@@ -1,4 +1,6 @@
-"""GitHub API 平面：githubkit 封装（App 认证）。ARCHITECTURE §4.5、附录 A。
+"""GitHub API 平面：githubkit 封装（App 认证）。
+
+见 docs/architecture/components.md §4.5、github-app.md。
 
 TODO(verify) V1：githubkit 的确切 API（App→installation token、PR、GraphQL resolveReviewThread）。
   下面的调用按 githubkit 的常见形态写，方法名/返回结构落地时对照官方文档校准。

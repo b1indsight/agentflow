@@ -1,6 +1,6 @@
 """端口（hexagonal）。core 只依赖这些 Protocol；adapter 在各自模块实现。
 
-见 ARCHITECTURE §9、M0-PLAN §5。
+见 docs/architecture/roadmap.md §9、docs/plan/m0.md §5。
 """
 
 from __future__ import annotations

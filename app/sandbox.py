@@ -1,4 +1,6 @@
-"""Sandbox 端口的 adapter。ARCHITECTURE §4.6 / §9-5。
+"""Sandbox 端口的 adapter。
+
+见 docs/architecture/components.md §4.6、roadmap.md §9-5。
 
 沙盒 = 可写根 + 网络出口，三正交轴之一，只认路径不认 git/jj。MVP adapter 就是
 codex 原生的 `workspace-write`：把「工作区可写、默认断网」表达成一份 SandboxPolicy，

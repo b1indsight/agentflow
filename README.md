@@ -4,7 +4,8 @@
 `code agent 编码 → PR → 你审核 → 回喂修订 → 人工合并 → 归档` 的闭环。
 **headless**：所有交互都在 GitHub 的 issue / PR 上。
 
-- 完整设计见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
+- 架构文档见 [`docs/architecture/`](docs/architecture/README.md)。
+- 计划与实施记录见 [`docs/plan/`](docs/plan/README.md)。
 - **状态：M0 骨架已验收（2026-08-26）**。真实 GitHub/Codex/bub 闭环属于 M1+，
   尚未验证的集成在代码里以 `TODO(verify)` 标注。
 
@@ -52,7 +53,7 @@ M0 已实测：
 - `uv sync --locked`、Ruff、Mypy 和 CLI help 通过；
 - `flowtool serve` 可启动，worker/reconciler 正常初始化，`GET /healthz` 返回 200；
 - codex `exec` + `resume` 上下文连续；`workspace-write` 下 jj `.jj` 可写、`jj commit` 成功；
-  git `.git` 只读、`git commit` 被挡（见 ARCHITECTURE §4.4 / §4.6）。
+  git `.git` 只读、`git commit` 被挡（见 [`components.md`](docs/architecture/components.md) §4.4 / §4.6）。
 
 待验证（代码里 `TODO(verify)`）：githubkit 具体调用、bub 判定 API、push 联网 + scoped token、
 git repo 的提交路径、多轮 context 增长。

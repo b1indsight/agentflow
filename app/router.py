@@ -1,4 +1,6 @@
-"""事件路由：去重、忽略 bot、触发授权、落反馈、settle 去抖。ARCHITECTURE §4.2、附录 B.1。
+"""事件路由：去重、忽略 bot、触发授权、落反馈、settle 去抖。
+
+见 docs/architecture/components.md §4.2、review-loop.md §B.1。
 
 webhook 秒回，长活交给 worker / settle 定时器。
 """

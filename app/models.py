@@ -1,6 +1,6 @@
 """领域模型：枚举、内部 dataclass、跨模型 JSON 契约。
 
-见 M0-PLAN §4 / ARCHITECTURE §4.7、附录 B。
+见 docs/plan/m0.md §4、docs/architecture/components.md §4.7 与 review-loop.md。
 """
 
 from __future__ import annotations

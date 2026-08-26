@@ -2,7 +2,7 @@
 
 > 状态：已实施 · 日期：2026-08-26 · 基线：`main@origin` (`e65d534b`)
 >
-> 本计划收尾 [`M0-PLAN.md`](M0-PLAN.md) 已定义的 M0 范围；不扩展到真实
+> 本计划收尾 [`m0.md`](m0.md) 已定义的 M0 范围；不扩展到真实
 > GitHub/Codex/bub 闭环。实施前需在 draft PR 上获得明确批准。
 
 ## 1. 目标与边界
@@ -112,10 +112,10 @@ Ruff 的现有 5 项问题随其所属模块修正；Mypy 错误随行为和测�
 
 实施阶段预计同步：
 
-- [`README.md`](../README.md)：更新“已验证/待验证”和可运行的验证命令；
-- [`M0-PLAN.md`](M0-PLAN.md)：保留原计划作为决策记录，追加实际完成状态与验收结果；
-- [`ARCHITECTURE.md`](ARCHITECTURE.md)：仅更新里程碑状态和仍存在的集成风险，不改架构决策；
-- [`architecture.html`](architecture.html)：同步可视化中的 M0 状态、测试缺口和验收 callout。
+- [`README.md`](../../README.md)：更新“已验证/待验证”和可运行的验证命令；
+- [`m0.md`](m0.md)：保留原计划作为决策记录，追加实际完成状态与验收结果；
+- [架构文档](../architecture/README.md)：仅更新里程碑状态和仍存在的集成风险，不改架构决策；
+- [`diagram.html`](../architecture/diagram.html)：同步可视化中的 M0 状态、测试缺口和验收 callout。
 
 仓库目前没有 changelog、文档索引生成器或 CI 配置，本次不为 M0 收尾新增这些体系。
 本计划文件作为实现决策记录保留；若实施与计划发生实质偏差，会在这里记录。

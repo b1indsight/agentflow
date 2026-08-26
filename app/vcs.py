@@ -1,4 +1,4 @@
-"""VCS 轴：工作区隔离 + 提交指引。ARCHITECTURE §4.6。
+"""VCS 轴：工作区隔离 + 提交指引。见 docs/architecture/components.md §4.6。
 
 不是端口——只是一组普通函数（旧的 VCS `Protocol` 已砍：薄包装、`head_commit`/
 `rebase_onto`/`cleanup` 是死代码、只 jj 验过）。§4.6 把本地平面拆成三条正交轴：

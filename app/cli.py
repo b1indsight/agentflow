@@ -1,4 +1,4 @@
-"""Admin CLI（typer）。ARCHITECTURE §10-8。
+"""Admin CLI（typer）。见 docs/architecture/decisions.md §10-8。
 
 serve：起 webhook 常驻进程；flows/show/cancel/retry：运维 flow。
 """

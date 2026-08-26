@@ -1,4 +1,4 @@
-"""FastAPI webhook 入口 + 组合根。ARCHITECTURE §4.1。
+"""FastAPI webhook 入口 + 组合根。见 docs/architecture/components.md §4.1。
 
 /webhook：HMAC 验签 → 忽略 bot / 去重（router）→ 秒回 202。
 lifespan 里装配所有组件、起 worker / reconciler 后台任务。

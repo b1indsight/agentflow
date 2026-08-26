@@ -1,4 +1,6 @@
-"""Judge 适配器：bub（小型语义判定 agent）。ARCHITECTURE §4.10、附录 B。
+"""Judge 适配器：bub（小型语义判定 agent）。
+
+见 docs/architecture/components.md §4.10、review-loop.md。
 
 用法：把 PR 讨论快照喂给 bub，让它判定 revise/wait/answer/ignore 并综合出 instruction。
 

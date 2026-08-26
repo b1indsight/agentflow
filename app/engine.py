@@ -1,4 +1,6 @@
-"""Flow 状态机 + 转移动作。ARCHITECTURE §4.3、附录 B。
+"""Flow 状态机 + 转移动作。
+
+见 docs/architecture/components.md §4.3、review-loop.md。
 
 编排大脑：把 store、CodeAgent、Judge、GitHubClient 串起来；工作区隔离 + VCS 指引
 经 app.vcs 的普通函数（§4.6 三轴，VCS 已不是端口）。
