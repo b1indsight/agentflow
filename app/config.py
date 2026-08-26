@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Annotated
 
 from pydantic import field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -21,7 +22,7 @@ class Settings(BaseSettings):
 
     # 触发
     trigger_label: str = "flow"
-    allowlist: list[str] = []
+    allowlist: Annotated[list[str], NoDecode] = []
 
     # 本地路径
     repos_root: Path = Path("~/.flowtool/repos")

@@ -91,6 +91,13 @@ def _dt(s: str | None) -> datetime | None:
     return datetime.fromisoformat(s) if s else None
 
 
+def _required[T](value: T | None) -> T:
+    """Fail fast when an SQLite insert/read-back invariant is violated."""
+    if value is None:
+        raise RuntimeError("database insert did not produce a readable record")
+    return value
+
+
 class Store:
     def __init__(self, db_path: Path):
         self.db_path = db_path
@@ -117,7 +124,7 @@ class Store:
             (repo, issue_number, installation_id, FlowState.PENDING, _iso(now), _iso(now)),
         )
         self._conn.commit()
-        return self.get_flow(cur.lastrowid)  # type: ignore[arg-type]
+        return _required(self.get_flow(_required(cur.lastrowid)))
 
     def get_flow(self, flow_id: int) -> Flow | None:
         row = self._conn.execute("SELECT * FROM flows WHERE id=?", (flow_id,)).fetchone()
@@ -177,7 +184,7 @@ class Store:
             (flow_id, 0, _iso(now), _iso(now)),
         )
         self._conn.commit()
-        return self.get_attempt(cur.lastrowid)  # type: ignore[arg-type]
+        return _required(self.get_attempt(_required(cur.lastrowid)))
 
     def get_attempt(self, attempt_id: int) -> Attempt | None:
         row = self._conn.execute("SELECT * FROM attempts WHERE id=?", (attempt_id,)).fetchone()
@@ -223,7 +230,7 @@ class Store:
              _iso(now), _iso(now)),
         )
         self._conn.commit()
-        return self.get_job(cur.lastrowid)  # type: ignore[arg-type]
+        return _required(self.get_job(_required(cur.lastrowid)))
 
     def get_job(self, job_id: int) -> Job | None:
         row = self._conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()

@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 
@@ -14,7 +14,7 @@ from pydantic import BaseModel
 
 
 def utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 # --------------------------------------------------------------------------- 枚举
@@ -80,7 +80,7 @@ class Flow:
     指向当前驱动 flow 的那个。数据模型**不再把 issue↔PR 锁成 1:1**。
     """
 
-    id: int | None
+    id: int
     repo: str  # "owner/name"
     issue_number: int
     state: FlowState
@@ -98,7 +98,7 @@ class Attempt:
     revise 失控闸计数（revision_cycles）是 per-attempt（挂在具体 PR 上）。
     """
 
-    id: int | None
+    id: int
     flow_id: int
     branch: str | None = None
     codex_session_id: str | None = None
@@ -110,7 +110,7 @@ class Attempt:
 
 @dataclass
 class Job:
-    id: int | None
+    id: int
     flow_id: int
     kind: JobKind
     state: JobState
@@ -158,7 +158,7 @@ class AgentRun:
     session_id: str | None
     last_message: str
     exit_code: int
-    output: "CodexResult | None" = None   # --output-schema 解析结果（修订轮）
+    output: CodexResult | None = None   # --output-schema 解析结果（修订轮）
 
 
 # ------------------------------------------------------------ 跨模型 JSON 契约（pydantic）
