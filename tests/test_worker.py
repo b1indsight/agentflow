@@ -81,6 +81,30 @@ async def test_dispatch_contains_heartbeat_task_failures(
 
 
 @pytest.mark.asyncio
+async def test_heartbeat_retries_after_transient_store_failure(
+    store: Store, monkeypatch
+) -> None:
+    worker = Worker(store, RecordingEngine())
+    heartbeat = Mock(side_effect=[RuntimeError("database busy"), None])
+    sleep_calls = 0
+
+    async def stop_after_retry(interval: float) -> None:
+        # Model one failed lease renewal followed by a successful retry.
+        nonlocal sleep_calls
+        sleep_calls += 1
+        if sleep_calls == 3:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(store, "heartbeat", heartbeat)
+    monkeypatch.setattr(asyncio, "sleep", stop_after_retry)
+
+    await worker._heartbeat(42)
+
+    assert heartbeat.call_count == 2
+    heartbeat.assert_called_with(42)
+
+
+@pytest.mark.asyncio
 async def test_dispatch_marks_failed_job(store: Store) -> None:
     queued = enqueue_job(store)
     claimed = store.claim_job()

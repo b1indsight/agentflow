@@ -47,7 +47,7 @@ uv run mypy app tests
 
 M0 已实测：
 
-- 18 个自动化测试覆盖配置/契约、SQLite、HMAC、health、delivery 去重、allowlist、取消与
+- 19 个自动化测试覆盖配置/契约、SQLite、HMAC、health、delivery 去重、allowlist、取消与
   review 路由、worker dispatch/失败/启动恢复；
 - `uv sync --locked`、Ruff、Mypy 和 CLI help 通过；
 - `flowtool serve` 可启动，worker/reconciler 正常初始化，`GET /healthz` 返回 200；

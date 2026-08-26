@@ -62,7 +62,12 @@ class Worker:
         try:
             while True:
                 await asyncio.sleep(_HEARTBEAT_INTERVAL)
-                self.store.heartbeat(job_id)
+                try:
+                    self.store.heartbeat(job_id)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        "heartbeat for job {} failed; retrying: {}", job_id, e
+                    )
         except asyncio.CancelledError:
             return
 
