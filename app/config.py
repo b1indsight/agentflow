@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     repos_root: Path = Path("~/.flowtool/repos")
     db_path: Path = Path("~/.flowtool/flowtool.sqlite3")
 
-    # 修订循环（附录 B.7）
+    # 修订循环（docs/architecture/review-loop.md §B.7）
     settle_seconds: float = 75.0
     submit_grace_seconds: float = 15.0
     confidence_threshold: float = 0.6

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>FlowTool 架构图 · M0</title>
+<title>FlowTool 架构状态 · M0</title>
 <style>
   :root {
     --bg:#eaeef3; --surface:#ffffff; --surface-2:#f4f7fb;
@@ -238,23 +238,23 @@
       <div class="mark">🏗️</div>
       <div>
         <h1>FlowTool</h1>
-        <p class="tagline">headless 编排器 · GitHub issue 打 <code>flow</code> 标 → codex 编码 → PR → 审核回喂 → 人工合并 → 归档</p>
+        <p class="tagline">目标闭环 · GitHub issue 打 <code>flow</code> 标 → codex 编码 → PR → 审核回喂 → 人工合并 → 归档</p>
       </div>
     </div>
     <button class="theme" id="theme" aria-label="切换主题"><span id="theme-ico">◐</span> <span id="theme-txt">主题</span></button>
   </header>
 
   <div class="stats">
-    <div class="stat d"><b>13</b><span>写实</span></div>
-    <div class="stat p"><b>3</b><span>部分</span></div>
-    <div class="stat s"><b>2</b><span>桩 stub</span></div>
+    <div class="stat d"><b>9</b><span>已实现</span></div>
+    <div class="stat p"><b>6</b><span>部分</span></div>
+    <div class="stat s"><b>3</b><span>桩 stub</span></div>
     <div class="stat m"><b>0</b><span>M0 缺失</span></div>
     <div class="stat"><b>M0</b><span>验收通过</span></div>
   </div>
 
   <div class="legend" role="group" aria-label="按状态筛选">
-    <span class="hint">点击筛选 →</span>
-    <button class="key" data-filter="done" aria-pressed="false"><span class="dot"></span>写实 written</button>
+    <span class="hint">实现状态 ≠ 端到端验收 · 点击筛选 →</span>
+    <button class="key" data-filter="done" aria-pressed="false"><span class="dot"></span>已实现 implemented</button>
     <button class="key" data-filter="partial" aria-pressed="false"><span class="dot"></span>部分 partial</button>
     <button class="key" data-filter="stub" aria-pressed="false"><span class="dot"></span>桩 stub</button>
     <button class="key" data-filter="missing" aria-pressed="false"><span class="dot missing-dot"></span>缺失 missing</button>
@@ -265,17 +265,17 @@
   <div class="row-label">契约地基 · core 只依赖这些</div>
   <div class="foundation">
     <article class="node" data-status="done">
-      <div class="node__top"><span class="node__name">models</span><span class="pill">写实</span></div>
+      <div class="node__top"><span class="node__name">models</span><span class="pill">M0 已验</span></div>
       <p class="node__role">枚举 · dataclass · pydantic 跨模型契约（TriageVerdict / CodexResult）</p>
       <code class="node__file">app/models.py</code>
     </article>
     <article class="node" data-status="done">
-      <div class="node__top"><span class="node__name">config</span><span class="pill">写实</span></div>
+      <div class="node__top"><span class="node__name">config</span><span class="pill">M0 已验</span></div>
       <p class="node__role">pydantic-settings · env 前缀 FLOWTOOL_ · allowlist / 路径展开</p>
       <code class="node__file">app/config.py</code>
     </article>
     <article class="node" data-status="done">
-      <div class="node__top"><span class="node__name">ports</span><span class="pill">写实</span></div>
+      <div class="node__top"><span class="node__name">ports</span><span class="pill">已定义</span></div>
       <p class="node__role">5 个端口 Protocol（CodeAgent / Judge / Sandbox / GitHubClient / JobDispatch）签名定死 · VCS 已降为普通函数</p>
       <code class="node__file">app/ports.py</code>
     </article>
@@ -310,20 +310,20 @@
       <div class="scroll-x">
         <div class="pipe">
           <article class="node" data-status="done">
-            <div class="node__top"><span class="node__name">Ingress</span><span class="pill">写实</span></div>
-            <p class="node__role">FastAPI · HMAC 验签 · /webhook · /healthz · 忽略 bot · 202 秒回</p>
+            <div class="node__top"><span class="node__name">Ingress</span><span class="pill">M0 已验</span></div>
+            <p class="node__role">FastAPI · HMAC 验签 · /webhook · /healthz · 后台交接 · 202 响应</p>
             <code class="node__file">app/ingress.py</code>
           </article>
           <span class="arrow" aria-hidden="true">→</span>
           <article class="node" data-status="done">
-            <div class="node__top"><span class="node__name">Event Router</span><span class="pill">写实</span></div>
+            <div class="node__top"><span class="node__name">Event Router</span><span class="pill">M0 已验</span></div>
             <p class="node__role">delivery 去重 · 触发授权(allowlist) · 落 review_threads · settle 去抖</p>
             <code class="node__file">app/router.py</code>
           </article>
           <span class="arrow" aria-hidden="true">→</span>
-          <article class="node" data-status="done">
-            <div class="node__top"><span class="node__name">Flow Engine</span><span class="pill">写实</span></div>
-            <p class="node__role">状态机核心 · 全部转移动作 · Judge 判定分流 · 失控闸(max cycles)</p>
+          <article class="node" data-status="partial">
+            <div class="node__top"><span class="node__name">Flow Engine</span><span class="pill">部分</span></div>
+            <p class="node__role">状态机控制流 · Judge 分流 · 最大修订轮数 · issue/thread/取消/冲突仍有桩</p>
             <code class="node__file">app/engine.py</code>
           </article>
         </div>
@@ -332,23 +332,23 @@
       <div class="row-label">Engine 协作 · 端口 &amp; 持久化</div>
       <div class="grid">
         <article class="node" data-status="done">
-          <div class="node__top"><span class="node__name">Store</span><span class="pill">写实</span></div>
+          <div class="node__top"><span class="node__name">Store</span><span class="pill">M0 已验</span></div>
           <p class="node__role">SQLite · flows / <b>attempts</b> / jobs / events / codex_runs / review_threads · 唯一约束 · 恢复 · runs/review 归属 attempt(§9-2)</p>
           <code class="node__file">app/store.py</code>
         </article>
         <article class="node" data-status="done">
-          <div class="node__top"><span class="node__name">Context Builder</span><span class="pill">写实</span></div>
-          <p class="node__role">最高杠杆 · 首轮 / 修订 prompt · 注入 VCS 指引 + 硬约束 + hunk 定位</p>
+          <div class="node__top"><span class="node__name">Context Builder</span><span class="pill">已实现</span></div>
+          <p class="node__role">首轮 / 修订 prompt · VCS 指引 + 硬约束 + hunk；真实 issue/diff/thread 上下文未接</p>
           <code class="node__file">app/context_builder.py</code>
         </article>
-        <article class="node" data-status="partial">
-          <div class="node__top"><span class="node__name">Judge</span><span class="pill">部分</span></div>
+        <article class="node" data-status="stub">
+          <div class="node__top"><span class="node__name">Judge</span><span class="pill">桩</span></div>
           <p class="node__role">bub 语义判定 revise/wait/answer/ignore · subprocess 兜底 · 解析失败→wait</p>
           <code class="node__file">app/judge.py · V2</code>
         </article>
         <article class="node" data-status="stub">
           <div class="node__top"><span class="node__name">GitHub Client</span><span class="pill">桩</span></div>
-          <p class="node__role">githubkit 封装 · PR / 评论 / label / reviewer / GraphQL resolve · installation 解析 NotImplementedError</p>
+          <p class="node__role">githubkit 调用形态 · token / PR / 评论 / label / reviewer / GraphQL · 全部未实 App 校准</p>
           <code class="node__file">app/github_client.py · V1</code>
         </article>
       </div>
@@ -356,8 +356,8 @@
       <div class="row-label">常驻后台任务</div>
       <div class="grid">
         <article class="node" data-status="done">
-          <div class="node__top"><span class="node__name">Worker</span><span class="pill">写实</span></div>
-          <p class="node__role">轮询 jobs 队列 · claim / dispatch → engine.run_job · heartbeat · 启动 recover 悬空 job</p>
+          <div class="node__top"><span class="node__name">Worker</span><span class="pill">M0 已验</span></div>
+          <p class="node__role">jobs claim/dispatch · DONE/FAILED · heartbeat 清理/瞬时失败重试 · 启动 recover</p>
           <code class="node__file">app/worker.py</code>
         </article>
         <article class="node" data-status="stub">
@@ -379,13 +379,13 @@
     <div class="plane plane--local">
       <span class="plane-label">本地平面 <small>= Code Agent (在 Sandbox 内) · 三正交轴 workspace / sandbox / VCS · 不出现裸 git</small></span>
       <div class="grid">
-        <article class="node" data-status="done">
-          <div class="node__top"><span class="node__name">Codex Driver</span><span class="pill">写实</span></div>
+        <article class="node" data-status="partial">
+          <div class="node__top"><span class="node__name">Codex Driver</span><span class="pill">部分</span></div>
           <p class="node__role">codex exec / resume 子进程 · JSONL 取 thread_id · --output-schema 解析 CodexResult · 向 Sandbox 要 policy</p>
           <code class="node__file">app/codex_driver.py · V5/V6</code>
         </article>
-        <article class="node" data-status="done">
-          <div class="node__top"><span class="node__name">Sandbox 端口</span><span class="pill">写实</span></div>
+        <article class="node" data-status="partial">
+          <div class="node__top"><span class="node__name">Sandbox 端口</span><span class="pill">部分</span></div>
           <p class="node__role">可写根 + 网络出口 · 只认路径不认 git/jj · MVP adapter = codex workspace-write · 容器/微VM 后续接管 FS(解 V4)</p>
           <code class="node__file">ports.Sandbox · app/sandbox.py · V3</code>
         </article>
@@ -410,13 +410,13 @@
     <div class="plane plane--edge">
       <span class="plane-label">外围 <small>CLI · 测试 · 插件</small></span>
       <div class="grid">
-        <article class="node" data-status="done">
-          <div class="node__top"><span class="node__name">CLI</span><span class="pill">写实</span></div>
+        <article class="node" data-status="partial">
+          <div class="node__top"><span class="node__name">CLI</span><span class="pill">部分验证</span></div>
           <p class="node__role">typer · serve(uvicorn) / flows / flow show / cancel / retry</p>
           <code class="node__file">app/cli.py</code>
         </article>
         <article class="node" data-status="done">
-          <div class="node__top"><span class="node__name">M0 Tests</span><span class="pill">写实</span></div>
+          <div class="node__top"><span class="node__name">M0 Tests</span><span class="pill">M0 已验</span></div>
           <p class="node__role">19 项 · 配置/契约 · SQLite · HMAC/路由 · worker/恢复 · 全部隔离外部服务</p>
           <code class="node__file">tests/ · pytest / Ruff / Mypy 全绿</code>
         </article>
@@ -494,7 +494,7 @@
           <div class="ms__head"><span class="ms__id">M1</span><span class="ms__tag">将来</span></div>
           <div class="ms__title">首轮 happy path</div>
           <ul class="ms__list">
-            <li>触发(allowlist) → worktree</li>
+            <li>触发(allowlist) → workspace</li>
             <li>codex 首轮 → 开 PR</li>
             <li>单 flow 打通</li>
           </ul>
@@ -536,7 +536,7 @@
           <ul class="ms__list">
             <li>容器化 codex 隔离</li>
             <li>公网 / 隧道部署</li>
-            <li>admin CLI</li>
+            <li>完整运维 · health · 可观测性</li>
           </ul>
         </article>
         <span class="arrow" aria-hidden="true">⇢</span>
@@ -555,8 +555,8 @@
 
   <!-- state machine -->
   <section class="block">
-    <h2>Flow 状态机 <span style="font-family:var(--mono);font-size:11px;color:var(--ink-soft);font-weight:400">app/engine.py · 全写实</span></h2>
-    <p class="sub">每个 issue 一台状态机 · 单 flow 内事件串行,多 flow 并行</p>
+    <h2>Flow 状态机 <span style="font-family:var(--mono);font-size:11px;color:var(--ink-soft);font-weight:400">控制流已写 · 外部边界未完成</span></h2>
+    <p class="sub">当前单 worker 串行消费 · per-flow 串行锁与多 flow 并行仍是目标</p>
     <div class="fsm">
       <span class="state">PENDING</span>
       <span class="to">→</span>
@@ -583,14 +583,14 @@
   <div class="callout">
     <h3>✓ M0 验收结果（2026-08-26）</h3>
     <ul>
-      <li><b>自动化</b> —— 19 项覆盖配置/契约、SQLite、HMAC/路由、worker/恢复；pytest、Ruff、Mypy 全绿。</li>
+      <li><b>自动化</b> —— 19 项覆盖配置/契约、SQLite、HMAC/路由、worker/恢复及 heartbeat 清理/重试；pytest、Ruff、Mypy 全绿。</li>
       <li><b>运行时</b> —— <code>uv sync --locked</code>、CLI、真实 <code>flowtool serve</code> 与 <code>GET /healthz</code> 200 已验证。</li>
-      <li><b>M1+ 仍待验证</b> —— githubkit、bub、真实 Codex/push、reconcile 与示例插件实现不计入 M0 完成范围。</li>
+      <li><b>M1+ 仍待验证</b> —— Flow Engine 外部副作用、githubkit、bub、真实 Codex/push、reconcile 与示例插件不计入 M0 完成范围。</li>
     </ul>
   </div>
 
   <footer>
-    <span>FlowTool · M0 已验收 · 状态截至 2026-08-26</span>
+    <span>FlowTool · M0 已验收 · 文档核对 2026-08-27</span>
     <span>docs/architecture/ · docs/plan/</span>
   </footer>
 

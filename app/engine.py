@@ -164,7 +164,8 @@ class FlowEngine:
         run = await self.code_agent.resume(attempt.codex_session_id, prompt, output_schema=schema)
         self.store.record_codex_run(attempt.id, "revision", prompt, "", run.exit_code)
         if run.exit_code != 0:
-            # 超时/报错：本轮没更新，反馈退回未回传（不 mark_relayed）留待下轮重试（附录 B.6）。
+            # 超时/报错：本轮没更新，反馈退回未回传（不 mark_relayed）留待下轮重试
+            # （docs/architecture/review-loop.md §B.6）。
             await self._fail(
                 flow, attempt.pr_number, f"修订失败（codex exit={run.exit_code}），本轮未更新。"
             )
@@ -186,7 +187,7 @@ class FlowEngine:
     async def _apply_codex_result(self, flow: Flow, attempt: Attempt, result: CodexResult) -> None:
         iid = flow.installation_id
         for a in result.addressed:
-            # 自动 resolve 已处理线程 + 回 note（附录 B.4）
+            # 自动 resolve 已处理线程 + 回 note（docs/architecture/review-loop.md §B.4）
             thread_id = self._thread_id_for(attempt, a.comment_id)
             if thread_id:
                 await self.github.resolve_review_thread(iid, thread_id)
@@ -219,7 +220,7 @@ class FlowEngine:
         # TODO(verify): Project 卡片移 Done、贴归档小结
         logger.info("flow {} archived", flow.id)
 
-    # ------------------------------------------------------ 反馈 → 判定（附录 B）
+    # ---------------------------- 反馈 → 判定（docs/architecture/review-loop.md）
 
     async def on_feedback_settled(self, flow: Flow) -> None:
         """settle 窗口到点后调用：语义判定 → 决定 revise/answer/wait/ignore。"""

@@ -7,7 +7,7 @@
 
 ## 1. 目标与边界
 
-当前 M0 脚手架已经能够安装、启动 CLI 和常驻服务，`GET /healthz` 也已实测返回 200；
+计划制定时，M0 脚手架已经能够安装、启动 CLI 和常驻服务，`GET /healthz` 也已实测返回 200；
 但仓库没有测试，Ruff 有 5 个问题，Mypy 有 20 个错误，因此仍不能按原 M0 计划验收。
 
 本次目标是建立一套可重复执行的 M0 验收基线：
@@ -134,4 +134,8 @@ lifespan，而不是已弃用的同步 TestClient；这保持了原计划的隔�
 - 测试未访问 GitHub/Codex/bub，也未使用真实凭据或真实轮询 sleep。
 
 测试优先实施共暴露并修复：allowlist CSV 的 source 解码错误、持久化实体 ID 的可空类型扩散、
-worker heartbeat 取消后未等待清理。真实 GitHub/Codex/bub 集成仍按 M1+ 和 V1–V9 跟踪。
+worker heartbeat 取消后未等待清理。随后两轮审查补充修复了 heartbeat task 异常向 dispatch 传播，
+以及单次 heartbeat 持久化失败会终止续租的问题；对应回归测试把最终测试数增至 19。
+
+真实 GitHub/Codex/bub 集成仍按 M1+ 和 V1–V9 跟踪。持续性的 heartbeat 持久化失败目前会无限重试，
+尚无失败上限或 worker unhealthy 信号，作为后续运维风险保留。

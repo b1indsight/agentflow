@@ -41,7 +41,7 @@ def build_initial_prompt(
 
 def _format_item(item: ReviewItem) -> str:
     if item.kind.value == "inline" and item.diff_hunk:
-        # 按内容定位，避开行号漂移（附录 B.4）
+        # 按内容定位，避开行号漂移（docs/architecture/review-loop.md §B.4）
         return (
             f"- [comment_id={item.github_id}] file `{item.path}` "
             f"(at commit {item.original_commit_id}):\n"

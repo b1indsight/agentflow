@@ -1,6 +1,6 @@
 # 路线图
 
-## 8. 建议目录 & 里程碑
+## 8. 当前目录与里程碑
 
 ```
 flowtool/
@@ -28,12 +28,14 @@ flowtool/
 ```
 
 - **M0（已验收）** 骨架 + webhook 验签 + SQLite（含 `jobs`）+ 配置 + worker / 崩溃恢复骨架；
-  19 个自动化测试、Ruff、Mypy、CLI 与 `/healthz` runtime smoke 全部通过（2026-08-26）
+  19 个自动化测试、Ruff、Mypy、CLI 与 `/healthz` runtime smoke 全部通过（2026-08-26）；
 - **M1** 触发（含 allowlist）→ 工作区 → codex 首轮 → 开 PR（单 flow happy path）
 - **M2** 语义 Triage（bub）门 + 回喂循环（settle → revise/answer/wait + resume/兜底 + 自动 resolve）
 - **M3** 人工合并检测（`pull_request.closed`）→ 归档 + 状态标签 / 评论
 - **M4** 多 flow 并发 + reconcile 对账 + Project 看板 + 错误恢复
-- **M5** 安全隔离（容器化 codex）+ 公网 / 隧道部署 + admin CLI
+- **M5** 安全隔离（容器化 codex）+ 公网 / 隧道部署 + 完整运维与可观测性
+
+M1–M5 是目标里程碑，不代表对应控制流代码或接口已经验收；实际状态见[架构入口](README.md#当前实现状态)。
 
 ## 9. 未来扩展与架构预留（Roadmap）
 
@@ -53,8 +55,8 @@ flowtool/
    - 预留：GitHub Client 保持薄封装，能力按需追加即可，不影响 core。
 
 4. **Code Agent 标准接口** —— 把"与 code agent 交互"抽象成统一端口，方便接入新的底层 agent（不只 codex）。
-   - 预留：把 §4.4 的 Codex Driver 收敛成 `CodeAgent` port（`start / resume / inject / 收集产物`）；
-     codex 是它的**第一个 adapter**，后续 Claude Code 等按同一端口接入。
+   - **当前接缝已就位**：`CodeAgent` port 已定义 `start / resume`，Codex 是第一个 adapter；实时
+     `inject`、统一日志/产物收集和其他 agent adapter 属于后续扩展。
 
 5. **更强隔离** —— 每次 agent 运行放进容器 / 微VM，隔离文件系统与网络。
    - 预留：`Sandbox` port **已是一等轴（§4.6，M0 就立）**，MVP adapter = codex `workspace-write`；容器 / 微VM 是后续 adapter，对应 M5。
@@ -72,6 +74,5 @@ flowtool/
 **架构取向：hexagonal（ports & adapters）。** core（Flow Engine + 状态机 + store）只依赖端口：
 `CodeAgent` / `Judge` / `Sandbox` / `JobDispatch` / `GitHubClient` / `Plugin hooks`。
 （**VCS 不是端口**——它是 workspace 拷贝函数 + git/jj 指引文本，见 §4.6。）
-MVP 给每个端口一个最简 adapter（codex / bub / workspace-write / 进程内 / githubkit / 空插件集），
-上面 7 条都是"换 adapter 或加插件"，core 保持不变。
-
+M0 已给端口放置最简 adapter 或桩（codex / bub / workspace-write / 进程内 / githubkit / 插件集）。
+“存在 adapter”不代表外部契约已校准；未来扩展仍优先通过换 adapter 或加插件保持 core 边界稳定。

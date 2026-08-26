@@ -1,6 +1,6 @@
 # 项目文档完整同步计划
 
-> 状态：待批准 · 计划日期：2026-08-27 · 基线：`main@origin` (`9cca7f67`)
+> 状态：已实施 · 计划/实施日期：2026-08-27 · 基线：`main@origin` (`9cca7f67`)
 >
 > 本计划整理项目文档及其入站引用，不改变运行逻辑、配置、依赖或对外行为。实施前需在 draft PR
 > 上获得明确批准。
@@ -137,3 +137,34 @@ docs/plan/
 删除迁移后的四个顶层旧文件：`docs/ARCHITECTURE.md`、`docs/architecture.html`、
 `docs/M0-PLAN.md`、`docs/M0-CLOSEOUT-PLAN.md`。不会修改 `env.example`，除非实施核对发现它与
 当前配置 schema 确有差异；不会新增 changelog 或独立文档站。
+
+## 6. 实施结果
+
+计划范围已完成：
+
+- 建立 `docs/architecture/README.md` 与 `docs/plan/README.md` 两个唯一目录入口；
+- 将原架构正文拆为 overview、components、workflows、decisions、roadmap、github-app 和
+  review-loop，并把交互图迁为 `diagram.html`；
+- 将两份 M0 计划迁为 `m0.md`、`m0-closeout.md`，保留原计划正文并追加最终审查结果；
+- 删除四个顶层旧文件，同步 README、Markdown、`env.example`、Python 注释和 docstring 的入站引用；
+- 以代码和测试为事实源，明确 M0 当前能力、Flow Engine/外部 adapter 的真实边界和 M1+ 目标设计；
+- 依据 GitHub 官方文档核对 App JWT、installation token、最小权限和 Webhook HMAC 说明。
+
+实施没有修改 Python 运行逻辑、测试、依赖或配置 schema。`env.example` 仅机械更新了架构文档路径
+注释；这是目录迁移的入站引用同步，不是配置变更。
+
+计划阶段关于可视化“少计节点、重复图例”的观察在最新基线上未能复现：原图的 13/3/2 数量与节点
+一致，图例也只有一项 missing。实施没有制造无依据修复，而是按新的状态定义重新核对每个组件，最终
+分类为 9 个已实现、6 个部分、3 个桩，并在图中明确“实现状态不等于端到端验收”。
+
+最终验证：
+
+- `uv run pytest`：19 项通过；
+- `uv run ruff check app tests`：通过；
+- `uv run mypy app tests`：27 个 source files 无问题；
+- `uv run flowtool --help` 与 `uv run flowtool flow --help`：通过；
+- 所有本地 Markdown 链接目标存在；HTML tag 嵌套平衡；可视化节点计数与 9/6/3 页面统计一致；
+- `git diff --check` 通过，除本计划中的历史迁移描述外没有旧文档路径或旧测试数量残留。
+
+仓库仍没有 changelog、文档生成器或 CI，本次没有新建这些体系。真实 GitHub/Codex/bub 联网集成
+按计划未执行，相应组件状态没有提升。

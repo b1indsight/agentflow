@@ -5,7 +5,7 @@
 
 ## 当前计划
 
-- [`documentation-refresh.md`](documentation-refresh.md) — 项目文档目录化与完整同步，已批准、实施中。
+- [`documentation-refresh.md`](documentation-refresh.md) — 项目文档目录化与完整同步，已实施、待合并。
 
 ## 已完成计划
 

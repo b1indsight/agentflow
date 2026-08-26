@@ -51,7 +51,7 @@ class BubJudge:
             return TriageVerdict.model_validate(data)
         except Exception as e:  # noqa: BLE001
             logger.warning("judge parse failed ({}); defaulting to wait. raw={}", e, raw[:200])
-            # 保守默认：解析不了就 wait（附录 B.3）
+            # 保守默认：解析不了就 wait（docs/architecture/review-loop.md §B.3）
             return TriageVerdict(verdict=Verdict.WAIT, confidence=0.0, reason="parse-failed")
 
     async def answer(self, question: str, pr_context: str) -> str:

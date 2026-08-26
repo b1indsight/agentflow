@@ -2,49 +2,56 @@
 
 ## 1. 定位
 
-一个 **本地优先、headless** 的编排器：把打了 `flow` 标签的 GitHub issue，自动跑成
-`codex 编码 → PR → 你审核 → 回喂修订 → 合并 → 归档` 的闭环。
-**所有人机交互都发生在 GitHub 的 issue / PR 上**，工具自身没有界面（MVP 阶段；Web 控制台是后续扩展，见 §9）。
+FlowTool 的**目标形态**是本地优先、headless 的编排器：把带 `flow` 标签的 GitHub issue 运行成
+`Codex 编码 → PR → 人工审核 → 回喂修订 → 人工合并 → 归档` 的闭环。产品交互面是 GitHub
+issue / PR；Web 控制台只属于未来路线图。
 
-已定基调：**Python** · **webhook 驱动的常驻进程** · **headless** · **本地 checkout 跑 codex** · **SQLite 持久化**。
+当前 M0 只验收了这个目标所需的基础设施切片，不具备真实闭环。当前状态以[架构入口](README.md#当前实现状态)
+为准。
 
-## 2. 运行形态的前提
+已定基调：**Python** · **Webhook 驱动的常驻进程** · **headless** · **本地 checkout 跑 Codex** ·
+**SQLite 持久化**。
 
-webhook 需要公网端点，但 codex 要在本地 repo 目录跑——两者靠"**常驻进程部署在持有本地 checkout 的机器上**"统一：
+## 2. 运行形态
 
-- 本地开发：用 **smee.io / cloudflared 隧道** 把 GitHub webhook 转发到 `localhost`。
-- 长期：把 daemon 放到一台有公网入口、且持有代码 checkout 的机器上。
+目标部署要求 Webhook 能到达 daemon，同时 daemon 所在机器持有本地 checkout：
+
+- 本地开发可通过可信隧道把 GitHub Webhook 转发到 `localhost`；
+- 长期运行时，daemon 部署在有受控公网入口且持有代码 checkout 的机器上；
+- 给 issue 打标签会触发本机执行模型生成的命令，因此 allowlist、沙盒、短时凭据和网络出口都是
+  前置安全边界，而不是后期增强。
+
+M0 只验证了本机 daemon 启动和 `/healthz`；公网入口、真实 Webhook 投递和生产部署尚未验证。
 
 ## 3. 组件总览
 
-```
+```text
               GitHub (issues / PRs / reviews / projects)
                      │  ▲
            webhooks  │  │  REST + GraphQL
                      ▼  │
  ┌───────────────────────────────────────────────────┐
- │              Orchestrator (Python daemon)           │
- │                                                     │
- │  [Webhook Ingress] → [Event Router] → [Flow Engine] │
- │   FastAPI/验签        去重/定位flow     状态机(每issue)│
- │                                    │      │         │
- │                     ┌──────────────┘      └───────┐ │
- │                     ▼                             ▼ │
- │           [Codex Driver] (在 Sandbox 内)   [GitHub  │
- │           子进程, cwd=每flow工作区          Client] │
- │                     │                             │ │
- │        [Workspace 隔离] + [Sandbox 端口]   [Store (SQLite)]
- │        VCS-无关拷贝     可写根/网络策略     flows/events/runs │
- └───────────────────────────────────────────────────┘
-                     │
-                     ▼
-     本地 repo 主 clone + 每 issue 独立工作区(拷贝) → codex 进程(Sandbox 内)
+ │              Orchestrator (Python daemon)          │
+ │                                                    │
+ │  [Webhook Ingress] → [Event Router] → [Flow Engine]│
+ │   FastAPI / HMAC      去重 / 定位 flow   状态机     │
+ │                              │            │        │
+ │                    [Worker + SQLite]      ├── GitHub Client
+ │                              │            └── Judge
+ └──────────────────────────────┼─────────────────────┘
+                                ▼
+               [Codex Driver] in [Sandbox]
+                                │
+                [Workspace 隔离] + [VCS 指引]
 ```
 
-**平面边界（关键）**：
-**Orchestrator = GitHub API 平面**——webhook、开 / 评论 / 合并检测 PR、labels、reviewer、Project、签发 scoped token，
-外加编排大脑（状态机 / Judge / ContextBuilder）。另加一步**薄的、VCS-无关的工作区隔离**（定分支名——它来开 PR）。
-**Code Agent（在 Sandbox 内）= 本地平面**——改码、commit、branch / bookmark、push。
-工具本身**不做本地版本控制、不出现裸 `git`**；本地 VCS 全归 agent（经 §4.6 的 **VCS 指引文本**，git / jj 通用）。
-本地平面拆成三条**正交轴**（§4.6）：**workspace**（隔离目录，VCS-无关）·**sandbox**（可写根 + 网络，端口，只认路径）·**VCS**（commit/push 由 agent 依指引做）。
+平面边界：
 
+- **Orchestrator / GitHub API 平面**负责 Webhook、持久化、状态机、Judge、Context Builder 与
+  GitHub API；
+- **Code Agent / 本地平面**负责工作区内的改码、commit、branch/bookmark 和 push；
+- Orchestrator 只确定分支名并在 push 后创建 PR，不直接执行本地版本控制；
+- 本地能力拆成 [workspace / sandbox / VCS 三条正交轴](components.md)（§4.6）。
+
+这些是架构边界。当前 GitHub、Judge、push 和完整 Engine 副作用仍未完成，不能从图中推断它们已经
+端到端可用。

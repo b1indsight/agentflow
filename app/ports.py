@@ -28,7 +28,7 @@ class CodeAgent(Protocol):
 
 @runtime_checkable
 class Judge(Protocol):
-    """轻的语义判定 agent。MVP adapter：bub（judge.py）。附录 B。"""
+    """轻的语义判定 agent。MVP adapter：bub。见 docs/architecture/review-loop.md。"""
 
     async def triage(self, discussion: str, pr_context: str) -> TriageVerdict: ...
 
@@ -53,7 +53,7 @@ class GitHubClient(Protocol):
 
     GitHub App 只能按 installation 认证，故每个调用都带 `installation_id`——
     engine 手里的 `flow.installation_id`（触发时从 webhook payload 存下）直接传进来，
-    adapter 不必再从 store 反查（§4.5 / 附录 A）。
+    adapter 不必再从 store 反查（docs/architecture/components.md §4.5 / github-app.md）。
     """
 
     async def installation_token(self, installation_id: int) -> str: ...
