@@ -1,6 +1,6 @@
 # M0 落地计划
 
-> 状态：草案 · 日期：2026-08-02 · 配套 [`ARCHITECTURE.md`](ARCHITECTURE.md)。
+> 状态：已验收 · 计划日期：2026-08-02 · 验收日期：2026-08-26 · 配套 [`ARCHITECTURE.md`](ARCHITECTURE.md)。
 > 本文件是**实现计划**（写给动手前对齐用），不是代码。未验证的集成统一标 `TODO(verify)`。
 > 2026-08-02 修订：本地平面拆成 workspace / sandbox / VCS 三轴——VCS 不再是端口（普通函数），Sandbox 提为端口（§5 / ARCHITECTURE §4.6）。
 
@@ -253,7 +253,24 @@ revision job:
 
 ## 9. M0 验收
 
-- `uv sync` 通过；`uv run flowtool serve` 起得来，`GET /healthz` 200。
-- 伪造一条带正确签名的 `issues.labeled` webhook → 建出 PENDING flow + 一条 queued job；错误签名 → 401；重复 delivery-id → 不重复处理。
-- worker 起来能 claim 到 job（dispatch 可为桩）；杀掉进程重启，running job 被 recover。
-- `pytest` 绿（HMAC / 建表 / 契约）。
+- [x] `uv sync --locked` 通过；`flowtool serve` 可启动，`GET /healthz` 返回 200。
+- [x] 正确签名的 `issues.labeled` webhook 建出 PENDING flow + queued job；错误签名返回
+  401；重复 delivery-id 不重复处理。
+- [x] worker 能 claim/dispatch job，成功与失败状态可回写；启动恢复和过期 heartbeat
+  通过确定性自动化测试模拟验证。
+- [x] `pytest` 16 项全绿，Ruff 与 Mypy 全绿。
+
+## 10. 实施结果（2026-08-26）
+
+M0 按原范围完成，没有把真实 GitHub/Codex/bub 闭环提前纳入。测试实际按行为边界拆为：
+
+- `test_config.py` / `test_models.py` / `test_store.py`：配置、契约与持久层；
+- `test_ingress.py` / `test_router.py`：health、HMAC、异步交接、去重与路由；
+- `test_worker.py`：dispatch、失败状态、启动恢复与 heartbeat 清理。
+
+实施中修正了三个由验收暴露的 M0 缺陷：逗号 allowlist 在 settings source 层被误当成
+JSON、已持久化实体 ID 仍向核心流程传播可空类型、heartbeat task 取消后未等待清理。
+为隔离 HTTP 测试，组合根新增 `create_app(context_factory=...)`；生产模块级 `app` 的启动方式不变。
+
+V1–V9 仍按上表跟踪，其中 V1–V6/V8/V9 属于后续真实集成验证；V7 在 M0 继续采用同步
+SQLite，是否迁移异步实现留待并发数据证明需要时再决定。

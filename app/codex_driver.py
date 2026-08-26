@@ -105,7 +105,7 @@ class CodexAgent:
         )
         try:
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self.timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             proc.kill()
             await proc.wait()
             logger.error("codex run timed out after {}s", self.timeout)

@@ -1,4 +1,3 @@
-from collections.abc import Iterator
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -26,16 +25,6 @@ class RecordingEngine:
     def on_merged(self, flow: Flow) -> None:
         flow.state = FlowState.MERGED
         self.store.update_flow(flow)
-
-
-@pytest.fixture
-def store(tmp_path) -> Iterator[Store]:
-    instance = Store(tmp_path / "router.sqlite3")
-    instance.init_db()
-    try:
-        yield instance
-    finally:
-        instance.close()
 
 
 @pytest.fixture

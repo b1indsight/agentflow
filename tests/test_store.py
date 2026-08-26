@@ -1,5 +1,4 @@
 import sqlite3
-from collections.abc import Iterator
 from datetime import timedelta
 
 import pytest
@@ -7,16 +6,6 @@ import pytest
 import app.store as store_module
 from app.models import FlowState, JobKind, JobState, ReviewItem, ReviewItemKind, utcnow
 from app.store import Store
-
-
-@pytest.fixture
-def store(tmp_path) -> Iterator[Store]:
-    instance = Store(tmp_path / "flowtool.sqlite3")
-    instance.init_db()
-    try:
-        yield instance
-    finally:
-        instance.close()
 
 
 def test_only_one_active_flow_exists_per_issue(store: Store) -> None:

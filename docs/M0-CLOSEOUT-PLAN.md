@@ -1,6 +1,6 @@
 # M0 收尾与验收计划
 
-> 状态：待审批 · 日期：2026-08-26 · 基线：`main@origin` (`e65d534b`)
+> 状态：已实施 · 日期：2026-08-26 · 基线：`main@origin` (`e65d534b`)
 >
 > 本计划收尾 [`M0-PLAN.md`](M0-PLAN.md) 已定义的 M0 范围；不扩展到真实
 > GitHub/Codex/bub 闭环。实施前需在 draft PR 上获得明确批准。
@@ -119,3 +119,19 @@ Ruff 的现有 5 项问题随其所属模块修正；Mypy 错误随行为和测�
 
 仓库目前没有 changelog、文档索引生成器或 CI 配置，本次不为 M0 收尾新增这些体系。
 本计划文件作为实现决策记录保留；若实施与计划发生实质偏差，会在这里记录。
+
+## 6. 实施结果
+
+计划范围已完成，无实质性范围偏差。HTTP 测试具体使用 `httpx.ASGITransport` 驱动 FastAPI
+lifespan，而不是已弃用的同步 TestClient；这保持了原计划的隔离目标，并避免测试依赖警告。
+
+最终结果：
+
+- 16 个 pytest 测试全部通过；
+- `ruff check app tests` 与 `mypy app tests` 通过；
+- `uv sync --locked`、`flowtool --help` 通过；
+- 使用临时 SQLite 启动真实服务后，`GET /healthz` 返回 200，服务正常关闭；
+- 测试未访问 GitHub/Codex/bub，也未使用真实凭据或真实轮询 sleep。
+
+测试优先实施共暴露并修复：allowlist CSV 的 source 解码错误、持久化实体 ID 的可空类型扩散、
+worker heartbeat 取消后未等待清理。真实 GitHub/Codex/bub 集成仍按 M1+ 和 V1–V9 跟踪。

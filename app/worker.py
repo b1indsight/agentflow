@@ -7,19 +7,23 @@ MVP：进程内单 worker，轮询 jobs 表。启动时 recover 悬空 job。
 from __future__ import annotations
 
 import asyncio
+from typing import Protocol
 
 from loguru import logger
 
-from app.engine import FlowEngine
-from app.models import JobState
+from app.models import Job, JobState
 from app.store import Store
 
 _POLL_INTERVAL = 2.0
 _HEARTBEAT_INTERVAL = 15.0
 
 
+class JobRunner(Protocol):
+    async def run_job(self, job: Job) -> None: ...
+
+
 class Worker:
-    def __init__(self, store: Store, engine: FlowEngine) -> None:
+    def __init__(self, store: Store, engine: JobRunner) -> None:
         self.store = store
         self.engine = engine
         self._stop = asyncio.Event()
@@ -36,7 +40,7 @@ class Worker:
                 continue
             await self._dispatch(job)
 
-    async def _dispatch(self, job) -> None:
+    async def _dispatch(self, job: Job) -> None:
         logger.info("dispatch job {} kind={} flow={}", job.id, job.kind, job.flow_id)
         hb = asyncio.create_task(self._heartbeat(job.id))
         try:
@@ -47,6 +51,10 @@ class Worker:
             self.store.finish_job(job.id, JobState.FAILED)
         finally:
             hb.cancel()
+            try:
+                await hb
+            except asyncio.CancelledError:
+                pass
 
     async def _heartbeat(self, job_id: int) -> None:
         try:

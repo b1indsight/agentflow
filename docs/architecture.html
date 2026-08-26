@@ -245,11 +245,11 @@
   </header>
 
   <div class="stats">
-    <div class="stat d"><b>12</b><span>写实</span></div>
+    <div class="stat d"><b>13</b><span>写实</span></div>
     <div class="stat p"><b>3</b><span>部分</span></div>
     <div class="stat s"><b>2</b><span>桩 stub</span></div>
-    <div class="stat m"><b>1</b><span>缺失 (tests)</span></div>
-    <div class="stat"><b>M0</b><span>验收未跑通</span></div>
+    <div class="stat m"><b>0</b><span>M0 缺失</span></div>
+    <div class="stat"><b>M0</b><span>验收通过</span></div>
   </div>
 
   <div class="legend" role="group" aria-label="按状态筛选">
@@ -408,12 +408,17 @@
     </div>
 
     <div class="plane plane--edge">
-      <span class="plane-label">外围 <small>CLI · 插件</small></span>
+      <span class="plane-label">外围 <small>CLI · 测试 · 插件</small></span>
       <div class="grid">
         <article class="node" data-status="done">
           <div class="node__top"><span class="node__name">CLI</span><span class="pill">写实</span></div>
           <p class="node__role">typer · serve(uvicorn) / flows / flow show / cancel / retry</p>
           <code class="node__file">app/cli.py</code>
+        </article>
+        <article class="node" data-status="done">
+          <div class="node__top"><span class="node__name">M0 Tests</span><span class="pill">写实</span></div>
+          <p class="node__role">16 项 · 配置/契约 · SQLite · HMAC/路由 · worker/恢复 · 全部隔离外部服务</p>
+          <code class="node__file">tests/ · pytest / Ruff / Mypy 全绿</code>
         </article>
         <article class="node" data-status="partial">
           <div class="node__top"><span class="node__name">Plugins</span><span class="pill">部分</span></div>
@@ -471,17 +476,17 @@
 
   <!-- roadmap milestone timeline -->
   <section class="block">
-    <h2>Roadmap · 里程碑 <span style="font-family:var(--mono);font-size:11px;color:var(--ink-soft);font-weight:400">当前在 M0 · M1–M5 均为将来</span></h2>
+    <h2>Roadmap · 里程碑 <span style="font-family:var(--mono);font-size:11px;color:var(--ink-soft);font-weight:400">M0 已验收 · 下一步 M1</span></h2>
     <p class="sub">端口(ports)现在就立好,后续扩展一律「换 adapter / 挂插件」,不动 core</p>
     <div class="scroll-x">
       <div class="track">
         <article class="ms ms--now">
-          <div class="ms__head"><span class="ms__id">M0</span><span class="ms__tag">进行中</span></div>
+          <div class="ms__head"><span class="ms__id">M0</span><span class="ms__tag">已完成</span></div>
           <div class="ms__title">骨架 &amp; 崩溃恢复</div>
           <ul class="ms__list">
             <li>webhook 验签 · SQLite(jobs)</li>
             <li>配置 · worker / recover 骨架</li>
-            <li><b>缺:</b> tests · 从没跑通</li>
+            <li><b>验收:</b> 16 tests · Ruff · Mypy · health 200</li>
           </ul>
         </article>
         <span class="arrow" aria-hidden="true">→</span>
@@ -574,19 +579,19 @@
     </div>
   </section>
 
-  <!-- M0 acceptance gap -->
+  <!-- M0 acceptance result -->
   <div class="callout">
-    <h3>⚠ 离 M0 验收(§9)还差的</h3>
+    <h3>✓ M0 验收结果（2026-08-26）</h3>
     <ul>
-      <li><b>没有 <code>tests/</code></b> —— HMAC / 建表 / 契约三个 smoke test 一个都没有,<code>pytest</code> 无法绿。</li>
-      <li><b>从没跑过</b> —— 无 <code>.venv</code>;<code>uv sync</code> / <code>flowtool serve</code> / <code>GET /healthz</code> / 伪造 webhook 都未实际验证。</li>
-      <li><b>示例插件体仍是桩</b> —— hook 已接线（engine 五个转移点触发 <code>on_flow_start/pr_opened/review/merged/archived</code>），但 <code>post-merge-summary</code> 只打日志,尚未真正提炼风格 / 提 PR。</li>
+      <li><b>自动化</b> —— 16 项覆盖配置/契约、SQLite、HMAC/路由、worker/恢复；pytest、Ruff、Mypy 全绿。</li>
+      <li><b>运行时</b> —— <code>uv sync --locked</code>、CLI、真实 <code>flowtool serve</code> 与 <code>GET /healthz</code> 200 已验证。</li>
+      <li><b>M1+ 仍待验证</b> —— githubkit、bub、真实 Codex/push、reconcile 与示例插件实现不计入 M0 完成范围。</li>
     </ul>
   </div>
 
   <footer>
-    <span>FlowTool · M0 脚手架 · 状态截至 2026-08-02</span>
-    <span>docs/ARCHITECTURE.md · docs/M0-PLAN.md</span>
+    <span>FlowTool · M0 已验收 · 状态截至 2026-08-26</span>
+    <span>docs/ARCHITECTURE.md · docs/M0-PLAN.md · docs/M0-CLOSEOUT-PLAN.md</span>
   </footer>
 
 </div>

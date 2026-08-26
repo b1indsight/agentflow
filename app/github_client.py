@@ -13,8 +13,10 @@ from app.config import get_settings
 
 # githubkit 采用惰性导入：M0 阶段未装依赖也能 import 本模块（桩）。
 try:
-    from githubkit import GitHub  # type: ignore
-    from githubkit import AppInstallationAuthStrategy  # type: ignore
+    from githubkit import (  # type: ignore
+        AppInstallationAuthStrategy,
+        GitHub,
+    )
 except Exception:  # noqa: BLE001
     GitHub = None  # type: ignore
     AppInstallationAuthStrategy = None  # type: ignore
@@ -50,7 +52,7 @@ class GitHubApp:
         try:
             auth = await gh.auth.async_get_token()  # TODO(verify) V1/V3 精确方法名与 scope
             return auth
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.error("installation_token failed: {}", e)
             raise
 

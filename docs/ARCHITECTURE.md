@@ -1,6 +1,7 @@
 # FlowTool 架构方案
 
-> 状态：草案 · 日期：2026-08-02 · 本文件是 living doc，细节随讨论迭代。
+> 状态：M0 已验收、M1+ 仍为草案 · 初始日期：2026-08-02 · M0 验收：2026-08-26。
+> 本文件是 living doc，细节随讨论迭代。
 > 项目暂用代号 **FlowTool**（源自触发标签 `flow`），未定名。
 > 2026-08-02 修订：本地平面拆成 **workspace / sandbox / VCS 三条正交轴**——VCS 降为普通函数（不再是端口），
 > Sandbox 提为一等端口（§4.6 / §9-5）。
@@ -265,7 +266,8 @@ flowtool/
   README.md
 ```
 
-- **M0** 骨架 + webhook 验签 + SQLite（含 `jobs`）+ 配置 + worker / 崩溃恢复骨架
+- **M0（已验收）** 骨架 + webhook 验签 + SQLite（含 `jobs`）+ 配置 + worker / 崩溃恢复骨架；
+  16 个自动化测试、Ruff、Mypy、CLI 与 `/healthz` runtime smoke 全部通过（2026-08-26）
 - **M1** 触发（含 allowlist）→ 工作区 → codex 首轮 → 开 PR（单 flow happy path）
 - **M2** 语义 Triage（bub）门 + 回喂循环（settle → revise/answer/wait + resume/兜底 + 自动 resolve）
 - **M3** 人工合并检测（`pull_request.closed`）→ 归档 + 状态标签 / 评论

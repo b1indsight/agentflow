@@ -10,7 +10,11 @@ import httpx
 import pytest
 import pytest_asyncio
 
-from app.ingress import create_app
+import app.router as router_module
+from app.ingress import WebhookRouter, create_app
+from app.models import Flow, FlowState, JobKind
+from app.router import EventRouter
+from app.store import Store
 
 
 class RecordingRouter:
@@ -24,9 +28,9 @@ class RecordingRouter:
 
 
 class FakeContext:
-    def __init__(self, secret: str = "webhook-secret") -> None:
-        self.settings = SimpleNamespace(github_webhook_secret=secret)
-        self.router = RecordingRouter()
+    def __init__(self, router: WebhookRouter | None = None, settings=None) -> None:
+        self.settings = settings or SimpleNamespace(github_webhook_secret="webhook-secret")
+        self.router = router or RecordingRouter()
         self.tasks: list[asyncio.Task[None]] = []
 
     def startup(self) -> None:
@@ -38,6 +42,24 @@ class FakeContext:
     async def shutdown(self) -> None:
         if self.tasks:
             await asyncio.gather(*self.tasks)
+
+
+class RoutingEngine:
+    def __init__(self, store: Store) -> None:
+        self.store = store
+
+    def on_trigger(self, repo: str, issue_number: int, installation_id: int | None) -> Flow:
+        flow = self.store.create_flow(repo, issue_number, installation_id)
+        self.store.enqueue_job(flow.id, JobKind.INITIAL)
+        return flow
+
+    def cancel(self, flow: Flow) -> None:
+        flow.state = FlowState.CANCELLED
+        self.store.update_flow(flow)
+
+    def on_merged(self, flow: Flow) -> None:
+        flow.state = FlowState.MERGED
+        self.store.update_flow(flow)
 
 
 @pytest.fixture
@@ -67,24 +89,52 @@ async def test_health_and_invalid_signature(client: httpx.AsyncClient) -> None:
 
 @pytest.mark.asyncio
 async def test_valid_signature_dispatches_webhook(
-    client: httpx.AsyncClient, context: FakeContext
+    store: Store, monkeypatch
 ) -> None:
-    payload = {"action": "labeled", "issue": {"number": 7}}
+    settings = SimpleNamespace(
+        allowlist=["alice"],
+        bot_login="flowtool[bot]",
+        github_webhook_secret="webhook-secret",
+        host="test",
+        port=0,
+        trigger_label="flow",
+        settle_seconds=75.0,
+        submit_grace_seconds=15.0,
+    )
+    monkeypatch.setattr(router_module, "get_settings", lambda: settings)
+    context = FakeContext(EventRouter(store, RoutingEngine(store)), settings)
+    application = create_app(lambda: context)
+    transport = httpx.ASGITransport(app=application)
+    payload = {
+        "action": "labeled",
+        "label": {"name": "flow"},
+        "repository": {"full_name": "owner/repo"},
+        "issue": {"number": 7},
+        "sender": {"login": "alice"},
+        "installation": {"id": 42},
+    }
     body = json.dumps(payload).encode()
     signature = "sha256=" + hmac.new(
         context.settings.github_webhook_secret.encode(), body, hashlib.sha256
     ).hexdigest()
 
-    response = await client.post(
-        "/webhook",
-        content=body,
-        headers={
-            "X-GitHub-Event": "issues",
-            "X-GitHub-Delivery": "delivery-1",
-            "X-Hub-Signature-256": signature,
-        },
-    )
+    async with (
+        application.router.lifespan_context(application),
+        httpx.AsyncClient(transport=transport, base_url="http://test") as client,
+    ):
+        response = await client.post(
+            "/webhook",
+            content=body,
+            headers={
+                "X-GitHub-Event": "issues",
+                "X-GitHub-Delivery": "delivery-1",
+                "X-Hub-Signature-256": signature,
+            },
+        )
+        await asyncio.gather(*context.tasks)
 
     assert response.status_code == 202
-    await asyncio.wait_for(context.router.handled.wait(), timeout=1)
-    assert context.router.calls == [("issues", "delivery-1", payload)]
+    flow = store.get_active_flow("owner/repo", 7)
+    assert flow is not None
+    assert flow.state is FlowState.PENDING
+    assert store.claim_job() is not None
