@@ -1,0 +1,151 @@
+from collections.abc import Iterator
+from types import SimpleNamespace
+from unittest.mock import Mock
+
+import pytest
+
+import app.router as router_module
+from app.models import Flow, FlowState, JobKind
+from app.router import EventRouter
+from app.store import Store
+
+
+class RecordingEngine:
+    def __init__(self, store: Store) -> None:
+        self.store = store
+
+    def on_trigger(self, repo: str, issue_number: int, installation_id: int | None) -> Flow:
+        flow = self.store.create_flow(repo, issue_number, installation_id)
+        self.store.enqueue_job(flow.id, JobKind.INITIAL)
+        return flow
+
+    def cancel(self, flow: Flow) -> None:
+        flow.state = FlowState.CANCELLED
+        self.store.update_flow(flow)
+
+    def on_merged(self, flow: Flow) -> None:
+        flow.state = FlowState.MERGED
+        self.store.update_flow(flow)
+
+
+@pytest.fixture
+def store(tmp_path) -> Iterator[Store]:
+    instance = Store(tmp_path / "router.sqlite3")
+    instance.init_db()
+    try:
+        yield instance
+    finally:
+        instance.close()
+
+
+@pytest.fixture
+def router(store: Store, monkeypatch) -> EventRouter:
+    settings = SimpleNamespace(
+        allowlist=["alice"],
+        bot_login="flowtool[bot]",
+        trigger_label="flow",
+        settle_seconds=75.0,
+        submit_grace_seconds=15.0,
+    )
+    monkeypatch.setattr(router_module, "get_settings", lambda: settings)
+    engine = RecordingEngine(store)
+    return EventRouter(store, engine)
+
+
+def issue_event(*, action: str, sender: str = "alice") -> dict:
+    return {
+        "action": action,
+        "label": {"name": "flow"},
+        "repository": {"full_name": "owner/repo"},
+        "issue": {"number": 7},
+        "sender": {"login": sender},
+        "installation": {"id": 42},
+    }
+
+
+@pytest.mark.asyncio
+async def test_allowed_label_creates_one_flow_and_job(
+    router: EventRouter, store: Store
+) -> None:
+    payload = issue_event(action="labeled")
+
+    await router.handle("issues", "delivery-1", payload)
+    await router.handle("issues", "delivery-1", payload)
+
+    flow = store.get_active_flow("owner/repo", 7)
+    assert flow is not None
+    assert flow.state is FlowState.PENDING
+    assert store.claim_job() is not None
+    assert store.claim_job() is None
+
+
+@pytest.mark.asyncio
+async def test_bot_and_non_allowlisted_users_do_not_trigger(
+    router: EventRouter, store: Store
+) -> None:
+    await router.handle("issues", "bot-delivery", issue_event(action="labeled", sender="flowtool[bot]"))
+    await router.handle("issues", "outsider-delivery", issue_event(action="labeled", sender="mallory"))
+
+    assert store.get_active_flow("owner/repo", 7) is None
+    assert store.event_seen("bot-delivery") is False
+    assert store.event_seen("outsider-delivery") is True
+
+
+@pytest.mark.asyncio
+async def test_unlabel_and_stop_comment_cancel_active_flow(
+    router: EventRouter, store: Store
+) -> None:
+    await router.handle("issues", "create-1", issue_event(action="labeled"))
+    await router.handle("issues", "cancel-1", issue_event(action="unlabeled"))
+    cancelled = store.list_flows()[0]
+    assert cancelled.state is FlowState.CANCELLED
+
+    replacement = store.create_flow("owner/repo", 7, installation_id=42)
+    stop_payload = {
+        "repository": {"full_name": "owner/repo"},
+        "issue": {"number": 7},
+        "comment": {"id": 77, "body": "/flow stop", "user": {"login": "alice"}},
+        "sender": {"login": "alice"},
+    }
+    await router.handle("issue_comment", "cancel-2", stop_payload)
+
+    stopped = store.get_flow(replacement.id)
+    assert stopped is not None
+    assert stopped.state is FlowState.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_review_comment_is_stored_for_current_attempt(
+    router: EventRouter, store: Store, monkeypatch
+) -> None:
+    flow = store.create_flow("owner/repo", 7, installation_id=42)
+    attempt = store.create_attempt(flow.id)
+    attempt.pr_number = 17
+    store.update_attempt(attempt)
+    flow.current_attempt_id = attempt.id
+    store.update_flow(flow)
+    touch = Mock()
+    monkeypatch.setattr(router.settle, "touch", touch)
+
+    payload = {
+        "repository": {"full_name": "owner/repo"},
+        "pull_request": {"number": 17},
+        "comment": {
+            "id": 101,
+            "body": "Please add a bound.",
+            "user": {"login": "reviewer"},
+            "path": "app/worker.py",
+            "line": 40,
+            "original_commit_id": "abc123",
+            "diff_hunk": "@@ -40 +40 @@",
+        },
+        "sender": {"login": "reviewer"},
+    }
+
+    await router.handle("pull_request_review_comment", "review-1", payload)
+
+    items = store.unrelayed_items(attempt.id)
+    assert len(items) == 1
+    assert items[0].github_id == 101
+    assert items[0].path == "app/worker.py"
+    touch.assert_called_once()
