@@ -6,13 +6,23 @@ webhook 秒回，长活交给 worker / settle 定时器。
 from __future__ import annotations
 
 import asyncio
+from typing import Protocol
 
 from loguru import logger
 
 from app.config import get_settings
-from app.engine import FlowEngine
 from app.models import TERMINAL_STATES, Flow, JobKind, ReviewItem, ReviewItemKind
 from app.store import Store
+
+
+class FlowEventHandler(Protocol):
+    def on_trigger(
+        self, repo: str, issue_number: int, installation_id: int | None
+    ) -> Flow | None: ...
+
+    def cancel(self, flow: Flow) -> None: ...
+
+    def on_merged(self, flow: Flow) -> None: ...
 
 
 class SettleScheduler:
@@ -46,7 +56,7 @@ class SettleScheduler:
 
 
 class EventRouter:
-    def __init__(self, store: Store, engine: FlowEngine) -> None:
+    def __init__(self, store: Store, engine: FlowEventHandler) -> None:
         self.store = store
         self.engine = engine
         self.settings = get_settings()

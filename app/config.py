@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from typing import Annotated
 
 from pydantic import field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -21,7 +23,7 @@ class Settings(BaseSettings):
 
     # 触发
     trigger_label: str = "flow"
-    allowlist: list[str] = []
+    allowlist: Annotated[list[str], NoDecode] = []
 
     # 本地路径
     repos_root: Path = Path("~/.flowtool/repos")
@@ -40,9 +42,12 @@ class Settings(BaseSettings):
 
     @field_validator("allowlist", mode="before")
     @classmethod
-    def _split_csv(cls, v: object) -> object:
-        # 支持逗号分隔（env 里 FLOWTOOL_ALLOWLIST=alice,bob）
+    def _parse_allowlist(cls, v: object) -> object:
         if isinstance(v, str):
+            stripped = v.strip()
+            if stripped.startswith("["):
+                return json.loads(stripped)
+            # 支持逗号分隔（env 里 FLOWTOOL_ALLOWLIST=alice,bob）
             return [x.strip() for x in v.split(",") if x.strip()]
         return v
 
