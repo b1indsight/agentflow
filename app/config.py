@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Annotated
 
@@ -41,9 +42,12 @@ class Settings(BaseSettings):
 
     @field_validator("allowlist", mode="before")
     @classmethod
-    def _split_csv(cls, v: object) -> object:
-        # 支持逗号分隔（env 里 FLOWTOOL_ALLOWLIST=alice,bob）
+    def _parse_allowlist(cls, v: object) -> object:
         if isinstance(v, str):
+            stripped = v.strip()
+            if stripped.startswith("["):
+                return json.loads(stripped)
+            # 支持逗号分隔（env 里 FLOWTOOL_ALLOWLIST=alice,bob）
             return [x.strip() for x in v.split(",") if x.strip()]
         return v
 
