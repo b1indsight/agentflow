@@ -127,7 +127,7 @@ lifespan，而不是已弃用的同步 TestClient；这保持了原计划的隔�
 
 最终结果：
 
-- 16 个 pytest 测试全部通过；
+- 18 个 pytest 测试全部通过；
 - `ruff check app tests` 与 `mypy app tests` 通过；
 - `uv sync --locked`、`flowtool --help` 通过；
 - 使用临时 SQLite 启动真实服务后，`GET /healthz` 返回 200，服务正常关闭；

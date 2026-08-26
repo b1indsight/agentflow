@@ -55,6 +55,8 @@ class Worker:
                 await hb
             except asyncio.CancelledError:
                 pass
+            except Exception as e:  # noqa: BLE001
+                logger.warning("heartbeat task for job {} failed: {}", job.id, e)
 
     async def _heartbeat(self, job_id: int) -> None:
         try:

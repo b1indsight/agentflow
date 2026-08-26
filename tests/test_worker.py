@@ -58,6 +58,29 @@ async def test_dispatch_finishes_job_and_cleans_up_heartbeat(
 
 
 @pytest.mark.asyncio
+async def test_dispatch_contains_heartbeat_task_failures(
+    store: Store, monkeypatch
+) -> None:
+    queued = enqueue_job(store)
+    claimed = store.claim_job()
+    assert claimed is not None
+    worker = Worker(store, RecordingEngine())
+
+    async def failing_heartbeat(job_id: int) -> None:
+        # A transient persistence failure must not terminate the worker loop.
+        assert job_id == claimed.id
+        raise RuntimeError("heartbeat failed")
+
+    monkeypatch.setattr(worker, "_heartbeat", failing_heartbeat)
+
+    await worker._dispatch(claimed)
+
+    finished = store.get_job(queued.id)
+    assert finished is not None
+    assert finished.state is JobState.DONE
+
+
+@pytest.mark.asyncio
 async def test_dispatch_marks_failed_job(store: Store) -> None:
     queued = enqueue_job(store)
     claimed = store.claim_job()

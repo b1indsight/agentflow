@@ -258,7 +258,7 @@ revision job:
   401；重复 delivery-id 不重复处理。
 - [x] worker 能 claim/dispatch job，成功与失败状态可回写；启动恢复和过期 heartbeat
   通过确定性自动化测试模拟验证。
-- [x] `pytest` 16 项全绿，Ruff 与 Mypy 全绿。
+- [x] `pytest` 18 项全绿，Ruff 与 Mypy 全绿。
 
 ## 10. 实施结果（2026-08-26）
 
