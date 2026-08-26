@@ -1,0 +1,627 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FlowTool 架构图 · M0</title>
+<style>
+  :root {
+    --bg:#eaeef3; --surface:#ffffff; --surface-2:#f4f7fb;
+    --ink:#172231; --ink-soft:#4a5768; --line:#d4dce7; --line-strong:#bccadb;
+    --accent:#1f6fe0; --accent-soft:rgba(31,111,224,.10);
+    --done:#1f9d52; --done-bg:rgba(31,157,82,.12);
+    --partial:#b5791b; --partial-bg:rgba(181,121,27,.14);
+    --stub:#5b6b80; --stub-bg:rgba(91,107,128,.13);
+    --missing:#d0455f; --missing-bg:rgba(208,69,95,.10);
+    --dot:rgba(30,60,100,.05);
+    --mono:ui-monospace,"SF Mono","JetBrains Mono","Cascadia Code",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"Helvetica Neue",sans-serif;
+    --r:10px; --maxw:1180px;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --bg:#0c1220; --surface:#141d2c; --surface-2:#101827;
+      --ink:#dce5f1; --ink-soft:#8b99ad; --line:#243244; --line-strong:#34465d;
+      --accent:#54a6ff; --accent-soft:rgba(84,166,255,.14);
+      --done:#4bcf74; --done-bg:rgba(75,207,116,.13);
+      --partial:#e0a53a; --partial-bg:rgba(224,165,58,.14);
+      --stub:#8194ab; --stub-bg:rgba(129,148,171,.13);
+      --missing:#f2647f; --missing-bg:rgba(242,100,127,.13);
+      --dot:rgba(140,180,230,.055);
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#0c1220; --surface:#141d2c; --surface-2:#101827;
+    --ink:#dce5f1; --ink-soft:#8b99ad; --line:#243244; --line-strong:#34465d;
+    --accent:#54a6ff; --accent-soft:rgba(84,166,255,.14);
+    --done:#4bcf74; --done-bg:rgba(75,207,116,.13);
+    --partial:#e0a53a; --partial-bg:rgba(224,165,58,.14);
+    --stub:#8194ab; --stub-bg:rgba(129,148,171,.13);
+    --missing:#f2647f; --missing-bg:rgba(242,100,127,.13);
+    --dot:rgba(140,180,230,.055);
+  }
+  :root[data-theme="light"]{
+    --bg:#eaeef3; --surface:#ffffff; --surface-2:#f4f7fb;
+    --ink:#172231; --ink-soft:#4a5768; --line:#d4dce7; --line-strong:#bccadb;
+    --accent:#1f6fe0; --accent-soft:rgba(31,111,224,.10);
+    --done:#1f9d52; --done-bg:rgba(31,157,82,.12);
+    --partial:#b5791b; --partial-bg:rgba(181,121,27,.14);
+    --stub:#5b6b80; --stub-bg:rgba(91,107,128,.13);
+    --missing:#d0455f; --missing-bg:rgba(208,69,95,.10);
+    --dot:rgba(30,60,100,.05);
+  }
+
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font-family:var(--sans); line-height:1.5;
+    background-image:radial-gradient(var(--dot) 1px, transparent 1px);
+    background-size:22px 22px;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:var(--maxw); margin:0 auto; padding:clamp(18px,4vw,40px) clamp(16px,4vw,32px) 64px}
+
+  /* ---------- masthead ---------- */
+  .masthead{display:flex; justify-content:space-between; align-items:flex-start; gap:20px; flex-wrap:wrap}
+  .brand{display:flex; gap:14px; align-items:center}
+  .brand .mark{
+    width:40px; height:40px; border-radius:9px; flex:none;
+    display:grid; place-items:center; font-size:20px;
+    background:var(--accent-soft); border:1px solid var(--line-strong); color:var(--accent);
+  }
+  h1{font-family:var(--mono); font-size:clamp(20px,3.4vw,27px); margin:0; letter-spacing:-.01em; font-weight:600}
+  .tagline{margin:2px 0 0; color:var(--ink-soft); font-size:13.5px}
+  .tagline code{font-family:var(--mono); color:var(--accent); background:var(--accent-soft); padding:.5px 5px; border-radius:5px; font-size:.92em}
+  .theme{
+    font-family:var(--mono); font-size:12px; cursor:pointer;
+    background:var(--surface); color:var(--ink-soft); border:1px solid var(--line-strong);
+    padding:8px 12px; border-radius:8px; display:inline-flex; gap:7px; align-items:center;
+  }
+  .theme:hover{color:var(--ink); border-color:var(--accent)}
+
+  /* ---------- stat ribbon ---------- */
+  .stats{display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); gap:10px; margin:22px 0 6px}
+  .stat{background:var(--surface); border:1px solid var(--line); border-radius:var(--r); padding:13px 15px; position:relative; overflow:hidden}
+  .stat::before{content:""; position:absolute; left:0; top:0; bottom:0; width:3px; background:var(--c,var(--accent))}
+  .stat b{font-family:var(--mono); font-size:24px; font-weight:600; font-variant-numeric:tabular-nums; display:block; letter-spacing:-.02em}
+  .stat span{font-size:11.5px; color:var(--ink-soft); text-transform:uppercase; letter-spacing:.05em}
+  .stat.d{--c:var(--done)} .stat.p{--c:var(--partial)} .stat.s{--c:var(--stub)} .stat.m{--c:var(--missing)}
+
+  /* ---------- legend ---------- */
+  .legend{display:flex; flex-wrap:wrap; gap:8px 10px; align-items:center; margin:16px 0 26px; padding:12px 14px;
+    background:var(--surface-2); border:1px solid var(--line); border-radius:var(--r)}
+  .legend .hint{font-size:11.5px; color:var(--ink-soft); margin-right:2px; font-family:var(--mono)}
+  .key{
+    font-family:var(--mono); font-size:11.5px; cursor:pointer; user-select:none;
+    display:inline-flex; align-items:center; gap:6px; padding:5px 9px; border-radius:20px;
+    background:var(--surface); border:1px solid var(--line-strong); color:var(--ink-soft);
+    transition:transform .12s ease;
+  }
+  .key .dot{width:9px; height:9px; border-radius:50%; background:var(--kc)}
+  .key[data-filter="done"]{--kc:var(--done)} .key[data-filter="partial"]{--kc:var(--partial)}
+  .key[data-filter="stub"]{--kc:var(--stub)} .key[data-filter="missing"]{--kc:var(--missing)}
+  .key[aria-pressed="true"]{color:var(--ink); border-color:var(--kc); box-shadow:0 0 0 1px var(--kc) inset}
+  .key:hover{transform:translateY(-1px)}
+  .key .missing-dot{border:1.5px dashed var(--missing); background:transparent}
+
+  /* ---------- diagram / planes ---------- */
+  .diagram{display:flex; flex-direction:column; gap:0}
+  .plane{
+    border:1px solid var(--line); border-radius:14px; background:var(--surface-2);
+    padding:16px 16px 18px; position:relative;
+    animation:rise .5s ease both;
+  }
+  .plane + .boundary{margin:0}
+  .plane-label{
+    display:inline-flex; align-items:center; gap:9px; font-family:var(--mono); font-size:11.5px;
+    text-transform:uppercase; letter-spacing:.08em; color:var(--accent);
+    background:var(--accent-soft); border:1px solid var(--line-strong);
+    padding:4px 10px; border-radius:7px; margin-bottom:14px;
+  }
+  .plane-label small{color:var(--ink-soft); letter-spacing:0; text-transform:none; font-size:11px}
+  .plane--edge{background:var(--surface); border-style:dashed}
+  .plane--local .plane-label{color:var(--partial); background:var(--partial-bg)}
+
+  /* boundary divider between planes */
+  .boundary{
+    display:flex; align-items:center; gap:12px; padding:11px 4px; margin:2px 0;
+  }
+  .boundary .rule{flex:1; height:0; border-top:1.5px dashed var(--line-strong)}
+  .boundary .btag{
+    font-family:var(--mono); font-size:10.5px; letter-spacing:.06em; text-transform:uppercase;
+    color:var(--ink-soft); white-space:nowrap;
+  }
+  .boundary .dir{display:flex; gap:8px; flex-wrap:wrap; justify-content:center}
+  .boundary .dir span{font-family:var(--mono); font-size:10.5px; color:var(--accent); white-space:nowrap}
+
+  .row-label{font-family:var(--mono); font-size:10.5px; color:var(--ink-soft); text-transform:uppercase; letter-spacing:.07em; margin:14px 0 8px}
+  .row-label:first-of-type{margin-top:0}
+
+  .scroll-x{overflow-x:auto; padding-bottom:2px}
+  .pipe{display:flex; align-items:stretch; gap:10px; min-width:min-content}
+  .pipe .node{flex:1 1 0; min-width:180px}
+  .arrow{align-self:center; font-family:var(--mono); color:var(--accent); font-size:18px; flex:none}
+  .grid{display:grid; grid-template-columns:repeat(auto-fill,minmax(210px,1fr)); gap:10px}
+
+  /* ---------- component node ---------- */
+  .node{
+    background:var(--surface); border:1px solid var(--line); border-radius:var(--r);
+    padding:12px 13px 12px 15px; position:relative; overflow:hidden;
+    transition:transform .14s ease, border-color .14s ease, box-shadow .14s ease, opacity .2s ease, filter .2s ease;
+    --s:var(--accent); --sbg:var(--accent-soft);
+  }
+  .node::before{content:""; position:absolute; left:0; top:0; bottom:0; width:3px; background:var(--s)}
+  .node[data-status="done"]{--s:var(--done); --sbg:var(--done-bg)}
+  .node[data-status="partial"]{--s:var(--partial); --sbg:var(--partial-bg)}
+  .node[data-status="stub"]{--s:var(--stub); --sbg:var(--stub-bg)}
+  .node[data-status="missing"]{--s:var(--missing); --sbg:var(--missing-bg); border-style:dashed}
+  .node[data-status="artifact"]{--s:var(--line-strong); --sbg:transparent; background:var(--surface-2); border-style:dashed}
+  .node:hover{transform:translateY(-2px); border-color:var(--s); box-shadow:0 6px 18px -12px rgba(0,0,0,.5)}
+  .node.dimmed{opacity:.28; filter:grayscale(.5)}
+  .node__top{display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:5px}
+  .node__name{font-family:var(--mono); font-weight:600; font-size:13.5px; letter-spacing:-.01em}
+  .node__role{font-size:12px; color:var(--ink-soft); margin:0 0 9px; line-height:1.42}
+  .node__file{font-family:var(--mono); font-size:11px; color:var(--ink-soft); background:var(--surface-2); border:1px solid var(--line); padding:2px 6px; border-radius:5px; display:inline-block}
+  .node[data-status="artifact"] .node__file{background:transparent; border:none; padding:0}
+  .pill{
+    font-family:var(--mono); font-size:10px; font-weight:600; letter-spacing:.02em;
+    padding:2px 7px; border-radius:20px; white-space:nowrap; flex:none;
+    background:var(--sbg); color:var(--s); border:1px solid color-mix(in srgb, var(--s) 32%, transparent);
+  }
+
+  /* foundation strip */
+  .foundation{display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:10px; margin-bottom:22px}
+
+  /* ---------- state machine ---------- */
+  section.block{margin-top:34px}
+  .block h2{font-family:var(--mono); font-size:14px; font-weight:600; letter-spacing:.02em; margin:0 0 4px; display:flex; align-items:center; gap:9px}
+  .block h2::before{content:""; width:8px; height:8px; border-radius:2px; background:var(--accent)}
+  .block .sub{color:var(--ink-soft); font-size:12.5px; margin:0 0 16px}
+  .fsm{display:flex; flex-wrap:wrap; align-items:center; gap:9px 8px; background:var(--surface-2); border:1px solid var(--line); border-radius:14px; padding:18px 16px}
+  .state{font-family:var(--mono); font-size:12px; font-weight:600; padding:7px 12px; border-radius:8px; background:var(--surface); border:1px solid var(--line-strong); letter-spacing:.02em; white-space:nowrap}
+  .state.term{border-style:dashed; color:var(--missing); border-color:color-mix(in srgb,var(--missing) 45%, var(--line-strong))}
+  .state.mid{color:var(--accent); border-color:color-mix(in srgb,var(--accent) 45%, var(--line-strong))}
+  .to{font-family:var(--mono); color:var(--ink-soft); font-size:14px}
+  .fsm .brk{flex-basis:100%; height:0}
+  .fsm .cap{font-family:var(--mono); font-size:10.5px; color:var(--ink-soft)}
+
+  /* ---------- M0 callout ---------- */
+  .callout{margin-top:20px; background:var(--surface); border:1px solid var(--line); border-left:3px solid var(--missing); border-radius:var(--r); padding:15px 17px}
+  .callout h3{font-family:var(--mono); font-size:13px; margin:0 0 9px; color:var(--missing)}
+  .callout ul{margin:0; padding-left:18px; display:flex; flex-direction:column; gap:6px}
+  .callout li{font-size:12.5px; color:var(--ink)}
+  .callout code{font-family:var(--mono); font-size:.9em; color:var(--ink-soft); background:var(--surface-2); padding:1px 5px; border-radius:4px}
+
+  footer{margin-top:34px; padding-top:16px; border-top:1px solid var(--line); color:var(--ink-soft); font-size:11.5px; font-family:var(--mono); display:flex; justify-content:space-between; flex-wrap:wrap; gap:8px}
+
+  /* ---------- future / roadmap ---------- */
+  .node[data-status="future"]{--s:var(--accent); --sbg:var(--accent-soft); border-style:dashed; background:var(--surface-2)}
+  .plane--future{border-style:dashed; background:transparent}
+  .plane--future .plane-label{color:var(--accent); background:var(--accent-soft)}
+  .key[data-filter="future"]{--kc:var(--accent)}
+  .key .future-dot{border:1.5px dashed var(--accent); background:transparent}
+  .port-tag{font-family:var(--mono); font-size:10px; color:var(--accent); background:var(--accent-soft);
+    border:1px solid color-mix(in srgb,var(--accent) 28%, transparent); padding:2px 7px; border-radius:5px; display:inline-block}
+
+  .track{display:flex; align-items:stretch; gap:9px; min-width:min-content; padding:2px 0 4px}
+  .ms{flex:0 0 216px; background:var(--surface); border:1px solid var(--line); border-radius:var(--r);
+    padding:13px 14px; position:relative; overflow:hidden; --mc:var(--accent)}
+  .ms::before{content:""; position:absolute; left:0; top:0; bottom:0; width:3px; background:var(--mc)}
+  .ms--now{--mc:var(--partial); border-color:color-mix(in srgb,var(--partial) 40%, var(--line))}
+  .ms--future{--mc:var(--accent); border-style:dashed; background:var(--surface-2)}
+  .ms__head{display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; gap:8px}
+  .ms__id{font-family:var(--mono); font-weight:700; font-size:16px; letter-spacing:.01em; color:var(--mc)}
+  .ms__tag{font-family:var(--mono); font-size:9.5px; text-transform:uppercase; letter-spacing:.05em;
+    padding:2px 7px; border-radius:20px; white-space:nowrap; color:var(--mc);
+    background:color-mix(in srgb,var(--mc) 13%, transparent); border:1px solid color-mix(in srgb,var(--mc) 30%, transparent)}
+  .ms__title{font-family:var(--mono); font-size:12.5px; font-weight:600; margin-bottom:9px; color:var(--ink); letter-spacing:-.01em}
+  .ms__list{margin:0; padding-left:15px; display:flex; flex-direction:column; gap:5px}
+  .ms__list li{font-size:11.5px; color:var(--ink-soft); line-height:1.4}
+  .ms__list li b{color:var(--ink); font-weight:600}
+
+  @keyframes rise{from{opacity:0; transform:translateY(8px)} to{opacity:1; transform:none}}
+  @media (prefers-reduced-motion:reduce){*{animation:none!important; transition:none!important}}
+  @media (max-width:560px){
+    .pipe{flex-direction:column}
+    .arrow{transform:rotate(90deg)}
+    .boundary{flex-wrap:wrap}
+    .boundary .dir{width:100%; order:3; justify-content:flex-start}
+  }
+</style>
+
+</head>
+<body>
+<div class="wrap">
+
+  <header class="masthead">
+    <div class="brand">
+      <div class="mark">🏗️</div>
+      <div>
+        <h1>FlowTool</h1>
+        <p class="tagline">headless 编排器 · GitHub issue 打 <code>flow</code> 标 → codex 编码 → PR → 审核回喂 → 人工合并 → 归档</p>
+      </div>
+    </div>
+    <button class="theme" id="theme" aria-label="切换主题"><span id="theme-ico">◐</span> <span id="theme-txt">主题</span></button>
+  </header>
+
+  <div class="stats">
+    <div class="stat d"><b>12</b><span>写实</span></div>
+    <div class="stat p"><b>3</b><span>部分</span></div>
+    <div class="stat s"><b>2</b><span>桩 stub</span></div>
+    <div class="stat m"><b>1</b><span>缺失 (tests)</span></div>
+    <div class="stat"><b>M0</b><span>验收未跑通</span></div>
+  </div>
+
+  <div class="legend" role="group" aria-label="按状态筛选">
+    <span class="hint">点击筛选 →</span>
+    <button class="key" data-filter="done" aria-pressed="false"><span class="dot"></span>写实 written</button>
+    <button class="key" data-filter="partial" aria-pressed="false"><span class="dot"></span>部分 partial</button>
+    <button class="key" data-filter="stub" aria-pressed="false"><span class="dot"></span>桩 stub</button>
+    <button class="key" data-filter="missing" aria-pressed="false"><span class="dot missing-dot"></span>缺失 missing</button>
+    <button class="key" data-filter="future" aria-pressed="false"><span class="dot future-dot"></span>将来 future</button>
+  </div>
+
+  <!-- foundation contracts -->
+  <div class="row-label">契约地基 · core 只依赖这些</div>
+  <div class="foundation">
+    <article class="node" data-status="done">
+      <div class="node__top"><span class="node__name">models</span><span class="pill">写实</span></div>
+      <p class="node__role">枚举 · dataclass · pydantic 跨模型契约（TriageVerdict / CodexResult）</p>
+      <code class="node__file">app/models.py</code>
+    </article>
+    <article class="node" data-status="done">
+      <div class="node__top"><span class="node__name">config</span><span class="pill">写实</span></div>
+      <p class="node__role">pydantic-settings · env 前缀 FLOWTOOL_ · allowlist / 路径展开</p>
+      <code class="node__file">app/config.py</code>
+    </article>
+    <article class="node" data-status="done">
+      <div class="node__top"><span class="node__name">ports</span><span class="pill">写实</span></div>
+      <p class="node__role">5 个端口 Protocol（CodeAgent / Judge / Sandbox / GitHubClient / JobDispatch）签名定死 · VCS 已降为普通函数</p>
+      <code class="node__file">app/ports.py</code>
+    </article>
+  </div>
+
+  <div class="diagram">
+
+    <!-- external plane -->
+    <div class="plane plane--edge">
+      <span class="plane-label">外部 · GitHub <small>issues / PRs / reviews / projects</small></span>
+      <div class="grid">
+        <article class="node" data-status="artifact">
+          <div class="node__top"><span class="node__name">GitHub</span></div>
+          <p class="node__role">交互面本身（headless 的「UI」）：打标触发 · PR review 反馈 · 人工 Approve+Merge · label / 进度评论</p>
+          <code class="node__file">webhooks ↕ REST + GraphQL</code>
+        </article>
+      </div>
+    </div>
+
+    <div class="boundary">
+      <span class="btag">平面边界</span>
+      <span class="rule"></span>
+      <div class="dir"><span>↓ webhooks</span><span>↑ REST + GraphQL</span></div>
+      <span class="rule"></span>
+    </div>
+
+    <!-- orchestrator plane -->
+    <div class="plane">
+      <span class="plane-label">Orchestrator daemon <small>= GitHub API 平面 + 编排大脑</small></span>
+
+      <div class="row-label">事件管线 · webhook 秒回，长活交后台</div>
+      <div class="scroll-x">
+        <div class="pipe">
+          <article class="node" data-status="done">
+            <div class="node__top"><span class="node__name">Ingress</span><span class="pill">写实</span></div>
+            <p class="node__role">FastAPI · HMAC 验签 · /webhook · /healthz · 忽略 bot · 202 秒回</p>
+            <code class="node__file">app/ingress.py</code>
+          </article>
+          <span class="arrow" aria-hidden="true">→</span>
+          <article class="node" data-status="done">
+            <div class="node__top"><span class="node__name">Event Router</span><span class="pill">写实</span></div>
+            <p class="node__role">delivery 去重 · 触发授权(allowlist) · 落 review_threads · settle 去抖</p>
+            <code class="node__file">app/router.py</code>
+          </article>
+          <span class="arrow" aria-hidden="true">→</span>
+          <article class="node" data-status="done">
+            <div class="node__top"><span class="node__name">Flow Engine</span><span class="pill">写实</span></div>
+            <p class="node__role">状态机核心 · 全部转移动作 · Judge 判定分流 · 失控闸(max cycles)</p>
+            <code class="node__file">app/engine.py</code>
+          </article>
+        </div>
+      </div>
+
+      <div class="row-label">Engine 协作 · 端口 &amp; 持久化</div>
+      <div class="grid">
+        <article class="node" data-status="done">
+          <div class="node__top"><span class="node__name">Store</span><span class="pill">写实</span></div>
+          <p class="node__role">SQLite · flows / <b>attempts</b> / jobs / events / codex_runs / review_threads · 唯一约束 · 恢复 · runs/review 归属 attempt(§9-2)</p>
+          <code class="node__file">app/store.py</code>
+        </article>
+        <article class="node" data-status="done">
+          <div class="node__top"><span class="node__name">Context Builder</span><span class="pill">写实</span></div>
+          <p class="node__role">最高杠杆 · 首轮 / 修订 prompt · 注入 VCS 指引 + 硬约束 + hunk 定位</p>
+          <code class="node__file">app/context_builder.py</code>
+        </article>
+        <article class="node" data-status="partial">
+          <div class="node__top"><span class="node__name">Judge</span><span class="pill">部分</span></div>
+          <p class="node__role">bub 语义判定 revise/wait/answer/ignore · subprocess 兜底 · 解析失败→wait</p>
+          <code class="node__file">app/judge.py · V2</code>
+        </article>
+        <article class="node" data-status="stub">
+          <div class="node__top"><span class="node__name">GitHub Client</span><span class="pill">桩</span></div>
+          <p class="node__role">githubkit 封装 · PR / 评论 / label / reviewer / GraphQL resolve · installation 解析 NotImplementedError</p>
+          <code class="node__file">app/github_client.py · V1</code>
+        </article>
+      </div>
+
+      <div class="row-label">常驻后台任务</div>
+      <div class="grid">
+        <article class="node" data-status="done">
+          <div class="node__top"><span class="node__name">Worker</span><span class="pill">写实</span></div>
+          <p class="node__role">轮询 jobs 队列 · claim / dispatch → engine.run_job · heartbeat · 启动 recover 悬空 job</p>
+          <code class="node__file">app/worker.py</code>
+        </article>
+        <article class="node" data-status="stub">
+          <div class="node__top"><span class="node__name">Reconciler</span><span class="pill">桩</span></div>
+          <p class="node__role">周期对账兜底 · 补 webhook 漏投 · _sweep() 目前空转</p>
+          <code class="node__file">app/reconcile.py · V1</code>
+        </article>
+      </div>
+    </div>
+
+    <div class="boundary">
+      <span class="btag">平面边界</span>
+      <span class="rule"></span>
+      <div class="dir"><span>engine 调 CodeAgent 端口 ↓</span></div>
+      <span class="rule"></span>
+    </div>
+
+    <!-- local plane -->
+    <div class="plane plane--local">
+      <span class="plane-label">本地平面 <small>= Code Agent (在 Sandbox 内) · 三正交轴 workspace / sandbox / VCS · 不出现裸 git</small></span>
+      <div class="grid">
+        <article class="node" data-status="done">
+          <div class="node__top"><span class="node__name">Codex Driver</span><span class="pill">写实</span></div>
+          <p class="node__role">codex exec / resume 子进程 · JSONL 取 thread_id · --output-schema 解析 CodexResult · 向 Sandbox 要 policy</p>
+          <code class="node__file">app/codex_driver.py · V5/V6</code>
+        </article>
+        <article class="node" data-status="done">
+          <div class="node__top"><span class="node__name">Sandbox 端口</span><span class="pill">写实</span></div>
+          <p class="node__role">可写根 + 网络出口 · 只认路径不认 git/jj · MVP adapter = codex workspace-write · 容器/微VM 后续接管 FS(解 V4)</p>
+          <code class="node__file">ports.Sandbox · app/sandbox.py · V3</code>
+        </article>
+        <article class="node" data-status="partial">
+          <div class="node__top"><span class="node__name">workspace + VCS 指引</span><span class="pill">部分</span></div>
+          <p class="node__role">普通函数(非端口) · make_workspace(VCS-无关拷贝) / cleanup · detect_vcs_kind + agent_guidance(git/jj)</p>
+          <code class="node__file">app/vcs.py · V8</code>
+        </article>
+        <article class="node" data-status="artifact">
+          <div class="node__top"><span class="node__name">工作区 (每 flow)</span></div>
+          <p class="node__role">VCS-无关的目录拷贝 · codex 在此改码 + commit + push（依 VCS 指引，本地平面自己做）</p>
+          <code class="node__file">~/.flowtool/repos/&lt;owner&gt;/&lt;repo&gt;--flow-issue-N</code>
+        </article>
+      </div>
+    </div>
+
+    <div class="boundary">
+      <span class="btag">外围 · 运维 &amp; 扩展</span>
+      <span class="rule"></span>
+    </div>
+
+    <div class="plane plane--edge">
+      <span class="plane-label">外围 <small>CLI · 插件</small></span>
+      <div class="grid">
+        <article class="node" data-status="done">
+          <div class="node__top"><span class="node__name">CLI</span><span class="pill">写实</span></div>
+          <p class="node__role">typer · serve(uvicorn) / flows / flow show / cancel / retry</p>
+          <code class="node__file">app/cli.py</code>
+        </article>
+        <article class="node" data-status="partial">
+          <div class="node__top"><span class="node__name">Plugins</span><span class="pill">部分</span></div>
+          <p class="node__role">pluggy hookspecs + 示例 post-merge-summary · engine 五个转移点已触发 hook · 示例插件体仍是桩</p>
+          <code class="node__file">app/plugins/ · 已接线</code>
+        </article>
+      </div>
+    </div>
+
+    <div class="boundary">
+      <span class="btag">架构预留 · 将来</span>
+      <span class="rule"></span>
+      <div class="dir"><span>换 adapter / 挂插件 · 不动 core</span></div>
+      <span class="rule"></span>
+    </div>
+
+    <!-- future modules plane -->
+    <div class="plane plane--future">
+      <span class="plane-label">将来的模块 <small>ports 已留好接缝 · roadmap §9</small></span>
+      <div class="grid">
+        <article class="node" data-status="future">
+          <div class="node__top"><span class="node__name">Web 控制台 (Kanban)</span><span class="pill">未排期</span></div>
+          <p class="node__role">webapp 看板,每张卡 = 一条被追踪的对话,可点进去实时插话。与 GitHub 并列的第二入口 adapter（≠ M4 的 GitHub Projects 看板）</p>
+          <span class="port-tag">预留 · core→store+API 层 · Driver 留实时注入入口</span>
+        </article>
+        <article class="node" data-status="future">
+          <div class="node__top"><span class="node__name">多 agent / 多方案分支</span><span class="pill">数据接缝已就位</span></div>
+          <p class="node__role">数据模型已解锁 1:1:attempts 表 · flows→attempts→runs 一对多 · review 归属 attempt · current_attempt_id。待做:真正并行起多 attempt + 择优</p>
+          <span class="port-tag">app/models.Attempt · store.attempts · §9-2</span>
+        </article>
+        <article class="node" data-status="future">
+          <div class="node__top"><span class="node__name">CodeAgent 标准接口</span><span class="pill">端口已立</span></div>
+          <p class="node__role">统一 code agent 端口（start / resume / inject / 收产物）。codex 是首个 adapter,后续接 Claude Code 等</p>
+          <span class="port-tag">port · ports.CodeAgent</span>
+        </article>
+        <article class="node" data-status="future">
+          <div class="node__top"><span class="node__name">Sandbox 容器 / 微VM adapter</span><span class="pill">M5</span></div>
+          <p class="node__role">端口已在(M0,workspace-write) · 后续换容器/微VM adapter：接管整个工作区 FS + 网络,git/jj 差别塌成指引文本(解 V4)</p>
+          <span class="port-tag">port · ports.Sandbox(已立) · adapter 对应 M5</span>
+        </article>
+        <article class="node" data-status="future">
+          <div class="node__top"><span class="node__name">JobDispatch · 控制/执行面分离</span><span class="pill">端口已立</span></div>
+          <p class="node__role">webapp+webhook 入口与 code agent 分机部署、调度 job。进程内 → 队列 + 远程 worker</p>
+          <span class="port-tag">port · ports.JobDispatch</span>
+        </article>
+        <article class="node" data-status="future">
+          <div class="node__top"><span class="node__name">插件生态</span><span class="pill">hook 已接线</span></div>
+          <p class="node__role">五个生命周期 hook（flow_start / pr_opened / review / merged / archived）engine 已实际触发。留待扩展:更丰富的插件(示例合并后总结仍是桩)</p>
+          <span class="port-tag">app/plugins/ · pluggy · 已接线</span>
+        </article>
+      </div>
+    </div>
+
+  </div><!-- /diagram -->
+
+  <!-- roadmap milestone timeline -->
+  <section class="block">
+    <h2>Roadmap · 里程碑 <span style="font-family:var(--mono);font-size:11px;color:var(--ink-soft);font-weight:400">当前在 M0 · M1–M5 均为将来</span></h2>
+    <p class="sub">端口(ports)现在就立好,后续扩展一律「换 adapter / 挂插件」,不动 core</p>
+    <div class="scroll-x">
+      <div class="track">
+        <article class="ms ms--now">
+          <div class="ms__head"><span class="ms__id">M0</span><span class="ms__tag">进行中</span></div>
+          <div class="ms__title">骨架 &amp; 崩溃恢复</div>
+          <ul class="ms__list">
+            <li>webhook 验签 · SQLite(jobs)</li>
+            <li>配置 · worker / recover 骨架</li>
+            <li><b>缺:</b> tests · 从没跑通</li>
+          </ul>
+        </article>
+        <span class="arrow" aria-hidden="true">→</span>
+        <article class="ms ms--future">
+          <div class="ms__head"><span class="ms__id">M1</span><span class="ms__tag">将来</span></div>
+          <div class="ms__title">首轮 happy path</div>
+          <ul class="ms__list">
+            <li>触发(allowlist) → worktree</li>
+            <li>codex 首轮 → 开 PR</li>
+            <li>单 flow 打通</li>
+          </ul>
+        </article>
+        <span class="arrow" aria-hidden="true">→</span>
+        <article class="ms ms--future">
+          <div class="ms__head"><span class="ms__id">M2</span><span class="ms__tag">将来</span></div>
+          <div class="ms__title">回喂循环</div>
+          <ul class="ms__list">
+            <li>语义 Triage(bub) 门</li>
+            <li>settle → revise/answer/wait</li>
+            <li>resume/兜底 · 自动 resolve</li>
+          </ul>
+        </article>
+        <span class="arrow" aria-hidden="true">→</span>
+        <article class="ms ms--future">
+          <div class="ms__head"><span class="ms__id">M3</span><span class="ms__tag">将来</span></div>
+          <div class="ms__title">合并归档</div>
+          <ul class="ms__list">
+            <li>人工合并检测</li>
+            <li>pull_request.closed → 归档</li>
+            <li>状态标签 / 评论</li>
+          </ul>
+        </article>
+        <span class="arrow" aria-hidden="true">→</span>
+        <article class="ms ms--future">
+          <div class="ms__head"><span class="ms__id">M4</span><span class="ms__tag">将来</span></div>
+          <div class="ms__title">规模化</div>
+          <ul class="ms__list">
+            <li>多 flow 并发</li>
+            <li>reconcile 对账</li>
+            <li>GitHub Projects 看板 · 错误恢复</li>
+          </ul>
+        </article>
+        <span class="arrow" aria-hidden="true">→</span>
+        <article class="ms ms--future">
+          <div class="ms__head"><span class="ms__id">M5</span><span class="ms__tag">将来</span></div>
+          <div class="ms__title">加固 &amp; 部署</div>
+          <ul class="ms__list">
+            <li>容器化 codex 隔离</li>
+            <li>公网 / 隧道部署</li>
+            <li>admin CLI</li>
+          </ul>
+        </article>
+        <span class="arrow" aria-hidden="true">⇢</span>
+        <article class="ms ms--future" style="--mc:var(--stub)">
+          <div class="ms__head"><span class="ms__id">◇</span><span class="ms__tag">未排期</span></div>
+          <div class="ms__title">Web 控制台 (Kanban)</div>
+          <ul class="ms__list">
+            <li>自建 webapp 看板</li>
+            <li>第二入口 adapter · 可实时插话</li>
+            <li>post-MVP · roadmap §9-1</li>
+          </ul>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <!-- state machine -->
+  <section class="block">
+    <h2>Flow 状态机 <span style="font-family:var(--mono);font-size:11px;color:var(--ink-soft);font-weight:400">app/engine.py · 全写实</span></h2>
+    <p class="sub">每个 issue 一台状态机 · 单 flow 内事件串行,多 flow 并行</p>
+    <div class="fsm">
+      <span class="state">PENDING</span>
+      <span class="to">→</span>
+      <span class="state mid">CODING</span>
+      <span class="to">→</span>
+      <span class="state mid">PR_OPEN</span>
+      <span class="to">⇄</span>
+      <span class="state mid">REVISING</span>
+      <span class="to">→</span>
+      <span class="state">MERGED</span>
+      <span class="to">→</span>
+      <span class="state">ARCHIVED</span>
+      <span class="brk"></span>
+      <span class="cap">任意态 →</span>
+      <span class="state term">CANCELLED</span>
+      <span class="cap">去 flow 标 / <code style="font-family:var(--mono)">/flow stop</code></span>
+      <span class="cap" style="margin-left:8px">任意态 →</span>
+      <span class="state term">FAILED</span>
+      <span class="cap">codex 报错 / 超最大修订轮</span>
+    </div>
+  </section>
+
+  <!-- M0 acceptance gap -->
+  <div class="callout">
+    <h3>⚠ 离 M0 验收(§9)还差的</h3>
+    <ul>
+      <li><b>没有 <code>tests/</code></b> —— HMAC / 建表 / 契约三个 smoke test 一个都没有,<code>pytest</code> 无法绿。</li>
+      <li><b>从没跑过</b> —— 无 <code>.venv</code>;<code>uv sync</code> / <code>flowtool serve</code> / <code>GET /healthz</code> / 伪造 webhook 都未实际验证。</li>
+      <li><b>示例插件体仍是桩</b> —— hook 已接线（engine 五个转移点触发 <code>on_flow_start/pr_opened/review/merged/archived</code>），但 <code>post-merge-summary</code> 只打日志,尚未真正提炼风格 / 提 PR。</li>
+    </ul>
+  </div>
+
+  <footer>
+    <span>FlowTool · M0 脚手架 · 状态截至 2026-08-02</span>
+    <span>docs/ARCHITECTURE.md · docs/M0-PLAN.md</span>
+  </footer>
+
+</div>
+
+<script>
+  (function(){
+    var root=document.documentElement;
+    var mq=window.matchMedia("(prefers-color-scheme: dark)");
+    var ico=document.getElementById("theme-ico"), txt=document.getElementById("theme-txt");
+    function cur(){ return root.getAttribute("data-theme") || (mq.matches?"dark":"light"); }
+    function paint(){ var d=cur()==="dark"; ico.textContent=d?"☾":"☀"; txt.textContent=d?"暗色":"亮色"; }
+    document.getElementById("theme").addEventListener("click",function(){
+      root.setAttribute("data-theme", cur()==="dark"?"light":"dark"); paint();
+    });
+    mq.addEventListener&&mq.addEventListener("change",paint);
+    paint();
+
+    // status filter (multi-select)
+    var active=new Set();
+    var nodes=document.querySelectorAll(".node[data-status]");
+    document.querySelectorAll(".key[data-filter]").forEach(function(btn){
+      btn.addEventListener("click",function(){
+        var f=btn.dataset.filter;
+        if(active.has(f)){active.delete(f); btn.setAttribute("aria-pressed","false");}
+        else{active.add(f); btn.setAttribute("aria-pressed","true");}
+        var on=active.size>0;
+        nodes.forEach(function(n){
+          var s=n.dataset.status;
+          if(s==="artifact"){ n.classList.toggle("dimmed", on); return; }
+          n.classList.toggle("dimmed", on && !active.has(s));
+        });
+      });
+    });
+  })();
+</script>
+
+</body>
+</html>

@@ -1,0 +1,48 @@
+[project]
+name = "flowtool"
+version = "0.0.1"
+description = "Headless orchestrator: GitHub issues labeled `flow` -> code agent (codex) -> PR -> review loop -> manual merge -> archive."
+requires-python = ">=3.12"
+readme = "README.md"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "githubkit>=0.11",       # GitHub App auth + webhooks; TODO(verify) exact API surface
+    "bub>=0.3.9",            # Judge adapter; TODO(verify) pin (bub is pre-0.4)
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "pluggy>=1.5",           # plugin hooks
+    "typer>=0.12",
+    "httpx>=0.27",
+    "loguru>=0.7",
+]
+
+[project.scripts]
+flowtool = "app.cli:app"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true

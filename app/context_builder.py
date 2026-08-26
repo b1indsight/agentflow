@@ -1,0 +1,63 @@
+"""Context Builder：首轮 / 修订 prompt 构建。ARCHITECTURE §4.9、附录 B.4。
+
+最高杠杆的组件——工具效果上限压在这里。写实（纯字符串组装）。
+TODO(verify) V8：注入的 VCS 指引（尤其 jj）对 codex 的实际效果。
+"""
+
+from __future__ import annotations
+
+from app.models import ReviewItem
+
+# 硬约束：codex 只碰本地 VCS，不碰 GitHub API（平面边界 §3）
+_HARD_CONSTRAINTS = (
+    "Rules:\n"
+    "- Edit code to satisfy the task, then commit locally and push using this repo's VCS "
+    "(see VCS guidance below).\n"
+    "- Do NOT open a pull request or post comments — the orchestrator handles GitHub.\n"
+    "- Run the repo's tests / lint if present and keep them green.\n"
+)
+
+# 修订轮要 codex 回的结构化产出（--output-schema 对应 models.CodexResult）
+_OUTPUT_INSTRUCTION = (
+    "When done, output a JSON object with keys: summary (string), "
+    "addressed (list of {comment_id, note}), deferred (list of {comment_id, reason}), "
+    "needs_clarification (list of string)."
+)
+
+
+def build_initial_prompt(
+    issue_title: str, issue_body: str, repo_conventions: str, vcs_guidance: str
+) -> str:
+    parts = [
+        f"# Task (from GitHub issue)\n## {issue_title}\n\n{issue_body}\n",
+        f"# Repo conventions\n{repo_conventions or '(none provided)'}\n",
+        f"# VCS guidance\n{vcs_guidance}\n",
+        _HARD_CONSTRAINTS,
+    ]
+    return "\n".join(parts)
+
+
+def _format_item(item: ReviewItem) -> str:
+    if item.kind.value == "inline" and item.diff_hunk:
+        # 按内容定位，避开行号漂移（附录 B.4）
+        return (
+            f"- [comment_id={item.github_id}] file `{item.path}` "
+            f"(at commit {item.original_commit_id}):\n"
+            f"```diff\n{item.diff_hunk}\n```\n"
+            f"  {item.author} says: {item.body}"
+        )
+    return f"- [comment_id={item.github_id}] {item.author} says: {item.body}"
+
+
+def build_revision_prompt(
+    instruction: str, items: list[ReviewItem], vcs_guidance: str
+) -> str:
+    feedback = "\n".join(_format_item(i) for i in items) or "(no inline items)"
+    parts = [
+        f"# Revision instruction (synthesized from review)\n{instruction}\n",
+        f"# Review feedback\n{feedback}\n",
+        f"# VCS guidance\n{vcs_guidance}\n",
+        _HARD_CONSTRAINTS,
+        _OUTPUT_INSTRUCTION,
+    ]
+    return "\n".join(parts)
