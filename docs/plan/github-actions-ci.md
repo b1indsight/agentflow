@@ -1,6 +1,6 @@
 # GitHub Actions CI 计划
 
-> 状态：待批准 · 日期：2026-08-27。
+> 状态：已实施并验证 · 日期：2026-08-27。
 > 首版只自动化 Ruff、Mypy、pytest 与 Python 分发包构建，不包含发布或部署。
 
 ## 1. 背景与目标
@@ -78,3 +78,22 @@ CI 不访问 GitHub App、Codex 或 bub，不使用真实凭据，也不启动�
 
 若 GitHub Actions 环境无法稳定运行，回退只需移除该 workflow 及对应 README 说明，不影响应用代码、
 数据库或本地开发命令。
+
+## 7. 实施结果
+
+实现与批准范围一致，没有加入发布、部署、格式检查、覆盖率或版本矩阵。四个检查通过一个
+`fail-fast: false` 的静态矩阵生成独立并行 job，共享相同的安全 checkout、uv/Python 安装和缓存配置，
+避免复制四份准备步骤；这不改变计划要求的独立检查结果与失败隔离。
+
+本地验证结果：
+
+- workflow 通过 YAML 语法解析，action 固定为 `actions/checkout` v7.0.1 与 `astral-sh/setup-uv`
+  v10.0.1 的完整 commit SHA；
+- `uv sync --locked --dev`、Ruff 和 Mypy 通过；
+- pytest 在本地 Python 3.13.12 环境收集并通过 19 项测试；
+- `uv build --no-sources` 在临时目录生成 `flowtool-0.0.1.tar.gz` 与
+  `flowtool-0.0.1-py3-none-any.whl`，工作树没有构建产物。
+
+草稿 PR 的首次真实运行（Actions run `33061311196`）在 GitHub 托管的 Python 3.12 runner 上通过
+全部四项 checks：Build 11 秒、Ruff 14 秒、pytest 20 秒、Mypy 44 秒。workflow 的 concurrency key
+按 PR 编号或 ref 分组，且 `cancel-in-progress: true`，新提交会取消同一分组中已被取代的运行。
