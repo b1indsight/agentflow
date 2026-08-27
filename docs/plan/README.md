@@ -5,9 +5,11 @@
 
 ## 当前计划
 
-- [`documentation-refresh.md`](documentation-refresh.md) — 项目文档目录化与完整同步，已实施、待合并。
+- [`github-actions-ci.md`](github-actions-ci.md) — Ruff、Mypy、pytest 与 uv build 的首版 GitHub Actions CI，待批准。
 
 ## 已完成计划
 
+- [`documentation-refresh.md`](documentation-refresh.md) — 项目文档目录化与完整同步，已实施；
+- [`../UV-BUILD-MIGRATION-PLAN.md`](../UV-BUILD-MIGRATION-PLAN.md) — 构建后端迁移到 `uv_build`，已实施；
 - [`m0.md`](m0.md) — M0 落地计划，已验收；
 - [`m0-closeout.md`](m0-closeout.md) — M0 收尾与验收计划，已实施。
