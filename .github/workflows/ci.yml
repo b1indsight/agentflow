@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_VERSION: "0.11.3"
+
+jobs:
+  checks:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: ruff
+            name: Ruff
+          - id: mypy
+            name: Mypy
+          - id: pytest
+            name: pytest
+          - id: build
+            name: Build
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install locked dependencies
+        if: matrix.id != 'build'
+        run: uv sync --locked --dev
+
+      - name: Run Ruff
+        if: matrix.id == 'ruff'
+        run: uv run ruff check app tests
+
+      - name: Run Mypy
+        if: matrix.id == 'mypy'
+        run: uv run mypy app tests
+
+      - name: Run pytest
+        if: matrix.id == 'pytest'
+        run: uv run pytest
+
+      - name: Build distributions
+        if: matrix.id == 'build'
+        run: uv build --no-sources

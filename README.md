@@ -67,8 +67,12 @@ uv run flowtool flow retry <FLOW_ID>
 uv run pytest
 uv run ruff check app tests
 uv run mypy app tests
+uv build --no-sources
 uv run flowtool --help
 ```
+
+[GitHub Actions CI](.github/workflows/ci.yml) 会在 pull request、推送到 `main` 和手动触发时，使用
+Python 3.12 分别运行 Ruff、Mypy、pytest 与 sdist/wheel 构建；四项检查并行执行且独立报告结果。
 
 截至 2026-08-26，19 项自动化测试覆盖配置/契约、SQLite、HMAC、health、异步交接、delivery 去重、
 allowlist、取消与 review 路由，以及 worker dispatch、失败、heartbeat 清理/重试和启动恢复；测试隔离
