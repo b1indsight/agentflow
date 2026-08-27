@@ -1,4 +1,4 @@
-"""插件层（pluggy）。ARCHITECTURE §9-7。
+"""插件层（pluggy）。见 docs/architecture/roadmap.md §9-7。
 
 core 在生命周期端口触发 hook，插件订阅。示例：合并后总结插件。
 """

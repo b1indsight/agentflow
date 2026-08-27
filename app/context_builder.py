@@ -1,4 +1,6 @@
-"""Context Builder：首轮 / 修订 prompt 构建。ARCHITECTURE §4.9、附录 B.4。
+"""Context Builder：首轮 / 修订 prompt 构建。
+
+见 docs/architecture/components.md §4.9、review-loop.md §B.4。
 
 最高杠杆的组件——工具效果上限压在这里。写实（纯字符串组装）。
 TODO(verify) V8：注入的 VCS 指引（尤其 jj）对 codex 的实际效果。
@@ -39,7 +41,7 @@ def build_initial_prompt(
 
 def _format_item(item: ReviewItem) -> str:
     if item.kind.value == "inline" and item.diff_hunk:
-        # 按内容定位，避开行号漂移（附录 B.4）
+        # 按内容定位，避开行号漂移（docs/architecture/review-loop.md §B.4）
         return (
             f"- [comment_id={item.github_id}] file `{item.path}` "
             f"(at commit {item.original_commit_id}):\n"

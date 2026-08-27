@@ -1,4 +1,4 @@
-"""配置：pydantic-settings，env 前缀 FLOWTOOL_。见 M0-PLAN §3。"""
+"""配置：pydantic-settings，env 前缀 FLOWTOOL_。见 docs/plan/m0.md §3。"""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ class Settings(BaseSettings):
         env_prefix="FLOWTOOL_", env_file=".env", env_file_encoding="utf-8", extra="ignore"
     )
 
-    # GitHub App（ARCHITECTURE 附录 A）
+    # GitHub App（docs/architecture/github-app.md）
     github_app_id: int = 0
     github_private_key_path: Path = Path("./flowtool-app.private-key.pem")
     github_webhook_secret: str = ""
@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     repos_root: Path = Path("~/.flowtool/repos")
     db_path: Path = Path("~/.flowtool/flowtool.sqlite3")
 
-    # 修订循环（附录 B.7）
+    # 修订循环（docs/architecture/review-loop.md §B.7）
     settle_seconds: float = 75.0
     submit_grace_seconds: float = 15.0
     confidence_threshold: float = 0.6

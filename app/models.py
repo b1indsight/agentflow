@@ -1,6 +1,6 @@
 """领域模型：枚举、内部 dataclass、跨模型 JSON 契约。
 
-见 M0-PLAN §4 / ARCHITECTURE §4.7、附录 B。
+见 docs/plan/m0.md §4、docs/architecture/components.md §4.7 与 review-loop.md。
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ TERMINAL_STATES = frozenset({FlowState.ARCHIVED, FlowState.CANCELLED, FlowState.
 
 class JobKind(StrEnum):
     INITIAL = "initial"      # 首轮编码
-    TRIAGE = "triage"        # settle 后语义判定（附录 B）：revise/answer/wait/ignore
+    TRIAGE = "triage"  # settle 后判定（docs/architecture/review-loop.md）：revise/answer/wait/ignore
     REVISION = "revision"    # 修订
     ANSWER = "answer"        # Judge=answer，只作答不改码
     ARCHIVE = "archive"      # 收尾归档
@@ -165,7 +165,7 @@ class AgentRun:
 
 
 class TriageVerdict(BaseModel):
-    """Judge（bub）的语义判定产出。附录 B.2。"""
+    """Judge（bub）的语义判定产出。见 docs/architecture/review-loop.md §B.2。"""
 
     verdict: Verdict
     confidence: float = 0.0
@@ -186,7 +186,7 @@ class DeferredComment(BaseModel):
 
 
 class CodexResult(BaseModel):
-    """codex 修订 run 的结构化产出（--output-schema）。附录 B.4。"""
+    """codex 修订 run 的结构化产出。见 docs/architecture/review-loop.md §B.4。"""
 
     summary: str = ""
     addressed: list[AddressedComment] = []

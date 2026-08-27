@@ -1,4 +1,4 @@
-"""示例插件：合并后总结（post-merge-summary）。ARCHITECTURE §9-7。
+"""示例插件：合并后总结（post-merge-summary）。见 docs/architecture/roadmap.md §9-7。
 
 归纳上一段对话里的代码风格偏好、更新仓库的 skill 文件。
 M0：桩 + TODO(verify)。

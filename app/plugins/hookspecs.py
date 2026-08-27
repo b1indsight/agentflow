@@ -1,4 +1,4 @@
-"""生命周期 hook 定义（pluggy hookspecs）。ARCHITECTURE §9-7。"""
+"""生命周期 hook 定义（pluggy hookspecs）。见 docs/architecture/roadmap.md §9-7。"""
 
 from __future__ import annotations
 

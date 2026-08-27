@@ -1,4 +1,6 @@
-"""对账 poller：补 webhook 漏投。ARCHITECTURE §4.2 / §10-2。
+"""对账 poller：补 webhook 漏投。
+
+见 docs/architecture/components.md §4.2、docs/architecture/decisions.md §10-2。
 
 webhook 为主、周期轮询兜底：启动时 + 定期，把 open flows 从 GitHub 重新同步
 （新 review？PR 是否已被合并？）。

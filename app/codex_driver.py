@@ -1,4 +1,4 @@
-"""CodeAgent 适配器：codex CLI。ARCHITECTURE §4.4 / §4.6。
+"""CodeAgent 适配器：codex CLI。见 docs/architecture/components.md §4.4 / §4.6。
 
 已实测的调用形态（写实）：
   起始：codex exec <PROMPT> --json -C <ws> -s workspace-write --skip-git-repo-check

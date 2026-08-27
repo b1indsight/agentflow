@@ -1,4 +1,4 @@
-"""SQLite 持久层：DDL + 仓储。见 M0-PLAN §4。
+"""SQLite 持久层：DDL + 仓储。见 docs/plan/m0.md §4。
 
 TODO(verify) V7：M0 用 stdlib sqlite3（同步）。FastAPI 是 async，若并发写吃紧
 再换 aiosqlite 或 asyncio.to_thread 包装。当前操作都很短，直接同步调用。

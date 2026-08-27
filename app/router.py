@@ -1,4 +1,6 @@
-"""事件路由：去重、忽略 bot、触发授权、落反馈、settle 去抖。ARCHITECTURE §4.2、附录 B.1。
+"""事件路由：去重、忽略 bot、触发授权、落反馈、settle 去抖。
+
+见 docs/architecture/components.md §4.2、review-loop.md §B.1。
 
 webhook 秒回，长活交给 worker / settle 定时器。
 """
@@ -26,10 +28,11 @@ class FlowEventHandler(Protocol):
 
 
 class SettleScheduler:
-    """每 flow 一个去抖定时器：安静 settle 秒后入队一个 TRIAGE job（附录 B）。
+    """每 flow 一个去抖定时器：安静 settle 秒后入队一个 TRIAGE job。
 
     去抖在内存里做（等会话停顿），真正的判定交给 worker——TRIAGE 也走 jobs 表，
     和 initial/revision/answer/archive 一样享受心跳 + 崩溃恢复，不再直接调 engine。
+    见 docs/architecture/review-loop.md。
     """
 
     def __init__(self, store: Store) -> None:
@@ -63,7 +66,7 @@ class EventRouter:
         self.settle = SettleScheduler(store)
 
     async def handle(self, event_type: str, delivery_id: str, payload: dict) -> None:
-        # 忽略 bot 自己的事件（附录 B.1）
+        # 忽略 bot 自己的事件（docs/architecture/review-loop.md §B.1）
         sender = (payload.get("sender") or {}).get("login", "")
         if sender == self.settings.bot_login:
             return
@@ -124,7 +127,7 @@ class EventRouter:
         if not flow:
             return
         if state == "approved":
-            return  # 合并侧信号，人工网页合并（附录 B.1）
+            return  # 合并侧信号，人工网页合并（docs/architecture/review-loop.md §B.1）
         if review.get("body"):
             self._record_feedback(flow, ReviewItemKind.REVIEW_BODY, review)
         # submit 是「这批说完了」的强信号 → 缩短到 grace

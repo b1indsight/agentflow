@@ -1,4 +1,6 @@
-"""Judge 适配器：bub（小型语义判定 agent）。ARCHITECTURE §4.10、附录 B。
+"""Judge 适配器：bub（小型语义判定 agent）。
+
+见 docs/architecture/components.md §4.10、review-loop.md。
 
 用法：把 PR 讨论快照喂给 bub，让它判定 revise/wait/answer/ignore 并综合出 instruction。
 
@@ -49,7 +51,7 @@ class BubJudge:
             return TriageVerdict.model_validate(data)
         except Exception as e:  # noqa: BLE001
             logger.warning("judge parse failed ({}); defaulting to wait. raw={}", e, raw[:200])
-            # 保守默认：解析不了就 wait（附录 B.3）
+            # 保守默认：解析不了就 wait（docs/architecture/review-loop.md §B.3）
             return TriageVerdict(verdict=Verdict.WAIT, confidence=0.0, reason="parse-failed")
 
     async def answer(self, question: str, pr_context: str) -> str:

@@ -1,0 +1,13 @@
+# 计划文档
+
+本目录保存功能与非小改动的计划、审批状态和实施结果。计划是决策记录，不代替 README 或架构文档
+中的当前事实。
+
+## 当前计划
+
+- [`documentation-refresh.md`](documentation-refresh.md) — 项目文档目录化与完整同步，已实施、待合并。
+
+## 已完成计划
+
+- [`m0.md`](m0.md) — M0 落地计划，已验收；
+- [`m0-closeout.md`](m0-closeout.md) — M0 收尾与验收计划，已实施。

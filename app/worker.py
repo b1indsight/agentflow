@@ -1,4 +1,6 @@
-"""Job 队列消费 + 崩溃恢复。ARCHITECTURE §4.2 / §10-1。
+"""Job 队列消费 + 崩溃恢复。
+
+见 docs/architecture/components.md §4.2、decisions.md §10-1。
 
 MVP：进程内单 worker，轮询 jobs 表。启动时 recover 悬空 job。
 这是 §9-6 JobDispatch 端口的种子（日后换队列 + 远程 worker）。
