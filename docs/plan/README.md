@@ -5,7 +5,7 @@
 
 ## 当前计划
 
-暂无。
+- [`postgresql-store.md`](postgresql-store.md) — 以 PostgreSQL 替换 SQLite，保持现有单进程编排结构不变，待批准；
 
 ## 已完成计划
 
