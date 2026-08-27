@@ -1,6 +1,6 @@
 # uv_build 迁移计划
 
-> 状态：待批准 · 日期：2026-08-27。
+> 状态：已实施并验证 · 日期：2026-08-27。
 > 本计划只迁移 Python 构建后端，不改变运行时依赖、CLI、源码包名或部署方式。
 
 ## 1. 背景与目标
@@ -80,3 +80,20 @@ FlowTool 已使用 uv 管理依赖、虚拟环境和常用开发命令，但构�
 
 若迁移无法生成与当前 Hatchling 等价的可安装产物，回退仅需恢复原 `[build-system]` 和
 `[tool.hatch.build.targets.wheel]`，不涉及应用代码或数据迁移。
+
+## 7. 实施结果
+
+迁移按批准方案完成，没有改变运行时依赖、源码布局或 CLI。`uv.lock` 经 `uv lock --check` 确认仍然
+有效，无需更新。
+
+验证结果：
+
+- `uv build --no-sources` 成功生成 sdist 和 `py3-none-any` wheel；
+- wheel 保留全部 20 个 Python 模块、项目元数据和 `flowtool = app.cli:app` console-script；
+- wheel 在临时 Python 3.12 环境安装后，可从源码 checkout 外运行 `flowtool --help`；
+- sdist 只包含构建所需元数据、README 和 `app` 源码，不再包含旧 Hatchling 产物意外带入的
+  `.jj` 内部数据、开发 skill、测试、锁文件和环境配置示例；
+- `uv sync --locked`、19 个 pytest 测试、Ruff 和 Mypy 全部通过。
+
+文档影响与计划一致：现有 README 命令和架构描述仍然准确，无需修改其他当前事实文档。未来首次
+引入 Rust 扩展时仍按计划将构建后端切换为 Maturin。
