@@ -70,10 +70,9 @@ class EventRouter:
         sender = (payload.get("sender") or {}).get("login", "")
         if sender == self.settings.bot_login:
             return
-        # 幂等
-        if self.store.event_seen(delivery_id):
+        # 原子占有 delivery；只有插入成功的 handler 才能继续副作用。
+        if not self.store.record_event(delivery_id, event_type, None, payload):
             return
-        self.store.record_event(delivery_id, event_type, None, payload)
 
         handler = {
             "issues": self._on_issues,

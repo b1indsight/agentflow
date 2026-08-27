@@ -1,6 +1,6 @@
 # PostgreSQL 持久层替换计划
 
-> 状态：待批准 · 日期：2026-08-27 · 基线：`main@origin` (`96ee4e9a`)
+> 状态：已实施并验证 · 计划日期：2026-08-27 · 验证日期：2026-08-28 · 基线：`main@origin` (`96ee4e9a`)
 >
 > 本次只替换数据库，不实施控制面/worker 分离或重做聊天模型。实施前需在 draft PR 上获得明确批准。
 
@@ -117,7 +117,25 @@ SQLite 的事实，不改写历史，只在当前事实文档和本计划中记�
 
 若实现无法稳定替换，回退本子 change 即恢复原 SQLite 代码和配置；计划 change 仍保留为决策记录。
 
-## 7. 参考依据
+## 7. 实施结果
+
+- PostgreSQL 已成为唯一运行时持久层；配置改为 `FLOWTOOL_DATABASE_URL`，Store 使用同步 Psycopg 3
+  连接池，并用 PostgreSQL 原生 schema、JSONB、带时区时间和 identity 主键承载原有六张表。
+- job claim 使用单条 `FOR UPDATE SKIP LOCKED` CTE 更新；delivery 去重使用
+  `INSERT ... ON CONFLICT DO NOTHING RETURNING` 原子占有。两个独立 Store 的共享可见性、并发 claim
+  和 delivery 去重均有集成测试。
+- 增加 `compose.yaml`、PostgreSQL 环境变量示例和 CI service。GitHub Actions run
+  [33150010124](https://github.com/b1indsight/agentflow/actions/runs/33150010124) 在 PostgreSQL 17.11 上
+  通过 23 项 pytest（3.01 秒、无警告），随后启动真实 `flowtool serve`，`/healthz` 返回 200；Ruff、Mypy 和
+  Build checks 同时通过。
+- 按用户要求，本机没有启动或连接 PostgreSQL。本机 pytest 收集 23 项，其中 6 项非数据库测试通过，
+  17 项依赖 `FLOWTOOL_TEST_DATABASE_URL` 的集成测试按预期跳过；本机 Ruff、Mypy、构建、锁文件、CLI
+  和文档格式检查通过。真实数据库验收由上述 CI 完成。
+- 与计划相比没有扩大架构范围：控制面/worker 仍未拆分，Store 仍为同步接口，daemon 仍在启动时以
+  schema owner 身份幂等初始化表，且没有引入迁移框架、worker lease/fencing 或 SQLite 数据导入工具。
+  测试隔离实现采用每个 fixture 创建独立 PostgreSQL schema，而不是清空共享表，隔离目标不变。
+
+## 8. 参考依据
 
 - PostgreSQL 文档将 `SKIP LOCKED` 明确列为适合多个消费者访问 queue-like table 时避免锁竞争的机制：
   <https://www.postgresql.org/docs/current/sql-select.html#SQL-FOR-UPDATE-SHARE>

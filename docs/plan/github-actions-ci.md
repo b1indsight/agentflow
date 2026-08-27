@@ -97,3 +97,9 @@ CI 不访问 GitHub App、Codex 或 bub，不使用真实凭据，也不启动�
 草稿 PR 的首次真实运行（Actions run `33061311196`）在 GitHub 托管的 Python 3.12 runner 上通过
 全部四项 checks：Build 11 秒、Ruff 14 秒、pytest 20 秒、Mypy 44 秒。workflow 的 concurrency key
 按 PR 编号或 ref 分组，且 `cancel-in-progress: true`，新提交会取消同一分组中已被取代的运行。
+
+## 8. 后续变更
+
+2026-08-27 的 PostgreSQL 持久层替换保留了相同的四项 checks，但把 pytest 从静态 matrix 中拆为
+独立 job，以便只给测试启动 PostgreSQL service；Ruff、Mypy 和 Build 仍共享原 matrix。该调整属于
+[`postgresql-store.md`](postgresql-store.md) 的验证环境，不改变本计划首版 CI 的门禁范围。

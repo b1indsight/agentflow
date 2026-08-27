@@ -10,7 +10,7 @@ issue / PR；Web 控制台只属于未来路线图。
 为准。
 
 已定基调：**Python** · **Webhook 驱动的常驻进程** · **headless** · **本地 checkout 跑 Codex** ·
-**SQLite 持久化**。
+**PostgreSQL 持久化**。
 
 ## 2. 运行形态
 
@@ -36,7 +36,7 @@ M0 只验证了本机 daemon 启动和 `/healthz`；公网入口、真实 Webhoo
  │  [Webhook Ingress] → [Event Router] → [Flow Engine]│
  │   FastAPI / HMAC      去重 / 定位 flow   状态机     │
  │                              │            │        │
- │                    [Worker + SQLite]      ├── GitHub Client
+ │                  [Worker + PostgreSQL]    ├── GitHub Client
  │                              │            └── Judge
  └──────────────────────────────┼─────────────────────┘
                                 ▼

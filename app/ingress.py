@@ -63,7 +63,7 @@ class App:
     def __init__(self) -> None:
         s = get_settings()
         self.settings = s
-        self.store = Store(s.db_path)
+        self.store = Store(s.database_url)
         self.engine = FlowEngine(self.store, CodexAgent(), BubJudge(), GitHubApp())
         self.router = EventRouter(self.store, self.engine)
         self.worker = Worker(self.store, self.engine)

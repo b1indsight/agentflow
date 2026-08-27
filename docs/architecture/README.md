@@ -1,7 +1,7 @@
 # FlowTool 架构文档
 
 > 状态：M0 已验收、M1+ 仍为目标设计 · 初始日期：2026-08-02 · M0 验收：2026-08-26 ·
-> 文档核对：2026-08-27。
+> 文档核对：2026-08-28。
 
 本目录是 FlowTool 架构的唯一入口。代码、测试、配置示例和已执行的运行验证是“当前实现”的事实
 来源；目标流程不会因为已经写入设计文档就被视为可用。
@@ -26,7 +26,7 @@
 | 范围 | 状态 | 当前事实 |
 |---|---|---|
 | 配置与领域契约 | 已验证 | CSV/JSON allowlist、路径展开、枚举和结构化 Judge/Codex 结果有自动化覆盖 |
-| SQLite Store | 已验证 | flow/attempt/job 往返、active 唯一约束、review upsert、heartbeat 与 stale job 恢复有覆盖 |
+| PostgreSQL Store | 已验证 | flow/attempt/job 往返、跨 Store 可见性、并发 delivery 去重/claim、active 唯一约束、review 与恢复有覆盖 |
 | Webhook Ingress | 已验证（M0） | `/healthz`、HMAC 拒绝/接受、后台交接和 202 响应有覆盖；health 仅表示进程可响应 |
 | Event Router | 已验证（M0） | delivery 去重、bot/allowlist、触发、取消和 inline review 入库有覆盖；同 flow 串行锁尚未实现 |
 | Worker | 已验证（M0） | claim/dispatch、DONE/FAILED、heartbeat 清理、瞬时续租失败重试和启动恢复有覆盖 |
@@ -38,15 +38,16 @@
 | CLI | 部分验证 | help、serve 和 health smoke 已验证；flows/show/cancel/retry 命令已写但无自动化覆盖 |
 | 插件 | 部分 | 五个生命周期 hook 已接线并隔离异常；post-merge-summary 仍只写日志 |
 
-## M0 验证基线
+## 当前验证基线
 
-- 19 项 pytest 测试全部通过；
+- 23 项 pytest 测试全部通过，其中持久层场景使用真实 PostgreSQL；
 - `uv sync --locked`、`ruff check app tests`、`mypy app tests` 与 `flowtool --help` 通过；
-- 真实 `flowtool serve` 启动后 `/healthz` 返回 200，并能正常关闭；
+- PostgreSQL-backed `flowtool serve` 在 CI 启动后 `/healthz` 返回 200，并能正常关闭；
 - 测试不访问 GitHub、Codex 或 bub，也不使用真实凭据和真实轮询等待。
 
-验收覆盖的是 M0 基础设施，不证明完整产品闭环。原始计划和最终结果见
-[`m0.md`](../plan/m0.md)与[`m0-closeout.md`](../plan/m0-closeout.md)。
+M0 在 2026-08-26 使用 SQLite 和 19 项测试完成原始验收；该记录保留在
+[`m0.md`](../plan/m0.md)与[`m0-closeout.md`](../plan/m0-closeout.md)。当前 PostgreSQL 替换不证明
+完整产品闭环，也不表示控制面/worker 已经分离。
 
 ## 阅读导航
 

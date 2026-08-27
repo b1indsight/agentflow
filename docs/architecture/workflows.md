@@ -5,7 +5,7 @@
 ```text
 签名正确的 Webhook
   → FastAPI 后台交接并返回 202
-  → Event Router 去重 / 授权 / 写 SQLite
+  → Event Router 去重 / 授权 / 写 PostgreSQL
   → flow + queued job
   → Worker claim / heartbeat / dispatch
   → job DONE 或 FAILED；重启时恢复 stale running job
