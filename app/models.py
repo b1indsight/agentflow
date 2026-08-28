@@ -1,16 +1,16 @@
-"""领域模型：枚举、内部 dataclass、跨模型 JSON 契约。
+"""领域模型：枚举、Pydantic 持久化/JSON 契约、内部 dataclass。
 
 见 docs/plan/m0.md §4、docs/architecture/components.md §4.7 与 review-loop.md。
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 def utcnow() -> datetime:
@@ -69,11 +69,10 @@ class VcsKind(StrEnum):
     # 注：VCS 不再是端口——只用于挑 agent_guidance() 的指引文本（§4.6 三轴）。
 
 
-# --------------------------------------------------------------------- 内部 dataclass
+# --------------------------------------------------------------------- 持久化模型
 
 
-@dataclass
-class Flow:
+class Flow(BaseModel):
     """issue 级追踪单元 + 状态机。per-attempt 的产物（branch/PR/会话）挪到 Attempt。
 
     一条 flow 可挂多个 Attempt（多方案分支，§9-2）；MVP 恰好一个，`current_attempt_id`
@@ -86,12 +85,11 @@ class Flow:
     state: FlowState
     installation_id: int | None = None
     current_attempt_id: int | None = None
-    created_at: datetime = field(default_factory=utcnow)
-    updated_at: datetime = field(default_factory=utcnow)
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
 
 
-@dataclass
-class Attempt:
+class Attempt(BaseModel):
     """一次候选解法：自己的 branch / 工作区 / codex 会话 / PR（§9-2）。
 
     MVP：每 flow 一个。多 agent / 多方案时，一条 flow 挂多个 Attempt，各自独立推进。
@@ -104,12 +102,11 @@ class Attempt:
     codex_session_id: str | None = None
     pr_number: int | None = None
     revision_cycles: int = 0
-    created_at: datetime = field(default_factory=utcnow)
-    updated_at: datetime = field(default_factory=utcnow)
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
 
 
-@dataclass
-class Job:
+class Job(BaseModel):
     id: int
     flow_id: int
     kind: JobKind
@@ -118,12 +115,11 @@ class Job:
     pid: int | None = None
     heartbeat_at: datetime | None = None
     payload: dict | None = None
-    created_at: datetime = field(default_factory=utcnow)
-    updated_at: datetime = field(default_factory=utcnow)
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
 
 
-@dataclass
-class ReviewItem:
+class ReviewItem(BaseModel):
     id: int | None
     attempt_id: int             # 归属到具体 attempt（§9-2），不再挂 flow
     kind: ReviewItemKind
@@ -137,7 +133,10 @@ class ReviewItem:
     diff_hunk: str | None = None
     relayed: bool = False
     resolved: bool = False
-    created_at: datetime = field(default_factory=utcnow)
+    created_at: datetime = Field(default_factory=utcnow)
+
+
+# ---------------------------------------------------------------- 非持久化 dataclass
 
 
 @dataclass(frozen=True)

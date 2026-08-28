@@ -108,6 +108,11 @@ commit 和 push，Orchestrator 只在 push 后走 GitHub API。当前缺口包�
 
 当前 Store 使用 Psycopg 3 的同步连接池访问 PostgreSQL：
 
+`Flow`、`Attempt`、`Job` 和 `ReviewItem` 是 Pydantic 持久化模型。返回这些领域对象的查询在
+cursor 上使用 Psycopg `class_row(Model)`，由模型统一校验枚举、时间和其他字段；其余轻量查询继续
+使用 pool 的 `dict_row` 默认值。SQL、事务边界、JSONB 适配和并发协议仍由 Store 显式维护，没有引入
+ORM。
+
 - `flows`：issue 级状态，`(repo, issue)` 仅允许一个非终态 flow；
 - `attempts`：每个候选解法的 branch/session/PR/revision_cycles，MVP 每 flow 一个；
 - `jobs`：queued/running/done/failed、pid、heartbeat、payload 与尝试次数；

@@ -76,7 +76,7 @@ uv run flowtool --help
 [GitHub Actions CI](.github/workflows/ci.yml) 会在 pull request、推送到 `main` 和手动触发时，使用
 Python 3.12 分别运行 Ruff、Mypy、pytest 与 sdist/wheel 构建；四项检查并行执行且独立报告结果。
 
-截至 2026-08-28，23 项自动化测试覆盖配置/契约、PostgreSQL、HMAC、health、异步交接、delivery 去重、
+截至 2026-08-28，24 项自动化测试覆盖配置/契约、PostgreSQL、HMAC、health、异步交接、delivery 去重、
 allowlist、取消与 review 路由，以及 worker dispatch、失败、heartbeat 清理/重试和启动恢复；测试隔离
 GitHub、Codex、bub、真实凭据与轮询等待。PostgreSQL 场景还覆盖两个独立 Store 的共享可见性、原子
 delivery 去重和并发 job claim。`uv sync --locked`、Ruff、Mypy、CLI help 和构建检查均已通过。

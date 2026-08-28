@@ -7,7 +7,7 @@ from datetime import timedelta
 from typing import Any, cast
 
 from psycopg import Connection
-from psycopg.rows import dict_row
+from psycopg.rows import class_row, dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
@@ -19,7 +19,6 @@ from app.models import (
     JobKind,
     JobState,
     ReviewItem,
-    ReviewItemKind,
     utcnow,
 )
 
@@ -117,7 +116,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_review_gid
 Row = dict[str, Any]
 
 
-def _required(row: Row | None) -> Row:
+def _required[Record](row: Record | None) -> Record:
     """Fail fast when an insert/read-back invariant is violated."""
     if row is None:
         raise RuntimeError("database insert did not produce a readable record")
@@ -151,36 +150,45 @@ class Store:
 
     def create_flow(self, repo: str, issue_number: int, installation_id: int | None) -> Flow:
         now = utcnow()
-        with self._pool.connection() as connection:
-            row = connection.execute(
+        with (
+            self._pool.connection() as connection,
+            connection.cursor(row_factory=class_row(Flow)) as cursor,
+        ):
+            row = cursor.execute(
                 "INSERT INTO flows(repo, issue_number, installation_id, state, created_at,"
                 " updated_at) VALUES (%s,%s,%s,%s,%s,%s) RETURNING *",
                 (repo, issue_number, installation_id, FlowState.PENDING, now, now),
             ).fetchone()
-        return self._row_to_flow(_required(row))
+        return _required(row)
 
     def get_flow(self, flow_id: int) -> Flow | None:
-        with self._pool.connection() as connection:
-            row = connection.execute("SELECT * FROM flows WHERE id=%s", (flow_id,)).fetchone()
-        return self._row_to_flow(row) if row else None
+        with (
+            self._pool.connection() as connection,
+            connection.cursor(row_factory=class_row(Flow)) as cursor,
+        ):
+            return cursor.execute("SELECT * FROM flows WHERE id=%s", (flow_id,)).fetchone()
 
     def get_active_flow(self, repo: str, issue_number: int) -> Flow | None:
-        with self._pool.connection() as connection:
-            row = connection.execute(
+        with (
+            self._pool.connection() as connection,
+            connection.cursor(row_factory=class_row(Flow)) as cursor,
+        ):
+            return cursor.execute(
                 "SELECT * FROM flows WHERE repo=%s AND issue_number=%s AND state NOT IN"
                 " ('archived','cancelled','failed') ORDER BY id DESC LIMIT 1",
                 (repo, issue_number),
             ).fetchone()
-        return self._row_to_flow(row) if row else None
 
     def get_flow_by_pr(self, repo: str, pr_number: int) -> Flow | None:
-        with self._pool.connection() as connection:
-            row = connection.execute(
+        with (
+            self._pool.connection() as connection,
+            connection.cursor(row_factory=class_row(Flow)) as cursor,
+        ):
+            return cursor.execute(
                 "SELECT f.* FROM flows f JOIN attempts a ON a.flow_id=f.id"
                 " WHERE f.repo=%s AND a.pr_number=%s ORDER BY f.id DESC LIMIT 1",
                 (repo, pr_number),
             ).fetchone()
-        return self._row_to_flow(row) if row else None
 
     def update_flow(self, flow: Flow) -> None:
         flow.updated_at = utcnow()
@@ -202,50 +210,45 @@ class Store:
         if active_only:
             query += " WHERE state NOT IN ('archived','cancelled','failed')"
         query += " ORDER BY id DESC"
-        with self._pool.connection() as connection:
-            rows = connection.execute(query).fetchall()
-        return [self._row_to_flow(row) for row in rows]
-
-    def _row_to_flow(self, row: Row) -> Flow:
-        return Flow(
-            id=row["id"],
-            repo=row["repo"],
-            issue_number=row["issue_number"],
-            installation_id=row["installation_id"],
-            state=FlowState(row["state"]),
-            current_attempt_id=row["current_attempt_id"],
-            created_at=row["created_at"],
-            updated_at=row["updated_at"],
-        )
+        with (
+            self._pool.connection() as connection,
+            connection.cursor(row_factory=class_row(Flow)) as cursor,
+        ):
+            return cursor.execute(query).fetchall()
 
     # --------------------------------------------------------------- attempts
 
     def create_attempt(self, flow_id: int) -> Attempt:
         now = utcnow()
-        with self._pool.connection() as connection:
-            row = connection.execute(
+        with (
+            self._pool.connection() as connection,
+            connection.cursor(row_factory=class_row(Attempt)) as cursor,
+        ):
+            row = cursor.execute(
                 "INSERT INTO attempts(flow_id, revision_cycles, created_at, updated_at)"
                 " VALUES (%s,%s,%s,%s) RETURNING *",
                 (flow_id, 0, now, now),
             ).fetchone()
-        return self._row_to_attempt(_required(row))
+        return _required(row)
 
     def get_attempt(self, attempt_id: int) -> Attempt | None:
-        with self._pool.connection() as connection:
-            row = connection.execute(
-                "SELECT * FROM attempts WHERE id=%s", (attempt_id,)
-            ).fetchone()
-        return self._row_to_attempt(row) if row else None
+        with (
+            self._pool.connection() as connection,
+            connection.cursor(row_factory=class_row(Attempt)) as cursor,
+        ):
+            return cursor.execute("SELECT * FROM attempts WHERE id=%s", (attempt_id,)).fetchone()
 
     def get_current_attempt(self, flow: Flow) -> Attempt | None:
         return self.get_attempt(flow.current_attempt_id) if flow.current_attempt_id else None
 
     def list_attempts(self, flow_id: int) -> list[Attempt]:
-        with self._pool.connection() as connection:
-            rows = connection.execute(
+        with (
+            self._pool.connection() as connection,
+            connection.cursor(row_factory=class_row(Attempt)) as cursor,
+        ):
+            return cursor.execute(
                 "SELECT * FROM attempts WHERE flow_id=%s ORDER BY id", (flow_id,)
             ).fetchall()
-        return [self._row_to_attempt(row) for row in rows]
 
     def update_attempt(self, attempt: Attempt) -> None:
         attempt.updated_at = utcnow()
@@ -263,26 +266,17 @@ class Store:
                 ),
             )
 
-    def _row_to_attempt(self, row: Row) -> Attempt:
-        return Attempt(
-            id=row["id"],
-            flow_id=row["flow_id"],
-            branch=row["branch"],
-            codex_session_id=row["codex_session_id"],
-            pr_number=row["pr_number"],
-            revision_cycles=row["revision_cycles"],
-            created_at=row["created_at"],
-            updated_at=row["updated_at"],
-        )
-
     # ------------------------------------------------------------------- jobs
 
     def enqueue_job(self, flow_id: int, kind: JobKind, payload: dict | None = None) -> Job:
         now = utcnow()
-        with self._pool.connection() as connection:
-            row = connection.execute(
-                "INSERT INTO jobs(flow_id, kind, state, attempt, payload, created_at, updated_at)"
-                " VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING *",
+        with (
+            self._pool.connection() as connection,
+            connection.cursor(row_factory=class_row(Job)) as cursor,
+        ):
+            row = cursor.execute(
+                "INSERT INTO jobs(flow_id, kind, state, attempt, payload, created_at,"
+                " updated_at) VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING *",
                 (
                     flow_id,
                     kind,
@@ -293,18 +287,23 @@ class Store:
                     now,
                 ),
             ).fetchone()
-        return self._row_to_job(_required(row))
+        return _required(row)
 
     def get_job(self, job_id: int) -> Job | None:
-        with self._pool.connection() as connection:
-            row = connection.execute("SELECT * FROM jobs WHERE id=%s", (job_id,)).fetchone()
-        return self._row_to_job(row) if row else None
+        with (
+            self._pool.connection() as connection,
+            connection.cursor(row_factory=class_row(Job)) as cursor,
+        ):
+            return cursor.execute("SELECT * FROM jobs WHERE id=%s", (job_id,)).fetchone()
 
     def claim_job(self) -> Job | None:
         """Atomically claim the oldest queued job without blocking another consumer."""
         now = utcnow()
-        with self._pool.connection() as connection:
-            row = connection.execute(
+        with (
+            self._pool.connection() as connection,
+            connection.cursor(row_factory=class_row(Job)) as cursor,
+        ):
+            return cursor.execute(
                 "WITH next_job AS ("
                 " SELECT id FROM jobs WHERE state=%s ORDER BY id"
                 " FOR UPDATE SKIP LOCKED LIMIT 1"
@@ -313,7 +312,6 @@ class Store:
                 " updated_at=%s FROM next_job WHERE jobs.id=next_job.id RETURNING jobs.*",
                 (JobState.QUEUED, JobState.RUNNING, os.getpid(), now, now),
             ).fetchone()
-        return self._row_to_job(row) if row else None
 
     def heartbeat(self, job_id: int) -> None:
         now = utcnow()
@@ -341,20 +339,6 @@ class Store:
             )
             recovered = result.rowcount
         return recovered
-
-    def _row_to_job(self, row: Row) -> Job:
-        return Job(
-            id=row["id"],
-            flow_id=row["flow_id"],
-            kind=JobKind(row["kind"]),
-            state=JobState(row["state"]),
-            attempt=row["attempt"],
-            pid=row["pid"],
-            heartbeat_at=row["heartbeat_at"],
-            payload=row["payload"],
-            created_at=row["created_at"],
-            updated_at=row["updated_at"],
-        )
 
     # ----------------------------------------------------------------- events
 
@@ -406,12 +390,14 @@ class Store:
             )
 
     def unrelayed_items(self, attempt_id: int) -> list[ReviewItem]:
-        with self._pool.connection() as connection:
-            rows = connection.execute(
+        with (
+            self._pool.connection() as connection,
+            connection.cursor(row_factory=class_row(ReviewItem)) as cursor,
+        ):
+            return cursor.execute(
                 "SELECT * FROM review_threads WHERE attempt_id=%s AND relayed=FALSE ORDER BY id",
                 (attempt_id,),
             ).fetchall()
-        return [self._row_to_item(row) for row in rows]
 
     def mark_relayed(self, item_ids: list[int]) -> None:
         if not item_ids:
@@ -428,24 +414,6 @@ class Store:
                 "UPDATE review_threads SET resolved=TRUE WHERE attempt_id=%s AND github_id=%s",
                 (attempt_id, github_id),
             )
-
-    def _row_to_item(self, row: Row) -> ReviewItem:
-        return ReviewItem(
-            id=row["id"],
-            attempt_id=row["attempt_id"],
-            kind=ReviewItemKind(row["kind"]),
-            github_id=row["github_id"],
-            author=row["author"],
-            body=row["body"],
-            thread_id=row["thread_id"],
-            path=row["path"],
-            line=row["line"],
-            original_commit_id=row["original_commit_id"],
-            diff_hunk=row["diff_hunk"],
-            relayed=row["relayed"],
-            resolved=row["resolved"],
-            created_at=row["created_at"],
-        )
 
     # ------------------------------------------------------------- codex_runs
 

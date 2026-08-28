@@ -40,7 +40,7 @@
 
 ## 当前验证基线
 
-- 23 项 pytest 测试全部通过，其中持久层场景使用真实 PostgreSQL；
+- 测试套件包含 24 项 pytest，其中持久层场景使用真实 PostgreSQL；
 - `uv sync --locked`、`ruff check app tests`、`mypy app tests` 与 `flowtool --help` 通过；
 - PostgreSQL-backed `flowtool serve` 在 CI 启动后 `/healthz` 返回 200，并能正常关闭；
 - 测试不访问 GitHub、Codex 或 bub，也不使用真实凭据和真实轮询等待。
