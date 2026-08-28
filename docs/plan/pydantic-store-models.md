@@ -1,6 +1,6 @@
 # Pydantic 持久化模型整合计划
 
-> 状态：已批准，实施中 · 日期：2026-08-28 · 前置实现：PR #5 (`96de770f`)
+> 状态：已实施并验证 · 日期：2026-08-28 · 前置实现：PR #5 (`96de770f`)
 >
 > 本次保留 Psycopg 原生 SQL，不引入 SQLModel、SQLAlchemy ORM 或其他 ORM。
 
@@ -81,3 +81,16 @@ Psycopg 官方的 FastAPI/Pydantic 示例采用相同的 `class_row(PydanticMode
 - **过度耦合**：只转换已经与表结构一一对应的四个持久化对象，其他领域类型继续独立。
 
 如出现不兼容，回退实现子 change 即恢复 dict-to-dataclass mapper，不影响已经完成的 PostgreSQL 替换。
+
+## 6. 实施结果
+
+- 实现 change `ea66e981` 将四个持久化对象改为可变 Pydantic 模型，并在所有返回领域对象的查询上
+  使用 `class_row(Model)`；四个手工 mapper 已移除，Store 的公开方法签名、SQL 和 schema 未变。
+- 本机未启动或连接 PostgreSQL：pytest 结果为 7 项通过、17 项数据库测试按预期跳过；Ruff、Mypy、
+  锁文件检查、构建、CLI help 和空白检查通过。
+- [GitHub Actions run 33151994627](https://github.com/b1indsight/agentflow/actions/runs/33151994627)
+  在 PostgreSQL 17.11 上通过全部 24 项 pytest（2.89 秒）和服务 `/healthz` smoke；Ruff、Mypy 与
+  Build 也全部通过。
+- 实施时发现新增模型测试使测试总数从 23 变为 24，且现有架构图明确把这些模型写成 dataclass；因此
+  除原计划列出的组件说明和计划索引外，也同步了 README、架构入口和架构图。这是文档事实同步，不改变
+  用户配置、数据库 schema 或运行流程。
