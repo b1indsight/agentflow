@@ -5,7 +5,7 @@
 
 ## 当前计划
 
-暂无。
+- [`pydantic-store-models.md`](pydantic-store-models.md) — 保留 Psycopg 原生 SQL，以 Pydantic 模型和 `class_row()` 取代手工行转换，待审批；
 
 ## 已完成计划
 
