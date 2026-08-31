@@ -16,8 +16,9 @@ from app.worker.executor import WorkerExecutor
 class WorkerRootLock:
     """Prevent two worker processes from mutating the same workspace root."""
 
-    def __init__(self, worker_root: Path) -> None:
+    def __init__(self, worker_root: Path, worker_id: str | None = None) -> None:
         self.worker_root = worker_root
+        self.worker_id = worker_id
         self._handle: IO[str] | None = None
 
     def acquire(self) -> None:
@@ -30,6 +31,8 @@ class WorkerRootLock:
         except BlockingIOError as exc:
             handle.close()
             raise RuntimeError(f"worker root already in use: {self.worker_root}") from exc
+        if self.worker_id is not None:
+            (self.worker_root / ".worker-id").write_text(f"{self.worker_id}\n")
         self._handle = handle
 
     def release(self) -> None:
@@ -45,7 +48,7 @@ class WorkerRuntime:
 
     def __init__(self, settings: WorkerSettings | None = None) -> None:
         self.settings = settings or get_worker_settings()
-        self.root_lock = WorkerRootLock(self.settings.worker_root)
+        self.root_lock = WorkerRootLock(self.settings.worker_root, self.settings.worker_id)
         executor = WorkerExecutor(
             self.settings.worker_root,
             CodexAgent(timeout=self.settings.codex_run_timeout_seconds),

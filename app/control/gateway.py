@@ -1,4 +1,4 @@
-"""Authenticated single-worker WebSocket gateway."""
+"""Authenticated multi-worker WebSocket registry and single-slot scheduler."""
 
 from __future__ import annotations
 
@@ -44,9 +44,15 @@ class WorkerSocket(Protocol):
 
 
 class GatewayStore(Protocol):
+    def worker_connected(self, worker_id: str, protocol_version: int) -> object: ...
+
+    def worker_disconnected(self, worker_id: str, reason: str | None = None) -> None: ...
+
     def assign_job(self, worker_id: str, token: str) -> Job | None: ...
 
-    def start_assignment(self, job_id: int, worker_id: str, token: str) -> bool: ...
+    def start_assignment(
+        self, job_id: int, attempt_id: int, worker_id: str, token: str
+    ) -> bool: ...
 
     def heartbeat_assignment(self, job_id: int, worker_id: str, token: str) -> bool: ...
 
@@ -75,60 +81,64 @@ class ProtocolViolation(RuntimeError):
     pass
 
 
-class SingleWorkerGateway:
-    """Serve exactly one configured worker identity and one assignment at a time."""
+class WorkerGateway:
+    """Serve one single-slot session per configured worker identity."""
 
     def __init__(
         self,
         store: GatewayStore,
         coordinator: AssignmentCoordinator,
         *,
-        worker_id: str,
-        worker_token: str,
+        worker_tokens: Mapping[str, str],
         heartbeat_interval: float = 15.0,
         heartbeat_timeout: float = 45.0,
         poll_interval: float = 2.0,
     ) -> None:
         self.store = store
         self.coordinator = coordinator
-        self.worker_id = worker_id
-        self.worker_token = worker_token
+        self.worker_tokens = dict(worker_tokens)
         self.heartbeat_interval = heartbeat_interval
         self.heartbeat_timeout = heartbeat_timeout
         self.poll_interval = poll_interval
-        self._connected = False
+        self._sessions: dict[str, asyncio.Event] = {}
+        self._registry_lock = asyncio.Lock()
 
     async def handle(self, socket: WorkerSocket) -> None:
-        if not self._authenticated(socket.headers):
+        worker_id = self._authenticated_identity(socket.headers)
+        if worker_id is None:
             await socket.close(code=1008)
             return
-        if self._connected:
+        wake = await self._register_session(worker_id)
+        if wake is None:
             await socket.close(code=1008)
             return
 
-        self._connected = True
         current: tuple[Job, str, ExecutionTask] | None = None
         started = False
+        connected = False
+        disconnect_reason: str | None = None
         try:
             await socket.accept()
             register = parse_worker_message(await socket.receive_text())
-            if not isinstance(register, Register) or register.worker_id != self.worker_id:
+            if not isinstance(register, Register) or register.worker_id != worker_id:
                 raise ProtocolViolation("worker registration does not match authenticated identity")
+            self.store.worker_connected(worker_id, register.protocol_version)
+            connected = True
             await socket.send_text(
                 Registered(heartbeat_interval=self.heartbeat_interval).model_dump_json()
             )
 
             while True:
+                wake.clear()
                 token = uuid4().hex
-                job = self.store.assign_job(self.worker_id, token)
+                job = self.store.assign_job(worker_id, token)
                 if job is None:
-                    await self._wait_while_idle(socket)
+                    await self._wait_while_idle(socket, wake)
                     continue
                 prepared = await self.coordinator.prepare(job)
                 if isinstance(prepared, JobState):
-                    self.store.finish_assignment(
-                        job.id, self.worker_id, token, prepared
-                    )
+                    self.store.finish_assignment(job.id, worker_id, token, prepared)
+                    self.notify_jobs()
                     continue
                 current = (job, token, prepared)
                 started = False
@@ -145,9 +155,11 @@ class SingleWorkerGateway:
                 if not isinstance(first, Started):
                     raise ProtocolViolation("assignment must be acknowledged with Started")
                 self._validate_assignment_message(first.job_id, first.assignment_token, current)
-                if not self.store.start_assignment(job.id, self.worker_id, token):
+                if not self.store.start_assignment(
+                    job.id, prepared.attempt_id, worker_id, token
+                ):
                     raise ProtocolViolation("assignment is no longer active")
-                self.coordinator.mark_started(job, prepared, self.worker_id)
+                self.coordinator.mark_started(job, prepared, worker_id)
                 started = True
 
                 while True:
@@ -157,7 +169,7 @@ class SingleWorkerGateway:
                             message.job_id, message.assignment_token, current
                         )
                         if not self.store.heartbeat_assignment(
-                            job.id, self.worker_id, token
+                            job.id, worker_id, token
                         ):
                             raise ProtocolViolation("heartbeat belongs to an inactive assignment")
                         continue
@@ -165,11 +177,11 @@ class SingleWorkerGateway:
                         self._validate_assignment_message(
                             message.job_id, message.assignment_token, current
                         )
-                        if not self.store.assignment_active(job.id, self.worker_id, token):
+                        if not self.store.assignment_active(job.id, worker_id, token):
                             raise ProtocolViolation("result belongs to an inactive assignment")
                         state = await self.coordinator.apply_result(job, message.result)
                         if not self.store.finish_assignment(
-                            job.id, self.worker_id, token, state
+                            job.id, worker_id, token, state
                         ):
                             raise ProtocolViolation("result lost its assignment fence")
                         await socket.send_text(
@@ -177,6 +189,7 @@ class SingleWorkerGateway:
                         )
                         current = None
                         started = False
+                        self.notify_jobs()
                         break
                     if isinstance(message, Failed):
                         self._validate_assignment_message(
@@ -184,7 +197,7 @@ class SingleWorkerGateway:
                         )
                         await self.coordinator.fail(job, message.error)
                         if not self.store.fail_assignment(
-                            job.id, self.worker_id, token, message.error
+                            job.id, worker_id, token, message.error
                         ):
                             raise ProtocolViolation("failure lost its assignment fence")
                         await socket.send_text(
@@ -192,13 +205,16 @@ class SingleWorkerGateway:
                         )
                         current = None
                         started = False
+                        self.notify_jobs()
                         break
                     raise ProtocolViolation(
                         f"unexpected assignment message: {type(message).__name__}"
                     )
         except (WebSocketDisconnect, ConnectionError, TimeoutError) as exc:
-            logger.info("worker {} disconnected: {}", self.worker_id, exc)
+            disconnect_reason = str(exc) or type(exc).__name__
+            logger.info("worker {} disconnected: {}", worker_id, exc)
         except ProtocolViolation as exc:
+            disconnect_reason = str(exc)
             logger.warning("worker protocol violation: {}", exc)
             try:
                 await socket.send_text(
@@ -208,6 +224,7 @@ class SingleWorkerGateway:
             except (WebSocketDisconnect, ConnectionError):
                 pass
         except ValidationError:
+            disconnect_reason = "message failed protocol validation"
             logger.warning("worker sent a message that failed protocol validation")
             try:
                 await socket.send_text(
@@ -224,31 +241,64 @@ class SingleWorkerGateway:
                 job, token, _ = current
                 if started:
                     reason = "worker disconnected after remote execution started"
+                    disconnect_reason = reason
                     await self.coordinator.fail(job, reason)
-                    self.store.fail_assignment(job.id, self.worker_id, token, reason)
+                    self.store.fail_assignment(job.id, worker_id, token, reason)
                 else:
-                    self.store.requeue_assignment(job.id, self.worker_id, token)
-            self._connected = False
+                    self.store.requeue_assignment(job.id, worker_id, token)
+                self.notify_jobs()
+            if connected:
+                self.store.worker_disconnected(worker_id, disconnect_reason)
+            await self._unregister_session(worker_id)
 
-    async def _wait_while_idle(self, socket: WorkerSocket) -> None:
+    async def _wait_while_idle(self, socket: WorkerSocket, wake: asyncio.Event) -> None:
+        receive = asyncio.create_task(socket.receive_text())
+        notified = asyncio.create_task(wake.wait())
         try:
-            raw = await asyncio.wait_for(socket.receive_text(), timeout=self.poll_interval)
-        except TimeoutError:
-            return
-        message = parse_worker_message(raw)
-        raise ProtocolViolation(f"unexpected idle message: {type(message).__name__}")
+            done, _ = await asyncio.wait(
+                {receive, notified},
+                timeout=self.poll_interval,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if receive in done:
+                message = parse_worker_message(receive.result())
+                raise ProtocolViolation(
+                    f"unexpected idle message: {type(message).__name__}"
+                )
+        finally:
+            receive.cancel()
+            notified.cancel()
+            await asyncio.gather(receive, notified, return_exceptions=True)
 
     async def _receive(self, socket: WorkerSocket) -> WorkerMessage:
         raw = await asyncio.wait_for(socket.receive_text(), timeout=self.heartbeat_timeout)
         return parse_worker_message(raw)
 
-    def _authenticated(self, headers: Mapping[str, str]) -> bool:
+    def _authenticated_identity(self, headers: Mapping[str, str]) -> str | None:
         identity = headers.get("x-flowtool-worker-id", "")
         authorization = headers.get("authorization", "")
-        expected_authorization = f"Bearer {self.worker_token}"
-        return hmac.compare_digest(identity, self.worker_id) and hmac.compare_digest(
-            authorization, expected_authorization
-        )
+        token = self.worker_tokens.get(identity)
+        if token is None:
+            return None
+        expected_authorization = f"Bearer {token}"
+        return identity if hmac.compare_digest(authorization, expected_authorization) else None
+
+    async def _register_session(self, worker_id: str) -> asyncio.Event | None:
+        async with self._registry_lock:
+            if worker_id in self._sessions:
+                return None
+            wake = asyncio.Event()
+            self._sessions[worker_id] = wake
+            return wake
+
+    async def _unregister_session(self, worker_id: str) -> None:
+        async with self._registry_lock:
+            self._sessions.pop(worker_id, None)
+
+    def notify_jobs(self) -> None:
+        """Wake all idle sessions after an enqueue or slot-state transition."""
+        for wake in self._sessions.values():
+            wake.set()
 
     @staticmethod
     def _validate_assignment_message(

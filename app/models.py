@@ -50,6 +50,12 @@ class JobState(StrEnum):
     FAILED = "failed"
 
 
+class WorkerStatus(StrEnum):
+    ONLINE = "online"
+    BUSY = "busy"
+    OFFLINE = "offline"
+
+
 class Verdict(StrEnum):
     REVISE = "revise"
     WAIT = "wait"
@@ -122,6 +128,27 @@ class Job(BaseModel):
     payload: dict | None = None
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
+
+
+class WorkerRecord(BaseModel):
+    worker_id: str
+    protocol_version: int
+    status: WorkerStatus
+    current_job_id: int | None = None
+    first_connected_at: datetime
+    last_connected_at: datetime
+    last_seen_at: datetime
+    last_assigned_at: datetime | None = None
+    last_error: str | None = None
+
+
+class WorkerView(BaseModel):
+    worker_id: str
+    status: WorkerStatus
+    current_job_id: int | None = None
+    current_flow_id: int | None = None
+    last_seen_at: datetime
+    last_error: str | None = None
 
 
 class ReviewItem(BaseModel):

@@ -79,8 +79,8 @@ GitHub resolve；当前代码也不会把 addressed note 发回线程。clarific
 ## B.5 并发目标
 
 目标是每 flow 至多一个 Codex run，运行期间的新反馈留给下一批，不打断当前 run；不同 flow 可并行。
-当前 serve 只允许一个远程 worker identity 串行消费所有 job，没有实现 per-flow 锁、多 flow 并行，也没有
-`/flow restart`。
+当前 serve 允许多个单槽 worker 并行消费不同 flow，并以 attempt affinity 防止同一会话跨 worker；尚未实现
+显式 per-flow 锁或 `/flow restart`。现有 job/attempt 状态约束会阻止一个 attempt 被两个 worker 同时领取。
 
 ## B.6 目标内部状态
 

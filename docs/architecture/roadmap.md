@@ -65,7 +65,7 @@ M1–M5 是目标里程碑，不代表对应控制流代码或接口已经验收
 
 6. **多 Worker 调度与恢复** —— 控制/执行面分离和单 worker 远程闭环已完成；后续增加多 identity、
    session affinity、公平调度、单机多 root，以及忙碌重连和持久 lease 接管。
-   - 当前接缝：`protocol.py`、`SingleWorkerGateway` 与 Store assignment token；worker 不直接共享 Store。
+   - 当前接缝：`protocol.py`、`WorkerGateway` 与 Store assignment token；worker 不直接共享 Store。
 
 7. **端口插件扩展** —— 在生命周期端口挂插件。
    例：合并后总结插件——归纳上一段对话里的代码风格偏好、更新仓库的 skill 文件。

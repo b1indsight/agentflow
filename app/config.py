@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Annotated
 
-from pydantic import SecretStr, field_validator, model_validator
+from pydantic import SecretStr, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
@@ -17,24 +17,6 @@ class FlowToolSettings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
     )
-
-    worker_id: str
-    worker_token: SecretStr
-
-    @field_validator("worker_id")
-    @classmethod
-    def _require_worker_id(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("FLOWTOOL_WORKER_ID is required")
-        return value
-
-    @field_validator("worker_token")
-    @classmethod
-    def _require_worker_token(cls, value: SecretStr) -> SecretStr:
-        if not value.get_secret_value().strip():
-            raise ValueError("FLOWTOOL_WORKER_TOKEN is required")
-        return value
-
 
 class ServeSettings(FlowToolSettings):
     """Secrets and tuning used only by the control-plane process."""
@@ -48,6 +30,7 @@ class ServeSettings(FlowToolSettings):
     allowlist: Annotated[list[str], NoDecode] = []
 
     database_url: str
+    worker_tokens: dict[str, SecretStr]
 
     settle_seconds: float = 75.0
     submit_grace_seconds: float = 15.0
@@ -77,6 +60,25 @@ class ServeSettings(FlowToolSettings):
             raise ValueError("FLOWTOOL_DATABASE_URL is required")
         return value
 
+    @field_validator("worker_tokens")
+    @classmethod
+    def _validate_worker_tokens(
+        cls, value: dict[str, SecretStr]
+    ) -> dict[str, SecretStr]:
+        if not value:
+            raise ValueError("FLOWTOOL_WORKER_TOKENS must configure at least one worker")
+        tokens: list[str] = []
+        for worker_id, token in value.items():
+            if not worker_id.strip():
+                raise ValueError("worker ids in FLOWTOOL_WORKER_TOKENS cannot be empty")
+            secret = token.get_secret_value()
+            if not secret.strip():
+                raise ValueError("worker tokens in FLOWTOOL_WORKER_TOKENS cannot be empty")
+            tokens.append(secret)
+        if len(tokens) != len(set(tokens)):
+            raise ValueError("worker tokens in FLOWTOOL_WORKER_TOKENS must be unique")
+        return value
+
     @field_validator("github_private_key_path", mode="after")
     @classmethod
     def _expand_path(cls, value: Path) -> Path:
@@ -86,14 +88,32 @@ class ServeSettings(FlowToolSettings):
 class WorkerSettings(FlowToolSettings):
     """Execution-only settings; deliberately excludes database and GitHub credentials."""
 
+    worker_id: str
+    worker_token: SecretStr
     serve_ws_url: str
-    worker_root: Path = Path("~/.flowtool/worker")
+    worker_root: Path = Path("~/.flowtool/workers/{worker_id}")
     codex_run_timeout_seconds: float = 1200.0
     allow_insecure_worker_ws: bool = False
 
+    @field_validator("worker_id")
+    @classmethod
+    def _require_worker_id(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("FLOWTOOL_WORKER_ID is required")
+        return value
+
+    @field_validator("worker_token")
+    @classmethod
+    def _require_worker_token(cls, value: SecretStr) -> SecretStr:
+        if not value.get_secret_value().strip():
+            raise ValueError("FLOWTOOL_WORKER_TOKEN is required")
+        return value
+
     @field_validator("worker_root", mode="after")
     @classmethod
-    def _expand_worker_root(cls, value: Path) -> Path:
+    def _expand_worker_root(cls, value: Path, info: ValidationInfo) -> Path:
+        if value == Path("~/.flowtool/workers/{worker_id}"):
+            value = Path(f"~/.flowtool/workers/{info.data['worker_id']}")
         return value.expanduser()
 
     @model_validator(mode="after")

@@ -3,7 +3,7 @@ import asyncio
 import pytest
 from fastapi import WebSocketDisconnect
 
-from app.control.gateway import SingleWorkerGateway
+from app.control.gateway import WorkerGateway
 from app.models import Job, JobKind, JobState
 from app.protocol import (
     Assignment,
@@ -25,6 +25,13 @@ class RecordingStore:
         self.started = False
         self.finished: JobState | None = None
         self.requeued = False
+        self.presence: dict[str, str] = {}
+
+    def worker_connected(self, worker_id: str, protocol_version: int):
+        self.presence[worker_id] = "online"
+
+    def worker_disconnected(self, worker_id: str, reason: str | None = None) -> None:
+        self.presence[worker_id] = "offline"
 
     def assign_job(self, worker_id: str, token: str) -> Job | None:
         if self.job.state is not JobState.QUEUED:
@@ -34,7 +41,9 @@ class RecordingStore:
         self.job.assignment_token = token
         return self.job
 
-    def start_assignment(self, job_id: int, worker_id: str, token: str) -> bool:
+    def start_assignment(
+        self, job_id: int, attempt_id: int, worker_id: str, token: str
+    ) -> bool:
         self.started = (job_id, worker_id, token) == (5, "worker-1", self.job.assignment_token)
         return self.started
 
@@ -96,9 +105,10 @@ class RecordingCoordinator:
 
 
 class ScriptedSocket:
-    def __init__(self, *, token: str = "worker-secret") -> None:
+    def __init__(self, *, worker_id: str = "worker-1", token: str = "worker-secret") -> None:
+        self.worker_id = worker_id
         self.headers = {
-            "x-flowtool-worker-id": "worker-1",
+            "x-flowtool-worker-id": worker_id,
             "authorization": f"Bearer {token}",
         }
         self.accepted = False
@@ -118,7 +128,7 @@ class ScriptedSocket:
     async def receive_text(self) -> str:
         self._step += 1
         if self._step == 1:
-            return Register(worker_id="worker-1").model_dump_json()
+            return Register(worker_id=self.worker_id).model_dump_json()
         assignment = next(
             message
             for raw in self.sent
@@ -145,11 +155,10 @@ async def test_gateway_runs_one_remote_assignment_to_ack() -> None:
     store = RecordingStore()
     coordinator = RecordingCoordinator()
     socket = ScriptedSocket()
-    gateway = SingleWorkerGateway(
+    gateway = WorkerGateway(
         store,
         coordinator,
-        worker_id="worker-1",
-        worker_token="worker-secret",
+        worker_tokens={"worker-1": "worker-secret"},
         heartbeat_interval=10,
         heartbeat_timeout=30,
         poll_interval=0.01,
@@ -169,11 +178,10 @@ async def test_gateway_runs_one_remote_assignment_to_ack() -> None:
 @pytest.mark.asyncio
 async def test_gateway_rejects_bad_credentials_before_accepting() -> None:
     socket = ScriptedSocket(token="wrong")
-    gateway = SingleWorkerGateway(
+    gateway = WorkerGateway(
         RecordingStore(),
         RecordingCoordinator(),
-        worker_id="worker-1",
-        worker_token="worker-secret",
+        worker_tokens={"worker-1": "worker-secret"},
     )
 
     await gateway.handle(socket)
@@ -190,11 +198,10 @@ class InvalidRegisterSocket(ScriptedSocket):
 @pytest.mark.asyncio
 async def test_gateway_closes_messages_with_an_incompatible_protocol_version() -> None:
     socket = InvalidRegisterSocket()
-    gateway = SingleWorkerGateway(
+    gateway = WorkerGateway(
         RecordingStore(),
         RecordingCoordinator(),
-        worker_id="worker-1",
-        worker_token="worker-secret",
+        worker_tokens={"worker-1": "worker-secret"},
     )
 
     await gateway.handle(socket)
@@ -205,8 +212,8 @@ async def test_gateway_closes_messages_with_an_incompatible_protocol_version() -
 
 
 class WaitingSocket(ScriptedSocket):
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, *, worker_id: str = "worker-1", token: str = "worker-secret") -> None:
+        super().__init__(worker_id=worker_id, token=token)
         self.accepted_event = asyncio.Event()
 
     async def accept(self) -> None:
@@ -216,7 +223,7 @@ class WaitingSocket(ScriptedSocket):
     async def receive_text(self) -> str:
         if self._step == 0:
             self._step = 1
-            return Register(worker_id="worker-1").model_dump_json()
+            return Register(worker_id=self.worker_id).model_dump_json()
         await asyncio.Event().wait()
         raise AssertionError("unreachable")
 
@@ -225,11 +232,10 @@ class WaitingSocket(ScriptedSocket):
 async def test_gateway_rejects_a_second_legal_worker_connection() -> None:
     store = RecordingStore()
     store.job.state = JobState.DONE
-    gateway = SingleWorkerGateway(
+    gateway = WorkerGateway(
         store,
         RecordingCoordinator(),
-        worker_id="worker-1",
-        worker_token="worker-secret",
+        worker_tokens={"worker-1": "worker-secret"},
         poll_interval=60,
     )
     first = WaitingSocket()
@@ -244,6 +250,33 @@ async def test_gateway_rejects_a_second_legal_worker_connection() -> None:
 
     assert second.accepted is False
     assert second.closed == 1008
+
+
+@pytest.mark.asyncio
+async def test_gateway_accepts_different_worker_identities_concurrently() -> None:
+    store = RecordingStore()
+    store.job.state = JobState.DONE
+    gateway = WorkerGateway(
+        store,
+        RecordingCoordinator(),
+        worker_tokens={"worker-1": "secret-1", "worker-2": "secret-2"},
+        poll_interval=60,
+    )
+    first = WaitingSocket(worker_id="worker-1", token="secret-1")
+    second = WaitingSocket(worker_id="worker-2", token="secret-2")
+    sessions = [
+        asyncio.create_task(gateway.handle(first)),
+        asyncio.create_task(gateway.handle(second)),
+    ]
+    await asyncio.gather(first.accepted_event.wait(), second.accepted_event.wait())
+    try:
+        assert first.accepted is True
+        assert second.accepted is True
+        assert store.presence == {"worker-1": "online", "worker-2": "online"}
+    finally:
+        for session in sessions:
+            session.cancel()
+        await asyncio.gather(*sessions, return_exceptions=True)
 
 
 class DisconnectingSocket(ScriptedSocket):
@@ -264,11 +297,10 @@ class DisconnectingSocket(ScriptedSocket):
 async def test_gateway_disconnect_policy(disconnect_after_start: bool) -> None:
     store = RecordingStore()
     coordinator = RecordingCoordinator()
-    gateway = SingleWorkerGateway(
+    gateway = WorkerGateway(
         store,
         coordinator,
-        worker_id="worker-1",
-        worker_token="worker-secret",
+        worker_tokens={"worker-1": "worker-secret"},
         poll_interval=0.01,
     )
 

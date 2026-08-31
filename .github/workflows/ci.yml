@@ -86,9 +86,10 @@ jobs:
       FLOWTOOL_TEST_DATABASE_URL: postgresql://flowtool:flowtool@127.0.0.1:5432/flowtool_test
       FLOWTOOL_WORKER_ID: worker-1
       FLOWTOOL_WORKER_TOKEN: ci-worker-secret
+      FLOWTOOL_WORKER_TOKENS: '{"worker-1":"ci-worker-secret","worker-2":"ci-worker-secret-2"}'
       FLOWTOOL_SERVE_WS_URL: ws://127.0.0.1:8000/internal/workers/connect
       FLOWTOOL_ALLOW_INSECURE_WORKER_WS: "true"
-      FLOWTOOL_WORKER_ROOT: /tmp/flowtool-ci-worker
+      FLOWTOOL_WORKER_ROOT: /tmp/flowtool-ci-worker-1
 
     steps:
       - name: Check out repository
@@ -114,10 +115,14 @@ jobs:
         run: |
           uv run flowtool serve > /tmp/flowtool.log 2>&1 &
           server_pid=$!
-          worker_pid=""
+          worker_pid_a=""
+          worker_pid_b=""
           cleanup() {
-            if [ -n "$worker_pid" ]; then
-              kill "$worker_pid" 2>/dev/null || true
+            if [ -n "$worker_pid_a" ]; then
+              kill "$worker_pid_a" 2>/dev/null || true
+            fi
+            if [ -n "$worker_pid_b" ]; then
+              kill "$worker_pid_b" 2>/dev/null || true
             fi
             kill "$server_pid" 2>/dev/null || true
           }
@@ -129,14 +134,25 @@ jobs:
             sleep 0.5
           done
           curl --fail --silent http://127.0.0.1:8000/healthz
-          uv run flowtool worker > /tmp/flowtool-worker.log 2>&1 &
-          worker_pid=$!
+          uv run flowtool worker > /tmp/flowtool-worker-1.log 2>&1 &
+          worker_pid_a=$!
+          FLOWTOOL_WORKER_ID=worker-2 \
+            FLOWTOOL_WORKER_TOKEN=ci-worker-secret-2 \
+            FLOWTOOL_WORKER_ROOT=/tmp/flowtool-ci-worker-2 \
+            uv run flowtool worker > /tmp/flowtool-worker-2.log 2>&1 &
+          worker_pid_b=$!
           for attempt in $(seq 1 20); do
-            if grep --quiet "registered with control plane" /tmp/flowtool-worker.log; then
+            if grep --quiet "registered with control plane" /tmp/flowtool-worker-1.log \
+              && grep --quiet "registered with control plane" /tmp/flowtool-worker-2.log; then
               break
             fi
             sleep 0.25
           done
           kill -0 "$server_pid"
-          kill -0 "$worker_pid"
-          grep --quiet "registered with control plane" /tmp/flowtool-worker.log
+          kill -0 "$worker_pid_a"
+          kill -0 "$worker_pid_b"
+          grep --quiet "registered with control plane" /tmp/flowtool-worker-1.log
+          grep --quiet "registered with control plane" /tmp/flowtool-worker-2.log
+          kill "$worker_pid_a"
+          wait "$worker_pid_a" 2>/dev/null || true
+          kill -0 "$worker_pid_b"

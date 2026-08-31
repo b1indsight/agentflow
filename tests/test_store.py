@@ -28,6 +28,7 @@ def test_attempt_and_job_lifecycle_round_trip(store: Store) -> None:
     flow.current_attempt_id = attempt.id
     store.update_attempt(attempt)
     store.update_flow(flow)
+    store.worker_connected("worker-1", protocol_version=1)
 
     job = store.enqueue_job(flow.id, JobKind.INITIAL, payload={"issue_number": 8})
     claimed = store.assign_job("worker-1", "assignment-1")
@@ -41,8 +42,11 @@ def test_attempt_and_job_lifecycle_round_trip(store: Store) -> None:
     assert claimed.assigned_worker_id == "worker-1"
     assert claimed.assignment_token == "assignment-1"
 
-    assert store.start_assignment(claimed.id, "worker-1", "wrong") is False
-    assert store.start_assignment(claimed.id, "worker-1", "assignment-1") is True
+    assert store.start_assignment(claimed.id, attempt.id, "worker-1", "wrong") is False
+    assert store.start_assignment(
+        claimed.id, attempt.id, "worker-1", "assignment-1"
+    ) is True
+    assert store.get_attempt(attempt.id).worker_id == "worker-1"  # type: ignore[union-attr]
     assert store.heartbeat_assignment(claimed.id, "worker-1", "assignment-1") is True
     assert store.finish_assignment(
         claimed.id, "worker-1", "assignment-1", JobState.DONE
@@ -54,6 +58,10 @@ def test_attempt_and_job_lifecycle_round_trip(store: Store) -> None:
 
 def test_only_unstarted_remote_assignments_can_be_requeued(store: Store) -> None:
     flow = store.create_flow("owner/repo", 9, installation_id=None)
+    attempt = store.create_attempt(flow.id)
+    flow.current_attempt_id = attempt.id
+    store.update_flow(flow)
+    store.worker_connected("worker-1", protocol_version=1)
     first = store.enqueue_job(flow.id, JobKind.INITIAL)
     assigned = store.assign_job("worker-1", "assignment-1")
     assert assigned is not None
@@ -64,7 +72,9 @@ def test_only_unstarted_remote_assignments_can_be_requeued(store: Store) -> None
 
     assigned = store.assign_job("worker-1", "assignment-2")
     assert assigned is not None
-    assert store.start_assignment(first.id, "worker-1", "assignment-2") is True
+    assert store.start_assignment(
+        first.id, attempt.id, "worker-1", "assignment-2"
+    ) is True
     # Once the remote executor starts, replay may duplicate external effects; fail closed instead.
     assert store.requeue_assignment(first.id, "worker-1", "assignment-2") is False
     assert store.fail_assignment(
@@ -78,15 +88,20 @@ def test_only_unstarted_remote_assignments_can_be_requeued(store: Store) -> None
 
 
 def test_startup_requeues_unstarted_and_fails_started_assignments(store: Store) -> None:
+    store.worker_connected("worker-1", protocol_version=1)
+    store.worker_connected("worker-2", protocol_version=1)
     unstarted_flow = store.create_flow("owner/unstarted", 1, installation_id=None)
     unstarted_job = store.enqueue_job(unstarted_flow.id, JobKind.INITIAL)
     assert store.assign_job("worker-1", "unstarted-token") is not None
 
     started_flow = store.create_flow("owner/started", 2, installation_id=None)
+    started_attempt = store.create_attempt(started_flow.id)
+    started_flow.current_attempt_id = started_attempt.id
+    store.update_flow(started_flow)
     started_job = store.enqueue_job(started_flow.id, JobKind.INITIAL)
-    assert store.assign_job("worker-1", "started-token") is not None
+    assert store.assign_job("worker-2", "started-token") is not None
     assert store.start_assignment(
-        started_job.id, "worker-1", "started-token"
+        started_job.id, started_attempt.id, "worker-2", "started-token"
     ) is True
 
     assert store.recover_abandoned_assignments() == (1, 1)
@@ -146,6 +161,8 @@ def test_concurrent_stores_do_not_claim_the_same_job(
     flow = store.create_flow("owner/queue", 12, installation_id=None)
     queued = store.enqueue_job(flow.id, JobKind.INITIAL)
     other = Store(postgresql_url)
+    store.worker_connected("worker-1", protocol_version=1)
+    store.worker_connected("worker-2", protocol_version=1)
 
     try:
         with ThreadPoolExecutor(max_workers=2) as executor:
@@ -163,6 +180,47 @@ def test_concurrent_stores_do_not_claim_the_same_job(
 
     claimed_ids = [job.id for job in claimed if job is not None]
     assert claimed_ids == [queued.id]
+
+
+def test_workers_are_single_slot_and_attempt_affinity_is_enforced(store: Store) -> None:
+    store.worker_connected("worker-a", protocol_version=1)
+    store.worker_connected("worker-b", protocol_version=1)
+    first_flow = store.create_flow("owner/first", 21, installation_id=None)
+    second_flow = store.create_flow("owner/second", 22, installation_id=None)
+    first_attempt = store.create_attempt(first_flow.id)
+    first_flow.current_attempt_id = first_attempt.id
+    store.update_flow(first_flow)
+    first = store.enqueue_job(first_flow.id, JobKind.INITIAL)
+    second = store.enqueue_job(second_flow.id, JobKind.INITIAL)
+
+    first_claim = store.assign_job("worker-a", "token-a")
+    assert first_claim is not None and first_claim.id == first.id
+    assert store.assign_job("worker-a", "another-token") is None
+    second_claim = store.assign_job("worker-b", "token-b")
+    assert second_claim is not None and second_claim.id == second.id
+    assert store.start_assignment(
+        first.id, first_attempt.id, "worker-a", "token-a"
+    ) is True
+    assert store.finish_assignment(first.id, "worker-a", "token-a", JobState.DONE)
+
+    revision = store.enqueue_job(first_flow.id, JobKind.REVISION)
+    assert store.finish_assignment(second.id, "worker-b", "token-b", JobState.DONE)
+    assert store.assign_job("worker-b", "wrong-worker") is None
+    affinity_claim = store.assign_job("worker-a", "right-worker")
+    assert affinity_claim is not None and affinity_claim.id == revision.id
+
+
+def test_worker_presence_round_trip(store: Store) -> None:
+    online = store.worker_connected("worker-a", protocol_version=1)
+
+    assert online.status == "online"
+    assert online.current_job_id is None
+    store.worker_disconnected("worker-a", "connection closed")
+
+    worker = store.list_workers()[0]
+    assert worker.worker_id == "worker-a"
+    assert worker.status == "offline"
+    assert worker.last_error == "connection closed"
 
 
 def test_concurrent_stores_reserve_a_delivery_once(

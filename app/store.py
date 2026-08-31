@@ -17,6 +17,8 @@ from app.models import (
     JobKind,
     JobState,
     ReviewItem,
+    WorkerRecord,
+    WorkerStatus,
     utcnow,
 )
 
@@ -75,6 +77,18 @@ CREATE TABLE IF NOT EXISTS jobs (
   updated_at TIMESTAMPTZ NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_jobs_state ON jobs(state);
+
+CREATE TABLE IF NOT EXISTS workers (
+  worker_id TEXT PRIMARY KEY,
+  protocol_version INTEGER NOT NULL,
+  status TEXT NOT NULL,
+  current_job_id BIGINT,
+  first_connected_at TIMESTAMPTZ NOT NULL,
+  last_connected_at TIMESTAMPTZ NOT NULL,
+  last_seen_at TIMESTAMPTZ NOT NULL,
+  last_assigned_at TIMESTAMPTZ,
+  last_error TEXT
+);
 
 -- Feature 1 upgrades existing PostgreSQL installations without a destructive migration.
 ALTER TABLE attempts ADD COLUMN IF NOT EXISTS worker_id TEXT;
@@ -317,8 +331,45 @@ class Store:
                 (flow_id, JobState.FAILED),
             ).fetchone()
 
+    # ---------------------------------------------------------------- workers
+
+    def worker_connected(self, worker_id: str, protocol_version: int) -> WorkerRecord:
+        now = utcnow()
+        with (
+            self._pool.connection() as connection,
+            connection.cursor(row_factory=class_row(WorkerRecord)) as cursor,
+        ):
+            row = cursor.execute(
+                "INSERT INTO workers(worker_id, protocol_version, status, current_job_id,"
+                " first_connected_at, last_connected_at, last_seen_at, last_error)"
+                " VALUES (%s,%s,%s,NULL,%s,%s,%s,NULL)"
+                " ON CONFLICT(worker_id) DO UPDATE SET protocol_version=excluded.protocol_version,"
+                " status=excluded.status, current_job_id=NULL,"
+                " last_connected_at=excluded.last_connected_at,"
+                " last_seen_at=excluded.last_seen_at, last_error=NULL RETURNING *",
+                (worker_id, protocol_version, WorkerStatus.ONLINE, now, now, now),
+            ).fetchone()
+        return _required(row)
+
+    def worker_disconnected(self, worker_id: str, reason: str | None = None) -> None:
+        with self._pool.connection() as connection:
+            connection.execute(
+                "UPDATE workers SET status=%s, current_job_id=NULL, last_seen_at=%s,"
+                " last_error=%s WHERE worker_id=%s",
+                (WorkerStatus.OFFLINE, utcnow(), reason, worker_id),
+            )
+
+    def list_workers(self) -> list[WorkerRecord]:
+        with (
+            self._pool.connection() as connection,
+            connection.cursor(row_factory=class_row(WorkerRecord)) as cursor,
+        ):
+            return cursor.execute(
+                "SELECT * FROM workers ORDER BY worker_id"
+            ).fetchall()
+
     def assign_job(self, worker_id: str, token: str) -> Job | None:
-        """Assign the oldest eligible job to the configured remote worker."""
+        """Claim the oldest affinity-compatible job for the fairest idle worker."""
 
         now = utcnow()
         with (
@@ -326,29 +377,70 @@ class Store:
             connection.cursor(row_factory=class_row(Job)) as cursor,
         ):
             return cursor.execute(
-                "WITH next_job AS ("
+                "WITH next_worker AS ("
+                " SELECT worker_id FROM workers WHERE status=%s AND current_job_id IS NULL"
+                " ORDER BY last_assigned_at NULLS FIRST, worker_id FOR UPDATE LIMIT 1"
+                "), next_job AS ("
                 " SELECT j.id FROM jobs j JOIN flows f ON f.id=j.flow_id"
+                " LEFT JOIN attempts a ON a.id=f.current_attempt_id"
                 " WHERE j.state=%s AND f.state NOT IN ('archived','cancelled','failed')"
-                " ORDER BY j.id"
-                " FOR UPDATE SKIP LOCKED LIMIT 1"
-                ")"
+                " AND (a.worker_id IS NULL OR a.worker_id=%s)"
+                " AND EXISTS (SELECT 1 FROM next_worker WHERE worker_id=%s)"
+                " ORDER BY j.created_at, j.id FOR UPDATE OF j SKIP LOCKED LIMIT 1"
+                "), assigned AS ("
                 " UPDATE jobs SET state=%s, pid=NULL, assigned_worker_id=%s,"
                 " assignment_token=%s, started_at=NULL, last_error=NULL,"
                 " attempt=attempt+1, heartbeat_at=%s, updated_at=%s"
-                " FROM next_job WHERE jobs.id=next_job.id RETURNING jobs.*",
-                (JobState.QUEUED, JobState.RUNNING, worker_id, token, now, now),
+                " FROM next_job WHERE jobs.id=next_job.id RETURNING jobs.*"
+                "), worker_update AS ("
+                " UPDATE workers SET status=%s, current_job_id=assigned.id,"
+                " last_assigned_at=%s, last_seen_at=%s FROM assigned"
+                " WHERE workers.worker_id=%s RETURNING workers.worker_id"
+                ") SELECT assigned.* FROM assigned JOIN worker_update ON TRUE",
+                (
+                    WorkerStatus.ONLINE,
+                    JobState.QUEUED,
+                    worker_id,
+                    worker_id,
+                    JobState.RUNNING,
+                    worker_id,
+                    token,
+                    now,
+                    now,
+                    WorkerStatus.BUSY,
+                    now,
+                    now,
+                    worker_id,
+                ),
             ).fetchone()
 
-    def start_assignment(self, job_id: int, worker_id: str, token: str) -> bool:
+    def start_assignment(
+        self, job_id: int, attempt_id: int, worker_id: str, token: str
+    ) -> bool:
         now = utcnow()
-        with self._pool.connection() as connection:
-            result = connection.execute(
+        with self._pool.connection() as connection, connection.transaction():
+            job = connection.execute(
+                "SELECT flow_id FROM jobs WHERE id=%s AND state=%s"
+                " AND assigned_worker_id=%s AND assignment_token=%s"
+                " AND started_at IS NULL FOR UPDATE",
+                (job_id, JobState.RUNNING, worker_id, token),
+            ).fetchone()
+            if job is None:
+                return False
+            bound = connection.execute(
+                "UPDATE attempts SET worker_id=%s, updated_at=%s"
+                " WHERE id=%s AND flow_id=%s AND (worker_id IS NULL OR worker_id=%s)",
+                (worker_id, now, attempt_id, job["flow_id"], worker_id),
+            )
+            if bound.rowcount != 1:
+                return False
+            started = connection.execute(
                 "UPDATE jobs SET started_at=%s, heartbeat_at=%s, updated_at=%s"
                 " WHERE id=%s AND state=%s AND assigned_worker_id=%s"
                 " AND assignment_token=%s AND started_at IS NULL",
                 (now, now, now, job_id, JobState.RUNNING, worker_id, token),
             )
-        return result.rowcount == 1
+            return started.rowcount == 1
 
     def heartbeat_assignment(self, job_id: int, worker_id: str, token: str) -> bool:
         now = utcnow()
@@ -359,6 +451,11 @@ class Store:
                 " AND assignment_token=%s",
                 (now, now, job_id, JobState.RUNNING, worker_id, token),
             )
+            if result.rowcount == 1:
+                connection.execute(
+                    "UPDATE workers SET last_seen_at=%s WHERE worker_id=%s",
+                    (now, worker_id),
+                )
         return result.rowcount == 1
 
     def assignment_active(self, job_id: int, worker_id: str, token: str) -> bool:
@@ -382,6 +479,12 @@ class Store:
                 " AND assignment_token=%s",
                 (state, utcnow(), job_id, JobState.RUNNING, worker_id, token),
             )
+            if result.rowcount == 1:
+                connection.execute(
+                    "UPDATE workers SET status=%s, current_job_id=NULL, last_seen_at=%s"
+                    " WHERE worker_id=%s AND current_job_id=%s",
+                    (WorkerStatus.ONLINE, utcnow(), worker_id, job_id),
+                )
         return result.rowcount == 1
 
     def requeue_assignment(self, job_id: int, worker_id: str, token: str) -> bool:
@@ -392,6 +495,12 @@ class Store:
                 " AND assigned_worker_id=%s AND assignment_token=%s AND started_at IS NULL",
                 (JobState.QUEUED, utcnow(), job_id, JobState.RUNNING, worker_id, token),
             )
+            if result.rowcount == 1:
+                connection.execute(
+                    "UPDATE workers SET status=%s, current_job_id=NULL, last_seen_at=%s"
+                    " WHERE worker_id=%s AND current_job_id=%s",
+                    (WorkerStatus.ONLINE, utcnow(), worker_id, job_id),
+                )
         return result.rowcount == 1
 
     def fail_assignment(self, job_id: int, worker_id: str, token: str, reason: str) -> bool:
@@ -402,6 +511,12 @@ class Store:
                 " AND assignment_token=%s",
                 (JobState.FAILED, reason, utcnow(), job_id, JobState.RUNNING, worker_id, token),
             )
+            if result.rowcount == 1:
+                connection.execute(
+                    "UPDATE workers SET status=%s, current_job_id=NULL, last_seen_at=%s,"
+                    " last_error=%s WHERE worker_id=%s AND current_job_id=%s",
+                    (WorkerStatus.ONLINE, utcnow(), reason, worker_id, job_id),
+                )
         return result.rowcount == 1
 
     def recover_abandoned_assignments(self) -> tuple[int, int]:
@@ -409,6 +524,10 @@ class Store:
 
         now = utcnow()
         with self._pool.connection() as connection:
+            connection.execute(
+                "UPDATE workers SET status=%s, current_job_id=NULL",
+                (WorkerStatus.OFFLINE,),
+            )
             requeued = connection.execute(
                 "UPDATE jobs SET state=%s, assigned_worker_id=NULL, assignment_token=NULL,"
                 " heartbeat_at=NULL, updated_at=%s WHERE state=%s AND started_at IS NULL",
