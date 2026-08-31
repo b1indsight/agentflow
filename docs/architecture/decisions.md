@@ -9,7 +9,7 @@
 | CI 门禁 | 使用目标仓库自身 CI | FlowTool 不自建门禁，人工合并者依据 PR checks 判断 |
 | 会话连续 | Codex `resume` 同一会话 | 2026-08-01 独立实测成立；真实多轮修订仍待验证 |
 | PR 所有权 | Orchestrator 创建 PR | Code Agent 只负责本地改码/提交/push；真实路径未贯通 |
-| 持久化 | SQLite + 持久化 jobs | M0 已验证；当前是单进程、同步 SQLite |
+| 持久化 | PostgreSQL + 持久化 jobs | Psycopg 连接池与并发安全 claim；当前仍是单进程、同步 Store |
 | 本地版本控制 | VCS 指引交给 Code Agent | VCS 不是端口；jj commit 已独立实测，git/push 未贯通 |
 
 “决策已定”只表示目标方向固定，不表示对应 adapter 或端到端行为已经完成。

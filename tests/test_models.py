@@ -1,7 +1,26 @@
+from datetime import datetime
+
 import pytest
 from pydantic import ValidationError
 
-from app.models import CodexResult, TriageVerdict, Verdict
+from app.models import CodexResult, Job, JobKind, JobState, TriageVerdict, Verdict
+
+
+def test_persisted_model_validates_database_values() -> None:
+    job = Job.model_validate(
+        {
+            "id": 7,
+            "flow_id": 3,
+            "kind": "initial",
+            "state": "queued",
+            "created_at": "2026-08-28T09:30:00+00:00",
+            "updated_at": "2026-08-28T09:31:00+00:00",
+        }
+    )
+
+    assert job.kind is JobKind.INITIAL
+    assert job.state is JobState.QUEUED
+    assert job.created_at == datetime.fromisoformat("2026-08-28T09:30:00+00:00")
 
 
 def test_triage_verdict_validates_known_verdicts() -> None:

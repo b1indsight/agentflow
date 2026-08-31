@@ -30,8 +30,6 @@ jobs:
             name: Ruff
           - id: mypy
             name: Mypy
-          - id: pytest
-            name: pytest
           - id: build
             name: Build
 
@@ -61,10 +59,62 @@ jobs:
         if: matrix.id == 'mypy'
         run: uv run mypy app tests
 
-      - name: Run pytest
-        if: matrix.id == 'pytest'
-        run: uv run pytest
-
       - name: Build distributions
         if: matrix.id == 'build'
         run: uv build --no-sources
+
+  pytest:
+    name: pytest
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: flowtool_test
+          POSTGRES_USER: flowtool
+          POSTGRES_PASSWORD: flowtool
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U flowtool -d flowtool_test"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 15
+    env:
+      FLOWTOOL_DATABASE_URL: postgresql://flowtool:flowtool@127.0.0.1:5432/flowtool_test
+      FLOWTOOL_TEST_DATABASE_URL: postgresql://flowtool:flowtool@127.0.0.1:5432/flowtool_test
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install locked dependencies
+        run: uv sync --locked --dev
+
+      - name: Run pytest
+        run: uv run pytest
+
+      - name: Smoke PostgreSQL-backed service
+        run: |
+          uv run flowtool serve > /tmp/flowtool.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          for attempt in $(seq 1 20); do
+            if curl --fail --silent http://127.0.0.1:8000/healthz; then
+              exit 0
+            fi
+            sleep 0.5
+          done
+          cat /tmp/flowtool.log
+          exit 1

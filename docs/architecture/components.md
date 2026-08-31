@@ -11,7 +11,7 @@ Codex 等长任务占用 GitHub 的 Webhook 请求。
 
 - `GET /healthz` 返回 `{"status": "ok"}`；它是存活探针，不检查数据库或外部依赖；
 - `POST /webhook` 缺少或带错误签名时返回 401；签名正确时创建后台 handler 并返回 202；
-- FastAPI lifespan 初始化 SQLite，启动 worker/reconciler，并在关闭时停止后台组件；
+- FastAPI lifespan 初始化 PostgreSQL schema，启动 worker/reconciler，并在关闭时停止后台组件和连接池；
 - 自动化测试覆盖 health、错误签名、正确签名、202 交接和一条 signed label→job 路径。
 
 边界：202 表示事件已交给进程内后台 task，不表示业务处理或持久化已经成功。进程在 handler 落库前
@@ -22,7 +22,7 @@ Codex 等长任务占用 GitHub 的 Webhook 请求。
 当前实现：
 
 - 忽略 `sender.login == BOT_LOGIN` 的事件；
-- 以 `X-GitHub-Delivery` 持久化去重，并记录原始 payload；
+- 以 `X-GitHub-Delivery` 原子占有并持久化去重，只有成功插入的 handler 才继续处理，同时记录原始 payload；
 - 仅允许 allowlist 用户通过 `issues.labeled(flow)` 创建 active flow 与 initial job；
 - `issues.unlabeled(flow)` 或严格等于 `/flow stop` 的评论取消 active flow；
 - review body、inline comment 和 PR conversation 归属到当前 attempt，settle 去抖后创建 TRIAGE job；
@@ -104,9 +104,14 @@ commit 和 push，Orchestrator 只在 push 后走 GitHub API。当前缺口包�
 - workspace-write 下 git `.git` 写入被挡，jj commit 只是独立实测；
 - cleanup 直接调用 `rm -rf`，其可靠性和失败恢复尚无自动化覆盖。
 
-## 4.7 Store（SQLite）
+## 4.7 Store（PostgreSQL）
 
-SQLite 是 M0 当前事实，使用 stdlib `sqlite3`、WAL 和 foreign keys：
+当前 Store 使用 Psycopg 3 的同步连接池访问 PostgreSQL：
+
+`Flow`、`Attempt`、`Job` 和 `ReviewItem` 是 Pydantic 持久化模型。返回这些领域对象的查询在
+cursor 上使用 Psycopg `class_row(Model)`，由模型统一校验枚举、时间和其他字段；其余轻量查询继续
+使用 pool 的 `dict_row` 默认值。SQL、事务边界、JSONB 适配和并发协议仍由 Store 显式维护，没有引入
+ORM。
 
 - `flows`：issue 级状态，`(repo, issue)` 仅允许一个非终态 flow；
 - `attempts`：每个候选解法的 branch/session/PR/revision_cycles，MVP 每 flow 一个；
@@ -115,8 +120,13 @@ SQLite 是 M0 当前事实，使用 stdlib `sqlite3`、WAL 和 foreign keys：
 - `codex_runs`：按 attempt 记录 prompt、kind、exit 与时间；
 - `review_threads`：按 attempt 记录正文/inline/conversation 反馈及 relayed/resolved 状态。
 
-自动化覆盖 active 唯一约束、flow/attempt/job 往返、review upsert、heartbeat 和 stale job 重排队。
-当前是单 worker 假设，没有跨进程 claim 锁或异步 SQLite；并发数据证明需要前不提前迁移。
+自动化覆盖 active 唯一约束、flow/attempt/job 往返、review upsert、heartbeat、stale job 重排队、
+两个独立 Store 的共享可见性、同一 delivery 的并发去重，以及两个连接不会 claim 同一个 queued job。
+`claim_job()` 使用事务内的 `FOR UPDATE SKIP LOCKED`，但当前 daemon 仍只启动一个 worker。
+
+Store 继续使用同步接口，也没有 worker identity、lease token/fencing 或 Codex session affinity；因此
+PostgreSQL 移除了共享文件限制，但不代表控制面/worker 分离或故障接管已经完成。M0 最初验收的 SQLite
+文件不会自动导入 PostgreSQL。
 
 ## 4.8 GitHub 交互面
 

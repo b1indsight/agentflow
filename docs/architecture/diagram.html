@@ -266,7 +266,7 @@
   <div class="foundation">
     <article class="node" data-status="done">
       <div class="node__top"><span class="node__name">models</span><span class="pill">M0 已验</span></div>
-      <p class="node__role">枚举 · dataclass · pydantic 跨模型契约（TriageVerdict / CodexResult）</p>
+      <p class="node__role">枚举 · Pydantic 持久化/跨模型契约 · 非持久化 dataclass</p>
       <code class="node__file">app/models.py</code>
     </article>
     <article class="node" data-status="done">
@@ -333,7 +333,7 @@
       <div class="grid">
         <article class="node" data-status="done">
           <div class="node__top"><span class="node__name">Store</span><span class="pill">M0 已验</span></div>
-          <p class="node__role">SQLite · flows / <b>attempts</b> / jobs / events / codex_runs / review_threads · 唯一约束 · 恢复 · runs/review 归属 attempt(§9-2)</p>
+          <p class="node__role">PostgreSQL + Psycopg pool · flows / <b>attempts</b> / jobs / events / codex_runs / review_threads · 并发 claim · 恢复</p>
           <code class="node__file">app/store.py</code>
         </article>
         <article class="node" data-status="done">
@@ -416,8 +416,8 @@
           <code class="node__file">app/cli.py</code>
         </article>
         <article class="node" data-status="done">
-          <div class="node__top"><span class="node__name">M0 Tests</span><span class="pill">M0 已验</span></div>
-          <p class="node__role">19 项 · 配置/契约 · SQLite · HMAC/路由 · worker/恢复 · 全部隔离外部服务</p>
+          <div class="node__top"><span class="node__name">Automated Tests</span><span class="pill">已验证</span></div>
+          <p class="node__role">24 项 · 配置/契约 · PostgreSQL · HMAC/路由 · worker/恢复 · 外部 agent/API 隔离</p>
           <code class="node__file">tests/ · pytest / Ruff / Mypy 全绿</code>
         </article>
         <article class="node" data-status="partial">

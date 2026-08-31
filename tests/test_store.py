@@ -1,7 +1,8 @@
-import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 
 import pytest
+from psycopg.errors import UniqueViolation
 
 import app.store as store_module
 from app.models import FlowState, JobKind, JobState, ReviewItem, ReviewItemKind, utcnow
@@ -11,7 +12,7 @@ from app.store import Store
 def test_only_one_active_flow_exists_per_issue(store: Store) -> None:
     flow = store.create_flow("owner/repo", 7, installation_id=11)
 
-    with pytest.raises(sqlite3.IntegrityError):
+    with pytest.raises(UniqueViolation):
         store.create_flow("owner/repo", 7, installation_id=11)
 
     flow.state = FlowState.CANCELLED
@@ -88,3 +89,54 @@ def test_review_item_upsert_preserves_one_feedback_record(store: Store) -> None:
     assert pending[0].id is not None
     store.mark_relayed([pending[0].id])
     assert store.unrelayed_items(attempt.id) == []
+
+
+def test_independent_stores_share_persisted_state(
+    store: Store, postgresql_url: str
+) -> None:
+    flow = store.create_flow("owner/shared", 11, installation_id=22)
+    other = Store(postgresql_url)
+
+    try:
+        assert other.get_flow(flow.id) == flow
+    finally:
+        other.close()
+
+
+def test_concurrent_stores_do_not_claim_the_same_job(
+    store: Store, postgresql_url: str
+) -> None:
+    flow = store.create_flow("owner/queue", 12, installation_id=None)
+    queued = store.enqueue_job(flow.id, JobKind.INITIAL)
+    other = Store(postgresql_url)
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            claimed = list(executor.map(lambda current: current.claim_job(), (store, other)))
+    finally:
+        other.close()
+
+    claimed_ids = [job.id for job in claimed if job is not None]
+    assert claimed_ids == [queued.id]
+
+
+def test_concurrent_stores_reserve_a_delivery_once(
+    store: Store, postgresql_url: str
+) -> None:
+    other = Store(postgresql_url)
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            recorded = list(
+                executor.map(
+                    lambda current: current.record_event(
+                        "shared-delivery", "issues", None, {"action": "labeled"}
+                    ),
+                    (store, other),
+                )
+            )
+    finally:
+        other.close()
+
+    assert sorted(recorded) == [False, True]
+    assert store.event_seen("shared-delivery") is True

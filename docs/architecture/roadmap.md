@@ -16,7 +16,7 @@ flowtool/
     sandbox.py        # Sandbox 端口 adapter：codex workspace-write（§4.6 / §9-5）
     worker.py         # job 队列消费 + 崩溃恢复（§10-1）
     reconcile.py      # 对账 poller（§10-2）
-    store.py          # SQLite 模型 + 仓储（含 jobs 表）
+    store.py          # PostgreSQL schema + 仓储（含 jobs 表）
     config.py         # 配置（pydantic-settings）
     models.py         # 领域类型 / 枚举
     cli.py            # admin CLI（§10-8）
@@ -29,6 +29,7 @@ flowtool/
 
 - **M0（已验收）** 骨架 + webhook 验签 + SQLite（含 `jobs`）+ 配置 + worker / 崩溃恢复骨架；
   19 个自动化测试、Ruff、Mypy、CLI 与 `/healthz` runtime smoke 全部通过（2026-08-26）；
+- **持久层替换（2026-08-27）** PostgreSQL 成为当前唯一运行时数据库；M0 的 SQLite 描述保留为历史验收事实；
 - **M1** 触发（含 allowlist）→ 工作区 → codex 首轮 → 开 PR（单 flow happy path）
 - **M2** 语义 Triage（bub）门 + 回喂循环（settle → revise/answer/wait + resume/兜底 + 自动 resolve）
 - **M3** 人工合并检测（`pull_request.closed`）→ 归档 + 状态标签 / 评论

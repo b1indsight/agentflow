@@ -25,9 +25,9 @@ class Settings(BaseSettings):
     trigger_label: str = "flow"
     allowlist: Annotated[list[str], NoDecode] = []
 
-    # 本地路径
+    # 持久化与本地路径
+    database_url: str = ""
     repos_root: Path = Path("~/.flowtool/repos")
-    db_path: Path = Path("~/.flowtool/flowtool.sqlite3")
 
     # 修订循环（docs/architecture/review-loop.md §B.7）
     settle_seconds: float = 75.0
@@ -51,7 +51,14 @@ class Settings(BaseSettings):
             return [x.strip() for x in v.split(",") if x.strip()]
         return v
 
-    @field_validator("repos_root", "db_path", "github_private_key_path", mode="after")
+    @field_validator("database_url")
+    @classmethod
+    def _require_database_url(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("FLOWTOOL_DATABASE_URL is required")
+        return value
+
+    @field_validator("repos_root", "github_private_key_path", mode="after")
     @classmethod
     def _expand(cls, v: Path) -> Path:
         return v.expanduser()

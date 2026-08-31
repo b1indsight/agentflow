@@ -4,14 +4,14 @@ FlowTool 的目标是把带 `flow` 标签的 GitHub issue 编排成
 `code agent 编码 → PR → 人工审核 → 自动回喂修订 → 人工合并 → 归档` 的 headless 闭环。
 项目自身不提供业务 UI，交互面是 GitHub issue 和 PR。
 
-> 当前状态：**M0 骨架已验收（2026-08-26）**。仓库已验证配置、持久化、Webhook 入口、
+> 当前状态：**M0 骨架已验收，持久层已替换为 PostgreSQL（2026-08-28）**。仓库已验证配置、持久化、Webhook 入口、
 > 事件路由与 worker 恢复基础；真实 GitHub/Codex/bub 闭环属于 M1+，目前不能按生产能力使用。
 
 ## 当前能力
 
 M0 已经具备并验证：
 
-- 加载 `FLOWTOOL_` 配置，初始化 SQLite 的 flow、attempt、job、event、run 和 review 数据；
+- 加载 `FLOWTOOL_` 配置，通过 Psycopg 连接池初始化 PostgreSQL 的 flow、attempt、job、event、run 和 review 数据；
 - 校验 `X-Hub-Signature-256`，异步交接 Webhook，并处理 delivery 去重、allowlist、取消和 review 入库；
 - 用进程内 worker claim/dispatch 持久化 job，维护 heartbeat，启动时恢复过期的 running job；
 - 通过 CLI 启动 daemon、查看 flow，并执行基础 cancel/retry 运维命令；
@@ -41,15 +41,17 @@ VCS 不是端口；详细设计与当前限制见 [`components.md`](docs/archite
 
 ```bash
 uv sync --locked
+docker compose up -d postgres
 cp env.example .env
 # 先编辑 .env：替换 change-me、your-username 和其他占位值
 FLOWTOOL_HOST=127.0.0.1 uv run flowtool serve
 ```
 
-不要用示例 Webhook secret 或 allowlist 启动可公开访问的服务；对外暴露端点前必须生成独立 secret，
-填入真实 allowlist，并配置 HTTPS/反向代理。启动 M0 daemon 和 `/healthz` 不等于 GitHub/Codex/bub
-集成已经可用；接入外部服务前请先阅读 [GitHub App 接入说明](docs/architecture/github-app.md)和
-[已知短板](docs/architecture/decisions.md)。
+Compose 中的 PostgreSQL 账号只用于本地开发。远程部署必须使用独立密码和 TLS；当前 M0 daemon 会初始化
+schema，因此数据库账号需要拥有应用 schema，但不应具有数据库外权限。项目不自动导入旧 SQLite 文件。
+也不要用示例 Webhook secret 或 allowlist 启动可公开访问的服务。启动 M0 daemon
+和 `/healthz` 不等于 GitHub/Codex/bub 集成已经可用；接入外部服务前请先阅读
+[GitHub App 接入说明](docs/architecture/github-app.md)和[已知短板](docs/architecture/decisions.md)。
 
 常用运维入口：
 
@@ -64,7 +66,7 @@ uv run flowtool flow retry <FLOW_ID>
 ## 验证基线
 
 ```bash
-uv run pytest
+FLOWTOOL_TEST_DATABASE_URL=postgresql://flowtool:flowtool@127.0.0.1:5432/flowtool uv run pytest
 uv run ruff check app tests
 uv run mypy app tests
 uv build --no-sources
@@ -74,10 +76,10 @@ uv run flowtool --help
 [GitHub Actions CI](.github/workflows/ci.yml) 会在 pull request、推送到 `main` 和手动触发时，使用
 Python 3.12 分别运行 Ruff、Mypy、pytest 与 sdist/wheel 构建；四项检查并行执行且独立报告结果。
 
-截至 2026-08-26，19 项自动化测试覆盖配置/契约、SQLite、HMAC、health、异步交接、delivery 去重、
+截至 2026-08-28，24 项自动化测试覆盖配置/契约、PostgreSQL、HMAC、health、异步交接、delivery 去重、
 allowlist、取消与 review 路由，以及 worker dispatch、失败、heartbeat 清理/重试和启动恢复；测试隔离
-GitHub、Codex、bub、真实凭据与轮询等待。`uv sync --locked`、Ruff、Mypy、CLI help 和真实
-`flowtool serve` + `/healthz` smoke 均已通过。
+GitHub、Codex、bub、真实凭据与轮询等待。PostgreSQL 场景还覆盖两个独立 Store 的共享可见性、原子
+delivery 去重和并发 job claim。`uv sync --locked`、Ruff、Mypy、CLI help 和构建检查均已通过。
 
 另有 2026-08-01 的独立实测证明 Codex `exec` / `resume` 上下文连续，`workspace-write` 下 jj `.jj`
 可写并能 commit；git `.git` 写入被拦截，push 与凭据注入未验证。这些结果不能替代 M1+ 端到端验收。
