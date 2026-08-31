@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import os
-from datetime import timedelta
 from typing import Any, cast
 
 from psycopg import Connection
@@ -43,6 +41,7 @@ CREATE TABLE IF NOT EXISTS attempts (
   branch TEXT,
   codex_session_id TEXT,
   pr_number INTEGER,
+  worker_id TEXT,
   revision_cycles INTEGER NOT NULL DEFAULT 0,
   created_at TIMESTAMPTZ NOT NULL,
   updated_at TIMESTAMPTZ NOT NULL
@@ -67,11 +66,22 @@ CREATE TABLE IF NOT EXISTS jobs (
   attempt INTEGER NOT NULL DEFAULT 0,
   pid INTEGER,
   heartbeat_at TIMESTAMPTZ,
+  assigned_worker_id TEXT,
+  assignment_token TEXT,
+  started_at TIMESTAMPTZ,
+  last_error TEXT,
   payload JSONB,
   created_at TIMESTAMPTZ NOT NULL,
   updated_at TIMESTAMPTZ NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_jobs_state ON jobs(state);
+
+-- Feature 1 upgrades existing PostgreSQL installations without a destructive migration.
+ALTER TABLE attempts ADD COLUMN IF NOT EXISTS worker_id TEXT;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS assigned_worker_id TEXT;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS assignment_token TEXT;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS last_error TEXT;
 
 CREATE TABLE IF NOT EXISTS events (
   delivery_id TEXT PRIMARY KEY,
@@ -255,11 +265,12 @@ class Store:
         with self._pool.connection() as connection:
             connection.execute(
                 "UPDATE attempts SET branch=%s, codex_session_id=%s, pr_number=%s,"
-                " revision_cycles=%s, updated_at=%s WHERE id=%s",
+                " worker_id=%s, revision_cycles=%s, updated_at=%s WHERE id=%s",
                 (
                     attempt.branch,
                     attempt.codex_session_id,
                     attempt.pr_number,
+                    attempt.worker_id,
                     attempt.revision_cycles,
                     attempt.updated_at,
                     attempt.id,
@@ -296,8 +307,19 @@ class Store:
         ):
             return cursor.execute("SELECT * FROM jobs WHERE id=%s", (job_id,)).fetchone()
 
-    def claim_job(self) -> Job | None:
-        """Atomically claim the oldest queued job without blocking another consumer."""
+    def latest_failed_job(self, flow_id: int) -> Job | None:
+        with (
+            self._pool.connection() as connection,
+            connection.cursor(row_factory=class_row(Job)) as cursor,
+        ):
+            return cursor.execute(
+                "SELECT * FROM jobs WHERE flow_id=%s AND state=%s ORDER BY id DESC LIMIT 1",
+                (flow_id, JobState.FAILED),
+            ).fetchone()
+
+    def assign_job(self, worker_id: str, token: str) -> Job | None:
+        """Assign the oldest eligible job to the configured remote worker."""
+
         now = utcnow()
         with (
             self._pool.connection() as connection,
@@ -305,40 +327,110 @@ class Store:
         ):
             return cursor.execute(
                 "WITH next_job AS ("
-                " SELECT id FROM jobs WHERE state=%s ORDER BY id"
+                " SELECT j.id FROM jobs j JOIN flows f ON f.id=j.flow_id"
+                " WHERE j.state=%s AND f.state NOT IN ('archived','cancelled','failed')"
+                " ORDER BY j.id"
                 " FOR UPDATE SKIP LOCKED LIMIT 1"
                 ")"
-                " UPDATE jobs SET state=%s, pid=%s, attempt=attempt+1, heartbeat_at=%s,"
-                " updated_at=%s FROM next_job WHERE jobs.id=next_job.id RETURNING jobs.*",
-                (JobState.QUEUED, JobState.RUNNING, os.getpid(), now, now),
+                " UPDATE jobs SET state=%s, pid=NULL, assigned_worker_id=%s,"
+                " assignment_token=%s, started_at=NULL, last_error=NULL,"
+                " attempt=attempt+1, heartbeat_at=%s, updated_at=%s"
+                " FROM next_job WHERE jobs.id=next_job.id RETURNING jobs.*",
+                (JobState.QUEUED, JobState.RUNNING, worker_id, token, now, now),
             ).fetchone()
 
-    def heartbeat(self, job_id: int) -> None:
+    def start_assignment(self, job_id: int, worker_id: str, token: str) -> bool:
         now = utcnow()
         with self._pool.connection() as connection:
-            connection.execute(
-                "UPDATE jobs SET heartbeat_at=%s, updated_at=%s WHERE id=%s",
-                (now, now, job_id),
+            result = connection.execute(
+                "UPDATE jobs SET started_at=%s, heartbeat_at=%s, updated_at=%s"
+                " WHERE id=%s AND state=%s AND assigned_worker_id=%s"
+                " AND assignment_token=%s AND started_at IS NULL",
+                (now, now, now, job_id, JobState.RUNNING, worker_id, token),
             )
+        return result.rowcount == 1
 
-    def finish_job(self, job_id: int, state: JobState) -> None:
-        with self._pool.connection() as connection:
-            connection.execute(
-                "UPDATE jobs SET state=%s, updated_at=%s WHERE id=%s",
-                (state, utcnow(), job_id),
-            )
-
-    def recover_stale_jobs(self, stale_after_seconds: float = 300.0) -> int:
-        """Requeue running jobs whose heartbeat has expired."""
-        cutoff = utcnow() - timedelta(seconds=stale_after_seconds)
+    def heartbeat_assignment(self, job_id: int, worker_id: str, token: str) -> bool:
+        now = utcnow()
         with self._pool.connection() as connection:
             result = connection.execute(
-                "UPDATE jobs SET state=%s, pid=NULL, updated_at=%s WHERE state=%s"
-                " AND (heartbeat_at IS NULL OR heartbeat_at < %s)",
-                (JobState.QUEUED, utcnow(), JobState.RUNNING, cutoff),
+                "UPDATE jobs SET heartbeat_at=%s, updated_at=%s"
+                " WHERE id=%s AND state=%s AND assigned_worker_id=%s"
+                " AND assignment_token=%s",
+                (now, now, job_id, JobState.RUNNING, worker_id, token),
             )
-            recovered = result.rowcount
-        return recovered
+        return result.rowcount == 1
+
+    def assignment_active(self, job_id: int, worker_id: str, token: str) -> bool:
+        with self._pool.connection() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM jobs WHERE id=%s AND state=%s AND assigned_worker_id=%s"
+                " AND assignment_token=%s",
+                (job_id, JobState.RUNNING, worker_id, token),
+            ).fetchone()
+        return row is not None
+
+    def finish_assignment(
+        self, job_id: int, worker_id: str, token: str, state: JobState
+    ) -> bool:
+        if state not in (JobState.DONE, JobState.FAILED):
+            raise ValueError("remote assignments can only finish as done or failed")
+        with self._pool.connection() as connection:
+            result = connection.execute(
+                "UPDATE jobs SET state=%s, assignment_token=NULL, updated_at=%s"
+                " WHERE id=%s AND state=%s AND assigned_worker_id=%s"
+                " AND assignment_token=%s",
+                (state, utcnow(), job_id, JobState.RUNNING, worker_id, token),
+            )
+        return result.rowcount == 1
+
+    def requeue_assignment(self, job_id: int, worker_id: str, token: str) -> bool:
+        with self._pool.connection() as connection:
+            result = connection.execute(
+                "UPDATE jobs SET state=%s, assigned_worker_id=NULL, assignment_token=NULL,"
+                " heartbeat_at=NULL, updated_at=%s WHERE id=%s AND state=%s"
+                " AND assigned_worker_id=%s AND assignment_token=%s AND started_at IS NULL",
+                (JobState.QUEUED, utcnow(), job_id, JobState.RUNNING, worker_id, token),
+            )
+        return result.rowcount == 1
+
+    def fail_assignment(self, job_id: int, worker_id: str, token: str, reason: str) -> bool:
+        with self._pool.connection() as connection:
+            result = connection.execute(
+                "UPDATE jobs SET state=%s, assignment_token=NULL, last_error=%s, updated_at=%s"
+                " WHERE id=%s AND state=%s AND assigned_worker_id=%s"
+                " AND assignment_token=%s",
+                (JobState.FAILED, reason, utcnow(), job_id, JobState.RUNNING, worker_id, token),
+            )
+        return result.rowcount == 1
+
+    def recover_abandoned_assignments(self) -> tuple[int, int]:
+        """Fail closed after a serve restart; resumable leases arrive in Feature 3."""
+
+        now = utcnow()
+        with self._pool.connection() as connection:
+            requeued = connection.execute(
+                "UPDATE jobs SET state=%s, assigned_worker_id=NULL, assignment_token=NULL,"
+                " heartbeat_at=NULL, updated_at=%s WHERE state=%s AND started_at IS NULL",
+                (JobState.QUEUED, now, JobState.RUNNING),
+            ).rowcount
+            failed_rows = connection.execute(
+                "UPDATE jobs SET state=%s, assignment_token=NULL, last_error=%s, updated_at=%s"
+                " WHERE state=%s AND started_at IS NOT NULL RETURNING flow_id",
+                (
+                    JobState.FAILED,
+                    "serve restarted after remote execution started",
+                    now,
+                    JobState.RUNNING,
+                ),
+            ).fetchall()
+            flow_ids = [row["flow_id"] for row in failed_rows]
+            if flow_ids:
+                connection.execute(
+                    "UPDATE flows SET state=%s, updated_at=%s WHERE id=ANY(%s)",
+                    (FlowState.FAILED, now, flow_ids),
+                )
+        return requeued, len(failed_rows)
 
     # ----------------------------------------------------------------- events
 

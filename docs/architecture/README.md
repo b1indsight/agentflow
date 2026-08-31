@@ -1,7 +1,7 @@
 # FlowTool 架构文档
 
 > 状态：M0 已验收、M1+ 仍为目标设计 · 初始日期：2026-08-02 · M0 验收：2026-08-26 ·
-> 文档核对：2026-08-28。
+> 文档核对：2026-09-01。
 
 本目录是 FlowTool 架构的唯一入口。代码、测试、配置示例和已执行的运行验证是“当前实现”的事实
 来源；目标流程不会因为已经写入设计文档就被视为可用。
@@ -25,29 +25,29 @@
 
 | 范围 | 状态 | 当前事实 |
 |---|---|---|
-| 配置与领域契约 | 已验证 | CSV/JSON allowlist、路径展开、枚举和结构化 Judge/Codex 结果有自动化覆盖 |
-| PostgreSQL Store | 已验证 | flow/attempt/job 往返、跨 Store 可见性、并发 delivery 去重/claim、active 唯一约束、review 与恢复有覆盖 |
+| 配置与领域契约 | 已验证 | serve/worker 独立配置、版本化 task/result/message、CSV/JSON allowlist 和结构化结果有覆盖 |
+| PostgreSQL Store | 已验证 | flow/attempt/job 往返、assignment token fencing、跨 Store 可见性、并发 assign、review 与恢复有覆盖 |
 | Webhook Ingress | 已验证（M0） | `/healthz`、HMAC 拒绝/接受、后台交接和 202 响应有覆盖；health 仅表示进程可响应 |
 | Event Router | 已验证（M0） | delivery 去重、bot/allowlist、触发、取消和 inline review 入库有覆盖；同 flow 串行锁尚未实现 |
-| Worker | 已验证（M0） | claim/dispatch、DONE/FAILED、heartbeat 清理、瞬时续租失败重试和启动恢复有覆盖 |
-| Flow Engine | 部分 | 状态转换和外部端口调用已写；issue 拉取、thread 映射、取消 kill、冲突处理与真实副作用未完成 |
+| Control/Worker 边界 | 已验证（Feature 1） | 单 worker WebSocket 鉴权、注册、五类任务、heartbeat/result ack、断线策略和 root lock 有覆盖 |
+| Control Service / Job Coordinator | 部分 | 状态转换和外部端口调用已拆到 control；issue 拉取、thread 映射、取消 kill、冲突处理与真实副作用未完成 |
 | Codex / Context / Sandbox / VCS | 部分 | CLI 命令构造、prompt、workspace 拷贝和策略接缝存在；commit/push、网络与凭据未端到端验证 |
 | GitHub Client | 桩 | githubkit 调用形态已写，认证、REST/GraphQL 方法与权限尚未在真实 App 上校准 |
 | Judge | 桩 | `bub run` subprocess 与保守解析存在，实际命令/API 和模型输出尚未校准 |
 | Reconciler | 桩 | 5 分钟循环存在，`_sweep()` 目前只记录 active flow，不拉取远端状态 |
-| CLI | 部分验证 | help、serve 和 health smoke 已验证；flows/show/cancel/retry 命令已写但无自动化覆盖 |
+| CLI | 部分验证 | `serve` 与 `worker` 双进程 smoke、help 和 health 已验证；flows/show/cancel/retry 尚无 CLI 级覆盖 |
 | 插件 | 部分 | 五个生命周期 hook 已接线并隔离异常；post-merge-summary 仍只写日志 |
 
 ## 当前验证基线
 
-- 24 项 pytest 测试全部通过，其中持久层场景使用真实 PostgreSQL；
+- pytest 覆盖协议、角色边界、远程执行闭环与真实 PostgreSQL 持久层场景；
 - `uv sync --locked`、`ruff check app tests`、`mypy app tests` 与 `flowtool --help` 通过；
-- PostgreSQL-backed `flowtool serve` 在 CI 启动后 `/healthz` 返回 200，并能正常关闭；
+- PostgreSQL-backed `flowtool serve` 与一个 `flowtool worker` 在 CI 中独立启动、完成注册并正常关闭；
 - 测试不访问 GitHub、Codex 或 bub，也不使用真实凭据和真实轮询等待。
 
 M0 在 2026-08-26 使用 SQLite 和 19 项测试完成原始验收；该记录保留在
 [`m0.md`](../plan/m0.md)与[`m0-closeout.md`](../plan/m0-closeout.md)。当前 PostgreSQL 替换不证明
-完整产品闭环，也不表示控制面/worker 已经分离。
+完整产品闭环。当前只支持一个预配置 worker；多 worker、忙碌重连和 lease 恢复属于后续 feature。
 
 ## 阅读导航
 

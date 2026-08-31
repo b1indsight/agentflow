@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from loguru import logger
 
-from app.config import get_settings
+from app.config import ServeSettings
 
 # githubkit 采用惰性导入：M0 阶段未装依赖也能 import 本模块（桩）。
 try:
@@ -34,8 +34,8 @@ mutation($threadId: ID!) {
 class GitHubApp:
     """实现 ports.GitHubClient。"""
 
-    def __init__(self) -> None:
-        s = get_settings()
+    def __init__(self, settings: ServeSettings) -> None:
+        s = settings
         self.app_id = s.github_app_id
         self.private_key = ""
         if s.github_private_key_path.exists():

@@ -39,7 +39,7 @@
 }
 ```
 
-Engine 仅在 `verdict=revise` 且 `confidence >= FLOWTOOL_CONFIDENCE_THRESHOLD` 时创建 revision job；
+JobCoordinator 仅在 `verdict=revise` 且 `confidence >= FLOWTOOL_CONFIDENCE_THRESHOLD` 时创建 revision job；
 answer 创建 answer job；wait/ignore 不执行外部动作。Bub 调用仍未校准，解析失败保守返回 wait。
 
 ## B.3 安全兜底
@@ -79,7 +79,8 @@ GitHub resolve；当前代码也不会把 addressed note 发回线程。clarific
 ## B.5 并发目标
 
 目标是每 flow 至多一个 Codex run，运行期间的新反馈留给下一批，不打断当前 run；不同 flow 可并行。
-当前 daemon 是单 worker 串行消费所有 job，没有实现 per-flow 锁或多 flow 并行，也没有 `/flow restart`。
+当前 serve 只允许一个远程 worker identity 串行消费所有 job，没有实现 per-flow 锁、多 flow 并行，也没有
+`/flow restart`。
 
 ## B.6 目标内部状态
 

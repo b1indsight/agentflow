@@ -9,7 +9,8 @@
 | CI 门禁 | 使用目标仓库自身 CI | FlowTool 不自建门禁，人工合并者依据 PR checks 判断 |
 | 会话连续 | Codex `resume` 同一会话 | 2026-08-01 独立实测成立；真实多轮修订仍待验证 |
 | PR 所有权 | Orchestrator 创建 PR | Code Agent 只负责本地改码/提交/push；真实路径未贯通 |
-| 持久化 | PostgreSQL + 持久化 jobs | Psycopg 连接池与并发安全 claim；当前仍是单进程、同步 Store |
+| 持久化 | PostgreSQL + 持久化 jobs | Store 只在 serve；assignment token 对远程消息 fencing，接口仍同步 |
+| 执行拓扑 | serve + 单个出站长连接 worker | Feature 1 已实现；多 worker/单机多实例与恢复 lease 尚未实现 |
 | 本地版本控制 | VCS 指引交给 Code Agent | VCS 不是端口；jj commit 已独立实测，git/push 未贯通 |
 
 “决策已定”只表示目标方向固定，不表示对应 adapter 或端到端行为已经完成。
@@ -21,7 +22,7 @@
 3. **事件可靠性**：当前 delivery 在 handler 执行业务逻辑前记为已处理，handler 失败后的补偿依赖尚未实现的
    reconcile；
 4. **并发与幂等**：同一 flow 串行化、重复外部副作用防护、人工 push 检测和 base 冲突处理仍是目标设计；
-5. **worker 健康**：瞬时 heartbeat 写失败会重试，但持续失败没有上限或 unhealthy 信号；
+5. **worker 健康**：started 后 heartbeat 超时会 fail closed；短暂断网也可能使任务失败，恢复 lease 尚未实现；
 6. **上下文与成本**：多轮 resume 的 token 增长、re-seed/压缩和预算限制尚未实现。
 
 ## 10. 待强化 / 已知短板

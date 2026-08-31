@@ -11,7 +11,8 @@ Codex 等长任务占用 GitHub 的 Webhook 请求。
 
 - `GET /healthz` 返回 `{"status": "ok"}`；它是存活探针，不检查数据库或外部依赖；
 - `POST /webhook` 缺少或带错误签名时返回 401；签名正确时创建后台 handler 并返回 202；
-- FastAPI lifespan 初始化 PostgreSQL schema，启动 worker/reconciler，并在关闭时停止后台组件和连接池；
+- `WS /internal/workers/connect` 在鉴权后接受唯一配置的 worker identity；
+- FastAPI lifespan 初始化 PostgreSQL schema，只启动 control reconciler，不再启动进程内 worker；
 - 自动化测试覆盖 health、错误签名、正确签名、202 交接和一条 signed label→job 路径。
 
 边界：202 表示事件已交给进程内后台 task，不表示业务处理或持久化已经成功。进程在 handler 落库前
@@ -32,7 +33,7 @@ M0 自动化覆盖 delivery 去重、bot/allowlist、触发、取消和 inline r
 事件串行锁、未合并 PR close 的取消语义、后台 handler 失败后的 delivery 重试，以及真实 GitHub payload
 的完整兼容性。Reconciler 仍是桩，不能作为当前补偿路径。
 
-## 4.3 Flow Engine（状态机核心）
+## 4.3 Control Service / Job Coordinator（状态机核心）
 
 目标状态机：
 
@@ -47,11 +48,11 @@ PENDING → CODING → PR_OPEN ⇄ REVISING
 运行失败   → FAILED
 ```
 
-当前控制流已实现 initial、triage、revision、answer、archive job 的分派，创建 attempt，记录 Codex run，
-执行最大修订轮数限制，并在五个生命周期位置触发插件 hook。非零 Codex exit 会转 FAILED，revision 成功后
-会根据结构化结果标记 addressed/deferred/clarification。
+`ControlService` 负责触发、取消、合并和 retry；`JobCoordinator` 把五类持久 job 构造成版本化 task，
+并把 worker 返回的结构化 result 应用为数据库、GitHub 与 plugin 副作用。worker 不能直接更新这些状态。
+非零 Codex exit 会转 FAILED，revision 成功后会标记 addressed/deferred/clarification。
 
-但 Engine 还依赖多处桩：
+当前 coordinator 还依赖多处桩：
 
 - `_fetch_issue()` 返回占位标题和空正文；
 - `_thread_id_for()` 永远返回 `None`，无法真实 resolve review thread；
@@ -61,6 +62,15 @@ PENDING → CODING → PR_OPEN ⇄ REVISING
 - 未合并 close、人工 push、rebase/冲突和外部副作用幂等尚未实现。
 
 因此状态转换代码存在不等于目标闭环可用。
+
+### 4.3.1 远程 Worker Gateway / Client / Executor
+
+serve 的 `SingleWorkerGateway` 校验 bearer token 与 worker id，维护一个 WebSocket 会话，并用随机
+assignment token 对 Started、Heartbeat 和结果做 fencing。worker 的 `WorkerClient` 主动连接并指数退避；
+`WorkerExecutor` 只依赖 CodeAgent、Judge、workspace/VCS，不导入 Store、FastAPI 或 GitHub。
+
+当前只允许一个预配置 worker identity。任务未 Started 断线会 requeue；Started 后断线或超时会把 job/flow
+置 FAILED，避免自动重放未知外部副作用。忙碌重连、lease 接管、多 worker 调度和单机多实例均未实现。
 
 ## 4.4 Codex Driver
 
@@ -75,7 +85,8 @@ PENDING → CODING → PR_OPEN ⇄ REVISING
 2026-08-01 的独立 CLI 实测证明 `exec` / `resume` 上下文连续、workspace-write 可修改工作区、jj
 `.jj` 可写且能 commit。它没有证明当前 driver 能在真实 flow 中完成 issue→commit→push→PR。
 
-当前 Engine 把 prompt、kind 和 exit code写入 `codex_runs`，`log_path` 为空；原始 JSONL 没有持久化。
+当前 worker 返回 exit/result，coordinator 把 kind 和 exit code 写入 `codex_runs`；跨协议尚未回传完整 prompt
+或原始 JSONL，因此 `prompt`/`log_path` 为空。
 网络开关的 Codex 配置键、GitHub 限域、push 凭据、git 提交路径和多轮 context 增长仍待验证。
 
 ## 4.5 GitHub Client
@@ -95,8 +106,8 @@ threads、resolve thread，并签发 push 所需的短时 installation token。�
 | sandbox | 是 | `ports.Sandbox` / `WorkspaceWriteSandbox` | 产出可写根和网络布尔值；当前 driver 只翻译 workspace-write/网络开关 |
 | VCS | 否 | `detect_vcs_kind/agent_guidance` | 探测 `.jj`，向 Code Agent 注入 git 或 jj 指引；工具自身不执行 commit/push |
 
-分支名由 Orchestrator 定为 `flow/issue-<n>`。目标上，Code Agent 在 workspace 内完成 branch/bookmark、
-commit 和 push，Orchestrator 只在 push 后走 GitHub API。当前缺口包括：
+分支名由 control 定为 `flow/issue-<n>`。目标上，worker 内的 Code Agent 在 workspace 完成
+branch/bookmark、commit 和 push，control 只在 worker 成功返回后走 GitHub API。当前缺口包括：
 
 - `SandboxPolicy.writable_roots` 没有被翻译为额外 CLI 参数；
 - network 配置键和仅允许 GitHub egress 的策略未验证；
@@ -114,19 +125,19 @@ cursor 上使用 Psycopg `class_row(Model)`，由模型统一校验枚举、时�
 ORM。
 
 - `flows`：issue 级状态，`(repo, issue)` 仅允许一个非终态 flow；
-- `attempts`：每个候选解法的 branch/session/PR/revision_cycles，MVP 每 flow 一个；
-- `jobs`：queued/running/done/failed、pid、heartbeat、payload 与尝试次数；
+- `attempts`：每个候选解法的 branch/session/PR/worker_id/revision_cycles，当前每 flow 一个；
+- `jobs`：queued/running/done/failed、worker/token/start/heartbeat/error、payload 与尝试次数；
 - `events`：delivery 去重和 payload 审计；
 - `codex_runs`：按 attempt 记录 prompt、kind、exit 与时间；
 - `review_threads`：按 attempt 记录正文/inline/conversation 反馈及 relayed/resolved 状态。
 
-自动化覆盖 active 唯一约束、flow/attempt/job 往返、review upsert、heartbeat、stale job 重排队、
-两个独立 Store 的共享可见性、同一 delivery 的并发去重，以及两个连接不会 claim 同一个 queued job。
-`claim_job()` 使用事务内的 `FOR UPDATE SKIP LOCKED`，但当前 daemon 仍只启动一个 worker。
+自动化覆盖 active 唯一约束、flow/attempt/job 往返、review upsert、assignment start/heartbeat/fencing、
+未 started requeue、started fail closed、跨 Store 可见性、delivery 去重和并发 assign。
+`assign_job()` 使用事务内的 `FOR UPDATE SKIP LOCKED`；gateway 仍只接受一个配置 worker。
 
-Store 继续使用同步接口，也没有 worker identity、lease token/fencing 或 Codex session affinity；因此
-PostgreSQL 移除了共享文件限制，但不代表控制面/worker 分离或故障接管已经完成。M0 最初验收的 SQLite
-文件不会自动导入 PostgreSQL。
+Store 继续使用同步接口。Feature 1 已增加 worker identity 与 assignment token fencing，但没有持久 lease、
+忙碌重连或 Codex session 的多 worker affinity；控制/执行面已分离不代表故障接管完成。M0 的 SQLite 文件
+不会自动导入 PostgreSQL。
 
 ## 4.8 GitHub 交互面
 
@@ -143,7 +154,7 @@ thread resolve 与 Project 状态仍依赖未校准的 GitHub adapter。工具�
 - revision prompt 包含 Judge instruction、未 relay 的反馈、inline path/diff hunk/original commit id、
   VCS 指引和 `CodexResult` 输出约定。
 
-但 Engine 当前提供的 issue 正文是空占位；revision prompt 没有当前 diff、CI 状态或完整未解决线程清单。
+但 coordinator 当前提供的 issue 正文是空占位；revision prompt 没有当前 diff、CI 状态或完整未解决线程清单。
 issue/PR 文本是不可信输入，后续接入必须保留明确的数据/指令边界。
 
 ## 4.10 Judge / Triage

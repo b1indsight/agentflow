@@ -9,11 +9,11 @@ from typing import Any
 import httpx
 import pytest
 import pytest_asyncio
+from fastapi import WebSocket
 
-import app.router as router_module
-from app.ingress import WebhookRouter, create_app
+from app.control.api import WebhookRouter, create_app
+from app.control.router import EventRouter
 from app.models import Flow, FlowState, JobKind
-from app.router import EventRouter
 from app.store import Store
 
 
@@ -27,10 +27,16 @@ class RecordingRouter:
         self.handled.set()
 
 
+class RecordingGateway:
+    async def handle(self, socket: WebSocket) -> None:
+        pass
+
+
 class FakeContext:
     def __init__(self, router: WebhookRouter | None = None, settings=None) -> None:
         self.settings = settings or SimpleNamespace(github_webhook_secret="webhook-secret")
         self.router = router or RecordingRouter()
+        self.gateway = RecordingGateway()
         self.tasks: list[asyncio.Task[None]] = []
 
     def startup(self) -> None:
@@ -44,7 +50,7 @@ class FakeContext:
             await asyncio.gather(*self.tasks)
 
 
-class RoutingEngine:
+class RoutingService:
     def __init__(self, store: Store) -> None:
         self.store = store
 
@@ -101,8 +107,7 @@ async def test_valid_signature_dispatches_webhook(
         settle_seconds=75.0,
         submit_grace_seconds=15.0,
     )
-    monkeypatch.setattr(router_module, "get_settings", lambda: settings)
-    context = FakeContext(EventRouter(store, RoutingEngine(store)), settings)
+    context = FakeContext(EventRouter(store, RoutingService(store), settings), settings)
     application = create_app(lambda: context)
     transport = httpx.ASGITransport(app=application)
     payload = {
@@ -137,4 +142,4 @@ async def test_valid_signature_dispatches_webhook(
     flow = store.get_active_flow("owner/repo", 7)
     assert flow is not None
     assert flow.state is FlowState.PENDING
-    assert store.claim_job() is not None
+    assert store.assign_job("worker-1", "assignment-1") is not None

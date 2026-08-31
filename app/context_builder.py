@@ -8,7 +8,9 @@ TODO(verify) V8：注入的 VCS 指引（尤其 jj）对 codex 的实际效果�
 
 from __future__ import annotations
 
-from app.models import ReviewItem
+from collections.abc import Sequence
+
+from app.protocol import ReviewFeedback
 
 # 硬约束：codex 只碰本地 VCS，不碰 GitHub API（平面边界 §3）
 _HARD_CONSTRAINTS = (
@@ -39,7 +41,7 @@ def build_initial_prompt(
     return "\n".join(parts)
 
 
-def _format_item(item: ReviewItem) -> str:
+def _format_item(item: ReviewFeedback) -> str:
     if item.kind.value == "inline" and item.diff_hunk:
         # 按内容定位，避开行号漂移（docs/architecture/review-loop.md §B.4）
         return (
@@ -52,7 +54,7 @@ def _format_item(item: ReviewItem) -> str:
 
 
 def build_revision_prompt(
-    instruction: str, items: list[ReviewItem], vcs_guidance: str
+    instruction: str, items: Sequence[ReviewFeedback], vcs_guidance: str
 ) -> str:
     feedback = "\n".join(_format_item(i) for i in items) or "(no inline items)"
     parts = [

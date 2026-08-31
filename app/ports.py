@@ -79,6 +79,6 @@ class GitHubClient(Protocol):
 
 @runtime_checkable
 class JobDispatch(Protocol):
-    """派发 job。MVP：进程内（worker 直接读 jobs 表），此接口为 §9-6 远程调度预留。"""
+    """派发 job 的抽象边界；当前 WebSocket gateway 直接从持久队列领取。"""
 
     async def submit(self, job_id: int) -> None: ...

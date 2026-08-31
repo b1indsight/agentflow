@@ -23,7 +23,6 @@ from pathlib import Path
 
 from loguru import logger
 
-from app.config import get_settings
 from app.models import AgentRun, CodexResult, SandboxPolicy
 from app.ports import Sandbox
 from app.sandbox import WorkspaceWriteSandbox
@@ -58,9 +57,9 @@ def _parse_thread_id(jsonl_text: str) -> str | None:
 class CodexAgent:
     """实现 ports.CodeAgent。"""
 
-    def __init__(self, sandbox: Sandbox | None = None):
+    def __init__(self, sandbox: Sandbox | None = None, *, timeout: float = 1200.0):
         self.sandbox: Sandbox = sandbox or WorkspaceWriteSandbox()
-        self.timeout = get_settings().codex_run_timeout_seconds
+        self.timeout = timeout
 
     async def start(self, task: str, cwd: Path, *, output_schema: Path | None = None) -> AgentRun:
         # 起始 run 要 commit + push → 需放网络（沙盒轴决定，§4.6）。

@@ -5,13 +5,14 @@ serve：起 webhook 常驻进程；flows/show/cancel/retry：运维 flow。
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterator
 from contextlib import contextmanager
 
 import typer
 
-from app.config import get_settings
-from app.models import FlowState, JobKind
+from app.config import get_serve_settings
+from app.control.service import ControlService
 from app.store import Store
 
 app = typer.Typer(help="FlowTool admin CLI")
@@ -21,7 +22,7 @@ app.add_typer(flow_app, name="flow")
 
 @contextmanager
 def _store() -> Iterator[Store]:
-    store = Store(get_settings().database_url)
+    store = Store(get_serve_settings().database_url)
     store.init_db()
     try:
         yield store
@@ -34,8 +35,21 @@ def serve() -> None:
     """启动 webhook 常驻进程（uvicorn）。"""
     import uvicorn
 
-    s = get_settings()
-    uvicorn.run("app.ingress:app", host=s.host, port=s.port, log_level="info")
+    settings = get_serve_settings()
+    uvicorn.run(
+        "app.control.api:app",
+        host=settings.host,
+        port=settings.port,
+        log_level="info",
+    )
+
+
+@app.command()
+def worker() -> None:
+    """启动远程执行进程并主动连接 control plane。"""
+    from app.worker.runtime import WorkerRuntime
+
+    asyncio.run(WorkerRuntime().run())
 
 
 @app.command()
@@ -72,19 +86,18 @@ def flow_cancel(flow_id: int) -> None:
         f = store.get_flow(flow_id)
         if not f:
             raise typer.Exit(1)
-        f.state = FlowState.CANCELLED
-        store.update_flow(f)
+        ControlService(store).cancel(f)
     typer.echo(f"flow {flow_id} cancelled")
 
 
 @flow_app.command("retry")
 def flow_retry(flow_id: int) -> None:
-    """重新排一个 initial job（失败恢复用）。"""
+    """重新排入最近失败的 job（没有失败记录时使用 initial）。"""
     with _store() as store:
         f = store.get_flow(flow_id)
         if not f:
             raise typer.Exit(1)
-        store.enqueue_job(flow_id, JobKind.INITIAL, payload={"issue_number": f.issue_number})
+        ControlService(store).retry(f)
     typer.echo(f"re-enqueued initial job for flow {flow_id}")
 
 
