@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Coroutine
+from datetime import timedelta
 from typing import Any
 
 from loguru import logger
@@ -24,7 +25,11 @@ class ControlRuntime:
 
     def __init__(self, settings: ServeSettings | None = None) -> None:
         self.settings = settings or get_serve_settings()
-        self.store = Store(self.settings.database_url)
+        self.store = Store(
+            self.settings.database_url,
+            lease_duration=timedelta(seconds=self.settings.worker_lease_duration),
+            recovery_grace=timedelta(seconds=self.settings.worker_recovery_grace),
+        )
         plugins = get_plugin_manager()
         self.coordinator = JobCoordinator(
             self.store, GitHubApp(self.settings), self.settings, plugins
@@ -55,7 +60,23 @@ class ControlRuntime:
                 requeued,
                 failed,
             )
-        self._tasks = [asyncio.create_task(self.reconciler.run())]
+        self._tasks = [
+            asyncio.create_task(self.reconciler.run()),
+            asyncio.create_task(self._sweep_assignments()),
+            asyncio.create_task(self.gateway.recover_pending_results()),
+        ]
+
+    async def _sweep_assignments(self) -> None:
+        while True:
+            await asyncio.sleep(self.settings.worker_sweep_interval)
+            requeued, failed = self.store.sweep_expired_assignments()
+            if requeued or failed:
+                logger.warning(
+                    "expired worker assignments: {} requeued, {} failed",
+                    requeued,
+                    failed,
+                )
+                self.gateway.notify_jobs()
 
     def spawn_handler(self, coroutine: Coroutine[Any, Any, None]) -> None:
         task = asyncio.create_task(coroutine)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import json
 from collections.abc import Mapping
 from typing import Protocol
 from uuid import uuid4
@@ -20,13 +21,18 @@ from app.protocol import (
     Failed,
     Heartbeat,
     ProtocolError,
+    RecoveryDescriptor,
+    RecoveryRejected,
     Register,
     Registered,
+    ReplayResult,
     ResultAccepted,
+    ResumeAssignment,
     Started,
     Succeeded,
     WorkerMessage,
     parse_worker_message,
+    terminal_digest,
 )
 
 
@@ -44,27 +50,73 @@ class WorkerSocket(Protocol):
 
 
 class GatewayStore(Protocol):
-    def worker_connected(self, worker_id: str, protocol_version: int) -> object: ...
+    def get_job(self, job_id: int) -> Job | None: ...
 
-    def worker_disconnected(self, worker_id: str, reason: str | None = None) -> None: ...
+    def worker_connected(
+        self, worker_id: str, protocol_version: int, connection_epoch: str
+    ) -> object: ...
 
-    def assign_job(self, worker_id: str, token: str) -> Job | None: ...
+    def worker_disconnected(
+        self,
+        worker_id: str,
+        reason: str | None = None,
+        connection_epoch: str = "",
+    ) -> None: ...
+
+    def assign_job(self, worker_id: str, token: str, connection_epoch: str) -> Job | None: ...
 
     def start_assignment(
-        self, job_id: int, attempt_id: int, worker_id: str, token: str
+        self,
+        job_id: int,
+        attempt_id: int,
+        worker_id: str,
+        token: str,
+        connection_epoch: str,
     ) -> bool: ...
 
-    def heartbeat_assignment(self, job_id: int, worker_id: str, token: str) -> bool: ...
+    def heartbeat_assignment(
+        self, job_id: int, worker_id: str, token: str, connection_epoch: str
+    ) -> bool: ...
 
-    def assignment_active(self, job_id: int, worker_id: str, token: str) -> bool: ...
+    def resume_assignment(
+        self, job_id: int, worker_id: str, token: str, connection_epoch: str
+    ) -> bool: ...
+
+    def record_assignment_result(
+        self,
+        job_id: int,
+        worker_id: str,
+        token: str,
+        connection_epoch: str,
+        payload: Mapping[str, object],
+        digest: str,
+    ) -> str: ...
+
+    def list_unapplied_results(self) -> list[Job]: ...
+
+    def complete_persisted_result(self, job_id: int, state: JobState) -> bool: ...
 
     def finish_assignment(
-        self, job_id: int, worker_id: str, token: str, state: JobState
+        self,
+        job_id: int,
+        worker_id: str,
+        token: str,
+        state: JobState,
+        connection_epoch: str,
     ) -> bool: ...
 
-    def requeue_assignment(self, job_id: int, worker_id: str, token: str) -> bool: ...
+    def requeue_assignment(
+        self, job_id: int, worker_id: str, token: str, connection_epoch: str
+    ) -> bool: ...
 
-    def fail_assignment(self, job_id: int, worker_id: str, token: str, reason: str) -> bool: ...
+    def fail_assignment(
+        self,
+        job_id: int,
+        worker_id: str,
+        token: str,
+        reason: str,
+        connection_epoch: str,
+    ) -> bool: ...
 
 
 class AssignmentCoordinator(Protocol):
@@ -100,111 +152,176 @@ class WorkerGateway:
         self.heartbeat_interval = heartbeat_interval
         self.heartbeat_timeout = heartbeat_timeout
         self.poll_interval = poll_interval
-        self._sessions: dict[str, asyncio.Event] = {}
+        self._sessions: dict[str, tuple[asyncio.Event, WorkerSocket]] = {}
         self._registry_lock = asyncio.Lock()
+        self._result_locks: dict[int, asyncio.Lock] = {}
 
     async def handle(self, socket: WorkerSocket) -> None:
         worker_id = self._authenticated_identity(socket.headers)
         if worker_id is None:
             await socket.close(code=1008)
             return
-        wake = await self._register_session(worker_id)
-        if wake is None:
-            await socket.close(code=1008)
-            return
 
-        current: tuple[Job, str, ExecutionTask] | None = None
-        started = False
+        current: tuple[Job, str, ExecutionTask | None] | None = None
         connected = False
+        registered_session = False
+        connection_epoch = uuid4().hex
+        wake: asyncio.Event | None = None
         disconnect_reason: str | None = None
         try:
             await socket.accept()
             register = parse_worker_message(await socket.receive_text())
             if not isinstance(register, Register) or register.worker_id != worker_id:
                 raise ProtocolViolation("worker registration does not match authenticated identity")
-            self.store.worker_connected(worker_id, register.protocol_version)
-            connected = True
-            await socket.send_text(
-                Registered(heartbeat_interval=self.heartbeat_interval).model_dump_json()
+            wake = await self._register_session(worker_id, socket)
+            registered_session = True
+            worker = self.store.worker_connected(
+                worker_id, register.protocol_version, connection_epoch
             )
-
-            while True:
-                wake.clear()
-                token = uuid4().hex
-                job = self.store.assign_job(worker_id, token)
-                if job is None:
-                    await self._wait_while_idle(socket, wake)
-                    continue
-                prepared = await self.coordinator.prepare(job)
-                if isinstance(prepared, JobState):
-                    self.store.finish_assignment(job.id, worker_id, token, prepared)
-                    self.notify_jobs()
-                    continue
-                current = (job, token, prepared)
-                started = False
+            connected = True
+            if register.recovery is not None:
+                current = await self._recover(
+                    socket,
+                    worker_id,
+                    connection_epoch,
+                    register.recovery,
+                )
+            else:
+                stale_job_id = getattr(worker, "current_job_id", None)
+                if stale_job_id is not None:
+                    await self._reject_missing_journal(
+                        worker_id, connection_epoch, stale_job_id
+                    )
+            if current is None:
                 await socket.send_text(
-                    Assignment(
-                        job_id=job.id,
-                        flow_id=job.flow_id,
-                        assignment_token=token,
-                        task=prepared,
+                    Registered(
+                        heartbeat_interval=self.heartbeat_interval,
+                        connection_epoch=connection_epoch,
                     ).model_dump_json()
                 )
 
-                first = await self._receive(socket)
-                if not isinstance(first, Started):
-                    raise ProtocolViolation("assignment must be acknowledged with Started")
-                self._validate_assignment_message(first.job_id, first.assignment_token, current)
-                if not self.store.start_assignment(
-                    job.id, prepared.attempt_id, worker_id, token
-                ):
-                    raise ProtocolViolation("assignment is no longer active")
-                self.coordinator.mark_started(job, prepared, worker_id)
-                started = True
+            while True:
+                if current is None:
+                    assert wake is not None
+                    wake.clear()
+                    token = uuid4().hex
+                    job = self.store.assign_job(worker_id, token, connection_epoch)
+                    if job is None:
+                        await self._wait_while_idle(socket, wake)
+                        continue
+                    prepared = await self.coordinator.prepare(job)
+                    if isinstance(prepared, JobState):
+                        self.store.finish_assignment(
+                            job.id,
+                            worker_id,
+                            token,
+                            prepared,
+                            connection_epoch,
+                        )
+                        self.notify_jobs()
+                        continue
+                    current = (job, token, prepared)
+                    await socket.send_text(
+                        Assignment(
+                            job_id=job.id,
+                            flow_id=job.flow_id,
+                            assignment_token=token,
+                            connection_epoch=connection_epoch,
+                            task=prepared,
+                        ).model_dump_json()
+                    )
+
+                    first = await self._receive(socket)
+                    if not isinstance(first, Started):
+                        raise ProtocolViolation("assignment must be acknowledged with Started")
+                    self._validate_assignment_message(
+                        first.job_id,
+                        first.assignment_token,
+                        first.connection_epoch,
+                        current,
+                        connection_epoch,
+                    )
+                    if not self.store.start_assignment(
+                        job.id,
+                        prepared.attempt_id,
+                        worker_id,
+                        token,
+                        connection_epoch,
+                    ):
+                        raise ProtocolViolation("assignment is no longer active")
+                    self.coordinator.mark_started(job, prepared, worker_id)
 
                 while True:
+                    job, token, _ = current
                     message = await self._receive(socket)
                     if isinstance(message, Heartbeat):
                         self._validate_assignment_message(
-                            message.job_id, message.assignment_token, current
+                            message.job_id,
+                            message.assignment_token,
+                            message.connection_epoch,
+                            current,
+                            connection_epoch,
                         )
                         if not self.store.heartbeat_assignment(
-                            job.id, worker_id, token
+                            job.id, worker_id, token, connection_epoch
                         ):
                             raise ProtocolViolation("heartbeat belongs to an inactive assignment")
                         continue
-                    if isinstance(message, Succeeded):
+                    if isinstance(message, (Succeeded, Failed)):
                         self._validate_assignment_message(
-                            message.job_id, message.assignment_token, current
+                            message.job_id,
+                            message.assignment_token,
+                            message.connection_epoch,
+                            current,
+                            connection_epoch,
                         )
-                        if not self.store.assignment_active(job.id, worker_id, token):
+                        receipt = self.store.record_assignment_result(
+                            job.id,
+                            worker_id,
+                            token,
+                            connection_epoch,
+                            message.model_dump(mode="json"),
+                            terminal_digest(message),
+                        )
+                        if receipt == "conflict":
+                            raise ProtocolViolation("result conflicts with the persisted result")
+                        if receipt == "rejected":
                             raise ProtocolViolation("result belongs to an inactive assignment")
-                        state = await self.coordinator.apply_result(job, message.result)
-                        if not self.store.finish_assignment(
-                            job.id, worker_id, token, state
-                        ):
-                            raise ProtocolViolation("result lost its assignment fence")
+                        state: JobState
+                        if receipt == "applied":
+                            persisted = self.store.get_job(job.id)
+                            if persisted is None or persisted.state not in (
+                                JobState.DONE,
+                                JobState.FAILED,
+                            ):
+                                raise ProtocolViolation("applied result has no terminal job")
+                            state = persisted.state
+                        else:
+                            async with self._result_lock(job.id):
+                                persisted = self.store.get_job(job.id)
+                                if persisted is not None and persisted.result_applied_at is not None:
+                                    state = persisted.state
+                                else:
+                                    state = await self._apply_terminal(job, message)
+                                    if not self.store.finish_assignment(
+                                        job.id,
+                                        worker_id,
+                                        token,
+                                        state,
+                                        connection_epoch,
+                                    ):
+                                        raise ProtocolViolation(
+                                            "result lost its assignment fence"
+                                        )
                         await socket.send_text(
-                            ResultAccepted(job_id=job.id, state=state).model_dump_json()
+                            ResultAccepted(
+                                job_id=job.id,
+                                state=state,
+                                assignment_token=token,
+                                connection_epoch=connection_epoch,
+                            ).model_dump_json()
                         )
                         current = None
-                        started = False
-                        self.notify_jobs()
-                        break
-                    if isinstance(message, Failed):
-                        self._validate_assignment_message(
-                            message.job_id, message.assignment_token, current
-                        )
-                        await self.coordinator.fail(job, message.error)
-                        if not self.store.fail_assignment(
-                            job.id, worker_id, token, message.error
-                        ):
-                            raise ProtocolViolation("failure lost its assignment fence")
-                        await socket.send_text(
-                            ResultAccepted(job_id=job.id, state=JobState.FAILED).model_dump_json()
-                        )
-                        current = None
-                        started = False
                         self.notify_jobs()
                         break
                     raise ProtocolViolation(
@@ -237,19 +354,14 @@ class WorkerGateway:
             except (WebSocketDisconnect, ConnectionError):
                 pass
         finally:
-            if current is not None:
-                job, token, _ = current
-                if started:
-                    reason = "worker disconnected after remote execution started"
-                    disconnect_reason = reason
-                    await self.coordinator.fail(job, reason)
-                    self.store.fail_assignment(job.id, worker_id, token, reason)
-                else:
-                    self.store.requeue_assignment(job.id, worker_id, token)
-                self.notify_jobs()
             if connected:
-                self.store.worker_disconnected(worker_id, disconnect_reason)
-            await self._unregister_session(worker_id)
+                self.store.worker_disconnected(
+                    worker_id,
+                    disconnect_reason,
+                    connection_epoch=connection_epoch,
+                )
+            if registered_session:
+                await self._unregister_session(worker_id, socket)
 
     async def _wait_while_idle(self, socket: WorkerSocket, wake: asyncio.Event) -> None:
         receive = asyncio.create_task(socket.receive_text())
@@ -283,29 +395,200 @@ class WorkerGateway:
         expected_authorization = f"Bearer {token}"
         return identity if hmac.compare_digest(authorization, expected_authorization) else None
 
-    async def _register_session(self, worker_id: str) -> asyncio.Event | None:
+    async def _register_session(
+        self, worker_id: str, socket: WorkerSocket
+    ) -> asyncio.Event:
         async with self._registry_lock:
-            if worker_id in self._sessions:
-                return None
+            previous = self._sessions.get(worker_id)
             wake = asyncio.Event()
-            self._sessions[worker_id] = wake
-            return wake
+            self._sessions[worker_id] = (wake, socket)
+        if previous is not None:
+            _, previous_socket = previous
+            try:
+                await previous_socket.close(code=1012)
+            except (WebSocketDisconnect, ConnectionError):
+                pass
+        return wake
 
-    async def _unregister_session(self, worker_id: str) -> None:
+    async def _unregister_session(self, worker_id: str, socket: WorkerSocket) -> None:
         async with self._registry_lock:
-            self._sessions.pop(worker_id, None)
+            current = self._sessions.get(worker_id)
+            if current is not None and current[1] is socket:
+                self._sessions.pop(worker_id, None)
 
     def notify_jobs(self) -> None:
         """Wake all idle sessions after an enqueue or slot-state transition."""
-        for wake in self._sessions.values():
+        for wake, _ in self._sessions.values():
             wake.set()
+
+    async def recover_pending_results(self) -> None:
+        """Apply result-inbox entries left pending by a control-plane interruption."""
+
+        for job in self.store.list_unapplied_results():
+            async with self._result_lock(job.id):
+                current = self.store.get_job(job.id)
+                if current is None or current.result_applied_at is not None:
+                    continue
+                payload = current.result_payload
+                if payload is None:
+                    continue
+                try:
+                    message = parse_worker_message(json.dumps(payload))
+                    if not isinstance(message, (Succeeded, Failed)):
+                        raise ProtocolViolation("persisted result is not terminal")
+                    state = await self._apply_terminal(current, message)
+                except (ValidationError, ProtocolViolation):
+                    logger.exception("persisted result for job {} is invalid", job.id)
+                    continue
+                if self.store.complete_persisted_result(job.id, state):
+                    logger.info("recovered persisted result for job {}", job.id)
+        self.notify_jobs()
+
+    def _result_lock(self, job_id: int) -> asyncio.Lock:
+        return self._result_locks.setdefault(job_id, asyncio.Lock())
+
+    async def _apply_terminal(
+        self, job: Job, message: Succeeded | Failed
+    ) -> JobState:
+        if isinstance(message, Succeeded):
+            return await self.coordinator.apply_result(job, message.result)
+        await self.coordinator.fail(job, message.error)
+        return JobState.FAILED
 
     @staticmethod
     def _validate_assignment_message(
         job_id: int,
         token: str,
-        current: tuple[Job, str, ExecutionTask],
+        message_epoch: str,
+        current: tuple[Job, str, ExecutionTask | None],
+        connection_epoch: str,
     ) -> None:
         job, expected_token, _ = current
-        if job_id != job.id or not hmac.compare_digest(token, expected_token):
+        if (
+            job_id != job.id
+            or not hmac.compare_digest(token, expected_token)
+            or not hmac.compare_digest(message_epoch, connection_epoch)
+        ):
             raise ProtocolViolation("message does not match the active assignment")
+
+    async def _recover(
+        self,
+        socket: WorkerSocket,
+        worker_id: str,
+        connection_epoch: str,
+        recovery: RecoveryDescriptor,
+    ) -> tuple[Job, str, ExecutionTask | None] | None:
+        job = self.store.get_job(recovery.job_id)
+        if (
+            job is None
+            or job.assigned_worker_id != worker_id
+            or job.assignment_token != recovery.assignment_token
+        ):
+            await socket.send_text(
+                RecoveryRejected(job_id=recovery.job_id, reason="assignment fence expired")
+                .model_dump_json()
+            )
+            return None
+        if (
+            job.result_applied_at is not None
+            and recovery.result_digest == job.result_digest
+            and job.state in (JobState.DONE, JobState.FAILED)
+        ):
+            await socket.send_text(
+                ResultAccepted(
+                    job_id=job.id,
+                    state=job.state,
+                    assignment_token=recovery.assignment_token,
+                    connection_epoch=connection_epoch,
+                ).model_dump_json()
+            )
+            return None
+        if recovery.state == "received":
+            requeued = self.store.requeue_assignment(
+                job.id,
+                worker_id,
+                recovery.assignment_token,
+                connection_epoch,
+            )
+            reason = "unstarted assignment abandoned"
+            if not requeued:
+                reason = "worker lost executor during assignment start"
+                await self.coordinator.fail(job, reason)
+                self.store.fail_assignment(
+                    job.id,
+                    worker_id,
+                    recovery.assignment_token,
+                    reason,
+                    connection_epoch,
+                )
+            await socket.send_text(
+                RecoveryRejected(job_id=job.id, reason=reason).model_dump_json()
+            )
+            self.notify_jobs()
+            return None
+        if recovery.state == "started" and not recovery.executor_active:
+            reason = "worker restarted after remote execution started"
+            await self.coordinator.fail(job, reason)
+            self.store.fail_assignment(
+                job.id,
+                worker_id,
+                recovery.assignment_token,
+                reason,
+                connection_epoch,
+            )
+            await socket.send_text(
+                RecoveryRejected(job_id=job.id, reason=reason).model_dump_json()
+            )
+            return None
+        if not self.store.resume_assignment(
+            job.id,
+            worker_id,
+            recovery.assignment_token,
+            connection_epoch,
+        ):
+            await socket.send_text(
+                RecoveryRejected(job_id=job.id, reason="recovery deadline expired")
+                .model_dump_json()
+            )
+            return None
+        if recovery.state in ("succeeded", "failed"):
+            await socket.send_text(
+                ReplayResult(
+                    job_id=job.id,
+                    assignment_token=recovery.assignment_token,
+                    connection_epoch=connection_epoch,
+                    heartbeat_interval=self.heartbeat_interval,
+                ).model_dump_json()
+            )
+        else:
+            await socket.send_text(
+                ResumeAssignment(
+                    job_id=job.id,
+                    assignment_token=recovery.assignment_token,
+                    connection_epoch=connection_epoch,
+                    heartbeat_interval=self.heartbeat_interval,
+                ).model_dump_json()
+            )
+        return job, recovery.assignment_token, None
+
+    async def _reject_missing_journal(
+        self, worker_id: str, connection_epoch: str, job_id: int
+    ) -> None:
+        job = self.store.get_job(job_id)
+        if job is None or job.assignment_token is None:
+            return
+        if job.started_at is None:
+            self.store.requeue_assignment(
+                job.id, worker_id, job.assignment_token, connection_epoch
+            )
+            self.notify_jobs()
+            return
+        reason = "worker reconnected without its started assignment journal"
+        await self.coordinator.fail(job, reason)
+        self.store.fail_assignment(
+            job.id,
+            worker_id,
+            job.assignment_token,
+            reason,
+            connection_epoch,
+        )

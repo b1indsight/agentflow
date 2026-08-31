@@ -30,11 +30,12 @@ class ScriptedConnection:
     def __init__(self) -> None:
         self.sent: list[str] = []
         self.messages = [
-            Registered(heartbeat_interval=60).model_dump_json(),
+            Registered(heartbeat_interval=60, connection_epoch="epoch-1").model_dump_json(),
             Assignment(
                 job_id=5,
                 flow_id=3,
                 assignment_token="assignment-1",
+                connection_epoch="epoch-1",
                 task=InitialTask(
                     attempt_id=7,
                     repo="owner/repo",
@@ -44,7 +45,12 @@ class ScriptedConnection:
                     branch="flow/issue-8",
                 ),
             ).model_dump_json(),
-            ResultAccepted(job_id=5, state=JobState.DONE).model_dump_json(),
+            ResultAccepted(
+                job_id=5,
+                state=JobState.DONE,
+                assignment_token="assignment-1",
+                connection_epoch="epoch-1",
+            ).model_dump_json(),
         ]
 
     async def send(self, data: str) -> None:
@@ -99,7 +105,7 @@ class BrokenHeartbeatConnection:
 
 
 @pytest.mark.asyncio
-async def test_heartbeat_failure_cancels_the_running_executor() -> None:
+async def test_heartbeat_failure_preserves_the_running_executor_for_reconnect() -> None:
     executor = CancellableExecutor()
     client = WorkerClient(
         worker_id="worker-1",
@@ -111,6 +117,7 @@ async def test_heartbeat_failure_cancels_the_running_executor() -> None:
         job_id=5,
         flow_id=3,
         assignment_token="assignment-1",
+        connection_epoch="epoch-1",
         task=InitialTask(
             attempt_id=7,
             repo="owner/repo",
@@ -128,9 +135,9 @@ async def test_heartbeat_failure_cancels_the_running_executor() -> None:
     )
     await executor.started.wait()
     try:
-        await asyncio.wait_for(executor.cancelled.wait(), timeout=0.1)
         with pytest.raises(ConnectionError, match="connection lost"):
             await execution
+        assert executor.cancelled.is_set() is False
     finally:
-        execution.cancel()
-        await asyncio.gather(execution, return_exceptions=True)
+        await client._cancel_execution()
+    assert executor.cancelled.is_set() is True

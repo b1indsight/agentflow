@@ -70,12 +70,16 @@ def flows(active: bool = typer.Option(False, help="只看未终结的")) -> None
 def workers() -> None:
     """列出 worker 在线状态和当前 assignment。"""
     with _store() as store:
-        typer.echo("WORKER\tSTATUS\tJOB\tFLOW\tLAST_SEEN")
+        typer.echo("WORKER\tSTATUS\tJOB\tFLOW\tEPOCH\tLEASE\tRECOVERY\tLAST_SEEN\tREASON")
         for worker in ControlService(store).list_workers():
             typer.echo(
                 f"{worker.worker_id}\t{worker.status.value}\t"
                 f"{worker.current_job_id or '-'}\t{worker.current_flow_id or '-'}\t"
-                f"{_age(worker.last_seen_at)}"
+                f"{(worker.connection_epoch or '-')[:8]}\t"
+                f"{_remaining(worker.lease_expires_at)}\t"
+                f"{_remaining(worker.recovery_deadline)}\t"
+                f"{_age(worker.last_seen_at)}\t"
+                f"{worker.last_disconnect_reason or '-'}"
             )
 
 
@@ -86,6 +90,12 @@ def _age(value: datetime) -> str:
     if seconds < 3600:
         return f"{seconds // 60}m"
     return f"{seconds // 3600}h"
+
+
+def _remaining(value: datetime | None) -> str:
+    if value is None:
+        return "-"
+    return f"{max(0, int((value - datetime.now(UTC)).total_seconds()))}s"
 
 
 @flow_app.command("show")
@@ -100,6 +110,13 @@ def flow_show(flow_id: int) -> None:
             typer.echo(
                 f"  attempt {att.id}{cur}: branch={att.branch} pr={att.pr_number}"
                 f" session={att.codex_session_id} cycles={att.revision_cycles}"
+            )
+        for job in store.list_jobs(f.id):
+            recovery = _remaining(job.recovery_deadline)
+            result = "received" if job.result_received_at is not None else "-"
+            typer.echo(
+                f"  job {job.id}: kind={job.kind} state={job.state} "
+                f"worker={job.assigned_worker_id or '-'} recovery={recovery} result={result}"
             )
 
 

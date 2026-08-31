@@ -1,4 +1,6 @@
 import asyncio
+from collections.abc import Mapping
+from types import SimpleNamespace
 
 import pytest
 from fastapi import WebSocketDisconnect
@@ -9,10 +11,13 @@ from app.protocol import (
     Assignment,
     ExecutionResult,
     ExecutionTask,
+    Heartbeat,
     InitialResult,
     InitialTask,
+    RecoveryDescriptor,
     Register,
     ResultAccepted,
+    ResumeAssignment,
     Started,
     Succeeded,
     parse_server_message,
@@ -26,14 +31,30 @@ class RecordingStore:
         self.finished: JobState | None = None
         self.requeued = False
         self.presence: dict[str, str] = {}
+        self.connection_epoch = ""
+        self.resumed = False
 
-    def worker_connected(self, worker_id: str, protocol_version: int):
+    def get_job(self, job_id: int) -> Job | None:
+        return self.job if self.job.id == job_id else None
+
+    def worker_connected(
+        self, worker_id: str, protocol_version: int, connection_epoch: str
+    ):
         self.presence[worker_id] = "online"
+        self.connection_epoch = connection_epoch
+        return SimpleNamespace(current_job_id=None)
 
-    def worker_disconnected(self, worker_id: str, reason: str | None = None) -> None:
+    def worker_disconnected(
+        self,
+        worker_id: str,
+        reason: str | None = None,
+        connection_epoch: str = "",
+    ) -> None:
         self.presence[worker_id] = "offline"
 
-    def assign_job(self, worker_id: str, token: str) -> Job | None:
+    def assign_job(
+        self, worker_id: str, token: str, connection_epoch: str
+    ) -> Job | None:
         if self.job.state is not JobState.QUEUED:
             return None
         self.job.state = JobState.RUNNING
@@ -42,16 +63,52 @@ class RecordingStore:
         return self.job
 
     def start_assignment(
-        self, job_id: int, attempt_id: int, worker_id: str, token: str
+        self,
+        job_id: int,
+        attempt_id: int,
+        worker_id: str,
+        token: str,
+        connection_epoch: str,
     ) -> bool:
         self.started = (job_id, worker_id, token) == (5, "worker-1", self.job.assignment_token)
         return self.started
 
-    def heartbeat_assignment(self, job_id: int, worker_id: str, token: str) -> bool:
+    def heartbeat_assignment(
+        self, job_id: int, worker_id: str, token: str, connection_epoch: str
+    ) -> bool:
         return (job_id, worker_id, token) == (5, "worker-1", self.job.assignment_token)
 
+    def resume_assignment(
+        self, job_id: int, worker_id: str, token: str, connection_epoch: str
+    ) -> bool:
+        self.resumed = self.assignment_active(job_id, worker_id, token)
+        return self.resumed
+
+    def record_assignment_result(
+        self,
+        job_id: int,
+        worker_id: str,
+        token: str,
+        connection_epoch: str,
+        payload: Mapping[str, object],
+        digest: str,
+    ) -> str:
+        return "pending" if self.assignment_active(job_id, worker_id, token) else "rejected"
+
+    def list_unapplied_results(self) -> list[Job]:
+        return []
+
+    def complete_persisted_result(self, job_id: int, state: JobState) -> bool:
+        self.job.state = state
+        return True
+
     def finish_assignment(
-        self, job_id: int, worker_id: str, token: str, state: JobState
+        self,
+        job_id: int,
+        worker_id: str,
+        token: str,
+        state: JobState,
+        connection_epoch: str,
     ) -> bool:
         if (job_id, worker_id, token) != (5, "worker-1", self.job.assignment_token):
             return False
@@ -65,11 +122,20 @@ class RecordingStore:
             and (job_id, worker_id, token) == (5, "worker-1", self.job.assignment_token)
         )
 
-    def requeue_assignment(self, job_id: int, worker_id: str, token: str) -> bool:
+    def requeue_assignment(
+        self, job_id: int, worker_id: str, token: str, connection_epoch: str
+    ) -> bool:
         self.requeued = True
         return True
 
-    def fail_assignment(self, job_id: int, worker_id: str, token: str, reason: str) -> bool:
+    def fail_assignment(
+        self,
+        job_id: int,
+        worker_id: str,
+        token: str,
+        reason: str,
+        connection_epoch: str,
+    ) -> bool:
         self.finished = JobState.FAILED
         self.job.state = JobState.FAILED
         return True
@@ -138,11 +204,13 @@ class ScriptedSocket:
             return Started(
                 job_id=assignment.job_id,
                 assignment_token=assignment.assignment_token,
+                connection_epoch=assignment.connection_epoch,
             ).model_dump_json()
         if self._step == 3:
             return Succeeded(
                 job_id=assignment.job_id,
                 assignment_token=assignment.assignment_token,
+                connection_epoch=assignment.connection_epoch,
                 result=InitialResult(
                     session_id="session-1", last_message="implemented", exit_code=0
                 ),
@@ -229,7 +297,7 @@ class WaitingSocket(ScriptedSocket):
 
 
 @pytest.mark.asyncio
-async def test_gateway_rejects_a_second_legal_worker_connection() -> None:
+async def test_gateway_new_epoch_takes_over_a_duplicate_worker_connection() -> None:
     store = RecordingStore()
     store.job.state = JobState.DONE
     gateway = WorkerGateway(
@@ -241,15 +309,18 @@ async def test_gateway_rejects_a_second_legal_worker_connection() -> None:
     first = WaitingSocket()
     first_session = asyncio.create_task(gateway.handle(first))
     await first.accepted_event.wait()
-    second = ScriptedSocket()
+    second = WaitingSocket()
     try:
-        await gateway.handle(second)
+        second_session = asyncio.create_task(gateway.handle(second))
+        await second.accepted_event.wait()
+        await asyncio.sleep(0)
     finally:
         first_session.cancel()
-        await asyncio.gather(first_session, return_exceptions=True)
+        second_session.cancel()
+        await asyncio.gather(first_session, second_session, return_exceptions=True)
 
-    assert second.accepted is False
-    assert second.closed == 1008
+    assert second.accepted is True
+    assert first.closed == 1012
 
 
 @pytest.mark.asyncio
@@ -306,6 +377,57 @@ async def test_gateway_disconnect_policy(disconnect_after_start: bool) -> None:
 
     await gateway.handle(DisconnectingSocket(disconnect_after_start=disconnect_after_start))
 
-    assert store.requeued is (not disconnect_after_start)
-    assert (store.finished is JobState.FAILED) is disconnect_after_start
-    assert bool(coordinator.failures) is disconnect_after_start
+    assert store.requeued is False
+    assert store.finished is None
+    assert coordinator.failures == []
+    assert store.job.state is JobState.RUNNING
+
+
+class RecoveringSocket(ScriptedSocket):
+    async def receive_text(self) -> str:
+        self._step += 1
+        if self._step == 1:
+            return Register(
+                worker_id=self.worker_id,
+                recovery=RecoveryDescriptor(
+                    job_id=5,
+                    assignment_token="assignment-1",
+                    state="started",
+                    executor_active=True,
+                ),
+            ).model_dump_json()
+        if self._step == 2:
+            resumed = next(
+                message
+                for raw in self.sent
+                if isinstance((message := parse_server_message(raw)), ResumeAssignment)
+            )
+            return Heartbeat(
+                job_id=resumed.job_id,
+                assignment_token=resumed.assignment_token,
+                connection_epoch=resumed.connection_epoch,
+            ).model_dump_json()
+        raise WebSocketDisconnect()
+
+
+@pytest.mark.asyncio
+async def test_gateway_resumes_started_assignment_under_a_new_epoch() -> None:
+    store = RecordingStore()
+    store.job.state = JobState.RUNNING
+    store.job.assigned_worker_id = "worker-1"
+    store.job.assignment_token = "assignment-1"
+    store.job.started_at = store.job.created_at
+    socket = RecoveringSocket()
+    gateway = WorkerGateway(
+        store,
+        RecordingCoordinator(),
+        worker_tokens={"worker-1": "worker-secret"},
+    )
+
+    await gateway.handle(socket)
+
+    messages = [parse_server_message(raw) for raw in socket.sent]
+    resumed = next(message for message in messages if isinstance(message, ResumeAssignment))
+    assert store.resumed is True
+    assert resumed.connection_epoch == store.connection_epoch
+    assert store.job.state is JobState.RUNNING

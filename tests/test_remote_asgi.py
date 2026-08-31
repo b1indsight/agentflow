@@ -91,12 +91,14 @@ def test_real_asgi_websocket_completes_a_postgresql_job(store: Store) -> None:
             Started(
                 job_id=assignment.job_id,
                 assignment_token=assignment.assignment_token,
+                connection_epoch=assignment.connection_epoch,
             ).model_dump_json()
         )
         socket.send_text(
             Succeeded(
                 job_id=assignment.job_id,
                 assignment_token=assignment.assignment_token,
+                connection_epoch=assignment.connection_epoch,
                 result=InitialResult(
                     session_id="session-1", last_message="done", exit_code=0
                 ),

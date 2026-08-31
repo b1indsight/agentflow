@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 from app.models import CodexResult, JobState, ReviewItemKind, TriageVerdict
 
-PROTOCOL_VERSION: Literal[1] = 1
+PROTOCOL_VERSION: Literal[2] = 2
 
 
 class ProtocolModel(BaseModel):
@@ -18,7 +20,7 @@ class ProtocolModel(BaseModel):
 
 
 class Message(ProtocolModel):
-    protocol_version: Literal[1] = PROTOCOL_VERSION
+    protocol_version: Literal[2] = PROTOCOL_VERSION
 
 
 class ReviewFeedback(ProtocolModel):
@@ -113,27 +115,39 @@ ExecutionResult = Annotated[
 ]
 
 
+class RecoveryDescriptor(ProtocolModel):
+    job_id: int
+    assignment_token: str
+    state: Literal["received", "started", "succeeded", "failed"]
+    result_digest: str | None = None
+    executor_active: bool = False
+
+
 class Register(Message):
     type: Literal["register"] = "register"
     worker_id: str
+    recovery: RecoveryDescriptor | None = None
 
 
 class Started(Message):
     type: Literal["started"] = "started"
     job_id: int
     assignment_token: str
+    connection_epoch: str
 
 
 class Heartbeat(Message):
     type: Literal["heartbeat"] = "heartbeat"
     job_id: int
     assignment_token: str
+    connection_epoch: str
 
 
 class Succeeded(Message):
     type: Literal["succeeded"] = "succeeded"
     job_id: int
     assignment_token: str
+    connection_epoch: str
     result: ExecutionResult
 
 
@@ -141,6 +155,7 @@ class Failed(Message):
     type: Literal["failed"] = "failed"
     job_id: int
     assignment_token: str
+    connection_epoch: str
     error: str
 
 
@@ -149,10 +164,27 @@ WorkerMessage = Annotated[
     Field(discriminator="type"),
 ]
 
+TerminalMessage = Succeeded | Failed
+
+
+def terminal_digest(message: TerminalMessage) -> str:
+    """Hash only terminal content so a replay may use a freshly fenced epoch."""
+
+    if isinstance(message, Succeeded):
+        payload: dict[str, object] = {
+            "type": message.type,
+            "result": message.result.model_dump(mode="json"),
+        }
+    else:
+        payload = {"type": message.type, "error": message.error}
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
 
 class Registered(Message):
     type: Literal["registered"] = "registered"
     heartbeat_interval: float
+    connection_epoch: str
 
 
 class Assignment(Message):
@@ -160,13 +192,38 @@ class Assignment(Message):
     job_id: int
     flow_id: int
     assignment_token: str
+    connection_epoch: str
     task: ExecutionTask
+
+
+class ResumeAssignment(Message):
+    type: Literal["resume_assignment"] = "resume_assignment"
+    job_id: int
+    assignment_token: str
+    connection_epoch: str
+    heartbeat_interval: float
+
+
+class ReplayResult(Message):
+    type: Literal["replay_result"] = "replay_result"
+    job_id: int
+    assignment_token: str
+    connection_epoch: str
+    heartbeat_interval: float
+
+
+class RecoveryRejected(Message):
+    type: Literal["recovery_rejected"] = "recovery_rejected"
+    job_id: int
+    reason: str
 
 
 class ResultAccepted(Message):
     type: Literal["result_accepted"] = "result_accepted"
     job_id: int
     state: JobState
+    assignment_token: str
+    connection_epoch: str
 
 
 class ProtocolError(Message):
@@ -176,7 +233,13 @@ class ProtocolError(Message):
 
 
 ServerMessage = Annotated[
-    Registered | Assignment | ResultAccepted | ProtocolError,
+    Registered
+    | Assignment
+    | ResumeAssignment
+    | ReplayResult
+    | RecoveryRejected
+    | ResultAccepted
+    | ProtocolError,
     Field(discriminator="type"),
 ]
 

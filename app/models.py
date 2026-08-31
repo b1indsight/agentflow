@@ -53,7 +53,9 @@ class JobState(StrEnum):
 class WorkerStatus(StrEnum):
     ONLINE = "online"
     BUSY = "busy"
+    RECOVERING = "recovering"
     OFFLINE = "offline"
+    FAILED = "failed"
 
 
 class Verdict(StrEnum):
@@ -124,6 +126,12 @@ class Job(BaseModel):
     assigned_worker_id: str | None = None
     assignment_token: str | None = None
     started_at: datetime | None = None
+    lease_expires_at: datetime | None = None
+    recovery_deadline: datetime | None = None
+    result_payload: dict | None = None
+    result_digest: str | None = None
+    result_received_at: datetime | None = None
+    result_applied_at: datetime | None = None
     last_error: str | None = None
     payload: dict | None = None
     created_at: datetime = Field(default_factory=utcnow)
@@ -134,12 +142,14 @@ class WorkerRecord(BaseModel):
     worker_id: str
     protocol_version: int
     status: WorkerStatus
+    connection_epoch: str | None = None
     current_job_id: int | None = None
     first_connected_at: datetime
     last_connected_at: datetime
     last_seen_at: datetime
     last_assigned_at: datetime | None = None
     last_error: str | None = None
+    last_disconnect_reason: str | None = None
 
 
 class WorkerView(BaseModel):
@@ -149,6 +159,10 @@ class WorkerView(BaseModel):
     current_flow_id: int | None = None
     last_seen_at: datetime
     last_error: str | None = None
+    connection_epoch: str | None = None
+    lease_expires_at: datetime | None = None
+    recovery_deadline: datetime | None = None
+    last_disconnect_reason: str | None = None
 
 
 class ReviewItem(BaseModel):

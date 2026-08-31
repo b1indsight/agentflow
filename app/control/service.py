@@ -94,6 +94,10 @@ class ControlService:
                     current_flow_id=job.flow_id if job is not None else None,
                     last_seen_at=worker.last_seen_at,
                     last_error=worker.last_error,
+                    connection_epoch=worker.connection_epoch,
+                    lease_expires_at=job.lease_expires_at if job is not None else None,
+                    recovery_deadline=job.recovery_deadline if job is not None else None,
+                    last_disconnect_reason=worker.last_disconnect_reason,
                 )
             )
         return views

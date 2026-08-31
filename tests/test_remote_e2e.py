@@ -1,5 +1,6 @@
 import asyncio
 from collections.abc import Mapping
+from types import SimpleNamespace
 
 import pytest
 
@@ -57,13 +58,25 @@ class RemoteStore:
         self.job = Job(id=5, flow_id=3, kind=JobKind.INITIAL, state=JobState.QUEUED)
         self.done = asyncio.Event()
 
-    def worker_connected(self, worker_id: str, protocol_version: int):
+    def get_job(self, job_id: int) -> Job | None:
+        return self.job if self.job.id == job_id else None
+
+    def worker_connected(
+        self, worker_id: str, protocol_version: int, connection_epoch: str
+    ):
+        return SimpleNamespace(current_job_id=None)
+
+    def worker_disconnected(
+        self,
+        worker_id: str,
+        reason: str | None = None,
+        connection_epoch: str = "",
+    ) -> None:
         pass
 
-    def worker_disconnected(self, worker_id: str, reason: str | None = None) -> None:
-        pass
-
-    def assign_job(self, worker_id: str, token: str) -> Job | None:
+    def assign_job(
+        self, worker_id: str, token: str, connection_epoch: str
+    ) -> Job | None:
         if self.job.state is not JobState.QUEUED:
             return None
         self.job.state = JobState.RUNNING
@@ -72,12 +85,43 @@ class RemoteStore:
         return self.job
 
     def start_assignment(
-        self, job_id: int, attempt_id: int, worker_id: str, token: str
+        self,
+        job_id: int,
+        attempt_id: int,
+        worker_id: str,
+        token: str,
+        connection_epoch: str,
     ) -> bool:
         return self.assignment_active(job_id, worker_id, token)
 
-    def heartbeat_assignment(self, job_id: int, worker_id: str, token: str) -> bool:
+    def heartbeat_assignment(
+        self, job_id: int, worker_id: str, token: str, connection_epoch: str
+    ) -> bool:
         return self.assignment_active(job_id, worker_id, token)
+
+    def resume_assignment(
+        self, job_id: int, worker_id: str, token: str, connection_epoch: str
+    ) -> bool:
+        return self.assignment_active(job_id, worker_id, token)
+
+    def record_assignment_result(
+        self,
+        job_id: int,
+        worker_id: str,
+        token: str,
+        connection_epoch: str,
+        payload: Mapping[str, object],
+        digest: str,
+    ) -> str:
+        return "pending" if self.assignment_active(job_id, worker_id, token) else "rejected"
+
+    def list_unapplied_results(self) -> list[Job]:
+        return []
+
+    def complete_persisted_result(self, job_id: int, state: JobState) -> bool:
+        self.job.state = state
+        self.done.set()
+        return True
 
     def assignment_active(self, job_id: int, worker_id: str, token: str) -> bool:
         return (
@@ -88,7 +132,12 @@ class RemoteStore:
         )
 
     def finish_assignment(
-        self, job_id: int, worker_id: str, token: str, state: JobState
+        self,
+        job_id: int,
+        worker_id: str,
+        token: str,
+        state: JobState,
+        connection_epoch: str,
     ) -> bool:
         if not self.assignment_active(job_id, worker_id, token):
             return False
@@ -96,11 +145,20 @@ class RemoteStore:
         self.done.set()
         return True
 
-    def requeue_assignment(self, job_id: int, worker_id: str, token: str) -> bool:
+    def requeue_assignment(
+        self, job_id: int, worker_id: str, token: str, connection_epoch: str
+    ) -> bool:
         self.job.state = JobState.QUEUED
         return True
 
-    def fail_assignment(self, job_id: int, worker_id: str, token: str, reason: str) -> bool:
+    def fail_assignment(
+        self,
+        job_id: int,
+        worker_id: str,
+        token: str,
+        reason: str,
+        connection_epoch: str,
+    ) -> bool:
         self.job.state = JobState.FAILED
         self.done.set()
         return True
