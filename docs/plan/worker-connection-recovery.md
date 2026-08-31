@@ -1,6 +1,6 @@
 # Worker 重连、租约恢复与运维强化计划
 
-> 状态：已批准，实施中 · 日期：2026-08-31 · Feature 3/3
+> 状态：已实施并验证 · 计划日期：2026-08-31 · 实施日期：2026-09-02 · Feature 3/3
 >
 > 依赖 Feature 1（远程单 Worker 闭环，PR #6）和 Feature 2（多 Worker 调度，PR #7），均已合并。
 > 本 feature 只强化已经工作的多 worker 架构，不改变 task/result 的业务职责和调度公平性。
@@ -220,3 +220,19 @@ CI fault smoke 使用短测试间隔，真实重启 serve/断开 worker socket�
 
 回退本 feature 恢复 Feature 2 的断线即失败语义。新增 lease/result 字段可保留但不使用；已经 DONE 的
 job 和历史 result 不删除，不执行破坏性数据回退。
+
+## 10. 实施结果
+
+- WebSocket 协议升级到 v2，以 worker、connection epoch、job 和 assignment token 联合 fencing，旧连接不能
+  heartbeat 或提交结果；
+- PostgreSQL 持久化 assignment lease、recovery deadline 和 result inbox；未 Started 的 assignment 到期后
+  可重排，Started job 在 grace 内只等待原 worker；
+- worker journal 在收到 `ResultAccepted` 前保留 assignment 和终态结果，断线或控制面重启后可去重重放；
+- `serve` 启动会恢复未结束 assignment 和未应用 result，worker 以同一 identity 重连并恢复 affinity；
+- CLI、状态展示、配置校验和 CI fault smoke 已同步，单元测试与 PostgreSQL/ASGI 集成测试覆盖租约、重连、
+  fencing、结果重放及 grace 到期路径；
+- PR #8 于 2026-09-02 合并到 `main`（`5ec17f2`）；合并后的 Ruff、Mypy、pytest、双进程 smoke 和 Build
+  均通过。
+
+实施与批准范围一致；跨 worker 迁移、控制面 HA 和外部 GitHub/Codex 副作用的 exactly-once 语义仍保留为
+后续工作。
