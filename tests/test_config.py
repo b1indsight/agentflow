@@ -49,6 +49,8 @@ def test_worker_settings_do_not_require_control_plane_secrets(monkeypatch, tmp_p
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("FLOWTOOL_DATABASE_URL", raising=False)
     monkeypatch.delenv("FLOWTOOL_GITHUB_WEBHOOK_SECRET", raising=False)
+    monkeypatch.delenv("FLOWTOOL_WORKER_ROOT", raising=False)
+    monkeypatch.delenv("FLOWTOOL_ALLOW_INSECURE_WORKER_WS", raising=False)
 
     settings = WorkerSettings(
         worker_id="worker-1",
@@ -60,7 +62,9 @@ def test_worker_settings_do_not_require_control_plane_secrets(monkeypatch, tmp_p
     assert not hasattr(settings, "database_url")
 
 
-def test_worker_requires_explicit_opt_in_for_plaintext_websocket() -> None:
+def test_worker_requires_explicit_opt_in_for_plaintext_websocket(monkeypatch) -> None:
+    monkeypatch.delenv("FLOWTOOL_ALLOW_INSECURE_WORKER_WS", raising=False)
+
     with pytest.raises(ValidationError):
         WorkerSettings(
             worker_id="worker-1",
