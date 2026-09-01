@@ -1,4 +1,4 @@
-"""Versioned messages exchanged by the control plane and one remote worker."""
+"""Versioned messages exchanged by the control plane and remote workers."""
 
 from __future__ import annotations
 

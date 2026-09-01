@@ -3,7 +3,7 @@ from collections.abc import Mapping
 
 import pytest
 
-from app.control.gateway import SingleWorkerGateway
+from app.control.gateway import WorkerGateway
 from app.models import Job, JobKind, JobState
 from app.protocol import (
     ExecutionResult,
@@ -57,6 +57,12 @@ class RemoteStore:
         self.job = Job(id=5, flow_id=3, kind=JobKind.INITIAL, state=JobState.QUEUED)
         self.done = asyncio.Event()
 
+    def worker_connected(self, worker_id: str, protocol_version: int):
+        pass
+
+    def worker_disconnected(self, worker_id: str, reason: str | None = None) -> None:
+        pass
+
     def assign_job(self, worker_id: str, token: str) -> Job | None:
         if self.job.state is not JobState.QUEUED:
             return None
@@ -65,7 +71,9 @@ class RemoteStore:
         self.job.assignment_token = token
         return self.job
 
-    def start_assignment(self, job_id: int, worker_id: str, token: str) -> bool:
+    def start_assignment(
+        self, job_id: int, attempt_id: int, worker_id: str, token: str
+    ) -> bool:
         return self.assignment_active(job_id, worker_id, token)
 
     def heartbeat_assignment(self, job_id: int, worker_id: str, token: str) -> bool:
@@ -136,11 +144,10 @@ async def test_control_gateway_and_worker_client_complete_one_remote_job() -> No
     serve_to_worker: asyncio.Queue[str] = asyncio.Queue()
     store = RemoteStore()
     coordinator = RemoteCoordinator()
-    gateway = SingleWorkerGateway(
+    gateway = WorkerGateway(
         store,
         coordinator,
-        worker_id="worker-1",
-        worker_token="worker-secret",
+        worker_tokens={"worker-1": "worker-secret"},
         poll_interval=0.01,
     )
     client = WorkerClient(

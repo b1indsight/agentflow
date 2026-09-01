@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import UTC, datetime
 
 import typer
 
@@ -63,6 +64,28 @@ def flows(active: bool = typer.Option(False, help="只看未终结的")) -> None
             typer.echo(
                 f"[{f.id}] {f.repo}#{f.issue_number:<5} {f.state:<10} {pr} cycles={cycles}"
             )
+
+
+@app.command()
+def workers() -> None:
+    """列出 worker 在线状态和当前 assignment。"""
+    with _store() as store:
+        typer.echo("WORKER\tSTATUS\tJOB\tFLOW\tLAST_SEEN")
+        for worker in ControlService(store).list_workers():
+            typer.echo(
+                f"{worker.worker_id}\t{worker.status.value}\t"
+                f"{worker.current_job_id or '-'}\t{worker.current_flow_id or '-'}\t"
+                f"{_age(worker.last_seen_at)}"
+            )
+
+
+def _age(value: datetime) -> str:
+    seconds = max(0, int((datetime.now(UTC) - value).total_seconds()))
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    return f"{seconds // 3600}h"
 
 
 @flow_app.command("show")

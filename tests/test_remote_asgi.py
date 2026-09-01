@@ -3,7 +3,7 @@ from types import SimpleNamespace
 from starlette.testclient import TestClient
 
 from app.control.api import create_app
-from app.control.gateway import SingleWorkerGateway
+from app.control.gateway import WorkerGateway
 from app.models import Job, JobKind, JobState
 from app.protocol import (
     Assignment,
@@ -22,9 +22,12 @@ from app.store import Store
 
 
 class AsgiCoordinator:
+    def __init__(self, attempt_id: int) -> None:
+        self.attempt_id = attempt_id
+
     async def prepare(self, job: Job) -> ExecutionTask | JobState:
         return InitialTask(
-            attempt_id=7,
+            attempt_id=self.attempt_id,
             repo="owner/repo",
             issue_number=8,
             issue_title="Issue",
@@ -44,14 +47,13 @@ class AsgiCoordinator:
 
 
 class AsgiContext:
-    def __init__(self, store: Store) -> None:
+    def __init__(self, store: Store, attempt_id: int) -> None:
         self.settings = SimpleNamespace(github_webhook_secret="unused")
         self.router = SimpleNamespace()
-        self.gateway = SingleWorkerGateway(
+        self.gateway = WorkerGateway(
             store,
-            AsgiCoordinator(),
-            worker_id="worker-1",
-            worker_token="worker-secret",
+            AsgiCoordinator(attempt_id),
+            worker_tokens={"worker-1": "worker-secret"},
             poll_interval=0.01,
         )
 
@@ -67,8 +69,11 @@ class AsgiContext:
 
 def test_real_asgi_websocket_completes_a_postgresql_job(store: Store) -> None:
     flow = store.create_flow("owner/repo", 8, installation_id=42)
+    attempt = store.create_attempt(flow.id)
+    flow.current_attempt_id = attempt.id
+    store.update_flow(flow)
     job = store.enqueue_job(flow.id, JobKind.INITIAL)
-    application = create_app(lambda: AsgiContext(store))  # type: ignore[arg-type]
+    application = create_app(lambda: AsgiContext(store, attempt.id))  # type: ignore[arg-type]
 
     with TestClient(application) as client, client.websocket_connect(
         "/internal/workers/connect",

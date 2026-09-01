@@ -11,7 +11,7 @@ Codex 等长任务占用 GitHub 的 Webhook 请求。
 
 - `GET /healthz` 返回 `{"status": "ok"}`；它是存活探针，不检查数据库或外部依赖；
 - `POST /webhook` 缺少或带错误签名时返回 401；签名正确时创建后台 handler 并返回 202；
-- `WS /internal/workers/connect` 在鉴权后接受唯一配置的 worker identity；
+- `WS /internal/workers/connect` 按 token map 鉴权，并为每个 worker identity 保持一条连接；
 - FastAPI lifespan 初始化 PostgreSQL schema，只启动 control reconciler，不再启动进程内 worker；
 - 自动化测试覆盖 health、错误签名、正确签名、202 交接和一条 signed label→job 路径。
 
@@ -65,12 +65,14 @@ PENDING → CODING → PR_OPEN ⇄ REVISING
 
 ### 4.3.1 远程 Worker Gateway / Client / Executor
 
-serve 的 `SingleWorkerGateway` 校验 bearer token 与 worker id，维护一个 WebSocket 会话，并用随机
-assignment token 对 Started、Heartbeat 和结果做 fencing。worker 的 `WorkerClient` 主动连接并指数退避；
+serve 的 `WorkerGateway` 校验每个 identity 的 bearer token，维护多会话 registry，并用随机
+assignment token 对 Started、Heartbeat 和结果做 fencing。每个 worker 是单槽，PostgreSQL 按 FIFO、
+worker `last_assigned_at` 和 attempt affinity 事务化领取任务。worker 的 `WorkerClient` 主动连接并指数退避；
 `WorkerExecutor` 只依赖 CodeAgent、Judge、workspace/VCS，不导入 Store、FastAPI 或 GitHub。
 
-当前只允许一个预配置 worker identity。任务未 Started 断线会 requeue；Started 后断线或超时会把 job/flow
-置 FAILED，避免自动重放未知外部副作用。忙碌重连、lease 接管、多 worker 调度和单机多实例均未实现。
+不同 identity 可并发在线，重复 identity 会拒绝新连接；任务未 Started 断线会 requeue，Started 后断线或
+超时会把 job/flow 置 FAILED，避免自动重放未知外部副作用。同一 attempt 的后续任务只回到首次 Started
+的 worker。同机默认 root 按 identity 派生并带独占锁。忙碌重连、lease 接管和跨 worker 迁移仍未实现。
 
 ## 4.4 Codex Driver
 
@@ -127,6 +129,7 @@ ORM。
 - `flows`：issue 级状态，`(repo, issue)` 仅允许一个非终态 flow；
 - `attempts`：每个候选解法的 branch/session/PR/worker_id/revision_cycles，当前每 flow 一个；
 - `jobs`：queued/running/done/failed、worker/token/start/heartbeat/error、payload 与尝试次数；
+- `workers`：identity、协议版本、在线/忙碌/离线、当前 job、连接/心跳/最近分配时间和最近错误；
 - `events`：delivery 去重和 payload 审计；
 - `codex_runs`：按 attempt 记录 prompt、kind、exit 与时间；
 - `review_threads`：按 attempt 记录正文/inline/conversation 反馈及 relayed/resolved 状态。
@@ -135,8 +138,9 @@ ORM。
 未 started requeue、started fail closed、跨 Store 可见性、delivery 去重和并发 assign。
 `assign_job()` 使用事务内的 `FOR UPDATE SKIP LOCKED`；gateway 仍只接受一个配置 worker。
 
-Store 继续使用同步接口。Feature 1 已增加 worker identity 与 assignment token fencing，但没有持久 lease、
-忙碌重连或 Codex session 的多 worker affinity；控制/执行面已分离不代表故障接管完成。M0 的 SQLite 文件
+Store 继续使用同步接口。assignment claim 会锁定公平候选 worker 和最早 eligible job，Started 在 token
+条件下原子绑定 `attempt.worker_id`。当前仍没有持久 lease、忙碌重连或跨 worker session 迁移；
+控制/执行面已分离不代表故障接管完成。M0 的 SQLite 文件
 不会自动导入 PostgreSQL。
 
 ## 4.8 GitHub 交互面

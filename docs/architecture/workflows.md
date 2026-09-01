@@ -7,9 +7,9 @@
   → FastAPI 后台交接并返回 202
   → Event Router 去重 / 授权 / 写 PostgreSQL
   → flow + queued job
-  → serve 通过认证 WebSocket 向唯一远程 worker assign
+  → serve 通过认证 WebSocket 向公平选中的空闲 worker assign
   → Started / Heartbeat / Result / ResultAccepted
-  → job DONE；断线时按是否 started 执行 requeue 或 fail closed
+  → Started 固定 attempt affinity → job DONE；断线时按是否 started 执行 requeue 或 fail closed
 ```
 
 测试使用 fake coordinator/executor 或 fake 外部端口，不访问 GitHub、Codex 或 bub。这个切片证明入口、

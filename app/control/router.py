@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from typing import Protocol
 
 from loguru import logger
@@ -20,6 +21,8 @@ class FlowEventHandler(Protocol):
 
     def on_merged(self, flow: Flow) -> None: ...
 
+    def notify_jobs(self) -> None: ...
+
 
 class RouterSettings(Protocol):
     allowlist: list[str]
@@ -30,9 +33,15 @@ class RouterSettings(Protocol):
 
 
 class SettleScheduler:
-    def __init__(self, store: Store, settings: RouterSettings) -> None:
+    def __init__(
+        self,
+        store: Store,
+        settings: RouterSettings,
+        jobs_available: Callable[[], None],
+    ) -> None:
         self.store = store
         self.settings = settings
+        self.jobs_available = jobs_available
         self._timers: dict[int, asyncio.Task[None]] = {}
 
     def touch(self, flow: Flow, grace: float | None = None) -> None:
@@ -51,6 +60,7 @@ class SettleScheduler:
         fresh = self.store.get_flow(flow.id)
         if fresh and fresh.state not in TERMINAL_STATES:
             self.store.enqueue_job(fresh.id, JobKind.TRIAGE)
+            self.jobs_available()
 
 
 class EventRouter:
@@ -63,7 +73,7 @@ class EventRouter:
         self.store = store
         self.service = service
         self.settings = settings
-        self.settle = SettleScheduler(store, settings)
+        self.settle = SettleScheduler(store, settings, service.notify_jobs)
 
     async def handle(self, event_type: str, delivery_id: str, payload: dict) -> None:
         sender = (payload.get("sender") or {}).get("login", "")

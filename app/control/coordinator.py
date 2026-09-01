@@ -149,6 +149,10 @@ class JobCoordinator:
         attempt = self.store.get_attempt(task.attempt_id)
         if attempt is None:
             raise ValueError(f"attempt {task.attempt_id} disappeared")
+        if attempt.worker_id not in (None, worker_id):
+            raise ValueError(
+                f"attempt {attempt.id} is affined to {attempt.worker_id}, not {worker_id}"
+            )
         attempt.worker_id = worker_id
         if job.kind is JobKind.REVISION:
             attempt.revision_cycles += 1

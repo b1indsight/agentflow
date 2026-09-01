@@ -1,7 +1,16 @@
 from typing import Any, cast
 
 from app.control.service import ControlService
-from app.models import Flow, FlowState, Job, JobKind, JobState
+from app.models import (
+    Flow,
+    FlowState,
+    Job,
+    JobKind,
+    JobState,
+    WorkerRecord,
+    WorkerStatus,
+    utcnow,
+)
 from app.store import Store
 
 
@@ -62,3 +71,36 @@ def test_explicit_retry_requeues_the_failed_job_kind() -> None:
 
     assert store.flow.state is FlowState.PR_OPEN
     assert store.enqueued == [JobKind.REVISION]
+
+
+def test_list_workers_aggregates_current_flow() -> None:
+    now = utcnow()
+    worker = WorkerRecord(
+        worker_id="worker-a",
+        protocol_version=1,
+        status=WorkerStatus.BUSY,
+        current_job_id=9,
+        first_connected_at=now,
+        last_connected_at=now,
+        last_seen_at=now,
+    )
+    job = Job(id=9, flow_id=3, kind=JobKind.INITIAL, state=JobState.RUNNING)
+    store = SimpleWorkerStore(worker, job)
+
+    views = ControlService(cast(Store, cast(Any, store))).list_workers()
+
+    assert views[0].worker_id == "worker-a"
+    assert views[0].current_job_id == 9
+    assert views[0].current_flow_id == 3
+
+
+class SimpleWorkerStore:
+    def __init__(self, worker: WorkerRecord, job: Job) -> None:
+        self.worker = worker
+        self.job = job
+
+    def list_workers(self) -> list[WorkerRecord]:
+        return [self.worker]
+
+    def get_job(self, job_id: int) -> Job | None:
+        return self.job if job_id == self.job.id else None

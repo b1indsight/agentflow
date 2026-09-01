@@ -10,7 +10,7 @@ from loguru import logger
 
 from app.config import ServeSettings, get_serve_settings
 from app.control.coordinator import JobCoordinator
-from app.control.gateway import SingleWorkerGateway
+from app.control.gateway import WorkerGateway
 from app.control.reconcile import Reconciler
 from app.control.router import EventRouter
 from app.control.service import ControlService
@@ -26,20 +26,22 @@ class ControlRuntime:
         self.settings = settings or get_serve_settings()
         self.store = Store(self.settings.database_url)
         plugins = get_plugin_manager()
-        self.service = ControlService(self.store, plugins)
         self.coordinator = JobCoordinator(
             self.store, GitHubApp(self.settings), self.settings, plugins
         )
-        self.router = EventRouter(self.store, self.service, self.settings)
-        self.gateway = SingleWorkerGateway(
+        self.gateway = WorkerGateway(
             self.store,
             self.coordinator,
-            worker_id=self.settings.worker_id,
-            worker_token=self.settings.worker_token.get_secret_value(),
+            worker_tokens={
+                worker_id: token.get_secret_value()
+                for worker_id, token in self.settings.worker_tokens.items()
+            },
             heartbeat_interval=self.settings.worker_heartbeat_interval,
             heartbeat_timeout=self.settings.worker_heartbeat_timeout,
             poll_interval=self.settings.worker_poll_interval,
         )
+        self.service = ControlService(self.store, plugins, self.gateway.notify_jobs)
+        self.router = EventRouter(self.store, self.service, self.settings)
         self.reconciler = Reconciler(self.store)
         self._tasks: list[asyncio.Task[None]] = []
         self._handlers: set[asyncio.Task[None]] = set()

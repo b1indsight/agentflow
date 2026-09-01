@@ -13,8 +13,7 @@ def test_settings_parse_csv_allowlist_and_expand_paths(monkeypatch, tmp_path) ->
         "FLOWTOOL_DATABASE_URL", "postgresql://flowtool:secret@db.example/flowtool"
     )
 
-    monkeypatch.setenv("FLOWTOOL_WORKER_ID", "worker-1")
-    monkeypatch.setenv("FLOWTOOL_WORKER_TOKEN", "secret")
+    monkeypatch.setenv("FLOWTOOL_WORKER_TOKENS", '{"worker-1":"secret"}')
 
     settings = ServeSettings()  # type: ignore[call-arg]
 
@@ -27,8 +26,7 @@ def test_settings_preserve_json_allowlist_environment_values(monkeypatch) -> Non
     monkeypatch.setenv("FLOWTOOL_ALLOWLIST", '["alice", "bob"]')
     monkeypatch.setenv("FLOWTOOL_DATABASE_URL", "postgresql://localhost/flowtool")
 
-    monkeypatch.setenv("FLOWTOOL_WORKER_ID", "worker-1")
-    monkeypatch.setenv("FLOWTOOL_WORKER_TOKEN", "secret")
+    monkeypatch.setenv("FLOWTOOL_WORKER_TOKENS", '{"worker-1":"secret"}')
 
     settings = ServeSettings()  # type: ignore[call-arg]
 
@@ -40,8 +38,29 @@ def test_settings_require_database_url(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.delenv("FLOWTOOL_DATABASE_URL", raising=False)
 
     with pytest.raises(ValidationError):
-        ServeSettings(  # type: ignore[call-arg]
-            worker_id="worker-1", worker_token=SecretStr("secret")
+        ServeSettings(worker_tokens={"worker-1": SecretStr("secret")})  # type: ignore[call-arg]
+
+
+def test_serve_settings_require_unique_nonempty_worker_credentials(monkeypatch) -> None:
+    monkeypatch.setenv("FLOWTOOL_DATABASE_URL", "postgresql://localhost/flowtool")
+
+    with pytest.raises(ValidationError):
+        ServeSettings(
+            database_url="postgresql://localhost/flowtool",
+            worker_tokens={"": SecretStr("secret")},
+        )
+    with pytest.raises(ValidationError):
+        ServeSettings(
+            database_url="postgresql://localhost/flowtool",
+            worker_tokens={"worker-1": SecretStr("")},
+        )
+    with pytest.raises(ValidationError):
+        ServeSettings(
+            database_url="postgresql://localhost/flowtool",
+            worker_tokens={
+                "worker-1": SecretStr("shared"),
+                "worker-2": SecretStr("shared"),
+            }
         )
 
 
@@ -58,7 +77,7 @@ def test_worker_settings_do_not_require_control_plane_secrets(monkeypatch, tmp_p
         serve_ws_url="wss://control.example/internal/workers/connect",
     )
 
-    assert settings.worker_root == Path("~/.flowtool/worker").expanduser()
+    assert settings.worker_root == Path("~/.flowtool/workers/worker-1").expanduser()
     assert not hasattr(settings, "database_url")
 
 
