@@ -3,13 +3,12 @@ from unittest.mock import Mock
 
 import pytest
 
-import app.router as router_module
+from app.control.router import EventRouter
 from app.models import Flow, FlowState, JobKind
-from app.router import EventRouter
 from app.store import Store
 
 
-class RecordingEngine:
+class RecordingService:
     def __init__(self, store: Store) -> None:
         self.store = store
 
@@ -36,9 +35,8 @@ def router(store: Store, monkeypatch) -> EventRouter:
         settle_seconds=75.0,
         submit_grace_seconds=15.0,
     )
-    monkeypatch.setattr(router_module, "get_settings", lambda: settings)
-    engine = RecordingEngine(store)
-    return EventRouter(store, engine)
+    service = RecordingService(store)
+    return EventRouter(store, service, settings)
 
 
 def issue_event(*, action: str, sender: str = "alice") -> dict:
@@ -64,8 +62,8 @@ async def test_allowed_label_creates_one_flow_and_job(
     flow = store.get_active_flow("owner/repo", 7)
     assert flow is not None
     assert flow.state is FlowState.PENDING
-    assert store.claim_job() is not None
-    assert store.claim_job() is None
+    assert store.assign_job("worker-1", "assignment-1") is not None
+    assert store.assign_job("worker-1", "assignment-2") is None
 
 
 @pytest.mark.asyncio
@@ -123,7 +121,7 @@ async def test_review_comment_is_stored_for_current_attempt(
             "id": 101,
             "body": "Please add a bound.",
             "user": {"login": "reviewer"},
-            "path": "app/worker.py",
+            "path": "app/worker/client.py",
             "line": 40,
             "original_commit_id": "abc123",
             "diff_hunk": "@@ -40 +40 @@",
@@ -136,5 +134,5 @@ async def test_review_comment_is_stored_for_current_attempt(
     items = store.unrelayed_items(attempt.id)
     assert len(items) == 1
     assert items[0].github_id == 101
-    assert items[0].path == "app/worker.py"
+    assert items[0].path == "app/worker/client.py"
     touch.assert_called_once()

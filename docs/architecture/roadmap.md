@@ -5,19 +5,17 @@
 ```
 flowtool/
   app/
-    ingress.py        # FastAPI webhook 端点 + 验签
-    router.py         # 事件归一 / 去重 / 路由
-    engine.py         # Flow 状态机
+    control/          # FastAPI/router/service/coordinator/gateway/reconciler/runtime
+    worker/           # WebSocket client/executor/runtime + worker root lock
+    protocol.py       # 版本化 task/result/message 契约
     codex_driver.py   # CodexSession 抽象（CodeAgent 端口首个 adapter）
     context_builder.py # prompt / 上下文构建（§4.9）
     judge.py          # Judge / Triage 适配器（bub，§4.10）
     github_client.py  # githubkit 封装（App 认证）
     vcs.py            # workspace 隔离(VCS-无关) + VCS 指引文本(git / jj)，普通函数（§4.6）
     sandbox.py        # Sandbox 端口 adapter：codex workspace-write（§4.6 / §9-5）
-    worker.py         # job 队列消费 + 崩溃恢复（§10-1）
-    reconcile.py      # 对账 poller（§10-2）
     store.py          # PostgreSQL schema + 仓储（含 jobs 表）
-    config.py         # 配置（pydantic-settings）
+    config.py         # serve/worker 角色配置（pydantic-settings）
     models.py         # 领域类型 / 枚举
     cli.py            # admin CLI（§10-8）
     plugins/          # 生命周期 hook 插件（§9-7）
@@ -30,6 +28,8 @@ flowtool/
 - **M0（已验收）** 骨架 + webhook 验签 + SQLite（含 `jobs`）+ 配置 + worker / 崩溃恢复骨架；
   19 个自动化测试、Ruff、Mypy、CLI 与 `/healthz` runtime smoke 全部通过（2026-08-26）；
 - **持久层替换（2026-08-27）** PostgreSQL 成为当前唯一运行时数据库；M0 的 SQLite 描述保留为历史验收事实；
+- **控制/执行面分离 Feature 1（2026-09-01）** serve 与一个出站 WebSocket worker 独立运行；多 worker
+  与恢复 lease 留给后续 feature；
 - **M1** 触发（含 allowlist）→ 工作区 → codex 首轮 → 开 PR（单 flow happy path）
 - **M2** 语义 Triage（bub）门 + 回喂循环（settle → revise/answer/wait + resume/兜底 + 自动 resolve）
 - **M3** 人工合并检测（`pull_request.closed`）→ 归档 + 状态标签 / 评论
@@ -63,17 +63,17 @@ M1–M5 是目标里程碑，不代表对应控制流代码或接口已经验收
    - 预留：`Sandbox` port **已是一等轴（§4.6，M0 就立）**，MVP adapter = codex `workspace-write`；容器 / 微VM 是后续 adapter，对应 M5。
      那个 adapter 由它**接管整个工作区的 FS 策略**，git/jj 的差别塌成纯指引文本、顺带解掉 git `.git` 只读（原 V4）。
 
-6. **控制面 / 执行面分离** —— webapp + webhook 入口与底层 code agent 可分在不同机器，从而**调度**被追踪的 job。
-   - 预留：engine 触发 codex 的那一步走一个 `JobDispatch` port（MVP 进程内直接调；日后换成队列 + 远程 worker）。
-     core 不假设 worker 在本机，job 状态经 store 共享。
+6. **多 Worker 调度与恢复** —— 控制/执行面分离和单 worker 远程闭环已完成；后续增加多 identity、
+   session affinity、公平调度、单机多 root，以及忙碌重连和持久 lease 接管。
+   - 当前接缝：`protocol.py`、`SingleWorkerGateway` 与 Store assignment token；worker 不直接共享 Store。
 
 7. **端口插件扩展** —— 在生命周期端口挂插件。
    例：合并后总结插件——归纳上一段对话里的代码风格偏好、更新仓库的 skill 文件。
    - **已接线（2026-08-02）**：五个生命周期 hook（`on_flow_start / on_pr_opened / on_review / on_merged / on_archived`）已在 engine 的对应状态转移处触发，插件可订阅；插件异常被隔离（不掀翻 core）。
      待实现：示例插件 `post-merge-summary` 的插件体（读会话 + diff → 提炼风格偏好 → 提 PR 更新 repo 的 skill），目前只打日志。
 
-**架构取向：hexagonal（ports & adapters）。** core（Flow Engine + 状态机 + store）只依赖端口：
+**架构取向：hexagonal（ports & adapters）。** control core（ControlService + JobCoordinator + store）只依赖端口：
 `CodeAgent` / `Judge` / `Sandbox` / `JobDispatch` / `GitHubClient` / `Plugin hooks`。
 （**VCS 不是端口**——它是 workspace 拷贝函数 + git/jj 指引文本，见 §4.6。）
-M0 已给端口放置最简 adapter 或桩（codex / bub / workspace-write / 进程内 / githubkit / 插件集）。
+当前已给端口放置最简 adapter 或桩（codex / bub / workspace-write / WebSocket worker / githubkit / 插件集）。
 “存在 adapter”不代表外部契约已校准；未来扩展仍优先通过换 adapter 或加插件保持 core 边界稳定。

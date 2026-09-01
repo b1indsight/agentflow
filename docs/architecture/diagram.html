@@ -302,9 +302,9 @@
       <span class="rule"></span>
     </div>
 
-    <!-- orchestrator plane -->
+    <!-- control plane -->
     <div class="plane">
-      <span class="plane-label">Orchestrator daemon <small>= GitHub API 平面 + 编排大脑</small></span>
+      <span class="plane-label">Serve / Control plane <small>= Store + GitHub API 唯一权威</small></span>
 
       <div class="row-label">事件管线 · webhook 秒回，长活交后台</div>
       <div class="scroll-x">
@@ -312,39 +312,39 @@
           <article class="node" data-status="done">
             <div class="node__top"><span class="node__name">Ingress</span><span class="pill">M0 已验</span></div>
             <p class="node__role">FastAPI · HMAC 验签 · /webhook · /healthz · 后台交接 · 202 响应</p>
-            <code class="node__file">app/ingress.py</code>
+            <code class="node__file">app/control/api.py</code>
           </article>
           <span class="arrow" aria-hidden="true">→</span>
           <article class="node" data-status="done">
             <div class="node__top"><span class="node__name">Event Router</span><span class="pill">M0 已验</span></div>
             <p class="node__role">delivery 去重 · 触发授权(allowlist) · 落 review_threads · settle 去抖</p>
-            <code class="node__file">app/router.py</code>
+            <code class="node__file">app/control/router.py</code>
           </article>
           <span class="arrow" aria-hidden="true">→</span>
           <article class="node" data-status="partial">
-            <div class="node__top"><span class="node__name">Flow Engine</span><span class="pill">部分</span></div>
-            <p class="node__role">状态机控制流 · Judge 分流 · 最大修订轮数 · issue/thread/取消/冲突仍有桩</p>
-            <code class="node__file">app/engine.py</code>
+            <div class="node__top"><span class="node__name">Control Service + Coordinator</span><span class="pill">部分</span></div>
+            <p class="node__role">状态机与 task/result 转换 · GitHub 副作用 · issue/thread/取消/冲突仍有桩</p>
+            <code class="node__file">app/control/service.py · coordinator.py</code>
           </article>
         </div>
       </div>
 
-      <div class="row-label">Engine 协作 · 端口 &amp; 持久化</div>
+      <div class="row-label">Control 协作 · 协议、Gateway 与持久化</div>
       <div class="grid">
         <article class="node" data-status="done">
           <div class="node__top"><span class="node__name">Store</span><span class="pill">M0 已验</span></div>
-          <p class="node__role">PostgreSQL + Psycopg pool · flows / <b>attempts</b> / jobs / events / codex_runs / review_threads · 并发 claim · 恢复</p>
+          <p class="node__role">PostgreSQL · flows/attempts/jobs · worker identity + assignment token fencing · 启动收敛</p>
           <code class="node__file">app/store.py</code>
         </article>
         <article class="node" data-status="done">
-          <div class="node__top"><span class="node__name">Context Builder</span><span class="pill">已实现</span></div>
-          <p class="node__role">首轮 / 修订 prompt · VCS 指引 + 硬约束 + hunk；真实 issue/diff/thread 上下文未接</p>
-          <code class="node__file">app/context_builder.py</code>
+          <div class="node__top"><span class="node__name">Protocol</span><span class="pill">已验证</span></div>
+          <p class="node__role">v1 strict Pydantic · 五类 task/result · register/started/heartbeat/result/ack</p>
+          <code class="node__file">app/protocol.py</code>
         </article>
         <article class="node" data-status="stub">
-          <div class="node__top"><span class="node__name">Judge</span><span class="pill">桩</span></div>
-          <p class="node__role">bub 语义判定 revise/wait/answer/ignore · subprocess 兜底 · 解析失败→wait</p>
-          <code class="node__file">app/judge.py · V2</code>
+          <div class="node__top"><span class="node__name">Worker Gateway</span><span class="pill">已验证</span></div>
+          <p class="node__role">单 identity WebSocket · bearer 鉴权 · assignment fencing · 断线 fail closed</p>
+          <code class="node__file">app/control/gateway.py</code>
         </article>
         <article class="node" data-status="stub">
           <div class="node__top"><span class="node__name">GitHub Client</span><span class="pill">桩</span></div>
@@ -356,14 +356,14 @@
       <div class="row-label">常驻后台任务</div>
       <div class="grid">
         <article class="node" data-status="done">
-          <div class="node__top"><span class="node__name">Worker</span><span class="pill">M0 已验</span></div>
-          <p class="node__role">jobs claim/dispatch · DONE/FAILED · heartbeat 清理/瞬时失败重试 · 启动 recover</p>
-          <code class="node__file">app/worker.py</code>
+          <div class="node__top"><span class="node__name">Remote Worker Session</span><span class="pill">Feature 1 已验</span></div>
+          <p class="node__role">唯一出站长连接 · 未 started requeue · started 后 fail closed</p>
+          <code class="node__file">app/control/gateway.py</code>
         </article>
         <article class="node" data-status="stub">
           <div class="node__top"><span class="node__name">Reconciler</span><span class="pill">桩</span></div>
           <p class="node__role">周期对账兜底 · 补 webhook 漏投 · _sweep() 目前空转</p>
-          <code class="node__file">app/reconcile.py · V1</code>
+          <code class="node__file">app/control/reconcile.py · V1</code>
         </article>
       </div>
     </div>
@@ -371,13 +371,13 @@
     <div class="boundary">
       <span class="btag">平面边界</span>
       <span class="rule"></span>
-      <div class="dir"><span>engine 调 CodeAgent 端口 ↓</span></div>
+      <div class="dir"><span>authenticated WebSocket · versioned task/result ↓↑</span></div>
       <span class="rule"></span>
     </div>
 
-    <!-- local plane -->
+    <!-- worker plane -->
     <div class="plane plane--local">
-      <span class="plane-label">本地平面 <small>= Code Agent (在 Sandbox 内) · 三正交轴 workspace / sandbox / VCS · 不出现裸 git</small></span>
+      <span class="plane-label">Remote Worker <small>= Client + Executor + Judge/Code Agent · 不访问 Store/GitHub</small></span>
       <div class="grid">
         <article class="node" data-status="partial">
           <div class="node__top"><span class="node__name">Codex Driver</span><span class="pill">部分</span></div>
@@ -395,9 +395,9 @@
           <code class="node__file">app/vcs.py · V8</code>
         </article>
         <article class="node" data-status="artifact">
-          <div class="node__top"><span class="node__name">工作区 (每 flow)</span></div>
-          <p class="node__role">VCS-无关的目录拷贝 · codex 在此改码 + commit + push（依 VCS 指引，本地平面自己做）</p>
-          <code class="node__file">~/.flowtool/repos/&lt;owner&gt;/&lt;repo&gt;--flow-issue-N</code>
+          <div class="node__top"><span class="node__name">Worker Client + Executor</span></div>
+          <p class="node__role">主动连接/重连 · heartbeat · 五类执行 · root 独占锁 · workspace 清理</p>
+          <code class="node__file">app/worker/client.py · executor.py · runtime.py</code>
         </article>
       </div>
     </div>
@@ -412,12 +412,12 @@
       <div class="grid">
         <article class="node" data-status="partial">
           <div class="node__top"><span class="node__name">CLI</span><span class="pill">部分验证</span></div>
-          <p class="node__role">typer · serve(uvicorn) / flows / flow show / cancel / retry</p>
+          <p class="node__role">typer · serve / worker / flows / flow show / cancel / retry</p>
           <code class="node__file">app/cli.py</code>
         </article>
         <article class="node" data-status="done">
           <div class="node__top"><span class="node__name">Automated Tests</span><span class="pill">已验证</span></div>
-          <p class="node__role">24 项 · 配置/契约 · PostgreSQL · HMAC/路由 · worker/恢复 · 外部 agent/API 隔离</p>
+          <p class="node__role">角色配置/协议 · PostgreSQL · HMAC/路由 · 远程闭环/断线 · import 边界</p>
           <code class="node__file">tests/ · pytest / Ruff / Mypy 全绿</code>
         </article>
         <article class="node" data-status="partial">
@@ -460,9 +460,9 @@
           <span class="port-tag">port · ports.Sandbox(已立) · adapter 对应 M5</span>
         </article>
         <article class="node" data-status="future">
-          <div class="node__top"><span class="node__name">JobDispatch · 控制/执行面分离</span><span class="pill">端口已立</span></div>
-          <p class="node__role">webapp+webhook 入口与 code agent 分机部署、调度 job。进程内 → 队列 + 远程 worker</p>
-          <span class="port-tag">port · ports.JobDispatch</span>
+          <div class="node__top"><span class="node__name">多 Worker 调度与恢复 lease</span><span class="pill">后续 Feature</span></div>
+          <p class="node__role">多 identity / 单机多 root · affinity / 公平调度 · 忙碌重连 · serve 重启接管</p>
+          <span class="port-tag">protocol + gateway + assignment token</span>
         </article>
         <article class="node" data-status="future">
           <div class="node__top"><span class="node__name">插件生态</span><span class="pill">hook 已接线</span></div>
@@ -556,7 +556,7 @@
   <!-- state machine -->
   <section class="block">
     <h2>Flow 状态机 <span style="font-family:var(--mono);font-size:11px;color:var(--ink-soft);font-weight:400">控制流已写 · 外部边界未完成</span></h2>
-    <p class="sub">当前单 worker 串行消费 · per-flow 串行锁与多 flow 并行仍是目标</p>
+    <p class="sub">当前单个远程 worker 串行消费 · per-flow 串行锁与多 worker 并行仍是目标</p>
     <div class="fsm">
       <span class="state">PENDING</span>
       <span class="to">→</span>
@@ -585,12 +585,12 @@
     <ul>
       <li><b>自动化</b> —— 19 项覆盖配置/契约、SQLite、HMAC/路由、worker/恢复及 heartbeat 清理/重试；pytest、Ruff、Mypy 全绿。</li>
       <li><b>运行时</b> —— <code>uv sync --locked</code>、CLI、真实 <code>flowtool serve</code> 与 <code>GET /healthz</code> 200 已验证。</li>
-      <li><b>M1+ 仍待验证</b> —— Flow Engine 外部副作用、githubkit、bub、真实 Codex/push、reconcile 与示例插件不计入 M0 完成范围。</li>
+      <li><b>M1+ 仍待验证</b> —— Coordinator 外部副作用、githubkit、bub、真实 Codex/push、reconcile 与示例插件不计入 M0 完成范围。</li>
     </ul>
   </div>
 
   <footer>
-    <span>FlowTool · M0 已验收 · 文档核对 2026-08-27</span>
+    <span>FlowTool · 单远程 worker Feature 1 · 文档核对 2026-09-01</span>
     <span>docs/architecture/ · docs/plan/</span>
   </footer>
 

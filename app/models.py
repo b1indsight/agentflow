@@ -101,6 +101,7 @@ class Attempt(BaseModel):
     branch: str | None = None
     codex_session_id: str | None = None
     pr_number: int | None = None
+    worker_id: str | None = None
     revision_cycles: int = 0
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
@@ -114,6 +115,10 @@ class Job(BaseModel):
     attempt: int = 0
     pid: int | None = None
     heartbeat_at: datetime | None = None
+    assigned_worker_id: str | None = None
+    assignment_token: str | None = None
+    started_at: datetime | None = None
+    last_error: str | None = None
     payload: dict | None = None
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)

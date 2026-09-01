@@ -4,8 +4,9 @@ FlowTool 的目标是把带 `flow` 标签的 GitHub issue 编排成
 `code agent 编码 → PR → 人工审核 → 自动回喂修订 → 人工合并 → 归档` 的 headless 闭环。
 项目自身不提供业务 UI，交互面是 GitHub issue 和 PR。
 
-> 当前状态：**M0 骨架已验收，持久层已替换为 PostgreSQL（2026-08-28）**。仓库已验证配置、持久化、Webhook 入口、
-> 事件路由与 worker 恢复基础；真实 GitHub/Codex/bub 闭环属于 M1+，目前不能按生产能力使用。
+> 当前状态：**M0 骨架已验收，control plane 与单个远程 worker 已结构分离（2026-09-01）**。仓库已验证
+> PostgreSQL、Webhook、版本化 WebSocket 协议和一次远程 job 闭环；真实 GitHub/Codex/bub 闭环属于
+> M1+，目前不能按生产能力使用。
 
 ## 当前能力
 
@@ -13,9 +14,11 @@ M0 已经具备并验证：
 
 - 加载 `FLOWTOOL_` 配置，通过 Psycopg 连接池初始化 PostgreSQL 的 flow、attempt、job、event、run 和 review 数据；
 - 校验 `X-Hub-Signature-256`，异步交接 Webhook，并处理 delivery 去重、allowlist、取消和 review 入库；
-- 用进程内 worker claim/dispatch 持久化 job，维护 heartbeat，启动时恢复过期的 running job；
-- 通过 CLI 启动 daemon、查看 flow，并执行基础 cancel/retry 运维命令；
-- 提供 Flow Engine、Codex、GitHub、Judge、Sandbox 和插件接缝，供后续里程碑补全。
+- `flowtool serve` 独占 Store、Webhook、状态机和 GitHub 权限，通过认证 WebSocket 向一个 worker 派发 job；
+- `flowtool worker` 主动保持长连接，只装配 workspace、Codex 和 Judge，不读取数据库或 GitHub App 私钥；
+- INITIAL/TRIAGE/REVISION/ANSWER/ARCHIVE 使用版本化 task/result 契约，并用 assignment token 拒绝迟到结果；
+- 未开始断线会重新排队，已开始断线会 fail closed；serve 重启按同一保守规则收敛旧 assignment；
+- 通过 CLI 分别启动两个角色、查看 flow，并执行基础 cancel/retry 运维命令。
 
 尚未形成可用闭环：GitHub App API 尚未校准，issue 正文和 review thread 映射仍是桩，bub 调用、
 Codex commit/push、网络与 scoped token、reconcile 对账、取消运行中进程和真实多轮修订均未端到端验证。
@@ -29,8 +32,8 @@ Codex commit/push、网络与 scoped token、reconcile 对账、取消运行中�
 
 ## 平面边界
 
-- **Orchestrator / GitHub API 平面**：Webhook、状态机、持久化、GitHub API、Judge 与 prompt 组织；
-- **Code Agent / 本地平面**：在隔离工作区内改码、commit、branch/bookmark 和 push；
+- **Control plane**：Webhook、状态机、持久化和 GitHub API，是唯一数据库与外部副作用权威；
+- **Worker execution plane**：Judge、prompt、Codex 和隔离工作区，通过出站 WebSocket 接收结构化任务；
 - **本地三轴**：workspace 负责目录隔离，Sandbox 负责可写根与网络策略，VCS 只通过 git/jj 指引交给 agent。
 
 VCS 不是端口；详细设计与当前限制见 [`components.md`](docs/architecture/components.md) §4.6。
@@ -45,13 +48,16 @@ docker compose up -d postgres
 cp env.example .env
 # 先编辑 .env：替换 change-me、your-username 和其他占位值
 FLOWTOOL_HOST=127.0.0.1 uv run flowtool serve
+# 另开终端，使用同一份 .env：
+uv run flowtool worker
 ```
 
-Compose 中的 PostgreSQL 账号只用于本地开发。远程部署必须使用独立密码和 TLS；当前 M0 daemon 会初始化
+Compose 中的 PostgreSQL 账号只用于本地开发。远程部署必须使用独立密码和 TLS；serve 会初始化
 schema，因此数据库账号需要拥有应用 schema，但不应具有数据库外权限。项目不自动导入旧 SQLite 文件。
 也不要用示例 Webhook secret 或 allowlist 启动可公开访问的服务。启动 M0 daemon
 和 `/healthz` 不等于 GitHub/Codex/bub 集成已经可用；接入外部服务前请先阅读
-[GitHub App 接入说明](docs/architecture/github-app.md)和[已知短板](docs/architecture/decisions.md)。
+[GitHub App 接入说明](docs/architecture/github-app.md)和[已知短板](docs/architecture/decisions.md)。当前版本只允许
+配置的一个 worker identity 在线；同一 worker root 也有进程锁。多 worker 与单机多实例属于后续 feature。
 
 常用运维入口：
 
@@ -76,10 +82,10 @@ uv run flowtool --help
 [GitHub Actions CI](.github/workflows/ci.yml) 会在 pull request、推送到 `main` 和手动触发时，使用
 Python 3.12 分别运行 Ruff、Mypy、pytest 与 sdist/wheel 构建；四项检查并行执行且独立报告结果。
 
-截至 2026-08-28，24 项自动化测试覆盖配置/契约、PostgreSQL、HMAC、health、异步交接、delivery 去重、
-allowlist、取消与 review 路由，以及 worker dispatch、失败、heartbeat 清理/重试和启动恢复；测试隔离
-GitHub、Codex、bub、真实凭据与轮询等待。PostgreSQL 场景还覆盖两个独立 Store 的共享可见性、原子
-delivery 去重和并发 job claim。`uv sync --locked`、Ruff、Mypy、CLI help 和构建检查均已通过。
+自动化测试覆盖角色配置/协议、PostgreSQL、HMAC、路由、coordinator/executor、WebSocket 鉴权、
+assignment fencing、断线策略、worker root lock，以及 control gateway 与 worker client 的
+一次远程 job 闭环；测试隔离 GitHub、Codex、bub 和真实凭据。PostgreSQL 场景还覆盖跨 Store 可见性、
+原子 delivery 去重和并发 assignment。`uv sync --locked`、Ruff、Mypy、CLI help 和构建检查均纳入基线。
 
 另有 2026-08-01 的独立实测证明 Codex `exec` / `resume` 上下文连续，`workspace-write` 下 jj `.jj`
 可写并能 commit；git `.git` 写入被拦截，push 与凭据注入未验证。这些结果不能替代 M1+ 端到端验收。
