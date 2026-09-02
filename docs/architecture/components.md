@@ -68,7 +68,7 @@ PENDING → CODING → PR_OPEN ⇄ REVISING
 serve 的 `WorkerGateway` 校验每个 identity 的 bearer token，维护多会话 registry，并用随机 connection epoch 与
 assignment token 对 Started、Heartbeat 和结果做四元组 fencing。每个 worker 是单槽，PostgreSQL 按 FIFO、
 worker `last_assigned_at` 和 attempt affinity 事务化领取任务。worker 的 `WorkerClient` 主动连接并指数退避；
-`WorkerExecutor` 只依赖 CodeAgent、Judge、workspace/VCS，不导入 Store、FastAPI 或 GitHub。
+`WorkerExecutor` 只依赖 CodeAgent、Judge 和 Flow repo/VCS helpers，不导入 Store、FastAPI 或 GitHub。
 
 不同 identity 可并发在线；同 identity 新连接取得新 epoch 并关闭旧 socket，数据库条件保证旧连接最终失效。
 任务未 Started 断线后保留到 lease 到期再 requeue；Started job 进入 RECOVERING，只允许原 identity 在 grace 内恢复，
@@ -80,18 +80,21 @@ worker `last_assigned_at` 和 attempt affinity 事务化领取任务。worker �
 
 `CodexAgent` 已实现 `CodeAgent` 端口的 `start` / `resume`：
 
-- start 使用 `codex exec <prompt> --json -C <workspace> -s workspace-write`；
+- start 仅在显式 `FLOWTOOL_TRUSTED_HOST_EXECUTION=true` 时使用
+  `codex exec <prompt> --json -C <flow-repo> -s danger-full-access`；
+- start/resume 都要求 trusted-host 开关；worker 还必须声明专用 account/container/VM 隔离，且不得继承
+  control-plane 环境变量；
 - 从 JSONL 的 `thread.started.thread_id` 读取 session id；
 - resume 使用 `codex exec resume <session_id>`，cwd 与 sandbox 继承自会话；
-- `-o` 读取最终消息，revision 可通过 `--output-schema` 解析 `CodexResult`；
+- `-o` 读取最终消息，INITIAL 和 revision 通过 `--output-schema` 解析结构化结果；
+- 子进程只继承 Codex 认证、代理/CA 和基础运行环境，不继承 `FLOWTOOL_*` 或 GitHub token；
 - 单次运行使用配置的 timeout，超时 kill 子进程并返回 exit 124。
 
 2026-08-01 的独立 CLI 实测证明 `exec` / `resume` 上下文连续、workspace-write 可修改工作区、jj
 `.jj` 可写且能 commit。它没有证明当前 driver 能在真实 flow 中完成 issue→commit→push→PR。
 
 当前 worker 返回 exit/result，coordinator 把 kind 和 exit code 写入 `codex_runs`；跨协议尚未回传完整 prompt
-或原始 JSONL，因此 `prompt`/`log_path` 为空。
-网络开关的 Codex 配置键、GitHub 限域、push 凭据、git 提交路径和多轮 context 增长仍待验证。
+或原始 JSONL，因此 `prompt`/`log_path` 为空。GitHub 限域、push 凭据和多轮 context 增长仍待验证。
 
 ## 4.5 GitHub Client
 
@@ -102,22 +105,22 @@ threads、resolve thread，并签发 push 所需的短时 installation token。�
 权限、分页、错误处理与 scoped token 都没有集成验证。当前代码也不支持 Project v2 更新、关闭 issue、
 分支/ref 管理或远端状态查询。接入假设见 [GitHub App 文档](github-app.md)。
 
-## 4.6 本地平面：三条正交轴（workspace / sandbox / VCS）
+## 4.6 本地平面：Flow repo / execution policy / VCS
 
 | 轴 | 是否端口 | 当前载体 | 当前边界 |
 |---|---|---|---|
-| workspace | 否 | `vcs.make_workspace/cleanup_workspace` | 通过 `cp -a` 复制主 clone；大仓库成本与重复目录处理未验证 |
-| sandbox | 是 | `ports.Sandbox` / `WorkspaceWriteSandbox` | 产出可写根和网络布尔值；当前 driver 只翻译 workspace-write/网络开关 |
-| VCS | 否 | `detect_vcs_kind/agent_guidance` | 探测 `.jj`，向 Code Agent 注入 git 或 jj 指引；工具自身不执行 commit/push |
+| Flow repo | 否 | `prepare_flow_repo/cleanup_flow_repo` | stable flow id 派生独占完整 repo；同 Flow 复用、不同 Flow 分离 |
+| execution policy | 否 | worker config / `CodexAgent` | full access 需专用 account/container/VM；目录只表达所有权 |
+| VCS | 否 | `agent_guidance/verify_vcs_outcome` | Agent 自探测；worker 用固定 remote 和净化、限时命令验证 ancestry/clean/remote SHA |
 
-分支名由 control 定为 `flow/issue-<n>`。目标上，worker 内的 Code Agent 在 workspace 完成
-branch/bookmark、commit 和 push，control 只在 worker 成功返回后走 GitHub API。当前缺口包括：
+分支名由 control 定为 `flow/issue-<n>`。worker 内的 Code Agent 在 Flow repo 完成 branch/bookmark、
+commit 和 push，worker 独立核验后，control 才把 INITIAL 视为成功。当前缺口包括：
 
-- `SandboxPolicy.writable_roots` 没有被翻译为额外 CLI 参数；
-- network 配置键和仅允许 GitHub egress 的策略未验证；
+- 每 Flow 容器/微 VM 和互不信任租户的强隔离仍属 M5；M1 至少要求 worker 与 control secret 分离；
+- 仅允许 GitHub egress 的策略未实现；
 - installation token 尚未安全注入 git credential helper；
-- workspace-write 下 git `.git` 写入被挡，jj commit 只是独立实测；
-- cleanup 直接调用 `rm -rf`，其可靠性和失败恢复尚无自动化覆盖。
+- Flow 生命周期级 worker/repo binding 仍待 M1 Feature 3 持久化；
+- 大 repo 的完整复制成本和 terminal cleanup 故障恢复仍待验证。
 
 ## 4.7 Store（PostgreSQL）
 

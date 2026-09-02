@@ -12,8 +12,8 @@ flowtool/
     context_builder.py # prompt / 上下文构建（§4.9）
     judge.py          # Judge / Triage 适配器（bub，§4.10）
     github_client.py  # githubkit 封装（App 认证）
-    vcs.py            # workspace 隔离(VCS-无关) + VCS 指引文本(git / jj)，普通函数（§4.6）
-    sandbox.py        # Sandbox 端口 adapter：codex workspace-write（§4.6 / §9-5）
+    vcs.py            # Flow repo 准备 + VCS 自探测指引/事实核验（§4.6）
+    sandbox.py        # 旧 workspace-write 接缝；强隔离 adapter 留到 M5（§4.6 / §9-5）
     store.py          # PostgreSQL schema + 仓储（含 jobs 表）
     config.py         # serve/worker 角色配置（pydantic-settings）
     models.py         # 领域类型 / 枚举
@@ -59,9 +59,9 @@ M1–M5 是目标里程碑，不代表对应控制流代码或接口已经验收
    - **当前接缝已就位**：`CodeAgent` port 已定义 `start / resume`，Codex 是第一个 adapter；实时
      `inject`、统一日志/产物收集和其他 agent adapter 属于后续扩展。
 
-5. **更强隔离** —— 每次 agent 运行放进容器 / 微VM，隔离文件系统与网络。
-   - 预留：`Sandbox` port **已是一等轴（§4.6，M0 就立）**，MVP adapter = codex `workspace-write`；容器 / 微VM 是后续 adapter，对应 M5。
-     那个 adapter 由它**接管整个工作区的 FS 策略**，git/jj 的差别塌成纯指引文本、顺带解掉 git `.git` 只读（原 V4）。
+5. **更强隔离** —— 每个 Flow 放进容器 / 微VM，隔离完整 repo、文件系统与网络。
+   - M1 full-access worker 必须先通过专用 OS account、容器或 VM 与 control secret 隔离；不同 Flow repo
+     目录只表达所有权。容器 / 微VM adapter 在 M5 接管 per-Flow FS、egress 和生命周期，支持互不信任租户。
 
 6. **多 Worker 调度与恢复** —— 多 identity、session affinity、公平调度、单机多 root、忙碌重连、
    持久 lease 与 result replay 已完成。
@@ -74,6 +74,7 @@ M1–M5 是目标里程碑，不代表对应控制流代码或接口已经验收
 
 **架构取向：hexagonal（ports & adapters）。** control core（ControlService + JobCoordinator + store）只依赖端口：
 `CodeAgent` / `Judge` / `Sandbox` / `JobDispatch` / `GitHubClient` / `Plugin hooks`。
-（**VCS 不是端口**——它是 workspace 拷贝函数 + git/jj 指引文本，见 §4.6。）
-当前已给端口放置最简 adapter 或桩（codex / bub / workspace-write / WebSocket worker / githubkit / 插件集）。
+**VCS 不是端口**：它由 Flow repo 准备、自探测 guidance 和只读事实核验函数组成（见 §4.6）。
+当前已给端口放置最简 adapter 或桩
+（codex / bub / legacy workspace-write / WebSocket worker / githubkit / 插件集）。
 “存在 adapter”不代表外部契约已校准；未来扩展仍优先通过换 adapter 或加插件保持 core 边界稳定。

@@ -4,6 +4,7 @@ import pytest
 from pydantic import SecretStr, ValidationError
 
 from app.config import ServeSettings, WorkerSettings
+from app.worker.runtime import validate_worker_environment
 
 
 def test_settings_parse_csv_allowlist_and_expand_paths(monkeypatch, tmp_path) -> None:
@@ -78,7 +79,62 @@ def test_worker_settings_do_not_require_control_plane_secrets(monkeypatch, tmp_p
     )
 
     assert settings.worker_root == Path("~/.flowtool/workers/worker-1").expanduser()
+    assert settings.trusted_host_execution is False
     assert not hasattr(settings, "database_url")
+
+
+def test_worker_trusted_host_execution_requires_explicit_opt_in() -> None:
+    settings = WorkerSettings(
+        worker_id="worker-1",
+        worker_token=SecretStr("secret"),
+        serve_ws_url="wss://control.example/internal/workers/connect",
+        trusted_host_execution=True,
+        execution_isolation="dedicated-account",
+    )
+
+    assert settings.trusted_host_execution is True
+
+
+def test_worker_rejects_full_access_without_external_isolation() -> None:
+    with pytest.raises(ValidationError, match="execution isolation"):
+        WorkerSettings(
+            worker_id="worker-1",
+            worker_token=SecretStr("secret"),
+            serve_ws_url="wss://control.example/internal/workers/connect",
+            trusted_host_execution=True,
+        )
+
+
+def test_full_access_worker_rejects_control_plane_environment() -> None:
+    settings = WorkerSettings(
+        worker_id="worker-1",
+        worker_token=SecretStr("secret"),
+        serve_ws_url="wss://control.example/internal/workers/connect",
+        trusted_host_execution=True,
+        execution_isolation="container",
+    )
+
+    with pytest.raises(RuntimeError, match="control-plane secrets"):
+        validate_worker_environment(
+            settings,
+            {"FLOWTOOL_DATABASE_URL": "postgresql://secret"},
+        )
+
+
+def test_worker_settings_do_not_read_the_control_plane_dotenv(
+    monkeypatch, tmp_path: Path
+) -> None:
+    for key in ("FLOWTOOL_WORKER_ID", "FLOWTOOL_WORKER_TOKEN", "FLOWTOOL_SERVE_WS_URL"):
+        monkeypatch.delenv(key, raising=False)
+    (tmp_path / ".env").write_text(
+        "FLOWTOOL_WORKER_ID=worker-1\n"
+        "FLOWTOOL_WORKER_TOKEN=secret\n"
+        "FLOWTOOL_SERVE_WS_URL=wss://control.example/internal/workers/connect\n"
+    )
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ValidationError):
+        WorkerSettings()  # type: ignore[call-arg]
 
 
 def test_worker_requires_explicit_opt_in_for_plaintext_websocket(monkeypatch) -> None:

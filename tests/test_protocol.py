@@ -23,6 +23,7 @@ def test_assignment_and_result_round_trip_with_discriminated_payloads() -> None:
         assignment_token="assignment-1",
         connection_epoch="epoch-1",
         task=InitialTask(
+            flow_id=7,
             attempt_id=13,
             repo="owner/repo",
             issue_number=9,

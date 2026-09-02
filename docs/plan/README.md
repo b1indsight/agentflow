@@ -3,12 +3,9 @@
 本目录保存功能与非小改动的计划、审批状态和实施结果。计划是决策记录，不代替 README 或架构文档
 中的当前事实。
 
-## 当前计划
-
-暂无。
-
 ## 已完成计划
 
+- [`m1-code-agent-vcs.md`](m1-code-agent-vcs.md) — M1 Feature 1/3：Flow repo、CodeAgent 自主 Git/jj commit/push 与 worker 事实核验，已实施并验证；
 - [`worker-connection-recovery.md`](worker-connection-recovery.md) — Feature 3/3：忙碌重连、持久租约、serve 重启恢复和结果重放，已实施并验证；
 - [`multi-worker-scheduling.md`](multi-worker-scheduling.md) — Feature 2/3：多 worker 公平调度、attempt affinity 和单机多实例隔离，已实施并验证；
 - [`control-worker-separation.md`](control-worker-separation.md) — Feature 1/3：`serve` 与一个远程 worker 的完整 WebSocket 执行闭环，已实施并验证；

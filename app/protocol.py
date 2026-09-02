@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 from app.models import CodexResult, JobState, ReviewItemKind, TriageVerdict
 
-PROTOCOL_VERSION: Literal[2] = 2
+PROTOCOL_VERSION: Literal[3] = 3
 
 
 class ProtocolModel(BaseModel):
@@ -20,7 +20,7 @@ class ProtocolModel(BaseModel):
 
 
 class Message(ProtocolModel):
-    protocol_version: Literal[2] = PROTOCOL_VERSION
+    protocol_version: Literal[3] = PROTOCOL_VERSION
 
 
 class ReviewFeedback(ProtocolModel):
@@ -35,6 +35,7 @@ class ReviewFeedback(ProtocolModel):
 
 class InitialTask(ProtocolModel):
     kind: Literal["initial"] = "initial"
+    flow_id: int = Field(gt=0)
     attempt_id: int
     repo: str
     issue_number: int
@@ -52,6 +53,7 @@ class TriageTask(ProtocolModel):
 
 class RevisionTask(ProtocolModel):
     kind: Literal["revision"] = "revision"
+    flow_id: int = Field(gt=0)
     attempt_id: int
     repo: str
     branch: str
@@ -69,9 +71,9 @@ class AnswerTask(ProtocolModel):
 
 class ArchiveTask(ProtocolModel):
     kind: Literal["archive"] = "archive"
+    flow_id: int = Field(gt=0)
     attempt_id: int
     repo: str
-    branches: list[str]
 
 
 ExecutionTask = Annotated[
@@ -85,6 +87,8 @@ class InitialResult(ProtocolModel):
     session_id: str | None
     last_message: str
     exit_code: int
+    failure_stage: str | None = None
+    failure_detail: str | None = None
 
 
 class TriageResult(ProtocolModel):

@@ -15,8 +15,9 @@ from app.models import AgentRun, SandboxPolicy, TriageVerdict
 class CodeAgent(Protocol):
     """重的代码 agent。MVP adapter：codex（codex_driver.py）。
 
-    在一个 `Sandbox`（可写根 + 网络策略）内跑；本地版本控制（branch/commit/push）
-    由 agent 自己按注入的 VCS 指引做（§4.6 三轴：workspace / sandbox / VCS）。
+    本地版本控制（branch/commit/push）由 agent 自己在 Flow 独占 repo 内完成。Codex adapter 的
+    trusted-host 模式使用 full access，必须由外部 account/container/VM 隔离 control secret；目录所有权
+    与安全隔离是不同约束。
     """
 
     async def start(self, task: str, cwd: Path, *, output_schema: Path | None = None) -> AgentRun: ...
@@ -40,8 +41,8 @@ class Sandbox(Protocol):
     """执行沙盒：可写根 + 网络出口策略。三正交轴之一（§4.6）。
 
     只认路径，**不认 git/jj**——把「哪些目录可写、能否联网」和版本控制彻底分开。
-    MVP adapter：codex 原生 `workspace-write`（app/sandbox.py，落地时由 code agent 翻成 CLI 参数）。
-    后续 adapter：容器 / 微VM（§9-5，M5）——由它接管文件系统策略，顺带消掉 git `.git` 只读那道坎（V4）。
+    现有 workspace-write adapter 保留为旧接缝，不用于需要修改完整 Git metadata 的 M1 CodeAgent。
+    后续 adapter：容器 / 微VM（§9-5，M5）——由它接管文件系统和网络安全策略。
     """
 
     def policy(self, ws: Path, *, network: bool) -> SandboxPolicy: ...

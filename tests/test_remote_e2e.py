@@ -170,6 +170,7 @@ class RemoteCoordinator:
 
     async def prepare(self, job: Job) -> ExecutionTask | JobState:
         return InitialTask(
+            flow_id=job.flow_id,
             attempt_id=7,
             repo="owner/repo",
             issue_number=8,

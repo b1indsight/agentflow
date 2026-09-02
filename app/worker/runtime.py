@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import fcntl
+import os
+from collections.abc import Mapping
 from pathlib import Path
 from typing import IO
 
@@ -12,6 +14,34 @@ from app.judge import BubJudge
 from app.worker.client import WorkerClient
 from app.worker.executor import WorkerExecutor
 from app.worker.journal import WorkerJournal
+
+_CONTROL_ENVIRONMENT_KEYS = frozenset(
+    {
+        "FLOWTOOL_DATABASE_URL",
+        "FLOWTOOL_GITHUB_APP_ID",
+        "FLOWTOOL_GITHUB_PRIVATE_KEY_PATH",
+        "FLOWTOOL_GITHUB_WEBHOOK_SECRET",
+        "FLOWTOOL_WORKER_TOKENS",
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+    }
+)
+
+
+def validate_worker_environment(
+    settings: WorkerSettings, source: Mapping[str, str] | None = None
+) -> None:
+    """Fail closed when full-access Codex shares control-plane process secrets."""
+
+    if not settings.trusted_host_execution:
+        return
+    values = os.environ if source is None else source
+    exposed = sorted(key for key in _CONTROL_ENVIRONMENT_KEYS if values.get(key))
+    if exposed:
+        raise RuntimeError(
+            "trusted-host CodeAgent cannot start with control-plane secrets in the worker "
+            f"environment: {', '.join(exposed)}"
+        )
 
 
 class WorkerRootLock:
@@ -63,7 +93,10 @@ class WorkerRuntime:
         self.root_lock = WorkerRootLock(self.settings.worker_root, self.settings.worker_id)
         executor = WorkerExecutor(
             self.settings.worker_root,
-            CodexAgent(timeout=self.settings.codex_run_timeout_seconds),
+            CodexAgent(
+                trusted_host=self.settings.trusted_host_execution,
+                timeout=self.settings.codex_run_timeout_seconds,
+            ),
             BubJudge(),
         )
         self.client = WorkerClient(
@@ -78,6 +111,7 @@ class WorkerRuntime:
         )
 
     async def run(self) -> None:
+        validate_worker_environment(self.settings)
         self.root_lock.acquire()
         try:
             await self.client.run()

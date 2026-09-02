@@ -48,9 +48,10 @@ issue / PR；Web 控制台只属于未来路线图。
 平面边界：
 
 - **Control plane**负责 Webhook、持久化、状态机和 GitHub API，是唯一数据库权威；
-- **Worker execution plane**负责 Judge、Context Builder、Codex 与工作区内的改码/提交/push；
+- **Worker execution plane**负责 Judge、Context Builder、Codex 与 Flow repo 内的改码/提交/push；
 - control 只确定分支名并在 worker 完成 push 后创建 PR，不直接执行本地版本控制；
-- 本地能力拆成 [workspace / sandbox / VCS 三条正交轴](components.md)（§4.6）。
+- 本地能力按 [Flow repo / execution policy / VCS](components.md) 分离（§4.6）：Agent 选择并操作
+  Git/jj，worker 只验证事实。
 
-这些是架构边界。当前 GitHub、Judge、push 和完整 coordinator 副作用仍未完成，不能从图中推断它们已经
-端到端可用。
+这些是架构边界。当前 GitHub、Judge、GitHub-authenticated push 和完整 coordinator 副作用仍未完成，
+不能从图中推断它们已经端到端可用。

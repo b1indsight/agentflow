@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 def utcnow() -> datetime:
@@ -74,7 +74,6 @@ class ReviewItemKind(StrEnum):
 class VcsKind(StrEnum):
     GIT = "git"
     JJ = "jj"
-    # 注：VCS 不再是端口——只用于挑 agent_guidance() 的指引文本（§4.6 三轴）。
 
 
 # --------------------------------------------------------------------- 持久化模型
@@ -187,13 +186,35 @@ class ReviewItem(BaseModel):
 
 @dataclass(frozen=True)
 class SandboxPolicy:
-    """一次 agent run 的沙盒策略（ports.Sandbox 产出）。只认路径，不认 git/jj。
-
-    codex adapter 把它翻成 `-s workspace-write` (+ 网络开关)；容器 adapter 用它挂 FS + 配网。
-    """
+    """Legacy/future Sandbox-port policy; M1 trusted-host Codex does not consume it."""
 
     writable_roots: tuple[Path, ...]   # agent 可写的目录（至少含工作区）
     network: bool                      # 是否放开出口（push 时才要，尽量限到 github.com）
+
+
+@dataclass(frozen=True)
+class VcsExecutionContext:
+    """Facts fixed before CodeAgent mutates a Flow-owned repository."""
+
+    repo_path: Path
+    branch: str
+    remote: str
+    git_remote_url: str | None
+    jj_remote_url: str | None
+    git_base_sha: str | None
+    jj_base_sha: str | None
+    jj_ancestor_sha: str | None
+
+
+@dataclass(frozen=True)
+class VcsOutcome:
+    """VCS facts independently verified after a CodeAgent run."""
+
+    declared_backend: VcsKind
+    verified_backend: VcsKind
+    branch: str
+    commit_sha: str
+    remote_sha: str
 
 
 @dataclass
@@ -234,6 +255,16 @@ class CodexResult(BaseModel):
     """codex 修订 run 的结构化产出。见 docs/architecture/review-loop.md §B.4。"""
 
     summary: str = ""
+    vcs_backend_used: VcsKind | None = None
     addressed: list[AddressedComment] = []
     deferred: list[DeferredComment] = []
     needs_clarification: list[str] = []
+
+
+class InitialCodexResult(BaseModel):
+    """Strict structured result required from an INITIAL CodeAgent run."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    summary: str
+    vcs_backend_used: VcsKind

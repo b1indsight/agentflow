@@ -162,6 +162,7 @@ async def test_initial_job_crosses_worker_boundary_and_opens_pr() -> None:
 
     task = await subject.prepare(job)
     assert isinstance(task, InitialTask)
+    assert task.flow_id == store.flow.id
     subject.mark_started(job, task, "worker-1")
     state = await subject.apply_result(
         job,
@@ -175,6 +176,33 @@ async def test_initial_job_crosses_worker_boundary_and_opens_pr() -> None:
     assert store.attempt.codex_session_id == "session-1"
     assert store.attempt.pr_number == 17
     assert github.opened == ["flow/issue-8"]
+
+
+@pytest.mark.asyncio
+async def test_initial_vcs_failure_is_reported_with_sanitized_stage_and_detail() -> None:
+    store = MemoryStore()
+    github = RecordingGitHub()
+    subject = coordinator(store, github)
+    job = Job(id=5, flow_id=1, kind=JobKind.INITIAL, state=JobState.RUNNING)
+    task = await subject.prepare(job)
+    assert isinstance(task, InitialTask)
+    subject.mark_started(job, task, "worker-1")
+
+    state = await subject.apply_result(
+        job,
+        InitialResult(
+            session_id="session-1",
+            last_message="ignored raw message",
+            exit_code=65,
+            failure_stage="push",
+            failure_detail="remote branch is missing",
+        ),
+    )
+
+    assert state is JobState.FAILED
+    assert github.comments == [
+        "⚠️ 编码失败（codex exit=65）；VCS push: remote branch is missing。未开 PR。"
+    ]
 
 
 @pytest.mark.asyncio
