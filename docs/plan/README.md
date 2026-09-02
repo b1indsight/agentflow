@@ -6,6 +6,7 @@
 ## 当前计划
 
 - [`m1-github-capabilities.md`](m1-github-capabilities.md) — M1 Feature 2/3：GitHub App、短时 push capability 与 PR primitives 已实现并通过自动化，真实 App smoke 待执行；
+- [`m1-issue-to-pr.md`](m1-issue-to-pr.md) — M1 Feature 3/3：贯通真实标签触发、Flow 生命周期独占 worker/repo、Flow tool RPC、CodeAgent commit/push、远端验证与一 Flow 一 PR，待审批；
 
 ## 已完成计划
 
