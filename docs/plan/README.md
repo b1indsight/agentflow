@@ -5,7 +5,7 @@
 
 ## 当前计划
 
-Feature 3 将在独立计划 PR 中跟进。
+- [`worker-connection-recovery.md`](worker-connection-recovery.md) — Feature 3/3：增加忙碌重连、持久租约、serve 重启恢复和结果重放，实施中；
 
 ## 已完成计划
 

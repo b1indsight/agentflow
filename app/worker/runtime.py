@@ -11,6 +11,7 @@ from app.config import WorkerSettings, get_worker_settings
 from app.judge import BubJudge
 from app.worker.client import WorkerClient
 from app.worker.executor import WorkerExecutor
+from app.worker.journal import WorkerJournal
 
 
 class WorkerRootLock:
@@ -32,7 +33,18 @@ class WorkerRootLock:
             handle.close()
             raise RuntimeError(f"worker root already in use: {self.worker_root}") from exc
         if self.worker_id is not None:
-            (self.worker_root / ".worker-id").write_text(f"{self.worker_id}\n")
+            identity_path = self.worker_root / ".worker-id"
+            if identity_path.exists():
+                recorded = identity_path.read_text().strip()
+                if recorded != self.worker_id:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                    handle.close()
+                    raise RuntimeError(
+                        f"worker root belongs to {recorded}, not {self.worker_id}: "
+                        f"{self.worker_root}"
+                    )
+            else:
+                identity_path.write_text(f"{self.worker_id}\n")
         self._handle = handle
 
     def release(self) -> None:
@@ -59,6 +71,10 @@ class WorkerRuntime:
             worker_token=self.settings.worker_token.get_secret_value(),
             serve_ws_url=self.settings.serve_ws_url,
             executor=executor,
+            journal=WorkerJournal(self.settings.worker_root),
+            reconnect_min_backoff=self.settings.reconnect_min_backoff,
+            reconnect_max_backoff=self.settings.reconnect_max_backoff,
+            reconnect_jitter=self.settings.reconnect_jitter,
         )
 
     async def run(self) -> None:

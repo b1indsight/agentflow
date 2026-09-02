@@ -7,7 +7,9 @@ from app.protocol import (
     Assignment,
     InitialResult,
     InitialTask,
+    RecoveryDescriptor,
     Register,
+    ResumeAssignment,
     Succeeded,
     parse_server_message,
     parse_worker_message,
@@ -19,6 +21,7 @@ def test_assignment_and_result_round_trip_with_discriminated_payloads() -> None:
         job_id=41,
         flow_id=7,
         assignment_token="assignment-1",
+        connection_epoch="epoch-1",
         task=InitialTask(
             attempt_id=13,
             repo="owner/repo",
@@ -38,6 +41,7 @@ def test_assignment_and_result_round_trip_with_discriminated_payloads() -> None:
     succeeded = Succeeded(
         job_id=41,
         assignment_token="assignment-1",
+        connection_epoch="epoch-1",
         result=InitialResult(session_id="session-1", last_message="done", exit_code=0),
     )
     worker_message = parse_worker_message(succeeded.model_dump_json())
@@ -59,6 +63,35 @@ def test_protocol_rejects_unknown_versions_and_result_shapes() -> None:
             {
                 "job_id": 1,
                 "assignment_token": "token",
+                "connection_epoch": "epoch-1",
                 "result": {"kind": "triage", "verdict": verdict.model_dump(), "extra": True},
             }
         )
+
+
+def test_recovery_descriptor_and_resume_message_round_trip() -> None:
+    register = Register(
+        worker_id="worker-1",
+        recovery=RecoveryDescriptor(
+            job_id=41,
+            assignment_token="assignment-1",
+            state="started",
+            executor_active=True,
+        ),
+    )
+
+    parsed_register = parse_worker_message(register.model_dump_json())
+    assert isinstance(parsed_register, Register)
+    assert parsed_register.recovery is not None
+    assert parsed_register.recovery.executor_active is True
+
+    resumed = parse_server_message(
+        ResumeAssignment(
+            job_id=41,
+            assignment_token="assignment-1",
+            connection_epoch="epoch-2",
+            heartbeat_interval=10,
+        ).model_dump_json()
+    )
+    assert isinstance(resumed, ResumeAssignment)
+    assert resumed.connection_epoch == "epoch-2"

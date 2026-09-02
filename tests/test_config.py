@@ -98,3 +98,46 @@ def test_worker_requires_explicit_opt_in_for_plaintext_websocket(monkeypatch) ->
         allow_insecure_worker_ws=True,
     )
     assert settings.serve_ws_url.startswith("ws://")
+
+
+def test_recovery_timing_settings_require_safe_ordering(monkeypatch) -> None:
+    monkeypatch.setenv("FLOWTOOL_DATABASE_URL", "postgresql://localhost/flowtool")
+
+    with pytest.raises(ValidationError, match="lease duration"):
+        ServeSettings(
+            database_url="postgresql://localhost/flowtool",
+            worker_tokens={"worker-1": SecretStr("secret")},
+            worker_heartbeat_interval=10,
+            worker_lease_duration=20,
+        )
+    with pytest.raises(ValidationError, match="recovery grace"):
+        ServeSettings(
+            database_url="postgresql://localhost/flowtool",
+            worker_tokens={"worker-1": SecretStr("secret")},
+            worker_heartbeat_interval=10,
+            worker_heartbeat_timeout=30,
+            worker_lease_duration=31,
+            worker_recovery_grace=30,
+        )
+
+
+def test_worker_reconnect_backoff_requires_a_valid_range() -> None:
+    with pytest.raises(ValidationError, match="reconnect"):
+        WorkerSettings(
+            worker_id="worker-1",
+            worker_token=SecretStr("secret"),
+            serve_ws_url="ws://localhost:8000/internal/workers/connect",
+            allow_insecure_worker_ws=True,
+            reconnect_min_backoff=5,
+            reconnect_max_backoff=1,
+        )
+
+
+def test_missing_worker_id_is_reported_as_a_settings_error(monkeypatch) -> None:
+    monkeypatch.delenv("FLOWTOOL_WORKER_ID", raising=False)
+
+    with pytest.raises(ValidationError):
+        WorkerSettings(
+            worker_token=SecretStr("secret"),
+            serve_ws_url="wss://control.example/internal/workers/connect",
+        )  # type: ignore[call-arg]

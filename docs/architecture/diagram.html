@@ -333,17 +333,17 @@
       <div class="grid">
         <article class="node" data-status="done">
           <div class="node__top"><span class="node__name">Store</span><span class="pill">M0 已验</span></div>
-          <p class="node__role">PostgreSQL · flows/attempts/jobs · worker identity + assignment token fencing · 启动收敛</p>
+          <p class="node__role">PostgreSQL · flows/attempts/jobs · epoch/token fencing · lease + result inbox · 启动恢复</p>
           <code class="node__file">app/store.py</code>
         </article>
         <article class="node" data-status="done">
           <div class="node__top"><span class="node__name">Protocol</span><span class="pill">已验证</span></div>
-          <p class="node__role">v1 strict Pydantic · 五类 task/result · register/started/heartbeat/result/ack</p>
+          <p class="node__role">v2 strict Pydantic · 五类 task/result · recovery/resume/replay/ack</p>
           <code class="node__file">app/protocol.py</code>
         </article>
-        <article class="node" data-status="stub">
+        <article class="node" data-status="done">
           <div class="node__top"><span class="node__name">Worker Gateway</span><span class="pill">已验证</span></div>
-          <p class="node__role">单 identity WebSocket · bearer 鉴权 · assignment fencing · 断线 fail closed</p>
+          <p class="node__role">多 identity WebSocket · bearer 鉴权 · epoch fencing · busy reconnect / takeover</p>
           <code class="node__file">app/control/gateway.py</code>
         </article>
         <article class="node" data-status="stub">
@@ -356,8 +356,8 @@
       <div class="row-label">常驻后台任务</div>
       <div class="grid">
         <article class="node" data-status="done">
-          <div class="node__top"><span class="node__name">Remote Worker Session</span><span class="pill">Feature 1 已验</span></div>
-          <p class="node__role">唯一出站长连接 · 未 started requeue · started 后 fail closed</p>
+          <div class="node__top"><span class="node__name">Remote Worker Session</span><span class="pill">Features 1–3 已验</span></div>
+          <p class="node__role">多出站长连接 · lease/recovery grace · journal/result replay · serve restart</p>
           <code class="node__file">app/control/gateway.py</code>
         </article>
         <article class="node" data-status="stub">
@@ -396,8 +396,8 @@
         </article>
         <article class="node" data-status="artifact">
           <div class="node__top"><span class="node__name">Worker Client + Executor</span></div>
-          <p class="node__role">主动连接/重连 · heartbeat · 五类执行 · root 独占锁 · workspace 清理</p>
-          <code class="node__file">app/worker/client.py · executor.py · runtime.py</code>
+          <p class="node__role">主动连接/重连 · heartbeat · executor 解耦 · 持久 journal · identity/root 独占锁</p>
+          <code class="node__file">app/worker/client.py · journal.py · executor.py · runtime.py</code>
         </article>
       </div>
     </div>
@@ -460,9 +460,9 @@
           <span class="port-tag">port · ports.Sandbox(已立) · adapter 对应 M5</span>
         </article>
         <article class="node" data-status="future">
-          <div class="node__top"><span class="node__name">多 Worker 调度与恢复 lease</span><span class="pill">后续 Feature</span></div>
-          <p class="node__role">多 identity / 单机多 root · affinity / 公平调度 · 忙碌重连 · serve 重启接管</p>
-          <span class="port-tag">protocol + gateway + assignment token</span>
+          <div class="node__top"><span class="node__name">执行平面 HA 与迁移</span><span class="pill">后续</span></div>
+          <p class="node__role">多 serve leader election · 共享 registry · 可迁移 session/workspace · 外部副作用幂等</p>
+          <span class="port-tag">当前只支持同 identity 恢复</span>
         </article>
         <article class="node" data-status="future">
           <div class="node__top"><span class="node__name">插件生态</span><span class="pill">hook 已接线</span></div>
@@ -590,7 +590,7 @@
   </div>
 
   <footer>
-    <span>FlowTool · 单远程 worker Feature 1 · 文档核对 2026-09-01</span>
+    <span>FlowTool · 多 worker recovery Features 1–3 · 文档核对 2026-09-02</span>
     <span>docs/architecture/ · docs/plan/</span>
   </footer>
 

@@ -34,3 +34,13 @@ def test_distinct_worker_roots_record_identity_and_lock_independently(tmp_path: 
     finally:
         first.release()
         second.release()
+
+
+def test_worker_root_rejects_sequential_identity_reuse(tmp_path: Path) -> None:
+    root = tmp_path / "shared"
+    first = WorkerRootLock(root, "worker-a")
+    first.acquire()
+    first.release()
+
+    with pytest.raises(RuntimeError, match="belongs to worker-a"):
+        WorkerRootLock(root, "worker-b").acquire()

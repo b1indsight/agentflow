@@ -153,6 +153,27 @@ jobs:
           kill -0 "$worker_pid_b"
           grep --quiet "registered with control plane" /tmp/flowtool-worker-1.log
           grep --quiet "registered with control plane" /tmp/flowtool-worker-2.log
+          kill "$server_pid"
+          wait "$server_pid" 2>/dev/null || true
+          uv run flowtool serve >> /tmp/flowtool.log 2>&1 &
+          server_pid=$!
+          for attempt in $(seq 1 20); do
+            if curl --fail --silent http://127.0.0.1:8000/healthz; then
+              break
+            fi
+            sleep 0.5
+          done
+          curl --fail --silent http://127.0.0.1:8000/healthz
+          for attempt in $(seq 1 40); do
+            worker_a_registrations=$(grep --count "registered with control plane" /tmp/flowtool-worker-1.log || true)
+            worker_b_registrations=$(grep --count "registered with control plane" /tmp/flowtool-worker-2.log || true)
+            if [ "$worker_a_registrations" -ge 2 ] && [ "$worker_b_registrations" -ge 2 ]; then
+              break
+            fi
+            sleep 0.25
+          done
+          test "$worker_a_registrations" -ge 2
+          test "$worker_b_registrations" -ge 2
           kill "$worker_pid_a"
           wait "$worker_pid_a" 2>/dev/null || true
           kill -0 "$worker_pid_b"

@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from psycopg.errors import UniqueViolation
@@ -87,7 +88,36 @@ def test_only_unstarted_remote_assignments_can_be_requeued(store: Store) -> None
     assert store.latest_failed_job(flow.id) == failed
 
 
-def test_startup_requeues_unstarted_and_fails_started_assignments(store: Store) -> None:
+def test_result_inbox_deduplicates_and_rejects_conflicting_payloads(store: Store) -> None:
+    flow = store.create_flow("owner/results", 33, installation_id=None)
+    attempt = store.create_attempt(flow.id)
+    flow.current_attempt_id = attempt.id
+    store.update_flow(flow)
+    store.worker_connected("worker-1", protocol_version=1, connection_epoch="epoch-1")
+    job = store.enqueue_job(flow.id, JobKind.INITIAL)
+    assert store.assign_job("worker-1", "token-1", "epoch-1") is not None
+    assert store.start_assignment(
+        job.id, attempt.id, "worker-1", "token-1", "epoch-1"
+    )
+    payload = {"type": "succeeded", "result": {"kind": "initial", "exit_code": 0}}
+
+    assert store.record_assignment_result(
+        job.id, "worker-1", "token-1", "epoch-1", payload, "digest-1"
+    ) == "pending"
+    assert store.record_assignment_result(
+        job.id, "worker-1", "token-1", "epoch-1", payload, "digest-1"
+    ) == "pending"
+    assert store.record_assignment_result(
+        job.id, "worker-1", "token-1", "epoch-1", {"different": True}, "digest-2"
+    ) == "conflict"
+    assert [pending.id for pending in store.list_unapplied_results()] == [job.id]
+    assert store.complete_persisted_result(job.id, JobState.DONE)
+    assert store.record_assignment_result(
+        job.id, "worker-1", "token-1", "epoch-1", payload, "digest-1"
+    ) == "applied"
+
+
+def test_startup_preserves_assignments_for_lease_recovery(store: Store) -> None:
     store.worker_connected("worker-1", protocol_version=1)
     store.worker_connected("worker-2", protocol_version=1)
     unstarted_flow = store.create_flow("owner/unstarted", 1, installation_id=None)
@@ -104,17 +134,107 @@ def test_startup_requeues_unstarted_and_fails_started_assignments(store: Store) 
         started_job.id, started_attempt.id, "worker-2", "started-token"
     ) is True
 
-    assert store.recover_abandoned_assignments() == (1, 1)
+    assert store.recover_abandoned_assignments() == (0, 0)
 
     recovered_unstarted = store.get_job(unstarted_job.id)
     recovered_started = store.get_job(started_job.id)
     recovered_flow = store.get_flow(started_flow.id)
     assert recovered_unstarted is not None
-    assert recovered_unstarted.state is JobState.QUEUED
+    assert recovered_unstarted.state is JobState.RUNNING
     assert recovered_started is not None
-    assert recovered_started.state is JobState.FAILED
+    assert recovered_started.state is JobState.RUNNING
+    assert recovered_started.recovery_deadline is not None
     assert recovered_flow is not None
-    assert recovered_flow.state is FlowState.FAILED
+    assert recovered_flow.state is FlowState.PENDING
+
+
+def test_epoch_fencing_and_started_recovery_grace(postgresql_url: str) -> None:
+    now = datetime(2026, 9, 1, tzinfo=UTC)
+
+    def clock() -> datetime:
+        return now
+
+    store = Store(
+        postgresql_url,
+        clock=clock,
+        lease_duration=timedelta(seconds=30),
+        recovery_grace=timedelta(seconds=90),
+    )
+    store.init_db()
+    try:
+        flow = store.create_flow("owner/recovery", 31, installation_id=None)
+        attempt = store.create_attempt(flow.id)
+        flow.current_attempt_id = attempt.id
+        store.update_flow(flow)
+        store.worker_connected("worker-1", protocol_version=1, connection_epoch="epoch-1")
+        queued = store.enqueue_job(flow.id, JobKind.INITIAL)
+        assigned = store.assign_job("worker-1", "token-1", "epoch-1")
+        assert assigned is not None and assigned.id == queued.id
+        assert assigned.lease_expires_at == now + timedelta(seconds=30)
+        assert store.start_assignment(
+            queued.id, attempt.id, "worker-1", "token-1", "epoch-1"
+        )
+
+        now += timedelta(seconds=10)
+        store.worker_disconnected(
+            "worker-1", "network lost", connection_epoch="epoch-1"
+        )
+        recovering = store.get_job(queued.id)
+        assert recovering is not None
+        assert recovering.recovery_deadline == now + timedelta(seconds=90)
+
+        store.worker_connected("worker-1", protocol_version=1, connection_epoch="epoch-2")
+        assert not store.heartbeat_assignment(
+            queued.id, "worker-1", "token-1", "epoch-1"
+        )
+        assert store.resume_assignment(
+            queued.id, "worker-1", "token-1", "epoch-2"
+        )
+        assert store.heartbeat_assignment(
+            queued.id, "worker-1", "token-1", "epoch-2"
+        )
+
+        now += timedelta(seconds=91)
+        store.worker_disconnected(
+            "worker-1", "network lost again", connection_epoch="epoch-2"
+        )
+        now += timedelta(seconds=91)
+        assert store.sweep_expired_assignments() == (0, 1)
+        assert store.get_job(queued.id).state is JobState.FAILED  # type: ignore[union-attr]
+        assert store.get_flow(flow.id).state is FlowState.FAILED  # type: ignore[union-attr]
+    finally:
+        store.close()
+
+
+def test_unstarted_assignment_is_requeued_only_after_lease_expiry(
+    postgresql_url: str,
+) -> None:
+    now = datetime(2026, 9, 1, tzinfo=UTC)
+
+    def clock() -> datetime:
+        return now
+
+    store = Store(
+        postgresql_url,
+        clock=clock,
+        lease_duration=timedelta(seconds=30),
+    )
+    store.init_db()
+    try:
+        flow = store.create_flow("owner/unstarted-lease", 32, installation_id=None)
+        job = store.enqueue_job(flow.id, JobKind.INITIAL)
+        store.worker_connected("worker-1", protocol_version=1, connection_epoch="epoch-1")
+        assert store.assign_job("worker-1", "token-1", "epoch-1") is not None
+        store.worker_disconnected(
+            "worker-1", "network lost", connection_epoch="epoch-1"
+        )
+        assert store.sweep_expired_assignments() == (0, 0)
+
+        now += timedelta(seconds=31)
+        assert store.sweep_expired_assignments() == (1, 0)
+        assert store.get_job(job.id).state is JobState.QUEUED  # type: ignore[union-attr]
+    finally:
+        store.close()
 
 
 def test_review_item_upsert_preserves_one_feedback_record(store: Store) -> None:

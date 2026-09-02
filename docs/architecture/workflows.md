@@ -9,7 +9,9 @@
   → flow + queued job
   → serve 通过认证 WebSocket 向公平选中的空闲 worker assign
   → Started / Heartbeat / Result / ResultAccepted
-  → Started 固定 attempt affinity → job DONE；断线时按是否 started 执行 requeue 或 fail closed
+  → Started 固定 attempt affinity → job DONE
+  → 断线：unstarted 等 lease 后重排；started 只由原 worker 在 grace 内续跑/重放结果
+  → serve 重启：恢复持久 assignment/result inbox，不重复派发 started job
 ```
 
 测试使用 fake coordinator/executor 或 fake 外部端口，不访问 GitHub、Codex 或 bub。这个切片证明入口、

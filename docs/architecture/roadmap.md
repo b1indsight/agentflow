@@ -6,7 +6,7 @@
 flowtool/
   app/
     control/          # FastAPI/router/service/coordinator/gateway/reconciler/runtime
-    worker/           # WebSocket client/executor/runtime + worker root lock
+    worker/           # WebSocket client/executor/runtime + durable journal/root lock
     protocol.py       # 版本化 task/result/message 契约
     codex_driver.py   # CodexSession 抽象（CodeAgent 端口首个 adapter）
     context_builder.py # prompt / 上下文构建（§4.9）
@@ -28,8 +28,8 @@ flowtool/
 - **M0（已验收）** 骨架 + webhook 验签 + SQLite（含 `jobs`）+ 配置 + worker / 崩溃恢复骨架；
   19 个自动化测试、Ruff、Mypy、CLI 与 `/healthz` runtime smoke 全部通过（2026-08-26）；
 - **持久层替换（2026-08-27）** PostgreSQL 成为当前唯一运行时数据库；M0 的 SQLite 描述保留为历史验收事实；
-- **控制/执行面分离 Feature 1（2026-09-01）** serve 与一个出站 WebSocket worker 独立运行；多 worker
-  与恢复 lease 留给后续 feature；
+- **远程执行 Features 1–3（2026-09-02）** serve/worker 分离、多 worker 公平调度与 affinity、持久 lease、
+  同 identity 忙碌重连、serve 重启恢复和结果重放均已实现；跨 worker session 迁移与多 serve HA 不在范围内；
 - **M1** 触发（含 allowlist）→ 工作区 → codex 首轮 → 开 PR（单 flow happy path）
 - **M2** 语义 Triage（bub）门 + 回喂循环（settle → revise/answer/wait + resume/兜底 + 自动 resolve）
 - **M3** 人工合并检测（`pull_request.closed`）→ 归档 + 状态标签 / 评论
@@ -63,9 +63,9 @@ M1–M5 是目标里程碑，不代表对应控制流代码或接口已经验收
    - 预留：`Sandbox` port **已是一等轴（§4.6，M0 就立）**，MVP adapter = codex `workspace-write`；容器 / 微VM 是后续 adapter，对应 M5。
      那个 adapter 由它**接管整个工作区的 FS 策略**，git/jj 的差别塌成纯指引文本、顺带解掉 git `.git` 只读（原 V4）。
 
-6. **多 Worker 调度与恢复** —— 控制/执行面分离和单 worker 远程闭环已完成；后续增加多 identity、
-   session affinity、公平调度、单机多 root，以及忙碌重连和持久 lease 接管。
-   - 当前接缝：`protocol.py`、`WorkerGateway` 与 Store assignment token；worker 不直接共享 Store。
+6. **多 Worker 调度与恢复** —— 多 identity、session affinity、公平调度、单机多 root、忙碌重连、
+   持久 lease 与 result replay 已完成。
+   - 后续方向：跨 worker 可迁移 session/workspace、多 serve leader election、外部副作用幂等键和通用可观测性。
 
 7. **端口插件扩展** —— 在生命周期端口挂插件。
    例：合并后总结插件——归纳上一段对话里的代码风格偏好、更新仓库的 skill 文件。

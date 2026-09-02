@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Annotated
 
-from pydantic import SecretStr, ValidationInfo, field_validator, model_validator
+from pydantic import Field, SecretStr, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
@@ -39,9 +39,25 @@ class ServeSettings(FlowToolSettings):
 
     host: str = "0.0.0.0"
     port: int = 8000
-    worker_heartbeat_interval: float = 15.0
-    worker_heartbeat_timeout: float = 45.0
-    worker_poll_interval: float = 2.0
+    worker_heartbeat_interval: float = Field(default=15.0, gt=0)
+    worker_heartbeat_timeout: float = Field(default=45.0, gt=0)
+    worker_lease_duration: float = Field(default=60.0, gt=0)
+    worker_recovery_grace: float = Field(default=300.0, gt=0)
+    worker_sweep_interval: float = Field(default=5.0, gt=0)
+    worker_poll_interval: float = Field(default=2.0, gt=0)
+
+    @model_validator(mode="after")
+    def _validate_recovery_timing(self) -> ServeSettings:
+        if self.worker_lease_duration <= max(
+            self.worker_heartbeat_interval * 3,
+            self.worker_heartbeat_timeout,
+        ):
+            raise ValueError(
+                "worker lease duration must exceed the heartbeat timeout and three intervals"
+            )
+        if self.worker_recovery_grace <= self.worker_lease_duration:
+            raise ValueError("worker recovery grace must exceed the lease duration")
+        return self
 
     @field_validator("allowlist", mode="before")
     @classmethod
@@ -94,6 +110,9 @@ class WorkerSettings(FlowToolSettings):
     worker_root: Path = Path("~/.flowtool/workers/{worker_id}")
     codex_run_timeout_seconds: float = 1200.0
     allow_insecure_worker_ws: bool = False
+    reconnect_min_backoff: float = Field(default=1.0, gt=0)
+    reconnect_max_backoff: float = Field(default=30.0, gt=0)
+    reconnect_jitter: float = Field(default=0.2, ge=0, le=1)
 
     @field_validator("worker_id")
     @classmethod
@@ -113,11 +132,16 @@ class WorkerSettings(FlowToolSettings):
     @classmethod
     def _expand_worker_root(cls, value: Path, info: ValidationInfo) -> Path:
         if value == Path("~/.flowtool/workers/{worker_id}"):
-            value = Path(f"~/.flowtool/workers/{info.data['worker_id']}")
+            worker_id = info.data.get("worker_id")
+            if worker_id is None:
+                return value
+            value = Path(f"~/.flowtool/workers/{worker_id}")
         return value.expanduser()
 
     @model_validator(mode="after")
     def _require_secure_websocket(self) -> WorkerSettings:
+        if self.reconnect_max_backoff < self.reconnect_min_backoff:
+            raise ValueError("worker reconnect backoff range or jitter is invalid")
         if self.serve_ws_url.startswith("wss://"):
             return self
         if self.allow_insecure_worker_ws and self.serve_ws_url.startswith("ws://"):

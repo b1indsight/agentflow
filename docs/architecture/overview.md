@@ -21,7 +21,7 @@ issue / PR；Web 控制台只属于未来路线图。
 - 给 issue 打标签会触发本机执行模型生成的命令，因此 allowlist、沙盒、短时凭据和网络出口都是
   前置安全边界，而不是后期增强。
 
-当前验证了 serve/单 worker 双进程启动、认证 WebSocket 注册和 fake executor 的一次远程 job；公网入口、
+当前验证了 serve/双 worker 多进程启动与重启重连、认证 WebSocket 注册、租约恢复和 fake executor 的远程 job；公网入口、
 真实 Webhook 投递和生产部署尚未验证。
 
 ## 3. 组件总览
@@ -37,11 +37,11 @@ issue / PR；Web 控制台只属于未来路线图。
  │                           │                              │
  │                    [Worker Gateway]                      │
  └───────────────────────────┼──────────────────────────────┘
-                 authenticated WebSocket
-                             │
- ┌──────────────────── remote worker ──────────────────────┐
- │ [Worker Client] → [Executor] → Judge / Codex / Sandbox  │
- │                              → Workspace / VCS 指引      │
+               authenticated WebSockets
+                       │       │
+ ┌──────────────── remote workers (1..N) ──────────────────┐
+ │ [Worker Client + Journal] → [Executor] → Judge / Codex  │
+ │                                      → Workspace / VCS   │
  └──────────────────────────────────────────────────────────┘
 ```
 
