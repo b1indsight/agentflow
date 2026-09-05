@@ -4,10 +4,9 @@ FlowTool 的目标是把带 `flow` 标签的 GitHub issue 编排成
 `code agent 编码 → PR → 人工审核 → 自动回喂修订 → 人工合并 → 归档` 的 headless 闭环。
 项目自身不提供业务 UI，交互面是 GitHub issue 和 PR。
 
-> 当前状态：**M0 骨架已验收，M1 的 CodeAgent VCS 与 GitHub App primitives 已实现（2026-09-05）**。
-> 仓库已验证 PostgreSQL、Webhook、远程 worker 闭环、CodeAgent VCS 事实核验，以及类型化 GitHub
-> Issue/ref/PR 与 scoped capability adapter；真实 GitHub App smoke、完整 Issue→PR 接线和 bub 仍未完成，
-> 目前不能按生产能力使用。
+> 当前状态：**M0 已验收，M1 三个 feature 均已实现并通过自动化（2026-09-05），真实 M1 E2E 待验收**。
+> 仓库已贯通 Issue/default branch、Flow 生命周期 binding、Codex commit/push、`flow.open_pr` 与一 Flow 一 PR；
+> 真实 GitHub App smoke、一次授权 disposable repo 的 Issue→PR E2E 和 bub 仍未完成，目前不能按生产能力使用。
 
 ## 当前能力
 
@@ -17,16 +16,19 @@ M0 已经具备并验证：
 - 校验 `X-Hub-Signature-256`，异步交接 Webhook，并处理 delivery 去重、allowlist、取消和 review 入库；
 - `flowtool serve` 独占 Store、Webhook、状态机和 GitHub 权限，通过独立认证 WebSocket 向多个 worker 公平派发 job；
 - `flowtool worker` 主动保持长连接，只装配 workspace、Codex 和 Judge，不读取数据库或 GitHub App 私钥；
-- INITIAL/TRIAGE/REVISION/ANSWER/ARCHIVE 使用 v3 task/result 契约，显式携带 stable Flow identity，并用
+- INITIAL/TRIAGE/REVISION/ANSWER/ARCHIVE 使用 v4 task/result/tool/error 契约，显式携带 stable Flow identity，并用
   worker/epoch/job/token 四元组拒绝旧连接写入；
 - 未 Started 的 assignment 在 lease 到期后重排；Started job 在 recovery grace 内只等原 worker，serve 重启不会立即失败；
 - worker journal 在 ResultAccepted 前保留 assignment/终态结果，control result inbox 去重重放并恢复未应用结果；
 - 同一 attempt 固定到首次 Started 的 worker；每个 worker 单槽运行，同机实例使用独立 root、identity 标记和进程锁；
+- Flow 生命周期独占一个 worker/repo，`FlowDelivery` 独立保存 branch/base/PR；Attempt 只保存本次运行与 session；
+- INITIAL 获取真实 Issue/default branch，临发短时 push capability；Codex 通过 worker-local MCP 调用
+  `flow.open_pr`，control 在远端 SHA 核验后幂等创建或复用唯一 PR；
 - 通过 CLI 分别启动两个角色、查看 flow/worker，并执行基础 cancel/retry 运维命令。
 
 尚未形成可用闭环：GitHub App adapter 已对齐锁定的 githubkit 0.16 并通过隔离测试，但真实 App smoke、
-issue/default branch 到 INITIAL 的接线、review thread 映射、bub 调用、credential 下发与受控网络、
-reconcile 对账、取消运行中进程和真实多轮修订仍未端到端验证。
+真实 Issue→PR E2E、review thread 映射、bub 调用、受控网络、reconcile 对账、取消运行中进程和真实多轮修订
+仍未端到端验证。
 完整边界见[架构状态表](docs/architecture/README.md#当前实现状态)。
 
 ## 文档
@@ -106,5 +108,7 @@ assignment/epoch fencing、lease sweeper、忙碌重连、result replay、worker
 `uv sync --locked`、Ruff、Mypy、CLI help 和构建检查均纳入基线。
 
 M1 Feature 1 已用一次性本地 repo 验证 Codex 自主完成 Git commit/push；Feature 2 已实现按单仓库和
-Contents write 收窄的短时 capability，以及 Issue/repository/ref/PR primitives。真实 GitHub App smoke、
-GitHub egress/credential 下发和 Issue→PR 完整闭环仍待完成。
+Contents write 收窄的短时 capability，以及 Issue/repository/ref/PR primitives；Feature 3 已通过 95 项
+自动化测试贯通 capability 下发、worker-local MCP、双端 VCS/ref 核验和幂等 PR delivery。真实 GitHub App
+smoke、GitHub-only egress 和授权 disposable repo 的完整 E2E 仍待完成；本机无 PostgreSQL，22 个数据库
+集成场景未执行。

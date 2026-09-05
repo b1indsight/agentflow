@@ -1,6 +1,6 @@
 # M1 单 Flow Issue→PR 闭环计划
 
-> 状态：待审批 · 计划日期：2026-09-02 · 架构修订：2026-09-03 · M1 Feature 3/3
+> 状态：已批准并实现，真实 E2E 待执行 · 计划日期：2026-09-02 · 实施日期：2026-09-05 · M1 Feature 3/3
 >
 > 前置：Feature 1 已证明 CodeAgent 自主完成本地 VCS/commit/push；Feature 2 已校准 GitHub App、短时
 > push capability 和 PR primitives。本 feature 只组装并验收单 flow happy path，不实现 Flow 派生，
@@ -93,7 +93,7 @@ JSONL 或任意环境变量。
 
 ### 3.2 Flow tool RPC
 
-v3 同时增加可复用的 tool request/response message family。它与 assignment 的终态 result 并行存在，允许
+v4 增加可复用的 tool request/response message family 和分类 error/retry metadata。它与 assignment 的终态 result 并行存在，允许
 CodeAgent 在一次 run 尚未退出时调用 control plane 能力。M1 只注册：
 
 ```text
@@ -244,7 +244,7 @@ tool request 可能在“GitHub 已开 PR、response 尚未返回”的窗口重
      分轴测试；
    - 增加 execution binding、delivery 与 tool-call ledger，完成向前 schema migration。
 2. **协议与 Flow tool transport，测试先行**
-   - 写 v3 parse/reject、INITIAL 字段、secret envelope、fenced tool request/response 和未知 tool 拒绝测试；
+   - 写 v4 parse/reject、INITIAL 字段、secret envelope、fenced tool request/response 和未知 tool 拒绝测试；
    - 实现 WSS multiplex、worker-local MCP broker 与 control tool registry。
 3. **真实 prepare，测试先行**
    - fake GitHub 返回 Issue/default branch/capability；
@@ -271,7 +271,7 @@ tool request 可能在“GitHub 已开 PR、response 尚未返回”的窗口重
 ### 7.1 自动化
 
 - router：真实形状 `issues.labeled` payload、sender/bot/allowlist/delivery 去重；
-- protocol：v2/v3 边界、strict secret envelope、tool request/response fencing、result branch/SHA 验证；
+- protocol：旧版/v4 边界、strict secret envelope、tool request/response fencing、分类错误与 result branch/SHA 验证；
 - gateway：capability 只在 assignment 内存/WSS，tool RPC multiplex，重派发刷新，不进入 result inbox；
 - Flow tools：未知工具拒绝、越权/过期 call 拒绝、call response 重放和一 Flow 一 PR；
 - MCP broker：Agent只能看到已注册工具，broker 无 GitHub/Store/worker bearer credential；
@@ -349,3 +349,15 @@ git diff --check
 
 回退时可关闭真实 GitHub/Codex 配置并继续运行已验证的 M0/远程 worker 基础设施。已创建的 branch/PR
 不自动删除，由操作者在 GitHub 审核后处理；数据库保留失败 flow 供诊断。
+
+## 10. 实施结果（2026-09-05）
+
+已实现本计划的领域、协议与执行路径：`FlowExecution`、`FlowDelivery` 和 `FlowToolCall` 分别持有生命周期
+binding、交付状态和幂等调用账本；调度器在 Flow 终态前保留单槽 worker/repo；INITIAL 使用真实 Issue、
+default branch 和临发的短时 push capability。Codex run 获得只注册 `open_pr` 的 worker-local STDIO MCP，
+请求经现有认证 WebSocket 送到 control。Worker 在调用前验证本地 branch/commit/clean/remote，control 再以
+GitHub ref 核对 SHA，随后按稳定 head find-or-open PR；terminal result 还会与持久 tool outcome 再核对。
+
+自动化结果：pytest 95 passed、22 skipped；Ruff、Mypy 与构建通过。22 个 skip 是需要 PostgreSQL 的 Store 场景，
+当前环境没有 Docker/PostgreSQL，未执行这些集成测试。尚未提供用户授权的 disposable GitHub repository，
+因此真实 GitHub App smoke 和本 feature 的真实 Issue→PR E2E 未执行；依据 §8，M1 仍不能标记为“已验收”。

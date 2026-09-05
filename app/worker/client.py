@@ -4,16 +4,22 @@ from __future__ import annotations
 
 import asyncio
 import random
+from dataclasses import dataclass
 from typing import Protocol
+from uuid import uuid4
 
 from loguru import logger
 from websockets.asyncio.client import connect
 
+from app.models import VcsOutcome
 from app.protocol import (
     Assignment,
     ExecutionResult,
     ExecutionTask,
     Failed,
+    FlowToolErrorKind,
+    FlowToolRequest,
+    FlowToolResponse,
     Heartbeat,
     ProtocolError,
     RecoveryDescriptor,
@@ -38,11 +44,35 @@ class Connection(Protocol):
 
 
 class TaskExecutor(Protocol):
-    async def execute(self, task: ExecutionTask) -> ExecutionResult: ...
+    async def execute(
+        self, task: ExecutionTask, secret=None
+    ) -> ExecutionResult: ...
 
 
 class WorkerProtocolError(RuntimeError):
     pass
+
+
+class FlowToolCallError(WorkerProtocolError):
+    """A classified control-plane tool rejection surfaced to the local MCP caller."""
+
+    def __init__(self, response: FlowToolResponse) -> None:
+        assert response.error is not None and response.error_kind is not None
+        self.kind: FlowToolErrorKind = response.error_kind
+        self.retryable = response.retryable
+        self.retry_after = response.retry_after
+        detail = f"{self.kind.value}: {response.error}"
+        if self.retryable:
+            detail += "; retryable=true"
+        if self.retry_after is not None:
+            detail += f"; retry_after={self.retry_after}"
+        super().__init__(detail)
+
+
+@dataclass
+class _PendingTool:
+    request: FlowToolRequest
+    future: asyncio.Future[dict[str, object]]
 
 
 class WorkerClient:
@@ -71,6 +101,38 @@ class WorkerClient:
         self._stop = asyncio.Event()
         self._assignment: Assignment | None = None
         self._execution: asyncio.Task[ExecutionResult] | None = None
+        self._tool_requests: asyncio.Queue[_PendingTool] = asyncio.Queue()
+
+    async def call_tool(
+        self,
+        name: str,
+        arguments: dict[str, object],
+        *,
+        call_id: str | None = None,
+        vcs_outcome: VcsOutcome,
+    ) -> dict[str, object]:
+        """Route one worker-local tool invocation over the active assignment socket."""
+
+        assignment = self._assignment
+        if assignment is None:
+            raise WorkerProtocolError("Flow tool call has no active assignment")
+        future: asyncio.Future[dict[str, object]] = asyncio.get_running_loop().create_future()
+        request = FlowToolRequest(
+            job_id=assignment.job_id,
+            flow_id=assignment.flow_id,
+            attempt_id=assignment.task.attempt_id,
+            assignment_token=assignment.assignment_token,
+            connection_epoch=assignment.connection_epoch,
+            call_id=call_id or uuid4().hex,
+            name=name,
+            arguments=arguments,
+            vcs_backend=vcs_outcome.verified_backend,
+            branch=vcs_outcome.branch,
+            commit_sha=vcs_outcome.commit_sha,
+            remote_sha=vcs_outcome.remote_sha,
+        )
+        await self._tool_requests.put(_PendingTool(request, future))
+        return await future
 
     async def run(self) -> None:
         delay = self.reconnect_min_backoff
@@ -181,7 +243,9 @@ class WorkerClient:
         )
         if self.journal is not None:
             self.journal.record_started()
-        self._execution = asyncio.create_task(self.executor.execute(assignment.task))
+        self._execution = asyncio.create_task(
+            self.executor.execute(assignment.task, assignment.secret)
+        )
         await self._drive_assignment(connection, heartbeat_interval)
 
     async def _drive_assignment(
@@ -201,12 +265,42 @@ class WorkerClient:
         )
         try:
             if execution is not None:
-                completed, _ = await asyncio.wait(
-                    {execution, heartbeat}, return_when=asyncio.FIRST_COMPLETED
-                )
-                if heartbeat in completed:
-                    heartbeat.result()
-                    raise WorkerProtocolError("heartbeat task stopped unexpectedly")
+                while not execution.done():
+                    next_tool = asyncio.create_task(self._tool_requests.get())
+                    completed, _ = await asyncio.wait(
+                        {execution, heartbeat, next_tool},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if heartbeat in completed:
+                        next_tool.cancel()
+                        await asyncio.gather(next_tool, return_exceptions=True)
+                        heartbeat.result()
+                        raise WorkerProtocolError("heartbeat task stopped unexpectedly")
+                    if next_tool in completed:
+                        pending = next_tool.result()
+                        request = pending.request.model_copy(
+                            update={"connection_epoch": assignment.connection_epoch}
+                        )
+                        try:
+                            await connection.send(request.model_dump_json())
+                            response = parse_server_message(await _receive_text(connection))
+                        except BaseException:
+                            await self._tool_requests.put(pending)
+                            raise
+                        if not isinstance(response, FlowToolResponse) or response.call_id != request.call_id:
+                            await self._tool_requests.put(pending)
+                            raise WorkerProtocolError("Flow tool response does not match its request")
+                        if response.error is not None:
+                            pending.future.set_exception(FlowToolCallError(response))
+                        elif response.result is None:
+                            pending.future.set_exception(
+                                WorkerProtocolError("Flow tool returned no result")
+                            )
+                        else:
+                            pending.future.set_result(response.result)
+                        continue
+                    next_tool.cancel()
+                    await asyncio.gather(next_tool, return_exceptions=True)
                 try:
                     result = execution.result()
                     terminal: Succeeded | Failed = Succeeded(
@@ -328,6 +422,10 @@ class WorkerClient:
         self._execution.cancel()
         await asyncio.gather(self._execution, return_exceptions=True)
         self._execution = None
+        while not self._tool_requests.empty():
+            pending = self._tool_requests.get_nowait()
+            if not pending.future.done():
+                pending.future.set_exception(WorkerProtocolError("assignment was cancelled"))
 
 
 async def _receive_text(connection: Connection) -> str:

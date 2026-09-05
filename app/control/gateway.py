@@ -16,9 +16,12 @@ from pydantic import ValidationError
 from app.models import Job, JobState
 from app.protocol import (
     Assignment,
+    AssignmentSecret,
     ExecutionResult,
     ExecutionTask,
     Failed,
+    FlowToolRequest,
+    FlowToolResponse,
     Heartbeat,
     ProtocolError,
     RecoveryDescriptor,
@@ -122,6 +125,14 @@ class GatewayStore(Protocol):
 class AssignmentCoordinator(Protocol):
     async def prepare(self, job: Job) -> ExecutionTask | JobState: ...
 
+    async def assignment_secret(
+        self, job: Job, task: ExecutionTask
+    ) -> AssignmentSecret | None: ...
+
+    async def execute_tool(
+        self, request: FlowToolRequest, *, worker_id: str
+    ) -> FlowToolResponse: ...
+
     def mark_started(self, job: Job, task: ExecutionTask, worker_id: str) -> None: ...
 
     async def apply_result(self, job: Job, result: ExecutionResult) -> JobState: ...
@@ -220,6 +231,20 @@ class WorkerGateway:
                         )
                         self.notify_jobs()
                         continue
+                    try:
+                        secret = await self.coordinator.assignment_secret(job, prepared)
+                    except Exception as exc:  # noqa: BLE001
+                        reason = f"assignment capability failed: {type(exc).__name__}"
+                        await self.coordinator.fail(job, reason)
+                        self.store.finish_assignment(
+                            job.id,
+                            worker_id,
+                            token,
+                            JobState.FAILED,
+                            connection_epoch,
+                        )
+                        self.notify_jobs()
+                        continue
                     current = (job, token, prepared)
                     await socket.send_text(
                         Assignment(
@@ -228,6 +253,7 @@ class WorkerGateway:
                             assignment_token=token,
                             connection_epoch=connection_epoch,
                             task=prepared,
+                            secret=secret,
                         ).model_dump_json()
                     )
 
@@ -266,6 +292,21 @@ class WorkerGateway:
                             job.id, worker_id, token, connection_epoch
                         ):
                             raise ProtocolViolation("heartbeat belongs to an inactive assignment")
+                        continue
+                    if isinstance(message, FlowToolRequest):
+                        self._validate_assignment_message(
+                            message.job_id,
+                            message.assignment_token,
+                            message.connection_epoch,
+                            current,
+                            connection_epoch,
+                        )
+                        if message.flow_id != job.flow_id:
+                            raise ProtocolViolation("Flow tool call belongs to another Flow")
+                        response = await self.coordinator.execute_tool(
+                            message, worker_id=worker_id
+                        )
+                        await socket.send_text(response.model_dump_json())
                         continue
                     if isinstance(message, (Succeeded, Failed)):
                         self._validate_assignment_message(

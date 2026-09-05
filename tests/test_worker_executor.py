@@ -1,6 +1,10 @@
+import asyncio
+import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from pydantic import SecretStr
 
 from app.models import AgentRun, CodexResult, TriageVerdict, VcsKind, VcsOutcome, Verdict
 from app.protocol import (
@@ -8,8 +12,10 @@ from app.protocol import (
     AnswerTask,
     ArchiveResult,
     ArchiveTask,
+    AssignmentSecret,
     InitialResult,
     InitialTask,
+    PushSecret,
     RevisionResult,
     RevisionTask,
     TriageResult,
@@ -23,8 +29,19 @@ class RecordingAgent:
         self.started: list[tuple[str, Path]] = []
         self.resumed: list[tuple[str, str]] = []
 
-    async def start(self, task: str, cwd: Path, *, output_schema=None) -> AgentRun:
+    async def start(self, task: str, cwd: Path, *, output_schema=None, context=None) -> AgentRun:
         self.started.append((task, cwd))
+        if context is not None and context.mcp_socket is not None:
+            reader, writer = await asyncio.open_unix_connection(context.mcp_socket)
+            writer.write(
+                b'{"call_id":"call-1","name":"flow.open_pr",'
+                b'"arguments":{"title":"Implement","body":"Done"}}\n'
+            )
+            await writer.drain()
+            response = json.loads(await reader.readline())
+            assert response["result"]["pr_number"] == 17
+            writer.close()
+            await writer.wait_closed()
         return AgentRun(
             session_id="session-1",
             last_message="initial done",
@@ -51,13 +68,59 @@ class RecordingJudge:
 
 
 class BackendlessAgent(RecordingAgent):
-    async def start(self, task: str, cwd: Path, *, output_schema=None) -> AgentRun:
+    async def start(self, task: str, cwd: Path, *, output_schema=None, context=None) -> AgentRun:
         return AgentRun(
             session_id="session-1",
             last_message="claimed success",
             exit_code=0,
             output=CodexResult(summary="claimed success"),
         )
+
+
+class RecordingToolCaller:
+    async def call_tool(self, name, arguments, *, call_id=None, vcs_outcome):
+        assert name == "flow.open_pr"
+        assert call_id == "call-1"
+        assert vcs_outcome.commit_sha == "abc"
+        return {
+            "pr_number": 17,
+            "url": "https://github.com/owner/repo/pull/17",
+            "head_sha": "abc",
+            "delivery_version": 1,
+        }
+
+
+def assignment_secret() -> AssignmentSecret:
+    return AssignmentSecret(
+        push=PushSecret(
+            token=SecretStr("push-token"),
+            repository="owner/repo",
+            expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_initial_with_delivery_channel_requires_push_capability(tmp_path: Path) -> None:
+    executor = WorkerExecutor(
+        tmp_path, RecordingAgent(), RecordingJudge(), tool_caller=RecordingToolCaller()
+    )
+
+    result = await executor.execute(
+        InitialTask(
+            flow_id=3,
+            attempt_id=1,
+            repo="owner/repo",
+            issue_number=8,
+            issue_title="Issue",
+            issue_body="Body",
+            branch="flow/3",
+        )
+    )
+
+    assert isinstance(result, InitialResult)
+    assert result.failure_stage == "capability"
+    assert result.failure_detail == "push capability is missing"
 
 
 @pytest.mark.asyncio
@@ -92,9 +155,15 @@ async def test_executor_runs_agent_and_judge_tasks_without_store(
     monkeypatch.setattr("app.worker.executor.prepare_flow_repo", fake_workspace)
     monkeypatch.setattr("app.worker.executor.prepare_vcs_context", fake_context)
     monkeypatch.setattr("app.worker.executor.verify_vcs_outcome", fake_verify)
+    monkeypatch.setattr(
+        "app.worker.tools.verify_pushed_outcome",
+        lambda context: fake_verify(context, VcsKind.GIT),
+    )
     monkeypatch.setattr("app.worker.executor.cleanup_flow_repo", fake_cleanup)
     agent = RecordingAgent()
-    executor = WorkerExecutor(tmp_path, agent, RecordingJudge())
+    executor = WorkerExecutor(
+        tmp_path, agent, RecordingJudge(), tool_caller=RecordingToolCaller()
+    )
 
     initial = await executor.execute(
         InitialTask(
@@ -105,7 +174,8 @@ async def test_executor_runs_agent_and_judge_tasks_without_store(
             issue_title="Issue",
             issue_body="Body",
             branch="flow/issue-8",
-        )
+        ),
+        assignment_secret(),
     )
     triage = await executor.execute(
         TriageTask(attempt_id=1, discussion="please revise", pr_context="PR #1")
@@ -129,6 +199,9 @@ async def test_executor_runs_agent_and_judge_tasks_without_store(
     )
 
     assert isinstance(initial, InitialResult)
+    assert initial.commit_sha == "abc"
+    assert initial.open_pr_call_id == "call-1"
+    assert initial.pull_request is not None
     assert isinstance(triage, TriageResult)
     assert isinstance(revision, RevisionResult)
     assert revision.output.summary == "updated"

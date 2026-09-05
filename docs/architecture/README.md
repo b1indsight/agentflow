@@ -1,7 +1,7 @@
 # FlowTool 架构文档
 
-> 状态：M0 已验收、M1+ 仍为目标设计 · 初始日期：2026-08-02 · M0 验收：2026-08-26 ·
-> 文档核对：2026-09-03。
+> 状态：M0 已验收、M1 已实现但真实 E2E 待验收 · 初始日期：2026-08-02 · M0 验收：2026-08-26 ·
+> 文档核对：2026-09-05。
 
 本目录是 FlowTool 架构的唯一入口。代码、测试、配置示例和已执行的运行验证是“当前实现”的事实
 来源；目标流程不会因为已经写入设计文档就被视为可用。
@@ -25,13 +25,13 @@
 
 | 范围 | 状态 | 当前事实 |
 |---|---|---|
-| 配置与领域契约 | 已验证 | serve/worker 独立配置、v3 task/result/recovery message、stable Flow identity、时间关系验证和结构化结果有覆盖 |
-| PostgreSQL Store | 已验证 | flow/attempt/job、epoch/lease fencing、result inbox、跨 Store 可见性、并发 assign、review 与恢复有覆盖 |
+| 配置与领域契约 | 已验证 | serve/worker 独立配置、v4 task/result/tool/recovery message、分类 tool error、Flow lifecycle/delivery 分轴和结构化结果有覆盖 |
+| PostgreSQL Store | 部分 | flow/attempt/job、execution binding、delivery/tool ledger、epoch/lease fencing 与恢复已实现；本次环境未运行 PostgreSQL 集成用例 |
 | Webhook Ingress | 已验证（M0） | `/healthz`、HMAC 拒绝/接受、后台交接和 202 响应有覆盖；health 仅表示进程可响应 |
 | Event Router | 已验证（M0） | delivery 去重、bot/allowlist、触发、取消和 inline review 入库有覆盖；同 flow 串行锁尚未实现 |
-| Control/Worker 边界 | 已验证（Features 1–3） | 多 worker 鉴权/调度、affinity、busy reconnect、result replay、serve restart、journal/root lock 有覆盖 |
-| Control Service / Job Coordinator | 部分 | 状态转换和外部端口调用已拆到 control；issue 拉取、thread 映射、取消 kill、冲突处理与真实副作用未完成 |
-| Codex / Context / Sandbox / VCS | 部分 | stable Flow repo、外部 secret 隔离前置条件、Git/jj 自探测及限时/净化的 commit ancestry、remote 核验有自动化与本地 smoke；GitHub egress/credential 未验证 |
+| Control/Worker 边界 | 已验证（Features 1–3） | 多 worker 鉴权/调度、Flow 生命周期 binding、tool multiplex、busy reconnect、result replay 与 journal secret 负向覆盖 |
+| Control Service / Job Coordinator | 部分 | 真实 issue/default branch prepare、tool fencing/幂等 PR delivery 已接线；thread 映射、取消 kill、冲突处理与真实副作用 E2E 未完成 |
+| Codex / Context / Sandbox / VCS | 部分 | Flow repo、短时 credential helper、STDIO MCP、Git/jj commit/clean/remote 双端核验有自动化；GitHub-only egress 与真实 run 未验证 |
 | GitHub Client | 部分 | githubkit 0.16 App/installation 认证、Issue/repository/ref/PR、单仓库 Contents capability 与错误映射有隔离测试；真实 App smoke 和 M2 review threads 待验证 |
 | Judge | 桩 | `bub run` subprocess 与保守解析存在，实际命令/API 和模型输出尚未校准 |
 | Reconciler | 桩 | 5 分钟循环存在，`_sweep()` 目前只记录 active flow，不拉取远端状态 |
@@ -43,7 +43,8 @@
 - pytest 覆盖协议、角色边界、远程执行闭环与真实 PostgreSQL 持久层场景；
 - `uv sync --locked`、`ruff check app tests`、`mypy app tests` 与 `flowtool --help` 通过；
 - PostgreSQL-backed `flowtool serve` 与两个 worker 在 CI 中独立启动，并在 serve 重启后自动重新注册；
-- 测试不访问 GitHub、Codex 或 bub，也不使用真实凭据和真实轮询等待。
+- 测试不访问 GitHub、Codex 或 bub，也不使用真实凭据和真实轮询等待；M1 Feature 3 的自动化为
+  95 passed、22 个 PostgreSQL 场景因本机无数据库而 skipped。
 
 M0 在 2026-08-26 使用 SQLite 和 19 项测试完成原始验收；该记录保留在
 [`m0.md`](../plan/m0.md)与[`m0-closeout.md`](../plan/m0-closeout.md)。当前 PostgreSQL 替换不证明

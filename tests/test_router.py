@@ -4,7 +4,7 @@ from unittest.mock import Mock
 import pytest
 
 from app.control.router import EventRouter
-from app.models import Flow, FlowState, JobKind
+from app.models import DeliveryState, Flow, FlowState, JobKind
 from app.store import Store
 
 
@@ -22,7 +22,7 @@ class RecordingService:
         self.store.update_flow(flow)
 
     def on_merged(self, flow: Flow) -> None:
-        flow.state = FlowState.MERGED
+        flow.state = FlowState.SUCCEEDED
         self.store.update_flow(flow)
 
     def notify_jobs(self) -> None:
@@ -64,7 +64,7 @@ async def test_allowed_label_creates_one_flow_and_job(
 
     flow = store.get_active_flow("owner/repo", 7)
     assert flow is not None
-    assert flow.state is FlowState.PENDING
+    assert flow.state is FlowState.ACTIVE
     store.worker_connected("worker-1", protocol_version=1)
     assert store.assign_job("worker-1", "assignment-1") is not None
     assert store.assign_job("worker-1", "assignment-2") is None
@@ -111,10 +111,12 @@ async def test_review_comment_is_stored_for_current_attempt(
 ) -> None:
     flow = store.create_flow("owner/repo", 7, installation_id=42)
     attempt = store.create_attempt(flow.id)
-    attempt.pr_number = 17
-    store.update_attempt(attempt)
     flow.current_attempt_id = attempt.id
     store.update_flow(flow)
+    delivery = store.get_or_create_delivery(flow.id, f"flow/{flow.id}")
+    delivery.pr_number = 17
+    delivery.state = DeliveryState.OPEN
+    store.update_delivery(delivery)
     touch = Mock()
     monkeypatch.setattr(router.settle, "touch", touch)
 

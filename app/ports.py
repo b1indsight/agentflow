@@ -15,7 +15,7 @@ from app.github_models import (
     RemoteRef,
     RepositorySnapshot,
 )
-from app.models import AgentRun, SandboxPolicy, TriageVerdict
+from app.models import AgentRun, CodeAgentContext, SandboxPolicy, TriageVerdict
 
 
 @runtime_checkable
@@ -27,7 +27,14 @@ class CodeAgent(Protocol):
     与安全隔离是不同约束。
     """
 
-    async def start(self, task: str, cwd: Path, *, output_schema: Path | None = None) -> AgentRun: ...
+    async def start(
+        self,
+        task: str,
+        cwd: Path,
+        *,
+        output_schema: Path | None = None,
+        context: CodeAgentContext | None = None,
+    ) -> AgentRun: ...
 
     async def resume(
         self, session_id: str, prompt: str, *, output_schema: Path | None = None

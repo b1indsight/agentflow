@@ -5,6 +5,10 @@ from pydantic import ValidationError
 
 from app.models import (
     CodexResult,
+    DeliveryState,
+    FlowDelivery,
+    FlowExecution,
+    FlowState,
     InitialCodexResult,
     Job,
     JobKind,
@@ -63,3 +67,22 @@ def test_initial_codex_result_has_a_strict_required_schema() -> None:
 
     assert set(schema["required"]) == {"summary", "vcs_backend_used"}
     assert schema["additionalProperties"] is False
+
+
+def test_flow_lifecycle_is_separate_from_execution_and_delivery() -> None:
+    assert set(FlowState) == {
+        FlowState.ACTIVE,
+        FlowState.SUCCEEDED,
+        FlowState.FAILED,
+        FlowState.CANCELLED,
+    }
+    execution = FlowExecution(
+        flow_id=3,
+        worker_id="worker-a",
+        repo_identity="worker-a:owner/repo",
+    )
+    delivery = FlowDelivery(flow_id=3, branch="flow/3", state=DeliveryState.NONE)
+
+    assert execution.released_at is None
+    assert delivery.pr_number is None
+    assert delivery.state is DeliveryState.NONE

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>FlowTool 架构状态 · M0</title>
+<title>FlowTool 架构状态 · M1 已实现 / E2E 待验收</title>
 <style>
   :root {
     --bg:#eaeef3; --surface:#ffffff; --surface-2:#f4f7fb;
@@ -249,7 +249,7 @@
     <div class="stat p"><b>6</b><span>部分</span></div>
     <div class="stat s"><b>3</b><span>桩 stub</span></div>
     <div class="stat m"><b>0</b><span>M0 缺失</span></div>
-    <div class="stat"><b>M0</b><span>验收通过</span></div>
+    <div class="stat"><b>M1</b><span>已实现 · E2E 待验</span></div>
   </div>
 
   <div class="legend" role="group" aria-label="按状态筛选">
@@ -338,7 +338,7 @@
         </article>
         <article class="node" data-status="done">
           <div class="node__top"><span class="node__name">Protocol</span><span class="pill">已验证</span></div>
-          <p class="node__role">v3 strict Pydantic · stable Flow id · 五类 task/result · recovery/resume/replay/ack</p>
+          <p class="node__role">v4 strict Pydantic · task/result/tool RPC · 分类 error/retry metadata · wire-only secret envelope</p>
           <code class="node__file">app/protocol.py</code>
         </article>
         <article class="node" data-status="done">
@@ -346,10 +346,10 @@
           <p class="node__role">多 identity WebSocket · bearer 鉴权 · epoch fencing · busy reconnect / takeover</p>
           <code class="node__file">app/control/gateway.py</code>
         </article>
-        <article class="node" data-status="stub">
-          <div class="node__top"><span class="node__name">GitHub Client</span><span class="pill">桩</span></div>
-          <p class="node__role">githubkit 调用形态 · token / PR / 评论 / label / reviewer / GraphQL · 全部未实 App 校准</p>
-          <code class="node__file">app/github_client.py · V1</code>
+        <article class="node" data-status="partial">
+          <div class="node__top"><span class="node__name">GitHub Client</span><span class="pill">部分</span></div>
+          <p class="node__role">githubkit 0.16 · scoped token · Issue/ref/PR/label/reviewer 已有隔离契约测试 · 真实 App smoke 待验</p>
+          <code class="node__file">app/github_client.py</code>
         </article>
       </div>
 
@@ -371,7 +371,7 @@
     <div class="boundary">
       <span class="btag">平面边界</span>
       <span class="rule"></span>
-      <div class="dir"><span>authenticated WebSocket · versioned task/result ↓↑</span></div>
+      <div class="dir"><span>authenticated WebSocket · versioned task/result + flow tool RPC ↓↑</span></div>
       <span class="rule"></span>
     </div>
 
@@ -381,7 +381,7 @@
       <div class="grid">
         <article class="node" data-status="partial">
           <div class="node__top"><span class="node__name">Codex Driver</span><span class="pill">部分</span></div>
-          <p class="node__role">codex exec / resume 子进程 · JSONL 取 thread_id · --output-schema 解析 CodexResult · 向 Sandbox 要 policy</p>
+          <p class="node__role">codex exec / resume · output schema · 短时 push credential helper · worker-local STDIO MCP</p>
           <code class="node__file">app/codex_driver.py · V5/V6</code>
         </article>
         <article class="node" data-status="partial">
@@ -390,13 +390,13 @@
           <code class="node__file">ports.Sandbox · app/sandbox.py · V3</code>
         </article>
         <article class="node" data-status="partial">
-          <div class="node__top"><span class="node__name">workspace + VCS 指引</span><span class="pill">部分</span></div>
-          <p class="node__role">普通函数(非端口) · make_workspace(VCS-无关拷贝) / cleanup · detect_vcs_kind + agent_guidance(git/jj)</p>
+          <div class="node__top"><span class="node__name">Flow repo + VCS 核验</span><span class="pill">部分</span></div>
+          <p class="node__role">Flow 独占 repo · Agent 自选 Git/jj · tool 前核验 branch/commit/clean/remote SHA</p>
           <code class="node__file">app/vcs.py · V8</code>
         </article>
         <article class="node" data-status="artifact">
           <div class="node__top"><span class="node__name">Worker Client + Executor</span></div>
-          <p class="node__role">主动连接/重连 · heartbeat · executor 解耦 · 持久 journal · identity/root 独占锁</p>
+          <p class="node__role">主动连接/重连 · Flow 生命周期 binding · tool multiplex · journal 不落 secret · identity/root 独占锁</p>
           <code class="node__file">app/worker/client.py · journal.py · executor.py · runtime.py</code>
         </article>
       </div>
@@ -476,7 +476,7 @@
 
   <!-- roadmap milestone timeline -->
   <section class="block">
-    <h2>Roadmap · 里程碑 <span style="font-family:var(--mono);font-size:11px;color:var(--ink-soft);font-weight:400">M0 已验收 · 下一步 M1</span></h2>
+    <h2>Roadmap · 里程碑 <span style="font-family:var(--mono);font-size:11px;color:var(--ink-soft);font-weight:400">M1 已实现 · 真实 E2E 待验收</span></h2>
     <p class="sub">端口(ports)现在就立好,后续扩展一律「换 adapter / 挂插件」,不动 core</p>
     <div class="scroll-x">
       <div class="track">
@@ -490,8 +490,8 @@
           </ul>
         </article>
         <span class="arrow" aria-hidden="true">→</span>
-        <article class="ms ms--future">
-          <div class="ms__head"><span class="ms__id">M1</span><span class="ms__tag">将来</span></div>
+        <article class="ms ms--now">
+          <div class="ms__head"><span class="ms__id">M1</span><span class="ms__tag">已实现 / 待验</span></div>
           <div class="ms__title">首轮 happy path</div>
           <ul class="ms__list">
             <li>触发(allowlist) → workspace</li>
@@ -558,17 +558,10 @@
     <h2>Flow 状态机 <span style="font-family:var(--mono);font-size:11px;color:var(--ink-soft);font-weight:400">控制流已写 · 外部边界未完成</span></h2>
     <p class="sub">当前单个远程 worker 串行消费 · per-flow 串行锁与多 worker 并行仍是目标</p>
     <div class="fsm">
-      <span class="state">PENDING</span>
+      <span class="state mid">ACTIVE</span>
+      <span class="cap">delivery: NONE → OPENING → OPEN → CLOSED / MERGED</span>
       <span class="to">→</span>
-      <span class="state mid">CODING</span>
-      <span class="to">→</span>
-      <span class="state mid">PR_OPEN</span>
-      <span class="to">⇄</span>
-      <span class="state mid">REVISING</span>
-      <span class="to">→</span>
-      <span class="state">MERGED</span>
-      <span class="to">→</span>
-      <span class="state">ARCHIVED</span>
+      <span class="state">SUCCEEDED</span>
       <span class="brk"></span>
       <span class="cap">任意态 →</span>
       <span class="state term">CANCELLED</span>
@@ -585,12 +578,12 @@
     <ul>
       <li><b>自动化</b> —— 19 项覆盖配置/契约、SQLite、HMAC/路由、worker/恢复及 heartbeat 清理/重试；pytest、Ruff、Mypy 全绿。</li>
       <li><b>运行时</b> —— <code>uv sync --locked</code>、CLI、真实 <code>flowtool serve</code> 与 <code>GET /healthz</code> 200 已验证。</li>
-      <li><b>M1+ 仍待验证</b> —— Coordinator 外部副作用、githubkit、bub、真实 Codex/push、reconcile 与示例插件不计入 M0 完成范围。</li>
+      <li><b>M1 已实现、E2E 待验收</b> —— Flow binding、tool RPC、scoped push 与 PR delivery 有自动化；真实 GitHub/Codex、bub 与 reconcile 仍待验证。</li>
     </ul>
   </div>
 
   <footer>
-    <span>FlowTool · 多 worker recovery Features 1–3 · 文档核对 2026-09-02</span>
+    <span>FlowTool · M1 Feature 3 已实现 · 文档核对 2026-09-05</span>
     <span>docs/architecture/ · docs/plan/</span>
   </footer>
 

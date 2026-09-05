@@ -1,15 +1,26 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from pydantic import SecretStr
 
 from app.control.coordinator import JobCoordinator
-from app.github_models import PullRequestSnapshot
+from app.github_models import (
+    IssueSnapshot,
+    PullRequestSnapshot,
+    PushCapability,
+    RemoteRef,
+    RepositorySnapshot,
+)
 from app.models import (
     Attempt,
+    DeliveryState,
     Flow,
+    FlowDelivery,
+    FlowExecution,
     FlowState,
     Job,
     JobKind,
@@ -17,6 +28,7 @@ from app.models import (
     ReviewItem,
     ReviewItemKind,
     TriageVerdict,
+    VcsKind,
     Verdict,
 )
 from app.ports import GitHubClient
@@ -24,6 +36,7 @@ from app.protocol import (
     AnswerResult,
     ArchiveResult,
     ArchiveTask,
+    FlowToolRequest,
     InitialResult,
     InitialTask,
     RevisionResult,
@@ -40,9 +53,16 @@ class MemoryStore:
             repo="owner/repo",
             issue_number=8,
             installation_id=42,
-            state=FlowState.PENDING,
+            state=FlowState.ACTIVE,
         )
         self.attempt: Attempt | None = None
+        self.execution = FlowExecution(
+            flow_id=1,
+            worker_id="worker-1",
+            repo_identity="worker-1:owner/repo",
+        )
+        self.delivery: FlowDelivery | None = None
+        self.tool_calls: dict[str, Any] = {}
         self.enqueued: list[tuple[JobKind, dict | None]] = []
         self.relayed: list[int] = []
         self.runs: list[tuple[int, str, int | None]] = []
@@ -75,6 +95,43 @@ class MemoryStore:
 
     def update_flow(self, flow: Flow) -> None:
         self.flow = flow
+
+    def get_flow_execution(self, flow_id: int) -> FlowExecution | None:
+        return self.execution if flow_id == self.flow.id else None
+
+    def release_flow_execution(self, flow_id: int) -> bool:
+        self.execution.released_at = datetime.now(UTC)
+        return True
+
+    def get_or_create_delivery(self, flow_id: int, branch: str) -> FlowDelivery:
+        self.delivery = self.delivery or FlowDelivery(flow_id=flow_id, branch=branch)
+        return self.delivery
+
+    def get_delivery(self, flow_id: int) -> FlowDelivery | None:
+        return self.delivery if flow_id == self.flow.id else None
+
+    def update_delivery(self, delivery: FlowDelivery) -> None:
+        self.delivery = delivery
+
+    def assignment_active(self, *args: object) -> bool:
+        return True
+
+    def reserve_tool_call(self, **values: Any):
+        from app.models import FlowToolCall
+
+        previous = self.tool_calls.get(values["call_id"])
+        if previous:
+            return previous, False
+        call = FlowToolCall(**values)
+        self.tool_calls[call.call_id] = call
+        return call, True
+
+    def complete_tool_call(self, call_id: str, response: dict[str, object], error=None) -> None:
+        self.tool_calls[call_id].response = response
+        self.tool_calls[call_id].error = error
+
+    def get_tool_call(self, call_id: str):
+        return self.tool_calls.get(call_id)
 
     def list_attempts(self, flow_id: int) -> list[Attempt]:
         return [self.attempt] if self.attempt else []
@@ -111,6 +168,30 @@ class RecordingGitHub:
         self.opened: list[str] = []
         self.review_requests: list[list[str]] = []
         self.labels: list[list[str]] = []
+
+    async def get_issue(self, installation_id: int, repo: str, number: int) -> IssueSnapshot:
+        return IssueSnapshot(number=number, title="Real issue", body="Real body", state="open")
+
+    async def get_repository(
+        self, installation_id: int, repo: str
+    ) -> RepositorySnapshot:
+        return RepositorySnapshot(full_name=repo, default_branch="trunk")
+
+    async def create_push_capability(
+        self, installation_id: int, repo: str
+    ) -> PushCapability:
+        return PushCapability(
+            token=SecretStr("push-token"),
+            repository=repo,
+            permissions={"contents": "write"},
+            expires_at=datetime.now(UTC) + timedelta(minutes=10),
+        )
+
+    async def get_ref(self, installation_id: int, repo: str, branch: str) -> RemoteRef:
+        return RemoteRef(branch=branch, sha="abc123")
+
+    async def find_pull_request_by_head(self, *args: object) -> PullRequestSnapshot | None:
+        return None
 
     async def open_pull_request(
         self,
@@ -171,24 +252,64 @@ async def test_initial_job_crosses_worker_boundary_and_opens_pr() -> None:
     store = MemoryStore()
     github = RecordingGitHub()
     subject = coordinator(store, github)
-    job = Job(id=5, flow_id=1, kind=JobKind.INITIAL, state=JobState.RUNNING)
+    job = Job(
+        id=5,
+        flow_id=1,
+        kind=JobKind.INITIAL,
+        state=JobState.RUNNING,
+        assigned_worker_id="worker-1",
+        assignment_token="token-1",
+    )
 
     task = await subject.prepare(job)
     assert isinstance(task, InitialTask)
     assert task.flow_id == store.flow.id
+    assert task.issue_title == "Real issue"
+    assert task.base_branch == "trunk"
+    assert task.branch == "flow/1"
     subject.mark_started(job, task, "worker-1")
+    tool = await subject.execute_tool(
+        FlowToolRequest(
+            job_id=job.id,
+            flow_id=store.flow.id,
+            attempt_id=task.attempt_id,
+            assignment_token="token-1",
+            connection_epoch="epoch-1",
+            call_id="call-1",
+            name="flow.open_pr",
+            arguments={"title": "Implement", "body": "done"},
+            vcs_backend=VcsKind.GIT,
+            branch="flow/1",
+            commit_sha="abc123",
+            remote_sha="abc123",
+        ),
+        worker_id="worker-1",
+    )
+    assert tool.result is not None
     state = await subject.apply_result(
         job,
-        InitialResult(session_id="session-1", last_message="done", exit_code=0),
+        InitialResult(
+            session_id="session-1",
+            last_message="done",
+            exit_code=0,
+            vcs_backend=VcsKind.GIT,
+            branch="flow/1",
+            commit_sha="abc123",
+            remote_sha="abc123",
+            pushed=True,
+            open_pr_call_id="call-1",
+            pull_request=tool.result,
+        ),
     )
 
     assert state is JobState.DONE
-    assert store.flow.state is FlowState.PR_OPEN
+    assert store.flow.state is FlowState.ACTIVE
     assert store.attempt is not None
-    assert store.attempt.worker_id == "worker-1"
     assert store.attempt.codex_session_id == "session-1"
-    assert store.attempt.pr_number == 17
-    assert github.opened == ["flow/issue-8"]
+    assert store.delivery is not None
+    assert store.delivery.state is DeliveryState.OPEN
+    assert store.delivery.pr_number == 17
+    assert github.opened == ["flow/1"]
     assert github.review_requests == [["carol"]]
     assert github.labels == [["flow:in-review"]]
 
@@ -221,17 +342,51 @@ async def test_initial_vcs_failure_is_reported_with_sanitized_stage_and_detail()
 
 
 @pytest.mark.asyncio
+async def test_initial_delivery_failure_reports_the_broken_invariant() -> None:
+    store = MemoryStore()
+    github = RecordingGitHub()
+    subject = coordinator(store, github)
+    job = Job(id=5, flow_id=1, kind=JobKind.INITIAL, state=JobState.RUNNING)
+    task = await subject.prepare(job)
+    assert isinstance(task, InitialTask)
+
+    state = await subject.apply_result(
+        job,
+        InitialResult(
+            session_id="session-1",
+            last_message="done",
+            exit_code=0,
+            vcs_backend=VcsKind.GIT,
+            branch="flow/1",
+            commit_sha="abc123",
+            remote_sha="abc123",
+            pushed=True,
+        ),
+    )
+
+    assert state is JobState.FAILED
+    assert github.comments == [
+        "⚠️ 编码结果与已验证的 Flow delivery 不一致：delivery state is none, expected open。"
+    ]
+
+
+@pytest.mark.asyncio
 async def test_triage_and_revision_results_remain_control_plane_side_effects() -> None:
     store = MemoryStore()
     store.attempt = Attempt(
         id=1,
         flow_id=1,
-        branch="flow/issue-8",
         codex_session_id="session-1",
-        pr_number=17,
     )
     store.flow.current_attempt_id = 1
-    store.flow.state = FlowState.PR_OPEN
+    store.flow.state = FlowState.ACTIVE
+    store.delivery = FlowDelivery(
+        flow_id=1,
+        branch="flow/1",
+        base_branch="trunk",
+        state=DeliveryState.OPEN,
+        pr_number=17,
+    )
     github = RecordingGitHub()
     subject = coordinator(store, github)
 
@@ -263,7 +418,7 @@ async def test_triage_and_revision_results_remain_control_plane_side_effects() -
     )
 
     assert revision_state is JobState.DONE
-    assert store.flow.state is FlowState.PR_OPEN
+    assert store.flow.state is FlowState.ACTIVE
     assert store.attempt is not None
     assert store.attempt.revision_cycles == 1
     assert store.relayed == [101]
@@ -287,12 +442,17 @@ async def test_answer_and_archive_side_effects_are_applied_by_control() -> None:
     store.attempt = Attempt(
         id=1,
         flow_id=1,
-        branch="flow/issue-8",
         codex_session_id="session-1",
-        pr_number=17,
     )
     store.flow.current_attempt_id = 1
-    store.flow.state = FlowState.PR_OPEN
+    store.flow.state = FlowState.ACTIVE
+    store.delivery = FlowDelivery(
+        flow_id=1,
+        branch="flow/1",
+        base_branch="trunk",
+        state=DeliveryState.OPEN,
+        pr_number=17,
+    )
     github = RecordingGitHub()
     subject = coordinator(store, github)
 
@@ -303,11 +463,18 @@ async def test_answer_and_archive_side_effects_are_applied_by_control() -> None:
     assert answer_state is JobState.DONE
     assert github.comments == ["Because it is bounded."]
 
-    store.flow.state = FlowState.MERGED
+    store.flow.state = FlowState.ACTIVE
+    store.delivery = FlowDelivery(
+        flow_id=1,
+        branch="flow/1",
+        base_branch="trunk",
+        state=DeliveryState.MERGED,
+        pr_number=17,
+    )
     archive_job = Job(id=9, flow_id=1, kind=JobKind.ARCHIVE, state=JobState.RUNNING)
     archive_task = await subject.prepare(archive_job)
     assert isinstance(archive_task, ArchiveTask)
     archive_state = await subject.apply_result(archive_job, ArchiveResult())
 
     assert archive_state is JobState.DONE
-    assert store.flow.state is FlowState.ARCHIVED
+    assert store.flow.state is FlowState.SUCCEEDED

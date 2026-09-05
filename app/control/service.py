@@ -6,7 +6,7 @@ from collections.abc import Callable
 
 from loguru import logger
 
-from app.models import Flow, FlowState, JobKind, WorkerView
+from app.models import DeliveryState, Flow, FlowState, JobKind, WorkerView
 from app.plugins import get_plugin_manager
 from app.store import Store
 
@@ -37,17 +37,21 @@ class ControlService:
         flow = self.store.create_flow(repo, issue_number, installation_id)
         self.store.enqueue_job(flow.id, JobKind.INITIAL, payload={"issue_number": issue_number})
         self._jobs_available()
-        logger.info("flow {} created (PENDING) for {}#{}", flow.id, repo, issue_number)
+        logger.info("flow {} created (ACTIVE) for {}#{}", flow.id, repo, issue_number)
         return flow
 
     def cancel(self, flow: Flow) -> None:
         flow.state = FlowState.CANCELLED
         self.store.update_flow(flow)
+        self.store.release_flow_execution(flow.id)
         logger.info("flow {} cancelled", flow.id)
 
     def on_merged(self, flow: Flow) -> None:
-        flow.state = FlowState.MERGED
-        self.store.update_flow(flow)
+        delivery = self.store.get_delivery(flow.id)
+        if delivery is None:
+            raise ValueError(f"flow {flow.id} has no delivery to mark merged")
+        delivery.state = DeliveryState.MERGED
+        self.store.update_delivery(delivery)
         self._fire("on_merged", flow=flow)
         self.store.enqueue_job(flow.id, JobKind.ARCHIVE)
         self._jobs_available()
@@ -60,13 +64,7 @@ class ControlService:
             )
         failed_job = self.store.latest_failed_job(flow.id)
         kind = failed_job.kind if failed_job is not None else JobKind.INITIAL
-        flow.state = {
-            JobKind.INITIAL: FlowState.PENDING,
-            JobKind.TRIAGE: FlowState.PR_OPEN,
-            JobKind.REVISION: FlowState.PR_OPEN,
-            JobKind.ANSWER: FlowState.PR_OPEN,
-            JobKind.ARCHIVE: FlowState.MERGED,
-        }[kind]
+        flow.state = FlowState.ACTIVE
         self.store.update_flow(flow)
         self.store.enqueue_job(
             flow.id,
@@ -81,6 +79,7 @@ class ControlService:
     def list_workers(self) -> list[WorkerView]:
         views: list[WorkerView] = []
         for worker in self.store.list_workers():
+            execution = self.store.get_worker_execution(worker.worker_id)
             job = (
                 self.store.get_job(worker.current_job_id)
                 if worker.current_job_id is not None
@@ -91,12 +90,20 @@ class ControlService:
                     worker_id=worker.worker_id,
                     status=worker.status,
                     current_job_id=worker.current_job_id,
-                    current_flow_id=job.flow_id if job is not None else None,
+                    current_flow_id=(
+                        execution.flow_id
+                        if execution is not None
+                        else job.flow_id if job is not None else None
+                    ),
                     last_seen_at=worker.last_seen_at,
                     last_error=worker.last_error,
                     connection_epoch=worker.connection_epoch,
                     lease_expires_at=job.lease_expires_at if job is not None else None,
-                    recovery_deadline=job.recovery_deadline if job is not None else None,
+                    recovery_deadline=(
+                        job.recovery_deadline
+                        if job is not None and job.recovery_deadline is not None
+                        else execution.recovery_deadline if execution is not None else None
+                    ),
                     last_disconnect_reason=worker.last_disconnect_reason,
                 )
             )

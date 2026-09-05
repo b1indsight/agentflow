@@ -4,13 +4,23 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import datetime
+from enum import StrEnum
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    TypeAdapter,
+    field_serializer,
+    model_validator,
+)
 
-from app.models import CodexResult, JobState, ReviewItemKind, TriageVerdict
+from app.models import CodexResult, JobState, ReviewItemKind, TriageVerdict, VcsKind
 
-PROTOCOL_VERSION: Literal[3] = 3
+PROTOCOL_VERSION: Literal[4] = 4
 
 
 class ProtocolModel(BaseModel):
@@ -20,7 +30,7 @@ class ProtocolModel(BaseModel):
 
 
 class Message(ProtocolModel):
-    protocol_version: Literal[3] = PROTOCOL_VERSION
+    protocol_version: Literal[4] = PROTOCOL_VERSION
 
 
 class ReviewFeedback(ProtocolModel):
@@ -42,6 +52,25 @@ class InitialTask(ProtocolModel):
     issue_title: str
     issue_body: str
     branch: str
+    base_branch: str = "main"
+    remote: str = "origin"
+    repo_identity: str = ""
+
+
+class PushSecret(ProtocolModel):
+    """Wire-only Git credential whose normal repr remains redacted."""
+
+    token: SecretStr
+    repository: str
+    expires_at: datetime
+
+    @field_serializer("token", when_used="json")
+    def _serialize_token(self, token: SecretStr) -> str:
+        return token.get_secret_value()
+
+
+class AssignmentSecret(ProtocolModel):
+    push: PushSecret
 
 
 class TriageTask(ProtocolModel):
@@ -89,6 +118,13 @@ class InitialResult(ProtocolModel):
     exit_code: int
     failure_stage: str | None = None
     failure_detail: str | None = None
+    vcs_backend: VcsKind | None = None
+    branch: str | None = None
+    commit_sha: str | None = None
+    remote_sha: str | None = None
+    pushed: bool = False
+    open_pr_call_id: str | None = None
+    pull_request: dict[str, object] | None = None
 
 
 class TriageResult(ProtocolModel):
@@ -163,8 +199,24 @@ class Failed(Message):
     error: str
 
 
+class FlowToolRequest(Message):
+    type: Literal["flow_tool_request"] = "flow_tool_request"
+    job_id: int
+    flow_id: int
+    attempt_id: int
+    assignment_token: str
+    connection_epoch: str
+    call_id: str
+    name: str
+    arguments: dict[str, object]
+    vcs_backend: VcsKind
+    branch: str
+    commit_sha: str
+    remote_sha: str
+
+
 WorkerMessage = Annotated[
-    Register | Started | Heartbeat | Succeeded | Failed,
+    Register | Started | Heartbeat | Succeeded | Failed | FlowToolRequest,
     Field(discriminator="type"),
 ]
 
@@ -198,6 +250,7 @@ class Assignment(Message):
     assignment_token: str
     connection_epoch: str
     task: ExecutionTask
+    secret: AssignmentSecret | None = None
 
 
 class ResumeAssignment(Message):
@@ -236,6 +289,43 @@ class ProtocolError(Message):
     detail: str
 
 
+class FlowToolErrorKind(StrEnum):
+    """Stable error classes that tell a worker whether and how to retry a tool call."""
+
+    INVALID_REQUEST = "invalid_request"
+    STALE_ASSIGNMENT = "stale_assignment"
+    CONFLICT = "conflict"
+    AUTHORIZATION = "authorization"
+    NOT_FOUND = "not_found"
+    RATE_LIMITED = "rate_limited"
+    TRANSIENT = "transient"
+    UPSTREAM = "upstream"
+
+
+class FlowToolResponse(Message):
+    type: Literal["flow_tool_response"] = "flow_tool_response"
+    call_id: str
+    result: dict[str, object] | None = None
+    error: str | None = None
+    error_kind: FlowToolErrorKind | None = None
+    retryable: bool = False
+    retry_after: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_outcome(self) -> FlowToolResponse:
+        if (self.result is None) == (self.error is None):
+            raise ValueError("Flow tool response must contain exactly one of result or error")
+        if self.error is not None and self.error_kind is None:
+            raise ValueError("Flow tool error requires an error kind")
+        if self.error is None and (
+            self.error_kind is not None or self.retryable or self.retry_after is not None
+        ):
+            raise ValueError("successful Flow tool response cannot contain error metadata")
+        if self.retry_after is not None and not self.retryable:
+            raise ValueError("Flow tool retry_after requires a retryable error")
+        return self
+
+
 ServerMessage = Annotated[
     Registered
     | Assignment
@@ -243,7 +333,8 @@ ServerMessage = Annotated[
     | ReplayResult
     | RecoveryRejected
     | ResultAccepted
-    | ProtocolError,
+    | ProtocolError
+    | FlowToolResponse,
     Field(discriminator="type"),
 ]
 

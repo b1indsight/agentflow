@@ -59,7 +59,8 @@ def flows(active: bool = typer.Option(False, help="只看未终结的")) -> None
     with _store() as store:
         for f in store.list_flows(active_only=active):
             att = store.get_current_attempt(f)
-            pr = f"PR#{att.pr_number}" if att and att.pr_number else "-"
+            delivery = store.get_delivery(f.id)
+            pr = f"PR#{delivery.pr_number}" if delivery and delivery.pr_number else "-"
             cycles = att.revision_cycles if att else 0
             typer.echo(
                 f"[{f.id}] {f.repo}#{f.issue_number:<5} {f.state:<10} {pr} cycles={cycles}"
@@ -105,11 +106,23 @@ def flow_show(flow_id: int) -> None:
         if not f:
             raise typer.Exit(1)
         typer.echo(f"flow {f.id}\n  repo={f.repo} issue=#{f.issue_number} state={f.state}")
+        execution = store.get_flow_execution(f.id)
+        delivery = store.get_delivery(f.id)
+        if execution is not None:
+            typer.echo(
+                f"  execution: worker={execution.worker_id} repo={execution.repo_identity}"
+                f" active={execution.released_at is None}"
+            )
+        if delivery is not None:
+            typer.echo(
+                f"  delivery: state={delivery.state} branch={delivery.branch}"
+                f" pr={delivery.pr_number or '-'} head={delivery.head_sha or '-'}"
+            )
         for att in store.list_attempts(f.id):
             cur = " (current)" if att.id == f.current_attempt_id else ""
             typer.echo(
-                f"  attempt {att.id}{cur}: branch={att.branch} pr={att.pr_number}"
-                f" session={att.codex_session_id} cycles={att.revision_cycles}"
+                f"  attempt {att.id}{cur}: session={att.codex_session_id}"
+                f" cycles={att.revision_cycles}"
             )
         for job in store.list_jobs(f.id):
             recovery = _remaining(job.recovery_deadline)

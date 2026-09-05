@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from psycopg.errors import UniqueViolation
 
-from app.models import FlowState, JobKind, JobState, ReviewItem, ReviewItemKind
+from app.models import DeliveryState, FlowState, JobKind, JobState, ReviewItem, ReviewItemKind
 from app.store import Store
 
 
@@ -25,16 +25,16 @@ def test_only_one_active_flow_exists_per_issue(store: Store) -> None:
 def test_attempt_and_job_lifecycle_round_trip(store: Store) -> None:
     flow = store.create_flow("owner/repo", 8, installation_id=12)
     attempt = store.create_attempt(flow.id)
-    attempt.branch = "flow/issue-8"
     flow.current_attempt_id = attempt.id
-    store.update_attempt(attempt)
     store.update_flow(flow)
+    delivery = store.get_or_create_delivery(flow.id, f"flow/{flow.id}")
     store.worker_connected("worker-1", protocol_version=1)
 
     job = store.enqueue_job(flow.id, JobKind.INITIAL, payload={"issue_number": 8})
     claimed = store.assign_job("worker-1", "assignment-1")
 
     assert store.get_current_attempt(flow) == attempt
+    assert delivery.branch == f"flow/{flow.id}"
     assert claimed is not None
     assert claimed.id == job.id
     assert claimed.state is JobState.RUNNING
@@ -47,7 +47,7 @@ def test_attempt_and_job_lifecycle_round_trip(store: Store) -> None:
     assert store.start_assignment(
         claimed.id, attempt.id, "worker-1", "assignment-1"
     ) is True
-    assert store.get_attempt(attempt.id).worker_id == "worker-1"  # type: ignore[union-attr]
+    assert store.get_flow_execution(flow.id).worker_id == "worker-1"  # type: ignore[union-attr]
     assert store.heartbeat_assignment(claimed.id, "worker-1", "assignment-1") is True
     assert store.finish_assignment(
         claimed.id, "worker-1", "assignment-1", JobState.DONE
@@ -55,6 +55,64 @@ def test_attempt_and_job_lifecycle_round_trip(store: Store) -> None:
     finished = store.get_job(claimed.id)
     assert finished is not None
     assert finished.state is JobState.DONE
+
+
+def test_flow_binding_delivery_and_tool_ledger_round_trip(store: Store) -> None:
+    store.worker_connected("worker-a", protocol_version=4, connection_epoch="epoch-a")
+    flow = store.create_flow("owner/repo", 18, installation_id=42)
+    attempt = store.create_attempt(flow.id)
+    flow.current_attempt_id = attempt.id
+    store.update_flow(flow)
+    job = store.enqueue_job(flow.id, JobKind.INITIAL)
+
+    claimed = store.assign_job("worker-a", "token-a", "epoch-a")
+    assert claimed is not None and claimed.id == job.id
+    execution = store.get_flow_execution(flow.id)
+    assert execution is not None
+    assert execution.worker_id == "worker-a"
+    assert execution.repo_identity == "worker-a:owner/repo"
+
+    delivery = store.get_or_create_delivery(flow.id, "flow/1")
+    delivery.base_branch = "trunk"
+    store.update_delivery(delivery)
+    assert store.get_delivery(flow.id).state is DeliveryState.NONE  # type: ignore[union-attr]
+
+    call, created = store.reserve_tool_call(
+        call_id="call-a",
+        flow_id=flow.id,
+        attempt_id=attempt.id,
+        job_id=job.id,
+        name="flow.open_pr",
+        arguments={"title": "Fix", "body": "Done"},
+    )
+    assert created is True
+    assert call.response is None
+    store.complete_tool_call("call-a", {"pr_number": 7})
+    replay, created = store.reserve_tool_call(
+        call_id="call-a",
+        flow_id=flow.id,
+        attempt_id=attempt.id,
+        job_id=job.id,
+        name="flow.open_pr",
+        arguments={"title": "Fix", "body": "Done"},
+    )
+    assert created is False
+    assert replay.response == {"pr_number": 7}
+
+
+def test_pr_numbers_are_scoped_by_repository(store: Store) -> None:
+    first = store.create_flow("owner/first", 1, installation_id=42)
+    second = store.create_flow("owner/second", 1, installation_id=42)
+    first_delivery = store.get_or_create_delivery(first.id, f"flow/{first.id}")
+    second_delivery = store.get_or_create_delivery(second.id, f"flow/{second.id}")
+    first_delivery.pr_number = 7
+    second_delivery.pr_number = 7
+
+    store.update_delivery(first_delivery)
+    store.update_delivery(second_delivery)
+
+    assert store.get_flow_by_pr("owner/first", 7) == first
+    assert store.get_flow_by_pr("owner/second", 7) == second
 
 
 def test_only_unstarted_remote_assignments_can_be_requeued(store: Store) -> None:
@@ -145,7 +203,7 @@ def test_startup_preserves_assignments_for_lease_recovery(store: Store) -> None:
     assert recovered_started.state is JobState.RUNNING
     assert recovered_started.recovery_deadline is not None
     assert recovered_flow is not None
-    assert recovered_flow.state is FlowState.PENDING
+    assert recovered_flow.state is FlowState.ACTIVE
 
 
 def test_epoch_fencing_and_started_recovery_grace(postgresql_url: str) -> None:
@@ -202,6 +260,38 @@ def test_epoch_fencing_and_started_recovery_grace(postgresql_url: str) -> None:
         assert store.sweep_expired_assignments() == (0, 1)
         assert store.get_job(queued.id).state is JobState.FAILED  # type: ignore[union-attr]
         assert store.get_flow(flow.id).state is FlowState.FAILED  # type: ignore[union-attr]
+    finally:
+        store.close()
+
+
+def test_idle_flow_binding_fails_after_same_worker_recovery_grace(
+    postgresql_url: str,
+) -> None:
+    now = datetime(2026, 9, 1, tzinfo=UTC)
+    store = Store(
+        postgresql_url,
+        clock=lambda: now,
+        recovery_grace=timedelta(seconds=30),
+    )
+    store.init_db()
+    try:
+        store.worker_connected("worker-a", protocol_version=4, connection_epoch="epoch-a")
+        flow = store.create_flow("owner/idle", 51, installation_id=42)
+        job = store.enqueue_job(flow.id, JobKind.INITIAL)
+        assert store.assign_job("worker-a", "token-a", "epoch-a") is not None
+        assert store.finish_assignment(
+            job.id, "worker-a", "token-a", JobState.DONE, "epoch-a"
+        )
+
+        store.worker_disconnected("worker-a", "lost", "epoch-a")
+        execution = store.get_flow_execution(flow.id)
+        assert execution is not None
+        assert execution.recovery_deadline == now + timedelta(seconds=30)
+
+        now += timedelta(seconds=31)
+        assert store.sweep_expired_assignments() == (0, 1)
+        assert store.get_flow(flow.id).state is FlowState.FAILED  # type: ignore[union-attr]
+        assert store.get_flow_execution(flow.id).released_at is not None  # type: ignore[union-attr]
     finally:
         store.close()
 

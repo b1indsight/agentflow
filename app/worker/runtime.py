@@ -98,6 +98,7 @@ class WorkerRuntime:
                 timeout=self.settings.codex_run_timeout_seconds,
             ),
             BubJudge(),
+            worker_id=self.settings.worker_id,
         )
         self.client = WorkerClient(
             worker_id=self.settings.worker_id,
@@ -109,6 +110,7 @@ class WorkerRuntime:
             reconnect_max_backoff=self.settings.reconnect_max_backoff,
             reconnect_jitter=self.settings.reconnect_jitter,
         )
+        executor.tool_caller = self.client
 
     async def run(self) -> None:
         validate_worker_environment(self.settings)

@@ -5,10 +5,11 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
+from typing import cast
 
 import pytest
 
-from app.models import VcsKind
+from app.models import VcsExecutionContext, VcsKind, VcsOutcome
 from app.vcs import (
     VcsVerificationError,
     _run,
@@ -16,6 +17,7 @@ from app.vcs import (
     agent_guidance,
     prepare_flow_repo,
     prepare_vcs_context,
+    verify_pushed_outcome,
     verify_vcs_outcome,
 )
 
@@ -162,6 +164,26 @@ async def test_vcs_command_times_out_instead_of_occupying_the_worker() -> None:
         )
 
     assert error.value.stage == "test"
+
+
+@pytest.mark.asyncio
+async def test_pushed_outcome_discovers_the_single_verified_backend(monkeypatch) -> None:
+    expected = VcsOutcome(
+        declared_backend=VcsKind.GIT,
+        verified_backend=VcsKind.GIT,
+        branch="flow/one",
+        commit_sha="abc",
+        remote_sha="abc",
+    )
+
+    async def fake_verify(context, backend):
+        if backend is VcsKind.GIT:
+            return expected
+        raise VcsVerificationError("discovery", "jj unavailable")
+
+    monkeypatch.setattr("app.vcs.verify_vcs_outcome", fake_verify)
+
+    assert await verify_pushed_outcome(cast(VcsExecutionContext, object())) == expected
 
 
 @pytest.mark.asyncio

@@ -167,6 +167,30 @@ async def verify_vcs_outcome(
     raise VcsVerificationError("discovery", f"unsupported VCS backend: {declared_backend}")
 
 
+async def verify_pushed_outcome(context: VcsExecutionContext) -> VcsOutcome:
+    """Discover and verify the pushed backend before a delivery side effect."""
+
+    outcomes: list[VcsOutcome] = []
+    errors: list[str] = []
+    for backend in (VcsKind.GIT, VcsKind.JJ):
+        try:
+            outcomes.append(await verify_vcs_outcome(context, backend))
+        except VcsVerificationError as error:
+            errors.append(f"{backend.value}: {error}")
+    if not outcomes:
+        raise VcsVerificationError(
+            "delivery", "no pushed VCS outcome could be verified (" + "; ".join(errors) + ")"
+        )
+    first = outcomes[0]
+    if any(
+        (item.branch, item.commit_sha, item.remote_sha)
+        != (first.branch, first.commit_sha, first.remote_sha)
+        for item in outcomes[1:]
+    ):
+        raise VcsVerificationError("delivery", "VCS backends disagree on the pushed outcome")
+    return first
+
+
 async def _verify_git(context: VcsExecutionContext) -> VcsOutcome:
     if context.git_base_sha is None or context.git_remote_url is None:
         raise VcsVerificationError("discovery", "Agent declared git but git metadata is unavailable")

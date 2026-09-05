@@ -30,7 +30,7 @@ class RetryStore:
         return self.flow if self.flow.state not in {
             FlowState.FAILED,
             FlowState.CANCELLED,
-            FlowState.ARCHIVED,
+            FlowState.SUCCEEDED,
         } else None
 
     def update_flow(self, flow: Flow) -> None:
@@ -52,7 +52,7 @@ def test_explicit_retry_reactivates_a_failed_flow() -> None:
 
     service.retry(store.flow)
 
-    assert store.flow.state is FlowState.PENDING
+    assert store.flow.state is FlowState.ACTIVE
     assert store.enqueued == [JobKind.INITIAL]
 
 
@@ -69,7 +69,7 @@ def test_explicit_retry_requeues_the_failed_job_kind() -> None:
 
     service.retry(store.flow)
 
-    assert store.flow.state is FlowState.PR_OPEN
+    assert store.flow.state is FlowState.ACTIVE
     assert store.enqueued == [JobKind.REVISION]
 
 
@@ -104,3 +104,6 @@ class SimpleWorkerStore:
 
     def get_job(self, job_id: int) -> Job | None:
         return self.job if job_id == self.job.id else None
+
+    def get_worker_execution(self, worker_id: str):
+        return None
