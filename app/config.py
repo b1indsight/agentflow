@@ -28,6 +28,8 @@ class ServeSettings(FlowToolSettings):
 
     trigger_label: str = "flow"
     allowlist: Annotated[list[str], NoDecode] = []
+    reviewers: Annotated[list[str], NoDecode] = []
+    in_review_label: str = "flow:in-review"
 
     database_url: str
     worker_tokens: dict[str, SecretStr]
@@ -59,9 +61,9 @@ class ServeSettings(FlowToolSettings):
             raise ValueError("worker recovery grace must exceed the lease duration")
         return self
 
-    @field_validator("allowlist", mode="before")
+    @field_validator("allowlist", "reviewers", mode="before")
     @classmethod
-    def _parse_allowlist(cls, value: object) -> object:
+    def _parse_name_list(cls, value: object) -> object:
         if isinstance(value, str):
             stripped = value.strip()
             if stripped.startswith("["):

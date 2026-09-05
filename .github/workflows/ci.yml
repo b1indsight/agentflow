@@ -87,6 +87,9 @@ jobs:
       FLOWTOOL_WORKER_ID: worker-1
       FLOWTOOL_WORKER_TOKEN: ci-worker-secret
       FLOWTOOL_WORKER_TOKENS: '{"worker-1":"ci-worker-secret","worker-2":"ci-worker-secret-2"}'
+      # The process smoke makes no GitHub requests; these values exercise startup shape checks only.
+      FLOWTOOL_GITHUB_APP_ID: "123"
+      FLOWTOOL_GITHUB_PRIVATE_KEY_PATH: env.example
       FLOWTOOL_SERVE_WS_URL: ws://127.0.0.1:8000/internal/workers/connect
       FLOWTOOL_ALLOW_INSECURE_WORKER_WS: "true"
       FLOWTOOL_WORKER_ROOT: /tmp/flowtool-ci-worker-1

@@ -34,6 +34,19 @@ def test_settings_preserve_json_allowlist_environment_values(monkeypatch) -> Non
     assert settings.allowlist == ["alice", "bob"]
 
 
+def test_reviewers_are_configured_independently_from_trigger_allowlist(monkeypatch) -> None:
+    monkeypatch.setenv("FLOWTOOL_ALLOWLIST", "alice,bob")
+    monkeypatch.setenv("FLOWTOOL_REVIEWERS", "carol,dave")
+    monkeypatch.setenv("FLOWTOOL_DATABASE_URL", "postgresql://localhost/flowtool")
+    monkeypatch.setenv("FLOWTOOL_WORKER_TOKENS", '{"worker-1":"secret"}')
+
+    settings = ServeSettings()  # type: ignore[call-arg]
+
+    assert settings.allowlist == ["alice", "bob"]
+    assert settings.reviewers == ["carol", "dave"]
+    assert settings.in_review_label == "flow:in-review"
+
+
 def test_settings_require_database_url(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("FLOWTOOL_DATABASE_URL", raising=False)

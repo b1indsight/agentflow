@@ -8,6 +8,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
+from app.github_models import (
+    IssueSnapshot,
+    PullRequestSnapshot,
+    PushCapability,
+    RemoteRef,
+    RepositorySnapshot,
+)
 from app.models import AgentRun, SandboxPolicy, TriageVerdict
 
 
@@ -57,11 +64,29 @@ class GitHubClient(Protocol):
     adapter 不必再从 store 反查（docs/architecture/components.md §4.5 / github-app.md）。
     """
 
-    async def installation_token(self, installation_id: int) -> str: ...
+    async def get_issue(
+        self, installation_id: int, repo: str, number: int
+    ) -> IssueSnapshot: ...
 
-    async def open_pr(
+    async def get_repository(
+        self, installation_id: int, repo: str
+    ) -> RepositorySnapshot: ...
+
+    async def create_push_capability(
+        self, installation_id: int, repo: str
+    ) -> PushCapability: ...
+
+    async def get_ref(
+        self, installation_id: int, repo: str, branch: str
+    ) -> RemoteRef: ...
+
+    async def find_pull_request_by_head(
+        self, installation_id: int, repo: str, branch: str
+    ) -> PullRequestSnapshot | None: ...
+
+    async def open_pull_request(
         self, installation_id: int, repo: str, head: str, base: str, title: str, body: str
-    ) -> int: ...
+    ) -> PullRequestSnapshot: ...
 
     async def comment(self, installation_id: int, repo: str, number: int, body: str) -> None: ...
 

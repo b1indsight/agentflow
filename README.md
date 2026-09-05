@@ -4,9 +4,10 @@ FlowTool 的目标是把带 `flow` 标签的 GitHub issue 编排成
 `code agent 编码 → PR → 人工审核 → 自动回喂修订 → 人工合并 → 归档` 的 headless 闭环。
 项目自身不提供业务 UI，交互面是 GitHub issue 和 PR。
 
-> 当前状态：**M0 骨架已验收，多 worker 调度、租约恢复与结果重放已实现（2026-09-02）**。仓库已验证
-> PostgreSQL、Webhook、版本化 WebSocket 协议、worker affinity、重连 fencing 和远程 job 闭环；真实 GitHub/Codex/bub 闭环属于
-> M1+，目前不能按生产能力使用。
+> 当前状态：**M0 骨架已验收，M1 的 CodeAgent VCS 与 GitHub App primitives 已实现（2026-09-05）**。
+> 仓库已验证 PostgreSQL、Webhook、远程 worker 闭环、CodeAgent VCS 事实核验，以及类型化 GitHub
+> Issue/ref/PR 与 scoped capability adapter；真实 GitHub App smoke、完整 Issue→PR 接线和 bub 仍未完成，
+> 目前不能按生产能力使用。
 
 ## 当前能力
 
@@ -23,8 +24,9 @@ M0 已经具备并验证：
 - 同一 attempt 固定到首次 Started 的 worker；每个 worker 单槽运行，同机实例使用独立 root、identity 标记和进程锁；
 - 通过 CLI 分别启动两个角色、查看 flow/worker，并执行基础 cancel/retry 运维命令。
 
-尚未形成可用闭环：GitHub App API 尚未校准，issue 正文和 review thread 映射仍是桩，bub 调用、
-Codex commit/push、网络与 scoped token、reconcile 对账、取消运行中进程和真实多轮修订均未端到端验证。
+尚未形成可用闭环：GitHub App adapter 已对齐锁定的 githubkit 0.16 并通过隔离测试，但真实 App smoke、
+issue/default branch 到 INITIAL 的接线、review thread 映射、bub 调用、credential 下发与受控网络、
+reconcile 对账、取消运行中进程和真实多轮修订仍未端到端验证。
 完整边界见[架构状态表](docs/architecture/README.md#当前实现状态)。
 
 ## 文档
@@ -103,5 +105,6 @@ assignment/epoch fencing、lease sweeper、忙碌重连、result replay、worker
 原子 delivery 去重、并发 assignment、单槽、attempt affinity 和 result inbox。CI 还会在同一 runner 启动两个 worker root，并重启 serve 验证自动重连。
 `uv sync --locked`、Ruff、Mypy、CLI help 和构建检查均纳入基线。
 
-M1 Feature 1 已用一次性本地 repo 验证 Codex 在显式 trusted-host 模式下自主完成 Git commit/push，并由
-worker 核对 branch、clean status 和远端 SHA；GitHub egress、短时凭据和 Issue→PR 完整闭环仍待后续 feature。
+M1 Feature 1 已用一次性本地 repo 验证 Codex 自主完成 Git commit/push；Feature 2 已实现按单仓库和
+Contents write 收窄的短时 capability，以及 Issue/repository/ref/PR primitives。真实 GitHub App smoke、
+GitHub egress/credential 下发和 Issue→PR 完整闭环仍待完成。

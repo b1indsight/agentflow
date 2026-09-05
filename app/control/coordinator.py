@@ -38,6 +38,8 @@ from app.store import Store
 
 class CoordinatorSettings(Protocol):
     allowlist: list[str]
+    reviewers: list[str]
+    in_review_label: str
     confidence_threshold: float
     max_revision_cycles: int
 
@@ -191,7 +193,7 @@ class JobCoordinator:
                 return JobState.FAILED
             installation_id = _installation_id(flow)
             branch = _required_branch(attempt)
-            pr_number = await self.github.open_pr(
+            pull_request = await self.github.open_pull_request(
                 installation_id,
                 flow.repo,
                 head=branch,
@@ -199,15 +201,16 @@ class JobCoordinator:
                 title=f"issue #{flow.issue_number} (closes #{flow.issue_number})",
                 body=f"Closes #{flow.issue_number}\n\n{result.last_message}",
             )
+            pr_number = pull_request.number
             attempt.pr_number = pr_number
             self.store.update_attempt(attempt)
             flow.state = FlowState.PR_OPEN
             self.store.update_flow(flow)
             await self.github.request_reviewers(
-                installation_id, flow.repo, pr_number, self.settings.allowlist
+                installation_id, flow.repo, pr_number, self.settings.reviewers
             )
             await self.github.set_labels(
-                installation_id, flow.repo, pr_number, ["flow:in-review"]
+                installation_id, flow.repo, pr_number, [self.settings.in_review_label]
             )
             self._fire("on_pr_opened", flow=flow, pr_number=pr_number)
             return JobState.DONE
@@ -264,10 +267,10 @@ class JobCoordinator:
             installation_id = _installation_id(flow)
             pr_number = _pr_number(attempt)
             await self.github.request_reviewers(
-                installation_id, flow.repo, pr_number, self.settings.allowlist
+                installation_id, flow.repo, pr_number, self.settings.reviewers
             )
             await self.github.set_labels(
-                installation_id, flow.repo, pr_number, ["flow:in-review"]
+                installation_id, flow.repo, pr_number, [self.settings.in_review_label]
             )
             return JobState.DONE
 

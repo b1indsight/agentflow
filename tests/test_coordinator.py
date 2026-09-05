@@ -6,6 +6,7 @@ from typing import Any, cast
 import pytest
 
 from app.control.coordinator import JobCoordinator
+from app.github_models import PullRequestSnapshot
 from app.models import (
     Attempt,
     Flow,
@@ -108,8 +109,10 @@ class RecordingGitHub:
     def __init__(self) -> None:
         self.comments: list[str] = []
         self.opened: list[str] = []
+        self.review_requests: list[list[str]] = []
+        self.labels: list[list[str]] = []
 
-    async def open_pr(
+    async def open_pull_request(
         self,
         installation_id: int,
         repo: str,
@@ -117,9 +120,15 @@ class RecordingGitHub:
         base: str,
         title: str,
         body: str,
-    ) -> int:
+    ) -> PullRequestSnapshot:
         self.opened.append(head)
-        return 17
+        return PullRequestSnapshot(
+            number=17,
+            state="open",
+            head_branch=head,
+            head_sha="abc123",
+            base_branch=base,
+        )
 
     async def comment(self, installation_id: int, repo: str, number: int, body: str) -> None:
         self.comments.append(body)
@@ -131,12 +140,12 @@ class RecordingGitHub:
         number: int,
         reviewers: list[str],
     ) -> None:
-        pass
+        self.review_requests.append(reviewers)
 
     async def set_labels(
         self, installation_id: int, repo: str, number: int, labels: list[str]
     ) -> None:
-        pass
+        self.labels.append(labels)
 
     async def resolve_review_thread(self, installation_id: int, thread_id: str) -> None:
         pass
@@ -144,7 +153,11 @@ class RecordingGitHub:
 
 def coordinator(store: MemoryStore, github: RecordingGitHub) -> JobCoordinator:
     settings = SimpleNamespace(
-        allowlist=["alice"], confidence_threshold=0.6, max_revision_cycles=20
+        allowlist=["alice"],
+        reviewers=["carol"],
+        in_review_label="flow:in-review",
+        confidence_threshold=0.6,
+        max_revision_cycles=20,
     )
     return JobCoordinator(
         cast(Store, cast(Any, store)),
@@ -176,6 +189,8 @@ async def test_initial_job_crosses_worker_boundary_and_opens_pr() -> None:
     assert store.attempt.codex_session_id == "session-1"
     assert store.attempt.pr_number == 17
     assert github.opened == ["flow/issue-8"]
+    assert github.review_requests == [["carol"]]
+    assert github.labels == [["flow:in-review"]]
 
 
 @pytest.mark.asyncio
