@@ -5,6 +5,7 @@ from typing import Any
 
 import httpx
 import pytest
+from githubkit import GitHub
 from githubkit.exception import RequestFailed
 from githubkit.response import Response
 from pydantic import SecretStr
@@ -278,3 +279,26 @@ async def test_rate_limit_403_is_retryable(tmp_path: Path, monkeypatch: pytest.M
 
     assert captured.value.kind is GitHubErrorKind.RATE_LIMITED
     assert captured.value.retry_after == "12"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport_error", [httpx.ConnectError, httpx.ReadTimeout])
+async def test_maps_real_githubkit_transport_wrappers_as_transient(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    transport_error: type[httpx.RequestError],
+) -> None:
+    # githubkit wraps failures raised by httpx.send; production outages therefore do not expose
+    # the raw HTTPX types used by simpler endpoint fakes.
+    def fail(request: httpx.Request) -> httpx.Response:
+        raise transport_error("GitHub transport unavailable", request=request)
+
+    client = GitHub("test-token", async_transport=httpx.MockTransport(fail))
+    github = GitHubApp(settings(tmp_path))
+    monkeypatch.setattr(github, "_installation_client", lambda installation_id: client)
+
+    with pytest.raises(GitHubAdapterError) as captured:
+        await github.get_issue(42, "octo/repo", 7)
+
+    assert captured.value.kind is GitHubErrorKind.TRANSIENT
+    assert captured.value.retryable is True

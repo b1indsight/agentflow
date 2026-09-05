@@ -9,7 +9,7 @@ from typing import Any, Literal, TypeVar
 
 import httpx
 from githubkit import AppAuthStrategy, AppInstallationAuthStrategy, GitHub
-from githubkit.exception import AuthCredentialError, AuthExpiredError, RequestFailed
+from githubkit.exception import AuthCredentialError, AuthExpiredError, RequestError, RequestFailed
 from pydantic import SecretStr
 
 from app.config import ServeSettings
@@ -300,7 +300,7 @@ class GitHubApp:
             raise GitHubApp._request_error(endpoint, exc) from None
         except (AuthCredentialError, AuthExpiredError):
             raise GitHubAdapterError(GitHubErrorKind.AUTHENTICATION, endpoint) from None
-        except (httpx.TimeoutException, httpx.NetworkError):
+        except (RequestError, httpx.TimeoutException, httpx.NetworkError):
             raise GitHubAdapterError(GitHubErrorKind.TRANSIENT, endpoint) from None
         except (AttributeError, KeyError, TypeError, ValueError):
             raise GitHubAdapterError(
