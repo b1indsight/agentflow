@@ -1,6 +1,6 @@
 # M1 GitHub App 与临时能力计划
 
-> 状态：待审批 · 计划日期：2026-09-02 · M1 Feature 2/3
+> 状态：已批准并实现，真实 App smoke 待执行 · 计划日期：2026-09-02 · 实施日期：2026-09-05 · M1 Feature 2/3
 >
 > 前置：Feature 1 固定 CodeAgent 对本地 VCS、commit 与 push 的 ownership。本 feature 校准 GitHub App
 > 并提供真实 Issue、远端 ref、短时 push capability 和 PR primitives；完整 Issue→PR 编排属于 Feature 3。
@@ -208,3 +208,16 @@ git diff --check
 
 若真实 App 证明候选权限或 githubkit endpoint 不成立，在同一计划 PR 更新实际权限/API 决策后再继续；
 不得以“测试用了 fake”替代外部校准。
+
+## 10. 实施记录
+
+2026-09-05 已完成代码与隔离验证：
+
+- 锁定 `githubkit[auth-app]` 0.16，并校准 App/installation auth 与 M1 REST 方法；
+- 新增稳定 snapshot、secret-aware capability 和结构化 adapter errors；
+- capability 创建显式限制单仓库与 Contents write，并校验 GitHub 返回的实际 scope；
+- allowlist、reviewers 和 in-review label 分别配置，空 reviewers 不产生 API 请求；
+- pytest、Ruff、Mypy、lock check、build 和 diff check 均通过。
+
+真实 GitHub App smoke 尚未执行：当前工作环境没有 App ID、私钥、installation ID 或用户指定的
+disposable repository。PR 在完成该阻断验收前保持 draft，不能把隔离测试当作外部校准结果。

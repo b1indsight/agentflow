@@ -1,28 +1,27 @@
-"""GitHub API 平面：githubkit 封装（App 认证）。
-
-见 docs/architecture/components.md §4.5、github-app.md。
-
-TODO(verify) V1：githubkit 的确切 API（App→installation token、PR、GraphQL resolveReviewThread）。
-  下面的调用按 githubkit 的常见形态写，方法名/返回结构落地时对照官方文档校准。
-TODO(verify) V3：为 code agent 的 push 签发仓库级、短时、contents:write 的 scoped token。
-"""
+"""GitHub App adapter for the repository-scoped M1 API surface."""
 
 from __future__ import annotations
 
-from loguru import logger
+from collections.abc import Awaitable, Callable
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Literal, TypeVar
+
+import httpx
+from githubkit import AppAuthStrategy, AppInstallationAuthStrategy, GitHub
+from githubkit.exception import AuthCredentialError, AuthExpiredError, RequestFailed
+from pydantic import SecretStr
 
 from app.config import ServeSettings
-
-# githubkit 采用惰性导入：M0 阶段未装依赖也能 import 本模块（桩）。
-try:
-    from githubkit import (  # type: ignore
-        AppInstallationAuthStrategy,
-        GitHub,
-    )
-except Exception:  # noqa: BLE001
-    GitHub = None  # type: ignore
-    AppInstallationAuthStrategy = None  # type: ignore
-
+from app.github_models import (
+    GitHubAdapterError,
+    GitHubErrorKind,
+    IssueSnapshot,
+    PullRequestSnapshot,
+    PushCapability,
+    RemoteRef,
+    RepositorySnapshot,
+)
 
 _RESOLVE_THREAD_MUTATION = """
 mutation($threadId: ID!) {
@@ -30,67 +29,203 @@ mutation($threadId: ID!) {
 }
 """
 
+T = TypeVar("T")
+
 
 class GitHubApp:
-    """实现 ports.GitHubClient。"""
+    """Authenticate as the configured App and expose stable, typed GitHub operations."""
 
     def __init__(self, settings: ServeSettings) -> None:
-        s = settings
-        self.app_id = s.github_app_id
-        self.private_key = ""
-        if s.github_private_key_path.exists():
-            self.private_key = s.github_private_key_path.read_text()
+        if settings.github_app_id <= 0:
+            raise ValueError("FLOWTOOL_GITHUB_APP_ID must be a positive integer")
+        self._app_id = settings.github_app_id
+        self._private_key = self._read_private_key(settings.github_private_key_path)
 
-    def _client(self, installation_id: int):
-        if GitHub is None:
-            raise RuntimeError("githubkit not installed")  # TODO(verify) V1
+    @staticmethod
+    def _read_private_key(path: Path) -> str:
+        key = path.read_text()
+        if not key.strip():
+            raise ValueError("FLOWTOOL_GITHUB_PRIVATE_KEY_PATH points to an empty file")
+        return key
+
+    def _app_client(self) -> Any:
+        return GitHub(AppAuthStrategy(self._app_id, self._private_key))
+
+    def _installation_client(self, installation_id: int) -> Any:
         return GitHub(
-            AppInstallationAuthStrategy(self.app_id, self.private_key, installation_id)
+            AppInstallationAuthStrategy(
+                self._app_id,
+                self._private_key,
+                installation_id,
+            )
         )
 
-    async def installation_token(self, installation_id: int) -> str:
-        # githubkit 会用 App JWT 自动换 installation token 并缓存；这里显式取一把用于 git push。
-        gh = self._client(installation_id)
-        try:
-            auth = await gh.auth.async_get_token()  # TODO(verify) V1/V3 精确方法名与 scope
-            return auth
-        except Exception as e:
-            logger.error("installation_token failed: {}", e)
-            raise
+    async def get_issue(
+        self, installation_id: int, repo: str, number: int
+    ) -> IssueSnapshot:
+        owner, name = self._split_repo(repo)
+        client = self._installation_client(installation_id)
 
-    async def open_pr(
-        self, installation_id: int, repo: str, head: str, base: str, title: str, body: str
-    ) -> int:
-        owner, name = repo.split("/", 1)
-        gh = self._client(installation_id)
-        resp = await gh.rest.pulls.async_create(
-            owner, name, title=title, head=head, base=base, body=body
+        async def operation() -> IssueSnapshot:
+            data = (await client.rest.issues.async_get(owner, name, number)).parsed_data
+            return IssueSnapshot(
+                number=data.number,
+                title=data.title,
+                body=data.body or "",
+                state=data.state,
+            )
+
+        return await self._execute("get_issue", operation)
+
+    async def get_repository(
+        self, installation_id: int, repo: str
+    ) -> RepositorySnapshot:
+        owner, name = self._split_repo(repo)
+        client = self._installation_client(installation_id)
+
+        async def operation() -> RepositorySnapshot:
+            data = (await client.rest.repos.async_get(owner, name)).parsed_data
+            return RepositorySnapshot(full_name=data.full_name, default_branch=data.default_branch)
+
+        return await self._execute("get_repository", operation)
+
+    async def create_push_capability(
+        self, installation_id: int, repo: str
+    ) -> PushCapability:
+        _, name = self._split_repo(repo)
+        client = self._app_client()
+
+        async def operation() -> PushCapability:
+            data = (
+                await client.rest.apps.async_create_installation_access_token(
+                    installation_id,
+                    repositories=[name],
+                    permissions={"contents": "write"},
+                )
+            ).parsed_data
+            permissions = self._permissions(data.permissions)
+            repositories = [item.full_name for item in (data.repositories or [])]
+            if permissions != {"contents": "write"} or repositories != [repo]:
+                raise GitHubAdapterError(
+                    GitHubErrorKind.UNEXPECTED_RESPONSE,
+                    "create_push_capability",
+                )
+            return PushCapability(
+                token=SecretStr(data.token),
+                repository=repo,
+                permissions=permissions,
+                expires_at=datetime.fromisoformat(data.expires_at),
+            )
+
+        return await self._execute("create_push_capability", operation)
+
+    async def get_ref(
+        self, installation_id: int, repo: str, branch: str
+    ) -> RemoteRef:
+        owner, name = self._split_repo(repo)
+        branch = self._normalize_branch(branch)
+        client = self._installation_client(installation_id)
+
+        async def operation() -> RemoteRef:
+            data = (await client.rest.git.async_get_ref(owner, name, f"heads/{branch}")).parsed_data
+            return RemoteRef(branch=branch, sha=data.object_.sha)
+
+        return await self._execute("get_ref", operation)
+
+    async def find_pull_request_by_head(
+        self, installation_id: int, repo: str, branch: str
+    ) -> PullRequestSnapshot | None:
+        owner, name = self._split_repo(repo)
+        branch = self._normalize_branch(branch)
+        client = self._installation_client(installation_id)
+
+        async def operation() -> PullRequestSnapshot | None:
+            pulls = (
+                await client.rest.pulls.async_list(
+                    owner,
+                    name,
+                    state="all",
+                    head=f"{owner}:{branch}",
+                    per_page=2,
+                )
+            ).parsed_data
+            if not pulls:
+                return None
+            if len(pulls) != 1:
+                raise GitHubAdapterError(
+                    GitHubErrorKind.UNEXPECTED_RESPONSE,
+                    "find_pull_request_by_head",
+                )
+            return self._pull_snapshot(pulls[0])
+
+        return await self._execute("find_pull_request_by_head", operation)
+
+    async def open_pull_request(
+        self,
+        installation_id: int,
+        repo: str,
+        head: str,
+        base: str,
+        title: str,
+        body: str,
+    ) -> PullRequestSnapshot:
+        owner, name = self._split_repo(repo)
+        client = self._installation_client(installation_id)
+
+        async def operation() -> PullRequestSnapshot:
+            data = (
+                await client.rest.pulls.async_create(
+                    owner,
+                    name,
+                    title=title,
+                    head=head,
+                    base=base,
+                    body=body,
+                )
+            ).parsed_data
+            return self._pull_snapshot(data)
+
+        return await self._execute("open_pull_request", operation)
+
+    async def comment(
+        self, installation_id: int, repo: str, number: int, body: str
+    ) -> None:
+        owner, name = self._split_repo(repo)
+        client = self._installation_client(installation_id)
+        await self._execute(
+            "comment",
+            lambda: client.rest.issues.async_create_comment(owner, name, number, body=body),
         )
-        return resp.parsed_data.number  # TODO(verify) V1
-
-    async def comment(self, installation_id: int, repo: str, number: int, body: str) -> None:
-        owner, name = repo.split("/", 1)
-        gh = self._client(installation_id)
-        await gh.rest.issues.async_create_comment(owner, name, number, body=body)
 
     async def set_labels(
         self, installation_id: int, repo: str, number: int, labels: list[str]
     ) -> None:
-        owner, name = repo.split("/", 1)
-        gh = self._client(installation_id)
-        await gh.rest.issues.async_set_labels(owner, name, number, labels=labels)
+        owner, name = self._split_repo(repo)
+        client = self._installation_client(installation_id)
+        await self._execute(
+            "set_labels",
+            lambda: client.rest.issues.async_set_labels(owner, name, number, labels=labels),
+        )
 
     async def request_reviewers(
         self, installation_id: int, repo: str, number: int, reviewers: list[str]
     ) -> None:
-        owner, name = repo.split("/", 1)
-        gh = self._client(installation_id)
-        await gh.rest.pulls.async_request_reviewers(owner, name, number, reviewers=reviewers)
+        if not reviewers:
+            return
+        owner, name = self._split_repo(repo)
+        client = self._installation_client(installation_id)
+        await self._execute(
+            "request_reviewers",
+            lambda: client.rest.pulls.async_request_reviewers(
+                owner, name, number, reviewers=reviewers
+            ),
+        )
 
-    async def list_review_threads(self, installation_id: int, repo: str, pr: int) -> list[dict]:
-        # GraphQL：拿 reviewThreads，映射 comment_id → thread_id。TODO(verify) V1。
-        owner, name = repo.split("/", 1)
-        gh = self._client(installation_id)
+    async def list_review_threads(
+        self, installation_id: int, repo: str, pr: int
+    ) -> list[dict[str, Any]]:
+        owner, name = self._split_repo(repo)
+        client = self._installation_client(installation_id)
         query = """
         query($owner:String!,$name:String!,$pr:Int!){
           repository(owner:$owner,name:$name){
@@ -98,9 +233,109 @@ class GitHubApp:
               reviewThreads(first:100){ nodes{ id isResolved comments(first:20){ nodes{ databaseId }}}}
             }}}
         """
-        data = await gh.async_graphql(query, {"owner": owner, "name": name, "pr": pr})
-        return data["repository"]["pullRequest"]["reviewThreads"]["nodes"]
+
+        async def operation() -> list[dict[str, Any]]:
+            data = await client.async_graphql(
+                query, {"owner": owner, "name": name, "pr": pr}
+            )
+            return data["repository"]["pullRequest"]["reviewThreads"]["nodes"]
+
+        return await self._execute("list_review_threads", operation)
 
     async def resolve_review_thread(self, installation_id: int, thread_id: str) -> None:
-        gh = self._client(installation_id)
-        await gh.async_graphql(_RESOLVE_THREAD_MUTATION, {"threadId": thread_id})
+        client = self._installation_client(installation_id)
+        await self._execute(
+            "resolve_review_thread",
+            lambda: client.async_graphql(
+                _RESOLVE_THREAD_MUTATION, {"threadId": thread_id}
+            ),
+        )
+
+    @staticmethod
+    def _split_repo(repo: str) -> tuple[str, str]:
+        parts = repo.split("/")
+        if len(parts) != 2 or not all(parts):
+            raise GitHubAdapterError(GitHubErrorKind.VALIDATION, "repository")
+        return parts[0], parts[1]
+
+    @staticmethod
+    def _normalize_branch(branch: str) -> str:
+        normalized = branch.removeprefix("refs/heads/").removeprefix("heads/")
+        if not normalized:
+            raise GitHubAdapterError(GitHubErrorKind.VALIDATION, "branch")
+        return normalized
+
+    @staticmethod
+    def _permissions(value: Any) -> dict[str, Literal["read", "write"]]:
+        if isinstance(value, dict):
+            raw = value
+        elif hasattr(value, "model_dump"):
+            raw = value.model_dump(exclude_none=True, exclude_unset=True)
+        else:
+            raw = vars(value)
+        permissions: dict[str, Literal["read", "write"]] = {}
+        for key, item in raw.items():
+            if item not in {"read", "write"}:
+                continue
+            permissions[key] = item
+        return permissions
+
+    @staticmethod
+    def _pull_snapshot(data: Any) -> PullRequestSnapshot:
+        return PullRequestSnapshot(
+            number=data.number,
+            state=data.state,
+            head_branch=data.head.ref,
+            head_sha=data.head.sha,
+            base_branch=data.base.ref,
+        )
+
+    @staticmethod
+    async def _execute(endpoint: str, operation: Callable[[], Awaitable[T]]) -> T:
+        try:
+            return await operation()
+        except GitHubAdapterError:
+            raise
+        except RequestFailed as exc:
+            raise GitHubApp._request_error(endpoint, exc) from None
+        except (AuthCredentialError, AuthExpiredError):
+            raise GitHubAdapterError(GitHubErrorKind.AUTHENTICATION, endpoint) from None
+        except (httpx.TimeoutException, httpx.NetworkError):
+            raise GitHubAdapterError(GitHubErrorKind.TRANSIENT, endpoint) from None
+        except (AttributeError, KeyError, TypeError, ValueError):
+            raise GitHubAdapterError(
+                GitHubErrorKind.UNEXPECTED_RESPONSE, endpoint
+            ) from None
+
+    @staticmethod
+    def _request_error(endpoint: str, error: RequestFailed) -> GitHubAdapterError:
+        response = error.response.raw_response
+        status = response.status_code
+        retry_after = response.headers.get("Retry-After")
+        if status == 401:
+            kind = GitHubErrorKind.AUTHENTICATION
+        elif status == 403 and (
+            response.headers.get("X-RateLimit-Remaining") == "0" or retry_after
+        ):
+            kind = GitHubErrorKind.RATE_LIMITED
+        elif status == 403:
+            kind = GitHubErrorKind.PERMISSION
+        elif status == 404:
+            kind = GitHubErrorKind.NOT_FOUND
+        elif status == 409:
+            kind = GitHubErrorKind.CONFLICT
+        elif status == 422:
+            kind = GitHubErrorKind.VALIDATION
+        elif status == 429:
+            kind = GitHubErrorKind.RATE_LIMITED
+        elif status >= 500:
+            kind = GitHubErrorKind.TRANSIENT
+        else:
+            kind = GitHubErrorKind.UNEXPECTED_RESPONSE
+        return GitHubAdapterError(
+            kind,
+            endpoint,
+            status_code=status,
+            request_id=response.headers.get("X-GitHub-Request-Id"),
+            retry_after=retry_after,
+        )

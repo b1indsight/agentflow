@@ -5,7 +5,7 @@
 
 ## 当前计划
 
-- [`m1-github-capabilities.md`](m1-github-capabilities.md) — M1 Feature 2/3：校准 GitHub App、短时 push capability 与 PR primitives，待审批；
+- [`m1-github-capabilities.md`](m1-github-capabilities.md) — M1 Feature 2/3：GitHub App、短时 push capability 与 PR primitives 已实现并通过自动化，真实 App smoke 待执行；
 
 ## 已完成计划
 

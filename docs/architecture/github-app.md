@@ -1,7 +1,6 @@
 # GitHub App 接入
 
-> 状态：目标接入说明，尚未在真实 App 上验证。实施 M1 时必须逐 endpoint 对照 GitHub 官方权限文档，
-> 并校准当前 `githubkit` 版本的 API。
+> 状态：已对齐 githubkit 0.16 并通过隔离契约测试；尚未在真实 App 上执行读写 smoke。
 
 GitHub App 提供独立 bot 身份、Webhook 和短期 installation token。FlowTool 不需要代表某个用户执行
 操作，因此当前设计不使用 OAuth user token。
@@ -41,7 +40,9 @@ App JWT ── POST /app/installations/{id}/access_tokens ──► Installation
 | issue 评论与 labels | Issues: read/write | 状态评论、触发/取消标签 |
 | PR、reviewer、review threads | Pull requests: read/write | 创建 PR、请求审核、读取/解决线程 |
 | 仓库身份 | Metadata: read | GitHub App 默认需要的仓库元数据 |
-| CI 可见性（可选） | Checks / Commit statuses: read | 仅在 FlowTool 需要读取时申请 |
+
+`FLOWTOOL_ALLOWLIST` 只控制谁能触发 flow；`FLOWTOOL_REVIEWERS` 独立配置 PR reviewer，空列表表示不
+请求 reviewer。`FLOWTOOL_IN_REVIEW_LABEL` 配置 review 状态 label。
 
 订阅事件候选：Issues、Issue comment、Pull request、Pull request review、Pull request review comment。
 GitHub 会根据已选权限决定哪些事件可订阅；正式接入时应逐事件核对
@@ -50,18 +51,24 @@ GitHub 会根据已选权限决定哪些事件可订阅；正式接入时应逐�
 安装 App 时只授权目标仓库。记录 App ID、私钥路径、Webhook secret；installation ID 从 Webhook
 payload 获取，不需要静态写入 `.env`。
 
-## A.3 当前代码与缺口
+## A.3 已实现能力与缺口
 
-`GitHubApp` 读取 `FLOWTOOL_GITHUB_APP_ID` 和私钥文件，为每次调用按 `installation_id` 构造 githubkit
-client，并写出了 token、PR、comment、labels、reviewers、list/resolve thread 的调用形态。
+`GitHubApp` 启动时验证正 App ID 和可读非空私钥，按 Webhook 保存的 `installation_id` 构造 githubkit
+0.16 client。core 只接收类型化的 Issue、repository、remote ref、PR snapshot 和 secret-aware push
+capability，不接触 githubkit schema。
+
+已由自动化覆盖：
+
+- Issue、repository/default branch、ref、按 head 查找 PR、创建 PR、评论、labels 与 reviewers 的方法；
+- 通过公开 installation access-token endpoint 显式传入单仓库和 `contents: write`，并校验返回 scope；
+- authentication、permission、not found、conflict、validation、rate limit、transient 与异常响应分类；
+- capability 的 token 在 repr 和普通 JSON 序列化中脱敏。
 
 尚未验证或实现：
 
-- `githubkit` 的认证类、token 方法和 REST/GraphQL 返回结构是否与锁定版本一致；
-- 权限组合、分页、rate limit、重试和 API 错误到 flow/job 状态的映射；
-- 创建按仓库/权限进一步收窄的 token；
+- disposable repository 上的真实 App 读写 smoke；
 - 用 credential helper 注入 token、限制网络到 GitHub、使用后撤销/清理且不写入工作区；
-- issue 拉取、默认分支解析、review thread ID 映射、Project v2 与 reconcile 查询。
+- review thread ID 映射、Project v2 与 reconcile 查询。
 
 因此不能仅凭配置真实凭据就把当前 daemon 视为可用集成。
 
@@ -80,4 +87,5 @@ FlowTool，也不替代签名校验。
 - 私钥和 Webhook secret 只通过环境/本地 secret 文件提供，不入库、不进入 agent 工作区；
 - `.gitignore` 已忽略 `.env` 与 `*.pem`，`env.example` 只含占位值；
 - App 私钥不得传给 Code Agent；push 只使用短期、最小范围的 installation token；
-- 生产接入前需定义 token 缓存/刷新、撤销、日志脱敏和异常清理策略。
+- capability 不进入 Store、job/result/journal、prompt 或日志；Feature 3 只在 assignment 临近发送时创建，
+  retry 时重新签发，并负责 credential helper 注入与清理。

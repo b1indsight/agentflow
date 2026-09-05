@@ -32,7 +32,7 @@
 | Control/Worker 边界 | 已验证（Features 1–3） | 多 worker 鉴权/调度、affinity、busy reconnect、result replay、serve restart、journal/root lock 有覆盖 |
 | Control Service / Job Coordinator | 部分 | 状态转换和外部端口调用已拆到 control；issue 拉取、thread 映射、取消 kill、冲突处理与真实副作用未完成 |
 | Codex / Context / Sandbox / VCS | 部分 | stable Flow repo、外部 secret 隔离前置条件、Git/jj 自探测及限时/净化的 commit ancestry、remote 核验有自动化与本地 smoke；GitHub egress/credential 未验证 |
-| GitHub Client | 桩 | githubkit 调用形态已写，认证、REST/GraphQL 方法与权限尚未在真实 App 上校准 |
+| GitHub Client | 部分 | githubkit 0.16 App/installation 认证、Issue/repository/ref/PR、单仓库 Contents capability 与错误映射有隔离测试；真实 App smoke 和 M2 review threads 待验证 |
 | Judge | 桩 | `bub run` subprocess 与保守解析存在，实际命令/API 和模型输出尚未校准 |
 | Reconciler | 桩 | 5 分钟循环存在，`_sweep()` 目前只记录 active flow，不拉取远端状态 |
 | CLI | 部分验证 | `serve` 与 `worker` 双进程 smoke、help 和 health 已验证；flows/show/cancel/retry 尚无 CLI 级覆盖 |

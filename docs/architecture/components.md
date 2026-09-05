@@ -101,9 +101,10 @@ worker `last_assigned_at` 和 attempt affinity 事务化领取任务。worker �
 目标职责：以 GitHub App installation 身份创建 PR、评论、设置 labels、请求 reviewers、列出 review
 threads、resolve thread，并签发 push 所需的短时 installation token。自动合并明确不在职责内。
 
-`GitHubApp` 已写出 githubkit REST/GraphQL 调用形态，但全部属于未校准 adapter：真实认证方法、返回类型、
-权限、分页、错误处理与 scoped token 都没有集成验证。当前代码也不支持 Project v2 更新、关闭 issue、
-分支/ref 管理或远端状态查询。接入假设见 [GitHub App 文档](github-app.md)。
+`GitHubApp` 已对齐锁定的 githubkit 0.16：返回稳定的 Issue、repository、remote ref 和 PR snapshot，
+用 App 身份签发只含单仓库 Contents write 的短时 capability，并把常见 HTTP/认证故障映射为不含响应
+body 的类型化错误。真实 GitHub App smoke 尚未执行；review thread GraphQL、Project v2、关闭 issue 和
+reconcile 仍未校准。接入边界见 [GitHub App 文档](github-app.md)。
 
 ## 4.6 本地平面：Flow repo / execution policy / VCS
 
@@ -153,8 +154,10 @@ GitHub 等外部副作用与 `result_applied_at` 之间仍非原子，不能宣�
 
 目标用户体验完全位于 GitHub：标签触发、PR review 反馈、网页人工合并、状态 labels 与评论。
 
-当前 router 已识别触发、取消、review/comment 和 merged 事件；真正的 PR 创建、评论、reviewer、label、
-thread resolve 与 Project 状态仍依赖未校准的 GitHub adapter。工具没有自动合并实现。
+当前 router 已识别触发、取消、review/comment 和 merged 事件；PR 创建、评论、reviewer 和 label 已有
+经隔离测试的 adapter primitive，且 reviewer 配置不复用 trigger allowlist。Feature 3 才负责把真实
+Issue/default branch、head PR 查询和 capability 接入 INITIAL；thread resolve 与 Project 状态仍未校准。
+工具没有自动合并实现。
 
 ## 4.9 Context Builder
 
