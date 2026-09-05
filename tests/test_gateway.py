@@ -149,6 +149,7 @@ class RecordingCoordinator:
 
     async def prepare(self, job: Job) -> ExecutionTask | JobState:
         return InitialTask(
+            flow_id=job.flow_id,
             attempt_id=11,
             repo="owner/repo",
             issue_number=8,

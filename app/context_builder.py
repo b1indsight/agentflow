@@ -28,6 +28,11 @@ _OUTPUT_INSTRUCTION = (
     "needs_clarification (list of string)."
 )
 
+_INITIAL_OUTPUT_INSTRUCTION = (
+    "When done, output a JSON object with `summary` and `vcs_backend_used`. "
+    "Set `vcs_backend_used` to `git` or `jj` according to the backend you actually used."
+)
+
 
 def build_initial_prompt(
     issue_title: str, issue_body: str, repo_conventions: str, vcs_guidance: str
@@ -37,6 +42,7 @@ def build_initial_prompt(
         f"# Repo conventions\n{repo_conventions or '(none provided)'}\n",
         f"# VCS guidance\n{vcs_guidance}\n",
         _HARD_CONSTRAINTS,
+        _INITIAL_OUTPUT_INSTRUCTION,
     ]
     return "\n".join(parts)
 

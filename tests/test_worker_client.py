@@ -37,6 +37,7 @@ class ScriptedConnection:
                 assignment_token="assignment-1",
                 connection_epoch="epoch-1",
                 task=InitialTask(
+                    flow_id=3,
                     attempt_id=7,
                     repo="owner/repo",
                     issue_number=8,
@@ -119,6 +120,7 @@ async def test_heartbeat_failure_preserves_the_running_executor_for_reconnect() 
         assignment_token="assignment-1",
         connection_epoch="epoch-1",
         task=InitialTask(
+            flow_id=3,
             attempt_id=7,
             repo="owner/repo",
             issue_number=8,

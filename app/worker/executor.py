@@ -6,8 +6,10 @@ import json
 import tempfile
 from pathlib import Path
 
+from loguru import logger
+
 from app.context_builder import build_initial_prompt, build_revision_prompt
-from app.models import CodexResult
+from app.models import CodexResult, InitialCodexResult
 from app.ports import CodeAgent, Judge
 from app.protocol import (
     AnswerResult,
@@ -23,7 +25,16 @@ from app.protocol import (
     TriageResult,
     TriageTask,
 )
-from app.vcs import agent_guidance, cleanup_workspace, make_workspace, workspace_path
+from app.vcs import (
+    VcsVerificationError,
+    agent_guidance,
+    cleanup_flow_repo,
+    prepare_flow_repo,
+    prepare_vcs_context,
+    verify_vcs_outcome,
+)
+
+VCS_VERIFICATION_EXIT_CODE = 65
 
 
 class WorkerExecutor:
@@ -51,21 +62,43 @@ class WorkerExecutor:
             return AnswerResult(answer=answer)
         if isinstance(task, ArchiveTask):
             repo_path = self._repo_path(task.repo)
-            for branch in task.branches:
-                await cleanup_workspace(workspace_path(repo_path, branch))
+            await cleanup_flow_repo(repo_path, task.flow_id)
             return ArchiveResult()
         raise TypeError(f"unsupported execution task: {type(task).__name__}")
 
     async def _initial(self, task: InitialTask) -> InitialResult:
         repo_path = self._repo_path(task.repo)
-        workspace = await make_workspace(repo_path, task.branch)
+        workspace = await prepare_flow_repo(repo_path, task.flow_id)
+        vcs_context = await prepare_vcs_context(workspace, task.branch)
         prompt = build_initial_prompt(
             task.issue_title,
             task.issue_body,
             self._repo_conventions(workspace),
-            agent_guidance(repo_path, task.branch),
+            agent_guidance(task.branch),
         )
-        run = await self.code_agent.start(prompt, workspace)
+        schema_path = _write_output_schema(InitialCodexResult)
+        try:
+            run = await self.code_agent.start(prompt, workspace, output_schema=schema_path)
+        finally:
+            schema_path.unlink(missing_ok=True)
+        if run.exit_code != 0:
+            return InitialResult(
+                session_id=run.session_id,
+                last_message=run.last_message,
+                exit_code=run.exit_code,
+            )
+        if run.output is None or run.output.vcs_backend_used is None:
+            return _vcs_failure(run.session_id, run.last_message, "result", "missing VCS backend")
+        try:
+            outcome = await verify_vcs_outcome(vcs_context, run.output.vcs_backend_used)
+        except VcsVerificationError as error:
+            return _vcs_failure(run.session_id, run.last_message, error.stage, str(error))
+        logger.info(
+            "verified CodeAgent VCS outcome: backend={} branch={} commit={}",
+            outcome.verified_backend,
+            outcome.branch,
+            outcome.commit_sha,
+        )
         return InitialResult(
             session_id=run.session_id,
             last_message=run.last_message,
@@ -73,13 +106,12 @@ class WorkerExecutor:
         )
 
     async def _revision(self, task: RevisionTask) -> RevisionResult:
-        repo_path = self._repo_path(task.repo)
         prompt = build_revision_prompt(
             task.instruction,
             task.feedback,
-            agent_guidance(repo_path, task.branch),
+            agent_guidance(task.branch),
         )
-        schema_path = _write_output_schema()
+        schema_path = _write_output_schema(CodexResult)
         try:
             run = await self.code_agent.resume(
                 task.session_id,
@@ -107,11 +139,26 @@ class WorkerExecutor:
         return ""
 
 
-def _write_output_schema() -> Path:
+def _write_output_schema(model: type[CodexResult | InitialCodexResult]) -> Path:
     """Write CodexResult's schema to a private temporary file for the Codex CLI."""
 
     with tempfile.NamedTemporaryFile(
         mode="w", prefix="codex-schema-", suffix=".json", delete=False
     ) as output:
-        json.dump(CodexResult.model_json_schema(), output)
+        json.dump(model.model_json_schema(), output)
         return Path(output.name)
+
+
+def _vcs_failure(
+    session_id: str | None, last_message: str, stage: str, detail: str
+) -> InitialResult:
+    message = f"VCS verification failed [{stage}]: {detail}"
+    if last_message:
+        message = f"{last_message.rstrip()}\n\n{message}"
+    return InitialResult(
+        session_id=session_id,
+        last_message=message,
+        exit_code=VCS_VERIFICATION_EXIT_CODE,
+        failure_stage=stage,
+        failure_detail=detail,
+    )

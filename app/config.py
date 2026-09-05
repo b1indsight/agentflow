@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import Field, SecretStr, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -104,15 +104,32 @@ class ServeSettings(FlowToolSettings):
 class WorkerSettings(FlowToolSettings):
     """Execution-only settings; deliberately excludes database and GitHub credentials."""
 
+    model_config = SettingsConfigDict(
+        env_prefix="FLOWTOOL_",
+        env_file=None,
+        extra="ignore",
+    )
+
     worker_id: str
     worker_token: SecretStr
     serve_ws_url: str
     worker_root: Path = Path("~/.flowtool/workers/{worker_id}")
     codex_run_timeout_seconds: float = 1200.0
+    trusted_host_execution: bool = False
+    execution_isolation: Literal["dedicated-account", "container", "vm"] | None = None
     allow_insecure_worker_ws: bool = False
     reconnect_min_backoff: float = Field(default=1.0, gt=0)
     reconnect_max_backoff: float = Field(default=30.0, gt=0)
     reconnect_jitter: float = Field(default=0.2, ge=0, le=1)
+
+    @model_validator(mode="after")
+    def _require_full_access_isolation(self) -> WorkerSettings:
+        if self.trusted_host_execution and self.execution_isolation is None:
+            raise ValueError(
+                "trusted-host execution requires external execution isolation "
+                "(dedicated-account, container, or vm)"
+            )
+        return self
 
     @field_validator("worker_id")
     @classmethod

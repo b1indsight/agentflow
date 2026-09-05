@@ -16,7 +16,8 @@ M0 已经具备并验证：
 - 校验 `X-Hub-Signature-256`，异步交接 Webhook，并处理 delivery 去重、allowlist、取消和 review 入库；
 - `flowtool serve` 独占 Store、Webhook、状态机和 GitHub 权限，通过独立认证 WebSocket 向多个 worker 公平派发 job；
 - `flowtool worker` 主动保持长连接，只装配 workspace、Codex 和 Judge，不读取数据库或 GitHub App 私钥；
-- INITIAL/TRIAGE/REVISION/ANSWER/ARCHIVE 使用 v2 task/result 契约，并用 worker/epoch/job/token 四元组拒绝旧连接写入；
+- INITIAL/TRIAGE/REVISION/ANSWER/ARCHIVE 使用 v3 task/result 契约，显式携带 stable Flow identity，并用
+  worker/epoch/job/token 四元组拒绝旧连接写入；
 - 未 Started 的 assignment 在 lease 到期后重排；Started job 在 recovery grace 内只等原 worker，serve 重启不会立即失败；
 - worker journal 在 ResultAccepted 前保留 assignment/终态结果，control result inbox 去重重放并恢复未应用结果；
 - 同一 attempt 固定到首次 Started 的 worker；每个 worker 单槽运行，同机实例使用独立 root、identity 标记和进程锁；
@@ -35,8 +36,9 @@ Codex commit/push、网络与 scoped token、reconcile 对账、取消运行中�
 ## 平面边界
 
 - **Control plane**：Webhook、状态机、持久化和 GitHub API，是唯一数据库与外部副作用权威；
-- **Worker execution plane**：Judge、prompt、Codex 和隔离工作区，通过出站 WebSocket 接收结构化任务；
-- **本地三轴**：workspace 负责目录隔离，Sandbox 负责可写根与网络策略，VCS 只通过 git/jj 指引交给 agent。
+- **Worker execution plane**：Judge、prompt、Codex 和 Flow 独占 repo，通过出站 WebSocket 接收结构化任务；
+- **本地执行**：Flow repo 负责目录所有权；只有运行在无法读取 control-plane secret 的专用 OS account、
+  container 或 VM 中的 worker 才能显式开启 full access。Agent 自选 Git/jj，worker 只做结果核验。
 
 VCS 不是端口；详细设计与当前限制见 [`components.md`](docs/architecture/components.md) §4.6。
 
@@ -50,9 +52,18 @@ docker compose up -d postgres
 cp env.example .env
 # 先编辑 .env：替换 change-me、your-username 和其他占位值
 FLOWTOOL_HOST=127.0.0.1 uv run flowtool serve
-# 另开终端，使用同一份 .env：
-uv run flowtool worker
+# 未启用 CodeAgent 的本地 worker 可以另开终端，以进程环境传入 worker-only 配置：
+FLOWTOOL_WORKER_ID=worker-1 FLOWTOOL_WORKER_TOKEN=change-me-worker-token \
+FLOWTOOL_SERVE_WS_URL=ws://127.0.0.1:8000/internal/workers/connect \
+FLOWTOOL_ALLOW_INSECURE_WORKER_WS=true uv run flowtool worker
 ```
+
+`WorkerSettings` 不读取当前目录的 `.env`。要运行 `danger-full-access` CodeAgent，必须在专用 OS account、
+container 或 VM 中只注入 worker/Codex 所需变量，并设置
+`FLOWTOOL_TRUSTED_HOST_EXECUTION=true` 与对应的
+`FLOWTOOL_EXECUTION_ISOLATION=dedicated-account|container|vm`。worker 进程环境若包含数据库、GitHub App、
+webhook 或 control worker-registry secret，会拒绝启动。仅使用不同 repo 目录不构成这个 secret 边界；
+同一 VM 可以运行多个隔离 worker，但 control plane 的凭据和 `.env` 必须对其 OS 身份不可读。
 
 Compose 中的 PostgreSQL 账号只用于本地开发。远程部署必须使用独立密码和 TLS；serve 会初始化
 schema，因此数据库账号需要拥有应用 schema，但不应具有数据库外权限。项目不自动导入旧 SQLite 文件。
@@ -92,5 +103,5 @@ assignment/epoch fencing、lease sweeper、忙碌重连、result replay、worker
 原子 delivery 去重、并发 assignment、单槽、attempt affinity 和 result inbox。CI 还会在同一 runner 启动两个 worker root，并重启 serve 验证自动重连。
 `uv sync --locked`、Ruff、Mypy、CLI help 和构建检查均纳入基线。
 
-另有 2026-08-01 的独立实测证明 Codex `exec` / `resume` 上下文连续，`workspace-write` 下 jj `.jj`
-可写并能 commit；git `.git` 写入被拦截，push 与凭据注入未验证。这些结果不能替代 M1+ 端到端验收。
+M1 Feature 1 已用一次性本地 repo 验证 Codex 在显式 trusted-host 模式下自主完成 Git commit/push，并由
+worker 核对 branch、clean status 和远端 SHA；GitHub egress、短时凭据和 Issue→PR 完整闭环仍待后续 feature。

@@ -1,43 +1,79 @@
-"""CodeAgent 适配器：codex CLI。见 docs/architecture/components.md §4.4 / §4.6。
-
-已实测的调用形态（写实）：
-  起始：codex exec <PROMPT> --json -C <ws> -s workspace-write --skip-git-repo-check
-        -o <last> </dev/null
-        → JSONL 里 {"type":"thread.started","thread_id":"<UUID>"} 取 session id
-  续接：codex exec resume <sid> <PROMPT> --json --skip-git-repo-check -o <last> </dev/null
-        （resume 不接受 -s/-C，从会话继承 cwd + sandbox）
-
-沙盒不再写死：起始时向注入的 `ports.Sandbox` 要一份 SandboxPolicy（可写根 + 网络），
-再翻成 codex 参数。MVP = WorkspaceWriteSandbox → `-s workspace-write`（+ push 需要的网络）。
-
-TODO(verify) V5：改码+commit+push 在一次 run 内端到端（jj commit 已验，push 未验）。
-TODO(verify) V6：多轮 resume 的 context/token 增长。
-"""
+"""CodeAgent adapter for Codex CLI in a trusted Flow-owned repository."""
 
 from __future__ import annotations
 
 import asyncio
 import json
+import os
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
 
 from loguru import logger
 
-from app.models import AgentRun, CodexResult, SandboxPolicy
-from app.ports import Sandbox
-from app.sandbox import WorkspaceWriteSandbox
+from app.models import AgentRun, CodexResult
 
 CODEX_BIN = "codex"
 
 
-def _sandbox_args(policy: SandboxPolicy) -> list[str]:
-    """把 SandboxPolicy 翻成 codex CLI 参数（workspace-write 家族）。"""
-    args = ["-s", "workspace-write"]
-    # workspace-write 默认把工作区设为可写、断网。额外可写根 / 放网络走 -c 覆盖。
-    if policy.network:
-        # TODO(verify) V3：放开出口的确切配置键 + 限到 github.com（push 才需要）。
-        args += ["-c", "sandbox_workspace_write.network_access=true"]
-    return args
+_CODEX_ENVIRONMENT_KEYS = frozenset(
+    {
+        "PATH",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "SHELL",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TERM",
+        "TMPDIR",
+        "CODEX_HOME",
+        "OPENAI_API_KEY",
+        "CODEX_API_KEY",
+        "CODEX_ACCESS_TOKEN",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "no_proxy",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "REQUESTS_CA_BUNDLE",
+        "CURL_CA_BUNDLE",
+    }
+)
+
+
+def _codex_environment(source: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Build a minimal environment without worker, control-plane, or GitHub credentials."""
+
+    values = os.environ if source is None else source
+    return {key: value for key, value in values.items() if key in _CODEX_ENVIRONMENT_KEYS}
+
+
+def _start_args(task: str, cwd: Path, *, trusted_host: bool) -> list[str]:
+    """Build a full-access start command only after the operator's explicit opt-in."""
+
+    if not trusted_host:
+        raise RuntimeError(
+            "Codex trusted-host full-access execution requires "
+            "FLOWTOOL_TRUSTED_HOST_EXECUTION=true"
+        )
+    return [
+        CODEX_BIN,
+        "exec",
+        task,
+        "--json",
+        "-C",
+        str(cwd),
+        "-s",
+        "danger-full-access",
+        "--skip-git-repo-check",
+    ]
 
 
 def _parse_thread_id(jsonl_text: str) -> str | None:
@@ -57,24 +93,22 @@ def _parse_thread_id(jsonl_text: str) -> str | None:
 class CodexAgent:
     """实现 ports.CodeAgent。"""
 
-    def __init__(self, sandbox: Sandbox | None = None, *, timeout: float = 1200.0):
-        self.sandbox: Sandbox = sandbox or WorkspaceWriteSandbox()
+    def __init__(self, *, trusted_host: bool = False, timeout: float = 1200.0):
+        self.trusted_host = trusted_host
         self.timeout = timeout
 
     async def start(self, task: str, cwd: Path, *, output_schema: Path | None = None) -> AgentRun:
-        # 起始 run 要 commit + push → 需放网络（沙盒轴决定，§4.6）。
-        policy = self.sandbox.policy(cwd, network=True)
-        args = [
-            CODEX_BIN, "exec", task,
-            "--json", "-C", str(cwd),
-            *_sandbox_args(policy),
-            "--skip-git-repo-check",
-        ]
+        args = _start_args(task, cwd, trusted_host=self.trusted_host)
         return await self._run(args, output_schema, parse_thread=True)
 
     async def resume(
         self, session_id: str, prompt: str, *, output_schema: Path | None = None
     ) -> AgentRun:
+        if not self.trusted_host:
+            raise RuntimeError(
+                "Codex trusted-host full-access execution requires "
+                "FLOWTOOL_TRUSTED_HOST_EXECUTION=true"
+            )
         # resume 不接受 -s / -C：cwd 与 sandbox 从会话继承
         args = [
             CODEX_BIN, "exec", "resume", session_id, prompt,
@@ -90,20 +124,22 @@ class CodexAgent:
         parse_thread: bool,
         session_id: str | None = None,
     ) -> AgentRun:
-        last_file = Path(tempfile.mktemp(prefix="codex-last-", suffix=".txt"))
+        with tempfile.NamedTemporaryFile(prefix="codex-last-", suffix=".txt", delete=False) as file:
+            last_file = Path(file.name)
         args += ["-o", str(last_file)]
         if output_schema is not None:
             args += ["--output-schema", str(output_schema)]
 
-        logger.info("codex run: {}", " ".join(a if len(a) < 60 else a[:57] + "..." for a in args))
+        logger.info("codex run started: resume={} output_schema={}", not parse_thread, output_schema is not None)
         proc = await asyncio.create_subprocess_exec(
             *args,
             stdin=asyncio.subprocess.DEVNULL,   # 必须：否则 codex 会挂等 stdin
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=_codex_environment(),
         )
         try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self.timeout)
+            stdout, _stderr = await asyncio.wait_for(proc.communicate(), timeout=self.timeout)
         except TimeoutError:
             proc.kill()
             await proc.wait()
@@ -125,7 +161,7 @@ class CodexAgent:
         if last_file.exists():
             last_file.unlink()
         if proc.returncode != 0:
-            logger.error("codex exit={} stderr={}", proc.returncode, stderr.decode()[:500])
+            logger.error("codex exit={}", proc.returncode)
 
         return AgentRun(
             session_id=sid, last_message=last_message, exit_code=proc.returncode or 0, output=output

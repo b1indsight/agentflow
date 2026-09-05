@@ -25,13 +25,13 @@
 
 | 范围 | 状态 | 当前事实 |
 |---|---|---|
-| 配置与领域契约 | 已验证 | serve/worker 独立配置、v2 task/result/recovery message、时间关系验证和结构化结果有覆盖 |
+| 配置与领域契约 | 已验证 | serve/worker 独立配置、v3 task/result/recovery message、stable Flow identity、时间关系验证和结构化结果有覆盖 |
 | PostgreSQL Store | 已验证 | flow/attempt/job、epoch/lease fencing、result inbox、跨 Store 可见性、并发 assign、review 与恢复有覆盖 |
 | Webhook Ingress | 已验证（M0） | `/healthz`、HMAC 拒绝/接受、后台交接和 202 响应有覆盖；health 仅表示进程可响应 |
 | Event Router | 已验证（M0） | delivery 去重、bot/allowlist、触发、取消和 inline review 入库有覆盖；同 flow 串行锁尚未实现 |
 | Control/Worker 边界 | 已验证（Features 1–3） | 多 worker 鉴权/调度、affinity、busy reconnect、result replay、serve restart、journal/root lock 有覆盖 |
 | Control Service / Job Coordinator | 部分 | 状态转换和外部端口调用已拆到 control；issue 拉取、thread 映射、取消 kill、冲突处理与真实副作用未完成 |
-| Codex / Context / Sandbox / VCS | 部分 | CLI 命令构造、prompt、workspace 拷贝和策略接缝存在；commit/push、网络与凭据未端到端验证 |
+| Codex / Context / Sandbox / VCS | 部分 | stable Flow repo、外部 secret 隔离前置条件、Git/jj 自探测及限时/净化的 commit ancestry、remote 核验有自动化与本地 smoke；GitHub egress/credential 未验证 |
 | GitHub Client | 桩 | githubkit 调用形态已写，认证、REST/GraphQL 方法与权限尚未在真实 App 上校准 |
 | Judge | 桩 | `bub run` subprocess 与保守解析存在，实际命令/API 和模型输出尚未校准 |
 | Reconciler | 桩 | 5 分钟循环存在，`_sweep()` 目前只记录 active flow，不拉取远端状态 |

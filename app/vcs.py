@@ -1,86 +1,353 @@
-"""VCS 轴：工作区隔离 + 提交指引。见 docs/architecture/components.md §4.6。
+"""Flow-owned repository preparation and post-run VCS verification.
 
-不是端口——只是一组普通函数（旧的 VCS `Protocol` 已砍：薄包装、`head_commit`/
-`rebase_onto`/`cleanup` 是死代码、只 jj 验过）。§4.6 把本地平面拆成三条正交轴：
-
-  workspace  每 flow 一个隔离目录（**VCS-无关**的拷贝，本模块 make_workspace/cleanup_workspace）
-  sandbox    可写根 + 网络出口（ports.Sandbox，只认路径，见 app/sandbox.py）
-  VCS        branch / commit / push 由 code agent 自己做——本模块只出**指引文本**
-
-平面边界（§3）：Orchestrator 定分支名（它来开 PR），agent 依 agent_guidance() 建分支 +
-commit + push。工具不出现裸 git。
-
-实测（§4.6）：workspace-write 下 jj `.jj` 可写、`jj commit` 成功；git `.git` 被沙盒挡成只读。
-这是**沙盒**在漏 VCS 知识（它守 `.git` 却不知道守 `.jj`），不是 VCS 轴的问题——
-未来容器 Sandbox adapter 接管 FS 策略即消除（原 V4，见 ports.Sandbox）。
-TODO(verify) V8：codex 对 jj 不熟，agent_guidance() 的 jj 指引效果。
+CodeAgent chooses and operates the repository's native VCS. This module does not choose on its
+behalf or perform commits; it snapshots every available backend before the run and verifies the
+backend declared by the Agent afterwards.
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
+import shutil
+import signal
+import tempfile
+from collections.abc import Mapping
 from pathlib import Path
+from urllib.parse import urlparse
 
-from app.models import VcsKind
+from app.models import VcsExecutionContext, VcsKind, VcsOutcome
 
 
-async def _run(*args: str, cwd: Path | None = None) -> tuple[int, str, str]:
+class VcsVerificationError(RuntimeError):
+    """A stable VCS completion-stage failure suitable for an INITIAL result."""
+
+    def __init__(self, stage: str, message: str) -> None:
+        super().__init__(message)
+        self.stage = stage
+
+
+VCS_COMMAND_TIMEOUT_SECONDS = 30.0
+
+
+def _vcs_environment(source: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Return a verification environment without worker or credential state."""
+
+    values = os.environ if source is None else source
+    environment = {key: values[key] for key in ("PATH", "LANG", "LC_ALL") if key in values}
+    environment.update(
+        {
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_OPTIONAL_LOCKS": "0",
+        }
+    )
+    return environment
+
+
+async def _run(
+    *args: str,
+    cwd: Path | None = None,
+    timeout: float = VCS_COMMAND_TIMEOUT_SECONDS,
+    stage: str = "discovery",
+) -> tuple[int, str, str]:
     proc = await asyncio.create_subprocess_exec(
         *args,
         cwd=str(cwd) if cwd else None,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        env=_vcs_environment(),
+        start_new_session=True,
     )
-    out, err = await proc.communicate()
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except TimeoutError as error:
+        os.killpg(proc.pid, signal.SIGKILL)
+        await proc.wait()
+        raise VcsVerificationError(stage, f"{args[0]} command timed out after {timeout:g}s") from error
     return proc.returncode or 0, out.decode(errors="replace"), err.decode(errors="replace")
 
 
-# --------------------------------------------------------------- workspace 轴（VCS-无关）
+def flow_repo_path(seed_repo_path: Path, flow_id: int) -> Path:
+    """Return the unambiguous directory owned by a stable Flow identity."""
+
+    if flow_id <= 0:
+        raise ValueError("flow_id must be positive")
+    return seed_repo_path.parent / f"{seed_repo_path.name}--flow-{flow_id}"
 
 
-def workspace_path(repo_path: Path, branch: str) -> Path:
-    return repo_path.parent / f"{repo_path.name}--{branch.replace('/', '-')}"
+async def prepare_flow_repo(seed_repo_path: Path, flow_id: int) -> Path:
+    """Create a full repo copy once and reuse it for later Attempts of the same Flow."""
+
+    if not seed_repo_path.is_dir():
+        raise FileNotFoundError(f"seed repository does not exist: {seed_repo_path}")
+    repo_path = flow_repo_path(seed_repo_path, flow_id)
+    if repo_path.exists():
+        if not repo_path.is_dir():
+            raise RuntimeError(f"Flow repository path is not a directory: {repo_path}")
+        return repo_path
+    partial_path = repo_path.with_name(f"{repo_path.name}.partial")
+    if partial_path.exists():
+        await asyncio.to_thread(shutil.rmtree, partial_path)
+    try:
+        await asyncio.to_thread(shutil.copytree, seed_repo_path, partial_path, symlinks=True)
+        partial_path.replace(repo_path)
+    except BaseException:
+        if partial_path.exists():
+            await asyncio.to_thread(shutil.rmtree, partial_path)
+        raise
+    return repo_path
 
 
-async def make_workspace(repo_path: Path, branch: str) -> Path:
-    """把主 clone 复制成每 flow 独立工作区。**VCS-无关**——就是拷目录，不跑
-    `git worktree` / `jj workspace`（那会把 workspace 绑死到具体 VCS）。
+async def cleanup_flow_repo(seed_repo_path: Path, flow_id: int) -> None:
+    """Remove the repository owned by a terminal Flow."""
 
-    分支名由 Orchestrator 传入（它来开 PR）；建分支 + commit + push 是 agent 的活
-    （见 agent_guidance()）。TODO(verify)：大 repo 用 APFS clonefile / reflink 降成本。
-    """
-    ws = workspace_path(repo_path, branch)
-    await _run("cp", "-a", str(repo_path), str(ws))
-    return ws
+    repo_path = flow_repo_path(seed_repo_path, flow_id)
+    if repo_path.exists():
+        await asyncio.to_thread(shutil.rmtree, repo_path)
 
 
-async def cleanup_workspace(ws: Path) -> None:
-    """删除隔离工作区（VCS-无关，就是删目录）。归档 / 取消时调。"""
-    await _run("rm", "-rf", str(ws))
+async def prepare_vcs_context(
+    repo_path: Path, branch: str, *, remote: str = "origin"
+) -> VcsExecutionContext:
+    """Snapshot candidate backend revisions without selecting a backend for CodeAgent."""
+
+    git_base = await _optional_stdout("git", "rev-parse", "HEAD", cwd=repo_path)
+    jj_base = await _optional_stdout(
+        "jj", "log", "-r", "@", "--no-graph", "-T", "commit_id ++ \"\\n\"", cwd=repo_path
+    )
+    jj_ancestor = await _optional_stdout(
+        "jj",
+        "log",
+        "-r",
+        "parents(@)",
+        "--no-graph",
+        "-T",
+        'commit_id ++ "\\n"',
+        cwd=repo_path,
+    )
+    if git_base is None and jj_base is None:
+        raise VcsVerificationError("discovery", "repository has neither usable git nor jj metadata")
+    git_remote_url = await _git_remote_url(repo_path, remote) if git_base is not None else None
+    jj_remote_url = await _jj_remote_url(repo_path, remote) if jj_base is not None else None
+    return VcsExecutionContext(
+        repo_path=repo_path,
+        branch=branch,
+        remote=remote,
+        git_remote_url=git_remote_url,
+        jj_remote_url=jj_remote_url,
+        git_base_sha=git_base,
+        jj_base_sha=jj_base,
+        jj_ancestor_sha=jj_ancestor,
+    )
 
 
-# ------------------------------------------------------------------- VCS 轴（指引文本）
+def agent_guidance(branch: str, *, remote: str = "origin") -> str:
+    """Tell CodeAgent the VCS completion contract without preselecting Git or jj."""
+
+    return (
+        "Inspect the repository conventions and actual VCS metadata, then choose the repository's "
+        "native Git or Jujutsu (jj) workflow yourself. Start from the current checkout, create the "
+        f"exact branch or bookmark `{branch}`, make at least one new commit, and push it to "
+        f"`{remote}`. Leave no uncommitted changes. Do not open a pull request. In the structured "
+        "result set `vcs_backend_used` to exactly `git` or `jj` for the backend you actually used."
+    )
 
 
-def detect_vcs_kind(repo_path: Path) -> VcsKind:
-    """探测：有 .jj → jj，否则 git。只用来挑指引文本。"""
-    return VcsKind.JJ if (repo_path / ".jj").exists() else VcsKind.GIT
+async def verify_vcs_outcome(
+    context: VcsExecutionContext, declared_backend: VcsKind
+) -> VcsOutcome:
+    """Verify branch, new commit, cleanliness, and the remote ref for the declared backend."""
+
+    if declared_backend is VcsKind.GIT:
+        return await _verify_git(context)
+    if declared_backend is VcsKind.JJ:
+        return await _verify_jj(context)
+    raise VcsVerificationError("discovery", f"unsupported VCS backend: {declared_backend}")
 
 
-_GIT_GUIDANCE = (
-    "This repo uses git. Create and switch to a branch named `{branch}`, commit your changes "
-    "locally, then push that branch to origin. Do NOT open a pull request (the tool does that)."
-)
+async def _verify_git(context: VcsExecutionContext) -> VcsOutcome:
+    if context.git_base_sha is None or context.git_remote_url is None:
+        raise VcsVerificationError("discovery", "Agent declared git but git metadata is unavailable")
+    branch = await _required_stdout(
+        "branch", "git", "branch", "--show-current", cwd=context.repo_path
+    )
+    if branch != context.branch:
+        raise VcsVerificationError(
+            "branch", f"git branch is {branch or '(detached)'}, expected {context.branch}"
+        )
+    commit = await _required_stdout("commit", "git", "rev-parse", "HEAD", cwd=context.repo_path)
+    await _require_git_descendant(context.repo_path, context.git_base_sha, commit)
+    await _require_clean("git", "status", "--porcelain", "--untracked-files=all", cwd=context.repo_path)
+    current_url = await _git_remote_url(context.repo_path, context.remote)
+    _require_unchanged_remote(current_url, context.git_remote_url)
+    remote = await _remote_sha(context.git_remote_url, context.branch)
+    return _outcome(VcsKind.GIT, branch, commit, remote)
 
-_JJ_GUIDANCE = (
-    "This repository uses Jujutsu (jj), NOT git. After editing, commit with "
-    "`jj commit -m '<message>'`, set bookmark `{branch}` on that commit, then push it with "
-    "`jj git push -b {branch}`. Do not run git. Do NOT open a pull request (the tool does that)."
-)
+
+async def _verify_jj(context: VcsExecutionContext) -> VcsOutcome:
+    if (
+        context.jj_base_sha is None
+        or context.jj_ancestor_sha is None
+        or context.jj_remote_url is None
+    ):
+        raise VcsVerificationError("discovery", "Agent declared jj but jj metadata is unavailable")
+    commit = await _required_stdout(
+        "commit",
+        "jj",
+        "log",
+        "-r",
+        context.branch,
+        "--no-graph",
+        "-T",
+        "commit_id ++ \"\\n\"",
+        cwd=context.repo_path,
+    )
+    _require_new_commit(commit, context.jj_base_sha)
+    await _require_jj_descendant(context.repo_path, context.jj_ancestor_sha, commit)
+    await _require_clean("jj", "diff", "--summary", cwd=context.repo_path)
+    current_url = await _jj_remote_url(context.repo_path, context.remote)
+    _require_unchanged_remote(current_url, context.jj_remote_url)
+    remote = await _remote_sha(context.jj_remote_url, context.branch)
+    return _outcome(VcsKind.JJ, context.branch, commit, remote)
 
 
-def agent_guidance(repo_path: Path, branch: str) -> str:
-    """注入 prompt 的本地版本控制指引（本仓库怎么建分支 / commit / push）。"""
-    if detect_vcs_kind(repo_path) is VcsKind.JJ:
-        return _JJ_GUIDANCE.format(branch=branch)
-    return _GIT_GUIDANCE.format(branch=branch)
+def _require_new_commit(commit: str, base: str) -> None:
+    if commit == base:
+        raise VcsVerificationError("commit", "target branch has no new commit")
+
+
+async def _require_git_descendant(repo_path: Path, base: str, commit: str) -> None:
+    _require_new_commit(commit, base)
+    code, _, _ = await _run(
+        *_git_args("merge-base", "--is-ancestor", base, commit), cwd=repo_path, stage="commit"
+    )
+    if code != 0:
+        raise VcsVerificationError("commit", "target commit does not descend from the captured base")
+
+
+async def _require_jj_descendant(repo_path: Path, base: str, commit: str) -> None:
+    ancestor = await _required_stdout(
+        "commit",
+        "jj",
+        "log",
+        "-r",
+        f"{base} & ancestors({commit})",
+        "--no-graph",
+        "-T",
+        'commit_id ++ "\\n"',
+        cwd=repo_path,
+    )
+    if ancestor != base:
+        raise VcsVerificationError("commit", "target commit does not descend from the captured base")
+
+
+async def _require_clean(*args: str, cwd: Path) -> None:
+    changes = await _required_stdout("workspace", *args, cwd=cwd)
+    if changes:
+        raise VcsVerificationError("workspace", "repository has uncommitted changes")
+
+
+async def _jj_remote_url(repo_path: Path, remote: str) -> str:
+    remotes = await _required_stdout("push", "jj", "git", "remote", "list", cwd=repo_path)
+    for line in remotes.splitlines():
+        name, separator, url = line.partition(" ")
+        if name == remote and separator and url.strip():
+            return _canonical_remote_url(url.strip(), repo_path)
+    raise VcsVerificationError("push", f"jj remote {remote!r} is not configured")
+
+
+async def _git_remote_url(repo_path: Path, remote: str) -> str:
+    url = await _required_stdout(
+        "push", "git", "remote", "get-url", "--push", remote, cwd=repo_path
+    )
+    return _canonical_remote_url(url, repo_path)
+
+
+def _canonical_remote_url(url: str, repo_path: Path) -> str:
+    parsed = urlparse(url)
+    if parsed.scheme == "https":
+        if parsed.username or parsed.password or parsed.query or parsed.fragment:
+            raise VcsVerificationError("push", "remote URL must not contain embedded credentials")
+        return url
+    if parsed.scheme == "file":
+        if parsed.netloc not in ("", "localhost"):
+            raise VcsVerificationError("push", "file remote must be local")
+        return str(Path(parsed.path).resolve())
+    if not parsed.scheme and ":" not in url:
+        path = Path(url)
+        return str((repo_path / path).resolve() if not path.is_absolute() else path.resolve())
+    raise VcsVerificationError("push", "remote must use HTTPS or a local path")
+
+
+def _require_unchanged_remote(current: str, captured: str) -> None:
+    if current != captured:
+        raise VcsVerificationError("push", "configured remote changed during CodeAgent execution")
+
+
+async def _remote_sha(remote: str, branch: str) -> str:
+    # Run outside the agent-controlled repository so local config cannot rewrite the fixed URL.
+    with tempfile.TemporaryDirectory(prefix="flowtool-vcs-verify-") as directory:
+        output = await _required_stdout(
+            "push",
+            "git",
+            "ls-remote",
+            "--heads",
+            remote,
+            f"refs/heads/{branch}",
+            cwd=Path(directory),
+        )
+    lines = output.splitlines()
+    if len(lines) != 1:
+        raise VcsVerificationError("push", f"remote branch {branch!r} is missing or ambiguous")
+    return lines[0].split(maxsplit=1)[0]
+
+
+def _outcome(backend: VcsKind, branch: str, commit: str, remote: str) -> VcsOutcome:
+    if commit != remote:
+        raise VcsVerificationError("push", "local commit does not match the remote branch")
+    return VcsOutcome(
+        declared_backend=backend,
+        verified_backend=backend,
+        branch=branch,
+        commit_sha=commit,
+        remote_sha=remote,
+    )
+
+
+async def _optional_stdout(*args: str, cwd: Path) -> str | None:
+    try:
+        command = _git_args(*args[1:]) if args and args[0] == "git" else args
+        code, stdout, _ = await _run(*command, cwd=cwd)
+    except FileNotFoundError:
+        return None
+    return stdout.strip() if code == 0 and stdout.strip() else None
+
+
+async def _required_stdout(stage: str, *args: str, cwd: Path) -> str:
+    try:
+        command = _git_args(*args[1:]) if args and args[0] == "git" else args
+        code, stdout, _ = await _run(*command, cwd=cwd, stage=stage)
+    except FileNotFoundError as error:
+        raise VcsVerificationError(stage, f"required executable is unavailable: {args[0]}") from error
+    if code != 0:
+        raise VcsVerificationError(stage, f"{args[0]} command failed with exit {code}")
+    return stdout.strip()
+
+
+def _git_args(*args: str) -> tuple[str, ...]:
+    """Disable repository-controlled Git hooks, helpers, and external protocols."""
+
+    return (
+        "git",
+        "-c",
+        f"core.hooksPath={os.devnull}",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "credential.helper=",
+        "-c",
+        "protocol.ext.allow=never",
+        *args,
+    )

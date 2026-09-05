@@ -3,7 +3,15 @@ from datetime import datetime
 import pytest
 from pydantic import ValidationError
 
-from app.models import CodexResult, Job, JobKind, JobState, TriageVerdict, Verdict
+from app.models import (
+    CodexResult,
+    InitialCodexResult,
+    Job,
+    JobKind,
+    JobState,
+    TriageVerdict,
+    Verdict,
+)
 
 
 def test_persisted_model_validates_database_values() -> None:
@@ -48,3 +56,10 @@ def test_codex_result_parses_review_outcomes() -> None:
     assert result.addressed[0].comment_id == 12
     assert result.deferred[0].comment_id == 13
     assert result.needs_clarification == ["Which timeout should be the default?"]
+
+
+def test_initial_codex_result_has_a_strict_required_schema() -> None:
+    schema = InitialCodexResult.model_json_schema()
+
+    assert set(schema["required"]) == {"summary", "vcs_backend_used"}
+    assert schema["additionalProperties"] is False

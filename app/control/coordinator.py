@@ -73,6 +73,7 @@ class JobCoordinator:
                 flow.current_attempt_id = attempt.id
                 self.store.update_flow(flow)
             return InitialTask(
+                flow_id=flow.id,
                 attempt_id=attempt.id,
                 repo=flow.repo,
                 issue_number=flow.issue_number,
@@ -104,6 +105,7 @@ class JobCoordinator:
                 await self._fail(flow, attempt.pr_number, "修订任务缺少 Codex session。")
                 return JobState.FAILED
             return RevisionTask(
+                flow_id=flow.id,
                 attempt_id=attempt.id,
                 repo=flow.repo,
                 branch=_required_branch(attempt),
@@ -132,13 +134,9 @@ class JobCoordinator:
             )
         if job.kind is JobKind.ARCHIVE:
             return ArchiveTask(
+                flow_id=flow.id,
                 attempt_id=attempt.id,
                 repo=flow.repo,
-                branches=[
-                    current.branch
-                    for current in self.store.list_attempts(flow.id)
-                    if current.branch
-                ],
             )
         raise ValueError(f"unsupported job kind: {job.kind}")
 
@@ -179,10 +177,16 @@ class JobCoordinator:
             self.store.update_attempt(attempt)
             self.store.record_codex_run(attempt.id, "initial", "", "", result.exit_code)
             if result.exit_code != 0:
+                reason = f"编码失败（codex exit={result.exit_code}），未开 PR。"
+                if result.failure_stage and result.failure_detail:
+                    reason = (
+                        f"编码失败（codex exit={result.exit_code}）；VCS {result.failure_stage}: "
+                        f"{result.failure_detail}。未开 PR。"
+                    )
                 await self._fail(
                     flow,
                     flow.issue_number,
-                    f"编码失败（codex exit={result.exit_code}），未开 PR。",
+                    reason,
                 )
                 return JobState.FAILED
             installation_id = _installation_id(flow)

@@ -14,6 +14,7 @@ def _assignment() -> Assignment:
         assignment_token="assignment-1",
         connection_epoch="epoch-1",
         task=InitialTask(
+            flow_id=3,
             attempt_id=7,
             repo="owner/repo",
             issue_number=8,
