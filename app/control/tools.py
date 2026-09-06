@@ -8,7 +8,7 @@ from typing import Protocol
 from loguru import logger
 
 from app.github_models import GitHubAdapterError, GitHubErrorKind, PullRequestSnapshot
-from app.models import TERMINAL_STATES, DeliveryState
+from app.models import TERMINAL_STATES, DeliveryState, FlowDelivery
 from app.plugins import get_plugin_manager
 from app.ports import GitHubClient
 from app.protocol import FlowToolErrorKind, FlowToolRequest, FlowToolResponse
@@ -119,9 +119,8 @@ class FlowToolService:
             )
         title = title.strip()
         body = self._closing_body(body, flow.issue_number)
-        if delivery.pr_number is not None and (
-            (delivery.title is not None and delivery.title != title)
-            or (delivery.body is not None and delivery.body != body)
+        if (delivery.title is not None and delivery.title != title) or (
+            delivery.body is not None and delivery.body != body
         ):
             raise FlowToolRejected(
                 FlowToolErrorKind.CONFLICT,
@@ -160,57 +159,110 @@ class FlowToolService:
                 FlowToolErrorKind.CONFLICT,
                 "remote branch SHA does not match the worker-verified commit",
             )
-        previous_state = delivery.state
-        delivery.state = DeliveryState.OPENING
-        delivery.head_sha = remote.sha
-        self.store.update_delivery(delivery)
-
-        pull_request = await self.github.find_pull_request_by_head(
-            installation_id, flow.repo, delivery.branch
-        )
-        if pull_request is None:
-            if delivery.pr_number is not None:
+        if delivery.state is DeliveryState.OPEN:
+            if delivery.head_sha != remote.sha:
                 raise FlowToolRejected(
-                    FlowToolErrorKind.NOT_FOUND,
-                    "persisted pull request is missing from GitHub",
+                    FlowToolErrorKind.CONFLICT,
+                    "open Flow delivery head does not match the remote branch",
                 )
-            pull_request = await self._create_or_find(
-                installation_id,
-                flow.repo,
-                delivery.branch,
-                delivery.base_branch,
-                title,
-                body,
-            )
-        self._validate_pull_request(pull_request, delivery.branch, delivery.base_branch, remote.sha)
-
-        delivery.state = DeliveryState.OPEN
-        delivery.pr_number = pull_request.number
-        delivery.url = f"https://github.com/{flow.repo}/pull/{pull_request.number}"
+            existing_response = self._delivery_response(delivery)
+            self.store.complete_tool_call(request.call_id, existing_response)
+            return FlowToolResponse(call_id=request.call_id, result=existing_response)
+        delivery.state = DeliveryState.OPENING
         delivery.head_sha = remote.sha
         delivery.title = title
         delivery.body = body
-        delivery.version += 1
         self.store.update_delivery(delivery)
-        await self.github.set_labels(
-            installation_id, flow.repo, pull_request.number, [self.settings.in_review_label]
-        )
-        await self.github.request_reviewers(
-            installation_id, flow.repo, pull_request.number, self.settings.reviewers
-        )
-        response: dict[str, object] = {
-            "pr_number": pull_request.number,
-            "url": delivery.url,
+
+        prepared_response: dict[str, object] = {
+            "status": "prepared",
             "head_sha": remote.sha,
             "delivery_version": delivery.version,
         }
-        self.store.complete_tool_call(request.call_id, response)
-        if previous_state is not DeliveryState.OPEN:
+        self.store.complete_tool_call(request.call_id, prepared_response)
+        return FlowToolResponse(call_id=request.call_id, result=prepared_response)
+
+    async def finalize_open_pr(self, flow_id: int, call_id: str) -> dict[str, object]:
+        """Create the prepared PR only after INITIAL terminal validation succeeds."""
+
+        async with self._locks.setdefault(flow_id, asyncio.Lock()):
+            flow = self.store.get_flow(flow_id)
+            delivery = self.store.get_delivery(flow_id)
+            call = self.store.get_tool_call(call_id)
+            if flow is None or flow.state in TERMINAL_STATES:
+                raise FlowToolRejected(FlowToolErrorKind.CONFLICT, "Flow is not active")
+            if delivery is None or delivery.base_branch is None:
+                raise FlowToolRejected(
+                    FlowToolErrorKind.CONFLICT, "Flow delivery is not prepared"
+                )
+            if call is None or call.flow_id != flow_id or call.name != "flow.open_pr":
+                raise FlowToolRejected(
+                    FlowToolErrorKind.CONFLICT, "flow.open_pr call is not prepared"
+                )
+            if delivery.state is DeliveryState.OPEN:
+                if delivery.pr_number is None or delivery.url is None or delivery.head_sha is None:
+                    raise FlowToolRejected(
+                        FlowToolErrorKind.CONFLICT, "open Flow delivery is incomplete"
+                    )
+                return self._delivery_response(delivery)
+            if (
+                delivery.state is not DeliveryState.OPENING
+                or delivery.title is None
+                or delivery.body is None
+                or delivery.head_sha is None
+            ):
+                raise FlowToolRejected(
+                    FlowToolErrorKind.CONFLICT, "Flow delivery has no prepared PR intent"
+                )
+            installation_id = flow.installation_id
+            if installation_id is None:
+                raise FlowToolRejected(
+                    FlowToolErrorKind.AUTHORIZATION, "Flow has no GitHub installation"
+                )
+
+            pull_request = await self.github.find_pull_request_by_head(
+                installation_id, flow.repo, delivery.branch
+            )
+            if pull_request is None:
+                if delivery.pr_number is not None:
+                    raise FlowToolRejected(
+                        FlowToolErrorKind.NOT_FOUND,
+                        "persisted pull request is missing from GitHub",
+                    )
+                pull_request = await self._create_or_find(
+                    installation_id,
+                    flow.repo,
+                    delivery.branch,
+                    delivery.base_branch,
+                    delivery.title,
+                    delivery.body,
+                )
+            self._validate_pull_request(
+                pull_request,
+                delivery.branch,
+                delivery.base_branch,
+                delivery.head_sha,
+            )
+            await self.github.set_labels(
+                installation_id,
+                flow.repo,
+                pull_request.number,
+                [self.settings.in_review_label],
+            )
+            await self.github.request_reviewers(
+                installation_id, flow.repo, pull_request.number, self.settings.reviewers
+            )
+
+            delivery.state = DeliveryState.OPEN
+            delivery.pr_number = pull_request.number
+            delivery.url = f"https://github.com/{flow.repo}/pull/{pull_request.number}"
+            delivery.version += 1
+            self.store.update_delivery(delivery)
             try:
                 self.plugins.hook.on_pr_opened(flow=flow, pr_number=pull_request.number)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("plugin hook on_pr_opened failed: {}", exc)
-        return FlowToolResponse(call_id=request.call_id, result=response)
+            return self._delivery_response(delivery)
 
     async def _create_or_find(
         self,
@@ -237,6 +289,11 @@ class FlowToolService:
     def _validate_pull_request(
         pull_request: PullRequestSnapshot, branch: str, base: str, head_sha: str
     ) -> None:
+        if pull_request.state.casefold() != "open":
+            raise FlowToolRejected(
+                FlowToolErrorKind.CONFLICT,
+                f"pull request is {pull_request.state}, expected open",
+            )
         if (
             pull_request.head_branch != branch
             or pull_request.base_branch != base
@@ -246,6 +303,15 @@ class FlowToolService:
                 FlowToolErrorKind.CONFLICT,
                 "pull request head, base, or SHA conflicts with Flow delivery",
             )
+
+    @staticmethod
+    def _delivery_response(delivery: FlowDelivery) -> dict[str, object]:
+        return {
+            "pr_number": delivery.pr_number,
+            "url": delivery.url,
+            "head_sha": delivery.head_sha,
+            "delivery_version": delivery.version,
+        }
 
     @staticmethod
     def _closing_body(body: str, issue_number: int) -> str:

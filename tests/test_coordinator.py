@@ -286,23 +286,24 @@ async def test_initial_job_crosses_worker_boundary_and_opens_pr() -> None:
         worker_id="worker-1",
     )
     assert tool.result is not None
-    state = await subject.apply_result(
-        job,
-        InitialResult(
-            session_id="session-1",
-            last_message="done",
-            exit_code=0,
-            vcs_backend=VcsKind.GIT,
-            branch="flow/1",
-            commit_sha="abc123",
-            remote_sha="abc123",
-            pushed=True,
-            open_pr_call_id="call-1",
-            pull_request=tool.result,
-        ),
+    assert github.opened == []
+    result = InitialResult(
+        session_id="session-1",
+        last_message="done",
+        exit_code=0,
+        vcs_backend=VcsKind.GIT,
+        branch="flow/1",
+        commit_sha="abc123",
+        remote_sha="abc123",
+        pushed=True,
+        open_pr_call_id="call-1",
+        pull_request=tool.result,
     )
+    state = await subject.apply_result(job, result)
+    replayed_state = await subject.apply_result(job, result)
 
     assert state is JobState.DONE
+    assert replayed_state is JobState.DONE
     assert store.flow.state is FlowState.ACTIVE
     assert store.attempt is not None
     assert store.attempt.codex_session_id == "session-1"
@@ -312,6 +313,54 @@ async def test_initial_job_crosses_worker_boundary_and_opens_pr() -> None:
     assert github.opened == ["flow/1"]
     assert github.review_requests == [["carol"]]
     assert github.labels == [["flow:in-review"]]
+
+
+@pytest.mark.asyncio
+async def test_initial_failure_after_open_pr_request_has_no_github_pr_side_effect() -> None:
+    # Codex may call the tool and then fail or time out; GitHub delivery must wait until the
+    # coordinator has accepted the terminal result and final VCS facts.
+    store = MemoryStore()
+    github = RecordingGitHub()
+    subject = coordinator(store, github)
+    job = Job(
+        id=5,
+        flow_id=1,
+        kind=JobKind.INITIAL,
+        state=JobState.RUNNING,
+        assigned_worker_id="worker-1",
+        assignment_token="token-1",
+    )
+    task = await subject.prepare(job)
+    assert isinstance(task, InitialTask)
+    subject.mark_started(job, task, "worker-1")
+    tool = await subject.execute_tool(
+        FlowToolRequest(
+            job_id=job.id,
+            flow_id=store.flow.id,
+            attempt_id=task.attempt_id,
+            assignment_token="token-1",
+            connection_epoch="epoch-1",
+            call_id="call-1",
+            name="flow.open_pr",
+            arguments={"title": "Implement", "body": "done"},
+            vcs_backend=VcsKind.GIT,
+            branch="flow/1",
+            commit_sha="abc123",
+            remote_sha="abc123",
+        ),
+        worker_id="worker-1",
+    )
+    assert tool.result is not None
+
+    state = await subject.apply_result(
+        job,
+        InitialResult(session_id="session-1", last_message="failed", exit_code=1),
+    )
+
+    assert state is JobState.FAILED
+    assert github.opened == []
+    assert store.delivery is not None
+    assert store.delivery.state is DeliveryState.OPENING
 
 
 @pytest.mark.asyncio
@@ -366,7 +415,7 @@ async def test_initial_delivery_failure_reports_the_broken_invariant() -> None:
 
     assert state is JobState.FAILED
     assert github.comments == [
-        "⚠️ 编码结果与已验证的 Flow delivery 不一致：delivery state is none, expected open。"
+        "⚠️ 编码结果与已验证的 Flow delivery 不一致：delivery state is none, expected opening or open。"
     ]
 
 

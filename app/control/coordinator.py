@@ -6,7 +6,7 @@ from typing import Protocol
 
 from loguru import logger
 
-from app.control.tools import FlowToolService
+from app.control.tools import FlowToolRejected, FlowToolService
 from app.github_models import GitHubAdapterError
 from app.models import (
     TERMINAL_STATES,
@@ -260,6 +260,16 @@ class JobCoordinator:
                     f"编码结果与已验证的 Flow delivery 不一致：{mismatch}。",
                 )
                 return JobState.FAILED
+            assert result.open_pr_call_id is not None
+            try:
+                await self.tools.finalize_open_pr(flow.id, result.open_pr_call_id)
+            except (FlowToolRejected, GitHubAdapterError) as exc:
+                await self._fail(
+                    flow,
+                    flow.issue_number,
+                    f"PR delivery failed after terminal validation: {exc}",
+                )
+                return JobState.FAILED
             return JobState.DONE
 
         if isinstance(result, TriageResult):
@@ -385,8 +395,8 @@ class JobCoordinator:
 
         if delivery is None:
             return "delivery is missing"
-        if delivery.state is not DeliveryState.OPEN:
-            return f"delivery state is {delivery.state.value}, expected open"
+        if delivery.state not in {DeliveryState.OPENING, DeliveryState.OPEN}:
+            return f"delivery state is {delivery.state.value}, expected opening or open"
         if result.vcs_backend is None:
             return "verified VCS backend is missing"
         if not result.pushed:
@@ -415,10 +425,8 @@ class JobCoordinator:
             return "pull request handle is missing"
         if tool_call.response != result.pull_request:
             return "pull request handle does not match the persisted tool response"
-        if result.pull_request.get("pr_number") != delivery.pr_number:
-            return "pull request number does not match delivery"
         if result.pull_request.get("head_sha") != delivery.head_sha:
-            return "pull request head SHA does not match delivery"
+            return "prepared delivery head SHA does not match delivery"
         return None
 
     async def _fail(self, flow: Flow, number: int | None, reason: str) -> None:

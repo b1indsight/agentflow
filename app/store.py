@@ -717,7 +717,10 @@ class Store:
                     return None
                 connection.execute(
                     "INSERT INTO flow_executions(flow_id, worker_id, repo_identity, bound_at)"
-                    " VALUES (%s,%s,%s,%s)",
+                    " VALUES (%s,%s,%s,%s) ON CONFLICT(flow_id) DO UPDATE SET"
+                    " worker_id=EXCLUDED.worker_id, repo_identity=EXCLUDED.repo_identity,"
+                    " bound_at=EXCLUDED.bound_at, recovery_deadline=NULL, released_at=NULL"
+                    " WHERE flow_executions.released_at IS NOT NULL",
                     (row["flow_id"], worker_id, f"{worker_id}:{row['repo']}", now),
                 )
             else:
