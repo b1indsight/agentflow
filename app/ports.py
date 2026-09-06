@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -71,21 +72,13 @@ class GitHubClient(Protocol):
     adapter 不必再从 store 反查（docs/architecture/components.md §4.5 / github-app.md）。
     """
 
-    async def get_issue(
-        self, installation_id: int, repo: str, number: int
-    ) -> IssueSnapshot: ...
+    async def get_issue(self, installation_id: int, repo: str, number: int) -> IssueSnapshot: ...
 
-    async def get_repository(
-        self, installation_id: int, repo: str
-    ) -> RepositorySnapshot: ...
+    async def get_repository(self, installation_id: int, repo: str) -> RepositorySnapshot: ...
 
-    async def create_push_capability(
-        self, installation_id: int, repo: str
-    ) -> PushCapability: ...
+    async def create_push_capability(self, installation_id: int, repo: str) -> PushCapability: ...
 
-    async def get_ref(
-        self, installation_id: int, repo: str, branch: str
-    ) -> RemoteRef: ...
+    async def get_ref(self, installation_id: int, repo: str, branch: str) -> RemoteRef: ...
 
     async def find_pull_request_by_head(
         self, installation_id: int, repo: str, branch: str
@@ -95,7 +88,28 @@ class GitHubClient(Protocol):
         self, installation_id: int, repo: str, head: str, base: str, title: str, body: str
     ) -> PullRequestSnapshot: ...
 
-    async def comment(self, installation_id: int, repo: str, number: int, body: str) -> None: ...
+    async def comment(self, installation_id: int, repo: str, number: int, body: str) -> int: ...
+
+    async def find_comment(
+        self,
+        installation_id: int,
+        repo: str,
+        number: int,
+        marker: str,
+    ) -> int | None: ...
+
+    async def get_labels(self, installation_id: int, repo: str, number: int) -> list[str]: ...
+
+    async def get_reviewers(
+        self,
+        installation_id: int,
+        repo: str,
+        number: int,
+        *,
+        since: datetime,
+    ) -> set[str]: ...
+
+    async def review_thread_resolved(self, installation_id: int, thread_id: str) -> bool: ...
 
     async def set_labels(
         self, installation_id: int, repo: str, number: int, labels: list[str]

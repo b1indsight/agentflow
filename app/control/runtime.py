@@ -53,6 +53,7 @@ class ControlRuntime:
 
     def startup(self) -> None:
         self.store.init_db()
+        self.store.results.recover_claims()
         requeued, failed = self.store.recover_abandoned_assignments()
         if requeued or failed:
             logger.warning(
@@ -69,14 +70,18 @@ class ControlRuntime:
     async def _sweep_assignments(self) -> None:
         while True:
             await asyncio.sleep(self.settings.worker_sweep_interval)
-            requeued, failed = self.store.sweep_expired_assignments()
-            if requeued or failed:
-                logger.warning(
-                    "expired worker assignments: {} requeued, {} failed",
-                    requeued,
-                    failed,
-                )
-                self.gateway.notify_jobs()
+            try:
+                requeued, failed = self.store.sweep_expired_assignments()
+                if requeued or failed:
+                    logger.warning(
+                        "expired worker assignments: {} requeued, {} failed",
+                        requeued,
+                        failed,
+                    )
+                    self.gateway.notify_jobs()
+                await self.gateway.recover_pending_results()
+            except Exception:  # noqa: BLE001 -- keep periodic recovery alive after operational errors
+                logger.exception("assignment/result recovery sweep failed; retrying next sweep")
 
     def spawn_handler(self, coroutine: Coroutine[Any, Any, None]) -> None:
         task = asyncio.create_task(coroutine)

@@ -26,8 +26,9 @@ from app.store import Store
 
 
 class AsgiCoordinator:
-    def __init__(self, attempt_id: int) -> None:
+    def __init__(self, attempt_id: int, store: Store) -> None:
         self.attempt_id = attempt_id
+        self.store = store
 
     async def prepare(self, job: Job) -> ExecutionTask | JobState:
         return InitialTask(
@@ -40,14 +41,10 @@ class AsgiCoordinator:
             branch="flow/issue-8",
         )
 
-    async def assignment_secret(
-        self, job: Job, task: ExecutionTask
-    ) -> AssignmentSecret | None:
+    async def assignment_secret(self, job: Job, task: ExecutionTask) -> AssignmentSecret | None:
         return None
 
-    async def execute_tool(
-        self, request: FlowToolRequest, *, worker_id: str
-    ) -> FlowToolResponse:
+    async def execute_tool(self, request: FlowToolRequest, *, worker_id: str) -> FlowToolResponse:
         return FlowToolResponse(
             call_id=request.call_id,
             error="unused",
@@ -59,6 +56,7 @@ class AsgiCoordinator:
 
     async def apply_result(self, job: Job, result: ExecutionResult) -> JobState:
         assert isinstance(result, InitialResult)
+        self.store.complete_persisted_result(job.id, JobState.DONE)
         return JobState.DONE
 
     async def fail(self, job: Job, reason: str) -> None:
@@ -71,7 +69,7 @@ class AsgiContext:
         self.router = SimpleNamespace()
         self.gateway = WorkerGateway(
             store,
-            AsgiCoordinator(attempt_id),
+            AsgiCoordinator(attempt_id, store),
             worker_tokens={"worker-1": "worker-secret"},
             poll_interval=0.01,
         )
@@ -94,13 +92,16 @@ def test_real_asgi_websocket_completes_a_postgresql_job(store: Store) -> None:
     job = store.enqueue_job(flow.id, JobKind.INITIAL)
     application = create_app(lambda: AsgiContext(store, attempt.id))  # type: ignore[arg-type]
 
-    with TestClient(application) as client, client.websocket_connect(
-        "/internal/workers/connect",
-        headers={
-            "Authorization": "Bearer worker-secret",
-            "X-FlowTool-Worker-ID": "worker-1",
-        },
-    ) as socket:
+    with (
+        TestClient(application) as client,
+        client.websocket_connect(
+            "/internal/workers/connect",
+            headers={
+                "Authorization": "Bearer worker-secret",
+                "X-FlowTool-Worker-ID": "worker-1",
+            },
+        ) as socket,
+    ):
         socket.send_text(Register(worker_id="worker-1").model_dump_json())
         assert isinstance(parse_server_message(socket.receive_text()), Registered)
         assignment = parse_server_message(socket.receive_text())
@@ -118,9 +119,7 @@ def test_real_asgi_websocket_completes_a_postgresql_job(store: Store) -> None:
                 job_id=assignment.job_id,
                 assignment_token=assignment.assignment_token,
                 connection_epoch=assignment.connection_epoch,
-                result=InitialResult(
-                    session_id="session-1", last_message="done", exit_code=0
-                ),
+                result=InitialResult(session_id="session-1", last_message="done", exit_code=0),
             ).model_dump_json()
         )
         accepted = parse_server_message(socket.receive_text())

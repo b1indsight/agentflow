@@ -19,7 +19,8 @@ M0 已经具备并验证：
 - INITIAL/TRIAGE/REVISION/ANSWER/ARCHIVE 使用 v4 task/result/tool/error 契约，显式携带 stable Flow identity，并用
   worker/epoch/job/token 四元组拒绝旧连接写入；
 - 未 Started 的 assignment 在 lease 到期后重排；Started job 在 recovery grace 内只等原 worker，serve 重启不会立即失败；
-- worker journal 在 ResultAccepted 前保留 assignment/终态结果，control result inbox 去重重放并恢复未应用结果；
+- worker journal 在 ResultAccepted 前保留 assignment/终态结果；control 持续恢复已接收结果，
+  以持久化 GitHub 操作回执和最终本地事务避免重放重复派生任务/评论，未知远端结果保留待核对；
 - 同一 attempt 固定到首次 Started 的 worker；每个 worker 单槽运行，同机实例使用独立 root、identity 标记和进程锁；
 - Flow 生命周期独占一个 worker/repo，`FlowDelivery` 独立保存 branch/base/PR；Attempt 只保存本次运行与 session；
 - INITIAL 获取真实 Issue/default branch，临发短时 push capability；Codex 通过 worker-local MCP 调用
@@ -110,5 +111,9 @@ assignment/epoch fencing、lease sweeper、忙碌重连、result replay、worker
 M1 Feature 1 已用一次性本地 repo 验证 Codex 自主完成 Git commit/push；Feature 2 已实现按单仓库和
 Contents write 收窄的短时 capability，以及 Issue/repository/ref/PR primitives；Feature 3 已通过 95 项
 自动化测试贯通 capability 下发、worker-local MCP、双端 VCS/ref 核验和幂等 PR delivery。真实 GitHub App
-smoke、GitHub-only egress 和授权 disposable repo 的完整 E2E 仍待完成；本机无 PostgreSQL，22 个数据库
-集成场景未执行。
+smoke、GitHub-only egress 和授权 disposable repo 的完整 E2E 仍待完成。
+
+原子结果应用改动的本机验证为 118 passed / 30 skipped；按用户要求先跳过本机 PostgreSQL 安装和真实数据库
+测试，数据库用例保留在现有 PostgreSQL CI 中。Ruff、Mypy、CLI help 和 sdist/wheel 构建通过。
+升级必须先停止旧 serve；旧版本已接收但未确认的结果默认要求人工核对，详见
+[结果应用计划与验证范围](docs/plan/atomic-workflow-results.md)。

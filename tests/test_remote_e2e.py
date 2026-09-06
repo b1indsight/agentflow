@@ -62,9 +62,7 @@ class RemoteStore:
     def get_job(self, job_id: int) -> Job | None:
         return self.job if self.job.id == job_id else None
 
-    def worker_connected(
-        self, worker_id: str, protocol_version: int, connection_epoch: str
-    ):
+    def worker_connected(self, worker_id: str, protocol_version: int, connection_epoch: str):
         return SimpleNamespace(current_job_id=None)
 
     def worker_disconnected(
@@ -75,9 +73,7 @@ class RemoteStore:
     ) -> None:
         pass
 
-    def assign_job(
-        self, worker_id: str, token: str, connection_epoch: str
-    ) -> Job | None:
+    def assign_job(self, worker_id: str, token: str, connection_epoch: str) -> Job | None:
         if self.job.state is not JobState.QUEUED:
             return None
         self.job.state = JobState.RUNNING
@@ -121,6 +117,7 @@ class RemoteStore:
 
     def complete_persisted_result(self, job_id: int, state: JobState) -> bool:
         self.job.state = state
+        self.job.result_applied_at = self.job.updated_at
         self.done.set()
         return True
 
@@ -166,7 +163,8 @@ class RemoteStore:
 
 
 class RemoteCoordinator:
-    def __init__(self) -> None:
+    def __init__(self, store: RemoteStore) -> None:
+        self.store = store
         self.result: InitialResult | None = None
         self.tool_calls = 0
 
@@ -197,6 +195,7 @@ class RemoteCoordinator:
     async def apply_result(self, job: Job, result: ExecutionResult) -> JobState:
         assert isinstance(result, InitialResult)
         self.result = result
+        self.store.complete_persisted_result(job.id, JobState.DONE)
         return JobState.DONE
 
     async def fail(self, job: Job, reason: str) -> None:
@@ -230,7 +229,7 @@ async def test_control_gateway_and_worker_client_complete_one_remote_job() -> No
     worker_to_serve: asyncio.Queue[str] = asyncio.Queue()
     serve_to_worker: asyncio.Queue[str] = asyncio.Queue()
     store = RemoteStore()
-    coordinator = RemoteCoordinator()
+    coordinator = RemoteCoordinator(store)
     gateway = WorkerGateway(
         store,
         coordinator,

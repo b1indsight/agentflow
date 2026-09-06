@@ -62,9 +62,7 @@ def flows(active: bool = typer.Option(False, help="只看未终结的")) -> None
             delivery = store.get_delivery(f.id)
             pr = f"PR#{delivery.pr_number}" if delivery and delivery.pr_number else "-"
             cycles = att.revision_cycles if att else 0
-            typer.echo(
-                f"[{f.id}] {f.repo}#{f.issue_number:<5} {f.state:<10} {pr} cycles={cycles}"
-            )
+            typer.echo(f"[{f.id}] {f.repo}#{f.issue_number:<5} {f.state:<10} {pr} cycles={cycles}")
 
 
 @app.command()
@@ -131,6 +129,14 @@ def flow_show(flow_id: int) -> None:
                 f"  job {job.id}: kind={job.kind} state={job.state} "
                 f"worker={job.assigned_worker_id or '-'} recovery={recovery} result={result}"
             )
+            if job.last_error:
+                typer.echo(f"    error: {job.last_error}")
+            for effect in store.results.list_effects(job.id):
+                if effect.state.value not in {"succeeded", "skipped"}:
+                    typer.echo(
+                        f"    effect {effect.effect_key}: {effect.state} "
+                        f"next={effect.next_attempt_at.isoformat()} reason={effect.last_error or '-'}"
+                    )
 
 
 @flow_app.command("cancel")

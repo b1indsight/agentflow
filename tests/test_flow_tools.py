@@ -1,4 +1,5 @@
-from types import SimpleNamespace
+from contextlib import contextmanager
+from copy import deepcopy
 from typing import Any, cast
 
 import pytest
@@ -48,6 +49,18 @@ class ToolStore:
         )
         self.calls: dict[str, FlowToolCall] = {}
         self.assignment_is_active = True
+
+    @contextmanager
+    def transaction(self):
+        snapshot = deepcopy(self.__dict__)
+        try:
+            yield self
+        except Exception:
+            self.__dict__.update(snapshot)
+            raise
+
+    def lock_workflow(self, flow_id: int) -> Flow | None:
+        return self.get_flow(flow_id)
 
     def assignment_active(self, *args: object) -> bool:
         return self.assignment_is_active
@@ -145,13 +158,12 @@ def request(name: str = "flow.open_pr") -> FlowToolRequest:
 
 
 @pytest.mark.asyncio
-async def test_open_pr_prepares_and_replays_before_terminal_finalize() -> None:
+async def test_open_pr_prepares_and_replays_without_remote_delivery() -> None:
     store = ToolStore()
     github = ToolGitHub()
     service = FlowToolService(
         cast(Store, cast(Any, store)),
         cast(GitHubClient, cast(Any, github)),
-        SimpleNamespace(reviewers=["carol"], in_review_label="flow:in-review"),
     )
 
     first = await service.execute(request(), worker_id="worker-a")
@@ -169,52 +181,12 @@ async def test_open_pr_prepares_and_replays_before_terminal_finalize() -> None:
     assert github.opened == 0
     assert github.labels == github.reviews == 0
 
-    finalized = await service.finalize_open_pr(store.flow.id, "call-a")
-    replayed_finalize = await service.finalize_open_pr(store.flow.id, "call-a")
-
-    assert finalized == replayed_finalize
-    assert finalized["pr_number"] == 17
-    assert store.delivery.state is DeliveryState.OPEN
-    assert github.opened == 1
-    assert github.labels == github.reviews == 1
-
-
-@pytest.mark.asyncio
-async def test_finalize_rejects_a_closed_pull_request() -> None:
-    class ClosedGitHub(ToolGitHub):
-        async def find_pull_request_by_head(
-            self, installation_id: int, repo: str, branch: str
-        ) -> PullRequestSnapshot | None:
-            return PullRequestSnapshot(
-                number=17,
-                state="closed",
-                head_branch=branch,
-                head_sha="abc123",
-                base_branch="trunk",
-            )
-
-    store = ToolStore()
-    github = ClosedGitHub()
-    service = FlowToolService(
-        cast(Store, cast(Any, store)),
-        cast(GitHubClient, cast(Any, github)),
-        SimpleNamespace(reviewers=["carol"], in_review_label="flow:in-review"),
-    )
-    assert (await service.execute(request(), worker_id="worker-a")).error is None
-
-    with pytest.raises(RuntimeError, match="pull request is closed"):
-        await service.finalize_open_pr(store.flow.id, "call-a")
-
-    assert store.delivery.state is DeliveryState.OPENING
-    assert github.labels == github.reviews == 0
-
 
 @pytest.mark.asyncio
 async def test_unknown_flow_tool_fails_closed() -> None:
     service = FlowToolService(
         cast(Store, cast(Any, ToolStore())),
         cast(GitHubClient, cast(Any, ToolGitHub())),
-        SimpleNamespace(reviewers=[], in_review_label="flow:in-review"),
     )
 
     response = await service.execute(request("flow.spawn"), worker_id="worker-a")
@@ -226,20 +198,54 @@ async def test_unknown_flow_tool_fails_closed() -> None:
 
 
 @pytest.mark.asyncio
+async def test_prepared_delivery_and_tool_receipt_roll_back_together(monkeypatch) -> None:
+    # A crash saving the tool reply must not leave a half-prepared delivery behind.
+    store = ToolStore()
+    service = FlowToolService(cast(Store, store), cast(GitHubClient, ToolGitHub()))
+    complete = store.complete_tool_call
+
+    def crash(*args, **kwargs):
+        complete(*args, **kwargs)
+        raise RuntimeError("receipt commit interrupted")
+
+    monkeypatch.setattr(store, "complete_tool_call", crash)
+    with pytest.raises(RuntimeError, match="receipt commit interrupted"):
+        await service.execute(request(), worker_id="worker-a")
+    assert store.delivery.state is DeliveryState.NONE
+    assert store.calls["call-a"].response is None
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_remote_verification_cannot_prepare_delivery(monkeypatch) -> None:
+    # The GitHub read yields control; cancellation wins before local intent is committed.
+    store = ToolStore()
+    github = ToolGitHub()
+
+    async def cancel_and_read(*args):
+        store.flow.state = FlowState.CANCELLED
+        return RemoteRef(branch="flow/3", sha="abc123")
+
+    monkeypatch.setattr(github, "get_ref", cancel_and_read)
+    service = FlowToolService(cast(Store, store), cast(GitHubClient, github))
+    response = await service.execute(request(), worker_id="worker-a")
+    assert response.error_kind is FlowToolErrorKind.STALE_ASSIGNMENT
+    assert store.delivery.state is DeliveryState.NONE
+    assert store.calls["call-a"].response is None
+
+
+@pytest.mark.asyncio
 async def test_stale_assignment_is_distinct_from_invalid_arguments() -> None:
     store = ToolStore()
     store.assignment_is_active = False
     service = FlowToolService(
         cast(Store, cast(Any, store)),
         cast(GitHubClient, cast(Any, ToolGitHub())),
-        SimpleNamespace(reviewers=[], in_review_label="flow:in-review"),
     )
 
     stale = await service.execute(request(), worker_id="worker-a")
     active_service = FlowToolService(
         cast(Store, cast(Any, ToolStore())),
         cast(GitHubClient, cast(Any, ToolGitHub())),
-        SimpleNamespace(reviewers=[], in_review_label="flow:in-review"),
     )
     invalid = await active_service.execute(
         request().model_copy(update={"arguments": {"title": "", "body": "Done"}}),
@@ -254,9 +260,7 @@ async def test_stale_assignment_is_distinct_from_invalid_arguments() -> None:
 @pytest.mark.asyncio
 async def test_github_rate_limit_is_returned_as_retryable() -> None:
     class RateLimitedGitHub(ToolGitHub):
-        async def get_ref(
-            self, installation_id: int, repo: str, branch: str
-        ) -> RemoteRef:
+        async def get_ref(self, installation_id: int, repo: str, branch: str) -> RemoteRef:
             raise GitHubAdapterError(
                 GitHubErrorKind.RATE_LIMITED,
                 "get ref",
@@ -267,7 +271,6 @@ async def test_github_rate_limit_is_returned_as_retryable() -> None:
     service = FlowToolService(
         cast(Store, cast(Any, ToolStore())),
         cast(GitHubClient, cast(Any, RateLimitedGitHub())),
-        SimpleNamespace(reviewers=[], in_review_label="flow:in-review"),
     )
 
     response = await service.execute(request(), worker_id="worker-a")
@@ -284,7 +287,6 @@ async def test_new_call_cannot_change_existing_pr_arguments() -> None:
     service = FlowToolService(
         cast(Store, cast(Any, store)),
         cast(GitHubClient, cast(Any, github)),
-        SimpleNamespace(reviewers=[], in_review_label="flow:in-review"),
     )
     assert (await service.execute(request(), worker_id="worker-a")).error is None
     conflicting = request().model_copy(
@@ -308,11 +310,8 @@ async def test_remote_sha_mismatch_fails_before_opening_pr() -> None:
     service = FlowToolService(
         cast(Store, cast(Any, store)),
         cast(GitHubClient, cast(Any, github)),
-        SimpleNamespace(reviewers=[], in_review_label="flow:in-review"),
     )
-    mismatched = request().model_copy(
-        update={"commit_sha": "different", "remote_sha": "different"}
-    )
+    mismatched = request().model_copy(update={"commit_sha": "different", "remote_sha": "different"})
 
     response = await service.execute(mismatched, worker_id="worker-a")
 

@@ -24,6 +24,7 @@ from app.protocol import (
     Succeeded,
     parse_server_message,
 )
+from app.result_models import ResultPending
 
 
 class RecordingStore:
@@ -39,9 +40,7 @@ class RecordingStore:
     def get_job(self, job_id: int) -> Job | None:
         return self.job if self.job.id == job_id else None
 
-    def worker_connected(
-        self, worker_id: str, protocol_version: int, connection_epoch: str
-    ):
+    def worker_connected(self, worker_id: str, protocol_version: int, connection_epoch: str):
         self.presence[worker_id] = "online"
         self.connection_epoch = connection_epoch
         return SimpleNamespace(current_job_id=None)
@@ -54,9 +53,7 @@ class RecordingStore:
     ) -> None:
         self.presence[worker_id] = "offline"
 
-    def assign_job(
-        self, worker_id: str, token: str, connection_epoch: str
-    ) -> Job | None:
+    def assign_job(self, worker_id: str, token: str, connection_epoch: str) -> Job | None:
         if self.job.state is not JobState.QUEUED:
             return None
         self.job.state = JobState.RUNNING
@@ -95,7 +92,12 @@ class RecordingStore:
         payload: Mapping[str, object],
         digest: str,
     ) -> str:
-        return "pending" if self.assignment_active(job_id, worker_id, token) else "rejected"
+        if not self.assignment_active(job_id, worker_id, token):
+            return "rejected"
+        self.job.result_payload = dict(payload)
+        self.job.result_digest = digest
+        self.job.result_received_at = self.job.updated_at
+        return "pending"
 
     def list_unapplied_results(self) -> list[Job]:
         return []
@@ -119,9 +121,10 @@ class RecordingStore:
         return True
 
     def assignment_active(self, job_id: int, worker_id: str, token: str) -> bool:
-        return (
-            self.job.state is JobState.RUNNING
-            and (job_id, worker_id, token) == (5, "worker-1", self.job.assignment_token)
+        return self.job.state is JobState.RUNNING and (job_id, worker_id, token) == (
+            5,
+            "worker-1",
+            self.job.assignment_token,
         )
 
     def requeue_assignment(
@@ -163,9 +166,7 @@ class RecordingCoordinator:
     async def assignment_secret(self, job: Job, task: ExecutionTask):
         return None
 
-    async def execute_tool(
-        self, request: FlowToolRequest, *, worker_id: str
-    ) -> FlowToolResponse:
+    async def execute_tool(self, request: FlowToolRequest, *, worker_id: str) -> FlowToolResponse:
         assert worker_id == "worker-1"
         return FlowToolResponse(
             call_id=request.call_id,
@@ -179,10 +180,15 @@ class RecordingCoordinator:
     async def apply_result(self, job: Job, result: ExecutionResult) -> JobState:
         assert isinstance(result, InitialResult)
         self.results.append(result)
+        # This transport fixture shares its stored Job object with the coordinator.
+        job.state = JobState.DONE
+        job.result_applied_at = job.updated_at
         return JobState.DONE
 
     async def fail(self, job: Job, reason: str) -> None:
         self.failures.append(reason)
+        job.state = JobState.FAILED
+        job.result_applied_at = job.updated_at
 
 
 class ScriptedSocket:
@@ -265,9 +271,7 @@ class ToolSocket(ScriptedSocket):
                 remote_sha="abc",
             ).model_dump_json()
         if self._step == 4:
-            assert any(
-                isinstance(parse_server_message(raw), FlowToolResponse) for raw in self.sent
-            )
+            assert any(isinstance(parse_server_message(raw), FlowToolResponse) for raw in self.sent)
             return Succeeded(
                 job_id=assignment.job_id,
                 assignment_token=assignment.assignment_token,
@@ -299,7 +303,8 @@ async def test_gateway_runs_one_remote_assignment_to_ack() -> None:
     assert any(isinstance(message, Assignment) for message in messages)
     assert any(isinstance(message, ResultAccepted) for message in messages)
     assert store.started is True
-    assert store.finished is JobState.DONE
+    assert store.job.state is JobState.DONE
+    assert store.job.result_applied_at is not None
     assert coordinator.started is True
     assert coordinator.results[0].session_id == "session-1"
 
@@ -319,6 +324,58 @@ async def test_gateway_multiplexes_flow_tool_calls_during_execution() -> None:
     responses = [parse_server_message(raw) for raw in socket.sent]
     assert any(isinstance(message, FlowToolResponse) for message in responses)
     assert any(isinstance(message, ResultAccepted) for message in responses)
+
+
+@pytest.mark.parametrize("pending", [True, False])
+async def test_gateway_never_acknowledges_an_uncommitted_result(pending, monkeypatch):
+    store = RecordingStore()
+    coordinator = RecordingCoordinator()
+    socket = ScriptedSocket()
+
+    async def unfinished(*args):
+        if pending:
+            raise ResultPending("GitHub outcome requires reconciliation")
+        return JobState.DONE
+
+    monkeypatch.setattr(coordinator, "apply_result", unfinished)
+    gateway = WorkerGateway(store, coordinator, worker_tokens={"worker-1": "worker-secret"})
+    await gateway.handle(socket)
+    assert store.job.result_payload is not None
+    assert store.job.result_applied_at is None
+    assert not any(isinstance(parse_server_message(raw), ResultAccepted) for raw in socket.sent)
+    assert socket.closed == (1013 if pending else 1008)
+
+
+async def test_recovery_continues_after_one_broken_result():
+    class RecoveryStore(RecordingStore):
+        def __init__(self):
+            super().__init__()
+            self.jobs = [self.job, self.job.model_copy(update={"id": 6})]
+            for job in self.jobs:
+                job.result_payload = Succeeded(
+                    job_id=job.id,
+                    assignment_token="token",
+                    connection_epoch="epoch",
+                    result=InitialResult(session_id="session", last_message="done", exit_code=0),
+                ).model_dump(mode="json")
+
+        def list_unapplied_results(self):
+            return self.jobs
+
+        def get_job(self, job_id):
+            return next(job for job in self.jobs if job.id == job_id)
+
+    class RecoveryCoordinator(RecordingCoordinator):
+        async def apply_result(self, job, result):
+            if job.id == 5:
+                raise RuntimeError("broken local result")
+            return await super().apply_result(job, result)
+
+    store = RecoveryStore()
+    gateway = WorkerGateway(store, RecoveryCoordinator(), worker_tokens={"worker-1": "secret"})
+    await gateway.recover_pending_results()
+    assert store.jobs[0].result_applied_at is None
+    assert store.jobs[1].result_applied_at is not None
 
 
 @pytest.mark.asyncio
