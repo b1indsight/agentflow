@@ -72,6 +72,23 @@ def test_github_app_requires_positive_app_id_and_readable_nonempty_key(tmp_path:
         GitHubApp(configured.model_copy(update={"github_private_key_path": empty_key}))
 
 
+@pytest.mark.parametrize("configured_timeout", [None, "12.5"])
+def test_both_github_auth_clients_use_finite_timeouts(
+    configured_timeout: str | None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    # A client left at githubkit's timeout=None can hold result recovery indefinitely.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("FLOWTOOL_GITHUB_REQUEST_TIMEOUT_SECONDS", raising=False)
+    if configured_timeout is not None:
+        monkeypatch.setenv("FLOWTOOL_GITHUB_REQUEST_TIMEOUT_SECONDS", configured_timeout)
+    github = GitHubApp(settings(tmp_path))
+    expected = float(configured_timeout) if configured_timeout is not None else 30.0
+
+    for client in (github._app_client(), github._installation_client(42)):
+        timeout = client.config.timeout
+        assert (timeout.connect, timeout.read, timeout.write, timeout.pool) == (expected,) * 4
+
+
 @pytest.mark.asyncio
 async def test_reads_issue_repository_and_remote_ref_as_internal_snapshots(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

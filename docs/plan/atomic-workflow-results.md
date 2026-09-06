@@ -150,3 +150,10 @@ PostgreSQL 测试和安装；保留集成用例，并在交付时明确实际执
   `uv build --no-sources` 与 `git diff --check` 通过。一个既有 Starlette/httpx 弃用告警保留。
 - 用户要求的“真实测试 2 先跳过”按本机 PostgreSQL 测试/安装暂停执行；未访问真实 GitHub/Codex/bub。
   30 个数据库用例包含 SQL 回滚、跨连接触发、领取/取消互斥、源任务去重和 recovery deadline，用现有 CI 验证。
+
+### 审查后小补丁：GitHub 网络超时
+
+按用户“先配置个超时”的要求，新增 `FLOWTOOL_GITHUB_REQUEST_TIMEOUT_SECONDS`，默认 30 秒，
+覆盖 App/installation 两种客户端的连接、读写和连接池等待，拒绝非正值及 NaN/Infinity。
+测试先复现客户端各阶段超时均为 None，再验证默认值、环境变量覆盖、无效值拒绝和现有超时错误映射。
+本补丁不拆分租约清理与恢复循环，不为锁等待或整批恢复设置总时限；相关耦合及其他审查发现仍待后续处理。

@@ -190,6 +190,19 @@ def test_recovery_timing_settings_require_safe_ordering(monkeypatch) -> None:
         )
 
 
+@pytest.mark.parametrize("timeout", ["0", "-1", "nan", "inf"])
+def test_github_request_timeout_rejects_nonpositive_or_nonfinite_values(
+    timeout: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("FLOWTOOL_GITHUB_REQUEST_TIMEOUT_SECONDS", timeout)
+    with pytest.raises(ValidationError, match="github_request_timeout_seconds"):
+        ServeSettings(
+            database_url="postgresql://localhost/flowtool",
+            worker_tokens={"worker-1": SecretStr("secret")},
+        )
+
+
 def test_worker_reconnect_backoff_requires_a_valid_range() -> None:
     with pytest.raises(ValidationError, match="reconnect"):
         WorkerSettings(

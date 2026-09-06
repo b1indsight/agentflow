@@ -44,6 +44,11 @@ App JWT ── POST /app/installations/{id}/access_tokens ──► Installation
 `FLOWTOOL_ALLOWLIST` 只控制谁能触发 flow；`FLOWTOOL_REVIEWERS` 独立配置 PR reviewer，空列表表示不
 请求 reviewer。`FLOWTOOL_IN_REVIEW_LABEL` 配置 review 状态 label。
 
+`FLOWTOOL_GITHUB_REQUEST_TIMEOUT_SECONDS` 控制 serve 端 GitHub App 和 installation 客户端的
+连接、读取、写入、连接池等待超时，默认均为 **30 秒**；只接受正有限数值，修改后重启 serve 生效。
+这是 HTTPX 各网络阶段的超时，不是包含重试、分页和锁等待在内的整个结果恢复时限。
+超时仍走现有 transient 错误处理；可能已发送的非幂等写入保留待核对，不能直接重发。
+
 订阅事件候选：Issues、Issue comment、Pull request、Pull request review、Pull request review comment。
 GitHub 会根据已选权限决定哪些事件可订阅；正式接入时应逐事件核对
 [Webhook events and payloads](https://docs.github.com/en/webhooks/webhook-events-and-payloads)。

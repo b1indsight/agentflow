@@ -40,6 +40,7 @@ class GitHubApp:
             raise ValueError("FLOWTOOL_GITHUB_APP_ID must be a positive integer")
         self._app_id = settings.github_app_id
         self._bot_login = settings.bot_login
+        self._request_timeout_seconds = settings.github_request_timeout_seconds
         self._private_key = self._read_private_key(settings.github_private_key_path)
 
     @staticmethod
@@ -50,7 +51,10 @@ class GitHubApp:
         return key
 
     def _app_client(self) -> Any:
-        return GitHub(AppAuthStrategy(self._app_id, self._private_key))
+        return GitHub(
+            AppAuthStrategy(self._app_id, self._private_key),
+            timeout=self._request_timeout_seconds,
+        )
 
     def _installation_client(self, installation_id: int) -> Any:
         return GitHub(
@@ -58,7 +62,8 @@ class GitHubApp:
                 self._app_id,
                 self._private_key,
                 installation_id,
-            )
+            ),
+            timeout=self._request_timeout_seconds,
         )
 
     async def get_issue(self, installation_id: int, repo: str, number: int) -> IssueSnapshot:
