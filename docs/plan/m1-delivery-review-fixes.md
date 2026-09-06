@@ -1,6 +1,6 @@
 # M1 delivery review 修复计划
 
-> 状态：已批准并实施，PostgreSQL CI 待验证 · 计划/实施日期：2026-09-06
+> 状态：已实施并验证 · 计划/实施日期：2026-09-06
 
 ## 目标
 
@@ -83,5 +83,5 @@ PR snapshot 校验除 branch/base/head SHA 外，明确要求 `state == "open"`�
   GitHub PR/label/reviewer 副作用；已 open delivery 的 terminal replay 直接复用持久化结果；
 - PR snapshot 明确要求 state 为 `open`；closed lookup 保持 delivery=`opening` 并失败；
 - 新增 fail/retry/reassign、失败 terminal 无 PR 副作用、prepared/finalize replay 和 closed PR 回归测试；
-- 本地结果：Ruff、Mypy、uv lock、build 通过；pytest 97 passed、23 skipped。本机没有 PostgreSQL，相关
-  场景（包括新增 retry 回归）由 PR CI 的 PostgreSQL service 验证。
+- 本地结果：Ruff、Mypy、uv lock、build 通过；pytest 97 passed、23 skipped。本机没有 PostgreSQL；
+  PR CI 的 Ruff、Mypy、build 和 PostgreSQL pytest 全部通过，包括新增 retry 回归场景。

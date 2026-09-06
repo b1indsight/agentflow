@@ -5,12 +5,12 @@
 
 ## 当前计划
 
-- [`m1-delivery-review-fixes.md`](m1-delivery-review-fixes.md) — failed Flow retry、INITIAL 成功前提前开 PR 和 closed PR 误判已修复，PostgreSQL CI 待验证；
 - [`m1-github-capabilities.md`](m1-github-capabilities.md) — M1 Feature 2/3：GitHub App、短时 push capability 与 PR primitives 已实现并通过自动化，真实 App smoke 待执行；
 - [`m1-issue-to-pr.md`](m1-issue-to-pr.md) — M1 Feature 3/3：Flow 生命周期独占 worker/repo、Flow tool RPC、CodeAgent commit/push、远端验证与一 Flow 一 PR 已实现并通过自动化，真实 E2E 待执行；
 
 ## 已完成计划
 
+- [`m1-delivery-review-fixes.md`](m1-delivery-review-fixes.md) — failed Flow retry、INITIAL 成功前提前开 PR 和 closed PR 误判已修复并通过 PostgreSQL CI；
 - [`m1-code-agent-vcs.md`](m1-code-agent-vcs.md) — M1 Feature 1/3：Flow repo、CodeAgent 自主 Git/jj commit/push 与 worker 事实核验，已实施并验证；
 - [`worker-connection-recovery.md`](worker-connection-recovery.md) — Feature 3/3：忙碌重连、持久租约、serve 重启恢复和结果重放，已实施并验证；
 - [`multi-worker-scheduling.md`](multi-worker-scheduling.md) — Feature 2/3：多 worker 公平调度、attempt affinity 和单机多实例隔离，已实施并验证；
