@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 
 def utcnow() -> datetime:
@@ -21,18 +21,24 @@ def utcnow() -> datetime:
 
 
 class FlowState(StrEnum):
-    PENDING = "pending"
-    CODING = "coding"
-    PR_OPEN = "pr_open"
-    REVISING = "revising"
-    MERGED = "merged"
-    ARCHIVED = "archived"
+    """Flow lifecycle only; UI phases are derived from jobs and delivery."""
+
+    ACTIVE = "active"
+    SUCCEEDED = "succeeded"
     CANCELLED = "cancelled"
     FAILED = "failed"
 
 
 # 处于这些状态的 flow 算「已终结」，(repo, issue) 唯一约束只作用于非终结态。
-TERMINAL_STATES = frozenset({FlowState.ARCHIVED, FlowState.CANCELLED, FlowState.FAILED})
+TERMINAL_STATES = frozenset({FlowState.SUCCEEDED, FlowState.CANCELLED, FlowState.FAILED})
+
+
+class DeliveryState(StrEnum):
+    NONE = "none"
+    OPENING = "opening"
+    OPEN = "open"
+    CLOSED = "closed"
+    MERGED = "merged"
 
 
 class JobKind(StrEnum):
@@ -80,11 +86,7 @@ class VcsKind(StrEnum):
 
 
 class Flow(BaseModel):
-    """issue 级追踪单元 + 状态机。per-attempt 的产物（branch/PR/会话）挪到 Attempt。
-
-    一条 flow 可挂多个 Attempt（多方案分支，§9-2）；MVP 恰好一个，`current_attempt_id`
-    指向当前驱动 flow 的那个。数据模型**不再把 issue↔PR 锁成 1:1**。
-    """
+    """Stable issue-level lifecycle and delivery identity."""
 
     id: int
     repo: str  # "owner/name"
@@ -97,19 +99,55 @@ class Flow(BaseModel):
 
 
 class Attempt(BaseModel):
-    """一次候选解法：自己的 branch / 工作区 / codex 会话 / PR（§9-2）。
-
-    MVP：每 flow 一个。多 agent / 多方案时，一条 flow 挂多个 Attempt，各自独立推进。
-    revise 失控闸计数（revision_cycles）是 per-attempt（挂在具体 PR 上）。
-    """
+    """One execution/recovery/retry fact within a stable Flow binding."""
 
     id: int
     flow_id: int
-    branch: str | None = None
     codex_session_id: str | None = None
-    pr_number: int | None = None
-    worker_id: str | None = None
     revision_cycles: int = 0
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class FlowExecution(BaseModel):
+    """Stable ownership of one worker slot and repo for the lifetime of a Flow."""
+
+    flow_id: int
+    worker_id: str
+    repo_identity: str
+    bound_at: datetime = Field(default_factory=utcnow)
+    recovery_deadline: datetime | None = None
+    released_at: datetime | None = None
+
+
+class FlowDelivery(BaseModel):
+    """Flow-owned branch and pull-request delivery state."""
+
+    flow_id: int
+    branch: str
+    base_branch: str | None = None
+    state: DeliveryState = DeliveryState.NONE
+    pr_number: int | None = None
+    url: str | None = None
+    head_sha: str | None = None
+    title: str | None = None
+    body: str | None = None
+    version: int = 0
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class FlowToolCall(BaseModel):
+    """Durable idempotency ledger for a fenced Flow tool invocation."""
+
+    call_id: str
+    flow_id: int
+    attempt_id: int
+    job_id: int
+    name: str
+    arguments: dict[str, object]
+    response: dict[str, object] | None = None
+    error: str | None = None
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
 
@@ -225,6 +263,15 @@ class AgentRun:
     last_message: str
     exit_code: int
     output: CodexResult | None = None   # --output-schema 解析结果（修订轮）
+
+
+@dataclass(frozen=True)
+class CodeAgentContext:
+    """Ephemeral per-run capabilities; never persist or log this value."""
+
+    push_token: SecretStr | None = None
+    push_repository: str | None = None
+    mcp_socket: Path | None = None
 
 
 # ------------------------------------------------------------ 跨模型 JSON 契约（pydantic）

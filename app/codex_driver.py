@@ -5,13 +5,14 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 
 from loguru import logger
 
-from app.models import AgentRun, CodexResult
+from app.models import AgentRun, CodeAgentContext, CodexResult
 
 CODEX_BIN = "codex"
 
@@ -48,14 +49,40 @@ _CODEX_ENVIRONMENT_KEYS = frozenset(
 )
 
 
-def _codex_environment(source: Mapping[str, str] | None = None) -> dict[str, str]:
-    """Build a minimal environment without worker, control-plane, or GitHub credentials."""
+def _codex_environment(
+    source: Mapping[str, str] | None = None,
+    context: CodeAgentContext | None = None,
+) -> dict[str, str]:
+    """Build a minimal environment with only the optional scoped push credential."""
 
     values = os.environ if source is None else source
-    return {key: value for key, value in values.items() if key in _CODEX_ENVIRONMENT_KEYS}
+    environment = {
+        key: value for key, value in values.items() if key in _CODEX_ENVIRONMENT_KEYS
+    }
+    if context is not None and context.push_token is not None:
+        environment.update(
+            {
+                "FLOWTOOL_PUSH_TOKEN": context.push_token.get_secret_value(),
+                "GIT_TERMINAL_PROMPT": "0",
+                "GIT_CONFIG_COUNT": "2",
+                "GIT_CONFIG_KEY_0": "credential.https://github.com.username",
+                "GIT_CONFIG_VALUE_0": "x-access-token",
+                "GIT_CONFIG_KEY_1": "credential.https://github.com.helper",
+                "GIT_CONFIG_VALUE_1": (
+                    "!f() { echo password=$FLOWTOOL_PUSH_TOKEN; }; f"
+                ),
+            }
+        )
+    return environment
 
 
-def _start_args(task: str, cwd: Path, *, trusted_host: bool) -> list[str]:
+def _start_args(
+    task: str,
+    cwd: Path,
+    *,
+    trusted_host: bool,
+    context: CodeAgentContext | None = None,
+) -> list[str]:
     """Build a full-access start command only after the operator's explicit opt-in."""
 
     if not trusted_host:
@@ -63,7 +90,7 @@ def _start_args(task: str, cwd: Path, *, trusted_host: bool) -> list[str]:
             "Codex trusted-host full-access execution requires "
             "FLOWTOOL_TRUSTED_HOST_EXECUTION=true"
         )
-    return [
+    args = [
         CODEX_BIN,
         "exec",
         task,
@@ -74,6 +101,19 @@ def _start_args(task: str, cwd: Path, *, trusted_host: bool) -> list[str]:
         "danger-full-access",
         "--skip-git-repo-check",
     ]
+    if context is not None and context.mcp_socket is not None:
+        overrides = {
+            "mcp_servers.flow.command": sys.executable,
+            "mcp_servers.flow.args": ["-m", "app.worker.tools"],
+            "mcp_servers.flow.env.FLOWTOOL_MCP_SOCKET": str(context.mcp_socket),
+            "mcp_servers.flow.env.FLOWTOOL_PUSH_TOKEN": "",
+            "mcp_servers.flow.required": True,
+            "mcp_servers.flow.enabled_tools": ["open_pr"],
+            "mcp_servers.flow.default_tools_approval_mode": "auto",
+        }
+        for key, value in overrides.items():
+            args.extend(["-c", f"{key}={json.dumps(value)}"])
+    return args
 
 
 def _parse_thread_id(jsonl_text: str) -> str | None:
@@ -97,9 +137,16 @@ class CodexAgent:
         self.trusted_host = trusted_host
         self.timeout = timeout
 
-    async def start(self, task: str, cwd: Path, *, output_schema: Path | None = None) -> AgentRun:
-        args = _start_args(task, cwd, trusted_host=self.trusted_host)
-        return await self._run(args, output_schema, parse_thread=True)
+    async def start(
+        self,
+        task: str,
+        cwd: Path,
+        *,
+        output_schema: Path | None = None,
+        context: CodeAgentContext | None = None,
+    ) -> AgentRun:
+        args = _start_args(task, cwd, trusted_host=self.trusted_host, context=context)
+        return await self._run(args, output_schema, parse_thread=True, context=context)
 
     async def resume(
         self, session_id: str, prompt: str, *, output_schema: Path | None = None
@@ -123,6 +170,7 @@ class CodexAgent:
         *,
         parse_thread: bool,
         session_id: str | None = None,
+        context: CodeAgentContext | None = None,
     ) -> AgentRun:
         with tempfile.NamedTemporaryFile(prefix="codex-last-", suffix=".txt", delete=False) as file:
             last_file = Path(file.name)
@@ -136,7 +184,7 @@ class CodexAgent:
             stdin=asyncio.subprocess.DEVNULL,   # 必须：否则 codex 会挂等 stdin
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            env=_codex_environment(),
+            env=_codex_environment(context=context),
         )
         try:
             stdout, _stderr = await asyncio.wait_for(proc.communicate(), timeout=self.timeout)

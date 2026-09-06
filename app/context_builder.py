@@ -17,7 +17,8 @@ _HARD_CONSTRAINTS = (
     "Rules:\n"
     "- Edit code to satisfy the task, then commit locally and push using this repo's VCS "
     "(see VCS guidance below).\n"
-    "- Do NOT open a pull request or post comments — the orchestrator handles GitHub.\n"
+    "- After the push, call the `flow.open_pr` environment tool once with the proposed PR title "
+    "and body. Do NOT use GitHub API/CLI to open a PR or post comments.\n"
     "- Run the repo's tests / lint if present and keep them green.\n"
 )
 

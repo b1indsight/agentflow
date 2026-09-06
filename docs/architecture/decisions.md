@@ -8,20 +8,20 @@
 | 合并 | 全程人工 | 工具只监听合并事件，不提供自动合并路径 |
 | CI 门禁 | 使用目标仓库自身 CI | FlowTool 不自建门禁，人工合并者依据 PR checks 判断 |
 | 会话连续 | Codex `resume` 同一会话 | 2026-08-01 独立实测成立；真实多轮修订仍待验证 |
-| PR 所有权 | Orchestrator 创建 PR | Code Agent 只负责本地改码/提交/push；真实路径未贯通 |
+| PR 所有权 | Orchestrator 创建 PR | Code Agent 改码/提交/push 后调用 `flow.open_pr`；control 独占 GitHub API，真实 E2E 待验收 |
 | 持久化 | PostgreSQL + 持久化 jobs/result inbox | Store 只在 serve；epoch + assignment token 对远程消息 fencing，接口仍同步 |
 | 执行拓扑 | 单 serve + 多个出站单槽 worker | 多 worker、affinity、单机多实例和同 identity lease 恢复已实现；多 serve HA 未实现 |
-| 本地版本控制 | VCS 指引交给 Code Agent | VCS 不是端口；jj commit 已独立实测，git/push 未贯通 |
+| 本地版本控制 | VCS 指引交给 Code Agent | VCS 不是端口；Git/jj 由 Agent 自选，worker 在开 PR 前验证 commit/clean/remote SHA |
 
 “决策已定”只表示目标方向固定，不表示对应 adapter 或端到端行为已经完成。
 
 ## 7. 主要风险
 
-1. **外部闭环未验证**：githubkit adapter 已通过隔离契约测试，但真实 GitHub App、bub 和凭据注入仍可能使 M1 路径失败；
+1. **外部闭环未验证**：githubkit、凭据注入和 Issue→PR 已通过隔离自动化，但真实 GitHub App/Codex 与 bub 仍可能使路径失败；
 2. **本机代码执行**：issue 内容是不可信输入，真实启用前必须落实沙盒、最小权限与受控网络；
 3. **事件可靠性**：当前 delivery 在 handler 执行业务逻辑前记为已处理，handler 失败后的补偿依赖尚未实现的
    reconcile；
-4. **并发与幂等**：同一 flow 串行化、重复外部副作用防护、人工 push 检测和 base 冲突处理仍是目标设计；
+4. **并发与幂等**：一 Flow 一 binding/branch/PR 与 open PR 重放已约束；人工 push 检测和 base 冲突处理仍是目标设计；
 5. **worker 健康**：短断线可在 recovery grace 内恢复，但 worker 进程丢失 executor、grace 到期或 journal 损坏仍会 fail closed；
 6. **上下文与成本**：多轮 resume 的 token 增长、re-seed/压缩和预算限制尚未实现。
 

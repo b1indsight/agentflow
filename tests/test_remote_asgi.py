@@ -7,8 +7,12 @@ from app.control.gateway import WorkerGateway
 from app.models import Job, JobKind, JobState
 from app.protocol import (
     Assignment,
+    AssignmentSecret,
     ExecutionResult,
     ExecutionTask,
+    FlowToolErrorKind,
+    FlowToolRequest,
+    FlowToolResponse,
     InitialResult,
     InitialTask,
     Register,
@@ -34,6 +38,20 @@ class AsgiCoordinator:
             issue_title="Issue",
             issue_body="Body",
             branch="flow/issue-8",
+        )
+
+    async def assignment_secret(
+        self, job: Job, task: ExecutionTask
+    ) -> AssignmentSecret | None:
+        return None
+
+    async def execute_tool(
+        self, request: FlowToolRequest, *, worker_id: str
+    ) -> FlowToolResponse:
+        return FlowToolResponse(
+            call_id=request.call_id,
+            error="unused",
+            error_kind=FlowToolErrorKind.INVALID_REQUEST,
         )
 
     def mark_started(self, job: Job, task: ExecutionTask, worker_id: str) -> None:

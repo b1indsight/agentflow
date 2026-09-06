@@ -1,8 +1,10 @@
 from pathlib import Path
 
 import pytest
+from pydantic import SecretStr
 
 from app.codex_driver import CodexAgent, _codex_environment, _start_args
+from app.models import CodeAgentContext
 
 
 def test_trusted_host_start_uses_full_access_in_the_flow_repo() -> None:
@@ -43,6 +45,29 @@ def test_codex_environment_removes_worker_and_github_credentials() -> None:
         "HTTPS_PROXY": "https://proxy.example",
         "SSL_CERT_FILE": "/etc/ssl/corp.pem",
     }
+
+
+def test_run_context_injects_only_scoped_push_and_mcp_capabilities() -> None:
+    context = CodeAgentContext(
+        push_token=SecretStr("push-secret"),
+        push_repository="owner/repo",
+        mcp_socket=Path("/tmp/flowtool.sock"),
+    )
+
+    environment = _codex_environment({"PATH": "/usr/bin"}, context)
+    args = _start_args(
+        "do the task",
+        Path("/worker/repos/flow-1"),
+        trusted_host=True,
+        context=context,
+    )
+
+    assert environment["FLOWTOOL_PUSH_TOKEN"] == "push-secret"
+    assert environment["GIT_CONFIG_KEY_1"].endswith("helper")
+    assert "push-secret" not in " ".join(args)
+    assert any("mcp_servers.flow.command" in item for item in args)
+    assert any("FLOWTOOL_MCP_SOCKET" in item for item in args)
+    assert 'mcp_servers.flow.env.FLOWTOOL_PUSH_TOKEN=""' in args
 
 
 @pytest.mark.asyncio

@@ -5,10 +5,11 @@ from types import SimpleNamespace
 import pytest
 
 from app.control.gateway import WorkerGateway
-from app.models import Job, JobKind, JobState
+from app.models import Job, JobKind, JobState, VcsKind, VcsOutcome
 from app.protocol import (
     ExecutionResult,
     ExecutionTask,
+    FlowToolResponse,
     InitialResult,
     InitialTask,
 )
@@ -167,6 +168,7 @@ class RemoteStore:
 class RemoteCoordinator:
     def __init__(self) -> None:
         self.result: InitialResult | None = None
+        self.tool_calls = 0
 
     async def prepare(self, job: Job) -> ExecutionTask | JobState:
         return InitialTask(
@@ -177,6 +179,16 @@ class RemoteCoordinator:
             issue_title="Issue",
             issue_body="Body",
             branch="flow/issue-8",
+        )
+
+    async def assignment_secret(self, job: Job, task: ExecutionTask):
+        return None
+
+    async def execute_tool(self, request, *, worker_id: str):
+        self.tool_calls += 1
+        return FlowToolResponse(
+            call_id=request.call_id,
+            result={"pr_number": 17, "head_sha": "abc123"},
         )
 
     def mark_started(self, job: Job, task: ExecutionTask, worker_id: str) -> None:
@@ -192,8 +204,24 @@ class RemoteCoordinator:
 
 
 class FakeExecutor:
-    async def execute(self, task: ExecutionTask) -> ExecutionResult:
+    def __init__(self) -> None:
+        self.client: WorkerClient | None = None
+
+    async def execute(self, task: ExecutionTask, secret=None) -> ExecutionResult:
         assert isinstance(task, InitialTask)
+        assert self.client is not None
+        tool = await self.client.call_tool(
+            "flow.open_pr",
+            {"title": "Implement", "body": "Done"},
+            vcs_outcome=VcsOutcome(
+                declared_backend=VcsKind.GIT,
+                verified_backend=VcsKind.GIT,
+                branch=task.branch,
+                commit_sha="abc",
+                remote_sha="abc",
+            ),
+        )
+        assert tool["pr_number"] == 17
         return InitialResult(session_id="session-1", last_message="done", exit_code=0)
 
 
@@ -209,12 +237,14 @@ async def test_control_gateway_and_worker_client_complete_one_remote_job() -> No
         worker_tokens={"worker-1": "worker-secret"},
         poll_interval=0.01,
     )
+    executor = FakeExecutor()
     client = WorkerClient(
         worker_id="worker-1",
         worker_token="worker-secret",
         serve_ws_url="ws://unused",
-        executor=FakeExecutor(),
+        executor=executor,
     )
+    executor.client = client
 
     tasks = [
         asyncio.create_task(gateway.handle(QueueSocket(worker_to_serve, serve_to_worker))),
@@ -231,3 +261,4 @@ async def test_control_gateway_and_worker_client_complete_one_remote_job() -> No
     assert store.job.state is JobState.DONE
     assert coordinator.result is not None
     assert coordinator.result.session_id == "session-1"
+    assert coordinator.tool_calls == 1

@@ -64,7 +64,7 @@ class RoutingService:
         self.store.update_flow(flow)
 
     def on_merged(self, flow: Flow) -> None:
-        flow.state = FlowState.MERGED
+        flow.state = FlowState.SUCCEEDED
         self.store.update_flow(flow)
 
     def notify_jobs(self) -> None:
@@ -144,6 +144,6 @@ async def test_valid_signature_dispatches_webhook(
     assert response.status_code == 202
     flow = store.get_active_flow("owner/repo", 7)
     assert flow is not None
-    assert flow.state is FlowState.PENDING
+    assert flow.state is FlowState.ACTIVE
     store.worker_connected("worker-1", protocol_version=1)
     assert store.assign_job("worker-1", "assignment-1") is not None

@@ -6,11 +6,13 @@ import pytest
 from fastapi import WebSocketDisconnect
 
 from app.control.gateway import WorkerGateway
-from app.models import Job, JobKind, JobState
+from app.models import Job, JobKind, JobState, VcsKind
 from app.protocol import (
     Assignment,
     ExecutionResult,
     ExecutionTask,
+    FlowToolRequest,
+    FlowToolResponse,
     Heartbeat,
     InitialResult,
     InitialTask,
@@ -158,6 +160,18 @@ class RecordingCoordinator:
             branch="flow/issue-8",
         )
 
+    async def assignment_secret(self, job: Job, task: ExecutionTask):
+        return None
+
+    async def execute_tool(
+        self, request: FlowToolRequest, *, worker_id: str
+    ) -> FlowToolResponse:
+        assert worker_id == "worker-1"
+        return FlowToolResponse(
+            call_id=request.call_id,
+            result={"pr_number": 17, "head_sha": "abc"},
+        )
+
     def mark_started(self, job: Job, task: ExecutionTask, worker_id: str) -> None:
         assert isinstance(task, InitialTask)
         self.started = True
@@ -219,6 +233,52 @@ class ScriptedSocket:
         raise WebSocketDisconnect()
 
 
+class ToolSocket(ScriptedSocket):
+    async def receive_text(self) -> str:
+        self._step += 1
+        if self._step == 1:
+            return Register(worker_id=self.worker_id).model_dump_json()
+        assignment = next(
+            message
+            for raw in self.sent
+            if isinstance((message := parse_server_message(raw)), Assignment)
+        )
+        if self._step == 2:
+            return Started(
+                job_id=assignment.job_id,
+                assignment_token=assignment.assignment_token,
+                connection_epoch=assignment.connection_epoch,
+            ).model_dump_json()
+        if self._step == 3:
+            return FlowToolRequest(
+                job_id=assignment.job_id,
+                flow_id=assignment.flow_id,
+                attempt_id=assignment.task.attempt_id,
+                assignment_token=assignment.assignment_token,
+                connection_epoch=assignment.connection_epoch,
+                call_id="call-1",
+                name="flow.open_pr",
+                arguments={"title": "Implement", "body": "Done"},
+                vcs_backend=VcsKind.GIT,
+                branch="flow/3",
+                commit_sha="abc",
+                remote_sha="abc",
+            ).model_dump_json()
+        if self._step == 4:
+            assert any(
+                isinstance(parse_server_message(raw), FlowToolResponse) for raw in self.sent
+            )
+            return Succeeded(
+                job_id=assignment.job_id,
+                assignment_token=assignment.assignment_token,
+                connection_epoch=assignment.connection_epoch,
+                result=InitialResult(
+                    session_id="session-1", last_message="implemented", exit_code=0
+                ),
+            ).model_dump_json()
+        raise WebSocketDisconnect()
+
+
 @pytest.mark.asyncio
 async def test_gateway_runs_one_remote_assignment_to_ack() -> None:
     store = RecordingStore()
@@ -242,6 +302,23 @@ async def test_gateway_runs_one_remote_assignment_to_ack() -> None:
     assert store.finished is JobState.DONE
     assert coordinator.started is True
     assert coordinator.results[0].session_id == "session-1"
+
+
+@pytest.mark.asyncio
+async def test_gateway_multiplexes_flow_tool_calls_during_execution() -> None:
+    socket = ToolSocket()
+    gateway = WorkerGateway(
+        RecordingStore(),
+        RecordingCoordinator(),
+        worker_tokens={"worker-1": "worker-secret"},
+        poll_interval=0.01,
+    )
+
+    await gateway.handle(socket)
+
+    responses = [parse_server_message(raw) for raw in socket.sent]
+    assert any(isinstance(message, FlowToolResponse) for message in responses)
+    assert any(isinstance(message, ResultAccepted) for message in responses)
 
 
 @pytest.mark.asyncio

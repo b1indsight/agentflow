@@ -30,7 +30,7 @@ flowtool/
 - **持久层替换（2026-08-27）** PostgreSQL 成为当前唯一运行时数据库；M0 的 SQLite 描述保留为历史验收事实；
 - **远程执行 Features 1–3（2026-09-02）** serve/worker 分离、多 worker 公平调度与 affinity、持久 lease、
   同 identity 忙碌重连、serve 重启恢复和结果重放均已实现；跨 worker session 迁移与多 serve HA 不在范围内；
-- **M1** 触发（含 allowlist）→ 工作区 → codex 首轮 → 开 PR（单 flow happy path）
+- **M1** 触发（含 allowlist）→ Flow 独占 worker/repo → codex 首轮 → 开 PR（单 flow happy path）
 - **M2** 语义 Triage（bub）门 + 回喂循环（settle → revise/answer/wait + resume/兜底 + 自动 resolve）
 - **M3** 人工合并检测（`pull_request.closed`）→ 归档 + 状态标签 / 评论
 - **M4** 多 flow 并发 + reconcile 对账 + Project 看板 + 错误恢复
@@ -47,10 +47,13 @@ M1–M5 是目标里程碑，不代表对应控制流代码或接口已经验收
    - 预留：core 状态经 store + 一层 API 暴露；headless（GitHub）与 webapp 是同一 core 的两个入口适配器。
      Driver 除"批量回喂 review"外，要留一个**实时注入消息**的入口，webapp 才能"插话"。
 
-2. **多 agent 并行 / 多方案分支** —— 同一任务多个 agent 并行跑，或不同分支跑不同解法，再择优。
-   - **数据模型接缝已就位（2026-08-02）**：引入 `attempts` 表，`issue ↔ PR` 不再 1:1 锁死——一条 flow 可挂多个 **attempt/candidate**
-     （各自 branch / 工作区 / 会话 / PR）；`flows → attempts → runs` 一对多，`review_threads` 归属到具体 attempt，`flows.current_attempt_id` 指当前候选。
-     待实现：真正并行起多个 attempt + 择优逻辑（engine 目前每 flow 只建一个 attempt）。
+2. **可派生 Flow 编排** —— Flow 像持久化的分布式 subagent 一样 spawn/send/wait/inspect/accept 其他 Flow；
+   每个子 Flow 拥有自己的隔离执行环境、repo、干净上下文、skills、结果和最多一张 PR。
+   - **目标边界已定（2026-09-03）**：调度和协作的一等单位是 Flow，不是人格化 Agent；一 Flow = 一
+     隔离执行环境 = 一独占 repo = 一 branch = 最多一 PR，Attempt 只表示同一 Flow 的执行尝试。目标模型、
+     状态分轴、tool RPC、context/skill portability 和父级验收见[可派生 Flow 编排](derivable-flows.md)。
+   - M1 先让 Flow 全生命周期固定占用单槽 worker/repo，并以 `flow.open_pr` 验证通用 tool transport；
+     FlowLink、派生、durable join、result acceptance 和可释放的跨 worker checkpoint 后续分阶段实现。
 
 3. **完善 GitHub 协作** —— 覆盖常见协作动作（reviewer 指派、draft PR、labels、Projects 联动、review 线程 resolve 等）。
    - 预留：GitHub Client 保持薄封装，能力按需追加即可，不影响 core。
@@ -65,7 +68,9 @@ M1–M5 是目标里程碑，不代表对应控制流代码或接口已经验收
 
 6. **多 Worker 调度与恢复** —— 多 identity、session affinity、公平调度、单机多 root、忙碌重连、
    持久 lease 与 result replay 已完成。
-   - 后续方向：跨 worker 可迁移 session/workspace、多 serve leader election、外部副作用幂等键和通用可观测性。
+   - M1 先增加 Flow 生命周期固定 binding：一个 worker 同时服务一个 Flow，空闲 job 期间也不复用。
+   - 后续方向：可释放 checkpoint、跨 worker 重建 session/repo、多 serve leader election、外部副作用幂等键
+     和通用可观测性。
 
 7. **端口插件扩展** —— 在生命周期端口挂插件。
    例：合并后总结插件——归纳上一段对话里的代码风格偏好、更新仓库的 skill 文件。

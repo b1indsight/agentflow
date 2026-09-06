@@ -8,21 +8,25 @@
   → Event Router 去重 / 授权 / 写 PostgreSQL
   → flow + queued job
   → serve 通过认证 WebSocket 向公平选中的空闲 worker assign
-  → Started / Heartbeat / Result / ResultAccepted
-  → Started 固定 attempt affinity → job DONE
+  → FlowExecution 固定单槽 worker/repo，prepare 读取真实 Issue/default branch
+  → Started / Heartbeat；INITIAL 获得临发 scoped push capability
+  → Codex commit/push → worker-local flow.open_pr MCP → control tool ledger
+  → worker 核验本地 VCS/remote，control 再核对 GitHub ref → find-or-open 唯一 PR
+  → Result 与持久 tool outcome 核对 → ResultAccepted；Flow 保持 ACTIVE 与 binding
   → 断线：unstarted 等 lease 后重排；started 只由原 worker 在 grace 内续跑/重放结果
   → serve 重启：恢复持久 assignment/result inbox，不重复派发 started job
 ```
 
-测试使用 fake coordinator/executor 或 fake 外部端口，不访问 GitHub、Codex 或 bub。这个切片证明入口、
-持久化和远程边界，不证明下面的目标闭环。
+测试使用 fake GitHub/Codex/bub 外部端口，不访问真实服务。这个切片证明内部 Issue→PR 编排与远程边界，
+不证明真实 GitHub App/Codex 的外部闭环。
 
 ## 5. 目标闭环
 
 1. 用户创建 issue 并添加 `flow` 标签；
 2. GitHub 发送 `issues.labeled` Webhook；
 3. control 派发 INITIAL task，worker 建立隔离工作区并启动 Codex 首轮编码；
-4. Code Agent commit/push，worker 回传 result，control 创建带 `Closes #N` 的 PR 并请求审核；
+4. Code Agent commit/push 后调用 `flow.open_pr`；worker 与 control 依次核验远端 SHA，control 创建带
+   `Closes #N` 的 PR 并请求审核；
 5. 用户在 GitHub 提交 review、inline comment 或对话评论；
 6. Event Router 持久化反馈，settle 后由 Judge 判定 revise/wait/answer/ignore；
 7. revise 由同一 worker 恢复 Codex 会话并 push，control 处理线程并重新请求审核；
@@ -30,6 +34,6 @@
 9. `pull_request.closed (merged=true)` 触发 MERGED 和 archive job；
 10. worker 清理工作区，control 归档记录并更新 GitHub 状态。
 
-步骤 3–10 的控制流已拆入 `JobCoordinator` 与 `WorkerExecutor`，但真实 GitHub/Codex/bub、push、线程映射、冲突处理、
+步骤 3–4 已实现并通过隔离自动化，真实 GitHub/Codex E2E 待执行。步骤 5–10 的 bub、线程映射、冲突处理、
 取消运行中进程、Project 更新与 reconcile 尚未完成。具体状态见[组件职责](components.md)和
 [已知短板](decisions.md)。

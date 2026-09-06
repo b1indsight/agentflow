@@ -52,14 +52,12 @@ PENDING → CODING → PR_OPEN ⇄ REVISING
 并把 worker 返回的结构化 result 应用为数据库、GitHub 与 plugin 副作用。worker 不能直接更新这些状态。
 非零 Codex exit 会转 FAILED，revision 成功后会标记 addressed/deferred/clarification。
 
-当前 coordinator 还依赖多处桩：
+当前 coordinator 仍有以下缺口：
 
-- `_fetch_issue()` 返回占位标题和空正文；
 - `_thread_id_for()` 永远返回 `None`，无法真实 resolve review thread；
 - `_pr_context()` 只有 repo、PR 和 issue 编号，没有 diff、CI 或未解决线程；
-- base 固定为 `main`，没有从目标仓库配置解析默认分支；
 - cancel 只更新数据库状态，不 kill Codex、不清工作区；
-- 未合并 close、人工 push、rebase/冲突和外部副作用幂等尚未实现。
+- 未合并 close、人工 push、rebase/冲突尚未实现。
 
 因此状态转换代码存在不等于目标闭环可用。
 
@@ -67,12 +65,13 @@ PENDING → CODING → PR_OPEN ⇄ REVISING
 
 serve 的 `WorkerGateway` 校验每个 identity 的 bearer token，维护多会话 registry，并用随机 connection epoch 与
 assignment token 对 Started、Heartbeat 和结果做四元组 fencing。每个 worker 是单槽，PostgreSQL 按 FIFO、
-worker `last_assigned_at` 和 attempt affinity 事务化领取任务。worker 的 `WorkerClient` 主动连接并指数退避；
+worker `last_assigned_at` 和 Flow execution binding 事务化领取任务。worker 的 `WorkerClient` 主动连接并指数退避；
 `WorkerExecutor` 只依赖 CodeAgent、Judge 和 Flow repo/VCS helpers，不导入 Store、FastAPI 或 GitHub。
 
 不同 identity 可并发在线；同 identity 新连接取得新 epoch 并关闭旧 socket，数据库条件保证旧连接最终失效。
 任务未 Started 断线后保留到 lease 到期再 requeue；Started job 进入 RECOVERING，只允许原 identity 在 grace 内恢复，
-到期才把 job/flow 置 FAILED。worker socket 与 executor 解耦，root 内原子 journal 在 ack 前保存进度和终态结果；
+到期才把 job/flow 置 FAILED。Flow 非终态时，即使暂时没有 running job，binding 也继续独占该 worker/repo。
+worker socket 与 executor 解耦，root 内原子 journal 在 ack 前保存进度和终态结果；
 进程重启可重放终态，但不会猜测恢复已经消失的 executor。同一 attempt 的后续任务仍只回到首次 Started 的 worker，
 不支持跨 worker session 迁移。同机默认 root 按 identity 派生，并用持久 identity 标记与独占锁拒绝并发或顺序复用。
 
@@ -87,14 +86,16 @@ worker `last_assigned_at` 和 attempt affinity 事务化领取任务。worker �
 - 从 JSONL 的 `thread.started.thread_id` 读取 session id；
 - resume 使用 `codex exec resume <session_id>`，cwd 与 sandbox 继承自会话；
 - `-o` 读取最终消息，INITIAL 和 revision 通过 `--output-schema` 解析结构化结果；
-- 子进程只继承 Codex 认证、代理/CA 和基础运行环境，不继承 `FLOWTOOL_*` 或 GitHub token；
+- 子进程只继承 Codex 认证、代理/CA 和基础运行环境；INITIAL 额外获得单次短时 push credential helper 与
+  指向 0600 Unix socket 的 `flow.open_pr` STDIO MCP 配置，不获得 control/worker credential；
 - 单次运行使用配置的 timeout，超时 kill 子进程并返回 exit 124。
 
 2026-08-01 的独立 CLI 实测证明 `exec` / `resume` 上下文连续、workspace-write 可修改工作区、jj
 `.jj` 可写且能 commit。它没有证明当前 driver 能在真实 flow 中完成 issue→commit→push→PR。
 
-当前 worker 返回 exit/result，coordinator 把 kind 和 exit code 写入 `codex_runs`；跨协议尚未回传完整 prompt
-或原始 JSONL，因此 `prompt`/`log_path` 为空。GitHub 限域、push 凭据和多轮 context 增长仍待验证。
+当前 worker 返回 exit/result、worker 验证的 VCS facts 和 `flow.open_pr` handle；coordinator 把 kind 和 exit code
+写入 `codex_runs` 并与持久 tool outcome 核对。跨协议不回传完整 prompt 或原始 JSONL，因此
+`prompt`/`log_path` 为空。GitHub-only egress 和多轮 context 增长仍待验证。
 
 ## 4.5 GitHub Client
 
@@ -112,28 +113,32 @@ reconcile 仍未校准。接入边界见 [GitHub App 文档](github-app.md)。
 |---|---|---|---|
 | Flow repo | 否 | `prepare_flow_repo/cleanup_flow_repo` | stable flow id 派生独占完整 repo；同 Flow 复用、不同 Flow 分离 |
 | execution policy | 否 | worker config / `CodexAgent` | full access 需专用 account/container/VM；目录只表达所有权 |
-| VCS | 否 | `agent_guidance/verify_vcs_outcome` | Agent 自探测；worker 用固定 remote 和净化、限时命令验证 ancestry/clean/remote SHA |
+| VCS | 否 | `agent_guidance/verify_pushed_outcome` | Agent 自探测；worker 在 tool 前用固定 remote 和净化、限时命令验证 ancestry/clean/remote SHA |
 
-分支名由 control 定为 `flow/issue-<n>`。worker 内的 Code Agent 在 Flow repo 完成 branch/bookmark、
-commit 和 push，worker 独立核验后，control 才把 INITIAL 视为成功。当前缺口包括：
+分支名由 control 定为 `flow/<flow-id>`。worker 内的 Code Agent 在 Flow repo 完成 branch/bookmark、commit 和
+push；worker 在转发 `flow.open_pr` 前核验，control 再读取 GitHub ref 核对 SHA 后才创建/复用 PR，最后以
+terminal result 三方核对。当前缺口包括：
 
 - 每 Flow 容器/微 VM 和互不信任租户的强隔离仍属 M5；M1 至少要求 worker 与 control secret 分离；
 - 仅允许 GitHub egress 的策略未实现；
-- installation token 尚未安全注入 git credential helper；
-- Flow 生命周期级 worker/repo binding 仍待 M1 Feature 3 持久化；
+- installation token 尚未在真实 GitHub 上验证，且 GitHub-only egress 未强制；
 - 大 repo 的完整复制成本和 terminal cleanup 故障恢复仍待验证。
 
 ## 4.7 Store（PostgreSQL）
 
 当前 Store 使用 Psycopg 3 的同步连接池访问 PostgreSQL：
 
-`Flow`、`Attempt`、`Job` 和 `ReviewItem` 是 Pydantic 持久化模型。返回这些领域对象的查询在
+`Flow`、`FlowExecution`、`FlowDelivery`、`FlowToolCall`、`Attempt`、`Job` 和 `ReviewItem` 是 Pydantic
+持久化模型。返回这些领域对象的查询在
 cursor 上使用 Psycopg `class_row(Model)`，由模型统一校验枚举、时间和其他字段；其余轻量查询继续
 使用 pool 的 `dict_row` 默认值。SQL、事务边界、JSONB 适配和并发协议仍由 Store 显式维护，没有引入
 ORM。
 
 - `flows`：issue 级状态，`(repo, issue)` 仅允许一个非终态 flow；
-- `attempts`：每个候选解法的 branch/session/PR/worker_id/revision_cycles，当前每 flow 一个；
+- `flow_executions`：Flow 到单槽 worker/repo identity 的生命周期 binding 与 recovery deadline；
+- `flow_deliveries`：每 Flow 唯一 branch/base/PR、交付状态和版本；
+- `flow_tool_calls`：fenced command 的参数与终态 response/error，支持同 call id 重放；
+- `attempts`：一次运行/恢复尝试的 session 与 revision cycles，不拥有 worker、branch 或 PR；
 - `jobs`：queued/running/done/failed、worker/token/start、lease/recovery deadline、result inbox/digest 与尝试次数；
 - `workers`：identity、协议版本、epoch、online/busy/recovering/offline/failed、当前 job、连接/心跳与断线原因；
 - `events`：delivery 去重和 payload 审计；
@@ -144,10 +149,10 @@ ORM。
 lease 到期 requeue、started grace/deadline、epoch fencing、result inbox 去重、跨 Store 可见性、delivery 去重和并发 assign。
 `assign_job()` 使用事务内的 `FOR UPDATE SKIP LOCKED`，gateway 接受多个独立配置 worker。
 
-Store 继续使用同步接口。assignment claim 会锁定公平候选 worker 和最早 eligible job，Started 在 token
-条件下原子绑定 `attempt.worker_id`。result inbox 保证内部 coordinator 对已确认 digest 的重复结果不重复应用；
-GitHub 等外部副作用与 `result_applied_at` 之间仍非原子，不能宣称 exactly-once。跨 worker session 迁移和多 serve HA
-仍未实现。M0 的 SQLite 文件
+Store 继续使用同步接口。assignment claim 会锁定公平候选空闲 worker 和最早 eligible Flow job，并原子创建
+或复用 lifecycle binding。result inbox 保证 terminal result 不重复应用；`flow_tool_calls` 在副作用前登记并以
+稳定 head 查询收口开 PR 的崩溃窗口，但不宣称通用 exactly-once。跨 worker session 迁移和多 serve HA 仍未实现。
+M0 的 SQLite 文件
 不会自动导入 PostgreSQL。
 
 ## 4.8 GitHub 交互面
@@ -155,8 +160,8 @@ GitHub 等外部副作用与 `result_applied_at` 之间仍非原子，不能宣�
 目标用户体验完全位于 GitHub：标签触发、PR review 反馈、网页人工合并、状态 labels 与评论。
 
 当前 router 已识别触发、取消、review/comment 和 merged 事件；PR 创建、评论、reviewer 和 label 已有
-经隔离测试的 adapter primitive，且 reviewer 配置不复用 trigger allowlist。Feature 3 才负责把真实
-Issue/default branch、head PR 查询和 capability 接入 INITIAL；thread resolve 与 Project 状态仍未校准。
+经隔离测试的 adapter primitive，且 reviewer 配置不复用 trigger allowlist。真实 Issue/default branch、
+head PR 查询和 capability 已接入 INITIAL；thread resolve 与 Project 状态仍未校准。
 工具没有自动合并实现。
 
 ## 4.9 Context Builder
@@ -167,7 +172,7 @@ Issue/default branch、head PR 查询和 capability 接入 INITIAL；thread reso
 - revision prompt 包含 Judge instruction、未 relay 的反馈、inline path/diff hunk/original commit id、
   VCS 指引和 `CodexResult` 输出约定。
 
-但 coordinator 当前提供的 issue 正文是空占位；revision prompt 没有当前 diff、CI 状态或完整未解决线程清单。
+INITIAL 已使用 GitHub Issue 的真实标题与正文；revision prompt 没有当前 diff、CI 状态或完整未解决线程清单。
 issue/PR 文本是不可信输入，后续接入必须保留明确的数据/指令边界。
 
 ## 4.10 Judge / Triage

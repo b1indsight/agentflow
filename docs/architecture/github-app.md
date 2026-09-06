@@ -1,6 +1,6 @@
 # GitHub App 接入
 
-> 状态：已对齐 githubkit 0.16 并通过隔离契约测试；尚未在真实 App 上执行读写 smoke。
+> 状态：已对齐 githubkit 0.16，并接入 M1 Issue→PR 自动化路径；尚未在真实 App 上执行读写 smoke。
 
 GitHub App 提供独立 bot 身份、Webhook 和短期 installation token。FlowTool 不需要代表某个用户执行
 操作，因此当前设计不使用 OAuth user token。
@@ -63,11 +63,14 @@ capability，不接触 githubkit schema。
 - 通过公开 installation access-token endpoint 显式传入单仓库和 `contents: write`，并校验返回 scope；
 - authentication、permission、not found、conflict、validation、rate limit、transient 与异常响应分类；
 - capability 的 token 在 repr 和普通 JSON 序列化中脱敏。
+- capability 只在 assignment 临发时签发，通过 wire-only secret envelope 到 worker；Codex 的单次子进程以
+  环境 credential helper 使用 token，参数、result 和 worker journal 不保存 token；
+- control 的 `flow.open_pr` 在 GitHub ref SHA 与 worker 验证事实一致后才 find-or-open PR，并持久化调用结果供重放。
 
 尚未验证或实现：
 
 - disposable repository 上的真实 App 读写 smoke；
-- 用 credential helper 注入 token、限制网络到 GitHub、使用后撤销/清理且不写入工作区；
+- 限制网络到 GitHub，以及显式提前撤销 installation token；
 - review thread ID 映射、Project v2 与 reconcile 查询。
 
 因此不能仅凭配置真实凭据就把当前 daemon 视为可用集成。

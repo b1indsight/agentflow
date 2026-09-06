@@ -6,10 +6,14 @@ from typing import Protocol
 
 from loguru import logger
 
+from app.control.tools import FlowToolService
+from app.github_models import GitHubAdapterError
 from app.models import (
     TERMINAL_STATES,
     Attempt,
+    DeliveryState,
     Flow,
+    FlowDelivery,
     FlowState,
     Job,
     JobKind,
@@ -23,10 +27,14 @@ from app.protocol import (
     AnswerTask,
     ArchiveResult,
     ArchiveTask,
+    AssignmentSecret,
     ExecutionResult,
     ExecutionTask,
+    FlowToolRequest,
+    FlowToolResponse,
     InitialResult,
     InitialTask,
+    PushSecret,
     ReviewFeedback,
     RevisionResult,
     RevisionTask,
@@ -58,6 +66,7 @@ class JobCoordinator:
         self.github = github
         self.settings = settings
         self.plugins = plugins or get_plugin_manager()
+        self.tools = FlowToolService(store, github, settings, self.plugins)
 
     async def prepare(self, job: Job) -> ExecutionTask | JobState:
         flow = self.store.get_flow(job.flow_id)
@@ -67,21 +76,46 @@ class JobCoordinator:
             return JobState.DONE
 
         if job.kind is JobKind.INITIAL:
+            if flow.installation_id is None:
+                await self._fail(flow, flow.issue_number, "Flow 缺少 GitHub installation。")
+                return JobState.FAILED
+            execution = self.store.get_flow_execution(flow.id)
+            if execution is None or execution.released_at is not None:
+                await self._fail(flow, flow.issue_number, "Flow 缺少 active execution binding。")
+                return JobState.FAILED
+            if job.assigned_worker_id and execution.worker_id != job.assigned_worker_id:
+                await self._fail(flow, flow.issue_number, "Flow execution binding 与 assignment 不匹配。")
+                return JobState.FAILED
             attempt = self.store.get_current_attempt(flow)
             if attempt is None:
                 attempt = self.store.create_attempt(flow.id)
-                attempt.branch = f"flow/issue-{flow.issue_number}"
-                self.store.update_attempt(attempt)
                 flow.current_attempt_id = attempt.id
                 self.store.update_flow(flow)
+            delivery = self.store.get_or_create_delivery(flow.id, f"flow/{flow.id}")
+            try:
+                issue = await self.github.get_issue(
+                    flow.installation_id, flow.repo, flow.issue_number
+                )
+                repository = await self.github.get_repository(flow.installation_id, flow.repo)
+            except GitHubAdapterError as exc:
+                await self._fail(flow, flow.issue_number, str(exc))
+                return JobState.FAILED
+            if repository.full_name != flow.repo:
+                await self._fail(flow, flow.issue_number, "GitHub repository identity 不匹配。")
+                return JobState.FAILED
+            delivery.base_branch = repository.default_branch
+            self.store.update_delivery(delivery)
             return InitialTask(
                 flow_id=flow.id,
                 attempt_id=attempt.id,
                 repo=flow.repo,
                 issue_number=flow.issue_number,
-                issue_title=f"issue #{flow.issue_number}",
-                issue_body="",
-                branch=_required_branch(attempt),
+                issue_title=issue.title,
+                issue_body=issue.body,
+                branch=delivery.branch,
+                base_branch=repository.default_branch,
+                remote="origin",
+                repo_identity=execution.repo_identity,
             )
 
         attempt = self.store.get_current_attempt(flow)
@@ -100,17 +134,18 @@ class JobCoordinator:
                 pr_context=self._pr_context(flow, attempt),
             )
         if job.kind is JobKind.REVISION:
+            delivery = self._delivery(flow, attempt)
             if attempt.revision_cycles + 1 > self.settings.max_revision_cycles:
-                await self._fail(flow, attempt.pr_number, "已达最大修订轮数，暂停。")
+                await self._fail(flow, delivery.pr_number, "已达最大修订轮数，暂停。")
                 return JobState.FAILED
             if not attempt.codex_session_id:
-                await self._fail(flow, attempt.pr_number, "修订任务缺少 Codex session。")
+                await self._fail(flow, delivery.pr_number, "修订任务缺少 Codex session。")
                 return JobState.FAILED
             return RevisionTask(
                 flow_id=flow.id,
                 attempt_id=attempt.id,
                 repo=flow.repo,
-                branch=_required_branch(attempt),
+                branch=delivery.branch,
                 session_id=attempt.codex_session_id,
                 instruction=(job.payload or {}).get(
                     "instruction", "Address the review feedback."
@@ -142,6 +177,30 @@ class JobCoordinator:
             )
         raise ValueError(f"unsupported job kind: {job.kind}")
 
+    async def assignment_secret(
+        self, job: Job, task: ExecutionTask
+    ) -> AssignmentSecret | None:
+        if not isinstance(task, InitialTask):
+            return None
+        flow = self.store.get_flow(job.flow_id)
+        if flow is None or flow.installation_id is None:
+            raise ValueError("INITIAL assignment has no GitHub installation")
+        capability = await self.github.create_push_capability(
+            flow.installation_id, flow.repo
+        )
+        return AssignmentSecret(
+            push=PushSecret(
+                token=capability.token,
+                repository=capability.repository,
+                expires_at=capability.expires_at,
+            )
+        )
+
+    async def execute_tool(
+        self, request: FlowToolRequest, *, worker_id: str
+    ) -> FlowToolResponse:
+        return await self.tools.execute(request, worker_id=worker_id)
+
     def mark_started(self, job: Job, task: ExecutionTask, worker_id: str) -> None:
         flow = self.store.get_flow(job.flow_id)
         if flow is None:
@@ -149,19 +208,16 @@ class JobCoordinator:
         attempt = self.store.get_attempt(task.attempt_id)
         if attempt is None:
             raise ValueError(f"attempt {task.attempt_id} disappeared")
-        if attempt.worker_id not in (None, worker_id):
+        execution = self.store.get_flow_execution(flow.id)
+        if execution is None or execution.worker_id != worker_id:
             raise ValueError(
-                f"attempt {attempt.id} is affined to {attempt.worker_id}, not {worker_id}"
+                f"flow {flow.id} is not bound to worker {worker_id}"
             )
-        attempt.worker_id = worker_id
         if job.kind is JobKind.REVISION:
             attempt.revision_cycles += 1
-            flow.state = FlowState.REVISING
         elif job.kind is JobKind.INITIAL:
-            flow.state = FlowState.CODING
             self._fire("on_flow_start", flow=flow)
         self.store.update_attempt(attempt)
-        self.store.update_flow(flow)
 
     async def apply_result(self, job: Job, result: ExecutionResult) -> JobState:
         _validate_result_kind(job.kind, result)
@@ -178,7 +234,7 @@ class JobCoordinator:
             attempt.codex_session_id = result.session_id
             self.store.update_attempt(attempt)
             self.store.record_codex_run(attempt.id, "initial", "", "", result.exit_code)
-            if result.exit_code != 0:
+            if result.exit_code != 0 or not result.session_id:
                 reason = f"编码失败（codex exit={result.exit_code}），未开 PR。"
                 if result.failure_stage and result.failure_detail:
                     reason = (
@@ -191,28 +247,19 @@ class JobCoordinator:
                     reason,
                 )
                 return JobState.FAILED
-            installation_id = _installation_id(flow)
-            branch = _required_branch(attempt)
-            pull_request = await self.github.open_pull_request(
-                installation_id,
-                flow.repo,
-                head=branch,
-                base="main",
-                title=f"issue #{flow.issue_number} (closes #{flow.issue_number})",
-                body=f"Closes #{flow.issue_number}\n\n{result.last_message}",
-            )
-            pr_number = pull_request.number
-            attempt.pr_number = pr_number
-            self.store.update_attempt(attempt)
-            flow.state = FlowState.PR_OPEN
-            self.store.update_flow(flow)
-            await self.github.request_reviewers(
-                installation_id, flow.repo, pr_number, self.settings.reviewers
-            )
-            await self.github.set_labels(
-                installation_id, flow.repo, pr_number, [self.settings.in_review_label]
-            )
-            self._fire("on_pr_opened", flow=flow, pr_number=pr_number)
+            delivery = self.store.get_delivery(flow.id)
+            mismatch = self._initial_delivery_mismatch(job, attempt, result, delivery)
+            if mismatch is not None:
+                await self._fail(
+                    flow,
+                    (
+                        delivery.pr_number
+                        if delivery is not None and delivery.pr_number is not None
+                        else flow.issue_number
+                    ),
+                    f"编码结果与已验证的 Flow delivery 不一致：{mismatch}。",
+                )
+                return JobState.FAILED
             return JobState.DONE
 
         if isinstance(result, TriageResult):
@@ -227,7 +274,7 @@ class JobCoordinator:
                 await self.github.comment(
                     _installation_id(flow),
                     flow.repo,
-                    _pr_number(attempt),
+                    self._pr_number(flow, attempt),
                     f"按此修改中：{verdict.instruction}",
                 )
                 self.store.enqueue_job(
@@ -255,17 +302,15 @@ class JobCoordinator:
             if result.exit_code != 0:
                 await self._fail(
                     flow,
-                    attempt.pr_number,
+                    self._pr_number(flow, attempt),
                     f"修订失败（codex exit={result.exit_code}），本轮未更新。",
                 )
                 return JobState.FAILED
             await self._apply_codex_result(flow, attempt, result)
             items = self.store.unrelayed_items(attempt.id)
             self.store.mark_relayed([item.id for item in items if item.id is not None])
-            flow.state = FlowState.PR_OPEN
-            self.store.update_flow(flow)
             installation_id = _installation_id(flow)
-            pr_number = _pr_number(attempt)
+            pr_number = self._pr_number(flow, attempt)
             await self.github.request_reviewers(
                 installation_id, flow.repo, pr_number, self.settings.reviewers
             )
@@ -278,13 +323,14 @@ class JobCoordinator:
             if attempt is None:
                 return JobState.FAILED
             await self.github.comment(
-                _installation_id(flow), flow.repo, _pr_number(attempt), result.answer
+                _installation_id(flow), flow.repo, self._pr_number(flow, attempt), result.answer
             )
             return JobState.DONE
 
         if isinstance(result, ArchiveResult):
-            flow.state = FlowState.ARCHIVED
+            flow.state = FlowState.SUCCEEDED
             self.store.update_flow(flow)
+            self.store.release_flow_execution(flow.id)
             self._fire("on_archived", flow=flow)
             logger.info("flow {} archived", flow.id)
             return JobState.DONE
@@ -295,15 +341,15 @@ class JobCoordinator:
         flow = self.store.get_flow(job.flow_id)
         if flow is None:
             return
-        attempt = self.store.get_current_attempt(flow)
-        number = attempt.pr_number if attempt and attempt.pr_number else flow.issue_number
+        delivery = self.store.get_delivery(flow.id)
+        number = delivery.pr_number if delivery and delivery.pr_number else flow.issue_number
         await self._fail(flow, number, reason)
 
     async def _apply_codex_result(
         self, flow: Flow, attempt: Attempt, result: RevisionResult
     ) -> None:
         installation_id = _installation_id(flow)
-        pr_number = _pr_number(attempt)
+        pr_number = self._pr_number(flow, attempt)
         for addressed in result.output.addressed:
             thread_id = self._thread_id_for(attempt, addressed.comment_id)
             if thread_id:
@@ -328,10 +374,58 @@ class JobCoordinator:
                 f"已按 review 更新：{result.output.summary}",
             )
 
+    def _initial_delivery_mismatch(
+        self,
+        job: Job,
+        attempt: Attempt,
+        result: InitialResult,
+        delivery: FlowDelivery | None,
+    ) -> str | None:
+        """Return the first violated invariant in a successful INITIAL delivery result."""
+
+        if delivery is None:
+            return "delivery is missing"
+        if delivery.state is not DeliveryState.OPEN:
+            return f"delivery state is {delivery.state.value}, expected open"
+        if result.vcs_backend is None:
+            return "verified VCS backend is missing"
+        if not result.pushed:
+            return "worker did not report a verified push"
+        if result.branch != delivery.branch:
+            return "result branch does not match delivery branch"
+        if not result.commit_sha:
+            return "verified commit SHA is missing"
+        if result.commit_sha != result.remote_sha:
+            return "local and remote commit SHAs differ"
+        if result.commit_sha != delivery.head_sha:
+            return "result commit SHA does not match delivery head"
+        if not result.open_pr_call_id:
+            return "flow.open_pr call id is missing"
+
+        tool_call = self.store.get_tool_call(result.open_pr_call_id)
+        if tool_call is None:
+            return "flow.open_pr call is not persisted"
+        if (tool_call.flow_id, tool_call.attempt_id, tool_call.job_id) != (
+            job.flow_id,
+            attempt.id,
+            job.id,
+        ):
+            return "flow.open_pr call fence does not match the result"
+        if result.pull_request is None:
+            return "pull request handle is missing"
+        if tool_call.response != result.pull_request:
+            return "pull request handle does not match the persisted tool response"
+        if result.pull_request.get("pr_number") != delivery.pr_number:
+            return "pull request number does not match delivery"
+        if result.pull_request.get("head_sha") != delivery.head_sha:
+            return "pull request head SHA does not match delivery"
+        return None
+
     async def _fail(self, flow: Flow, number: int | None, reason: str) -> None:
         logger.warning("flow {} failed: {}", flow.id, reason)
         flow.state = FlowState.FAILED
         self.store.update_flow(flow)
+        self.store.release_flow_execution(flow.id)
         if number is None or flow.installation_id is None:
             return
         try:
@@ -349,9 +443,21 @@ class JobCoordinator:
     def _thread_id_for(attempt: Attempt, comment_id: int) -> str | None:
         return None
 
-    @staticmethod
-    def _pr_context(flow: Flow, attempt: Attempt) -> str:
-        return f"{flow.repo} PR #{attempt.pr_number} (issue #{flow.issue_number})"
+    def _delivery(self, flow: Flow, attempt: Attempt) -> FlowDelivery:
+        delivery = self.store.get_delivery(flow.id)
+        if delivery is None:
+            raise ValueError(f"flow {flow.id} has no delivery")
+        return delivery
+
+    def _pr_number(self, flow: Flow, attempt: Attempt) -> int:
+        number = self._delivery(flow, attempt).pr_number
+        if number is None:
+            raise ValueError(f"flow {flow.id} has no pull request")
+        return number
+
+    def _pr_context(self, flow: Flow, attempt: Attempt) -> str:
+        return f"{flow.repo} PR #{self._delivery(flow, attempt).pr_number} " \
+            f"(issue #{flow.issue_number})"
 
 
 def _validate_result_kind(kind: JobKind, result: ExecutionResult) -> None:
@@ -364,18 +470,6 @@ def _validate_result_kind(kind: JobKind, result: ExecutionResult) -> None:
     }[kind]
     if not isinstance(result, expected):
         raise TypeError(f"job kind {kind} cannot accept result kind {result.kind}")
-
-
-def _required_branch(attempt: Attempt) -> str:
-    if not attempt.branch:
-        raise ValueError(f"attempt {attempt.id} has no branch")
-    return attempt.branch
-
-
-def _pr_number(attempt: Attempt) -> int:
-    if attempt.pr_number is None:
-        raise ValueError(f"attempt {attempt.id} has no pull request")
-    return attempt.pr_number
 
 
 def _installation_id(flow: Flow) -> int:

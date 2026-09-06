@@ -1,9 +1,18 @@
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from pydantic import SecretStr
 
 from app.models import JobState
-from app.protocol import Assignment, InitialResult, InitialTask, Succeeded
+from app.protocol import (
+    Assignment,
+    AssignmentSecret,
+    InitialResult,
+    InitialTask,
+    PushSecret,
+    Succeeded,
+)
 from app.worker.journal import JournalError, WorkerJournal
 
 
@@ -22,6 +31,13 @@ def _assignment() -> Assignment:
             issue_body="Body",
             branch="flow/issue-8",
         ),
+        secret=AssignmentSecret(
+            push=PushSecret(
+                token=SecretStr("push-secret"),
+                repository="owner/repo",
+                expires_at=datetime.now(UTC) + timedelta(minutes=5),
+            )
+        ),
     )
 
 
@@ -29,6 +45,7 @@ def test_journal_persists_terminal_result_until_ack(tmp_path: Path) -> None:
     journal = WorkerJournal(tmp_path)
     assignment = _assignment()
     journal.record_received(assignment)
+    assert "push-secret" not in journal.path.read_text()
     journal.record_started()
     terminal = Succeeded(
         job_id=assignment.job_id,
