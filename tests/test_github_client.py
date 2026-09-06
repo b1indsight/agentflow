@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -72,6 +72,23 @@ def test_github_app_requires_positive_app_id_and_readable_nonempty_key(tmp_path:
         GitHubApp(configured.model_copy(update={"github_private_key_path": empty_key}))
 
 
+@pytest.mark.parametrize("configured_timeout", [None, "12.5"])
+def test_both_github_auth_clients_use_finite_timeouts(
+    configured_timeout: str | None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    # A client left at githubkit's timeout=None can hold result recovery indefinitely.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("FLOWTOOL_GITHUB_REQUEST_TIMEOUT_SECONDS", raising=False)
+    if configured_timeout is not None:
+        monkeypatch.setenv("FLOWTOOL_GITHUB_REQUEST_TIMEOUT_SECONDS", configured_timeout)
+    github = GitHubApp(settings(tmp_path))
+    expected = float(configured_timeout) if configured_timeout is not None else 30.0
+
+    for client in (github._app_client(), github._installation_client(42)):
+        timeout = client.config.timeout
+        assert (timeout.connect, timeout.read, timeout.write, timeout.pool) == (expected,) * 4
+
+
 @pytest.mark.asyncio
 async def test_reads_issue_repository_and_remote_ref_as_internal_snapshots(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -83,11 +100,7 @@ async def test_reads_issue_repository_and_remote_ref_as_internal_snapshots(
         response(SimpleNamespace(full_name="octo/repo", default_branch="trunk"))
     )
     get_ref = AsyncEndpoint(
-        response(
-            SimpleNamespace(
-                ref="refs/heads/topic", object_=SimpleNamespace(sha="abc123")
-            )
-        )
+        response(SimpleNamespace(ref="refs/heads/topic", object_=SimpleNamespace(sha="abc123")))
     )
     client = SimpleNamespace(
         rest=SimpleNamespace(
@@ -114,9 +127,9 @@ async def test_reads_issue_repository_and_remote_ref_as_internal_snapshots(
         "default_branch": "trunk",
     }
     assert ref_snapshot.model_dump() == {"branch": "topic", "sha": "abc123"}
-    assert issue.calls == [(('octo', 'repo', 7), {})]
-    assert repository.calls == [(('octo', 'repo'), {})]
-    assert get_ref.calls == [(('octo', 'repo', 'heads/topic'), {})]
+    assert issue.calls == [(("octo", "repo", 7), {})]
+    assert repository.calls == [(("octo", "repo"), {})]
+    assert get_ref.calls == [(("octo", "repo", "heads/topic"), {})]
 
 
 @pytest.mark.asyncio
@@ -196,9 +209,7 @@ async def test_pull_request_primitives_map_snapshots_and_skip_empty_reviewers(
     monkeypatch.setattr(github, "_installation_client", lambda installation_id: client)
 
     found = await github.find_pull_request_by_head(42, "octo/repo", "topic")
-    opened = await github.open_pull_request(
-        42, "octo/repo", "new-topic", "trunk", "Title", "Body"
-    )
+    opened = await github.open_pull_request(42, "octo/repo", "new-topic", "trunk", "Title", "Body")
     await github.request_reviewers(42, "octo/repo", 10, [])
 
     assert found is not None and found.number == 9
@@ -221,6 +232,91 @@ def request_failed(status: int, **headers: str) -> RequestFailed:
     request = httpx.Request("GET", "https://api.github.com/repos/octo/repo")
     raw = httpx.Response(status, request=request, headers=headers, json={"message": "secret"})
     return RequestFailed(Response(raw, dict))
+
+
+@pytest.mark.asyncio
+async def test_comment_recovery_checks_author_and_paginates(tmp_path, monkeypatch) -> None:
+    # A copied marker in a user's comment must not acknowledge an unperformed bot effect.
+    marker = "<!-- flowtool:effect:stable -->"
+    pages = []
+
+    async def list_comments(*args, page, **kwargs):
+        pages.append(page)
+        if page == 1:
+            return response(
+                [
+                    SimpleNamespace(
+                        id=n,
+                        body=marker,
+                        user=SimpleNamespace(login="alice", type="User"),
+                    )
+                    for n in range(100)
+                ]
+            )
+        return response(
+            [
+                SimpleNamespace(
+                    id=700,
+                    body=f"Done.\n\n{marker}",
+                    user=SimpleNamespace(login="flowtool[bot]", type="Bot"),
+                )
+            ]
+        )
+
+    client = SimpleNamespace(
+        rest=SimpleNamespace(
+            issues=SimpleNamespace(
+                async_list_comments=list_comments,
+                async_create_comment=AsyncEndpoint(response(SimpleNamespace(id=701))),
+            )
+        )
+    )
+    github = GitHubApp(settings(tmp_path))
+    monkeypatch.setattr(github, "_installation_client", lambda _: client)
+    assert await github.find_comment(42, "octo/repo", 10, marker) == 700
+    assert pages == [1, 2]
+    assert await github.comment(42, "octo/repo", 10, "Another comment") == 701
+
+
+@pytest.mark.asyncio
+async def test_reviewer_reconciliation_includes_completed_reviews_across_pages(
+    tmp_path, monkeypatch
+):
+    # A reviewer may finish before an interrupted request is reconciled; do not request it twice.
+    since = datetime(2026, 9, 6, tzinfo=UTC)
+    pages = []
+
+    def review(login, submitted_at, state="APPROVED"):
+        return SimpleNamespace(
+            user=SimpleNamespace(login=login),
+            submitted_at=submitted_at,
+            state=state,
+        )
+
+    async def list_reviews(*args, page, **kwargs):
+        pages.append(page)
+        if page == 1:
+            return response([review("old", since - timedelta(days=1)) for _ in range(100)])
+        return response([review("finished", since), review("draft", since, "PENDING")])
+
+    client = SimpleNamespace(
+        rest=SimpleNamespace(
+            pulls=SimpleNamespace(
+                async_get=AsyncEndpoint(
+                    response(
+                        SimpleNamespace(
+                            requested_reviewers=[SimpleNamespace(login="requested")],
+                        )
+                    )
+                ),
+                async_list_reviews=list_reviews,
+            )
+        )
+    )
+    github = GitHubApp(settings(tmp_path))
+    monkeypatch.setattr(github, "_installation_client", lambda _: client)
+    assert await github.get_reviewers(42, "octo/repo", 10, since=since) == {"requested", "finished"}
+    assert pages == [1, 2]
 
 
 @pytest.mark.asyncio
@@ -247,9 +343,7 @@ async def test_maps_github_failures_without_response_bodies(
 ) -> None:
     headers["X-GitHub-Request-Id"] = "request-123"
     get_issue = AsyncEndpoint(error=request_failed(status, **headers))
-    client = SimpleNamespace(
-        rest=SimpleNamespace(issues=SimpleNamespace(async_get=get_issue))
-    )
+    client = SimpleNamespace(rest=SimpleNamespace(issues=SimpleNamespace(async_get=get_issue)))
     github = GitHubApp(settings(tmp_path))
     monkeypatch.setattr(github, "_installation_client", lambda installation_id: client)
 
@@ -268,9 +362,7 @@ async def test_rate_limit_403_is_retryable(tmp_path: Path, monkeypatch: pytest.M
     get_issue = AsyncEndpoint(
         error=request_failed(403, **{"X-RateLimit-Remaining": "0", "Retry-After": "12"})
     )
-    client = SimpleNamespace(
-        rest=SimpleNamespace(issues=SimpleNamespace(async_get=get_issue))
-    )
+    client = SimpleNamespace(rest=SimpleNamespace(issues=SimpleNamespace(async_get=get_issue)))
     github = GitHubApp(settings(tmp_path))
     monkeypatch.setattr(github, "_installation_client", lambda installation_id: client)
 

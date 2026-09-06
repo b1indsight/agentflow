@@ -42,11 +42,13 @@ class DeliveryState(StrEnum):
 
 
 class JobKind(StrEnum):
-    INITIAL = "initial"      # 首轮编码
-    TRIAGE = "triage"  # settle 后判定（docs/architecture/review-loop.md）：revise/answer/wait/ignore
-    REVISION = "revision"    # 修订
-    ANSWER = "answer"        # Judge=answer，只作答不改码
-    ARCHIVE = "archive"      # 收尾归档
+    INITIAL = "initial"  # 首轮编码
+    TRIAGE = (
+        "triage"  # settle 后判定（docs/architecture/review-loop.md）：revise/answer/wait/ignore
+    )
+    REVISION = "revision"  # 修订
+    ANSWER = "answer"  # Judge=answer，只作答不改码
+    ARCHIVE = "archive"  # 收尾归档
 
 
 class JobState(StrEnum):
@@ -72,8 +74,8 @@ class Verdict(StrEnum):
 
 
 class ReviewItemKind(StrEnum):
-    REVIEW_BODY = "review_body"    # pull_request_review 正文
-    INLINE = "inline"              # pull_request_review_comment
+    REVIEW_BODY = "review_body"  # pull_request_review 正文
+    INLINE = "inline"  # pull_request_review_comment
     CONVERSATION = "conversation"  # issue_comment（PR 上）
 
 
@@ -169,6 +171,9 @@ class Job(BaseModel):
     result_digest: str | None = None
     result_received_at: datetime | None = None
     result_applied_at: datetime | None = None
+    result_recovery_version: int = 1
+    source_job_id: int | None = None
+    source_key: str | None = None
     last_error: str | None = None
     payload: dict | None = None
     created_at: datetime = Field(default_factory=utcnow)
@@ -204,12 +209,12 @@ class WorkerView(BaseModel):
 
 class ReviewItem(BaseModel):
     id: int | None
-    attempt_id: int             # 归属到具体 attempt（§9-2），不再挂 flow
+    attempt_id: int  # 归属到具体 attempt（§9-2），不再挂 flow
     kind: ReviewItemKind
-    github_id: int              # review id / comment id
+    github_id: int  # review id / comment id
     author: str
     body: str
-    thread_id: str | None = None       # GraphQL review thread id（inline 才有）
+    thread_id: str | None = None  # GraphQL review thread id（inline 才有）
     path: str | None = None
     line: int | None = None
     original_commit_id: str | None = None
@@ -226,8 +231,8 @@ class ReviewItem(BaseModel):
 class SandboxPolicy:
     """Legacy/future Sandbox-port policy; M1 trusted-host Codex does not consume it."""
 
-    writable_roots: tuple[Path, ...]   # agent 可写的目录（至少含工作区）
-    network: bool                      # 是否放开出口（push 时才要，尽量限到 github.com）
+    writable_roots: tuple[Path, ...]  # agent 可写的目录（至少含工作区）
+    network: bool  # 是否放开出口（push 时才要，尽量限到 github.com）
 
 
 @dataclass(frozen=True)
@@ -262,7 +267,7 @@ class AgentRun:
     session_id: str | None
     last_message: str
     exit_code: int
-    output: CodexResult | None = None   # --output-schema 解析结果（修订轮）
+    output: CodexResult | None = None  # --output-schema 解析结果（修订轮）
 
 
 @dataclass(frozen=True)
@@ -283,8 +288,8 @@ class TriageVerdict(BaseModel):
     verdict: Verdict
     confidence: float = 0.0
     reason: str = ""
-    instruction: str = ""       # verdict=revise：要做的具体改动
-    answer: str = ""            # verdict=answer：回给提问者的话
+    instruction: str = ""  # verdict=revise：要做的具体改动
+    answer: str = ""  # verdict=answer：回给提问者的话
     open_points: list[str] = []
 
 

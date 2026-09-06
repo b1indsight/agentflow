@@ -39,6 +39,8 @@ class GitHubApp:
         if settings.github_app_id <= 0:
             raise ValueError("FLOWTOOL_GITHUB_APP_ID must be a positive integer")
         self._app_id = settings.github_app_id
+        self._bot_login = settings.bot_login
+        self._request_timeout_seconds = settings.github_request_timeout_seconds
         self._private_key = self._read_private_key(settings.github_private_key_path)
 
     @staticmethod
@@ -49,7 +51,10 @@ class GitHubApp:
         return key
 
     def _app_client(self) -> Any:
-        return GitHub(AppAuthStrategy(self._app_id, self._private_key))
+        return GitHub(
+            AppAuthStrategy(self._app_id, self._private_key),
+            timeout=self._request_timeout_seconds,
+        )
 
     def _installation_client(self, installation_id: int) -> Any:
         return GitHub(
@@ -57,12 +62,11 @@ class GitHubApp:
                 self._app_id,
                 self._private_key,
                 installation_id,
-            )
+            ),
+            timeout=self._request_timeout_seconds,
         )
 
-    async def get_issue(
-        self, installation_id: int, repo: str, number: int
-    ) -> IssueSnapshot:
+    async def get_issue(self, installation_id: int, repo: str, number: int) -> IssueSnapshot:
         owner, name = self._split_repo(repo)
         client = self._installation_client(installation_id)
 
@@ -77,9 +81,7 @@ class GitHubApp:
 
         return await self._execute("get_issue", operation)
 
-    async def get_repository(
-        self, installation_id: int, repo: str
-    ) -> RepositorySnapshot:
+    async def get_repository(self, installation_id: int, repo: str) -> RepositorySnapshot:
         owner, name = self._split_repo(repo)
         client = self._installation_client(installation_id)
 
@@ -89,9 +91,7 @@ class GitHubApp:
 
         return await self._execute("get_repository", operation)
 
-    async def create_push_capability(
-        self, installation_id: int, repo: str
-    ) -> PushCapability:
+    async def create_push_capability(self, installation_id: int, repo: str) -> PushCapability:
         _, name = self._split_repo(repo)
         client = self._app_client()
 
@@ -119,9 +119,7 @@ class GitHubApp:
 
         return await self._execute("create_push_capability", operation)
 
-    async def get_ref(
-        self, installation_id: int, repo: str, branch: str
-    ) -> RemoteRef:
+    async def get_ref(self, installation_id: int, repo: str, branch: str) -> RemoteRef:
         owner, name = self._split_repo(repo)
         branch = self._normalize_branch(branch)
         client = self._installation_client(installation_id)
@@ -187,15 +185,140 @@ class GitHubApp:
 
         return await self._execute("open_pull_request", operation)
 
-    async def comment(
-        self, installation_id: int, repo: str, number: int, body: str
-    ) -> None:
+    async def comment(self, installation_id: int, repo: str, number: int, body: str) -> int:
         owner, name = self._split_repo(repo)
         client = self._installation_client(installation_id)
-        await self._execute(
-            "comment",
-            lambda: client.rest.issues.async_create_comment(owner, name, number, body=body),
-        )
+
+        async def operation() -> int:
+            data = (
+                await client.rest.issues.async_create_comment(
+                    owner,
+                    name,
+                    number,
+                    body=body,
+                )
+            ).parsed_data
+            if not isinstance(data.id, int) or data.id <= 0:
+                raise ValueError("missing comment ID")
+            return data.id
+
+        return await self._execute("comment", operation)
+
+    async def find_comment(
+        self,
+        installation_id: int,
+        repo: str,
+        number: int,
+        marker: str,
+    ) -> int | None:
+        """Find an exact recovery marker authored by this App's bot, scanning all comment pages."""
+        owner, name = self._split_repo(repo)
+        client = self._installation_client(installation_id)
+
+        async def operation() -> int | None:
+            page = 1
+            while True:
+                comments = (
+                    await client.rest.issues.async_list_comments(
+                        owner,
+                        name,
+                        number,
+                        per_page=100,
+                        page=page,
+                    )
+                ).parsed_data
+                for comment in comments:
+                    if (
+                        comment.user is not None
+                        and comment.user.login == self._bot_login
+                        and comment.user.type == "Bot"
+                        and marker in (comment.body or "").splitlines()
+                    ):
+                        return int(comment.id)
+                if len(comments) < 100:
+                    return None
+                page += 1
+
+        return await self._execute("find_comment", operation)
+
+    async def get_labels(self, installation_id: int, repo: str, number: int) -> list[str]:
+        owner, name = self._split_repo(repo)
+        client = self._installation_client(installation_id)
+
+        async def operation() -> list[str]:
+            labels: list[str] = []
+            page = 1
+            while True:
+                data = (
+                    await client.rest.issues.async_list_labels_on_issue(
+                        owner,
+                        name,
+                        number,
+                        per_page=100,
+                        page=page,
+                    )
+                ).parsed_data
+                labels.extend(label.name for label in data)
+                if len(data) < 100:
+                    return labels
+                page += 1
+
+        return await self._execute("get_labels", operation)
+
+    async def get_reviewers(
+        self,
+        installation_id: int,
+        repo: str,
+        number: int,
+        *,
+        since: datetime,
+    ) -> set[str]:
+        """Return currently requested reviewers and people who have reviewed since this effect."""
+        owner, name = self._split_repo(repo)
+        client = self._installation_client(installation_id)
+
+        async def operation() -> set[str]:
+            pull = (await client.rest.pulls.async_get(owner, name, number)).parsed_data
+            reviewers = {user.login for user in (pull.requested_reviewers or [])}
+            page = 1
+            while True:
+                data = (
+                    await client.rest.pulls.async_list_reviews(
+                        owner,
+                        name,
+                        number,
+                        per_page=100,
+                        page=page,
+                    )
+                ).parsed_data
+                reviewers.update(
+                    review.user.login
+                    for review in data
+                    if review.user is not None
+                    and review.submitted_at is not None
+                    and review.submitted_at >= since
+                    and review.state.casefold() != "pending"
+                )
+                if len(data) < 100:
+                    return reviewers
+                page += 1
+
+        return await self._execute("get_reviewers", operation)
+
+    async def review_thread_resolved(self, installation_id: int, thread_id: str) -> bool:
+        client = self._installation_client(installation_id)
+
+        async def operation() -> bool:
+            data = await client.async_graphql(
+                "query($id:ID!){node(id:$id){... on PullRequestReviewThread{isResolved}}}",
+                {"id": thread_id},
+            )
+            value = data["node"]["isResolved"]
+            if not isinstance(value, bool):
+                raise TypeError("missing review thread resolution state")
+            return value
+
+        return await self._execute("review_thread_resolved", operation)
 
     async def set_labels(
         self, installation_id: int, repo: str, number: int, labels: list[str]
@@ -235,9 +358,7 @@ class GitHubApp:
         """
 
         async def operation() -> list[dict[str, Any]]:
-            data = await client.async_graphql(
-                query, {"owner": owner, "name": name, "pr": pr}
-            )
+            data = await client.async_graphql(query, {"owner": owner, "name": name, "pr": pr})
             return data["repository"]["pullRequest"]["reviewThreads"]["nodes"]
 
         return await self._execute("list_review_threads", operation)
@@ -246,9 +367,7 @@ class GitHubApp:
         client = self._installation_client(installation_id)
         await self._execute(
             "resolve_review_thread",
-            lambda: client.async_graphql(
-                _RESOLVE_THREAD_MUTATION, {"threadId": thread_id}
-            ),
+            lambda: client.async_graphql(_RESOLVE_THREAD_MUTATION, {"threadId": thread_id}),
         )
 
     @staticmethod
@@ -303,9 +422,7 @@ class GitHubApp:
         except (RequestError, httpx.TimeoutException, httpx.NetworkError):
             raise GitHubAdapterError(GitHubErrorKind.TRANSIENT, endpoint) from None
         except (AttributeError, KeyError, TypeError, ValueError):
-            raise GitHubAdapterError(
-                GitHubErrorKind.UNEXPECTED_RESPONSE, endpoint
-            ) from None
+            raise GitHubAdapterError(GitHubErrorKind.UNEXPECTED_RESPONSE, endpoint) from None
 
     @staticmethod
     def _request_error(endpoint: str, error: RequestFailed) -> GitHubAdapterError:

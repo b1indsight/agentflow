@@ -24,6 +24,7 @@ class ServeSettings(FlowToolSettings):
     github_app_id: int = 0
     github_private_key_path: Path = Path("./flowtool-app.private-key.pem")
     github_webhook_secret: str = ""
+    github_request_timeout_seconds: float = Field(default=30.0, gt=0, allow_inf_nan=False)
     bot_login: str = "flowtool[bot]"
 
     trigger_label: str = "flow"

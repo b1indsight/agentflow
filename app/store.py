@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
+from copy import copy
 from datetime import datetime, timedelta
 from typing import Any, cast
 
@@ -27,6 +29,7 @@ from app.models import (
     WorkerStatus,
     utcnow,
 )
+from app.result_store import RESULT_SCHEMA, ResultStore
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS flows (
@@ -249,6 +252,8 @@ class Store:
         self._clock = clock
         self.lease_duration = lease_duration
         self.recovery_grace = recovery_grace
+        self._bound_connection: Connection[Row] | None = None
+        self._transaction_closed = False
         self._pool = cast(
             ConnectionPool[Connection[Row]],
             ConnectionPool(
@@ -260,11 +265,115 @@ class Store:
             ),
         )
 
+    @contextmanager
+    def connection(self) -> Iterator[Connection[Row]]:
+        """Borrow the transaction's connection, or commit one standalone repository operation."""
+        if self._transaction_closed:
+            raise RuntimeError("transaction repository used outside its context")
+        if self._bound_connection is not None:
+            yield self._bound_connection
+        else:
+            with self._pool.connection() as connection:
+                yield connection
+
+    @contextmanager
+    def transaction(self) -> Iterator[Store]:
+        """Yield an explicitly bound repository; exceptions roll back every operation in the unit.
+
+        Use ``with store.transaction() as tx:`` and call repository methods on ``tx`` only.
+        The view shares the pool and configuration, not mutable transaction state with callers.
+        No network await belongs inside this context.
+        """
+        with self.connection() as connection, connection.transaction():
+            bound = copy(self)
+            bound._bound_connection = connection
+            try:
+                yield bound
+            finally:
+                bound._transaction_closed = True
+
+    def serialize_issue(self, repo: str, issue_number: int) -> None:
+        """Serialize trigger/retry of the same issue, including creation before a Flow row exists."""
+        if self._bound_connection is None:
+            raise RuntimeError("issue lock requires a workflow transaction")
+        self._bound_connection.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+            (f"flowtool:{repo}#{issue_number}",),
+        )
+
+    def lock_workflow(self, flow_id: int) -> Flow | None:
+        """Lock the worker before the Flow, then read fresh lifecycle state for a command."""
+        if self._bound_connection is None:
+            raise RuntimeError("workflow lock requires a transaction")
+        connection = self._bound_connection
+        connection.execute(
+            "SELECT worker_id FROM workers WHERE worker_id IN"
+            " (SELECT worker_id FROM flow_executions WHERE flow_id=%s)"
+            " OR current_job_id IN (SELECT id FROM jobs WHERE flow_id=%s)"
+            " ORDER BY worker_id FOR UPDATE",
+            (flow_id, flow_id),
+        ).fetchall()
+        with connection.cursor(row_factory=class_row(Flow)) as cursor:
+            return cursor.execute(
+                "SELECT * FROM flows WHERE id=%s FOR NO KEY UPDATE", (flow_id,)
+            ).fetchone()
+
+    def lock_job(self, job_id: int) -> Job | None:
+        """Lock a job after its workflow has been locked in the same transaction."""
+        if self._bound_connection is None:
+            raise RuntimeError("job lock requires a workflow transaction")
+        with self._bound_connection.cursor(row_factory=class_row(Job)) as cursor:
+            return cursor.execute("SELECT * FROM jobs WHERE id=%s FOR UPDATE", (job_id,)).fetchone()
+
+    @staticmethod
+    def _lock_worker(connection: Connection[Row], worker_id: str) -> None:
+        """Keep assignment writers ordered worker -> job/binding, like workflow completion."""
+        connection.execute(
+            "SELECT worker_id FROM workers WHERE worker_id=%s FOR UPDATE",
+            (worker_id,),
+        ).fetchone()
+
+    def cancel_jobs(self, flow_id: int) -> None:
+        """Retire queued work; a running executor still owns its slot until result or lease expiry."""
+        with self.connection() as connection:
+            connection.execute(
+                "UPDATE jobs SET state=%s, last_error=%s, updated_at=%s WHERE flow_id=%s"
+                " AND state=%s AND result_received_at IS NULL",
+                (
+                    JobState.FAILED,
+                    "Flow cancelled",
+                    self._clock(),
+                    flow_id,
+                    JobState.QUEUED,
+                ),
+            )
+
+    def has_pending_result(self, flow_id: int) -> bool:
+        with self.connection() as connection:
+            return (
+                connection.execute(
+                    "SELECT 1 FROM jobs WHERE flow_id=%s AND result_received_at IS NOT NULL"
+                    " AND result_applied_at IS NULL LIMIT 1",
+                    (flow_id,),
+                ).fetchone()
+                is not None
+            )
+
     def init_db(self) -> None:
-        with self._pool.connection() as connection:
+        with self.connection() as connection:
             connection.execute(SCHEMA)
+            connection.execute(RESULT_SCHEMA)
+
+    def now(self) -> datetime:
+        return self._clock()
+
+    @property
+    def results(self) -> ResultStore:
+        return ResultStore(self)
 
     def close(self) -> None:
+        if self._bound_connection is not None:
+            raise RuntimeError("only the owning repository can close the connection pool")
         self._pool.close()
 
     # ------------------------------------------------------------------ flows
@@ -272,7 +381,7 @@ class Store:
     def create_flow(self, repo: str, issue_number: int, installation_id: int | None) -> Flow:
         now = utcnow()
         with (
-            self._pool.connection() as connection,
+            self.connection() as connection,
             connection.cursor(row_factory=class_row(Flow)) as cursor,
         ):
             row = cursor.execute(
@@ -284,14 +393,14 @@ class Store:
 
     def get_flow(self, flow_id: int) -> Flow | None:
         with (
-            self._pool.connection() as connection,
+            self.connection() as connection,
             connection.cursor(row_factory=class_row(Flow)) as cursor,
         ):
             return cursor.execute("SELECT * FROM flows WHERE id=%s", (flow_id,)).fetchone()
 
     def get_active_flow(self, repo: str, issue_number: int) -> Flow | None:
         with (
-            self._pool.connection() as connection,
+            self.connection() as connection,
             connection.cursor(row_factory=class_row(Flow)) as cursor,
         ):
             return cursor.execute(
@@ -302,7 +411,7 @@ class Store:
 
     def get_flow_by_pr(self, repo: str, pr_number: int) -> Flow | None:
         with (
-            self._pool.connection() as connection,
+            self.connection() as connection,
             connection.cursor(row_factory=class_row(Flow)) as cursor,
         ):
             return cursor.execute(
@@ -313,7 +422,7 @@ class Store:
 
     def update_flow(self, flow: Flow) -> None:
         flow.updated_at = utcnow()
-        with self._pool.connection() as connection:
+        with self.connection() as connection:
             connection.execute(
                 "UPDATE flows SET installation_id=%s, state=%s, current_attempt_id=%s,"
                 " updated_at=%s WHERE id=%s",
@@ -332,7 +441,7 @@ class Store:
             query += " WHERE state NOT IN ('archived','cancelled','failed')"
         query += " ORDER BY id DESC"
         with (
-            self._pool.connection() as connection,
+            self.connection() as connection,
             connection.cursor(row_factory=class_row(Flow)) as cursor,
         ):
             return cursor.execute(query).fetchall()
@@ -342,7 +451,7 @@ class Store:
     def create_attempt(self, flow_id: int) -> Attempt:
         now = utcnow()
         with (
-            self._pool.connection() as connection,
+            self.connection() as connection,
             connection.cursor(row_factory=class_row(Attempt)) as cursor,
         ):
             row = cursor.execute(
@@ -354,7 +463,7 @@ class Store:
 
     def get_attempt(self, attempt_id: int) -> Attempt | None:
         with (
-            self._pool.connection() as connection,
+            self.connection() as connection,
             connection.cursor(row_factory=class_row(Attempt)) as cursor,
         ):
             return cursor.execute("SELECT * FROM attempts WHERE id=%s", (attempt_id,)).fetchone()
@@ -364,7 +473,7 @@ class Store:
 
     def list_attempts(self, flow_id: int) -> list[Attempt]:
         with (
-            self._pool.connection() as connection,
+            self.connection() as connection,
             connection.cursor(row_factory=class_row(Attempt)) as cursor,
         ):
             return cursor.execute(
@@ -373,7 +482,7 @@ class Store:
 
     def update_attempt(self, attempt: Attempt) -> None:
         attempt.updated_at = utcnow()
-        with self._pool.connection() as connection:
+        with self.connection() as connection:
             connection.execute(
                 "UPDATE attempts SET codex_session_id=%s, revision_cycles=%s,"
                 " updated_at=%s WHERE id=%s",
@@ -389,7 +498,7 @@ class Store:
 
     def get_flow_execution(self, flow_id: int) -> FlowExecution | None:
         with (
-            self._pool.connection() as connection,
+            self.connection() as connection,
             connection.cursor(row_factory=class_row(FlowExecution)) as cursor,
         ):
             return cursor.execute(
@@ -398,18 +507,17 @@ class Store:
 
     def get_worker_execution(self, worker_id: str) -> FlowExecution | None:
         with (
-            self._pool.connection() as connection,
+            self.connection() as connection,
             connection.cursor(row_factory=class_row(FlowExecution)) as cursor,
         ):
             return cursor.execute(
-                "SELECT * FROM flow_executions WHERE worker_id=%s"
-                " AND released_at IS NULL",
+                "SELECT * FROM flow_executions WHERE worker_id=%s AND released_at IS NULL",
                 (worker_id,),
             ).fetchone()
 
     def release_flow_execution(self, flow_id: int) -> bool:
         now = self._clock()
-        with self._pool.connection() as connection:
+        with self.connection() as connection:
             result = connection.execute(
                 "UPDATE flow_executions SET released_at=%s"
                 " WHERE flow_id=%s AND released_at IS NULL",
@@ -420,7 +528,7 @@ class Store:
     def get_or_create_delivery(self, flow_id: int, branch: str) -> FlowDelivery:
         now = self._clock()
         with (
-            self._pool.connection() as connection,
+            self.connection() as connection,
             connection.cursor(row_factory=class_row(FlowDelivery)) as cursor,
         ):
             row = cursor.execute(
@@ -437,7 +545,7 @@ class Store:
 
     def get_delivery(self, flow_id: int) -> FlowDelivery | None:
         with (
-            self._pool.connection() as connection,
+            self.connection() as connection,
             connection.cursor(row_factory=class_row(FlowDelivery)) as cursor,
         ):
             return cursor.execute(
@@ -446,7 +554,7 @@ class Store:
 
     def update_delivery(self, delivery: FlowDelivery) -> None:
         delivery.updated_at = self._clock()
-        with self._pool.connection() as connection:
+        with self.connection() as connection:
             connection.execute(
                 "UPDATE flow_deliveries SET branch=%s, base_branch=%s, state=%s,"
                 " pr_number=%s, url=%s, head_sha=%s, title=%s, body=%s,"
@@ -481,7 +589,7 @@ class Store:
 
         now = self._clock()
         with (
-            self._pool.connection() as connection,
+            self.connection() as connection,
             connection.cursor(row_factory=class_row(FlowToolCall)) as cursor,
         ):
             row = cursor.execute(
@@ -510,10 +618,9 @@ class Store:
         self, call_id: str, response: Mapping[str, object], error: str | None = None
     ) -> None:
         now = self._clock()
-        with self._pool.connection() as connection:
+        with self.connection() as connection:
             result = connection.execute(
-                "UPDATE flow_tool_calls SET response=%s, error=%s, updated_at=%s"
-                " WHERE call_id=%s",
+                "UPDATE flow_tool_calls SET response=%s, error=%s, updated_at=%s WHERE call_id=%s",
                 (Jsonb(dict(response)), error, now, call_id),
             )
         if result.rowcount != 1:
@@ -521,7 +628,7 @@ class Store:
 
     def get_tool_call(self, call_id: str) -> FlowToolCall | None:
         with (
-            self._pool.connection() as connection,
+            self.connection() as connection,
             connection.cursor(row_factory=class_row(FlowToolCall)) as cursor,
         ):
             return cursor.execute(
@@ -530,15 +637,29 @@ class Store:
 
     # ------------------------------------------------------------------- jobs
 
-    def enqueue_job(self, flow_id: int, kind: JobKind, payload: dict | None = None) -> Job:
+    def enqueue_job(
+        self,
+        flow_id: int,
+        kind: JobKind,
+        payload: dict | None = None,
+        *,
+        source_job_id: int | None = None,
+        source_key: str | None = None,
+    ) -> Job:
+        if (source_job_id is None) != (source_key is None):
+            raise ValueError("derived jobs require both source job and purpose")
         now = utcnow()
         with (
-            self._pool.connection() as connection,
+            self.connection() as connection,
             connection.cursor(row_factory=class_row(Job)) as cursor,
         ):
             row = cursor.execute(
                 "INSERT INTO jobs(flow_id, kind, state, attempt, payload, created_at,"
-                " updated_at) VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING *",
+                " updated_at,source_job_id,source_key) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)"
+                " ON CONFLICT(source_job_id,source_key) WHERE source_job_id IS NOT NULL"
+                " DO UPDATE SET source_key=excluded.source_key"
+                " WHERE jobs.flow_id=excluded.flow_id AND jobs.kind=excluded.kind"
+                " AND jobs.payload IS NOT DISTINCT FROM excluded.payload RETURNING *",
                 (
                     flow_id,
                     kind,
@@ -547,20 +668,22 @@ class Store:
                     Jsonb(payload) if payload else None,
                     now,
                     now,
+                    source_job_id,
+                    source_key,
                 ),
             ).fetchone()
         return _required(row)
 
     def get_job(self, job_id: int) -> Job | None:
         with (
-            self._pool.connection() as connection,
+            self.connection() as connection,
             connection.cursor(row_factory=class_row(Job)) as cursor,
         ):
             return cursor.execute("SELECT * FROM jobs WHERE id=%s", (job_id,)).fetchone()
 
     def list_jobs(self, flow_id: int) -> list[Job]:
         with (
-            self._pool.connection() as connection,
+            self.connection() as connection,
             connection.cursor(row_factory=class_row(Job)) as cursor,
         ):
             return cursor.execute(
@@ -569,7 +692,7 @@ class Store:
 
     def latest_failed_job(self, flow_id: int) -> Job | None:
         with (
-            self._pool.connection() as connection,
+            self.connection() as connection,
             connection.cursor(row_factory=class_row(Job)) as cursor,
         ):
             return cursor.execute(
@@ -587,7 +710,7 @@ class Store:
     ) -> WorkerRecord:
         now = self._clock()
         with (
-            self._pool.connection() as connection,
+            self.connection() as connection,
             connection.cursor(row_factory=class_row(WorkerRecord)) as cursor,
         ):
             row = cursor.execute(
@@ -623,7 +746,8 @@ class Store:
         connection_epoch: str = "",
     ) -> None:
         now = self._clock()
-        with self._pool.connection() as connection, connection.transaction():
+        with self.connection() as connection, connection.transaction():
+            self._lock_worker(connection, worker_id)
             connection.execute(
                 "UPDATE flow_executions SET recovery_deadline=COALESCE(recovery_deadline,%s)"
                 " WHERE worker_id=%s AND released_at IS NULL"
@@ -667,18 +791,16 @@ class Store:
 
     def list_workers(self) -> list[WorkerRecord]:
         with (
-            self._pool.connection() as connection,
+            self.connection() as connection,
             connection.cursor(row_factory=class_row(WorkerRecord)) as cursor,
         ):
-            return cursor.execute(
-                "SELECT * FROM workers ORDER BY worker_id"
-            ).fetchall()
+            return cursor.execute("SELECT * FROM workers ORDER BY worker_id").fetchall()
 
     def assign_job(self, worker_id: str, token: str, connection_epoch: str = "") -> Job | None:
         """Claim work while retaining a Flow's worker slot between individual jobs."""
 
         now = self._clock()
-        with self._pool.connection() as connection, connection.transaction():
+        with self.connection() as connection, connection.transaction():
             candidate = connection.execute(
                 "SELECT w.worker_id FROM workers w WHERE w.status=%s"
                 " AND w.current_job_id IS NULL AND EXISTS (SELECT 1 FROM jobs j"
@@ -695,14 +817,16 @@ class Store:
             ).fetchone()
             if candidate is None or candidate["worker_id"] != worker_id:
                 return None
-            if connection.execute(
-                "SELECT 1 FROM workers WHERE worker_id=%s AND connection_epoch=%s",
-                (worker_id, connection_epoch),
-            ).fetchone() is None:
+            if (
+                connection.execute(
+                    "SELECT 1 FROM workers WHERE worker_id=%s AND connection_epoch=%s",
+                    (worker_id, connection_epoch),
+                ).fetchone()
+                is None
+            ):
                 return None
             execution = connection.execute(
-                "SELECT flow_id FROM flow_executions WHERE worker_id=%s"
-                " AND released_at IS NULL",
+                "SELECT flow_id FROM flow_executions WHERE worker_id=%s AND released_at IS NULL",
                 (worker_id,),
             ).fetchone()
             if execution is None:
@@ -710,24 +834,26 @@ class Store:
                     "SELECT j.id, j.flow_id, f.repo FROM jobs j JOIN flows f ON f.id=j.flow_id"
                     " LEFT JOIN flow_executions e ON e.flow_id=f.id AND e.released_at IS NULL"
                     " WHERE j.state=%s AND f.state=%s AND e.flow_id IS NULL"
-                    " ORDER BY j.created_at, j.id FOR UPDATE OF j SKIP LOCKED LIMIT 1",
+                    " ORDER BY j.created_at, j.id FOR NO KEY UPDATE OF f,j SKIP LOCKED LIMIT 1",
                     (JobState.QUEUED, FlowState.ACTIVE),
                 ).fetchone()
                 if row is None:
                     return None
-                connection.execute(
+                bound = connection.execute(
                     "INSERT INTO flow_executions(flow_id, worker_id, repo_identity, bound_at)"
                     " VALUES (%s,%s,%s,%s) ON CONFLICT(flow_id) DO UPDATE SET"
                     " worker_id=EXCLUDED.worker_id, repo_identity=EXCLUDED.repo_identity,"
                     " bound_at=EXCLUDED.bound_at, recovery_deadline=NULL, released_at=NULL"
-                    " WHERE flow_executions.released_at IS NOT NULL",
+                    " WHERE flow_executions.released_at IS NOT NULL RETURNING flow_id",
                     (row["flow_id"], worker_id, f"{worker_id}:{row['repo']}", now),
-                )
+                ).fetchone()
+                if bound is None:
+                    return None
             else:
                 row = connection.execute(
                     "SELECT j.id, j.flow_id, f.repo FROM jobs j JOIN flows f ON f.id=j.flow_id"
                     " WHERE j.state=%s AND f.state=%s AND j.flow_id=%s"
-                    " ORDER BY j.created_at, j.id FOR UPDATE OF j SKIP LOCKED LIMIT 1",
+                    " ORDER BY j.created_at, j.id FOR NO KEY UPDATE OF f,j SKIP LOCKED LIMIT 1",
                     (JobState.QUEUED, FlowState.ACTIVE, execution["flow_id"]),
                 ).fetchone()
                 if row is None:
@@ -766,7 +892,8 @@ class Store:
         connection_epoch: str = "",
     ) -> bool:
         now = self._clock()
-        with self._pool.connection() as connection, connection.transaction():
+        with self.connection() as connection, connection.transaction():
+            self._lock_worker(connection, worker_id)
             job = connection.execute(
                 "SELECT flow_id FROM jobs WHERE id=%s AND state=%s"
                 " AND assigned_worker_id=%s AND assignment_token=%s"
@@ -810,7 +937,8 @@ class Store:
         connection_epoch: str = "",
     ) -> bool:
         now = self._clock()
-        with self._pool.connection() as connection:
+        with self.connection() as connection:
+            self._lock_worker(connection, worker_id)
             result = connection.execute(
                 "UPDATE jobs SET heartbeat_at=%s, lease_expires_at=%s, updated_at=%s"
                 " WHERE id=%s AND state=%s AND assigned_worker_id=%s"
@@ -830,8 +958,7 @@ class Store:
             )
             if result.rowcount == 1:
                 connection.execute(
-                    "UPDATE workers SET last_seen_at=%s WHERE worker_id=%s"
-                    " AND connection_epoch=%s",
+                    "UPDATE workers SET last_seen_at=%s WHERE worker_id=%s AND connection_epoch=%s",
                     (now, worker_id, connection_epoch),
                 )
         return result.rowcount == 1
@@ -842,7 +969,8 @@ class Store:
         """Attach a new fenced connection to a started assignment within its grace."""
 
         now = self._clock()
-        with self._pool.connection() as connection, connection.transaction():
+        with self.connection() as connection, connection.transaction():
+            self._lock_worker(connection, worker_id)
             resumed = connection.execute(
                 "UPDATE jobs SET recovery_deadline=NULL, heartbeat_at=%s,"
                 " lease_expires_at=%s, updated_at=%s WHERE id=%s AND state=%s"
@@ -878,7 +1006,7 @@ class Store:
         token: str,
         connection_epoch: str = "",
     ) -> bool:
-        with self._pool.connection() as connection:
+        with self.connection() as connection:
             row = connection.execute(
                 "SELECT 1 FROM jobs WHERE id=%s AND state=%s AND assigned_worker_id=%s"
                 " AND assignment_token=%s AND EXISTS (SELECT 1 FROM workers"
@@ -899,7 +1027,8 @@ class Store:
         """Persist a fenced terminal message before domain-side result application."""
 
         now = self._clock()
-        with self._pool.connection() as connection, connection.transaction():
+        with self.connection() as connection, connection.transaction():
+            self._lock_worker(connection, worker_id)
             row = connection.execute(
                 "SELECT result_digest, result_applied_at FROM jobs WHERE id=%s"
                 " AND assigned_worker_id=%s AND assignment_token=%s"
@@ -915,7 +1044,8 @@ class Store:
                 return "applied" if row["result_applied_at"] is not None else "pending"
             stored = connection.execute(
                 "UPDATE jobs SET result_payload=%s, result_digest=%s,"
-                " result_received_at=%s, updated_at=%s WHERE id=%s AND state=%s",
+                " result_received_at=%s, updated_at=%s,result_recovery_version=1"
+                " WHERE id=%s AND state=%s",
                 (Jsonb(dict(payload)), digest, now, now, job_id, JobState.RUNNING),
             )
             return "pending" if stored.rowcount == 1 else "rejected"
@@ -924,7 +1054,7 @@ class Store:
         """Return durable terminal messages whose coordinator application was interrupted."""
 
         with (
-            self._pool.connection() as connection,
+            self.connection() as connection,
             connection.cursor(row_factory=class_row(Job)) as cursor,
         ):
             return cursor.execute(
@@ -939,7 +1069,13 @@ class Store:
         if state not in (JobState.DONE, JobState.FAILED):
             raise ValueError("persisted results can only complete terminal jobs")
         now = self._clock()
-        with self._pool.connection() as connection, connection.transaction():
+        with self.connection() as connection, connection.transaction():
+            owner = connection.execute(
+                "SELECT assigned_worker_id FROM jobs WHERE id=%s",
+                (job_id,),
+            ).fetchone()
+            if owner and owner["assigned_worker_id"]:
+                self._lock_worker(connection, owner["assigned_worker_id"])
             completed = connection.execute(
                 "UPDATE jobs SET state=%s, result_applied_at=%s, updated_at=%s"
                 " WHERE id=%s AND state=%s AND result_received_at IS NOT NULL"
@@ -961,7 +1097,38 @@ class Store:
                         job_id,
                     ),
                 )
+                connection.execute(
+                    "UPDATE flow_executions SET recovery_deadline=CASE WHEN EXISTS"
+                    " (SELECT 1 FROM workers WHERE worker_id=%s AND status=%s) THEN NULL ELSE %s END"
+                    " WHERE flow_id=(SELECT flow_id FROM jobs WHERE id=%s) AND released_at IS NULL",
+                    (
+                        completed["assigned_worker_id"],
+                        WorkerStatus.ONLINE,
+                        now + self.recovery_grace,
+                        job_id,
+                    ),
+                )
         return completed is not None
+
+    def record_control_result(
+        self,
+        job_id: int,
+        payload: Mapping[str, object],
+        digest: str,
+        reason: str,
+    ) -> None:
+        """Record a control-generated terminal outcome while holding the workflow/job locks."""
+        with self.connection() as connection:
+            connection.execute(
+                "UPDATE jobs SET result_payload=%s,result_digest=%s,result_received_at=%s,"
+                " result_recovery_version=1,last_error=%s WHERE id=%s AND state=%s"
+                " AND result_received_at IS NULL",
+                (Jsonb(dict(payload)), digest, self._clock(), reason, job_id, JobState.RUNNING),
+            )
+
+    def set_job_error(self, job_id: int, reason: str) -> None:
+        with self.connection() as connection:
+            connection.execute("UPDATE jobs SET last_error=%s WHERE id=%s", (reason, job_id))
 
     def finish_assignment(
         self,
@@ -973,7 +1140,8 @@ class Store:
     ) -> bool:
         if state not in (JobState.DONE, JobState.FAILED):
             raise ValueError("remote assignments can only finish as done or failed")
-        with self._pool.connection() as connection:
+        with self.connection() as connection:
+            self._lock_worker(connection, worker_id)
             result = connection.execute(
                 "UPDATE jobs SET state=%s, result_applied_at=COALESCE(result_applied_at,%s),"
                 " updated_at=%s"
@@ -1007,11 +1175,13 @@ class Store:
         token: str,
         connection_epoch: str = "",
     ) -> bool:
-        with self._pool.connection() as connection:
+        with self.connection() as connection:
+            self._lock_worker(connection, worker_id)
             result = connection.execute(
                 "UPDATE jobs SET state=%s, assigned_worker_id=NULL, assignment_token=NULL,"
                 " heartbeat_at=NULL, updated_at=%s WHERE id=%s AND state=%s"
                 " AND assigned_worker_id=%s AND assignment_token=%s AND started_at IS NULL"
+                " AND result_received_at IS NULL"
                 " AND EXISTS (SELECT 1 FROM workers WHERE worker_id=%s"
                 " AND connection_epoch=%s)",
                 (
@@ -1041,7 +1211,8 @@ class Store:
         reason: str,
         connection_epoch: str = "",
     ) -> bool:
-        with self._pool.connection() as connection:
+        with self.connection() as connection:
+            self._lock_worker(connection, worker_id)
             result = connection.execute(
                 "UPDATE jobs SET state=%s, assignment_token=NULL, last_error=%s, updated_at=%s"
                 " WHERE id=%s AND state=%s AND assigned_worker_id=%s"
@@ -1071,7 +1242,7 @@ class Store:
         """Mark persisted work recoverable without replaying or failing it at startup."""
 
         now = self._clock()
-        with self._pool.connection() as connection:
+        with self.connection() as connection:
             connection.execute(
                 "UPDATE workers SET status=%s",
                 (WorkerStatus.OFFLINE,),
@@ -1092,11 +1263,15 @@ class Store:
         """Requeue unstarted leases and fail only started jobs past recovery grace."""
 
         now = self._clock()
-        with self._pool.connection() as connection, connection.transaction():
+        with self.connection() as connection, connection.transaction():
+            connection.execute(
+                "SELECT worker_id FROM workers ORDER BY worker_id FOR UPDATE"
+            ).fetchall()
             requeued_rows = connection.execute(
                 "UPDATE jobs SET state=%s, assigned_worker_id=NULL, assignment_token=NULL,"
                 " heartbeat_at=NULL, lease_expires_at=NULL, updated_at=%s"
                 " WHERE state=%s AND started_at IS NULL AND lease_expires_at<=%s"
+                " AND result_received_at IS NULL"
                 " RETURNING id, assigned_worker_id",
                 (JobState.QUEUED, now, JobState.RUNNING, now),
             ).fetchall()
@@ -1104,6 +1279,7 @@ class Store:
                 "UPDATE jobs SET state=%s, last_error=%s, updated_at=%s"
                 " WHERE state=%s AND started_at IS NOT NULL"
                 " AND recovery_deadline IS NOT NULL AND recovery_deadline<=%s"
+                " AND result_received_at IS NULL"
                 " RETURNING id, flow_id, assigned_worker_id",
                 (
                     JobState.FAILED,
@@ -1130,8 +1306,8 @@ class Store:
             flow_ids = [row["flow_id"] for row in failed_rows]
             if flow_ids:
                 connection.execute(
-                    "UPDATE flows SET state=%s, updated_at=%s WHERE id=ANY(%s)",
-                    (FlowState.FAILED, now, flow_ids),
+                    "UPDATE flows SET state=%s, updated_at=%s WHERE id=ANY(%s) AND state=%s",
+                    (FlowState.FAILED, now, flow_ids, FlowState.ACTIVE),
                 )
                 connection.execute(
                     "UPDATE flow_executions SET released_at=%s"
@@ -1141,18 +1317,19 @@ class Store:
             expired_executions = connection.execute(
                 "UPDATE flow_executions SET released_at=%s"
                 " WHERE released_at IS NULL AND recovery_deadline IS NOT NULL"
-                " AND recovery_deadline<=%s RETURNING flow_id, worker_id",
+                " AND recovery_deadline<=%s AND NOT EXISTS (SELECT 1 FROM jobs j"
+                " WHERE j.flow_id=flow_executions.flow_id AND j.result_received_at IS NOT NULL"
+                " AND j.result_applied_at IS NULL) RETURNING flow_id, worker_id",
                 (now, now),
             ).fetchall()
             expired_flow_ids = [row["flow_id"] for row in expired_executions]
             if expired_flow_ids:
                 connection.execute(
-                    "UPDATE flows SET state=%s, updated_at=%s WHERE id=ANY(%s)",
-                    (FlowState.FAILED, now, expired_flow_ids),
+                    "UPDATE flows SET state=%s, updated_at=%s WHERE id=ANY(%s) AND state=%s",
+                    (FlowState.FAILED, now, expired_flow_ids, FlowState.ACTIVE),
                 )
                 connection.execute(
-                    "UPDATE workers SET status=%s, current_job_id=NULL"
-                    " WHERE worker_id=ANY(%s)",
+                    "UPDATE workers SET status=%s, current_job_id=NULL WHERE worker_id=ANY(%s)",
                     (
                         WorkerStatus.FAILED,
                         [row["worker_id"] for row in expired_executions],
@@ -1163,7 +1340,7 @@ class Store:
     # ----------------------------------------------------------------- events
 
     def event_seen(self, delivery_id: str) -> bool:
-        with self._pool.connection() as connection:
+        with self.connection() as connection:
             row = connection.execute(
                 "SELECT 1 FROM events WHERE delivery_id=%s", (delivery_id,)
             ).fetchone()
@@ -1173,7 +1350,7 @@ class Store:
         self, delivery_id: str, event_type: str, flow_id: int | None, payload: dict
     ) -> bool:
         """Atomically reserve a delivery and report whether this caller won."""
-        with self._pool.connection() as connection:
+        with self.connection() as connection:
             row = connection.execute(
                 "INSERT INTO events(delivery_id, event_type, flow_id, payload, processed_at)"
                 " VALUES (%s,%s,%s,%s,%s) ON CONFLICT (delivery_id) DO NOTHING"
@@ -1185,7 +1362,7 @@ class Store:
     # --------------------------------------------------------- review_threads
 
     def upsert_review_item(self, item: ReviewItem) -> None:
-        with self._pool.connection() as connection:
+        with self.connection() as connection:
             connection.execute(
                 "INSERT INTO review_threads(attempt_id, kind, github_id, thread_id, path, line,"
                 " original_commit_id, diff_hunk, author, body, relayed, resolved, created_at)"
@@ -1211,7 +1388,7 @@ class Store:
 
     def unrelayed_items(self, attempt_id: int) -> list[ReviewItem]:
         with (
-            self._pool.connection() as connection,
+            self.connection() as connection,
             connection.cursor(row_factory=class_row(ReviewItem)) as cursor,
         ):
             return cursor.execute(
@@ -1222,14 +1399,14 @@ class Store:
     def mark_relayed(self, item_ids: list[int]) -> None:
         if not item_ids:
             return
-        with self._pool.connection() as connection, connection.cursor() as cursor:
+        with self.connection() as connection, connection.cursor() as cursor:
             cursor.executemany(
                 "UPDATE review_threads SET relayed=TRUE WHERE id=%s",
                 [(item_id,) for item_id in item_ids],
             )
 
     def mark_resolved(self, attempt_id: int, github_id: int) -> None:
-        with self._pool.connection() as connection:
+        with self.connection() as connection:
             connection.execute(
                 "UPDATE review_threads SET resolved=TRUE WHERE attempt_id=%s AND github_id=%s",
                 (attempt_id, github_id),
@@ -1238,12 +1415,20 @@ class Store:
     # ------------------------------------------------------------- codex_runs
 
     def record_codex_run(
-        self, attempt_id: int, kind: str, prompt: str, log_path: str, exit_code: int
+        self,
+        attempt_id: int,
+        kind: str,
+        prompt: str,
+        log_path: str,
+        exit_code: int,
+        *,
+        source_job_id: int | None = None,
     ) -> None:
         now = utcnow()
-        with self._pool.connection() as connection:
+        with self.connection() as connection:
             connection.execute(
                 "INSERT INTO codex_runs(attempt_id, kind, prompt, log_path, exit_code,"
-                " started_at, ended_at) VALUES (%s,%s,%s,%s,%s,%s,%s)",
-                (attempt_id, kind, prompt, log_path, exit_code, now, now),
+                " started_at, ended_at,source_job_id) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)"
+                " ON CONFLICT(source_job_id) WHERE source_job_id IS NOT NULL DO NOTHING",
+                (attempt_id, kind, prompt, log_path, exit_code, now, now, source_job_id),
             )

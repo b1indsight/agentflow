@@ -48,13 +48,15 @@ PENDING → CODING → PR_OPEN ⇄ REVISING
 运行失败   → FAILED
 ```
 
-`ControlService` 负责触发、取消、合并和 retry；`JobCoordinator` 把五类持久 job 构造成版本化 task，
-并把 worker 返回的结构化 result 应用为数据库、GitHub 与 plugin 副作用。worker 不能直接更新这些状态。
+`ControlService` 在显式事务中负责触发、取消、合并和 retry；`JobCoordinator` 把五类持久 job 构造成版本化 task，
+并把已接收的结构化 result 交给 `ResultApplication`。后者冻结一次结果的领域变更和 GitHub 操作，
+由 `ResultEffects` 查询/执行远端操作并保存回执，最后一起提交本地状态、派生任务、运行记录和结果确认。
+网络请求不占用数据库事务；plugin hook 在提交后调用，不具备持久化投递保证。worker 不能直接更新这些状态。
 非零 Codex exit 会转 FAILED，revision 成功后会标记 addressed/deferred/clarification。
 
 当前 coordinator 仍有以下缺口：
 
-- `_thread_id_for()` 永远返回 `None`，无法真实 resolve review thread；
+- review comment 到 GraphQL thread 的映射尚未接入，无法真实 resolve review thread；
 - `_pr_context()` 只有 repo、PR 和 issue 编号，没有 diff、CI 或未解决线程；
 - cancel 只更新数据库状态，不 kill Codex、不清工作区；
 - 未合并 close、人工 push、rebase/冲突尚未实现。
@@ -70,7 +72,10 @@ worker `last_assigned_at` 和 Flow execution binding 事务化领取任务。wor
 
 不同 identity 可并发在线；同 identity 新连接取得新 epoch 并关闭旧 socket，数据库条件保证旧连接最终失效。
 任务未 Started 断线后保留到 lease 到期再 requeue；Started job 进入 RECOVERING，只允许原 identity 在 grace 内恢复，
-到期才把 job/flow 置 FAILED。Flow 非终态时，即使暂时没有 running job，binding 也继续独占该 worker/repo。
+到期才把 job/活跃 flow 置 FAILED，不覆盖 CANCELLED。取消只退掉 queued job，running executor 仍需交回结果或等待租约清理。
+已持久接收的终态结果由 control 接管，不因 worker 的 recovery deadline 到期重新执行或失败；
+后台循环持续恢复未应用结果。必要的 GitHub 操作未完成时不发 ResultAccepted，worker 保留 journal 重连。
+Flow 非终态时，即使暂时没有 running job，binding 也继续独占该 worker/repo。
 worker socket 与 executor 解耦，root 内原子 journal 在 ack 前保存进度和终态结果；
 进程重启可重放终态，但不会猜测恢复已经消失的 executor。同一 attempt 的后续任务仍只回到首次 Started 的 worker，
 不支持跨 worker session 迁移。同机默认 root 按 identity 派生，并用持久 identity 标记与独占锁拒绝并发或顺序复用。
@@ -140,6 +145,8 @@ ORM。
 - `flow_tool_calls`：fenced command 的参数与终态 response/error，支持同 call id 重放；
 - `attempts`：一次运行/恢复尝试的 session 与 revision cycles，不拥有 worker、branch 或 PR；
 - `jobs`：queued/running/done/failed、worker/token/start、lease/recovery deadline、result inbox/digest 与尝试次数；
+- `result_applications`：按源 job 唯一保存冻结的结果计划；
+- `result_effects`：有序 GitHub 操作、claim/fencing、远端回执、退避时间和最后错误；
 - `workers`：identity、协议版本、epoch、online/busy/recovering/offline/failed、当前 job、连接/心跳与断线原因；
 - `events`：delivery 去重和 payload 审计；
 - `codex_runs`：按 attempt 记录 prompt、kind、exit 与时间；
@@ -150,8 +157,15 @@ lease 到期 requeue、started grace/deadline、epoch fencing、result inbox 去
 `assign_job()` 使用事务内的 `FOR UPDATE SKIP LOCKED`，gateway 接受多个独立配置 worker。
 
 Store 继续使用同步接口。assignment claim 会锁定公平候选空闲 worker 和最早 eligible Flow job，并原子创建
-或复用 lifecycle binding。result inbox 保证 terminal result 不重复应用；`flow_tool_calls` 在副作用前登记并以
-稳定 head 查询收口开 PR 的崩溃窗口，但不宣称通用 exactly-once。跨 worker session 迁移和多 serve HA 仍未实现。
+或复用 lifecycle binding。`with store.transaction() as tx` 提供连接绑定的 Store 视图，各领域步骤显式使用 `tx`。
+结果的最终事务同时写入 flow/delivery/attempt、带源 job 唯一键的派生 job/codex run、`result_applied_at` 和 worker slot。
+`flow_tool_calls` 的 prepared delivery 与 response 也一起提交。
+
+评论使用稳定隐藏 marker 并分页核对本 bot 作者，PR 使用固定 head 查询，labels/reviewers 则核对目标状态。
+不能确认是否成功的非幂等请求保持 uncertain，不盲目重复 POST；`flow show` 显示待处理操作，retry 不能绕过它们。
+因此不宣称跨 PostgreSQL/GitHub 的通用 exactly-once。跨 worker session 迁移和多 serve HA 仍未实现。
+升级前应停止旧 serve；新增字段/表采用 additive schema。旧版本已接收却未确认的结果可能有未记账副作用，
+默认阻止自动重放并要求人工核对；不要在未核对远端前手工清除结果标记或操作账本。
 M0 的 SQLite 文件
 不会自动导入 PostgreSQL。
 
