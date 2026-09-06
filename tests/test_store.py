@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from psycopg.errors import UniqueViolation
 
+from app.control.service import ControlService
 from app.models import DeliveryState, FlowState, JobKind, JobState, ReviewItem, ReviewItemKind
 from app.store import Store
 
@@ -418,6 +419,29 @@ def test_workers_are_single_slot_and_attempt_affinity_is_enforced(store: Store) 
     assert store.assign_job("worker-b", "wrong-worker") is None
     affinity_claim = store.assign_job("worker-a", "right-worker")
     assert affinity_claim is not None and affinity_claim.id == revision.id
+
+
+def test_failed_flow_retry_reactivates_its_released_execution(store: Store) -> None:
+    # A failed Flow keeps its execution history row; retry must reactivate that row instead of
+    # inserting the same flow_id again and making the queued retry permanently unassignable.
+    store.worker_connected("worker-a", protocol_version=1)
+    flow = store.create_flow("owner/retry", 23, installation_id=None)
+    failed = store.enqueue_job(flow.id, JobKind.INITIAL)
+    assert store.assign_job("worker-a", "token-a") is not None
+    assert store.finish_assignment(failed.id, "worker-a", "token-a", JobState.FAILED)
+    flow.state = FlowState.FAILED
+    store.update_flow(flow)
+    assert store.release_flow_execution(flow.id)
+
+    ControlService(store).retry(flow)
+
+    retried = store.assign_job("worker-a", "token-b")
+    assert retried is not None
+    assert retried.kind is JobKind.INITIAL
+    execution = store.get_flow_execution(flow.id)
+    assert execution is not None
+    assert execution.worker_id == "worker-a"
+    assert execution.released_at is None
 
 
 def test_worker_presence_round_trip(store: Store) -> None:

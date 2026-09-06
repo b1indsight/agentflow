@@ -82,6 +82,9 @@ class ToolStore:
         call.response = response
         call.error = error
 
+    def get_tool_call(self, call_id: str) -> FlowToolCall | None:
+        return self.calls.get(call_id)
+
 
 class ToolGitHub:
     def __init__(self) -> None:
@@ -142,7 +145,7 @@ def request(name: str = "flow.open_pr") -> FlowToolRequest:
 
 
 @pytest.mark.asyncio
-async def test_open_pr_verifies_remote_and_replays_one_delivery() -> None:
+async def test_open_pr_prepares_and_replays_before_terminal_finalize() -> None:
     store = ToolStore()
     github = ToolGitHub()
     service = FlowToolService(
@@ -156,11 +159,54 @@ async def test_open_pr_verifies_remote_and_replays_one_delivery() -> None:
 
     assert first.error is None
     assert replay.result == first.result
-    assert first.result is not None and first.result["pr_number"] == 17
-    assert store.delivery.state is DeliveryState.OPEN
+    assert first.result == {
+        "status": "prepared",
+        "head_sha": "abc123",
+        "delivery_version": 0,
+    }
+    assert store.delivery.state is DeliveryState.OPENING
     assert store.delivery.head_sha == "abc123"
+    assert github.opened == 0
+    assert github.labels == github.reviews == 0
+
+    finalized = await service.finalize_open_pr(store.flow.id, "call-a")
+    replayed_finalize = await service.finalize_open_pr(store.flow.id, "call-a")
+
+    assert finalized == replayed_finalize
+    assert finalized["pr_number"] == 17
+    assert store.delivery.state is DeliveryState.OPEN
     assert github.opened == 1
     assert github.labels == github.reviews == 1
+
+
+@pytest.mark.asyncio
+async def test_finalize_rejects_a_closed_pull_request() -> None:
+    class ClosedGitHub(ToolGitHub):
+        async def find_pull_request_by_head(
+            self, installation_id: int, repo: str, branch: str
+        ) -> PullRequestSnapshot | None:
+            return PullRequestSnapshot(
+                number=17,
+                state="closed",
+                head_branch=branch,
+                head_sha="abc123",
+                base_branch="trunk",
+            )
+
+    store = ToolStore()
+    github = ClosedGitHub()
+    service = FlowToolService(
+        cast(Store, cast(Any, store)),
+        cast(GitHubClient, cast(Any, github)),
+        SimpleNamespace(reviewers=["carol"], in_review_label="flow:in-review"),
+    )
+    assert (await service.execute(request(), worker_id="worker-a")).error is None
+
+    with pytest.raises(RuntimeError, match="pull request is closed"):
+        await service.finalize_open_pr(store.flow.id, "call-a")
+
+    assert store.delivery.state is DeliveryState.OPENING
+    assert github.labels == github.reviews == 0
 
 
 @pytest.mark.asyncio
@@ -252,7 +298,7 @@ async def test_new_call_cannot_change_existing_pr_arguments() -> None:
 
     assert response.result is None
     assert response.error == "flow.open_pr arguments conflict with the existing delivery"
-    assert github.opened == 1
+    assert github.opened == 0
 
 
 @pytest.mark.asyncio

@@ -5,6 +5,7 @@
 
 ## 当前计划
 
+- [`m1-delivery-review-fixes.md`](m1-delivery-review-fixes.md) — failed Flow retry、INITIAL 成功前提前开 PR 和 closed PR 误判已修复，PostgreSQL CI 待验证；
 - [`m1-github-capabilities.md`](m1-github-capabilities.md) — M1 Feature 2/3：GitHub App、短时 push capability 与 PR primitives 已实现并通过自动化，真实 App smoke 待执行；
 - [`m1-issue-to-pr.md`](m1-issue-to-pr.md) — M1 Feature 3/3：Flow 生命周期独占 worker/repo、Flow tool RPC、CodeAgent commit/push、远端验证与一 Flow 一 PR 已实现并通过自动化，真实 E2E 待执行；
 
