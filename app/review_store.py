@@ -201,8 +201,9 @@ class ReviewStore:
             )
             return True
 
-    def _reconcile_edits(self, flow_id: int, update: FeedbackUpdate) -> None:
+    def _reconcile_edits(self, flow_id: int, update: FeedbackUpdate) -> bool:
         """Replay a durable same-second edit chain as predecessors arrive, in the ingest transaction."""
+        changed = False
         with self.store.connection() as connection:
             while True:
                 row = connection.execute(
@@ -225,8 +226,8 @@ class ReviewStore:
                     (row["id"], row["observed_at"], current.body),
                 ).fetchone()
                 if pending is None:
-                    return
-                self._append_version(
+                    return changed
+                changed |= self._append_version(
                     flow_id, pending["attempt_id"], pending["source_delivery"],
                     FeedbackUpdate.model_validate(pending["content"]),
                     previous_body=pending["previous_body"],
@@ -420,6 +421,7 @@ class ReviewStore:
                 or snapshot.repo != flow.repo or snapshot.pr_number != delivery.pr_number):
             raise ValueError("thread observation does not belong to active PR")
         changed = False
+        frozen = {(f.item_id, f.version) for f in baseline if f.kind is ReviewItemKind.INLINE}
         with self.store.connection() as connection:
             for thread in snapshot.threads:
                 connection.execute(
@@ -434,7 +436,7 @@ class ReviewStore:
                     if comment.is_bot:
                         continue
                     row = connection.execute(
-                        "SELECT v.content FROM review_items i JOIN review_versions v"
+                        "SELECT i.id,i.version,i.observed_at,v.content FROM review_items i JOIN review_versions v"
                         " ON i.id=v.item_id AND i.version=v.version WHERE i.flow_id=%s"
                         " AND i.kind='inline' AND i.github_id=%s", (flow_id, comment.github_id),
                     ).fetchone()
@@ -443,11 +445,10 @@ class ReviewStore:
                         comment.body, comment.author, comment.updated_at,
                     ):
                         # Thread metadata is stored above; enriching it is not new reviewer input.
+                        changed |= self._reconcile_edits(flow_id, old)
                         continue
-                    if old and old.updated_at == comment.updated_at and not any(
-                        f.kind is ReviewItemKind.INLINE and f.github_id == comment.github_id
-                        and f.body == old.body and f.updated_at == old.updated_at for f in baseline
-                    ):
+                    if (row and row["observed_at"] == comment.updated_at
+                            and (row["id"], row["version"]) not in frozen):
                         # A webhook may be ahead of an eventually consistent GraphQL read in the
                         # same timestamp tick. Only advance the frozen version, never undo a newer one.
                         continue
@@ -462,6 +463,7 @@ class ReviewStore:
                         flow_id, flow.current_attempt_id, None, update,
                         previous_body=old.body if old else None,
                     )
+                    changed |= self._reconcile_edits(flow_id, update)
             if changed:
                 self._touch(flow_id, 0)
 

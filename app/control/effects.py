@@ -30,6 +30,15 @@ from app.review_models import BatchState
 from app.store import Store
 
 
+class _PendingReviewFeedback(RuntimeError):
+    """A notification became unnecessary while its remote prerequisites were being queried."""
+
+
+def _pending_feedback(store: Store, plan: ResultPlan) -> bool:
+    frozen = {(f.item_id, f.version) for f in plan.consumed}
+    return any((f.item_id, f.version) not in frozen for f in store.reviews.pending(plan.flow_id))
+
+
 class ResultEffects:
     """Resume ordered effects; an uncertain non-idempotent write is reconciled, never guessed."""
 
@@ -70,6 +79,9 @@ class ResultEffects:
             uncertain = record.dispatched_at is not None
             try:
                 receipt = await self._execute(plan, record, records)
+            except _PendingReviewFeedback as exc:
+                self.store.results.finish(record, EffectState.SUCCEEDED,
+                                          receipt=EffectReceipt(pending_reason=str(exc)))
             except ResultPending as exc:
                 self.store.results.finish(
                     record,
@@ -148,6 +160,10 @@ class ResultEffects:
                 ):
                     raise FlowToolRejected(FlowToolErrorKind.CONFLICT,
                                            "new feedback arrived before resolve dispatch")
+                if (plan.revision is not None
+                        and isinstance(record.payload, (LabelsEffect, ReviewersEffect))
+                        and _pending_feedback(tx, plan)):
+                    raise _PendingReviewFeedback("出现新反馈，暂停 re-review")
             tx.results.mark_dispatched(record)
 
     async def _execute(
@@ -248,10 +264,8 @@ class ResultEffects:
             number = effect.number
             if plan.revision is not None:
                 assert isinstance(number, int)
-                frozen = {(f.item_id, f.version) for f in plan.consumed}
                 if (any(r.receipt and r.receipt.pending_reason for r in records)
-                        or any((f.item_id, f.version) not in frozen
-                               for f in self.store.reviews.pending(plan.flow_id))
+                        or _pending_feedback(self.store, plan)
                         or not await revision_current(self.github, plan, number)):
                     return EffectReceipt(pending_reason="仍有未决反馈或 PR 已变化，暂停 re-review")
             if number == "created_pr":

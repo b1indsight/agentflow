@@ -102,11 +102,15 @@ JSON 数据；异常或不完整映射保留待处理。REST reply 使用根评�
 每线程说明经持久回执确认后，检查本轮与历史已核验修订对所有人类反馈的精确覆盖；deferred、遗漏、
 clarification、缺失映射或变化的 head 阻止完成。历史依据只接受当前 attempt 的最新 item/version。
 resolve 前刷新线程并补入尚未收到 webhook 的反馈；也核对本地新版本，避免迟到查询撤销同秒编辑。
+同秒刷新只可推进被冻结的 item/version，正文改回原值也不会重获旧版本资格；远端补齐前驱后，
+在同一事务中继续回放已排队的编辑。每个 resolve effect 仅保存该线程的 inline 处理依据。
 resolve 后复读记录远端状态和竞态反馈，不自动 unresolve。人工 resolve 不等于新反馈已消费。
 
 回复通过本 App 作者和精确 marker 找回；响应不确定时保留 uncertain，不盲目重发。
 确定的线程权限/删除错误保存未完成诊断，不阻止已验证代码的 result ACK；回复未成功的 addressed 仍未消费。
 必要线程处理未完成、存在新反馈、或 PR/head 已改变时不请求 re-review。新反馈属于下一批，不重跑旧 CodeAgent。
+标签和 reviewer 查询完成后，发送前还会在 workflow 事务内再次检查待处理反馈；新增反馈使通知跳过，
+留下未完成诊断并正常确认已交付的修订结果。
 GitHub 没有条件式 resolve 事务，刷新与 mutation 之间的竞态仍可能让新评论暂时位于已关闭线程中；
 系统保留该反馈与远端观察记录，持续远端对账属于 M4。
 

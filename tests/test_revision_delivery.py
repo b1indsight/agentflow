@@ -186,6 +186,37 @@ def verified_result(task, **updates):
     return RevisionResult(**values)
 
 
+async def test_resolve_payloads_only_carry_their_threads_current_and_historical_feedback(revision_control):
+    from datetime import UTC, datetime
+
+    from app.control.resolution import plan_resolution
+    from app.github_models import ReviewThreads
+    from app.models import AddressedComment, ReviewItemKind
+    from app.result_models import ResolveEffect
+    from tests.test_review_resolution import feedback, human, snapshot
+
+    store, _, _, _, task = revision_control
+    threads, current, historical = [], [], []
+    # Many long review threads must not duplicate the entire PR's history in every effect.
+    for number in range(20):
+        root = human(number * 2 + 1, body="Earlier request " + "x" * 1000)
+        reply = human(number * 2 + 2, reply_to_id=root.github_id, body="New request " + "y" * 1000)
+        threads.append(snapshot(root, reply).model_copy(update={"thread_id": f"T{number}"}))
+        historical.extend([feedback(root), feedback(root, kind=ReviewItemKind.REVIEW_BODY)])
+        current.append(feedback(reply))
+    remote = ReviewThreads(repo=store.flow.repo, pr_number=17, fetched_at=datetime.now(UTC), threads=threads)
+    batch = store.reviews.batch.model_copy(update={"feedback": current, "threads": remote})
+    result = verified_result(task.model_copy(update={"feedback": current}), output=revision_output(
+        addressed=[AddressedComment(item_id=f.item_id, version=f.version, comment_id=f.github_id,
+                                    note="Fixed") for f in current]))
+    plan = plan_resolution(store.flow, 17, batch, result, historical)
+    resolves = [effect for effect in plan.effects if isinstance(effect, ResolveEffect)]
+    assert len(resolves) == len(threads) and all(effect.allow_resolve for effect in resolves)
+    assert all({f.github_id for f in effect.covered} == {c.github_id for c in effect.snapshot.comments}
+               and all(f.kind is ReviewItemKind.INLINE for f in effect.covered) for effect in resolves)
+    assert sum(len(effect.model_dump_json()) for effect in resolves) < 3 * len(remote.model_dump_json())
+
+
 async def test_control_preserves_omitted_feedback_and_does_not_rereview_noop(revision_control):
     from tests.test_coordinator import apply_result
 

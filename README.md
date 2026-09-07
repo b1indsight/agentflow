@@ -158,7 +158,7 @@ Python 3.12 分别运行 Ruff、Mypy、pytest 与 sdist/wheel 构建。pytest jo
 结果重放与远端操作核对。数据库用例还覆盖事务回滚、跨连接并发、任务去重、取消交错和恢复期限；
 GitHub、Codex 与模型服务使用替身；Judge 契约测试运行真实 bub 库连接本机假模型端点，不访问真实 provider。
 
-2026-09-07 M2 F4 本机复核：完整 pytest **371 passed / 0 skipped**（真实 PostgreSQL），Ruff、Mypy 和发行包构建通过；
+2026-09-07 M2 F4 本机复核：完整 pytest **377 passed / 0 skipped**（真实 PostgreSQL），Ruff、Mypy 和发行包构建通过；
 覆盖反馈批次、Judge/答案恢复、Git/jj 修订核验、session 兜底，以及线程分页、原位回复、保守 resolve、
 两轮反馈处理和 PostgreSQL 故障恢复。保留一个
 Starlette TestClient/httpx 弃用告警。数据库 CI 的历史验证见

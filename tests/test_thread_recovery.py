@@ -249,6 +249,76 @@ async def test_webhook_edit_blocks_resolve_even_if_remote_read_lags(store, threa
     assert store.reviews.pending(flow.id)[0].body == "A new requirement"
 
 
+async def test_same_second_round_trip_keeps_the_latest_webhook_version(store, thread_revision):
+    flow, job, github, subject = thread_revision
+    original = human().body
+    # A reviewer edits A→B→A in one second; the remote query is still showing B.
+    for delivery, previous, body in [("edit-b", original, "Intermediate"),
+                                     ("edit-a", "Intermediate", original)]:
+        store.reviews.ingest(flow.id, delivery, "pull_request_review_comment",
+            {"changes": {"body": {"from": previous}}}, FeedbackUpdate(
+                kind=ReviewItemKind.INLINE, github_id=1, author="alice",
+                body=body, updated_at=human().updated_at,
+            ), settle_seconds=0, submit_grace_seconds=0)
+    github.thread.comments[0] = human(body="Intermediate")
+    await subject.results.apply(job.id)
+    assert [(f.version, f.body) for f in store.reviews.pending(flow.id)] == [(3, original)]
+    assert github.resolves == [] and github.review_requests == []
+
+
+@pytest.mark.parametrize("preexisting", [False, True])
+async def test_remote_predecessor_releases_the_queued_webhook_edit(store, thread_revision, preexisting):
+    flow, job, github, subject = thread_revision
+    # C's webhook arrives before B. GraphQL supplies B, so the stored B→C edit must follow it.
+    latest = FeedbackUpdate(kind=ReviewItemKind.INLINE, github_id=1, author="alice",
+                            body="Latest", updated_at=human().updated_at)
+    assert not store.reviews.ingest(flow.id, "edit-c", "pull_request_review_comment",
+        {"changes": {"body": {"from": "Intermediate"}}}, latest,
+        settle_seconds=0, submit_grace_seconds=0)
+    if preexisting:
+        # Recover a predecessor observed by the older implementation before edit-chain replay existed.
+        with store.transaction() as tx:
+            tx.lock_workflow(flow.id)
+            assert tx.reviews._append_version(flow.id, flow.current_attempt_id, None,
+                latest.model_copy(update={"body": "Intermediate"}), previous_body=human().body)
+    github.thread.comments[0] = human(body="Intermediate")
+    await subject.results.apply(job.id)
+    assert [(f.version, f.body) for f in store.reviews.pending(flow.id)] == [(3, "Latest")]
+    with store.connection() as connection:
+        assert connection.execute("SELECT COUNT(*) AS n FROM review_pending_edits").fetchone()["n"] == 0
+    assert not store.reviews.ingest(flow.id, "late-edit-b", "pull_request_review_comment",
+        {"changes": {"body": {"from": human().body}}}, latest.model_copy(update={"body": "Intermediate"}),
+        settle_seconds=0, submit_grace_seconds=0)
+    queued = store.reviews.claim_due()
+    assert len(queued) == 1
+    assert store.reviews.for_job(queued[0]).feedback[0].body == "Latest"
+
+
+@pytest.mark.parametrize("query,write", [("get_labels", "labels"), ("get_reviewers", "review_requests")])
+async def test_new_feedback_during_notification_query_fences_dispatch(
+    store, thread_revision, monkeypatch, query, write,
+):
+    flow, job, github, subject = thread_revision
+    original = getattr(github, query)
+
+    async def with_feedback(*args, **kwargs):
+        # The old batch has already resolved its thread; a new question arrives during the last read.
+        store.reviews.ingest(flow.id, "new-question", "issue_comment", {}, FeedbackUpdate(
+            kind=ReviewItemKind.CONVERSATION, github_id=2, author="alice",
+            body="Please also check the edge case", updated_at=human().updated_at,
+        ), settle_seconds=0, submit_grace_seconds=0)
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(github, query, with_feedback)
+    assert await subject.results.apply(job.id) is JobState.DONE
+    assert getattr(github, write) == [] and github.review_requests == []
+    batch = store.reviews.for_job(store.get_job(job.id))
+    assert batch.state.value == "waiting" and batch.open_points
+    assert [f.github_id for f in store.reviews.pending(flow.id)] == [2]
+    assert await coordinator(store, github).results.apply(job.id) is JobState.DONE
+    assert getattr(github, write) == []
+
+
 async def test_dispatch_rechecks_input_arriving_during_head_read(store, thread_revision, monkeypatch):
     flow, job, github, subject = thread_revision
     original = github.get_review_pull_request

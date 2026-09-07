@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- 修复线程审查边界：同秒远端刷新按 item/version 校验冻结基线，并在同一事务中继续处理已排队的编辑；
+  标签和 reviewer 请求发送前再次检查待处理反馈，发现新输入时保存诊断并跳过通知。
+- resolve effect 只保存所属线程的 inline 处理依据，避免多线程重复保存整个 PR 的反馈历史。
 - M2 F4：类型化线程/comment 快照、独立 cursor 分页和共享请求/字节预算；原 review 线程合并回复
   addressed/deferred/可关联问题，PR conversation 说明引用精确来源及已核验提交。
 - 先确认回复，再检查完整人类反馈覆盖、本地版本与当前 PR/head，resolve 后复读；新评论和编辑

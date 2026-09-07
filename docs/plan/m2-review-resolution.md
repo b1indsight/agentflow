@@ -149,8 +149,20 @@ deferred/clarification/遗漏/新版本/远端 SHA 变化时保留；reply 在 r
   查询落后于 webhook 的同秒版本冲突保留本地新反馈；未知写结果继续 uncertain，禁止盲目重发。
 - PostgreSQL 用例覆盖丢响应重放、取消、提交失败、迟到 webhook、两轮修订、历史覆盖、同数字不同 kind、
   多评论合并、deferred、no-op、映射不完整，以及人工 resolve / mutation 期间的新评论。
-- 全套 Ruff、Mypy 通过；pytest **371 passed / 0 skipped**（真实 PostgreSQL，本机 Git/jj），
+- 全套 Ruff、Mypy 通过；pytest **377 passed / 0 skipped**（真实 PostgreSQL，本机 Git/jj），
   `uv build --no-sources` 成功生成 sdist/wheel；保留原有 Starlette/httpx 弃用告警；外部 GitHub/Codex 使用替身，bub 契约使用假 provider。
 - 真实矩阵所有场景均为**待验收**：本会话尚未提供 disposable repo、GitHub App 和真实模型配置。
   无真实 GitHub 评论/resolve 操作、无真实模型执行，也不存在可填写的真实对象链接、版本和数据库验收记录。
   待这些输入可用后逐项执行第 6 节矩阵；M2 保持“已实现、真实验收未完成”。
+
+### 审查修复（2026-09-07）
+
+用户明确授权修复首轮审查的 3 medium / 1 low；同一 bookmark/PR 继续提交：
+
+- 同秒 observation 使用冻结 item/version，防止 A→B→A 后的旧 B 查询回退当前版本。
+- 复用持久 edit-chain reconciliation，远端补齐前驱或重读已有前驱时继续处理排队编辑，再调度下一批。
+- label/reviewer 在 dispatch 事务内重查反馈，新输入使通知跳过并写待处理诊断，不把 result 卡成失败。
+- 按 comment ID 建立 inline 依据索引，每个 resolve effect 仅保存所属线程内容；20 个双评论线程
+  的回归场景从重复保存 1,200 份反馈缩减为 40 份，保留当前及历史版本的覆盖判定。
+- 新增 6 项回归用例，均先复现原问题；线程与修订测试共 71 项通过；
+  完整 pytest **377 passed / 0 skipped**（真实 PostgreSQL），Ruff、Mypy、`uv build --no-sources` 通过。

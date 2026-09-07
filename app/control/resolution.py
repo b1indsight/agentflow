@@ -76,6 +76,10 @@ def plan_resolution(
                   and all(f.kind is ReviewItemKind.INLINE for f in batch.feedback))
     if not associated:
         conversation.extend(questions)
+    coverage_by_comment: dict[int, list[ReviewFeedback]] = {}
+    for item in [*historical, *addressed]:
+        if item.kind is ReviewItemKind.INLINE:
+            coverage_by_comment.setdefault(item.github_id, []).append(item)
     commit = f"已核验提交：[ `{result.commit_sha}` ](https://github.com/{flow.repo}/commit/{result.commit_sha})"
     for thread_id, items in groups.items():
         thread = mapped[thread_id]
@@ -98,7 +102,8 @@ def plan_resolution(
             notes.blocked.extend(FeedbackRef(item_id=f.item_id, version=f.version) for f in items)
             conversation.append(reason)
             reply_key = None
-        coverage = [*historical, *addressed]
+        coverage = [item for comment in thread.comments
+                    for item in coverage_by_comment.get(comment.github_id, []) if matches(comment, item)]
         notes.effects.append(ResolveEffect(
             installation_id=flow.installation_id, repo=flow.repo, key=f"resolve:{thread_id}", number=number, thread_id=thread_id,
             snapshot=thread, covered=coverage, reply_key=reply_key,
