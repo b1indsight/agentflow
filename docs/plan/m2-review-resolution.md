@@ -1,17 +1,20 @@
 # M2 Feature 4/4：review 线程回复、自动 resolve 与闭环验收
 
-> 状态：已批准并实施，自动化通过；真实 M2 矩阵待验收 · 日期：2026-09-07
+> 状态：已实现并合并 [PR #22](https://github.com/b1indsight/agentflow/pull/22)，自动化通过；真实 M2 矩阵待验收，另有一项未修复的 Medium。
+> 实施日期：2026-09-07 · 合并日期：2026-09-08（Asia/Singapore）· 文档核对：2026-09-08。
 > 实施基线：`main` / `f305acd5`（PR #21，前置 #19–#21 均已合并）
-> Bookmark：`feat/m2-review-resolution`；本 PR 继续承载实现；用户于 2026-09-07 指示“做pr #22”。
+> Bookmark：`feat/m2-review-resolution`；计划、实现与审查修复均在同一 PR。
 > 实现前置：F1 `feat/m2-feedback-batches`、F2 `feat/m2-semantic-triage`、
 > F3 `feat/m2-revision-delivery`。本 feature 是 M2 集成验收入口。
 
-## 1. 目标与当前缺口
+第 1–6 节保留规划基线、方案与验收要求；第 7 节记录实施结果，第 8 节记录合并与剩余工作。
+
+## 1. 目标与规划时缺口
 
 reviewer 应在自己提出问题的线程看到处理说明；系统仅在当前线程的问题已处理且对应代码交付
 通过核验后自动 resolve。新评论、延后事项或待澄清问题必须继续保留。
 
-当前 `GitHubClient.list_review_threads()` 只读取前 100 个线程及每线程前 20 条评论，没有 cursor
+规划时 `GitHubClient.list_review_threads()` 只读取前 100 个线程及每线程前 20 条评论，没有 cursor
 分页；返回无类型字典，也未接入 router/结果映射。`ReviewItem.thread_id` 有字段但入口未填充。
 `ResultApplication` 把 addressed 的数字 comment_id 直接设为本地 resolved，既不发布 note，
 也不生成 ResolveEffect。已有副作用执行器支持 resolve 状态查询和恢复，可直接延伸使用。
@@ -117,14 +120,15 @@ deferred/clarification/遗漏/新版本/远端 SHA 变化时保留；reply 在 r
 `uv build --no-sources`。fake GitHub/Codex/bub E2E 验证控制流，不代替真实集成验收。
 升级前处理旧 pending results/effects；不把旧本地 resolved 标记迁移成已核验远端 receipt。
 
-在配置好的 disposable GitHub repo、App、worker 和真实模型上按以下矩阵记录证据：
+在配置好的 disposable GitHub repo、App、worker 和真实模型上按以下矩阵记录证据。
+截至 2026-09-08，以下场景均为**待验收**，表中描述验收要求：
 
-| 场景 | 验收结果 |
+| 场景 | 验收要求（均待执行） |
 |---|---|
 | M1 Issue→PR 前置 | 保存原 PR/branch、worker/repo binding 与首轮 SHA，确认可真实 push |
 | 普通讨论尚未定论 → 新回复形成结论 | 先 wait，无改码；新反馈后只派生一次 revision |
 | 代码问题、闲聊 | answer 只发一次且不改 SHA；ignore 不发无意义回复 |
-| Request Changes + 多条 inline、明确 bot 指令 | 授权强信号经 grace 合批直达一个 revision，仍受交付/轮数限制 |
+| Request Changes + 多条 inline、明确 bot 指令 | 仅授权 Request Changes 经 grace 合批直达 revision；bot 指令进入 Judge，均受交付/轮数限制 |
 | 两轮正常修订 | 同 session/repo/branch/PR，实际新 SHA；处理说明返回正确线程 |
 | 修订中追加或编辑评论 | 不被旧结果消费，不误 resolve，下一轮继续处理 |
 | session 丢失 | 干净原 repo 一次 start 兜底；保留同一 PR 和批次，更新 session 记录 |
@@ -132,7 +136,7 @@ deferred/clarification/遗漏/新版本/远端 SHA 变化时保留；reply 在 r
 | settle 中 serve 重启、结果/ACK 恢复 | 反馈与任务不丢失；无重复修订、回复和 resolve |
 | 有效 addressed 与分页线程 | 确认远端回复/resolve；记录 thread/comment ID 与核验 SHA |
 
-真实 PR 评论与 resolve 属于实施验收阶段的受控测试操作，本计划阶段不执行。
+真实 PR 评论与 resolve 属于配置授权测试环境后的验收操作，目前尚未执行。
 记录运行日期、CLI/adapter/model 版本、GitHub 对象链接、数据库批次/结果摘要和失败项，禁止记录密钥。
 任何未运行场景单列“待验收”；只有自动化与真实矩阵都达到预期，才把 M2 标为已验收。
 
@@ -151,9 +155,9 @@ deferred/clarification/遗漏/新版本/远端 SHA 变化时保留；reply 在 r
   多评论合并、deferred、no-op、映射不完整，以及人工 resolve / mutation 期间的新评论。
 - 全套 Ruff、Mypy 通过；pytest **377 passed / 0 skipped**（真实 PostgreSQL，本机 Git/jj），
   `uv build --no-sources` 成功生成 sdist/wheel；保留原有 Starlette/httpx 弃用告警；外部 GitHub/Codex 使用替身，bub 契约使用假 provider。
-- 真实矩阵所有场景均为**待验收**：本会话尚未提供 disposable repo、GitHub App 和真实模型配置。
-  无真实 GitHub 评论/resolve 操作、无真实模型执行，也不存在可填写的真实对象链接、版本和数据库验收记录。
-  待这些输入可用后逐项执行第 6 节矩阵；M2 保持“已实现、真实验收未完成”。
+- 真实矩阵所有场景均为**待验收**：尚无授权的一次性仓库、GitHub App 和真实模型的完整验收记录。
+  没有执行该矩阵要求的真实 GitHub 评论/resolve 或模型调用，缺少对应对象链接、版本和数据库运行证据。
+  测试环境配置并授权后逐项执行第 6 节矩阵；M2 保持“已实现并合并、真实验收未完成”。
 
 ### 审查修复（2026-09-07）
 
@@ -166,3 +170,28 @@ deferred/clarification/遗漏/新版本/远端 SHA 变化时保留；reply 在 r
   的回归场景从重复保存 1,200 份反馈缩减为 40 份，保留当前及历史版本的覆盖判定。
 - 新增 6 项回归用例，均先复现原问题；线程与修订测试共 71 项通过；
   完整 pytest **377 passed / 0 skipped**（真实 PostgreSQL），Ruff、Mypy、`uv build --no-sources` 通过。
+
+## 8. 合并状态与剩余工作（2026-09-08）
+
+[PR #22](https://github.com/b1indsight/agentflow/pull/22) 于 2026-09-08 00:02:45（Asia/Singapore；
+UTC 2026-09-07 16:02:45）合并为 `5fd27f23584e`，M2 F1–F4 全部进入 main。
+修复 head `0294c003128b` 的 [CI](https://github.com/b1indsight/agentflow/actions/runs/34140178991)
+全部通过。审查修复后的独立审查无 critical，新发现以下 Medium，尚未修复。
+第 6 节真实验收矩阵仍待执行；合并和自动化通过不表示 M2 已验收。
+
+### 同秒重复 webhook 重放（Medium，未修复）
+
+来源：[PR #22 的修复后审查记录](https://github.com/b1indsight/agentflow/pull/22)。
+相关路径为 `app/review_store.py` 的远端线程观察与 `_reconcile_edits()`。
+
+1. GraphQL 已观察到评论从 A 编辑为 B，并将 B 保存为当前版本。
+2. 同一条 A→B 的 webhook 迟到；其前序 A 与当前 B 不符，编辑进入持久队列。
+3. 后续批次冻结 B，远端又在同一时间戳内将正文从 B 改回 A。
+4. 观察写入 A 后，reconciliation 将已发生过的旧 A→B 再次重放，错误生成新版本 B。
+
+影响：已过时的要求重新成为待处理反馈，可能阻塞 resolve/re-review，并进入下一轮 worker。
+这不是已修复项；第 7 节的 377 项测试与 CI 尚不能证明该交错顺序已正确处理。
+
+修复验收条件：识别版本历史中已表示的编辑转换，避免将迟到重复 webhook 作为新编辑；无法确定的
+编辑保留诊断。新增“远端观察 → 迟到重复 webhook → 同秒正文回退”回归，确认最终正文保持 A，
+不派生旧 B 的待处理版本，并保持真实新编辑和乱序编辑的处理能力。

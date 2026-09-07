@@ -1,14 +1,17 @@
 # M2 Feature 1/4：持久反馈批次与 settle
 
-> 状态：已批准并实施 · 计划/批准/实施日期：2026-09-07 · 基线：`main` / `9fd98266`（PR #18）
-> Bookmark：`feat/m2-feedback-batches`；本 PR 获批后继续承载实现，不另开实现 PR。
+> 状态：已实现并合并 [PR #19](https://github.com/b1indsight/agentflow/pull/19)；M2 真实闭环待验收。
+> 计划/批准/实施日期：2026-09-07 · 规划基线：`main` / `9fd98266`（PR #18）· 文档核对：2026-09-08。
+> Bookmark：`feat/m2-feedback-batches`；计划与实现使用同一 PR。
+
+以下保留原始拆分与规划基线；F1–F4 现已全部合并，当前实现及已知缺陷见 [M2 状态与待办](../architecture/README.md#m2-状态与待办)。
 
 ## 1. M2 需求分析与 feature 拆分
 
 [路线图](../architecture/roadmap.md)定义 M2 为语义 Triage（bub）门与回喂循环：
 `settle → revise / answer / wait`，包含 resume、兜底与自动 resolve。
 用户应能在同一 PR 上讨论、提出修改、得到答复并继续审核；系统应保留尚未决议或未处理的反馈。
-本次只提交四份计划，各自创建独立 draft PR；下面是实现依赖，不是四个 PR 的堆叠关系。
+规划阶段先提交四份计划，各自创建独立 draft PR；下面记录实现依赖，不是四个 PR 的堆叠关系。
 
 | Feature | 交付结果 | 实现前置 | 计划文件 |
 |---|---|---|---|
@@ -17,12 +20,12 @@
 | F3：可靠修订与会话兜底 | 同 repo/session 修订，验证 commit/push，安全恢复失效会话 | F1、F2 | `m2-revision-delivery.md` |
 | F4：review 线程回复与自动 resolve | 把处理说明发回正确线程，确认后 resolve，并验收完整 M2 | F1、F2、F3 | `m2-review-resolution.md` |
 
-建议实现顺序 F1 → F2 → F3 → F4。每个 PR 从相同 main 单独分出，仅含本 feature 的计划；
-实现前在同一 bookmark 更新到已合并前置。审批计划不等于提前合并计划 PR。
+规划时约定顺序 F1 → F2 → F3 → F4。每个 PR 先从相同 main 单独分出，仅含本 feature 的计划；
+实现前在同一 bookmark 更新到已合并前置，随后在同一 PR 提交实现。
 
-### 当前代码事实与缺口
+### 规划基线的代码事实与缺口
 
-| 当前事实 | 对 M2 的影响 | 负责 feature |
+| 规划时事实 | 对 M2 的影响 | 负责 feature |
 |---|---|---|
 | `SettleScheduler` 用 `asyncio.Task` 保存计时，事件去重与反馈写入分别提交 | 重启丢到期调度；事件已去重但反馈未写入时重投也无效 | F1 |
 | task prepare 与 result apply 都重新查询 `unrelayed_items()` | 执行期间新来的反馈可能被本轮结果误标为 relayed | F1 |
@@ -40,8 +43,8 @@
 
 - 保持一个 Flow、一个独占 worker/repo、一个稳定 branch、最多一个 PR；同 Flow 执行串行。
 - Webhook 只完成轻量持久交接；Judge/CodeAgent 在 worker 执行；GitHub API、数据库在 control。
-- 普通反馈进入 Judge；allowlist 用户明确提及配置的 bot 并附带指令、或提交 Request Changes，
-  可绕过 Judge，但仍持久化、合批并遵守轮数、状态与交付校验。
+- 普通反馈（包括提及 bot 的指令）进入 Judge；仅 allowlist 作者提交的 Request Changes 可绕过
+  Judge，但仍持久化、合批并遵守轮数、状态与交付校验。此处已同步实施阶段收紧后的强信号规则。
 - wait 保留问题并等待新信息；answer/ignore 不产生 Codex 修改；低置信度或模型失败不能触发改码。
 - 真实 M2 验收包含两轮修订、答复、等待后继续、serve 重启、失效 session 兜底和真实线程 resolve。
   M1 真实 GitHub App/Codex E2E 尚未验收，作为联调前置记录，不因这些计划而宣称完成。

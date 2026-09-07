@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- 文档状态核对（2026-09-08）：M2 F1–F4 已通过 PR #19–#22 合并，真实 GitHub App/Codex/bub
+  验收仍待完成。同步架构、路线图、可视化和计划记录；合并与 CI 证据见 [M2 状态与待办](docs/architecture/README.md#m2-状态与待办)。
+- 记录尚未修复的 Medium：远端已观察 A→B 后，迟到的重复 A→B webhook 可能排队，在同秒 B→A
+  回退后重放旧内容；详见 [F4 已知问题](docs/plan/m2-review-resolution.md#同秒重复-webhook-重放medium未修复)。
+
 - 修复线程审查边界：同秒远端刷新按 item/version 校验冻结基线，并在同一事务中继续处理已排队的编辑；
   标签和 reviewer 请求发送前再次检查待处理反馈，发现新输入时保存诊断并跳过通知。
 - resolve effect 只保存所属线程的 inline 处理依据，避免多线程重复保存整个 PR 的反馈历史。

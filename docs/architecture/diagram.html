@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>FlowTool 架构状态 · M1 已实现 / E2E 待验收</title>
+<title>FlowTool 架构状态 · M1/M2 已合并 / E2E 待验收</title>
 <style>
   :root {
     --bg:#eaeef3; --surface:#ffffff; --surface-2:#f4f7fb;
@@ -245,11 +245,11 @@
   </header>
 
   <div class="stats">
-    <div class="stat d"><b>9</b><span>已实现</span></div>
-    <div class="stat p"><b>6</b><span>部分</span></div>
-    <div class="stat s"><b>3</b><span>桩 stub</span></div>
+    <div class="stat d"><b>10</b><span>已实现</span></div>
+    <div class="stat p"><b>7</b><span>部分</span></div>
+    <div class="stat s"><b>1</b><span>桩 stub</span></div>
     <div class="stat m"><b>0</b><span>M0 缺失</span></div>
-    <div class="stat"><b>M1</b><span>已实现 · E2E 待验</span></div>
+    <div class="stat"><b>M2</b><span>F1–F4 已合并 · E2E 待验</span></div>
   </div>
 
   <div class="legend" role="group" aria-label="按状态筛选">
@@ -316,14 +316,14 @@
           </article>
           <span class="arrow" aria-hidden="true">→</span>
           <article class="node" data-status="done">
-            <div class="node__top"><span class="node__name">Event Router</span><span class="pill">M0 已验</span></div>
-            <p class="node__role">delivery 去重 · 触发授权(allowlist) · 落 review_threads · settle 去抖</p>
+            <div class="node__top"><span class="node__name">Event Router</span><span class="pill">M2 自动化</span></div>
+            <p class="node__role">delivery/反馈版本原子入库 · allowlist · 持久 settle/冻结批次 · 同秒重复编辑有已知缺陷</p>
             <code class="node__file">app/control/router.py</code>
           </article>
           <span class="arrow" aria-hidden="true">→</span>
           <article class="node" data-status="partial">
             <div class="node__top"><span class="node__name">Control Service + Coordinator</span><span class="pill">部分</span></div>
-            <p class="node__role">状态机与 task/result 转换 · GitHub 副作用 · issue/thread/取消/冲突仍有桩</p>
+            <p class="node__role">Issue→PR · 语义决策/交付核验 · 原线程回复/resolve · 真实 E2E、kill、冲突处理待完成</p>
             <code class="node__file">app/control/service.py · coordinator.py</code>
           </article>
         </div>
@@ -332,13 +332,13 @@
       <div class="row-label">Control 协作 · 协议、Gateway 与持久化</div>
       <div class="grid">
         <article class="node" data-status="done">
-          <div class="node__top"><span class="node__name">Store</span><span class="pill">M0 已验</span></div>
-          <p class="node__role">PostgreSQL · flows/attempts/jobs · epoch/token fencing · lease + result inbox · 启动恢复</p>
+          <div class="node__top"><span class="node__name">Store</span><span class="pill">自动化</span></div>
+          <p class="node__role">PostgreSQL · flows/attempts/jobs · epoch/token fencing · result/effect 账本 · 反馈版本/批次/线程观察</p>
           <code class="node__file">app/store.py</code>
         </article>
         <article class="node" data-status="done">
           <div class="node__top"><span class="node__name">Protocol</span><span class="pill">已验证</span></div>
-          <p class="node__role">v4 strict Pydantic · task/result/tool RPC · 分类 error/retry metadata · wire-only secret envelope</p>
+          <p class="node__role">v7 strict Pydantic · task/result/tool RPC · 批次/context digest · 冻结修订/session generation</p>
           <code class="node__file">app/protocol.py</code>
         </article>
         <article class="node" data-status="done">
@@ -348,7 +348,7 @@
         </article>
         <article class="node" data-status="partial">
           <div class="node__top"><span class="node__name">GitHub Client</span><span class="pill">部分</span></div>
-          <p class="node__role">githubkit 0.16 · scoped token · Issue/ref/PR/label/reviewer 已有隔离契约测试 · 真实 App smoke 待验</p>
+          <p class="node__role">githubkit 0.16 · scoped token · Issue/ref/PR · 线程/comment 分页、回复/resolve 有自动化 · 真实 App 待验</p>
           <code class="node__file">app/github_client.py</code>
         </article>
       </div>
@@ -381,7 +381,7 @@
       <div class="grid">
         <article class="node" data-status="partial">
           <div class="node__top"><span class="node__name">Codex Driver</span><span class="pill">部分</span></div>
-          <p class="node__role">codex exec / resume · output schema · 短时 push credential helper · worker-local STDIO MCP</p>
+          <p class="node__role">codex exec / resume · 一次性 session 兜底 · output schema · 每轮短时 push 凭据 · 首轮 STDIO MCP</p>
           <code class="node__file">app/codex_driver.py · V5/V6</code>
         </article>
         <article class="node" data-status="partial">
@@ -391,12 +391,12 @@
         </article>
         <article class="node" data-status="partial">
           <div class="node__top"><span class="node__name">Flow repo + VCS 核验</span><span class="pill">部分</span></div>
-          <p class="node__role">Flow 独占 repo · Agent 自选 Git/jj · tool 前核验 branch/commit/clean/remote SHA</p>
+          <p class="node__role">Flow 独占 repo · Agent 自选 Git/jj · 首轮/修订核验 branch/commit/clean/remote SHA</p>
           <code class="node__file">app/vcs.py · V8</code>
         </article>
         <article class="node" data-status="artifact">
           <div class="node__top"><span class="node__name">Worker Client + Executor</span></div>
-          <p class="node__role">主动连接/重连 · Flow 生命周期 binding · tool multiplex · journal 不落 secret · identity/root 独占锁</p>
+          <p class="node__role">主动连接/重连 · Flow binding · tool multiplex · journal · bub 无工具语义决策（假 provider 契约已验）</p>
           <code class="node__file">app/worker/client.py · journal.py · executor.py · runtime.py</code>
         </article>
       </div>
@@ -476,7 +476,7 @@
 
   <!-- roadmap milestone timeline -->
   <section class="block">
-    <h2>Roadmap · 里程碑 <span style="font-family:var(--mono);font-size:11px;color:var(--ink-soft);font-weight:400">M1 已实现 · 真实 E2E 待验收</span></h2>
+    <h2>Roadmap · 里程碑 <span style="font-family:var(--mono);font-size:11px;color:var(--ink-soft);font-weight:400">M1/M2 已实现并合并 · 真实 E2E 待验收</span></h2>
     <p class="sub">端口(ports)现在就立好,后续扩展一律「换 adapter / 挂插件」,不动 core</p>
     <div class="scroll-x">
       <div class="track">
@@ -500,13 +500,13 @@
           </ul>
         </article>
         <span class="arrow" aria-hidden="true">→</span>
-        <article class="ms ms--future">
-          <div class="ms__head"><span class="ms__id">M2</span><span class="ms__tag">将来</span></div>
+        <article class="ms ms--now">
+          <div class="ms__head"><span class="ms__id">M2</span><span class="ms__tag">已合并 / 待验</span></div>
           <div class="ms__title">回喂循环</div>
           <ul class="ms__list">
-            <li>语义 Triage(bub) 门</li>
-            <li>settle → revise/answer/wait</li>
-            <li>resume/兜底 · 自动 resolve</li>
+            <li>F1–F4 · PR #19–#22</li>
+            <li>持久 settle · bub 四类决策</li>
+            <li>修订核验/兜底 · 回复/保守 resolve</li>
           </ul>
         </article>
         <span class="arrow" aria-hidden="true">→</span>
@@ -556,7 +556,7 @@
   <!-- state machine -->
   <section class="block">
     <h2>Flow 状态机 <span style="font-family:var(--mono);font-size:11px;color:var(--ink-soft);font-weight:400">控制流已写 · 外部边界未完成</span></h2>
-    <p class="sub">当前单个远程 worker 串行消费 · per-flow 串行锁与多 worker 并行仍是目标</p>
+    <p class="sub">单 serve + 多个单槽 worker · 同 Flow 独占 worker/repo 并串行处理反馈批次</p>
     <div class="fsm">
       <span class="state mid">ACTIVE</span>
       <span class="cap">delivery: NONE → OPENING → OPEN → CLOSED / MERGED</span>
@@ -578,12 +578,13 @@
     <ul>
       <li><b>自动化</b> —— 19 项覆盖配置/契约、SQLite、HMAC/路由、worker/恢复及 heartbeat 清理/重试；pytest、Ruff、Mypy 全绿。</li>
       <li><b>运行时</b> —— <code>uv sync --locked</code>、CLI、真实 <code>flowtool serve</code> 与 <code>GET /healthz</code> 200 已验证。</li>
-      <li><b>M1 已实现、E2E 待验收</b> —— Flow binding、tool RPC、scoped push 与 PR delivery 有自动化；真实 GitHub/Codex、bub 与 reconcile 仍待验证。</li>
+      <li><b>M1/M2 已实现并合并、E2E 待验收</b> —— F1–F4 完整自动化 377 passed / 0 skipped（2026-09-07）；GitHub/Codex 使用替身，bub 连接假 provider。</li>
+      <li><b>剩余工作</b> —— 真实 GitHub App/Codex/bub 矩阵待执行；同秒重复 webhook 重放有一项未修复 Medium，见 <a href="README.md#m2-状态与待办">M2 状态与待办</a>。</li>
     </ul>
   </div>
 
   <footer>
-    <span>FlowTool · M1 Feature 3 已实现 · 文档核对 2026-09-05</span>
+    <span>FlowTool · M2 F1–F4 已合并 · 文档核对 2026-09-08</span>
     <span>docs/architecture/ · docs/plan/</span>
   </footer>
 

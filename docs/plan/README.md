@@ -5,10 +5,12 @@
 
 ## 当前计划
 
-- [`m2-feedback-batches.md`](m2-feedback-batches.md) — M2 Feature 1/4：已批准并实施持久反馈批次与 settle，本机完整 PostgreSQL 测试通过；
-- [`m2-semantic-triage.md`](m2-semantic-triage.md) — M2 Feature 2/4：bub adapter、有界上下文与幂等答复已实施并通过自动化，真实 provider 语义 smoke 待执行；
-- [`m2-revision-delivery.md`](m2-revision-delivery.md) — M2 Feature 3/4：修订交付核验与一次性 session 兜底已实施并通过自动化，真实多轮 smoke 待验收；
-- [`m2-review-resolution.md`](m2-review-resolution.md) — M2 Feature 4/4：原线程回复、保守 resolve 与持久恢复已实现；完整 PostgreSQL 自动化 377 项通过，真实 M2 矩阵待验收；
+本节包含已实现、仍有验收待办的计划。M2 F1–F4 已全部合并；状态、证据和开放问题见 [M2 状态与待办](../architecture/README.md#m2-状态与待办)。
+
+- [`m2-feedback-batches.md`](m2-feedback-batches.md) — M2 F1：持久反馈批次与 settle，已实现并合并 [#19](https://github.com/b1indsight/agentflow/pull/19)；
+- [`m2-semantic-triage.md`](m2-semantic-triage.md) — M2 F2：bub adapter、有界上下文与幂等答复，已实现并合并 [#20](https://github.com/b1indsight/agentflow/pull/20)，真实 provider smoke 待执行；
+- [`m2-revision-delivery.md`](m2-revision-delivery.md) — M2 F3：修订交付核验与一次性 session 兜底，已实现并合并 [#21](https://github.com/b1indsight/agentflow/pull/21)，真实多轮 smoke 待验收；
+- [`m2-review-resolution.md`](m2-review-resolution.md) — M2 F4：原线程回复、保守 resolve 与持久恢复，已实现并合并 [#22](https://github.com/b1indsight/agentflow/pull/22)；377 项自动化通过，真实矩阵待验收，同秒重复 webhook 重放缺陷未修复；
 - [`atomic-workflow-results.md`](atomic-workflow-results.md) — 已批准并实施：原子结果提交与 GitHub 操作恢复；本机 118 项通过，30 项 PostgreSQL 用例按要求跳过；
 - [`m1-github-capabilities.md`](m1-github-capabilities.md) — M1 Feature 2/3：GitHub App、短时 push capability 与 PR primitives 已实现并通过自动化，真实 App smoke 待执行；
 - [`m1-issue-to-pr.md`](m1-issue-to-pr.md) — M1 Feature 3/3：Flow 生命周期独占 worker/repo、Flow tool RPC、CodeAgent commit/push、远端验证与一 Flow 一 PR 已实现并通过自动化，真实 E2E 待执行；
