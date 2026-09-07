@@ -21,8 +21,6 @@ from app.models import (
 from app.plugins import get_plugin_manager
 from app.ports import GitHubClient
 from app.protocol import (
-    AnswerResult,
-    AnswerTask,
     ArchiveResult,
     ArchiveTask,
     AssignmentSecret,
@@ -40,6 +38,7 @@ from app.protocol import (
     TriageTask,
     terminal_digest,
 )
+from app.review_context import build_review_context
 from app.review_models import BatchState
 from app.store import Store
 
@@ -136,7 +135,7 @@ class JobCoordinator:
             await self.fail(job, f"{job.kind} job has no current attempt")
             return JobState.FAILED
 
-        if job.kind in {JobKind.TRIAGE, JobKind.REVISION, JobKind.ANSWER}:
+        if job.kind in {JobKind.TRIAGE, JobKind.REVISION}:
             batch = self.store.reviews.for_job(job)
             if batch.attempt_id != attempt.id or batch.state not in {
                 BatchState.READY, BatchState.PROCESSING,
@@ -144,12 +143,31 @@ class JobCoordinator:
                 raise ValueError("review batch is no longer current")
 
         if job.kind is JobKind.TRIAGE:
+            context = batch.context
+            if context is None:
+                context = await build_review_context(
+                    self.github, flow, batch, self._pr_number(flow, attempt),
+                )
+                with self.store.transaction() as tx:
+                    fresh = tx.lock_workflow(flow.id)
+                    current = tx.lock_job(job.id)
+                    if (fresh is None or current is None or fresh.state in TERMINAL_STATES
+                            or fresh.current_attempt_id != attempt.id):
+                        return JobState.DONE
+                    if job.assignment_token is not None and (
+                        current.state is not JobState.RUNNING
+                        or current.assigned_worker_id != job.assigned_worker_id
+                        or current.assignment_token != job.assignment_token
+                        or current.lease_expires_at is None
+                        or current.lease_expires_at <= tx.now()
+                    ):
+                        return JobState.QUEUED
+                    context = tx.reviews.freeze_context(current, context)
             return TriageTask(
                 batch_id=batch.id,
-                feedback=batch.feedback,
+                feedback=list(batch.feedback),
                 attempt_id=attempt.id,
-                discussion=batch.discussion,
-                pr_context=self._pr_context(flow, attempt),
+                context=context,
             )
         if job.kind is JobKind.REVISION:
             delivery = self._delivery(flow, attempt)
@@ -168,14 +186,6 @@ class JobCoordinator:
                 session_id=attempt.codex_session_id,
                 instruction=(job.payload or {}).get("instruction", "Address the review feedback."),
                 feedback=batch.feedback,
-            )
-        if job.kind is JobKind.ANSWER:
-            return AnswerTask(
-                batch_id=batch.id,
-                feedback=batch.feedback,
-                attempt_id=attempt.id,
-                question=(job.payload or {}).get("question", ""),
-                pr_context=self._pr_context(flow, attempt),
             )
         if job.kind is JobKind.ARCHIVE:
             return ArchiveTask(
@@ -213,7 +223,7 @@ class JobCoordinator:
         execution = self.store.get_flow_execution(flow.id)
         if execution is None or execution.worker_id != worker_id:
             raise ValueError(f"flow {flow.id} is not bound to worker {worker_id}")
-        if job.kind in {JobKind.TRIAGE, JobKind.REVISION, JobKind.ANSWER}:
+        if job.kind in {JobKind.TRIAGE, JobKind.REVISION}:
             with self.store.transaction() as tx:
                 fresh = tx.lock_workflow(flow.id)
                 current = tx.lock_job(job.id)
@@ -270,19 +280,11 @@ class JobCoordinator:
             raise ValueError(f"flow {flow.id} has no pull request")
         return number
 
-    def _pr_context(self, flow: Flow, attempt: Attempt) -> str:
-        return (
-            f"{flow.repo} PR #{self._delivery(flow, attempt).pr_number} "
-            f"(issue #{flow.issue_number})"
-        )
-
-
 def _validate_result_kind(kind: JobKind, result: ExecutionResult) -> None:
     expected = {
         JobKind.INITIAL: InitialResult,
         JobKind.TRIAGE: TriageResult,
         JobKind.REVISION: RevisionResult,
-        JobKind.ANSWER: AnswerResult,
         JobKind.ARCHIVE: ArchiveResult,
     }[kind]
     if not isinstance(result, expected):

@@ -37,7 +37,7 @@ class ServeSettings(FlowToolSettings):
 
     settle_seconds: float = 75.0
     submit_grace_seconds: float = 15.0
-    confidence_threshold: float = 0.6
+    confidence_threshold: float = Field(default=0.6, ge=0, le=1, allow_inf_nan=False)
     max_revision_cycles: int = 20
 
     host: str = "0.0.0.0"
@@ -118,6 +118,10 @@ class WorkerSettings(FlowToolSettings):
     serve_ws_url: str
     worker_root: Path = Path("~/.flowtool/workers/{worker_id}")
     codex_run_timeout_seconds: float = 1200.0
+    judge_model: str = ""
+    judge_api_key: SecretStr | None = None
+    judge_api_base: str | None = None
+    judge_timeout_seconds: float = Field(default=60.0, gt=0, allow_inf_nan=False)
     trusted_host_execution: bool = False
     execution_isolation: Literal["dedicated-account", "container", "vm"] | None = None
     allow_insecure_worker_ws: bool = False

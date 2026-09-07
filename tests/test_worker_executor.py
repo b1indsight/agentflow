@@ -8,8 +8,6 @@ from pydantic import SecretStr
 
 from app.models import AgentRun, CodexResult, TriageVerdict, VcsKind, VcsOutcome, Verdict
 from app.protocol import (
-    AnswerResult,
-    AnswerTask,
     ArchiveResult,
     ArchiveTask,
     AssignmentSecret,
@@ -22,6 +20,7 @@ from app.protocol import (
     TriageTask,
 )
 from app.worker.executor import WorkerExecutor
+from tests.review_memory import judge_decision, review_context
 
 
 class RecordingAgent:
@@ -60,11 +59,10 @@ class RecordingAgent:
 
 
 class RecordingJudge:
-    async def triage(self, discussion: str, pr_context: str) -> TriageVerdict:
-        return TriageVerdict(verdict=Verdict.REVISE, confidence=0.9, instruction="Fix it")
-
-    async def answer(self, question: str, pr_context: str) -> str:
-        return "answer"
+    async def triage(self, context):
+        return judge_decision(
+            TriageVerdict(verdict=Verdict.REVISE, confidence=0.9, instruction="Fix it"), context,
+        )
 
 
 class BackendlessAgent(RecordingAgent):
@@ -178,7 +176,7 @@ async def test_executor_runs_agent_and_judge_tasks_without_store(
         assignment_secret(),
     )
     triage = await executor.execute(
-        TriageTask(batch_id=1, feedback=[], attempt_id=1, discussion="please revise", pr_context="PR #1")
+        TriageTask(batch_id=1, feedback=[], attempt_id=1, context=review_context())
     )
     revision = await executor.execute(
         RevisionTask(
@@ -192,9 +190,6 @@ async def test_executor_runs_agent_and_judge_tasks_without_store(
             feedback=[],
         )
     )
-    answer = await executor.execute(
-        AnswerTask(batch_id=1, feedback=[], attempt_id=1, question="Why?", pr_context="PR #1")
-    )
     archived = await executor.execute(
         ArchiveTask(flow_id=3, attempt_id=1, repo="owner/repo")
     )
@@ -206,8 +201,7 @@ async def test_executor_runs_agent_and_judge_tasks_without_store(
     assert isinstance(triage, TriageResult)
     assert isinstance(revision, RevisionResult)
     assert revision.output.summary == "updated"
-    assert isinstance(answer, AnswerResult)
-    assert answer.answer == "answer"
+    assert triage.decision.context_digest == review_context().digest
     assert isinstance(archived, ArchiveResult)
     assert agent.started and agent.resumed
     assert agent.started[0][1] == workspace

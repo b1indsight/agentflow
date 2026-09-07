@@ -89,17 +89,23 @@ class ControlService:
             tx.cancel_jobs(fresh.id)
             failed_job = tx.latest_failed_job(fresh.id)
             kind = failed_job.kind if failed_job is not None else JobKind.INITIAL
+            if kind is JobKind.ANSWER:
+                raise ValueError("Reconcile legacy ANSWER jobs before upgrading to protocol v6")
             fresh.state = FlowState.ACTIVE
             tx.update_flow(fresh)
-            replacement = tx.enqueue_job(
-                fresh.id,
-                kind,
-                payload=(
-                    failed_job.payload if failed_job else {"issue_number": fresh.issue_number}
-                ),
-            )
-            if failed_job is not None and kind in {JobKind.TRIAGE, JobKind.REVISION, JobKind.ANSWER}:
-                tx.reviews.retry(failed_job, replacement)
+            if (failed_job is not None and kind is JobKind.TRIAGE
+                    and tx.reviews.for_job(failed_job).context_stale):
+                tx.reviews.retriage(failed_job)
+            else:
+                replacement = tx.enqueue_job(
+                    fresh.id,
+                    kind,
+                    payload=(
+                        failed_job.payload if failed_job else {"issue_number": fresh.issue_number}
+                    ),
+                )
+                if failed_job is not None and kind in {JobKind.TRIAGE, JobKind.REVISION}:
+                    tx.reviews.retry(failed_job, replacement)
         self._jobs_available()
 
     def notify_jobs(self) -> None:

@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
+from app.context_models import DiscussionPage, FilePage, ReviewContext, ReviewPullRequest
 from app.github_models import (
     IssueSnapshot,
     PullRequestSnapshot,
@@ -16,7 +17,8 @@ from app.github_models import (
     RemoteRef,
     RepositorySnapshot,
 )
-from app.models import AgentRun, CodeAgentContext, SandboxPolicy, TriageVerdict
+from app.judge_models import JudgeDecision
+from app.models import AgentRun, CodeAgentContext, SandboxPolicy
 
 
 @runtime_checkable
@@ -46,9 +48,7 @@ class CodeAgent(Protocol):
 class Judge(Protocol):
     """轻的语义判定 agent。MVP adapter：bub。见 docs/architecture/review-loop.md。"""
 
-    async def triage(self, discussion: str, pr_context: str) -> TriageVerdict: ...
-
-    async def answer(self, question: str, pr_context: str) -> str: ...
+    async def triage(self, context: ReviewContext) -> JudgeDecision: ...
 
 
 @runtime_checkable
@@ -73,6 +73,18 @@ class GitHubClient(Protocol):
     """
 
     async def get_issue(self, installation_id: int, repo: str, number: int) -> IssueSnapshot: ...
+
+    async def get_review_pull_request(
+        self, installation_id: int, repo: str, number: int,
+    ) -> ReviewPullRequest: ...
+
+    async def list_pull_request_files(
+        self, installation_id: int, repo: str, number: int,
+    ) -> FilePage: ...
+
+    async def list_pull_request_discussions(
+        self, installation_id: int, repo: str, number: int,
+    ) -> DiscussionPage: ...
 
     async def get_repository(self, installation_id: int, repo: str) -> RepositorySnapshot: ...
 

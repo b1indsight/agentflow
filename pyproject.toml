@@ -8,7 +8,7 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
     "githubkit[auth-app]>=0.16,<0.17",  # calibrated App auth and REST surface
-    "bub>=0.3.9",            # Judge adapter; TODO(verify) pin (bub is pre-0.4)
+    "bub==0.4.1",            # Calibrated private ModelRunner completion contract
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
     "psycopg[binary,pool]>=3.2",

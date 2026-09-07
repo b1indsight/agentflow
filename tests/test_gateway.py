@@ -309,6 +309,20 @@ async def test_gateway_runs_one_remote_assignment_to_ack() -> None:
     assert coordinator.results[0].session_id == "session-1"
 
 
+async def test_gateway_does_not_dispatch_after_capability_fetch_loses_ownership():
+    store = RecordingStore()
+
+    class ChangedCoordinator(RecordingCoordinator):
+        async def assignment_secret(self, job, task):
+            store.job.assignment_token = "reassigned-token"
+
+    socket = ScriptedSocket()
+    gateway = WorkerGateway(store, ChangedCoordinator(), worker_tokens={"worker-1": "worker-secret"})
+    await gateway.handle(socket)
+    assert not any(isinstance(parse_server_message(raw), Assignment) for raw in socket.sent)
+    assert not store.started
+
+
 @pytest.mark.asyncio
 async def test_gateway_multiplexes_flow_tool_calls_during_execution() -> None:
     socket = ToolSocket()

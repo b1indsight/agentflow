@@ -155,6 +155,40 @@ class WorkerGateway:
         self._registry_lock = asyncio.Lock()
         self._result_locks: dict[int, asyncio.Lock] = {}
 
+    async def _prepare_assignment(
+        self, job: Job, worker_id: str, token: str, epoch: str,
+    ) -> tuple[ExecutionTask | JobState, AssignmentSecret | None]:
+        """Keep the unstarted lease alive across both context and capability I/O; fence dispatch."""
+        async def build() -> tuple[ExecutionTask | JobState, AssignmentSecret | None]:
+            prepared = await self.coordinator.prepare(job)
+            if isinstance(prepared, JobState):
+                return prepared, None
+            try:
+                secret = await self.coordinator.assignment_secret(job, prepared)
+            except Exception as exc:  # noqa: BLE001
+                if not self.store.heartbeat_assignment(job.id, worker_id, token, epoch):
+                    raise ProtocolViolation("assignment expired during capability preparation") from None
+                await self.coordinator.fail(job, f"assignment capability failed: {type(exc).__name__}")
+                return JobState.FAILED, None
+            return prepared, secret
+
+        preparing = asyncio.create_task(build())
+        try:
+            while True:
+                if not self.store.heartbeat_assignment(job.id, worker_id, token, epoch):
+                    raise ProtocolViolation("assignment expired during preparation")
+                done, _ = await asyncio.wait({preparing}, timeout=self.heartbeat_interval)
+                if done:
+                    prepared, secret = preparing.result()
+                    if not isinstance(prepared, JobState) and not self.store.heartbeat_assignment(
+                        job.id, worker_id, token, epoch,
+                    ):
+                        raise ProtocolViolation("assignment changed before dispatch")
+                    return prepared, secret
+        finally:
+            preparing.cancel()
+            await asyncio.gather(preparing, return_exceptions=True)
+
     async def handle(self, socket: WorkerSocket) -> None:
         worker_id = self._authenticated_identity(socket.headers)
         if worker_id is None:
@@ -206,22 +240,14 @@ class WorkerGateway:
                     if job is None:
                         await self._wait_while_idle(socket, wake)
                         continue
-                    prepared = await self.coordinator.prepare(job)
+                    prepared, secret = await self._prepare_assignment(job, worker_id, token, connection_epoch)
                     if isinstance(prepared, JobState):
-                        self.store.finish_assignment(
-                            job.id,
-                            worker_id,
-                            token,
-                            prepared,
-                            connection_epoch,
-                        )
-                        self.notify_jobs()
-                        continue
-                    try:
-                        secret = await self.coordinator.assignment_secret(job, prepared)
-                    except Exception as exc:  # noqa: BLE001
-                        reason = f"assignment capability failed: {type(exc).__name__}"
-                        await self.coordinator.fail(job, reason)
+                        if prepared is JobState.QUEUED:
+                            self.store.requeue_assignment(job.id, worker_id, token, connection_epoch)
+                        else:
+                            self.store.finish_assignment(
+                                job.id, worker_id, token, prepared, connection_epoch,
+                            )
                         self.notify_jobs()
                         continue
                     current = (job, token, prepared)

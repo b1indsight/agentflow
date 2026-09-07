@@ -196,9 +196,13 @@ issue/PR 文本是不可信输入，后续接入必须保留明确的数据/指�
 
 ## 4.10 Judge / Triage
 
-目标语义见 [Review 修订循环](review-loop.md)。当前 `BubJudge` 通过 subprocess 执行
-`bub run <prompt>`，要求返回 JSON，再校验为 `TriageVerdict`；解析失败保守返回 `wait`。`answer()`
-使用另一条简短 prompt。
+语义见 [Review 修订循环](review-loop.md)。`review_context.py` 在 control 读取 Issue、PR 与分页文件/
+讨论，冻结有界 JSON 快照；先后读取 PR 防止 head/base 在取数期间变化，prepare 重试复用入库快照。
 
-实际 bub 命令、模型配置、退出码处理、结构化输出稳定性、置信度行为和真实 PR 讨论效果均未校准，
-因此当前状态是桩，而不是已验证 adapter。
+`BubJudge` 启动独立 `judge_runner` 子进程，显式配置 bub 0.4.1 `ModelRunner.completion_response`，
+不创建 framework、加载插件、读写 tape 或执行工具。每批次独立请求与会话 ID；凭据仅通过允许的
+子进程环境传入。单次调用无 fallback/SDK retry，父进程限制时长和 stdout/stderr，取消时回收子进程。
+
+严格校验四类 verdict、有限 confidence、动作字段和 envelope 身份。结果持久保存模型/adapter 版本、
+context digest、reason/open_points；answer 使用同一个答案经现有副作用账本发布，不再调用模型。
+adapter/控制流已通过自动化，真实 provider 的语义准确性仍待 smoke 验收。

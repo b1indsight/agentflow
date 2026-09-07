@@ -11,6 +11,7 @@ from app.models import DeliveryState, FlowState, Job, JobKind, JobState, TriageV
 from app.protocol import Succeeded, TriageResult, terminal_digest
 from app.result_models import EffectState
 from app.store import Store
+from tests.review_memory import judge_decision
 from tests.test_coordinator import RecordingGitHub, coordinator
 
 
@@ -133,14 +134,18 @@ def accepted_triage(store: Store, *, receive: bool = True) -> tuple[Job, TriageR
     job = store.assign_job("worker-a", "triage-token", "epoch-a")
     assert job is not None
     assert store.start_assignment(job.id, attempt.id, "worker-a", "triage-token", "epoch-a")
+    from tests.review_memory import review_context
+    with store.transaction() as tx:
+        tx.lock_workflow(flow.id)
+        tx.reviews.freeze_context(job, review_context(store.reviews.for_job(job).id))
     result = TriageResult(
         batch_id=store.reviews.for_job(job).id,
         feedback_refs=list(store.reviews.for_job(job).feedback),
-        verdict=TriageVerdict(
+        decision=judge_decision(TriageVerdict(
             verdict=Verdict.REVISE,
             confidence=0.9,
             instruction="Fix it",
-        )
+        ))
     )
     message = Succeeded(
         job_id=job.id,

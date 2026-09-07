@@ -9,8 +9,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
+from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 
 
 def utcnow() -> datetime:
@@ -47,7 +48,7 @@ class JobKind(StrEnum):
         "triage"  # settle 后判定（docs/architecture/review-loop.md）：revise/answer/wait/ignore
     )
     REVISION = "revision"  # 修订
-    ANSWER = "answer"  # Judge=answer，只作答不改码
+    ANSWER = "answer"  # Historical rows only; protocol v6 answers directly from TRIAGE.
     ARCHIVE = "archive"  # 收尾归档
 
 
@@ -285,12 +286,30 @@ class CodeAgentContext:
 class TriageVerdict(BaseModel):
     """Judge（bub）的语义判定产出。见 docs/architecture/review-loop.md §B.2。"""
 
+    model_config = ConfigDict(extra="forbid")
+
     verdict: Verdict
-    confidence: float = 0.0
-    reason: str = ""
-    instruction: str = ""  # verdict=revise：要做的具体改动
-    answer: str = ""  # verdict=answer：回给提问者的话
-    open_points: list[str] = []
+    confidence: float = Field(default=0.0, strict=True, ge=0, le=1, allow_inf_nan=False)
+    reason: str = Field(default="", strict=True, max_length=2000)
+    instruction: str = Field(default="", strict=True, max_length=8000)
+    answer: str = Field(default="", strict=True, max_length=12000)
+    open_points: list[Annotated[str, Field(strict=True, min_length=1, max_length=1000)]] = Field(
+        default_factory=list, max_length=20,
+    )
+
+    @model_validator(mode="after")
+    def _action_fields(self) -> TriageVerdict:
+        if self.verdict is Verdict.REVISE:
+            if not self.instruction.strip() or self.answer:
+                raise ValueError("revise requires an instruction and forbids an answer")
+        elif self.verdict is Verdict.ANSWER:
+            if not self.answer.strip() or self.instruction or self.open_points:
+                raise ValueError("answer requires a complete answer with no unresolved work")
+        elif self.instruction or self.answer:
+            raise ValueError("wait/ignore cannot contain an instruction or answer")
+        if self.verdict is Verdict.IGNORE and self.open_points:
+            raise ValueError("ignore cannot discard unresolved work")
+        return self
 
 
 class FeedbackRef(BaseModel):

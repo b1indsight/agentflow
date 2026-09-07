@@ -28,6 +28,51 @@ class AsyncEndpoint:
         return self.result
 
 
+async def test_review_files_paginate_and_mark_missing_patch(tmp_path, monkeypatch):
+    pages = []
+
+    async def files(*args, **kwargs):
+        pages.append(kwargs["page"])
+        count = 20 if kwargs["page"] == 1 else 1
+        return response([SimpleNamespace(filename=f"{kwargs['page']}-{i}.py", status="modified",
+            patch=None if i == 0 else "+line", previous_filename=None) for i in range(count)])
+
+    client = SimpleNamespace(rest=SimpleNamespace(pulls=SimpleNamespace(async_list_files=files)))
+    app = GitHubApp(settings(tmp_path))
+    monkeypatch.setattr(app, "_installation_client", lambda _: client)
+    result = await app.list_pull_request_files(1, "owner/repo", 17)
+    assert pages == [1, 2]
+    assert len(result.files) == 21
+    assert not result.truncated
+    assert result.files[0].patch is None
+    assert result.files[0].limitations == ["patch:unavailable-or-binary"]
+
+
+async def test_review_discussions_cover_all_sources_with_a_finite_page_limit(tmp_path, monkeypatch):
+    pages = []
+
+    async def discussion(*args, **kwargs):
+        pages.append(kwargs["page"])
+        return response([SimpleNamespace(id=i + kwargs["page"] * 10, body="x" * 5000,
+            user=SimpleNamespace(login="reviewer"), updated_at=datetime.now(UTC),
+            submitted_at=datetime.now(UTC), path="app.py", original_commit_id="old",
+            diff_hunk="+x") for i in range(10)])
+
+    client = SimpleNamespace(rest=SimpleNamespace(
+        pulls=SimpleNamespace(async_list_reviews=discussion, async_list_review_comments=discussion),
+        issues=SimpleNamespace(async_list_comments=discussion),
+    ))
+    app = GitHubApp(settings(tmp_path))
+    monkeypatch.setattr(app, "_installation_client", lambda _: client)
+    result = await app.list_pull_request_discussions(1, "owner/repo", 17)
+    assert result.truncated
+    assert len(result.discussions) == 60
+    assert pages == [1, 2, 3] * 3
+    assert {item.kind for item in result.discussions} == {"conversation", "review_body", "inline"}
+    assert all(len(item.body) == 4000 and "body:truncated" in item.limitations
+               for item in result.discussions)
+
+
 def response(data: Any) -> SimpleNamespace:
     return SimpleNamespace(parsed_data=data)
 
