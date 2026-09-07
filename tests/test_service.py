@@ -67,6 +67,9 @@ class RetryStore:
     def latest_failed_job(self, flow_id: int) -> Job | None:
         return self.failed_job
 
+    def cancel_jobs(self, flow_id: int) -> None:
+        self.reviews.cancel(flow_id)
+
     def enqueue_job(self, flow_id: int, kind: JobKind, payload: dict | None = None) -> Job:
         self.enqueued.append(kind)
         return Job(id=2, flow_id=flow_id, kind=kind, state=JobState.QUEUED)

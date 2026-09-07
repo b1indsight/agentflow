@@ -23,6 +23,7 @@ from app.models import (
     Job,
     JobKind,
     JobState,
+    ReviewItemKind,
     Verdict,
 )
 from app.ports import GitHubClient
@@ -238,14 +239,11 @@ class ResultApplication:
                     }
                 )
             if verdict.verdict is Verdict.ANSWER:
-                discussion = "\n".join(
-                    f"{item.author}: {item.body}" for item in batch.feedback
-                )
                 return base.model_copy(
                     update={
                         "derived": DerivedJob(
                             kind=JobKind.ANSWER,
-                            payload={"batch_id": batch.id, "question": discussion},
+                            payload={"batch_id": batch.id, "question": batch.discussion},
                         ),
                     }
                 )
@@ -286,11 +284,12 @@ class ResultApplication:
             )):
                 return self._failure(tx, flow, base, "revision reported unknown or conflicting feedback")
             consumed = [FeedbackRef(item_id=f.item_id, version=f.version) for f in result.output.addressed]
-            # An empty Request Changes body authorizes the batch; it is not another coding request.
+            # Empty review summaries carry metadata, not an additional coding request.
             reported_keys = set(keys)
             consumed.extend(
                 FeedbackRef(item_id=f.item_id, version=f.version) for f in batch.feedback
-                if not f.body.strip() and f.signal == "request_changes"
+                if not f.body.strip()
+                and (f.kind is ReviewItemKind.REVIEW_BODY or f.signal == "request_changes")
                 and (f.item_id, f.version) not in reported_keys
             )
             unresolved = len(consumed) != len(batch.feedback) or bool(result.output.needs_clarification)

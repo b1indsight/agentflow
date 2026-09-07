@@ -154,6 +154,7 @@ ORM。
 - `codex_runs`：按 attempt 记录 prompt、kind、exit 与时间；
 - `review_threads`：旧反馈历史，升级时一次性导入最新对象；旧 resolved 标记不作为 GitHub 确认；
 - `review_items` / `review_versions`：Flow 内稳定反馈身份、不可变版本及独立 relay/consume 时间；
+- `review_pending_edits`：同秒乱序编辑的前序正文与原始来源，供前序到达后原子回放；
 - `review_buffers` / `review_batches`：持久 deadline/generation、冻结快照、批次所有者 job 和未决问题。
 
 自动化覆盖 active 唯一约束、flow/attempt/job 往返、review upsert、assignment start/heartbeat/fencing、

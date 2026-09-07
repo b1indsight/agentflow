@@ -152,10 +152,16 @@ TRIAGE→REVISION/ANSWER 转移同一批次所有权，结果确认精确 item/v
 新 reply/resolve、副作用式 bub adapter 和真实修订交付仍属于 F2–F4。
 
 取消/失败退休活动批次，显式 retry 复用原快照并保留后到版本。旧 review_threads 只作为历史来源
-一次性导入；缺少 batch 的在途旧任务及非 v5 未确认结果会阻止启动并列出 job ID。
-源时间可用时拒绝旧版本；同秒编辑使用 `changes.body.from`，没有更新时间的编辑按接收时间排序。
+一次性导入；缺少 batch 的在途及仍可重试的失败旧任务、非 v5 未确认结果会阻止启动并列出 job ID。
+源时间可用时拒绝旧版本；同秒编辑使用 `changes.body.from`，前序未到的编辑持久暂存并接续回放，
+没有更新时间的编辑按接收时间排序。
 
-验证：本机临时 PostgreSQL 上完整测试 180 passed、0 skipped；覆盖批次入口/领取故障回滚、并发与重启、
+验证：本机临时 PostgreSQL 上完整测试 197 passed、0 skipped；覆盖批次入口/领取故障回滚、并发与重启、
 版本隔离、删除、授权/action 分流、waiting、重放、取消和 retry。原有 WebSocket 测试的关闭竞态已在
 独立 main 工作区复现，测试改为等待服务端完成断连再退出 TestClient；不改产品连接行为。
 Ruff、Mypy 和构建通过；CI 结果见本 PR 的检查记录。真实 GitHub/Codex/bub 验收未运行。
+
+用户授权修复首轮审查的 8 个问题后，补充回归测试并修复：恢复超时后的 queued job 清理、历史失败
+重试选择、旧 failed review job 升级检查、ANSWER 未决问题传递、approval 唤醒、空 review 正文阻塞、
+同秒乱序编辑丢失及代码围栏命令误判。先复现 13 个失败场景，再验证修复；额外覆盖 sweep 前 retry、
+历史失败不阻止升级，以及乱序回放中断后的事务回滚和重启恢复。

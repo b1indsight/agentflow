@@ -54,12 +54,15 @@ def scenario():
     return store, github, job, result
 
 
-async def test_empty_request_changes_is_consumed_as_a_signal_after_revision(scenario):
+@pytest.mark.parametrize("signal_kind", ["request_changes", "discussion"])
+async def test_empty_review_body_is_not_an_unresolved_obligation(scenario, signal_kind):
+    from app.models import ReviewItemKind
+
     store, github, job, _ = scenario
     job.kind = JobKind.REVISION
     item = store.reviews.batch.feedback[0]
     signal = item.model_copy(update={"item_id": 102, "github_id": 501, "body": "",
-                                     "signal": "request_changes"})
+                                     "signal": signal_kind, "kind": ReviewItemKind.REVIEW_BODY})
     store.reviews.batch.feedback.append(signal)
     result = RevisionResult(
         batch_id=1, feedback_refs=[item, signal], session_id="session-1", last_message="done",

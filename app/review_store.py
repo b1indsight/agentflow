@@ -35,6 +35,15 @@ CREATE TABLE IF NOT EXISTS review_versions (
   consumed_at TIMESTAMPTZ,
   PRIMARY KEY(item_id,version)
 );
+CREATE TABLE IF NOT EXISTS review_pending_edits (
+  source_delivery TEXT PRIMARY KEY,
+  item_id BIGINT NOT NULL REFERENCES review_items(id),
+  attempt_id BIGINT NOT NULL REFERENCES attempts(id),
+  previous_body TEXT NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  content JSONB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_review_pending_edits_item ON review_pending_edits(item_id);
 CREATE TABLE IF NOT EXISTS review_buffers (
   flow_id BIGINT PRIMARY KEY REFERENCES flows(id),
   generation BIGINT NOT NULL,
@@ -100,6 +109,10 @@ class ReviewStore:
                 previous_body=previous_body,
             ):
                 return False
+            tx.reviews._reconcile_edits(flow_id, update)
+            # Invalidating old content adds no discussion and must not wake a waiting batch.
+            if update.deleted:
+                return True
             strong = tx.reviews._has_unused_signal(flow_id)
             delay = submit_grace_seconds if strong or update.submitted else settle_seconds
             tx.reviews._touch(flow_id, delay)
@@ -131,6 +144,15 @@ class ReviewStore:
                     and not update.deleted
                     and previous_body != old.body
                 ):
+                    # Reserve the webhook once, but keep an edit whose predecessor is still missing.
+                    if previous_body is not None and delivery_id is not None:
+                        connection.execute(
+                            "INSERT INTO review_pending_edits"
+                            " (source_delivery,item_id,attempt_id,previous_body,updated_at,content)"
+                            " VALUES(%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
+                            (delivery_id, row["id"], attempt_id, previous_body,
+                             update.updated_at, Jsonb(update.model_dump(mode="json"))),
+                        )
                     return False
                 content_fields = {"updated_at", "submitted"}
                 if old.model_dump(exclude=content_fields) == update.model_dump(
@@ -161,6 +183,37 @@ class ReviewStore:
                 (item_id, version, attempt_id, delivery_id, Jsonb(update.model_dump(mode="json"))),
             )
             return True
+
+    def _reconcile_edits(self, flow_id: int, update: FeedbackUpdate) -> None:
+        """Replay a durable same-second edit chain as predecessors arrive, in the ingest transaction."""
+        with self.store.connection() as connection:
+            while True:
+                row = connection.execute(
+                    "SELECT i.id,i.observed_at,v.content FROM review_items i JOIN review_versions v"
+                    " ON v.item_id=i.id AND v.version=i.version"
+                    " WHERE i.flow_id=%s AND i.kind=%s AND i.github_id=%s",
+                    (flow_id, update.kind, update.github_id),
+                ).fetchone()
+                assert row is not None
+                current = FeedbackUpdate.model_validate(row["content"])
+                connection.execute(
+                    "DELETE FROM review_pending_edits WHERE item_id=%s AND (updated_at<%s OR %s)",
+                    (row["id"], row["observed_at"], current.deleted),
+                )
+                pending = connection.execute(
+                    "DELETE FROM review_pending_edits WHERE source_delivery=("
+                    " SELECT source_delivery FROM review_pending_edits WHERE item_id=%s"
+                    " AND updated_at=%s AND previous_body=%s ORDER BY source_delivery LIMIT 1)"
+                    " RETURNING *",
+                    (row["id"], row["observed_at"], current.body),
+                ).fetchone()
+                if pending is None:
+                    return
+                self._append_version(
+                    flow_id, pending["attempt_id"], pending["source_delivery"],
+                    FeedbackUpdate.model_validate(pending["content"]),
+                    previous_body=pending["previous_body"],
+                )
 
     def _has_unused_signal(self, flow_id: int) -> bool:
         with self.store.connection() as connection:
@@ -212,7 +265,7 @@ class ReviewStore:
                 if flow is None:
                     continue
                 if flow.state in TERMINAL_STATES:
-                    tx.reviews.cancel(flow.id)
+                    tx.cancel_jobs(flow.id)
                     continue
                 job = tx.reviews._claim(flow.id, flow.current_attempt_id)
                 if job is not None:
@@ -373,8 +426,11 @@ class ReviewStore:
         """Fail with actionable job IDs instead of inventing missing legacy batch identities."""
         with self.store.connection() as connection:
             rows = connection.execute(
-                "SELECT id FROM jobs WHERE (kind IN ('triage','revision','answer')"
-                " AND state IN ('queued','running') AND (payload->>'batch_id') IS NULL)"
+                "SELECT id FROM jobs j WHERE (kind IN ('triage','revision','answer')"
+                " AND (state IN ('queued','running') OR (state='failed'"
+                " AND id=(SELECT MAX(newer.id) FROM jobs newer WHERE newer.flow_id=j.flow_id)"
+                " AND EXISTS (SELECT 1 FROM flows f WHERE f.id=j.flow_id"
+                " AND f.state IN ('failed','cancelled')))) AND (payload->>'batch_id') IS NULL)"
                 " OR (result_received_at IS NOT NULL AND result_applied_at IS NULL"
                 " AND result_payload->>'protocol_version' IS DISTINCT FROM '5') ORDER BY id",
             ).fetchall()

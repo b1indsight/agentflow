@@ -142,16 +142,13 @@ class JobCoordinator:
                 BatchState.READY, BatchState.PROCESSING,
             }:
                 raise ValueError("review batch is no longer current")
-            discussion = "\n".join(f"{item.author}: {item.body}" for item in batch.feedback)
-            if batch.open_points:
-                discussion += "\nUnresolved questions:\n" + "\n".join(batch.open_points)
 
         if job.kind is JobKind.TRIAGE:
             return TriageTask(
                 batch_id=batch.id,
                 feedback=batch.feedback,
                 attempt_id=attempt.id,
-                discussion=discussion,
+                discussion=batch.discussion,
                 pr_context=self._pr_context(flow, attempt),
             )
         if job.kind is JobKind.REVISION:

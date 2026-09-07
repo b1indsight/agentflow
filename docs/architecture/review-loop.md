@@ -15,8 +15,10 @@ M2 Feature 1 已实现持久反馈批次与 settle，见[实施计划](../plan/m
 ```
 
 review body、inline 和 conversation 使用 `(flow_id, kind, github_id)` 区分身份，保留来源 attempt。
-重复 delivery/内容和较旧源时间不重置窗口；同秒编辑可使用 GitHub `changes.body.from` 校验前序正文。
-没有更新时间的编辑以接收时间排序。删除保存 tombstone，后到的旧事件不能复活正文。
+重复 delivery/内容和较旧源时间不重置窗口；同秒编辑使用 GitHub `changes.body.from` 校验前序正文。
+前序尚未到达的同秒编辑持久暂存，前序到达后在同一事务中回放；支持重启和中断后重投。
+没有更新时间的编辑以接收时间排序。删除保存 tombstone，后到的旧事件不能复活正文；
+approval/删除只使原正文失效，不推进 generation 或唤醒等待中的讨论。
 
 allowlist 作者本人提交的 Request Changes，或正文非引用/代码块中的行首 `@<bot_login> 指令`，
 使用较短 submit grace 合批后直达 REVISION。非 allowlist 用户的同类文本只作为普通讨论；
@@ -46,7 +48,7 @@ Flow 生命周期保持 `ACTIVE/SUCCEEDED/CANCELLED/FAILED`；PR delivery 独立
 | 结果 | 当前行为 |
 |---|---|
 | revise 且达到置信度阈值 | 通过持久效果账本发送修改说明，原子派生一个携带同批次的 REVISION |
-| answer | 派生携带同快照的 ANSWER，沿用 Judge.answer；答案发布成功后精确消费本批次 |
+| answer | 派生携带同快照及未决问题的 ANSWER，沿用 Judge.answer；答案发布成功后精确消费本批次 |
 | 空答案 | 保留为 waiting，不发空评论或消费反馈 |
 | wait / 低置信度 revise | 保存 open_points/reason，保持 waiting，无新 generation 不自动重跑 |
 | ignore | 消费本批次精确版本，不发外部消息 |
@@ -63,19 +65,21 @@ note/reason；control 拒绝未知、重复、跨版本或互相冲突的引用�
 
 非零 exit 按现有失败路径收尾，不消费反馈。成功时只消费明确 addressed 的版本；deferred、遗漏项
 及 needs_clarification 留作未决，有未决问题时不请求 re-review。处理说明仍主要发在 PR conversation，
-真实原线程回复和 resolve 属于 F4。
+空 review 正文作为元数据随成功修订消费，不计为遗漏项。真实原线程回复和 resolve 属于 F4。
 
 本轮 push capability、resume 环境、VCS/远端 SHA 校验、失效 session fallback 尚属 F3。
 当前成功 exit 不能证明真实 revision 已完成 commit/push，整个 M2 不能因此标为已验收。
 
 ## B.5 取消、重试与恢复
 
-- Flow 终态时退休 buffer/活动批次；取消仍不 kill 运行中的 agent，旧结果受现有 assignment/状态 fencing。
-- 显式 retry 将原冻结批次交给新的 job，保留后到的新版本，不复制新的 Flow/PR。
+- Flow 终态时退休 buffer/活动批次，恢复 sweep 同时退休残留 queued jobs；取消仍不 kill 运行中的 agent。
+- 显式 retry 先清理残留排队任务，仅重试当前失败任务，已被后续任务替换的历史失败不再作为候选。
+  当前失败 review 将原冻结批次交给新的 job，保留后到的新版本；没有当前失败任务时走 INITIAL。
 - 已接收的结果依然通过原子结果应用与 GitHub effect ledger 恢复，不能因重放重复派生或消费。
 - schema 一次性导入旧 review_threads 的最新对象，保留历史表；旧 resolved 标记不作为远端确认。
-- 协议 v5 要求 serve/worker 一起升级。先用旧版本排空 queued/running review jobs 和所有未确认旧结果，
-  然后停止旧进程再升级；新 serve 检查旧任务并给出 job ID，禁止猜测缺失的 batch/版本。
+- 协议 v5 要求 serve/worker 一起升级。先用旧版本排空 queued/running review jobs，重试并完成仍可
+  重试的 failed review jobs，核对所有未确认旧结果，然后停止旧进程再升级；新 serve 检查这些旧待办
+  并给出 job ID，禁止猜测缺失的 batch/版本。已被后续任务替换的历史失败不阻止启动。
 
 ## B.6 参数与验证
 

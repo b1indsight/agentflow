@@ -181,11 +181,15 @@ def _has_command(body: str, bot_login: str) -> bool:
     fence: str | None = None
     for line in body.splitlines():
         stripped = line.lstrip()
-        if stripped.startswith(("```", "~~~")):
-            marker = stripped[:3]
-            fence = None if fence == marker else marker if fence is None else fence
+        if fence is not None:
+            if re.fullmatch(r" {0,3}" + re.escape(fence[0]) + "{" + str(len(fence)) + r",}[ \t]*", line):
+                fence = None
             continue
-        if fence or stripped.startswith(">") or line.startswith(("    ", "\t")):
+        opening = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
+        if opening and (opening[1][0] != "`" or "`" not in opening[2]):
+            fence = opening[1]
+            continue
+        if stripped.startswith(">") or line.startswith(("    ", "\t")):
             continue
         if re.match(r"^@" + re.escape(bot_login) + r"(?:\s+|[:,]\s*)\S", stripped):
             return True

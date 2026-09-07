@@ -701,12 +701,14 @@ class Store:
             ).fetchall()
 
     def latest_failed_job(self, flow_id: int) -> Job | None:
+        """Return the current failed job; a later job retires every earlier retry candidate."""
         with (
             self.connection() as connection,
             connection.cursor(row_factory=class_row(Job)) as cursor,
         ):
             return cursor.execute(
-                "SELECT * FROM jobs WHERE flow_id=%s AND state=%s ORDER BY id DESC LIMIT 1",
+                "SELECT * FROM (SELECT * FROM jobs WHERE flow_id=%s ORDER BY id DESC LIMIT 1)"
+                " latest WHERE state=%s",
                 (flow_id, JobState.FAILED),
             ).fetchone()
 

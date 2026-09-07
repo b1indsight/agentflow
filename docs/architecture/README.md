@@ -41,7 +41,7 @@
 ## 当前验证基线
 
 - pytest 覆盖协议、角色边界、远程执行闭环与真实 PostgreSQL 持久层场景；
-- 2026-09-07 M2 F1 本机临时 PostgreSQL 完整测试为 180 passed、0 skipped；外部模型/GitHub 使用替身；
+- 2026-09-07 M2 F1 本机临时 PostgreSQL 完整测试为 197 passed、0 skipped；外部模型/GitHub 使用替身；
 - `uv sync --locked`、`ruff check app tests`、`mypy app tests` 与 `flowtool --help` 通过；
 - PostgreSQL-backed `flowtool serve` 与两个 worker 在 CI 中独立启动，并在 serve 重启后自动重新注册；
 - 测试不访问 GitHub、Codex 或 bub，也不使用真实凭据和真实轮询等待；M1 Feature 3 的自动化为

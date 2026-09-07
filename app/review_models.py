@@ -40,6 +40,8 @@ class BatchState(StrEnum):
 
 
 class ReviewBatch(BaseModel):
+    """Frozen feedback and unresolved questions shared by every stage of a review batch."""
+
     id: int
     flow_id: int
     attempt_id: int
@@ -50,3 +52,11 @@ class ReviewBatch(BaseModel):
     feedback: list[ReviewFeedback]
     open_points: list[str]
     created_at: datetime
+
+    @property
+    def discussion(self) -> str:
+        """Render the full discussion context for both triage and answer model calls."""
+        text = "\n".join(f"{item.author}: {item.body}" for item in self.feedback)
+        if self.open_points:
+            text += "\nUnresolved questions:\n" + "\n".join(self.open_points)
+        return text

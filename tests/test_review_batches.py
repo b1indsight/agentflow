@@ -8,7 +8,15 @@ import pytest
 
 from app.control.router import EventRouter
 from app.control.service import ControlService
-from app.models import DeliveryState, JobKind, JobState, ReviewItemKind, TriageVerdict, Verdict
+from app.models import (
+    DeliveryState,
+    FlowState,
+    JobKind,
+    JobState,
+    ReviewItemKind,
+    TriageVerdict,
+    Verdict,
+)
 from app.protocol import Succeeded, TriageResult, terminal_digest
 from app.review_models import BatchState, FeedbackUpdate
 from app.review_store import ReviewStore
@@ -250,6 +258,11 @@ def test_cancel_retires_buffer_and_batch_atomically(store, review_flow):
         ("outsider", "@flowtool[bot] add a bound", JobKind.TRIAGE),
         ("alice", "> @flowtool[bot] add a bound", JobKind.TRIAGE),
         ("alice", "```\n@flowtool[bot] add a bound\n```", JobKind.TRIAGE),
+        # A shorter nested fence or a fence with trailing text cannot close the outer block.
+        ("alice", "````markdown\n```\n@flowtool[bot] add a bound\n```\n````", JobKind.TRIAGE),
+        ("alice", "~~~~\n~~~\n@flowtool[bot] add a bound\n~~~~", JobKind.TRIAGE),
+        ("alice", "```\n```example\n@flowtool[bot] add a bound\n```", JobKind.TRIAGE),
+        ("alice", "````\n```\n````\n@flowtool[bot] add a bound", JobKind.REVISION),
     ],
 )
 async def test_strong_commands_require_author_and_unquoted_instruction(
@@ -335,9 +348,15 @@ async def test_review_actions_have_explicit_dispatch_semantics(
     assert [j.kind for j in jobs] == ([] if expected is None else [expected])
 
 
-def test_upgrade_refuses_unbatched_review_work(store, review_flow):
+@pytest.mark.parametrize("state", [JobState.QUEUED, JobState.RUNNING, JobState.FAILED])
+def test_upgrade_refuses_unbatched_review_work(store, review_flow, state):
     flow, _ = review_flow
     job = store.enqueue_job(flow.id, JobKind.TRIAGE)
+    with store.connection() as connection:
+        connection.execute("UPDATE jobs SET state=%s WHERE id=%s", (state, job.id))
+    if state is JobState.FAILED:
+        flow.state = FlowState.FAILED
+        store.update_flow(flow)
     with pytest.raises(RuntimeError, match=str(job.id)):
         store.reviews.check_upgrade()
 
@@ -423,3 +442,152 @@ async def test_revise_transfers_batch_to_one_derived_job(store, review_flow):
     assert len(github.comments) == 1
     ingest(store, flow, feedback(clock, 102), "next")
     assert claim(store, clock) == []
+
+
+@pytest.mark.parametrize("sweep_reviews", [True, False])
+async def test_expired_offline_binding_retires_queued_review_before_retry(
+    store, review_flow, sweep_reviews,
+):
+    flow, clock = review_flow
+    initial = store.enqueue_job(flow.id, JobKind.INITIAL)
+    store.worker_connected("worker-a", 5, "epoch-a")
+    assert store.assign_job("worker-a", "initial", "epoch-a").id == initial.id
+    assert store.finish_assignment(initial.id, "worker-a", "initial", JobState.DONE, "epoch-a")
+    store.worker_disconnected("worker-a", "lost", "epoch-a")
+    ingest(store, flow, feedback(clock))
+    job = claim(store, clock)[0]
+
+    # Reviews can settle while their bound worker is offline; expiry must retire that queue.
+    clock.now += store.recovery_grace
+    store.sweep_expired_assignments()
+    if sweep_reviews:
+        store.reviews.claim_due()
+        assert store.get_job(job.id).state is JobState.FAILED
+    ControlService(store).retry(flow)
+    assert store.get_job(job.id).state is JobState.FAILED
+    store.worker_connected("worker-b", 5, "epoch-b")
+    replacement = store.assign_job("worker-b", "retry", "epoch-b")
+    assert replacement.id != job.id
+    task = await coordinator(store, RecordingGitHub()).prepare(replacement)
+    assert task.batch_id == job.payload["batch_id"]
+
+
+@pytest.mark.parametrize("outcome", [BatchState.COMPLETED, BatchState.WAITING])
+def test_retry_after_successful_replacement_does_not_select_historical_failure(
+    store, review_flow, outcome,
+):
+    flow, clock = review_flow
+    ingest(store, flow, feedback(clock))
+    original = claim(store, clock)[0]
+    service = ControlService(store)
+    service.cancel(flow)
+    service.retry(flow)
+    replacement = store.list_jobs(flow.id)[-1]
+    batch = store.reviews.for_job(replacement)
+    store.reviews.complete(batch.id, outcome, [], [])
+    with store.connection() as connection:
+        connection.execute("UPDATE jobs SET state='done' WHERE id=%s", (replacement.id,))
+
+    # A later idle cancellation must not resurrect the old failure whose owner was replaced.
+    service.cancel(flow)
+    service.retry(flow)
+    assert store.get_job(original.id).state is JobState.FAILED
+    assert store.list_jobs(flow.id)[-1].kind is JobKind.INITIAL
+    assert store.get_flow(flow.id).state is FlowState.ACTIVE
+
+
+def test_upgrade_allows_historical_failed_review_with_a_finished_replacement(store, review_flow):
+    flow, _ = review_flow
+    old = store.enqueue_job(flow.id, JobKind.TRIAGE)
+    replacement = store.enqueue_job(flow.id, JobKind.TRIAGE)
+    with store.connection() as connection:
+        connection.execute("UPDATE jobs SET state='failed' WHERE id=%s", (old.id,))
+        connection.execute("UPDATE jobs SET state='done' WHERE id=%s", (replacement.id,))
+    flow.state = FlowState.CANCELLED
+    store.update_flow(flow)
+    # An already replaced failure is history, so it does not require pre-upgrade reconciliation.
+    store.reviews.check_upgrade()
+
+
+async def test_answer_receives_questions_carried_from_previous_wait(store, review_flow):
+    flow, clock = review_flow
+    ingest(store, flow, feedback(clock))
+    job = claim(store, clock)[0]
+    await run_triage(store, flow, job, TriageVerdict(
+        verdict=Verdict.WAIT, open_points=["Why is the limit 10?"],
+    ))
+    ingest(store, flow, feedback(clock, 102, body="Please explain it."), "reply")
+    job = claim(store, clock)[0]
+    subject, _, _ = await run_triage(store, flow, job, TriageVerdict(verdict=Verdict.ANSWER))
+    answer = store.list_jobs(flow.id)[-1]
+    task = await subject.prepare(answer)
+    # The answer executor is a separate model call and cannot see the earlier triage prompt.
+    assert "Why is the limit 10?" in task.question
+    assert "Please explain it." in task.question
+
+
+@pytest.mark.parametrize("approval_id", [101, 102])
+async def test_approval_invalidates_body_without_waking_waiting_feedback(
+    store, review_flow, approval_id,
+):
+    flow, clock = review_flow
+    ingest(store, flow, feedback(clock, kind=ReviewItemKind.REVIEW_BODY))
+    ingest(store, flow, feedback(clock, 201), "inline")
+    batch = store.reviews.for_job(claim(store, clock)[0])
+    store.reviews.complete(batch.id, BatchState.WAITING, [], ["Which limit?"])
+    router = EventRouter(store, ControlService(store), SimpleNamespace(
+        allowlist=["alice"], bot_login="flowtool[bot]", trigger_label="flow",
+        settle_seconds=75, submit_grace_seconds=15,
+    ))
+    # Both a fresh approval and approval of an existing review must leave discussion asleep.
+    await router.handle("pull_request_review", "approval", {
+        "action": "submitted", "repository": {"full_name": "owner/repo"},
+        "pull_request": {"number": 17}, "sender": {"login": "alice"},
+        "review": {"id": approval_id, "state": "approved", "body": "Looks good",
+                   "user": {"login": "alice"}, "updated_at": clock.now.isoformat()},
+    })
+    assert claim(store, clock) == []
+    if approval_id == 101:
+        assert all(f.kind is not ReviewItemKind.REVIEW_BODY for f in store.reviews.pending(flow.id))
+
+
+@pytest.mark.parametrize("final_body", ["C", "A"])
+def test_same_second_out_of_order_edits_reconcile_after_restart(
+    store, review_flow, monkeypatch, final_body,
+):
+    flow, clock = review_flow
+    ingest(store, flow, feedback(clock, body="A"))
+
+    def edit(repository, delivery, previous, body):
+        return repository.reviews.ingest(
+            flow.id, delivery, "pull_request_review_comment",
+            {"changes": {"body": {"from": previous}}}, feedback(clock, body=body),
+            settle_seconds=75, submit_grace_seconds=15,
+        )
+
+    # GitHub timestamps have second precision; C may arrive before its predecessor B.
+    edit(store, "C", "B", final_body)
+    append_version = ReviewStore._append_version
+
+    def crash_after_replaying_c(self, *args, **kwargs):
+        changed = append_version(self, *args, **kwargs)
+        if args[2] == "C":
+            raise RuntimeError("replay interrupted")
+        return changed
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ReviewStore, "_append_version", crash_after_replaying_c)
+        with pytest.raises(RuntimeError, match="replay interrupted"):
+            edit(store, "B", "A", "B")
+    assert not store.event_seen("B")
+    assert store.reviews.pending(flow.id)[0].body == "A"
+    restarted = Store(store.database_url, clock=lambda: clock.now)
+    try:
+        edit(restarted, "B", "A", "B")
+        assert restarted.reviews.pending(flow.id)[0].body == final_body
+        assert not edit(restarted, "C", "B", final_body)
+        batch = restarted.reviews.for_job(claim(restarted, clock)[0])
+        assert batch.feedback[0].body == final_body
+        assert batch.feedback[0].version == 3
+    finally:
+        restarted.close()
