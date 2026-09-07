@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Callable
-from typing import Protocol
+from datetime import datetime
+from typing import Literal, Protocol
 
 from loguru import logger
 
-from app.models import TERMINAL_STATES, Flow, JobKind, ReviewItem, ReviewItemKind
+from app.models import Flow, ReviewItemKind
+from app.review_models import FeedbackUpdate
 from app.store import Store
 
 
@@ -33,6 +34,8 @@ class RouterSettings(Protocol):
 
 
 class SettleScheduler:
+    """Wake jobs from durable deadlines; process lifetime never owns a settle window."""
+
     def __init__(
         self,
         store: Store,
@@ -42,24 +45,9 @@ class SettleScheduler:
         self.store = store
         self.settings = settings
         self.jobs_available = jobs_available
-        self._timers: dict[int, asyncio.Task[None]] = {}
 
-    def touch(self, flow: Flow, grace: float | None = None) -> None:
-        delay = grace if grace is not None else self.settings.settle_seconds
-        old = self._timers.get(flow.id)
-        if old and not old.done():
-            old.cancel()
-        self._timers[flow.id] = asyncio.create_task(self._fire(flow, delay))
-
-    async def _fire(self, flow: Flow, delay: float) -> None:
-        try:
-            await asyncio.sleep(delay)
-        except asyncio.CancelledError:
-            return
-        self._timers.pop(flow.id, None)
-        fresh = self.store.get_flow(flow.id)
-        if fresh and fresh.state not in TERMINAL_STATES:
-            self.store.enqueue_job(fresh.id, JobKind.TRIAGE)
+    def sweep(self) -> None:
+        if self.store.reviews.claim_due():
             self.jobs_available()
 
 
@@ -77,15 +65,15 @@ class EventRouter:
 
     async def handle(self, event_type: str, delivery_id: str, payload: dict) -> None:
         sender = (payload.get("sender") or {}).get("login", "")
-        if sender == self.settings.bot_login:
+        if sender == self.settings.bot_login or (payload.get("sender") or {}).get("type") == "Bot":
+            return
+        if event_type in {"issue_comment", "pull_request_review", "pull_request_review_comment"}:
+            self._on_feedback(event_type, delivery_id, payload)
             return
         if not self.store.record_event(delivery_id, event_type, None, payload):
             return
         handler = {
             "issues": self._on_issues,
-            "issue_comment": self._on_issue_comment,
-            "pull_request_review": self._on_review,
-            "pull_request_review_comment": self._on_review_comment,
             "pull_request": self._on_pull_request,
         }.get(event_type)
         if handler:
@@ -108,64 +96,77 @@ class EventRouter:
             if flow:
                 self.service.cancel(flow)
 
-    async def _on_issue_comment(self, payload: dict) -> None:
+    def _on_feedback(self, event_type: str, delivery_id: str, payload: dict) -> None:
+        """Parse one event, then atomically hand its identity and content to the review store."""
         repo = payload["repository"]["full_name"]
-        number = payload["issue"]["number"]
-        body = (payload.get("comment") or {}).get("body", "")
-        flow = self.store.get_flow_by_pr(repo, number) or self.store.get_active_flow(repo, number)
-        if not flow:
+        conversation = event_type == "issue_comment"
+        review = event_type == "pull_request_review"
+        number = payload["issue" if conversation else "pull_request"]["number"]
+        flow = self.store.get_flow_by_pr(repo, number)
+        if conversation and flow is None:
+            flow = self.store.get_active_flow(repo, number)
+        action = payload.get("action")
+        allowed = (
+            {"submitted", "edited", "dismissed"} if review else {"created", "edited", "deleted"}
+        )
+        item = payload.get("review" if review else "comment") or {}
+        author = item.get("user") or {}
+        if (
+            flow is None
+            or action not in allowed
+            or author.get("type") == "Bot"
+            or author.get("login") == self.settings.bot_login
+        ):
+            self.store.record_event(delivery_id, event_type, flow.id if flow else None, payload)
             return
-        if body.strip() == "/flow stop":
-            self.service.cancel(flow)
+        body = item.get("body") or ""
+        if conversation and action == "created" and body.strip() == "/flow stop":
+            if self.store.record_event(delivery_id, event_type, flow.id, payload):
+                self.service.cancel(flow)
             return
-        self._record_feedback(flow, ReviewItemKind.CONVERSATION, payload["comment"])
-        self.settle.touch(flow)
-
-    async def _on_review(self, payload: dict) -> None:
-        repo = payload["repository"]["full_name"]
-        pr = payload["pull_request"]["number"]
-        review = payload.get("review") or {}
-        flow = self.store.get_flow_by_pr(repo, pr)
-        if not flow or review.get("state") == "approved":
-            return
-        if review.get("body"):
-            self._record_feedback(flow, ReviewItemKind.REVIEW_BODY, review)
-        self.settle.touch(flow, grace=self.settings.submit_grace_seconds)
-
-    async def _on_review_comment(self, payload: dict) -> None:
-        repo = payload["repository"]["full_name"]
-        pr = payload["pull_request"]["number"]
-        flow = self.store.get_flow_by_pr(repo, pr)
-        if not flow:
-            return
-        self._record_feedback(flow, ReviewItemKind.INLINE, payload["comment"])
-        self.settle.touch(flow)
+        sender = (payload.get("sender") or {}).get("login", "")
+        authorized = sender in self.settings.allowlist and sender == author.get("login")
+        signal: Literal["discussion", "request_changes"] = "discussion"
+        deleted = action in {"deleted", "dismissed"} or (review and item.get("state") == "approved")
+        if authorized and review and action == "submitted" and item.get("state") == "changes_requested":
+            signal = "request_changes"
+        timestamp = item.get("updated_at")
+        if timestamp is None and action in {"created", "submitted"}:
+            timestamp = item.get("submitted_at") if review else item.get("created_at")
+        update = FeedbackUpdate(
+            kind=(
+                ReviewItemKind.CONVERSATION
+                if conversation
+                else ReviewItemKind.REVIEW_BODY
+                if review
+                else ReviewItemKind.INLINE
+            ),
+            github_id=item["id"],
+            author=author.get("login", "unknown"),
+            body="" if deleted else body,
+            deleted=deleted,
+            updated_at=datetime.fromisoformat(timestamp) if timestamp else self.store.now(),
+            signal=signal,
+            submitted=review and action == "submitted",
+            path=item.get("path"),
+            original_commit_id=item.get("original_commit_id"),
+            diff_hunk=item.get("diff_hunk"),
+        )
+        if self.store.reviews.ingest(
+            flow.id,
+            delivery_id,
+            event_type,
+            payload,
+            update,
+            settle_seconds=self.settings.settle_seconds,
+            submit_grace_seconds=self.settings.submit_grace_seconds,
+        ):
+            self.service.notify_jobs()
 
     async def _on_pull_request(self, payload: dict) -> None:
         pull_request = payload.get("pull_request") or {}
         if payload.get("action") != "closed" or not pull_request.get("merged"):
             return
-        flow = self.store.get_flow_by_pr(
-            payload["repository"]["full_name"], pull_request["number"]
-        )
+        flow = self.store.get_flow_by_pr(payload["repository"]["full_name"], pull_request["number"])
         if flow:
             self.service.on_merged(flow)
-
-    def _record_feedback(self, flow: Flow, kind: ReviewItemKind, comment: dict) -> None:
-        if flow.current_attempt_id is None:
-            logger.warning("feedback for flow {} with no active attempt; skipping", flow.id)
-            return
-        self.store.upsert_review_item(
-            ReviewItem(
-                id=None,
-                attempt_id=flow.current_attempt_id,
-                kind=kind,
-                github_id=comment.get("id", 0),
-                author=(comment.get("user") or {}).get("login", "unknown"),
-                body=comment.get("body", ""),
-                path=comment.get("path"),
-                line=comment.get("line"),
-                original_commit_id=comment.get("original_commit_id"),
-                diff_hunk=comment.get("diff_hunk"),
-            )
-        )

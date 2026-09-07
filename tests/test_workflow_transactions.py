@@ -122,11 +122,20 @@ def accepted_triage(store: Store, *, receive: bool = True) -> tuple[Job, TriageR
     assert store.finish_assignment(
         initial.id, "worker-a", "initial-token", JobState.DONE, "epoch-a"
     )
-    store.enqueue_job(flow.id, JobKind.TRIAGE)
+    from app.models import ReviewItemKind
+    from app.review_models import FeedbackUpdate
+
+    store.reviews.ingest(flow.id, "review-event", "pull_request_review_comment", {},
+        FeedbackUpdate(kind=ReviewItemKind.INLINE, github_id=101, author="alice",
+                       body="Fix it", updated_at=store.now()),
+        settle_seconds=0, submit_grace_seconds=0)
+    store.reviews.claim_due()
     job = store.assign_job("worker-a", "triage-token", "epoch-a")
     assert job is not None
     assert store.start_assignment(job.id, attempt.id, "worker-a", "triage-token", "epoch-a")
     result = TriageResult(
+        batch_id=store.reviews.for_job(job).id,
+        feedback_refs=list(store.reviews.for_job(job).feedback),
         verdict=TriageVerdict(
             verdict=Verdict.REVISE,
             confidence=0.9,
@@ -198,7 +207,7 @@ async def test_result_and_derived_job_commit_together(store: Store, monkeypatch)
         store.enqueue_job(
             job.flow_id,
             JobKind.REVISION,
-            {"instruction": "Fix it"},
+            {"batch_id": result.batch_id, "instruction": "Fix it"},
             source_job_id=job.id,
             source_key="revision",
         ).id

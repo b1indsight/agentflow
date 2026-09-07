@@ -1,7 +1,7 @@
 # FlowTool 架构文档
 
 > 状态：M0 已验收、M1 已实现但真实 E2E 待验收 · 初始日期：2026-08-02 · M0 验收：2026-08-26 ·
-> 文档核对：2026-09-05。
+> 文档核对：2026-09-07；M2 Feature 1 持久反馈批次已实现并通过 PostgreSQL 自动化。
 
 本目录是 FlowTool 架构的唯一入口。代码、测试、配置示例和已执行的运行验证是“当前实现”的事实
 来源；目标流程不会因为已经写入设计文档就被视为可用。
@@ -25,10 +25,10 @@
 
 | 范围 | 状态 | 当前事实 |
 |---|---|---|
-| 配置与领域契约 | 已验证 | serve/worker 独立配置、v4 task/result/tool/recovery message、分类 tool error、Flow lifecycle/delivery 分轴和结构化结果有覆盖 |
-| PostgreSQL Store | 部分 | flow/attempt/job、execution binding、delivery/tool ledger、epoch/lease fencing 与恢复已实现；本次环境未运行 PostgreSQL 集成用例 |
+| 配置与领域契约 | 已验证 | serve/worker 独立配置、v5 task/result/tool/recovery message、批次/item-version 身份、分类 tool error 和 Flow lifecycle/delivery 分轴有覆盖 |
+| PostgreSQL Store | 已验证（自动化） | flow/attempt/job、binding、结果账本与反馈版本/buffer/batch 事务、并发和恢复通过实际 PostgreSQL 测试 |
 | Webhook Ingress | 已验证（M0） | `/healthz`、HMAC 拒绝/接受、后台交接和 202 响应有覆盖；health 仅表示进程可响应 |
-| Event Router | 已验证（M0） | delivery 去重、bot/allowlist、触发、取消和 inline review 入库有覆盖；同 flow 串行锁尚未实现 |
+| Event Router | 已验证（M2 F1 自动化） | 反馈 delivery/版本/deadline 原子写入，持久 settle、强信号授权、显式 action、同 Flow 冻结批次串行和重启恢复已覆盖 |
 | Control/Worker 边界 | 已验证（Features 1–3） | 多 worker 鉴权/调度、Flow 生命周期 binding、tool multiplex、busy reconnect、result replay 与 journal secret 负向覆盖 |
 | Control Service / Job Coordinator | 部分 | 真实 issue/default branch prepare、tool fencing/幂等 PR delivery 已接线；thread 映射、取消 kill、冲突处理与真实副作用 E2E 未完成 |
 | Codex / Context / Sandbox / VCS | 部分 | Flow repo、短时 credential helper、STDIO MCP、Git/jj commit/clean/remote 双端核验有自动化；GitHub-only egress 与真实 run 未验证 |
@@ -41,6 +41,7 @@
 ## 当前验证基线
 
 - pytest 覆盖协议、角色边界、远程执行闭环与真实 PostgreSQL 持久层场景；
+- 2026-09-07 M2 F1 本机临时 PostgreSQL 完整测试为 196 passed、0 skipped；外部模型/GitHub 使用替身；
 - `uv sync --locked`、`ruff check app tests`、`mypy app tests` 与 `flowtool --help` 通过；
 - PostgreSQL-backed `flowtool serve` 与两个 worker 在 CI 中独立启动，并在 serve 重启后自动重新注册；
 - 测试不访问 GitHub、Codex 或 bub，也不使用真实凭据和真实轮询等待；M1 Feature 3 的自动化为

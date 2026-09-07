@@ -30,6 +30,7 @@ from app.models import (
     utcnow,
 )
 from app.result_store import RESULT_SCHEMA, ResultStore
+from app.review_store import REVIEW_SCHEMA, ReviewStore
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS flows (
@@ -335,6 +336,7 @@ class Store:
 
     def cancel_jobs(self, flow_id: int) -> None:
         """Retire queued work; a running executor still owns its slot until result or lease expiry."""
+        self.reviews.cancel(flow_id)
         with self.connection() as connection:
             connection.execute(
                 "UPDATE jobs SET state=%s, last_error=%s, updated_at=%s WHERE flow_id=%s"
@@ -363,6 +365,8 @@ class Store:
         with self.connection() as connection:
             connection.execute(SCHEMA)
             connection.execute(RESULT_SCHEMA)
+            connection.execute(REVIEW_SCHEMA)
+        self.reviews.migrate_legacy()
 
     def now(self) -> datetime:
         return self._clock()
@@ -370,6 +374,10 @@ class Store:
     @property
     def results(self) -> ResultStore:
         return ResultStore(self)
+
+    @property
+    def reviews(self) -> ReviewStore:
+        return ReviewStore(self)
 
     def close(self) -> None:
         if self._bound_connection is not None:
@@ -422,7 +430,7 @@ class Store:
 
     def update_flow(self, flow: Flow) -> None:
         flow.updated_at = utcnow()
-        with self.connection() as connection:
+        with self.transaction() as tx, tx.connection() as connection:
             connection.execute(
                 "UPDATE flows SET installation_id=%s, state=%s, current_attempt_id=%s,"
                 " updated_at=%s WHERE id=%s",
@@ -434,6 +442,8 @@ class Store:
                     flow.id,
                 ),
             )
+            if flow.state in {FlowState.CANCELLED, FlowState.FAILED, FlowState.SUCCEEDED}:
+                tx.reviews.cancel(flow.id)
 
     def list_flows(self, *, active_only: bool = False) -> list[Flow]:
         query = "SELECT * FROM flows"
@@ -691,12 +701,14 @@ class Store:
             ).fetchall()
 
     def latest_failed_job(self, flow_id: int) -> Job | None:
+        """Return the current failed job; a later job retires every earlier retry candidate."""
         with (
             self.connection() as connection,
             connection.cursor(row_factory=class_row(Job)) as cursor,
         ):
             return cursor.execute(
-                "SELECT * FROM jobs WHERE flow_id=%s AND state=%s ORDER BY id DESC LIMIT 1",
+                "SELECT * FROM (SELECT * FROM jobs WHERE flow_id=%s ORDER BY id DESC LIMIT 1)"
+                " latest WHERE state=%s",
                 (flow_id, JobState.FAILED),
             ).fetchone()
 

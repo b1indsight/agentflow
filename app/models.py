@@ -293,12 +293,20 @@ class TriageVerdict(BaseModel):
     open_points: list[str] = []
 
 
-class AddressedComment(BaseModel):
+class FeedbackRef(BaseModel):
+    """Identity of one immutable review version, independent of GitHub's ID namespaces."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    item_id: int = Field(gt=0)
+    version: int = Field(gt=0)
+
+
+class AddressedComment(FeedbackRef):
     comment_id: int
     note: str
 
 
-class DeferredComment(BaseModel):
+class DeferredComment(FeedbackRef):
     comment_id: int
     reason: str
 

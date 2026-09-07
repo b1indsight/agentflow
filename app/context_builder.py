@@ -25,7 +25,8 @@ _HARD_CONSTRAINTS = (
 # 修订轮要 codex 回的结构化产出（--output-schema 对应 models.CodexResult）
 _OUTPUT_INSTRUCTION = (
     "When done, output a JSON object with keys: summary (string), "
-    "addressed (list of {comment_id, note}), deferred (list of {comment_id, reason}), "
+    "addressed (list of {item_id, version, comment_id, note}), "
+    "deferred (list of {item_id, version, comment_id, reason}), "
     "needs_clarification (list of string)."
 )
 
@@ -52,12 +53,14 @@ def _format_item(item: ReviewFeedback) -> str:
     if item.kind.value == "inline" and item.diff_hunk:
         # 按内容定位，避开行号漂移（docs/architecture/review-loop.md §B.4）
         return (
-            f"- [comment_id={item.github_id}] file `{item.path}` "
+            f"- [item_id={item.item_id}, version={item.version}, comment_id={item.github_id}] "
+            f"file `{item.path}` "
             f"(at commit {item.original_commit_id}):\n"
             f"```diff\n{item.diff_hunk}\n```\n"
             f"  {item.author} says: {item.body}"
         )
-    return f"- [comment_id={item.github_id}] {item.author} says: {item.body}"
+    return (f"- [item_id={item.item_id}, version={item.version}, comment_id={item.github_id}] "
+            f"{item.author} says: {item.body}")
 
 
 def build_revision_prompt(

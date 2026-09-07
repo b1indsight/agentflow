@@ -69,12 +69,12 @@ class WorkerExecutor:
             return await self._initial(task, secret)
         if isinstance(task, TriageTask):
             verdict = await self.judge.triage(task.discussion, task.pr_context)
-            return TriageResult(verdict=verdict)
+            return TriageResult(batch_id=task.batch_id, feedback_refs=list(task.feedback), verdict=verdict)
         if isinstance(task, RevisionTask):
             return await self._revision(task)
         if isinstance(task, AnswerTask):
             answer = await self.judge.answer(task.question, task.pr_context)
-            return AnswerResult(answer=answer)
+            return AnswerResult(batch_id=task.batch_id, feedback_refs=list(task.feedback), answer=answer)
         if isinstance(task, ArchiveTask):
             repo_path = self._repo_path(task.repo)
             await cleanup_flow_repo(repo_path, task.flow_id)
@@ -193,6 +193,8 @@ class WorkerExecutor:
         finally:
             schema_path.unlink(missing_ok=True)
         return RevisionResult(
+            batch_id=task.batch_id,
+            feedback_refs=list(task.feedback),
             session_id=run.session_id,
             last_message=run.last_message,
             exit_code=run.exit_code,

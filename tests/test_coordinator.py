@@ -20,6 +20,7 @@ from app.github_models import (
 from app.models import (
     Attempt,
     DeliveryState,
+    FeedbackRef,
     Flow,
     FlowDelivery,
     FlowExecution,
@@ -50,12 +51,14 @@ from app.protocol import (
 )
 from app.store import Store
 from tests.result_memory import MemoryResults
+from tests.review_memory import MemoryReviews
 
 
 class MemoryStore:
     def __init__(self) -> None:
         self.jobs: dict[int, Job] = {}
         self.results = MemoryResults()
+        self.reviews = MemoryReviews()
         self.sources: dict[tuple[int, str], Job] = {}
         self.flow = Flow(
             id=1,
@@ -560,7 +563,7 @@ async def test_triage_result_replay_does_not_repeat_comment_or_derived_job() -> 
     github = RecordingGitHub()
     subject = coordinator(store, github)
     job = Job(id=6, flow_id=1, kind=JobKind.TRIAGE, state=JobState.RUNNING)
-    result = TriageResult(
+    result = TriageResult(batch_id=1, feedback_refs=[FeedbackRef(item_id=101, version=1)],
         verdict=TriageVerdict(
             verdict=Verdict.REVISE,
             confidence=0.9,
@@ -571,7 +574,7 @@ async def test_triage_result_replay_does_not_repeat_comment_or_derived_job() -> 
     await apply_result(subject, job, result)
     await apply_result(subject, job, result)
 
-    assert store.enqueued == [(JobKind.REVISION, {"instruction": "Fix it"})]
+    assert store.enqueued == [(JobKind.REVISION, {"batch_id": 1, "instruction": "Fix it"})]
     assert len(github.comments) == 1
 
 
@@ -599,7 +602,7 @@ async def test_triage_and_revision_results_remain_control_plane_side_effects() -
     triage_state = await apply_result(
         subject,
         triage_job,
-        TriageResult(
+        TriageResult(batch_id=1, feedback_refs=[FeedbackRef(item_id=101, version=1)],
             verdict=TriageVerdict(
                 verdict=Verdict.REVISE,
                 confidence=0.9,
@@ -608,7 +611,7 @@ async def test_triage_and_revision_results_remain_control_plane_side_effects() -
         ),
     )
     assert triage_state is JobState.DONE
-    assert store.enqueued == [(JobKind.REVISION, {"instruction": "Fix it"})]
+    assert store.enqueued == [(JobKind.REVISION, {"batch_id": 1, "instruction": "Fix it"})]
 
     revision_job = Job(id=7, flow_id=1, kind=JobKind.REVISION, state=JobState.RUNNING)
     task = await prepare(subject, revision_job)
@@ -617,7 +620,7 @@ async def test_triage_and_revision_results_remain_control_plane_side_effects() -
     revision_state = await apply_result(
         subject,
         revision_job,
-        RevisionResult(
+        RevisionResult(batch_id=1, feedback_refs=[FeedbackRef(item_id=101, version=1)],
             session_id="session-1",
             last_message="updated",
             exit_code=0,
@@ -628,7 +631,8 @@ async def test_triage_and_revision_results_remain_control_plane_side_effects() -
     assert store.flow.state is FlowState.ACTIVE
     assert store.attempt is not None
     assert store.attempt.revision_cycles == 1
-    assert store.relayed == [101]
+    assert store.reviews.batch.state.value == "waiting"
+    assert store.reviews.consumed == []
 
 
 @pytest.mark.asyncio
@@ -640,7 +644,7 @@ async def test_result_kind_must_match_persisted_job_kind() -> None:
         await apply_result(
             subject,
             job,
-            TriageResult(verdict=TriageVerdict(verdict=Verdict.WAIT)),
+            TriageResult(batch_id=1, feedback_refs=[FeedbackRef(item_id=101, version=1)], verdict=TriageVerdict(verdict=Verdict.WAIT)),
         )
 
 
@@ -667,7 +671,7 @@ async def test_answer_and_archive_side_effects_are_applied_by_control() -> None:
     answer_state = await apply_result(
         subject,
         Job(id=8, flow_id=1, kind=JobKind.ANSWER, state=JobState.RUNNING),
-        AnswerResult(answer="Because it is bounded."),
+        AnswerResult(batch_id=1, feedback_refs=[FeedbackRef(item_id=101, version=1)], answer="Because it is bounded."),
     )
     assert answer_state is JobState.DONE
     assert github.comments == ["Because it is bounded."]

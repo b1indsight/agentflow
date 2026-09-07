@@ -7,7 +7,8 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.github_models import PullRequestSnapshot
-from app.models import FlowDelivery, FlowState, JobKind, JobState
+from app.models import FeedbackRef, FlowDelivery, FlowState, JobKind, JobState
+from app.review_models import BatchState
 
 
 class FrozenModel(BaseModel):
@@ -83,8 +84,10 @@ class ResultPlan(FrozenModel):
     run: RunUpdate | None = None
     delivery: FlowDelivery | None = None
     derived: DerivedJob | None = None
-    relayed_ids: list[int] = Field(default_factory=list)
-    resolved_ids: list[int] = Field(default_factory=list)
+    batch_id: int | None = None
+    batch_state: BatchState | None = None
+    consumed: list[FeedbackRef] = Field(default_factory=list)
+    open_points: list[str] = Field(default_factory=list)
     effects: list[Effect] = Field(default_factory=list)
 
 

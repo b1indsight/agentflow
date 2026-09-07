@@ -32,6 +32,7 @@ flowtool/
   同 identity 忙碌重连、serve 重启恢复和结果重放均已实现；跨 worker session 迁移与多 serve HA 不在范围内；
 - **M1** 触发（含 allowlist）→ Flow 独占 worker/repo → codex 首轮 → 开 PR（单 flow happy path）
 - **M2** 语义 Triage（bub）门 + 回喂循环（settle → revise/answer/wait + resume/兜底 + 自动 resolve）
+  - Feature 1 持久反馈批次/settle 已实现并通过 PostgreSQL 自动化；Features 2–4 和真实闭环仍待实施验收。
 - **M3** 人工合并检测（`pull_request.closed`）→ 归档 + 状态标签 / 评论
 - **M4** 多 flow 并发 + reconcile 对账 + Project 看板 + 错误恢复
 - **M5** 安全隔离（容器化 codex）+ 公网 / 隧道部署 + 完整运维与可观测性

@@ -15,10 +15,12 @@ from app.models import (
     utcnow,
 )
 from app.store import Store
+from tests.review_memory import MemoryReviews
 
 
 class RetryStore:
     def __init__(self, failed_job: Job | None = None) -> None:
+        self.reviews = MemoryReviews()
         self.flow = Flow(
             id=1,
             repo="owner/repo",
@@ -64,6 +66,9 @@ class RetryStore:
 
     def latest_failed_job(self, flow_id: int) -> Job | None:
         return self.failed_job
+
+    def cancel_jobs(self, flow_id: int) -> None:
+        self.reviews.cancel(flow_id)
 
     def enqueue_job(self, flow_id: int, kind: JobKind, payload: dict | None = None) -> Job:
         self.enqueued.append(kind)

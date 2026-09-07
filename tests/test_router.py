@@ -1,5 +1,4 @@
 from types import SimpleNamespace
-from unittest.mock import Mock
 
 import pytest
 
@@ -93,6 +92,7 @@ async def test_unlabel_and_stop_comment_cancel_active_flow(
 
     replacement = store.create_flow("owner/repo", 7, installation_id=42)
     stop_payload = {
+        "action": "created",
         "repository": {"full_name": "owner/repo"},
         "issue": {"number": 7},
         "comment": {"id": 77, "body": "/flow stop", "user": {"login": "alice"}},
@@ -117,10 +117,9 @@ async def test_review_comment_is_stored_for_current_attempt(
     delivery.pr_number = 17
     delivery.state = DeliveryState.OPEN
     store.update_delivery(delivery)
-    touch = Mock()
-    monkeypatch.setattr(router.settle, "touch", touch)
 
     payload = {
+        "action": "created",
         "repository": {"full_name": "owner/repo"},
         "pull_request": {"number": 17},
         "comment": {
@@ -137,8 +136,8 @@ async def test_review_comment_is_stored_for_current_attempt(
 
     await router.handle("pull_request_review_comment", "review-1", payload)
 
-    items = store.unrelayed_items(attempt.id)
+    items = store.reviews.pending(flow.id)
     assert len(items) == 1
     assert items[0].github_id == 101
     assert items[0].path == "app/worker/client.py"
-    touch.assert_called_once()
+    assert not store.reviews.claim_due()
