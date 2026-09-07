@@ -223,7 +223,7 @@ class ReviewStore:
                     " ON v.item_id=i.id AND v.version=i.version WHERE i.flow_id=%s"
                     " AND v.consumed_at IS NULL AND v.relayed_at IS NULL"
                     " AND NOT (v.content->>'deleted')::boolean"
-                    " AND v.content->>'signal' <> 'discussion' LIMIT 1",
+                    " AND v.content->>'signal' = 'request_changes' LIMIT 1",
                     (flow_id,),
                 ).fetchone()
                 is not None

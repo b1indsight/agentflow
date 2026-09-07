@@ -88,9 +88,9 @@ claim 到期 buffer 时冻结输入，创建唯一来源键的 job，并更新�
 | 事件/结果 | 行为 |
 |---|---|
 | 普通 conversation、inline、带正文的 review | 追加版本，重置普通静默窗口；review submitted 可使用较短 grace |
-| approve、其他 bot/self、重复或无有效变化事件 | 不触发修改或重复批次；不将普通文本中的引用误识别为命令 |
-| allowlist 用户的明确 bot 指令、submitted Request Changes | 持久化强信号，以 submit grace 收集关联 inline，绕过 Judge 后创建一个 REVISION |
-| 非 allowlist 用户的同类文本 | 作为普通讨论进入 Judge，不能绕过语义门；普通讨论入口仍保持开放 |
+| approve、其他 bot/self、重复或无有效变化事件 | 不触发修改或重复批次 |
+| allowlist 作者本人提交的 Request Changes | 持久化强信号，以 submit grace 收集关联 inline，绕过 Judge 后创建一个 REVISION |
+| 普通评论（包括 @bot）、非 allowlist 的 Request Changes | 作为普通讨论进入 Judge，不能绕过语义门；普通讨论入口仍保持开放 |
 | 空正文 Request Changes | 保存 review 状态本身；无可操作正文/inline 时等待补充，不创建空指令修订 |
 | 强信号之后继续收到关联 inline | 保留强信号及 grace 语义，最后一次相关事件后静默到期，不降级回普通批次 |
 | 当前有处理中的批次 | 继续缓冲新版本，到期也等当前结果和必要副作用完成后才领取下一批 |
@@ -99,7 +99,7 @@ claim 到期 buffer 时冻结输入，创建唯一来源键的 job，并更新�
 | cancel / terminal Flow | 原子取消 buffer 和未执行批次，禁止继续派生 job；旧结果按现有 fencing 收尾 |
 
 bot 判断覆盖 payload 的 actor 类型与配置的 bot login；edited/deleted/dismissed 等 action 显式分流，
-不能把撤销或编辑的 review 当作新的强信号。强信号识别仅取用户明确提交的正文，排除引用/代码块。
+不能把撤销或编辑的 review 当作新的强信号。强信号只依据授权作者提交的 review 状态，不从评论正文识别命令。
 执行开始后新增/编辑/删除反馈留给下一轮，不在 webhook 内打断 Codex；F4 在 resolve 前再校验线程。
 
 启动时与周期 sweep 查询持久 due_at；数据库时间/可注入 clock 决定到期，内存 timer 只作为唤醒优化。
@@ -156,7 +156,7 @@ TRIAGE→REVISION/ANSWER 转移同一批次所有权，结果确认精确 item/v
 源时间可用时拒绝旧版本；同秒编辑使用 `changes.body.from`，前序未到的编辑持久暂存并接续回放，
 没有更新时间的编辑按接收时间排序。
 
-验证：本机临时 PostgreSQL 上完整测试 197 passed、0 skipped；覆盖批次入口/领取故障回滚、并发与重启、
+验证：本机临时 PostgreSQL 上完整测试 196 passed、0 skipped；覆盖批次入口/领取故障回滚、并发与重启、
 版本隔离、删除、授权/action 分流、waiting、重放、取消和 retry。原有 WebSocket 测试的关闭竞态已在
 独立 main 工作区复现，测试改为等待服务端完成断连再退出 TestClient；不改产品连接行为。
 Ruff、Mypy 和构建通过；CI 结果见本 PR 的检查记录。真实 GitHub/Codex/bub 验收未运行。
@@ -165,3 +165,8 @@ Ruff、Mypy 和构建通过；CI 结果见本 PR 的检查记录。真实 GitHub
 重试选择、旧 failed review job 升级检查、ANSWER 未决问题传递、approval 唤醒、空 review 正文阻塞、
 同秒乱序编辑丢失及代码围栏命令误判。先复现 13 个失败场景，再验证修复；额外覆盖 sweep 前 retry、
 历史失败不阻止升级，以及乱序回放中断后的事务回滚和重启恢复。
+
+随后用户取消评论中 `@bot` 直接触发修订的入口。删除命令检测与 Markdown 围栏解析，普通评论统一
+进入 Judge，仅授权的 submitted Request Changes 保留直达修订。旧 v5 `command` 值兼容读取，
+但不再作为缓冲区的强信号；已冻结批次保持原快照。以三种评论入口、直接提及及跨行代码示例、
+旧缓冲 command 的 7 个回归场景替换原命令解析测试，先验证失败后通过完整套件。

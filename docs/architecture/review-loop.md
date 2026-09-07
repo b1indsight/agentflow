@@ -20,10 +20,13 @@ review body、inline 和 conversation 使用 `(flow_id, kind, github_id)` 区分
 没有更新时间的编辑以接收时间排序。删除保存 tombstone，后到的旧事件不能复活正文；
 approval/删除只使原正文失效，不推进 generation 或唤醒等待中的讨论。
 
-allowlist 作者本人提交的 Request Changes，或正文非引用/代码块中的行首 `@<bot_login> 指令`，
-使用较短 submit grace 合批后直达 REVISION。非 allowlist 用户的同类文本只作为普通讨论；
+仅 allowlist 作者本人提交的 Request Changes 使用较短 submit grace 合批后直达 REVISION。
+评论正文（包括 `@bot`、明确修改要求和代码示例）统一进入 Judge；非 allowlist 的 Request Changes
+也作为普通讨论。
 edited 不产生新的强信号，approve/dismissed 不触发修订。空 Request Changes 保存信号但不创建空修改，
 之后收到可操作正文/inline 再处理。配置 bot 和 GitHub `type=Bot` 的事件均不进入反馈循环。
+
+旧 v5 快照中的 `command` 值仍可读取，但缓冲区不再将它视为直达修订的强信号；已冻结批次保持原快照。
 
 到期时间在 PostgreSQL；启动时以及 worker sweep 周期扫描，不依赖进程内 timer。
 到期后最多增加一次 sweep 周期的调度延迟。一个 Flow 最多一个 ready/processing 批次，

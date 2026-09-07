@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from collections.abc import Callable
 from datetime import datetime
 from typing import Literal, Protocol
@@ -127,13 +126,10 @@ class EventRouter:
             return
         sender = (payload.get("sender") or {}).get("login", "")
         authorized = sender in self.settings.allowlist and sender == author.get("login")
-        signal: Literal["discussion", "command", "request_changes"] = "discussion"
+        signal: Literal["discussion", "request_changes"] = "discussion"
         deleted = action in {"deleted", "dismissed"} or (review and item.get("state") == "approved")
-        if authorized and not deleted:
-            if review and action == "submitted" and item.get("state") == "changes_requested":
-                signal = "request_changes"
-            elif action in {"created", "submitted"} and _has_command(body, self.settings.bot_login):
-                signal = "command"
+        if authorized and review and action == "submitted" and item.get("state") == "changes_requested":
+            signal = "request_changes"
         timestamp = item.get("updated_at")
         if timestamp is None and action in {"created", "submitted"}:
             timestamp = item.get("submitted_at") if review else item.get("created_at")
@@ -174,23 +170,3 @@ class EventRouter:
         flow = self.store.get_flow_by_pr(payload["repository"]["full_name"], pull_request["number"])
         if flow:
             self.service.on_merged(flow)
-
-
-def _has_command(body: str, bot_login: str) -> bool:
-    """Only a leading mention with an instruction outside quotes/code is a direct command."""
-    fence: str | None = None
-    for line in body.splitlines():
-        stripped = line.lstrip()
-        if fence is not None:
-            if re.fullmatch(r" {0,3}" + re.escape(fence[0]) + "{" + str(len(fence)) + r",}[ \t]*", line):
-                fence = None
-            continue
-        opening = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
-        if opening and (opening[1][0] != "`" or "`" not in opening[2]):
-            fence = opening[1]
-            continue
-        if stripped.startswith(">") or line.startswith(("    ", "\t")):
-            continue
-        if re.match(r"^@" + re.escape(bot_login) + r"(?:\s+|[:,]\s*)\S", stripped):
-            return True
-    return False

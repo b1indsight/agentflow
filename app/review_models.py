@@ -20,6 +20,7 @@ class FeedbackUpdate(BaseModel):
     body: str
     updated_at: AwareDatetime
     deleted: bool = False
+    # Keep legacy command values readable in persisted v5 snapshots; routing no longer emits them.
     signal: Literal["discussion", "command", "request_changes"] = "discussion"
     submitted: bool = False
     path: str | None = None

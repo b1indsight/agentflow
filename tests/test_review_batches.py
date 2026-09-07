@@ -252,25 +252,19 @@ def test_cancel_retires_buffer_and_batch_atomically(store, review_flow):
 
 
 @pytest.mark.parametrize(
-    "actor,body,kind",
+    "event_type,item_key,container,action",
     [
-        ("alice", "@flowtool[bot] add a bound", JobKind.REVISION),
-        ("outsider", "@flowtool[bot] add a bound", JobKind.TRIAGE),
-        ("alice", "> @flowtool[bot] add a bound", JobKind.TRIAGE),
-        ("alice", "```\n@flowtool[bot] add a bound\n```", JobKind.TRIAGE),
-        # A shorter nested fence or a fence with trailing text cannot close the outer block.
-        ("alice", "````markdown\n```\n@flowtool[bot] add a bound\n```\n````", JobKind.TRIAGE),
-        ("alice", "~~~~\n~~~\n@flowtool[bot] add a bound\n~~~~", JobKind.TRIAGE),
-        ("alice", "```\n```example\n@flowtool[bot] add a bound\n```", JobKind.TRIAGE),
-        ("alice", "````\n```\n````\n@flowtool[bot] add a bound", JobKind.REVISION),
+        ("issue_comment", "comment", "issue", "created"),
+        ("pull_request_review_comment", "comment", "pull_request", "created"),
+        ("pull_request_review", "review", "pull_request", "submitted"),
     ],
 )
-async def test_strong_commands_require_author_and_unquoted_instruction(
-    store,
-    review_flow,
-    actor,
-    body,
-    kind,
+@pytest.mark.parametrize("body", [
+    "@flowtool[bot] add a bound",
+    "```foo`bar\n@flowtool[bot] add a bound\nend ```",
+])
+async def test_bot_mentions_always_enter_triage(
+    store, review_flow, event_type, item_key, container, action, body,
 ):
     _, clock = review_flow
     settings = SimpleNamespace(
@@ -281,23 +275,36 @@ async def test_strong_commands_require_author_and_unquoted_instruction(
         submit_grace_seconds=15,
     )
     router = EventRouter(store, ControlService(store), settings)
+    # Even an allowlisted author's direct request or multiline code example needs Judge.
     await router.handle(
-        "issue_comment",
+        event_type,
         "comment",
         {
-            "action": "created",
+            "action": action,
             "repository": {"full_name": "owner/repo"},
-            "issue": {"number": 17},
-            "sender": {"login": actor, "type": "User"},
-            "comment": {
+            container: {"number": 17},
+            "sender": {"login": "alice", "type": "User"},
+            item_key: {
                 "id": 101,
                 "body": body,
-                "user": {"login": actor},
+                "state": "commented",
+                "user": {"login": "alice"},
                 "updated_at": clock.now.isoformat(),
             },
         },
     )
-    assert claim(store, clock)[0].kind is kind
+    job = claim(store, clock)[0]
+    assert job.kind is JobKind.TRIAGE
+    batch = store.reviews.for_job(job)
+    assert batch.feedback[0].body == body
+    assert batch.feedback[0].signal == "discussion"
+
+
+def test_preexisting_buffered_command_no_longer_bypasses_judge(store, review_flow):
+    flow, clock = review_flow
+    # Previously persisted v5 feedback remains readable, but cannot act as a strong signal.
+    ingest(store, flow, feedback(clock, body="@flowtool[bot] add a bound", signal="command"))
+    assert claim(store, clock)[0].kind is JobKind.TRIAGE
 
 
 @pytest.mark.parametrize(

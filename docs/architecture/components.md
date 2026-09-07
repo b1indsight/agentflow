@@ -27,7 +27,7 @@ Codex 等长任务占用 GitHub 的 Webhook 请求。
 - 仅允许 allowlist 用户通过 `issues.labeled(flow)` 创建 active flow 与 initial job；
 - `issues.unlabeled(flow)` 或严格等于 `/flow stop` 的评论取消 active flow；
 - review body、inline comment 和 conversation 按 Flow/kind/GitHub ID 保存不可变版本，保留来源 attempt；
-- 反馈 delivery、版本和 deadline 共用事务，持久 settle 后冻结批次；allowlist 强信号经 grace 直达 REVISION；
+- 反馈 delivery、版本和 deadline 共用事务，持久 settle 后冻结批次；仅 allowlist 作者提交的 Request Changes 经 grace 直达 REVISION；
 - `pull_request.closed (merged=true)` 驱动 MERGED；approve 本身不触发修订。
 
 M2 F1 自动化覆盖反馈工作流锁、同 Flow 批次串行、重启恢复和精确版本消费。尚未实现：

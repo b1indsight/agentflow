@@ -6,7 +6,7 @@ FlowTool 的目标是把带 `flow` 标签的 GitHub issue 编排成
 
 > 当前状态（2026-09-07）：**M0 已验收；M1 Issue→PR 已实现并有自动化覆盖，真实 GitHub E2E 待验收**。
 > 当前实现还包含 M1 交付修复、原子结果提交与恢复，以及 M2 F1 持久反馈批次与 settle。
-> 本机最新测试为 **197 passed / 0 skipped**（实际 PostgreSQL）；完整产品闭环尚未验收。
+> 本机最新测试为 **196 passed / 0 skipped**（实际 PostgreSQL）；完整产品闭环尚未验收。
 
 ## 当前能力
 
@@ -27,7 +27,8 @@ FlowTool 的目标是把带 `flow` 标签的 GitHub issue 编排成
 - **GitHub 请求超时**：App 和 installation 客户端的连接、读写及连接池等待默认各为 30 秒，
   可通过 `FLOWTOOL_GITHUB_REQUEST_TIMEOUT_SECONDS` 调整；这不是整批结果恢复的总时限。
 - **持久反馈批次**：反馈版本与 settle deadline 入库，重启后恢复；同 Flow 串行处理冻结批次，
-  运行中新评论/编辑进入下一批。allowlist 强信号经 grace 合批直达修订；wait 等待新信息，
+  运行中新评论/编辑进入下一批。仅 allowlist 作者提交的 Request Changes 经 grace 合批直达修订；
+  包含 `@bot` 的评论也进入 Judge。wait 等待新信息，
   answer/ignore/明确 addressed 只消费本批次精确版本，未决问题保留。
 - **运维入口**：CLI 可查看 Flow、交付分支/PR、worker、任务恢复状态和未完成的 GitHub 操作，
   并提供 cancel/retry 命令。存在待核对结果时会拒绝直接 retry。
@@ -144,7 +145,7 @@ Python 3.12 分别运行 Ruff、Mypy、pytest 与 sdist/wheel 构建。pytest jo
 结果重放与远端操作核对。数据库用例还覆盖事务回滚、跨连接并发、任务去重、取消交错和恢复期限；
 GitHub、Codex、bub 使用替身，不访问真实外部服务。
 
-2026-09-07 M2 F1 本机复核：设置临时 PostgreSQL 数据库后 `uv run pytest -q` 为 **197 passed / 0 skipped**；
+2026-09-07 M2 F1 本机复核：设置临时 PostgreSQL 数据库后 `uv run pytest -q` 为 **196 passed / 0 skipped**；
 覆盖反馈交接/领取回滚、重启、并发、版本隔离、等待接续、乱序编辑回放与重试恢复。保留一个
 Starlette TestClient/httpx 弃用告警。数据库 CI 的历史验证见
 [M1 交付修复记录](docs/plan/m1-delivery-review-fixes.md#实施结果)，原子结果改动的验证边界见
