@@ -40,7 +40,8 @@ class CodeAgent(Protocol):
     ) -> AgentRun: ...
 
     async def resume(
-        self, session_id: str, prompt: str, *, output_schema: Path | None = None
+        self, session_id: str, prompt: str, *, output_schema: Path | None = None,
+        context: CodeAgentContext | None = None,
     ) -> AgentRun: ...
 
 
@@ -91,6 +92,10 @@ class GitHubClient(Protocol):
     async def create_push_capability(self, installation_id: int, repo: str) -> PushCapability: ...
 
     async def get_ref(self, installation_id: int, repo: str, branch: str) -> RemoteRef: ...
+
+    async def compare_commits(
+        self, installation_id: int, repo: str, base: str, head: str,
+    ) -> bool: ...
 
     async def find_pull_request_by_head(
         self, installation_id: int, repo: str, branch: str

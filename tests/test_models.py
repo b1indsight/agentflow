@@ -51,6 +51,7 @@ def test_codex_result_parses_review_outcomes() -> None:
     result = CodexResult.model_validate_json(
         """{
             "summary": "Updated the retry policy.",
+            "vcs_backend_used": "git",
             "addressed": [{"item_id": 1, "version": 1, "comment_id": 12, "note": "Added a bound."}],
             "deferred": [{"item_id": 2, "version": 1, "comment_id": 13, "reason": "Needs product input."}],
             "needs_clarification": ["Which timeout should be the default?"]

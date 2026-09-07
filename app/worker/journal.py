@@ -10,7 +10,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
 from app.models import JobState
-from app.protocol import Assignment, Failed, Succeeded, terminal_digest
+from app.protocol import Assignment, Failed, RevisionInvocation, Succeeded, terminal_digest
 
 TerminalMessage = Succeeded | Failed
 _TERMINAL: TypeAdapter[TerminalMessage] = TypeAdapter(TerminalMessage)
@@ -30,6 +30,9 @@ class JournalRecord(BaseModel):
     state: Literal["received", "started", "succeeded", "failed"]
     result_digest: str | None = None
     terminal: TerminalMessage | None = None
+    revision_phase: Literal["resume", "fallback"] | None = None
+    fallback_consumed: bool = False
+    invocations: list[RevisionInvocation] = []
 
 
 class WorkerJournal:
@@ -63,6 +66,24 @@ class WorkerJournal:
         record.state = "started"
         self._write(record)
         return record
+
+    def begin_revision(self, phase: Literal["resume", "fallback"]) -> None:
+        """Durably consume the single fallback before starting another process."""
+        record = self._required()
+        if record.state != "started" or record.fallback_consumed:
+            raise JournalError("revision invocation cannot be safely restarted")
+        if phase == "resume" and record.revision_phase is not None:
+            raise JournalError("resume has already been attempted")
+        record.revision_phase = phase
+        record.fallback_consumed = phase == "fallback"
+        self._write(record)
+
+    def finish_invocation(self, invocation: RevisionInvocation) -> None:
+        record = self._required()
+        if record.state != "started" or record.revision_phase != invocation.mode:
+            raise JournalError("invocation does not match durable revision phase")
+        record.invocations.append(invocation)
+        self._write(record)
 
     def record_terminal(self, terminal: TerminalMessage) -> JournalRecord:
         record = self._required()

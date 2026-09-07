@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import tempfile
 from datetime import UTC, datetime
@@ -10,7 +11,7 @@ from pathlib import Path
 from loguru import logger
 
 from app.context_builder import build_initial_prompt, build_revision_prompt
-from app.models import CodeAgentContext, CodexResult, InitialCodexResult
+from app.models import CodeAgentContext, CodexResult, InitialCodexResult, SessionUnavailable
 from app.ports import CodeAgent, Judge
 from app.protocol import (
     ArchiveResult,
@@ -20,6 +21,7 @@ from app.protocol import (
     ExecutionTask,
     InitialResult,
     InitialTask,
+    RevisionInvocation,
     RevisionResult,
     RevisionTask,
     TriageResult,
@@ -29,10 +31,14 @@ from app.vcs import (
     VcsVerificationError,
     agent_guidance,
     cleanup_flow_repo,
+    flow_repo_path,
     prepare_flow_repo,
+    prepare_revision_context,
     prepare_vcs_context,
+    verify_revision_outcome,
     verify_vcs_outcome,
 )
+from app.worker.journal import WorkerJournal
 from app.worker.tools import FlowToolCaller, flow_tool_broker
 
 VCS_VERIFICATION_EXIT_CODE = 65
@@ -53,11 +59,15 @@ class WorkerExecutor:
         *,
         worker_id: str | None = None,
         tool_caller: FlowToolCaller | None = None,
+        journal: WorkerJournal | None = None,
+        revision_timeout: float = 1200.0,
     ) -> None:
         self.worker_root = worker_root
         self.code_agent = code_agent
         self.judge = judge
         self.worker_id = worker_id
+        self.journal = journal
+        self.revision_timeout = revision_timeout
         self.tool_caller = tool_caller
 
     async def execute(
@@ -70,7 +80,11 @@ class WorkerExecutor:
             return TriageResult(batch_id=task.batch_id, feedback_refs=list(task.feedback),
                                 decision=decision)
         if isinstance(task, RevisionTask):
-            return await self._revision(task)
+            try:
+                async with asyncio.timeout(self.revision_timeout):
+                    return await self._revision(task, secret)
+            except TimeoutError as error:
+                raise TimeoutError("revision deadline expired; edits or a push may have occurred") from error
         if isinstance(task, ArchiveTask):
             repo_path = self._repo_path(task.repo)
             await cleanup_flow_repo(repo_path, task.flow_id)
@@ -173,29 +187,92 @@ class WorkerExecutor:
             pull_request=tool_result,
         )
 
-    async def _revision(self, task: RevisionTask) -> RevisionResult:
-        prompt = build_revision_prompt(
-            task.instruction,
-            task.feedback,
-            agent_guidance(task.branch),
+    async def _revision(
+        self, task: RevisionTask, secret: AssignmentSecret | None,
+    ) -> RevisionResult:
+        """Resume with fresh credentials, falling back once only after proven non-execution."""
+        result = RevisionResult(
+            batch_id=task.batch_id, feedback_refs=list(task.feedback), flow_id=task.flow_id,
+            attempt_id=task.attempt_id, previous_session_id=task.session_id,
+            session_id=task.session_id, session_generation=task.session_generation,
+            mode="resume" if task.session_id else "fallback", last_message="", exit_code=65,
         )
-        schema_path = _write_output_schema(CodexResult)
+        schema_path: Path | None = None
         try:
-            run = await self.code_agent.resume(
-                task.session_id,
-                prompt,
-                output_schema=schema_path,
+            if self.worker_id is None or task.repo_identity != f"{self.worker_id}:{task.repo}":
+                raise VcsVerificationError("binding", "repo identity does not match worker")
+            if (secret is None or secret.push.repository != task.repo
+                    or secret.push.expires_at <= datetime.now(UTC)):
+                raise VcsVerificationError("capability", "missing, mismatched or expired push capability")
+            workspace = flow_repo_path(self._repo_path(task.repo), task.flow_id)
+            context = CodeAgentContext(push_token=secret.push.token,
+                                       push_repository=task.repo, cwd=workspace)
+            vcs_context = await prepare_revision_context(
+                workspace, task.branch, task.expected_head_sha, context,
             )
+            prompt = build_revision_prompt(task, self._repo_conventions(workspace))
+            schema_path = _write_output_schema(CodexResult)
+            run = None
+            if task.session_id:
+                if self.journal is not None:
+                    self.journal.begin_revision("resume")
+                try:
+                    run = await self.code_agent.resume(
+                        task.session_id, prompt, output_schema=schema_path, context=context,
+                    )
+                except SessionUnavailable:
+                    invocation = RevisionInvocation(mode="resume", session_id=task.session_id,
+                                                    exit_code=1, failure="session_unavailable")
+                    result.invocations.append(invocation)
+                    if self.journal is not None:
+                        self.journal.finish_invocation(invocation)
+                    # A rejection is insufficient if anything changed while resume was attempted.
+                    fallback_context = await prepare_revision_context(
+                        workspace, task.branch, task.expected_head_sha, context,
+                    )
+                    if ((fallback_context.git_remote_url, fallback_context.jj_remote_url)
+                            != (vcs_context.git_remote_url, vcs_context.jj_remote_url)):
+                        raise VcsVerificationError("push", "remote changed after session rejection")
+            if run is None:
+                result.mode = "fallback"
+                result.session_generation += 1
+                if self.journal is not None:
+                    self.journal.begin_revision("fallback")
+                run = await self.code_agent.start(
+                    prompt, workspace, output_schema=schema_path, context=context,
+                )
+            invocation = RevisionInvocation(mode=result.mode, session_id=run.session_id,
+                                            exit_code=run.exit_code)
+            result.invocations.append(invocation)
+            if self.journal is not None:
+                self.journal.finish_invocation(invocation)
+            result.session_id = run.session_id
+            result.last_message = run.last_message
+            if run.exit_code != 0:
+                result.exit_code = run.exit_code
+                result.failure_stage = "execution"
+                result.failure_detail = (run.failure_detail
+                                         or "CodeAgent exited unsuccessfully; execution may have occurred")
+                return result
+            if not isinstance(run.output, CodexResult) or not run.session_id:
+                raise VcsVerificationError("result", "missing strict revision output or session")
+            if result.mode == "resume" and run.session_id != task.session_id:
+                raise VcsVerificationError("session", "resume returned a different session")
+            result.output = run.output
+            outcome = await verify_revision_outcome(vcs_context, run.output.vcs_backend_used)
+            result.vcs_backend = outcome.verified_backend
+            result.branch = outcome.branch
+            result.commit_sha = outcome.commit_sha
+            result.remote_sha = outcome.remote_sha
+            result.clean_worktree = True
+            result.exit_code = 0
+        except VcsVerificationError as error:
+            result.failure_stage = error.stage
+            result.failure_detail = str(error)
         finally:
-            schema_path.unlink(missing_ok=True)
-        return RevisionResult(
-            batch_id=task.batch_id,
-            feedback_refs=list(task.feedback),
-            session_id=run.session_id,
-            last_message=run.last_message,
-            exit_code=run.exit_code,
-            output=run.output or CodexResult(),
-        )
+            if schema_path is not None:
+                schema_path.unlink(missing_ok=True)
+        return result
 
     def _repo_path(self, repo: str) -> Path:
         return self.worker_root / "repos" / repo

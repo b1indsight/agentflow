@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import os
 import shutil
+import signal
 import subprocess
+import sys
 from pathlib import Path
 from typing import cast
 
@@ -164,6 +166,38 @@ async def test_vcs_command_times_out_instead_of_occupying_the_worker() -> None:
         )
 
     assert error.value.stage == "test"
+
+
+@pytest.mark.asyncio
+async def test_outer_revision_deadline_kills_and_reaps_vcs_process_group(monkeypatch) -> None:
+    processes = []
+    killed = []
+    spawn, killpg = asyncio.create_subprocess_exec, os.killpg
+
+    async def record_process(*args, **kwargs):
+        process = await spawn(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    def record_kill(pid, sig):
+        killed.append((pid, sig))
+        killpg(pid, sig)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", record_process)
+    monkeypatch.setattr(os, "killpg", record_kill)
+    try:
+        with pytest.raises(TimeoutError):
+            async with asyncio.timeout(0.1):
+                await _run(sys.executable, "-c", "import time; time.sleep(10)",
+                           timeout=30, stage="revision_verification")
+        assert len(processes) == 1
+        assert killed == [(processes[0].pid, signal.SIGKILL)]
+        assert processes[0].returncode is not None
+    finally:
+        for process in processes:
+            if process.returncode is None:
+                killpg(process.pid, signal.SIGKILL)
+                await process.wait()
 
 
 @pytest.mark.asyncio

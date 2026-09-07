@@ -13,6 +13,7 @@ def review_context(batch_id: int = 1) -> ReviewContext:
         batch_id=batch_id, repo="owner/repo", issue_number=8, pr_number=17,
         pull_request=ReviewPullRequest(
             number=17, state="open", head_branch="flow/8", head_sha="abc",
+            head_repository="owner/repo",
             base_branch="main", base_sha="def", title="Bound retries", body="Use 10 retries",
         ),
     )
@@ -25,6 +26,7 @@ def judge_decision(verdict: TriageVerdict, context: ReviewContext | None = None)
 
 class MemoryReviews:
     def __init__(self) -> None:
+        self.jobs: dict[int, Job] = {}
         self.batch = ReviewBatch(
             id=1,
             flow_id=1,
@@ -52,6 +54,14 @@ class MemoryReviews:
 
     def for_job(self, job: Job) -> ReviewBatch:
         return self.batch.model_copy(update={"job_id": job.id})
+
+    def freeze_revision(self, job, task):
+        from app.protocol import RevisionTask
+
+        if (job.payload or {}).get("revision") is None:
+            job.payload = {**(job.payload or {}), "revision": task.model_dump(mode="json")}
+            self.jobs[job.id].payload = job.payload
+        return RevisionTask.model_validate(job.payload["revision"])
 
     def freeze_context(self, job: Job, context: ReviewContext) -> ReviewContext:
         if self.batch.context is None:

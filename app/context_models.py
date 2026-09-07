@@ -18,6 +18,7 @@ class ReviewPullRequest(PullRequestSnapshot):
     body: str
     base_sha: str
     merged: bool = False
+    head_repository: str | None = None
 
 
 class ContextFile(BaseModel):

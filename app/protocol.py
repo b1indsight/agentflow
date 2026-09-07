@@ -23,7 +23,7 @@ from app.judge_models import JudgeDecision
 from app.models import CodexResult, FeedbackRef, JobState, VcsKind
 from app.review_models import ReviewFeedback
 
-PROTOCOL_VERSION: Literal[6] = 6
+PROTOCOL_VERSION: Literal[7] = 7
 
 
 class ProtocolModel(BaseModel):
@@ -33,7 +33,7 @@ class ProtocolModel(BaseModel):
 
 
 class Message(ProtocolModel):
-    protocol_version: Literal[6] = PROTOCOL_VERSION
+    protocol_version: Literal[7] = PROTOCOL_VERSION
 
 
 class ReviewTask(ProtocolModel):
@@ -59,7 +59,7 @@ class InitialTask(ProtocolModel):
 class PushSecret(ProtocolModel):
     """Wire-only Git credential whose normal repr remains redacted."""
 
-    token: SecretStr
+    token: SecretStr = Field(min_length=1)
     repository: str
     expires_at: datetime
 
@@ -93,8 +93,25 @@ class RevisionTask(ReviewTask):
     flow_id: int = Field(gt=0)
     repo: str
     branch: str
-    session_id: str
+    repo_identity: str
+    pr_number: int = Field(gt=0)
+    base_branch: str
+    expected_head_sha: str = Field(min_length=1)
+    session_id: str | None
+    session_generation: int = Field(ge=0)
     instruction: str
+    issue_title: str
+    issue_body: str
+    previous_summary: str
+    open_points: list[str]
+    context: ReviewContext | None = None
+
+
+class RevisionInvocation(ProtocolModel):
+    mode: Literal["resume", "fallback"]
+    session_id: str | None
+    exit_code: int
+    failure: str | None = None
 
 
 class ArchiveTask(ProtocolModel):
@@ -141,7 +158,20 @@ class RevisionResult(ReviewResult):
     session_id: str | None
     last_message: str
     exit_code: int
-    output: CodexResult = Field(default_factory=CodexResult)
+    flow_id: int = Field(gt=0)
+    attempt_id: int = Field(gt=0)
+    previous_session_id: str | None
+    session_generation: int = Field(ge=0)
+    mode: Literal["resume", "fallback"]
+    invocations: list[RevisionInvocation] = Field(default_factory=list, max_length=2)
+    output: CodexResult | None = None
+    failure_stage: str | None = None
+    failure_detail: str | None = None
+    vcs_backend: VcsKind | None = None
+    branch: str | None = None
+    commit_sha: str | None = None
+    remote_sha: str | None = None
+    clean_worktree: bool = False
 
 
 class ArchiveResult(ProtocolModel):
@@ -250,6 +280,13 @@ class Assignment(Message):
     connection_epoch: str
     task: ExecutionTask
     secret: AssignmentSecret | None = None
+
+    @model_validator(mode="after")
+    def _flow_identity(self) -> Assignment:
+        if (isinstance(self.task, (InitialTask, RevisionTask, ArchiveTask))
+                and self.task.flow_id != self.flow_id):
+            raise ValueError("assignment and task belong to different Flows")
+        return self
 
 
 class ResumeAssignment(Message):

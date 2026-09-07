@@ -13,10 +13,12 @@ import shutil
 import signal
 import tempfile
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 from urllib.parse import urlparse
 
-from app.models import VcsExecutionContext, VcsKind, VcsOutcome
+from app.credentials import git_credential_environment
+from app.models import CodeAgentContext, VcsExecutionContext, VcsKind, VcsOutcome
 
 
 class VcsVerificationError(RuntimeError):
@@ -51,20 +53,26 @@ async def _run(
     cwd: Path | None = None,
     timeout: float = VCS_COMMAND_TIMEOUT_SECONDS,
     stage: str = "discovery",
+    environment: dict[str, str] | None = None,
 ) -> tuple[int, str, str]:
     proc = await asyncio.create_subprocess_exec(
         *args,
         cwd=str(cwd) if cwd else None,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        env=_vcs_environment(),
+        env=environment if environment is not None else _vcs_environment(),
         start_new_session=True,
     )
     try:
         out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except TimeoutError as error:
-        os.killpg(proc.pid, signal.SIGKILL)
+    except (TimeoutError, asyncio.CancelledError) as error:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
         await proc.wait()
+        if isinstance(error, asyncio.CancelledError):
+            raise
         raise VcsVerificationError(stage, f"{args[0]} command timed out after {timeout:g}s") from error
     return proc.returncode or 0, out.decode(errors="replace"), err.decode(errors="replace")
 
@@ -191,7 +199,7 @@ async def verify_pushed_outcome(context: VcsExecutionContext) -> VcsOutcome:
     return first
 
 
-async def _verify_git(context: VcsExecutionContext) -> VcsOutcome:
+async def _verify_git(context: VcsExecutionContext, *, require_new: bool = True) -> VcsOutcome:
     if context.git_base_sha is None or context.git_remote_url is None:
         raise VcsVerificationError("discovery", "Agent declared git but git metadata is unavailable")
     branch = await _required_stdout(
@@ -202,15 +210,16 @@ async def _verify_git(context: VcsExecutionContext) -> VcsOutcome:
             "branch", f"git branch is {branch or '(detached)'}, expected {context.branch}"
         )
     commit = await _required_stdout("commit", "git", "rev-parse", "HEAD", cwd=context.repo_path)
-    await _require_git_descendant(context.repo_path, context.git_base_sha, commit)
+    if require_new or commit != context.git_base_sha:
+        await _require_git_descendant(context.repo_path, context.git_base_sha, commit)
     await _require_clean("git", "status", "--porcelain", "--untracked-files=all", cwd=context.repo_path)
     current_url = await _git_remote_url(context.repo_path, context.remote)
     _require_unchanged_remote(current_url, context.git_remote_url)
-    remote = await _remote_sha(context.git_remote_url, context.branch)
+    remote = await _remote_sha(context.git_remote_url, context.branch, context.push_context)
     return _outcome(VcsKind.GIT, branch, commit, remote)
 
 
-async def _verify_jj(context: VcsExecutionContext) -> VcsOutcome:
+async def _verify_jj(context: VcsExecutionContext, *, require_new: bool = True) -> VcsOutcome:
     if (
         context.jj_base_sha is None
         or context.jj_ancestor_sha is None
@@ -228,13 +237,54 @@ async def _verify_jj(context: VcsExecutionContext) -> VcsOutcome:
         "commit_id ++ \"\\n\"",
         cwd=context.repo_path,
     )
-    _require_new_commit(commit, context.jj_base_sha)
+    if require_new:
+        _require_new_commit(commit, context.jj_base_sha)
     await _require_jj_descendant(context.repo_path, context.jj_ancestor_sha, commit)
     await _require_clean("jj", "diff", "--summary", cwd=context.repo_path)
     current_url = await _jj_remote_url(context.repo_path, context.remote)
     _require_unchanged_remote(current_url, context.jj_remote_url)
-    remote = await _remote_sha(context.jj_remote_url, context.branch)
+    remote = await _remote_sha(context.jj_remote_url, context.branch, context.push_context)
     return _outcome(VcsKind.JJ, context.branch, commit, remote)
+
+
+async def prepare_revision_context(
+    repo_path: Path, branch: str, expected_sha: str,
+    push_context: CodeAgentContext | None = None,
+) -> VcsExecutionContext:
+    """Require the existing clean Flow repo to match the frozen remote head; never reset it."""
+    if not repo_path.is_dir():
+        raise VcsVerificationError("binding", "existing Flow repository is missing")
+    context = await prepare_vcs_context(repo_path, branch)
+    # A colocated jj working-copy commit may differ from its pushed bookmark. The expected
+    # delivery commit, not that mutable working-copy commit, is the revision ancestry anchor.
+    context = replace(context, git_base_sha=expected_sha if context.git_base_sha else None,
+                      jj_ancestor_sha=expected_sha if context.jj_base_sha else None,
+                      push_context=push_context)
+    backend = VcsKind.JJ if context.jj_base_sha else VcsKind.GIT
+    outcome = await verify_revision_outcome(context, backend)
+    if outcome.commit_sha != expected_sha:
+        raise VcsVerificationError("baseline", "local/remote head differs from frozen delivery")
+    return context
+
+
+async def verify_revision_outcome(
+    context: VcsExecutionContext, backend: VcsKind,
+) -> VcsOutcome:
+    """Verify a revision's descendant or explicit no-op without demanding a new commit."""
+    if backend is VcsKind.GIT:
+        return await _verify_git(context, require_new=False)
+    outcome = await _verify_jj(context, require_new=False)
+    working = await _required_stdout(
+        "branch", "jj", "log", "-r", "@", "--no-graph", "-T", "commit_id",
+        cwd=context.repo_path,
+    )
+    parents = await _required_stdout(
+        "branch", "jj", "log", "-r", "parents(@)", "--no-graph", "-T", 'commit_id ++ "\\n"',
+        cwd=context.repo_path,
+    )
+    if working != outcome.commit_sha and parents != outcome.commit_sha:
+        raise VcsVerificationError("branch", "jj working copy is not at the delivered bookmark")
+    return outcome
 
 
 def _require_new_commit(commit: str, base: str) -> None:
@@ -310,18 +360,26 @@ def _require_unchanged_remote(current: str, captured: str) -> None:
         raise VcsVerificationError("push", "configured remote changed during CodeAgent execution")
 
 
-async def _remote_sha(remote: str, branch: str) -> str:
+async def _remote_sha(
+    remote: str, branch: str, push_context: CodeAgentContext | None = None,
+) -> str:
     # Run outside the agent-controlled repository so local config cannot rewrite the fixed URL.
     with tempfile.TemporaryDirectory(prefix="flowtool-vcs-verify-") as directory:
-        output = await _required_stdout(
-            "push",
+        environment = _vcs_environment()
+        if push_context is not None:
+            environment.update(git_credential_environment(push_context))
+        code, output, _ = await _run(
             "git",
             "ls-remote",
             "--heads",
             remote,
             f"refs/heads/{branch}",
             cwd=Path(directory),
+            stage="push",
+            environment=environment,
         )
+        if code != 0:
+            raise VcsVerificationError("push", f"remote-ref query failed with exit {code}")
     lines = output.splitlines()
     if len(lines) != 1:
         raise VcsVerificationError("push", f"remote branch {branch!r} is missing or ambiguous")

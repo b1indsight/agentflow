@@ -5,14 +5,23 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import signal
 import sys
 import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 
 from loguru import logger
+from pydantic import ValidationError
 
-from app.models import AgentRun, CodeAgentContext, CodexResult
+from app.credentials import git_credential_environment
+from app.models import (
+    AgentRun,
+    CodeAgentContext,
+    CodexResult,
+    InitialCodexResult,
+    SessionUnavailable,
+)
 
 CODEX_BIN = "codex"
 
@@ -59,20 +68,8 @@ def _codex_environment(
     environment = {
         key: value for key, value in values.items() if key in _CODEX_ENVIRONMENT_KEYS
     }
-    if context is not None and context.push_token is not None:
-        environment.update(
-            {
-                "FLOWTOOL_PUSH_TOKEN": context.push_token.get_secret_value(),
-                "GIT_TERMINAL_PROMPT": "0",
-                "GIT_CONFIG_COUNT": "2",
-                "GIT_CONFIG_KEY_0": "credential.https://github.com.username",
-                "GIT_CONFIG_VALUE_0": "x-access-token",
-                "GIT_CONFIG_KEY_1": "credential.https://github.com.helper",
-                "GIT_CONFIG_VALUE_1": (
-                    "!f() { echo password=$FLOWTOOL_PUSH_TOKEN; }; f"
-                ),
-            }
-        )
+    if context is not None:
+        environment.update(git_credential_environment(context))
     return environment
 
 
@@ -113,6 +110,10 @@ def _start_args(
         }
         for key, value in overrides.items():
             args.extend(["-c", f"{key}={json.dumps(value)}"])
+    elif context is not None and context.cwd is not None:
+        args.extend(["-c", f"mcp_servers.flow.command={json.dumps(sys.executable)}",
+                     "-c", "mcp_servers.flow.enabled=false"])
+    args.extend(["-c", 'shell_environment_policy.inherit="all"'])
     return args
 
 
@@ -149,19 +150,29 @@ class CodexAgent:
         return await self._run(args, output_schema, parse_thread=True, context=context)
 
     async def resume(
-        self, session_id: str, prompt: str, *, output_schema: Path | None = None
+        self, session_id: str, prompt: str, *, output_schema: Path | None = None,
+        context: CodeAgentContext | None = None,
     ) -> AgentRun:
         if not self.trusted_host:
             raise RuntimeError(
                 "Codex trusted-host full-access execution requires "
                 "FLOWTOOL_TRUSTED_HOST_EXECUTION=true"
             )
-        # resume 不接受 -s / -C：cwd 与 sandbox 从会话继承
+        if context is None or context.cwd is None:
+            raise ValueError("resume requires the current Flow repository context")
+        # CLI 0.153.4 accepts config overrides on resume, but not start's -C/-s flags.
+        # Override the saved broker/environment for every process, including recovered sessions.
         args = [
             CODEX_BIN, "exec", "resume", session_id, prompt,
             "--json", "--skip-git-repo-check",
+            "-c", f"cwd={json.dumps(str(context.cwd))}",
+            "-c", 'sandbox_mode="danger-full-access"',
+            "-c", f"mcp_servers.flow.command={json.dumps(sys.executable)}",
+            "-c", "mcp_servers.flow.enabled=false",
+            "-c", 'shell_environment_policy.inherit="all"',
         ]
-        return await self._run(args, output_schema, parse_thread=False, session_id=session_id)
+        return await self._run(args, output_schema, parse_thread=False,
+                               session_id=session_id, context=context)
 
     async def _run(
         self,
@@ -185,32 +196,52 @@ class CodexAgent:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=_codex_environment(context=context),
+            cwd=context.cwd if context is not None else None,
+            start_new_session=True,
         )
         try:
-            stdout, _stderr = await asyncio.wait_for(proc.communicate(), timeout=self.timeout)
-        except TimeoutError:
-            proc.kill()
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self.timeout)
+        except (TimeoutError, asyncio.CancelledError) as error:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
             await proc.wait()
+            last_file.unlink(missing_ok=True)
+            if isinstance(error, asyncio.CancelledError):
+                raise
             logger.error("codex run timed out after {}s", self.timeout)
             return AgentRun(session_id=session_id, last_message="", exit_code=124)
 
         jsonl = stdout.decode(errors="replace")
-        sid = _parse_thread_id(jsonl) if parse_thread else session_id
+        sid = _parse_thread_id(jsonl)
         last_message = last_file.read_text() if last_file.exists() else ""
 
-        output: CodexResult | None = None
+        output: CodexResult | InitialCodexResult | None = None
         if output_schema is not None and last_message.strip():
             # 结构化产出：codex 把最终 JSON 写进 -o 文件（符合 --output-schema）
             try:
-                output = CodexResult.model_validate_json(last_message)
-            except Exception as e:  # noqa: BLE001
-                logger.warning("failed to parse CodexResult: {}", e)  # TODO(verify) 产出落点
+                schema = json.loads(output_schema.read_text())
+                model = CodexResult if "addressed" in schema["properties"] else InitialCodexResult
+                output = model.model_validate_json(last_message)
+            except ValidationError:
+                # Validation messages include the offending input, which can contain a token.
+                logger.warning("CodeAgent output did not satisfy its required schema")
 
         if last_file.exists():
             last_file.unlink()
         if proc.returncode != 0:
             logger.error("codex exit={}", proc.returncode)
+            # Only a complete pre-execution rejection is a fallback signal. Output/events,
+            # generic errors, timeouts and malformed results may follow edits or a push.
+            error_lines = stderr.decode(errors="replace").strip().splitlines()
+            if (session_id and not jsonl.strip() and not last_message.strip() and error_lines
+                    and error_lines[-1] == "Error: thread/resume: thread/resume failed: "
+                    f"no rollout found for thread id {session_id} (code -32600)"):
+                raise SessionUnavailable("Codex rejected the saved session before execution")
 
-        return AgentRun(
-            session_id=sid, last_message=last_message, exit_code=proc.returncode or 0, output=output
-        )
+        detail = stderr.decode(errors="replace")[-4000:] if proc.returncode else None
+        if detail and context is not None and context.push_token is not None:
+            detail = detail.replace(context.push_token.get_secret_value(), "[REDACTED]")
+        return AgentRun(session_id=sid, last_message=last_message, exit_code=proc.returncode or 0,
+                        output=output, failure_detail=detail)

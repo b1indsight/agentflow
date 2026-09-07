@@ -11,6 +11,7 @@ from psycopg.types.json import Jsonb
 from app.context_models import ReviewContext
 from app.judge_models import JudgeDecision
 from app.models import TERMINAL_STATES, DeliveryState, Job, JobKind
+from app.protocol import RevisionTask
 from app.review_models import BatchState, FeedbackRef, FeedbackUpdate, ReviewBatch, ReviewFeedback
 
 if TYPE_CHECKING:
@@ -416,6 +417,17 @@ class ReviewStore:
         if any((f.item_id, f.version) not in frozen for f in self.pending(batch.flow_id)):
             self._touch(batch.flow_id, 0)
 
+    def freeze_revision(self, job: Job, task: RevisionTask) -> RevisionTask:
+        """Persist the non-secret assignment before dispatch under the workflow lock."""
+        self.for_job(job)
+        if job.payload is not None and job.payload.get("revision") is not None:
+            return RevisionTask.model_validate(job.payload["revision"])
+        payload = {**(job.payload or {}), "revision": task.model_dump(mode="json")}
+        with self.store.connection() as connection:
+            connection.execute("UPDATE jobs SET payload=%s WHERE id=%s", (Jsonb(payload), job.id))
+        job.payload = payload
+        return task
+
     def mark_context_stale(self, job: Job) -> None:
         """Retain the old evidence while recording that explicit retry needs a new batch."""
         batch = self.for_job(job)
@@ -474,7 +486,9 @@ class ReviewStore:
                 " AND EXISTS (SELECT 1 FROM flows f WHERE f.id=j.flow_id"
                 " AND f.state IN ('failed','cancelled')))) AND (payload->>'batch_id') IS NULL)"
                 " OR (result_received_at IS NOT NULL AND result_applied_at IS NULL"
-                " AND result_payload->>'protocol_version' IS DISTINCT FROM '6')"
+                " AND result_payload->>'protocol_version' IS DISTINCT FROM '7')"
+                " OR (kind='revision' AND state='running' AND started_at IS NOT NULL"
+                " AND (payload->>'revision') IS NULL)"
                 " OR (kind='answer' AND state IN ('queued','running','failed'))"
                 " OR (kind='triage' AND state='running' AND started_at IS NOT NULL AND NOT EXISTS"
                 " (SELECT 1 FROM review_batches b WHERE b.job_id=j.id AND b.context IS NOT NULL))"

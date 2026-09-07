@@ -7,6 +7,7 @@ from typing import Protocol
 from loguru import logger
 
 from app.control.results import ResultApplication
+from app.control.revisions import verify_revision_remote
 from app.control.tools import FlowToolService
 from app.github_models import GitHubAdapterError
 from app.models import (
@@ -174,19 +175,66 @@ class JobCoordinator:
             if attempt.revision_cycles + 1 > self.settings.max_revision_cycles:
                 await self.fail(job, "已达最大修订轮数，暂停。")
                 return JobState.FAILED
-            if not attempt.codex_session_id:
-                await self.fail(job, "修订任务缺少 Codex session。")
+            execution = self.store.get_flow_execution(flow.id)
+            if execution is None or execution.released_at is not None:
+                await self.fail(job, "修订任务缺少有效 worker binding。")
                 return JobState.FAILED
-            return RevisionTask(
+            try:
+                mismatch = await verify_revision_remote(
+                    self.github, flow, delivery, delivery.head_sha or "",
+                )
+                if not mismatch:
+                    assert flow.installation_id is not None
+                    issue = await self.github.get_issue(
+                        flow.installation_id, flow.repo, flow.issue_number,
+                    )
+            except GitHubAdapterError as exc:
+                # Preparation has not consumed a revision cycle. Persist the failure so
+                # transient outages can be retried explicitly without reconnect loops.
+                await self.fail(job, str(exc))
+                return JobState.FAILED
+            if mismatch:
+                await self.fail(job, mismatch)
+                return JobState.FAILED
+            assert flow.installation_id is not None
+            assert delivery.head_sha and delivery.base_branch and delivery.pr_number
+            task = RevisionTask(
                 batch_id=batch.id,
                 flow_id=flow.id,
                 attempt_id=attempt.id,
                 repo=flow.repo,
                 branch=delivery.branch,
+                repo_identity=execution.repo_identity,
+                pr_number=delivery.pr_number,
+                base_branch=delivery.base_branch,
+                expected_head_sha=delivery.head_sha,
                 session_id=attempt.codex_session_id,
+                session_generation=attempt.session_generation,
+                issue_title=issue.title,
+                issue_body=issue.body,
+                previous_summary=attempt.last_revision_summary,
+                open_points=batch.open_points,
+                context=batch.context,
                 instruction=(job.payload or {}).get("instruction", "Address the review feedback."),
                 feedback=batch.feedback,
             )
+            with self.store.transaction() as tx:
+                fresh = tx.lock_workflow(flow.id)
+                current = tx.lock_job(job.id)
+                binding = tx.get_flow_execution(flow.id)
+                latest = tx.get_delivery(flow.id)
+                if (fresh is None or current is None or fresh.state in TERMINAL_STATES
+                        or fresh.current_attempt_id != attempt.id):
+                    return JobState.DONE
+                if (binding != execution or latest != delivery
+                        or current.assignment_token != job.assignment_token
+                        or current.assigned_worker_id != job.assigned_worker_id
+                        or current.state is not JobState.RUNNING
+                        or (job.assignment_token is not None and (
+                            current.lease_expires_at is None
+                            or current.lease_expires_at <= tx.now()))):
+                    return JobState.QUEUED
+                return tx.reviews.freeze_revision(current, task)
         if job.kind is JobKind.ARCHIVE:
             return ArchiveTask(
                 flow_id=flow.id,
@@ -196,11 +244,11 @@ class JobCoordinator:
         raise ValueError(f"unsupported job kind: {job.kind}")
 
     async def assignment_secret(self, job: Job, task: ExecutionTask) -> AssignmentSecret | None:
-        if not isinstance(task, InitialTask):
+        if not isinstance(task, (InitialTask, RevisionTask)):
             return None
         flow = self.store.get_flow(job.flow_id)
         if flow is None or flow.installation_id is None:
-            raise ValueError("INITIAL assignment has no GitHub installation")
+            raise ValueError("coding assignment has no GitHub installation")
         capability = await self.github.create_push_capability(flow.installation_id, flow.repo)
         return AssignmentSecret(
             push=PushSecret(
@@ -229,10 +277,7 @@ class JobCoordinator:
                 current = tx.lock_job(job.id)
                 if fresh is None or current is None or fresh.state in TERMINAL_STATES:
                     return
-                first_start = tx.reviews.started(current)
-                if first_start and job.kind is JobKind.REVISION:
-                    attempt.revision_cycles += 1
-                    tx.update_attempt(attempt)
+                tx.reviews.started(current)
         elif job.kind is JobKind.INITIAL:
             self._fire("on_flow_start", flow=flow)
 

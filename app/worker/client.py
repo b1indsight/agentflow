@@ -310,12 +310,19 @@ class WorkerClient:
                         result=result,
                     )
                 except Exception as exc:  # noqa: BLE001
-                    logger.exception("remote job {} failed", assignment.job_id)
+                    # Exceptions can contain model output or a credential echoed by a command.
+                    logger.error("remote job {} failed ({})", assignment.job_id, type(exc).__name__)
                     terminal = Failed(
                         job_id=assignment.job_id,
                         assignment_token=assignment.assignment_token,
                         connection_epoch=assignment.connection_epoch,
                         error=str(exc),
+                    )
+                if assignment.secret is not None:
+                    terminal = type(terminal).model_validate_json(
+                        terminal.model_dump_json().replace(
+                            assignment.secret.push.token.get_secret_value(), "[REDACTED]",
+                        )
                     )
                 self._execution = None
                 if self.journal is not None:

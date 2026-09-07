@@ -1,8 +1,8 @@
 # Review 修订循环
 
 M2 Feature 1 已实现持久反馈批次与 settle，见[实施计划](../plan/m2-feedback-batches.md)。
-bub adapter 与直接答复已完成 F2 自动化验证，真实 provider 语义 smoke 待执行；修订交付核验/session
-兜底与线程 resolve 分别属于 M2 F3/F4，尚未验收。
+bub adapter、直接答复与 F3 修订交付/session 兜底已完成自动化验证；真实 provider、多轮 Codex/GitHub
+smoke 和 F4 线程 resolve 仍待验收。
 
 ## B.1 反馈入口与持久 settle
 
@@ -35,8 +35,8 @@ edited 不产生新的强信号，approve/dismissed 不触发修订。空 Reques
 
 ## B.2 冻结批次与任务协议
 
-协议 v6 的 TRIAGE task 携带 batch ID、attempt ID、精确反馈引用及有界 `ReviewContext`；REVISION
-继续携带完整反馈。result 携带同一 batch ID 与精确 item/version 清单，TRIAGE 还携带决策的模型/
+协议 v7 的 TRIAGE task 携带 batch ID、attempt ID、精确反馈引用及有界 `ReviewContext`；REVISION
+还冻结原 PR、repo identity、head/base、session generation、原始任务和前轮未决点。result 携带同一 batch ID 与精确 item/version 清单，TRIAGE 还携带决策的模型/
 adapter 版本、会话 ID、context digest 和失败分类。control 校验所有权、当前 attempt、快照及其 digest。
 prepare 与 result apply 不再重新读取“所有未 relay 评论”作为本轮输入或完成集合。
 
@@ -72,7 +72,8 @@ open_points 保留。答案和修改说明发送前重新核对批次/attempt、
 
 ## B.4 修订结果
 
-修订使用原 session 调用 CodeAgent.resume，prompt 含冻结的 instruction/feedback 和 VCS 指引。
+修订使用原 session 调用 CodeAgent.resume，每轮注入新的临时 push capability 和原 Flow cwd，
+禁用首轮 MCP broker。prompt 包含原任务、PR 快照、冻结 instruction/feedback、约定和前轮未决点。
 `CodexResult` 的 addressed/deferred 必须携带 `item_id`、`version`、GitHub `comment_id` 和
 note/reason；control 拒绝未知、重复、跨版本或互相冲突的引用。
 
@@ -80,8 +81,17 @@ note/reason；control 拒绝未知、重复、跨版本或互相冲突的引用�
 及 needs_clarification 留作未决，有未决问题时不请求 re-review。处理说明仍主要发在 PR conversation，
 空 review 正文作为元数据随成功修订消费，不计为遗漏项。真实原线程回复和 resolve 属于 F4。
 
-本轮 push capability、resume 环境、VCS/远端 SHA 校验、失效 session fallback 尚属 F3。
-当前成功 exit 不能证明真实 revision 已完成 commit/push，整个 M2 不能因此标为已验收。
+退出码之外，worker 要求完整 schema、Git/jj backend、正确 branch、干净工作区和一致的本地/远端 SHA；
+执行前基线必须等于 control 冻结的 head。control 查询原 open PR 与 ref，核验 head repository、base/branch
+和提交从基线正常前进，随后将交付事实及 addressed 声明冻结入 ResultPlan。结果重放复用已核验事实与副作用回执。
+允许 SHA 不变的明确 no-op；没有新提交或有 deferred/clarification/遗漏项时不请求 review。
+
+没有 session，或 Codex 0.153.4 明确返回执行前的 `no rollout found for thread id` 且无执行事件时，
+重新核验 repo/ref 后最多 start 一次；其他错误和不确定结果保留反馈并暂停。journal 在进程启动前记录
+resume/fallback 阶段、一次性兜底消耗和 invocation 结果。重启时没有 terminal 的 started job 不自动重跑。
+`Started` 与 revision_cycles 同事务提交，fallback/重放不增额度；新的显式 retry job 消耗新额度，保留原 worker binding。
+成功接受新 session 后才更新 generation。全过程受 CodeAgent 总时限约束，超时回收并等待 CLI/VCS 进程组退出。
+真实 GitHub/Codex 两轮 resume 和 start 兜底 smoke 尚未执行，完整 M2 仍待验收。
 
 ## B.5 取消、重试与恢复
 
@@ -94,12 +104,18 @@ note/reason；control 拒绝未知、重复、跨版本或互相冲突的引用�
 - 上下文读取和 capability 准备期间持续续租；冻结前验证任务所有权和租约，派发前再次验证 token/epoch。
   过期或已重新分配的准备结果不得冻结或派发；未开始执行的准备任务在重启后由正常恢复流程重新排队。
 - 已接收的结果依然通过原子结果应用与 GitHub effect ledger 恢复，不能因重放重复派生或消费。
+- 已核验修订遇到明确拒绝的 GitHub 通知时，保留未完成的结果计划、交付/session 事实及成功回执，
+  Flow 保持 ACTIVE；显式 retry 仅重新启用已确认未成功发送的通知，完成后统一提交结果，不创建新修订任务。
+  取消后不能补发；状态不明或仍在执行的通知不得通过显式 retry 重发。
+- 修订准备阶段的 PR/ref/Issue 读取错误持久进入失败路径，包括临时 GitHub 故障；恢复后显式 retry，
+  不因 worker 重连无限重排，也不在 Started 前消耗修订额度。
 - schema 一次性导入旧 review_threads 的最新对象，保留历史表；旧 resolved 标记不作为远端确认。
-- 协议 v6 删除 ANSWER task/result，要求 serve/worker 一起升级。先用旧版本排空 queued/running review jobs，重试并完成仍可
+- 协议 v7 要求严格修订交付证据与冻结 assignment，serve/worker 一起升级。先用旧版本排空 queued/running review jobs，重试并完成仍可
   重试的 failed review jobs，核对所有未确认旧结果，然后停止旧进程再升级；新 serve 检查这些旧待办
   并给出 job ID，禁止猜测缺失的 batch/版本。旧 ANSWER（含 failed）必须核对并处理；已被后续任务
-  替换的其他历史失败不阻止启动。旧 worker journal 的未确认任务/结果也要先处理，不能混跑 v5/v6。
+  替换的其他历史失败不阻止启动。旧 worker journal 的未确认任务/结果也要先处理，不能混跑 v6/v7。
   缺上下文的 TRIAGE 仅在已开始执行时阻止启动，尚在准备中的当前协议任务可恢复。
+  已开始执行却缺少冻结 revision assignment 的任务也会阻止启动，不能补猜预期 SHA。
 
 ## B.6 参数与验证
 

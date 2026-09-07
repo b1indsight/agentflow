@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from psycopg.rows import class_row
 from psycopg.types.json import Jsonb
 
+from app.models import Flow, JobState
 from app.result_models import EffectReceipt, EffectRecord, EffectState, ResultPlan
 
 if TYPE_CHECKING:
@@ -186,6 +187,35 @@ class ResultStore:
                 " claim_expires_at=NULL WHERE job_id=%s AND state NOT IN (%s,%s)",
                 (EffectState.SKIPPED, reason, job_id, EffectState.SUCCEEDED, EffectState.FAILED),
             )
+
+    def retry_revision_effects(self, flow: Flow) -> bool:
+        """Rearm definite rejections only; the caller holds the workflow lock."""
+        with self.store.connection() as connection:
+            jobs = connection.execute(
+                "SELECT id FROM jobs WHERE flow_id=%s AND result_received_at IS NOT NULL"
+                " AND result_applied_at IS NULL FOR UPDATE",
+                (flow.id,),
+            ).fetchall()
+            if len(jobs) != 1:
+                return False
+            job_id = jobs[0]["id"]
+            plan = self.get_plan(job_id)
+            if (plan is None or plan.revision is None or plan.state is not JobState.DONE
+                    or plan.attempt_id != flow.current_attempt_id):
+                return False
+            effects = self.list_effects(job_id)
+            failed = [effect for effect in effects if effect.state is EffectState.FAILED]
+            if (not failed or any(effect.dispatched_at is not None for effect in failed)
+                    or any(effect.state in {EffectState.RUNNING, EffectState.UNCERTAIN}
+                           for effect in effects)):
+                return False
+            connection.execute(
+                "UPDATE result_effects SET state=%s,next_attempt_at=%s,last_error=NULL"
+                " WHERE job_id=%s AND state=%s",
+                (EffectState.RETRY, self.store.now(), job_id, EffectState.FAILED),
+            )
+            connection.execute("UPDATE jobs SET last_error=NULL WHERE id=%s", (job_id,))
+            return True
 
     def recover_claims(self) -> None:
         """Called once after the old single-serve process has stopped, before accepting work."""

@@ -28,6 +28,24 @@ class AsyncEndpoint:
         return self.result
 
 
+@pytest.mark.parametrize("status,ancestor,behind,expected", [
+    ("ahead", "base", 0, True), ("ahead", "other", 0, False),
+    ("diverged", "base", 1, False), ("behind", "head", 2, False),
+])
+async def test_revision_lineage_requires_github_fast_forward(
+    tmp_path, monkeypatch, status, ancestor, behind, expected,
+):
+    endpoint = AsyncEndpoint(SimpleNamespace(parsed_data=SimpleNamespace(
+        status=status, merge_base_commit=SimpleNamespace(sha=ancestor),
+        base_commit=SimpleNamespace(sha="base"), behind_by=behind,
+    )))
+    client = SimpleNamespace(rest=SimpleNamespace(repos=SimpleNamespace(async_compare_commits=endpoint)))
+    app = GitHubApp(settings(tmp_path))
+    monkeypatch.setattr(app, "_installation_client", lambda _: client)
+    assert await app.compare_commits(1, "owner/repo", "base", "head") is expected
+    assert endpoint.calls == [(("owner", "repo", "base...head"), {"per_page": 1})]
+
+
 async def test_review_files_paginate_and_mark_missing_patch(tmp_path, monkeypatch):
     pages = []
 

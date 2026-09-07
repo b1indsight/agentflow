@@ -151,13 +151,13 @@ def flow_cancel(flow_id: int) -> None:
 
 @flow_app.command("retry")
 def flow_retry(flow_id: int) -> None:
-    """重新排入最近失败的 job（没有失败记录时使用 initial）。"""
+    """重试失败任务，或补发已核验修订中被明确拒绝的 GitHub 通知。"""
     with _store() as store:
         f = store.get_flow(flow_id)
         if not f:
             raise typer.Exit(1)
         ControlService(store).retry(f)
-    typer.echo(f"re-enqueued initial job for flow {flow_id}")
+    typer.echo(f"retry requested for flow {flow_id}")
 
 
 if __name__ == "__main__":

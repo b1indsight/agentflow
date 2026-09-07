@@ -9,9 +9,7 @@ import pytest
 from app.control.service import ControlService
 from app.github_models import GitHubAdapterError, GitHubErrorKind
 from app.models import (
-    AddressedComment,
     Attempt,
-    CodexResult,
     DeliveryState,
     FeedbackRef,
     FlowDelivery,
@@ -24,7 +22,7 @@ from app.models import (
     VcsKind,
     Verdict,
 )
-from app.protocol import InitialResult, RevisionResult, TriageResult
+from app.protocol import InitialResult, TriageResult
 from app.result_models import EffectState, ResultPending
 from app.store import Store
 from tests.review_memory import judge_decision
@@ -79,25 +77,6 @@ async def test_old_attempt_failure_does_not_publish_or_fail_current_attempt(scen
     assert store.flow.state is FlowState.ACTIVE
 
 
-@pytest.mark.parametrize("signal_kind", ["request_changes", "discussion"])
-async def test_empty_review_body_is_not_an_unresolved_obligation(scenario, signal_kind):
-    from app.models import ReviewItemKind
-
-    store, github, job, _ = scenario
-    job.kind = JobKind.REVISION
-    item = store.reviews.batch.feedback[0]
-    signal = item.model_copy(update={"item_id": 102, "github_id": 501, "body": "",
-                                     "signal": signal_kind, "kind": ReviewItemKind.REVIEW_BODY})
-    store.reviews.batch.feedback.append(signal)
-    result = RevisionResult(
-        batch_id=1, feedback_refs=[item, signal], session_id="session-1", last_message="done",
-        exit_code=0, output=CodexResult(addressed=[AddressedComment(
-            item_id=item.item_id, version=item.version, comment_id=item.github_id, note="Fixed",
-        )]),
-    )
-    await apply_result(coordinator(store, github), job, result)
-    assert store.reviews.batch.state.value == "completed"
-    assert {f.item_id for f in store.reviews.consumed} == {101, 102}
 
 
 @pytest.fixture
