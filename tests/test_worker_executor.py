@@ -178,10 +178,11 @@ async def test_executor_runs_agent_and_judge_tasks_without_store(
         assignment_secret(),
     )
     triage = await executor.execute(
-        TriageTask(attempt_id=1, discussion="please revise", pr_context="PR #1")
+        TriageTask(batch_id=1, feedback=[], attempt_id=1, discussion="please revise", pr_context="PR #1")
     )
     revision = await executor.execute(
         RevisionTask(
+            batch_id=1,
             flow_id=3,
             attempt_id=1,
             repo="owner/repo",
@@ -192,7 +193,7 @@ async def test_executor_runs_agent_and_judge_tasks_without_store(
         )
     )
     answer = await executor.execute(
-        AnswerTask(attempt_id=1, question="Why?", pr_context="PR #1")
+        AnswerTask(batch_id=1, feedback=[], attempt_id=1, question="Why?", pr_context="PR #1")
     )
     archived = await executor.execute(
         ArchiveTask(flow_id=3, attempt_id=1, repo="owner/repo")

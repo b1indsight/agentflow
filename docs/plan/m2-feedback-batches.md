@@ -1,6 +1,6 @@
 # M2 Feature 1/4：持久反馈批次与 settle
 
-> 状态：待审批，plan only · 日期：2026-09-07 · 基线：`main` / `9fd98266`（PR #18）
+> 状态：已批准并实施 · 计划/批准/实施日期：2026-09-07 · 基线：`main` / `9fd98266`（PR #18）
 > Bookmark：`feat/m2-feedback-batches`；本 PR 获批后继续承载实现，不另开实现 PR。
 
 ## 1. M2 需求分析与 feature 拆分
@@ -137,4 +137,25 @@ bot 判断覆盖 payload 的 actor 类型与配置的 bot login；edited/deleted
   `uv build --no-sources`；PostgreSQL 用例需设置 `FLOWTOOL_TEST_DATABASE_URL`，不能以 skipped 验收。
 
 完成标准是确定性自动化证明上述事务与批次行为。真实 bub、Codex 和 GitHub 线程验收分别属于后续 feature。
-本 PR 当前只含计划，没有执行产品测试或声明上述功能已经实现。
+计划阶段记录结束；实际交付范围与验证见下。
+
+## 7. 实施记录
+
+用户以“先做 #19”批准本计划；继续使用原 bookmark 和 PR #19。新增 `review_models.py` / `review_store.py`，
+分别承载不可变内容/版本契约与 PostgreSQL schema/事务。批次直接保存类型化 JSON 快照，取代额外的
+batch-members 连接表；同 Flow 的活动批次与 generation 由唯一约束保证。
+
+入口 delivery、版本、deadline 共享事务；启动/周期 sweep 持久领取。任务及结果协议升至 v5，
+TRIAGE→REVISION/ANSWER 转移同一批次所有权，结果确认精确 item/version。wait 保存问题并等待
+新 generation；answer/ignore/明确 addressed 消费对应版本，deferred/遗漏/clarification 保留。
+修订输出提前加入 item/version，是避免 GitHub 数字 ID 跨命名空间误消费所必需的契约。
+新 reply/resolve、副作用式 bub adapter 和真实修订交付仍属于 F2–F4。
+
+取消/失败退休活动批次，显式 retry 复用原快照并保留后到版本。旧 review_threads 只作为历史来源
+一次性导入；缺少 batch 的在途旧任务及非 v5 未确认结果会阻止启动并列出 job ID。
+源时间可用时拒绝旧版本；同秒编辑使用 `changes.body.from`，没有更新时间的编辑按接收时间排序。
+
+验证：本机临时 PostgreSQL 上完整测试 180 passed、0 skipped；覆盖批次入口/领取故障回滚、并发与重启、
+版本隔离、删除、授权/action 分流、waiting、重放、取消和 retry。原有 WebSocket 测试的关闭竞态已在
+独立 main 工作区复现，测试改为等待服务端完成断连再退出 TestClient；不改产品连接行为。
+Ruff、Mypy 和构建通过；CI 结果见本 PR 的检查记录。真实 GitHub/Codex/bub 验收未运行。

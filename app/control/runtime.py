@@ -53,6 +53,7 @@ class ControlRuntime:
 
     def startup(self) -> None:
         self.store.init_db()
+        self.store.reviews.check_upgrade()
         self.store.results.recover_claims()
         requeued, failed = self.store.recover_abandoned_assignments()
         if requeued or failed:
@@ -66,6 +67,7 @@ class ControlRuntime:
             asyncio.create_task(self._sweep_assignments()),
             asyncio.create_task(self.gateway.recover_pending_results()),
         ]
+        self.router.settle.sweep()
 
     async def _sweep_assignments(self) -> None:
         while True:
@@ -80,6 +82,7 @@ class ControlRuntime:
                     )
                     self.gateway.notify_jobs()
                 await self.gateway.recover_pending_results()
+                self.router.settle.sweep()
             except Exception:  # noqa: BLE001 -- keep periodic recovery alive after operational errors
                 logger.exception("assignment/result recovery sweep failed; retrying next sweep")
 

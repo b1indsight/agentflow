@@ -34,13 +34,13 @@ from app.protocol import (
     InitialResult,
     InitialTask,
     PushSecret,
-    ReviewFeedback,
     RevisionResult,
     RevisionTask,
     TriageResult,
     TriageTask,
     terminal_digest,
 )
+from app.review_models import BatchState
 from app.store import Store
 
 
@@ -136,12 +136,20 @@ class JobCoordinator:
             await self.fail(job, f"{job.kind} job has no current attempt")
             return JobState.FAILED
 
+        if job.kind in {JobKind.TRIAGE, JobKind.REVISION, JobKind.ANSWER}:
+            batch = self.store.reviews.for_job(job)
+            if batch.attempt_id != attempt.id or batch.state not in {
+                BatchState.READY, BatchState.PROCESSING,
+            }:
+                raise ValueError("review batch is no longer current")
+            discussion = "\n".join(f"{item.author}: {item.body}" for item in batch.feedback)
+            if batch.open_points:
+                discussion += "\nUnresolved questions:\n" + "\n".join(batch.open_points)
+
         if job.kind is JobKind.TRIAGE:
-            items = self.store.unrelayed_items(attempt.id)
-            if not items:
-                return JobState.DONE
-            discussion = "\n".join(f"{item.author}: {item.body}" for item in items)
             return TriageTask(
+                batch_id=batch.id,
+                feedback=batch.feedback,
                 attempt_id=attempt.id,
                 discussion=discussion,
                 pr_context=self._pr_context(flow, attempt),
@@ -155,27 +163,19 @@ class JobCoordinator:
                 await self.fail(job, "修订任务缺少 Codex session。")
                 return JobState.FAILED
             return RevisionTask(
+                batch_id=batch.id,
                 flow_id=flow.id,
                 attempt_id=attempt.id,
                 repo=flow.repo,
                 branch=delivery.branch,
                 session_id=attempt.codex_session_id,
                 instruction=(job.payload or {}).get("instruction", "Address the review feedback."),
-                feedback=[
-                    ReviewFeedback(
-                        kind=item.kind,
-                        github_id=item.github_id,
-                        author=item.author,
-                        body=item.body,
-                        path=item.path,
-                        original_commit_id=item.original_commit_id,
-                        diff_hunk=item.diff_hunk,
-                    )
-                    for item in self.store.unrelayed_items(attempt.id)
-                ],
+                feedback=batch.feedback,
             )
         if job.kind is JobKind.ANSWER:
             return AnswerTask(
+                batch_id=batch.id,
+                feedback=batch.feedback,
                 attempt_id=attempt.id,
                 question=(job.payload or {}).get("question", ""),
                 pr_context=self._pr_context(flow, attempt),
@@ -216,11 +216,18 @@ class JobCoordinator:
         execution = self.store.get_flow_execution(flow.id)
         if execution is None or execution.worker_id != worker_id:
             raise ValueError(f"flow {flow.id} is not bound to worker {worker_id}")
-        if job.kind is JobKind.REVISION:
-            attempt.revision_cycles += 1
+        if job.kind in {JobKind.TRIAGE, JobKind.REVISION, JobKind.ANSWER}:
+            with self.store.transaction() as tx:
+                fresh = tx.lock_workflow(flow.id)
+                current = tx.lock_job(job.id)
+                if fresh is None or current is None or fresh.state in TERMINAL_STATES:
+                    return
+                first_start = tx.reviews.started(current)
+                if first_start and job.kind is JobKind.REVISION:
+                    attempt.revision_cycles += 1
+                    tx.update_attempt(attempt)
         elif job.kind is JobKind.INITIAL:
             self._fire("on_flow_start", flow=flow)
-        self.store.update_attempt(attempt)
 
     async def apply_result(self, job: Job, result: ExecutionResult) -> JobState:
         _validate_result_kind(job.kind, result)

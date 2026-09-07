@@ -84,7 +84,17 @@ class AsgiContext:
         pass
 
 
-def test_real_asgi_websocket_completes_a_postgresql_job(store: Store) -> None:
+def test_real_asgi_websocket_completes_a_postgresql_job(store: Store, monkeypatch) -> None:
+    from threading import Event
+
+    disconnected = Event()
+    handle = WorkerGateway.handle
+
+    async def handle_until_disconnected(self, socket):
+        await handle(self, socket)
+        disconnected.set()
+
+    monkeypatch.setattr(WorkerGateway, "handle", handle_until_disconnected)
     flow = store.create_flow("owner/repo", 8, installation_id=42)
     attempt = store.create_attempt(flow.id)
     flow.current_attempt_id = attempt.id
@@ -125,6 +135,10 @@ def test_real_asgi_websocket_completes_a_postgresql_job(store: Store) -> None:
         accepted = parse_server_message(socket.receive_text())
         assert isinstance(accepted, ResultAccepted)
         assert accepted.state is JobState.DONE
+
+        # Wait for the peer to finish disconnecting before TestClient cancels its ASGI task.
+        socket.close()
+        assert disconnected.wait(timeout=2)
 
     completed = store.get_job(job.id)
     assert completed is not None

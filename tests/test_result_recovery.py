@@ -9,8 +9,11 @@ import pytest
 from app.control.service import ControlService
 from app.github_models import GitHubAdapterError, GitHubErrorKind
 from app.models import (
+    AddressedComment,
     Attempt,
+    CodexResult,
     DeliveryState,
+    FeedbackRef,
     FlowDelivery,
     FlowState,
     FlowToolCall,
@@ -21,7 +24,7 @@ from app.models import (
     VcsKind,
     Verdict,
 )
-from app.protocol import InitialResult, TriageResult
+from app.protocol import InitialResult, RevisionResult, TriageResult
 from app.result_models import EffectState, ResultPending
 from app.store import Store
 from tests.test_coordinator import MemoryStore, RecordingGitHub, apply_result, coordinator
@@ -41,7 +44,7 @@ def scenario():
     )
     github = RecordingGitHub()
     job = Job(id=6, flow_id=1, kind=JobKind.TRIAGE, state=JobState.RUNNING)
-    result = TriageResult(
+    result = TriageResult(batch_id=1, feedback_refs=[FeedbackRef(item_id=101, version=1)],
         verdict=TriageVerdict(
             verdict=Verdict.REVISE,
             confidence=0.9,
@@ -49,6 +52,24 @@ def scenario():
         )
     )
     return store, github, job, result
+
+
+async def test_empty_request_changes_is_consumed_as_a_signal_after_revision(scenario):
+    store, github, job, _ = scenario
+    job.kind = JobKind.REVISION
+    item = store.reviews.batch.feedback[0]
+    signal = item.model_copy(update={"item_id": 102, "github_id": 501, "body": "",
+                                     "signal": "request_changes"})
+    store.reviews.batch.feedback.append(signal)
+    result = RevisionResult(
+        batch_id=1, feedback_refs=[item, signal], session_id="session-1", last_message="done",
+        exit_code=0, output=CodexResult(addressed=[AddressedComment(
+            item_id=item.item_id, version=item.version, comment_id=item.github_id, note="Fixed",
+        )]),
+    )
+    await apply_result(coordinator(store, github), job, result)
+    assert store.reviews.batch.state.value == "completed"
+    assert {f.item_id for f in store.reviews.consumed} == {101, 102}
 
 
 @pytest.fixture

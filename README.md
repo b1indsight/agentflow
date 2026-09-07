@@ -5,8 +5,8 @@ FlowTool 的目标是把带 `flow` 标签的 GitHub issue 编排成
 项目自身不提供业务 UI，交互面是 GitHub issue 和 PR。
 
 > 当前状态（2026-09-07）：**M0 已验收；M1 Issue→PR 已实现并有自动化覆盖，真实 GitHub E2E 待验收**。
-> 当前实现还包含 M1 交付修复、原子结果提交与恢复，以及 GitHub 请求超时配置。
-> 本机最新测试为 **124 passed / 30 skipped**；跳过项为 PostgreSQL 集成测试，完整产品闭环尚未验收。
+> 当前实现还包含 M1 交付修复、原子结果提交与恢复，以及 M2 F1 持久反馈批次与 settle。
+> 本机最新测试为 **180 passed / 0 skipped**（实际 PostgreSQL）；完整产品闭环尚未验收。
 
 ## 当前能力
 
@@ -26,6 +26,9 @@ FlowTool 的目标是把带 `flow` 标签的 GitHub issue 编排成
   恢复时核对远端状态，避免重复派生 job 或重复发送评论；无法确认的远端结果保留待核对状态。
 - **GitHub 请求超时**：App 和 installation 客户端的连接、读写及连接池等待默认各为 30 秒，
   可通过 `FLOWTOOL_GITHUB_REQUEST_TIMEOUT_SECONDS` 调整；这不是整批结果恢复的总时限。
+- **持久反馈批次**：反馈版本与 settle deadline 入库，重启后恢复；同 Flow 串行处理冻结批次，
+  运行中新评论/编辑进入下一批。allowlist 强信号经 grace 合批直达修订；wait 等待新信息，
+  answer/ignore/明确 addressed 只消费本批次精确版本，未决问题保留。
 - **运维入口**：CLI 可查看 Flow、交付分支/PR、worker、任务恢复状态和未完成的 GitHub 操作，
   并提供 cancel/retry 命令。存在待核对结果时会拒绝直接 retry。
 
@@ -141,13 +144,18 @@ Python 3.12 分别运行 Ruff、Mypy、pytest 与 sdist/wheel 构建。pytest jo
 结果重放与远端操作核对。数据库用例还覆盖事务回滚、跨连接并发、任务去重、取消交错和恢复期限；
 GitHub、Codex、bub 使用替身，不访问真实外部服务。
 
-2026-09-07 本机复核：`uv run pytest -q -p no:cacheprovider` 为 **124 passed / 30 skipped**，
-`uv run flowtool --help` 通过。30 个 PostgreSQL 用例因未设置测试数据库连接而跳过；保留一个
+2026-09-07 M2 F1 本机复核：设置临时 PostgreSQL 数据库后 `uv run pytest -q` 为 **180 passed / 0 skipped**；
+覆盖反馈交接/领取回滚、重启、并发、版本隔离、等待接续与结果恢复。保留一个
 Starlette TestClient/httpx 弃用告警。数据库 CI 的历史验证见
 [M1 交付修复记录](docs/plan/m1-delivery-review-fixes.md#实施结果)，原子结果改动的验证边界见
 [实施记录](docs/plan/atomic-workflow-results.md#实施记录2026-09-06)。
 
 ## 升级注意
+
+M2 F1 将任务协议升级到 v5，serve 和 worker 必须一起升级。先用旧版本排空 queued/running review
+job 与所有未确认旧结果，再停止旧进程；新 serve 遇到缺 batch 的旧 review job 或旧协议未确认结果
+会拒绝启动并列出 job ID。不要手工清除结果标记来绕过检查。schema 会一次性导入旧反馈，保留历史表；
+旧 resolved 标记不代表 GitHub 已确认。详见[Review 循环](docs/architecture/review-loop.md#b5-取消重试与恢复)。
 
 从原子结果恢复改动之前的版本升级时，先停止旧 serve，再启动新版本；不支持新旧 serve 混跑。
 旧版本留下的未知结果可能无法自动核实，需要人工处理；回退前也要处理完或隔离新增待办，避免旧版本

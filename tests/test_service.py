@@ -15,10 +15,12 @@ from app.models import (
     utcnow,
 )
 from app.store import Store
+from tests.review_memory import MemoryReviews
 
 
 class RetryStore:
     def __init__(self, failed_job: Job | None = None) -> None:
+        self.reviews = MemoryReviews()
         self.flow = Flow(
             id=1,
             repo="owner/repo",

@@ -18,9 +18,10 @@ from pydantic import (
     model_validator,
 )
 
-from app.models import CodexResult, JobState, ReviewItemKind, TriageVerdict, VcsKind
+from app.models import CodexResult, FeedbackRef, JobState, TriageVerdict, VcsKind
+from app.review_models import ReviewFeedback
 
-PROTOCOL_VERSION: Literal[4] = 4
+PROTOCOL_VERSION: Literal[5] = 5
 
 
 class ProtocolModel(BaseModel):
@@ -30,17 +31,13 @@ class ProtocolModel(BaseModel):
 
 
 class Message(ProtocolModel):
-    protocol_version: Literal[4] = PROTOCOL_VERSION
+    protocol_version: Literal[5] = PROTOCOL_VERSION
 
 
-class ReviewFeedback(ProtocolModel):
-    kind: ReviewItemKind
-    github_id: int
-    author: str
-    body: str
-    path: str | None = None
-    original_commit_id: str | None = None
-    diff_hunk: str | None = None
+class ReviewTask(ProtocolModel):
+    batch_id: int = Field(gt=0)
+    attempt_id: int
+    feedback: list[ReviewFeedback]
 
 
 class InitialTask(ProtocolModel):
@@ -73,27 +70,23 @@ class AssignmentSecret(ProtocolModel):
     push: PushSecret
 
 
-class TriageTask(ProtocolModel):
+class TriageTask(ReviewTask):
     kind: Literal["triage"] = "triage"
-    attempt_id: int
     discussion: str
     pr_context: str
 
 
-class RevisionTask(ProtocolModel):
+class RevisionTask(ReviewTask):
     kind: Literal["revision"] = "revision"
     flow_id: int = Field(gt=0)
-    attempt_id: int
     repo: str
     branch: str
     session_id: str
     instruction: str
-    feedback: list[ReviewFeedback]
 
 
-class AnswerTask(ProtocolModel):
+class AnswerTask(ReviewTask):
     kind: Literal["answer"] = "answer"
-    attempt_id: int
     question: str
     pr_context: str
 
@@ -127,12 +120,17 @@ class InitialResult(ProtocolModel):
     pull_request: dict[str, object] | None = None
 
 
-class TriageResult(ProtocolModel):
+class ReviewResult(ProtocolModel):
+    batch_id: int = Field(gt=0)
+    feedback_refs: list[FeedbackRef]
+
+
+class TriageResult(ReviewResult):
     kind: Literal["triage"] = "triage"
     verdict: TriageVerdict
 
 
-class RevisionResult(ProtocolModel):
+class RevisionResult(ReviewResult):
     kind: Literal["revision"] = "revision"
     session_id: str | None
     last_message: str
@@ -140,7 +138,7 @@ class RevisionResult(ProtocolModel):
     output: CodexResult = Field(default_factory=CodexResult)
 
 
-class AnswerResult(ProtocolModel):
+class AnswerResult(ReviewResult):
     kind: Literal["answer"] = "answer"
     answer: str
 

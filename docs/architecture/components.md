@@ -22,15 +22,16 @@ Codex 等长任务占用 GitHub 的 Webhook 请求。
 
 当前实现：
 
-- 忽略 `sender.login == BOT_LOGIN` 的事件；
+- 忽略配置 bot login 及 GitHub `type=Bot` 的事件；
 - 以 `X-GitHub-Delivery` 原子占有并持久化去重，只有成功插入的 handler 才继续处理，同时记录原始 payload；
 - 仅允许 allowlist 用户通过 `issues.labeled(flow)` 创建 active flow 与 initial job；
 - `issues.unlabeled(flow)` 或严格等于 `/flow stop` 的评论取消 active flow；
-- review body、inline comment 和 PR conversation 归属到当前 attempt，settle 去抖后创建 TRIAGE job；
+- review body、inline comment 和 conversation 按 Flow/kind/GitHub ID 保存不可变版本，保留来源 attempt；
+- 反馈 delivery、版本和 deadline 共用事务，持久 settle 后冻结批次；allowlist 强信号经 grace 直达 REVISION；
 - `pull_request.closed (merged=true)` 驱动 MERGED；approve 本身不触发修订。
 
-M0 自动化覆盖 delivery 去重、bot/allowlist、触发、取消和 inline review 入库。尚未实现：同一 flow
-事件串行锁、未合并 PR close 的取消语义、后台 handler 失败后的 delivery 重试，以及真实 GitHub payload
+M2 F1 自动化覆盖反馈工作流锁、同 Flow 批次串行、重启恢复和精确版本消费。尚未实现：
+未合并 PR close 的取消语义、后台 handler 失败后的自动 delivery 重试，以及真实 GitHub payload
 的完整兼容性。Reconciler 仍是桩，不能作为当前补偿路径。
 
 ## 4.3 Control Service / Job Coordinator（状态机核心）
@@ -52,7 +53,8 @@ PENDING → CODING → PR_OPEN ⇄ REVISING
 并把已接收的结构化 result 交给 `ResultApplication`。后者冻结一次结果的领域变更和 GitHub 操作，
 由 `ResultEffects` 查询/执行远端操作并保存回执，最后一起提交本地状态、派生任务、运行记录和结果确认。
 网络请求不占用数据库事务；plugin hook 在提交后调用，不具备持久化投递保证。worker 不能直接更新这些状态。
-非零 Codex exit 会转 FAILED，revision 成功后会标记 addressed/deferred/clarification。
+非零 Codex exit 会转 FAILED。revision 成功后仅消费明确 addressed 的 item/version，deferred/遗漏项/
+clarification 保持 waiting；不把 addressed 当作远端 resolved。有未决问题时不重新请求审核。
 
 当前 coordinator 仍有以下缺口：
 
@@ -150,7 +152,9 @@ ORM。
 - `workers`：identity、协议版本、epoch、online/busy/recovering/offline/failed、当前 job、连接/心跳与断线原因；
 - `events`：delivery 去重和 payload 审计；
 - `codex_runs`：按 attempt 记录 prompt、kind、exit 与时间；
-- `review_threads`：按 attempt 记录正文/inline/conversation 反馈及 relayed/resolved 状态。
+- `review_threads`：旧反馈历史，升级时一次性导入最新对象；旧 resolved 标记不作为 GitHub 确认；
+- `review_items` / `review_versions`：Flow 内稳定反馈身份、不可变版本及独立 relay/consume 时间；
+- `review_buffers` / `review_batches`：持久 deadline/generation、冻结快照、批次所有者 job 和未决问题。
 
 自动化覆盖 active 唯一约束、flow/attempt/job 往返、review upsert、assignment start/heartbeat/fencing、
 lease 到期 requeue、started grace/deadline、epoch fencing、result inbox 去重、跨 Store 可见性、delivery 去重和并发 assign。
@@ -183,7 +187,7 @@ head PR 查询和 capability 已接入 INITIAL；thread resolve 与 Project 状�
 当前 `ContextBuilder` 是纯字符串组件：
 
 - initial prompt 包含 issue 标题/正文、首个 `AGENTS.md` 或 `CLAUDE.md`、VCS 指引和硬约束；
-- revision prompt 包含 Judge instruction、未 relay 的反馈、inline path/diff hunk/original commit id、
+- revision prompt 包含 Judge instruction、冻结批次的 item/version、inline path/diff hunk/original commit id、
   VCS 指引和 `CodexResult` 输出约定。
 
 INITIAL 已使用 GitHub Issue 的真实标题与正文；revision prompt 没有当前 diff、CI 状态或完整未解决线程清单。

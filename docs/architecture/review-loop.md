@@ -1,110 +1,92 @@
 # Review 修订循环
 
-本页定义 M1+ 的目标语义，并单独列出 M0 当前实现；除“当前实现”明确说明的部分外，不代表已经完成
-真实 GitHub/Codex/bub 验证。
+M2 Feature 1 已实现持久反馈批次与 settle，见[实施计划](../plan/m2-feedback-batches.md)。
+真实 bub 语义接口、修订交付核验/session 兜底与线程 resolve 分别属于 M2 Features 2–4，尚未验收。
 
-## B.1 反馈入口
+## B.1 反馈入口与持久 settle
 
-目标上，普通非 bot 反馈先进入持久化缓冲，再由 Judge 决定是否改码：
-
-```text
-非 bot 反馈 → settle 静默窗口 → Judge
-        ├ revise → Codex 修订
-        ├ answer → Judge 作答，不改码
-        ├ wait   → 保留反馈，等待更多上下文
-        └ ignore → 略过
-```
-
-目标架构保留两类强信号直达修订：显式 `@flowtool` 指令，以及 GitHub Request Changes review。
-它们跳过 Judge，但仍应先持久化反馈、遵守同 flow 串行约束并由 revision job 执行，避免在 Webhook
-请求内启动长任务。
-
-当前 router 已实现：忽略 bot、忽略 approve、记录 review body / inline / PR conversation、按 flow
-重置内存 settle timer，并在 timer 到点后创建持久化 TRIAGE job。Request-changes 只把等待缩短为
-`submit_grace_seconds`，不会绕过 Judge；`@flowtool` 也没有专用路由。因此上述强信号例外仍是 M1+
-目标，而不是 M0 当前能力。
-
-当前 timer 本身不持久化，进程重启会丢失尚未到点的 settle；同 flow 串行锁和 `/flow restart` 也尚未实现。
-
-## B.2 Judge 结构化产出
-
-```json
-{
-  "verdict": "revise | wait | answer | ignore",
-  "confidence": 0.0,
-  "reason": "判断依据",
-  "instruction": "revise 时的具体改动",
-  "answer": "answer 时的回复",
-  "open_points": ["wait 时仍未决定的问题"]
-}
-```
-
-JobCoordinator 仅在 `verdict=revise` 且 `confidence >= FLOWTOOL_CONFIDENCE_THRESHOLD` 时创建 revision job；
-answer 创建 answer job；wait/ignore 不执行外部动作。Bub 调用仍未校准，解析失败保守返回 wait。
-
-## B.3 安全兜底
-
-已实现的兜底：bot 忽略、allowlist 触发、置信度阈值、Judge 解析失败→wait、最大修订轮数和单次
-Codex timeout。
-
-目标但未实现：revision 前可中止窗口、`/flow restart`、运行中 kill、预算限制、同 flow 串行化、
-外部 push 检测和更强的 prompt-injection 隔离。人工合并仍是最后安全门。
-
-## B.4 Revision job
-
-当前顺序：
-
-1. 读取当前 attempt 的全部 `relayed=false` 反馈；
-2. 用 Judge instruction、反馈正文、inline path/diff hunk/original commit id 和 VCS 指引构造 prompt；
-3. `codex exec resume <session_id> ... --output-schema`；
-4. 非零 exit 将 flow 标为 FAILED，不标记反馈 relayed；
-5. 成功时解析 `CodexResult`，处理 addressed/deferred/clarification/summary，再标记反馈 relayed；
-6. flow 回到 PR_OPEN，设置 `flow:in-review` 并重新请求 allowlist 用户审核。
-
-`CodexResult`：
-
-```json
-{
-  "summary": "...",
-  "addressed": [{"comment_id": 123, "note": "..."}],
-  "deferred": [{"comment_id": 456, "reason": "..."}],
-  "needs_clarification": ["..."]
-}
-```
-
-重要边界：当前 `_thread_id_for()` 是桩，所以 addressed 只能更新本地 resolved 标记，不能真实调用
-GitHub resolve；当前代码也不会把 addressed note 发回线程。clarification 不会暂停 re-review；Codex 是否
-完成 commit/push 仅由 exit code 间接假定，没有远端校验、rebase 或冲突检测。
-
-## B.5 并发目标
-
-目标是每 flow 至多一个 Codex run，运行期间的新反馈留给下一批，不打断当前 run；不同 flow 可并行。
-当前 serve 允许多个单槽 worker 并行消费不同 flow，并以 attempt affinity 防止同一会话跨 worker；尚未实现
-显式 per-flow 锁或 `/flow restart`。现有 job/attempt 状态约束会阻止一个 attempt 被两个 worker 同时领取。
-
-## B.6 目标内部状态
+普通非 bot 反馈经过如下路径：
 
 ```text
-        非 bot 反馈        settle + Judge=revise
-IDLE ───────────► SETTLING ─────────────────► RUNNING
- ▲                    │                         │
- └──── 完成/等待 ─────┴──── 新反馈留到下一批 ──┘
+反馈 delivery + 不可变版本 + buffer deadline（同一事务）
+  → 持久 settle 到期
+  → 冻结 batch + 创建 TRIAGE job（同一事务）
+  → Judge → revise / answer / wait / ignore
 ```
 
-这些 IDLE/SETTLING/RUNNING 是设计层的子状态，当前数据库没有对应枚举；当前持久化状态仍是
-`PR_OPEN ⇄ REVISING`，settle timer 在内存中。
+review body、inline 和 conversation 使用 `(flow_id, kind, github_id)` 区分身份，保留来源 attempt。
+重复 delivery/内容和较旧源时间不重置窗口；同秒编辑可使用 GitHub `changes.body.from` 校验前序正文。
+没有更新时间的编辑以接收时间排序。删除保存 tombstone，后到的旧事件不能复活正文。
 
-## B.7 当前参数
+allowlist 作者本人提交的 Request Changes，或正文非引用/代码块中的行首 `@<bot_login> 指令`，
+使用较短 submit grace 合批后直达 REVISION。非 allowlist 用户的同类文本只作为普通讨论；
+edited 不产生新的强信号，approve/dismissed 不触发修订。空 Request Changes 保存信号但不创建空修改，
+之后收到可操作正文/inline 再处理。配置 bot 和 GitHub `type=Bot` 的事件均不进入反馈循环。
 
-| 环境变量 | 默认 | 当前用途 |
-|---|---:|---|
-| `FLOWTOOL_SETTLE_SECONDS` | 75 | 普通反馈后的静默窗口 |
-| `FLOWTOOL_SUBMIT_GRACE_SECONDS` | 15 | review submitted 后的缩短窗口 |
-| `FLOWTOOL_CONFIDENCE_THRESHOLD` | 0.6 | revise 的最低 Judge 置信度 |
+到期时间在 PostgreSQL；启动时以及 worker sweep 周期扫描，不依赖进程内 timer。
+到期后最多增加一次 sweep 周期的调度延迟。一个 Flow 最多一个 ready/processing 批次，
+批次从 TRIAGE 到派生 REVISION/ANSWER 一直保有这一约束，直到结果与必要副作用完成。
+
+## B.2 冻结批次与任务协议
+
+协议 v5 的 TRIAGE/REVISION/ANSWER task 携带 batch ID、attempt ID、完整反馈快照，result
+携带同一 batch ID 与精确 item/version 清单。control 校验所有权、当前 attempt 和快照成员。
+prepare 与 result apply 不再重新读取“所有未 relay 评论”作为本轮输入或完成集合。
+
+例如：A/B 已进入批次，执行期间到达 C 或 A 的新版本；旧结果只确认 A/B 的旧版本，
+C 和新版 A 留到后续批次。模型已看到（relayed）、当前版本已消费（consumed）、远端 thread
+resolved 是不同事实；M2 F1 不把 addressed 写为 GitHub resolved。
+
+Flow 生命周期保持 `ACTIVE/SUCCEEDED/CANCELLED/FAILED`；PR delivery 独立保存
+`NONE/OPENING/OPEN/CLOSED/MERGED`。settling/waiting/running 从 buffer、batch 和 job 推导，
+不恢复旧的 `PR_OPEN/REVISING` Flow 枚举。
+
+## B.3 判定与反馈消费
+
+| 结果 | 当前行为 |
+|---|---|
+| revise 且达到置信度阈值 | 通过持久效果账本发送修改说明，原子派生一个携带同批次的 REVISION |
+| answer | 派生携带同快照的 ANSWER，沿用 Judge.answer；答案发布成功后精确消费本批次 |
+| 空答案 | 保留为 waiting，不发空评论或消费反馈 |
+| wait / 低置信度 revise | 保存 open_points/reason，保持 waiting，无新 generation 不自动重跑 |
+| ignore | 消费本批次精确版本，不发外部消息 |
+
+新反馈到来后接续 waiting 批次的未消费版本和 open_points。旧批次结束后由新 generation
+建立下一批；没有新信息时不重复调用模型。bub 解析失败仍保守 wait；其 CLI/模型契约、
+timeout、严格 confidence 校验、丰富 PR 上下文和去除答案二次生成属于 F2。
+
+## B.4 修订结果
+
+修订使用原 session 调用 CodeAgent.resume，prompt 含冻结的 instruction/feedback 和 VCS 指引。
+`CodexResult` 的 addressed/deferred 必须携带 `item_id`、`version`、GitHub `comment_id` 和
+note/reason；control 拒绝未知、重复、跨版本或互相冲突的引用。
+
+非零 exit 按现有失败路径收尾，不消费反馈。成功时只消费明确 addressed 的版本；deferred、遗漏项
+及 needs_clarification 留作未决，有未决问题时不请求 re-review。处理说明仍主要发在 PR conversation，
+真实原线程回复和 resolve 属于 F4。
+
+本轮 push capability、resume 环境、VCS/远端 SHA 校验、失效 session fallback 尚属 F3。
+当前成功 exit 不能证明真实 revision 已完成 commit/push，整个 M2 不能因此标为已验收。
+
+## B.5 取消、重试与恢复
+
+- Flow 终态时退休 buffer/活动批次；取消仍不 kill 运行中的 agent，旧结果受现有 assignment/状态 fencing。
+- 显式 retry 将原冻结批次交给新的 job，保留后到的新版本，不复制新的 Flow/PR。
+- 已接收的结果依然通过原子结果应用与 GitHub effect ledger 恢复，不能因重放重复派生或消费。
+- schema 一次性导入旧 review_threads 的最新对象，保留历史表；旧 resolved 标记不作为远端确认。
+- 协议 v5 要求 serve/worker 一起升级。先用旧版本排空 queued/running review jobs 和所有未确认旧结果，
+  然后停止旧进程再升级；新 serve 检查旧任务并给出 job ID，禁止猜测缺失的 batch/版本。
+
+## B.6 参数与验证
+
+| 环境变量 | 默认值 | 用途 |
+|---|---|---|
+| `FLOWTOOL_SETTLE_SECONDS` | 75 | 普通静默窗口 |
+| `FLOWTOOL_SUBMIT_GRACE_SECONDS` | 15 | review submitted/强信号窗口 |
+| `FLOWTOOL_WORKER_SWEEP_INTERVAL` | 5 | 持久 deadline 与结果恢复扫描间隔 |
+| `FLOWTOOL_CONFIDENCE_THRESHOLD` | 0.6 | revise 最低置信度 |
 | `FLOWTOOL_CODEX_RUN_TIMEOUT_SECONDS` | 1200 | 单次 Codex timeout |
-| `FLOWTOOL_MAX_REVISION_CYCLES` | 20 | 每 attempt 的最大修订轮数 |
+| `FLOWTOOL_MAX_REVISION_CYCLES` | 20 | 每 attempt 的修订次数限制 |
 
-## B.8 后续方向
-
-bub 可在未来成为 GitHub PR 对话的原生 channel adapter，使 triage 与 answer 共用会话；这属于路线图，
-当前 subprocess adapter 不具备该能力。
+PostgreSQL 自动化覆盖入口回滚、并发领取、重启、批次内外版本、删除、wait 接续、强信号授权、
+结果重放和 retry。真实 bub/Codex/GitHub 多轮闭环及线程操作留到 M2 后续 feature 验收。

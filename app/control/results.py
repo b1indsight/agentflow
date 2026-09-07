@@ -11,8 +11,11 @@ from pluggy import PluginManager
 from app.control.effects import ResultEffects
 from app.models import (
     TERMINAL_STATES,
+    AddressedComment,
     Attempt,
+    DeferredComment,
     DeliveryState,
+    FeedbackRef,
     Flow,
     FlowDelivery,
     FlowState,
@@ -44,6 +47,7 @@ from app.result_models import (
     ReviewersEffect,
     RunUpdate,
 )
+from app.review_models import BatchState
 from app.store import Store
 
 
@@ -150,6 +154,15 @@ class ResultApplication:
             raise ValueError("result kind does not match persisted job")
         if attempt is None:
             return self._failure(tx, flow, base, "result has no current attempt")
+        if isinstance(result, (TriageResult, RevisionResult, AnswerResult)):
+            batch = tx.reviews.for_job(job)
+            expected = [(f.item_id, f.version) for f in batch.feedback]
+            received = [(f.item_id, f.version) for f in result.feedback_refs]
+            if (result.batch_id != batch.id or received != expected
+                    or batch.attempt_id != attempt.id
+                    or batch.state not in {BatchState.READY, BatchState.PROCESSING}):
+                return self._failure(tx, flow, base, "result does not match its frozen review batch")
+            base = base.model_copy(update={"batch_id": batch.id})
         if isinstance(result, InitialResult):
             base = base.model_copy(
                 update={
@@ -211,7 +224,8 @@ class ResultApplication:
                 return base.model_copy(
                     update={
                         "derived": DerivedJob(
-                            kind=JobKind.REVISION, payload={"instruction": verdict.instruction}
+                            kind=JobKind.REVISION,
+                            payload={"batch_id": batch.id, "instruction": verdict.instruction},
                         ),
                         "effects": [
                             self._comment(
@@ -225,16 +239,24 @@ class ResultApplication:
                 )
             if verdict.verdict is Verdict.ANSWER:
                 discussion = "\n".join(
-                    f"{item.author}: {item.body}" for item in tx.unrelayed_items(attempt.id)
+                    f"{item.author}: {item.body}" for item in batch.feedback
                 )
                 return base.model_copy(
                     update={
                         "derived": DerivedJob(
-                            kind=JobKind.ANSWER, payload={"question": discussion}
+                            kind=JobKind.ANSWER,
+                            payload={"batch_id": batch.id, "question": discussion},
                         ),
                     }
                 )
-            return base
+            if verdict.verdict is Verdict.IGNORE:
+                return base.model_copy(update={
+                    "batch_state": BatchState.COMPLETED, "consumed": result.feedback_refs,
+                })
+            return base.model_copy(update={
+                "batch_state": BatchState.WAITING,
+                "open_points": verdict.open_points or [verdict.reason or "Awaiting more discussion."],
+            })
         if isinstance(result, RevisionResult):
             base = base.model_copy(
                 update={
@@ -253,6 +275,25 @@ class ResultApplication:
                     f"修订失败（codex exit={result.exit_code}），本轮未更新。",
                 )
             number = self._pr_number(tx, flow)
+            members = {(f.item_id, f.version): f for f in batch.feedback}
+            reported: list[AddressedComment | DeferredComment] = [
+                *result.output.addressed, *result.output.deferred,
+            ]
+            keys = [(f.item_id, f.version) for f in reported]
+            if (len(keys) != len(set(keys)) or any(
+                key not in members or members[key].github_id != item.comment_id
+                for key, item in zip(keys, reported, strict=True)
+            )):
+                return self._failure(tx, flow, base, "revision reported unknown or conflicting feedback")
+            consumed = [FeedbackRef(item_id=f.item_id, version=f.version) for f in result.output.addressed]
+            # An empty Request Changes body authorizes the batch; it is not another coding request.
+            reported_keys = set(keys)
+            consumed.extend(
+                FeedbackRef(item_id=f.item_id, version=f.version) for f in batch.feedback
+                if not f.body.strip() and f.signal == "request_changes"
+                and (f.item_id, f.version) not in reported_keys
+            )
+            unresolved = len(consumed) != len(batch.feedback) or bool(result.output.needs_clarification)
             effects = [
                 self._comment(
                     flow, number, f"deferred:{index}", f"@ {item.comment_id}: {item.reason}"
@@ -269,19 +310,26 @@ class ResultApplication:
                         flow, number, "summary", f"已按 review 更新：{result.output.summary}"
                     )
                 )
-            effects.extend(self._review_effects(flow, number))
+            if not unresolved:
+                effects.extend(self._review_effects(flow, number))
             return base.model_copy(
                 update={
                     "effects": effects,
-                    "resolved_ids": [item.comment_id for item in result.output.addressed],
-                    "relayed_ids": [
-                        item.id for item in tx.unrelayed_items(attempt.id) if item.id is not None
-                    ],
+                    "batch_state": BatchState.WAITING if unresolved else BatchState.COMPLETED,
+                    "consumed": consumed,
+                    "open_points": [*result.output.needs_clarification,
+                                    *(item.reason for item in result.output.deferred)],
                 }
             )
         if isinstance(result, AnswerResult):
+            if not result.answer.strip():
+                return base.model_copy(update={
+                    "batch_state": BatchState.WAITING, "open_points": ["Answer was empty."],
+                })
             return base.model_copy(
                 update={
+                    "batch_state": BatchState.COMPLETED,
+                    "consumed": result.feedback_refs,
                     "effects": [
                         self._comment(
                             flow,
@@ -345,17 +393,17 @@ class ResultApplication:
             current.version += 1
             tx.update_delivery(current)
         if plan.derived is not None:
-            tx.enqueue_job(
+            derived = tx.enqueue_job(
                 flow.id,
                 plan.derived.kind,
                 plan.derived.payload,
                 source_job_id=job.id,
                 source_key=plan.derived.kind.value,
             )
-        if plan.attempt_id is not None:
-            for comment_id in plan.resolved_ids:
-                tx.mark_resolved(plan.attempt_id, comment_id)
-            tx.mark_relayed(plan.relayed_ids)
+            if plan.batch_id is not None:
+                tx.reviews.advance(plan.batch_id, derived)
+        if plan.batch_id is not None and plan.batch_state is not None:
+            tx.reviews.complete(plan.batch_id, plan.batch_state, plan.consumed, plan.open_points)
 
     def _failure(self, tx: Store, flow: Flow, base: ResultPlan, reason: str) -> ResultPlan:
         delivery = tx.get_delivery(flow.id)
