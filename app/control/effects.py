@@ -9,8 +9,9 @@ from uuid import uuid4
 
 from app.control.tools import FlowToolRejected, FlowToolService
 from app.github_models import GitHubAdapterError, GitHubErrorKind
-from app.models import TERMINAL_STATES
+from app.models import TERMINAL_STATES, DeliveryState
 from app.ports import GitHubClient
+from app.protocol import FlowToolErrorKind
 from app.result_models import (
     CommentEffect,
     EffectReceipt,
@@ -22,6 +23,7 @@ from app.result_models import (
     ResultPlan,
     ReviewersEffect,
 )
+from app.review_models import BatchState
 from app.store import Store
 
 
@@ -117,6 +119,14 @@ class ResultEffects:
                 or flow.current_attempt_id != plan.attempt_id
             ):
                 raise ResultPending("Flow changed before GitHub dispatch")
+            if plan.batch_id is not None:
+                batch = tx.reviews.for_job(job)
+                delivery = tx.get_delivery(flow.id)
+                if (batch.id != plan.batch_id
+                        or batch.state not in {BatchState.READY, BatchState.PROCESSING}
+                        or delivery is None or delivery.state is not DeliveryState.OPEN):
+                    raise FlowToolRejected(FlowToolErrorKind.CONFLICT,
+                                           "review batch or PR is no longer active")
             tx.results.mark_dispatched(record)
 
     async def _execute(
@@ -137,6 +147,19 @@ class ResultEffects:
                 return EffectReceipt(comment_id=found)
             if record.dispatched_at is not None:
                 raise ResultPending("comment outcome is unknown; waiting for its remote marker")
+            if plan.batch_id is not None and effect.key in {"answer", "triage"}:
+                job = self.store.get_job(plan.job_id)
+                if job is None:
+                    raise FlowToolRejected(FlowToolErrorKind.CONFLICT, "review job disappeared")
+                batch = self.store.reviews.for_job(job)
+                snapshot = batch.context.pull_request if batch.context is not None else None
+                current = await self.github.get_review_pull_request(installation, repo, effect.number)
+                if (snapshot is None or current.number != effect.number
+                        or current.state != "open" or current.merged
+                        or current.head_sha != snapshot.head_sha
+                        or current.base_sha != snapshot.base_sha):
+                    raise FlowToolRejected(FlowToolErrorKind.CONFLICT,
+                                           "PR changed since the Judge snapshot")
             self._dispatch(plan, record)
             comment_id = await self.github.comment(
                 installation,

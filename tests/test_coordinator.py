@@ -36,7 +36,6 @@ from app.models import (
 )
 from app.ports import GitHubClient
 from app.protocol import (
-    AnswerResult,
     ArchiveResult,
     ArchiveTask,
     ExecutionResult,
@@ -51,7 +50,7 @@ from app.protocol import (
 )
 from app.store import Store
 from tests.result_memory import MemoryResults
-from tests.review_memory import MemoryReviews
+from tests.review_memory import MemoryReviews, judge_decision
 
 
 class MemoryStore:
@@ -270,6 +269,18 @@ class RecordingGitHub:
 
     async def get_issue(self, installation_id: int, repo: str, number: int) -> IssueSnapshot:
         return IssueSnapshot(number=number, title="Real issue", body="Real body", state="open")
+
+    async def get_review_pull_request(self, *args):
+        from tests.review_memory import review_context
+        return review_context().pull_request
+
+    async def list_pull_request_files(self, *args):
+        from app.context_models import FilePage
+        return FilePage(files=[])
+
+    async def list_pull_request_discussions(self, *args):
+        from app.context_models import DiscussionPage
+        return DiscussionPage(discussions=[])
 
     async def get_repository(self, installation_id: int, repo: str) -> RepositorySnapshot:
         return RepositorySnapshot(full_name=repo, default_branch="trunk")
@@ -564,11 +575,11 @@ async def test_triage_result_replay_does_not_repeat_comment_or_derived_job() -> 
     subject = coordinator(store, github)
     job = Job(id=6, flow_id=1, kind=JobKind.TRIAGE, state=JobState.RUNNING)
     result = TriageResult(batch_id=1, feedback_refs=[FeedbackRef(item_id=101, version=1)],
-        verdict=TriageVerdict(
+        decision=judge_decision(TriageVerdict(
             verdict=Verdict.REVISE,
             confidence=0.9,
             instruction="Fix it",
-        )
+        ))
     )
 
     await apply_result(subject, job, result)
@@ -603,11 +614,11 @@ async def test_triage_and_revision_results_remain_control_plane_side_effects() -
         subject,
         triage_job,
         TriageResult(batch_id=1, feedback_refs=[FeedbackRef(item_id=101, version=1)],
-            verdict=TriageVerdict(
+            decision=judge_decision(TriageVerdict(
                 verdict=Verdict.REVISE,
                 confidence=0.9,
                 instruction="Fix it",
-            )
+            ))
         ),
     )
     assert triage_state is JobState.DONE
@@ -644,7 +655,7 @@ async def test_result_kind_must_match_persisted_job_kind() -> None:
         await apply_result(
             subject,
             job,
-            TriageResult(batch_id=1, feedback_refs=[FeedbackRef(item_id=101, version=1)], verdict=TriageVerdict(verdict=Verdict.WAIT)),
+            TriageResult(batch_id=1, feedback_refs=[FeedbackRef(item_id=101, version=1)], decision=judge_decision(TriageVerdict(verdict=Verdict.WAIT))),
         )
 
 
@@ -670,11 +681,12 @@ async def test_answer_and_archive_side_effects_are_applied_by_control() -> None:
 
     answer_state = await apply_result(
         subject,
-        Job(id=8, flow_id=1, kind=JobKind.ANSWER, state=JobState.RUNNING),
-        AnswerResult(batch_id=1, feedback_refs=[FeedbackRef(item_id=101, version=1)], answer="Because it is bounded."),
+        Job(id=8, flow_id=1, kind=JobKind.TRIAGE, state=JobState.RUNNING),
+        TriageResult(batch_id=1, feedback_refs=[FeedbackRef(item_id=101, version=1)],
+                     decision=judge_decision(TriageVerdict(verdict=Verdict.ANSWER, answer="Because it is bounded."))),
     )
     assert answer_state is JobState.DONE
-    assert github.comments == ["Because it is bounded."]
+    assert len(github.comments) == 1 and github.comments[0].startswith("Because it is bounded.")
 
     store.flow.state = FlowState.ACTIVE
     store.delivery = FlowDelivery(

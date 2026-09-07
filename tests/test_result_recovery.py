@@ -27,6 +27,7 @@ from app.models import (
 from app.protocol import InitialResult, RevisionResult, TriageResult
 from app.result_models import EffectState, ResultPending
 from app.store import Store
+from tests.review_memory import judge_decision
 from tests.test_coordinator import MemoryStore, RecordingGitHub, apply_result, coordinator
 
 
@@ -45,13 +46,37 @@ def scenario():
     github = RecordingGitHub()
     job = Job(id=6, flow_id=1, kind=JobKind.TRIAGE, state=JobState.RUNNING)
     result = TriageResult(batch_id=1, feedback_refs=[FeedbackRef(item_id=101, version=1)],
-        verdict=TriageVerdict(
+        decision=judge_decision(TriageVerdict(
             verdict=Verdict.REVISE,
             confidence=0.9,
             instruction="Fix it",
-        )
+        ))
     )
     return store, github, job, result
+
+
+@pytest.mark.parametrize("violation", ["digest", "incomplete-context"])
+async def test_control_rejects_decisions_without_matching_complete_evidence(scenario, violation):
+    store, github, job, result = scenario
+    if violation == "digest":
+        result.decision.context_digest = "0" * 64
+    else:
+        store.reviews.batch.context.limitations.append("files:truncated")
+        result.decision.context_digest = store.reviews.batch.context.digest
+    await apply_result(coordinator(store, github), job, result)
+    assert github.comments == []
+    assert store.reviews.consumed == []
+    assert not store.sources
+
+
+async def test_old_attempt_failure_does_not_publish_or_fail_current_attempt(scenario):
+    store, github, job, _ = scenario
+    store.jobs[job.id] = job
+    store.attempt = Attempt(id=2, flow_id=1, codex_session_id="new-session")
+    store.flow.current_attempt_id = 2
+    await coordinator(store, github).fail(job, "Old worker failed")
+    assert github.comments == []
+    assert store.flow.state is FlowState.ACTIVE
 
 
 @pytest.mark.parametrize("signal_kind", ["request_changes", "discussion"])

@@ -13,6 +13,16 @@ from githubkit.exception import AuthCredentialError, AuthExpiredError, RequestEr
 from pydantic import SecretStr
 
 from app.config import ServeSettings
+from app.context_models import (
+    MAX_DISCUSSIONS,
+    MAX_FILES,
+    SOURCE_CHARS,
+    ContextDiscussion,
+    ContextFile,
+    DiscussionPage,
+    FilePage,
+    ReviewPullRequest,
+)
 from app.github_models import (
     GitHubAdapterError,
     GitHubErrorKind,
@@ -90,6 +100,100 @@ class GitHubApp:
             return RepositorySnapshot(full_name=data.full_name, default_branch=data.default_branch)
 
         return await self._execute("get_repository", operation)
+
+    async def get_review_pull_request(
+        self, installation_id: int, repo: str, number: int,
+    ) -> ReviewPullRequest:
+        owner, name = self._split_repo(repo)
+        client = self._installation_client(installation_id)
+
+        async def operation() -> ReviewPullRequest:
+            data = (await client.rest.pulls.async_get(owner, name, number)).parsed_data
+            return ReviewPullRequest(
+                **self._pull_snapshot(data).model_dump(), title=data.title, body=data.body or "",
+                base_sha=data.base.sha, merged=data.merged,
+            )
+
+        return await self._execute("get_review_pull_request", operation)
+
+    async def list_pull_request_files(
+        self, installation_id: int, repo: str, number: int,
+    ) -> FilePage:
+        """Read at most 40 files plus a sentinel page; absent patches stay explicitly unknown."""
+        owner, name = self._split_repo(repo)
+        client = self._installation_client(installation_id)
+
+        async def operation() -> FilePage:
+            files: list[ContextFile] = []
+            for page in range(1, MAX_FILES // 20 + 2):
+                data = (await client.rest.pulls.async_list_files(
+                    owner, name, number, per_page=20, page=page)).parsed_data
+                for item in data:
+                    if len(files) == MAX_FILES:
+                        return FilePage(files=files, truncated=True)
+                    patch = item.patch
+                    limitations = []
+                    if patch is None:
+                        limitations.append("patch:unavailable-or-binary")
+                    elif len(patch) > SOURCE_CHARS:
+                        limitations.append("patch:truncated")
+                    files.append(ContextFile(
+                        path=item.filename, status=item.status,
+                        patch=patch[:SOURCE_CHARS] if patch is not None else None,
+                        previous_path=item.previous_filename, limitations=limitations,
+                    ))
+                if len(data) < 20:
+                    break
+            return FilePage(files=files)
+
+        return await self._execute("list_pull_request_files", operation)
+
+    async def list_pull_request_discussions(
+        self, installation_id: int, repo: str, number: int,
+    ) -> DiscussionPage:
+        """Bound each conversation/review/inline source independently so none starves the others."""
+        owner, name = self._split_repo(repo)
+        client = self._installation_client(installation_id)
+
+        async def operation() -> DiscussionPage:
+            discussions: list[ContextDiscussion] = []
+            truncated = False
+            endpoints = [
+                ("conversation", client.rest.issues.async_list_comments),
+                ("review_body", client.rest.pulls.async_list_reviews),
+                ("inline", client.rest.pulls.async_list_review_comments),
+            ]
+            for kind, endpoint in endpoints:
+                count = 0
+                for page in range(1, MAX_DISCUSSIONS // 3 // 10 + 2):
+                    data = (await endpoint(owner, name, number, per_page=10, page=page)).parsed_data
+                    for item in data:
+                        if count == MAX_DISCUSSIONS // 3:
+                            truncated = True
+                            break
+                        body = item.body or ""
+                        hunk = item.diff_hunk if kind == "inline" else None
+                        limitations = []
+                        if len(body) > SOURCE_CHARS:
+                            limitations.append("body:truncated")
+                        if hunk and len(hunk) > SOURCE_CHARS:
+                            limitations.append("diff_hunk:truncated")
+                        discussions.append(ContextDiscussion(
+                            kind=kind, github_id=item.id,
+                            author=item.user.login if item.user else "[deleted]",
+                            body=body[:SOURCE_CHARS],
+                            updated_at=item.submitted_at if kind == "review_body" else item.updated_at,
+                            path=item.path if kind == "inline" else None,
+                            original_commit_id=item.original_commit_id if kind == "inline" else None,
+                            diff_hunk=hunk[:SOURCE_CHARS] if hunk else hunk,
+                            limitations=limitations,
+                        ))
+                        count += 1
+                    if len(data) < 10:
+                        break
+            return DiscussionPage(discussions=discussions, truncated=truncated)
+
+        return await self._execute("list_pull_request_discussions", operation)
 
     async def create_push_capability(self, installation_id: int, repo: str) -> PushCapability:
         _, name = self._split_repo(repo)

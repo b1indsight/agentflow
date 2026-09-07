@@ -13,8 +13,6 @@ from app.context_builder import build_initial_prompt, build_revision_prompt
 from app.models import CodeAgentContext, CodexResult, InitialCodexResult
 from app.ports import CodeAgent, Judge
 from app.protocol import (
-    AnswerResult,
-    AnswerTask,
     ArchiveResult,
     ArchiveTask,
     AssignmentSecret,
@@ -68,13 +66,11 @@ class WorkerExecutor:
         if isinstance(task, InitialTask):
             return await self._initial(task, secret)
         if isinstance(task, TriageTask):
-            verdict = await self.judge.triage(task.discussion, task.pr_context)
-            return TriageResult(batch_id=task.batch_id, feedback_refs=list(task.feedback), verdict=verdict)
+            decision = await self.judge.triage(task.context)
+            return TriageResult(batch_id=task.batch_id, feedback_refs=list(task.feedback),
+                                decision=decision)
         if isinstance(task, RevisionTask):
             return await self._revision(task)
-        if isinstance(task, AnswerTask):
-            answer = await self.judge.answer(task.question, task.pr_context)
-            return AnswerResult(batch_id=task.batch_id, feedback_refs=list(task.feedback), answer=answer)
         if isinstance(task, ArchiveTask):
             repo_path = self._repo_path(task.repo)
             await cleanup_flow_repo(repo_path, task.flow_id)

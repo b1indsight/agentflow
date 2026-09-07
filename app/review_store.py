@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING
 from psycopg.rows import class_row
 from psycopg.types.json import Jsonb
 
+from app.context_models import ReviewContext
+from app.judge_models import JudgeDecision
 from app.models import TERMINAL_STATES, DeliveryState, Job, JobKind
 from app.review_models import BatchState, FeedbackRef, FeedbackUpdate, ReviewBatch, ReviewFeedback
 
@@ -64,6 +66,8 @@ CREATE TABLE IF NOT EXISTS review_batches (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ux_review_active_batch ON review_batches(flow_id)
   WHERE state IN ('ready','processing');
+ALTER TABLE review_batches ADD COLUMN IF NOT EXISTS context JSONB;
+ALTER TABLE review_batches ADD COLUMN IF NOT EXISTS decision JSONB;
 CREATE INDEX IF NOT EXISTS ix_review_due ON review_buffers(due_at) WHERE due_at IS NOT NULL;
 CREATE TABLE IF NOT EXISTS review_migrations (version INTEGER PRIMARY KEY);
 """
@@ -373,6 +377,29 @@ class ReviewStore:
                 )
         return True
 
+    def freeze_context(self, job: Job, context: ReviewContext) -> ReviewContext:
+        """Called with the workflow lock after network reads; first prepared snapshot wins."""
+        batch = self.for_job(job)
+        if context.batch_id != batch.id or batch.state not in {
+            BatchState.READY, BatchState.PROCESSING,
+        }:
+            raise ValueError("cannot freeze context for an inactive/different batch")
+        if batch.context is not None:
+            return batch.context
+        with self.store.connection() as connection:
+            connection.execute("UPDATE review_batches SET context=%s WHERE id=%s",
+                               (Jsonb(context.model_dump(mode="json")), batch.id))
+        return context
+
+    def record_decision(self, job: Job, decision: JudgeDecision) -> None:
+        """Persist the accepted interpretation alongside its immutable input in the result transaction."""
+        batch = self.for_job(job)
+        if batch.context is None or batch.context.digest != decision.context_digest:
+            raise ValueError("decision does not match its frozen context")
+        with self.store.connection() as connection:
+            connection.execute("UPDATE review_batches SET decision=%s,open_points=%s WHERE id=%s",
+                (Jsonb(decision.model_dump(mode="json")), Jsonb(decision.verdict.open_points), batch.id))
+
     def advance(self, batch_id: int, job: Job) -> None:
         """Transfer a batch to its one derived job without releasing the active-batch constraint."""
         with self.store.connection() as connection:
@@ -432,7 +459,11 @@ class ReviewStore:
                 " AND EXISTS (SELECT 1 FROM flows f WHERE f.id=j.flow_id"
                 " AND f.state IN ('failed','cancelled')))) AND (payload->>'batch_id') IS NULL)"
                 " OR (result_received_at IS NOT NULL AND result_applied_at IS NULL"
-                " AND result_payload->>'protocol_version' IS DISTINCT FROM '5') ORDER BY id",
+                " AND result_payload->>'protocol_version' IS DISTINCT FROM '6')"
+                " OR (kind='answer' AND state IN ('queued','running','failed'))"
+                " OR (kind='triage' AND state='running' AND NOT EXISTS"
+                " (SELECT 1 FROM review_batches b WHERE b.job_id=j.id AND b.context IS NOT NULL))"
+                " ORDER BY id",
             ).fetchall()
         if rows:
             raise RuntimeError(

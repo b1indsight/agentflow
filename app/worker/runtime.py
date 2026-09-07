@@ -8,6 +8,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import IO
 
+from loguru import logger
+
 from app.codex_driver import CodexAgent
 from app.config import WorkerSettings, get_worker_settings
 from app.judge import BubJudge
@@ -91,13 +93,19 @@ class WorkerRuntime:
     def __init__(self, settings: WorkerSettings | None = None) -> None:
         self.settings = settings or get_worker_settings()
         self.root_lock = WorkerRootLock(self.settings.worker_root, self.settings.worker_id)
+        judge = BubJudge(
+            model=self.settings.judge_model, api_key=self.settings.judge_api_key,
+            api_base=self.settings.judge_api_base, timeout=self.settings.judge_timeout_seconds,
+        )
+        if failure := judge.configuration_failure():
+            logger.warning("Judge unavailable; triage will wait: {}", failure)
         executor = WorkerExecutor(
             self.settings.worker_root,
             CodexAgent(
                 trusted_host=self.settings.trusted_host_execution,
                 timeout=self.settings.codex_run_timeout_seconds,
             ),
-            BubJudge(),
+            judge,
             worker_id=self.settings.worker_id,
         )
         self.client = WorkerClient(

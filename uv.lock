@@ -527,7 +527,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "bub", specifier = ">=0.3.9" },
+    { name = "bub", specifier = "==0.4.1" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "githubkit", extras = ["auth-app"], specifier = ">=0.16,<0.17" },
     { name = "httpx", specifier = ">=0.27" },

@@ -21,6 +21,7 @@ from app.protocol import Succeeded, TriageResult, terminal_digest
 from app.review_models import BatchState, FeedbackUpdate
 from app.review_store import ReviewStore
 from app.store import Store
+from tests.review_memory import judge_decision
 from tests.test_coordinator import RecordingGitHub, coordinator
 
 
@@ -387,8 +388,8 @@ def test_failed_batch_retry_restores_ownership_and_cancel_fences_old_work(store,
     assert store.reviews.for_job(replacement).feedback[0].github_id == 101
 
 
-async def run_triage(store, flow, job, verdict, *, before_apply=None):
-    github = RecordingGitHub()
+async def run_triage(store, flow, job, verdict, *, before_apply=None, github=None):
+    github = github or RecordingGitHub()
     subject = coordinator(store, github)
     store.worker_connected("worker-a", 5, "epoch-a")
     assigned = store.assign_job("worker-a", "token", "epoch-a")
@@ -396,7 +397,7 @@ async def run_triage(store, flow, job, verdict, *, before_apply=None):
     task = await subject.prepare(assigned)
     assert store.start_assignment(job.id, flow.current_attempt_id, "worker-a", "token", "epoch-a")
     subject.mark_started(assigned, task, "worker-a")
-    result = TriageResult(batch_id=task.batch_id, feedback_refs=task.feedback, verdict=verdict)
+    result = TriageResult(batch_id=task.batch_id, feedback_refs=task.feedback, decision=judge_decision(verdict, task.context))
     message = Succeeded(
         job_id=job.id, assignment_token="token", connection_epoch="epoch-a", result=result
     )
@@ -416,6 +417,122 @@ async def run_triage(store, flow, job, verdict, *, before_apply=None):
     await subject.apply_result(assigned, result)
     await subject.apply_result(assigned, result)
     return subject, github, result
+
+
+async def test_prepare_freezes_once_across_restart_and_later_remote_edits(store, review_flow):
+    flow, clock = review_flow
+    ingest(store, flow, feedback(clock))
+    job = claim(store, clock)[0]
+    first = await coordinator(store, RecordingGitHub()).prepare(job)
+    restarted = Store(store.database_url, clock=lambda: clock.now)
+
+    class NoReads(RecordingGitHub):
+        async def get_review_pull_request(self, *args):
+            pytest.fail("prepare recovery must reuse persisted context")
+    try:
+        again = await coordinator(restarted, NoReads()).prepare(restarted.get_job(job.id))
+        assert again.context == first.context
+        assert again.context.feedback[0].body == "Add a bound."
+    finally:
+        restarted.close()
+
+
+@pytest.mark.parametrize("confidence,expected", [(0.6, JobKind.REVISION), (0.599, None)])
+async def test_revise_confidence_boundary_and_unresolved_points_persist(
+    store, review_flow, confidence, expected,
+):
+    flow, clock = review_flow
+    ingest(store, flow, feedback(clock))
+    job = claim(store, clock)[0]
+    _, github, _ = await run_triage(store, flow, job, TriageVerdict(
+        verdict=Verdict.REVISE, confidence=confidence, instruction="Add a bound",
+        reason="Agreed limit, but naming remains open.", open_points=["Which name?"],
+    ))
+    batch = store.reviews.get_batch(job.payload["batch_id"])
+    assert batch.open_points == ["Which name?"]
+    assert batch.decision.verdict.confidence == confidence
+    if expected:
+        assert store.list_jobs(flow.id)[-1].kind is expected
+    else:
+        assert batch.state is BatchState.WAITING
+        assert github.comments == []
+        assert not claim(store, clock)
+
+
+async def test_answer_recovery_waits_for_receipt_and_preserves_a_new_version(store, review_flow):
+    from app.github_models import GitHubAdapterError, GitHubErrorKind
+    from app.result_models import ResultPending
+
+    class LostResponseGitHub(RecordingGitHub):
+        async def comment(self, *args):
+            await super().comment(*args)
+            raise GitHubAdapterError(GitHubErrorKind.TRANSIENT, "comment")
+
+    flow, clock = review_flow
+    ingest(store, flow, feedback(clock))
+    job = claim(store, clock)[0]
+    github = LostResponseGitHub()
+    with pytest.raises(ResultPending):
+        await run_triage(store, flow, job, TriageVerdict(
+            verdict=Verdict.ANSWER, answer="The bound is ten.", confidence=0.8,
+        ), github=github)
+    batch = store.reviews.for_job(store.get_job(job.id))
+    assert batch.state is BatchState.PROCESSING
+    assert len(store.reviews.pending(flow.id)) == 1
+    assert batch.decision.verdict.answer == "The bound is ten."
+    clock.now += timedelta(seconds=20)
+    ingest(store, flow, feedback(clock, body="A new request"), "edit")
+    restarted = Store(store.database_url, clock=lambda: clock.now)
+    try:
+        await coordinator(restarted, github).results.apply(job.id)
+        await coordinator(restarted, github).results.apply(job.id)
+        assert len(github.comments) == 1
+        assert [(f.github_id, f.version) for f in restarted.reviews.pending(flow.id)] == [(101, 2)]
+        assert restarted.reviews.for_job(restarted.get_job(job.id)).state is BatchState.COMPLETED
+        assert len(restarted.list_jobs(flow.id)) == 1
+    finally:
+        restarted.close()
+
+
+@pytest.mark.parametrize("change", ["cancel", "closed", "merged", "head", "attempt"])
+async def test_answer_rechecks_lifecycle_and_remote_head_before_sending(store, review_flow, change):
+    class ChangedGitHub(RecordingGitHub):
+        changed = False
+
+        async def get_review_pull_request(self, *args):
+            pr = await super().get_review_pull_request(*args)
+            if self.changed and change in {"closed", "merged", "head"}:
+                return pr.model_copy(update={
+                    "state": "closed" if change == "closed" else "open",
+                    "merged": change == "merged", "head_sha": "changed" if change == "head" else "abc",
+                })
+            return pr
+
+    flow, clock = review_flow
+    ingest(store, flow, feedback(clock))
+    job = claim(store, clock)[0]
+    github = ChangedGitHub()
+
+    def change_state():
+        github.changed = True
+        if change == "cancel":
+            ControlService(store).cancel(flow)
+        if change == "attempt":
+            current = store.get_flow(flow.id)
+            current.current_attempt_id = store.create_attempt(flow.id).id
+            store.update_flow(current)
+
+    await run_triage(store, flow, job, TriageVerdict(verdict=Verdict.ANSWER, answer="Reply"),
+                     github=github, before_apply=change_state)
+    assert github.comments == []
+    assert len(store.reviews.pending(flow.id)) == 1
+
+
+def test_upgrade_blocks_legacy_answer_even_with_a_batch_id(store, review_flow):
+    flow, _ = review_flow
+    job = store.enqueue_job(flow.id, JobKind.ANSWER, {"batch_id": 1})
+    with pytest.raises(RuntimeError, match=str(job.id)):
+        store.reviews.check_upgrade()
 
 
 async def test_ignore_consumes_frozen_input_once_and_leaves_newer_version(store, review_flow):
@@ -516,7 +633,7 @@ def test_upgrade_allows_historical_failed_review_with_a_finished_replacement(sto
     store.reviews.check_upgrade()
 
 
-async def test_answer_receives_questions_carried_from_previous_wait(store, review_flow):
+async def test_answer_uses_frozen_decision_once_and_consumes_after_comment(store, review_flow):
     flow, clock = review_flow
     ingest(store, flow, feedback(clock))
     job = claim(store, clock)[0]
@@ -525,12 +642,18 @@ async def test_answer_receives_questions_carried_from_previous_wait(store, revie
     ))
     ingest(store, flow, feedback(clock, 102, body="Please explain it."), "reply")
     job = claim(store, clock)[0]
-    subject, _, _ = await run_triage(store, flow, job, TriageVerdict(verdict=Verdict.ANSWER))
-    answer = store.list_jobs(flow.id)[-1]
-    task = await subject.prepare(answer)
-    # The answer executor is a separate model call and cannot see the earlier triage prompt.
-    assert "Why is the limit 10?" in task.question
-    assert "Please explain it." in task.question
+    _, github, _ = await run_triage(store, flow, job, TriageVerdict(
+        verdict=Verdict.ANSWER, answer="Ten is the configured retry limit.", confidence=0.9,
+    ))
+    batch = store.reviews.for_job(store.get_job(job.id))
+    assert "Why is the limit 10?" in batch.context.open_points
+    assert batch.decision.verdict.answer == "Ten is the configured retry limit."
+    assert len(github.comments) == 1
+    assert github.comments[0].startswith("Ten is the configured retry limit.")
+    assert "#discussion_r102" in github.comments[0]
+    assert batch.state is BatchState.COMPLETED
+    assert not store.reviews.pending(flow.id)
+    assert all(item.kind.value != "answer" for item in store.list_jobs(flow.id))
 
 
 @pytest.mark.parametrize("approval_id", [101, 102])

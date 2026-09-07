@@ -1,7 +1,8 @@
 # M2 Feature 2/4：bub 语义决策与答复
 
-> 状态：待审批，plan only · 日期：2026-09-07 · 基线：`main` / `9fd98266`（PR #18）
-> Bookmark：`feat/m2-semantic-triage`；本 PR 获批后继续承载实现。
+> 状态：已批准并实施，自动化验证通过；真实 provider 语义 smoke 待执行。
+> 日期：2026-09-07 · 实现基线：`main` / `78b8bc38`（已合并 PR #19）。
+> Bookmark：`feat/m2-semantic-triage`；用户“做 PR #20”授权进入同一 PR 的实现阶段。
 > 实现前置：F1 持久反馈批次与 settle（`feat/m2-feedback-batches`）；F3/F4 消费本 feature 的决策。
 
 ## 1. 需求与当前缺口
@@ -114,4 +115,28 @@ adapter 或依赖变更，再在同一 PR 完成审批，不能退回共享个�
   未配置真实 provider 时只能报告自动化通过、真实语义验收待执行，不能标记本 feature 已全面验证。
 
 完成标准：普通反馈经校准 adapter 产生可恢复决策，答复不再二次生成或重复发布；
-反馈来源、判断证据和未决事项均可追溯。本 PR 当前只含计划。
+反馈来源、判断证据和未决事项均可追溯。
+
+## 实施记录（2026-09-07）
+
+- 固定 bub 0.4.1，使用其 `ModelRunner.completion_response` 单次入口，`tools=[]`、`hooks=None`、
+  无 fallback、SDK `max_retries=0`。不创建 framework、加载插件或读写 tape；每次调用独立进程/
+  请求 ID。假模型端点验证真实库的流式最终消息及单次请求，未使用生产凭据。
+- `app/context_models.py` 定义证据类型，`app/review_context.py` 承担 control 专有快照构建，避免
+  将 GitHub 读取混入 worker 共用的 Codex prompt builder。首次远端读取后在工作流锁内冻结；
+  重启及 prepare 重试复用快照。文件 40 个，三类讨论各 20 条，当前反馈/历史问题各 60 条；
+  单项正文/patch 4000 字符，快照 96000 JSON 字节。所有缺失/截断均采用保守 wait。
+- 原模型结果保存在持久 result inbox；批次保存接受的决策、context digest、版本、reason/
+  open_points。低于阈值的 revise 保存为 wait，原始建议仍可在 result inbox 查证。
+- 协议 v6 移除 ANSWER task/result/Judge.answer；答案及来源直接进入原有 CommentEffect 账本。
+  已发未知结果按 marker 恢复；确认后才消费精确版本。发送前检查取消、批次、attempt、PR 状态
+  与 head/base，新反馈和新版本留到下一批。revise 的未决点继续保存供 F3/F4 消费。
+- 验证覆盖严格数值/动作契约、隔离配置、无工具、重复/污染 JSON、非零退出、输出大小、启动失败、
+  timeout/取消回收、分页、快照大小/缺失/读取期间 SHA 变化、等待接续、精确消费及 PostgreSQL 恢复。
+- 升级要求：旧 serve/worker 排空在途 review、处理 failed ANSWER 和所有未应用旧结果/journal，
+  再一起升级。保留历史 `JobKind.ANSWER` 只供数据库读取，禁止恢复到已删除的执行协议。
+- 真实语义 smoke：**未执行**。本机假模型测试只证明 adapter/控制流契约，不代表真实模型对中英文、
+  矛盾讨论、注入式文本的语义准确率。本 feature 尚未全面语义验收；需部署时指定真实模型与受控快照集。
+- 验证结果：Ruff、Mypy、完整 pytest **250 passed / 0 skipped**（真实 PostgreSQL）和
+  `uv build --no-sources` 通过。保留既有 Starlette TestClient/httpx 弃用告警。
+  当前环境未配置 `FLOWTOOL_JUDGE_MODEL` / `FLOWTOOL_JUDGE_API_KEY`；未调用真实付费 provider。

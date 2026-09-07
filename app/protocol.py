@@ -18,10 +18,12 @@ from pydantic import (
     model_validator,
 )
 
-from app.models import CodexResult, FeedbackRef, JobState, TriageVerdict, VcsKind
+from app.context_models import MAX_CONTEXT_BYTES, ReviewContext
+from app.judge_models import JudgeDecision
+from app.models import CodexResult, FeedbackRef, JobState, VcsKind
 from app.review_models import ReviewFeedback
 
-PROTOCOL_VERSION: Literal[5] = 5
+PROTOCOL_VERSION: Literal[6] = 6
 
 
 class ProtocolModel(BaseModel):
@@ -31,7 +33,7 @@ class ProtocolModel(BaseModel):
 
 
 class Message(ProtocolModel):
-    protocol_version: Literal[5] = PROTOCOL_VERSION
+    protocol_version: Literal[6] = PROTOCOL_VERSION
 
 
 class ReviewTask(ProtocolModel):
@@ -70,10 +72,20 @@ class AssignmentSecret(ProtocolModel):
     push: PushSecret
 
 
-class TriageTask(ReviewTask):
+class TriageTask(ProtocolModel):
     kind: Literal["triage"] = "triage"
-    discussion: str
-    pr_context: str
+    batch_id: int = Field(gt=0)
+    attempt_id: int
+    feedback: list[FeedbackRef]
+    context: ReviewContext
+
+    @model_validator(mode="after")
+    def _context_batch(self) -> TriageTask:
+        if self.context.batch_id != self.batch_id:
+            raise ValueError("triage context belongs to another batch")
+        if len(self.context.model_dump_json().encode()) > MAX_CONTEXT_BYTES:
+            raise ValueError("triage context exceeds the byte budget")
+        return self
 
 
 class RevisionTask(ReviewTask):
@@ -85,12 +97,6 @@ class RevisionTask(ReviewTask):
     instruction: str
 
 
-class AnswerTask(ReviewTask):
-    kind: Literal["answer"] = "answer"
-    question: str
-    pr_context: str
-
-
 class ArchiveTask(ProtocolModel):
     kind: Literal["archive"] = "archive"
     flow_id: int = Field(gt=0)
@@ -99,7 +105,7 @@ class ArchiveTask(ProtocolModel):
 
 
 ExecutionTask = Annotated[
-    InitialTask | TriageTask | RevisionTask | AnswerTask | ArchiveTask,
+    InitialTask | TriageTask | RevisionTask | ArchiveTask,
     Field(discriminator="kind"),
 ]
 
@@ -127,7 +133,7 @@ class ReviewResult(ProtocolModel):
 
 class TriageResult(ReviewResult):
     kind: Literal["triage"] = "triage"
-    verdict: TriageVerdict
+    decision: JudgeDecision
 
 
 class RevisionResult(ReviewResult):
@@ -138,17 +144,12 @@ class RevisionResult(ReviewResult):
     output: CodexResult = Field(default_factory=CodexResult)
 
 
-class AnswerResult(ReviewResult):
-    kind: Literal["answer"] = "answer"
-    answer: str
-
-
 class ArchiveResult(ProtocolModel):
     kind: Literal["archive"] = "archive"
 
 
 ExecutionResult = Annotated[
-    InitialResult | TriageResult | RevisionResult | AnswerResult | ArchiveResult,
+    InitialResult | TriageResult | RevisionResult | ArchiveResult,
     Field(discriminator="kind"),
 ]
 

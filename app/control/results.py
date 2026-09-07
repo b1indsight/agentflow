@@ -24,11 +24,11 @@ from app.models import (
     JobKind,
     JobState,
     ReviewItemKind,
+    TriageVerdict,
     Verdict,
 )
 from app.ports import GitHubClient
 from app.protocol import (
-    AnswerResult,
     ArchiveResult,
     Failed,
     InitialResult,
@@ -148,6 +148,13 @@ class ResultApplication:
                 if isinstance(message, Failed)
                 else base
             )
+        batch = tx.reviews.for_job(job) if job.kind in {JobKind.TRIAGE, JobKind.REVISION} else None
+        if batch is not None:
+            base = base.model_copy(update={"attempt_id": batch.attempt_id, "batch_id": batch.id})
+            if (batch.attempt_id != flow.current_attempt_id
+                    or batch.state not in {BatchState.READY, BatchState.PROCESSING}):
+                return base.model_copy(update={"state": JobState.FAILED,
+                    "error": "review batch or attempt is no longer current"})
         if isinstance(message, Failed):
             return self._failure(tx, flow, base, message.error)
         result = message.result
@@ -155,15 +162,13 @@ class ResultApplication:
             raise ValueError("result kind does not match persisted job")
         if attempt is None:
             return self._failure(tx, flow, base, "result has no current attempt")
-        if isinstance(result, (TriageResult, RevisionResult, AnswerResult)):
-            batch = tx.reviews.for_job(job)
+        if isinstance(result, (TriageResult, RevisionResult)):
+            assert batch is not None
             expected = [(f.item_id, f.version) for f in batch.feedback]
             received = [(f.item_id, f.version) for f in result.feedback_refs]
-            if (result.batch_id != batch.id or received != expected
-                    or batch.attempt_id != attempt.id
-                    or batch.state not in {BatchState.READY, BatchState.PROCESSING}):
-                return self._failure(tx, flow, base, "result does not match its frozen review batch")
-            base = base.model_copy(update={"batch_id": batch.id})
+            if result.batch_id != batch.id or received != expected:
+                return base.model_copy(update={"state": JobState.FAILED,
+                    "error": "result does not match its frozen review batch"})
         if isinstance(result, InitialResult):
             base = base.model_copy(
                 update={
@@ -217,7 +222,21 @@ class ResultApplication:
             ]
             return base.model_copy(update={"delivery": delivery, "effects": effects})
         if isinstance(result, TriageResult):
-            verdict = result.verdict
+            assert batch is not None
+            decision = result.decision
+            if batch.context is None or decision.context_digest != batch.context.digest:
+                return base.model_copy(update={"state": JobState.FAILED,
+                    "error": "Judge context digest does not match frozen batch"})
+            verdict = decision.verdict
+            if batch.context.limitations or decision.failure:
+                verdict = TriageVerdict(verdict=Verdict.WAIT, reason=decision.failure
+                    or "incomplete-context", open_points=verdict.open_points)
+            elif verdict.verdict is Verdict.REVISE and (
+                verdict.confidence < self.settings.confidence_threshold
+            ):
+                verdict = TriageVerdict(verdict=Verdict.WAIT, confidence=verdict.confidence,
+                    reason=f"low-confidence: {verdict.reason}"[:2000], open_points=verdict.open_points)
+            tx.reviews.record_decision(job, decision.model_copy(update={"verdict": verdict}))
             if (
                 verdict.verdict is Verdict.REVISE
                 and verdict.confidence >= self.settings.confidence_threshold
@@ -241,10 +260,13 @@ class ResultApplication:
             if verdict.verdict is Verdict.ANSWER:
                 return base.model_copy(
                     update={
-                        "derived": DerivedJob(
-                            kind=JobKind.ANSWER,
-                            payload={"batch_id": batch.id, "question": batch.discussion},
-                        ),
+                        "batch_state": BatchState.COMPLETED,
+                        "consumed": result.feedback_refs,
+                        "effects": [self._comment(flow, self._pr_number(tx, flow), "answer",
+                            verdict.answer + "\n\n来源：" + ", ".join(
+                                _feedback_link(flow.repo, batch.context.pr_number, item.kind,
+                                               item.github_id) for item in batch.feedback
+                            ))],
                     }
                 )
             if verdict.verdict is Verdict.IGNORE:
@@ -256,6 +278,7 @@ class ResultApplication:
                 "open_points": verdict.open_points or [verdict.reason or "Awaiting more discussion."],
             })
         if isinstance(result, RevisionResult):
+            assert batch is not None
             base = base.model_copy(
                 update={
                     "run": RunUpdate(
@@ -292,7 +315,8 @@ class ResultApplication:
                 and (f.kind is ReviewItemKind.REVIEW_BODY or f.signal == "request_changes")
                 and (f.item_id, f.version) not in reported_keys
             )
-            unresolved = len(consumed) != len(batch.feedback) or bool(result.output.needs_clarification)
+            unresolved = (len(consumed) != len(batch.feedback)
+                          or bool(batch.open_points or result.output.needs_clarification))
             effects = [
                 self._comment(
                     flow, number, f"deferred:{index}", f"@ {item.comment_id}: {item.reason}"
@@ -316,27 +340,8 @@ class ResultApplication:
                     "effects": effects,
                     "batch_state": BatchState.WAITING if unresolved else BatchState.COMPLETED,
                     "consumed": consumed,
-                    "open_points": [*result.output.needs_clarification,
+                    "open_points": [*batch.open_points, *result.output.needs_clarification,
                                     *(item.reason for item in result.output.deferred)],
-                }
-            )
-        if isinstance(result, AnswerResult):
-            if not result.answer.strip():
-                return base.model_copy(update={
-                    "batch_state": BatchState.WAITING, "open_points": ["Answer was empty."],
-                })
-            return base.model_copy(
-                update={
-                    "batch_state": BatchState.COMPLETED,
-                    "consumed": result.feedback_refs,
-                    "effects": [
-                        self._comment(
-                            flow,
-                            self._pr_number(tx, flow),
-                            "answer",
-                            result.answer,
-                        )
-                    ]
                 }
             )
         if isinstance(result, ArchiveResult):
@@ -480,6 +485,16 @@ class ResultApplication:
                 )
         except Exception as exc:  # noqa: BLE001
             logger.warning("post-commit plugin hook failed: {}", exc)
+
+
+def _feedback_link(repo: str, number: int, kind: ReviewItemKind, github_id: int) -> str:
+    anchor = {
+        ReviewItemKind.CONVERSATION: "issuecomment",
+        ReviewItemKind.REVIEW_BODY: "pullrequestreview",
+        ReviewItemKind.INLINE: "discussion_r",
+    }[kind]
+    suffix = f"{anchor}{github_id}" if kind is ReviewItemKind.INLINE else f"{anchor}-{github_id}"
+    return f"[{kind.value} {github_id}](https://github.com/{repo}/pull/{number}#{suffix})"
 
 
 def initial_delivery_mismatch(

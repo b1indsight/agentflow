@@ -2,8 +2,25 @@
 
 from datetime import UTC, datetime
 
-from app.models import FeedbackRef, Job, ReviewItemKind
+from app.context_models import ReviewContext, ReviewPullRequest
+from app.judge_models import JudgeDecision
+from app.models import FeedbackRef, Job, ReviewItemKind, TriageVerdict
 from app.review_models import BatchState, ReviewBatch, ReviewFeedback
+
+
+def review_context(batch_id: int = 1) -> ReviewContext:
+    return ReviewContext(
+        batch_id=batch_id, repo="owner/repo", issue_number=8, pr_number=17,
+        pull_request=ReviewPullRequest(
+            number=17, state="open", head_branch="flow/8", head_sha="abc",
+            base_branch="main", base_sha="def", title="Bound retries", body="Use 10 retries",
+        ),
+    )
+
+
+def judge_decision(verdict: TriageVerdict, context: ReviewContext | None = None) -> JudgeDecision:
+    return JudgeDecision(context_digest=(context or review_context()).digest,
+                         session_id="test-session", model="fake", verdict=verdict)
 
 
 class MemoryReviews:
@@ -18,6 +35,7 @@ class MemoryReviews:
             job_id=None,
             open_points=[],
             created_at=datetime.now(UTC),
+            context=review_context(),
             feedback=[
                 ReviewFeedback(
                     item_id=101,
@@ -34,6 +52,15 @@ class MemoryReviews:
 
     def for_job(self, job: Job) -> ReviewBatch:
         return self.batch.model_copy(update={"job_id": job.id})
+
+    def freeze_context(self, job: Job, context: ReviewContext) -> ReviewContext:
+        if self.batch.context is None:
+            self.batch.context = context
+        return self.batch.context
+
+    def record_decision(self, job: Job, decision: JudgeDecision) -> None:
+        self.batch.decision = decision
+        self.batch.open_points = decision.verdict.open_points
 
     def started(self, job: Job) -> bool:
         first = self.batch.state is BatchState.READY

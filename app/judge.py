@@ -1,81 +1,125 @@
-"""Judge 适配器：bub（小型语义判定 agent）。
-
-见 docs/architecture/components.md §4.10、review-loop.md。
-
-用法：把 PR 讨论快照喂给 bub，让它判定 revise/wait/answer/ignore 并综合出 instruction。
-
-TODO(verify) V2：bub 的调用方式与结构化产出。
-  - bub 是 hook-first runtime（pre-0.4，API 会变）。这里先用 subprocess `bub run` 兜底，
-    prompt 要求它只输出一个 JSON；日后可换成库方式（自定 plugin 的 build_prompt/run_model）。
-  - 模型经 BUB_MODEL / BUB_API_KEY（bub 自读环境变量）。
-"""
+"""Run one controlled bub request with bounded time, output, environment and lifetime."""
 
 from __future__ import annotations
 
 import asyncio
-import json
+import os
+import sys
+from importlib.metadata import PackageNotFoundError, version
+from tempfile import TemporaryDirectory
+from uuid import uuid4
 
-from loguru import logger
+from pydantic import SecretStr, ValidationError
 
-from app.models import TriageVerdict, Verdict
+from app.context_models import MAX_CONTEXT_BYTES, ReviewContext
+from app.judge_models import Failure, JudgeDecision, JudgeRequest, strict_json, waiting
 
-_TRIAGE_PROMPT = """\
-You are a triage judge on a GitHub pull request conversation involving multiple people.
-Decide what the code agent should do next. Output ONLY a JSON object:
-{{"verdict": "revise|wait|answer|ignore", "confidence": 0.0-1.0, "reason": "...",
-  "instruction": "if revise: the concrete change to make, synthesized from the discussion",
-  "answer": "if answer: the reply to post", "open_points": ["if wait: undecided points"]}}
 
-Guidance:
-- revise: the discussion reached a conclusion that requires a code change.
-- wait: people are still discussing / no conclusion. Prefer this when ambiguous.
-- answer: someone asks a question about the code that needs a reply, not a change.
-- ignore: chatter / praise / off-topic.
-
-## PR context
-{pr_context}
-
-## New discussion
-{discussion}
-"""
+class OutputLimitError(Exception):
+    pass
 
 
 class BubJudge:
-    """实现 ports.Judge。"""
+    """Judge port. Credentials enter only this adapter and the short-lived child environment."""
 
-    async def triage(self, discussion: str, pr_context: str) -> TriageVerdict:
-        prompt = _TRIAGE_PROMPT.format(pr_context=pr_context, discussion=discussion)
-        raw = await self._bub_run(prompt)
+    def __init__(self, *, model: str = "", api_key: SecretStr | None = None,
+                 api_base: str | None = None, timeout: float = 60.0) -> None:
+        self.model, self.api_key, self.api_base, self.timeout = model, api_key, api_base, timeout
+
+    def configuration_failure(self) -> Failure | None:
+        """Local readiness check: never contacts a provider or reads personal bub settings."""
+        if not self.model or ":" not in self.model or not self.api_key:
+            return "missing-configuration"
+        if not self.api_key.get_secret_value().strip():
+            return "missing-configuration"
         try:
-            data = json.loads(_extract_json(raw))
-            return TriageVerdict.model_validate(data)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("judge parse failed ({}); defaulting to wait. raw={}", e, raw[:200])
-            # 保守默认：解析不了就 wait（docs/architecture/review-loop.md §B.3）
-            return TriageVerdict(verdict=Verdict.WAIT, confidence=0.0, reason="parse-failed")
+            if version("bub") != "0.4.1":
+                return "adapter-unavailable"
+        except PackageNotFoundError:
+            return "adapter-unavailable"
+        return None
 
-    async def answer(self, question: str, pr_context: str) -> str:
-        prompt = f"Answer this question about the PR concisely.\n\n{pr_context}\n\nQ: {question}"
-        return (await self._bub_run(prompt)).strip()
-
-    async def _bub_run(self, prompt: str) -> str:
-        # TODO(verify) V2：确认 `bub run` 的确切用法与输出格式；必要时改库调用。
-        proc = await asyncio.create_subprocess_exec(
-            "bub", "run", prompt,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        out, err = await proc.communicate()
+    async def triage(self, context: ReviewContext) -> JudgeDecision:
+        request = JudgeRequest(session_id=uuid4().hex, context=context)
+        if (context.limitations or len(context.model_dump_json().encode()) > MAX_CONTEXT_BYTES
+                or context.pull_request is None or context.pull_request.state != "open"
+                or context.pull_request.merged):
+            return waiting(request, self.model, "incomplete-context")
+        failure = self.configuration_failure()
+        if failure:
+            return waiting(request, self.model, failure)
+        assert self.api_key is not None
+        env = {
+            "PATH": os.defpath, "LANG": "C.UTF-8",
+            "FLOWTOOL_JUDGE_MODEL": self.model,
+            "FLOWTOOL_JUDGE_API_KEY": self.api_key.get_secret_value(),
+        }
+        if self.api_base:
+            env["FLOWTOOL_JUDGE_API_BASE"] = self.api_base
+        with TemporaryDirectory(prefix="flowtool-judge-") as directory:
+            env["BUB_HOME"] = directory
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    sys.executable, "-I", "-m", "app.judge_runner", env=env, cwd=directory,
+                    stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+            except OSError:
+                return waiting(request, self.model, "start-failed")
+            try:
+                async with asyncio.timeout(self.timeout):
+                    out = await _exchange(proc, request.model_dump_json().encode())
+            except TimeoutError:
+                return waiting(request, self.model, "timeout")
+            except OutputLimitError:
+                return waiting(request, self.model, "output-limit")
+            finally:
+                if proc.returncode is None:
+                    proc.kill()
+                await proc.wait()
         if proc.returncode != 0:
-            logger.error("bub run failed: {}", err.decode()[:300])
-        return out.decode(errors="replace")
+            return waiting(request, self.model, "nonzero-exit")
+        if not out:
+            return waiting(request, self.model, "empty-output")
+        try:
+            decision = JudgeDecision.model_validate(strict_json(out))
+            if (decision.context_digest != context.digest or decision.model != self.model
+                    or decision.session_id != request.session_id):
+                raise ValueError("envelope identity mismatch")
+            return decision
+        except (ValueError, ValidationError):
+            return waiting(request, self.model, "invalid-envelope")
 
 
-def _extract_json(text: str) -> str:
-    """从可能带前后缀的输出里抠出第一个 {...} JSON 块。"""
-    start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end == -1 or end < start:
-        raise ValueError("no json object found")
-    return text[start : end + 1]
+async def _exchange(proc: asyncio.subprocess.Process, request: bytes) -> bytes:
+    """Drain both pipes concurrently so verbose/misbehaving children cannot deadlock or fill RAM."""
+    async def read(stream: asyncio.StreamReader, limit: int) -> bytes:
+        chunks = bytearray()
+        while chunk := await stream.read(8192):
+            chunks.extend(chunk)
+            if len(chunks) > limit:
+                raise OutputLimitError
+        return bytes(chunks)
+
+    assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
+
+    async def write() -> None:
+        assert proc.stdin is not None
+        try:
+            proc.stdin.write(request)
+            await proc.stdin.drain()
+            proc.stdin.close()
+            await proc.stdin.wait_closed()
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # Exit code/envelope below diagnoses a child which exited before reading stdin.
+
+    stdout = asyncio.create_task(read(proc.stdout, 64_000))
+    tasks = [stdout, asyncio.create_task(read(proc.stderr, 16_000)), asyncio.create_task(write())]
+    try:
+        await asyncio.gather(*tasks)
+        await proc.wait()
+        return stdout.result()
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)

@@ -7,6 +7,19 @@ from app.config import ServeSettings, WorkerSettings
 from app.worker.runtime import validate_worker_environment
 
 
+def test_judge_credentials_stay_out_of_config_serialization_and_code_agent_environment(monkeypatch):
+    from app.codex_driver import _codex_environment
+
+    monkeypatch.setenv("FLOWTOOL_JUDGE_MODEL", "openai:test")
+    monkeypatch.setenv("FLOWTOOL_JUDGE_API_KEY", "judge-secret")
+    configured = WorkerSettings(worker_id="worker", worker_token=SecretStr("worker-secret"),
+                                serve_ws_url="wss://example.test/ws")
+    assert configured.judge_model == "openai:test"
+    assert configured.judge_api_key.get_secret_value() == "judge-secret"
+    assert "judge-secret" not in configured.model_dump_json()
+    assert "FLOWTOOL_JUDGE_API_KEY" not in _codex_environment()
+
+
 def test_settings_parse_csv_allowlist_and_expand_paths(monkeypatch, tmp_path) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("FLOWTOOL_ALLOWLIST", "alice, bob ,carol")

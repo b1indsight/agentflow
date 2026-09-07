@@ -6,6 +6,8 @@ from typing import Literal
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
+from app.context_models import ReviewContext
+from app.judge_models import JudgeDecision
 from app.models import FeedbackRef, ReviewItemKind
 
 
@@ -53,10 +55,12 @@ class ReviewBatch(BaseModel):
     feedback: list[ReviewFeedback]
     open_points: list[str]
     created_at: datetime
+    context: ReviewContext | None = None
+    decision: JudgeDecision | None = None
 
     @property
     def discussion(self) -> str:
-        """Render the full discussion context for both triage and answer model calls."""
+        """Render frozen feedback for an authorized direct revision."""
         text = "\n".join(f"{item.author}: {item.body}" for item in self.feedback)
         if self.open_points:
             text += "\nUnresolved questions:\n" + "\n".join(self.open_points)
