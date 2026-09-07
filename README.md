@@ -5,7 +5,7 @@ FlowTool 的目标是把带 `flow` 标签的 GitHub issue 编排成
 项目自身不提供业务 UI，交互面是 GitHub issue 和 PR。
 
 > 当前状态（2026-09-07）：**M0 已验收；M1 Issue→PR 已实现并有自动化覆盖，真实 GitHub E2E 待验收**。
-> 当前实现还包含原子结果恢复，以及 M2 F1 反馈批次、F2 语义决策、F3 修订交付核验与 session 兜底。
+> 当前实现还包含原子结果恢复，以及 M2 F1 反馈批次、F2 语义决策、F3 修订交付核验与 session 兜底、F4 原线程回复与保守 resolve。
 > 自动化使用实际 PostgreSQL 与临时 Git/jj 仓库；真实多轮产品闭环仍待验收。
 
 ## 当前能力
@@ -40,12 +40,16 @@ FlowTool 的目标是把带 `flow` 标签的 GitHub issue 编排成
   control 再核验 PR/head/base/ref 与提交关系。缺 session 或明确未执行的 session 拒绝仅兜底一次，
   journal 防止中断后盲目重跑。未决反馈保留；no-op 或部分完成不重新请求 review。
 
+- **原线程反馈闭环**：control 冻结有界分页的线程/comment 身份，按线程合并 addressed/deferred 说明；
+  处理说明确认发送后，检查完整人类反馈覆盖、当前 PR/head 和较新的本地版本，再 resolve 并复读。
+  回复/resolve 响应丢失由持久账本恢复；新评论进入下一批，权限或映射问题保留诊断并暂停 re-review。
+
 ## 尚未完成
 
 - 真实 GitHub App smoke，以及授权的一次性仓库中的完整 Issue→PR E2E 仍待执行；
   自动化测试使用外部服务替身，不代表真实 GitHub、Codex、bub 集成已验收。
 - bub adapter 已通过真实库加本机假模型端点的契约测试；真实 provider 语义 smoke 仍待执行。
-  review thread 映射与 resolve 由 M2 F4 继续完成；冲突处理和真实多轮闭环仍待验收。
+  review thread 映射、回复和 resolve 已通过自动化；冲突处理和真实多轮闭环仍待验收。
 - Reconciler 目前只定时记录活跃 Flow，尚不拉取 GitHub 状态补偿漏失事件。
 - cancel 会取消本地流程和任务，尚不终止正在执行的 agent 进程；跨 worker session 迁移、
   多 serve 高可用、GitHub-only 网络限制和由项目管理的强隔离运行环境仍属后续工作。
@@ -154,13 +158,18 @@ Python 3.12 分别运行 Ruff、Mypy、pytest 与 sdist/wheel 构建。pytest jo
 结果重放与远端操作核对。数据库用例还覆盖事务回滚、跨连接并发、任务去重、取消交错和恢复期限；
 GitHub、Codex 与模型服务使用替身；Judge 契约测试运行真实 bub 库连接本机假模型端点，不访问真实 provider。
 
-2026-09-07 M2 F3 本机复核：完整 pytest **331 passed / 0 skipped**（真实 PostgreSQL），Ruff、Mypy 和发行包构建通过；
-覆盖反馈批次、Judge/答案恢复，以及 Git/jj 修订核验、session 兜底、额度计数和交付结果原子恢复。保留一个
+2026-09-07 M2 F4 本机复核：完整 pytest **377 passed / 0 skipped**（真实 PostgreSQL），Ruff、Mypy 和发行包构建通过；
+覆盖反馈批次、Judge/答案恢复、Git/jj 修订核验、session 兜底，以及线程分页、原位回复、保守 resolve、
+两轮反馈处理和 PostgreSQL 故障恢复。保留一个
 Starlette TestClient/httpx 弃用告警。数据库 CI 的历史验证见
 [M1 交付修复记录](docs/plan/m1-delivery-review-fixes.md#实施结果)，原子结果改动的验证边界见
 [实施记录](docs/plan/atomic-workflow-results.md#实施记录2026-09-06)。
 
 ## 升级注意
+
+M2 F4 保持 wire protocol v7，在 control 的批次和结果账本中增加线程快照、处理依据和远端回执。
+升级前须完成或人工核对旧 pending revision result/effect；缺少 F4 线程处理意图的旧计划会列出 job ID 并阻止启动。
+旧本地 resolved 不会迁移为远端确认。线程权限失败可完成已验证代码交付，但相关反馈/诊断仍待人工处理。
 
 M2 F3 将任务协议升级到 v7，修订契约必须包含冻结基线与交付证据，serve 和 worker 必须一起升级。先用旧版本排空 queued/running review
 job、重试并完成仍可重试的 failed review job，核对所有未确认旧结果，再停止旧进程；

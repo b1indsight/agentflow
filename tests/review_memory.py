@@ -75,6 +75,27 @@ class MemoryReviews:
     def mark_context_stale(self, job: Job) -> None:
         self.batch.context_stale = True
 
+    def freeze_threads(self, job, snapshot):
+        if self.batch.threads is None:
+            self.batch.threads = snapshot
+        return self.batch.threads
+
+    def addressed(self, flow_id, attempt_id):
+        return []
+
+    def record_addressed(self, *args):
+        pass
+
+    def pending(self, flow_id):
+        consumed = {(f.item_id, f.version) for f in self.consumed}
+        return [f for f in self.batch.feedback if (f.item_id, f.version) not in consumed]
+
+    def get_batch(self, batch_id):
+        return self.batch
+
+    def observe_threads(self, flow_id, snapshot, baseline):
+        pass
+
     def started(self, job: Job) -> bool:
         first = self.batch.state is BatchState.READY
         self.batch.state = BatchState.PROCESSING

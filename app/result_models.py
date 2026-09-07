@@ -6,10 +6,10 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.github_models import PullRequestSnapshot
+from app.github_models import PullRequestSnapshot, ReviewThread
 from app.models import FeedbackRef, FlowDelivery, FlowState, JobKind, JobState
 from app.protocol import RevisionResult
-from app.review_models import BatchState
+from app.review_models import BatchState, ReviewFeedback
 
 
 class FrozenModel(BaseModel):
@@ -53,10 +53,24 @@ class ReviewersEffect(EffectSpec):
 class ResolveEffect(EffectSpec):
     kind: Literal["resolve"] = "resolve"
     thread_id: str
+    number: int | None = None
+    snapshot: ReviewThread | None = None
+    covered: list[ReviewFeedback] = Field(default_factory=list)
+    reply_key: str | None = None
+    allow_resolve: bool = False
+
+
+class ThreadReplyEffect(EffectSpec):
+    kind: Literal["thread_reply"] = "thread_reply"
+    number: int
+    thread_id: str
+    root_comment_id: int
+    body: str
+    feedback_refs: list[FeedbackRef]
 
 
 Effect = Annotated[
-    CommentEffect | PullRequestEffect | LabelsEffect | ReviewersEffect | ResolveEffect,
+    CommentEffect | PullRequestEffect | LabelsEffect | ReviewersEffect | ResolveEffect | ThreadReplyEffect,
     Field(discriminator="kind"),
 ]
 
@@ -85,6 +99,7 @@ class ResultPlan(FrozenModel):
     run: RunUpdate | None = None
     delivery: FlowDelivery | None = None
     revision: RevisionResult | None = None
+    resolution_version: int = 0
     derived: DerivedJob | None = None
     batch_id: int | None = None
     batch_state: BatchState | None = None
@@ -106,6 +121,9 @@ class EffectState(StrEnum):
 class EffectReceipt(FrozenModel):
     comment_id: int | None = None
     pull_request: PullRequestSnapshot | None = None
+    thread_id: str | None = None
+    remote_resolved: bool | None = None
+    pending_reason: str | None = None
 
 
 class EffectRecord(BaseModel):

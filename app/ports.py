@@ -16,6 +16,7 @@ from app.github_models import (
     PushCapability,
     RemoteRef,
     RepositorySnapshot,
+    ReviewThreads,
 )
 from app.judge_models import JudgeDecision
 from app.models import AgentRun, CodeAgentContext, SandboxPolicy
@@ -136,7 +137,21 @@ class GitHubClient(Protocol):
         self, installation_id: int, repo: str, number: int, reviewers: list[str]
     ) -> None: ...
 
-    async def list_review_threads(self, installation_id: int, repo: str, pr: int) -> list[dict]: ...
+    async def list_review_threads(
+        self, installation_id: int, repo: str, pr: int,
+    ) -> ReviewThreads: ...
+
+    async def get_review_thread(
+        self, installation_id: int, repo: str, pr: int, thread_id: str,
+    ) -> ReviewThreads: ...
+
+    async def reply_review_thread(
+        self, installation_id: int, repo: str, pr: int, root_comment_id: int, body: str,
+    ) -> int: ...
+
+    async def find_review_reply(
+        self, installation_id: int, repo: str, pr: int, thread_id: str, marker: str,
+    ) -> int | None: ...
 
     async def resolve_review_thread(self, installation_id: int, thread_id: str) -> None: ...
 

@@ -6,7 +6,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, SecretStr
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, SecretStr
 
 
 class GitHubModel(BaseModel):
@@ -23,6 +23,44 @@ class IssueSnapshot(GitHubModel):
 class RepositorySnapshot(GitHubModel):
     full_name: str
     default_branch: str
+
+
+class ReviewComment(GitHubModel):
+    """Remote comment identity and content version; node_id is never a thread ID."""
+
+    github_id: int = Field(gt=0)
+    node_id: str
+    author: str
+    is_bot: bool
+    body: str
+    updated_at: AwareDatetime
+    reply_to_id: int | None = None
+    original_commit_id: str | None = None
+
+
+class ReviewThread(GitHubModel):
+    thread_id: str
+    repo: str
+    pr_number: int
+    path: str
+    resolved: bool
+    outdated: bool
+    comments: list[ReviewComment]
+    complete: bool = True
+
+
+class ReviewThreads(GitHubModel):
+    """Bounded remote evidence; any limitation prevents automated resolution."""
+
+    repo: str
+    pr_number: int
+    fetched_at: AwareDatetime
+    threads: list[ReviewThread] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+
+    @property
+    def complete(self) -> bool:
+        return not self.limitations and all(thread.complete for thread in self.threads)
 
 
 class RemoteRef(GitHubModel):

@@ -9,7 +9,13 @@ from typing import Any, Literal, TypeVar
 
 import httpx
 from githubkit import AppAuthStrategy, AppInstallationAuthStrategy, GitHub
-from githubkit.exception import AuthCredentialError, AuthExpiredError, RequestError, RequestFailed
+from githubkit.exception import (
+    AuthCredentialError,
+    AuthExpiredError,
+    GraphQLFailed,
+    RequestError,
+    RequestFailed,
+)
 from pydantic import SecretStr
 
 from app.config import ServeSettings
@@ -31,7 +37,9 @@ from app.github_models import (
     PushCapability,
     RemoteRef,
     RepositorySnapshot,
+    ReviewThreads,
 )
+from app.github_threads import ThreadReader
 
 _RESOLVE_THREAD_MUTATION = """
 mutation($threadId: ID!) {
@@ -466,23 +474,45 @@ class GitHubApp:
         )
 
     async def list_review_threads(
-        self, installation_id: int, repo: str, pr: int
-    ) -> list[dict[str, Any]]:
+        self, installation_id: int, repo: str, pr: int,
+    ) -> ReviewThreads:
+        self._split_repo(repo)
+        reader = ThreadReader(self._installation_client(installation_id), repo, pr)
+        return await self._execute("list_review_threads", reader.all)
+
+    async def get_review_thread(
+        self, installation_id: int, repo: str, pr: int, thread_id: str,
+    ) -> ReviewThreads:
+        reader = ThreadReader(self._installation_client(installation_id), repo, pr)
+        return await self._execute("get_review_thread", lambda: reader.one(thread_id))
+
+    async def reply_review_thread(
+        self, installation_id: int, repo: str, pr: int, root_comment_id: int, body: str,
+    ) -> int:
+        """REST replies require the root database ID, not a reply or a GraphQL node ID."""
         owner, name = self._split_repo(repo)
         client = self._installation_client(installation_id)
-        query = """
-        query($owner:String!,$name:String!,$pr:Int!){
-          repository(owner:$owner,name:$name){
-            pullRequest(number:$pr){
-              reviewThreads(first:100){ nodes{ id isResolved comments(first:20){ nodes{ databaseId }}}}
-            }}}
-        """
 
-        async def operation() -> list[dict[str, Any]]:
-            data = await client.async_graphql(query, {"owner": owner, "name": name, "pr": pr})
-            return data["repository"]["pullRequest"]["reviewThreads"]["nodes"]
+        async def operation() -> int:
+            response = await client.rest.pulls.async_create_reply_for_review_comment(
+                owner, name, pr, root_comment_id, body=body,
+            )
+            return int(response.parsed_data.id)
 
-        return await self._execute("list_review_threads", operation)
+        return await self._execute("reply_review_thread", operation)
+
+    async def find_review_reply(
+        self, installation_id: int, repo: str, pr: int, thread_id: str, marker: str,
+    ) -> int | None:
+        snapshot = await self.get_review_thread(installation_id, repo, pr, thread_id)
+        for thread in snapshot.threads:
+            for comment in thread.comments:
+                if (comment.is_bot and comment.author == self._bot_login
+                        and marker in comment.body.splitlines()):
+                    return comment.github_id
+        if not snapshot.complete:
+            raise GitHubAdapterError(GitHubErrorKind.UNEXPECTED_RESPONSE, "find_review_reply")
+        return None
 
     async def resolve_review_thread(self, installation_id: int, thread_id: str) -> None:
         client = self._installation_client(installation_id)
@@ -536,6 +566,16 @@ class GitHubApp:
             return await operation()
         except GitHubAdapterError:
             raise
+        except GraphQLFailed as exc:
+            kinds = {error.type for error in exc.response.errors or []}
+            kind = (GitHubErrorKind.RATE_LIMITED if "RATE_LIMITED" in kinds else
+                    GitHubErrorKind.PERMISSION if "FORBIDDEN" in kinds else
+                    GitHubErrorKind.NOT_FOUND if "NOT_FOUND" in kinds else
+                    GitHubErrorKind.TRANSIENT if kinds & {"INTERNAL", "SERVICE_UNAVAILABLE"} else
+                    GitHubErrorKind.UNEXPECTED_RESPONSE)
+            status = {GitHubErrorKind.PERMISSION: 403, GitHubErrorKind.NOT_FOUND: 404,
+                      GitHubErrorKind.RATE_LIMITED: 429}.get(kind)
+            raise GitHubAdapterError(kind, endpoint, status_code=status) from None
         except RequestFailed as exc:
             raise GitHubApp._request_error(endpoint, exc) from None
         except (AuthCredentialError, AuthExpiredError):

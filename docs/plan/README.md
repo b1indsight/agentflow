@@ -8,6 +8,7 @@
 - [`m2-feedback-batches.md`](m2-feedback-batches.md) — M2 Feature 1/4：已批准并实施持久反馈批次与 settle，本机完整 PostgreSQL 测试通过；
 - [`m2-semantic-triage.md`](m2-semantic-triage.md) — M2 Feature 2/4：bub adapter、有界上下文与幂等答复已实施并通过自动化，真实 provider 语义 smoke 待执行；
 - [`m2-revision-delivery.md`](m2-revision-delivery.md) — M2 Feature 3/4：修订交付核验与一次性 session 兜底已实施并通过自动化，真实多轮 smoke 待验收；
+- [`m2-review-resolution.md`](m2-review-resolution.md) — M2 Feature 4/4：原线程回复、保守 resolve 与持久恢复已实现；完整 PostgreSQL 自动化 377 项通过，真实 M2 矩阵待验收；
 - [`atomic-workflow-results.md`](atomic-workflow-results.md) — 已批准并实施：原子结果提交与 GitHub 操作恢复；本机 118 项通过，30 项 PostgreSQL 用例按要求跳过；
 - [`m1-github-capabilities.md`](m1-github-capabilities.md) — M1 Feature 2/3：GitHub App、短时 push capability 与 PR primitives 已实现并通过自动化，真实 App smoke 待执行；
 - [`m1-issue-to-pr.md`](m1-issue-to-pr.md) — M1 Feature 3/3：Flow 生命周期独占 worker/repo、Flow tool RPC、CodeAgent commit/push、远端验证与一 Flow 一 PR 已实现并通过自动化，真实 E2E 待执行；

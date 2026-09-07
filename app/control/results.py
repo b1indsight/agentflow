@@ -9,6 +9,7 @@ from loguru import logger
 from pluggy import PluginManager
 
 from app.control.effects import ResultEffects
+from app.control.resolution import feedback_link, plan_resolution
 from app.control.revisions import frozen_revision, revision_mismatch, verify_revision_remote
 from app.github_models import GitHubAdapterError
 from app.models import (
@@ -49,6 +50,7 @@ from app.result_models import (
     ResultPlan,
     ReviewersEffect,
     RunUpdate,
+    ThreadReplyEffect,
 )
 from app.review_models import BatchState
 from app.store import Store
@@ -190,6 +192,7 @@ class ResultApplication:
             digest=job.result_digest,
             attempt_id=flow.current_attempt_id,
             state=JobState.DONE,
+            resolution_version=1,
         )
         if flow.state in TERMINAL_STATES:
             return (
@@ -383,22 +386,18 @@ class ResultApplication:
             )
             unresolved = (len(consumed) != len(batch.feedback)
                           or bool(result.output.needs_clarification))
-            effects = [
-                self._comment(
-                    flow, number, f"deferred:{index}", f"@ {item.comment_id}: {item.reason}"
-                )
-                for index, item in enumerate(result.output.deferred)
-            ]
-            effects.extend(
-                self._comment(flow, number, f"question:{index}", f"❓ {question}")
-                for index, question in enumerate(result.output.needs_clarification)
-            )
+            notes = plan_resolution(flow, number, batch, result,
+                                    tx.reviews.addressed(flow.id, attempt.id))
+            blocked = {(f.item_id, f.version) for f in notes.blocked}
+            consumed = [f for f in consumed if (f.item_id, f.version) not in blocked]
+            unresolved |= bool(notes.problems)
+            effects = notes.effects
             new_commit = result.commit_sha != task.expected_head_sha
             if result.output.summary:
                 effects.append(
                     self._comment(
                         flow, number, "summary",
-                        f"{'修订进展' if unresolved else '修订结果'}"
+                        f"修订交付"
                         f"（{'已核验新提交' if new_commit else '无新提交'}）：{result.output.summary}"
                     )
                 )
@@ -411,7 +410,7 @@ class ResultApplication:
                     "revision": result,
                     "batch_state": BatchState.WAITING if unresolved else BatchState.COMPLETED,
                     "consumed": consumed,
-                    "open_points": [*result.output.needs_clarification,
+                    "open_points": [*notes.problems, *result.output.needs_clarification,
                                     *(item.reason for item in result.output.deferred)],
                 }
             )
@@ -478,7 +477,22 @@ class ResultApplication:
             if plan.batch_id is not None:
                 tx.reviews.advance(plan.batch_id, derived)
         if plan.batch_id is not None and plan.batch_state is not None:
-            tx.reviews.complete(plan.batch_id, plan.batch_state, plan.consumed, plan.open_points)
+            consumed = plan.consumed
+            batch_state, open_points = plan.batch_state, list(plan.open_points)
+            if plan.revision is not None:
+                records = tx.results.list_effects(plan.job_id)
+                blocked = {(f.item_id, f.version) for r in records
+                           if isinstance(r.payload, ThreadReplyEffect)
+                           and r.receipt is not None and r.receipt.pending_reason
+                           for f in r.payload.feedback_refs}
+                consumed = [f for f in consumed if (f.item_id, f.version) not in blocked]
+                open_points.extend(r.receipt.pending_reason for r in records
+                                   if r.receipt is not None and r.receipt.pending_reason)
+                if open_points:
+                    batch_state = BatchState.WAITING
+                assert plan.revision.commit_sha is not None
+                tx.reviews.record_addressed(plan.batch_id, consumed, plan.revision.commit_sha, job.id)
+            tx.reviews.complete(plan.batch_id, batch_state, consumed, list(dict.fromkeys(open_points)))
 
     @staticmethod
     def _commit_initial_delivery(tx: Store, job: Job, current: FlowDelivery, flow: Flow) -> None:
@@ -575,13 +589,7 @@ class ResultApplication:
 
 
 def _feedback_link(repo: str, number: int, kind: ReviewItemKind, github_id: int) -> str:
-    anchor = {
-        ReviewItemKind.CONVERSATION: "issuecomment",
-        ReviewItemKind.REVIEW_BODY: "pullrequestreview",
-        ReviewItemKind.INLINE: "discussion_r",
-    }[kind]
-    suffix = f"{anchor}{github_id}" if kind is ReviewItemKind.INLINE else f"{anchor}-{github_id}"
-    return f"[{kind.value} {github_id}](https://github.com/{repo}/pull/{number}#{suffix})"
+    return f"[{kind.value} {github_id}]({feedback_link(repo, number, kind, github_id)})"
 
 
 def initial_delivery_mismatch(
