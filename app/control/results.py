@@ -107,6 +107,22 @@ class ResultApplication:
             raise ResultPending("pre-upgrade result may have produced untracked effects")
         assert plan is not None
         failure = await self.effects.run(plan)
+        if failure and plan.revision is not None:
+            # The push already happened. Keep its verified facts and effect receipts
+            # pending, so an explicit retry can finish delivery without another run.
+            with self.store.transaction() as tx:
+                flow = tx.lock_workflow(plan.flow_id)
+                current = tx.lock_job(job_id)
+                pending = (
+                    flow is not None and current is not None
+                    and flow.state not in TERMINAL_STATES
+                    and flow.current_attempt_id == plan.attempt_id
+                    and current.result_applied_at is None
+                )
+                if pending:
+                    tx.set_job_error(job_id, failure)
+            if pending:
+                raise ResultPending(failure)
         with self.store.transaction() as tx:
             flow = tx.lock_workflow(plan.flow_id)
             current = tx.lock_job(job_id)

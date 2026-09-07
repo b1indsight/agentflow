@@ -75,37 +75,39 @@ class ControlService:
             if fresh is None:
                 raise ValueError(f"flow {flow.id} disappeared")
             if tx.has_pending_result(flow.id):
-                raise ValueError("Flow has a pending result; reconcile its effects before retry")
-            active = tx.get_active_flow(fresh.repo, fresh.issue_number)
-            if active is not None and active.id != fresh.id:
-                raise ValueError(
-                    f"flow {active.id} is already active for {fresh.repo}#{fresh.issue_number}"
-                )
-            if fresh.state is FlowState.ACTIVE:
-                return
-            if fresh.state is FlowState.SUCCEEDED:
-                raise ValueError("a succeeded Flow cannot be retried")
-            # Recovery may have failed the Flow before its queued work was swept.
-            tx.cancel_jobs(fresh.id)
-            failed_job = tx.latest_failed_job(fresh.id)
-            kind = failed_job.kind if failed_job is not None else JobKind.INITIAL
-            if kind is JobKind.ANSWER:
-                raise ValueError("Reconcile legacy ANSWER jobs before upgrading to protocol v6")
-            fresh.state = FlowState.ACTIVE
-            tx.update_flow(fresh)
-            if (failed_job is not None and kind is JobKind.TRIAGE
-                    and tx.reviews.for_job(failed_job).context_stale):
-                tx.reviews.retriage(failed_job)
+                if fresh.state is not FlowState.ACTIVE or not tx.results.retry_revision_effects(fresh):
+                    raise ValueError("Flow has a pending result; reconcile its effects before retry")
             else:
-                replacement = tx.enqueue_job(
-                    fresh.id,
-                    kind,
-                    payload=(
-                        failed_job.payload if failed_job else {"issue_number": fresh.issue_number}
-                    ),
-                )
-                if failed_job is not None and kind in {JobKind.TRIAGE, JobKind.REVISION}:
-                    tx.reviews.retry(failed_job, replacement)
+                active = tx.get_active_flow(fresh.repo, fresh.issue_number)
+                if active is not None and active.id != fresh.id:
+                    raise ValueError(
+                        f"flow {active.id} is already active for {fresh.repo}#{fresh.issue_number}"
+                    )
+                if fresh.state is FlowState.ACTIVE:
+                    return
+                if fresh.state is FlowState.SUCCEEDED:
+                    raise ValueError("a succeeded Flow cannot be retried")
+                # Recovery may have failed the Flow before its queued work was swept.
+                tx.cancel_jobs(fresh.id)
+                failed_job = tx.latest_failed_job(fresh.id)
+                kind = failed_job.kind if failed_job is not None else JobKind.INITIAL
+                if kind is JobKind.ANSWER:
+                    raise ValueError("Reconcile legacy ANSWER jobs before upgrading to protocol v6")
+                fresh.state = FlowState.ACTIVE
+                tx.update_flow(fresh)
+                if (failed_job is not None and kind is JobKind.TRIAGE
+                        and tx.reviews.for_job(failed_job).context_stale):
+                    tx.reviews.retriage(failed_job)
+                else:
+                    replacement = tx.enqueue_job(
+                        fresh.id,
+                        kind,
+                        payload=(
+                            failed_job.payload if failed_job else {"issue_number": fresh.issue_number}
+                        ),
+                    )
+                    if failed_job is not None and kind in {JobKind.TRIAGE, JobKind.REVISION}:
+                        tx.reviews.retry(failed_job, replacement)
         self._jobs_available()
 
     def notify_jobs(self) -> None:

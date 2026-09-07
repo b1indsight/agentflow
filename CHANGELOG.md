@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- 修复已 push 修订遇到通知永久拒绝后无法恢复的问题：保留核验结果与成功回执，显式 retry 仅补发
+  被明确拒绝的通知，不重跑修订或增加轮数；状态不明的通知仍禁止盲目重发。
+- 修订准备阶段的 PR/ref/Issue GitHub 错误进入持久失败及显式重试路径；总时限触发 VCS 取消时
+  回收并等待整个子进程组退出，避免与后续修订重叠。
 - M2 F3：冻结修订的 Flow/attempt/batch、PR/branch/head 与 session generation，每轮签发临时单仓库
   push capability；revision prompt、resume 环境与初始 MCP broker 分离。
 - Git/jj 修订独立核验 branch、clean tree、本地/远端 SHA；control 验证原 open PR、仓库与 fast-forward

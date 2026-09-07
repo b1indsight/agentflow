@@ -35,7 +35,7 @@ FlowTool 的目标是把带 `flow` 标签的 GitHub issue 编排成
   `FLOWTOOL_JUDGE_MODEL` / `FLOWTOOL_JUDGE_API_KEY` 只配置在 worker；可选 API 地址和 60 秒超时见
   [env.example](env.example)。未配置时 Judge 等待，不在健康检查中调用模型。
 - **运维入口**：CLI 可查看 Flow、交付分支/PR、worker、任务恢复状态和未完成的 GitHub 操作，
-  并提供 cancel/retry 命令。存在待核对结果时会拒绝直接 retry。
+  并提供 cancel/retry 命令。已核验修订中被明确拒绝的通知可补发；结果不确定时拒绝直接 retry。
 - **可靠修订**：每轮更新单仓库 push 凭据，复用原 repo/branch/PR；worker 核验 Git/jj 工作区及远端，
   control 再核验 PR/head/base/ref 与提交关系。缺 session 或明确未执行的 session 拒绝仅兜底一次，
   journal 防止中断后盲目重跑。未决反馈保留；no-op 或部分完成不重新请求 review。
@@ -123,7 +123,9 @@ uv run flowtool flow retry <FLOW_ID>
 ```
 
 运维命令在可访问数据库的 control 环境运行。`flow show` 会列出未完成 GitHub 操作的状态、
-下一次尝试时间和错误原因；`flow retry` 重排最近失败的任务，无法代替待核对结果的人工处理。
+下一次尝试时间和错误原因；`flow retry` 重排最近失败的任务。已核验并 push 的修订若遇到 GitHub
+明确拒绝通知（例如 reviewer 请求 422），结果和回执保持待完成；修正 GitHub 端原因后使用同一命令
+只重试失败通知，成功后原子提交交付/session/反馈，不重新运行修订。状态不明的操作仍须先核对。
 
 ## 验证基线
 
@@ -152,7 +154,7 @@ Python 3.12 分别运行 Ruff、Mypy、pytest 与 sdist/wheel 构建。pytest jo
 结果重放与远端操作核对。数据库用例还覆盖事务回滚、跨连接并发、任务去重、取消交错和恢复期限；
 GitHub、Codex 与模型服务使用替身；Judge 契约测试运行真实 bub 库连接本机假模型端点，不访问真实 provider。
 
-2026-09-07 M2 F3 本机复核：完整 pytest **323 passed / 0 skipped**（真实 PostgreSQL），Ruff、Mypy 和发行包构建通过；
+2026-09-07 M2 F3 本机复核：完整 pytest **331 passed / 0 skipped**（真实 PostgreSQL），Ruff、Mypy 和发行包构建通过；
 覆盖反馈批次、Judge/答案恢复，以及 Git/jj 修订核验、session 兜底、额度计数和交付结果原子恢复。保留一个
 Starlette TestClient/httpx 弃用告警。数据库 CI 的历史验证见
 [M1 交付修复记录](docs/plan/m1-delivery-review-fixes.md#实施结果)，原子结果改动的验证边界见
@@ -170,7 +172,8 @@ schema 会一次性导入旧反馈，保留历史表；
 
 session generation 和前轮摘要自动迁移入 attempts。旧 worker journal 必须先确认或人工核对，不能混跑 v6/v7。
 修订失败保留原 worker binding；处理脏工作区或远端偏移后可显式 retry，不自动 reset/rebase/force push。
-CodeAgent 总时限覆盖 resume 与 fallback，超时回收整个 CLI 进程组；用户 cancel 仍不终止运行中的进程。
+修订准备阶段的 GitHub 错误会持久记录为失败；恢复后显式 retry，未 Started 的准备失败不消耗修订轮数。
+CodeAgent 总时限覆盖 resume、fallback 和 VCS 核验，超时回收并等待对应进程组退出；用户 cancel 仍不终止运行中的进程。
 
 从原子结果恢复改动之前的版本升级时，先停止旧 serve，再启动新版本；不支持新旧 serve 混跑。
 旧版本留下的未知结果可能无法自动核实，需要人工处理；回退前也要处理完或隔离新增待办，避免旧版本

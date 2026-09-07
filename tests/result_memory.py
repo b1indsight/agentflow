@@ -2,7 +2,7 @@
 
 from datetime import timedelta
 
-from app.models import utcnow
+from app.models import Flow, utcnow
 from app.result_models import EffectReceipt, EffectRecord, EffectState, ResultPlan
 
 
@@ -14,6 +14,11 @@ class MemoryResults:
 
     def get_plan(self, job_id: int) -> ResultPlan | None:
         return self.plans.get(job_id)
+
+    def retry_revision_effects(self, flow: Flow) -> bool:
+        # Verified revision recovery is exercised against PostgreSQL.
+        assert not any(plan.revision is not None for plan in self.plans.values())
+        return False
 
     def prepare(self, plan: ResultPlan) -> None:
         if plan.job_id in self.plans:

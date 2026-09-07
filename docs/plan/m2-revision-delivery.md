@@ -160,6 +160,9 @@ fallback 启动前后、result 落盘与 ACK 丢失都要测试。进程重启�
   bookkeeping 前崩溃的窗口。fallback/结果重放不增加计数，新 retry job 消耗新额度并保留原 binding。
 - CodeAgent 总时限覆盖本轮 resume/fallback；超时或取消 asyncio 执行会回收整个 CLI 进程组。
   wire/journal 持久化前清除异常或输出中回显的本轮 push token。用户 cancel 不 kill 的既有边界不变。
+- 后续审查修复：已核验修订遇到明确拒绝的通知时保留结果计划与回执，显式 retry 只补发失败通知，
+  完成后提交原有交付/session/反馈，不重新运行修订。状态不明的通知仍需核对，取消后不得补发。
+  PR/ref/Issue 准备错误持久进入失败与显式重试路径；VCS 核验被总时限取消时 kill/reap 整个进程组。
 
 CLI 校准：本机 `codex-cli 0.153.4` 的 `exec resume --help` 确认支持 `--output-schema` 与 `-c`。
 使用临时目录、ephemeral 模式和关闭的本机 provider 端口执行缺失 UUID 探针，未运行模型或改码。
@@ -174,7 +177,7 @@ transport，已在 start fallback/resume 中处理。
 session/journal 兜底边界，control 的错误 PR/base/ref/lineage/反馈身份，以及实际 PostgreSQL 的
 Started 原子计数、结果提交失败、ACK/结果重放、新反馈隔离、cancel 并发、强信号额度和原地 retry。
 
-验证结果：完整 pytest **323 passed / 0 skipped**（实际 PostgreSQL），Ruff 与 Mypy 通过，
+验证结果：完整 pytest **331 passed / 0 skipped**（实际 PostgreSQL），Ruff 与 Mypy 通过，
 `uv build --no-sources` 成功生成 sdist/wheel；仅保留既有 Starlette TestClient/httpx 弃用告警。
 
 真实 disposable GitHub repo 的两轮 Codex resume、完整模型 start fallback 和端到端授权凭据 smoke

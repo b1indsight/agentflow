@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 import pytest
 
 from app.context_models import ReviewPullRequest
-from app.github_models import RemoteRef
+from app.github_models import GitHubAdapterError, GitHubErrorKind, RemoteRef
 from app.models import AddressedComment, DeliveryState, FlowState, JobKind, JobState, ReviewItemKind
 from app.protocol import (
     PROTOCOL_VERSION,
@@ -196,3 +196,121 @@ async def test_protocol_upgrade_refuses_old_started_revision(store, pending_revi
         connection.execute("UPDATE jobs SET payload=payload-'revision' WHERE id=%s", (job.id,))
     with pytest.raises(RuntimeError, match="Drain or reconcile"):
         store.reviews.check_upgrade()
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_rejected_revision_notification_keeps_verified_result_recoverable(
+    store, pending_revision, monkeypatch, cancel,
+):
+    from app.control.service import ControlService
+    from app.result_models import EffectState, ResultPending
+
+    flow, job, task, github, subject = pending_revision
+    assert store.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
+    subject.mark_started(job, task, "worker-a")
+    item = task.feedback[0]
+    output = revision_output(addressed=[AddressedComment(item_id=item.item_id, version=item.version,
+                                                         comment_id=item.github_id, note="Fixed")])
+    result = verified_result(
+        task, commit_sha="revision", remote_sha="revision", output=output,
+        mode="fallback", session_id="new-session", session_generation=1,
+        invocations=[
+            RevisionInvocation(mode="resume", session_id="old-session", exit_code=1,
+                               failure="session_unavailable"),
+            RevisionInvocation(mode="fallback", session_id="new-session", exit_code=0),
+        ],
+    )
+    github.sha = "revision"
+    assert accept(store, job, result) == "pending"
+
+    async def rejected(*args, **kwargs):
+        raise GitHubAdapterError(GitHubErrorKind.VALIDATION, "request_reviewers", status_code=422)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(github, "request_reviewers", rejected)
+        with pytest.raises(ResultPending, match="422"):
+            await subject.results.apply(job.id)
+    assert store.get_job(job.id).result_applied_at is None
+    assert "422" in store.get_job(job.id).last_error
+    assert store.get_flow(flow.id).state is FlowState.ACTIVE
+    assert store.results.get_plan(job.id).revision.model_dump() == result.model_dump()
+    assert store.results.list_effects(job.id)[-1].state is EffectState.FAILED
+    comments, reads = list(github.comments), github.reads
+    # Recovery must wait for an explicit retry, including after control restarts.
+    restarted = coordinator(store, github)
+    with pytest.raises(ResultPending):
+        await restarted.results.apply(job.id)
+    assert github.review_requests == []
+    service = ControlService(store)
+    if cancel:
+        service.cancel(flow)
+        with pytest.raises(ValueError, match="pending result"):
+            service.retry(flow)
+        await restarted.results.apply(job.id)
+        assert github.review_requests == []
+        assert store.get_delivery(flow.id).head_sha == "baseline"
+        return
+    service.retry(flow)
+    assert await restarted.results.apply(job.id) is JobState.DONE
+    assert accept(store, job, result) == "applied"
+    assert github.comments == comments and github.reads == reads
+    assert github.review_requests == [["carol"]]
+    assert store.get_delivery(flow.id).head_sha == "revision"
+    assert store.get_attempt(task.attempt_id).revision_cycles == 1
+    assert store.get_attempt(task.attempt_id).codex_session_id == "new-session"
+    assert store.get_attempt(task.attempt_id).session_generation == 1
+    assert store.reviews.pending(flow.id) == []
+    assert store.assign_job("worker-a", "next-token", "epoch") is None
+
+
+@pytest.mark.parametrize(("endpoint", "kind", "status"), [
+    ("get_review_pull_request", GitHubErrorKind.NOT_FOUND, 404),
+    ("get_ref", GitHubErrorKind.NOT_FOUND, 404),
+    ("get_issue", GitHubErrorKind.NOT_FOUND, 404),
+    ("get_ref", GitHubErrorKind.TRANSIENT, 503),
+])
+async def test_revision_preparation_failure_is_persisted_and_explicitly_retryable(
+    store, pending_revision, monkeypatch, endpoint, kind, status,
+):
+    from app.control.service import ControlService
+
+    flow, job, task, github, subject = pending_revision
+
+    async def unavailable(*args):
+        raise GitHubAdapterError(kind, endpoint, status_code=status)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(github, endpoint, unavailable)
+        assert await subject.prepare(job) is JobState.FAILED
+    failed = store.get_job(job.id)
+    assert failed.state is JobState.FAILED and failed.result_applied_at is not None
+    assert endpoint in failed.last_error
+    assert store.get_flow(flow.id).state is FlowState.FAILED
+    assert store.get_attempt(task.attempt_id).revision_cycles == 0
+    ControlService(store).retry(flow)
+    replacement = store.assign_job("worker-a", "retry-token", "epoch")
+    assert isinstance(await subject.prepare(replacement), RevisionTask)
+    assert store.get_attempt(task.attempt_id).revision_cycles == 0
+
+
+async def test_uncertain_revision_notification_cannot_be_explicitly_resent(
+    store, pending_revision, monkeypatch,
+):
+    from app.control.service import ControlService
+    from app.result_models import EffectState, ResultPending
+
+    flow, job, task, github, subject = pending_revision
+    assert store.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
+    subject.mark_started(job, task, "worker-a")
+    assert accept(store, job, verified_result(task)) == "pending"
+
+    async def unknown(*args, **kwargs):
+        raise GitHubAdapterError(GitHubErrorKind.TRANSIENT, "comment")
+
+    monkeypatch.setattr(github, "comment", unknown)
+    with pytest.raises(ResultPending):
+        await subject.results.apply(job.id)
+    assert store.results.list_effects(job.id)[0].state is EffectState.UNCERTAIN
+    with pytest.raises(ValueError, match="pending result"):
+        ControlService(store).retry(flow)
+    assert store.get_job(job.id).result_applied_at is None

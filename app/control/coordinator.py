@@ -179,15 +179,25 @@ class JobCoordinator:
             if execution is None or execution.released_at is not None:
                 await self.fail(job, "修订任务缺少有效 worker binding。")
                 return JobState.FAILED
-            mismatch = await verify_revision_remote(
-                self.github, flow, delivery, delivery.head_sha or "",
-            )
+            try:
+                mismatch = await verify_revision_remote(
+                    self.github, flow, delivery, delivery.head_sha or "",
+                )
+                if not mismatch:
+                    assert flow.installation_id is not None
+                    issue = await self.github.get_issue(
+                        flow.installation_id, flow.repo, flow.issue_number,
+                    )
+            except GitHubAdapterError as exc:
+                # Preparation has not consumed a revision cycle. Persist the failure so
+                # transient outages can be retried explicitly without reconnect loops.
+                await self.fail(job, str(exc))
+                return JobState.FAILED
             if mismatch:
                 await self.fail(job, mismatch)
                 return JobState.FAILED
             assert flow.installation_id is not None
             assert delivery.head_sha and delivery.base_branch and delivery.pr_number
-            issue = await self.github.get_issue(flow.installation_id, flow.repo, flow.issue_number)
             task = RevisionTask(
                 batch_id=batch.id,
                 flow_id=flow.id,

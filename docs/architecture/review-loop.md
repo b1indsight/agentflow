@@ -90,7 +90,7 @@ note/reason；control 拒绝未知、重复、跨版本或互相冲突的引用�
 重新核验 repo/ref 后最多 start 一次；其他错误和不确定结果保留反馈并暂停。journal 在进程启动前记录
 resume/fallback 阶段、一次性兜底消耗和 invocation 结果。重启时没有 terminal 的 started job 不自动重跑。
 `Started` 与 revision_cycles 同事务提交，fallback/重放不增额度；新的显式 retry job 消耗新额度，保留原 worker binding。
-成功接受新 session 后才更新 generation。全过程受 CodeAgent 总时限约束，超时回收 CLI 进程组。
+成功接受新 session 后才更新 generation。全过程受 CodeAgent 总时限约束，超时回收并等待 CLI/VCS 进程组退出。
 真实 GitHub/Codex 两轮 resume 和 start 兜底 smoke 尚未执行，完整 M2 仍待验收。
 
 ## B.5 取消、重试与恢复
@@ -104,6 +104,11 @@ resume/fallback 阶段、一次性兜底消耗和 invocation 结果。重启时�
 - 上下文读取和 capability 准备期间持续续租；冻结前验证任务所有权和租约，派发前再次验证 token/epoch。
   过期或已重新分配的准备结果不得冻结或派发；未开始执行的准备任务在重启后由正常恢复流程重新排队。
 - 已接收的结果依然通过原子结果应用与 GitHub effect ledger 恢复，不能因重放重复派生或消费。
+- 已核验修订遇到明确拒绝的 GitHub 通知时，保留未完成的结果计划、交付/session 事实及成功回执，
+  Flow 保持 ACTIVE；显式 retry 仅重新启用已确认未成功发送的通知，完成后统一提交结果，不创建新修订任务。
+  取消后不能补发；状态不明或仍在执行的通知不得通过显式 retry 重发。
+- 修订准备阶段的 PR/ref/Issue 读取错误持久进入失败路径，包括临时 GitHub 故障；恢复后显式 retry，
+  不因 worker 重连无限重排，也不在 Started 前消耗修订额度。
 - schema 一次性导入旧 review_threads 的最新对象，保留历史表；旧 resolved 标记不作为远端确认。
 - 协议 v7 要求严格修订交付证据与冻结 assignment，serve/worker 一起升级。先用旧版本排空 queued/running review jobs，重试并完成仍可
   重试的 failed review jobs，核对所有未确认旧结果，然后停止旧进程再升级；新 serve 检查这些旧待办

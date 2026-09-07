@@ -65,9 +65,14 @@ async def _run(
     )
     try:
         out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except TimeoutError as error:
-        os.killpg(proc.pid, signal.SIGKILL)
+    except (TimeoutError, asyncio.CancelledError) as error:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
         await proc.wait()
+        if isinstance(error, asyncio.CancelledError):
+            raise
         raise VcsVerificationError(stage, f"{args[0]} command timed out after {timeout:g}s") from error
     return proc.returncode or 0, out.decode(errors="replace"), err.decode(errors="replace")
 
