@@ -7,6 +7,9 @@
 - control 冻结有界 Issue/PR/patch/讨论快照，绑定 head/base SHA 与 context digest；缺失/截断保守 wait。
 - answer 直接发布已校验答案及来源，取消、旧 attempt 和变化的 PR 在发送前拦截；持久回执后精确消费，
   不再创建 ANSWER worker job 或二次调用模型。reason/open_points 和模型/adapter 信息随批次持久保存。
+- 修复上下文冻结前重启被误判为旧任务，以及 Judge 输出超限后管道阻塞导致回收挂起的问题。
+- 无效决策引用或摘要使 Flow 进入可重试失败状态；head/base 变化后 retry 重建上下文并保留旧批次审计。
+- 上下文和 capability 准备期间续租，冻结与派发前校验任务所有权，防止过期分配派发或覆盖新任务。
 - 协议升级至 v6：serve/worker 同步升级，旧 ANSWER 任务和未应用旧协议结果须先处理；真实 provider
   的语义 smoke 尚未执行，假模型端点验证的是 adapter 契约和控制流。
 - M2 F1：反馈版本、settle deadline 和冻结批次持久化；事件交接、批次任务派生及结果消费原子提交。

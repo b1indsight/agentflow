@@ -149,7 +149,7 @@ Python 3.12 分别运行 Ruff、Mypy、pytest 与 sdist/wheel 构建。pytest jo
 结果重放与远端操作核对。数据库用例还覆盖事务回滚、跨连接并发、任务去重、取消交错和恢复期限；
 GitHub、Codex 与模型服务使用替身；Judge 契约测试运行真实 bub 库连接本机假模型端点，不访问真实 provider。
 
-2026-09-07 M2 F2 本机复核：完整 pytest **250 passed / 0 skipped**（真实 PostgreSQL），Ruff、Mypy 和发行包构建通过；
+2026-09-07 M2 F2 本机复核：完整 pytest **264 passed / 0 skipped**（真实 PostgreSQL），Ruff、Mypy 和发行包构建通过；
 覆盖反馈交接/领取回滚、重启、并发、版本隔离、等待接续、乱序编辑回放、Judge 契约和答案恢复。保留一个
 Starlette TestClient/httpx 弃用告警。数据库 CI 的历史验证见
 [M1 交付修复记录](docs/plan/m1-delivery-review-fixes.md#实施结果)，原子结果改动的验证边界见
@@ -160,8 +160,9 @@ Starlette TestClient/httpx 弃用告警。数据库 CI 的历史验证见
 M2 F2 将任务协议升级到 v6，删除 ANSWER task/result，serve 和 worker 必须一起升级。先用旧版本排空 queued/running review
 job、重试并完成仍可重试的 failed review job，核对所有未确认旧结果，再停止旧进程；
 历史失败的 ANSWER 也须核对并处理；已被替换的其他历史失败不阻止升级。新 serve 遇到旧 ANSWER、
-缺 batch/冻结上下文的旧在途任务或旧协议未确认结果
-会拒绝启动并列出 job ID。不要手工清除结果标记来绕过检查。schema 会一次性导入旧反馈，保留历史表；
+缺 batch 的旧在途任务、已开始执行却缺冻结上下文的 TRIAGE 或旧协议未确认结果
+会拒绝启动并列出 job ID；尚未开始执行的上下文准备任务可正常恢复。不要手工清除结果标记来绕过检查。
+schema 会一次性导入旧反馈，保留历史表；
 旧 resolved 标记不代表 GitHub 已确认。详见[Review 循环](docs/architecture/review-loop.md#b5-取消重试与恢复)。
 
 从原子结果恢复改动之前的版本升级时，先停止旧 serve，再启动新版本；不支持新旧 serve 混跑。

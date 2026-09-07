@@ -167,7 +167,7 @@ class ResultApplication:
             expected = [(f.item_id, f.version) for f in batch.feedback]
             received = [(f.item_id, f.version) for f in result.feedback_refs]
             if result.batch_id != batch.id or received != expected:
-                return base.model_copy(update={"state": JobState.FAILED,
+                return base.model_copy(update={"state": JobState.FAILED, "flow_state": FlowState.FAILED,
                     "error": "result does not match its frozen review batch"})
         if isinstance(result, InitialResult):
             base = base.model_copy(
@@ -225,7 +225,7 @@ class ResultApplication:
             assert batch is not None
             decision = result.decision
             if batch.context is None or decision.context_digest != batch.context.digest:
-                return base.model_copy(update={"state": JobState.FAILED,
+                return base.model_copy(update={"state": JobState.FAILED, "flow_state": FlowState.FAILED,
                     "error": "Judge context digest does not match frozen batch"})
             verdict = decision.verdict
             if batch.context.limitations or decision.failure:

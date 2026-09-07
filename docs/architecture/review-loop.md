@@ -88,12 +88,18 @@ note/reason；control 拒绝未知、重复、跨版本或互相冲突的引用�
 - Flow 终态时退休 buffer/活动批次，恢复 sweep 同时退休残留 queued jobs；取消仍不 kill 运行中的 agent。
 - 显式 retry 先清理残留排队任务，仅重试当前失败任务，已被后续任务替换的历史失败不再作为候选。
   当前失败 review 将原冻结批次交给新的 job，保留后到的新版本；没有当前失败任务时走 INITIAL。
+  若答案发布前 head/base 变化，旧批次标记 `context_stale`；显式 retry 用最新未消费反馈及未决点
+  创建新批次并重取快照，旧快照和决策保留供审计。无效反馈引用或 context digest 使当前 Flow
+  失败且不发布评论，允许通过显式 retry 恢复。
+- 上下文读取和 capability 准备期间持续续租；冻结前验证任务所有权和租约，派发前再次验证 token/epoch。
+  过期或已重新分配的准备结果不得冻结或派发；未开始执行的准备任务在重启后由正常恢复流程重新排队。
 - 已接收的结果依然通过原子结果应用与 GitHub effect ledger 恢复，不能因重放重复派生或消费。
 - schema 一次性导入旧 review_threads 的最新对象，保留历史表；旧 resolved 标记不作为远端确认。
 - 协议 v6 删除 ANSWER task/result，要求 serve/worker 一起升级。先用旧版本排空 queued/running review jobs，重试并完成仍可
   重试的 failed review jobs，核对所有未确认旧结果，然后停止旧进程再升级；新 serve 检查这些旧待办
   并给出 job ID，禁止猜测缺失的 batch/版本。旧 ANSWER（含 failed）必须核对并处理；已被后续任务
   替换的其他历史失败不阻止启动。旧 worker journal 的未确认任务/结果也要先处理，不能混跑 v5/v6。
+  缺上下文的 TRIAGE 仅在已开始执行时阻止启动，尚在准备中的当前协议任务可恢复。
 
 ## B.6 参数与验证
 
@@ -110,6 +116,7 @@ note/reason；control 拒绝未知、重复、跨版本或互相冲突的引用�
 | `FLOWTOOL_MAX_REVISION_CYCLES` | 20 | 每 attempt 的修订次数限制 |
 
 PostgreSQL 自动化覆盖入口回滚、并发领取、重启、批次内外版本、删除、wait 接续、强信号授权、
-结果重放和 retry，以及快照冻结、直接答案丢失回执恢复、旧 attempt/关闭 PR/head 变化拦截。
+结果重放和 retry，以及快照冻结前重启、准备期续租与过期隔离、无效结果恢复、直接答案丢失回执恢复、
+旧 attempt/关闭 PR/head 变化拦截和过期上下文重建。
 bub 0.4.1 使用本机假模型端点校准真实库行为；真实 provider 的语义 smoke、Codex/GitHub 多轮闭环
 及线程操作仍待各 feature 验收。

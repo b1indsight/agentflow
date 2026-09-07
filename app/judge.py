@@ -9,6 +9,7 @@ from importlib.metadata import PackageNotFoundError, version
 from tempfile import TemporaryDirectory
 from uuid import uuid4
 
+from loguru import logger
 from pydantic import SecretStr, ValidationError
 
 from app.context_models import MAX_CONTEXT_BYTES, ReviewContext
@@ -74,9 +75,7 @@ class BubJudge:
             except OutputLimitError:
                 return waiting(request, self.model, "output-limit")
             finally:
-                if proc.returncode is None:
-                    proc.kill()
-                await proc.wait()
+                await _reap(proc)
         if proc.returncode != 0:
             return waiting(request, self.model, "nonzero-exit")
         if not out:
@@ -89,6 +88,28 @@ class BubJudge:
             return decision
         except (ValueError, ValidationError):
             return waiting(request, self.model, "invalid-envelope")
+
+
+async def _reap(proc: asyncio.subprocess.Process) -> None:
+    """Kill and drain together: a paused pipe can block Process.wait even after SIGKILL."""
+    if proc.returncode is None:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass  # The child exited between the returncode check and the signal.
+    if proc.stdin is not None:
+        proc.stdin.close()
+
+    async def discard(stream: asyncio.StreamReader) -> None:
+        while await stream.read(8192):
+            pass
+
+    try:
+        async with asyncio.timeout(5):
+            await asyncio.gather(proc.wait(), *(discard(stream) for stream in
+                (proc.stdout, proc.stderr) if stream is not None))
+    except TimeoutError:
+        logger.warning("Judge cleanup exceeded its time limit after termination")
 
 
 async def _exchange(proc: asyncio.subprocess.Process, request: bytes) -> bytes:

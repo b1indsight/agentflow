@@ -133,10 +133,16 @@ adapter 或依赖变更，再在同一 PR 完成审批，不能退回共享个�
   与 head/base，新反馈和新版本留到下一批。revise 的未决点继续保存供 F3/F4 消费。
 - 验证覆盖严格数值/动作契约、隔离配置、无工具、重复/污染 JSON、非零退出、输出大小、启动失败、
   timeout/取消回收、分页、快照大小/缺失/读取期间 SHA 变化、等待接续、精确消费及 PostgreSQL 恢复。
+- 审查修复：未开始执行的 TRIAGE 即使尚无上下文也可重启恢复；已开始却缺上下文的旧任务仍阻止启动。
+  Judge 超限退出后持续排空 stdout/stderr，并将终止回收限制为 5 秒；真实子进程覆盖两条管道的持续输出。
+- 无效反馈引用或 context digest 使当前 Flow 失败且不发布评论，支持显式 retry。发布前 head/base 变化
+  则标记旧上下文过期；retry 用最新未消费反馈创建新批次并重取快照，保留旧快照和决策供审计。
+- 上下文分页读取和 capability 准备期间续租；冻结前校验任务所有权与租约，派发前再次校验 token/epoch。
+  PostgreSQL 用例覆盖过期、重新分配及超过初始租约的准备过程，避免旧准备结果覆盖或派发新分配的任务。
 - 升级要求：旧 serve/worker 排空在途 review、处理 failed ANSWER 和所有未应用旧结果/journal，
   再一起升级。保留历史 `JobKind.ANSWER` 只供数据库读取，禁止恢复到已删除的执行协议。
 - 真实语义 smoke：**未执行**。本机假模型测试只证明 adapter/控制流契约，不代表真实模型对中英文、
   矛盾讨论、注入式文本的语义准确率。本 feature 尚未全面语义验收；需部署时指定真实模型与受控快照集。
-- 验证结果：Ruff、Mypy、完整 pytest **250 passed / 0 skipped**（真实 PostgreSQL）和
+- 验证结果：Ruff、Mypy、完整 pytest **264 passed / 0 skipped**（真实 PostgreSQL）和
   `uv build --no-sources` 通过。保留既有 Starlette TestClient/httpx 弃用告警。
   当前环境未配置 `FLOWTOOL_JUDGE_MODEL` / `FLOWTOOL_JUDGE_API_KEY`；未调用真实付费 provider。

@@ -62,6 +62,9 @@ class MemoryReviews:
         self.batch.decision = decision
         self.batch.open_points = decision.verdict.open_points
 
+    def mark_context_stale(self, job: Job) -> None:
+        self.batch.context_stale = True
+
     def started(self, job: Job) -> bool:
         first = self.batch.state is BatchState.READY
         self.batch.state = BatchState.PROCESSING

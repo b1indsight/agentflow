@@ -154,6 +154,14 @@ class JobCoordinator:
                     if (fresh is None or current is None or fresh.state in TERMINAL_STATES
                             or fresh.current_attempt_id != attempt.id):
                         return JobState.DONE
+                    if job.assignment_token is not None and (
+                        current.state is not JobState.RUNNING
+                        or current.assigned_worker_id != job.assigned_worker_id
+                        or current.assignment_token != job.assignment_token
+                        or current.lease_expires_at is None
+                        or current.lease_expires_at <= tx.now()
+                    ):
+                        return JobState.QUEUED
                     context = tx.reviews.freeze_context(current, context)
             return TriageTask(
                 batch_id=batch.id,

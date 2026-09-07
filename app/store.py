@@ -954,7 +954,10 @@ class Store:
             result = connection.execute(
                 "UPDATE jobs SET heartbeat_at=%s, lease_expires_at=%s, updated_at=%s"
                 " WHERE id=%s AND state=%s AND assigned_worker_id=%s"
-                " AND assignment_token=%s AND EXISTS (SELECT 1 FROM workers"
+                " AND assignment_token=%s"
+                " AND (started_at IS NOT NULL OR (lease_expires_at>%s AND EXISTS"
+                " (SELECT 1 FROM flows f WHERE f.id=jobs.flow_id AND f.state='active')))"
+                " AND EXISTS (SELECT 1 FROM workers"
                 " WHERE worker_id=%s AND connection_epoch=%s)",
                 (
                     now,
@@ -964,6 +967,7 @@ class Store:
                     JobState.RUNNING,
                     worker_id,
                     token,
+                    now,
                     worker_id,
                     connection_epoch,
                 ),

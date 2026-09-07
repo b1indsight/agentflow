@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import sys
 from contextlib import asynccontextmanager
 
 import pytest
@@ -159,6 +160,8 @@ class ChildProcess:
     def kill(self):
         self.killed = True
         self.returncode = -9
+        self.stdout.feed_eof()
+        self.stderr.feed_eof()
 
     async def wait(self):
         self.waited = True
@@ -216,6 +219,34 @@ async def test_process_start_error_is_sanitized(monkeypatch):
     result = await BubJudge(model="openai:test", api_key=SecretStr("fake")).triage(context())
     assert result.failure == "start-failed"
     assert "secret-path" not in result.model_dump_json()
+
+
+@pytest.mark.parametrize("fd", [1, 2])
+async def test_real_flooded_pipe_is_drained_when_child_is_killed(monkeypatch, fd):
+    original = asyncio.create_subprocess_exec
+    children = []
+
+    async def start(*args, **kwargs):
+        # A low transport watermark makes the paused-pipe race deterministic on macOS and Linux.
+        child = await original(sys.executable, "-c",
+            f"import os\nwhile True: os.write({fd}, b'x' * 65536)", limit=1024, **kwargs)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", start)
+    task = asyncio.create_task(BubJudge(model="openai:test", api_key=SecretStr("fake"),
+                                        timeout=10).triage(context()))
+    done, _ = await asyncio.wait({task}, timeout=3)
+    if not done:
+        # Keep a failing regression test from leaking the old implementation's blocked process.
+        for child in children:
+            if child.returncode is None:
+                child.kill()
+            await asyncio.gather(child.stdout.read(), child.stderr.read())
+        await task
+    assert done, "Judge hung waiting for a killed child with a paused output transport"
+    assert task.result().failure == "output-limit"
+    assert children[0].returncode is not None
 
 
 @pytest.mark.parametrize("tool_calls,finish", [

@@ -56,6 +56,7 @@ class ReviewBatch(BaseModel):
     open_points: list[str]
     created_at: datetime
     context: ReviewContext | None = None
+    context_stale: bool = False
     decision: JudgeDecision | None = None
 
     @property

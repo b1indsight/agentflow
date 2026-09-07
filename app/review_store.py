@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS review_batches (
 CREATE UNIQUE INDEX IF NOT EXISTS ux_review_active_batch ON review_batches(flow_id)
   WHERE state IN ('ready','processing');
 ALTER TABLE review_batches ADD COLUMN IF NOT EXISTS context JSONB;
+ALTER TABLE review_batches ADD COLUMN IF NOT EXISTS context_stale BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE review_batches ADD COLUMN IF NOT EXISTS decision JSONB;
 CREATE INDEX IF NOT EXISTS ix_review_due ON review_buffers(due_at) WHERE due_at IS NOT NULL;
 CREATE TABLE IF NOT EXISTS review_migrations (version INTEGER PRIMARY KEY);
@@ -415,6 +416,20 @@ class ReviewStore:
         if any((f.item_id, f.version) not in frozen for f in self.pending(batch.flow_id)):
             self._touch(batch.flow_id, 0)
 
+    def mark_context_stale(self, job: Job) -> None:
+        """Retain the old evidence while recording that explicit retry needs a new batch."""
+        batch = self.for_job(job)
+        with self.store.connection() as connection:
+            connection.execute("UPDATE review_batches SET context_stale=TRUE WHERE id=%s", (batch.id,))
+
+    def retriage(self, previous: Job) -> None:
+        """Under the workflow lock, feed stale unconsumed input into normal batch creation."""
+        batch = self.for_job(previous)
+        with self.store.connection() as connection:
+            connection.execute("UPDATE review_batches SET state='waiting' WHERE id=%s", (batch.id,))
+        self._touch(batch.flow_id, 0)
+        self._claim(batch.flow_id, batch.attempt_id)
+
     def complete(
         self,
         batch_id: int,
@@ -461,7 +476,7 @@ class ReviewStore:
                 " OR (result_received_at IS NOT NULL AND result_applied_at IS NULL"
                 " AND result_payload->>'protocol_version' IS DISTINCT FROM '6')"
                 " OR (kind='answer' AND state IN ('queued','running','failed'))"
-                " OR (kind='triage' AND state='running' AND NOT EXISTS"
+                " OR (kind='triage' AND state='running' AND started_at IS NOT NULL AND NOT EXISTS"
                 " (SELECT 1 FROM review_batches b WHERE b.job_id=j.id AND b.context IS NOT NULL))"
                 " ORDER BY id",
             ).fetchall()
