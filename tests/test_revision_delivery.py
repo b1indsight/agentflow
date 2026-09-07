@@ -150,6 +150,12 @@ async def revision_control():
     store.delivery = FlowDelivery(flow_id=1, branch="flow/1", base_branch="trunk",
                                   state=DeliveryState.OPEN, pr_number=17, head_sha="abc123")
     job = Job(id=21, flow_id=1, kind=JobKind.REVISION, state=JobState.RUNNING)
+    from app.github_models import ReviewComment, ReviewThread
+    item = store.reviews.batch.feedback[0]
+    github.threads = [ReviewThread(thread_id="T1", repo="owner/repo", pr_number=17,
+        path="app.py", resolved=False, outdated=False, comments=[ReviewComment(
+            github_id=item.github_id, node_id="C500", author=item.author, is_bot=False,
+            body=item.body, updated_at=item.updated_at)])]
     subject = coordinator(store, github)
     from tests.review_memory import review_context
 

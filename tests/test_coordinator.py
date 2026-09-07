@@ -16,6 +16,7 @@ from app.github_models import (
     PushCapability,
     RemoteRef,
     RepositorySnapshot,
+    ReviewThread,
 )
 from app.models import (
     Attempt,
@@ -266,6 +267,8 @@ class RecordingGitHub:
         self.opened: list[str] = []
         self.review_requests: list[list[str]] = []
         self.labels: list[list[str]] = []
+        self.threads: list[ReviewThread] = []
+        self.thread_replies: list[str] = []
 
     async def get_issue(self, installation_id: int, repo: str, number: int) -> IssueSnapshot:
         return IssueSnapshot(number=number, title="Real issue", body="Real body", state="open")
@@ -281,6 +284,22 @@ class RecordingGitHub:
     async def list_pull_request_discussions(self, *args):
         from app.context_models import DiscussionPage
         return DiscussionPage(discussions=[])
+
+    async def list_review_threads(self, installation_id, repo, number):
+        from app.github_models import ReviewThreads
+        return ReviewThreads(repo=repo, pr_number=number, fetched_at=datetime.now(UTC),
+                             threads=[t.model_copy(deep=True) for t in self.threads])
+
+    async def get_review_thread(self, installation, repo, number, thread_id):
+        return await self.list_review_threads(installation, repo, number)
+
+    async def find_review_reply(self, installation, repo, number, thread_id, marker):
+        return next((i + 1 for i, body in enumerate(self.thread_replies)
+                     if marker in body.splitlines()), None)
+
+    async def reply_review_thread(self, installation, repo, number, root, body):
+        self.thread_replies.append(body)
+        return len(self.thread_replies)
 
     async def get_repository(self, installation_id: int, repo: str) -> RepositorySnapshot:
         return RepositorySnapshot(full_name=repo, default_branch="trunk")
@@ -352,7 +371,8 @@ class RecordingGitHub:
         self.labels.append(labels)
 
     async def resolve_review_thread(self, installation_id: int, thread_id: str) -> None:
-        pass
+        self.threads = [t.model_copy(update={"resolved": True}) if t.thread_id == thread_id else t
+                        for t in self.threads]
 
 
 async def apply_result(subject: JobCoordinator, job: Job, result: ExecutionResult) -> JobState:

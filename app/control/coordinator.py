@@ -9,7 +9,7 @@ from loguru import logger
 from app.control.results import ResultApplication
 from app.control.revisions import verify_revision_remote
 from app.control.tools import FlowToolService
-from app.github_models import GitHubAdapterError
+from app.github_models import GitHubAdapterError, ReviewThreads
 from app.models import (
     TERMINAL_STATES,
     Attempt,
@@ -18,6 +18,7 @@ from app.models import (
     Job,
     JobKind,
     JobState,
+    ReviewItemKind,
 )
 from app.plugins import get_plugin_manager
 from app.ports import GitHubClient
@@ -142,6 +143,24 @@ class JobCoordinator:
                 BatchState.READY, BatchState.PROCESSING,
             }:
                 raise ValueError("review batch is no longer current")
+
+        if job.kind in {JobKind.TRIAGE, JobKind.REVISION} and batch.threads is None and any(
+            f.kind is ReviewItemKind.INLINE for f in batch.feedback
+        ):
+            assert flow.installation_id is not None
+            number = self._pr_number(flow, attempt)
+            try:
+                threads = await self.github.list_review_threads(flow.installation_id, flow.repo, number)
+            except GitHubAdapterError as exc:
+                threads = ReviewThreads(repo=flow.repo, pr_number=number, fetched_at=self.store.now(),
+                                        limitations=[f"threads:{exc.kind.value}"])
+            with self.store.transaction() as tx:
+                fresh = tx.lock_workflow(flow.id)
+                current = tx.lock_job(job.id)
+                if (fresh is None or current is None or fresh.state in TERMINAL_STATES
+                        or fresh.current_attempt_id != attempt.id):
+                    return JobState.DONE
+                batch.threads = tx.reviews.freeze_threads(current, threads)
 
         if job.kind is JobKind.TRIAGE:
             context = batch.context

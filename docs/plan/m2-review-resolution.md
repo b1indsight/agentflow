@@ -1,7 +1,8 @@
 # M2 Feature 4/4：review 线程回复、自动 resolve 与闭环验收
 
-> 状态：待审批，plan only · 日期：2026-09-07 · 基线：`main` / `9fd98266`（PR #18）
-> Bookmark：`feat/m2-review-resolution`；本 PR 获批后继续承载实现。
+> 状态：已批准并实施，自动化通过；真实 M2 矩阵待验收 · 日期：2026-09-07
+> 实施基线：`main` / `f305acd5`（PR #21，前置 #19–#21 均已合并）
+> Bookmark：`feat/m2-review-resolution`；本 PR 继续承载实现；用户于 2026-09-07 指示“做pr #22”。
 > 实现前置：F1 `feat/m2-feedback-batches`、F2 `feat/m2-semantic-triage`、
 > F3 `feat/m2-revision-delivery`。本 feature 是 M2 集成验收入口。
 
@@ -135,4 +136,21 @@ deferred/clarification/遗漏/新版本/远端 SHA 变化时保留；reply 在 r
 记录运行日期、CLI/adapter/model 版本、GitHub 对象链接、数据库批次/结果摘要和失败项，禁止记录密钥。
 任何未运行场景单列“待验收”；只有自动化与真实矩阵都达到预期，才把 M2 标为已验收。
 
-本 PR 当前仅包含计划。M3 的人工 merge/归档和 M4 的通用恢复能力不因本次验收而视为完成。
+本 PR 已包含实现；M3 的人工 merge/归档和 M4 的通用恢复能力不因本次实现而视为完成。
+
+
+## 7. 实施记录（2026-09-07）
+
+- 新增 `github_threads.py` 承担 adapter 内分页与预算，类型化 snapshot 存入 control 的 batch.threads；
+  保持 worker protocol v7，不改变已冻结 Judge context digest。通过原线程根评论 REST endpoint 回复。
+- 新增 `control/resolution.py` 规划每线程说明与覆盖依据；`control/thread_effects.py` 刷新、入库、resolve
+  和复读；result ledger 持久化回复及实际远端状态。历史 addressed 只接受当前 attempt 的最新版本。
+- 线程权限/删除/映射错误写未完成诊断；新版本或未决问题保持开放并抑制 re-review。
+  查询落后于 webhook 的同秒版本冲突保留本地新反馈；未知写结果继续 uncertain，禁止盲目重发。
+- PostgreSQL 用例覆盖丢响应重放、取消、提交失败、迟到 webhook、两轮修订、历史覆盖、同数字不同 kind、
+  多评论合并、deferred、no-op、映射不完整，以及人工 resolve / mutation 期间的新评论。
+- 全套 Ruff、Mypy 通过；pytest **371 passed / 0 skipped**（真实 PostgreSQL，本机 Git/jj），
+  `uv build --no-sources` 成功生成 sdist/wheel；保留原有 Starlette/httpx 弃用告警；外部 GitHub/Codex 使用替身，bub 契约使用假 provider。
+- 真实矩阵所有场景均为**待验收**：本会话尚未提供 disposable repo、GitHub App 和真实模型配置。
+  无真实 GitHub 评论/resolve 操作、无真实模型执行，也不存在可填写的真实对象链接、版本和数据库验收记录。
+  待这些输入可用后逐项执行第 6 节矩阵；M2 保持“已实现、真实验收未完成”。

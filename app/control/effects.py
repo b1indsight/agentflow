@@ -7,6 +7,7 @@ from datetime import UTC
 from email.utils import parsedate_to_datetime
 from uuid import uuid4
 
+from app.control.thread_effects import has_pending_thread_feedback, resolve_thread, revision_current
 from app.control.tools import FlowToolRejected, FlowToolService
 from app.github_models import GitHubAdapterError, GitHubErrorKind
 from app.models import TERMINAL_STATES, DeliveryState
@@ -19,9 +20,11 @@ from app.result_models import (
     EffectState,
     LabelsEffect,
     PullRequestEffect,
+    ResolveEffect,
     ResultPending,
     ResultPlan,
     ReviewersEffect,
+    ThreadReplyEffect,
 )
 from app.review_models import BatchState
 from app.store import Store
@@ -45,6 +48,8 @@ class ResultEffects:
                 if flow.current_attempt_id != plan.attempt_id:
                     tx.results.skip_remaining(plan.job_id, "result attempt is no longer current")
                     return "result attempt is no longer current"
+                if plan.revision is not None and plan.resolution_version == 0:
+                    raise ResultPending("pre-upgrade revision effects require manual reconciliation")
             records = self.store.results.list_effects(plan.job_id)
             unfinished = [
                 r
@@ -85,6 +90,14 @@ class ResultEffects:
                     uncertain or (record.dispatched_at is not None and not definite_rejection)
                 )
                 retryable = isinstance(exc, GitHubAdapterError) and exc.retryable
+                if (isinstance(record.payload, (ThreadReplyEffect, ResolveEffect))
+                        and not ambiguous and not retryable):
+                    # A definite permission/deletion failure leaves a diagnostic and pending input;
+                    # already delivered code must not trigger another Codex run to repair GitHub.
+                    self.store.results.finish(record, EffectState.SUCCEEDED, receipt=EffectReceipt(
+                        thread_id=record.payload.thread_id, pending_reason=str(exc),
+                    ))
+                    continue
                 state = (
                     EffectState.UNCERTAIN
                     if ambiguous
@@ -127,6 +140,14 @@ class ResultEffects:
                         or delivery is None or delivery.state is not DeliveryState.OPEN):
                     raise FlowToolRejected(FlowToolErrorKind.CONFLICT,
                                            "review batch or PR is no longer active")
+                if plan.delivery is not None and delivery != plan.delivery:
+                    raise FlowToolRejected(FlowToolErrorKind.CONFLICT,
+                                           "delivery changed before GitHub dispatch")
+                if isinstance(record.payload, ResolveEffect) and has_pending_thread_feedback(
+                    tx, plan, record.payload,
+                ):
+                    raise FlowToolRejected(FlowToolErrorKind.CONFLICT,
+                                           "new feedback arrived before resolve dispatch")
             tx.results.mark_dispatched(record)
 
     async def _execute(
@@ -137,16 +158,31 @@ class ResultEffects:
     ) -> EffectReceipt:
         effect = record.payload
         installation, repo = effect.installation_id, effect.repo
-        if isinstance(effect, CommentEffect):
+        if isinstance(effect, (CommentEffect, ThreadReplyEffect)):
             digest = hashlib.sha256(
                 f"{plan.job_id}:{plan.digest}:{effect.key}".encode()
             ).hexdigest()
             marker = f"<!-- flowtool:effect:{digest} -->"
-            found = await self.github.find_comment(installation, repo, effect.number, marker)
+            if isinstance(effect, ThreadReplyEffect):
+                found = await self.github.find_review_reply(
+                    installation, repo, effect.number, effect.thread_id, marker,
+                )
+            else:
+                found = await self.github.find_comment(installation, repo, effect.number, marker)
             if found is not None:
                 return EffectReceipt(comment_id=found)
             if record.dispatched_at is not None:
                 raise ResultPending("comment outcome is unknown; waiting for its remote marker")
+            if isinstance(effect, ThreadReplyEffect):
+                if not await revision_current(self.github, plan, effect.number):
+                    return EffectReceipt(thread_id=effect.thread_id,
+                                         pending_reason="PR 已关闭或 head 已变化，未发送线程说明")
+                self._dispatch(plan, record)
+                reply = await self.github.reply_review_thread(
+                    installation, repo, effect.number, effect.root_comment_id,
+                    f"{effect.body}\n\n{marker}",
+                )
+                return EffectReceipt(comment_id=reply, thread_id=effect.thread_id)
             if plan.batch_id is not None and effect.key in {"answer", "triage"}:
                 job = self.store.get_job(plan.job_id)
                 if job is None:
@@ -210,6 +246,14 @@ class ResultEffects:
             return EffectReceipt(pull_request=pull_request)
         if isinstance(effect, (LabelsEffect, ReviewersEffect)):
             number = effect.number
+            if plan.revision is not None:
+                assert isinstance(number, int)
+                frozen = {(f.item_id, f.version) for f in plan.consumed}
+                if (any(r.receipt and r.receipt.pending_reason for r in records)
+                        or any((f.item_id, f.version) not in frozen
+                               for f in self.store.reviews.pending(plan.flow_id))
+                        or not await revision_current(self.github, plan, number)):
+                    return EffectReceipt(pending_reason="仍有未决反馈或 PR 已变化，暂停 re-review")
             if number == "created_pr":
                 receipts = [
                     r.receipt.pull_request
@@ -243,10 +287,7 @@ class ResultEffects:
                     self._dispatch(plan, record)
                     await self.github.request_reviewers(installation, repo, number, missing)
             return EffectReceipt()
-        if not await self.github.review_thread_resolved(installation, effect.thread_id):
-            self._dispatch(plan, record)
-            await self.github.resolve_review_thread(installation, effect.thread_id)
-        return EffectReceipt()
+        return await resolve_thread(self.store, self.github, plan, record, records, self._dispatch)
 
     def _delay(
         self,

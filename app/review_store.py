@@ -9,8 +9,9 @@ from psycopg.rows import class_row
 from psycopg.types.json import Jsonb
 
 from app.context_models import ReviewContext
+from app.github_models import ReviewThreads
 from app.judge_models import JudgeDecision
-from app.models import TERMINAL_STATES, DeliveryState, Job, JobKind
+from app.models import TERMINAL_STATES, DeliveryState, Job, JobKind, ReviewItemKind
 from app.protocol import RevisionTask
 from app.review_models import BatchState, FeedbackRef, FeedbackUpdate, ReviewBatch, ReviewFeedback
 
@@ -70,6 +71,16 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_review_active_batch ON review_batches(flow_
 ALTER TABLE review_batches ADD COLUMN IF NOT EXISTS context JSONB;
 ALTER TABLE review_batches ADD COLUMN IF NOT EXISTS context_stale BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE review_batches ADD COLUMN IF NOT EXISTS decision JSONB;
+ALTER TABLE review_batches ADD COLUMN IF NOT EXISTS threads JSONB;
+ALTER TABLE review_versions ADD COLUMN IF NOT EXISTS addressed_sha TEXT;
+ALTER TABLE review_versions ADD COLUMN IF NOT EXISTS addressed_job_id BIGINT REFERENCES jobs(id);
+CREATE TABLE IF NOT EXISTS review_thread_observations (
+  flow_id BIGINT NOT NULL REFERENCES flows(id),
+  thread_id TEXT NOT NULL,
+  fetched_at TIMESTAMPTZ NOT NULL,
+  snapshot JSONB NOT NULL,
+  PRIMARY KEY(flow_id,thread_id)
+);
 CREATE INDEX IF NOT EXISTS ix_review_due ON review_buffers(due_at) WHERE due_at IS NOT NULL;
 CREATE TABLE IF NOT EXISTS review_migrations (version INTEGER PRIMARY KEY);
 """
@@ -360,6 +371,100 @@ class ReviewStore:
             raise ValueError("review job does not own its batch")
         return batch
 
+    def freeze_threads(self, job: Job, snapshot: ReviewThreads) -> ReviewThreads:
+        """Bind remote thread/comment identities to this batch before worker execution."""
+        batch = self.for_job(job)
+        with self.store.connection() as connection:
+            connection.execute(
+                "UPDATE review_batches SET threads=COALESCE(threads,%s) WHERE id=%s",
+                (Jsonb(snapshot.model_dump(mode="json")), batch.id),
+            )
+        return batch.threads or snapshot
+
+    def addressed(self, flow_id: int, attempt_id: int) -> list[ReviewFeedback]:
+        """Only current versions addressed by verified deliveries may cover later thread checks."""
+        with self.store.connection() as connection:
+            rows = connection.execute(
+                "SELECT i.id,i.version,v.content FROM review_items i JOIN review_versions v"
+                " ON v.item_id=i.id AND v.version=i.version WHERE i.flow_id=%s"
+                " AND v.attempt_id=%s AND v.addressed_sha IS NOT NULL",
+                (flow_id, attempt_id),
+            ).fetchall()
+        return [ReviewFeedback(item_id=r["id"], version=r["version"], **r["content"]) for r in rows]
+
+    def record_addressed(
+        self, batch_id: int, refs: list[FeedbackRef], sha: str, job_id: int,
+    ) -> None:
+        batch = self.get_batch(batch_id)
+        members = {(f.item_id, f.version) for f in batch.feedback}
+        with self.store.connection() as connection:
+            for ref in refs:
+                if (ref.item_id, ref.version) not in members:
+                    raise ValueError("addressed feedback is outside batch")
+                connection.execute(
+                    "UPDATE review_versions SET addressed_sha=%s,addressed_job_id=%s"
+                    " WHERE item_id=%s AND version=%s", (sha, job_id, ref.item_id, ref.version),
+                )
+
+    def observe_threads(
+        self, flow_id: int, snapshot: ReviewThreads, baseline: list[ReviewFeedback],
+    ) -> None:
+        """Persist remote facts and missing human input without consuming or reviving old versions.
+
+        Runs under the caller's workflow lock. Even manually resolved threads can contain new input.
+        Observations never manufacture an addressed or remote-resolution receipt from legacy flags.
+        """
+        flow = self.store.get_flow(flow_id)
+        delivery = self.store.get_delivery(flow_id)
+        if (flow is None or flow.current_attempt_id is None or delivery is None
+                or snapshot.repo != flow.repo or snapshot.pr_number != delivery.pr_number):
+            raise ValueError("thread observation does not belong to active PR")
+        changed = False
+        with self.store.connection() as connection:
+            for thread in snapshot.threads:
+                connection.execute(
+                    "INSERT INTO review_thread_observations VALUES(%s,%s,%s,%s)"
+                    " ON CONFLICT(flow_id,thread_id) DO UPDATE SET fetched_at=EXCLUDED.fetched_at,"
+                    " snapshot=EXCLUDED.snapshot WHERE review_thread_observations.fetched_at"
+                    " <= EXCLUDED.fetched_at",
+                    (flow_id, thread.thread_id, snapshot.fetched_at,
+                     Jsonb(thread.model_dump(mode="json"))),
+                )
+                for comment in thread.comments:
+                    if comment.is_bot:
+                        continue
+                    row = connection.execute(
+                        "SELECT v.content FROM review_items i JOIN review_versions v"
+                        " ON i.id=v.item_id AND i.version=v.version WHERE i.flow_id=%s"
+                        " AND i.kind='inline' AND i.github_id=%s", (flow_id, comment.github_id),
+                    ).fetchone()
+                    old = FeedbackUpdate.model_validate(row["content"]) if row else None
+                    if old and (old.body, old.author, old.updated_at) == (
+                        comment.body, comment.author, comment.updated_at,
+                    ):
+                        # Thread metadata is stored above; enriching it is not new reviewer input.
+                        continue
+                    if old and old.updated_at == comment.updated_at and not any(
+                        f.kind is ReviewItemKind.INLINE and f.github_id == comment.github_id
+                        and f.body == old.body and f.updated_at == old.updated_at for f in baseline
+                    ):
+                        # A webhook may be ahead of an eventually consistent GraphQL read in the
+                        # same timestamp tick. Only advance the frozen version, never undo a newer one.
+                        continue
+                    update = FeedbackUpdate(
+                        kind=ReviewItemKind.INLINE, github_id=comment.github_id,
+                        author=comment.author, body=comment.body, updated_at=comment.updated_at,
+                        path=thread.path, original_commit_id=comment.original_commit_id,
+                        diff_hunk=old.diff_hunk if old else None,
+                        signal=old.signal if old else "discussion",
+                    )
+                    changed |= self._append_version(
+                        flow_id, flow.current_attempt_id, None, update,
+                        previous_body=old.body if old else None,
+                    )
+            if changed:
+                self._touch(flow_id, 0)
+
     def started(self, job: Job) -> bool:
         """Record model relay once per job stage; return whether this is its first Started."""
         batch = self.for_job(job)
@@ -490,6 +595,10 @@ class ReviewStore:
                 " OR (kind='revision' AND state='running' AND started_at IS NOT NULL"
                 " AND (payload->>'revision') IS NULL)"
                 " OR (kind='answer' AND state IN ('queued','running','failed'))"
+                " OR (j.result_received_at IS NOT NULL AND j.result_applied_at IS NULL"
+                " AND EXISTS (SELECT 1 FROM result_applications a WHERE a.job_id=j.id"
+                " AND a.plan->'revision' != 'null'::jsonb"
+                " AND a.plan->>'resolution_version' IS DISTINCT FROM '1'))"
                 " OR (kind='triage' AND state='running' AND started_at IS NOT NULL AND NOT EXISTS"
                 " (SELECT 1 FROM review_batches b WHERE b.job_id=j.id AND b.context IS NOT NULL))"
                 " ORDER BY id",

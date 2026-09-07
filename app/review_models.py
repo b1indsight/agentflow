@@ -7,6 +7,7 @@ from typing import Literal
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 from app.context_models import ReviewContext
+from app.github_models import ReviewThreads
 from app.judge_models import JudgeDecision
 from app.models import FeedbackRef, ReviewItemKind
 
@@ -56,6 +57,7 @@ class ReviewBatch(BaseModel):
     open_points: list[str]
     created_at: datetime
     context: ReviewContext | None = None
+    threads: ReviewThreads | None = None
     context_stale: bool = False
     decision: JudgeDecision | None = None
 

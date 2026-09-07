@@ -253,7 +253,9 @@ async def test_rejected_revision_notification_keeps_verified_result_recoverable(
     service.retry(flow)
     assert await restarted.results.apply(job.id) is JobState.DONE
     assert accept(store, job, result) == "applied"
-    assert github.comments == comments and github.reads == reads
+    assert github.comments == comments
+    # A resumed reviewer request checks the current head before publishing.
+    assert github.reads == reads + 1
     assert github.review_requests == [["carol"]]
     assert store.get_delivery(flow.id).head_sha == "revision"
     assert store.get_attempt(task.attempt_id).revision_cycles == 1

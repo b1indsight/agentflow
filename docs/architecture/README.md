@@ -1,7 +1,7 @@
 # FlowTool 架构文档
 
 > 状态：M0 已验收、M1 已实现但真实 E2E 待验收 · 初始日期：2026-08-02 · M0 验收：2026-08-26 ·
-> 文档核对：2026-09-07；M2 Feature 1 持久反馈批次已实现并通过 PostgreSQL 自动化。
+> 文档核对：2026-09-07；M2 Features 1–4 已实现并通过 PostgreSQL 自动化，真实闭环待验收。
 
 本目录是 FlowTool 架构的唯一入口。代码、测试、配置示例和已执行的运行验证是“当前实现”的事实
 来源；目标流程不会因为已经写入设计文档就被视为可用。
@@ -30,9 +30,9 @@
 | Webhook Ingress | 已验证（M0） | `/healthz`、HMAC 拒绝/接受、后台交接和 202 响应有覆盖；health 仅表示进程可响应 |
 | Event Router | 已验证（M2 F1 自动化） | 反馈 delivery/版本/deadline 原子写入，持久 settle、强信号授权、显式 action、同 Flow 冻结批次串行和重启恢复已覆盖 |
 | Control/Worker 边界 | 已验证（Features 1–3） | 多 worker 鉴权/调度、Flow 生命周期 binding、tool multiplex、busy reconnect、result replay 与 journal secret 负向覆盖 |
-| Control Service / Job Coordinator | 部分 | 真实 issue/default branch prepare、tool fencing/幂等 PR delivery 已接线；thread 映射、取消 kill、冲突处理与真实副作用 E2E 未完成 |
+| Control Service / Job Coordinator | 部分 | 真实 issue/default branch prepare、tool fencing/幂等 PR delivery 已接线；原线程回复/保守 resolve 与持久恢复有自动化；取消 kill、冲突处理与真实副作用 E2E 未完成 |
 | Codex / Context / Sandbox / VCS | 部分 | Flow repo、临时凭据、首轮 MCP、修订 resume/一次性 fallback、Git/jj clean/remote/lineage 双端核验有自动化；GitHub-only egress 与真实多轮 run 未验证 |
-| GitHub Client | 部分 | githubkit 0.16 App/installation 认证、Issue/repository/ref/PR、单仓库 Contents capability 与错误映射有隔离测试；真实 App smoke 和 M2 review threads 待验证 |
+| GitHub Client | 部分 | githubkit 0.16 App/installation 认证、Issue/repository/ref/PR、单仓库 Contents capability 与错误映射有隔离测试；M2 线程分页、回复、resolve 及竞态恢复有自动化；真实 App smoke 待验证 |
 | Judge | 已验证（adapter 自动化） | bub 0.4.1 受控无工具单次调用、有界冻结上下文、严格判定、直接答复及持久恢复已覆盖；真实 provider 语义 smoke 待执行 |
 | Reconciler | 桩 | 5 分钟循环存在，`_sweep()` 目前只记录 active flow，不拉取远端状态 |
 | CLI | 部分验证 | `serve` 与 `worker` 双进程 smoke、help 和 health 已验证；flows/show/cancel/retry 尚无 CLI 级覆盖 |
@@ -41,11 +41,10 @@
 ## 当前验证基线
 
 - pytest 覆盖协议、角色边界、远程执行闭环与真实 PostgreSQL 持久层场景；
-- 2026-09-07 M2 F1 本机临时 PostgreSQL 完整测试为 196 passed、0 skipped；外部模型/GitHub 使用替身；
+- 2026-09-07 M2 F4 本机临时 PostgreSQL 完整测试为 371 passed、0 skipped；外部模型/GitHub 使用替身；
 - `uv sync --locked`、`ruff check app tests`、`mypy app tests` 与 `flowtool --help` 通过；
 - PostgreSQL-backed `flowtool serve` 与两个 worker 在 CI 中独立启动，并在 serve 重启后自动重新注册；
-- 测试不访问 GitHub、Codex 或 bub，也不使用真实凭据和真实轮询等待；M1 Feature 3 的自动化为
-  95 passed、22 个 PostgreSQL 场景因本机无数据库而 skipped。
+- 测试不访问真实 GitHub、Codex 或模型服务；Judge 契约测试运行真实 bub 库连接假模型端点。
 
 M0 在 2026-08-26 使用 SQLite 和 19 项测试完成原始验收；该记录保留在
 [`m0.md`](../plan/m0.md)与[`m0-closeout.md`](../plan/m0-closeout.md)。当前 PostgreSQL 替换不证明

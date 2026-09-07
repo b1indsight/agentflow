@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- M2 F4：类型化线程/comment 快照、独立 cursor 分页和共享请求/字节预算；原 review 线程合并回复
+  addressed/deferred/可关联问题，PR conversation 说明引用精确来源及已核验提交。
+- 先确认回复，再检查完整人类反馈覆盖、本地版本与当前 PR/head，resolve 后复读；新评论和编辑
+  幂等入下一批，远端查询落后于同秒 webhook 时不覆盖新版本。addressed 依据与远端 resolved 分开持久保存。
+- 线程回复和 resolve 复用持久 effect ledger，响应丢失、重启、取消和数据库提交失败不重复写入；
+  权限/映射问题保留诊断，暂停 re-review。旧 pending revision plans 须先核对，wire protocol 保持 v7。
+- F4 自动化使用真实 PostgreSQL 与 GitHub 替身；真实 GitHub App/Codex/bub 完整矩阵仍待验收。
+
 - 修复已 push 修订遇到通知永久拒绝后无法恢复的问题：保留核验结果与成功回执，显式 retry 仅补发
   被明确拒绝的通知，不重跑修订或增加轮数；状态不明的通知仍禁止盲目重发。
 - 修订准备阶段的 PR/ref/Issue GitHub 错误进入持久失败及显式重试路径；总时限触发 VCS 取消时

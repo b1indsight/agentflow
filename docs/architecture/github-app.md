@@ -1,6 +1,6 @@
 # GitHub App 接入
 
-> 状态：已对齐 githubkit 0.16，并接入 M1 Issue→PR 自动化路径；尚未在真实 App 上执行读写 smoke。
+> 状态：已对齐 githubkit 0.16，并接入 M1 Issue→PR 与 M2 线程回复/resolve 自动化路径；尚未在真实 App 上执行读写 smoke。
 
 GitHub App 提供独立 bot 身份、Webhook 和短期 installation token。FlowTool 不需要代表某个用户执行
 操作，因此当前设计不使用 OAuth user token。
@@ -72,11 +72,17 @@ capability，不接触 githubkit schema。
   环境 credential helper 使用 token，参数、result 和 worker journal 不保存 token；
 - control 的 `flow.open_pr` 在 GitHub ref SHA 与 worker 验证事实一致后才 find-or-open PR，并持久化调用结果供重放。
 
+线程能力已由自动化覆盖：GraphQL reviewThreads/comments 独立分页、完整性与身份校验；
+REST 根评论回复、分页精确 marker 恢复、resolve 后远端复读及 GraphQL 部分错误分类。
+线程读取共享 50 请求 / 2 MB 数据预算，超限保留未完成状态。Pull requests: write 用于原线程回复和 resolve。
+REST 写路径见 [Create a reply for a review comment](https://docs.github.com/en/rest/pulls/comments#create-a-reply-for-a-review-comment)；
+线程字段见 [GitHub GraphQL pulls](https://docs.github.com/en/graphql/reference/pulls)。
+
 尚未验证或实现：
 
 - disposable repository 上的真实 App 读写 smoke；
 - 限制网络到 GitHub，以及显式提前撤销 installation token；
-- review thread ID 映射、Project v2 与 reconcile 查询。
+- Project v2 与 reconcile 查询。
 
 因此不能仅凭配置真实凭据就把当前 daemon 视为可用集成。
 

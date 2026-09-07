@@ -2,7 +2,7 @@
 
 M2 Feature 1 已实现持久反馈批次与 settle，见[实施计划](../plan/m2-feedback-batches.md)。
 bub adapter、直接答复与 F3 修订交付/session 兜底已完成自动化验证；真实 provider、多轮 Codex/GitHub
-smoke 和 F4 线程 resolve 仍待验收。
+smoke 待执行；F4 原线程回复与保守 resolve 已实施，真实闭环仍待验收。
 
 ## B.1 反馈入口与持久 settle
 
@@ -78,8 +78,8 @@ open_points 保留。答案和修改说明发送前重新核对批次/attempt、
 note/reason；control 拒绝未知、重复、跨版本或互相冲突的引用。
 
 非零 exit 按现有失败路径收尾，不消费反馈。成功时只消费明确 addressed 的版本；deferred、遗漏项
-及 needs_clarification 留作未决，有未决问题时不请求 re-review。处理说明仍主要发在 PR conversation，
-空 review 正文作为元数据随成功修订消费，不计为遗漏项。真实原线程回复和 resolve 属于 F4。
+及 needs_clarification 留作未决，有未决问题时不请求 re-review。inline 说明合并回复原线程，review body
+和 conversation 说明按批次发到 PR conversation 并引用来源。空 review 正文作为元数据随成功修订消费。
 
 退出码之外，worker 要求完整 schema、Git/jj backend、正确 branch、干净工作区和一致的本地/远端 SHA；
 执行前基线必须等于 control 冻结的 head。control 查询原 open PR 与 ref，核验 head repository、base/branch
@@ -92,6 +92,23 @@ resume/fallback 阶段、一次性兜底消耗和 invocation 结果。重启时�
 `Started` 与 revision_cycles 同事务提交，fallback/重放不增额度；新的显式 retry job 消耗新额度，保留原 worker binding。
 成功接受新 session 后才更新 generation。全过程受 CodeAgent 总时限约束，超时回收并等待 CLI/VCS 进程组退出。
 真实 GitHub/Codex 两轮 resume 和 start 兜底 smoke 尚未执行，完整 M2 仍待验收。
+
+### 原线程回复与 resolve（F4）
+
+control 在执行前把 repo/PR、thread node ID、comment database/node ID、正文版本和完整性冻结到 batch；
+worker wire contract 不携带远端操作权限。线程和评论独立 cursor 分页，每次读取最多 50 个请求、2 MB
+JSON 数据；异常或不完整映射保留待处理。REST reply 使用根评论 database ID，不能用 reply ID 或 thread ID。
+
+每线程说明经持久回执确认后，检查本轮与历史已核验修订对所有人类反馈的精确覆盖；deferred、遗漏、
+clarification、缺失映射或变化的 head 阻止完成。历史依据只接受当前 attempt 的最新 item/version。
+resolve 前刷新线程并补入尚未收到 webhook 的反馈；也核对本地新版本，避免迟到查询撤销同秒编辑。
+resolve 后复读记录远端状态和竞态反馈，不自动 unresolve。人工 resolve 不等于新反馈已消费。
+
+回复通过本 App 作者和精确 marker 找回；响应不确定时保留 uncertain，不盲目重发。
+确定的线程权限/删除错误保存未完成诊断，不阻止已验证代码的 result ACK；回复未成功的 addressed 仍未消费。
+必要线程处理未完成、存在新反馈、或 PR/head 已改变时不请求 re-review。新反馈属于下一批，不重跑旧 CodeAgent。
+GitHub 没有条件式 resolve 事务，刷新与 mutation 之间的竞态仍可能让新评论暂时位于已关闭线程中；
+系统保留该反馈与远端观察记录，持续远端对账属于 M4。
 
 ## B.5 取消、重试与恢复
 
@@ -136,3 +153,5 @@ PostgreSQL 自动化覆盖入口回滚、并发领取、重启、批次内外版
 旧 attempt/关闭 PR/head 变化拦截和过期上下文重建。
 bub 0.4.1 使用本机假模型端点校准真实库行为；真实 provider 的语义 smoke、Codex/GitHub 多轮闭环
 及线程操作仍待各 feature 验收。
+
+F4 升级检查也拒绝缺少线程处理意图的旧 pending revision plan；先完成或核对它们，禁止直接清除账本。
