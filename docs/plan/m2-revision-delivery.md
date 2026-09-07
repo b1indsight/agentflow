@@ -1,19 +1,21 @@
 # M2 Feature 3/4：可靠修订与会话兜底
 
-> 状态：用户已批准并实施，真实多轮 smoke 待验收 · 日期：2026-09-07
-> Bookmark：`feat/m2-revision-delivery`；在同一 PR #21 实施，基线已更新至合并 F2 的 `878588e0`。
+> 状态：已实现并合并 [PR #21](https://github.com/b1indsight/agentflow/pull/21)，真实多轮 smoke 待验收。
+> 实施日期：2026-09-07 · 文档核对：2026-09-08。
+> Bookmark：`feat/m2-revision-delivery`；实施基线为合并 F2 的 `878588e0`。
 > 实现前置：F1 `feat/m2-feedback-batches`、F2 `feat/m2-semantic-triage`。
 > F4 `feat/m2-review-resolution` 在本 feature 确认交付后处理线程与完整 M2 验收。
 
-第 1–7 节保留审批时的方案与验收范围；当前实施记录见第 8 节。
+第 1–7 节保留审批时的方案与验收范围；实施记录见第 8 节。
+F1–F4 现已全部合并，当前状态及已知缺陷见 [M2 状态与待办](../architecture/README.md#m2-状态与待办)。
 
-## 1. 目标与当前问题
+## 1. 目标与规划时问题
 
 用户在原 PR 上提出修改，Flow 应复用独占 repo 和 Codex 会话完成修订，commit/push 到原 branch，
 并在 control 确认 GitHub 远端提交后报告结果。正常情况下连续 resume；会话确实失效时允许一次
 有边界的上下文重建，不新建 Flow、branch 或 PR。
 
-当前代码已经有 `RevisionTask` 和 `CodeAgent.resume`，但仍有以下缺口：
+规划基线已有 `RevisionTask` 和 `CodeAgent.resume`，但存在以下缺口：
 
 - `assignment_secret()` 只给 INITIAL 签发 push capability；resume 不传 `CodeAgentContext`。
 - worker 修订只看 exit/output，没有像 INITIAL 一样准备/校验 repo、验证 VCS backend、commit、
@@ -181,5 +183,6 @@ Started 原子计数、结果提交失败、ACK/结果重放、新反馈隔离�
 `uv build --no-sources` 成功生成 sdist/wheel；仅保留既有 Starlette TestClient/httpx 弃用告警。
 
 真实 disposable GitHub repo 的两轮 Codex resume、完整模型 start fallback 和端到端授权凭据 smoke
-**未执行，仍待验收**。本地 CLI 探针和 fake CodeAgent/GitHub 测试不替代这些外部验收；F4 的线程
-回复/resolve 与完整 M2 闭环也未实施。
+**未执行，仍待验收**。本地 CLI 探针和 fake CodeAgent/GitHub 测试不替代这些外部验收。
+2026-09-08 状态更新：F4 线程回复/resolve 已实现并合并 #22；真实 M2 矩阵仍待验收，且存在
+[尚未修复的同秒 webhook 重放问题](m2-review-resolution.md#同秒重复-webhook-重放medium未修复)。

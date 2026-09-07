@@ -1,16 +1,18 @@
 # M2 Feature 2/4：bub 语义决策与答复
 
-> 状态：已批准并实施，自动化验证通过；真实 provider 语义 smoke 待执行。
-> 日期：2026-09-07 · 实现基线：`main` / `78b8bc38`（已合并 PR #19）。
-> Bookmark：`feat/m2-semantic-triage`；用户“做 PR #20”授权进入同一 PR 的实现阶段。
+> 状态：已实现并合并 [PR #20](https://github.com/b1indsight/agentflow/pull/20)，自动化通过；真实 provider 语义 smoke 待执行。
+> 日期：2026-09-07 · 实现基线：`main` / `78b8bc38`（已合并 PR #19）· 文档核对：2026-09-08。
+> Bookmark：`feat/m2-semantic-triage`；计划与实现使用同一 PR。
 > 实现前置：F1 持久反馈批次与 settle（`feat/m2-feedback-batches`）；F3/F4 消费本 feature 的决策。
 
-## 1. 需求与当前缺口
+以下保留规划基线与方案；F1–F4 当前状态及已知缺陷见 [M2 状态与待办](../architecture/README.md#m2-状态与待办)。
+
+## 1. 需求与规划时缺口
 
 [M2 路线图](../architecture/roadmap.md)要求普通讨论先经过语义门，只有已形成可操作结论才启动改码；
 问题得到答复，未决讨论等待补充，闲聊被消费而不重复触发。强信号的授权和路由由 F1 负责。
 
-当前 `BubJudge` 执行 `bub run <prompt>`，取 stdout 首尾大括号；无 timeout，非零退出后仍继续解析，
+规划时 `BubJudge` 执行 `bub run <prompt>`，取 stdout 首尾大括号；无 timeout，非零退出后仍继续解析，
 `confidence` 未限制范围。Coordinator 仅提供 repo/PR/Issue 编号作为上下文。
 `TriageVerdict.answer` 被忽略，ANSWER 又调用模型，而 answer/wait/ignore 都缺少明确批次消费语义。
 

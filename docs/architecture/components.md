@@ -36,32 +36,31 @@ M2 F1 自动化覆盖反馈工作流锁、同 Flow 批次串行、重启恢复�
 
 ## 4.3 Control Service / Job Coordinator（状态机核心）
 
-目标状态机：
+当前持久状态分轴保存；编码、审核和修订阶段由 job、反馈批次与 delivery 推导：
 
 ```text
-PENDING → CODING → PR_OPEN ⇄ REVISING
-                      │
-              人工 Approve + Merge
-                      ▼
-                    MERGED → ARCHIVED
-
-任意活动态 → CANCELLED
-运行失败   → FAILED
+Flow:     ACTIVE → SUCCEEDED / CANCELLED / FAILED
+Delivery: NONE → OPENING → OPEN → CLOSED / MERGED
+Review:   settle → READY → PROCESSING → COMPLETED / WAITING
+          新反馈进入后续批次；终态取消活动批次
 ```
 
-`ControlService` 在显式事务中负责触发、取消、合并和 retry；`JobCoordinator` 把五类持久 job 构造成版本化 task，
+`ControlService` 在显式事务中负责触发、取消、合并和 retry；`JobCoordinator` 把 INITIAL、TRIAGE、REVISION、ARCHIVE
+持久 job 构造成版本化 task（ANSWER 仅保留历史记录，当前答复直接使用 TRIAGE 的已校验答案），
 并把已接收的结构化 result 交给 `ResultApplication`。后者冻结一次结果的领域变更和 GitHub 操作，
 由 `ResultEffects` 查询/执行远端操作并保存回执，最后一起提交本地状态、派生任务、运行记录和结果确认。
 网络请求不占用数据库事务；plugin hook 在提交后调用，不具备持久化投递保证。worker 不能直接更新这些状态。
 非零 Codex exit 会转 FAILED。revision 成功后仅消费明确 addressed 的 item/version，deferred/遗漏项/
 clarification 保持 waiting；不把 addressed 当作远端 resolved。有未决问题时不重新请求审核。
 
-当前 coordinator 仍有以下缺口：
+M2 已接入有界 Issue/PR/patch/讨论快照、线程/comment 映射与原线程回复/保守 resolve。
+当前 coordinator 仍有以下边界：
 
-- review comment 到 GraphQL thread 的映射尚未接入，无法真实 resolve review thread；
-- `_pr_context()` 只有 repo、PR 和 issue 编号，没有 diff、CI 或未解决线程；
+- 上述路径有自动化覆盖，真实 GitHub App/Codex/bub 闭环待验收；
+- 同秒重复 webhook 的历史编辑可能被再次重放，见 [M2 已知问题](README.md#m2-状态与待办)；
+- 冻结上下文尚不包含 CI 状态；
 - cancel 只更新数据库状态，不 kill Codex、不清工作区；
-- 未合并 close、人工 push、rebase/冲突尚未实现。
+- 修订会检测并拒绝远端 head 漂移；未合并 close、人工 push 合并、rebase/冲突处理尚未实现。
 
 因此状态转换代码存在不等于目标闭环可用。
 
@@ -111,8 +110,9 @@ threads、resolve thread，并签发 push 所需的短时 installation token。�
 
 `GitHubApp` 已对齐锁定的 githubkit 0.16：返回稳定的 Issue、repository、remote ref 和 PR snapshot，
 用 App 身份签发只含单仓库 Contents write 的短时 capability，并把常见 HTTP/认证故障映射为不含响应
-body 的类型化错误。真实 GitHub App smoke 尚未执行；review thread GraphQL、Project v2、关闭 issue 和
-reconcile 仍未校准。接入边界见 [GitHub App 文档](github-app.md)。
+body 的类型化错误。M2 已加入类型化 GraphQL 线程/comment 分页、共享预算、原线程回复和 resolve/复读，
+并通过隔离自动化。真实 GitHub App smoke 尚未执行；Project v2、关闭 issue 和通用 reconcile
+仍未校准。接入边界见 [GitHub App 文档](github-app.md)。
 
 ## 4.6 本地平面：Flow repo / execution policy / VCS
 
@@ -153,9 +153,10 @@ ORM。
 - `events`：delivery 去重和 payload 审计；
 - `codex_runs`：按 attempt 记录 prompt、kind、exit 与时间；
 - `review_threads`：旧反馈历史，升级时一次性导入最新对象；旧 resolved 标记不作为 GitHub 确认；
-- `review_items` / `review_versions`：Flow 内稳定反馈身份、不可变版本及独立 relay/consume 时间；
-- `review_pending_edits`：同秒乱序编辑的前序正文与原始来源，供前序到达后原子回放；
-- `review_buffers` / `review_batches`：持久 deadline/generation、冻结快照、批次所有者 job 和未决问题。
+- `review_items` / `review_versions`：Flow 内稳定反馈身份、不可变版本、独立 relay/consume 时间和已核验 addressed 依据；
+- `review_pending_edits`：同秒乱序编辑的前序正文与原始来源，供前序到达后原子回放；重复历史编辑仍有[已知缺陷](README.md#m2-状态与待办)；
+- `review_buffers` / `review_batches`：持久 deadline/generation、冻结反馈/上下文/线程快照、批次所有者 job 和未决问题；
+- `review_thread_observations`：远端线程快照与真实 resolved 状态，不以本地 addressed 代替远端确认。
 
 自动化覆盖 active 唯一约束、flow/attempt/job 往返、review upsert、assignment start/heartbeat/fencing、
 lease 到期 requeue、started grace/deadline、epoch fencing、result inbox 去重、跨 Store 可见性、delivery 去重和并发 assign。
@@ -180,7 +181,8 @@ M0 的 SQLite 文件
 
 当前 router 已识别触发、取消、review/comment 和 merged 事件；PR 创建、评论、reviewer 和 label 已有
 经隔离测试的 adapter primitive，且 reviewer 配置不复用 trigger allowlist。真实 Issue/default branch、
-head PR 查询和 capability 已接入 INITIAL；thread resolve 与 Project 状态仍未校准。
+head PR 查询和 capability 已接入 INITIAL；M2 原线程回复/resolve 已接入并有自动化覆盖，
+真实 App 校准与 Project 状态更新仍待完成。
 工具没有自动合并实现。
 
 ## 4.9 Context Builder
@@ -189,10 +191,10 @@ head PR 查询和 capability 已接入 INITIAL；thread resolve 与 Project 状�
 
 - initial prompt 包含 issue 标题/正文、首个 `AGENTS.md` 或 `CLAUDE.md`、VCS 指引和硬约束；
 - revision prompt 包含 Judge instruction、冻结批次的 item/version、inline path/diff hunk/original commit id、
-  VCS 指引和 `CodexResult` 输出约定。
+  原 Issue、交付基线、此前 summary/open_points、VCS 指引和 `CodexResult` 输出约定；有冻结 PR context 时一并传入。
 
-INITIAL 已使用 GitHub Issue 的真实标题与正文；revision prompt 没有当前 diff、CI 状态或完整未解决线程清单。
-issue/PR 文本是不可信输入，后续接入必须保留明确的数据/指令边界。
+INITIAL 已使用 GitHub Issue 的真实标题与正文；冻结 PR context 包含有界 patch 和讨论，不含 CI 状态。
+F4 的完整线程映射由 control 持有，不扩展 worker v7 契约。issue/PR 文本是不可信输入，必须保留明确的数据/指令边界。
 
 ## 4.10 Judge / Triage
 

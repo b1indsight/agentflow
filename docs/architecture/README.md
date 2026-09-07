@@ -1,7 +1,7 @@
 # FlowTool 架构文档
 
-> 状态：M0 已验收、M1 已实现但真实 E2E 待验收 · 初始日期：2026-08-02 · M0 验收：2026-08-26 ·
-> 文档核对：2026-09-07；M2 Features 1–4 已实现并通过 PostgreSQL 自动化，真实闭环待验收。
+> 状态：M0 已验收；M1、M2 已实现并合并，真实 E2E 待验收。
+> 初始日期：2026-08-02 · M0 验收：2026-08-26 · 文档核对：2026-09-08。
 
 本目录是 FlowTool 架构的唯一入口。代码、测试、配置示例和已执行的运行验证是“当前实现”的事实
 来源；目标流程不会因为已经写入设计文档就被视为可用。
@@ -38,6 +38,30 @@
 | CLI | 部分验证 | `serve` 与 `worker` 双进程 smoke、help 和 health 已验证；flows/show/cancel/retry 尚无 CLI 级覆盖 |
 | 插件 | 部分 | 五个生命周期 hook 已接线并隔离异常；post-merge-summary 仍只写日志 |
 
+## M2 状态与待办
+
+**F1–F4 均已实现并合并；M2 尚未通过真实环境验收。**
+
+| Feature | 已合并 PR | 实现范围 |
+|---|---|---|
+| F1 | [#19](https://github.com/b1indsight/agentflow/pull/19) | 持久反馈版本、settle 与冻结批次 |
+| F2 | [#20](https://github.com/b1indsight/agentflow/pull/20) | bub 语义决策、有界上下文与直接答复 |
+| F3 | [#21](https://github.com/b1indsight/agentflow/pull/21) | 同 repo/branch/PR 修订、交付核验与一次性 session 兜底 |
+| F4 | [#22](https://github.com/b1indsight/agentflow/pull/22) | 线程/comment 分页映射、原线程回复、保守 resolve 与持久恢复 |
+
+F4 于 **2026-09-08 00:02:45（Asia/Singapore）**合并，对应 UTC 2026-09-07 16:02:45，
+合并提交为 `5fd27f23584e`。[PR #22](https://github.com/b1indsight/agentflow/pull/22)
+记录修复 head `0294c003128b` 的 377 passed / 0 skipped，
+[对应 CI](https://github.com/b1indsight/agentflow/actions/runs/34140178991) 全部通过；这些结果覆盖自动化场景。
+
+剩余工作：
+
+- **真实验收**：GitHub App smoke、M1 Issue→PR 前置，以及两轮修订、answer/wait/ignore、session
+  兜底、重启恢复和真实线程回复/resolve 均缺少真实服务运行证据，按 [F4 验收矩阵](../plan/m2-review-resolution.md#6-自动化与真实-m2-验收)逐项完成。
+- **已知 Medium，未修复**：远端观察 A→B 后，迟到的重复 webhook 可在同秒 B→A 回退后重放旧 A→B，
+  将旧内容变成新版本，阻塞 resolve/re-review，并可能进入下一轮 worker。复现与修复验收条件见
+  [F4 已知问题](../plan/m2-review-resolution.md#同秒重复-webhook-重放medium未修复)。自动化通过不代表该缺陷已解决。
+
 ## 当前验证基线
 
 - pytest 覆盖协议、角色边界、远程执行闭环与真实 PostgreSQL 持久层场景；
@@ -54,7 +78,7 @@ M0 在 2026-08-26 使用 SQLite 和 19 项测试完成原始验收；该记录�
 
 - [总览](overview.md)：定位、运行形态、平面边界与组件总览；
 - [组件职责](components.md)：端口、适配器、状态机与持久层；
-- [端到端流程](workflows.md)：M0 已验证切片与目标闭环；
+- [端到端流程](workflows.md)：M1/M2 自动化覆盖的切片与目标闭环；
 - [关键决策、风险与短板](decisions.md)：已定方案和开放问题；
 - [路线图](roadmap.md)：M0–M5 里程碑与扩展预留；
 - [GitHub App 接入](github-app.md)：认证、权限、Webhook 和密钥；

@@ -6,8 +6,8 @@ FlowTool 的**目标形态**是本地优先、headless 的编排器：把带 `fl
 `Codex 编码 → PR → 人工审核 → 回喂修订 → 人工合并 → 归档` 的闭环。产品交互面是 GitHub
 issue / PR；Web 控制台只属于未来路线图。
 
-当前 M0 只验收了这个目标所需的基础设施切片，不具备真实闭环。当前状态以[架构入口](README.md#当前实现状态)
-为准。
+M0 已验收基础设施切片；M1 Issue→PR 与 M2 回喂循环已实现、合并并有自动化覆盖，真实服务闭环
+仍待验收。当前状态和 M2 已知问题以[架构入口](README.md#m2-状态与待办)为准。
 
 已定基调：**Python** · **Webhook 驱动的 control plane** · **出站长连接 worker** · **headless** ·
 **worker 本地 checkout 跑 Codex** · **PostgreSQL 持久化**。
