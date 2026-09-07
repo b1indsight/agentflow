@@ -112,6 +112,7 @@ class GitHubApp:
             return ReviewPullRequest(
                 **self._pull_snapshot(data).model_dump(), title=data.title, body=data.body or "",
                 base_sha=data.base.sha, merged=data.merged,
+                head_repository=data.head.repo.full_name if data.head.repo is not None else None,
             )
 
         return await self._execute("get_review_pull_request", operation)
@@ -233,6 +234,22 @@ class GitHubApp:
             return RemoteRef(branch=branch, sha=data.object_.sha)
 
         return await self._execute("get_ref", operation)
+
+    async def compare_commits(
+        self, installation_id: int, repo: str, base: str, head: str,
+    ) -> bool:
+        """Prove a normal forward delivery using GitHub's comparison of immutable SHAs."""
+        owner, name = self._split_repo(repo)
+        client = self._installation_client(installation_id)
+
+        async def operation() -> bool:
+            data = (await client.rest.repos.async_compare_commits(
+                owner, name, f"{base}...{head}", per_page=1,
+            )).parsed_data
+            return (data.status == "ahead" and data.merge_base_commit.sha == base
+                    and data.base_commit.sha == base and data.behind_by == 0)
+
+        return await self._execute("compare_commits", operation)
 
     async def find_pull_request_by_head(
         self, installation_id: int, repo: str, branch: str

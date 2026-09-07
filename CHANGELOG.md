@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- M2 F3：冻结修订的 Flow/attempt/batch、PR/branch/head 与 session generation，每轮签发临时单仓库
+  push capability；revision prompt、resume 环境与初始 MCP broker 分离。
+- Git/jj 修订独立核验 branch、clean tree、本地/远端 SHA；control 验证原 open PR、仓库与 fast-forward
+  lineage，原子提交 session、delivery head、精确反馈与 job 终态。no-op、deferred/clarification 不触发 re-review。
+- session 缺失或明确的执行前拒绝允许一次 start；journal 持久记录阶段和调用，超时/不确定执行不重跑。
+  Started 与修订额度同事务计数；失败保留 worker binding，结果重放和 fallback 不重复计数。
+- 协议升级到 v7，旧未确认结果和已开始但缺冻结 assignment 的修订须先核对；同步 serve/worker 升级。
+  完整 PostgreSQL/Git/jj 自动化已覆盖；真实 GitHub/Codex 多轮 smoke 与 F4 thread resolve 仍待验收。
 - M2 F2：bub 0.4.1 受控单次调用、无工具/插件/共享会话，配置与凭据只进入 worker 子进程；
   timeout、输出上限、严格 verdict/envelope 与失败分类均有自动化覆盖。
 - control 冻结有界 Issue/PR/patch/讨论快照，绑定 head/base SHA 与 context digest；缺失/截断保守 wait。

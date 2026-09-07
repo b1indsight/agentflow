@@ -99,6 +99,7 @@ class WorkerRuntime:
         )
         if failure := judge.configuration_failure():
             logger.warning("Judge unavailable; triage will wait: {}", failure)
+        journal = WorkerJournal(self.settings.worker_root)
         executor = WorkerExecutor(
             self.settings.worker_root,
             CodexAgent(
@@ -107,13 +108,15 @@ class WorkerRuntime:
             ),
             judge,
             worker_id=self.settings.worker_id,
+            journal=journal,
+            revision_timeout=self.settings.codex_run_timeout_seconds,
         )
         self.client = WorkerClient(
             worker_id=self.settings.worker_id,
             worker_token=self.settings.worker_token.get_secret_value(),
             serve_ws_url=self.settings.serve_ws_url,
             executor=executor,
-            journal=WorkerJournal(self.settings.worker_root),
+            journal=journal,
             reconnect_min_backoff=self.settings.reconnect_min_backoff,
             reconnect_max_backoff=self.settings.reconnect_max_backoff,
             reconnect_jitter=self.settings.reconnect_jitter,

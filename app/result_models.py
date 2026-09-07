@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.github_models import PullRequestSnapshot
 from app.models import FeedbackRef, FlowDelivery, FlowState, JobKind, JobState
+from app.protocol import RevisionResult
 from app.review_models import BatchState
 
 
@@ -83,6 +84,7 @@ class ResultPlan(FrozenModel):
     error: str | None = None
     run: RunUpdate | None = None
     delivery: FlowDelivery | None = None
+    revision: RevisionResult | None = None
     derived: DerivedJob | None = None
     batch_id: int | None = None
     batch_state: BatchState | None = None

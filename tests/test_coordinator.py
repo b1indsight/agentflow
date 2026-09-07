@@ -42,7 +42,6 @@ from app.protocol import (
     FlowToolRequest,
     InitialResult,
     InitialTask,
-    RevisionResult,
     RevisionTask,
     Succeeded,
     TriageResult,
@@ -58,6 +57,7 @@ class MemoryStore:
         self.jobs: dict[int, Job] = {}
         self.results = MemoryResults()
         self.reviews = MemoryReviews()
+        self.reviews.jobs = self.jobs
         self.sources: dict[tuple[int, str], Job] = {}
         self.flow = Flow(
             id=1,
@@ -590,7 +590,7 @@ async def test_triage_result_replay_does_not_repeat_comment_or_derived_job() -> 
 
 
 @pytest.mark.asyncio
-async def test_triage_and_revision_results_remain_control_plane_side_effects() -> None:
+async def test_triage_and_revision_results_remain_control_plane_side_effects(monkeypatch) -> None:
     store = MemoryStore()
     store.attempt = Attempt(
         id=1,
@@ -605,8 +605,16 @@ async def test_triage_and_revision_results_remain_control_plane_side_effects() -
         base_branch="trunk",
         state=DeliveryState.OPEN,
         pr_number=17,
+        head_sha="abc123",
     )
     github = RecordingGitHub()
+    from tests.review_memory import review_context
+
+    async def current_pr(*args):
+        return review_context().pull_request.model_copy(update={
+            "head_branch": "flow/1", "base_branch": "trunk", "head_sha": "abc123",
+        })
+
     subject = coordinator(store, github)
 
     triage_job = Job(id=6, flow_id=1, kind=JobKind.TRIAGE, state=JobState.RUNNING)
@@ -623,25 +631,24 @@ async def test_triage_and_revision_results_remain_control_plane_side_effects() -
     )
     assert triage_state is JobState.DONE
     assert store.enqueued == [(JobKind.REVISION, {"batch_id": 1, "instruction": "Fix it"})]
+    monkeypatch.setattr(github, "get_review_pull_request", current_pr)
 
     revision_job = Job(id=7, flow_id=1, kind=JobKind.REVISION, state=JobState.RUNNING)
     task = await prepare(subject, revision_job)
     assert isinstance(task, RevisionTask)
     subject.mark_started(revision_job, task, "worker-1")
+    from tests.test_revision_delivery import verified_result
+
     revision_state = await apply_result(
         subject,
         revision_job,
-        RevisionResult(batch_id=1, feedback_refs=[FeedbackRef(item_id=101, version=1)],
-            session_id="session-1",
-            last_message="updated",
-            exit_code=0,
-        ),
+        verified_result(task),
     )
 
     assert revision_state is JobState.DONE
     assert store.flow.state is FlowState.ACTIVE
     assert store.attempt is not None
-    assert store.attempt.revision_cycles == 1
+    assert store.attempt.revision_cycles == 0  # This fake does not execute Store.start_assignment.
     assert store.reviews.batch.state.value == "waiting"
     assert store.reviews.consumed == []
 

@@ -1,9 +1,11 @@
 # M2 Feature 3/4：可靠修订与会话兜底
 
-> 状态：待审批，plan only · 日期：2026-09-07 · 基线：`main` / `9fd98266`（PR #18）
-> Bookmark：`feat/m2-revision-delivery`；本 PR 获批后继续承载实现。
+> 状态：用户已批准并实施，真实多轮 smoke 待验收 · 日期：2026-09-07
+> Bookmark：`feat/m2-revision-delivery`；在同一 PR #21 实施，基线已更新至合并 F2 的 `878588e0`。
 > 实现前置：F1 `feat/m2-feedback-batches`、F2 `feat/m2-semantic-triage`。
 > F4 `feat/m2-review-resolution` 在本 feature 确认交付后处理线程与完整 M2 验收。
+
+第 1–7 节保留审批时的方案与验收范围；当前实施记录见第 8 节。
 
 ## 1. 目标与当前问题
 
@@ -136,4 +138,45 @@ fallback 启动前后、result 落盘与 ACK 丢失都要测试。进程重启�
 - 真实 disposable repo smoke：完成 M1 PR 后连续两轮 resume，确认同 branch/PR/session、实际 SHA；
   再用可控缺失 session 场景验证一次 start fallback，保留版本/运行记录。外部 smoke 未执行须明确待验收。
 
-本 feature 完成不等于已真实 resolve 线程，后者由 F4 验收。本 PR 当前只有计划，没有产品或测试代码。
+本 feature 完成不等于已真实 resolve 线程，后者由 F4 验收。
+
+## 8. 实施记录（2026-09-07）
+
+用户通过“实现 pr#21”批准继续实施。前置 #19/#20 已合并，在原 bookmark/PR 更新基线后完成：
+
+- 协议 v7：任务持久冻结 repo identity、原 PR/branch/base/head、batch、session generation、原任务、
+  前轮摘要和未决点；凭据仅随 assignment 传输，不进入任务 payload 或 journal。
+- revision 专用 prompt 不包含首轮开 PR 指令；resume 显式传入本轮 cwd/credential helper，并禁用
+  原 MCP broker。Git/jj 在执行前检查原有工作区与远端基线，执行后核验 clean tree、branch、commit/ref。
+  私有仓库的远端 ref 查询复用本轮临时凭据；不 reset/rebase/force push。
+- control 查询原 open PR、head repository、head/base/ref，并用 GitHub compare 的状态与 merge-base
+  验证正常前进。结果计划持久保存交付证据和反馈声明，随后原子提交 session/generation、delivery head、
+  精确反馈处理和 job 终态。新反馈不被旧结果消费；addressed 未标记为 GitHub resolved。
+- no-op、遗漏项、deferred 或 clarification 不触发 re-review；当前问题进入 waiting，询问与说明通过
+  既有幂等副作用账本发送。只有无未决项且有已核验新提交时请求审核。
+- 缺失 session 或确证的执行前拒绝最多 start 一次。journal 在调用前持久记录阶段与 fallback 消耗，
+  在调用后保存 invocation 事实；重启不重跑不确定执行。新 session 仅在接受成功结果后替换旧 session。
+- 唯一 job 的首次 Started 与 revision_cycles 在同一 PostgreSQL 事务内提交，覆盖控制进程在 relay
+  bookkeeping 前崩溃的窗口。fallback/结果重放不增加计数，新 retry job 消耗新额度并保留原 binding。
+- CodeAgent 总时限覆盖本轮 resume/fallback；超时或取消 asyncio 执行会回收整个 CLI 进程组。
+  wire/journal 持久化前清除异常或输出中回显的本轮 push token。用户 cancel 不 kill 的既有边界不变。
+
+CLI 校准：本机 `codex-cli 0.153.4` 的 `exec resume --help` 确认支持 `--output-schema` 与 `-c`。
+使用临时目录、ephemeral 模式和关闭的本机 provider 端口执行缺失 UUID 探针，未运行模型或改码。
+CLI 无 stdout 执行事件，exit 1，明确返回
+`thread/resume failed: no rollout found for thread id … (code -32600)`。
+仅这个已校准格式允许 fallback；其他错误保守失败。另实测禁用 MCP server 时仍需给出合法 command
+transport，已在 start fallback/resume 中处理。
+命令契约参考 [OpenAI CLI 文档](https://learn.chatgpt.com/docs/developer-commands?surface=cli)；
+错误分类以上述本机版本探针为依据，不推断其他 CLI 版本的行为。
+
+自动化覆盖真实临时 Git/jj 的新提交/no-op、未 push、脏树、错误工作区，worker capability 与
+session/journal 兜底边界，control 的错误 PR/base/ref/lineage/反馈身份，以及实际 PostgreSQL 的
+Started 原子计数、结果提交失败、ACK/结果重放、新反馈隔离、cancel 并发、强信号额度和原地 retry。
+
+验证结果：完整 pytest **323 passed / 0 skipped**（实际 PostgreSQL），Ruff 与 Mypy 通过，
+`uv build --no-sources` 成功生成 sdist/wheel；仅保留既有 Starlette TestClient/httpx 弃用告警。
+
+真实 disposable GitHub repo 的两轮 Codex resume、完整模型 start fallback 和端到端授权凭据 smoke
+**未执行，仍待验收**。本地 CLI 探针和 fake CodeAgent/GitHub 测试不替代这些外部验收；F4 的线程
+回复/resolve 与完整 M2 闭环也未实施。

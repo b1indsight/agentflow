@@ -25,13 +25,13 @@
 
 | 范围 | 状态 | 当前事实 |
 |---|---|---|
-| 配置与领域契约 | 已验证 | serve/worker 独立配置、v6 task/result/tool/recovery message、批次/item-version/context digest 身份、分类 tool error 和 Flow lifecycle/delivery 分轴有覆盖 |
+| 配置与领域契约 | 已验证 | serve/worker 独立配置、v7 task/result/tool/recovery message、冻结修订基线与 session generation、批次/item-version/context digest 身份有覆盖 |
 | PostgreSQL Store | 已验证（自动化） | flow/attempt/job、binding、结果账本与反馈版本/buffer/batch 事务、并发和恢复通过实际 PostgreSQL 测试 |
 | Webhook Ingress | 已验证（M0） | `/healthz`、HMAC 拒绝/接受、后台交接和 202 响应有覆盖；health 仅表示进程可响应 |
 | Event Router | 已验证（M2 F1 自动化） | 反馈 delivery/版本/deadline 原子写入，持久 settle、强信号授权、显式 action、同 Flow 冻结批次串行和重启恢复已覆盖 |
 | Control/Worker 边界 | 已验证（Features 1–3） | 多 worker 鉴权/调度、Flow 生命周期 binding、tool multiplex、busy reconnect、result replay 与 journal secret 负向覆盖 |
 | Control Service / Job Coordinator | 部分 | 真实 issue/default branch prepare、tool fencing/幂等 PR delivery 已接线；thread 映射、取消 kill、冲突处理与真实副作用 E2E 未完成 |
-| Codex / Context / Sandbox / VCS | 部分 | Flow repo、短时 credential helper、STDIO MCP、Git/jj commit/clean/remote 双端核验有自动化；GitHub-only egress 与真实 run 未验证 |
+| Codex / Context / Sandbox / VCS | 部分 | Flow repo、临时凭据、首轮 MCP、修订 resume/一次性 fallback、Git/jj clean/remote/lineage 双端核验有自动化；GitHub-only egress 与真实多轮 run 未验证 |
 | GitHub Client | 部分 | githubkit 0.16 App/installation 认证、Issue/repository/ref/PR、单仓库 Contents capability 与错误映射有隔离测试；真实 App smoke 和 M2 review threads 待验证 |
 | Judge | 已验证（adapter 自动化） | bub 0.4.1 受控无工具单次调用、有界冻结上下文、严格判定、直接答复及持久恢复已覆盖；真实 provider 语义 smoke 待执行 |
 | Reconciler | 桩 | 5 分钟循环存在，`_sweep()` 目前只记录 active flow，不拉取远端状态 |

@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -107,6 +107,8 @@ class Attempt(BaseModel):
     id: int
     flow_id: int
     codex_session_id: str | None = None
+    session_generation: int = 0
+    last_revision_summary: str = ""
     revision_cycles: int = 0
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
@@ -248,6 +250,7 @@ class VcsExecutionContext:
     git_base_sha: str | None
     jj_base_sha: str | None
     jj_ancestor_sha: str | None
+    push_context: CodeAgentContext | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)
@@ -268,7 +271,12 @@ class AgentRun:
     session_id: str | None
     last_message: str
     exit_code: int
-    output: CodexResult | None = None  # --output-schema 解析结果（修订轮）
+    output: CodexResult | InitialCodexResult | None = None
+    failure_detail: str | None = None
+
+
+class SessionUnavailable(RuntimeError):
+    """Adapter proved resume was rejected before any model or tool execution."""
 
 
 @dataclass(frozen=True)
@@ -278,6 +286,7 @@ class CodeAgentContext:
     push_token: SecretStr | None = None
     push_repository: str | None = None
     mcp_socket: Path | None = None
+    cwd: Path | None = None
 
 
 # ------------------------------------------------------------ 跨模型 JSON 契约（pydantic）
@@ -333,11 +342,13 @@ class DeferredComment(FeedbackRef):
 class CodexResult(BaseModel):
     """codex 修订 run 的结构化产出。见 docs/architecture/review-loop.md §B.4。"""
 
-    summary: str = ""
-    vcs_backend_used: VcsKind | None = None
-    addressed: list[AddressedComment] = []
-    deferred: list[DeferredComment] = []
-    needs_clarification: list[str] = []
+    model_config = ConfigDict(extra="forbid")
+
+    summary: str = Field(min_length=1)
+    vcs_backend_used: VcsKind
+    addressed: list[AddressedComment]
+    deferred: list[DeferredComment]
+    needs_clarification: list[str]
 
 
 class InitialCodexResult(BaseModel):

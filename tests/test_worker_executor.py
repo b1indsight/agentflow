@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from pydantic import SecretStr
 
-from app.models import AgentRun, CodexResult, TriageVerdict, VcsKind, VcsOutcome, Verdict
+from app.models import AgentRun, InitialCodexResult, TriageVerdict, VcsKind, VcsOutcome, Verdict
 from app.protocol import (
     ArchiveResult,
     ArchiveTask,
@@ -14,8 +14,6 @@ from app.protocol import (
     InitialResult,
     InitialTask,
     PushSecret,
-    RevisionResult,
-    RevisionTask,
     TriageResult,
     TriageTask,
 )
@@ -45,16 +43,16 @@ class RecordingAgent:
             session_id="session-1",
             last_message="initial done",
             exit_code=0,
-            output=CodexResult(summary="initial done", vcs_backend_used=VcsKind.GIT),
+            output=InitialCodexResult(summary="initial done", vcs_backend_used=VcsKind.GIT),
         )
 
-    async def resume(self, session_id: str, prompt: str, *, output_schema=None) -> AgentRun:
+    async def resume(self, session_id: str, prompt: str, *, output_schema=None, context=None) -> AgentRun:
         self.resumed.append((session_id, prompt))
         return AgentRun(
             session_id=session_id,
             last_message="revision done",
             exit_code=0,
-            output=CodexResult(summary="updated"),
+            output=None,
         )
 
 
@@ -71,7 +69,7 @@ class BackendlessAgent(RecordingAgent):
             session_id="session-1",
             last_message="claimed success",
             exit_code=0,
-            output=CodexResult(summary="claimed success"),
+            output=None,
         )
 
 
@@ -178,18 +176,6 @@ async def test_executor_runs_agent_and_judge_tasks_without_store(
     triage = await executor.execute(
         TriageTask(batch_id=1, feedback=[], attempt_id=1, context=review_context())
     )
-    revision = await executor.execute(
-        RevisionTask(
-            batch_id=1,
-            flow_id=3,
-            attempt_id=1,
-            repo="owner/repo",
-            branch="flow/issue-8",
-            session_id="session-1",
-            instruction="Fix it",
-            feedback=[],
-        )
-    )
     archived = await executor.execute(
         ArchiveTask(flow_id=3, attempt_id=1, repo="owner/repo")
     )
@@ -199,11 +185,9 @@ async def test_executor_runs_agent_and_judge_tasks_without_store(
     assert initial.open_pr_call_id == "call-1"
     assert initial.pull_request is not None
     assert isinstance(triage, TriageResult)
-    assert isinstance(revision, RevisionResult)
-    assert revision.output.summary == "updated"
     assert triage.decision.context_digest == review_context().digest
     assert isinstance(archived, ArchiveResult)
-    assert agent.started and agent.resumed
+    assert agent.started
     assert agent.started[0][1] == workspace
     assert cleaned
 

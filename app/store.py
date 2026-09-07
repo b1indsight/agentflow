@@ -169,6 +169,8 @@ CREATE TABLE IF NOT EXISTS flow_tool_calls (
 
 -- Feature 1 upgrades existing PostgreSQL installations without a destructive migration.
 ALTER TABLE attempts ADD COLUMN IF NOT EXISTS worker_id TEXT;
+ALTER TABLE attempts ADD COLUMN IF NOT EXISTS session_generation INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE attempts ADD COLUMN IF NOT EXISTS last_revision_summary TEXT NOT NULL DEFAULT '';
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS assigned_worker_id TEXT;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS assignment_token TEXT;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ;
@@ -495,10 +497,13 @@ class Store:
         with self.connection() as connection:
             connection.execute(
                 "UPDATE attempts SET codex_session_id=%s, revision_cycles=%s,"
+                " session_generation=%s,last_revision_summary=%s,"
                 " updated_at=%s WHERE id=%s",
                 (
                     attempt.codex_session_id,
                     attempt.revision_cycles,
+                    attempt.session_generation,
+                    attempt.last_revision_summary,
                     attempt.updated_at,
                     attempt.id,
                 ),
@@ -907,7 +912,7 @@ class Store:
         with self.connection() as connection, connection.transaction():
             self._lock_worker(connection, worker_id)
             job = connection.execute(
-                "SELECT flow_id FROM jobs WHERE id=%s AND state=%s"
+                "SELECT flow_id,kind FROM jobs WHERE id=%s AND state=%s"
                 " AND assigned_worker_id=%s AND assignment_token=%s"
                 " AND started_at IS NULL AND EXISTS (SELECT 1 FROM workers"
                 " WHERE worker_id=%s AND connection_epoch=%s) FOR UPDATE",
@@ -939,6 +944,13 @@ class Store:
                     token,
                 ),
             )
+            if started.rowcount == 1 and job["kind"] == JobKind.REVISION:
+                # Count in the same transaction as Started: a control crash before feedback
+                # relay bookkeeping must not leave a real invocation outside the revision cap.
+                connection.execute(
+                    "UPDATE attempts SET revision_cycles=revision_cycles+1,updated_at=%s WHERE id=%s",
+                    (now, attempt_id),
+                )
             return started.rowcount == 1
 
     def heartbeat_assignment(

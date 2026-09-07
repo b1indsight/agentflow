@@ -102,6 +102,39 @@ async def test_client_acknowledges_and_executes_one_assignment() -> None:
     assert messages[2].assignment_token == "assignment-1"
 
 
+@pytest.mark.parametrize("fails", [False, True])
+async def test_worker_redacts_echoed_push_capability_before_journal_and_wire(tmp_path, fails):
+    from app.protocol import Failed, parse_server_message
+    from app.worker.journal import WorkerJournal
+    from tests.test_worker_journal import _assignment
+
+    class EchoingExecutor:
+        async def execute(self, task, secret=None):
+            if fails:
+                raise RuntimeError("command echoed push-secret")
+            return InitialResult(session_id="session", last_message="push-secret", exit_code=0)
+
+    class InspectJournal(WorkerJournal):
+        def record_terminal(self, terminal):
+            assert "push-secret" not in terminal.model_dump_json()
+            return super().record_terminal(terminal)
+
+    connection = ScriptedConnection()
+    assignment = parse_server_message(connection.messages[1])
+    assert isinstance(assignment, Assignment)
+    assignment.secret = _assignment().secret
+    connection.messages[1] = assignment.model_dump_json()
+    client = WorkerClient(worker_id="worker-1", worker_token="worker-secret",
+                           serve_ws_url="ws://serve/internal/workers/connect",
+                           executor=EchoingExecutor(), journal=InspectJournal(tmp_path))
+    with pytest.raises(ConnectionError, match="script complete"):
+        await client.run_connection(connection)
+    terminal = parse_worker_message(connection.sent[2])
+    assert isinstance(terminal, Failed if fails else Succeeded)
+    assert "push-secret" not in terminal.model_dump_json()
+    assert "[REDACTED]" in terminal.model_dump_json()
+
+
 class ToolCallingExecutor:
     def __init__(self) -> None:
         self.client: WorkerClient | None = None

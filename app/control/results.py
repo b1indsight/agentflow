@@ -9,6 +9,8 @@ from loguru import logger
 from pluggy import PluginManager
 
 from app.control.effects import ResultEffects
+from app.control.revisions import frozen_revision, revision_mismatch, verify_revision_remote
+from app.github_models import GitHubAdapterError
 from app.models import (
     TERMINAL_STATES,
     AddressedComment,
@@ -77,6 +79,7 @@ class ResultApplication:
         job = self.store.get_job(job_id)
         if job is None:
             raise ValueError(f"job {job_id} disappeared")
+        revision_error = await self._check_revision(job)
         legacy = False
         with self.store.transaction() as tx:
             flow = tx.lock_workflow(job.flow_id)
@@ -96,7 +99,7 @@ class ResultApplication:
             else:
                 plan = tx.results.get_plan(job_id)
                 if plan is None:
-                    plan = self._prepare(tx, flow, current)
+                    plan = self._prepare(tx, flow, current, revision_error)
                     tx.results.prepare(plan)
                 if plan.digest != current.result_digest:
                     raise ValueError("result plan digest conflicts with inbox")
@@ -128,7 +131,37 @@ class ResultApplication:
         self._after_commit(flow, current, plan, state)
         return state
 
-    def _prepare(self, tx: Store, flow: Flow, job: Job) -> ResultPlan:
+    async def _check_revision(self, job: Job) -> str | None:
+        """Perform network reads outside the transaction, once per frozen result plan."""
+        if (job.kind is not JobKind.REVISION or job.result_applied_at is not None
+                or job.result_payload is None or self.store.results.get_plan(job.id) is not None
+                or job.result_recovery_version == 0):
+            return None
+        flow = self.store.get_flow(job.flow_id)
+        if flow is None or flow.state in TERMINAL_STATES:
+            return None
+        message = parse_worker_message(json.dumps(job.result_payload))
+        if not isinstance(message, Succeeded) or not isinstance(message.result, RevisionResult):
+            return None
+        result = message.result
+        task = frozen_revision(job)
+        mismatch = revision_mismatch(task, result)
+        if mismatch:
+            return mismatch
+        delivery = self.store.get_delivery(flow.id)
+        if delivery is None or delivery.head_sha != task.expected_head_sha:
+            return "revision baseline no longer matches delivery"
+        assert result.commit_sha is not None
+        try:
+            return await verify_revision_remote(self.effects.github, flow, delivery, result.commit_sha)
+        except GitHubAdapterError as error:
+            if error.retryable:
+                raise ResultPending(str(error)) from error
+            return str(error)
+
+    def _prepare(
+        self, tx: Store, flow: Flow, job: Job, revision_error: str | None = None,
+    ) -> ResultPlan:
         """Freeze state-dependent inputs once; later attempts use this same plan and effect order."""
         message = parse_worker_message(json.dumps(job.result_payload))
         if not isinstance(message, (Succeeded, Failed)):
@@ -293,8 +326,25 @@ class ResultApplication:
                     tx,
                     flow,
                     base,
-                    f"修订失败（codex exit={result.exit_code}），本轮未更新。",
+                    f"修订失败（exit={result.exit_code}, stage={result.failure_stage}）："
+                    f"{result.failure_detail or '执行结果不确定'}。反馈保留，需核对工作区和远端。",
                 )
+            task = frozen_revision(job)
+            delivery = tx.get_delivery(flow.id)
+            execution = tx.get_flow_execution(flow.id)
+            mismatch = revision_error or revision_mismatch(task, result)
+            if mismatch:
+                return self._failure(tx, flow, base, mismatch)
+            if (delivery is None or delivery.head_sha != task.expected_head_sha
+                    or delivery.state is not DeliveryState.OPEN
+                    or delivery.pr_number != task.pr_number or delivery.branch != task.branch
+                    or delivery.base_branch != task.base_branch
+                    or attempt.codex_session_id != task.session_id
+                    or attempt.session_generation != task.session_generation
+                    or execution is None or execution.released_at is not None
+                    or execution.repo_identity != task.repo_identity):
+                return self._failure(tx, flow, base, "revision assignment is no longer current")
+            assert result.output is not None
             number = self._pr_number(tx, flow)
             members = {(f.item_id, f.version): f for f in batch.feedback}
             reported: list[AddressedComment | DeferredComment] = [
@@ -316,7 +366,7 @@ class ResultApplication:
                 and (f.item_id, f.version) not in reported_keys
             )
             unresolved = (len(consumed) != len(batch.feedback)
-                          or bool(batch.open_points or result.output.needs_clarification))
+                          or bool(result.output.needs_clarification))
             effects = [
                 self._comment(
                     flow, number, f"deferred:{index}", f"@ {item.comment_id}: {item.reason}"
@@ -327,20 +377,25 @@ class ResultApplication:
                 self._comment(flow, number, f"question:{index}", f"❓ {question}")
                 for index, question in enumerate(result.output.needs_clarification)
             )
+            new_commit = result.commit_sha != task.expected_head_sha
             if result.output.summary:
                 effects.append(
                     self._comment(
-                        flow, number, "summary", f"已按 review 更新：{result.output.summary}"
+                        flow, number, "summary",
+                        f"{'修订进展' if unresolved else '修订结果'}"
+                        f"（{'已核验新提交' if new_commit else '无新提交'}）：{result.output.summary}"
                     )
                 )
-            if not unresolved:
+            if not unresolved and new_commit:
                 effects.extend(self._review_effects(flow, number))
             return base.model_copy(
                 update={
                     "effects": effects,
+                    "delivery": delivery,
+                    "revision": result,
                     "batch_state": BatchState.WAITING if unresolved else BatchState.COMPLETED,
                     "consumed": consumed,
-                    "open_points": [*batch.open_points, *result.output.needs_clarification,
+                    "open_points": [*result.output.needs_clarification,
                                     *(item.reason for item in result.output.deferred)],
                 }
             )
@@ -361,8 +416,14 @@ class ResultApplication:
             attempt = tx.get_attempt(plan.attempt_id)
             if attempt is None:
                 raise ValueError("result attempt disappeared")
-            if plan.run.session_id is not None or plan.run.kind == "initial":
+            if plan.run.kind == "initial" or (
+                plan.run.session_id is not None and not failure and plan.state is JobState.DONE
+            ):
                 attempt.codex_session_id = plan.run.session_id
+                if plan.revision is not None:
+                    attempt.session_generation = plan.revision.session_generation
+                    assert plan.revision.output is not None
+                    attempt.last_revision_summary = plan.revision.output.summary
                 tx.update_attempt(attempt)
             tx.record_codex_run(
                 attempt.id,
@@ -376,26 +437,20 @@ class ResultApplication:
         if state is not None:
             flow.state = state
             tx.update_flow(flow)
-            tx.release_flow_execution(flow.id)
+            if job.kind is not JobKind.REVISION:
+                tx.release_flow_execution(flow.id)
         if failure or plan.state is JobState.FAILED:
             return
         if plan.delivery is not None:
             current = tx.get_delivery(flow.id)
             if current is None or current.version != plan.delivery.version:
                 raise ResultPending("delivery version changed before result commit")
-            receipts = [
-                r.receipt.pull_request
-                for r in tx.results.list_effects(job.id)
-                if r.receipt is not None and r.receipt.pull_request is not None
-            ]
-            if len(receipts) != 1:
-                raise ValueError("initial result has no unique PR receipt")
-            pull_request = receipts[0]
-            current.state = DeliveryState.OPEN
-            current.pr_number = pull_request.number
-            current.url = f"https://github.com/{flow.repo}/pull/{pull_request.number}"
-            current.version += 1
-            tx.update_delivery(current)
+            if plan.revision is not None:
+                current.head_sha = plan.revision.commit_sha
+                current.version += 1
+                tx.update_delivery(current)
+            else:
+                self._commit_initial_delivery(tx, job, current, flow)
         if plan.derived is not None:
             derived = tx.enqueue_job(
                 flow.id,
@@ -408,6 +463,22 @@ class ResultApplication:
                 tx.reviews.advance(plan.batch_id, derived)
         if plan.batch_id is not None and plan.batch_state is not None:
             tx.reviews.complete(plan.batch_id, plan.batch_state, plan.consumed, plan.open_points)
+
+    @staticmethod
+    def _commit_initial_delivery(tx: Store, job: Job, current: FlowDelivery, flow: Flow) -> None:
+        receipts = [
+                r.receipt.pull_request
+                for r in tx.results.list_effects(job.id)
+                if r.receipt is not None and r.receipt.pull_request is not None
+        ]
+        if len(receipts) != 1:
+            raise ValueError("initial result has no unique PR receipt")
+        pull_request = receipts[0]
+        current.state = DeliveryState.OPEN
+        current.pr_number = pull_request.number
+        current.url = f"https://github.com/{flow.repo}/pull/{pull_request.number}"
+        current.version += 1
+        tx.update_delivery(current)
 
     def _failure(self, tx: Store, flow: Flow, base: ResultPlan, reason: str) -> ResultPlan:
         delivery = tx.get_delivery(flow.id)
