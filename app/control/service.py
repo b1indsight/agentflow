@@ -112,6 +112,9 @@ class ControlService:
                 kind = failed_job.kind if failed_job is not None else JobKind.INITIAL
                 if kind is JobKind.ANSWER:
                     raise ValueError("Reconcile legacy ANSWER jobs before upgrading to protocol v6")
+                delivery = tx.get_delivery(fresh.id)
+                if delivery is not None and delivery.supersedes(kind):
+                    raise ValueError("a merged PR cannot retry coding or review jobs")
                 fresh.state = FlowState.ACTIVE
                 tx.update_flow(fresh)
                 if (failed_job is not None and kind is JobKind.TRIAGE

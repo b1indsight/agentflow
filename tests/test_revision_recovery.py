@@ -189,6 +189,32 @@ async def test_failed_revision_retry_retains_repo_and_consumes_a_new_cycle(store
     assert store.get_flow_execution(flow.id).worker_id == binding.worker_id
 
 
+async def test_failed_revision_retry_after_merge_keeps_flow_terminal(store, pending_revision):
+    from app.control.service import ControlService
+    from tests.test_merge import route_merge
+
+    flow, job, task, _, subject = pending_revision
+    assert store.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
+    subject.mark_started(job, task, "worker-a")
+    failed = verified_result(task, exit_code=65, failure_stage="push", failure_detail="not pushed")
+    assert accept(store, job, failed) == "pending"
+    assert await subject.results.apply(job.id) is JobState.FAILED
+    await route_merge(store, flow)
+    jobs = store.list_jobs(flow.id)
+    binding = store.get_flow_execution(flow.id)
+    delivery = store.get_delivery(flow.id)
+    assert delivery.state is DeliveryState.MERGED
+
+    with pytest.raises(ValueError, match="merged PR"):
+        ControlService(store).retry(flow)
+
+    assert store.get_flow(flow.id).state is FlowState.FAILED
+    assert store.get_active_flow(flow.repo, flow.issue_number) is None
+    assert store.list_jobs(flow.id) == jobs
+    assert store.get_flow_execution(flow.id) == binding
+    assert store.get_delivery(flow.id) == delivery
+
+
 async def test_protocol_upgrade_refuses_old_started_revision(store, pending_revision):
     _, job, task, _, _ = pending_revision
     assert store.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")

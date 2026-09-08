@@ -98,8 +98,11 @@ F1 保留当前健康 worker 上的 ARCHIVE 执行路径，不升级 wire protoc
   只查询 PR 身份/当前远端状态。未知评论结果仍保持 pending，阻止归档越过未确认结果。
 - 补齐直接相关的 `flow.open_pr` 入口：合并后旧 INITIAL 再调用工具会被拒绝，不能改回 OPENING。
   线程观察在合并后不再恢复反馈 buffer。`on_merged` 保持提交后尽力调用。
+- 修复审查发现的 merged delivery 重试问题：恢复 ACTIVE 前拒绝已退休的编码/review 工作，
+  保持终态 Flow 与原任务、binding、delivery 不变，不占用 Issue 的活跃名额；ARCHIVE 仍可重试。
+  先用真实 PostgreSQL 复现“REVISION 失败后 PR 被合并”的错误，再验证修复和归档重试边界。
 
-先补测试复现原子去重、身份过滤和结果竞态缺陷，再实施。完整 pytest **399 passed / 0 skipped**
+先补测试复现原子去重、身份过滤和结果竞态缺陷，再实施。完整 pytest **401 passed / 0 skipped**
 （真实 PostgreSQL，Git/jj 临时仓库；GitHub/模型用替身）；Ruff、Mypy、`uv build --no-sources`
 和差异空白检查均通过。独立代码审查结果见 PR 验证记录。
 

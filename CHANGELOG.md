@@ -6,6 +6,8 @@
   共用 PostgreSQL 事务；重复事件只推进一次，合法关联合并不受反馈 bot/触发 allowlist 过滤。
 - 合并后的任务准备、派发、flow.open_pr 和 GitHub 写入检查 delivery；迟到 INITIAL/REVISION
   保留运行事实，旧结果不改回 OPEN、不将归档 Flow 置 FAILED、不派生修订或消费反馈。
+- 已合并 PR 的编码/review 重试在恢复 Flow 前被拒绝，避免终态 Flow 卡在 ACTIVE 并占用
+  Issue 的活跃名额；失败 ARCHIVE 仍可重试。
 - 已派发的 GitHub 操作只查询回执，不重发；ARCHIVE 等待旧执行和未应用结果收尾。保留协议 v7
   和现有清理路径，可靠清理/worker 释放增强与归档状态回写分别由 M3 F2/F3 接续。
 
