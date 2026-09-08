@@ -1,7 +1,8 @@
 """Real PostgreSQL effect receipts survive lost GitHub responses and preserve racing feedback."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
+import httpx
 import pytest
 
 from app.github_models import GitHubAdapterError, GitHubErrorKind, ReviewThreads
@@ -14,8 +15,9 @@ from app.models import (
     ReviewItemKind,
 )
 from app.protocol import PROTOCOL_VERSION, RevisionTask
-from app.result_models import ResultPending
+from app.result_models import EffectState, ResolveEffect, ResultPending
 from app.review_models import FeedbackUpdate
+from tests.test_archive_status import archive_adapter
 from tests.test_coordinator import coordinator
 from tests.test_review_resolution import human, snapshot
 from tests.test_revision_delivery import revision_output, verified_result
@@ -121,6 +123,44 @@ async def test_lost_response_replays_one_reply_and_one_resolve(store, thread_rev
     assert len(github.replies) == 1 and github.resolves == ["T1"]
     assert store.reviews.pending(flow.id) == []
     assert store.get_delivery(flow.id).head_sha == "revision"
+
+
+@pytest.mark.parametrize("status", [401, 429])
+async def test_auth_failure_after_resolve_waits_for_confirmation(
+    store, thread_revision, tmp_path, monkeypatch, status,
+):
+    _, job, github, subject = thread_revision
+    read = github.get_review_thread
+
+    def rejected_token(request):
+        assert request.url.path == "/app/installations/42/access_tokens"
+        return httpx.Response(status, json={"message": "token unavailable"},
+                              headers={"Retry-After": "120"} if status == 429 else {})
+
+    adapter, _ = archive_adapter(tmp_path, monkeypatch, rejected_token)
+
+    async def auth_after_resolve(*args):
+        if github.resolves:
+            return await adapter.get_review_thread(*args)
+        return await read(*args)
+
+    monkeypatch.setattr(github, "get_review_thread", auth_after_resolve)
+    before = store.now()
+    with pytest.raises(ResultPending):
+        await subject.results.apply(job.id)
+    effect = next(r for r in store.results.list_effects(job.id)
+                  if isinstance(r.payload, ResolveEffect))
+    assert effect.state is EffectState.UNCERTAIN
+    assert effect.dispatched_at is not None
+    if status == 429:
+        assert effect.next_attempt_at >= before + timedelta(seconds=120)
+    assert github.review_requests == []
+    monkeypatch.setattr(github, "get_review_thread", read)
+    with store.connection() as connection:
+        connection.execute("UPDATE result_effects SET next_attempt_at=now() WHERE job_id=%s", (job.id,))
+    assert await coordinator(store, github).results.apply(job.id) is JobState.DONE
+    assert github.resolves == ["T1"]
+    assert github.review_requests
 
 
 @pytest.mark.parametrize("change", ["new", "edited", "manual-resolve", "during-resolve", "head"])

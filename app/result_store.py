@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING
 from psycopg.rows import class_row
 from psycopg.types.json import Jsonb
 
-from app.models import Flow, JobState
 from app.result_models import EffectReceipt, EffectRecord, EffectState, ResultPlan
 
 if TYPE_CHECKING:
@@ -202,32 +201,19 @@ class ResultStore:
                  self.store.now(), EffectState.FAILED),
             )
 
-    def retry_delivery_effects(self, flow: Flow) -> bool:
-        """Rearm definite rejections only; the caller holds the workflow lock."""
+    def get_pending_plan(self, flow_id: int) -> ResultPlan | None:
+        """Find a unique unapplied inbox plan; the caller holds the workflow lock."""
         with self.store.connection() as connection:
             jobs = connection.execute(
                 "SELECT id FROM jobs WHERE flow_id=%s AND result_received_at IS NOT NULL"
                 " AND result_applied_at IS NULL FOR UPDATE",
-                (flow.id,),
+                (flow_id,),
             ).fetchall()
-            if len(jobs) != 1:
-                return False
-            job_id = jobs[0]["id"]
-            plan = self.get_plan(job_id)
-            if (plan is None or (plan.revision is None and plan.archive is None)
-                    or plan.state is not JobState.DONE
-                    or plan.attempt_id != flow.current_attempt_id):
-                return False
-            if plan.archive is not None:
-                from app.control.archive import verify_archive
+            return self.get_plan(jobs[0]["id"]) if len(jobs) == 1 else None
 
-                job = self.store.get_job(job_id)
-                if job is None:
-                    return False
-                try:
-                    verify_archive(self.store, flow, job, plan.archive)
-                except ValueError:
-                    return False
+    def retry_failed_effects(self, job_id: int) -> bool:
+        """Rearm definite rejections after control validates the plan under its workflow lock."""
+        with self.store.connection() as connection:
             effects = self.list_effects(job_id)
             failed = [effect for effect in effects if effect.state is EffectState.FAILED]
             if (not failed or any(effect.dispatched_at is not None for effect in failed)

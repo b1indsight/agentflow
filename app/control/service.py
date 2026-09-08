@@ -6,6 +6,7 @@ from collections.abc import Callable
 
 from loguru import logger
 
+from app.control.archive import verify_archive
 from app.github_models import PullRequestMerge
 from app.models import (
     TERMINAL_STATES,
@@ -109,7 +110,7 @@ class ControlService:
             if delivery is not None and delivery.state is DeliveryState.MERGED:
                 self._retry_archive(tx, fresh)
             elif tx.has_pending_result(flow.id):
-                if fresh.state is not FlowState.ACTIVE or not tx.results.retry_delivery_effects(fresh):
+                if fresh.state is not FlowState.ACTIVE or not self._retry_delivery_effects(tx, fresh):
                     raise ValueError("Flow has a pending result; reconcile its effects before retry")
             else:
                 active = tx.get_active_flow(fresh.repo, fresh.issue_number)
@@ -148,6 +149,24 @@ class ControlService:
         self._jobs_available()
 
     @staticmethod
+    def _retry_delivery_effects(tx: Store, flow: Flow) -> bool:
+        """Validate verified delivery or cleanup before rearming its failed GitHub effects."""
+        plan = tx.results.get_pending_plan(flow.id)
+        if (plan is None or (plan.revision is None and plan.archive is None)
+                or plan.state is not JobState.DONE
+                or plan.attempt_id != flow.current_attempt_id):
+            return False
+        if plan.archive is not None:
+            job = tx.lock_job(plan.job_id)
+            if job is None:
+                return False
+            try:
+                verify_archive(tx, flow, job, plan.archive)
+            except ValueError:
+                return False
+        return tx.results.retry_failed_effects(plan.job_id)
+
+    @staticmethod
     def _retry_archive(tx: Store, flow: Flow) -> None:
         """Retry only a settled archive on its original binding and current Attempt."""
         if flow.state is not FlowState.ACTIVE:
@@ -156,7 +175,7 @@ class ControlService:
         if execution is None or execution.released_at is not None:
             raise ValueError("archive retry requires the original active binding")
         if tx.has_pending_result(flow.id):
-            if tx.results.retry_delivery_effects(flow):
+            if ControlService._retry_delivery_effects(tx, flow):
                 return
             raise ValueError("archive has a pending result; wait for result reconciliation")
         jobs = tx.list_jobs(flow.id)

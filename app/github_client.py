@@ -13,9 +13,11 @@ from githubkit.exception import (
     AuthCredentialError,
     AuthExpiredError,
     GraphQLFailed,
+    RateLimitExceeded,
     RequestError,
     RequestFailed,
 )
+from jwt.exceptions import PyJWTError
 from pydantic import SecretStr
 
 from app.config import ServeSettings
@@ -69,12 +71,14 @@ class GitHubApp:
         return key
 
     def _app_client(self) -> Any:
+        # Push credentials are issued before assignment and have no effect-ledger retry.
         return GitHub(
             AppAuthStrategy(self._app_id, self._private_key),
             timeout=self._request_timeout_seconds,
         )
 
-    def _installation_client(self, installation_id: int) -> Any:
+    def _installation_client(self, installation_id: int, *, auto_retry: bool = True) -> Any:
+        """Read APIs retain SDK retries; mutations explicitly defer to durable effect recovery."""
         return GitHub(
             AppInstallationAuthStrategy(
                 self._app_id,
@@ -82,6 +86,7 @@ class GitHubApp:
                 installation_id,
             ),
             timeout=self._request_timeout_seconds,
+            auto_retry=auto_retry,
         )
 
     async def get_issue(self, installation_id: int, repo: str, number: int) -> IssueSnapshot:
@@ -297,7 +302,7 @@ class GitHubApp:
         body: str,
     ) -> PullRequestSnapshot:
         owner, name = self._split_repo(repo)
-        client = self._installation_client(installation_id)
+        client = self._installation_client(installation_id, auto_retry=False)
 
         async def operation() -> PullRequestSnapshot:
             data = (
@@ -316,7 +321,7 @@ class GitHubApp:
 
     async def comment(self, installation_id: int, repo: str, number: int, body: str) -> int:
         owner, name = self._split_repo(repo)
-        client = self._installation_client(installation_id)
+        client = self._installation_client(installation_id, auto_retry=False)
 
         async def operation() -> int:
             data = (
@@ -453,7 +458,7 @@ class GitHubApp:
         self, installation_id: int, repo: str, number: int, labels: list[str]
     ) -> None:
         owner, name = self._split_repo(repo)
-        client = self._installation_client(installation_id)
+        client = self._installation_client(installation_id, auto_retry=False)
         await self._execute(
             "set_labels",
             lambda: client.rest.issues.async_set_labels(owner, name, number, labels=labels),
@@ -469,6 +474,7 @@ class GitHubApp:
             "get_label (preconfigure the repository status label)",
             lambda: client.rest.issues.async_get_label(owner, name, label),
         )
+        client = self._installation_client(installation_id, auto_retry=False)
         response = await self._execute(
             "add_label",
             lambda: client.rest.issues.async_add_labels(owner, name, number, labels=[label]),
@@ -481,7 +487,7 @@ class GitHubApp:
     ) -> None:
         """Treat an absent label as success only when the target can still be read."""
         owner, name = self._split_repo(repo)
-        client = self._installation_client(installation_id)
+        client = self._installation_client(installation_id, auto_retry=False)
         try:
             await self._execute(
                 "remove_label",
@@ -501,7 +507,7 @@ class GitHubApp:
         if not reviewers:
             return
         owner, name = self._split_repo(repo)
-        client = self._installation_client(installation_id)
+        client = self._installation_client(installation_id, auto_retry=False)
         await self._execute(
             "request_reviewers",
             lambda: client.rest.pulls.async_request_reviewers(
@@ -527,7 +533,7 @@ class GitHubApp:
     ) -> int:
         """REST replies require the root database ID, not a reply or a GraphQL node ID."""
         owner, name = self._split_repo(repo)
-        client = self._installation_client(installation_id)
+        client = self._installation_client(installation_id, auto_retry=False)
 
         async def operation() -> int:
             response = await client.rest.pulls.async_create_reply_for_review_comment(
@@ -551,7 +557,7 @@ class GitHubApp:
         return None
 
     async def resolve_review_thread(self, installation_id: int, thread_id: str) -> None:
-        client = self._installation_client(installation_id)
+        client = self._installation_client(installation_id, auto_retry=False)
         await self._execute(
             "resolve_review_thread",
             lambda: client.async_graphql(_RESOLVE_THREAD_MUTATION, {"threadId": thread_id}),
@@ -614,10 +620,21 @@ class GitHubApp:
             raise GitHubAdapterError(kind, endpoint, status_code=status) from None
         except RequestFailed as exc:
             raise GitHubApp._request_error(endpoint, exc) from None
-        except (AuthCredentialError, AuthExpiredError):
-            raise GitHubAdapterError(GitHubErrorKind.AUTHENTICATION, endpoint) from None
-        except (RequestError, httpx.TimeoutException, httpx.NetworkError):
-            raise GitHubAdapterError(GitHubErrorKind.TRANSIENT, endpoint) from None
+        except (AuthCredentialError, AuthExpiredError, PyJWTError, RequestError,
+                httpx.TimeoutException, httpx.NetworkError) as error:
+            # githubkit wraps local auth failures along with transport errors in RequestError.
+            cause = error.exc if isinstance(error, RequestError) else error
+            if isinstance(cause, RequestFailed):
+                # A wrapped HTTP rejection comes from auth's token acquisition; target HTTP
+                # responses are checked outside _arequest and reach the direct handler above.
+                failure = GitHubApp._request_error(endpoint, cause)
+                failure.definitely_unsent = True
+                raise failure from None
+            unsent_auth = isinstance(cause, (AuthCredentialError, AuthExpiredError, PyJWTError))
+            raise GitHubAdapterError(
+                GitHubErrorKind.AUTHENTICATION if unsent_auth else GitHubErrorKind.TRANSIENT,
+                endpoint, definitely_unsent=unsent_auth,
+            ) from None
         except (AttributeError, KeyError, TypeError, ValueError):
             raise GitHubAdapterError(GitHubErrorKind.UNEXPECTED_RESPONSE, endpoint) from None
 
@@ -626,6 +643,8 @@ class GitHubApp:
         response = error.response.raw_response
         status = response.status_code
         retry_after = response.headers.get("Retry-After")
+        if retry_after is None and isinstance(error, RateLimitExceeded):
+            retry_after = str(max(0.0, error.retry_after.total_seconds()))
         if status == 401:
             kind = GitHubErrorKind.AUTHENTICATION
         elif status == 403 and (

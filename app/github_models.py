@@ -106,7 +106,7 @@ class GitHubErrorKind(StrEnum):
 
 
 class GitHubAdapterError(RuntimeError):
-    """Sanitized adapter failure with stable retry and diagnostics metadata."""
+    """Sanitized failure; definitely_unsent proves this call sent no target request."""
 
     def __init__(
         self,
@@ -116,12 +116,14 @@ class GitHubAdapterError(RuntimeError):
         status_code: int | None = None,
         request_id: str | None = None,
         retry_after: str | None = None,
+        definitely_unsent: bool = False,
     ) -> None:
         self.kind = kind
         self.endpoint = endpoint
         self.status_code = status_code
         self.request_id = request_id
         self.retry_after = retry_after
+        self.definitely_unsent = definitely_unsent
         self.retryable = kind in {GitHubErrorKind.RATE_LIMITED, GitHubErrorKind.TRANSIENT}
         details = [f"GitHub {endpoint} failed", f"kind={kind.value}"]
         if status_code is not None:

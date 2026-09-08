@@ -371,6 +371,16 @@ class Store:
                 is not None
             )
 
+    def has_unsettled_jobs(self, flow_id: int, *, excluding_job_id: int) -> bool:
+        """Check for another executor or unapplied result without loading job payloads."""
+        with self.connection() as connection:
+            return connection.execute(
+                "SELECT 1 FROM jobs WHERE flow_id=%s AND id<>%s"
+                " AND (state=%s OR (result_received_at IS NOT NULL"
+                " AND result_applied_at IS NULL)) LIMIT 1",
+                (flow_id, excluding_job_id, JobState.RUNNING),
+            ).fetchone() is not None
+
     def init_db(self) -> None:
         with self.connection() as connection:
             connection.execute(SCHEMA)

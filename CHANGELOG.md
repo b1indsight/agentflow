@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- 修复归档评论发送前的本地认证失败被误判为未知结果：恢复凭据后可重试原结果，已有不确定
+  发送记录仍仅查回执。状态写入停用 SDK 内部重试，保留读取（含标签预检、只读 GraphQL）和 push token 签发的有限重试；
+  resolve 成功后的确认查询失败保留待确认记录，持久恢复遵守 Retry-After 或限流重置时间。
+  重试资格校验归回 control service，归档等待检查改为数据库存在性查询。
 - M3 F3：清理核验后，对 Issue/PR 增量增加完成标签、移除 in-review 标签，并各发布稳定 marker
   的固定归档说明；保留用户与触发标签，不创建仓库 label。新增 `FLOWTOOL_DONE_LABEL` 及配置冲突校验。
 - 归档 GitHub 回写复用冻结 ResultPlan 和 effect 回执：响应丢失先查询，部分成功只续跑缺失操作；

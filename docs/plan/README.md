@@ -9,7 +9,7 @@
 
 - [`m3-merge-detection.md`](m3-merge-detection.md) — M3 F1：合并检测与后续任务收敛，已合并 [#24](https://github.com/b1indsight/agentflow/pull/24)；
 - [`m3-workspace-archive.md`](m3-workspace-archive.md) — M3 F2：可核验工作区清理、原 worker 恢复与原子释放，已合并 [#25](https://github.com/b1indsight/agentflow/pull/25)；
-- [`m3-archive-status.md`](m3-archive-status.md) — M3 F3：归档状态回写已实施，真实闭环待验收，见 [#26](https://github.com/b1indsight/agentflow/pull/26)；
+- [`m3-archive-status.md`](m3-archive-status.md) — M3 F3：归档状态回写已合并 [#26](https://github.com/b1indsight/agentflow/pull/26)，真实闭环待验收；
 - [`m2-feedback-batches.md`](m2-feedback-batches.md) — M2 F1：持久反馈批次与 settle，已实现并合并 [#19](https://github.com/b1indsight/agentflow/pull/19)；
 - [`m2-semantic-triage.md`](m2-semantic-triage.md) — M2 F2：bub adapter、有界上下文与幂等答复，已实现并合并 [#20](https://github.com/b1indsight/agentflow/pull/20)，真实 provider smoke 待执行；
 - [`m2-revision-delivery.md`](m2-revision-delivery.md) — M2 F3：修订交付核验与一次性 session 兜底，已实现并合并 [#21](https://github.com/b1indsight/agentflow/pull/21)，真实多轮 smoke 待验收；

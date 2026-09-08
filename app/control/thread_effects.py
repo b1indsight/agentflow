@@ -3,7 +3,7 @@
 from collections.abc import Callable
 
 from app.control.resolution import covered_thread
-from app.github_models import ReviewThreads
+from app.github_models import GitHubAdapterError, ReviewThreads
 from app.models import TERMINAL_STATES, ReviewItemKind
 from app.ports import GitHubClient
 from app.result_models import EffectReceipt, EffectRecord, ResolveEffect, ResultPending, ResultPlan
@@ -80,9 +80,13 @@ async def resolve_thread(
         dispatch(plan, record)
         await github.resolve_review_thread(effect.installation_id, effect.thread_id)
         # GitHub has no conditional resolve. Retain raced comments without automatically reopening.
-        after = await github.get_review_thread(
-            effect.installation_id, effect.repo, effect.number, effect.thread_id,
-        )
+        try:
+            after = await github.get_review_thread(
+                effect.installation_id, effect.repo, effect.number, effect.thread_id,
+            )
+        except GitHubAdapterError as error:
+            # A rejected confirmation read says nothing about the completed mutation.
+            raise ResultPending(f"resolve confirmation is pending: {error}") from error
         observe(store, plan, after)
         current = next((t for t in after.threads if t.thread_id == effect.thread_id), None)
         if current is None or not after.complete:

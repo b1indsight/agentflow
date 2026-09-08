@@ -1,10 +1,18 @@
 """Archive notifications retain cleanup receipts until every GitHub effect is durable."""
 
+from datetime import UTC, datetime, timedelta
+
+import httpx
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from githubkit import GitHub
+from githubkit.cache.mem_cache import MemCacheStrategy
 
 from app.control.archive import archive_progress
 from app.control.effects import ResultEffects
 from app.control.service import ControlService
+from app.github_client import GitHubApp
 from app.github_models import GitHubAdapterError, GitHubErrorKind
 from app.models import FlowState, JobState
 from app.plugins.hookspecs import hookimpl
@@ -14,6 +22,7 @@ from app.result_store import ResultStore
 from app.store import Store
 from tests.test_archive_recovery import ready_archive, receive
 from tests.test_coordinator import RecordingGitHub, coordinator
+from tests.test_github_client import settings
 from tests.test_merge import route_merge
 
 
@@ -58,6 +67,26 @@ def due(store, job_id):
     with store.connection() as connection:
         connection.execute("UPDATE result_effects SET next_attempt_at=%s WHERE job_id=%s",
                            (store.now(), job_id))
+
+
+def archive_adapter(tmp_path, monkeypatch, transport, *, invalid_key=False):
+    """Use production client construction and isolated credentials/cache, mocking only transport."""
+    config = settings(tmp_path)
+    if not invalid_key:
+        config.github_private_key_path.write_bytes(
+            rsa.generate_private_key(public_exponent=65537, key_size=2048).private_bytes(
+                serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                serialization.NoEncryption(),
+            )
+        )
+    cache = MemCacheStrategy()
+
+    def client(*args, **kwargs):
+        return GitHub(*args, **kwargs, async_transport=httpx.MockTransport(transport),
+                      cache_strategy=cache)
+
+    monkeypatch.setattr("app.github_client.GitHub", client)
+    return GitHubApp(config), cache
 
 
 async def test_archive_publishes_stable_status_and_replay_does_not_backfill(store):
@@ -160,6 +189,223 @@ async def test_unknown_archive_comment_stays_pending_without_resending_or_reclea
     assert store.results.get_plan(job.id).archive == result
     assert store.get_flow(flow.id).state is FlowState.ACTIVE
     assert not github.notifications
+
+
+@pytest.mark.parametrize("failure", ["invalid_key", "token_rejected", "token_unavailable"])
+@pytest.mark.parametrize("already_dispatched", [False, True])
+async def test_archive_auth_failure_preserves_whether_comment_was_sent(
+    store, tmp_path, monkeypatch, failure, already_dispatched,
+):
+    flow, job, result, github, subject = await pending_archive(store)
+    comment, find_comment = github.comment, github.find_comment
+    requests = []
+
+    def transport(request):
+        requests.append(request)
+        assert request.url.path == "/app/installations/42/access_tokens"
+        return httpx.Response(503 if failure == "token_unavailable" else 401,
+                              json={"message": "installation token unavailable"})
+
+    adapter, _ = archive_adapter(tmp_path, monkeypatch, transport,
+                                 invalid_key=failure == "invalid_key")
+
+    if already_dispatched:
+        async def lost_response(*args):
+            await comment(*args)
+            raise GitHubAdapterError(GitHubErrorKind.TRANSIENT, "comment")
+        monkeypatch.setattr(github, "comment", lost_response)
+        with pytest.raises(ResultPending):
+            await subject.results.apply(job.id)
+        due(store, job.id)
+        # A failed lookup cannot clear evidence of the preceding uncertain write.
+        monkeypatch.setattr(github, "find_comment", adapter.find_comment)
+    else:
+        # Credentials can expire between the marker lookup and the comment request.
+        monkeypatch.setattr(github, "comment", adapter.comment)
+    with pytest.raises(ResultPending, match=("transient" if failure == "token_unavailable"
+                                             else "authentication")):
+        await subject.results.apply(job.id)
+    assert bool(requests) is (failure != "invalid_key")
+    effect = store.results.list_effects(job.id)[2]
+    expected = (EffectState.RETRY if failure == "token_unavailable" else EffectState.FAILED)
+    assert effect.state is (EffectState.UNCERTAIN if already_dispatched else expected)
+    assert (effect.dispatched_at is not None) is already_dispatched
+    assert store.results.get_plan(job.id).archive == result
+    assert store.get_flow_execution(flow.id).released_at is None
+
+    monkeypatch.setattr(github, "comment", comment)
+    monkeypatch.setattr(github, "find_comment", find_comment)
+    if already_dispatched:
+        with pytest.raises(ValueError, match="pending result"):
+            ControlService(store).retry(flow)
+        due(store, job.id)
+    elif failure == "token_unavailable":
+        due(store, job.id)
+    else:
+        ControlService(store).retry(flow)
+    assert await coordinator(store, github).results.apply(job.id) is JobState.DONE
+    assert len(github.notifications) == 2
+    assert store.get_flow(flow.id).current_attempt_id == result.attempt_id
+    assert store.get_flow_execution(flow.id).released_at is not None
+
+
+async def test_archive_keeps_dispatch_evidence_when_token_expires_after_post(store, tmp_path, monkeypatch):
+    flow, job, _, github, subject = await pending_archive(store)
+    requests = []
+
+    def transport(request):
+        requests.append(request.url.path)
+        if request.url.path == "/app/installations/42/access_tokens":
+            if len(requests) > 1:
+                return httpx.Response(503, json={"message": "token service unavailable"})
+            return httpx.Response(201, json={"token": "test-token", "expires_at":
+                (store.now() + timedelta(hours=1)).astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")})
+        # The POST may have committed. Expiry must not let a later SDK auth failure erase it.
+        assert request.url.path.endswith("/comments")
+        cache._cache = None
+        return httpx.Response(503, json={"message": "comment response unavailable"})
+
+    async def no_wait(*args):
+        pass
+
+    adapter, cache = archive_adapter(tmp_path, monkeypatch, transport)
+    monkeypatch.setattr("githubkit.core.anyio.sleep", no_wait)
+    monkeypatch.setattr(github, "comment", adapter.comment)
+    with pytest.raises(ResultPending):
+        await subject.results.apply(job.id)
+    effect = store.results.list_effects(job.id)[2]
+    assert effect.state is EffectState.UNCERTAIN
+    assert effect.dispatched_at is not None
+    assert requests == ["/app/installations/42/access_tokens",
+                        f"/repos/{flow.repo}/issues/{flow.issue_number}/comments"]
+    assert store.get_flow_execution(flow.id).released_at is None
+
+
+async def test_archive_retry_policy_keeps_push_token_acquisition_retryable(tmp_path, monkeypatch):
+    requests = []
+
+    def transport(request):
+        assert request.url.path == "/app/installations/42/access_tokens"
+        requests.append(request)
+        return httpx.Response(503 if len(requests) == 1 else 201, json={"token": "test-token"})
+
+    async def no_wait(*args):
+        pass
+
+    adapter, _ = archive_adapter(tmp_path, monkeypatch, transport)
+    monkeypatch.setattr("githubkit.core.anyio.sleep", no_wait)
+    # Credential issuance precedes the worker assignment and has no effect-ledger retry.
+    response = await adapter._app_client().arequest(
+        "POST", "/app/installations/42/access_tokens", json={"repositories": ["repo"]},
+    )
+    assert response.status_code == 201
+    assert len(requests) == 2
+
+
+async def test_archive_retry_policy_preserves_graphql_discovery_retries(tmp_path, monkeypatch):
+    queries = []
+
+    def transport(request):
+        if request.url.path == "/app/installations/42/access_tokens":
+            return httpx.Response(201, json={"token": "test-token", "expires_at":
+                (datetime.now(UTC) + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")})
+        assert request.url.path == "/graphql"
+        queries.append(request)
+        if len(queries) == 1:
+            return httpx.Response(503, json={"message": "temporarily unavailable"})
+        return httpx.Response(200, json={"data": {"repository": {"pullRequest": {
+            "reviewThreads": {"nodes": [], "pageInfo": {"hasNextPage": False, "endCursor": None}},
+        }}}})
+
+    async def no_wait(*args):
+        pass
+
+    adapter, _ = archive_adapter(tmp_path, monkeypatch, transport)
+    monkeypatch.setattr("githubkit.core.anyio.sleep", no_wait)
+    snapshot = await adapter.list_review_threads(42, "owner/repo", 17)
+    assert snapshot.complete
+    assert len(queries) == 2
+
+
+async def test_add_label_retries_definition_read_but_not_write(tmp_path, monkeypatch):
+    requests = []
+    definition_path = "/repos/owner/repo/labels/flow:done"
+    write_path = "/repos/owner/repo/issues/17/labels"
+
+    def transport(request):
+        if request.url.path == "/app/installations/42/access_tokens":
+            return httpx.Response(201, json={"token": "test-token", "expires_at":
+                (datetime.now(UTC) + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")})
+        requests.append((request.method, request.url.path))
+        if request.method == "GET":
+            assert request.url.path == definition_path
+            if len(requests) == 1:
+                return httpx.Response(503, json={"message": "temporarily unavailable"})
+            return httpx.Response(200, json={
+                "id": 1, "node_id": "LA_test", "name": "flow:done", "color": "0e8a16",
+                "url": f"https://api.github.com{definition_path}",
+                "description": None, "default": False,
+            })
+        assert (request.method, request.url.path) == ("POST", write_path)
+        return httpx.Response(503, json={"message": "write outcome unknown"})
+
+    async def no_wait(*args):
+        pass
+
+    adapter, _ = archive_adapter(tmp_path, monkeypatch, transport)
+    monkeypatch.setattr("githubkit.core.anyio.sleep", no_wait)
+    # A transient definition lookup is safe to repeat; the subsequent write may have committed.
+    with pytest.raises(GitHubAdapterError) as failure:
+        await adapter.add_label(42, "owner/repo", 17, "flow:done")
+    assert failure.value.endpoint == "add_label"
+    assert failure.value.status_code == 503
+    assert requests == [("GET", definition_path), ("GET", definition_path), ("POST", write_path)]
+
+
+async def test_archive_rate_limit_waits_until_reset_without_retry_after(store, tmp_path, monkeypatch):
+    _, job, _, github, subject = await pending_archive(store)
+    reset = datetime.fromtimestamp(int(store.now().timestamp()) + 3600, UTC)
+    requests = []
+
+    def transport(request):
+        requests.append(request.url.path)
+        if request.url.path == "/app/installations/42/access_tokens":
+            return httpx.Response(201, json={"token": "test-token", "expires_at":
+                (reset + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")})
+        return httpx.Response(403, json={"message": "rate limited"}, headers={
+            "X-RateLimit-Remaining": "0", "X-RateLimit-Reset": str(int(reset.timestamp())),
+        })
+
+    adapter, _ = archive_adapter(tmp_path, monkeypatch, transport)
+    monkeypatch.setattr(github, "comment", adapter.comment)
+    with pytest.raises(ResultPending):
+        await subject.results.apply(job.id)
+    effect = store.results.list_effects(job.id)[2]
+    assert effect.state is EffectState.RETRY
+    assert effect.next_attempt_at >= reset
+    assert effect.dispatched_at is None
+    with pytest.raises(ResultPending):
+        await subject.results.apply(job.id)
+    assert len(requests) == 2
+
+
+async def test_archive_effect_retry_checks_current_ownership_before_rearming(store, monkeypatch):
+    flow, job, _, github, subject = await pending_archive(store)
+
+    async def forbidden(*args):
+        raise GitHubAdapterError(GitHubErrorKind.PERMISSION, "comment", status_code=403)
+
+    monkeypatch.setattr(github, "comment", forbidden)
+    with pytest.raises(ResultPending):
+        await subject.results.apply(job.id)
+    before = store.results.list_effects(job.id)
+    delivery = store.get_delivery(flow.id)
+    delivery.version += 1
+    store.update_delivery(delivery)
+    with pytest.raises(ValueError, match="pending result"):
+        ControlService(store).retry(flow)
+    assert store.results.list_effects(job.id) == before
+    assert store.get_flow_execution(flow.id).released_at is None
 
 
 @pytest.mark.parametrize("status,kind", [(429, GitHubErrorKind.RATE_LIMITED),

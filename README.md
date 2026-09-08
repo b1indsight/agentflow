@@ -49,7 +49,7 @@ FlowTool 的目标是把带 `flow` 标签的 GitHub issue 编排成
 
 ## 尚未完成
 
-- M3 F1/F2 已合并；F3 归档状态回写已实现，完整真实闭环仍待验收，见
+- M3 F1/F2/F3 已合并，完整真实闭环仍待验收，见
   [#26 计划与实施记录](docs/plan/m3-archive-status.md)。
 - 真实 GitHub App smoke，以及授权的一次性仓库中的完整 Issue→PR E2E 仍待执行；
   自动化测试使用外部服务替身，不代表真实 GitHub、Codex、bub 集成已验收。
@@ -143,6 +143,9 @@ uv run flowtool flow retry <FLOW_ID>
 缺少标签或 GitHub App 权限会保留待处理结果，服务不会创建仓库标签。
 `flow show` 区分清理与 GitHub 回写进度；清理已确认但回写被明确拒绝时，修正远端原因后
 执行 `flow retry <id>`，只重置原 job 的失败 effects，保留已完成回执、attempt 和 worker journal。
+评论发送前的本地认证失败也可在修复凭据后按此方式重试；后续查询失败不会清除已有不确定发送记录。
+状态写入由持久恢复逻辑处理，避免 SDK 内部重试掩盖此前已发送的请求；读取（含只读 GraphQL）
+与 push token 签发保留有限重试。确认查询失败仍等待恢复，并遵守 Retry-After 或限流重置时间。
 429/5xx 由恢复循环继续处理；评论结果不明时先查 marker，不盲目补发。等待期间 Flow 保持 ACTIVE
 并占用原 worker。配置变更不改写已经冻结的通知；历史 SUCCEEDED Flow 和升级前冻结的空 effects
 归档计划不补通知。`on_archived` 是提交后的尽力插件回调，异常不破坏完成，不承诺跨崩溃仅调用一次。
@@ -186,9 +189,9 @@ Starlette TestClient/httpx 弃用告警。数据库 CI 的历史验证见
 M3 F2 本地验证（2026-09-08）：真实 PostgreSQL 下 **461 passed / 0 skipped**，含真实 Git/jj
 目录及 worker/control 恢复测试；Ruff、Mypy、sdist/wheel 构建通过。仅保留既有 Starlette 弃用告警。
 
-M3 F3 本地验证（2026-09-08）：真实 PostgreSQL 下 **483 passed / 0 skipped**；包含归档状态回写、
+M3 F3 及审查修复本地验证（2026-09-08）：真实 PostgreSQL 下 **502 passed / 0 skipped**；包含归档状态回写、
 响应丢失与重启恢复。Ruff、Mypy 与 sdist/wheel 构建通过；真实 GitHub App/worker 验收仍待执行，
-详见 [F3 实施与验收记录](docs/plan/m3-archive-status.md#6-实施与验收记录2026-09-08)。
+详见 [F3 审查修复记录](docs/plan/m3-archive-status.md#7-审查修复2026-09-08)。
 
 M3 F2 使用 wire protocol **v8** 和 worker journal **v2**，serve/worker 必须一起升级。
 先用旧版本排空在途任务、未应用结果及其 ACK，并处理仍占用 worker 的旧 Flow；无法排空的工作区、

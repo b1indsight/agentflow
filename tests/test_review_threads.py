@@ -90,7 +90,7 @@ async def test_reply_uses_root_rest_endpoint_and_exact_app_marker(tmp_path, monk
     app._bot_login = "flowtool[bot]"
     client = SimpleNamespace(async_graphql=graphql, rest=SimpleNamespace(pulls=SimpleNamespace(
         async_create_reply_for_review_comment=reply)))
-    monkeypatch.setattr(app, "_installation_client", lambda _: client)
+    monkeypatch.setattr(app, "_installation_client", lambda _, **kwargs: client)
     assert await app.find_review_reply(1, "owner/repo", 17, "T1", "MARK") == 4
     assert await app.reply_review_thread(1, "owner/repo", 17, 1, "note") == 900
     assert writes == [(("owner", "repo", 17, 1), {"body": "note"})]
