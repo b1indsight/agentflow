@@ -1,0 +1,94 @@
+# M3 Feature 2/3：工作区清理与 worker 释放
+
+> 状态：计划草案待审批，未实施。需求核对：2026-09-08。
+> 规划基线：`main` / `81417c5b`；bookmark：`feat/m3-workspace-archive`。
+> 实现前置：[F1 合并检测与任务收敛 #24](https://github.com/b1indsight/agentflow/pull/24)。
+> 计划 PR 以 main 为 base；F1 实现并合并后更新本分支，在同一 PR 实施。
+
+## 1. 目标与边界
+
+F1 确认合并并停止后续编码；F2 让原 worker 清理该 Flow 的工作区，control 收到可核验凭据
+后完成归档并释放 worker。删除失败、断线或 ACK 丢失都不能把错误 worker 的空目录当成功。
+
+当前 `ArchiveTask` 只有 Flow/attempt/repo，`ArchiveResult` 为空；worker 调用
+`cleanup_flow_repo()`，control 随即设 SUCCEEDED 并释放 binding。通用 failure/recovery
+还可能在清理完成前释放 binding。F2 只增强这一条资源生命周期，不处理 GitHub 标签/评论。
+
+复用 jobs、FlowExecution、result inbox/ResultPlan 和 worker journal。不新增归档表、
+持久归档阶段枚举或第二套 receipt 系统；阶段由 job 状态、清理结果、结果应用标记推导，
+错误复用 job.last_error。F3 在同一结果处理路径增加状态回写。
+
+## 2. 方案
+
+### 2.1 最小清理契约
+
+- ArchiveTask 增加冻结的 worker/repo identity、delivery version；沿用现有 Flow/attempt
+  和 assignment token/epoch。control 必须确认 delivery MERGED、绑定仍属于原 worker，
+  F1 的旧 executor/结果已收尾，才允许派发。
+- ArchiveResult 返回对应 Flow/attempt/repo identity、delivery version 和清理事实
+  `removed` / `already_absent`。control 逐项校验并保存在现有 result inbox/plan；
+  不接受空结果或仅靠另一 worker 的目录不存在判断完成。
+- worker 从配置和 Flow ID 派生目标路径，不接受远端任意绝对路径。清理不调用 CodeAgent、
+  Judge 或 GitHub，也不需要 push token。
+- 扩展归档字段时只升级一次协议（基线 v7 → v8），serve/worker 同步升级。旧空结果不得
+  补造凭据；部署先排空旧归档任务/未应用结果，无法排空则人工核验。
+
+### 2.2 清理与崩溃
+
+只删除受管 Flow repo 及同一规则可明确归属的临时目录。验证目标不同于 seed/root/其他
+Flow，拒绝顶层 symlink 和路径逃逸；内部 symlink 只删除链接，不跟随其目标。
+保留 seed、其他 Flow、数据库历史、worker journal 和共享 Codex 会话；不删除远端 branch。
+
+开始删除前在现有 journal 保存目录归属已核验的清理标记，保留到清理结果确认。目录已不存在
+只有在这个标记存在时才是幂等成功；首次看到空目录且无标记应阻塞，不把更换 root 当成已清理。
+部分删除可在原 worker 重试。成功先写 journal，再发送 result；ACK 前保留 journal，已有
+终态只重放。删除后、写终态前崩溃时，仅在原 worker/root 且确认旧 executor 已结束后重试
+幂等清理，不扩展通用 started job 重跑策略。更换 root 或丢失 journal 需人工处理。
+
+### 2.3 失败与释放
+
+清理已验证 → 持久冻结结果 → 同一事务完成 ARCHIVE、Flow SUCCEEDED、binding 释放和
+result applied → ACK。F2 阶段没有 GitHub effects；F3 将在最后提交之前追加必要回写。
+成功归档时间使用 job 的持久完成/应用时间，不再加一套归档时间字段。
+
+只对 MERGED 且归档未完成的 Flow 调整 failure/recovery/cancel 路径：保留原 binding，
+阻止其他 worker 接管；未知 executor 状态或原 worker 长期离线显示阻塞，不推断已经清理。
+普通未合并 Flow 的通用恢复不在本 feature 的改造范围。
+
+扩展现有 `flow retry`，仅允许 ACTIVE、MERGED、原 binding 完整且无正在执行/未应用结果的
+Flow 重试失败 ARCHIVE。保留当前 attempt，不创建 INITIAL；重新派发也只给原 worker。
+有未应用清理结果时交给既有恢复循环，不重做删除。进程停止无法确认时拒绝重试并说明原因。
+历史 FAILED/CANCELLED Flow、已释放 binding 和跨 worker/root 恢复留待人工处理。
+
+`flow show` 基于现有 job/result 展示等待、清理失败、已清理/待提交或完成及错误；修正
+`list_flows(active_only=True)` 的历史 archived 字符串，使 SUCCEEDED 不出现在 active 列表。
+保持 `on_archived` 的现有提交后尽力调用语义，不实现持久插件投递。
+
+## 3. 落点与实施顺序
+
+| 落点 | 改动 |
+|---|---|
+| `app/protocol.py`、`worker/executor.py`、`app/vcs.py` | 版本化清理凭据、身份/路径校验、幂等删除 |
+| `app/worker/journal.py`、`client.py` | 仅在现有恢复接缝不足时补归档重放和原 executor 退出检查 |
+| `app/control/coordinator.py`、`results.py`、`app/result_models.py` | 派发校验、清理结果冻结、原子完成 |
+| `app/store.py`、`control/service.py`、`gateway.py` | 归档专属 binding 保留、失败重试、active 查询 |
+| `app/cli.py`、README/配置升级说明 | 派生进度显示与有限恢复说明 |
+
+审批后先用真实临时目录/repo 写清理边界测试，再实现协议和 worker；然后补 PostgreSQL
+资源释放/恢复测试并接入 control，最后做 worker 断线及 ACK 重放集成测试和文档。
+
+## 4. 验收
+
+- 正常删除、已不存在、部分删除、权限失败、顶层/内部 symlink；seed、其他 Flow、journal
+  保留。使用真实临时 Git/jj repo，不只断言 cleanup 函数被调用。
+- 错 worker/root/repo/attempt、旧 token/epoch、digest 冲突：拒绝结果，不释放他人资源。
+- 删除前后崩溃、journal 写入后断线、serve 重启、ACK 丢失：原身份恢复，已成功结果只重放。
+- grace 到期/旧进程仍未知：不清理、不释放、不派给别的 worker；原 worker 恢复后可按上述
+  条件 retry archive，绝不启动编码。历史终态和已释放 binding 不自动恢复。
+- 原子完成事务回滚/重放：Flow 成功、job 完成、binding 释放同成同败；成功后第二个 Flow
+  才能使用该 worker，active 列表不再显示旧 Flow。
+
+数据库并发与恢复测试用真实 PostgreSQL。实现完成运行 `uv run ruff check app tests`、
+`uv run mypy app tests`、完整 pytest（配置数据库，无数据库跳过）和 `uv build --no-sources`。
+F2 单独验收真实本地 worker/目录的清理与复用；GitHub 回写及完整 M3 验收归 F3。
+本计划阶段仅检查文档差异与链接，未运行产品测试。
