@@ -59,6 +59,7 @@ from app.store import Store
 class ResultSettings(Protocol):
     reviewers: list[str]
     in_review_label: str
+    done_label: str
     confidence_threshold: float
 
 
@@ -109,9 +110,9 @@ class ResultApplication:
             raise ResultPending("pre-upgrade result may have produced untracked effects")
         assert plan is not None
         failure = await self.effects.run(plan)
-        if failure and plan.revision is not None:
-            # The push already happened. Keep its verified facts and effect receipts
-            # pending, so an explicit retry can finish delivery without another run.
+        if failure and (plan.revision is not None or plan.archive is not None):
+            # Code delivery or cleanup already happened. Preserve its receipts so
+            # explicit retry repairs only GitHub without another worker run.
             with self.store.transaction() as tx:
                 flow = tx.lock_workflow(plan.flow_id)
                 current = tx.lock_job(job_id)
@@ -432,13 +433,19 @@ class ResultApplication:
                 }
             )
         if isinstance(result, ArchiveResult):
-            from app.control.archive import verify_archive
+            from app.control.archive import archive_effects, verify_archive
 
             try:
                 verify_archive(tx, flow, job, result)
             except ValueError as error:
                 return self._failure(tx, flow, base, str(error))
-            return base.model_copy(update={"flow_state": FlowState.SUCCEEDED, "archive": result})
+            delivery = tx.get_delivery(flow.id)
+            assert delivery is not None
+            return base.model_copy(update={
+                "flow_state": FlowState.SUCCEEDED, "archive": result,
+                "effects": archive_effects(flow, delivery, done_label=self.settings.done_label,
+                                           in_review_label=self.settings.in_review_label),
+            })
         raise TypeError(f"unsupported result: {type(result).__name__}")
 
     @staticmethod

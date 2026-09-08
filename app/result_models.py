@@ -50,6 +50,15 @@ class ReviewersEffect(EffectSpec):
     reviewers: list[str]
 
 
+class LabelEffect(EffectSpec):
+    """Own one label's presence; unrelated labels never participate in reconciliation."""
+
+    kind: Literal["label"] = "label"
+    number: int
+    label: str
+    present: bool
+
+
 class ResolveEffect(EffectSpec):
     kind: Literal["resolve"] = "resolve"
     thread_id: str
@@ -70,7 +79,8 @@ class ThreadReplyEffect(EffectSpec):
 
 
 Effect = Annotated[
-    CommentEffect | PullRequestEffect | LabelsEffect | ReviewersEffect | ResolveEffect | ThreadReplyEffect,
+    CommentEffect | PullRequestEffect | LabelsEffect | LabelEffect | ReviewersEffect
+    | ResolveEffect | ThreadReplyEffect,
     Field(discriminator="kind"),
 ]
 

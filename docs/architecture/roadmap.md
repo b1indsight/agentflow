@@ -34,9 +34,9 @@ flowtool/
 - **M2（已实现并合并，真实 E2E 待验收）** 语义 Triage（bub）门 + 回喂循环
   （settle → revise/answer/wait/ignore + resume/兜底 + 保守 resolve）；F1–F4 对应 PR #19–#22。
   同秒重复 webhook 重放缺陷尚未修复；合并证据与剩余验收见 [M2 状态与待办](README.md#m2-状态与待办)。
-- **M3（F1 已合并，F2 已实施，F3 计划待审批）** 人工合并检测（`pull_request.closed`）→ 归档 + 状态标签 / 评论；
+- **M3（F1/F2 已合并，F3 已实施，真实闭环待验收）** 人工合并检测（`pull_request.closed`）→ 归档 + 状态标签 / 评论；
   拆为 F1 合并检测与任务收敛、F2 工作区清理与 worker 释放、F3 状态回写与闭环验收三个 PR，
-  依次实施；[拆分与 F1 计划](../plan/m3-merge-detection.md)记录范围和复杂度边界。
+  [F3 实施与验收](../plan/m3-archive-status.md)记录增量回写、恢复操作及真实闭环待办。
 - **M4** 多 flow 并发 + reconcile 对账 + Project 看板 + 错误恢复
 - **M5** 安全隔离（容器化 codex）+ 公网 / 隧道部署 + 完整运维与可观测性
 

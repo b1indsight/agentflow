@@ -41,5 +41,7 @@
 
 步骤 3–7 已实现并合并，具备隔离自动化覆盖，真实 GitHub App/Codex/bub E2E 待执行。
 步骤 8 由用户人工完成；M3 F1 已实现步骤 9 的原子合并与后续任务收敛，迟到结果不能恢复编码。
-步骤 10 当前保留健康 worker 的清理骨架；可靠清理/异常恢复及状态回写分别等待 M3 F2/F3。
+步骤 10 已接入 F2 原 worker 清理凭据与 F3 状态回写：Issue/PR 增量更新标签、各一条固定归档说明，
+回写失败保留 ACTIVE Flow 和原 binding，成功后才原子完成并 ACK。真实 M3 闭环待验收，见
+[F3 实施与验收](../plan/m3-archive-status.md)。
 冲突处理、取消运行中进程、Project 更新与通用 reconcile 尚未完成；具体边界见[组件职责](components.md)和[已知短板](decisions.md)。

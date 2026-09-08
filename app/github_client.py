@@ -459,6 +459,42 @@ class GitHubApp:
             lambda: client.rest.issues.async_set_labels(owner, name, number, labels=labels),
         )
 
+    async def add_label(
+        self, installation_id: int, repo: str, number: int, label: str
+    ) -> None:
+        """Add a preconfigured repository label without replacing any target labels."""
+        owner, name = self._split_repo(repo)
+        client = self._installation_client(installation_id)
+        await self._execute(
+            "get_label (preconfigure the repository status label)",
+            lambda: client.rest.issues.async_get_label(owner, name, label),
+        )
+        response = await self._execute(
+            "add_label",
+            lambda: client.rest.issues.async_add_labels(owner, name, number, labels=[label]),
+        )
+        if label.casefold() not in {item.name.casefold() for item in response.parsed_data}:
+            raise GitHubAdapterError(GitHubErrorKind.UNEXPECTED_RESPONSE, "add_label")
+
+    async def remove_label(
+        self, installation_id: int, repo: str, number: int, label: str
+    ) -> None:
+        """Treat an absent label as success only when the target can still be read."""
+        owner, name = self._split_repo(repo)
+        client = self._installation_client(installation_id)
+        try:
+            await self._execute(
+                "remove_label",
+                lambda: client.rest.issues.async_remove_label(owner, name, number, label),
+            )
+        except GitHubAdapterError as error:
+            if error.status_code != 404:
+                raise
+            # GitHub also uses 404 for hidden repositories: never swallow it blindly.
+            labels = await self.get_labels(installation_id, repo, number)
+            if label.casefold() in {item.casefold() for item in labels}:
+                raise
+
     async def request_reviewers(
         self, installation_id: int, repo: str, number: int, reviewers: list[str]
     ) -> None:

@@ -7,6 +7,7 @@ from datetime import UTC
 from email.utils import parsedate_to_datetime
 from uuid import uuid4
 
+from app.control.archive import verify_archive
 from app.control.thread_effects import has_pending_thread_feedback, resolve_thread, revision_current
 from app.control.tools import FlowToolRejected, FlowToolService
 from app.github_models import GitHubAdapterError, GitHubErrorKind
@@ -18,6 +19,7 @@ from app.result_models import (
     EffectReceipt,
     EffectRecord,
     EffectState,
+    LabelEffect,
     LabelsEffect,
     PullRequestEffect,
     ResolveEffect,
@@ -60,6 +62,11 @@ class ResultEffects:
                 job = tx.get_job(plan.job_id)
                 if job is None:
                     raise ValueError("result job disappeared")
+                if plan.archive is not None:
+                    try:
+                        verify_archive(tx, flow, job, plan.archive)
+                    except ValueError as error:
+                        raise ResultPending(str(error)) from error
                 delivery = tx.get_delivery(plan.flow_id)
                 retired = delivery is not None and delivery.supersedes(job.kind)
                 if retired:
@@ -153,6 +160,11 @@ class ResultEffects:
             ):
                 raise ResultPending("Flow changed before GitHub dispatch")
             delivery = tx.get_delivery(flow.id)
+            if plan.archive is not None:
+                try:
+                    verify_archive(tx, flow, job, plan.archive)
+                except ValueError as error:
+                    raise ResultPending(str(error)) from error
             if delivery is not None and delivery.supersedes(job.kind):
                 raise FlowToolRejected(FlowToolErrorKind.CONFLICT, "PR merged before GitHub dispatch")
             if plan.batch_id is not None:
@@ -179,7 +191,9 @@ class ResultEffects:
 
     @staticmethod
     def _comment_marker(plan: ResultPlan, effect: CommentEffect | ThreadReplyEffect) -> str:
-        digest = hashlib.sha256(f"{plan.job_id}:{plan.digest}:{effect.key}".encode()).hexdigest()
+        identity = (f"archive:{effect.repo}:{plan.flow_id}:{effect.key}" if plan.archive is not None
+                    else f"{plan.job_id}:{plan.digest}:{effect.key}")
+        digest = hashlib.sha256(identity.encode()).hexdigest()
         return f"<!-- flowtool:effect:{digest} -->"
 
     async def _recover_merged(
@@ -209,7 +223,7 @@ class ResultEffects:
             if len(created) != 1:
                 raise ResultPending("merged PR notification awaits its creation receipt")
             number = created[0].number
-        if isinstance(effect, LabelsEffect):
+        if isinstance(effect, (LabelsEffect, LabelEffect)):
             await self.github.get_labels(installation, repo, number)
         else:
             assert record.dispatched_at is not None
@@ -307,6 +321,16 @@ class ResultEffects:
                 effect.head_sha,
             )
             return EffectReceipt(pull_request=pull_request)
+        if isinstance(effect, LabelEffect):
+            labels = await self.github.get_labels(installation, repo, effect.number)
+            present = effect.label.casefold() in {label.casefold() for label in labels}
+            if present != effect.present:
+                self._dispatch(plan, record)
+                if effect.present:
+                    await self.github.add_label(installation, repo, effect.number, effect.label)
+                else:
+                    await self.github.remove_label(installation, repo, effect.number, effect.label)
+            return EffectReceipt()
         if isinstance(effect, (LabelsEffect, ReviewersEffect)):
             number = effect.number
             if plan.revision is not None:

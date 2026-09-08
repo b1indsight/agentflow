@@ -109,7 +109,7 @@ class ControlService:
             if delivery is not None and delivery.state is DeliveryState.MERGED:
                 self._retry_archive(tx, fresh)
             elif tx.has_pending_result(flow.id):
-                if fresh.state is not FlowState.ACTIVE or not tx.results.retry_revision_effects(fresh):
+                if fresh.state is not FlowState.ACTIVE or not tx.results.retry_delivery_effects(fresh):
                     raise ValueError("Flow has a pending result; reconcile its effects before retry")
             else:
                 active = tx.get_active_flow(fresh.repo, fresh.issue_number)
@@ -156,6 +156,8 @@ class ControlService:
         if execution is None or execution.released_at is not None:
             raise ValueError("archive retry requires the original active binding")
         if tx.has_pending_result(flow.id):
+            if tx.results.retry_delivery_effects(flow):
+                return
             raise ValueError("archive has a pending result; wait for result reconciliation")
         jobs = tx.list_jobs(flow.id)
         if any(job.state is JobState.RUNNING for job in jobs):

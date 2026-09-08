@@ -133,6 +133,14 @@ class GitHubClient(Protocol):
         self, installation_id: int, repo: str, number: int, labels: list[str]
     ) -> None: ...
 
+    async def add_label(
+        self, installation_id: int, repo: str, number: int, label: str
+    ) -> None: ...
+
+    async def remove_label(
+        self, installation_id: int, repo: str, number: int, label: str
+    ) -> None: ...
+
     async def request_reviewers(
         self, installation_id: int, repo: str, number: int, reviewers: list[str]
     ) -> None: ...

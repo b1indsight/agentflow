@@ -49,6 +49,7 @@ class CoordinatorSettings(Protocol):
     allowlist: list[str]
     reviewers: list[str]
     in_review_label: str
+    done_label: str
     confidence_threshold: float
     max_revision_cycles: int
 

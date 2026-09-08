@@ -202,7 +202,7 @@ class ResultStore:
                  self.store.now(), EffectState.FAILED),
             )
 
-    def retry_revision_effects(self, flow: Flow) -> bool:
+    def retry_delivery_effects(self, flow: Flow) -> bool:
         """Rearm definite rejections only; the caller holds the workflow lock."""
         with self.store.connection() as connection:
             jobs = connection.execute(
@@ -214,9 +214,20 @@ class ResultStore:
                 return False
             job_id = jobs[0]["id"]
             plan = self.get_plan(job_id)
-            if (plan is None or plan.revision is None or plan.state is not JobState.DONE
+            if (plan is None or (plan.revision is None and plan.archive is None)
+                    or plan.state is not JobState.DONE
                     or plan.attempt_id != flow.current_attempt_id):
                 return False
+            if plan.archive is not None:
+                from app.control.archive import verify_archive
+
+                job = self.store.get_job(job_id)
+                if job is None:
+                    return False
+                try:
+                    verify_archive(self.store, flow, job, plan.archive)
+                except ValueError:
+                    return False
             effects = self.list_effects(job_id)
             failed = [effect for effect in effects if effect.state is EffectState.FAILED]
             if (not failed or any(effect.dispatched_at is not None for effect in failed)

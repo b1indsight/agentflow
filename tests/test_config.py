@@ -7,6 +7,17 @@ from app.config import ServeSettings, WorkerSettings
 from app.worker.runtime import validate_worker_environment
 
 
+@pytest.mark.parametrize("labels", [
+    {"done_label": ""}, {"in_review_label": "  "}, {"trigger_label": ""},
+    {"done_label": "FLOW"}, {"done_label": "Flow:In-Review"},
+    {"in_review_label": "FLOW"},
+])
+def test_archive_status_labels_cannot_be_empty_or_conflict(labels):
+    with pytest.raises(ValidationError, match="label"):
+        ServeSettings(_env_file=None, database_url="postgresql://localhost/test",
+                      worker_tokens={"worker": SecretStr("secret")}, **labels)
+
+
 def test_judge_credentials_stay_out_of_config_serialization_and_code_agent_environment(monkeypatch):
     from app.codex_driver import _codex_environment
 

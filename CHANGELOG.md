@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- M3 F3：清理核验后，对 Issue/PR 增量增加完成标签、移除 in-review 标签，并各发布稳定 marker
+  的固定归档说明；保留用户与触发标签，不创建仓库 label。新增 `FLOWTOOL_DONE_LABEL` 及配置冲突校验。
+- 归档 GitHub 回写复用冻结 ResultPlan 和 effect 回执：响应丢失先查询，部分成功只续跑缺失操作；
+  永久错误保留 ACTIVE Flow、清理凭据和 binding。`flow retry` 仅重置原结果的明确失败回写，
+  `flow show` 显示清理与回写进度；全部回写后才原子成功、释放 worker 并 ACK。
+- F3 自动化覆盖 PostgreSQL、重启/回执恢复、幂等标签和评论、配置与插件异常；真实 App/worker
+  的完整 M3 闭环待验收，记录见 `docs/plan/m3-archive-status.md`。
+
 - 修复 M3 F2 的任务交接恢复：未冻结的归档领取不再阻断 serve 重启；冻结命令在 Started 丢失
   或 grace 到期时保留原 token，核对冻结身份后恢复执行/结果。重连前持久保存已完成的 executor 结果，
   拒绝未启动编码任务时保留 root/Flow 归属，过期编码队列项不再阻止归档 retry。

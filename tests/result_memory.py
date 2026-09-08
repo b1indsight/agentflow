@@ -15,7 +15,7 @@ class MemoryResults:
     def get_plan(self, job_id: int) -> ResultPlan | None:
         return self.plans.get(job_id)
 
-    def retry_revision_effects(self, flow: Flow) -> bool:
+    def retry_delivery_effects(self, flow: Flow) -> bool:
         # Verified revision recovery is exercised against PostgreSQL.
         assert not any(plan.revision is not None for plan in self.plans.values())
         return False

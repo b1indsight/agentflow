@@ -24,6 +24,9 @@ FlowTool 的目标是把带 `flow` 标签的 GitHub issue 编排成
 - **原子提交与操作恢复**：trigger/retry/merge/cancel 的状态和任务变更在共享事务内提交；
   终态结果先持久接收，再执行带回执的 GitHub 操作，最后原子提交本地结果并发送 `ResultAccepted`。
   恢复时核对远端状态，避免重复派生 job 或重复发送评论；无法确认的远端结果保留待核对状态。
+- **合并与归档**：人工合并后由原 worker 核验并清理工作区；对关联 Issue/PR 增加完成标签、
+  移除 in-review 标签并各发布一条固定归档说明。全部回写完成后，原子提交成功、释放 worker 并 ACK。
+  部分回写或响应丢失只恢复未完成操作，保留清理凭据和用户标签。
 - **GitHub 请求超时**：App 和 installation 客户端的连接、读写及连接池等待默认各为 30 秒，
   可通过 `FLOWTOOL_GITHUB_REQUEST_TIMEOUT_SECONDS` 调整；这不是整批结果恢复的总时限。
 - **持久反馈批次**：反馈版本与 settle deadline 入库，重启后恢复；同 Flow 串行处理冻结批次，
@@ -46,8 +49,8 @@ FlowTool 的目标是把带 `flow` 标签的 GitHub issue 编排成
 
 ## 尚未完成
 
-- M3 F1 已合并；F2 已实现原 worker 的可核验清理、崩溃恢复和原子资源释放，见
-  [#25 计划与实施记录](docs/plan/m3-workspace-archive.md)。归档标签、评论和完整真实闭环验收由 F3 接续。
+- M3 F1/F2 已合并；F3 归档状态回写已实现，完整真实闭环仍待验收，见
+  [#26 计划与实施记录](docs/plan/m3-archive-status.md)。
 - 真实 GitHub App smoke，以及授权的一次性仓库中的完整 Issue→PR E2E 仍待执行；
   自动化测试使用外部服务替身，不代表真实 GitHub、Codex、bub 集成已验收。
 - bub adapter 已通过真实库加本机假模型端点的契约测试；真实 provider 语义 smoke 仍待执行。
@@ -135,6 +138,15 @@ uv run flowtool flow retry <FLOW_ID>
 明确拒绝通知（例如 reviewer 请求 422），结果和回执保持待完成；修正 GitHub 端原因后使用同一命令
 只重试失败通知，成功后原子提交交付/session/反馈，不重新运行修订。状态不明的操作仍须先核对。
 
+归档使用 `FLOWTOOL_DONE_LABEL`（默认 `flow:done`）与 `FLOWTOOL_IN_REVIEW_LABEL`。
+部署前在仓库创建这两个标签；它们与 trigger label 必须非空且互不相同（忽略大小写）。
+缺少标签或 GitHub App 权限会保留待处理结果，服务不会创建仓库标签。
+`flow show` 区分清理与 GitHub 回写进度；清理已确认但回写被明确拒绝时，修正远端原因后
+执行 `flow retry <id>`，只重置原 job 的失败 effects，保留已完成回执、attempt 和 worker journal。
+429/5xx 由恢复循环继续处理；评论结果不明时先查 marker，不盲目补发。等待期间 Flow 保持 ACTIVE
+并占用原 worker。配置变更不改写已经冻结的通知；历史 SUCCEEDED Flow 和升级前冻结的空 effects
+归档计划不补通知。`on_archived` 是提交后的尽力插件回调，异常不破坏完成，不承诺跨崩溃仅调用一次。
+
 ## 验证基线
 
 本地检查：
@@ -174,6 +186,10 @@ Starlette TestClient/httpx 弃用告警。数据库 CI 的历史验证见
 M3 F2 本地验证（2026-09-08）：真实 PostgreSQL 下 **461 passed / 0 skipped**，含真实 Git/jj
 目录及 worker/control 恢复测试；Ruff、Mypy、sdist/wheel 构建通过。仅保留既有 Starlette 弃用告警。
 
+M3 F3 本地验证（2026-09-08）：真实 PostgreSQL 下 **483 passed / 0 skipped**；包含归档状态回写、
+响应丢失与重启恢复。Ruff、Mypy 与 sdist/wheel 构建通过；真实 GitHub App/worker 验收仍待执行，
+详见 [F3 实施与验收记录](docs/plan/m3-archive-status.md#6-实施与验收记录2026-09-08)。
+
 M3 F2 使用 wire protocol **v8** 和 worker journal **v2**，serve/worker 必须一起升级。
 先用旧版本排空在途任务、未应用结果及其 ACK，并处理仍占用 worker 的旧 Flow；无法排空的工作区、
 旧 journal 或旧空归档结果需要人工核验。已 Started 却缺少冻结任务的 ARCHIVE、旧协议结果会阻止 serve 启动；
@@ -188,8 +204,8 @@ M3 F2 使用 wire protocol **v8** 和 worker journal **v2**，serve/worker 必�
 
 合并后使用 `flow show <id>` 查看等待、清理失败、结果待核验/提交或完成及错误。
 清理失败会保留 ACTIVE Flow 和原 worker binding；修复权限等原因后，原 worker 在线且执行已结束时
-使用 `flow retry <id>`，只重试 ARCHIVE，保留当前 attempt。已有未应用结果时等待恢复循环，
-不要重复删除。合并后的 cancel 被拒绝；旧 executor 状态未知、journal 丢失、原 worker 长期离线、
+使用 `flow retry <id>`，只重试 ARCHIVE，保留当前 attempt。已有清理凭据时仅按上述方式恢复 GitHub
+回写，不要重复删除。合并后的 cancel 被拒绝；旧 executor 状态未知、journal 丢失、原 worker 长期离线、
 历史 FAILED/CANCELLED Flow 或已释放的绑定均不会自动接管、清理或释放，需人工核验。
 
 M2 F4 保持 wire protocol v7，在 control 的批次和结果账本中增加线程快照、处理依据和远端回执。
