@@ -46,8 +46,8 @@ FlowTool 的目标是把带 `flow` 标签的 GitHub issue 编排成
 
 ## 尚未完成
 
-- M3 F1 已实现原子合并检测、停止后续任务和迟到结果收尾，见 [#24 计划与实施记录](docs/plan/m3-merge-detection.md)。
-  原 worker 清理凭据/异常恢复增强、归档标签与评论分别等待 M3 F2/F3，完整真实闭环仍待验收。
+- M3 F1 已合并；F2 已实现原 worker 的可核验清理、崩溃恢复和原子资源释放，见
+  [#25 计划与实施记录](docs/plan/m3-workspace-archive.md)。归档标签、评论和完整真实闭环验收由 F3 接续。
 - 真实 GitHub App smoke，以及授权的一次性仓库中的完整 Issue→PR E2E 仍待执行；
   自动化测试使用外部服务替身，不代表真实 GitHub、Codex、bub 集成已验收。
 - bub adapter 已通过真实库加本机假模型端点的契约测试；真实 provider 语义 smoke 仍待执行。
@@ -170,6 +170,25 @@ Starlette TestClient/httpx 弃用告警。数据库 CI 的历史验证见
 [实施记录](docs/plan/atomic-workflow-results.md#实施记录2026-09-06)。
 
 ## 升级注意
+
+M3 F2 本地验证（2026-09-08）：真实 PostgreSQL 下 **444 passed / 0 skipped**，含真实 Git/jj
+目录及 worker/control 恢复测试；Ruff、Mypy、sdist/wheel 构建通过。仅保留既有 Starlette 弃用告警。
+
+M3 F2 使用 wire protocol **v8** 和 worker journal **v2**，serve/worker 必须一起升级。
+先用旧版本排空在途任务、未应用结果及其 ACK，并处理仍占用 worker 的旧 Flow；无法排空的工作区、
+旧 journal 或旧空归档结果需要人工核验。旧在途 ARCHIVE 缺少冻结任务、旧协议结果均会阻止 serve 启动。
+不转换空结果为清理凭据，不删除 journal 绕过检查；旧版本已清除 journal 的绑定也需先人工处理。
+
+新 journal 在任务 ACK 后保留上一任务的 Flow 和 root 归属，成功归档 ACK 后才移除。不要更换
+`FLOWTOOL_WORKER_ROOT`、复制 journal 到其他 root 或复用 worker ID 接管工作区。清理仅删除
+`repos/<owner>/<repo>--flow-<id>` 与其 `.partial`，拒绝 symlink 祖先、顶层 symlink、路径逃逸
+和含保留标记 `--flow-` 的 seed 仓库名；保留 seed、其他 Flow、journal 和共享会话。
+
+合并后使用 `flow show <id>` 查看等待、清理失败、结果待核验/提交或完成及错误。
+清理失败会保留 ACTIVE Flow 和原 worker binding；修复权限等原因后，原 worker 在线且执行已结束时
+使用 `flow retry <id>`，只重试 ARCHIVE，保留当前 attempt。已有未应用结果时等待恢复循环，
+不要重复删除。合并后的 cancel 被拒绝；旧 executor 状态未知、journal 丢失、原 worker 长期离线、
+历史 FAILED/CANCELLED Flow 或已释放的绑定均不会自动接管、清理或释放，需人工核验。
 
 M2 F4 保持 wire protocol v7，在 control 的批次和结果账本中增加线程快照、处理依据和远端回执。
 升级前须完成或人工核对旧 pending revision result/effect；缺少 F4 线程处理意图的旧计划会列出 job ID 并阻止启动。

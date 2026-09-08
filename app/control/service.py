@@ -7,7 +7,16 @@ from collections.abc import Callable
 from loguru import logger
 
 from app.github_models import PullRequestMerge
-from app.models import TERMINAL_STATES, DeliveryState, Flow, FlowState, JobKind, WorkerView
+from app.models import (
+    TERMINAL_STATES,
+    DeliveryState,
+    Flow,
+    FlowState,
+    JobKind,
+    JobState,
+    WorkerStatus,
+    WorkerView,
+)
 from app.plugins import get_plugin_manager
 from app.store import Store
 
@@ -46,6 +55,9 @@ class ControlService:
             fresh = tx.lock_workflow(flow.id)
             if fresh is None or fresh.state in TERMINAL_STATES:
                 return
+            delivery = tx.get_delivery(fresh.id)
+            if delivery is not None and delivery.state is DeliveryState.MERGED:
+                raise ValueError("a merged Flow must finish archive before its worker can be released")
             fresh.state = FlowState.CANCELLED
             tx.update_flow(fresh)
             tx.release_flow_execution(fresh.id)
@@ -93,7 +105,10 @@ class ControlService:
             fresh = tx.lock_workflow(flow.id)
             if fresh is None:
                 raise ValueError(f"flow {flow.id} disappeared")
-            if tx.has_pending_result(flow.id):
+            delivery = tx.get_delivery(fresh.id)
+            if delivery is not None and delivery.state is DeliveryState.MERGED:
+                self._retry_archive(tx, fresh)
+            elif tx.has_pending_result(flow.id):
                 if fresh.state is not FlowState.ACTIVE or not tx.results.retry_revision_effects(fresh):
                     raise ValueError("Flow has a pending result; reconcile its effects before retry")
             else:
@@ -131,6 +146,31 @@ class ControlService:
                     if failed_job is not None and kind in {JobKind.TRIAGE, JobKind.REVISION}:
                         tx.reviews.retry(failed_job, replacement)
         self._jobs_available()
+
+    @staticmethod
+    def _retry_archive(tx: Store, flow: Flow) -> None:
+        """Retry only a settled archive on its original binding and current Attempt."""
+        if flow.state is not FlowState.ACTIVE:
+            raise ValueError("a merged PR cannot retry coding or review jobs or terminal Flows")
+        execution = tx.get_flow_execution(flow.id)
+        if execution is None or execution.released_at is not None:
+            raise ValueError("archive retry requires the original active binding")
+        if tx.has_pending_result(flow.id):
+            raise ValueError("archive has a pending result; wait for result reconciliation")
+        jobs = tx.list_jobs(flow.id)
+        if any(job.state is JobState.RUNNING for job in jobs):
+            raise ValueError("archive retry is blocked by a running or unknown executor")
+        if any(job.state is JobState.QUEUED for job in jobs):
+            raise ValueError("archive is already queued; wait for the original worker")
+        workers = tx.list_workers()
+        worker = next((w for w in workers if w.worker_id == execution.worker_id), None)
+        if worker is None or worker.status is not WorkerStatus.ONLINE or worker.current_job_id is not None:
+            raise ValueError("archive retry requires the original worker online with no executor")
+        failed = next((job for job in reversed(jobs)
+                       if job.kind is JobKind.ARCHIVE and job.state is JobState.FAILED), None)
+        if failed is None:
+            raise ValueError("Flow has no failed archive to retry")
+        tx.enqueue_job(flow.id, JobKind.ARCHIVE, payload=failed.payload)
 
     def notify_jobs(self) -> None:
         self._jobs_available()

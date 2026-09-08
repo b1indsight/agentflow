@@ -10,7 +10,14 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
 from app.models import JobState
-from app.protocol import Assignment, Failed, RevisionInvocation, Succeeded, terminal_digest
+from app.protocol import (
+    ArchiveTask,
+    Assignment,
+    Failed,
+    RevisionInvocation,
+    Succeeded,
+    terminal_digest,
+)
 
 TerminalMessage = Succeeded | Failed
 _TERMINAL: TypeAdapter[TerminalMessage] = TypeAdapter(TerminalMessage)
@@ -23,7 +30,7 @@ class JournalError(RuntimeError):
 class JournalRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    version: Literal[1] = 1
+    version: Literal[2] = 2
     job_id: int
     flow_id: int
     assignment_token: str
@@ -33,6 +40,10 @@ class JournalRecord(BaseModel):
     revision_phase: Literal["resume", "fallback"] | None = None
     fallback_consumed: bool = False
     invocations: list[RevisionInvocation] = []
+    archive_task: ArchiveTask | None = None
+    root_identity: tuple[str, int, int]
+    acknowledged: bool = False
+    cleanup_verified: bool = False
 
 
 class WorkerJournal:
@@ -45,19 +56,52 @@ class WorkerJournal:
         if not self.path.exists():
             return None
         try:
-            return JournalRecord.model_validate_json(self.path.read_text())
+            record = JournalRecord.model_validate_json(self.path.read_text())
         except (OSError, ValidationError, ValueError) as exc:
             raise JournalError(f"invalid worker journal at {self.path}") from exc
+        if record.root_identity != self._root_identity():
+            raise JournalError("worker journal belongs to another worker root")
+        return record
 
     def record_received(self, assignment: Assignment) -> JournalRecord:
+        previous = self.load()
+        archive = assignment.task if isinstance(assignment.task, ArchiveTask) else None
+        unstarted_archive = (previous is not None and previous.archive_task == archive
+                             and previous.state == "received")
+        if archive is not None and (previous is None or previous.flow_id != archive.flow_id
+                                    or not (previous.acknowledged or unstarted_archive)):
+            raise JournalError("archive requires the original Flow's acknowledged worker journal")
+        if (previous is not None and previous.archive_task is not None
+                and (previous.state not in {"received", "failed"} or previous.archive_task != archive)):
+            raise JournalError("cannot replace unacknowledged archive cleanup evidence")
         record = JournalRecord(
             job_id=assignment.job_id,
             flow_id=assignment.flow_id,
             assignment_token=assignment.assignment_token,
             state="received",
+            archive_task=archive,
+            root_identity=self._root_identity(),
+            cleanup_verified=bool(previous and previous.cleanup_verified),
         )
         self._write(record)
         return record
+
+    def verify_cleanup(self, task: ArchiveTask, *, repo_present: bool) -> None:
+        """Persist ownership before deletion; only that proof permits an absent workspace."""
+        record = self._required()
+        if record.state != "started" or record.archive_task != task:
+            raise JournalError("archive cleanup does not match the journal assignment")
+        if not record.cleanup_verified:
+            if not repo_present:
+                raise JournalError("archive repository is absent without verified cleanup evidence")
+            record.cleanup_verified = True
+            self._write(record)
+
+    def _root_identity(self) -> tuple[str, int, int]:
+        root = self.path.parent.resolve()
+        root.mkdir(parents=True, exist_ok=True)
+        stat = root.stat()
+        return str(root), stat.st_dev, stat.st_ino
 
     def record_started(self) -> JournalRecord:
         record = self._required()
@@ -107,12 +151,21 @@ class WorkerJournal:
             raise JournalError("result acknowledgement does not match terminal journal")
         if state not in (JobState.DONE, JobState.FAILED):
             raise JournalError("result acknowledgement is not terminal")
+        if record.archive_task is None or state is JobState.FAILED:
+            # Preserve root/Flow provenance between jobs and cleanup proof after partial failure.
+            record.acknowledged = True
+            self._write(record)
+            return
         self.path.unlink()
 
     def clear_rejected(self, job_id: int) -> None:
         record = self._required()
         if record.job_id != job_id:
             raise JournalError("recovery rejection does not match journal")
+        if record.archive_task is not None:
+            if record.state != "received":
+                raise JournalError("archive recovery rejected; retain cleanup evidence for reconciliation")
+            return
         self.path.unlink()
 
     def _required(self) -> JournalRecord:
@@ -138,6 +191,11 @@ class WorkerJournal:
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temporary, self.path)
+            directory = os.open(self.path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
         finally:
             if temporary is not None and os.path.exists(temporary):
                 os.unlink(temporary)

@@ -43,6 +43,9 @@ class RecordingStore:
     def get_delivery(self, flow_id: int) -> FlowDelivery | None:
         return None
 
+    def get_worker_execution(self, worker_id: str):
+        return None
+
     def worker_connected(self, worker_id: str, protocol_version: int, connection_epoch: str):
         self.presence[worker_id] = "online"
         self.connection_epoch = connection_epoch

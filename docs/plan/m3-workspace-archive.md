@@ -1,6 +1,6 @@
 # M3 Feature 2/3：工作区清理与 worker 释放
 
-> 状态：计划草案待审批，未实施。需求核对：2026-09-08。
+> 状态：用户于 2026-09-08 指示实施 PR #25；已实施，待代码审查。
 > 规划基线：`main` / `81417c5b`；bookmark：`feat/m3-workspace-archive`。
 > 实现前置：[F1 合并检测与任务收敛 #24](https://github.com/b1indsight/agentflow/pull/24)。
 > 计划 PR 以 main 为 base；F1 实现并合并后更新本分支，在同一 PR 实施。
@@ -92,3 +92,28 @@ Flow 重试失败 ARCHIVE。保留当前 attempt，不创建 INITIAL；重新派
 `uv run mypy app tests`、完整 pytest（配置数据库，无数据库跳过）和 `uv build --no-sources`。
 F2 单独验收真实本地 worker/目录的清理与复用；GitHub 回写及完整 M3 验收归 F3。
 本计划阶段仅检查文档差异与链接，未运行产品测试。
+
+## 5. 实施记录（2026-09-08）
+
+在 #24 合并后将同一 bookmark 更新到 main，实现仍沿用 PR #25。
+
+- v8 ArchiveTask 冻结在 job.payload；ArchiveResult 在 result inbox 与 ResultPlan 中持久保存。
+  派发、结果准备和最终提交均检查原绑定、MERGED delivery 版本、当前 attempt 和旧任务收敛。
+  job 完成、Flow SUCCEEDED、释放绑定和 result applied 在同一 PostgreSQL 事务提交。
+- journal v2 增加本地 root 路径/device/inode 和归档任务/校验标记。为防止任务间更换 root，
+  普通任务 ACK 后保留上一任务记录，成功归档 ACK 后删除；失败 ACK 与未 Started 的重新派发保留归属。
+  此处扩大了原计划的 journal 保留时段，仍复用同一文件，未增加 receipt 系统或归档表。
+- 仅删除派生 repo 和 `.partial`；清理前拒绝不安全路径，内部链接不跟随，取消等待删除线程退出。
+  原 root 的进程锁使纯文件删除可在进程重启后继续；旧编码 executor 退出未知时不推断成功。
+- MERGED/ACTIVE 归档失败保留绑定；grace 过期保留未决 executor，原 worker 可恢复结果。
+  retry 仅对在线原 worker 的已结束失败 ARCHIVE 生效，保留 attempt；pending result 由恢复循环处理。
+  合并后 cancel 明确拒绝，历史终态/丢失 journal/已释放绑定需人工核验。
+- `flow show` 显示派生归档进度，修正 active 列表；on_archived 保持提交后尽力调用。
+  README 记录 v8/journal v2 的排空与人工核验要求，旧空结果不补造清理凭据。
+
+验证覆盖真实 Git/jj 工作区、PostgreSQL、symlink/缺目录/错身份/版本冲突、权限失败与部分删除、
+删除线程取消、删除前后崩溃、终态 journal、serve 重启、ACK 丢失及第二个 Flow 复用。
+本次仅验证本地 worker 与 control；GitHub 状态回写及真实 GitHub/Codex/bub 全闭环归 F3。
+
+最终验证：真实 PostgreSQL 下完整 pytest **444 passed / 0 skipped**；Ruff、Mypy（88 个源文件）、
+`uv build --no-sources` 的 sdist/wheel 均通过。保留已有 Starlette TestClient/httpx 弃用告警。

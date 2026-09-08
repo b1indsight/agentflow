@@ -23,7 +23,7 @@ from app.judge_models import JudgeDecision
 from app.models import CodexResult, FeedbackRef, JobState, VcsKind
 from app.review_models import ReviewFeedback
 
-PROTOCOL_VERSION: Literal[7] = 7
+PROTOCOL_VERSION: Literal[8] = 8
 
 
 class ProtocolModel(BaseModel):
@@ -33,7 +33,7 @@ class ProtocolModel(BaseModel):
 
 
 class Message(ProtocolModel):
-    protocol_version: Literal[7] = PROTOCOL_VERSION
+    protocol_version: Literal[8] = PROTOCOL_VERSION
 
 
 class ReviewTask(ProtocolModel):
@@ -114,11 +114,19 @@ class RevisionInvocation(ProtocolModel):
     failure: str | None = None
 
 
-class ArchiveTask(ProtocolModel):
-    kind: Literal["archive"] = "archive"
+class ArchiveIdentity(ProtocolModel):
+    """Frozen ownership and delivery facts shared by cleanup commands and receipts."""
+
     flow_id: int = Field(gt=0)
-    attempt_id: int
+    attempt_id: int = Field(gt=0)
     repo: str
+    worker_id: str
+    repo_identity: str
+    delivery_version: int = Field(ge=0)
+
+
+class ArchiveTask(ArchiveIdentity):
+    kind: Literal["archive"] = "archive"
 
 
 ExecutionTask = Annotated[
@@ -174,8 +182,9 @@ class RevisionResult(ReviewResult):
     clean_worktree: bool = False
 
 
-class ArchiveResult(ProtocolModel):
+class ArchiveResult(ArchiveIdentity):
     kind: Literal["archive"] = "archive"
+    cleanup: Literal["removed", "already_absent"]
 
 
 ExecutionResult = Annotated[
@@ -190,6 +199,7 @@ class RecoveryDescriptor(ProtocolModel):
     state: Literal["received", "started", "succeeded", "failed"]
     result_digest: str | None = None
     executor_active: bool = False
+    archive_resume: bool = False
 
 
 class Register(Message):

@@ -29,6 +29,7 @@ from app.models import (
     WorkerStatus,
     utcnow,
 )
+from app.protocol import ArchiveTask
 from app.result_store import RESULT_SCHEMA, ResultStore
 from app.review_store import REVIEW_SCHEMA, ReviewStore
 
@@ -452,7 +453,7 @@ class Store:
     def list_flows(self, *, active_only: bool = False) -> list[Flow]:
         query = "SELECT * FROM flows"
         if active_only:
-            query += " WHERE state NOT IN ('archived','cancelled','failed')"
+            query += " WHERE state NOT IN ('succeeded','cancelled','failed')"
         query += " ORDER BY id DESC"
         with (
             self.connection() as connection,
@@ -710,6 +711,14 @@ class Store:
                 "SELECT * FROM jobs WHERE flow_id=%s ORDER BY id", (flow_id,)
             ).fetchall()
 
+    def freeze_archive(self, job: Job, task: ArchiveTask) -> None:
+        """Persist the command under the caller's workflow/job locks before dispatch."""
+        with self.connection() as connection:
+            connection.execute(
+                "UPDATE jobs SET payload=%s WHERE id=%s",
+                (Jsonb({**(job.payload or {}), "archive": task.model_dump(mode="json")}), job.id),
+            )
+
     def latest_failed_job(self, flow_id: int) -> Job | None:
         """Return the current failed job; a later job retires every earlier retry candidate."""
         with (
@@ -826,6 +835,8 @@ class Store:
         eligible = (
             " AND ((j.kind='archive') = EXISTS (SELECT 1 FROM flow_deliveries d"
             " WHERE d.flow_id=j.flow_id AND d.state='merged'))"
+            " AND (j.kind<>'archive' OR EXISTS (SELECT 1 FROM flow_executions e"
+            " WHERE e.flow_id=j.flow_id AND e.released_at IS NULL))"
             " AND (j.kind<>'archive' OR NOT EXISTS (SELECT 1 FROM jobs prior"
             " WHERE prior.flow_id=j.flow_id AND prior.id<>j.id"
             " AND (prior.state='running' OR (prior.result_received_at IS NOT NULL"
@@ -1018,7 +1029,11 @@ class Store:
                 " lease_expires_at=%s, updated_at=%s WHERE id=%s AND state=%s"
                 " AND started_at IS NOT NULL AND assigned_worker_id=%s"
                 " AND assignment_token=%s AND (recovery_deadline IS NULL"
-                " OR recovery_deadline>%s) AND EXISTS (SELECT 1 FROM workers"
+                " OR recovery_deadline>%s OR EXISTS (SELECT 1 FROM flow_deliveries d"
+                " JOIN flows f ON f.id=d.flow_id JOIN flow_executions e ON e.flow_id=f.id"
+                " WHERE f.id=jobs.flow_id AND f.state='active' AND d.state='merged'"
+                " AND e.released_at IS NULL AND e.worker_id=jobs.assigned_worker_id))"
+                " AND EXISTS (SELECT 1 FROM workers"
                 " WHERE worker_id=%s AND connection_epoch=%s)",
                 (
                     now,
@@ -1322,6 +1337,8 @@ class Store:
                 " WHERE state=%s AND started_at IS NOT NULL"
                 " AND recovery_deadline IS NOT NULL AND recovery_deadline<=%s"
                 " AND result_received_at IS NULL"
+                " AND NOT EXISTS (SELECT 1 FROM flow_deliveries d JOIN flows f ON f.id=d.flow_id"
+                " WHERE d.flow_id=jobs.flow_id AND d.state='merged' AND f.state='active')"
                 " RETURNING id, flow_id, assigned_worker_id",
                 (
                     JobState.FAILED,
@@ -1331,6 +1348,14 @@ class Store:
                     now,
                 ),
             ).fetchall()
+            connection.execute(
+                "UPDATE jobs SET last_error=%s WHERE state='running'"
+                " AND started_at IS NOT NULL AND recovery_deadline<=%s"
+                " AND result_received_at IS NULL AND EXISTS"
+                " (SELECT 1 FROM flow_deliveries d JOIN flows f ON f.id=d.flow_id"
+                " WHERE d.flow_id=jobs.flow_id AND d.state='merged' AND f.state='active')",
+                ("archive blocked: original worker executor status is unknown", now),
+            )
             requeued_ids = [row["id"] for row in requeued_rows]
             if requeued_ids:
                 connection.execute(
@@ -1359,6 +1384,8 @@ class Store:
             expired_executions = connection.execute(
                 "UPDATE flow_executions SET released_at=%s"
                 " WHERE released_at IS NULL AND recovery_deadline IS NOT NULL"
+                " AND NOT EXISTS (SELECT 1 FROM flow_deliveries d JOIN flows f ON f.id=d.flow_id"
+                " WHERE d.flow_id=flow_executions.flow_id AND d.state='merged' AND f.state='active')"
                 " AND recovery_deadline<=%s AND NOT EXISTS (SELECT 1 FROM jobs j"
                 " WHERE j.flow_id=flow_executions.flow_id AND j.result_received_at IS NOT NULL"
                 " AND j.result_applied_at IS NULL) RETURNING flow_id, worker_id",

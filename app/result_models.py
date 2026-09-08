@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.github_models import PullRequestSnapshot, ReviewThread
 from app.models import FeedbackRef, FlowDelivery, FlowState, JobKind, JobState
-from app.protocol import RevisionResult
+from app.protocol import ArchiveResult, RevisionResult
 from app.review_models import BatchState, ReviewFeedback
 
 
@@ -99,6 +99,7 @@ class ResultPlan(FrozenModel):
     run: RunUpdate | None = None
     delivery: FlowDelivery | None = None
     revision: RevisionResult | None = None
+    archive: ArchiveResult | None = None
     resolution_version: int = 0
     derived: DerivedJob | None = None
     batch_id: int | None = None

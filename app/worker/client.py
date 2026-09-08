@@ -189,9 +189,19 @@ class WorkerClient:
             self._acknowledge(first)
             first = parse_server_message(await _receive_text(connection))
         elif isinstance(first, ResumeAssignment):
-            if self._assignment is None or self._execution is None:
-                raise WorkerProtocolError("serve resumed an assignment without a live executor")
             self._validate_recovery_message(first.job_id, first.assignment_token)
+            if self._assignment is None or self._execution is None:
+                record = self._journal_record()
+                if record is None or record.state != "started" or record.archive_task is None:
+                    raise WorkerProtocolError("serve resumed an assignment without a live executor")
+                # Runtime holds the original root's process lock. Archive starts no subprocesses,
+                # so a new process can safely continue this journaled deletion only.
+                self._assignment = Assignment(
+                    job_id=record.job_id, flow_id=record.flow_id,
+                    assignment_token=record.assignment_token, connection_epoch=first.connection_epoch,
+                    task=record.archive_task,
+                )
+                self._execution = asyncio.create_task(self.executor.execute(record.archive_task))
             self._assignment = self._assignment.model_copy(
                 update={"connection_epoch": first.connection_epoch}
             )
@@ -380,6 +390,7 @@ class WorkerClient:
             assignment_token=record.assignment_token,
             state=record.state,
             result_digest=record.result_digest,
+            archive_resume=record.archive_task is not None and record.state == "started",
             executor_active=(
                 record.state == "started"
                 and self._execution is not None
