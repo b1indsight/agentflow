@@ -171,12 +171,14 @@ Starlette TestClient/httpx 弃用告警。数据库 CI 的历史验证见
 
 ## 升级注意
 
-M3 F2 本地验证（2026-09-08）：真实 PostgreSQL 下 **444 passed / 0 skipped**，含真实 Git/jj
+M3 F2 本地验证（2026-09-08）：真实 PostgreSQL 下 **461 passed / 0 skipped**，含真实 Git/jj
 目录及 worker/control 恢复测试；Ruff、Mypy、sdist/wheel 构建通过。仅保留既有 Starlette 弃用告警。
 
 M3 F2 使用 wire protocol **v8** 和 worker journal **v2**，serve/worker 必须一起升级。
 先用旧版本排空在途任务、未应用结果及其 ACK，并处理仍占用 worker 的旧 Flow；无法排空的工作区、
-旧 journal 或旧空归档结果需要人工核验。旧在途 ARCHIVE 缺少冻结任务、旧协议结果均会阻止 serve 启动。
+旧 journal 或旧空归档结果需要人工核验。已 Started 却缺少冻结任务的 ARCHIVE、旧协议结果会阻止 serve 启动；
+仅领取但未冻结的任务可正常恢复。冻结后的归档在 Started 丢失或 grace 到期时保留原 token，
+按原 journal 与冻结身份恢复；断线期间已完成的执行结果在重连注册前先持久保存。
 不转换空结果为清理凭据，不删除 journal 绕过检查；旧版本已清除 journal 的绑定也需先人工处理。
 
 新 journal 在任务 ACK 后保留上一任务的 Flow 和 root 归属，成功归档 ACK 后才移除。不要更换

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- 修复 M3 F2 的任务交接恢复：未冻结的归档领取不再阻断 serve 重启；冻结命令在 Started 丢失
+  或 grace 到期时保留原 token，核对冻结身份后恢复执行/结果。重连前持久保存已完成的 executor 结果，
+  拒绝未启动编码任务时保留 root/Flow 归属，过期编码队列项不再阻止归档 retry。
 - M3 F2：协议 v8 的 ARCHIVE 冻结 Flow/attempt、原 worker/repo identity 和 delivery version，
   control 核验 removed/already_absent 凭据后，原子提交 job、Flow SUCCEEDED、binding 释放和结果应用。
 - worker journal v2 保留任务间的 root/Flow 归属，删除前持久化校验标记；只清理受管 repo 与

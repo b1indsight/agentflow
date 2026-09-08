@@ -200,3 +200,60 @@ async def test_merged_coding_process_without_exit_proof_cannot_unlock_archive(st
     assert store.get_job(old.id).state is JobState.RUNNING
     assert store.get_job(old.id).result_received_at is None
     assert store.get_flow_execution(flow.id).released_at is None
+
+
+async def test_restart_between_archive_claim_and_freeze_requeues_safely(store):
+    # A claim commits before coordinator.prepare(). This is a current, unstarted delivery.
+    old, _ = accepted_triage(store)
+    flow = store.get_flow(old.flow_id)
+    await route_merge(store, flow)
+    subject = coordinator(store, RecordingGitHub())
+    await subject.results.apply(old.id)
+    job = store.assign_job("worker-a", "archive-token", "epoch-a")
+    assert job.payload is None and job.started_at is None
+    store.reviews.check_upgrade()
+    store.recover_abandoned_assignments()
+    now = store.now()
+    store._clock = lambda: now + timedelta(hours=1)
+    store.sweep_expired_assignments()
+    assert store.get_job(job.id).state is JobState.QUEUED
+    store.worker_connected("worker-a", 8, "restart")
+    recovered = store.assign_job("worker-a", "new-token", "restart")
+    assert recovered.id == job.id
+    assert isinstance(await subject.prepare(recovered), ArchiveTask)
+    assert store.get_flow_execution(flow.id).released_at is None
+
+
+async def test_superseded_queued_coding_does_not_block_archive_retry(store):
+    # Lease recovery can requeue coding work after merge already retired its initial queue.
+    flow, job, _task, subject = await ready_archive(store)
+    stale = store.enqueue_job(flow.id, JobKind.REVISION)
+    await subject.fail(job, "cleanup permission denied")
+    ControlService(store).retry(flow)
+    retry = store.assign_job("worker-a", "retry", "epoch-a")
+    assert retry.kind is JobKind.ARCHIVE and retry.id != job.id
+    assert store.get_job(stale.id).state is JobState.QUEUED
+
+
+@pytest.mark.parametrize("mismatch", ["worker", "token", "epoch", "delivery", "attempt", "binding"])
+async def test_lost_archive_started_requires_original_fence_and_frozen_identity(store, mismatch):
+    flow, job, _task, _subject = await ready_archive(store, start=False)
+    worker, token, epoch = "worker-a", "archive-token", "epoch-a"
+    if mismatch == "worker":
+        worker = "worker-b"
+        store.worker_connected(worker, 8, epoch)
+    elif mismatch == "token":
+        token = "old-token"
+    elif mismatch == "epoch":
+        epoch = "old-epoch"
+    elif mismatch == "delivery":
+        delivery = store.get_delivery(flow.id)
+        delivery.version += 1
+        store.update_delivery(delivery)
+    elif mismatch == "attempt":
+        flow.current_attempt_id = store.create_attempt(flow.id).id
+        store.update_flow(flow)
+    else:
+        store.release_flow_execution(flow.id)
+    assert not store.resume_assignment(job.id, worker, token, epoch)
+    assert store.get_job(job.id).started_at is None

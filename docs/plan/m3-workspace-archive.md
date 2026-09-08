@@ -115,5 +115,21 @@ F2 单独验收真实本地 worker/目录的清理与复用；GitHub 回写及�
 删除线程取消、删除前后崩溃、终态 journal、serve 重启、ACK 丢失及第二个 Flow 复用。
 本次仅验证本地 worker 与 control；GitHub 状态回写及真实 GitHub/Codex/bub 全闭环归 F3。
 
-最终验证：真实 PostgreSQL 下完整 pytest **444 passed / 0 skipped**；Ruff、Mypy（88 个源文件）、
+最终验证：真实 PostgreSQL 下完整 pytest **461 passed / 0 skipped**；Ruff、Mypy（88 个源文件）、
 `uv build --no-sources` 的 sdist/wheel 均通过。保留已有 Starlette TestClient/httpx 弃用告警。
+
+### 审查修复
+
+首轮审查的 1 High / 4 Medium 已按用户指示修复：
+
+- 领取后、冻结前崩溃的 unstarted ARCHIVE 不再被误判为旧协议；真正已开始却缺少冻结任务的
+  旧归档及旧协议未确认结果仍拒绝升级。
+- 重连前将已完成的活跃 executor 结果写入 journal，复用正常完成时的凭据脱敏与结果构造；
+  journal 写入失败时保留内存中的完成结果，不把 done task 误判为退出未知。
+- 拒绝 received 状态的普通任务时保留 root/Flow 归属，合并后可接续 ARCHIVE。
+- 冻结归档视作可能已执行，断线/serve 重启及 lease sweep 均保留原分配；恢复时核对 token、epoch、
+  原绑定和完整冻结任务，再补记丢失的 Started 并恢复清理或结果重放。普通编码不获得此重跑能力。
+- 重试只检查 queued ARCHIVE；合并后恢复产生的过期编码队列项仍不能被执行，也不阻塞清理重试。
+
+新增 17 项回归覆盖上述窗口，其中真实 Git/jj 目录验证 Started 丢失后的超时恢复；
+PostgreSQL 验证冻结身份/围栏拒绝，真实 worker/control 往返验证合并与重连交接。

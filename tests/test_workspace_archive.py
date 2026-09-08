@@ -162,6 +162,18 @@ async def test_archive_with_lost_journal_does_not_adopt_an_existing_directory(tm
     assert seed.is_dir() and repo.is_dir()
 
 
+async def test_rejected_unstarted_coding_retains_flow_provenance_for_archive(tmp_path):
+    seed, repo, journal, executor, assignment = await workspace(tmp_path, start=False)
+    # Reproduce merge after an ordinary task was journaled but before it could start.
+    journal.path.unlink()
+    journal.record_received(_assignment())
+    journal.clear_rejected(5)
+    journal.record_received(assignment)
+    journal.record_started()
+    assert (await executor.execute(assignment.task)).cleanup == "removed"
+    assert seed.exists() and not repo.exists()
+
+
 async def test_cancelling_archive_waits_for_filesystem_thread_to_stop(tmp_path, monkeypatch):
     _, repo, journal, executor, assignment = await workspace(tmp_path)
     entered = asyncio.Event()

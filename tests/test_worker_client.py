@@ -284,3 +284,34 @@ async def test_heartbeat_failure_preserves_the_running_executor_for_reconnect() 
     finally:
         await client._cancel_execution()
     assert executor.cancelled.is_set() is True
+
+
+@pytest.mark.parametrize("fails", [False, True])
+async def test_completed_disconnected_executor_is_journaled_before_recovery(tmp_path, fails):
+    from app.worker.journal import WorkerJournal
+    from tests.test_worker_journal import _assignment
+
+    # Execution finishes after the driver lost its connection; registration must carry its result.
+    class CompletedExecutor:
+        async def execute(self, task, secret=None):
+            if fails:
+                raise RuntimeError("push-secret was echoed")
+            return InitialResult(session_id="session", last_message="push-secret", exit_code=0)
+
+    journal = WorkerJournal(tmp_path)
+    assignment = _assignment()
+    journal.record_received(assignment)
+    journal.record_started()
+    executor = CompletedExecutor()
+    client = WorkerClient(worker_id="worker-a", worker_token="secret", serve_ws_url="ws://test",
+                          executor=executor, journal=journal)
+    client._assignment = assignment
+    execution = asyncio.create_task(executor.execute(assignment.task, assignment.secret))
+    client._execution = execution
+    await asyncio.gather(execution, return_exceptions=True)
+    recovery = client._recovery_descriptor()
+    assert recovery.state == ("failed" if fails else "succeeded")
+    assert recovery.result_digest == journal.load().result_digest
+    assert journal.load().terminal is not None
+    assert "push-secret" not in journal.path.read_text()
+    assert "[REDACTED]" in journal.path.read_text()

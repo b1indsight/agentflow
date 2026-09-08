@@ -3,6 +3,7 @@
 import asyncio
 import json
 import shutil
+from datetime import timedelta
 
 import pytest
 
@@ -14,6 +15,7 @@ from app.protocol import (
     InitialTask,
     ResultAccepted,
     Succeeded,
+    TriageTask,
     parse_server_message,
     parse_worker_message,
 )
@@ -23,9 +25,12 @@ from app.worker.executor import WorkerExecutor
 from app.worker.journal import WorkerJournal
 from app.worker.runtime import WorkerRootLock
 from tests.test_archive_recovery import ready_archive, receive
+from tests.test_coordinator import RecordingGitHub, coordinator
+from tests.test_merge import route_merge
 from tests.test_remote_e2e import QueueConnection, QueueSocket
 from tests.test_vcs import _git_fixture, _jj
 from tests.test_worker_executor import RecordingAgent, RecordingJudge
+from tests.test_workflow_transactions import accepted_triage
 
 
 class ArchiveSocket(QueueSocket):
@@ -58,14 +63,15 @@ class ObservedClient(WorkerClient):
             self.acked.set()
 
 
-async def connect_once(store, subject, executor, journal, *, drop_ack=False):
+async def connect_once(store, subject, executor, journal, *, drop_ack=False, client=None):
     outgoing, incoming = asyncio.Queue(), asyncio.Queue()
     gateway = WorkerGateway(store, subject, worker_tokens={"worker-a": "secret"}, poll_interval=60)
     archive_id = next(job.id for job in store.list_jobs(journal.load().flow_id)
                       if job.kind is JobKind.ARCHIVE)
-    client = ObservedClient(archive_id=archive_id,
-                            worker_id="worker-a", worker_token="secret", serve_ws_url="ws://test",
-                            executor=executor, journal=journal)
+    if client is None:
+        client = ObservedClient(archive_id=archive_id,
+                                worker_id="worker-a", worker_token="secret", serve_ws_url="ws://test",
+                                executor=executor, journal=journal)
     server = asyncio.create_task(gateway.handle(ArchiveSocket(outgoing, incoming)))
     worker = asyncio.create_task(client.run_connection(AckConnection(outgoing, incoming,
                                                                      drop_ack=drop_ack)))
@@ -84,14 +90,16 @@ async def connect_once(store, subject, executor, journal, *, drop_ack=False):
 
 
 @pytest.mark.parametrize("window", ["before-received", "before-delete", "after-delete",
-                                   "terminal", "pending", "ack"])
+                                   "terminal", "pending", "ack", "started-lost", "result-started-lost"])
 @pytest.mark.parametrize("backend", ["git", pytest.param("jj", marks=pytest.mark.skipif(
     shutil.which("jj") is None, reason="jj is not installed",
 ))])
 async def test_original_worker_recovers_cleanup_and_replays_without_redeleting(
     store, tmp_path, monkeypatch, window, backend,
 ):
-    flow, job, task, subject = await ready_archive(store, start=window != "before-received")
+    flow, job, task, subject = await ready_archive(
+        store, start=window not in {"before-received", "started-lost", "result-started-lost"},
+    )
     seed, _ = _git_fixture(tmp_path)
     if backend == "jj":
         import os
@@ -128,14 +136,14 @@ async def test_original_worker_recovers_cleanup_and_replays_without_redeleting(
     lock = WorkerRootLock(root, "worker-a")
     lock.acquire()
     try:
-        if window not in {"before-received", "before-delete"}:
+        if window not in {"before-received", "before-delete", "started-lost"}:
             result = await executor.execute(task)
-            if window in {"terminal", "pending", "ack"}:
+            if window in {"terminal", "pending", "ack", "result-started-lost"}:
                 journal.record_terminal(Succeeded(job_id=job.id, assignment_token="archive-token",
                     connection_epoch="epoch-a", result=result))
             if window == "pending":
                 assert receive(store, job, result) == "pending"
-            if window in {"terminal", "pending", "ack"}:
+            if window in {"terminal", "pending", "ack", "result-started-lost"}:
                 async def no_execution(*args, **kwargs):
                     raise AssertionError("a durable terminal result must only replay")
 
@@ -146,6 +154,12 @@ async def test_original_worker_recovers_cleanup_and_replays_without_redeleting(
     lock.acquire()
     try:
         store.recover_abandoned_assignments()
+        if window in {"started-lost", "result-started-lost"}:
+            # The original frozen token must survive a lost Started frame and expired grace.
+            now = store.now()
+            store._clock = lambda: now + timedelta(hours=1)
+            store.sweep_expired_assignments()
+            assert store.get_job(job.id).assignment_token == "archive-token"
         await connect_once(store, subject, executor, WorkerJournal(root), drop_ack=window == "ack")
         if window == "ack":
             assert journal.load() is not None
@@ -162,3 +176,45 @@ async def test_original_worker_recovers_cleanup_and_replays_without_redeleting(
     store.worker_connected("worker-a", 8, "next")
     next_job = store.assign_job("worker-a", "next-token", "next")
     assert next_job.flow_id == next_flow.id and next_job.kind is JobKind.INITIAL
+
+
+@pytest.mark.parametrize("window", ["completed-disconnected", "unstarted-rejected"])
+async def test_merge_recovery_preserves_coding_completion_and_root_provenance(store, tmp_path, window):
+    old, result = accepted_triage(store, receive=False)
+    flow = store.get_flow(old.flow_id)
+    if window == "unstarted-rejected":
+        # Recreate the fixture's delivery before Started, while retaining its frozen context.
+        with store.connection() as connection:
+            connection.execute("UPDATE jobs SET started_at=NULL WHERE id=%s", (old.id,))
+    await route_merge(store, flow)
+    archive_id = store.list_jobs(flow.id)[-1].id
+    seed, _ = _git_fixture(tmp_path)
+    root = tmp_path / "worker"
+    managed_seed = root / "repos/owner/repo"
+    managed_seed.parent.mkdir(parents=True)
+    shutil.move(seed, managed_seed)
+    repo = await prepare_flow_repo(managed_seed, flow.id)
+    journal = WorkerJournal(root)
+    batch = store.reviews.for_job(old)
+    assignment = Assignment(job_id=old.id, flow_id=flow.id, assignment_token=old.assignment_token,
+        connection_epoch="epoch-a", task=TriageTask(batch_id=batch.id, feedback=result.feedback_refs,
+            attempt_id=flow.current_attempt_id, context=batch.context))
+    journal.record_received(assignment)
+    executor = WorkerExecutor(root, RecordingAgent(), RecordingJudge(), worker_id="worker-a",
+                              journal=journal)
+    client = ObservedClient(archive_id=archive_id, worker_id="worker-a", worker_token="secret",
+                            serve_ws_url="ws://test", executor=executor, journal=journal)
+    if window == "completed-disconnected":
+        journal.record_started()
+        client._assignment = assignment
+        client._execution = asyncio.create_task(asyncio.sleep(0, result=result))
+        await client._execution
+    lock = WorkerRootLock(root, "worker-a")
+    lock.acquire()
+    try:
+        await connect_once(store, coordinator(store, RecordingGitHub()), executor, journal, client=client)
+    finally:
+        lock.release()
+    assert store.get_flow(flow.id).state is FlowState.SUCCEEDED
+    assert store.get_flow_execution(flow.id).released_at is not None
+    assert not repo.exists() and managed_seed.exists()

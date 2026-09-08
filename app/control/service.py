@@ -160,7 +160,7 @@ class ControlService:
         jobs = tx.list_jobs(flow.id)
         if any(job.state is JobState.RUNNING for job in jobs):
             raise ValueError("archive retry is blocked by a running or unknown executor")
-        if any(job.state is JobState.QUEUED for job in jobs):
+        if any(job.kind is JobKind.ARCHIVE and job.state is JobState.QUEUED for job in jobs):
             raise ValueError("archive is already queued; wait for the original worker")
         workers = tx.list_workers()
         worker = next((w for w in workers if w.worker_id == execution.worker_id), None)

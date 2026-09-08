@@ -311,32 +311,7 @@ class WorkerClient:
                         continue
                     next_tool.cancel()
                     await asyncio.gather(next_tool, return_exceptions=True)
-                try:
-                    result = execution.result()
-                    terminal: Succeeded | Failed = Succeeded(
-                        job_id=assignment.job_id,
-                        assignment_token=assignment.assignment_token,
-                        connection_epoch=assignment.connection_epoch,
-                        result=result,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    # Exceptions can contain model output or a credential echoed by a command.
-                    logger.error("remote job {} failed ({})", assignment.job_id, type(exc).__name__)
-                    terminal = Failed(
-                        job_id=assignment.job_id,
-                        assignment_token=assignment.assignment_token,
-                        connection_epoch=assignment.connection_epoch,
-                        error=str(exc),
-                    )
-                if assignment.secret is not None:
-                    terminal = type(terminal).model_validate_json(
-                        terminal.model_dump_json().replace(
-                            assignment.secret.push.token.get_secret_value(), "[REDACTED]",
-                        )
-                    )
-                self._execution = None
-                if self.journal is not None:
-                    self.journal.record_terminal(terminal)
+                terminal = self._record_completed_execution()
             else:
                 assert record is not None and record.terminal is not None
                 terminal = record.terminal.model_copy(
@@ -358,6 +333,39 @@ class WorkerClient:
         finally:
             heartbeat.cancel()
             await asyncio.gather(heartbeat, return_exceptions=True)
+
+    def _record_completed_execution(self) -> Succeeded | Failed:
+        """Capture a finished task before recovery or sending; retain it if journaling fails."""
+        assignment, execution = self._assignment, self._execution
+        if assignment is None or execution is None or not execution.done():
+            raise WorkerProtocolError("cannot record an unfinished or missing executor")
+        try:
+            result = execution.result()
+            terminal: Succeeded | Failed = Succeeded(
+                job_id=assignment.job_id,
+                assignment_token=assignment.assignment_token,
+                connection_epoch=assignment.connection_epoch,
+                result=result,
+            )
+        except Exception as exc:  # noqa: BLE001
+            # Exceptions can contain model output or a credential echoed by a command.
+            logger.error("remote job {} failed ({})", assignment.job_id, type(exc).__name__)
+            terminal = Failed(
+                job_id=assignment.job_id,
+                assignment_token=assignment.assignment_token,
+                connection_epoch=assignment.connection_epoch,
+                error=str(exc),
+            )
+        if assignment.secret is not None:
+            terminal = type(terminal).model_validate_json(
+                terminal.model_dump_json().replace(
+                    assignment.secret.push.token.get_secret_value(), "[REDACTED]",
+                )
+            )
+        if self.journal is not None:
+            self.journal.record_terminal(terminal)
+        self._execution = None
+        return terminal
 
     async def _heartbeat(
         self,
@@ -382,6 +390,9 @@ class WorkerClient:
         return self.journal.load() if self.journal is not None else None
 
     def _recovery_descriptor(self) -> RecoveryDescriptor | None:
+        if (self.journal is not None and self._execution is not None
+                and self._execution.done() and not self._execution.cancelled()):
+            self._record_completed_execution()
         record = self._journal_record()
         if record is None:
             return None

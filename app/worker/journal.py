@@ -66,11 +66,9 @@ class WorkerJournal:
     def record_received(self, assignment: Assignment) -> JournalRecord:
         previous = self.load()
         archive = assignment.task if isinstance(assignment.task, ArchiveTask) else None
-        unstarted_archive = (previous is not None and previous.archive_task == archive
-                             and previous.state == "received")
         if archive is not None and (previous is None or previous.flow_id != archive.flow_id
-                                    or not (previous.acknowledged or unstarted_archive)):
-            raise JournalError("archive requires the original Flow's acknowledged worker journal")
+                                    or not (previous.acknowledged or previous.state == "received")):
+            raise JournalError("archive requires the original Flow's worker journal")
         if (previous is not None and previous.archive_task is not None
                 and (previous.state not in {"received", "failed"} or previous.archive_task != archive)):
             raise JournalError("cannot replace unacknowledged archive cleanup evidence")
@@ -162,10 +160,11 @@ class WorkerJournal:
         record = self._required()
         if record.job_id != job_id:
             raise JournalError("recovery rejection does not match journal")
-        if record.archive_task is not None:
-            if record.state != "received":
-                raise JournalError("archive recovery rejected; retain cleanup evidence for reconciliation")
+        if record.state == "received":
+            # No executor ran. Keep the root/Flow provenance when merge supersedes this command.
             return
+        if record.archive_task is not None:
+            raise JournalError("archive recovery rejected; retain cleanup evidence for reconciliation")
         self.path.unlink()
 
     def _required(self) -> JournalRecord:
