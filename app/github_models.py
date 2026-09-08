@@ -25,6 +25,15 @@ class RepositorySnapshot(GitHubModel):
     default_branch: str
 
 
+class PullRequestMerge(GitHubModel):
+    """Required facts from a merged pull_request.closed webhook, before event reservation."""
+
+    number: int = Field(gt=0)
+    merged: Literal[True]
+    merged_at: AwareDatetime
+    merge_commit_sha: str = Field(min_length=1)
+
+
 class ReviewComment(GitHubModel):
     """Remote comment identity and content version; node_id is never a thread ID."""
 

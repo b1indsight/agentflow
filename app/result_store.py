@@ -188,6 +188,20 @@ class ResultStore:
                 (EffectState.SKIPPED, reason, job_id, EffectState.SUCCEEDED, EffectState.FAILED),
             )
 
+    def retire_for_merge(self, job_id: int) -> None:
+        """Skip unsent work, retaining active senders and uncertain writes for read-only recovery."""
+        with self.store.connection() as connection:
+            connection.execute(
+                "UPDATE result_effects SET state=CASE WHEN dispatched_at IS NULL THEN %s ELSE %s END,"
+                " last_error=%s,claimed_by=NULL,claim_expires_at=NULL,next_attempt_at=%s"
+                " WHERE job_id=%s AND state NOT IN (%s,%s)"
+                " AND (claimed_by IS NULL OR claim_expires_at<=%s)"
+                " AND (dispatched_at IS NULL OR state=%s)",
+                (EffectState.SKIPPED, EffectState.UNCERTAIN, "PR merged; no further writes",
+                 self.store.now(), job_id, EffectState.SUCCEEDED, EffectState.SKIPPED,
+                 self.store.now(), EffectState.FAILED),
+            )
+
     def retry_revision_effects(self, flow: Flow) -> bool:
         """Rearm definite rejections only; the caller holds the workflow lock."""
         with self.store.connection() as connection:

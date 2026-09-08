@@ -6,6 +6,7 @@ from collections.abc import Callable
 
 from loguru import logger
 
+from app.github_models import PullRequestMerge
 from app.models import TERMINAL_STATES, DeliveryState, Flow, FlowState, JobKind, WorkerView
 from app.plugins import get_plugin_manager
 from app.store import Store
@@ -52,20 +53,38 @@ class ControlService:
         self._jobs_available()
         logger.info("flow {} cancelled", flow.id)
 
-    def on_merged(self, flow: Flow) -> None:
+    def on_merged(self, flow: Flow, delivery_id: str, payload: dict) -> None:
+        """Commit the webhook reservation, merge fact and retirement of old work together."""
+        merge = PullRequestMerge.model_validate(payload["pull_request"])
         with self.store.transaction() as tx:
             fresh = tx.lock_workflow(flow.id)
-            if fresh is None or fresh.state in TERMINAL_STATES:
-                return
             delivery = tx.get_delivery(flow.id)
-            if delivery is None:
-                raise ValueError(f"flow {flow.id} has no delivery to mark merged")
-            if delivery.state is DeliveryState.MERGED:
+            if (fresh is None or delivery is None or payload.get("action") != "closed"
+                    or (payload.get("repository") or {}).get("full_name") != fresh.repo
+                    or fresh.installation_id is None
+                    or (payload.get("installation") or {}).get("id") != fresh.installation_id
+                    or delivery.pr_number != merge.number):
+                logger.warning("merge identity does not match flow {}", flow.id)
                 return
-            delivery.state = DeliveryState.MERGED
-            tx.update_delivery(delivery)
-            tx.enqueue_job(flow.id, JobKind.ARCHIVE)
-        self._fire("on_merged", flow=flow)
+            if not tx.record_event(delivery_id, "pull_request", fresh.id, payload):
+                return
+            if ((delivery.merged_at is not None and delivery.merged_at != merge.merged_at)
+                    or (delivery.merge_commit_sha is not None
+                        and delivery.merge_commit_sha != merge.merge_commit_sha)):
+                raise ValueError("merge event conflicts with recorded merge facts")
+            first_merge = delivery.state is not DeliveryState.MERGED
+            if first_merge or delivery.merged_at is None or delivery.merge_commit_sha is None:
+                delivery.state = DeliveryState.MERGED
+                delivery.merged_at = merge.merged_at
+                delivery.merge_commit_sha = merge.merge_commit_sha
+                delivery.version += 1
+                tx.update_delivery(delivery)
+            if not first_merge:
+                return
+            if fresh.state not in TERMINAL_STATES:
+                tx.cancel_jobs(flow.id, reason="PR merged; queued work retired")
+                tx.enqueue_job(flow.id, JobKind.ARCHIVE)
+        self._fire("on_merged", flow=fresh)
         self._jobs_available()
 
     def retry(self, flow: Flow) -> None:
@@ -93,6 +112,9 @@ class ControlService:
                 kind = failed_job.kind if failed_job is not None else JobKind.INITIAL
                 if kind is JobKind.ANSWER:
                     raise ValueError("Reconcile legacy ANSWER jobs before upgrading to protocol v6")
+                delivery = tx.get_delivery(fresh.id)
+                if delivery is not None and delivery.supersedes(kind):
+                    raise ValueError("a merged PR cannot retry coding or review jobs")
                 fresh.state = FlowState.ACTIVE
                 tx.update_flow(fresh)
                 if (failed_job is not None and kind is JobKind.TRIAGE

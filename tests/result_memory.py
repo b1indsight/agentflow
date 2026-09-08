@@ -95,6 +95,19 @@ class MemoryResults:
                 record.state, record.last_error = EffectState.SKIPPED, reason
                 record.claimed_by = record.claim_expires_at = None
 
+    def retire_for_merge(self, job_id: int) -> None:
+        for record in self.records.get(job_id, []):
+            if record.state in {EffectState.SUCCEEDED, EffectState.SKIPPED}:
+                continue
+            if (record.claimed_by is not None and record.claim_expires_at is not None
+                    and record.claim_expires_at > self.clock):
+                continue
+            if record.dispatched_at is None or record.state is EffectState.FAILED:
+                record.state = (EffectState.SKIPPED if record.dispatched_at is None
+                                else EffectState.UNCERTAIN)
+                record.claimed_by = record.claim_expires_at = None
+                record.next_attempt_at = self.clock
+
     def recover_claims(self) -> None:
         for records in self.records.values():
             for record in records:

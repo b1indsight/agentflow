@@ -22,13 +22,16 @@ Codex 等长任务占用 GitHub 的 Webhook 请求。
 
 当前实现：
 
-- 忽略配置 bot login 及 GitHub `type=Bot` 的事件；
+- 触发/反馈忽略配置 bot login 及 GitHub `type=Bot` 的事件；合法关联 PR 的合并事实不受此过滤；
 - 以 `X-GitHub-Delivery` 原子占有并持久化去重，只有成功插入的 handler 才继续处理，同时记录原始 payload；
 - 仅允许 allowlist 用户通过 `issues.labeled(flow)` 创建 active flow 与 initial job；
 - `issues.unlabeled(flow)` 或严格等于 `/flow stop` 的评论取消 active flow；
 - review body、inline comment 和 conversation 按 Flow/kind/GitHub ID 保存不可变版本，保留来源 attempt；
 - 反馈 delivery、版本和 deadline 共用事务，持久 settle 后冻结批次；仅 allowlist 作者提交的 Request Changes 经 grace 直达 REVISION；
-- `pull_request.closed (merged=true)` 驱动 MERGED；approve 本身不触发修订。
+- `pull_request.closed (merged=true)` 原子保存事件去重、合并时间/SHA、delivery version，停止
+  queued 编码/review 和活动批次并入队唯一 ARCHIVE；校验 repo/PR/installation，approve 不归档。
+- 合并后的任务派发、flow.open_pr、结果应用和 GitHub 写入均检查 delivery；迟到结果只保存
+  执行事实并收尾 ACK，已发 GitHub 操作只查询回执，ARCHIVE 等待旧执行/结果收尾。
 
 M2 F1 自动化覆盖反馈工作流锁、同 Flow 批次串行、重启恢复和精确版本消费。尚未实现：
 未合并 PR close 的取消语义、后台 handler 失败后的自动 delivery 重试，以及真实 GitHub payload

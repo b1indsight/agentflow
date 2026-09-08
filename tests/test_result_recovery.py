@@ -218,6 +218,84 @@ async def test_remote_comment_is_recovered_after_response_loss(scenario, monkeyp
     assert store.jobs[job.id].result_applied_at is not None
 
 
+@pytest.mark.parametrize("exit_code", [0, 1])
+async def test_merged_initial_result_keeps_execution_facts_without_reopening(initial_scenario, exit_code):
+    # The human merged the PR opened by flow.open_pr before INITIAL returned its final result.
+    store, github, job, result = initial_scenario
+    store.delivery.state = DeliveryState.MERGED
+    store.delivery.pr_number = 17
+    store.delivery.version += 1
+    result = result.model_copy(update={"exit_code": exit_code})
+    subject = coordinator(store, github)
+    await apply_result(subject, job, result)
+    await apply_result(subject, job, result)
+    assert store.flow.state is FlowState.ACTIVE
+    assert store.delivery.state is DeliveryState.MERGED
+    assert store.execution.released_at is None
+    assert len(store.runs) == 1
+    assert github.comments == []
+    assert store.results.list_effects(job.id) == []
+
+
+async def test_merge_during_comment_lookup_prevents_dispatch(scenario, monkeypatch):
+    # The merge commits while an old result is awaiting a GitHub read, just before POST.
+    store, github, job, result = scenario
+    original = github.find_comment
+
+    async def merge_during_lookup(*args):
+        store.delivery.state = DeliveryState.MERGED
+        store.delivery.version += 1
+        store.reviews.cancel(store.flow.id)
+        return await original(*args)
+
+    monkeypatch.setattr(github, "find_comment", merge_during_lookup)
+    subject = coordinator(store, github)
+    try:
+        await apply_result(subject, job, result)
+    except ResultPending:
+        store.results.clock += timedelta(seconds=30)
+        await apply_result(subject, job, result)
+    assert store.jobs[job.id].result_applied_at is not None
+    assert store.flow.state is FlowState.ACTIVE
+    assert github.comments == []
+    assert store.enqueued == []
+
+
+@pytest.mark.parametrize("remote_receipt", [True, False])
+async def test_merged_result_reconciles_dispatched_comment_without_resending(
+    scenario, monkeypatch, remote_receipt,
+):
+    # Merge must not discard an uncertain POST or let its recovered result enqueue REVISION.
+    store, github, job, result = scenario
+    original = github.comment
+    calls = []
+
+    async def lose_response(*args):
+        calls.append(args)
+        if remote_receipt:
+            await original(*args)
+        raise GitHubAdapterError(GitHubErrorKind.TRANSIENT, "comment")
+
+    monkeypatch.setattr(github, "comment", lose_response)
+    subject = coordinator(store, github)
+    with pytest.raises(ResultPending):
+        await apply_result(subject, job, result)
+    store.delivery.state = DeliveryState.MERGED
+    store.delivery.version += 1
+    store.reviews.cancel(store.flow.id)
+    store.results.clock += timedelta(seconds=30)
+    if remote_receipt:
+        assert await apply_result(subject, job, result) is JobState.DONE
+        assert store.results.list_effects(job.id)[0].state is EffectState.SUCCEEDED
+    else:
+        with pytest.raises(ResultPending):
+            await apply_result(subject, job, result)
+        assert store.jobs[job.id].result_applied_at is None
+    assert len(calls) == 1
+    assert store.enqueued == []
+    assert store.flow.state is FlowState.ACTIVE
+
+
 async def test_unknown_comment_is_not_resubmitted_and_blocks_retry(scenario, monkeypatch) -> None:
     store, github, job, result = scenario
     sent = []

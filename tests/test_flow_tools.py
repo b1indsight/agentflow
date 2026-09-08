@@ -183,6 +183,18 @@ async def test_open_pr_prepares_and_replays_without_remote_delivery() -> None:
 
 
 @pytest.mark.asyncio
+async def test_open_pr_after_merge_cannot_restore_opening_delivery() -> None:
+    # INITIAL may still be running and call the tool again after its PR was merged.
+    store = ToolStore()
+    store.delivery.state = DeliveryState.MERGED
+    store.delivery.pr_number = 17
+    service = FlowToolService(cast(Store, store), cast(GitHubClient, ToolGitHub()))
+    response = await service.execute(request(), worker_id="worker-a")
+    assert response.error_kind is FlowToolErrorKind.CONFLICT
+    assert store.delivery.state is DeliveryState.MERGED
+    assert store.calls == {}
+
+
 async def test_unknown_flow_tool_fails_closed() -> None:
     service = FlowToolService(
         cast(Store, cast(Any, ToolStore())),

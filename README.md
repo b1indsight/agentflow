@@ -46,6 +46,8 @@ FlowTool 的目标是把带 `flow` 标签的 GitHub issue 编排成
 
 ## 尚未完成
 
+- M3 F1 已实现原子合并检测、停止后续任务和迟到结果收尾，见 [#24 计划与实施记录](docs/plan/m3-merge-detection.md)。
+  原 worker 清理凭据/异常恢复增强、归档标签与评论分别等待 M3 F2/F3，完整真实闭环仍待验收。
 - 真实 GitHub App smoke，以及授权的一次性仓库中的完整 Issue→PR E2E 仍待执行；
   自动化测试使用外部服务替身，不代表真实 GitHub、Codex、bub 集成已验收。
 - bub adapter 已通过真实库加本机假模型端点的契约测试；真实 provider 语义 smoke 仍待执行。

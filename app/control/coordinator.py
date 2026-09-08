@@ -70,11 +70,17 @@ class JobCoordinator:
         self.tools = FlowToolService(store, github)
         self.results = ResultApplication(store, github, settings, self.plugins)
 
+    @staticmethod
+    def _retired(store: Store, flow: Flow, job: Job) -> bool:
+        delivery = store.get_delivery(flow.id)
+        return (flow.state in TERMINAL_STATES
+                or (delivery is not None and delivery.supersedes(job.kind)))
+
     async def prepare(self, job: Job) -> ExecutionTask | JobState:
         flow = self.store.get_flow(job.flow_id)
         if flow is None:
             return JobState.FAILED
-        if flow.state in TERMINAL_STATES:
+        if self._retired(self.store, flow, job):
             return JobState.DONE
 
         if job.kind is JobKind.INITIAL:
@@ -91,7 +97,7 @@ class JobCoordinator:
                 return JobState.FAILED
             with self.store.transaction() as tx:
                 fresh = tx.lock_workflow(flow.id)
-                if fresh is None or fresh.state in TERMINAL_STATES:
+                if fresh is None or self._retired(tx, fresh, job):
                     return JobState.DONE
                 attempt = tx.get_current_attempt(fresh)
                 if attempt is None:
@@ -111,7 +117,7 @@ class JobCoordinator:
                 return JobState.FAILED
             with self.store.transaction() as tx:
                 fresh = tx.lock_workflow(flow.id)
-                if fresh is None or fresh.state in TERMINAL_STATES:
+                if fresh is None or self._retired(tx, fresh, job):
                     return JobState.DONE
                 current_delivery = tx.get_delivery(flow.id)
                 if current_delivery is None:
@@ -157,7 +163,7 @@ class JobCoordinator:
             with self.store.transaction() as tx:
                 fresh = tx.lock_workflow(flow.id)
                 current = tx.lock_job(job.id)
-                if (fresh is None or current is None or fresh.state in TERMINAL_STATES
+                if (fresh is None or current is None or self._retired(tx, fresh, job)
                         or fresh.current_attempt_id != attempt.id):
                     return JobState.DONE
                 batch.threads = tx.reviews.freeze_threads(current, threads)
@@ -171,7 +177,7 @@ class JobCoordinator:
                 with self.store.transaction() as tx:
                     fresh = tx.lock_workflow(flow.id)
                     current = tx.lock_job(job.id)
-                    if (fresh is None or current is None or fresh.state in TERMINAL_STATES
+                    if (fresh is None or current is None or self._retired(tx, fresh, job)
                             or fresh.current_attempt_id != attempt.id):
                         return JobState.DONE
                     if job.assignment_token is not None and (
@@ -242,7 +248,7 @@ class JobCoordinator:
                 current = tx.lock_job(job.id)
                 binding = tx.get_flow_execution(flow.id)
                 latest = tx.get_delivery(flow.id)
-                if (fresh is None or current is None or fresh.state in TERMINAL_STATES
+                if (fresh is None or current is None or self._retired(tx, fresh, job)
                         or fresh.current_attempt_id != attempt.id):
                     return JobState.DONE
                 if (binding != execution or latest != delivery
@@ -284,6 +290,8 @@ class JobCoordinator:
         flow = self.store.get_flow(job.flow_id)
         if flow is None:
             raise ValueError(f"flow {job.flow_id} disappeared")
+        if self._retired(self.store, flow, job):
+            return
         attempt = self.store.get_attempt(task.attempt_id)
         if attempt is None:
             raise ValueError(f"attempt {task.attempt_id} disappeared")
@@ -294,7 +302,7 @@ class JobCoordinator:
             with self.store.transaction() as tx:
                 fresh = tx.lock_workflow(flow.id)
                 current = tx.lock_job(job.id)
-                if fresh is None or current is None or fresh.state in TERMINAL_STATES:
+                if fresh is None or current is None or self._retired(tx, fresh, job):
                     return
                 tx.reviews.started(current)
         elif job.kind is JobKind.INITIAL:

@@ -141,6 +141,8 @@ CREATE TABLE IF NOT EXISTS flow_deliveries (
 );
 ALTER TABLE flow_deliveries ADD COLUMN IF NOT EXISTS title TEXT;
 ALTER TABLE flow_deliveries ADD COLUMN IF NOT EXISTS body TEXT;
+ALTER TABLE flow_deliveries ADD COLUMN IF NOT EXISTS merged_at TIMESTAMPTZ;
+ALTER TABLE flow_deliveries ADD COLUMN IF NOT EXISTS merge_commit_sha TEXT;
 DROP INDEX IF EXISTS ux_flow_deliveries_pr;
 CREATE INDEX IF NOT EXISTS ix_flow_deliveries_pr
   ON flow_deliveries(pr_number) WHERE pr_number IS NOT NULL;
@@ -336,7 +338,7 @@ class Store:
             (worker_id,),
         ).fetchone()
 
-    def cancel_jobs(self, flow_id: int) -> None:
+    def cancel_jobs(self, flow_id: int, *, reason: str = "Flow cancelled") -> None:
         """Retire queued work; a running executor still owns its slot until result or lease expiry."""
         self.reviews.cancel(flow_id)
         with self.connection() as connection:
@@ -345,7 +347,7 @@ class Store:
                 " AND state=%s AND result_received_at IS NULL",
                 (
                     JobState.FAILED,
-                    "Flow cancelled",
+                    reason,
                     self._clock(),
                     flow_id,
                     JobState.QUEUED,
@@ -573,6 +575,7 @@ class Store:
             connection.execute(
                 "UPDATE flow_deliveries SET branch=%s, base_branch=%s, state=%s,"
                 " pr_number=%s, url=%s, head_sha=%s, title=%s, body=%s,"
+                " merged_at=%s, merge_commit_sha=%s,"
                 " version=%s, updated_at=%s"
                 " WHERE flow_id=%s",
                 (
@@ -584,6 +587,8 @@ class Store:
                     delivery.head_sha,
                     delivery.title,
                     delivery.body,
+                    delivery.merged_at,
+                    delivery.merge_commit_sha,
                     delivery.version,
                     delivery.updated_at,
                     delivery.flow_id,
@@ -817,6 +822,15 @@ class Store:
         """Claim work while retaining a Flow's worker slot between individual jobs."""
 
         now = self._clock()
+        # Share this predicate across fair-worker selection and both binding paths.
+        eligible = (
+            " AND ((j.kind='archive') = EXISTS (SELECT 1 FROM flow_deliveries d"
+            " WHERE d.flow_id=j.flow_id AND d.state='merged'))"
+            " AND (j.kind<>'archive' OR NOT EXISTS (SELECT 1 FROM jobs prior"
+            " WHERE prior.flow_id=j.flow_id AND prior.id<>j.id"
+            " AND (prior.state='running' OR (prior.result_received_at IS NOT NULL"
+            " AND prior.result_applied_at IS NULL))))"
+        )
         with self.connection() as connection, connection.transaction():
             candidate = connection.execute(
                 "SELECT w.worker_id FROM workers w WHERE w.status=%s"
@@ -827,7 +841,7 @@ class Store:
                 " LEFT JOIN flow_executions bound ON bound.flow_id=f.id"
                 " AND bound.released_at IS NULL WHERE j.state=%s"
                 " AND f.state=%s AND ((own.flow_id=j.flow_id) OR"
-                " (own.flow_id IS NULL AND bound.flow_id IS NULL)))"
+                " (own.flow_id IS NULL AND bound.flow_id IS NULL))" + eligible + ")"
                 " ORDER BY w.last_assigned_at NULLS FIRST, w.worker_id"
                 " FOR UPDATE OF w SKIP LOCKED LIMIT 1",
                 (WorkerStatus.ONLINE, JobState.QUEUED, FlowState.ACTIVE),
@@ -850,7 +864,7 @@ class Store:
                 row = connection.execute(
                     "SELECT j.id, j.flow_id, f.repo FROM jobs j JOIN flows f ON f.id=j.flow_id"
                     " LEFT JOIN flow_executions e ON e.flow_id=f.id AND e.released_at IS NULL"
-                    " WHERE j.state=%s AND f.state=%s AND e.flow_id IS NULL"
+                    " WHERE j.state=%s AND f.state=%s AND e.flow_id IS NULL" + eligible +
                     " ORDER BY j.created_at, j.id FOR NO KEY UPDATE OF f,j SKIP LOCKED LIMIT 1",
                     (JobState.QUEUED, FlowState.ACTIVE),
                 ).fetchone()
@@ -869,7 +883,7 @@ class Store:
             else:
                 row = connection.execute(
                     "SELECT j.id, j.flow_id, f.repo FROM jobs j JOIN flows f ON f.id=j.flow_id"
-                    " WHERE j.state=%s AND f.state=%s AND j.flow_id=%s"
+                    " WHERE j.state=%s AND f.state=%s AND j.flow_id=%s" + eligible +
                     " ORDER BY j.created_at, j.id FOR NO KEY UPDATE OF f,j SKIP LOCKED LIMIT 1",
                     (JobState.QUEUED, FlowState.ACTIVE, execution["flow_id"]),
                 ).fetchone()

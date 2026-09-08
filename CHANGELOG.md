@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- M3 F1：merged webhook 去重、合并时间/SHA、delivery version、旧工作退休和 ARCHIVE 入队
+  共用 PostgreSQL 事务；重复事件只推进一次，合法关联合并不受反馈 bot/触发 allowlist 过滤。
+- 合并后的任务准备、派发、flow.open_pr 和 GitHub 写入检查 delivery；迟到 INITIAL/REVISION
+  保留运行事实，旧结果不改回 OPEN、不将归档 Flow 置 FAILED、不派生修订或消费反馈。
+- 已合并 PR 的编码/review 重试在恢复 Flow 前被拒绝，避免终态 Flow 卡在 ACTIVE 并占用
+  Issue 的活跃名额；失败 ARCHIVE 仍可重试。
+- 已派发的 GitHub 操作只查询回执，不重发；ARCHIVE 等待旧执行和未应用结果收尾。保留协议 v7
+  和现有清理路径，可靠清理/worker 释放增强与归档状态回写分别由 M3 F2/F3 接续。
+
 - 文档状态核对（2026-09-08）：M2 F1–F4 已通过 PR #19–#22 合并，真实 GitHub App/Codex/bub
   验收仍待完成。同步架构、路线图、可视化和计划记录；合并与 CI 证据见 [M2 状态与待办](docs/architecture/README.md#m2-状态与待办)。
 - 记录尚未修复的 Medium：远端已观察 A→B 后，迟到的重复 A→B webhook 可能排队，在同秒 B→A

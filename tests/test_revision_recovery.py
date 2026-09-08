@@ -189,6 +189,32 @@ async def test_failed_revision_retry_retains_repo_and_consumes_a_new_cycle(store
     assert store.get_flow_execution(flow.id).worker_id == binding.worker_id
 
 
+async def test_failed_revision_retry_after_merge_keeps_flow_terminal(store, pending_revision):
+    from app.control.service import ControlService
+    from tests.test_merge import route_merge
+
+    flow, job, task, _, subject = pending_revision
+    assert store.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
+    subject.mark_started(job, task, "worker-a")
+    failed = verified_result(task, exit_code=65, failure_stage="push", failure_detail="not pushed")
+    assert accept(store, job, failed) == "pending"
+    assert await subject.results.apply(job.id) is JobState.FAILED
+    await route_merge(store, flow)
+    jobs = store.list_jobs(flow.id)
+    binding = store.get_flow_execution(flow.id)
+    delivery = store.get_delivery(flow.id)
+    assert delivery.state is DeliveryState.MERGED
+
+    with pytest.raises(ValueError, match="merged PR"):
+        ControlService(store).retry(flow)
+
+    assert store.get_flow(flow.id).state is FlowState.FAILED
+    assert store.get_active_flow(flow.repo, flow.issue_number) is None
+    assert store.list_jobs(flow.id) == jobs
+    assert store.get_flow_execution(flow.id) == binding
+    assert store.get_delivery(flow.id) == delivery
+
+
 async def test_protocol_upgrade_refuses_old_started_revision(store, pending_revision):
     _, job, task, _, _ = pending_revision
     assert store.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
@@ -198,9 +224,9 @@ async def test_protocol_upgrade_refuses_old_started_revision(store, pending_revi
         store.reviews.check_upgrade()
 
 
-@pytest.mark.parametrize("cancel", [False, True])
+@pytest.mark.parametrize("transition", ["retry", "cancel", "merge"])
 async def test_rejected_revision_notification_keeps_verified_result_recoverable(
-    store, pending_revision, monkeypatch, cancel,
+    store, pending_revision, monkeypatch, transition,
 ):
     from app.control.service import ControlService
     from app.result_models import EffectState, ResultPending
@@ -242,7 +268,18 @@ async def test_rejected_revision_notification_keeps_verified_result_recoverable(
         await restarted.results.apply(job.id)
     assert github.review_requests == []
     service = ControlService(store)
-    if cancel:
+    if transition == "merge":
+        from tests.test_merge import route_merge
+
+        await route_merge(store, flow)
+        assert await restarted.results.apply(job.id) is JobState.DONE
+        assert github.comments == comments and github.review_requests == []
+        assert store.get_delivery(flow.id).state is DeliveryState.MERGED
+        assert store.get_delivery(flow.id).head_sha == "baseline"
+        assert store.get_flow(flow.id).state is FlowState.ACTIVE
+        assert store.get_attempt(task.attempt_id).codex_session_id == "old-session"
+        return
+    if transition == "cancel":
         service.cancel(flow)
         with pytest.raises(ValueError, match="pending result"):
             service.retry(flow)
@@ -263,6 +300,40 @@ async def test_rejected_revision_notification_keeps_verified_result_recoverable(
     assert store.get_attempt(task.attempt_id).session_generation == 1
     assert store.reviews.pending(flow.id) == []
     assert store.assign_job("worker-a", "next-token", "epoch") is None
+
+
+@pytest.mark.parametrize("merge_at", ["verification", "commit"])
+async def test_merge_during_revision_application_preserves_delivery_and_session(
+    store, pending_revision, monkeypatch, merge_at,
+):
+    # Remote verification and effect I/O can each overlap a human merging the current PR.
+    from tests.test_merge import route_merge
+
+    flow, job, task, github, subject = pending_revision
+    result = verified_result(task, commit_sha="revision", remote_sha="revision")
+    github.sha = "revision"
+    assert accept(store, job, result) == "pending"
+    owner = github if merge_at == "verification" else subject.results.effects
+    method = "get_review_pull_request" if merge_at == "verification" else "run"
+    original = getattr(owner, method)
+
+    async def merge_after_read(*args, **kwargs):
+        value = await original(*args, **kwargs)
+        await route_merge(store, flow)
+        return value
+
+    monkeypatch.setattr(owner, method, merge_after_read)
+    assert await subject.results.apply(job.id) is JobState.DONE
+    assert await subject.results.apply(job.id) is JobState.DONE
+    assert store.get_delivery(flow.id).state is DeliveryState.MERGED
+    assert store.get_delivery(flow.id).head_sha == "baseline"
+    assert store.get_attempt(task.attempt_id).codex_session_id == "old-session"
+    assert store.get_flow_execution(flow.id).released_at is None
+    assert len(store.reviews.pending(flow.id)) == 1
+    with store.connection() as connection:
+        assert connection.execute(
+            "SELECT count(*) AS n FROM codex_runs WHERE source_job_id=%s", (job.id,),
+        ).fetchone()["n"] == 1
 
 
 @pytest.mark.parametrize(("endpoint", "kind", "status"), [

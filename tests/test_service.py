@@ -5,7 +5,9 @@ import pytest
 
 from app.control.service import ControlService
 from app.models import (
+    DeliveryState,
     Flow,
+    FlowDelivery,
     FlowState,
     Job,
     JobKind,
@@ -30,6 +32,7 @@ class RetryStore:
         )
         self.enqueued: list[JobKind] = []
         self.failed_job = failed_job
+        self.delivery: FlowDelivery | None = None
 
     @contextmanager
     def transaction(self):
@@ -48,6 +51,9 @@ class RetryStore:
 
     def has_pending_result(self, flow_id: int) -> bool:
         return False
+
+    def get_delivery(self, flow_id: int) -> FlowDelivery | None:
+        return self.delivery
 
     def get_active_flow(self, repo: str, issue_number: int) -> Flow | None:
         return (
@@ -100,6 +106,16 @@ def test_explicit_retry_requeues_the_failed_job_kind() -> None:
 
     assert store.flow.state is FlowState.ACTIVE
     assert store.enqueued == [JobKind.REVISION]
+
+
+def test_merged_delivery_still_allows_failed_archive_retry() -> None:
+    store = RetryStore(Job(id=3, flow_id=1, kind=JobKind.ARCHIVE, state=JobState.FAILED))
+    store.delivery = FlowDelivery(flow_id=1, branch="flow/1", state=DeliveryState.MERGED)
+
+    ControlService(cast(Store, cast(Any, store))).retry(store.flow)
+
+    assert store.flow.state is FlowState.ACTIVE
+    assert store.enqueued == [JobKind.ARCHIVE]
 
 
 def test_retry_rolls_back_state_when_enqueue_fails(monkeypatch: pytest.MonkeyPatch) -> None:

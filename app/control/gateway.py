@@ -13,7 +13,7 @@ from fastapi import WebSocketDisconnect
 from loguru import logger
 from pydantic import ValidationError
 
-from app.models import Job, JobState
+from app.models import FlowDelivery, Job, JobState
 from app.protocol import (
     Assignment,
     AssignmentSecret,
@@ -55,6 +55,8 @@ class WorkerSocket(Protocol):
 
 class GatewayStore(Protocol):
     def get_job(self, job_id: int) -> Job | None: ...
+
+    def get_delivery(self, flow_id: int) -> FlowDelivery | None: ...
 
     def worker_connected(
         self, worker_id: str, protocol_version: int, connection_epoch: str
@@ -184,6 +186,11 @@ class WorkerGateway:
                         job.id, worker_id, token, epoch,
                     ):
                         raise ProtocolViolation("assignment changed before dispatch")
+                    delivery = self.store.get_delivery(job.flow_id)
+                    if (not isinstance(prepared, JobState) and delivery is not None
+                            and delivery.supersedes(job.kind)):
+                        await self.coordinator.fail(job, "PR merged before task dispatch")
+                        return JobState.FAILED, None
                     return prepared, secret
         finally:
             preparing.cancel()

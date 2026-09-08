@@ -20,7 +20,7 @@ class FlowEventHandler(Protocol):
 
     def cancel(self, flow: Flow) -> None: ...
 
-    def on_merged(self, flow: Flow) -> None: ...
+    def on_merged(self, flow: Flow, delivery_id: str, payload: dict) -> None: ...
 
     def notify_jobs(self) -> None: ...
 
@@ -64,6 +64,10 @@ class EventRouter:
         self.settle = SettleScheduler(store, settings, service.notify_jobs)
 
     async def handle(self, event_type: str, delivery_id: str, payload: dict) -> None:
+        # Merge is a PR fact, including bot-authored events, and owns its atomic reservation.
+        if event_type == "pull_request":
+            self._on_pull_request(delivery_id, payload)
+            return
         sender = (payload.get("sender") or {}).get("login", "")
         if sender == self.settings.bot_login or (payload.get("sender") or {}).get("type") == "Bot":
             return
@@ -74,7 +78,6 @@ class EventRouter:
             return
         handler = {
             "issues": self._on_issues,
-            "pull_request": self._on_pull_request,
         }.get(event_type)
         if handler:
             await handler(payload)
@@ -163,10 +166,10 @@ class EventRouter:
         ):
             self.service.notify_jobs()
 
-    async def _on_pull_request(self, payload: dict) -> None:
+    def _on_pull_request(self, delivery_id: str, payload: dict) -> None:
         pull_request = payload.get("pull_request") or {}
-        if payload.get("action") != "closed" or not pull_request.get("merged"):
+        if payload.get("action") != "closed" or pull_request.get("merged") is not True:
             return
         flow = self.store.get_flow_by_pr(payload["repository"]["full_name"], pull_request["number"])
         if flow:
-            self.service.on_merged(flow)
+            self.service.on_merged(flow, delivery_id, payload)

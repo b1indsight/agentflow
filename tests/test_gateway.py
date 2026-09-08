@@ -6,7 +6,7 @@ import pytest
 from fastapi import WebSocketDisconnect
 
 from app.control.gateway import WorkerGateway
-from app.models import Job, JobKind, JobState, VcsKind
+from app.models import DeliveryState, FlowDelivery, Job, JobKind, JobState, VcsKind
 from app.protocol import (
     Assignment,
     ExecutionResult,
@@ -39,6 +39,9 @@ class RecordingStore:
 
     def get_job(self, job_id: int) -> Job | None:
         return self.job if self.job.id == job_id else None
+
+    def get_delivery(self, flow_id: int) -> FlowDelivery | None:
+        return None
 
     def worker_connected(self, worker_id: str, protocol_version: int, connection_epoch: str):
         self.presence[worker_id] = "online"
@@ -307,6 +310,24 @@ async def test_gateway_runs_one_remote_assignment_to_ack() -> None:
     assert store.job.result_applied_at is not None
     assert coordinator.started is True
     assert coordinator.results[0].session_id == "session-1"
+
+
+async def test_gateway_checks_merge_after_capability_preparation(monkeypatch):
+    # A merge may commit after prepare() while control is awaiting a push token.
+    store, coordinator = RecordingStore(), RecordingCoordinator()
+    delivery = FlowDelivery(flow_id=store.job.flow_id, branch="flow/3", state=DeliveryState.OPEN)
+    monkeypatch.setattr(store, "get_delivery", lambda _: delivery)
+
+    async def merged_secret(*args):
+        delivery.state = DeliveryState.MERGED
+
+    monkeypatch.setattr(coordinator, "assignment_secret", merged_secret)
+    gateway = WorkerGateway(store, coordinator, worker_tokens={"worker-1": "secret"})
+    store.worker_connected("worker-1", 7, "epoch")
+    job = store.assign_job("worker-1", "token", "epoch")
+    prepared, secret = await gateway._prepare_assignment(job, "worker-1", "token", "epoch")
+    assert prepared is JobState.FAILED and secret is None
+    assert coordinator.failures == ["PR merged before task dispatch"]
 
 
 async def test_gateway_does_not_dispatch_after_capability_fetch_loses_ownership():
