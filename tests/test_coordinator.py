@@ -368,6 +368,13 @@ class RecordingGitHub:
     ) -> None:
         self.labels.append(labels)
 
+    async def add_label(self, installation_id, repo, number, label):
+        self.labels.append([*await self.get_labels(installation_id, repo, number), label])
+
+    async def remove_label(self, installation_id, repo, number, label):
+        self.labels.append([item for item in await self.get_labels(installation_id, repo, number)
+                            if item.casefold() != label.casefold()])
+
     async def resolve_review_thread(self, installation_id: int, thread_id: str) -> None:
         self.threads = [t.model_copy(update={"resolved": True}) if t.thread_id == thread_id else t
                         for t in self.threads]
@@ -391,6 +398,7 @@ def coordinator(store: Store | MemoryStore, github: RecordingGitHub) -> JobCoord
         allowlist=["alice"],
         reviewers=["carol"],
         in_review_label="flow:in-review",
+        done_label="flow:done",
         confidence_threshold=0.6,
         max_revision_cycles=20,
     )

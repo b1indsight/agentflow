@@ -31,6 +31,7 @@ class ServeSettings(FlowToolSettings):
     allowlist: Annotated[list[str], NoDecode] = []
     reviewers: Annotated[list[str], NoDecode] = []
     in_review_label: str = "flow:in-review"
+    done_label: str = "flow:done"
 
     database_url: str
     worker_tokens: dict[str, SecretStr]
@@ -48,6 +49,21 @@ class ServeSettings(FlowToolSettings):
     worker_recovery_grace: float = Field(default=300.0, gt=0)
     worker_sweep_interval: float = Field(default=5.0, gt=0)
     worker_poll_interval: float = Field(default=2.0, gt=0)
+
+    @field_validator("trigger_label", "in_review_label", "done_label")
+    @classmethod
+    def _require_label(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("status and trigger labels must not be empty")
+        return value.strip()
+
+    @model_validator(mode="after")
+    def _validate_status_labels(self) -> ServeSettings:
+        labels = {label.casefold() for label in
+                  (self.trigger_label, self.in_review_label, self.done_label)}
+        if len(labels) != 3:
+            raise ValueError("trigger, in_review and done labels must be distinct")
+        return self
 
     @model_validator(mode="after")
     def _validate_recovery_timing(self) -> ServeSettings:

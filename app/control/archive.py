@@ -1,7 +1,10 @@
 """The archive command and receipt share one frozen ownership contract."""
 
-from app.models import DeliveryState, Flow, FlowState, Job, JobKind, JobState
+from datetime import UTC
+
+from app.models import DeliveryState, Flow, FlowDelivery, FlowState, Job, JobKind, JobState
 from app.protocol import ArchiveResult, ArchiveTask
+from app.result_models import CommentEffect, Effect, EffectState, LabelEffect
 from app.store import Store
 
 
@@ -40,6 +43,35 @@ def verify_archive(store: Store, flow: Flow, job: Job, result: ArchiveResult) ->
         raise ValueError("archive receipt does not match its frozen command")
 
 
+def archive_effects(
+    flow: Flow, delivery: FlowDelivery, *, done_label: str, in_review_label: str,
+) -> list[Effect]:
+    """Freeze deterministic completion messages and incremental labels for both targets."""
+    if (flow.installation_id is None or delivery.pr_number is None
+            or delivery.merge_commit_sha is None or delivery.merged_at is None):
+        raise ValueError("archive notification requires installation and persisted merge facts")
+    body = (
+        f"✅ Flow {flow.id} 已归档\n\n"
+        f"关联 Issue：{flow.repo}#{flow.issue_number}\n"
+        f"关联 PR：{flow.repo}#{delivery.pr_number}\n"
+        f"合并 SHA：`{delivery.merge_commit_sha}`\n"
+        f"合并时间：{delivery.merged_at.astimezone(UTC).isoformat()}\n\n"
+        "工作区清理已确认。"
+    )
+    effects: list[Effect] = []
+    for number in (flow.issue_number, delivery.pr_number):
+        key = f"archive:{delivery.pr_number}:{number}"
+        effects.extend([
+            LabelEffect(key=f"{key}:done", installation_id=flow.installation_id,
+                        repo=flow.repo, number=number, label=done_label, present=True),
+            LabelEffect(key=f"{key}:in-review", installation_id=flow.installation_id,
+                        repo=flow.repo, number=number, label=in_review_label, present=False),
+            CommentEffect(key=f"{key}:comment", installation_id=flow.installation_id,
+                          repo=flow.repo, number=number, body=body),
+        ])
+    return effects
+
+
 def archive_progress(store: Store, flow: Flow, jobs: list[Job]) -> str:
     """Derive operator-visible cleanup progress from existing jobs and frozen results."""
     archive = next((job for job in reversed(jobs) if job.kind is JobKind.ARCHIVE), None)
@@ -50,6 +82,15 @@ def archive_progress(store: Store, flow: Flow, jobs: list[Job]) -> str:
     if archive.result_received_at is not None and archive.result_applied_at is None:
         plan = store.results.get_plan(archive.id)
         if plan is not None and plan.archive is not None:
+            unfinished = [record for record in store.results.list_effects(archive.id)
+                          if record.state not in {EffectState.SUCCEEDED, EffectState.SKIPPED}]
+            if unfinished:
+                first = unfinished[0]
+                reason = first.last_error or first.state.value
+                retry = ("; use flow retry after resolving the error"
+                         if first.state is EffectState.FAILED else "")
+                return (f"cleaned; GitHub status pending ({len(unfinished)} effects): "
+                        f"{first.effect_key}: {reason}{retry}")
             return "cleaned; waiting for atomic completion"
         return "result received; waiting for verification"
     if archive.state is JobState.FAILED:

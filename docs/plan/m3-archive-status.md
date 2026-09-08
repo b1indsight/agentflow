@@ -1,16 +1,16 @@
 # M3 Feature 3/3：归档状态回写与闭环验收
 
-> 状态：计划草案待审批，未实施。需求核对：2026-09-08。
-> 规划基线：`main` / `81417c5b`；bookmark：`feat/m3-archive-status`。
+> 状态：已实施，483 项自动化通过；真实 M3 待验收。更新：2026-09-08。
+> 实施授权：用户“做 PR #26”；基线：`main` / `1571643c`；bookmark：`feat/m3-archive-status`。
 > 实现前置：[F1 #24](https://github.com/b1indsight/agentflow/pull/24)、[F2 工作区清理 #25](https://github.com/b1indsight/agentflow/pull/25)。
-> 计划 PR 以 main 为 base；前置 feature 实现并合并后更新本分支，在同一 PR 实施。
+> F1/F2 已合并，本分支已更新到 main，并在同一 PR #26 实施。
 
 ## 1. 目标与边界
 
 F1 可靠记录合并，F2 验证原 worker 已清理工作区。F3 让用户在关联 Issue 和 PR 看见完成
 标签及归档说明，回写失败可恢复，全部完成后才宣布整个 Flow 成功并释放 worker。
 
-当前 ARCHIVE 的 ResultPlan 没有 GitHub effects；已有评论查询/marker/receipt 机制可复用，
+实施前 ARCHIVE 的 ResultPlan 没有 GitHub effects；已有评论查询/marker/receipt 机制可复用，
 现有 `set_labels()` 会替换整组标签，不能直接用于保留用户标签的完成状态更新。
 
 本 feature 只新增必要的状态配置和增量标签能力，复用现有 ResultPlan、effect ledger、
@@ -86,3 +86,30 @@ Flow 在归档期间保持 ACTIVE，占用原 binding，现有同 Issue 活跃 F
 另覆盖一次重复 merge webhook、一次清理/回写边界重启和一次运行中修订与合并交错。
 记录具体 PR、delivery、数据库/worker 证据；未完成时明确“自动化通过，真实 M3 待验收”。
 M1/M2 的独立真实验收和同秒 webhook 重放缺陷继续保留在原状态文档。
+
+## 6. 实施与验收记录（2026-09-08）
+
+- `LabelEffect` 仅管理一个标签的存在状态，Issue/PR 各冻结 done、in-review 与评论三项 effect。
+  adapter 使用 add/remove；添加前核对仓库定义，remove 404 复查目标标签，保留其他标签。
+- 新增 `done_label`，三个 trigger/in-review/done 名称不能为空或重名（忽略大小写），避免归档
+  意外移除触发标签。评论固定记录 Flow、Issue/PR、合并 SHA/UTC 时间和清理确认；marker 不含 job/digest。
+- 准备、恢复和发送前核验 F2 身份；GitHub 永久拒绝保留清理凭据、原 job/attempt/binding。
+  `flow retry` 复用交付 effect 重试路径，仅重置明确失败的操作；未知评论只查 marker。
+- `flow show` 派生剩余回写数、首个未完成 effect 和错误；全部回写后沿用原子完成与 ACK。
+  成功后重放和升级前冻结的空 effects 计划均不补通知。插件异常在完成后隔离。
+
+自动化证据：
+
+- `FLOWTOOL_TEST_DATABASE_URL=postgresql://flowtool@127.0.0.1:55419/postgres uv run pytest -q --tb=short`：
+  **483 passed / 0 skipped**，包含真实 PostgreSQL、Git/jj 目录、worker 断线/ACK 重放和下一 Flow 复用。
+- 新增测试覆盖标签并发变化、已有标签、缺失定义/404、配置冲突、部分回写与永久拒绝、429/503、
+  响应丢失、评论落账前重启、真实连接池重建、未知评论、冻结配置和 marker、合并版本变化、历史计划及插件异常。
+- `uv run ruff check app tests`、`uv run mypy app tests` 通过（90 文件）；
+  `uv build --no-sources` 成功构建 sdist/wheel。
+  完整 pytest 仅保留既有 Starlette 弃用告警。
+
+真实验收：**自动化通过，真实 M3 待验收**。当前工作区没有 `.env`/App 私钥，环境也未配置
+App ID、数据库与 worker 凭据；尚未提供专用验收仓库或已连接原 worker。
+尚无真实 PR/delivery/worker 运行证据，未执行真实 GitHub 回写或人工合并。
+待提供专用环境后按第 5 节覆盖人工合并→归档→下一 Flow、重复 merge、边界重启及修订/合并交错；
+M1/M2 的真实验收待办与已知 webhook 问题保持原状态。

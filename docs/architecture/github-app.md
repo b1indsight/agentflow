@@ -58,6 +58,13 @@ payload 获取，不需要静态写入 `.env`。
 
 ## A.3 已实现能力与缺口
 
+归档前在目标仓库创建 `FLOWTOOL_DONE_LABEL`（默认 `flow:done`）和 `FLOWTOOL_IN_REVIEW_LABEL`
+（默认 `flow:in-review`）。两个状态标签与 trigger label 不得重名（忽略大小写）或为空。
+Issue/PR 标签和归档评论需要对应的 Issues/Pull requests write 权限；状态回写使用
+[Labels API](https://docs.github.com/en/rest/issues/labels) 的增量 add/remove，保留用户标签和 `flow`。
+缺少 label 定义或权限会保留清理凭据与未完成回写，不自动创建仓库 label；修正后通过
+`flow retry <id>` 继续原结果。仅标签缺失且目标仍可读取时把 remove 404 视为已完成。
+
 `GitHubApp` 启动时验证正 App ID 和可读非空私钥，按 Webhook 保存的 `installation_id` 构造 githubkit
 0.16 client。core 只接收类型化的 Issue、repository、remote ref、PR snapshot 和 secret-aware push
 capability，不接触 githubkit schema。
