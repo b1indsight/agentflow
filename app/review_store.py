@@ -420,6 +420,8 @@ class ReviewStore:
         if (flow is None or flow.current_attempt_id is None or delivery is None
                 or snapshot.repo != flow.repo or snapshot.pr_number != delivery.pr_number):
             raise ValueError("thread observation does not belong to active PR")
+        if delivery.state is DeliveryState.MERGED:
+            return
         changed = False
         frozen = {(f.item_id, f.version) for f in baseline if f.kind is ReviewItemKind.INLINE}
         with self.store.connection() as connection:

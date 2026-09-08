@@ -1,6 +1,6 @@
 # M3 Feature 1/3：合并检测与后续任务收敛
 
-> 状态：计划草案待审批，未实施。需求核对：2026-09-08。
+> 状态：已批准并实施，PR #24 待代码审查。用户于 2026-09-08 指示“做 #24”。
 > 基线：`main` / `81417c5b`；沿用 bookmark `feat/m3-merge-archive` 与 [PR #24](https://github.com/b1indsight/agentflow/pull/24)。
 
 ## 1. M3 拆分与复杂度边界
@@ -82,4 +82,27 @@ F1 保留当前健康 worker 上的 ARCHIVE 执行路径，不升级 wire protoc
 
 复用 router/service/coordinator/result recovery 测试，数据库原子性使用真实 PostgreSQL。
 实现完成运行 Ruff、Mypy、完整 pytest（设置 `FLOWTOOL_TEST_DATABASE_URL`，数据库用例不跳过）
-和 `uv build --no-sources`。本计划阶段仅检查文档差异与链接，未运行产品测试。
+和 `uv build --no-sources`。规划阶段仅检查文档；实施记录见下节。
+
+## 6. 实施记录（2026-09-08）
+
+沿用 jobs、binding 与结果账本实施，没有新增归档表、状态机、后台队列或 wire protocol。
+
+- `PullRequestMerge` 在预留事件前校验必需事实；service 同事务记录 event、merge 字段、version、
+  停止旧 queued 工作/活动批次及唯一 ARCHIVE。冲突事实回滚；终态 Flow 只更新事实。
+- 调度器的共享资格条件阻止 merged Flow 的编码/review 工作和有旧运行/未应用结果的 ARCHIVE。
+  coordinator 在远端读取后检查合并状态，gateway 在 capability 准备后、实际派发前再次检查。
+- ResultApplication 对合并前后创建的计划都收尾迟到结果：原计划/回执留档，仅记录执行事实，
+  不改 session、delivery head、生命周期或反馈消费，也不触发旧 review/PR-opened hooks。
+- effects 停掉未发送操作，保留尚未退出的 sender；已发评论通过原 marker 找回，其他已发操作
+  只查询 PR 身份/当前远端状态。未知评论结果仍保持 pending，阻止归档越过未确认结果。
+- 补齐直接相关的 `flow.open_pr` 入口：合并后旧 INITIAL 再调用工具会被拒绝，不能改回 OPENING。
+  线程观察在合并后不再恢复反馈 buffer。`on_merged` 保持提交后尽力调用。
+
+先补测试复现原子去重、身份过滤和结果竞态缺陷，再实施。完整 pytest **399 passed / 0 skipped**
+（真实 PostgreSQL，Git/jj 临时仓库；GitHub/模型用替身）；Ruff、Mypy、`uv build --no-sources`
+和差异空白检查均通过。独立代码审查结果见 PR 验证记录。
+
+F2 的清理凭据、异常恢复中的原资源保留以及 F3 的标签/评论尚未实现。当前只验收健康 worker
+的既有 archive 路径；started worker 丢失、grace 到期和历史未核验清理仍按既有边界处理。
+真实 GitHub App/Codex/bub 的 M1/M2 验收及完整真实 M3 验收仍待完成。

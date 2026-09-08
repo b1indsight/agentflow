@@ -82,6 +82,8 @@ class FlowToolService:
                 FlowToolErrorKind.CONFLICT,
                 "Flow delivery is not prepared",
             )
+        if delivery.state is DeliveryState.MERGED:
+            raise FlowToolRejected(FlowToolErrorKind.CONFLICT, "PR merged; flow.open_pr is retired")
         if request.branch != delivery.branch:
             raise FlowToolRejected(
                 FlowToolErrorKind.CONFLICT,

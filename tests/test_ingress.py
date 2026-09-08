@@ -63,7 +63,7 @@ class RoutingService:
         flow.state = FlowState.CANCELLED
         self.store.update_flow(flow)
 
-    def on_merged(self, flow: Flow) -> None:
+    def on_merged(self, flow: Flow, delivery_id: str, payload: dict) -> None:
         flow.state = FlowState.SUCCEEDED
         self.store.update_flow(flow)
 

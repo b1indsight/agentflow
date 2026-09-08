@@ -57,7 +57,14 @@ class ResultEffects:
                 if flow.current_attempt_id != plan.attempt_id:
                     tx.results.skip_remaining(plan.job_id, "result attempt is no longer current")
                     return "result attempt is no longer current"
-                if plan.revision is not None and plan.resolution_version == 0:
+                job = tx.get_job(plan.job_id)
+                if job is None:
+                    raise ValueError("result job disappeared")
+                delivery = tx.get_delivery(plan.flow_id)
+                retired = delivery is not None and delivery.supersedes(job.kind)
+                if retired:
+                    tx.results.retire_for_merge(plan.job_id)
+                if not retired and plan.revision is not None and plan.resolution_version == 0:
                     raise ResultPending("pre-upgrade revision effects require manual reconciliation")
             records = self.store.results.list_effects(plan.job_id)
             unfinished = [
@@ -78,7 +85,8 @@ class ResultEffects:
                 raise ResultPending("result effects are awaiting retry or reconciliation")
             uncertain = record.dispatched_at is not None
             try:
-                receipt = await self._execute(plan, record, records)
+                receipt = (await self._recover_merged(plan, record, records) if retired
+                           else await self._execute(plan, record, records))
             except _PendingReviewFeedback as exc:
                 self.store.results.finish(record, EffectState.SUCCEEDED,
                                           receipt=EffectReceipt(pending_reason=str(exc)))
@@ -144,6 +152,9 @@ class ResultEffects:
                 or flow.current_attempt_id != plan.attempt_id
             ):
                 raise ResultPending("Flow changed before GitHub dispatch")
+            delivery = tx.get_delivery(flow.id)
+            if delivery is not None and delivery.supersedes(job.kind):
+                raise FlowToolRejected(FlowToolErrorKind.CONFLICT, "PR merged before GitHub dispatch")
             if plan.batch_id is not None:
                 batch = tx.reviews.for_job(job)
                 delivery = tx.get_delivery(flow.id)
@@ -166,6 +177,45 @@ class ResultEffects:
                     raise _PendingReviewFeedback("出现新反馈，暂停 re-review")
             tx.results.mark_dispatched(record)
 
+    @staticmethod
+    def _comment_marker(plan: ResultPlan, effect: CommentEffect | ThreadReplyEffect) -> str:
+        digest = hashlib.sha256(f"{plan.job_id}:{plan.digest}:{effect.key}".encode()).hexdigest()
+        return f"<!-- flowtool:effect:{digest} -->"
+
+    async def _recover_merged(
+        self, plan: ResultPlan, record: EffectRecord, records: list[EffectRecord],
+    ) -> EffectReceipt:
+        """Observe already dispatched writes after merge; never reissue a mutation."""
+        effect = record.payload
+        installation, repo = effect.installation_id, effect.repo
+        if isinstance(effect, (CommentEffect, ThreadReplyEffect)):
+            # This path already reconciles by marker and forbids resending a dispatched comment.
+            return await self._execute(plan, record, records)
+        if isinstance(effect, PullRequestEffect):
+            found = await self.github.find_pull_request_by_head(installation, repo, effect.branch)
+            delivery = self.store.get_delivery(plan.flow_id)
+            if (found is None or delivery is None or found.number != delivery.pr_number
+                    or found.head_branch != effect.branch or found.base_branch != effect.base_branch):
+                raise ResultPending("merged PR creation awaits its remote identity")
+            return EffectReceipt(pull_request=found)
+        if isinstance(effect, ResolveEffect):
+            resolved = await self.github.review_thread_resolved(installation, effect.thread_id)
+            return EffectReceipt(thread_id=effect.thread_id, remote_resolved=resolved,
+                                 pending_reason="PR merged; observed thread without resolving")
+        number = effect.number
+        if number == "created_pr":
+            created = [r.receipt.pull_request for r in records
+                       if r.receipt is not None and r.receipt.pull_request is not None]
+            if len(created) != 1:
+                raise ResultPending("merged PR notification awaits its creation receipt")
+            number = created[0].number
+        if isinstance(effect, LabelsEffect):
+            await self.github.get_labels(installation, repo, number)
+        else:
+            assert record.dispatched_at is not None
+            await self.github.get_reviewers(installation, repo, number, since=record.dispatched_at)
+        return EffectReceipt(pending_reason="PR merged; observed notification without reissuing it")
+
     async def _execute(
         self,
         plan: ResultPlan,
@@ -175,10 +225,7 @@ class ResultEffects:
         effect = record.payload
         installation, repo = effect.installation_id, effect.repo
         if isinstance(effect, (CommentEffect, ThreadReplyEffect)):
-            digest = hashlib.sha256(
-                f"{plan.job_id}:{plan.digest}:{effect.key}".encode()
-            ).hexdigest()
-            marker = f"<!-- flowtool:effect:{digest} -->"
+            marker = self._comment_marker(plan, effect)
             if isinstance(effect, ThreadReplyEffect):
                 found = await self.github.find_review_reply(
                     installation, repo, effect.number, effect.thread_id, marker,

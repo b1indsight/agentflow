@@ -7,7 +7,7 @@
 
 本节包含待审批及已实现、仍有验收待办的计划。M2 F1–F4 已全部合并；状态、证据和开放问题见 [M2 状态与待办](../architecture/README.md#m2-状态与待办)。
 
-- [`m3-merge-detection.md`](m3-merge-detection.md) — M3 F1：合并检测与后续任务收敛，计划草案待审批 [#24](https://github.com/b1indsight/agentflow/pull/24)；M3 按 F1 合并、F2 清理、F3 状态回写拆分实施；
+- [`m3-merge-detection.md`](m3-merge-detection.md) — M3 F1：合并检测与后续任务收敛，已实施、待代码审查 [#24](https://github.com/b1indsight/agentflow/pull/24)；M3 按 F1 合并、F2 清理、F3 状态回写拆分实施；
 - [M3 F2 计划 PR #25](https://github.com/b1indsight/agentflow/pull/25) — 工作区清理与 worker 释放，待审批；依赖 F1，计划文档在该独立分支；
 - [M3 F3 计划 PR #26](https://github.com/b1indsight/agentflow/pull/26) — 归档状态回写与闭环验收，待审批；依赖 F2，计划文档在该独立分支；
 - [`m2-feedback-batches.md`](m2-feedback-batches.md) — M2 F1：持久反馈批次与 settle，已实现并合并 [#19](https://github.com/b1indsight/agentflow/pull/19)；

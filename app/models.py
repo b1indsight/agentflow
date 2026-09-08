@@ -135,11 +135,17 @@ class FlowDelivery(BaseModel):
     pr_number: int | None = None
     url: str | None = None
     head_sha: str | None = None
+    merged_at: datetime | None = None
+    merge_commit_sha: str | None = None
     title: str | None = None
     body: str | None = None
     version: int = 0
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
+
+    def supersedes(self, kind: JobKind) -> bool:
+        """A merged delivery retires coding/review work while still requiring archive."""
+        return self.state is DeliveryState.MERGED and kind is not JobKind.ARCHIVE
 
 
 class FlowToolCall(BaseModel):

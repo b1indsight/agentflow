@@ -120,6 +120,10 @@ class ResultApplication:
                     and flow.state not in TERMINAL_STATES
                     and flow.current_attempt_id == plan.attempt_id
                     and current.result_applied_at is None
+                    and not (
+                        (delivery := tx.get_delivery(plan.flow_id)) is not None
+                        and delivery.supersedes(current.kind)
+                    )
                 )
                 if pending:
                     tx.set_job_error(job_id, failure)
@@ -134,6 +138,12 @@ class ResultApplication:
                 return current.state
             if current.result_digest != plan.digest:
                 raise ValueError("result digest changed before commit")
+            delivery = tx.get_delivery(flow.id)
+            retired = delivery is not None and delivery.supersedes(current.kind)
+            if retired:
+                # Preserve the frozen plan/receipts as history; only execution facts survive merge.
+                plan = self._retired_plan(current, plan.attempt_id)
+                failure = None
             state = JobState.FAILED if failure else plan.state
             if flow.state not in TERMINAL_STATES:
                 if flow.current_attempt_id != plan.attempt_id:
@@ -146,7 +156,8 @@ class ResultApplication:
                 tx.results.skip_remaining(job_id, failure or plan.error or "result failed")
             if not tx.complete_persisted_result(job_id, state):
                 raise ResultPending("result has not reached its atomic completion boundary")
-        self._after_commit(flow, current, plan, state)
+        if not retired:
+            self._after_commit(flow, current, plan, state)
         return state
 
     async def _check_revision(self, job: Job) -> str | None:
@@ -157,6 +168,9 @@ class ResultApplication:
             return None
         flow = self.store.get_flow(job.flow_id)
         if flow is None or flow.state in TERMINAL_STATES:
+            return None
+        delivery = self.store.get_delivery(flow.id)
+        if delivery is not None and delivery.supersedes(job.kind):
             return None
         message = parse_worker_message(json.dumps(job.result_payload))
         if not isinstance(message, Succeeded) or not isinstance(message.result, RevisionResult):
@@ -203,10 +217,13 @@ class ResultApplication:
         batch = tx.reviews.for_job(job) if job.kind in {JobKind.TRIAGE, JobKind.REVISION} else None
         if batch is not None:
             base = base.model_copy(update={"attempt_id": batch.attempt_id, "batch_id": batch.id})
-            if (batch.attempt_id != flow.current_attempt_id
-                    or batch.state not in {BatchState.READY, BatchState.PROCESSING}):
-                return base.model_copy(update={"state": JobState.FAILED,
-                    "error": "review batch or attempt is no longer current"})
+        delivery = tx.get_delivery(flow.id)
+        if delivery is not None and delivery.supersedes(job.kind):
+            return self._retired_plan(job, base.attempt_id)
+        if batch is not None and (batch.attempt_id != flow.current_attempt_id
+                or batch.state not in {BatchState.READY, BatchState.PROCESSING}):
+            return base.model_copy(update={"state": JobState.FAILED,
+                "error": "review batch or attempt is no longer current"})
         if isinstance(message, Failed):
             return self._failure(tx, flow, base, message.error)
         result = message.result
@@ -418,6 +435,30 @@ class ResultApplication:
             return base.model_copy(update={"flow_state": FlowState.SUCCEEDED})
         raise TypeError(f"unsupported result: {type(result).__name__}")
 
+    @staticmethod
+    def _retired_plan(job: Job, attempt_id: int | None) -> ResultPlan:
+        """A merge supersedes the result's domain intent, but not its immutable execution record."""
+        message = parse_worker_message(json.dumps(job.result_payload))
+        run = None
+        state = JobState.DONE
+        reason = "PR merged; late result retained without applying coding/review changes"
+        if isinstance(message, Failed):
+            state, reason = JobState.FAILED, f"{reason}: {message.error}"
+        elif isinstance(message, Succeeded):
+            result = message.result
+            if result.kind != job.kind.value:
+                raise ValueError("result kind does not match persisted job")
+            if isinstance(result, (InitialResult, RevisionResult)):
+                run = RunUpdate(kind=result.kind, session_id=result.session_id,
+                                exit_code=result.exit_code)
+                if result.exit_code != 0:
+                    state = JobState.FAILED
+        else:
+            raise TypeError("persisted inbox message is not terminal")
+        assert job.result_digest is not None
+        return ResultPlan(job_id=job.id, flow_id=job.flow_id, digest=job.result_digest,
+                          attempt_id=attempt_id, state=state, error=reason, run=run)
+
     def _commit(
         self,
         tx: Store,
@@ -427,13 +468,15 @@ class ResultApplication:
         failure: str | None,
     ) -> None:
         """Commit local consequences under the same connection as the final result marker."""
+        delivery = tx.get_delivery(flow.id)
+        retired = delivery is not None and delivery.supersedes(job.kind)
         if plan.run is not None and plan.attempt_id is not None:
             attempt = tx.get_attempt(plan.attempt_id)
             if attempt is None:
                 raise ValueError("result attempt disappeared")
-            if plan.run.kind == "initial" or (
+            if not retired and (plan.run.kind == "initial" or (
                 plan.run.session_id is not None and not failure and plan.state is JobState.DONE
-            ):
+            )):
                 attempt.codex_session_id = plan.run.session_id
                 if plan.revision is not None:
                     attempt.session_generation = plan.revision.session_generation
@@ -448,6 +491,8 @@ class ResultApplication:
                 plan.run.exit_code,
                 source_job_id=job.id,
             )
+        if retired:
+            return
         state = FlowState.FAILED if failure else plan.flow_state
         if state is not None:
             flow.state = state

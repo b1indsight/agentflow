@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.control.gateway import WorkerGateway
-from app.models import Job, JobKind, JobState, VcsKind, VcsOutcome
+from app.models import FlowDelivery, Job, JobKind, JobState, VcsKind, VcsOutcome
 from app.protocol import (
     ExecutionResult,
     ExecutionTask,
@@ -61,6 +61,9 @@ class RemoteStore:
 
     def get_job(self, job_id: int) -> Job | None:
         return self.job if self.job.id == job_id else None
+
+    def get_delivery(self, flow_id: int) -> FlowDelivery | None:
+        return None
 
     def worker_connected(self, worker_id: str, protocol_version: int, connection_epoch: str):
         return SimpleNamespace(current_job_id=None)
