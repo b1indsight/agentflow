@@ -16,7 +16,7 @@ async def test_add_label_requires_existing_definition_and_uses_incremental_api(t
     client = SimpleNamespace(rest=SimpleNamespace(issues=SimpleNamespace(
         async_get_label=get, async_add_labels=add,
     )))
-    monkeypatch.setattr(github, "_installation_client", lambda _: client)
+    monkeypatch.setattr(github, "_installation_client", lambda _, **kwargs: client)
     await github.add_label(42, "octo/repo", 7, "flow:done")
     assert get.calls == [(("octo", "repo", "flow:done"), {})]
     assert add.calls == [(("octo", "repo", 7), {"labels": ["flow:done"]})]
@@ -44,7 +44,7 @@ async def test_remove_label_404_requires_positive_target_lookup(tmp_path, monkey
     client = SimpleNamespace(rest=SimpleNamespace(issues=SimpleNamespace(
         async_remove_label=missing, async_list_labels_on_issue=listed,
     )))
-    monkeypatch.setattr(github, "_installation_client", lambda _: client)
+    monkeypatch.setattr(github, "_installation_client", lambda _, **kwargs: client)
     # A concurrent removal is success; a hidden repo or a still-present label is not.
     if remaining == []:
         await github.remove_label(42, "octo/repo", 7, "flow:in-review")

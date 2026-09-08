@@ -1,9 +1,9 @@
 # M3 Feature 3/3：归档状态回写与闭环验收
 
-> 状态：已实施，483 项自动化通过；真实 M3 待验收。更新：2026-09-08。
+> 状态：F3 已合并，审查修复后 502 项自动化通过；真实 M3 待验收。更新：2026-09-08。
 > 实施授权：用户“做 PR #26”；基线：`main` / `1571643c`；bookmark：`feat/m3-archive-status`。
 > 实现前置：[F1 #24](https://github.com/b1indsight/agentflow/pull/24)、[F2 工作区清理 #25](https://github.com/b1indsight/agentflow/pull/25)。
-> F1/F2 已合并，本分支已更新到 main，并在同一 PR #26 实施。
+> F1/F2/F3 已合并；F3 在同一 PR #26 完成计划与实施，后续审查修复见第 7 节。
 
 ## 1. 目标与边界
 
@@ -113,3 +113,30 @@ App ID、数据库与 worker 凭据；尚未提供专用验收仓库或已连接
 尚无真实 PR/delivery/worker 运行证据，未执行真实 GitHub 回写或人工合并。
 待提供专用环境后按第 5 节覆盖人工合并→归档→下一 Flow、重复 merge、边界重启及修订/合并交错；
 M1/M2 的真实验收待办与已知 webhook 问题保持原状态。
+
+## 7. 审查修复（2026-09-08）
+
+用户授权修复本次审查中除真实工具辅助验收之外的问题。#26 已合并，修复基于
+`main` / `c0d70988`，使用后续修复 bookmark `fix/m3-archive-recovery`：
+
+- 本地认证在评论发送前失败时，adapter 保留确认未发送的证据；修复认证后可通过原结果
+  重试完成回写。已存在不确定发送记录时，后续查询的认证失败不得清除原发送证据。
+- 将归档重试的身份与计划资格校验归回 control service，result store 只查询待处理计划
+  和重置明确失败的 effects，不再反向依赖 control。
+- 归档的旧 executor/未应用结果检查改用数据库存在性查询，保留派发、恢复、发送与提交
+  各边界的校验，避免反复反序列化完整 job 历史。
+
+新增回归保留真实 githubkit App 认证流程和 JWT 签名，仅模拟 transport：覆盖无效私钥、获取
+installation token 返回 401/503，先验证旧实现会阻塞，再验证沿用原结果恢复。adapter 识别 SDK
+的 RequestError 包装、本地认证/JWT 错误与 token 获取的 HTTP 失败；普通传输故障继续保留
+结果不确定性。已有不确定写入后的查询失败不会清除原发送证据。
+由各 mutation API 显式关闭 SDK 自动重试，读取（含 GraphQL）保留有限重试，状态写入由持久恢复接管。
+另覆盖评论先返回 503、SDK 内部
+重试前 token 过期且获取失败的交错，确保已有发送证据不会被后一次认证错误清除。
+App client 的 push token 签发保留有限重试，覆盖 503→201；线程 resolve 成功后的查询认证失败
+保持待确认，恢复后继续 re-review，并验证 429 的 Retry-After 等待时间。
+补充 GraphQL 发现 503→200 和缺少 Retry-After 的主限流回归，持久等待继承 SDK 计算的 reset deadline。
+标签定义的 GET 预检保留 SDK 重试；回归覆盖预检 503→200 后写入返回 503，确认写入只发送一次。
+覆盖已有不确定发送记录、重试身份校验及查询边界；完整 PostgreSQL pytest：
+**502 passed / 0 skipped**。Ruff、Mypy（90 文件）与差异格式检查通过。
+真实 GitHub App/原 worker 闭环仍按第 5 节保留待验收。

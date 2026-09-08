@@ -269,7 +269,7 @@ async def test_pull_request_primitives_map_snapshots_and_skip_empty_reviewers(
         )
     )
     github = GitHubApp(settings(tmp_path))
-    monkeypatch.setattr(github, "_installation_client", lambda installation_id: client)
+    monkeypatch.setattr(github, "_installation_client", lambda installation_id, **kwargs: client)
 
     found = await github.find_pull_request_by_head(42, "octo/repo", "topic")
     opened = await github.open_pull_request(42, "octo/repo", "new-topic", "trunk", "Title", "Body")
@@ -335,7 +335,7 @@ async def test_comment_recovery_checks_author_and_paginates(tmp_path, monkeypatc
         )
     )
     github = GitHubApp(settings(tmp_path))
-    monkeypatch.setattr(github, "_installation_client", lambda _: client)
+    monkeypatch.setattr(github, "_installation_client", lambda _, **kwargs: client)
     assert await github.find_comment(42, "octo/repo", 10, marker) == 700
     assert pages == [1, 2]
     assert await github.comment(42, "octo/repo", 10, "Another comment") == 701

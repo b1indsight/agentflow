@@ -9,6 +9,33 @@ from app.models import DeliveryState, FlowState, JobKind, JobState, ReviewItem, 
 from app.store import Store
 
 
+@pytest.mark.parametrize("state,received,applied,blocked", [
+    (JobState.QUEUED, False, False, False),
+    (JobState.RUNNING, False, False, True),
+    (JobState.DONE, False, False, False),
+    (JobState.FAILED, True, False, True),
+    (JobState.DONE, True, True, False),
+])
+def test_unsettled_jobs_distinguishes_executors_and_pending_results(
+    store, state, received, applied, blocked,
+):
+    flow = store.create_flow("owner/repo", 17, installation_id=42)
+    archive = store.enqueue_job(flow.id, JobKind.ARCHIVE)
+    prior = store.enqueue_job(flow.id, JobKind.REVISION)
+    other = store.create_flow("owner/repo", 18, installation_id=42)
+    unrelated = store.enqueue_job(other.id, JobKind.INITIAL)
+    now = store.now()
+    with store.connection() as connection:
+        connection.execute("UPDATE jobs SET state=%s WHERE id=ANY(%s)",
+                           (JobState.RUNNING, [archive.id, unrelated.id]))
+        connection.execute(
+            "UPDATE jobs SET state=%s,result_received_at=%s,result_applied_at=%s WHERE id=%s",
+            (state, now if received else None, now if applied else None, prior.id),
+        )
+    # Cleanup must wait for every earlier executor/result, but not itself or another Flow.
+    assert store.has_unsettled_jobs(flow.id, excluding_job_id=archive.id) is blocked
+
+
 def test_only_one_active_flow_exists_per_issue(store: Store) -> None:
     flow = store.create_flow("owner/repo", 7, installation_id=11)
 

@@ -20,9 +20,7 @@ def archive_task(store: Store, flow: Flow, job: Job) -> ArchiveTask:
             or execution.worker_id != job.assigned_worker_id
             or execution.repo_identity != f"{execution.worker_id}:{flow.repo}"):
         raise ValueError("archive requires the original worker and repository binding")
-    if any(prior.id != job.id and (prior.state is JobState.RUNNING or (
-        prior.result_received_at is not None and prior.result_applied_at is None
-    )) for prior in store.list_jobs(flow.id)):
+    if store.has_unsettled_jobs(flow.id, excluding_job_id=job.id):
         raise ValueError("archive is blocked by an executor or unapplied result")
     task = ArchiveTask(
         flow_id=flow.id, attempt_id=flow.current_attempt_id, repo=flow.repo,

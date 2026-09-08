@@ -98,20 +98,23 @@ class ResultEffects:
                 self.store.results.finish(record, EffectState.SUCCEEDED,
                                           receipt=EffectReceipt(pending_reason=str(exc)))
             except ResultPending as exc:
+                cause = exc.__cause__ if isinstance(exc.__cause__, GitHubAdapterError) else None
                 self.store.results.finish(
                     record,
                     EffectState.UNCERTAIN,
                     error=str(exc),
-                    delay=self._delay(record),
+                    delay=self._delay(record, cause),
                 )
                 raise
             except (GitHubAdapterError, FlowToolRejected) as exc:
                 # An error while querying an earlier uncertain write cannot prove it was unsent.
                 definite_rejection = (
                     isinstance(exc, GitHubAdapterError)
-                    and exc.status_code is not None
-                    and 400 <= exc.status_code < 500
-                    and exc.status_code not in {408}
+                    and (exc.definitely_unsent or (
+                        exc.status_code is not None
+                        and 400 <= exc.status_code < 500
+                        and exc.status_code not in {408}
+                    ))
                 )
                 ambiguous = isinstance(exc, GitHubAdapterError) and (
                     uncertain or (record.dispatched_at is not None and not definite_rejection)
