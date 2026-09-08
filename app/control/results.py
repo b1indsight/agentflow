@@ -432,7 +432,13 @@ class ResultApplication:
                 }
             )
         if isinstance(result, ArchiveResult):
-            return base.model_copy(update={"flow_state": FlowState.SUCCEEDED})
+            from app.control.archive import verify_archive
+
+            try:
+                verify_archive(tx, flow, job, result)
+            except ValueError as error:
+                return self._failure(tx, flow, base, str(error))
+            return base.model_copy(update={"flow_state": FlowState.SUCCEEDED, "archive": result})
         raise TypeError(f"unsupported result: {type(result).__name__}")
 
     @staticmethod
@@ -493,6 +499,17 @@ class ResultApplication:
             )
         if retired:
             return
+        if job.kind is JobKind.ARCHIVE:
+            if failure or plan.state is JobState.FAILED:
+                return
+            from app.control.archive import verify_archive
+
+            if plan.archive is None:
+                raise ResultPending("archive result requires manual reconciliation after upgrade")
+            try:
+                verify_archive(tx, flow, job, plan.archive)
+            except ValueError as error:
+                raise ResultPending(str(error)) from error
         state = FlowState.FAILED if failure else plan.flow_state
         if state is not None:
             flow.state = state
@@ -557,6 +574,8 @@ class ResultApplication:
 
     def _failure(self, tx: Store, flow: Flow, base: ResultPlan, reason: str) -> ResultPlan:
         delivery = tx.get_delivery(flow.id)
+        if delivery is not None and delivery.state is DeliveryState.MERGED:
+            return base.model_copy(update={"state": JobState.FAILED, "error": reason})
         number = delivery.pr_number if delivery and delivery.pr_number else flow.issue_number
         return base.model_copy(
             update={

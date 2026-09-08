@@ -37,8 +37,6 @@ from app.models import (
 )
 from app.ports import GitHubClient
 from app.protocol import (
-    ArchiveResult,
-    ArchiveTask,
     ExecutionResult,
     FlowToolRequest,
     InitialResult,
@@ -687,7 +685,7 @@ async def test_result_kind_must_match_persisted_job_kind() -> None:
 
 
 @pytest.mark.asyncio
-async def test_answer_and_archive_side_effects_are_applied_by_control() -> None:
+async def test_answer_side_effects_are_applied_by_control() -> None:
     store = MemoryStore()
     store.attempt = Attempt(
         id=1,
@@ -714,19 +712,3 @@ async def test_answer_and_archive_side_effects_are_applied_by_control() -> None:
     )
     assert answer_state is JobState.DONE
     assert len(github.comments) == 1 and github.comments[0].startswith("Because it is bounded.")
-
-    store.flow.state = FlowState.ACTIVE
-    store.delivery = FlowDelivery(
-        flow_id=1,
-        branch="flow/1",
-        base_branch="trunk",
-        state=DeliveryState.MERGED,
-        pr_number=17,
-    )
-    archive_job = Job(id=9, flow_id=1, kind=JobKind.ARCHIVE, state=JobState.RUNNING)
-    archive_task = await prepare(subject, archive_job)
-    assert isinstance(archive_task, ArchiveTask)
-    archive_state = await apply_result(subject, archive_job, ArchiveResult())
-
-    assert archive_state is JobState.DONE
-    assert store.flow.state is FlowState.SUCCEEDED

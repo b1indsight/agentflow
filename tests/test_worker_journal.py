@@ -62,7 +62,8 @@ def test_journal_persists_terminal_result_until_ack(tmp_path: Path) -> None:
     assert recovered.terminal == terminal
 
     journal.acknowledge(assignment.job_id, JobState.DONE)
-    assert journal.load() is None
+    retained = journal.load()
+    assert retained is not None and retained.acknowledged
 
 
 def test_corrupt_journal_is_preserved_for_diagnosis(tmp_path: Path) -> None:

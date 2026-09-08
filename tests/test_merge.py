@@ -11,7 +11,7 @@ from pydantic import ValidationError
 from app.control.router import EventRouter
 from app.control.service import ControlService
 from app.models import DeliveryState, Flow, FlowState, JobKind, JobState
-from app.protocol import ArchiveResult, Succeeded, terminal_digest
+from app.protocol import ArchiveResult, ArchiveTask, Succeeded, terminal_digest
 from app.review_models import BatchState
 from app.store import Store
 from tests.test_coordinator import RecordingGitHub, coordinator
@@ -144,8 +144,12 @@ async def test_merge_retires_review_but_waits_for_running_result(store):
     assert archive is not None and archive.kind is JobKind.ARCHIVE
     assert sum(j.kind is JobKind.REVISION for j in store.list_jobs(flow.id)) == 0
     assert store.get_flow_execution(flow.id).released_at is None
+    task = await subject.prepare(archive)
+    assert isinstance(task, ArchiveTask)
+    assert store.start_assignment(archive.id, task.attempt_id, "worker-a", "archive-token", "epoch-a")
     message = Succeeded(job_id=archive.id, assignment_token="archive-token",
-                        connection_epoch="epoch-a", result=ArchiveResult())
+                        connection_epoch="epoch-a",
+                        result=ArchiveResult(**task.model_dump(), cleanup="removed"))
     assert store.record_assignment_result(
         archive.id, "worker-a", "archive-token", "epoch-a",
         message.model_dump(mode="json"), terminal_digest(message),

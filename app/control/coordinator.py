@@ -6,6 +6,7 @@ from typing import Protocol
 
 from loguru import logger
 
+from app.control.archive import archive_task
 from app.control.results import ResultApplication
 from app.control.revisions import verify_revision_remote
 from app.control.tools import FlowToolService
@@ -24,7 +25,6 @@ from app.plugins import get_plugin_manager
 from app.ports import GitHubClient
 from app.protocol import (
     ArchiveResult,
-    ArchiveTask,
     AssignmentSecret,
     ExecutionResult,
     ExecutionTask,
@@ -261,11 +261,18 @@ class JobCoordinator:
                     return JobState.QUEUED
                 return tx.reviews.freeze_revision(current, task)
         if job.kind is JobKind.ARCHIVE:
-            return ArchiveTask(
-                flow_id=flow.id,
-                attempt_id=attempt.id,
-                repo=flow.repo,
-            )
+            try:
+                with self.store.transaction() as tx:
+                    fresh = tx.lock_workflow(flow.id)
+                    current = tx.lock_job(job.id)
+                    if fresh is None or current is None:
+                        raise ValueError("archive workflow disappeared")
+                    archive = archive_task(tx, fresh, current)
+                    tx.freeze_archive(current, archive)
+                    return archive
+            except ValueError as error:
+                await self.fail(job, str(error))
+                return JobState.FAILED
         raise ValueError(f"unsupported job kind: {job.kind}")
 
     async def assignment_secret(self, job: Job, task: ExecutionTask) -> AssignmentSecret | None:

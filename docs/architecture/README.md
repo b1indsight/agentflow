@@ -29,7 +29,7 @@
 | PostgreSQL Store | 已验证（自动化） | flow/attempt/job、binding、结果账本与反馈版本/buffer/batch 事务、并发和恢复通过实际 PostgreSQL 测试 |
 | Webhook Ingress | 已验证（M0） | `/healthz`、HMAC 拒绝/接受、后台交接和 202 响应有覆盖；health 仅表示进程可响应 |
 | Event Router | 已验证（M2 F1 自动化） | 反馈 delivery/版本/deadline 原子写入，持久 settle、强信号授权、显式 action、同 Flow 冻结批次串行和重启恢复已覆盖 |
-| M3 合并检测 | F1 已实施、待审 | merged 事件与合并事实/旧工作退休/ARCHIVE 共用事务；派发与迟到结果检查合并状态，已发副作用只查询回执；F2/F3 清理增强与状态回写待实施 |
+| M3 合并与清理 | F1 已合并，F2 已实施 | 合并原子收敛；原 worker 提交版本化清理凭据，journal 恢复，原子完成并释放绑定；F3 状态回写和完整验收待实施 |
 | Control/Worker 边界 | 已验证（Features 1–3） | 多 worker 鉴权/调度、Flow 生命周期 binding、tool multiplex、busy reconnect、result replay 与 journal secret 负向覆盖 |
 | Control Service / Job Coordinator | 部分 | 真实 issue/default branch prepare、tool fencing/幂等 PR delivery 已接线；原线程回复/保守 resolve 与持久恢复有自动化；取消 kill、冲突处理与真实副作用 E2E 未完成 |
 | Codex / Context / Sandbox / VCS | 部分 | Flow repo、临时凭据、首轮 MCP、修订 resume/一次性 fallback、Git/jj clean/remote/lineage 双端核验有自动化；GitHub-only egress 与真实多轮 run 未验证 |

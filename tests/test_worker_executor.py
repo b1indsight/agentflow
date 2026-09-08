@@ -8,8 +8,6 @@ from pydantic import SecretStr
 
 from app.models import AgentRun, InitialCodexResult, TriageVerdict, VcsKind, VcsOutcome, Verdict
 from app.protocol import (
-    ArchiveResult,
-    ArchiveTask,
     AssignmentSecret,
     InitialResult,
     InitialTask,
@@ -126,7 +124,6 @@ async def test_executor_runs_agent_and_judge_tasks_without_store(
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     (workspace / "AGENTS.md").write_text("Run tests.")
-    cleaned: list[Path] = []
 
     async def fake_workspace(repo_path: Path, flow_id: int) -> Path:
         assert flow_id == 3
@@ -145,9 +142,6 @@ async def test_executor_runs_agent_and_judge_tasks_without_store(
             remote_sha="abc",
         )
 
-    async def fake_cleanup(repo_path: Path, flow_id: int) -> None:
-        cleaned.append(repo_path / str(flow_id))
-
     monkeypatch.setattr("app.worker.executor.prepare_flow_repo", fake_workspace)
     monkeypatch.setattr("app.worker.executor.prepare_vcs_context", fake_context)
     monkeypatch.setattr("app.worker.executor.verify_vcs_outcome", fake_verify)
@@ -155,7 +149,6 @@ async def test_executor_runs_agent_and_judge_tasks_without_store(
         "app.worker.tools.verify_pushed_outcome",
         lambda context: fake_verify(context, VcsKind.GIT),
     )
-    monkeypatch.setattr("app.worker.executor.cleanup_flow_repo", fake_cleanup)
     agent = RecordingAgent()
     executor = WorkerExecutor(
         tmp_path, agent, RecordingJudge(), tool_caller=RecordingToolCaller()
@@ -176,9 +169,6 @@ async def test_executor_runs_agent_and_judge_tasks_without_store(
     triage = await executor.execute(
         TriageTask(batch_id=1, feedback=[], attempt_id=1, context=review_context())
     )
-    archived = await executor.execute(
-        ArchiveTask(flow_id=3, attempt_id=1, repo="owner/repo")
-    )
 
     assert isinstance(initial, InitialResult)
     assert initial.commit_sha == "abc"
@@ -186,10 +176,8 @@ async def test_executor_runs_agent_and_judge_tasks_without_store(
     assert initial.pull_request is not None
     assert isinstance(triage, TriageResult)
     assert triage.decision.context_digest == review_context().digest
-    assert isinstance(archived, ArchiveResult)
     assert agent.started
     assert agent.started[0][1] == workspace
-    assert cleaned
 
 
 @pytest.mark.asyncio

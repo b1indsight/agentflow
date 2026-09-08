@@ -31,6 +31,7 @@ from app.vcs import (
     VcsVerificationError,
     agent_guidance,
     cleanup_flow_repo,
+    flow_cleanup_paths,
     flow_repo_path,
     prepare_flow_repo,
     prepare_revision_context,
@@ -86,9 +87,16 @@ class WorkerExecutor:
             except TimeoutError as error:
                 raise TimeoutError("revision deadline expired; edits or a push may have occurred") from error
         if isinstance(task, ArchiveTask):
+            if (self.worker_id != task.worker_id
+                    or task.repo_identity != f"{self.worker_id}:{task.repo}"):
+                raise ValueError("archive repository identity does not match worker")
+            if self.journal is None:
+                raise ValueError("archive cleanup requires a durable worker journal")
             repo_path = self._repo_path(task.repo)
-            await cleanup_flow_repo(repo_path, task.flow_id)
-            return ArchiveResult()
+            paths = flow_cleanup_paths(repo_path, task.flow_id, self.worker_root)
+            self.journal.verify_cleanup(task, repo_present=paths[0].is_dir())
+            cleanup = await cleanup_flow_repo(repo_path, task.flow_id, worker_root=self.worker_root)
+            return ArchiveResult(**task.model_dump(), cleanup=cleanup)
         raise TypeError(f"unsupported execution task: {type(task).__name__}")
 
     async def _initial(

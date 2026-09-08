@@ -108,14 +108,15 @@ def test_explicit_retry_requeues_the_failed_job_kind() -> None:
     assert store.enqueued == [JobKind.REVISION]
 
 
-def test_merged_delivery_still_allows_failed_archive_retry() -> None:
+def test_merged_terminal_flow_requires_manual_archive_reconciliation() -> None:
     store = RetryStore(Job(id=3, flow_id=1, kind=JobKind.ARCHIVE, state=JobState.FAILED))
     store.delivery = FlowDelivery(flow_id=1, branch="flow/1", state=DeliveryState.MERGED)
 
-    ControlService(cast(Store, cast(Any, store))).retry(store.flow)
+    with pytest.raises(ValueError, match="terminal"):
+        ControlService(cast(Store, cast(Any, store))).retry(store.flow)
 
-    assert store.flow.state is FlowState.ACTIVE
-    assert store.enqueued == [JobKind.ARCHIVE]
+    assert store.flow.state is FlowState.FAILED
+    assert store.enqueued == []
 
 
 def test_retry_rolls_back_state_when_enqueue_fails(monkeypatch: pytest.MonkeyPatch) -> None:

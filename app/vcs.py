@@ -15,6 +15,7 @@ import tempfile
 from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlparse
 
 from app.credentials import git_credential_environment
@@ -108,12 +109,49 @@ async def prepare_flow_repo(seed_repo_path: Path, flow_id: int) -> Path:
     return repo_path
 
 
-async def cleanup_flow_repo(seed_repo_path: Path, flow_id: int) -> None:
-    """Remove the repository owned by a terminal Flow."""
-
+def flow_cleanup_paths(seed_repo_path: Path, flow_id: int, worker_root: Path) -> tuple[Path, Path]:
+    """Validate managed directory boundaries, including ancestors and partial copies."""
+    root = worker_root.resolve()
+    seed = seed_repo_path.absolute()
+    if not seed.is_relative_to(worker_root.absolute()):
+        raise ValueError("archive repository escapes worker root")
+    relative = seed.relative_to(worker_root.absolute())
+    if (len(relative.parts) != 3 or relative.parts[0] != "repos"
+            or any(part in {".", ".."} for part in relative.parts)
+            or "--flow-" in relative.name):
+        raise ValueError("archive repository does not have a managed seed path")
+    cursor = worker_root.absolute()
+    for component in relative.parts:
+        cursor /= component
+        if cursor.is_symlink() or not cursor.is_dir():
+            raise ValueError("archive repository ancestor is missing or a symlink")
     repo_path = flow_repo_path(seed_repo_path, flow_id)
-    if repo_path.exists():
-        await asyncio.to_thread(shutil.rmtree, repo_path)
+    paths = repo_path, repo_path.with_name(repo_path.name + ".partial")
+    for path in paths:
+        if (path.is_symlink() or not path.resolve().is_relative_to(root)
+                or path.resolve() in {root, seed.resolve()}
+                or (path.exists() and not path.is_dir())):
+            raise ValueError("unsafe archive cleanup target")
+    return paths
+
+
+async def cleanup_flow_repo(
+    seed_repo_path: Path, flow_id: int, *, worker_root: Path,
+) -> Literal["removed", "already_absent"]:
+    """Delete validated Flow directories; the caller must journal ownership first."""
+    paths = flow_cleanup_paths(seed_repo_path, flow_id, worker_root)
+    removed = False
+    for path in paths:
+        if path.exists():
+            deletion = asyncio.create_task(asyncio.to_thread(shutil.rmtree, path))
+            try:
+                await asyncio.shield(deletion)
+            except asyncio.CancelledError:
+                # Cancelling to_thread does not stop rmtree. Keep the root locked until it exits.
+                await deletion
+                raise
+            removed = True
+    return "removed" if removed else "already_absent"
 
 
 async def prepare_vcs_context(

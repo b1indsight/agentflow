@@ -65,6 +65,9 @@ class RemoteStore:
     def get_delivery(self, flow_id: int) -> FlowDelivery | None:
         return None
 
+    def get_worker_execution(self, worker_id: str):
+        return None
+
     def worker_connected(self, worker_id: str, protocol_version: int, connection_epoch: str):
         return SimpleNamespace(current_job_id=None)
 

@@ -13,7 +13,9 @@ from datetime import UTC, datetime
 import typer
 
 from app.config import get_serve_settings
+from app.control.archive import archive_progress
 from app.control.service import ControlService
+from app.models import DeliveryState
 from app.store import Store
 
 app = typer.Typer(help="FlowTool admin CLI")
@@ -122,7 +124,10 @@ def flow_show(flow_id: int) -> None:
                 f"  attempt {att.id}{cur}: session={att.codex_session_id}"
                 f" cycles={att.revision_cycles}"
             )
-        for job in store.list_jobs(f.id):
+        jobs = store.list_jobs(f.id)
+        if delivery is not None and delivery.state is DeliveryState.MERGED:
+            typer.echo(f"  archive: {archive_progress(store, f, jobs)}")
+        for job in jobs:
             recovery = _remaining(job.recovery_deadline)
             result = "received" if job.result_received_at is not None else "-"
             typer.echo(

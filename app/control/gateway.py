@@ -13,7 +13,7 @@ from fastapi import WebSocketDisconnect
 from loguru import logger
 from pydantic import ValidationError
 
-from app.models import FlowDelivery, Job, JobState
+from app.models import DeliveryState, FlowDelivery, FlowExecution, Job, JobKind, JobState
 from app.protocol import (
     Assignment,
     AssignmentSecret,
@@ -57,6 +57,8 @@ class GatewayStore(Protocol):
     def get_job(self, job_id: int) -> Job | None: ...
 
     def get_delivery(self, flow_id: int) -> FlowDelivery | None: ...
+
+    def get_worker_execution(self, worker_id: str) -> FlowExecution | None: ...
 
     def worker_connected(
         self, worker_id: str, protocol_version: int, connection_epoch: str
@@ -226,10 +228,20 @@ class WorkerGateway:
                     connection_epoch,
                     register.recovery,
                 )
-            else:
+            if current is None:
                 stale_job_id = getattr(worker, "current_job_id", None)
-                if stale_job_id is not None:
+                if stale_job_id is not None and (
+                    register.recovery is None or register.recovery.job_id != stale_job_id
+                ):
+                    # A crash before journaling a newly delivered command leaves the preceding
+                    # acknowledged receipt. Recover the unstarted delivery behind that receipt.
                     await self._reject_missing_journal(worker_id, connection_epoch, stale_job_id)
+                elif register.recovery is None and (
+                    binding := self.store.get_worker_execution(worker_id)
+                ) is not None:
+                    delivery = self.store.get_delivery(binding.flow_id)
+                    if delivery is not None and delivery.state is DeliveryState.MERGED:
+                        raise ProtocolViolation("archive blocked: original worker journal is missing")
             if current is None:
                 await socket.send_text(
                     Registered(
@@ -566,8 +578,12 @@ class WorkerGateway:
             await socket.send_text(RecoveryRejected(job_id=job.id, reason=reason).model_dump_json())
             self.notify_jobs()
             return None
-        if recovery.state == "started" and not recovery.executor_active:
+        if (recovery.state == "started" and not recovery.executor_active
+                and not (job.kind is JobKind.ARCHIVE and recovery.archive_resume)):
             reason = "worker restarted after remote execution started"
+            delivery = self.store.get_delivery(job.flow_id)
+            if delivery is not None and delivery.supersedes(job.kind):
+                raise ProtocolViolation("archive blocked: original executor exit cannot be confirmed")
             await self.coordinator.fail(job, reason)
             await socket.send_text(RecoveryRejected(job_id=job.id, reason=reason).model_dump_json())
             return None
@@ -613,5 +629,8 @@ class WorkerGateway:
             self.store.requeue_assignment(job.id, worker_id, job.assignment_token, connection_epoch)
             self.notify_jobs()
             return
+        delivery = self.store.get_delivery(job.flow_id)
+        if delivery is not None and delivery.state is DeliveryState.MERGED:
+            raise ProtocolViolation("archive blocked: original worker assignment journal is missing")
         reason = "worker reconnected without its started assignment journal"
         await self.coordinator.fail(job, reason)
