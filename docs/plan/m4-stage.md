@@ -28,15 +28,15 @@ schema、共享替身和文档；锁文件、生成文件单独报告，不用�
 
 | Feature / 计划入口 | 产品 | 测试 | 文档 | 合计 |
 |---|---:|---:|---:|---:|
-| F1 [同秒反馈版本去重](https://github.com/b1indsight/agentflow/blob/feat/m4-feedback-replay/docs/plan/m4-feedback-replay.md) | 300 | 370 | 180 | **850** |
-| F2 [多 Flow 恢复并发与调度隔离](https://github.com/b1indsight/agentflow/blob/feat/m4-recovery-concurrency/docs/plan/m4-recovery-concurrency.md) | 360 | 480 | 100 | **940** |
-| F3 [持久 PR 对账与漏失合并补偿](https://github.com/b1indsight/agentflow/blob/feat/m4-pr-reconcile/docs/plan/m4-pr-reconcile.md) | 480 | 430 | 100 | **1010** |
-| F4 [Issue/PR 讨论与 Review 正文对账](https://github.com/b1indsight/agentflow/blob/feat/m4-discussion-reconcile/docs/plan/m4-discussion-reconcile.md) | 440 | 450 | 100 | **990** |
-| F5 [Review 线程持续对账](https://github.com/b1indsight/agentflow/blob/feat/m4-thread-reconcile/docs/plan/m4-thread-reconcile.md) | 390 | 480 | 100 | **970** |
-| F6 [未合并 PR 关闭与重新打开](https://github.com/b1indsight/agentflow/blob/feat/m4-pr-lifecycle/docs/plan/m4-pr-lifecycle.md) | 520 | 450 | 110 | **1080** |
-| F7 [准备期只读 GitHub 故障重试](https://github.com/b1indsight/agentflow/blob/feat/m4-preparation-retry/docs/plan/m4-preparation-retry.md) | 420 | 460 | 100 | **980** |
-| F8 [GitHub Projects v2 最小接口与配置](https://github.com/b1indsight/agentflow/blob/feat/m4-projects-api/docs/plan/m4-projects-api.md) | 410 | 440 | 100 | **950** |
-| F9 [Projects 状态投影与恢复](https://github.com/b1indsight/agentflow/blob/feat/m4-projects-sync/docs/plan/m4-projects-sync.md) | 460 | 450 | 110 | **1020** |
+| F1 [同秒反馈版本去重 · #28](https://github.com/b1indsight/agentflow/pull/28) | 300 | 370 | 180 | **850** |
+| F2 [多 Flow 恢复并发与调度隔离 · #29](https://github.com/b1indsight/agentflow/pull/29) | 360 | 480 | 100 | **940** |
+| F3 [持久 PR 对账与漏失合并补偿 · #30](https://github.com/b1indsight/agentflow/pull/30) | 480 | 430 | 100 | **1010** |
+| F4 [Issue/PR 讨论与 Review 正文对账 · #31](https://github.com/b1indsight/agentflow/pull/31) | 440 | 450 | 100 | **990** |
+| F5 [Review 线程持续对账 · #32](https://github.com/b1indsight/agentflow/pull/32) | 390 | 480 | 100 | **970** |
+| F6 [未合并 PR 关闭与重新打开 · #33](https://github.com/b1indsight/agentflow/pull/33) | 520 | 450 | 110 | **1080** |
+| F7 [准备期只读 GitHub 故障重试 · #34](https://github.com/b1indsight/agentflow/pull/34) | 420 | 460 | 100 | **980** |
+| F8 [GitHub Projects v2 最小接口与配置 · #35](https://github.com/b1indsight/agentflow/pull/35) | 410 | 440 | 100 | **950** |
+| F9 [Projects 状态投影与恢复 · #36](https://github.com/b1indsight/agentflow/pull/36) | 460 | 450 | 110 | **1020** |
 
 预计超过 **1200 行** 时，在实施前或增量检查时拆出可独立验收的 feature，修订依赖和计划；
 不能删减竞态/恢复测试、压行、批量移动文件来满足预算。行数小不等于完成，正确性验收优先。
@@ -101,4 +101,3 @@ F4/F5、F8 在设计上可分别推进；这里不要求同时启动实现。前
 日志与结果；当前没有这些验收证据。本次计划只做文档/链接/diff 检查，不运行产品测试。
 M4 完成需九项各自实现并验证，以及上述真实矩阵通过；M1–M3 的未验项需补证或明确仍未通过，
 不能用自动化替身测试替代外部闭环。
-
