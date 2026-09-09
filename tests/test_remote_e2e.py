@@ -118,7 +118,12 @@ class RemoteStore:
     ) -> str:
         return "pending" if self.assignment_active(job_id, worker_id, token) else "rejected"
 
-    def list_unapplied_results(self) -> list[Job]:
+    def unapplied_result_ceiling(self) -> int:
+        return 0
+
+    def list_unapplied_results(
+        self, *, after_id: int = 0, through_id: int | None = None, limit: int = 64,
+    ) -> list[Job]:
         return []
 
     def complete_persisted_result(self, job_id: int, state: JobState) -> bool:

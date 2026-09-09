@@ -1,9 +1,9 @@
 # M4 Feature 2/9：多 Flow 恢复并发与调度隔离
 
-> 状态：计划待审批；本 PR 只含文档，尚未实施。
+> 状态：用户于 2026-09-09 批准按序实现并推送；F2 已实施并验证，待用户 review/合并。
 > 规划日期：2026-09-09；基线：`main@origin` / `be65878f`（归档恢复修复 #27 已合并）。
 > bookmark：`feat/m4-recovery-concurrency`；实现前置：最新 main；独立于 F1。
-> 一 feature = 一 bookmark = 一 PR；前置合并后更新到最新 main，在本 PR 实施，不先合并纯计划。
+> 用户统一 review/合并；本 PR 以 F1 分支为 base，只展示 F2 增量，不等待前项合并。
 
 ## 1. 目标与已有能力
 
@@ -55,3 +55,15 @@
 本次规划仅做文档内容、链接和 diff 检查。实施按“先失败测试→最小实现→针对性验证→完整检查”
 推进；完整检查为实际 PostgreSQL 下 pytest、Ruff、Mypy 和 `uv build --no-sources`。
 
+## 实施记录（2026-09-09）
+
+- lease、settle 和网络结果恢复各有独立周期任务；单项失败不停止其他任务，shutdown 取消并等待全部任务。
+- 固定数量的 TaskGroup 消费有界结果页，保留实时结果/恢复共用的 job lock；重复 sweep 串行领取。
+- 每轮扫描冻结最高结果 ID，分页推进后回绕；持续到达的新结果不会无限推迟旧 pending 结果。
+  游标仅影响本进程扫描公平性，重启重新从持久 inbox 读取，不改变结果提交和 ACK 语义。
+- 增加 `FLOWTOOL_RESULT_RECOVERY_CONCURRENCY`（默认 4，上限 64）与
+  `FLOWTOOL_RESULT_RECOVERY_BATCH_SIZE`（默认 64，上限 1000），下限均为 1。
+- 新增测试先复现 10 项失败；另以持续新结果测试复现旧结果不能及时回绕，再补有限扫描边界。
+  覆盖慢请求、pool 上限、取消回收、同 job 排他、分页与数据库边界。
+- 聚焦回归 48 passed；实际 PostgreSQL 完整回归 523 passed / 0 skipped；Ruff、Mypy、
+  sdist/wheel 构建通过。仅有既有 Starlette 弃用警告，真实外部服务 smoke 未执行。

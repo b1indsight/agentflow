@@ -10,6 +10,10 @@ FlowTool 的目标是把带 `flow` 标签的 GitHub issue 编排成
 
 ## 当前能力
 
+- **恢复并发**：lease、settle 和网络结果恢复独立运行；结果恢复默认 4 并发、每页 64 项，
+  可用 `FLOWTOOL_RESULT_RECOVERY_CONCURRENCY`（1–64）和
+  `FLOWTOOL_RESULT_RECOVERY_BATCH_SIZE`（1–1000）调整。有限扫描周期保证旧待确认结果可重试。
+
 - **接收与持久化**：校验 GitHub Webhook 的 `X-Hub-Signature-256`，处理 delivery 去重、allowlist、
   触发、取消和 review 入库；PostgreSQL 是唯一运行时数据库，启动时初始化 schema。
 - **远程执行**：`flowtool serve` 管理状态、数据库和 GitHub 操作；`flowtool worker` 主动通过认证

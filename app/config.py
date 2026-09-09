@@ -49,6 +49,8 @@ class ServeSettings(FlowToolSettings):
     worker_recovery_grace: float = Field(default=300.0, gt=0)
     worker_sweep_interval: float = Field(default=5.0, gt=0)
     worker_poll_interval: float = Field(default=2.0, gt=0)
+    result_recovery_concurrency: int = Field(default=4, ge=1, le=64)
+    result_recovery_batch_size: int = Field(default=64, ge=1, le=1000)
 
     @field_validator("trigger_label", "in_review_label", "done_label")
     @classmethod

@@ -44,6 +44,8 @@ class ControlRuntime:
             heartbeat_interval=self.settings.worker_heartbeat_interval,
             heartbeat_timeout=self.settings.worker_heartbeat_timeout,
             poll_interval=self.settings.worker_poll_interval,
+            recovery_concurrency=self.settings.result_recovery_concurrency,
+            recovery_batch_size=self.settings.result_recovery_batch_size,
         )
         self.service = ControlService(self.store, plugins, self.gateway.notify_jobs)
         self.router = EventRouter(self.store, self.service, self.settings)
@@ -65,7 +67,8 @@ class ControlRuntime:
         self._tasks = [
             asyncio.create_task(self.reconciler.run()),
             asyncio.create_task(self._sweep_assignments()),
-            asyncio.create_task(self.gateway.recover_pending_results()),
+            asyncio.create_task(self._sweep_results()),
+            asyncio.create_task(self._sweep_reviews()),
         ]
         self.router.settle.sweep()
 
@@ -81,10 +84,26 @@ class ControlRuntime:
                         failed,
                     )
                     self.gateway.notify_jobs()
-                await self.gateway.recover_pending_results()
-                self.router.settle.sweep()
             except Exception:  # noqa: BLE001 -- keep periodic recovery alive after operational errors
-                logger.exception("assignment/result recovery sweep failed; retrying next sweep")
+                logger.exception("assignment recovery sweep failed; retrying next sweep")
+
+    async def _sweep_results(self) -> None:
+        """Recover immediately at startup; network waits never hold the local scheduling loops."""
+        while True:
+            try:
+                await self.gateway.recover_pending_results()
+            except Exception:  # noqa: BLE001 -- a failed inbox query is retried next sweep
+                logger.exception("result recovery sweep failed; retrying next sweep")
+            await asyncio.sleep(self.settings.worker_sweep_interval)
+
+    async def _sweep_reviews(self) -> None:
+        """Keep settle independent of both lease errors and slow remote receipt checks."""
+        while True:
+            await asyncio.sleep(self.settings.worker_sweep_interval)
+            try:
+                self.router.settle.sweep()
+            except Exception:  # noqa: BLE001 -- a failed claim leaves durable deadlines to retry
+                logger.exception("review settle sweep failed; retrying next sweep")
 
     def spawn_handler(self, coroutine: Coroutine[Any, Any, None]) -> None:
         task = asyncio.create_task(coroutine)
