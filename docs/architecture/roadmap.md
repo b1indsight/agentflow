@@ -37,7 +37,9 @@ flowtool/
 - **M3（F1/F2/F3 已合并，真实闭环待验收）** 人工合并检测（`pull_request.closed`）→ 归档 + 状态标签 / 评论；
   拆为 F1 合并检测与任务收敛、F2 工作区清理与 worker 释放、F3 状态回写与闭环验收三个 PR，
   [F3 实施与验收](../plan/m3-archive-status.md)记录增量回写、恢复操作及真实闭环待办。
-- **M4** 多 flow 并发 + reconcile 对账 + Project 看板 + 错误恢复
+- **M4（计划待审批）** 在现有多 worker 能力上补恢复并发、已追踪 Flow 的 PR/反馈对账、
+  close/reopen、准备期有界重试与 Projects v2 看板；拆为九个 feature，每 PR 约 1000 行，
+  依赖、预算和验收见 [M4 阶段计划](../plan/m4-stage.md)。
 - **M5** 安全隔离（容器化 codex）+ 公网 / 隧道部署 + 完整运维与可观测性
 
 M1/M2 已合并不等于真实闭环已验收；M3 尚未完成，M4–M5 仍为目标里程碑。实际状态见[架构入口](README.md#当前实现状态)。

@@ -7,6 +7,8 @@
 
 本节包含待审批及已实现、仍有验收待办的计划。M2 F1–F4 已全部合并；状态、证据和开放问题见 [M2 状态与待办](../architecture/README.md#m2-状态与待办)。
 
+- [`m4-stage.md`](m4-stage.md) — M4 阶段计划：九个独立 feature，单 PR 预算 850–1080 行，依赖和各 draft PR 入口见总表；计划待审批，尚未实施；
+- [`m4-feedback-replay.md`](m4-feedback-replay.md) — M4 F1：修复同秒远端观察与迟到 webhook 的旧版本重放；计划待审批；
 - [`m3-merge-detection.md`](m3-merge-detection.md) — M3 F1：合并检测与后续任务收敛，已合并 [#24](https://github.com/b1indsight/agentflow/pull/24)；
 - [`m3-workspace-archive.md`](m3-workspace-archive.md) — M3 F2：可核验工作区清理、原 worker 恢复与原子释放，已合并 [#25](https://github.com/b1indsight/agentflow/pull/25)；
 - [`m3-archive-status.md`](m3-archive-status.md) — M3 F3：归档状态回写已合并 [#26](https://github.com/b1indsight/agentflow/pull/26)，真实闭环待验收；
