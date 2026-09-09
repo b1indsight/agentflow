@@ -118,6 +118,10 @@ def flow_show(flow_id: int) -> None:
                 f"  delivery: state={delivery.state} branch={delivery.branch}"
                 f" pr={delivery.pr_number or '-'} head={delivery.head_sha or '-'}"
             )
+        check = store.reconcile.get(f.id)
+        if check is not None:
+            typer.echo(f"  reconcile: last={check.last_success_at or '-'} next={check.next_at}"
+                       f" failures={check.failures} reason={check.last_error or '-'}")
         for att in store.list_attempts(f.id):
             cur = " (current)" if att.id == f.current_attempt_id else ""
             typer.echo(

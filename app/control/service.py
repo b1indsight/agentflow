@@ -12,6 +12,7 @@ from app.models import (
     TERMINAL_STATES,
     DeliveryState,
     Flow,
+    FlowDelivery,
     FlowState,
     JobKind,
     JobState,
@@ -81,23 +82,34 @@ class ControlService:
                 return
             if not tx.record_event(delivery_id, "pull_request", fresh.id, payload):
                 return
-            if ((delivery.merged_at is not None and delivery.merged_at != merge.merged_at)
-                    or (delivery.merge_commit_sha is not None
-                        and delivery.merge_commit_sha != merge.merge_commit_sha)):
-                raise ValueError("merge event conflicts with recorded merge facts")
-            first_merge = delivery.state is not DeliveryState.MERGED
-            if first_merge or delivery.merged_at is None or delivery.merge_commit_sha is None:
-                delivery.state = DeliveryState.MERGED
-                delivery.merged_at = merge.merged_at
-                delivery.merge_commit_sha = merge.merge_commit_sha
-                delivery.version += 1
-                tx.update_delivery(delivery)
-            if not first_merge:
-                return
-            if fresh.state not in TERMINAL_STATES:
-                tx.cancel_jobs(flow.id, reason="PR merged; queued work retired")
-                tx.enqueue_job(flow.id, JobKind.ARCHIVE)
-        self._fire("on_merged", flow=fresh)
+            first_merge = self.record_merge(tx, fresh, delivery, merge)
+        if first_merge:
+            self.notify_merge(fresh)
+
+    @staticmethod
+    def record_merge(tx: Store, flow: Flow, delivery: FlowDelivery, merge: PullRequestMerge) -> bool:
+        """Apply verified merge facts under the caller's workflow lock, for webhook or poll."""
+        if delivery.flow_id != flow.id or delivery.pr_number != merge.number:
+            raise ValueError("merge does not belong to delivery")
+        if ((delivery.merged_at is not None and delivery.merged_at != merge.merged_at)
+                or (delivery.merge_commit_sha is not None
+                    and delivery.merge_commit_sha != merge.merge_commit_sha)):
+            raise ValueError("merge event conflicts with recorded merge facts")
+        first_merge = delivery.state is not DeliveryState.MERGED
+        if first_merge or delivery.merged_at is None or delivery.merge_commit_sha is None:
+            delivery.state = DeliveryState.MERGED
+            delivery.merged_at = merge.merged_at
+            delivery.merge_commit_sha = merge.merge_commit_sha
+            delivery.version += 1
+            tx.update_delivery(delivery)
+        if first_merge and flow.state not in TERMINAL_STATES:
+            tx.cancel_jobs(flow.id, reason="PR merged; queued work retired")
+            tx.enqueue_job(flow.id, JobKind.ARCHIVE)
+        return first_merge
+
+    def notify_merge(self, flow: Flow) -> None:
+        """Notify plugins and workers only after merge facts and archive work have committed."""
+        self._fire("on_merged", flow=flow)
         self._jobs_available()
 
     def retry(self, flow: Flow) -> None:

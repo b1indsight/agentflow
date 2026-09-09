@@ -1,9 +1,9 @@
 # M4 Feature 3/9：持久 PR 对账与漏失合并补偿
 
-> 状态：计划待审批；本 PR 只含文档，尚未实施。
+> 状态：用户已批准按序实现并推送；F3 已实施并通过 PostgreSQL 全量回归。
 > 规划日期：2026-09-09；基线：`main@origin` / `be65878f`（归档恢复修复 #27 已合并）。
 > bookmark：`feat/m4-pr-reconcile`；实现前置：最新 main；建议 F2 后实施，PR 合并事实路径可独立设计。
-> 一 feature = 一 bookmark = 一 PR；前置合并后更新到最新 main，在本 PR 实施，不先合并纯计划。
+> 用户统一 review/合并；本 PR 以 F2 分支为 base，只展示 F3 增量，不等待前项合并。
 
 ## 1. 目标与边界
 
@@ -61,3 +61,16 @@
 本次规划仅做文档内容、链接和 diff 检查。实施按“先失败测试→最小实现→针对性验证→完整检查”
 推进；完整检查为实际 PostgreSQL 下 pytest、Ruff、Mypy 和 `uv build --no-sources`。
 
+## 实施记录（2026-09-09）
+
+- 新增 `flow_reconcile` 的到期时间、成功时间、失败次数和脱敏诊断；按有界批次补建和扫描
+  已追踪 PR。失败/取消的历史 Flow 可确认合并事实，不能自动重激活或启动归档。
+- PR 按编号读取并验证 repo/head repo 与合并事实，事务外 I/O，提交时复核 attempt、
+  lifecycle、installation 与 delivery version。过期快照只延后复查。
+- webhook 和 poll 共用 `ControlService.record_merge`；合并事实、任务收敛、ARCHIVE 与
+  poll 成功时间同事务提交，提交后再通知插件与 worker。poll 不伪造 webhook delivery ID。
+- `FLOWTOOL_RECONCILE_INTERVAL_SECONDS` 默认 300，批次默认 64、并发默认 4；
+  永久读取错误低频探测，临时错误持久退避；共用 `github_retry.retry_delay` 保持 effects 的服务端等待语义。
+- `flow show` 展示检查时间/错误；普通 close 和 head/base 漂移只记诊断，不修改已核验交付。
+- 实际 PostgreSQL 完整回归 548 passed / 0 skipped；涵盖原 M3 合并与归档路径。
+  Ruff、Mypy 和 sdist/wheel 构建通过，真实 App smoke 待执行。

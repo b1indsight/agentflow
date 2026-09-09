@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import UTC
-from email.utils import parsedate_to_datetime
 from uuid import uuid4
 
 from app.control.archive import verify_archive
 from app.control.thread_effects import has_pending_thread_feedback, resolve_thread, revision_current
 from app.control.tools import FlowToolRejected, FlowToolService
 from app.github_models import GitHubAdapterError, GitHubErrorKind
+from app.github_retry import retry_delay
 from app.models import TERMINAL_STATES, DeliveryState
 from app.ports import GitHubClient
 from app.protocol import FlowToolErrorKind
@@ -382,15 +381,5 @@ class ResultEffects:
         record: EffectRecord,
         error: GitHubAdapterError | FlowToolRejected | None = None,
     ) -> float:
-        delay = min(300.0, 2.0 ** min(record.attempts, 8))
-        if isinstance(error, GitHubAdapterError) and error.retry_after:
-            try:
-                requested = float(error.retry_after)
-            except ValueError:
-                try:
-                    deadline = parsedate_to_datetime(error.retry_after)
-                    requested = (deadline.astimezone(UTC) - self.store.now()).total_seconds()
-                except (ValueError, TypeError, OverflowError):
-                    requested = 0.0
-            delay = max(delay, requested)
-        return delay
+        return retry_delay(record.attempts, self.store.now(),
+                           error if isinstance(error, GitHubAdapterError) else None)
