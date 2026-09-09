@@ -159,9 +159,14 @@ class ReviewStore:
                 if (
                     update.updated_at == row["observed_at"]
                     and not update.deleted
-                    and previous_body != old.body
+                    and (
+                        previous_body != old.body
+                        or (delivery_id is not None and previous_body is not None
+                            and self._edit_seen(row["id"], previous_body, update))
+                    )
                 ):
-                    # Reserve the webhook once, but keep an edit whose predecessor is still missing.
+                    # Missing predecessors and already represented same-second transitions are
+                    # retained for diagnosis. Only a fresh observation can disambiguate a repeat.
                     if previous_body is not None and delivery_id is not None:
                         connection.execute(
                             "INSERT INTO review_pending_edits"
@@ -201,6 +206,23 @@ class ReviewStore:
             )
             return True
 
+    def _edit_seen(self, item_id: int, previous_body: str, update: FeedbackUpdate) -> bool:
+        """Whether this object's same-tick history already represents the claimed transition.
+
+        A repeated A→B may be either a late webhook or a real third edit after A→B→A.
+        Neither its delivery ID nor second-precision timestamp establishes which; observations
+        may advance the frozen item version, but webhook replay must not guess.
+        """
+        with self.store.connection() as connection:
+            return connection.execute(
+                "SELECT 1 FROM review_versions v LEFT JOIN review_versions p"
+                " ON p.item_id=v.item_id AND p.version=v.version-1"
+                " WHERE v.item_id=%s AND (v.content->>'updated_at')::timestamptz=%s"
+                " AND v.content->>'body'=%s AND (p.content->>'body'=%s"
+                " OR (p.version IS NULL AND v.source_delivery IS NULL)) LIMIT 1",
+                (item_id, update.updated_at, update.body, previous_body),
+            ).fetchone() is not None
+
     def _reconcile_edits(self, flow_id: int, update: FeedbackUpdate) -> bool:
         """Replay a durable same-second edit chain as predecessors arrive, in the ingest transaction."""
         changed = False
@@ -218,15 +240,23 @@ class ReviewStore:
                     "DELETE FROM review_pending_edits WHERE item_id=%s AND (updated_at<%s OR %s)",
                     (row["id"], row["observed_at"], current.deleted),
                 )
-                pending = connection.execute(
-                    "DELETE FROM review_pending_edits WHERE source_delivery=("
-                    " SELECT source_delivery FROM review_pending_edits WHERE item_id=%s"
-                    " AND updated_at=%s AND previous_body=%s ORDER BY source_delivery LIMIT 1)"
-                    " RETURNING *",
+                candidates = connection.execute(
+                    "SELECT * FROM review_pending_edits WHERE item_id=%s"
+                    " AND updated_at=%s AND previous_body=%s ORDER BY source_delivery",
                     (row["id"], row["observed_at"], current.body),
-                ).fetchone()
-                if pending is None:
+                ).fetchall()
+                candidates = [p for p in candidates if not self._edit_seen(
+                    row["id"], p["previous_body"], FeedbackUpdate.model_validate(p["content"]),
+                )]
+                # Competing successors have no provable ordering. Keep both pending until a
+                # fresh remote snapshot supplies a version; delivery IDs are not a clock.
+                if not candidates or len({p["content"]["body"] for p in candidates}) != 1:
                     return changed
+                pending = candidates[0]
+                connection.execute(
+                    "DELETE FROM review_pending_edits WHERE source_delivery=%s",
+                    (pending["source_delivery"],),
+                )
                 changed |= self._append_version(
                     flow_id, pending["attempt_id"], pending["source_delivery"],
                     FeedbackUpdate.model_validate(pending["content"]),

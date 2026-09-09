@@ -33,11 +33,11 @@ flowtool/
 - **M1（已实现并合并，真实 E2E 待验收）** 触发（含 allowlist）→ Flow 独占 worker/repo → codex 首轮 → 开 PR
 - **M2（已实现并合并，真实 E2E 待验收）** 语义 Triage（bub）门 + 回喂循环
   （settle → revise/answer/wait/ignore + resume/兜底 + 保守 resolve）；F1–F4 对应 PR #19–#22。
-  同秒重复 webhook 重放缺陷尚未修复；合并证据与剩余验收见 [M2 状态与待办](README.md#m2-状态与待办)。
+  同秒重复 webhook 重放已在 M4 F1 修复；合并证据与剩余验收见 [M2 状态与待办](README.md#m2-状态与待办)。
 - **M3（F1/F2/F3 已合并，真实闭环待验收）** 人工合并检测（`pull_request.closed`）→ 归档 + 状态标签 / 评论；
   拆为 F1 合并检测与任务收敛、F2 工作区清理与 worker 释放、F3 状态回写与闭环验收三个 PR，
   [F3 实施与验收](../plan/m3-archive-status.md)记录增量回写、恢复操作及真实闭环待办。
-- **M4（计划待审批）** 在现有多 worker 能力上补恢复并发、已追踪 Flow 的 PR/反馈对账、
+- **M4（已批准按序实施）** 在现有多 worker 能力上补恢复并发、已追踪 Flow 的 PR/反馈对账、
   close/reopen、准备期有界重试与 Projects v2 看板；拆为九个 feature，每 PR 约 1000 行，
   依赖、预算和验收见 [M4 阶段计划](../plan/m4-stage.md)。
 - **M5** 安全隔离（容器化 codex）+ 公网 / 隧道部署 + 完整运维与可观测性

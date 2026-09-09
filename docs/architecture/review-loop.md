@@ -1,8 +1,8 @@
 # Review 修订循环
 
 M2 F1–F4 已实现并通过 PR #19–#22 合并，包含持久反馈批次、bub 语义决策与直接答复、修订交付/session
-兜底、原线程回复与保守 resolve。自动化通过，真实 GitHub App/Codex/bub 闭环待验收；仍有同秒重复
-webhook 重放缺陷。合并证据与剩余工作见 [M2 状态与待办](README.md#m2-状态与待办)。
+兜底、原线程回复与保守 resolve。自动化通过，真实 GitHub App/Codex/bub 闭环待验收；M4 F1 已修复
+同秒重复 webhook 重放。合并证据与剩余工作见 [M2 状态与待办](README.md#m2-状态与待办)。
 
 ## B.1 反馈入口与持久 settle
 
@@ -18,8 +18,8 @@ webhook 重放缺陷。合并证据与剩余工作见 [M2 状态与待办](READM
 review body、inline 和 conversation 使用 `(flow_id, kind, github_id)` 区分身份，保留来源 attempt。
 重复 delivery/内容和较旧源时间不重置窗口；同秒编辑使用 GitHub `changes.body.from` 校验前序正文。
 前序尚未到达的同秒编辑持久暂存，前序到达后在同一事务中回放；支持重启和中断后重投。
-已知例外：远端已观察过的编辑，其迟到重复 webhook 可在后续同秒回退时错误重放，
-详见 [F4 已知问题](../plan/m2-review-resolution.md#同秒重复-webhook-重放medium未修复)。
+已在同秒历史中表示的转换不再次回放；同一前序有不同后继时保留待核对，不按 delivery ID 定序。
+重复转换只有新鲜远端观察可以推进，较晚时间戳的真实编辑仍正常入库，见 [M4 F1](../plan/m4-feedback-replay.md)。
 没有更新时间的编辑以接收时间排序。删除保存 tombstone，后到的旧事件不能复活正文；
 approval/删除只使原正文失效，不推进 generation 或唤醒等待中的讨论。
 
@@ -106,7 +106,7 @@ clarification、缺失映射或变化的 head 阻止完成。历史依据只接�
 resolve 前刷新线程并补入尚未收到 webhook 的反馈；也核对本地新版本，避免迟到查询撤销同秒编辑。
 同秒刷新只可推进被冻结的 item/version，正文改回原值也不会重获旧版本资格；远端补齐前驱后，
 在同一事务中继续回放已排队的编辑。每个 resolve effect 仅保存该线程的 inline 处理依据。
-这里仍受上述重复历史编辑缺陷影响，不能据自动化通过断言所有同秒编辑交错都已正确处理。
+历史重复转换与无法定序的编辑等待新鲜观察；相关同秒交错由 M4 F1 的 PostgreSQL 回归验证。
 resolve 后复读记录远端状态和竞态反馈，不自动 unresolve。人工 resolve 不等于新反馈已消费。
 
 回复通过本 App 作者和精确 marker 找回；响应不确定时保留 uncertain，不盲目重发。

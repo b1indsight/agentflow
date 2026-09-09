@@ -60,7 +60,7 @@ M2 已接入有界 Issue/PR/patch/讨论快照、线程/comment 映射与原线�
 当前 coordinator 仍有以下边界：
 
 - 上述路径有自动化覆盖，真实 GitHub App/Codex/bub 闭环待验收；
-- 同秒重复 webhook 的历史编辑可能被再次重放，见 [M2 已知问题](README.md#m2-状态与待办)；
+- 同秒已出现的编辑转换保留待核对，不重复回放；新鲜观察可推进，见 [M4 F1](../plan/m4-feedback-replay.md)；
 - 冻结上下文尚不包含 CI 状态；
 - cancel 只更新数据库状态，不 kill Codex、不清工作区；
 - 修订会检测并拒绝远端 head 漂移；未合并 close、人工 push 合并、rebase/冲突处理尚未实现。
@@ -157,7 +157,7 @@ ORM。
 - `codex_runs`：按 attempt 记录 prompt、kind、exit 与时间；
 - `review_threads`：旧反馈历史，升级时一次性导入最新对象；旧 resolved 标记不作为 GitHub 确认；
 - `review_items` / `review_versions`：Flow 内稳定反馈身份、不可变版本、独立 relay/consume 时间和已核验 addressed 依据；
-- `review_pending_edits`：同秒乱序编辑的前序正文与原始来源，供前序到达后原子回放；重复历史编辑仍有[已知缺陷](README.md#m2-状态与待办)；
+- `review_pending_edits`：同秒乱序编辑的前序正文与原始来源；只有未在历史表示且后继无歧义时原子回放，其余保留待核对；
 - `review_buffers` / `review_batches`：持久 deadline/generation、冻结反馈/上下文/线程快照、批次所有者 job 和未决问题；
 - `review_thread_observations`：远端线程快照与真实 resolved 状态，不以本地 addressed 代替远端确认。
 

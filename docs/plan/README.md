@@ -7,15 +7,15 @@
 
 本节包含待审批及已实现、仍有验收待办的计划。M2 F1–F4 已全部合并；状态、证据和开放问题见 [M2 状态与待办](../architecture/README.md#m2-状态与待办)。
 
-- [`m4-stage.md`](m4-stage.md) — M4 阶段计划：九个独立 feature，单 PR 预算 850–1080 行，依赖和各 draft PR 入口见总表；计划待审批，尚未实施；
-- [`m4-feedback-replay.md`](m4-feedback-replay.md) — M4 F1：修复同秒远端观察与迟到 webhook 的旧版本重放；计划待审批；
+- [`m4-stage.md`](m4-stage.md) — M4 阶段计划：九个 feature，单 PR 预算 850–1080 行；已批准按序实现和推送，由用户统一 review/合并；
+- [`m4-feedback-replay.md`](m4-feedback-replay.md) — M4 F1：同秒远端观察与迟到 webhook 的旧版本重放已修复，512 项 PostgreSQL 全量通过，待用户 review/合并；
 - [`m3-merge-detection.md`](m3-merge-detection.md) — M3 F1：合并检测与后续任务收敛，已合并 [#24](https://github.com/b1indsight/agentflow/pull/24)；
 - [`m3-workspace-archive.md`](m3-workspace-archive.md) — M3 F2：可核验工作区清理、原 worker 恢复与原子释放，已合并 [#25](https://github.com/b1indsight/agentflow/pull/25)；
 - [`m3-archive-status.md`](m3-archive-status.md) — M3 F3：归档状态回写已合并 [#26](https://github.com/b1indsight/agentflow/pull/26)，真实闭环待验收；
 - [`m2-feedback-batches.md`](m2-feedback-batches.md) — M2 F1：持久反馈批次与 settle，已实现并合并 [#19](https://github.com/b1indsight/agentflow/pull/19)；
 - [`m2-semantic-triage.md`](m2-semantic-triage.md) — M2 F2：bub adapter、有界上下文与幂等答复，已实现并合并 [#20](https://github.com/b1indsight/agentflow/pull/20)，真实 provider smoke 待执行；
 - [`m2-revision-delivery.md`](m2-revision-delivery.md) — M2 F3：修订交付核验与一次性 session 兜底，已实现并合并 [#21](https://github.com/b1indsight/agentflow/pull/21)，真实多轮 smoke 待验收；
-- [`m2-review-resolution.md`](m2-review-resolution.md) — M2 F4：原线程回复、保守 resolve 与持久恢复，已实现并合并 [#22](https://github.com/b1indsight/agentflow/pull/22)；377 项自动化通过，真实矩阵待验收，同秒重复 webhook 重放缺陷未修复；
+- [`m2-review-resolution.md`](m2-review-resolution.md) — M2 F4：原线程回复、保守 resolve 与持久恢复，已实现并合并 [#22](https://github.com/b1indsight/agentflow/pull/22)；真实矩阵待验收，同秒重复 webhook 重放已在 M4 F1 修复；
 - [`atomic-workflow-results.md`](atomic-workflow-results.md) — 已批准并实施：原子结果提交与 GitHub 操作恢复；本机 118 项通过，30 项 PostgreSQL 用例按要求跳过；
 - [`m1-github-capabilities.md`](m1-github-capabilities.md) — M1 Feature 2/3：GitHub App、短时 push capability 与 PR primitives 已实现并通过自动化，真实 App smoke 待执行；
 - [`m1-issue-to-pr.md`](m1-issue-to-pr.md) — M1 Feature 3/3：Flow 生命周期独占 worker/repo、Flow tool RPC、CodeAgent commit/push、远端验证与一 Flow 一 PR 已实现并通过自动化，真实 E2E 待执行；

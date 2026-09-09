@@ -6,7 +6,7 @@ FlowTool 的目标是把带 `flow` 标签的 GitHub issue 编排成
 
 > 当前状态（2026-09-08）：**M0 已验收；M1 Issue→PR、M2 F1–F4 已实现并合并，真实 E2E 待验收**。
 > M2 包含持久反馈批次、语义决策、修订交付核验与 session 兜底、原线程回复与保守 resolve。
-> 自动化使用实际 PostgreSQL 与临时 Git/jj 仓库；仍有一项同秒 webhook 重放问题，见 [M2 状态与待办](docs/architecture/README.md#m2-状态与待办)。
+> 自动化使用实际 PostgreSQL 与临时 Git/jj 仓库；M4 F1 已修复同秒 webhook 重放，真实闭环待办见 [M2 状态与待办](docs/architecture/README.md#m2-状态与待办)。
 
 ## 当前能力
 
@@ -55,8 +55,6 @@ FlowTool 的目标是把带 `flow` 标签的 GitHub issue 编排成
   自动化测试使用外部服务替身，不代表真实 GitHub、Codex、bub 集成已验收。
 - bub adapter 已通过真实库加本机假模型端点的契约测试；真实 provider 语义 smoke 仍待执行。
   review thread 映射、回复和 resolve 已通过自动化；冲突处理和真实多轮闭环仍待验收。
-- 已知 Medium：远端观察编辑后，迟到的重复 webhook 可能在同秒正文回退时被再次重放，
-  使旧内容成为新版本并进入待处理反馈。复现顺序与修复验收条件见 [F4 已知问题](docs/plan/m2-review-resolution.md#同秒重复-webhook-重放medium未修复)。
 - Reconciler 目前只定时记录活跃 Flow，尚不拉取 GitHub 状态补偿漏失事件。
 - cancel 会取消本地流程和任务，尚不终止正在执行的 agent 进程；跨 worker session 迁移、
   多 serve 高可用、GitHub-only 网络限制和由项目管理的强隔离运行环境仍属后续工作。

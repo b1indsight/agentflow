@@ -1,9 +1,9 @@
 # M4 Feature 1/9：同秒反馈版本去重
 
-> 状态：计划待审批；本 PR 只含文档，尚未实施。
+> 状态：用户于 2026-09-09 批准按序实现并推送；F1 已实施并验证，留待用户统一 review/合并。
 > 规划日期：2026-09-09；基线：`main@origin` / `be65878f`（归档恢复修复 #27 已合并）。
 > bookmark：`feat/m4-feedback-replay`；实现前置：最新 main（M3 F1–F3 与归档恢复修复已合并）。
-> 一 feature = 一 bookmark = 一 PR；前置合并后更新到最新 main，在本 PR 实施，不先合并纯计划。
+> 一 feature = 一 bookmark = 一 PR；用户统一 review/合并，后续 PR 以已实现前项分支为基线。
 
 ## 1. 目标与边界
 
@@ -54,3 +54,13 @@
 本次规划仅做文档内容、链接和 diff 检查。实施按“先失败测试→最小实现→针对性验证→完整检查”
 推进；完整检查为实际 PostgreSQL 下 pytest、Ruff、Mypy 和 `uv build --no-sources`。
 
+## 实施记录（2026-09-09）
+
+- 使用既有版本历史核对同一对象、同一时间戳的前后正文转换；迟到或无法区分的新一轮重复
+  编辑保留在 pending edits，等待冻结 item/version 的新鲜远端观察，不派生旧反馈。
+- 同一前序存在不同后继正文时不按 delivery ID 猜测顺序。较晚时间戳的真实重复编辑仍正常入库。
+- 不修改 schema、worker 协议、冻结批次或修订轮数；诊断记录沿用既有 pending edits。
+- 新增 `tests/test_feedback_replay.py`：原复现先得到 5 failed / 2 passed，再实现修复。
+  已有乱序编辑和线程恢复聚焦回归 85 passed；补充首次远端观察、跨连接并发与删除回归后执行完整检查。
+- 最终实际 PostgreSQL 全量：512 passed / 0 skipped；Mypy、Ruff 和 sdist/wheel 构建通过。
+  仅有既有 Starlette 弃用警告；真实 GitHub/Codex/bub 验收仍待进行。
