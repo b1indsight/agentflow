@@ -122,6 +122,12 @@ def flow_show(flow_id: int) -> None:
         if check is not None:
             typer.echo(f"  reconcile: last={check.last_success_at or '-'} next={check.next_at}"
                        f" failures={check.failures} reason={check.last_error or '-'}")
+        for source in ("issue_comments", "pr_comments", "reviews"):
+            observation = store.reconcile.feedback_get(f.id, source)
+            if observation is not None:
+                typer.echo(f"  feedback {source}: cursor={observation.cursor or '-'}"
+                           f" last={observation.last_success_at or '-'} next={observation.next_at}"
+                           f" failures={observation.failures} reason={observation.last_error or '-'}")
         for att in store.list_attempts(f.id):
             cur = " (current)" if att.id == f.current_attempt_id else ""
             typer.echo(

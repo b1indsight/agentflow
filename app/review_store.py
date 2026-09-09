@@ -73,6 +73,8 @@ ALTER TABLE review_batches ADD COLUMN IF NOT EXISTS context_stale BOOLEAN NOT NU
 ALTER TABLE review_batches ADD COLUMN IF NOT EXISTS decision JSONB;
 ALTER TABLE review_batches ADD COLUMN IF NOT EXISTS threads JSONB;
 ALTER TABLE review_versions ADD COLUMN IF NOT EXISTS addressed_sha TEXT;
+ALTER TABLE review_versions ADD COLUMN IF NOT EXISTS observation_seq BIGINT GENERATED ALWAYS AS IDENTITY;
+CREATE UNIQUE INDEX IF NOT EXISTS ux_review_observation_seq ON review_versions(observation_seq);
 ALTER TABLE review_versions ADD COLUMN IF NOT EXISTS addressed_job_id BIGINT REFERENCES jobs(id);
 CREATE TABLE IF NOT EXISTS review_thread_observations (
   flow_id BIGINT NOT NULL REFERENCES flows(id),
@@ -275,6 +277,39 @@ class ReviewStore:
                     FeedbackUpdate.model_validate(pending["content"]),
                     previous_body=pending["previous_body"],
                 )
+
+    def observation_boundary(self) -> int:
+        """Freeze under the Flow lock before remote I/O, including already consumed versions."""
+        with self.store.connection() as connection:
+            row = connection.execute("SELECT COALESCE(MAX(observation_seq),0) seq FROM review_versions").fetchone()
+            assert row is not None
+            return row["seq"]
+
+    def observe_feedback(
+        self, flow_id: int, attempt_id: int, updates: list[FeedbackUpdate],
+        boundary: int, settle_seconds: float,
+    ) -> None:
+        """Apply a page under the Flow lock; concurrent immutable versions win over a slow read."""
+        changed = False
+        with self.store.connection() as connection:
+            for update in updates:
+                row = connection.execute(
+                    "SELECT v.content,v.observation_seq FROM review_items i JOIN review_versions v"
+                    " ON i.id=v.item_id AND i.version=v.version WHERE i.flow_id=%s"
+                    " AND i.kind=%s AND i.github_id=%s", (flow_id, update.kind, update.github_id),
+                ).fetchone()
+                if row and row["observation_seq"] > boundary:
+                    continue
+                old = FeedbackUpdate.model_validate(row["content"]) if row else None
+                if old and (old.body, old.author, old.deleted) == (update.body, update.author, update.deleted):
+                    # A repeated observation cannot downgrade an authorized webhook signal.
+                    update = update.model_copy(update={"signal": old.signal, "submitted": old.submitted})
+                appended = self._append_version(
+                    flow_id, attempt_id, None, update, previous_body=old.body if old else None,
+                )
+                changed |= appended and not update.deleted
+            if changed:
+                self._touch(flow_id, settle_seconds)
 
     def _has_unused_signal(self, flow_id: int) -> bool:
         with self.store.connection() as connection:

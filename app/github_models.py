@@ -20,6 +20,25 @@ class IssueSnapshot(GitHubModel):
     state: str
 
 
+FeedbackSource = Literal["issue_comments", "pr_comments", "reviews"]
+
+
+class RemoteFeedback(GitHubModel):
+    """Full observed content; deliberately carries no webhook sender authorization."""
+
+    github_id: int = Field(gt=0)
+    author: str
+    body: str
+    updated_at: AwareDatetime
+    is_bot: bool = False
+    state: Literal["commented", "changes_requested", "approved", "dismissed", "pending"] = "commented"
+
+
+class FeedbackPage(GitHubModel):
+    items: list[RemoteFeedback] = Field(max_length=50)
+    next_cursor: str | None = None
+
+
 class RepositorySnapshot(GitHubModel):
     full_name: str
     default_branch: str

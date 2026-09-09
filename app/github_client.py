@@ -31,7 +31,10 @@ from app.context_models import (
     FilePage,
     ReviewPullRequest,
 )
+from app.github_feedback import read_feedback_page
 from app.github_models import (
+    FeedbackPage,
+    FeedbackSource,
     GitHubAdapterError,
     GitHubErrorKind,
     IssueSnapshot,
@@ -89,6 +92,15 @@ class GitHubApp:
             timeout=self._request_timeout_seconds,
             auto_retry=auto_retry,
         )
+
+    async def list_feedback_page(
+        self, installation_id: int, repo: str, number: int,
+        source: FeedbackSource, cursor: str | None,
+    ) -> FeedbackPage:
+        client = self._installation_client(installation_id, auto_retry=False)
+        return await self._execute("feedback_page", lambda: read_feedback_page(
+            client, repo, number, source, cursor,
+        ))
 
     async def get_issue(self, installation_id: int, repo: str, number: int) -> IssueSnapshot:
         owner, name = self._split_repo(repo)

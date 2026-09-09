@@ -1,9 +1,9 @@
 # M4 Feature 4/9：Issue/PR 讨论与 Review 正文对账
 
-> 状态：计划待审批；本 PR 只含文档，尚未实施。
+> 状态：用户已批准顺序独立实施并推送；实现完成，完整验证通过。
 > 规划日期：2026-09-09；基线：`main@origin` / `be65878f`（归档恢复修复 #27 已合并）。
 > bookmark：`feat/m4-discussion-reconcile`；实现前置：F1、F3。
-> 一 feature = 一 bookmark = 一 PR；前置合并后更新到最新 main，在本 PR 实施，不先合并纯计划。
+> 本 PR 以 F3 bookmark 为 base；按用户指示无需等待合并，独立 review 后由用户统一合并。
 
 ## 1. 目标与依赖
 
@@ -56,6 +56,17 @@ source 状态只表达分页进度，不引入第二套反馈模型或 Judge 队
 目标 800–1100 行，预计超过 1200 行先缩小/拆出独立可验收 feature，不压缩测试或代码行数凑数。
 优先另拆：自动执行漏失的 stop/trigger 命令、全文历史导入和删除推断。未完成必需正确性验收时不能仅以行数达标合并。
 
-本次规划仅做文档内容、链接和 diff 检查。实施按“先失败测试→最小实现→针对性验证→完整检查”
+实施按“先失败测试→最小实现→针对性验证→完整检查”
 推进；完整检查为实际 PostgreSQL 下 pytest、Ruff、Mypy 和 `uv build --no-sources`。
 
+## 实现记录
+
+三个来源共享 `feedback_reconcile` 调度表，每页写入与 cursor 原子提交。每条不可变版本增加
+全局递增 `observation_seq`；查询前在 Flow 锁内冻结边界，因此不必载入整个历史来保护新 webhook。
+新增完整正文分页接口，REST 读评论，GraphQL 的 `updatedAt`/`fullDatabaseId` 读 review 编辑与 64 位 ID。
+这些周期读取禁用 SDK 自动重试，由持久 deadline 处理错误。现有 prompt 截断接口保持原语义。
+已覆盖三来源漏投、第二页失败/重启、事务回滚、同秒竞争/删除、强信号保留、历史命令过滤、
+限流和池取消；自动化不代表真实 GitHub App/Codex/bub E2E 已验收。
+
+验证：先失败测试确认缺少新模块；完整 PostgreSQL **570 passed / 0 skipped**，Ruff、Mypy、
+`uv build --no-sources` 均通过。现存 Starlette 弃用 warning 与本变更无关。
