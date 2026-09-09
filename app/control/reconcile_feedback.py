@@ -4,7 +4,7 @@ import asyncio
 
 from loguru import logger
 
-from app.github_models import GitHubAdapterError, GitHubErrorKind
+from app.github_models import FeedbackPage, FeedbackSource, GitHubAdapterError, GitHubErrorKind
 from app.github_retry import retry_delay
 from app.models import DeliveryState, FlowState, ReviewItemKind
 from app.ports import GitHubClient
@@ -64,22 +64,28 @@ class FeedbackReconciler:
                     raise ValueError("missing installation")
                 boundary = tx.reviews.observation_boundary()
             number = flow.issue_number if check.source == "issue_comments" else delivery.pr_number
-            page = await self.github.list_feedback_page(
-                flow.installation_id, flow.repo, number, check.source, check.cursor,
-            )
-            updates, diagnostic = [], None
-            for item in page.items:
-                if item.is_bot or item.author.casefold() == self.bot_login or item.state == "pending":
-                    continue
-                inert = item.body.strip().startswith("/flow")
-                if inert:
-                    diagnostic = "historical command ignored"
-                deleted = check.source == "reviews" and item.state in {"approved", "dismissed"}
-                updates.append(FeedbackUpdate(
-                    kind=ReviewItemKind.REVIEW_BODY if check.source == "reviews" else ReviewItemKind.CONVERSATION,
-                    github_id=item.github_id, author=item.author, body="" if deleted else item.body,
-                    updated_at=item.updated_at, deleted=deleted, inert=inert,
-                ))
+            threads, diagnostic = None, None
+            updates: list[FeedbackUpdate] = []
+            if check.source == "threads":
+                thread_page = await self.github.list_review_thread_page(
+                    flow.installation_id, flow.repo, number, check.cursor,
+                )
+                threads = thread_page.snapshot
+                threads = threads.model_copy(update={"threads": [thread.model_copy(update={
+                    "comments": [comment.model_copy(update={"is_bot": comment.is_bot
+                        or comment.author.casefold() == self.bot_login}) for comment in thread.comments],
+                }) for thread in threads.threads]})
+                following = thread_page.next_cursor
+                diagnostic = "; ".join(threads.limitations) or (
+                    "partial thread fragments; resolution requires a complete fresh read"
+                    if any(not thread.complete for thread in threads.threads) else None
+                )
+            else:
+                page = await self.github.list_feedback_page(
+                    flow.installation_id, flow.repo, number, check.source, check.cursor,
+                )
+                updates, diagnostic = self._discussion_updates(page, check.source)
+                following = page.next_cursor
             with self.store.transaction() as tx:
                 fresh = tx.lock_workflow(flow.id)
                 current = tx.get_delivery(flow.id)
@@ -89,10 +95,16 @@ class FeedbackReconciler:
                         or current != delivery):
                     tx.reconcile.feedback_failed(check, 5, "Flow changed during observation")
                     return
-                tx.reviews.observe_feedback(flow.id, flow.current_attempt_id, updates, boundary, self.settle_seconds)
+                if threads is None:
+                    tx.reviews.observe_feedback(flow.id, flow.current_attempt_id, updates, boundary, self.settle_seconds)
+                else:
+                    tx.reviews.observe_threads(
+                        flow.id, threads, [], boundary=boundary, settle_seconds=self.settle_seconds,
+                    )
                 tx.reconcile.feedback_finish(
-                    check, page.next_cursor, 5 if page.next_cursor else self.interval,
-                    diagnostic or ("scan incomplete; continuation saved" if page.next_cursor else None),
+                    check, following, 5 if following else self.interval,
+                    diagnostic or ("scan incomplete; continuation saved" if following else None),
+                    complete=not threads.limitations if threads is not None else True,
                 )
         except GitHubAdapterError as error:
             delay = retry_delay(check.failures + 1, self.store.now(), error)
@@ -103,3 +115,21 @@ class FeedbackReconciler:
             self.store.reconcile.feedback_failed(
                 check, retry_delay(check.failures + 1, self.store.now()), type(error).__name__,
             )
+
+    def _discussion_updates(
+        self, page: FeedbackPage, source: FeedbackSource,
+    ) -> tuple[list[FeedbackUpdate], str | None]:
+        updates, diagnostic = [], None
+        for item in page.items:
+            if item.is_bot or item.author.casefold() == self.bot_login or item.state == "pending":
+                continue
+            inert = item.body.strip().startswith("/flow")
+            if inert:
+                diagnostic = "historical command ignored"
+            deleted = source == "reviews" and item.state in {"approved", "dismissed"}
+            updates.append(FeedbackUpdate(
+                kind=ReviewItemKind.REVIEW_BODY if source == "reviews" else ReviewItemKind.CONVERSATION,
+                github_id=item.github_id, author=item.author, body="" if deleted else item.body,
+                updated_at=item.updated_at, deleted=deleted, inert=inert,
+            ))
+        return updates, diagnostic

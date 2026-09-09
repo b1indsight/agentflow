@@ -1,9 +1,9 @@
 # M4 Feature 5/9：Review 线程持续对账
 
-> 状态：计划待审批；本 PR 只含文档，尚未实施。
+> 状态：用户已批准顺序独立实施并推送；实现完成，完整验证通过。
 > 规划日期：2026-09-09；基线：`main@origin` / `be65878f`（归档恢复修复 #27 已合并）。
 > bookmark：`feat/m4-thread-reconcile`；实现前置：F1、F3。
-> 一 feature = 一 bookmark = 一 PR；前置合并后更新到最新 main，在本 PR 实施，不先合并纯计划。
+> 本 PR 以 F4 bookmark 为 base；按用户指示无需等待合并，独立 review 后由用户统一合并。
 
 ## 1. 目标与依赖
 
@@ -55,6 +55,25 @@ F4 处理普通讨论；两者可以独立验收，共用现有反馈版本和 s
 目标 800–1100 行，预计超过 1200 行先缩小/拆出独立可验收 feature，不压缩测试或代码行数凑数。
 优先另拆：自动 unresolve、删除评论推断和无限历史线程归档。未完成必需正确性验收时不能仅以行数达标合并。
 
-本次规划仅做文档内容、链接和 diff 检查。实施按“先失败测试→最小实现→针对性验证→完整检查”
+实施按“先失败测试→最小实现→针对性验证→完整检查”
 推进；完整检查为实际 PostgreSQL 下 pytest、Ruff、Mypy 和 `uv build --no-sources`。
 
+## 实现记录
+
+在线程来源复用 F4 的有界调度/重试和版本序号，不新建 Judge 队列。每次一条 GraphQL 请求，
+获取一个线程的至多 20 条评论；类型化 JSON continuation 分别保存外层和内层 cursor。
+使用 [GitHub 64 位 comment ID 与 updatedAt](https://docs.github.com/en/graphql/reference/pulls#pullrequestreviewcomment)。
+跨页 thread 片段始终 incomplete，即使最后一页读完也不伪装为完整覆盖；既有 M2 完整新鲜
+读取与 effect ledger 仍拥有 resolve 权限。消失节点不会卡死后续线程，但整轮保持缺失诊断。
+每页的反馈、人工状态与进度同事务提交；不推断删除或扩大原 resolution receipt。
+真实 GitHub 线程操作矩阵尚未验收。
+
+验证：先失败测试确认缺少分页契约；完整 PostgreSQL **590 passed / 0 skipped**，Ruff、Mypy、
+`uv build --no-sources` 均通过。覆盖嵌套 cursor、重启/回滚、新版本竞争、缺页和人工状态。
+
+## 2026-09-14 恢复问题返修
+
+真实 SDK 对嵌套节点返回 null + NOT_FOUND 时，转换为不完整页并保留外层续页；
+权限混合错误和非嵌套失败仍交回持久退避。真实 MockTransport 回归先失败后通过。
+合并前序 F4 的 inert 命令版本逻辑到提取后的讨论转换函数，避免返修被重构覆盖。
+原 low 的两套线程解析重构不在本次恢复修复范围。

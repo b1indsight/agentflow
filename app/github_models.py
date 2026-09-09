@@ -96,6 +96,13 @@ class RemoteRef(GitHubModel):
     sha: str
 
 
+class ReviewThreadPage(GitHubModel):
+    """One thread/comment page; partial thread fragments never prove resolution coverage."""
+
+    snapshot: ReviewThreads
+    next_cursor: str | None = None
+
+
 class PullRequestSnapshot(GitHubModel):
     number: int
     state: str
