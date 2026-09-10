@@ -1,9 +1,9 @@
 # M4 Feature 6/9：未合并 PR 关闭与重新打开
 
-> 状态：计划待审批；本 PR 只含文档，尚未实施。
+> 状态：用户已批准顺序独立实施并推送；实现完成，完整验证通过。
 > 规划日期：2026-09-09；基线：`main@origin` / `be65878f`（归档恢复修复 #27 已合并）。
 > bookmark：`feat/m4-pr-lifecycle`；实现前置：F3。
-> 一 feature = 一 bookmark = 一 PR；前置合并后更新到最新 main，在本 PR 实施，不先合并纯计划。
+> 本 PR 以 F5 bookmark 为 base；按用户指示无需等待合并，独立 review 后由用户统一合并。
 
 ## 1. 目标与依赖
 
@@ -59,6 +59,28 @@
 目标 800–1100 行，预计超过 1200 行先缩小/拆出独立可验收 feature，不压缩测试或代码行数凑数。
 优先另拆：人工 push 接纳、自动 rebase、自动清理关闭 PR 的 repo 和 executor kill。未完成必需正确性验收时不能仅以行数达标合并。
 
-本次规划仅做文档内容、链接和 diff 检查。实施按“先失败测试→最小实现→针对性验证→完整检查”
+实施按“先失败测试→最小实现→针对性验证→完整检查”
 推进；完整检查为实际 PostgreSQL 下 pytest、Ruff、Mypy 和 `uv build --no-sources`。
 
+## 实现记录
+
+复用 `DeliveryState.CLOSED` 和 `supersedes()` 贯穿领取、准备、最后派发、tool/effect dispatch 与结果收尾。
+关闭/漂移取消旧队列与 batch，保留真实编辑；重开通过持久 `force_triage` 重新冻结，避免复用强信号
+决策或伪造反馈已 relayed。新鲜查询检查原 PR/base/ref；只允许原 head 或经既有 revision/INITIAL
+核验的冻结 worker 结果。状态、attempt、delivery version 和最终 coding job 再次核对后恢复。
+PR 创建响应丢失后若发现已 closed，绑定经编号查询核验的身份，退休未发 effects 并完成原 ACK。
+仍在执行或没有可靠结果的 executor 不被当成退出，不自动释放、kill 或采纳人工 push。
+自动化已覆盖关闭/重开、真实 PostgreSQL、派发凭据竞态、in-flight revision、旧评论响应丢失、
+INITIAL 最终提交前关闭和事务回滚；真实 GitHub close/reopen/归档 smoke 尚未验收。
+
+验证：先失败测试后实施，完整 PostgreSQL **607 passed / 0 skipped**；Ruff、Mypy、
+`uv build --no-sources` 均通过。17 个新增数据库生命周期用例，已有合并与结果恢复回归通过。
+
+## 阻塞与恢复返修
+
+- CLOSED 保留原执行绑定；失联和租约超时不会释放现场，原 Started 任务可以恢复连接。
+- 重开时先退休关闭后重新入队的旧任务，再冻结当前反馈，避免陈旧任务重新执行。
+- 对账提示持久化版本；远端查询期间新到的提示保留立即再检查的期限。
+- 新增关闭后断联、三种重新入队和查询竞态的 6 项 PostgreSQL 回归；针对性 73 passed。
+
+返修验证：PostgreSQL 完整套件 624 passed；Ruff、Mypy、build 通过。

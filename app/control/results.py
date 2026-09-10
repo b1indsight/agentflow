@@ -454,7 +454,7 @@ class ResultApplication:
         message = parse_worker_message(json.dumps(job.result_payload))
         run = None
         state = JobState.DONE
-        reason = "PR merged; late result retained without applying coding/review changes"
+        reason = "PR closed or merged; late result retained without applying coding/review changes"
         if isinstance(message, Failed):
             state, reason = JobState.FAILED, f"{reason}: {message.error}"
         elif isinstance(message, Succeeded):

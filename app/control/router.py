@@ -168,8 +168,13 @@ class EventRouter:
 
     def _on_pull_request(self, delivery_id: str, payload: dict) -> None:
         pull_request = payload.get("pull_request") or {}
-        if payload.get("action") != "closed" or pull_request.get("merged") is not True:
+        if payload.get("action") not in {"closed", "reopened", "synchronize"}:
             return
         flow = self.store.get_flow_by_pr(payload["repository"]["full_name"], pull_request["number"])
-        if flow:
+        if flow and payload.get("action") == "closed" and pull_request.get("merged") is True:
             self.service.on_merged(flow, delivery_id, payload)
+        elif flow:
+            with self.store.transaction() as tx:
+                fresh = tx.lock_workflow(flow.id)
+                if fresh is not None and tx.record_event(delivery_id, "pull_request", flow.id, payload):
+                    tx.reconcile.hint(flow.id)

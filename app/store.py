@@ -361,6 +361,25 @@ class Store:
                 ),
             )
 
+    def lifecycle_job(self, flow_id: int) -> Job | None:
+        """Latest coding execution, excluding jobs cancelled before they could run."""
+        with self.connection() as connection:
+            return connection.cursor(row_factory=class_row(Job)).execute(
+                "SELECT * FROM jobs WHERE flow_id=%s AND kind IN ('initial','revision')"
+                " AND (state='running' OR started_at IS NOT NULL OR result_received_at IS NOT NULL)"
+                " AND NOT (started_at IS NULL AND COALESCE(result_payload->>'connection_epoch','')='control')"
+                " ORDER BY id DESC LIMIT 1", (flow_id,),
+            ).fetchone()
+
+    def reopen_blocked(self, flow_id: int) -> bool:
+        """A timeout cannot prove that an executor exited or a dispatched effect settled."""
+        with self.connection() as connection:
+            return connection.execute(
+                "SELECT 1 FROM jobs WHERE flow_id=%s AND (state='running'"
+                " OR (result_received_at IS NOT NULL AND result_applied_at IS NULL)"
+                " OR (started_at IS NOT NULL AND result_received_at IS NULL)) LIMIT 1", (flow_id,),
+            ).fetchone() is not None
+
     def has_pending_result(self, flow_id: int) -> bool:
         with self.connection() as connection:
             return (
@@ -854,6 +873,8 @@ class Store:
         now = self._clock()
         # Share this predicate across fair-worker selection and both binding paths.
         eligible = (
+            " AND NOT EXISTS (SELECT 1 FROM flow_deliveries paused"
+            " WHERE paused.flow_id=j.flow_id AND paused.state='closed')"
             " AND ((j.kind='archive') = EXISTS (SELECT 1 FROM flow_deliveries d"
             " WHERE d.flow_id=j.flow_id AND d.state='merged'))"
             " AND (j.kind<>'archive' OR EXISTS (SELECT 1 FROM flow_executions e"
@@ -1061,7 +1082,7 @@ class Store:
                 " AND assignment_token=%s AND (recovery_deadline IS NULL"
                 " OR recovery_deadline>%s OR EXISTS (SELECT 1 FROM flow_deliveries d"
                 " JOIN flows f ON f.id=d.flow_id JOIN flow_executions e ON e.flow_id=f.id"
-                " WHERE f.id=jobs.flow_id AND f.state='active' AND d.state='merged'"
+                " WHERE f.id=jobs.flow_id AND f.state='active' AND d.state IN ('closed','merged')"
                 " AND e.released_at IS NULL AND e.worker_id=jobs.assigned_worker_id))"
                 " AND EXISTS (SELECT 1 FROM workers"
                 " WHERE worker_id=%s AND connection_epoch=%s)",
@@ -1383,7 +1404,7 @@ class Store:
                 " AND recovery_deadline IS NOT NULL AND recovery_deadline<=%s"
                 " AND result_received_at IS NULL"
                 " AND NOT EXISTS (SELECT 1 FROM flow_deliveries d JOIN flows f ON f.id=d.flow_id"
-                " WHERE d.flow_id=jobs.flow_id AND d.state='merged' AND f.state='active')"
+                " WHERE d.flow_id=jobs.flow_id AND d.state IN ('closed','merged') AND f.state='active')"
                 " RETURNING id, flow_id, assigned_worker_id",
                 (
                     JobState.FAILED,
@@ -1398,7 +1419,7 @@ class Store:
                 " AND " + _MAY_HAVE_EXECUTED + " AND recovery_deadline<=%s"
                 " AND result_received_at IS NULL AND EXISTS"
                 " (SELECT 1 FROM flow_deliveries d JOIN flows f ON f.id=d.flow_id"
-                " WHERE d.flow_id=jobs.flow_id AND d.state='merged' AND f.state='active')",
+                " WHERE d.flow_id=jobs.flow_id AND d.state IN ('closed','merged') AND f.state='active')",
                 ("archive blocked: original worker executor status is unknown", now),
             )
             requeued_ids = [row["id"] for row in requeued_rows]
@@ -1430,7 +1451,7 @@ class Store:
                 "UPDATE flow_executions SET released_at=%s"
                 " WHERE released_at IS NULL AND recovery_deadline IS NOT NULL"
                 " AND NOT EXISTS (SELECT 1 FROM flow_deliveries d JOIN flows f ON f.id=d.flow_id"
-                " WHERE d.flow_id=flow_executions.flow_id AND d.state='merged' AND f.state='active')"
+                " WHERE d.flow_id=flow_executions.flow_id AND d.state IN ('closed','merged') AND f.state='active')"
                 " AND recovery_deadline<=%s AND NOT EXISTS (SELECT 1 FROM jobs j"
                 " WHERE j.flow_id=flow_executions.flow_id AND j.result_received_at IS NOT NULL"
                 " AND j.result_applied_at IS NULL) RETURNING flow_id, worker_id",

@@ -202,6 +202,8 @@ class WorkerGateway:
                     delivery = self.store.get_delivery(job.flow_id)
                     if (not isinstance(prepared, JobState) and delivery is not None
                             and delivery.supersedes(job.kind)):
+                        if delivery.state is DeliveryState.CLOSED:
+                            return JobState.DONE, None
                         await self.coordinator.fail(job, "PR merged before task dispatch")
                         return JobState.FAILED, None
                     return prepared, secret

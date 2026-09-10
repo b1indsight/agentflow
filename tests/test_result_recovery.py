@@ -156,7 +156,7 @@ async def test_initial_delivery_commits_only_after_all_required_effects(
     assert store.jobs[job.id].result_applied_at is not None
 
 
-async def test_initial_delivery_rejects_a_closed_pr(initial_scenario) -> None:
+async def test_initial_delivery_records_closed_pr_without_reopening(initial_scenario) -> None:
     from app.github_models import PullRequestSnapshot
 
     store, github, job, result = initial_scenario
@@ -168,13 +168,13 @@ async def test_initial_delivery_rejects_a_closed_pr(initial_scenario) -> None:
         base_branch="trunk",
     )
     state = await apply_result(coordinator(store, github), job, result)
-    assert state is JobState.FAILED
-    assert store.flow.state is FlowState.FAILED
-    assert store.delivery.state is DeliveryState.OPENING
+    assert state is JobState.DONE
+    assert store.flow.state is FlowState.ACTIVE
+    assert store.delivery.state is DeliveryState.CLOSED and store.delivery.pr_number == 17
     assert github.opened == github.labels == github.review_requests == []
 
 
-async def test_closed_pr_is_a_permanent_conflict_even_after_lost_response(
+async def test_closed_pr_after_lost_creation_response_finishes_without_new_writes(
     initial_scenario, monkeypatch
 ):
     store, github, job, result = initial_scenario
@@ -191,7 +191,8 @@ async def test_closed_pr_is_a_permanent_conflict_even_after_lost_response(
     assert github.pull_request is not None
     github.pull_request = github.pull_request.model_copy(update={"state": "closed"})
     store.results.clock += timedelta(seconds=10)
-    assert await apply_result(subject, job, result) is JobState.FAILED
+    assert await apply_result(subject, job, result) is JobState.DONE
+    assert store.delivery.state is DeliveryState.CLOSED
     assert store.jobs[job.id].result_applied_at is not None
     assert len(github.opened) == 1
     assert github.labels == github.review_requests == []

@@ -10,6 +10,11 @@ FlowTool 的目标是把带 `flow` 标签的 GitHub issue 编排成
 
 ## 当前能力
 
+- **关闭与重开**：未合并 PR 关闭后保留原 worker/仓库 slot，停止新派发与 GitHub 写操作；
+  已发操作按原账本收尾。重开同一 PR 后重新核验 head/base 与已完成的 worker 交付，再重新
+  triage 未消费反馈。人工漂移、未知执行或未决 effects 保持暂挂；`flow show` 显示恢复条件，
+  `flow retry` 不能绕过此状态。关闭期间收到的真实反馈编辑仍保留。
+
 - **反馈对账**：原 Issue、PR 普通评论和 Review 正文分别保存分页进度，默认每 300 秒复扫；
   每个来源每次至多读取 50 条完整正文，未完成的页 5 秒后继续。重启保留 cursor/退避，
   `flow show` 展示各来源诊断。旧命令不追溯执行，列表缺席不推断删除。
@@ -34,7 +39,8 @@ FlowTool 的目标是把带 `flow` 标签的 GitHub issue 编排成
 - **Issue→PR 交付**：读取真实 Issue 和仓库默认分支，为 Codex 提供单仓库、短时 Contents write
   push capability，由 agent 自主 commit/push。`flow.open_pr` 先核验远端 SHA 并持久化 PR 意图，
   **INITIAL 终态结果校验成功后**才创建或复用唯一的 open PR，再设置标签和 reviewer。
-  已修复失败 Flow 重试后的执行绑定复用、提前开 PR 和 closed PR 被误判为成功的问题。
+  已修复失败 Flow 重试后的执行绑定复用和提前开 PR；创建后已关闭的 PR 保留身份并暂挂，
+  INITIAL 结果只收尾执行事实，不回开 PR。
 - **原子提交与操作恢复**：trigger/retry/merge/cancel 的状态和任务变更在共享事务内提交；
   终态结果先持久接收，再执行带回执的 GitHub 操作，最后原子提交本地结果并发送 `ResultAccepted`。
   恢复时核对远端状态，避免重复派生 job 或重复发送评论；无法确认的远端结果保留待核对状态。
