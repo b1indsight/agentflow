@@ -136,7 +136,7 @@ class GitHubApp:
     ) -> PullRequestStatus:
         """Read the associated PR by number; a missing or inaccessible PR is not a close event."""
         owner, name = self._split_repo(repo)
-        client = self._installation_client(installation_id)
+        client = self._installation_client(installation_id, auto_retry=False)
 
         async def operation() -> PullRequestStatus:
             data = (await client.rest.pulls.async_get(owner, name, number)).parsed_data

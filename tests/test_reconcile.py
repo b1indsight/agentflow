@@ -183,7 +183,7 @@ async def test_status_adapter_reads_by_number_and_keeps_merge_sha(tmp_path, monk
     endpoint = AsyncEndpoint(response(data))
     client = SimpleNamespace(rest=SimpleNamespace(pulls=SimpleNamespace(async_get=endpoint)))
     app = GitHubApp(settings(tmp_path))
-    monkeypatch.setattr(app, "_installation_client", lambda _: client)
+    monkeypatch.setattr(app, "_installation_client", lambda _, **kwargs: client)
     result = await app.get_pull_request_status(42, "owner/repo", 17)
     assert endpoint.calls == [(("owner", "repo", 17), {})]
     assert result.repo == "owner/repo" and result.merge_commit_sha == "a" * 40
@@ -233,3 +233,31 @@ def test_shared_retry_timing_preserves_server_deadlines(header, expected):
     now = datetime(2026, 9, 9, tzinfo=UTC)
     error = GitHubAdapterError(GitHubErrorKind.RATE_LIMITED, "read", retry_after=header)
     assert retry_delay(1, now, error) == expected
+
+
+async def test_sdk_rate_limit_reaches_durable_poll_owner(store, merge_flow, tmp_path, monkeypatch):
+    import httpx
+    from githubkit import GitHub as SDK
+
+    calls = []
+
+    def limited(request):
+        calls.append(request)
+        return httpx.Response(429, json={"message": "rate limited"}, headers={"Retry-After": "600"})
+
+    app = GitHubApp(settings(tmp_path))
+    monkeypatch.setattr(app, "_installation_client", lambda _, **options: SDK(
+        "test-token", async_transport=httpx.MockTransport(limited), **options,
+    ))
+    # SDK sleep must not hold the failure outside PostgreSQL until cancellation.
+    before = store.now()
+    await asyncio.wait_for(subject(store, app)._sweep(), 1)
+    deadline = store.reconcile.get(merge_flow.id).next_at
+    assert deadline >= before + timedelta(seconds=600)
+    assert len(calls) == 1
+    restarted = Store(store.database_url, clock=store.now)
+    try:
+        await subject(restarted, app)._sweep()
+        assert len(calls) == 1 and restarted.reconcile.get(merge_flow.id).next_at == deadline
+    finally:
+        restarted.close()

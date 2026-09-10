@@ -74,3 +74,8 @@
 - `flow show` 展示检查时间/错误；普通 close 和 head/base 漂移只记诊断，不修改已核验交付。
 - 实际 PostgreSQL 完整回归 548 passed / 0 skipped；涵盖原 M3 合并与归档路径。
   Ruff、Mypy 和 sdist/wheel 构建通过，真实 App smoke 待执行。
+
+## 2026-09-14 恢复问题返修
+
+编号 PR 读取禁用 SDK 内部重试，使限流直接交给持久调度器处理。真实 SDK MockTransport +
+PostgreSQL 用例验证 Retry-After 在请求返回时入库，重启后不会提前重新请求。
