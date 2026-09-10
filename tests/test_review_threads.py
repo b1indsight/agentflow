@@ -44,7 +44,7 @@ async def test_threads_and_comments_have_independent_cursors(tmp_path, monkeypat
             "reviewThreads": connection(nodes, "threads-1" if first else None)}}}
 
     app = GitHubApp(settings(tmp_path))
-    monkeypatch.setattr(app, "_installation_client", lambda _: SimpleNamespace(async_graphql=graphql))
+    monkeypatch.setattr(app, "_installation_client", lambda _, **kwargs: SimpleNamespace(async_graphql=graphql))
     result = await app.list_review_threads(1, "owner/repo", 17)
     assert result.complete and len(result.threads) == 101
     assert len(result.threads[0].comments) == 21
@@ -65,7 +65,7 @@ async def test_invalid_thread_reads_never_look_complete(tmp_path, monkeypatch, f
         return {"node": node}
 
     app = GitHubApp(settings(tmp_path))
-    monkeypatch.setattr(app, "_installation_client", lambda _: SimpleNamespace(async_graphql=graphql))
+    monkeypatch.setattr(app, "_installation_client", lambda _, **kwargs: SimpleNamespace(async_graphql=graphql))
     if fault == "partial":
         with pytest.raises(GitHubAdapterError):
             await app.get_review_thread(1, "owner/repo", 17, "T1")
@@ -111,7 +111,7 @@ async def test_thread_snapshot_has_a_shared_finite_budget(tmp_path, monkeypatch,
         return {"node": node}
 
     app = GitHubApp(settings(tmp_path))
-    monkeypatch.setattr(app, "_installation_client", lambda _: SimpleNamespace(async_graphql=graphql))
+    monkeypatch.setattr(app, "_installation_client", lambda _, **kwargs: SimpleNamespace(async_graphql=graphql))
     result = await app.get_review_thread(1, "owner/repo", 17, "T1")
     assert not result.complete
     assert len(calls) == (1 if limit == "bytes" else 2)

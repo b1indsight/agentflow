@@ -174,6 +174,9 @@ class RemoteStore:
 
 
 class RemoteCoordinator:
+    async def prepare_for_assignment(self, job, worker, token, epoch):
+        return await self.prepare(job)
+
     def __init__(self, store: RemoteStore) -> None:
         self.store = store
         self.result: InitialResult | None = None

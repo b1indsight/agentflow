@@ -10,6 +10,11 @@ FlowTool 的目标是把带 `flow` 标签的 GitHub issue 编排成
 
 ## 当前能力
 
+- **准备期读重试**：Assignment 发出前的临时 GitHub 读取故障按原 worker binding 自动退避；
+  `FLOWTOOL_PREPARE_MAX_FAILURES` 默认 5 次，`FLOWTOOL_PREPARE_RETRY_WINDOW_SECONDS`
+  默认 900 秒，遵守 Retry-After，重启保留次数与时间。`flow show` 展示准备失败、下次时间和原因。
+  超出预算或永久 API 错误走现有失败/显式 retry 路径；凭据签发和 worker 执行不在此重试范围。
+
 - **关闭与重开**：未合并 PR 关闭后保留原 worker/仓库 slot，停止新派发与 GitHub 写操作；
   已发操作按原账本收尾。重开同一 PR 后重新核验 head/base 与已完成的 worker 交付，再重新
   triage 未消费反馈。人工漂移、未知执行或未决 effects 保持暂挂；`flow show` 显示恢复条件，

@@ -1,9 +1,9 @@
 # M4 Feature 7/9：准备期只读 GitHub 故障重试
 
-> 状态：计划待审批；本 PR 只含文档，尚未实施。
+> 状态：用户已批准顺序独立实施并推送；实现与自动化验证完成；等待用户统一 review/合并。
 > 规划日期：2026-09-09；基线：`main@origin` / `be65878f`（归档恢复修复 #27 已合并）。
 > bookmark：`feat/m4-preparation-retry`；实现前置：F2；F6 若已合并需覆盖 CLOSED 边界。
-> 一 feature = 一 bookmark = 一 PR；前置合并后更新到最新 main，在本 PR 实施，不先合并纯计划。
+> 本 PR 以 F6 bookmark 为 base；按用户指示无需等待合并，独立 review 后由用户统一合并。
 
 ## 1. 目标与依赖
 
@@ -59,6 +59,27 @@
 目标 800–1100 行，预计超过 1200 行先缩小/拆出独立可验收 feature，不压缩测试或代码行数凑数。
 优先另拆：自动重跑 CodeAgent/Judge、unknown executor 接管和所有 GitHub 写操作重试改造。未完成必需正确性验收时不能仅以行数达标合并。
 
-本次规划仅做文档内容、链接和 diff 检查。实施按“先失败测试→最小实现→针对性验证→完整检查”
+实施按“先失败测试→最小实现→针对性验证→完整检查”
 推进；完整检查为实际 PostgreSQL 下 pytest、Ruff、Mypy 和 `uv build --no-sources`。
 
+## 实现记录
+
+gateway 使用 `prepare_for_assignment()` 明确区分准备读取和后续凭据签发。只读失败分类为
+`PreparationReadFailure`；Store 在同一事务核对 worker/token/epoch、未 Started/无结果和生命周期，
+写入预算与重排，或写入现有控制失败结果。领取跳过未到期 job，成功清除独立准备字段。
+读取使用剩余窗口 timeout，超时只取消只读操作；过期恢复不会再发 API 请求。准备期 SDK 读取
+禁用自身自动重试，原 F3 PR 状态读取接口的已报告问题不在本次返修范围。
+线程/上下文 API 错误不再冻结成半份证据，整轮成功后同事务冻结候选；永久错误保留现有人工恢复。
+已覆盖暂时失败恢复、重启、Retry-After/预算、旧 token/epoch/Started/结果拒绝重排、回滚、
+其他 worker 进展、窗口中慢读取、半份上下文和真实 SDK 限流响应；真实外部 E2E 尚未验收。
+
+验证：实际 PostgreSQL 完整套件 **627 passed**；Ruff、Mypy（106 个源文件）和 `uv build --no-sources` 通过。
+
+## 阻塞与恢复返修
+
+- 永久读取失败也经过原 worker/token/epoch、未 Started、未接受结果的事务围栏，旧请求不能失败新领取者。
+- 准备预算耗尽保留最后一次脱敏端点、错误分类和请求诊断，便于修复凭据或服务后显式 retry。
+- 关闭 SDK 透明重试后，结果核验也保存独立失败次数、Retry-After 期限和错误；重启遵守期限，到期继续原结果，不消耗准备预算或重复 worker 执行。
+- CLI 展示结果核验的下次重试时间和原因。
+
+返修验证：PostgreSQL 完整套件 646 passed；Ruff、Mypy、build 通过。

@@ -149,6 +149,13 @@ def flow_show(flow_id: int) -> None:
             )
             if job.last_error:
                 typer.echo(f"    error: {job.last_error}")
+            if job.prepare_failures:
+                typer.echo(f"    preparation: failures={job.prepare_failures}"
+                           f" first={job.prepare_first_failed_at} next={job.prepare_next_at or '-'}"
+                           f" reason={job.prepare_last_error or '-'}")
+            if job.verify_next_at:
+                typer.echo(f"    verification: failures={job.verify_failures} next={job.verify_next_at}"
+                           f" reason={job.verify_last_error or '-'}")
             for effect in store.results.list_effects(job.id):
                 if effect.state.value not in {"succeeded", "skipped"}:
                     typer.echo(

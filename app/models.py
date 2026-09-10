@@ -181,8 +181,15 @@ class Job(BaseModel):
     result_received_at: datetime | None = None
     result_applied_at: datetime | None = None
     result_recovery_version: int = 1
+    verify_failures: int = 0
+    verify_next_at: datetime | None = None
+    verify_last_error: str | None = None
     source_job_id: int | None = None
     source_key: str | None = None
+    prepare_failures: int = 0
+    prepare_next_at: datetime | None = None
+    prepare_first_failed_at: datetime | None = None
+    prepare_last_error: str | None = None
     last_error: str | None = None
     payload: dict | None = None
     created_at: datetime = Field(default_factory=utcnow)

@@ -407,6 +407,8 @@ def coordinator(store: Store | MemoryStore, github: RecordingGitHub) -> JobCoord
         done_label="flow:done",
         confidence_threshold=0.6,
         max_revision_cycles=20,
+        prepare_max_failures=5,
+        prepare_retry_window_seconds=900,
     )
     return JobCoordinator(
         cast(Store, store),

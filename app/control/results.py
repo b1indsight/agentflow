@@ -184,11 +184,14 @@ class ResultApplication:
         delivery = self.store.get_delivery(flow.id)
         if delivery is None or delivery.head_sha != task.expected_head_sha:
             return "revision baseline no longer matches delivery"
+        if job.verify_next_at is not None and job.verify_next_at > self.store.now():
+            raise ResultPending(job.verify_last_error or "revision verification backoff")
         assert result.commit_sha is not None
         try:
             return await verify_revision_remote(self.effects.github, flow, delivery, result.commit_sha)
         except GitHubAdapterError as error:
             if error.retryable:
+                self.store.results.defer_verification(job, error)
                 raise ResultPending(str(error)) from error
             return str(error)
 

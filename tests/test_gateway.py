@@ -158,6 +158,9 @@ class RecordingStore:
 
 
 class RecordingCoordinator:
+    async def prepare_for_assignment(self, job, worker, token, epoch):
+        return await self.prepare(job)
+
     def __init__(self) -> None:
         self.started = False
         self.results: list[InitialResult] = []
