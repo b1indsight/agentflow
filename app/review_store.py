@@ -162,7 +162,8 @@ class ReviewStore:
                     and (
                         previous_body != old.body
                         or (delivery_id is not None and previous_body is not None
-                            and self._edit_seen(row["id"], previous_body, update))
+                            and (self._edit_seen(row["id"], previous_body, update)
+                                 or self._competing_edit(row["id"], previous_body, update)))
                     )
                 ):
                     # Missing predecessors and already represented same-second transitions are
@@ -219,9 +220,21 @@ class ReviewStore:
                 " ON p.item_id=v.item_id AND p.version=v.version-1"
                 " WHERE v.item_id=%s AND (v.content->>'updated_at')::timestamptz=%s"
                 " AND v.content->>'body'=%s AND (p.content->>'body'=%s"
-                " OR (p.version IS NULL AND v.source_delivery IS NULL)) LIMIT 1",
+                " OR v.source_delivery IS NULL) LIMIT 1",
                 (item_id, update.updated_at, update.body, previous_body),
             ).fetchone() is not None
+
+    def _competing_edit(self, item_id: int, previous_body: str, update: FeedbackUpdate) -> bool:
+        """An incoming webhook has no ordering advantage over a queued alternative."""
+        with self.store.connection() as connection:
+            candidates = connection.execute(
+                "SELECT content FROM review_pending_edits WHERE item_id=%s"
+                " AND previous_body=%s AND updated_at=%s",
+                (item_id, previous_body, update.updated_at),
+            ).fetchall()
+        return any(candidate["content"]["body"] != update.body and not self._edit_seen(
+            item_id, previous_body, FeedbackUpdate.model_validate(candidate["content"]),
+        ) for candidate in candidates)
 
     def _reconcile_edits(self, flow_id: int, update: FeedbackUpdate) -> bool:
         """Replay a durable same-second edit chain as predecessors arrive, in the ingest transaction."""

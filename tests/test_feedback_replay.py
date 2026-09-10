@@ -88,6 +88,26 @@ def test_competing_edit_successors_are_not_ordered_by_delivery_id(store, review_
     assert store.reviews.pending(flow.id)[0].body == "C"
 
 
+def test_observation_covering_skipped_predecessor_cannot_replay(store, review_flow):
+    flow, clock = review_flow
+    ingest(store, flow, feedback(clock, body="X"))
+    # The remote X→A→B edits occurred before the poll; A was never stored locally.
+    observe(store, flow, clock, "B")
+    assert not edit(store, flow, clock, "late-a-b", "A", "B")
+    observe(store, flow, clock, "A")
+    assert store.reviews.pending(flow.id)[0].body == "A"
+
+
+def test_incoming_edit_cannot_bypass_pending_competing_successors(store, review_flow):
+    flow, clock = review_flow
+    ingest(store, flow, feedback(clock, body="Original"))
+    edit(store, flow, clock, "queued-b", "A", "B")
+    edit(store, flow, clock, "queued-c", "A", "C")
+    edit(store, flow, clock, "arriving-a", "Original", "A")
+    assert not edit(store, flow, clock, "late-d", "A", "D")
+    assert store.reviews.pending(flow.id)[0].body == "A"
+
+
 def test_late_edit_reservation_rolls_back_with_the_observation(store, review_flow, monkeypatch):
     flow, clock = review_flow
     ingest(store, flow, feedback(clock, body="A"))
