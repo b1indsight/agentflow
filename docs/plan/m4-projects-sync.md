@@ -1,9 +1,9 @@
 # M4 Feature 9/9：Projects 状态投影与恢复
 
-> 状态：计划待审批；本 PR 只含文档，尚未实施。
+> 状态：用户已批准顺序独立实施并推送；实现与自动化验证完成；等待用户统一 review/合并。
 > 规划日期：2026-09-09；基线：`main@origin` / `be65878f`（归档恢复修复 #27 已合并）。
 > bookmark：`feat/m4-projects-sync`；实现前置：F3、F6、F8。
-> 一 feature = 一 bookmark = 一 PR；前置合并后更新到最新 main，在本 PR 实施，不先合并纯计划。
+> 一 feature = 一 bookmark = 一 PR；按用户授权叠在 F8 PR 上实施和推送，无需等待合并。
 
 ## 1. 目标与依赖
 
@@ -57,7 +57,7 @@
 | 新增 `tests/test_project_sync.py`，既有 archive/remote E2E 测试 | 响应丢失、乱序与归档隔离 |
 
 先写状态映射和真实 PostgreSQL 的旧版本响应测试，再接 F8 查询/add/set；
-最后验证归档成功与 Project 离线可并存，并完成阶段真实验收矩阵。
+最后验证归档成功与 Project 离线可并存；外部真实验收矩阵另记录未验项。
 
 ## 5. 验收
 
@@ -75,6 +75,22 @@
 目标 800–1100 行，预计超过 1200 行先缩小/拆出独立可验收 feature，不压缩测试或代码行数凑数。
 优先另拆：双向拖卡控制、历史全量导入、额外字段和每 Flow 新卡片。未完成必需正确性验收时不能仅以行数达标合并。
 
-本次规划仅做文档内容、链接和 diff 检查。实施按“先失败测试→最小实现→针对性验证→完整检查”
+实施按“先失败测试→最小实现→针对性验证→完整检查”
 推进；完整检查为实际 PostgreSQL 下 pytest、Ruff、Mypy 和 `uv build --no-sources`。
 
+
+## 实现记录
+
+`project_destinations` 保存首次启用时间；有界扫描跟踪 ACTIVE 及启用后发生变化的 Flow，
+已存在投影继续追踪终态。同一 Project/Issue content ID 唯一，当前 ACTIVE 优先、否则最新 Flow。
+投影保存 config/desired/synced 版本、分页和不完整标记、脱敏错误及退避时间。
+`ProjectSync` 独立于 jobs/results/归档循环；单卡使用独立 PostgreSQL session advisory lock，
+网络等待不占工作流事务和 Store 连接池。每次只处理有界批次，慢卡不阻塞其他卡片。
+写前重新读本地期望，旧响应只确认旧版本；先读 item 再 add/set，读到相同 Status 不重写。
+add 前持久标记；响应丢失后从第一页重新核对，仍无法确认时阻塞，避免盲目重发。
+已知卡片删除/归档、不可见内容和不完整缺失均有诊断；显式 retry 保留 item ID 和未确认 add。
+配置修改重启生效；移除配置后停止后续请求，保留既有远端对象。只管理 Status。
+新增 PostgreSQL 测试覆盖版本竞争、两实例互斥、丢响应/重启、分页、真实归档 ACK/释放与离线隔离。
+外部 GitHub App、组织 Project 和实际 worker 的 smoke 尚未验证，不能据此宣称 M4 真实验收完成。
+
+验证：实际 PostgreSQL 完整套件 **687 passed**；Ruff、Mypy（112 个源文件）和 `uv build --no-sources` 通过。

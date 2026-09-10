@@ -44,6 +44,29 @@ def project_check(repo: str) -> None:
     typer.echo(f"{repo}: {target.title} ({config.project_id}), Status={target.status_name} ({config.status_field_id})")
 
 
+@project_app.command("status")
+def project_status(repo: str, limit: int = typer.Option(100, min=1, max=1000)) -> None:
+    """显示持久投影、期望/确认版本、退避和阻塞原因。"""
+    from app.project_store import ProjectStore
+
+    with _store() as store:
+        for row in ProjectStore(store).list_projections(repo=repo.casefold(), limit=limit):
+            typer.echo(f"{row.repo}#{row.issue_number} flow={row.flow_id} project={row.project_id} "
+                       f"item={row.item_id or '-'} {row.desired_status} "
+                       f"version={row.synced_version}/{row.desired_version} blocked={row.blocked} "
+                       f"next={row.next_at.isoformat()} error={row.last_error or '-'}")
+
+
+@project_app.command("retry")
+def project_retry(repo: str) -> None:
+    """修复配置或远端条件后重新核对；不清除已知卡片或未确认的 add。"""
+    from app.project_store import ProjectStore
+
+    with _store() as store:
+        count = ProjectStore(store).retry(repo)
+    typer.echo(f"{count} project projections scheduled for recheck")
+
+
 @contextmanager
 def _store() -> Iterator[Store]:
     store = Store(get_serve_settings().database_url)

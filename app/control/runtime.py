@@ -12,6 +12,7 @@ from loguru import logger
 from app.config import ServeSettings, get_serve_settings
 from app.control.coordinator import JobCoordinator
 from app.control.gateway import WorkerGateway
+from app.control.projects import ProjectSync
 from app.control.reconcile import Reconciler
 from app.control.reconcile_feedback import FeedbackReconciler
 from app.control.router import EventRouter
@@ -32,9 +33,8 @@ class ControlRuntime:
             recovery_grace=timedelta(seconds=self.settings.worker_recovery_grace),
         )
         plugins = get_plugin_manager()
-        self.coordinator = JobCoordinator(
-            self.store, GitHubApp(self.settings), self.settings, plugins
-        )
+        github = GitHubApp(self.settings)
+        self.coordinator = JobCoordinator(self.store, github, self.settings, plugins)
         self.gateway = WorkerGateway(
             self.store,
             self.coordinator,
@@ -62,6 +62,11 @@ class ControlRuntime:
             bot_login=self.settings.bot_login, interval=self.settings.reconcile_interval_seconds,
             batch_size=self.settings.reconcile_batch_size, concurrency=self.settings.reconcile_concurrency,
         )
+        self.project_sync = ProjectSync(
+            self.store, self.settings.projects, github.project_client,
+            interval=self.settings.reconcile_interval_seconds, batch_size=self.settings.reconcile_batch_size,
+            concurrency=self.settings.reconcile_concurrency,
+        )
         self._tasks: list[asyncio.Task[None]] = []
         self._handlers: set[asyncio.Task[None]] = set()
 
@@ -77,6 +82,7 @@ class ControlRuntime:
                 failed,
             )
         self._tasks = [
+            asyncio.create_task(self.project_sync.run()),
             asyncio.create_task(self.reconciler.run()),
             asyncio.create_task(self.feedback_reconciler.run()),
             asyncio.create_task(self._sweep_assignments()),
