@@ -21,6 +21,27 @@ from app.store import Store
 app = typer.Typer(help="FlowTool admin CLI")
 flow_app = typer.Typer(help="flow 运维")
 app.add_typer(flow_app, name="flow")
+project_app = typer.Typer(help="Projects v2 运维")
+app.add_typer(project_app, name="project")
+
+
+@project_app.command("check")
+def project_check(repo: str) -> None:
+    """只读校验已配置的组织 Project、Status 字段及选项。"""
+    from app.github_client import GitHubApp
+    from app.github_models import GitHubAdapterError
+
+    settings = get_serve_settings()
+    config = settings.projects.get(repo.casefold())
+    if config is None:
+        typer.echo(f"{repo}: Projects disabled")
+        return
+    try:
+        target = asyncio.run(GitHubApp(settings).project_client(config).validate(repo))
+    except GitHubAdapterError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(1) from None
+    typer.echo(f"{repo}: {target.title} ({config.project_id}), Status={target.status_name} ({config.status_field_id})")
 
 
 @contextmanager

@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Annotated, Literal
 
 from pydantic import Field, SecretStr, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+from app.project_models import ProjectConfig
 
 
 class FlowToolSettings(BaseSettings):
@@ -32,6 +35,17 @@ class ServeSettings(FlowToolSettings):
     reviewers: Annotated[list[str], NoDecode] = []
     in_review_label: str = "flow:in-review"
     done_label: str = "flow:done"
+    projects: dict[str, ProjectConfig] = {}
+
+    @field_validator("projects")
+    @classmethod
+    def _project_repositories(cls, value: dict[str, ProjectConfig]) -> dict[str, ProjectConfig]:
+        normalized = {repo.casefold(): config for repo, config in value.items()}
+        if len(normalized) != len(value) or any(
+            not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo) for repo in value
+        ):
+            raise ValueError("Projects keys must be unique owner/repository names")
+        return normalized
 
     database_url: str
     worker_tokens: dict[str, SecretStr]

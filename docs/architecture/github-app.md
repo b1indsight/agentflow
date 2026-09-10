@@ -110,3 +110,31 @@ FlowTool，也不替代签名校验。
 - App 私钥不得传给 Code Agent；push 只使用短期、最小范围的 installation token；
 - capability 不进入 Store、job/result/journal、prompt 或日志；Feature 3 只在 assignment 临近发送时创建，
   retry 时重新签发，并负责 credential helper 注入与清理。
+
+
+## A.4 可选的组织 Projects v2
+
+App 需要额外的**组织级 Projects read/write** 权限，且 installation 必须对应配置仓库所属组织。
+每个仓库最多配置一个既有 Project；只管理原 Issue 卡片的既有单选 Status 字段。
+个人 Project、PAT、创建看板/字段/选项不在本期范围。
+
+`FLOWTOOL_PROJECTS` 接受 JSON（没有此配置时零 Projects 请求）：
+
+```json
+{"owner/repo":{"installation_id":42,"project_id":"PVT_xxx","status_field_id":"PVTSSF_xxx",
+"options":{"todo":"option1","in_progress":"option2","in_review":"option3","blocked":"option4","done":"option5"}}}
+```
+
+字段和选项按查询所得 ID 绑定；允许多个逻辑状态指向同一个选项，展示名称更改不影响映射。
+修改配置后重启 serve。用 `flowtool project check owner/repo` 只读校验真实 repo installation、
+组织 Project 可写性、字段归属和全部选项；命令不创建测试卡片，也不访问数据库。
+
+adapter 逐页返回 items 和不可见内容标记，调用方必须完成遍历才能确认不存在；已知 item 的
+Status 按字段 ID 读取。add Issue 与 set Status 是两次独立 mutation，均禁止 SDK 自动重试。
+HTTP 200 中的 GraphQL errors/partial data 是失败，异常仅显示分类与 endpoint，不打印 token。
+F8 提供接口；持久的响应丢失核对和 Flow 自动同步由 F9 接入。
+
+依据：[Projects API](https://docs.github.com/en/issues/planning-and-tracking-with-projects/automating-your-project/using-the-api-to-manage-projects)、
+[组织 Projects 权限](https://docs.github.com/en/issues/planning-and-tracking-with-projects/automating-your-project/automating-projects-using-actions)、
+[字段与 item schema](https://docs.github.com/en/graphql/reference/projects)。
+真实组织 Project 尚未配置，真实 App 只读 smoke 未验证；自动化覆盖受控响应和真实 githubkit transport。

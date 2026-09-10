@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- M4 F8：可选组织 Projects v2 配置、只读目标校验、分页 item 读取及独立 add/Status API。
+
 - 保留 CLOSED PR 的失联执行现场，重开前清理重新入队的旧任务，并保留查询期间到达的对账提示。
 
 - F7 返修：永久准备失败也隔离旧领取者；耗尽保留根因；结果核验持久退避并遵守 Retry-After。

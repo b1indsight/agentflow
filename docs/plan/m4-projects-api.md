@@ -1,9 +1,9 @@
 # M4 Feature 8/9：GitHub Projects v2 最小接口与配置
 
-> 状态：计划待审批；本 PR 只含文档，尚未实施。
+> 状态：用户已批准顺序独立实施并推送；实现与自动化验证完成；等待用户统一 review/合并。
 > 规划日期：2026-09-09；基线：`main@origin` / `be65878f`（归档恢复修复 #27 已合并）。
-> bookmark：`feat/m4-projects-api`；实现前置：最新 main；可独立实施。
-> 一 feature = 一 bookmark = 一 PR；前置合并后更新到最新 main，在本 PR 实施，不先合并纯计划。
+> bookmark：`feat/m4-projects-api`；实现基线：F7 bookmark；API 能力在技术上独立。
+> 一 feature = 一 bookmark = 一 PR；按用户授权，无需等待合并，叠在前一项 PR 上实施并推送。
 
 ## 1. 目标与认证边界
 
@@ -65,3 +65,14 @@ installation 认证规划；个人 Project 若需要另一类凭据，应另拆�
 本次规划仅做文档内容、链接和 diff 检查。实施按“先失败测试→最小实现→针对性验证→完整检查”
 推进；完整检查为实际 PostgreSQL 下 pytest、Ruff、Mypy 和 `uv build --no-sources`。
 
+
+## 实现记录
+
+新增 `ProjectConfig`/typed facts、独立 `ProjectsClient` port 和 `GitHubProjects` adapter；
+复用 App 错误映射，所有 Projects 调用关闭 SDK 自动重试。目标和字段各按 node ID 查询，
+App JWT 查询实际 repo installation 后再验证组织、可写性与选项集合。
+`items_page()` 每次最多 100 条并保留不可见内容事实；读取 item 的字段最多遍历 10 页，
+未完成时明确失败。add/set 分别校验 receipt，不把 clientMutationId 视为幂等保证。
+只读 CLI、配置错误、第二页匹配、归档事实、半份响应和丢响应均有契约覆盖；真实 App smoke 未验证。
+
+验证：实际 PostgreSQL 完整套件 **657 passed**；Ruff、Mypy（109 个源文件）和 `uv build --no-sources` 通过。
