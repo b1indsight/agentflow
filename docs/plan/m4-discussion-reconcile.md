@@ -70,3 +70,11 @@ source 状态只表达分页进度，不引入第二套反馈模型或 Judge 队
 
 验证：先失败测试确认缺少新模块；完整 PostgreSQL **570 passed / 0 skipped**，Ruff、Mypy、
 `uv build --no-sources` 均通过。现存 Starlette 弃用 warning 与本变更无关。
+
+## 2026-09-14 恢复问题返修
+
+批次最多冻结 60 条并优先交付未 relay 的版本；完成后自动唤醒未包含的反馈，WAIT 不再把
+整个积压锁在超限批次里。已观察 review 可由真实授权 submitted webhook 升级信号；
+观察补齐前驱后同事务重放唯一合法后继。命令编辑以持久 inert 版本失效旧反馈，后续编辑
+仍可恢复；inert 仅用于持久化，不增加 worker wire 字段。新增 5 个回归先失败后通过，
+相关反馈/批次/版本回归共 82 passed。

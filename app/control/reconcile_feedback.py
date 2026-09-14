@@ -71,14 +71,14 @@ class FeedbackReconciler:
             for item in page.items:
                 if item.is_bot or item.author.casefold() == self.bot_login or item.state == "pending":
                     continue
-                if item.body.strip().startswith("/flow"):
+                inert = item.body.strip().startswith("/flow")
+                if inert:
                     diagnostic = "historical command ignored"
-                    continue
                 deleted = check.source == "reviews" and item.state in {"approved", "dismissed"}
                 updates.append(FeedbackUpdate(
                     kind=ReviewItemKind.REVIEW_BODY if check.source == "reviews" else ReviewItemKind.CONVERSATION,
                     github_id=item.github_id, author=item.author, body="" if deleted else item.body,
-                    updated_at=item.updated_at, deleted=deleted,
+                    updated_at=item.updated_at, deleted=deleted, inert=inert,
                 ))
             with self.store.transaction() as tx:
                 fresh = tx.lock_workflow(flow.id)

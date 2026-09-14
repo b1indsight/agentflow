@@ -192,6 +192,75 @@ async def test_repeated_review_does_not_downgrade_an_authorized_signal(store, re
     assert item.version == 1 and item.signal == "request_changes" and item.submitted
 
 
+async def test_observed_review_then_authorized_submission_preserves_request_changes(store, review_flow):
+    flow, clock = review_flow
+    github = GitHub(clock)
+    github.pages["reviews", None] = page(clock, state="changes_requested")
+    await poller(store, github)._sweep()
+    observed = store.reviews.pending(flow.id)[0]
+    update = feedback(clock, kind=ReviewItemKind.REVIEW_BODY, body=observed.body,
+                      signal="request_changes", submitted=True)
+    assert ingest(store, flow, update, "authorized-submitted")
+    assert store.reviews.pending(flow.id)[0].signal == "request_changes"
+    clock.now += timedelta(seconds=16)
+    assert store.reviews.claim_due()[0].kind.value == "revision"
+
+
+async def test_polling_missing_predecessor_applies_the_queued_successor(store, review_flow):
+    flow, clock = review_flow
+    ingest(store, flow, feedback(clock, kind=ReviewItemKind.CONVERSATION, body="A"))
+    github = GitHub(clock)
+    github.pages["issue_comments", None] = FeedbackPage(items=[page(clock).items[0].model_copy(update={"body": "B"})])
+
+    def arriving():
+        store.reviews.ingest(flow.id, "b-c", "issue_comment", {"changes": {"body": {"from": "B"}}},
+            feedback(clock, kind=ReviewItemKind.CONVERSATION, body="C"), settle_seconds=75, submit_grace_seconds=15)
+
+    github.before_return = arriving
+    await poller(store, github)._sweep()
+    assert store.reviews.pending(flow.id)[0].body == "C"
+
+
+async def test_edit_to_command_supersedes_feedback_and_later_edit_recovers(store, review_flow):
+    flow, clock = review_flow
+    ingest(store, flow, feedback(clock, kind=ReviewItemKind.CONVERSATION, body="Change old code"))
+    github = GitHub(clock)
+    github.pages["issue_comments", None] = FeedbackPage(items=[page(clock).items[0].model_copy(update={"body": "/flow stop"})])
+    await poller(store, github)._sweep()
+    assert store.reviews.pending(flow.id) == []
+    assert store.get_flow(flow.id).state is FlowState.ACTIVE
+    clock.now += timedelta(seconds=301)
+    github.pages["issue_comments", None] = page(clock)
+    await poller(store, github)._sweep()
+    assert store.reviews.pending(flow.id)[0].body == "Please add a bound."
+
+
+@pytest.mark.parametrize("verdict", ["ignore", "wait"])
+async def test_recovered_backlog_drains_without_oversized_or_repeated_wait_batches(store, review_flow, verdict):
+    from app.models import TriageVerdict, Verdict
+    from tests.test_review_batches import claim, run_triage
+
+    flow, clock = review_flow
+    github = GitHub(clock)
+    comments = [page(clock, number).items[0] for number in range(1, 62)]
+    github.pages["issue_comments", None] = FeedbackPage(items=comments[:50], next_cursor="2")
+    github.pages["issue_comments", "2"] = FeedbackPage(items=comments[50:])
+    await poller(store, github)._sweep()
+    clock.now += timedelta(seconds=6)
+    await poller(store, github)._sweep()
+    first = claim(store, clock)[0]
+    assert len(store.reviews.for_job(first).feedback) == 60
+    await run_triage(store, flow, first, TriageVerdict(verdict=Verdict(verdict), reason="Await clarification"))
+    # No new webhook is needed to deliver feedback omitted from the bounded first batch.
+    second = claim(store, clock)[0]
+    assert len(store.reviews.for_job(second).feedback) <= 60
+    assert any(item.github_id == 61 for item in store.reviews.for_job(second).feedback)
+    await run_triage(store, flow, second, TriageVerdict(verdict=Verdict(verdict), reason="Await clarification"))
+    assert claim(store, clock) == []
+    if verdict == "ignore":
+        assert store.reviews.pending(flow.id) == []
+
+
 async def test_rate_limit_preserves_cursor_and_deadline(store, review_flow):
     flow, clock = review_flow
     github = GitHub(clock)

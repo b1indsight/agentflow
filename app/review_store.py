@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from psycopg.rows import class_row
 from psycopg.types.json import Jsonb
 
-from app.context_models import ReviewContext
+from app.context_models import MAX_DISCUSSIONS, ReviewContext
 from app.github_models import ReviewThreads
 from app.judge_models import JudgeDecision
 from app.models import TERMINAL_STATES, DeliveryState, Job, JobKind, ReviewItemKind
@@ -148,7 +148,7 @@ class ReviewStore:
     ) -> bool:
         with self.store.connection() as connection:
             row = connection.execute(
-                "SELECT i.id,i.version,i.observed_at,v.content FROM review_items i JOIN review_versions v"
+                "SELECT i.id,i.version,i.observed_at,v.content,v.source_delivery FROM review_items i JOIN review_versions v"
                 " ON v.item_id=i.id AND v.version=i.version"
                 " WHERE i.flow_id=%s AND i.kind=%s AND i.github_id=%s",
                 (flow_id, update.kind, update.github_id),
@@ -158,9 +158,14 @@ class ReviewStore:
                 # Deletion is final for a GitHub object ID; an out-of-order edit cannot revive it.
                 if old.deleted or (update.updated_at < row["observed_at"] and not update.deleted):
                     return False
+                promoted = (delivery_id is not None and row["source_delivery"] is None
+                            and update.submitted and update.signal == "request_changes"
+                            and old.signal != "request_changes" and not old.inert
+                            and (old.body, old.author) == (update.body, update.author))
                 if (
                     update.updated_at == row["observed_at"]
                     and not update.deleted
+                    and not promoted
                     and (
                         previous_body != old.body
                         or (delivery_id is not None and previous_body is not None
@@ -176,7 +181,7 @@ class ReviewStore:
                             " (source_delivery,item_id,attempt_id,previous_body,updated_at,content)"
                             " VALUES(%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
                             (delivery_id, row["id"], attempt_id, previous_body,
-                             update.updated_at, Jsonb(update.model_dump(mode="json"))),
+                             update.updated_at, Jsonb(update.model_dump(mode="json") | {"inert": update.inert})),
                         )
                     return False
                 content_fields = {"updated_at", "submitted"}
@@ -205,7 +210,7 @@ class ReviewStore:
             connection.execute(
                 "INSERT INTO review_versions(item_id,version,attempt_id,source_delivery,content)"
                 " VALUES(%s,%s,%s,%s,%s)",
-                (item_id, version, attempt_id, delivery_id, Jsonb(update.model_dump(mode="json"))),
+                (item_id, version, attempt_id, delivery_id, Jsonb(update.model_dump(mode="json") | {"inert": update.inert})),
             )
             return True
 
@@ -307,11 +312,13 @@ class ReviewStore:
                 appended = self._append_version(
                     flow_id, attempt_id, None, update, previous_body=old.body if old else None,
                 )
-                changed |= appended and not update.deleted
+                changed |= appended and not (update.deleted or update.inert)
+                changed |= self._reconcile_edits(flow_id, update)
             if changed:
                 self._touch(flow_id, settle_seconds)
 
-    def _has_unused_signal(self, flow_id: int) -> bool:
+    def _has_unused_signal(self, flow_id: int, selected: list[ReviewFeedback] | None = None) -> bool:
+        ids = [item.item_id for item in selected] if selected is not None else None
         with self.store.connection() as connection:
             return (
                 connection.execute(
@@ -319,8 +326,9 @@ class ReviewStore:
                     " ON v.item_id=i.id AND v.version=i.version WHERE i.flow_id=%s"
                     " AND v.consumed_at IS NULL AND v.relayed_at IS NULL"
                     " AND NOT (v.content->>'deleted')::boolean"
-                    " AND v.content->>'signal' = 'request_changes' LIMIT 1",
-                    (flow_id,),
+                    " AND v.content->>'signal' = 'request_changes'"
+                    " AND (%s::bigint[] IS NULL OR i.id=ANY(%s)) LIMIT 1",
+                    (flow_id, ids, ids),
                 ).fetchone()
                 is not None
             )
@@ -334,13 +342,15 @@ class ReviewStore:
                 (flow_id, self.store.now() + timedelta(seconds=delay)),
             )
 
-    def pending(self, flow_id: int) -> list[ReviewFeedback]:
+    def pending(self, flow_id: int, *, for_batch: bool = False) -> list[ReviewFeedback]:
         with self.store.connection() as connection:
             rows = connection.execute(
                 "SELECT i.id,i.version,v.content FROM review_items i JOIN review_versions v"
                 " ON v.item_id=i.id AND v.version=i.version WHERE i.flow_id=%s"
-                " AND v.consumed_at IS NULL AND NOT (v.content->>'deleted')::boolean ORDER BY i.id",
-                (flow_id,),
+                " AND v.consumed_at IS NULL AND NOT (v.content->>'deleted')::boolean"
+                " AND NOT COALESCE((v.content->>'inert')::boolean,FALSE)"
+                " ORDER BY CASE WHEN %s THEN v.relayed_at IS NOT NULL ELSE FALSE END,i.id LIMIT %s",
+                (flow_id, for_batch, MAX_DISCUSSIONS if for_batch else None),
             ).fetchall()
         return [ReviewFeedback(item_id=r["id"], version=r["version"], **r["content"]) for r in rows]
 
@@ -383,8 +393,8 @@ class ReviewStore:
             ).fetchone()
             if buffer is None or active is not None:
                 return None
-            feedback = self.pending(flow_id)
-            strong = self._has_unused_signal(flow_id)
+            feedback = sorted(self.pending(flow_id, for_batch=True), key=lambda item: item.item_id)
+            strong = self._has_unused_signal(flow_id, feedback)
             connection.execute("UPDATE review_buffers SET due_at=NULL WHERE flow_id=%s", (flow_id,))
             if not feedback or not any(f.body.strip() for f in feedback):
                 return None
@@ -652,6 +662,17 @@ class ReviewStore:
                 "UPDATE review_batches SET state=%s,open_points=%s WHERE id=%s",
                 (state, Jsonb(open_points), batch_id),
             )
+            # Completing one bounded batch must expose omitted, never-relayed feedback.
+            unseen = connection.execute(
+                "SELECT 1 FROM review_items i JOIN review_versions v ON v.item_id=i.id AND v.version=i.version"
+                " WHERE i.flow_id=%s AND v.consumed_at IS NULL AND v.relayed_at IS NULL"
+                " AND NOT (v.content->>'deleted')::boolean AND NOT COALESCE((v.content->>'inert')::boolean,FALSE)"
+                " AND NOT EXISTS (SELECT 1 FROM jsonb_to_recordset(%s) AS seen(item_id bigint,version integer)"
+                " WHERE seen.item_id=i.id AND seen.version=i.version) LIMIT 1",
+                (batch.flow_id, Jsonb([item.model_dump(mode="json") for item in batch.feedback])),
+            ).fetchone()
+            if unseen:
+                self._touch(batch.flow_id, 0)
 
     def cancel(self, flow_id: int) -> None:
         """Retire pending discussion atomically with the Flow's terminal transition."""
