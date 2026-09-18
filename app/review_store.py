@@ -74,6 +74,7 @@ ALTER TABLE review_batches ADD COLUMN IF NOT EXISTS context_stale BOOLEAN NOT NU
 ALTER TABLE review_batches ADD COLUMN IF NOT EXISTS decision JSONB;
 ALTER TABLE review_batches ADD COLUMN IF NOT EXISTS threads JSONB;
 ALTER TABLE review_versions ADD COLUMN IF NOT EXISTS addressed_sha TEXT;
+ALTER TABLE review_versions ADD COLUMN IF NOT EXISTS signal_retired BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE review_versions ADD COLUMN IF NOT EXISTS observation_seq BIGINT GENERATED ALWAYS AS IDENTITY;
 CREATE UNIQUE INDEX IF NOT EXISTS ux_review_observation_seq ON review_versions(observation_seq);
 ALTER TABLE review_versions ADD COLUMN IF NOT EXISTS addressed_job_id BIGINT REFERENCES jobs(id);
@@ -325,6 +326,7 @@ class ReviewStore:
                     "SELECT 1 FROM review_items i JOIN review_versions v"
                     " ON v.item_id=i.id AND v.version=i.version WHERE i.flow_id=%s"
                     " AND v.consumed_at IS NULL AND v.relayed_at IS NULL"
+                    " AND NOT v.signal_retired"
                     " AND NOT (v.content->>'deleted')::boolean"
                     " AND v.content->>'signal' = 'request_changes'"
                     " AND (%s::bigint[] IS NULL OR i.id=ANY(%s)) LIMIT 1",
@@ -687,6 +689,15 @@ class ReviewStore:
         """Refreeze retained feedback through Judge without claiming it was previously relayed."""
         self._touch(flow_id, settle_seconds)
         with self.store.connection() as connection:
+            # The first bounded batch cannot retire authorization for the entire backlog.
+            # Retire each existing version under the caller's Flow lock; new versions still
+            # follow normal authorization rules, and duplicates cannot revive old signals.
+            connection.execute(
+                "UPDATE review_versions v SET signal_retired=TRUE FROM review_items i"
+                " WHERE v.item_id=i.id AND i.flow_id=%s AND NOT v.signal_retired"
+                " AND v.content->>'signal'='request_changes'",
+                (flow_id,),
+            )
             connection.execute("UPDATE review_buffers SET force_triage=TRUE WHERE flow_id=%s", (flow_id,))
 
     def cancel(self, flow_id: int) -> None:

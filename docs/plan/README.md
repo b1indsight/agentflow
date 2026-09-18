@@ -5,6 +5,8 @@
 
 ## 当前计划
 
+- [`m4-reopen-triage.md`](m4-reopen-triage.md) — M4 收尾 #37：已实现重开后多批反馈授权退休及 OPEN 轮询跨重启回归，726 项 PostgreSQL 全量通过，待用户 review/合并；
+
 - [`m4-pr-reconcile.md`](m4-pr-reconcile.md) — M4 F3：持久 PR 检查与漏失合并补偿已实施，548 项 PostgreSQL 回归通过；PR #30 以 F2 分支为基线；
 
 - [`m4-recovery-concurrency.md`](m4-recovery-concurrency.md) — M4 F2：本地 sweep 隔离、有界结果恢复并发及公平续扫已实施，523 项 PostgreSQL 回归通过；PR #29 以 F1 分支为基线；
