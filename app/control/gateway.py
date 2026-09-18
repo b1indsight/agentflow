@@ -15,6 +15,7 @@ from pydantic import ValidationError
 
 from app.control.preparation import PreparationStale
 from app.models import DeliveryState, FlowDelivery, FlowExecution, Job, JobKind, JobState
+from app.observability import Metrics
 from app.protocol import (
     Assignment,
     AssignmentSecret,
@@ -157,7 +158,9 @@ class WorkerGateway:
         poll_interval: float = 2.0,
         recovery_concurrency: int = 4,
         recovery_batch_size: int = 64,
+        metrics: Metrics | None = None,
     ) -> None:
+        self.metrics = metrics
         self.store = store
         self.coordinator = coordinator
         self.worker_tokens = dict(worker_tokens)
@@ -413,7 +416,8 @@ class WorkerGateway:
             await socket.close(code=1013)
         except (WebSocketDisconnect, ConnectionError, TimeoutError) as exc:
             disconnect_reason = str(exc) or type(exc).__name__
-            logger.info("worker {} disconnected: {}", worker_id, exc)
+            logger.bind(event="worker_disconnected", reason_code="connection_lost",
+                        worker_id=worker_id).opt(exception=exc).info("")
         except ProtocolViolation as exc:
             disconnect_reason = str(exc)
             logger.warning("worker protocol violation: {}", exc)
@@ -560,10 +564,13 @@ class WorkerGateway:
         return self._result_locks.setdefault(job_id, asyncio.Lock())
 
     async def _apply_terminal(self, job: Job, message: Succeeded | Failed) -> JobState:
-        if isinstance(message, Succeeded):
-            return await self.coordinator.apply_result(job, message.result)
-        await self.coordinator.fail(job, message.error)
-        return JobState.FAILED
+        with logger.contextualize(job_id=job.id, flow_id=job.flow_id,
+                                  worker_id=job.assigned_worker_id):
+            logger.bind(event="job_result", reason_code="ok").info("")
+            if isinstance(message, Succeeded):
+                return await self.coordinator.apply_result(job, message.result)
+            await self.coordinator.fail(job, message.error)
+            return JobState.FAILED
 
     @staticmethod
     def _validate_assignment_message(
@@ -605,6 +612,10 @@ class WorkerGateway:
             and recovery.result_digest == job.result_digest
             and job.state in (JobState.DONE, JobState.FAILED)
         ):
+            if self.metrics is not None:
+                self.metrics.replays.inc()
+            logger.bind(event="job_result", reason_code="ok", job_id=job.id,
+                        flow_id=job.flow_id, worker_id=worker_id, epoch=connection_epoch).info("")
             await socket.send_text(
                 ResultAccepted(
                     job_id=job.id,

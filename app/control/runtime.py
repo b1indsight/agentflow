@@ -19,6 +19,7 @@ from app.control.router import EventRouter
 from app.control.service import ControlService
 from app.control.webhooks import WebhookConsumer
 from app.github_client import GitHubApp
+from app.observability import Metrics, configure_logging
 from app.plugins import get_plugin_manager
 from app.store import Store
 from app.webhook_store import WebhookStore
@@ -29,6 +30,8 @@ class ControlRuntime:
 
     def __init__(self, settings: ServeSettings | None = None) -> None:
         self.settings = settings or get_serve_settings()
+        configure_logging("serve", self.settings.log_format)
+        self.metrics = Metrics()
         self.store = Store(
             self.settings.database_url,
             lease_duration=timedelta(seconds=self.settings.worker_lease_duration),
@@ -49,6 +52,7 @@ class ControlRuntime:
             poll_interval=self.settings.worker_poll_interval,
             recovery_concurrency=self.settings.result_recovery_concurrency,
             recovery_batch_size=self.settings.result_recovery_batch_size,
+            metrics=self.metrics,
         )
         self.service = ControlService(self.store, plugins, self.gateway.notify_jobs)
         self.router = EventRouter(self.store, self.service, self.settings)
@@ -93,6 +97,10 @@ class ControlRuntime:
             asyncio.create_task(self._sweep_results()),
             asyncio.create_task(self._sweep_reviews()),
         ]
+        if self.settings.metrics_token and self.settings.metrics_token.get_secret_value():
+            self._tasks.append(asyncio.create_task(self.metrics.run(
+                self.settings.database_url, self.settings.metrics_interval_seconds,
+            )))
         self.router.settle.sweep()
 
     async def _sweep_assignments(self) -> None:
@@ -100,6 +108,8 @@ class ControlRuntime:
             await asyncio.sleep(self.settings.worker_sweep_interval)
             try:
                 requeued, failed = self.store.sweep_expired_assignments()
+                self.metrics.expired.labels("requeued").inc(requeued)
+                self.metrics.expired.labels("failed").inc(failed)
                 if requeued or failed:
                     logger.warning(
                         "expired worker assignments: {} requeued, {} failed",

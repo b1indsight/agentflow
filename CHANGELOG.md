@@ -7,6 +7,9 @@
 
 ## Unreleased
 
+- M5 F5：增加字段白名单日志、独立 bearer 鉴权的内部指标和后台只读 PG 快照；采集故障
+  保留旧值并暴露陈旧度，重放不重复累加持久执行统计。默认关闭 metrics。
+
 - M5 F4：增加非 root serve/worker 镜像、TLS Compose 部署、可选 Cloudflare profile 与
   镜像构建/候选 digest 验证发布流程；本地无 Docker，实际构建及真实任务验收待 CI/环境。
 

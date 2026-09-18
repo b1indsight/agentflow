@@ -1,6 +1,6 @@
 # M5 F5：结构化日志与基础指标
 
-> 状态：计划待审批，未实现。2026-09-18。
+> 状态：已批准，日志、指标及验证已实现，待独立审查。2026-09-19。
 > 文档 PR 基线 main@origin / 55313e1f；接入依赖 F2，真实验证依赖 F3。
 > M4 reconcile/Projects 指标在相应实现集成后接线；当前 main 不具备的路径不得伪造指标。
 > 阶段范围：[PR #38](https://github.com/b1indsight/agentflow/pull/38)。
@@ -66,3 +66,10 @@ worker_id、epoch 和协议版本。assignment_token 是认证凭据，不当作
 目标约 950 行手写增删；超过 1200 行可拆日志与指标，不通过删掉脱敏/采集故障测试压缩。
 官方依据：[Prometheus instrumentation](https://prometheus.io/docs/practices/instrumentation/)、
 [标签命名与基数](https://prometheus.io/docs/practices/naming/)。
+
+## 实施记录
+
+见 [运行说明与稳定指标契约](../operations/observability.md)。执行耗时采用保留 job 的
+持久 gauge 总数/总时长，避免进程计数在重放和重启时重复或丢失；不宣称纯模型延迟。
+专用连接有 2 秒连接预算，加一条 2 秒聚合 SQL，scrape 只读缓存；这一轮预算相较计划
+明确拆分为连接与 SQL 两段，系统 DNS 仍由 resolver 限制。真实 F3 对照待环境。

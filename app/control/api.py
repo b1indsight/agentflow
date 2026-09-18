@@ -14,7 +14,9 @@ from fastapi import FastAPI, Header, Request, Response, WebSocket
 from loguru import logger
 from psycopg import Error as DatabaseError
 from psycopg_pool import PoolTimeout
+from starlette.middleware.base import RequestResponseEndpoint
 
+from app.observability import Metrics
 from app.webhook_store import DeliveryConflict
 
 
@@ -76,6 +78,7 @@ def create_app(
     async def lifespan(application: FastAPI):
         context = factory()
         application.state.ctx = context
+        application.state.metrics = getattr(context, "metrics", None) or Metrics()
         context.startup()
         host = getattr(context.settings, "host", "test")
         port = getattr(context.settings, "port", 0)
@@ -86,6 +89,25 @@ def create_app(
             await context.shutdown()
 
     application = FastAPI(title="FlowTool", lifespan=lifespan)
+
+    @application.middleware("http")
+    async def observe_request(request: Request, call_next: RequestResponseEndpoint) -> Response:
+        response = await call_next(request)
+        if request.url.path == "/webhook":
+            request.app.state.metrics.request(response.status_code)
+            logger.bind(event="webhook_received", reason_code="ok" if response.status_code == 202 else "legacy_log",
+                        delivery_id=request.headers.get("x-github-delivery", "")).info("")
+        return response
+
+    @application.get("/metrics")
+    async def metrics(request: Request) -> Response:
+        token = getattr(request.app.state.ctx.settings, "metrics_token", None)
+        if token is None or not token.get_secret_value():
+            return Response(status_code=404)
+        expected = "Bearer " + token.get_secret_value()
+        if not hmac.compare_digest(request.headers.get("authorization", "").encode(), expected.encode()):
+            return Response(status_code=401)
+        return Response(request.app.state.metrics.render(), media_type="text/plain; version=0.0.4; charset=utf-8")
 
     @application.get("/healthz")
     async def healthz() -> dict[str, str]:
