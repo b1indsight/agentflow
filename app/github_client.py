@@ -270,10 +270,13 @@ class GitHubApp:
 
         return await self._execute("create_push_capability", operation)
 
-    async def get_ref(self, installation_id: int, repo: str, branch: str) -> RemoteRef:
+    async def get_ref(
+        self, installation_id: int, repo: str, branch: str, *, retry_transient: bool = False,
+    ) -> RemoteRef:
+        """Durable callers own retries; execution-time tools may use bounded SDK retries."""
         owner, name = self._split_repo(repo)
         branch = self._normalize_branch(branch)
-        client = self._installation_client(installation_id, auto_retry=False)
+        client = self._installation_client(installation_id, auto_retry=retry_transient)
 
         async def operation() -> RemoteRef:
             data = (await client.rest.git.async_get_ref(owner, name, f"heads/{branch}")).parsed_data

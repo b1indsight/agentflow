@@ -32,7 +32,7 @@ class RevisionGitHub(RecordingGitHub):
                                   head_repository="owner/repo",
                                   base_branch="main", base_sha="base", title="Task", body="Requirements")
 
-    async def get_ref(self, installation_id, repo, branch):
+    async def get_ref(self, installation_id, repo, branch, *, retry_transient=False):
         return RemoteRef(branch=branch, sha=self.sha)
 
     async def compare_commits(self, installation_id, repo, base, head):

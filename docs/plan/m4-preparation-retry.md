@@ -83,3 +83,9 @@ gateway 使用 `prepare_for_assignment()` 明确区分准备读取和后续凭�
 - CLI 展示结果核验的下次重试时间和原因。
 
 返修验证：PostgreSQL 完整套件 646 passed；Ruff、Mypy、build 通过。
+
+## 执行中开 PR 的读取恢复
+
+`get_ref` 默认由持久调度处理重试；只有执行中的 `flow.open_pr` 明确启用 SDK 有界次数重试。临时 503/429 可在同一次工具调用内恢复，不再依赖模型重复调用；准备期和结果核验仍立即持久化 Retry-After。真实 SDK 回归覆盖失败后恢复和同 call_id 回放不再读取。
+
+本轮验证：完整 PostgreSQL 654 passed；Ruff、Mypy（108 个源文件）、build 通过。

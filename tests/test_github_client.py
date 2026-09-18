@@ -28,7 +28,8 @@ class AsyncEndpoint:
         return self.result
 
 
-async def test_preparation_rate_limit_is_returned_without_sdk_sleep(tmp_path, monkeypatch):
+@pytest.mark.parametrize("method,target", [("get_issue", 7), ("get_ref", "flow/7")])
+async def test_preparation_rate_limit_is_returned_without_sdk_sleep(tmp_path, monkeypatch, method, target):
     import asyncio
 
     requests = []
@@ -46,7 +47,7 @@ async def test_preparation_rate_limit_is_returned_without_sdk_sleep(tmp_path, mo
 
     monkeypatch.setattr(app, "_installation_client", installation)
     with pytest.raises(GitHubAdapterError) as caught:
-        await asyncio.wait_for(app.get_issue(42, "owner/repo", 7), 1)
+        await asyncio.wait_for(getattr(app, method)(42, "owner/repo", target), 1)
     assert caught.value.kind is GitHubErrorKind.RATE_LIMITED
     assert caught.value.retry_after == "600" and len(requests) == 1
 

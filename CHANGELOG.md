@@ -10,6 +10,7 @@
   同事务保存退避与原 worker/token/epoch 条件重排，不消耗 revision_cycles。过期窗口不再读取，
   慢重试读取按剩余时间取消；成功后清预算。上下文/线程候选只在整轮成功后冻结，SDK 准备期读取
   不再叠加自动重试；CLI 显示准备诊断。签发凭据和模型执行保持既有失败语义。
+  阻塞返修：执行中 flow.open_pr 的 ref 读取恢复 SDK 重试，持久准备/核验保留单次读取。
 
 
 - M4 F6：未合并 PR 关闭或确认 head/base 漂移后暂挂原 delivery，保留 worker/repo binding；
