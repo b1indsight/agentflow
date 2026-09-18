@@ -235,6 +235,59 @@ async def test_edit_to_command_supersedes_feedback_and_later_edit_recovers(store
     assert store.reviews.pending(flow.id)[0].body == "Please add a bound."
 
 
+async def test_poll_marks_same_webhook_command_body_inert(store, review_flow):
+    flow, clock = review_flow
+    ingest(store, flow, feedback(clock, kind=ReviewItemKind.CONVERSATION, body="/flow stop"))
+    github = GitHub(clock)
+    github.pages["issue_comments", None] = FeedbackPage(items=[
+        page(clock).items[0].model_copy(update={"body": "/flow stop"}),
+    ])
+    # An edited command can reach storage before polling identifies it as inert.
+    await poller(store, github)._sweep()
+    assert store.reviews.pending(flow.id) == []
+    assert store.get_flow(flow.id).state is FlowState.ACTIVE
+    clock.now += timedelta(seconds=301)
+    github.pages["issue_comments", None] = page(clock)
+    await poller(store, github)._sweep()
+    assert store.reviews.pending(flow.id)[0].body == "Please add a bound."
+
+
+@pytest.mark.parametrize("verdict", ["ignore", "wait"])
+async def test_blank_backlog_cannot_hide_text_or_repeat_forever(store, review_flow, verdict):
+    from app.models import TriageVerdict, Verdict
+    from tests.test_review_batches import claim, run_triage
+
+    flow, clock = review_flow
+    for identity in range(1, 71):
+        ingest(store, flow, feedback(clock, identity, body=" \n\t", kind=ReviewItemKind.REVIEW_BODY), str(identity))
+    ingest(store, flow, feedback(clock, 71, kind=ReviewItemKind.CONVERSATION), "text")
+    jobs = claim(store, clock)
+    assert len(jobs) == 1
+    # Reserve room for actual text even when the oldest 60 records have empty bodies.
+    for _ in range(2):
+        batch = store.reviews.for_job(jobs[0])
+        assert len(batch.feedback) <= 60 and any(item.github_id == 71 for item in batch.feedback)
+        await run_triage(store, flow, jobs[0], TriageVerdict(verdict=Verdict(verdict), reason="Checked"))
+        jobs = claim(store, clock)
+        if not jobs:
+            break
+    assert jobs == []
+
+
+def test_blank_authorized_signal_stays_with_bounded_text_batch(store, review_flow):
+    from app.models import JobKind
+    from tests.test_review_batches import claim
+
+    flow, clock = review_flow
+    for identity in range(1, 61):
+        ingest(store, flow, feedback(clock, identity, body="", kind=ReviewItemKind.REVIEW_BODY,
+                                    signal="request_changes" if identity == 1 else "discussion"), str(identity))
+    ingest(store, flow, feedback(clock, 61, kind=ReviewItemKind.CONVERSATION), "text")
+    jobs = claim(store, clock)
+    assert len(jobs) == 1 and jobs[0].kind is JobKind.REVISION
+    assert {item.github_id for item in store.reviews.for_job(jobs[0]).feedback} >= {1, 61}
+
+
 @pytest.mark.parametrize("verdict", ["ignore", "wait"])
 async def test_recovered_backlog_drains_without_oversized_or_repeated_wait_batches(store, review_flow, verdict):
     from app.models import TriageVerdict, Verdict

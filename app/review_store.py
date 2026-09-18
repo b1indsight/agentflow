@@ -185,9 +185,8 @@ class ReviewStore:
                         )
                     return False
                 content_fields = {"updated_at", "submitted"}
-                if old.model_dump(exclude=content_fields) == update.model_dump(
-                    exclude=content_fields
-                ):
+                if (old.inert == update.inert and old.model_dump(exclude=content_fields)
+                        == update.model_dump(exclude=content_fields)):
                     connection.execute(
                         "UPDATE review_items SET observed_at=%s WHERE id=%s",
                         (update.updated_at, row["id"]),
@@ -343,14 +342,19 @@ class ReviewStore:
             )
 
     def pending(self, flow_id: int, *, for_batch: bool = False) -> list[ReviewFeedback]:
+        """Bound batches while reserving one text item; empty reviews retain their authorization."""
         with self.store.connection() as connection:
             rows = connection.execute(
-                "SELECT i.id,i.version,v.content FROM review_items i JOIN review_versions v"
+                "WITH pending AS (SELECT i.id,i.version,v.content,v.relayed_at FROM review_items i JOIN review_versions v"
                 " ON v.item_id=i.id AND v.version=i.version WHERE i.flow_id=%s"
                 " AND v.consumed_at IS NULL AND NOT (v.content->>'deleted')::boolean"
-                " AND NOT COALESCE((v.content->>'inert')::boolean,FALSE)"
-                " ORDER BY CASE WHEN %s THEN v.relayed_at IS NOT NULL ELSE FALSE END,i.id LIMIT %s",
-                (flow_id, for_batch, MAX_DISCUSSIONS if for_batch else None),
+                " AND NOT COALESCE((v.content->>'inert')::boolean,FALSE)), first_text AS ("
+                " SELECT id FROM pending WHERE content->>'body' !~ '^[[:space:]]*$'"
+                " ORDER BY relayed_at IS NOT NULL,id LIMIT 1)"
+                " SELECT id,version,content FROM pending"
+                " ORDER BY CASE WHEN %s THEN id=(SELECT id FROM first_text) ELSE FALSE END DESC,"
+                " CASE WHEN %s THEN relayed_at IS NOT NULL ELSE FALSE END,id LIMIT %s",
+                (flow_id, for_batch, for_batch, MAX_DISCUSSIONS if for_batch else None),
             ).fetchall()
         return [ReviewFeedback(item_id=r["id"], version=r["version"], **r["content"]) for r in rows]
 
