@@ -1132,8 +1132,21 @@ class Store:
             )
             return "pending" if stored.rowcount == 1 else "rejected"
 
-    def list_unapplied_results(self) -> list[Job]:
-        """Return durable terminal messages whose coordinator application was interrupted."""
+    def unapplied_result_ceiling(self) -> int:
+        """Freeze a finite scan boundary so new results cannot postpone older retries forever."""
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT COALESCE(MAX(id),0) AS ceiling FROM jobs WHERE state=%s"
+                " AND result_received_at IS NOT NULL AND result_applied_at IS NULL",
+                (JobState.RUNNING,),
+            ).fetchone()
+            assert row is not None
+            return row["ceiling"]
+
+    def list_unapplied_results(
+        self, *, after_id: int = 0, through_id: int | None = None, limit: int = 64,
+    ) -> list[Job]:
+        """Page interrupted terminal results by stable job ID; recovery wraps after the last page."""
 
         with (
             self.connection() as connection,
@@ -1141,8 +1154,9 @@ class Store:
         ):
             return cursor.execute(
                 "SELECT * FROM jobs WHERE state=%s AND result_received_at IS NOT NULL"
-                " AND result_applied_at IS NULL ORDER BY result_received_at, id",
-                (JobState.RUNNING,),
+                " AND result_applied_at IS NULL AND id>%s"
+                " AND (%s::bigint IS NULL OR id<=%s) ORDER BY id LIMIT %s",
+                (JobState.RUNNING, after_id, through_id, through_id, limit),
             ).fetchall()
 
     def complete_persisted_result(self, job_id: int, state: JobState) -> bool:

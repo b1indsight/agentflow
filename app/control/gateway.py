@@ -100,7 +100,11 @@ class GatewayStore(Protocol):
         digest: str,
     ) -> str: ...
 
-    def list_unapplied_results(self) -> list[Job]: ...
+    def unapplied_result_ceiling(self) -> int: ...
+
+    def list_unapplied_results(
+        self, *, after_id: int = 0, through_id: int | None = None, limit: int = 64,
+    ) -> list[Job]: ...
 
     def finish_assignment(
         self,
@@ -148,6 +152,8 @@ class WorkerGateway:
         heartbeat_interval: float = 15.0,
         heartbeat_timeout: float = 45.0,
         poll_interval: float = 2.0,
+        recovery_concurrency: int = 4,
+        recovery_batch_size: int = 64,
     ) -> None:
         self.store = store
         self.coordinator = coordinator
@@ -155,6 +161,11 @@ class WorkerGateway:
         self.heartbeat_interval = heartbeat_interval
         self.heartbeat_timeout = heartbeat_timeout
         self.poll_interval = poll_interval
+        self.recovery_concurrency = recovery_concurrency
+        self.recovery_batch_size = recovery_batch_size
+        self._recovery_cursor = 0
+        self._recovery_ceiling = 0
+        self._recovery_lock = asyncio.Lock()
         self._sessions: dict[str, tuple[asyncio.Event, WorkerSocket]] = {}
         self._registry_lock = asyncio.Lock()
         self._result_locks: dict[int, asyncio.Lock] = {}
@@ -483,28 +494,59 @@ class WorkerGateway:
             wake.set()
 
     async def recover_pending_results(self) -> None:
-        """Apply result-inbox entries left pending by a control-plane interruption."""
+        """Recover one bounded page with fixed concurrency and no overlapping recovery sweeps.
 
-        for job in self.store.list_unapplied_results():
-            async with self._result_lock(job.id):
-                current = self.store.get_job(job.id)
+        Advance past still-pending results before wrapping, so a permanently uncertain low ID
+        cannot monopolize every batch. Live WebSocket results retain the same per-job lock.
+        """
+        async with self._recovery_lock:
+            if not self._recovery_ceiling:
+                self._recovery_ceiling = self.store.unapplied_result_ceiling()
+            jobs = self.store.list_unapplied_results(
+                after_id=self._recovery_cursor, through_id=self._recovery_ceiling,
+                limit=self.recovery_batch_size,
+            )
+            if not jobs and self._recovery_cursor:
+                self._recovery_ceiling = self.store.unapplied_result_ceiling()
+                jobs = self.store.list_unapplied_results(
+                    through_id=self._recovery_ceiling, limit=self.recovery_batch_size,
+                )
+            self._recovery_cursor = jobs[-1].id if jobs else 0
+            if (len(jobs) < self.recovery_batch_size
+                    or self._recovery_cursor >= self._recovery_ceiling):
+                self._recovery_cursor = self._recovery_ceiling = 0
+            pending = iter(jobs)
+
+            async def drain() -> None:
+                # next() does not yield: each job belongs to exactly one pool task.
+                for job in pending:
+                    await self._recover_result(job.id)
+
+            async with asyncio.TaskGroup() as group:
+                for _ in range(min(self.recovery_concurrency, len(jobs))):
+                    group.create_task(drain())
+        self.notify_jobs()
+
+    async def _recover_result(self, job_id: int) -> None:
+        """Apply one durable message, isolating operational errors from other Flows."""
+        async with self._result_lock(job_id):
+            try:
+                current = self.store.get_job(job_id)
                 if current is None or current.result_applied_at is not None:
-                    continue
+                    return
                 payload = current.result_payload
                 if payload is None:
-                    continue
-                try:
-                    message = parse_worker_message(json.dumps(payload))
-                    if not isinstance(message, (Succeeded, Failed)):
-                        raise ProtocolViolation("persisted result is not terminal")
-                    await self._apply_terminal(current, message)
-                except ResultPending:
-                    continue
-                except Exception:  # noqa: BLE001 -- isolate a failed job so recovery can continue
-                    logger.exception("persisted result recovery failed for job {}", job.id)
-                    continue
-                logger.info("recovered persisted result for job {}", job.id)
-        self.notify_jobs()
+                    return
+                message = parse_worker_message(json.dumps(payload))
+                if not isinstance(message, (Succeeded, Failed)):
+                    raise ProtocolViolation("persisted result is not terminal")
+                await self._apply_terminal(current, message)
+            except ResultPending:
+                return
+            except Exception:  # noqa: BLE001 -- one corrupt result must not stop the recovery pool
+                logger.exception("persisted result recovery failed for job {}", job_id)
+                return
+            logger.info("recovered persisted result for job {}", job_id)
 
     def _result_lock(self, job_id: int) -> asyncio.Lock:
         return self._result_locks.setdefault(job_id, asyncio.Lock())
