@@ -27,7 +27,7 @@ TARGET_QUERY = """query($project: ID!, $field: ID!) {
   } }
 }"""
 ITEMS_QUERY = """query($project: ID!, $after: String) {
-  node(id: $project) { ... on ProjectV2 { id items(first: 100, after: $after) {
+  node(id: $project) { ... on ProjectV2 { id items(first: 100, after: $after, archivedStates: [ARCHIVED, NOT_ARCHIVED]) {
     nodes { ITEM_FIELDS } pageInfo { hasNextPage endCursor }
   } } }
 }""".replace("ITEM_FIELDS", ITEM_FIELDS)

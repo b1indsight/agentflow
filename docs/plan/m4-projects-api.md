@@ -76,3 +76,9 @@ App JWT 查询实际 repo installation 后再验证组织、可写性与选项�
 只读 CLI、配置错误、第二页匹配、归档事实、半份响应和丢响应均有契约覆盖；真实 App smoke 未验证。
 
 验证：实际 PostgreSQL 完整套件 **657 passed**；Ruff、Mypy（109 个源文件）和 `uv build --no-sources` 通过。
+
+## 归档卡片枚举返修
+
+每页 items 显式请求 `archivedStates: [ARCHIVED, NOT_ARCHIVED]`，避免将已归档卡片误判为不存在。GitHub 默认只返回非归档卡片，见 [官方 GraphQL schema](https://docs.github.com/en/graphql/reference/projects#projectv2)。新增分页契约回归先失败后修复；F9 继续保留人工归档状态，恢复卡片后显式 retry 可复用原卡。
+
+本轮验证：完整 PostgreSQL 685 passed；Ruff、Mypy（111 个源文件）、build 通过。

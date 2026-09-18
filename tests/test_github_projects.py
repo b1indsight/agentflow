@@ -135,6 +135,18 @@ async def test_item_lookup_exposes_second_page_and_invisible_content(tmp_path, m
     assert all("mutation" not in query for query, _ in client.calls)
 
 
+async def test_membership_pages_explicitly_include_archived_cards(tmp_path, monkeypatch):
+    # GitHub defaults to NOT_ARCHIVED; a complete page must cover both states before proving absence.
+    api, client, _ = adapter(tmp_path, monkeypatch,
+        {"node": {"id": "P", "items": page([item("active")], "next")}},
+        {"node": {"id": "P", "items": page([item("archived", archived=True)])}})
+    first = await api.items_page(None)
+    second = await api.items_page(first.next_cursor)
+    assert all("archivedStates: [ARCHIVED, NOT_ARCHIVED]" in query for query, _ in client.calls)
+    assert second.complete and second.next_cursor is None
+    assert second.items[0].content_id == "archived" and second.items[0].archived
+
+
 @pytest.mark.parametrize("bad", ["partial", "cursor", "boolean", "item", "project"])
 async def test_malformed_pages_never_establish_absence(tmp_path, monkeypatch, bad):
     data = {"node": {"id": "P", "items": page([item()])}}
