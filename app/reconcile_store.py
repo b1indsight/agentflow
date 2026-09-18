@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from psycopg.rows import class_row
 from pydantic import BaseModel
 
 from app.github_models import FeedbackSource
+
+ReconcileSource = FeedbackSource | Literal["threads"]
 
 if TYPE_CHECKING:
     from app.store import Store
@@ -34,6 +36,7 @@ CREATE TABLE IF NOT EXISTS feedback_reconcile (
   PRIMARY KEY(flow_id,source)
 );
 CREATE INDEX IF NOT EXISTS ix_feedback_reconcile_due ON feedback_reconcile(next_at,flow_id);
+ALTER TABLE feedback_reconcile ADD COLUMN IF NOT EXISTS scan_incomplete BOOLEAN NOT NULL DEFAULT FALSE;
 """
 
 
@@ -46,8 +49,9 @@ class ReconcileState(BaseModel):
 
 
 class FeedbackCheck(ReconcileState):
-    source: FeedbackSource
+    source: ReconcileSource
     cursor: str | None = None
+    scan_incomplete: bool = False
 
 
 class ReconcileStore:
@@ -61,7 +65,7 @@ class ReconcileStore:
             connection.execute(
                 "INSERT INTO feedback_reconcile(flow_id,source,next_at)"
                 " SELECT f.id,s.source,%s FROM flows f JOIN flow_deliveries d ON d.flow_id=f.id"
-                " CROSS JOIN (VALUES ('issue_comments'),('pr_comments'),('reviews')) s(source)"
+                " CROSS JOIN (VALUES ('issue_comments'),('pr_comments'),('reviews'),('threads')) s(source)"
                 " WHERE f.state='active' AND d.state='open' AND d.pr_number IS NOT NULL"
                 " AND NOT EXISTS (SELECT 1 FROM feedback_reconcile r"
                 " WHERE r.flow_id=f.id AND r.source=s.source) ORDER BY f.id,s.source"
@@ -77,7 +81,7 @@ class ReconcileStore:
                 " ORDER BY r.next_at,r.flow_id,r.source LIMIT %s", (self.store.now(), limit),
             ).fetchall()
 
-    def feedback_get(self, flow_id: int, source: FeedbackSource) -> FeedbackCheck | None:
+    def feedback_get(self, flow_id: int, source: ReconcileSource) -> FeedbackCheck | None:
         with self.store.connection() as connection:
             return connection.cursor(row_factory=class_row(FeedbackCheck)).execute(
                 "SELECT * FROM feedback_reconcile WHERE flow_id=%s AND source=%s",
@@ -86,14 +90,18 @@ class ReconcileStore:
 
     def feedback_finish(
         self, check: FeedbackCheck, cursor: str | None, delay: float, diagnostic: str | None = None,
+        *, complete: bool = True,
     ) -> None:
         now = self.store.now()
         with self.store.connection() as connection:
             connection.execute(
-                "UPDATE feedback_reconcile SET cursor=%s,next_at=%s,failures=0,last_error=%s,"
-                " last_success_at=CASE WHEN %s THEN %s ELSE last_success_at END"
+                "UPDATE feedback_reconcile SET cursor=%s,next_at=%s,failures=0,"
+                " last_error=CASE WHEN %s AND scan_incomplete THEN 'scan incomplete; retry full scan' ELSE %s END,"
+                " last_success_at=CASE WHEN %s AND NOT scan_incomplete THEN %s ELSE last_success_at END,"
+                " scan_incomplete=CASE WHEN %s THEN FALSE ELSE scan_incomplete OR %s END"
                 " WHERE flow_id=%s AND source=%s",
-                (cursor, now + timedelta(seconds=delay), diagnostic, cursor is None, now,
+                (cursor, now + timedelta(seconds=delay), cursor is None, diagnostic,
+                 cursor is None and complete, now, cursor is None, not complete,
                  check.flow_id, check.source),
             )
 

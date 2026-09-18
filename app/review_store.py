@@ -501,6 +501,7 @@ class ReviewStore:
 
     def observe_threads(
         self, flow_id: int, snapshot: ReviewThreads, baseline: list[ReviewFeedback],
+        *, boundary: int | None = None, settle_seconds: float = 0,
     ) -> None:
         """Persist remote facts and missing human input without consuming or reviving old versions.
 
@@ -530,10 +531,13 @@ class ReviewStore:
                     if comment.is_bot:
                         continue
                     row = connection.execute(
-                        "SELECT i.id,i.version,i.observed_at,v.content FROM review_items i JOIN review_versions v"
+                        "SELECT i.id,i.version,i.observed_at,v.content,v.observation_seq"
+                        " FROM review_items i JOIN review_versions v"
                         " ON i.id=v.item_id AND i.version=v.version WHERE i.flow_id=%s"
                         " AND i.kind='inline' AND i.github_id=%s", (flow_id, comment.github_id),
                     ).fetchone()
+                    if row and boundary is not None and row["observation_seq"] > boundary:
+                        continue
                     old = FeedbackUpdate.model_validate(row["content"]) if row else None
                     if old and (old.body, old.author, old.updated_at) == (
                         comment.body, comment.author, comment.updated_at,
@@ -541,7 +545,7 @@ class ReviewStore:
                         # Thread metadata is stored above; enriching it is not new reviewer input.
                         changed |= self._reconcile_edits(flow_id, old)
                         continue
-                    if (row and row["observed_at"] == comment.updated_at
+                    if (row and boundary is None and row["observed_at"] == comment.updated_at
                             and (row["id"], row["version"]) not in frozen):
                         # A webhook may be ahead of an eventually consistent GraphQL read in the
                         # same timestamp tick. Only advance the frozen version, never undo a newer one.
@@ -559,7 +563,7 @@ class ReviewStore:
                     )
                     changed |= self._reconcile_edits(flow_id, update)
             if changed:
-                self._touch(flow_id, 0)
+                self._touch(flow_id, settle_seconds)
 
     def started(self, job: Job) -> bool:
         """Record model relay once per job stage; return whether this is its first Started."""

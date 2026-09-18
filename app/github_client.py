@@ -43,8 +43,10 @@ from app.github_models import (
     PushCapability,
     RemoteRef,
     RepositorySnapshot,
+    ReviewThreadPage,
     ReviewThreads,
 )
+from app.github_thread_pages import read_thread_page
 from app.github_threads import ThreadReader
 
 _RESOLVE_THREAD_MUTATION = """
@@ -545,6 +547,12 @@ class GitHubApp:
                 owner, name, number, reviewers=reviewers
             ),
         )
+
+    async def list_review_thread_page(
+        self, installation_id: int, repo: str, pr: int, cursor: str | None,
+    ) -> ReviewThreadPage:
+        client = self._installation_client(installation_id, auto_retry=False)
+        return await self._execute("review_thread_page", lambda: read_thread_page(client, repo, pr, cursor))
 
     async def list_review_threads(
         self, installation_id: int, repo: str, pr: int,

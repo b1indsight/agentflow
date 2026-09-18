@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- M4 F5：持续扫描 PR Review 线程，包括已 resolved 线程内的新反馈；每次一个有界 GraphQL
+  页，分别保存线程/评论 cursor，重启后续扫。页内容与进度原子提交，版本边界保护并发 webhook；
+  人工状态只记录事实，不调用 reply/resolve/unresolve。缺失节点的扫描保持 incomplete。
+  返修处理真实 SDK 的嵌套 NOT_FOUND，使缺失线程不再困住外层扫描。
+
 - F4 阻塞返修：空正文不能挡住有效反馈；同正文的命令停用状态正确持久化。
 
 - M4 F4：Issue/PR 评论和 Review 正文按有界页持久对账，页内容与 continuation 原子提交；

@@ -19,6 +19,7 @@ from app.github_models import (
     PushCapability,
     RemoteRef,
     RepositorySnapshot,
+    ReviewThreadPage,
     ReviewThreads,
 )
 from app.judge_models import JudgeDecision
@@ -78,6 +79,10 @@ class GitHubClient(Protocol):
     """
 
     async def get_issue(self, installation_id: int, repo: str, number: int) -> IssueSnapshot: ...
+
+    async def list_review_thread_page(
+        self, installation_id: int, repo: str, pr: int, cursor: str | None,
+    ) -> ReviewThreadPage: ...
 
     async def list_feedback_page(
         self, installation_id: int, repo: str, number: int,
