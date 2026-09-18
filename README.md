@@ -254,3 +254,5 @@ CodeAgent 总时限覆盖 resume、fallback 和 VCS 核验，超时回收并等�
 从原子结果恢复改动之前的版本升级时，先停止旧 serve，再启动新版本；不支持新旧 serve 混跑。
 旧版本留下的未知结果可能无法自动核实，需要人工处理；回退前也要处理完或隔离新增待办，避免旧版本
 忽略操作记录后重复执行。详见[兼容与交付边界](docs/plan/atomic-workflow-results.md#兼容与交付边界)。
+
+可选组织 Projects v2 的配置及只读 `flowtool project check <repo>` 见 [GitHub App 接入](docs/architecture/github-app.md#a4-可选的组织-projects-v2)。

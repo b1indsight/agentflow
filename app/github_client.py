@@ -46,8 +46,10 @@ from app.github_models import (
     ReviewThreadPage,
     ReviewThreads,
 )
+from app.github_projects import GitHubProjects
 from app.github_thread_pages import read_thread_page
 from app.github_threads import ThreadReader
+from app.project_models import ProjectConfig
 
 _RESOLVE_THREAD_MUTATION = """
 mutation($threadId: ID!) {
@@ -69,6 +71,9 @@ class GitHubApp:
         self._request_timeout_seconds = settings.github_request_timeout_seconds
         self._private_key = self._read_private_key(settings.github_private_key_path)
 
+    def project_client(self, config: ProjectConfig) -> GitHubProjects:
+        return GitHubProjects(self, config)
+
     @staticmethod
     def _read_private_key(path: Path) -> str:
         key = path.read_text()
@@ -76,11 +81,12 @@ class GitHubApp:
             raise ValueError("FLOWTOOL_GITHUB_PRIVATE_KEY_PATH points to an empty file")
         return key
 
-    def _app_client(self) -> Any:
+    def _app_client(self, *, auto_retry: bool = True) -> Any:
         # Push credentials are issued before assignment and have no effect-ledger retry.
         return GitHub(
             AppAuthStrategy(self._app_id, self._private_key),
             timeout=self._request_timeout_seconds,
+            auto_retry=auto_retry,
         )
 
     def _installation_client(self, installation_id: int, *, auto_retry: bool = True) -> Any:
