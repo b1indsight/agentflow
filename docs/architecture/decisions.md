@@ -31,7 +31,7 @@
 | # | 主题 | 状态 | 完成条件 |
 |---|---|---|---|
 | 1 | 持久化 job 与崩溃恢复 | 内部已验证 | result inbox 去重内部应用；外部副作用仍需幂等键/查询，避免崩溃窗口重复开 PR 或评论 |
-| 2 | Webhook 漏投与 reconcile | 桩 | `_sweep()` 真正拉取 PR/review 状态并用游标幂等补偿 |
+| 2 | Webhook 漏投与 reconcile | PR 合并已实现 | M4 F3 持久查询已追踪 PR 并补偿合并；反馈与 close/reopen 对账待后续 feature |
 | 3 | Review 修订循环 | 已实现并合并，真实验收待完成 | M2 F1–F4 和 M4 同秒重放修复有自动化覆盖；仍需真实 GitHub App/Codex/bub 矩阵，见 [M2 待办](README.md#m2-状态与待办) |
 | 4 | 触发授权与安全 | 部分 | allowlist 与 reviewers 已分离，单仓库 scoped token 已实现；仍需真实 smoke、assignment 注入、受控 egress 和凭据清理 |
 | 5 | Context Builder | 部分 | Issue/PR、有界 patch/讨论已冻结，control 持有线程快照；仍需真实输入校准与 CI 上下文 |

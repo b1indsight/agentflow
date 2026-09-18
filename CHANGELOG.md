@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- M4 F3：持久 PR 对账补偿漏失的合并 webhook，复用同一合并事务和归档入口；保存检查
+  deadline/成功时间/错误，支持重启、分页、有限并发和 Retry-After。旧快照不能回退新状态，
+  历史终态 Flow 只记录合并事实；`flow show` 可查看对账诊断。
+  返修关闭 PR 读取的 SDK 内部重试，保证限流 deadline 先持久化。
+
 - M4 F2：lease、settle 与网络结果恢复分别调度，结果按有界页和固定并发恢复；持续新增结果
   不会阻止旧 pending 结果再次被扫描。保留同 job 的实时/恢复排他和原 worker fencing。
   新增结果恢复并发与批次配置，默认 4 / 64；shutdown 等待恢复池退出。

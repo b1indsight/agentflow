@@ -5,6 +5,8 @@
 
 ## 当前计划
 
+- [`m4-pr-reconcile.md`](m4-pr-reconcile.md) — M4 F3：持久 PR 检查与漏失合并补偿已实施，548 项 PostgreSQL 回归通过；PR #30 以 F2 分支为基线；
+
 - [`m4-recovery-concurrency.md`](m4-recovery-concurrency.md) — M4 F2：本地 sweep 隔离、有界结果恢复并发及公平续扫已实施，523 项 PostgreSQL 回归通过；PR #29 以 F1 分支为基线；
 
 本节包含待审批及已实现、仍有验收待办的计划。M2 F1–F4 已全部合并；状态、证据和开放问题见 [M2 状态与待办](../architecture/README.md#m2-状态与待办)。

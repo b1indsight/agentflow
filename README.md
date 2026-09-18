@@ -10,6 +10,10 @@ FlowTool 的目标是把带 `flow` 标签的 GitHub issue 编排成
 
 ## 当前能力
 
+- **PR 对账**：对已追踪 PR 定时查询并补偿漏失合并事件，检查进度与退避持久化；
+  `FLOWTOOL_RECONCILE_INTERVAL_SECONDS` 默认 300 秒，`FLOWTOOL_RECONCILE_BATCH_SIZE`
+  默认 64，`FLOWTOOL_RECONCILE_CONCURRENCY` 默认 4。`flow show` 展示最后成功和下次检查时间。
+
 - **恢复并发**：lease、settle 和网络结果恢复独立运行；结果恢复默认 4 并发、每页 64 项，
   可用 `FLOWTOOL_RESULT_RECOVERY_CONCURRENCY`（1–64）和
   `FLOWTOOL_RESULT_RECOVERY_BATCH_SIZE`（1–1000）调整。有限扫描周期保证旧待确认结果可重试。
@@ -59,7 +63,7 @@ FlowTool 的目标是把带 `flow` 标签的 GitHub issue 编排成
   自动化测试使用外部服务替身，不代表真实 GitHub、Codex、bub 集成已验收。
 - bub adapter 已通过真实库加本机假模型端点的契约测试；真实 provider 语义 smoke 仍待执行。
   review thread 映射、回复和 resolve 已通过自动化；冲突处理和真实多轮闭环仍待验收。
-- Reconciler 目前只定时记录活跃 Flow，尚不拉取 GitHub 状态补偿漏失事件。
+- PR 合并对账已实现；普通 close/reopen、评论/线程漏投和新 Flow trigger 的补偿仍待后续范围。
 - cancel 会取消本地流程和任务，尚不终止正在执行的 agent 进程；跨 worker session 迁移、
   多 serve 高可用、GitHub-only 网络限制和由项目管理的强隔离运行环境仍属后续工作。
 

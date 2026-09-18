@@ -13,6 +13,7 @@ from app.context_models import DiscussionPage, FilePage, ReviewContext, ReviewPu
 from app.github_models import (
     IssueSnapshot,
     PullRequestSnapshot,
+    PullRequestStatus,
     PushCapability,
     RemoteRef,
     RepositorySnapshot,
@@ -75,6 +76,10 @@ class GitHubClient(Protocol):
     """
 
     async def get_issue(self, installation_id: int, repo: str, number: int) -> IssueSnapshot: ...
+
+    async def get_pull_request_status(
+        self, installation_id: int, repo: str, number: int,
+    ) -> PullRequestStatus: ...
 
     async def get_review_pull_request(
         self, installation_id: int, repo: str, number: int,

@@ -30,6 +30,7 @@ from app.models import (
     utcnow,
 )
 from app.protocol import ArchiveTask
+from app.reconcile_store import RECONCILE_SCHEMA, ReconcileStore
 from app.result_store import RESULT_SCHEMA, ResultStore
 from app.review_store import REVIEW_SCHEMA, ReviewStore
 
@@ -386,6 +387,7 @@ class Store:
             connection.execute(SCHEMA)
             connection.execute(RESULT_SCHEMA)
             connection.execute(REVIEW_SCHEMA)
+            connection.execute(RECONCILE_SCHEMA)
         self.reviews.migrate_legacy()
 
     def now(self) -> datetime:
@@ -398,6 +400,10 @@ class Store:
     @property
     def reviews(self) -> ReviewStore:
         return ReviewStore(self)
+
+    @property
+    def reconcile(self) -> ReconcileStore:
+        return ReconcileStore(self)
 
     def close(self) -> None:
         if self._bound_connection is not None:

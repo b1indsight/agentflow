@@ -6,7 +6,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, SecretStr
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, SecretStr, model_validator
 
 
 class GitHubModel(BaseModel):
@@ -83,6 +83,25 @@ class PullRequestSnapshot(GitHubModel):
     head_branch: str
     head_sha: str
     base_branch: str
+
+
+class PullRequestStatus(PullRequestSnapshot):
+    """A numbered PR observation, including confirmed merge facts and repository identity."""
+
+    repo: str
+    state: Literal["open", "closed"]
+    base_sha: str
+    head_repository: str | None
+    merged: bool
+    merged_at: AwareDatetime | None = None
+    merge_commit_sha: str | None = None
+
+    @model_validator(mode="after")
+    def _require_merge_facts(self) -> PullRequestStatus:
+        if self.merged and (self.state != "closed" or self.merged_at is None
+                            or not self.merge_commit_sha):
+            raise ValueError("merged PR requires closed state, timestamp and merge commit SHA")
+        return self
 
 
 class PushCapability(GitHubModel):

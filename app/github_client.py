@@ -36,6 +36,7 @@ from app.github_models import (
     GitHubErrorKind,
     IssueSnapshot,
     PullRequestSnapshot,
+    PullRequestStatus,
     PushCapability,
     RemoteRef,
     RepositorySnapshot,
@@ -129,6 +130,24 @@ class GitHubApp:
             )
 
         return await self._execute("get_review_pull_request", operation)
+
+    async def get_pull_request_status(
+        self, installation_id: int, repo: str, number: int,
+    ) -> PullRequestStatus:
+        """Read the associated PR by number; a missing or inaccessible PR is not a close event."""
+        owner, name = self._split_repo(repo)
+        client = self._installation_client(installation_id, auto_retry=False)
+
+        async def operation() -> PullRequestStatus:
+            data = (await client.rest.pulls.async_get(owner, name, number)).parsed_data
+            return PullRequestStatus(
+                **self._pull_snapshot(data).model_dump(), repo=data.base.repo.full_name,
+                base_sha=data.base.sha, merged=data.merged, merged_at=data.merged_at,
+                merge_commit_sha=data.merge_commit_sha,
+                head_repository=data.head.repo.full_name if data.head.repo is not None else None,
+            )
+
+        return await self._execute("get_pull_request_status", operation)
 
     async def list_pull_request_files(
         self, installation_id: int, repo: str, number: int,

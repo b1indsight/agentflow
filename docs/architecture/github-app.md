@@ -89,7 +89,7 @@ REST 写路径见 [Create a reply for a review comment](https://docs.github.com/
 
 - disposable repository 上的真实 App 读写 smoke；
 - 限制网络到 GitHub，以及显式提前撤销 installation token；
-- Project v2 与 reconcile 查询。
+- Project v2 与真实 reconcile smoke；按编号 PR 查询和漏失合并补偿已有自动化。
 
 因此不能仅凭配置真实凭据就把当前 daemon 视为可用集成。
 

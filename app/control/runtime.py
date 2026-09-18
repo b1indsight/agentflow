@@ -49,7 +49,12 @@ class ControlRuntime:
         )
         self.service = ControlService(self.store, plugins, self.gateway.notify_jobs)
         self.router = EventRouter(self.store, self.service, self.settings)
-        self.reconciler = Reconciler(self.store)
+        self.reconciler = Reconciler(
+            self.store, self.coordinator.github, self.service,
+            interval=self.settings.reconcile_interval_seconds,
+            batch_size=self.settings.reconcile_batch_size,
+            concurrency=self.settings.reconcile_concurrency,
+        )
         self._tasks: list[asyncio.Task[None]] = []
         self._handlers: set[asyncio.Task[None]] = set()
 

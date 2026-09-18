@@ -35,7 +35,7 @@ Codex 等长任务占用 GitHub 的 Webhook 请求。
 
 M2 F1 自动化覆盖反馈工作流锁、同 Flow 批次串行、重启恢复和精确版本消费。尚未实现：
 未合并 PR close 的取消语义、后台 handler 失败后的自动 delivery 重试，以及真实 GitHub payload
-的完整兼容性。Reconciler 仍是桩，不能作为当前补偿路径。
+的完整兼容性。M4 F3 的 Reconciler 已补偿已追踪 PR 的漏失合并，反馈与 close/reopen 对账后续实现。
 
 ## 4.3 Control Service / Job Coordinator（状态机核心）
 
