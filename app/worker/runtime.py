@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import fcntl
 import os
+import signal
 from collections.abc import Mapping
 from pathlib import Path
 from typing import IO
@@ -92,6 +94,7 @@ class WorkerRuntime:
     """Own the execution adapters without importing control-plane dependencies."""
 
     def __init__(self, settings: WorkerSettings | None = None) -> None:
+        self._shutdown_requested = False
         self.settings = settings or get_worker_settings()
         configure_logging("worker", self.settings.log_format)
         self.root_lock = WorkerRootLock(self.settings.worker_root, self.settings.worker_id)
@@ -128,10 +131,17 @@ class WorkerRuntime:
     async def run(self) -> None:
         validate_worker_environment(self.settings)
         self.root_lock.acquire()
+        loop = asyncio.get_running_loop()
+        loop.add_signal_handler(signal.SIGTERM, self.stop)
         try:
             await self.client.run()
+        except asyncio.CancelledError:
+            if not self._shutdown_requested:
+                raise
         finally:
+            loop.remove_signal_handler(signal.SIGTERM)
             self.root_lock.release()
 
     def stop(self) -> None:
+        self._shutdown_requested = True
         self.client.stop()

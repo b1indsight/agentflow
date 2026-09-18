@@ -263,8 +263,9 @@ async def test_merge_during_comment_lookup_prevents_dispatch(scenario, monkeypat
 
 
 @pytest.mark.parametrize("remote_receipt", [True, False])
-async def test_merged_result_reconciles_dispatched_comment_without_resending(
-    scenario, monkeypatch, remote_receipt,
+@pytest.mark.parametrize("transition", ["merge", "cancel"])
+async def test_retired_result_reconciles_dispatched_comment_without_resending(
+    scenario, monkeypatch, remote_receipt, transition,
 ):
     # Merge must not discard an uncertain POST or let its recovered result enqueue REVISION.
     store, github, job, result = scenario
@@ -281,9 +282,12 @@ async def test_merged_result_reconciles_dispatched_comment_without_resending(
     subject = coordinator(store, github)
     with pytest.raises(ResultPending):
         await apply_result(subject, job, result)
-    store.delivery.state = DeliveryState.MERGED
-    store.delivery.version += 1
-    store.reviews.cancel(store.flow.id)
+    if transition == "merge":
+        store.delivery.state = DeliveryState.MERGED
+        store.delivery.version += 1
+        store.reviews.cancel(store.flow.id)
+    else:
+        ControlService(cast(Store, store)).cancel(store.flow)
     store.results.clock += timedelta(seconds=30)
     if remote_receipt:
         assert await apply_result(subject, job, result) is JobState.DONE
@@ -294,7 +298,7 @@ async def test_merged_result_reconciles_dispatched_comment_without_resending(
         assert store.jobs[job.id].result_applied_at is None
     assert len(calls) == 1
     assert store.enqueued == []
-    assert store.flow.state is FlowState.ACTIVE
+    assert store.flow.state is (FlowState.ACTIVE if transition == "merge" else FlowState.CANCELLED)
 
 
 async def test_unknown_comment_is_not_resubmitted_and_blocks_retry(scenario, monkeypatch) -> None:

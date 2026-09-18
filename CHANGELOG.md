@@ -7,6 +7,9 @@
 
 ## Unreleased
 
+- M5 F6：协议 v9 持久停止请求与 nonce 凭据、取消确认前保留 binding、丢失 ACK 重放、
+  只读核对已发送 effects；持久 worker drain 允许原 Flow 收尾，补齐 SIGTERM 接线。
+
 - M5 F5：增加字段白名单日志、独立 bearer 鉴权的内部指标和后台只读 PG 快照；采集故障
   保留旧值并暴露陈旧度，重放不重复累加持久执行统计。默认关闭 metrics。
 

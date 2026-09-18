@@ -36,11 +36,12 @@ from app.protocol import ArchiveTask, Failed, terminal_digest
 from app.reconcile_store import RECONCILE_SCHEMA, ReconcileStore
 from app.result_store import RESULT_SCHEMA, ResultStore
 from app.review_store import REVIEW_SCHEMA, ReviewStore
+from app.stop_store import STOP_SCHEMA, StopStore
 from app.webhook_store import WEBHOOK_SCHEMA
 
 # A frozen archive may have started deleting before its Started frame reached serve.
 _MAY_HAVE_EXECUTED = (
-    "(started_at IS NOT NULL OR (kind='archive' AND payload->'archive' IS NOT NULL))"
+    "(started_at IS NOT NULL OR dispatch_authorized_at IS NOT NULL OR (kind='archive' AND payload->'archive' IS NOT NULL))"
 )
 
 SCHEMA = """
@@ -413,6 +414,7 @@ class Store:
         with self.connection() as connection:
             connection.execute(SCHEMA)
             connection.execute(WEBHOOK_SCHEMA)
+            connection.execute(STOP_SCHEMA)
             connection.execute(RESULT_SCHEMA)
             connection.execute(REVIEW_SCHEMA)
             connection.execute(RECONCILE_SCHEMA)
@@ -421,6 +423,10 @@ class Store:
 
     def now(self) -> datetime:
         return self._clock()
+
+    @property
+    def stops(self) -> StopStore:
+        return StopStore(self)
 
     @property
     def results(self) -> ResultStore:
@@ -588,7 +594,9 @@ class Store:
         with self.connection() as connection:
             result = connection.execute(
                 "UPDATE flow_executions SET released_at=%s"
-                " WHERE flow_id=%s AND released_at IS NULL",
+                " WHERE flow_id=%s AND released_at IS NULL"
+                " AND NOT EXISTS (SELECT 1 FROM execution_stops s WHERE s.flow_id=flow_executions.flow_id"
+                " AND s.binding_at=flow_executions.bound_at AND s.state!='confirmed')",
                 (now, flow_id),
             )
         return result.rowcount == 1
@@ -905,7 +913,7 @@ class Store:
                 " LEFT JOIN flow_executions bound ON bound.flow_id=f.id"
                 " AND bound.released_at IS NULL WHERE j.state=%s"
                 " AND f.state=%s AND ((own.flow_id=j.flow_id) OR"
-                " (own.flow_id IS NULL AND bound.flow_id IS NULL))" + eligible + ")"
+                " (own.flow_id IS NULL AND bound.flow_id IS NULL AND NOT w.draining))" + eligible + ")"
                 " ORDER BY w.last_assigned_at NULLS FIRST, w.worker_id"
                 " FOR UPDATE OF w SKIP LOCKED LIMIT 1",
                 (WorkerStatus.ONLINE, JobState.QUEUED, FlowState.ACTIVE, now),
@@ -1381,7 +1389,8 @@ class Store:
                 "UPDATE jobs SET state=%s, assigned_worker_id=NULL, assignment_token=NULL,"
                 " heartbeat_at=NULL, updated_at=%s WHERE id=%s AND state=%s"
                 " AND assigned_worker_id=%s AND assignment_token=%s AND started_at IS NULL"
-                " AND result_received_at IS NULL"
+                " AND result_received_at IS NULL AND dispatch_authorized_at IS NULL"
+                " AND NOT EXISTS (SELECT 1 FROM execution_stops s WHERE s.job_id=jobs.id AND s.state!='confirmed')"
                 " AND EXISTS (SELECT 1 FROM workers WHERE worker_id=%s"
                 " AND connection_epoch=%s)",
                 (
@@ -1416,7 +1425,9 @@ class Store:
             result = connection.execute(
                 "UPDATE jobs SET state=%s, assignment_token=NULL, last_error=%s, updated_at=%s"
                 " WHERE id=%s AND state=%s AND assigned_worker_id=%s"
-                " AND assignment_token=%s AND EXISTS (SELECT 1 FROM workers"
+                " AND assignment_token=%s AND NOT EXISTS (SELECT 1 FROM execution_stops s"
+                " WHERE s.job_id=jobs.id AND s.state!='confirmed')"
+                " AND EXISTS (SELECT 1 FROM workers"
                 " WHERE worker_id=%s AND connection_epoch=%s)",
                 (
                     JobState.FAILED,
@@ -1472,6 +1483,7 @@ class Store:
                 " heartbeat_at=NULL, lease_expires_at=NULL, updated_at=%s"
                 " WHERE state=%s AND NOT " + _MAY_HAVE_EXECUTED + " AND lease_expires_at<=%s"
                 " AND result_received_at IS NULL"
+                " AND NOT EXISTS (SELECT 1 FROM execution_stops s WHERE s.flow_id=jobs.flow_id AND s.state!='confirmed')"
                 " RETURNING id, assigned_worker_id",
                 (JobState.QUEUED, now, JobState.RUNNING, now),
             ).fetchall()
@@ -1480,6 +1492,7 @@ class Store:
                 " WHERE state=%s AND started_at IS NOT NULL"
                 " AND recovery_deadline IS NOT NULL AND recovery_deadline<=%s"
                 " AND result_received_at IS NULL"
+                " AND NOT EXISTS (SELECT 1 FROM execution_stops s WHERE s.flow_id=jobs.flow_id AND s.state!='confirmed')"
                 " AND NOT EXISTS (SELECT 1 FROM flow_deliveries d JOIN flows f ON f.id=d.flow_id"
                 " WHERE d.flow_id=jobs.flow_id AND d.state IN ('closed','merged') AND f.state='active')"
                 " RETURNING id, flow_id, assigned_worker_id",
@@ -1529,6 +1542,10 @@ class Store:
                 " WHERE released_at IS NULL AND recovery_deadline IS NOT NULL"
                 " AND NOT EXISTS (SELECT 1 FROM flow_deliveries d JOIN flows f ON f.id=d.flow_id"
                 " WHERE d.flow_id=flow_executions.flow_id AND d.state IN ('closed','merged') AND f.state='active')"
+                " AND NOT EXISTS (SELECT 1 FROM execution_stops s WHERE s.flow_id=flow_executions.flow_id AND s.state!='confirmed')"
+                " AND NOT EXISTS (SELECT 1 FROM jobs unknown WHERE unknown.flow_id=flow_executions.flow_id"
+                " AND unknown.dispatch_authorized_at IS NOT NULL AND unknown.started_at IS NULL"
+                " AND unknown.result_received_at IS NULL)"
                 " AND recovery_deadline<=%s AND NOT EXISTS (SELECT 1 FROM jobs j"
                 " WHERE j.flow_id=flow_executions.flow_id AND j.result_received_at IS NOT NULL"
                 " AND j.result_applied_at IS NULL) RETURNING flow_id, worker_id",

@@ -17,12 +17,14 @@ from app.models import (
     utcnow,
 )
 from app.store import Store
+from tests.result_memory import MemoryStops
 from tests.review_memory import MemoryReviews
 
 
 class RetryStore:
     def __init__(self, failed_job: Job | None = None) -> None:
         self.reviews = MemoryReviews()
+        self.stops = MemoryStops()
         self.flow = Flow(
             id=1,
             repo="owner/repo",

@@ -1,6 +1,6 @@
 # M5 F6：运行中取消、drain 与停机
 
-> 状态：计划待审批，未实现。2026-09-18。
+> 状态：已批准并实现，自动化验证及独立审查进行中。2026-09-20。
 > 文档 PR 基线 main@origin / 55313e1f；真实验收依赖 F3，实施前集成 M4 lifecycle/recovery。
 > 阶段范围：[PR #38](https://github.com/b1indsight/agentflow/pull/38)。
 
@@ -77,3 +77,10 @@ Flow 可收尾；超时和缺 journal 给出 blocked 事实。标准 lint/type/b
 预算目标约 1100 行，但此 feature 跨协议/持久层/进程边界，预计超过 1200 行时必须在实施前
 拆成“持久取消与停止确认”和“drain/优雅停机”；需要 supervisor 再单拆，不以弱化停止证明
 满足行数。停止确认是 F7 安全更新前置；跨 worker 迁移和强制释放未知执行不在范围。
+
+## 实施记录
+
+协议 v9；`worker-drain <id> [--undo]`；行为、升级限制及证据见
+[取消和停机说明](../operations/cancel-drain.md)。复用现有 Codex/VCS 所有权及 SIGKILL
+进程组路径，停止 task 确认预算 15 秒，握手 20 秒，没有新增跨重启 PID 终止逻辑。
+未知旧进程保持 blocked；真实环境的 F3 取消和整套部署故障注入仍待执行。
