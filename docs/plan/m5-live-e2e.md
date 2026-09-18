@@ -1,6 +1,6 @@
 # M5 F3：真实业务闭环验收
 
-> 状态：计划待审批，未实现/未执行真实验收。2026-09-18。
+> 状态：已批准；工具已实现，真实验收待环境。2026-09-18。
 > PR 文档基线：main@origin / 55313e1f；实际运行依赖 M5 F1/F2 以及已集成的 M1–M4。
 > M4 后续代码仍在分支链，实施前核对 main；本计划不把替身测试当成真实服务证据。
 > 阶段范围与部署文档：[PR #38](https://github.com/b1indsight/agentflow/pull/38)。
@@ -67,3 +67,13 @@ F3 真实闭环仍未完成。普通 PR CI 不使用外部模型密钥或自动�
 
 预计约 850 行手写增删；超过 1200 行优先拆验证工具和额外故障场景，不能把真实核心闭环
 降级为 stub。与 F1 文档及 F2 的依赖在同一 PR 实施前 rebase，不另开“实现 PR”。
+
+## 实施记录
+
+工具放在 `app/live_smoke.py`，通过 `uv run python -m app.live_smoke` 使用，不新增 flowtool
+部署命令。默认只读，显式 allow-write + exact repo allowlist 才创建一个测试 Issue；本地持久
+unknown 意图和锁防止响应丢失后盲目重建。人工 review/merge、扩展故障矩阵按
+[真实验收文档](../verification/m5-live-e2e.md) 操作，未提供真实环境时不宣称 F3 完成。
+
+验证：12 项工具/真实 PostgreSQL 只读观测测试通过；Ruff、Mypy、构建、模块 help 和 diff 检查
+通过。没有触发真实 Issue、模型调用或人工合并；扩展矩阵均保留未执行，F3 尚未完成真实验收。
