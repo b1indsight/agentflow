@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- 保留 CLOSED PR 的失联执行现场，重开前清理重新入队的旧任务，并保留查询期间到达的对账提示。
+
+- M4 F6：未合并 PR 关闭或确认 head/base 漂移后暂挂原 delivery，保留 worker/repo binding；
+  退休排队意图，旧结果/已发 effects 只收尾事实。生命周期 webhook 提前唤醒新鲜查询，
+  重开须等待旧执行/结果收敛并核验原基线或冻结 worker 交付；反馈重新 triage，retry 不绕过暂挂。
+  阻塞返修：CLOSED 缺少 journal 时保留原执行和结果入口，现场恢复后可重新打开 PR。
+
 - M4 F5：持续扫描 PR Review 线程，包括已 resolved 线程内的新反馈；每次一个有界 GraphQL
   页，分别保存线程/评论 cursor，重启后续扫。页内容与进度原子提交，版本边界保护并发 webhook；
   人工状态只记录事实，不调用 reply/resolve/unresolve。缺失节点的扫描保持 incomplete。

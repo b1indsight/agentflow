@@ -69,6 +69,7 @@ CREATE TABLE IF NOT EXISTS review_batches (
 CREATE UNIQUE INDEX IF NOT EXISTS ux_review_active_batch ON review_batches(flow_id)
   WHERE state IN ('ready','processing');
 ALTER TABLE review_batches ADD COLUMN IF NOT EXISTS context JSONB;
+ALTER TABLE review_buffers ADD COLUMN IF NOT EXISTS force_triage BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE review_batches ADD COLUMN IF NOT EXISTS context_stale BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE review_batches ADD COLUMN IF NOT EXISTS decision JSONB;
 ALTER TABLE review_batches ADD COLUMN IF NOT EXISTS threads JSONB;
@@ -116,7 +117,7 @@ class ReviewStore:
                 or flow.state in TERMINAL_STATES
                 or flow.current_attempt_id is None
                 or delivery is None
-                or delivery.state is not DeliveryState.OPEN
+                or delivery.state not in {DeliveryState.OPEN, DeliveryState.CLOSED}
             ):
                 return False
             previous_body = ((payload.get("changes") or {}).get("body") or {}).get("from")
@@ -130,7 +131,7 @@ class ReviewStore:
                 return False
             tx.reviews._reconcile_edits(flow_id, update)
             # Invalidating old content adds no discussion and must not wake a waiting batch.
-            if update.deleted:
+            if update.deleted or delivery.state is DeliveryState.CLOSED:
                 return True
             strong = tx.reviews._has_unused_signal(flow_id)
             delay = submit_grace_seconds if strong or update.submitted else settle_seconds
@@ -388,7 +389,7 @@ class ReviewStore:
             return None
         with self.store.connection() as connection:
             buffer = connection.execute(
-                "SELECT generation FROM review_buffers WHERE flow_id=%s AND due_at<=%s",
+                "SELECT generation,force_triage FROM review_buffers WHERE flow_id=%s AND due_at<=%s",
                 (flow_id, self.store.now()),
             ).fetchone()
             active = connection.execute(
@@ -398,8 +399,8 @@ class ReviewStore:
             if buffer is None or active is not None:
                 return None
             feedback = sorted(self.pending(flow_id, for_batch=True), key=lambda item: item.item_id)
-            strong = self._has_unused_signal(flow_id, feedback)
-            connection.execute("UPDATE review_buffers SET due_at=NULL WHERE flow_id=%s", (flow_id,))
+            strong = not buffer["force_triage"] and self._has_unused_signal(flow_id, feedback)
+            connection.execute("UPDATE review_buffers SET due_at=NULL,force_triage=FALSE WHERE flow_id=%s", (flow_id,))
             if not feedback or not any(f.body.strip() for f in feedback):
                 return None
             previous = connection.execute(
@@ -681,6 +682,12 @@ class ReviewStore:
             ).fetchone()
             if unseen:
                 self._touch(batch.flow_id, 0)
+
+    def reopened(self, flow_id: int, settle_seconds: float) -> None:
+        """Refreeze retained feedback through Judge without claiming it was previously relayed."""
+        self._touch(flow_id, settle_seconds)
+        with self.store.connection() as connection:
+            connection.execute("UPDATE review_buffers SET force_triage=TRUE WHERE flow_id=%s", (flow_id,))
 
     def cancel(self, flow_id: int) -> None:
         """Retire pending discussion atomically with the Flow's terminal transition."""

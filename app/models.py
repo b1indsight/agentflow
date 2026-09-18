@@ -144,8 +144,8 @@ class FlowDelivery(BaseModel):
     updated_at: datetime = Field(default_factory=utcnow)
 
     def supersedes(self, kind: JobKind) -> bool:
-        """A merged delivery retires coding/review work while still requiring archive."""
-        return self.state is DeliveryState.MERGED and kind is not JobKind.ARCHIVE
+        """Closed PRs retire coding/review intent; merged deliveries still require archive."""
+        return self.state in {DeliveryState.CLOSED, DeliveryState.MERGED} and kind is not JobKind.ARCHIVE
 
 
 class FlowToolCall(BaseModel):

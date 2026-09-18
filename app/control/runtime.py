@@ -52,6 +52,7 @@ class ControlRuntime:
         self.router = EventRouter(self.store, self.service, self.settings)
         self.reconciler = Reconciler(
             self.store, self.coordinator.github, self.service,
+            settle_seconds=self.settings.settle_seconds,
             interval=self.settings.reconcile_interval_seconds,
             batch_size=self.settings.reconcile_batch_size,
             concurrency=self.settings.reconcile_concurrency,

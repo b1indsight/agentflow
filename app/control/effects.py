@@ -168,7 +168,7 @@ class ResultEffects:
                 except ValueError as error:
                     raise ResultPending(str(error)) from error
             if delivery is not None and delivery.supersedes(job.kind):
-                raise FlowToolRejected(FlowToolErrorKind.CONFLICT, "PR merged before GitHub dispatch")
+                raise FlowToolRejected(FlowToolErrorKind.CONFLICT, "PR closed or merged before GitHub dispatch")
             if plan.batch_id is not None:
                 batch = tx.reviews.for_job(job)
                 delivery = tx.get_delivery(flow.id)
@@ -316,6 +316,40 @@ class ResultEffects:
                     )
                     if pull_request is None:
                         raise
+            if pull_request.state == "closed":
+                # PR creation may have succeeded before INITIAL's final local commit.
+                # Bind its verified identity and retire intent instead of re-opening it.
+                remote = await self.github.get_pull_request_status(installation, repo, pull_request.number)
+                if (remote.repo != repo or remote.number != pull_request.number or remote.head_repository != repo
+                        or remote.head_branch != effect.branch or remote.base_branch != effect.base_branch
+                        or remote.head_sha != effect.head_sha):
+                    raise FlowToolRejected(FlowToolErrorKind.CONFLICT, "closed INITIAL PR identity changed")
+                if remote.state == "closed":
+                    from app.control.lifecycle import pause_delivery
+                    from app.control.service import ControlService
+                    from app.github_models import PullRequestMerge
+
+                    with self.store.transaction() as tx:
+                        fresh = tx.lock_workflow(plan.flow_id)
+                        current_delivery = tx.get_delivery(plan.flow_id)
+                        if (fresh is None or current_delivery is None or plan.delivery is None
+                                or fresh.current_attempt_id != plan.attempt_id
+                                or current_delivery.version != plan.delivery.version
+                                or current_delivery.head_sha != effect.head_sha
+                                or current_delivery.pr_number not in {None, remote.number}):
+                            raise ResultPending("INITIAL delivery changed during closed PR verification")
+                        current_delivery.pr_number = remote.number
+                        current_delivery.url = f"https://github.com/{repo}/pull/{remote.number}"
+                        if remote.merged:
+                            assert remote.merged_at is not None and remote.merge_commit_sha is not None
+                            ControlService.record_merge(tx, fresh, current_delivery, PullRequestMerge(
+                                number=remote.number, merged=True, merged_at=remote.merged_at,
+                                merge_commit_sha=remote.merge_commit_sha,
+                            ))
+                        else:
+                            pause_delivery(tx, current_delivery)
+                    return EffectReceipt(pull_request=remote)
+                pull_request = remote
             FlowToolService.validate_pull_request(
                 pull_request,
                 effect.branch,

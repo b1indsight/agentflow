@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS flow_reconcile (
   last_error TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_reconcile_due ON flow_reconcile(next_at,flow_id);
+ALTER TABLE flow_reconcile ADD COLUMN IF NOT EXISTS hint_version BIGINT NOT NULL DEFAULT 0;
 CREATE TABLE IF NOT EXISTS feedback_reconcile (
   flow_id BIGINT NOT NULL REFERENCES flows(id),
   source TEXT NOT NULL,
@@ -46,6 +47,7 @@ class ReconcileState(BaseModel):
     last_success_at: datetime | None = None
     failures: int = 0
     last_error: str | None = None
+    hint_version: int = 0
 
 
 class FeedbackCheck(ReconcileState):
@@ -113,6 +115,16 @@ class ReconcileStore:
                 (self.store.now() + timedelta(seconds=delay), reason, check.flow_id, check.source),
             )
 
+    def hint(self, flow_id: int) -> None:
+        """Wake a healthy numbered check without bypassing a persisted failure deadline."""
+        with self.store.connection() as connection:
+            connection.execute(
+                "INSERT INTO flow_reconcile(flow_id,next_at,hint_version) VALUES(%s,%s,1)"
+                " ON CONFLICT(flow_id) DO UPDATE SET hint_version=flow_reconcile.hint_version+1,"
+                " next_at=CASE WHEN flow_reconcile.failures=0 THEN LEAST(flow_reconcile.next_at,EXCLUDED.next_at)"
+                " ELSE flow_reconcile.next_at END", (flow_id, self.store.now()),
+            )
+
     def seed(self, limit: int) -> None:
         """Incrementally register existing tracked PRs; never infer new Flows from GitHub."""
         with self.store.connection() as connection:
@@ -139,12 +151,13 @@ class ReconcileStore:
                 "SELECT * FROM flow_reconcile WHERE flow_id=%s", (flow_id,),
             ).fetchone()
 
-    def succeeded(self, flow_id: int, delay: float, diagnostic: str | None = None) -> None:
+    def succeeded(self, flow_id: int, delay: float, diagnostic: str | None = None, *, hint_version: int) -> None:
         now = self.store.now()
         with self.store.connection() as connection:
             connection.execute(
-                "UPDATE flow_reconcile SET last_success_at=%s,next_at=%s,failures=0,last_error=%s"
-                " WHERE flow_id=%s", (now, now + timedelta(seconds=delay), diagnostic, flow_id),
+                "UPDATE flow_reconcile SET last_success_at=%s,"
+                " next_at=CASE WHEN hint_version=%s THEN %s ELSE %s END,failures=0,last_error=%s"
+                " WHERE flow_id=%s", (now, hint_version, now + timedelta(seconds=delay), now, diagnostic, flow_id),
             )
 
     def failed(self, flow_id: int, delay: float, reason: str) -> None:

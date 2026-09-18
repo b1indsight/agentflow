@@ -119,6 +119,8 @@ class ControlService:
             if fresh is None:
                 raise ValueError(f"flow {flow.id} disappeared")
             delivery = tx.get_delivery(fresh.id)
+            if delivery is not None and delivery.state is DeliveryState.CLOSED:
+                raise ValueError("PR is closed or paused; reopen and reconcile its baseline before retry")
             if delivery is not None and delivery.state is DeliveryState.MERGED:
                 self._retry_archive(tx, fresh)
             elif tx.has_pending_result(flow.id):

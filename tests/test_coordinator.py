@@ -13,6 +13,7 @@ from app.control.coordinator import JobCoordinator
 from app.github_models import (
     IssueSnapshot,
     PullRequestSnapshot,
+    PullRequestStatus,
     PushCapability,
     RemoteRef,
     RepositorySnapshot,
@@ -111,7 +112,7 @@ class MemoryStore:
             for job in self.jobs.values()
         )
 
-    def cancel_jobs(self, flow_id: int) -> None:
+    def cancel_jobs(self, flow_id: int, *, reason: str = "Flow cancelled") -> None:
         for job in self.jobs.values():
             if job.flow_id == flow_id and job.state is JobState.QUEUED:
                 job.state = JobState.FAILED
@@ -315,6 +316,11 @@ class RecordingGitHub:
 
     async def find_pull_request_by_head(self, *args: object) -> PullRequestSnapshot | None:
         return self.pull_request
+
+    async def get_pull_request_status(self, installation: int, repo: str, number: int) -> PullRequestStatus:
+        assert self.pull_request is not None
+        return PullRequestStatus(**self.pull_request.model_dump(), repo=repo, head_repository=repo,
+                                 base_sha="base", merged=False)
 
     async def open_pull_request(
         self,
