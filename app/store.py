@@ -31,6 +31,7 @@ from app.models import (
     WorkerStatus,
     utcnow,
 )
+from app.project_store import PROJECT_SCHEMA
 from app.protocol import ArchiveTask, Failed, terminal_digest
 from app.reconcile_store import RECONCILE_SCHEMA, ReconcileStore
 from app.result_store import RESULT_SCHEMA, ResultStore
@@ -413,6 +414,7 @@ class Store:
             connection.execute(RESULT_SCHEMA)
             connection.execute(REVIEW_SCHEMA)
             connection.execute(RECONCILE_SCHEMA)
+            connection.execute(PROJECT_SCHEMA)
         self.reviews.migrate_legacy()
 
     def now(self) -> datetime:

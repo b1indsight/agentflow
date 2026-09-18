@@ -239,6 +239,7 @@ async def test_real_sdk_never_retries_or_accepts_partial_mutation(tmp_path, monk
     with pytest.raises(GitHubAdapterError) as caught:
         await asyncio.wait_for(call, 1)
     assert len(calls) == 1 and "secret-token" not in str(caught.value)
+    assert caught.value.request_rejected is (failure == "limited")
     assert caught.value.kind is {"partial": GitHubErrorKind.PERMISSION,
         "lost": GitHubErrorKind.TRANSIENT, "limited": GitHubErrorKind.RATE_LIMITED}[failure]
 

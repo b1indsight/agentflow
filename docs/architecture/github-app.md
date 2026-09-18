@@ -132,9 +132,29 @@ App 需要额外的**组织级 Projects read/write** 权限，且 installation �
 adapter 逐页返回 items 和不可见内容标记，调用方必须完成遍历才能确认不存在；已知 item 的
 Status 按字段 ID 读取。add Issue 与 set Status 是两次独立 mutation，均禁止 SDK 自动重试。
 HTTP 200 中的 GraphQL errors/partial data 是失败，异常仅显示分类与 endpoint，不打印 token。
-F8 提供接口；持久的响应丢失核对和 Flow 自动同步由 F9 接入。
+F8 提供接口；F9 已接入独立持久的 Flow 状态同步与响应丢失核对。
 
 依据：[Projects API](https://docs.github.com/en/issues/planning-and-tracking-with-projects/automating-your-project/using-the-api-to-manage-projects)、
 [组织 Projects 权限](https://docs.github.com/en/issues/planning-and-tracking-with-projects/automating-your-project/automating-projects-using-actions)、
 [字段与 item schema](https://docs.github.com/en/graphql/reference/projects)。
 真实组织 Project 尚未配置，真实 App 只读 smoke 未验证；自动化覆盖受控响应和真实 githubkit transport。
+
+
+### Projects 同步运维（F9）
+
+启用配置后，ACTIVE 或此后发生状态变化的 Flow 会被扫描；既有投影的 Done/Blocked 持续补偿。
+一 Issue 对应一张卡，重复 Flow 优先由当前 ACTIVE、否则最新 Flow 驱动；不批量导入既有历史终态。
+SUCCEEDED→Done，FAILED/CANCELLED/CLOSED 和明确人工阻塞→Blocked，MERGED 待归档→In Progress，
+未绑定 INITIAL→Todo，有排队/执行任务→In Progress，OPEN 空闲→In Review。
+临时网络退避不会把 Flow 直接改为 Blocked，Projects 故障也不会阻止归档 ACK 和 worker 释放。
+
+用 `flowtool project status owner/repo` 查看最多 100 条（可用 `--limit` 调整），包含 item、
+期望/已确认版本、下次运行时间及脱敏错误；修复权限、字段选项或远端条件后运行
+`flowtool project retry owner/repo` 重新核对。它不创建新卡、不解除远端归档，也不清除已知 item。
+
+同步独立每 5 秒调度，沿用 reconcile 的批次/并发/轮询间隔设置。每卡一条数据库 session 锁
+跨越远端 I/O，不占用 Flow 行锁；429/暂时错误持久退避并保留 Retry-After。
+重启后先读取远端值，写响应丢失时不会把旧响应当新版本确认。
+首次 add 在发送前记录不确定标记；若重启后完整查询仍找不到该卡，自动流程会阻塞，需人工
+核对远端事实。`retry` 本身不会把不确定 add 变成安全重发。被删除的已知卡片也不会自动重建。
+人工修改受管 Status 会在下一轮被当前状态覆盖，其他字段不变；移除配置并重启后停止请求。
