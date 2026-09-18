@@ -105,7 +105,7 @@ class ToolGitHub:
         self.labels = 0
         self.reviews = 0
 
-    async def get_ref(self, installation_id: int, repo: str, branch: str) -> RemoteRef:
+    async def get_ref(self, installation_id: int, repo: str, branch: str, *, retry_transient=False) -> RemoteRef:
         return RemoteRef(branch=branch, sha="abc123")
 
     async def find_pull_request_by_head(
@@ -233,7 +233,7 @@ async def test_cancel_during_remote_verification_cannot_prepare_delivery(monkeyp
     store = ToolStore()
     github = ToolGitHub()
 
-    async def cancel_and_read(*args):
+    async def cancel_and_read(*args, **kwargs):
         store.flow.state = FlowState.CANCELLED
         return RemoteRef(branch="flow/3", sha="abc123")
 
@@ -272,7 +272,7 @@ async def test_stale_assignment_is_distinct_from_invalid_arguments() -> None:
 @pytest.mark.asyncio
 async def test_github_rate_limit_is_returned_as_retryable() -> None:
     class RateLimitedGitHub(ToolGitHub):
-        async def get_ref(self, installation_id: int, repo: str, branch: str) -> RemoteRef:
+        async def get_ref(self, installation_id: int, repo: str, branch: str, *, retry_transient=False) -> RemoteRef:
             raise GitHubAdapterError(
                 GitHubErrorKind.RATE_LIMITED,
                 "get ref",

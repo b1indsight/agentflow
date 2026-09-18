@@ -109,7 +109,9 @@ class GitHubClient(Protocol):
 
     async def create_push_capability(self, installation_id: int, repo: str) -> PushCapability: ...
 
-    async def get_ref(self, installation_id: int, repo: str, branch: str) -> RemoteRef: ...
+    async def get_ref(
+        self, installation_id: int, repo: str, branch: str, *, retry_transient: bool = False,
+    ) -> RemoteRef: ...
 
     async def compare_commits(
         self, installation_id: int, repo: str, base: str, head: str,

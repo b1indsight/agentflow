@@ -13,6 +13,8 @@ from psycopg.rows import class_row, dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
+from app.github_models import GitHubAdapterError
+from app.github_retry import retry_delay
 from app.models import (
     Attempt,
     DeliveryState,
@@ -29,7 +31,7 @@ from app.models import (
     WorkerStatus,
     utcnow,
 )
-from app.protocol import ArchiveTask
+from app.protocol import ArchiveTask, Failed, terminal_digest
 from app.reconcile_store import RECONCILE_SCHEMA, ReconcileStore
 from app.result_store import RESULT_SCHEMA, ResultStore
 from app.review_store import REVIEW_SCHEMA, ReviewStore
@@ -181,6 +183,10 @@ ALTER TABLE attempts ADD COLUMN IF NOT EXISTS worker_id TEXT;
 ALTER TABLE attempts ADD COLUMN IF NOT EXISTS session_generation INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE attempts ADD COLUMN IF NOT EXISTS last_revision_summary TEXT NOT NULL DEFAULT '';
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS assigned_worker_id TEXT;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS prepare_failures INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS prepare_next_at TIMESTAMPTZ;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS prepare_first_failed_at TIMESTAMPTZ;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS prepare_last_error TEXT;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS assignment_token TEXT;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS last_error TEXT;
@@ -873,6 +879,7 @@ class Store:
         now = self._clock()
         # Share this predicate across fair-worker selection and both binding paths.
         eligible = (
+            " AND (j.prepare_next_at IS NULL OR j.prepare_next_at<=%s)"
             " AND NOT EXISTS (SELECT 1 FROM flow_deliveries paused"
             " WHERE paused.flow_id=j.flow_id AND paused.state='closed')"
             " AND ((j.kind='archive') = EXISTS (SELECT 1 FROM flow_deliveries d"
@@ -897,7 +904,7 @@ class Store:
                 " (own.flow_id IS NULL AND bound.flow_id IS NULL))" + eligible + ")"
                 " ORDER BY w.last_assigned_at NULLS FIRST, w.worker_id"
                 " FOR UPDATE OF w SKIP LOCKED LIMIT 1",
-                (WorkerStatus.ONLINE, JobState.QUEUED, FlowState.ACTIVE),
+                (WorkerStatus.ONLINE, JobState.QUEUED, FlowState.ACTIVE, now),
             ).fetchone()
             if candidate is None or candidate["worker_id"] != worker_id:
                 return None
@@ -919,7 +926,7 @@ class Store:
                     " LEFT JOIN flow_executions e ON e.flow_id=f.id AND e.released_at IS NULL"
                     " WHERE j.state=%s AND f.state=%s AND e.flow_id IS NULL" + eligible +
                     " ORDER BY j.created_at, j.id FOR NO KEY UPDATE OF f,j SKIP LOCKED LIMIT 1",
-                    (JobState.QUEUED, FlowState.ACTIVE),
+                    (JobState.QUEUED, FlowState.ACTIVE, now),
                 ).fetchone()
                 if row is None:
                     return None
@@ -938,7 +945,7 @@ class Store:
                     "SELECT j.id, j.flow_id, f.repo FROM jobs j JOIN flows f ON f.id=j.flow_id"
                     " WHERE j.state=%s AND f.state=%s AND j.flow_id=%s" + eligible +
                     " ORDER BY j.created_at, j.id FOR NO KEY UPDATE OF f,j SKIP LOCKED LIMIT 1",
-                    (JobState.QUEUED, FlowState.ACTIVE, execution["flow_id"]),
+                    (JobState.QUEUED, FlowState.ACTIVE, execution["flow_id"], now),
                 ).fetchone()
                 if row is None:
                     return None
@@ -1290,6 +1297,72 @@ class Store:
                     (WorkerStatus.ONLINE, self._clock(), worker_id, job_id),
                 )
         return result.rowcount == 1
+
+    def _lock_preparation(self, job_id: int, worker: str, token: str, epoch: str) -> Job | None:
+        job = self.get_job(job_id)
+        if job is None:
+            return None
+        self.lock_workflow(job.flow_id)
+        current = self.lock_job(job_id)
+        if (current is None or current.started_at is not None or current.result_received_at is not None
+                or current.lease_expires_at is None or current.lease_expires_at <= self.now()
+                or not self.assignment_active(job_id, worker, token, epoch)):
+            return None
+        return current
+
+    def clear_preparation(self, job_id: int, worker: str, token: str, epoch: str) -> bool:
+        """Clear the read budget only for the same successful, un-dispatched preparation."""
+        with self.transaction() as tx:
+            current = tx._lock_preparation(job_id, worker, token, epoch)
+            if current is None:
+                return False
+            with tx.connection() as connection:
+                connection.execute(
+                    "UPDATE jobs SET prepare_failures=0,prepare_next_at=NULL,prepare_first_failed_at=NULL,"
+                    " prepare_last_error=NULL WHERE id=%s", (job_id,),
+                )
+            return True
+
+    def defer_preparation(
+        self, job_id: int, worker: str, token: str, epoch: str, error: GitHubAdapterError | None,
+        *, max_failures: int, window_seconds: float,
+    ) -> JobState | None:
+        """Atomically retry or fail a read; None rejects stale assignment evidence.
+
+        A missing error means the persisted window expired before issuing another request.
+        The caller has not emitted Assignment and must complete the ordinary result path on failure.
+        """
+        with self.transaction() as tx:
+            current = tx._lock_preparation(job_id, worker, token, epoch)
+            if current is None:
+                return None
+            flow, delivery = tx.get_flow(current.flow_id), tx.get_delivery(current.flow_id)
+            if (flow is None or flow.state is not FlowState.ACTIVE
+                    or (delivery is not None and delivery.supersedes(current.kind))):
+                return JobState.DONE
+            now = tx.now()
+            failures = current.prepare_failures + (error is not None)
+            first = current.prepare_first_failed_at or now
+            next_at = now + timedelta(seconds=retry_delay(failures, now, error))
+            permanent = error is not None and not error.retryable
+            exhausted = (permanent or error is None or failures >= max_failures
+                         or next_at >= first + timedelta(seconds=window_seconds))
+            cause = str(error) if error else current.prepare_last_error or "preparation window expired"
+            reason = (f"preparation retry budget/window exhausted: {cause}"
+                      if exhausted and not permanent else cause)
+            with tx.connection() as connection:
+                connection.execute(
+                    "UPDATE jobs SET prepare_failures=%s,prepare_first_failed_at=%s,prepare_next_at=%s,"
+                    " prepare_last_error=%s,last_error=%s WHERE id=%s",
+                    (failures, first, None if exhausted else next_at, cause, reason, job_id),
+                )
+            if exhausted:
+                message = Failed(job_id=job_id, assignment_token=token, connection_epoch="control", error=reason)
+                tx.record_control_result(job_id, message.model_dump(mode="json"), terminal_digest(message), reason)
+                return JobState.FAILED
+            if not tx.requeue_assignment(job_id, worker, token, epoch):
+                raise ValueError("locked preparation could not be requeued")
+            return JobState.QUEUED
 
     def requeue_assignment(
         self,

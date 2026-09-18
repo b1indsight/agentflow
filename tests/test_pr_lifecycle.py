@@ -57,7 +57,7 @@ class GitHub:
             self.before_return()
         return self.remote
 
-    async def get_ref(self, installation, repo, branch):
+    async def get_ref(self, installation, repo, branch, *, retry_transient=False):
         return RemoteRef(branch=branch, sha=self.remote.head_sha)
 
 

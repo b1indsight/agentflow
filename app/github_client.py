@@ -84,7 +84,7 @@ class GitHubApp:
         )
 
     def _installation_client(self, installation_id: int, *, auto_retry: bool = True) -> Any:
-        """Read APIs retain SDK retries; mutations explicitly defer to durable effect recovery."""
+        """Durable preparation and effect owners disable SDK retries at their call sites."""
         return GitHub(
             AppInstallationAuthStrategy(
                 self._app_id,
@@ -106,7 +106,7 @@ class GitHubApp:
 
     async def get_issue(self, installation_id: int, repo: str, number: int) -> IssueSnapshot:
         owner, name = self._split_repo(repo)
-        client = self._installation_client(installation_id)
+        client = self._installation_client(installation_id, auto_retry=False)
 
         async def operation() -> IssueSnapshot:
             data = (await client.rest.issues.async_get(owner, name, number)).parsed_data
@@ -121,7 +121,7 @@ class GitHubApp:
 
     async def get_repository(self, installation_id: int, repo: str) -> RepositorySnapshot:
         owner, name = self._split_repo(repo)
-        client = self._installation_client(installation_id)
+        client = self._installation_client(installation_id, auto_retry=False)
 
         async def operation() -> RepositorySnapshot:
             data = (await client.rest.repos.async_get(owner, name)).parsed_data
@@ -133,7 +133,7 @@ class GitHubApp:
         self, installation_id: int, repo: str, number: int,
     ) -> ReviewPullRequest:
         owner, name = self._split_repo(repo)
-        client = self._installation_client(installation_id)
+        client = self._installation_client(installation_id, auto_retry=False)
 
         async def operation() -> ReviewPullRequest:
             data = (await client.rest.pulls.async_get(owner, name, number)).parsed_data
@@ -168,7 +168,7 @@ class GitHubApp:
     ) -> FilePage:
         """Read at most 40 files plus a sentinel page; absent patches stay explicitly unknown."""
         owner, name = self._split_repo(repo)
-        client = self._installation_client(installation_id)
+        client = self._installation_client(installation_id, auto_retry=False)
 
         async def operation() -> FilePage:
             files: list[ContextFile] = []
@@ -200,7 +200,7 @@ class GitHubApp:
     ) -> DiscussionPage:
         """Bound each conversation/review/inline source independently so none starves the others."""
         owner, name = self._split_repo(repo)
-        client = self._installation_client(installation_id)
+        client = self._installation_client(installation_id, auto_retry=False)
 
         async def operation() -> DiscussionPage:
             discussions: list[ContextDiscussion] = []
@@ -270,10 +270,13 @@ class GitHubApp:
 
         return await self._execute("create_push_capability", operation)
 
-    async def get_ref(self, installation_id: int, repo: str, branch: str) -> RemoteRef:
+    async def get_ref(
+        self, installation_id: int, repo: str, branch: str, *, retry_transient: bool = False,
+    ) -> RemoteRef:
+        """Durable callers own retries; execution-time tools may use bounded SDK retries."""
         owner, name = self._split_repo(repo)
         branch = self._normalize_branch(branch)
-        client = self._installation_client(installation_id)
+        client = self._installation_client(installation_id, auto_retry=retry_transient)
 
         async def operation() -> RemoteRef:
             data = (await client.rest.git.async_get_ref(owner, name, f"heads/{branch}")).parsed_data
@@ -286,7 +289,7 @@ class GitHubApp:
     ) -> bool:
         """Prove a normal forward delivery using GitHub's comparison of immutable SHAs."""
         owner, name = self._split_repo(repo)
-        client = self._installation_client(installation_id)
+        client = self._installation_client(installation_id, auto_retry=False)
 
         async def operation() -> bool:
             data = (await client.rest.repos.async_compare_commits(
@@ -558,7 +561,7 @@ class GitHubApp:
         self, installation_id: int, repo: str, pr: int,
     ) -> ReviewThreads:
         self._split_repo(repo)
-        reader = ThreadReader(self._installation_client(installation_id), repo, pr)
+        reader = ThreadReader(self._installation_client(installation_id, auto_retry=False), repo, pr)
         return await self._execute("list_review_threads", reader.all)
 
     async def get_review_thread(

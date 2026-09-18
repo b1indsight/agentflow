@@ -28,6 +28,30 @@ class AsyncEndpoint:
         return self.result
 
 
+@pytest.mark.parametrize("method,target", [("get_issue", 7), ("get_ref", "flow/7")])
+async def test_preparation_rate_limit_is_returned_without_sdk_sleep(tmp_path, monkeypatch, method, target):
+    import asyncio
+
+    requests = []
+
+    def limited(request):
+        requests.append(request)
+        return httpx.Response(403, json={"message": "API rate limit exceeded"},
+                              headers={"X-RateLimit-Remaining": "0", "Retry-After": "600"}, request=request)
+
+    app = GitHubApp(settings(tmp_path))
+
+    def installation(installation_id, *, auto_retry):
+        assert auto_retry is False
+        return GitHub("test-token", auto_retry=auto_retry, async_transport=httpx.MockTransport(limited))
+
+    monkeypatch.setattr(app, "_installation_client", installation)
+    with pytest.raises(GitHubAdapterError) as caught:
+        await asyncio.wait_for(getattr(app, method)(42, "owner/repo", target), 1)
+    assert caught.value.kind is GitHubErrorKind.RATE_LIMITED
+    assert caught.value.retry_after == "600" and len(requests) == 1
+
+
 @pytest.mark.parametrize("status,ancestor,behind,expected", [
     ("ahead", "base", 0, True), ("ahead", "other", 0, False),
     ("diverged", "base", 1, False), ("behind", "head", 2, False),
@@ -41,7 +65,7 @@ async def test_revision_lineage_requires_github_fast_forward(
     )))
     client = SimpleNamespace(rest=SimpleNamespace(repos=SimpleNamespace(async_compare_commits=endpoint)))
     app = GitHubApp(settings(tmp_path))
-    monkeypatch.setattr(app, "_installation_client", lambda _: client)
+    monkeypatch.setattr(app, "_installation_client", lambda _, **kwargs: client)
     assert await app.compare_commits(1, "owner/repo", "base", "head") is expected
     assert endpoint.calls == [(("owner", "repo", "base...head"), {"per_page": 1})]
 
@@ -57,7 +81,7 @@ async def test_review_files_paginate_and_mark_missing_patch(tmp_path, monkeypatc
 
     client = SimpleNamespace(rest=SimpleNamespace(pulls=SimpleNamespace(async_list_files=files)))
     app = GitHubApp(settings(tmp_path))
-    monkeypatch.setattr(app, "_installation_client", lambda _: client)
+    monkeypatch.setattr(app, "_installation_client", lambda _, **kwargs: client)
     result = await app.list_pull_request_files(1, "owner/repo", 17)
     assert pages == [1, 2]
     assert len(result.files) == 21
@@ -81,7 +105,7 @@ async def test_review_discussions_cover_all_sources_with_a_finite_page_limit(tmp
         issues=SimpleNamespace(async_list_comments=discussion),
     ))
     app = GitHubApp(settings(tmp_path))
-    monkeypatch.setattr(app, "_installation_client", lambda _: client)
+    monkeypatch.setattr(app, "_installation_client", lambda _, **kwargs: client)
     result = await app.list_pull_request_discussions(1, "owner/repo", 17)
     assert result.truncated
     assert len(result.discussions) == 60
@@ -173,7 +197,7 @@ async def test_reads_issue_repository_and_remote_ref_as_internal_snapshots(
         )
     )
     github = GitHubApp(settings(tmp_path))
-    monkeypatch.setattr(github, "_installation_client", lambda installation_id: client)
+    monkeypatch.setattr(github, "_installation_client", lambda installation_id, **kwargs: client)
 
     issue_snapshot = await github.get_issue(42, "octo/repo", 7)
     repository_snapshot = await github.get_repository(42, "octo/repo")
@@ -377,7 +401,7 @@ async def test_reviewer_reconciliation_includes_completed_reviews_across_pages(
         )
     )
     github = GitHubApp(settings(tmp_path))
-    monkeypatch.setattr(github, "_installation_client", lambda _: client)
+    monkeypatch.setattr(github, "_installation_client", lambda _, **kwargs: client)
     assert await github.get_reviewers(42, "octo/repo", 10, since=since) == {"requested", "finished"}
     assert pages == [1, 2]
 
@@ -408,7 +432,7 @@ async def test_maps_github_failures_without_response_bodies(
     get_issue = AsyncEndpoint(error=request_failed(status, **headers))
     client = SimpleNamespace(rest=SimpleNamespace(issues=SimpleNamespace(async_get=get_issue)))
     github = GitHubApp(settings(tmp_path))
-    monkeypatch.setattr(github, "_installation_client", lambda installation_id: client)
+    monkeypatch.setattr(github, "_installation_client", lambda installation_id, **kwargs: client)
 
     with pytest.raises(GitHubAdapterError) as captured:
         await github.get_issue(42, "octo/repo", 7)
@@ -427,7 +451,7 @@ async def test_rate_limit_403_is_retryable(tmp_path: Path, monkeypatch: pytest.M
     )
     client = SimpleNamespace(rest=SimpleNamespace(issues=SimpleNamespace(async_get=get_issue)))
     github = GitHubApp(settings(tmp_path))
-    monkeypatch.setattr(github, "_installation_client", lambda installation_id: client)
+    monkeypatch.setattr(github, "_installation_client", lambda installation_id, **kwargs: client)
 
     with pytest.raises(GitHubAdapterError) as captured:
         await github.get_issue(42, "octo/repo", 7)
@@ -450,7 +474,7 @@ async def test_maps_real_githubkit_transport_wrappers_as_transient(
 
     client = GitHub("test-token", async_transport=httpx.MockTransport(fail))
     github = GitHubApp(settings(tmp_path))
-    monkeypatch.setattr(github, "_installation_client", lambda installation_id: client)
+    monkeypatch.setattr(github, "_installation_client", lambda installation_id, **kwargs: client)
 
     with pytest.raises(GitHubAdapterError) as captured:
         await github.get_issue(42, "octo/repo", 7)

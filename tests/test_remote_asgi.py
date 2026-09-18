@@ -26,6 +26,9 @@ from app.store import Store
 
 
 class AsgiCoordinator:
+    async def prepare_for_assignment(self, job, worker, token, epoch):
+        return await self.prepare(job)
+
     def __init__(self, attempt_id: int, store: Store) -> None:
         self.attempt_id = attempt_id
         self.store = store

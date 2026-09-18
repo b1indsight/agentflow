@@ -311,7 +311,7 @@ class RecordingGitHub:
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
         )
 
-    async def get_ref(self, installation_id: int, repo: str, branch: str) -> RemoteRef:
+    async def get_ref(self, installation_id: int, repo: str, branch: str, *, retry_transient=False) -> RemoteRef:
         return RemoteRef(branch=branch, sha="abc123")
 
     async def find_pull_request_by_head(self, *args: object) -> PullRequestSnapshot | None:
@@ -407,6 +407,8 @@ def coordinator(store: Store | MemoryStore, github: RecordingGitHub) -> JobCoord
         done_label="flow:done",
         confidence_threshold=0.6,
         max_revision_cycles=20,
+        prepare_max_failures=5,
+        prepare_retry_window_seconds=900,
     )
     return JobCoordinator(
         cast(Store, store),

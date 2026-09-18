@@ -40,6 +40,8 @@ class ServeSettings(FlowToolSettings):
     submit_grace_seconds: float = 15.0
     confidence_threshold: float = Field(default=0.6, ge=0, le=1, allow_inf_nan=False)
     max_revision_cycles: int = 20
+    prepare_max_failures: int = Field(default=5, ge=1, le=100)
+    prepare_retry_window_seconds: float = Field(default=900, gt=0, allow_inf_nan=False)
 
     host: str = "0.0.0.0"
     port: int = 8000

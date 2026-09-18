@@ -32,7 +32,7 @@ class RevisionGitHub(RecordingGitHub):
                                   head_repository="owner/repo",
                                   base_branch="main", base_sha="base", title="Task", body="Requirements")
 
-    async def get_ref(self, installation_id, repo, branch):
+    async def get_ref(self, installation_id, repo, branch, *, retry_transient=False):
         return RemoteRef(branch=branch, sha=self.sha)
 
     async def compare_commits(self, installation_id, repo, base, head):
@@ -162,7 +162,7 @@ async def test_revision_limit_applies_to_strong_signals(store, pending_revision)
     attempt = store.get_attempt(task.attempt_id)
     attempt.revision_cycles = 20
     store.update_attempt(attempt)
-    assert await subject.prepare(job) is JobState.FAILED
+    assert await subject.prepare_for_assignment(job, "worker-a", "token", "epoch") is JobState.FAILED
     assert store.get_attempt(task.attempt_id).revision_cycles == 20
     assert store.reviews.pending(job.flow_id)
 
@@ -354,7 +354,14 @@ async def test_revision_preparation_failure_is_persisted_and_explicitly_retryabl
 
     with monkeypatch.context() as patch:
         patch.setattr(github, endpoint, unavailable)
-        assert await subject.prepare(job) is JobState.FAILED
+        if kind is GitHubErrorKind.TRANSIENT:
+            from app.control.preparation import PreparationReadFailure
+
+            with pytest.raises(PreparationReadFailure):
+                await subject.prepare(job)
+            assert store.get_job(job.id).result_received_at is None
+            return
+        assert await subject.prepare_for_assignment(job, "worker-a", "token", "epoch") is JobState.FAILED
     failed = store.get_job(job.id)
     assert failed.state is JobState.FAILED and failed.result_applied_at is not None
     assert endpoint in failed.last_error

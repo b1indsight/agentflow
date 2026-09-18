@@ -302,7 +302,7 @@ async def test_archive_retry_policy_keeps_push_token_acquisition_retryable(tmp_p
     assert len(requests) == 2
 
 
-async def test_archive_retry_policy_preserves_graphql_discovery_retries(tmp_path, monkeypatch):
+async def test_preparation_discovery_defers_retries_to_its_durable_owner(tmp_path, monkeypatch):
     queries = []
 
     def transport(request):
@@ -322,6 +322,10 @@ async def test_archive_retry_policy_preserves_graphql_discovery_retries(tmp_path
 
     adapter, _ = archive_adapter(tmp_path, monkeypatch, transport)
     monkeypatch.setattr("githubkit.core.anyio.sleep", no_wait)
+    with pytest.raises(GitHubAdapterError) as caught:
+        await adapter.list_review_threads(42, "owner/repo", 17)
+    assert caught.value.kind is GitHubErrorKind.TRANSIENT
+    assert len(queries) == 1
     snapshot = await adapter.list_review_threads(42, "owner/repo", 17)
     assert snapshot.complete
     assert len(queries) == 2

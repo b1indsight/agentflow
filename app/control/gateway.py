@@ -13,6 +13,7 @@ from fastapi import WebSocketDisconnect
 from loguru import logger
 from pydantic import ValidationError
 
+from app.control.preparation import PreparationStale
 from app.models import DeliveryState, FlowDelivery, FlowExecution, Job, JobKind, JobState
 from app.protocol import (
     Assignment,
@@ -121,7 +122,9 @@ class GatewayStore(Protocol):
 
 
 class AssignmentCoordinator(Protocol):
-    async def prepare(self, job: Job) -> ExecutionTask | JobState: ...
+    async def prepare_for_assignment(
+        self, job: Job, worker: str, token: str, epoch: str,
+    ) -> ExecutionTask | JobState: ...
 
     async def assignment_secret(self, job: Job, task: ExecutionTask) -> AssignmentSecret | None: ...
 
@@ -175,7 +178,10 @@ class WorkerGateway:
     ) -> tuple[ExecutionTask | JobState, AssignmentSecret | None]:
         """Keep the unstarted lease alive across both context and capability I/O; fence dispatch."""
         async def build() -> tuple[ExecutionTask | JobState, AssignmentSecret | None]:
-            prepared = await self.coordinator.prepare(job)
+            try:
+                prepared = await self.coordinator.prepare_for_assignment(job, worker_id, token, epoch)
+            except PreparationStale as error:
+                raise ProtocolViolation(str(error)) from error
             if isinstance(prepared, JobState):
                 return prepared, None
             try:

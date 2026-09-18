@@ -8,6 +8,9 @@ from typing import TYPE_CHECKING
 from psycopg.rows import class_row
 from psycopg.types.json import Jsonb
 
+from app.github_models import GitHubAdapterError
+from app.github_retry import retry_delay
+from app.models import Job
 from app.result_models import EffectReceipt, EffectRecord, EffectState, ResultPlan
 
 if TYPE_CHECKING:
@@ -25,6 +28,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_codex_runs_source ON codex_runs(source_job_
 -- A pre-upgrade accepted result may already have produced unmarked comments.
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS result_recovery_version INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE jobs ALTER COLUMN result_recovery_version SET DEFAULT 1;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS verify_failures INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS verify_next_at TIMESTAMPTZ;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS verify_last_error TEXT;
 CREATE TABLE IF NOT EXISTS result_applications (
   job_id BIGINT PRIMARY KEY REFERENCES jobs(id),
   digest TEXT NOT NULL,
@@ -64,7 +70,24 @@ class ResultStore:
                 "SELECT plan FROM result_applications WHERE job_id=%s",
                 (job_id,),
             ).fetchone()
-        return ResultPlan.model_validate(row["plan"]) if row else None
+            return ResultPlan.model_validate(row["plan"]) if row else None
+
+    def defer_verification(self, job: Job, error: GitHubAdapterError) -> None:
+        """Retain a server deadline only while this accepted result still needs verification."""
+        with self.store.transaction() as tx:
+            tx.lock_workflow(job.flow_id)
+            current = tx.lock_job(job.id)
+            if (current is None or current.result_digest != job.result_digest
+                    or current.result_applied_at is not None or tx.results.get_plan(job.id) is not None):
+                return
+            failures = current.verify_failures + 1
+            next_at = tx.now() + timedelta(seconds=retry_delay(failures, tx.now(), error))
+            with tx.connection() as connection:
+                connection.execute(
+                    "UPDATE jobs SET verify_failures=%s,verify_next_at=GREATEST(verify_next_at,%s),"
+                    " verify_last_error=%s,last_error=%s WHERE id=%s",
+                    (failures, next_at, str(error), str(error), job.id),
+                )
 
     def prepare(self, plan: ResultPlan) -> None:
         """Reserve a frozen plan and its effects atomically; caller holds the workflow/job locks."""
@@ -80,6 +103,10 @@ class ResultStore:
                 if previous is None or previous.digest != plan.digest:
                     raise ValueError("result plan digest conflicts with persisted result")
                 return
+            connection.execute(
+                "UPDATE jobs SET verify_failures=0,verify_next_at=NULL,verify_last_error=NULL WHERE id=%s",
+                (plan.job_id,),
+            )
             for position, effect in enumerate(plan.effects):
                 connection.execute(
                     "INSERT INTO result_effects(job_id,effect_key,position,payload,state,"
