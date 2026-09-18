@@ -1,6 +1,6 @@
 # M4 收尾：重开反馈分诊与轮询恢复回归
 
-> 状态：计划待批准；尚未修改产品代码或测试。日期：2026-09-18。
+> 状态：用户已批准并实施；自动化验证完成，待代码审查及用户合并。日期：2026-09-18。
 > 基线：`feat/m4-projects-api@origin` / `4e1b9e71`，包含 M4 F1–F9。
 > bookmark：`fix/m4-reopen-triage`；本计划与实现使用同一 PR。
 
@@ -53,3 +53,17 @@
   就宣布 M4 已进入 main。用户仍统一 review/合并。
 - 外部验收继续按 `m4-stage.md` 第 5 节执行；需可用且获授权的测试仓库、App、worker
   和组织 Project。缺少这些条件时记录未验收，不以替身测试代替。
+
+## 6. 实施与验证
+
+- `review_versions.signal_retired` 持久记录版本的强信号授权失效；在重开事务内退休该 Flow
+  已有 request_changes 授权。统一查询排除已退休版本，保留首次强制 triage。
+- 不改正文或 consumed/relayed 记录；同版本 webhook/轮询重复观察不会恢复授权。
+  真正的新反馈、新内容版本继续使用既有授权规则，再次 close/reopen 会退休当时的授权。
+- 新增六项分诊回归：超过 60 条积压完成/WAIT 后重启、重复通知与新 Review/编辑版本、
+  空正文和事务回滚。最初五项在旧实现均失败，修复后通过。
+- 新增 OPEN 正常轮询→重启→限流→再次重启→恢复的持久 deadline 回归；轮询产品代码无需修改。
+- 实际 PostgreSQL 全量 **726 passed / 0 skipped**；Ruff、Mypy（115 个源文件）和
+  `uv build --no-sources` 通过。保留既有 Starlette 弃用警告。
+- 本次不追溯改写升级前已经产生的批次；新规则在修复版本执行重开事务时应用。
+  真实外部验收、完整 M4 汇入 main 和线程解析重复的 low 仍待后续处理。

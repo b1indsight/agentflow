@@ -107,6 +107,48 @@ async def test_rate_limit_deadline_survives_restart(store, merge_flow, monkeypat
         restarted.close()
 
 
+async def test_open_polling_resumes_its_success_and_retry_deadlines_after_restart(
+    store, merge_flow, monkeypatch,
+):
+    clock = SimpleNamespace(now=datetime(2026, 9, 18, tzinfo=UTC))
+    monkeypatch.setattr(store, "_clock", lambda: clock.now)
+    remote = status(merge_flow, state="open", merged=False)
+    github = GitHub(remote)
+    await subject(store, github)._sweep()
+    first = store.reconcile.get(merge_flow.id)
+    assert first.next_at == clock.now + timedelta(seconds=300)
+    # Restart after an ordinary OPEN response, rather than only after a missed merge.
+    restarted = Store(store.database_url, clock=lambda: clock.now)
+    try:
+        clock.now = first.next_at - timedelta(seconds=1)
+        await subject(restarted, github)._sweep()
+        assert len(github.calls) == 1
+        clock.now = first.next_at
+        github.remote = GitHubAdapterError(GitHubErrorKind.RATE_LIMITED, "status", retry_after="120")
+        await subject(restarted, github)._sweep()
+        failed = restarted.reconcile.get(merge_flow.id)
+        assert failed.failures == 1 and failed.last_success_at == first.last_success_at
+        assert failed.next_at == clock.now + timedelta(seconds=120)
+    finally:
+        restarted.close()
+    restarted = Store(store.database_url, clock=lambda: clock.now)
+    try:
+        github.remote = remote
+        clock.now = failed.next_at - timedelta(seconds=1)
+        await subject(restarted, github)._sweep()
+        assert len(github.calls) == 2
+        clock.now = failed.next_at
+        await subject(restarted, github)._sweep()
+        assert len(github.calls) == 3
+        recovered = restarted.reconcile.get(merge_flow.id)
+        assert recovered.failures == 0 and recovered.last_error is None
+        assert recovered.next_at == clock.now + timedelta(seconds=300)
+        assert restarted.get_delivery(merge_flow.id).state is DeliveryState.OPEN
+        assert restarted.list_jobs(merge_flow.id) == []
+    finally:
+        restarted.close()
+
+
 @pytest.mark.parametrize("kind", [GitHubErrorKind.AUTHENTICATION, GitHubErrorKind.PERMISSION,
                                  GitHubErrorKind.NOT_FOUND])
 async def test_read_errors_do_not_invent_pr_lifecycle_facts(store, merge_flow, kind):
