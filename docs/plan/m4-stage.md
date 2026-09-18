@@ -1,6 +1,6 @@
 # M4 阶段计划：并发收敛、GitHub 对账与 Projects 看板
 
-> 状态：九项已实施；本轮已授权恢复修复完成，复审新增问题待后续指示；外部真实验收尚未完成。更新：2026-09-18。
+> 状态：九项已实施；已报告的阻塞项已修复，验证与非阻塞遗留项见第 7 节；外部真实验收尚未完成。更新：2026-09-18。
 > 基线：`main@origin` / `be65878f`；M3 #24–#26 及归档恢复修复 #27 已合并。
 > 阶段总表随 F1 PR 维护；每个 feature 有自己的 bookmark 和 draft PR，批准后在原 PR 实施。
 > 用户统一 review 和合并；本轮不执行合并。M1–M3 的真实 E2E 待办继续保留。
@@ -135,20 +135,23 @@ PR 以相邻前项为 base，代码、测试和文档均按相对 base 的新增
 删除线程分页、CLOSED 过期执行、重开旧任务、丢失对账提示、永久准备失败围栏、结果核验退避、
 Projects 明确拒绝后的建卡恢复及已知归档结果状态；另保留预算耗尽的实际错误原因。
 
-完整 PostgreSQL 验证：F1 514、F3 551、F4 578、F5 601、F6 624、F7 646、最终栈 709 passed。
-最终 Ruff、Mypy（113 个源文件）、build 通过。真实 GitHub App/worker/组织 Projects 矩阵仍待验收。
+首轮返修 PostgreSQL 验证：F1 514、F3 551、F4 578、F5 601、F6 624、F7 646、最终栈 709 passed。
+首轮最终 Ruff、Mypy（113 个源文件）、build 通过。真实 GitHub App/worker/组织 Projects 矩阵仍待验收。
 
-返修复审新增 medium（已报告，尚未修改）：
+用户随后授权修复会造成卡住的问题，五项阻塞/队列问题已完成第二轮返修：
 
-| PR | 问题与影响 |
+| PR | 修复与恢复证据 |
 |---|---|
-| #31 | 同正文仅 inert 改变时比较忽略该字段，命令消息可能仍是可执行反馈 |
-| #31 | 前 60 条空正文可阻止后续有效反馈进入批次 |
-| #33 | 重开强制 triage 仅覆盖首批，后续积压 request_changes 可直接生成 revision |
-| #33 | CLOSED worker 重连无 journal 仍会合成失败，阻断真实结果和 reopen |
-| #34 | 执行期间 flow.open_pr 的 ref 读取缺少 transient 重试所有者 |
-| #35 | Projects items 默认遗漏 archived 卡片，可误判不存在 |
+| #31 | 同正文 inert 变化独立持久化，命令停用和后续普通编辑可恢复 |
+| #31 | 每批为有效正文保留位置；空 Review 授权保留，WAIT 不会无限重复 |
+| #33 | CLOSED 无 journal 重连保留执行事实；原结果可接受、收尾并 reopen |
+| #34 | flow.open_pr 显式启用 ref SDK 重试；同一次调用恢复，持久读取仍自行退避 |
+| #35/#36 | 枚举 archived 卡片，人工恢复后跨重启 retry 复用原卡，不进入重复建卡路径 |
 
-原 low 的普通 OPEN 轮询重启测试缺口和线程解析重复仍保留。
-仓库 review gate 规定："Findings-driven rework requires a new, explicit user request after the findings have been reported."
-因此新增发现等待后续明确返修指令；通过 gate/CI 不等于这些问题已解决。本轮不执行 merge。
+第二轮完整 PostgreSQL 验证：F4 582、F6 629、F7 654、F8 685、最终栈 719 passed；
+最终 Ruff、Mypy（114 个源文件）、build 通过。
+F4/F6/F7/F8 本轮独立复审无新增发现；F5 同步中的文档冲突已解决，已知解析重复 low 保留。
+
+剩余非阻塞项：#33 重开超过 60 条积压时后续批次可能绕过强制 triage（medium）；
+普通 OPEN 轮询跨重启测试缺口、线程解析重复（low）。本轮范围是阻塞修复，未扩展这些行为/重构项。
+用户统一 review/合并，本轮不执行 merge。真实外部矩阵仍待验收。

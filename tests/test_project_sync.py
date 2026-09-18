@@ -211,6 +211,50 @@ async def test_manual_removal_is_never_reversed_even_after_retry(store, projecti
     assert state(store).blocked and remote.calls.count("add") == 1
 
 
+async def test_discovered_archived_card_recovers_after_restore_and_restart(store, projection, tmp_path, monkeypatch):
+    import json
+
+    import httpx
+    from githubkit import GitHub as SDK
+
+    from app.github_client import GitHubApp
+    from tests.test_github_client import settings
+    from tests.test_github_projects import item, page
+
+    flow, clock, configs, remote, sync = projection
+    remote.item = ProjectItem(id="ITEM", content_id=f"ISSUE-{flow.issue_number}", archived=True)
+
+    def transport(request):
+        # Match GitHub's default filter: archived membership needs an explicit query argument.
+        query = json.loads(request.content)["query"]
+        nodes = [item(remote.item.content_id, archived=True)] if "archivedStates:" in query else []
+        return httpx.Response(200, json={"data": {"node": {"id": "P", "items": page(nodes)}}})
+
+    async def unexpected_add(content):
+        pytest.fail("an existing archived card must not enter the add path")
+
+    app = GitHubApp(settings(tmp_path))
+    monkeypatch.setattr(app, "_installation_client", lambda _, **options: SDK(
+        "test-token", async_transport=httpx.MockTransport(transport), **options,
+    ))
+    monkeypatch.setattr(remote, "items_page", app.project_client(config()).items_page)
+    monkeypatch.setattr(remote, "add_issue", unexpected_add)
+    await sync.sweep()
+    assert state(store).item_id == "ITEM" and state(store).blocked
+    assert not state(store).add_started
+    # Restoring the card is a human action; retry resumes the saved item without another add.
+    remote.item.archived = False
+    reopened = Store(store.database_url, clock=lambda: clock.now)
+    try:
+        ProjectStore(reopened).retry(flow.repo)
+        await ProjectSync(reopened, configs, lambda _: remote).sweep()
+        row = state(reopened)
+        assert row.item_id == "ITEM" and not row.blocked
+        assert row.synced_version == row.desired_version
+    finally:
+        reopened.close()
+
+
 async def test_pagination_and_invisible_content_never_trigger_duplicate_add(store, projection):
     flow, _, _, remote, sync = projection
     remote.item = ProjectItem(id="ITEM", content_id=f"ISSUE-{flow.issue_number}", archived=False)

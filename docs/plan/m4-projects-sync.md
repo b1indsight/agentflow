@@ -102,3 +102,9 @@ add 前持久标记；响应丢失后从第一页重新核对，仍无法确认�
 - 真实 SDK 429/403 跨重启恢复和真实归档回执新增三个 PostgreSQL 回归；保留原丢失响应、人工删除、未知执行保护。
 
 返修验证：最终 PostgreSQL 完整套件 709 passed；Ruff、Mypy（113 个源文件）、build 通过。
+
+## 归档卡片恢复验证
+
+继承 F8 显式包含 archived 的成员查询，新增真实 SDK + PostgreSQL 回归：已有归档卡片被识别并保存原 item ID，人工恢复后跨重启显式 retry 完成同步；整个过程不进入 add 路径。
+
+本轮最终验证：完整 PostgreSQL 719 passed；Ruff、Mypy（114 个源文件）、build 通过。
