@@ -17,9 +17,11 @@ from app.control.reconcile import Reconciler
 from app.control.reconcile_feedback import FeedbackReconciler
 from app.control.router import EventRouter
 from app.control.service import ControlService
+from app.control.webhooks import WebhookConsumer
 from app.github_client import GitHubApp
 from app.plugins import get_plugin_manager
 from app.store import Store
+from app.webhook_store import WebhookStore
 
 
 class ControlRuntime:
@@ -50,6 +52,7 @@ class ControlRuntime:
         )
         self.service = ControlService(self.store, plugins, self.gateway.notify_jobs)
         self.router = EventRouter(self.store, self.service, self.settings)
+        self.webhooks = WebhookConsumer(self.store, self.settings, self.service)
         self.reconciler = Reconciler(
             self.store, self.coordinator.github, self.service,
             settle_seconds=self.settings.settle_seconds,
@@ -82,6 +85,7 @@ class ControlRuntime:
                 failed,
             )
         self._tasks = [
+            asyncio.create_task(self.webhooks.run()),
             asyncio.create_task(self.project_sync.run()),
             asyncio.create_task(self.reconciler.run()),
             asyncio.create_task(self.feedback_reconciler.run()),
@@ -123,6 +127,10 @@ class ControlRuntime:
                 self.router.settle.sweep()
             except Exception:  # noqa: BLE001 -- a failed claim leaves durable deadlines to retry
                 logger.exception("review settle sweep failed; retrying next sweep")
+
+    async def receive_webhook(self, event_type: str, delivery_id: str, payload: dict, digest: str) -> None:
+        await asyncio.to_thread(WebhookStore(self.store).receive, delivery_id, event_type, payload, digest)
+        self.webhooks.wakeup.set()
 
     def spawn_handler(self, coroutine: Coroutine[Any, Any, None]) -> None:
         task = asyncio.create_task(coroutine)

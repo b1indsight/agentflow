@@ -80,6 +80,9 @@ class AsgiContext:
     def startup(self) -> None:
         pass
 
+    async def receive_webhook(self, event_type, delivery_id, payload, digest) -> None:
+        raise AssertionError("webhook receipt is not used in this test")
+
     def spawn_handler(self, coroutine) -> None:
         raise AssertionError("webhook handler is not used in this test")
 

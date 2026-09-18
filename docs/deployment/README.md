@@ -148,8 +148,9 @@ curl -i https://hooks.example.com/docs
 ```
 
 无签名 POST 应返回 401，其余路径应返回 404。合法 GitHub delivery 预期返回 202；
-202 只说明入口已接收，当前版本尚有后台处理前进程退出导致丢事件的窗口。隧道也不存储离线事件，
-需在 GitHub 核查并按需重新投递。持久接收属于后续 M5 feature。
+202 表示事件已在 PostgreSQL inbox 持久接收，业务处理在后台完成；诊断和重试见
+[Webhook inbox 运维](../operations/webhook-inbox.md)。隧道不存储离线事件，未到达系统的
+事件仍需在 GitHub 核查并按需重新投递。
 
 用 allowlist 账号在测试仓库触发 Flow，通过 `uv run flowtool flows --active` 和
 `uv run flowtool flow show <FLOW_ID>` 查看进度，再验证 PR、review 和归档。

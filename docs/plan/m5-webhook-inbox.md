@@ -1,6 +1,6 @@
 # M5 F2：Webhook 持久接收与重放
 
-> 状态：计划待审批，未实现。2026-09-18。
+> 状态：已批准并实施；745 项 PostgreSQL 全量回归通过，等待代码审查。2026-09-18。
 > 基线：main@origin / 55313e1f；M4 F2–F9 与收尾 #37 已合入对应分支链，尚未全部进入 main。
 > 本计划独立以 main 为 PR base；实施前纳入实际需要的 M4 代码并重新核对，沿用同一 PR。
 > 阶段范围与 F1 文档：[PR #38](https://github.com/b1indsight/agentflow/pull/38)。
@@ -74,3 +74,13 @@ blocked，不能卡住后续 delivery。显式人工重试用既有 admin CLI �
 两个可独立审查的 feature，更新阶段表后实施，不省略原子性修复。
 GitHub 不会自动重投失败 delivery；本 feature 不补收从未到达本系统的事件，见
 [官方失败投递说明](https://docs.github.com/en/webhooks/using-webhooks/handling-failed-webhook-deliveries)。
+
+## 实施记录
+
+实现采用同一事务绑定的同步 router dispatch，嵌套事务复用连接；数据库消费线程避免阻塞 lease
+循环，提交后的调度/插件通知返回主事件循环。旧 events 无业务完成证据的 delivery 明确 blocked，
+不静默跳过。首版领取批量50、租约60秒、最多10次带 jitter 退避、7/90天保留固定，减少配置面。
+运维见 [Webhook inbox](../operations/webhook-inbox.md)。
+
+2026-09-18：本机 745 passed / 0 skipped；Ruff、Mypy、uv build 与 diff 检查通过。
+尚未执行真实 GitHub 重投；已用 PostgreSQL 和 ASGI 验证入口持久性及所有业务分支回滚。

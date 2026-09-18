@@ -25,6 +25,33 @@ project_app = typer.Typer(help="Projects v2 运维")
 app.add_typer(project_app, name="project")
 
 
+inbox_app = typer.Typer(help="durable webhook 运维")
+app.add_typer(inbox_app, name="inbox")
+
+
+@inbox_app.command("status")
+def inbox_status(limit: int = typer.Option(50, min=1, max=500)) -> None:
+    """Show bounded delivery diagnostics without payload or authentication data."""
+    from app.webhook_store import WebhookStore
+
+    with _store() as store:
+        for item in WebhookStore(store).list(limit):
+            typer.echo(f"{item.delivery_id} event={item.event_type} state={item.state} "
+                       f"attempts={item.attempts} next={item.next_at.isoformat()} error={item.error_code or '-'}")
+
+
+@inbox_app.command("retry")
+def inbox_retry(delivery_id: str) -> None:
+    """Requeue only a blocked receipt; never reset a live claim or completed event."""
+    from app.webhook_store import WebhookStore
+
+    with _store() as store:
+        if not WebhookStore(store).retry(delivery_id):
+            typer.echo("delivery is not blocked or has no retained payload", err=True)
+            raise typer.Exit(1)
+    typer.echo(f"delivery {delivery_id} queued")
+
+
 @project_app.command("check")
 def project_check(repo: str) -> None:
     """只读校验已配置的组织 Project、Status 字段及选项。"""

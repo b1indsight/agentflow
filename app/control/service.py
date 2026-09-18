@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from functools import partial
 
 from loguru import logger
 
@@ -29,12 +30,20 @@ class ControlService:
         store: Store,
         plugins=None,
         jobs_available: Callable[[], None] | None = None,
+        *, after_commit: list[Callable[[], None]] | None = None,
     ) -> None:
+        self._after_commit = after_commit
         self.store = store
         self.plugins = plugins or get_plugin_manager()
         self._jobs_available = jobs_available or (lambda: None)
 
     def _fire(self, hook: str, **kwargs: object) -> None:
+        if self._after_commit is not None:
+            self._after_commit.append(partial(self._emit_hook, hook, **kwargs))
+        else:
+            self._emit_hook(hook, **kwargs)
+
+    def _emit_hook(self, hook: str, **kwargs: object) -> None:
         try:
             getattr(self.plugins.hook, hook)(**kwargs)
         except Exception as exc:  # noqa: BLE001

@@ -24,6 +24,7 @@ class FlowToolSettings(BaseSettings):
 class ServeSettings(FlowToolSettings):
     """Secrets and tuning used only by the control-plane process."""
 
+    webhook_max_body_bytes: int = Field(default=25 * 1024 * 1024, ge=1, le=100 * 1024 * 1024)
     github_app_id: int = 0
     github_private_key_path: Path = Path("./flowtool-app.private-key.pem")
     github_webhook_secret: str = ""

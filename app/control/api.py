@@ -4,16 +4,23 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
+import re
 from collections.abc import Callable, Coroutine
 from contextlib import asynccontextmanager
 from typing import Any, Protocol
 
 from fastapi import FastAPI, Header, Request, Response, WebSocket
 from loguru import logger
+from psycopg import Error as DatabaseError
+from psycopg_pool import PoolTimeout
+
+from app.webhook_store import DeliveryConflict
 
 
 class WebhookSettings(Protocol):
     github_webhook_secret: str
+    webhook_max_body_bytes: int
 
 
 class WebhookRouter(Protocol):
@@ -38,14 +45,20 @@ class ApplicationContext(Protocol):
 
     def spawn_handler(self, coroutine: Coroutine[Any, Any, None]) -> None: ...
 
+    async def receive_webhook(self, event_type: str, delivery_id: str, payload: dict, digest: str) -> None: ...
+
     async def shutdown(self) -> None: ...
 
 
 def verify_signature(secret: str, body: bytes, signature_header: str | None) -> bool:
-    if not signature_header or not signature_header.startswith("sha256="):
+    if not signature_header or not re.fullmatch(r"sha256=[0-9a-f]{64}", signature_header):
         return False
     expected = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
     return hmac.compare_digest(expected, signature_header)
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError("non-finite JSON number")
 
 
 def _default_context() -> ApplicationContext:
@@ -86,15 +99,33 @@ def create_app(
         x_hub_signature_256: str | None = Header(default=None),
     ) -> Response:
         context: ApplicationContext = request.app.state.ctx
-        body = await request.body()
+        body = bytearray()
+        async for chunk in request.stream():
+            if len(body) + len(chunk) > context.settings.webhook_max_body_bytes:
+                return Response(status_code=413)
+            body.extend(chunk)
         if not verify_signature(
-            context.settings.github_webhook_secret, body, x_hub_signature_256
+            context.settings.github_webhook_secret, bytes(body), x_hub_signature_256
         ):
             return Response(status_code=401, content="bad signature")
-        payload = await request.json()
-        context.spawn_handler(
-            context.router.handle(x_github_event, x_github_delivery, payload)
-        )
+        if (not re.fullmatch(r"[A-Za-z0-9_-]{1,200}", x_github_delivery)
+                or not re.fullmatch(r"[a-z_]{1,100}", x_github_event)):
+            return Response(status_code=400)
+        try:
+            payload = json.loads(body, parse_constant=_reject_json_constant)
+        except (ValueError, UnicodeError, RecursionError):
+            return Response(status_code=400)
+        if not isinstance(payload, dict):
+            return Response(status_code=400)
+        try:
+            await context.receive_webhook(
+                x_github_event, x_github_delivery, payload, hashlib.sha256(body).hexdigest(),
+            )
+        except DeliveryConflict:
+            return Response(status_code=409)
+        except (DatabaseError, PoolTimeout):
+            logger.warning("webhook receipt unavailable")
+            return Response(status_code=503)
         return Response(status_code=202)
 
     @application.websocket("/internal/workers/connect")
