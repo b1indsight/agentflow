@@ -317,7 +317,7 @@
           <span class="arrow" aria-hidden="true">→</span>
           <article class="node" data-status="done">
             <div class="node__top"><span class="node__name">Event Router</span><span class="pill">M2 自动化</span></div>
-            <p class="node__role">delivery/反馈版本原子入库 · allowlist · 持久 settle/冻结批次 · 同秒重复编辑有已知缺陷</p>
+            <p class="node__role">delivery/反馈版本原子入库 · allowlist · 持久 settle/冻结批次 · 同秒历史转换核对</p>
             <code class="node__file">app/control/router.py</code>
           </article>
           <span class="arrow" aria-hidden="true">→</span>
@@ -579,7 +579,7 @@
       <li><b>自动化</b> —— 19 项覆盖配置/契约、SQLite、HMAC/路由、worker/恢复及 heartbeat 清理/重试；pytest、Ruff、Mypy 全绿。</li>
       <li><b>运行时</b> —— <code>uv sync --locked</code>、CLI、真实 <code>flowtool serve</code> 与 <code>GET /healthz</code> 200 已验证。</li>
       <li><b>M1/M2 已实现并合并、E2E 待验收</b> —— F1–F4 完整自动化 377 passed / 0 skipped（2026-09-07）；GitHub/Codex 使用替身，bub 连接假 provider。</li>
-      <li><b>剩余工作</b> —— 真实 GitHub App/Codex/bub 矩阵待执行；同秒重复 webhook 重放有一项未修复 Medium，见 <a href="README.md#m2-状态与待办">M2 状态与待办</a>。</li>
+      <li><b>剩余工作</b> —— 真实 GitHub App/Codex/bub 矩阵待执行；M4 F1 已修复同秒重复 webhook 重放，见 <a href="README.md#m2-状态与待办">M2 状态与待办</a>。</li>
     </ul>
   </div>
 

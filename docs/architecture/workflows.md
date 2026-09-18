@@ -23,7 +23,7 @@
 ```
 
 测试覆盖内部 Issue→PR、M2 批次和修订控制流；GitHub/Codex 使用替身，bub 契约连接假 provider。
-真实服务闭环尚未验收；同秒重复 webhook 重放仍有已知缺陷，见 [M2 状态与待办](README.md#m2-状态与待办)。
+真实服务闭环尚未验收；同秒重复 webhook 重放已在 M4 F1 修复，见 [M2 状态与待办](README.md#m2-状态与待办)。
 
 ## 5. 目标闭环
 

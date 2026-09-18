@@ -59,9 +59,9 @@ F4 于 **2026-09-08 00:02:45（Asia/Singapore）**合并，对应 UTC 2026-09-07
 
 - **真实验收**：GitHub App smoke、M1 Issue→PR 前置，以及两轮修订、answer/wait/ignore、session
   兜底、重启恢复和真实线程回复/resolve 均缺少真实服务运行证据，按 [F4 验收矩阵](../plan/m2-review-resolution.md#6-自动化与真实-m2-验收)逐项完成。
-- **已知 Medium，未修复**：远端观察 A→B 后，迟到的重复 webhook 可在同秒 B→A 回退后重放旧 A→B，
-  将旧内容变成新版本，阻塞 resolve/re-review，并可能进入下一轮 worker。复现与修复验收条件见
-  [F4 已知问题](../plan/m2-review-resolution.md#同秒重复-webhook-重放medium未修复)。自动化通过不代表该缺陷已解决。
+
+M4 F1 已修复同秒旧转换重放：历史中已表示的编辑及不能定序的后继保留待核对，只有新鲜
+远端观察推进重复转换。原复现、重启/回滚及并发回归见 [F1 实施记录](../plan/m4-feedback-replay.md)。
 
 ## 当前验证基线
 
