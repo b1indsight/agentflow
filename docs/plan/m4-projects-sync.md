@@ -94,3 +94,11 @@ add 前持久标记；响应丢失后从第一页重新核对，仍无法确认�
 外部 GitHub App、组织 Project 和实际 worker 的 smoke 尚未验证，不能据此宣称 M4 真实验收完成。
 
 验证：实际 PostgreSQL 完整套件 **687 passed**；Ruff、Mypy（112 个源文件）和 `uv build --no-sources` 通过。
+
+## 阻塞与恢复返修
+
+- HTTP 401/403/429 明确拒绝与 GraphQL 部分成功、传输丢失分开分类。前者清除未成功建卡标记，遵守退避或显式 retry；后者继续只读恢复，避免重复建卡。
+- 已收到归档回执时，旧 recovery_deadline 不再代表未知执行；通知效果退避期间投影为 In Progress。
+- 真实 SDK 429/403 跨重启恢复和真实归档回执新增三个 PostgreSQL 回归；保留原丢失响应、人工删除、未知执行保护。
+
+返修验证：最终 PostgreSQL 完整套件 709 passed；Ruff、Mypy（113 个源文件）、build 通过。

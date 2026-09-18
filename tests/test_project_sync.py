@@ -252,6 +252,59 @@ async def test_rate_limit_deadline_survives_and_does_not_change_flow(store, proj
     assert remote.calls == ["validate"] and store.get_flow(flow.id).state is FlowState.SUCCEEDED
 
 
+@pytest.mark.parametrize("status", [429, 403])
+async def test_definite_add_rejection_can_retry_after_restart(store, projection, tmp_path, monkeypatch, status):
+    import httpx
+    from githubkit import GitHub as SDK
+
+    from app.github_client import GitHubApp
+    from app.github_projects import GitHubProjects
+    from tests.test_github_client import settings
+    from tests.test_github_projects import item
+
+    flow, clock, configs, remote, sync = projection
+    calls = []
+
+    def rejected(request):
+        calls.append(request)
+        if len(calls) == 1:
+            return httpx.Response(status, json={"message": "rejected"}, headers={"Retry-After": "600"}
+                                  if status == 429 else {})
+        return httpx.Response(200, json={"data": {"addProjectV2ItemById": {
+            "item": item(f"ISSUE-{flow.issue_number}"),
+        }}})
+
+    app = GitHubApp(settings(tmp_path))
+    monkeypatch.setattr(app, "_installation_client", lambda _, **options: SDK(
+        "test-token", async_transport=httpx.MockTransport(rejected), **options,
+    ))
+
+    async def add(content):
+        remote.item = await GitHubProjects(app, config()).add_issue(content)
+        return remote.item.model_copy()
+
+    monkeypatch.setattr(remote, "add_issue", add)
+    await sync.sweep()
+    pending = state(store)
+    assert not pending.add_started and pending.item_id is None and len(calls) == 1
+    assert pending.blocked is (status == 403)
+    restarted = Store(store.database_url, clock=lambda: clock.now)
+    try:
+        resumed = ProjectSync(restarted, configs, lambda _: remote)
+        await resumed.sweep()
+        assert len(calls) == 1
+        if status == 403:
+            ProjectStore(restarted).retry(flow.repo)
+        else:
+            assert pending.next_at >= clock.now + timedelta(seconds=600)
+            clock.now = pending.next_at
+        await resumed.sweep()
+        assert len(calls) == 2 and state(restarted).item_id == "ITEM"
+        assert state(restarted).synced_version == state(restarted).desired_version
+    finally:
+        restarted.close()
+
+
 async def test_disable_mid_request_stops_following_requests(store, projection):
     flow, _, configs, remote, sync = projection
     remote.item = ProjectItem(id="ITEM", content_id=f"ISSUE-{flow.issue_number}", archived=False)
@@ -409,6 +462,30 @@ async def test_unknown_archive_executor_is_an_explicit_block(store, projection):
         connection.execute("UPDATE jobs SET recovery_deadline=%s WHERE id=%s", (clock.now, job.id))
     await sync.sweep()
     assert state(store).desired_status is ProjectStatus.BLOCKED
+
+
+async def test_received_archive_result_is_in_progress_despite_old_recovery_deadline(store, monkeypatch):
+    from app.protocol import ArchiveResult
+    from app.result_models import ResultPending
+    from tests.test_archive_recovery import ready_archive, receive
+
+    flow, job, task, subject = await ready_archive(store)
+    # The retained deadline describes a past disconnect; a persisted receipt now proves the outcome.
+    with store.connection() as connection:
+        connection.execute("UPDATE jobs SET recovery_deadline=%s WHERE id=%s", (store.now(), job.id))
+    assert receive(store, job, ArchiveResult(**task.model_dump(), cleanup="removed")) == "pending"
+
+    async def delayed(plan):
+        raise ResultPending("notification backoff")
+
+    monkeypatch.setattr(subject.results.effects, "run", delayed)
+    with pytest.raises(ResultPending):
+        await subject.results.apply(job.id)
+    remote = Remote()
+    sync = ProjectSync(store, {flow.repo: config()}, lambda _: remote)
+    await sync.sweep()
+    assert state(store).desired_status is ProjectStatus.IN_PROGRESS
+    assert store.get_job(job.id).result_applied_at is None
 
 
 async def test_case_normalized_repo_is_enrolled_and_synced(store, projection):

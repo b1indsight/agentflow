@@ -1,6 +1,6 @@
 # M4 阶段计划：并发收敛、GitHub 对账与 Projects 看板
 
-> 状态：F1–F8 已推送；F9 已实现并通过自动化验证；外部真实验收尚未完成。日期：2026-09-10。
+> 状态：九项已实施；本轮已授权恢复修复完成，复审新增问题待后续指示；外部真实验收尚未完成。更新：2026-09-18。
 > 基线：`main@origin` / `be65878f`；M3 #24–#26 及归档恢复修复 #27 已合并。
 > 阶段总表随 F1 PR 维护；每个 feature 有自己的 bookmark 和 draft PR，批准后在原 PR 实施。
 > 用户统一 review 和合并；本轮不执行合并。M1–M3 的真实 E2E 待办继续保留。
@@ -104,7 +104,7 @@ M4 完成需九项各自实现并验证，以及上述真实矩阵通过；M1–
 不能用自动化替身测试替代外部闭环。
 
 
-## 6. 实施与 review 记录
+## 6. 初次实施与 review 记录（返修前）
 
 PR 以相邻前项为 base，代码、测试和文档均按相对 base 的新增行 + 删除行统计。
 前八项 GitHub CI 的 Ruff、Mypy、Build 和 pytest 全部成功（2026-09-10 核对）。
@@ -127,3 +127,28 @@ PR 以相邻前项为 base，代码、测试和文档均按相对 base 的新增
 超过恢复宽限会释放绑定并终结 Flow，影响原绑定 reopen。其余包含反馈重放/批次、分页缺失节点、
 准备期并发与退避边界等 medium/low；CI 通过不代表这些发现已修复。
 最终真实验收矩阵仍缺外部证据；用户统一 review 和合并，本轮没有执行 merge。
+
+## 7. 阻塞与恢复返修（2026-09-18）
+
+用户授权解决此前报告的阻塞和无法恢复问题，并更新原 PR，由用户统一 review/合并。
+已修复此前的 high/medium：同秒反馈重放、PR SDK 隐藏重试、讨论批次/授权/编辑恢复、
+删除线程分页、CLOSED 过期执行、重开旧任务、丢失对账提示、永久准备失败围栏、结果核验退避、
+Projects 明确拒绝后的建卡恢复及已知归档结果状态；另保留预算耗尽的实际错误原因。
+
+完整 PostgreSQL 验证：F1 514、F3 551、F4 578、F5 601、F6 624、F7 646、最终栈 709 passed。
+最终 Ruff、Mypy（113 个源文件）、build 通过。真实 GitHub App/worker/组织 Projects 矩阵仍待验收。
+
+返修复审新增 medium（已报告，尚未修改）：
+
+| PR | 问题与影响 |
+|---|---|
+| #31 | 同正文仅 inert 改变时比较忽略该字段，命令消息可能仍是可执行反馈 |
+| #31 | 前 60 条空正文可阻止后续有效反馈进入批次 |
+| #33 | 重开强制 triage 仅覆盖首批，后续积压 request_changes 可直接生成 revision |
+| #33 | CLOSED worker 重连无 journal 仍会合成失败，阻断真实结果和 reopen |
+| #34 | 执行期间 flow.open_pr 的 ref 读取缺少 transient 重试所有者 |
+| #35 | Projects items 默认遗漏 archived 卡片，可误判不存在 |
+
+原 low 的普通 OPEN 轮询重启测试缺口和线程解析重复仍保留。
+仓库 review gate 规定："Findings-driven rework requires a new, explicit user request after the findings have been reported."
+因此新增发现等待后续明确返修指令；通过 gate/CI 不等于这些问题已解决。本轮不执行 merge。

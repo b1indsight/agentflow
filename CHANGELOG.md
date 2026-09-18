@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- F9 返修：Projects 明确拒绝的建卡请求可恢复重试；已知归档结果等待通知时不再误标 Blocked。
+
 - M4 F9：独立持久 Projects 状态投影，支持分页、响应丢失核对、版本竞争、退避及 CLI 诊断/重试，不阻塞归档释放。
 
 - M4 F8：可选组织 Projects v2 配置、只读目标校验、分页 item 读取及独立 add/Status API。

@@ -719,4 +719,7 @@ class GitHubApp:
             status_code=status,
             request_id=response.headers.get("X-GitHub-Request-Id"),
             retry_after=retry_after,
+            # HTTP authentication/permission/rate rejection proves non-execution;
+            # GraphQL partial responses and transport failures do not establish this.
+            request_rejected=status in {401, 403, 429},
         )

@@ -162,6 +162,7 @@ class GitHubAdapterError(RuntimeError):
         request_id: str | None = None,
         retry_after: str | None = None,
         definitely_unsent: bool = False,
+        request_rejected: bool = False,
     ) -> None:
         self.kind = kind
         self.endpoint = endpoint
@@ -169,6 +170,7 @@ class GitHubAdapterError(RuntimeError):
         self.request_id = request_id
         self.retry_after = retry_after
         self.definitely_unsent = definitely_unsent
+        self.request_rejected = request_rejected
         self.retryable = kind in {GitHubErrorKind.RATE_LIMITED, GitHubErrorKind.TRANSIENT}
         details = [f"GitHub {endpoint} failed", f"kind={kind.value}"]
         if status_code is not None:

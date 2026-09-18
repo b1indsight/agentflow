@@ -123,7 +123,8 @@ class ProjectStore:
             fact = connection.execute(
                 "SELECT f.id,f.installation_id,CASE"
                 " WHEN f.state='succeeded' THEN 'done' WHEN f.state IN ('failed','cancelled') THEN 'blocked'"
-                " WHEN d.state='closed' OR j.state='failed' OR (j.kind='archive' AND j.recovery_deadline IS NOT NULL) OR EXISTS (SELECT 1 FROM result_effects e"
+                " WHEN d.state='closed' OR j.state='failed' OR (j.kind='archive'"
+                " AND j.recovery_deadline IS NOT NULL AND j.result_received_at IS NULL) OR EXISTS (SELECT 1 FROM result_effects e"
                 " JOIN jobs ej ON ej.id=e.job_id WHERE ej.flow_id=f.id AND ej.result_applied_at IS NULL"
                 " AND e.state='failed') THEN 'blocked'"
                 " WHEN d.state='merged' THEN 'in_progress'"
@@ -134,7 +135,8 @@ class ProjectStore:
                 " WHEN d.state='open' THEN 'in_review' ELSE 'in_progress' END AS status"
                 " FROM flows f LEFT JOIN flow_deliveries d ON d.flow_id=f.id"
                 " LEFT JOIN flow_executions x ON x.flow_id=f.id AND x.released_at IS NULL"
-                " LEFT JOIN LATERAL (SELECT state,kind,recovery_deadline FROM jobs WHERE flow_id=f.id ORDER BY id DESC LIMIT 1) j ON TRUE"
+                " LEFT JOIN LATERAL (SELECT state,kind,recovery_deadline,result_received_at"
+                " FROM jobs WHERE flow_id=f.id ORDER BY id DESC LIMIT 1) j ON TRUE"
                 " WHERE lower(f.repo)=%s AND f.issue_number=%s ORDER BY (f.state='active') DESC,f.id DESC LIMIT 1",
                 (row.repo, row.issue_number),
             ).fetchone()
