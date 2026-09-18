@@ -84,3 +84,9 @@ INITIAL 最终提交前关闭和事务回滚；真实 GitHub close/reopen/归档
 - 新增关闭后断联、三种重新入队和查询竞态的 6 项 PostgreSQL 回归；针对性 73 passed。
 
 返修验证：PostgreSQL 完整套件 624 passed；Ruff、Mypy、build 通过。
+
+## 无日志重连的阻塞返修
+
+CLOSED 和 MERGED 的 Started 执行缺少 worker journal 时，仅拒绝恢复握手并保留原执行事实，不合成失败回执。原 journal/结果恢复后仍可接受原 token 的结果、完成收尾并重新核验打开 PR。新增真实 PostgreSQL 回归覆盖整条恢复链，针对性 48 passed。
+
+本轮验证：完整 PostgreSQL 629 passed；Ruff、Mypy、build 通过。

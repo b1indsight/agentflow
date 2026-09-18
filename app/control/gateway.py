@@ -674,7 +674,8 @@ class WorkerGateway:
             self.notify_jobs()
             return
         delivery = self.store.get_delivery(job.flow_id)
-        if delivery is not None and delivery.state is DeliveryState.MERGED:
-            raise ProtocolViolation("archive blocked: original worker assignment journal is missing")
+        if delivery is not None and delivery.state in {DeliveryState.CLOSED, DeliveryState.MERGED}:
+            action = "reopen" if delivery.state is DeliveryState.CLOSED else "archive"
+            raise ProtocolViolation(f"{action} blocked: original worker assignment journal is missing")
         reason = "worker reconnected without its started assignment journal"
         await self.coordinator.fail(job, reason)

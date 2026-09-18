@@ -4,7 +4,7 @@ from datetime import timedelta
 
 import pytest
 
-from app.control.gateway import WorkerGateway
+from app.control.gateway import ProtocolViolation, WorkerGateway
 from app.control.lifecycle import pause_delivery
 from app.control.reconcile import Reconciler
 from app.control.router import EventRouter
@@ -89,6 +89,35 @@ async def test_closed_binding_survives_expiry_and_original_started_job_can_resum
     else:
         await check(store, flow, GitHub(flow, "open"))
         assert store.get_delivery(flow.id).state is DeliveryState.OPEN
+
+
+async def test_closed_missing_journal_preserves_late_result_and_reopen(store, pending_revision):
+    flow, job, task, github, subject = pending_revision
+    assert store.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
+    with store.transaction() as tx:
+        tx.lock_workflow(flow.id)
+        pause_delivery(tx, tx.get_delivery(flow.id))
+    store.worker_disconnected("worker-a", "disconnected during closed PR", "epoch")
+    store.worker_connected("worker-a", PROTOCOL_VERSION, "restart")
+    gateway = WorkerGateway(store, subject, worker_tokens={})
+    # Missing journal is not proof of execution failure: its original result may still arrive.
+    with pytest.raises(ProtocolViolation, match="journal is missing"):
+        await gateway._reject_missing_journal("worker-a", "restart", job.id)
+    assert store.get_job(job.id).result_received_at is None
+    assert store.get_job(job.id).state is JobState.RUNNING
+    assert store.get_flow_execution(flow.id).released_at is None
+
+    assert store.resume_assignment(job.id, "worker-a", "token", "restart")
+    message = Succeeded(job_id=job.id, assignment_token="token", connection_epoch="restart",
+                        result=verified_result(task))
+    assert store.record_assignment_result(job.id, "worker-a", "token", "restart",
+        message.model_dump(mode="json"), terminal_digest(message)) == "pending"
+    assert await subject.results.apply(job.id) is JobState.DONE
+    remote = GitHub(flow, "open", head_branch=task.branch, head_sha=task.expected_head_sha)
+    github.get_pull_request_status = remote.get_pull_request_status
+    await check(store, flow, github)
+    assert store.get_delivery(flow.id).state is DeliveryState.OPEN
+    assert store.get_flow_execution(flow.id).released_at is None
 
 
 @pytest.mark.parametrize("recovery", ["explicit", "lease", "restart"])
