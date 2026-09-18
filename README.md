@@ -10,6 +10,10 @@ FlowTool 的目标是把带 `flow` 标签的 GitHub issue 编排成
 
 ## 当前能力
 
+- **反馈对账**：原 Issue、PR 普通评论和 Review 正文分别保存分页进度，默认每 300 秒复扫；
+  每个来源每次至多读取 50 条完整正文，未完成的页 5 秒后继续。重启保留 cursor/退避，
+  `flow show` 展示各来源诊断。旧命令不追溯执行，列表缺席不推断删除。
+
 - **PR 对账**：对已追踪 PR 定时查询并补偿漏失合并事件，检查进度与退避持久化；
   `FLOWTOOL_RECONCILE_INTERVAL_SECONDS` 默认 300 秒，`FLOWTOOL_RECONCILE_BATCH_SIZE`
   默认 64，`FLOWTOOL_RECONCILE_CONCURRENCY` 默认 4。`flow show` 展示最后成功和下次检查时间。

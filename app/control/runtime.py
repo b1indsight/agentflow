@@ -13,6 +13,7 @@ from app.config import ServeSettings, get_serve_settings
 from app.control.coordinator import JobCoordinator
 from app.control.gateway import WorkerGateway
 from app.control.reconcile import Reconciler
+from app.control.reconcile_feedback import FeedbackReconciler
 from app.control.router import EventRouter
 from app.control.service import ControlService
 from app.github_client import GitHubApp
@@ -55,6 +56,11 @@ class ControlRuntime:
             batch_size=self.settings.reconcile_batch_size,
             concurrency=self.settings.reconcile_concurrency,
         )
+        self.feedback_reconciler = FeedbackReconciler(
+            self.store, self.coordinator.github, settle_seconds=self.settings.settle_seconds,
+            bot_login=self.settings.bot_login, interval=self.settings.reconcile_interval_seconds,
+            batch_size=self.settings.reconcile_batch_size, concurrency=self.settings.reconcile_concurrency,
+        )
         self._tasks: list[asyncio.Task[None]] = []
         self._handlers: set[asyncio.Task[None]] = set()
 
@@ -71,6 +77,7 @@ class ControlRuntime:
             )
         self._tasks = [
             asyncio.create_task(self.reconciler.run()),
+            asyncio.create_task(self.feedback_reconciler.run()),
             asyncio.create_task(self._sweep_assignments()),
             asyncio.create_task(self._sweep_results()),
             asyncio.create_task(self._sweep_reviews()),

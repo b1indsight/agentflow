@@ -11,6 +11,8 @@ from typing import Protocol, runtime_checkable
 
 from app.context_models import DiscussionPage, FilePage, ReviewContext, ReviewPullRequest
 from app.github_models import (
+    FeedbackPage,
+    FeedbackSource,
     IssueSnapshot,
     PullRequestSnapshot,
     PullRequestStatus,
@@ -76,6 +78,11 @@ class GitHubClient(Protocol):
     """
 
     async def get_issue(self, installation_id: int, repo: str, number: int) -> IssueSnapshot: ...
+
+    async def list_feedback_page(
+        self, installation_id: int, repo: str, number: int,
+        source: FeedbackSource, cursor: str | None,
+    ) -> FeedbackPage: ...
 
     async def get_pull_request_status(
         self, installation_id: int, repo: str, number: int,
