@@ -1,0 +1,10 @@
+# Allow only the application build inputs; local secrets/data never enter the context.
+**
+!Dockerfile
+!pyproject.toml
+!uv.lock
+!README.md
+!app/
+!app/**
+app/**/__pycache__/
+app/**/*.pyc

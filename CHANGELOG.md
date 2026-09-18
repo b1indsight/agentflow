@@ -5,6 +5,9 @@
 
 ## Unreleased
 
+- M5 F4：增加非 root serve/worker 镜像、TLS Compose 部署、可选 Cloudflare profile 与
+  镜像构建/候选 digest 验证发布流程；本地无 Docker，实际构建及真实任务验收待 CI/环境。
+
 - M5 F3：增加默认只读的真实闭环验收工具、显式测试 Issue 创建和结果未知保护，
   记录同一 Flow/PR 的修订 head 与归档事实；真实模型/GitHub 矩阵仍需运行环境。
 

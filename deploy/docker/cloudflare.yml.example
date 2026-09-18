@@ -1,0 +1,7 @@
+tunnel: YOUR-TUNNEL-UUID
+credentials-file: /run/secrets/tunnel_credentials
+ingress:
+  - hostname: hooks.example.com
+    path: ^/webhook$
+    service: http://serve:8000
+  - service: http_status:404

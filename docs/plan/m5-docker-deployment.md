@@ -1,6 +1,6 @@
 # M5 F4：Docker 镜像、发布与 Compose 部署
 
-> 状态：计划待审批，未实现。2026-09-18。
+> 状态：已批准并实现镜像、Compose、CI 和部署说明；镜像构建与环境验收待完成。2026-09-18。
 > 文档 PR 基线 main@origin / 55313e1f；交付依赖 F1 部署文档、F2 持久接收和 F3 真实闭环。
 > M4 后续代码尚未全部进入 main；实施前核对集成版本，原 PR rebase 后继续实现。
 > 阶段范围：[PR #38](https://github.com/b1indsight/agentflow/pull/38)。
@@ -76,3 +76,10 @@ README 区分 fake smoke 与真实 F3 复验；产品代码若变更执行标准
 身份迁移不能隐藏在 Dockerfile 重构里。K8s、资源级强隔离、任意平台镜像和热升级不在范围。
 依据：[Docker 构建 secret](https://docs.docker.com/build/building/secrets/)、
 [官方 GitHub Actions 构建工具](https://github.com/docker/build-push-action)。
+
+## 实施证据
+
+见 [部署说明](../deployment/docker.md) 与 `scripts/smoke/docker.sh`。本机没有 Docker，
+不能执行 Compose smoke；Images PR CI 负责实际 build/TLS/空闲 worker 重建重连验证。
+尚未运行真实任务、双 worker、journal 跨挂载恢复、Cloudflare 公网和 GHCR 发布拉取，
+保留 draft，不将静态检查当作本节完整验收。发布使用候选 digest 验证后晋升同一 manifest。
