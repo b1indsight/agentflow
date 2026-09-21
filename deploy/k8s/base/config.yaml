@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: flowtool-serve-config
+data:
+  FLOWTOOL_HOST: 0.0.0.0
+  FLOWTOOL_PORT: '8000'
+  FLOWTOOL_LOG_FORMAT: json
+  FLOWTOOL_GITHUB_PRIVATE_KEY_PATH: /run/secrets/github/app.pem

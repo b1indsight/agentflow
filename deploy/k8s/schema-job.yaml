@@ -1,0 +1,59 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: flowtool-schema
+  namespace: flowtool
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 120
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: flowtool
+        flowtool-role: schema
+    spec:
+      serviceAccountName: flowtool
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/os: linux
+        kubernetes.io/arch: amd64
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      terminationGracePeriodSeconds: 60
+      containers:
+      - name: schema
+        image: flowtool-serve:replace-me
+        command:
+        - python
+        - -c
+        - 'import os; from app.store import Store; store=Store(os.environ[''FLOWTOOL_DATABASE_URL'']);
+
+          try: store.init_db()
+
+          finally: store.close()'
+        env:
+        - name: FLOWTOOL_DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: flowtool-serve-env
+              key: FLOWTOOL_DATABASE_URL
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: '1'
+            memory: 512Mi
+      volumes: []
+      restartPolicy: Never

@@ -1,0 +1,134 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: flowtool-serve
+spec:
+  serviceName: flowtool-serve-headless
+  replicas: 0
+  selector:
+    matchLabels:
+      flowtool-role: serve
+  updateStrategy:
+    type: OnDelete
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: flowtool
+        flowtool-role: serve
+    spec:
+      serviceAccountName: flowtool
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/os: linux
+        kubernetes.io/arch: amd64
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      terminationGracePeriodSeconds: 60
+      containers:
+      - name: serve
+        image: flowtool-serve:replace-me
+        args:
+        - serve
+        envFrom:
+        - configMapRef:
+            name: flowtool-serve-config
+        - secretRef:
+            name: flowtool-serve-env
+        ports:
+        - name: http
+          containerPort: 8000
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: '1'
+            memory: 512Mi
+        volumeMounts:
+        - name: flowtool-app-key
+          mountPath: /run/secrets/github
+          readOnly: true
+        - name: serve-tmp
+          mountPath: /tmp
+        startupProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          periodSeconds: 5
+          failureThreshold: 36
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: http
+          timeoutSeconds: 3
+          periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          timeoutSeconds: 2
+          periodSeconds: 10
+          failureThreshold: 3
+      - name: worker-gateway
+        image: nginx:stable-alpine@sha256:ef8676b33d681f272ba429b27658bdd7e640963279714c96bddf1dc76307f7b6
+        command:
+        - nginx
+        - -g
+        - daemon off;
+        ports:
+        - name: wss
+          containerPort: 8443
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        resources:
+          requests:
+            cpu: 10m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+        volumeMounts:
+        - name: gateway-config
+          mountPath: /etc/nginx/nginx.conf
+          subPath: nginx.conf
+          readOnly: true
+        - name: flowtool-worker-tls
+          mountPath: /run/secrets/tls
+          readOnly: true
+        - name: gateway-tmp
+          mountPath: /tmp
+        readinessProbe:
+          tcpSocket:
+            port: wss
+          periodSeconds: 5
+      volumes:
+      - name: flowtool-app-key
+        secret:
+          secretName: flowtool-app-key
+          defaultMode: 288
+      - name: flowtool-worker-tls
+        secret:
+          secretName: flowtool-worker-tls
+          defaultMode: 288
+      - name: gateway-config
+        configMap:
+          name: flowtool-gateway
+      - name: serve-tmp
+        emptyDir: {}
+      - name: gateway-tmp
+        emptyDir: {}

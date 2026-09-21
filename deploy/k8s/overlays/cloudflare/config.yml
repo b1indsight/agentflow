@@ -1,0 +1,7 @@
+tunnel: REPLACE_WITH_TUNNEL_UUID
+credentials-file: /run/secrets/tunnel/credentials.json
+ingress:
+  - hostname: REPLACE_WITH_WEBHOOK_HOSTNAME
+    path: ^/webhook$
+    service: http://flowtool-serve:8000
+  - service: http_status:404

@@ -1,6 +1,6 @@
 # 部署 FlowTool 与 Cloudflare Tunnel
 
-容器部署见 [Docker / Compose](docker.md)。
+容器部署见 [Docker / Compose](docker.md) 和 [Kubernetes](kubernetes.md)。
 
 本文使用现有 `flowtool serve`、`flowtool worker` 和官方 `cloudflared`，说明直接运行进程的
 部署步骤。示例基于同一主机、不同 OS 账号的首次联调；Docker 镜像和 K8s 清单仍在 M5 计划中。

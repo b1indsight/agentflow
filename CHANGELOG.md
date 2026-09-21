@@ -7,6 +7,9 @@
 
 ## Unreleased
 
+- M5 F7：增加零副本起步的 Kustomize base、独立 schema Job、RWOP worker PVC、内部 TLS
+  和可选 Cloudflare overlay；新增有界 DB readiness 与 worker 本地探针，集群验收待环境。
+
 - M5 F6：协议 v9 持久停止请求与 nonce 凭据、取消确认前保留 binding、丢失 ACK 重放、
   只读核对已发送 effects；持久 worker drain 允许原 Flow 收尾，补齐 SIGTERM 接线。
 

@@ -1,6 +1,6 @@
 # M5 F7：Kubernetes 部署
 
-> 状态：计划待审批，未实现。2026-09-18。
+> 状态：已批准，清单/探针/文档已实现，真实集群验收待环境。2026-09-22。
 > 文档 PR 基线 main@origin / 55313e1f；实现依赖 F4 镜像、F6 stop/drain；F5 指标可选接入。
 > 每 Flow 执行隔离后置；K8s 仅部署固定 serve/worker 服务。沿用同一 PR 实现。
 > 阶段范围：[PR #38](https://github.com/b1indsight/agentflow/pull/38)。
@@ -76,3 +76,10 @@ readiness 失败；Secret 跨角色不可见；缺 CSI/证书时给出明确错�
 预算约 1100 行，超 1200 行拆“基础部署/探针”和“受控升级/恢复”；root identity 迁移另拆。
 官方依据：[StatefulSet 强制删除风险](https://kubernetes.io/docs/tasks/run-application/force-delete-stateful-set-pod/)、
 [持久卷访问模式](https://kubernetes.io/docs/concepts/storage/persistent-volumes/)。
+
+## 实施证据
+
+本机使用经官方 SHA256 校验的 kubectl v1.35.4 成功渲染 base/Cloudflare overlay，并验证
+角色 Secret、OnDelete、RWOP、digest 和入口边界。探针及 PG 回归另附 PR 验证记录。
+没有目标集群/CSI 的安装、server-side dry-run、活动 journal 重挂载和节点失联证据，
+不宣称任意 CSI 或跨节点恢复可用。保留 draft，运行步骤见 [Kubernetes 部署](../deployment/kubernetes.md)。

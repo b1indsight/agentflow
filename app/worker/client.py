@@ -93,6 +93,7 @@ class WorkerClient:
         reconnect_max_backoff: float = 30.0,
         reconnect_jitter: float = 0.2,
     ) -> None:
+        self.connected = False
         self.worker_id = worker_id
         self.worker_token = worker_token
         self.serve_ws_url = serve_ws_url
@@ -157,6 +158,7 @@ class WorkerClient:
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:  # noqa: BLE001
+                    self.connected = False
                     jitter = random.uniform(
                         1 - self.reconnect_jitter, 1 + self.reconnect_jitter
                     )
@@ -169,6 +171,7 @@ class WorkerClient:
                     except TimeoutError:
                         delay = min(delay * 2, self.reconnect_max_backoff)
         finally:
+            self.connected = False
             await self._cancel_execution()
 
     async def run_connection(self, connection: Connection) -> None:
@@ -227,6 +230,7 @@ class WorkerClient:
             raise WorkerProtocolError(
                 f"expected Registered, received {type(first).__name__}"
             )
+        self.connected = True
         logger.bind(event="worker_connected", reason_code="ok", worker_id=self.worker_id).info("")
 
         if isinstance(first, Registered):
@@ -465,6 +469,7 @@ class WorkerClient:
             )
 
     def stop(self) -> None:
+        self.connected = False
         self._stop.set()
         if self._connection_task is not None:
             self._connection_task.cancel()
