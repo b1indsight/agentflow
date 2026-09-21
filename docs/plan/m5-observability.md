@@ -73,3 +73,7 @@ worker_id、epoch 和协议版本。assignment_token 是认证凭据，不当作
 持久 gauge 总数/总时长，避免进程计数在重放和重启时重复或丢失；不宣称纯模型延迟。
 专用连接有 2 秒连接预算，加一条 2 秒聚合 SQL，scrape 只读缓存；这一轮预算相较计划
 明确拆分为连接与 SQL 两段，系统 DNS 仍由 resolver 限制。真实 F3 对照待环境。
+
+CI 后续验证：进程冒烟原本匹配旧日志全文，已改为 `event=worker_connected`。
+本机隔离 PG schema 中实际双 worker 启动、serve 重启后双方重新注册和独立退出均通过。
+此验证修正不包含独立审查报告中的对账候选过滤/第三方日志来源两项返修。
