@@ -101,3 +101,7 @@ journal 的 root_identity 包含路径、设备号和 inode。容器重建或卷
 同一卷中的普通文件还在，不代表活动执行可恢复。当前 smoke 只验证无任务 worker 的卷、TLS、
 注册、serve 重启后的重连及角色边界；不宣称已完成 terminal journal 重放、多 worker、真实模型、
 Cloudflare 公网或跨挂载恢复验收。这些需要实际环境逐项补充证据。
+
+Codex API key 认证使用 worker 的 `CODEX_API_KEY`，不要仅设置 `OPENAI_API_KEY`。
+Compose 内部网关通过 Docker DNS 每 5 秒重新解析 serve；重建 serve 换 IP 后无需重启网关，
+已有 WSS 会断开并由 worker 重连。镜像 CI 会强制换 IP、保持同一个网关容器验证此路径。

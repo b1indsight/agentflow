@@ -83,3 +83,13 @@ README 区分 fake smoke 与真实 F3 复验；产品代码若变更执行标准
 不能执行 Compose smoke；Images PR CI 负责实际 build/TLS/空闲 worker 重建重连验证。
 尚未运行真实任务、双 worker、journal 跨挂载恢复、Cloudflare 公网和 GHCR 发布拉取，
 保留 draft，不将静态检查当作本节完整验收。发布使用候选 digest 验证后晋升同一 manifest。
+
+2026-09-22 授权返修三项：worker 示例改用 CODEX_API_KEY；Compose Nginx 使用 Docker DNS
+运行时解析 serve（5 秒缓存），保持固定网关容器可在 serve 地址变化后重新连接；smoke 内部
+shell 改为 -e，任一角色边界断言失败立即退出。旧示例缺 key 的断言失败，旧 sh -c 的
+`false; true` 返回 0，证明此前可能掩盖错误；修正 sh -ec 后返回非零。
+
+镜像 smoke 增加 env-file 认证变量检查及两个注入假 secret 的反例；serve 重建时用仅本次
+fixture 的占位容器占住旧 IP，确认新 IP 不同、gateway ID 未变，再启动已离线 worker 验证
+重连，避免 restart 不换 IP 的弱验证。占位容器与独立测试网络在 trap 中清理。
+本地无 Docker，实际镜像验证交由该 PR CI，不把 shell 语法检查当作容器验收。
