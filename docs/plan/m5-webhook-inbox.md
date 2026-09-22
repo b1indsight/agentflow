@@ -84,3 +84,10 @@ GitHub 不会自动重投失败 delivery；本 feature 不补收从未到达本�
 
 2026-09-18：本机 745 passed / 0 skipped；Ruff、Mypy、uv build 与 diff 检查通过。
 尚未执行真实 GitHub 重投；已用 PostgreSQL 和 ASGI 验证入口持久性及所有业务分支回滚。
+
+2026-09-22 授权返修：用户要求修复已报告 bug。新增“触发退避后接收取消”和“同时间戳、
+活跃/blocked claim”两个先行失败回归；修复后通过。按仓库串行持久接收并分配单调 inbox
+序号，claim 不越过同仓库未完成记录（含 blocked），其他仓库仍可消费。旧行按原时间/ID
+确定性补序号。只加 claim 排序无法阻止退避越过，因此保留前驱检查及接收提交顺序锁。
+这个顺序是本系统接收顺序，不承诺纠正 GitHub 已经乱序送达的事件。
+验证：747 项 PostgreSQL 回归、Ruff、Mypy、构建通过；新增两项测试在旧实现失败、修复后通过。

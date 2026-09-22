@@ -29,6 +29,18 @@ CREATE TABLE IF NOT EXISTS webhook_inbox (
     error_code TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_webhook_pending ON webhook_inbox(state, next_at, received_at);
+ALTER TABLE webhook_inbox ADD COLUMN IF NOT EXISTS inbox_position BIGINT;
+CREATE SEQUENCE IF NOT EXISTS webhook_inbox_position_seq;
+WITH pending AS MATERIALIZED (
+ SELECT delivery_id FROM webhook_inbox WHERE inbox_position IS NULL ORDER BY received_at,delivery_id
+), numbered AS MATERIALIZED (
+ SELECT delivery_id,nextval('webhook_inbox_position_seq') AS position FROM pending
+)
+UPDATE webhook_inbox w SET inbox_position=n.position FROM numbered n WHERE w.delivery_id=n.delivery_id;
+ALTER TABLE webhook_inbox ALTER COLUMN inbox_position SET DEFAULT nextval('webhook_inbox_position_seq');
+ALTER TABLE webhook_inbox ALTER COLUMN inbox_position SET NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_webhook_order ON webhook_inbox
+ ((payload #>> '{repository,full_name}'), inbox_position) WHERE state != 'done';
 """
 
 
@@ -60,6 +72,11 @@ class WebhookStore:
         now = self.store.now()
         with self.store.transaction() as tx, tx.connection() as conn:
             conn.execute("SET LOCAL statement_timeout = '2s'")
+            # Allocate the sequence only after older receipts for this repository commit.
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(COALESCE(%s::jsonb "
+                "#>> '{repository,full_name}', %s), 1))", (Jsonb(payload), delivery_id),
+            )
             conn.execute(
                 "INSERT INTO webhook_inbox(delivery_id,event_type,payload,body_digest,received_at,next_at) "
                 "VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
@@ -75,9 +92,12 @@ class WebhookStore:
         now = self.store.now()
         with self.store.connection() as conn:
             row = conn.execute(
-                "WITH candidate AS (SELECT delivery_id FROM webhook_inbox WHERE "
-                "(state='pending' AND next_at<=%s) OR (state='processing' AND claim_expires_at<=%s) "
-                "ORDER BY received_at,delivery_id FOR UPDATE SKIP LOCKED LIMIT 1) "
+                "WITH candidate AS (SELECT delivery_id FROM webhook_inbox head WHERE "
+                "((state='pending' AND next_at<=%s) OR (state='processing' AND claim_expires_at<=%s)) "
+                "AND NOT EXISTS (SELECT 1 FROM webhook_inbox older WHERE older.state != 'done' "
+                "AND older.inbox_position < head.inbox_position AND "
+                "older.payload #>> '{repository,full_name}' = head.payload #>> '{repository,full_name}') "
+                "ORDER BY inbox_position FOR UPDATE SKIP LOCKED LIMIT 1) "
                 "UPDATE webhook_inbox w SET state='processing',attempts=attempts+1,claim_token=%s,"
                 "claim_expires_at=%s FROM candidate c WHERE w.delivery_id=c.delivery_id RETURNING w.*",
                 (now, now, uuid4().hex, now + timedelta(seconds=60)),

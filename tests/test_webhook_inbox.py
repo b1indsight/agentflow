@@ -227,3 +227,46 @@ async def test_consumer_shutdown_waits_for_db_transaction_without_blocking_loop(
     release.set()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+def test_retry_cannot_be_overtaken_by_cancellation(store, monkeypatch):
+    inbox = WebhookStore(store)
+    trigger = ControlService.on_trigger
+    receive(inbox, 'trigger')
+    def fail(*args):
+        raise RuntimeError('transient failure')
+    monkeypatch.setattr(ControlService, 'on_trigger', fail)
+    consumer(store).sweep()
+    cancelled = payload()
+    cancelled['action'] = 'unlabeled'
+    receive(inbox, 'cancel', cancelled)
+    # Cancellation must wait for the older accepted trigger, including its backoff.
+    assert consumer(store).sweep() == 0
+    monkeypatch.setattr(ControlService, 'on_trigger', trigger)
+    with store.connection() as conn:
+        conn.execute("UPDATE webhook_inbox SET next_at=%s", (store.now(),))
+    assert consumer(store).sweep() == 2
+    assert store.get_active_flow('owner/repo', 7) is None
+
+
+def test_claim_preserves_repository_order_through_live_and_blocked_claims(store):
+    inbox = WebhookStore(store)
+    fixed = store.now()
+    store._clock = lambda: fixed
+    receive(inbox, 'z-first')
+    receive(inbox, 'a-second')
+    other = payload()
+    other['repository']['full_name'] = 'owner/other'
+    receive(inbox, 'other-repo', other)
+    first = inbox.claim()
+    assert first.delivery_id == 'z-first'
+    other_item = inbox.claim()
+    assert other_item.delivery_id == 'other-repo'
+    assert inbox.claim() is None
+    inbox.fail(first, 'Invalid', permanent=True)
+    assert inbox.claim() is None
+    assert inbox.retry(first.delivery_id)
+    retried = inbox.claim()
+    assert retried.delivery_id == first.delivery_id
+    assert inbox.complete(retried)
+    assert inbox.claim().delivery_id == 'a-second'
