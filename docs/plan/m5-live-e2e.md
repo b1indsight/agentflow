@@ -85,3 +85,12 @@ unknown 意图和锁防止响应丢失后盲目重建。人工 review/merge、�
 远端 Issue 创建仍在请求前持久化 unknown，超时不可重新创建；DB 观察仍只读。
 两项原缺陷均先复现再通过回归；无需通过修改 Store 通用接口传播单用途超时参数。
 验证：762 项 PG 全量、Ruff、Mypy、构建通过；真实模型验收仍待用户环境。
+
+2026-09-22 二次返修：用户授权处理父观察器 SIGTERM 遗留子进程。安装仅标记停止请求的
+处理器，以最多 100ms 的 join 间隔退出等待，在 finally 清理独立进程组、回收直接子进程，
+并恢复原 signal handler。标记式处理不在 spawn 中抛异常，避免 PID 尚未记录时失去清理入口。
+真实 CLI 测试用 TCP 握手确认 gh 已启动并持有会话后，只向父进程发 SIGTERM；验证退出码
+143、观察器管道关闭、gh 的 TCP 连接关闭，以及同一 run 状态锁可重新获得。
+对照旧版默认信号行为：该测试在 5 秒 communicate 超时；保留清理机制后通过。
+命令：`FLOWTOOL_TEST_DATABASE_URL=... uv run pytest tests/test_live_smoke.py -q`，16 项通过。
+不新增生产功能；SIGKILL/主机断电无法由用户态 handler 清理，仍非此入口的保证。

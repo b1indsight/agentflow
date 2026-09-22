@@ -209,3 +209,52 @@ def test_cli_deadline_bounds_unresponsive_database_connection(tmp_path):
             pytest.fail('database exceeded total smoke deadline')
     assert result.returncode == 2
     assert time.monotonic() - started < 4
+
+
+def test_parent_sigterm_reaps_observer_and_gh_and_releases_state_lock(tmp_path):
+    import os
+    import signal
+    import socket
+    import subprocess
+    import sys
+
+    # Signal only the watchdog after gh proves the observer owns the session lock.
+    # Inherited stdout keeps communicate blocked if either descendant survives.
+    with socket.socket() as listener:
+        listener.bind(('127.0.0.1', 0))
+        listener.listen()
+        listener.settimeout(10)
+        gh = tmp_path / 'gh'
+        gh.write_text(
+            f'#!{sys.executable}\nimport os, socket, time\n'
+            f'with socket.create_connection(("127.0.0.1", {listener.getsockname()[1]})) as s:\n'
+            '    s.sendall(str(os.getpgrp()).encode())\n'
+            '    time.sleep(60)\n'
+        )
+        gh.chmod(0o700)
+        process = subprocess.Popen([
+            sys.executable, '-m', 'app.live_smoke', '--repo', 'owner/smoke',
+            '--run-id', 'terminated', '--state-dir', str(tmp_path / 'state'),
+            '--wait-seconds', '30'], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env={**os.environ, 'PATH': f'{tmp_path}:{os.environ["PATH"]}'})
+        group = None
+        try:
+            connection, _ = listener.accept()
+            with connection:
+                connection.settimeout(5)
+                group = int(connection.recv(64))
+                process.terminate()
+                process.communicate(timeout=5)
+                assert connection.recv(1) == b''  # gh also released its live socket
+            assert process.returncode == 128 + signal.SIGTERM
+            with SmokeSession('owner/smoke', 'terminated', tmp_path / 'state', FakeGitHub()):
+                pass
+        finally:
+            if group is not None:
+                try:
+                    os.killpg(group, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            if process.poll() is None:
+                process.kill()
+            process.communicate(timeout=5)

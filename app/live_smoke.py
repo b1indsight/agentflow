@@ -18,6 +18,7 @@ import subprocess
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+from types import FrameType
 from typing import IO, Literal, Protocol, Self
 
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError
@@ -316,23 +317,38 @@ def main() -> int:
         parser.error("wait-seconds must be in 0..1800")
     deadline = time.monotonic() + (args.wait_seconds or 60)
     process = multiprocessing.get_context("spawn").Process(target=_run_process, args=(args, deadline))
-    process.start()
+    stop_requested = False
+
+    def request_stop(signum: int, frame: FrameType | None) -> None:
+        # Do not raise from a signal handler: start() must finish recording the PID
+        # before cleanup can own the child, including a signal during spawn.
+        nonlocal stop_requested
+        stop_requested = True
+
+    previous_sigterm = signal.signal(signal.SIGTERM, request_stop)
     try:
-        process.join(timeout=max(0, deadline - time.monotonic()))
+        process.start()
+        while not stop_requested and process.is_alive() and time.monotonic() < deadline:
+            process.join(timeout=min(0.1, max(0, deadline - time.monotonic())))
+        if stop_requested:
+            return 128 + signal.SIGTERM
         if process.exitcode is not None:
             return process.exitcode if process.exitcode >= 0 else 1
         print("Observation incomplete: total runtime deadline reached.")
         return 2
     finally:
-        if process.is_alive():
-            assert process.pid is not None
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                process.kill()  # deadline may expire before the child creates its group
-            process.join(timeout=1)
-        if not process.is_alive():
-            process.close()
+        try:
+            if process.pid is not None:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    if process.is_alive():
+                        process.kill()  # shutdown may precede creation of the group
+                process.join(timeout=1)
+            if not process.is_alive():
+                process.close()
+        finally:
+            signal.signal(signal.SIGTERM, previous_sigterm)
 
 
 if __name__ == "__main__":
