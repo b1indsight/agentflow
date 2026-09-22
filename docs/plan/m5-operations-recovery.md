@@ -121,3 +121,6 @@ RPO≤24h/RTO≤2h、完整活动 Flow 恢复、无重复 PR/评论、真实 sys
 
 最终本地验证：789 项 PostgreSQL 测试通过（0 skipped）；Ruff、Mypy 130 文件、构建及
 promtool 规则/单元测试通过。约 1,040 行增删，未超过计划的 1,200 行拆分阈值。
+
+CI 首轮在启动 PostgreSQL 服务前失败：Actions 的 Docker 参数解析不接受 health-cmd 的单引号，
+使 `-U` 被当作 docker create 参数；按 runner 参数格式改为双引号。未更改演练连接设置。
