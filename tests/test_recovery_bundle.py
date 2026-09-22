@@ -56,7 +56,9 @@ def test_verified_bundle_retains_identity_metadata(tmp_path):
 def test_freeze_connection_preserves_environment_port_and_password_file(postgresql_url, tmp_path, monkeypatch):
     # Deployment URLs can omit values supplied by the libpq environment.
     settings = conninfo_to_dict(postgresql_url)
-    port = settings.pop('port')
+    with psycopg.connect(postgresql_url) as fixture:
+        port = str(fixture.info.port)
+    settings.pop('port', None)
     password_file = tmp_path / 'test.pgpass'
     password_file.write_text('127.0.0.1:*:*:*:fixture-only\n')
     password_file.chmod(0o600)
@@ -75,6 +77,8 @@ def test_freeze_connection_preserves_environment_port_and_password_file(postgres
 def test_freeze_connection_prefers_explicit_dsn_and_preserves_tls_paths(postgresql_url, tmp_path, monkeypatch):
     # Explicit connection settings must override inherited deployment defaults.
     settings = conninfo_to_dict(postgresql_url)
+    with psycopg.connect(postgresql_url) as fixture:
+        settings['port'] = str(fixture.info.port)
     monkeypatch.setenv('PGPORT', '1')
     monkeypatch.setenv('PGPASSFILE', '/wrong/default')
     settings.update(passfile=str(tmp_path / 'explicit.pgpass'), sslrootcert=str(tmp_path / 'ca.pem'), sslmode='disable')
