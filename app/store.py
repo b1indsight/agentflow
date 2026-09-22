@@ -355,12 +355,16 @@ class Store:
         ).fetchone()
 
     def cancel_jobs(self, flow_id: int, *, reason: str = "Flow cancelled") -> None:
-        """Retire queued work; a running executor still owns its slot until result or lease expiry."""
+        """Retire queued/never-dispatched preparation; actual execution requires stop proof."""
         self.reviews.cancel(flow_id)
         with self.connection() as connection:
             connection.execute(
-                "UPDATE jobs SET state=%s, last_error=%s, updated_at=%s WHERE flow_id=%s"
-                " AND state=%s AND result_received_at IS NULL",
+                "WITH retired AS (UPDATE jobs SET state=%s, last_error=%s, updated_at=%s WHERE flow_id=%s"
+                " AND (state=%s OR (state='running' AND started_at IS NULL AND dispatch_authorized_at IS NULL"
+                " AND EXISTS (SELECT 1 FROM flows f WHERE f.id=jobs.flow_id AND f.state='cancelled')))"
+                " AND result_received_at IS NULL RETURNING id)"
+                " UPDATE workers SET current_job_id=NULL,status=CASE WHEN status='busy' THEN 'online' ELSE status END"
+                " WHERE current_job_id IN (SELECT id FROM retired)",
                 (
                     JobState.FAILED,
                     reason,
@@ -596,7 +600,13 @@ class Store:
                 "UPDATE flow_executions SET released_at=%s"
                 " WHERE flow_id=%s AND released_at IS NULL"
                 " AND NOT EXISTS (SELECT 1 FROM execution_stops s WHERE s.flow_id=flow_executions.flow_id"
-                " AND s.binding_at=flow_executions.bound_at AND s.state!='confirmed')",
+                " AND s.binding_at=flow_executions.bound_at AND s.state!='confirmed')"
+                " AND NOT EXISTS (SELECT 1 FROM jobs j JOIN flows f ON f.id=j.flow_id"
+                " WHERE j.flow_id=flow_executions.flow_id AND f.state='cancelled'"
+                " AND j.result_received_at IS NOT NULL AND j.result_applied_at IS NULL)"
+                " AND NOT EXISTS (SELECT 1 FROM result_effects e JOIN jobs j ON j.id=e.job_id"
+                " JOIN flows f ON f.id=j.flow_id WHERE j.flow_id=flow_executions.flow_id"
+                " AND f.state='cancelled' AND e.dispatched_at IS NOT NULL AND e.receipt IS NULL)",
                 (now, flow_id),
             )
         return result.rowcount == 1

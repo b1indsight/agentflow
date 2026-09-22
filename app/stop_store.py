@@ -61,6 +61,7 @@ class StopStore:
         with self.store.connection() as conn:
             job = conn.execute(
                 "SELECT id,assignment_token FROM jobs WHERE flow_id=%s AND assigned_worker_id=%s"
+                " AND (started_at IS NOT NULL OR dispatch_authorized_at IS NOT NULL)"
                 " AND assignment_token IS NOT NULL AND (state='running'"
                 " OR ((started_at IS NOT NULL OR dispatch_authorized_at IS NOT NULL) AND result_received_at IS NULL)"
                 " OR (result_received_at IS NOT NULL AND result_applied_at IS NULL)"
@@ -127,17 +128,18 @@ class StopStore:
                 ).fetchone()
                 binding = tx.get_flow_execution(receipt.flow_id)
                 worker = conn.execute("SELECT connection_epoch FROM workers WHERE worker_id=%s", (worker_id,)).fetchone()
-                if (intent is None or binding is None or worker is None
+                if (intent is None or worker is None
                         or worker['connection_epoch'] != receipt.connection_epoch
                         or intent.worker_id != worker_id or intent.job_id != receipt.job_id
-                        or intent.flow_id != receipt.flow_id or intent.assignment_token != receipt.assignment_token
-                        or binding.worker_id != worker_id or binding.bound_at != intent.binding_at):
+                        or intent.flow_id != receipt.flow_id or intent.assignment_token != receipt.assignment_token):
                     return False
                 digest = hashlib.sha256(receipt.model_dump_json(exclude={'connection_epoch'}).encode()).hexdigest()
                 if intent.receipt_digest is not None and intent.receipt_digest != digest:
                     return False
                 if intent.state == 'confirmed':
-                    return True
+                    return intent.receipt_digest == digest
+                if binding is None or binding.worker_id != worker_id or binding.bound_at != intent.binding_at:
+                    return False
                 conn.execute("UPDATE execution_stops SET state='stopped',receipt_digest=%s WHERE request_id=%s",
                              (digest, intent.request_id))
                 if tx.has_pending_result(receipt.flow_id) or conn.execute(

@@ -1,5 +1,7 @@
 from datetime import timedelta
 
+import pytest
+
 from app.control.service import ControlService
 from app.models import JobKind
 from app.protocol import PROTOCOL_VERSION
@@ -147,3 +149,108 @@ def test_lost_started_ack_cannot_requeue_then_cancel_as_unsent(store):
     ControlService(store).cancel(flow)
     assert store.stops.pending('w') is not None
     assert store.get_flow_execution(flow.id).released_at is None
+
+
+def test_cancel_during_preparation_releases_slot_without_nonexistent_journal(store):
+    from app.models import JobState
+    flow = store.create_flow('owner/repo', 1, 1)
+    store.worker_connected('w', PROTOCOL_VERSION, 'epoch')
+    job = store.enqueue_job(flow.id, JobKind.INITIAL)
+    assert store.assign_job('w', 'preparing', 'epoch')
+    ControlService(store).cancel(flow)
+    assert store.stops.pending('w') is None
+    assert store.get_flow_execution(flow.id).released_at is not None
+    assert store.get_job(job.id).state is JobState.FAILED
+    assert store.list_workers()[0].current_job_id is None
+    assert not store.stops.authorize_dispatch(job.id, 'w', 'preparing', 'epoch')
+    replacement = store.create_flow('owner/repo', 2, 1)
+    next_job = store.enqueue_job(replacement.id, JobKind.INITIAL)
+    assert store.assign_job('w', 'replacement', 'epoch').id == next_job.id
+    assert not store.clear_preparation(job.id, 'w', 'preparing', 'epoch')
+    assert store.list_workers()[0].current_job_id == next_job.id
+
+
+def test_confirmed_stop_can_be_reacknowledged_after_flow_rebind(store):
+    from app.protocol import ExecutionStopped
+    flow, _ = running(store)
+    ControlService(store).cancel(flow)
+    stop = store.stops.pending('w')
+    receipt = ExecutionStopped(**stop.message('epoch').model_dump(exclude={'type'}), execution_nonce='old-owned')
+    assert store.stops.confirm('w', receipt)
+    ControlService(store).retry(store.get_flow(flow.id))
+    store.worker_connected('new-worker', PROTOCOL_VERSION, 'new-epoch')
+    replacement = store.assign_job('new-worker', 'new-token', 'new-epoch')
+    assert replacement is not None
+    before = store.get_flow_execution(flow.id)
+    store.worker_connected('w', PROTOCOL_VERSION, 'reconnect')
+    replay = receipt.model_copy(update={'connection_epoch': 'reconnect'})
+    assert store.stops.confirm('w', replay)
+    assert store.get_flow_execution(flow.id) == before
+    assert store.get_job(replacement.id).assignment_token == 'new-token'
+    assert not store.stops.confirm('w', replay.model_copy(update={'execution_nonce': 'forged'}))
+
+
+@pytest.mark.parametrize("remote_state", ["open", "closed", "merged", "foreign"])
+async def test_cancelled_creation_persists_pr_identity_and_merge_before_stop(store, remote_state):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from app.control.effects import ResultEffects
+    from app.github_models import PullRequestStatus
+    from app.models import DeliveryState, FlowState, JobState
+    from app.protocol import ExecutionStopped
+    from app.result_models import EffectState, PullRequestEffect, ResultPending, ResultPlan
+    flow, job = running(store)
+    delivery = store.get_or_create_delivery(flow.id, 'flow/1')
+    delivery.state, delivery.base_branch, delivery.head_sha = DeliveryState.OPENING, 'main', 'a' * 40
+    store.update_delivery(delivery)
+    effect = PullRequestEffect(key='pr', installation_id=1, repo=flow.repo, branch=delivery.branch,
+                               base_branch='main', head_sha='a' * 40, title='fixture', body='fixture')
+    plan = ResultPlan(job_id=job.id, flow_id=flow.id, attempt_id=flow.current_attempt_id,
+                      digest='fixture', state=JobState.DONE, delivery=delivery, effects=[effect])
+    store.results.prepare(plan)
+    record = store.results.claim(job.id, 'sender')
+    store.results.mark_dispatched(record)
+    store.results.finish(record, EffectState.UNCERTAIN, error='lost response', delay=0)
+    ControlService(store).cancel(flow)
+    remote = PullRequestStatus(number=17, repo=flow.repo, state='closed' if remote_state == 'merged' else 'open' if remote_state == 'foreign' else remote_state, head_repository='fork/repo' if remote_state == 'foreign' else flow.repo,
+                               head_branch=delivery.branch, base_branch='main', head_sha='a' * 40,
+                               base_sha='b' * 40, merged=remote_state == 'merged', merged_at=store.now() if remote_state == 'merged' else None, merge_commit_sha='c' * 40 if remote_state == 'merged' else None)
+    github = SimpleNamespace(find_pull_request_by_head=AsyncMock(return_value=remote),
+                             get_pull_request_status=AsyncMock(return_value=remote))
+    if remote_state == 'foreign':
+        with pytest.raises(ResultPending):
+            await ResultEffects(store, github).run(plan)
+        assert store.get_delivery(flow.id).pr_number is None
+        assert store.get_flow_execution(flow.id).released_at is None
+        return
+    assert await ResultEffects(store, github).run(plan) is None
+    recovered = store.get_delivery(flow.id)
+    assert recovered.pr_number == 17 and recovered.state is DeliveryState(remote_state)
+    assert recovered.merge_commit_sha == remote.merge_commit_sha
+    assert store.get_flow_by_pr(flow.repo, 17).id == flow.id
+    assert store.get_flow(flow.id).state is (FlowState.ACTIVE if remote_state == "merged" else FlowState.CANCELLED)
+    stop = store.stops.pending('w')
+    assert store.stops.confirm('w', ExecutionStopped(**stop.message('epoch').model_dump(exclude={'type'}), execution_nonce='owned'))
+    if remote_state == 'merged':
+        assert store.get_flow_execution(flow.id).released_at is None
+        assert store.assign_job('w', 'archive', 'epoch').kind is JobKind.ARCHIVE
+    else:
+        assert store.get_flow_execution(flow.id).released_at is not None
+
+
+async def test_preparation_result_releases_cancelled_binding_after_application(store):
+    from app.protocol import Failed, terminal_digest
+    from tests.test_coordinator import RecordingGitHub, coordinator
+    flow = store.create_flow('owner/repo', 1, 1)
+    store.worker_connected('w', PROTOCOL_VERSION, 'epoch')
+    job = store.enqueue_job(flow.id, JobKind.INITIAL)
+    assert store.assign_job('w', 'preparing', 'epoch')
+    message = Failed(job_id=job.id, assignment_token='preparing', connection_epoch='control', error='prepare failed')
+    store.record_control_result(job.id, message.model_dump(mode='json'), terminal_digest(message), 'prepare failed')
+    ControlService(store).cancel(flow)
+    assert store.stops.pending('w') is None
+    assert store.get_flow_execution(flow.id).released_at is None
+    await coordinator(store, RecordingGitHub()).results.apply(job.id)
+    assert store.get_job(job.id).result_applied_at is not None
+    assert store.get_flow_execution(flow.id).released_at is not None

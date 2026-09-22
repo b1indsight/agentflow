@@ -84,3 +84,19 @@ Flow 可收尾；超时和缺 journal 给出 blocked 事实。标准 lint/type/b
 [取消和停机说明](../operations/cancel-drain.md)。复用现有 Codex/VCS 所有权及 SIGKILL
 进程组路径，停止 task 确认预算 15 秒，握手 20 秒，没有新增跨重启 PID 终止逻辑。
 未知旧进程保持 blocked；真实环境的 F3 取消和整套部署故障注入仍待执行。
+
+2026-09-22 授权返修三项：
+- 未 dispatch/未 started 的 preparation 不要求 worker 停止凭据，取消时退休未发送 job 并释放
+  当前 worker job 槽；旧 preparation 回调仍被 job/token fence 拒绝。若控制端结果未应用，
+  取消绑定保持到结果/effects 收敛后再释放，避免要求不存在的 worker journal。
+- 已 confirmed 的停止回执按原 request/job/token/nonce digest 和当前连接 epoch 重放确认；
+  不再要求 Flow 仍使用旧 binding，不触碰已重绑的新任务。未确认停止仍严格校验原 binding。
+- 取消时恢复 OPENING PR，先只读核验 repository/head/base，再在 workflow 锁内保存 PR 身份、
+  URL 和当前 open/closed/merge 事实。merge 经原 record_merge 进入保留绑定的 archive 路径；
+  版本变化或异仓库观察继续阻塞，不补发远端写入。
+
+三个原缺陷均有先行失败 PG 回归；扩展覆盖开放/关闭/合并/异仓库 PR、旧 nonce 伪造、
+重绑后新任务未被修改，以及控制端准备结果收敛。归档原子释放回归防止把取消的 pending
+结果保护误用于正常 archive 提交。沿用既有停止/结果/归档机制，无新增强制释放入口。
+验证：791 项 PostgreSQL 全量、Ruff、Mypy、构建通过。准备任务直接退休仅限 CANCELLED，
+保留 PR close/pause 与 reopen 的原恢复语义；58 项取消/暂停/准备重试定向回归通过。

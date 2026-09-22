@@ -63,3 +63,7 @@ STOP 请求和有效凭据握手能完成取消。未写出凭据的进程崩溃
 双向 worker 协议，以及真实无害父/子进程退出和 ACK 丢失后新 client/journal 重放。
 网络重连不会把“没有本地 task”当作停止证明。F3 真实 GitHub/模型取消验收、整套部署中的
 serve/worker 分进程故障注入尚待运行环境，不能用上述单机测试代替发布验收。
+
+未 dispatch 的准备任务取消后不等待 worker journal；本地未应用结果仍须先收敛。已确认停止
+可在 Flow 重绑后再次 ACK，历史 ACK 不释放新 binding。取消期间找回的创建 PR 会记录其身份
+与 merge 事实；已经合并时仍在原 binding 上完成归档，不因为取消丢失 PR 对账入口。

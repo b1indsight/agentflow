@@ -218,6 +218,37 @@ class ResultEffects:
             if (found is None or delivery is None or (not cancelled_opening and found.number != delivery.pr_number)
                     or found.head_branch != effect.branch or found.base_branch != effect.base_branch):
                 raise ResultPending("retired PR creation awaits its remote identity")
+            if cancelled_opening:
+                from app.control.service import ControlService
+                from app.github_models import PullRequestMerge
+
+                remote = await self.github.get_pull_request_status(installation, repo, found.number)
+                if (remote.repo != repo or remote.number != found.number or remote.head_repository != repo
+                        or remote.head_branch != effect.branch or remote.base_branch != effect.base_branch
+                        or remote.head_sha != effect.head_sha):
+                    raise ResultPending("cancelled PR identity changed during recovery")
+                with self.store.transaction() as tx:
+                    fresh = tx.lock_workflow(plan.flow_id)
+                    current = tx.get_delivery(plan.flow_id)
+                    if (fresh is None or fresh.state is not FlowState.CANCELLED
+                            or fresh.current_attempt_id != plan.attempt_id or current is None
+                            or plan.delivery is None or current.version != plan.delivery.version
+                            or current.state is not DeliveryState.OPENING or current.pr_number is not None
+                            or current.branch != effect.branch or current.head_sha != effect.head_sha):
+                        raise ResultPending("cancelled delivery changed during recovery")
+                    current.pr_number = remote.number
+                    current.url = f"https://github.com/{repo}/pull/{remote.number}"
+                    if remote.merged:
+                        assert remote.merged_at is not None and remote.merge_commit_sha is not None
+                        ControlService.record_merge(tx, fresh, current, PullRequestMerge(
+                            number=remote.number, merged=True, merged_at=remote.merged_at,
+                            merge_commit_sha=remote.merge_commit_sha,
+                        ))
+                    else:
+                        current.state = DeliveryState.CLOSED if remote.state == 'closed' else DeliveryState.OPEN
+                        current.version += 1
+                        tx.update_delivery(current)
+                found = remote
             return EffectReceipt(pull_request=found)
         if isinstance(effect, ResolveEffect):
             resolved = await self.github.review_thread_resolved(installation, effect.thread_id)
