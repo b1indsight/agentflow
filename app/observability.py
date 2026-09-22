@@ -89,6 +89,7 @@ FAMILIES: dict[str, tuple[tuple[str, ...], tuple[tuple[str, ...], ...]]] = {
     'jobs': (('kind', 'state'), (KINDS, ('queued', 'running', 'done', 'failed', 'other'))),
     'workers': (('state',), (('online', 'busy', 'recovering', 'offline', 'failed', 'other'),)),
     'bindings_active': ((), ()), 'recovery_pending': ((), ()), 'reconcile_due': ((), ()),
+    'archive_pending_age_seconds': ((), ()),
     'effects': (('state',), (('pending', 'running', 'retry', 'uncertain', 'succeeded', 'failed', 'skipped', 'other'),)),
     'projects': (('state',), (('pending', 'blocked', 'other'),)),
     'oldest_age_seconds': (('queue',), (('inbox', 'jobs', 'recovery', 'archive', 'reconcile', 'projects', 'other'),)),

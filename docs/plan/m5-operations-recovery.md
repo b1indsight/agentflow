@@ -1,6 +1,6 @@
 # M5 F8：常驻运维、备份恢复与故障验收
 
-> 状态：计划待审批，未实现/未演练。2026-09-18。
+> 状态：已获“按顺序实现 PR”授权；工具与文档已实施，完整部署恢复验收待办。2026-09-22。
 > 文档 PR 基线 main@origin / 55313e1f；依赖 F5 观测、F6 stop/drain、F7 K8s 及 F4 镜像。
 > M4 后续恢复能力实施前核对真实集成版本，不从已关闭/合并的分支 PR 推断 main 已包含。
 > 阶段范围：[PR #38](https://github.com/b1indsight/agentflow/pull/38)。
@@ -85,3 +85,39 @@ webhook 重投、终态 ACK 丢失、停止请求/确认间重启、容器/Pod �
 预算目标约 1000 行手写增删；超过 1200 行拆常驻/告警与备份/故障验收。缺少实际运行环境
 或 root identity 前置时明确剩余工作，不用模拟测试替代完整恢复证据。
 依据：[PostgreSQL SQL dump](https://www.postgresql.org/docs/17/backup-dump.html)。
+
+## 7. 实施与验证记录
+
+2026-09-22：同一 PR #45 接续 #44 的 c72cd4d02707，实现 systemd 双角色示例、三种部署的
+维护/冷备/升级/凭据轮换说明。没有部署 CLI、自动生产备份或本地每 Flow 容器。
+
+先增加 manifest 拒绝缺件/损坏/未停写/越界/符号链接和 archive 最新任务回归，确认失败，
+再实现脚本及新 gauge。脚本仅操作自己创建的 loopback fixture schema，保留证据与资源；
+并未启动 serve/worker/模型或调用 GitHub。manifest hash 仅检测完整性，信任来自私有备份存储。
+新增 archive_pending_age_seconds 供告警使用，排除被成功重试取代的历史失败；不更改旧指标口径。
+
+10 条告警使用 Prometheus 3.5.1 的 promtool，通过官方资产 SHA256 后执行；12 组场景覆盖
+触发/持续期/恢复、没有 worker 行、全部指标无数据。告警通知接收方与生产备份 gauge 需部署者接入。
+CI 新增固定 PostgreSQL 17 镜像与同镜像客户端的实际恢复、systemd 语法和告警测试。
+
+本地演练使用 PostgreSQL/pg_dump/pg_restore 16.2、协议 9，隔离 schema
+`recovery_5d41ef6a337c4465bcd949c94c20d25b`，恢复耗时 0.053 秒（极小 fixture，不代表生产 RTO）。
+活动 assignment/binding、inbox、HOME 数据恢复通过；原 journal 未变，复制 root 被身份校验阻塞。
+本地 report 位于忽略目录 `.cache/2026-09-18/m5-f8/recovery-2/report.json`，只含合成数据。
+
+| 故障 | 本轮证据与限制 |
+| --- | --- |
+| serve 正常停止、worker 短断连 | #42 真实双 worker 进程 smoke 通过；模型为替身，非生产故障验收 |
+| serve SIGKILL / DB 暂停 | 未执行整套部署注入；readiness 单测不能替代 DB 故障的 runtime 验收 |
+| webhook 重投、处理崩溃边界 | F2 持久 inbox PG 测试通过；真实 GitHub 重投未执行 |
+| 终态/停止 ACK 丢失 | journal 与 F6 双向协议测试通过，含真实 Python 父子进程回收 |
+| 执行进程未知/重启间隙 | F6 保守阻塞测试通过；完整主机断电未执行 |
+| 容器/Pod 重建 | Docker CI idle worker 文件持久 smoke 通过；活动 journal/CSI/节点失联未执行 |
+| 备份缺件/损坏 | manifest 单测通过；实际独立 PG dump/restore 与 root 阻塞演练通过 |
+| 恢复后 GitHub head/merge 更新 | 仅前序 M4 模拟/PG 回归；真实远端故障矩阵未执行 |
+
+RPO≤24h/RTO≤2h、完整活动 Flow 恢复、无重复 PR/评论、真实 systemd 主机及 K8s 目标 CSI
+均未验收。保持 Draft；不会把 fixture 恢复耗时或未知旧执行视为可上线证明。
+
+最终本地验证：789 项 PostgreSQL 测试通过（0 skipped）；Ruff、Mypy 130 文件、构建及
+promtool 规则/单元测试通过。约 1,040 行增删，未超过计划的 1,200 行拆分阈值。

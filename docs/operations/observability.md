@@ -45,6 +45,7 @@ scrape_configs:
 | jobs | gauge / kind,state | 全部保留 job 的排队、运行及终态记录数 |
 | workers | gauge / state | 数据库登记状态，online/busy 不等于当前已确认空闲 |
 | bindings_active | gauge | 未释放的 Flow-worker binding |
+| archive_pending_age_seconds | gauge | 仍绑定的活动 Flow 最新未成功 archive job 的最老年龄；用于运维告警 |
 | recovery_pending | gauge | 已收到结果但尚未应用的 job，包括被阻塞的恢复 |
 | effects | gauge / state | pending/running/retry/uncertain/succeeded/failed/skipped 的外部 effect |
 | projects | gauge / state | desired_version > synced_version，区分 pending/blocked |

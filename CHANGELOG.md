@@ -7,6 +7,9 @@
 
 ## Unreleased
 
+- M5 F8：增加 systemd 示例、维护/冷备/轮换 runbook、10 条 Prometheus 告警及测试，
+  提供隔离 PostgreSQL dump/restore 演练与完整性校验；复制 root 的活动恢复仍明确阻塞。
+
 - M5 F7：增加零副本起步的 Kustomize base、独立 schema Job、RWOP worker PVC、内部 TLS
   和可选 Cloudflare overlay；新增有界 DB readiness 与 worker 本地探针，集群验收待环境。
 
