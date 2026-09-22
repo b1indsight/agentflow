@@ -58,8 +58,11 @@ kubectl -n flowtool rollout status statefulset/flowtool-worker-1 --timeout=300s
 kubectl -n flowtool exec flowtool-serve-0 -c serve -- flowtool workers
 ```
 
-serve 的 `/readyz` 检查初始化完成和有界只读 DB 探测；`/healthz` 仅表示存活。
-DB 故障使 readiness 失败，不让 liveness 重启服务。worker readiness 检查本进程注册状态及
+serve 的 `/readyz` 检查初始化完成和有界只读 DB 探测；`/healthz` 表示 HTTP 可以响应。
+serve 不配置 startup/liveness 探针：现有同步 SQL 可能阻塞 HTTP，不能把超时当作进程死亡。
+DB 故障或初始化未完成只使 readiness 失败；容器进程退出仍由 Kubernetes 自动重启。
+取舍是应用死锁不由 HTTP 探针自动重启，需告警后人工诊断；全面异步化 SQL 不在本次修复内。
+worker readiness 检查本进程注册状态及
 本地心跳文件新鲜度；busy 不表示故障，也不是绑定可释放的证明。外部模型和 Cloudflare 不参与
 存活探针。Service 仅 ClusterIP，内部 TLS 由 serve 同 Pod 的代理提供。
 

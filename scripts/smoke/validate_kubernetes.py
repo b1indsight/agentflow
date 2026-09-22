@@ -39,6 +39,9 @@ def validate(path: Path, placeholders: bool) -> None:
                 assert placeholders or not claim['spec']['storageClassName'].startswith('replace-')
         elif role == 'serve':
             assert secrets == {'flowtool-serve-env', 'flowtool-app-key', 'flowtool-worker-tls'}
+            serve = next(c for c in pod['containers'] if c['name'] == 'serve')
+            assert 'livenessProbe' not in serve and 'startupProbe' not in serve, 'DB stalls must not restart serve'
+            assert serve['readinessProbe']['httpGet']['path'] == '/readyz'
         elif role == 'cloudflare':
             assert secrets == {'flowtool-tunnel-credentials'}
     for resource in objects:

@@ -83,3 +83,17 @@ readiness 失败；Secret 跨角色不可见；缺 CSI/证书时给出明确错�
 角色 Secret、OnDelete、RWOP、digest 和入口边界。探针及 PG 回归另附 PR 验证记录。
 没有目标集群/CSI 的安装、server-side dry-run、活动 journal 重挂载和节点失联证据，
 不宣称任意 CSI 或跨节点恢复可用。保留 draft，运行步骤见 [Kubernetes 部署](../deployment/kubernetes.md)。
+
+2026-09-22 授权返修与探针决策修订：
+- ResumeAssignment 验证成功且恢复执行准备完成时立即标记 connected，ReplayResult 同样在
+  等待终态 ACK 前标记；不再等待模型任务完成。新增真实 journal + 未完成 executor 的重连
+  回归，旧实现仍在发送 heartbeat 时 readiness 为假，修复后保持已连接。
+- 原计划以 HTTP healthz 做存活/启动探针的假设不成立：现有多个同步数据库路径会阻塞同一
+  HTTP loop。本轮取消 serve 的 startup/liveness 探针，保留 readyz，进程退出由容器重启策略
+  恢复；DB/初始化失败只撤流，不因 HTTP 超时主动杀进程。没有假称已全面异步化 SQL。
+  取舍：真正应用死锁需监控与人工处理；独立探针进程或全面 DB 调度改造应单独评估。
+
+先在 validator 增加“serve 无杀进程探针且 readyz 保留”契约，旧渲染失败；修正后 base/Cloudflare
+两种 Kustomize 渲染通过。只修改两个 sweep 不能证明其它同步 SQL 路径安全，因此不采用该
+不完整方案。仍未执行真实集群 DB 故障注入，静态检查不代替集群行为验收。
+验证：796 项 PostgreSQL 全量、Ruff、Mypy、构建与两种清单边界检查通过。

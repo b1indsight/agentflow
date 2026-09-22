@@ -61,25 +61,12 @@ spec:
           readOnly: true
         - name: serve-tmp
           mountPath: /tmp
-        startupProbe:
-          httpGet:
-            path: /healthz
-            port: http
-          periodSeconds: 5
-          failureThreshold: 36
         readinessProbe:
           httpGet:
             path: /readyz
             port: http
           timeoutSeconds: 3
           periodSeconds: 5
-        livenessProbe:
-          httpGet:
-            path: /healthz
-            port: http
-          timeoutSeconds: 2
-          periodSeconds: 10
-          failureThreshold: 3
       - name: worker-gateway
         image: nginx:stable-alpine@sha256:ef8676b33d681f272ba429b27658bdd7e640963279714c96bddf1dc76307f7b6
         command:

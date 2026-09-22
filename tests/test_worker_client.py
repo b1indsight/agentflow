@@ -267,13 +267,15 @@ class BrokenHeartbeatConnection:
 
 
 @pytest.mark.asyncio
-async def test_heartbeat_failure_preserves_the_running_executor_for_reconnect() -> None:
+async def test_heartbeat_failure_preserves_the_running_executor_for_reconnect(tmp_path) -> None:
+    from app.worker.journal import WorkerJournal
     executor = CancellableExecutor()
     client = WorkerClient(
         worker_id="worker-1",
         worker_token="worker-secret",
         serve_ws_url="ws://unused",
         executor=executor,
+        journal=WorkerJournal(tmp_path),
     )
     assignment = Assignment(
         job_id=5,
@@ -301,6 +303,28 @@ async def test_heartbeat_failure_preserves_the_running_executor_for_reconnect() 
         with pytest.raises(ConnectionError, match="connection lost"):
             await execution
         assert executor.cancelled.is_set() is False
+        from app.protocol import ResumeAssignment
+
+        heartbeat = asyncio.Event()
+        class ResumedConnection:
+            first = True
+            async def send(self, data):
+                if isinstance(parse_worker_message(data), Heartbeat):
+                    heartbeat.set()
+            async def recv(self):
+                if self.first:
+                    self.first = False
+                    return ResumeAssignment(job_id=5, assignment_token='assignment-1',
+                                            connection_epoch='epoch-2', heartbeat_interval=0.01).model_dump_json()
+                await asyncio.Event().wait()
+        resumed = asyncio.create_task(client.run_connection(ResumedConnection()))
+        try:
+            await asyncio.wait_for(heartbeat.wait(), 1)
+            assert client.connected  # Recovery succeeded even though the executor is still busy.
+            assert client._execution is not None and not client._execution.done()
+        finally:
+            resumed.cancel()
+            await asyncio.gather(resumed, return_exceptions=True)
     finally:
         await client._cancel_execution()
     assert executor.cancelled.is_set() is True
