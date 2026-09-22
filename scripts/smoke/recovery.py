@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -29,6 +30,36 @@ from app.webhook_store import WebhookStore
 from app.worker.journal import JournalError, WorkerJournal
 
 FILES = {'database.dump', 'worker.tar.gz'}
+
+
+def freeze_connection(conn: psycopg.Connection) -> tuple[dict[str, str], dict[str, str]]:
+    """Flatten libpq's resolved defaults/service/URL into one private tool environment.
+
+    Use libpq's own environment mapping, not a hand-maintained subset. Refuse options
+    that cannot be passed this way before creating fixture resources; never put secrets
+    in command arguments or reports. Pin the actual loopback peer for every connection.
+    """
+    peer = conn.info.hostaddr
+    if not ipaddress.ip_address(peer).is_loopback:
+        raise ValueError('resolved database peer must be loopback')
+    params: dict[str, str] = {}
+    env = dict(os.environ)
+    for option in psycopg.pq.Conninfo.get_defaults():
+        if option.envvar:
+            env.pop(option.envvar.decode(), None)
+    for option in conn.pgconn.info:
+        key = option.keyword.decode()
+        if option.val is None or key == 'service':
+            continue
+        if not option.envvar:
+            if option.val:
+                raise ValueError(f'connection option has no safe tool environment mapping: {key}')
+            continue
+        value = option.val.decode()
+        params[key] = value
+        env[option.envvar.decode()] = value
+    params['hostaddr'] = env['PGHOSTADDR'] = peer
+    return params, env
 
 
 def digest(path: Path) -> str:
@@ -81,6 +112,8 @@ def drill(work: Path, postgres_bin: Path, revision: str) -> dict:
         versions[tool] = subprocess.check_output([str(postgres_bin / tool), '--version'], text=True).strip()
     with psycopg.connect(base) as conn:
         major = conn.info.server_version // 10000
+        options, env = freeze_connection(conn)
+    base = make_conninfo(**options)
     if any(f'PostgreSQL) {major}.' not in v for v in versions.values()):
         raise ValueError('dump/restore tools must match the server major version')
     os.umask(0o077)
@@ -89,7 +122,7 @@ def drill(work: Path, postgres_bin: Path, revision: str) -> dict:
     (work / 'resources.json').write_text(json.dumps({'schema': schema, 'scope': 'isolated-fixture'}))
     with psycopg.connect(base, autocommit=True) as conn:
         conn.execute(sql.SQL('CREATE SCHEMA {}').format(sql.Identifier(schema)))
-    scoped = make_conninfo(base, options=f'-c search_path={schema}')
+    scoped = make_conninfo(base, options=f"{options.get('options', '')} -c search_path={schema}".strip())
     root, home, backup = work / 'live/root', work / 'live/home', work / 'backup'
     for path in (root, home, backup):
         path.mkdir(mode=0o700, parents=True)
@@ -121,11 +154,6 @@ def drill(work: Path, postgres_bin: Path, revision: str) -> dict:
     finally:
         store.close()
     # No serve, worker, executor or GitHub client is started by this fixture.
-    env = {k: v for k, v in os.environ.items() if not k.startswith('PG')}
-    mapping = {'host': 'PGHOST', 'port': 'PGPORT', 'dbname': 'PGDATABASE',
-               'user': 'PGUSER', 'password': 'PGPASSWORD', 'sslmode': 'PGSSLMODE'}
-    env.update({variable: options[key] for key, variable in mapping.items() if key in options})
-    env['PGCONNECT_TIMEOUT'] = '5'
 
     def pg(tool: str, *args: str) -> None:
         # Do not copy database credentials to argv or relay stderr into CI logs.
@@ -151,7 +179,7 @@ def drill(work: Path, postgres_bin: Path, revision: str) -> dict:
     # This identifier was minted by this process, never accepted from input/manifest.
     with psycopg.connect(base, autocommit=True) as conn:
         conn.execute(sql.SQL('DROP SCHEMA {} CASCADE').format(sql.Identifier(schema)))
-    pg('pg_restore', '--dbname', options['dbname'], '--exit-on-error', '--single-transaction',
+    pg('pg_restore', '--dbname', make_conninfo(dbname=options['dbname']), '--exit-on-error', '--single-transaction',
        '--no-owner', '--no-acl', str(backup / 'database.dump'))
     restored = Store(scoped)
     try:

@@ -167,3 +167,4 @@
 - M5 F5 返修：reconcile 指标匹配调度资格，标准日志保留原级别与来源并继续脱敏。
 - M5 F6 返修：准备取消无需不存在的 journal；历史 stop ACK 不受重绑影响；恢复取消中的 PR 身份与合并事实。
 - M5 F7 返修：serve 的 DB/HTTP 不可用仅撤销就绪，不使用杀进程探针；worker 恢复执行时立即就绪。
+- M5 F8 返修：恢复演练冻结 libpq 解析结果，Python 与 dump/restore 共用端口、密码文件与 TLS 设置。

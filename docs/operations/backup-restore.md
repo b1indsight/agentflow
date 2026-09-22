@@ -75,6 +75,9 @@ uv run python -m scripts.smoke.recovery --run --work-dir .cache/2026-09-18/my-re
 ```
 
 父目录须存在、work-dir 须全新；仅接受显式 loopback 测试连接，不传生产 URL。
+首次连接后冻结 libpq 实际解析的配置，Python 与 dump/restore 共用端口、密码文件、TLS 路径
+等设置，并固定已验证的 loopback 地址。显式 URL 参数优先于环境默认值；没有安全环境变量
+映射的非空参数（如 `keepalives`）会在创建资源前拒绝，不会静默忽略。凭据不写入命令行或报告。
 脚本只创建/删除/恢复自己随机命名的 schema；保留 resources.json、manifest、归档及 report，
 失败也保留已创建资源。检查完仅删除该 resources.json 标识的 fixture schema/目录。
 脚本不启动 serve/worker/模型，不连 GitHub、不修改生产 backup gauge。

@@ -124,3 +124,13 @@ promtool 规则/单元测试通过。约 1,040 行增删，未超过计划的 1,
 
 CI 首轮在启动 PostgreSQL 服务前失败：Actions 的 Docker 参数解析不接受 health-cmd 的单引号，
 使 `-U` 被当作 docker create 参数；按 runner 参数格式改为双引号。未更改演练连接设置。
+
+2026-09-22 返修：用户授权修复原审查发现。复现 URL 省略端口、由 PGPORT 提供时，
+Python 能连接但 pg_dump 失败；修复为冻结首次连接的 libpq 有效参数并共享给后续 Python
+与客户端工具，保留密码文件、TLS 路径与显式参数优先级。实际 peer 必须 loopback，后续固定
+hostaddr；不能映射到环境的非空参数在创建 fixture 前明确拒绝。
+新增环境参数、显式覆盖和拒绝不支持选项的三项 PG 回归；本地 PostgreSQL 16.2 实际
+dump/restore 在 PGPORT-only 输入下通过，report 位于
+`.cache/2026-09-18/m5-fixes/recovery-config-after/report.json`。
+CI PostgreSQL 17 演练改用 PGPORT 与私有 PGPASSFILE，验证真实密码认证和独立客户端恢复。
+返修后本地全量 806 项通过（0 skipped）；Ruff、Mypy 130 文件与发行包构建通过。

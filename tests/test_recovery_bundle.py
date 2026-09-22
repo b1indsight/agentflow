@@ -2,9 +2,11 @@ import hashlib
 import json
 from pathlib import Path
 
+import psycopg
 import pytest
+from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
-from scripts.smoke.recovery import verify_bundle
+from scripts.smoke.recovery import freeze_connection, verify_bundle
 
 
 def bundle(path: Path):
@@ -49,3 +51,42 @@ def test_verified_bundle_retains_identity_metadata(tmp_path):
     path = tmp_path / 'backup'
     expected = bundle(path)
     assert verify_bundle(path) == expected
+
+
+def test_freeze_connection_preserves_environment_port_and_password_file(postgresql_url, tmp_path, monkeypatch):
+    # Deployment URLs can omit values supplied by the libpq environment.
+    settings = conninfo_to_dict(postgresql_url)
+    port = settings.pop('port')
+    password_file = tmp_path / 'test.pgpass'
+    password_file.write_text('127.0.0.1:*:*:*:fixture-only\n')
+    password_file.chmod(0o600)
+    monkeypatch.setenv('PGPORT', port)
+    monkeypatch.setenv('PGPASSFILE', str(password_file))
+    with psycopg.connect(make_conninfo(**settings)) as conn:
+        params, env = freeze_connection(conn)
+    assert params['port'] == env['PGPORT'] == port
+    assert params['passfile'] == env['PGPASSFILE'] == str(password_file)
+    assert env['PGHOSTADDR'] in ('127.0.0.1', '::1')
+    # Reopening the frozen parameters must address the same isolated schema.
+    with psycopg.connect(make_conninfo(**params)) as conn:
+        assert conn.execute('SELECT current_schema()').fetchone()[0].startswith('test_')
+
+
+def test_freeze_connection_prefers_explicit_dsn_and_preserves_tls_paths(postgresql_url, tmp_path, monkeypatch):
+    # Explicit connection settings must override inherited deployment defaults.
+    settings = conninfo_to_dict(postgresql_url)
+    monkeypatch.setenv('PGPORT', '1')
+    monkeypatch.setenv('PGPASSFILE', '/wrong/default')
+    settings.update(passfile=str(tmp_path / 'explicit.pgpass'), sslrootcert=str(tmp_path / 'ca.pem'), sslmode='disable')
+    with psycopg.connect(make_conninfo(**settings)) as conn:
+        params, env = freeze_connection(conn)
+    assert env['PGPORT'] == settings['port']
+    assert env['PGPASSFILE'] == settings['passfile']
+    assert env['PGSSLROOTCERT'] == settings['sslrootcert']
+    assert params['sslmode'] == env['PGSSLMODE'] == 'disable'
+
+
+def test_freeze_connection_rejects_unrepresentable_option_instead_of_ignoring_it(postgresql_url):
+    # Refuse unsupported settings before a tool can silently use different ones.
+    with psycopg.connect(postgresql_url, keepalives=0) as conn, pytest.raises(ValueError, match='keepalives'):
+        freeze_connection(conn)
