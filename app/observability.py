@@ -64,7 +64,17 @@ def configure_logging(role: str, output_format: str, output: TextIO | None = Non
     # Standard logging also carries third-party HTTP/DSN exception messages.
     class SanitizedHandler(logging.Handler):
         def emit(self, record: logging.LogRecord) -> None:
-            logger.opt(exception=record.exc_info).log(record.levelno, '')
+            def origin(target_record: Record) -> None:
+                # Preserve code identity, never arbitrary logger names containing URL/credentials.
+                target_record['name'] = record.name if re.fullmatch(r'[A-Za-z0-9_.]{1,200}', record.name) else 'standard_logging'
+                target_record['function'] = record.funcName if re.fullmatch(r'[A-Za-z0-9_.<>]{1,200}', record.funcName or '') else 'unknown'
+                target_record['line'] = record.lineno
+            level: str | int = record.levelno
+            try:
+                level = logger.level(record.levelname).name
+            except ValueError:
+                pass  # Custom standard levels retain their numeric severity.
+            logger.patch(origin).opt(exception=record.exc_info).log(level, '')
 
     logging.basicConfig(handlers=[SanitizedHandler()], level=logging.INFO, force=True)
     for name in ('uvicorn', 'uvicorn.error', 'uvicorn.access'):

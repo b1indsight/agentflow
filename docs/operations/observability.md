@@ -82,3 +82,7 @@ archive failed 或 projects blocked 分别检查收尾和投影，不能用重�
 验证包含并发上下文、standard logging/嵌套异常净化、默认关闭/独立鉴权、PG 积压与空队列、
 重复快照不重复记执行、真实 pg_sleep 超时及旧快照保留。F3 外部真实闭环对照尚未运行。
 实现依据：[Prometheus 自定义采集器](https://prometheus.github.io/client_python/collector/custom/)。
+
+reconcile_due 与 reconcile 年龄仅包含调度器当前可选的持久行：Flow 未 succeeded、delivery
+有 PR 且未 merged。cancelled/failed 仍可能需要对账，并非一律排除。标准 logging 保留原始
+级别与代码来源；消息、参数和异常正文仍被过滤，不记录 pathname。

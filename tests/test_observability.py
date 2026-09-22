@@ -142,3 +142,48 @@ def test_standard_logging_and_nested_extras_are_sanitized():
         assert len(output.getvalue().splitlines()) == 2
     finally:
         logger.remove()
+
+
+def test_standard_logging_preserves_level_and_origin_without_payload():
+    import logging
+    output = io.StringIO()
+    configure_logging('serve', 'json', output)
+    try:
+        source = logging.getLogger('fixture.original')
+        for level in (logging.WARNING, logging.ERROR):
+            record = source.makeRecord(source.name, level, '/private/secret/path', 123,
+                                       'private token %s', ('credential',), None, 'original_fn')
+            source.handle(record)
+        rows = [json.loads(line) for line in output.getvalue().splitlines()]
+        assert [row['level'] for row in rows] == ['WARNING', 'ERROR']
+        assert {row['source'] for row in rows} == {'fixture.original:original_fn:123'}
+        assert 'credential' not in output.getvalue() and '/private' not in output.getvalue()
+    finally:
+        logger.remove()
+
+
+def test_reconcile_metrics_match_scheduler_eligibility(store, postgresql_url):
+    from app.models import DeliveryState, FlowState
+    for number, state, delivery_state, pr in [
+        (1, FlowState.ACTIVE, DeliveryState.OPEN, 11),
+        (2, FlowState.CANCELLED, DeliveryState.OPEN, 12),
+        (3, FlowState.SUCCEEDED, DeliveryState.OPEN, 13),
+        (4, FlowState.ACTIVE, DeliveryState.MERGED, 14),
+        (5, FlowState.ACTIVE, DeliveryState.NONE, None),
+    ]:
+        flow = store.create_flow('fixture/repo', number, 1)
+        flow.state = state
+        store.update_flow(flow)
+        delivery = store.get_or_create_delivery(flow.id, f'flow/{number}')
+        delivery.state, delivery.pr_number = delivery_state, pr
+        store.update_delivery(delivery)
+        store.reconcile.hint(flow.id)
+        with store.connection() as conn:
+            conn.execute("UPDATE flow_reconcile SET next_at=now()-(%s * interval '1 second') WHERE flow_id=%s",
+                         (60 if number <= 2 else 3600, flow.id))
+    due = store.reconcile.due(100)
+    assert len(due) == 2  # Cancelled PRs still need reconciliation; succeeded/merged/no-PR do not.
+    metrics = read_snapshot(postgresql_url)
+    assert next(s.value for s in metrics.samples if s.family == 'reconcile_due') == len(due)
+    age = next(s.value for s in metrics.samples if s.family == 'oldest_age_seconds' and s.labels == ['reconcile'])
+    assert 60 <= age < 120

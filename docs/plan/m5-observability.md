@@ -77,3 +77,10 @@ worker_id、epoch 和协议版本。assignment_token 是认证凭据，不当作
 CI 后续验证：进程冒烟原本匹配旧日志全文，已改为 `event=worker_connected`。
 本机隔离 PG schema 中实际双 worker 启动、serve 重启后双方重新注册和独立退出均通过。
 此验证修正不包含独立审查报告中的对账候选过滤/第三方日志来源两项返修。
+
+2026-09-22 授权返修：reconcile count/age 与调度器复用同一资格表达式；排除 succeeded、merged
+及无 PR 的历史行，保留 cancelled/failed 仍需远端对账的 PR，避免错误地一律只统计 ACTIVE。
+标准日志桥接恢复 WARNING/ERROR 名称、原 logger/function/line，继续丢弃消息/参数/路径，
+来源名称限制字符集合。两项先行回归分别复现 5 行误计为 2 行、Level 30/40 与桥接位置问题。
+修复后定向 PG/观测测试通过；共享资格常量防止调度/指标再次分叉，无额外状态或后台任务。
+验证：771 项 PostgreSQL 全量回归、Ruff、Mypy、构建通过。
