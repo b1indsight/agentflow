@@ -91,3 +91,9 @@ GitHub 不会自动重投失败 delivery；本 feature 不补收从未到达本�
 确定性补序号。只加 claim 排序无法阻止退避越过，因此保留前驱检查及接收提交顺序锁。
 这个顺序是本系统接收顺序，不承诺纠正 GitHub 已经乱序送达的事件。
 验证：747 项 PostgreSQL 回归、Ruff、Mypy、构建通过；新增两项测试在旧实现失败、修复后通过。
+
+2026-09-22 二次返修：用户授权补完新增发现。并发回归将第一条接收事务停在 insert 后、
+commit 前；另一真实连接接收同仓库不同 delivery，通过 pg_locks 确认其等待 advisory lock，
+此时不能 claim，提交后按 first→second 消费。没有依靠固定 sleep 推测线程是否开始。
+消融命令：`FLOWTOOL_TEST_DATABASE_URL=... uv run pytest tests/test_webhook_inbox.py -q -k distinct_receipt`。
+临时移除 receive 的 advisory lock 后稳定失败（后接收先提交），恢复后通过；保留该回归。

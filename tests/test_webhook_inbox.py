@@ -166,6 +166,48 @@ def test_concurrent_duplicate_receipts_and_claims(store):
     assert sum(item is not None for item in claims) == 1
 
 
+def test_distinct_receipt_waits_for_older_repository_transaction(store):
+    from concurrent.futures import ThreadPoolExecutor
+    from queue import Queue
+    from threading import Event
+    from time import monotonic
+
+    inbox = WebhookStore(store)
+    backend: Queue[int] = Queue()
+
+    def second_receipt():
+        with store.transaction() as tx, tx.connection() as conn:
+            backend.put(conn.info.backend_pid)
+            receive(WebhookStore(tx), "second")
+
+    # Hold the first insert uncommitted: sequence order alone cannot prevent a
+    # concurrent, distinct receipt from becoming visible and claimable first.
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with store.transaction() as first:
+            receive(WebhookStore(first), "first")
+            pending = pool.submit(second_receipt)
+            pid = backend.get(timeout=5)
+            deadline = monotonic() + 1.5
+            with store.connection() as observer:
+                while True:
+                    blocked = observer.execute(
+                        "SELECT 1 FROM pg_locks WHERE pid=%s AND locktype='advisory' AND NOT granted",
+                        (pid,),
+                    ).fetchone()
+                    if blocked:
+                        break
+                    assert not pending.done(), "later receipt committed before the older transaction"
+                    assert monotonic() < deadline, "later receipt never waited on the repository lock"
+                    Event().wait(0.01)
+            assert inbox.claim() is None
+        pending.result(timeout=5)
+    claim = inbox.claim()
+    assert claim is not None and claim.delivery_id == "first"
+    assert inbox.complete(claim)
+    claim = inbox.claim()
+    assert claim is not None and claim.delivery_id == "second"
+
+
 @pytest.mark.parametrize("event,action", [
     ("pull_request", "closed"), ("issues", "unlabeled"),
     ("issue_comment", "created"), ("pull_request_review", "submitted"),
