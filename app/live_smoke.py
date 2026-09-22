@@ -10,8 +10,10 @@ import argparse
 import fcntl
 import hashlib
 import json
+import multiprocessing
 import os
 import re
+import signal
 import subprocess
 import time
 from datetime import UTC, datetime
@@ -259,27 +261,14 @@ class SmokeSession:
         return evidence
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--repo", required=True)
-    parser.add_argument("--run-id", required=True)
-    parser.add_argument("--state-dir", type=Path, required=True)
-    parser.add_argument("--allow-write", action="store_true", help="create one labeled test Issue")
-    parser.add_argument("--allowed-repo", default="")
-    parser.add_argument("--observe", action="store_true", help="read DB and PR evidence after receipt")
-    parser.add_argument("--source-revision", default="unrecorded")
-    parser.add_argument("--wait-seconds", type=int, default=0)
-    args = parser.parse_args()
-    if not 0 <= args.wait_seconds <= 1800:
-        parser.error("wait-seconds must be in 0..1800")
-    deadline = time.monotonic() + (args.wait_seconds or 60)
+def _run(args: argparse.Namespace, deadline: float) -> int:
     github = GitHubProbe(deadline)
     try:
         with SmokeSession(args.repo, args.run_id, args.state_dir, github) as smoke:
             issue = smoke.ensure_issue(allow_write=args.allow_write, allowed_repo=args.allowed_repo)
             if issue is None:
                 print("No existing smoke Issue; read-only check completed. No remote writes performed.")
-                return 0
+                return 2 if args.observe else 0
             print(f"Issue: https://github.com/{args.repo}/issues/{issue}")
             if not args.observe:
                 return 0
@@ -304,6 +293,46 @@ def main() -> int:
     except Exception as exc:  # noqa: BLE001 -- never print DB errors with credentials/payload
         print(f"Verification failed: {type(exc).__name__}")
         return 1
+
+
+def _run_process(args: argparse.Namespace, deadline: float) -> None:
+    # The watchdog owns this process group, including gh and any blocked DB connection.
+    os.setsid()
+    raise SystemExit(_run(args, deadline))
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--repo", required=True)
+    parser.add_argument("--run-id", required=True)
+    parser.add_argument("--state-dir", type=Path, required=True)
+    parser.add_argument("--allow-write", action="store_true", help="create one labeled test Issue")
+    parser.add_argument("--allowed-repo", default="")
+    parser.add_argument("--observe", action="store_true", help="read DB and PR evidence after receipt")
+    parser.add_argument("--source-revision", default="unrecorded")
+    parser.add_argument("--wait-seconds", type=int, default=0)
+    args = parser.parse_args()
+    if not 0 <= args.wait_seconds <= 1800:
+        parser.error("wait-seconds must be in 0..1800")
+    deadline = time.monotonic() + (args.wait_seconds or 60)
+    process = multiprocessing.get_context("spawn").Process(target=_run_process, args=(args, deadline))
+    process.start()
+    try:
+        process.join(timeout=max(0, deadline - time.monotonic()))
+        if process.exitcode is not None:
+            return process.exitcode if process.exitcode >= 0 else 1
+        print("Observation incomplete: total runtime deadline reached.")
+        return 2
+    finally:
+        if process.is_alive():
+            assert process.pid is not None
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                process.kill()  # deadline may expire before the child creates its group
+            process.join(timeout=1)
+        if not process.is_alive():
+            process.close()
 
 
 if __name__ == "__main__":

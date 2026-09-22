@@ -143,3 +143,5 @@
 - ANSWER 保留未决问题；approval/删除不唤醒 waiting；空 review 正文不再阻塞修订完成。
 - 同秒乱序编辑持久暂存并按前序回放。
 - 移除评论中 `@bot` 直达修订的规则；普通文本和代码示例统一进入 Judge，仅授权的 Request Changes 绕过 Judge。
+
+- M5 F3 返修：没有 Issue 的观察返回未完成；统一进程预算覆盖数据库连接与外部命令。

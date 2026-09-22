@@ -164,3 +164,48 @@ def test_core_pass_requires_three_verified_heads_and_matching_merge(store, tmp_p
             assert result.core_passed == (letter == "c")
         remote.merge_commit_sha = "e"*40
         assert not smoke.observe(store, probe, "actual-revision").core_passed
+
+
+@pytest.mark.parametrize('observe,expected', [(False, 0), (True, 2)])
+def test_cli_missing_issue_is_not_successful_observation(tmp_path, observe, expected):
+    import os
+    import subprocess
+    import sys
+    gh = tmp_path / 'gh'
+    gh.write_text(f'#!{sys.executable}\nprint("[]")\n')
+    gh.chmod(0o700)
+    result = subprocess.run([sys.executable, '-m', 'app.live_smoke', '--repo', 'owner/smoke',
+                             '--run-id', 'missing', '--state-dir', str(tmp_path / 'state'),
+                             *(['--observe'] if observe else [])],
+                            env={**os.environ, 'PATH': f'{tmp_path}:{os.environ["PATH"]}'},
+                            capture_output=True, timeout=10, check=False)
+    assert result.returncode == expected
+
+
+def test_cli_deadline_bounds_unresponsive_database_connection(tmp_path):
+    import os
+    import socket
+    import subprocess
+    import sys
+    import time
+    # A TCP listener accepts the kernel handshake but never speaks PostgreSQL.
+    # The pool's normal acquisition timeout must not exceed the smoke's total budget.
+    gh = tmp_path / 'gh'
+    gh.write_text(f'#!{sys.executable}\nprint(\'[{{"number": 1, "body": "<!-- flowtool-smoke:timeout -->"}}]\')\n')
+    gh.chmod(0o700)
+    with socket.socket() as listener:
+        listener.bind(('127.0.0.1', 0))
+        listener.listen()
+        url = f'postgresql://fixture@127.0.0.1:{listener.getsockname()[1]}/fixture'
+        started = time.monotonic()
+        try:
+            result = subprocess.run([
+                sys.executable, '-m', 'app.live_smoke', '--repo', 'owner/smoke',
+                '--run-id', 'timeout', '--state-dir', str(tmp_path / 'state'),
+                '--observe', '--source-revision', 'fixture', '--wait-seconds', '1'],
+                env={**os.environ, 'PATH': f'{tmp_path}:{os.environ["PATH"]}',
+                     'FLOWTOOL_DATABASE_URL': url}, capture_output=True, timeout=4, check=False)
+        except subprocess.TimeoutExpired:
+            pytest.fail('database exceeded total smoke deadline')
+    assert result.returncode == 2
+    assert time.monotonic() - started < 4

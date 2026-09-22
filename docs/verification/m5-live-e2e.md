@@ -78,3 +78,8 @@ run state 只写资源 ID、SHA、状态和时间，不写 token、原始 payloa
 
 工具使用 [GitHub CLI API](https://cli.github.com/manual/gh_api) 的 JSON stdin 请求，不拼接 shell。
 PR CI 只测试工具边界和数据库只读观测，不使用真实模型密钥或自动写测试仓库。
+
+观察模式没有找到测试 Issue 时返回 2（未完成），不能当作闭环通过。普通只读探查仍可返回 0。
+整个 CLI 操作在独立进程组内受总预算约束：wait-seconds 为 0 时单次预算 60 秒，否则为指定秒数；
+包括启动、GitHub 请求、连接池和数据库，超时返回 2，最多另用 1 秒回收进程组。
+超时后的创建 unknown 仍须人工核对，不允许自动重建 Issue；保留 state-dir 证据。
