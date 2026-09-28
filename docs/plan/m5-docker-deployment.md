@@ -93,3 +93,15 @@ shell 改为 -e，任一角色边界断言失败立即退出。旧示例缺 key 
 fixture 的占位容器占住旧 IP，确认新 IP 不同、gateway ID 未变，再启动已离线 worker 验证
 重连，避免 restart 不换 IP 的弱验证。占位容器与独立测试网络在 trap 中清理。
 本地无 Docker，实际镜像验证交由该 PR CI，不把 shell 语法检查当作容器验收。
+
+2026-09-28 授权补完自动重连 LOW：用户要求继续处理上轮报告的剩余问题。本次替代前述
+“停 worker、重建 serve、启动 worker”步骤；卷持久化重建测试仍单独保留。卷测试后先等到
+新的 online epoch，再保持 worker 运行，重建 serve 并占住旧 IP，网关容器也保持不变。
+通过 fixture PostgreSQL 查询完整 epoch，等待不同于旧值的新 online epoch；随后检查
+worker 容器 ID、StartedAt、RestartCount 和 Running 均未变化，排除自动重启冒充重连。
+
+本地 `bash -n scripts/smoke/docker.sh` 与 diff 检查通过。确定性 shell 轮询实验覆盖
+旧 online→新 epoch、一直旧 online、查询错误；三种均符合预期。去掉 epoch 比较后，
+前两种场景被错误提前接受，证明仅检查 online 不足。实验入口：
+`.cache/2026-09-18/m5-fixes/check-reconnect-epoch.py`。只增加 smoke 断言，不改变产品重连策略。
+本机仍无 Docker；上述实验只验证断言逻辑，实际 WSS 断开和容器重连以该 PR Images CI 为准。

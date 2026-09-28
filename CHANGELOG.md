@@ -1,5 +1,7 @@
 # Changelog
 
+- M5 F4：Docker smoke 保持 worker 运行并验证 serve 换 IP 后连接 epoch 更新，排除旧 online 状态及容器重启误报。
+
 - M5 F2：补充真实并发接收提交顺序回归，并验证移除事务锁会导致测试失败。
 - M5 F3：父观察器收到 SIGTERM 后回收观察进程组并释放运行状态锁。
 

@@ -54,11 +54,23 @@ docker run --rm --env-file deploy/docker/worker.env.example --entrypoint sh "$FL
 docker run --rm --entrypoint codex "$FLOWTOOL_WORKER_IMAGE" --version
 docker run --rm --entrypoint jj "$FLOWTOOL_WORKER_IMAGE" --version
 "${compose[@]}" up -d postgres serve worker-gateway worker
-for attempt in $(seq 1 60); do
-  if "${compose[@]}" exec -T serve flowtool workers 2>/dev/null | grep -q 'worker-1'; then break; fi
-  if [ "$attempt" = 60 ]; then exit 1; fi
-  sleep 2
-done
+# Read the full epoch from the isolated fixture DB, not truncated CLI output or
+# a persisted online row which can outlive its socket when serve disappears.
+wait_online_epoch() {
+  local previous="$1" current attempt
+  for attempt in $(seq 1 60); do
+    current=$("${compose[@]}" exec -T postgres psql -U flowtool -d flowtool -Atc \
+      "SELECT connection_epoch FROM workers WHERE worker_id='worker-1' AND status='online'" 2>/dev/null) || current=''
+    if [ -n "$current" ] && [ "$current" != "$previous" ]; then
+      printf '%s\n' "$current"
+      return 0
+    fi
+    sleep 2
+  done
+  echo 'Worker did not establish a fresh online connection epoch' >&2
+  return 1
+}
+initial_epoch=$(wait_online_epoch '')
 boundary_check='test ! -e /run/secrets/app_key; test ! -e /run/secrets/db_password; touch /var/lib/flowtool/persisted'
 "${compose[@]}" exec -T worker sh -ec "$boundary_check"
 for forbidden in app_key db_password; do
@@ -72,13 +84,10 @@ done
 "${compose[@]}" rm -f worker
 "${compose[@]}" up -d worker
 "${compose[@]}" exec -T worker test -f /var/lib/flowtool/persisted
-"${compose[@]}" stop worker
+old_epoch=$(wait_online_epoch "$initial_epoch")
+worker_id=$("${compose[@]}" ps -q worker)
+worker_process=$(docker inspect -f '{{.Id}} {{.State.StartedAt}} {{.RestartCount}} {{.State.Running}}' "$worker_id")
 serve_id=$("${compose[@]}" ps -q serve)
-for attempt in $(seq 1 20); do
-  if "${compose[@]}" exec -T serve flowtool workers | grep -q 'worker-1.*offline'; then break; fi
-  if [ "$attempt" = 20 ]; then exit 1; fi
-  sleep 1
-done
 control_network="${project_name}_control"
 old_ip=$(docker inspect -f "{{(index .NetworkSettings.Networks \"$control_network\").IPAddress}}" "$serve_id")
 gateway_id=$("${compose[@]}" ps -q worker-gateway)
@@ -90,10 +99,8 @@ docker run -d --name "$project_name-ip-holder" --network "$control_network" --ip
 new_ip=$(docker inspect -f "{{(index .NetworkSettings.Networks \"$control_network\").IPAddress}}" "$("${compose[@]}" ps -q serve)")
 test "$old_ip" != "$new_ip"
 test "$gateway_id" = "$("${compose[@]}" ps -q worker-gateway)"
-"${compose[@]}" start worker
-for attempt in $(seq 1 60); do
-  if "${compose[@]}" exec -T serve flowtool workers 2>/dev/null | grep -q 'worker-1.*online'; then break; fi
-  if [ "$attempt" = 60 ]; then exit 1; fi
-  sleep 2
-done
+new_epoch=$(wait_online_epoch "$old_epoch")
+test "$worker_id" = "$("${compose[@]}" ps -q worker)"
+test "$worker_process" = "$(docker inspect -f '{{.Id}} {{.State.StartedAt}} {{.RestartCount}} {{.State.Running}}' "$worker_id")"
+printf 'Live worker reconnected: epoch %s -> %s; worker process unchanged.\n' "$old_epoch" "$new_epoch"
 printf 'Docker role/TLS/volume/reconnect smoke passed (no live model or GitHub task).\n'
