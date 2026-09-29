@@ -13,6 +13,7 @@ from loguru import logger
 from app.codex_driver import CodexAgent
 from app.config import WorkerSettings, get_worker_settings
 from app.judge import BubJudge
+from app.observability import configure_logging
 from app.worker.client import WorkerClient
 from app.worker.executor import WorkerExecutor
 from app.worker.journal import WorkerJournal
@@ -92,6 +93,7 @@ class WorkerRuntime:
 
     def __init__(self, settings: WorkerSettings | None = None) -> None:
         self.settings = settings or get_worker_settings()
+        configure_logging("worker", self.settings.log_format)
         self.root_lock = WorkerRootLock(self.settings.worker_root, self.settings.worker_id)
         judge = BubJudge(
             model=self.settings.judge_model, api_key=self.settings.judge_api_key,

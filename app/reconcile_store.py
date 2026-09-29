@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from app.github_models import FeedbackSource
 
 ReconcileSource = FeedbackSource | Literal["threads"]
+PR_RECONCILE_ELIGIBLE = "f.state<>'succeeded' AND d.pr_number IS NOT NULL AND d.state<>'merged'"
 
 if TYPE_CHECKING:
     from app.store import Store
@@ -131,7 +132,7 @@ class ReconcileStore:
             connection.execute(
                 "INSERT INTO flow_reconcile(flow_id,next_at)"
                 " SELECT f.id,%s FROM flows f JOIN flow_deliveries d ON d.flow_id=f.id"
-                " WHERE f.state<>'succeeded' AND d.pr_number IS NOT NULL AND d.state<>'merged'"
+                f" WHERE {PR_RECONCILE_ELIGIBLE}"
                 " AND NOT EXISTS (SELECT 1 FROM flow_reconcile r WHERE r.flow_id=f.id)"
                 " ORDER BY f.id LIMIT %s ON CONFLICT DO NOTHING", (self.store.now(), limit),
             )
@@ -141,7 +142,7 @@ class ReconcileStore:
             return connection.cursor(row_factory=class_row(ReconcileState)).execute(
                 "SELECT r.* FROM flow_reconcile r JOIN flows f ON f.id=r.flow_id"
                 " JOIN flow_deliveries d ON d.flow_id=f.id WHERE r.next_at<=%s"
-                " AND f.state<>'succeeded' AND d.pr_number IS NOT NULL AND d.state<>'merged'"
+                f" AND {PR_RECONCILE_ELIGIBLE}"
                 " ORDER BY r.next_at,r.flow_id LIMIT %s", (self.store.now(), limit),
             ).fetchall()
 

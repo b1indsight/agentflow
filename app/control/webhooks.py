@@ -62,6 +62,8 @@ class WebhookConsumer:
                 ))
                 logger.warning("webhook processing failed: reason={}", type(error).__name__)
             else:
+                logger.bind(event="webhook_applied", reason_code="ok",
+                            delivery_id=item.delivery_id).info("")
                 handled += 1
                 for callback in callbacks:
                     try:

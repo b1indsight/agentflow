@@ -217,7 +217,7 @@ class WorkerClient:
             raise WorkerProtocolError(
                 f"expected Registered, received {type(first).__name__}"
             )
-        logger.info("worker {} registered with control plane", self.worker_id)
+        logger.bind(event="worker_connected", reason_code="ok", worker_id=self.worker_id).info("")
 
         if isinstance(first, Registered):
             heartbeat_interval = first.heartbeat_interval
@@ -253,9 +253,12 @@ class WorkerClient:
         )
         if self.journal is not None:
             self.journal.record_started()
-        self._execution = asyncio.create_task(
-            self.executor.execute(assignment.task, assignment.secret)
-        )
+        with logger.contextualize(flow_id=assignment.flow_id, job_id=assignment.job_id,
+                                  worker_id=self.worker_id, epoch=assignment.connection_epoch):
+            logger.bind(event="job_started", reason_code="ok").info("")
+            self._execution = asyncio.create_task(
+                self.executor.execute(assignment.task, assignment.secret)
+            )
         await self._drive_assignment(connection, heartbeat_interval)
 
     async def _drive_assignment(
@@ -349,7 +352,9 @@ class WorkerClient:
             )
         except Exception as exc:  # noqa: BLE001
             # Exceptions can contain model output or a credential echoed by a command.
-            logger.error("remote job {} failed ({})", assignment.job_id, type(exc).__name__)
+            logger.bind(event="job_failed", reason_code="execution_failed",
+                        job_id=assignment.job_id, flow_id=assignment.flow_id,
+                        worker_id=self.worker_id).opt(exception=exc).error("")
             terminal = Failed(
                 job_id=assignment.job_id,
                 assignment_token=assignment.assignment_token,
