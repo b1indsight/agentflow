@@ -56,3 +56,13 @@ def test_initial_delivery_validation_keeps_result_orchestration_out_of_lifecycle
     assert not contains_forbidden(
         imported_modules(Path("app/control/initial.py")), {"app.control"},
     )
+
+
+def test_workflow_policies_do_not_depend_on_persistence_or_orchestration() -> None:
+    # Policy extraction is useful only while decisions remain callable without
+    # a Store, network adapter or control runtime.
+    for module in ("review_policy", "recovery_policy"):
+        assert not contains_forbidden(
+            imported_modules(Path(f"app/{module}.py")),
+            {"app.store", "app.review_store", "app.control", "psycopg", "app.github_client"},
+        )

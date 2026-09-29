@@ -136,6 +136,11 @@ terminal result 三方核对。当前缺口包括：
 
 ## 4.7 Store（PostgreSQL）
 
+反馈批次的 TRIAGE/REVISION 选择、指令和未决问题归并由 `review_policy` 的纯函数决定；
+`recovery_policy` 根据固定时间及读取的事实决定重排、失败、保留诊断和绑定释放。
+Store 负责候选查询、信号/回执事实、锁和原子写入。恢复扫描在原 worker 锁事务内先提交 job
+动作，再查询事务内更新后的绑定事实；策略函数不执行 SQL、读取时钟或调用外部服务。
+
 当前 Store 使用 Psycopg 3 的同步连接池访问 PostgreSQL：
 
 `Flow`、`FlowExecution`、`FlowDelivery`、`FlowToolCall`、`Attempt`、`Job` 和 `ReviewItem` 是 Pydantic

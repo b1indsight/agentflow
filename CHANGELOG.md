@@ -8,6 +8,8 @@
 
 ## Unreleased
 
+- 将反馈批次与租约恢复决策提取为纯规则；Store 保留并发 fencing 和原子写入，补充回执竞争与回滚测试。
+
 - 将 INITIAL 交付校验提取为共享模块，解除 results/effects/lifecycle 循环依赖，并增加依赖边界回归检查。
 
 - M5 F8：增加 systemd 示例、维护/冷备/轮换 runbook、10 条 Prometheus 告警及测试，

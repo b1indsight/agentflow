@@ -5,6 +5,8 @@
 
 ## 当前计划
 
+- [`workflow-decision-boundaries.md`](workflow-decision-boundaries.md) — 工作流决策与持久层分离 · PR #53：纯决策已提取，Store 事务边界保留；855 项 PostgreSQL 回归通过，待评审。
+
 - [`m4-reopen-triage.md`](m4-reopen-triage.md) — M4 收尾 #37：已实现重开后多批反馈授权退休及 OPEN 轮询跨重启回归，726 项 PostgreSQL 全量通过，待用户 review/合并；
 
 - [`m4-pr-reconcile.md`](m4-pr-reconcile.md) — M4 F3：持久 PR 检查与漏失合并补偿已实施，548 项 PostgreSQL 回归通过；PR #30 以 F2 分支为基线；
