@@ -1,0 +1,117 @@
+name: Images
+on:
+  pull_request:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish verified role images to GHCR
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: images-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with: {persist-credentials: false}
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+      - name: Build serve
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        with:
+          context: .
+          target: serve
+          platforms: linux/amd64
+          load: true
+          tags: flowtool-serve:test
+          cache-from: type=gha,scope=serve
+          cache-to: type=gha,mode=max,scope=serve
+      - name: Build worker
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        with:
+          context: .
+          target: worker
+          platforms: linux/amd64
+          load: true
+          tags: flowtool-worker:test
+          cache-from: type=gha,scope=worker
+          cache-to: type=gha,mode=max,scope=worker
+      - name: Verify role boundaries, TLS, persistence and reconnect
+        run: bash scripts/smoke/docker.sh
+  publish:
+    needs: build
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with: {persist-credentials: false}
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Resolve image names
+        id: image
+        env:
+          REPOSITORY: ${{ github.repository }}
+        run: echo "prefix=ghcr.io/${REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+      - name: Build serve candidate with attestations
+        id: serve
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        with:
+          context: .
+          target: serve
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.image.outputs.prefix }}-serve:candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          cache-from: type=gha,scope=serve
+          sbom: true
+          provenance: mode=max
+      - name: Build worker candidate with attestations
+        id: worker
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        with:
+          context: .
+          target: worker
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.image.outputs.prefix }}-worker:candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          cache-from: type=gha,scope=worker
+          sbom: true
+          provenance: mode=max
+      - name: Pull and verify exact candidate digests
+        env:
+          FLOWTOOL_SMOKE_SERVE_IMAGE: ${{ steps.image.outputs.prefix }}-serve@${{ steps.serve.outputs.digest }}
+          FLOWTOOL_SMOKE_WORKER_IMAGE: ${{ steps.image.outputs.prefix }}-worker@${{ steps.worker.outputs.digest }}
+        run: |
+          docker pull "$FLOWTOOL_SMOKE_SERVE_IMAGE"
+          docker pull "$FLOWTOOL_SMOKE_WORKER_IMAGE"
+          bash scripts/smoke/docker.sh
+      - name: Tag verified manifests without rebuilding
+        env:
+          IMAGE_PREFIX: ${{ steps.image.outputs.prefix }}
+          SERVE_DIGEST: ${{ steps.serve.outputs.digest }}
+          WORKER_DIGEST: ${{ steps.worker.outputs.digest }}
+          SOURCE_SHA: ${{ github.sha }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          for role in serve worker; do
+            if [ "$role" = serve ]; then digest="$SERVE_DIGEST"; else digest="$WORKER_DIGEST"; fi
+            name="${IMAGE_PREFIX}-${role}"
+            tags=(--tag "$name:sha-$SOURCE_SHA")
+            if [ "$REF_TYPE" = tag ]; then tags+=(--tag "$name:$REF_NAME"); fi
+            docker buildx imagetools create "${tags[@]}" "$name@$digest"
+            echo "$name@$digest — TLS/volume/reconnect smoke passed" >> "$GITHUB_STEP_SUMMARY"
+          done

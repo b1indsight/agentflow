@@ -1,0 +1,95 @@
+name: flowtool
+services:
+  serve:
+    image: ${FLOWTOOL_SERVE_IMAGE:-flowtool-serve:local}
+    build:
+      context: ../..
+      target: serve
+    env_file: ${FLOWTOOL_DEPLOY_DIR:?set a private deployment directory}/serve.env
+    environment:
+      FLOWTOOL_HOST: 0.0.0.0
+      FLOWTOOL_GITHUB_PRIVATE_KEY_PATH: /run/secrets/app_key
+    secrets: [app_key]
+    networks: [control]
+    restart: unless-stopped
+    stop_grace_period: 45s
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+
+  worker-gateway:
+    image: nginx:stable-alpine@sha256:ef8676b33d681f272ba429b27658bdd7e640963279714c96bddf1dc76307f7b6
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    secrets: [tls_cert, tls_key]
+    networks: [control, execution]
+    depends_on:
+      serve: {condition: service_healthy}
+    restart: unless-stopped
+
+  worker:
+    image: ${FLOWTOOL_WORKER_IMAGE:-flowtool-worker:local}
+    build:
+      context: ../..
+      target: worker
+    env_file: ${FLOWTOOL_DEPLOY_DIR:?set a private deployment directory}/worker.env
+    environment:
+      FLOWTOOL_SERVE_WS_URL: wss://worker-gateway:8443/internal/workers/connect
+      FLOWTOOL_ALLOW_INSECURE_WORKER_WS: "false"
+      SSL_CERT_FILE: /run/secrets/ca_bundle
+    secrets: [ca_bundle]
+    volumes:
+      - worker_root:/var/lib/flowtool
+      - worker_home:/home/flowtool
+    networks: [execution]
+    depends_on: [worker-gateway]
+    restart: unless-stopped
+    stop_grace_period: 45s
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+
+  postgres:
+    profiles: [database]
+    image: postgres:17-alpine@sha256:f02121de6f74d30d8a94cd1d9584125e2178d7e6c377d8130112d4e52d867995
+    environment:
+      POSTGRES_DB: flowtool
+      POSTGRES_USER: flowtool
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    secrets: [db_password]
+    volumes: [postgres_data:/var/lib/postgresql/data]
+    networks: [control]
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U flowtool -d flowtool"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  cloudflared:
+    profiles: [cloudflare]
+    image: cloudflare/cloudflared:latest@sha256:b269e8abd07a5bf6f3f4be65d5050b2174eca89c56a0241a8ff32a16aec454e4
+    command: [tunnel, --no-autoupdate, --config, /etc/cloudflared/config.yml, run]
+    volumes:
+      - ${FLOWTOOL_DEPLOY_DIR}/cloudflare.yml:/etc/cloudflared/config.yml:ro
+    secrets: [tunnel_credentials]
+    networks: [control]
+    restart: unless-stopped
+
+secrets:
+  app_key: {file: "${FLOWTOOL_DEPLOY_DIR}/secrets/app.pem"}
+  tls_cert: {file: "${FLOWTOOL_DEPLOY_DIR}/secrets/tls.crt"}
+  tls_key: {file: "${FLOWTOOL_DEPLOY_DIR}/secrets/tls.key"}
+  ca_bundle: {file: "${FLOWTOOL_DEPLOY_DIR}/secrets/ca-bundle.pem"}
+  db_password: {file: "${FLOWTOOL_DEPLOY_DIR}/secrets/db-password"}
+  tunnel_credentials: {file: "${FLOWTOOL_DEPLOY_DIR}/secrets/tunnel.json"}
+volumes:
+  worker_root:
+  worker_home:
+  postgres_data:
+networks:
+  control:
+  execution:

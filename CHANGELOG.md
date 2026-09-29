@@ -1,9 +1,14 @@
 # Changelog
 
+- M5 F4：Docker smoke 保持 worker 运行并验证 serve 换 IP 后连接 epoch 更新，排除旧 online 状态及容器重启误报。
+
 - M5 F2：补充真实并发接收提交顺序回归，并验证移除事务锁会导致测试失败。
 - M5 F3：父观察器收到 SIGTERM 后回收观察进程组并释放运行状态锁。
 
 ## Unreleased
+
+- M5 F4：增加非 root serve/worker 镜像、TLS Compose 部署、可选 Cloudflare profile 与
+  镜像构建/候选 digest 验证发布流程；本地无 Docker，实际构建及真实任务验收待 CI/环境。
 
 - M5 F3：增加默认只读的真实闭环验收工具、显式测试 Issue 创建和结果未知保护，
   记录同一 Flow/PR 的修订 head 与归档事实；真实模型/GitHub 矩阵仍需运行环境。
@@ -146,3 +151,4 @@
 - 移除评论中 `@bot` 直达修订的规则；普通文本和代码示例统一进入 Judge，仅授权的 Request Changes 绕过 Judge。
 
 - M5 F3 返修：没有 Issue 的观察返回未完成；统一进程预算覆盖数据库连接与外部命令。
+- M5 F4 返修：修正 Codex 认证变量，网关动态解析 serve，smoke 边界断言立即失败。
