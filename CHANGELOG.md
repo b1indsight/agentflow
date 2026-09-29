@@ -4,8 +4,12 @@
 
 - M5 F2：补充真实并发接收提交顺序回归，并验证移除事务锁会导致测试失败。
 - M5 F3：父观察器收到 SIGTERM 后回收观察进程组并释放运行状态锁。
+- M5 F8：恢复测试从实际连接读取 fixture 端口，兼容 URL 省略端口的 libpq 配置。
 
 ## Unreleased
+
+- M5 F8：增加 systemd 示例、维护/冷备/轮换 runbook、10 条 Prometheus 告警及测试，
+  提供隔离 PostgreSQL dump/restore 演练与完整性校验；复制 root 的活动恢复仍明确阻塞。
 
 - M5 F7：增加零副本起步的 Kustomize base、独立 schema Job、RWOP worker PVC、内部 TLS
   和可选 Cloudflare overlay；新增有界 DB readiness 与 worker 本地探针，集群验收待环境。
@@ -164,3 +168,4 @@
 - M5 F5 返修：reconcile 指标匹配调度资格，标准日志保留原级别与来源并继续脱敏。
 - M5 F6 返修：准备取消无需不存在的 journal；历史 stop ACK 不受重绑影响；恢复取消中的 PR 身份与合并事实。
 - M5 F7 返修：serve 的 DB/HTTP 不可用仅撤销就绪，不使用杀进程探针；worker 恢复执行时立即就绪。
+- M5 F8 返修：恢复演练冻结 libpq 解析结果，Python 与 dump/restore 共用端口、密码文件与 TLS 设置。

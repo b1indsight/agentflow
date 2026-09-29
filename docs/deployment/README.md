@@ -1,10 +1,11 @@
 # 部署 FlowTool 与 Cloudflare Tunnel
 
 容器部署见 [Docker / Compose](docker.md) 和 [Kubernetes](kubernetes.md)。
+常驻服务、告警与维护见 [运维手册](../operations/runbook.md)。
 
 本文使用现有 `flowtool serve`、`flowtool worker` 和官方 `cloudflared`，说明直接运行进程的
-部署步骤。示例基于同一主机、不同 OS 账号的首次联调；Docker 镜像和 K8s 清单仍在 M5 计划中。
-目前 `/healthz` 仅表示 HTTP 进程可响应；本文不假设已有 readiness 或部署管理命令。
+部署步骤。示例基于同一主机、不同 OS 账号的首次联调；容器方式使用上面的专门文档。
+`/healthz` 表示 HTTP 进程可响应，`/readyz` 还检查启动状态与数据库；不提供部署管理命令。
 
 ## 1. 准备运行环境
 

@@ -1,0 +1,295 @@
+rule_files:
+- alerts.yml
+evaluation_interval: 1m
+tests:
+- name: FlowtoolUnavailable
+  interval: 1m
+  input_series:
+  - series: up{job="flowtool",instance="serve"}
+    values: 0 0 0 1 1
+  alert_rule_test:
+  - eval_time: 0m
+    alertname: FlowtoolUnavailable
+    exp_alerts: []
+  - eval_time: 2m
+    alertname: FlowtoolUnavailable
+    exp_alerts:
+    - exp_labels:
+        job: flowtool
+        instance: serve
+        severity: warning
+      exp_annotations:
+        runbook_url: https://github.com/b1indsight/agentflow/blob/feat/m5-operations-recovery/docs/operations/runbook.md#alerts
+  - eval_time: 4m
+    alertname: FlowtoolUnavailable
+    exp_alerts: []
+- name: FlowtoolSnapshotStale
+  interval: 1m
+  input_series:
+  - series: flowtool_metrics_snapshot_age_seconds{job="flowtool",instance="serve"}
+    values: 61 61 61 0 0
+  - series: flowtool_metrics_snapshot_ready{job="flowtool",instance="serve"}
+    values: 1+0x4
+  alert_rule_test:
+  - eval_time: 0m
+    alertname: FlowtoolSnapshotStale
+    exp_alerts: []
+  - eval_time: 2m
+    alertname: FlowtoolSnapshotStale
+    exp_alerts:
+    - exp_labels:
+        job: flowtool
+        instance: serve
+        severity: warning
+      exp_annotations:
+        runbook_url: https://github.com/b1indsight/agentflow/blob/feat/m5-operations-recovery/docs/operations/runbook.md#alerts
+  - eval_time: 4m
+    alertname: FlowtoolSnapshotStale
+    exp_alerts: []
+- name: FlowtoolInboxOld
+  interval: 1m
+  input_series:
+  - series: flowtool_oldest_age_seconds{job="flowtool",instance="serve",queue="inbox"}
+    values: 301 301 301 0 0
+  alert_rule_test:
+  - eval_time: 0m
+    alertname: FlowtoolInboxOld
+    exp_alerts: []
+  - eval_time: 2m
+    alertname: FlowtoolInboxOld
+    exp_alerts:
+    - exp_labels:
+        job: flowtool
+        instance: serve
+        severity: warning
+        queue: inbox
+      exp_annotations:
+        runbook_url: https://github.com/b1indsight/agentflow/blob/feat/m5-operations-recovery/docs/operations/runbook.md#alerts
+  - eval_time: 4m
+    alertname: FlowtoolInboxOld
+    exp_alerts: []
+- name: FlowtoolInboxBlocked
+  interval: 1m
+  input_series:
+  - series: flowtool_inbox{job="flowtool",instance="serve",state="blocked"}
+    values: 1 1 1 0 0
+  alert_rule_test:
+  - eval_time: 0m
+    alertname: FlowtoolInboxBlocked
+    exp_alerts: []
+  - eval_time: 2m
+    alertname: FlowtoolInboxBlocked
+    exp_alerts:
+    - exp_labels:
+        job: flowtool
+        instance: serve
+        severity: warning
+        state: blocked
+      exp_annotations:
+        runbook_url: https://github.com/b1indsight/agentflow/blob/feat/m5-operations-recovery/docs/operations/runbook.md#alerts
+  - eval_time: 4m
+    alertname: FlowtoolInboxBlocked
+    exp_alerts: []
+- name: FlowtoolNoWorkers
+  interval: 1m
+  input_series:
+  - series: flowtool_jobs{job="flowtool",instance="serve",kind="initial",state="queued"}
+    values: 1+0x4
+  - series: flowtool_workers{job="flowtool",instance="serve",state="online"}
+    values: 0 0 0 1 1
+  alert_rule_test:
+  - eval_time: 1m
+    alertname: FlowtoolNoWorkers
+    exp_alerts: []
+  - eval_time: 2m
+    alertname: FlowtoolNoWorkers
+    exp_alerts:
+    - exp_labels:
+        job: flowtool
+        instance: serve
+        severity: warning
+      exp_annotations:
+        runbook_url: https://github.com/b1indsight/agentflow/blob/feat/m5-operations-recovery/docs/operations/runbook.md#alerts
+  - eval_time: 4m
+    alertname: FlowtoolNoWorkers
+    exp_alerts: []
+- name: FlowtoolRecoveryOld
+  interval: 1m
+  input_series:
+  - series: flowtool_oldest_age_seconds{job="flowtool",instance="serve",queue="recovery"}
+    values: 601 601 601 0 0
+  alert_rule_test:
+  - eval_time: 0m
+    alertname: FlowtoolRecoveryOld
+    exp_alerts: []
+  - eval_time: 2m
+    alertname: FlowtoolRecoveryOld
+    exp_alerts:
+    - exp_labels:
+        job: flowtool
+        instance: serve
+        severity: warning
+        queue: recovery
+      exp_annotations:
+        runbook_url: https://github.com/b1indsight/agentflow/blob/feat/m5-operations-recovery/docs/operations/runbook.md#alerts
+  - eval_time: 4m
+    alertname: FlowtoolRecoveryOld
+    exp_alerts: []
+- name: FlowtoolArchiveOld
+  interval: 1m
+  input_series:
+  - series: flowtool_archive_pending_age_seconds{job="flowtool",instance="serve"}
+    values: 601 601 601 0 0
+  alert_rule_test:
+  - eval_time: 0m
+    alertname: FlowtoolArchiveOld
+    exp_alerts: []
+  - eval_time: 2m
+    alertname: FlowtoolArchiveOld
+    exp_alerts:
+    - exp_labels:
+        job: flowtool
+        instance: serve
+        severity: warning
+      exp_annotations:
+        runbook_url: https://github.com/b1indsight/agentflow/blob/feat/m5-operations-recovery/docs/operations/runbook.md#alerts
+  - eval_time: 4m
+    alertname: FlowtoolArchiveOld
+    exp_alerts: []
+- name: FlowtoolBackupFailed
+  interval: 1m
+  input_series:
+  - series: flowtool_backup_last_run_success{job="flowtool-backup",instance="backup"}
+    values: 0 0 0 1 1
+  alert_rule_test:
+  - eval_time: 0m
+    alertname: FlowtoolBackupFailed
+    exp_alerts: []
+  - eval_time: 2m
+    alertname: FlowtoolBackupFailed
+    exp_alerts:
+    - exp_labels:
+        job: flowtool-backup
+        instance: backup
+        severity: warning
+      exp_annotations:
+        runbook_url: https://github.com/b1indsight/agentflow/blob/feat/m5-operations-recovery/docs/operations/runbook.md#alerts
+  - eval_time: 4m
+    alertname: FlowtoolBackupFailed
+    exp_alerts: []
+- name: FlowtoolBackupOld
+  interval: 1m
+  input_series:
+  - series: flowtool_backup_last_success_timestamp_seconds{job="flowtool-backup",instance="backup"}
+    values: -93601 -93601 -93601 180 240
+  alert_rule_test:
+  - eval_time: 0m
+    alertname: FlowtoolBackupOld
+    exp_alerts: []
+  - eval_time: 2m
+    alertname: FlowtoolBackupOld
+    exp_alerts:
+    - exp_labels:
+        job: flowtool-backup
+        instance: backup
+        severity: warning
+      exp_annotations:
+        runbook_url: https://github.com/b1indsight/agentflow/blob/feat/m5-operations-recovery/docs/operations/runbook.md#alerts
+  - eval_time: 4m
+    alertname: FlowtoolBackupOld
+    exp_alerts: []
+- name: FlowtoolBackupMissing
+  interval: 1m
+  input_series:
+  - series: up{job="flowtool-backup",instance="backup"}
+    values: 0 0 0 1 1
+  - series: flowtool_backup_last_run_success{job="flowtool-backup",instance="backup"}
+    values: 1+0x4
+  - series: flowtool_backup_last_success_timestamp_seconds{job="flowtool-backup",instance="backup"}
+    values: 0+60x4
+  alert_rule_test:
+  - eval_time: 0m
+    alertname: FlowtoolBackupMissing
+    exp_alerts: []
+  - eval_time: 2m
+    alertname: FlowtoolBackupMissing
+    exp_alerts:
+    - exp_labels:
+        job: flowtool-backup
+        instance: backup
+        severity: warning
+      exp_annotations:
+        runbook_url: https://github.com/b1indsight/agentflow/blob/feat/m5-operations-recovery/docs/operations/runbook.md#alerts
+  - eval_time: 4m
+    alertname: FlowtoolBackupMissing
+    exp_alerts: []
+- name: no data
+  interval: 1m
+  input_series: []
+  alert_rule_test:
+  - eval_time: 2m
+    alertname: FlowtoolUnavailable
+    exp_alerts:
+    - exp_labels:
+        job: flowtool
+        severity: warning
+      exp_annotations:
+        runbook_url: https://github.com/b1indsight/agentflow/blob/feat/m5-operations-recovery/docs/operations/runbook.md#alerts
+  - eval_time: 2m
+    alertname: FlowtoolSnapshotStale
+    exp_alerts:
+    - exp_labels:
+        job: flowtool
+        severity: warning
+      exp_annotations:
+        runbook_url: https://github.com/b1indsight/agentflow/blob/feat/m5-operations-recovery/docs/operations/runbook.md#alerts
+  - eval_time: 2m
+    alertname: FlowtoolInboxOld
+    exp_alerts: []
+  - eval_time: 2m
+    alertname: FlowtoolInboxBlocked
+    exp_alerts: []
+  - eval_time: 2m
+    alertname: FlowtoolNoWorkers
+    exp_alerts: []
+  - eval_time: 2m
+    alertname: FlowtoolRecoveryOld
+    exp_alerts: []
+  - eval_time: 2m
+    alertname: FlowtoolArchiveOld
+    exp_alerts: []
+  - eval_time: 2m
+    alertname: FlowtoolBackupFailed
+    exp_alerts: []
+  - eval_time: 2m
+    alertname: FlowtoolBackupOld
+    exp_alerts: []
+  - eval_time: 2m
+    alertname: FlowtoolBackupMissing
+    exp_alerts:
+    - exp_labels:
+        job: flowtool-backup
+        severity: warning
+      exp_annotations:
+        runbook_url: https://github.com/b1indsight/agentflow/blob/feat/m5-operations-recovery/docs/operations/runbook.md#alerts
+- name: FlowtoolNoWorkers
+  interval: 1m
+  input_series:
+  - series: flowtool_jobs{job="flowtool",instance="serve",kind="initial",state="queued"}
+    values: 1 1 1 0 0
+  alert_rule_test:
+  - eval_time: 1m
+    alertname: FlowtoolNoWorkers
+    exp_alerts: []
+  - eval_time: 2m
+    alertname: FlowtoolNoWorkers
+    exp_alerts:
+    - exp_labels:
+        job: flowtool
+        instance: serve
+        severity: warning
+      exp_annotations:
+        runbook_url: https://github.com/b1indsight/agentflow/blob/feat/m5-operations-recovery/docs/operations/runbook.md#alerts
+  - eval_time: 4m
+    alertname: FlowtoolNoWorkers
+    exp_alerts: []

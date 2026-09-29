@@ -187,3 +187,28 @@ def test_reconcile_metrics_match_scheduler_eligibility(store, postgresql_url):
     assert next(s.value for s in metrics.samples if s.family == 'reconcile_due') == len(due)
     age = next(s.value for s in metrics.samples if s.family == 'oldest_age_seconds' and s.labels == ['reconcile'])
     assert 60 <= age < 120
+
+
+def test_archive_alert_age_uses_latest_job_of_active_bound_flow(store, postgresql_url):
+    from app.models import JobKind
+    from app.protocol import PROTOCOL_VERSION
+    flow = store.create_flow('fixture/recovery', 1, 1)
+    store.worker_connected('w', PROTOCOL_VERSION, 'epoch')
+    initial = store.enqueue_job(flow.id, JobKind.INITIAL)
+    assert store.assign_job('w', 'token', 'epoch')
+    with store.connection() as conn:
+        conn.execute("UPDATE jobs SET state='done' WHERE id=%s", (initial.id,))
+    job = store.enqueue_job(flow.id, JobKind.ARCHIVE)
+    with store.connection() as conn:
+        conn.execute("UPDATE jobs SET created_at=now()-interval '20 minutes' WHERE id=%s", (job.id,))
+    def age():
+        return next(s.value for s in read_snapshot(postgresql_url).samples
+                    if s.family == 'archive_pending_age_seconds')
+    assert age() >= 1200
+    with store.connection() as conn:
+        conn.execute("UPDATE jobs SET state='failed' WHERE id=%s", (job.id,))
+    # A completed retry must not leave the old failure permanently alerting.
+    retry = store.enqueue_job(flow.id, JobKind.ARCHIVE)
+    with store.connection() as conn:
+        conn.execute("UPDATE jobs SET state='done' WHERE id=%s", (retry.id,))
+    assert age() == 0
