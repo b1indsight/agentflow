@@ -3,6 +3,7 @@
 import json
 from dataclasses import dataclass
 
+from app.control.initial import initial_delivery_mismatch
 from app.control.revisions import frozen_revision, revision_mismatch, verify_revision_remote
 from app.github_models import PullRequestStatus
 from app.models import DeliveryState, Flow, FlowDelivery, Job
@@ -46,9 +47,6 @@ async def prove_reopen(
             return None, "old coding execution failed; repository requires manual reconciliation"
         result = message.result
         if isinstance(result, InitialResult):
-            # Share canonical INITIAL/tool validation without creating an import cycle with effects.
-            from app.control.results import initial_delivery_mismatch
-
             attempt = store.get_current_attempt(flow)
             call = store.get_tool_call(result.open_pr_call_id) if result.open_pr_call_id else None
             if (attempt is None or result.exit_code != 0 or not result.session_id

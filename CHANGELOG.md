@@ -8,6 +8,8 @@
 
 ## Unreleased
 
+- 将 INITIAL 交付校验提取为共享模块，解除 results/effects/lifecycle 循环依赖，并增加依赖边界回归检查。
+
 - M5 F8：增加 systemd 示例、维护/冷备/轮换 runbook、10 条 Prometheus 告警及测试，
   提供隔离 PostgreSQL dump/restore 演练与完整性校验；复制 root 的活动恢复仍明确阻塞。
 
