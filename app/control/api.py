@@ -43,6 +43,8 @@ class ApplicationContext(Protocol):
     @property
     def gateway(self) -> WorkerGateway: ...
 
+    async def ready(self) -> bool: ...
+
     def startup(self) -> None: ...
 
     def spawn_handler(self, coroutine: Coroutine[Any, Any, None]) -> None: ...
@@ -108,6 +110,12 @@ def create_app(
         if not hmac.compare_digest(request.headers.get("authorization", "").encode(), expected.encode()):
             return Response(status_code=401)
         return Response(request.app.state.metrics.render(), media_type="text/plain; version=0.0.4; charset=utf-8")
+
+    @application.get("/readyz")
+    async def readyz(request: Request) -> Response:
+        context: ApplicationContext = request.app.state.ctx
+        ready = await context.ready()
+        return Response(status_code=200 if ready else 503, content="ready" if ready else "not ready")
 
     @application.get("/healthz")
     async def healthz() -> dict[str, str]:

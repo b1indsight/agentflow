@@ -18,6 +18,7 @@ from app.judge import BubJudge
 from app.observability import configure_logging
 from app.worker.client import WorkerClient
 from app.worker.executor import WorkerExecutor
+from app.worker.health import HealthFile
 from app.worker.journal import WorkerJournal
 
 _CONTROL_ENVIRONMENT_KEYS = frozenset(
@@ -131,6 +132,7 @@ class WorkerRuntime:
     async def run(self) -> None:
         validate_worker_environment(self.settings)
         self.root_lock.acquire()
+        health_task = asyncio.create_task(self._report_health()) if self.settings.worker_status_path else None
         loop = asyncio.get_running_loop()
         loop.add_signal_handler(signal.SIGTERM, self.stop)
         try:
@@ -140,7 +142,20 @@ class WorkerRuntime:
                 raise
         finally:
             loop.remove_signal_handler(signal.SIGTERM)
+            if health_task is not None:
+                health_task.cancel()
+                await asyncio.gather(health_task, return_exceptions=True)
             self.root_lock.release()
+
+    async def _report_health(self) -> None:
+        assert self.settings.worker_status_path is not None
+        marker = HealthFile(self.settings.worker_status_path)
+        try:
+            while True:
+                marker.write(self.client.connected)
+                await asyncio.sleep(5)
+        finally:
+            marker.write(False)
 
     def stop(self) -> None:
         self._shutdown_requested = True

@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flowtool-cloudflare
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      flowtool-role: cloudflare
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: flowtool
+        flowtool-role: cloudflare
+    spec:
+      serviceAccountName: flowtool
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/os: linux
+        kubernetes.io/arch: amd64
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      terminationGracePeriodSeconds: 60
+      containers:
+      - name: cloudflared
+        image: cloudflare/cloudflared:latest@sha256:b269e8abd07a5bf6f3f4be65d5050b2174eca89c56a0241a8ff32a16aec454e4
+        args:
+        - tunnel
+        - --no-autoupdate
+        - --config
+        - /etc/cloudflared/config.yml
+        - run
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+        volumeMounts:
+        - name: config
+          mountPath: /etc/cloudflared
+          readOnly: true
+        - name: flowtool-tunnel-credentials
+          mountPath: /run/secrets/tunnel
+          readOnly: true
+      volumes:
+      - name: config
+        configMap:
+          name: flowtool-tunnel
+      - name: flowtool-tunnel-credentials
+        secret:
+          secretName: flowtool-tunnel-credentials
+          defaultMode: 288

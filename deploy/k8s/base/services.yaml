@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: flowtool-serve
+spec:
+  selector:
+    flowtool-role: serve
+  ports:
+  - name: http
+    port: 8000
+  - name: wss
+    port: 8443
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: flowtool-serve-headless
+spec:
+  clusterIP: None
+  selector:
+    flowtool-role: serve
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: flowtool-worker-1-headless
+spec:
+  clusterIP: None
+  selector:
+    flowtool-role: worker-1

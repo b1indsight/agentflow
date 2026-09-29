@@ -53,6 +53,9 @@ class FakeContext:
 
         self.tasks.append(asyncio.create_task(consume()))
 
+    async def ready(self) -> bool:
+        return True
+
     def startup(self) -> None:
         pass
 

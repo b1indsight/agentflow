@@ -7,6 +7,9 @@
 
 ## Unreleased
 
+- M5 F7：增加零副本起步的 Kustomize base、独立 schema Job、RWOP worker PVC、内部 TLS
+  和可选 Cloudflare overlay；新增有界 DB readiness 与 worker 本地探针，集群验收待环境。
+
 - M5 F6：协议 v9 持久停止请求与 nonce 凭据、取消确认前保留 binding、丢失 ACK 重放、
   只读核对已发送 effects；持久 worker drain 允许原 Flow 收尾，补齐 SIGTERM 接线。
 
@@ -160,3 +163,4 @@
 - M5 F4 返修：修正 Codex 认证变量，网关动态解析 serve，smoke 边界断言立即失败。
 - M5 F5 返修：reconcile 指标匹配调度资格，标准日志保留原级别与来源并继续脱敏。
 - M5 F6 返修：准备取消无需不存在的 journal；历史 stop ACK 不受重绑影响；恢复取消中的 PR 身份与合并事实。
+- M5 F7 返修：serve 的 DB/HTTP 不可用仅撤销就绪，不使用杀进程探针；worker 恢复执行时立即就绪。

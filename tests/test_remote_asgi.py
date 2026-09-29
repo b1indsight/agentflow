@@ -77,6 +77,9 @@ class AsgiContext:
             poll_interval=0.01,
         )
 
+    async def ready(self) -> bool:
+        return True
+
     def startup(self) -> None:
         pass
 

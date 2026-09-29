@@ -1,0 +1,160 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: flowtool-worker-1
+spec:
+  serviceName: flowtool-worker-1-headless
+  replicas: 0
+  selector:
+    matchLabels:
+      flowtool-role: worker-1
+  updateStrategy:
+    type: OnDelete
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: flowtool
+        flowtool-role: worker-1
+    spec:
+      serviceAccountName: flowtool
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/os: linux
+        kubernetes.io/arch: amd64
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      terminationGracePeriodSeconds: 60
+      containers:
+      - name: worker
+        image: flowtool-worker:replace-me
+        args:
+        - worker
+        envFrom:
+        - secretRef:
+            name: flowtool-worker-1-env
+        env:
+        - name: FLOWTOOL_WORKER_ID
+          value: worker-1
+        - name: FLOWTOOL_WORKER_ROOT
+          value: /var/lib/flowtool
+        - name: HOME
+          value: /home/flowtool
+        - name: FLOWTOOL_WORKER_STATUS_PATH
+          value: /run/flowtool/health.json
+        - name: FLOWTOOL_SERVE_WS_URL
+          value: wss://flowtool-serve.flowtool.svc:8443/internal/workers/connect
+        - name: FLOWTOOL_ALLOW_INSECURE_WORKER_WS
+          value: 'false'
+        - name: FLOWTOOL_LOG_FORMAT
+          value: json
+        - name: FLOWTOOL_EXECUTION_ISOLATION
+          value: container
+        - name: FLOWTOOL_TRUSTED_HOST_EXECUTION
+          value: 'true'
+        - name: SSL_CERT_FILE
+          value: /run/secrets/ca/ca-bundle.pem
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        resources:
+          requests:
+            cpu: 500m
+            memory: 512Mi
+          limits:
+            cpu: '4'
+            memory: 8Gi
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/flowtool
+          subPath: root
+        - name: data
+          mountPath: /home/flowtool
+          subPath: home
+        - name: status
+          mountPath: /run/flowtool
+        - name: worker-tmp
+          mountPath: /tmp
+        - name: flowtool-worker-ca
+          mountPath: /run/secrets/ca
+          readOnly: true
+        readinessProbe:
+          exec:
+            command:
+            - python
+            - -m
+            - app.worker.health
+            - /run/flowtool/health.json
+          periodSeconds: 5
+          timeoutSeconds: 3
+        startupProbe:
+          exec:
+            command:
+            - python
+            - -m
+            - app.worker.health
+            - /run/flowtool/health.json
+            - --live
+          periodSeconds: 5
+          failureThreshold: 36
+        livenessProbe:
+          exec:
+            command:
+            - python
+            - -m
+            - app.worker.health
+            - /run/flowtool/health.json
+            - --live
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 3
+      volumes:
+      - name: flowtool-worker-ca
+        secret:
+          secretName: flowtool-worker-ca
+          defaultMode: 288
+      - name: status
+        emptyDir: {}
+      - name: worker-tmp
+        emptyDir: {}
+      initContainers:
+      - name: prepare-data
+        image: flowtool-worker:replace-me
+        command:
+        - python
+        - -c
+        - from pathlib import Path; [Path('/data', name).mkdir(mode=0o700, exist_ok=True)
+          for name in ('root','home')]
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        resources:
+          requests:
+            cpu: 10m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+        volumeMounts:
+        - name: data
+          mountPath: /data
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes:
+      - ReadWriteOncePod
+      storageClassName: replace-with-rwop-csi
+      resources:
+        requests:
+          storage: 50Gi

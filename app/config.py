@@ -159,6 +159,7 @@ class WorkerSettings(FlowToolSettings):
     worker_id: str
     worker_token: SecretStr
     serve_ws_url: str
+    worker_status_path: Path | None = None
     worker_root: Path = Path("~/.flowtool/workers/{worker_id}")
     codex_run_timeout_seconds: float = 1200.0
     judge_model: str = ""

@@ -21,6 +21,7 @@ from app.control.webhooks import WebhookConsumer
 from app.github_client import GitHubApp
 from app.observability import Metrics, configure_logging
 from app.plugins import get_plugin_manager
+from app.readiness import database_ready
 from app.stop_store import StopStore
 from app.store import Store
 from app.webhook_store import WebhookStore
@@ -33,6 +34,8 @@ class ControlRuntime:
         self.settings = settings or get_serve_settings()
         configure_logging("serve", self.settings.log_format)
         self.metrics = Metrics()
+        self._ready = False
+        self._readiness_lock = asyncio.Lock()
         self.store = Store(
             self.settings.database_url,
             lease_duration=timedelta(seconds=self.settings.worker_lease_duration),
@@ -104,6 +107,14 @@ class ControlRuntime:
                 self.settings.database_url, self.settings.metrics_interval_seconds,
             )))
         self.router.settle.sweep()
+        self._ready = True
+
+    async def ready(self) -> bool:
+        if not self._ready or self._readiness_lock.locked():
+            return False
+        async with self._readiness_lock:
+            healthy = await database_ready(self.settings.database_url)
+            return self._ready and healthy
 
     async def _sweep_assignments(self) -> None:
         while True:
@@ -158,6 +169,7 @@ class ControlRuntime:
             logger.opt(exception=exception).error("webhook handler crashed")
 
     async def shutdown(self) -> None:
+        self._ready = False
         self.reconciler.stop()
         tasks = [*self._tasks, *self._handlers]
         for task in tasks:
