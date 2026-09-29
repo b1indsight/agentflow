@@ -104,6 +104,8 @@ VCS 不是端口；详细设计与当前限制见 [`components.md`](docs/archite
 
 ## 快速开始
 
+完整步骤见 [部署与 Cloudflare 接入指南](docs/deployment/README.md)。
+
 要求 Python 3.12+、uv，以及可访问的 PostgreSQL；以下用 Docker Compose 启动开发数据库。
 实际编码还需要在隔离的 worker 环境准备 Codex CLI 和认证，GitHub App 配置见
 [接入说明](docs/architecture/github-app.md)。
