@@ -64,13 +64,14 @@ class ControlService:
     def cancel(self, flow: Flow) -> None:
         with self.store.transaction() as tx:
             fresh = tx.lock_workflow(flow.id)
-            if fresh is None or fresh.state in TERMINAL_STATES:
+            if fresh is None or fresh.state is FlowState.SUCCEEDED:
                 return
             delivery = tx.get_delivery(fresh.id)
             if delivery is not None and delivery.state is DeliveryState.MERGED:
                 raise ValueError("a merged Flow must finish archive before its worker can be released")
             fresh.state = FlowState.CANCELLED
             tx.update_flow(fresh)
+            tx.stops.request(fresh.id)
             tx.release_flow_execution(fresh.id)
             tx.cancel_jobs(fresh.id)
         self._jobs_available()
@@ -111,6 +112,13 @@ class ControlService:
             delivery.merge_commit_sha = merge.merge_commit_sha
             delivery.version += 1
             tx.update_delivery(delivery)
+        binding = tx.get_flow_execution(flow.id)
+        if (first_merge and flow.state is FlowState.CANCELLED and binding is not None
+                and binding.released_at is None and tx.stops.has_pending(flow.id)
+                and tx.get_active_flow(flow.repo, flow.issue_number) is None):
+            # Merge facts supersede cancellation only for archive on the retained original binding.
+            flow.state = FlowState.ACTIVE
+            tx.update_flow(flow)
         if first_merge and flow.state not in TERMINAL_STATES:
             tx.cancel_jobs(flow.id, reason="PR merged; queued work retired")
             tx.enqueue_job(flow.id, JobKind.ARCHIVE)
@@ -127,6 +135,8 @@ class ControlService:
             fresh = tx.lock_workflow(flow.id)
             if fresh is None:
                 raise ValueError(f"flow {flow.id} disappeared")
+            if tx.stops.has_pending(fresh.id):
+                raise ValueError("cancellation is awaiting confirmed stop or pending result reconciliation")
             delivery = tx.get_delivery(fresh.id)
             if delivery is not None and delivery.state is DeliveryState.CLOSED:
                 raise ValueError("PR is closed or paused; reopen and reconcile its baseline before retry")
@@ -231,6 +241,7 @@ class ControlService:
             views.append(
                 WorkerView(
                     worker_id=worker.worker_id,
+                    draining=worker.draining,
                     status=worker.status,
                     current_job_id=worker.current_job_id,
                     current_flow_id=(

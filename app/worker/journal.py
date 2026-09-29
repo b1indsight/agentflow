@@ -6,6 +6,7 @@ import os
 import tempfile
 from pathlib import Path
 from typing import Literal
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
@@ -13,8 +14,10 @@ from app.models import JobState
 from app.protocol import (
     ArchiveTask,
     Assignment,
+    ExecutionStopped,
     Failed,
     RevisionInvocation,
+    StopAccepted,
     Succeeded,
     terminal_digest,
 )
@@ -44,6 +47,8 @@ class JournalRecord(BaseModel):
     root_identity: tuple[str, int, int]
     acknowledged: bool = False
     cleanup_verified: bool = False
+    execution_nonce: str | None = None
+    stopped: ExecutionStopped | None = None
 
 
 class WorkerJournal:
@@ -77,12 +82,30 @@ class WorkerJournal:
             flow_id=assignment.flow_id,
             assignment_token=assignment.assignment_token,
             state="received",
+            execution_nonce=uuid4().hex,
             archive_task=archive,
             root_identity=self._root_identity(),
             cleanup_verified=bool(previous and previous.cleanup_verified),
         )
         self._write(record)
         return record
+
+    def record_stopped(self, receipt: ExecutionStopped) -> None:
+        record = self._required()
+        if (record.job_id, record.flow_id, record.assignment_token, record.execution_nonce) != (
+                receipt.job_id, receipt.flow_id, receipt.assignment_token, receipt.execution_nonce):
+            raise JournalError("stop receipt does not match owned execution")
+        record.stopped = receipt
+        record.acknowledged = False
+        self._write(record)
+
+    def acknowledge_stop(self, accepted: StopAccepted) -> None:
+        record = self._required()
+        if record.stopped is None or any(getattr(record.stopped, field) != getattr(accepted, field)
+                                        for field in ('request_id', 'flow_id', 'job_id', 'assignment_token')):
+            raise JournalError("stop acknowledgement does not match receipt")
+        record.acknowledged = True
+        self._write(record)
 
     def verify_cleanup(self, task: ArchiveTask, *, repo_present: bool) -> None:
         """Persist ownership before deletion; only that proof permits an absent workspace."""

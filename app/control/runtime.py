@@ -21,6 +21,7 @@ from app.control.webhooks import WebhookConsumer
 from app.github_client import GitHubApp
 from app.observability import Metrics, configure_logging
 from app.plugins import get_plugin_manager
+from app.stop_store import StopStore
 from app.store import Store
 from app.webhook_store import WebhookStore
 
@@ -53,6 +54,7 @@ class ControlRuntime:
             recovery_concurrency=self.settings.result_recovery_concurrency,
             recovery_batch_size=self.settings.result_recovery_batch_size,
             metrics=self.metrics,
+            stops=StopStore(self.store),
         )
         self.service = ControlService(self.store, plugins, self.gateway.notify_jobs)
         self.router = EventRouter(self.store, self.service, self.settings)

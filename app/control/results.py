@@ -157,6 +157,8 @@ class ResultApplication:
                 tx.results.skip_remaining(job_id, failure or plan.error or "result failed")
             if not tx.complete_persisted_result(job_id, state):
                 raise ResultPending("result has not reached its atomic completion boundary")
+            if flow.state is FlowState.CANCELLED:
+                tx.release_flow_execution(flow.id)
         if not retired:
             self._after_commit(flow, current, plan, state)
         return state

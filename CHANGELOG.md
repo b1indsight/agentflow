@@ -7,6 +7,9 @@
 
 ## Unreleased
 
+- M5 F6：协议 v9 持久停止请求与 nonce 凭据、取消确认前保留 binding、丢失 ACK 重放、
+  只读核对已发送 effects；持久 worker drain 允许原 Flow 收尾，补齐 SIGTERM 接线。
+
 - M5 F5：增加字段白名单日志、独立 bearer 鉴权的内部指标和后台只读 PG 快照；采集故障
   保留旧值并暴露陈旧度，重放不重复累加持久执行统计。默认关闭 metrics。
 
@@ -156,3 +159,4 @@
 - M5 F3 返修：没有 Issue 的观察返回未完成；统一进程预算覆盖数据库连接与外部命令。
 - M5 F4 返修：修正 Codex 认证变量，网关动态解析 serve，smoke 边界断言立即失败。
 - M5 F5 返修：reconcile 指标匹配调度资格，标准日志保留原级别与来源并继续脱敏。
+- M5 F6 返修：准备取消无需不存在的 journal；历史 stop ACK 不受重绑影响；恢复取消中的 PR 身份与合并事实。

@@ -197,6 +197,7 @@ class Job(BaseModel):
 
 
 class WorkerRecord(BaseModel):
+    draining: bool = False
     worker_id: str
     protocol_version: int
     status: WorkerStatus
@@ -211,6 +212,7 @@ class WorkerRecord(BaseModel):
 
 
 class WorkerView(BaseModel):
+    draining: bool = False
     worker_id: str
     status: WorkerStatus
     current_job_id: int | None = None

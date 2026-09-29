@@ -115,6 +115,7 @@ def serve() -> None:
         host=settings.host,
         port=settings.port,
         log_level="info",
+        timeout_graceful_shutdown=20,
     )
 
 
@@ -138,14 +139,24 @@ def flows(active: bool = typer.Option(False, help="只看未终结的")) -> None
             typer.echo(f"[{f.id}] {f.repo}#{f.issue_number:<5} {f.state:<10} {pr} cycles={cycles}")
 
 
+@app.command("worker-drain")
+def worker_drain(worker_id: str, undo: bool = typer.Option(False, "--undo")) -> None:
+    """暂停给 worker 分配新 Flow；已有绑定继续收尾。"""
+    from app.stop_store import StopStore
+
+    with _store() as store:
+        StopStore(store).drain(worker_id, not undo)
+    typer.echo(f"{worker_id}: draining={not undo}")
+
+
 @app.command()
 def workers() -> None:
     """列出 worker 在线状态和当前 assignment。"""
     with _store() as store:
-        typer.echo("WORKER\tSTATUS\tJOB\tFLOW\tEPOCH\tLEASE\tRECOVERY\tLAST_SEEN\tREASON")
+        typer.echo("WORKER\tSTATUS\tDRAINING\tJOB\tFLOW\tEPOCH\tLEASE\tRECOVERY\tLAST_SEEN\tREASON")
         for worker in ControlService(store).list_workers():
             typer.echo(
-                f"{worker.worker_id}\t{worker.status.value}\t"
+                f"{worker.worker_id}\t{worker.status.value}\t{worker.draining}\t"
                 f"{worker.current_job_id or '-'}\t{worker.current_flow_id or '-'}\t"
                 f"{(worker.connection_epoch or '-')[:8]}\t"
                 f"{_remaining(worker.lease_expires_at)}\t"
@@ -242,7 +253,8 @@ def flow_cancel(flow_id: int) -> None:
         if not f:
             raise typer.Exit(1)
         ControlService(store).cancel(f)
-    typer.echo(f"flow {flow_id} cancelled")
+        waiting = store.stops.has_pending(flow_id)
+    typer.echo(f"flow {flow_id}: cancellation requested; stop_pending={waiting}")
 
 
 @flow_app.command("retry")

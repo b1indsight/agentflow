@@ -7,6 +7,7 @@ from app.protocol import (
     Assignment,
     ExecutionResult,
     ExecutionTask,
+    Failed,
     FlowToolErrorKind,
     FlowToolRequest,
     FlowToolResponse,
@@ -48,6 +49,8 @@ class RecordingExecutor:
 
 class ScriptedConnection:
     def __init__(self) -> None:
+        self.result_ready = asyncio.Event()
+        self.tool_ready = asyncio.Event()
         self.sent: list[str] = []
         self.messages = [
             Registered(heartbeat_interval=60, connection_epoch="epoch-1").model_dump_json(),
@@ -76,10 +79,17 @@ class ScriptedConnection:
 
     async def send(self, data: str) -> None:
         self.sent.append(data)
+        message = parse_worker_message(data)
+        if isinstance(message, (Succeeded, Failed)):
+            self.result_ready.set()
+        if isinstance(message, FlowToolRequest):
+            self.tool_ready.set()
 
     async def recv(self) -> str:
         if not self.messages:
             raise ConnectionError("script complete")
+        if '"type":"result_accepted"' in self.messages[0]:
+            await self.result_ready.wait()
         return self.messages.pop(0)
 
 
@@ -158,11 +168,18 @@ class ToolCallingExecutor:
 
 class ToolConnection:
     def __init__(self) -> None:
+        self.result_ready = asyncio.Event()
+        self.tool_ready = asyncio.Event()
         self.sent: list[str] = []
         self.step = 0
 
     async def send(self, data: str) -> None:
         self.sent.append(data)
+        message = parse_worker_message(data)
+        if isinstance(message, (Succeeded, Failed)):
+            self.result_ready.set()
+        if isinstance(message, FlowToolRequest):
+            self.tool_ready.set()
 
     async def recv(self) -> str:
         self.step += 1
@@ -185,12 +202,14 @@ class ToolConnection:
                 ),
             ).model_dump_json()
         if self.step == 3:
+            await self.tool_ready.wait()
             request = parse_worker_message(self.sent[-1])
             assert isinstance(request, FlowToolRequest)
             return FlowToolResponse(
                 call_id=request.call_id, result={"pr_number": 17}
             ).model_dump_json()
         if self.step == 4:
+            await self.result_ready.wait()
             terminal = parse_worker_message(self.sent[-1])
             assert isinstance(terminal, Succeeded)
             return ResultAccepted(
@@ -243,7 +262,8 @@ class BrokenHeartbeatConnection:
             raise ConnectionError("connection lost")
 
     async def recv(self) -> str:
-        raise AssertionError("result acknowledgement should not be awaited")
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
 
 
 @pytest.mark.asyncio

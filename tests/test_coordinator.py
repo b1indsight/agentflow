@@ -48,7 +48,7 @@ from app.protocol import (
     terminal_digest,
 )
 from app.store import Store
-from tests.result_memory import MemoryResults
+from tests.result_memory import MemoryResults, MemoryStops
 from tests.review_memory import MemoryReviews, judge_decision
 
 
@@ -56,6 +56,7 @@ class MemoryStore:
     def __init__(self) -> None:
         self.jobs: dict[int, Job] = {}
         self.results = MemoryResults()
+        self.stops = MemoryStops()
         self.reviews = MemoryReviews()
         self.reviews.jobs = self.jobs
         self.sources: dict[tuple[int, str], Job] = {}
@@ -181,6 +182,8 @@ class MemoryStore:
         return self.execution if flow_id == self.flow.id else None
 
     def release_flow_execution(self, flow_id: int) -> bool:
+        if self.stops.has_pending(flow_id):
+            return False
         self.execution.released_at = datetime.now(UTC)
         return True
 
