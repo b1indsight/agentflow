@@ -9,20 +9,19 @@ from loguru import logger
 from pluggy import PluginManager
 
 from app.control.effects import ResultEffects
+from app.control.initial import initial_delivery_mismatch
 from app.control.resolution import feedback_link, plan_resolution
 from app.control.revisions import frozen_revision, revision_mismatch, verify_revision_remote
 from app.github_models import GitHubAdapterError
 from app.models import (
     TERMINAL_STATES,
     AddressedComment,
-    Attempt,
     DeferredComment,
     DeliveryState,
     FeedbackRef,
     Flow,
     FlowDelivery,
     FlowState,
-    FlowToolCall,
     Job,
     JobKind,
     JobState,
@@ -666,46 +665,3 @@ class ResultApplication:
 
 def _feedback_link(repo: str, number: int, kind: ReviewItemKind, github_id: int) -> str:
     return f"[{kind.value} {github_id}]({feedback_link(repo, number, kind, github_id)})"
-
-
-def initial_delivery_mismatch(
-    job: Job,
-    attempt: Attempt,
-    result: InitialResult,
-    delivery: FlowDelivery | None,
-    tool_call: FlowToolCall | None,
-) -> str | None:
-    """Validate the same INITIAL/tool invariants before recording any PR creation intent."""
-    if delivery is None:
-        return "delivery is missing"
-    if delivery.state not in {DeliveryState.OPENING, DeliveryState.OPEN}:
-        return f"delivery state is {delivery.state.value}, expected opening or open"
-    if result.vcs_backend is None:
-        return "verified VCS backend is missing"
-    if not result.pushed:
-        return "worker did not report a verified push"
-    if result.branch != delivery.branch:
-        return "result branch does not match delivery branch"
-    if not result.commit_sha:
-        return "verified commit SHA is missing"
-    if result.commit_sha != result.remote_sha:
-        return "local and remote commit SHAs differ"
-    if result.commit_sha != delivery.head_sha:
-        return "result commit SHA does not match delivery head"
-    if not result.open_pr_call_id:
-        return "flow.open_pr call id is missing"
-    if tool_call is None:
-        return "flow.open_pr call is not persisted"
-    if (tool_call.flow_id, tool_call.attempt_id, tool_call.job_id) != (
-        job.flow_id,
-        attempt.id,
-        job.id,
-    ):
-        return "flow.open_pr call fence does not match the result"
-    if result.pull_request is None:
-        return "pull request handle is missing"
-    if tool_call.response != result.pull_request:
-        return "pull request handle does not match the persisted tool response"
-    if result.pull_request.get("head_sha") != delivery.head_sha:
-        return "prepared delivery head SHA does not match delivery"
-    return None

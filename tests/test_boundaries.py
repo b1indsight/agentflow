@@ -6,7 +6,8 @@ from pathlib import Path
 
 def imported_modules(package: Path) -> set[str]:
     modules: set[str] = set()
-    for path in package.rglob("*.py"):
+    paths = [package] if package.is_file() else package.rglob("*.py")
+    for path in paths:
         tree = ast.parse(path.read_text(), filename=str(path))
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
@@ -42,4 +43,16 @@ def test_control_and_worker_packages_keep_role_boundaries() -> None:
             "app.store",
             "fastapi",
         }
+    )
+
+
+def test_initial_delivery_validation_keeps_result_orchestration_out_of_lifecycle() -> None:
+    # Reopening an INITIAL delivery used a function-local import that closed the
+    # results -> effects -> lifecycle -> results cycle; ordinary imports hid it.
+    assert not contains_forbidden(
+        imported_modules(Path("app/control/lifecycle.py")),
+        {"app.control.results", "app.control.effects"},
+    )
+    assert not contains_forbidden(
+        imported_modules(Path("app/control/initial.py")), {"app.control"},
     )
