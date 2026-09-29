@@ -36,6 +36,7 @@ from app.protocol import ArchiveTask, Failed, terminal_digest
 from app.reconcile_store import RECONCILE_SCHEMA, ReconcileStore
 from app.result_store import RESULT_SCHEMA, ResultStore
 from app.review_store import REVIEW_SCHEMA, ReviewStore
+from app.webhook_store import WEBHOOK_SCHEMA
 
 # A frozen archive may have started deleting before its Started frame reached serve.
 _MAY_HAVE_EXECUTED = (
@@ -411,6 +412,7 @@ class Store:
     def init_db(self) -> None:
         with self.connection() as connection:
             connection.execute(SCHEMA)
+            connection.execute(WEBHOOK_SCHEMA)
             connection.execute(RESULT_SCHEMA)
             connection.execute(REVIEW_SCHEMA)
             connection.execute(RECONCILE_SCHEMA)

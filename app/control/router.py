@@ -64,6 +64,10 @@ class EventRouter:
         self.settle = SettleScheduler(store, settings, service.notify_jobs)
 
     async def handle(self, event_type: str, delivery_id: str, payload: dict) -> None:
+        self.dispatch(event_type, delivery_id, payload)
+
+    def dispatch(self, event_type: str, delivery_id: str, payload: dict) -> None:
+        """Apply DB-only event transitions; callers may bind one outer transaction."""
         # Merge is a PR fact, including bot-authored events, and owns its atomic reservation.
         if event_type == "pull_request":
             self._on_pull_request(delivery_id, payload)
@@ -80,9 +84,9 @@ class EventRouter:
             "issues": self._on_issues,
         }.get(event_type)
         if handler:
-            await handler(payload)
+            handler(payload)
 
-    async def _on_issues(self, payload: dict) -> None:
+    def _on_issues(self, payload: dict) -> None:
         action = payload.get("action")
         label = (payload.get("label") or {}).get("name")
         repo = payload["repository"]["full_name"]
