@@ -6,7 +6,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, SecretStr
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, SecretStr, model_validator
 
 
 class GitHubModel(BaseModel):
@@ -18,6 +18,25 @@ class IssueSnapshot(GitHubModel):
     title: str
     body: str
     state: str
+
+
+FeedbackSource = Literal["issue_comments", "pr_comments", "reviews"]
+
+
+class RemoteFeedback(GitHubModel):
+    """Full observed content; deliberately carries no webhook sender authorization."""
+
+    github_id: int = Field(gt=0)
+    author: str
+    body: str
+    updated_at: AwareDatetime
+    is_bot: bool = False
+    state: Literal["commented", "changes_requested", "approved", "dismissed", "pending"] = "commented"
+
+
+class FeedbackPage(GitHubModel):
+    items: list[RemoteFeedback] = Field(max_length=50)
+    next_cursor: str | None = None
 
 
 class RepositorySnapshot(GitHubModel):
@@ -77,12 +96,38 @@ class RemoteRef(GitHubModel):
     sha: str
 
 
+class ReviewThreadPage(GitHubModel):
+    """One thread/comment page; partial thread fragments never prove resolution coverage."""
+
+    snapshot: ReviewThreads
+    next_cursor: str | None = None
+
+
 class PullRequestSnapshot(GitHubModel):
     number: int
     state: str
     head_branch: str
     head_sha: str
     base_branch: str
+
+
+class PullRequestStatus(PullRequestSnapshot):
+    """A numbered PR observation, including confirmed merge facts and repository identity."""
+
+    repo: str
+    state: Literal["open", "closed"]
+    base_sha: str
+    head_repository: str | None
+    merged: bool
+    merged_at: AwareDatetime | None = None
+    merge_commit_sha: str | None = None
+
+    @model_validator(mode="after")
+    def _require_merge_facts(self) -> PullRequestStatus:
+        if self.merged and (self.state != "closed" or self.merged_at is None
+                            or not self.merge_commit_sha):
+            raise ValueError("merged PR requires closed state, timestamp and merge commit SHA")
+        return self
 
 
 class PushCapability(GitHubModel):
@@ -117,6 +162,7 @@ class GitHubAdapterError(RuntimeError):
         request_id: str | None = None,
         retry_after: str | None = None,
         definitely_unsent: bool = False,
+        request_rejected: bool = False,
     ) -> None:
         self.kind = kind
         self.endpoint = endpoint
@@ -124,6 +170,7 @@ class GitHubAdapterError(RuntimeError):
         self.request_id = request_id
         self.retry_after = retry_after
         self.definitely_unsent = definitely_unsent
+        self.request_rejected = request_rejected
         self.retryable = kind in {GitHubErrorKind.RATE_LIMITED, GitHubErrorKind.TRANSIENT}
         details = [f"GitHub {endpoint} failed", f"kind={kind.value}"]
         if status_code is not None:

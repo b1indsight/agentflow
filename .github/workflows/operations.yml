@@ -1,0 +1,56 @@
+name: Operations validation
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  recovery:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:17-alpine@sha256:f02121de6f74d30d8a94cd1d9584125e2178d7e6c377d8130112d4e52d867995
+        env:
+          POSTGRES_USER: flowtool
+          POSTGRES_PASSWORD: fixture-only
+          POSTGRES_DB: fixture
+        ports: ['55432:5432']
+        options: >-
+          --health-cmd "pg_isready -U flowtool -d fixture"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with: {persist-credentials: false}
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d
+        with: {version: '0.11.3'}
+      - name: Verify pinned promtool and alert rules
+        run: |
+          cache_dir=".cache/$(date +%F)/operations"
+          mkdir -p "$cache_dir"
+          curl -fsSL https://github.com/prometheus/prometheus/releases/download/v3.5.1/prometheus-3.5.1.linux-amd64.tar.gz -o "$cache_dir/prometheus.tar.gz"
+          echo "cd6aea0ab214b05838470668dfcee7d01a7d91913509a227b00401ca872423f0  $cache_dir/prometheus.tar.gz" | sha256sum --check
+          tar -xzf "$cache_dir/prometheus.tar.gz" -C "$cache_dir" prometheus-3.5.1.linux-amd64/promtool
+          "$cache_dir/prometheus-3.5.1.linux-amd64/promtool" check rules deploy/monitoring/alerts.yml
+          "$cache_dir/prometheus-3.5.1.linux-amd64/promtool" test rules deploy/monitoring/alerts.test.yml
+      - name: Real PostgreSQL 17 fixture restore with matching image tools
+        env:
+          FLOWTOOL_TEST_DATABASE_URL: postgresql://flowtool@127.0.0.1/fixture
+          PGPORT: '55432'
+        run: |
+          cache_dir="$PWD/.cache/$(date +%F)/operations"
+          mkdir -p "$cache_dir/bin"
+          export PGPASSFILE="$cache_dir/fixture.pgpass"
+          (umask 077; printf '%s\n' '127.0.0.1:55432:fixture:flowtool:fixture-only' > "$PGPASSFILE")
+          for tool in pg_dump pg_restore; do
+            cat > "$cache_dir/bin/$tool" <<'WRAPPER'
+          #!/bin/sh
+          exec docker run --rm --network host --user "$(id -u):$(id -g)" -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" -e PGHOST -e PGHOSTADDR -e PGPORT -e PGUSER -e PGPASSWORD -e PGPASSFILE -e PGDATABASE -e PGCONNECT_TIMEOUT -e PGSSLMODE -e PGSSLROOTCERT -e PGOPTIONS --entrypoint "$(basename "$0")" postgres:17-alpine@sha256:f02121de6f74d30d8a94cd1d9584125e2178d7e6c377d8130112d4e52d867995 "$@"
+          WRAPPER
+            chmod 755 "$cache_dir/bin/$tool"
+          done
+          uv run python -m scripts.smoke.recovery --run --work-dir "$cache_dir/drill" --postgres-bin "$cache_dir/bin" --revision "$GITHUB_SHA"
+          uv run ruff check scripts/smoke/recovery.py
+      - name: Verify systemd unit syntax (no services started)
+        run: |
+          sudo install -d /opt/flowtool/.venv/bin
+          sudo ln -s "$PWD/.venv/bin/flowtool" /opt/flowtool/.venv/bin/flowtool
+          systemd-analyze verify --man=no deploy/systemd/*.service

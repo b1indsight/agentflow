@@ -1,0 +1,25 @@
+[Unit]
+Description=Flowtool control plane (single instance)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=flowtool-control
+Group=flowtool-control
+WorkingDirectory=/var/lib/flowtool/control
+EnvironmentFile=/etc/flowtool/serve.env
+ExecStart=/opt/flowtool/.venv/bin/flowtool serve
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=60
+KillMode=control-group
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/flowtool/control
+
+[Install]
+WantedBy=multi-user.target

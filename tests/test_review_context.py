@@ -1,5 +1,7 @@
 """Snapshot boundaries protect evidence identity, size and recovery from changing GitHub data."""
 
+import pytest
+
 from app.context_models import (
     MAX_CONTEXT_BYTES,
     ContextDiscussion,
@@ -56,19 +58,25 @@ async def test_context_total_byte_limit_and_missing_patch_are_explicit():
     assert "context:truncated" in result.limitations
 
 
-async def test_missing_api_and_head_change_are_frozen_as_limitations():
+@pytest.mark.parametrize("permission", [False, True])
+async def test_api_errors_propagate_while_head_changes_remain_explicit(permission):
     class ChangingGitHub(SnapshotGitHub):
         reads = 0
 
         async def get_issue(self, *args):
-            raise GitHubAdapterError(GitHubErrorKind.PERMISSION, "get_issue")
+            if permission:
+                raise GitHubAdapterError(GitHubErrorKind.PERMISSION, "get_issue")
+            return await super().get_issue(*args)
 
         async def get_review_pull_request(self, *args):
             self.reads += 1
             return context().pull_request.model_copy(update={"head_sha": str(self.reads)})
     store = MemoryStore()
+    if permission:
+        with pytest.raises(GitHubAdapterError):
+            await build_review_context(ChangingGitHub(), store.flow, store.reviews.batch, 17)
+        return
     result = await build_review_context(ChangingGitHub(), store.flow, store.reviews.batch, 17)
-    assert "issue:permission" in result.limitations
     assert "pull_request:changed-during-read" in result.limitations
 
 

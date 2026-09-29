@@ -11,15 +11,29 @@ from typing import Protocol, runtime_checkable
 
 from app.context_models import DiscussionPage, FilePage, ReviewContext, ReviewPullRequest
 from app.github_models import (
+    FeedbackPage,
+    FeedbackSource,
     IssueSnapshot,
     PullRequestSnapshot,
+    PullRequestStatus,
     PushCapability,
     RemoteRef,
     RepositorySnapshot,
+    ReviewThreadPage,
     ReviewThreads,
 )
 from app.judge_models import JudgeDecision
 from app.models import AgentRun, CodeAgentContext, SandboxPolicy
+from app.project_models import ProjectItem, ProjectItemsPage, ProjectStatus, ProjectTarget
+
+
+class ProjectsClient(Protocol):
+    async def validate(self, repo: str) -> ProjectTarget: ...
+    async def issue_id(self, repo: str, number: int) -> str: ...
+    async def items_page(self, cursor: str | None) -> ProjectItemsPage: ...
+    async def read_item(self, item_id: str) -> ProjectItem | None: ...
+    async def add_issue(self, content_id: str) -> ProjectItem: ...
+    async def set_status(self, item_id: str, status: ProjectStatus) -> None: ...
 
 
 @runtime_checkable
@@ -76,6 +90,19 @@ class GitHubClient(Protocol):
 
     async def get_issue(self, installation_id: int, repo: str, number: int) -> IssueSnapshot: ...
 
+    async def list_review_thread_page(
+        self, installation_id: int, repo: str, pr: int, cursor: str | None,
+    ) -> ReviewThreadPage: ...
+
+    async def list_feedback_page(
+        self, installation_id: int, repo: str, number: int,
+        source: FeedbackSource, cursor: str | None,
+    ) -> FeedbackPage: ...
+
+    async def get_pull_request_status(
+        self, installation_id: int, repo: str, number: int,
+    ) -> PullRequestStatus: ...
+
     async def get_review_pull_request(
         self, installation_id: int, repo: str, number: int,
     ) -> ReviewPullRequest: ...
@@ -92,7 +119,9 @@ class GitHubClient(Protocol):
 
     async def create_push_capability(self, installation_id: int, repo: str) -> PushCapability: ...
 
-    async def get_ref(self, installation_id: int, repo: str, branch: str) -> RemoteRef: ...
+    async def get_ref(
+        self, installation_id: int, repo: str, branch: str, *, retry_transient: bool = False,
+    ) -> RemoteRef: ...
 
     async def compare_commits(
         self, installation_id: int, repo: str, base: str, head: str,

@@ -13,11 +13,14 @@ from fastapi import WebSocketDisconnect
 from loguru import logger
 from pydantic import ValidationError
 
+from app.control.preparation import PreparationStale
 from app.models import DeliveryState, FlowDelivery, FlowExecution, Job, JobKind, JobState
+from app.observability import Metrics
 from app.protocol import (
     Assignment,
     AssignmentSecret,
     ExecutionResult,
+    ExecutionStopped,
     ExecutionTask,
     Failed,
     FlowToolRequest,
@@ -32,12 +35,14 @@ from app.protocol import (
     ResultAccepted,
     ResumeAssignment,
     Started,
+    StopAccepted,
     Succeeded,
     WorkerMessage,
     parse_worker_message,
     terminal_digest,
 )
 from app.result_models import ResultPending
+from app.stop_store import StopIntent, StopStore
 
 
 class WorkerSocket(Protocol):
@@ -100,7 +105,11 @@ class GatewayStore(Protocol):
         digest: str,
     ) -> str: ...
 
-    def list_unapplied_results(self) -> list[Job]: ...
+    def unapplied_result_ceiling(self) -> int: ...
+
+    def list_unapplied_results(
+        self, *, after_id: int = 0, through_id: int | None = None, limit: int = 64,
+    ) -> list[Job]: ...
 
     def finish_assignment(
         self,
@@ -117,7 +126,9 @@ class GatewayStore(Protocol):
 
 
 class AssignmentCoordinator(Protocol):
-    async def prepare(self, job: Job) -> ExecutionTask | JobState: ...
+    async def prepare_for_assignment(
+        self, job: Job, worker: str, token: str, epoch: str,
+    ) -> ExecutionTask | JobState: ...
 
     async def assignment_secret(self, job: Job, task: ExecutionTask) -> AssignmentSecret | None: ...
 
@@ -148,13 +159,24 @@ class WorkerGateway:
         heartbeat_interval: float = 15.0,
         heartbeat_timeout: float = 45.0,
         poll_interval: float = 2.0,
+        recovery_concurrency: int = 4,
+        recovery_batch_size: int = 64,
+        metrics: Metrics | None = None,
+        stops: StopStore | None = None,
     ) -> None:
+        self.stops = stops
+        self.metrics = metrics
         self.store = store
         self.coordinator = coordinator
         self.worker_tokens = dict(worker_tokens)
         self.heartbeat_interval = heartbeat_interval
         self.heartbeat_timeout = heartbeat_timeout
         self.poll_interval = poll_interval
+        self.recovery_concurrency = recovery_concurrency
+        self.recovery_batch_size = recovery_batch_size
+        self._recovery_cursor = 0
+        self._recovery_ceiling = 0
+        self._recovery_lock = asyncio.Lock()
         self._sessions: dict[str, tuple[asyncio.Event, WorkerSocket]] = {}
         self._registry_lock = asyncio.Lock()
         self._result_locks: dict[int, asyncio.Lock] = {}
@@ -164,7 +186,10 @@ class WorkerGateway:
     ) -> tuple[ExecutionTask | JobState, AssignmentSecret | None]:
         """Keep the unstarted lease alive across both context and capability I/O; fence dispatch."""
         async def build() -> tuple[ExecutionTask | JobState, AssignmentSecret | None]:
-            prepared = await self.coordinator.prepare(job)
+            try:
+                prepared = await self.coordinator.prepare_for_assignment(job, worker_id, token, epoch)
+            except PreparationStale as error:
+                raise ProtocolViolation(str(error)) from error
             if isinstance(prepared, JobState):
                 return prepared, None
             try:
@@ -191,6 +216,8 @@ class WorkerGateway:
                     delivery = self.store.get_delivery(job.flow_id)
                     if (not isinstance(prepared, JobState) and delivery is not None
                             and delivery.supersedes(job.kind)):
+                        if delivery.state is DeliveryState.CLOSED:
+                            return JobState.DONE, None
                         await self.coordinator.fail(job, "PR merged before task dispatch")
                         return JobState.FAILED, None
                     return prepared, secret
@@ -221,7 +248,13 @@ class WorkerGateway:
                 worker_id, register.protocol_version, connection_epoch
             )
             connected = True
-            if register.recovery is not None:
+            stop = self.stops.pending(worker_id) if self.stops is not None else None
+            if (stop is None and self.stops is not None and register.recovery is not None
+                    and register.recovery.stop_request_id is not None):
+                stop = self.stops.receipt_request(worker_id, register.recovery.stop_request_id)
+            if stop is not None:
+                await self._stop_worker(socket, worker_id, connection_epoch, stop)
+            elif register.recovery is not None:
                 current = await self._recover(
                     socket,
                     worker_id,
@@ -229,7 +262,7 @@ class WorkerGateway:
                     register.recovery,
                 )
             if current is None:
-                stale_job_id = getattr(worker, "current_job_id", None)
+                stale_job_id = None if stop is not None else getattr(worker, "current_job_id", None)
                 if stale_job_id is not None and (
                     register.recovery is None or register.recovery.job_id != stale_job_id
                 ):
@@ -254,6 +287,9 @@ class WorkerGateway:
                 if current is None:
                     assert wake is not None
                     wake.clear()
+                    stop = self.stops.pending(worker_id) if self.stops is not None else None
+                    if stop is not None:
+                        await self._stop_worker(socket, worker_id, connection_epoch, stop)
                     token = uuid4().hex
                     job = self.store.assign_job(worker_id, token, connection_epoch)
                     if job is None:
@@ -269,6 +305,8 @@ class WorkerGateway:
                             )
                         self.notify_jobs()
                         continue
+                    if self.stops is not None and not self.stops.authorize_dispatch(job.id, worker_id, token, connection_epoch):
+                        raise ProtocolViolation("assignment changed before dispatch authorization")
                     current = (job, token, prepared)
                     await socket.send_text(
                         Assignment(
@@ -303,6 +341,11 @@ class WorkerGateway:
 
                 while True:
                     job, token, _ = current
+                    stop = self.stops.pending(worker_id) if self.stops is not None else None
+                    if stop is not None:
+                        await self._stop_worker(socket, worker_id, connection_epoch, stop)
+                        current = None
+                        break
                     message = await self._receive(socket)
                     if isinstance(message, Heartbeat):
                         self._validate_assignment_message(
@@ -394,7 +437,8 @@ class WorkerGateway:
             await socket.close(code=1013)
         except (WebSocketDisconnect, ConnectionError, TimeoutError) as exc:
             disconnect_reason = str(exc) or type(exc).__name__
-            logger.info("worker {} disconnected: {}", worker_id, exc)
+            logger.bind(event="worker_disconnected", reason_code="connection_lost",
+                        worker_id=worker_id).opt(exception=exc).info("")
         except ProtocolViolation as exc:
             disconnect_reason = str(exc)
             logger.warning("worker protocol violation: {}", exc)
@@ -427,6 +471,38 @@ class WorkerGateway:
                 )
             if registered_session:
                 await self._unregister_session(worker_id, socket)
+
+    async def _stop_worker(self, socket: WorkerSocket, worker_id: str, epoch: str, stop: StopIntent) -> None:
+        assert self.stops is not None
+        await socket.send_text(stop.message(epoch).model_dump_json())
+        # An in-flight heartbeat/tool/result can precede the stopped receipt on this stream.
+        async with asyncio.timeout(20):
+            while True:
+                message = await self._receive(socket)
+                if not isinstance(message, (Heartbeat, FlowToolRequest, Succeeded, Failed, ExecutionStopped)):
+                    raise ProtocolViolation("unexpected message while stopping")
+                if (message.job_id, message.assignment_token, message.connection_epoch) != (
+                        stop.job_id, stop.assignment_token, epoch):
+                    raise ProtocolViolation("stop reply has stale assignment credentials")
+                if isinstance(message, (Succeeded, Failed)):
+                    job = self.store.get_job(stop.job_id)
+                    if job is None:
+                        raise ProtocolViolation("stop result job is missing")
+                    receipt = self.store.record_assignment_result(job.id, worker_id, stop.assignment_token,
+                                                                 epoch, message.model_dump(mode="json"), terminal_digest(message))
+                    if receipt in {'conflict', 'rejected'}:
+                        raise ProtocolViolation("stop result conflicts with persisted facts")
+                    if receipt != 'applied':
+                        async with self._result_lock(job.id):
+                            latest = self.store.get_job(job.id)
+                            if latest is not None and latest.result_applied_at is None:
+                                await self._apply_terminal(latest, message)
+                if isinstance(message, ExecutionStopped):
+                    if message.request_id != stop.request_id or not self.stops.confirm(worker_id, message):
+                        raise ProtocolViolation("stop blocked: receipt or external effects not converged")
+                    await socket.send_text(StopAccepted(**stop.message(epoch).model_dump(exclude={'type'})).model_dump_json())
+                    self.notify_jobs()
+                    return
 
     async def _wait_while_idle(self, socket: WorkerSocket, wake: asyncio.Event) -> None:
         receive = asyncio.create_task(socket.receive_text())
@@ -483,37 +559,71 @@ class WorkerGateway:
             wake.set()
 
     async def recover_pending_results(self) -> None:
-        """Apply result-inbox entries left pending by a control-plane interruption."""
+        """Recover one bounded page with fixed concurrency and no overlapping recovery sweeps.
 
-        for job in self.store.list_unapplied_results():
-            async with self._result_lock(job.id):
-                current = self.store.get_job(job.id)
+        Advance past still-pending results before wrapping, so a permanently uncertain low ID
+        cannot monopolize every batch. Live WebSocket results retain the same per-job lock.
+        """
+        async with self._recovery_lock:
+            if not self._recovery_ceiling:
+                self._recovery_ceiling = self.store.unapplied_result_ceiling()
+            jobs = self.store.list_unapplied_results(
+                after_id=self._recovery_cursor, through_id=self._recovery_ceiling,
+                limit=self.recovery_batch_size,
+            )
+            if not jobs and self._recovery_cursor:
+                self._recovery_ceiling = self.store.unapplied_result_ceiling()
+                jobs = self.store.list_unapplied_results(
+                    through_id=self._recovery_ceiling, limit=self.recovery_batch_size,
+                )
+            self._recovery_cursor = jobs[-1].id if jobs else 0
+            if (len(jobs) < self.recovery_batch_size
+                    or self._recovery_cursor >= self._recovery_ceiling):
+                self._recovery_cursor = self._recovery_ceiling = 0
+            pending = iter(jobs)
+
+            async def drain() -> None:
+                # next() does not yield: each job belongs to exactly one pool task.
+                for job in pending:
+                    await self._recover_result(job.id)
+
+            async with asyncio.TaskGroup() as group:
+                for _ in range(min(self.recovery_concurrency, len(jobs))):
+                    group.create_task(drain())
+        self.notify_jobs()
+
+    async def _recover_result(self, job_id: int) -> None:
+        """Apply one durable message, isolating operational errors from other Flows."""
+        async with self._result_lock(job_id):
+            try:
+                current = self.store.get_job(job_id)
                 if current is None or current.result_applied_at is not None:
-                    continue
+                    return
                 payload = current.result_payload
                 if payload is None:
-                    continue
-                try:
-                    message = parse_worker_message(json.dumps(payload))
-                    if not isinstance(message, (Succeeded, Failed)):
-                        raise ProtocolViolation("persisted result is not terminal")
-                    await self._apply_terminal(current, message)
-                except ResultPending:
-                    continue
-                except Exception:  # noqa: BLE001 -- isolate a failed job so recovery can continue
-                    logger.exception("persisted result recovery failed for job {}", job.id)
-                    continue
-                logger.info("recovered persisted result for job {}", job.id)
-        self.notify_jobs()
+                    return
+                message = parse_worker_message(json.dumps(payload))
+                if not isinstance(message, (Succeeded, Failed)):
+                    raise ProtocolViolation("persisted result is not terminal")
+                await self._apply_terminal(current, message)
+            except ResultPending:
+                return
+            except Exception:  # noqa: BLE001 -- one corrupt result must not stop the recovery pool
+                logger.exception("persisted result recovery failed for job {}", job_id)
+                return
+            logger.info("recovered persisted result for job {}", job_id)
 
     def _result_lock(self, job_id: int) -> asyncio.Lock:
         return self._result_locks.setdefault(job_id, asyncio.Lock())
 
     async def _apply_terminal(self, job: Job, message: Succeeded | Failed) -> JobState:
-        if isinstance(message, Succeeded):
-            return await self.coordinator.apply_result(job, message.result)
-        await self.coordinator.fail(job, message.error)
-        return JobState.FAILED
+        with logger.contextualize(job_id=job.id, flow_id=job.flow_id,
+                                  worker_id=job.assigned_worker_id):
+            logger.bind(event="job_result", reason_code="ok").info("")
+            if isinstance(message, Succeeded):
+                return await self.coordinator.apply_result(job, message.result)
+            await self.coordinator.fail(job, message.error)
+            return JobState.FAILED
 
     @staticmethod
     def _validate_assignment_message(
@@ -555,6 +665,10 @@ class WorkerGateway:
             and recovery.result_digest == job.result_digest
             and job.state in (JobState.DONE, JobState.FAILED)
         ):
+            if self.metrics is not None:
+                self.metrics.replays.inc()
+            logger.bind(event="job_result", reason_code="ok", job_id=job.id,
+                        flow_id=job.flow_id, worker_id=worker_id, epoch=connection_epoch).info("")
             await socket.send_text(
                 ResultAccepted(
                     job_id=job.id,
@@ -630,7 +744,8 @@ class WorkerGateway:
             self.notify_jobs()
             return
         delivery = self.store.get_delivery(job.flow_id)
-        if delivery is not None and delivery.state is DeliveryState.MERGED:
-            raise ProtocolViolation("archive blocked: original worker assignment journal is missing")
+        if delivery is not None and delivery.state in {DeliveryState.CLOSED, DeliveryState.MERGED}:
+            action = "reopen" if delivery.state is DeliveryState.CLOSED else "archive"
+            raise ProtocolViolation(f"{action} blocked: original worker assignment journal is missing")
         reason = "worker reconnected without its started assignment journal"
         await self.coordinator.fail(job, reason)

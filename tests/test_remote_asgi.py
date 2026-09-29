@@ -26,6 +26,9 @@ from app.store import Store
 
 
 class AsgiCoordinator:
+    async def prepare_for_assignment(self, job, worker, token, epoch):
+        return await self.prepare(job)
+
     def __init__(self, attempt_id: int, store: Store) -> None:
         self.attempt_id = attempt_id
         self.store = store
@@ -74,8 +77,14 @@ class AsgiContext:
             poll_interval=0.01,
         )
 
+    async def ready(self) -> bool:
+        return True
+
     def startup(self) -> None:
         pass
+
+    async def receive_webhook(self, event_type, delivery_id, payload, digest) -> None:
+        raise AssertionError("webhook receipt is not used in this test")
 
     def spawn_handler(self, coroutine) -> None:
         raise AssertionError("webhook handler is not used in this test")

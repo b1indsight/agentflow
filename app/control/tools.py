@@ -82,8 +82,8 @@ class FlowToolService:
                 FlowToolErrorKind.CONFLICT,
                 "Flow delivery is not prepared",
             )
-        if delivery.state is DeliveryState.MERGED:
-            raise FlowToolRejected(FlowToolErrorKind.CONFLICT, "PR merged; flow.open_pr is retired")
+        if delivery.state in {DeliveryState.CLOSED, DeliveryState.MERGED}:
+            raise FlowToolRejected(FlowToolErrorKind.CONFLICT, "PR closed or merged; flow.open_pr is retired")
         if request.branch != delivery.branch:
             raise FlowToolRejected(
                 FlowToolErrorKind.CONFLICT,
@@ -137,7 +137,7 @@ class FlowToolService:
                 FlowToolErrorKind.AUTHORIZATION,
                 "Flow has no GitHub installation",
             )
-        remote = await self.github.get_ref(installation_id, flow.repo, delivery.branch)
+        remote = await self.github.get_ref(installation_id, flow.repo, delivery.branch, retry_transient=True)
         if remote.branch != delivery.branch:
             raise FlowToolRejected(
                 FlowToolErrorKind.UPSTREAM,

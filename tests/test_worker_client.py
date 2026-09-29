@@ -7,6 +7,7 @@ from app.protocol import (
     Assignment,
     ExecutionResult,
     ExecutionTask,
+    Failed,
     FlowToolErrorKind,
     FlowToolRequest,
     FlowToolResponse,
@@ -48,6 +49,8 @@ class RecordingExecutor:
 
 class ScriptedConnection:
     def __init__(self) -> None:
+        self.result_ready = asyncio.Event()
+        self.tool_ready = asyncio.Event()
         self.sent: list[str] = []
         self.messages = [
             Registered(heartbeat_interval=60, connection_epoch="epoch-1").model_dump_json(),
@@ -76,10 +79,17 @@ class ScriptedConnection:
 
     async def send(self, data: str) -> None:
         self.sent.append(data)
+        message = parse_worker_message(data)
+        if isinstance(message, (Succeeded, Failed)):
+            self.result_ready.set()
+        if isinstance(message, FlowToolRequest):
+            self.tool_ready.set()
 
     async def recv(self) -> str:
         if not self.messages:
             raise ConnectionError("script complete")
+        if '"type":"result_accepted"' in self.messages[0]:
+            await self.result_ready.wait()
         return self.messages.pop(0)
 
 
@@ -158,11 +168,18 @@ class ToolCallingExecutor:
 
 class ToolConnection:
     def __init__(self) -> None:
+        self.result_ready = asyncio.Event()
+        self.tool_ready = asyncio.Event()
         self.sent: list[str] = []
         self.step = 0
 
     async def send(self, data: str) -> None:
         self.sent.append(data)
+        message = parse_worker_message(data)
+        if isinstance(message, (Succeeded, Failed)):
+            self.result_ready.set()
+        if isinstance(message, FlowToolRequest):
+            self.tool_ready.set()
 
     async def recv(self) -> str:
         self.step += 1
@@ -185,12 +202,14 @@ class ToolConnection:
                 ),
             ).model_dump_json()
         if self.step == 3:
+            await self.tool_ready.wait()
             request = parse_worker_message(self.sent[-1])
             assert isinstance(request, FlowToolRequest)
             return FlowToolResponse(
                 call_id=request.call_id, result={"pr_number": 17}
             ).model_dump_json()
         if self.step == 4:
+            await self.result_ready.wait()
             terminal = parse_worker_message(self.sent[-1])
             assert isinstance(terminal, Succeeded)
             return ResultAccepted(
@@ -243,17 +262,20 @@ class BrokenHeartbeatConnection:
             raise ConnectionError("connection lost")
 
     async def recv(self) -> str:
-        raise AssertionError("result acknowledgement should not be awaited")
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
 
 
 @pytest.mark.asyncio
-async def test_heartbeat_failure_preserves_the_running_executor_for_reconnect() -> None:
+async def test_heartbeat_failure_preserves_the_running_executor_for_reconnect(tmp_path) -> None:
+    from app.worker.journal import WorkerJournal
     executor = CancellableExecutor()
     client = WorkerClient(
         worker_id="worker-1",
         worker_token="worker-secret",
         serve_ws_url="ws://unused",
         executor=executor,
+        journal=WorkerJournal(tmp_path),
     )
     assignment = Assignment(
         job_id=5,
@@ -281,6 +303,28 @@ async def test_heartbeat_failure_preserves_the_running_executor_for_reconnect() 
         with pytest.raises(ConnectionError, match="connection lost"):
             await execution
         assert executor.cancelled.is_set() is False
+        from app.protocol import ResumeAssignment
+
+        heartbeat = asyncio.Event()
+        class ResumedConnection:
+            first = True
+            async def send(self, data):
+                if isinstance(parse_worker_message(data), Heartbeat):
+                    heartbeat.set()
+            async def recv(self):
+                if self.first:
+                    self.first = False
+                    return ResumeAssignment(job_id=5, assignment_token='assignment-1',
+                                            connection_epoch='epoch-2', heartbeat_interval=0.01).model_dump_json()
+                await asyncio.Event().wait()
+        resumed = asyncio.create_task(client.run_connection(ResumedConnection()))
+        try:
+            await asyncio.wait_for(heartbeat.wait(), 1)
+            assert client.connected  # Recovery succeeded even though the executor is still busy.
+            assert client._execution is not None and not client._execution.done()
+        finally:
+            resumed.cancel()
+            await asyncio.gather(resumed, return_exceptions=True)
     finally:
         await client._cancel_execution()
     assert executor.cancelled.is_set() is True

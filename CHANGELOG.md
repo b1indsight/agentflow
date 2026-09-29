@@ -1,6 +1,82 @@
 # Changelog
 
+- M5 F4：Docker smoke 保持 worker 运行并验证 serve 换 IP 后连接 epoch 更新，排除旧 online 状态及容器重启误报。
+
+- M5 F2：补充真实并发接收提交顺序回归，并验证移除事务锁会导致测试失败。
+- M5 F3：父观察器收到 SIGTERM 后回收观察进程组并释放运行状态锁。
+- M5 F8：恢复测试从实际连接读取 fixture 端口，兼容 URL 省略端口的 libpq 配置。
+
 ## Unreleased
+
+- M5 F8：增加 systemd 示例、维护/冷备/轮换 runbook、10 条 Prometheus 告警及测试，
+  提供隔离 PostgreSQL dump/restore 演练与完整性校验；复制 root 的活动恢复仍明确阻塞。
+
+- M5 F7：增加零副本起步的 Kustomize base、独立 schema Job、RWOP worker PVC、内部 TLS
+  和可选 Cloudflare overlay；新增有界 DB readiness 与 worker 本地探针，集群验收待环境。
+
+- M5 F6：协议 v9 持久停止请求与 nonce 凭据、取消确认前保留 binding、丢失 ACK 重放、
+  只读核对已发送 effects；持久 worker drain 允许原 Flow 收尾，补齐 SIGTERM 接线。
+
+- M5 F5：增加字段白名单日志、独立 bearer 鉴权的内部指标和后台只读 PG 快照；采集故障
+  保留旧值并暴露陈旧度，重放不重复累加持久执行统计。默认关闭 metrics。
+
+- M5 F4：增加非 root serve/worker 镜像、TLS Compose 部署、可选 Cloudflare profile 与
+  镜像构建/候选 digest 验证发布流程；本地无 Docker，实际构建及真实任务验收待 CI/环境。
+
+- M5 F3：增加默认只读的真实闭环验收工具、显式测试 Issue 创建和结果未知保护，
+  记录同一 Flow/PR 的修订 head 与归档事实；真实模型/GitHub 矩阵仍需运行环境。
+
+- 修复 M5 Webhook 退避越过取消：同仓库按持久接收序号消费，阻塞项保留顺序。
+- M5 F2：Webhook 在 202 前持久入库；业务转换与 inbox 完成同事务，支持重启重放、有限重试、
+  blocked 诊断/重试、请求体限额及完成数据保留清理。旧 events 状态不明时保守阻塞。
+
+- M4 收尾：PR 重开时持久退休已有反馈版本的强信号授权，超过单批上限、WAIT、空正文和重启
+  不再绕过重新分诊；新反馈版本仍可正常授权修订。补齐 OPEN 轮询与限流退避跨重启回归。
+
+- F9 返修：Projects 明确拒绝的建卡请求可恢复重试；已知归档结果等待通知时不再误标 Blocked。
+
+- M4 F9：独立持久 Projects 状态投影，支持分页、响应丢失核对、版本竞争、退避及 CLI 诊断/重试，不阻塞归档释放。
+  恢复验证覆盖已有归档卡片发现、人工恢复和跨重启 retry，复用原卡而不重复 add。
+
+- M4 F8：可选组织 Projects v2 配置、只读目标校验、分页 item 读取及独立 add/Status API。
+  阻塞返修：分页显式包含归档和非归档卡片，避免误判不存在后进入不确定建卡状态。
+
+- 保留 CLOSED PR 的失联执行现场，重开前清理重新入队的旧任务，并保留查询期间到达的对账提示。
+
+- F7 返修：永久准备失败也隔离旧领取者；耗尽保留根因；结果核验持久退避并遵守 Retry-After。
+
+- M4 F7：尚未派发的只读 GitHub 准备支持持久有界重试，默认 5 次连续失败、15 分钟窗口；
+  同事务保存退避与原 worker/token/epoch 条件重排，不消耗 revision_cycles。过期窗口不再读取，
+  慢重试读取按剩余时间取消；成功后清预算。上下文/线程候选只在整轮成功后冻结，SDK 准备期读取
+  不再叠加自动重试；CLI 显示准备诊断。签发凭据和模型执行保持既有失败语义。
+  阻塞返修：执行中 flow.open_pr 的 ref 读取恢复 SDK 重试，持久准备/核验保留单次读取。
+
+
+- M4 F6：未合并 PR 关闭或确认 head/base 漂移后暂挂原 delivery，保留 worker/repo binding；
+  退休排队意图，旧结果/已发 effects 只收尾事实。生命周期 webhook 提前唤醒新鲜查询，
+  重开须等待旧执行/结果收敛并核验原基线或冻结 worker 交付；反馈重新 triage，retry 不绕过暂挂。
+  阻塞返修：CLOSED 缺少 journal 时保留原执行和结果入口，现场恢复后可重新打开 PR。
+
+- M4 F5：持续扫描 PR Review 线程，包括已 resolved 线程内的新反馈；每次一个有界 GraphQL
+  页，分别保存线程/评论 cursor，重启后续扫。页内容与进度原子提交，版本边界保护并发 webhook；
+  人工状态只记录事实，不调用 reply/resolve/unresolve。缺失节点的扫描保持 incomplete。
+  返修处理真实 SDK 的嵌套 NOT_FOUND，使缺失线程不再困住外层扫描。
+
+- F4 阻塞返修：空正文不能挡住有效反馈；同正文的命令停用状态正确持久化。
+
+- M4 F4：Issue/PR 评论和 Review 正文按有界页持久对账，页内容与 continuation 原子提交；
+  周期复扫捕获编辑，查询前冻结版本序号避免覆盖新 webhook。旧命令不执行、不补造强信号授权，
+  页面缺席不推断删除。`flow show` 展示各来源的进度、失败和下次重试。
+  返修限制单批输入并自动推进积压，保留授权提交信号与排队编辑；命令编辑失效旧意见且允许后续恢复。
+
+- M4 F3：持久 PR 对账补偿漏失的合并 webhook，复用同一合并事务和归档入口；保存检查
+  deadline/成功时间/错误，支持重启、分页、有限并发和 Retry-After。旧快照不能回退新状态，
+  历史终态 Flow 只记录合并事实；`flow show` 可查看对账诊断。
+  返修关闭 PR 读取的 SDK 内部重试，保证限流 deadline 先持久化。
+
+- M4 F2：lease、settle 与网络结果恢复分别调度，结果按有界页和固定并发恢复；持续新增结果
+  不会阻止旧 pending 结果再次被扫描。保留同 job 的实时/恢复排他和原 worker fencing。
+  新增结果恢复并发与批次配置，默认 4 / 64；shutdown 等待恢复池退出。
 
 - M4 F1：同秒远端观察与迟到 webhook 的重复转换按版本历史核对；已出现过的转换及无法
   定序的多后继编辑保留待核对，不再在正文回退后复活旧反馈。新鲜观察可继续推进，较晚
@@ -86,3 +162,10 @@
 - ANSWER 保留未决问题；approval/删除不唤醒 waiting；空 review 正文不再阻塞修订完成。
 - 同秒乱序编辑持久暂存并按前序回放。
 - 移除评论中 `@bot` 直达修订的规则；普通文本和代码示例统一进入 Judge，仅授权的 Request Changes 绕过 Judge。
+
+- M5 F3 返修：没有 Issue 的观察返回未完成；统一进程预算覆盖数据库连接与外部命令。
+- M5 F4 返修：修正 Codex 认证变量，网关动态解析 serve，smoke 边界断言立即失败。
+- M5 F5 返修：reconcile 指标匹配调度资格，标准日志保留原级别与来源并继续脱敏。
+- M5 F6 返修：准备取消无需不存在的 journal；历史 stop ACK 不受重绑影响；恢复取消中的 PR 身份与合并事实。
+- M5 F7 返修：serve 的 DB/HTTP 不可用仅撤销就绪，不使用杀进程探针；worker 恢复执行时立即就绪。
+- M5 F8 返修：恢复演练冻结 libpq 解析结果，Python 与 dump/restore 共用端口、密码文件与 TLS 设置。

@@ -144,8 +144,8 @@ class FlowDelivery(BaseModel):
     updated_at: datetime = Field(default_factory=utcnow)
 
     def supersedes(self, kind: JobKind) -> bool:
-        """A merged delivery retires coding/review work while still requiring archive."""
-        return self.state is DeliveryState.MERGED and kind is not JobKind.ARCHIVE
+        """Closed PRs retire coding/review intent; merged deliveries still require archive."""
+        return self.state in {DeliveryState.CLOSED, DeliveryState.MERGED} and kind is not JobKind.ARCHIVE
 
 
 class FlowToolCall(BaseModel):
@@ -181,8 +181,15 @@ class Job(BaseModel):
     result_received_at: datetime | None = None
     result_applied_at: datetime | None = None
     result_recovery_version: int = 1
+    verify_failures: int = 0
+    verify_next_at: datetime | None = None
+    verify_last_error: str | None = None
     source_job_id: int | None = None
     source_key: str | None = None
+    prepare_failures: int = 0
+    prepare_next_at: datetime | None = None
+    prepare_first_failed_at: datetime | None = None
+    prepare_last_error: str | None = None
     last_error: str | None = None
     payload: dict | None = None
     created_at: datetime = Field(default_factory=utcnow)
@@ -190,6 +197,7 @@ class Job(BaseModel):
 
 
 class WorkerRecord(BaseModel):
+    draining: bool = False
     worker_id: str
     protocol_version: int
     status: WorkerStatus
@@ -204,6 +212,7 @@ class WorkerRecord(BaseModel):
 
 
 class WorkerView(BaseModel):
+    draining: bool = False
     worker_id: str
     status: WorkerStatus
     current_job_id: int | None = None

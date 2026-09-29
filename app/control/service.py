@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from functools import partial
 
 from loguru import logger
 
@@ -12,6 +13,7 @@ from app.models import (
     TERMINAL_STATES,
     DeliveryState,
     Flow,
+    FlowDelivery,
     FlowState,
     JobKind,
     JobState,
@@ -28,12 +30,20 @@ class ControlService:
         store: Store,
         plugins=None,
         jobs_available: Callable[[], None] | None = None,
+        *, after_commit: list[Callable[[], None]] | None = None,
     ) -> None:
+        self._after_commit = after_commit
         self.store = store
         self.plugins = plugins or get_plugin_manager()
         self._jobs_available = jobs_available or (lambda: None)
 
     def _fire(self, hook: str, **kwargs: object) -> None:
+        if self._after_commit is not None:
+            self._after_commit.append(partial(self._emit_hook, hook, **kwargs))
+        else:
+            self._emit_hook(hook, **kwargs)
+
+    def _emit_hook(self, hook: str, **kwargs: object) -> None:
         try:
             getattr(self.plugins.hook, hook)(**kwargs)
         except Exception as exc:  # noqa: BLE001
@@ -54,13 +64,14 @@ class ControlService:
     def cancel(self, flow: Flow) -> None:
         with self.store.transaction() as tx:
             fresh = tx.lock_workflow(flow.id)
-            if fresh is None or fresh.state in TERMINAL_STATES:
+            if fresh is None or fresh.state is FlowState.SUCCEEDED:
                 return
             delivery = tx.get_delivery(fresh.id)
             if delivery is not None and delivery.state is DeliveryState.MERGED:
                 raise ValueError("a merged Flow must finish archive before its worker can be released")
             fresh.state = FlowState.CANCELLED
             tx.update_flow(fresh)
+            tx.stops.request(fresh.id)
             tx.release_flow_execution(fresh.id)
             tx.cancel_jobs(fresh.id)
         self._jobs_available()
@@ -81,23 +92,41 @@ class ControlService:
                 return
             if not tx.record_event(delivery_id, "pull_request", fresh.id, payload):
                 return
-            if ((delivery.merged_at is not None and delivery.merged_at != merge.merged_at)
-                    or (delivery.merge_commit_sha is not None
-                        and delivery.merge_commit_sha != merge.merge_commit_sha)):
-                raise ValueError("merge event conflicts with recorded merge facts")
-            first_merge = delivery.state is not DeliveryState.MERGED
-            if first_merge or delivery.merged_at is None or delivery.merge_commit_sha is None:
-                delivery.state = DeliveryState.MERGED
-                delivery.merged_at = merge.merged_at
-                delivery.merge_commit_sha = merge.merge_commit_sha
-                delivery.version += 1
-                tx.update_delivery(delivery)
-            if not first_merge:
-                return
-            if fresh.state not in TERMINAL_STATES:
-                tx.cancel_jobs(flow.id, reason="PR merged; queued work retired")
-                tx.enqueue_job(flow.id, JobKind.ARCHIVE)
-        self._fire("on_merged", flow=fresh)
+            first_merge = self.record_merge(tx, fresh, delivery, merge)
+        if first_merge:
+            self.notify_merge(fresh)
+
+    @staticmethod
+    def record_merge(tx: Store, flow: Flow, delivery: FlowDelivery, merge: PullRequestMerge) -> bool:
+        """Apply verified merge facts under the caller's workflow lock, for webhook or poll."""
+        if delivery.flow_id != flow.id or delivery.pr_number != merge.number:
+            raise ValueError("merge does not belong to delivery")
+        if ((delivery.merged_at is not None and delivery.merged_at != merge.merged_at)
+                or (delivery.merge_commit_sha is not None
+                    and delivery.merge_commit_sha != merge.merge_commit_sha)):
+            raise ValueError("merge event conflicts with recorded merge facts")
+        first_merge = delivery.state is not DeliveryState.MERGED
+        if first_merge or delivery.merged_at is None or delivery.merge_commit_sha is None:
+            delivery.state = DeliveryState.MERGED
+            delivery.merged_at = merge.merged_at
+            delivery.merge_commit_sha = merge.merge_commit_sha
+            delivery.version += 1
+            tx.update_delivery(delivery)
+        binding = tx.get_flow_execution(flow.id)
+        if (first_merge and flow.state is FlowState.CANCELLED and binding is not None
+                and binding.released_at is None and tx.stops.has_pending(flow.id)
+                and tx.get_active_flow(flow.repo, flow.issue_number) is None):
+            # Merge facts supersede cancellation only for archive on the retained original binding.
+            flow.state = FlowState.ACTIVE
+            tx.update_flow(flow)
+        if first_merge and flow.state not in TERMINAL_STATES:
+            tx.cancel_jobs(flow.id, reason="PR merged; queued work retired")
+            tx.enqueue_job(flow.id, JobKind.ARCHIVE)
+        return first_merge
+
+    def notify_merge(self, flow: Flow) -> None:
+        """Notify plugins and workers only after merge facts and archive work have committed."""
+        self._fire("on_merged", flow=flow)
         self._jobs_available()
 
     def retry(self, flow: Flow) -> None:
@@ -106,7 +135,11 @@ class ControlService:
             fresh = tx.lock_workflow(flow.id)
             if fresh is None:
                 raise ValueError(f"flow {flow.id} disappeared")
+            if tx.stops.has_pending(fresh.id):
+                raise ValueError("cancellation is awaiting confirmed stop or pending result reconciliation")
             delivery = tx.get_delivery(fresh.id)
+            if delivery is not None and delivery.state is DeliveryState.CLOSED:
+                raise ValueError("PR is closed or paused; reopen and reconcile its baseline before retry")
             if delivery is not None and delivery.state is DeliveryState.MERGED:
                 self._retry_archive(tx, fresh)
             elif tx.has_pending_result(flow.id):
@@ -208,6 +241,7 @@ class ControlService:
             views.append(
                 WorkerView(
                     worker_id=worker.worker_id,
+                    draining=worker.draining,
                     status=worker.status,
                     current_job_id=worker.current_job_id,
                     current_flow_id=(

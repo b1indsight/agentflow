@@ -13,8 +13,11 @@ from fastapi import WebSocket
 
 from app.control.api import WebhookRouter, create_app
 from app.control.router import EventRouter
+from app.control.service import ControlService
+from app.control.webhooks import WebhookConsumer
 from app.models import Flow, FlowState, JobKind
 from app.store import Store
+from app.webhook_store import WebhookStore
 
 
 class RecordingRouter:
@@ -35,9 +38,23 @@ class RecordingGateway:
 class FakeContext:
     def __init__(self, router: WebhookRouter | None = None, settings=None) -> None:
         self.settings = settings or SimpleNamespace(github_webhook_secret="webhook-secret")
+        self.settings.webhook_max_body_bytes = 25 * 1024 * 1024
         self.router = router or RecordingRouter()
         self.gateway = RecordingGateway()
         self.tasks: list[asyncio.Task[None]] = []
+
+    async def receive_webhook(self, event_type: str, delivery_id: str, payload: dict, digest: str) -> None:
+        assert isinstance(self.router, EventRouter)
+        store = self.router.store
+        WebhookStore(store).receive(delivery_id, event_type, payload, digest)
+
+        async def consume() -> None:
+            WebhookConsumer(store, self.settings, ControlService(store)).sweep()
+
+        self.tasks.append(asyncio.create_task(consume()))
+
+    async def ready(self) -> bool:
+        return True
 
     def startup(self) -> None:
         pass
@@ -147,3 +164,50 @@ async def test_valid_signature_dispatches_webhook(
     assert flow.state is FlowState.ACTIVE
     store.worker_connected("worker-1", protocol_version=1)
     assert store.assign_job("worker-1", "assignment-1") is not None
+
+
+def signed_headers(body: bytes) -> dict[str, str]:
+    return {"X-GitHub-Event": "issues", "X-GitHub-Delivery": "receipt-1",
+            "X-Hub-Signature-256": "sha256=" + hmac.new(
+                b"webhook-secret", body, hashlib.sha256).hexdigest()}
+
+
+@pytest.mark.asyncio
+async def test_receipt_commit_failure_is_not_acknowledged(client, context, monkeypatch):
+    from psycopg import OperationalError
+
+    def unavailable(*args):
+        raise OperationalError("secret database URL")
+
+    monkeypatch.setattr(context, "receive_webhook", unavailable)
+    response = await client.post("/webhook", content=b"{}", headers=signed_headers(b"{}"))
+    assert response.status_code == 503
+    assert "secret" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_invalid_identity_json_and_conflict(client, context, monkeypatch):
+    from app.webhook_store import DeliveryConflict
+
+    for body in [b"[]", b"{", b"null", b'{"value":NaN}']:
+        assert (await client.post("/webhook", content=body, headers=signed_headers(body))).status_code == 400
+    headers = signed_headers(b"{}")
+    del headers["X-GitHub-Delivery"]
+    assert (await client.post("/webhook", content=b"{}", headers=headers)).status_code == 400
+
+    def conflict(*args):
+        raise DeliveryConflict()
+
+    monkeypatch.setattr(context, "receive_webhook", conflict)
+    assert (await client.post("/webhook", content=b"{}", headers=signed_headers(b"{}"))).status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_streamed_request_body_limit(client, context):
+    context.settings.webhook_max_body_bytes = 3
+
+    async def chunks():
+        yield b"{"
+        yield b'"large":1}'
+
+    assert (await client.post("/webhook", content=chunks())).status_code == 413

@@ -5,6 +5,22 @@
 
 ## 当前计划
 
+- [`m4-reopen-triage.md`](m4-reopen-triage.md) — M4 收尾 #37：已实现重开后多批反馈授权退休及 OPEN 轮询跨重启回归，726 项 PostgreSQL 全量通过，待用户 review/合并；
+
+- [`m4-pr-reconcile.md`](m4-pr-reconcile.md) — M4 F3：持久 PR 检查与漏失合并补偿已实施，548 项 PostgreSQL 回归通过；PR #30 以 F2 分支为基线；
+
+- [`m4-recovery-concurrency.md`](m4-recovery-concurrency.md) — M4 F2：本地 sweep 隔离、有界结果恢复并发及公平续扫已实施，523 项 PostgreSQL 回归通过；PR #29 以 F1 分支为基线；
+
+- [`m5-stage.md`](m5-stage.md) — M5 阶段草案：部署文档、Docker 镜像和 Kubernetes 部署，Cloudflare 归入部署配置；每 Flow 强隔离后置；
+- [`../deployment/README.md`](../deployment/README.md) — M5 F1：直接进程部署与 Cloudflare 接入文档已编写；未新增应用功能，真实部署待验证；
+- [M5 F2：Webhook 持久接收与重放 · #39](https://github.com/b1indsight/agentflow/pull/39) — 已实施并推送，保留 Draft；审查发现与环境验收见 PR；
+- [M5 F3：真实最小闭环 · #40](https://github.com/b1indsight/agentflow/pull/40) — 已实施并推送，保留 Draft；审查发现与环境验收见 PR；
+- [M5 F4：Docker 镜像与 Compose · #41](https://github.com/b1indsight/agentflow/pull/41) — 已实施并推送，保留 Draft；审查发现与环境验收见 PR；
+- [M5 F5：结构化日志与指标 · #42](https://github.com/b1indsight/agentflow/pull/42) — 已实施并推送，保留 Draft；审查发现与环境验收见 PR；
+- [M5 F6：运行中取消、drain 与停机 · #43](https://github.com/b1indsight/agentflow/pull/43) — 已实施并推送，保留 Draft；审查发现与环境验收见 PR；
+- [M5 F7：Kubernetes 部署 · #44](https://github.com/b1indsight/agentflow/pull/44) — 已实施并推送，保留 Draft；审查发现与环境验收见 PR；
+- [M5 F8：常驻运维与恢复验收 · #45](https://github.com/b1indsight/agentflow/pull/45) — 已实施并推送，保留 Draft；审查发现与环境验收见 PR；
+
 本节包含待审批及已实现、仍有验收待办的计划。M2 F1–F4 已全部合并；状态、证据和开放问题见 [M2 状态与待办](../architecture/README.md#m2-状态与待办)。
 
 - [`m4-stage.md`](m4-stage.md) — M4 阶段计划：九个 feature，单 PR 预算 850–1080 行；已批准按序实现和推送，由用户统一 review/合并；

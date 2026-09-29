@@ -157,6 +157,8 @@ class ResultApplication:
                 tx.results.skip_remaining(job_id, failure or plan.error or "result failed")
             if not tx.complete_persisted_result(job_id, state):
                 raise ResultPending("result has not reached its atomic completion boundary")
+            if flow.state is FlowState.CANCELLED:
+                tx.release_flow_execution(flow.id)
         if not retired:
             self._after_commit(flow, current, plan, state)
         return state
@@ -184,11 +186,14 @@ class ResultApplication:
         delivery = self.store.get_delivery(flow.id)
         if delivery is None or delivery.head_sha != task.expected_head_sha:
             return "revision baseline no longer matches delivery"
+        if job.verify_next_at is not None and job.verify_next_at > self.store.now():
+            raise ResultPending(job.verify_last_error or "revision verification backoff")
         assert result.commit_sha is not None
         try:
             return await verify_revision_remote(self.effects.github, flow, delivery, result.commit_sha)
         except GitHubAdapterError as error:
             if error.retryable:
+                self.store.results.defer_verification(job, error)
                 raise ResultPending(str(error)) from error
             return str(error)
 
@@ -454,7 +459,7 @@ class ResultApplication:
         message = parse_worker_message(json.dumps(job.result_payload))
         run = None
         state = JobState.DONE
-        reason = "PR merged; late result retained without applying coding/review changes"
+        reason = "PR closed or merged; late result retained without applying coding/review changes"
         if isinstance(message, Failed):
             state, reason = JobState.FAILED, f"{reason}: {message.error}"
         elif isinstance(message, Succeeded):

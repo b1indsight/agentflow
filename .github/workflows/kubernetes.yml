@@ -1,0 +1,34 @@
+name: Kubernetes templates
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with: {persist-credentials: false}
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d
+        with: {version: '0.11.3'}
+      - name: Verify pinned kubectl and render both variants
+        run: |
+          k8s_cache=".cache/$(date +%F)/k8s"
+          mkdir -p "${k8s_cache}"
+          curl -fsSL https://dl.k8s.io/release/v1.35.4/bin/linux/amd64/kubectl -o ${k8s_cache}/kubectl
+          curl -fsSL https://dl.k8s.io/release/v1.35.4/bin/linux/amd64/kubectl.sha256 -o ${k8s_cache}/kubectl.sha256
+          echo "$(cat ${k8s_cache}/kubectl.sha256)  ${k8s_cache}/kubectl" | sha256sum --check
+          chmod 755 ${k8s_cache}/kubectl
+          ${k8s_cache}/kubectl kustomize deploy/k8s/base > ${k8s_cache}/base.yaml
+          ${k8s_cache}/kubectl kustomize deploy/k8s/overlays/cloudflare > ${k8s_cache}/cloudflare.yaml
+          uv run --with pyyaml==6.0.2 python scripts/smoke/validate_kubernetes.py --allow-placeholders ${k8s_cache}/base.yaml
+          uv run --with pyyaml==6.0.2 python scripts/smoke/validate_kubernetes.py --allow-placeholders ${k8s_cache}/cloudflare.yaml
+          bash -n scripts/smoke/kubernetes.sh
+      - name: Verify non-root read-only TLS gateway configuration
+        run: |
+          tls_dir="$PWD/.cache/$(date +%F)/k8s/tls"
+          mkdir -p "$tls_dir"
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=flowtool-serve.flowtool.svc -keyout "$tls_dir/tls.key" -out "$tls_dir/tls.crt" >/dev/null 2>&1
+          chmod 755 "$tls_dir"
+          chmod 444 "$tls_dir/"*
+          docker run --rm --read-only --user 10001:10001 --cap-drop ALL --security-opt no-new-privileges --network none --tmpfs /tmp:rw,nosuid,size=16m --entrypoint nginx -v "$PWD/deploy/k8s/base/nginx.conf:/etc/nginx/nginx.conf:ro" -v "$tls_dir:/run/secrets/tls:ro" nginx:stable-alpine@sha256:ef8676b33d681f272ba429b27658bdd7e640963279714c96bddf1dc76307f7b6 -t

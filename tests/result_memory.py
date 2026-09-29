@@ -116,3 +116,16 @@ class MemoryResults:
                         EffectState.UNCERTAIN if record.dispatched_at else EffectState.PENDING
                     )
                     record.claimed_by = record.claim_expires_at = None
+
+
+class MemoryStops:
+    """Domain-test double only; stop fencing and confirmation are covered against PostgreSQL."""
+
+    def __init__(self) -> None:
+        self.requested: set[int] = set()
+
+    def request(self, flow_id: int) -> None:
+        self.requested.add(flow_id)
+
+    def has_pending(self, flow_id: int) -> bool:
+        return flow_id in self.requested

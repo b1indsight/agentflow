@@ -10,6 +10,30 @@ FlowTool 的目标是把带 `flow` 标签的 GitHub issue 编排成
 
 ## 当前能力
 
+- **准备期读重试**：Assignment 发出前的临时 GitHub 读取故障按原 worker binding 自动退避；
+  `FLOWTOOL_PREPARE_MAX_FAILURES` 默认 5 次，`FLOWTOOL_PREPARE_RETRY_WINDOW_SECONDS`
+  默认 900 秒，遵守 Retry-After，重启保留次数与时间。`flow show` 展示准备失败、下次时间和原因。
+  超出预算或永久 API 错误走现有失败/显式 retry 路径；凭据签发和 worker 执行不在此重试范围。
+
+- **关闭与重开**：未合并 PR 关闭后保留原 worker/仓库 slot，停止新派发与 GitHub 写操作；
+  已发操作按原账本收尾。重开同一 PR 后重新核验 head/base 与已完成的 worker 交付，再重新
+  triage 未消费反馈。人工漂移、未知执行或未决 effects 保持暂挂；`flow show` 显示恢复条件，
+  `flow retry` 不能绕过此状态。关闭期间收到的真实反馈编辑仍保留。
+
+- **反馈对账**：原 Issue、PR 普通评论和 Review 正文分别保存分页进度，默认每 300 秒复扫；
+  每个来源每次至多读取 50 条完整正文，未完成的页 5 秒后继续。重启保留 cursor/退避，
+  `flow show` 展示各来源诊断。旧命令不追溯执行，列表缺席不推断删除。
+  行内线程同样持续对账，包括人工 resolved/unresolved/outdated 事实；每次读取一个线程的
+  至多 20 条评论，嵌套分页可恢复。跨页片段不作为完整 resolve 依据，poll 不执行远端写操作。
+
+- **PR 对账**：对已追踪 PR 定时查询并补偿漏失合并事件，检查进度与退避持久化；
+  `FLOWTOOL_RECONCILE_INTERVAL_SECONDS` 默认 300 秒，`FLOWTOOL_RECONCILE_BATCH_SIZE`
+  默认 64，`FLOWTOOL_RECONCILE_CONCURRENCY` 默认 4。`flow show` 展示最后成功和下次检查时间。
+
+- **恢复并发**：lease、settle 和网络结果恢复独立运行；结果恢复默认 4 并发、每页 64 项，
+  可用 `FLOWTOOL_RESULT_RECOVERY_CONCURRENCY`（1–64）和
+  `FLOWTOOL_RESULT_RECOVERY_BATCH_SIZE`（1–1000）调整。有限扫描周期保证旧待确认结果可重试。
+
 - **接收与持久化**：校验 GitHub Webhook 的 `X-Hub-Signature-256`，处理 delivery 去重、allowlist、
   触发、取消和 review 入库；PostgreSQL 是唯一运行时数据库，启动时初始化 schema。
 - **远程执行**：`flowtool serve` 管理状态、数据库和 GitHub 操作；`flowtool worker` 主动通过认证
@@ -20,7 +44,8 @@ FlowTool 的目标是把带 `flow` 标签的 GitHub issue 编排成
 - **Issue→PR 交付**：读取真实 Issue 和仓库默认分支，为 Codex 提供单仓库、短时 Contents write
   push capability，由 agent 自主 commit/push。`flow.open_pr` 先核验远端 SHA 并持久化 PR 意图，
   **INITIAL 终态结果校验成功后**才创建或复用唯一的 open PR，再设置标签和 reviewer。
-  已修复失败 Flow 重试后的执行绑定复用、提前开 PR 和 closed PR 被误判为成功的问题。
+  已修复失败 Flow 重试后的执行绑定复用和提前开 PR；创建后已关闭的 PR 保留身份并暂挂，
+  INITIAL 结果只收尾执行事实，不回开 PR。
 - **原子提交与操作恢复**：trigger/retry/merge/cancel 的状态和任务变更在共享事务内提交；
   终态结果先持久接收，再执行带回执的 GitHub 操作，最后原子提交本地结果并发送 `ResultAccepted`。
   恢复时核对远端状态，避免重复派生 job 或重复发送评论；无法确认的远端结果保留待核对状态。
@@ -55,7 +80,7 @@ FlowTool 的目标是把带 `flow` 标签的 GitHub issue 编排成
   自动化测试使用外部服务替身，不代表真实 GitHub、Codex、bub 集成已验收。
 - bub adapter 已通过真实库加本机假模型端点的契约测试；真实 provider 语义 smoke 仍待执行。
   review thread 映射、回复和 resolve 已通过自动化；冲突处理和真实多轮闭环仍待验收。
-- Reconciler 目前只定时记录活跃 Flow，尚不拉取 GitHub 状态补偿漏失事件。
+- PR 合并对账已实现；普通 close/reopen、评论/线程漏投和新 Flow trigger 的补偿仍待后续范围。
 - cancel 会取消本地流程和任务，尚不终止正在执行的 agent 进程；跨 worker session 迁移、
   多 serve 高可用、GitHub-only 网络限制和由项目管理的强隔离运行环境仍属后续工作。
 
@@ -78,6 +103,8 @@ FlowTool 的目标是把带 `flow` 标签的 GitHub issue 编排成
 VCS 不是端口；详细设计与当前限制见 [`components.md`](docs/architecture/components.md) §4.6。
 
 ## 快速开始
+
+完整步骤见 [部署与 Cloudflare 接入指南](docs/deployment/README.md)。
 
 要求 Python 3.12+、uv，以及可访问的 PostgreSQL；以下用 Docker Compose 启动开发数据库。
 实际编码还需要在隔离的 worker 环境准备 Codex CLI 和认证，GitHub App 配置见
@@ -229,3 +256,7 @@ CodeAgent 总时限覆盖 resume、fallback 和 VCS 核验，超时回收并等�
 从原子结果恢复改动之前的版本升级时，先停止旧 serve，再启动新版本；不支持新旧 serve 混跑。
 旧版本留下的未知结果可能无法自动核实，需要人工处理；回退前也要处理完或隔离新增待办，避免旧版本
 忽略操作记录后重复执行。详见[兼容与交付边界](docs/plan/atomic-workflow-results.md#兼容与交付边界)。
+
+可选组织 Projects v2 的配置及只读 `flowtool project check <repo>` 见 [GitHub App 接入](docs/architecture/github-app.md#a4-可选的组织-projects-v2)。
+
+Projects 自动同步已接入；`flowtool project status <repo>` 查看状态，`flowtool project retry <repo>` 在修复远端条件后重新核对。

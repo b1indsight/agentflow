@@ -23,7 +23,7 @@ from app.judge_models import JudgeDecision
 from app.models import CodexResult, FeedbackRef, JobState, VcsKind
 from app.review_models import ReviewFeedback
 
-PROTOCOL_VERSION: Literal[8] = 8
+PROTOCOL_VERSION: Literal[9] = 9
 
 
 class ProtocolModel(BaseModel):
@@ -33,7 +33,7 @@ class ProtocolModel(BaseModel):
 
 
 class Message(ProtocolModel):
-    protocol_version: Literal[8] = PROTOCOL_VERSION
+    protocol_version: Literal[9] = PROTOCOL_VERSION
 
 
 class ReviewTask(ProtocolModel):
@@ -198,6 +198,7 @@ class RecoveryDescriptor(ProtocolModel):
     assignment_token: str
     state: Literal["received", "started", "succeeded", "failed"]
     result_digest: str | None = None
+    stop_request_id: str | None = None
     executor_active: bool = False
     archive_resume: bool = False
 
@@ -254,8 +255,29 @@ class FlowToolRequest(Message):
     remote_sha: str
 
 
+class StopFence(Message):
+    request_id: str
+    flow_id: int
+    job_id: int
+    assignment_token: str
+    connection_epoch: str
+
+
+class StopExecution(StopFence):
+    type: Literal["stop_execution"] = "stop_execution"
+
+
+class ExecutionStopped(StopFence):
+    type: Literal["execution_stopped"] = "execution_stopped"
+    execution_nonce: str = Field(min_length=1, max_length=128)
+
+
+class StopAccepted(StopFence):
+    type: Literal["stop_accepted"] = "stop_accepted"
+
+
 WorkerMessage = Annotated[
-    Register | Started | Heartbeat | Succeeded | Failed | FlowToolRequest,
+    Register | Started | Heartbeat | Succeeded | Failed | FlowToolRequest | ExecutionStopped,
     Field(discriminator="type"),
 ]
 
@@ -380,7 +402,9 @@ ServerMessage = Annotated[
     | RecoveryRejected
     | ResultAccepted
     | ProtocolError
-    | FlowToolResponse,
+    | FlowToolResponse
+    | StopExecution
+    | StopAccepted,
     Field(discriminator="type"),
 ]
 

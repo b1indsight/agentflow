@@ -13,6 +13,8 @@ from psycopg.rows import class_row, dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
+from app.github_models import GitHubAdapterError
+from app.github_retry import retry_delay
 from app.models import (
     Attempt,
     DeliveryState,
@@ -29,13 +31,17 @@ from app.models import (
     WorkerStatus,
     utcnow,
 )
-from app.protocol import ArchiveTask
+from app.project_store import PROJECT_SCHEMA
+from app.protocol import ArchiveTask, Failed, terminal_digest
+from app.reconcile_store import RECONCILE_SCHEMA, ReconcileStore
 from app.result_store import RESULT_SCHEMA, ResultStore
 from app.review_store import REVIEW_SCHEMA, ReviewStore
+from app.stop_store import STOP_SCHEMA, StopStore
+from app.webhook_store import WEBHOOK_SCHEMA
 
 # A frozen archive may have started deleting before its Started frame reached serve.
 _MAY_HAVE_EXECUTED = (
-    "(started_at IS NOT NULL OR (kind='archive' AND payload->'archive' IS NOT NULL))"
+    "(started_at IS NOT NULL OR dispatch_authorized_at IS NOT NULL OR (kind='archive' AND payload->'archive' IS NOT NULL))"
 )
 
 SCHEMA = """
@@ -180,6 +186,10 @@ ALTER TABLE attempts ADD COLUMN IF NOT EXISTS worker_id TEXT;
 ALTER TABLE attempts ADD COLUMN IF NOT EXISTS session_generation INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE attempts ADD COLUMN IF NOT EXISTS last_revision_summary TEXT NOT NULL DEFAULT '';
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS assigned_worker_id TEXT;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS prepare_failures INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS prepare_next_at TIMESTAMPTZ;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS prepare_first_failed_at TIMESTAMPTZ;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS prepare_last_error TEXT;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS assignment_token TEXT;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS last_error TEXT;
@@ -345,12 +355,16 @@ class Store:
         ).fetchone()
 
     def cancel_jobs(self, flow_id: int, *, reason: str = "Flow cancelled") -> None:
-        """Retire queued work; a running executor still owns its slot until result or lease expiry."""
+        """Retire queued/never-dispatched preparation; actual execution requires stop proof."""
         self.reviews.cancel(flow_id)
         with self.connection() as connection:
             connection.execute(
-                "UPDATE jobs SET state=%s, last_error=%s, updated_at=%s WHERE flow_id=%s"
-                " AND state=%s AND result_received_at IS NULL",
+                "WITH retired AS (UPDATE jobs SET state=%s, last_error=%s, updated_at=%s WHERE flow_id=%s"
+                " AND (state=%s OR (state='running' AND started_at IS NULL AND dispatch_authorized_at IS NULL"
+                " AND EXISTS (SELECT 1 FROM flows f WHERE f.id=jobs.flow_id AND f.state='cancelled')))"
+                " AND result_received_at IS NULL RETURNING id)"
+                " UPDATE workers SET current_job_id=NULL,status=CASE WHEN status='busy' THEN 'online' ELSE status END"
+                " WHERE current_job_id IN (SELECT id FROM retired)",
                 (
                     JobState.FAILED,
                     reason,
@@ -359,6 +373,25 @@ class Store:
                     JobState.QUEUED,
                 ),
             )
+
+    def lifecycle_job(self, flow_id: int) -> Job | None:
+        """Latest coding execution, excluding jobs cancelled before they could run."""
+        with self.connection() as connection:
+            return connection.cursor(row_factory=class_row(Job)).execute(
+                "SELECT * FROM jobs WHERE flow_id=%s AND kind IN ('initial','revision')"
+                " AND (state='running' OR started_at IS NOT NULL OR result_received_at IS NOT NULL)"
+                " AND NOT (started_at IS NULL AND COALESCE(result_payload->>'connection_epoch','')='control')"
+                " ORDER BY id DESC LIMIT 1", (flow_id,),
+            ).fetchone()
+
+    def reopen_blocked(self, flow_id: int) -> bool:
+        """A timeout cannot prove that an executor exited or a dispatched effect settled."""
+        with self.connection() as connection:
+            return connection.execute(
+                "SELECT 1 FROM jobs WHERE flow_id=%s AND (state='running'"
+                " OR (result_received_at IS NOT NULL AND result_applied_at IS NULL)"
+                " OR (started_at IS NOT NULL AND result_received_at IS NULL)) LIMIT 1", (flow_id,),
+            ).fetchone() is not None
 
     def has_pending_result(self, flow_id: int) -> bool:
         with self.connection() as connection:
@@ -384,12 +417,20 @@ class Store:
     def init_db(self) -> None:
         with self.connection() as connection:
             connection.execute(SCHEMA)
+            connection.execute(WEBHOOK_SCHEMA)
+            connection.execute(STOP_SCHEMA)
             connection.execute(RESULT_SCHEMA)
             connection.execute(REVIEW_SCHEMA)
+            connection.execute(RECONCILE_SCHEMA)
+            connection.execute(PROJECT_SCHEMA)
         self.reviews.migrate_legacy()
 
     def now(self) -> datetime:
         return self._clock()
+
+    @property
+    def stops(self) -> StopStore:
+        return StopStore(self)
 
     @property
     def results(self) -> ResultStore:
@@ -398,6 +439,10 @@ class Store:
     @property
     def reviews(self) -> ReviewStore:
         return ReviewStore(self)
+
+    @property
+    def reconcile(self) -> ReconcileStore:
+        return ReconcileStore(self)
 
     def close(self) -> None:
         if self._bound_connection is not None:
@@ -553,7 +598,15 @@ class Store:
         with self.connection() as connection:
             result = connection.execute(
                 "UPDATE flow_executions SET released_at=%s"
-                " WHERE flow_id=%s AND released_at IS NULL",
+                " WHERE flow_id=%s AND released_at IS NULL"
+                " AND NOT EXISTS (SELECT 1 FROM execution_stops s WHERE s.flow_id=flow_executions.flow_id"
+                " AND s.binding_at=flow_executions.bound_at AND s.state!='confirmed')"
+                " AND NOT EXISTS (SELECT 1 FROM jobs j JOIN flows f ON f.id=j.flow_id"
+                " WHERE j.flow_id=flow_executions.flow_id AND f.state='cancelled'"
+                " AND j.result_received_at IS NOT NULL AND j.result_applied_at IS NULL)"
+                " AND NOT EXISTS (SELECT 1 FROM result_effects e JOIN jobs j ON j.id=e.job_id"
+                " JOIN flows f ON f.id=j.flow_id WHERE j.flow_id=flow_executions.flow_id"
+                " AND f.state='cancelled' AND e.dispatched_at IS NOT NULL AND e.receipt IS NULL)",
                 (now, flow_id),
             )
         return result.rowcount == 1
@@ -848,6 +901,9 @@ class Store:
         now = self._clock()
         # Share this predicate across fair-worker selection and both binding paths.
         eligible = (
+            " AND (j.prepare_next_at IS NULL OR j.prepare_next_at<=%s)"
+            " AND NOT EXISTS (SELECT 1 FROM flow_deliveries paused"
+            " WHERE paused.flow_id=j.flow_id AND paused.state='closed')"
             " AND ((j.kind='archive') = EXISTS (SELECT 1 FROM flow_deliveries d"
             " WHERE d.flow_id=j.flow_id AND d.state='merged'))"
             " AND (j.kind<>'archive' OR EXISTS (SELECT 1 FROM flow_executions e"
@@ -867,10 +923,10 @@ class Store:
                 " LEFT JOIN flow_executions bound ON bound.flow_id=f.id"
                 " AND bound.released_at IS NULL WHERE j.state=%s"
                 " AND f.state=%s AND ((own.flow_id=j.flow_id) OR"
-                " (own.flow_id IS NULL AND bound.flow_id IS NULL))" + eligible + ")"
+                " (own.flow_id IS NULL AND bound.flow_id IS NULL AND NOT w.draining))" + eligible + ")"
                 " ORDER BY w.last_assigned_at NULLS FIRST, w.worker_id"
                 " FOR UPDATE OF w SKIP LOCKED LIMIT 1",
-                (WorkerStatus.ONLINE, JobState.QUEUED, FlowState.ACTIVE),
+                (WorkerStatus.ONLINE, JobState.QUEUED, FlowState.ACTIVE, now),
             ).fetchone()
             if candidate is None or candidate["worker_id"] != worker_id:
                 return None
@@ -892,7 +948,7 @@ class Store:
                     " LEFT JOIN flow_executions e ON e.flow_id=f.id AND e.released_at IS NULL"
                     " WHERE j.state=%s AND f.state=%s AND e.flow_id IS NULL" + eligible +
                     " ORDER BY j.created_at, j.id FOR NO KEY UPDATE OF f,j SKIP LOCKED LIMIT 1",
-                    (JobState.QUEUED, FlowState.ACTIVE),
+                    (JobState.QUEUED, FlowState.ACTIVE, now),
                 ).fetchone()
                 if row is None:
                     return None
@@ -911,7 +967,7 @@ class Store:
                     "SELECT j.id, j.flow_id, f.repo FROM jobs j JOIN flows f ON f.id=j.flow_id"
                     " WHERE j.state=%s AND f.state=%s AND j.flow_id=%s" + eligible +
                     " ORDER BY j.created_at, j.id FOR NO KEY UPDATE OF f,j SKIP LOCKED LIMIT 1",
-                    (JobState.QUEUED, FlowState.ACTIVE, execution["flow_id"]),
+                    (JobState.QUEUED, FlowState.ACTIVE, execution["flow_id"], now),
                 ).fetchone()
                 if row is None:
                     return None
@@ -1055,7 +1111,7 @@ class Store:
                 " AND assignment_token=%s AND (recovery_deadline IS NULL"
                 " OR recovery_deadline>%s OR EXISTS (SELECT 1 FROM flow_deliveries d"
                 " JOIN flows f ON f.id=d.flow_id JOIN flow_executions e ON e.flow_id=f.id"
-                " WHERE f.id=jobs.flow_id AND f.state='active' AND d.state='merged'"
+                " WHERE f.id=jobs.flow_id AND f.state='active' AND d.state IN ('closed','merged')"
                 " AND e.released_at IS NULL AND e.worker_id=jobs.assigned_worker_id))"
                 " AND EXISTS (SELECT 1 FROM workers"
                 " WHERE worker_id=%s AND connection_epoch=%s)",
@@ -1132,8 +1188,21 @@ class Store:
             )
             return "pending" if stored.rowcount == 1 else "rejected"
 
-    def list_unapplied_results(self) -> list[Job]:
-        """Return durable terminal messages whose coordinator application was interrupted."""
+    def unapplied_result_ceiling(self) -> int:
+        """Freeze a finite scan boundary so new results cannot postpone older retries forever."""
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT COALESCE(MAX(id),0) AS ceiling FROM jobs WHERE state=%s"
+                " AND result_received_at IS NOT NULL AND result_applied_at IS NULL",
+                (JobState.RUNNING,),
+            ).fetchone()
+            assert row is not None
+            return row["ceiling"]
+
+    def list_unapplied_results(
+        self, *, after_id: int = 0, through_id: int | None = None, limit: int = 64,
+    ) -> list[Job]:
+        """Page interrupted terminal results by stable job ID; recovery wraps after the last page."""
 
         with (
             self.connection() as connection,
@@ -1141,8 +1210,9 @@ class Store:
         ):
             return cursor.execute(
                 "SELECT * FROM jobs WHERE state=%s AND result_received_at IS NOT NULL"
-                " AND result_applied_at IS NULL ORDER BY result_received_at, id",
-                (JobState.RUNNING,),
+                " AND result_applied_at IS NULL AND id>%s"
+                " AND (%s::bigint IS NULL OR id<=%s) ORDER BY id LIMIT %s",
+                (JobState.RUNNING, after_id, through_id, through_id, limit),
             ).fetchall()
 
     def complete_persisted_result(self, job_id: int, state: JobState) -> bool:
@@ -1250,6 +1320,72 @@ class Store:
                 )
         return result.rowcount == 1
 
+    def _lock_preparation(self, job_id: int, worker: str, token: str, epoch: str) -> Job | None:
+        job = self.get_job(job_id)
+        if job is None:
+            return None
+        self.lock_workflow(job.flow_id)
+        current = self.lock_job(job_id)
+        if (current is None or current.started_at is not None or current.result_received_at is not None
+                or current.lease_expires_at is None or current.lease_expires_at <= self.now()
+                or not self.assignment_active(job_id, worker, token, epoch)):
+            return None
+        return current
+
+    def clear_preparation(self, job_id: int, worker: str, token: str, epoch: str) -> bool:
+        """Clear the read budget only for the same successful, un-dispatched preparation."""
+        with self.transaction() as tx:
+            current = tx._lock_preparation(job_id, worker, token, epoch)
+            if current is None:
+                return False
+            with tx.connection() as connection:
+                connection.execute(
+                    "UPDATE jobs SET prepare_failures=0,prepare_next_at=NULL,prepare_first_failed_at=NULL,"
+                    " prepare_last_error=NULL WHERE id=%s", (job_id,),
+                )
+            return True
+
+    def defer_preparation(
+        self, job_id: int, worker: str, token: str, epoch: str, error: GitHubAdapterError | None,
+        *, max_failures: int, window_seconds: float,
+    ) -> JobState | None:
+        """Atomically retry or fail a read; None rejects stale assignment evidence.
+
+        A missing error means the persisted window expired before issuing another request.
+        The caller has not emitted Assignment and must complete the ordinary result path on failure.
+        """
+        with self.transaction() as tx:
+            current = tx._lock_preparation(job_id, worker, token, epoch)
+            if current is None:
+                return None
+            flow, delivery = tx.get_flow(current.flow_id), tx.get_delivery(current.flow_id)
+            if (flow is None or flow.state is not FlowState.ACTIVE
+                    or (delivery is not None and delivery.supersedes(current.kind))):
+                return JobState.DONE
+            now = tx.now()
+            failures = current.prepare_failures + (error is not None)
+            first = current.prepare_first_failed_at or now
+            next_at = now + timedelta(seconds=retry_delay(failures, now, error))
+            permanent = error is not None and not error.retryable
+            exhausted = (permanent or error is None or failures >= max_failures
+                         or next_at >= first + timedelta(seconds=window_seconds))
+            cause = str(error) if error else current.prepare_last_error or "preparation window expired"
+            reason = (f"preparation retry budget/window exhausted: {cause}"
+                      if exhausted and not permanent else cause)
+            with tx.connection() as connection:
+                connection.execute(
+                    "UPDATE jobs SET prepare_failures=%s,prepare_first_failed_at=%s,prepare_next_at=%s,"
+                    " prepare_last_error=%s,last_error=%s WHERE id=%s",
+                    (failures, first, None if exhausted else next_at, cause, reason, job_id),
+                )
+            if exhausted:
+                message = Failed(job_id=job_id, assignment_token=token, connection_epoch="control", error=reason)
+                tx.record_control_result(job_id, message.model_dump(mode="json"), terminal_digest(message), reason)
+                return JobState.FAILED
+            if not tx.requeue_assignment(job_id, worker, token, epoch):
+                raise ValueError("locked preparation could not be requeued")
+            return JobState.QUEUED
+
     def requeue_assignment(
         self,
         job_id: int,
@@ -1263,7 +1399,8 @@ class Store:
                 "UPDATE jobs SET state=%s, assigned_worker_id=NULL, assignment_token=NULL,"
                 " heartbeat_at=NULL, updated_at=%s WHERE id=%s AND state=%s"
                 " AND assigned_worker_id=%s AND assignment_token=%s AND started_at IS NULL"
-                " AND result_received_at IS NULL"
+                " AND result_received_at IS NULL AND dispatch_authorized_at IS NULL"
+                " AND NOT EXISTS (SELECT 1 FROM execution_stops s WHERE s.job_id=jobs.id AND s.state!='confirmed')"
                 " AND EXISTS (SELECT 1 FROM workers WHERE worker_id=%s"
                 " AND connection_epoch=%s)",
                 (
@@ -1298,7 +1435,9 @@ class Store:
             result = connection.execute(
                 "UPDATE jobs SET state=%s, assignment_token=NULL, last_error=%s, updated_at=%s"
                 " WHERE id=%s AND state=%s AND assigned_worker_id=%s"
-                " AND assignment_token=%s AND EXISTS (SELECT 1 FROM workers"
+                " AND assignment_token=%s AND NOT EXISTS (SELECT 1 FROM execution_stops s"
+                " WHERE s.job_id=jobs.id AND s.state!='confirmed')"
+                " AND EXISTS (SELECT 1 FROM workers"
                 " WHERE worker_id=%s AND connection_epoch=%s)",
                 (
                     JobState.FAILED,
@@ -1354,6 +1493,7 @@ class Store:
                 " heartbeat_at=NULL, lease_expires_at=NULL, updated_at=%s"
                 " WHERE state=%s AND NOT " + _MAY_HAVE_EXECUTED + " AND lease_expires_at<=%s"
                 " AND result_received_at IS NULL"
+                " AND NOT EXISTS (SELECT 1 FROM execution_stops s WHERE s.flow_id=jobs.flow_id AND s.state!='confirmed')"
                 " RETURNING id, assigned_worker_id",
                 (JobState.QUEUED, now, JobState.RUNNING, now),
             ).fetchall()
@@ -1362,8 +1502,9 @@ class Store:
                 " WHERE state=%s AND started_at IS NOT NULL"
                 " AND recovery_deadline IS NOT NULL AND recovery_deadline<=%s"
                 " AND result_received_at IS NULL"
+                " AND NOT EXISTS (SELECT 1 FROM execution_stops s WHERE s.flow_id=jobs.flow_id AND s.state!='confirmed')"
                 " AND NOT EXISTS (SELECT 1 FROM flow_deliveries d JOIN flows f ON f.id=d.flow_id"
-                " WHERE d.flow_id=jobs.flow_id AND d.state='merged' AND f.state='active')"
+                " WHERE d.flow_id=jobs.flow_id AND d.state IN ('closed','merged') AND f.state='active')"
                 " RETURNING id, flow_id, assigned_worker_id",
                 (
                     JobState.FAILED,
@@ -1378,7 +1519,7 @@ class Store:
                 " AND " + _MAY_HAVE_EXECUTED + " AND recovery_deadline<=%s"
                 " AND result_received_at IS NULL AND EXISTS"
                 " (SELECT 1 FROM flow_deliveries d JOIN flows f ON f.id=d.flow_id"
-                " WHERE d.flow_id=jobs.flow_id AND d.state='merged' AND f.state='active')",
+                " WHERE d.flow_id=jobs.flow_id AND d.state IN ('closed','merged') AND f.state='active')",
                 ("archive blocked: original worker executor status is unknown", now),
             )
             requeued_ids = [row["id"] for row in requeued_rows]
@@ -1410,7 +1551,11 @@ class Store:
                 "UPDATE flow_executions SET released_at=%s"
                 " WHERE released_at IS NULL AND recovery_deadline IS NOT NULL"
                 " AND NOT EXISTS (SELECT 1 FROM flow_deliveries d JOIN flows f ON f.id=d.flow_id"
-                " WHERE d.flow_id=flow_executions.flow_id AND d.state='merged' AND f.state='active')"
+                " WHERE d.flow_id=flow_executions.flow_id AND d.state IN ('closed','merged') AND f.state='active')"
+                " AND NOT EXISTS (SELECT 1 FROM execution_stops s WHERE s.flow_id=flow_executions.flow_id AND s.state!='confirmed')"
+                " AND NOT EXISTS (SELECT 1 FROM jobs unknown WHERE unknown.flow_id=flow_executions.flow_id"
+                " AND unknown.dispatch_authorized_at IS NOT NULL AND unknown.started_at IS NULL"
+                " AND unknown.result_received_at IS NULL)"
                 " AND recovery_deadline<=%s AND NOT EXISTS (SELECT 1 FROM jobs j"
                 " WHERE j.flow_id=flow_executions.flow_id AND j.result_received_at IS NOT NULL"
                 " AND j.result_applied_at IS NULL) RETURNING flow_id, worker_id",

@@ -31,17 +31,25 @@ from app.context_models import (
     FilePage,
     ReviewPullRequest,
 )
+from app.github_feedback import read_feedback_page
 from app.github_models import (
+    FeedbackPage,
+    FeedbackSource,
     GitHubAdapterError,
     GitHubErrorKind,
     IssueSnapshot,
     PullRequestSnapshot,
+    PullRequestStatus,
     PushCapability,
     RemoteRef,
     RepositorySnapshot,
+    ReviewThreadPage,
     ReviewThreads,
 )
+from app.github_projects import GitHubProjects
+from app.github_thread_pages import read_thread_page
 from app.github_threads import ThreadReader
+from app.project_models import ProjectConfig
 
 _RESOLVE_THREAD_MUTATION = """
 mutation($threadId: ID!) {
@@ -63,6 +71,9 @@ class GitHubApp:
         self._request_timeout_seconds = settings.github_request_timeout_seconds
         self._private_key = self._read_private_key(settings.github_private_key_path)
 
+    def project_client(self, config: ProjectConfig) -> GitHubProjects:
+        return GitHubProjects(self, config)
+
     @staticmethod
     def _read_private_key(path: Path) -> str:
         key = path.read_text()
@@ -70,15 +81,16 @@ class GitHubApp:
             raise ValueError("FLOWTOOL_GITHUB_PRIVATE_KEY_PATH points to an empty file")
         return key
 
-    def _app_client(self) -> Any:
+    def _app_client(self, *, auto_retry: bool = True) -> Any:
         # Push credentials are issued before assignment and have no effect-ledger retry.
         return GitHub(
             AppAuthStrategy(self._app_id, self._private_key),
             timeout=self._request_timeout_seconds,
+            auto_retry=auto_retry,
         )
 
     def _installation_client(self, installation_id: int, *, auto_retry: bool = True) -> Any:
-        """Read APIs retain SDK retries; mutations explicitly defer to durable effect recovery."""
+        """Durable preparation and effect owners disable SDK retries at their call sites."""
         return GitHub(
             AppInstallationAuthStrategy(
                 self._app_id,
@@ -89,9 +101,18 @@ class GitHubApp:
             auto_retry=auto_retry,
         )
 
+    async def list_feedback_page(
+        self, installation_id: int, repo: str, number: int,
+        source: FeedbackSource, cursor: str | None,
+    ) -> FeedbackPage:
+        client = self._installation_client(installation_id, auto_retry=False)
+        return await self._execute("feedback_page", lambda: read_feedback_page(
+            client, repo, number, source, cursor,
+        ))
+
     async def get_issue(self, installation_id: int, repo: str, number: int) -> IssueSnapshot:
         owner, name = self._split_repo(repo)
-        client = self._installation_client(installation_id)
+        client = self._installation_client(installation_id, auto_retry=False)
 
         async def operation() -> IssueSnapshot:
             data = (await client.rest.issues.async_get(owner, name, number)).parsed_data
@@ -106,7 +127,7 @@ class GitHubApp:
 
     async def get_repository(self, installation_id: int, repo: str) -> RepositorySnapshot:
         owner, name = self._split_repo(repo)
-        client = self._installation_client(installation_id)
+        client = self._installation_client(installation_id, auto_retry=False)
 
         async def operation() -> RepositorySnapshot:
             data = (await client.rest.repos.async_get(owner, name)).parsed_data
@@ -118,7 +139,7 @@ class GitHubApp:
         self, installation_id: int, repo: str, number: int,
     ) -> ReviewPullRequest:
         owner, name = self._split_repo(repo)
-        client = self._installation_client(installation_id)
+        client = self._installation_client(installation_id, auto_retry=False)
 
         async def operation() -> ReviewPullRequest:
             data = (await client.rest.pulls.async_get(owner, name, number)).parsed_data
@@ -130,12 +151,30 @@ class GitHubApp:
 
         return await self._execute("get_review_pull_request", operation)
 
+    async def get_pull_request_status(
+        self, installation_id: int, repo: str, number: int,
+    ) -> PullRequestStatus:
+        """Read the associated PR by number; a missing or inaccessible PR is not a close event."""
+        owner, name = self._split_repo(repo)
+        client = self._installation_client(installation_id, auto_retry=False)
+
+        async def operation() -> PullRequestStatus:
+            data = (await client.rest.pulls.async_get(owner, name, number)).parsed_data
+            return PullRequestStatus(
+                **self._pull_snapshot(data).model_dump(), repo=data.base.repo.full_name,
+                base_sha=data.base.sha, merged=data.merged, merged_at=data.merged_at,
+                merge_commit_sha=data.merge_commit_sha,
+                head_repository=data.head.repo.full_name if data.head.repo is not None else None,
+            )
+
+        return await self._execute("get_pull_request_status", operation)
+
     async def list_pull_request_files(
         self, installation_id: int, repo: str, number: int,
     ) -> FilePage:
         """Read at most 40 files plus a sentinel page; absent patches stay explicitly unknown."""
         owner, name = self._split_repo(repo)
-        client = self._installation_client(installation_id)
+        client = self._installation_client(installation_id, auto_retry=False)
 
         async def operation() -> FilePage:
             files: list[ContextFile] = []
@@ -167,7 +206,7 @@ class GitHubApp:
     ) -> DiscussionPage:
         """Bound each conversation/review/inline source independently so none starves the others."""
         owner, name = self._split_repo(repo)
-        client = self._installation_client(installation_id)
+        client = self._installation_client(installation_id, auto_retry=False)
 
         async def operation() -> DiscussionPage:
             discussions: list[ContextDiscussion] = []
@@ -237,10 +276,13 @@ class GitHubApp:
 
         return await self._execute("create_push_capability", operation)
 
-    async def get_ref(self, installation_id: int, repo: str, branch: str) -> RemoteRef:
+    async def get_ref(
+        self, installation_id: int, repo: str, branch: str, *, retry_transient: bool = False,
+    ) -> RemoteRef:
+        """Durable callers own retries; execution-time tools may use bounded SDK retries."""
         owner, name = self._split_repo(repo)
         branch = self._normalize_branch(branch)
-        client = self._installation_client(installation_id)
+        client = self._installation_client(installation_id, auto_retry=retry_transient)
 
         async def operation() -> RemoteRef:
             data = (await client.rest.git.async_get_ref(owner, name, f"heads/{branch}")).parsed_data
@@ -253,7 +295,7 @@ class GitHubApp:
     ) -> bool:
         """Prove a normal forward delivery using GitHub's comparison of immutable SHAs."""
         owner, name = self._split_repo(repo)
-        client = self._installation_client(installation_id)
+        client = self._installation_client(installation_id, auto_retry=False)
 
         async def operation() -> bool:
             data = (await client.rest.repos.async_compare_commits(
@@ -515,11 +557,17 @@ class GitHubApp:
             ),
         )
 
+    async def list_review_thread_page(
+        self, installation_id: int, repo: str, pr: int, cursor: str | None,
+    ) -> ReviewThreadPage:
+        client = self._installation_client(installation_id, auto_retry=False)
+        return await self._execute("review_thread_page", lambda: read_thread_page(client, repo, pr, cursor))
+
     async def list_review_threads(
         self, installation_id: int, repo: str, pr: int,
     ) -> ReviewThreads:
         self._split_repo(repo)
-        reader = ThreadReader(self._installation_client(installation_id), repo, pr)
+        reader = ThreadReader(self._installation_client(installation_id, auto_retry=False), repo, pr)
         return await self._execute("list_review_threads", reader.all)
 
     async def get_review_thread(
@@ -671,4 +719,7 @@ class GitHubApp:
             status_code=status,
             request_id=response.headers.get("X-GitHub-Request-Id"),
             retry_after=retry_after,
+            # HTTP authentication/permission/rate rejection proves non-execution;
+            # GraphQL partial responses and transport failures do not establish this.
+            request_rejected=status in {401, 403, 429},
         )

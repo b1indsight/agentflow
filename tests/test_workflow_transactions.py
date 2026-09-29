@@ -178,7 +178,9 @@ def test_expired_cancelled_executor_does_not_overwrite_cancelled_flow(store: Sto
     store.worker_disconnected("worker-a", "offline", "epoch-a")
     later = store.now() + timedelta(minutes=10)
     monkeypatch.setattr(store, "_clock", lambda: later)
-    assert store.sweep_expired_assignments() == (0, 1)
+    assert store.sweep_expired_assignments() == (0, 0)
+    execution = store.get_flow_execution(flow.id)
+    assert execution is not None and execution.released_at is None
     cancelled = store.get_flow(job.flow_id)
     assert cancelled is not None and cancelled.state is FlowState.CANCELLED
 

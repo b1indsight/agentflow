@@ -64,6 +64,10 @@ class EventRouter:
         self.settle = SettleScheduler(store, settings, service.notify_jobs)
 
     async def handle(self, event_type: str, delivery_id: str, payload: dict) -> None:
+        self.dispatch(event_type, delivery_id, payload)
+
+    def dispatch(self, event_type: str, delivery_id: str, payload: dict) -> None:
+        """Apply DB-only event transitions; callers may bind one outer transaction."""
         # Merge is a PR fact, including bot-authored events, and owns its atomic reservation.
         if event_type == "pull_request":
             self._on_pull_request(delivery_id, payload)
@@ -80,9 +84,9 @@ class EventRouter:
             "issues": self._on_issues,
         }.get(event_type)
         if handler:
-            await handler(payload)
+            handler(payload)
 
-    async def _on_issues(self, payload: dict) -> None:
+    def _on_issues(self, payload: dict) -> None:
         action = payload.get("action")
         label = (payload.get("label") or {}).get("name")
         repo = payload["repository"]["full_name"]
@@ -168,8 +172,13 @@ class EventRouter:
 
     def _on_pull_request(self, delivery_id: str, payload: dict) -> None:
         pull_request = payload.get("pull_request") or {}
-        if payload.get("action") != "closed" or pull_request.get("merged") is not True:
+        if payload.get("action") not in {"closed", "reopened", "synchronize"}:
             return
         flow = self.store.get_flow_by_pr(payload["repository"]["full_name"], pull_request["number"])
-        if flow:
+        if flow and payload.get("action") == "closed" and pull_request.get("merged") is True:
             self.service.on_merged(flow, delivery_id, payload)
+        elif flow:
+            with self.store.transaction() as tx:
+                fresh = tx.lock_workflow(flow.id)
+                if fresh is not None and tx.record_event(delivery_id, "pull_request", flow.id, payload):
+                    tx.reconcile.hint(flow.id)

@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Annotated, Literal
 
 from pydantic import Field, SecretStr, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+from app.project_models import ProjectConfig
+
 
 class FlowToolSettings(BaseSettings):
+    log_format: Literal["text", "json"] = "text"
+
     model_config = SettingsConfigDict(
         env_prefix="FLOWTOOL_",
         env_file=".env",
@@ -21,6 +26,10 @@ class FlowToolSettings(BaseSettings):
 class ServeSettings(FlowToolSettings):
     """Secrets and tuning used only by the control-plane process."""
 
+    metrics_token: SecretStr | None = None
+    metrics_interval_seconds: float = Field(default=15, ge=5, le=300, allow_inf_nan=False)
+
+    webhook_max_body_bytes: int = Field(default=25 * 1024 * 1024, ge=1, le=100 * 1024 * 1024)
     github_app_id: int = 0
     github_private_key_path: Path = Path("./flowtool-app.private-key.pem")
     github_webhook_secret: str = ""
@@ -32,6 +41,17 @@ class ServeSettings(FlowToolSettings):
     reviewers: Annotated[list[str], NoDecode] = []
     in_review_label: str = "flow:in-review"
     done_label: str = "flow:done"
+    projects: dict[str, ProjectConfig] = {}
+
+    @field_validator("projects")
+    @classmethod
+    def _project_repositories(cls, value: dict[str, ProjectConfig]) -> dict[str, ProjectConfig]:
+        normalized = {repo.casefold(): config for repo, config in value.items()}
+        if len(normalized) != len(value) or any(
+            not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo) for repo in value
+        ):
+            raise ValueError("Projects keys must be unique owner/repository names")
+        return normalized
 
     database_url: str
     worker_tokens: dict[str, SecretStr]
@@ -40,6 +60,8 @@ class ServeSettings(FlowToolSettings):
     submit_grace_seconds: float = 15.0
     confidence_threshold: float = Field(default=0.6, ge=0, le=1, allow_inf_nan=False)
     max_revision_cycles: int = 20
+    prepare_max_failures: int = Field(default=5, ge=1, le=100)
+    prepare_retry_window_seconds: float = Field(default=900, gt=0, allow_inf_nan=False)
 
     host: str = "0.0.0.0"
     port: int = 8000
@@ -49,6 +71,11 @@ class ServeSettings(FlowToolSettings):
     worker_recovery_grace: float = Field(default=300.0, gt=0)
     worker_sweep_interval: float = Field(default=5.0, gt=0)
     worker_poll_interval: float = Field(default=2.0, gt=0)
+    result_recovery_concurrency: int = Field(default=4, ge=1, le=64)
+    result_recovery_batch_size: int = Field(default=64, ge=1, le=1000)
+    reconcile_interval_seconds: float = Field(default=300.0, gt=0, allow_inf_nan=False)
+    reconcile_batch_size: int = Field(default=64, ge=1, le=1000)
+    reconcile_concurrency: int = Field(default=4, ge=1, le=64)
 
     @field_validator("trigger_label", "in_review_label", "done_label")
     @classmethod
@@ -132,6 +159,7 @@ class WorkerSettings(FlowToolSettings):
     worker_id: str
     worker_token: SecretStr
     serve_ws_url: str
+    worker_status_path: Path | None = None
     worker_root: Path = Path("~/.flowtool/workers/{worker_id}")
     codex_run_timeout_seconds: float = 1200.0
     judge_model: str = ""

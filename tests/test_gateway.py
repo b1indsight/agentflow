@@ -105,7 +105,12 @@ class RecordingStore:
         self.job.result_received_at = self.job.updated_at
         return "pending"
 
-    def list_unapplied_results(self) -> list[Job]:
+    def unapplied_result_ceiling(self) -> int:
+        return 0
+
+    def list_unapplied_results(
+        self, *, after_id: int = 0, through_id: int | None = None, limit: int = 64,
+    ) -> list[Job]:
         return []
 
     def complete_persisted_result(self, job_id: int, state: JobState) -> bool:
@@ -153,6 +158,9 @@ class RecordingStore:
 
 
 class RecordingCoordinator:
+    async def prepare_for_assignment(self, job, worker, token, epoch):
+        return await self.prepare(job)
+
     def __init__(self) -> None:
         self.started = False
         self.results: list[InitialResult] = []
@@ -397,8 +405,12 @@ async def test_recovery_continues_after_one_broken_result():
                     result=InitialResult(session_id="session", last_message="done", exit_code=0),
                 ).model_dump(mode="json")
 
-        def list_unapplied_results(self):
-            return self.jobs
+        def unapplied_result_ceiling(self):
+            return max(job.id for job in self.jobs)
+
+        def list_unapplied_results(self, *, after_id=0, through_id=None, limit=64):
+            return [job for job in self.jobs if job.id > after_id
+                    and (through_id is None or job.id <= through_id)][:limit]
 
         def get_job(self, job_id):
             return next(job for job in self.jobs if job.id == job_id)

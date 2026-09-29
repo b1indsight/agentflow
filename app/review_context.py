@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable
-
 from app.context_models import (
     MAX_CONTEXT_BYTES,
     MAX_DISCUSSIONS,
@@ -12,7 +10,6 @@ from app.context_models import (
     ContextDiscussion,
     ReviewContext,
 )
-from app.github_models import GitHubAdapterError
 from app.models import Flow
 from app.ports import GitHubClient
 from app.review_models import ReviewBatch
@@ -31,26 +28,17 @@ async def build_review_context(
         raise ValueError("review context requires a GitHub installation")
     limitations: list[str] = []
 
-    async def fetch[T](name: str, call: Awaitable[T]) -> T | None:
-        try:
-            return await call
-        except GitHubAdapterError as exc:
-            limitations.append(f"{name}:{exc.kind.value}")
-            return None
-
     def clip(value: str, source: str) -> str:
         if len(value) > SOURCE_CHARS:
             limitations.append(f"{source[:100]}:truncated")
         return value[:SOURCE_CHARS]
 
-    pr = await fetch("pull_request", github.get_review_pull_request(
-        installation, flow.repo, pr_number))
-    issue = await fetch("issue", github.get_issue(installation, flow.repo, flow.issue_number))
-    files = await fetch("files", github.list_pull_request_files(installation, flow.repo, pr_number))
-    discussion = await fetch("discussion", github.list_pull_request_discussions(
-        installation, flow.repo, pr_number))
-    after = await fetch("pull_request", github.get_review_pull_request(
-        installation, flow.repo, pr_number))
+    # API failures belong to the pre-Assignment retry boundary, not a frozen partial context.
+    pr = await github.get_review_pull_request(installation, flow.repo, pr_number)
+    issue = await github.get_issue(installation, flow.repo, flow.issue_number)
+    files = await github.list_pull_request_files(installation, flow.repo, pr_number)
+    discussion = await github.list_pull_request_discussions(installation, flow.repo, pr_number)
+    after = await github.get_review_pull_request(installation, flow.repo, pr_number)
     if pr and after and (pr.head_sha, pr.base_sha, pr.state, pr.merged) != (
         after.head_sha, after.base_sha, after.state, after.merged,
     ):

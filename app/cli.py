@@ -21,6 +21,77 @@ from app.store import Store
 app = typer.Typer(help="FlowTool admin CLI")
 flow_app = typer.Typer(help="flow 运维")
 app.add_typer(flow_app, name="flow")
+project_app = typer.Typer(help="Projects v2 运维")
+app.add_typer(project_app, name="project")
+
+
+inbox_app = typer.Typer(help="durable webhook 运维")
+app.add_typer(inbox_app, name="inbox")
+
+
+@inbox_app.command("status")
+def inbox_status(limit: int = typer.Option(50, min=1, max=500)) -> None:
+    """Show bounded delivery diagnostics without payload or authentication data."""
+    from app.webhook_store import WebhookStore
+
+    with _store() as store:
+        for item in WebhookStore(store).list(limit):
+            typer.echo(f"{item.delivery_id} event={item.event_type} state={item.state} "
+                       f"attempts={item.attempts} next={item.next_at.isoformat()} error={item.error_code or '-'}")
+
+
+@inbox_app.command("retry")
+def inbox_retry(delivery_id: str) -> None:
+    """Requeue only a blocked receipt; never reset a live claim or completed event."""
+    from app.webhook_store import WebhookStore
+
+    with _store() as store:
+        if not WebhookStore(store).retry(delivery_id):
+            typer.echo("delivery is not blocked or has no retained payload", err=True)
+            raise typer.Exit(1)
+    typer.echo(f"delivery {delivery_id} queued")
+
+
+@project_app.command("check")
+def project_check(repo: str) -> None:
+    """只读校验已配置的组织 Project、Status 字段及选项。"""
+    from app.github_client import GitHubApp
+    from app.github_models import GitHubAdapterError
+
+    settings = get_serve_settings()
+    config = settings.projects.get(repo.casefold())
+    if config is None:
+        typer.echo(f"{repo}: Projects disabled")
+        return
+    try:
+        target = asyncio.run(GitHubApp(settings).project_client(config).validate(repo))
+    except GitHubAdapterError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(1) from None
+    typer.echo(f"{repo}: {target.title} ({config.project_id}), Status={target.status_name} ({config.status_field_id})")
+
+
+@project_app.command("status")
+def project_status(repo: str, limit: int = typer.Option(100, min=1, max=1000)) -> None:
+    """显示持久投影、期望/确认版本、退避和阻塞原因。"""
+    from app.project_store import ProjectStore
+
+    with _store() as store:
+        for row in ProjectStore(store).list_projections(repo=repo.casefold(), limit=limit):
+            typer.echo(f"{row.repo}#{row.issue_number} flow={row.flow_id} project={row.project_id} "
+                       f"item={row.item_id or '-'} {row.desired_status} "
+                       f"version={row.synced_version}/{row.desired_version} blocked={row.blocked} "
+                       f"next={row.next_at.isoformat()} error={row.last_error or '-'}")
+
+
+@project_app.command("retry")
+def project_retry(repo: str) -> None:
+    """修复配置或远端条件后重新核对；不清除已知卡片或未确认的 add。"""
+    from app.project_store import ProjectStore
+
+    with _store() as store:
+        count = ProjectStore(store).retry(repo)
+    typer.echo(f"{count} project projections scheduled for recheck")
 
 
 @contextmanager
@@ -44,6 +115,7 @@ def serve() -> None:
         host=settings.host,
         port=settings.port,
         log_level="info",
+        timeout_graceful_shutdown=20,
     )
 
 
@@ -67,14 +139,24 @@ def flows(active: bool = typer.Option(False, help="只看未终结的")) -> None
             typer.echo(f"[{f.id}] {f.repo}#{f.issue_number:<5} {f.state:<10} {pr} cycles={cycles}")
 
 
+@app.command("worker-drain")
+def worker_drain(worker_id: str, undo: bool = typer.Option(False, "--undo")) -> None:
+    """暂停给 worker 分配新 Flow；已有绑定继续收尾。"""
+    from app.stop_store import StopStore
+
+    with _store() as store:
+        StopStore(store).drain(worker_id, not undo)
+    typer.echo(f"{worker_id}: draining={not undo}")
+
+
 @app.command()
 def workers() -> None:
     """列出 worker 在线状态和当前 assignment。"""
     with _store() as store:
-        typer.echo("WORKER\tSTATUS\tJOB\tFLOW\tEPOCH\tLEASE\tRECOVERY\tLAST_SEEN\tREASON")
+        typer.echo("WORKER\tSTATUS\tDRAINING\tJOB\tFLOW\tEPOCH\tLEASE\tRECOVERY\tLAST_SEEN\tREASON")
         for worker in ControlService(store).list_workers():
             typer.echo(
-                f"{worker.worker_id}\t{worker.status.value}\t"
+                f"{worker.worker_id}\t{worker.status.value}\t{worker.draining}\t"
                 f"{worker.current_job_id or '-'}\t{worker.current_flow_id or '-'}\t"
                 f"{(worker.connection_epoch or '-')[:8]}\t"
                 f"{_remaining(worker.lease_expires_at)}\t"
@@ -118,6 +200,19 @@ def flow_show(flow_id: int) -> None:
                 f"  delivery: state={delivery.state} branch={delivery.branch}"
                 f" pr={delivery.pr_number or '-'} head={delivery.head_sha or '-'}"
             )
+            if delivery.state is DeliveryState.CLOSED:
+                typer.echo("  paused: original worker/repo retained; reopen requires settled execution"
+                           " and verified head/base; flow retry cannot bypass this hold")
+        check = store.reconcile.get(f.id)
+        if check is not None:
+            typer.echo(f"  reconcile: last={check.last_success_at or '-'} next={check.next_at}"
+                       f" failures={check.failures} reason={check.last_error or '-'}")
+        for source in ("issue_comments", "pr_comments", "reviews", "threads"):
+            observation = store.reconcile.feedback_get(f.id, source)
+            if observation is not None:
+                typer.echo(f"  feedback {source}: cursor={observation.cursor or '-'}"
+                           f" last={observation.last_success_at or '-'} next={observation.next_at}"
+                           f" failures={observation.failures} reason={observation.last_error or '-'}")
         for att in store.list_attempts(f.id):
             cur = " (current)" if att.id == f.current_attempt_id else ""
             typer.echo(
@@ -136,6 +231,13 @@ def flow_show(flow_id: int) -> None:
             )
             if job.last_error:
                 typer.echo(f"    error: {job.last_error}")
+            if job.prepare_failures:
+                typer.echo(f"    preparation: failures={job.prepare_failures}"
+                           f" first={job.prepare_first_failed_at} next={job.prepare_next_at or '-'}"
+                           f" reason={job.prepare_last_error or '-'}")
+            if job.verify_next_at:
+                typer.echo(f"    verification: failures={job.verify_failures} next={job.verify_next_at}"
+                           f" reason={job.verify_last_error or '-'}")
             for effect in store.results.list_effects(job.id):
                 if effect.state.value not in {"succeeded", "skipped"}:
                     typer.echo(
@@ -151,7 +253,8 @@ def flow_cancel(flow_id: int) -> None:
         if not f:
             raise typer.Exit(1)
         ControlService(store).cancel(f)
-    typer.echo(f"flow {flow_id} cancelled")
+        waiting = store.stops.has_pending(flow_id)
+    typer.echo(f"flow {flow_id}: cancellation requested; stop_pending={waiting}")
 
 
 @flow_app.command("retry")

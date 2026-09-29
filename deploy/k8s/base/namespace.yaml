@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: flowtool
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: flowtool
+automountServiceAccountToken: false

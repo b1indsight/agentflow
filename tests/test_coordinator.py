@@ -13,6 +13,7 @@ from app.control.coordinator import JobCoordinator
 from app.github_models import (
     IssueSnapshot,
     PullRequestSnapshot,
+    PullRequestStatus,
     PushCapability,
     RemoteRef,
     RepositorySnapshot,
@@ -47,7 +48,7 @@ from app.protocol import (
     terminal_digest,
 )
 from app.store import Store
-from tests.result_memory import MemoryResults
+from tests.result_memory import MemoryResults, MemoryStops
 from tests.review_memory import MemoryReviews, judge_decision
 
 
@@ -55,6 +56,7 @@ class MemoryStore:
     def __init__(self) -> None:
         self.jobs: dict[int, Job] = {}
         self.results = MemoryResults()
+        self.stops = MemoryStops()
         self.reviews = MemoryReviews()
         self.reviews.jobs = self.jobs
         self.sources: dict[tuple[int, str], Job] = {}
@@ -111,7 +113,7 @@ class MemoryStore:
             for job in self.jobs.values()
         )
 
-    def cancel_jobs(self, flow_id: int) -> None:
+    def cancel_jobs(self, flow_id: int, *, reason: str = "Flow cancelled") -> None:
         for job in self.jobs.values():
             if job.flow_id == flow_id and job.state is JobState.QUEUED:
                 job.state = JobState.FAILED
@@ -180,6 +182,8 @@ class MemoryStore:
         return self.execution if flow_id == self.flow.id else None
 
     def release_flow_execution(self, flow_id: int) -> bool:
+        if self.stops.has_pending(flow_id):
+            return False
         self.execution.released_at = datetime.now(UTC)
         return True
 
@@ -310,11 +314,16 @@ class RecordingGitHub:
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
         )
 
-    async def get_ref(self, installation_id: int, repo: str, branch: str) -> RemoteRef:
+    async def get_ref(self, installation_id: int, repo: str, branch: str, *, retry_transient=False) -> RemoteRef:
         return RemoteRef(branch=branch, sha="abc123")
 
     async def find_pull_request_by_head(self, *args: object) -> PullRequestSnapshot | None:
         return self.pull_request
+
+    async def get_pull_request_status(self, installation: int, repo: str, number: int) -> PullRequestStatus:
+        assert self.pull_request is not None
+        return PullRequestStatus(**self.pull_request.model_dump(), repo=repo, head_repository=repo,
+                                 base_sha="base", merged=False)
 
     async def open_pull_request(
         self,
@@ -401,6 +410,8 @@ def coordinator(store: Store | MemoryStore, github: RecordingGitHub) -> JobCoord
         done_label="flow:done",
         confidence_threshold=0.6,
         max_revision_cycles=20,
+        prepare_max_failures=5,
+        prepare_retry_window_seconds=900,
     )
     return JobCoordinator(
         cast(Store, store),

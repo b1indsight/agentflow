@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Awaitable, Callable
+from datetime import timedelta
 from typing import Protocol
 
 from loguru import logger
 
 from app.control.archive import archive_task
+from app.control.preparation import PreparationReadFailure, PreparationStale
 from app.control.results import ResultApplication
 from app.control.revisions import verify_revision_remote
 from app.control.tools import FlowToolService
-from app.github_models import GitHubAdapterError, ReviewThreads
+from app.github_models import GitHubAdapterError, GitHubErrorKind
 from app.models import (
     TERMINAL_STATES,
     Attempt,
@@ -52,6 +56,8 @@ class CoordinatorSettings(Protocol):
     done_label: str
     confidence_threshold: float
     max_revision_cycles: int
+    prepare_max_failures: int
+    prepare_retry_window_seconds: float
 
 
 class JobCoordinator:
@@ -76,6 +82,46 @@ class JobCoordinator:
         delivery = store.get_delivery(flow.id)
         return (flow.state in TERMINAL_STATES
                 or (delivery is not None and delivery.supersedes(job.kind)))
+
+    async def prepare_for_assignment(
+        self, job: Job, worker: str, token: str, epoch: str,
+    ) -> ExecutionTask | JobState:
+        """Own read-only retry decisions before the gateway is allowed to emit Assignment."""
+        error = None
+        expired = (job.prepare_first_failed_at is not None and self.store.now()
+                   >= job.prepare_first_failed_at + timedelta(seconds=self.settings.prepare_retry_window_seconds))
+        if not expired:
+            try:
+                prepared = await self.prepare(job)
+            except PreparationReadFailure as failure:
+                error = failure.error
+            else:
+                if not isinstance(prepared, JobState) and not self.store.clear_preparation(job.id, worker, token, epoch):
+                    raise PreparationStale("preparation changed before dispatch")
+                return prepared
+        state = self.store.defer_preparation(
+            job.id, worker, token, epoch, error, max_failures=self.settings.prepare_max_failures,
+            window_seconds=self.settings.prepare_retry_window_seconds,
+        )
+        if state is None:
+            raise PreparationStale("preparation changed before retry")
+        if state is JobState.FAILED:
+            await self.results.apply(job.id)
+        return state
+
+    async def _read[T](self, job: Job, operation: Callable[[], Awaitable[T]]) -> T:
+        """Bound only GitHub reads by the remaining retry window, never failure effects or signing."""
+        remaining = None if job.prepare_first_failed_at is None else max(0, (
+            job.prepare_first_failed_at + timedelta(seconds=self.settings.prepare_retry_window_seconds)
+            - self.store.now()
+        ).total_seconds())
+        try:
+            async with asyncio.timeout(remaining):
+                return await operation()
+        except TimeoutError as error:
+            raise PreparationReadFailure(GitHubAdapterError(
+                GitHubErrorKind.TRANSIENT, "preparation read window expired",
+            )) from error
 
     async def prepare(self, job: Job) -> ExecutionTask | JobState:
         flow = self.store.get_flow(job.flow_id)
@@ -108,11 +154,10 @@ class JobCoordinator:
                 delivery = tx.get_or_create_delivery(fresh.id, f"flow/{fresh.id}")
                 flow = fresh
             try:
-                issue = await self.github.get_issue(installation_id, flow.repo, flow.issue_number)
-                repository = await self.github.get_repository(installation_id, flow.repo)
+                issue = await self._read(job, lambda: self.github.get_issue(installation_id, flow.repo, flow.issue_number))
+                repository = await self._read(job, lambda: self.github.get_repository(installation_id, flow.repo))
             except GitHubAdapterError as exc:
-                await self.fail(job, str(exc))
-                return JobState.FAILED
+                raise PreparationReadFailure(exc) from exc
             if repository.full_name != flow.repo:
                 await self.fail(job, "GitHub repository identity 不匹配。")
                 return JobState.FAILED
@@ -151,45 +196,44 @@ class JobCoordinator:
             }:
                 raise ValueError("review batch is no longer current")
 
+        threads = None
         if job.kind in {JobKind.TRIAGE, JobKind.REVISION} and batch.threads is None and any(
             f.kind is ReviewItemKind.INLINE for f in batch.feedback
         ):
             assert flow.installation_id is not None
             number = self._pr_number(flow, attempt)
             try:
-                threads = await self.github.list_review_threads(flow.installation_id, flow.repo, number)
+                installation = flow.installation_id
+                threads = await self._read(job, lambda: self.github.list_review_threads(installation, flow.repo, number))
             except GitHubAdapterError as exc:
-                threads = ReviewThreads(repo=flow.repo, pr_number=number, fetched_at=self.store.now(),
-                                        limitations=[f"threads:{exc.kind.value}"])
+                raise PreparationReadFailure(exc) from exc
+
+        if job.kind is JobKind.TRIAGE:
+            context = batch.context
+            if context is None:
+                try:
+                    context = await self._read(job, lambda: build_review_context(
+                        self.github, flow, batch, self._pr_number(flow, attempt),
+                    ))
+                except GitHubAdapterError as exc:
+                    raise PreparationReadFailure(exc) from exc
             with self.store.transaction() as tx:
                 fresh = tx.lock_workflow(flow.id)
                 current = tx.lock_job(job.id)
                 if (fresh is None or current is None or self._retired(tx, fresh, job)
                         or fresh.current_attempt_id != attempt.id):
                     return JobState.DONE
-                batch.threads = tx.reviews.freeze_threads(current, threads)
-
-        if job.kind is JobKind.TRIAGE:
-            context = batch.context
-            if context is None:
-                context = await build_review_context(
-                    self.github, flow, batch, self._pr_number(flow, attempt),
-                )
-                with self.store.transaction() as tx:
-                    fresh = tx.lock_workflow(flow.id)
-                    current = tx.lock_job(job.id)
-                    if (fresh is None or current is None or self._retired(tx, fresh, job)
-                            or fresh.current_attempt_id != attempt.id):
-                        return JobState.DONE
-                    if job.assignment_token is not None and (
-                        current.state is not JobState.RUNNING
-                        or current.assigned_worker_id != job.assigned_worker_id
-                        or current.assignment_token != job.assignment_token
-                        or current.lease_expires_at is None
-                        or current.lease_expires_at <= tx.now()
-                    ):
-                        return JobState.QUEUED
-                    context = tx.reviews.freeze_context(current, context)
+                if job.assignment_token is not None and (
+                    current.state is not JobState.RUNNING
+                    or current.assigned_worker_id != job.assigned_worker_id
+                    or current.assignment_token != job.assignment_token
+                    or current.lease_expires_at is None
+                    or current.lease_expires_at <= tx.now()
+                ):
+                    return JobState.QUEUED
+                if threads is not None:
+                    tx.reviews.freeze_threads(current, threads)
+                context = tx.reviews.freeze_context(current, context)
             return TriageTask(
                 batch_id=batch.id,
                 feedback=list(batch.feedback),
@@ -206,19 +250,17 @@ class JobCoordinator:
                 await self.fail(job, "修订任务缺少有效 worker binding。")
                 return JobState.FAILED
             try:
-                mismatch = await verify_revision_remote(
+                mismatch = await self._read(job, lambda: verify_revision_remote(
                     self.github, flow, delivery, delivery.head_sha or "",
-                )
+                ))
                 if not mismatch:
                     assert flow.installation_id is not None
-                    issue = await self.github.get_issue(
-                        flow.installation_id, flow.repo, flow.issue_number,
-                    )
+                    installation = flow.installation_id
+                    issue = await self._read(job, lambda: self.github.get_issue(
+                        installation, flow.repo, flow.issue_number,
+                    ))
             except GitHubAdapterError as exc:
-                # Preparation has not consumed a revision cycle. Persist the failure so
-                # transient outages can be retried explicitly without reconnect loops.
-                await self.fail(job, str(exc))
-                return JobState.FAILED
+                raise PreparationReadFailure(exc) from exc
             if mismatch:
                 await self.fail(job, mismatch)
                 return JobState.FAILED
@@ -260,6 +302,8 @@ class JobCoordinator:
                             current.lease_expires_at is None
                             or current.lease_expires_at <= tx.now()))):
                     return JobState.QUEUED
+                if threads is not None:
+                    tx.reviews.freeze_threads(current, threads)
                 return tx.reviews.freeze_revision(current, task)
         if job.kind is JobKind.ARCHIVE:
             try:
