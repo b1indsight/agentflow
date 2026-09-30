@@ -15,6 +15,7 @@ from app.protocol import (
 )
 from app.worker.client import WorkerClient
 from app.worker.journal import WorkerJournal
+from app.worker.tools import FlowToolCaller
 from tests.worker_fakes import NoPendingStops, connected_worker
 
 
@@ -207,13 +208,11 @@ class RemoteCoordinator:
 
 
 class FakeExecutor:
-    def __init__(self) -> None:
-        self.client: WorkerClient | None = None
-
-    async def execute(self, task: ExecutionTask, secret=None, *, tool_caller=None) -> ExecutionResult:
+    async def execute(
+        self, task: ExecutionTask, secret=None, *, tool_caller: FlowToolCaller
+    ) -> ExecutionResult:
         assert isinstance(task, InitialTask)
-        assert self.client is not None
-        tool = await self.client.call_tool(
+        tool = await tool_caller.call_tool(
             "flow.open_pr",
             {"title": "Implement", "body": "Done"},
             vcs_outcome=VcsOutcome(
@@ -246,7 +245,6 @@ async def test_control_gateway_and_worker_client_complete_one_remote_job(tmp_pat
         serve_ws_url="ws://unused",
         executor=executor,
     )
-    executor.client = client
 
     tasks = [
         asyncio.create_task(gateway.handle(QueueSocket(worker_to_serve, serve_to_worker))),

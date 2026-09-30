@@ -23,6 +23,7 @@ from app.protocol import (
 )
 from app.worker.client import FlowToolCallError, WorkerClient
 from app.worker.journal import WorkerJournal
+from app.worker.tools import FlowToolCaller
 
 
 def test_flow_tool_call_error_preserves_retry_metadata() -> None:
@@ -148,12 +149,10 @@ async def test_worker_redacts_echoed_push_capability_before_journal_and_wire(tmp
 
 
 class ToolCallingExecutor:
-    def __init__(self) -> None:
-        self.client: WorkerClient | None = None
-
-    async def execute(self, task: ExecutionTask, secret=None, *, tool_caller=None) -> ExecutionResult:
-        assert self.client is not None
-        result = await self.client.call_tool(
+    async def execute(
+        self, task: ExecutionTask, secret=None, *, tool_caller: FlowToolCaller
+    ) -> ExecutionResult:
+        result = await tool_caller.call_tool(
             "flow.open_pr",
             {"title": "Implement", "body": "Done"},
             vcs_outcome=VcsOutcome(
@@ -231,7 +230,6 @@ async def test_client_multiplexes_tool_call_while_executor_is_running(tmp_path) 
         serve_ws_url="ws://serve/internal/workers/connect",
         executor=executor,
     )
-    executor.client = client
     connection = ToolConnection()
 
     with pytest.raises(ConnectionError, match="script complete"):
