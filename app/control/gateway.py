@@ -38,6 +38,7 @@ from app.contracts.protocol import (
     terminal_digest,
 )
 from app.contracts.result_models import ResultPending
+from app.control.conversation import ConversationBroker
 from app.control.preparation import PreparationStale
 from app.domain.models import (
     DeliveryState,
@@ -199,6 +200,7 @@ class WorkerGateway:
         self._sessions: dict[str, tuple[asyncio.Event, WorkerSocket]] = {}
         self._registry_lock = asyncio.Lock()
         self._result_locks: dict[int, asyncio.Lock] = {}
+        self.conversations = ConversationBroker()
 
     async def _prepare_assignment(
         self, job: Job, worker_id: str, token: str, epoch: str,
@@ -263,6 +265,7 @@ class WorkerGateway:
                 raise ProtocolViolation("worker registration does not match authenticated identity")
             wake = await self._register_session(worker_id, socket)
             registered_session = True
+            self.conversations.connect(worker_id, connection_epoch, socket)
             worker = self.store.worker_connected(
                 worker_id, register.protocol_version, connection_epoch
             )
@@ -533,15 +536,19 @@ class WorkerGateway:
             )
             if receive in done:
                 message = parse_worker_message(receive.result())
-                raise ProtocolViolation(f"unexpected idle message: {type(message).__name__}")
+                if not self.conversations.accept(socket, message):
+                    raise ProtocolViolation(f"unexpected idle message: {type(message).__name__}")
         finally:
             receive.cancel()
             notified.cancel()
             await asyncio.gather(receive, notified, return_exceptions=True)
 
     async def _receive(self, socket: WorkerSocket) -> WorkerMessage:
-        raw = await asyncio.wait_for(socket.receive_text(), timeout=self.heartbeat_timeout)
-        return parse_worker_message(raw)
+        async with asyncio.timeout(self.heartbeat_timeout):
+            while True:
+                message = parse_worker_message(await socket.receive_text())
+                if not self.conversations.accept(socket, message):
+                    return message
 
     def _authenticated_identity(self, headers: Mapping[str, str]) -> str | None:
         identity = headers.get("x-flowtool-worker-id", "")
@@ -566,6 +573,7 @@ class WorkerGateway:
         return wake
 
     async def _unregister_session(self, worker_id: str, socket: WorkerSocket) -> None:
+        self.conversations.disconnect(socket)
         async with self._registry_lock:
             current = self._sessions.get(worker_id)
             if current is not None and current[1] is socket:

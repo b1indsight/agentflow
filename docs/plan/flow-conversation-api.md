@@ -1,6 +1,6 @@
 # Flow 会话查询接口 — Feature record
 
-**Stage:** Planning，待用户批准后实施
+**Stage:** Implemented，验证通过，待独立代码审查
 **PR:** [#58](https://github.com/b1indsight/agentflow/pull/58)
 
 **当前方案：** 以时间线第 1 条修订为准：control 实时代理 worker 查询 Codex 历史，
@@ -164,3 +164,57 @@ worker 忙碌与空闲时都需处理查询，不能并发调用同一 WebSocket
 活跃文件尾行、缺失/损坏历史、超时/取消清理、断线/旧 epoch 响应、忙碌 worker 及限额。
 消融移除响应来源校验和路径边界校验，确认相应测试捕获错误；不再做持久化相关消融。
 执行 Ruff、Mypy、相关测试、现有 PostgreSQL 回归及构建，保持同一 bookmark 和 PR。
+
+### 2. 2026-09-30 — 用户批准实施
+
+用户明确要求“先实现这个版本”，批准第 1 条实时代理方案，以及随后说明的 role/kind
+分离：user、assistant、tool、system、developer 按实际历史映射，工具调用与结果以
+call_id 关联。GitHub 评论只在已进入 Codex 提示或工具记录时显示，不新增 PR 活动聚合。
+实施开始；继续使用 PR #58。
+
+### 3. 2026-09-30 — 实现与验证
+
+实现 `GET /api/flows/{flow_id}/conversation`，以 control 独立 token 鉴权。复用已有
+flow/attempt/worker 元数据，经 WebSocket 查询 worker 的 Codex rollout，返回 role/kind、
+call_id、来源 session 和游标。新增模块分别归属 contracts、control 和 worker；没有新增
+数据库表、会话持久化、采集上传或队列。API 文档见 `docs/architecture/conversation-api.md`。
+
+主要实现决策：
+
+- 本地 Codex 版本为 0.155.1；只检查历史样本的结构字段，未复制真实会话内容作为 fixture。
+  读取 session_meta + response_item，跳过 event_msg 重复消息及 reasoning/analysis。
+- cursor 绑定 flow、已有 session 集合/代次、文件身份与字节位置。session 被覆盖/文件失效
+  返回 409；缺文件逐 session 标记。条目基于源位置定位，不虚构 job/invocation 关联。
+- 每页读取和响应设限；8192 字符文本截断，超过 256 KiB 的原始单行返回 history_limit。
+  不尝试无限跳过或加载超大单行。暂不支持的事件/多模态内容显式标记 unsupported。
+- worker 使用单一 WebSocket receive 边界处理查询，文件读取在线程执行，跨重连仍受线程内
+  semaphore 限制。control 仅维护有界内存请求映射，验证 socket/epoch/request ID/flow/session。
+- HTTP 断开监测使用 AnyIO 取消作用域，避免 Starlette 嵌套 scope 吞掉单次 asyncio 取消导致
+  响应挂起；增加真实 ASGI 断开测试。AnyIO 已是既有间接依赖，现显式声明，锁定版本未改变。
+- 协议升至 v11，要求 control/worker 同步升级；不转换旧协议的在途 journal。
+  worker 环境检查新增拒绝 control API token，避免控制侧凭据传入执行环境。
+
+验证证据：
+
+- 测试先行：历史读取、RPC 和 HTTP 首次运行分别因缺失实现/404 失败，再实现至通过。
+- `FLOWTOOL_TEST_DATABASE_URL=postgresql://flowtool@127.0.0.1:55419/postgres uv run pytest -q --tb=short`：
+  **836 passed**，包括现有执行、恢复、归档回归，只有既有 Starlette TestClient 弃用告警。
+- 会话专项 **23 passed**，包括 HTTP→control→真实 WorkerClient→历史文件的忙碌/空闲查询、
+  PostgreSQL 元数据与释放后的绑定、HTTP 断开、连接替换、超时、并发限额、跨 flow 游标、
+  活跃尾行、归档文件、损坏/超限、凭据过滤、特殊文件及路径边界。
+- `uv run ruff check app tests`、`uv run mypy app tests`、`uv build --no-sources` 通过。
+
+消融（均在独立代码审查前完成，实验后恢复源码）：
+
+1. 从 `ConversationBroker.accept` 移除 socket 与 epoch 匹配条件，运行
+   `tests/test_conversation_proxy.py::test_query_correlates_response_and_rejects_other_connection`，
+   断言失败：错误来源的响应提前完成查询。保留来源约束。
+2. 把 `app/worker/history.py` 中 `os.O_NOFOLLOW` 替换为 0，运行
+   `tests/test_conversation_history.py::test_history_refuses_special_files_and_racing_directory_symlink`，
+   断言失败：路径替换为 symlink 后未被拒绝。保留逐目录无跟随打开。
+3. 恢复后专项 23 项通过。实验脚本/日志位于 `.cache/2026-09-30/conversation-ablation*`，
+   不纳入版本控制。
+
+已知边界：只显示已知 session 的本地历史，worker 离线不可读；首次执行 session 尚未回传及
+fallback 覆盖的旧 ID 不能保证定位。不展示 control 自己发布的 PR 活动；未做真实在线 Codex/GitHub
+交互 smoke，不宣称已覆盖其他 Codex 历史版本。独立代码审查待执行。

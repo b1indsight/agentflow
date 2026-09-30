@@ -5,6 +5,7 @@ description = "Headless orchestrator: GitHub issues labeled `flow` -> code agent
 requires-python = ">=3.12"
 readme = "README.md"
 dependencies = [
+    "anyio>=4",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
     "githubkit[auth-app]>=0.16,<0.17",  # calibrated App auth and REST surface

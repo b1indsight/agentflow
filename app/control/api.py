@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -10,13 +11,16 @@ from collections.abc import Callable
 from contextlib import asynccontextmanager
 from typing import Protocol
 
-from fastapi import FastAPI, Header, Request, Response, WebSocket
+import anyio
+from fastapi import FastAPI, Header, HTTPException, Path, Query, Request, Response, WebSocket
 from loguru import logger
 from psycopg import Error as DatabaseError
 from psycopg_pool import PoolTimeout
 from pydantic import SecretStr
 from starlette.middleware.base import RequestResponseEndpoint
 
+from app.contracts.conversation import ConversationFailure, ConversationPage
+from app.control.conversation import ConversationService
 from app.persistence.webhook_store import DeliveryConflict
 from app.telemetry.metrics import Metrics
 
@@ -25,6 +29,7 @@ class ApplicationSettings(Protocol):
     github_webhook_secret: str
     webhook_max_body_bytes: int
     metrics_token: SecretStr | None
+    control_api_token: SecretStr | None
     host: str
     port: int
 
@@ -42,6 +47,9 @@ class ApplicationContext(Protocol):
 
     @property
     def gateway(self) -> WorkerGateway: ...
+
+    @property
+    def conversations(self) -> ConversationService: ...
 
     async def ready(self) -> bool: ...
 
@@ -67,6 +75,13 @@ def _default_context() -> ApplicationContext:
     from app.control.runtime import ControlRuntime
 
     return ControlRuntime()
+
+
+async def _wait_for_disconnect(request: Request, cancel_scope: anyio.CancelScope) -> None:
+    """Consume the GET request stream until the caller disconnects."""
+    with cancel_scope:
+        while (await request.receive())["type"] != "http.disconnect":
+            pass
 
 
 def create_app(
@@ -96,6 +111,44 @@ def create_app(
             logger.bind(event="webhook_received", reason_code="ok" if response.status_code == 202 else "unspecified",
                         delivery_id=request.headers.get("x-github-delivery", "")).info("")
         return response
+
+    @application.get("/api/flows/{flow_id}/conversation", response_model=ConversationPage)
+    async def conversation(
+        request: Request,
+        response: Response,
+        flow_id: int = Path(gt=0),
+        cursor: str | None = Query(default=None, min_length=1, max_length=2048),
+        limit: int = Query(default=100, ge=1, le=500),
+    ) -> ConversationPage | Response:
+        context: ApplicationContext = request.app.state.ctx
+        token = context.settings.control_api_token
+        headers = {"Cache-Control": "no-store"}
+        if token is None or not token.get_secret_value():
+            raise HTTPException(503, "conversation_api_disabled", headers=headers)
+        expected = "Bearer " + token.get_secret_value()
+        if not hmac.compare_digest(request.headers.get("authorization", "").encode(), expected.encode()):
+            raise HTTPException(401, "unauthorized", headers={**headers, "WWW-Authenticate": "Bearer"})
+        query = asyncio.create_task(context.conversations.read(flow_id, cursor, limit))
+        # Starlette's receive middleware uses AnyIO scopes; level cancellation is
+        # needed so cancelling the watcher cannot be swallowed by its nested scope.
+        disconnect_scope = anyio.CancelScope()
+        disconnected = asyncio.create_task(_wait_for_disconnect(request, disconnect_scope))
+        try:
+            await asyncio.wait({query, disconnected}, return_when=asyncio.FIRST_COMPLETED)
+            if not query.done():
+                return Response(status_code=499, headers=headers)
+            response.headers.update(headers)
+            return query.result()
+        except ConversationFailure as exc:
+            status = {"flow_not_found": 404, "worker_unavailable": 503, "query_timeout": 504,
+                      "query_busy": 503, "cursor_invalid": 409}.get(exc.code, 502)
+            raise HTTPException(status, exc.code, headers=headers) from exc
+        except (DatabaseError, PoolTimeout) as exc:
+            raise HTTPException(503, "database_unavailable", headers=headers) from exc
+        finally:
+            query.cancel()
+            disconnect_scope.cancel()
+            await asyncio.gather(query, disconnected, return_exceptions=True)
 
     @application.get("/metrics")
     async def metrics(request: Request) -> Response:
