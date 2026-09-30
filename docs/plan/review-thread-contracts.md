@@ -215,3 +215,7 @@ GraphQL connection 校验；不扩展到 webhook 生命周期或整个工作流�
   archive 对共享替身的调用。全仓 Ruff、Mypy（137 源文件）和 diff 检查通过。
 - 隔离实验 `.cache/2026-09-30/test-cleanup-ablation.py` 临时让 InitialResult 序列化漏掉 pushed：
   原有两例错误通过，固定基准两例均正确失败。实验仅修改子进程对象，无源码变动。
+
+### 2026-09-30：测试精简独立审查完成
+
+实现提交 `f9ddc38d7032` 的独立审查返回空 findings，通过；同一 PR #54 更新测试精简与验证记录。
