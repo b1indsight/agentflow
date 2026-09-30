@@ -234,7 +234,7 @@ async def test_control_gateway_and_worker_client_complete_one_remote_job(tmp_pat
     coordinator = RemoteCoordinator(store)
     gateway = WorkerGateway(
         store,
-        coordinator, stops=NoPendingStops(),
+        coordinator, execution_control=NoPendingStops(),
         worker_tokens={"worker-1": "worker-secret"},
         poll_interval=0.01,
     )

@@ -255,3 +255,12 @@ GraphQL connection 校验；不扩展到 webhook 生命周期或整个工作流�
 ### 2026-09-30：当前版本专用实现独立审查完成
 
 实现提交 `b46fc4233a9c` 独立审查返回空 findings，通过；同一 PR #54 更新最终范围与当前版本验证结果。
+
+
+### 2026-09-30：明确 WorkerGateway 执行控制依赖命名
+
+用户要求调整 stops 的名称。构造参数与属性统一为 execution_control，协议改为
+WorkerExecutionControl，并注明派发授权及持久停止请求/回执职责。生产和测试调用方同步，
+直接替换旧名称；StopStore 的持久化实现及执行行为不变。
+相关 gateway、停止、恢复及生命周期回归 **123 passed**；Ruff、Mypy（138 源文件）
+与 diff 检查通过。纯命名调整沿用现有行为测试，无需新增测试或消融实验。

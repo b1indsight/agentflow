@@ -173,7 +173,7 @@ async def test_gateway_renews_lease_while_preparing_and_fetching_capability(
         async def secret(*args):
             await release.wait()
         monkeypatch.setattr(subject, "assignment_secret", secret)
-    gateway = WorkerGateway(store, subject, stops=StopStore(store), worker_tokens={"worker-a": "x"})
+    gateway = WorkerGateway(store, subject, execution_control=StopStore(store), worker_tokens={"worker-a": "x"})
     original_wait = asyncio.wait
     ticks = 0
 

@@ -176,7 +176,7 @@ async def test_merged_coding_process_without_exit_proof_cannot_unlock_archive(st
     flow = store.get_flow(old.flow_id)
     await route_merge(store, flow)
     subject = coordinator(store, RecordingGitHub())
-    gateway = WorkerGateway(store, subject, stops=StopStore(store), worker_tokens={"worker-a": "secret"})
+    gateway = WorkerGateway(store, subject, execution_control=StopStore(store), worker_tokens={"worker-a": "secret"})
     store.worker_connected("worker-a", PROTOCOL_VERSION, "restart")
     with pytest.raises(ProtocolViolation, match="archive blocked"):
         if journal == "missing":

@@ -24,7 +24,7 @@ from tests.test_revision_recovery import (
 
 
 def gateway(store, subject):
-    return WorkerGateway(store, subject, stops=StopStore(store), worker_tokens={})
+    return WorkerGateway(store, subject, execution_control=StopStore(store), worker_tokens={})
 
 
 async def test_transient_read_requeues_and_recovers_without_a_revision_cycle(store, pending_revision, monkeypatch):
