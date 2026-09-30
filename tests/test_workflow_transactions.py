@@ -199,13 +199,13 @@ async def test_result_and_derived_job_commit_together(store: Store, monkeypatch)
     with monkeypatch.context() as patch:
         patch.setattr(Store, "complete_persisted_result", interrupted)
         with pytest.raises(RuntimeError, match="commit interrupted"):
-            await subject.apply_result(job, result)
+            await subject.apply_result(job.id)
     pending = store.get_job(job.id)
     assert pending is not None and pending.result_applied_at is None
     assert all(item.kind is not JobKind.REVISION for item in store.list_jobs(job.flow_id))
     assert store.results.list_effects(job.id)[0].state is EffectState.SUCCEEDED
-    await subject.apply_result(job, result)
-    await subject.apply_result(job, result)
+    await subject.apply_result(job.id)
+    await subject.apply_result(job.id)
     derived = [item for item in store.list_jobs(job.flow_id) if item.kind is JobKind.REVISION]
     assert len(derived) == len(github.comments) == 1
     assert derived[0].source_job_id == job.id
@@ -224,14 +224,14 @@ async def test_result_and_derived_job_commit_together(store: Store, monkeypatch)
 
 async def test_accepted_result_survives_expired_worker_recovery(store: Store, monkeypatch) -> None:
     # Once control accepted the terminal result, an offline executor cannot invalidate its delivery.
-    job, result = accepted_triage(store)
+    job, _ = accepted_triage(store)
     store.worker_disconnected("worker-a", "connection lost", "epoch-a")
     later = store.now() + timedelta(minutes=10)
     monkeypatch.setattr(store, "_clock", lambda: later)
     assert store.sweep_expired_assignments() == (0, 0)
     flow = store.get_flow(job.flow_id)
     assert flow is not None and flow.state is FlowState.ACTIVE
-    await coordinator(store, RecordingGitHub()).apply_result(job, result)
+    await coordinator(store, RecordingGitHub()).apply_result(job.id)
     finished = store.get_job(job.id)
     assert finished is not None and finished.state is JobState.DONE
     execution = store.get_flow_execution(job.flow_id)

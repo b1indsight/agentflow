@@ -5,6 +5,8 @@
 
 ## 当前计划
 
+- [`internal-contract-simplification.md`](internal-contract-simplification.md) — 内部结果、agent 输出、settle 与插件契约精简 · PR #55：804 项 PostgreSQL 回归通过，独立审查无发现，待用户评审。
+
 - [`review-thread-contracts.md`](review-thread-contracts.md) — Review 线程字段、解析与分页契约统一 · PR #54：已实现，816 项 PostgreSQL 回归通过，独立审查无发现，待用户评审。
 
 - [`workflow-decision-boundaries.md`](workflow-decision-boundaries.md) — 工作流决策与持久层分离 · PR #53：实现已验证；随后按要求精简 42 个重复测试情形，131 项相关回归通过，待评审。

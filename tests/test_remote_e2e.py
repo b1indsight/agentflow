@@ -12,6 +12,7 @@ from app.protocol import (
     FlowToolResponse,
     InitialResult,
     InitialTask,
+    Succeeded,
 )
 from app.worker.client import WorkerClient
 from app.worker.journal import WorkerJournal
@@ -119,7 +120,11 @@ class RemoteStore:
         payload: Mapping[str, object],
         digest: str,
     ) -> str:
-        return "pending" if self.assignment_active(job_id, worker_id, token) else "rejected"
+        if not self.assignment_active(job_id, worker_id, token):
+            return "rejected"
+        self.job.result_payload = dict(payload)
+        self.job.result_digest = digest
+        return "pending"
 
     def unapplied_result_ceiling(self) -> int:
         return 0
@@ -197,7 +202,10 @@ class RemoteCoordinator:
     def mark_started(self, job: Job, task: ExecutionTask, worker_id: str) -> None:
         pass
 
-    async def apply_result(self, job: Job, result: ExecutionResult) -> JobState:
+    async def apply_result(self, job_id: int) -> JobState:
+        job = self.store.get_job(job_id)
+        assert job is not None and job.result_payload is not None
+        result = Succeeded.model_validate(job.result_payload).result
         assert isinstance(result, InitialResult)
         self.result = result
         self.store.complete_persisted_result(job.id, JobState.DONE)

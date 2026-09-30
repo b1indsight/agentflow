@@ -13,7 +13,6 @@ from app.control.gateway import WorkerGateway
 from app.control.projects import ProjectSync
 from app.control.reconcile import Reconciler
 from app.control.reconcile_feedback import FeedbackReconciler
-from app.control.router import SettleScheduler
 from app.control.service import ControlService
 from app.control.webhooks import WebhookConsumer
 from app.github_client import GitHubApp
@@ -58,7 +57,6 @@ class ControlRuntime:
             execution_control=StopStore(self.store),
         )
         self.service = ControlService(self.store, plugins, self.gateway.notify_jobs)
-        self.settle = SettleScheduler(self.store, self.service.notify_jobs)
         self.webhooks = WebhookConsumer(self.store, self.settings, self.service)
         self.reconciler = Reconciler(
             self.store, self.coordinator.github, self.service,
@@ -102,7 +100,7 @@ class ControlRuntime:
             self._tasks.append(asyncio.create_task(self.metrics.run(
                 self.settings.database_url, self.settings.metrics_interval_seconds,
             )))
-        self.settle.sweep()
+        self._settle_reviews()
         self._ready = True
 
     async def ready(self) -> bool:
@@ -138,12 +136,16 @@ class ControlRuntime:
                 logger.exception("result recovery sweep failed; retrying next sweep")
             await asyncio.sleep(self.settings.worker_sweep_interval)
 
+    def _settle_reviews(self) -> None:
+        if self.store.reviews.claim_due():
+            self.gateway.notify_jobs()
+
     async def _sweep_reviews(self) -> None:
         """Keep settle independent of both lease errors and slow remote receipt checks."""
         while True:
             await asyncio.sleep(self.settings.worker_sweep_interval)
             try:
-                self.settle.sweep()
+                self._settle_reviews()
             except Exception:  # noqa: BLE001 -- a failed claim leaves durable deadlines to retry
                 logger.exception("review settle sweep failed; retrying next sweep")
 

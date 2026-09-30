@@ -50,7 +50,8 @@ Review:   settle → READY → PROCESSING → COMPLETED / WAITING
 
 `ControlService` 在显式事务中负责触发、取消、合并和 retry；`JobCoordinator` 把 INITIAL、TRIAGE、REVISION、ARCHIVE
 持久 job 构造成版本化 task（ANSWER 仅保留历史记录，当前答复直接使用 TRIAGE 的已校验答案），
-并把已接收的结构化 result 交给 `ResultApplication`。后者冻结一次结果的领域变更和 GitHub 操作，
+并按 job ID 调用 `ResultApplication`，由后者读取并校验已持久接收的 result，
+冻结一次结果的领域变更和 GitHub 操作，
 由 `ResultEffects` 查询/执行远端操作并保存回执，最后一起提交本地状态、派生任务、运行记录和结果确认。
 网络请求不占用数据库事务；plugin hook 在提交后调用，不具备持久化投递保证。worker 不能直接更新这些状态。
 非零 Codex exit 会转 FAILED。revision 成功后仅消费明确 addressed 的 item/version，deferred/遗漏项/
@@ -94,7 +95,8 @@ worker socket 与 executor 解耦，root 内原子 journal 在 ack 前保存进�
   control-plane 环境变量；
 - 从 JSONL 的 `thread.started.thread_id` 读取 session id；
 - resume 使用 `codex exec resume <session_id>`，cwd 与 sandbox 继承自会话；
-- `-o` 读取最终消息，INITIAL 和 revision 通过 `--output-schema` 解析结构化结果；
+- `-o` 读取原始最终消息，`--output-schema` 约束 CLI 输出；`WorkerExecutor` 按 INITIAL/revision
+  严格解析各自结果模型，adapter 不解释业务 schema；
 - 子进程只继承 Codex 认证、代理/CA 和基础运行环境；INITIAL 额外获得单次短时 push credential helper 与
   指向 0600 Unix socket 的 `flow.open_pr` STDIO MCP 配置，不获得 control/worker credential；
 - 单次运行使用配置的 timeout，超时 kill 子进程并返回 exit 124。

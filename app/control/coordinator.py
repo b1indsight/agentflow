@@ -7,11 +7,9 @@ from collections.abc import Awaitable, Callable
 from datetime import timedelta
 from typing import Protocol
 
-from loguru import logger
-
 from app.control.archive import archive_task
 from app.control.preparation import PreparationReadFailure, PreparationStale
-from app.control.results import ResultApplication
+from app.control.results import ResultApplication, ResultSettings
 from app.control.revisions import verify_revision_remote
 from app.control.tools import FlowToolService
 from app.github_models import GitHubAdapterError, GitHubErrorKind
@@ -24,22 +22,17 @@ from app.models import (
     JobState,
     ReviewItemKind,
 )
-from app.plugins import get_plugin_manager
+from app.plugins import emit_hook, get_plugin_manager
 from app.ports import GitHubClient
 from app.protocol import (
-    ArchiveResult,
     AssignmentSecret,
-    ExecutionResult,
     ExecutionTask,
     Failed,
     FlowToolRequest,
     FlowToolResponse,
-    InitialResult,
     InitialTask,
     PushSecret,
-    RevisionResult,
     RevisionTask,
-    TriageResult,
     TriageTask,
     terminal_digest,
 )
@@ -48,12 +41,7 @@ from app.review_models import BatchState
 from app.store import Store
 
 
-class CoordinatorSettings(Protocol):
-    allowlist: list[str]
-    reviewers: list[str]
-    in_review_label: str
-    done_label: str
-    confidence_threshold: float
+class CoordinatorSettings(ResultSettings, Protocol):
     max_revision_cycles: int
     prepare_max_failures: int
     prepare_retry_window_seconds: float
@@ -357,11 +345,11 @@ class JobCoordinator:
                     return
                 tx.reviews.started(current)
         elif job.kind is JobKind.INITIAL:
-            self._fire("on_flow_start", flow=flow)
+            emit_hook(self.plugins, "on_flow_start", flow=flow)
 
-    async def apply_result(self, job: Job, result: ExecutionResult) -> JobState:
-        _validate_result_kind(job.kind, result)
-        return await self.results.apply(job.id)
+    async def apply_result(self, job_id: int) -> JobState:
+        """Apply the accepted result from the durable inbox, including recovery replays."""
+        return await self.results.apply(job_id)
 
     async def fail(self, job: Job, reason: str) -> None:
         """Persist control failures too, so recovery and live failures use the same atomic finish."""
@@ -385,12 +373,6 @@ class JobCoordinator:
                 )
         await self.results.apply(job.id)
 
-    def _fire(self, hook: str, **kwargs: object) -> None:
-        try:
-            getattr(self.plugins.hook, hook)(**kwargs)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("plugin hook {} failed: {}", hook, exc)
-
     def _delivery(self, flow: Flow) -> FlowDelivery:
         delivery = self.store.get_delivery(flow.id)
         if delivery is None:
@@ -402,13 +384,3 @@ class JobCoordinator:
         if number is None:
             raise ValueError(f"flow {flow.id} has no pull request")
         return number
-
-def _validate_result_kind(kind: JobKind, result: ExecutionResult) -> None:
-    expected = {
-        JobKind.INITIAL: InitialResult,
-        JobKind.TRIAGE: TriageResult,
-        JobKind.REVISION: RevisionResult,
-        JobKind.ARCHIVE: ArchiveResult,
-    }[kind]
-    if not isinstance(result, expected):
-        raise TypeError(f"job kind {kind} cannot accept result kind {result.kind}")

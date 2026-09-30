@@ -41,9 +41,10 @@ class RecordingAgent:
             await writer.wait_closed()
         return AgentRun(
             session_id="session-1",
-            last_message="initial done",
+            last_message=InitialCodexResult(
+                summary="initial done", vcs_backend_used=VcsKind.GIT,
+            ).model_dump_json(),
             exit_code=0,
-            output=InitialCodexResult(summary="initial done", vcs_backend_used=VcsKind.GIT),
         )
 
     async def resume(self, session_id: str, prompt: str, *, output_schema=None, context=None) -> AgentRun:
@@ -52,7 +53,6 @@ class RecordingAgent:
             session_id=session_id,
             last_message="revision done",
             exit_code=0,
-            output=None,
         )
 
 
@@ -69,7 +69,6 @@ class BackendlessAgent(RecordingAgent):
             session_id="session-1",
             last_message="claimed success",
             exit_code=0,
-            output=None,
         )
 
 

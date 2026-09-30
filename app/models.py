@@ -258,7 +258,6 @@ class AgentRun:
     session_id: str | None
     last_message: str
     exit_code: int
-    output: CodexResult | InitialCodexResult | None = None
     failure_detail: str | None = None
 
 

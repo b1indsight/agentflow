@@ -367,7 +367,7 @@ async def apply_result(subject: JobCoordinator, job: Job, result: ExecutionResul
     """Model the accepted-inbox boundary before invoking the production result application."""
     store = cast(MemoryStore, subject.store)
     store.accept(job, result)
-    return await subject.apply_result(job, result)
+    return await subject.apply_result(job.id)
 
 
 async def prepare(subject: JobCoordinator, job: Job):
@@ -669,7 +669,7 @@ async def test_result_kind_must_match_persisted_job_kind() -> None:
     subject = coordinator(MemoryStore(), RecordingGitHub())
     job = Job(id=8, flow_id=1, kind=JobKind.INITIAL, state=JobState.RUNNING)
 
-    with pytest.raises(TypeError, match="cannot accept"):
+    with pytest.raises(ValueError, match="result kind does not match persisted job"):
         await apply_result(
             subject,
             job,
