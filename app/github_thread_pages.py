@@ -7,24 +7,21 @@ from typing import Any
 from githubkit.exception import GraphQLFailed
 from pydantic import BaseModel, ConfigDict
 
-from app.github_models import ReviewComment, ReviewThread, ReviewThreadPage, ReviewThreads
-from app.github_threads import MAX_THREAD_BYTES
+from app.github_models import ReviewThreadPage, ReviewThreads
+from app.github_pagination import next_cursor
+from app.github_threads import (
+    MAX_THREAD_BYTES,
+    THREAD_FIELDS,
+    THREAD_QUERY,
+    belongs_to_pr,
+    decode_thread,
+)
 
-_FIELDS = """
-id isResolved isOutdated path
-pullRequest {number repository {nameWithOwner}}
-comments(first:20,after:$comments){
-  nodes {fullDatabaseId id body updatedAt author {login __typename}
-         replyTo {fullDatabaseId} originalCommit {oid}}
-  pageInfo {hasNextPage endCursor}
-}
-"""
 _THREADS = """
 query($owner:String!,$name:String!,$pr:Int!,$after:String,$comments:String){
 repository(owner:$owner,name:$name){pullRequest(number:$pr){
 reviewThreads(first:1,after:$after){nodes{
-""" + _FIELDS + "} pageInfo {hasNextPage endCursor}}}}}"
-_COMMENTS = "query($id:ID!,$comments:String){node(id:$id){... on PullRequestReviewThread{" + _FIELDS + "}}}"
+""" + THREAD_FIELDS + "} pageInfo {hasNextPage endCursor}}}}}"
 
 
 class ThreadCursor(BaseModel):
@@ -36,16 +33,6 @@ class ThreadCursor(BaseModel):
     following: str | None = None
 
 
-def next_cursor(page: dict[str, Any], previous: str | None) -> str | None:
-    info = page["pageInfo"]
-    if not isinstance(info["hasNextPage"], bool):
-        raise TypeError("invalid page completeness")
-    cursor = info["endCursor"] if info["hasNextPage"] else None
-    if info["hasNextPage"] and (not isinstance(cursor, str) or not cursor or cursor == previous):
-        raise ValueError("invalid thread cursor")
-    return cursor
-
-
 async def read_thread_page(client: Any, repo: str, pr: int, cursor: str | None) -> ReviewThreadPage:
     """Read resolved and unresolved threads alike; each invocation makes at most one request."""
     state = ThreadCursor.model_validate_json(cursor) if cursor else ThreadCursor()
@@ -55,7 +42,7 @@ async def read_thread_page(client: Any, repo: str, pr: int, cursor: str | None) 
     owner, name = repo.split("/")
     try:
         data = await client.async_graphql(
-            _COMMENTS if state.thread_id else _THREADS,
+            THREAD_QUERY if state.thread_id else _THREADS,
             {"id": state.thread_id, "comments": state.comments} if state.thread_id else
             {"owner": owner, "name": name, "pr": pr, "after": state.after, "comments": None},
         )
@@ -87,28 +74,17 @@ async def read_thread_page(client: Any, repo: str, pr: int, cursor: str | None) 
             raise ValueError("missing thread entry")
     continuation = ThreadCursor(after=following).model_dump_json() if following else None
     if node is not None:
-        pull = node["pullRequest"]
-        if pull["number"] != pr or pull["repository"]["nameWithOwner"].casefold() != repo.casefold():
+        if not belongs_to_pr(node, repo, pr):
             raise ValueError("thread does not belong to tracked PR")
         comments_page = node["comments"]
         comments_after = next_cursor(comments_page, state.comments)
-        if len(comments_page["nodes"]) > 20:
-            raise ValueError("invalid comment page size")
-        comments = [ReviewComment(
-            github_id=raw["fullDatabaseId"], node_id=raw["id"], body=raw["body"],
-            updated_at=raw["updatedAt"], author=raw["author"]["login"] if raw["author"] else "deleted-user",
-            is_bot=bool(raw["author"] and raw["author"]["__typename"] == "Bot"),
-            reply_to_id=raw["replyTo"]["fullDatabaseId"] if raw["replyTo"] else None,
-            original_commit_id=raw["originalCommit"]["oid"] if raw["originalCommit"] else None,
-        ) for raw in comments_page["nodes"]]
-        if len({comment.github_id for comment in comments}) != len(comments):
-            raise ValueError("duplicate comment identity")
-        snapshot.threads.append(ReviewThread(
-            thread_id=node["id"], repo=repo, pr_number=pr, path=node["path"],
-            resolved=node["isResolved"], outdated=node["isOutdated"], comments=comments,
+        thread = decode_thread(node, repo, pr)
+        if not thread.complete:
+            raise ValueError("missing or duplicate comment identity")
+        snapshot.threads.append(thread.model_copy(update={
             # Even the final nested page is a fragment, never a complete coverage snapshot.
-            complete=bool(comments) and not comments_after and not state.thread_id,
-        ))
+            "complete": bool(thread.comments) and not comments_after and not state.thread_id,
+        }))
         if comments_after:
             continuation = ThreadCursor(
                 after=state.after, thread_id=node["id"], comments=comments_after, following=following,

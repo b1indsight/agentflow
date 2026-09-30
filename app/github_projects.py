@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 from app.github_models import GitHubAdapterError, GitHubErrorKind
+from app.github_pagination import next_cursor
 from app.project_models import (
     ProjectConfig,
     ProjectItem,
@@ -54,16 +55,6 @@ SET = """mutation($project: ID!, $item: ID!, $field: ID!, $option: String!) {
 def require(value: bool, reason: str = "response") -> None:
     if not value:
         raise GitHubAdapterError(GitHubErrorKind.UNEXPECTED_RESPONSE, f"project_{reason}")
-
-
-def following(connection: Any, previous: str | None) -> str | None:
-    info = connection["pageInfo"]
-    require(type(info["hasNextPage"]) is bool)
-    cursor = info["endCursor"]
-    if info["hasNextPage"]:
-        require(isinstance(cursor, str) and bool(cursor) and cursor != previous)
-        return str(cursor)
-    return None
 
 
 class GitHubProjects:
@@ -126,7 +117,7 @@ class GitHubProjects:
             require(data["id"] == self.config.project_id)
             connection = data["items"]
             items = [self._item(node) for node in connection["nodes"]]
-            return ProjectItemsPage(items=items, next_cursor=following(connection, cursor),
+            return ProjectItemsPage(items=items, next_cursor=next_cursor(connection, cursor),
                                     complete=all(item.content_id is not None for item in items))
         return await self._execute(read)
 
@@ -144,7 +135,7 @@ class GitHubProjects:
                     if value.get("field", {}).get("id") == self.config.status_field_id:
                         item.option_id = value["optionId"]
                         return item
-                cursor = following(data["fieldValues"], cursor)
+                cursor = next_cursor(data["fieldValues"], cursor)
                 if cursor is None:
                     return item
             raise GitHubAdapterError(GitHubErrorKind.UNEXPECTED_RESPONSE, "project_field_pagination")
