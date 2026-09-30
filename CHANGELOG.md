@@ -8,6 +8,8 @@
 
 ## Unreleased
 
+- 精简重复测试与 worker 替身，保留真实事务回滚覆盖；v9 回执兼容测试改用固定数据和摘要基准。
+
 - review 标签更新与旧账本重放改为增量操作，保留用户标签；统一 PR 远端读取与交付回执类型，
   保持 v9 JSON、终态摘要和冻结上下文兼容。worker 显式要求持久 journal、身份及停止控制，
   tool caller 按执行传入；移除闲置 ReviewItem CRUD、webhook handler、sandbox/dispatch 接缝及重复 VCS 字段。

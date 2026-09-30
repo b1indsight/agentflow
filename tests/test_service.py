@@ -38,12 +38,7 @@ class RetryStore:
 
     @contextmanager
     def transaction(self):
-        flow, enqueued = self.flow.model_copy(deep=True), list(self.enqueued)
-        try:
-            yield self
-        except Exception:
-            self.flow, self.enqueued = flow, enqueued
-            raise
+        yield self
 
     def serialize_issue(self, repo: str, issue_number: int) -> None:
         pass
@@ -83,31 +78,21 @@ class RetryStore:
         return Job(id=2, flow_id=flow_id, kind=kind, state=JobState.QUEUED)
 
 
-def test_explicit_retry_reactivates_a_failed_flow() -> None:
-    store = RetryStore()
-    service = ControlService(cast(Store, cast(Any, store)))
-
-    service.retry(store.flow)
-
-    assert store.flow.state is FlowState.ACTIVE
-    assert store.enqueued == [JobKind.INITIAL]
-
-
-def test_explicit_retry_requeues_the_failed_job_kind() -> None:
-    failed_job = Job(
-        id=3,
-        flow_id=1,
-        kind=JobKind.REVISION,
-        state=JobState.FAILED,
-        payload={"instruction": "Address feedback"},
-    )
+@pytest.mark.parametrize("failed_kind,expected_kind", [
+    (None, JobKind.INITIAL),
+    (JobKind.REVISION, JobKind.REVISION),
+])
+def test_explicit_retry_reactivates_flow_and_requeues_kind(failed_kind, expected_kind) -> None:
+    failed_job = (Job(id=3, flow_id=1, kind=failed_kind, state=JobState.FAILED,
+                      payload={"instruction": "Address feedback"})
+                  if failed_kind is not None else None)
     store = RetryStore(failed_job)
     service = ControlService(cast(Store, cast(Any, store)))
 
     service.retry(store.flow)
 
     assert store.flow.state is FlowState.ACTIVE
-    assert store.enqueued == [JobKind.REVISION]
+    assert store.enqueued == [expected_kind]
 
 
 def test_merged_terminal_flow_requires_manual_archive_reconciliation() -> None:
@@ -116,22 +101,6 @@ def test_merged_terminal_flow_requires_manual_archive_reconciliation() -> None:
 
     with pytest.raises(ValueError, match="terminal"):
         ControlService(cast(Store, cast(Any, store))).retry(store.flow)
-
-    assert store.flow.state is FlowState.FAILED
-    assert store.enqueued == []
-
-
-def test_retry_rolls_back_state_when_enqueue_fails(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A control crash or database error between activation and enqueue must leave retry possible.
-    store = RetryStore()
-    service = ControlService(cast(Store, cast(Any, store)))
-
-    def fail_enqueue(*args: object, **kwargs: object) -> Job:
-        raise RuntimeError("enqueue interrupted")
-
-    monkeypatch.setattr(store, "enqueue_job", fail_enqueue)
-    with pytest.raises(RuntimeError, match="enqueue interrupted"):
-        service.retry(store.flow)
 
     assert store.flow.state is FlowState.FAILED
     assert store.enqueued == []
