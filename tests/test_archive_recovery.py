@@ -6,7 +6,14 @@ import pytest
 
 from app.control.service import ControlService
 from app.models import FlowState, JobKind, JobState
-from app.protocol import ArchiveResult, ArchiveTask, Failed, Succeeded, terminal_digest
+from app.protocol import (
+    PROTOCOL_VERSION,
+    ArchiveResult,
+    ArchiveTask,
+    Failed,
+    Succeeded,
+    terminal_digest,
+)
 from app.stop_store import StopStore
 from app.store import Store
 from tests.test_coordinator import RecordingGitHub, coordinator
@@ -100,7 +107,7 @@ async def test_failed_archive_retry_keeps_attempt_and_original_worker(store):
     with pytest.raises(ValueError, match="merged.*archive|archive.*merged"):
         service.cancel(flow)
     service.retry(flow)
-    store.worker_connected("worker-b", 8, "epoch-b")
+    store.worker_connected("worker-b", PROTOCOL_VERSION, "epoch-b")
     assert store.assign_job("worker-b", "other", "epoch-b") is None
     retried = store.assign_job("worker-a", "retry", "epoch-a")
     assert retried.kind is JobKind.ARCHIVE
@@ -122,9 +129,9 @@ async def test_expired_merged_executor_is_pinned_until_original_worker_returns(s
     assert "executor" in store.get_job(old.id).last_error
     with pytest.raises(ValueError, match="executor|running"):
         ControlService(store).retry(flow)
-    store.worker_connected("worker-b", 8, "epoch-b")
+    store.worker_connected("worker-b", PROTOCOL_VERSION, "epoch-b")
     assert store.assign_job("worker-b", "other", "epoch-b") is None
-    store.worker_connected("worker-a", 8, "new-epoch")
+    store.worker_connected("worker-a", PROTOCOL_VERSION, "new-epoch")
     assert store.resume_assignment(old.id, "worker-a", "triage-token", "new-epoch")
 
 
@@ -135,7 +142,7 @@ async def test_archive_without_original_binding_cannot_be_adopted(store):
     with pytest.raises(ValueError, match="binding"):
         ControlService(store).retry(flow)
     store.enqueue_job(flow.id, JobKind.ARCHIVE)
-    store.worker_connected("worker-b", 8, "epoch-b")
+    store.worker_connected("worker-b", PROTOCOL_VERSION, "epoch-b")
     assert store.assign_job("worker-b", "other", "epoch-b") is None
 
 
@@ -160,23 +167,6 @@ async def test_delivery_change_after_receipt_freeze_blocks_commit(store, monkeyp
         ControlService(store).retry(flow)
 
 
-@pytest.mark.parametrize("legacy", ["task", "result"])
-async def test_upgrade_refuses_legacy_archive_without_inventing_cleanup_receipts(store, legacy):
-    flow, job, _task, _subject = await ready_archive(store)
-    with store.connection() as connection:
-        if legacy == "task":
-            connection.execute("UPDATE jobs SET payload=NULL WHERE id=%s", (job.id,))
-        else:
-            connection.execute(
-                "UPDATE jobs SET result_received_at=now(), result_payload="
-                "'{\"protocol_version\":7,\"result\":{\"kind\":\"archive\"}}'::jsonb WHERE id=%s",
-                (job.id,),
-            )
-    with pytest.raises(RuntimeError, match="Drain or reconcile pre-upgrade jobs"):
-        store.reviews.check_upgrade()
-    assert store.get_flow_execution(flow.id).released_at is None
-
-
 @pytest.mark.parametrize("journal", ["missing", "started-without-executor"])
 async def test_merged_coding_process_without_exit_proof_cannot_unlock_archive(store, journal):
     from app.control.gateway import ProtocolViolation, WorkerGateway
@@ -187,7 +177,7 @@ async def test_merged_coding_process_without_exit_proof_cannot_unlock_archive(st
     await route_merge(store, flow)
     subject = coordinator(store, RecordingGitHub())
     gateway = WorkerGateway(store, subject, stops=StopStore(store), worker_tokens={"worker-a": "secret"})
-    store.worker_connected("worker-a", 8, "restart")
+    store.worker_connected("worker-a", PROTOCOL_VERSION, "restart")
     with pytest.raises(ProtocolViolation, match="archive blocked"):
         if journal == "missing":
             await gateway._reject_missing_journal("worker-a", "restart", old.id)
@@ -212,13 +202,12 @@ async def test_restart_between_archive_claim_and_freeze_requeues_safely(store):
     await subject.results.apply(old.id)
     job = store.assign_job("worker-a", "archive-token", "epoch-a")
     assert job.payload is None and job.started_at is None
-    store.reviews.check_upgrade()
     store.recover_abandoned_assignments()
     now = store.now()
     store._clock = lambda: now + timedelta(hours=1)
     store.sweep_expired_assignments()
     assert store.get_job(job.id).state is JobState.QUEUED
-    store.worker_connected("worker-a", 8, "restart")
+    store.worker_connected("worker-a", PROTOCOL_VERSION, "restart")
     recovered = store.assign_job("worker-a", "new-token", "restart")
     assert recovered.id == job.id
     assert isinstance(await subject.prepare(recovered), ArchiveTask)
@@ -242,7 +231,7 @@ async def test_lost_archive_started_requires_original_fence_and_frozen_identity(
     worker, token, epoch = "worker-a", "archive-token", "epoch-a"
     if mismatch == "worker":
         worker = "worker-b"
-        store.worker_connected(worker, 8, epoch)
+        store.worker_connected(worker, PROTOCOL_VERSION, epoch)
     elif mismatch == "token":
         token = "old-token"
     elif mismatch == "epoch":

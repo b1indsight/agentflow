@@ -132,15 +132,6 @@ def test_cleanup_preserves_pending_and_dedup_identity(store):
     assert consumer(store).sweep() == 1  # only the pending second Issue
 
 
-def test_pre_inbox_marker_is_blocked_instead_of_silently_losing_business(store):
-    store.record_event("one", "issues", None, payload())
-    inbox = WebhookStore(store)
-    receive(inbox)
-    consumer(store).sweep()
-    assert inbox.list()[0].state == "blocked"
-    assert inbox.list()[0].error_code == "LegacyDelivery"
-
-
 def test_retry_budget_is_bounded(store, monkeypatch):
     def unavailable(*args):
         raise RuntimeError("temporary")

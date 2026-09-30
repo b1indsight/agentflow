@@ -10,7 +10,6 @@ from app.context_models import (
     ContextDiscussion,
     ReviewContext,
 )
-from app.github_models import PullRequestDetails
 from app.models import Flow
 from app.ports import GitHubClient
 from app.review_models import ReviewBatch
@@ -104,7 +103,7 @@ async def build_review_context(
         limitations.append("open-points:truncated")
     snapshot = ReviewContext(
         batch_id=batch.id, repo=flow.repo, issue_number=flow.issue_number, pr_number=pr_number,
-        issue=issue, pull_request=PullRequestDetails.model_validate(pr.model_dump()), files=bounded_files,
+        issue=issue, pull_request=pr, files=bounded_files,
         discussions=discussions[:MAX_DISCUSSIONS], feedback=feedback,
         open_points=[clip(point, "open-points") for point in batch.open_points[:MAX_DISCUSSIONS]],
         limitations=sorted(set(limitations)),

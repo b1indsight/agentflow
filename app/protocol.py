@@ -24,7 +24,7 @@ from app.judge_models import JudgeDecision
 from app.models import CodexResult, FeedbackRef, JobState, VcsKind
 from app.review_models import ReviewFeedback
 
-PROTOCOL_VERSION: Literal[9] = 9
+PROTOCOL_VERSION: Literal[10] = 10
 
 
 class ProtocolModel(BaseModel):
@@ -34,7 +34,7 @@ class ProtocolModel(BaseModel):
 
 
 class Message(ProtocolModel):
-    protocol_version: Literal[9] = PROTOCOL_VERSION
+    protocol_version: Literal[10] = PROTOCOL_VERSION
 
 
 class ReviewTask(ProtocolModel):
@@ -149,8 +149,7 @@ class InitialResult(ProtocolModel):
     remote_sha: str | None = None
     pushed: bool = False
     open_pr_call_id: str | None = None
-    # Keep the v9 wire name: this is a tool receipt, not a remote PR snapshot.
-    pull_request: DeliveryReceipt | None = None
+    delivery_receipt: DeliveryReceipt | None = None
 
 
 class ReviewResult(ProtocolModel):

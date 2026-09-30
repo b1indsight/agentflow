@@ -3,7 +3,7 @@
 from datetime import UTC, datetime
 
 from app.context_models import ReviewContext
-from app.github_models import PullRequestDetails
+from app.github_models import PullRequestStatus
 from app.judge_models import JudgeDecision
 from app.models import FeedbackRef, Job, ReviewItemKind, TriageVerdict
 from app.review_models import BatchState, ReviewBatch, ReviewFeedback
@@ -12,7 +12,7 @@ from app.review_models import BatchState, ReviewBatch, ReviewFeedback
 def review_context(batch_id: int = 1) -> ReviewContext:
     return ReviewContext(
         batch_id=batch_id, repo="owner/repo", issue_number=8, pr_number=17,
-        pull_request=PullRequestDetails(
+        pull_request=PullRequestStatus(repo="owner/repo", merged=False,
             number=17, state="open", head_branch="flow/8", head_sha="abc",
             head_repository="owner/repo",
             base_branch="main", base_sha="def", title="Bound retries", body="Use 10 retries",

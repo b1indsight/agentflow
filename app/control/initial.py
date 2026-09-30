@@ -38,10 +38,10 @@ def initial_delivery_mismatch(
         job.id,
     ):
         return "flow.open_pr call fence does not match the result"
-    if result.pull_request is None:
-        return "pull request handle is missing"
-    if tool_call.response != result.pull_request:
-        return "pull request handle does not match the persisted tool response"
-    if result.pull_request.head_sha != delivery.head_sha:
+    if result.delivery_receipt is None:
+        return "delivery receipt is missing"
+    if tool_call.response != result.delivery_receipt:
+        return "delivery receipt does not match the persisted tool response"
+    if result.delivery_receipt.head_sha != delivery.head_sha:
         return "prepared delivery head SHA does not match delivery"
     return None

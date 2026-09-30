@@ -8,6 +8,10 @@
 
 ## Unreleased
 
+- 未部署阶段统一到当前完整 schema、wire protocol v10 / journal v3；删除历史迁移、旧任务/effect
+  与升级分支，交付结果字段改为 delivery_receipt，上下文共用当前 PR 模型。旧开发数据不自动转换；
+  首次运行使用新数据库与 worker root。同版本恢复、重放、摘要和并发保护保留。
+
 - 精简重复测试与 worker 替身，保留真实事务回滚覆盖；v9 回执兼容测试改用固定数据和摘要基准。
 
 - review 标签更新与旧账本重放改为增量操作，保留用户标签；统一 PR 远端读取与交付回执类型，

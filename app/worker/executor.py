@@ -181,7 +181,7 @@ class WorkerExecutor:
             remote_sha=outcome.remote_sha,
             pushed=outcome.commit_sha == outcome.remote_sha,
             open_pr_call_id=tool_call_id,
-            pull_request=tool_result,
+            delivery_receipt=tool_result,
         )
 
     async def _revision(

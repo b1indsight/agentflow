@@ -1,6 +1,6 @@
 # 仓库概念与接口统一（起始于 Review 线程读取）
 
-**阶段：** 全部已批准审查项已实现并验证，独立审查通过。
+**阶段：** 当前版本专用契约已实现并验证，等待本轮独立审查。
 **PR：** [#54](https://github.com/b1indsight/agentflow/pull/54)。
 **基线：** `main` / `717f97bb`。
 **Bookmark：** `refactor/review-thread-contracts`。
@@ -219,3 +219,35 @@ GraphQL connection 校验；不扩展到 webhook 生命周期或整个工作流�
 ### 2026-09-30：测试精简独立审查完成
 
 实现提交 `f9ddc38d7032` 的独立审查返回空 findings，通过；同一 PR #54 更新测试精简与验证记录。
+
+
+### 2026-09-30：用户明确取消历史兼容要求
+
+用户说明“当前仓库没有部署”，要求“直接去掉兼容之前版本的代码，全部固定到最新版本”。
+此要求取代此前保留旧表迁移、旧 effect、旧回执字段/摘要及冻结上下文投影的决定，批准直接清理：
+完整当前 schema 替换增量迁移/回填；删除旧任务枚举、迁移启动检查和旧结果版本分支；仅保留
+当前单标签 effect。回执字段命名统一为 delivery_receipt、状态显式区分 prepared/opened，上下文
+直接使用统一 PR 模型；更新 wire 为 v10、journal 为 v3，拒绝其他版本，不提供转换。
+删除旧版本专用测试，保留当前版本重放、重启、摘要完整性与并发保护。新增干净 schema 的
+初始化/重复初始化回归，执行真实 PostgreSQL 全仓、Ruff/Mypy/build；同步当前运维文档。
+不清空本地已有数据库；旧开发数据库应单独重建，历史计划保留为历史记录。
+
+
+### 2026-09-30：当前版本专用实现完成
+
+- schema：将增量 ADD COLUMN 合并到各表完整定义，删除状态/交付回填、旧 review_threads /
+  review_migrations、旧 attempts branch/PR/worker 字段、jobs pid/recovery version 和工具 error。
+  webhook 顺序使用当前 identity 列，保留事务内分配顺序。循环外键的幂等建立属于当前表关系，
+  并非旧版迁移，继续保留。
+- 运行时：删除旧 ANSWER、command signal、LabelsEffect、result/resolution version、pre-inbox
+  以及 check_upgrade/migrate_legacy 分支。ResolveEffect 的 PR 编号和快照为必填；当前 batch
+  缺失、摘要不符、凭据/绑定错误、未知副作用等运行期保护不变。
+- 契约：仅 wire v10 / journal v3；INITIAL 使用 delivery_receipt，prepared/opened 为显式判别字段。
+  删除仅为冻结旧字段保留的 PullRequestDetails；远端与上下文共用 PullRequestStatus。
+- 测试：删除历史升级/迁移专用场景，将 fixture 里的旧 worker 版本替换为 PROTOCOL_VERSION。
+  新增当前 schema 重复初始化、现有 Flow 保留、无旧表字段回归；改动前因 review_threads 存在
+  失败，当前实现通过。修正生命周期测试遗漏的旧 router.handle 调用为 dispatch。
+- 验证：真实 PostgreSQL 全仓 **803 passed**；Ruff、Mypy（138 源文件）、uv build 与 diff 检查通过。
+  删除的兼容路径不引入额外机制；无需额外消融。保留现有当前版本恢复、标签和线程回归。
+- README、架构及运维文档以当前版本为准；历史计划和 changelog 保留原事实，由本条明确取代
+  兼容决定。没有删除或迁移本地现有数据库，没有调用真实 GitHub/模型。

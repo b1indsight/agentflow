@@ -261,8 +261,8 @@ async def test_lifecycle_webhooks_are_durable_query_hints(store, lifecycle_flow,
     router = EventRouter(store, ControlService(store), SimpleNamespace())
     payload = {"action": action, "repository": {"full_name": flow.repo},
                "pull_request": {"number": 17, "merged": False}}
-    await router.handle("pull_request", "hint", payload)
-    await router.handle("pull_request", "hint", payload)
+    router.dispatch("pull_request", "hint", payload)
+    router.dispatch("pull_request", "hint", payload)
     assert store.event_seen("hint")
     assert store.reconcile.get(flow.id) is not None
     assert store.get_delivery(flow.id).state is DeliveryState.OPEN
@@ -353,7 +353,7 @@ async def test_initial_close_before_final_commit_keeps_verified_identity_and_can
     assert store.start_assignment(job.id, attempt.id, "worker", "token", "epoch")
     result = InitialResult(session_id="session-1", last_message="done", exit_code=0,
         vcs_backend=VcsKind.GIT, branch=delivery.branch, commit_sha="abc123", remote_sha="abc123",
-        pushed=True, open_pr_call_id="initial", pull_request=prepared)
+        pushed=True, open_pr_call_id="initial", delivery_receipt=prepared)
     terminal = Succeeded(job_id=job.id, assignment_token="token", connection_epoch="epoch", result=result)
     assert store.record_assignment_result(job.id, "worker", "token", "epoch",
         terminal.model_dump(mode="json"), terminal_digest(terminal)) == "pending"

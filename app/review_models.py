@@ -25,8 +25,7 @@ class FeedbackUpdate(BaseModel):
     deleted: bool = False
     # Persistence-only invalidation; an edited command can later become ordinary feedback.
     inert: bool = Field(default=False, exclude=True)
-    # Keep legacy command values readable in persisted v5 snapshots; routing no longer emits them.
-    signal: Literal["discussion", "command", "request_changes"] = "discussion"
+    signal: Literal["discussion", "request_changes"] = "discussion"
     submitted: bool = False
     path: str | None = None
     original_commit_id: str | None = None

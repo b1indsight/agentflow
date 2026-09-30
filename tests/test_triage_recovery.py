@@ -8,7 +8,7 @@ import pytest
 from app.control.gateway import WorkerGateway
 from app.control.service import ControlService
 from app.models import FlowState, JobState, TriageVerdict, Verdict
-from app.protocol import Succeeded, TriageResult, terminal_digest
+from app.protocol import PROTOCOL_VERSION, Succeeded, TriageResult, terminal_digest
 from app.review_models import BatchState
 from app.stop_store import StopStore
 from app.store import Store
@@ -21,7 +21,7 @@ from tests.test_review_batches import review_flow as review_flow  # noqa: PLC041
 def assign_triage(store, flow, clock):
     ingest(store, flow, feedback(clock))
     job = claim(store, clock)[0]
-    store.worker_connected("worker-a", 6, "epoch-a")
+    store.worker_connected("worker-a", PROTOCOL_VERSION, "epoch-a")
     assigned = store.assign_job("worker-a", "token", "epoch-a")
     assert assigned.id == job.id
     return assigned
@@ -56,25 +56,15 @@ async def test_restart_during_snapshot_preparation_requeues_unstarted_work(store
     assert store.reviews.for_job(job).context is None
     restarted = Store(store.database_url, clock=lambda: clock.now)
     try:
-        # Startup checks precede recovery. A v6 job has not reached Started at this boundary.
-        restarted.reviews.check_upgrade()
         restarted.recover_abandoned_assignments()
         clock.now += timedelta(seconds=61)
         assert restarted.sweep_expired_assignments() == (1, 0)
-        restarted.worker_connected("worker-a", 6, "epoch-b")
+        restarted.worker_connected("worker-a", PROTOCOL_VERSION, "epoch-b")
         replacement = restarted.assign_job("worker-a", "next-token", "epoch-b")
         assert replacement.id == job.id
         assert (await coordinator(restarted, RecordingGitHub()).prepare(replacement)).context
     finally:
         restarted.close()
-
-
-def test_started_triage_without_context_still_requires_upgrade_reconciliation(store, review_flow):
-    flow, clock = review_flow
-    job = assign_triage(store, flow, clock)
-    assert store.start_assignment(job.id, flow.current_attempt_id, "worker-a", "token", "epoch-a")
-    with pytest.raises(RuntimeError, match=str(job.id)):
-        store.reviews.check_upgrade()
 
 
 @pytest.mark.parametrize("mismatch", ["refs", "digest"])
@@ -131,7 +121,7 @@ async def test_retry_replaces_stale_context_and_keeps_the_original_audit(store, 
     assert fresh.id != old.id
     assert fresh.context is None
     assert [(item.github_id, item.version) for item in fresh.feedback] == [(101, 2), (102, 1)]
-    store.worker_connected("worker-a", 6, "epoch-a")
+    store.worker_connected("worker-a", PROTOCOL_VERSION, "epoch-a")
     replacement = store.assign_job("worker-a", "token", "epoch-a")
     await apply_triage(store, flow, replacement, subject,
                       TriageVerdict(verdict=Verdict.ANSWER, answer="Answer from the new snapshot."))
@@ -154,7 +144,7 @@ async def test_expired_assignment_cannot_freeze_its_fetched_context(store, revie
             clock.now += timedelta(seconds=61)
             assert store.sweep_expired_assignments() == (1, 0)
             if reassigned:
-                store.worker_connected("worker-a", 6, "epoch-b")
+                store.worker_connected("worker-a", PROTOCOL_VERSION, "epoch-b")
                 assert store.assign_job("worker-a", "new-token", "epoch-b").id == job.id
             return await super().get_issue(*args)
 

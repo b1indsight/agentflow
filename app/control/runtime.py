@@ -81,7 +81,6 @@ class ControlRuntime:
 
     def startup(self) -> None:
         self.store.init_db()
-        self.store.reviews.check_upgrade()
         self.store.results.recover_claims()
         requeued, failed = self.store.recover_abandoned_assignments()
         if requeued or failed:

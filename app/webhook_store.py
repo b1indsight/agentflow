@@ -15,6 +15,7 @@ if TYPE_CHECKING:
 
 WEBHOOK_SCHEMA = """
 CREATE TABLE IF NOT EXISTS webhook_inbox (
+    inbox_position BIGINT GENERATED ALWAYS AS IDENTITY,
     delivery_id TEXT PRIMARY KEY,
     event_type TEXT NOT NULL,
     payload JSONB,
@@ -29,16 +30,6 @@ CREATE TABLE IF NOT EXISTS webhook_inbox (
     error_code TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_webhook_pending ON webhook_inbox(state, next_at, received_at);
-ALTER TABLE webhook_inbox ADD COLUMN IF NOT EXISTS inbox_position BIGINT;
-CREATE SEQUENCE IF NOT EXISTS webhook_inbox_position_seq;
-WITH pending AS MATERIALIZED (
- SELECT delivery_id FROM webhook_inbox WHERE inbox_position IS NULL ORDER BY received_at,delivery_id
-), numbered AS MATERIALIZED (
- SELECT delivery_id,nextval('webhook_inbox_position_seq') AS position FROM pending
-)
-UPDATE webhook_inbox w SET inbox_position=n.position FROM numbered n WHERE w.delivery_id=n.delivery_id;
-ALTER TABLE webhook_inbox ALTER COLUMN inbox_position SET DEFAULT nextval('webhook_inbox_position_seq');
-ALTER TABLE webhook_inbox ALTER COLUMN inbox_position SET NOT NULL;
 CREATE INDEX IF NOT EXISTS ix_webhook_order ON webhook_inbox
  ((payload #>> '{repository,full_name}'), inbox_position) WHERE state != 'done';
 """

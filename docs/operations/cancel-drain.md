@@ -9,7 +9,7 @@
 
 ## 停止确认
 
-同一鉴权 WebSocket 使用 v9 的 StopExecution / ExecutionStopped / StopAccepted 消息。
+同一鉴权 WebSocket 使用 v10 的 StopExecution / ExecutionStopped / StopAccepted 消息。
 请求绑定 flow、worker、job、assignment token、binding 创建时间、当前 epoch 和独立 request ID。
 worker 必须持有匹配 journal，当前执行只能由持有该 task / 子进程对象的进程取消。
 每次 assignment 在启动前持久化执行 nonce；停止凭据包含 nonce，原 journal 继续保存直到 ACK。
@@ -25,7 +25,7 @@ blocked。恢复原 journal 不等于证明旧进程结束。不要删除 journa
 先隔离原运行环境、检查原进程及远端操作事实，再制定人工恢复步骤；此版没有 force-release。
 
 控制面还会等结果和已 dispatch 的外部 effects 收敛。取消后只核对已发送写操作，不重发；
-结果未知就保留占用。即使旧版本曾把 effect 标记 skipped，只要已发送且没有 receipt，仍阻止
+结果未知就保留占用。effect 标记 skipped 时，只要已发送且没有 receipt，仍阻止
 释放。取消期间确认 PR 已合并时，保留原 binding，符合条件的原 Flow 转回 ACTIVE 只做 archive；
 不会重新运行编码。如果另一条 Flow 已占用同一 Issue，保留现场并人工处理冲突。
 
@@ -52,10 +52,9 @@ serve 用 Uvicorn 的 20 秒 graceful shutdown 窗口停止接收并收敛请求
 STOP 请求和有效凭据握手能完成取消。未写出凭据的进程崩溃依然按未知执行处理。
 容器 stop grace / Kubernetes terminationGracePeriod 至少 45 秒，超时 SIGKILL 只靠持久事实恢复。
 
-协议从 v8 升到 v9，旧 worker 显式拒绝，不混跑。升级步骤：停止触发新任务 → drain 所有 worker
-→ 等现有绑定完成或 cancel 并等确认 → 保存数据库与 worker root/HOME → 停 worker → 升 serve
-及 worker → 检查身份、连接和恢复状态 → undrain。旧 journal 中若仍嵌有 v8 结果，应先用原版本
-收敛；不要用文本替换修改 journal 协议版本。Docker/K8s 必须选择同一版本的角色镜像。
+当前仅支持协议 v10 / journal v3，serve/worker 必须使用同一版本。仓库未部署，未保留跨版本
+数据库或 journal 迁移。当前版本停机重启仍应先 drain，再保存数据和 worker root/HOME；
+按原身份启动并核对恢复状态后 undrain。不要通过编辑 journal 版本号绕过验证。
 
 ## 验证范围
 

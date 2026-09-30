@@ -6,6 +6,7 @@ import psycopg
 import pytest
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
+from app.protocol import PROTOCOL_VERSION
 from scripts.smoke.recovery import freeze_connection, verify_bundle
 
 
@@ -16,7 +17,7 @@ def bundle(path: Path):
     manifest = {
         'format': 1, 'scope': 'isolated-fixture', 'complete': True,
         'backup_id': 'fixture', 'created_at': '2026-09-18T00:00:00+00:00',
-        'revision': 'fixture-revision', 'protocol': 9, 'schema': 'recovery_fixture',
+        'revision': 'fixture-revision', 'protocol': PROTOCOL_VERSION, 'schema': 'recovery_fixture',
         'worker': {'id': 'fixture-worker', 'root_identity': ['/fixture/root', 1, 2]},
         'steps': {'stopped': True, 'dumped': True, 'archived': True},
         'files': {name: hashlib.sha256(b'fixture').hexdigest()

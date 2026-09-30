@@ -214,15 +214,6 @@ async def test_failed_revision_retry_after_merge_keeps_flow_terminal(store, pend
     assert store.get_delivery(flow.id) == delivery
 
 
-async def test_protocol_upgrade_refuses_old_started_revision(store, pending_revision):
-    _, job, task, _, _ = pending_revision
-    assert store.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
-    with store.connection() as connection:
-        connection.execute("UPDATE jobs SET payload=payload-'revision' WHERE id=%s", (job.id,))
-    with pytest.raises(RuntimeError, match="Drain or reconcile"):
-        store.reviews.check_upgrade()
-
-
 @pytest.mark.parametrize("transition", ["retry", "cancel", "merge"])
 async def test_rejected_revision_notification_keeps_verified_result_recoverable(
     store, pending_revision, monkeypatch, transition,

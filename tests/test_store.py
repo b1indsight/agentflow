@@ -7,6 +7,7 @@ from psycopg.errors import UniqueViolation
 from app.control.service import ControlService
 from app.delivery_models import OpenedDelivery
 from app.models import DeliveryState, FlowState, JobKind, JobState
+from app.protocol import PROTOCOL_VERSION
 from app.store import Store
 
 
@@ -57,7 +58,7 @@ def test_attempt_and_job_lifecycle_round_trip(store: Store) -> None:
     flow.current_attempt_id = attempt.id
     store.update_flow(flow)
     delivery = store.get_or_create_delivery(flow.id, f"flow/{flow.id}")
-    store.worker_connected("worker-1", protocol_version=1)
+    store.worker_connected("worker-1", protocol_version=PROTOCOL_VERSION)
 
     job = store.enqueue_job(flow.id, JobKind.INITIAL, payload={"issue_number": 8})
     claimed = store.assign_job("worker-1", "assignment-1")
@@ -87,7 +88,7 @@ def test_attempt_and_job_lifecycle_round_trip(store: Store) -> None:
 
 
 def test_flow_binding_delivery_and_tool_ledger_round_trip(store: Store) -> None:
-    store.worker_connected("worker-a", protocol_version=4, connection_epoch="epoch-a")
+    store.worker_connected("worker-a", protocol_version=PROTOCOL_VERSION, connection_epoch="epoch-a")
     flow = store.create_flow("owner/repo", 18, installation_id=42)
     attempt = store.create_attempt(flow.id)
     flow.current_attempt_id = attempt.id
@@ -149,7 +150,7 @@ def test_only_unstarted_remote_assignments_can_be_requeued(store: Store) -> None
     attempt = store.create_attempt(flow.id)
     flow.current_attempt_id = attempt.id
     store.update_flow(flow)
-    store.worker_connected("worker-1", protocol_version=1)
+    store.worker_connected("worker-1", protocol_version=PROTOCOL_VERSION)
     first = store.enqueue_job(flow.id, JobKind.INITIAL)
     assigned = store.assign_job("worker-1", "assignment-1")
     assert assigned is not None
@@ -174,7 +175,7 @@ def test_result_inbox_deduplicates_and_rejects_conflicting_payloads(store: Store
     attempt = store.create_attempt(flow.id)
     flow.current_attempt_id = attempt.id
     store.update_flow(flow)
-    store.worker_connected("worker-1", protocol_version=1, connection_epoch="epoch-1")
+    store.worker_connected("worker-1", protocol_version=PROTOCOL_VERSION, connection_epoch="epoch-1")
     job = store.enqueue_job(flow.id, JobKind.INITIAL)
     assert store.assign_job("worker-1", "token-1", "epoch-1") is not None
     assert store.start_assignment(
@@ -199,8 +200,8 @@ def test_result_inbox_deduplicates_and_rejects_conflicting_payloads(store: Store
 
 
 def test_startup_preserves_assignments_for_lease_recovery(store: Store) -> None:
-    store.worker_connected("worker-1", protocol_version=1)
-    store.worker_connected("worker-2", protocol_version=1)
+    store.worker_connected("worker-1", protocol_version=PROTOCOL_VERSION)
+    store.worker_connected("worker-2", protocol_version=PROTOCOL_VERSION)
     unstarted_flow = store.create_flow("owner/unstarted", 1, installation_id=None)
     unstarted_job = store.enqueue_job(unstarted_flow.id, JobKind.INITIAL)
     assert store.assign_job("worker-1", "unstarted-token") is not None
@@ -247,7 +248,7 @@ def test_epoch_fencing_and_started_recovery_grace(postgresql_url: str) -> None:
         attempt = store.create_attempt(flow.id)
         flow.current_attempt_id = attempt.id
         store.update_flow(flow)
-        store.worker_connected("worker-1", protocol_version=1, connection_epoch="epoch-1")
+        store.worker_connected("worker-1", protocol_version=PROTOCOL_VERSION, connection_epoch="epoch-1")
         queued = store.enqueue_job(flow.id, JobKind.INITIAL)
         assigned = store.assign_job("worker-1", "token-1", "epoch-1")
         assert assigned is not None and assigned.id == queued.id
@@ -264,7 +265,7 @@ def test_epoch_fencing_and_started_recovery_grace(postgresql_url: str) -> None:
         assert recovering is not None
         assert recovering.recovery_deadline == now + timedelta(seconds=90)
 
-        store.worker_connected("worker-1", protocol_version=1, connection_epoch="epoch-2")
+        store.worker_connected("worker-1", protocol_version=PROTOCOL_VERSION, connection_epoch="epoch-2")
         assert not store.heartbeat_assignment(
             queued.id, "worker-1", "token-1", "epoch-1"
         )
@@ -298,7 +299,7 @@ def test_idle_flow_binding_fails_after_same_worker_recovery_grace(
     )
     store.init_db()
     try:
-        store.worker_connected("worker-a", protocol_version=4, connection_epoch="epoch-a")
+        store.worker_connected("worker-a", protocol_version=PROTOCOL_VERSION, connection_epoch="epoch-a")
         flow = store.create_flow("owner/idle", 51, installation_id=42)
         job = store.enqueue_job(flow.id, JobKind.INITIAL)
         assert store.assign_job("worker-a", "token-a", "epoch-a") is not None
@@ -336,7 +337,7 @@ def test_unstarted_assignment_is_requeued_only_after_lease_expiry(
     try:
         flow = store.create_flow("owner/unstarted-lease", 32, installation_id=None)
         job = store.enqueue_job(flow.id, JobKind.INITIAL)
-        store.worker_connected("worker-1", protocol_version=1, connection_epoch="epoch-1")
+        store.worker_connected("worker-1", protocol_version=PROTOCOL_VERSION, connection_epoch="epoch-1")
         assert store.assign_job("worker-1", "token-1", "epoch-1") is not None
         store.worker_disconnected(
             "worker-1", "network lost", connection_epoch="epoch-1"
@@ -368,8 +369,8 @@ def test_concurrent_stores_do_not_claim_the_same_job(
     flow = store.create_flow("owner/queue", 12, installation_id=None)
     queued = store.enqueue_job(flow.id, JobKind.INITIAL)
     other = Store(postgresql_url)
-    store.worker_connected("worker-1", protocol_version=1)
-    store.worker_connected("worker-2", protocol_version=1)
+    store.worker_connected("worker-1", protocol_version=PROTOCOL_VERSION)
+    store.worker_connected("worker-2", protocol_version=PROTOCOL_VERSION)
 
     try:
         with ThreadPoolExecutor(max_workers=2) as executor:
@@ -390,8 +391,8 @@ def test_concurrent_stores_do_not_claim_the_same_job(
 
 
 def test_workers_are_single_slot_and_attempt_affinity_is_enforced(store: Store) -> None:
-    store.worker_connected("worker-a", protocol_version=1)
-    store.worker_connected("worker-b", protocol_version=1)
+    store.worker_connected("worker-a", protocol_version=PROTOCOL_VERSION)
+    store.worker_connected("worker-b", protocol_version=PROTOCOL_VERSION)
     first_flow = store.create_flow("owner/first", 21, installation_id=None)
     second_flow = store.create_flow("owner/second", 22, installation_id=None)
     first_attempt = store.create_attempt(first_flow.id)
@@ -420,7 +421,7 @@ def test_workers_are_single_slot_and_attempt_affinity_is_enforced(store: Store) 
 def test_failed_flow_retry_reactivates_its_released_execution(store: Store) -> None:
     # A failed Flow keeps its execution history row; retry must reactivate that row instead of
     # inserting the same flow_id again and making the queued retry permanently unassignable.
-    store.worker_connected("worker-a", protocol_version=1)
+    store.worker_connected("worker-a", protocol_version=PROTOCOL_VERSION)
     flow = store.create_flow("owner/retry", 23, installation_id=None)
     failed = store.enqueue_job(flow.id, JobKind.INITIAL)
     assert store.assign_job("worker-a", "token-a") is not None
@@ -441,7 +442,7 @@ def test_failed_flow_retry_reactivates_its_released_execution(store: Store) -> N
 
 
 def test_worker_presence_round_trip(store: Store) -> None:
-    online = store.worker_connected("worker-a", protocol_version=1)
+    online = store.worker_connected("worker-a", protocol_version=PROTOCOL_VERSION)
 
     assert online.status == "online"
     assert online.current_job_id is None

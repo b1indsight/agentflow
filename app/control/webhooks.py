@@ -15,10 +15,6 @@ from app.store import Store
 from app.webhook_store import WebhookStore
 
 
-class LegacyDelivery(ValueError):
-    """A pre-inbox dedup marker cannot prove whether its business transaction committed."""
-
-
 class WebhookConsumer:
     def __init__(self, store: Store, settings: RouterSettings, service: ControlService) -> None:
         self.store, self.settings, self.service = store, settings, service
@@ -48,8 +44,6 @@ class WebhookConsumer:
                     )
                     if item.payload is None:
                         raise ValueError("pending webhook payload missing")
-                    if tx.event_seen(item.delivery_id):
-                        raise LegacyDelivery("pre-inbox event requires manual reconciliation")
                     # dispatch is synchronous DB-only work; nested transactions share this connection.
                     EventRouter(tx, service, self.settings).dispatch(
                         item.event_type, item.delivery_id, item.payload,

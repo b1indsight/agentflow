@@ -17,8 +17,6 @@ if TYPE_CHECKING:
     from app.store import Store
 
 STOP_SCHEMA = """
-ALTER TABLE jobs ADD COLUMN IF NOT EXISTS dispatch_authorized_at TIMESTAMPTZ;
-ALTER TABLE workers ADD COLUMN IF NOT EXISTS draining BOOLEAN NOT NULL DEFAULT FALSE;
 CREATE TABLE IF NOT EXISTS execution_stops (
  request_id TEXT PRIMARY KEY, flow_id BIGINT NOT NULL REFERENCES flows(id),
  job_id BIGINT NOT NULL REFERENCES jobs(id), worker_id TEXT NOT NULL REFERENCES workers(worker_id),

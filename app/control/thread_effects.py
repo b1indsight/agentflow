@@ -53,8 +53,6 @@ async def resolve_thread(
     """A successful note and exact human coverage are required even on uncertain-write recovery."""
     effect = record.payload
     assert isinstance(effect, ResolveEffect)
-    if effect.number is None or effect.snapshot is None:
-        return EffectReceipt(pending_reason="Legacy resolve intent lacks verified thread mapping")
     snapshot = await github.get_review_thread(
         effect.installation_id, effect.repo, effect.number, effect.thread_id,
     )

@@ -16,6 +16,7 @@ from app.models import (
     WorkerStatus,
     utcnow,
 )
+from app.protocol import PROTOCOL_VERSION
 from app.store import Store
 from tests.result_memory import MemoryStops
 from tests.review_memory import MemoryReviews
@@ -110,7 +111,7 @@ def test_list_workers_aggregates_current_flow() -> None:
     now = utcnow()
     worker = WorkerRecord(
         worker_id="worker-a",
-        protocol_version=1,
+        protocol_version=PROTOCOL_VERSION,
         status=WorkerStatus.BUSY,
         current_job_id=9,
         first_connected_at=now,

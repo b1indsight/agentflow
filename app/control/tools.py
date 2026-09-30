@@ -127,9 +127,7 @@ class FlowToolService:
             )
         except ValueError as exc:
             raise FlowToolRejected(FlowToolErrorKind.CONFLICT, str(exc)) from exc
-        if call.response is not None or call.error is not None:
-            if call.error is not None:
-                return self._error(request, FlowToolErrorKind.CONFLICT, call.error)
+        if call.response is not None:
             return FlowToolResponse(call_id=request.call_id, result=call.response)
 
         installation_id = flow.installation_id

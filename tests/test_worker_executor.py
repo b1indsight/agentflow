@@ -169,7 +169,7 @@ async def test_executor_runs_agent_and_judge_tasks_without_store(
     assert isinstance(initial, InitialResult)
     assert initial.commit_sha == "abc"
     assert initial.open_pr_call_id == "call-1"
-    assert initial.pull_request is not None
+    assert initial.delivery_receipt is not None
     assert isinstance(triage, TriageResult)
     assert triage.decision.context_digest == review_context().digest
     assert agent.started

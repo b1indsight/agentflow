@@ -152,7 +152,7 @@ ORM。
 - `flows`：issue 级状态，`(repo, issue)` 仅允许一个非终态 flow；
 - `flow_executions`：Flow 到单槽 worker/repo identity 的生命周期 binding 与 recovery deadline；
 - `flow_deliveries`：每 Flow 唯一 branch/base/PR、交付状态和版本；
-- `flow_tool_calls`：fenced command 的参数与终态 response/error，支持同 call id 重放；
+- `flow_tool_calls`：fenced command 的参数与成功交付回执 response，支持同 call id 重放；
 - `attempts`：一次运行/恢复尝试的 session 与 revision cycles，不拥有 worker、branch 或 PR；
 - `jobs`：queued/running/done/failed、worker/token/start、lease/recovery deadline、result inbox/digest 与尝试次数；
 - `result_applications`：按源 job 唯一保存冻结的结果计划；
@@ -160,7 +160,6 @@ ORM。
 - `workers`：identity、协议版本、epoch、online/busy/recovering/offline/failed、当前 job、连接/心跳与断线原因；
 - `events`：delivery 去重和 payload 审计；
 - `codex_runs`：按 attempt 记录 prompt、kind、exit 与时间；
-- `review_threads`：旧反馈历史，升级时一次性导入最新对象；旧 resolved 标记不作为 GitHub 确认；
 - `review_items` / `review_versions`：Flow 内稳定反馈身份、不可变版本、独立 relay/consume 时间和已核验 addressed 依据；
 - `review_pending_edits`：同秒乱序编辑的前序正文与原始来源；只有未在历史表示且后继无歧义时原子回放，其余保留待核对；
 - `review_buffers` / `review_batches`：持久 deadline/generation、冻结反馈/上下文/线程快照、批次所有者 job 和未决问题；
@@ -178,10 +177,8 @@ Store 继续使用同步接口。assignment claim 会锁定公平候选空闲 wo
 评论使用稳定隐藏 marker 并分页核对本 bot 作者，PR 使用固定 head 查询，labels/reviewers 则核对目标状态。
 不能确认是否成功的非幂等请求保持 uncertain，不盲目重复 POST；`flow show` 显示待处理操作，retry 不能绕过它们。
 因此不宣称跨 PostgreSQL/GitHub 的通用 exactly-once。跨 worker session 迁移和多 serve HA 仍未实现。
-升级前应停止旧 serve；新增字段/表采用 additive schema。旧版本已接收却未确认的结果可能有未记账副作用，
-默认阻止自动重放并要求人工核对；不要在未核对远端前手工清除结果标记或操作账本。
-M0 的 SQLite 文件
-不会自动导入 PostgreSQL。
+当前只初始化完整 schema，不执行历史迁移、数据回填或跨版本结果转换。serve/worker 使用同一
+版本，wire protocol v10 / journal v3；持久结果的重放保障适用于当前版本的重启恢复。
 
 ## 4.8 GitHub 交互面
 
@@ -202,7 +199,7 @@ head PR 查询和 capability 已接入 INITIAL；M2 原线程回复/resolve 已�
   原 Issue、交付基线、此前 summary/open_points、VCS 指引和 `CodexResult` 输出约定；有冻结 PR context 时一并传入。
 
 INITIAL 已使用 GitHub Issue 的真实标题与正文；冻结 PR context 包含有界 patch 和讨论，不含 CI 状态。
-F4 的完整线程映射由 control 持有，不扩展 worker v7 契约。issue/PR 文本是不可信输入，必须保留明确的数据/指令边界。
+F4 的完整线程映射由 control 持有，遵循当前 worker v10 契约。issue/PR 文本是不可信输入，必须保留明确的数据/指令边界。
 
 ## 4.10 Judge / Triage
 

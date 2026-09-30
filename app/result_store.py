@@ -18,19 +18,10 @@ if TYPE_CHECKING:
 
 
 RESULT_SCHEMA = """
-ALTER TABLE jobs ADD COLUMN IF NOT EXISTS source_job_id BIGINT REFERENCES jobs(id);
-ALTER TABLE jobs ADD COLUMN IF NOT EXISTS source_key TEXT;
 CREATE UNIQUE INDEX IF NOT EXISTS ux_jobs_source ON jobs(source_job_id, source_key)
   WHERE source_job_id IS NOT NULL;
-ALTER TABLE codex_runs ADD COLUMN IF NOT EXISTS source_job_id BIGINT REFERENCES jobs(id);
 CREATE UNIQUE INDEX IF NOT EXISTS ux_codex_runs_source ON codex_runs(source_job_id)
   WHERE source_job_id IS NOT NULL;
--- A pre-upgrade accepted result may already have produced unmarked comments.
-ALTER TABLE jobs ADD COLUMN IF NOT EXISTS result_recovery_version INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE jobs ALTER COLUMN result_recovery_version SET DEFAULT 1;
-ALTER TABLE jobs ADD COLUMN IF NOT EXISTS verify_failures INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE jobs ADD COLUMN IF NOT EXISTS verify_next_at TIMESTAMPTZ;
-ALTER TABLE jobs ADD COLUMN IF NOT EXISTS verify_last_error TEXT;
 CREATE TABLE IF NOT EXISTS result_applications (
   job_id BIGINT PRIMARY KEY REFERENCES jobs(id),
   digest TEXT NOT NULL,

@@ -8,6 +8,7 @@ from app.control.gateway import WorkerGateway
 from app.delivery_models import OpenedDelivery
 from app.models import DeliveryState, FlowDelivery, Job, JobKind, JobState, VcsKind
 from app.protocol import (
+    PROTOCOL_VERSION,
     Assignment,
     ExecutionResult,
     ExecutionTask,
@@ -323,7 +324,7 @@ async def test_gateway_checks_merge_after_capability_preparation(monkeypatch):
 
     monkeypatch.setattr(coordinator, "assignment_secret", merged_secret)
     gateway = WorkerGateway(store, coordinator, stops=NoPendingStops(), worker_tokens={"worker-1": "secret"})
-    store.worker_connected("worker-1", 7, "epoch")
+    store.worker_connected("worker-1", PROTOCOL_VERSION, "epoch")
     job = store.assign_job("worker-1", "token", "epoch")
     prepared, secret = await gateway._prepare_assignment(job, "worker-1", "token", "epoch")
     assert prepared is JobState.FAILED and secret is None

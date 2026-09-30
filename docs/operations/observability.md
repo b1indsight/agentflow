@@ -3,7 +3,7 @@
 serve / worker 设置 `FLOWTOOL_LOG_FORMAT=json` 启用 JSON stdout，默认 text 也执行同样的字段过滤。
 日志仅保留时间、级别、角色、受控 event/reason_code、代码位置、异常类型和有效的关联 ID。
 不会渲染原始异常值/栈局部变量、消息正文、额外嵌套对象、prompt、HTTP URL、模型输出或 token。
-旧日志调用未迁移的事件显示 `application_log / legacy_log`，通过 source 定位；不要依赖旧 message
+未标注结构化事件的日志显示 `application_log / unspecified`，通过 source 定位；不要依赖 message
 全文告警。第三方 standard logging 和 Uvicorn 日志使用同一出口。CLI 自身命令结果仍是命令输出。
 
 `delivery_id` 关联接收与应用；`flow_id/job_id/worker_id/epoch` 关联执行和结果处理。

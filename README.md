@@ -218,12 +218,10 @@ M3 F3 及审查修复本地验证（2026-09-08）：真实 PostgreSQL 下 **502 
 响应丢失与重启恢复。Ruff、Mypy 与 sdist/wheel 构建通过；真实 GitHub App/worker 验收仍待执行，
 详见 [F3 审查修复记录](docs/plan/m3-archive-status.md#7-审查修复2026-09-08)。
 
-M3 F2 使用 wire protocol **v8** 和 worker journal **v2**，serve/worker 必须一起升级。
-先用旧版本排空在途任务、未应用结果及其 ACK，并处理仍占用 worker 的旧 Flow；无法排空的工作区、
-旧 journal 或旧空归档结果需要人工核验。已 Started 却缺少冻结任务的 ARCHIVE、旧协议结果会阻止 serve 启动；
-仅领取但未冻结的任务可正常恢复。冻结后的归档在 Started 丢失或 grace 到期时保留原 token，
-按原 journal 与冻结身份恢复；断线期间已完成的执行结果在重连注册前先持久保存。
-不转换空结果为清理凭据，不删除 journal 绕过检查；旧版本已清除 journal 的绑定也需先人工处理。
+当前仅支持 wire protocol **v10**、worker journal **v3** 与当前完整 PostgreSQL schema。
+仓库尚未部署，不提供旧版本数据库、任务、结果或 journal 的迁移；首次运行使用新数据库/schema
+和新 worker root。serve/worker 使用同一 commit/镜像版本，不混跑；协议不匹配直接拒绝。
+同版本重启仍保留冻结任务、结果摘要、effect ledger 与 journal 恢复能力。
 
 新 journal 在任务 ACK 后保留上一任务的 Flow 和 root 归属，成功归档 ACK 后才移除。不要更换
 `FLOWTOOL_WORKER_ROOT`、复制 journal 到其他 root 或复用 worker ID 接管工作区。清理仅删除
@@ -236,26 +234,12 @@ M3 F2 使用 wire protocol **v8** 和 worker journal **v2**，serve/worker 必�
 回写，不要重复删除。合并后的 cancel 被拒绝；旧 executor 状态未知、journal 丢失、原 worker 长期离线、
 历史 FAILED/CANCELLED Flow 或已释放的绑定均不会自动接管、清理或释放，需人工核验。
 
-M2 F4 保持 wire protocol v7，在 control 的批次和结果账本中增加线程快照、处理依据和远端回执。
-升级前须完成或人工核对旧 pending revision result/effect；缺少 F4 线程处理意图的旧计划会列出 job ID 并阻止启动。
-旧本地 resolved 不会迁移为远端确认。线程权限失败可完成已验证代码交付，但相关反馈/诊断仍待人工处理。
+线程快照、处理依据和远端回执均按当前契约持久化；本地 resolved 标记不替代 GitHub 确认。
+线程权限失败可完成已验证代码交付，但相关反馈/诊断仍待处理。
 
-M2 F3 将任务协议升级到 v7，修订契约必须包含冻结基线与交付证据，serve 和 worker 必须一起升级。先用旧版本排空 queued/running review
-job、重试并完成仍可重试的 failed review job，核对所有未确认旧结果，再停止旧进程；
-历史失败的 ANSWER 也须核对并处理；已被替换的其他历史失败不阻止升级。新 serve 遇到旧 ANSWER、
-缺 batch 的旧在途任务、已开始执行却缺冻结上下文的 TRIAGE、缺冻结 assignment 的 REVISION 或旧协议未确认结果
-会拒绝启动并列出 job ID；尚未开始执行的上下文准备任务可正常恢复。不要手工清除结果标记来绕过检查。
-schema 会一次性导入旧反馈，保留历史表；
-旧 resolved 标记不代表 GitHub 已确认。详见[Review 循环](docs/architecture/review-loop.md#b5-取消重试与恢复)。
-
-session generation 和前轮摘要自动迁移入 attempts。旧 worker journal 必须先确认或人工核对，不能混跑 v6/v7。
 修订失败保留原 worker binding；处理脏工作区或远端偏移后可显式 retry，不自动 reset/rebase/force push。
 修订准备阶段的 GitHub 错误会持久记录为失败；恢复后显式 retry，未 Started 的准备失败不消耗修订轮数。
 CodeAgent 总时限覆盖 resume、fallback 和 VCS 核验，超时回收并等待对应进程组退出；用户 cancel 仍不终止运行中的进程。
-
-从原子结果恢复改动之前的版本升级时，先停止旧 serve，再启动新版本；不支持新旧 serve 混跑。
-旧版本留下的未知结果可能无法自动核实，需要人工处理；回退前也要处理完或隔离新增待办，避免旧版本
-忽略操作记录后重复执行。详见[兼容与交付边界](docs/plan/atomic-workflow-results.md#兼容与交付边界)。
 
 可选组织 Projects v2 的配置及只读 `flowtool project check <repo>` 见 [GitHub App 接入](docs/architecture/github-app.md#a4-可选的组织-projects-v2)。
 

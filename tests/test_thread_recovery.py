@@ -266,17 +266,6 @@ async def test_discovered_feedback_and_late_webhook_share_one_version(store, thr
     assert [(f.github_id, f.version) for f in store.reviews.for_job(queued[0]).feedback] == [(2, 1)]
 
 
-async def test_legacy_pending_plan_is_rejected_on_upgrade(store, thread_revision):
-    _, job, _, subject = thread_revision
-    await subject.results.apply(job.id)
-    with store.connection() as connection:
-        connection.execute("UPDATE jobs SET result_applied_at=NULL WHERE id=%s", (job.id,))
-        connection.execute("UPDATE result_applications SET plan=plan-'resolution_version' WHERE job_id=%s",
-                           (job.id,))
-    with pytest.raises(RuntimeError, match=str(job.id)):
-        store.reviews.check_upgrade()
-
-
 async def test_webhook_edit_blocks_resolve_even_if_remote_read_lags(store, thread_revision):
     flow, job, github, subject = thread_revision
     update = FeedbackUpdate(kind=ReviewItemKind.INLINE, github_id=1, author="alice",

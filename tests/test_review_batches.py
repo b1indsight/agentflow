@@ -17,7 +17,7 @@ from app.models import (
     TriageVerdict,
     Verdict,
 )
-from app.protocol import Succeeded, TriageResult, terminal_digest
+from app.protocol import PROTOCOL_VERSION, Succeeded, TriageResult, terminal_digest
 from app.review_models import BatchState, FeedbackUpdate
 from app.review_store import ReviewStore
 from app.store import Store
@@ -173,23 +173,6 @@ def test_failed_batch_claim_rolls_back_deadline_and_job(store, review_flow, monk
     assert len(store.reviews.claim_due()) == 1
 
 
-def test_legacy_import_preserves_pending_feedback_without_trusting_resolution(store, review_flow):
-    flow, _ = review_flow
-    with store.connection() as connection:
-        # Write the retired schema directly; only migration still reads these rows.
-        connection.execute(
-            "INSERT INTO review_threads(attempt_id,kind,github_id,author,body,resolved,created_at)"
-            " VALUES(%s,'inline',555,'alice','Unverified old response',TRUE,%s)",
-            (flow.current_attempt_id, store.now()),
-        )
-        connection.execute("DELETE FROM review_migrations")
-    store.reviews.migrate_legacy()
-    store.reviews.migrate_legacy()
-    pending = store.reviews.pending(flow.id)
-    assert len(pending) == 1 and pending[0].github_id == 555
-    assert len(store.reviews.claim_due()) == 1
-
-
 def test_wait_needs_new_generation_and_carries_questions(store, review_flow):
     flow, clock = review_flow
     ingest(store, flow, feedback(clock))
@@ -294,13 +277,6 @@ async def test_bot_mentions_always_enter_triage(
     assert batch.feedback[0].signal == "discussion"
 
 
-def test_preexisting_buffered_command_no_longer_bypasses_judge(store, review_flow):
-    flow, clock = review_flow
-    # Previously persisted v5 feedback remains readable, but cannot act as a strong signal.
-    ingest(store, flow, feedback(clock, body="@flowtool[bot] add a bound", signal="command"))
-    assert claim(store, clock)[0].kind is JobKind.TRIAGE
-
-
 @pytest.mark.parametrize(
     "state,action,sender,expected",
     [
@@ -349,19 +325,6 @@ async def test_review_actions_have_explicit_dispatch_semantics(
     assert [j.kind for j in jobs] == ([] if expected is None else [expected])
 
 
-@pytest.mark.parametrize("state", [JobState.QUEUED, JobState.RUNNING, JobState.FAILED])
-def test_upgrade_refuses_unbatched_review_work(store, review_flow, state):
-    flow, _ = review_flow
-    job = store.enqueue_job(flow.id, JobKind.TRIAGE)
-    with store.connection() as connection:
-        connection.execute("UPDATE jobs SET state=%s WHERE id=%s", (state, job.id))
-    if state is JobState.FAILED:
-        flow.state = FlowState.FAILED
-        store.update_flow(flow)
-    with pytest.raises(RuntimeError, match=str(job.id)):
-        store.reviews.check_upgrade()
-
-
 def test_failed_batch_retry_restores_ownership_and_cancel_fences_old_work(store, review_flow):
     from app.models import FlowState
 
@@ -384,7 +347,7 @@ def test_failed_batch_retry_restores_ownership_and_cancel_fences_old_work(store,
 async def run_triage(store, flow, job, verdict, *, before_apply=None, github=None):
     github = github or RecordingGitHub()
     subject = coordinator(store, github)
-    store.worker_connected("worker-a", 5, "epoch-a")
+    store.worker_connected("worker-a", PROTOCOL_VERSION, "epoch-a")
     assigned = store.assign_job("worker-a", "token", "epoch-a")
     assert assigned.id == job.id
     task = await subject.prepare(assigned)
@@ -521,13 +484,6 @@ async def test_answer_rechecks_lifecycle_and_remote_head_before_sending(store, r
     assert len(store.reviews.pending(flow.id)) == 1
 
 
-def test_upgrade_blocks_legacy_answer_even_with_a_batch_id(store, review_flow):
-    flow, _ = review_flow
-    job = store.enqueue_job(flow.id, JobKind.ANSWER, {"batch_id": 1})
-    with pytest.raises(RuntimeError, match=str(job.id)):
-        store.reviews.check_upgrade()
-
-
 async def test_ignore_consumes_frozen_input_once_and_leaves_newer_version(store, review_flow):
     flow, clock = review_flow
     ingest(store, flow, feedback(clock))
@@ -567,7 +523,7 @@ async def test_expired_offline_binding_retires_queued_review_before_retry(
 ):
     flow, clock = review_flow
     initial = store.enqueue_job(flow.id, JobKind.INITIAL)
-    store.worker_connected("worker-a", 5, "epoch-a")
+    store.worker_connected("worker-a", PROTOCOL_VERSION, "epoch-a")
     assert store.assign_job("worker-a", "initial", "epoch-a").id == initial.id
     assert store.finish_assignment(initial.id, "worker-a", "initial", JobState.DONE, "epoch-a")
     store.worker_disconnected("worker-a", "lost", "epoch-a")
@@ -582,7 +538,7 @@ async def test_expired_offline_binding_retires_queued_review_before_retry(
         assert store.get_job(job.id).state is JobState.FAILED
     ControlService(store).retry(flow)
     assert store.get_job(job.id).state is JobState.FAILED
-    store.worker_connected("worker-b", 5, "epoch-b")
+    store.worker_connected("worker-b", PROTOCOL_VERSION, "epoch-b")
     replacement = store.assign_job("worker-b", "retry", "epoch-b")
     assert replacement.id != job.id
     task = await coordinator(store, RecordingGitHub()).prepare(replacement)
@@ -611,19 +567,6 @@ def test_retry_after_successful_replacement_does_not_select_historical_failure(
     assert store.get_job(original.id).state is JobState.FAILED
     assert store.list_jobs(flow.id)[-1].kind is JobKind.INITIAL
     assert store.get_flow(flow.id).state is FlowState.ACTIVE
-
-
-def test_upgrade_allows_historical_failed_review_with_a_finished_replacement(store, review_flow):
-    flow, _ = review_flow
-    old = store.enqueue_job(flow.id, JobKind.TRIAGE)
-    replacement = store.enqueue_job(flow.id, JobKind.TRIAGE)
-    with store.connection() as connection:
-        connection.execute("UPDATE jobs SET state='failed' WHERE id=%s", (old.id,))
-        connection.execute("UPDATE jobs SET state='done' WHERE id=%s", (replacement.id,))
-    flow.state = FlowState.CANCELLED
-    store.update_flow(flow)
-    # An already replaced failure is history, so it does not require pre-upgrade reconciliation.
-    store.reviews.check_upgrade()
 
 
 async def test_answer_uses_frozen_decision_once_and_consumes_after_comment(store, review_flow):

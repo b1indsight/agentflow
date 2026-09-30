@@ -10,6 +10,7 @@ import pytest
 from pydantic import SecretStr
 
 from app.control.coordinator import JobCoordinator
+from app.delivery_models import DeliveryReceipt
 from app.github_models import (
     IssueSnapshot,
     PullRequestSnapshot,
@@ -197,9 +198,8 @@ class MemoryStore:
         self.tool_calls[call.call_id] = call
         return call, True
 
-    def complete_tool_call(self, call_id: str, response: dict[str, object], error=None) -> None:
+    def complete_tool_call(self, call_id: str, response: DeliveryReceipt) -> None:
         self.tool_calls[call_id].response = response
-        self.tool_calls[call_id].error = error
 
     def get_tool_call(self, call_id: str):
         return self.tool_calls.get(call_id)
@@ -302,7 +302,7 @@ class RecordingGitHub:
         details = pr.model_dump()
         if self.pull_request is not None:
             details.update(self.pull_request.model_dump())
-        return PullRequestStatus(**details, repo=repo)
+        return PullRequestStatus.model_validate(details | {"repo": repo})
 
     async def open_pull_request(
         self,
@@ -444,7 +444,7 @@ async def test_initial_job_crosses_worker_boundary_and_opens_pr() -> None:
         remote_sha="abc123",
         pushed=True,
         open_pr_call_id="call-1",
-        pull_request=tool.result,
+        delivery_receipt=tool.result,
     )
     state = await apply_result(subject, job, result)
     replayed_state = await apply_result(subject, job, result)

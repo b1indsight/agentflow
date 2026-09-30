@@ -1,18 +1,19 @@
-"""Durable flow.open_pr receipts; their JSON shapes remain compatible with protocol v9."""
+"""Current flow.open_pr receipts with explicit delivery states."""
 
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 
 class PreparedDelivery(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
-    status: Literal["prepared"]
+    status: Literal["prepared"] = "prepared"
     head_sha: str = Field(min_length=1)
     delivery_version: int = Field(ge=0)
 
 
 class OpenedDelivery(BaseModel):
+    status: Literal["opened"] = "opened"
     model_config = ConfigDict(frozen=True, extra="forbid")
     pr_number: int = Field(gt=0)
     url: str
@@ -20,4 +21,4 @@ class OpenedDelivery(BaseModel):
     delivery_version: int = Field(ge=0)
 
 
-DeliveryReceipt = PreparedDelivery | OpenedDelivery
+DeliveryReceipt = Annotated[PreparedDelivery | OpenedDelivery, Field(discriminator="status")]
