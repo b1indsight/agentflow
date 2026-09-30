@@ -5,7 +5,7 @@
 
 ## 当前计划
 
-- [`internal-contract-simplification.md`](internal-contract-simplification.md) — 内部结果、agent 输出、settle 与插件契约精简 · 已实现，804 项 PostgreSQL 回归通过，待独立审查。
+- [`internal-contract-simplification.md`](internal-contract-simplification.md) — 内部结果、agent 输出、settle 与插件契约精简 · PR #55：804 项 PostgreSQL 回归通过，独立审查无发现，待用户评审。
 
 - [`review-thread-contracts.md`](review-thread-contracts.md) — Review 线程字段、解析与分页契约统一 · PR #54：已实现，816 项 PostgreSQL 回归通过，独立审查无发现，待用户评审。
 
