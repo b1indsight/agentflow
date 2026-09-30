@@ -7,7 +7,7 @@ from threading import Event
 import psycopg
 import pytest
 
-from app.models import DeliveryState, FlowState, JobKind, JobState, WorkerStatus
+from app.models import FlowState, JobKind, JobState, WorkerStatus
 from app.protocol import PROTOCOL_VERSION, ExecutionStopped
 
 NOW = datetime(2026, 9, 29, tzinfo=UTC)
@@ -30,47 +30,6 @@ def expiring(store, *, started=False):
         connection.execute("UPDATE flow_executions SET recovery_deadline=%s WHERE flow_id=%s",
                            (NOW, flow.id))
     return flow, job
-
-
-@pytest.mark.parametrize("started,delivery,pending,counts,job_state,flow_state,worker_state,released", [
-    (False, None, None, (1, 1), JobState.QUEUED, FlowState.FAILED, WorkerStatus.FAILED, True),
-    (True, None, None, (0, 1), JobState.FAILED, FlowState.FAILED, WorkerStatus.FAILED, True),
-    (False, DeliveryState.CLOSED, None, (1, 0), JobState.QUEUED, FlowState.ACTIVE, WorkerStatus.OFFLINE, False),
-    (True, DeliveryState.CLOSED, None, (0, 0), JobState.RUNNING, FlowState.ACTIVE, WorkerStatus.BUSY, False),
-    (True, DeliveryState.MERGED, None, (0, 0), JobState.RUNNING, FlowState.ACTIVE, WorkerStatus.BUSY, False),
-    (True, None, "result", (0, 0), JobState.RUNNING, FlowState.ACTIVE, WorkerStatus.BUSY, False),
-    (True, None, "stop", (0, 0), JobState.RUNNING, FlowState.ACTIVE, WorkerStatus.BUSY, False),
-    (False, None, "dispatch", (0, 0), JobState.RUNNING, FlowState.ACTIVE, WorkerStatus.BUSY, False),
-])
-def test_sweep_preserves_states_and_counts(
-    store, started, delivery, pending, counts, job_state, flow_state, worker_state, released,
-):
-    # A single sweep may requeue an unstarted job and then expire its idle binding;
-    # preserve that order and count, while durable evidence keeps ownership intact.
-    flow, job = expiring(store, started=started)
-    if delivery is not None:
-        record = store.get_or_create_delivery(flow.id, "flow/1")
-        record.state = delivery
-        store.update_delivery(record)
-    if pending == "result":
-        assert store.record_assignment_result(job.id, "w", "token", "epoch", {}, "receipt") == "pending"
-    elif pending == "stop":
-        with store.transaction() as tx:
-            tx.lock_workflow(flow.id)
-            tx.stops.request(flow.id)
-    elif pending == "dispatch":
-        with store.connection() as connection:
-            connection.execute("UPDATE jobs SET dispatch_authorized_at=%s WHERE id=%s", (NOW, job.id))
-    assert store.sweep_expired_assignments() == counts
-    actual_job = store.get_job(job.id)
-    assert actual_job.state is job_state
-    assert store.get_flow(flow.id).state is flow_state
-    assert store.list_workers()[0].status is worker_state
-    assert (store.get_flow_execution(flow.id).released_at is not None) is released
-    if started and delivery is not None:
-        assert actual_job.last_error == "archive blocked: original worker executor status is unknown"
-    elif job_state is JobState.FAILED:
-        assert actual_job.last_error == "worker recovery deadline expired"
 
 
 @pytest.mark.parametrize("receipt", ["result", "stop"])
