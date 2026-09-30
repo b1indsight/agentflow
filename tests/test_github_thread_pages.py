@@ -6,10 +6,11 @@ from types import SimpleNamespace
 import pytest
 
 from app.control.resolution import covered_thread
+from app.github_client import GitHubApp
 from app.github_models import GitHubAdapterError, GitHubErrorKind
 from app.github_thread_pages import ThreadCursor
 from app.github_threads import MAX_THREAD_BYTES
-from tests.test_github_client import AsyncEndpoint
+from tests.test_github_client import AsyncEndpoint, settings
 from tests.test_github_feedback import adapter
 from tests.test_review_resolution import feedback
 
@@ -32,6 +33,27 @@ def outer(thread, *, following=None):
         "nodes": [thread] if thread is not None else [],
         "pageInfo": {"hasNextPage": following is not None, "endCursor": following},
     }}}}
+
+
+async def test_all_thread_reads_preserve_the_same_comment_identity(tmp_path, monkeypatch):
+    # Full snapshots and durable polling see the same large IDs, including reply targets.
+    thread = node()
+    raw = thread["comments"]["nodes"][0]
+    raw["replyTo"] = {"fullDatabaseId": str(2**33)}
+    raw["author"] = None
+    app = GitHubApp(settings(tmp_path))
+    client = Client(outer(thread), {"node": thread}, outer(thread))
+    monkeypatch.setattr(app, "_installation_client", lambda *args, **kwargs: client)
+
+    full = await app.list_review_threads(42, "owner/repo", 17)
+    single = await app.get_review_thread(42, "owner/repo", 17, "T1")
+    page = await app.list_review_thread_page(42, "owner/repo", 17, None)
+
+    assert full.threads == single.threads == page.snapshot.threads
+    comment = full.threads[0].comments[0]
+    assert (comment.github_id, comment.reply_to_id) == (2**33 + 1, 2**33)
+    assert comment.author == "deleted-user" and not comment.is_bot
+    assert all("fullDatabaseId" in query and "databaseId" not in query for query, _ in client.calls)
 
 
 class Client:

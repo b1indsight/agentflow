@@ -10,7 +10,7 @@ from tests.test_github_client import settings
 
 
 def comment(number, *, author="alice", bot=False, body="Fix this"):
-    return {"databaseId": number, "id": f"C{number}", "body": body,
+    return {"fullDatabaseId": str(number), "id": f"C{number}", "body": body,
             "updatedAt": "2026-09-07T10:00:00Z", "author": {
                 "login": author, "__typename": "Bot" if bot else "User"},
             "replyTo": None, "originalCommit": {"oid": "baseline"}}
@@ -33,7 +33,7 @@ async def test_threads_and_comments_have_independent_cursors(tmp_path, monkeypat
     async def graphql(query, variables):
         calls.append(variables)
         if "id" in variables:
-            assert variables == {"id": "T1", "cursor": "comments-1"}
+            assert variables == {"id": "T1", "comments": "comments-1"}
             return {"node": thread(comments=[comment(999)])}
         first = variables["cursor"] is None
         nodes = [thread(i) for i in range(1, 101)] if first else [thread(101)]
@@ -52,7 +52,9 @@ async def test_threads_and_comments_have_independent_cursors(tmp_path, monkeypat
     assert calls[-1]["cursor"] == "threads-1"
 
 
-@pytest.mark.parametrize("fault", ["cursor", "partial", "wrong-pr", "missing-node"])
+@pytest.mark.parametrize("fault", [
+    "cursor", "partial", "wrong-pr", "missing-node", "duplicate-comment", "missing-comment",
+])
 async def test_invalid_thread_reads_never_look_complete(tmp_path, monkeypatch, fault):
     async def graphql(query, variables):
         if fault == "partial":
@@ -62,6 +64,11 @@ async def test_invalid_thread_reads_never_look_complete(tmp_path, monkeypatch, f
         node = thread(cursor="same" if fault == "cursor" else None)
         if fault == "wrong-pr":
             node["pullRequest"]["number"] = 18
+        elif fault == "duplicate-comment":
+            # A response can encode the same ID as either a number or a string.
+            node["comments"]["nodes"].append(comment(1) | {"fullDatabaseId": 1})
+        elif fault == "missing-comment":
+            node["comments"]["nodes"].append(None)
         return {"node": node}
 
     app = GitHubApp(settings(tmp_path))

@@ -3,6 +3,7 @@
 from typing import Any
 
 from app.github_models import FeedbackPage, FeedbackSource, RemoteFeedback
+from app.github_pagination import next_cursor
 
 _REVIEWS = """
 query($owner:String!,$name:String!,$number:Int!,$cursor:String){
@@ -39,12 +40,7 @@ async def read_feedback_page(
     if data.get("errors"):
         raise ValueError("partial review response")
     connection = data["repository"]["pullRequest"]["reviews"]
-    info = connection["pageInfo"]
-    if not isinstance(info["hasNextPage"], bool):
-        raise TypeError("invalid review completeness")
-    following = info["endCursor"] if info["hasNextPage"] else None
-    if info["hasNextPage"] and (not isinstance(following, str) or not following or following == cursor):
-        raise ValueError("invalid review cursor")
+    following = next_cursor(connection, cursor)
     return FeedbackPage(items=[RemoteFeedback(
         github_id=node["fullDatabaseId"], author=node["author"]["login"], body=node["body"],
         updated_at=node["updatedAt"], state=node["state"].lower(),
