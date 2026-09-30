@@ -171,7 +171,8 @@ ORM。
 lease 到期 requeue、started grace/deadline、epoch fencing、result inbox 去重、跨 Store 可见性、delivery 去重和并发 assign。
 `assign_job()` 使用事务内的 `FOR UPDATE SKIP LOCKED`，gateway 接受多个独立配置 worker。
 
-Store 继续使用同步接口。assignment claim 会锁定公平候选空闲 worker 和最早 eligible Flow job，并原子创建
+Store 继续使用同步接口。assignment claim 无锁读取公平候选，只有请求方就是候选时才锁定自身 worker，
+重新检查 epoch、在线状态、空闲槽位及 drain/binding；随后锁定最早 eligible Flow job，并原子创建
 或复用 lifecycle binding。`with store.transaction() as tx` 提供连接绑定的 Store 视图，各领域步骤显式使用 `tx`。
 结果的最终事务同时写入 flow/delivery/attempt、带源 job 唯一键的派生 job/codex run、`result_applied_at` 和 worker slot。
 `flow_tool_calls` 的 prepared delivery 与 response 也一起提交。

@@ -886,16 +886,22 @@ class Store:
                 " AND bound.released_at IS NULL WHERE j.state=%s"
                 " AND f.state=%s AND ((own.flow_id=j.flow_id) OR"
                 " (own.flow_id IS NULL AND bound.flow_id IS NULL AND NOT w.draining))" + eligible + ")"
-                " ORDER BY w.last_assigned_at NULLS FIRST, w.worker_id"
-                " FOR UPDATE OF w SKIP LOCKED LIMIT 1",
+                " ORDER BY w.last_assigned_at NULLS FIRST, w.worker_id LIMIT 1",
                 (WorkerStatus.ONLINE, JobState.QUEUED, FlowState.ACTIVE, now),
             ).fetchone()
             if candidate is None or candidate["worker_id"] != worker_id:
                 return None
+            # A noncandidate must not lock another worker: concurrent callers can
+            # otherwise skip each other's candidates and both return without work.
+            # Selection is advisory; lock and recheck this caller before any writes.
             if (
                 connection.execute(
-                    "SELECT 1 FROM workers WHERE worker_id=%s AND connection_epoch=%s",
-                    (worker_id, connection_epoch),
+                    "SELECT 1 FROM workers WHERE worker_id=%s AND connection_epoch=%s"
+                    " AND status=%s AND current_job_id IS NULL"
+                    " AND (NOT draining OR EXISTS (SELECT 1 FROM flow_executions e"
+                    " WHERE e.worker_id=workers.worker_id AND e.released_at IS NULL))"
+                    " FOR UPDATE OF workers SKIP LOCKED",
+                    (worker_id, connection_epoch, WorkerStatus.ONLINE),
                 ).fetchone()
                 is None
             ):
