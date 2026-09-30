@@ -11,9 +11,10 @@ from psycopg.types.json import Jsonb
 from app.context_models import MAX_DISCUSSIONS, ReviewContext
 from app.github_models import ReviewThreads
 from app.judge_models import JudgeDecision
-from app.models import TERMINAL_STATES, DeliveryState, Job, JobKind, ReviewItemKind
+from app.models import TERMINAL_STATES, DeliveryState, Job, ReviewItemKind
 from app.protocol import RevisionTask
 from app.review_models import BatchState, FeedbackRef, FeedbackUpdate, ReviewBatch, ReviewFeedback
+from app.review_policy import decide_review_batch
 
 if TYPE_CHECKING:
     from app.store import Store
@@ -401,16 +402,19 @@ class ReviewStore:
             if buffer is None or active is not None:
                 return None
             feedback = sorted(self.pending(flow_id, for_batch=True), key=lambda item: item.item_id)
-            strong = not buffer["force_triage"] and self._has_unused_signal(flow_id, feedback)
+            has_unused_signal = self._has_unused_signal(flow_id, feedback)
             connection.execute("UPDATE review_buffers SET due_at=NULL,force_triage=FALSE WHERE flow_id=%s", (flow_id,))
-            if not feedback or not any(f.body.strip() for f in feedback):
-                return None
             previous = connection.execute(
                 "SELECT open_points FROM review_batches WHERE flow_id=%s AND state='waiting'"
                 " ORDER BY id",
                 (flow_id,),
             ).fetchall()
-            points = list(dict.fromkeys(p for row in previous for p in row["open_points"]))
+            decision = decide_review_batch(
+                feedback, has_unused_signal=has_unused_signal, force_triage=buffer["force_triage"],
+                previous_open_points=[p for row in previous for p in row["open_points"]],
+            )
+            if decision is None:
+                return None
             connection.execute(
                 "UPDATE review_batches SET state='completed' WHERE flow_id=%s AND state='waiting'",
                 (flow_id,),
@@ -422,21 +426,17 @@ class ReviewStore:
                     flow_id,
                     attempt_id,
                     buffer["generation"],
-                    "strong" if strong else "discussion",
+                    decision.trigger,
                     Jsonb([f.model_dump(mode="json") for f in feedback]),
-                    Jsonb(points),
+                    Jsonb(list(decision.open_points)),
                     self.store.now(),
                 ),
             ).fetchone()
             assert row is not None
             payload: dict[str, object] = {"batch_id": row["id"]}
-            if strong:
-                payload["instruction"] = "\n".join(
-                    f"{f.author}: {f.body}" for f in feedback if f.body
-                )
-            job = self.store.enqueue_job(
-                flow_id, JobKind.REVISION if strong else JobKind.TRIAGE, payload
-            )
+            if decision.instruction is not None:
+                payload["instruction"] = decision.instruction
+            job = self.store.enqueue_job(flow_id, decision.kind, payload)
             connection.execute(
                 "UPDATE review_batches SET job_id=%s WHERE id=%s", (job.id, row["id"])
             )

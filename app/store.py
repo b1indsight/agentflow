@@ -34,6 +34,15 @@ from app.models import (
 from app.project_store import PROJECT_SCHEMA
 from app.protocol import ArchiveTask, Failed, terminal_digest
 from app.reconcile_store import RECONCILE_SCHEMA, ReconcileStore
+from app.recovery_policy import (
+    RECOVERY_BLOCKED,
+    RECOVERY_EXPIRED,
+    BindingRecoveryFacts,
+    JobRecoveryFacts,
+    RecoveryAction,
+    decide_job_recovery,
+    should_release_binding,
+)
 from app.result_store import RESULT_SCHEMA, ResultStore
 from app.review_store import REVIEW_SCHEMA, ReviewStore
 from app.stop_store import STOP_SCHEMA, StopStore
@@ -1481,46 +1490,57 @@ class Store:
         return 0, 0
 
     def sweep_expired_assignments(self) -> tuple[int, int]:
-        """Requeue unstarted leases and fail only started jobs past recovery grace."""
+        """Apply pure recovery decisions under the existing worker-first transaction fence."""
 
         now = self._clock()
         with self.connection() as connection, connection.transaction():
             connection.execute(
                 "SELECT worker_id FROM workers ORDER BY worker_id FOR UPDATE"
             ).fetchall()
+            # Assignment/result/stop writers acquire these worker locks too. Keep
+            # facts and updates in this transaction, and lock selected jobs before
+            # deciding so a received result cannot be overwritten by a stale read.
+            candidates = connection.cursor(row_factory=class_row(JobRecoveryFacts)).execute(
+                "SELECT j.id,j.flow_id,j.kind,j.lease_expires_at,j.recovery_deadline,"
+                " j.started_at,j.dispatch_authorized_at,j.result_received_at,"
+                " (j.payload->'archive' IS NOT NULL) AS archive_frozen,"
+                " f.state AS flow_state,d.state AS delivery_state,"
+                " EXISTS (SELECT 1 FROM execution_stops s WHERE s.flow_id=j.flow_id"
+                " AND s.state!='confirmed') AS has_pending_stop"
+                " FROM jobs j JOIN flows f ON f.id=j.flow_id"
+                " LEFT JOIN flow_deliveries d ON d.flow_id=j.flow_id"
+                " WHERE j.state='running' AND (j.lease_expires_at<=%s OR j.recovery_deadline<=%s)"
+                " ORDER BY j.id FOR UPDATE OF j",
+                (now, now),
+            ).fetchall()
+            actions: dict[RecoveryAction, list[int]] = {action: [] for action in RecoveryAction}
+            for candidate in candidates:
+                actions[decide_job_recovery(candidate, now)].append(candidate.id)
             requeued_rows = connection.execute(
                 "UPDATE jobs SET state=%s, assigned_worker_id=NULL, assignment_token=NULL,"
                 " heartbeat_at=NULL, lease_expires_at=NULL, updated_at=%s"
-                " WHERE state=%s AND NOT " + _MAY_HAVE_EXECUTED + " AND lease_expires_at<=%s"
+                " WHERE id=ANY(%s) AND state=%s"
                 " AND result_received_at IS NULL"
-                " AND NOT EXISTS (SELECT 1 FROM execution_stops s WHERE s.flow_id=jobs.flow_id AND s.state!='confirmed')"
-                " RETURNING id, assigned_worker_id",
-                (JobState.QUEUED, now, JobState.RUNNING, now),
+                " RETURNING id",
+                (JobState.QUEUED, now, actions[RecoveryAction.REQUEUE], JobState.RUNNING),
             ).fetchall()
             failed_rows = connection.execute(
                 "UPDATE jobs SET state=%s, last_error=%s, updated_at=%s"
-                " WHERE state=%s AND started_at IS NOT NULL"
-                " AND recovery_deadline IS NOT NULL AND recovery_deadline<=%s"
+                " WHERE id=ANY(%s) AND state=%s"
                 " AND result_received_at IS NULL"
-                " AND NOT EXISTS (SELECT 1 FROM execution_stops s WHERE s.flow_id=jobs.flow_id AND s.state!='confirmed')"
-                " AND NOT EXISTS (SELECT 1 FROM flow_deliveries d JOIN flows f ON f.id=d.flow_id"
-                " WHERE d.flow_id=jobs.flow_id AND d.state IN ('closed','merged') AND f.state='active')"
-                " RETURNING id, flow_id, assigned_worker_id",
+                " RETURNING id, flow_id",
                 (
                     JobState.FAILED,
-                    "worker recovery deadline expired",
+                    RECOVERY_EXPIRED,
                     now,
+                    actions[RecoveryAction.FAIL],
                     JobState.RUNNING,
-                    now,
                 ),
             ).fetchall()
             connection.execute(
-                "UPDATE jobs SET last_error=%s WHERE state='running'"
-                " AND " + _MAY_HAVE_EXECUTED + " AND recovery_deadline<=%s"
-                " AND result_received_at IS NULL AND EXISTS"
-                " (SELECT 1 FROM flow_deliveries d JOIN flows f ON f.id=d.flow_id"
-                " WHERE d.flow_id=jobs.flow_id AND d.state IN ('closed','merged') AND f.state='active')",
-                ("archive blocked: original worker executor status is unknown", now),
+                "UPDATE jobs SET last_error=%s WHERE id=ANY(%s) AND state='running'"
+                " AND result_received_at IS NULL",
+                (RECOVERY_BLOCKED, actions[RecoveryAction.BLOCKED]),
             )
             requeued_ids = [row["id"] for row in requeued_rows]
             if requeued_ids:
@@ -1547,19 +1567,29 @@ class Store:
                     " WHERE flow_id=ANY(%s) AND released_at IS NULL",
                     (now, flow_ids),
                 )
-            expired_executions = connection.execute(
-                "UPDATE flow_executions SET released_at=%s"
-                " WHERE released_at IS NULL AND recovery_deadline IS NOT NULL"
-                " AND NOT EXISTS (SELECT 1 FROM flow_deliveries d JOIN flows f ON f.id=d.flow_id"
-                " WHERE d.flow_id=flow_executions.flow_id AND d.state IN ('closed','merged') AND f.state='active')"
-                " AND NOT EXISTS (SELECT 1 FROM execution_stops s WHERE s.flow_id=flow_executions.flow_id AND s.state!='confirmed')"
-                " AND NOT EXISTS (SELECT 1 FROM jobs unknown WHERE unknown.flow_id=flow_executions.flow_id"
+            # Binding eligibility observes the preceding job/Flow writes, as the
+            # old sequential UPDATEs did; it must not use the pre-transition facts.
+            bindings = connection.cursor(row_factory=class_row(BindingRecoveryFacts)).execute(
+                "SELECT e.flow_id,e.worker_id,e.recovery_deadline,"
+                " f.state AS flow_state,d.state AS delivery_state,"
+                " EXISTS (SELECT 1 FROM execution_stops s WHERE s.flow_id=e.flow_id"
+                " AND s.state!='confirmed') AS has_pending_stop,"
+                " EXISTS (SELECT 1 FROM jobs unknown WHERE unknown.flow_id=e.flow_id"
                 " AND unknown.dispatch_authorized_at IS NOT NULL AND unknown.started_at IS NULL"
-                " AND unknown.result_received_at IS NULL)"
-                " AND recovery_deadline<=%s AND NOT EXISTS (SELECT 1 FROM jobs j"
-                " WHERE j.flow_id=flow_executions.flow_id AND j.result_received_at IS NOT NULL"
-                " AND j.result_applied_at IS NULL) RETURNING flow_id, worker_id",
-                (now, now),
+                " AND unknown.result_received_at IS NULL) AS has_unstarted_dispatch,"
+                " EXISTS (SELECT 1 FROM jobs j WHERE j.flow_id=e.flow_id"
+                " AND j.result_received_at IS NOT NULL AND j.result_applied_at IS NULL) AS has_unapplied_result"
+                " FROM flow_executions e JOIN flows f ON f.id=e.flow_id"
+                " LEFT JOIN flow_deliveries d ON d.flow_id=e.flow_id"
+                " WHERE e.released_at IS NULL AND e.recovery_deadline<=%s"
+                " ORDER BY e.flow_id FOR UPDATE OF e",
+                (now,),
+            ).fetchall()
+            release_ids = [binding.flow_id for binding in bindings if should_release_binding(binding, now)]
+            expired_executions = connection.execute(
+                "UPDATE flow_executions SET released_at=%s WHERE flow_id=ANY(%s)"
+                " AND released_at IS NULL RETURNING flow_id,worker_id",
+                (now, release_ids),
             ).fetchall()
             expired_flow_ids = [row["flow_id"] for row in expired_executions]
             if expired_flow_ids:
