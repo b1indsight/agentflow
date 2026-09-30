@@ -101,7 +101,7 @@ async def test_closed_missing_journal_preserves_late_result_and_reopen(store, pe
         pause_delivery(tx, tx.get_delivery(flow.id))
     store.worker_disconnected("worker-a", "disconnected during closed PR", "epoch")
     store.worker_connected("worker-a", PROTOCOL_VERSION, "restart")
-    gateway = WorkerGateway(store, subject, stops=StopStore(store), worker_tokens={})
+    gateway = WorkerGateway(store, subject, execution_control=StopStore(store), worker_tokens={})
     # Missing journal is not proof of execution failure: its original result may still arrive.
     with pytest.raises(ProtocolViolation, match="journal is missing"):
         await gateway._reject_missing_journal("worker-a", "restart", job.id)
@@ -280,7 +280,7 @@ async def test_close_during_capability_preparation_never_dispatches(store, pendi
         return secret
 
     monkeypatch.setattr(github, "create_push_capability", close_before_return)
-    gateway = WorkerGateway(store, subject, stops=StopStore(store), worker_tokens={})
+    gateway = WorkerGateway(store, subject, execution_control=StopStore(store), worker_tokens={})
     prepared, secret = await gateway._prepare_assignment(job, "worker-a", "token", "epoch")
     assert prepared is JobState.DONE and secret is None
     assert store.get_job(job.id).started_at is None

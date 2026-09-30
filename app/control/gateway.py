@@ -66,7 +66,9 @@ class WorkerSocket(Protocol):
     async def receive_text(self) -> str: ...
 
 
-class WorkerStops(Protocol):
+class WorkerExecutionControl(Protocol):
+    """Authorize worker dispatch and track durable stop requests and receipts."""
+
     def pending(self, worker_id: str) -> StopIntent | None: ...
 
     def receipt_request(self, worker_id: str, request_id: str) -> StopIntent | None: ...
@@ -180,9 +182,9 @@ class WorkerGateway:
         recovery_concurrency: int = 4,
         recovery_batch_size: int = 64,
         metrics: Metrics | None = None,
-        stops: WorkerStops,
+        execution_control: WorkerExecutionControl,
     ) -> None:
-        self.stops = stops
+        self.execution_control = execution_control
         self.metrics = metrics
         self.store = store
         self.coordinator = coordinator
@@ -266,10 +268,10 @@ class WorkerGateway:
                 worker_id, register.protocol_version, connection_epoch
             )
             connected = True
-            stop = self.stops.pending(worker_id)
+            stop = self.execution_control.pending(worker_id)
             if (stop is None and register.recovery is not None
                     and register.recovery.stop_request_id is not None):
-                stop = self.stops.receipt_request(worker_id, register.recovery.stop_request_id)
+                stop = self.execution_control.receipt_request(worker_id, register.recovery.stop_request_id)
             if stop is not None:
                 await self._stop_worker(socket, worker_id, connection_epoch, stop)
             elif register.recovery is not None:
@@ -305,7 +307,7 @@ class WorkerGateway:
                 if current is None:
                     assert wake is not None
                     wake.clear()
-                    stop = self.stops.pending(worker_id)
+                    stop = self.execution_control.pending(worker_id)
                     if stop is not None:
                         await self._stop_worker(socket, worker_id, connection_epoch, stop)
                     token = uuid4().hex
@@ -323,7 +325,7 @@ class WorkerGateway:
                             )
                         self.notify_jobs()
                         continue
-                    if not self.stops.authorize_dispatch(job.id, worker_id, token, connection_epoch):
+                    if not self.execution_control.authorize_dispatch(job.id, worker_id, token, connection_epoch):
                         raise ProtocolViolation("assignment changed before dispatch authorization")
                     current = (job, token, prepared)
                     await socket.send_text(
@@ -359,7 +361,7 @@ class WorkerGateway:
 
                 while True:
                     job, token, _ = current
-                    stop = self.stops.pending(worker_id)
+                    stop = self.execution_control.pending(worker_id)
                     if stop is not None:
                         await self._stop_worker(socket, worker_id, connection_epoch, stop)
                         current = None
@@ -515,7 +517,7 @@ class WorkerGateway:
                             if latest is not None and latest.result_applied_at is None:
                                 await self._apply_terminal(latest, message)
                 if isinstance(message, ExecutionStopped):
-                    if message.request_id != stop.request_id or not self.stops.confirm(worker_id, message):
+                    if message.request_id != stop.request_id or not self.execution_control.confirm(worker_id, message):
                         raise ProtocolViolation("stop blocked: receipt or external effects not converged")
                     await socket.send_text(StopAccepted(**stop.message(epoch).model_dump(exclude={'type'})).model_dump_json())
                     self.notify_jobs()

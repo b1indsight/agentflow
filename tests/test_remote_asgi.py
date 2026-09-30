@@ -75,7 +75,7 @@ class AsgiContext:
         self.metrics = Metrics()
         self.gateway = WorkerGateway(
             store,
-            AsgiCoordinator(attempt_id, store), stops=StopStore(store),
+            AsgiCoordinator(attempt_id, store), execution_control=StopStore(store),
             worker_tokens={"worker-1": "worker-secret"},
             poll_interval=0.01,
         )

@@ -55,7 +55,7 @@ async def test_slow_result_does_not_block_another_flow():
                 advanced.set()
             return await super().apply_result(job, result)
 
-    gateway = WorkerGateway(Inbox(2), Coordinator(), stops=NoPendingStops(), worker_tokens={})
+    gateway = WorkerGateway(Inbox(2), Coordinator(), execution_control=NoPendingStops(), worker_tokens={})
     recovery = asyncio.create_task(gateway.recover_pending_results())
     try:
         await asyncio.wait_for(blocked.wait(), 1)
@@ -81,7 +81,7 @@ async def test_recovery_pool_is_bounded_and_cancellation_joins_all_tasks():
                 active.remove(job.id)
             return await super().apply_result(job, result)
 
-    gateway = WorkerGateway(Inbox(20), Coordinator(), stops=NoPendingStops(), worker_tokens={}, recovery_concurrency=2)
+    gateway = WorkerGateway(Inbox(20), Coordinator(), execution_control=NoPendingStops(), worker_tokens={}, recovery_concurrency=2)
     recovery = asyncio.create_task(gateway.recover_pending_results())
     try:
         await asyncio.wait_for(started.wait(), 1)
@@ -104,7 +104,7 @@ async def test_bounded_batches_advance_past_a_persistently_pending_result():
             return await super().apply_result(job, result)
 
     inbox = Inbox(5)
-    gateway = WorkerGateway(inbox, Coordinator(), stops=NoPendingStops(), worker_tokens={}, recovery_batch_size=2)
+    gateway = WorkerGateway(inbox, Coordinator(), execution_control=NoPendingStops(), worker_tokens={}, recovery_batch_size=2)
     for _ in range(4):
         await gateway.recover_pending_results()
     assert calls == [1, 2, 3, 4, 5, 1]
@@ -121,7 +121,7 @@ async def test_live_result_holds_the_same_job_lock_as_recovery():
             return await super().apply_result(job, result)
 
     inbox, coordinator = Inbox(2), Coordinator()
-    gateway = WorkerGateway(inbox, coordinator, stops=NoPendingStops(), worker_tokens={})
+    gateway = WorkerGateway(inbox, coordinator, execution_control=NoPendingStops(), worker_tokens={})
     lock = gateway._result_lock(1)
     await lock.acquire()
     recovery = asyncio.create_task(gateway.recover_pending_results())
@@ -147,7 +147,7 @@ async def test_new_arrivals_cannot_extend_a_recovery_cycle_forever():
             raise ResultPending("still waiting")
 
     inbox = Inbox(2)
-    gateway = WorkerGateway(inbox, Coordinator(), stops=NoPendingStops(), worker_tokens={}, recovery_batch_size=1)
+    gateway = WorkerGateway(inbox, Coordinator(), execution_control=NoPendingStops(), worker_tokens={}, recovery_batch_size=1)
     await gateway.recover_pending_results()
     # A busy service keeps producing new IDs; the initial scan must still end at ID 2.
     inbox.jobs[3] = Inbox(3).jobs[3]

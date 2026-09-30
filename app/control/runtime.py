@@ -55,7 +55,7 @@ class ControlRuntime:
             recovery_concurrency=self.settings.result_recovery_concurrency,
             recovery_batch_size=self.settings.result_recovery_batch_size,
             metrics=self.metrics,
-            stops=StopStore(self.store),
+            execution_control=StopStore(self.store),
         )
         self.service = ControlService(self.store, plugins, self.gateway.notify_jobs)
         self.settle = SettleScheduler(self.store, self.service.notify_jobs)

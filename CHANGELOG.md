@@ -8,6 +8,8 @@
 
 ## Unreleased
 
+- WorkerGateway 的 stops 参数改为 execution_control，接口改为 WorkerExecutionControl，明确派发授权与停止控制职责。
+
 - 未部署阶段统一到当前完整 schema、wire protocol v10 / journal v3；删除历史迁移、旧任务/effect
   与升级分支，交付结果字段改为 delivery_receipt，上下文共用当前 PR 模型。旧开发数据不自动转换；
   首次运行使用新数据库与 worker root。同版本恢复、重放、摘要和并发保护保留。
