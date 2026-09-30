@@ -143,3 +143,11 @@ README、组件职责、目录树和架构 HTML 同步使用当前路径；历�
 
 仓库 `review-and-bookmark.sh` 对实现提交 `e57f96895f9e` 完成独立只读审查，
 返回空 findings，门禁通过。实现已推送到原 PR #57；本条只补充审查记录，没有修改代码。
+
+### 2026-09-30 · 5. 远端运维 CI 补充检查
+
+远端 recovery Job 已完成 PostgreSQL 17 fixture dump/restore 和 worker home 恢复演练，
+随后独立检查 `scripts/smoke/recovery.py` 时检出迁移后的 import 排序问题。
+本地原 Ruff 范围是 `app tests`，没有覆盖该脚本；现已修正排序并将脚本纳入检查，
+`uv run ruff check app tests scripts/smoke/recovery.py` 与 diff 检查通过。
+此次只调整 import 顺序，不改变恢复逻辑；单独通过审查门禁后更新同一 PR。

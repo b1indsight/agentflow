@@ -23,8 +23,14 @@ from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from pydantic import SecretStr
 
+from app.contracts.protocol import (
+    PROTOCOL_VERSION,
+    Assignment,
+    AssignmentSecret,
+    InitialTask,
+    PushSecret,
+)
 from app.domain.models import JobKind
-from app.contracts.protocol import PROTOCOL_VERSION, Assignment, AssignmentSecret, InitialTask, PushSecret
 from app.persistence.store import Store
 from app.persistence.webhook_store import WebhookStore
 from app.worker.journal import JournalError, WorkerJournal
