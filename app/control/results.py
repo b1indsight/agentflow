@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 from typing import Literal, Protocol
 
-from loguru import logger
 from pluggy import PluginManager
 
 from app.control.effects import ResultEffects
@@ -29,6 +28,7 @@ from app.models import (
     TriageVerdict,
     Verdict,
 )
+from app.plugins import emit_hook
 from app.ports import GitHubClient
 from app.protocol import (
     ArchiveResult,
@@ -637,17 +637,13 @@ class ResultApplication:
             return
         if flow.state is FlowState.SUCCEEDED and job.kind is not JobKind.ARCHIVE:
             return
-        try:
-            if job.kind is JobKind.TRIAGE:
-                self.plugins.hook.on_review(flow=flow)
-            elif job.kind is JobKind.ARCHIVE:
-                self.plugins.hook.on_archived(flow=flow)
-            elif job.kind is JobKind.INITIAL and plan.delivery is not None:
-                self.plugins.hook.on_pr_opened(
-                    flow=flow, pr_number=self._pr_number(self.store, flow)
-                )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("post-commit plugin hook failed: {}", exc)
+        if job.kind is JobKind.TRIAGE:
+            emit_hook(self.plugins, "on_review", flow=flow)
+        elif job.kind is JobKind.ARCHIVE:
+            emit_hook(self.plugins, "on_archived", flow=flow)
+        elif job.kind is JobKind.INITIAL and plan.delivery is not None:
+            emit_hook(self.plugins, "on_pr_opened",
+                      flow=flow, pr_number=self._pr_number(self.store, flow))
 
 
 def _feedback_link(repo: str, number: int, kind: ReviewItemKind, github_id: int) -> str:

@@ -47,15 +47,16 @@ async def test_slow_result_does_not_block_another_flow():
     blocked, release, advanced = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
     class Coordinator(RecordingCoordinator):
-        async def apply_result(self, job, result):
-            if job.id == 1:
+        async def apply_result(self, job_id):
+            if job_id == 1:
                 blocked.set()
                 await release.wait()
             else:
                 advanced.set()
-            return await super().apply_result(job, result)
+            return await super().apply_result(job_id)
 
-    gateway = WorkerGateway(Inbox(2), Coordinator(), execution_control=NoPendingStops(), worker_tokens={})
+    inbox = Inbox(2)
+    gateway = WorkerGateway(inbox, Coordinator(inbox), execution_control=NoPendingStops(), worker_tokens={})
     recovery = asyncio.create_task(gateway.recover_pending_results())
     try:
         await asyncio.wait_for(blocked.wait(), 1)
@@ -71,17 +72,18 @@ async def test_recovery_pool_is_bounded_and_cancellation_joins_all_tasks():
     active = set()
 
     class Coordinator(RecordingCoordinator):
-        async def apply_result(self, job, result):
-            active.add(job.id)
+        async def apply_result(self, job_id):
+            active.add(job_id)
             if len(active) == 2:
                 started.set()
             try:
                 await release.wait()
             finally:
-                active.remove(job.id)
-            return await super().apply_result(job, result)
+                active.remove(job_id)
+            return await super().apply_result(job_id)
 
-    gateway = WorkerGateway(Inbox(20), Coordinator(), execution_control=NoPendingStops(), worker_tokens={}, recovery_concurrency=2)
+    inbox = Inbox(20)
+    gateway = WorkerGateway(inbox, Coordinator(inbox), execution_control=NoPendingStops(), worker_tokens={}, recovery_concurrency=2)
     recovery = asyncio.create_task(gateway.recover_pending_results())
     try:
         await asyncio.wait_for(started.wait(), 1)
@@ -97,14 +99,14 @@ async def test_bounded_batches_advance_past_a_persistently_pending_result():
     calls = []
 
     class Coordinator(RecordingCoordinator):
-        async def apply_result(self, job, result):
-            calls.append(job.id)
-            if job.id == 1:
+        async def apply_result(self, job_id):
+            calls.append(job_id)
+            if job_id == 1:
                 raise ResultPending("waiting for a receipt")
-            return await super().apply_result(job, result)
+            return await super().apply_result(job_id)
 
     inbox = Inbox(5)
-    gateway = WorkerGateway(inbox, Coordinator(), execution_control=NoPendingStops(), worker_tokens={}, recovery_batch_size=2)
+    gateway = WorkerGateway(inbox, Coordinator(inbox), execution_control=NoPendingStops(), worker_tokens={}, recovery_batch_size=2)
     for _ in range(4):
         await gateway.recover_pending_results()
     assert calls == [1, 2, 3, 4, 5, 1]
@@ -115,12 +117,13 @@ async def test_live_result_holds_the_same_job_lock_as_recovery():
     advanced = asyncio.Event()
 
     class Coordinator(RecordingCoordinator):
-        async def apply_result(self, job, result):
-            if job.id == 2:
+        async def apply_result(self, job_id):
+            if job_id == 2:
                 advanced.set()
-            return await super().apply_result(job, result)
+            return await super().apply_result(job_id)
 
-    inbox, coordinator = Inbox(2), Coordinator()
+    inbox = Inbox(2)
+    coordinator = Coordinator(inbox)
     gateway = WorkerGateway(inbox, coordinator, execution_control=NoPendingStops(), worker_tokens={})
     lock = gateway._result_lock(1)
     await lock.acquire()
@@ -129,9 +132,7 @@ async def test_live_result_holds_the_same_job_lock_as_recovery():
     try:
         await asyncio.wait_for(advanced.wait(), 1)
         # A live WebSocket handler commits before releasing the shared job lock.
-        await coordinator.apply_result(inbox.jobs[1], InitialResult(
-            session_id="session", last_message="done", exit_code=0,
-        ))
+        await coordinator.apply_result(1)
     finally:
         lock.release()
         await asyncio.gather(recovery, duplicate_sweep)
@@ -142,12 +143,12 @@ async def test_new_arrivals_cannot_extend_a_recovery_cycle_forever():
     calls = []
 
     class Coordinator(RecordingCoordinator):
-        async def apply_result(self, job, result):
-            calls.append(job.id)
+        async def apply_result(self, job_id):
+            calls.append(job_id)
             raise ResultPending("still waiting")
 
     inbox = Inbox(2)
-    gateway = WorkerGateway(inbox, Coordinator(), execution_control=NoPendingStops(), worker_tokens={}, recovery_batch_size=1)
+    gateway = WorkerGateway(inbox, Coordinator(inbox), execution_control=NoPendingStops(), worker_tokens={}, recovery_batch_size=1)
     await gateway.recover_pending_results()
     # A busy service keeps producing new IDs; the initial scan must still end at ID 2.
     inbox.jobs[3] = Inbox(3).jobs[3]
@@ -171,9 +172,9 @@ async def test_runtime_sweeps_continue_while_result_recovery_waits():
     runtime = ControlRuntime.__new__(ControlRuntime)
     runtime.settings = SimpleNamespace(worker_sweep_interval=0)
     runtime.store = SimpleNamespace(
+        reviews=SimpleNamespace(claim_due=Mock(side_effect=lambda: (settled.set() or True))),
         sweep_expired_assignments=Mock(side_effect=lambda: (lease.set() or 0, 0)), close=Mock(),
     )
-    runtime.settle = SimpleNamespace(sweep=settled.set)
     runtime.gateway = SimpleNamespace(recover_pending_results=AsyncMock(side_effect=recover),
                                      notify_jobs=Mock())
     runtime.reconciler = SimpleNamespace(stop=Mock())

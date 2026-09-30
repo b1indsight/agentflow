@@ -9,7 +9,6 @@ from app.observability import Metrics
 from app.protocol import (
     Assignment,
     AssignmentSecret,
-    ExecutionResult,
     ExecutionTask,
     FlowToolErrorKind,
     FlowToolRequest,
@@ -59,9 +58,8 @@ class AsgiCoordinator:
     def mark_started(self, job: Job, task: ExecutionTask, worker_id: str) -> None:
         pass
 
-    async def apply_result(self, job: Job, result: ExecutionResult) -> JobState:
-        assert isinstance(result, InitialResult)
-        self.store.complete_persisted_result(job.id, JobState.DONE)
+    async def apply_result(self, job_id: int) -> JobState:
+        self.store.complete_persisted_result(job_id, JobState.DONE)
         return JobState.DONE
 
     async def fail(self, job: Job, reason: str) -> None:

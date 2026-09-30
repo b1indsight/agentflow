@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from loguru import logger
+from pydantic import ValidationError
 
 from app.context_builder import build_initial_prompt, build_revision_prompt
 from app.delivery_models import DeliveryReceipt
@@ -145,10 +146,13 @@ class WorkerExecutor:
                 last_message=run.last_message,
                 exit_code=run.exit_code,
             )
-        if run.output is None or run.output.vcs_backend_used is None:
+        try:
+            output = InitialCodexResult.model_validate_json(run.last_message)
+        except ValidationError:
+            # Validation errors include raw input, which may contain credentials.
             return _vcs_failure(run.session_id, run.last_message, "result", "missing VCS backend")
         try:
-            outcome = await verify_vcs_outcome(vcs_context, run.output.vcs_backend_used)
+            outcome = await verify_vcs_outcome(vcs_context, output.vcs_backend_used)
         except VcsVerificationError as error:
             return _vcs_failure(run.session_id, run.last_message, error.stage, str(error))
         if (tool_call_id is None or tool_result is None):
@@ -247,12 +251,16 @@ class WorkerExecutor:
                 result.failure_detail = (run.failure_detail
                                          or "CodeAgent exited unsuccessfully; execution may have occurred")
                 return result
-            if not isinstance(run.output, CodexResult) or not run.session_id:
+            try:
+                output = CodexResult.model_validate_json(run.last_message)
+            except ValidationError:
+                raise VcsVerificationError("result", "missing strict revision output or session") from None
+            if not run.session_id:
                 raise VcsVerificationError("result", "missing strict revision output or session")
             if result.mode == "resume" and run.session_id != task.session_id:
                 raise VcsVerificationError("session", "resume returned a different session")
-            result.output = run.output
-            outcome = await verify_revision_outcome(vcs_context, run.output.vcs_backend_used)
+            result.output = output
+            outcome = await verify_revision_outcome(vcs_context, output.vcs_backend_used)
             result.vcs_backend = outcome.backend
             result.branch = outcome.branch
             result.commit_sha = outcome.commit_sha

@@ -12,14 +12,11 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from loguru import logger
-from pydantic import ValidationError
 
 from app.credentials import git_credential_environment
 from app.models import (
     AgentRun,
     CodeAgentContext,
-    CodexResult,
-    InitialCodexResult,
     SessionUnavailable,
 )
 
@@ -217,17 +214,6 @@ class CodexAgent:
         sid = _parse_thread_id(jsonl)
         last_message = last_file.read_text() if last_file.exists() else ""
 
-        output: CodexResult | InitialCodexResult | None = None
-        if output_schema is not None and last_message.strip():
-            # 结构化产出：codex 把最终 JSON 写进 -o 文件（符合 --output-schema）
-            try:
-                schema = json.loads(output_schema.read_text())
-                model = CodexResult if "addressed" in schema["properties"] else InitialCodexResult
-                output = model.model_validate_json(last_message)
-            except ValidationError:
-                # Validation messages include the offending input, which can contain a token.
-                logger.warning("CodeAgent output did not satisfy its required schema")
-
         if last_file.exists():
             last_file.unlink()
         if proc.returncode != 0:
@@ -244,4 +230,4 @@ class CodexAgent:
         if detail and context is not None and context.push_token is not None:
             detail = detail.replace(context.push_token.get_secret_value(), "[REDACTED]")
         return AgentRun(session_id=sid, last_message=last_message, exit_code=proc.returncode or 0,
-                        output=output, failure_detail=detail)
+                        failure_detail=detail)

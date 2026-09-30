@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from datetime import datetime
 from typing import Literal, Protocol
 
@@ -31,22 +30,6 @@ class RouterSettings(Protocol):
     trigger_label: str
     settle_seconds: float
     submit_grace_seconds: float
-
-
-class SettleScheduler:
-    """Wake jobs from durable deadlines; process lifetime never owns a settle window."""
-
-    def __init__(
-        self,
-        store: Store,
-        jobs_available: Callable[[], None],
-    ) -> None:
-        self.store = store
-        self.jobs_available = jobs_available
-
-    def sweep(self) -> None:
-        if self.store.reviews.claim_due():
-            self.jobs_available()
 
 
 class EventRouter:

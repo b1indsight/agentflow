@@ -370,8 +370,8 @@ async def run_triage(store, flow, job, verdict, *, before_apply=None, github=Non
     )
     if before_apply:
         before_apply()
-    await subject.apply_result(assigned, result)
-    await subject.apply_result(assigned, result)
+    await subject.apply_result(assigned.id)
+    await subject.apply_result(assigned.id)
     return subject, github, result
 
 

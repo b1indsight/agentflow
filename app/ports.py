@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Protocol
 
 from app.context_models import DiscussionPage, FilePage, ReviewContext
 from app.github_models import (
@@ -36,7 +36,6 @@ class ProjectsClient(Protocol):
     async def set_status(self, item_id: str, status: ProjectStatus) -> None: ...
 
 
-@runtime_checkable
 class CodeAgent(Protocol):
     """重的代码 agent。MVP adapter：codex（codex_driver.py）。
 
@@ -60,14 +59,12 @@ class CodeAgent(Protocol):
     ) -> AgentRun: ...
 
 
-@runtime_checkable
 class Judge(Protocol):
     """轻的语义判定 agent。MVP adapter：bub。见 docs/architecture/review-loop.md。"""
 
     async def triage(self, context: ReviewContext) -> JudgeDecision: ...
 
 
-@runtime_checkable
 class GitHubClient(Protocol):
     """GitHub API 平面。adapter：githubkit（github_client.py）。
 

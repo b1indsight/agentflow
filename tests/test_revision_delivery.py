@@ -78,13 +78,13 @@ class RevisionAgent:
                 _git("commit", "-m", "revision", cwd=self.repo)
                 if self.behavior == "push":
                     _git("push", "origin", "flow/1", cwd=self.repo)
-        return AgentRun(session_id, "done", 0,
-                        None if self.behavior == "empty" else revision_output())
+        return AgentRun(session_id,
+                        "" if self.behavior == "empty" else revision_output().model_dump_json(), 0)
 
     async def start(self, prompt, cwd, *, output_schema=None, context=None):
         assert cwd == self.repo
         self.calls.append(("start", context, prompt))
-        return AgentRun("new-session", "done", 0, revision_output())
+        return AgentRun("new-session", revision_output().model_dump_json(), 0)
 
 
 @pytest.mark.parametrize("behavior,success", [

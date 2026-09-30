@@ -20,7 +20,7 @@ from app.models import (
     WorkerStatus,
     WorkerView,
 )
-from app.plugins import get_plugin_manager
+from app.plugins import emit_hook, get_plugin_manager
 from app.store import Store
 
 
@@ -39,15 +39,9 @@ class ControlService:
 
     def _fire(self, hook: str, **kwargs: object) -> None:
         if self._after_commit is not None:
-            self._after_commit.append(partial(self._emit_hook, hook, **kwargs))
+            self._after_commit.append(partial(emit_hook, self.plugins, hook, **kwargs))
         else:
-            self._emit_hook(hook, **kwargs)
-
-    def _emit_hook(self, hook: str, **kwargs: object) -> None:
-        try:
-            getattr(self.plugins.hook, hook)(**kwargs)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("plugin hook {} failed: {}", hook, exc)
+            emit_hook(self.plugins, hook, **kwargs)
 
     def on_trigger(self, repo: str, issue_number: int, installation_id: int | None) -> Flow | None:
         with self.store.transaction() as tx:

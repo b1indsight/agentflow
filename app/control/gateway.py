@@ -27,7 +27,6 @@ from app.observability import Metrics
 from app.protocol import (
     Assignment,
     AssignmentSecret,
-    ExecutionResult,
     ExecutionStopped,
     ExecutionTask,
     Failed,
@@ -158,7 +157,7 @@ class AssignmentCoordinator(Protocol):
 
     def mark_started(self, job: Job, task: ExecutionTask, worker_id: str) -> None: ...
 
-    async def apply_result(self, job: Job, result: ExecutionResult) -> JobState: ...
+    async def apply_result(self, job_id: int) -> JobState: ...
 
     async def fail(self, job: Job, reason: str) -> None: ...
 
@@ -640,7 +639,7 @@ class WorkerGateway:
                                   worker_id=job.assigned_worker_id):
             logger.bind(event="job_result", reason_code="ok").info("")
             if isinstance(message, Succeeded):
-                return await self.coordinator.apply_result(job, message.result)
+                return await self.coordinator.apply_result(job.id)
             await self.coordinator.fail(job, message.error)
             return JobState.FAILED
 

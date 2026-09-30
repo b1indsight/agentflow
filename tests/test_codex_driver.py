@@ -7,6 +7,29 @@ from app.codex_driver import CodexAgent, _codex_environment, _start_args
 from app.models import CodeAgentContext
 
 
+async def test_adapter_returns_raw_output_without_interpreting_business_schema(monkeypatch, tmp_path):
+    # A caller-owned schema need not contain INITIAL/REVISION fields. The adapter
+    # must forward the CLI output; only the task executor knows its business type.
+    schema = tmp_path / "schema.json"
+    schema.write_text('{"type":"object"}')
+    raw = '{"caller_owned":"result"}'
+
+    class Process:
+        returncode = 0
+
+        async def communicate(self):
+            return b'{"type":"thread.started","thread_id":"session-1"}\n', b""
+
+    async def spawn(*args, **kwargs):
+        assert args[args.index("--output-schema") + 1] == str(schema)
+        Path(args[args.index("-o") + 1]).write_text(raw)
+        return Process()
+
+    monkeypatch.setattr("app.codex_driver.asyncio.create_subprocess_exec", spawn)
+    run = await CodexAgent(trusted_host=True).start("task", tmp_path, output_schema=schema)
+    assert (run.session_id, run.last_message, run.exit_code) == ("session-1", raw, 0)
+
+
 def test_trusted_host_start_uses_full_access_in_the_flow_repo() -> None:
     args = _start_args("do the task", Path("/worker/repos/flow-1"), trusted_host=True)
 

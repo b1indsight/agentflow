@@ -15,6 +15,7 @@ from app.delivery_models import DeliveryReceipt
 from app.models import VcsOutcome
 from app.protocol import (
     Assignment,
+    AssignmentSecret,
     ExecutionResult,
     ExecutionStopped,
     ExecutionTask,
@@ -50,7 +51,7 @@ class Connection(Protocol):
 
 class TaskExecutor(Protocol):
     async def execute(
-        self, task: ExecutionTask, secret=None, *, tool_caller: FlowToolCaller
+        self, task: ExecutionTask, secret: AssignmentSecret | None = None, *, tool_caller: FlowToolCaller
     ) -> ExecutionResult: ...
 
 
