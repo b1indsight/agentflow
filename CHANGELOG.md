@@ -11,6 +11,9 @@
 - 精简内部结果应用与 CodeAgent 契约：仅按 job ID 应用持久结果，executor 负责严格解析
   原始 agent 输出；删除 AgentRun.output 与 SettleScheduler，统一插件异常隔离和重复配置字段。
 
+- 修复公平领取时非候选 worker 替其他 worker 持锁造成的双空结果；候选无锁读取，
+  仅锁请求方并复查 epoch、在线状态、空闲槽位及 drain/binding，增加确定性并发回归。
+
 - WorkerGateway 的 stops 参数改为 execution_control，接口改为 WorkerExecutionControl，明确派发授权与停止控制职责。
 
 - 未部署阶段统一到当前完整 schema、wire protocol v10 / journal v3；删除历史迁移、旧任务/effect

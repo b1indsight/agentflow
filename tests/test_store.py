@@ -1,6 +1,8 @@
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
+from threading import Event
 
+import psycopg
 import pytest
 from psycopg.errors import UniqueViolation
 
@@ -363,31 +365,85 @@ def test_independent_stores_share_persisted_state(
         other.close()
 
 
+@pytest.mark.parametrize("contender_id", ["worker-2", "worker-1"])
 def test_concurrent_stores_do_not_claim_the_same_job(
-    store: Store, postgresql_url: str
+    store: Store, postgresql_url: str, monkeypatch, contender_id
 ) -> None:
+    # Two idle workers can poll together. Hold worker-2 after its fair selection
+    # of worker-1; that selection must not lock worker-1 out of claiming the job.
+    # A second request for worker-1 must also recheck its slot after the first wins.
     flow = store.create_flow("owner/queue", 12, installation_id=None)
     queued = store.enqueue_job(flow.id, JobKind.INITIAL)
+    following = store.enqueue_job(flow.id, JobKind.TRIAGE)
     other = Store(postgresql_url)
     store.worker_connected("worker-1", protocol_version=PROTOCOL_VERSION)
     store.worker_connected("worker-2", protocol_version=PROTOCOL_VERSION)
 
+    selected, release = Event(), Event()
+    execute = psycopg.Connection.execute
     try:
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            claimed = list(
-                executor.map(
-                    lambda entry: entry[0].assign_job(entry[1], entry[2]),
-                    (
-                        (store, "worker-1", "assignment-1"),
-                        (other, "worker-2", "assignment-2"),
-                    ),
-                )
-            )
+        with other.transaction() as contender:
+            def observed(connection, query, *args, **kwargs):
+                cursor = execute(connection, query, *args, **kwargs)
+                if (connection is contender._bound_connection
+                        and query.startswith("SELECT w.worker_id FROM workers w")):
+                    selected.set()
+                    assert release.wait(5)
+                return cursor
+
+            monkeypatch.setattr(psycopg.Connection, "execute", observed)
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                second = executor.submit(contender.assign_job, contender_id, "assignment-2")
+                try:
+                    assert selected.wait(5)
+                    first = executor.submit(store.assign_job, "worker-1", "assignment-1")
+                    winner = first.result(timeout=5)
+                finally:
+                    release.set()
+                loser = second.result(timeout=5)
     finally:
         other.close()
 
-    claimed_ids = [job.id for job in claimed if job is not None]
-    assert claimed_ids == [queued.id]
+    assert winner is not None and winner.id == queued.id
+    assert loser is None
+    persisted = store.get_job(queued.id)
+    pending = store.get_job(following.id)
+    assert persisted is not None and persisted.assigned_worker_id == "worker-1"
+    assert persisted.attempt == 1
+    assert pending is not None and pending.state is JobState.QUEUED
+
+
+@pytest.mark.parametrize("change", ["epoch", "offline", "draining"])
+def test_assignment_rechecks_worker_after_fair_selection(store, postgresql_url, monkeypatch, change):
+    # As in the concurrent claim test above, pause at the fair SELECT boundary.
+    # A reconnect, disconnect or drain can commit before the caller locks itself.
+    flow = store.create_flow("owner/changed-worker", 13, installation_id=None)
+    queued = store.enqueue_job(flow.id, JobKind.INITIAL)
+    store.worker_connected("worker-1", PROTOCOL_VERSION, "epoch")
+    other = Store(postgresql_url)
+    execute = psycopg.Connection.execute
+
+    def observed(connection, query, *args, **kwargs):
+        cursor = execute(connection, query, *args, **kwargs)
+        if query.startswith("SELECT w.worker_id FROM workers w"):
+            with other.transaction() as tx:
+                with tx.connection() as conn:
+                    conn.execute("SET LOCAL statement_timeout = '2s'")
+                if change == "epoch":
+                    tx.worker_connected("worker-1", PROTOCOL_VERSION, "new-epoch")
+                elif change == "offline":
+                    tx.worker_disconnected("worker-1", connection_epoch="epoch")
+                else:
+                    tx.stops.drain("worker-1", True)
+        return cursor
+
+    monkeypatch.setattr(psycopg.Connection, "execute", observed)
+    try:
+        assert store.assign_job("worker-1", "token", "epoch") is None
+    finally:
+        other.close()
+    assert store.get_job(queued.id).state is JobState.QUEUED
+    assert store.get_flow_execution(flow.id) is None
 
 
 def test_workers_are_single_slot_and_attempt_affinity_is_enforced(store: Store) -> None:
