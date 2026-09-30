@@ -2,8 +2,8 @@
 
 from datetime import timedelta
 
-from app.models import utcnow
-from app.result_models import EffectReceipt, EffectRecord, EffectState, ResultPlan
+from app.contracts.result_models import EffectReceipt, EffectRecord, EffectState, ResultPlan
+from app.domain.models import utcnow
 
 
 class MemoryResults:

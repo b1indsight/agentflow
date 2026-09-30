@@ -7,11 +7,11 @@ from collections.abc import Awaitable, Callable
 
 from loguru import logger
 
-from app.github_models import GitHubAdapterError, GitHubErrorKind
-from app.ports import ProjectsClient
-from app.project_models import ProjectConfig
-from app.project_store import Projection, ProjectStore
-from app.store import Store
+from app.domain.github_models import GitHubAdapterError, GitHubErrorKind
+from app.domain.ports import ProjectsClient
+from app.domain.project_models import ProjectConfig
+from app.persistence.project_store import Projection, ProjectStore
+from app.persistence.store import Store
 
 
 class DestinationChanged(Exception):

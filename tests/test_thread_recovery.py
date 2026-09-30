@@ -5,8 +5,10 @@ from datetime import UTC, datetime, timedelta
 import httpx
 import pytest
 
-from app.github_models import GitHubAdapterError, GitHubErrorKind, ReviewThreads
-from app.models import (
+from app.contracts.protocol import PROTOCOL_VERSION, RevisionTask
+from app.contracts.result_models import EffectState, ResolveEffect, ResultPending
+from app.domain.github_models import GitHubAdapterError, GitHubErrorKind, ReviewThreads
+from app.domain.models import (
     AddressedComment,
     DeferredComment,
     DeliveryState,
@@ -14,9 +16,7 @@ from app.models import (
     JobState,
     ReviewItemKind,
 )
-from app.protocol import PROTOCOL_VERSION, RevisionTask
-from app.result_models import EffectState, ResolveEffect, ResultPending
-from app.review_models import FeedbackUpdate
+from app.domain.review_models import FeedbackUpdate
 from tests.test_archive_status import archive_adapter
 from tests.test_coordinator import coordinator
 from tests.test_review_resolution import human, snapshot
@@ -232,7 +232,7 @@ async def test_cancel_after_reply_lookup_prevents_any_write(store, thread_revisi
 
 
 async def test_commit_failure_keeps_remote_receipts_and_exact_consumption(store, thread_revision, monkeypatch):
-    from app.store import Store
+    from app.persistence.store import Store
 
     flow, job, github, subject = thread_revision
     original = Store.complete_persisted_result

@@ -4,10 +4,10 @@ from datetime import timedelta
 
 import pytest
 
-from app.context_models import MAX_DISCUSSIONS
-from app.models import JobKind
-from app.review_models import BatchState, FeedbackRef
-from app.store import Store
+from app.domain.context_models import MAX_DISCUSSIONS
+from app.domain.models import JobKind
+from app.domain.review_models import BatchState, FeedbackRef
+from app.persistence.store import Store
 from tests.test_pr_lifecycle import GitHub, check
 from tests.test_pr_lifecycle import lifecycle_flow as lifecycle_flow  # noqa: PLC0414
 from tests.test_review_batches import feedback, ingest

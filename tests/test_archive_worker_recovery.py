@@ -7,10 +7,7 @@ from datetime import timedelta
 
 import pytest
 
-from app.control.gateway import WorkerGateway
-from app.control.service import ControlService
-from app.models import FlowState, JobKind, JobState
-from app.protocol import (
+from app.contracts.protocol import (
     PROTOCOL_VERSION,
     Assignment,
     InitialTask,
@@ -20,12 +17,15 @@ from app.protocol import (
     parse_server_message,
     parse_worker_message,
 )
-from app.stop_store import StopStore
-from app.vcs import prepare_flow_repo
+from app.control.gateway import WorkerGateway
+from app.control.service import ControlService
+from app.domain.models import FlowState, JobKind, JobState
+from app.persistence.stop_store import StopStore
 from app.worker.client import WorkerClient
 from app.worker.executor import WorkerExecutor
 from app.worker.journal import WorkerJournal
 from app.worker.runtime import WorkerRootLock
+from app.worker.vcs import prepare_flow_repo
 from tests.test_archive_recovery import ready_archive, receive
 from tests.test_coordinator import RecordingGitHub, coordinator
 from tests.test_merge import route_merge

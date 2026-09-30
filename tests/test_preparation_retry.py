@@ -6,14 +6,14 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.contracts.protocol import PROTOCOL_VERSION, RevisionTask, TriageTask
 from app.control.gateway import WorkerGateway
 from app.control.lifecycle import pause_delivery
 from app.control.preparation import PreparationStale
-from app.github_models import GitHubAdapterError, GitHubErrorKind
-from app.models import JobKind, JobState, ReviewItemKind
-from app.protocol import PROTOCOL_VERSION, RevisionTask, TriageTask
-from app.stop_store import StopStore
-from app.store import Store
+from app.domain.github_models import GitHubAdapterError, GitHubErrorKind
+from app.domain.models import JobKind, JobState, ReviewItemKind
+from app.persistence.stop_store import StopStore
+from app.persistence.store import Store
 from tests.test_coordinator import coordinator
 from tests.test_review_batches import feedback, ingest
 from tests.test_revision_delivery import verified_result

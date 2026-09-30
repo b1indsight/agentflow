@@ -4,10 +4,7 @@ from collections.abc import Mapping
 import pytest
 from fastapi import WebSocketDisconnect
 
-from app.control.gateway import WorkerGateway
-from app.delivery_models import OpenedDelivery
-from app.models import DeliveryState, FlowDelivery, Job, JobKind, JobState, VcsKind
-from app.protocol import (
+from app.contracts.protocol import (
     PROTOCOL_VERSION,
     Assignment,
     ExecutionTask,
@@ -24,7 +21,10 @@ from app.protocol import (
     Succeeded,
     parse_server_message,
 )
-from app.result_models import ResultPending
+from app.contracts.result_models import ResultPending
+from app.control.gateway import WorkerGateway
+from app.domain.delivery_models import OpenedDelivery
+from app.domain.models import DeliveryState, FlowDelivery, Job, JobKind, JobState, VcsKind
 from tests.worker_fakes import NoPendingStops, connected_worker
 
 

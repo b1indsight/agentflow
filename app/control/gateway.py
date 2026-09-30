@@ -13,18 +13,7 @@ from fastapi import WebSocketDisconnect
 from loguru import logger
 from pydantic import ValidationError
 
-from app.control.preparation import PreparationStale
-from app.models import (
-    DeliveryState,
-    FlowDelivery,
-    FlowExecution,
-    Job,
-    JobKind,
-    JobState,
-    WorkerRecord,
-)
-from app.observability import Metrics
-from app.protocol import (
+from app.contracts.protocol import (
     Assignment,
     AssignmentSecret,
     ExecutionStopped,
@@ -48,8 +37,19 @@ from app.protocol import (
     parse_worker_message,
     terminal_digest,
 )
-from app.result_models import ResultPending
-from app.stop_store import StopIntent
+from app.contracts.result_models import ResultPending
+from app.control.preparation import PreparationStale
+from app.domain.models import (
+    DeliveryState,
+    FlowDelivery,
+    FlowExecution,
+    Job,
+    JobKind,
+    JobState,
+    WorkerRecord,
+)
+from app.persistence.stop_store import StopIntent
+from app.telemetry.metrics import Metrics
 
 
 class WorkerSocket(Protocol):

@@ -8,6 +8,9 @@
 
 ## Unreleased
 
+- 按职责整理 domain/contracts/persistence/github/control/worker/telemetry 包，更新导入与部署入口；
+  分离日志和指标，worker 启动不再间接加载数据库模块。CLI、数据库 schema 和网络协议保持不变。
+
 - 精简内部结果应用与 CodeAgent 契约：仅按 job ID 应用持久结果，executor 负责严格解析
   原始 agent 输出；删除 AgentRun.output 与 SettleScheduler，统一插件异常隔离和重复配置字段。
 

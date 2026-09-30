@@ -6,7 +6,7 @@ import psycopg
 import pytest
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
-from app.protocol import PROTOCOL_VERSION
+from app.contracts.protocol import PROTOCOL_VERSION
 from scripts.smoke.recovery import freeze_connection, verify_bundle
 
 

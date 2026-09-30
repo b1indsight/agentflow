@@ -6,9 +6,11 @@ from typing import cast
 
 import pytest
 
+from app.contracts.protocol import InitialResult, TriageResult
+from app.contracts.result_models import EffectState, ResultPending
 from app.control.service import ControlService
-from app.github_models import GitHubAdapterError, GitHubErrorKind
-from app.models import (
+from app.domain.github_models import GitHubAdapterError, GitHubErrorKind
+from app.domain.models import (
     Attempt,
     DeliveryState,
     FeedbackRef,
@@ -22,9 +24,7 @@ from app.models import (
     VcsKind,
     Verdict,
 )
-from app.protocol import InitialResult, TriageResult
-from app.result_models import EffectState, ResultPending
-from app.store import Store
+from app.persistence.store import Store
 from tests.review_memory import judge_decision
 from tests.test_coordinator import MemoryStore, RecordingGitHub, apply_result, coordinator
 
@@ -166,7 +166,7 @@ async def test_initial_delivery_commits_only_after_all_required_effects(
 
 
 async def test_initial_delivery_records_closed_pr_without_reopening(initial_scenario) -> None:
-    from app.github_models import PullRequestSnapshot
+    from app.domain.github_models import PullRequestSnapshot
 
     store, github, job, result = initial_scenario
     github.pull_request = PullRequestSnapshot(

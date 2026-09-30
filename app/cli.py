@@ -15,8 +15,8 @@ import typer
 from app.config import get_serve_settings
 from app.control.archive import archive_progress
 from app.control.service import ControlService
-from app.models import DeliveryState
-from app.store import Store
+from app.domain.models import DeliveryState
+from app.persistence.store import Store
 
 app = typer.Typer(help="FlowTool admin CLI")
 flow_app = typer.Typer(help="flow 运维")
@@ -32,7 +32,7 @@ app.add_typer(inbox_app, name="inbox")
 @inbox_app.command("status")
 def inbox_status(limit: int = typer.Option(50, min=1, max=500)) -> None:
     """Show bounded delivery diagnostics without payload or authentication data."""
-    from app.webhook_store import WebhookStore
+    from app.persistence.webhook_store import WebhookStore
 
     with _store() as store:
         for item in WebhookStore(store).list(limit):
@@ -43,7 +43,7 @@ def inbox_status(limit: int = typer.Option(50, min=1, max=500)) -> None:
 @inbox_app.command("retry")
 def inbox_retry(delivery_id: str) -> None:
     """Requeue only a blocked receipt; never reset a live claim or completed event."""
-    from app.webhook_store import WebhookStore
+    from app.persistence.webhook_store import WebhookStore
 
     with _store() as store:
         if not WebhookStore(store).retry(delivery_id):
@@ -55,8 +55,8 @@ def inbox_retry(delivery_id: str) -> None:
 @project_app.command("check")
 def project_check(repo: str) -> None:
     """只读校验已配置的组织 Project、Status 字段及选项。"""
-    from app.github_client import GitHubApp
-    from app.github_models import GitHubAdapterError
+    from app.domain.github_models import GitHubAdapterError
+    from app.github.client import GitHubApp
 
     settings = get_serve_settings()
     config = settings.projects.get(repo.casefold())
@@ -74,7 +74,7 @@ def project_check(repo: str) -> None:
 @project_app.command("status")
 def project_status(repo: str, limit: int = typer.Option(100, min=1, max=1000)) -> None:
     """显示持久投影、期望/确认版本、退避和阻塞原因。"""
-    from app.project_store import ProjectStore
+    from app.persistence.project_store import ProjectStore
 
     with _store() as store:
         for row in ProjectStore(store).list_projections(repo=repo.casefold(), limit=limit):
@@ -87,7 +87,7 @@ def project_status(repo: str, limit: int = typer.Option(100, min=1, max=1000)) -
 @project_app.command("retry")
 def project_retry(repo: str) -> None:
     """修复配置或远端条件后重新核对；不清除已知卡片或未确认的 add。"""
-    from app.project_store import ProjectStore
+    from app.persistence.project_store import ProjectStore
 
     with _store() as store:
         count = ProjectStore(store).retry(repo)
@@ -142,7 +142,7 @@ def flows(active: bool = typer.Option(False, help="只看未终结的")) -> None
 @app.command("worker-drain")
 def worker_drain(worker_id: str, undo: bool = typer.Option(False, "--undo")) -> None:
     """暂停给 worker 分配新 Flow；已有绑定继续收尾。"""
-    from app.stop_store import StopStore
+    from app.persistence.stop_store import StopStore
 
     with _store() as store:
         StopStore(store).drain(worker_id, not undo)

@@ -1,6 +1,6 @@
 """Fresh installations use the current schema without historical upgrade state."""
 
-from app.models import FlowState
+from app.domain.models import FlowState
 
 
 def test_current_schema_initialization_is_idempotent(store):

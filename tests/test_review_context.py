@@ -2,15 +2,15 @@
 
 import pytest
 
-from app.context_models import (
+from app.control.review_context import build_review_context
+from app.domain.context_models import (
     MAX_CONTEXT_BYTES,
     ContextDiscussion,
     ContextFile,
     DiscussionPage,
     FilePage,
 )
-from app.github_models import GitHubAdapterError, GitHubErrorKind
-from app.review_context import build_review_context
+from app.domain.github_models import GitHubAdapterError, GitHubErrorKind
 from tests.review_memory import review_context as context
 from tests.test_coordinator import MemoryStore, RecordingGitHub
 

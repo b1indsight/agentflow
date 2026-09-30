@@ -7,8 +7,8 @@ from threading import Event
 import psycopg
 import pytest
 
-from app.models import FlowState, JobKind, JobState, WorkerStatus
-from app.protocol import PROTOCOL_VERSION, ExecutionStopped
+from app.contracts.protocol import PROTOCOL_VERSION, ExecutionStopped
+from app.domain.models import FlowState, JobKind, JobState, WorkerStatus
 
 NOW = datetime(2026, 9, 29, tzinfo=UTC)
 
@@ -82,7 +82,7 @@ def test_binding_decision_failure_rolls_back_prior_job_updates(store, monkeypatc
     def interrupted(*args):
         raise RuntimeError("binding decision interrupted")
 
-    monkeypatch.setattr("app.store.should_release_binding", interrupted)
+    monkeypatch.setattr("app.persistence.store.should_release_binding", interrupted)
     with pytest.raises(RuntimeError, match="binding decision interrupted"):
         store.sweep_expired_assignments()
     assert store.get_job(job.id).state is JobState.RUNNING

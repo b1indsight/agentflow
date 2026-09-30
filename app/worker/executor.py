@@ -11,11 +11,7 @@ from pathlib import Path
 from loguru import logger
 from pydantic import ValidationError
 
-from app.context_builder import build_initial_prompt, build_revision_prompt
-from app.delivery_models import DeliveryReceipt
-from app.models import CodeAgentContext, CodexResult, InitialCodexResult, SessionUnavailable
-from app.ports import CodeAgent, Judge
-from app.protocol import (
+from app.contracts.protocol import (
     ArchiveResult,
     ArchiveTask,
     AssignmentSecret,
@@ -29,7 +25,13 @@ from app.protocol import (
     TriageResult,
     TriageTask,
 )
-from app.vcs import (
+from app.domain.delivery_models import DeliveryReceipt
+from app.domain.models import CodeAgentContext, CodexResult, InitialCodexResult, SessionUnavailable
+from app.domain.ports import CodeAgent, Judge
+from app.worker.context_builder import build_initial_prompt, build_revision_prompt
+from app.worker.journal import WorkerJournal
+from app.worker.tools import FlowToolBroker, FlowToolCaller
+from app.worker.vcs import (
     VcsVerificationError,
     agent_guidance,
     cleanup_flow_repo,
@@ -41,8 +43,6 @@ from app.vcs import (
     verify_revision_outcome,
     verify_vcs_outcome,
 )
-from app.worker.journal import WorkerJournal
-from app.worker.tools import FlowToolBroker, FlowToolCaller
 
 VCS_VERIFICATION_EXIT_CODE = 65
 

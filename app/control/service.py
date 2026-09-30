@@ -8,8 +8,8 @@ from functools import partial
 from loguru import logger
 
 from app.control.archive import verify_archive
-from app.github_models import PullRequestMerge
-from app.models import (
+from app.domain.github_models import PullRequestMerge
+from app.domain.models import (
     TERMINAL_STATES,
     DeliveryState,
     Flow,
@@ -20,8 +20,8 @@ from app.models import (
     WorkerStatus,
     WorkerView,
 )
+from app.persistence.store import Store
 from app.plugins import emit_hook, get_plugin_manager
-from app.store import Store
 
 
 class ControlService:

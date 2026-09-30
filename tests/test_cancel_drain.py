@@ -2,10 +2,10 @@ from datetime import timedelta
 
 import pytest
 
+from app.contracts.protocol import PROTOCOL_VERSION
 from app.control.service import ControlService
-from app.models import JobKind
-from app.protocol import PROTOCOL_VERSION
-from app.stop_store import StopStore
+from app.domain.models import JobKind
+from app.persistence.stop_store import StopStore
 
 
 def running(store):
@@ -35,7 +35,7 @@ def test_cancel_retains_slot_and_fence_past_recovery_timeout(store):
 
 
 def test_confirmation_requires_current_epoch_and_exact_request(store):
-    from app.protocol import ExecutionStopped
+    from app.contracts.protocol import ExecutionStopped
     flow, job = running(store)
     ControlService(store).cancel(flow)
     stops = StopStore(store)
@@ -80,8 +80,8 @@ def test_never_dispatched_cancel_needs_no_stop(store):
 
 
 async def test_merge_during_cancel_retains_binding_for_original_archive(store):
-    from app.models import DeliveryState, FlowState
-    from app.protocol import ExecutionStopped
+    from app.contracts.protocol import ExecutionStopped
+    from app.domain.models import DeliveryState, FlowState
     from tests.test_merge import route_merge
     flow, _job = running(store)
     delivery = store.get_or_create_delivery(flow.id, 'flow/1')
@@ -98,7 +98,7 @@ async def test_merge_during_cancel_retains_binding_for_original_archive(store):
 
 
 def test_unresolved_dispatched_effect_blocks_stop_even_if_result_was_marked_applied(store):
-    from app.protocol import ExecutionStopped
+    from app.contracts.protocol import ExecutionStopped
     flow, job = running(store)
     # Older code could mark a cancelled effect skipped without reconciling a dispatched write.
     with store.connection() as conn:
@@ -116,8 +116,8 @@ def test_unresolved_dispatched_effect_blocks_stop_even_if_result_was_marked_appl
 
 
 async def test_late_merge_with_replacement_flow_keeps_stop_blocked(store):
-    from app.models import DeliveryState
-    from app.protocol import ExecutionStopped
+    from app.contracts.protocol import ExecutionStopped
+    from app.domain.models import DeliveryState
     from tests.test_merge import route_merge
     flow, _job = running(store)
     delivery = store.get_or_create_delivery(flow.id, 'flow/1')
@@ -152,7 +152,7 @@ def test_lost_started_ack_cannot_requeue_then_cancel_as_unsent(store):
 
 
 def test_cancel_during_preparation_releases_slot_without_nonexistent_journal(store):
-    from app.models import JobState
+    from app.domain.models import JobState
     flow = store.create_flow('owner/repo', 1, 1)
     store.worker_connected('w', PROTOCOL_VERSION, 'epoch')
     job = store.enqueue_job(flow.id, JobKind.INITIAL)
@@ -171,7 +171,7 @@ def test_cancel_during_preparation_releases_slot_without_nonexistent_journal(sto
 
 
 def test_confirmed_stop_can_be_reacknowledged_after_flow_rebind(store):
-    from app.protocol import ExecutionStopped
+    from app.contracts.protocol import ExecutionStopped
     flow, _ = running(store)
     ControlService(store).cancel(flow)
     stop = store.stops.pending('w')
@@ -195,11 +195,16 @@ async def test_cancelled_creation_persists_pr_identity_and_merge_before_stop(sto
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
 
+    from app.contracts.protocol import ExecutionStopped
+    from app.contracts.result_models import (
+        EffectState,
+        PullRequestEffect,
+        ResultPending,
+        ResultPlan,
+    )
     from app.control.effects import ResultEffects
-    from app.github_models import PullRequestStatus
-    from app.models import DeliveryState, FlowState, JobState
-    from app.protocol import ExecutionStopped
-    from app.result_models import EffectState, PullRequestEffect, ResultPending, ResultPlan
+    from app.domain.github_models import PullRequestStatus
+    from app.domain.models import DeliveryState, FlowState, JobState
     flow, job = running(store)
     delivery = store.get_or_create_delivery(flow.id, 'flow/1')
     delivery.state, delivery.base_branch, delivery.head_sha = DeliveryState.OPENING, 'main', 'a' * 40
@@ -240,7 +245,7 @@ async def test_cancelled_creation_persists_pr_identity_and_merge_before_stop(sto
 
 
 async def test_preparation_result_releases_cancelled_binding_after_application(store):
-    from app.protocol import Failed, terminal_digest
+    from app.contracts.protocol import Failed, terminal_digest
     from tests.test_coordinator import RecordingGitHub, coordinator
     flow = store.create_flow('owner/repo', 1, 1)
     store.worker_connected('w', PROTOCOL_VERSION, 'epoch')

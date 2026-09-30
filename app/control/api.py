@@ -17,8 +17,8 @@ from psycopg_pool import PoolTimeout
 from pydantic import SecretStr
 from starlette.middleware.base import RequestResponseEndpoint
 
-from app.observability import Metrics
-from app.webhook_store import DeliveryConflict
+from app.persistence.webhook_store import DeliveryConflict
+from app.telemetry.metrics import Metrics
 
 
 class ApplicationSettings(Protocol):

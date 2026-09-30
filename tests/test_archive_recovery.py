@@ -4,9 +4,7 @@ from datetime import timedelta
 
 import pytest
 
-from app.control.service import ControlService
-from app.models import FlowState, JobKind, JobState
-from app.protocol import (
+from app.contracts.protocol import (
     PROTOCOL_VERSION,
     ArchiveResult,
     ArchiveTask,
@@ -14,8 +12,10 @@ from app.protocol import (
     Succeeded,
     terminal_digest,
 )
-from app.stop_store import StopStore
-from app.store import Store
+from app.control.service import ControlService
+from app.domain.models import FlowState, JobKind, JobState
+from app.persistence.stop_store import StopStore
+from app.persistence.store import Store
 from tests.test_coordinator import RecordingGitHub, coordinator
 from tests.test_merge import route_merge
 from tests.test_workflow_transactions import accepted_triage
@@ -169,8 +169,8 @@ async def test_delivery_change_after_receipt_freeze_blocks_commit(store, monkeyp
 
 @pytest.mark.parametrize("journal", ["missing", "started-without-executor"])
 async def test_merged_coding_process_without_exit_proof_cannot_unlock_archive(store, journal):
+    from app.contracts.protocol import RecoveryDescriptor
     from app.control.gateway import ProtocolViolation, WorkerGateway
-    from app.protocol import RecoveryDescriptor
 
     old, _ = accepted_triage(store, receive=False)
     flow = store.get_flow(old.flow_id)

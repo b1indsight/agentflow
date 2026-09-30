@@ -267,7 +267,7 @@
     <article class="node" data-status="done">
       <div class="node__top"><span class="node__name">models</span><span class="pill">M0 已验</span></div>
       <p class="node__role">枚举 · Pydantic 持久化/跨模型契约 · 非持久化 dataclass</p>
-      <code class="node__file">app/models.py</code>
+      <code class="node__file">app/domain/models.py</code>
     </article>
     <article class="node" data-status="done">
       <div class="node__top"><span class="node__name">config</span><span class="pill">M0 已验</span></div>
@@ -277,7 +277,7 @@
     <article class="node" data-status="done">
       <div class="node__top"><span class="node__name">ports</span><span class="pill">已定义</span></div>
       <p class="node__role">5 个端口 Protocol（CodeAgent / Judge / Sandbox / GitHubClient / JobDispatch）签名定死 · VCS 已降为普通函数</p>
-      <code class="node__file">app/ports.py</code>
+      <code class="node__file">app/domain/ports.py</code>
     </article>
   </div>
 
@@ -334,12 +334,12 @@
         <article class="node" data-status="done">
           <div class="node__top"><span class="node__name">Store</span><span class="pill">自动化</span></div>
           <p class="node__role">PostgreSQL · flows/attempts/jobs · epoch/token fencing · result/effect 账本 · 反馈版本/批次/线程观察</p>
-          <code class="node__file">app/store.py</code>
+          <code class="node__file">app/persistence/store.py</code>
         </article>
         <article class="node" data-status="done">
           <div class="node__top"><span class="node__name">Protocol</span><span class="pill">已验证</span></div>
           <p class="node__role">v7 strict Pydantic · task/result/tool RPC · 批次/context digest · 冻结修订/session generation</p>
-          <code class="node__file">app/protocol.py</code>
+          <code class="node__file">app/contracts/protocol.py</code>
         </article>
         <article class="node" data-status="done">
           <div class="node__top"><span class="node__name">Worker Gateway</span><span class="pill">已验证</span></div>
@@ -349,7 +349,7 @@
         <article class="node" data-status="partial">
           <div class="node__top"><span class="node__name">GitHub Client</span><span class="pill">部分</span></div>
           <p class="node__role">githubkit 0.16 · scoped token · Issue/ref/PR · 线程/comment 分页、回复/resolve 有自动化 · 真实 App 待验</p>
-          <code class="node__file">app/github_client.py</code>
+          <code class="node__file">app/github/client.py</code>
         </article>
       </div>
 
@@ -382,7 +382,7 @@
         <article class="node" data-status="partial">
           <div class="node__top"><span class="node__name">Codex Driver</span><span class="pill">部分</span></div>
           <p class="node__role">codex exec / resume · 一次性 session 兜底 · output schema · 每轮短时 push 凭据 · 首轮 STDIO MCP</p>
-          <code class="node__file">app/codex_driver.py · V5/V6</code>
+          <code class="node__file">app/worker/codex_driver.py · V5/V6</code>
         </article>
         <article class="node" data-status="partial">
           <div class="node__top"><span class="node__name">Sandbox 端口</span><span class="pill">部分</span></div>
@@ -392,7 +392,7 @@
         <article class="node" data-status="partial">
           <div class="node__top"><span class="node__name">Flow repo + VCS 核验</span><span class="pill">部分</span></div>
           <p class="node__role">Flow 独占 repo · Agent 自选 Git/jj · 首轮/修订核验 branch/commit/clean/remote SHA</p>
-          <code class="node__file">app/vcs.py · V8</code>
+          <code class="node__file">app/worker/vcs.py · V8</code>
         </article>
         <article class="node" data-status="artifact">
           <div class="node__top"><span class="node__name">Worker Client + Executor</span></div>
@@ -447,7 +447,7 @@
         <article class="node" data-status="future">
           <div class="node__top"><span class="node__name">多 agent / 多方案分支</span><span class="pill">数据接缝已就位</span></div>
           <p class="node__role">数据模型已解锁 1:1:attempts 表 · flows→attempts→runs 一对多 · review 归属 attempt · current_attempt_id。待做:真正并行起多 attempt + 择优</p>
-          <span class="port-tag">app/models.Attempt · store.attempts · §9-2</span>
+          <span class="port-tag">app/domain/models.Attempt · store.attempts · §9-2</span>
         </article>
         <article class="node" data-status="future">
           <div class="node__top"><span class="node__name">CodeAgent 标准接口</span><span class="pill">端口已立</span></div>

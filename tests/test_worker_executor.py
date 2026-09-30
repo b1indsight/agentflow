@@ -6,15 +6,22 @@ from pathlib import Path
 import pytest
 from pydantic import SecretStr
 
-from app.delivery_models import OpenedDelivery
-from app.models import AgentRun, InitialCodexResult, TriageVerdict, VcsKind, VcsOutcome, Verdict
-from app.protocol import (
+from app.contracts.protocol import (
     AssignmentSecret,
     InitialResult,
     InitialTask,
     PushSecret,
     TriageResult,
     TriageTask,
+)
+from app.domain.delivery_models import OpenedDelivery
+from app.domain.models import (
+    AgentRun,
+    InitialCodexResult,
+    TriageVerdict,
+    VcsKind,
+    VcsOutcome,
+    Verdict,
 )
 from app.worker.executor import WorkerExecutor
 from app.worker.journal import WorkerJournal

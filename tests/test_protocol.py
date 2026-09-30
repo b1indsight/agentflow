@@ -4,9 +4,7 @@ import pytest
 from pydantic import ValidationError
 from pydantic.types import SecretStr
 
-from app.delivery_models import OpenedDelivery
-from app.models import TriageVerdict, VcsKind, Verdict
-from app.protocol import (
+from app.contracts.protocol import (
     PROTOCOL_VERSION,
     Assignment,
     AssignmentSecret,
@@ -23,6 +21,8 @@ from app.protocol import (
     parse_server_message,
     parse_worker_message,
 )
+from app.domain.delivery_models import OpenedDelivery
+from app.domain.models import TriageVerdict, VcsKind, Verdict
 
 
 def test_assignment_and_result_round_trip_with_discriminated_payloads() -> None:

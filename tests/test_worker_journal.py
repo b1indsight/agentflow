@@ -4,8 +4,7 @@ from pathlib import Path
 import pytest
 from pydantic import SecretStr
 
-from app.models import JobState
-from app.protocol import (
+from app.contracts.protocol import (
     Assignment,
     AssignmentSecret,
     InitialResult,
@@ -13,6 +12,7 @@ from app.protocol import (
     PushSecret,
     Succeeded,
 )
+from app.domain.models import JobState
 from app.worker.journal import JournalError, WorkerJournal
 
 

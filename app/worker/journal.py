@@ -10,8 +10,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
-from app.models import JobState
-from app.protocol import (
+from app.contracts.protocol import (
     ArchiveTask,
     Assignment,
     ExecutionStopped,
@@ -21,6 +20,7 @@ from app.protocol import (
     Succeeded,
     terminal_digest,
 )
+from app.domain.models import JobState
 
 TerminalMessage = Succeeded | Failed
 _TERMINAL: TypeAdapter[TerminalMessage] = TypeAdapter(TerminalMessage)

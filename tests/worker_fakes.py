@@ -1,8 +1,8 @@
 """Explicit worker dependencies for in-memory protocol tests."""
 
-from app.models import WorkerRecord, WorkerStatus, utcnow
-from app.protocol import ExecutionStopped
-from app.stop_store import StopIntent
+from app.contracts.protocol import ExecutionStopped
+from app.domain.models import WorkerRecord, WorkerStatus, utcnow
+from app.persistence.stop_store import StopIntent
 
 
 class NoPendingStops:

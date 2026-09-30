@@ -9,9 +9,19 @@ from typing import Any, cast
 import pytest
 from pydantic import SecretStr
 
+from app.contracts.protocol import (
+    ExecutionResult,
+    FlowToolRequest,
+    InitialResult,
+    InitialTask,
+    RevisionTask,
+    Succeeded,
+    TriageResult,
+    terminal_digest,
+)
 from app.control.coordinator import JobCoordinator
-from app.delivery_models import DeliveryReceipt
-from app.github_models import (
+from app.domain.delivery_models import DeliveryReceipt
+from app.domain.github_models import (
     IssueSnapshot,
     PullRequestSnapshot,
     PullRequestStatus,
@@ -20,7 +30,7 @@ from app.github_models import (
     RepositorySnapshot,
     ReviewThread,
 )
-from app.models import (
+from app.domain.models import (
     Attempt,
     DeliveryState,
     FeedbackRef,
@@ -35,18 +45,8 @@ from app.models import (
     VcsKind,
     Verdict,
 )
-from app.ports import GitHubClient
-from app.protocol import (
-    ExecutionResult,
-    FlowToolRequest,
-    InitialResult,
-    InitialTask,
-    RevisionTask,
-    Succeeded,
-    TriageResult,
-    terminal_digest,
-)
-from app.store import Store
+from app.domain.ports import GitHubClient
+from app.persistence.store import Store
 from tests.result_memory import MemoryResults, MemoryStops
 from tests.review_memory import MemoryReviews, judge_decision
 
@@ -189,7 +189,7 @@ class MemoryStore:
         return True
 
     def reserve_tool_call(self, **values: Any):
-        from app.models import FlowToolCall
+        from app.domain.models import FlowToolCall
 
         previous = self.tool_calls.get(values["call_id"])
         if previous:
@@ -255,15 +255,15 @@ class RecordingGitHub:
         return IssueSnapshot(number=number, title="Real issue", body="Real body", state="open")
 
     async def list_pull_request_files(self, *args):
-        from app.context_models import FilePage
+        from app.domain.context_models import FilePage
         return FilePage(files=[])
 
     async def list_pull_request_discussions(self, *args):
-        from app.context_models import DiscussionPage
+        from app.domain.context_models import DiscussionPage
         return DiscussionPage(discussions=[])
 
     async def list_review_threads(self, installation_id, repo, number):
-        from app.github_models import ReviewThreads
+        from app.domain.github_models import ReviewThreads
         return ReviewThreads(repo=repo, pr_number=number, fetched_at=datetime.now(UTC),
                              threads=[t.model_copy(deep=True) for t in self.threads])
 

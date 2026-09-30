@@ -2,6 +2,21 @@
 
 本页同时写目标职责和当前边界。组件的汇总状态以[架构入口](README.md#当前实现状态)为准。
 
+## 包依赖边界
+
+`domain/` 保存领域事实、端口与纯策略；`contracts/` 在这些类型上定义跨进程消息与冻结结果。
+`persistence/` 拥有 SQL 和事务，`github/` 拥有 GitHub SDK/GraphQL 适配，两者不反向依赖编排层。
+`control/` 组合仓储、GitHub、协议与插件，负责工作流和外部副作用；`worker/` 组合协议、Agent/Judge
+执行器及 VCS，不加载 control、数据库或 GitHub SDK 实现。配置与 CLI 保留原入口。
+
+`telemetry/logging.py` 只提供通用日志配置；`telemetry/metrics.py` 由控制端使用，并调用
+`persistence/metrics_store.py` 读取数据库指标。两者不在包入口集中导出，避免 worker 经日志导入 SQL。
+`domain/github_retry.py` 是纯退避计算，不属于 GitHub SDK 适配，仓储可以直接复用。
+职责边界由 `tests/test_boundaries.py` 检查，另以独立解释器验证 worker 启动的传递导入。
+
+目录列表见[当前目录](roadmap.md#8-当前目录与里程碑)。Judge 内部子进程入口为
+`app.worker.judge_runner`；对外 CLI、`app.control.api` 和 `app.live_smoke` 入口保持不变。
+
 ## 4.1 Webhook Ingress（FastAPI + uvicorn）
 
 职责：读取原始请求体，用 Webhook secret 校验 `X-Hub-Signature-256`，把有效事件交给 router，避免

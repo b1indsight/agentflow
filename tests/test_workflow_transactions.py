@@ -6,11 +6,19 @@ from datetime import timedelta
 
 import pytest
 
+from app.contracts.protocol import PROTOCOL_VERSION, Succeeded, TriageResult, terminal_digest
+from app.contracts.result_models import EffectState
 from app.control.service import ControlService
-from app.models import DeliveryState, FlowState, Job, JobKind, JobState, TriageVerdict, Verdict
-from app.protocol import PROTOCOL_VERSION, Succeeded, TriageResult, terminal_digest
-from app.result_models import EffectState
-from app.store import Store
+from app.domain.models import (
+    DeliveryState,
+    FlowState,
+    Job,
+    JobKind,
+    JobState,
+    TriageVerdict,
+    Verdict,
+)
+from app.persistence.store import Store
 from tests.review_memory import judge_decision
 from tests.test_coordinator import RecordingGitHub, coordinator
 
@@ -44,7 +52,7 @@ def test_transaction_view_reuses_its_connection_without_leaking_to_other_callers
             borrowed.append(connection)
             yield connection
 
-    monkeypatch.setattr("app.store.ConnectionPool", Pool)
+    monkeypatch.setattr("app.persistence.store.ConnectionPool", Pool)
     subject = Store("unused")
     with pytest.raises(RuntimeError, match="abort"), subject.transaction() as tx:
         with tx.connection() as first, tx.connection() as second:
@@ -123,8 +131,8 @@ def accepted_triage(store: Store, *, receive: bool = True) -> tuple[Job, TriageR
     assert store.finish_assignment(
         initial.id, "worker-a", "initial-token", JobState.DONE, "epoch-a"
     )
-    from app.models import ReviewItemKind
-    from app.review_models import FeedbackUpdate
+    from app.domain.models import ReviewItemKind
+    from app.domain.review_models import FeedbackUpdate
 
     store.reviews.ingest(flow.id, "review-event", "pull_request_review_comment", {},
         FeedbackUpdate(kind=ReviewItemKind.INLINE, github_id=101, author="alice",

@@ -1,6 +1,6 @@
 """Errors which may cross only the pre-Assignment read-preparation boundary."""
 
-from app.github_models import GitHubAdapterError
+from app.domain.github_models import GitHubAdapterError
 
 
 class PreparationReadFailure(Exception):

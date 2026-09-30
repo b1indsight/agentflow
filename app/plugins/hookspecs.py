@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pluggy
 
-from app.models import Flow
+from app.domain.models import Flow
 
 hookspec = pluggy.HookspecMarker("flowtool")
 hookimpl = pluggy.HookimplMarker("flowtool")

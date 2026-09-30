@@ -7,7 +7,7 @@ import pytest
 from psycopg import sql
 from psycopg.conninfo import make_conninfo
 
-from app.store import Store
+from app.persistence.store import Store
 
 
 @pytest.fixture

@@ -5,9 +5,9 @@ from datetime import UTC, datetime
 import pytest
 
 from app.control.resolution import covered_thread
-from app.github_models import ReviewComment, ReviewThread
-from app.models import ReviewItemKind
-from app.review_models import ReviewFeedback
+from app.domain.github_models import ReviewComment, ReviewThread
+from app.domain.models import ReviewItemKind
+from app.domain.review_models import ReviewFeedback
 
 
 def human(number=1, **updates):

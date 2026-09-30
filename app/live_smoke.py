@@ -23,9 +23,9 @@ from typing import IO, Literal, Protocol, Self
 
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 
-from app.models import FlowState, JobKind, JobState
-from app.protocol import PROTOCOL_VERSION
-from app.store import Store
+from app.contracts.protocol import PROTOCOL_VERSION
+from app.domain.models import FlowState, JobKind, JobState
+from app.persistence.store import Store
 
 TASK = """Add smoke/greeting.py exposing greet(name), returning 'Hello, <name>!'.
 Add a focused Python standard-library unittest. Only change files under smoke/. Do not modify CI, dependencies or credentials.

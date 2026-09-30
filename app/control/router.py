@@ -7,9 +7,9 @@ from typing import Literal, Protocol
 
 from loguru import logger
 
-from app.models import Flow, ReviewItemKind
-from app.review_models import FeedbackUpdate
-from app.store import Store
+from app.domain.models import Flow, ReviewItemKind
+from app.domain.review_models import FeedbackUpdate
+from app.persistence.store import Store
 
 
 class FlowEventHandler(Protocol):

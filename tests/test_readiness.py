@@ -4,8 +4,8 @@ from types import SimpleNamespace
 from fastapi.testclient import TestClient
 
 from app.control.api import create_app
-from app.observability import Metrics
-from app.readiness import database_ready
+from app.persistence.readiness import database_ready
+from app.telemetry.metrics import Metrics
 from app.worker.health import HealthFile, healthy
 
 
@@ -14,7 +14,7 @@ async def test_database_readiness_is_read_only(postgresql_url):
 
 
 async def test_database_failure_is_not_liveness_failure(monkeypatch):
-    import app.readiness as module
+    import app.persistence.readiness as module
 
     async def fail(*args, **kwargs):
         raise OSError('private DSN secret')
@@ -37,7 +37,7 @@ async def test_database_failure_is_not_liveness_failure(monkeypatch):
 
 
 async def test_probe_connection_deadline_does_not_block_event_loop(monkeypatch):
-    import app.readiness as module
+    import app.persistence.readiness as module
     async def blocked(*args, **kwargs): await asyncio.Event().wait()
     monkeypatch.setattr(module.psycopg.AsyncConnection, 'connect', blocked)
     task = asyncio.create_task(database_ready('unused'))

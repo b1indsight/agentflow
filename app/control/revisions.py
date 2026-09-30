@@ -1,8 +1,8 @@
 """Read-only revision delivery checks shared by assignment and result application."""
 
-from app.models import DeliveryState, Flow, FlowDelivery, Job
-from app.ports import GitHubClient
-from app.protocol import RevisionResult, RevisionTask
+from app.contracts.protocol import RevisionResult, RevisionTask
+from app.domain.models import DeliveryState, Flow, FlowDelivery, Job
+from app.domain.ports import GitHubClient
 
 
 def frozen_revision(job: Job) -> RevisionTask:

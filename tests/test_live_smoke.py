@@ -5,8 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.contracts.protocol import PROTOCOL_VERSION
 from app.live_smoke import GitHubProbe, SmokeError, SmokeSession
-from app.protocol import PROTOCOL_VERSION
 
 
 class FakeGitHub:
@@ -91,8 +91,8 @@ def test_truncated_issue_listing_is_not_absence(monkeypatch):
 
 
 def test_observe_reads_without_creating_work_and_does_not_claim_partial_success(store, tmp_path, monkeypatch):
+    from app.domain.models import DeliveryState
     from app.live_smoke import Pull
-    from app.models import DeliveryState
 
     gh = FakeGitHub()
     gh.issue = 7
@@ -129,8 +129,8 @@ def test_deadline_prevents_even_read_requests(monkeypatch):
 
 
 def test_core_pass_requires_three_verified_heads_and_matching_merge(store, tmp_path, monkeypatch):
+    from app.domain.models import DeliveryState, FlowState, JobKind
     from app.live_smoke import Pull
-    from app.models import DeliveryState, FlowState, JobKind
 
     gh = FakeGitHub()
     gh.issue = 7

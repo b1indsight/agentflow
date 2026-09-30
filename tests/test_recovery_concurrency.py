@@ -8,11 +8,11 @@ import pytest
 from pydantic import ValidationError
 
 from app.config import ServeSettings
+from app.contracts.protocol import InitialResult, Succeeded
+from app.contracts.result_models import ResultPending
 from app.control.gateway import WorkerGateway
 from app.control.runtime import ControlRuntime
-from app.models import JobKind, JobState
-from app.protocol import InitialResult, Succeeded
-from app.result_models import ResultPending
+from app.domain.models import JobKind, JobState
 from tests.test_gateway import RecordingCoordinator, RecordingStore
 from tests.worker_fakes import NoPendingStops
 

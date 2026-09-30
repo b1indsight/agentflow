@@ -7,10 +7,10 @@ import httpx
 import pytest
 from githubkit import GitHub as SDK
 
-from app.github_client import GitHubApp
-from app.models import JobState
-from app.result_models import ResultPending
-from app.store import Store
+from app.contracts.result_models import ResultPending
+from app.domain.models import JobState
+from app.github.client import GitHubApp
+from app.persistence.store import Store
 from tests.test_coordinator import coordinator
 from tests.test_github_client import settings
 from tests.test_revision_delivery import verified_result

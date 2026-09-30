@@ -2,10 +2,10 @@
 
 from datetime import UTC
 
-from app.models import DeliveryState, Flow, FlowDelivery, FlowState, Job, JobKind, JobState
-from app.protocol import ArchiveResult, ArchiveTask
-from app.result_models import CommentEffect, Effect, EffectState, LabelEffect
-from app.store import Store
+from app.contracts.protocol import ArchiveResult, ArchiveTask
+from app.contracts.result_models import CommentEffect, Effect, EffectState, LabelEffect
+from app.domain.models import DeliveryState, Flow, FlowDelivery, FlowState, Job, JobKind, JobState
+from app.persistence.store import Store
 
 
 def archive_task(store: Store, flow: Flow, job: Job) -> ArchiveTask:

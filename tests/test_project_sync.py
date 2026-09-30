@@ -7,11 +7,11 @@ import pytest
 
 from app.control.projects import ProjectSync
 from app.control.service import ControlService
-from app.github_models import GitHubAdapterError, GitHubErrorKind
-from app.models import DeliveryState, FlowState, JobKind, JobState
-from app.project_models import ProjectItem, ProjectItemsPage, ProjectStatus, ProjectTarget
-from app.project_store import ProjectStore
-from app.store import Store
+from app.domain.github_models import GitHubAdapterError, GitHubErrorKind
+from app.domain.models import DeliveryState, FlowState, JobKind, JobState
+from app.domain.project_models import ProjectItem, ProjectItemsPage, ProjectStatus, ProjectTarget
+from app.persistence.project_store import ProjectStore
+from app.persistence.store import Store
 from tests.test_github_projects import config
 from tests.test_review_batches import review_flow as review_flow  # noqa: PLC0414
 
@@ -68,7 +68,7 @@ class Remote:
 @pytest.fixture
 def projection(store, review_flow, monkeypatch):
     flow, clock = review_flow
-    monkeypatch.setattr("app.store.utcnow", lambda: clock.now)
+    monkeypatch.setattr("app.persistence.store.utcnow", lambda: clock.now)
     configs = {flow.repo: config()}
     remote = Remote()
     sync = ProjectSync(store, configs, lambda _: remote, interval=30, batch_size=8, concurrency=2)
@@ -114,7 +114,7 @@ async def test_unbound_initial_is_todo_then_bound_work_is_in_progress(store, pro
     store.enqueue_job(flow.id, JobKind.INITIAL)
     await converge(sync)
     assert state(store).desired_status is ProjectStatus.TODO
-    from app.protocol import PROTOCOL_VERSION
+    from app.contracts.protocol import PROTOCOL_VERSION
 
     store.worker_connected("project-worker", PROTOCOL_VERSION, "epoch")
     assert store.assign_job("project-worker", "token", "epoch") is not None
@@ -217,7 +217,7 @@ async def test_discovered_archived_card_recovers_after_restore_and_restart(store
     import httpx
     from githubkit import GitHub as SDK
 
-    from app.github_client import GitHubApp
+    from app.github.client import GitHubApp
     from tests.test_github_client import settings
     from tests.test_github_projects import item, page
 
@@ -301,8 +301,8 @@ async def test_definite_add_rejection_can_retry_after_restart(store, projection,
     import httpx
     from githubkit import GitHub as SDK
 
-    from app.github_client import GitHubApp
-    from app.github_projects import GitHubProjects
+    from app.github.client import GitHubApp
+    from app.github.projects import GitHubProjects
     from tests.test_github_client import settings
     from tests.test_github_projects import item
 
@@ -420,7 +420,7 @@ async def test_explicit_job_failure_blocks_but_pending_retry_does_not(store, pro
 
 
 async def test_archive_ack_and_worker_release_succeed_while_projects_are_offline(store):
-    from app.protocol import ArchiveResult
+    from app.contracts.protocol import ArchiveResult
     from tests.test_archive_recovery import ready_archive, receive
 
     flow, job, task, subject = await ready_archive(store)
@@ -509,8 +509,8 @@ async def test_unknown_archive_executor_is_an_explicit_block(store, projection):
 
 
 async def test_received_archive_result_is_in_progress_despite_old_recovery_deadline(store, monkeypatch):
-    from app.protocol import ArchiveResult
-    from app.result_models import ResultPending
+    from app.contracts.protocol import ArchiveResult
+    from app.contracts.result_models import ResultPending
     from tests.test_archive_recovery import ready_archive, receive
 
     flow, job, task, subject = await ready_archive(store)

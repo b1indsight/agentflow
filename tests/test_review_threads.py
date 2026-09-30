@@ -4,8 +4,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.github_client import GitHubApp
-from app.github_models import GitHubAdapterError
+from app.domain.github_models import GitHubAdapterError
+from app.github.client import GitHubApp
 from tests.test_github_client import settings
 
 
@@ -105,7 +105,7 @@ async def test_reply_uses_root_rest_endpoint_and_exact_app_marker(tmp_path, monk
 
 @pytest.mark.parametrize("limit", ["requests", "bytes"])
 async def test_thread_snapshot_has_a_shared_finite_budget(tmp_path, monkeypatch, limit):
-    from app import github_threads
+    from app.github import threads as github_threads
 
     monkeypatch.setattr(github_threads, "MAX_THREAD_REQUESTS", 2)
     if limit == "bytes":

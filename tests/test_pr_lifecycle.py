@@ -4,24 +4,24 @@ from datetime import timedelta
 
 import pytest
 
+from app.contracts.protocol import PROTOCOL_VERSION, InitialResult, Succeeded, terminal_digest
+from app.contracts.result_models import ResultPending
 from app.control.gateway import ProtocolViolation, WorkerGateway
 from app.control.lifecycle import pause_delivery
 from app.control.reconcile import Reconciler
 from app.control.router import EventRouter
 from app.control.service import ControlService
-from app.delivery_models import PreparedDelivery
-from app.github_models import (
+from app.domain.delivery_models import PreparedDelivery
+from app.domain.github_models import (
     GitHubAdapterError,
     GitHubErrorKind,
     PullRequestSnapshot,
     PullRequestStatus,
     RemoteRef,
 )
-from app.models import DeliveryState, FlowState, JobKind, JobState, VcsKind
-from app.protocol import PROTOCOL_VERSION, InitialResult, Succeeded, terminal_digest
-from app.result_models import ResultPending
-from app.review_models import BatchState
-from app.stop_store import StopStore
+from app.domain.models import DeliveryState, FlowState, JobKind, JobState, VcsKind
+from app.domain.review_models import BatchState
+from app.persistence.stop_store import StopStore
 from tests.test_coordinator import RecordingGitHub, coordinator
 from tests.test_review_batches import feedback, ingest
 from tests.test_review_batches import (
@@ -380,7 +380,7 @@ def test_close_and_queued_retirement_roll_back_together(store, lifecycle_flow, m
     def fail(*args, **kwargs):
         raise RuntimeError("before commit")
 
-    from app.store import Store
+    from app.persistence.store import Store
 
     monkeypatch.setattr(Store, "cancel_jobs", fail)
     with pytest.raises(RuntimeError), store.transaction() as tx:

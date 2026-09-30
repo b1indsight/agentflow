@@ -11,8 +11,8 @@ from typing import cast
 
 import pytest
 
-from app.models import VcsExecutionContext, VcsKind, VcsOutcome
-from app.vcs import (
+from app.domain.models import VcsExecutionContext, VcsKind, VcsOutcome
+from app.worker.vcs import (
     VcsVerificationError,
     _run,
     _vcs_environment,
@@ -214,7 +214,7 @@ async def test_pushed_outcome_discovers_the_single_backend(monkeypatch) -> None:
             return expected
         raise VcsVerificationError("discovery", "jj unavailable")
 
-    monkeypatch.setattr("app.vcs.verify_vcs_outcome", fake_verify)
+    monkeypatch.setattr("app.worker.vcs.verify_vcs_outcome", fake_verify)
 
     assert await verify_pushed_outcome(cast(VcsExecutionContext, object())) == expected
 

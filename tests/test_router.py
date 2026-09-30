@@ -2,10 +2,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.contracts.protocol import PROTOCOL_VERSION
 from app.control.router import EventRouter
-from app.models import DeliveryState, Flow, FlowState, JobKind
-from app.protocol import PROTOCOL_VERSION
-from app.store import Store
+from app.domain.models import DeliveryState, Flow, FlowState, JobKind
+from app.persistence.store import Store
 
 
 class RecordingService:

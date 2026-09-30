@@ -2,11 +2,7 @@ from types import SimpleNamespace
 
 from starlette.testclient import TestClient
 
-from app.control.api import create_app
-from app.control.gateway import WorkerGateway
-from app.models import Job, JobKind, JobState
-from app.observability import Metrics
-from app.protocol import (
+from app.contracts.protocol import (
     Assignment,
     AssignmentSecret,
     ExecutionTask,
@@ -22,8 +18,12 @@ from app.protocol import (
     Succeeded,
     parse_server_message,
 )
-from app.stop_store import StopStore
-from app.store import Store
+from app.control.api import create_app
+from app.control.gateway import WorkerGateway
+from app.domain.models import Job, JobKind, JobState
+from app.persistence.stop_store import StopStore
+from app.persistence.store import Store
+from app.telemetry.metrics import Metrics
 
 
 class AsgiCoordinator:

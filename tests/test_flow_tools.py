@@ -4,15 +4,16 @@ from typing import Any, cast
 
 import pytest
 
+from app.contracts.protocol import FlowToolErrorKind, FlowToolRequest
 from app.control.tools import FlowToolService
-from app.delivery_models import DeliveryReceipt, PreparedDelivery
-from app.github_models import (
+from app.domain.delivery_models import DeliveryReceipt, PreparedDelivery
+from app.domain.github_models import (
     GitHubAdapterError,
     GitHubErrorKind,
     PullRequestSnapshot,
     RemoteRef,
 )
-from app.models import (
+from app.domain.models import (
     Attempt,
     DeliveryState,
     Flow,
@@ -22,9 +23,8 @@ from app.models import (
     FlowToolCall,
     VcsKind,
 )
-from app.ports import GitHubClient
-from app.protocol import FlowToolErrorKind, FlowToolRequest
-from app.store import Store
+from app.domain.ports import GitHubClient
+from app.persistence.store import Store
 
 
 class ToolStore:

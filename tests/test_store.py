@@ -6,11 +6,11 @@ import psycopg
 import pytest
 from psycopg.errors import UniqueViolation
 
+from app.contracts.protocol import PROTOCOL_VERSION
 from app.control.service import ControlService
-from app.delivery_models import OpenedDelivery
-from app.models import DeliveryState, FlowState, JobKind, JobState
-from app.protocol import PROTOCOL_VERSION
-from app.store import Store
+from app.domain.delivery_models import OpenedDelivery
+from app.domain.models import DeliveryState, FlowState, JobKind, JobState
+from app.persistence.store import Store
 
 
 @pytest.mark.parametrize("state,received,applied,blocked", [

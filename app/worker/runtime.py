@@ -12,14 +12,14 @@ from typing import IO
 
 from loguru import logger
 
-from app.codex_driver import CodexAgent
 from app.config import WorkerSettings, get_worker_settings
-from app.judge import BubJudge
-from app.observability import configure_logging
+from app.telemetry.logging import configure_logging
 from app.worker.client import WorkerClient
+from app.worker.codex_driver import CodexAgent
 from app.worker.executor import WorkerExecutor
 from app.worker.health import HealthFile
 from app.worker.journal import WorkerJournal
+from app.worker.judge import BubJudge
 
 _CONTROL_ENVIRONMENT_KEYS = frozenset(
     {

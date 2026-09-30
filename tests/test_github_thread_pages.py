@@ -6,10 +6,10 @@ from types import SimpleNamespace
 import pytest
 
 from app.control.resolution import covered_thread
-from app.github_client import GitHubApp
-from app.github_models import GitHubAdapterError, GitHubErrorKind
-from app.github_thread_pages import ThreadCursor
-from app.github_threads import MAX_THREAD_BYTES
+from app.domain.github_models import GitHubAdapterError, GitHubErrorKind
+from app.github.client import GitHubApp
+from app.github.thread_pages import ThreadCursor
+from app.github.threads import MAX_THREAD_BYTES
 from tests.test_github_client import AsyncEndpoint, settings
 from tests.test_github_feedback import adapter
 from tests.test_review_resolution import feedback
