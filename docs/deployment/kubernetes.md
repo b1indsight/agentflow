@@ -80,6 +80,9 @@ flowtool-tunnel-credentials Secret（credentials.json）。按已准备的 base 
 
 ## 更新、恢复与限制
 
+当前仅支持完整 schema、协议 v10 / journal v3，不提供历史数据迁移。首次部署使用新数据库和 PVC；
+下述流程适用于当前版本恢复与部署操作，不承诺跨版本升级或降级数据兼容。
+
 更新前执行 [drain/停止确认](../operations/cancel-drain.md)，等所有 binding 收敛；保留数据库和
 worker root/HOME 的一致备份。两个 StatefulSet 使用 OnDelete，避免修改镜像就自动替换执行者。
 先把 worker、serve replicas 降到 0，等待正常删除完成，再运行同版本 schema Job。上一轮 Job

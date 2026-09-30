@@ -50,7 +50,6 @@ class JobKind(StrEnum):
         "triage"  # settle 后判定（docs/architecture/review-loop.md）：revise/answer/wait/ignore
     )
     REVISION = "revision"  # 修订
-    ANSWER = "answer"  # Historical rows only; protocol v6 answers directly from TRIAGE.
     ARCHIVE = "archive"  # 收尾归档
 
 
@@ -160,7 +159,6 @@ class FlowToolCall(BaseModel):
     name: str
     arguments: dict[str, object]
     response: DeliveryReceipt | None = None
-    error: str | None = None
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
 
@@ -171,7 +169,6 @@ class Job(BaseModel):
     kind: JobKind
     state: JobState
     attempt: int = 0
-    pid: int | None = None
     heartbeat_at: datetime | None = None
     assigned_worker_id: str | None = None
     assignment_token: str | None = None
@@ -182,7 +179,6 @@ class Job(BaseModel):
     result_digest: str | None = None
     result_received_at: datetime | None = None
     result_applied_at: datetime | None = None
-    result_recovery_version: int = 1
     verify_failures: int = 0
     verify_next_at: datetime | None = None
     verify_last_error: str | None = None

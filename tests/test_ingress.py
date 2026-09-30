@@ -15,6 +15,7 @@ from app.control.service import ControlService
 from app.control.webhooks import WebhookConsumer
 from app.models import Flow, FlowState, JobKind
 from app.observability import Metrics
+from app.protocol import PROTOCOL_VERSION
 from app.store import Store
 from app.webhook_store import WebhookStore
 
@@ -151,7 +152,7 @@ async def test_valid_signature_dispatches_webhook(
     flow = store.get_active_flow("owner/repo", 7)
     assert flow is not None
     assert flow.state is FlowState.ACTIVE
-    store.worker_connected("worker-1", protocol_version=1)
+    store.worker_connected("worker-1", protocol_version=PROTOCOL_VERSION)
     assert store.assign_job("worker-1", "assignment-1") is not None
 
 

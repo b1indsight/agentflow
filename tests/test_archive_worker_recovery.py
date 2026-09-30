@@ -11,6 +11,7 @@ from app.control.gateway import WorkerGateway
 from app.control.service import ControlService
 from app.models import FlowState, JobKind, JobState
 from app.protocol import (
+    PROTOCOL_VERSION,
     Assignment,
     InitialTask,
     ResultAccepted,
@@ -174,7 +175,7 @@ async def test_original_worker_recovers_cleanup_and_replays_without_redeleting(
     assert store.get_flow_execution(flow.id).released_at is not None
     assert store.get_job(job.id).state is JobState.DONE
     next_flow = ControlService(store).on_trigger("owner/repo", 999, 42)
-    store.worker_connected("worker-a", 8, "next")
+    store.worker_connected("worker-a", PROTOCOL_VERSION, "next")
     next_job = store.assign_job("worker-a", "next-token", "next")
     assert next_job.flow_id == next_flow.id and next_job.kind is JobKind.INITIAL
 

@@ -1,22 +1,16 @@
-# 停机升级与回滚
+# 当前版本部署与重启
 
-部署前记录旧、新 commit/镜像 digest、协议版本、配置引用、worker ID 与 root/HOME/PVC 映射。
-同一窗口升级 serve 和所有 worker；协议不匹配应停止，不关闭校验。M5 当前协议 9，
-从旧协议升级必须先收敛旧任务/journal，参见 [停止与排空](cancel-drain.md)。
+仓库尚未部署，仅支持当前完整 PostgreSQL schema、wire protocol v10 和 worker journal v3。
+不提供旧数据库、旧任务或旧 journal 的升级/回滚转换。首次部署选择新数据库/schema 与新
+worker root，serve/worker 固定到同一 commit/镜像 digest；schema 初始化只创建当前结构。
 
-1. 暂停入口，drain 所有 worker；等 Flow 完成归档、terminal ACK 和 stop 确认。记录不能收敛的原因。
-2. 完成 [冷备](backup-restore.md)，保留旧镜像/配置。不要把复制 root 当作已验证恢复点。
-3. 停旧 serve/worker，证实没有旧进程。使用同版本代码初始化 schema：K8s 使用 schema Job，
-   直接进程/Compose 在停写窗口由唯一新 serve 初始化；失败则停在此处，勿启动 workers。
-4. 启动新 serve，检查 readyz/指标/DB；启动固定身份 worker，确认注册、journal 恢复和 drain 状态。
-5. 在隔离 fixture 完成 smoke 后开入口，按需重投 GitHub delivery；确认状态后逐个 `worker-drain ID --undo`。
+同版本重启保留现有恢复契约：
 
-systemd 停服务后原子切换 `/opt/flowtool` 到版本目录；保持数据目录不动，更新 unit/env 后 daemon-reload。
-Compose 固定 serve/worker digest，停止后更新镜像再启动；保留卷，内部网关需验证 WSS 连通。
-K8s 固定 digest、OnDelete；按 [K8s 升级](../deployment/kubernetes.md) 的 drain/scale/schema/逐 Pod 顺序，
-不可把 StatefulSet 模板已更新当成 Pod 已更新；实际 imageID 与计划 digest 必须一致。
+1. 暂停入口并 drain worker，记录未完成任务与无法收敛的原因。
+2. 按[冷备](backup-restore.md)保存数据库、worker root/HOME 及身份映射。
+3. 停止所有写入进程；使用相同版本初始化 schema，初始化可重复执行。
+4. 按原身份启动 serve/worker，检查 readiness、journal、inbox 和结果恢复状态。
+5. 验证后恢复入口并 undrain。Docker/K8s 两种角色使用同一版本镜像。
 
-失败先停新进程并保留数据库、日志和 journal。仅在确认 schema/协议/数据仍向后兼容时切回旧镜像；
-不可逆 schema 或已发生远端副作用时不能盲目降级，走前向修复或隔离恢复评估。
-回滚 checkpoint 逐项记录（入口、进程、schema、镜像、身份、inbox、效果），不通过重试覆盖未知结果。
-当前没有自动 schema rollback、滚动多 serve 或跨 root 身份迁移。
+已有旧版开发数据需独立保留或显式重建，应用不自动删除、改写或迁移。备份恢复使用生成备份的
+同一应用版本；不能仅修改 journal/manifest 的版本号来加载不同契约的数据。

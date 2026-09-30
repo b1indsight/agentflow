@@ -23,7 +23,7 @@ from app.models import (
     Verdict,
 )
 from app.protocol import InitialResult, TriageResult
-from app.result_models import EffectState, LabelsEffect, ResultPending
+from app.result_models import EffectState, ResultPending
 from app.store import Store
 from tests.review_memory import judge_decision
 from tests.test_coordinator import MemoryStore, RecordingGitHub, apply_result, coordinator
@@ -110,7 +110,7 @@ def initial_scenario(scenario):
         remote_sha="abc123",
         pushed=True,
         open_pr_call_id="call-1",
-        pull_request=prepared,
+        delivery_receipt=prepared,
     )
     return store, github, job, result
 
@@ -127,17 +127,11 @@ async def test_cancel_before_terminal_keeps_executor_slot_until_result_ack(scena
     assert not github.comments and not store.enqueued
 
 
-@pytest.mark.parametrize("legacy", [False, True])
-async def test_review_label_preserves_user_labels_on_delivery_and_replay(initial_scenario, legacy):
+async def test_review_label_preserves_user_labels_on_delivery_and_replay(initial_scenario):
     # Human labels may predate delivery; replaying a frozen status intent must not erase them.
     store, github, job, result = initial_scenario
     github.labels = [["bug", "user-owned"]]
     subject = coordinator(store, github)
-    if legacy:
-        subject.results._review_effects = lambda flow, number: [LabelsEffect(
-            key="labels", installation_id=flow.installation_id, repo=flow.repo,
-            number=number, labels=["flow:in-review"],
-        )]
     await apply_result(subject, job, result)
     await apply_result(subject, job, result)
     assert github.labels[-1] == ["bug", "user-owned", "flow:in-review"]
@@ -453,13 +447,3 @@ async def test_rate_limit_waits_then_retries_a_definitely_rejected_request(
     store.results.clock += timedelta(seconds=60)
     await apply_result(coordinator(store, github), job, result)
     assert len(attempts) == 2 and len(github.comments) == 1
-
-
-async def test_legacy_result_is_not_blindly_replayed(scenario) -> None:
-    store, github, job, result = scenario
-    store.accept(job, result)
-    store.jobs[job.id].result_recovery_version = 0
-    with pytest.raises(ResultPending, match="pre-upgrade"):
-        await apply_result(coordinator(store, github), job, result)
-    assert "manual reconciliation" in store.jobs[job.id].last_error
-    assert github.comments == store.enqueued == []

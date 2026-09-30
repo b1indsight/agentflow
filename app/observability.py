@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 
 EVENTS = {'job_failed', 'job_started', 'job_result', 'webhook_received', 'webhook_applied',
           'worker_connected', 'worker_disconnected', 'snapshot_failed', 'application_log'}
-REASONS = {'ok', 'execution_failed', 'database_unavailable', 'connection_lost', 'legacy_log'}
+REASONS = {'ok', 'execution_failed', 'database_unavailable', 'connection_lost', 'unspecified'}
 
 
 def configure_logging(role: str, output_format: str, output: TextIO | None = None) -> None:
@@ -39,7 +39,7 @@ def configure_logging(role: str, output_format: str, output: TextIO | None = Non
         row: dict[str, str | int] = {
             'timestamp': record['time'].isoformat(), 'level': record['level'].name,
             'role': role, 'event': event if isinstance(event, str) and event in EVENTS else 'application_log',
-            'reason_code': reason if isinstance(reason, str) and reason in REASONS else 'legacy_log',
+            'reason_code': reason if isinstance(reason, str) and reason in REASONS else 'unspecified',
             'source': f"{record['name']}:{record['function']}:{record['line']}",
         }
         for key in ('flow_id', 'job_id', 'protocol_version'):

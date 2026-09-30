@@ -8,7 +8,7 @@ import pytest
 
 from app.control.service import ControlService
 from app.models import DeliveryState, FlowState, Job, JobKind, JobState, TriageVerdict, Verdict
-from app.protocol import Succeeded, TriageResult, terminal_digest
+from app.protocol import PROTOCOL_VERSION, Succeeded, TriageResult, terminal_digest
 from app.result_models import EffectState
 from app.store import Store
 from tests.review_memory import judge_decision
@@ -81,7 +81,7 @@ def test_concurrent_trigger_enqueues_once(store: Store) -> None:
 
 def test_assignment_skips_a_flow_locked_for_cancellation(store: Store):
     # The first assignment has no binding yet, so lifecycle serialization must include the Flow row.
-    store.worker_connected("worker-a", 4, "epoch-a")
+    store.worker_connected("worker-a", PROTOCOL_VERSION, "epoch-a")
     flow = ControlService(store).on_trigger("owner/repo", 705, 42)
     assert flow is not None
     with store.transaction() as tx:
@@ -109,7 +109,7 @@ def test_retry_rolls_back_with_real_database(store: Store, monkeypatch) -> None:
 
 def accepted_triage(store: Store, *, receive: bool = True) -> tuple[Job, TriageResult]:
     """Establish the same lifecycle binding a completed INITIAL leaves for its next job."""
-    store.worker_connected("worker-a", 4, "epoch-a")
+    store.worker_connected("worker-a", PROTOCOL_VERSION, "epoch-a")
     flow = store.create_flow("owner/repo", 703, 42)
     attempt = store.create_attempt(flow.id)
     flow.current_attempt_id = attempt.id

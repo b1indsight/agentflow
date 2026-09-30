@@ -82,7 +82,6 @@ class ResultApplication:
         if job is None:
             raise ValueError(f"job {job_id} disappeared")
         revision_error = await self._check_revision(job)
-        legacy = False
         with self.store.transaction() as tx:
             flow = tx.lock_workflow(job.flow_id)
             current = tx.lock_job(job_id)
@@ -92,22 +91,12 @@ class ResultApplication:
                 return current.state
             if current.result_payload is None or current.result_digest is None:
                 raise ValueError("result application requires a persisted terminal message")
-            if current.result_recovery_version == 0:
-                tx.set_job_error(
-                    job_id, "pre-upgrade result needs manual reconciliation before replay"
-                )
-                legacy = True
-                plan = None
-            else:
-                plan = tx.results.get_plan(job_id)
-                if plan is None:
-                    plan = self._prepare(tx, flow, current, revision_error)
-                    tx.results.prepare(plan)
-                if plan.digest != current.result_digest:
-                    raise ValueError("result plan digest conflicts with inbox")
-        if legacy:
-            raise ResultPending("pre-upgrade result may have produced untracked effects")
-        assert plan is not None
+            plan = tx.results.get_plan(job_id)
+            if plan is None:
+                plan = self._prepare(tx, flow, current, revision_error)
+                tx.results.prepare(plan)
+            if plan.digest != current.result_digest:
+                raise ValueError("result plan digest conflicts with inbox")
         failure = await self.effects.run(plan)
         if failure and (plan.revision is not None or plan.archive is not None):
             # Code delivery or cleanup already happened. Preserve its receipts so
@@ -165,8 +154,7 @@ class ResultApplication:
     async def _check_revision(self, job: Job) -> str | None:
         """Perform network reads outside the transaction, once per frozen result plan."""
         if (job.kind is not JobKind.REVISION or job.result_applied_at is not None
-                or job.result_payload is None or self.store.results.get_plan(job.id) is not None
-                or job.result_recovery_version == 0):
+                or job.result_payload is None or self.store.results.get_plan(job.id) is not None):
             return None
         flow = self.store.get_flow(job.flow_id)
         if flow is None or flow.state in TERMINAL_STATES:
@@ -211,7 +199,6 @@ class ResultApplication:
             digest=job.result_digest,
             attempt_id=flow.current_attempt_id,
             state=JobState.DONE,
-            resolution_version=1,
         )
         if flow.state in TERMINAL_STATES:
             return (
@@ -515,8 +502,7 @@ class ResultApplication:
                 return
             from app.control.archive import verify_archive
 
-            if plan.archive is None:
-                raise ResultPending("archive result requires manual reconciliation after upgrade")
+            assert plan.archive is not None
             try:
                 verify_archive(tx, flow, job, plan.archive)
             except ValueError as error:

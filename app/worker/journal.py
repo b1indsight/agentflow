@@ -33,7 +33,7 @@ class JournalError(RuntimeError):
 class JournalRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    version: Literal[2] = 2
+    version: Literal[3] = 3
     job_id: int
     flow_id: int
     assignment_token: str

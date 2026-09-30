@@ -17,7 +17,7 @@ from app.github_models import GitHubAdapterError, GitHubErrorKind
 from app.models import FlowState, JobState
 from app.plugins.hookspecs import hookimpl
 from app.protocol import ArchiveResult
-from app.result_models import CommentEffect, EffectState, ResultPending, ResultPlan
+from app.result_models import CommentEffect, EffectState, ResultPending
 from app.result_store import ResultStore
 from app.store import Store
 from tests.test_archive_recovery import ready_archive, receive
@@ -492,17 +492,3 @@ async def test_restart_recovers_comment_before_receipt_and_isolates_plugin_failu
     assert store.get_job(job.id).result_applied_at is not None
     assert store.get_flow(flow.id).state is FlowState.SUCCEEDED
     assert store.get_flow_execution(flow.id).released_at is not None
-
-
-async def test_frozen_pre_upgrade_archive_does_not_backfill_notifications(store):
-    flow, job, result, github, subject = await pending_archive(store)
-    # F2 froze cleanup-only plans. An upgrade must not add effects to these or completed Flows.
-    plan = ResultPlan(job_id=job.id, flow_id=flow.id, digest=store.get_job(job.id).result_digest,
-                      attempt_id=flow.current_attempt_id, state=JobState.DONE,
-                      flow_state=FlowState.SUCCEEDED, archive=result)
-    with store.transaction() as tx:
-        tx.lock_workflow(flow.id)
-        tx.results.prepare(plan)
-    assert await subject.results.apply(job.id) is JobState.DONE
-    assert await coordinator(store, github).results.apply(job.id) is JobState.DONE
-    assert not github.writes

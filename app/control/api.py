@@ -93,7 +93,7 @@ def create_app(
         response = await call_next(request)
         if request.url.path == "/webhook":
             request.app.state.metrics.request(response.status_code)
-            logger.bind(event="webhook_received", reason_code="ok" if response.status_code == 202 else "legacy_log",
+            logger.bind(event="webhook_received", reason_code="ok" if response.status_code == 202 else "unspecified",
                         delivery_id=request.headers.get("x-github-delivery", "")).info("")
         return response
 

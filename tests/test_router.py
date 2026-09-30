@@ -4,6 +4,7 @@ import pytest
 
 from app.control.router import EventRouter
 from app.models import DeliveryState, Flow, FlowState, JobKind
+from app.protocol import PROTOCOL_VERSION
 from app.store import Store
 
 
@@ -64,7 +65,7 @@ async def test_allowed_label_creates_one_flow_and_job(
     flow = store.get_active_flow("owner/repo", 7)
     assert flow is not None
     assert flow.state is FlowState.ACTIVE
-    store.worker_connected("worker-1", protocol_version=1)
+    store.worker_connected("worker-1", protocol_version=PROTOCOL_VERSION)
     assert store.assign_job("worker-1", "assignment-1") is not None
     assert store.assign_job("worker-1", "assignment-2") is None
 

@@ -19,7 +19,6 @@ flowtool/
     models.py         # 领域类型 / 枚举
     cli.py            # admin CLI（§10-8）
     plugins/          # 生命周期 hook 插件（§9-7）
-  migrations/
   tests/
   pyproject.toml      # uv 管理
   README.md
@@ -87,5 +86,5 @@ M1/M2 已合并不等于真实闭环已验收；M3 尚未完成，M4–M5 仍为
 `CodeAgent` / `Judge` / `GitHubClient` / `Plugin hooks`；worker 执行器直接管理执行与工作区约束。
 **VCS 不是端口**：它由 Flow repo 准备、自探测 guidance 和只读事实核验函数组成（见 §4.6）。
 当前已给端口放置最简 adapter 或桩
-（codex / bub / legacy workspace-write / WebSocket worker / githubkit / 插件集）。
+（codex / bub / WebSocket worker / githubkit / 插件集）。
 “存在 adapter”不代表外部契约已校准；未来扩展仍优先通过换 adapter 或加插件保持 core 边界稳定。

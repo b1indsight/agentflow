@@ -133,13 +133,9 @@ GitHub 没有条件式 resolve 事务，刷新与 mutation 之间的竞态仍可
   取消后不能补发；状态不明或仍在执行的通知不得通过显式 retry 重发。
 - 修订准备阶段的 PR/ref/Issue 读取错误持久进入失败路径，包括临时 GitHub 故障；恢复后显式 retry，
   不因 worker 重连无限重排，也不在 Started 前消耗修订额度。
-- schema 一次性导入旧 review_threads 的最新对象，保留历史表；旧 resolved 标记不作为远端确认。
-- 协议 v7 要求严格修订交付证据与冻结 assignment，serve/worker 一起升级。先用旧版本排空 queued/running review jobs，重试并完成仍可
-  重试的 failed review jobs，核对所有未确认旧结果，然后停止旧进程再升级；新 serve 检查这些旧待办
-  并给出 job ID，禁止猜测缺失的 batch/版本。旧 ANSWER（含 failed）必须核对并处理；已被后续任务
-  替换的其他历史失败不阻止启动。旧 worker journal 的未确认任务/结果也要先处理，不能混跑 v6/v7。
-  缺上下文的 TRIAGE 仅在已开始执行时阻止启动，尚在准备中的当前协议任务可恢复。
-  已开始执行却缺少冻结 revision assignment 的任务也会阻止启动，不能补猜预期 SHA。
+- 只支持当前完整 schema、协议 v10 和 journal v3；首次运行使用新数据库与 worker root。
+  同版本的未开始任务、冻结 assignment、已接收结果和 effect 回执继续按持久事实恢复。
+  不导入旧 review_threads，不维护旧 ANSWER 任务或旧版本启动迁移分支。
 
 ## B.6 参数与验证
 

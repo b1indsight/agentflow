@@ -37,14 +37,6 @@ class PullRequestEffect(EffectSpec):
     body: str
 
 
-class LabelsEffect(EffectSpec):
-    """Legacy persisted status intent; replay only ensures these labels are present."""
-    kind: Literal["labels"] = "labels"
-    # INITIAL resolves this explicit dependency from its preceding PR receipt.
-    number: int | Literal["created_pr"]
-    labels: list[str]
-
-
 class ReviewersEffect(EffectSpec):
     kind: Literal["reviewers"] = "reviewers"
     number: int | Literal["created_pr"]
@@ -63,8 +55,8 @@ class LabelEffect(EffectSpec):
 class ResolveEffect(EffectSpec):
     kind: Literal["resolve"] = "resolve"
     thread_id: str
-    number: int | None = None
-    snapshot: ReviewThread | None = None
+    number: int
+    snapshot: ReviewThread
     covered: list[ReviewFeedback] = Field(default_factory=list)
     reply_key: str | None = None
     allow_resolve: bool = False
@@ -80,7 +72,7 @@ class ThreadReplyEffect(EffectSpec):
 
 
 Effect = Annotated[
-    CommentEffect | PullRequestEffect | LabelsEffect | LabelEffect | ReviewersEffect
+    CommentEffect | PullRequestEffect | LabelEffect | ReviewersEffect
     | ResolveEffect | ThreadReplyEffect,
     Field(discriminator="kind"),
 ]
@@ -111,7 +103,6 @@ class ResultPlan(FrozenModel):
     delivery: FlowDelivery | None = None
     revision: RevisionResult | None = None
     archive: ArchiveResult | None = None
-    resolution_version: int = 0
     derived: DerivedJob | None = None
     batch_id: int | None = None
     batch_state: BatchState | None = None

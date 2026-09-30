@@ -6,7 +6,6 @@ import threading
 from pathlib import Path
 
 import pytest
-from pydantic import ValidationError
 
 from app.models import JobState
 from app.protocol import ArchiveResult, ArchiveTask, Assignment, Failed, InitialResult, Succeeded
@@ -139,11 +138,6 @@ async def test_copied_journal_cannot_authorize_another_worker_root(tmp_path):
     moved = WorkerJournal(another_root)
     with pytest.raises(JournalError, match="root"):
         moved.load()
-
-
-def test_empty_legacy_archive_result_is_rejected():
-    with pytest.raises(ValidationError):
-        ArchiveResult.model_validate({"kind": "archive"})
 
 
 async def test_unstarted_archive_reassignment_retains_original_root_proof(tmp_path):

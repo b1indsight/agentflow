@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.live_smoke import GitHubProbe, SmokeError, SmokeSession
+from app.protocol import PROTOCOL_VERSION
 
 
 class FakeGitHub:
@@ -145,7 +146,7 @@ def test_core_pass_requires_three_verified_heads_and_matching_merge(store, tmp_p
     delivery.merge_commit_sha = "d"*40
     store.update_delivery(delivery)
     archive = store.enqueue_job(flow.id, JobKind.ARCHIVE)
-    store.worker_connected("worker-1", protocol_version=8)
+    store.worker_connected("worker-1", protocol_version=PROTOCOL_VERSION)
     with store.connection() as conn:
         conn.execute("INSERT INTO flow_executions(flow_id,worker_id,repo_identity,bound_at,released_at) "
                      "VALUES (%s,'worker-1','worker-1:owner/smoke',%s,%s)", (flow.id, store.now(), store.now()))

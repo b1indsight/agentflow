@@ -126,7 +126,7 @@ def test_defer_requires_the_exact_unstarted_assignment(store, pending_revision, 
     if change == "started":
         store.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
     elif change == "epoch":
-        store.worker_connected("worker-a", 8, "new-epoch")
+        store.worker_connected("worker-a", PROTOCOL_VERSION, "new-epoch")
     elif change == "result":
         accept(store, job, verified_result(task))
     else:
