@@ -8,12 +8,11 @@ import os
 import socket
 import sys
 import tempfile
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Protocol, Self
 from uuid import uuid4
 
+from app.delivery_models import DeliveryReceipt
 from app.models import VcsExecutionContext, VcsOutcome
 from app.vcs import verify_pushed_outcome
 
@@ -26,7 +25,7 @@ class FlowToolCaller(Protocol):
         *,
         call_id: str | None = None,
         vcs_outcome: VcsOutcome,
-    ) -> dict[str, object]: ...
+    ) -> DeliveryReceipt: ...
 
 
 class FlowToolBroker:
@@ -37,7 +36,7 @@ class FlowToolBroker:
         self.vcs_context = vcs_context
         self.socket_path = Path(tempfile.gettempdir()) / f"flowtool-mcp-{uuid4().hex}.sock"
         self.last_call_id: str | None = None
-        self.last_result: dict[str, object] | None = None
+        self.last_result: DeliveryReceipt | None = None
         self.last_vcs_outcome: VcsOutcome | None = None
         self._server: asyncio.AbstractServer | None = None
 
@@ -78,21 +77,13 @@ class FlowToolBroker:
             self.last_call_id = call_id
             self.last_result = result
             self.last_vcs_outcome = outcome
-            response: dict[str, object] = {"result": result}
+            response: dict[str, object] = {"result": result.model_dump(mode="json")}
         except (TypeError, ValueError, RuntimeError) as exc:
             response = {"error": str(exc)}
         writer.write((json.dumps(response, separators=(",", ":")) + "\n").encode())
         await writer.drain()
         writer.close()
         await writer.wait_closed()
-
-
-@asynccontextmanager
-async def flow_tool_broker(
-    caller: FlowToolCaller, vcs_context: VcsExecutionContext
-) -> AsyncIterator[FlowToolBroker]:
-    async with FlowToolBroker(caller, vcs_context) as broker:
-        yield broker
 
 
 def _bridge_call(name: str, arguments: dict[str, object]) -> dict[str, object]:

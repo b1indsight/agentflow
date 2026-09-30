@@ -82,7 +82,7 @@ async def test_git_outcome_requires_new_clean_commit_on_target_remote_branch(
 
     outcome = await verify_vcs_outcome(context, VcsKind.GIT)
 
-    assert outcome.verified_backend is VcsKind.GIT
+    assert outcome.backend is VcsKind.GIT
     assert outcome.branch == "flow/one"
     assert outcome.commit_sha == outcome.remote_sha
     assert outcome.commit_sha != context.git_base_sha
@@ -129,7 +129,7 @@ async def test_jj_outcome_is_verified_from_a_colocated_repository(tmp_path: Path
 
     outcome = await verify_vcs_outcome(context, VcsKind.JJ)
 
-    assert outcome.verified_backend is VcsKind.JJ
+    assert outcome.backend is VcsKind.JJ
     assert outcome.commit_sha == outcome.remote_sha
 
 
@@ -201,10 +201,9 @@ async def test_outer_revision_deadline_kills_and_reaps_vcs_process_group(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_pushed_outcome_discovers_the_single_verified_backend(monkeypatch) -> None:
+async def test_pushed_outcome_discovers_the_single_backend(monkeypatch) -> None:
     expected = VcsOutcome(
-        declared_backend=VcsKind.GIT,
-        verified_backend=VcsKind.GIT,
+        backend=VcsKind.GIT,
         branch="flow/one",
         commit_sha="abc",
         remote_sha="abc",

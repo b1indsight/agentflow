@@ -2,6 +2,7 @@ import asyncio
 
 import pytest
 
+from app.delivery_models import OpenedDelivery
 from app.models import JobState, VcsKind, VcsOutcome
 from app.protocol import (
     Assignment,
@@ -21,6 +22,7 @@ from app.protocol import (
     parse_worker_message,
 )
 from app.worker.client import FlowToolCallError, WorkerClient
+from app.worker.journal import WorkerJournal
 
 
 def test_flow_tool_call_error_preserves_retry_metadata() -> None:
@@ -41,7 +43,7 @@ def test_flow_tool_call_error_preserves_retry_metadata() -> None:
 
 
 class RecordingExecutor:
-    async def execute(self, task: ExecutionTask, secret=None) -> ExecutionResult:
+    async def execute(self, task: ExecutionTask, secret=None, *, tool_caller=None) -> ExecutionResult:
         assert isinstance(task, InitialTask)
         assert task.repo == "owner/repo"
         return InitialResult(session_id="session-1", last_message="done", exit_code=0)
@@ -94,9 +96,9 @@ class ScriptedConnection:
 
 
 @pytest.mark.asyncio
-async def test_client_acknowledges_and_executes_one_assignment() -> None:
+async def test_client_acknowledges_and_executes_one_assignment(tmp_path) -> None:
     connection = ScriptedConnection()
-    client = WorkerClient(
+    client = WorkerClient(journal=WorkerJournal(tmp_path),
         worker_id="worker-1",
         worker_token="worker-secret",
         serve_ws_url="ws://serve/internal/workers/connect",
@@ -119,7 +121,7 @@ async def test_worker_redacts_echoed_push_capability_before_journal_and_wire(tmp
     from tests.test_worker_journal import _assignment
 
     class EchoingExecutor:
-        async def execute(self, task, secret=None):
+        async def execute(self, task, secret=None, *, tool_caller=None):
             if fails:
                 raise RuntimeError("command echoed push-secret")
             return InitialResult(session_id="session", last_message="push-secret", exit_code=0)
@@ -149,20 +151,19 @@ class ToolCallingExecutor:
     def __init__(self) -> None:
         self.client: WorkerClient | None = None
 
-    async def execute(self, task: ExecutionTask, secret=None) -> ExecutionResult:
+    async def execute(self, task: ExecutionTask, secret=None, *, tool_caller=None) -> ExecutionResult:
         assert self.client is not None
         result = await self.client.call_tool(
             "flow.open_pr",
             {"title": "Implement", "body": "Done"},
             vcs_outcome=VcsOutcome(
-                declared_backend=VcsKind.GIT,
-                verified_backend=VcsKind.GIT,
+                backend=VcsKind.GIT,
                 branch="flow/3",
                 commit_sha="abc",
                 remote_sha="abc",
             ),
         )
-        assert result["pr_number"] == 17
+        assert isinstance(result, OpenedDelivery) and result.pr_number == 17
         return InitialResult(session_id="session-1", last_message="done", exit_code=0)
 
 
@@ -206,7 +207,7 @@ class ToolConnection:
             request = parse_worker_message(self.sent[-1])
             assert isinstance(request, FlowToolRequest)
             return FlowToolResponse(
-                call_id=request.call_id, result={"pr_number": 17}
+                call_id=request.call_id, result=OpenedDelivery(pr_number=17, url="https://github.com/owner/repo/pull/17", head_sha="abc", delivery_version=1)
             ).model_dump_json()
         if self.step == 4:
             await self.result_ready.wait()
@@ -222,9 +223,9 @@ class ToolConnection:
 
 
 @pytest.mark.asyncio
-async def test_client_multiplexes_tool_call_while_executor_is_running() -> None:
+async def test_client_multiplexes_tool_call_while_executor_is_running(tmp_path) -> None:
     executor = ToolCallingExecutor()
-    client = WorkerClient(
+    client = WorkerClient(journal=WorkerJournal(tmp_path),
         worker_id="worker-1",
         worker_token="worker-secret",
         serve_ws_url="ws://serve/internal/workers/connect",
@@ -247,7 +248,7 @@ class CancellableExecutor:
         self.started = asyncio.Event()
         self.cancelled = asyncio.Event()
 
-    async def execute(self, task: ExecutionTask, secret=None) -> ExecutionResult:
+    async def execute(self, task: ExecutionTask, secret=None, *, tool_caller=None) -> ExecutionResult:
         self.started.set()
         try:
             await asyncio.Event().wait()
@@ -337,7 +338,7 @@ async def test_completed_disconnected_executor_is_journaled_before_recovery(tmp_
 
     # Execution finishes after the driver lost its connection; registration must carry its result.
     class CompletedExecutor:
-        async def execute(self, task, secret=None):
+        async def execute(self, task, secret=None, *, tool_caller=None):
             if fails:
                 raise RuntimeError("push-secret was echoed")
             return InitialResult(session_id="session", last_message="push-secret", exit_code=0)

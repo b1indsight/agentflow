@@ -74,7 +74,7 @@ class Reconciler:
                     raise ValueError("missing installation")
                 coding = tx.lifecycle_job(flow.id)
                 blocked = tx.reopen_blocked(flow.id)
-            remote = await self.github.get_pull_request_status(
+            remote = await self.github.get_pull_request(
                 flow.installation_id, flow.repo, delivery.pr_number,
             )
             if (remote.repo != flow.repo or remote.number != delivery.pr_number

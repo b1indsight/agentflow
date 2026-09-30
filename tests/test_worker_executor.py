@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from pydantic import SecretStr
 
+from app.delivery_models import OpenedDelivery
 from app.models import AgentRun, InitialCodexResult, TriageVerdict, VcsKind, VcsOutcome, Verdict
 from app.protocol import (
     AssignmentSecret,
@@ -16,6 +17,7 @@ from app.protocol import (
     TriageTask,
 )
 from app.worker.executor import WorkerExecutor
+from app.worker.journal import WorkerJournal
 from tests.review_memory import judge_decision, review_context
 
 
@@ -76,12 +78,7 @@ class RecordingToolCaller:
         assert name == "flow.open_pr"
         assert call_id == "call-1"
         assert vcs_outcome.commit_sha == "abc"
-        return {
-            "pr_number": 17,
-            "url": "https://github.com/owner/repo/pull/17",
-            "head_sha": "abc",
-            "delivery_version": 1,
-        }
+        return OpenedDelivery(pr_number=17, url="https://github.com/owner/repo/pull/17", head_sha="abc", delivery_version=1)
 
 
 def assignment_secret() -> AssignmentSecret:
@@ -97,19 +94,19 @@ def assignment_secret() -> AssignmentSecret:
 @pytest.mark.asyncio
 async def test_initial_with_delivery_channel_requires_push_capability(tmp_path: Path) -> None:
     executor = WorkerExecutor(
-        tmp_path, RecordingAgent(), RecordingJudge(), tool_caller=RecordingToolCaller()
+        tmp_path, RecordingAgent(), RecordingJudge(), worker_id="worker-1", journal=WorkerJournal(tmp_path)
     )
 
     result = await executor.execute(
         InitialTask(
             flow_id=3,
             attempt_id=1,
-            repo="owner/repo",
+            repo="owner/repo", repo_identity="worker-1:owner/repo",
             issue_number=8,
             issue_title="Issue",
             issue_body="Body",
             branch="flow/3",
-        )
+        ), tool_caller=RecordingToolCaller()
     )
 
     assert isinstance(result, InitialResult)
@@ -135,8 +132,7 @@ async def test_executor_runs_agent_and_judge_tasks_without_store(
     async def fake_verify(context, backend):
         assert backend is VcsKind.GIT
         return VcsOutcome(
-            declared_backend=VcsKind.GIT,
-            verified_backend=VcsKind.GIT,
+            backend=VcsKind.GIT,
             branch="flow/issue-8",
             commit_sha="abc",
             remote_sha="abc",
@@ -151,23 +147,23 @@ async def test_executor_runs_agent_and_judge_tasks_without_store(
     )
     agent = RecordingAgent()
     executor = WorkerExecutor(
-        tmp_path, agent, RecordingJudge(), tool_caller=RecordingToolCaller()
+        tmp_path, agent, RecordingJudge(), worker_id="worker-1", journal=WorkerJournal(tmp_path)
     )
 
     initial = await executor.execute(
         InitialTask(
             flow_id=3,
             attempt_id=1,
-            repo="owner/repo",
+            repo="owner/repo", repo_identity="worker-1:owner/repo",
             issue_number=8,
             issue_title="Issue",
             issue_body="Body",
             branch="flow/issue-8",
         ),
-        assignment_secret(),
+        assignment_secret(), tool_caller=RecordingToolCaller(),
     )
     triage = await executor.execute(
-        TriageTask(batch_id=1, feedback=[], attempt_id=1, context=review_context())
+        TriageTask(batch_id=1, feedback=[], attempt_id=1, context=review_context()), tool_caller=RecordingToolCaller()
     )
 
     assert isinstance(initial, InitialResult)
@@ -195,18 +191,18 @@ async def test_initial_exit_zero_without_a_declared_backend_is_a_failure(
 
     monkeypatch.setattr("app.worker.executor.prepare_flow_repo", fake_workspace)
     monkeypatch.setattr("app.worker.executor.prepare_vcs_context", fake_context)
-    executor = WorkerExecutor(tmp_path, BackendlessAgent(), RecordingJudge())
+    executor = WorkerExecutor(tmp_path, BackendlessAgent(), RecordingJudge(), worker_id="worker-1", journal=WorkerJournal(tmp_path))
 
     result = await executor.execute(
         InitialTask(
             flow_id=3,
             attempt_id=1,
-            repo="owner/repo",
+            repo="owner/repo", repo_identity="worker-1:owner/repo",
             issue_number=8,
             issue_title="Issue",
             issue_body="Body",
             branch="flow/issue-8",
-        )
+        ), assignment_secret(), tool_caller=RecordingToolCaller()
     )
 
     assert isinstance(result, InitialResult)

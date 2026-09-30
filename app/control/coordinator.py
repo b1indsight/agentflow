@@ -17,7 +17,6 @@ from app.control.tools import FlowToolService
 from app.github_models import GitHubAdapterError, GitHubErrorKind
 from app.models import (
     TERMINAL_STATES,
-    Attempt,
     Flow,
     FlowDelivery,
     Job,
@@ -201,7 +200,7 @@ class JobCoordinator:
             f.kind is ReviewItemKind.INLINE for f in batch.feedback
         ):
             assert flow.installation_id is not None
-            number = self._pr_number(flow, attempt)
+            number = self._pr_number(flow)
             try:
                 installation = flow.installation_id
                 threads = await self._read(job, lambda: self.github.list_review_threads(installation, flow.repo, number))
@@ -213,7 +212,7 @@ class JobCoordinator:
             if context is None:
                 try:
                     context = await self._read(job, lambda: build_review_context(
-                        self.github, flow, batch, self._pr_number(flow, attempt),
+                        self.github, flow, batch, self._pr_number(flow),
                     ))
                 except GitHubAdapterError as exc:
                     raise PreparationReadFailure(exc) from exc
@@ -241,7 +240,7 @@ class JobCoordinator:
                 context=context,
             )
         if job.kind is JobKind.REVISION:
-            delivery = self._delivery(flow, attempt)
+            delivery = self._delivery(flow)
             if attempt.revision_cycles + 1 > self.settings.max_revision_cycles:
                 await self.fail(job, "已达最大修订轮数，暂停。")
                 return JobState.FAILED
@@ -392,14 +391,14 @@ class JobCoordinator:
         except Exception as exc:  # noqa: BLE001
             logger.warning("plugin hook {} failed: {}", hook, exc)
 
-    def _delivery(self, flow: Flow, attempt: Attempt) -> FlowDelivery:
+    def _delivery(self, flow: Flow) -> FlowDelivery:
         delivery = self.store.get_delivery(flow.id)
         if delivery is None:
             raise ValueError(f"flow {flow.id} has no delivery")
         return delivery
 
-    def _pr_number(self, flow: Flow, attempt: Attempt) -> int:
-        number = self._delivery(flow, attempt).pr_number
+    def _pr_number(self, flow: Flow) -> int:
+        number = self._delivery(flow).pr_number
         if number is None:
             raise ValueError(f"flow {flow.id} has no pull request")
         return number

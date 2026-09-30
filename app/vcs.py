@@ -428,8 +428,7 @@ def _outcome(backend: VcsKind, branch: str, commit: str, remote: str) -> VcsOutc
     if commit != remote:
         raise VcsVerificationError("push", "local commit does not match the remote branch")
     return VcsOutcome(
-        declared_backend=backend,
-        verified_backend=backend,
+        backend=backend,
         branch=branch,
         commit_sha=commit,
         remote_sha=remote,

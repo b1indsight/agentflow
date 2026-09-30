@@ -14,7 +14,7 @@ from app.vcs import prepare_flow_repo
 from app.worker.executor import WorkerExecutor
 from app.worker.journal import JournalError, WorkerJournal
 from tests.test_vcs import _git_fixture
-from tests.test_worker_executor import RecordingAgent, RecordingJudge
+from tests.test_worker_executor import RecordingAgent, RecordingJudge, RecordingToolCaller
 from tests.test_worker_journal import _assignment
 
 
@@ -60,7 +60,7 @@ async def test_cleanup_preserves_seed_other_flow_journal_and_internal_symlink_ta
     partial = repo.with_name(repo.name + ".partial")
     partial.mkdir()
 
-    result = await executor.execute(assignment.task)
+    result = await executor.execute(assignment.task, tool_caller=RecordingToolCaller())
 
     assert isinstance(result, ArchiveResult) and result.cleanup == "removed"
     assert (result.flow_id, result.attempt_id, result.repo_identity, result.delivery_version) == (
@@ -70,7 +70,7 @@ async def test_cleanup_preserves_seed_other_flow_journal_and_internal_symlink_ta
     assert seed.is_dir() and other.is_dir() and journal.path.exists()
     assert (outside / "keep").read_text() == "keep"
     # A crash after removal but before the terminal journal write must reuse durable proof.
-    assert (await executor.execute(assignment.task)).cleanup == "already_absent"
+    assert (await executor.execute(assignment.task, tool_caller=RecordingToolCaller())).cleanup == "already_absent"
 
 
 @pytest.mark.parametrize("case", ["absent", "top-symlink", "partial-symlink", "parent-symlink",
@@ -100,7 +100,7 @@ async def test_cleanup_rejects_missing_ownership_or_unsafe_target(tmp_path, case
         task = task.model_copy(update={field: value})
 
     with pytest.raises((ValueError, JournalError), match="archive|cleanup|repository"):
-        await executor.execute(task)
+        await executor.execute(task, tool_caller=RecordingToolCaller())
     assert seed.is_dir()
 
 
@@ -117,7 +117,7 @@ async def test_failed_cleanup_keeps_proof_through_ack_and_explicit_retry(tmp_pat
 
     monkeypatch.setattr(shutil, "rmtree", fail_partial)
     with pytest.raises(PermissionError):
-        await executor.execute(assignment.task)
+        await executor.execute(assignment.task, tool_caller=RecordingToolCaller())
     assert not repo.exists() and partial.exists()
     journal.record_terminal(Failed(job_id=10, assignment_token="token-10",
                                    connection_epoch="epoch", error="cleanup denied"))
@@ -127,13 +127,13 @@ async def test_failed_cleanup_keeps_proof_through_ack_and_explicit_retry(tmp_pat
     journal.record_received(retry)
     journal.record_started()
     monkeypatch.setattr(shutil, "rmtree", original)
-    assert (await executor.execute(retry.task)).cleanup == "removed"
+    assert (await executor.execute(retry.task, tool_caller=RecordingToolCaller())).cleanup == "removed"
     assert seed.exists() and not partial.exists()
 
 
 async def test_copied_journal_cannot_authorize_another_worker_root(tmp_path):
     _, _, journal, executor, assignment = await workspace(tmp_path)
-    await executor.execute(assignment.task)
+    await executor.execute(assignment.task, tool_caller=RecordingToolCaller())
     another_root = tmp_path / "new-root"
     shutil.copytree(journal.path.parent, another_root)
     moved = WorkerJournal(another_root)
@@ -170,7 +170,7 @@ async def test_rejected_unstarted_coding_retains_flow_provenance_for_archive(tmp
     journal.clear_rejected(5)
     journal.record_received(assignment)
     journal.record_started()
-    assert (await executor.execute(assignment.task)).cleanup == "removed"
+    assert (await executor.execute(assignment.task, tool_caller=RecordingToolCaller())).cleanup == "removed"
     assert seed.exists() and not repo.exists()
 
 
@@ -187,7 +187,7 @@ async def test_cancelling_archive_waits_for_filesystem_thread_to_stop(tmp_path, 
         original(path)
 
     monkeypatch.setattr(shutil, "rmtree", delayed_delete)
-    execution = asyncio.create_task(executor.execute(assignment.task))
+    execution = asyncio.create_task(executor.execute(assignment.task, tool_caller=RecordingToolCaller()))
     try:
         await asyncio.wait_for(entered.wait(), 2)
         execution.cancel()

@@ -14,7 +14,15 @@ from loguru import logger
 from pydantic import ValidationError
 
 from app.control.preparation import PreparationStale
-from app.models import DeliveryState, FlowDelivery, FlowExecution, Job, JobKind, JobState
+from app.models import (
+    DeliveryState,
+    FlowDelivery,
+    FlowExecution,
+    Job,
+    JobKind,
+    JobState,
+    WorkerRecord,
+)
 from app.observability import Metrics
 from app.protocol import (
     Assignment,
@@ -42,7 +50,7 @@ from app.protocol import (
     terminal_digest,
 )
 from app.result_models import ResultPending
-from app.stop_store import StopIntent, StopStore
+from app.stop_store import StopIntent
 
 
 class WorkerSocket(Protocol):
@@ -58,6 +66,16 @@ class WorkerSocket(Protocol):
     async def receive_text(self) -> str: ...
 
 
+class WorkerStops(Protocol):
+    def pending(self, worker_id: str) -> StopIntent | None: ...
+
+    def receipt_request(self, worker_id: str, request_id: str) -> StopIntent | None: ...
+
+    def authorize_dispatch(self, job_id: int, worker_id: str, token: str, epoch: str) -> bool: ...
+
+    def confirm(self, worker_id: str, receipt: ExecutionStopped) -> bool: ...
+
+
 class GatewayStore(Protocol):
     def get_job(self, job_id: int) -> Job | None: ...
 
@@ -67,7 +85,7 @@ class GatewayStore(Protocol):
 
     def worker_connected(
         self, worker_id: str, protocol_version: int, connection_epoch: str
-    ) -> object: ...
+    ) -> WorkerRecord: ...
 
     def worker_disconnected(
         self,
@@ -162,7 +180,7 @@ class WorkerGateway:
         recovery_concurrency: int = 4,
         recovery_batch_size: int = 64,
         metrics: Metrics | None = None,
-        stops: StopStore | None = None,
+        stops: WorkerStops,
     ) -> None:
         self.stops = stops
         self.metrics = metrics
@@ -248,8 +266,8 @@ class WorkerGateway:
                 worker_id, register.protocol_version, connection_epoch
             )
             connected = True
-            stop = self.stops.pending(worker_id) if self.stops is not None else None
-            if (stop is None and self.stops is not None and register.recovery is not None
+            stop = self.stops.pending(worker_id)
+            if (stop is None and register.recovery is not None
                     and register.recovery.stop_request_id is not None):
                 stop = self.stops.receipt_request(worker_id, register.recovery.stop_request_id)
             if stop is not None:
@@ -262,7 +280,7 @@ class WorkerGateway:
                     register.recovery,
                 )
             if current is None:
-                stale_job_id = None if stop is not None else getattr(worker, "current_job_id", None)
+                stale_job_id = None if stop is not None else worker.current_job_id
                 if stale_job_id is not None and (
                     register.recovery is None or register.recovery.job_id != stale_job_id
                 ):
@@ -287,7 +305,7 @@ class WorkerGateway:
                 if current is None:
                     assert wake is not None
                     wake.clear()
-                    stop = self.stops.pending(worker_id) if self.stops is not None else None
+                    stop = self.stops.pending(worker_id)
                     if stop is not None:
                         await self._stop_worker(socket, worker_id, connection_epoch, stop)
                     token = uuid4().hex
@@ -305,7 +323,7 @@ class WorkerGateway:
                             )
                         self.notify_jobs()
                         continue
-                    if self.stops is not None and not self.stops.authorize_dispatch(job.id, worker_id, token, connection_epoch):
+                    if not self.stops.authorize_dispatch(job.id, worker_id, token, connection_epoch):
                         raise ProtocolViolation("assignment changed before dispatch authorization")
                     current = (job, token, prepared)
                     await socket.send_text(
@@ -341,7 +359,7 @@ class WorkerGateway:
 
                 while True:
                     job, token, _ = current
-                    stop = self.stops.pending(worker_id) if self.stops is not None else None
+                    stop = self.stops.pending(worker_id)
                     if stop is not None:
                         await self._stop_worker(socket, worker_id, connection_epoch, stop)
                         current = None
@@ -473,7 +491,6 @@ class WorkerGateway:
                 await self._unregister_session(worker_id, socket)
 
     async def _stop_worker(self, socket: WorkerSocket, worker_id: str, epoch: str, stop: StopIntent) -> None:
-        assert self.stops is not None
         await socket.send_text(stop.message(epoch).model_dump_json())
         # An in-flight heartbeat/tool/result can precede the stopped receipt on this stream.
         async with asyncio.timeout(20):

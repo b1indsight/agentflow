@@ -14,6 +14,7 @@ from app.models import JobKind, JobState
 from app.protocol import InitialResult, Succeeded
 from app.result_models import ResultPending
 from tests.test_gateway import RecordingCoordinator, RecordingStore
+from tests.worker_fakes import NoPendingStops
 
 
 class Inbox(RecordingStore):
@@ -54,7 +55,7 @@ async def test_slow_result_does_not_block_another_flow():
                 advanced.set()
             return await super().apply_result(job, result)
 
-    gateway = WorkerGateway(Inbox(2), Coordinator(), worker_tokens={})
+    gateway = WorkerGateway(Inbox(2), Coordinator(), stops=NoPendingStops(), worker_tokens={})
     recovery = asyncio.create_task(gateway.recover_pending_results())
     try:
         await asyncio.wait_for(blocked.wait(), 1)
@@ -80,7 +81,7 @@ async def test_recovery_pool_is_bounded_and_cancellation_joins_all_tasks():
                 active.remove(job.id)
             return await super().apply_result(job, result)
 
-    gateway = WorkerGateway(Inbox(20), Coordinator(), worker_tokens={}, recovery_concurrency=2)
+    gateway = WorkerGateway(Inbox(20), Coordinator(), stops=NoPendingStops(), worker_tokens={}, recovery_concurrency=2)
     recovery = asyncio.create_task(gateway.recover_pending_results())
     try:
         await asyncio.wait_for(started.wait(), 1)
@@ -103,7 +104,7 @@ async def test_bounded_batches_advance_past_a_persistently_pending_result():
             return await super().apply_result(job, result)
 
     inbox = Inbox(5)
-    gateway = WorkerGateway(inbox, Coordinator(), worker_tokens={}, recovery_batch_size=2)
+    gateway = WorkerGateway(inbox, Coordinator(), stops=NoPendingStops(), worker_tokens={}, recovery_batch_size=2)
     for _ in range(4):
         await gateway.recover_pending_results()
     assert calls == [1, 2, 3, 4, 5, 1]
@@ -120,7 +121,7 @@ async def test_live_result_holds_the_same_job_lock_as_recovery():
             return await super().apply_result(job, result)
 
     inbox, coordinator = Inbox(2), Coordinator()
-    gateway = WorkerGateway(inbox, coordinator, worker_tokens={})
+    gateway = WorkerGateway(inbox, coordinator, stops=NoPendingStops(), worker_tokens={})
     lock = gateway._result_lock(1)
     await lock.acquire()
     recovery = asyncio.create_task(gateway.recover_pending_results())
@@ -146,7 +147,7 @@ async def test_new_arrivals_cannot_extend_a_recovery_cycle_forever():
             raise ResultPending("still waiting")
 
     inbox = Inbox(2)
-    gateway = WorkerGateway(inbox, Coordinator(), worker_tokens={}, recovery_batch_size=1)
+    gateway = WorkerGateway(inbox, Coordinator(), stops=NoPendingStops(), worker_tokens={}, recovery_batch_size=1)
     await gateway.recover_pending_results()
     # A busy service keeps producing new IDs; the initial scan must still end at ID 2.
     inbox.jobs[3] = Inbox(3).jobs[3]
@@ -172,11 +173,10 @@ async def test_runtime_sweeps_continue_while_result_recovery_waits():
     runtime.store = SimpleNamespace(
         sweep_expired_assignments=Mock(side_effect=lambda: (lease.set() or 0, 0)), close=Mock(),
     )
-    runtime.router = SimpleNamespace(settle=SimpleNamespace(sweep=settled.set))
+    runtime.settle = SimpleNamespace(sweep=settled.set)
     runtime.gateway = SimpleNamespace(recover_pending_results=AsyncMock(side_effect=recover),
                                      notify_jobs=Mock())
     runtime.reconciler = SimpleNamespace(stop=Mock())
-    runtime._handlers = set()
     loops = [runtime._sweep_results, runtime._sweep_assignments, runtime._sweep_reviews]
     runtime._tasks = [asyncio.create_task(loop()) for loop in loops]
     try:

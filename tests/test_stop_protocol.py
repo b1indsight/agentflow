@@ -121,7 +121,7 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path):
             return raw
 
     class Executor:
-        async def execute(self, task, secret=None):
+        async def execute(self, task, secret=None, *, tool_caller=None):
             started.set()
             try: await asyncio.Event().wait()
             finally: ended.set()

@@ -2,44 +2,36 @@ import asyncio
 import hashlib
 import hmac
 import json
-from collections.abc import AsyncIterator, Coroutine
+from collections.abc import AsyncIterator
 from types import SimpleNamespace
-from typing import Any
 
 import httpx
 import pytest
 import pytest_asyncio
-from fastapi import WebSocket
 
-from app.control.api import WebhookRouter, create_app
+from app.control.api import create_app
 from app.control.router import EventRouter
 from app.control.service import ControlService
 from app.control.webhooks import WebhookConsumer
 from app.models import Flow, FlowState, JobKind
+from app.observability import Metrics
 from app.store import Store
 from app.webhook_store import WebhookStore
 
 
-class RecordingRouter:
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, str, dict]] = []
-        self.handled = asyncio.Event()
-
-    async def handle(self, event_type: str, delivery_id: str, payload: dict) -> None:
-        self.calls.append((event_type, delivery_id, payload))
-        self.handled.set()
-
-
 class RecordingGateway:
-    async def handle(self, socket: WebSocket) -> None:
+    async def handle(self, socket) -> None:
         pass
 
 
 class FakeContext:
-    def __init__(self, router: WebhookRouter | None = None, settings=None) -> None:
+    def __init__(self, router: EventRouter | None = None, settings=None) -> None:
         self.settings = settings or SimpleNamespace(github_webhook_secret="webhook-secret")
         self.settings.webhook_max_body_bytes = 25 * 1024 * 1024
-        self.router = router or RecordingRouter()
+        self.settings.metrics_token = None
+        self.settings.host, self.settings.port = "test", 0
+        self.metrics = Metrics()
+        self.router = router
         self.gateway = RecordingGateway()
         self.tasks: list[asyncio.Task[None]] = []
 
@@ -58,9 +50,6 @@ class FakeContext:
 
     def startup(self) -> None:
         pass
-
-    def spawn_handler(self, coro: Coroutine[Any, Any, None]) -> None:
-        self.tasks.append(asyncio.create_task(coro))
 
     async def shutdown(self) -> None:
         if self.tasks:

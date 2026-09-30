@@ -10,13 +10,13 @@ Codex 等长任务占用 GitHub 的 Webhook 请求。
 当前实现：
 
 - `GET /healthz` 返回 `{"status": "ok"}`；它是存活探针，不检查数据库或外部依赖；
-- `POST /webhook` 缺少或带错误签名时返回 401；签名正确时创建后台 handler 并返回 202；
+- `POST /webhook` 缺少或带错误签名时返回 401；签名正确时持久化 webhook inbox 后返回 202；
 - `WS /internal/workers/connect` 按 token map 鉴权，并为每个 worker identity 保持一条连接；
 - FastAPI lifespan 初始化 PostgreSQL schema，启动 reconciler、lease sweeper 和 result inbox recovery，不启动进程内 worker；
-- 自动化测试覆盖 health、错误签名、正确签名、202 交接和一条 signed label→job 路径。
+- 自动化测试覆盖 health、错误签名、正确签名、202 持久化确认和一条 signed label→job 路径。
 
-边界：202 表示事件已交给进程内后台 task，不表示业务处理或持久化已经成功。进程在 handler 落库前
-退出仍可能丢失事件，未来由可靠入站/对账语义补强。
+边界：202 表示事件已持久化到 webhook inbox；后台消费者在事务内调用 Event Router，失败后可重试。
+202 不表示业务处理已经完成。
 
 ## 4.2 Event Router
 
@@ -143,7 +143,7 @@ Store 负责候选查询、信号/回执事实、锁和原子写入。恢复扫�
 
 当前 Store 使用 Psycopg 3 的同步连接池访问 PostgreSQL：
 
-`Flow`、`FlowExecution`、`FlowDelivery`、`FlowToolCall`、`Attempt`、`Job` 和 `ReviewItem` 是 Pydantic
+`Flow`、`FlowExecution`、`FlowDelivery`、`FlowToolCall`、`Attempt`、`Job` 是 Pydantic
 持久化模型。返回这些领域对象的查询在
 cursor 上使用 Psycopg `class_row(Model)`，由模型统一校验枚举、时间和其他字段；其余轻量查询继续
 使用 pool 的 `dict_row` 默认值。SQL、事务边界、JSONB 适配和并发协议仍由 Store 显式维护，没有引入

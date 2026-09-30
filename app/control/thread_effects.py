@@ -25,7 +25,7 @@ async def revision_current(github: GitHubClient, plan: ResultPlan, number: int) 
     if plan.revision is None or plan.delivery is None:
         return False
     effect = plan.effects[0]
-    current = await github.get_review_pull_request(effect.installation_id, effect.repo, number)
+    current = await github.get_pull_request(effect.installation_id, effect.repo, number)
     return (current.number == number and current.state == "open" and not current.merged
             and current.head_sha == plan.revision.commit_sha
             and current.head_branch == plan.delivery.branch

@@ -13,6 +13,7 @@ from psycopg.rows import class_row, dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
+from app.delivery_models import DeliveryReceipt
 from app.github_models import GitHubAdapterError
 from app.github_retry import retry_delay
 from app.models import (
@@ -26,7 +27,6 @@ from app.models import (
     Job,
     JobKind,
     JobState,
-    ReviewItem,
     WorkerRecord,
     WorkerStatus,
     utcnow,
@@ -713,13 +713,13 @@ class Store:
         return call, created
 
     def complete_tool_call(
-        self, call_id: str, response: Mapping[str, object], error: str | None = None
+        self, call_id: str, response: DeliveryReceipt
     ) -> None:
         now = self._clock()
         with self.connection() as connection:
             result = connection.execute(
                 "UPDATE flow_tool_calls SET response=%s, error=%s, updated_at=%s WHERE call_id=%s",
-                (Jsonb(dict(response)), error, now, call_id),
+                (Jsonb(response.model_dump(mode="json")), None, now, call_id),
             )
         if result.rowcount != 1:
             raise ValueError(f"tool call {call_id} does not exist")
@@ -1431,42 +1431,6 @@ class Store:
                 )
         return result.rowcount == 1
 
-    def fail_assignment(
-        self,
-        job_id: int,
-        worker_id: str,
-        token: str,
-        reason: str,
-        connection_epoch: str = "",
-    ) -> bool:
-        with self.connection() as connection:
-            self._lock_worker(connection, worker_id)
-            result = connection.execute(
-                "UPDATE jobs SET state=%s, assignment_token=NULL, last_error=%s, updated_at=%s"
-                " WHERE id=%s AND state=%s AND assigned_worker_id=%s"
-                " AND assignment_token=%s AND NOT EXISTS (SELECT 1 FROM execution_stops s"
-                " WHERE s.job_id=jobs.id AND s.state!='confirmed')"
-                " AND EXISTS (SELECT 1 FROM workers"
-                " WHERE worker_id=%s AND connection_epoch=%s)",
-                (
-                    JobState.FAILED,
-                    reason,
-                    self._clock(),
-                    job_id,
-                    JobState.RUNNING,
-                    worker_id,
-                    token,
-                    worker_id,
-                    connection_epoch,
-                ),
-            )
-            if result.rowcount == 1:
-                connection.execute(
-                    "UPDATE workers SET status=%s, current_job_id=NULL, last_seen_at=%s,"
-                    " last_error=%s WHERE worker_id=%s AND current_job_id=%s",
-                    (WorkerStatus.ONLINE, self._clock(), reason, worker_id, job_id),
-                )
-        return result.rowcount == 1
 
     def recover_abandoned_assignments(self) -> tuple[int, int]:
         """Mark persisted work recoverable without replaying or failing it at startup."""
@@ -1630,56 +1594,6 @@ class Store:
 
     # --------------------------------------------------------- review_threads
 
-    def upsert_review_item(self, item: ReviewItem) -> None:
-        with self.connection() as connection:
-            connection.execute(
-                "INSERT INTO review_threads(attempt_id, kind, github_id, thread_id, path, line,"
-                " original_commit_id, diff_hunk, author, body, relayed, resolved, created_at)"
-                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
-                " ON CONFLICT(attempt_id, kind, github_id) DO UPDATE SET"
-                " thread_id=excluded.thread_id, body=excluded.body",
-                (
-                    item.attempt_id,
-                    item.kind,
-                    item.github_id,
-                    item.thread_id,
-                    item.path,
-                    item.line,
-                    item.original_commit_id,
-                    item.diff_hunk,
-                    item.author,
-                    item.body,
-                    item.relayed,
-                    item.resolved,
-                    item.created_at,
-                ),
-            )
-
-    def unrelayed_items(self, attempt_id: int) -> list[ReviewItem]:
-        with (
-            self.connection() as connection,
-            connection.cursor(row_factory=class_row(ReviewItem)) as cursor,
-        ):
-            return cursor.execute(
-                "SELECT * FROM review_threads WHERE attempt_id=%s AND relayed=FALSE ORDER BY id",
-                (attempt_id,),
-            ).fetchall()
-
-    def mark_relayed(self, item_ids: list[int]) -> None:
-        if not item_ids:
-            return
-        with self.connection() as connection, connection.cursor() as cursor:
-            cursor.executemany(
-                "UPDATE review_threads SET relayed=TRUE WHERE id=%s",
-                [(item_id,) for item_id in item_ids],
-            )
-
-    def mark_resolved(self, attempt_id: int, github_id: int) -> None:
-        with self.connection() as connection:
-            connection.execute(
-                "UPDATE review_threads SET resolved=TRUE WHERE attempt_id=%s AND github_id=%s",
-                (attempt_id, github_id),
-            )
 
     # ------------------------------------------------------------- codex_runs
 

@@ -34,7 +34,7 @@ def merge_payload(flow: Flow) -> dict:
 async def route_merge(store: Store, flow: Flow, event: str = "merge-1", payload=None):
     settings = SimpleNamespace(allowlist=["alice"], bot_login="flowtool[bot]", trigger_label="flow",
                                settle_seconds=75.0, submit_grace_seconds=15.0)
-    await EventRouter(store, ControlService(store), settings).handle(
+    EventRouter(store, ControlService(store), settings).dispatch(
         "pull_request", event, payload if payload is not None else merge_payload(flow),
     )
 

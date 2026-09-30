@@ -187,7 +187,7 @@ class ResultEffects:
                     raise FlowToolRejected(FlowToolErrorKind.CONFLICT,
                                            "new feedback arrived before resolve dispatch")
                 if (plan.revision is not None
-                        and isinstance(record.payload, (LabelsEffect, ReviewersEffect))
+                        and isinstance(record.payload, (LabelEffect, LabelsEffect, ReviewersEffect))
                         and _pending_feedback(tx, plan)):
                     raise _PendingReviewFeedback("出现新反馈，暂停 re-review")
             tx.results.mark_dispatched(record)
@@ -222,7 +222,7 @@ class ResultEffects:
                 from app.control.service import ControlService
                 from app.github_models import PullRequestMerge
 
-                remote = await self.github.get_pull_request_status(installation, repo, found.number)
+                remote = await self.github.get_pull_request(installation, repo, found.number)
                 if (remote.repo != repo or remote.number != found.number or remote.head_repository != repo
                         or remote.head_branch != effect.branch or remote.base_branch != effect.base_branch
                         or remote.head_sha != effect.head_sha):
@@ -304,7 +304,7 @@ class ResultEffects:
                     raise FlowToolRejected(FlowToolErrorKind.CONFLICT, "review job disappeared")
                 batch = self.store.reviews.for_job(job)
                 snapshot = batch.context.pull_request if batch.context is not None else None
-                current = await self.github.get_review_pull_request(installation, repo, effect.number)
+                current = await self.github.get_pull_request(installation, repo, effect.number)
                 if (snapshot is None or current.number != effect.number
                         or current.state != "open" or current.merged):
                     raise FlowToolRejected(FlowToolErrorKind.CONFLICT,
@@ -355,7 +355,7 @@ class ResultEffects:
             if pull_request.state == "closed":
                 # PR creation may have succeeded before INITIAL's final local commit.
                 # Bind its verified identity and retire intent instead of re-opening it.
-                remote = await self.github.get_pull_request_status(installation, repo, pull_request.number)
+                remote = await self.github.get_pull_request(installation, repo, pull_request.number)
                 if (remote.repo != repo or remote.number != pull_request.number or remote.head_repository != repo
                         or remote.head_branch != effect.branch or remote.base_branch != effect.base_branch
                         or remote.head_sha != effect.head_sha):
@@ -393,17 +393,7 @@ class ResultEffects:
                 effect.head_sha,
             )
             return EffectReceipt(pull_request=pull_request)
-        if isinstance(effect, LabelEffect):
-            labels = await self.github.get_labels(installation, repo, effect.number)
-            present = effect.label.casefold() in {label.casefold() for label in labels}
-            if present != effect.present:
-                self._dispatch(plan, record)
-                if effect.present:
-                    await self.github.add_label(installation, repo, effect.number, effect.label)
-                else:
-                    await self.github.remove_label(installation, repo, effect.number, effect.label)
-            return EffectReceipt()
-        if isinstance(effect, (LabelsEffect, ReviewersEffect)):
+        if isinstance(effect, (LabelEffect, LabelsEffect, ReviewersEffect)):
             number = effect.number
             if plan.revision is not None:
                 assert isinstance(number, int)
@@ -422,11 +412,21 @@ class ResultEffects:
                         "PR-dependent effect requires exactly one persisted PR receipt"
                     )
                 number = receipts[0].number
-            if isinstance(effect, LabelsEffect):
-                labels = await self.github.get_labels(installation, repo, number)
-                if set(labels) != set(effect.labels):
+            if isinstance(effect, (LabelEffect, LabelsEffect)):
+                labels = {label.casefold() for label in await self.github.get_labels(installation, repo, number)}
+                # Old frozen list intents also own only their named status labels.
+                desired = ([(effect.label, effect.present)] if isinstance(effect, LabelEffect)
+                           else [(label, True) for label in effect.labels])
+                for label, present in desired:
+                    if (label.casefold() in labels) == present:
+                        continue
                     self._dispatch(plan, record)
-                    await self.github.set_labels(installation, repo, number, effect.labels)
+                    if present:
+                        await self.github.add_label(installation, repo, number, label)
+                        labels.add(label.casefold())
+                    else:
+                        await self.github.remove_label(installation, repo, number, label)
+                        labels.discard(label.casefold())
             else:
                 # Include completed reviews since dispatch so recovery does not request them again.
                 satisfied = await self.github.get_reviewers(

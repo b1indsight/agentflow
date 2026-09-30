@@ -43,7 +43,7 @@ from app.result_models import (
     CommentEffect,
     DerivedJob,
     Effect,
-    LabelsEffect,
+    LabelEffect,
     PullRequestEffect,
     ResultPending,
     ResultPlan,
@@ -603,12 +603,13 @@ class ResultApplication:
 
     def _review_effects(self, flow: Flow, number: int | Literal["created_pr"]) -> list[Effect]:
         effects: list[Effect] = [
-            LabelsEffect(
+            LabelEffect(
                 key="labels",
                 installation_id=self._installation(flow),
                 repo=flow.repo,
                 number=number,
-                labels=[self.settings.in_review_label],
+                label=self.settings.in_review_label,
+                present=True,
             )
         ]
         if self.settings.reviewers:

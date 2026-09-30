@@ -361,7 +361,7 @@ async def test_new_feedback_during_notification_query_fences_dispatch(
 
 async def test_dispatch_rechecks_input_arriving_during_head_read(store, thread_revision, monkeypatch):
     flow, job, github, subject = thread_revision
-    original = github.get_review_pull_request
+    original = github.get_pull_request
 
     async def edited(*args):
         if github.replies:
@@ -372,7 +372,7 @@ async def test_dispatch_rechecks_input_arriving_during_head_read(store, thread_r
                 ), settle_seconds=0, submit_grace_seconds=0)
         return await original(*args)
 
-    monkeypatch.setattr(github, "get_review_pull_request", edited)
+    monkeypatch.setattr(github, "get_pull_request", edited)
     await subject.results.apply(job.id)
     assert github.resolves == [] and github.review_requests == []
     assert store.reviews.pending(flow.id)[0].body == "Last moment edit"

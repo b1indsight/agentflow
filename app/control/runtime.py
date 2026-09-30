@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Coroutine
 from datetime import timedelta
-from typing import Any
 
 from loguru import logger
 
@@ -15,7 +13,7 @@ from app.control.gateway import WorkerGateway
 from app.control.projects import ProjectSync
 from app.control.reconcile import Reconciler
 from app.control.reconcile_feedback import FeedbackReconciler
-from app.control.router import EventRouter
+from app.control.router import SettleScheduler
 from app.control.service import ControlService
 from app.control.webhooks import WebhookConsumer
 from app.github_client import GitHubApp
@@ -60,7 +58,7 @@ class ControlRuntime:
             stops=StopStore(self.store),
         )
         self.service = ControlService(self.store, plugins, self.gateway.notify_jobs)
-        self.router = EventRouter(self.store, self.service, self.settings)
+        self.settle = SettleScheduler(self.store, self.service.notify_jobs)
         self.webhooks = WebhookConsumer(self.store, self.settings, self.service)
         self.reconciler = Reconciler(
             self.store, self.coordinator.github, self.service,
@@ -80,7 +78,6 @@ class ControlRuntime:
             concurrency=self.settings.reconcile_concurrency,
         )
         self._tasks: list[asyncio.Task[None]] = []
-        self._handlers: set[asyncio.Task[None]] = set()
 
     def startup(self) -> None:
         self.store.init_db()
@@ -106,7 +103,7 @@ class ControlRuntime:
             self._tasks.append(asyncio.create_task(self.metrics.run(
                 self.settings.database_url, self.settings.metrics_interval_seconds,
             )))
-        self.router.settle.sweep()
+        self.settle.sweep()
         self._ready = True
 
     async def ready(self) -> bool:
@@ -147,7 +144,7 @@ class ControlRuntime:
         while True:
             await asyncio.sleep(self.settings.worker_sweep_interval)
             try:
-                self.router.settle.sweep()
+                self.settle.sweep()
             except Exception:  # noqa: BLE001 -- a failed claim leaves durable deadlines to retry
                 logger.exception("review settle sweep failed; retrying next sweep")
 
@@ -155,23 +152,10 @@ class ControlRuntime:
         await asyncio.to_thread(WebhookStore(self.store).receive, delivery_id, event_type, payload, digest)
         self.webhooks.wakeup.set()
 
-    def spawn_handler(self, coroutine: Coroutine[Any, Any, None]) -> None:
-        task = asyncio.create_task(coroutine)
-        self._handlers.add(task)
-        task.add_done_callback(self._on_handler_done)
-
-    def _on_handler_done(self, task: asyncio.Task[None]) -> None:
-        self._handlers.discard(task)
-        if task.cancelled():
-            return
-        exception = task.exception()
-        if exception is not None:
-            logger.opt(exception=exception).error("webhook handler crashed")
-
     async def shutdown(self) -> None:
         self._ready = False
         self.reconciler.stop()
-        tasks = [*self._tasks, *self._handlers]
+        tasks = self._tasks
         for task in tasks:
             task.cancel()
         if tasks:

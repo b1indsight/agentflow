@@ -5,6 +5,7 @@ from typing import Any, cast
 import pytest
 
 from app.control.tools import FlowToolService
+from app.delivery_models import DeliveryReceipt, PreparedDelivery
 from app.github_models import (
     GitHubAdapterError,
     GitHubErrorKind,
@@ -89,11 +90,10 @@ class ToolStore:
         return call, True
 
     def complete_tool_call(
-        self, call_id: str, response: dict[str, object], error: str | None = None
+        self, call_id: str, response: DeliveryReceipt
     ) -> None:
         call = self.calls[call_id]
         call.response = response
-        call.error = error
 
     def get_tool_call(self, call_id: str) -> FlowToolCall | None:
         return self.calls.get(call_id)
@@ -133,7 +133,7 @@ class ToolGitHub:
             base_branch=base,
         )
 
-    async def set_labels(self, *args: object) -> None:
+    async def add_label(self, *args: object) -> None:
         self.labels += 1
 
     async def request_reviewers(self, *args: object) -> None:
@@ -171,11 +171,7 @@ async def test_open_pr_prepares_and_replays_without_remote_delivery() -> None:
 
     assert first.error is None
     assert replay.result == first.result
-    assert first.result == {
-        "status": "prepared",
-        "head_sha": "abc123",
-        "delivery_version": 0,
-    }
+    assert first.result == PreparedDelivery(status="prepared", head_sha="abc123", delivery_version=0)
     assert store.delivery.state is DeliveryState.OPENING
     assert store.delivery.head_sha == "abc123"
     assert github.opened == 0

@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from app.context_models import DiscussionPage, FilePage, ReviewContext, ReviewPullRequest
+from app.context_models import DiscussionPage, FilePage, ReviewContext
 from app.github_models import (
     FeedbackPage,
     FeedbackSource,
@@ -23,7 +23,7 @@ from app.github_models import (
     ReviewThreads,
 )
 from app.judge_models import JudgeDecision
-from app.models import AgentRun, CodeAgentContext, SandboxPolicy
+from app.models import AgentRun, CodeAgentContext
 from app.project_models import ProjectItem, ProjectItemsPage, ProjectStatus, ProjectTarget
 
 
@@ -68,18 +68,6 @@ class Judge(Protocol):
 
 
 @runtime_checkable
-class Sandbox(Protocol):
-    """执行沙盒：可写根 + 网络出口策略。三正交轴之一（§4.6）。
-
-    只认路径，**不认 git/jj**——把「哪些目录可写、能否联网」和版本控制彻底分开。
-    现有 workspace-write adapter 保留为旧接缝，不用于需要修改完整 Git metadata 的 M1 CodeAgent。
-    后续 adapter：容器 / 微VM（§9-5，M5）——由它接管文件系统和网络安全策略。
-    """
-
-    def policy(self, ws: Path, *, network: bool) -> SandboxPolicy: ...
-
-
-@runtime_checkable
 class GitHubClient(Protocol):
     """GitHub API 平面。adapter：githubkit（github_client.py）。
 
@@ -99,13 +87,9 @@ class GitHubClient(Protocol):
         source: FeedbackSource, cursor: str | None,
     ) -> FeedbackPage: ...
 
-    async def get_pull_request_status(
+    async def get_pull_request(
         self, installation_id: int, repo: str, number: int,
     ) -> PullRequestStatus: ...
-
-    async def get_review_pull_request(
-        self, installation_id: int, repo: str, number: int,
-    ) -> ReviewPullRequest: ...
 
     async def list_pull_request_files(
         self, installation_id: int, repo: str, number: int,
@@ -158,10 +142,6 @@ class GitHubClient(Protocol):
 
     async def review_thread_resolved(self, installation_id: int, thread_id: str) -> bool: ...
 
-    async def set_labels(
-        self, installation_id: int, repo: str, number: int, labels: list[str]
-    ) -> None: ...
-
     async def add_label(
         self, installation_id: int, repo: str, number: int, label: str
     ) -> None: ...
@@ -191,10 +171,3 @@ class GitHubClient(Protocol):
     ) -> int | None: ...
 
     async def resolve_review_thread(self, installation_id: int, thread_id: str) -> None: ...
-
-
-@runtime_checkable
-class JobDispatch(Protocol):
-    """派发 job 的抽象边界；当前 WebSocket gateway 直接从持久队列领取。"""
-
-    async def submit(self, job_id: int) -> None: ...

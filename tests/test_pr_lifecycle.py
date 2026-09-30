@@ -9,6 +9,7 @@ from app.control.lifecycle import pause_delivery
 from app.control.reconcile import Reconciler
 from app.control.router import EventRouter
 from app.control.service import ControlService
+from app.delivery_models import PreparedDelivery
 from app.github_models import (
     GitHubAdapterError,
     GitHubErrorKind,
@@ -20,6 +21,7 @@ from app.models import DeliveryState, FlowState, JobKind, JobState, VcsKind
 from app.protocol import PROTOCOL_VERSION, InitialResult, Succeeded, terminal_digest
 from app.result_models import ResultPending
 from app.review_models import BatchState
+from app.stop_store import StopStore
 from tests.test_coordinator import RecordingGitHub, coordinator
 from tests.test_review_batches import feedback, ingest
 from tests.test_review_batches import (
@@ -44,14 +46,14 @@ def lifecycle_flow(store, review_flow):
 
 class GitHub:
     def __init__(self, flow, state="closed", **updates):
-        self.remote = PullRequestStatus(
+        self.remote = PullRequestStatus(title="PR", body="",
             repo=flow.repo, number=17, state=state, merged=False, head_branch=f"flow/{flow.id}",
             head_sha="b" * 40, base_branch="main", base_sha="a" * 40, head_repository=flow.repo,
         ).model_copy(update=updates)
         self.before_return = None
         self.calls = 0
 
-    async def get_pull_request_status(self, *args):
+    async def get_pull_request(self, *args):
         self.calls += 1
         if self.before_return:
             self.before_return()
@@ -99,7 +101,7 @@ async def test_closed_missing_journal_preserves_late_result_and_reopen(store, pe
         pause_delivery(tx, tx.get_delivery(flow.id))
     store.worker_disconnected("worker-a", "disconnected during closed PR", "epoch")
     store.worker_connected("worker-a", PROTOCOL_VERSION, "restart")
-    gateway = WorkerGateway(store, subject, worker_tokens={})
+    gateway = WorkerGateway(store, subject, stops=StopStore(store), worker_tokens={})
     # Missing journal is not proof of execution failure: its original result may still arrive.
     with pytest.raises(ProtocolViolation, match="journal is missing"):
         await gateway._reject_missing_journal("worker-a", "restart", job.id)
@@ -114,7 +116,7 @@ async def test_closed_missing_journal_preserves_late_result_and_reopen(store, pe
         message.model_dump(mode="json"), terminal_digest(message)) == "pending"
     assert await subject.results.apply(job.id) is JobState.DONE
     remote = GitHub(flow, "open", head_branch=task.branch, head_sha=task.expected_head_sha)
-    github.get_pull_request_status = remote.get_pull_request_status
+    github.get_pull_request = remote.get_pull_request
     await check(store, flow, github)
     assert store.get_delivery(flow.id).state is DeliveryState.OPEN
     assert store.get_flow_execution(flow.id).released_at is None
@@ -278,7 +280,7 @@ async def test_close_during_capability_preparation_never_dispatches(store, pendi
         return secret
 
     monkeypatch.setattr(github, "create_push_capability", close_before_return)
-    gateway = WorkerGateway(store, subject, worker_tokens={})
+    gateway = WorkerGateway(store, subject, stops=StopStore(store), worker_tokens={})
     prepared, secret = await gateway._prepare_assignment(job, "worker-a", "token", "epoch")
     assert prepared is JobState.DONE and secret is None
     assert store.get_job(job.id).started_at is None
@@ -300,7 +302,7 @@ async def test_inflight_revision_is_acknowledged_then_verified_before_reopen(sto
     assert github.comments == [] and github.review_requests == []
     assert len(store.reviews.pending(flow.id)) == 1
     remote.remote = remote.remote.model_copy(update={"state": "open"})
-    monkeypatch.setattr(github, "get_pull_request_status", remote.get_pull_request_status)
+    monkeypatch.setattr(github, "get_pull_request", remote.get_pull_request)
     await check(store, flow, github)
     assert store.get_delivery(flow.id).state is DeliveryState.OPEN
     assert store.get_delivery(flow.id).head_sha == "revision"
@@ -344,7 +346,7 @@ async def test_initial_close_before_final_commit_keeps_verified_identity_and_can
     delivery.state, delivery.head_sha, delivery.base_branch = DeliveryState.OPENING, "abc123", "trunk"
     delivery.title, delivery.body = "Title", "Body\n\nCloses #8"
     store.update_delivery(delivery)
-    prepared = {"status": "prepared", "head_sha": "abc123", "delivery_version": delivery.version}
+    prepared = PreparedDelivery(status="prepared", head_sha="abc123", delivery_version=delivery.version)
     store.reserve_tool_call(call_id="initial", flow_id=flow.id, attempt_id=attempt.id,
                            job_id=job.id, name="flow.open_pr", arguments={"title": "Title", "body": "Body"})
     store.complete_tool_call("initial", prepared)

@@ -111,12 +111,21 @@ class PullRequestSnapshot(GitHubModel):
     base_branch: str
 
 
-class PullRequestStatus(PullRequestSnapshot):
+class PullRequestDetails(PullRequestSnapshot):
+    """PR content projection with the stable fields used by frozen review contexts."""
+
+    title: str
+    body: str
+    base_sha: str
+    merged: bool = False
+    head_repository: str | None = None
+
+
+class PullRequestStatus(PullRequestDetails):
     """A numbered PR observation, including confirmed merge facts and repository identity."""
 
     repo: str
     state: Literal["open", "closed"]
-    base_sha: str
     head_repository: str | None
     merged: bool
     merged_at: AwareDatetime | None = None

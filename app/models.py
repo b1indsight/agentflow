@@ -13,6 +13,8 @@ from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 
+from app.delivery_models import DeliveryReceipt
+
 
 def utcnow() -> datetime:
     return datetime.now(UTC)
@@ -157,7 +159,7 @@ class FlowToolCall(BaseModel):
     job_id: int
     name: str
     arguments: dict[str, object]
-    response: dict[str, object] | None = None
+    response: DeliveryReceipt | None = None
     error: str | None = None
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
@@ -225,32 +227,7 @@ class WorkerView(BaseModel):
     last_disconnect_reason: str | None = None
 
 
-class ReviewItem(BaseModel):
-    id: int | None
-    attempt_id: int  # 归属到具体 attempt（§9-2），不再挂 flow
-    kind: ReviewItemKind
-    github_id: int  # review id / comment id
-    author: str
-    body: str
-    thread_id: str | None = None  # GraphQL review thread id（inline 才有）
-    path: str | None = None
-    line: int | None = None
-    original_commit_id: str | None = None
-    diff_hunk: str | None = None
-    relayed: bool = False
-    resolved: bool = False
-    created_at: datetime = Field(default_factory=utcnow)
-
-
 # ---------------------------------------------------------------- 非持久化 dataclass
-
-
-@dataclass(frozen=True)
-class SandboxPolicy:
-    """Legacy/future Sandbox-port policy; M1 trusted-host Codex does not consume it."""
-
-    writable_roots: tuple[Path, ...]  # agent 可写的目录（至少含工作区）
-    network: bool  # 是否放开出口（push 时才要，尽量限到 github.com）
 
 
 @dataclass(frozen=True)
@@ -272,8 +249,7 @@ class VcsExecutionContext:
 class VcsOutcome:
     """VCS facts independently verified after a CodeAgent run."""
 
-    declared_backend: VcsKind
-    verified_backend: VcsKind
+    backend: VcsKind
     branch: str
     commit_sha: str
     remote_sha: str

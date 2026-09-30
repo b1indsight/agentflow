@@ -5,7 +5,8 @@ import pytest
 from psycopg.errors import UniqueViolation
 
 from app.control.service import ControlService
-from app.models import DeliveryState, FlowState, JobKind, JobState, ReviewItem, ReviewItemKind
+from app.delivery_models import OpenedDelivery
+from app.models import DeliveryState, FlowState, JobKind, JobState
 from app.store import Store
 
 
@@ -115,7 +116,7 @@ def test_flow_binding_delivery_and_tool_ledger_round_trip(store: Store) -> None:
     )
     assert created is True
     assert call.response is None
-    store.complete_tool_call("call-a", {"pr_number": 7})
+    store.complete_tool_call("call-a", OpenedDelivery(pr_number=7, url="https://github.com/owner/repo/pull/17", head_sha="abc", delivery_version=1))
     replay, created = store.reserve_tool_call(
         call_id="call-a",
         flow_id=flow.id,
@@ -125,7 +126,7 @@ def test_flow_binding_delivery_and_tool_ledger_round_trip(store: Store) -> None:
         arguments={"title": "Fix", "body": "Done"},
     )
     assert created is False
-    assert replay.response == {"pr_number": 7}
+    assert replay.response == OpenedDelivery(pr_number=7, url="https://github.com/owner/repo/pull/17", head_sha="abc", delivery_version=1)
 
 
 def test_pr_numbers_are_scoped_by_repository(store: Store) -> None:
@@ -164,14 +165,8 @@ def test_only_unstarted_remote_assignments_can_be_requeued(store: Store) -> None
     ) is True
     # Once the remote executor starts, replay may duplicate external effects; fail closed instead.
     assert store.requeue_assignment(first.id, "worker-1", "assignment-2") is False
-    assert store.fail_assignment(
-        first.id, "worker-1", "assignment-2", "worker disconnected"
-    ) is True
-    failed = store.get_job(first.id)
-    assert failed is not None
-    assert failed.state is JobState.FAILED
-    assert failed.last_error == "worker disconnected"
-    assert store.latest_failed_job(flow.id) == failed
+    current = store.get_job(first.id)
+    assert current is not None and current.state is JobState.RUNNING
 
 
 def test_result_inbox_deduplicates_and_rejects_conflicting_payloads(store: Store) -> None:
@@ -353,32 +348,6 @@ def test_unstarted_assignment_is_requeued_only_after_lease_expiry(
         assert store.get_job(job.id).state is JobState.QUEUED  # type: ignore[union-attr]
     finally:
         store.close()
-
-
-def test_review_item_upsert_preserves_one_feedback_record(store: Store) -> None:
-    flow = store.create_flow("owner/repo", 10, installation_id=None)
-    attempt = store.create_attempt(flow.id)
-    item = ReviewItem(
-        id=None,
-        attempt_id=attempt.id,
-        kind=ReviewItemKind.INLINE,
-        github_id=101,
-        author="reviewer",
-        body="Please add a bound.",
-    )
-    store.upsert_review_item(item)
-    item.body = "Please add a strict bound."
-    store.upsert_review_item(item)
-    store.mark_resolved(attempt.id, item.github_id)
-
-    pending = store.unrelayed_items(attempt.id)
-    assert len(pending) == 1
-    assert pending[0].body == "Please add a strict bound."
-    assert pending[0].resolved is True
-
-    assert pending[0].id is not None
-    store.mark_relayed([pending[0].id])
-    assert store.unrelayed_items(attempt.id) == []
 
 
 def test_independent_stores_share_persisted_state(

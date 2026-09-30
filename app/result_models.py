@@ -38,6 +38,7 @@ class PullRequestEffect(EffectSpec):
 
 
 class LabelsEffect(EffectSpec):
+    """Legacy persisted status intent; replay only ensures these labels are present."""
     kind: Literal["labels"] = "labels"
     # INITIAL resolves this explicit dependency from its preceding PR receipt.
     number: int | Literal["created_pr"]
@@ -54,7 +55,7 @@ class LabelEffect(EffectSpec):
     """Own one label's presence; unrelated labels never participate in reconciliation."""
 
     kind: Literal["label"] = "label"
-    number: int
+    number: int | Literal["created_pr"]
     label: str
     present: bool
 

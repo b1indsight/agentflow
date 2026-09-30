@@ -35,7 +35,7 @@ class GitHub:
         self.calls = []
         self.before_return = None
 
-    async def get_pull_request_status(self, installation, repo, number):
+    async def get_pull_request(self, installation, repo, number):
         self.calls.append((installation, repo, number))
         if self.before_return:
             self.before_return()
@@ -218,7 +218,7 @@ async def test_polling_is_bounded_and_one_error_does_not_starve_later_flows(stor
 
 
 async def test_status_adapter_reads_by_number_and_keeps_merge_sha(tmp_path, monkeypatch):
-    data = SimpleNamespace(number=17, state="closed", merged=True,
+    data = SimpleNamespace(number=17, state="closed", merged=True, title="PR", body=None,
         merged_at=datetime(2026, 9, 8, tzinfo=UTC), merge_commit_sha="a" * 40,
         head=SimpleNamespace(ref="flow/1", sha="b" * 40, repo=SimpleNamespace(full_name="owner/repo")),
         base=SimpleNamespace(ref="main", sha="c" * 40, repo=SimpleNamespace(full_name="owner/repo")))
@@ -226,13 +226,14 @@ async def test_status_adapter_reads_by_number_and_keeps_merge_sha(tmp_path, monk
     client = SimpleNamespace(rest=SimpleNamespace(pulls=SimpleNamespace(async_get=endpoint)))
     app = GitHubApp(settings(tmp_path))
     monkeypatch.setattr(app, "_installation_client", lambda _, **kwargs: client)
-    result = await app.get_pull_request_status(42, "owner/repo", 17)
+    result = await app.get_pull_request(42, "owner/repo", 17)
     assert endpoint.calls == [(("owner", "repo", 17), {})]
+    assert result.title == "PR" and result.body == ""
     assert result.repo == "owner/repo" and result.merge_commit_sha == "a" * 40
     assert result.head_sha == "b" * 40
     data.merged_at = None
     with pytest.raises(GitHubAdapterError):
-        await app.get_pull_request_status(42, "owner/repo", 17)
+        await app.get_pull_request(42, "owner/repo", 17)
 
 
 async def test_reconcile_concurrency_and_shutdown_are_bounded(store, merge_flow):
@@ -245,7 +246,7 @@ async def test_reconcile_concurrency_and_shutdown_are_bounded(store, merge_flow)
     active = set()
 
     class WaitingGitHub(GitHub):
-        async def get_pull_request_status(self, installation, repo, number):
+        async def get_pull_request(self, installation, repo, number):
             active.add(number)
             if len(active) == 2:
                 started.set()

@@ -4,6 +4,7 @@ import pytest
 from pydantic import ValidationError
 from pydantic.types import SecretStr
 
+from app.delivery_models import OpenedDelivery
 from app.models import TriageVerdict, VcsKind, Verdict
 from app.protocol import (
     PROTOCOL_VERSION,
@@ -93,12 +94,7 @@ def test_flow_tool_messages_are_strict_and_fenced() -> None:
     assert isinstance(parsed, FlowToolRequest)
     response = FlowToolResponse(
         call_id="call-1",
-        result={
-            "pr_number": 17,
-            "url": "https://github.com/owner/repo/pull/17",
-            "head_sha": "abc",
-            "delivery_version": 1,
-        },
+        result=OpenedDelivery(pr_number=17, url="https://github.com/owner/repo/pull/17", head_sha="abc", delivery_version=1),
     )
     assert isinstance(parse_server_message(response.model_dump_json()), FlowToolResponse)
 
@@ -126,7 +122,7 @@ def test_protocol_rejects_unknown_versions_and_result_shapes() -> None:
     with pytest.raises(ValidationError, match="exactly one"):
         FlowToolResponse(
             call_id="call-1",
-            result={"pr_number": 17},
+            result=OpenedDelivery(pr_number=17, url="https://github.com/owner/repo/pull/17", head_sha="abc", delivery_version=1),
             error="conflict",
             error_kind=FlowToolErrorKind.CONFLICT,
         )

@@ -30,8 +30,6 @@ from app.models import (
     Job,
     JobKind,
     JobState,
-    ReviewItem,
-    ReviewItemKind,
     TriageVerdict,
     VcsKind,
     Verdict,
@@ -76,18 +74,7 @@ class MemoryStore:
         self.delivery: FlowDelivery | None = None
         self.tool_calls: dict[str, Any] = {}
         self.enqueued: list[tuple[JobKind, dict | None]] = []
-        self.relayed: list[int] = []
         self.runs: list[tuple[int, str, int | None]] = []
-        self.feedback = [
-            ReviewItem(
-                id=101,
-                attempt_id=1,
-                kind=ReviewItemKind.INLINE,
-                github_id=500,
-                author="reviewer",
-                body="Please fix it.",
-            )
-        ]
 
     @contextmanager
     def transaction(self):
@@ -220,8 +207,6 @@ class MemoryStore:
     def list_attempts(self, flow_id: int) -> list[Attempt]:
         return [self.attempt] if self.attempt else []
 
-    def unrelayed_items(self, attempt_id: int) -> list[ReviewItem]:
-        return self.feedback
 
     def enqueue_job(
         self,
@@ -254,12 +239,6 @@ class MemoryStore:
     ) -> None:
         self.runs.append((attempt_id, kind, exit_code))
 
-    def mark_relayed(self, item_ids: list[int]) -> None:
-        self.relayed.extend(item_ids)
-
-    def mark_resolved(self, attempt_id: int, github_id: int) -> None:
-        pass
-
 
 class RecordingGitHub:
     def __init__(self) -> None:
@@ -274,10 +253,6 @@ class RecordingGitHub:
 
     async def get_issue(self, installation_id: int, repo: str, number: int) -> IssueSnapshot:
         return IssueSnapshot(number=number, title="Real issue", body="Real body", state="open")
-
-    async def get_review_pull_request(self, *args):
-        from tests.review_memory import review_context
-        return review_context().pull_request
 
     async def list_pull_request_files(self, *args):
         from app.context_models import FilePage
@@ -320,10 +295,14 @@ class RecordingGitHub:
     async def find_pull_request_by_head(self, *args: object) -> PullRequestSnapshot | None:
         return self.pull_request
 
-    async def get_pull_request_status(self, installation: int, repo: str, number: int) -> PullRequestStatus:
-        assert self.pull_request is not None
-        return PullRequestStatus(**self.pull_request.model_dump(), repo=repo, head_repository=repo,
-                                 base_sha="base", merged=False)
+    async def get_pull_request(self, installation: int, repo: str, number: int) -> PullRequestStatus:
+        from tests.review_memory import review_context
+        pr = review_context().pull_request
+        assert pr is not None
+        details = pr.model_dump()
+        if self.pull_request is not None:
+            details.update(self.pull_request.model_dump())
+        return PullRequestStatus(**details, repo=repo)
 
     async def open_pull_request(
         self,
@@ -371,11 +350,6 @@ class RecordingGitHub:
         reviewers: list[str],
     ) -> None:
         self.review_requests.append(reviewers)
-
-    async def set_labels(
-        self, installation_id: int, repo: str, number: int, labels: list[str]
-    ) -> None:
-        self.labels.append(labels)
 
     async def add_label(self, installation_id, repo, number, label):
         self.labels.append([*await self.get_labels(installation_id, repo, number), label])
@@ -668,7 +642,7 @@ async def test_triage_and_revision_results_remain_control_plane_side_effects(mon
     )
     assert triage_state is JobState.DONE
     assert store.enqueued == [(JobKind.REVISION, {"batch_id": 1, "instruction": "Fix it"})]
-    monkeypatch.setattr(github, "get_review_pull_request", current_pr)
+    monkeypatch.setattr(github, "get_pull_request", current_pr)
 
     revision_job = Job(id=7, flow_id=1, kind=JobKind.REVISION, state=JobState.RUNNING)
     task = await prepare(subject, revision_job)

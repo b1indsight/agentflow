@@ -4,8 +4,8 @@
 
 ```text
 签名正确的 Webhook
-  → FastAPI 后台交接并返回 202
-  → Event Router 去重 / 授权 / 写 PostgreSQL
+  → FastAPI 持久化 webhook inbox 并返回 202
+  → 后台消费者 → Event Router 去重 / 授权 / 写 PostgreSQL
   → flow + queued job
   → serve 通过认证 WebSocket 向公平选中的空闲 worker assign
   → FlowExecution 固定单槽 worker/repo，prepare 读取真实 Issue/default branch

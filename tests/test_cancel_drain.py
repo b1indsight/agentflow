@@ -213,11 +213,11 @@ async def test_cancelled_creation_persists_pr_identity_and_merge_before_stop(sto
     store.results.mark_dispatched(record)
     store.results.finish(record, EffectState.UNCERTAIN, error='lost response', delay=0)
     ControlService(store).cancel(flow)
-    remote = PullRequestStatus(number=17, repo=flow.repo, state='closed' if remote_state == 'merged' else 'open' if remote_state == 'foreign' else remote_state, head_repository='fork/repo' if remote_state == 'foreign' else flow.repo,
+    remote = PullRequestStatus(title="PR", body="", number=17, repo=flow.repo, state='closed' if remote_state == 'merged' else 'open' if remote_state == 'foreign' else remote_state, head_repository='fork/repo' if remote_state == 'foreign' else flow.repo,
                                head_branch=delivery.branch, base_branch='main', head_sha='a' * 40,
                                base_sha='b' * 40, merged=remote_state == 'merged', merged_at=store.now() if remote_state == 'merged' else None, merge_commit_sha='c' * 40 if remote_state == 'merged' else None)
     github = SimpleNamespace(find_pull_request_by_head=AsyncMock(return_value=remote),
-                             get_pull_request_status=AsyncMock(return_value=remote))
+                             get_pull_request=AsyncMock(return_value=remote))
     if remote_state == 'foreign':
         with pytest.raises(ResultPending):
             await ResultEffects(store, github).run(plan)

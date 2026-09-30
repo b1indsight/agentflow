@@ -11,6 +11,7 @@ from pathlib import Path
 from loguru import logger
 
 from app.context_builder import build_initial_prompt, build_revision_prompt
+from app.delivery_models import DeliveryReceipt
 from app.models import CodeAgentContext, CodexResult, InitialCodexResult, SessionUnavailable
 from app.ports import CodeAgent, Judge
 from app.protocol import (
@@ -40,7 +41,7 @@ from app.vcs import (
     verify_vcs_outcome,
 )
 from app.worker.journal import WorkerJournal
-from app.worker.tools import FlowToolCaller, flow_tool_broker
+from app.worker.tools import FlowToolBroker, FlowToolCaller
 
 VCS_VERIFICATION_EXIT_CODE = 65
 
@@ -58,9 +59,8 @@ class WorkerExecutor:
         code_agent: CodeAgent,
         judge: Judge,
         *,
-        worker_id: str | None = None,
-        tool_caller: FlowToolCaller | None = None,
-        journal: WorkerJournal | None = None,
+        worker_id: str,
+        journal: WorkerJournal,
         revision_timeout: float = 1200.0,
     ) -> None:
         self.worker_root = worker_root
@@ -69,13 +69,14 @@ class WorkerExecutor:
         self.worker_id = worker_id
         self.journal = journal
         self.revision_timeout = revision_timeout
-        self.tool_caller = tool_caller
 
     async def execute(
-        self, task: ExecutionTask, secret: AssignmentSecret | None = None
+        self, task: ExecutionTask, secret: AssignmentSecret | None = None,
+        *, tool_caller: FlowToolCaller
     ) -> ExecutionResult:
+        """Use the active assignment caller without retaining a client/executor reference cycle."""
         if isinstance(task, InitialTask):
-            return await self._initial(task, secret)
+            return await self._initial(task, secret, tool_caller)
         if isinstance(task, TriageTask):
             decision = await self.judge.triage(task.context)
             return TriageResult(batch_id=task.batch_id, feedback_refs=list(task.feedback),
@@ -90,8 +91,6 @@ class WorkerExecutor:
             if (self.worker_id != task.worker_id
                     or task.repo_identity != f"{self.worker_id}:{task.repo}"):
                 raise ValueError("archive repository identity does not match worker")
-            if self.journal is None:
-                raise ValueError("archive cleanup requires a durable worker journal")
             repo_path = self._repo_path(task.repo)
             paths = flow_cleanup_paths(repo_path, task.flow_id, self.worker_root)
             self.journal.verify_cleanup(task, repo_present=paths[0].is_dir())
@@ -100,17 +99,16 @@ class WorkerExecutor:
         raise TypeError(f"unsupported execution task: {type(task).__name__}")
 
     async def _initial(
-        self, task: InitialTask, secret: AssignmentSecret | None
+        self, task: InitialTask, secret: AssignmentSecret | None, tool_caller: FlowToolCaller
     ) -> InitialResult:
-        if self.worker_id is not None and task.repo_identity != f"{self.worker_id}:{task.repo}":
+        if task.repo_identity != f"{self.worker_id}:{task.repo}":
             return _vcs_failure(None, "", "binding", "repo identity does not match worker")
-        if self.tool_caller is not None and secret is None:
+        if secret is None:
             return _vcs_failure(None, "", "capability", "push capability is missing")
-        if secret is not None:
-            if secret.push.repository != task.repo:
-                return _vcs_failure(None, "", "capability", "push capability repository mismatch")
-            if secret.push.expires_at <= datetime.now(UTC):
-                return _vcs_failure(None, "", "capability", "push capability expired")
+        if secret.push.repository != task.repo:
+            return _vcs_failure(None, "", "capability", "push capability repository mismatch")
+        if secret.push.expires_at <= datetime.now(UTC):
+            return _vcs_failure(None, "", "capability", "push capability expired")
         repo_path = self._repo_path(task.repo)
         workspace = await prepare_flow_repo(repo_path, task.flow_id)
         vcs_context = await prepare_vcs_context(workspace, task.branch)
@@ -121,33 +119,24 @@ class WorkerExecutor:
             agent_guidance(task.branch),
         )
         schema_path = _write_output_schema(InitialCodexResult)
-        context = CodeAgentContext(
-            push_token=secret.push.token if secret else None,
-            push_repository=secret.push.repository if secret else None,
-        )
         tool_call_id: str | None = None
-        tool_result: dict[str, object] | None = None
+        tool_result: DeliveryReceipt | None = None
         tool_vcs_outcome = None
         try:
-            if self.tool_caller is None:
+            async with FlowToolBroker(tool_caller, vcs_context) as broker:
                 run = await self.code_agent.start(
-                    prompt, workspace, output_schema=schema_path, context=context
+                    prompt,
+                    workspace,
+                    output_schema=schema_path,
+                    context=CodeAgentContext(
+                        push_token=secret.push.token,
+                        push_repository=secret.push.repository,
+                        mcp_socket=broker.socket_path,
+                    ),
                 )
-            else:
-                async with flow_tool_broker(self.tool_caller, vcs_context) as broker:
-                    run = await self.code_agent.start(
-                        prompt,
-                        workspace,
-                        output_schema=schema_path,
-                        context=CodeAgentContext(
-                            push_token=context.push_token,
-                            push_repository=context.push_repository,
-                            mcp_socket=broker.socket_path,
-                        ),
-                    )
-                    tool_call_id = broker.last_call_id
-                    tool_result = broker.last_result
-                    tool_vcs_outcome = broker.last_vcs_outcome
+                tool_call_id = broker.last_call_id
+                tool_result = broker.last_result
+                tool_vcs_outcome = broker.last_vcs_outcome
         finally:
             schema_path.unlink(missing_ok=True)
         if run.exit_code != 0:
@@ -162,7 +151,7 @@ class WorkerExecutor:
             outcome = await verify_vcs_outcome(vcs_context, run.output.vcs_backend_used)
         except VcsVerificationError as error:
             return _vcs_failure(run.session_id, run.last_message, error.stage, str(error))
-        if self.tool_caller is not None and (tool_call_id is None or tool_result is None):
+        if (tool_call_id is None or tool_result is None):
             return _vcs_failure(
                 run.session_id,
                 run.last_message,
@@ -178,7 +167,7 @@ class WorkerExecutor:
             )
         logger.info(
             "verified CodeAgent VCS outcome: backend={} branch={} commit={}",
-            outcome.verified_backend,
+            outcome.backend,
             outcome.branch,
             outcome.commit_sha,
         )
@@ -186,7 +175,7 @@ class WorkerExecutor:
             session_id=run.session_id,
             last_message=run.last_message,
             exit_code=run.exit_code,
-            vcs_backend=outcome.verified_backend,
+            vcs_backend=outcome.backend,
             branch=outcome.branch,
             commit_sha=outcome.commit_sha,
             remote_sha=outcome.remote_sha,
@@ -207,7 +196,7 @@ class WorkerExecutor:
         )
         schema_path: Path | None = None
         try:
-            if self.worker_id is None or task.repo_identity != f"{self.worker_id}:{task.repo}":
+            if task.repo_identity != f"{self.worker_id}:{task.repo}":
                 raise VcsVerificationError("binding", "repo identity does not match worker")
             if (secret is None or secret.push.repository != task.repo
                     or secret.push.expires_at <= datetime.now(UTC)):
@@ -222,8 +211,7 @@ class WorkerExecutor:
             schema_path = _write_output_schema(CodexResult)
             run = None
             if task.session_id:
-                if self.journal is not None:
-                    self.journal.begin_revision("resume")
+                self.journal.begin_revision("resume")
                 try:
                     run = await self.code_agent.resume(
                         task.session_id, prompt, output_schema=schema_path, context=context,
@@ -232,8 +220,7 @@ class WorkerExecutor:
                     invocation = RevisionInvocation(mode="resume", session_id=task.session_id,
                                                     exit_code=1, failure="session_unavailable")
                     result.invocations.append(invocation)
-                    if self.journal is not None:
-                        self.journal.finish_invocation(invocation)
+                    self.journal.finish_invocation(invocation)
                     # A rejection is insufficient if anything changed while resume was attempted.
                     fallback_context = await prepare_revision_context(
                         workspace, task.branch, task.expected_head_sha, context,
@@ -244,16 +231,14 @@ class WorkerExecutor:
             if run is None:
                 result.mode = "fallback"
                 result.session_generation += 1
-                if self.journal is not None:
-                    self.journal.begin_revision("fallback")
+                self.journal.begin_revision("fallback")
                 run = await self.code_agent.start(
                     prompt, workspace, output_schema=schema_path, context=context,
                 )
             invocation = RevisionInvocation(mode=result.mode, session_id=run.session_id,
                                             exit_code=run.exit_code)
             result.invocations.append(invocation)
-            if self.journal is not None:
-                self.journal.finish_invocation(invocation)
+            self.journal.finish_invocation(invocation)
             result.session_id = run.session_id
             result.last_message = run.last_message
             if run.exit_code != 0:
@@ -268,7 +253,7 @@ class WorkerExecutor:
                 raise VcsVerificationError("session", "resume returned a different session")
             result.output = run.output
             outcome = await verify_revision_outcome(vcs_context, run.output.vcs_backend_used)
-            result.vcs_backend = outcome.verified_backend
+            result.vcs_backend = outcome.backend
             result.branch = outcome.branch
             result.commit_sha = outcome.commit_sha
             result.remote_sha = outcome.remote_sha

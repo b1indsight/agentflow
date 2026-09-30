@@ -1,6 +1,6 @@
-# Review 线程读取契约统一
+# 仓库概念与接口统一（起始于 Review 线程读取）
 
-**阶段：** 已实现并验证，独立代码审查无发现，待用户评审。
+**阶段：** 全部已批准审查项已实现并验证，等待本轮独立审查。
 **PR：** [#54](https://github.com/b1indsight/agentflow/pull/54)。
 **基线：** `main` / `717f97bb`。
 **Bookmark：** `refactor/review-thread-contracts`。
@@ -124,3 +124,66 @@ GraphQL connection 校验；不扩展到 webhook 生命周期或整个工作流�
 
 - 仓库 review gate 审查实现提交 `b4a80fa33c9a`，返回空 findings，审查通过。
 - 实现已推送至同一 bookmark / PR #54；本次追加仅更新文档状态。
+
+### 2026-09-30：用户批准修复全部审查问题
+
+**要求与批准：** 用户明确要求“修复刚刚找到的所有问题”。本次覆盖全仓审查的 8 组问题及
+4 项低成本清理，沿用同一文档、bookmark 和 PR；第 2 项线程解析已完成。此要求取代前一条
+“其余审查项不纳入本 PR”的范围约束；PR 暂时恢复 draft，完成后统一审查。
+
+**已批准方向与实施顺序：**
+
+1. 新 review 标签 effect 改用增量标签操作，保留旧账本读取/回放兼容；先证明已有用户标签
+   不被覆盖，并沿用回复、re-review、归档的 fence 与恢复测试。
+2. 远端 PR 事实统一读取入口与 decoder；上下文仅持有其文本裁剪投影，保持旧冻结上下文
+   字段和 digest 不变。保留已合并 PR 的严格事实校验。
+3. 明确交付准备/已交付回执的类型，串联 control、持久工具账本、协议和 worker；沿用 v9
+   已有 JSON 字段及合法回执形状，避免将持久化 digest 或重放契约变更伪装成内部重构。
+4. journal、worker 身份、tool caller、stop store 成为实际运行所需的依赖，移除生产不使用
+   的无依赖模式；测试注入明确替身或临时 journal，保留客户端/执行器组装的职责边界。
+5. 收紧 API Context/Gateway 类型；删掉闲置 webhook handler 生命周期，runtime 直接拥有
+   settle 调度；更新仍描述非持久 webhook 交接的当前架构文档。
+6. 移除旧 ReviewItem CRUD 运行时 API，保留旧表及单次迁移；迁移回归直接写旧 schema fixture。
+   移除无生产调用的 fail_assignment、Sandbox/JobDispatch 扩展桩、重复 VCS backend 字段、
+   broker 转包层，以及未使用的 delivery helper 参数。
+
+**风险与验证：** 首先为行为问题添加失败回归；改动现有测试以覆盖真实必需契约，避免
+测试替身维持不再支持的执行模式。持久回执往返 JSON/digest、旧迁移、标签重放与停止/重连
+为重点回归；完成后跑 PostgreSQL 全量、Ruff、Mypy 和 build。消融临时恢复标签全量覆盖，
+验证真实回归失败；类型收紧与死代码删除不新增运行时机制，无需为删除本身另造消融。
+新的实现提交需经过独立代码审查后推送，未经用户请求不合并 PR。
+
+
+### 2026-09-30：全部审查项实现与验证
+
+- 标签：新计划仅写 `LabelEffect`，旧 `LabelsEffect` 保留为持久兼容格式；执行与退休观察路径
+  共用标签增量语义。新交付及旧计划重放均保留人工标签，沿用原有 dispatch/revision fences。
+- PR：删除两个用途各自维护的 REST 方法，统一为 `get_pull_request` / `PullRequestStatus`；
+  `PullRequestDetails` 是远端模型的基类及冻结上下文投影，字段顺序/JSON 不变。显式投影避免
+  内存子类与数据库恢复对象不一致；保留 PR 身份快照用于创建结果，不合并不同责任的持久状态。
+- 回执：`PreparedDelivery | OpenedDelivery` 贯穿 tool ledger、control、协议、worker 和 MCP；
+  仅在边界序列化。保留 v9 `pull_request` wire 字段以及两种已有 JSON 形状；新增摘要往返回归。
+  `FlowToolCall.error` 保留旧记录读取，删除无调用的写错误参数。
+- worker：journal/worker_id/stops 必需；`execute(..., tool_caller=...)` 从当前 assignment 传入，
+  删除运行时回填的 client/executor 循环引用以及可跳过日志/停止检查的分支。
+  Gateway 返回真实 `WorkerRecord`，API 明确 metrics/host/port/token 依赖；测试提供实际 journal
+  或明确内存替身。无生产用途的 webhook handlers、router 转发与 broker 转包层已删除。
+- 旧接口：删除 ReviewItem 运行时对象及 CRUD、fail_assignment、SandboxPolicy/Sandbox/
+  WorkspaceWriteSandbox/JobDispatch；保留旧表迁移，迁移测试直接写旧表。VCS 验证结果只保留
+  一个 backend，删除未使用的 coordinator 参数。runtime 直接拥有 settle；当前架构文档已同步。
+- 验证：真实 PostgreSQL 全仓 **822 passed**；最后移除转发接口后，受影响路径再次
+  **120 passed**。Ruff、Mypy（137 个源文件）、`uv build` 和 diff 空白检查均通过。
+  未调用真实 GitHub/模型，未修改数据库 schema 或协议版本。
+
+### 2026-09-30：标签行为消融
+
+复现命令：`FLOWTOOL_TEST_DATABASE_URL=<test-db> uv run --no-sync python
+.cache/2026-09-30/label-contract-ablation.py`。脚本仅在独立 Python 进程中将增量调用替换为
+旧式全量 set_labels，源码不变；对新/旧两种 effect 使用同一条标签保留与重放测试。
+
+- 实现前：两例失败，人工 `bug` / `user-owned` 标签丢失。
+- 当前实现：两例通过（包含在 822 / 120 项回归中）。
+- 消融恢复覆盖语义：两例重新失败，实际标签仅剩 `flow:in-review`；因此保留增量操作。
+- 其余改动移除分支、重复规则或加强边界类型；未新增调度/重试机制，不为删除另造消融。
+
+本轮独立审查完成后记录结果并更新同一 PR；不自动合并。

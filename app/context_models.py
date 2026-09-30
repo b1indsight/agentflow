@@ -5,20 +5,12 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.github_models import IssueSnapshot, PullRequestSnapshot
+from app.github_models import IssueSnapshot, PullRequestDetails
 
 MAX_CONTEXT_BYTES = 96_000
 MAX_FILES = 40
 MAX_DISCUSSIONS = 60
 SOURCE_CHARS = 4_000
-
-
-class ReviewPullRequest(PullRequestSnapshot):
-    title: str
-    body: str
-    base_sha: str
-    merged: bool = False
-    head_repository: str | None = None
 
 
 class ContextFile(BaseModel):
@@ -64,7 +56,7 @@ class ReviewContext(BaseModel):
     issue_number: int
     pr_number: int
     issue: IssueSnapshot | None = None
-    pull_request: ReviewPullRequest | None = None
+    pull_request: PullRequestDetails | None = None
     files: list[ContextFile] = Field(default_factory=list)
     discussions: list[ContextDiscussion] = Field(default_factory=list)
     feedback: list[ContextDiscussion] = Field(default_factory=list)
