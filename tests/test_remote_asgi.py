@@ -5,6 +5,7 @@ from starlette.testclient import TestClient
 from app.control.api import create_app
 from app.control.gateway import WorkerGateway
 from app.models import Job, JobKind, JobState
+from app.observability import Metrics
 from app.protocol import (
     Assignment,
     AssignmentSecret,
@@ -22,6 +23,7 @@ from app.protocol import (
     Succeeded,
     parse_server_message,
 )
+from app.stop_store import StopStore
 from app.store import Store
 
 
@@ -68,11 +70,12 @@ class AsgiCoordinator:
 
 class AsgiContext:
     def __init__(self, store: Store, attempt_id: int) -> None:
-        self.settings = SimpleNamespace(github_webhook_secret="unused")
-        self.router = SimpleNamespace()
+        self.settings = SimpleNamespace(github_webhook_secret="unused", webhook_max_body_bytes=1024,
+                                        metrics_token=None, host="test", port=0)
+        self.metrics = Metrics()
         self.gateway = WorkerGateway(
             store,
-            AsgiCoordinator(attempt_id, store),
+            AsgiCoordinator(attempt_id, store), stops=StopStore(store),
             worker_tokens={"worker-1": "worker-secret"},
             poll_interval=0.01,
         )
@@ -85,9 +88,6 @@ class AsgiContext:
 
     async def receive_webhook(self, event_type, delivery_id, payload, digest) -> None:
         raise AssertionError("webhook receipt is not used in this test")
-
-    def spawn_handler(self, coroutine) -> None:
-        raise AssertionError("webhook handler is not used in this test")
 
     async def shutdown(self) -> None:
         pass

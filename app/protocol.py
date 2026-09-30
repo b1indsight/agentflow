@@ -19,6 +19,7 @@ from pydantic import (
 )
 
 from app.context_models import MAX_CONTEXT_BYTES, ReviewContext
+from app.delivery_models import DeliveryReceipt
 from app.judge_models import JudgeDecision
 from app.models import CodexResult, FeedbackRef, JobState, VcsKind
 from app.review_models import ReviewFeedback
@@ -148,7 +149,8 @@ class InitialResult(ProtocolModel):
     remote_sha: str | None = None
     pushed: bool = False
     open_pr_call_id: str | None = None
-    pull_request: dict[str, object] | None = None
+    # Keep the v9 wire name: this is a tool receipt, not a remote PR snapshot.
+    pull_request: DeliveryReceipt | None = None
 
 
 class ReviewResult(ProtocolModel):
@@ -373,7 +375,7 @@ class FlowToolErrorKind(StrEnum):
 class FlowToolResponse(Message):
     type: Literal["flow_tool_response"] = "flow_tool_response"
     call_id: str
-    result: dict[str, object] | None = None
+    result: DeliveryReceipt | None = None
     error: str | None = None
     error_kind: FlowToolErrorKind | None = None
     retryable: bool = False

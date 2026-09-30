@@ -174,21 +174,14 @@ def test_failed_batch_claim_rolls_back_deadline_and_job(store, review_flow, monk
 
 
 def test_legacy_import_preserves_pending_feedback_without_trusting_resolution(store, review_flow):
-    from app.models import ReviewItem
-
     flow, _ = review_flow
-    store.upsert_review_item(
-        ReviewItem(
-            id=None,
-            attempt_id=flow.current_attempt_id,
-            kind=ReviewItemKind.INLINE,
-            github_id=555,
-            author="alice",
-            body="Unverified old response",
-            resolved=True,
-        )
-    )
     with store.connection() as connection:
+        # Write the retired schema directly; only migration still reads these rows.
+        connection.execute(
+            "INSERT INTO review_threads(attempt_id,kind,github_id,author,body,resolved,created_at)"
+            " VALUES(%s,'inline',555,'alice','Unverified old response',TRUE,%s)",
+            (flow.current_attempt_id, store.now()),
+        )
         connection.execute("DELETE FROM review_migrations")
     store.reviews.migrate_legacy()
     store.reviews.migrate_legacy()
@@ -277,7 +270,7 @@ async def test_bot_mentions_always_enter_triage(
     )
     router = EventRouter(store, ControlService(store), settings)
     # Even an allowlisted author's direct request or multiline code example needs Judge.
-    await router.handle(
+    router.dispatch(
         event_type,
         "comment",
         {
@@ -335,7 +328,7 @@ async def test_review_actions_have_explicit_dispatch_semantics(
         submit_grace_seconds=15,
     )
     router = EventRouter(store, ControlService(store), settings)
-    await router.handle(
+    router.dispatch(
         "pull_request_review",
         "review",
         {
@@ -427,7 +420,7 @@ async def test_prepare_freezes_once_across_restart_and_later_remote_edits(store,
     restarted = Store(store.database_url, clock=lambda: clock.now)
 
     class NoReads(RecordingGitHub):
-        async def get_review_pull_request(self, *args):
+        async def get_pull_request(self, *args):
             pytest.fail("prepare recovery must reuse persisted context")
     try:
         again = await coordinator(restarted, NoReads()).prepare(restarted.get_job(job.id))
@@ -499,8 +492,8 @@ async def test_answer_rechecks_lifecycle_and_remote_head_before_sending(store, r
     class ChangedGitHub(RecordingGitHub):
         changed = False
 
-        async def get_review_pull_request(self, *args):
-            pr = await super().get_review_pull_request(*args)
+        async def get_pull_request(self, *args):
+            pr = await super().get_pull_request(*args)
             if self.changed and change in {"closed", "merged", "head"}:
                 return pr.model_copy(update={
                     "state": "closed" if change == "closed" else "open",
@@ -670,7 +663,7 @@ async def test_approval_invalidates_body_without_waking_waiting_feedback(
         settle_seconds=75, submit_grace_seconds=15,
     ))
     # Both a fresh approval and approval of an existing review must leave discussion asleep.
-    await router.handle("pull_request_review", "approval", {
+    router.dispatch("pull_request_review", "approval", {
         "action": "submitted", "repository": {"full_name": "owner/repo"},
         "pull_request": {"number": 17}, "sender": {"login": "alice"},
         "review": {"id": approval_id, "state": "approved", "body": "Looks good",

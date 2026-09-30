@@ -10,6 +10,7 @@ from app.context_models import (
     ContextDiscussion,
     ReviewContext,
 )
+from app.github_models import PullRequestDetails
 from app.models import Flow
 from app.ports import GitHubClient
 from app.review_models import ReviewBatch
@@ -34,22 +35,21 @@ async def build_review_context(
         return value[:SOURCE_CHARS]
 
     # API failures belong to the pre-Assignment retry boundary, not a frozen partial context.
-    pr = await github.get_review_pull_request(installation, flow.repo, pr_number)
+    pr = await github.get_pull_request(installation, flow.repo, pr_number)
     issue = await github.get_issue(installation, flow.repo, flow.issue_number)
     files = await github.list_pull_request_files(installation, flow.repo, pr_number)
     discussion = await github.list_pull_request_discussions(installation, flow.repo, pr_number)
-    after = await github.get_review_pull_request(installation, flow.repo, pr_number)
-    if pr and after and (pr.head_sha, pr.base_sha, pr.state, pr.merged) != (
+    after = await github.get_pull_request(installation, flow.repo, pr_number)
+    if (pr.head_sha, pr.base_sha, pr.state, pr.merged) != (
         after.head_sha, after.base_sha, after.state, after.merged,
     ):
         limitations.append("pull_request:changed-during-read")
-    if pr and (pr.number != pr_number or pr.state != "open" or pr.merged):
+    if pr.number != pr_number or pr.state != "open" or pr.merged:
         limitations.append("pull_request:not-current-open-pr")
     if issue and issue.number != flow.issue_number:
         limitations.append("issue:identity-mismatch")
-    if pr:
-        pr = pr.model_copy(update={"title": clip(pr.title, "pr-title"),
-                                   "body": clip(pr.body, "pr-body")})
+    pr = pr.model_copy(update={"title": clip(pr.title, "pr-title"),
+                               "body": clip(pr.body, "pr-body")})
     if issue:
         issue = issue.model_copy(update={"title": clip(issue.title, "issue-title"),
                                          "body": clip(issue.body, "issue-body")})
@@ -104,7 +104,7 @@ async def build_review_context(
         limitations.append("open-points:truncated")
     snapshot = ReviewContext(
         batch_id=batch.id, repo=flow.repo, issue_number=flow.issue_number, pr_number=pr_number,
-        issue=issue, pull_request=pr, files=bounded_files,
+        issue=issue, pull_request=PullRequestDetails.model_validate(pr.model_dump()), files=bounded_files,
         discussions=discussions[:MAX_DISCUSSIONS], feedback=feedback,
         open_points=[clip(point, "open-points") for point in batch.open_points[:MAX_DISCUSSIONS]],
         limitations=sorted(set(limitations)),

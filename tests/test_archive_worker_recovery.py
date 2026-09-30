@@ -19,6 +19,7 @@ from app.protocol import (
     parse_server_message,
     parse_worker_message,
 )
+from app.stop_store import StopStore
 from app.vcs import prepare_flow_repo
 from app.worker.client import WorkerClient
 from app.worker.executor import WorkerExecutor
@@ -29,7 +30,7 @@ from tests.test_coordinator import RecordingGitHub, coordinator
 from tests.test_merge import route_merge
 from tests.test_remote_e2e import QueueConnection, QueueSocket
 from tests.test_vcs import _git_fixture, _jj
-from tests.test_worker_executor import RecordingAgent, RecordingJudge
+from tests.test_worker_executor import RecordingAgent, RecordingJudge, RecordingToolCaller
 from tests.test_workflow_transactions import accepted_triage
 
 
@@ -65,7 +66,7 @@ class ObservedClient(WorkerClient):
 
 async def connect_once(store, subject, executor, journal, *, drop_ack=False, client=None):
     outgoing, incoming = asyncio.Queue(), asyncio.Queue()
-    gateway = WorkerGateway(store, subject, worker_tokens={"worker-a": "secret"}, poll_interval=60)
+    gateway = WorkerGateway(store, subject, stops=StopStore(store), worker_tokens={"worker-a": "secret"}, poll_interval=60)
     archive_id = next(job.id for job in store.list_jobs(journal.load().flow_id)
                       if job.kind is JobKind.ARCHIVE)
     if client is None:
@@ -137,7 +138,7 @@ async def test_original_worker_recovers_cleanup_and_replays_without_redeleting(
     lock.acquire()
     try:
         if window not in {"before-received", "before-delete", "started-lost"}:
-            result = await executor.execute(task)
+            result = await executor.execute(task, tool_caller=RecordingToolCaller())
             if window in {"terminal", "pending", "ack", "result-started-lost"}:
                 journal.record_terminal(Succeeded(job_id=job.id, assignment_token="archive-token",
                     connection_epoch="epoch-a", result=result))

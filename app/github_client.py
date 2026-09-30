@@ -29,7 +29,6 @@ from app.context_models import (
     ContextFile,
     DiscussionPage,
     FilePage,
-    ReviewPullRequest,
 )
 from app.github_feedback import read_feedback_page
 from app.github_models import (
@@ -135,23 +134,7 @@ class GitHubApp:
 
         return await self._execute("get_repository", operation)
 
-    async def get_review_pull_request(
-        self, installation_id: int, repo: str, number: int,
-    ) -> ReviewPullRequest:
-        owner, name = self._split_repo(repo)
-        client = self._installation_client(installation_id, auto_retry=False)
-
-        async def operation() -> ReviewPullRequest:
-            data = (await client.rest.pulls.async_get(owner, name, number)).parsed_data
-            return ReviewPullRequest(
-                **self._pull_snapshot(data).model_dump(), title=data.title, body=data.body or "",
-                base_sha=data.base.sha, merged=data.merged,
-                head_repository=data.head.repo.full_name if data.head.repo is not None else None,
-            )
-
-        return await self._execute("get_review_pull_request", operation)
-
-    async def get_pull_request_status(
+    async def get_pull_request(
         self, installation_id: int, repo: str, number: int,
     ) -> PullRequestStatus:
         """Read the associated PR by number; a missing or inaccessible PR is not a close event."""
@@ -162,12 +145,13 @@ class GitHubApp:
             data = (await client.rest.pulls.async_get(owner, name, number)).parsed_data
             return PullRequestStatus(
                 **self._pull_snapshot(data).model_dump(), repo=data.base.repo.full_name,
+                title=data.title, body=data.body or "",
                 base_sha=data.base.sha, merged=data.merged, merged_at=data.merged_at,
                 merge_commit_sha=data.merge_commit_sha,
                 head_repository=data.head.repo.full_name if data.head.repo is not None else None,
             )
 
-        return await self._execute("get_pull_request_status", operation)
+        return await self._execute("get_pull_request", operation)
 
     async def list_pull_request_files(
         self, installation_id: int, repo: str, number: int,
@@ -495,16 +479,6 @@ class GitHubApp:
             return value
 
         return await self._execute("review_thread_resolved", operation)
-
-    async def set_labels(
-        self, installation_id: int, repo: str, number: int, labels: list[str]
-    ) -> None:
-        owner, name = self._split_repo(repo)
-        client = self._installation_client(installation_id, auto_retry=False)
-        await self._execute(
-            "set_labels",
-            lambda: client.rest.issues.async_set_labels(owner, name, number, labels=labels),
-        )
 
     async def add_label(
         self, installation_id: int, repo: str, number: int, label: str

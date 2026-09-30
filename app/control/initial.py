@@ -42,6 +42,6 @@ def initial_delivery_mismatch(
         return "pull request handle is missing"
     if tool_call.response != result.pull_request:
         return "pull request handle does not match the persisted tool response"
-    if result.pull_request.get("head_sha") != delivery.head_sha:
+    if result.pull_request.head_sha != delivery.head_sha:
         return "prepared delivery head SHA does not match delivery"
     return None

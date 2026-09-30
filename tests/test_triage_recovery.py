@@ -10,6 +10,7 @@ from app.control.service import ControlService
 from app.models import FlowState, JobState, TriageVerdict, Verdict
 from app.protocol import Succeeded, TriageResult, terminal_digest
 from app.review_models import BatchState
+from app.stop_store import StopStore
 from app.store import Store
 from tests.review_memory import judge_decision
 from tests.test_coordinator import RecordingGitHub, coordinator
@@ -106,9 +107,9 @@ async def test_retry_replaces_stale_context_and_keeps_the_original_audit(store, 
     class ChangedGitHub(RecordingGitHub):
         reads = 0
 
-        async def get_review_pull_request(self, *args):
+        async def get_pull_request(self, *args):
             self.reads += 1
-            pr = await super().get_review_pull_request(*args)
+            pr = await super().get_pull_request(*args)
             if self.reads == 3:
                 # New feedback arrives after the old snapshot but before its rejected publication.
                 clock.now += timedelta(seconds=1)
@@ -182,7 +183,7 @@ async def test_gateway_renews_lease_while_preparing_and_fetching_capability(
         async def secret(*args):
             await release.wait()
         monkeypatch.setattr(subject, "assignment_secret", secret)
-    gateway = WorkerGateway(store, subject, worker_tokens={"worker-a": "x"})
+    gateway = WorkerGateway(store, subject, stops=StopStore(store), worker_tokens={"worker-a": "x"})
     original_wait = asyncio.wait
     ticks = 0
 

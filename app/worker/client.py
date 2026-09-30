@@ -11,6 +11,7 @@ from uuid import uuid4
 from loguru import logger
 from websockets.asyncio.client import connect
 
+from app.delivery_models import DeliveryReceipt
 from app.models import VcsOutcome
 from app.protocol import (
     Assignment,
@@ -37,7 +38,8 @@ from app.protocol import (
     Succeeded,
     parse_server_message,
 )
-from app.worker.journal import JournalRecord, WorkerJournal
+from app.worker.journal import WorkerJournal
+from app.worker.tools import FlowToolCaller
 
 
 class Connection(Protocol):
@@ -48,7 +50,7 @@ class Connection(Protocol):
 
 class TaskExecutor(Protocol):
     async def execute(
-        self, task: ExecutionTask, secret=None
+        self, task: ExecutionTask, secret=None, *, tool_caller: FlowToolCaller
     ) -> ExecutionResult: ...
 
 
@@ -75,7 +77,7 @@ class FlowToolCallError(WorkerProtocolError):
 @dataclass
 class _PendingTool:
     request: FlowToolRequest
-    future: asyncio.Future[dict[str, object]]
+    future: asyncio.Future[DeliveryReceipt]
 
 
 class WorkerClient:
@@ -88,7 +90,7 @@ class WorkerClient:
         worker_token: str,
         serve_ws_url: str,
         executor: TaskExecutor,
-        journal: WorkerJournal | None = None,
+        journal: WorkerJournal,
         reconnect_min_backoff: float = 1.0,
         reconnect_max_backoff: float = 30.0,
         reconnect_jitter: float = 0.2,
@@ -116,13 +118,13 @@ class WorkerClient:
         *,
         call_id: str | None = None,
         vcs_outcome: VcsOutcome,
-    ) -> dict[str, object]:
+    ) -> DeliveryReceipt:
         """Route one worker-local tool invocation over the active assignment socket."""
 
         assignment = self._assignment
         if assignment is None:
             raise WorkerProtocolError("Flow tool call has no active assignment")
-        future: asyncio.Future[dict[str, object]] = asyncio.get_running_loop().create_future()
+        future: asyncio.Future[DeliveryReceipt] = asyncio.get_running_loop().create_future()
         request = FlowToolRequest(
             job_id=assignment.job_id,
             flow_id=assignment.flow_id,
@@ -132,7 +134,7 @@ class WorkerClient:
             call_id=call_id or uuid4().hex,
             name=name,
             arguments=arguments,
-            vcs_backend=vcs_outcome.verified_backend,
+            vcs_backend=vcs_outcome.backend,
             branch=vcs_outcome.branch,
             commit_sha=vcs_outcome.commit_sha,
             remote_sha=vcs_outcome.remote_sha,
@@ -204,7 +206,7 @@ class WorkerClient:
         elif isinstance(first, ResumeAssignment):
             self._validate_recovery_message(first.job_id, first.assignment_token)
             if self._assignment is None or self._execution is None:
-                record = self._journal_record()
+                record = self.journal.load()
                 if record is None or record.state != "started" or record.archive_task is None:
                     raise WorkerProtocolError("serve resumed an assignment without a live executor")
                 # Runtime holds the original root's process lock. Archive starts no subprocesses,
@@ -214,7 +216,7 @@ class WorkerClient:
                     assignment_token=record.assignment_token, connection_epoch=first.connection_epoch,
                     task=record.archive_task,
                 )
-                self._execution = asyncio.create_task(self.executor.execute(record.archive_task))
+                self._execution = asyncio.create_task(self.executor.execute(record.archive_task, tool_caller=self))
             self._assignment = self._assignment.model_copy(
                 update={"connection_epoch": first.connection_epoch}
             )
@@ -262,8 +264,7 @@ class WorkerClient:
         if self._assignment is not None or self._execution is not None:
             raise WorkerProtocolError("received a second assignment while busy")
         self._assignment = assignment
-        if self.journal is not None:
-            self.journal.record_received(assignment)
+        self.journal.record_received(assignment)
         await connection.send(
             Started(
                 job_id=assignment.job_id,
@@ -271,13 +272,12 @@ class WorkerClient:
                 connection_epoch=assignment.connection_epoch,
             ).model_dump_json()
         )
-        if self.journal is not None:
-            self.journal.record_started()
+        self.journal.record_started()
         with logger.contextualize(flow_id=assignment.flow_id, job_id=assignment.job_id,
                                   worker_id=self.worker_id, epoch=assignment.connection_epoch):
             logger.bind(event="job_started", reason_code="ok").info("")
             self._execution = asyncio.create_task(
-                self.executor.execute(assignment.task, assignment.secret)
+                self.executor.execute(assignment.task, assignment.secret, tool_caller=self)
             )
         await self._drive_assignment(connection, heartbeat_interval)
 
@@ -290,7 +290,7 @@ class WorkerClient:
         execution = self._execution
         if assignment is None:
             raise WorkerProtocolError("active assignment is missing")
-        record = self._journal_record()
+        record = self.journal.load()
         if execution is None and (record is None or record.terminal is None):
             raise WorkerProtocolError("active assignment has no executor or terminal result")
         heartbeat = asyncio.create_task(
@@ -380,8 +380,8 @@ class WorkerClient:
             await asyncio.gather(incoming, heartbeat, return_exceptions=True)
 
     async def _handle_stop(self, connection: Connection, request: StopExecution) -> None:
-        record = self._journal_record()
-        if record is None or self.journal is None or (
+        record = self.journal.load()
+        if record is None or (
                 record.job_id, record.flow_id, record.assignment_token) != (
                 request.job_id, request.flow_id, request.assignment_token):
             raise WorkerProtocolError("stop blocked: original journal is missing")
@@ -449,8 +449,7 @@ class WorkerClient:
                     assignment.secret.push.token.get_secret_value(), "[REDACTED]",
                 )
             )
-        if self.journal is not None:
-            self.journal.record_terminal(terminal)
+        self.journal.record_terminal(terminal)
         self._execution = None
         return terminal
 
@@ -476,14 +475,11 @@ class WorkerClient:
         if self._connection_task is not None:
             self._connection_task.cancel()
 
-    def _journal_record(self) -> JournalRecord | None:
-        return self.journal.load() if self.journal is not None else None
-
     def _recovery_descriptor(self) -> RecoveryDescriptor | None:
-        if (self.journal is not None and self._execution is not None
+        if (self._execution is not None
                 and self._execution.done() and not self._execution.cancelled()):
             self._record_completed_execution()
-        record = self._journal_record()
+        record = self.journal.load()
         if record is None:
             return None
         return RecoveryDescriptor(
@@ -501,14 +497,14 @@ class WorkerClient:
         )
 
     def _validate_recovery_message(self, job_id: int, token: str) -> None:
-        record = self._journal_record()
+        record = self.journal.load()
         if record is None or (record.job_id, record.assignment_token) != (job_id, token):
             raise WorkerProtocolError("recovery response does not match the worker journal")
 
     async def _replay_result(
         self, connection: Connection, replay: ReplayResult
     ) -> None:
-        record = self._journal_record()
+        record = self.journal.load()
         if record is None or record.terminal is None:
             raise WorkerProtocolError("serve requested a result missing from the journal")
         terminal = record.terminal.model_copy(
@@ -526,14 +522,12 @@ class WorkerClient:
         self._acknowledge(accepted)
 
     def _acknowledge(self, accepted: ResultAccepted) -> None:
-        if self.journal is not None:
-            self.journal.acknowledge(accepted.job_id, accepted.state)
+        self.journal.acknowledge(accepted.job_id, accepted.state)
         self._assignment = None
         self._execution = None
 
     def _clear_rejected(self, job_id: int) -> None:
-        if self.journal is not None:
-            self.journal.clear_rejected(job_id)
+        self.journal.clear_rejected(job_id)
         self._assignment = None
 
     async def _cancel_execution(self) -> None:

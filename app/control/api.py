@@ -6,27 +6,27 @@ import hashlib
 import hmac
 import json
 import re
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable
 from contextlib import asynccontextmanager
-from typing import Any, Protocol
+from typing import Protocol
 
 from fastapi import FastAPI, Header, Request, Response, WebSocket
 from loguru import logger
 from psycopg import Error as DatabaseError
 from psycopg_pool import PoolTimeout
+from pydantic import SecretStr
 from starlette.middleware.base import RequestResponseEndpoint
 
 from app.observability import Metrics
 from app.webhook_store import DeliveryConflict
 
 
-class WebhookSettings(Protocol):
+class ApplicationSettings(Protocol):
     github_webhook_secret: str
     webhook_max_body_bytes: int
-
-
-class WebhookRouter(Protocol):
-    async def handle(self, event_type: str, delivery_id: str, payload: dict) -> None: ...
+    metrics_token: SecretStr | None
+    host: str
+    port: int
 
 
 class WorkerGateway(Protocol):
@@ -35,10 +35,10 @@ class WorkerGateway(Protocol):
 
 class ApplicationContext(Protocol):
     @property
-    def settings(self) -> WebhookSettings: ...
+    def settings(self) -> ApplicationSettings: ...
 
     @property
-    def router(self) -> WebhookRouter: ...
+    def metrics(self) -> Metrics: ...
 
     @property
     def gateway(self) -> WorkerGateway: ...
@@ -46,8 +46,6 @@ class ApplicationContext(Protocol):
     async def ready(self) -> bool: ...
 
     def startup(self) -> None: ...
-
-    def spawn_handler(self, coroutine: Coroutine[Any, Any, None]) -> None: ...
 
     async def receive_webhook(self, event_type: str, delivery_id: str, payload: dict, digest: str) -> None: ...
 
@@ -80,11 +78,9 @@ def create_app(
     async def lifespan(application: FastAPI):
         context = factory()
         application.state.ctx = context
-        application.state.metrics = getattr(context, "metrics", None) or Metrics()
+        application.state.metrics = context.metrics
         context.startup()
-        host = getattr(context.settings, "host", "test")
-        port = getattr(context.settings, "port", 0)
-        logger.info("FlowTool control plane up on {}:{}", host, port)
+        logger.info("FlowTool control plane up on {}:{}", context.settings.host, context.settings.port)
         try:
             yield
         finally:
@@ -103,7 +99,8 @@ def create_app(
 
     @application.get("/metrics")
     async def metrics(request: Request) -> Response:
-        token = getattr(request.app.state.ctx.settings, "metrics_token", None)
+        context: ApplicationContext = request.app.state.ctx
+        token = context.settings.metrics_token
         if token is None or not token.get_secret_value():
             return Response(status_code=404)
         expected = "Bearer " + token.get_secret_value()

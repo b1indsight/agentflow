@@ -84,7 +84,7 @@ M1/M2 已合并不等于真实闭环已验收；M3 尚未完成，M4–M5 仍为
      待实现：示例插件 `post-merge-summary` 的插件体（读会话 + diff → 提炼风格偏好 → 提 PR 更新 repo 的 skill），目前只打日志。
 
 **架构取向：hexagonal（ports & adapters）。** control core（ControlService + JobCoordinator + store）只依赖端口：
-`CodeAgent` / `Judge` / `Sandbox` / `JobDispatch` / `GitHubClient` / `Plugin hooks`。
+`CodeAgent` / `Judge` / `GitHubClient` / `Plugin hooks`；worker 执行器直接管理执行与工作区约束。
 **VCS 不是端口**：它由 Flow repo 准备、自探测 guidance 和只读事实核验函数组成（见 §4.6）。
 当前已给端口放置最简 adapter 或桩
 （codex / bub / legacy workspace-write / WebSocket worker / githubkit / 插件集）。

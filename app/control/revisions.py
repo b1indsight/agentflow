@@ -57,7 +57,7 @@ async def verify_revision_remote(
     if (flow.installation_id is None or delivery.state is not DeliveryState.OPEN
             or delivery.pr_number is None or not delivery.base_branch or not delivery.head_sha):
         return "revision has no open verified delivery"
-    pr = await github.get_review_pull_request(flow.installation_id, flow.repo, delivery.pr_number)
+    pr = await github.get_pull_request(flow.installation_id, flow.repo, delivery.pr_number)
     ref = await github.get_ref(flow.installation_id, flow.repo, delivery.branch)
     if (pr.number != delivery.pr_number or pr.state != "open" or pr.merged
             or pr.head_repository != flow.repo

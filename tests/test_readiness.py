@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from fastapi.testclient import TestClient
 
 from app.control.api import create_app
+from app.observability import Metrics
 from app.readiness import database_ready
 from app.worker.health import HealthFile, healthy
 
@@ -22,7 +23,8 @@ async def test_database_failure_is_not_liveness_failure(monkeypatch):
     assert not await database_ready('unused')
 
     class Context:
-        settings = SimpleNamespace()
+        settings = SimpleNamespace(host="test", port=0, metrics_token=None)
+        metrics = Metrics()
         def startup(self): pass
         async def shutdown(self): pass
         async def ready(self): return False

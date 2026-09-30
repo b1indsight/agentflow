@@ -39,11 +39,9 @@ class SettleScheduler:
     def __init__(
         self,
         store: Store,
-        settings: RouterSettings,
         jobs_available: Callable[[], None],
     ) -> None:
         self.store = store
-        self.settings = settings
         self.jobs_available = jobs_available
 
     def sweep(self) -> None:
@@ -61,10 +59,6 @@ class EventRouter:
         self.store = store
         self.service = service
         self.settings = settings
-        self.settle = SettleScheduler(store, settings, service.notify_jobs)
-
-    async def handle(self, event_type: str, delivery_id: str, payload: dict) -> None:
-        self.dispatch(event_type, delivery_id, payload)
 
     def dispatch(self, event_type: str, delivery_id: str, payload: dict) -> None:
         """Apply DB-only event transitions; callers may bind one outer transaction."""

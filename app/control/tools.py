@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
+from app.delivery_models import DeliveryReceipt, OpenedDelivery, PreparedDelivery
 from app.github_models import GitHubAdapterError, GitHubErrorKind, PullRequestSnapshot
 from app.models import TERMINAL_STATES, DeliveryState, FlowDelivery
 from app.ports import GitHubClient
@@ -179,18 +180,16 @@ class FlowToolService:
                         FlowToolErrorKind.CONFLICT,
                         "open Flow delivery head does not match the remote branch",
                     )
-                prepared_response = self._delivery_response(delivery)
+                prepared_response: DeliveryReceipt = self._delivery_response(delivery)
             else:
                 delivery.state = DeliveryState.OPENING
                 delivery.head_sha = remote.sha
                 delivery.title = title
                 delivery.body = body
                 tx.update_delivery(delivery)
-                prepared_response = {
-                    "status": "prepared",
-                    "head_sha": remote.sha,
-                    "delivery_version": delivery.version,
-                }
+                prepared_response = PreparedDelivery(
+                    status="prepared", head_sha=remote.sha, delivery_version=delivery.version,
+                )
             tx.complete_tool_call(request.call_id, prepared_response)
         return FlowToolResponse(call_id=request.call_id, result=prepared_response)
 
@@ -214,13 +213,11 @@ class FlowToolService:
             )
 
     @staticmethod
-    def _delivery_response(delivery: FlowDelivery) -> dict[str, object]:
-        return {
-            "pr_number": delivery.pr_number,
-            "url": delivery.url,
-            "head_sha": delivery.head_sha,
-            "delivery_version": delivery.version,
-        }
+    def _delivery_response(delivery: FlowDelivery) -> OpenedDelivery:
+        assert delivery.pr_number is not None and delivery.url is not None
+        assert delivery.head_sha is not None
+        return OpenedDelivery(pr_number=delivery.pr_number, url=delivery.url,
+                              head_sha=delivery.head_sha, delivery_version=delivery.version)
 
     @staticmethod
     def _closing_body(body: str, issue_number: int) -> str:

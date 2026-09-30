@@ -12,6 +12,7 @@ from app.control.preparation import PreparationStale
 from app.github_models import GitHubAdapterError, GitHubErrorKind
 from app.models import JobKind, JobState, ReviewItemKind
 from app.protocol import PROTOCOL_VERSION, RevisionTask, TriageTask
+from app.stop_store import StopStore
 from app.store import Store
 from tests.test_coordinator import coordinator
 from tests.test_review_batches import feedback, ingest
@@ -23,7 +24,7 @@ from tests.test_revision_recovery import (
 
 
 def gateway(store, subject):
-    return WorkerGateway(store, subject, worker_tokens={})
+    return WorkerGateway(store, subject, stops=StopStore(store), worker_tokens={})
 
 
 async def test_transient_read_requeues_and_recovers_without_a_revision_cycle(store, pending_revision, monkeypatch):

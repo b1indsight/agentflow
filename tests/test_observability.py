@@ -41,7 +41,7 @@ async def test_logs_isolate_concurrent_context_and_never_render_exception_payloa
 def test_metrics_default_off_and_bearer_protected():
     class Context:
         def __init__(self):
-            self.settings = SimpleNamespace(metrics_token=SecretStr('monitor-only'))
+            self.settings = SimpleNamespace(metrics_token=SecretStr('monitor-only'), host="test", port=0)
             self.metrics = Metrics()
         def startup(self): pass
         async def shutdown(self): pass

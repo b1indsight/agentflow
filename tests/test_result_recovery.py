@@ -23,7 +23,7 @@ from app.models import (
     Verdict,
 )
 from app.protocol import InitialResult, TriageResult
-from app.result_models import EffectState, ResultPending
+from app.result_models import EffectState, LabelsEffect, ResultPending
 from app.store import Store
 from tests.review_memory import judge_decision
 from tests.test_coordinator import MemoryStore, RecordingGitHub, apply_result, coordinator
@@ -77,8 +77,6 @@ async def test_old_attempt_failure_does_not_publish_or_fail_current_attempt(scen
     assert store.flow.state is FlowState.ACTIVE
 
 
-
-
 @pytest.fixture
 def initial_scenario(scenario):
     store, github, job, _ = scenario
@@ -129,20 +127,37 @@ async def test_cancel_before_terminal_keeps_executor_slot_until_result_ack(scena
     assert not github.comments and not store.enqueued
 
 
+@pytest.mark.parametrize("legacy", [False, True])
+async def test_review_label_preserves_user_labels_on_delivery_and_replay(initial_scenario, legacy):
+    # Human labels may predate delivery; replaying a frozen status intent must not erase them.
+    store, github, job, result = initial_scenario
+    github.labels = [["bug", "user-owned"]]
+    subject = coordinator(store, github)
+    if legacy:
+        subject.results._review_effects = lambda flow, number: [LabelsEffect(
+            key="labels", installation_id=flow.installation_id, repo=flow.repo,
+            number=number, labels=["flow:in-review"],
+        )]
+    await apply_result(subject, job, result)
+    await apply_result(subject, job, result)
+    assert github.labels[-1] == ["bug", "user-owned", "flow:in-review"]
+    assert len(github.labels) == 2
+
+
 async def test_initial_delivery_commits_only_after_all_required_effects(
     initial_scenario, monkeypatch
 ) -> None:
     store, github, job, result = initial_scenario
-    original = github.set_labels
+    original = github.add_label
     limited = [True]
 
-    async def set_labels(*args):
+    async def add_label(*args):
         if limited:
             limited.pop()
-            raise GitHubAdapterError(GitHubErrorKind.RATE_LIMITED, "set_labels", status_code=429)
+            raise GitHubAdapterError(GitHubErrorKind.RATE_LIMITED, "add_label", status_code=429)
         await original(*args)
 
-    monkeypatch.setattr(github, "set_labels", set_labels)
+    monkeypatch.setattr(github, "add_label", add_label)
     with pytest.raises(ResultPending):
         await apply_result(coordinator(store, github), job, result)
     assert store.delivery.state is DeliveryState.OPENING

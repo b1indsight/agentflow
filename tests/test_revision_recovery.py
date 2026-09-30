@@ -4,8 +4,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from app.context_models import ReviewPullRequest
-from app.github_models import GitHubAdapterError, GitHubErrorKind, RemoteRef
+from app.github_models import GitHubAdapterError, GitHubErrorKind, PullRequestStatus, RemoteRef
 from app.models import AddressedComment, DeliveryState, FlowState, JobKind, JobState, ReviewItemKind
 from app.protocol import (
     PROTOCOL_VERSION,
@@ -26,9 +25,9 @@ class RevisionGitHub(RecordingGitHub):
         self.sha = "baseline"
         self.reads = 0
 
-    async def get_review_pull_request(self, *args):
+    async def get_pull_request(self, *args):
         self.reads += 1
-        return ReviewPullRequest(number=17, state="open", head_branch="flow/1", head_sha=self.sha,
+        return PullRequestStatus(repo="owner/repo", merged=False, number=17, state="open", head_branch="flow/1", head_sha=self.sha,
                                   head_repository="owner/repo",
                                   base_branch="main", base_sha="base", title="Task", body="Requirements")
 
@@ -314,7 +313,7 @@ async def test_merge_during_revision_application_preserves_delivery_and_session(
     github.sha = "revision"
     assert accept(store, job, result) == "pending"
     owner = github if merge_at == "verification" else subject.results.effects
-    method = "get_review_pull_request" if merge_at == "verification" else "run"
+    method = "get_pull_request" if merge_at == "verification" else "run"
     original = getattr(owner, method)
 
     async def merge_after_read(*args, **kwargs):
@@ -337,7 +336,7 @@ async def test_merge_during_revision_application_preserves_delivery_and_session(
 
 
 @pytest.mark.parametrize(("endpoint", "kind", "status"), [
-    ("get_review_pull_request", GitHubErrorKind.NOT_FOUND, 404),
+    ("get_pull_request", GitHubErrorKind.NOT_FOUND, 404),
     ("get_ref", GitHubErrorKind.NOT_FOUND, 404),
     ("get_issue", GitHubErrorKind.NOT_FOUND, 404),
     ("get_ref", GitHubErrorKind.TRANSIENT, 503),

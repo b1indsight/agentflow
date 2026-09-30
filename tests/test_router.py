@@ -58,8 +58,8 @@ async def test_allowed_label_creates_one_flow_and_job(
 ) -> None:
     payload = issue_event(action="labeled")
 
-    await router.handle("issues", "delivery-1", payload)
-    await router.handle("issues", "delivery-1", payload)
+    router.dispatch("issues", "delivery-1", payload)
+    router.dispatch("issues", "delivery-1", payload)
 
     flow = store.get_active_flow("owner/repo", 7)
     assert flow is not None
@@ -73,8 +73,8 @@ async def test_allowed_label_creates_one_flow_and_job(
 async def test_bot_and_non_allowlisted_users_do_not_trigger(
     router: EventRouter, store: Store
 ) -> None:
-    await router.handle("issues", "bot-delivery", issue_event(action="labeled", sender="flowtool[bot]"))
-    await router.handle("issues", "outsider-delivery", issue_event(action="labeled", sender="mallory"))
+    router.dispatch("issues", "bot-delivery", issue_event(action="labeled", sender="flowtool[bot]"))
+    router.dispatch("issues", "outsider-delivery", issue_event(action="labeled", sender="mallory"))
 
     assert store.get_active_flow("owner/repo", 7) is None
     assert store.event_seen("bot-delivery") is False
@@ -85,8 +85,8 @@ async def test_bot_and_non_allowlisted_users_do_not_trigger(
 async def test_unlabel_and_stop_comment_cancel_active_flow(
     router: EventRouter, store: Store
 ) -> None:
-    await router.handle("issues", "create-1", issue_event(action="labeled"))
-    await router.handle("issues", "cancel-1", issue_event(action="unlabeled"))
+    router.dispatch("issues", "create-1", issue_event(action="labeled"))
+    router.dispatch("issues", "cancel-1", issue_event(action="unlabeled"))
     cancelled = store.list_flows()[0]
     assert cancelled.state is FlowState.CANCELLED
 
@@ -98,7 +98,7 @@ async def test_unlabel_and_stop_comment_cancel_active_flow(
         "comment": {"id": 77, "body": "/flow stop", "user": {"login": "alice"}},
         "sender": {"login": "alice"},
     }
-    await router.handle("issue_comment", "cancel-2", stop_payload)
+    router.dispatch("issue_comment", "cancel-2", stop_payload)
 
     stopped = store.get_flow(replacement.id)
     assert stopped is not None
@@ -134,7 +134,7 @@ async def test_review_comment_is_stored_for_current_attempt(
         "sender": {"login": "reviewer"},
     }
 
-    await router.handle("pull_request_review_comment", "review-1", payload)
+    router.dispatch("pull_request_review_comment", "review-1", payload)
 
     items = store.reviews.pending(flow.id)
     assert len(items) == 1

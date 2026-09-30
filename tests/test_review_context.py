@@ -16,7 +16,7 @@ from tests.test_coordinator import MemoryStore, RecordingGitHub
 
 
 class SnapshotGitHub(RecordingGitHub):
-    async def get_review_pull_request(self, *args):
+    async def get_pull_request(self, *args):
         return context().pull_request
 
     async def list_pull_request_files(self, *args):
@@ -68,7 +68,7 @@ async def test_api_errors_propagate_while_head_changes_remain_explicit(permissio
                 raise GitHubAdapterError(GitHubErrorKind.PERMISSION, "get_issue")
             return await super().get_issue(*args)
 
-        async def get_review_pull_request(self, *args):
+        async def get_pull_request(self, *args):
             self.reads += 1
             return context().pull_request.model_copy(update={"head_sha": str(self.reads)})
     store = MemoryStore()

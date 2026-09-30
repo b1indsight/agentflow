@@ -12,7 +12,9 @@ from app.models import AgentRun, CodeAgentContext, CodexResult, VcsKind
 from app.protocol import AssignmentSecret, PushSecret, RevisionTask
 from app.vcs import flow_repo_path, prepare_flow_repo
 from app.worker.executor import WorkerExecutor
+from app.worker.journal import WorkerJournal
 from tests.test_vcs import _git, _git_fixture
+from tests.test_worker_executor import RecordingToolCaller
 
 
 def revision_output(**updates):
@@ -48,6 +50,11 @@ async def revision_workspace(tmp_path):
         repository="owner/repo", token=SecretStr("fresh-token"),
         expires_at=datetime.now(UTC) + timedelta(minutes=30),
     ))
+    from app.protocol import Assignment
+    journal = WorkerJournal(root)
+    journal.record_received(Assignment(job_id=1, flow_id=1, assignment_token="token",
+                                      connection_epoch="epoch", task=task, secret=secret))
+    journal.record_started()
     return root, target, task, secret
 
 
@@ -87,7 +94,7 @@ async def test_revision_verifies_real_git_delivery(revision_workspace, behavior,
     # A successful process can leave unpushed or dirty work; neither closes review feedback.
     root, repo, task, secret = revision_workspace
     agent = RevisionAgent(repo, behavior)
-    result = await WorkerExecutor(root, agent, SimpleNamespace(), worker_id="w").execute(task, secret)
+    result = await WorkerExecutor(root, agent, SimpleNamespace(), journal=WorkerJournal(root), worker_id="w").execute(task, secret, tool_caller=RecordingToolCaller())
     assert (result.exit_code == 0) is success
     assert agent.calls[0][1].push_token.get_secret_value() == "fresh-token"
     assert agent.calls[0][1].cwd == repo
@@ -107,7 +114,7 @@ async def test_fallback_only_when_execution_is_known_not_to_have_started(
     root, repo, task, secret = revision_workspace
     task = task.model_copy(update={"session_id": session})
     agent = RevisionAgent(repo, behavior)
-    result = await WorkerExecutor(root, agent, SimpleNamespace(), worker_id="w").execute(task, secret)
+    result = await WorkerExecutor(root, agent, SimpleNamespace(), journal=WorkerJournal(root), worker_id="w").execute(task, secret, tool_caller=RecordingToolCaller())
     assert [call[0] for call in agent.calls] == expected
     if expected[-1] == "start":
         assert result.session_id == "new-session"
@@ -127,7 +134,7 @@ async def test_revision_preflight_rejects_before_model_execution(revision_worksp
     else:
         (repo / "uncommitted").write_text("keep me")
     agent = RevisionAgent(repo)
-    result = await WorkerExecutor(root, agent, SimpleNamespace(), worker_id="w").execute(task, secret)
+    result = await WorkerExecutor(root, agent, SimpleNamespace(), journal=WorkerJournal(root), worker_id="w").execute(task, secret, tool_caller=RecordingToolCaller())
     assert result.exit_code != 0
     assert agent.calls == []
 
@@ -164,7 +171,7 @@ async def revision_control():
             "head_branch": "flow/1", "head_sha": "abc123", "base_branch": "trunk",
         })
 
-    github.get_review_pull_request = current_pr
+    github.get_pull_request = current_pr
     task = await prepare(subject, job)
     return store, github, job, subject, task
 
@@ -259,7 +266,7 @@ async def test_control_checks_actual_pr_and_lineage(revision_control, monkeypatc
     from tests.test_coordinator import apply_result
 
     store, github, job, subject, task = revision_control
-    original = github.get_review_pull_request
+    original = github.get_pull_request
 
     async def changed_pr(*args):
         pr = await original(*args)
@@ -278,7 +285,7 @@ async def test_control_checks_actual_pr_and_lineage(revision_control, monkeypatc
     async def compare(*args):
         return False
 
-    monkeypatch.setattr(github, "get_review_pull_request", changed_pr)
+    monkeypatch.setattr(github, "get_pull_request", changed_pr)
     if change == "lineage":
         monkeypatch.setattr(github, "get_ref", ref)
         monkeypatch.setattr(github, "compare_commits", compare, raising=False)
@@ -297,7 +304,7 @@ async def test_verified_partial_delivery_waits_without_rereview(revision_control
     from tests.test_coordinator import apply_result
 
     store, github, job, subject, task = revision_control
-    original = github.get_review_pull_request
+    original = github.get_pull_request
 
     async def current_pr(*args):
         return (await original(*args)).model_copy(update={"head_sha": "new"})
@@ -308,7 +315,7 @@ async def test_verified_partial_delivery_waits_without_rereview(revision_control
     async def compare(*args):
         return True
 
-    monkeypatch.setattr(github, "get_review_pull_request", current_pr)
+    monkeypatch.setattr(github, "get_pull_request", current_pr)
     monkeypatch.setattr(github, "get_ref", ref)
     monkeypatch.setattr(github, "compare_commits", compare, raising=False)
     item = task.feedback[0]
@@ -401,7 +408,7 @@ async def test_journal_prevents_restarting_an_interrupted_invocation(revision_wo
     agent = RevisionAgent(repo, "missing")
     restarted = WorkerJournal(root)
     with pytest.raises(JournalError, match="restarted|already been attempted"):
-        await WorkerExecutor(root, agent, SimpleNamespace(), worker_id="w", journal=restarted).execute(task, secret)
+        await WorkerExecutor(root, agent, SimpleNamespace(), worker_id="w", journal=restarted).execute(task, secret, tool_caller=RecordingToolCaller())
     assert agent.calls == []
     assert "fresh-token" not in journal.path.read_text()
     assert restarted.load().revision_phase == phase
@@ -418,7 +425,7 @@ async def test_dirty_repository_after_session_rejection_does_not_fallback(revisi
             raise SessionUnavailable("rejected")
 
     agent = DirtyRejection(repo)
-    result = await WorkerExecutor(root, agent, SimpleNamespace(), worker_id="w").execute(task, secret)
+    result = await WorkerExecutor(root, agent, SimpleNamespace(), journal=WorkerJournal(root), worker_id="w").execute(task, secret, tool_caller=RecordingToolCaller())
     assert result.exit_code != 0
     assert agent.calls == []
     assert (repo / "uncertain-work").read_text() == "preserve"

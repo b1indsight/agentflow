@@ -1,10 +1,10 @@
 import asyncio
 from collections.abc import Mapping
-from types import SimpleNamespace
 
 import pytest
 
 from app.control.gateway import WorkerGateway
+from app.delivery_models import OpenedDelivery
 from app.models import FlowDelivery, Job, JobKind, JobState, VcsKind, VcsOutcome
 from app.protocol import (
     ExecutionResult,
@@ -14,6 +14,8 @@ from app.protocol import (
     InitialTask,
 )
 from app.worker.client import WorkerClient
+from app.worker.journal import WorkerJournal
+from tests.worker_fakes import NoPendingStops, connected_worker
 
 
 class QueueSocket:
@@ -69,7 +71,7 @@ class RemoteStore:
         return None
 
     def worker_connected(self, worker_id: str, protocol_version: int, connection_epoch: str):
-        return SimpleNamespace(current_job_id=None)
+        return connected_worker(worker_id, protocol_version, connection_epoch)
 
     def worker_disconnected(
         self,
@@ -160,18 +162,6 @@ class RemoteStore:
         self.job.state = JobState.QUEUED
         return True
 
-    def fail_assignment(
-        self,
-        job_id: int,
-        worker_id: str,
-        token: str,
-        reason: str,
-        connection_epoch: str,
-    ) -> bool:
-        self.job.state = JobState.FAILED
-        self.done.set()
-        return True
-
 
 class RemoteCoordinator:
     async def prepare_for_assignment(self, job, worker, token, epoch):
@@ -200,7 +190,7 @@ class RemoteCoordinator:
         self.tool_calls += 1
         return FlowToolResponse(
             call_id=request.call_id,
-            result={"pr_number": 17, "head_sha": "abc123"},
+            result=OpenedDelivery(pr_number=17, head_sha="abc123", url="https://github.com/owner/repo/pull/17", delivery_version=1),
         )
 
     def mark_started(self, job: Job, task: ExecutionTask, worker_id: str) -> None:
@@ -220,38 +210,37 @@ class FakeExecutor:
     def __init__(self) -> None:
         self.client: WorkerClient | None = None
 
-    async def execute(self, task: ExecutionTask, secret=None) -> ExecutionResult:
+    async def execute(self, task: ExecutionTask, secret=None, *, tool_caller=None) -> ExecutionResult:
         assert isinstance(task, InitialTask)
         assert self.client is not None
         tool = await self.client.call_tool(
             "flow.open_pr",
             {"title": "Implement", "body": "Done"},
             vcs_outcome=VcsOutcome(
-                declared_backend=VcsKind.GIT,
-                verified_backend=VcsKind.GIT,
+                backend=VcsKind.GIT,
                 branch=task.branch,
                 commit_sha="abc",
                 remote_sha="abc",
             ),
         )
-        assert tool["pr_number"] == 17
+        assert isinstance(tool, OpenedDelivery) and tool.pr_number == 17
         return InitialResult(session_id="session-1", last_message="done", exit_code=0)
 
 
 @pytest.mark.asyncio
-async def test_control_gateway_and_worker_client_complete_one_remote_job() -> None:
+async def test_control_gateway_and_worker_client_complete_one_remote_job(tmp_path) -> None:
     worker_to_serve: asyncio.Queue[str] = asyncio.Queue()
     serve_to_worker: asyncio.Queue[str] = asyncio.Queue()
     store = RemoteStore()
     coordinator = RemoteCoordinator(store)
     gateway = WorkerGateway(
         store,
-        coordinator,
+        coordinator, stops=NoPendingStops(),
         worker_tokens={"worker-1": "worker-secret"},
         poll_interval=0.01,
     )
     executor = FakeExecutor()
-    client = WorkerClient(
+    client = WorkerClient(journal=WorkerJournal(tmp_path),
         worker_id="worker-1",
         worker_token="worker-secret",
         serve_ws_url="ws://unused",
