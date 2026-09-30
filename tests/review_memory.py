@@ -2,11 +2,11 @@
 
 from datetime import UTC, datetime
 
-from app.context_models import ReviewContext
-from app.github_models import PullRequestStatus
-from app.judge_models import JudgeDecision
-from app.models import FeedbackRef, Job, ReviewItemKind, TriageVerdict
-from app.review_models import BatchState, ReviewBatch, ReviewFeedback
+from app.domain.context_models import ReviewContext
+from app.domain.github_models import PullRequestStatus
+from app.domain.judge_models import JudgeDecision
+from app.domain.models import FeedbackRef, Job, ReviewItemKind, TriageVerdict
+from app.domain.review_models import BatchState, ReviewBatch, ReviewFeedback
 
 
 def review_context(batch_id: int = 1) -> ReviewContext:
@@ -57,7 +57,7 @@ class MemoryReviews:
         return self.batch.model_copy(update={"job_id": job.id})
 
     def freeze_revision(self, job, task):
-        from app.protocol import RevisionTask
+        from app.contracts.protocol import RevisionTask
 
         if (job.payload or {}).get("revision") is None:
             job.payload = {**(job.payload or {}), "revision": task.model_dump(mode="json")}

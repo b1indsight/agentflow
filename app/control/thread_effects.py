@@ -2,12 +2,18 @@
 
 from collections.abc import Callable
 
+from app.contracts.result_models import (
+    EffectReceipt,
+    EffectRecord,
+    ResolveEffect,
+    ResultPending,
+    ResultPlan,
+)
 from app.control.resolution import covered_thread
-from app.github_models import GitHubAdapterError, ReviewThreads
-from app.models import TERMINAL_STATES, ReviewItemKind
-from app.ports import GitHubClient
-from app.result_models import EffectReceipt, EffectRecord, ResolveEffect, ResultPending, ResultPlan
-from app.store import Store
+from app.domain.github_models import GitHubAdapterError, ReviewThreads
+from app.domain.models import TERMINAL_STATES, ReviewItemKind
+from app.domain.ports import GitHubClient
+from app.persistence.store import Store
 
 
 def observe(store: Store, plan: ResultPlan, snapshot: ReviewThreads) -> None:

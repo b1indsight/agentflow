@@ -8,11 +8,11 @@ from types import SimpleNamespace
 import pytest
 from pydantic import SecretStr, ValidationError
 
-from app.models import AgentRun, CodeAgentContext, CodexResult, VcsKind
-from app.protocol import AssignmentSecret, PushSecret, RevisionTask
-from app.vcs import flow_repo_path, prepare_flow_repo
+from app.contracts.protocol import AssignmentSecret, PushSecret, RevisionTask
+from app.domain.models import AgentRun, CodeAgentContext, CodexResult, VcsKind
 from app.worker.executor import WorkerExecutor
 from app.worker.journal import WorkerJournal
+from app.worker.vcs import flow_repo_path, prepare_flow_repo
 from tests.test_vcs import _git, _git_fixture
 from tests.test_worker_executor import RecordingToolCaller
 
@@ -50,7 +50,7 @@ async def revision_workspace(tmp_path):
         repository="owner/repo", token=SecretStr("fresh-token"),
         expires_at=datetime.now(UTC) + timedelta(minutes=30),
     ))
-    from app.protocol import Assignment
+    from app.contracts.protocol import Assignment
     journal = WorkerJournal(root)
     journal.record_received(Assignment(job_id=1, flow_id=1, assignment_token="token",
                                       connection_epoch="epoch", task=task, secret=secret))
@@ -66,7 +66,7 @@ class RevisionAgent:
     async def resume(self, session_id, prompt, *, output_schema=None, context=None):
         self.calls.append(("resume", context, prompt))
         if self.behavior == "missing":
-            from app.models import SessionUnavailable
+            from app.domain.models import SessionUnavailable
 
             raise SessionUnavailable("session not found before execution")
         if self.behavior == "timeout":
@@ -148,7 +148,7 @@ def test_revision_output_requires_every_field_and_rejects_extra_data():
 
 @pytest.fixture
 async def revision_control():
-    from app.models import Attempt, DeliveryState, FlowDelivery, Job, JobKind, JobState
+    from app.domain.models import Attempt, DeliveryState, FlowDelivery, Job, JobKind, JobState
     from tests.test_coordinator import MemoryStore, RecordingGitHub, coordinator, prepare
 
     store, github = MemoryStore(), RecordingGitHub()
@@ -157,7 +157,7 @@ async def revision_control():
     store.delivery = FlowDelivery(flow_id=1, branch="flow/1", base_branch="trunk",
                                   state=DeliveryState.OPEN, pr_number=17, head_sha="abc123")
     job = Job(id=21, flow_id=1, kind=JobKind.REVISION, state=JobState.RUNNING)
-    from app.github_models import ReviewComment, ReviewThread
+    from app.domain.github_models import ReviewComment, ReviewThread
     item = store.reviews.batch.feedback[0]
     github.threads = [ReviewThread(thread_id="T1", repo="owner/repo", pr_number=17,
         path="app.py", resolved=False, outdated=False, comments=[ReviewComment(
@@ -177,7 +177,7 @@ async def revision_control():
 
 
 def verified_result(task, **updates):
-    from app.protocol import RevisionInvocation, RevisionResult
+    from app.contracts.protocol import RevisionInvocation, RevisionResult
 
     values = {
         "flow_id": task.flow_id, "attempt_id": task.attempt_id, "batch_id": task.batch_id,
@@ -196,10 +196,10 @@ def verified_result(task, **updates):
 async def test_resolve_payloads_only_carry_their_threads_current_and_historical_feedback(revision_control):
     from datetime import UTC, datetime
 
+    from app.contracts.result_models import ResolveEffect
     from app.control.resolution import plan_resolution
-    from app.github_models import ReviewThreads
-    from app.models import AddressedComment, ReviewItemKind
-    from app.result_models import ResolveEffect
+    from app.domain.github_models import ReviewThreads
+    from app.domain.models import AddressedComment, ReviewItemKind
     from tests.test_review_resolution import feedback, human, snapshot
 
     store, _, _, _, task = revision_control
@@ -278,7 +278,7 @@ async def test_control_checks_actual_pr_and_lineage(revision_control, monkeypatc
         })
 
     async def ref(*args):
-        from app.github_models import RemoteRef
+        from app.domain.github_models import RemoteRef
 
         return RemoteRef(branch=task.branch, sha="new")
 
@@ -299,8 +299,8 @@ async def test_control_checks_actual_pr_and_lineage(revision_control, monkeypatc
 
 @pytest.mark.parametrize("pending", ["deferred", "clarification", "none"])
 async def test_verified_partial_delivery_waits_without_rereview(revision_control, monkeypatch, pending):
-    from app.github_models import RemoteRef
-    from app.models import AddressedComment, DeferredComment
+    from app.domain.github_models import RemoteRef
+    from app.domain.models import AddressedComment, DeferredComment
     from tests.test_coordinator import apply_result
 
     store, github, job, subject, task = revision_control
@@ -336,7 +336,7 @@ async def test_verified_partial_delivery_waits_without_rereview(revision_control
 
 @pytest.mark.parametrize("kind", ["unknown", "duplicate", "conflict", "wrong_github_id"])
 async def test_revision_rejects_fabricated_or_conflicting_feedback(revision_control, kind):
-    from app.models import AddressedComment, DeferredComment
+    from app.domain.models import AddressedComment, DeferredComment
     from tests.test_coordinator import apply_result
 
     store, github, job, subject, task = revision_control
@@ -361,7 +361,11 @@ async def test_revision_checks_real_jj_repository(revision_workspace, behavior):
     import os
     import shutil
 
-    from app.vcs import VcsVerificationError, prepare_revision_context, verify_revision_outcome
+    from app.worker.vcs import (
+        VcsVerificationError,
+        prepare_revision_context,
+        verify_revision_outcome,
+    )
     from tests.test_vcs import _jj
 
     if shutil.which("jj") is None:
@@ -391,7 +395,7 @@ async def test_revision_checks_real_jj_repository(revision_workspace, behavior):
 
 @pytest.mark.parametrize("phase", ["resume", "fallback"])
 async def test_journal_prevents_restarting_an_interrupted_invocation(revision_workspace, phase):
-    from app.protocol import Assignment, RevisionInvocation
+    from app.contracts.protocol import Assignment, RevisionInvocation
     from app.worker.journal import JournalError, WorkerJournal
 
     root, repo, task, secret = revision_workspace
@@ -415,7 +419,7 @@ async def test_journal_prevents_restarting_an_interrupted_invocation(revision_wo
 
 
 async def test_dirty_repository_after_session_rejection_does_not_fallback(revision_workspace):
-    from app.models import SessionUnavailable
+    from app.domain.models import SessionUnavailable
 
     root, repo, task, secret = revision_workspace
 
@@ -433,7 +437,7 @@ async def test_dirty_repository_after_session_rejection_does_not_fallback(revisi
 
 @pytest.mark.parametrize("signal_kind", ["request_changes", "discussion"])
 async def test_empty_review_body_is_not_an_unresolved_obligation(revision_control, signal_kind):
-    from app.models import AddressedComment, ReviewItemKind
+    from app.domain.models import AddressedComment, ReviewItemKind
     from tests.test_coordinator import apply_result
 
     store, _github, job, subject, task = revision_control

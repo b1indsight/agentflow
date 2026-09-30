@@ -4,6 +4,9 @@ FlowTool 的目标是把带 `flow` 标签的 GitHub issue 编排成
 `code agent 编码 → PR → 人工审核 → 自动回喂修订 → 人工合并 → 归档` 的 headless 闭环。
 项目自身不提供业务 UI，交互面是 GitHub issue 和 PR。
 
+代码按职责分为 `domain`、`contracts`、`persistence`、`github`、`control`、`worker`、
+`telemetry` 与 `plugins`；目录和依赖边界见[组件职责](docs/architecture/components.md#包依赖边界)。
+
 > 当前状态（2026-09-08）：**M0 已验收；M1 Issue→PR、M2 F1–F4 已实现并合并，真实 E2E 待验收**。
 > M2 包含持久反馈批次、语义决策、修订交付核验与 session 兜底、原线程回复与保守 resolve。
 > 自动化使用实际 PostgreSQL 与临时 Git/jj 仓库；M4 F1 已修复同秒 webhook 重放，真实闭环待办见 [M2 状态与待办](docs/architecture/README.md#m2-状态与待办)。

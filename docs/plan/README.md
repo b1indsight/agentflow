@@ -5,6 +5,8 @@
 
 ## 当前计划
 
+- [`package-responsibilities.md`](package-responsibilities.md) — PR #57：职责归包与日志隔离已实施，813 项 PostgreSQL 回归、构建及边界消融通过；独立审查无发现，待用户评审。
+
 - [`fair-assignment-locking.md`](fair-assignment-locking.md) — 固定并发交错并修复公平领取交叉持锁 · PR #56：同步最新 main 后 808 项 PostgreSQL 回归通过，三项消融验证有效，独立审查无发现。
 
 - [`internal-contract-simplification.md`](internal-contract-simplification.md) — 内部结果、agent 输出、settle 与插件契约精简 · PR #55：804 项 PostgreSQL 回归通过，独立审查无发现，待用户评审。

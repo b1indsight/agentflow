@@ -7,12 +7,33 @@ from typing import Literal, Protocol
 
 from pluggy import PluginManager
 
+from app.contracts.protocol import (
+    ArchiveResult,
+    Failed,
+    InitialResult,
+    RevisionResult,
+    Succeeded,
+    TriageResult,
+    parse_worker_message,
+)
+from app.contracts.result_models import (
+    CommentEffect,
+    DerivedJob,
+    Effect,
+    LabelEffect,
+    PullRequestEffect,
+    ResultPending,
+    ResultPlan,
+    ReviewersEffect,
+    RunUpdate,
+    ThreadReplyEffect,
+)
 from app.control.effects import ResultEffects
 from app.control.initial import initial_delivery_mismatch
 from app.control.resolution import feedback_link, plan_resolution
 from app.control.revisions import frozen_revision, revision_mismatch, verify_revision_remote
-from app.github_models import GitHubAdapterError
-from app.models import (
+from app.domain.github_models import GitHubAdapterError
+from app.domain.models import (
     TERMINAL_STATES,
     AddressedComment,
     DeferredComment,
@@ -28,31 +49,10 @@ from app.models import (
     TriageVerdict,
     Verdict,
 )
+from app.domain.ports import GitHubClient
+from app.domain.review_models import BatchState
+from app.persistence.store import Store
 from app.plugins import emit_hook
-from app.ports import GitHubClient
-from app.protocol import (
-    ArchiveResult,
-    Failed,
-    InitialResult,
-    RevisionResult,
-    Succeeded,
-    TriageResult,
-    parse_worker_message,
-)
-from app.result_models import (
-    CommentEffect,
-    DerivedJob,
-    Effect,
-    LabelEffect,
-    PullRequestEffect,
-    ResultPending,
-    ResultPlan,
-    ReviewersEffect,
-    RunUpdate,
-    ThreadReplyEffect,
-)
-from app.review_models import BatchState
-from app.store import Store
 
 
 class ResultSettings(Protocol):

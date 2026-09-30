@@ -3,8 +3,9 @@ from typing import Any, cast
 
 import pytest
 
+from app.contracts.protocol import PROTOCOL_VERSION
 from app.control.service import ControlService
-from app.models import (
+from app.domain.models import (
     DeliveryState,
     Flow,
     FlowDelivery,
@@ -16,8 +17,7 @@ from app.models import (
     WorkerStatus,
     utcnow,
 )
-from app.protocol import PROTOCOL_VERSION
-from app.store import Store
+from app.persistence.store import Store
 from tests.result_memory import MemoryStops
 from tests.review_memory import MemoryReviews
 

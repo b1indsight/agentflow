@@ -1,7 +1,27 @@
 from __future__ import annotations
 
 import ast
+import json
+import subprocess
+import sys
 from pathlib import Path
+
+import pytest
+
+
+def test_worker_startup_does_not_load_control_plane_dependencies() -> None:
+    # Shared logging previously pulled SQL stores into worker startup transitively.
+    # A fresh interpreter observes real imports without pytest's loaded modules.
+    result = subprocess.run(
+        [sys.executable, "-c",
+         "import json, sys; import app.worker.runtime; print(json.dumps(sorted(sys.modules)))"],
+        check=True, capture_output=True, text=True,
+    )
+    modules = set(json.loads(result.stdout))
+    forbidden = {"app.control", "app.persistence", "app.github", "psycopg", "githubkit"}
+    assert not contains_forbidden(modules, forbidden), sorted(
+        module for module in modules if contains_forbidden({module}, forbidden)
+    )
 
 
 def imported_modules(package: Path) -> set[str]:
@@ -14,6 +34,7 @@ def imported_modules(package: Path) -> set[str]:
                 modules.update(alias.name for alias in node.names)
             elif isinstance(node, ast.ImportFrom) and node.module:
                 modules.add(node.module)
+                modules.update(f"{node.module}.{alias.name}" for alias in node.names)
     return modules
 
 
@@ -25,25 +46,21 @@ def contains_forbidden(modules: set[str], prefixes: set[str]) -> bool:
     )
 
 
-def test_control_and_worker_packages_keep_role_boundaries() -> None:
-    control_imports = imported_modules(Path("app/control"))
-    worker_imports = imported_modules(Path("app/worker"))
-
-    assert not contains_forbidden(
-        control_imports,
-        {"app.codex_driver", "app.judge", "app.worker", "app.worker.runtime"}
-    )
-    assert not contains_forbidden(
-        worker_imports,
-        {
-            "app.control",
-            "app.github_client",
-            "app.ingress",
-            "app.router",
-            "app.store",
-            "fastapi",
-        }
-    )
+@pytest.mark.parametrize(("package", "forbidden"), [
+    ("domain", {"app.contracts", "app.control", "app.worker", "app.persistence",
+                "app.github", "app.telemetry", "psycopg", "githubkit", "fastapi"}),
+    ("contracts", {"app.control", "app.worker", "app.persistence", "app.github",
+                   "app.telemetry", "psycopg", "githubkit", "fastapi"}),
+    ("persistence", {"app.control", "app.worker", "app.github", "githubkit"}),
+    ("github", {"app.control", "app.worker", "app.persistence", "psycopg"}),
+    ("control", {"app.worker"}),
+    ("worker", {"app.control", "app.persistence", "app.github", "app.telemetry.metrics",
+                "psycopg", "githubkit", "fastapi"}),
+])
+def test_packages_keep_responsibility_boundaries(package: str, forbidden: set[str]) -> None:
+    modules = imported_modules(Path("app") / package)
+    assert modules, f"No imports found in {package}; check the package path"
+    assert not contains_forbidden(modules, forbidden)
 
 
 def test_initial_delivery_validation_keeps_result_orchestration_out_of_lifecycle() -> None:
@@ -56,13 +73,3 @@ def test_initial_delivery_validation_keeps_result_orchestration_out_of_lifecycle
     assert not contains_forbidden(
         imported_modules(Path("app/control/initial.py")), {"app.control"},
     )
-
-
-def test_workflow_policies_do_not_depend_on_persistence_or_orchestration() -> None:
-    # Policy extraction is useful only while decisions remain callable without
-    # a Store, network adapter or control runtime.
-    for module in ("review_policy", "recovery_policy"):
-        assert not contains_forbidden(
-            imported_modules(Path(f"app/{module}.py")),
-            {"app.store", "app.review_store", "app.control", "psycopg", "app.github_client"},
-        )

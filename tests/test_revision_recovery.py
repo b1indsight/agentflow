@@ -4,17 +4,29 @@ from datetime import UTC, datetime
 
 import pytest
 
-from app.github_models import GitHubAdapterError, GitHubErrorKind, PullRequestStatus, RemoteRef
-from app.models import AddressedComment, DeliveryState, FlowState, JobKind, JobState, ReviewItemKind
-from app.protocol import (
+from app.contracts.protocol import (
     PROTOCOL_VERSION,
     RevisionInvocation,
     RevisionTask,
     Succeeded,
     terminal_digest,
 )
-from app.review_models import FeedbackUpdate
-from app.store import Store
+from app.domain.github_models import (
+    GitHubAdapterError,
+    GitHubErrorKind,
+    PullRequestStatus,
+    RemoteRef,
+)
+from app.domain.models import (
+    AddressedComment,
+    DeliveryState,
+    FlowState,
+    JobKind,
+    JobState,
+    ReviewItemKind,
+)
+from app.domain.review_models import FeedbackUpdate
+from app.persistence.store import Store
 from tests.test_coordinator import RecordingGitHub, coordinator
 from tests.test_revision_delivery import revision_output, verified_result
 
@@ -218,8 +230,8 @@ async def test_failed_revision_retry_after_merge_keeps_flow_terminal(store, pend
 async def test_rejected_revision_notification_keeps_verified_result_recoverable(
     store, pending_revision, monkeypatch, transition,
 ):
+    from app.contracts.result_models import EffectState, ResultPending
     from app.control.service import ControlService
-    from app.result_models import EffectState, ResultPending
 
     flow, job, task, github, subject = pending_revision
     assert store.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
@@ -366,8 +378,8 @@ async def test_revision_preparation_failure_is_persisted_and_explicitly_retryabl
 async def test_uncertain_revision_notification_cannot_be_explicitly_resent(
     store, pending_revision, monkeypatch,
 ):
+    from app.contracts.result_models import EffectState, ResultPending
     from app.control.service import ControlService
-    from app.result_models import EffectState, ResultPending
 
     flow, job, task, github, subject = pending_revision
     assert store.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")

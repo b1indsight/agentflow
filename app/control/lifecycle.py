@@ -3,13 +3,13 @@
 import json
 from dataclasses import dataclass
 
+from app.contracts.protocol import InitialResult, RevisionResult, Succeeded, parse_worker_message
 from app.control.initial import initial_delivery_mismatch
 from app.control.revisions import frozen_revision, revision_mismatch, verify_revision_remote
-from app.github_models import PullRequestStatus
-from app.models import DeliveryState, Flow, FlowDelivery, Job
-from app.ports import GitHubClient
-from app.protocol import InitialResult, RevisionResult, Succeeded, parse_worker_message
-from app.store import Store
+from app.domain.github_models import PullRequestStatus
+from app.domain.models import DeliveryState, Flow, FlowDelivery, Job
+from app.domain.ports import GitHubClient
+from app.persistence.store import Store
 
 
 @dataclass(frozen=True)

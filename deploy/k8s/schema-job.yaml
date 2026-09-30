@@ -31,7 +31,7 @@ spec:
         command:
         - python
         - -c
-        - 'import os; from app.store import Store; store=Store(os.environ[''FLOWTOOL_DATABASE_URL'']);
+        - 'import os; from app.persistence.store import Store; store=Store(os.environ[''FLOWTOOL_DATABASE_URL'']);
 
           try: store.init_db()
 

@@ -5,10 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.control.gateway import WorkerGateway
-from app.control.service import ControlService
-from app.models import JobKind
-from app.protocol import (
+from app.contracts.protocol import (
     Assignment,
     ExecutionStopped,
     InitialResult,
@@ -17,10 +14,13 @@ from app.protocol import (
     StopExecution,
     parse_worker_message,
 )
-from app.stop_store import StopStore
-from app.vcs import _run
+from app.control.gateway import WorkerGateway
+from app.control.service import ControlService
+from app.domain.models import JobKind
+from app.persistence.stop_store import StopStore
 from app.worker.client import WorkerClient, WorkerProtocolError
 from app.worker.journal import WorkerJournal
+from app.worker.vcs import _run
 
 
 def assignment():

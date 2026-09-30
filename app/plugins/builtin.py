@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from loguru import logger
 
-from app.models import Flow
+from app.domain.models import Flow
 from app.plugins.hookspecs import hookimpl
 
 

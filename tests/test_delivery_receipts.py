@@ -3,7 +3,7 @@
 import pytest
 from pydantic import ValidationError
 
-from app.protocol import FlowToolResponse, Succeeded, parse_worker_message
+from app.contracts.protocol import FlowToolResponse, Succeeded, parse_worker_message
 
 
 @pytest.mark.parametrize("receipt", [

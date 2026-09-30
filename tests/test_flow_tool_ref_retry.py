@@ -7,9 +7,9 @@ import pytest
 from githubkit import GitHub as SDK
 
 from app.control.tools import FlowToolService
-from app.github_client import GitHubApp
-from app.ports import GitHubClient
-from app.store import Store
+from app.domain.ports import GitHubClient
+from app.github.client import GitHubApp
+from app.persistence.store import Store
 from tests.test_flow_tools import ToolGitHub, ToolStore, request
 from tests.test_github_client import settings
 

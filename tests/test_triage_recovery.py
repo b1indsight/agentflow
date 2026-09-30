@@ -5,13 +5,13 @@ from datetime import timedelta
 
 import pytest
 
+from app.contracts.protocol import PROTOCOL_VERSION, Succeeded, TriageResult, terminal_digest
 from app.control.gateway import WorkerGateway
 from app.control.service import ControlService
-from app.models import FlowState, JobState, TriageVerdict, Verdict
-from app.protocol import PROTOCOL_VERSION, Succeeded, TriageResult, terminal_digest
-from app.review_models import BatchState
-from app.stop_store import StopStore
-from app.store import Store
+from app.domain.models import FlowState, JobState, TriageVerdict, Verdict
+from app.domain.review_models import BatchState
+from app.persistence.stop_store import StopStore
+from app.persistence.store import Store
 from tests.review_memory import judge_decision
 from tests.test_coordinator import RecordingGitHub, coordinator
 from tests.test_review_batches import claim, feedback, ingest

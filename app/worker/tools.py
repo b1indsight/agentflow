@@ -12,9 +12,9 @@ from pathlib import Path
 from typing import Protocol, Self
 from uuid import uuid4
 
-from app.delivery_models import DeliveryReceipt
-from app.models import VcsExecutionContext, VcsOutcome
-from app.vcs import verify_pushed_outcome
+from app.domain.delivery_models import DeliveryReceipt
+from app.domain.models import VcsExecutionContext, VcsOutcome
+from app.worker.vcs import verify_pushed_outcome
 
 
 class FlowToolCaller(Protocol):

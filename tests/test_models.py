@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from app.models import (
+from app.domain.models import (
     CodexResult,
     InitialCodexResult,
     Job,

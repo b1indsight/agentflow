@@ -3,8 +3,8 @@ from pathlib import Path
 import pytest
 from pydantic import SecretStr
 
-from app.codex_driver import CodexAgent, _codex_environment, _start_args
-from app.models import CodeAgentContext
+from app.domain.models import CodeAgentContext
+from app.worker.codex_driver import CodexAgent, _codex_environment, _start_args
 
 
 async def test_adapter_returns_raw_output_without_interpreting_business_schema(monkeypatch, tmp_path):
@@ -25,7 +25,7 @@ async def test_adapter_returns_raw_output_without_interpreting_business_schema(m
         Path(args[args.index("-o") + 1]).write_text(raw)
         return Process()
 
-    monkeypatch.setattr("app.codex_driver.asyncio.create_subprocess_exec", spawn)
+    monkeypatch.setattr("app.worker.codex_driver.asyncio.create_subprocess_exec", spawn)
     run = await CodexAgent(trusted_host=True).start("task", tmp_path, output_schema=schema)
     assert (run.session_id, run.last_message, run.exit_code) == ("session-1", raw, 0)
 
@@ -102,7 +102,7 @@ async def test_resume_also_requires_explicit_trusted_host_mode() -> None:
 
 
 async def test_resume_refreshes_environment_and_disables_initial_broker(monkeypatch, tmp_path):
-    from app.models import AgentRun
+    from app.domain.models import AgentRun
 
     observed = {}
 
@@ -132,7 +132,7 @@ async def test_resume_refreshes_environment_and_disables_initial_broker(monkeypa
 async def test_cli_session_rejection_is_classified_only_before_any_events(
     monkeypatch, tmp_path, events, error, unavailable,
 ):
-    from app.models import SessionUnavailable
+    from app.domain.models import SessionUnavailable
 
     class Process:
         returncode = 1
@@ -143,7 +143,7 @@ async def test_cli_session_rejection_is_classified_only_before_any_events(
     async def spawn(*args, **kwargs):
         return Process()
 
-    monkeypatch.setattr("app.codex_driver.asyncio.create_subprocess_exec", spawn)
+    monkeypatch.setattr("app.worker.codex_driver.asyncio.create_subprocess_exec", spawn)
     agent = CodexAgent(trusted_host=True)
     if unavailable:
         with pytest.raises(SessionUnavailable):
@@ -176,8 +176,8 @@ async def test_revision_deadline_cancels_the_whole_codex_process_group(monkeypat
         files.append(Path(args[args.index("-o") + 1]))
         return Process()
 
-    monkeypatch.setattr("app.codex_driver.asyncio.create_subprocess_exec", spawn)
-    monkeypatch.setattr("app.codex_driver.os.killpg", lambda pid, sig: stopped.append((pid, sig)))
+    monkeypatch.setattr("app.worker.codex_driver.asyncio.create_subprocess_exec", spawn)
+    monkeypatch.setattr("app.worker.codex_driver.os.killpg", lambda pid, sig: stopped.append((pid, sig)))
     running = asyncio.create_task(CodexAgent(trusted_host=True).resume(
         "session-1", "fix", context=CodeAgentContext(cwd=tmp_path),
     ))

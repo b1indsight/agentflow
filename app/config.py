@@ -10,7 +10,7 @@ from typing import Annotated, Literal
 from pydantic import Field, SecretStr, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
-from app.project_models import ProjectConfig
+from app.domain.project_models import ProjectConfig
 
 
 class FlowToolSettings(BaseSettings):

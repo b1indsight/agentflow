@@ -11,8 +11,8 @@ from pydantic import ValidationError
 
 from app.control.router import EventRouter, RouterSettings
 from app.control.service import ControlService
-from app.store import Store
-from app.webhook_store import WebhookStore
+from app.persistence.store import Store
+from app.persistence.webhook_store import WebhookStore
 
 
 class WebhookConsumer:

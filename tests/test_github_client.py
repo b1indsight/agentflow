@@ -11,8 +11,8 @@ from githubkit.response import Response
 from pydantic import SecretStr
 
 from app.config import ServeSettings
-from app.github_client import GitHubApp
-from app.github_models import GitHubAdapterError, GitHubErrorKind, PushCapability
+from app.domain.github_models import GitHubAdapterError, GitHubErrorKind, PushCapability
+from app.github.client import GitHubApp
 
 
 class AsyncEndpoint:

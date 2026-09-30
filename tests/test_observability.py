@@ -9,9 +9,10 @@ from loguru import logger
 from pydantic import SecretStr
 
 from app.control.api import create_app
-from app.metrics_store import read_snapshot
-from app.observability import Metrics, configure_logging
-from app.webhook_store import WebhookStore
+from app.persistence.metrics_store import read_snapshot
+from app.persistence.webhook_store import WebhookStore
+from app.telemetry.logging import configure_logging
+from app.telemetry.metrics import Metrics
 
 
 async def test_logs_isolate_concurrent_context_and_never_render_exception_payload():
@@ -78,7 +79,7 @@ def test_persistent_backlog_and_empty_age(store, postgresql_url):
 async def test_snapshot_runs_off_event_loop_and_scrape_never_reads_database(monkeypatch):
     import threading
 
-    import app.observability as module
+    import app.telemetry.metrics as module
     started, release = threading.Event(), threading.Event()
     calls = []
 
@@ -102,7 +103,7 @@ async def test_snapshot_runs_off_event_loop_and_scrape_never_reads_database(monk
 
 
 def test_repeated_snapshots_do_not_count_execution_receipt_twice(store, postgresql_url):
-    from app.models import JobKind
+    from app.domain.models import JobKind
     flow = store.create_flow('private/repository', 1, 1)
     job = store.enqueue_job(flow.id, JobKind.INITIAL)
     with store.connection() as connection:
@@ -119,7 +120,7 @@ def test_repeated_snapshots_do_not_count_execution_receipt_twice(store, postgres
 def test_snapshot_query_timeout_preserves_previous_facts(store, postgresql_url, monkeypatch):
     import psycopg
 
-    import app.metrics_store as module
+    import app.persistence.metrics_store as module
     metrics = Metrics()
     metrics.accept(read_snapshot(postgresql_url))
     previous = metrics.snapshot
@@ -163,7 +164,7 @@ def test_standard_logging_preserves_level_and_origin_without_payload():
 
 
 def test_reconcile_metrics_match_scheduler_eligibility(store, postgresql_url):
-    from app.models import DeliveryState, FlowState
+    from app.domain.models import DeliveryState, FlowState
     for number, state, delivery_state, pr in [
         (1, FlowState.ACTIVE, DeliveryState.OPEN, 11),
         (2, FlowState.CANCELLED, DeliveryState.OPEN, 12),
@@ -190,8 +191,8 @@ def test_reconcile_metrics_match_scheduler_eligibility(store, postgresql_url):
 
 
 def test_archive_alert_age_uses_latest_job_of_active_bound_flow(store, postgresql_url):
-    from app.models import JobKind
-    from app.protocol import PROTOCOL_VERSION
+    from app.contracts.protocol import PROTOCOL_VERSION
+    from app.domain.models import JobKind
     flow = store.create_flow('fixture/recovery', 1, 1)
     store.worker_connected('w', PROTOCOL_VERSION, 'epoch')
     initial = store.enqueue_job(flow.id, JobKind.INITIAL)

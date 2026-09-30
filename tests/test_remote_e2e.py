@@ -3,10 +3,7 @@ from collections.abc import Mapping
 
 import pytest
 
-from app.control.gateway import WorkerGateway
-from app.delivery_models import OpenedDelivery
-from app.models import FlowDelivery, Job, JobKind, JobState, VcsKind, VcsOutcome
-from app.protocol import (
+from app.contracts.protocol import (
     ExecutionResult,
     ExecutionTask,
     FlowToolResponse,
@@ -14,6 +11,9 @@ from app.protocol import (
     InitialTask,
     Succeeded,
 )
+from app.control.gateway import WorkerGateway
+from app.domain.delivery_models import OpenedDelivery
+from app.domain.models import FlowDelivery, Job, JobKind, JobState, VcsKind, VcsOutcome
 from app.worker.client import WorkerClient
 from app.worker.journal import WorkerJournal
 from app.worker.tools import FlowToolCaller

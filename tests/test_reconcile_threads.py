@@ -5,10 +5,10 @@ from datetime import timedelta
 import pytest
 
 from app.control.reconcile_feedback import FeedbackReconciler
-from app.github_models import FeedbackPage, ReviewThreadPage, ReviewThreads
-from app.models import DeliveryState
-from app.reconcile_store import ReconcileStore
-from app.store import Store
+from app.domain.github_models import FeedbackPage, ReviewThreadPage, ReviewThreads
+from app.domain.models import DeliveryState
+from app.persistence.reconcile_store import ReconcileStore
+from app.persistence.store import Store
 from tests.test_review_batches import feedback, ingest
 from tests.test_review_batches import (
     review_flow as review_flow,  # noqa: PLC0414 - fixture re-export

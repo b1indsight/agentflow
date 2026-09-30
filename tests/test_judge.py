@@ -8,8 +8,8 @@ from contextlib import asynccontextmanager
 import pytest
 from pydantic import SecretStr, ValidationError
 
-from app.judge import BubJudge
-from app.models import TriageVerdict
+from app.domain.models import TriageVerdict
+from app.worker.judge import BubJudge
 from tests.review_memory import review_context as context
 
 
@@ -178,7 +178,7 @@ async def test_child_output_and_exit_contract(monkeypatch, out, err, code, failu
     child = ChildProcess(out, err, code)
 
     async def start(*args, **kwargs):
-        assert args[1:4] == ("-I", "-m", "app.judge_runner")
+        assert args[1:4] == ("-I", "-m", "app.worker.judge_runner")
         assert set(kwargs["env"]) == {
             "PATH", "LANG", "FLOWTOOL_JUDGE_MODEL", "FLOWTOOL_JUDGE_API_KEY", "BUB_HOME",
         }
@@ -202,7 +202,7 @@ async def test_timeout_and_cancellation_kill_and_reap_child(monkeypatch, error, 
         raise error
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", start)
-    monkeypatch.setattr("app.judge._exchange", exchange)
+    monkeypatch.setattr("app.worker.judge._exchange", exchange)
     judge = BubJudge(model="openai:test", api_key=SecretStr("fake"))
     if failure:
         assert (await judge.triage(context())).failure == failure
@@ -268,8 +268,8 @@ async def test_runner_does_not_instantiate_framework_or_tape(monkeypatch):
     from bub.framework import BubFramework
     from bub.tools import ToolExecutor
 
-    from app.judge_models import JudgeRequest
-    from app.judge_runner import run
+    from app.domain.judge_models import JudgeRequest
+    from app.worker.judge_runner import run
 
     def forbidden(*args, **kwargs):
         pytest.fail("Judge must not enter plugin, tape or tool execution paths")

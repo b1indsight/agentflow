@@ -2,11 +2,11 @@
 
 from dataclasses import dataclass, field
 
-from app.github_models import ReviewComment, ReviewThread
-from app.models import FeedbackRef, Flow, ReviewItemKind
-from app.protocol import RevisionResult
-from app.result_models import CommentEffect, Effect, ResolveEffect, ThreadReplyEffect
-from app.review_models import ReviewBatch, ReviewFeedback
+from app.contracts.protocol import RevisionResult
+from app.contracts.result_models import CommentEffect, Effect, ResolveEffect, ThreadReplyEffect
+from app.domain.github_models import ReviewComment, ReviewThread
+from app.domain.models import FeedbackRef, Flow, ReviewItemKind
+from app.domain.review_models import ReviewBatch, ReviewFeedback
 
 
 def matches(comment: ReviewComment, feedback: ReviewFeedback) -> bool:

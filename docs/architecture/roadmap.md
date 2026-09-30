@@ -5,24 +5,24 @@
 ```
 flowtool/
   app/
-    control/          # FastAPI/router/service/coordinator/gateway/reconciler/runtime
-    worker/           # WebSocket client/executor/runtime + durable journal/root lock
-    protocol.py       # 版本化 task/result/message 契约
-    codex_driver.py   # CodexSession 抽象（CodeAgent 端口首个 adapter）
-    context_builder.py # prompt / 上下文构建（§4.9）
-    judge.py          # Judge / Triage 适配器（bub，§4.10）
-    github_client.py  # githubkit 封装（App 认证）
-    vcs.py            # Flow repo 准备 + VCS 自探测指引/事实核验（§4.6）
-    sandbox.py        # 旧 workspace-write 接缝；强隔离 adapter 留到 M5（§4.6 / §9-5）
-    store.py          # PostgreSQL schema + 仓储（含 jobs 表）
+    domain/           # 领域事实、类型、端口与纯策略（无运行时 I/O）
+    contracts/        # 版本化 task/result/message 与冻结结果应用契约
+    persistence/      # PostgreSQL schema、事务仓储、指标查询与就绪探针
+    github/           # githubkit App 认证、GraphQL 分页与远端数据解码
+    control/          # HTTP/WS 服务、调度、工作流编排与审核证据采集
+    worker/           # WS client、journal、Agent/Judge、prompt、工作目录与 VCS
+    telemetry/        # 通用 logging 与控制端 metrics，分开依赖
     config.py         # serve/worker 角色配置（pydantic-settings）
-    models.py         # 领域类型 / 枚举
     cli.py            # admin CLI（§10-8）
+    live_smoke.py      # 真实闭环验收命令入口
     plugins/          # 生命周期 hook 插件（§9-7）
   tests/
   pyproject.toml      # uv 管理
   README.md
 ```
+
+包之间的依赖规则见[组件职责](components.md#包依赖边界)。包迁移不改变 CLI、数据库 schema
+或网络消息字段；内部 Python 导入使用新路径，不提供旧路径转发模块。
 
 - **M0（已验收）** 骨架 + webhook 验签 + SQLite（含 `jobs`）+ 配置 + worker / 崩溃恢复骨架；
   19 个自动化测试、Ruff、Mypy、CLI 与 `/healthz` runtime smoke 全部通过（2026-08-26）；

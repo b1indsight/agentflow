@@ -11,9 +11,7 @@ from uuid import uuid4
 from loguru import logger
 from websockets.asyncio.client import connect
 
-from app.delivery_models import DeliveryReceipt
-from app.models import VcsOutcome
-from app.protocol import (
+from app.contracts.protocol import (
     Assignment,
     AssignmentSecret,
     ExecutionResult,
@@ -39,6 +37,8 @@ from app.protocol import (
     Succeeded,
     parse_server_message,
 )
+from app.domain.delivery_models import DeliveryReceipt
+from app.domain.models import VcsOutcome
 from app.worker.journal import WorkerJournal
 from app.worker.tools import FlowToolCaller
 

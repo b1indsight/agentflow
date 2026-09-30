@@ -19,7 +19,7 @@ def test_archive_status_labels_cannot_be_empty_or_conflict(labels):
 
 
 def test_judge_credentials_stay_out_of_config_serialization_and_code_agent_environment(monkeypatch):
-    from app.codex_driver import _codex_environment
+    from app.worker.codex_driver import _codex_environment
 
     monkeypatch.setenv("FLOWTOOL_JUDGE_MODEL", "openai:test")
     monkeypatch.setenv("FLOWTOOL_JUDGE_API_KEY", "judge-secret")

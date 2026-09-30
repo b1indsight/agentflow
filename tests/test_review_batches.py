@@ -6,9 +6,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.contracts.protocol import PROTOCOL_VERSION, Succeeded, TriageResult, terminal_digest
 from app.control.router import EventRouter
 from app.control.service import ControlService
-from app.models import (
+from app.domain.models import (
     DeliveryState,
     FlowState,
     JobKind,
@@ -17,10 +18,9 @@ from app.models import (
     TriageVerdict,
     Verdict,
 )
-from app.protocol import PROTOCOL_VERSION, Succeeded, TriageResult, terminal_digest
-from app.review_models import BatchState, FeedbackUpdate
-from app.review_store import ReviewStore
-from app.store import Store
+from app.domain.review_models import BatchState, FeedbackUpdate
+from app.persistence.review_store import ReviewStore
+from app.persistence.store import Store
 from tests.review_memory import judge_decision
 from tests.test_coordinator import RecordingGitHub, coordinator
 
@@ -326,7 +326,7 @@ async def test_review_actions_have_explicit_dispatch_semantics(
 
 
 def test_failed_batch_retry_restores_ownership_and_cancel_fences_old_work(store, review_flow):
-    from app.models import FlowState
+    from app.domain.models import FlowState
 
     flow, clock = review_flow
     ingest(store, flow, feedback(clock))
@@ -416,8 +416,8 @@ async def test_revise_confidence_boundary_and_unresolved_points_persist(
 
 
 async def test_answer_recovery_waits_for_receipt_and_preserves_a_new_version(store, review_flow):
-    from app.github_models import GitHubAdapterError, GitHubErrorKind
-    from app.result_models import ResultPending
+    from app.contracts.result_models import ResultPending
+    from app.domain.github_models import GitHubAdapterError, GitHubErrorKind
 
     class LostResponseGitHub(RecordingGitHub):
         async def comment(self, *args):

@@ -8,11 +8,11 @@ import pytest
 
 from app.control.reconcile import Reconciler
 from app.control.service import ControlService
-from app.github_client import GitHubApp
-from app.github_models import GitHubAdapterError, GitHubErrorKind
-from app.github_retry import retry_delay
-from app.models import DeliveryState, FlowState, JobKind
-from app.store import Store
+from app.domain.github_models import GitHubAdapterError, GitHubErrorKind
+from app.domain.github_retry import retry_delay
+from app.domain.models import DeliveryState, FlowState, JobKind
+from app.github.client import GitHubApp
+from app.persistence.store import Store
 from tests.test_github_client import AsyncEndpoint, response, settings
 from tests.test_merge import (
     merge_flow as merge_flow,  # noqa: PLC0414 - fixture re-export

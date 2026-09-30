@@ -7,11 +7,18 @@ from pathlib import Path
 
 import pytest
 
-from app.models import JobState
-from app.protocol import ArchiveResult, ArchiveTask, Assignment, Failed, InitialResult, Succeeded
-from app.vcs import prepare_flow_repo
+from app.contracts.protocol import (
+    ArchiveResult,
+    ArchiveTask,
+    Assignment,
+    Failed,
+    InitialResult,
+    Succeeded,
+)
+from app.domain.models import JobState
 from app.worker.executor import WorkerExecutor
 from app.worker.journal import JournalError, WorkerJournal
+from app.worker.vcs import prepare_flow_repo
 from tests.test_vcs import _git_fixture
 from tests.test_worker_executor import RecordingAgent, RecordingJudge, RecordingToolCaller
 from tests.test_worker_journal import _assignment

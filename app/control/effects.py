@@ -5,15 +5,8 @@ from __future__ import annotations
 import hashlib
 from uuid import uuid4
 
-from app.control.archive import verify_archive
-from app.control.thread_effects import has_pending_thread_feedback, resolve_thread, revision_current
-from app.control.tools import FlowToolRejected, FlowToolService
-from app.github_models import GitHubAdapterError, GitHubErrorKind
-from app.github_retry import retry_delay
-from app.models import TERMINAL_STATES, DeliveryState, FlowState
-from app.ports import GitHubClient
-from app.protocol import FlowToolErrorKind
-from app.result_models import (
+from app.contracts.protocol import FlowToolErrorKind
+from app.contracts.result_models import (
     CommentEffect,
     EffectReceipt,
     EffectRecord,
@@ -26,8 +19,15 @@ from app.result_models import (
     ReviewersEffect,
     ThreadReplyEffect,
 )
-from app.review_models import BatchState
-from app.store import Store
+from app.control.archive import verify_archive
+from app.control.thread_effects import has_pending_thread_feedback, resolve_thread, revision_current
+from app.control.tools import FlowToolRejected, FlowToolService
+from app.domain.github_models import GitHubAdapterError, GitHubErrorKind
+from app.domain.github_retry import retry_delay
+from app.domain.models import TERMINAL_STATES, DeliveryState, FlowState
+from app.domain.ports import GitHubClient
+from app.domain.review_models import BatchState
+from app.persistence.store import Store
 
 
 class _PendingReviewFeedback(RuntimeError):
@@ -217,7 +217,7 @@ class ResultEffects:
                 raise ResultPending("retired PR creation awaits its remote identity")
             if cancelled_opening:
                 from app.control.service import ControlService
-                from app.github_models import PullRequestMerge
+                from app.domain.github_models import PullRequestMerge
 
                 remote = await self.github.get_pull_request(installation, repo, found.number)
                 if (remote.repo != repo or remote.number != found.number or remote.head_repository != repo
@@ -360,7 +360,7 @@ class ResultEffects:
                 if remote.state == "closed":
                     from app.control.lifecycle import pause_delivery
                     from app.control.service import ControlService
-                    from app.github_models import PullRequestMerge
+                    from app.domain.github_models import PullRequestMerge
 
                     with self.store.transaction() as tx:
                         fresh = tx.lock_workflow(plan.flow_id)

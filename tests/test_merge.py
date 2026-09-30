@@ -8,12 +8,12 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
+from app.contracts.protocol import ArchiveResult, ArchiveTask, Succeeded, terminal_digest
 from app.control.router import EventRouter
 from app.control.service import ControlService
-from app.models import DeliveryState, Flow, FlowState, JobKind, JobState
-from app.protocol import ArchiveResult, ArchiveTask, Succeeded, terminal_digest
-from app.review_models import BatchState
-from app.store import Store
+from app.domain.models import DeliveryState, Flow, FlowState, JobKind, JobState
+from app.domain.review_models import BatchState
+from app.persistence.store import Store
 from tests.test_coordinator import RecordingGitHub, coordinator
 from tests.test_workflow_transactions import accepted_triage
 

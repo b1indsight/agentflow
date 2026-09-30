@@ -11,9 +11,9 @@ from pydantic import ValidationError
 from typer.testing import CliRunner
 
 from app import cli
-from app.github_client import GitHubApp
-from app.github_models import GitHubAdapterError, GitHubErrorKind
-from app.project_models import ProjectConfig, ProjectStatus
+from app.domain.github_models import GitHubAdapterError, GitHubErrorKind
+from app.domain.project_models import ProjectConfig, ProjectStatus
+from app.github.client import GitHubApp
 from tests.test_github_client import AsyncEndpoint, response, settings
 
 
@@ -246,7 +246,7 @@ async def test_real_sdk_never_retries_or_accepts_partial_mutation(tmp_path, monk
 
 def test_check_disabled_does_not_construct_github(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "get_serve_settings", lambda: settings(tmp_path))
-    monkeypatch.setattr("app.github_client.GitHubApp", lambda _: pytest.fail("disabled must not authenticate"))
+    monkeypatch.setattr("app.github.client.GitHubApp", lambda _: pytest.fail("disabled must not authenticate"))
     result = CliRunner().invoke(cli.app, ["project", "check", "owner/repo"])
     assert result.exit_code == 0 and "disabled" in result.stdout
 
@@ -256,7 +256,7 @@ def test_check_only_validates_and_prints_target(tmp_path, monkeypatch):
     settings_value.projects = {"owner/repo": config()}
     api, client, lookup = adapter(tmp_path, monkeypatch, target())
     monkeypatch.setattr(cli, "get_serve_settings", lambda: settings_value)
-    monkeypatch.setattr("app.github_client.GitHubApp", lambda _: SimpleNamespace(project_client=lambda _: api))
+    monkeypatch.setattr("app.github.client.GitHubApp", lambda _: SimpleNamespace(project_client=lambda _: api))
     result = CliRunner().invoke(cli.app, ["project", "check", "OWNER/REPO"])
     assert result.exit_code == 0 and "Renamed board" in result.stdout
     assert len(client.calls) == len(lookup.calls) == 1

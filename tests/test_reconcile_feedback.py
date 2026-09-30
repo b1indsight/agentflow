@@ -6,10 +6,15 @@ from datetime import timedelta
 import pytest
 
 from app.control.reconcile_feedback import FeedbackReconciler
-from app.github_models import FeedbackPage, GitHubAdapterError, GitHubErrorKind, RemoteFeedback
-from app.models import DeliveryState, FlowState, ReviewItemKind
-from app.reconcile_store import ReconcileStore
-from app.store import Store
+from app.domain.github_models import (
+    FeedbackPage,
+    GitHubAdapterError,
+    GitHubErrorKind,
+    RemoteFeedback,
+)
+from app.domain.models import DeliveryState, FlowState, ReviewItemKind
+from app.persistence.reconcile_store import ReconcileStore
+from app.persistence.store import Store
 from tests.test_review_batches import feedback, ingest
 from tests.test_review_batches import (
     review_flow as review_flow,  # noqa: PLC0414 - fixture re-export
@@ -254,7 +259,7 @@ async def test_poll_marks_same_webhook_command_body_inert(store, review_flow):
 
 @pytest.mark.parametrize("verdict", ["ignore", "wait"])
 async def test_blank_backlog_cannot_hide_text_or_repeat_forever(store, review_flow, verdict):
-    from app.models import TriageVerdict, Verdict
+    from app.domain.models import TriageVerdict, Verdict
     from tests.test_review_batches import claim, run_triage
 
     flow, clock = review_flow
@@ -275,7 +280,7 @@ async def test_blank_backlog_cannot_hide_text_or_repeat_forever(store, review_fl
 
 
 def test_blank_authorized_signal_stays_with_bounded_text_batch(store, review_flow):
-    from app.models import JobKind
+    from app.domain.models import JobKind
     from tests.test_review_batches import claim
 
     flow, clock = review_flow
@@ -290,7 +295,7 @@ def test_blank_authorized_signal_stays_with_bounded_text_batch(store, review_flo
 
 @pytest.mark.parametrize("verdict", ["ignore", "wait"])
 async def test_recovered_backlog_drains_without_oversized_or_repeated_wait_batches(store, review_flow, verdict):
-    from app.models import TriageVerdict, Verdict
+    from app.domain.models import TriageVerdict, Verdict
     from tests.test_review_batches import claim, run_triage
 
     flow, clock = review_flow

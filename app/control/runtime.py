@@ -15,13 +15,14 @@ from app.control.reconcile import Reconciler
 from app.control.reconcile_feedback import FeedbackReconciler
 from app.control.service import ControlService
 from app.control.webhooks import WebhookConsumer
-from app.github_client import GitHubApp
-from app.observability import Metrics, configure_logging
+from app.github.client import GitHubApp
+from app.persistence.readiness import database_ready
+from app.persistence.stop_store import StopStore
+from app.persistence.store import Store
+from app.persistence.webhook_store import WebhookStore
 from app.plugins import get_plugin_manager
-from app.readiness import database_ready
-from app.stop_store import StopStore
-from app.store import Store
-from app.webhook_store import WebhookStore
+from app.telemetry.logging import configure_logging
+from app.telemetry.metrics import Metrics
 
 
 class ControlRuntime:

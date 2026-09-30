@@ -4,13 +4,18 @@ import asyncio
 
 from loguru import logger
 
-from app.github_models import FeedbackPage, FeedbackSource, GitHubAdapterError, GitHubErrorKind
-from app.github_retry import retry_delay
-from app.models import DeliveryState, FlowState, ReviewItemKind
-from app.ports import GitHubClient
-from app.reconcile_store import FeedbackCheck
-from app.review_models import FeedbackUpdate
-from app.store import Store
+from app.domain.github_models import (
+    FeedbackPage,
+    FeedbackSource,
+    GitHubAdapterError,
+    GitHubErrorKind,
+)
+from app.domain.github_retry import retry_delay
+from app.domain.models import DeliveryState, FlowState, ReviewItemKind
+from app.domain.ports import GitHubClient
+from app.domain.review_models import FeedbackUpdate
+from app.persistence.reconcile_store import FeedbackCheck
+from app.persistence.store import Store
 
 
 class FeedbackReconciler:

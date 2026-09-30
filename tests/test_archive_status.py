@@ -9,17 +9,17 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from githubkit import GitHub
 from githubkit.cache.mem_cache import MemCacheStrategy
 
+from app.contracts.protocol import ArchiveResult
+from app.contracts.result_models import CommentEffect, EffectState, ResultPending
 from app.control.archive import archive_progress
 from app.control.effects import ResultEffects
 from app.control.service import ControlService
-from app.github_client import GitHubApp
-from app.github_models import GitHubAdapterError, GitHubErrorKind
-from app.models import FlowState, JobState
+from app.domain.github_models import GitHubAdapterError, GitHubErrorKind
+from app.domain.models import FlowState, JobState
+from app.github.client import GitHubApp
+from app.persistence.result_store import ResultStore
+from app.persistence.store import Store
 from app.plugins.hookspecs import hookimpl
-from app.protocol import ArchiveResult
-from app.result_models import CommentEffect, EffectState, ResultPending
-from app.result_store import ResultStore
-from app.store import Store
 from tests.test_archive_recovery import ready_archive, receive
 from tests.test_coordinator import RecordingGitHub, coordinator
 from tests.test_github_client import settings
@@ -85,7 +85,7 @@ def archive_adapter(tmp_path, monkeypatch, transport, *, invalid_key=False):
         return GitHub(*args, **kwargs, async_transport=httpx.MockTransport(transport),
                       cache_strategy=cache)
 
-    monkeypatch.setattr("app.github_client.GitHub", client)
+    monkeypatch.setattr("app.github.client.GitHub", client)
     return GitHubApp(config), cache
 
 

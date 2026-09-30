@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import asyncio
 
-from app.delivery_models import DeliveryReceipt, OpenedDelivery, PreparedDelivery
-from app.github_models import GitHubAdapterError, GitHubErrorKind, PullRequestSnapshot
-from app.models import TERMINAL_STATES, DeliveryState, FlowDelivery
-from app.ports import GitHubClient
-from app.protocol import FlowToolErrorKind, FlowToolRequest, FlowToolResponse
-from app.store import Store
+from app.contracts.protocol import FlowToolErrorKind, FlowToolRequest, FlowToolResponse
+from app.domain.delivery_models import DeliveryReceipt, OpenedDelivery, PreparedDelivery
+from app.domain.github_models import GitHubAdapterError, GitHubErrorKind, PullRequestSnapshot
+from app.domain.models import TERMINAL_STATES, DeliveryState, FlowDelivery
+from app.domain.ports import GitHubClient
+from app.persistence.store import Store
 
 
 class FlowToolRejected(RuntimeError):

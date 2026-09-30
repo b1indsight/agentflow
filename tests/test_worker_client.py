@@ -2,9 +2,7 @@ import asyncio
 
 import pytest
 
-from app.delivery_models import OpenedDelivery
-from app.models import JobState, VcsKind, VcsOutcome
-from app.protocol import (
+from app.contracts.protocol import (
     Assignment,
     ExecutionResult,
     ExecutionTask,
@@ -21,6 +19,8 @@ from app.protocol import (
     Succeeded,
     parse_worker_message,
 )
+from app.domain.delivery_models import OpenedDelivery
+from app.domain.models import JobState, VcsKind, VcsOutcome
 from app.worker.client import FlowToolCallError, WorkerClient
 from app.worker.journal import WorkerJournal
 from app.worker.tools import FlowToolCaller
@@ -117,7 +117,7 @@ async def test_client_acknowledges_and_executes_one_assignment(tmp_path) -> None
 
 @pytest.mark.parametrize("fails", [False, True])
 async def test_worker_redacts_echoed_push_capability_before_journal_and_wire(tmp_path, fails):
-    from app.protocol import Failed, parse_server_message
+    from app.contracts.protocol import Failed, parse_server_message
     from app.worker.journal import WorkerJournal
     from tests.test_worker_journal import _assignment
 
@@ -302,7 +302,7 @@ async def test_heartbeat_failure_preserves_the_running_executor_for_reconnect(tm
         with pytest.raises(ConnectionError, match="connection lost"):
             await execution
         assert executor.cancelled.is_set() is False
-        from app.protocol import ResumeAssignment
+        from app.contracts.protocol import ResumeAssignment
 
         heartbeat = asyncio.Event()
         class ResumedConnection:

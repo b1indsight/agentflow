@@ -7,24 +7,7 @@ from collections.abc import Awaitable, Callable
 from datetime import timedelta
 from typing import Protocol
 
-from app.control.archive import archive_task
-from app.control.preparation import PreparationReadFailure, PreparationStale
-from app.control.results import ResultApplication, ResultSettings
-from app.control.revisions import verify_revision_remote
-from app.control.tools import FlowToolService
-from app.github_models import GitHubAdapterError, GitHubErrorKind
-from app.models import (
-    TERMINAL_STATES,
-    Flow,
-    FlowDelivery,
-    Job,
-    JobKind,
-    JobState,
-    ReviewItemKind,
-)
-from app.plugins import emit_hook, get_plugin_manager
-from app.ports import GitHubClient
-from app.protocol import (
+from app.contracts.protocol import (
     AssignmentSecret,
     ExecutionTask,
     Failed,
@@ -36,9 +19,26 @@ from app.protocol import (
     TriageTask,
     terminal_digest,
 )
-from app.review_context import build_review_context
-from app.review_models import BatchState
-from app.store import Store
+from app.control.archive import archive_task
+from app.control.preparation import PreparationReadFailure, PreparationStale
+from app.control.results import ResultApplication, ResultSettings
+from app.control.review_context import build_review_context
+from app.control.revisions import verify_revision_remote
+from app.control.tools import FlowToolService
+from app.domain.github_models import GitHubAdapterError, GitHubErrorKind
+from app.domain.models import (
+    TERMINAL_STATES,
+    Flow,
+    FlowDelivery,
+    Job,
+    JobKind,
+    JobState,
+    ReviewItemKind,
+)
+from app.domain.ports import GitHubClient
+from app.domain.review_models import BatchState
+from app.persistence.store import Store
+from app.plugins import emit_hook, get_plugin_manager
 
 
 class CoordinatorSettings(ResultSettings, Protocol):

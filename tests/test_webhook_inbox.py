@@ -9,7 +9,7 @@ import pytest
 
 from app.control.service import ControlService
 from app.control.webhooks import WebhookConsumer
-from app.webhook_store import DeliveryConflict, WebhookStore
+from app.persistence.webhook_store import DeliveryConflict, WebhookStore
 
 
 def settings():
@@ -205,7 +205,7 @@ def test_distinct_receipt_waits_for_older_repository_transaction(store):
     ("pull_request_review_comment", "created"),
 ])
 def test_all_business_routes_rollback_with_receipt(store, monkeypatch, event, action):
-    from app.models import DeliveryState, FlowState
+    from app.domain.models import DeliveryState, FlowState
 
     flow = store.create_flow("owner/repo", 7, 42)
     attempt = store.create_attempt(flow.id)

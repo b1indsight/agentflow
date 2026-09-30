@@ -9,15 +9,15 @@ import httpx
 import pytest
 import pytest_asyncio
 
+from app.contracts.protocol import PROTOCOL_VERSION
 from app.control.api import create_app
 from app.control.router import EventRouter
 from app.control.service import ControlService
 from app.control.webhooks import WebhookConsumer
-from app.models import Flow, FlowState, JobKind
-from app.observability import Metrics
-from app.protocol import PROTOCOL_VERSION
-from app.store import Store
-from app.webhook_store import WebhookStore
+from app.domain.models import Flow, FlowState, JobKind
+from app.persistence.store import Store
+from app.persistence.webhook_store import WebhookStore
+from app.telemetry.metrics import Metrics
 
 
 class RecordingGateway:
@@ -177,7 +177,7 @@ async def test_receipt_commit_failure_is_not_acknowledged(client, context, monke
 
 @pytest.mark.asyncio
 async def test_invalid_identity_json_and_conflict(client, context, monkeypatch):
-    from app.webhook_store import DeliveryConflict
+    from app.persistence.webhook_store import DeliveryConflict
 
     for body in [b"[]", b"{", b"null", b'{"value":NaN}']:
         assert (await client.post("/webhook", content=body, headers=signed_headers(body))).status_code == 400

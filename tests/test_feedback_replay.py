@@ -5,9 +5,9 @@ from datetime import timedelta
 
 import pytest
 
-from app.github_models import ReviewThreads
-from app.review_store import ReviewStore
-from app.store import Store
+from app.domain.github_models import ReviewThreads
+from app.persistence.review_store import ReviewStore
+from app.persistence.store import Store
 from tests.test_review_batches import feedback, ingest
 from tests.test_review_batches import (
     review_flow as review_flow,  # noqa: PLC0414 - fixture re-export

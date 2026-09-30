@@ -5,8 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.github_client import GitHubApp
-from app.github_models import GitHubAdapterError, GitHubErrorKind
+from app.domain.github_models import GitHubAdapterError, GitHubErrorKind
+from app.github.client import GitHubApp
 from tests.test_github_client import AsyncEndpoint, response, settings
 
 
