@@ -23,7 +23,7 @@ from app.domain.github_models import (
     ReviewThreads,
 )
 from app.domain.judge_models import JudgeDecision
-from app.domain.models import AgentRun, CodeAgentContext
+from app.domain.models import CodingExecutionContext, CodingExecutionResult
 from app.domain.project_models import ProjectItem, ProjectItemsPage, ProjectStatus, ProjectTarget
 
 
@@ -36,7 +36,7 @@ class ProjectsClient(Protocol):
     async def set_status(self, item_id: str, status: ProjectStatus) -> None: ...
 
 
-class CodeAgent(Protocol):
+class CodingAgent(Protocol):
     """重的代码 agent。MVP adapter：codex（codex_driver.py）。
 
     本地版本控制（branch/commit/push）由 agent 自己在 Flow 独占 repo 内完成。Codex adapter 的
@@ -50,13 +50,13 @@ class CodeAgent(Protocol):
         cwd: Path,
         *,
         output_schema: Path | None = None,
-        context: CodeAgentContext | None = None,
-    ) -> AgentRun: ...
+        context: CodingExecutionContext | None = None,
+    ) -> CodingExecutionResult: ...
 
     async def resume(
         self, session_id: str, prompt: str, *, output_schema: Path | None = None,
-        context: CodeAgentContext | None = None,
-    ) -> AgentRun: ...
+        context: CodingExecutionContext | None = None,
+    ) -> CodingExecutionResult: ...
 
 
 class Judge(Protocol):

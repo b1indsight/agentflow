@@ -12,7 +12,7 @@ from app.contracts.protocol import (
     ArchiveTask,
     Assignment,
     Failed,
-    InitialResult,
+    InitialTaskResult,
     Succeeded,
 )
 from app.domain.models import JobState
@@ -44,7 +44,7 @@ async def workspace(tmp_path: Path, *, start=True):
     journal.record_started()
     journal.record_terminal(Succeeded(
         job_id=5, assignment_token="assignment-1", connection_epoch="epoch-1",
-        result=InitialResult(session_id="session", last_message="done", exit_code=0),
+        result=InitialTaskResult(session_id="session", last_message="done", exit_code=0),
     ))
     journal.acknowledge(5, JobState.DONE)
     assignment = archive_assignment()

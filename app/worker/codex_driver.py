@@ -1,4 +1,4 @@
-"""CodeAgent adapter for Codex CLI in a trusted Flow-owned repository."""
+"""CodingAgent adapter for Codex CLI in a trusted Flow-owned repository."""
 
 from __future__ import annotations
 
@@ -14,8 +14,8 @@ from pathlib import Path
 from loguru import logger
 
 from app.domain.models import (
-    AgentRun,
-    CodeAgentContext,
+    CodingExecutionContext,
+    CodingExecutionResult,
     SessionUnavailable,
 )
 from app.worker.credentials import git_credential_environment
@@ -57,7 +57,7 @@ _CODEX_ENVIRONMENT_KEYS = frozenset(
 
 def _codex_environment(
     source: Mapping[str, str] | None = None,
-    context: CodeAgentContext | None = None,
+    context: CodingExecutionContext | None = None,
 ) -> dict[str, str]:
     """Build a minimal environment with only the optional scoped push credential."""
 
@@ -75,7 +75,7 @@ def _start_args(
     cwd: Path,
     *,
     trusted_host: bool,
-    context: CodeAgentContext | None = None,
+    context: CodingExecutionContext | None = None,
 ) -> list[str]:
     """Build a full-access start command only after the operator's explicit opt-in."""
 
@@ -129,7 +129,7 @@ def _parse_thread_id(jsonl_text: str) -> str | None:
 
 
 class CodexAgent:
-    """实现 ports.CodeAgent。"""
+    """实现 ports.CodingAgent。"""
 
     def __init__(self, *, trusted_host: bool = False, timeout: float = 1200.0):
         self.trusted_host = trusted_host
@@ -141,15 +141,15 @@ class CodexAgent:
         cwd: Path,
         *,
         output_schema: Path | None = None,
-        context: CodeAgentContext | None = None,
-    ) -> AgentRun:
+        context: CodingExecutionContext | None = None,
+    ) -> CodingExecutionResult:
         args = _start_args(task, cwd, trusted_host=self.trusted_host, context=context)
         return await self._run(args, output_schema, parse_thread=True, context=context)
 
     async def resume(
         self, session_id: str, prompt: str, *, output_schema: Path | None = None,
-        context: CodeAgentContext | None = None,
-    ) -> AgentRun:
+        context: CodingExecutionContext | None = None,
+    ) -> CodingExecutionResult:
         if not self.trusted_host:
             raise RuntimeError(
                 "Codex trusted-host full-access execution requires "
@@ -178,8 +178,8 @@ class CodexAgent:
         *,
         parse_thread: bool,
         session_id: str | None = None,
-        context: CodeAgentContext | None = None,
-    ) -> AgentRun:
+        context: CodingExecutionContext | None = None,
+    ) -> CodingExecutionResult:
         with tempfile.NamedTemporaryFile(prefix="codex-last-", suffix=".txt", delete=False) as file:
             last_file = Path(file.name)
         args += ["-o", str(last_file)]
@@ -208,7 +208,7 @@ class CodexAgent:
             if isinstance(error, asyncio.CancelledError):
                 raise
             logger.error("codex run timed out after {}s", self.timeout)
-            return AgentRun(session_id=session_id, last_message="", exit_code=124)
+            return CodingExecutionResult(session_id=session_id, last_message="", exit_code=124)
 
         jsonl = stdout.decode(errors="replace")
         sid = _parse_thread_id(jsonl)
@@ -229,5 +229,5 @@ class CodexAgent:
         detail = stderr.decode(errors="replace")[-4000:] if proc.returncode else None
         if detail and context is not None and context.push_token is not None:
             detail = detail.replace(context.push_token.get_secret_value(), "[REDACTED]")
-        return AgentRun(session_id=sid, last_message=last_message, exit_code=proc.returncode or 0,
+        return CodingExecutionResult(session_id=sid, last_message=last_message, exit_code=proc.returncode or 0,
                         failure_detail=detail)

@@ -65,7 +65,7 @@ tool authorization 和 delivery ownership 都以稳定 Flow ID 为键。
 
 ## 4. Agent 环境工具
 
-CodeAgent 看到的是 Flow 语义工具，不是 control 数据库、worker 管理接口或 GitHub credential：
+CodingAgent 看到的是 Flow 语义工具，不是 control 数据库、worker 管理接口或 GitHub credential：
 
 ```text
 flow.spawn(task, context, skills, result_contract, relation) -> child_flow
@@ -83,7 +83,7 @@ GitHub 协作走同一能力通道，例如 `flow.open_pr`、`flow.comment` 和 
 工具调用路径为：
 
 ```text
-CodeAgent
+CodingAgent
   -> worker-local Flow tool broker（MCP）
   -> 已认证、可复用的 worker/control 通道
   -> control command handler + Store

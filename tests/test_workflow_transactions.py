@@ -132,7 +132,7 @@ def bound_review_flow(store: Store):
 
 def accepted_coding(store: Store, *, receive: bool = True):
     """A remote coding assignment for worker journal/stop recovery tests."""
-    from app.contracts.protocol import InitialResult
+    from app.contracts.protocol import InitialTaskResult
 
     flow = bound_review_flow(store)
     store.enqueue_job(flow.id, JobKind.INITIAL)
@@ -140,7 +140,7 @@ def accepted_coding(store: Store, *, receive: bool = True):
     assert job is not None and job.assignment_token is not None
     assert flow is not None and flow.current_attempt_id is not None
     assert store.start_assignment(job.id, flow.current_attempt_id, "worker-a", "triage-token", "epoch-a")
-    result = InitialResult(session_id="session", last_message="done", exit_code=0)
+    result = InitialTaskResult(session_id="session", last_message="done", exit_code=0)
     if receive:
         message = Succeeded(job_id=job.id, assignment_token=job.assignment_token,
                             connection_epoch="epoch-a", result=result)

@@ -11,8 +11,8 @@ from app.contracts.protocol import (
     FlowToolRequest,
     FlowToolResponse,
     Heartbeat,
-    InitialResult,
     InitialTask,
+    InitialTaskResult,
     RecoveryDescriptor,
     Register,
     ResultAccepted,
@@ -153,7 +153,7 @@ class RecordingCoordinator:
     def __init__(self, store: RecordingStore) -> None:
         self.store = store
         self.started = False
-        self.results: list[InitialResult] = []
+        self.results: list[InitialTaskResult] = []
         self.failures: list[str] = []
 
     async def prepare(self, job: Job) -> ExecutionTask | JobState:
@@ -185,7 +185,7 @@ class RecordingCoordinator:
         job = self.store.get_job(job_id)
         assert job is not None and job.result_payload is not None
         result = Succeeded.model_validate(job.result_payload).result
-        assert isinstance(result, InitialResult)
+        assert isinstance(result, InitialTaskResult)
         self.results.append(result)
         # This transport fixture shares its stored Job object with the coordinator.
         job.state = JobState.DONE
@@ -246,7 +246,7 @@ class ScriptedSocket:
                 job_id=assignment.job_id,
                 assignment_token=assignment.assignment_token,
                 connection_epoch=assignment.connection_epoch,
-                result=InitialResult(
+                result=InitialTaskResult(
                     session_id="session-1", last_message="implemented", exit_code=0
                 ),
             ).model_dump_json()
@@ -291,7 +291,7 @@ class ToolSocket(ScriptedSocket):
                 job_id=assignment.job_id,
                 assignment_token=assignment.assignment_token,
                 connection_epoch=assignment.connection_epoch,
-                result=InitialResult(
+                result=InitialTaskResult(
                     session_id="session-1", last_message="implemented", exit_code=0
                 ),
             ).model_dump_json()
@@ -405,7 +405,7 @@ async def test_recovery_continues_after_one_broken_result():
                     job_id=job.id,
                     assignment_token="token",
                     connection_epoch="epoch",
-                    result=InitialResult(session_id="session", last_message="done", exit_code=0),
+                    result=InitialTaskResult(session_id="session", last_message="done", exit_code=0),
                 ).model_dump(mode="json")
 
         def unapplied_result_ceiling(self):

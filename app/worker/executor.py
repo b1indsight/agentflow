@@ -17,15 +17,20 @@ from app.contracts.protocol import (
     AssignmentSecret,
     ExecutionResult,
     ExecutionTask,
-    InitialResult,
     InitialTask,
-    RevisionInvocation,
-    RevisionResult,
+    InitialTaskResult,
+    RevisionExecutionRecord,
     RevisionTask,
+    RevisionTaskResult,
 )
 from app.domain.delivery_models import DeliveryReceipt
-from app.domain.models import CodeAgentContext, CodexResult, InitialCodexResult, SessionUnavailable
-from app.domain.ports import CodeAgent
+from app.domain.models import (
+    CodingExecutionContext,
+    InitialCodingOutput,
+    RevisionCodingOutput,
+    SessionUnavailable,
+)
+from app.domain.ports import CodingAgent
 from app.worker.context_builder import build_initial_prompt, build_revision_prompt
 from app.worker.journal import WorkerJournal
 from app.worker.tools import FlowToolBroker, FlowToolCaller
@@ -55,7 +60,7 @@ class WorkerExecutor:
     def __init__(
         self,
         worker_root: Path,
-        code_agent: CodeAgent,
+        code_agent: CodingAgent,
         *,
         worker_id: str,
         journal: WorkerJournal,
@@ -93,7 +98,7 @@ class WorkerExecutor:
 
     async def _initial(
         self, task: InitialTask, secret: AssignmentSecret | None, tool_caller: FlowToolCaller
-    ) -> InitialResult:
+    ) -> InitialTaskResult:
         if task.repo_identity != f"{self.worker_id}:{task.repo}":
             return _vcs_failure(None, "", "binding", "repo identity does not match worker")
         if secret is None:
@@ -111,7 +116,7 @@ class WorkerExecutor:
             self._repo_conventions(workspace),
             agent_guidance(task.branch),
         )
-        schema_path = _write_output_schema(InitialCodexResult)
+        schema_path = _write_output_schema(InitialCodingOutput)
         tool_call_id: str | None = None
         tool_result: DeliveryReceipt | None = None
         tool_vcs_outcome = None
@@ -121,7 +126,7 @@ class WorkerExecutor:
                     prompt,
                     workspace,
                     output_schema=schema_path,
-                    context=CodeAgentContext(
+                    context=CodingExecutionContext(
                         push_token=secret.push.token,
                         push_repository=secret.push.repository,
                         mcp_socket=broker.socket_path,
@@ -133,13 +138,13 @@ class WorkerExecutor:
         finally:
             schema_path.unlink(missing_ok=True)
         if run.exit_code != 0:
-            return InitialResult(
+            return InitialTaskResult(
                 session_id=run.session_id,
                 last_message=run.last_message,
                 exit_code=run.exit_code,
             )
         try:
-            output = InitialCodexResult.model_validate_json(run.last_message)
+            output = InitialCodingOutput.model_validate_json(run.last_message)
         except ValidationError:
             # Validation errors include raw input, which may contain credentials.
             return _vcs_failure(run.session_id, run.last_message, "result", "missing VCS backend")
@@ -152,7 +157,7 @@ class WorkerExecutor:
                 run.session_id,
                 run.last_message,
                 "delivery",
-                "CodeAgent did not complete flow.open_pr",
+                "CodingAgent did not complete flow.open_pr",
             )
         if tool_vcs_outcome is not None and tool_vcs_outcome != outcome:
             return _vcs_failure(
@@ -162,12 +167,12 @@ class WorkerExecutor:
                 "VCS outcome changed after flow.open_pr",
             )
         logger.info(
-            "verified CodeAgent VCS outcome: backend={} branch={} commit={}",
+            "verified CodingAgent VCS outcome: backend={} branch={} commit={}",
             outcome.backend,
             outcome.branch,
             outcome.commit_sha,
         )
-        return InitialResult(
+        return InitialTaskResult(
             session_id=run.session_id,
             last_message=run.last_message,
             exit_code=run.exit_code,
@@ -182,9 +187,9 @@ class WorkerExecutor:
 
     async def _revision(
         self, task: RevisionTask, secret: AssignmentSecret | None,
-    ) -> RevisionResult:
+    ) -> RevisionTaskResult:
         """Resume with fresh credentials, falling back once only after proven non-execution."""
-        result = RevisionResult(
+        result = RevisionTaskResult(
             batch_id=task.batch_id, feedback_refs=list(task.feedback), flow_id=task.flow_id,
             attempt_id=task.attempt_id, previous_session_id=task.session_id,
             session_id=task.session_id, session_generation=task.session_generation,
@@ -198,13 +203,13 @@ class WorkerExecutor:
                     or secret.push.expires_at <= datetime.now(UTC)):
                 raise VcsVerificationError("capability", "missing, mismatched or expired push capability")
             workspace = flow_repo_path(self._repo_path(task.repo), task.flow_id)
-            context = CodeAgentContext(push_token=secret.push.token,
+            context = CodingExecutionContext(push_token=secret.push.token,
                                        push_repository=task.repo, cwd=workspace)
             vcs_context = await prepare_revision_context(
                 workspace, task.branch, task.expected_head_sha, context,
             )
             prompt = build_revision_prompt(task, self._repo_conventions(workspace))
-            schema_path = _write_output_schema(CodexResult)
+            schema_path = _write_output_schema(RevisionCodingOutput)
             run = None
             if task.session_id:
                 self.journal.begin_revision("resume")
@@ -213,7 +218,7 @@ class WorkerExecutor:
                         task.session_id, prompt, output_schema=schema_path, context=context,
                     )
                 except SessionUnavailable:
-                    invocation = RevisionInvocation(mode="resume", session_id=task.session_id,
+                    invocation = RevisionExecutionRecord(mode="resume", session_id=task.session_id,
                                                     exit_code=1, failure="session_unavailable")
                     result.invocations.append(invocation)
                     self.journal.finish_invocation(invocation)
@@ -231,7 +236,7 @@ class WorkerExecutor:
                 run = await self.code_agent.start(
                     prompt, workspace, output_schema=schema_path, context=context,
                 )
-            invocation = RevisionInvocation(mode=result.mode, session_id=run.session_id,
+            invocation = RevisionExecutionRecord(mode=result.mode, session_id=run.session_id,
                                             exit_code=run.exit_code)
             result.invocations.append(invocation)
             self.journal.finish_invocation(invocation)
@@ -241,10 +246,10 @@ class WorkerExecutor:
                 result.exit_code = run.exit_code
                 result.failure_stage = "execution"
                 result.failure_detail = (run.failure_detail
-                                         or "CodeAgent exited unsuccessfully; execution may have occurred")
+                                         or "CodingAgent exited unsuccessfully; execution may have occurred")
                 return result
             try:
-                output = CodexResult.model_validate_json(run.last_message)
+                output = RevisionCodingOutput.model_validate_json(run.last_message)
             except ValidationError:
                 raise VcsVerificationError("result", "missing strict revision output or session") from None
             if not run.session_id:
@@ -279,8 +284,8 @@ class WorkerExecutor:
         return ""
 
 
-def _write_output_schema(model: type[CodexResult | InitialCodexResult]) -> Path:
-    """Write CodexResult's schema to a private temporary file for the Codex CLI."""
+def _write_output_schema(model: type[RevisionCodingOutput | InitialCodingOutput]) -> Path:
+    """Write RevisionCodingOutput's schema to a private temporary file for the Codex CLI."""
 
     with tempfile.NamedTemporaryFile(
         mode="w", prefix="codex-schema-", suffix=".json", delete=False
@@ -291,11 +296,11 @@ def _write_output_schema(model: type[CodexResult | InitialCodexResult]) -> Path:
 
 def _vcs_failure(
     session_id: str | None, last_message: str, stage: str, detail: str
-) -> InitialResult:
+) -> InitialTaskResult:
     message = f"VCS verification failed [{stage}]: {detail}"
     if last_message:
         message = f"{last_message.rstrip()}\n\n{message}"
-    return InitialResult(
+    return InitialTaskResult(
         session_id=session_id,
         last_message=message,
         exit_code=VCS_VERIFICATION_EXIT_CODE,

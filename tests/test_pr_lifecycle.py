@@ -4,7 +4,7 @@ from datetime import timedelta
 
 import pytest
 
-from app.contracts.protocol import PROTOCOL_VERSION, InitialResult, Succeeded, terminal_digest
+from app.contracts.protocol import PROTOCOL_VERSION, InitialTaskResult, Succeeded, terminal_digest
 from app.contracts.result_models import ResultPending
 from app.control.gateway import ProtocolViolation, WorkerGateway
 from app.control.lifecycle import pause_delivery
@@ -352,7 +352,7 @@ async def test_initial_close_before_final_commit_keeps_verified_identity_and_can
                            job_id=job.id, name="flow.open_pr", arguments={"title": "Title", "body": "Body"})
     store.complete_tool_call("initial", prepared)
     assert store.start_assignment(job.id, attempt.id, "worker", "token", "epoch")
-    result = InitialResult(session_id="session-1", last_message="done", exit_code=0,
+    result = InitialTaskResult(session_id="session-1", last_message="done", exit_code=0,
         vcs_backend=VcsKind.GIT, branch=delivery.branch, commit_sha="abc123", remote_sha="abc123",
         pushed=True, open_pr_call_id="initial", delivery_receipt=prepared)
     terminal = Succeeded(job_id=job.id, assignment_token="token", connection_epoch="epoch", result=result)

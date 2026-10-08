@@ -77,9 +77,9 @@ open_points 保留。下发 revision 或发送答案前重新核对批次/attemp
 
 ## B.4 修订结果
 
-修订使用原 session 调用 CodeAgent.resume，每轮注入新的临时 push capability 和原 Flow cwd，
+修订使用原 session 调用 CodingAgent.resume，每轮注入新的临时 push capability 和原 Flow cwd，
 禁用首轮 MCP broker。prompt 包含原任务、PR 快照、冻结 instruction/feedback、约定和前轮未决点。
-`CodexResult` 的 addressed/deferred 必须携带 `item_id`、`version`、GitHub `comment_id` 和
+`RevisionCodingOutput` 的 addressed/deferred 必须携带 `item_id`、`version`、GitHub `comment_id` 和
 note/reason；control 拒绝未知、重复、跨版本或互相冲突的引用。
 
 非零 exit 按现有失败路径收尾，不消费反馈。成功时只消费明确 addressed 的版本；deferred、遗漏项
@@ -95,7 +95,7 @@ note/reason；control 拒绝未知、重复、跨版本或互相冲突的引用�
 重新核验 repo/ref 后最多 start 一次；其他错误和不确定结果保留反馈并暂停。journal 在进程启动前记录
 resume/fallback 阶段、一次性兜底消耗和 invocation 结果。重启时没有 terminal 的 started job 不自动重跑。
 `Started` 与 revision_cycles 同事务提交，fallback/重放不增额度；新的显式 retry job 消耗新额度，保留原 worker binding。
-成功接受新 session 后才更新 generation。全过程受 CodeAgent 总时限约束，超时回收并等待 CLI/VCS 进程组退出。
+成功接受新 session 后才更新 generation。全过程受 CodingAgent 总时限约束，超时回收并等待 CLI/VCS 进程组退出。
 真实 GitHub/Codex 两轮 resume 和 start 兜底 smoke 尚未执行，完整 M2 仍待验收。
 
 ### 原线程回复与 resolve（F4）
@@ -114,7 +114,7 @@ resolve 后复读记录远端状态和竞态反馈，不自动 unresolve。人�
 
 回复通过本 App 作者和精确 marker 找回；响应不确定时保留 uncertain，不盲目重发。
 确定的线程权限/删除错误保存未完成诊断，不阻止已验证代码的 result ACK；回复未成功的 addressed 仍未消费。
-必要线程处理未完成、存在新反馈、或 PR/head 已改变时不请求 re-review。新反馈属于下一批，不重跑旧 CodeAgent。
+必要线程处理未完成、存在新反馈、或 PR/head 已改变时不请求 re-review。新反馈属于下一批，不重跑旧 CodingAgent。
 标签和 reviewer 查询完成后，发送前还会在 workflow 事务内再次检查待处理反馈；新增反馈使通知跳过，
 留下未完成诊断并正常确认已交付的修订结果。
 GitHub 没有条件式 resolve 事务，刷新与 mutation 之间的竞态仍可能让新评论暂时位于已关闭线程中；

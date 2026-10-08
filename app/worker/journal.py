@@ -15,7 +15,7 @@ from app.contracts.protocol import (
     Assignment,
     ExecutionStopped,
     Failed,
-    RevisionInvocation,
+    RevisionExecutionRecord,
     StopAccepted,
     Succeeded,
     terminal_digest,
@@ -42,7 +42,7 @@ class JournalRecord(BaseModel):
     terminal: TerminalMessage | None = None
     revision_phase: Literal["resume", "fallback"] | None = None
     fallback_consumed: bool = False
-    invocations: list[RevisionInvocation] = []
+    invocations: list[RevisionExecutionRecord] = []
     archive_task: ArchiveTask | None = None
     root_identity: tuple[str, int, int]
     acknowledged: bool = False
@@ -143,7 +143,7 @@ class WorkerJournal:
         record.fallback_consumed = phase == "fallback"
         self._write(record)
 
-    def finish_invocation(self, invocation: RevisionInvocation) -> None:
+    def finish_invocation(self, invocation: RevisionExecutionRecord) -> None:
         record = self._required()
         if record.state != "started" or record.revision_phase != invocation.mode:
             raise JournalError("invocation does not match durable revision phase")

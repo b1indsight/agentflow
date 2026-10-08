@@ -6,7 +6,7 @@ from typing import cast
 
 import pytest
 
-from app.contracts.protocol import InitialResult
+from app.contracts.protocol import InitialTaskResult
 from app.contracts.result_models import EffectState, ResultPending
 from app.control.service import ControlService
 from app.domain.github_models import GitHubAdapterError, GitHubErrorKind
@@ -39,7 +39,7 @@ async def scenario():
     )
     github = RecordingGitHub()
     job = Job(id=6, flow_id=1, kind=JobKind.INITIAL, state=JobState.RUNNING)
-    result = InitialResult(session_id=None, last_message="failed", exit_code=1)
+    result = InitialTaskResult(session_id=None, last_message="failed", exit_code=1)
     return store, github, job, result
 
 
@@ -79,7 +79,7 @@ def initial_scenario(scenario):
         arguments={"title": "Title", "body": "Body"},
         response=prepared,
     )
-    result = InitialResult(
+    result = InitialTaskResult(
         session_id="session-1",
         last_message="done",
         exit_code=0,

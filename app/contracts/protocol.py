@@ -21,7 +21,7 @@ from pydantic import (
 from app.contracts.conversation import ConversationError, ConversationPage, SessionRef
 from app.domain.context_models import ReviewContext
 from app.domain.delivery_models import DeliveryReceipt
-from app.domain.models import CodexResult, FeedbackRef, JobState, VcsKind
+from app.domain.models import FeedbackRef, JobState, RevisionCodingOutput, VcsKind
 from app.domain.review_models import ReviewFeedback
 
 PROTOCOL_VERSION: Literal[12] = 12
@@ -118,7 +118,7 @@ class RevisionTask(ReviewTask):
     context: ReviewContext | None = None
 
 
-class RevisionInvocation(ProtocolModel):
+class RevisionExecutionRecord(ProtocolModel):
     mode: Literal["resume", "fallback"]
     session_id: str | None
     exit_code: int
@@ -146,7 +146,7 @@ ExecutionTask = Annotated[
 ]
 
 
-class InitialResult(ProtocolModel):
+class InitialTaskResult(ProtocolModel):
     kind: Literal["initial"] = "initial"
     session_id: str | None
     last_message: str
@@ -167,7 +167,7 @@ class ReviewResult(ProtocolModel):
     feedback_refs: list[FeedbackRef]
 
 
-class RevisionResult(ReviewResult):
+class RevisionTaskResult(ReviewResult):
     kind: Literal["revision"] = "revision"
     session_id: str | None
     last_message: str
@@ -177,8 +177,8 @@ class RevisionResult(ReviewResult):
     previous_session_id: str | None
     session_generation: int = Field(ge=0)
     mode: Literal["resume", "fallback"]
-    invocations: list[RevisionInvocation] = Field(default_factory=list, max_length=2)
-    output: CodexResult | None = None
+    invocations: list[RevisionExecutionRecord] = Field(default_factory=list, max_length=2)
+    output: RevisionCodingOutput | None = None
     failure_stage: str | None = None
     failure_detail: str | None = None
     vcs_backend: VcsKind | None = None
@@ -194,7 +194,7 @@ class ArchiveResult(ArchiveIdentity):
 
 
 ExecutionResult = Annotated[
-    InitialResult | RevisionResult | ArchiveResult,
+    InitialTaskResult | RevisionTaskResult | ArchiveResult,
     Field(discriminator="kind"),
 ]
 

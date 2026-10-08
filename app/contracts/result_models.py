@@ -6,7 +6,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.contracts.protocol import ArchiveResult, RevisionResult
+from app.contracts.protocol import ArchiveResult, RevisionTaskResult
 from app.domain.github_models import PullRequestSnapshot, ReviewThread
 from app.domain.models import FeedbackRef, FlowDelivery, FlowState, JobState
 from app.domain.review_models import BatchState, ReviewFeedback
@@ -96,7 +96,7 @@ class ResultPlan(FrozenModel):
     error: str | None = None
     run: RunUpdate | None = None
     delivery: FlowDelivery | None = None
-    revision: RevisionResult | None = None
+    revision: RevisionTaskResult | None = None
     archive: ArchiveResult | None = None
     batch_id: int | None = None
     batch_state: BatchState | None = None

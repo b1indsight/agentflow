@@ -8,7 +8,7 @@ import pytest
 
 from app.contracts.protocol import (
     PROTOCOL_VERSION,
-    RevisionInvocation,
+    RevisionExecutionRecord,
     RevisionTask,
     Succeeded,
     terminal_digest,
@@ -109,9 +109,9 @@ async def test_result_commit_failure_replays_facts_without_new_execution(store, 
     result = verified_result(task, mode="fallback", session_id="new-session", session_generation=1,
                               commit_sha="revision", remote_sha="revision", output=output,
                               invocations=[
-                                  RevisionInvocation(mode="resume", session_id="old-session", exit_code=1,
+                                  RevisionExecutionRecord(mode="resume", session_id="old-session", exit_code=1,
                                                      failure="session_unavailable"),
-                                  RevisionInvocation(mode="fallback", session_id="new-session", exit_code=0),
+                                  RevisionExecutionRecord(mode="fallback", session_id="new-session", exit_code=0),
                               ])
     github.sha = "revision"
     # Feedback arriving while the worker runs must not be consumed by this frozen result.
@@ -245,9 +245,9 @@ async def test_rejected_revision_notification_keeps_verified_result_recoverable(
         task, commit_sha="revision", remote_sha="revision", output=output,
         mode="fallback", session_id="new-session", session_generation=1,
         invocations=[
-            RevisionInvocation(mode="resume", session_id="old-session", exit_code=1,
+            RevisionExecutionRecord(mode="resume", session_id="old-session", exit_code=1,
                                failure="session_unavailable"),
-            RevisionInvocation(mode="fallback", session_id="new-session", exit_code=0),
+            RevisionExecutionRecord(mode="fallback", session_id="new-session", exit_code=0),
         ],
     )
     github.sha = "revision"
