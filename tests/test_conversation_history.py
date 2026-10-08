@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from app.contracts.conversation import ConversationFailure, SessionRef
-from app.worker.history import CodexHistory
+from app.worker.state.history import CodexHistory
 
 SESSION = "019eac3b-a60c-7a93-a442-3718f660fc8c"
 REF = SessionRef(attempt_id=1, session_id=SESSION, session_generation=0)
@@ -126,7 +126,7 @@ def test_history_malformed_limits_and_secret_filter(tmp_path: Path, monkeypatch)
 
 
 def test_history_scan_budget_returns_continuation(tmp_path: Path, monkeypatch) -> None:
-    from app.worker import history
+    from app.worker.state import history
 
     monkeypatch.setattr(history, "MAX_SCAN", 1)
     rollout(tmp_path, [{"type": "turn_context", "payload": {}}, message("user", "later")])

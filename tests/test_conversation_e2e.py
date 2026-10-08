@@ -9,8 +9,8 @@ from app.control.api import create_app
 from app.control.conversation import ConversationService
 from app.control.gateway import WorkerGateway
 from app.domain.models import Attempt, Flow, FlowExecution, FlowState
-from app.worker.client import WorkerClient
-from app.worker.session import WorkerSession
+from app.worker.state.session import WorkerSession
+from app.worker.transport.client import WorkerClient
 from tests.test_conversation_history import SESSION, message, rollout
 from tests.test_remote_e2e import (
     FakeExecutor,

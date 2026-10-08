@@ -31,10 +31,8 @@ from app.domain.models import (
     SessionUnavailable,
 )
 from app.domain.ports import CodingAgent
-from app.worker.context_builder import build_initial_prompt, build_revision_prompt
-from app.worker.session import WorkerSession
-from app.worker.tools import FlowToolCaller, WorkerMCP
-from app.worker.vcs import (
+from app.worker.execution.prompts import build_initial_prompt, build_revision_prompt
+from app.worker.execution.vcs import (
     VcsVerificationError,
     agent_guidance,
     cleanup_flow_repo,
@@ -46,6 +44,8 @@ from app.worker.vcs import (
     verify_revision_outcome,
     verify_vcs_outcome,
 )
+from app.worker.state.session import WorkerSession
+from app.worker.transport.mcp import FlowToolCaller, WorkerMCP
 
 VCS_VERIFICATION_EXIT_CODE = 65
 

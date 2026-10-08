@@ -21,7 +21,7 @@ from starlette.routing import Route
 
 from app.domain.delivery_models import DeliveryReceipt
 from app.domain.models import VcsExecutionContext, VcsOutcome
-from app.worker.vcs import verify_pushed_outcome
+from app.worker.execution.vcs import verify_pushed_outcome
 
 
 class FlowToolCaller(Protocol):

@@ -17,7 +17,7 @@ from app.domain.models import (
     CodingExecutionResult,
     SessionUnavailable,
 )
-from app.worker.credentials import git_credential_environment
+from app.worker.execution.credentials import git_credential_environment
 
 CODEX_BIN = "codex"
 

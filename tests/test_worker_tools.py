@@ -3,7 +3,7 @@ import pytest
 
 from app.domain.delivery_models import OpenedDelivery
 from app.domain.models import VcsExecutionContext, VcsKind, VcsOutcome
-from app.worker import tools
+from app.worker.transport import mcp
 
 
 async def test_worker_mcp_http_open_pr_and_lifecycle(tmp_path, monkeypatch):
@@ -18,9 +18,9 @@ async def test_worker_mcp_http_open_pr_and_lifecycle(tmp_path, monkeypatch):
             return OpenedDelivery(pr_number=17, url="https://github.com/o/r/pull/17",
                                   head_sha="abc", delivery_version=1)
 
-    monkeypatch.setattr(tools, "verify_pushed_outcome", verify)
+    monkeypatch.setattr(mcp, "verify_pushed_outcome", verify)
     context = VcsExecutionContext(tmp_path, "flow/test", "origin", None, None, None, None, None)
-    async with tools.WorkerMCP(Caller(), context) as server, httpx.AsyncClient(trust_env=False) as client:
+    async with mcp.WorkerMCP(Caller(), context) as server, httpx.AsyncClient(trust_env=False) as client:
         request = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
         assert (await client.post(server.url, json=request)).status_code == 401
         headers = {"Authorization": f"Bearer {server.token.get_secret_value()}"}
@@ -55,7 +55,7 @@ async def test_cancelled_invocation_closes_mcp_without_replacing_worker_signal_h
 
     previous = signal.getsignal(signal.SIGTERM)
     context = VcsExecutionContext(tmp_path, "flow/test", "origin", None, None, None, None, None)
-    server = tools.WorkerMCP(SimpleNamespace(), context)
+    server = mcp.WorkerMCP(SimpleNamespace(), context)
     started = asyncio.Event()
 
     async def invocation():

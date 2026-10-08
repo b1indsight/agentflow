@@ -16,9 +16,9 @@ from app.contracts.protocol import (
     Succeeded,
 )
 from app.domain.models import JobState
-from app.worker.executor import WorkerExecutor
-from app.worker.session import SessionError, WorkerSession
-from app.worker.vcs import prepare_flow_repo
+from app.worker.execution.executor import WorkerExecutor
+from app.worker.execution.vcs import prepare_flow_repo
+from app.worker.state.session import SessionError, WorkerSession
 from tests.test_vcs import _git_fixture
 from tests.test_worker_executor import RecordingAgent, RecordingToolCaller
 from tests.test_worker_session import _assignment

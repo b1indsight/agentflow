@@ -21,9 +21,9 @@ from app.contracts.protocol import (
 )
 from app.domain.delivery_models import OpenedDelivery
 from app.domain.models import JobState, VcsKind, VcsOutcome
-from app.worker.client import FlowToolCallError, WorkerClient
-from app.worker.session import WorkerSession
-from app.worker.tools import FlowToolCaller
+from app.worker.state.session import WorkerSession
+from app.worker.transport.client import FlowToolCallError, WorkerClient
+from app.worker.transport.mcp import FlowToolCaller
 
 
 def test_flow_tool_call_error_preserves_retry_metadata() -> None:
@@ -118,7 +118,7 @@ async def test_client_acknowledges_and_executes_one_assignment(tmp_path) -> None
 @pytest.mark.parametrize("fails", [False, True])
 async def test_worker_redacts_echoed_push_capability_before_journal_and_wire(tmp_path, fails):
     from app.contracts.protocol import Failed, parse_server_message
-    from app.worker.session import WorkerSession
+    from app.worker.state.session import WorkerSession
     from tests.test_worker_session import _assignment
 
     class EchoingExecutor:
@@ -267,7 +267,7 @@ class BrokenHeartbeatConnection:
 
 @pytest.mark.asyncio
 async def test_heartbeat_failure_preserves_the_running_executor_for_reconnect(tmp_path) -> None:
-    from app.worker.session import WorkerSession
+    from app.worker.state.session import WorkerSession
     executor = CancellableExecutor()
     client = WorkerClient(
         worker_id="worker-1",
@@ -331,7 +331,7 @@ async def test_heartbeat_failure_preserves_the_running_executor_for_reconnect(tm
 
 @pytest.mark.parametrize("fails", [False, True])
 async def test_completed_disconnected_executor_is_journaled_before_recovery(tmp_path, fails):
-    from app.worker.session import WorkerSession
+    from app.worker.state.session import WorkerSession
     from tests.test_worker_session import _assignment
 
     # Execution finishes after the driver lost its connection; registration must carry its result.
@@ -365,7 +365,7 @@ async def test_mcp_shutdown_consumes_late_tool_response_before_delivering_result
     import httpx
 
     from app.domain.models import VcsExecutionContext
-    from app.worker.tools import WorkerMCP
+    from app.worker.transport.mcp import WorkerMCP
 
     # Codex exits while open_pr waits on control. HTTP shutdown cancels the waiter,
     # but the original socket still needs to consume control's reply and deliver the job result.
@@ -375,7 +375,7 @@ async def test_mcp_shutdown_consumes_late_tool_response_before_delivering_result
     async def verify(context):
         return outcome
 
-    monkeypatch.setattr("app.worker.tools.verify_pushed_outcome", verify)
+    monkeypatch.setattr("app.worker.transport.mcp.verify_pushed_outcome", verify)
 
     class LateConnection(ToolConnection):
         async def recv(self):

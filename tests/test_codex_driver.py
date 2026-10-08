@@ -4,7 +4,7 @@ import pytest
 from pydantic import SecretStr
 
 from app.domain.models import CodingExecutionContext
-from app.worker.codex_driver import CodexAgent, _codex_environment, _start_args
+from app.worker.execution.codex import CodexAgent, _codex_environment, _start_args
 
 
 async def test_adapter_returns_raw_output_without_interpreting_business_schema(monkeypatch, tmp_path):
@@ -25,7 +25,7 @@ async def test_adapter_returns_raw_output_without_interpreting_business_schema(m
         Path(args[args.index("-o") + 1]).write_text(raw)
         return Process()
 
-    monkeypatch.setattr("app.worker.codex_driver.asyncio.create_subprocess_exec", spawn)
+    monkeypatch.setattr("app.worker.execution.codex.asyncio.create_subprocess_exec", spawn)
     run = await CodexAgent(trusted_host=True).start("task", tmp_path, output_schema=schema)
     assert (run.session_id, run.last_message, run.exit_code) == ("session-1", raw, 0)
 
@@ -146,7 +146,7 @@ async def test_cli_session_rejection_is_classified_only_before_any_events(
     async def spawn(*args, **kwargs):
         return Process()
 
-    monkeypatch.setattr("app.worker.codex_driver.asyncio.create_subprocess_exec", spawn)
+    monkeypatch.setattr("app.worker.execution.codex.asyncio.create_subprocess_exec", spawn)
     agent = CodexAgent(trusted_host=True)
     if unavailable:
         with pytest.raises(SessionUnavailable):
@@ -179,8 +179,8 @@ async def test_revision_deadline_cancels_the_whole_codex_process_group(monkeypat
         files.append(Path(args[args.index("-o") + 1]))
         return Process()
 
-    monkeypatch.setattr("app.worker.codex_driver.asyncio.create_subprocess_exec", spawn)
-    monkeypatch.setattr("app.worker.codex_driver.os.killpg", lambda pid, sig: stopped.append((pid, sig)))
+    monkeypatch.setattr("app.worker.execution.codex.asyncio.create_subprocess_exec", spawn)
+    monkeypatch.setattr("app.worker.execution.codex.os.killpg", lambda pid, sig: stopped.append((pid, sig)))
     running = asyncio.create_task(CodexAgent(trusted_host=True).resume(
         "session-1", "fix", context=CodingExecutionContext(cwd=tmp_path),
     ))
@@ -203,7 +203,7 @@ async def test_mcp_token_is_redacted_before_results_leave_driver(monkeypatch, tm
         Path(args[args.index("-o") + 1]).write_text("echoed mcp-secret")
         return Process()
 
-    monkeypatch.setattr("app.worker.codex_driver.asyncio.create_subprocess_exec", spawn)
+    monkeypatch.setattr("app.worker.execution.codex.asyncio.create_subprocess_exec", spawn)
     result = await CodexAgent(trusted_host=True).start(
         "task", tmp_path, context=CodingExecutionContext(
             mcp_url="http://127.0.0.1:12345/mcp", mcp_token=SecretStr("mcp-secret"),

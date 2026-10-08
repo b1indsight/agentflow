@@ -18,9 +18,9 @@ from app.control.gateway import WorkerGateway
 from app.control.service import ControlService
 from app.domain.models import JobKind
 from app.persistence.stop_store import StopStore
-from app.worker.client import WorkerClient, WorkerProtocolError
-from app.worker.session import WorkerSession
-from app.worker.vcs import _run
+from app.worker.execution.vcs import _run
+from app.worker.state.session import WorkerSession
+from app.worker.transport.client import WorkerClient, WorkerProtocolError
 
 
 def assignment():

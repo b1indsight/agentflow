@@ -13,7 +13,7 @@ from app.contracts.protocol import (
     Succeeded,
 )
 from app.domain.models import JobState
-from app.worker.session import SessionError, WorkerSession
+from app.worker.state.session import SessionError, WorkerSession
 
 
 def _assignment() -> Assignment:

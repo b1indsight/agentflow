@@ -33,7 +33,7 @@ from app.contracts.protocol import (
 from app.domain.models import JobKind
 from app.persistence.store import Store
 from app.persistence.webhook_store import WebhookStore
-from app.worker.session import SessionError, WorkerSession
+from app.worker.state.session import SessionError, WorkerSession
 
 FILES = {'database.dump', 'worker.tar.gz'}
 

@@ -127,7 +127,7 @@ async def test_review_comment_is_stored_for_current_attempt(
             "id": 101,
             "body": "Please add a bound.",
             "user": {"login": "reviewer"},
-            "path": "app/worker/client.py",
+            "path": "app/worker/transport/client.py",
             "line": 40,
             "original_commit_id": "abc123",
             "diff_hunk": "@@ -40 +40 @@",
@@ -140,5 +140,5 @@ async def test_review_comment_is_stored_for_current_attempt(
     items = store.reviews.pending(flow.id)
     assert len(items) == 1
     assert items[0].github_id == 101
-    assert items[0].path == "app/worker/client.py"
+    assert items[0].path == "app/worker/transport/client.py"
     assert not store.reviews.claim_due()

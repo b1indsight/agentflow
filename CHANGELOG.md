@@ -8,6 +8,8 @@
 
 ## Unreleased
 
+- worker 按 execution、transport、state 归组；同步模块引用与运维脚本，运行入口、消息协议和持久化格式不变。
+
 - worker 进程内提供单任务 HTTP MCP，仅开放 open_pr；Codex 注入 URL 和临时 Bearer，移除 STDIO 子进程与 Unix socket 桥接，复用既有 PR 交付链。
 
 - 历史查询消息分流、并发回复及连接结束清理归入 WorkerClient，删除 HistoryConnection；历史读取组件和 WebSocket 消息格式不变。

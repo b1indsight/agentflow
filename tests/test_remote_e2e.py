@@ -14,9 +14,9 @@ from app.contracts.protocol import (
 from app.control.gateway import WorkerGateway
 from app.domain.delivery_models import OpenedDelivery
 from app.domain.models import FlowDelivery, Job, JobKind, JobState, VcsKind, VcsOutcome
-from app.worker.client import WorkerClient
-from app.worker.session import WorkerSession
-from app.worker.tools import FlowToolCaller
+from app.worker.state.session import WorkerSession
+from app.worker.transport.client import WorkerClient
+from app.worker.transport.mcp import FlowToolCaller
 from tests.worker_fakes import NoPendingStops, connected_worker
 
 

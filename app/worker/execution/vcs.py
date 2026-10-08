@@ -19,7 +19,7 @@ from typing import Literal
 from urllib.parse import urlparse
 
 from app.domain.models import CodingExecutionContext, VcsExecutionContext, VcsKind, VcsOutcome
-from app.worker.credentials import git_credential_environment
+from app.worker.execution.credentials import git_credential_environment
 
 
 class VcsVerificationError(RuntimeError):

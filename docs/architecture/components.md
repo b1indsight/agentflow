@@ -241,16 +241,21 @@ adapter/控制流已通过自动化，真实 provider 的语义准确性仍待 s
 
 ### WorkerSession
 
-`app/worker/session.py` 统一 worker 本地会话状态：当前 assignment、持久化执行阶段、
+`app/worker/state/session.py` 统一 worker 本地会话状态：当前 assignment、持久化执行阶段、
 修订调用记录、终态脱敏/归档、恢复描述、停止/清理凭据及历史查询入口。
 Runtime 创建一个实例供 Client/Executor 共用；Client 保留连接和执行 Task，Executor 保留任务编排。
 会话状态继续写入 `assignment-journal.json`（version=3），历史正文继续从 Codex JSONL 读取。
-历史解析与限流由 `history.py` 处理，查询允许读取 control 明确指定的既往会话，不局限于当前 assignment。
+历史解析与限流由 `state/history.py` 处理，查询允许读取 control 明确指定的既往会话，不局限于当前 assignment。
 
 
 WorkerClient 在 `_receive_message()` 统一解析 WebSocket 消息，历史查询并发执行并在原连接回复；
 其他任务消息继续进入执行/恢复流程。每条连接最多 4 个历史查询，连接结束时取消并回收查询任务。
-`history.py` 继续提供历史解析、分页和读取限制，由 WorkerSession 提供查询入口；无额外连接包装层。
+`state/history.py` 继续提供历史解析、分页和读取限制，由 WorkerSession 提供查询入口；无额外连接包装层。
 
 WorkerMCP 随首次编码启动与关闭，复用现有 HTTP 依赖，仅暴露 open_pr；无 STDIO 桥接进程。
 修订恢复覆盖为禁用的 flow MCP 配置，避免重新连接旧任务端口。MCP 服务不接管 worker 信号。
+
+
+Worker 目录分为 `execution/`（executor、Codex、prompts、VCS、credentials）、
+`transport/`（control client、MCP）和 `state/`（session、history）。
+根目录保留 runtime/config/health，分别负责组装、配置和探针入口；各子包不提供转发导出。
