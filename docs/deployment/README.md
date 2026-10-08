@@ -35,7 +35,8 @@ chmod 600 .env
 | `FLOWTOOL_HOST` / `FLOWTOOL_PORT` | 本文使用 `127.0.0.1` / `8000` |
 
 提前创建 `flow`、`flow:in-review`、`flow:done` 标签；如修改名称，同步修改对应配置。
-Judge 配置只提供给 worker，不使用 serve 的 `.env` 传递它。
+Judge 配置只提供给 control，在 serve 的 `.env` 配置 `FLOWTOOL_JUDGE_MODEL`、
+`FLOWTOOL_JUDGE_API_KEY`，可选 `FLOWTOOL_JUDGE_API_BASE` 和 `FLOWTOOL_JUDGE_TIMEOUT_SECONDS`。
 
 PostgreSQL 已存在时直接配置连接串。需要临时开发数据库时，可在仓库执行：
 
@@ -78,13 +79,11 @@ FLOWTOOL_ALLOW_INSECURE_WORKER_WS=true
 FLOWTOOL_WORKER_ROOT=~/.flowtool/workers/worker-1
 FLOWTOOL_TRUSTED_HOST_EXECUTION=true
 FLOWTOOL_EXECUTION_ISOLATION=dedicated-account
-FLOWTOOL_JUDGE_MODEL='provider:实际模型名'
-FLOWTOOL_JUDGE_API_KEY='替换为模型API-key'
 ```
 
 本文的明文 WS 只用于同机 loopback 联调；跨主机连接需要 WSS，不通过公开的 webhook 域名连接 worker。
 `dedicated-account` 必须对应已建立的真实账号边界。Codex 所需认证在该 worker 账号下独立准备，
-不复制 control 环境变量。可选 Judge API 地址使用 `FLOWTOOL_JUDGE_API_BASE`。
+不复制 control 环境变量或 Judge 密钥。
 
 在 worker 应用目录加载自己编写的文件并启动：
 

@@ -409,7 +409,7 @@ async def test_project_error_does_not_block_control_cancellation_or_worker_relea
 
 async def test_explicit_job_failure_blocks_but_pending_retry_does_not(store, projection):
     flow, clock, _, _, sync = projection
-    job = store.enqueue_job(flow.id, JobKind.TRIAGE)
+    job = store.enqueue_job(flow.id, JobKind.REVISION)
     await converge(sync)
     assert state(store).desired_status is ProjectStatus.IN_PROGRESS
     with store.connection() as connection:

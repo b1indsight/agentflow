@@ -2,20 +2,17 @@
 
 import asyncio
 from datetime import timedelta
-from types import SimpleNamespace
 
 import pytest
 
-from app.contracts.protocol import PROTOCOL_VERSION, RevisionTask, TriageTask
+from app.contracts.protocol import PROTOCOL_VERSION, RevisionTask
 from app.control.gateway import WorkerGateway
 from app.control.lifecycle import pause_delivery
-from app.control.preparation import PreparationStale
 from app.domain.github_models import GitHubAdapterError, GitHubErrorKind
-from app.domain.models import JobKind, JobState, ReviewItemKind
+from app.domain.models import JobKind, JobState
 from app.persistence.stop_store import StopStore
 from app.persistence.store import Store
 from tests.test_coordinator import coordinator
-from tests.test_review_batches import feedback, ingest
 from tests.test_revision_delivery import verified_result
 from tests.test_revision_recovery import accept
 from tests.test_revision_recovery import (
@@ -74,32 +71,6 @@ async def test_retry_after_and_count_survive_restart(store, pending_revision, mo
         restarted.close()
 
 
-async def test_old_permanent_read_failure_cannot_fail_reassigned_started_triage(
-    store, pending_revision, monkeypatch,
-):
-    flow, old, _, github, subject = pending_revision
-    store.cancel_jobs(flow.id)
-    assert store.finish_assignment(old.id, "worker-a", "token", JobState.DONE, "epoch")
-    ingest(store, flow, feedback(SimpleNamespace(now=store.now()), 102), "new-feedback")
-    store.reviews.reopened(flow.id, 0)
-    store.reviews.claim_due()
-    job = store.assign_job("worker-a", "old", "epoch")
-    assert job.kind is JobKind.TRIAGE
-
-    async def late_failure(*args):
-        # A delayed response belongs to the old preparation, even after the new owner starts.
-        assert store.requeue_assignment(job.id, "worker-a", "old", "epoch")
-        replacement = store.assign_job("worker-a", "new", "epoch")
-        assert store.start_assignment(replacement.id, flow.current_attempt_id, "worker-a", "new", "epoch")
-        raise GitHubAdapterError(GitHubErrorKind.PERMISSION, "get_issue", status_code=403)
-
-    monkeypatch.setattr(github, "get_issue", late_failure)
-    with pytest.raises(PreparationStale):
-        await subject.prepare_for_assignment(job, "worker-a", "old", "epoch")
-    current = store.get_job(job.id)
-    assert current.state is JobState.RUNNING and current.assignment_token == "new"
-    assert current.started_at is not None and current.result_received_at is None
-    assert store.get_flow_execution(flow.id).released_at is None
 
 
 @pytest.mark.parametrize("maximum,header", [(1, None), (5, "901")])
@@ -187,42 +158,6 @@ async def test_expired_window_stops_before_another_github_request(store, pending
     assert "get_ref" in store.get_job(job.id).prepare_last_error
 
 
-async def test_partial_read_round_is_not_frozen_or_combined_with_retry(store, pending_revision, monkeypatch):
-    flow, old_job, _, github, subject = pending_revision
-    store.cancel_jobs(flow.id)
-    assert store.finish_assignment(old_job.id, "worker-a", "token", JobState.DONE, "epoch")
-    from types import SimpleNamespace
-
-    clock = SimpleNamespace(now=store.now())
-    ingest(store, flow, feedback(clock, 102, kind=ReviewItemKind.INLINE), "inline")
-    store.reviews.reopened(flow.id, 0)
-    queued = store.reviews.claim_due()[0]
-    job = store.assign_job("worker-a", "triage", "epoch")
-    original_issue, original_threads = github.get_issue, github.list_review_threads
-    rounds = []
-
-    async def threads(*args):
-        value = await original_threads(*args)
-        rounds.append(value)
-        return value
-
-    async def unavailable(*args):
-        raise GitHubAdapterError(GitHubErrorKind.TRANSIENT, "get_issue")
-
-    monkeypatch.setattr(github, "list_review_threads", threads)
-    monkeypatch.setattr(github, "get_issue", unavailable)
-    prepared, _ = await gateway(store, subject)._prepare_assignment(job, "worker-a", "triage", "epoch")
-    assert prepared is JobState.QUEUED and queued.kind is JobKind.TRIAGE
-    batch = store.reviews.for_job(job)
-    assert batch.context is None and batch.threads is None
-    future = store.get_job(job.id).prepare_next_at + timedelta(seconds=1)
-    monkeypatch.setattr(store, "_clock", lambda: future)
-    monkeypatch.setattr(github, "get_issue", original_issue)
-    github.sha = "fresh-head"
-    retry = store.assign_job("worker-a", "fresh", "epoch")
-    prepared, _ = await gateway(store, subject)._prepare_assignment(retry, "worker-a", "fresh", "epoch")
-    assert isinstance(prepared, TriageTask) and prepared.context.pull_request.head_sha == "fresh-head"
-    assert len(rounds) == 2 and store.reviews.for_job(job).threads == rounds[-1]
 
 
 def test_another_worker_can_progress_while_original_binding_waits(store, pending_revision):

@@ -3,7 +3,6 @@
 import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 from pydantic import SecretStr, ValidationError
@@ -94,7 +93,7 @@ async def test_revision_verifies_real_git_delivery(revision_workspace, behavior,
     # A successful process can leave unpushed or dirty work; neither closes review feedback.
     root, repo, task, secret = revision_workspace
     agent = RevisionAgent(repo, behavior)
-    result = await WorkerExecutor(root, agent, SimpleNamespace(), journal=WorkerJournal(root), worker_id="w").execute(task, secret, tool_caller=RecordingToolCaller())
+    result = await WorkerExecutor(root, agent, journal=WorkerJournal(root), worker_id="w").execute(task, secret, tool_caller=RecordingToolCaller())
     assert (result.exit_code == 0) is success
     assert agent.calls[0][1].push_token.get_secret_value() == "fresh-token"
     assert agent.calls[0][1].cwd == repo
@@ -114,7 +113,7 @@ async def test_fallback_only_when_execution_is_known_not_to_have_started(
     root, repo, task, secret = revision_workspace
     task = task.model_copy(update={"session_id": session})
     agent = RevisionAgent(repo, behavior)
-    result = await WorkerExecutor(root, agent, SimpleNamespace(), journal=WorkerJournal(root), worker_id="w").execute(task, secret, tool_caller=RecordingToolCaller())
+    result = await WorkerExecutor(root, agent, journal=WorkerJournal(root), worker_id="w").execute(task, secret, tool_caller=RecordingToolCaller())
     assert [call[0] for call in agent.calls] == expected
     if expected[-1] == "start":
         assert result.session_id == "new-session"
@@ -134,7 +133,7 @@ async def test_revision_preflight_rejects_before_model_execution(revision_worksp
     else:
         (repo / "uncommitted").write_text("keep me")
     agent = RevisionAgent(repo)
-    result = await WorkerExecutor(root, agent, SimpleNamespace(), journal=WorkerJournal(root), worker_id="w").execute(task, secret, tool_caller=RecordingToolCaller())
+    result = await WorkerExecutor(root, agent, journal=WorkerJournal(root), worker_id="w").execute(task, secret, tool_caller=RecordingToolCaller())
     assert result.exit_code != 0
     assert agent.calls == []
 
@@ -412,7 +411,7 @@ async def test_journal_prevents_restarting_an_interrupted_invocation(revision_wo
     agent = RevisionAgent(repo, "missing")
     restarted = WorkerJournal(root)
     with pytest.raises(JournalError, match="restarted|already been attempted"):
-        await WorkerExecutor(root, agent, SimpleNamespace(), worker_id="w", journal=restarted).execute(task, secret, tool_caller=RecordingToolCaller())
+        await WorkerExecutor(root, agent, worker_id="w", journal=restarted).execute(task, secret, tool_caller=RecordingToolCaller())
     assert agent.calls == []
     assert "fresh-token" not in journal.path.read_text()
     assert restarted.load().revision_phase == phase
@@ -429,7 +428,7 @@ async def test_dirty_repository_after_session_rejection_does_not_fallback(revisi
             raise SessionUnavailable("rejected")
 
     agent = DirtyRejection(repo)
-    result = await WorkerExecutor(root, agent, SimpleNamespace(), journal=WorkerJournal(root), worker_id="w").execute(task, secret, tool_caller=RecordingToolCaller())
+    result = await WorkerExecutor(root, agent, journal=WorkerJournal(root), worker_id="w").execute(task, secret, tool_caller=RecordingToolCaller())
     assert result.exit_code != 0
     assert agent.calls == []
     assert (repo / "uncertain-work").read_text() == "preserve"

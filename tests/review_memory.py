@@ -73,9 +73,6 @@ class MemoryReviews:
         self.batch.decision = decision
         self.batch.open_points = decision.verdict.open_points
 
-    def mark_context_stale(self, job: Job) -> None:
-        self.batch.context_stale = True
-
     def freeze_threads(self, job, snapshot):
         if self.batch.threads is None:
             self.batch.threads = snapshot

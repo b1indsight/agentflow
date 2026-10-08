@@ -22,12 +22,10 @@ from app.contracts.protocol import (
     RevisionInvocation,
     RevisionResult,
     RevisionTask,
-    TriageResult,
-    TriageTask,
 )
 from app.domain.delivery_models import DeliveryReceipt
 from app.domain.models import CodeAgentContext, CodexResult, InitialCodexResult, SessionUnavailable
-from app.domain.ports import CodeAgent, Judge
+from app.domain.ports import CodeAgent
 from app.worker.context_builder import build_initial_prompt, build_revision_prompt
 from app.worker.journal import WorkerJournal
 from app.worker.tools import FlowToolBroker, FlowToolCaller
@@ -58,7 +56,6 @@ class WorkerExecutor:
         self,
         worker_root: Path,
         code_agent: CodeAgent,
-        judge: Judge,
         *,
         worker_id: str,
         journal: WorkerJournal,
@@ -66,7 +63,6 @@ class WorkerExecutor:
     ) -> None:
         self.worker_root = worker_root
         self.code_agent = code_agent
-        self.judge = judge
         self.worker_id = worker_id
         self.journal = journal
         self.revision_timeout = revision_timeout
@@ -78,10 +74,6 @@ class WorkerExecutor:
         """Use the active assignment caller without retaining a client/executor reference cycle."""
         if isinstance(task, InitialTask):
             return await self._initial(task, secret, tool_caller)
-        if isinstance(task, TriageTask):
-            decision = await self.judge.triage(task.context)
-            return TriageResult(batch_id=task.batch_id, feedback_refs=list(task.feedback),
-                                decision=decision)
         if isinstance(task, RevisionTask):
             try:
                 async with asyncio.timeout(self.revision_timeout):

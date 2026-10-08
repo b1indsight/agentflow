@@ -8,7 +8,7 @@ import pytest
 from app.domain.github_models import ReviewThreads
 from app.persistence.review_store import ReviewStore
 from app.persistence.store import Store
-from tests.test_review_batches import feedback, ingest
+from tests.test_review_batches import batch_for, feedback, ingest, settle
 from tests.test_review_batches import (
     review_flow as review_flow,  # noqa: PLC0414 - fixture re-export
 )
@@ -48,7 +48,7 @@ def test_observed_edit_does_not_replay_after_same_second_revert(
         if late_after_revert:
             assert not edit(restarted, flow, clock, "late-b", "A", "B")
         assert [(f.version, f.body) for f in restarted.reviews.pending(flow.id)] == [(3, "A")]
-        batch = restarted.reviews.for_job(restarted.reviews.claim_due()[0])
+        batch = batch_for(restarted, settle(restarted)[0])
         assert [(f.version, f.body) for f in batch.feedback] == [(3, "A")]
         assert not edit(restarted, flow, clock, "late-b", "A", "B")
     finally:

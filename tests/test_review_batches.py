@@ -3,10 +3,10 @@
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
-from app.contracts.protocol import PROTOCOL_VERSION, Succeeded, TriageResult, terminal_digest
 from app.control.router import EventRouter
 from app.control.service import ControlService
 from app.domain.models import (
@@ -18,7 +18,7 @@ from app.domain.models import (
     TriageVerdict,
     Verdict,
 )
-from app.domain.review_models import BatchState, FeedbackUpdate
+from app.domain.review_models import BatchState, FeedbackUpdate, ReviewBatch
 from app.persistence.review_store import ReviewStore
 from app.persistence.store import Store
 from tests.review_memory import judge_decision
@@ -61,9 +61,17 @@ def ingest(store, flow, update, delivery="delivery-1"):
     )
 
 
+def batch_for(store, work):
+    return store.reviews.get_batch(work.id) if isinstance(work, ReviewBatch) else store.reviews.for_job(work)
+
+
+def settle(store):
+    return [store.get_job(b.job_id) if b.job_id is not None else b for b in store.reviews.claim_due()]
+
+
 def claim(store, clock):
     clock.now += timedelta(seconds=76)
-    return store.reviews.claim_due()
+    return settle(store)
 
 
 def test_delivery_and_feedback_are_one_transaction(store, review_flow, monkeypatch):
@@ -91,11 +99,11 @@ def test_settle_survives_new_store_and_concurrent_claims(store, review_flow):
     restarted = Store(store.database_url, clock=lambda: clock.now)
     try:
         with ThreadPoolExecutor(max_workers=2) as pool:
-            claimed = list(pool.map(lambda db: db.reviews.claim_due(), [store, restarted]))
+            claimed = list(pool.map(lambda db: settle(db), [store, restarted]))
         jobs = [job for group in claimed for job in group]
         assert len(jobs) == 1
-        assert jobs[0].kind is JobKind.TRIAGE
-        batch = restarted.reviews.for_job(jobs[0])
+        assert isinstance(jobs[0], ReviewBatch)
+        batch = batch_for(restarted, jobs[0])
         assert batch.feedback[0].github_id == 101
     finally:
         restarted.close()
@@ -105,15 +113,15 @@ def test_batch_completion_cannot_consume_new_comments_or_edits(store, review_flo
     flow, clock = review_flow
     ingest(store, flow, feedback(clock))
     job = claim(store, clock)[0]
-    batch = store.reviews.for_job(job)
+    batch = batch_for(store, job)
     ingest(store, flow, feedback(clock, body="Add an upper and lower bound."), "edit")
     ingest(store, flow, feedback(clock, 102), "second")
     assert claim(store, clock) == []  # A running batch owns the Flow until result completion.
     with store.transaction() as tx:
         tx.lock_workflow(flow.id)
         tx.reviews.complete(batch.id, BatchState.COMPLETED, batch.feedback, [])
-    next_job = store.reviews.claim_due()[0]
-    next_batch = store.reviews.for_job(next_job)
+    next_job = settle(store)[0]
+    next_batch = batch_for(store, next_job)
     assert [(f.github_id, f.version) for f in next_batch.feedback] == [(101, 2), (102, 1)]
     assert batch.feedback[0].body == "Add a bound."
 
@@ -136,7 +144,7 @@ def test_duplicate_and_stale_versions_do_not_extend_settle(store, review_flow):
         "older",
     )
     clock.now += timedelta(seconds=16)
-    assert len(store.reviews.claim_due()) == 1
+    assert len(settle(store)) == 1
 
 
 def test_same_second_edit_uses_the_github_predecessor_to_order_versions(store, review_flow):
@@ -158,7 +166,7 @@ def test_same_second_edit_uses_the_github_predecessor_to_order_versions(store, r
 
 def test_failed_batch_claim_rolls_back_deadline_and_job(store, review_flow, monkeypatch):
     flow, clock = review_flow
-    ingest(store, flow, feedback(clock))
+    ingest(store, flow, feedback(clock, signal="request_changes"))
     original = Store.enqueue_job
 
     def interrupted(*args, **kwargs):
@@ -170,19 +178,19 @@ def test_failed_batch_claim_rolls_back_deadline_and_job(store, review_flow, monk
         with pytest.raises(RuntimeError, match="claim interrupted"):
             claim(store, clock)
     assert store.list_jobs(flow.id) == []
-    assert len(store.reviews.claim_due()) == 1
+    assert len(settle(store)) == 1
 
 
 def test_wait_needs_new_generation_and_carries_questions(store, review_flow):
     flow, clock = review_flow
     ingest(store, flow, feedback(clock))
-    batch = store.reviews.for_job(claim(store, clock)[0])
+    batch = batch_for(store, claim(store, clock)[0])
     with store.transaction() as tx:
         tx.lock_workflow(flow.id)
         tx.reviews.complete(batch.id, BatchState.WAITING, [], ["Which limit?"])
     assert claim(store, clock) == []
     ingest(store, flow, feedback(clock, 102, body="Use 10."), "answer")
-    resumed = store.reviews.for_job(claim(store, clock)[0])
+    resumed = batch_for(store, claim(store, clock)[0])
     assert len(resumed.feedback) == 2
     assert resumed.open_points == ["Which limit?"]
 
@@ -203,7 +211,7 @@ def test_same_number_in_different_github_namespaces_remains_distinct(store, revi
     flow, clock = review_flow
     ingest(store, flow, feedback(clock))
     ingest(store, flow, feedback(clock, kind=ReviewItemKind.REVIEW_BODY), "review")
-    batch = store.reviews.for_job(claim(store, clock)[0])
+    batch = batch_for(store, claim(store, clock)[0])
     assert len({f.item_id for f in batch.feedback}) == 2
 
 
@@ -213,7 +221,7 @@ def test_empty_request_changes_waits_for_inline_then_bypasses_judge(store, revie
     assert claim(store, clock) == []
     ingest(store, flow, feedback(clock, 102), "inline")
     clock.now += timedelta(seconds=16)
-    jobs = store.reviews.claim_due()
+    jobs = settle(store)
     assert len(jobs) == 1 and jobs[0].kind is JobKind.REVISION
     assert "Add a bound" in jobs[0].payload["instruction"]
 
@@ -221,7 +229,7 @@ def test_empty_request_changes_waits_for_inline_then_bypasses_judge(store, revie
 def test_cancel_retires_buffer_and_batch_atomically(store, review_flow):
     flow, clock = review_flow
     ingest(store, flow, feedback(clock))
-    batch = store.reviews.for_job(claim(store, clock)[0])
+    batch = batch_for(store, claim(store, clock)[0])
     ingest(store, flow, feedback(clock, 102), "next")
     ControlService(store).cancel(flow)
     assert store.reviews.get_batch(batch.id).state is BatchState.CANCELLED
@@ -271,8 +279,8 @@ async def test_bot_mentions_always_enter_triage(
         },
     )
     job = claim(store, clock)[0]
-    assert job.kind is JobKind.TRIAGE
-    batch = store.reviews.for_job(job)
+    assert isinstance(job, ReviewBatch)
+    batch = batch_for(store, job)
     assert batch.feedback[0].body == body
     assert batch.feedback[0].signal == "discussion"
 
@@ -281,8 +289,8 @@ async def test_bot_mentions_always_enter_triage(
     "state,action,sender,expected",
     [
         ("changes_requested", "submitted", "alice", JobKind.REVISION),
-        ("changes_requested", "submitted", "outsider", JobKind.TRIAGE),
-        ("changes_requested", "edited", "alice", JobKind.TRIAGE),
+        ("changes_requested", "submitted", "outsider", "discussion"),
+        ("changes_requested", "edited", "alice", "discussion"),
         ("approved", "submitted", "alice", None),
         ("changes_requested", "dismissed", "alice", None),
     ],
@@ -322,75 +330,44 @@ async def test_review_actions_have_explicit_dispatch_semantics(
         },
     )
     jobs = claim(store, clock)
-    assert [j.kind for j in jobs] == ([] if expected is None else [expected])
+    assert [j.trigger if isinstance(j, ReviewBatch) else j.kind for j in jobs] == ([] if expected is None else [expected])
 
 
 def test_failed_batch_retry_restores_ownership_and_cancel_fences_old_work(store, review_flow):
     from app.domain.models import FlowState
 
     flow, clock = review_flow
-    ingest(store, flow, feedback(clock))
+    ingest(store, flow, feedback(clock, signal="request_changes"))
     job = claim(store, clock)[0]
     with store.transaction() as tx:
         tx.lock_workflow(flow.id)
         flow.state = FlowState.FAILED
         tx.update_flow(flow)
         tx.cancel_jobs(flow.id)
-    assert store.reviews.get_batch(job.payload["batch_id"]).state is BatchState.CANCELLED
+    assert store.reviews.get_batch(batch_for(store, job).id).state is BatchState.CANCELLED
     ControlService(store).retry(flow)
     replacement = store.list_jobs(flow.id)[-1]
     assert replacement.id != job.id
-    assert store.reviews.for_job(replacement).state is BatchState.READY
-    assert store.reviews.for_job(replacement).feedback[0].github_id == 101
+    assert batch_for(store, replacement).state is BatchState.READY
+    assert batch_for(store, replacement).feedback[0].github_id == 101
 
 
-async def run_triage(store, flow, job, verdict, *, before_apply=None, github=None):
+async def run_triage(store, flow, batch, verdict, *, before_apply=None, github=None):
     github = github or RecordingGitHub()
     subject = coordinator(store, github)
-    store.worker_connected("worker-a", PROTOCOL_VERSION, "epoch-a")
-    assigned = store.assign_job("worker-a", "token", "epoch-a")
-    assert assigned.id == job.id
-    task = await subject.prepare(assigned)
-    assert store.start_assignment(job.id, flow.current_attempt_id, "worker-a", "token", "epoch-a")
-    subject.mark_started(assigned, task, "worker-a")
-    result = TriageResult(batch_id=task.batch_id, feedback_refs=task.feedback, decision=judge_decision(verdict, task.context))
-    message = Succeeded(
-        job_id=job.id, assignment_token="token", connection_epoch="epoch-a", result=result
-    )
-    assert (
-        store.record_assignment_result(
-            job.id,
-            "worker-a",
-            "token",
-            "epoch-a",
-            message.model_dump(mode="json"),
-            terminal_digest(message),
-        )
-        == "pending"
-    )
-    if before_apply:
-        before_apply()
-    await subject.apply_result(assigned.id)
-    await subject.apply_result(assigned.id)
-    return subject, github, result
+    async def decide(context):
+        if before_apply:
+            before_apply()
+        return judge_decision(verdict, context)
+    judge = SimpleNamespace(triage=AsyncMock(side_effect=decide))
+    await subject.triage(batch, judge)
+    fresh = store.reviews.get_batch(batch.id)
+    if fresh.decision is not None or fresh.job_id is not None:
+        await subject.triage(fresh, judge)
+    return subject, github, store.reviews.get_batch(batch.id).decision
 
 
-async def test_prepare_freezes_once_across_restart_and_later_remote_edits(store, review_flow):
-    flow, clock = review_flow
-    ingest(store, flow, feedback(clock))
-    job = claim(store, clock)[0]
-    first = await coordinator(store, RecordingGitHub()).prepare(job)
-    restarted = Store(store.database_url, clock=lambda: clock.now)
 
-    class NoReads(RecordingGitHub):
-        async def get_pull_request(self, *args):
-            pytest.fail("prepare recovery must reuse persisted context")
-    try:
-        again = await coordinator(restarted, NoReads()).prepare(restarted.get_job(job.id))
-        assert again.context == first.context
-        assert again.context.feedback[0].body == "Add a bound."
-    finally:
-        restarted.close()
 
 
 @pytest.mark.parametrize("confidence,expected", [(0.6, JobKind.REVISION), (0.599, None)])
@@ -404,7 +381,7 @@ async def test_revise_confidence_boundary_and_unresolved_points_persist(
         verdict=Verdict.REVISE, confidence=confidence, instruction="Add a bound",
         reason="Agreed limit, but naming remains open.", open_points=["Which name?"],
     ))
-    batch = store.reviews.get_batch(job.payload["batch_id"])
+    batch = store.reviews.get_batch(batch_for(store, job).id)
     assert batch.open_points == ["Which name?"]
     assert batch.decision.verdict.confidence == confidence
     if expected:
@@ -415,37 +392,40 @@ async def test_revise_confidence_boundary_and_unresolved_points_persist(
         assert not claim(store, clock)
 
 
-async def test_answer_recovery_waits_for_receipt_and_preserves_a_new_version(store, review_flow):
-    from app.contracts.result_models import ResultPending
+@pytest.mark.parametrize("receipt", [True, False])
+async def test_answer_recovery_waits_for_receipt_and_preserves_a_new_version(store, review_flow, receipt):
     from app.domain.github_models import GitHubAdapterError, GitHubErrorKind
 
     class LostResponseGitHub(RecordingGitHub):
         async def comment(self, *args):
-            await super().comment(*args)
+            if receipt:
+                await super().comment(*args)
             raise GitHubAdapterError(GitHubErrorKind.TRANSIENT, "comment")
 
     flow, clock = review_flow
     ingest(store, flow, feedback(clock))
     job = claim(store, clock)[0]
     github = LostResponseGitHub()
-    with pytest.raises(ResultPending):
+    with pytest.raises(GitHubAdapterError):
         await run_triage(store, flow, job, TriageVerdict(
             verdict=Verdict.ANSWER, answer="The bound is ten.", confidence=0.8,
         ), github=github)
-    batch = store.reviews.for_job(store.get_job(job.id))
-    assert batch.state is BatchState.PROCESSING
+    batch = batch_for(store, job)
+    assert batch.state is BatchState.READY
     assert len(store.reviews.pending(flow.id)) == 1
     assert batch.decision.verdict.answer == "The bound is ten."
     clock.now += timedelta(seconds=20)
     ingest(store, flow, feedback(clock, body="A new request"), "edit")
     restarted = Store(store.database_url, clock=lambda: clock.now)
     try:
-        await coordinator(restarted, github).results.apply(job.id)
-        await coordinator(restarted, github).results.apply(job.id)
-        assert len(github.comments) == 1
+        await coordinator(restarted, github).triage(restarted.reviews.get_batch(job.id),
+            SimpleNamespace(triage=AsyncMock(side_effect=AssertionError("saved decision must be reused"))))
+        await coordinator(restarted, github).triage(restarted.reviews.get_batch(job.id),
+            SimpleNamespace(triage=AsyncMock(side_effect=AssertionError("saved decision must be reused"))))
+        assert len(github.comments) == int(receipt)
         assert [(f.github_id, f.version) for f in restarted.reviews.pending(flow.id)] == [(101, 2)]
-        assert restarted.reviews.for_job(restarted.get_job(job.id)).state is BatchState.COMPLETED
-        assert len(restarted.list_jobs(flow.id)) == 1
+        assert batch_for(restarted, job).state is (BatchState.COMPLETED if receipt else BatchState.READY)
+        assert restarted.list_jobs(flow.id) == []
     finally:
         restarted.close()
 
@@ -495,7 +475,7 @@ async def test_ignore_consumes_frozen_input_once_and_leaves_newer_version(store,
         TriageVerdict(verdict=Verdict.IGNORE),
         before_apply=lambda: ingest(store, flow, feedback(clock, body="New request"), "edit"),
     )
-    assert store.get_job(job.id).state is JobState.DONE
+    assert batch_for(store, job).state is BatchState.COMPLETED
     assert [(f.github_id, f.version) for f in store.reviews.pending(flow.id)] == [(101, 2)]
 
 
@@ -511,38 +491,12 @@ async def test_revise_transfers_batch_to_one_derived_job(store, review_flow):
     )
     revisions = [j for j in store.list_jobs(flow.id) if j.kind is JobKind.REVISION]
     assert len(revisions) == 1
-    assert store.reviews.for_job(revisions[0]).id == job.payload["batch_id"]
-    assert len(github.comments) == 1
+    assert batch_for(store, revisions[0]).id == batch_for(store, job).id
+    assert github.comments == []
     ingest(store, flow, feedback(clock, 102), "next")
     assert claim(store, clock) == []
 
 
-@pytest.mark.parametrize("sweep_reviews", [True, False])
-async def test_expired_offline_binding_retires_queued_review_before_retry(
-    store, review_flow, sweep_reviews,
-):
-    flow, clock = review_flow
-    initial = store.enqueue_job(flow.id, JobKind.INITIAL)
-    store.worker_connected("worker-a", PROTOCOL_VERSION, "epoch-a")
-    assert store.assign_job("worker-a", "initial", "epoch-a").id == initial.id
-    assert store.finish_assignment(initial.id, "worker-a", "initial", JobState.DONE, "epoch-a")
-    store.worker_disconnected("worker-a", "lost", "epoch-a")
-    ingest(store, flow, feedback(clock))
-    job = claim(store, clock)[0]
-
-    # Reviews can settle while their bound worker is offline; expiry must retire that queue.
-    clock.now += store.recovery_grace
-    store.sweep_expired_assignments()
-    if sweep_reviews:
-        store.reviews.claim_due()
-        assert store.get_job(job.id).state is JobState.FAILED
-    ControlService(store).retry(flow)
-    assert store.get_job(job.id).state is JobState.FAILED
-    store.worker_connected("worker-b", PROTOCOL_VERSION, "epoch-b")
-    replacement = store.assign_job("worker-b", "retry", "epoch-b")
-    assert replacement.id != job.id
-    task = await coordinator(store, RecordingGitHub()).prepare(replacement)
-    assert task.batch_id == job.payload["batch_id"]
 
 
 @pytest.mark.parametrize("outcome", [BatchState.COMPLETED, BatchState.WAITING])
@@ -550,13 +504,13 @@ def test_retry_after_successful_replacement_does_not_select_historical_failure(
     store, review_flow, outcome,
 ):
     flow, clock = review_flow
-    ingest(store, flow, feedback(clock))
+    ingest(store, flow, feedback(clock, signal="request_changes"))
     original = claim(store, clock)[0]
     service = ControlService(store)
     service.cancel(flow)
     service.retry(flow)
     replacement = store.list_jobs(flow.id)[-1]
-    batch = store.reviews.for_job(replacement)
+    batch = batch_for(store, replacement)
     store.reviews.complete(batch.id, outcome, [], [])
     with store.connection() as connection:
         connection.execute("UPDATE jobs SET state='done' WHERE id=%s", (replacement.id,))
@@ -581,7 +535,7 @@ async def test_answer_uses_frozen_decision_once_and_consumes_after_comment(store
     _, github, _ = await run_triage(store, flow, job, TriageVerdict(
         verdict=Verdict.ANSWER, answer="Ten is the configured retry limit.", confidence=0.9,
     ))
-    batch = store.reviews.for_job(store.get_job(job.id))
+    batch = batch_for(store, job)
     assert "Why is the limit 10?" in batch.context.open_points
     assert batch.decision.verdict.answer == "Ten is the configured retry limit."
     assert len(github.comments) == 1
@@ -599,7 +553,7 @@ async def test_approval_invalidates_body_without_waking_waiting_feedback(
     flow, clock = review_flow
     ingest(store, flow, feedback(clock, kind=ReviewItemKind.REVIEW_BODY))
     ingest(store, flow, feedback(clock, 201), "inline")
-    batch = store.reviews.for_job(claim(store, clock)[0])
+    batch = batch_for(store, claim(store, clock)[0])
     store.reviews.complete(batch.id, BatchState.WAITING, [], ["Which limit?"])
     router = EventRouter(store, ControlService(store), SimpleNamespace(
         allowlist=["alice"], bot_login="flowtool[bot]", trigger_label="flow",
@@ -652,7 +606,7 @@ def test_same_second_out_of_order_edits_reconcile_after_restart(
         edit(restarted, "B", "A", "B")
         assert restarted.reviews.pending(flow.id)[0].body == final_body
         assert not edit(restarted, "C", "B", final_body)
-        batch = restarted.reviews.for_job(claim(restarted, clock)[0])
+        batch = batch_for(restarted, claim(restarted, clock)[0])
         assert batch.feedback[0].body == final_body
         assert batch.feedback[0].version == 3
     finally:

@@ -15,7 +15,7 @@ from app.domain.github_models import (
 from app.domain.models import DeliveryState, FlowState, ReviewItemKind
 from app.persistence.reconcile_store import ReconcileStore
 from app.persistence.store import Store
-from tests.test_review_batches import feedback, ingest
+from tests.test_review_batches import batch_for, feedback, ingest, settle
 from tests.test_review_batches import (
     review_flow as review_flow,  # noqa: PLC0414 - fixture re-export
 )
@@ -208,7 +208,7 @@ async def test_observed_review_then_authorized_submission_preserves_request_chan
     assert ingest(store, flow, update, "authorized-submitted")
     assert store.reviews.pending(flow.id)[0].signal == "request_changes"
     clock.now += timedelta(seconds=16)
-    assert store.reviews.claim_due()[0].kind.value == "revision"
+    assert settle(store)[0].kind.value == "revision"
 
 
 async def test_polling_missing_predecessor_applies_the_queued_successor(store, review_flow):
@@ -270,7 +270,7 @@ async def test_blank_backlog_cannot_hide_text_or_repeat_forever(store, review_fl
     assert len(jobs) == 1
     # Reserve room for actual text even when the oldest 60 records have empty bodies.
     for _ in range(2):
-        batch = store.reviews.for_job(jobs[0])
+        batch = batch_for(store, jobs[0])
         assert len(batch.feedback) <= 60 and any(item.github_id == 71 for item in batch.feedback)
         await run_triage(store, flow, jobs[0], TriageVerdict(verdict=Verdict(verdict), reason="Checked"))
         jobs = claim(store, clock)
@@ -290,7 +290,7 @@ def test_blank_authorized_signal_stays_with_bounded_text_batch(store, review_flo
     ingest(store, flow, feedback(clock, 61, kind=ReviewItemKind.CONVERSATION), "text")
     jobs = claim(store, clock)
     assert len(jobs) == 1 and jobs[0].kind is JobKind.REVISION
-    assert {item.github_id for item in store.reviews.for_job(jobs[0]).feedback} >= {1, 61}
+    assert {item.github_id for item in batch_for(store, jobs[0]).feedback} >= {1, 61}
 
 
 @pytest.mark.parametrize("verdict", ["ignore", "wait"])
@@ -307,12 +307,12 @@ async def test_recovered_backlog_drains_without_oversized_or_repeated_wait_batch
     clock.now += timedelta(seconds=6)
     await poller(store, github)._sweep()
     first = claim(store, clock)[0]
-    assert len(store.reviews.for_job(first).feedback) == 60
+    assert len(batch_for(store, first).feedback) == 60
     await run_triage(store, flow, first, TriageVerdict(verdict=Verdict(verdict), reason="Await clarification"))
     # No new webhook is needed to deliver feedback omitted from the bounded first batch.
     second = claim(store, clock)[0]
-    assert len(store.reviews.for_job(second).feedback) <= 60
-    assert any(item.github_id == 61 for item in store.reviews.for_job(second).feedback)
+    assert len(batch_for(store, second).feedback) <= 60
+    assert any(item.github_id == 61 for item in batch_for(store, second).feedback)
     await run_triage(store, flow, second, TriageVerdict(verdict=Verdict(verdict), reason="Await clarification"))
     assert claim(store, clock) == []
     if verdict == "ignore":

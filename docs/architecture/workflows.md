@@ -14,7 +14,7 @@
   → worker 核验本地 VCS/remote；Result 与持久 tool outcome 核对
   → control 再核对 GitHub ref → find-or-open 唯一 PR → ResultAccepted；保留 ACTIVE 与 binding
   → review/comment → 持久反馈与 settle → 冻结下一批
-  → Judge 判定 revise/answer/wait/ignore；授权 Request Changes 经 grace 直达 revise
+  → control 本地 Judge 判定 revise/answer/wait/ignore；授权 Request Changes 经 grace 直达 revise
   → revise：同 repo/branch/PR resume 或一次性 session 兜底 → 双端交付核验
   → 原线程说明 → 覆盖与版本检查 → 保守 resolve 并复读 → 无未决反馈时请求 re-review
   → answer/ignore 精确消费本批版本；wait 保留问题，等待新反馈
@@ -33,7 +33,8 @@
 4. Code Agent commit/push 后调用 `flow.open_pr`；worker 与 control 依次核验远端 SHA，control 创建带
    `Closes #N` 的 PR 并请求审核；
 5. 用户在 GitHub 提交 review、inline comment 或对话评论；
-6. Event Router 持久化反馈，settle 后由 Judge 判定 revise/wait/answer/ignore；授权 Request Changes 经 grace 直达修订；
+6. Event Router 持久化反馈，settle 后由 control 的 Judge 作前置判断；只有 revise 创建 revision job，
+   answer/ignore/wait 直接处理批次。授权 Request Changes 经 grace 直达修订；
 7. revise 由同一 worker 恢复 Codex 会话并 push，control 核验交付、处理线程，无未决反馈时重新请求审核；
 8. 用户根据仓库自身 CI 和 review 在网页人工 Approve + Merge；
 9. `pull_request.closed (merged=true)` 触发 MERGED 和 archive job；

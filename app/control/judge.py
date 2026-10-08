@@ -61,7 +61,7 @@ class BubJudge:
             env["BUB_HOME"] = directory
             try:
                 proc = await asyncio.create_subprocess_exec(
-                    sys.executable, "-I", "-m", "app.worker.judge_runner", env=env, cwd=directory,
+                    sys.executable, "-I", "-m", "app.control.judge_runner", env=env, cwd=directory,
                     stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )

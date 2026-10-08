@@ -27,10 +27,6 @@ class WorkerSettings(BaseSettings):
     worker_status_path: Path | None = None
     worker_root: Path = Path("~/.flowtool/workers/{worker_id}")
     codex_run_timeout_seconds: float = 1200.0
-    judge_model: str = ""
-    judge_api_key: SecretStr | None = None
-    judge_api_base: str | None = None
-    judge_timeout_seconds: float = Field(default=60.0, gt=0, allow_inf_nan=False)
     trusted_host_execution: bool = False
     execution_isolation: Literal["dedicated-account", "container", "vm"] | None = None
     allow_insecure_worker_ws: bool = False

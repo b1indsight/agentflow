@@ -1,3 +1,5 @@
+from tests.test_review_batches import settle
+
 """PostgreSQL crash and replay boundaries for verified revisions."""
 
 from datetime import UTC, datetime
@@ -67,7 +69,7 @@ async def pending_revision(store):
                             signal="request_changes", submitted=True)
     store.reviews.ingest(flow.id, "review", "pull_request_review", {}, update,
                          settle_seconds=0, submit_grace_seconds=0)
-    queued = store.reviews.claim_due()[0]
+    queued = settle(store)[0]
     assert queued.kind is JobKind.REVISION
     store.worker_connected("worker-a", PROTOCOL_VERSION, "epoch")
     job = store.assign_job("worker-a", "token", "epoch")

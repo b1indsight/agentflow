@@ -46,9 +46,6 @@ class DeliveryState(StrEnum):
 
 class JobKind(StrEnum):
     INITIAL = "initial"  # 首轮编码
-    TRIAGE = (
-        "triage"  # settle 后判定（docs/architecture/review-loop.md）：revise/answer/wait/ignore
-    )
     REVISION = "revision"  # 修订
     ARCHIVE = "archive"  # 收尾归档
 

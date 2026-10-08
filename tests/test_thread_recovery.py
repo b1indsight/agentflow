@@ -19,6 +19,7 @@ from app.domain.models import (
 from app.domain.review_models import FeedbackUpdate
 from tests.test_archive_status import archive_adapter
 from tests.test_coordinator import coordinator
+from tests.test_review_batches import batch_for, settle
 from tests.test_review_resolution import human, snapshot
 from tests.test_revision_delivery import revision_output, verified_result
 from tests.test_revision_recovery import RevisionGitHub, accept
@@ -87,7 +88,7 @@ async def thread_revision(store, request):
             update={"kind": ReviewItemKind.REVIEW_BODY}), settle_seconds=0, submit_grace_seconds=0)
     if mode == "incomplete":
         github.thread = github.thread.model_copy(update={"complete": False})
-    store.reviews.claim_due()
+    settle(store)
     store.worker_connected("worker-a", PROTOCOL_VERSION, "epoch")
     job = store.assign_job("worker-a", "token", "epoch")
     subject = coordinator(store, github)
@@ -209,7 +210,7 @@ async def test_permission_denial_keeps_diagnostic_without_rerunning_code(
     monkeypatch.setattr(github, operation, denied)
     assert await subject.results.apply(job.id) is JobState.DONE
     assert store.get_delivery(flow.id).head_sha == "revision"
-    batch = store.reviews.for_job(store.get_job(job.id))
+    batch = batch_for(store, store.get_job(job.id))
     assert batch.state.value == "waiting"
     assert any("permission" in point for point in batch.open_points)
     assert github.review_requests == []
@@ -261,9 +262,9 @@ async def test_discovered_feedback_and_late_webhook_share_one_version(store, thr
         body=new.body, updated_at=new.updated_at, path="app.py")
     assert not store.reviews.ingest(flow.id, "late-webhook", "pull_request_review_comment", {}, update,
                                     settle_seconds=0, submit_grace_seconds=0)
-    queued = store.reviews.claim_due()
+    queued = settle(store)
     assert len(queued) == 1
-    assert [(f.github_id, f.version) for f in store.reviews.for_job(queued[0]).feedback] == [(2, 1)]
+    assert [(f.github_id, f.version) for f in batch_for(store, queued[0]).feedback] == [(2, 1)]
 
 
 async def test_webhook_edit_blocks_resolve_even_if_remote_read_lags(store, thread_revision):
@@ -318,9 +319,9 @@ async def test_remote_predecessor_releases_the_queued_webhook_edit(store, thread
     assert not store.reviews.ingest(flow.id, "late-edit-b", "pull_request_review_comment",
         {"changes": {"body": {"from": human().body}}}, latest.model_copy(update={"body": "Intermediate"}),
         settle_seconds=0, submit_grace_seconds=0)
-    queued = store.reviews.claim_due()
+    queued = settle(store)
     assert len(queued) == 1
-    assert store.reviews.for_job(queued[0]).feedback[0].body == "Latest"
+    assert batch_for(store, queued[0]).feedback[0].body == "Latest"
 
 
 @pytest.mark.parametrize("query,write", [("get_labels", "labels"), ("get_reviewers", "review_requests")])
@@ -341,7 +342,7 @@ async def test_new_feedback_during_notification_query_fences_dispatch(
     monkeypatch.setattr(github, query, with_feedback)
     assert await subject.results.apply(job.id) is JobState.DONE
     assert getattr(github, write) == [] and github.review_requests == []
-    batch = store.reviews.for_job(store.get_job(job.id))
+    batch = batch_for(store, store.get_job(job.id))
     assert batch.state.value == "waiting" and batch.open_points
     assert [f.github_id for f in store.reviews.pending(flow.id)] == [2]
     assert await coordinator(store, github).results.apply(job.id) is JobState.DONE
@@ -396,7 +397,7 @@ async def test_next_revision_combines_valid_historical_coverage_on_the_same_pr(
         kind=ReviewItemKind.INLINE, github_id=3, author=new.author, body=new.body,
         updated_at=new.updated_at, signal="request_changes", submitted=True,
     ), settle_seconds=0, submit_grace_seconds=0)
-    store.reviews.claim_due()
+    settle(store)
     job = store.assign_job("worker-a", "token", "epoch")
     task = await subject.prepare(job)
     assert isinstance(task, RevisionTask)
