@@ -382,7 +382,7 @@
         <article class="node" data-status="partial">
           <div class="node__top"><span class="node__name">Codex Driver</span><span class="pill">部分</span></div>
           <p class="node__role">codex exec / resume · 一次性 session 兜底 · output schema · 每轮短时 push 凭据 · 首轮 worker 内 HTTP MCP</p>
-          <code class="node__file">app/worker/codex_driver.py · V5/V6</code>
+          <code class="node__file">app/worker/execution/codex.py · V5/V6</code>
         </article>
         <article class="node" data-status="partial">
           <div class="node__top"><span class="node__name">Sandbox 端口</span><span class="pill">部分</span></div>
@@ -392,12 +392,12 @@
         <article class="node" data-status="partial">
           <div class="node__top"><span class="node__name">Flow repo + VCS 核验</span><span class="pill">部分</span></div>
           <p class="node__role">Flow 独占 repo · Agent 自选 Git/jj · 首轮/修订核验 branch/commit/clean/remote SHA</p>
-          <code class="node__file">app/worker/vcs.py · V8</code>
+          <code class="node__file">app/worker/execution/vcs.py · V8</code>
         </article>
         <article class="node" data-status="artifact">
           <div class="node__top"><span class="node__name">Worker Client + Executor</span></div>
           <p class="node__role">主动连接/重连 · Flow binding · tool multiplex · journal · bub 无工具语义决策（假 provider 契约已验）</p>
-          <code class="node__file">app/worker/client.py · session.py · executor.py · runtime.py</code>
+          <code class="node__file">app/worker/transport/client.py · state/session.py · execution/executor.py · runtime.py</code>
         </article>
       </div>
     </div>

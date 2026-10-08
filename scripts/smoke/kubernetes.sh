@@ -25,7 +25,7 @@ test "$("${k[@]}" get "pvc/$pvc" -o jsonpath='{.status.phase}')" = Bound
 "${k[@]}" exec flowtool-worker-1-0 -- python -c \
   "import os; from pathlib import Path; assert os.getuid()==10001; assert not os.getenv('FLOWTOOL_DATABASE_URL'); assert not Path('/run/secrets/github/app.pem').exists(); assert not Path('/var/run/secrets/kubernetes.io/serviceaccount/token').exists()"
 "${k[@]}" exec flowtool-worker-1-0 -- python -c \
-  "from pathlib import Path; from app.worker.session import WorkerSession; r=WorkerSession(Path('/var/lib/flowtool')).load(); print('journal validated' if r else 'journal absent: no active recovery evidence')"
+  "from pathlib import Path; from app.worker.state.session import WorkerSession; r=WorkerSession(Path('/var/lib/flowtool')).load(); print('journal validated' if r else 'journal absent: no active recovery evidence')"
 if [ "${FLOWTOOL_K8S_RECREATE_IDLE_WORKER:-no}" = yes ]; then
   "${k[@]}" exec flowtool-serve-0 -c serve -- flowtool worker-drain worker-1
   row=$("${k[@]}" exec flowtool-serve-0 -c serve -- flowtool workers | awk '$1=="worker-1" {print $2,$3,$4,$5}')

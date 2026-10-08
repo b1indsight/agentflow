@@ -5,6 +5,8 @@
 
 ## 当前计划
 
+- [`worker-layout.md`](worker-layout.md) — PR #65：worker 按 execution/transport/state 归组，830 项回归与构建通过。
+
 - [`worker-mcp.md`](worker-mcp.md) — worker 内嵌 HTTP MCP，仅 open_pr；修复取消后迟到回复，830 项回归通过，SDK 握手和鉴权消融通过。
 
 - [`client-history-dispatch.md`](client-history-dispatch.md) — 历史查询通信归入 WorkerClient，消息格式不变；826 项回归通过。

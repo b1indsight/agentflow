@@ -37,7 +37,7 @@ class ProjectsClient(Protocol):
 
 
 class CodingAgent(Protocol):
-    """重的代码 agent。MVP adapter：codex（codex_driver.py）。
+    """重的代码 agent。MVP adapter：codex（worker/execution/codex.py）。
 
     本地版本控制（branch/commit/push）由 agent 自己在 Flow 独占 repo 内完成。Codex adapter 的
     trusted-host 模式使用 full access，必须由外部 account/container/VM 隔离 control secret；目录所有权

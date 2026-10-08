@@ -11,12 +11,12 @@ from pathlib import Path
 from typing import IO
 
 from app.telemetry.logging import configure_logging
-from app.worker.client import WorkerClient
-from app.worker.codex_driver import CodexAgent
 from app.worker.config import WorkerSettings
-from app.worker.executor import WorkerExecutor
+from app.worker.execution.codex import CodexAgent
+from app.worker.execution.executor import WorkerExecutor
 from app.worker.health import HealthFile
-from app.worker.session import WorkerSession
+from app.worker.state.session import WorkerSession
+from app.worker.transport.client import WorkerClient
 
 _CONTROL_ENVIRONMENT_KEYS = frozenset(
     {

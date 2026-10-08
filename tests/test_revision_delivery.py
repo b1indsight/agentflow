@@ -14,9 +14,9 @@ from app.domain.models import (
     RevisionCodingOutput,
     VcsKind,
 )
-from app.worker.executor import WorkerExecutor
-from app.worker.session import WorkerSession
-from app.worker.vcs import flow_repo_path, prepare_flow_repo
+from app.worker.execution.executor import WorkerExecutor
+from app.worker.execution.vcs import flow_repo_path, prepare_flow_repo
+from app.worker.state.session import WorkerSession
 from tests.test_vcs import _git, _git_fixture
 from tests.test_worker_executor import RecordingToolCaller
 
@@ -365,7 +365,7 @@ async def test_revision_checks_real_jj_repository(revision_workspace, behavior):
     import os
     import shutil
 
-    from app.worker.vcs import (
+    from app.worker.execution.vcs import (
         VcsVerificationError,
         prepare_revision_context,
         verify_revision_outcome,
@@ -400,7 +400,7 @@ async def test_revision_checks_real_jj_repository(revision_workspace, behavior):
 @pytest.mark.parametrize("phase", ["resume", "fallback"])
 async def test_journal_prevents_restarting_an_interrupted_invocation(revision_workspace, phase):
     from app.contracts.protocol import Assignment, RevisionExecutionRecord
-    from app.worker.session import SessionError, WorkerSession
+    from app.worker.state.session import SessionError, WorkerSession
 
     root, repo, task, secret = revision_workspace
     root.mkdir(exist_ok=True)

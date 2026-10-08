@@ -24,7 +24,7 @@ from app.contracts.protocol import (
     terminal_digest,
 )
 from app.domain.models import JobState
-from app.worker.history import CodexHistory
+from app.worker.state.history import CodexHistory
 
 TerminalMessage = Succeeded | Failed
 _TERMINAL: TypeAdapter[TerminalMessage] = TypeAdapter(TerminalMessage)

@@ -20,8 +20,8 @@ from app.domain.models import (
     VcsOutcome,
     Verdict,
 )
-from app.worker.executor import WorkerExecutor
-from app.worker.session import WorkerSession
+from app.worker.execution.executor import WorkerExecutor
+from app.worker.state.session import WorkerSession
 from tests.review_memory import judge_decision
 
 
@@ -138,11 +138,11 @@ async def test_executor_runs_agent_without_store(
             remote_sha="abc",
         )
 
-    monkeypatch.setattr("app.worker.executor.prepare_flow_repo", fake_workspace)
-    monkeypatch.setattr("app.worker.executor.prepare_vcs_context", fake_context)
-    monkeypatch.setattr("app.worker.executor.verify_vcs_outcome", fake_verify)
+    monkeypatch.setattr("app.worker.execution.executor.prepare_flow_repo", fake_workspace)
+    monkeypatch.setattr("app.worker.execution.executor.prepare_vcs_context", fake_context)
+    monkeypatch.setattr("app.worker.execution.executor.verify_vcs_outcome", fake_verify)
     monkeypatch.setattr(
-        "app.worker.tools.verify_pushed_outcome",
+        "app.worker.transport.mcp.verify_pushed_outcome",
         lambda context: fake_verify(context, VcsKind.GIT),
     )
     agent = RecordingAgent()
@@ -183,8 +183,8 @@ async def test_initial_exit_zero_without_a_declared_backend_is_a_failure(
     async def fake_context(repo_path: Path, branch: str):
         return object()
 
-    monkeypatch.setattr("app.worker.executor.prepare_flow_repo", fake_workspace)
-    monkeypatch.setattr("app.worker.executor.prepare_vcs_context", fake_context)
+    monkeypatch.setattr("app.worker.execution.executor.prepare_flow_repo", fake_workspace)
+    monkeypatch.setattr("app.worker.execution.executor.prepare_vcs_context", fake_context)
     executor = WorkerExecutor(tmp_path, BackendlessAgent(), worker_id="worker-1", session=WorkerSession(tmp_path))
 
     result = await executor.execute(

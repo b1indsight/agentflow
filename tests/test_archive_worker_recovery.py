@@ -20,11 +20,11 @@ from app.control.gateway import WorkerGateway
 from app.control.service import ControlService
 from app.domain.models import FlowState, JobKind, JobState
 from app.persistence.stop_store import StopStore
-from app.worker.client import WorkerClient
-from app.worker.executor import WorkerExecutor
+from app.worker.execution.executor import WorkerExecutor
+from app.worker.execution.vcs import prepare_flow_repo
 from app.worker.runtime import WorkerRootLock
-from app.worker.session import WorkerSession
-from app.worker.vcs import prepare_flow_repo
+from app.worker.state.session import WorkerSession
+from app.worker.transport.client import WorkerClient
 from tests.test_archive_recovery import ready_archive, receive
 from tests.test_coordinator import RecordingGitHub, coordinator
 from tests.test_merge import route_merge

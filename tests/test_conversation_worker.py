@@ -11,8 +11,8 @@ from app.contracts.protocol import (
     Registered,
     parse_worker_message,
 )
-from app.worker.client import WorkerClient
-from app.worker.session import WorkerSession
+from app.worker.state.session import WorkerSession
+from app.worker.transport.client import WorkerClient
 
 
 class Connection:

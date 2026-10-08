@@ -42,8 +42,8 @@ from app.contracts.protocol import (
 )
 from app.domain.delivery_models import DeliveryReceipt
 from app.domain.models import VcsOutcome
-from app.worker.session import WorkerSession
-from app.worker.tools import FlowToolCaller
+from app.worker.state.session import WorkerSession
+from app.worker.transport.mcp import FlowToolCaller
 
 
 class Connection(Protocol):
