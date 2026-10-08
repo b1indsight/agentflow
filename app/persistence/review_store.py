@@ -12,7 +12,14 @@ from app.contracts.protocol import RevisionTask
 from app.domain.context_models import MAX_DISCUSSIONS, ReviewContext
 from app.domain.github_models import ReviewThreads
 from app.domain.judge_models import JudgeDecision
-from app.domain.models import TERMINAL_STATES, DeliveryState, Job, ReviewItemKind
+from app.domain.models import (
+    TERMINAL_STATES,
+    DeliveryState,
+    FlowState,
+    Job,
+    JobKind,
+    ReviewItemKind,
+)
 from app.domain.review_models import (
     BatchState,
     FeedbackRef,
@@ -77,8 +84,8 @@ CREATE TABLE IF NOT EXISTS review_batches (
   open_points JSONB NOT NULL,
   created_at TIMESTAMPTZ NOT NULL,
   context JSONB,
-  context_stale BOOLEAN NOT NULL DEFAULT FALSE,
   decision JSONB,
+  answer_dispatched BOOLEAN NOT NULL DEFAULT FALSE,
   threads JSONB,
   UNIQUE(flow_id,generation)
 );
@@ -367,8 +374,8 @@ class ReviewStore:
             ).fetchall()
         return [ReviewFeedback(item_id=r["id"], version=r["version"], **r["content"]) for r in rows]
 
-    def claim_due(self) -> list[Job]:
-        """Claim at most one batch per Flow, keeping the same worker→Flow→job lock order."""
+    def claim_due(self) -> list[ReviewBatch]:
+        """Settle at most one batch per Flow under the existing workflow lock."""
         with self.store.connection() as connection:
             candidates = connection.execute(
                 "SELECT flow_id FROM review_buffers WHERE due_at<=%s"
@@ -391,7 +398,7 @@ class ReviewStore:
                     jobs.append(job)
         return jobs
 
-    def _claim(self, flow_id: int, attempt_id: int | None) -> Job | None:
+    def _claim(self, flow_id: int, attempt_id: int | None) -> ReviewBatch | None:
         delivery = self.store.get_delivery(flow_id)
         if attempt_id is None or delivery is None or delivery.state is not DeliveryState.OPEN:
             return None
@@ -438,14 +445,31 @@ class ReviewStore:
                 ),
             ).fetchone()
             assert row is not None
-            payload: dict[str, object] = {"batch_id": row["id"]}
             if decision.instruction is not None:
-                payload["instruction"] = decision.instruction
-            job = self.store.enqueue_job(flow_id, decision.kind, payload)
-            connection.execute(
-                "UPDATE review_batches SET job_id=%s WHERE id=%s", (job.id, row["id"])
-            )
-            return job
+                job = self.store.enqueue_job(flow_id, JobKind.REVISION,
+                    {"batch_id": row["id"], "instruction": decision.instruction})
+                self.advance(row["id"], job)
+            return self.get_batch(row["id"])
+
+    def pending_triage(self) -> list[ReviewBatch]:
+        """Read unfinished prerequisites; they have no job or execution ownership."""
+        with self.store.connection() as connection:
+            return connection.cursor(row_factory=class_row(ReviewBatch)).execute(
+                "SELECT b.* FROM review_batches b JOIN flows f ON f.id=b.flow_id"
+                " JOIN flow_deliveries d ON d.flow_id=f.id"
+                " WHERE b.state='ready' AND b.job_id IS NULL AND f.state='active'"
+                " AND b.attempt_id=f.current_attempt_id AND d.state='open' ORDER BY b.id"
+            ).fetchall()
+
+    def current(self, batch: ReviewBatch) -> bool:
+        """Check under the workflow lock before accepting a batch prerequisite."""
+        flow = self.store.get_flow(batch.flow_id)
+        delivery = self.store.get_delivery(batch.flow_id)
+        fresh = self.get_batch(batch.id)
+        return (flow is not None and flow.state is FlowState.ACTIVE
+                and flow.current_attempt_id == batch.attempt_id
+                and delivery is not None and delivery.state is DeliveryState.OPEN
+                and fresh.state is BatchState.READY and fresh.job_id is None)
 
     def get_batch(self, batch_id: int) -> ReviewBatch:
         """Load persisted input content, never the live item projection."""
@@ -581,20 +605,23 @@ class ReviewStore:
         if batch.state is not BatchState.READY:
             raise ValueError("cannot start an inactive review batch")
         with self.store.connection() as connection:
-            connection.execute(
-                "UPDATE review_batches SET state='processing' WHERE id=%s", (batch.id,)
-            )
+            connection.execute("UPDATE review_batches SET state='processing' WHERE id=%s", (batch.id,))
+        self.relayed(batch)
+        return True
+
+    def relayed(self, batch: ReviewBatch) -> None:
+        """Track which feedback versions have actually reached a model."""
+        with self.store.connection() as connection:
             for item in batch.feedback:
                 connection.execute(
                     "UPDATE review_versions SET relayed_at=COALESCE(relayed_at,%s)"
                     " WHERE item_id=%s AND version=%s",
                     (self.store.now(), item.item_id, item.version),
                 )
-        return True
 
-    def freeze_context(self, job: Job, context: ReviewContext) -> ReviewContext:
+    def freeze_context(self, batch: ReviewBatch, context: ReviewContext) -> ReviewContext:
         """Called with the workflow lock after network reads; first prepared snapshot wins."""
-        batch = self.for_job(job)
+        batch = self.get_batch(batch.id)
         if context.batch_id != batch.id or batch.state not in {
             BatchState.READY, BatchState.PROCESSING,
         }:
@@ -606,9 +633,9 @@ class ReviewStore:
                                (Jsonb(context.model_dump(mode="json")), batch.id))
         return context
 
-    def record_decision(self, job: Job, decision: JudgeDecision) -> None:
-        """Persist the accepted interpretation alongside its immutable input in the result transaction."""
-        batch = self.for_job(job)
+    def record_decision(self, batch: ReviewBatch, decision: JudgeDecision) -> None:
+        """Persist the interpretation alongside its immutable batch input."""
+        batch = self.get_batch(batch.id)
         if batch.context is None or batch.context.digest != decision.context_digest:
             raise ValueError("decision does not match its frozen context")
         with self.store.connection() as connection:
@@ -640,20 +667,6 @@ class ReviewStore:
             connection.execute("UPDATE jobs SET payload=%s WHERE id=%s", (Jsonb(payload), job.id))
         job.payload = payload
         return task
-
-    def mark_context_stale(self, job: Job) -> None:
-        """Retain the old evidence while recording that explicit retry needs a new batch."""
-        batch = self.for_job(job)
-        with self.store.connection() as connection:
-            connection.execute("UPDATE review_batches SET context_stale=TRUE WHERE id=%s", (batch.id,))
-
-    def retriage(self, previous: Job) -> None:
-        """Under the workflow lock, feed stale unconsumed input into normal batch creation."""
-        batch = self.for_job(previous)
-        with self.store.connection() as connection:
-            connection.execute("UPDATE review_batches SET state='waiting' WHERE id=%s", (batch.id,))
-        self._touch(batch.flow_id, 0)
-        self._claim(batch.flow_id, batch.attempt_id)
 
     def complete(
         self,

@@ -1,6 +1,6 @@
 """Flow-owned repository preparation and post-run VCS verification.
 
-CodeAgent chooses and operates the repository's native VCS. This module does not choose on its
+CodingAgent chooses and operates the repository's native VCS. This module does not choose on its
 behalf or perform commits; it snapshots every available backend before the run and verifies the
 backend declared by the Agent afterwards.
 """
@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse
 
-from app.domain.models import CodeAgentContext, VcsExecutionContext, VcsKind, VcsOutcome
+from app.domain.models import CodingExecutionContext, VcsExecutionContext, VcsKind, VcsOutcome
 from app.worker.credentials import git_credential_environment
 
 
@@ -157,7 +157,7 @@ async def cleanup_flow_repo(
 async def prepare_vcs_context(
     repo_path: Path, branch: str, *, remote: str = "origin"
 ) -> VcsExecutionContext:
-    """Snapshot candidate backend revisions without selecting a backend for CodeAgent."""
+    """Snapshot candidate backend revisions without selecting a backend for CodingAgent."""
 
     git_base = await _optional_stdout("git", "rev-parse", "HEAD", cwd=repo_path)
     jj_base = await _optional_stdout(
@@ -190,7 +190,7 @@ async def prepare_vcs_context(
 
 
 def agent_guidance(branch: str, *, remote: str = "origin") -> str:
-    """Tell CodeAgent the VCS completion contract without preselecting Git or jj."""
+    """Tell CodingAgent the VCS completion contract without preselecting Git or jj."""
 
     return (
         "Inspect the repository conventions and actual VCS metadata, then choose the repository's "
@@ -287,7 +287,7 @@ async def _verify_jj(context: VcsExecutionContext, *, require_new: bool = True) 
 
 async def prepare_revision_context(
     repo_path: Path, branch: str, expected_sha: str,
-    push_context: CodeAgentContext | None = None,
+    push_context: CodingExecutionContext | None = None,
 ) -> VcsExecutionContext:
     """Require the existing clean Flow repo to match the frozen remote head; never reset it."""
     if not repo_path.is_dir():
@@ -395,11 +395,11 @@ def _canonical_remote_url(url: str, repo_path: Path) -> str:
 
 def _require_unchanged_remote(current: str, captured: str) -> None:
     if current != captured:
-        raise VcsVerificationError("push", "configured remote changed during CodeAgent execution")
+        raise VcsVerificationError("push", "configured remote changed during CodingAgent execution")
 
 
 async def _remote_sha(
-    remote: str, branch: str, push_context: CodeAgentContext | None = None,
+    remote: str, branch: str, push_context: CodingExecutionContext | None = None,
 ) -> str:
     # Run outside the agent-controlled repository so local config cannot rewrite the fixed URL.
     with tempfile.TemporaryDirectory(prefix="flowtool-vcs-verify-") as directory:

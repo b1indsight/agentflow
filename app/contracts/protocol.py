@@ -19,13 +19,12 @@ from pydantic import (
 )
 
 from app.contracts.conversation import ConversationError, ConversationPage, SessionRef
-from app.domain.context_models import MAX_CONTEXT_BYTES, ReviewContext
+from app.domain.context_models import ReviewContext
 from app.domain.delivery_models import DeliveryReceipt
-from app.domain.judge_models import JudgeDecision
-from app.domain.models import CodexResult, FeedbackRef, JobState, VcsKind
+from app.domain.models import FeedbackRef, JobState, RevisionCodingOutput, VcsKind
 from app.domain.review_models import ReviewFeedback
 
-PROTOCOL_VERSION: Literal[11] = 11
+PROTOCOL_VERSION: Literal[12] = 12
 
 
 class ProtocolModel(BaseModel):
@@ -35,7 +34,7 @@ class ProtocolModel(BaseModel):
 
 
 class Message(ProtocolModel):
-    protocol_version: Literal[11] = PROTOCOL_VERSION
+    protocol_version: Literal[12] = PROTOCOL_VERSION
 
 
 class ConversationQuery(Message):
@@ -100,22 +99,6 @@ class AssignmentSecret(ProtocolModel):
     push: PushSecret
 
 
-class TriageTask(ProtocolModel):
-    kind: Literal["triage"] = "triage"
-    batch_id: int = Field(gt=0)
-    attempt_id: int
-    feedback: list[FeedbackRef]
-    context: ReviewContext
-
-    @model_validator(mode="after")
-    def _context_batch(self) -> TriageTask:
-        if self.context.batch_id != self.batch_id:
-            raise ValueError("triage context belongs to another batch")
-        if len(self.context.model_dump_json().encode()) > MAX_CONTEXT_BYTES:
-            raise ValueError("triage context exceeds the byte budget")
-        return self
-
-
 class RevisionTask(ReviewTask):
     kind: Literal["revision"] = "revision"
     flow_id: int = Field(gt=0)
@@ -135,7 +118,7 @@ class RevisionTask(ReviewTask):
     context: ReviewContext | None = None
 
 
-class RevisionInvocation(ProtocolModel):
+class RevisionExecutionRecord(ProtocolModel):
     mode: Literal["resume", "fallback"]
     session_id: str | None
     exit_code: int
@@ -158,12 +141,12 @@ class ArchiveTask(ArchiveIdentity):
 
 
 ExecutionTask = Annotated[
-    InitialTask | TriageTask | RevisionTask | ArchiveTask,
+    InitialTask | RevisionTask | ArchiveTask,
     Field(discriminator="kind"),
 ]
 
 
-class InitialResult(ProtocolModel):
+class InitialTaskResult(ProtocolModel):
     kind: Literal["initial"] = "initial"
     session_id: str | None
     last_message: str
@@ -184,12 +167,7 @@ class ReviewResult(ProtocolModel):
     feedback_refs: list[FeedbackRef]
 
 
-class TriageResult(ReviewResult):
-    kind: Literal["triage"] = "triage"
-    decision: JudgeDecision
-
-
-class RevisionResult(ReviewResult):
+class RevisionTaskResult(ReviewResult):
     kind: Literal["revision"] = "revision"
     session_id: str | None
     last_message: str
@@ -199,8 +177,8 @@ class RevisionResult(ReviewResult):
     previous_session_id: str | None
     session_generation: int = Field(ge=0)
     mode: Literal["resume", "fallback"]
-    invocations: list[RevisionInvocation] = Field(default_factory=list, max_length=2)
-    output: CodexResult | None = None
+    invocations: list[RevisionExecutionRecord] = Field(default_factory=list, max_length=2)
+    output: RevisionCodingOutput | None = None
     failure_stage: str | None = None
     failure_detail: str | None = None
     vcs_backend: VcsKind | None = None
@@ -216,7 +194,7 @@ class ArchiveResult(ArchiveIdentity):
 
 
 ExecutionResult = Annotated[
-    InitialResult | TriageResult | RevisionResult | ArchiveResult,
+    InitialTaskResult | RevisionTaskResult | ArchiveResult,
     Field(discriminator="kind"),
 ]
 

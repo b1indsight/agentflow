@@ -61,9 +61,9 @@ FlowTool 的目标是把带 `flow` 标签的 GitHub issue 编排成
   运行中新评论/编辑进入下一批。仅 allowlist 作者提交的 Request Changes 经 grace 合批直达修订；
   包含 `@bot` 的评论也进入 Judge。wait 等待新信息，
   answer/ignore/明确 addressed 只消费本批次精确版本，未决问题保留。
-- **语义决策与直接答复**：control 冻结 Issue/PR、有限 patch 和讨论，worker 用 bub 0.4.1 无工具入口
-  判定；超时、非法输出和不完整快照保守 wait。答案只生成一次，通过持久账本发布并引用来源反馈。
-  `FLOWTOOL_JUDGE_MODEL` / `FLOWTOOL_JUDGE_API_KEY` 只配置在 worker；可选 API 地址和 60 秒超时见
+- **语义决策与直接答复**：control 冻结 Issue/PR、有限 patch 和讨论，control 用 bub 0.4.1 无工具入口
+  判定；超时、非法输出和不完整快照保守 wait。决定保存在反馈批次，只有 revise 创建 worker job；答案引用来源反馈并以批次 marker 核对回执。
+  `FLOWTOOL_JUDGE_MODEL` / `FLOWTOOL_JUDGE_API_KEY` 只配置在 control；可选 API 地址和 60 秒超时见
   [env.example](env.example)。未配置时 Judge 等待，不在健康检查中调用模型。
 - **运维入口**：CLI 可查看 Flow、交付分支/PR、worker、任务恢复状态和未完成的 GitHub 操作，
   并提供 cancel/retry 命令。已核验修订中被明确拒绝的通知可补发；结果不确定时拒绝直接 retry。
@@ -134,7 +134,7 @@ FLOWTOOL_ALLOW_INSECURE_WORKER_WS=true uv run flowtool worker
 ```
 
 `WorkerSettings` 不读取当前目录的 `.env`，worker 配置通过进程环境提供；默认要求 `wss://`，示例中的
-`FLOWTOOL_ALLOW_INSECURE_WORKER_WS=true` 仅用于开发。要运行 `danger-full-access` CodeAgent，必须在专用 OS account、
+`FLOWTOOL_ALLOW_INSECURE_WORKER_WS=true` 仅用于开发。要运行 `danger-full-access` CodingAgent，必须在专用 OS account、
 container 或 VM 中只注入 worker/Codex 所需变量，并设置
 `FLOWTOOL_TRUSTED_HOST_EXECUTION=true` 与对应的
 `FLOWTOOL_EXECUTION_ISOLATION=dedicated-account|container|vm`。开启该模式时，worker 进程环境若包含数据库、
@@ -222,7 +222,7 @@ M3 F3 及审查修复本地验证（2026-09-08）：真实 PostgreSQL 下 **502 
 响应丢失与重启恢复。Ruff、Mypy 与 sdist/wheel 构建通过；真实 GitHub App/worker 验收仍待执行，
 详见 [F3 审查修复记录](docs/plan/m3-archive-status.md#7-审查修复2026-09-08)。
 
-当前仅支持 wire protocol **v10**、worker journal **v3** 与当前完整 PostgreSQL schema。
+当前仅支持 wire protocol **v12**、worker journal **v3** 与当前完整 PostgreSQL schema。
 仓库尚未部署，不提供旧版本数据库、任务、结果或 journal 的迁移；首次运行使用新数据库/schema
 和新 worker root。serve/worker 使用同一 commit/镜像版本，不混跑；协议不匹配直接拒绝。
 同版本重启仍保留冻结任务、结果摘要、effect ledger 与 journal 恢复能力。
@@ -243,7 +243,7 @@ M3 F3 及审查修复本地验证（2026-09-08）：真实 PostgreSQL 下 **502 
 
 修订失败保留原 worker binding；处理脏工作区或远端偏移后可显式 retry，不自动 reset/rebase/force push。
 修订准备阶段的 GitHub 错误会持久记录为失败；恢复后显式 retry，未 Started 的准备失败不消耗修订轮数。
-CodeAgent 总时限覆盖 resume、fallback 和 VCS 核验，超时回收并等待对应进程组退出；用户 cancel 仍不终止运行中的进程。
+CodingAgent 总时限覆盖 resume、fallback 和 VCS 核验，超时回收并等待对应进程组退出；用户 cancel 仍不终止运行中的进程。
 
 可选组织 Projects v2 的配置及只读 `flowtool project check <repo>` 见 [GitHub App 接入](docs/architecture/github-app.md#a4-可选的组织-projects-v2)。
 

@@ -33,22 +33,22 @@ M0 已验收基础设施切片；M1 Issue→PR 与 M2 回喂循环已实现、�
                      ▼  │
  ┌──────────────────── serve / control ────────────────────┐
  │ [Webhook] → [Event Router] → [Control Service]          │
- │                   [Job Coordinator] → Store / GitHub    │
+ │                   [Job Coordinator] → Judge / Store / GitHub    │
  │                           │                              │
  │                    [Worker Gateway]                      │
  └───────────────────────────┼──────────────────────────────┘
                authenticated WebSockets
                        │       │
  ┌──────────────── remote workers (1..N) ──────────────────┐
- │ [Worker Client + Journal] → [Executor] → Judge / Codex  │
+ │ [Worker Client + Journal] → [Executor] → Codex          │
  │                                      → Workspace / VCS   │
  └──────────────────────────────────────────────────────────┘
 ```
 
 平面边界：
 
-- **Control plane**负责 Webhook、持久化、状态机和 GitHub API，是唯一数据库权威；
-- **Worker execution plane**负责 Judge、Context Builder、Codex 与 Flow repo 内的改码/提交/push；
+- **Control plane**负责 Webhook、持久化、状态机、Judge 决策和 GitHub API，是唯一数据库权威；
+- **Worker execution plane**负责 Context Builder、Codex 与 Flow repo 内的改码/提交/push；
 - control 只确定分支名并在 worker 完成 push 后创建 PR，不直接执行本地版本控制；
 - 本地能力按 [Flow repo / execution policy / VCS](components.md) 分离（§4.6）：Agent 选择并操作
   Git/jj，worker 只验证事实。

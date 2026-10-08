@@ -3,7 +3,12 @@
 import json
 from dataclasses import dataclass
 
-from app.contracts.protocol import InitialResult, RevisionResult, Succeeded, parse_worker_message
+from app.contracts.protocol import (
+    InitialTaskResult,
+    RevisionTaskResult,
+    Succeeded,
+    parse_worker_message,
+)
 from app.control.initial import initial_delivery_mismatch
 from app.control.revisions import frozen_revision, revision_mismatch, verify_revision_remote
 from app.domain.github_models import PullRequestStatus
@@ -46,7 +51,7 @@ async def prove_reopen(
         if not isinstance(message, Succeeded):
             return None, "old coding execution failed; repository requires manual reconciliation"
         result = message.result
-        if isinstance(result, InitialResult):
+        if isinstance(result, InitialTaskResult):
             attempt = store.get_current_attempt(flow)
             call = store.get_tool_call(result.open_pr_call_id) if result.open_pr_call_id else None
             if (attempt is None or result.exit_code != 0 or not result.session_id
@@ -54,7 +59,7 @@ async def prove_reopen(
                                                 delivery.model_copy(update={"state": DeliveryState.OPEN}), call)):
                 return None, "INITIAL delivery incomplete; manual reconciliation required"
             proof = ReopenProof(delivery.head_sha, result.session_id)
-        elif isinstance(result, RevisionResult):
+        elif isinstance(result, RevisionTaskResult):
             task = frozen_revision(job)
             if (revision_mismatch(task, result) or task.attempt_id != flow.current_attempt_id
                     or task.repo != flow.repo or task.pr_number != delivery.pr_number

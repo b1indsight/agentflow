@@ -6,7 +6,7 @@
 
 `domain/` 保存领域事实、端口与纯策略；`contracts/` 在这些类型上定义跨进程消息与冻结结果。
 `persistence/` 拥有 SQL 和事务，`github/` 拥有 GitHub SDK/GraphQL 适配，两者不反向依赖编排层。
-`control/` 组合仓储、GitHub、协议与插件，负责工作流和外部副作用；`worker/` 组合协议、Agent/Judge
+`control/` 组合仓储、GitHub、协议与插件，负责工作流、Judge 决策和外部副作用；`worker/` 组合协议、CodingAgent
 执行器及 VCS，不加载 control、数据库或 GitHub SDK 实现。配置与 CLI 保留原入口。
 
 `telemetry/logging.py` 只提供通用日志配置；`telemetry/metrics.py` 由控制端使用，并调用
@@ -15,7 +15,7 @@
 职责边界由 `tests/test_boundaries.py` 检查，另以独立解释器验证 worker 启动的传递导入。
 
 目录列表见[当前目录](roadmap.md#8-当前目录与里程碑)。Judge 内部子进程入口为
-`app.worker.judge_runner`；对外 CLI、`app.control.api` 和 `app.live_smoke` 入口保持不变。
+`app.control.judge_runner`；对外 CLI、`app.control.api` 和 `app.live_smoke` 入口保持不变。
 
 ## 4.1 Webhook Ingress（FastAPI + uvicorn）
 
@@ -63,11 +63,11 @@ Review:   settle → READY → PROCESSING → COMPLETED / WAITING
           新反馈进入后续批次；终态取消活动批次
 ```
 
-`ControlService` 在显式事务中负责触发、取消、合并和 retry；`JobCoordinator` 把 INITIAL、TRIAGE、REVISION、ARCHIVE
-持久 job 构造成版本化 task（ANSWER 仅保留历史记录，当前答复直接使用 TRIAGE 的已校验答案），
+`ControlService` 在显式事务中负责触发、取消、合并和 retry；`JobCoordinator` 把 INITIAL、REVISION、ARCHIVE
+持久 job 构造成版本化 task，并在创建 revision 前直接处理需要 Judge 判断的反馈批次，
 并按 job ID 调用 `ResultApplication`，由后者读取并校验已持久接收的 result，
 冻结一次结果的领域变更和 GitHub 操作，
-由 `ResultEffects` 查询/执行远端操作并保存回执，最后一起提交本地状态、派生任务、运行记录和结果确认。
+由 `ResultEffects` 查询/执行远端操作并保存回执，最后一起提交本地状态、运行记录和结果确认。
 网络请求不占用数据库事务；plugin hook 在提交后调用，不具备持久化投递保证。worker 不能直接更新这些状态。
 非零 Codex exit 会转 FAILED。revision 成功后仅消费明确 addressed 的 item/version，deferred/遗漏项/
 clarification 保持 waiting；不把 addressed 当作远端 resolved。有未决问题时不重新请求审核。
@@ -88,7 +88,7 @@ M2 已接入有界 Issue/PR/patch/讨论快照、线程/comment 映射与原线�
 serve 的 `WorkerGateway` 校验每个 identity 的 bearer token，维护多会话 registry，并用随机 connection epoch 与
 assignment token 对 Started、Heartbeat 和结果做四元组 fencing。每个 worker 是单槽，PostgreSQL 按 FIFO、
 worker `last_assigned_at` 和 Flow execution binding 事务化领取任务。worker 的 `WorkerClient` 主动连接并指数退避；
-`WorkerExecutor` 只依赖 CodeAgent、Judge 和 Flow repo/VCS helpers，不导入 Store、FastAPI 或 GitHub。
+`WorkerExecutor` 只依赖 CodingAgent 和 Flow repo/VCS helpers，不导入 Store、FastAPI 或 GitHub。
 
 不同 identity 可并发在线；同 identity 新连接取得新 epoch 并关闭旧 socket，数据库条件保证旧连接最终失效。
 任务未 Started 断线后保留到 lease 到期再 requeue；Started job 进入 RECOVERING，只允许原 identity 在 grace 内恢复，
@@ -102,7 +102,7 @@ worker socket 与 executor 解耦，root 内原子 journal 在 ack 前保存进�
 
 ## 4.4 Codex Driver
 
-`CodexAgent` 已实现 `CodeAgent` 端口的 `start` / `resume`：
+`CodexAgent` 已实现 `CodingAgent` 端口的 `start` / `resume`：
 
 - start 仅在显式 `FLOWTOOL_TRUSTED_HOST_EXECUTION=true` 时使用
   `codex exec <prompt> --json -C <flow-repo> -s danger-full-access`；
@@ -153,7 +153,7 @@ terminal result 三方核对。当前缺口包括：
 
 ## 4.7 Store（PostgreSQL）
 
-反馈批次的 TRIAGE/REVISION 选择、指令和未决问题归并由 `review_policy` 的纯函数决定；
+反馈批次的前置判断/直接修订选择、指令和未决问题归并由 `review_policy` 的纯函数决定；
 `recovery_policy` 根据固定时间及读取的事实决定重排、失败、保留诊断和绑定释放。
 Store 负责候选查询、信号/回执事实、锁和原子写入。恢复扫描在原 worker 锁事务内先提交 job
 动作，再查询事务内更新后的绑定事实；策略函数不执行 SQL、读取时钟或调用外部服务。
@@ -214,17 +214,23 @@ head PR 查询和 capability 已接入 INITIAL；M2 原线程回复/resolve 已�
 
 - initial prompt 包含 issue 标题/正文、首个 `AGENTS.md` 或 `CLAUDE.md`、VCS 指引和硬约束；
 - revision prompt 包含 Judge instruction、冻结批次的 item/version、inline path/diff hunk/original commit id、
-  原 Issue、交付基线、此前 summary/open_points、VCS 指引和 `CodexResult` 输出约定；有冻结 PR context 时一并传入。
+  原 Issue、交付基线、此前 summary/open_points、VCS 指引和 `RevisionCodingOutput` 输出约定；有冻结 PR context 时一并传入。
 
 INITIAL 已使用 GitHub Issue 的真实标题与正文；冻结 PR context 包含有界 patch 和讨论，不含 CI 状态。
-F4 的完整线程映射由 control 持有，遵循当前 worker v10 契约。issue/PR 文本是不可信输入，必须保留明确的数据/指令边界。
+F4 的完整线程映射由 control 持有，遵循当前 worker v12 契约。issue/PR 文本是不可信输入，必须保留明确的数据/指令边界。
 
 ## 4.10 Judge / Triage
 
 语义见 [Review 修订循环](review-loop.md)。`review_context.py` 在 control 读取 Issue、PR 与分页文件/
-讨论，冻结有界 JSON 快照；先后读取 PR 防止 head/base 在取数期间变化，prepare 重试复用入库快照。
+讨论，冻结有界 JSON 快照；先后读取 PR 防止 head/base 在取数期间变化，未完成批次复用入库快照。
 
-`BubJudge` 启动独立 `judge_runner` 子进程，显式配置 bub 0.4.1 `ModelRunner.completion_response`，
+triage 是 worker 请求之前的批次判断，由 control 的 review sweep 顺序处理 ready 且无 job 的批次。
+REVISE 在工作流事务中创建 revision job 并关联批次；ANSWER/IGNORE/WAIT 直接处理批次。
+没有独立 job、assignment token 或本地任务恢复；中断后重新读取未完成批次。有效性检查与原子
+关联避免迟到决定或重复下发，过程不更改 worker 状态或 Flow binding。答案已发送但回执不明时，
+只查询批次 marker，不重复 POST。
+
+control 的 `BubJudge` 启动独立 `judge_runner` 子进程，显式配置 bub 0.4.1 `ModelRunner.completion_response`，
 不创建 framework、加载插件、读写 tape 或执行工具。每批次独立请求与会话 ID；凭据仅通过允许的
 子进程环境传入。单次调用无 fallback/SDK retry，父进程限制时长和 stdout/stderr，取消时回收子进程。
 

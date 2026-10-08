@@ -11,6 +11,7 @@ from app.control.config import ServeSettings
 from app.control.conversation import ConversationService
 from app.control.coordinator import JobCoordinator
 from app.control.gateway import WorkerGateway
+from app.control.judge import BubJudge
 from app.control.projects import ProjectSync
 from app.control.reconcile import Reconciler
 from app.control.reconcile_feedback import FeedbackReconciler
@@ -27,7 +28,7 @@ from app.telemetry.metrics import Metrics
 
 
 class ControlRuntime:
-    """Own all stateful control adapters; no execution adapter is constructed here."""
+    """Own control adapters, local review decisions and background recovery."""
 
     def __init__(self, settings: ServeSettings) -> None:
         self.settings = settings
@@ -58,6 +59,9 @@ class ControlRuntime:
             metrics=self.metrics,
             execution_control=StopStore(self.store),
         )
+        self.judge = BubJudge(model=settings.judge_model, api_key=settings.judge_api_key,
+                         api_base=settings.judge_api_base, timeout=settings.judge_timeout_seconds)
+        self._triage_task: asyncio.Task[None] | None = None
         self.service = ControlService(self.store, plugins, self.gateway.notify_jobs)
         self.conversations = ConversationService(self.store, self.gateway.conversations)
         self.webhooks = WebhookConsumer(self.store, self.settings, self.service)
@@ -143,6 +147,22 @@ class ControlRuntime:
         if self.store.reviews.claim_due():
             self.gateway.notify_jobs()
 
+        if self._triage_task is None or self._triage_task.done():
+            self._triage_task = asyncio.create_task(self._run_triage())
+
+    async def _run_triage(self) -> None:
+        try:
+            batches = self.store.reviews.pending_triage()
+        except Exception:  # noqa: BLE001 -- retry a temporarily unavailable database next sweep
+            logger.exception("could not read pending review batches")
+            return
+        for batch in batches:
+            try:
+                await self.coordinator.triage(batch, self.judge)
+            except Exception:  # noqa: BLE001 -- isolate unavailable providers/feedback batches
+                logger.exception("review prerequisite interrupted; unfinished batch will be retried")
+        self.gateway.notify_jobs()
+
     async def _sweep_reviews(self) -> None:
         """Keep settle independent of both lease errors and slow remote receipt checks."""
         while True:
@@ -159,7 +179,9 @@ class ControlRuntime:
     async def shutdown(self) -> None:
         self._ready = False
         self.reconciler.stop()
-        tasks = self._tasks
+        tasks = list(self._tasks)
+        if self._triage_task is not None:
+            tasks.append(self._triage_task)
         for task in tasks:
             task.cancel()
         if tasks:

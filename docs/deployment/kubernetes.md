@@ -20,9 +20,9 @@ CA bundle 应包含公共根证书和内部 CA，准备方法见 Docker 文档�
 模板只引用 Secret，不包含真实值。创建 namespace 后，在其下分别创建：
 
 - flowtool-serve-env：serve 专属 env 文件，含数据库 URL、App ID、Webhook secret、worker token
-  映射、allowlist/reviewers，以及可选独立 metrics token。
+  映射、allowlist/reviewers、Judge model/API key，以及可选独立 metrics token。
 - flowtool-app-key：`app.pem`。
-- flowtool-worker-1-env：worker token、`CODEX_API_KEY`、judge model/API key；禁止放 DB/App key。
+- flowtool-worker-1-env：worker token、`CODEX_API_KEY`；禁止放 DB/App key 或 Judge API key。
 - flowtool-worker-ca：`ca-bundle.pem`。
 - flowtool-worker-tls：标准 TLS Secret 的 tls.crt/tls.key。
 

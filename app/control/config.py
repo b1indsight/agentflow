@@ -56,6 +56,11 @@ class ServeSettings(BaseSettings):
     database_url: str
     worker_tokens: dict[str, SecretStr]
 
+    judge_model: str = ""
+    judge_api_key: SecretStr | None = None
+    judge_api_base: str | None = None
+    judge_timeout_seconds: float = Field(default=60.0, gt=0, allow_inf_nan=False)
+
     settle_seconds: float = 75.0
     submit_grace_seconds: float = 15.0
     confidence_threshold: float = Field(default=0.6, ge=0, le=1, allow_inf_nan=False)

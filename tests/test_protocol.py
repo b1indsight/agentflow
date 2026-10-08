@@ -11,8 +11,8 @@ from app.contracts.protocol import (
     FlowToolErrorKind,
     FlowToolRequest,
     FlowToolResponse,
-    InitialResult,
     InitialTask,
+    InitialTaskResult,
     PushSecret,
     RecoveryDescriptor,
     Register,
@@ -26,7 +26,7 @@ from app.domain.models import TriageVerdict, VcsKind, Verdict
 
 
 def test_assignment_and_result_round_trip_with_discriminated_payloads() -> None:
-    assert PROTOCOL_VERSION == 11
+    assert PROTOCOL_VERSION == 12
     assignment = Assignment(
         job_id=41,
         flow_id=7,
@@ -67,11 +67,11 @@ def test_assignment_and_result_round_trip_with_discriminated_payloads() -> None:
         job_id=41,
         assignment_token="assignment-1",
         connection_epoch="epoch-1",
-        result=InitialResult(session_id="session-1", last_message="done", exit_code=0),
+        result=InitialTaskResult(session_id="session-1", last_message="done", exit_code=0),
     )
     worker_message = parse_worker_message(succeeded.model_dump_json())
     assert isinstance(worker_message, Succeeded)
-    assert isinstance(worker_message.result, InitialResult)
+    assert isinstance(worker_message.result, InitialTaskResult)
 
 
 def test_flow_tool_messages_are_strict_and_fenced() -> None:

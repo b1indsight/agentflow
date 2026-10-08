@@ -9,10 +9,9 @@ flowtool/
     contracts/        # 版本化 task/result/message 与冻结结果应用契约
     persistence/      # PostgreSQL schema、事务仓储、指标查询与就绪探针
     github/           # githubkit App 认证、GraphQL 分页与远端数据解码
-    control/          # HTTP/WS 服务、调度、工作流编排与审核证据采集
-    worker/           # WS client、journal、Agent/Judge、prompt、工作目录与 VCS
+    control/          # HTTP/WS 服务、调度、工作流编排、审核证据与 Judge
+    worker/           # WS client、journal、CodingAgent、prompt、工作目录与 VCS
     telemetry/        # 通用 logging 与控制端 metrics，分开依赖
-    config.py         # serve/worker 角色配置（pydantic-settings）
     cli.py            # admin CLI（§10-8）
     live_smoke.py      # 真实闭环验收命令入口
     plugins/          # 生命周期 hook 插件（§9-7）
@@ -64,7 +63,7 @@ M1/M2 已合并不等于真实闭环已验收；M3 尚未完成，M4–M5 仍为
    - 预留：GitHub Client 保持薄封装，能力按需追加即可，不影响 core。
 
 4. **Code Agent 标准接口** —— 把"与 code agent 交互"抽象成统一端口，方便接入新的底层 agent（不只 codex）。
-   - **当前接缝已就位**：`CodeAgent` port 已定义 `start / resume`，Codex 是第一个 adapter；实时
+   - **当前接缝已就位**：`CodingAgent` port 已定义 `start / resume`，Codex 是第一个 adapter；实时
      `inject`、统一日志/产物收集和其他 agent adapter 属于后续扩展。
 
 5. **更强隔离** —— 每个 Flow 放进容器 / 微VM，隔离完整 repo、文件系统与网络。
@@ -83,7 +82,7 @@ M1/M2 已合并不等于真实闭环已验收；M3 尚未完成，M4–M5 仍为
      待实现：示例插件 `post-merge-summary` 的插件体（读会话 + diff → 提炼风格偏好 → 提 PR 更新 repo 的 skill），目前只打日志。
 
 **架构取向：hexagonal（ports & adapters）。** control core（ControlService + JobCoordinator + store）只依赖端口：
-`CodeAgent` / `Judge` / `GitHubClient` / `Plugin hooks`；worker 执行器直接管理执行与工作区约束。
+`CodingAgent` / `Judge` / `GitHubClient` / `Plugin hooks`；worker 执行器直接管理执行与工作区约束。
 **VCS 不是端口**：它由 Flow repo 准备、自探测 guidance 和只读事实核验函数组成（见 §4.6）。
 当前已给端口放置最简 adapter 或桩
 （codex / bub / WebSocket worker / githubkit / 插件集）。

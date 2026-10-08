@@ -18,11 +18,11 @@ from app.persistence.stop_store import StopStore
 from app.persistence.store import Store
 from tests.test_coordinator import RecordingGitHub, coordinator
 from tests.test_merge import route_merge
-from tests.test_workflow_transactions import accepted_triage
+from tests.test_workflow_transactions import accepted_coding
 
 
 async def ready_archive(store, *, start=True):
-    old, _ = accepted_triage(store)
+    old, _ = accepted_coding(store)
     flow = store.get_flow(old.flow_id)
     await route_merge(store, flow)
     subject = coordinator(store, RecordingGitHub())
@@ -116,7 +116,7 @@ async def test_failed_archive_retry_keeps_attempt_and_original_worker(store):
 
 
 async def test_expired_merged_executor_is_pinned_until_original_worker_returns(store):
-    old, _ = accepted_triage(store, receive=False)
+    old, _ = accepted_coding(store, receive=False)
     flow = store.get_flow(old.flow_id)
     await route_merge(store, flow)
     store.worker_disconnected("worker-a", connection_epoch="epoch-a")
@@ -172,7 +172,7 @@ async def test_merged_coding_process_without_exit_proof_cannot_unlock_archive(st
     from app.contracts.protocol import RecoveryDescriptor
     from app.control.gateway import ProtocolViolation, WorkerGateway
 
-    old, _ = accepted_triage(store, receive=False)
+    old, _ = accepted_coding(store, receive=False)
     flow = store.get_flow(old.flow_id)
     await route_merge(store, flow)
     subject = coordinator(store, RecordingGitHub())
@@ -195,7 +195,7 @@ async def test_merged_coding_process_without_exit_proof_cannot_unlock_archive(st
 
 async def test_restart_between_archive_claim_and_freeze_requeues_safely(store):
     # A claim commits before coordinator.prepare(). This is a current, unstarted delivery.
-    old, _ = accepted_triage(store)
+    old, _ = accepted_coding(store)
     flow = store.get_flow(old.flow_id)
     await route_merge(store, flow)
     subject = coordinator(store, RecordingGitHub())

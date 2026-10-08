@@ -18,7 +18,7 @@ def test_worker_startup_does_not_load_control_plane_dependencies() -> None:
         check=True, capture_output=True, text=True,
     )
     modules = set(json.loads(result.stdout))
-    forbidden = {"app.control", "app.persistence", "app.github", "psycopg", "githubkit"}
+    forbidden = {"app.control", "app.persistence", "app.github", "psycopg", "githubkit", "bub"}
     assert not contains_forbidden(modules, forbidden), sorted(
         module for module in modules if contains_forbidden({module}, forbidden)
     )
@@ -61,7 +61,7 @@ def contains_forbidden(modules: set[str], prefixes: set[str]) -> bool:
     ("github", {"app.control", "app.worker", "app.persistence", "psycopg"}),
     ("control", {"app.worker"}),
     ("worker", {"app.control", "app.persistence", "app.github", "app.telemetry.metrics",
-                "psycopg", "githubkit", "fastapi"}),
+                "psycopg", "githubkit", "fastapi", "bub", "app.contracts.control"}),
 ])
 def test_packages_keep_responsibility_boundaries(package: str, forbidden: set[str]) -> None:
     modules = imported_modules(Path("app") / package)

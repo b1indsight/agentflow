@@ -12,10 +12,9 @@ from app.contracts.protocol import ArchiveResult, ArchiveTask, Succeeded, termin
 from app.control.router import EventRouter
 from app.control.service import ControlService
 from app.domain.models import DeliveryState, Flow, FlowState, JobKind, JobState
-from app.domain.review_models import BatchState
 from app.persistence.store import Store
 from tests.test_coordinator import RecordingGitHub, coordinator
-from tests.test_workflow_transactions import accepted_triage
+from tests.test_workflow_transactions import accepted_coding
 
 
 def merge_payload(flow: Flow) -> dict:
@@ -128,10 +127,9 @@ async def test_invalid_merge_facts_can_be_corrected_before_redelivery(store, mer
 
 async def test_merge_retires_review_but_waits_for_running_result(store):
     # Merge can arrive after worker completion but before its durable result has been applied.
-    job, _ = accepted_triage(store)
+    job, _ = accepted_coding(store)
     flow = store.get_flow(job.flow_id)
     await route_merge(store, flow)
-    assert store.reviews.for_job(job).state is BatchState.CANCELLED
     assert store.assign_job("worker-a", "archive-token", "epoch-a") is None
     github = RecordingGitHub()
     subject = coordinator(store, github)

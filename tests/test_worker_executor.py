@@ -8,16 +8,14 @@ from pydantic import SecretStr
 
 from app.contracts.protocol import (
     AssignmentSecret,
-    InitialResult,
     InitialTask,
+    InitialTaskResult,
     PushSecret,
-    TriageResult,
-    TriageTask,
 )
 from app.domain.delivery_models import OpenedDelivery
 from app.domain.models import (
-    AgentRun,
-    InitialCodexResult,
+    CodingExecutionResult,
+    InitialCodingOutput,
     TriageVerdict,
     VcsKind,
     VcsOutcome,
@@ -25,7 +23,7 @@ from app.domain.models import (
 )
 from app.worker.executor import WorkerExecutor
 from app.worker.journal import WorkerJournal
-from tests.review_memory import judge_decision, review_context
+from tests.review_memory import judge_decision
 
 
 class RecordingAgent:
@@ -33,7 +31,7 @@ class RecordingAgent:
         self.started: list[tuple[str, Path]] = []
         self.resumed: list[tuple[str, str]] = []
 
-    async def start(self, task: str, cwd: Path, *, output_schema=None, context=None) -> AgentRun:
+    async def start(self, task: str, cwd: Path, *, output_schema=None, context=None) -> CodingExecutionResult:
         self.started.append((task, cwd))
         if context is not None and context.mcp_socket is not None:
             reader, writer = await asyncio.open_unix_connection(context.mcp_socket)
@@ -46,17 +44,17 @@ class RecordingAgent:
             assert response["result"]["pr_number"] == 17
             writer.close()
             await writer.wait_closed()
-        return AgentRun(
+        return CodingExecutionResult(
             session_id="session-1",
-            last_message=InitialCodexResult(
+            last_message=InitialCodingOutput(
                 summary="initial done", vcs_backend_used=VcsKind.GIT,
             ).model_dump_json(),
             exit_code=0,
         )
 
-    async def resume(self, session_id: str, prompt: str, *, output_schema=None, context=None) -> AgentRun:
+    async def resume(self, session_id: str, prompt: str, *, output_schema=None, context=None) -> CodingExecutionResult:
         self.resumed.append((session_id, prompt))
-        return AgentRun(
+        return CodingExecutionResult(
             session_id=session_id,
             last_message="revision done",
             exit_code=0,
@@ -71,8 +69,8 @@ class RecordingJudge:
 
 
 class BackendlessAgent(RecordingAgent):
-    async def start(self, task: str, cwd: Path, *, output_schema=None, context=None) -> AgentRun:
-        return AgentRun(
+    async def start(self, task: str, cwd: Path, *, output_schema=None, context=None) -> CodingExecutionResult:
+        return CodingExecutionResult(
             session_id="session-1",
             last_message="claimed success",
             exit_code=0,
@@ -100,7 +98,7 @@ def assignment_secret() -> AssignmentSecret:
 @pytest.mark.asyncio
 async def test_initial_with_delivery_channel_requires_push_capability(tmp_path: Path) -> None:
     executor = WorkerExecutor(
-        tmp_path, RecordingAgent(), RecordingJudge(), worker_id="worker-1", journal=WorkerJournal(tmp_path)
+        tmp_path, RecordingAgent(), worker_id="worker-1", journal=WorkerJournal(tmp_path)
     )
 
     result = await executor.execute(
@@ -115,13 +113,13 @@ async def test_initial_with_delivery_channel_requires_push_capability(tmp_path: 
         ), tool_caller=RecordingToolCaller()
     )
 
-    assert isinstance(result, InitialResult)
+    assert isinstance(result, InitialTaskResult)
     assert result.failure_stage == "capability"
     assert result.failure_detail == "push capability is missing"
 
 
 @pytest.mark.asyncio
-async def test_executor_runs_agent_and_judge_tasks_without_store(
+async def test_executor_runs_agent_without_store(
     monkeypatch, tmp_path: Path
 ) -> None:
     workspace = tmp_path / "workspace"
@@ -153,7 +151,7 @@ async def test_executor_runs_agent_and_judge_tasks_without_store(
     )
     agent = RecordingAgent()
     executor = WorkerExecutor(
-        tmp_path, agent, RecordingJudge(), worker_id="worker-1", journal=WorkerJournal(tmp_path)
+        tmp_path, agent, worker_id="worker-1", journal=WorkerJournal(tmp_path)
     )
 
     initial = await executor.execute(
@@ -168,16 +166,10 @@ async def test_executor_runs_agent_and_judge_tasks_without_store(
         ),
         assignment_secret(), tool_caller=RecordingToolCaller(),
     )
-    triage = await executor.execute(
-        TriageTask(batch_id=1, feedback=[], attempt_id=1, context=review_context()), tool_caller=RecordingToolCaller()
-    )
-
-    assert isinstance(initial, InitialResult)
+    assert isinstance(initial, InitialTaskResult)
     assert initial.commit_sha == "abc"
     assert initial.open_pr_call_id == "call-1"
     assert initial.delivery_receipt is not None
-    assert isinstance(triage, TriageResult)
-    assert triage.decision.context_digest == review_context().digest
     assert agent.started
     assert agent.started[0][1] == workspace
 
@@ -197,7 +189,7 @@ async def test_initial_exit_zero_without_a_declared_backend_is_a_failure(
 
     monkeypatch.setattr("app.worker.executor.prepare_flow_repo", fake_workspace)
     monkeypatch.setattr("app.worker.executor.prepare_vcs_context", fake_context)
-    executor = WorkerExecutor(tmp_path, BackendlessAgent(), RecordingJudge(), worker_id="worker-1", journal=WorkerJournal(tmp_path))
+    executor = WorkerExecutor(tmp_path, BackendlessAgent(), worker_id="worker-1", journal=WorkerJournal(tmp_path))
 
     result = await executor.execute(
         InitialTask(
@@ -211,7 +203,7 @@ async def test_initial_exit_zero_without_a_declared_backend_is_a_failure(
         ), assignment_secret(), tool_caller=RecordingToolCaller()
     )
 
-    assert isinstance(result, InitialResult)
+    assert isinstance(result, InitialTaskResult)
     assert result.exit_code == 65
     assert result.failure_stage == "result"
     assert result.failure_detail == "missing VCS backend"

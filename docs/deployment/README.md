@@ -35,7 +35,8 @@ chmod 600 .env
 | `FLOWTOOL_HOST` / `FLOWTOOL_PORT` | 本文使用 `127.0.0.1` / `8000` |
 
 提前创建 `flow`、`flow:in-review`、`flow:done` 标签；如修改名称，同步修改对应配置。
-Judge 配置只提供给 worker，不使用 serve 的 `.env` 传递它。
+Judge 配置只提供给 control，在 serve 的 `.env` 配置 `FLOWTOOL_JUDGE_MODEL`、
+`FLOWTOOL_JUDGE_API_KEY`，可选 `FLOWTOOL_JUDGE_API_BASE` 和 `FLOWTOOL_JUDGE_TIMEOUT_SECONDS`。
 
 PostgreSQL 已存在时直接配置连接串。需要临时开发数据库时，可在仓库执行：
 
@@ -78,13 +79,11 @@ FLOWTOOL_ALLOW_INSECURE_WORKER_WS=true
 FLOWTOOL_WORKER_ROOT=~/.flowtool/workers/worker-1
 FLOWTOOL_TRUSTED_HOST_EXECUTION=true
 FLOWTOOL_EXECUTION_ISOLATION=dedicated-account
-FLOWTOOL_JUDGE_MODEL='provider:实际模型名'
-FLOWTOOL_JUDGE_API_KEY='替换为模型API-key'
 ```
 
 本文的明文 WS 只用于同机 loopback 联调；跨主机连接需要 WSS，不通过公开的 webhook 域名连接 worker。
 `dedicated-account` 必须对应已建立的真实账号边界。Codex 所需认证在该 worker 账号下独立准备，
-不复制 control 环境变量。可选 Judge API 地址使用 `FLOWTOOL_JUDGE_API_BASE`。
+不复制 control 环境变量或 Judge 密钥。
 
 在 worker 应用目录加载自己编写的文件并启动：
 
@@ -169,7 +168,7 @@ curl -i https://hooks.example.com/docs
 | webhook 返回 404 | hostname、精确 `/webhook` 路径和配置匹配顺序 |
 | worker 不在线 | identity/token、连接地址，以及是否错误继承了 control secret |
 | delivery 成功但没有 Flow | allowlist、触发事件/标签、App 安装仓库及 serve 日志 |
-| CodeAgent/Judge 失败 | worker 的工具链、独立认证、模型配置及 Flow 错误记录 |
+| CodingAgent/Judge 失败 | worker 的工具链、独立认证、模型配置及 Flow 错误记录 |
 
 前台进程用各自终端的 Ctrl-C 停止。维护前确认正在执行的 Flow，并保留数据库与 worker
 持久目录；当前 `flow cancel` 尚不保证终止正在运行的 agent，不能把取消当成 drain。

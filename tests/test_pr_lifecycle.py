@@ -4,7 +4,7 @@ from datetime import timedelta
 
 import pytest
 
-from app.contracts.protocol import PROTOCOL_VERSION, InitialResult, Succeeded, terminal_digest
+from app.contracts.protocol import PROTOCOL_VERSION, InitialTaskResult, Succeeded, terminal_digest
 from app.contracts.result_models import ResultPending
 from app.control.gateway import ProtocolViolation, WorkerGateway
 from app.control.lifecycle import pause_delivery
@@ -23,7 +23,7 @@ from app.domain.models import DeliveryState, FlowState, JobKind, JobState, VcsKi
 from app.domain.review_models import BatchState
 from app.persistence.stop_store import StopStore
 from tests.test_coordinator import RecordingGitHub, coordinator
-from tests.test_review_batches import feedback, ingest
+from tests.test_review_batches import batch_for, feedback, ingest, settle
 from tests.test_review_batches import (
     review_flow as review_flow,  # noqa: PLC0414 - fixture re-export
 )
@@ -32,7 +32,7 @@ from tests.test_revision_recovery import accept
 from tests.test_revision_recovery import (
     pending_revision as pending_revision,  # noqa: PLC0414 - fixture re-export
 )
-from tests.test_workflow_transactions import accepted_triage
+from tests.test_workflow_transactions import accepted_coding
 
 
 @pytest.fixture
@@ -125,9 +125,10 @@ async def test_closed_missing_journal_preserves_late_result_and_reopen(store, pe
 @pytest.mark.parametrize("recovery", ["explicit", "lease", "restart"])
 async def test_reopen_retires_unstarted_jobs_requeued_after_pause(store, lifecycle_flow, recovery):
     flow, clock = lifecycle_flow
-    ingest(store, flow, feedback(clock))
+    ingest(store, flow, feedback(clock, signal="request_changes"))
     clock.now += timedelta(seconds=76)
-    old = store.reviews.claim_due()[0]
+    old = settle(store)[0]
+    # This regression concerns a remote coding preparation surviving a PR pause.
     store.worker_connected("worker", PROTOCOL_VERSION, "epoch")
     assert store.assign_job("worker", "token", "epoch").id == old.id
     await check(store, flow, GitHub(flow, "closed"))
@@ -144,9 +145,9 @@ async def test_reopen_retires_unstarted_jobs_requeued_after_pause(store, lifecyc
     await check(store, flow, GitHub(flow, "open"))
     assert store.get_delivery(flow.id).state is DeliveryState.OPEN
     assert store.get_job(old.id).state is JobState.FAILED
-    fresh = store.reviews.claim_due()[0]
+    fresh = settle(store)[0]
     store.worker_connected("worker", PROTOCOL_VERSION, "new")
-    assert store.assign_job("worker", "new-token", "new").id == fresh.id
+    assert store.reviews.pending_triage()[0].id == fresh.id
 
 
 async def test_lifecycle_hint_during_query_schedules_a_fresh_observation(store, lifecycle_flow):
@@ -187,18 +188,18 @@ async def test_reopen_refreezes_feedback_through_judge_and_keeps_binding(store, 
     flow, clock = lifecycle_flow
     ingest(store, flow, feedback(clock, signal="request_changes", submitted=True))
     clock.now += timedelta(seconds=76)
-    old = store.reviews.claim_due()[0]
+    old = settle(store)[0]
     await check(store, flow, GitHub(flow))
-    assert store.reviews.for_job(old).state is BatchState.CANCELLED
+    assert batch_for(store, old).state is BatchState.CANCELLED
     # Closed PRs still retain genuine edits, but never dispatch work.
     clock.now += timedelta(seconds=1)
     ingest(store, flow, feedback(clock, body="Edited while closed"), "closed-edit")
-    assert store.reviews.claim_due() == []
+    assert settle(store) == []
     await check(store, flow, GitHub(flow, "open"))
     assert store.get_delivery(flow.id).state is DeliveryState.OPEN
-    new = store.reviews.claim_due()[0]
-    assert new.id != old.id and new.kind is JobKind.TRIAGE
-    batch = store.reviews.for_job(new)
+    new = settle(store)[0]
+    assert new.id != old.id and new.job_id is None
+    batch = batch_for(store, new)
     assert batch.context is None and batch.decision is None
     assert batch.feedback[0].body == "Edited while closed"
 
@@ -307,12 +308,12 @@ async def test_inflight_revision_is_acknowledged_then_verified_before_reopen(sto
     assert store.get_delivery(flow.id).state is DeliveryState.OPEN
     assert store.get_delivery(flow.id).head_sha == "revision"
     assert store.get_flow_execution(flow.id).released_at is None
-    queued = store.reviews.claim_due()[0]
-    assert queued.kind is JobKind.TRIAGE
+    queued = settle(store)[0]
+    assert queued.job_id is None
 
 
 async def test_close_after_comment_dispatch_recovers_only_the_existing_marker(store, monkeypatch):
-    job, _ = accepted_triage(store)
+    job, _ = accepted_coding(store)
     github = RecordingGitHub()
     original = github.comment
 
@@ -331,7 +332,7 @@ async def test_close_after_comment_dispatch_recovers_only_the_existing_marker(st
     monkeypatch.setattr(store, "_clock", lambda: future)
     assert await subject.results.apply(job.id) is JobState.DONE
     assert len(github.comments) == 1
-    assert len(store.reviews.pending(job.flow_id)) == 1
+    assert store.reviews.pending(job.flow_id) == []
     assert all(j.kind is not JobKind.REVISION for j in store.list_jobs(job.flow_id))
 
 
@@ -351,7 +352,7 @@ async def test_initial_close_before_final_commit_keeps_verified_identity_and_can
                            job_id=job.id, name="flow.open_pr", arguments={"title": "Title", "body": "Body"})
     store.complete_tool_call("initial", prepared)
     assert store.start_assignment(job.id, attempt.id, "worker", "token", "epoch")
-    result = InitialResult(session_id="session-1", last_message="done", exit_code=0,
+    result = InitialTaskResult(session_id="session-1", last_message="done", exit_code=0,
         vcs_backend=VcsKind.GIT, branch=delivery.branch, commit_sha="abc123", remote_sha="abc123",
         pushed=True, open_pr_call_id="initial", delivery_receipt=prepared)
     terminal = Succeeded(job_id=job.id, assignment_token="token", connection_epoch="epoch", result=result)

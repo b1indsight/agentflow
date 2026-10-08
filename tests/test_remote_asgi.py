@@ -9,8 +9,8 @@ from app.contracts.protocol import (
     FlowToolErrorKind,
     FlowToolRequest,
     FlowToolResponse,
-    InitialResult,
     InitialTask,
+    InitialTaskResult,
     Register,
     Registered,
     ResultAccepted,
@@ -138,7 +138,7 @@ def test_real_asgi_websocket_completes_a_postgresql_job(store: Store, monkeypatc
                 job_id=assignment.job_id,
                 assignment_token=assignment.assignment_token,
                 connection_epoch=assignment.connection_epoch,
-                result=InitialResult(session_id="session-1", last_message="done", exit_code=0),
+                result=InitialTaskResult(session_id="session-1", last_message="done", exit_code=0),
             ).model_dump_json()
         )
         accepted = parse_server_message(socket.receive_text())

@@ -3,13 +3,17 @@
 import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 from pydantic import SecretStr, ValidationError
 
 from app.contracts.protocol import AssignmentSecret, PushSecret, RevisionTask
-from app.domain.models import AgentRun, CodeAgentContext, CodexResult, VcsKind
+from app.domain.models import (
+    CodingExecutionContext,
+    CodingExecutionResult,
+    RevisionCodingOutput,
+    VcsKind,
+)
 from app.worker.executor import WorkerExecutor
 from app.worker.journal import WorkerJournal
 from app.worker.vcs import flow_repo_path, prepare_flow_repo
@@ -18,7 +22,7 @@ from tests.test_worker_executor import RecordingToolCaller
 
 
 def revision_output(**updates):
-    return CodexResult.model_validate({
+    return RevisionCodingOutput.model_validate({
         "summary": "Already satisfied", "vcs_backend_used": VcsKind.GIT,
         "addressed": [], "deferred": [], "needs_clarification": [], **updates,
     })
@@ -61,7 +65,7 @@ async def revision_workspace(tmp_path):
 class RevisionAgent:
     def __init__(self, repo: Path, behavior="noop"):
         self.repo, self.behavior = repo, behavior
-        self.calls: list[tuple[str, CodeAgentContext | None, str]] = []
+        self.calls: list[tuple[str, CodingExecutionContext | None, str]] = []
 
     async def resume(self, session_id, prompt, *, output_schema=None, context=None):
         self.calls.append(("resume", context, prompt))
@@ -70,7 +74,7 @@ class RevisionAgent:
 
             raise SessionUnavailable("session not found before execution")
         if self.behavior == "timeout":
-            return AgentRun(session_id, "", 124)
+            return CodingExecutionResult(session_id, "", 124)
         if self.behavior in {"unpushed", "dirty", "push"}:
             (self.repo / "change.txt").write_text("revision\n")
             if self.behavior != "dirty":
@@ -78,13 +82,13 @@ class RevisionAgent:
                 _git("commit", "-m", "revision", cwd=self.repo)
                 if self.behavior == "push":
                     _git("push", "origin", "flow/1", cwd=self.repo)
-        return AgentRun(session_id,
+        return CodingExecutionResult(session_id,
                         "" if self.behavior == "empty" else revision_output().model_dump_json(), 0)
 
     async def start(self, prompt, cwd, *, output_schema=None, context=None):
         assert cwd == self.repo
         self.calls.append(("start", context, prompt))
-        return AgentRun("new-session", revision_output().model_dump_json(), 0)
+        return CodingExecutionResult("new-session", revision_output().model_dump_json(), 0)
 
 
 @pytest.mark.parametrize("behavior,success", [
@@ -94,7 +98,7 @@ async def test_revision_verifies_real_git_delivery(revision_workspace, behavior,
     # A successful process can leave unpushed or dirty work; neither closes review feedback.
     root, repo, task, secret = revision_workspace
     agent = RevisionAgent(repo, behavior)
-    result = await WorkerExecutor(root, agent, SimpleNamespace(), journal=WorkerJournal(root), worker_id="w").execute(task, secret, tool_caller=RecordingToolCaller())
+    result = await WorkerExecutor(root, agent, journal=WorkerJournal(root), worker_id="w").execute(task, secret, tool_caller=RecordingToolCaller())
     assert (result.exit_code == 0) is success
     assert agent.calls[0][1].push_token.get_secret_value() == "fresh-token"
     assert agent.calls[0][1].cwd == repo
@@ -114,7 +118,7 @@ async def test_fallback_only_when_execution_is_known_not_to_have_started(
     root, repo, task, secret = revision_workspace
     task = task.model_copy(update={"session_id": session})
     agent = RevisionAgent(repo, behavior)
-    result = await WorkerExecutor(root, agent, SimpleNamespace(), journal=WorkerJournal(root), worker_id="w").execute(task, secret, tool_caller=RecordingToolCaller())
+    result = await WorkerExecutor(root, agent, journal=WorkerJournal(root), worker_id="w").execute(task, secret, tool_caller=RecordingToolCaller())
     assert [call[0] for call in agent.calls] == expected
     if expected[-1] == "start":
         assert result.session_id == "new-session"
@@ -134,16 +138,16 @@ async def test_revision_preflight_rejects_before_model_execution(revision_worksp
     else:
         (repo / "uncommitted").write_text("keep me")
     agent = RevisionAgent(repo)
-    result = await WorkerExecutor(root, agent, SimpleNamespace(), journal=WorkerJournal(root), worker_id="w").execute(task, secret, tool_caller=RecordingToolCaller())
+    result = await WorkerExecutor(root, agent, journal=WorkerJournal(root), worker_id="w").execute(task, secret, tool_caller=RecordingToolCaller())
     assert result.exit_code != 0
     assert agent.calls == []
 
 
 def test_revision_output_requires_every_field_and_rejects_extra_data():
     with pytest.raises(ValidationError):
-        CodexResult.model_validate({"summary": "done"})
+        RevisionCodingOutput.model_validate({"summary": "done"})
     with pytest.raises(ValidationError):
-        CodexResult.model_validate({**revision_output().model_dump(), "pushed": True})
+        RevisionCodingOutput.model_validate({**revision_output().model_dump(), "pushed": True})
 
 
 @pytest.fixture
@@ -177,20 +181,20 @@ async def revision_control():
 
 
 def verified_result(task, **updates):
-    from app.contracts.protocol import RevisionInvocation, RevisionResult
+    from app.contracts.protocol import RevisionExecutionRecord, RevisionTaskResult
 
     values = {
         "flow_id": task.flow_id, "attempt_id": task.attempt_id, "batch_id": task.batch_id,
         "feedback_refs": list(task.feedback), "previous_session_id": task.session_id,
         "session_id": task.session_id, "session_generation": task.session_generation,
         "mode": "resume",
-        "invocations": [RevisionInvocation(mode="resume", session_id=task.session_id, exit_code=0)],
+        "invocations": [RevisionExecutionRecord(mode="resume", session_id=task.session_id, exit_code=0)],
         "last_message": "done", "exit_code": 0, "output": revision_output(),
         "vcs_backend": VcsKind.GIT, "branch": task.branch, "commit_sha": task.expected_head_sha,
         "remote_sha": task.expected_head_sha, "clean_worktree": True,
     }
     values.update(updates)
-    return RevisionResult(**values)
+    return RevisionTaskResult(**values)
 
 
 async def test_resolve_payloads_only_carry_their_threads_current_and_historical_feedback(revision_control):
@@ -395,7 +399,7 @@ async def test_revision_checks_real_jj_repository(revision_workspace, behavior):
 
 @pytest.mark.parametrize("phase", ["resume", "fallback"])
 async def test_journal_prevents_restarting_an_interrupted_invocation(revision_workspace, phase):
-    from app.contracts.protocol import Assignment, RevisionInvocation
+    from app.contracts.protocol import Assignment, RevisionExecutionRecord
     from app.worker.journal import JournalError, WorkerJournal
 
     root, repo, task, secret = revision_workspace
@@ -406,13 +410,13 @@ async def test_journal_prevents_restarting_an_interrupted_invocation(revision_wo
     journal.record_started()
     journal.begin_revision("resume")
     if phase == "fallback":
-        journal.finish_invocation(RevisionInvocation(mode="resume", session_id=task.session_id,
+        journal.finish_invocation(RevisionExecutionRecord(mode="resume", session_id=task.session_id,
                                                       exit_code=1, failure="session_unavailable"))
         journal.begin_revision("fallback")
     agent = RevisionAgent(repo, "missing")
     restarted = WorkerJournal(root)
     with pytest.raises(JournalError, match="restarted|already been attempted"):
-        await WorkerExecutor(root, agent, SimpleNamespace(), worker_id="w", journal=restarted).execute(task, secret, tool_caller=RecordingToolCaller())
+        await WorkerExecutor(root, agent, worker_id="w", journal=restarted).execute(task, secret, tool_caller=RecordingToolCaller())
     assert agent.calls == []
     assert "fresh-token" not in journal.path.read_text()
     assert restarted.load().revision_phase == phase
@@ -429,7 +433,7 @@ async def test_dirty_repository_after_session_rejection_does_not_fallback(revisi
             raise SessionUnavailable("rejected")
 
     agent = DirtyRejection(repo)
-    result = await WorkerExecutor(root, agent, SimpleNamespace(), journal=WorkerJournal(root), worker_id="w").execute(task, secret, tool_caller=RecordingToolCaller())
+    result = await WorkerExecutor(root, agent, journal=WorkerJournal(root), worker_id="w").execute(task, secret, tool_caller=RecordingToolCaller())
     assert result.exit_code != 0
     assert agent.calls == []
     assert (repo / "uncertain-work").read_text() == "preserve"
@@ -449,7 +453,7 @@ async def test_empty_review_body_is_not_an_unresolved_obligation(revision_contro
     store.jobs[job.id].payload["revision"] = task.model_dump(mode="json")
     result = verified_result(
         task, feedback_refs=[item, signal],
-        output=CodexResult(summary="Fixed", vcs_backend_used=VcsKind.GIT,
+        output=RevisionCodingOutput(summary="Fixed", vcs_backend_used=VcsKind.GIT,
                           deferred=[], needs_clarification=[], addressed=[AddressedComment(
             item_id=item.item_id, version=item.version, comment_id=item.github_id, note="Fixed",
         )]),

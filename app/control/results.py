@@ -10,15 +10,13 @@ from pluggy import PluginManager
 from app.contracts.protocol import (
     ArchiveResult,
     Failed,
-    InitialResult,
-    RevisionResult,
+    InitialTaskResult,
+    RevisionTaskResult,
     Succeeded,
-    TriageResult,
     parse_worker_message,
 )
 from app.contracts.result_models import (
     CommentEffect,
-    DerivedJob,
     Effect,
     LabelEffect,
     PullRequestEffect,
@@ -30,7 +28,7 @@ from app.contracts.result_models import (
 )
 from app.control.effects import ResultEffects
 from app.control.initial import initial_delivery_mismatch
-from app.control.resolution import feedback_link, plan_resolution
+from app.control.resolution import plan_resolution
 from app.control.revisions import frozen_revision, revision_mismatch, verify_revision_remote
 from app.domain.github_models import GitHubAdapterError
 from app.domain.models import (
@@ -46,8 +44,6 @@ from app.domain.models import (
     JobKind,
     JobState,
     ReviewItemKind,
-    TriageVerdict,
-    Verdict,
 )
 from app.domain.ports import GitHubClient
 from app.domain.review_models import BatchState
@@ -163,7 +159,7 @@ class ResultApplication:
         if delivery is not None and delivery.supersedes(job.kind):
             return None
         message = parse_worker_message(json.dumps(job.result_payload))
-        if not isinstance(message, Succeeded) or not isinstance(message.result, RevisionResult):
+        if not isinstance(message, Succeeded) or not isinstance(message.result, RevisionTaskResult):
             return None
         result = message.result
         task = frozen_revision(job)
@@ -189,8 +185,6 @@ class ResultApplication:
     ) -> ResultPlan:
         """Freeze state-dependent inputs once; later attempts use this same plan and effect order."""
         message = parse_worker_message(json.dumps(job.result_payload))
-        if not isinstance(message, (Succeeded, Failed)):
-            raise TypeError("persisted inbox message is not terminal")
         assert job.result_digest is not None
         attempt = tx.get_current_attempt(flow)
         base = ResultPlan(
@@ -206,7 +200,7 @@ class ResultApplication:
                 if isinstance(message, Failed)
                 else base
             )
-        batch = tx.reviews.for_job(job) if job.kind in {JobKind.TRIAGE, JobKind.REVISION} else None
+        batch = tx.reviews.for_job(job) if job.kind in {JobKind.REVISION} else None
         if batch is not None:
             base = base.model_copy(update={"attempt_id": batch.attempt_id, "batch_id": batch.id})
         delivery = tx.get_delivery(flow.id)
@@ -218,19 +212,20 @@ class ResultApplication:
                 "error": "review batch or attempt is no longer current"})
         if isinstance(message, Failed):
             return self._failure(tx, flow, base, message.error)
+        assert isinstance(message, Succeeded)
         result = message.result
         if result.kind != job.kind.value:
             raise ValueError("result kind does not match persisted job")
         if attempt is None:
             return self._failure(tx, flow, base, "result has no current attempt")
-        if isinstance(result, (TriageResult, RevisionResult)):
+        if isinstance(result, RevisionTaskResult):
             assert batch is not None
             expected = [(f.item_id, f.version) for f in batch.feedback]
             received = [(f.item_id, f.version) for f in result.feedback_refs]
             if result.batch_id != batch.id or received != expected:
                 return base.model_copy(update={"state": JobState.FAILED, "flow_state": FlowState.FAILED,
                     "error": "result does not match its frozen review batch"})
-        if isinstance(result, InitialResult):
+        if isinstance(result, InitialTaskResult):
             base = base.model_copy(
                 update={
                     "run": RunUpdate(
@@ -282,63 +277,7 @@ class ResultApplication:
                 *self._review_effects(flow, "created_pr"),
             ]
             return base.model_copy(update={"delivery": delivery, "effects": effects})
-        if isinstance(result, TriageResult):
-            assert batch is not None
-            decision = result.decision
-            if batch.context is None or decision.context_digest != batch.context.digest:
-                return base.model_copy(update={"state": JobState.FAILED, "flow_state": FlowState.FAILED,
-                    "error": "Judge context digest does not match frozen batch"})
-            verdict = decision.verdict
-            if batch.context.limitations or decision.failure:
-                verdict = TriageVerdict(verdict=Verdict.WAIT, reason=decision.failure
-                    or "incomplete-context", open_points=verdict.open_points)
-            elif verdict.verdict is Verdict.REVISE and (
-                verdict.confidence < self.settings.confidence_threshold
-            ):
-                verdict = TriageVerdict(verdict=Verdict.WAIT, confidence=verdict.confidence,
-                    reason=f"low-confidence: {verdict.reason}"[:2000], open_points=verdict.open_points)
-            tx.reviews.record_decision(job, decision.model_copy(update={"verdict": verdict}))
-            if (
-                verdict.verdict is Verdict.REVISE
-                and verdict.confidence >= self.settings.confidence_threshold
-            ):
-                return base.model_copy(
-                    update={
-                        "derived": DerivedJob(
-                            kind=JobKind.REVISION,
-                            payload={"batch_id": batch.id, "instruction": verdict.instruction},
-                        ),
-                        "effects": [
-                            self._comment(
-                                flow,
-                                self._pr_number(tx, flow),
-                                "triage",
-                                f"按此修改中：{verdict.instruction}",
-                            )
-                        ],
-                    }
-                )
-            if verdict.verdict is Verdict.ANSWER:
-                return base.model_copy(
-                    update={
-                        "batch_state": BatchState.COMPLETED,
-                        "consumed": result.feedback_refs,
-                        "effects": [self._comment(flow, self._pr_number(tx, flow), "answer",
-                            verdict.answer + "\n\n来源：" + ", ".join(
-                                _feedback_link(flow.repo, batch.context.pr_number, item.kind,
-                                               item.github_id) for item in batch.feedback
-                            ))],
-                    }
-                )
-            if verdict.verdict is Verdict.IGNORE:
-                return base.model_copy(update={
-                    "batch_state": BatchState.COMPLETED, "consumed": result.feedback_refs,
-                })
-            return base.model_copy(update={
-                "batch_state": BatchState.WAITING,
-                "open_points": verdict.open_points or [verdict.reason or "Awaiting more discussion."],
-            })
-        if isinstance(result, RevisionResult):
+        if isinstance(result, RevisionTaskResult):
             assert batch is not None
             base = base.model_copy(
                 update={
@@ -452,7 +391,7 @@ class ResultApplication:
             result = message.result
             if result.kind != job.kind.value:
                 raise ValueError("result kind does not match persisted job")
-            if isinstance(result, (InitialResult, RevisionResult)):
+            if isinstance(result, (InitialTaskResult, RevisionTaskResult)):
                 run = RunUpdate(kind=result.kind, session_id=result.session_id,
                                 exit_code=result.exit_code)
                 if result.exit_code != 0:
@@ -525,16 +464,6 @@ class ResultApplication:
                 tx.update_delivery(current)
             else:
                 self._commit_initial_delivery(tx, job, current, flow)
-        if plan.derived is not None:
-            derived = tx.enqueue_job(
-                flow.id,
-                plan.derived.kind,
-                plan.derived.payload,
-                source_job_id=job.id,
-                source_key=plan.derived.kind.value,
-            )
-            if plan.batch_id is not None:
-                tx.reviews.advance(plan.batch_id, derived)
         if plan.batch_id is not None and plan.batch_state is not None:
             consumed = plan.consumed
             batch_state, open_points = plan.batch_state, list(plan.open_points)
@@ -637,14 +566,9 @@ class ResultApplication:
             return
         if flow.state is FlowState.SUCCEEDED and job.kind is not JobKind.ARCHIVE:
             return
-        if job.kind is JobKind.TRIAGE:
-            emit_hook(self.plugins, "on_review", flow=flow)
-        elif job.kind is JobKind.ARCHIVE:
+        if job.kind is JobKind.ARCHIVE:
             emit_hook(self.plugins, "on_archived", flow=flow)
         elif job.kind is JobKind.INITIAL and plan.delivery is not None:
             emit_hook(self.plugins, "on_pr_opened",
                       flow=flow, pr_number=self._pr_number(self.store, flow))
 
-
-def _feedback_link(repo: str, number: int, kind: ReviewItemKind, github_id: int) -> str:
-    return f"[{kind.value} {github_id}]({feedback_link(repo, number, kind, github_id)})"

@@ -10,8 +10,6 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import IO
 
-from loguru import logger
-
 from app.telemetry.logging import configure_logging
 from app.worker.client import WorkerClient
 from app.worker.codex_driver import CodexAgent
@@ -19,7 +17,6 @@ from app.worker.config import WorkerSettings
 from app.worker.executor import WorkerExecutor
 from app.worker.health import HealthFile
 from app.worker.journal import WorkerJournal
-from app.worker.judge import BubJudge
 
 _CONTROL_ENVIRONMENT_KEYS = frozenset(
     {
@@ -46,7 +43,7 @@ def validate_worker_environment(
     exposed = sorted(key for key in _CONTROL_ENVIRONMENT_KEYS if values.get(key))
     if exposed:
         raise RuntimeError(
-            "trusted-host CodeAgent cannot start with control-plane secrets in the worker "
+            "trusted-host CodingAgent cannot start with control-plane secrets in the worker "
             f"environment: {', '.join(exposed)}"
         )
 
@@ -100,12 +97,6 @@ class WorkerRuntime:
         self.settings = settings
         configure_logging("worker", self.settings.log_format)
         self.root_lock = WorkerRootLock(self.settings.worker_root, self.settings.worker_id)
-        judge = BubJudge(
-            model=self.settings.judge_model, api_key=self.settings.judge_api_key,
-            api_base=self.settings.judge_api_base, timeout=self.settings.judge_timeout_seconds,
-        )
-        if failure := judge.configuration_failure():
-            logger.warning("Judge unavailable; triage will wait: {}", failure)
         journal = WorkerJournal(self.settings.worker_root)
         executor = WorkerExecutor(
             self.settings.worker_root,
@@ -113,7 +104,6 @@ class WorkerRuntime:
                 trusted_host=self.settings.trusted_host_execution,
                 timeout=self.settings.codex_run_timeout_seconds,
             ),
-            judge,
             worker_id=self.settings.worker_id,
             journal=journal,
             revision_timeout=self.settings.codex_run_timeout_seconds,

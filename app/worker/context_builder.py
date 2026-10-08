@@ -20,7 +20,7 @@ _HARD_CONSTRAINTS = (
     "- Run the repo's tests / lint if present and keep them green.\n"
 )
 
-# 修订轮要 codex 回的结构化产出（--output-schema 对应 models.CodexResult）
+# 修订轮要 codex 回的结构化产出（--output-schema 对应 models.RevisionCodingOutput）
 _OUTPUT_INSTRUCTION = (
     "When done, output a JSON object with keys: summary (nonempty string), "
     "vcs_backend_used (git or jj), "

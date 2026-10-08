@@ -46,9 +46,6 @@ class DeliveryState(StrEnum):
 
 class JobKind(StrEnum):
     INITIAL = "initial"  # 首轮编码
-    TRIAGE = (
-        "triage"  # settle 后判定（docs/architecture/review-loop.md）：revise/answer/wait/ignore
-    )
     REVISION = "revision"  # 修订
     ARCHIVE = "archive"  # 收尾归档
 
@@ -228,7 +225,7 @@ class WorkerView(BaseModel):
 
 @dataclass(frozen=True)
 class VcsExecutionContext:
-    """Facts fixed before CodeAgent mutates a Flow-owned repository."""
+    """Facts fixed before CodingAgent mutates a Flow-owned repository."""
 
     repo_path: Path
     branch: str
@@ -238,12 +235,12 @@ class VcsExecutionContext:
     git_base_sha: str | None
     jj_base_sha: str | None
     jj_ancestor_sha: str | None
-    push_context: CodeAgentContext | None = field(default=None, repr=False)
+    push_context: CodingExecutionContext | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)
 class VcsOutcome:
-    """VCS facts independently verified after a CodeAgent run."""
+    """VCS facts independently verified after a CodingAgent run."""
 
     backend: VcsKind
     branch: str
@@ -252,8 +249,8 @@ class VcsOutcome:
 
 
 @dataclass
-class AgentRun:
-    """CodeAgent 一次运行的结果（codex exec / resume）。"""
+class CodingExecutionResult:
+    """CodingAgent 一次运行的结果（codex exec / resume）。"""
 
     session_id: str | None
     last_message: str
@@ -266,7 +263,7 @@ class SessionUnavailable(RuntimeError):
 
 
 @dataclass(frozen=True)
-class CodeAgentContext:
+class CodingExecutionContext:
     """Ephemeral per-run capabilities; never persist or log this value."""
 
     push_token: SecretStr | None = None
@@ -325,7 +322,7 @@ class DeferredComment(FeedbackRef):
     reason: str
 
 
-class CodexResult(BaseModel):
+class RevisionCodingOutput(BaseModel):
     """codex 修订 run 的结构化产出。见 docs/architecture/review-loop.md §B.4。"""
 
     model_config = ConfigDict(extra="forbid")
@@ -337,8 +334,8 @@ class CodexResult(BaseModel):
     needs_clarification: list[str]
 
 
-class InitialCodexResult(BaseModel):
-    """Strict structured result required from an INITIAL CodeAgent run."""
+class InitialCodingOutput(BaseModel):
+    """Strict structured result required from an INITIAL CodingAgent run."""
 
     model_config = ConfigDict(extra="forbid")
 
