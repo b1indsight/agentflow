@@ -33,7 +33,7 @@ from app.domain.models import (
 from app.domain.ports import CodingAgent
 from app.worker.context_builder import build_initial_prompt, build_revision_prompt
 from app.worker.session import WorkerSession
-from app.worker.tools import FlowToolBroker, FlowToolCaller
+from app.worker.tools import FlowToolCaller, WorkerMCP
 from app.worker.vcs import (
     VcsVerificationError,
     agent_guidance,
@@ -121,7 +121,7 @@ class WorkerExecutor:
         tool_result: DeliveryReceipt | None = None
         tool_vcs_outcome = None
         try:
-            async with FlowToolBroker(tool_caller, vcs_context) as broker:
+            async with WorkerMCP(tool_caller, vcs_context) as mcp:
                 run = await self.code_agent.start(
                     prompt,
                     workspace,
@@ -129,12 +129,13 @@ class WorkerExecutor:
                     context=CodingExecutionContext(
                         push_token=secret.push.token,
                         push_repository=secret.push.repository,
-                        mcp_socket=broker.socket_path,
+                        mcp_url=mcp.url,
+                        mcp_token=mcp.token,
                     ),
                 )
-                tool_call_id = broker.last_call_id
-                tool_result = broker.last_result
-                tool_vcs_outcome = broker.last_vcs_outcome
+                tool_call_id = mcp.last_call_id
+                tool_result = mcp.last_result
+                tool_vcs_outcome = mcp.last_vcs_outcome
         finally:
             schema_path.unlink(missing_ok=True)
         if run.exit_code != 0:

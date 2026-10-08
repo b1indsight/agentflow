@@ -8,6 +8,8 @@
 
 ## Unreleased
 
+- worker 进程内提供单任务 HTTP MCP，仅开放 open_pr；Codex 注入 URL 和临时 Bearer，移除 STDIO 子进程与 Unix socket 桥接，复用既有 PR 交付链。
+
 - 历史查询消息分流、并发回复及连接结束清理归入 WorkerClient，删除 HistoryConnection；历史读取组件和 WebSocket 消息格式不变。
 
 - WorkerSession 统一当前任务、持久化状态、结果归档/恢复与 Codex 历史查询；替换 WorkerJournal，保留既有 journal 格式和协议。

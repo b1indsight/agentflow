@@ -6,7 +6,6 @@ import asyncio
 import json
 import os
 import signal
-import sys
 import tempfile
 from collections.abc import Mapping
 from pathlib import Path
@@ -67,6 +66,8 @@ def _codex_environment(
     }
     if context is not None:
         environment.update(git_credential_environment(context))
+        if context.mcp_token is not None:
+            environment["FLOWTOOL_MCP_TOKEN"] = context.mcp_token.get_secret_value()
     return environment
 
 
@@ -95,21 +96,16 @@ def _start_args(
         "danger-full-access",
         "--skip-git-repo-check",
     ]
-    if context is not None and context.mcp_socket is not None:
-        overrides = {
-            "mcp_servers.flow.command": sys.executable,
-            "mcp_servers.flow.args": ["-m", "app.worker.tools"],
-            "mcp_servers.flow.env.FLOWTOOL_MCP_SOCKET": str(context.mcp_socket),
-            "mcp_servers.flow.env.FLOWTOOL_PUSH_TOKEN": "",
-            "mcp_servers.flow.required": True,
-            "mcp_servers.flow.enabled_tools": ["open_pr"],
-            "mcp_servers.flow.default_tools_approval_mode": "auto",
-        }
-        for key, value in overrides.items():
-            args.extend(["-c", f"{key}={json.dumps(value)}"])
+    if context is not None and context.mcp_url is not None:
+        if context.mcp_token is None:
+            raise ValueError("worker MCP requires a scoped token")
+        config = (
+            f'{{url={json.dumps(context.mcp_url)}, bearer_token_env_var="FLOWTOOL_MCP_TOKEN", '
+            'enabled_tools=["open_pr"], required=true, default_tools_approval_mode="auto"}'
+        )
+        args.extend(["-c", f"mcp_servers.flow={config}"])
     elif context is not None and context.cwd is not None:
-        args.extend(["-c", f"mcp_servers.flow.command={json.dumps(sys.executable)}",
-                     "-c", "mcp_servers.flow.enabled=false"])
+        args.extend(["-c", 'mcp_servers.flow={url="http://127.0.0.1", enabled=false}'])
     args.extend(["-c", 'shell_environment_policy.inherit="all"'])
     return args
 
@@ -164,8 +160,7 @@ class CodexAgent:
             "--json", "--skip-git-repo-check",
             "-c", f"cwd={json.dumps(str(context.cwd))}",
             "-c", 'sandbox_mode="danger-full-access"',
-            "-c", f"mcp_servers.flow.command={json.dumps(sys.executable)}",
-            "-c", "mcp_servers.flow.enabled=false",
+            "-c", 'mcp_servers.flow={url="http://127.0.0.1", enabled=false}',
             "-c", 'shell_environment_policy.inherit="all"',
         ]
         return await self._run(args, output_schema, parse_thread=False,
@@ -213,6 +208,8 @@ class CodexAgent:
         jsonl = stdout.decode(errors="replace")
         sid = _parse_thread_id(jsonl)
         last_message = last_file.read_text() if last_file.exists() else ""
+        if context is not None and context.mcp_token is not None:
+            last_message = last_message.replace(context.mcp_token.get_secret_value(), "[REDACTED]")
 
         if last_file.exists():
             last_file.unlink()
@@ -229,5 +226,7 @@ class CodexAgent:
         detail = stderr.decode(errors="replace")[-4000:] if proc.returncode else None
         if detail and context is not None and context.push_token is not None:
             detail = detail.replace(context.push_token.get_secret_value(), "[REDACTED]")
+        if detail and context is not None and context.mcp_token is not None:
+            detail = detail.replace(context.mcp_token.get_secret_value(), "[REDACTED]")
         return CodingExecutionResult(session_id=sid, last_message=last_message, exit_code=proc.returncode or 0,
                         failure_detail=detail)

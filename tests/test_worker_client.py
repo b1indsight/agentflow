@@ -358,3 +358,61 @@ async def test_completed_disconnected_executor_is_journaled_before_recovery(tmp_
     assert journal.load().terminal is not None
     assert "push-secret" not in journal.path.read_text()
     assert "[REDACTED]" in journal.path.read_text()
+
+
+@pytest.mark.parametrize("rejected", [False, True])
+async def test_mcp_shutdown_consumes_late_tool_response_before_delivering_result(tmp_path, monkeypatch, rejected):
+    import httpx
+
+    from app.domain.models import VcsExecutionContext
+    from app.worker.tools import WorkerMCP
+
+    # Codex exits while open_pr waits on control. HTTP shutdown cancels the waiter,
+    # but the original socket still needs to consume control's reply and deliver the job result.
+    closed = asyncio.Event()
+    outcome = VcsOutcome(backend=VcsKind.GIT, branch="flow/3", commit_sha="abc", remote_sha="abc")
+
+    async def verify(context):
+        return outcome
+
+    monkeypatch.setattr("app.worker.tools.verify_pushed_outcome", verify)
+
+    class LateConnection(ToolConnection):
+        async def recv(self):
+            if self.step == 2:
+                await closed.wait()
+                raw = await super().recv()
+                if rejected:
+                    request = parse_worker_message(self.sent[-1])
+                    return FlowToolResponse(call_id=request.call_id, error="upstream rejected",
+                                            error_kind=FlowToolErrorKind.UPSTREAM).model_dump_json()
+                return raw
+            return await super().recv()
+
+    connection = LateConnection()
+
+    class Executor:
+        async def execute(self, task, secret=None, *, tool_caller):
+            context = VcsExecutionContext(tmp_path, "flow/3", "origin", None, None, None, None, None)
+            async with httpx.AsyncClient(trust_env=False) as http:
+                async with WorkerMCP(tool_caller, context) as mcp:
+                    request = asyncio.create_task(http.post(mcp.url, headers={
+                        "Authorization": f"Bearer {mcp.token.get_secret_value()}",
+                    }, json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+                        "name": "open_pr", "arguments": {"title": "Implement", "body": "Done"},
+                    }}))
+                    await connection.tool_ready.wait()
+                await asyncio.gather(request, return_exceptions=True)
+            closed.set()
+            return InitialTaskResult(session_id="session-1", last_message="Codex timed out", exit_code=124)
+
+    session = WorkerSession(tmp_path)
+    client = WorkerClient(worker_id="worker-1", worker_token="token", serve_ws_url="unused",
+                          executor=Executor(), session=session)
+    with pytest.raises(ConnectionError, match="script complete"):
+        await asyncio.wait_for(client.run_connection(connection), 5)
+    messages = [parse_worker_message(raw) for raw in connection.sent]
+    assert sum(isinstance(message, FlowToolRequest) for message in messages) == 1
+    terminals = [message for message in messages if isinstance(message, Succeeded)]
+    assert len(terminals) == 1 and terminals[0].result.exit_code == 124
+    assert session.load().acknowledged

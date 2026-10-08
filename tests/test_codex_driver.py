@@ -74,7 +74,8 @@ def test_run_context_injects_only_scoped_push_and_mcp_capabilities() -> None:
     context = CodingExecutionContext(
         push_token=SecretStr("push-secret"),
         push_repository="owner/repo",
-        mcp_socket=Path("/tmp/flowtool.sock"),
+        mcp_url="http://127.0.0.1:12345/mcp",
+        mcp_token=SecretStr("mcp-secret"),
     )
 
     environment = _codex_environment({"PATH": "/usr/bin"}, context)
@@ -88,9 +89,11 @@ def test_run_context_injects_only_scoped_push_and_mcp_capabilities() -> None:
     assert environment["FLOWTOOL_PUSH_TOKEN"] == "push-secret"
     assert environment["GIT_CONFIG_KEY_1"].endswith("helper")
     assert "push-secret" not in " ".join(args)
-    assert any("mcp_servers.flow.command" in item for item in args)
-    assert any("FLOWTOOL_MCP_SOCKET" in item for item in args)
-    assert 'mcp_servers.flow.env.FLOWTOOL_PUSH_TOKEN=""' in args
+    assert environment["FLOWTOOL_MCP_TOKEN"] == "mcp-secret"
+    assert "mcp-secret" not in " ".join(args)
+    assert any('url="http://127.0.0.1:12345/mcp"' in item for item in args)
+    assert any('bearer_token_env_var="FLOWTOOL_MCP_TOKEN"' in item for item in args)
+    assert not any("mcp_servers.flow.command" in item for item in args)
 
 
 @pytest.mark.asyncio
@@ -116,7 +119,7 @@ async def test_resume_refreshes_environment_and_disables_initial_broker(monkeypa
                                push_repository="owner/repo")
     await agent.resume("session-1", "revise", context=context)
     assert observed["context"] is context
-    assert "mcp_servers.flow.enabled=false" in observed["args"]
+    assert 'mcp_servers.flow={url="http://127.0.0.1", enabled=false}' in observed["args"]
     assert f'cwd="{tmp_path}"' in observed["args"]
     assert "ghs_unique_fresh_capability" not in " ".join(observed["args"])
 
@@ -187,3 +190,24 @@ async def test_revision_deadline_cancels_the_whole_codex_process_group(monkeypat
         await running
     assert stopped == [(12345, signal.SIGKILL), "waited"]
     assert not files[0].exists()
+
+
+async def test_mcp_token_is_redacted_before_results_leave_driver(monkeypatch, tmp_path):
+    class Process:
+        returncode = 1
+
+        async def communicate(self):
+            return b"", b"failed with mcp-secret"
+
+    async def spawn(*args, **kwargs):
+        Path(args[args.index("-o") + 1]).write_text("echoed mcp-secret")
+        return Process()
+
+    monkeypatch.setattr("app.worker.codex_driver.asyncio.create_subprocess_exec", spawn)
+    result = await CodexAgent(trusted_host=True).start(
+        "task", tmp_path, context=CodingExecutionContext(
+            mcp_url="http://127.0.0.1:12345/mcp", mcp_token=SecretStr("mcp-secret"),
+        ),
+    )
+    assert result.last_message == "echoed [REDACTED]"
+    assert result.failure_detail == "failed with [REDACTED]"

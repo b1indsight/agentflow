@@ -113,7 +113,7 @@ worker socket 与 executor 解耦，root 内原子 journal 在 ack 前保存进�
 - `-o` 读取原始最终消息，`--output-schema` 约束 CLI 输出；`WorkerExecutor` 按 INITIAL/revision
   严格解析各自结果模型，adapter 不解释业务 schema；
 - 子进程只继承 Codex 认证、代理/CA 和基础运行环境；INITIAL 额外获得单次短时 push credential helper 与
-  指向 0600 Unix socket 的 `flow.open_pr` STDIO MCP 配置，不获得 control/worker credential；
+  指向 worker 进程内 loopback HTTP 服务的 `flow.open_pr` MCP 配置及单次 Bearer 凭据，不获得 control/worker credential；
 - 单次运行使用配置的 timeout，超时 kill 子进程并返回 exit 124。
 
 2026-08-01 的独立 CLI 实测证明 `exec` / `resume` 上下文连续、workspace-write 可修改工作区、jj
@@ -251,3 +251,6 @@ Runtime 创建一个实例供 Client/Executor 共用；Client 保留连接和执
 WorkerClient 在 `_receive_message()` 统一解析 WebSocket 消息，历史查询并发执行并在原连接回复；
 其他任务消息继续进入执行/恢复流程。每条连接最多 4 个历史查询，连接结束时取消并回收查询任务。
 `history.py` 继续提供历史解析、分页和读取限制，由 WorkerSession 提供查询入口；无额外连接包装层。
+
+WorkerMCP 随首次编码启动与关闭，复用现有 HTTP 依赖，仅暴露 open_pr；无 STDIO 桥接进程。
+修订恢复覆盖为禁用的 flow MCP 配置，避免重新连接旧任务端口。MCP 服务不接管 worker 信号。

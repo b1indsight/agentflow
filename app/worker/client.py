@@ -373,6 +373,10 @@ class WorkerClient:
                         if not isinstance(response, FlowToolResponse) or response.call_id != request.call_id:
                             await self._tool_requests.put(pending)
                             raise WorkerProtocolError("Flow tool response does not match its request")
+                        # MCP shutdown may cancel its waiter while control finishes the call.
+                        # Consume the matching reply without writing to a completed future.
+                        if pending.future.done():
+                            continue
                         if response.error is not None:
                             pending.future.set_exception(FlowToolCallError(response))
                         elif response.result is None:

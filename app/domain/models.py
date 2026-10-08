@@ -268,7 +268,8 @@ class CodingExecutionContext:
 
     push_token: SecretStr | None = None
     push_repository: str | None = None
-    mcp_socket: Path | None = None
+    mcp_url: str | None = None
+    mcp_token: SecretStr | None = None
     cwd: Path | None = None
 
 
