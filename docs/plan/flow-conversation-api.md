@@ -1,6 +1,6 @@
 # Flow 会话查询接口 — Feature record
 
-**Stage:** Implemented，验证通过，待独立代码审查
+**Stage:** Implemented，会话查询及接收器修复已验证
 **PR:** [#58](https://github.com/b1indsight/agentflow/pull/58)
 
 **当前方案：** 以时间线第 1 条修订为准：control 实时代理 worker 查询 Codex 历史，
@@ -218,3 +218,39 @@ call_id、来源 session 和游标。新增模块分别归属 contracts、contro
 已知边界：只显示已知 session 的本地历史，worker 离线不可读；首次执行 session 尚未回传及
 fallback 覆盖的旧 ID 不能保证定位。不展示 control 自己发布的 PR 活动；未做真实在线 Codex/GitHub
 交互 smoke，不宣称已覆盖其他 Codex 历史版本。独立代码审查待执行。
+
+### 4. 2026-10-08 — 修复审查发现的 control 忙碌查询超时
+
+**来源与授权：** 上次独立审查报告
+`.git/jj-reviews/pomqwvlnzxmt-5c103cc664f5.json` 指出一项 medium：gateway 只在等待执行
+消息/idle 时处理会话响应，准备 assignment、调用工具及应用执行结果时可能让已到达的响应
+超过 10 秒而返回 504。用户明确要求“修复”，授权本轮修改及一次后续独立审查。
+
+**实现：** 新增 `app/control/worker_connection.py`，认证注册后每条连接只有一个持续读取
+transport 的任务。会话响应立即交给原 broker 校验/关联；执行消息按到达顺序交给原 gateway。
+这仅增加连接生命周期内的有界传输缓冲（32 条/16 MiB），不新增会话队列、持久化或重放。
+超限使接收器失败，断线/接收失败立即让查询不可用；gateway 结束或连接替换时回收接收器。
+保留 execution 消息的协议校验、heartbeat 超时、epoch 和断线恢复处理。
+
+**测试与取舍：** 用事件分别阻塞 worker、preparation、tool、result 四个阶段，再通过真实
+HTTP→control→WorkerClient→历史文件查询。修复前后三个 control 阶段均返回 504，修复后
+四阶段均在释放阻塞事件前返回 200，之后任务正常完成并继续分页。旧 scripted socket 替身
+改为等待 assignment/tool response 后产生对应回复，去掉对“server 只在空闲时 recv”的假设。
+新增取消 consumer 不取消 transport reader、执行消息有序、断线立即失败及缓冲溢出测试。
+
+验证结果：
+
+- `uv run --env-file .cache/2026-09-30/conversation-test.env pytest -q --tb=short`：
+  **842 passed**，仅既有 Starlette TestClient 弃用告警。
+- 相关会话、gateway、worker、停止协议及 PostgreSQL/ASGI 专项：**26 passed**。
+- Ruff、Mypy、sdist/wheel 构建及 `git diff --check` 通过。
+
+消融在实现后进行，实验结束恢复原文件：
+
+1. 取消接收器即时分流，改回 gateway 消费 execution 时分流：四阶段端到端测试为
+   **3 failed / 1 passed**，preparation/tool/result 再次返回 504，证明确需持续即时分流。
+2. 移除执行缓冲上限：洪泛测试未能及时失败并清理查询，以 TimeoutError 失败，证明不可
+   依赖阻塞缓冲或无限积压。恢复后上述专项 26 项通过。
+
+脚本与日志位于 `.cache/2026-09-30/conversation-receiver-*`，沿用本会话缓存目录，不提交。
+本轮继续更新原 PR #58，无协议版本、数据库 schema 或用户接口变化。

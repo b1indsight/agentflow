@@ -209,6 +209,8 @@ class ScriptedSocket:
         self.closed: int | None = None
         self.sent: list[str] = []
         self._step = 0
+        self.assignment_sent = asyncio.Event()
+        self.tool_responded = asyncio.Event()
 
     async def accept(self) -> None:
         self.accepted = True
@@ -218,11 +220,16 @@ class ScriptedSocket:
 
     async def send_text(self, data: str) -> None:
         self.sent.append(data)
+        if isinstance(parse_server_message(data), Assignment):
+            self.assignment_sent.set()
+        if isinstance(parse_server_message(data), FlowToolResponse):
+            self.tool_responded.set()
 
     async def receive_text(self) -> str:
         self._step += 1
         if self._step == 1:
             return Register(worker_id=self.worker_id).model_dump_json()
+        await self.assignment_sent.wait()
         assignment = next(
             message
             for raw in self.sent
@@ -251,6 +258,7 @@ class ToolSocket(ScriptedSocket):
         self._step += 1
         if self._step == 1:
             return Register(worker_id=self.worker_id).model_dump_json()
+        await self.assignment_sent.wait()
         assignment = next(
             message
             for raw in self.sent
@@ -278,7 +286,7 @@ class ToolSocket(ScriptedSocket):
                 remote_sha="abc",
             ).model_dump_json()
         if self._step == 4:
-            assert any(isinstance(parse_server_message(raw), FlowToolResponse) for raw in self.sent)
+            await self.tool_responded.wait()
             return Succeeded(
                 job_id=assignment.job_id,
                 assignment_token=assignment.assignment_token,

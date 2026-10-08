@@ -10,7 +10,8 @@
 
 - 新增按 flow 查询 Codex 会话的 control API，通过现有 WebSocket 请求原 worker 按需读取历史；
   支持角色、工具调用关联、游标分页和独立 Bearer 认证，不新增会话队列或持久化。
-  wire protocol 升至 v11，control/worker 需同步升级。
+  wire protocol 升至 v11，control/worker 需同步升级。持续接收器保证 control 准备任务、处理工具
+  和应用结果期间仍可分流会话响应，避免已返回的历史被阻塞至查询超时。
 
 - 按职责整理 domain/contracts/persistence/github/control/worker/telemetry 包，更新导入与部署入口；
   分离日志和指标，worker 启动不再间接加载数据库模块。CLI、数据库 schema 和网络协议保持不变。
