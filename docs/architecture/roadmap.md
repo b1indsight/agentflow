@@ -9,10 +9,9 @@ flowtool/
     contracts/        # 版本化 task/result/message 与冻结结果应用契约
     persistence/      # PostgreSQL schema、事务仓储、指标查询与就绪探针
     github/           # githubkit App 认证、GraphQL 分页与远端数据解码
-    control/          # HTTP/WS 服务、调度、工作流编排与审核证据采集
-    worker/           # WS client、journal、Agent/Judge、prompt、工作目录与 VCS
+    control/          # HTTP/WS 服务、调度、工作流编排、审核证据与 Judge
+    worker/           # WS client、journal、CodeAgent、prompt、工作目录与 VCS
     telemetry/        # 通用 logging 与控制端 metrics，分开依赖
-    config.py         # serve/worker 角色配置（pydantic-settings）
     cli.py            # admin CLI（§10-8）
     live_smoke.py      # 真实闭环验收命令入口
     plugins/          # 生命周期 hook 插件（§9-7）

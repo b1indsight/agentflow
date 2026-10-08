@@ -374,7 +374,7 @@ def test_concurrent_stores_do_not_claim_the_same_job(
     # A second request for worker-1 must also recheck its slot after the first wins.
     flow = store.create_flow("owner/queue", 12, installation_id=None)
     queued = store.enqueue_job(flow.id, JobKind.INITIAL)
-    following = store.enqueue_job(flow.id, JobKind.TRIAGE)
+    following = store.enqueue_job(flow.id, JobKind.REVISION)
     other = Store(postgresql_url)
     store.worker_connected("worker-1", protocol_version=PROTOCOL_VERSION)
     store.worker_connected("worker-2", protocol_version=PROTOCOL_VERSION)

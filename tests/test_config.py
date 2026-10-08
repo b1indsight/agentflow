@@ -24,8 +24,9 @@ def test_judge_credentials_stay_out_of_config_serialization_and_code_agent_envir
 
     monkeypatch.setenv("FLOWTOOL_JUDGE_MODEL", "openai:test")
     monkeypatch.setenv("FLOWTOOL_JUDGE_API_KEY", "judge-secret")
-    configured = WorkerSettings(worker_id="worker", worker_token=SecretStr("worker-secret"),
-                                serve_ws_url="wss://example.test/ws")
+    configured = ServeSettings(database_url="postgresql://localhost/test",
+                               worker_tokens={"worker": SecretStr("worker-secret")})
+    assert "judge_model" not in WorkerSettings.model_fields
     assert configured.judge_model == "openai:test"
     assert configured.judge_api_key.get_secret_value() == "judge-secret"
     assert "judge-secret" not in configured.model_dump_json()

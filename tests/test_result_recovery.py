@@ -6,31 +6,27 @@ from typing import cast
 
 import pytest
 
-from app.contracts.protocol import InitialResult, TriageResult
+from app.contracts.protocol import InitialResult
 from app.contracts.result_models import EffectState, ResultPending
 from app.control.service import ControlService
 from app.domain.github_models import GitHubAdapterError, GitHubErrorKind
 from app.domain.models import (
     Attempt,
     DeliveryState,
-    FeedbackRef,
     FlowDelivery,
     FlowState,
     FlowToolCall,
     Job,
     JobKind,
     JobState,
-    TriageVerdict,
     VcsKind,
-    Verdict,
 )
 from app.persistence.store import Store
-from tests.review_memory import judge_decision
 from tests.test_coordinator import MemoryStore, RecordingGitHub, apply_result, coordinator
 
 
 @pytest.fixture
-def scenario():
+async def scenario():
     store = MemoryStore()
     store.attempt = Attempt(id=1, flow_id=1, codex_session_id="session-1")
     store.flow.current_attempt_id = 1
@@ -42,33 +38,16 @@ def scenario():
         pr_number=17,
     )
     github = RecordingGitHub()
-    job = Job(id=6, flow_id=1, kind=JobKind.TRIAGE, state=JobState.RUNNING)
-    result = TriageResult(batch_id=1, feedback_refs=[FeedbackRef(item_id=101, version=1)],
-        decision=judge_decision(TriageVerdict(
-            verdict=Verdict.REVISE,
-            confidence=0.9,
-            instruction="Fix it",
-        ))
-    )
+    job = Job(id=6, flow_id=1, kind=JobKind.INITIAL, state=JobState.RUNNING)
+    result = InitialResult(session_id=None, last_message="failed", exit_code=1)
     return store, github, job, result
 
 
-@pytest.mark.parametrize("violation", ["digest", "incomplete-context"])
-async def test_control_rejects_decisions_without_matching_complete_evidence(scenario, violation):
-    store, github, job, result = scenario
-    if violation == "digest":
-        result.decision.context_digest = "0" * 64
-    else:
-        store.reviews.batch.context.limitations.append("files:truncated")
-        result.decision.context_digest = store.reviews.batch.context.digest
-    await apply_result(coordinator(store, github), job, result)
-    assert github.comments == []
-    assert store.reviews.consumed == []
-    assert not store.sources
 
 
 async def test_old_attempt_failure_does_not_publish_or_fail_current_attempt(scenario):
     store, github, job, _ = scenario
+    job.kind = JobKind.REVISION
     store.jobs[job.id] = job
     store.attempt = Attempt(id=2, flow_id=1, codex_session_id="new-session")
     store.flow.current_attempt_id = 2
@@ -223,8 +202,8 @@ async def test_remote_comment_is_recovered_after_response_loss(scenario, monkeyp
     assert store.results.list_effects(job.id)[0].state is EffectState.UNCERTAIN
     store.results.clock += timedelta(seconds=10)
     state = await apply_result(coordinator(store, github), job, result)
-    assert state is JobState.DONE
-    assert len(github.comments) == len(store.enqueued) == 1
+    assert state is JobState.FAILED
+    assert len(github.comments) == 1 and store.enqueued == []
     assert store.jobs[job.id].result_applied_at is not None
 
 
@@ -299,7 +278,7 @@ async def test_retired_result_reconciles_dispatched_comment_without_resending(
         ControlService(cast(Store, store)).cancel(store.flow)
     store.results.clock += timedelta(seconds=30)
     if remote_receipt:
-        assert await apply_result(subject, job, result) is JobState.DONE
+        assert await apply_result(subject, job, result) is JobState.FAILED
         assert store.results.list_effects(job.id)[0].state is EffectState.SUCCEEDED
     else:
         with pytest.raises(ResultPending):
@@ -329,7 +308,7 @@ async def test_unknown_comment_is_not_resubmitted_and_blocks_retry(scenario, mon
         ControlService(cast(Store, store)).retry(store.flow)
 
 
-async def test_final_commit_failure_rolls_back_derived_job_but_keeps_effect_receipt(
+async def test_final_commit_failure_rolls_back_completion_but_keeps_effect_receipt(
     scenario,
     monkeypatch,
 ) -> None:
@@ -352,7 +331,7 @@ async def test_final_commit_failure_rolls_back_derived_job_but_keeps_effect_rece
     assert store.jobs[job.id].result_applied_at is None
     assert store.results.list_effects(job.id)[0].state is EffectState.SUCCEEDED
     await apply_result(coordinator(store, github), job, result)
-    assert len(store.enqueued) == len(github.comments) == 1
+    assert len(github.comments) == 1 and store.enqueued == []
 
 
 async def test_cancel_during_remote_lookup_does_not_authorize_a_comment(
@@ -392,7 +371,7 @@ async def test_concurrent_application_has_one_remote_sender(scenario, monkeypatc
     finally:
         release.set()
         await first
-    assert len(github.comments) == len(store.enqueued) == 1
+    assert len(github.comments) == 1 and store.enqueued == []
 
 
 async def test_process_interruption_recovers_a_running_effect(scenario, monkeypatch) -> None:
@@ -414,7 +393,7 @@ async def test_process_interruption_recovers_a_running_effect(scenario, monkeypa
     assert store.results.list_effects(job.id)[0].state is EffectState.RUNNING
     store.results.recover_claims()
     await apply_result(coordinator(store, github), job, result)
-    assert len(github.comments) == len(store.enqueued) == 1
+    assert len(github.comments) == 1 and store.enqueued == []
 
 
 async def test_rate_limit_waits_then_retries_a_definitely_rejected_request(

@@ -14,9 +14,9 @@ from app.contracts.protocol import (
     FlowToolRequest,
     InitialResult,
     InitialTask,
+    RevisionResult,
     RevisionTask,
     Succeeded,
-    TriageResult,
     terminal_digest,
 )
 from app.control.coordinator import JobCoordinator
@@ -33,7 +33,6 @@ from app.domain.github_models import (
 from app.domain.models import (
     Attempt,
     DeliveryState,
-    FeedbackRef,
     Flow,
     FlowDelivery,
     FlowExecution,
@@ -41,14 +40,12 @@ from app.domain.models import (
     Job,
     JobKind,
     JobState,
-    TriageVerdict,
     VcsKind,
-    Verdict,
 )
 from app.domain.ports import GitHubClient
 from app.persistence.store import Store
 from tests.result_memory import MemoryResults, MemoryStops
-from tests.review_memory import MemoryReviews, judge_decision
+from tests.review_memory import MemoryReviews
 
 
 class MemoryStore:
@@ -112,17 +109,14 @@ class MemoryStore:
     def lock_job(self, job_id: int) -> Job | None:
         return self.get_job(job_id)
 
+
     def get_job(self, job_id: int) -> Job | None:
         job = self.jobs.get(job_id)
         return job.model_copy(deep=True) if job else None
 
     def accept(self, job: Job, result: ExecutionResult) -> None:
-        message = Succeeded(
-            job_id=job.id,
-            assignment_token="test-token",
-            connection_epoch="test-epoch",
-            result=result,
-        )
+        message = Succeeded(job_id=job.id, assignment_token="test-token",
+                            connection_epoch="test-epoch", result=result)
         current = self.jobs.setdefault(job.id, job.model_copy(deep=True))
         digest = terminal_digest(message)
         if current.result_digest is not None:
@@ -569,39 +563,10 @@ async def test_initial_delivery_failure_reports_the_broken_invariant() -> None:
     ]
 
 
-@pytest.mark.asyncio
-async def test_triage_result_replay_does_not_repeat_comment_or_derived_job() -> None:
-    # The control process can die after applying a result but before acknowledging the worker.
-    store = MemoryStore()
-    store.attempt = Attempt(id=1, flow_id=1, codex_session_id="session-1")
-    store.flow.current_attempt_id = 1
-    store.delivery = FlowDelivery(
-        flow_id=1,
-        branch="flow/1",
-        base_branch="trunk",
-        state=DeliveryState.OPEN,
-        pr_number=17,
-    )
-    github = RecordingGitHub()
-    subject = coordinator(store, github)
-    job = Job(id=6, flow_id=1, kind=JobKind.TRIAGE, state=JobState.RUNNING)
-    result = TriageResult(batch_id=1, feedback_refs=[FeedbackRef(item_id=101, version=1)],
-        decision=judge_decision(TriageVerdict(
-            verdict=Verdict.REVISE,
-            confidence=0.9,
-            instruction="Fix it",
-        ))
-    )
-
-    await apply_result(subject, job, result)
-    await apply_result(subject, job, result)
-
-    assert store.enqueued == [(JobKind.REVISION, {"batch_id": 1, "instruction": "Fix it"})]
-    assert len(github.comments) == 1
 
 
 @pytest.mark.asyncio
-async def test_triage_and_revision_results_remain_control_plane_side_effects(monkeypatch) -> None:
+async def test_revision_results_remain_control_plane_side_effects(monkeypatch) -> None:
     store = MemoryStore()
     store.attempt = Attempt(
         id=1,
@@ -628,20 +593,6 @@ async def test_triage_and_revision_results_remain_control_plane_side_effects(mon
 
     subject = coordinator(store, github)
 
-    triage_job = Job(id=6, flow_id=1, kind=JobKind.TRIAGE, state=JobState.RUNNING)
-    triage_state = await apply_result(
-        subject,
-        triage_job,
-        TriageResult(batch_id=1, feedback_refs=[FeedbackRef(item_id=101, version=1)],
-            decision=judge_decision(TriageVerdict(
-                verdict=Verdict.REVISE,
-                confidence=0.9,
-                instruction="Fix it",
-            ))
-        ),
-    )
-    assert triage_state is JobState.DONE
-    assert store.enqueued == [(JobKind.REVISION, {"batch_id": 1, "instruction": "Fix it"})]
     monkeypatch.setattr(github, "get_pull_request", current_pr)
 
     revision_job = Job(id=7, flow_id=1, kind=JobKind.REVISION, state=JobState.RUNNING)
@@ -673,35 +624,8 @@ async def test_result_kind_must_match_persisted_job_kind() -> None:
         await apply_result(
             subject,
             job,
-            TriageResult(batch_id=1, feedback_refs=[FeedbackRef(item_id=101, version=1)], decision=judge_decision(TriageVerdict(verdict=Verdict.WAIT))),
+            RevisionResult(batch_id=1, feedback_refs=[], session_id="s", exit_code=1, last_message="",
+                           flow_id=1, attempt_id=1, previous_session_id="s", session_generation=0, mode="resume"),
         )
 
 
-@pytest.mark.asyncio
-async def test_answer_side_effects_are_applied_by_control() -> None:
-    store = MemoryStore()
-    store.attempt = Attempt(
-        id=1,
-        flow_id=1,
-        codex_session_id="session-1",
-    )
-    store.flow.current_attempt_id = 1
-    store.flow.state = FlowState.ACTIVE
-    store.delivery = FlowDelivery(
-        flow_id=1,
-        branch="flow/1",
-        base_branch="trunk",
-        state=DeliveryState.OPEN,
-        pr_number=17,
-    )
-    github = RecordingGitHub()
-    subject = coordinator(store, github)
-
-    answer_state = await apply_result(
-        subject,
-        Job(id=8, flow_id=1, kind=JobKind.TRIAGE, state=JobState.RUNNING),
-        TriageResult(batch_id=1, feedback_refs=[FeedbackRef(item_id=101, version=1)],
-                     decision=judge_decision(TriageVerdict(verdict=Verdict.ANSWER, answer="Because it is bounded."))),
-    )
-    assert answer_state is JobState.DONE
-    assert len(github.comments) == 1 and github.comments[0].startswith("Because it is bounded.")

@@ -8,6 +8,11 @@
 
 ## Unreleased
 
+- triage 作为 control 内的反馈批次前置判断，仅 REVISE 创建 worker job；删除独立 triage job、
+  领取 token、本地任务恢复和结果契约。复用冻结批次、工作流事务与现有 coordinator；
+  worker 不再执行 triage 或加载 bub/Judge。Judge 密钥迁到 serve；wire protocol 升至 v12，
+  升级前排空旧 assignment、结果及 journal，再同步升级 serve/worker。共用安装依赖仍包含 bub。
+
 - serve/worker 的配置类和进程级实例分别放入各自 config 模块，直接继承 BaseSettings，实例首次访问时创建；删除公共配置模块，启动入口继续显式传入 Runtime。
 
 - 新增按 flow 查询 Codex 会话的 control API，通过现有 WebSocket 请求原 worker 按需读取历史；

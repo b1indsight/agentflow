@@ -295,23 +295,6 @@ class ResultEffects:
                     f"{effect.body}\n\n{marker}",
                 )
                 return EffectReceipt(comment_id=reply, thread_id=effect.thread_id)
-            if plan.batch_id is not None and effect.key in {"answer", "triage"}:
-                job = self.store.get_job(plan.job_id)
-                if job is None:
-                    raise FlowToolRejected(FlowToolErrorKind.CONFLICT, "review job disappeared")
-                batch = self.store.reviews.for_job(job)
-                snapshot = batch.context.pull_request if batch.context is not None else None
-                current = await self.github.get_pull_request(installation, repo, effect.number)
-                if (snapshot is None or current.number != effect.number
-                        or current.state != "open" or current.merged):
-                    raise FlowToolRejected(FlowToolErrorKind.CONFLICT,
-                                           "PR is no longer open for the Judge snapshot")
-                if (current.head_sha != snapshot.head_sha or current.base_sha != snapshot.base_sha):
-                    with self.store.transaction() as tx:
-                        tx.lock_workflow(job.flow_id)
-                        tx.reviews.mark_context_stale(job)
-                    raise FlowToolRejected(FlowToolErrorKind.CONFLICT,
-                                           "PR changed since the Judge snapshot; retry needs new context")
             self._dispatch(plan, record)
             comment_id = await self.github.comment(
                 installation,

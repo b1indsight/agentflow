@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.contracts.protocol import ArchiveResult, RevisionResult
 from app.domain.github_models import PullRequestSnapshot, ReviewThread
-from app.domain.models import FeedbackRef, FlowDelivery, FlowState, JobKind, JobState
+from app.domain.models import FeedbackRef, FlowDelivery, FlowState, JobState
 from app.domain.review_models import BatchState, ReviewFeedback
 
 
@@ -78,11 +78,6 @@ Effect = Annotated[
 ]
 
 
-class DerivedJob(FrozenModel):
-    kind: JobKind
-    payload: dict[str, object]
-
-
 class RunUpdate(FrozenModel):
     kind: Literal["initial", "revision"]
     session_id: str | None
@@ -103,7 +98,6 @@ class ResultPlan(FrozenModel):
     delivery: FlowDelivery | None = None
     revision: RevisionResult | None = None
     archive: ArchiveResult | None = None
-    derived: DerivedJob | None = None
     batch_id: int | None = None
     batch_state: BatchState | None = None
     consumed: list[FeedbackRef] = Field(default_factory=list)

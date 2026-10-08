@@ -19,13 +19,12 @@ from pydantic import (
 )
 
 from app.contracts.conversation import ConversationError, ConversationPage, SessionRef
-from app.domain.context_models import MAX_CONTEXT_BYTES, ReviewContext
+from app.domain.context_models import ReviewContext
 from app.domain.delivery_models import DeliveryReceipt
-from app.domain.judge_models import JudgeDecision
 from app.domain.models import CodexResult, FeedbackRef, JobState, VcsKind
 from app.domain.review_models import ReviewFeedback
 
-PROTOCOL_VERSION: Literal[11] = 11
+PROTOCOL_VERSION: Literal[12] = 12
 
 
 class ProtocolModel(BaseModel):
@@ -35,7 +34,7 @@ class ProtocolModel(BaseModel):
 
 
 class Message(ProtocolModel):
-    protocol_version: Literal[11] = PROTOCOL_VERSION
+    protocol_version: Literal[12] = PROTOCOL_VERSION
 
 
 class ConversationQuery(Message):
@@ -100,22 +99,6 @@ class AssignmentSecret(ProtocolModel):
     push: PushSecret
 
 
-class TriageTask(ProtocolModel):
-    kind: Literal["triage"] = "triage"
-    batch_id: int = Field(gt=0)
-    attempt_id: int
-    feedback: list[FeedbackRef]
-    context: ReviewContext
-
-    @model_validator(mode="after")
-    def _context_batch(self) -> TriageTask:
-        if self.context.batch_id != self.batch_id:
-            raise ValueError("triage context belongs to another batch")
-        if len(self.context.model_dump_json().encode()) > MAX_CONTEXT_BYTES:
-            raise ValueError("triage context exceeds the byte budget")
-        return self
-
-
 class RevisionTask(ReviewTask):
     kind: Literal["revision"] = "revision"
     flow_id: int = Field(gt=0)
@@ -158,7 +141,7 @@ class ArchiveTask(ArchiveIdentity):
 
 
 ExecutionTask = Annotated[
-    InitialTask | TriageTask | RevisionTask | ArchiveTask,
+    InitialTask | RevisionTask | ArchiveTask,
     Field(discriminator="kind"),
 ]
 
@@ -182,11 +165,6 @@ class InitialResult(ProtocolModel):
 class ReviewResult(ProtocolModel):
     batch_id: int = Field(gt=0)
     feedback_refs: list[FeedbackRef]
-
-
-class TriageResult(ReviewResult):
-    kind: Literal["triage"] = "triage"
-    decision: JudgeDecision
 
 
 class RevisionResult(ReviewResult):
@@ -216,7 +194,7 @@ class ArchiveResult(ArchiveIdentity):
 
 
 ExecutionResult = Annotated[
-    InitialResult | TriageResult | RevisionResult | ArchiveResult,
+    InitialResult | RevisionResult | ArchiveResult,
     Field(discriminator="kind"),
 ]
 

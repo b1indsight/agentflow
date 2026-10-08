@@ -4,7 +4,6 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
-from app.domain.models import JobKind
 from app.domain.review_models import ReviewFeedback
 
 
@@ -12,7 +11,6 @@ from app.domain.review_models import ReviewFeedback
 class ReviewBatchDecision:
     """Content to freeze in a new batch; no database identity exists yet."""
 
-    kind: JobKind
     trigger: Literal["strong", "discussion"]
     instruction: str | None
     open_points: tuple[str, ...]
@@ -31,7 +29,6 @@ def decide_review_batch(
         return None
     strong = has_unused_signal and not force_triage
     return ReviewBatchDecision(
-        kind=JobKind.REVISION if strong else JobKind.TRIAGE,
         trigger="strong" if strong else "discussion",
         instruction="\n".join(f"{item.author}: {item.body}" for item in feedback if item.body)
         if strong else None,

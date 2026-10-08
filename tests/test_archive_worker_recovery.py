@@ -13,7 +13,6 @@ from app.contracts.protocol import (
     InitialTask,
     ResultAccepted,
     Succeeded,
-    TriageTask,
     parse_server_message,
     parse_worker_message,
 )
@@ -31,8 +30,8 @@ from tests.test_coordinator import RecordingGitHub, coordinator
 from tests.test_merge import route_merge
 from tests.test_remote_e2e import QueueConnection, QueueSocket
 from tests.test_vcs import _git_fixture, _jj
-from tests.test_worker_executor import RecordingAgent, RecordingJudge, RecordingToolCaller
-from tests.test_workflow_transactions import accepted_triage
+from tests.test_worker_executor import RecordingAgent, RecordingToolCaller
+from tests.test_workflow_transactions import accepted_coding
 
 
 class ArchiveSocket(QueueSocket):
@@ -134,7 +133,7 @@ async def test_original_worker_recovers_cleanup_and_replays_without_redeleting(
             assignment_token="archive-token", connection_epoch="epoch-a", task=task))
         journal.record_started()
     agent = RecordingAgent()
-    executor = WorkerExecutor(root, agent, RecordingJudge(), worker_id="worker-a", journal=journal)
+    executor = WorkerExecutor(root, agent, worker_id="worker-a", journal=journal)
     lock = WorkerRootLock(root, "worker-a")
     lock.acquire()
     try:
@@ -182,7 +181,7 @@ async def test_original_worker_recovers_cleanup_and_replays_without_redeleting(
 
 @pytest.mark.parametrize("window", ["completed-disconnected", "unstarted-rejected"])
 async def test_merge_recovery_preserves_coding_completion_and_root_provenance(store, tmp_path, window):
-    old, result = accepted_triage(store, receive=False)
+    old, result = accepted_coding(store, receive=False)
     flow = store.get_flow(old.flow_id)
     if window == "unstarted-rejected":
         # Recreate the fixture's delivery before Started, while retaining its frozen context.
@@ -197,12 +196,12 @@ async def test_merge_recovery_preserves_coding_completion_and_root_provenance(st
     shutil.move(seed, managed_seed)
     repo = await prepare_flow_repo(managed_seed, flow.id)
     journal = WorkerJournal(root)
-    batch = store.reviews.for_job(old)
     assignment = Assignment(job_id=old.id, flow_id=flow.id, assignment_token=old.assignment_token,
-        connection_epoch="epoch-a", task=TriageTask(batch_id=batch.id, feedback=result.feedback_refs,
-            attempt_id=flow.current_attempt_id, context=batch.context))
+        connection_epoch="epoch-a", task=InitialTask(flow_id=flow.id,
+            attempt_id=flow.current_attempt_id, repo=flow.repo, repo_identity="worker-a:" + flow.repo,
+            issue_number=flow.issue_number, issue_title="Issue", issue_body="", branch=f"flow/{flow.id}"))
     journal.record_received(assignment)
-    executor = WorkerExecutor(root, RecordingAgent(), RecordingJudge(), worker_id="worker-a",
+    executor = WorkerExecutor(root, RecordingAgent(), worker_id="worker-a",
                               journal=journal)
     client = ObservedClient(archive_id=archive_id, worker_id="worker-a", worker_token="secret",
                             serve_ws_url="ws://test", executor=executor, journal=journal)

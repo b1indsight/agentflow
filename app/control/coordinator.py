@@ -16,11 +16,11 @@ from app.contracts.protocol import (
     InitialTask,
     PushSecret,
     RevisionTask,
-    TriageTask,
     terminal_digest,
 )
 from app.control.archive import archive_task
 from app.control.preparation import PreparationReadFailure, PreparationStale
+from app.control.resolution import feedback_link
 from app.control.results import ResultApplication, ResultSettings
 from app.control.review_context import build_review_context
 from app.control.revisions import verify_revision_remote
@@ -34,9 +34,11 @@ from app.domain.models import (
     JobKind,
     JobState,
     ReviewItemKind,
+    TriageVerdict,
+    Verdict,
 )
-from app.domain.ports import GitHubClient
-from app.domain.review_models import BatchState
+from app.domain.ports import GitHubClient, Judge
+from app.domain.review_models import BatchState, ReviewBatch
 from app.persistence.store import Store
 from app.plugins import emit_hook, get_plugin_manager
 
@@ -70,10 +72,98 @@ class JobCoordinator:
         return (flow.state in TERMINAL_STATES
                 or (delivery is not None and delivery.supersedes(job.kind)))
 
+    async def triage(self, batch: ReviewBatch, judge: Judge) -> None:
+        """Resolve a feedback prerequisite, enqueueing a worker job only for revision."""
+        with self.store.transaction() as tx:
+            flow = tx.lock_workflow(batch.flow_id)
+            if not tx.reviews.current(batch):
+                return
+        assert flow is not None and flow.installation_id is not None
+        context = batch.context or await build_review_context(
+            self.github, flow, batch, self._pr_number(flow),
+        )
+        with self.store.transaction() as tx:
+            tx.lock_workflow(flow.id)
+            if not tx.reviews.current(batch):
+                return
+            context = tx.reviews.freeze_context(batch, context)
+            tx.reviews.relayed(batch)
+        decision = batch.decision or await judge.triage(context)
+        if decision.context_digest != context.digest:
+            raise ValueError("Judge decision does not match its frozen context")
+        verdict = decision.verdict
+        if context.limitations or decision.failure:
+            verdict = TriageVerdict(verdict=Verdict.WAIT, reason=decision.failure
+                or "incomplete-context", open_points=verdict.open_points)
+        elif verdict.verdict is Verdict.REVISE and verdict.confidence < self.settings.confidence_threshold:
+            verdict = TriageVerdict(verdict=Verdict.WAIT, confidence=verdict.confidence,
+                reason=f"low-confidence: {verdict.reason}"[:2000], open_points=verdict.open_points)
+        marker = f"<!-- agentflow:batch:{batch.id}:answer -->"
+        if verdict.verdict is Verdict.ANSWER:
+            found = await self.github.find_comment(flow.installation_id, flow.repo, context.pr_number, marker)
+            with self.store.transaction() as tx:
+                tx.lock_workflow(flow.id)
+                if not tx.reviews.current(batch):
+                    return
+                if found is not None:
+                    tx.reviews.complete(batch.id, BatchState.COMPLETED, list(batch.feedback), [])
+                    return
+                if tx.reviews.get_batch(batch.id).answer_dispatched:
+                    return  # An uncertain POST is reconciled by marker, never blindly repeated.
+        # Remote reads can outlive close/merge or a changed PR baseline.
+        remote = (await self.github.get_pull_request(flow.installation_id, flow.repo, context.pr_number)
+                  if verdict.verdict in {Verdict.REVISE, Verdict.ANSWER} else None)
+        with self.store.transaction() as tx:
+            tx.lock_workflow(flow.id)
+            if not tx.reviews.current(batch):
+                return
+            if remote is not None and (context.pull_request is None or remote.state != "open" or remote.merged
+                    or remote.head_sha != context.pull_request.head_sha
+                    or remote.base_sha != context.pull_request.base_sha):
+                with tx.connection() as connection:
+                    connection.execute("UPDATE review_batches SET context=NULL,decision=NULL WHERE id=%s", (batch.id,))
+                return
+            tx.reviews.record_decision(batch, decision.model_copy(update={"verdict": verdict}))
+            if verdict.verdict is Verdict.REVISE:
+                job = tx.enqueue_job(flow.id, JobKind.REVISION,
+                    {"batch_id": batch.id, "instruction": verdict.instruction})
+                tx.reviews.advance(batch.id, job)
+            elif verdict.verdict is not Verdict.ANSWER:
+                tx.reviews.complete(batch.id,
+                    BatchState.COMPLETED if verdict.verdict is Verdict.IGNORE else BatchState.WAITING,
+                    list(batch.feedback) if verdict.verdict is Verdict.IGNORE else [],
+                    verdict.open_points or ([verdict.reason or "Awaiting more discussion."]
+                        if verdict.verdict is Verdict.WAIT else []))
+        if verdict.verdict is Verdict.ANSWER:
+            with self.store.transaction() as tx:
+                tx.lock_workflow(flow.id)
+                if not tx.reviews.current(batch):
+                    return
+                with tx.connection() as connection:
+                    connection.execute("UPDATE review_batches SET answer_dispatched=TRUE WHERE id=%s", (batch.id,))
+            sources = ", ".join(f"[{f.kind.value} {f.github_id}]({feedback_link(flow.repo,
+                context.pr_number, f.kind, f.github_id)})" for f in batch.feedback)
+            try:
+                await self.github.comment(flow.installation_id, flow.repo, context.pr_number,
+                    f"{verdict.answer}\n\n来源：{sources}\n\n{marker}")
+            except GitHubAdapterError as exc:
+                # Same definite-rejection boundary as ResultEffects.run; uncertain writes stay marked.
+                if exc.definitely_unsent or (exc.status_code is not None and 400 <= exc.status_code < 500
+                                            and exc.status_code != 408):
+                    with self.store.connection() as connection:
+                        connection.execute("UPDATE review_batches SET answer_dispatched=FALSE WHERE id=%s", (batch.id,))
+                raise
+            with self.store.transaction() as tx:
+                tx.lock_workflow(flow.id)
+                if not tx.reviews.current(batch):
+                    return
+                tx.reviews.complete(batch.id, BatchState.COMPLETED, list(batch.feedback), [])
+        emit_hook(self.plugins, "on_review", flow=flow)
+
     async def prepare_for_assignment(
         self, job: Job, worker: str, token: str, epoch: str,
     ) -> ExecutionTask | JobState:
-        """Own read-only retry decisions before the gateway is allowed to emit Assignment."""
+        """Bound read preparation for remote assignments."""
         error = None
         expired = (job.prepare_first_failed_at is not None and self.store.now()
                    >= job.prepare_first_failed_at + timedelta(seconds=self.settings.prepare_retry_window_seconds))
@@ -92,7 +182,7 @@ class JobCoordinator:
         )
         if state is None:
             raise PreparationStale("preparation changed before retry")
-        if state is JobState.FAILED:
+        if state is JobState.FAILED and worker is not None:
             await self.results.apply(job.id)
         return state
 
@@ -176,7 +266,7 @@ class JobCoordinator:
             await self.fail(job, f"{job.kind} job has no current attempt")
             return JobState.FAILED
 
-        if job.kind in {JobKind.TRIAGE, JobKind.REVISION}:
+        if job.kind is JobKind.REVISION:
             batch = self.store.reviews.for_job(job)
             if batch.attempt_id != attempt.id or batch.state not in {
                 BatchState.READY, BatchState.PROCESSING,
@@ -184,7 +274,7 @@ class JobCoordinator:
                 raise ValueError("review batch is no longer current")
 
         threads = None
-        if job.kind in {JobKind.TRIAGE, JobKind.REVISION} and batch.threads is None and any(
+        if job.kind is JobKind.REVISION and batch.threads is None and any(
             f.kind is ReviewItemKind.INLINE for f in batch.feedback
         ):
             assert flow.installation_id is not None
@@ -195,38 +285,6 @@ class JobCoordinator:
             except GitHubAdapterError as exc:
                 raise PreparationReadFailure(exc) from exc
 
-        if job.kind is JobKind.TRIAGE:
-            context = batch.context
-            if context is None:
-                try:
-                    context = await self._read(job, lambda: build_review_context(
-                        self.github, flow, batch, self._pr_number(flow),
-                    ))
-                except GitHubAdapterError as exc:
-                    raise PreparationReadFailure(exc) from exc
-            with self.store.transaction() as tx:
-                fresh = tx.lock_workflow(flow.id)
-                current = tx.lock_job(job.id)
-                if (fresh is None or current is None or self._retired(tx, fresh, job)
-                        or fresh.current_attempt_id != attempt.id):
-                    return JobState.DONE
-                if job.assignment_token is not None and (
-                    current.state is not JobState.RUNNING
-                    or current.assigned_worker_id != job.assigned_worker_id
-                    or current.assignment_token != job.assignment_token
-                    or current.lease_expires_at is None
-                    or current.lease_expires_at <= tx.now()
-                ):
-                    return JobState.QUEUED
-                if threads is not None:
-                    tx.reviews.freeze_threads(current, threads)
-                context = tx.reviews.freeze_context(current, context)
-            return TriageTask(
-                batch_id=batch.id,
-                feedback=list(batch.feedback),
-                attempt_id=attempt.id,
-                context=context,
-            )
         if job.kind is JobKind.REVISION:
             delivery = self._delivery(flow)
             if attempt.revision_cycles + 1 > self.settings.max_revision_cycles:
@@ -337,7 +395,7 @@ class JobCoordinator:
         execution = self.store.get_flow_execution(flow.id)
         if execution is None or execution.worker_id != worker_id:
             raise ValueError(f"flow {flow.id} is not bound to worker {worker_id}")
-        if job.kind in {JobKind.TRIAGE, JobKind.REVISION}:
+        if job.kind is JobKind.REVISION:
             with self.store.transaction() as tx:
                 fresh = tx.lock_workflow(flow.id)
                 current = tx.lock_job(job.id)

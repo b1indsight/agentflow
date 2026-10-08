@@ -20,7 +20,7 @@ from app.worker.executor import WorkerExecutor
 from app.worker.journal import JournalError, WorkerJournal
 from app.worker.vcs import prepare_flow_repo
 from tests.test_vcs import _git_fixture
-from tests.test_worker_executor import RecordingAgent, RecordingJudge, RecordingToolCaller
+from tests.test_worker_executor import RecordingAgent, RecordingToolCaller
 from tests.test_worker_journal import _assignment
 
 
@@ -51,7 +51,7 @@ async def workspace(tmp_path: Path, *, start=True):
     journal.record_received(assignment)
     if start:
         journal.record_started()
-    executor = WorkerExecutor(root, RecordingAgent(), RecordingJudge(),
+    executor = WorkerExecutor(root, RecordingAgent(),
                               worker_id="worker-a", journal=journal)
     return managed_seed, repo, journal, executor, assignment
 
