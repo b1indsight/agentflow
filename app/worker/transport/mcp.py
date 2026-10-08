@@ -13,11 +13,9 @@ from typing import Protocol, Self
 from uuid import uuid4
 
 import uvicorn
+from fastapi import FastAPI, Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import SecretStr
-from starlette.applications import Starlette
-from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
-from starlette.routing import Route
 
 from app.domain.delivery_models import DeliveryReceipt
 from app.domain.models import VcsExecutionContext, VcsOutcome
@@ -49,7 +47,8 @@ class WorkerMCP:
         self.last_call_id: str | None = None
         self.last_result: DeliveryReceipt | None = None
         self.last_vcs_outcome: VcsOutcome | None = None
-        app = Starlette(routes=[Route("/mcp", self._handle, methods=["POST", "GET", "DELETE"])])
+        app = FastAPI(openapi_url=None, docs_url=None, redoc_url=None)
+        app.add_api_route("/mcp", self._handle, methods=["POST", "GET", "DELETE"])
         self._server = _EmbeddedServer(uvicorn.Config(
             app, log_config=None, access_log=False, lifespan="off", ws="none",
             timeout_graceful_shutdown=0,

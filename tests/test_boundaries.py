@@ -61,7 +61,8 @@ def contains_forbidden(modules: set[str], prefixes: set[str]) -> bool:
     ("github", {"app.control", "app.worker", "app.persistence", "psycopg"}),
     ("control", {"app.worker"}),
     ("worker", {"app.control", "app.persistence", "app.github", "app.telemetry.metrics",
-                "psycopg", "githubkit", "fastapi", "bub", "app.contracts.control"}),
+                "psycopg", "githubkit", "bub", "app.contracts.control"}),
+    ("worker/execution", {"fastapi"}),
 ])
 def test_packages_keep_responsibility_boundaries(package: str, forbidden: set[str]) -> None:
     modules = imported_modules(Path("app") / package)
