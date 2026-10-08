@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 from pydantic import SecretStr
 
-from app.domain.models import CodeAgentContext
+from app.domain.models import CodingExecutionContext
 from app.worker.codex_driver import CodexAgent, _codex_environment, _start_args
 
 
@@ -71,7 +71,7 @@ def test_codex_environment_removes_worker_and_github_credentials() -> None:
 
 
 def test_run_context_injects_only_scoped_push_and_mcp_capabilities() -> None:
-    context = CodeAgentContext(
+    context = CodingExecutionContext(
         push_token=SecretStr("push-secret"),
         push_repository="owner/repo",
         mcp_socket=Path("/tmp/flowtool.sock"),
@@ -102,17 +102,17 @@ async def test_resume_also_requires_explicit_trusted_host_mode() -> None:
 
 
 async def test_resume_refreshes_environment_and_disables_initial_broker(monkeypatch, tmp_path):
-    from app.domain.models import AgentRun
+    from app.domain.models import CodingExecutionResult
 
     observed = {}
 
     async def fake_run(args, output_schema, **kwargs):
         observed.update(args=args, **kwargs)
-        return AgentRun("session-1", "", 0)
+        return CodingExecutionResult("session-1", "", 0)
 
     agent = CodexAgent(trusted_host=True)
     monkeypatch.setattr(agent, "_run", fake_run)
-    context = CodeAgentContext(cwd=tmp_path, push_token=SecretStr("ghs_unique_fresh_capability"),
+    context = CodingExecutionContext(cwd=tmp_path, push_token=SecretStr("ghs_unique_fresh_capability"),
                                push_repository="owner/repo")
     await agent.resume("session-1", "revise", context=context)
     assert observed["context"] is context
@@ -147,9 +147,9 @@ async def test_cli_session_rejection_is_classified_only_before_any_events(
     agent = CodexAgent(trusted_host=True)
     if unavailable:
         with pytest.raises(SessionUnavailable):
-            await agent.resume("session-1", "fix", context=CodeAgentContext(cwd=tmp_path))
+            await agent.resume("session-1", "fix", context=CodingExecutionContext(cwd=tmp_path))
     else:
-        run = await agent.resume("session-1", "fix", context=CodeAgentContext(cwd=tmp_path))
+        run = await agent.resume("session-1", "fix", context=CodingExecutionContext(cwd=tmp_path))
         assert run.exit_code == 1
 
 
@@ -179,7 +179,7 @@ async def test_revision_deadline_cancels_the_whole_codex_process_group(monkeypat
     monkeypatch.setattr("app.worker.codex_driver.asyncio.create_subprocess_exec", spawn)
     monkeypatch.setattr("app.worker.codex_driver.os.killpg", lambda pid, sig: stopped.append((pid, sig)))
     running = asyncio.create_task(CodexAgent(trusted_host=True).resume(
-        "session-1", "fix", context=CodeAgentContext(cwd=tmp_path),
+        "session-1", "fix", context=CodingExecutionContext(cwd=tmp_path),
     ))
     await entered.wait()
     running.cancel()

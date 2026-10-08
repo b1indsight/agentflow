@@ -8,6 +8,8 @@
 
 ## Unreleased
 
+- 统一编码执行、结构化回复与任务结果的类型名称；保留首次/修订结果区分，序列化字段和执行行为不变。
+
 - triage 作为 control 内的反馈批次前置判断，仅 REVISE 创建 worker job；删除独立 triage job、
   领取 token、本地任务恢复和结果契约。复用冻结批次、工作流事务与现有 coordinator；
   worker 不再执行 triage 或加载 bub/Judge。Judge 密钥迁到 serve；wire protocol 升至 v12，

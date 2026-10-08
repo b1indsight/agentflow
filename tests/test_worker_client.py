@@ -11,8 +11,8 @@ from app.contracts.protocol import (
     FlowToolRequest,
     FlowToolResponse,
     Heartbeat,
-    InitialResult,
     InitialTask,
+    InitialTaskResult,
     Registered,
     ResultAccepted,
     Started,
@@ -47,7 +47,7 @@ class RecordingExecutor:
     async def execute(self, task: ExecutionTask, secret=None, *, tool_caller=None) -> ExecutionResult:
         assert isinstance(task, InitialTask)
         assert task.repo == "owner/repo"
-        return InitialResult(session_id="session-1", last_message="done", exit_code=0)
+        return InitialTaskResult(session_id="session-1", last_message="done", exit_code=0)
 
 
 class ScriptedConnection:
@@ -125,7 +125,7 @@ async def test_worker_redacts_echoed_push_capability_before_journal_and_wire(tmp
         async def execute(self, task, secret=None, *, tool_caller=None):
             if fails:
                 raise RuntimeError("command echoed push-secret")
-            return InitialResult(session_id="session", last_message="push-secret", exit_code=0)
+            return InitialTaskResult(session_id="session", last_message="push-secret", exit_code=0)
 
     class InspectJournal(WorkerJournal):
         def record_terminal(self, terminal):
@@ -163,7 +163,7 @@ class ToolCallingExecutor:
             ),
         )
         assert isinstance(result, OpenedDelivery) and result.pr_number == 17
-        return InitialResult(session_id="session-1", last_message="done", exit_code=0)
+        return InitialTaskResult(session_id="session-1", last_message="done", exit_code=0)
 
 
 class ToolConnection:
@@ -339,7 +339,7 @@ async def test_completed_disconnected_executor_is_journaled_before_recovery(tmp_
         async def execute(self, task, secret=None, *, tool_caller=None):
             if fails:
                 raise RuntimeError("push-secret was echoed")
-            return InitialResult(session_id="session", last_message="push-secret", exit_code=0)
+            return InitialTaskResult(session_id="session", last_message="push-secret", exit_code=0)
 
     journal = WorkerJournal(tmp_path)
     assignment = _assignment()

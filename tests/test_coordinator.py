@@ -12,10 +12,10 @@ from pydantic import SecretStr
 from app.contracts.protocol import (
     ExecutionResult,
     FlowToolRequest,
-    InitialResult,
     InitialTask,
-    RevisionResult,
+    InitialTaskResult,
     RevisionTask,
+    RevisionTaskResult,
     Succeeded,
     terminal_digest,
 )
@@ -428,7 +428,7 @@ async def test_initial_job_crosses_worker_boundary_and_opens_pr() -> None:
     )
     assert tool.result is not None
     assert github.opened == []
-    result = InitialResult(
+    result = InitialTaskResult(
         session_id="session-1",
         last_message="done",
         exit_code=0,
@@ -496,7 +496,7 @@ async def test_initial_failure_after_open_pr_request_has_no_github_pr_side_effec
     state = await apply_result(
         subject,
         job,
-        InitialResult(session_id="session-1", last_message="failed", exit_code=1),
+        InitialTaskResult(session_id="session-1", last_message="failed", exit_code=1),
     )
 
     assert state is JobState.FAILED
@@ -518,7 +518,7 @@ async def test_initial_vcs_failure_is_reported_with_sanitized_stage_and_detail()
     state = await apply_result(
         subject,
         job,
-        InitialResult(
+        InitialTaskResult(
             session_id="session-1",
             last_message="ignored raw message",
             exit_code=65,
@@ -545,7 +545,7 @@ async def test_initial_delivery_failure_reports_the_broken_invariant() -> None:
     state = await apply_result(
         subject,
         job,
-        InitialResult(
+        InitialTaskResult(
             session_id="session-1",
             last_message="done",
             exit_code=0,
@@ -624,7 +624,7 @@ async def test_result_kind_must_match_persisted_job_kind() -> None:
         await apply_result(
             subject,
             job,
-            RevisionResult(batch_id=1, feedback_refs=[], session_id="s", exit_code=1, last_message="",
+            RevisionTaskResult(batch_id=1, feedback_refs=[], session_id="s", exit_code=1, last_message="",
                            flow_id=1, attempt_id=1, previous_session_id="s", session_generation=0, mode="resume"),
         )
 

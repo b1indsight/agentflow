@@ -1,6 +1,6 @@
 """Read-only revision delivery checks shared by assignment and result application."""
 
-from app.contracts.protocol import RevisionResult, RevisionTask
+from app.contracts.protocol import RevisionTask, RevisionTaskResult
 from app.domain.models import DeliveryState, Flow, FlowDelivery, Job
 from app.domain.ports import GitHubClient
 
@@ -10,7 +10,7 @@ def frozen_revision(job: Job) -> RevisionTask:
     return RevisionTask.model_validate((job.payload or {}).get("revision"))
 
 
-def revision_mismatch(task: RevisionTask, result: RevisionResult) -> str | None:
+def revision_mismatch(task: RevisionTask, result: RevisionTaskResult) -> str | None:
     """Validate worker evidence before any remote effect or local acknowledgement."""
     if (result.flow_id, result.attempt_id, result.batch_id) != (
         task.flow_id, task.attempt_id, task.batch_id,

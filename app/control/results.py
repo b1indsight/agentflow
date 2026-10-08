@@ -10,8 +10,8 @@ from pluggy import PluginManager
 from app.contracts.protocol import (
     ArchiveResult,
     Failed,
-    InitialResult,
-    RevisionResult,
+    InitialTaskResult,
+    RevisionTaskResult,
     Succeeded,
     parse_worker_message,
 )
@@ -159,7 +159,7 @@ class ResultApplication:
         if delivery is not None and delivery.supersedes(job.kind):
             return None
         message = parse_worker_message(json.dumps(job.result_payload))
-        if not isinstance(message, Succeeded) or not isinstance(message.result, RevisionResult):
+        if not isinstance(message, Succeeded) or not isinstance(message.result, RevisionTaskResult):
             return None
         result = message.result
         task = frozen_revision(job)
@@ -218,14 +218,14 @@ class ResultApplication:
             raise ValueError("result kind does not match persisted job")
         if attempt is None:
             return self._failure(tx, flow, base, "result has no current attempt")
-        if isinstance(result, RevisionResult):
+        if isinstance(result, RevisionTaskResult):
             assert batch is not None
             expected = [(f.item_id, f.version) for f in batch.feedback]
             received = [(f.item_id, f.version) for f in result.feedback_refs]
             if result.batch_id != batch.id or received != expected:
                 return base.model_copy(update={"state": JobState.FAILED, "flow_state": FlowState.FAILED,
                     "error": "result does not match its frozen review batch"})
-        if isinstance(result, InitialResult):
+        if isinstance(result, InitialTaskResult):
             base = base.model_copy(
                 update={
                     "run": RunUpdate(
@@ -277,7 +277,7 @@ class ResultApplication:
                 *self._review_effects(flow, "created_pr"),
             ]
             return base.model_copy(update={"delivery": delivery, "effects": effects})
-        if isinstance(result, RevisionResult):
+        if isinstance(result, RevisionTaskResult):
             assert batch is not None
             base = base.model_copy(
                 update={
@@ -391,7 +391,7 @@ class ResultApplication:
             result = message.result
             if result.kind != job.kind.value:
                 raise ValueError("result kind does not match persisted job")
-            if isinstance(result, (InitialResult, RevisionResult)):
+            if isinstance(result, (InitialTaskResult, RevisionTaskResult)):
                 run = RunUpdate(kind=result.kind, session_id=result.session_id,
                                 exit_code=result.exit_code)
                 if result.exit_code != 0:

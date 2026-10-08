@@ -8,8 +8,8 @@ import pytest
 from app.contracts.protocol import (
     Assignment,
     ExecutionStopped,
-    InitialResult,
     InitialTask,
+    InitialTaskResult,
     StopAccepted,
     StopExecution,
     parse_worker_message,
@@ -125,7 +125,7 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path):
             started.set()
             try: await asyncio.Event().wait()
             finally: ended.set()
-            return InitialResult(session_id='unused', last_message='', exit_code=0)
+            return InitialTaskResult(session_id='unused', last_message='', exit_code=0)
 
     class Coordinator:
         async def prepare_for_assignment(self, job, *args):

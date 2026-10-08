@@ -7,8 +7,8 @@ from pydantic import SecretStr
 from app.contracts.protocol import (
     Assignment,
     AssignmentSecret,
-    InitialResult,
     InitialTask,
+    InitialTaskResult,
     PushSecret,
     Succeeded,
 )
@@ -51,7 +51,7 @@ def test_journal_persists_terminal_result_until_ack(tmp_path: Path) -> None:
         job_id=assignment.job_id,
         assignment_token=assignment.assignment_token,
         connection_epoch=assignment.connection_epoch,
-        result=InitialResult(session_id="session-1", last_message="done", exit_code=0),
+        result=InitialTaskResult(session_id="session-1", last_message="done", exit_code=0),
     )
     journal.record_terminal(terminal)
 

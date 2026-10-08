@@ -43,7 +43,7 @@ def validate_worker_environment(
     exposed = sorted(key for key in _CONTROL_ENVIRONMENT_KEYS if values.get(key))
     if exposed:
         raise RuntimeError(
-            "trusted-host CodeAgent cannot start with control-plane secrets in the worker "
+            "trusted-host CodingAgent cannot start with control-plane secrets in the worker "
             f"environment: {', '.join(exposed)}"
         )
 

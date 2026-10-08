@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from pydantic import ValidationError
 
-from app.contracts.protocol import InitialResult, Succeeded
+from app.contracts.protocol import InitialTaskResult, Succeeded
 from app.contracts.result_models import ResultPending
 from app.control.config import ServeSettings
 from app.control.gateway import WorkerGateway
@@ -24,7 +24,7 @@ class Inbox(RecordingStore):
         self.pages = []
         for i in range(1, count + 1):
             message = Succeeded(job_id=i, assignment_token="token", connection_epoch="epoch",
-                result=InitialResult(session_id="session", last_message="done", exit_code=0))
+                result=InitialTaskResult(session_id="session", last_message="done", exit_code=0))
             self.jobs[i] = self.job.model_copy(update={
                 "id": i, "flow_id": i, "state": JobState.RUNNING,
                 "result_payload": message.model_dump(mode="json"),

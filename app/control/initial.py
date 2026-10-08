@@ -1,13 +1,13 @@
 """Read-only INITIAL delivery checks shared by result application and PR reopening."""
 
-from app.contracts.protocol import InitialResult
+from app.contracts.protocol import InitialTaskResult
 from app.domain.models import Attempt, DeliveryState, FlowDelivery, FlowToolCall, Job
 
 
 def initial_delivery_mismatch(
     job: Job,
     attempt: Attempt,
-    result: InitialResult,
+    result: InitialTaskResult,
     delivery: FlowDelivery | None,
     tool_call: FlowToolCall | None,
 ) -> str | None:

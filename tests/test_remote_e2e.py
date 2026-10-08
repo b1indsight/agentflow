@@ -7,8 +7,8 @@ from app.contracts.protocol import (
     ExecutionResult,
     ExecutionTask,
     FlowToolResponse,
-    InitialResult,
     InitialTask,
+    InitialTaskResult,
     Succeeded,
 )
 from app.control.gateway import WorkerGateway
@@ -175,7 +175,7 @@ class RemoteCoordinator:
 
     def __init__(self, store: RemoteStore) -> None:
         self.store = store
-        self.result: InitialResult | None = None
+        self.result: InitialTaskResult | None = None
         self.tool_calls = 0
 
     async def prepare(self, job: Job) -> ExecutionTask | JobState:
@@ -206,7 +206,7 @@ class RemoteCoordinator:
         job = self.store.get_job(job_id)
         assert job is not None and job.result_payload is not None
         result = Succeeded.model_validate(job.result_payload).result
-        assert isinstance(result, InitialResult)
+        assert isinstance(result, InitialTaskResult)
         self.result = result
         self.store.complete_persisted_result(job.id, JobState.DONE)
         return JobState.DONE
@@ -231,7 +231,7 @@ class FakeExecutor:
             ),
         )
         assert isinstance(tool, OpenedDelivery) and tool.pr_number == 17
-        return InitialResult(session_id="session-1", last_message="done", exit_code=0)
+        return InitialTaskResult(session_id="session-1", last_message="done", exit_code=0)
 
 
 @pytest.mark.asyncio

@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field
 
-from app.contracts.protocol import RevisionResult
+from app.contracts.protocol import RevisionTaskResult
 from app.contracts.result_models import CommentEffect, Effect, ResolveEffect, ThreadReplyEffect
 from app.domain.github_models import ReviewComment, ReviewThread
 from app.domain.models import FeedbackRef, Flow, ReviewItemKind
@@ -38,7 +38,7 @@ class ResolutionNotes:
 
 
 def plan_resolution(
-    flow: Flow, number: int, batch: ReviewBatch, result: RevisionResult,
+    flow: Flow, number: int, batch: ReviewBatch, result: RevisionTaskResult,
     historical: list[ReviewFeedback],
 ) -> ResolutionNotes:
     """Freeze one reply and one resolution check per mapped thread; keep unmapped feedback pending."""

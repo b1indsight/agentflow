@@ -168,7 +168,7 @@ curl -i https://hooks.example.com/docs
 | webhook 返回 404 | hostname、精确 `/webhook` 路径和配置匹配顺序 |
 | worker 不在线 | identity/token、连接地址，以及是否错误继承了 control secret |
 | delivery 成功但没有 Flow | allowlist、触发事件/标签、App 安装仓库及 serve 日志 |
-| CodeAgent/Judge 失败 | worker 的工具链、独立认证、模型配置及 Flow 错误记录 |
+| CodingAgent/Judge 失败 | worker 的工具链、独立认证、模型配置及 Flow 错误记录 |
 
 前台进程用各自终端的 Ctrl-C 停止。维护前确认正在执行的 Flow，并保留数据库与 worker
 持久目录；当前 `flow cancel` 尚不保证终止正在运行的 agent，不能把取消当成 drain。

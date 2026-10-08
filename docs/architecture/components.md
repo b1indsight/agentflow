@@ -6,7 +6,7 @@
 
 `domain/` 保存领域事实、端口与纯策略；`contracts/` 在这些类型上定义跨进程消息与冻结结果。
 `persistence/` 拥有 SQL 和事务，`github/` 拥有 GitHub SDK/GraphQL 适配，两者不反向依赖编排层。
-`control/` 组合仓储、GitHub、协议与插件，负责工作流、Judge 决策和外部副作用；`worker/` 组合协议、CodeAgent
+`control/` 组合仓储、GitHub、协议与插件，负责工作流、Judge 决策和外部副作用；`worker/` 组合协议、CodingAgent
 执行器及 VCS，不加载 control、数据库或 GitHub SDK 实现。配置与 CLI 保留原入口。
 
 `telemetry/logging.py` 只提供通用日志配置；`telemetry/metrics.py` 由控制端使用，并调用
@@ -88,7 +88,7 @@ M2 已接入有界 Issue/PR/patch/讨论快照、线程/comment 映射与原线�
 serve 的 `WorkerGateway` 校验每个 identity 的 bearer token，维护多会话 registry，并用随机 connection epoch 与
 assignment token 对 Started、Heartbeat 和结果做四元组 fencing。每个 worker 是单槽，PostgreSQL 按 FIFO、
 worker `last_assigned_at` 和 Flow execution binding 事务化领取任务。worker 的 `WorkerClient` 主动连接并指数退避；
-`WorkerExecutor` 只依赖 CodeAgent 和 Flow repo/VCS helpers，不导入 Store、FastAPI 或 GitHub。
+`WorkerExecutor` 只依赖 CodingAgent 和 Flow repo/VCS helpers，不导入 Store、FastAPI 或 GitHub。
 
 不同 identity 可并发在线；同 identity 新连接取得新 epoch 并关闭旧 socket，数据库条件保证旧连接最终失效。
 任务未 Started 断线后保留到 lease 到期再 requeue；Started job 进入 RECOVERING，只允许原 identity 在 grace 内恢复，
@@ -102,7 +102,7 @@ worker socket 与 executor 解耦，root 内原子 journal 在 ack 前保存进�
 
 ## 4.4 Codex Driver
 
-`CodexAgent` 已实现 `CodeAgent` 端口的 `start` / `resume`：
+`CodexAgent` 已实现 `CodingAgent` 端口的 `start` / `resume`：
 
 - start 仅在显式 `FLOWTOOL_TRUSTED_HOST_EXECUTION=true` 时使用
   `codex exec <prompt> --json -C <flow-repo> -s danger-full-access`；
@@ -214,7 +214,7 @@ head PR 查询和 capability 已接入 INITIAL；M2 原线程回复/resolve 已�
 
 - initial prompt 包含 issue 标题/正文、首个 `AGENTS.md` 或 `CLAUDE.md`、VCS 指引和硬约束；
 - revision prompt 包含 Judge instruction、冻结批次的 item/version、inline path/diff hunk/original commit id、
-  原 Issue、交付基线、此前 summary/open_points、VCS 指引和 `CodexResult` 输出约定；有冻结 PR context 时一并传入。
+  原 Issue、交付基线、此前 summary/open_points、VCS 指引和 `RevisionCodingOutput` 输出约定；有冻结 PR context 时一并传入。
 
 INITIAL 已使用 GitHub Issue 的真实标题与正文；冻结 PR context 包含有界 patch 和讨论，不含 CI 状态。
 F4 的完整线程映射由 control 持有，遵循当前 worker v12 契约。issue/PR 文本是不可信输入，必须保留明确的数据/指令边界。

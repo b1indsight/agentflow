@@ -1,9 +1,9 @@
-"""Ephemeral Git credential environment shared by CodeAgent and remote-ref verification."""
+"""Ephemeral Git credential environment shared by CodingAgent and remote-ref verification."""
 
-from app.domain.models import CodeAgentContext
+from app.domain.models import CodingExecutionContext
 
 
-def git_credential_environment(context: CodeAgentContext) -> dict[str, str]:
+def git_credential_environment(context: CodingExecutionContext) -> dict[str, str]:
     """Supply the current capability without placing a token in argv or repository config."""
     if context.push_token is None:
         return {}
