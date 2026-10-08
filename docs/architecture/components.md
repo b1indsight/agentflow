@@ -246,3 +246,8 @@ adapter/控制流已通过自动化，真实 provider 的语义准确性仍待 s
 Runtime 创建一个实例供 Client/Executor 共用；Client 保留连接和执行 Task，Executor 保留任务编排。
 会话状态继续写入 `assignment-journal.json`（version=3），历史正文继续从 Codex JSONL 读取。
 历史解析与限流由 `history.py` 处理，查询允许读取 control 明确指定的既往会话，不局限于当前 assignment。
+
+
+WorkerClient 在 `_receive_message()` 统一解析 WebSocket 消息，历史查询并发执行并在原连接回复；
+其他任务消息继续进入执行/恢复流程。每条连接最多 4 个历史查询，连接结束时取消并回收查询任务。
+`history.py` 继续提供历史解析、分页和读取限制，由 WorkerSession 提供查询入口；无额外连接包装层。

@@ -1,5 +1,6 @@
 import asyncio
 import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -10,7 +11,8 @@ from app.contracts.protocol import (
     Registered,
     parse_worker_message,
 )
-from app.worker.history_connection import HistoryConnection
+from app.worker.client import WorkerClient
+from app.worker.session import WorkerSession
 
 
 class Connection:
@@ -26,24 +28,27 @@ class Connection:
 
 
 @pytest.mark.asyncio
-async def test_query_does_not_block_execution_messages() -> None:
+async def test_query_does_not_block_execution_messages(tmp_path) -> None:
     connection = Connection()
     started, release = threading.Event(), threading.Event()
 
-    class History:
+    class Session(WorkerSession):
         def read(self, flow_id, sessions, cursor, limit):
             started.set()
             assert release.wait(timeout=5)
             return ConversationPage(flow_id=flow_id)
 
-    wrapper = HistoryConnection(connection, History())
+    client = WorkerClient(worker_id="worker-1", worker_token="token", serve_ws_url="unused",
+                          executor=SimpleNamespace(), session=Session(tmp_path))
     query = ConversationQuery(request_id="q1", connection_epoch="e1", flow_id=42, sessions=[])
     await connection.incoming.put(query.model_dump_json())
     registered = Registered(connection_epoch="e1", heartbeat_interval=10).model_dump_json()
     await connection.incoming.put(registered)
+    running = asyncio.create_task(client.run_connection(connection))
     try:
-        assert await wrapper.recv() == registered
+        await connection.outgoing.get()  # Registration request.
         assert await asyncio.to_thread(started.wait, 5)
+        assert client.connected
         release.set()
         result = parse_worker_message(await asyncio.wait_for(connection.outgoing.get(), 5))
         assert isinstance(result, ConversationResult)
@@ -52,4 +57,5 @@ async def test_query_does_not_block_execution_messages() -> None:
         assert result.page.flow_id == 42
     finally:
         release.set()
-        await wrapper.close()
+        running.cancel()
+        await asyncio.gather(running, return_exceptions=True)
