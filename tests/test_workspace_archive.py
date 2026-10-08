@@ -17,11 +17,11 @@ from app.contracts.protocol import (
 )
 from app.domain.models import JobState
 from app.worker.executor import WorkerExecutor
-from app.worker.journal import JournalError, WorkerJournal
+from app.worker.session import SessionError, WorkerSession
 from app.worker.vcs import prepare_flow_repo
 from tests.test_vcs import _git_fixture
 from tests.test_worker_executor import RecordingAgent, RecordingToolCaller
-from tests.test_worker_journal import _assignment
+from tests.test_worker_session import _assignment
 
 
 def archive_assignment(job_id: int = 10) -> Assignment:
@@ -39,7 +39,7 @@ async def workspace(tmp_path: Path, *, start=True):
     managed_seed.parent.mkdir(parents=True)
     shutil.move(seed, managed_seed)
     repo = await prepare_flow_repo(managed_seed, 3)
-    journal = WorkerJournal(root)
+    journal = WorkerSession(root)
     journal.record_received(_assignment())
     journal.record_started()
     journal.record_terminal(Succeeded(
@@ -52,7 +52,7 @@ async def workspace(tmp_path: Path, *, start=True):
     if start:
         journal.record_started()
     executor = WorkerExecutor(root, RecordingAgent(),
-                              worker_id="worker-a", journal=journal)
+                              worker_id="worker-a", session=journal)
     return managed_seed, repo, journal, executor, assignment
 
 
@@ -105,7 +105,7 @@ async def test_cleanup_rejects_missing_ownership_or_unsafe_target(tmp_path, case
         }[case]
         task = task.model_copy(update={field: value})
 
-    with pytest.raises((ValueError, JournalError), match="archive|cleanup|repository"):
+    with pytest.raises((ValueError, SessionError), match="archive|cleanup|repository"):
         await executor.execute(task, tool_caller=RecordingToolCaller())
     assert seed.is_dir()
 
@@ -142,8 +142,8 @@ async def test_copied_journal_cannot_authorize_another_worker_root(tmp_path):
     await executor.execute(assignment.task, tool_caller=RecordingToolCaller())
     another_root = tmp_path / "new-root"
     shutil.copytree(journal.path.parent, another_root)
-    moved = WorkerJournal(another_root)
-    with pytest.raises(JournalError, match="root"):
+    moved = WorkerSession(another_root)
+    with pytest.raises(SessionError, match="root"):
         moved.load()
 
 
@@ -158,7 +158,7 @@ async def test_unstarted_archive_reassignment_retains_original_root_proof(tmp_pa
 async def test_archive_with_lost_journal_does_not_adopt_an_existing_directory(tmp_path):
     seed, repo, journal, _executor, assignment = await workspace(tmp_path)
     journal.path.unlink()
-    with pytest.raises(JournalError, match="original Flow"):
+    with pytest.raises(SessionError, match="original Flow"):
         journal.record_received(assignment)
     assert seed.is_dir() and repo.is_dir()
 

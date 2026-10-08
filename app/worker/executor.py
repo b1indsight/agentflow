@@ -32,7 +32,7 @@ from app.domain.models import (
 )
 from app.domain.ports import CodingAgent
 from app.worker.context_builder import build_initial_prompt, build_revision_prompt
-from app.worker.journal import WorkerJournal
+from app.worker.session import WorkerSession
 from app.worker.tools import FlowToolBroker, FlowToolCaller
 from app.worker.vcs import (
     VcsVerificationError,
@@ -63,13 +63,13 @@ class WorkerExecutor:
         code_agent: CodingAgent,
         *,
         worker_id: str,
-        journal: WorkerJournal,
+        session: WorkerSession,
         revision_timeout: float = 1200.0,
     ) -> None:
         self.worker_root = worker_root
         self.code_agent = code_agent
         self.worker_id = worker_id
-        self.journal = journal
+        self.session = session
         self.revision_timeout = revision_timeout
 
     async def execute(
@@ -91,7 +91,7 @@ class WorkerExecutor:
                 raise ValueError("archive repository identity does not match worker")
             repo_path = self._repo_path(task.repo)
             paths = flow_cleanup_paths(repo_path, task.flow_id, self.worker_root)
-            self.journal.verify_cleanup(task, repo_present=paths[0].is_dir())
+            self.session.verify_cleanup(task, repo_present=paths[0].is_dir())
             cleanup = await cleanup_flow_repo(repo_path, task.flow_id, worker_root=self.worker_root)
             return ArchiveResult(**task.model_dump(), cleanup=cleanup)
         raise TypeError(f"unsupported execution task: {type(task).__name__}")
@@ -212,7 +212,7 @@ class WorkerExecutor:
             schema_path = _write_output_schema(RevisionCodingOutput)
             run = None
             if task.session_id:
-                self.journal.begin_revision("resume")
+                self.session.begin_revision("resume")
                 try:
                     run = await self.code_agent.resume(
                         task.session_id, prompt, output_schema=schema_path, context=context,
@@ -220,8 +220,7 @@ class WorkerExecutor:
                 except SessionUnavailable:
                     invocation = RevisionExecutionRecord(mode="resume", session_id=task.session_id,
                                                     exit_code=1, failure="session_unavailable")
-                    result.invocations.append(invocation)
-                    self.journal.finish_invocation(invocation)
+                    result.invocations = self.session.finish_invocation(invocation)
                     # A rejection is insufficient if anything changed while resume was attempted.
                     fallback_context = await prepare_revision_context(
                         workspace, task.branch, task.expected_head_sha, context,
@@ -232,14 +231,13 @@ class WorkerExecutor:
             if run is None:
                 result.mode = "fallback"
                 result.session_generation += 1
-                self.journal.begin_revision("fallback")
+                self.session.begin_revision("fallback")
                 run = await self.code_agent.start(
                     prompt, workspace, output_schema=schema_path, context=context,
                 )
             invocation = RevisionExecutionRecord(mode=result.mode, session_id=run.session_id,
                                             exit_code=run.exit_code)
-            result.invocations.append(invocation)
-            self.journal.finish_invocation(invocation)
+            result.invocations = self.session.finish_invocation(invocation)
             result.session_id = run.session_id
             result.last_message = run.last_message
             if run.exit_code != 0:

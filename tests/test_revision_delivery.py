@@ -15,7 +15,7 @@ from app.domain.models import (
     VcsKind,
 )
 from app.worker.executor import WorkerExecutor
-from app.worker.journal import WorkerJournal
+from app.worker.session import WorkerSession
 from app.worker.vcs import flow_repo_path, prepare_flow_repo
 from tests.test_vcs import _git, _git_fixture
 from tests.test_worker_executor import RecordingToolCaller
@@ -55,7 +55,7 @@ async def revision_workspace(tmp_path):
         expires_at=datetime.now(UTC) + timedelta(minutes=30),
     ))
     from app.contracts.protocol import Assignment
-    journal = WorkerJournal(root)
+    journal = WorkerSession(root)
     journal.record_received(Assignment(job_id=1, flow_id=1, assignment_token="token",
                                       connection_epoch="epoch", task=task, secret=secret))
     journal.record_started()
@@ -98,7 +98,7 @@ async def test_revision_verifies_real_git_delivery(revision_workspace, behavior,
     # A successful process can leave unpushed or dirty work; neither closes review feedback.
     root, repo, task, secret = revision_workspace
     agent = RevisionAgent(repo, behavior)
-    result = await WorkerExecutor(root, agent, journal=WorkerJournal(root), worker_id="w").execute(task, secret, tool_caller=RecordingToolCaller())
+    result = await WorkerExecutor(root, agent, session=WorkerSession(root), worker_id="w").execute(task, secret, tool_caller=RecordingToolCaller())
     assert (result.exit_code == 0) is success
     assert agent.calls[0][1].push_token.get_secret_value() == "fresh-token"
     assert agent.calls[0][1].cwd == repo
@@ -118,7 +118,7 @@ async def test_fallback_only_when_execution_is_known_not_to_have_started(
     root, repo, task, secret = revision_workspace
     task = task.model_copy(update={"session_id": session})
     agent = RevisionAgent(repo, behavior)
-    result = await WorkerExecutor(root, agent, journal=WorkerJournal(root), worker_id="w").execute(task, secret, tool_caller=RecordingToolCaller())
+    result = await WorkerExecutor(root, agent, session=WorkerSession(root), worker_id="w").execute(task, secret, tool_caller=RecordingToolCaller())
     assert [call[0] for call in agent.calls] == expected
     if expected[-1] == "start":
         assert result.session_id == "new-session"
@@ -138,7 +138,7 @@ async def test_revision_preflight_rejects_before_model_execution(revision_worksp
     else:
         (repo / "uncommitted").write_text("keep me")
     agent = RevisionAgent(repo)
-    result = await WorkerExecutor(root, agent, journal=WorkerJournal(root), worker_id="w").execute(task, secret, tool_caller=RecordingToolCaller())
+    result = await WorkerExecutor(root, agent, session=WorkerSession(root), worker_id="w").execute(task, secret, tool_caller=RecordingToolCaller())
     assert result.exit_code != 0
     assert agent.calls == []
 
@@ -400,11 +400,11 @@ async def test_revision_checks_real_jj_repository(revision_workspace, behavior):
 @pytest.mark.parametrize("phase", ["resume", "fallback"])
 async def test_journal_prevents_restarting_an_interrupted_invocation(revision_workspace, phase):
     from app.contracts.protocol import Assignment, RevisionExecutionRecord
-    from app.worker.journal import JournalError, WorkerJournal
+    from app.worker.session import SessionError, WorkerSession
 
     root, repo, task, secret = revision_workspace
     root.mkdir(exist_ok=True)
-    journal = WorkerJournal(root)
+    journal = WorkerSession(root)
     journal.record_received(Assignment(job_id=1, flow_id=1, assignment_token="token",
                                         connection_epoch="epoch", task=task, secret=secret))
     journal.record_started()
@@ -414,9 +414,9 @@ async def test_journal_prevents_restarting_an_interrupted_invocation(revision_wo
                                                       exit_code=1, failure="session_unavailable"))
         journal.begin_revision("fallback")
     agent = RevisionAgent(repo, "missing")
-    restarted = WorkerJournal(root)
-    with pytest.raises(JournalError, match="restarted|already been attempted"):
-        await WorkerExecutor(root, agent, worker_id="w", journal=restarted).execute(task, secret, tool_caller=RecordingToolCaller())
+    restarted = WorkerSession(root)
+    with pytest.raises(SessionError, match="restarted|already been attempted"):
+        await WorkerExecutor(root, agent, worker_id="w", session=restarted).execute(task, secret, tool_caller=RecordingToolCaller())
     assert agent.calls == []
     assert "fresh-token" not in journal.path.read_text()
     assert restarted.load().revision_phase == phase
@@ -433,7 +433,7 @@ async def test_dirty_repository_after_session_rejection_does_not_fallback(revisi
             raise SessionUnavailable("rejected")
 
     agent = DirtyRejection(repo)
-    result = await WorkerExecutor(root, agent, journal=WorkerJournal(root), worker_id="w").execute(task, secret, tool_caller=RecordingToolCaller())
+    result = await WorkerExecutor(root, agent, session=WorkerSession(root), worker_id="w").execute(task, secret, tool_caller=RecordingToolCaller())
     assert result.exit_code != 0
     assert agent.calls == []
     assert (repo / "uncertain-work").read_text() == "preserve"

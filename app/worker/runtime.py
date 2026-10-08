@@ -16,7 +16,7 @@ from app.worker.codex_driver import CodexAgent
 from app.worker.config import WorkerSettings
 from app.worker.executor import WorkerExecutor
 from app.worker.health import HealthFile
-from app.worker.journal import WorkerJournal
+from app.worker.session import WorkerSession
 
 _CONTROL_ENVIRONMENT_KEYS = frozenset(
     {
@@ -97,7 +97,7 @@ class WorkerRuntime:
         self.settings = settings
         configure_logging("worker", self.settings.log_format)
         self.root_lock = WorkerRootLock(self.settings.worker_root, self.settings.worker_id)
-        journal = WorkerJournal(self.settings.worker_root)
+        session = WorkerSession(self.settings.worker_root)
         executor = WorkerExecutor(
             self.settings.worker_root,
             CodexAgent(
@@ -105,7 +105,7 @@ class WorkerRuntime:
                 timeout=self.settings.codex_run_timeout_seconds,
             ),
             worker_id=self.settings.worker_id,
-            journal=journal,
+            session=session,
             revision_timeout=self.settings.codex_run_timeout_seconds,
         )
         self.client = WorkerClient(
@@ -113,7 +113,7 @@ class WorkerRuntime:
             worker_token=self.settings.worker_token.get_secret_value(),
             serve_ws_url=self.settings.serve_ws_url,
             executor=executor,
-            journal=journal,
+            session=session,
             reconnect_min_backoff=self.settings.reconnect_min_backoff,
             reconnect_max_backoff=self.settings.reconnect_max_backoff,
             reconnect_jitter=self.settings.reconnect_jitter,

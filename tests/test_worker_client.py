@@ -22,7 +22,7 @@ from app.contracts.protocol import (
 from app.domain.delivery_models import OpenedDelivery
 from app.domain.models import JobState, VcsKind, VcsOutcome
 from app.worker.client import FlowToolCallError, WorkerClient
-from app.worker.journal import WorkerJournal
+from app.worker.session import WorkerSession
 from app.worker.tools import FlowToolCaller
 
 
@@ -99,7 +99,7 @@ class ScriptedConnection:
 @pytest.mark.asyncio
 async def test_client_acknowledges_and_executes_one_assignment(tmp_path) -> None:
     connection = ScriptedConnection()
-    client = WorkerClient(journal=WorkerJournal(tmp_path),
+    client = WorkerClient(session=WorkerSession(tmp_path),
         worker_id="worker-1",
         worker_token="worker-secret",
         serve_ws_url="ws://serve/internal/workers/connect",
@@ -118,8 +118,8 @@ async def test_client_acknowledges_and_executes_one_assignment(tmp_path) -> None
 @pytest.mark.parametrize("fails", [False, True])
 async def test_worker_redacts_echoed_push_capability_before_journal_and_wire(tmp_path, fails):
     from app.contracts.protocol import Failed, parse_server_message
-    from app.worker.journal import WorkerJournal
-    from tests.test_worker_journal import _assignment
+    from app.worker.session import WorkerSession
+    from tests.test_worker_session import _assignment
 
     class EchoingExecutor:
         async def execute(self, task, secret=None, *, tool_caller=None):
@@ -127,7 +127,7 @@ async def test_worker_redacts_echoed_push_capability_before_journal_and_wire(tmp
                 raise RuntimeError("command echoed push-secret")
             return InitialTaskResult(session_id="session", last_message="push-secret", exit_code=0)
 
-    class InspectJournal(WorkerJournal):
+    class InspectJournal(WorkerSession):
         def record_terminal(self, terminal):
             assert "push-secret" not in terminal.model_dump_json()
             return super().record_terminal(terminal)
@@ -139,7 +139,7 @@ async def test_worker_redacts_echoed_push_capability_before_journal_and_wire(tmp
     connection.messages[1] = assignment.model_dump_json()
     client = WorkerClient(worker_id="worker-1", worker_token="worker-secret",
                            serve_ws_url="ws://serve/internal/workers/connect",
-                           executor=EchoingExecutor(), journal=InspectJournal(tmp_path))
+                           executor=EchoingExecutor(), session=InspectJournal(tmp_path))
     with pytest.raises(ConnectionError, match="script complete"):
         await client.run_connection(connection)
     terminal = parse_worker_message(connection.sent[2])
@@ -224,7 +224,7 @@ class ToolConnection:
 @pytest.mark.asyncio
 async def test_client_multiplexes_tool_call_while_executor_is_running(tmp_path) -> None:
     executor = ToolCallingExecutor()
-    client = WorkerClient(journal=WorkerJournal(tmp_path),
+    client = WorkerClient(session=WorkerSession(tmp_path),
         worker_id="worker-1",
         worker_token="worker-secret",
         serve_ws_url="ws://serve/internal/workers/connect",
@@ -267,14 +267,14 @@ class BrokenHeartbeatConnection:
 
 @pytest.mark.asyncio
 async def test_heartbeat_failure_preserves_the_running_executor_for_reconnect(tmp_path) -> None:
-    from app.worker.journal import WorkerJournal
+    from app.worker.session import WorkerSession
     executor = CancellableExecutor()
     client = WorkerClient(
         worker_id="worker-1",
         worker_token="worker-secret",
         serve_ws_url="ws://unused",
         executor=executor,
-        journal=WorkerJournal(tmp_path),
+        session=WorkerSession(tmp_path),
     )
     assignment = Assignment(
         job_id=5,
@@ -331,8 +331,8 @@ async def test_heartbeat_failure_preserves_the_running_executor_for_reconnect(tm
 
 @pytest.mark.parametrize("fails", [False, True])
 async def test_completed_disconnected_executor_is_journaled_before_recovery(tmp_path, fails):
-    from app.worker.journal import WorkerJournal
-    from tests.test_worker_journal import _assignment
+    from app.worker.session import WorkerSession
+    from tests.test_worker_session import _assignment
 
     # Execution finishes after the driver lost its connection; registration must carry its result.
     class CompletedExecutor:
@@ -341,14 +341,14 @@ async def test_completed_disconnected_executor_is_journaled_before_recovery(tmp_
                 raise RuntimeError("push-secret was echoed")
             return InitialTaskResult(session_id="session", last_message="push-secret", exit_code=0)
 
-    journal = WorkerJournal(tmp_path)
+    journal = WorkerSession(tmp_path)
     assignment = _assignment()
     journal.record_received(assignment)
     journal.record_started()
     executor = CompletedExecutor()
     client = WorkerClient(worker_id="worker-a", worker_token="secret", serve_ws_url="ws://test",
-                          executor=executor, journal=journal)
-    client._assignment = assignment
+                          executor=executor, session=journal)
+    client.session.assignment = assignment
     execution = asyncio.create_task(executor.execute(assignment.task, assignment.secret))
     client._execution = execution
     await asyncio.gather(execution, return_exceptions=True)
