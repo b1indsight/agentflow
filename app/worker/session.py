@@ -1,4 +1,4 @@
-"""Durable single-assignment journal owned by one worker root."""
+"""Persistent worker session: execution state, recovery evidence and conversation access."""
 
 from __future__ import annotations
 
@@ -10,27 +10,31 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
+from app.contracts.conversation import ConversationPage, SessionRef
 from app.contracts.protocol import (
     ArchiveTask,
     Assignment,
+    ExecutionResult,
     ExecutionStopped,
     Failed,
+    RecoveryDescriptor,
     RevisionExecutionRecord,
     StopAccepted,
     Succeeded,
     terminal_digest,
 )
 from app.domain.models import JobState
+from app.worker.history import CodexHistory
 
 TerminalMessage = Succeeded | Failed
 _TERMINAL: TypeAdapter[TerminalMessage] = TypeAdapter(TerminalMessage)
 
 
-class JournalError(RuntimeError):
+class SessionError(RuntimeError):
     """The persisted assignment journal cannot be safely interpreted."""
 
 
-class JournalRecord(BaseModel):
+class SessionState(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     version: Literal[3] = 3
@@ -51,33 +55,100 @@ class JournalRecord(BaseModel):
     stopped: ExecutionStopped | None = None
 
 
-class WorkerJournal:
-    """Persist assignment progress atomically until the serve acknowledges a result."""
+class WorkerSession:
+    """Own local assignment state and its durable evidence across transport reconnects."""
 
     def __init__(self, worker_root: Path) -> None:
         self.path = worker_root / "assignment-journal.json"
+        self.assignment: Assignment | None = None
+        self._history = CodexHistory()
 
-    def load(self) -> JournalRecord | None:
+    def read(self, flow_id: int, sessions: list[SessionRef], cursor: str | None, limit: int) -> ConversationPage:
+        """Read only the requested threads; the current assignment is not a history index."""
+        return self._history.read(flow_id, sessions, cursor, limit)
+
+    def recovery(self, *, executor_active: bool) -> RecoveryDescriptor | None:
+        record = self.load()
+        if record is None:
+            return None
+        return RecoveryDescriptor(
+            job_id=record.job_id, assignment_token=record.assignment_token,
+            state=record.state, result_digest=record.result_digest,
+            stop_request_id=record.stopped.request_id if record.stopped else None,
+            archive_resume=record.archive_task is not None and record.state == "started",
+            executor_active=record.state == "started" and executor_active,
+        )
+
+    def validate_recovery(self, job_id: int, token: str) -> None:
+        record = self._required()
+        if (record.job_id, record.assignment_token) != (job_id, token):
+            raise SessionError("recovery response does not match the worker session")
+
+    def resume(self, connection_epoch: str, *, executor_active: bool) -> Assignment:
+        """Rebind a live execution; only archive cleanup can resume after process loss."""
+        if self.assignment is None or not executor_active:
+            record = self._required()
+            if record.state != "started" or record.archive_task is None:
+                raise SessionError("serve resumed an assignment without a live executor")
+            self.assignment = Assignment(
+                job_id=record.job_id, flow_id=record.flow_id,
+                assignment_token=record.assignment_token, connection_epoch=connection_epoch,
+                task=record.archive_task,
+            )
+        self.assignment = self.assignment.model_copy(update={"connection_epoch": connection_epoch})
+        return self.assignment
+
+    def replay(self, connection_epoch: str) -> TerminalMessage:
+        record = self._required()
+        if record.terminal is None:
+            raise SessionError("serve requested a result missing from the session")
+        return record.terminal.model_copy(update={"connection_epoch": connection_epoch})
+
+    def complete(self, outcome: ExecutionResult | Exception) -> TerminalMessage:
+        """Redact the ephemeral push capability before persisting any execution outcome."""
+        assignment = self.assignment
+        if assignment is None:
+            raise SessionError("active assignment is missing")
+        if isinstance(outcome, Exception):
+            terminal: TerminalMessage = Failed(
+                job_id=assignment.job_id, assignment_token=assignment.assignment_token,
+                connection_epoch=assignment.connection_epoch, error=str(outcome),
+            )
+        else:
+            terminal = Succeeded(
+                job_id=assignment.job_id, assignment_token=assignment.assignment_token,
+                connection_epoch=assignment.connection_epoch, result=outcome,
+            )
+        if assignment.secret is not None:
+            terminal = type(terminal).model_validate_json(
+                terminal.model_dump_json().replace(
+                    assignment.secret.push.token.get_secret_value(), "[REDACTED]",
+                )
+            )
+        self.record_terminal(terminal)
+        return terminal
+
+    def load(self) -> SessionState | None:
         if not self.path.exists():
             return None
         try:
-            record = JournalRecord.model_validate_json(self.path.read_text())
+            record = SessionState.model_validate_json(self.path.read_text())
         except (OSError, ValidationError, ValueError) as exc:
-            raise JournalError(f"invalid worker journal at {self.path}") from exc
+            raise SessionError(f"invalid worker journal at {self.path}") from exc
         if record.root_identity != self._root_identity():
-            raise JournalError("worker journal belongs to another worker root")
+            raise SessionError("worker journal belongs to another worker root")
         return record
 
-    def record_received(self, assignment: Assignment) -> JournalRecord:
+    def record_received(self, assignment: Assignment) -> SessionState:
         previous = self.load()
         archive = assignment.task if isinstance(assignment.task, ArchiveTask) else None
         if archive is not None and (previous is None or previous.flow_id != archive.flow_id
                                     or not (previous.acknowledged or previous.state == "received")):
-            raise JournalError("archive requires the original Flow's worker journal")
+            raise SessionError("archive requires the original Flow's worker journal")
         if (previous is not None and previous.archive_task is not None
                 and (previous.state not in {"received", "failed"} or previous.archive_task != archive)):
-            raise JournalError("cannot replace unacknowledged archive cleanup evidence")
-        record = JournalRecord(
+            raise SessionError("cannot replace unacknowledged archive cleanup evidence")
+        record = SessionState(
             job_id=assignment.job_id,
             flow_id=assignment.flow_id,
             assignment_token=assignment.assignment_token,
@@ -88,13 +159,14 @@ class WorkerJournal:
             cleanup_verified=bool(previous and previous.cleanup_verified),
         )
         self._write(record)
+        self.assignment = assignment
         return record
 
     def record_stopped(self, receipt: ExecutionStopped) -> None:
         record = self._required()
         if (record.job_id, record.flow_id, record.assignment_token, record.execution_nonce) != (
                 receipt.job_id, receipt.flow_id, receipt.assignment_token, receipt.execution_nonce):
-            raise JournalError("stop receipt does not match owned execution")
+            raise SessionError("stop receipt does not match owned execution")
         record.stopped = receipt
         record.acknowledged = False
         self._write(record)
@@ -103,18 +175,19 @@ class WorkerJournal:
         record = self._required()
         if record.stopped is None or any(getattr(record.stopped, field) != getattr(accepted, field)
                                         for field in ('request_id', 'flow_id', 'job_id', 'assignment_token')):
-            raise JournalError("stop acknowledgement does not match receipt")
+            raise SessionError("stop acknowledgement does not match receipt")
         record.acknowledged = True
         self._write(record)
+        self.assignment = None
 
     def verify_cleanup(self, task: ArchiveTask, *, repo_present: bool) -> None:
         """Persist ownership before deletion; only that proof permits an absent workspace."""
         record = self._required()
         if record.state != "started" or record.archive_task != task:
-            raise JournalError("archive cleanup does not match the journal assignment")
+            raise SessionError("archive cleanup does not match the journal assignment")
         if not record.cleanup_verified:
             if not repo_present:
-                raise JournalError("archive repository is absent without verified cleanup evidence")
+                raise SessionError("archive repository is absent without verified cleanup evidence")
             record.cleanup_verified = True
             self._write(record)
 
@@ -124,10 +197,10 @@ class WorkerJournal:
         stat = root.stat()
         return str(root), stat.st_dev, stat.st_ino
 
-    def record_started(self) -> JournalRecord:
+    def record_started(self) -> SessionState:
         record = self._required()
         if record.state != "received":
-            raise JournalError(f"cannot start journal in {record.state} state")
+            raise SessionError(f"cannot start journal in {record.state} state")
         record.state = "started"
         self._write(record)
         return record
@@ -136,29 +209,30 @@ class WorkerJournal:
         """Durably consume the single fallback before starting another process."""
         record = self._required()
         if record.state != "started" or record.fallback_consumed:
-            raise JournalError("revision invocation cannot be safely restarted")
+            raise SessionError("revision invocation cannot be safely restarted")
         if phase == "resume" and record.revision_phase is not None:
-            raise JournalError("resume has already been attempted")
+            raise SessionError("resume has already been attempted")
         record.revision_phase = phase
         record.fallback_consumed = phase == "fallback"
         self._write(record)
 
-    def finish_invocation(self, invocation: RevisionExecutionRecord) -> None:
+    def finish_invocation(self, invocation: RevisionExecutionRecord) -> list[RevisionExecutionRecord]:
         record = self._required()
         if record.state != "started" or record.revision_phase != invocation.mode:
-            raise JournalError("invocation does not match durable revision phase")
+            raise SessionError("invocation does not match durable revision phase")
         record.invocations.append(invocation)
         self._write(record)
+        return record.invocations
 
-    def record_terminal(self, terminal: TerminalMessage) -> JournalRecord:
+    def record_terminal(self, terminal: TerminalMessage) -> SessionState:
         record = self._required()
         if record.state not in ("started", "succeeded", "failed"):
-            raise JournalError(f"cannot finish journal in {record.state} state")
+            raise SessionError(f"cannot finish journal in {record.state} state")
         if (terminal.job_id, terminal.assignment_token) != (
             record.job_id,
             record.assignment_token,
         ):
-            raise JournalError("terminal result does not match the journal assignment")
+            raise SessionError("terminal result does not match the journal assignment")
         payload = terminal.model_dump(mode="json")
         record.state = "succeeded" if isinstance(terminal, Succeeded) else "failed"
         record.result_digest = terminal_digest(terminal)
@@ -169,34 +243,38 @@ class WorkerJournal:
     def acknowledge(self, job_id: int, state: JobState) -> None:
         record = self._required()
         if record.job_id != job_id or record.state not in ("succeeded", "failed"):
-            raise JournalError("result acknowledgement does not match terminal journal")
+            raise SessionError("result acknowledgement does not match terminal journal")
         if state not in (JobState.DONE, JobState.FAILED):
-            raise JournalError("result acknowledgement is not terminal")
+            raise SessionError("result acknowledgement is not terminal")
         if record.archive_task is None or state is JobState.FAILED:
             # Preserve root/Flow provenance between jobs and cleanup proof after partial failure.
             record.acknowledged = True
             self._write(record)
+            self.assignment = None
             return
         self.path.unlink()
+        self.assignment = None
 
     def clear_rejected(self, job_id: int) -> None:
         record = self._required()
         if record.job_id != job_id:
-            raise JournalError("recovery rejection does not match journal")
+            raise SessionError("recovery rejection does not match journal")
         if record.state == "received":
             # No executor ran. Keep the root/Flow provenance when merge supersedes this command.
+            self.assignment = None
             return
         if record.archive_task is not None:
-            raise JournalError("archive recovery rejected; retain cleanup evidence for reconciliation")
+            raise SessionError("archive recovery rejected; retain cleanup evidence for reconciliation")
         self.path.unlink()
+        self.assignment = None
 
-    def _required(self) -> JournalRecord:
+    def _required(self) -> SessionState:
         record = self.load()
         if record is None:
-            raise JournalError("worker journal is missing")
+            raise SessionError("worker journal is missing")
         return record
 
-    def _write(self, record: JournalRecord) -> None:
+    def _write(self, record: SessionState) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = record.model_dump_json()
         temporary: str | None = None

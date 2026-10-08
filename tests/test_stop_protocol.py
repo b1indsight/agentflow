@@ -19,7 +19,7 @@ from app.control.service import ControlService
 from app.domain.models import JobKind
 from app.persistence.stop_store import StopStore
 from app.worker.client import WorkerClient, WorkerProtocolError
-from app.worker.journal import WorkerJournal
+from app.worker.session import WorkerSession
 from app.worker.vcs import _run
 
 
@@ -40,7 +40,7 @@ class AckConnection:
 
 async def test_stop_kills_owned_process_and_child_then_replays_lost_ack(tmp_path):
     work = assignment()
-    journal = WorkerJournal(tmp_path)
+    journal = WorkerSession(tmp_path)
     journal.record_received(work)
     journal.record_started()
     ready = tmp_path / 'pids'
@@ -52,8 +52,8 @@ async def test_stop_kills_owned_process_and_child_then_replays_lost_ack(tmp_path
         async with asyncio.timeout(5):
             while not ready.exists(): await asyncio.sleep(0.01)
         client = WorkerClient(worker_id='w', worker_token='secret', serve_ws_url='unused',
-                              executor=SimpleNamespace(), journal=journal)
-        client._assignment, client._execution, client._connection_epoch = work, execution, 'epoch'
+                              executor=SimpleNamespace(), session=journal)
+        client.session.assignment, client._execution, client._connection_epoch = work, execution, 'epoch'
         request = StopExecution(job_id=1, flow_id=1, assignment_token='token', connection_epoch='epoch', request_id='stop')
         with pytest.raises(ConnectionError): await client._handle_stop(AckConnection(request, lost=True), request)
         assert execution.cancelled()
@@ -67,7 +67,7 @@ async def test_stop_kills_owned_process_and_child_then_replays_lost_ack(tmp_path
                     except ProcessLookupError: break
                     await asyncio.sleep(0.01)
         restarted = WorkerClient(worker_id='w', worker_token='secret', serve_ws_url='unused',
-                                 executor=SimpleNamespace(), journal=WorkerJournal(tmp_path))
+                                 executor=SimpleNamespace(), session=WorkerSession(tmp_path))
         request = request.model_copy(update={'connection_epoch': 'new'})
         restarted._connection_epoch = 'new'
         connection = AckConnection(request)
@@ -81,11 +81,11 @@ async def test_stop_kills_owned_process_and_child_then_replays_lost_ack(tmp_path
 
 async def test_restarted_worker_does_not_infer_stopped_from_absent_task(tmp_path):
     work = assignment()
-    journal = WorkerJournal(tmp_path)
+    journal = WorkerSession(tmp_path)
     journal.record_received(work)
     journal.record_started()
     client = WorkerClient(worker_id='w', worker_token='secret', serve_ws_url='unused',
-                          executor=SimpleNamespace(), journal=journal)
+                          executor=SimpleNamespace(), session=journal)
     client._connection_epoch = 'epoch'
     request = StopExecution(job_id=1, flow_id=1, assignment_token='token', connection_epoch='epoch', request_id='stop')
     with pytest.raises(WorkerProtocolError, match='ownership is unknown'):
@@ -139,7 +139,7 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path):
     gateway = WorkerGateway(store, Coordinator(), worker_tokens={'w': 'secret'},
                             heartbeat_interval=0.01, poll_interval=0.01, execution_control=StopStore(store))
     client = WorkerClient(worker_id='w', worker_token='secret', serve_ws_url='unused',
-                          executor=Executor(), journal=WorkerJournal(tmp_path))
+                          executor=Executor(), session=WorkerSession(tmp_path))
     server = asyncio.create_task(gateway.handle(Socket()))
     worker = asyncio.create_task(client.run_connection(Connection()))
     try:

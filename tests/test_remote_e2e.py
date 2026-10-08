@@ -15,7 +15,7 @@ from app.control.gateway import WorkerGateway
 from app.domain.delivery_models import OpenedDelivery
 from app.domain.models import FlowDelivery, Job, JobKind, JobState, VcsKind, VcsOutcome
 from app.worker.client import WorkerClient
-from app.worker.journal import WorkerJournal
+from app.worker.session import WorkerSession
 from app.worker.tools import FlowToolCaller
 from tests.worker_fakes import NoPendingStops, connected_worker
 
@@ -247,7 +247,7 @@ async def test_control_gateway_and_worker_client_complete_one_remote_job(tmp_pat
         poll_interval=0.01,
     )
     executor = FakeExecutor()
-    client = WorkerClient(journal=WorkerJournal(tmp_path),
+    client = WorkerClient(session=WorkerSession(tmp_path),
         worker_id="worker-1",
         worker_token="worker-secret",
         serve_ws_url="ws://unused",

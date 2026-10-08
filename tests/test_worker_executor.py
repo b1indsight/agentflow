@@ -22,7 +22,7 @@ from app.domain.models import (
     Verdict,
 )
 from app.worker.executor import WorkerExecutor
-from app.worker.journal import WorkerJournal
+from app.worker.session import WorkerSession
 from tests.review_memory import judge_decision
 
 
@@ -98,7 +98,7 @@ def assignment_secret() -> AssignmentSecret:
 @pytest.mark.asyncio
 async def test_initial_with_delivery_channel_requires_push_capability(tmp_path: Path) -> None:
     executor = WorkerExecutor(
-        tmp_path, RecordingAgent(), worker_id="worker-1", journal=WorkerJournal(tmp_path)
+        tmp_path, RecordingAgent(), worker_id="worker-1", session=WorkerSession(tmp_path)
     )
 
     result = await executor.execute(
@@ -151,7 +151,7 @@ async def test_executor_runs_agent_without_store(
     )
     agent = RecordingAgent()
     executor = WorkerExecutor(
-        tmp_path, agent, worker_id="worker-1", journal=WorkerJournal(tmp_path)
+        tmp_path, agent, worker_id="worker-1", session=WorkerSession(tmp_path)
     )
 
     initial = await executor.execute(
@@ -189,7 +189,7 @@ async def test_initial_exit_zero_without_a_declared_backend_is_a_failure(
 
     monkeypatch.setattr("app.worker.executor.prepare_flow_repo", fake_workspace)
     monkeypatch.setattr("app.worker.executor.prepare_vcs_context", fake_context)
-    executor = WorkerExecutor(tmp_path, BackendlessAgent(), worker_id="worker-1", journal=WorkerJournal(tmp_path))
+    executor = WorkerExecutor(tmp_path, BackendlessAgent(), worker_id="worker-1", session=WorkerSession(tmp_path))
 
     result = await executor.execute(
         InitialTask(

@@ -237,3 +237,12 @@ control 的 `BubJudge` 启动独立 `judge_runner` 子进程，显式配置 bub 
 严格校验四类 verdict、有限 confidence、动作字段和 envelope 身份。结果持久保存模型/adapter 版本、
 context digest、reason/open_points；answer 使用同一个答案经现有副作用账本发布，不再调用模型。
 adapter/控制流已通过自动化，真实 provider 的语义准确性仍待 smoke 验收。
+
+
+### WorkerSession
+
+`app/worker/session.py` 统一 worker 本地会话状态：当前 assignment、持久化执行阶段、
+修订调用记录、终态脱敏/归档、恢复描述、停止/清理凭据及历史查询入口。
+Runtime 创建一个实例供 Client/Executor 共用；Client 保留连接和执行 Task，Executor 保留任务编排。
+会话状态继续写入 `assignment-journal.json`（version=3），历史正文继续从 Codex JSONL 读取。
+历史解析与限流由 `history.py` 处理，查询允许读取 control 明确指定的既往会话，不局限于当前 assignment。

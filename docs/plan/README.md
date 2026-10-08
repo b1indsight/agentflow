@@ -5,6 +5,8 @@
 
 ## 当前计划
 
+- [`worker-session.md`](worker-session.md) — PR #62：统一持久化会话状态、恢复及历史查询；既有测试、静态检查和构建通过；按用户要求删除新增的旧记录兼容测试。
+
 - [`control-triage.md`](control-triage.md) — PR #60：triage 已收敛为 control 的反馈批次前置判断，删除独立 job/领取/token/恢复；826 项 PostgreSQL 回归、静态检查、构建及三项消融通过。
 
 - [`package-responsibilities.md`](package-responsibilities.md) — PR #57：职责归包与日志隔离已实施，813 项 PostgreSQL 回归、构建及边界消融通过；独立审查无发现，待用户评审。

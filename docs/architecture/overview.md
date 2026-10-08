@@ -40,7 +40,7 @@ M0 已验收基础设施切片；M1 Issue→PR 与 M2 回喂循环已实现、�
                authenticated WebSockets
                        │       │
  ┌──────────────── remote workers (1..N) ──────────────────┐
- │ [Worker Client + Journal] → [Executor] → Codex          │
+ │ [Worker Client + Session] → [Executor] → Codex          │
  │                                      → Workspace / VCS   │
  └──────────────────────────────────────────────────────────┘
 ```

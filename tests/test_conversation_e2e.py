@@ -10,8 +10,7 @@ from app.control.conversation import ConversationService
 from app.control.gateway import WorkerGateway
 from app.domain.models import Attempt, Flow, FlowExecution, FlowState
 from app.worker.client import WorkerClient
-from app.worker.history import CodexHistory
-from app.worker.journal import WorkerJournal
+from app.worker.session import WorkerSession
 from tests.test_conversation_history import SESSION, message, rollout
 from tests.test_remote_e2e import (
     FakeExecutor,
@@ -36,7 +35,7 @@ class HistoryStore(RemoteStore):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ["worker", "preparation", "tool", "result"])
-async def test_http_query_while_worker_or_control_busy_and_idle(tmp_path, phase) -> None:
+async def test_http_query_while_worker_or_control_busy_and_idle(tmp_path, phase, monkeypatch) -> None:
     started, release = asyncio.Event(), asyncio.Event()
 
     async def block(selected):
@@ -73,9 +72,9 @@ async def test_http_query_while_worker_or_control_busy_and_idle(tmp_path, phase)
     app.state.ctx = context
     to_worker: asyncio.Queue[str] = asyncio.Queue()
     to_control: asyncio.Queue[str] = asyncio.Queue()
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex"))
     worker = WorkerClient(worker_id="worker-1", worker_token="worker-secret", serve_ws_url="unused",
-                          executor=Executor(), journal=WorkerJournal(tmp_path / "worker"))
-    worker.history = CodexHistory(tmp_path / "codex")
+                          executor=Executor(), session=WorkerSession(tmp_path / "worker"))
     server = asyncio.create_task(gateway.handle(QueueSocket(to_control, to_worker)))
     client = asyncio.create_task(worker.run_connection(QueueConnection(to_control, to_worker)))
     try:

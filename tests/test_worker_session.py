@@ -13,7 +13,7 @@ from app.contracts.protocol import (
     Succeeded,
 )
 from app.domain.models import JobState
-from app.worker.journal import JournalError, WorkerJournal
+from app.worker.session import SessionError, WorkerSession
 
 
 def _assignment() -> Assignment:
@@ -42,7 +42,7 @@ def _assignment() -> Assignment:
 
 
 def test_journal_persists_terminal_result_until_ack(tmp_path: Path) -> None:
-    journal = WorkerJournal(tmp_path)
+    journal = WorkerSession(tmp_path)
     assignment = _assignment()
     journal.record_received(assignment)
     assert "push-secret" not in journal.path.read_text()
@@ -55,7 +55,7 @@ def test_journal_persists_terminal_result_until_ack(tmp_path: Path) -> None:
     )
     journal.record_terminal(terminal)
 
-    recovered = WorkerJournal(tmp_path).load()
+    recovered = WorkerSession(tmp_path).load()
     assert recovered is not None
     assert recovered.state == "succeeded"
     assert recovered.result_digest
@@ -70,7 +70,7 @@ def test_corrupt_journal_is_preserved_for_diagnosis(tmp_path: Path) -> None:
     path = tmp_path / "assignment-journal.json"
     path.write_text("not-json")
 
-    with pytest.raises(JournalError, match="invalid worker journal"):
-        WorkerJournal(tmp_path).load()
+    with pytest.raises(SessionError, match="invalid worker journal"):
+        WorkerSession(tmp_path).load()
 
     assert path.read_text() == "not-json"
