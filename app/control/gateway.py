@@ -38,7 +38,9 @@ from app.contracts.protocol import (
     terminal_digest,
 )
 from app.contracts.result_models import ResultPending
+from app.control.conversation import ConversationBroker
 from app.control.preparation import PreparationStale
+from app.control.worker_connection import ProtocolViolation, WorkerConnection, WorkerSocket
 from app.domain.models import (
     DeliveryState,
     FlowDelivery,
@@ -50,19 +52,6 @@ from app.domain.models import (
 )
 from app.persistence.stop_store import StopIntent
 from app.telemetry.metrics import Metrics
-
-
-class WorkerSocket(Protocol):
-    @property
-    def headers(self) -> Mapping[str, str]: ...
-
-    async def accept(self) -> None: ...
-
-    async def close(self, code: int = 1000) -> None: ...
-
-    async def send_text(self, data: str) -> None: ...
-
-    async def receive_text(self) -> str: ...
 
 
 class WorkerExecutionControl(Protocol):
@@ -162,10 +151,6 @@ class AssignmentCoordinator(Protocol):
     async def fail(self, job: Job, reason: str) -> None: ...
 
 
-class ProtocolViolation(RuntimeError):
-    pass
-
-
 class WorkerGateway:
     """Serve one single-slot session per configured worker identity."""
 
@@ -199,6 +184,7 @@ class WorkerGateway:
         self._sessions: dict[str, tuple[asyncio.Event, WorkerSocket]] = {}
         self._registry_lock = asyncio.Lock()
         self._result_locks: dict[int, asyncio.Lock] = {}
+        self.conversations = ConversationBroker()
 
     async def _prepare_assignment(
         self, job: Job, worker_id: str, token: str, epoch: str,
@@ -256,11 +242,14 @@ class WorkerGateway:
         connection_epoch = uuid4().hex
         wake: asyncio.Event | None = None
         disconnect_reason: str | None = None
+        connection: WorkerConnection | None = None
         try:
             await socket.accept()
             register = parse_worker_message(await socket.receive_text())
             if not isinstance(register, Register) or register.worker_id != worker_id:
                 raise ProtocolViolation("worker registration does not match authenticated identity")
+            connection = WorkerConnection(socket, self.conversations, worker_id, connection_epoch)
+            socket = connection
             wake = await self._register_session(worker_id, socket)
             registered_session = True
             worker = self.store.worker_connected(
@@ -482,6 +471,8 @@ class WorkerGateway:
             except (WebSocketDisconnect, ConnectionError):
                 pass
         finally:
+            if connection is not None:
+                await connection.stop()
             if connected:
                 self.store.worker_disconnected(
                     worker_id,
@@ -566,6 +557,7 @@ class WorkerGateway:
         return wake
 
     async def _unregister_session(self, worker_id: str, socket: WorkerSocket) -> None:
+        self.conversations.disconnect(socket)
         async with self._registry_lock:
             current = self._sessions.get(worker_id)
             if current is not None and current[1] is socket:

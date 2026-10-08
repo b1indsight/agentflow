@@ -9,6 +9,7 @@
 ## 如何阅读
 
 - 本页的状态表描述当前实现，是架构文档中的 current truth；
+- [会话查询 API](conversation-api.md)描述按 flow 读取 worker Codex 历史的接口、分页与可用性边界；
 - [总览](overview.md)、[组件职责](components.md)和[端到端流程](workflows.md)同时记录目标设计，
   每处涉及未完成能力时明确标注当前边界；
 - [关键决策](decisions.md)记录已定方案、开放风险和退出条件；

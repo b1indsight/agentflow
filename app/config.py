@@ -27,6 +27,7 @@ class ServeSettings(FlowToolSettings):
     """Secrets and tuning used only by the control-plane process."""
 
     metrics_token: SecretStr | None = None
+    control_api_token: SecretStr | None = None
     metrics_interval_seconds: float = Field(default=15, ge=5, le=300, allow_inf_nan=False)
 
     webhook_max_body_bytes: int = Field(default=25 * 1024 * 1024, ge=1, le=100 * 1024 * 1024)

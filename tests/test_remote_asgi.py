@@ -19,6 +19,7 @@ from app.contracts.protocol import (
     parse_server_message,
 )
 from app.control.api import create_app
+from app.control.conversation import ConversationService
 from app.control.gateway import WorkerGateway
 from app.domain.models import Job, JobKind, JobState
 from app.persistence.stop_store import StopStore
@@ -77,6 +78,7 @@ class AsgiContext:
             worker_tokens={"worker-1": "worker-secret"},
             poll_interval=0.01,
         )
+        self.conversations = ConversationService(store, self.gateway.conversations)
 
     async def ready(self) -> bool:
         return True

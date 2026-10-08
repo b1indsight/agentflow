@@ -11,6 +11,7 @@ import pytest_asyncio
 
 from app.contracts.protocol import PROTOCOL_VERSION
 from app.control.api import create_app
+from app.control.conversation import ConversationService
 from app.control.router import EventRouter
 from app.control.service import ControlService
 from app.control.webhooks import WebhookConsumer
@@ -26,6 +27,10 @@ class RecordingGateway:
 
 
 class FakeContext:
+    @property
+    def conversations(self) -> ConversationService:
+        raise AssertionError("webhook tests do not query conversations")
+
     def __init__(self, router: EventRouter | None = None, settings=None) -> None:
         self.settings = settings or SimpleNamespace(github_webhook_secret="webhook-secret")
         self.settings.webhook_max_body_bytes = 25 * 1024 * 1024

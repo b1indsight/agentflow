@@ -39,14 +39,10 @@ from app.contracts.protocol import (
 )
 from app.domain.delivery_models import DeliveryReceipt
 from app.domain.models import VcsOutcome
+from app.worker.history import CodexHistory
+from app.worker.history_connection import Connection, HistoryConnection
 from app.worker.journal import WorkerJournal
 from app.worker.tools import FlowToolCaller
-
-
-class Connection(Protocol):
-    async def send(self, data: str) -> None: ...
-
-    async def recv(self) -> str | bytes: ...
 
 
 class TaskExecutor(Protocol):
@@ -111,6 +107,7 @@ class WorkerClient:
         self._assignment: Assignment | None = None
         self._execution: asyncio.Task[ExecutionResult] | None = None
         self._tool_requests: asyncio.Queue[_PendingTool] = asyncio.Queue()
+        self.history = CodexHistory()
 
     async def call_tool(
         self,
@@ -178,6 +175,13 @@ class WorkerClient:
             await self._cancel_execution()
 
     async def run_connection(self, connection: Connection) -> None:
+        history_connection = HistoryConnection(connection, self.history)
+        try:
+            await self._run_connection(history_connection)
+        finally:
+            await history_connection.close()
+
+    async def _run_connection(self, connection: Connection) -> None:
         await connection.send(
             Register(
                 worker_id=self.worker_id,

@@ -92,6 +92,7 @@ FlowTool 的目标是把带 `flow` 标签的 GitHub issue 编排成
 
 ## 文档
 
+- [Flow 会话查询 API](docs/architecture/conversation-api.md)：control 代理 worker 读取 Codex 历史，供 WebUI 分页展示；
 - [`docs/architecture/`](docs/architecture/README.md)：当前实现状态、目标架构、组件、流程、决策和接入说明；
 - [`docs/architecture/diagram.html`](docs/architecture/diagram.html)：手工维护的交互式架构可视化；
 - [`docs/plan/`](docs/plan/README.md)：计划、批准状态和实施结果记录。

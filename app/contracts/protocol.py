@@ -18,13 +18,14 @@ from pydantic import (
     model_validator,
 )
 
+from app.contracts.conversation import ConversationError, ConversationPage, SessionRef
 from app.domain.context_models import MAX_CONTEXT_BYTES, ReviewContext
 from app.domain.delivery_models import DeliveryReceipt
 from app.domain.judge_models import JudgeDecision
 from app.domain.models import CodexResult, FeedbackRef, JobState, VcsKind
 from app.domain.review_models import ReviewFeedback
 
-PROTOCOL_VERSION: Literal[10] = 10
+PROTOCOL_VERSION: Literal[11] = 11
 
 
 class ProtocolModel(BaseModel):
@@ -34,7 +35,33 @@ class ProtocolModel(BaseModel):
 
 
 class Message(ProtocolModel):
-    protocol_version: Literal[10] = PROTOCOL_VERSION
+    protocol_version: Literal[11] = PROTOCOL_VERSION
+
+
+class ConversationQuery(Message):
+    """Read-only request, independent of the worker's current assignment."""
+
+    type: Literal["conversation_query"] = "conversation_query"
+    request_id: str = Field(min_length=1, max_length=64)
+    connection_epoch: str = Field(min_length=1, max_length=64)
+    flow_id: int = Field(gt=0)
+    sessions: list[SessionRef] = Field(max_length=128)
+    cursor: str | None = Field(default=None, max_length=2048)
+    limit: int = Field(default=100, ge=1, le=500)
+
+
+class ConversationResult(Message):
+    type: Literal["conversation_result"] = "conversation_result"
+    request_id: str = Field(min_length=1, max_length=64)
+    connection_epoch: str = Field(min_length=1, max_length=64)
+    page: ConversationPage | None = None
+    error: ConversationError | None = None
+
+    @model_validator(mode="after")
+    def _one_outcome(self) -> ConversationResult:
+        if (self.page is None) == (self.error is None):
+            raise ValueError("conversation result requires exactly one of page or error")
+        return self
 
 
 class ReviewTask(ProtocolModel):
@@ -278,7 +305,7 @@ class StopAccepted(StopFence):
 
 
 WorkerMessage = Annotated[
-    Register | Started | Heartbeat | Succeeded | Failed | FlowToolRequest | ExecutionStopped,
+    Register | Started | Heartbeat | Succeeded | Failed | FlowToolRequest | ExecutionStopped | ConversationResult,
     Field(discriminator="type"),
 ]
 
@@ -405,7 +432,8 @@ ServerMessage = Annotated[
     | ProtocolError
     | FlowToolResponse
     | StopExecution
-    | StopAccepted,
+    | StopAccepted
+    | ConversationQuery,
     Field(discriminator="type"),
 ]
 

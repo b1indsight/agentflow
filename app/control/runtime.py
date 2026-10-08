@@ -8,6 +8,7 @@ from datetime import timedelta
 from loguru import logger
 
 from app.config import ServeSettings, get_serve_settings
+from app.control.conversation import ConversationService
 from app.control.coordinator import JobCoordinator
 from app.control.gateway import WorkerGateway
 from app.control.projects import ProjectSync
@@ -58,6 +59,7 @@ class ControlRuntime:
             execution_control=StopStore(self.store),
         )
         self.service = ControlService(self.store, plugins, self.gateway.notify_jobs)
+        self.conversations = ConversationService(self.store, self.gateway.conversations)
         self.webhooks = WebhookConsumer(self.store, self.settings, self.service)
         self.reconciler = Reconciler(
             self.store, self.coordinator.github, self.service,

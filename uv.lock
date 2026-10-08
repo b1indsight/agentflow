@@ -503,6 +503,7 @@ name = "flowtool"
 version = "0.0.1"
 source = { editable = "." }
 dependencies = [
+    { name = "anyio" },
     { name = "bub" },
     { name = "fastapi" },
     { name = "githubkit", extra = ["auth-app"] },
@@ -528,6 +529,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "anyio", specifier = ">=4" },
     { name = "bub", specifier = "==0.4.1" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "githubkit", extras = ["auth-app"], specifier = ">=0.16,<0.17" },
