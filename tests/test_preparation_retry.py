@@ -276,7 +276,7 @@ async def test_a_slow_retry_read_cannot_run_beyond_the_window(store, pending_rev
 def test_preparation_retry_limits_are_validated(tmp_path, field, value):
     from pydantic import ValidationError
 
-    from app.config import ServeSettings
+    from app.control.config import ServeSettings
     from tests.test_github_client import settings
 
     with pytest.raises(ValidationError):

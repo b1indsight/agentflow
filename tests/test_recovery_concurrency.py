@@ -7,9 +7,9 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from pydantic import ValidationError
 
-from app.config import ServeSettings
 from app.contracts.protocol import InitialResult, Succeeded
 from app.contracts.result_models import ResultPending
+from app.control.config import ServeSettings
 from app.control.gateway import WorkerGateway
 from app.control.runtime import ControlRuntime
 from app.domain.models import JobKind, JobState

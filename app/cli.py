@@ -12,7 +12,6 @@ from datetime import UTC, datetime
 
 import typer
 
-from app.config import get_serve_settings
 from app.control.archive import archive_progress
 from app.control.service import ControlService
 from app.domain.models import DeliveryState
@@ -55,10 +54,10 @@ def inbox_retry(delivery_id: str) -> None:
 @project_app.command("check")
 def project_check(repo: str) -> None:
     """只读校验已配置的组织 Project、Status 字段及选项。"""
+    from app.control.config import settings
     from app.domain.github_models import GitHubAdapterError
     from app.github.client import GitHubApp
 
-    settings = get_serve_settings()
     config = settings.projects.get(repo.casefold())
     if config is None:
         typer.echo(f"{repo}: Projects disabled")
@@ -96,7 +95,9 @@ def project_retry(repo: str) -> None:
 
 @contextmanager
 def _store() -> Iterator[Store]:
-    store = Store(get_serve_settings().database_url)
+    from app.control.config import settings
+
+    store = Store(settings.database_url)
     store.init_db()
     try:
         yield store
@@ -109,9 +110,12 @@ def serve() -> None:
     """启动 webhook 常驻进程（uvicorn）。"""
     import uvicorn
 
-    settings = get_serve_settings()
+    from app.control.api import create_app
+    from app.control.config import settings
+    from app.control.runtime import ControlRuntime
+
     uvicorn.run(
-        "app.control.api:app",
+        create_app(lambda: ControlRuntime(settings)),
         host=settings.host,
         port=settings.port,
         log_level="info",
@@ -122,9 +126,10 @@ def serve() -> None:
 @app.command()
 def worker() -> None:
     """启动远程执行进程并主动连接 control plane。"""
+    from app.worker.config import settings
     from app.worker.runtime import WorkerRuntime
 
-    asyncio.run(WorkerRuntime().run())
+    asyncio.run(WorkerRuntime(settings).run())
 
 
 @app.command()

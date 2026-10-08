@@ -1,19 +1,21 @@
-"""Role-specific configuration for the control plane and remote worker."""
+"""Control configuration and its process-wide settings instance."""
 
 from __future__ import annotations
 
 import json
 import re
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import TYPE_CHECKING, Annotated, Literal
 
-from pydantic import Field, SecretStr, ValidationInfo, field_validator, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from app.domain.project_models import ProjectConfig
 
 
-class FlowToolSettings(BaseSettings):
+class ServeSettings(BaseSettings):
+    """Secrets and tuning used only by the control-plane process."""
+
     log_format: Literal["text", "json"] = "text"
 
     model_config = SettingsConfigDict(
@@ -22,9 +24,6 @@ class FlowToolSettings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
     )
-
-class ServeSettings(FlowToolSettings):
-    """Secrets and tuning used only by the control-plane process."""
 
     metrics_token: SecretStr | None = None
     control_api_token: SecretStr | None = None
@@ -38,11 +37,11 @@ class ServeSettings(FlowToolSettings):
     bot_login: str = "flowtool[bot]"
 
     trigger_label: str = "flow"
-    allowlist: Annotated[list[str], NoDecode] = []
-    reviewers: Annotated[list[str], NoDecode] = []
+    allowlist: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    reviewers: Annotated[list[str], NoDecode] = Field(default_factory=list)
     in_review_label: str = "flow:in-review"
     done_label: str = "flow:done"
-    projects: dict[str, ProjectConfig] = {}
+    projects: dict[str, ProjectConfig] = Field(default_factory=dict)
 
     @field_validator("projects")
     @classmethod
@@ -147,93 +146,14 @@ class ServeSettings(FlowToolSettings):
     def _expand_path(cls, value: Path) -> Path:
         return value.expanduser()
 
-
-class WorkerSettings(FlowToolSettings):
-    """Execution-only settings; deliberately excludes database and GitHub credentials."""
-
-    model_config = SettingsConfigDict(
-        env_prefix="FLOWTOOL_",
-        env_file=None,
-        extra="ignore",
-    )
-
-    worker_id: str
-    worker_token: SecretStr
-    serve_ws_url: str
-    worker_status_path: Path | None = None
-    worker_root: Path = Path("~/.flowtool/workers/{worker_id}")
-    codex_run_timeout_seconds: float = 1200.0
-    judge_model: str = ""
-    judge_api_key: SecretStr | None = None
-    judge_api_base: str | None = None
-    judge_timeout_seconds: float = Field(default=60.0, gt=0, allow_inf_nan=False)
-    trusted_host_execution: bool = False
-    execution_isolation: Literal["dedicated-account", "container", "vm"] | None = None
-    allow_insecure_worker_ws: bool = False
-    reconnect_min_backoff: float = Field(default=1.0, gt=0)
-    reconnect_max_backoff: float = Field(default=30.0, gt=0)
-    reconnect_jitter: float = Field(default=0.2, ge=0, le=1)
-
-    @model_validator(mode="after")
-    def _require_full_access_isolation(self) -> WorkerSettings:
-        if self.trusted_host_execution and self.execution_isolation is None:
-            raise ValueError(
-                "trusted-host execution requires external execution isolation "
-                "(dedicated-account, container, or vm)"
-            )
-        return self
-
-    @field_validator("worker_id")
-    @classmethod
-    def _require_worker_id(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("FLOWTOOL_WORKER_ID is required")
-        return value
-
-    @field_validator("worker_token")
-    @classmethod
-    def _require_worker_token(cls, value: SecretStr) -> SecretStr:
-        if not value.get_secret_value().strip():
-            raise ValueError("FLOWTOOL_WORKER_TOKEN is required")
-        return value
-
-    @field_validator("worker_root", mode="after")
-    @classmethod
-    def _expand_worker_root(cls, value: Path, info: ValidationInfo) -> Path:
-        if value == Path("~/.flowtool/workers/{worker_id}"):
-            worker_id = info.data.get("worker_id")
-            if worker_id is None:
-                return value
-            value = Path(f"~/.flowtool/workers/{worker_id}")
-        return value.expanduser()
-
-    @model_validator(mode="after")
-    def _require_secure_websocket(self) -> WorkerSettings:
-        if self.reconnect_max_backoff < self.reconnect_min_backoff:
-            raise ValueError("worker reconnect backoff range or jitter is invalid")
-        if self.serve_ws_url.startswith("wss://"):
-            return self
-        if self.allow_insecure_worker_ws and self.serve_ws_url.startswith("ws://"):
-            return self
-        raise ValueError(
-            "FLOWTOOL_SERVE_WS_URL must use wss://; set "
-            "FLOWTOOL_ALLOW_INSECURE_WORKER_WS=true only for development"
-        )
+if TYPE_CHECKING:
+    settings: ServeSettings
 
 
-_serve_settings: ServeSettings | None = None
-_worker_settings: WorkerSettings | None = None
-
-
-def get_serve_settings() -> ServeSettings:
-    global _serve_settings
-    if _serve_settings is None:
-        _serve_settings = ServeSettings()  # type: ignore[call-arg]
-    return _serve_settings
-
-
-def get_worker_settings() -> WorkerSettings:
-    global _worker_settings
-    if _worker_settings is None:
-        _worker_settings = WorkerSettings()  # type: ignore[call-arg]
-    return _worker_settings
+def __getattr__(name: str) -> ServeSettings:
+    """Create the process-wide settings on first access, keeping type imports inert."""
+    if name != "settings":
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    value = ServeSettings()  # type: ignore[call-arg]
+    globals()["settings"] = value
+    return value

@@ -12,10 +12,10 @@ from typing import IO
 
 from loguru import logger
 
-from app.config import WorkerSettings, get_worker_settings
 from app.telemetry.logging import configure_logging
 from app.worker.client import WorkerClient
 from app.worker.codex_driver import CodexAgent
+from app.worker.config import WorkerSettings
 from app.worker.executor import WorkerExecutor
 from app.worker.health import HealthFile
 from app.worker.journal import WorkerJournal
@@ -95,9 +95,9 @@ class WorkerRootLock:
 class WorkerRuntime:
     """Own the execution adapters without importing control-plane dependencies."""
 
-    def __init__(self, settings: WorkerSettings | None = None) -> None:
+    def __init__(self, settings: WorkerSettings) -> None:
         self._shutdown_requested = False
-        self.settings = settings or get_worker_settings()
+        self.settings = settings
         configure_logging("worker", self.settings.log_format)
         self.root_lock = WorkerRootLock(self.settings.worker_root, self.settings.worker_id)
         judge = BubJudge(

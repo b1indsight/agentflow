@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 import httpx
 from githubkit import AppAuthStrategy, AppInstallationAuthStrategy, GitHub
@@ -20,7 +20,6 @@ from githubkit.exception import (
 from jwt.exceptions import PyJWTError
 from pydantic import SecretStr
 
-from app.config import ServeSettings
 from app.domain.context_models import (
     MAX_DISCUSSIONS,
     MAX_FILES,
@@ -48,6 +47,9 @@ from app.domain.project_models import ProjectConfig
 from app.github.feedback import read_feedback_page
 from app.github.projects import GitHubProjects
 from app.github.thread_pages import read_thread_page
+
+if TYPE_CHECKING:
+    from app.control.config import ServeSettings
 from app.github.threads import ThreadReader
 
 _RESOLVE_THREAD_MUTATION = """

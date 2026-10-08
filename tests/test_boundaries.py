@@ -29,6 +29,12 @@ def imported_modules(package: Path) -> set[str]:
     paths = [package] if package.is_file() else package.rglob("*.py")
     for path in paths:
         tree = ast.parse(path.read_text(), filename=str(path))
+        # Configuration types can be referenced across packages without loading
+        # those packages at runtime; retain the check on executable imports.
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.If) and isinstance(node.test, ast.Name)
+                    and node.test.id == "TYPE_CHECKING"):
+                node.body = []
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 modules.update(alias.name for alias in node.names)

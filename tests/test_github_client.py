@@ -10,7 +10,7 @@ from githubkit.exception import RequestFailed
 from githubkit.response import Response
 from pydantic import SecretStr
 
-from app.config import ServeSettings
+from app.control.config import ServeSettings
 from app.domain.github_models import GitHubAdapterError, GitHubErrorKind, PushCapability
 from app.github.client import GitHubApp
 

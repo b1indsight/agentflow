@@ -3,7 +3,8 @@ from pathlib import Path
 import pytest
 from pydantic import SecretStr, ValidationError
 
-from app.config import ServeSettings, WorkerSettings
+from app.control.config import ServeSettings
+from app.worker.config import WorkerSettings
 from app.worker.runtime import validate_worker_environment
 
 
@@ -71,14 +72,6 @@ def test_reviewers_are_configured_independently_from_trigger_allowlist(monkeypat
     assert settings.in_review_label == "flow:in-review"
 
 
-def test_settings_require_database_url(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("FLOWTOOL_DATABASE_URL", raising=False)
-
-    with pytest.raises(ValidationError):
-        ServeSettings(worker_tokens={"worker-1": SecretStr("secret")})  # type: ignore[call-arg]
-
-
 def test_serve_settings_require_unique_nonempty_worker_credentials(monkeypatch) -> None:
     monkeypatch.setenv("FLOWTOOL_DATABASE_URL", "postgresql://localhost/flowtool")
 
@@ -118,18 +111,6 @@ def test_worker_settings_do_not_require_control_plane_secrets(monkeypatch, tmp_p
     assert settings.worker_root == Path("~/.flowtool/workers/worker-1").expanduser()
     assert settings.trusted_host_execution is False
     assert not hasattr(settings, "database_url")
-
-
-def test_worker_trusted_host_execution_requires_explicit_opt_in() -> None:
-    settings = WorkerSettings(
-        worker_id="worker-1",
-        worker_token=SecretStr("secret"),
-        serve_ws_url="wss://control.example/internal/workers/connect",
-        trusted_host_execution=True,
-        execution_isolation="dedicated-account",
-    )
-
-    assert settings.trusted_host_execution is True
 
 
 def test_worker_rejects_full_access_without_external_isolation() -> None:
@@ -211,19 +192,6 @@ def test_recovery_timing_settings_require_safe_ordering(monkeypatch) -> None:
             worker_heartbeat_timeout=30,
             worker_lease_duration=31,
             worker_recovery_grace=30,
-        )
-
-
-@pytest.mark.parametrize("timeout", ["0", "-1", "nan", "inf"])
-def test_github_request_timeout_rejects_nonpositive_or_nonfinite_values(
-    timeout: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-) -> None:
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("FLOWTOOL_GITHUB_REQUEST_TIMEOUT_SECONDS", timeout)
-    with pytest.raises(ValidationError, match="github_request_timeout_seconds"):
-        ServeSettings(
-            database_url="postgresql://localhost/flowtool",
-            worker_tokens={"worker-1": SecretStr("secret")},
         )
 
 

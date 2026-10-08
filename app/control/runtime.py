@@ -7,7 +7,7 @@ from datetime import timedelta
 
 from loguru import logger
 
-from app.config import ServeSettings, get_serve_settings
+from app.control.config import ServeSettings
 from app.control.conversation import ConversationService
 from app.control.coordinator import JobCoordinator
 from app.control.gateway import WorkerGateway
@@ -29,8 +29,8 @@ from app.telemetry.metrics import Metrics
 class ControlRuntime:
     """Own all stateful control adapters; no execution adapter is constructed here."""
 
-    def __init__(self, settings: ServeSettings | None = None) -> None:
-        self.settings = settings or get_serve_settings()
+    def __init__(self, settings: ServeSettings) -> None:
+        self.settings = settings
         configure_logging("serve", self.settings.log_format)
         self.metrics = Metrics()
         self._ready = False
