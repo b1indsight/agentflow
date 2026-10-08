@@ -1,16 +1,23 @@
-"""Worker-local MCP broker with no control-plane or GitHub credentials."""
+"""Assignment-scoped MCP endpoint hosted in the worker process."""
 
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
-import os
+import secrets
 import socket
-import sys
-import tempfile
-from pathlib import Path
+from collections.abc import Generator
+from contextlib import contextmanager
 from typing import Protocol, Self
 from uuid import uuid4
+
+import uvicorn
+from pydantic import SecretStr
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import JSONResponse, Response
+from starlette.routing import Route
 
 from app.domain.delivery_models import DeliveryReceipt
 from app.domain.models import VcsExecutionContext, VcsOutcome
@@ -19,171 +26,126 @@ from app.worker.vcs import verify_pushed_outcome
 
 class FlowToolCaller(Protocol):
     async def call_tool(
-        self,
-        name: str,
-        arguments: dict[str, object],
-        *,
-        call_id: str | None = None,
-        vcs_outcome: VcsOutcome,
+        self, name: str, arguments: dict[str, object], *,
+        call_id: str | None = None, vcs_outcome: VcsOutcome,
     ) -> DeliveryReceipt: ...
 
 
-class FlowToolBroker:
-    """Expose one assignment-scoped Unix socket to the STDIO MCP subprocess."""
+class _EmbeddedServer(uvicorn.Server):
+    @contextmanager
+    def capture_signals(self) -> Generator[None, None, None]:
+        # WorkerRuntime owns signals for the entire worker, including Codex cleanup.
+        yield
+
+
+class WorkerMCP:
+    """Serve only open_pr for one coding invocation; revoke access when it finishes."""
 
     def __init__(self, caller: FlowToolCaller, vcs_context: VcsExecutionContext) -> None:
         self.caller = caller
         self.vcs_context = vcs_context
-        self.socket_path = Path(tempfile.gettempdir()) / f"flowtool-mcp-{uuid4().hex}.sock"
+        self.token = SecretStr(secrets.token_urlsafe(32))
+        self.url = ""
         self.last_call_id: str | None = None
         self.last_result: DeliveryReceipt | None = None
         self.last_vcs_outcome: VcsOutcome | None = None
-        self._server: asyncio.AbstractServer | None = None
+        app = Starlette(routes=[Route("/mcp", self._handle, methods=["POST", "GET", "DELETE"])])
+        self._server = _EmbeddedServer(uvicorn.Config(
+            app, log_config=None, access_log=False, lifespan="off", ws="none",
+            timeout_graceful_shutdown=0,
+        ))
+        self._task: asyncio.Task[None] | None = None
+        self._socket: socket.socket | None = None
 
     async def __aenter__(self) -> Self:
-        self._server = await asyncio.start_unix_server(
-            self._handle_connection, path=self.socket_path
-        )
-        self.socket_path.chmod(0o600)
+        self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            self._socket.bind(("127.0.0.1", 0))
+            self.url = f"http://127.0.0.1:{self._socket.getsockname()[1]}/mcp"
+            self._task = asyncio.create_task(self._server.serve(sockets=[self._socket]))
+            async with asyncio.timeout(5):
+                while not self._server.started:
+                    if self._task.done():
+                        await self._task
+                        raise RuntimeError("worker MCP server did not start")
+                    await asyncio.sleep(0.01)
+        except BaseException:
+            await self.__aexit__()
+            raise
         return self
 
     async def __aexit__(self, *exc: object) -> None:
-        if self._server is not None:
-            self._server.close()
-            await self._server.wait_closed()
-        self.socket_path.unlink(missing_ok=True)
+        self._server.should_exit = True
+        if self._task is not None:
+            await self._task
+        if self._socket is not None:
+            self._socket.close()
 
-    async def _handle_connection(
-        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-    ) -> None:
+    async def _handle(self, request: Request) -> Response:
+        origin = self.url.removesuffix("/mcp")
+        if (request.headers.get("host") != origin.removeprefix("http://")
+                or request.headers.get("origin") not in (None, origin)):
+            return Response(status_code=403)
+        if not hmac.compare_digest(request.headers.get("authorization", ""),
+                                   f"Bearer {self.token.get_secret_value()}"):
+            return Response(status_code=401)
+        if request.method != "POST":
+            return Response(status_code=405, headers={"Allow": "POST"})
+        if request.headers.get("mcp-protocol-version", "2025-03-26") not in {
+            "2025-03-26", "2025-06-18", "2025-11-25",
+        }:
+            return Response(status_code=400)
+        request_id: str | int | None = None
         try:
-            raw = await reader.readline()
-            request = json.loads(raw)
-            if not isinstance(request, dict):
-                raise TypeError("worker-local Flow tool request must be an object")
-            call_id = request.get("call_id")
-            name = request.get("name")
-            arguments = request.get("arguments")
-            if (
-                not isinstance(call_id, str)
-                or name != "flow.open_pr"
-                or not isinstance(arguments, dict)
-            ):
-                raise ValueError("invalid worker-local Flow tool request")
-            outcome = await verify_pushed_outcome(self.vcs_context)
-            result = await self.caller.call_tool(
-                name, arguments, call_id=call_id, vcs_outcome=outcome
-            )
-            self.last_call_id = call_id
-            self.last_result = result
-            self.last_vcs_outcome = outcome
-            response: dict[str, object] = {"result": result.model_dump(mode="json")}
-        except (TypeError, ValueError, RuntimeError) as exc:
-            response = {"error": str(exc)}
-        writer.write((json.dumps(response, separators=(",", ":")) + "\n").encode())
-        await writer.drain()
-        writer.close()
-        await writer.wait_closed()
+            data = await request.json()
+            if not isinstance(data, dict) or data.get("jsonrpc") != "2.0":
+                raise ValueError("expected a JSON-RPC 2.0 message")
+            request_id = data.get("id")
+            if request_id is None:
+                return Response(status_code=202)
+            if type(request_id) not in (str, int):
+                request_id = None
+                raise ValueError("invalid request ID")
+            result = await self._dispatch(data)
+            return JSONResponse({"jsonrpc": "2.0", "id": request_id, "result": result})
+        except (ValueError, TypeError) as exc:
+            return JSONResponse({"jsonrpc": "2.0", "id": request_id,
+                                 "error": {"code": -32602, "message": str(exc)}})
 
-
-def _bridge_call(name: str, arguments: dict[str, object]) -> dict[str, object]:
-    socket_path = os.environ.get("FLOWTOOL_MCP_SOCKET")
-    if not socket_path:
-        raise RuntimeError("Flow tool broker socket is unavailable")
-    request = {
-        "call_id": uuid4().hex,
-        "name": f"flow.{name}",
-        "arguments": arguments,
-    }
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-        client.connect(socket_path)
-        stream = client.makefile("rwb")
-        stream.write((json.dumps(request, separators=(",", ":")) + "\n").encode())
-        stream.flush()
-        response = json.loads(stream.readline())
-    if not isinstance(response, dict):
-        raise TypeError("Flow tool broker returned an invalid response")
-    if response.get("error") is not None:
-        raise RuntimeError(str(response["error"]))
-    result = response.get("result")
-    if not isinstance(result, dict):
-        raise TypeError("Flow tool broker returned an invalid result")
-    return result
-
-
-def _mcp_result(request: dict[str, object]) -> dict[str, object] | None:
-    request_id = request.get("id")
-    method = request.get("method")
-    if request_id is None:
-        return None
-    if method == "initialize":
-        params = request.get("params")
-        protocol_version = (
-            params.get("protocolVersion", "2025-06-18")
-            if isinstance(params, dict)
-            else "2025-06-18"
-        )
-        result: dict[str, object] = {
-            "protocolVersion": protocol_version,
-            "capabilities": {"tools": {"listChanged": False}},
-            "serverInfo": {"name": "flowtool", "version": "0.0.1"},
-            "instructions": "Call open_pr only after committing and pushing the Flow branch.",
-        }
-    elif method == "tools/list":
-        result = {
-            "tools": [
-                {
-                    "name": "open_pr",
-                    "description": "Verify the pushed Flow branch and open or reuse its pull request.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "title": {"type": "string"},
-                            "body": {"type": "string"},
-                        },
-                        "required": ["title", "body"],
-                        "additionalProperties": False,
-                    },
-                }
-            ]
-        }
-    elif method == "tools/call":
-        params = request.get("params")
-        if not isinstance(params, dict) or params.get("name") != "open_pr":
-            raise ValueError("unknown Flow tool")
-        arguments = params.get("arguments")
-        if not isinstance(arguments, dict):
-            raise ValueError("Flow tool arguments must be an object")
-        tool_result = _bridge_call("open_pr", arguments)
-        result = {
-            "content": [{"type": "text", "text": json.dumps(tool_result)}],
-            "structuredContent": tool_result,
-        }
-    else:
-        raise ValueError(f"unsupported MCP method: {method}")
-    return {"jsonrpc": "2.0", "id": request_id, "result": result}
-
-
-def main() -> None:
-    """Run the minimal newline-delimited STDIO MCP server used by Codex."""
-
-    for line in sys.stdin:
-        request: object = None
-        try:
-            request = json.loads(line)
-            if not isinstance(request, dict):
-                raise TypeError("MCP request must be an object")
-            response = _mcp_result(request)
-        except (json.JSONDecodeError, TypeError, ValueError, RuntimeError, OSError) as exc:
-            response = {
-                "jsonrpc": "2.0",
-                "id": request.get("id") if isinstance(request, dict) else None,
-                "error": {"code": -32602, "message": str(exc)},
+    async def _dispatch(self, request: dict) -> dict:
+        method = request.get("method")
+        if method == "initialize":
+            return {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {"tools": {"listChanged": False}},
+                "serverInfo": {"name": "flowtool", "version": "0.0.1"},
+                "instructions": "Call open_pr only after committing and pushing the Flow branch.",
             }
-        if response is not None:
-            sys.stdout.write(json.dumps(response, separators=(",", ":")) + "\n")
-            sys.stdout.flush()
-
-
-if __name__ == "__main__":
-    main()
+        if method == "ping":
+            return {}
+        if method == "tools/list":
+            return {"tools": [{
+                "name": "open_pr",
+                "description": "Verify the pushed Flow branch and open or reuse its pull request.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"title": {"type": "string"}, "body": {"type": "string"}},
+                    "required": ["title", "body"], "additionalProperties": False,
+                },
+            }]}
+        params = request.get("params")
+        if method != "tools/call" or not isinstance(params, dict) or params.get("name") != "open_pr":
+            raise ValueError("unknown MCP method or tool")
+        arguments = params.get("arguments")
+        if (not isinstance(arguments, dict) or set(arguments) != {"title", "body"}
+                or any(not isinstance(value, str) for value in arguments.values())):
+            raise ValueError("open_pr requires title and body strings")
+        try:
+            outcome = await verify_pushed_outcome(self.vcs_context)
+            call_id = uuid4().hex
+            result = await self.caller.call_tool("flow.open_pr", arguments, call_id=call_id, vcs_outcome=outcome)
+            self.last_call_id, self.last_result, self.last_vcs_outcome = call_id, result, outcome
+            payload = result.model_dump(mode="json")
+            return {"content": [{"type": "text", "text": json.dumps(payload)}], "structuredContent": payload}
+        except (RuntimeError, ValueError) as exc:
+            return {"isError": True, "content": [{"type": "text", "text": str(exc)}]}

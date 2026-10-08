@@ -1,8 +1,7 @@
-import asyncio
-import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import httpx
 import pytest
 from pydantic import SecretStr
 
@@ -33,17 +32,14 @@ class RecordingAgent:
 
     async def start(self, task: str, cwd: Path, *, output_schema=None, context=None) -> CodingExecutionResult:
         self.started.append((task, cwd))
-        if context is not None and context.mcp_socket is not None:
-            reader, writer = await asyncio.open_unix_connection(context.mcp_socket)
-            writer.write(
-                b'{"call_id":"call-1","name":"flow.open_pr",'
-                b'"arguments":{"title":"Implement","body":"Done"}}\n'
-            )
-            await writer.drain()
-            response = json.loads(await reader.readline())
-            assert response["result"]["pr_number"] == 17
-            writer.close()
-            await writer.wait_closed()
+        if context is not None and context.mcp_url is not None:
+            async with httpx.AsyncClient(trust_env=False) as client:
+                response = await client.post(context.mcp_url, headers={
+                    "Authorization": f"Bearer {context.mcp_token.get_secret_value()}",
+                }, json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+                    "name": "open_pr", "arguments": {"title": "Implement", "body": "Done"},
+                }})
+                assert response.json()["result"]["structuredContent"]["pr_number"] == 17
         return CodingExecutionResult(
             session_id="session-1",
             last_message=InitialCodingOutput(
@@ -80,7 +76,7 @@ class BackendlessAgent(RecordingAgent):
 class RecordingToolCaller:
     async def call_tool(self, name, arguments, *, call_id=None, vcs_outcome):
         assert name == "flow.open_pr"
-        assert call_id == "call-1"
+        assert call_id
         assert vcs_outcome.commit_sha == "abc"
         return OpenedDelivery(pr_number=17, url="https://github.com/owner/repo/pull/17", head_sha="abc", delivery_version=1)
 
@@ -168,7 +164,7 @@ async def test_executor_runs_agent_without_store(
     )
     assert isinstance(initial, InitialTaskResult)
     assert initial.commit_sha == "abc"
-    assert initial.open_pr_call_id == "call-1"
+    assert initial.open_pr_call_id
     assert initial.delivery_receipt is not None
     assert agent.started
     assert agent.started[0][1] == workspace

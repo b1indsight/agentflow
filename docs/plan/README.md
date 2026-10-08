@@ -5,6 +5,8 @@
 
 ## 当前计划
 
+- [`worker-mcp.md`](worker-mcp.md) — worker 内嵌 HTTP MCP，仅 open_pr；修复取消后迟到回复，830 项回归通过，SDK 握手和鉴权消融通过。
+
 - [`client-history-dispatch.md`](client-history-dispatch.md) — 历史查询通信归入 WorkerClient，消息格式不变；826 项回归通过。
 
 - [`worker-session.md`](worker-session.md) — PR #62：统一持久化会话状态、恢复及历史查询；既有测试、静态检查和构建通过；按用户要求删除新增的旧记录兼容测试。
