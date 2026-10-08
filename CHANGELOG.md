@@ -8,6 +8,8 @@
 
 ## Unreleased
 
+- 历史查询消息分流、并发回复及连接结束清理归入 WorkerClient，删除 HistoryConnection；历史读取组件和 WebSocket 消息格式不变。
+
 - WorkerSession 统一当前任务、持久化状态、结果归档/恢复与 Codex 历史查询；替换 WorkerJournal，保留既有 journal 格式和协议。
 
 - 统一编码执行、结构化回复与任务结果的类型名称；保留首次/修订结果区分，序列化字段和执行行为不变。

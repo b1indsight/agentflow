@@ -5,6 +5,8 @@
 
 ## 当前计划
 
+- [`client-history-dispatch.md`](client-history-dispatch.md) — 历史查询通信归入 WorkerClient，消息格式不变；826 项回归通过。
+
 - [`worker-session.md`](worker-session.md) — PR #62：统一持久化会话状态、恢复及历史查询；既有测试、静态检查和构建通过；按用户要求删除新增的旧记录兼容测试。
 
 - [`control-triage.md`](control-triage.md) — PR #60：triage 已收敛为 control 的反馈批次前置判断，删除独立 job/领取/token/恢复；826 项 PostgreSQL 回归、静态检查、构建及三项消融通过。

@@ -11,9 +11,12 @@ from uuid import uuid4
 from loguru import logger
 from websockets.asyncio.client import connect
 
+from app.contracts.conversation import ConversationFailure
 from app.contracts.protocol import (
     Assignment,
     AssignmentSecret,
+    ConversationQuery,
+    ConversationResult,
     ExecutionResult,
     ExecutionStopped,
     ExecutionTask,
@@ -39,9 +42,14 @@ from app.contracts.protocol import (
 )
 from app.domain.delivery_models import DeliveryReceipt
 from app.domain.models import VcsOutcome
-from app.worker.history_connection import Connection, HistoryConnection
 from app.worker.session import WorkerSession
 from app.worker.tools import FlowToolCaller
+
+
+class Connection(Protocol):
+    async def send(self, data: str) -> None: ...
+
+    async def recv(self) -> str | bytes: ...
 
 
 class TaskExecutor(Protocol):
@@ -103,6 +111,7 @@ class WorkerClient:
         self._stop = asyncio.Event()
         self._connection_epoch: str | None = None
         self._connection_task: asyncio.Task[None] | None = None
+        self._history_tasks: set[asyncio.Task[None]] = set()
         self._execution: asyncio.Task[ExecutionResult] | None = None
         self._tool_requests: asyncio.Queue[_PendingTool] = asyncio.Queue()
 
@@ -172,11 +181,45 @@ class WorkerClient:
             await self._cancel_execution()
 
     async def run_connection(self, connection: Connection) -> None:
-        history_connection = HistoryConnection(connection, self.session)
         try:
-            await self._run_connection(history_connection)
+            await self._run_connection(connection)
         finally:
-            await history_connection.close()
+            tasks = list(self._history_tasks)
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            self._history_tasks.clear()
+
+    async def _receive_message(self, connection: Connection) -> ServerMessage:
+        """Keep one socket reader while history requests run alongside task messages."""
+        while True:
+            raw = await connection.recv()
+            message = parse_server_message(raw.decode() if isinstance(raw, bytes) else raw)
+            if not isinstance(message, ConversationQuery):
+                return message
+            if len(self._history_tasks) >= 4:
+                await connection.send(ConversationResult(
+                    request_id=message.request_id, connection_epoch=message.connection_epoch,
+                    error="query_busy",
+                ).model_dump_json())
+                continue
+            task = asyncio.create_task(self._answer_history(connection, message))
+            self._history_tasks.add(task)
+            task.add_done_callback(self._history_finished)
+
+    def _history_finished(self, task: asyncio.Task[None]) -> None:
+        self._history_tasks.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            logger.warning("conversation response could not be delivered")
+
+    async def _answer_history(self, connection: Connection, query: ConversationQuery) -> None:
+        try:
+            page = await asyncio.to_thread(self.session.read, query.flow_id, query.sessions, query.cursor, query.limit)
+            result = ConversationResult(request_id=query.request_id, connection_epoch=query.connection_epoch, page=page)
+        except ConversationFailure as exc:
+            result = ConversationResult(request_id=query.request_id,
+                                        connection_epoch=query.connection_epoch, error=exc.code)
+        await connection.send(result.model_dump_json())
 
     async def _run_connection(self, connection: Connection) -> None:
         await connection.send(
@@ -186,9 +229,7 @@ class WorkerClient:
             ).model_dump_json()
         )
         heartbeat_interval = 15.0
-        first: ServerMessage | None = parse_server_message(
-            await _receive_text(connection)
-        )
+        first: ServerMessage | None = await self._receive_message(connection)
         self._connection_epoch = getattr(first, "connection_epoch", None)
         if isinstance(first, ProtocolError):
             raise WorkerProtocolError(
@@ -196,15 +237,15 @@ class WorkerClient:
             )
         if isinstance(first, StopExecution):
             await self._handle_stop(connection, first)
-            first = parse_server_message(await _receive_text(connection))
+            first = await self._receive_message(connection)
         if isinstance(first, RecoveryRejected):
             self.session.clear_rejected(first.job_id)
             await self._cancel_execution()
-            first = parse_server_message(await _receive_text(connection))
+            first = await self._receive_message(connection)
         elif isinstance(first, ResultAccepted):
             self.session.validate_recovery(first.job_id, first.assignment_token)
             self._acknowledge(first)
-            first = parse_server_message(await _receive_text(connection))
+            first = await self._receive_message(connection)
         elif isinstance(first, ResumeAssignment):
             self.session.validate_recovery(first.job_id, first.assignment_token)
             had_execution = self.session.assignment is not None and self._execution is not None
@@ -233,7 +274,7 @@ class WorkerClient:
             self._connection_epoch = first.connection_epoch
             heartbeat_interval = first.heartbeat_interval
         while not self._stop.is_set():
-            message = parse_server_message(await _receive_text(connection))
+            message = await self._receive_message(connection)
             if isinstance(message, ProtocolError):
                 raise WorkerProtocolError(
                     f"serve protocol error: {message.code}: {message.detail}"
@@ -287,7 +328,7 @@ class WorkerClient:
         heartbeat = asyncio.create_task(
             self._heartbeat(connection, assignment, heartbeat_interval)
         )
-        incoming = asyncio.create_task(_receive_text(connection))
+        incoming = asyncio.create_task(self._receive_message(connection))
         try:
             if execution is not None:
                 while not execution.done():
@@ -304,7 +345,7 @@ class WorkerClient:
                     if incoming in completed:
                         next_tool.cancel()
                         await asyncio.gather(next_tool, return_exceptions=True)
-                        message = parse_server_message(incoming.result())
+                        message = incoming.result()
                         if not isinstance(message, StopExecution):
                             raise WorkerProtocolError("unexpected message during execution")
                         heartbeat.cancel()
@@ -318,14 +359,14 @@ class WorkerClient:
                         )
                         try:
                             await connection.send(request.model_dump_json())
-                            response = parse_server_message(await incoming)
+                            response = await incoming
                             if isinstance(response, StopExecution):
                                 heartbeat.cancel()
                                 await asyncio.gather(heartbeat, return_exceptions=True)
                                 pending.future.cancel()
                                 await self._handle_stop(connection, response)
                                 return
-                            incoming = asyncio.create_task(_receive_text(connection))
+                            incoming = asyncio.create_task(self._receive_message(connection))
                         except BaseException:
                             await self._tool_requests.put(pending)
                             raise
@@ -350,7 +391,7 @@ class WorkerClient:
             heartbeat.cancel()
             await asyncio.gather(heartbeat, return_exceptions=True)
             await connection.send(terminal.model_dump_json())
-            accepted = parse_server_message(await incoming)
+            accepted = await incoming
             if isinstance(accepted, StopExecution):
                 await self._handle_stop(connection, accepted)
                 return
@@ -401,7 +442,7 @@ class WorkerClient:
         await connection.send(receipt.model_dump_json())
         # A result may already have been sent when the server requested stop. Only a matching
         # stop ACK permits session retirement; unrelated result ACKs cannot authorize release.
-        accepted = parse_server_message(await _receive_text(connection))
+        accepted = await self._receive_message(connection)
         if not isinstance(accepted, StopAccepted) or accepted.connection_epoch != request.connection_epoch:
             raise WorkerProtocolError("stop was not acknowledged")
         self.session.acknowledge_stop(accepted)
@@ -457,7 +498,7 @@ class WorkerClient:
     ) -> None:
         terminal = self.session.replay(replay.connection_epoch)
         await connection.send(terminal.model_dump_json())
-        accepted = parse_server_message(await _receive_text(connection))
+        accepted = await self._receive_message(connection)
         if (
             not isinstance(accepted, ResultAccepted)
             or accepted.job_id != replay.job_id
@@ -485,7 +526,3 @@ class WorkerClient:
             if not pending.future.done():
                 pending.future.set_exception(WorkerProtocolError("assignment was cancelled"))
 
-
-async def _receive_text(connection: Connection) -> str:
-    raw = await connection.recv()
-    return raw.decode() if isinstance(raw, bytes) else raw
