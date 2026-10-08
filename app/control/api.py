@@ -72,9 +72,10 @@ def _reject_json_constant(value: str) -> None:
 
 
 def _default_context() -> ApplicationContext:
+    from app.control.config import settings
     from app.control.runtime import ControlRuntime
 
-    return ControlRuntime()
+    return ControlRuntime(settings)
 
 
 async def _wait_for_disconnect(request: Request, cancel_scope: anyio.CancelScope) -> None:

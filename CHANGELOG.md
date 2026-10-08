@@ -8,6 +8,8 @@
 
 ## Unreleased
 
+- serve/worker 的配置类和进程级实例分别放入各自 config 模块，直接继承 BaseSettings，实例首次访问时创建；删除公共配置模块，启动入口继续显式传入 Runtime。
+
 - 新增按 flow 查询 Codex 会话的 control API，通过现有 WebSocket 请求原 worker 按需读取历史；
   支持角色、工具调用关联、游标分页和独立 Bearer 认证，不新增会话队列或持久化。
   wire protocol 升至 v11，control/worker 需同步升级。持续接收器保证 control 准备任务、处理工具

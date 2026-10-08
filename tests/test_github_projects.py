@@ -244,18 +244,24 @@ async def test_real_sdk_never_retries_or_accepts_partial_mutation(tmp_path, monk
         "lost": GitHubErrorKind.TRANSIENT, "limited": GitHubErrorKind.RATE_LIMITED}[failure]
 
 
-def test_check_disabled_does_not_construct_github(tmp_path, monkeypatch):
-    monkeypatch.setattr(cli, "get_serve_settings", lambda: settings(tmp_path))
+@pytest.fixture
+def serve_config(tmp_path, monkeypatch):
+    from app.control import config as serve_config
+
+    monkeypatch.setitem(serve_config.__dict__, "settings", settings(tmp_path))
+    return serve_config
+
+
+def test_check_disabled_does_not_construct_github(serve_config, monkeypatch):
     monkeypatch.setattr("app.github.client.GitHubApp", lambda _: pytest.fail("disabled must not authenticate"))
     result = CliRunner().invoke(cli.app, ["project", "check", "owner/repo"])
     assert result.exit_code == 0 and "disabled" in result.stdout
 
 
-def test_check_only_validates_and_prints_target(tmp_path, monkeypatch):
-    settings_value = settings(tmp_path)
+def test_check_only_validates_and_prints_target(tmp_path, monkeypatch, serve_config):
+    settings_value = serve_config.settings
     settings_value.projects = {"owner/repo": config()}
     api, client, lookup = adapter(tmp_path, monkeypatch, target())
-    monkeypatch.setattr(cli, "get_serve_settings", lambda: settings_value)
     monkeypatch.setattr("app.github.client.GitHubApp", lambda _: SimpleNamespace(project_client=lambda _: api))
     result = CliRunner().invoke(cli.app, ["project", "check", "OWNER/REPO"])
     assert result.exit_code == 0 and "Renamed board" in result.stdout
