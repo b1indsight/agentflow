@@ -1,6 +1,11 @@
-"""Errors which may cross only the pre-Assignment read-preparation boundary."""
+"""Outcomes and errors at the unstarted assignment preparation boundary."""
+
+from typing import Literal
 
 from app.domain.github_models import GitHubAdapterError
+from app.domain.models import JobState
+
+PreparationState = Literal[JobState.QUEUED, JobState.DONE, JobState.FAILED]
 
 
 class PreparationReadFailure(Exception):

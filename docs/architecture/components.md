@@ -69,6 +69,10 @@ Review:   settle → READY → PROCESSING → COMPLETED / WAITING
 冻结一次结果的领域变更和 GitHub 操作，
 由 `ResultEffects` 查询/执行远端操作并保存回执，最后一起提交本地状态、运行记录和结果确认。
 网络请求不占用数据库事务；plugin hook 在提交后调用，不具备持久化投递保证。worker 不能直接更新这些状态。
+`JobCoordinator.prepare_for_assignment` 完成任务构造、push capability 签发和 I/O 后业务复查，
+直接返回 wire `Assignment` 或 QUEUED/DONE/FAILED。读取故障使用持久重试预算，签发故障直接失败。
+`WorkerGateway` 在准备期间维持租约心跳，连接结束时取消并等待准备协程；发送前仍独立调用
+`authorize_dispatch`，再发送 coordinator 构造的消息。
 非零 Codex exit 会转 FAILED。revision 成功后仅消费明确 addressed 的 item/version，deferred/遗漏项/
 clarification 保持 waiting；不把 addressed 当作远端 resolved。有未决问题时不重新请求审核。
 

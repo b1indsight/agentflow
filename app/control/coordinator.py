@@ -8,6 +8,7 @@ from datetime import timedelta
 from typing import Protocol
 
 from app.contracts.protocol import (
+    Assignment,
     AssignmentSecret,
     ExecutionTask,
     Failed,
@@ -19,7 +20,7 @@ from app.contracts.protocol import (
     terminal_digest,
 )
 from app.control.archive import archive_task
-from app.control.preparation import PreparationReadFailure, PreparationStale
+from app.control.preparation import PreparationReadFailure, PreparationStale, PreparationState
 from app.control.resolution import feedback_link
 from app.control.results import ResultApplication, ResultSettings
 from app.control.review_context import build_review_context
@@ -28,6 +29,7 @@ from app.control.tools import FlowToolService
 from app.domain.github_models import GitHubAdapterError, GitHubErrorKind
 from app.domain.models import (
     TERMINAL_STATES,
+    DeliveryState,
     Flow,
     FlowDelivery,
     Job,
@@ -162,7 +164,33 @@ class JobCoordinator:
 
     async def prepare_for_assignment(
         self, job: Job, worker: str, token: str, epoch: str,
-    ) -> ExecutionTask | JobState:
+    ) -> Assignment | PreparationState:
+        """Build an unstarted assignment, keeping read retries separate from signing failures."""
+        prepared = await self._prepare_task(job, worker, token, epoch)
+        if isinstance(prepared, JobState):
+            return prepared
+        try:
+            secret = await self._assignment_secret(job, prepared)
+        except Exception as exc:  # noqa: BLE001 - signing errors become durable control failures
+            if not self.store.clear_preparation(job.id, worker, token, epoch):
+                raise PreparationStale("assignment expired during capability preparation") from None
+            await self.fail(job, f"assignment capability failed: {type(exc).__name__}")
+            return JobState.FAILED
+        # Signing may outlive the lease or race a webhook; validate even without a gateway.
+        if not self.store.clear_preparation(job.id, worker, token, epoch):
+            raise PreparationStale("assignment changed before dispatch")
+        delivery = self.store.get_delivery(job.flow_id)
+        if delivery is not None and delivery.supersedes(job.kind):
+            if delivery.state is DeliveryState.CLOSED:
+                return JobState.DONE
+            await self.fail(job, "PR merged before task dispatch")
+            return JobState.FAILED
+        return Assignment(job_id=job.id, flow_id=job.flow_id, assignment_token=token,
+                          connection_epoch=epoch, task=prepared, secret=secret)
+
+    async def _prepare_task(
+        self, job: Job, worker: str, token: str, epoch: str,
+    ) -> ExecutionTask | PreparationState:
         """Bound read preparation for remote assignments."""
         error = None
         expired = (job.prepare_first_failed_at is not None and self.store.now()
@@ -173,6 +201,8 @@ class JobCoordinator:
             except PreparationReadFailure as failure:
                 error = failure.error
             else:
+                if isinstance(prepared, JobState):
+                    assert prepared in (JobState.QUEUED, JobState.DONE, JobState.FAILED)
                 if not isinstance(prepared, JobState) and not self.store.clear_preparation(job.id, worker, token, epoch):
                     raise PreparationStale("preparation changed before dispatch")
                 return prepared
@@ -182,6 +212,7 @@ class JobCoordinator:
         )
         if state is None:
             raise PreparationStale("preparation changed before retry")
+        assert state in (JobState.QUEUED, JobState.DONE, JobState.FAILED)
         if state is JobState.FAILED and worker is not None:
             await self.results.apply(job.id)
         return state
@@ -365,7 +396,7 @@ class JobCoordinator:
                 return JobState.FAILED
         raise ValueError(f"unsupported job kind: {job.kind}")
 
-    async def assignment_secret(self, job: Job, task: ExecutionTask) -> AssignmentSecret | None:
+    async def _assignment_secret(self, job: Job, task: ExecutionTask) -> AssignmentSecret | None:
         if not isinstance(task, (InitialTask, RevisionTask)):
             return None
         flow = self.store.get_flow(job.flow_id)

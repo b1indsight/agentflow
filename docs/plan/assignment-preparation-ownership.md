@@ -1,6 +1,6 @@
 # Assignment 准备的业务归属 — Feature record
 
-**Stage:** Planning — 待审阅，尚未实施。
+**Stage:** Implemented — 实现、消融与本地验证完成。
 **PR:** [#71](https://github.com/b1indsight/agentflow/pull/71)。
 **Bookmark:** `refactor/assignment-preparation-ownership`
 **基线:** `main` / `a7c91202`（PR #68），2026-10-10。
@@ -80,3 +80,45 @@ coordinator 和 Assignment，保留 transport 的生命周期所有权。
 不合并读取重试与签发失败政策，不创建通用调度器。与其他三个计划独立，建议最后实施。
 
 ## 2. PR change timeline
+
+
+### 2026-10-10 — 收拢准备业务与并发边界
+
+- **触发与实现：** 原 gateway 分别取得 task/secret 并判定签发失败及 delivery；现在
+  `JobCoordinator.prepare_for_assignment` 直接构造既有 `Assignment`，内部保留读取预算与
+  capability 签发的独立边界。`PreparationState` 使用 Literal 限定 QUEUED/DONE/FAILED，
+  不增加消息中间类型。旧公开 `assignment_secret` 已移除，签发 helper 仅供 coordinator 内部使用。
+- **边界选择：** 复用 `clear_preparation` 的事务复查，在签发成功和异常后检查原 token、
+  worker epoch、有效租约、未 started、未接收 result，再使用已有 fail/result 路径。
+  相比 heartbeat，该检查也拒绝已启动任务；不改变 SQL 锁顺序，不在数据库事务中等待签发。
+  gateway 继续拥有心跳、取消并 join、发送前 `authorize_dispatch`，成功后仅序列化 Assignment。
+- **政策对照：** 准备入口已发现退休任务返回 DONE；读取失败仍由 `defer_preparation` 决定
+  DONE/QUEUED/FAILED。签发成功后遇 CLOSED 返回 DONE，遇 MERGED 失败；签发异常在原授权
+  仍有效时失败，即使 delivery 已 CLOSED/MERGED，也不进入读取预算。原授权失效则抛
+  PreparationStale，不写失败结果。未统一这几个时序的语义。
+- **测试迁移：** gateway/ASGI/remote/stop 替身改为直接返回 Assignment；真实 PostgreSQL
+  参数化测试覆盖签发成功和失败时的 CLOSED、MERGED、epoch、token、租约过期和 started。
+  取消测试以事件控制异步清理，验证准备入口等待 signer 退出；发送前授权保留独立回归。
+  先写的 coordinator 测试在原实现下 CLOSED/MERGED 两例失败，证明业务尚未收拢。
+
+### 2026-10-10 — 消融结果与保留决定
+
+- **设置与复现：** 本地 PostgreSQL `127.0.0.1:55419`，同一组回归逐个移除机制，
+  每次结束在 finally 恢复文件。命令 `uv run python .cache/2026-10-10/pr71-ablation.py`；
+  脚本及各项日志保存于本地日期 cache，不进入版本控制。
+- **结果：** 移除签发成功后的持久 fence：epoch/token/expired/started 四例失败；移除
+  delivery 复查：CLOSED/MERGED 两例失败；移除取消后的 join：异步清理尚未退出时准备入口
+  已结束，一例失败；移除发送前授权：过期 token 被发送，一例失败。各变体均以 pytest
+  exit 1 捕获预期行为差异，恢复后再运行完整套件。
+- **测试修正与决定：** 初版取消测试的清理立即结束，移除 join 后仍通过；增加可控清理
+  release 事件后可靠捕获差异。保留四个独立机制，未增加通用 service、状态空间或协议版本。
+
+
+### 2026-10-10 — 最终验证
+
+- 恢复消融变体后，`FLOWTOOL_TEST_DATABASE_URL=postgresql://flowtool@127.0.0.1:55419/postgres
+  uv run pytest -q --tb=short`：**851 passed**，无跳过；覆盖准备重试、gateway、恢复并发、
+  cancel/drain、PR lifecycle、coordinator 与事务回归。仅有既有 Starlette/httpx 弃用警告。
+- `uv run ruff check app tests`、`uv run mypy app tests`（160 files）、`uv build`、
+  `git diff --check` 均通过。已检查最终 diff 与 code-principles，新增测试限于真实并发边界，
+  不引入通用调度抽象、数据库 schema 或 wire 变更。

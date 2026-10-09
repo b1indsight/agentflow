@@ -5,7 +5,6 @@ import pytest
 from fastapi import WebSocketDisconnect
 
 from app.contracts.protocol import (
-    PROTOCOL_VERSION,
     Assignment,
     ExecutionTask,
     FlowToolRequest,
@@ -24,7 +23,7 @@ from app.contracts.protocol import (
 from app.contracts.result_models import ResultPending
 from app.control.gateway import WorkerGateway
 from app.domain.delivery_models import OpenedDelivery
-from app.domain.models import DeliveryState, FlowDelivery, Job, JobKind, JobState, VcsKind
+from app.domain.models import FlowDelivery, Job, JobKind, JobState, VcsKind
 from tests.worker_fakes import NoPendingStops, connected_worker
 
 
@@ -148,7 +147,11 @@ class RecordingStore:
 
 class RecordingCoordinator:
     async def prepare_for_assignment(self, job, worker, token, epoch):
-        return await self.prepare(job)
+        task = await self.prepare(job)
+        if isinstance(task, JobState):
+            return task
+        return Assignment(job_id=job.id, flow_id=job.flow_id, assignment_token=token,
+                          connection_epoch=epoch, task=task)
 
     def __init__(self, store: RecordingStore) -> None:
         self.store = store
@@ -166,9 +169,6 @@ class RecordingCoordinator:
             issue_body="Body",
             branch="flow/issue-8",
         )
-
-    async def assignment_secret(self, job: Job, task: ExecutionTask):
-        return None
 
     async def execute_tool(self, request: FlowToolRequest, *, worker_id: str) -> FlowToolResponse:
         assert worker_id == "worker-1"
@@ -324,34 +324,21 @@ async def test_gateway_runs_one_remote_assignment_to_ack() -> None:
     assert coordinator.results[0].session_id == "session-1"
 
 
-async def test_gateway_checks_merge_after_capability_preparation(monkeypatch):
-    # A merge may commit after prepare() while control is awaiting a push token.
-    store = RecordingStore()
-    coordinator = RecordingCoordinator(store)
-    delivery = FlowDelivery(flow_id=store.job.flow_id, branch="flow/3", state=DeliveryState.OPEN)
-    monkeypatch.setattr(store, "get_delivery", lambda _: delivery)
-
-    async def merged_secret(*args):
-        delivery.state = DeliveryState.MERGED
-
-    monkeypatch.setattr(coordinator, "assignment_secret", merged_secret)
-    gateway = WorkerGateway(store, coordinator, execution_control=NoPendingStops(), worker_tokens={"worker-1": "secret"})
-    store.worker_connected("worker-1", PROTOCOL_VERSION, "epoch")
-    job = store.assign_job("worker-1", "token", "epoch")
-    prepared, secret = await gateway._prepare_assignment(job, "worker-1", "token", "epoch")
-    assert prepared is JobState.FAILED and secret is None
-    assert coordinator.failures == ["PR merged before task dispatch"]
-
-
-async def test_gateway_does_not_dispatch_after_capability_fetch_loses_ownership():
+async def test_gateway_authorizes_dispatch_after_preparation():
     store = RecordingStore()
 
     class ChangedCoordinator(RecordingCoordinator):
-        async def assignment_secret(self, job, task):
+        async def prepare_for_assignment(self, job, worker, token, epoch):
+            assignment = await super().prepare_for_assignment(job, worker, token, epoch)
             store.job.assignment_token = "reassigned-token"
+            return assignment
+
+    class AssignmentControl(NoPendingStops):
+        def authorize_dispatch(self, job_id, worker_id, token, epoch):
+            return store.assignment_active(job_id, worker_id, token)
 
     socket = ScriptedSocket()
-    gateway = WorkerGateway(store, ChangedCoordinator(store), execution_control=NoPendingStops(), worker_tokens={"worker-1": "worker-secret"})
+    gateway = WorkerGateway(store, ChangedCoordinator(store), execution_control=AssignmentControl(), worker_tokens={"worker-1": "worker-secret"})
     await gateway.handle(socket)
     assert not any(isinstance(parse_server_message(raw), Assignment) for raw in socket.sent)
     assert not store.started

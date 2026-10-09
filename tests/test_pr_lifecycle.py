@@ -282,8 +282,8 @@ async def test_close_during_capability_preparation_never_dispatches(store, pendi
 
     monkeypatch.setattr(github, "create_push_capability", close_before_return)
     gateway = WorkerGateway(store, subject, execution_control=StopStore(store), worker_tokens={})
-    prepared, secret = await gateway._prepare_assignment(job, "worker-a", "token", "epoch")
-    assert prepared is JobState.DONE and secret is None
+    prepared = await gateway._prepare_assignment(job, "worker-a", "token", "epoch")
+    assert prepared is JobState.DONE
     assert store.get_job(job.id).started_at is None
     assert store.get_flow_execution(flow.id).released_at is None
 

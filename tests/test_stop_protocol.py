@@ -128,10 +128,11 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path):
             return InitialTaskResult(session_id='unused', last_message='', exit_code=0)
 
     class Coordinator:
-        async def prepare_for_assignment(self, job, *args):
-            return InitialTask(flow_id=flow.id, attempt_id=attempt.id, repo=flow.repo,
+        async def prepare_for_assignment(self, job, worker, token, epoch):
+            task = InitialTask(flow_id=flow.id, attempt_id=attempt.id, repo=flow.repo,
                                issue_number=1, issue_title='test', issue_body='', branch='flow/1')
-        async def assignment_secret(self, job, task): return None
+            return Assignment(job_id=job.id, flow_id=job.flow_id, assignment_token=token,
+                              connection_epoch=epoch, task=task)
         def mark_started(self, job, task, worker_id): pass
         def worker_connected(self, *args): pass
         def worker_disconnected(self, *args): pass

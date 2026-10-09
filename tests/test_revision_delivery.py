@@ -258,12 +258,11 @@ async def test_control_refuses_unproven_revision_results(revision_control, chang
     assert github.review_requests == []
 
 
-async def test_revision_relay_is_idempotent_and_has_fresh_capability(revision_control):
+async def test_revision_relay_is_idempotent(revision_control):
     store, _, job, subject, task = revision_control
     subject.mark_started(job, task, "worker-1")
     subject.mark_started(job, task, "worker-1")
     assert store.reviews.batch.state.value == "processing"
-    assert (await subject.assignment_secret(job, task)).push.repository == task.repo
 
 
 @pytest.mark.parametrize("change", ["closed", "base", "head", "lineage", "fork"])
