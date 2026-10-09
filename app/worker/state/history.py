@@ -48,11 +48,13 @@ class CodexHistory:
             self._reads.release()
 
     def _path(self, session_id: str) -> Path | None:
+        # Prefer the active copy during archival; opening validates the candidate.
         count = 0
         for directory in (self.root / "sessions", self.root / "archived_sessions"):
             if not directory.exists():
                 continue
             if directory.is_symlink():
+                # followlinks=False does not protect the walk's starting directory.
                 raise ConversationFailure("history_unreadable")
             for parent, dirs, names in os.walk(directory, followlinks=False, onerror=self._walk_error):
                 count += len(dirs) + len(names)
@@ -91,6 +93,7 @@ class CodexHistory:
                 raise ConversationFailure("history_unreadable")
             identity = f"{file_stat.st_dev}:{file_stat.st_ino}:{hashlib.sha256(meta_line).hexdigest()}"
             if previous_identity is not None:
+                # A valid cursor can outlive its file; recheck identity and line position.
                 if identity != previous_identity or not len(meta_line) <= offset <= file_stat.st_size:
                     raise ConversationFailure("cursor_invalid")
                 file.seek(offset - 1)
@@ -105,6 +108,7 @@ class CodexHistory:
                 if len(raw) > MAX_LINE:
                     raise ConversationFailure("history_limit")
                 if not raw.endswith(b"\n"):
+                    # Leave a partially written final record for the next poll.
                     break
                 scanned += len(raw)
                 item, unsupported = self._item(json.loads(raw), query.session_id, offset)
@@ -113,6 +117,7 @@ class CodexHistory:
                 if item is not None:
                     item_size = len(item.model_dump_json().encode())
                     if len(page.items) >= query.limit or size + item_size > MAX_PAGE:
+                        # Keep offset before this record: it belongs to the next page.
                         page.has_more = True
                         break
                     page.items.append(item)

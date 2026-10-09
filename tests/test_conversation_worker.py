@@ -63,7 +63,7 @@ async def test_query_does_not_block_execution_messages(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_bad_cursor_returns_query_error_without_closing_connection(tmp_path):
+async def test_bad_cursor_returns_correlated_query_error(tmp_path):
     connection = Connection()
     client = WorkerClient(worker_id="worker", worker_token="token", serve_ws_url="unused",
                           executor=SimpleNamespace(), session=WorkerSession(tmp_path))

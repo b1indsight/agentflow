@@ -29,6 +29,7 @@ class HistoryQuery(ConversationModel):
                 if not isinstance(data, list) or len(data) != 3:
                     raise ValueError("invalid cursor shape")
                 session_id, offset, identity = data
+                # Bind byte offsets to their session before any filesystem access.
                 if (session_id != self.session_id or type(offset) is not int or offset < 0
                         or not isinstance(identity, str) or not 1 <= len(identity) <= 256):
                     raise ValueError("invalid cursor position")
@@ -69,6 +70,8 @@ class HistoryItem(ConversationModel):
 
 
 class HistoryPage(ConversationModel):
+    """Worker response for one session; control adds Flow/Attempt attribution."""
+
     session_id: str = Field(pattern=r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$")
     items: list[HistoryItem] = Field(default_factory=list, max_length=500)
     status: Literal["available", "not_found", "unsupported"] = "available"

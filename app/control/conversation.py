@@ -158,6 +158,7 @@ class ConversationService:
         fingerprint = hashlib.sha256(json.dumps([flow_id, [
             [a.id, a.codex_session_id, a.session_generation] for a in attempts
         ]]).encode()).hexdigest()
+        # The outer cursor binds session order/generation; worker sees only its inner cursor.
         index, inner_cursor = 0, None
         if cursor is not None:
             try:
@@ -184,6 +185,7 @@ class ConversationService:
         has_more = page.has_more
         if not has_more and index + 1 < len(attempts):
             next_index, next_inner, has_more = index + 1, None, True
+        # At the final session, retain its EOF cursor so later polls see appended records.
         next_cursor = base64.urlsafe_b64encode(json.dumps(
             [fingerprint, next_index, next_inner],
         ).encode()).decode()

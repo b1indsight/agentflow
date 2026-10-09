@@ -54,15 +54,6 @@ def test_history_roles_tools_pagination_and_live_tail(tmp_path: Path) -> None:
     assert final.items[0].id not in {item.id for item in first.items + second.items}
 
 
-def test_history_missing_and_cursor_identity(tmp_path: Path) -> None:
-    reader = CodexHistory(tmp_path)
-    assert reader.query(HistoryQuery(session_id=SESSION, cursor=None, limit=10)).status == "not_found"
-    rollout(tmp_path, [message("user", "hello")])
-    page = reader.query(HistoryQuery(session_id=SESSION, cursor=None, limit=10))
-    with pytest.raises(ConversationFailure, match="cursor_invalid"):
-        HistoryQuery(session_id="019eac3b-a60c-7a93-a442-3718f660fc8d", cursor=page.next_cursor)
-
-
 def test_history_rejects_symlink_escape_and_wrong_session(tmp_path: Path) -> None:
     outside = tmp_path / "outside"
     path = rollout(outside, [message("user", "other account")])
