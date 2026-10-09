@@ -72,7 +72,6 @@ class MemoryStore:
         self.delivery: FlowDelivery | None = None
         self.tool_calls: dict[str, Any] = {}
         self.enqueued: list[tuple[JobKind, dict | None]] = []
-        self.runs: list[tuple[int, str, int | None]] = []
 
     @contextmanager
     def transaction(self):
@@ -220,19 +219,6 @@ class MemoryStore:
         if source_job_id is not None and source_key is not None:
             self.sources[source_job_id, source_key] = job
         return job
-
-    def record_codex_run(
-        self,
-        attempt_id: int,
-        kind: str,
-        prompt: str,
-        log_path: str,
-        exit_code: int | None,
-        *,
-        source_job_id: int | None = None,
-    ) -> None:
-        self.runs.append((attempt_id, kind, exit_code))
-
 
 class RecordingGitHub:
     def __init__(self) -> None:

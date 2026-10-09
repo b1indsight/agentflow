@@ -6,7 +6,7 @@ from typing import cast
 
 import pytest
 
-from app.contracts.protocol import InitialTaskResult
+from app.contracts.protocol import InitialTaskResult, Succeeded, terminal_digest
 from app.contracts.result_models import EffectState, ResultPending
 from app.control.service import ControlService
 from app.domain.github_models import GitHubAdapterError, GitHubErrorKind
@@ -135,12 +135,16 @@ async def test_initial_delivery_commits_only_after_all_required_effects(
         await apply_result(coordinator(store, github), job, result)
     assert store.delivery.state is DeliveryState.OPENING
     assert store.jobs[job.id].result_applied_at is None
-    assert store.runs == []
+    accepted = store.get_job(job.id)
     store.results.clock += timedelta(seconds=10)
     await apply_result(coordinator(store, github), job, result)
     await apply_result(coordinator(store, github), job, result)
     assert store.delivery.state is DeliveryState.OPEN
-    assert len(github.opened) == len(store.runs) == 1
+    assert len(github.opened) == 1
+    persisted = store.get_job(job.id)
+    assert persisted.result_payload == accepted.result_payload
+    assert persisted.result_digest == accepted.result_digest
+    assert persisted.result_received_at == accepted.result_received_at
     assert store.jobs[job.id].result_applied_at is not None
 
 
@@ -217,11 +221,18 @@ async def test_merged_initial_result_keeps_execution_facts_without_reopening(ini
     result = result.model_copy(update={"exit_code": exit_code})
     subject = coordinator(store, github)
     await apply_result(subject, job, result)
+    accepted = store.get_job(job.id)
     await apply_result(subject, job, result)
     assert store.flow.state is FlowState.ACTIVE
     assert store.delivery.state is DeliveryState.MERGED
     assert store.execution.released_at is None
-    assert len(store.runs) == 1
+    persisted = store.get_job(job.id)
+    terminal = Succeeded.model_validate(persisted.result_payload)
+    assert terminal.result == result
+    assert persisted.result_digest == terminal_digest(terminal)
+    assert persisted.result_received_at == accepted.result_received_at
+    assert persisted.result_applied_at == accepted.result_applied_at
+    assert store.attempt.codex_session_id == "session-1"
     assert github.comments == []
     assert store.results.list_effects(job.id) == []
 

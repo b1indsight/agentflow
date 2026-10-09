@@ -20,8 +20,6 @@ if TYPE_CHECKING:
 RESULT_SCHEMA = """
 CREATE UNIQUE INDEX IF NOT EXISTS ux_jobs_source ON jobs(source_job_id, source_key)
   WHERE source_job_id IS NOT NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS ux_codex_runs_source ON codex_runs(source_job_id)
-  WHERE source_job_id IS NOT NULL;
 CREATE TABLE IF NOT EXISTS result_applications (
   job_id BIGINT PRIMARY KEY REFERENCES jobs(id),
   digest TEXT NOT NULL,
