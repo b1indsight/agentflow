@@ -1,4 +1,5 @@
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 from pydantic import SecretStr
@@ -21,6 +22,7 @@ async def test_adapter_returns_raw_output_without_interpreting_business_schema(m
             return b'{"type":"thread.started","thread_id":"session-1"}\n', b""
 
     async def spawn(*args, **kwargs):
+        assert kwargs["cwd"] == tmp_path
         assert args[args.index("--output-schema") + 1] == str(schema)
         Path(args[args.index("-o") + 1]).write_text(raw)
         return Process()
@@ -104,60 +106,28 @@ async def test_resume_also_requires_explicit_trusted_host_mode() -> None:
         await agent.resume("session-1", "continue", cwd=Path("/worker/repos/flow-1"))
 
 
-@pytest.mark.parametrize("mode", ["start", "resume"])
-@pytest.mark.parametrize("with_mcp", [False, True])
-async def test_run_uses_explicit_directory_and_current_mcp(monkeypatch, tmp_path, mode, with_mcp):
-    # A recovered session may save another directory and an expired INITIAL broker.
-    # Every invocation must override both from the current run's explicit inputs.
-    context = CodingExecutionContext(
-        push_token=SecretStr("fresh-push-secret"),
-        mcp_url="http://127.0.0.1:12345/mcp" if with_mcp else None,
-        mcp_token=SecretStr("fresh-mcp-secret") if with_mcp else None,
-    )
-
-    class Process:
-        returncode = 0
-
-        async def communicate(self):
-            return b'{"type":"thread.started","thread_id":"session-1"}\n', b""
-
-    async def spawn(*args, **kwargs):
-        assert kwargs["cwd"] == tmp_path
-        if mode == "start":
-            assert args[args.index("-C") + 1] == str(tmp_path)
-        else:
-            assert f'cwd="{tmp_path}"' in args
-        if with_mcp:
-            assert any('url="http://127.0.0.1:12345/mcp"' in arg for arg in args)
-            assert kwargs["env"]["FLOWTOOL_MCP_TOKEN"] == "fresh-mcp-secret"
-        else:
-            assert 'mcp_servers.flow={url="http://127.0.0.1", enabled=false}' in args
-            assert "FLOWTOOL_MCP_TOKEN" not in kwargs["env"]
-        assert kwargs["env"]["FLOWTOOL_PUSH_TOKEN"] == "fresh-push-secret"
-        assert "fresh-push-secret" not in " ".join(args)
-        assert "fresh-mcp-secret" not in " ".join(args)
-        return Process()
-
+async def test_resume_uses_current_directory_and_disables_saved_broker(monkeypatch, tmp_path):
+    # A recovered session can retain another directory and an expired INITIAL broker.
+    process = AsyncMock(returncode=0)
+    process.communicate.return_value = (b"", b"")
+    spawn = AsyncMock(return_value=process)
     monkeypatch.setattr("app.worker.execution.codex.asyncio.create_subprocess_exec", spawn)
-    agent = CodexAgent(trusted_host=True)
-    if mode == "start":
-        await agent.start("task", tmp_path, context=context)
-    else:
-        await agent.resume("session-1", "revise", cwd=tmp_path, context=context)
+
+    await CodexAgent(trusted_host=True).resume("session-1", "revise", cwd=tmp_path)
+
+    args, kwargs = spawn.call_args
+    assert kwargs["cwd"] == tmp_path
+    assert f'cwd="{tmp_path}"' in args
+    assert 'mcp_servers.flow={url="http://127.0.0.1", enabled=false}' in args
 
 
-@pytest.mark.parametrize("mode", ["start", "resume"])
 @pytest.mark.parametrize("context", [
     CodingExecutionContext(mcp_url="http://127.0.0.1:12345/mcp"),
     CodingExecutionContext(mcp_token=SecretStr("orphan-token")),
 ])
-async def test_mcp_requires_endpoint_and_token_together(tmp_path, mode, context):
-    agent = CodexAgent(trusted_host=True)
+def test_mcp_requires_endpoint_and_token_together(tmp_path, context):
     with pytest.raises(ValueError, match="MCP"):
-        if mode == "start":
-            await agent.start("task", tmp_path, context=context)
-        else:
-            await agent.resume("session-1", "revise", cwd=tmp_path, context=context)
+        _start_args("task", tmp_path, trusted_host=True, context=context)
 
 
 @pytest.mark.parametrize("events,error,unavailable", [

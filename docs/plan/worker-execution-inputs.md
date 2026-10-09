@@ -122,3 +122,22 @@ push_token 仍为 SecretStr，调用参数、环境构造、返回值和日志�
   一条既有 Starlette/httpx 弃用警告。
 - **检查与构建**：`uv run ruff check app tests`、`uv run mypy app tests`（160 source files）、
   `uv build`、`git diff --check` 均通过。真实 Codex 多轮执行仍未验证，不扩展本 PR 验收结论。
+
+
+### 2026-10-10 — 精简 Codex adapter 回归测试
+
+- **触发与范围**：用户指出 `tests/test_codex_driver.py` 测试偏重；本轮仅调整测试，
+  删除 start/resume × 有无 MCP 的组合矩阵，以及重复的凭据环境/argv 断言。
+  endpoint 配置与 secret 隔离继续由已有专门测试覆盖。
+- **实现与取舍**：保留一个 resume 的 CLI/进程目录与旧 broker 禁用回归，使用 AsyncMock
+  代替本地 Process/spawn 类；start 的进程目录断言放入现有输出转发测试，默认 MCP
+  禁用仍由已有 start 参数测试覆盖。endpoint/token 成对校验改为两项同步参数测试，
+  不再重复通过两个异步入口验证相同 helper。文件净减少 30 行，用例从 19 项减至 14 项。
+- **消融复验**：脚本 `.cache/2026-10-10/pr70-test-trim-ablation.py` 每次移除一项机制，执行
+  `uv run pytest tests/test_codex_driver.py -q --tb=short -k 'trusted_host_start or adapter_returns_raw or resume_uses_current_directory'`。
+  移除 MCP 禁用：2 failed / 1 passed；移除 resume CLI cwd：1 failed / 2 passed；
+  移除进程 cwd：2 failed / 1 passed。恢复后关键配置遗漏仍能被精简后的测试发现；
+  证据范围保持为命令/进程参数，不是实际 Codex 执行。
+- **验证**：`uv run pytest tests/test_codex_driver.py -q --tb=short`：14 passed。
+  六个计划指定模块：`uv run pytest tests/test_codex_driver.py tests/test_worker_executor.py tests/test_revision_delivery.py tests/test_vcs.py tests/test_worker_tools.py tests/test_worker_client.py -q --tb=short`：
+  87 passed。`uv run ruff check app tests`、`uv run mypy app tests`、`git diff --check` 均通过。
