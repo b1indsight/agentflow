@@ -101,6 +101,16 @@ def test_history_archive_and_truncated_source(tmp_path: Path) -> None:
         reader.query(HistoryQuery(session_id=SESSION, cursor=page.next_cursor, limit=1))
 
 
+def test_history_prefers_active_file_over_archived_copy(tmp_path: Path) -> None:
+    # During archival, both copies may be present; the active source takes priority.
+    path = rollout(tmp_path, [message("user", "active")])
+    archived = tmp_path / "archived_sessions" / path.name
+    archived.parent.mkdir()
+    archived.write_text(path.read_text().replace('"active"', '"archived"'))
+    page = CodexHistory(tmp_path).query(HistoryQuery(session_id=SESSION))
+    assert [item.content.text for item in page.items] == ["active"]
+
+
 def test_history_malformed_limits_and_secret_filter(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "private-key-value")
     path = rollout(tmp_path, [message("assistant", "private-key-value Bearer abc123 ghp_testsecret")])

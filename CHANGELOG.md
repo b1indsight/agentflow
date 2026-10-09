@@ -8,6 +8,9 @@
 
 ## Unreleased
 
+- 历史文件查找优先活动目录，找到即返回；移除重复文件报错、候选路径重复检查和 3 秒
+  遍历计时，保留条目上限及打开文件时的访问校验。
+
 - worker 历史查询只接受单个 session ID、cursor 和 limit，移除 SessionRef、HistoryCursor；
   control 负责 Flow/Attempt 归属和跨会话分页，每个 HTTP 页查询一个会话。旧游标返回 409，
   需重新加载；wire protocol 升至 v13，control/worker 须同步升级。

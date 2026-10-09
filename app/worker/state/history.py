@@ -8,7 +8,6 @@ import os
 import re
 import stat
 import threading
-import time
 from pathlib import Path
 from typing import BinaryIO
 
@@ -49,8 +48,6 @@ class CodexHistory:
             self._reads.release()
 
     def _path(self, session_id: str) -> Path | None:
-        found: Path | None = None
-        deadline = time.monotonic() + 3
         count = 0
         for directory in (self.root / "sessions", self.root / "archived_sessions"):
             if not directory.exists():
@@ -59,20 +56,15 @@ class CodexHistory:
                 raise ConversationFailure("history_unreadable")
             for parent, dirs, names in os.walk(directory, followlinks=False, onerror=self._walk_error):
                 count += len(dirs) + len(names)
-                if count > 50000 or time.monotonic() > deadline:
+                if count > 50000:
                     raise ConversationFailure("history_limit")
                 for name in names:
                     if not name.startswith("rollout-") or not name.endswith(".jsonl"):
                         continue
                     if name[-42:-6] != session_id:
                         continue
-                    path = Path(parent) / name
-                    if path.is_symlink() or not path.resolve().is_relative_to(self.root):
-                        raise ConversationFailure("history_unreadable")
-                    if found is not None:
-                        raise ConversationFailure("history_unreadable")
-                    found = path
-        return found
+                    return Path(parent) / name
+        return None
 
     @staticmethod
     def _walk_error(error: OSError) -> None:
