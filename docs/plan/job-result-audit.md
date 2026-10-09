@@ -1,6 +1,6 @@
 # Job 结果作为编码审计来源 — Feature record
 
-**Stage:** Planning — 待审阅，尚未实施。
+**Stage:** Implemented — 实施与本地验证完成。
 **PR:** [#69](https://github.com/b1indsight/agentflow/pull/69)。
 **Bookmark:** `refactor/job-result-audit`
 **基线:** `main` / `a7c91202`（PR #68），2026-10-10。
@@ -73,3 +73,34 @@ control 重启及迟到结果不会覆盖原证据。已合并 PR 的迟到结�
 本方案；实现时核对实际部署文档。进程级时间采集、审计查询接口及旧表物理删除另行设计。
 
 ## 2. PR change timeline
+
+### 2026-10-10 — 持久 job 结果替代重复运行投影
+
+- 已删除 `ResultApplication._commit()` 的 codex_runs 写入、Store 的写入方法以及当前
+  schema 的表和唯一索引声明。保留 RunUpdate 与 attempt session、generation、summary
+  更新；结果 ACK、应用标记和退休结果路径沿用现有事务。
+- 测试替身移除 runs 投影。INITIAL 成功/失败的 merge 后重放、INITIAL 远端操作延迟后的
+  重放，以及 REVISION resume/fallback 提交中断和 merge 竞态，改为验证持久 payload、
+  digest、接收时间及应用标记。新库检查表/索引不存在，旧表初始化保留已有审计行。
+- 架构说明和 CHANGELOG 记录停止写入、旧数据保留、外部 SQL 消费者迁移及时间语义。
+  不增加审计接口、重复摘要或进程时间采集。
+
+验证与消融：本次删除冗余投影，没有新增决策机制，因此不需要额外机制消融。删除前先运行
+更新后的 schema/revision 回归；恢复场景 16 个通过，2 个 schema 测试因旧表仍被创建而失败。
+删除后相同场景全部通过，扩展到计划指定的五个测试文件共 51 个通过，业务/session 恢复行为
+保持一致。命令均在独立 PostgreSQL（127.0.0.1:55469）执行：
+
+```sh
+export FLOWTOOL_TEST_DATABASE_URL=postgresql://flowtool@127.0.0.1:55469/postgres
+uv run pytest tests/test_schema.py tests/test_revision_recovery.py -q --tb=short
+uv run pytest tests/test_schema.py tests/test_revision_recovery.py tests/test_result_recovery.py tests/test_workflow_transactions.py tests/test_coordinator.py -q --tb=short
+uv run pytest -q --tb=short
+uv run ruff check .
+uv run mypy app tests
+uv build
+git diff --check
+```
+
+全套真实 PostgreSQL 回归 836 passed（62.17s），无跳过；有一个既有 Starlette/httpx
+弃用警告。Ruff 通过，Mypy 检查 160 个源文件无问题，sdist/wheel 构建成功，diff 检查通过。
+局限：未验证仓库外 SQL 消费者，旧表人工清理仍在范围外。

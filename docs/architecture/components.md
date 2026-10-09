@@ -119,9 +119,11 @@ worker socket 与 executor 解耦，root 内原子 journal 在 ack 前保存进�
 2026-08-01 的独立 CLI 实测证明 `exec` / `resume` 上下文连续、workspace-write 可修改工作区、jj
 `.jj` 可写且能 commit。它没有证明当前 driver 能在真实 flow 中完成 issue→commit→push→PR。
 
-当前 worker 返回 exit/result、worker 验证的 VCS facts 和 `flow.open_pr` handle；coordinator 把 kind 和 exit code
-写入 `codex_runs` 并与持久 tool outcome 核对。跨协议不回传完整 prompt 或原始 JSONL，因此
-`prompt`/`log_path` 为空。GitHub-only egress 和多轮 context 增长仍待验证。
+当前 worker 返回 exit/result、worker 验证的 VCS facts 和 `flow.open_pr` handle；control 将完整
+terminal payload 与 digest 持久化到 jobs，并与持久 tool outcome 核对。INITIAL 成功/失败和
+REVISION 的有序 invocations（包括 resume 失败后 fallback）均以该结果为编码审计来源。
+`result_received_at` 和 `result_applied_at` 分别表示接收与应用时间，不表示进程执行开始/结束。
+跨协议不回传完整 prompt 或原始 JSONL。GitHub-only egress 和多轮 context 增长仍待验证。
 
 ## 4.5 GitHub Client
 
@@ -176,11 +178,15 @@ ORM。
 - `result_effects`：有序 GitHub 操作、claim/fencing、远端回执、退避时间和最后错误；
 - `workers`：identity、协议版本、epoch、online/busy/recovering/offline/failed、当前 job、连接/心跳与断线原因；
 - `events`：delivery 去重和 payload 审计；
-- `codex_runs`：按 attempt 记录 prompt、kind、exit 与时间；
 - `review_items` / `review_versions`：Flow 内稳定反馈身份、不可变版本、独立 relay/consume 时间和已核验 addressed 依据；
 - `review_pending_edits`：同秒乱序编辑的前序正文与原始来源；只有未在历史表示且后继无歧义时原子回放，其余保留待核对；
 - `review_buffers` / `review_batches`：持久 deadline/generation、冻结反馈/上下文/线程快照、批次所有者 job 和未决问题；
 - `review_thread_observations`：远端线程快照与真实 resolved 状态，不以本地 addressed 代替远端确认。
+
+新库不创建 `codex_runs` 或其唯一索引；应用停止写入和依赖该表。已有库的旧表及数据在
+初始化时保留，不 DROP、不回填。外部 SQL 消费者需迁移到 jobs 的持久结果；旧表人工清理
+另行处理。重复应用、control 重启及已合并 PR 的迟到结果保留原始 payload、digest 和接收时间；
+应用时间与业务变更在同一事务提交，退休结果不改变 delivery 或当前 session。
 
 自动化覆盖 active 唯一约束、flow/attempt/job 往返、review upsert、assignment start/heartbeat/fencing、
 lease 到期 requeue、started grace/deadline、epoch fencing、result inbox 去重、跨 Store 可见性、delivery 去重和并发 assign。

@@ -426,14 +426,6 @@ class ResultApplication:
                     assert plan.revision.output is not None
                     attempt.last_revision_summary = plan.revision.output.summary
                 tx.update_attempt(attempt)
-            tx.record_codex_run(
-                attempt.id,
-                plan.run.kind,
-                "",
-                "",
-                plan.run.exit_code,
-                source_job_id=job.id,
-            )
         if retired:
             return
         if job.kind is JobKind.ARCHIVE:

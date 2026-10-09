@@ -120,6 +120,7 @@ async def test_result_commit_failure_replays_facts_without_new_execution(store, 
                                         body="Also fix another bound", updated_at=datetime.now(UTC)),
                          settle_seconds=0, submit_grace_seconds=0)
     assert accept(store, job, result) == "pending"
+    accepted = store.get_job(job.id)
     original = Store.complete_persisted_result
 
     def crash(self, job_id, state):
@@ -146,6 +147,14 @@ async def test_result_commit_failure_replays_facts_without_new_execution(store, 
         "new-session", 1, 1,
     )
     assert [item.github_id for item in store.reviews.pending(flow.id)] == [102]
+    persisted = store.get_job(job.id)
+    assert persisted.result_payload == accepted.result_payload
+    assert persisted.result_digest == accepted.result_digest
+    assert persisted.result_received_at == accepted.result_received_at
+    assert persisted.result_applied_at >= persisted.result_received_at
+    terminal = Succeeded.model_validate(persisted.result_payload)
+    assert terminal.result.model_dump(mode="json") == result.model_dump(mode="json")
+    assert terminal_digest(terminal) == persisted.result_digest
 
 
 async def test_cancel_during_remote_verification_prevents_effects_and_commit(
@@ -317,6 +326,7 @@ async def test_merge_during_revision_application_preserves_delivery_and_session(
     result = verified_result(task, commit_sha="revision", remote_sha="revision")
     github.sha = "revision"
     assert accept(store, job, result) == "pending"
+    accepted = store.get_job(job.id)
     owner = github if merge_at == "verification" else subject.results.effects
     method = "get_pull_request" if merge_at == "verification" else "run"
     original = getattr(owner, method)
@@ -334,10 +344,12 @@ async def test_merge_during_revision_application_preserves_delivery_and_session(
     assert store.get_attempt(task.attempt_id).codex_session_id == "old-session"
     assert store.get_flow_execution(flow.id).released_at is None
     assert len(store.reviews.pending(flow.id)) == 1
-    with store.connection() as connection:
-        assert connection.execute(
-            "SELECT count(*) AS n FROM codex_runs WHERE source_job_id=%s", (job.id,),
-        ).fetchone()["n"] == 1
+    persisted = store.get_job(job.id)
+    assert persisted.result_payload == accepted.result_payload
+    assert persisted.result_digest == accepted.result_digest
+    assert persisted.result_received_at == accepted.result_received_at
+    assert persisted.result_applied_at is not None
+
 
 
 @pytest.mark.parametrize(("endpoint", "kind", "status"), [
