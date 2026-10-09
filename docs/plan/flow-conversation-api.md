@@ -253,4 +253,114 @@ HTTP→control→WorkerClient→历史文件查询。修复前后三个 control 
    依赖阻塞缓冲或无限积压。恢复后上述专项 26 项通过。
 
 脚本与日志位于 `.cache/2026-09-30/conversation-receiver-*`，沿用本会话缓存目录，不提交。
+
+### 5. 2026-10-09 — 历史查询条件、读取描述与结果分离（提案，尚未实施）
+
+**背景与目标：** 用户要求由一个对象接收查询条件，转换成合法的查询 spec，再由 history
+对象接受 spec 并返回结构化结果。当前 `CodexHistory.read(flow_id, sessions, cursor, limit)`
+同时处理业务范围、游标解码、参数校验、文件读取及 `ConversationPage` 组装，导致主流程
+难以理解。本次调整沿用前述 worker 实时查询方案，仅替换其内部查询边界；不改变 HTTP、
+WebSocket 消息、错误码、消息内容和分页语义。命名按职责确定，无需沿用讨论中的泛称。
+
+**接口与职责：**
+
+1. `HistoryQuery` 表示输入条件：`flow_id`、`sessions`、可选的编码游标和 `limit`。
+   `resolve() -> HistoryReadSpec` 不执行文件 I/O，集中验证条件范围、生成原有查询指纹、
+   解码并校验 `HistoryCursor`，验证游标属于当前查询且下标有效。无游标时生成初始位置；
+   非法条件不能进入文件读取阶段。已有传输模型保留各自的边界校验。
+2. `HistoryReadSpec` 是校验后的读取描述：有序会话引用、条数上限、结构化起始游标。
+   不携带 `flow_id` 或编码后的游标字符串。游标保留原指纹作为不透明查询范围标识。
+   spec 使用不可变值及模型约束，读取过程使用独立进度，不修改传入 spec；不引入通用
+   查询语言、查询构建器层级或额外校验框架。
+3. `CodexHistory.query(spec: HistoryReadSpec) -> HistoryReadResult` 负责受限文件读取。
+   保留目录查找、并发限制、安全打开、文件元数据与身份验证、行边界检查、记录转换、
+   扫描/结果预算及续读位置推进。文件身份、文件长度和偏移行边界必须在打开文件后验证，
+   不声称输入 spec 能保证文件在后续读取时仍存在或不变化。
+4. `HistoryReadResult` 包含 `items`、会话状态 `sessions`、结构化 `next_cursor` 和
+   `has_more`，不包含 `flow_id` 或 HTTP 专用字段。已有消息和状态类型可复用；此项
+   不删除 `SessionHistory`，也不扩展它的语义。
+5. `WorkerSession.read(...)` 作为现有调用边界接收参数，构造并 resolve 查询，调用
+   `_history.query(spec)`，再把结果组装成 `ConversationPage`，附加 `flow_id` 并编码
+   下一游标。`WorkerClient` 保留现有 `to_thread` 调度、请求关联及错误响应职责。
+
+预期内部调用示意（名称与字段以实施时的类型检查为准）：
+
+```python
+query = HistoryQuery(flow_id=flow_id, sessions=sessions, cursor=cursor, limit=limit)
+spec = query.resolve()
+result = self._history.query(spec)
+return ConversationPage(
+    flow_id=query.flow_id,
+    items=result.items,
+    sessions=result.sessions,
+    next_cursor=result.next_cursor.encode(),
+    has_more=result.has_more,
+)
+```
+
+`HistoryCursor` 的编码/解码集中到查询值对象模块，保留现有 JSON 字段、Base64 编码以及
+指纹算法，避免部署前生成的游标因这次纯重构失效。指纹用于一致性校验，不作为认证。
+
+**涉及模块：** 新增 `app/worker/state/history_query.py` 容纳输入、spec、游标及结果类型；
+调整 `app/worker/state/history.py` 与 `app/worker/state/session.py`，更新历史读取及会话
+调用测试。实现完成时同步架构说明和 CHANGELOG；共享传输契约原则上无需变更。
+
+**替代方案与取舍：** 只将游标解析抽成函数改动最少，但读取器仍接受未归一化的独立参数，
+无法表达“先解析成合法查询再读取”的边界。直接让读取器接受 `ConversationQuery` 会把
+request ID、连接 epoch 等传输字段引入文件读取层。选择显式输入/spec/result 增加少量
+类型，但让原始字符串、查询上下文与文件扫描的职责分别可见；避免再增加只转发调用的服务类。
+
+**兼容性与风险：** 保留跨 flow/会话代次的游标拒绝、缺失会话状态、半行续读、EOF 后轮询、
+记录顺序、隐藏内容过滤、脱敏以及现有大小上限。主要风险是转换时丢失游标身份或改变推进
+时机，导致漏读/重复读；另外须防止可变游标通过 spec 在查询之间共享。用现有文件样本和
+针对性回归覆盖这些风险，不增加新持久化或数据库迁移。
+
+**实施与验证顺序：**
+
+1. 先补充/迁移行为测试：非法游标和查询范围在读取前失败、合法查询产生 spec、读取后原
+   spec 未变、旧格式游标兼容；测试聚焦可观察行为，不逐项复刻模型实现。
+2. 实现查询类型与转换，改为 `query(spec)`，把 Flow 响应组装移至现有 session 边界。
+   将 `_read_page` 的前置解析职责移出读取器，避免保留两套并行入口。
+3. 运行历史读取、worker 会话/客户端、conversation API/协议与真实数据库集成回归，
+   覆盖条数/大小分页、多会话、文件替换、半行/追加及路径限制；再按 CI 运行完整 pytest、
+   Ruff、Mypy、构建及 diff 检查，记录实际执行与结果。
+4. 实现后、独立代码审查前做有针对性的消融：暂时取消查询指纹匹配，应使跨 flow/会话
+   代次测试失败；暂时取消文件身份验证，应使文件替换续读测试失败。分别证明请求条件
+   校验与读取时状态校验不能相互替代。恢复代码后重新运行受影响测试。
+5. 更新本时间线中的实施证据，经过 skill 的独立审查门禁后推送同一分支、更新同一 PR。
+
+**待确认与延后项：** 本提案等待用户审阅；无额外阻塞性技术问题。删除会话状态、改变
+游标格式或分页规则、改为通用查询 DSL、重新分配 worker 会话生命周期均不在本次范围。
+
+### 6. 2026-10-09 — 查询 spec 与读取结果落地
+
+**实现与取舍：** `history_query.py` 提供 `HistoryQuery.resolve()`、不可变的
+`HistoryReadSpec` / `HistoryCursor` 以及 `HistoryReadResult`。会话引用复制为冻结的
+`HistorySession`，防止调用方改动原引用影响已经解析的查询；读取进度通过新游标推进，
+不改写输入。`CodexHistory.query(spec)` 替换原 `read(...)` 与 `_read_page`，不再处理
+Flow ID 或字符串游标；`WorkerSession.read` 负责条件转换与 `ConversationPage` 组装。
+保留现有会话状态、文件读取限制及传输协议，未添加新的服务层。
+
+**测试先行：** 先迁移历史测试到 spec/query 接口，并添加旧格式游标、spec 不变性、Flow
+响应组装、非法游标与同长度文件替换回归；实现前因缺少 `history_query` 模块而失败。
+实现后历史、worker session/client 与 conversation API 专项 **33 passed**。
+旧游标样例独立构造原格式 JSON/Base64 和文件身份，不依赖新编码器来证明兼容。
+
+**消融：** `.cache/2026-10-09/history-query-ablation.py` 分别临时移除以下机制，结束时
+用 `finally` 恢复源码；每项仅运行对应回归。
+
+1. 取消 `HistoryQuery.resolve()` 的指纹匹配：
+   `test_history_missing_and_cursor_identity` **1 failed**，跨 flow 游标不再被拒绝。
+2. 取消读取时的文件身份比较：`test_history_rejects_replaced_file_with_same_length`
+   **1 failed**，同长度、同元数据的新文件不再被拒绝。
+
+两项均因预期的 `ConversationFailure` 未抛出而失败，分别支持查询范围校验和文件状态校验。
+日志为 `.cache/2026-10-09/history-ablation-query-scope.log` 与
+`.cache/2026-10-09/history-ablation-file-identity.log`，均不提交。
+
+**最终验证：** 恢复消融代码后，隔离 PostgreSQL（本地端口 56473）完整回归
+`FLOWTOOL_TEST_DATABASE_URL=postgresql://flowtool@127.0.0.1:56473/postgres uv run pytest -q --tb=short`
+为 **836 passed**（58.58 秒，0 skipped），只有既有 Starlette TestClient 弃用告警。
+随后补充字节预算分页回归（无产品代码变更），确认未返回记录不会被游标跳过；历史专项
+**14 passed**。Ruff、Mypy（160 个源文件）、sdist/wheel 构建及 `git diff --check` 均通过。
 本轮继续更新原 PR #58，无协议版本、数据库 schema 或用户接口变化。

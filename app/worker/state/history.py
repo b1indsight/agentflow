@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import json
 import os
@@ -10,31 +9,22 @@ import re
 import stat
 import threading
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from typing import BinaryIO
-
-from pydantic import Field, ValidationError
 
 from app.contracts.conversation import (
     ConversationContent,
     ConversationFailure,
     ConversationItem,
-    ConversationModel,
-    ConversationPage,
     SessionHistory,
     SessionRef,
 )
+from app.worker.state.history_query import HistoryCursor, HistoryReadResult, HistoryReadSpec
 
 MAX_LINE = 256 * 1024
 MAX_SCAN = 8 * 1024 * 1024
 MAX_PAGE = 256 * 1024
-
-
-class HistoryCursor(ConversationModel):
-    fingerprint: str
-    index: int = Field(ge=0)
-    offset: int = Field(ge=0)
-    identity: str | None = None
 
 
 class CodexHistory:
@@ -48,34 +38,20 @@ class CodexHistory:
         self.root = (root or Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))).resolve()
         self._reads = threading.BoundedSemaphore(2)
 
-    def read(self, flow_id: int, sessions: list[SessionRef], cursor: str | None, limit: int) -> ConversationPage:
+    def query(self, spec: HistoryReadSpec) -> HistoryReadResult:
+        """Read a resolved query without modifying its inputs or encoding its result."""
         # Cancellation of to_thread cannot stop filesystem I/O. Hold the limit in the
         # thread itself so reconnects cannot accumulate unlimited background readers.
         if not self._reads.acquire(blocking=False):
             raise ConversationFailure("query_busy")
         try:
-            return self._read_page(flow_id, sessions, cursor, limit)
+            return self._read(spec)
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise ConversationFailure("history_unreadable") from exc
         finally:
             self._reads.release()
 
-    def _read_page(self, flow_id: int, sessions: list[SessionRef], cursor: str | None, limit: int) -> ConversationPage:
-        fingerprint = hashlib.sha256(json.dumps(
-            [flow_id, [ref.model_dump() for ref in sessions]], sort_keys=True,
-        ).encode()).hexdigest()
-        position = HistoryCursor(fingerprint=fingerprint, index=0, offset=0)
-        if cursor:
-            try:
-                position = HistoryCursor.model_validate_json(base64.b64decode(cursor, altchars=b"-_", validate=True))
-            except (ValueError, ValidationError) as exc:
-                raise ConversationFailure("cursor_invalid") from exc
-            if position.fingerprint != fingerprint or position.index >= len(sessions):
-                raise ConversationFailure("cursor_invalid")
-        try:
-            return self._read(flow_id, sessions, position, limit)
-        except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
-            raise ConversationFailure("history_unreadable") from exc
-
-    def _paths(self, sessions: list[SessionRef]) -> dict[str, Path]:
+    def _paths(self, sessions: Sequence[SessionRef]) -> dict[str, Path]:
         wanted = {ref.session_id for ref in sessions}
         found: dict[str, Path] = {}
         deadline = time.monotonic() + 3
@@ -107,11 +83,10 @@ class CodexHistory:
     def _walk_error(error: OSError) -> None:
         raise error
 
-    def _read(
-        self, flow_id: int, sessions: list[SessionRef], position: HistoryCursor, limit: int,
-    ) -> ConversationPage:
+    def _read(self, spec: HistoryReadSpec) -> HistoryReadResult:
+        sessions, position = spec.sessions, spec.position
         paths = self._paths(sessions)
-        page = ConversationPage(flow_id=flow_id, sessions=[
+        page = HistoryReadResult(next_cursor=position, sessions=[
             SessionHistory(**ref.model_dump(), status="available" if ref.session_id in paths else "not_found")
             for ref in sessions
         ])
@@ -159,12 +134,12 @@ class CodexHistory:
                         page.sessions[index].status = "unsupported"
                     if item is not None:
                         item_size = len(item.model_dump_json().encode())
-                        if len(page.items) >= limit or size + item_size > MAX_PAGE:
+                        if len(page.items) >= spec.limit or size + item_size > MAX_PAGE:
                             page.has_more = True
                             return self._finish(page, position)
                         page.items.append(item)
                         size += item_size
-                    position.offset = file.tell()
+                    position = position.model_copy(update={"offset": file.tell()})
                     if scanned >= MAX_SCAN:
                         page.has_more = self._has_complete_line(file) or index < len(sessions) - 1
                         return self._finish(page, position)
@@ -193,8 +168,8 @@ class CodexHistory:
         return file.readline(MAX_LINE + 1).endswith(b"\n")
 
     @staticmethod
-    def _finish(page: ConversationPage, position: HistoryCursor) -> ConversationPage:
-        page.next_cursor = base64.urlsafe_b64encode(position.model_dump_json().encode()).decode()
+    def _finish(page: HistoryReadResult, position: HistoryCursor) -> HistoryReadResult:
+        page.next_cursor = position
         return page
 
     @staticmethod

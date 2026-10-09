@@ -25,6 +25,7 @@ from app.contracts.protocol import (
 )
 from app.domain.models import JobState
 from app.worker.state.history import CodexHistory
+from app.worker.state.history_query import HistoryQuery
 
 TerminalMessage = Succeeded | Failed
 _TERMINAL: TypeAdapter[TerminalMessage] = TypeAdapter(TerminalMessage)
@@ -65,7 +66,12 @@ class WorkerSession:
 
     def read(self, flow_id: int, sessions: list[SessionRef], cursor: str | None, limit: int) -> ConversationPage:
         """Read only the requested threads; the current assignment is not a history index."""
-        return self._history.read(flow_id, sessions, cursor, limit)
+        query = HistoryQuery(flow_id=flow_id, sessions=sessions, cursor=cursor, limit=limit)
+        result = self._history.query(query.resolve())
+        return ConversationPage(
+            flow_id=query.flow_id, items=result.items, sessions=result.sessions,
+            next_cursor=result.next_cursor.encode(), has_more=result.has_more,
+        )
 
     def recovery(self, *, executor_active: bool) -> RecoveryDescriptor | None:
         record = self.load()

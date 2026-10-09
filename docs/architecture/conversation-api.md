@@ -3,6 +3,12 @@
 `GET /api/flows/{flow_id}/conversation` 按需代理对应 worker 读取 Codex 历史。
 control 仅查询现有 flow、attempt、session 和 worker 归属，不保存会话内容，也不维护队列。
 
+worker 内部由 `WorkerSession.read` 将条件交给 `HistoryQuery.resolve()`，验证查询范围、
+分页参数并解码游标，得到不可变的 `HistoryReadSpec`。`CodexHistory.query(spec)` 只负责
+读取源文件及验证文件身份和读取位置，返回 `HistoryReadResult`；`WorkerSession` 再附加
+flow ID、编码下一游标，组装共享的 `ConversationPage`。读取器不接收原始游标或 flow ID，
+也不修改输入 spec；输入合法与文件在读取时有效分别在上述两个阶段保证。
+
 ## 配置与请求
 
 在 control 设置非空 `FLOWTOOL_CONTROL_API_TOKEN`，通过

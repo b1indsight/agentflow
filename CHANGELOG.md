@@ -8,6 +8,9 @@
 
 ## Unreleased
 
+- 历史查询先由 HistoryQuery 解析为不可变 HistoryReadSpec，再由 CodexHistory.query 返回
+  HistoryReadResult；Flow 响应组装归入 WorkerSession，保留现有游标格式、分页和协议。
+
 - worker 按 execution、transport、state 归组；同步模块引用与运维脚本，运行入口、消息协议和持久化格式不变。
 
 - worker 进程内提供单任务 HTTP MCP，仅开放 open_pr；Codex 注入 URL 和临时 Bearer，移除 STDIO 子进程与 Unix socket 桥接，复用既有 PR 交付链。
