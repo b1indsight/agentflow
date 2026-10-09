@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import json
 import os
@@ -13,28 +12,17 @@ import time
 from pathlib import Path
 from typing import BinaryIO
 
-from pydantic import Field, ValidationError
-
 from app.contracts.conversation import (
     ConversationContent,
     ConversationFailure,
-    ConversationItem,
-    ConversationModel,
-    ConversationPage,
-    SessionHistory,
-    SessionRef,
+    HistoryItem,
+    HistoryPage,
+    HistoryQuery,
 )
 
 MAX_LINE = 256 * 1024
 MAX_SCAN = 8 * 1024 * 1024
 MAX_PAGE = 256 * 1024
-
-
-class HistoryCursor(ConversationModel):
-    fingerprint: str
-    index: int = Field(ge=0)
-    offset: int = Field(ge=0)
-    identity: str | None = None
 
 
 class CodexHistory:
@@ -48,36 +36,20 @@ class CodexHistory:
         self.root = (root or Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))).resolve()
         self._reads = threading.BoundedSemaphore(2)
 
-    def read(self, flow_id: int, sessions: list[SessionRef], cursor: str | None, limit: int) -> ConversationPage:
-        # Cancellation of to_thread cannot stop filesystem I/O. Hold the limit in the
-        # thread itself so reconnects cannot accumulate unlimited background readers.
+    def query(self, query: HistoryQuery) -> HistoryPage:
+        """Read one validated session query without blocking the event loop's caller."""
+        # Hold the permit in the thread: cancelling to_thread cannot stop file I/O.
         if not self._reads.acquire(blocking=False):
             raise ConversationFailure("query_busy")
         try:
-            return self._read_page(flow_id, sessions, cursor, limit)
+            return self._read(query)
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise ConversationFailure("history_unreadable") from exc
         finally:
             self._reads.release()
 
-    def _read_page(self, flow_id: int, sessions: list[SessionRef], cursor: str | None, limit: int) -> ConversationPage:
-        fingerprint = hashlib.sha256(json.dumps(
-            [flow_id, [ref.model_dump() for ref in sessions]], sort_keys=True,
-        ).encode()).hexdigest()
-        position = HistoryCursor(fingerprint=fingerprint, index=0, offset=0)
-        if cursor:
-            try:
-                position = HistoryCursor.model_validate_json(base64.b64decode(cursor, altchars=b"-_", validate=True))
-            except (ValueError, ValidationError) as exc:
-                raise ConversationFailure("cursor_invalid") from exc
-            if position.fingerprint != fingerprint or position.index >= len(sessions):
-                raise ConversationFailure("cursor_invalid")
-        try:
-            return self._read(flow_id, sessions, position, limit)
-        except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
-            raise ConversationFailure("history_unreadable") from exc
-
-    def _paths(self, sessions: list[SessionRef]) -> dict[str, Path]:
-        wanted = {ref.session_id for ref in sessions}
-        found: dict[str, Path] = {}
+    def _path(self, session_id: str) -> Path | None:
+        found: Path | None = None
         deadline = time.monotonic() + 3
         count = 0
         for directory in (self.root / "sessions", self.root / "archived_sessions"):
@@ -92,83 +64,73 @@ class CodexHistory:
                 for name in names:
                     if not name.startswith("rollout-") or not name.endswith(".jsonl"):
                         continue
-                    session_id = name[-42:-6]
-                    if session_id not in wanted:
+                    if name[-42:-6] != session_id:
                         continue
                     path = Path(parent) / name
                     if path.is_symlink() or not path.resolve().is_relative_to(self.root):
                         raise ConversationFailure("history_unreadable")
-                    if session_id in found:
+                    if found is not None:
                         raise ConversationFailure("history_unreadable")
-                    found[session_id] = path
+                    found = path
         return found
 
     @staticmethod
     def _walk_error(error: OSError) -> None:
         raise error
 
-    def _read(
-        self, flow_id: int, sessions: list[SessionRef], position: HistoryCursor, limit: int,
-    ) -> ConversationPage:
-        paths = self._paths(sessions)
-        page = ConversationPage(flow_id=flow_id, sessions=[
-            SessionHistory(**ref.model_dump(), status="available" if ref.session_id in paths else "not_found")
-            for ref in sessions
-        ])
-        scanned = size = 0
-        for index in range(position.index, len(sessions)):
-            ref = sessions[index]
-            path = paths.get(ref.session_id)
-            if path is None:
-                if index == position.index and position.identity is not None:
+    def _read(self, query: HistoryQuery) -> HistoryPage:
+        offset, previous_identity = query.position
+        path = self._path(query.session_id)
+        page = HistoryPage(session_id=query.session_id)
+        if path is None:
+            if previous_identity is not None:
+                raise ConversationFailure("cursor_invalid")
+            page.status = "not_found"
+            return page
+        with self._open(path) as file:
+            file_stat = os.fstat(file.fileno())
+            if previous_identity is not None and offset > file_stat.st_size:
+                raise ConversationFailure("cursor_invalid")
+            meta_line = file.readline(MAX_LINE + 1)
+            if len(meta_line) > MAX_LINE or not meta_line.endswith(b"\n"):
+                raise ConversationFailure("history_unreadable")
+            meta = json.loads(meta_line)
+            if meta.get("type") != "session_meta" or meta.get("payload", {}).get("id") != query.session_id:
+                raise ConversationFailure("history_unreadable")
+            identity = f"{file_stat.st_dev}:{file_stat.st_ino}:{hashlib.sha256(meta_line).hexdigest()}"
+            if previous_identity is not None:
+                if identity != previous_identity or not len(meta_line) <= offset <= file_stat.st_size:
                     raise ConversationFailure("cursor_invalid")
-                position = HistoryCursor(fingerprint=position.fingerprint, index=index, offset=0)
-                continue
-            with self._open(path) as file:
-                file_stat = os.fstat(file.fileno())
-                continuing = index == position.index and position.identity is not None
-                if continuing and position.offset > file_stat.st_size:
+                file.seek(offset - 1)
+                if file.read(1) != b"\n":
                     raise ConversationFailure("cursor_invalid")
-                meta_line = file.readline(MAX_LINE + 1)
-                if len(meta_line) > MAX_LINE or not meta_line.endswith(b"\n"):
-                    raise ConversationFailure("history_unreadable")
-                meta = json.loads(meta_line)
-                if meta.get("type") != "session_meta" or meta.get("payload", {}).get("id") != ref.session_id:
-                    raise ConversationFailure("history_unreadable")
-                identity = f"{file_stat.st_dev}:{file_stat.st_ino}:{hashlib.sha256(meta_line).hexdigest()}"
-                if continuing:
-                    if identity != position.identity or not len(meta_line) <= position.offset <= file_stat.st_size:
-                        raise ConversationFailure("cursor_invalid")
-                    file.seek(position.offset - 1)
-                    if file.read(1) != b"\n":
-                        raise ConversationFailure("cursor_invalid")
-                else:
-                    position = HistoryCursor(fingerprint=position.fingerprint, index=index,
-                                             offset=len(meta_line), identity=identity)
-                file.seek(position.offset)
-                while True:
-                    offset = file.tell()
-                    raw = file.readline(MAX_LINE + 1)
-                    if len(raw) > MAX_LINE:
-                        raise ConversationFailure("history_limit")
-                    if not raw.endswith(b"\n"):
+            else:
+                offset = len(meta_line)
+            file.seek(offset)
+            scanned = size = 0
+            while True:
+                raw = file.readline(MAX_LINE + 1)
+                if len(raw) > MAX_LINE:
+                    raise ConversationFailure("history_limit")
+                if not raw.endswith(b"\n"):
+                    break
+                scanned += len(raw)
+                item, unsupported = self._item(json.loads(raw), query.session_id, offset)
+                if unsupported:
+                    page.status = "unsupported"
+                if item is not None:
+                    item_size = len(item.model_dump_json().encode())
+                    if len(page.items) >= query.limit or size + item_size > MAX_PAGE:
+                        page.has_more = True
                         break
-                    scanned += len(raw)
-                    item, unsupported = self._item(json.loads(raw), ref, offset)
-                    if unsupported:
-                        page.sessions[index].status = "unsupported"
-                    if item is not None:
-                        item_size = len(item.model_dump_json().encode())
-                        if len(page.items) >= limit or size + item_size > MAX_PAGE:
-                            page.has_more = True
-                            return self._finish(page, position)
-                        page.items.append(item)
-                        size += item_size
-                    position.offset = file.tell()
-                    if scanned >= MAX_SCAN:
-                        page.has_more = self._has_complete_line(file) or index < len(sessions) - 1
-                        return self._finish(page, position)
-        return self._finish(page, position)
+                    page.items.append(item)
+                    size += item_size
+                offset = file.tell()
+                if scanned >= MAX_SCAN:
+                    page.has_more = self._has_complete_line(file)
+                    break
+            page.next_cursor = query.cursor_at(offset, identity)
+        return page
 
     def _open(self, path: Path) -> BinaryIO:
         # Resolve each component with no-follow opens: checking resolve() alone has a
@@ -193,19 +155,14 @@ class CodexHistory:
         return file.readline(MAX_LINE + 1).endswith(b"\n")
 
     @staticmethod
-    def _finish(page: ConversationPage, position: HistoryCursor) -> ConversationPage:
-        page.next_cursor = base64.urlsafe_b64encode(position.model_dump_json().encode()).decode()
-        return page
-
-    @staticmethod
-    def _item(row: dict, ref: SessionRef, offset: int) -> tuple[ConversationItem | None, bool]:
+    def _item(row: dict, session_id: str, offset: int) -> tuple[HistoryItem | None, bool]:
         if row.get("type") != "response_item":
             return None, False
         payload = row.get("payload", {})
         kind = payload.get("type")
         if kind == "reasoning" or payload.get("phase") == "analysis" or payload.get("channel") == "analysis":
             return None, False
-        data = {**ref.model_dump(), "id": f"{ref.session_id}:{offset}", "timestamp": row.get("timestamp")}
+        data = {"id": f"{session_id}:{offset}", "timestamp": row.get("timestamp")}
         truncated = False
 
         def text(value: str) -> str:
@@ -250,4 +207,4 @@ class CodexHistory:
                         content=ConversationContent(text=text(output)))
         else:
             return None, True
-        return ConversationItem.model_validate({**data, "truncated": truncated}), unsupported
+        return HistoryItem.model_validate({**data, "truncated": truncated}), unsupported

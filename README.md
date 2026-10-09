@@ -222,7 +222,7 @@ M3 F3 及审查修复本地验证（2026-09-08）：真实 PostgreSQL 下 **502 
 响应丢失与重启恢复。Ruff、Mypy 与 sdist/wheel 构建通过；真实 GitHub App/worker 验收仍待执行，
 详见 [F3 审查修复记录](docs/plan/m3-archive-status.md#7-审查修复2026-09-08)。
 
-当前仅支持 wire protocol **v12**、worker journal **v3** 与当前完整 PostgreSQL schema。
+当前仅支持 wire protocol **v13**、worker journal **v3** 与当前完整 PostgreSQL schema。
 仓库尚未部署，不提供旧版本数据库、任务、结果或 journal 的迁移；首次运行使用新数据库/schema
 和新 worker root。serve/worker 使用同一 commit/镜像版本，不混跑；协议不匹配直接拒绝。
 同版本重启仍保留冻结任务、结果摘要、effect ledger 与 journal 恢复能力。

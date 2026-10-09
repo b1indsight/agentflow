@@ -1,4 +1,5 @@
 import asyncio
+import json
 from types import SimpleNamespace
 
 import httpx
@@ -21,6 +22,7 @@ from tests.test_remote_e2e import (
 )
 from tests.worker_fakes import NoPendingStops
 
+OTHER_SESSION = "019eac3b-a60c-7a93-a442-3718f660fc8d"
 
 class HistoryStore(RemoteStore):
     def get_flow(self, flow_id):
@@ -30,7 +32,8 @@ class HistoryStore(RemoteStore):
         return FlowExecution(flow_id=flow_id, worker_id="worker-1", repo_identity="repo")
 
     def list_attempts(self, flow_id):
-        return [Attempt(id=7, flow_id=flow_id, codex_session_id=SESSION)]
+        return [Attempt(id=7, flow_id=flow_id, codex_session_id=SESSION),
+                Attempt(id=8, flow_id=flow_id, codex_session_id=OTHER_SESSION, session_generation=1)]
 
 
 @pytest.mark.asyncio
@@ -61,7 +64,11 @@ async def test_http_query_while_worker_or_control_busy_and_idle(tmp_path, phase,
             await block("worker")
             return await super().execute(task, secret, tool_caller=tool_caller)
 
-    rollout(tmp_path / "codex", [message("user", "PR feedback"), message("assistant", "Fixed")])
+    path = rollout(tmp_path / "codex", [message("user", "PR feedback"), message("assistant", "Fixed")])
+    path.with_name(path.name.replace(SESSION, OTHER_SESSION)).write_text(
+        json.dumps({"type": "session_meta", "payload": {"id": OTHER_SESSION}}) + "\n"
+        + json.dumps(message("assistant", "Follow-up")) + "\n"
+    )
     store = HistoryStore()
     gateway = WorkerGateway(store, Coordinator(store), execution_control=NoPendingStops(),
                             worker_tokens={"worker-1": "worker-secret"}, poll_interval=0.01)
@@ -91,6 +98,13 @@ async def test_http_query_while_worker_or_control_busy_and_idle(tmp_path, phase,
             second = await http.get("/api/flows/3/conversation", params={"cursor": first.json()["next_cursor"]})
             assert second.status_code == 200, second.text
             assert second.json()["items"][0]["content"]["text"] == "Fixed"
+            assert second.json()["has_more"]
+            third = await http.get("/api/flows/3/conversation", params={"cursor": second.json()["next_cursor"]})
+            assert third.status_code == 200, third.text
+            item = third.json()["items"][0]
+            assert (item["attempt_id"], item["session_id"], item["session_generation"]) == (8, OTHER_SESSION, 1)
+            assert item["content"]["text"] == "Follow-up"
+            assert not third.json()["has_more"]
             assert (await http.get("/api/flows/99/conversation")).status_code == 404
             assert not gateway.conversations.pending
     finally:

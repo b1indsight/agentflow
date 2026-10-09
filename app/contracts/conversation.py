@@ -1,21 +1,54 @@
 """Bounded, read-only conversation contracts shared by control and workers."""
 
-from typing import Literal
+import base64
+import json
+from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
 
 class ConversationModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class SessionRef(ConversationModel):
+class HistoryQuery(ConversationModel):
+    """A validated single-session query; decoded source position stays local."""
+
+    model_config = ConfigDict(frozen=True)
+
+    session_id: str = Field(pattern=r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$")
+    cursor: str | None = Field(default=None, min_length=1, max_length=1024)
+    limit: int = Field(default=100, ge=1, le=500)
+    _position: tuple[int, str | None] = PrivateAttr(default=(0, None))
+
+    @model_validator(mode="after")
+    def _decode_cursor(self) -> Self:
+        if self.cursor is not None:
+            try:
+                data = json.loads(base64.b64decode(self.cursor, altchars=b"-_", validate=True))
+                if not isinstance(data, list) or len(data) != 3:
+                    raise ValueError("invalid cursor shape")
+                session_id, offset, identity = data
+                if (session_id != self.session_id or type(offset) is not int or offset < 0
+                        or not isinstance(identity, str) or not 1 <= len(identity) <= 256):
+                    raise ValueError("invalid cursor position")
+                self._position = offset, identity
+            except (ValueError, TypeError) as exc:
+                raise ConversationFailure("cursor_invalid") from exc
+        return self
+
+    @property
+    def position(self) -> tuple[int, str | None]:
+        return self._position
+
+    def cursor_at(self, offset: int, identity: str) -> str:
+        return base64.urlsafe_b64encode(json.dumps([self.session_id, offset, identity]).encode()).decode()
+
+
+class SessionHistory(ConversationModel):
     attempt_id: int = Field(gt=0)
     session_id: str = Field(pattern=r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$")
     session_generation: int = Field(ge=0)
-
-
-class SessionHistory(SessionRef):
     status: Literal["available", "not_found", "unsupported"]
 
 
@@ -25,7 +58,7 @@ class ConversationContent(ConversationModel):
     arguments: str | None = Field(default=None, max_length=8192)
 
 
-class ConversationItem(SessionRef):
+class HistoryItem(ConversationModel):
     id: str = Field(max_length=100)
     timestamp: str | None = Field(default=None, max_length=64)
     role: Literal["user", "assistant", "tool", "system", "developer"]
@@ -33,6 +66,20 @@ class ConversationItem(SessionRef):
     call_id: str | None = Field(default=None, max_length=256)
     content: ConversationContent
     truncated: bool = False
+
+
+class HistoryPage(ConversationModel):
+    session_id: str = Field(pattern=r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$")
+    items: list[HistoryItem] = Field(default_factory=list, max_length=500)
+    status: Literal["available", "not_found", "unsupported"] = "available"
+    next_cursor: str | None = Field(default=None, max_length=1024)
+    has_more: bool = False
+
+
+class ConversationItem(HistoryItem):
+    attempt_id: int = Field(gt=0)
+    session_id: str = Field(pattern=r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$")
+    session_generation: int = Field(ge=0)
 
 
 class ConversationPage(ConversationModel):

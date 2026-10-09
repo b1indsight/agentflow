@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.contracts.conversation import ConversationPage
+from app.contracts.conversation import HistoryPage
 from app.contracts.protocol import (
     ConversationQuery,
     ConversationResult,
@@ -13,6 +13,7 @@ from app.contracts.protocol import (
 )
 from app.worker.state.session import WorkerSession
 from app.worker.transport.client import WorkerClient
+from tests.test_conversation_history import SESSION
 
 
 class Connection:
@@ -33,14 +34,14 @@ async def test_query_does_not_block_execution_messages(tmp_path) -> None:
     started, release = threading.Event(), threading.Event()
 
     class Session(WorkerSession):
-        def read(self, flow_id, sessions, cursor, limit):
+        def read(self, query):
             started.set()
             assert release.wait(timeout=5)
-            return ConversationPage(flow_id=flow_id)
+            return HistoryPage(session_id=query.session_id)
 
     client = WorkerClient(worker_id="worker-1", worker_token="token", serve_ws_url="unused",
                           executor=SimpleNamespace(), session=Session(tmp_path))
-    query = ConversationQuery(request_id="q1", connection_epoch="e1", flow_id=42, sessions=[])
+    query = ConversationQuery(request_id="q1", connection_epoch="e1", session_id=SESSION)
     await connection.incoming.put(query.model_dump_json())
     registered = Registered(connection_epoch="e1", heartbeat_interval=10).model_dump_json()
     await connection.incoming.put(registered)
@@ -54,8 +55,21 @@ async def test_query_does_not_block_execution_messages(tmp_path) -> None:
         assert isinstance(result, ConversationResult)
         assert result.request_id == "q1"
         assert result.page is not None
-        assert result.page.flow_id == 42
+        assert result.page.session_id == SESSION
     finally:
         release.set()
         running.cancel()
         await asyncio.gather(running, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_bad_cursor_returns_query_error_without_closing_connection(tmp_path):
+    connection = Connection()
+    client = WorkerClient(worker_id="worker", worker_token="token", serve_ws_url="unused",
+                          executor=SimpleNamespace(), session=WorkerSession(tmp_path))
+    request = ConversationQuery(request_id="bad-cursor", connection_epoch="epoch",
+                                session_id=SESSION, cursor="invalid-base64")
+    await client._answer_history(connection, request)
+    result = parse_worker_message(await connection.outgoing.get())
+    assert isinstance(result, ConversationResult)
+    assert result.request_id == "bad-cursor" and result.error == "cursor_invalid"

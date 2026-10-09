@@ -3,6 +3,10 @@
 `GET /api/flows/{flow_id}/conversation` 按需代理对应 worker 读取 Codex 历史。
 control 仅查询现有 flow、attempt、session 和 worker 归属，不保存会话内容，也不维护队列。
 
+worker 每次只接收 `session_id`、`cursor`、`limit`，由 `HistoryQuery` 校验后直接交给
+`CodexHistory.query()`。返回的 `HistoryPage` 只含该会话的记录、状态及续读位置。
+Flow/Attempt 归属和多会话顺序由 control 处理；无独立 SessionRef、HistoryCursor 或 spec 转换层。
+
 ## 配置与请求
 
 在 control 设置非空 `FLOWTOOL_CONTROL_API_TOKEN`，通过
@@ -51,7 +55,10 @@ control 自己发出的 PR 评论、状态更新不会显示；不合并完整 G
 
 ## 分页与轮询
 
-先按 attempt 排序，去重 session 后按每个源文件的记录顺序返回。条目 ID 由 session 与源
+先按 attempt 排序、去重 session；每个 HTTP 页只查询一个 session，页内按源文件顺序返回。
+`sessions` 仅报告本页实际检查的会话状态。即使 limit 尚有余量，也通过下一页切换会话。
+control 的外层游标绑定 flow、有序会话及代次；worker 的内层游标仅绑定 session 与文件位置。
+旧版多会话游标返回 `409 cursor_invalid`，应不带 cursor 重新加载。条目 ID 由 session 与源
 字节位置组成，可用于去重；不要自行解析或构造 cursor。`has_more=true` 时继续请求下一页，
 即使 items 为空也应推进 cursor（该页可能只扫描了非展示记录）。`has_more=false` 时可保存
 cursor，稍后轮询新增完整记录，不代表 agent 执行结束。
@@ -86,11 +93,12 @@ worker 使用执行 Codex 时相同的 `CODEX_HOME`（默认 `~/.codex`），读
 依据本地 Codex 0.155.1 历史结构验证适配，不执行 Codex 命令或读取全局 history.jsonl。
 
 每页最多扫描 8 MiB 完整记录；单行超过 256 KiB 返回 history_limit，文本/arguments 超过
-8192 字符截断并标记，items 序列化预算为 256 KiB。session 最多 128 个，目录发现最多
+8192 字符截断并标记，items 序列化预算为 256 KiB。control 每个 flow 最多关联 128 个 session，
+每个 HTTP 请求仅发起一次 worker 查询。目录发现最多
 50000 个条目/3 秒；control 全局最多 64 个待响应查询、每连接 4 个，worker 最多同时读取 2 个。
 control 每条连接使用单一持续接收器，在准备任务、处理工具和应用结果期间仍即时分流会话响应。
 执行消息按原顺序消费，连接内临时缓冲最多 32 条/16 MiB，超限使连接失败；不持久化或跨连接重放。
 已知环境凭据及常见 token 文本会脱敏，但不保证自动识别任意源码或文本中的所有秘密。
 
-本功能最初使用 wire protocol v11；当前 triage 迁移后为 v12，control 和 worker 必须同步升级；不会迁移旧版未完成
+本功能最初使用 wire protocol v11；当前单会话查询采用 v13，control 和 worker 必须同步升级；不会迁移旧版未完成
 worker journal。升级前完成/清理在途任务，不能把协议版本不兼容当成可恢复的会话查询失败。

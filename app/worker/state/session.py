@@ -10,7 +10,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
-from app.contracts.conversation import ConversationPage, SessionRef
+from app.contracts.conversation import HistoryPage, HistoryQuery
 from app.contracts.protocol import (
     ArchiveTask,
     Assignment,
@@ -63,9 +63,9 @@ class WorkerSession:
         self.assignment: Assignment | None = None
         self._history = CodexHistory()
 
-    def read(self, flow_id: int, sessions: list[SessionRef], cursor: str | None, limit: int) -> ConversationPage:
-        """Read only the requested threads; the current assignment is not a history index."""
-        return self._history.read(flow_id, sessions, cursor, limit)
+    def read(self, query: HistoryQuery) -> HistoryPage:
+        """Read the session selected by control, independent of the active assignment."""
+        return self._history.query(query)
 
     def recovery(self, *, executor_active: bool) -> RecoveryDescriptor | None:
         record = self.load()

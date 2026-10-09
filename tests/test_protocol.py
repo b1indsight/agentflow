@@ -26,7 +26,7 @@ from app.domain.models import TriageVerdict, VcsKind, Verdict
 
 
 def test_assignment_and_result_round_trip_with_discriminated_payloads() -> None:
-    assert PROTOCOL_VERSION == 12
+    assert PROTOCOL_VERSION == 13
     assignment = Assignment(
         job_id=41,
         flow_id=7,
