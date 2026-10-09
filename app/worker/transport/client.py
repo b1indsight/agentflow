@@ -11,7 +11,7 @@ from uuid import uuid4
 from loguru import logger
 from websockets.asyncio.client import connect
 
-from app.contracts.conversation import ConversationFailure
+from app.contracts.conversation import ConversationFailure, HistoryQuery
 from app.contracts.protocol import (
     Assignment,
     AssignmentSecret,
@@ -214,7 +214,8 @@ class WorkerClient:
 
     async def _answer_history(self, connection: Connection, query: ConversationQuery) -> None:
         try:
-            page = await asyncio.to_thread(self.session.read, query.flow_id, query.sessions, query.cursor, query.limit)
+            request = HistoryQuery(session_id=query.session_id, cursor=query.cursor, limit=query.limit)
+            page = await asyncio.to_thread(self.session.read, request)
             result = ConversationResult(request_id=query.request_id, connection_epoch=query.connection_epoch, page=page)
         except ConversationFailure as exc:
             result = ConversationResult(request_id=query.request_id,

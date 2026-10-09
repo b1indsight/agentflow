@@ -3,7 +3,7 @@ import asyncio
 import pytest
 from fastapi import WebSocketDisconnect
 
-from app.contracts.conversation import ConversationFailure, ConversationPage
+from app.contracts.conversation import ConversationFailure, HistoryPage, HistoryQuery
 from app.contracts.protocol import (
     ConversationQuery,
     ConversationResult,
@@ -12,6 +12,7 @@ from app.contracts.protocol import (
 )
 from app.control.conversation import ConversationBroker
 from app.control.worker_connection import ProtocolViolation, WorkerConnection
+from tests.test_conversation_history import SESSION
 
 
 class Socket:
@@ -52,7 +53,7 @@ async def test_dispatch_bypasses_execution_buffer_and_survives_consumer_cancella
         await asyncio.sleep(0)
         waiting.cancel()
         await asyncio.gather(waiting, return_exceptions=True)
-        query = asyncio.create_task(broker.query("worker", 42, [], None, 100))
+        query = asyncio.create_task(broker.query("worker", HistoryQuery(session_id=SESSION)))
         request = await socket.sent.get()
         assert isinstance(request, ConversationQuery)
         execution = [Heartbeat(job_id=job, assignment_token="token", connection_epoch="epoch").model_dump_json()
@@ -60,8 +61,8 @@ async def test_dispatch_bypasses_execution_buffer_and_survives_consumer_cancella
         for raw in execution:
             await socket.incoming.put(raw)
         await socket.incoming.put(ConversationResult(request_id=request.request_id, connection_epoch="epoch",
-                                                    page=ConversationPage(flow_id=42)).model_dump_json())
-        assert (await asyncio.wait_for(query, 1)).flow_id == 42
+                                                    page=HistoryPage(session_id=SESSION)).model_dump_json())
+        assert (await asyncio.wait_for(query, 1)).session_id == SESSION
         assert [await connection.receive_text(), await connection.receive_text()] == execution
     finally:
         await connection.stop()
@@ -76,7 +77,7 @@ async def test_dispatch_bypasses_execution_buffer_and_survives_consumer_cancella
 async def test_receiver_failure_immediately_fails_query_while_control_is_busy(failure) -> None:
     broker, socket = ConversationBroker(), Socket()
     connection = WorkerConnection(socket, broker, "worker", "epoch")
-    query = asyncio.create_task(broker.query("worker", 42, [], None, 100))
+    query = asyncio.create_task(broker.query("worker", HistoryQuery(session_id=SESSION)))
     await socket.sent.get()
     raw = Heartbeat(job_id=1, assignment_token="token", connection_epoch="epoch").model_dump_json()
     try:

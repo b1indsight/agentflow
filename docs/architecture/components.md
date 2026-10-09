@@ -217,7 +217,7 @@ head PR 查询和 capability 已接入 INITIAL；M2 原线程回复/resolve 已�
   原 Issue、交付基线、此前 summary/open_points、VCS 指引和 `RevisionCodingOutput` 输出约定；有冻结 PR context 时一并传入。
 
 INITIAL 已使用 GitHub Issue 的真实标题与正文；冻结 PR context 包含有界 patch 和讨论，不含 CI 状态。
-F4 的完整线程映射由 control 持有，遵循当前 worker v12 契约。issue/PR 文本是不可信输入，必须保留明确的数据/指令边界。
+F4 的完整线程映射由 control 持有，遵循当前 worker v13 契约。issue/PR 文本是不可信输入，必须保留明确的数据/指令边界。
 
 ## 4.10 Judge / Triage
 

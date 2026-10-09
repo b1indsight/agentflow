@@ -39,7 +39,7 @@ edited 不产生新的强信号，approve/dismissed 不触发修订。空 Reques
 
 ## B.2 冻结批次与任务协议
 
-协议 v12 只向 worker 下发 INITIAL、REVISION、ARCHIVE。triage 直接使用 ReviewBatch，
+协议 v13 只向 worker 下发 INITIAL、REVISION、ARCHIVE。triage 直接使用 ReviewBatch，
 上下文与 Judge 决策保存在批次内，没有 triage job 或本地终态协议。
 REVISION 冻结原 PR、repo identity、head/base、session generation、原始任务和前轮未决点。
 修订结果携带同一 batch ID 与精确 item/version 清单，control 校验所有权、当前 attempt 与快照。
@@ -136,7 +136,7 @@ GitHub 没有条件式 resolve 事务，刷新与 mutation 之间的竞态仍可
   取消后不能补发；状态不明或仍在执行的通知不得通过显式 retry 重发。
 - 修订准备阶段的 PR/ref/Issue 读取错误持久进入失败路径，包括临时 GitHub 故障；恢复后显式 retry，
   不因 worker 重连无限重排，也不在 Started 前消耗修订额度。
-- 只支持当前完整 schema、协议 v12 和 journal v3；首次运行使用新数据库与 worker root。
+- 只支持当前完整 schema、协议 v13 和 journal v3；首次运行使用新数据库与 worker root。
   同版本的未开始任务、冻结 assignment、已接收结果和 effect 回执继续按持久事实恢复。
   不导入旧 review_threads，不维护旧 ANSWER 任务或旧版本启动迁移分支。
 

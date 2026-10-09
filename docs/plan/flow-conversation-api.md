@@ -254,3 +254,146 @@ HTTP→control→WorkerClient→历史文件查询。修复前后三个 control 
 
 脚本与日志位于 `.cache/2026-09-30/conversation-receiver-*`，沿用本会话缓存目录，不提交。
 本轮继续更新原 PR #58，无协议版本、数据库 schema 或用户接口变化。
+
+### 5. 2026-10-10 — worker 单会话历史查询重做（提案，尚未实施）
+
+**背景与范围：** 用户要求在新 PR 重做历史查询，移除不必要的中间类型，并确认 worker
+只接收控制面确定的单个 `session_id`、`cursor`、`limit`。旧 PR #67 已关闭且未合并，
+本次从 main（5188e3be）重新实现，不承接其输入对象 → spec → 冻结会话副本的转换链。
+本条替代第 1 条中 worker 接收 flow ID / 会话列表及负责跨会话分页的安排。
+
+**目标接口：**
+
+```python
+query = HistoryQuery(session_id=session_id, cursor=cursor, limit=limit)
+page = history.query(query)
+```
+
+`HistoryQuery` 同时是条件对象和合法查询描述。构造时校验 session ID、limit、游标格式
+及游标绑定的 session ID，history 直接消费该对象。不再先构造输入对象再生成另一个 spec。
+解码得到的文件偏移和文件身份作为内部读取状态，不扩充查询的三个公开输入字段，也不定义
+独立 `HistoryCursor`。文件存在性、身份和行边界在实际打开文件时检查。
+
+**职责与类型清单：**
+
+- `HistoryQuery`：唯一的查询类型，输入只有 session ID、可选 cursor 和 limit。
+- 单会话记录/分页响应：从现有消息记录中提取不含 Flow/Attempt 元数据的记录结构，
+  以及包含 `items`、会话读取状态、`next_cursor`、`has_more` 的单会话页。
+  这些是 worker 实际返回的数据契约，直接用于 wire response，不再包一层内部结果再转换。
+  现有 `ConversationContent` 继续复用；不为文本、文件位置或已校验数据增加包装类。
+- `CodexHistory.query(query)`：查找单个 session 文件、安全打开、受限读取、过滤/脱敏/
+  截断、分页和错误分类。游标绑定 session ID 和源位置，不含 flow、attempt、代次或列表下标。
+- 控制面继续从 Attempt 记录解析 Flow 对应会话，按既有顺序去重；使用这些现成记录补上
+  HTTP 消息的 `attempt_id`、`session_id`、`session_generation`。删除 `SessionRef` 中间类，
+  控制面响应需要的字段直接声明，不经继承树把归属信息传入文件读取器。
+- `WorkerSession` 保留现有历史实例的生命周期；现有调用边界接受查询对象，不新增服务层。
+  `WorkerClient` 继续负责 to_thread、并发上限、连接结束清理、请求关联与错误回传。
+
+**协议边界：** `ConversationQuery` 消息的外层仍有版本、type、request_id 和
+connection_epoch；payload 直接使用 `HistoryQuery` 的三个字段，复用其校验。
+wire response 使用单会话页；broker 校验响应来源、epoch、请求 ID、条数和大小，并在
+控制面匹配请求中的 session。worker 历史请求和响应不携带 flow ID、attempt ID、代次或
+session 列表。协议由 v12 升级到 v13，同步升级 control/worker，不加旧消息兼容分支。
+
+**控制面分页方案（需随本计划审阅）：**
+
+- 保留现有 Flow HTTP 路径、认证及 limit 范围。每个 HTTP 请求只查询一个 session，
+  多会话通过控制面外层游标顺序串接，避免一个 HTTP 请求内部循环发出多次 worker 查询。
+- 外层 cursor 绑定 flow 及有序会话/代次，保存当前 session 和该 session 的 worker cursor。
+  worker 只看到内层 cursor。两层 cursor 的责任不同，均用局部编解码处理，不新增游标类。
+- 当前 session 还有完整记录时继续当前 session；读完且仍有后续 session 时，将下一游标
+  移到下一个 session 的起点并返回 `has_more=true`。最后一个 session 读完后保留其尾部
+  游标，`has_more=false`，允许之后轮询新增完整记录。部分写入行不被消耗。
+- HTTP `items` 仍携带原有归属字段，但一页最多包含一个 session 的记录，可能少于 limit；
+  `sessions` 仅报告本页实际检查的 session 状态。缺失或不支持的 session 可形成空页，
+  若后面还有 session 则提供续读游标。不得把空页当作 Flow 历史结束。
+- 旧版多会话 cursor 返回现有 `409 cursor_invalid`，调用方不带 cursor 重新加载；不为
+  未上线的旧编码引入迁移类型。公开游标仍不透明；新的嵌套格式须保证符合长度限制。
+
+**保留的约束：** 单次查询并发、超时、扫描预算、消息/响应大小上限、安全路径访问、
+文件替换检测、稳定消息 ID、隐藏内容过滤及脱敏均保留。读取异常返回明确错误，不伪装
+为空历史。Flow 的多会话顺序由控制面维护，不要求 worker 了解业务归属。
+
+**替代方案与代价：** 在 worker 保留多会话列表会继续混合 Flow 编排与文件读取；仅删除
+类型名称但改用同内容字典也没有缩小职责。本方案每页一次单会话请求，使边界直接可见，
+代价是跨 session 时可能多一次 HTTP 请求，以及需要重新加载旧分页游标。共享 wire 数据
+模型保留校验价值，但不承诺为内部对象增加深层冻结包装或通用查询构建器。
+
+**实施顺序与验证：**
+
+1. 先写/调整单会话协议及历史查询行为测试：无业务归属字段、合法查询直接读取、非法/
+   跨 session 游标拒绝、记录/工具转换、条数与字节分页、半行/追加轮询、文件替换及路径限制。
+2. 实现单会话读取入口与共享结果契约，移除 `SessionRef` / `HistoryCursor` 和旧多参数
+   读取入口；以更少的类型完成接口，不引入 `HistoryReadSpec`、`HistorySession` 或结果转接层。
+3. 调整 control 元数据查询、外层分页和 broker，以及 worker 调度；覆盖两个 session
+   跨页、缺失/不支持 session、末尾轮询、旧游标拒绝、worker 忙碌、断线/取消及 epoch 隔离。
+4. 更新架构说明和 changelog，运行对应专项、完整 PostgreSQL 回归、Ruff、Mypy、构建及
+   diff 检查；用真实 HTTP → WebSocket → 文件读取测试证明外层分页的归属和顺序。
+5. 实现后移除一次内层 session 绑定校验及一次文件身份校验，分别让跨 session 游标和
+   文件替换测试失败；恢复代码后重跑受影响回归。记录证据，再通过独立代码审查推送同一新 PR。
+
+**审阅状态：** 业务边界由用户明确指定；上述单会话分页、状态字段范围和游标换代细节
+随本计划提交审阅，尚未修改产品或测试代码。不在本次加入离线历史存储、队列或额外代理层。
+
+### 6. 2026-10-10 — 单会话查询实现与验证
+
+**实现：** `HistoryQuery(session_id, cursor, limit)` 构造时解码并校验内层游标，内部保存
+偏移和文件身份；`CodexHistory.query(query)` 只查找和读取一个 session 文件，直接返回
+wire 使用的 `HistoryPage` / `HistoryItem`。删除 `SessionRef` 与 `HistoryCursor`，没有
+引入 spec、冻结会话副本、结果转接类或新的服务层。原双层遍历改为单文件逐行读取，统一
+在退出读取循环时生成下一游标。`WorkerSession` 沿用历史实例生命周期并直接转发查询。
+
+**control 与 wire：** control 使用数据库已有 Attempt 对象维护顺序/去重和归属，外层
+游标只保存查询范围指纹、session 下标和内层游标；每页只发一次 worker 请求。wire v13
+查询字段为 session ID/cursor/limit 加请求/连接关联信息，不携带 Flow/Attempt 元数据。
+消息层校验字段形状，worker 的查询任务内再构造 HistoryQuery 并校验游标语义；这样非法
+游标返回 `cursor_invalid`，不会因消息反序列化失败导致整条连接重连。返回记录的归属
+由 control 补上，broker 校验 session、记录 ID、响应大小、条数和续读游标。
+
+**测试先行：** 新单会话边界及 control 分页测试在实现前因缺少 HistoryQuery 而失败。
+实现后专项 28 passed、1 个数据库用例待完整回归；覆盖跨 session 拒绝、无业务归属字段、
+查询输入不变、同长度文件替换、字节分页、缺失 session 空页续读、旧游标拒绝与尾部轮询。
+真实 HTTP→WebSocket→worker→文件用例覆盖 worker、preparation、tool、result 四种忙碌
+阶段，继续读取第二个 session 并验证由 control 补上的 attempt/代次。
+
+**消融：** `.cache/2026-10-09/single-session-ablation.py` 分别移除内层游标的 session
+匹配与打开文件后的身份比较。相同回归在对应的 `pytest.raises` 处各 **1 failed**，均为
+未抛出应有的 `cursor_invalid`。脚本在 finally 恢复源码后再运行完整回归。日志为
+`.cache/2026-10-09/single-session-ablation-session-binding.log` 和
+`.cache/2026-10-09/single-session-ablation-file-identity.log`，不提交。
+
+**最终验证：** 恢复消融后执行
+`FLOWTOOL_TEST_DATABASE_URL=postgresql://flowtool@127.0.0.1:56473/postgres uv run pytest -q --tb=short`，
+完整 PostgreSQL 回归 **835 passed**（57.14 秒，0 skipped），仅既有 Starlette TestClient
+弃用告警。Ruff、Mypy（160 个源文件）、sdist/wheel 构建及 `git diff --check` 通过。
+同步更新查询架构、协议版本说明和 CHANGELOG；协议 v13、单 session HTTP 分页及旧游标
+重新加载是本次明确的兼容性变化。
+
+### 7. 2026-10-10 — 简化历史文件查找
+
+**需求与实现：** 用户指出 `_path` 过度防御并明确要求修改。查找改为按 sessions、
+archived_sessions 顺序找到即返回，移除为重复检测而继续扫描的逻辑；两个目录都有副本时
+活动文件优先，同目录多个匹配文件采用遍历到的第一个。移除候选文件 `is_symlink` 和
+`resolve/is_relative_to` 的重复检查，统一依赖已有 `_open` 的逐级 O_NOFOLLOW/普通文件
+校验。删除 3 秒遍历计时，保留 50000 条目上限、目录入口符号链接拒绝、子目录不跟随链接
+及遍历 I/O 错误传播；入口检查用于避免遍历外部目录，与打开候选文件的检查职责不同。
+
+**验证与取舍：** 新增活动/归档副本优先级回归，修改前因重复文件报 history_unreadable
+而失败，修改后返回活动记录。历史读取、单会话/control 分页及真实 HTTP/WebSocket 专项
+**16 passed**，覆盖原有链接逃逸、普通文件、文件替换、归档读取和分页行为；受影响文件的
+Ruff、Mypy 和 diff 检查通过。本次删除机制，不引入新抽象；修复前后同一用例已直接证明
+去掉重复检测的行为变化，沿用第 6 条文件身份消融，无新增独立机制需要消融。
+
+### 8. 2026-10-10 — 补充边界注释并精简重复测试
+
+**修改：** 按用户要求，在活动目录优先级、遍历入口链接检查、文件身份复核、半行等待、
+分页不提前消费记录及控制面外层游标/EOF 轮询处补充原因注释。删除旧
+`test_history_missing_and_cursor_identity`：缺失状态已由控制面空页续读测试覆盖，跨会话
+游标拒绝已由新查询边界测试覆盖。移除新查询测试重复的普通分页、字段集合及不变性断言；
+移除 control 单元测试中与真实端到端重复的归属断言，保留每页调用次数、会话状态范围、
+尾部追加、跨 Flow/代次拒绝、缺失页接续和旧游标拒绝。将直接调用错误响应处理器的测试
+更名为 `test_bad_cursor_returns_correlated_query_error`，不再声称覆盖连接存活。
+
+**验证：** 历史、单会话/control、worker、真实 HTTP/WebSocket 及 API 专项 **25 passed**，
+仅既有 Starlette 弃用告警；Ruff、全量 Mypy 与 diff 检查通过。本次仅注释和测试精简，
+产品执行逻辑未变；保留第 6 条消融对应的 session 绑定和文件身份回归，无新机制需要消融。

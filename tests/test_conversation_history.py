@@ -3,11 +3,10 @@ from pathlib import Path
 
 import pytest
 
-from app.contracts.conversation import ConversationFailure, SessionRef
+from app.contracts.conversation import ConversationFailure, HistoryQuery
 from app.worker.state.history import CodexHistory
 
 SESSION = "019eac3b-a60c-7a93-a442-3718f660fc8c"
-REF = SessionRef(attempt_id=1, session_id=SESSION, session_generation=0)
 
 
 def rollout(root: Path, records: list[dict]) -> Path:
@@ -36,34 +35,23 @@ def test_history_roles_tools_pagination_and_live_tail(tmp_path: Path) -> None:
                                                "output": "passed"}},
     ])
     reader = CodexHistory(tmp_path)
-    first = reader.read(42, [REF], None, 2)
+    first = reader.query(HistoryQuery(session_id=SESSION, cursor=None, limit=2))
     assert [(item.role, item.kind) for item in first.items] == [("user", "message"), ("assistant", "message")]
     assert first.has_more
-    second = reader.read(42, [REF], first.next_cursor, 100)
+    second = reader.query(HistoryQuery(session_id=SESSION, cursor=first.next_cursor, limit=100))
     assert [(item.role, item.call_id) for item in second.items] == [("assistant", "c1"), ("tool", "c1")]
     assert not second.has_more
     # Codex appends JSONL while a running session is being viewed: do not consume a partial line.
     tail = json.dumps(message("assistant", "Done"))
     with path.open("a") as file:
         file.write(tail[:20])
-    partial = reader.read(42, [REF], second.next_cursor, 100)
+    partial = reader.query(HistoryQuery(session_id=SESSION, cursor=second.next_cursor, limit=100))
     assert partial.items == []
     with path.open("a") as file:
         file.write(tail[20:] + "\n")
-    final = reader.read(42, [REF], partial.next_cursor, 100)
+    final = reader.query(HistoryQuery(session_id=SESSION, cursor=partial.next_cursor, limit=100))
     assert final.items[0].content.text == "Done"
     assert final.items[0].id not in {item.id for item in first.items + second.items}
-
-
-def test_history_missing_and_cursor_identity(tmp_path: Path) -> None:
-    reader = CodexHistory(tmp_path)
-    assert reader.read(42, [REF], None, 10).sessions[0].status == "not_found"
-    rollout(tmp_path, [message("user", "hello")])
-    page = reader.read(42, [REF], None, 10)
-    with pytest.raises(ConversationFailure, match="cursor_invalid"):
-        reader.read(43, [REF], page.next_cursor, 10)
-    with pytest.raises(ConversationFailure, match="cursor_invalid"):
-        reader.read(42, [REF.model_copy(update={"session_generation": 1})], page.next_cursor, 10)
 
 
 def test_history_rejects_symlink_escape_and_wrong_session(tmp_path: Path) -> None:
@@ -74,55 +62,59 @@ def test_history_rejects_symlink_escape_and_wrong_session(tmp_path: Path) -> Non
     (root / "sessions" / path.name).symlink_to(path)
     # A rollout-looking symlink must never expose files outside the worker's history root.
     with pytest.raises(ConversationFailure, match="history_unreadable"):
-        CodexHistory(root).read(42, [REF], None, 10)
+        CodexHistory(root).query(HistoryQuery(session_id=SESSION, cursor=None, limit=10))
     path = rollout(tmp_path / "wrong", [])
     path.write_text(json.dumps({"type": "session_meta", "payload": {"id": "other-session"}}) + "\n")
     with pytest.raises(ConversationFailure, match="history_unreadable"):
-        CodexHistory(tmp_path / "wrong").read(42, [REF], None, 10)
+        CodexHistory(tmp_path / "wrong").query(HistoryQuery(session_id=SESSION, cursor=None, limit=10))
 
 
 def test_history_reports_unknown_records_and_truncates_text(tmp_path: Path) -> None:
     rollout(tmp_path, [message("user", "x" * 20000),
                        {"type": "response_item", "payload": {"type": "future_item"}}])
-    page = CodexHistory(tmp_path).read(42, [REF], None, 100)
+    page = CodexHistory(tmp_path).query(HistoryQuery(session_id=SESSION, cursor=None, limit=100))
     assert page.items[0].truncated
     assert len(page.items[0].content.text) < 20000
-    assert page.sessions[0].status == "unsupported"
+    assert page.status == "unsupported"
 
 
-def test_history_multiple_sessions_and_archive(tmp_path: Path) -> None:
+def test_history_archive_and_truncated_source(tmp_path: Path) -> None:
     first = rollout(tmp_path, [message("user", "initial")])
     archived = tmp_path / "archived_sessions" / first.name
     archived.parent.mkdir()
     first.rename(archived)
-    other = REF.model_copy(update={"attempt_id": 2, "session_id": "019eac3b-a60c-7a93-a442-3718f660fc8d"})
-    second = first.with_name(first.name.replace(SESSION, other.session_id))
-    second.write_text(json.dumps({"type": "session_meta", "payload": {"id": other.session_id}}) + "\n"
-                      + json.dumps(message("user", "retry")) + "\n")
     reader = CodexHistory(tmp_path)
-    page = reader.read(42, [REF, other], None, 1)
-    assert page.items[0].attempt_id == 1
-    page = reader.read(42, [REF, other], page.next_cursor, 1)
-    assert page.items[0].attempt_id == 2
+    page = reader.query(HistoryQuery(session_id=SESSION, limit=1))
+    assert page.items[0].content.text == "initial"
     assert not page.has_more
-    second.write_text("")
+    archived.write_text("")
     with pytest.raises(ConversationFailure, match="cursor_invalid"):
-        reader.read(42, [REF, other], page.next_cursor, 1)
+        reader.query(HistoryQuery(session_id=SESSION, cursor=page.next_cursor, limit=1))
+
+
+def test_history_prefers_active_file_over_archived_copy(tmp_path: Path) -> None:
+    # During archival, both copies may be present; the active source takes priority.
+    path = rollout(tmp_path, [message("user", "active")])
+    archived = tmp_path / "archived_sessions" / path.name
+    archived.parent.mkdir()
+    archived.write_text(path.read_text().replace('"active"', '"archived"'))
+    page = CodexHistory(tmp_path).query(HistoryQuery(session_id=SESSION))
+    assert [item.content.text for item in page.items] == ["active"]
 
 
 def test_history_malformed_limits_and_secret_filter(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "private-key-value")
     path = rollout(tmp_path, [message("assistant", "private-key-value Bearer abc123 ghp_testsecret")])
     reader = CodexHistory(tmp_path)
-    text = reader.read(42, [REF], None, 100).items[0].content.text
+    text = reader.query(HistoryQuery(session_id=SESSION, cursor=None, limit=100)).items[0].content.text
     assert "private-key-value" not in text and "abc123" not in text and "ghp_testsecret" not in text
     with path.open("a") as file:
         file.write("invalid-json\n")
     with pytest.raises(ConversationFailure, match="history_unreadable"):
-        reader.read(42, [REF], None, 100)
+        reader.query(HistoryQuery(session_id=SESSION, cursor=None, limit=100))
     rollout(tmp_path, [message("user", "x" * 300000)])
     with pytest.raises(ConversationFailure, match="history_limit"):
-        reader.read(42, [REF], None, 100)
+        reader.query(HistoryQuery(session_id=SESSION, cursor=None, limit=100))
 
 
 def test_history_scan_budget_returns_continuation(tmp_path: Path, monkeypatch) -> None:
@@ -131,9 +123,9 @@ def test_history_scan_budget_returns_continuation(tmp_path: Path, monkeypatch) -
     monkeypatch.setattr(history, "MAX_SCAN", 1)
     rollout(tmp_path, [{"type": "turn_context", "payload": {}}, message("user", "later")])
     reader = CodexHistory(tmp_path)
-    page = reader.read(42, [REF], None, 100)
+    page = reader.query(HistoryQuery(session_id=SESSION, cursor=None, limit=100))
     assert page.items == [] and page.has_more
-    page = reader.read(42, [REF], page.next_cursor, 100)
+    page = reader.query(HistoryQuery(session_id=SESSION, cursor=page.next_cursor, limit=100))
     assert page.items[0].content.text == "later"
 
 
@@ -146,7 +138,7 @@ def test_history_refuses_special_files_and_racing_directory_symlink(tmp_path: Pa
     os.mkfifo(path)
     reader = CodexHistory(root)
     with pytest.raises(ConversationFailure, match="history_unreadable"):
-        reader.read(42, [REF], None, 100)
+        reader.query(HistoryQuery(session_id=SESSION, cursor=None, limit=100))
     # Exercise the open boundary independently: a directory can be swapped after discovery.
     outside = tmp_path / "outside"
     outside.mkdir()

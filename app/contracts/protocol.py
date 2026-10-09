@@ -18,13 +18,13 @@ from pydantic import (
     model_validator,
 )
 
-from app.contracts.conversation import ConversationError, ConversationPage, SessionRef
+from app.contracts.conversation import ConversationError, HistoryPage
 from app.domain.context_models import ReviewContext
 from app.domain.delivery_models import DeliveryReceipt
 from app.domain.models import FeedbackRef, JobState, RevisionCodingOutput, VcsKind
 from app.domain.review_models import ReviewFeedback
 
-PROTOCOL_VERSION: Literal[12] = 12
+PROTOCOL_VERSION: Literal[13] = 13
 
 
 class ProtocolModel(BaseModel):
@@ -34,26 +34,27 @@ class ProtocolModel(BaseModel):
 
 
 class Message(ProtocolModel):
-    protocol_version: Literal[12] = PROTOCOL_VERSION
+    protocol_version: Literal[13] = PROTOCOL_VERSION
 
 
 class ConversationQuery(Message):
     """Read-only request, independent of the worker's current assignment."""
 
+    # HistoryQuery checks cursor semantics inside the task, so a bad cursor returns
+    # a query error rather than aborting WebSocket message parsing and reconnecting.
     type: Literal["conversation_query"] = "conversation_query"
+    session_id: str = Field(pattern=r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$")
+    cursor: str | None = Field(default=None, min_length=1, max_length=1024)
+    limit: int = Field(default=100, ge=1, le=500)
     request_id: str = Field(min_length=1, max_length=64)
     connection_epoch: str = Field(min_length=1, max_length=64)
-    flow_id: int = Field(gt=0)
-    sessions: list[SessionRef] = Field(max_length=128)
-    cursor: str | None = Field(default=None, max_length=2048)
-    limit: int = Field(default=100, ge=1, le=500)
 
 
 class ConversationResult(Message):
     type: Literal["conversation_result"] = "conversation_result"
     request_id: str = Field(min_length=1, max_length=64)
     connection_epoch: str = Field(min_length=1, max_length=64)
-    page: ConversationPage | None = None
+    page: HistoryPage | None = None
     error: ConversationError | None = None
 
     @model_validator(mode="after")
