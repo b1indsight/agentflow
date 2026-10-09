@@ -54,7 +54,7 @@ class CodingAgent(Protocol):
     ) -> CodingExecutionResult: ...
 
     async def resume(
-        self, session_id: str, prompt: str, *, output_schema: Path | None = None,
+        self, session_id: str, prompt: str, *, cwd: Path, output_schema: Path | None = None,
         context: CodingExecutionContext | None = None,
     ) -> CodingExecutionResult: ...
 

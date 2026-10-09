@@ -128,7 +128,6 @@ class WorkerExecutor:
                     output_schema=schema_path,
                     context=CodingExecutionContext(
                         push_token=secret.push.token,
-                        push_repository=secret.push.repository,
                         mcp_url=mcp.url,
                         mcp_token=mcp.token,
                     ),
@@ -204,10 +203,9 @@ class WorkerExecutor:
                     or secret.push.expires_at <= datetime.now(UTC)):
                 raise VcsVerificationError("capability", "missing, mismatched or expired push capability")
             workspace = flow_repo_path(self._repo_path(task.repo), task.flow_id)
-            context = CodingExecutionContext(push_token=secret.push.token,
-                                       push_repository=task.repo, cwd=workspace)
+            context = CodingExecutionContext(push_token=secret.push.token)
             vcs_context = await prepare_revision_context(
-                workspace, task.branch, task.expected_head_sha, context,
+                workspace, task.branch, task.expected_head_sha, secret.push.token,
             )
             prompt = build_revision_prompt(task, self._repo_conventions(workspace))
             schema_path = _write_output_schema(RevisionCodingOutput)
@@ -216,7 +214,7 @@ class WorkerExecutor:
                 self.session.begin_revision("resume")
                 try:
                     run = await self.code_agent.resume(
-                        task.session_id, prompt, output_schema=schema_path, context=context,
+                        task.session_id, prompt, cwd=workspace, output_schema=schema_path, context=context,
                     )
                 except SessionUnavailable:
                     invocation = RevisionExecutionRecord(mode="resume", session_id=task.session_id,
@@ -224,7 +222,7 @@ class WorkerExecutor:
                     result.invocations = self.session.finish_invocation(invocation)
                     # A rejection is insufficient if anything changed while resume was attempted.
                     fallback_context = await prepare_revision_context(
-                        workspace, task.branch, task.expected_head_sha, context,
+                        workspace, task.branch, task.expected_head_sha, secret.push.token,
                     )
                     if ((fallback_context.git_remote_url, fallback_context.jj_remote_url)
                             != (vcs_context.git_remote_url, vcs_context.jj_remote_url)):

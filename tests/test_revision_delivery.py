@@ -67,7 +67,8 @@ class RevisionAgent:
         self.repo, self.behavior = repo, behavior
         self.calls: list[tuple[str, CodingExecutionContext | None, str]] = []
 
-    async def resume(self, session_id, prompt, *, output_schema=None, context=None):
+    async def resume(self, session_id, prompt, *, cwd, output_schema=None, context=None):
+        assert cwd == self.repo
         self.calls.append(("resume", context, prompt))
         if self.behavior == "missing":
             from app.domain.models import SessionUnavailable
@@ -101,7 +102,6 @@ async def test_revision_verifies_real_git_delivery(revision_workspace, behavior,
     result = await WorkerExecutor(root, agent, session=WorkerSession(root), worker_id="w").execute(task, secret, tool_caller=RecordingToolCaller())
     assert (result.exit_code == 0) is success
     assert agent.calls[0][1].push_token.get_secret_value() == "fresh-token"
-    assert agent.calls[0][1].cwd == repo
     assert "flow.open_pr" not in agent.calls[0][2]
     if success:
         assert result.clean_worktree and result.commit_sha == result.remote_sha
@@ -120,6 +120,7 @@ async def test_fallback_only_when_execution_is_known_not_to_have_started(
     agent = RevisionAgent(repo, behavior)
     result = await WorkerExecutor(root, agent, session=WorkerSession(root), worker_id="w").execute(task, secret, tool_caller=RecordingToolCaller())
     assert [call[0] for call in agent.calls] == expected
+    assert all(call[1].mcp_url is None and call[1].mcp_token is None for call in agent.calls)
     if expected[-1] == "start":
         assert result.session_id == "new-session"
         assert result.session_generation == 1

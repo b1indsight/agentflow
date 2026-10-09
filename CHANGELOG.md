@@ -8,6 +8,10 @@
 
 ## Unreleased
 
+- CodingAgent start/resume 显式接收当前 Flow 目录，CLI 与进程目录保持一致；删除 context.cwd
+  和未使用的 push_repository，VCS 只接收 push token。flow MCP 按当前 endpoint/token 配置，
+  缺少 endpoint 时显式关闭，覆盖修订 resume 与 fallback。
+
 - 编码审计以 jobs 的持久结果、digest、接收/应用时间及 revision invocations 为来源；停止
   写入 codex_runs，新库不再创建该表或索引。已有旧表和数据保留，外部 SQL 消费者需迁移；
   接收/应用时间不表示真实进程执行时间。

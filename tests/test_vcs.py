@@ -10,10 +10,12 @@ from pathlib import Path
 from typing import cast
 
 import pytest
+from pydantic import SecretStr
 
 from app.domain.models import VcsExecutionContext, VcsKind, VcsOutcome
 from app.worker.execution.vcs import (
     VcsVerificationError,
+    _remote_sha,
     _run,
     _vcs_environment,
     agent_guidance,
@@ -152,6 +154,32 @@ def test_vcs_environment_does_not_inherit_worker_credentials() -> None:
     assert "FLOWTOOL_WORKER_TOKEN" not in environment
     assert environment["GIT_CONFIG_NOSYSTEM"] == "1"
     assert environment["GIT_CONFIG_GLOBAL"] == "/dev/null"
+
+
+async def test_remote_verification_uses_only_current_push_token(monkeypatch, tmp_path):
+    # Agent-local Git config and inherited worker/MCP credentials must not affect
+    # verification of the fixed remote URL after a revision.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("FLOWTOOL_WORKER_TOKEN", "worker-secret")
+    monkeypatch.setenv("FLOWTOOL_MCP_TOKEN", "mcp-secret")
+
+    async def run(*args, cwd, stage, environment):
+        assert args == (
+            "git", "ls-remote", "--heads", "https://github.com/owner/repo.git",
+            "refs/heads/flow/1",
+        )
+        assert cwd != tmp_path and cwd.is_dir()
+        assert stage == "push"
+        assert environment["FLOWTOOL_PUSH_TOKEN"] == "fresh-push-secret"
+        assert "FLOWTOOL_WORKER_TOKEN" not in environment
+        assert "FLOWTOOL_MCP_TOKEN" not in environment
+        assert environment["GIT_CONFIG_GLOBAL"] == os.devnull
+        return 0, "abc refs/heads/flow/1\n", ""
+
+    monkeypatch.setattr("app.worker.execution.vcs._run", run)
+    assert await _remote_sha(
+        "https://github.com/owner/repo.git", "flow/1", SecretStr("fresh-push-secret"),
+    ) == "abc"
 
 
 @pytest.mark.asyncio
