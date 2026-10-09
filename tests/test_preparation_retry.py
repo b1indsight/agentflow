@@ -25,8 +25,10 @@ def gateway(store, subject):
     return WorkerGateway(store, subject, execution_control=StopStore(store), worker_tokens={})
 
 
-@pytest.mark.parametrize("change", ["closed", "merged", "epoch", "token", "expired", "started"])
-@pytest.mark.parametrize("signing_fails", [False, True])
+@pytest.mark.parametrize("change,signing_fails", [
+    ("merged", False), ("closed", True),
+    ("epoch", False), ("epoch", True), ("started", False),
+])
 async def test_coordinator_rechecks_after_capability_io(store, pending_revision, monkeypatch, change, signing_fails):
     # Webhooks or a new connection can retire an assignment while signing is in flight.
     flow, job, task, github, subject = pending_revision
@@ -43,27 +45,20 @@ async def test_coordinator_rechecks_after_capability_io(store, pending_revision,
                 connection.execute("UPDATE flow_deliveries SET state='merged' WHERE flow_id=%s", (flow.id,))
         elif change == "epoch":
             store.worker_connected("worker-a", PROTOCOL_VERSION, "new-epoch")
-        elif change == "token":
-            store.requeue_assignment(job.id, "worker-a", "token", "epoch")
-            store.assign_job("worker-a", "new-token", "epoch")
-        elif change == "started":
-            store.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
         else:
-            deadline = store.get_job(job.id).lease_expires_at
-            monkeypatch.setattr(store, "_clock", lambda: deadline + timedelta(seconds=1))
+            store.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
         if signing_fails:
             raise GitHubAdapterError(GitHubErrorKind.TRANSIENT, "create_push_capability")
         return capability
 
     monkeypatch.setattr(github, "create_push_capability", changed)
-    if change in {"epoch", "token", "expired", "started"}:
+    if change in {"epoch", "started"}:
         with pytest.raises(PreparationStale):
             await subject.prepare_for_assignment(job, "worker-a", "token", "epoch")
         assert store.get_job(job.id).result_received_at is None
     else:
         prepared = await subject.prepare_for_assignment(job, "worker-a", "token", "epoch")
-        expected = JobState.FAILED if signing_fails or change == "merged" else JobState.DONE
-        assert prepared is expected
+        assert prepared is JobState.FAILED
     assert store.get_job(job.id).prepare_failures == 0
 
 

@@ -122,3 +122,19 @@ coordinator 和 Assignment，保留 transport 的生命周期所有权。
 - `uv run ruff check app tests`、`uv run mypy app tests`（160 files）、`uv build`、
   `git diff --check` 均通过。已检查最终 diff 与 code-principles，新增测试限于真实并发边界，
   不引入通用调度抽象、数据库 schema 或 wire 变更。
+
+
+### 2026-10-10 — 精简重复测试
+
+- **请求与变更：** 按用户要求删除低价值测试，签发并发矩阵由 12 个实例减为 5 个，
+  删除 7 个重复排列：CLOSED 成功、MERGED 失败、token/expired 的成功与失败，以及 started 失败。
+  CLOSED 成功仍由 `test_close_during_capability_preparation_never_dispatches` 覆盖；签发失败
+  的终态与读取预算政策仍有独立测试。token、lease 与 started/epoch 共用已有
+  `_lock_preparation`，保留 epoch 的成功/失败两例验证准备入口的两个复查分支，另保留
+  started 成功证明复查不能被允许已启动任务的 heartbeat 取代。未删除仓储边界测试。
+- **保留：** MERGED 成功后的业务判定、CLOSED 时签发失败的时序政策、取消后等待异步
+  清理、发送前独立授权。消除矩阵笛卡尔积和不再使用的 token/lease 场景构造。
+- **证据：** 精简后重跑原 `pr71-ablation.py`，移除签发后 fence 为 2 failed，移除
+  delivery 复查为 1 failed，移除 join 与发送前授权各 1 failed；均为预期行为断言失败，
+  文件已恢复。三个受影响测试文件的真实 PostgreSQL 回归为 **60 passed**；Ruff 与 diff 检查通过。
+  本次仅删除测试排列与简化断言，不修改生产代码；之前的 851 项全套结果保留为历史记录。
