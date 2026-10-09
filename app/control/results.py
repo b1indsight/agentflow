@@ -79,7 +79,19 @@ class ResultApplication:
         self._recovery_cursor = self._recovery_ceiling = 0
 
     async def apply(self, job_id: int) -> JobState:
-        """Serialize live and recovered applications of the same persisted result."""
+        """Serialize and apply a persisted terminal result for live or recovered work.
+
+        Call after the worker result or control failure has been saved with its
+        digest. Missing workflow records, missing results, or conflicting digests
+        raise ValueError. An already applied result returns its stored job state.
+
+        Applications of the same job share a local lock. Remote verification and
+        effects run outside workflow transactions; the frozen plan and receipts
+        let retries resume unfinished work. Local consequences and the completion
+        marker commit atomically. Return the completed job state, including FAILED
+        for a permanent failure. ResultPending means recovery is still needed:
+        retry the same job_id through recover_pending_results, honoring backoff.
+        """
         async with self._result_locks.setdefault(job_id, asyncio.Lock()):
             job = self.store.get_job(job_id)
             if job is not None and job.result_applied_at is not None:
@@ -117,6 +129,7 @@ class ResultApplication:
                     group.create_task(drain())
 
     async def _apply(self, job_id: int) -> JobState:
+        """Resume result intent and commit completion while the caller holds the job lock."""
         job = self.store.get_job(job_id)
         if job is None:
             raise ValueError(f"job {job_id} disappeared")
