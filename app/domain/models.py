@@ -235,7 +235,7 @@ class VcsExecutionContext:
     git_base_sha: str | None
     jj_base_sha: str | None
     jj_ancestor_sha: str | None
-    push_context: CodingExecutionContext | None = field(default=None, repr=False)
+    push_token: SecretStr | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)
@@ -267,10 +267,8 @@ class CodingExecutionContext:
     """Ephemeral per-run capabilities; never persist or log this value."""
 
     push_token: SecretStr | None = None
-    push_repository: str | None = None
     mcp_url: str | None = None
     mcp_token: SecretStr | None = None
-    cwd: Path | None = None
 
 
 # ------------------------------------------------------------ 跨模型 JSON 契约（pydantic）

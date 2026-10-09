@@ -1,14 +1,14 @@
 """Ephemeral Git credential environment shared by CodingAgent and remote-ref verification."""
 
-from app.domain.models import CodingExecutionContext
+from pydantic import SecretStr
 
 
-def git_credential_environment(context: CodingExecutionContext) -> dict[str, str]:
+def git_credential_environment(push_token: SecretStr | None) -> dict[str, str]:
     """Supply the current capability without placing a token in argv or repository config."""
-    if context.push_token is None:
+    if push_token is None:
         return {}
     return {
-        "FLOWTOOL_PUSH_TOKEN": context.push_token.get_secret_value(),
+        "FLOWTOOL_PUSH_TOKEN": push_token.get_secret_value(),
         "GIT_TERMINAL_PROMPT": "0",
         "GIT_CONFIG_COUNT": "2",
         "GIT_CONFIG_KEY_0": "credential.https://github.com.username",

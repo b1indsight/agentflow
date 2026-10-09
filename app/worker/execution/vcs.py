@@ -18,7 +18,9 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse
 
-from app.domain.models import CodingExecutionContext, VcsExecutionContext, VcsKind, VcsOutcome
+from pydantic import SecretStr
+
+from app.domain.models import VcsExecutionContext, VcsKind, VcsOutcome
 from app.worker.execution.credentials import git_credential_environment
 
 
@@ -253,7 +255,7 @@ async def _verify_git(context: VcsExecutionContext, *, require_new: bool = True)
     await _require_clean("git", "status", "--porcelain", "--untracked-files=all", cwd=context.repo_path)
     current_url = await _git_remote_url(context.repo_path, context.remote)
     _require_unchanged_remote(current_url, context.git_remote_url)
-    remote = await _remote_sha(context.git_remote_url, context.branch, context.push_context)
+    remote = await _remote_sha(context.git_remote_url, context.branch, context.push_token)
     return _outcome(VcsKind.GIT, branch, commit, remote)
 
 
@@ -281,13 +283,13 @@ async def _verify_jj(context: VcsExecutionContext, *, require_new: bool = True) 
     await _require_clean("jj", "diff", "--summary", cwd=context.repo_path)
     current_url = await _jj_remote_url(context.repo_path, context.remote)
     _require_unchanged_remote(current_url, context.jj_remote_url)
-    remote = await _remote_sha(context.jj_remote_url, context.branch, context.push_context)
+    remote = await _remote_sha(context.jj_remote_url, context.branch, context.push_token)
     return _outcome(VcsKind.JJ, context.branch, commit, remote)
 
 
 async def prepare_revision_context(
     repo_path: Path, branch: str, expected_sha: str,
-    push_context: CodingExecutionContext | None = None,
+    push_token: SecretStr | None = None,
 ) -> VcsExecutionContext:
     """Require the existing clean Flow repo to match the frozen remote head; never reset it."""
     if not repo_path.is_dir():
@@ -297,7 +299,7 @@ async def prepare_revision_context(
     # delivery commit, not that mutable working-copy commit, is the revision ancestry anchor.
     context = replace(context, git_base_sha=expected_sha if context.git_base_sha else None,
                       jj_ancestor_sha=expected_sha if context.jj_base_sha else None,
-                      push_context=push_context)
+                      push_token=push_token)
     backend = VcsKind.JJ if context.jj_base_sha else VcsKind.GIT
     outcome = await verify_revision_outcome(context, backend)
     if outcome.commit_sha != expected_sha:
@@ -399,13 +401,12 @@ def _require_unchanged_remote(current: str, captured: str) -> None:
 
 
 async def _remote_sha(
-    remote: str, branch: str, push_context: CodingExecutionContext | None = None,
+    remote: str, branch: str, push_token: SecretStr | None = None,
 ) -> str:
     # Run outside the agent-controlled repository so local config cannot rewrite the fixed URL.
     with tempfile.TemporaryDirectory(prefix="flowtool-vcs-verify-") as directory:
         environment = _vcs_environment()
-        if push_context is not None:
-            environment.update(git_credential_environment(push_context))
+        environment.update(git_credential_environment(push_token))
         code, output, _ = await _run(
             "git",
             "ls-remote",

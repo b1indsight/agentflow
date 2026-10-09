@@ -109,7 +109,12 @@ worker socket 与 executor 解耦，root 内原子 journal 在 ack 前保存进�
 - start/resume 都要求 trusted-host 开关；worker 还必须声明专用 account/container/VM 隔离，且不得继承
   control-plane 环境变量；
 - 从 JSONL 的 `thread.started.thread_id` 读取 session id；
-- resume 使用 `codex exec resume <session_id>`，cwd 与 sandbox 继承自会话；
+- start/resume 都显式接收当前 Flow 的 cwd，CLI 参数与子进程工作目录使用同一个值；
+  resume 通过配置覆盖保存的 cwd 与 sandbox；
+- `CodingExecutionContext` 只携带临时 push token 与 MCP endpoint/token；MCP 凭据必须成对提供，
+  未提供 endpoint 时 start/resume 均显式禁用 flow MCP，修订 fallback 也遵循这个规则；
+- VCS 远端验证只接收 push token，在 agent 仓库之外查询固定 URL；repository、过期时间与
+  worker binding 仍由 executor 校验；
 - `-o` 读取原始最终消息，`--output-schema` 约束 CLI 输出；`WorkerExecutor` 按 INITIAL/revision
   严格解析各自结果模型，adapter 不解释业务 schema；
 - 子进程只继承 Codex 认证、代理/CA 和基础运行环境；INITIAL 额外获得单次短时 push credential helper 与

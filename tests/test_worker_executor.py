@@ -48,7 +48,7 @@ class RecordingAgent:
             exit_code=0,
         )
 
-    async def resume(self, session_id: str, prompt: str, *, output_schema=None, context=None) -> CodingExecutionResult:
+    async def resume(self, session_id: str, prompt: str, *, cwd: Path, output_schema=None, context=None) -> CodingExecutionResult:
         self.resumed.append((session_id, prompt))
         return CodingExecutionResult(
             session_id=session_id,

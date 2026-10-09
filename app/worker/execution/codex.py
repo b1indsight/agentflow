@@ -65,10 +65,25 @@ def _codex_environment(
         key: value for key, value in values.items() if key in _CODEX_ENVIRONMENT_KEYS
     }
     if context is not None:
-        environment.update(git_credential_environment(context))
+        environment.update(git_credential_environment(context.push_token))
         if context.mcp_token is not None:
             environment["FLOWTOOL_MCP_TOKEN"] = context.mcp_token.get_secret_value()
     return environment
+
+
+def _mcp_args(context: CodingExecutionContext | None) -> list[str]:
+    """Replace saved flow MCP configuration with this run's capability or disable it."""
+    url = context.mcp_url if context is not None else None
+    token = context.mcp_token if context is not None else None
+    if (url is None) != (token is None):
+        raise ValueError("worker MCP requires an endpoint and scoped token together")
+    if url is None:
+        return ["-c", 'mcp_servers.flow={url="http://127.0.0.1", enabled=false}']
+    config = (
+        f'{{url={json.dumps(url)}, bearer_token_env_var="FLOWTOOL_MCP_TOKEN", '
+        'enabled_tools=["open_pr"], required=true, default_tools_approval_mode="auto"}'
+    )
+    return ["-c", f"mcp_servers.flow={config}"]
 
 
 def _start_args(
@@ -96,16 +111,7 @@ def _start_args(
         "danger-full-access",
         "--skip-git-repo-check",
     ]
-    if context is not None and context.mcp_url is not None:
-        if context.mcp_token is None:
-            raise ValueError("worker MCP requires a scoped token")
-        config = (
-            f'{{url={json.dumps(context.mcp_url)}, bearer_token_env_var="FLOWTOOL_MCP_TOKEN", '
-            'enabled_tools=["open_pr"], required=true, default_tools_approval_mode="auto"}'
-        )
-        args.extend(["-c", f"mcp_servers.flow={config}"])
-    elif context is not None and context.cwd is not None:
-        args.extend(["-c", 'mcp_servers.flow={url="http://127.0.0.1", enabled=false}'])
+    args.extend(_mcp_args(context))
     args.extend(["-c", 'shell_environment_policy.inherit="all"'])
     return args
 
@@ -140,10 +146,10 @@ class CodexAgent:
         context: CodingExecutionContext | None = None,
     ) -> CodingExecutionResult:
         args = _start_args(task, cwd, trusted_host=self.trusted_host, context=context)
-        return await self._run(args, output_schema, parse_thread=True, context=context)
+        return await self._run(args, output_schema, cwd=cwd, parse_thread=True, context=context)
 
     async def resume(
-        self, session_id: str, prompt: str, *, output_schema: Path | None = None,
+        self, session_id: str, prompt: str, *, cwd: Path, output_schema: Path | None = None,
         context: CodingExecutionContext | None = None,
     ) -> CodingExecutionResult:
         if not self.trusted_host:
@@ -151,19 +157,17 @@ class CodexAgent:
                 "Codex trusted-host full-access execution requires "
                 "FLOWTOOL_TRUSTED_HOST_EXECUTION=true"
             )
-        if context is None or context.cwd is None:
-            raise ValueError("resume requires the current Flow repository context")
         # CLI 0.153.4 accepts config overrides on resume, but not start's -C/-s flags.
         # Override the saved broker/environment for every process, including recovered sessions.
         args = [
             CODEX_BIN, "exec", "resume", session_id, prompt,
             "--json", "--skip-git-repo-check",
-            "-c", f"cwd={json.dumps(str(context.cwd))}",
+            "-c", f"cwd={json.dumps(str(cwd))}",
             "-c", 'sandbox_mode="danger-full-access"',
-            "-c", 'mcp_servers.flow={url="http://127.0.0.1", enabled=false}',
+            *_mcp_args(context),
             "-c", 'shell_environment_policy.inherit="all"',
         ]
-        return await self._run(args, output_schema, parse_thread=False,
+        return await self._run(args, output_schema, cwd=cwd, parse_thread=False,
                                session_id=session_id, context=context)
 
     async def _run(
@@ -171,6 +175,7 @@ class CodexAgent:
         args: list[str],
         output_schema: Path | None,
         *,
+        cwd: Path,
         parse_thread: bool,
         session_id: str | None = None,
         context: CodingExecutionContext | None = None,
@@ -188,7 +193,7 @@ class CodexAgent:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=_codex_environment(context=context),
-            cwd=context.cwd if context is not None else None,
+            cwd=cwd,
             start_new_session=True,
         )
         try:
