@@ -245,6 +245,19 @@ class JobCoordinator:
             )) from error
 
     async def prepare(self, job: Job) -> ExecutionTask | JobState:
+        """Build a task from a persisted job and its current workflow state.
+
+        Remote dispatch callers should use ``prepare_for_assignment`` after claiming
+        the job; that boundary also handles read retries, signing, and final fences.
+        This method may create INITIAL intent or freeze REVISION/ARCHIVE inputs.
+        GitHub reads run outside transactions, with state rechecked before freezing.
+
+        Return an execution task when ready, DONE when the work is retired, FAILED
+        when prerequisites fail, or QUEUED when revision assignment checks change.
+        PreparationReadFailure leaves retry scheduling to the assignment boundary;
+        invalid internal state raises ValueError. Failure handling may itself raise
+        ResultPending while durable failure effects await recovery.
+        """
         flow = self.store.get_flow(job.flow_id)
         if flow is None:
             return JobState.FAILED
