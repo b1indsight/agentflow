@@ -24,3 +24,15 @@ def connected_worker(worker_id: str, protocol_version: int, connection_epoch: st
     return WorkerRecord(worker_id=worker_id, protocol_version=protocol_version,
                         connection_epoch=connection_epoch, status=WorkerStatus.ONLINE,
                         first_connected_at=now, last_connected_at=now, last_seen_at=now)
+
+
+
+def make_results(store, coordinator):
+    """Exercise real result locking and recovery around an in-memory commit."""
+    from unittest.mock import Mock
+
+    from app.control.results import ResultApplication
+
+    results = ResultApplication(store, Mock(), Mock(), Mock())
+    results._apply = coordinator.apply_result
+    return results

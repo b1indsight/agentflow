@@ -63,11 +63,14 @@ Review:   settle → READY → PROCESSING → COMPLETED / WAITING
           新反馈进入后续批次；终态取消活动批次
 ```
 
-`ControlService` 在显式事务中负责触发、取消、合并和 retry；`JobCoordinator` 把 INITIAL、REVISION、ARCHIVE
+`ControlService` 在显式事务中负责触发、取消和 retry，并由 `lifecycle` 提交合并事实；
+`lifecycle` 也拥有创建 PR 的身份核验、绑定及 close/reopen。`JobCoordinator` 把 INITIAL、REVISION、ARCHIVE
 持久 job 构造成版本化 task，并在创建 revision 前直接处理需要 Judge 判断的反馈批次，
 并按 job ID 调用 `ResultApplication`，由后者读取并校验已持久接收的 result，
 冻结一次结果的领域变更和 GitHub 操作，
-由 `ResultEffects` 查询/执行远端操作并保存回执，最后一起提交本地状态、运行记录和结果确认。
+由 `ResultEffects` 查询/执行远端操作并保存回执，最后一起提交本地状态和结果确认。
+`ResultApplication` 同时拥有逐 job 锁、有界分页和固定并发恢复；Runtime 调度其恢复方法，
+Gateway 持久接收后经 coordinator 调用同一个结果入口，核验提交完成后才发送 ACK。
 网络请求不占用数据库事务；plugin hook 在提交后调用，不具备持久化投递保证。worker 不能直接更新这些状态。
 `JobCoordinator.prepare_for_assignment` 完成任务构造、push capability 签发和 I/O 后业务复查，
 直接返回 wire `Assignment` 或 QUEUED/DONE/FAILED。读取故障使用持久重试预算，签发故障直接失败。
@@ -243,7 +246,9 @@ triage 是 worker 请求之前的批次判断，由 control 的 review sweep 顺
 REVISE 在工作流事务中创建 revision job 并关联批次；ANSWER/IGNORE/WAIT 直接处理批次。
 没有独立 job、assignment token 或本地任务恢复；中断后重新读取未完成批次。有效性检查与原子
 关联避免迟到决定或重复下发，过程不更改 worker 状态或 Flow binding。答案已发送但回执不明时，
-只查询批次 marker，不重复 POST。
+只查询批次 marker，不重复 POST。`ReviewStore` 拥有上下文失效、答案发送授权和确定拒绝后的复位；
+coordinator 不直接更新业务表。批次答案与结果评论保留各自的事务授权和 marker 恢复，
+共享 `GitHubAdapterError.definitely_rejected` 的拒绝判定；线程回复与普通结果评论共用一个执行分支。
 
 control 的 `BubJudge` 启动独立 `judge_runner` 子进程，显式配置 bub 0.4.1 `ModelRunner.completion_response`，
 不创建 framework、加载插件、读写 tape 或执行工具。每批次独立请求与会话 ID；凭据仅通过允许的

@@ -12,6 +12,7 @@ from app.contracts.protocol import (
     Succeeded,
     terminal_digest,
 )
+from app.control.gateway import WorkerGateway
 from app.control.service import ControlService
 from app.domain.models import FlowState, JobKind, JobState
 from app.persistence.stop_store import StopStore
@@ -170,7 +171,7 @@ async def test_delivery_change_after_receipt_freeze_blocks_commit(store, monkeyp
 @pytest.mark.parametrize("journal", ["missing", "started-without-executor"])
 async def test_merged_coding_process_without_exit_proof_cannot_unlock_archive(store, journal):
     from app.contracts.protocol import RecoveryDescriptor
-    from app.control.gateway import ProtocolViolation, WorkerGateway
+    from app.control.gateway import ProtocolViolation
 
     old, _ = accepted_coding(store, receive=False)
     flow = store.get_flow(old.flow_id)

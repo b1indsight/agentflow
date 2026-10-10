@@ -6,7 +6,7 @@ import asyncio
 
 from loguru import logger
 
-from app.control.lifecycle import pause_delivery, prove_reopen, resume_delivery
+from app.control.lifecycle import pause_delivery, prove_reopen, record_merge, resume_delivery
 from app.control.service import ControlService
 from app.domain.github_models import GitHubAdapterError, GitHubErrorKind, PullRequestMerge
 from app.domain.github_retry import retry_delay
@@ -104,7 +104,7 @@ class Reconciler:
                         "number": remote.number, "merged": True, "merged_at": remote.merged_at,
                         "merge_commit_sha": remote.merge_commit_sha,
                     })
-                    merged = self.service.record_merge(tx, fresh, current, merge)
+                    merged = record_merge(tx, fresh, current, merge)
                 elif fresh.state is FlowState.ACTIVE:
                     if remote.state == "closed":
                         pause_delivery(tx, current)

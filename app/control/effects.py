@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 from uuid import uuid4
 
-from app.contracts.protocol import FlowToolErrorKind
 from app.contracts.result_models import (
     CommentEffect,
     EffectReceipt,
@@ -20,8 +19,13 @@ from app.contracts.result_models import (
     ThreadReplyEffect,
 )
 from app.control.archive import verify_archive
+from app.control.lifecycle import (
+    DeliveryConflict,
+    adopt_created_pull_request,
+    validate_created_pull_request,
+    validate_open_pull_request,
+)
 from app.control.thread_effects import has_pending_thread_feedback, resolve_thread, revision_current
-from app.control.tools import FlowToolRejected, FlowToolService
 from app.domain.github_models import GitHubAdapterError, GitHubErrorKind
 from app.domain.github_retry import retry_delay
 from app.domain.models import TERMINAL_STATES, DeliveryState, FlowState
@@ -103,16 +107,9 @@ class ResultEffects:
                     delay=self._delay(record, cause),
                 )
                 raise
-            except (GitHubAdapterError, FlowToolRejected) as exc:
+            except (GitHubAdapterError, DeliveryConflict) as exc:
                 # An error while querying an earlier uncertain write cannot prove it was unsent.
-                definite_rejection = (
-                    isinstance(exc, GitHubAdapterError)
-                    and (exc.definitely_unsent or (
-                        exc.status_code is not None
-                        and 400 <= exc.status_code < 500
-                        and exc.status_code not in {408}
-                    ))
-                )
+                definite_rejection = isinstance(exc, GitHubAdapterError) and exc.definitely_rejected
                 ambiguous = isinstance(exc, GitHubAdapterError) and (
                     uncertain or (record.dispatched_at is not None and not definite_rejection)
                 )
@@ -166,23 +163,20 @@ class ResultEffects:
                 except ValueError as error:
                     raise ResultPending(str(error)) from error
             if delivery is not None and delivery.supersedes(job.kind):
-                raise FlowToolRejected(FlowToolErrorKind.CONFLICT, "PR closed or merged before GitHub dispatch")
+                raise DeliveryConflict("PR closed or merged before GitHub dispatch")
             if plan.batch_id is not None:
                 batch = tx.reviews.for_job(job)
                 delivery = tx.get_delivery(flow.id)
                 if (batch.id != plan.batch_id
                         or batch.state not in {BatchState.READY, BatchState.PROCESSING}
                         or delivery is None or delivery.state is not DeliveryState.OPEN):
-                    raise FlowToolRejected(FlowToolErrorKind.CONFLICT,
-                                           "review batch or PR is no longer active")
+                    raise DeliveryConflict("review batch or PR is no longer active")
                 if plan.delivery is not None and delivery != plan.delivery:
-                    raise FlowToolRejected(FlowToolErrorKind.CONFLICT,
-                                           "delivery changed before GitHub dispatch")
+                    raise DeliveryConflict("delivery changed before GitHub dispatch")
                 if isinstance(record.payload, ResolveEffect) and has_pending_thread_feedback(
                     tx, plan, record.payload,
                 ):
-                    raise FlowToolRejected(FlowToolErrorKind.CONFLICT,
-                                           "new feedback arrived before resolve dispatch")
+                    raise DeliveryConflict("new feedback arrived before resolve dispatch")
                 if (plan.revision is not None
                         and isinstance(record.payload, (LabelEffect, ReviewersEffect))
                         and _pending_feedback(tx, plan)):
@@ -216,35 +210,14 @@ class ResultEffects:
                     or found.head_branch != effect.branch or found.base_branch != effect.base_branch):
                 raise ResultPending("retired PR creation awaits its remote identity")
             if cancelled_opening:
-                from app.control.service import ControlService
-                from app.domain.github_models import PullRequestMerge
-
                 remote = await self.github.get_pull_request(installation, repo, found.number)
-                if (remote.repo != repo or remote.number != found.number or remote.head_repository != repo
-                        or remote.head_branch != effect.branch or remote.base_branch != effect.base_branch
-                        or remote.head_sha != effect.head_sha):
-                    raise ResultPending("cancelled PR identity changed during recovery")
-                with self.store.transaction() as tx:
-                    fresh = tx.lock_workflow(plan.flow_id)
-                    current = tx.get_delivery(plan.flow_id)
-                    if (fresh is None or fresh.state is not FlowState.CANCELLED
-                            or fresh.current_attempt_id != plan.attempt_id or current is None
-                            or plan.delivery is None or current.version != plan.delivery.version
-                            or current.state is not DeliveryState.OPENING or current.pr_number is not None
-                            or current.branch != effect.branch or current.head_sha != effect.head_sha):
-                        raise ResultPending("cancelled delivery changed during recovery")
-                    current.pr_number = remote.number
-                    current.url = f"https://github.com/{repo}/pull/{remote.number}"
-                    if remote.merged:
-                        assert remote.merged_at is not None and remote.merge_commit_sha is not None
-                        ControlService.record_merge(tx, fresh, current, PullRequestMerge(
-                            number=remote.number, merged=True, merged_at=remote.merged_at,
-                            merge_commit_sha=remote.merge_commit_sha,
-                        ))
-                    else:
-                        current.state = DeliveryState.CLOSED if remote.state == 'closed' else DeliveryState.OPEN
-                        current.version += 1
-                        tx.update_delivery(current)
+                if plan.delivery is None:
+                    raise ResultPending("cancelled PR intent is missing")
+                try:
+                    validate_created_pull_request(remote, repo, found.number, plan.delivery)
+                except DeliveryConflict as error:
+                    raise ResultPending(str(error)) from error
+                adopt_created_pull_request(self.store, plan.attempt_id, plan.delivery, remote)
                 found = remote
             return EffectReceipt(pull_request=found)
         if isinstance(effect, ResolveEffect):
@@ -275,34 +248,28 @@ class ResultEffects:
         installation, repo = effect.installation_id, effect.repo
         if isinstance(effect, (CommentEffect, ThreadReplyEffect)):
             marker = self._comment_marker(plan, effect)
+
             if isinstance(effect, ThreadReplyEffect):
-                found = await self.github.find_review_reply(
-                    installation, repo, effect.number, effect.thread_id, marker,
-                )
+                comment_id = await self.github.find_review_reply(
+                    installation, repo, effect.number, effect.thread_id, marker)
             else:
-                found = await self.github.find_comment(installation, repo, effect.number, marker)
-            if found is not None:
-                return EffectReceipt(comment_id=found)
-            if record.dispatched_at is not None:
-                raise ResultPending("comment outcome is unknown; waiting for its remote marker")
-            if isinstance(effect, ThreadReplyEffect):
-                if not await revision_current(self.github, plan, effect.number):
+                comment_id = await self.github.find_comment(installation, repo, effect.number, marker)
+            if comment_id is None:
+                # Batch answers follow this same marker-before-retry rule in JobCoordinator._answer.
+                if record.dispatched_at is not None:
+                    raise ResultPending("comment outcome is unknown; waiting for its remote marker")
+                if isinstance(effect, ThreadReplyEffect) and not await revision_current(self.github, plan, effect.number):
                     return EffectReceipt(thread_id=effect.thread_id,
                                          pending_reason="PR 已关闭或 head 已变化，未发送线程说明")
                 self._dispatch(plan, record)
-                reply = await self.github.reply_review_thread(
-                    installation, repo, effect.number, effect.root_comment_id,
-                    f"{effect.body}\n\n{marker}",
-                )
-                return EffectReceipt(comment_id=reply, thread_id=effect.thread_id)
-            self._dispatch(plan, record)
-            comment_id = await self.github.comment(
-                installation,
-                repo,
-                effect.number,
-                f"{effect.body}\n\n{marker}",
-            )
-            return EffectReceipt(comment_id=comment_id)
+                body = f"{effect.body}\n\n{marker}"
+                if isinstance(effect, ThreadReplyEffect):
+                    comment_id = await self.github.reply_review_thread(
+                        installation, repo, effect.number, effect.root_comment_id, body)
+                else:
+                    comment_id = await self.github.comment(installation, repo, effect.number, body)
+            return EffectReceipt(comment_id=comment_id,
+                                 thread_id=effect.thread_id if isinstance(effect, ThreadReplyEffect) else None)
         if isinstance(effect, PullRequestEffect):
             pull_request = await self.github.find_pull_request_by_head(
                 installation,
@@ -336,37 +303,14 @@ class ResultEffects:
                 # PR creation may have succeeded before INITIAL's final local commit.
                 # Bind its verified identity and retire intent instead of re-opening it.
                 remote = await self.github.get_pull_request(installation, repo, pull_request.number)
-                if (remote.repo != repo or remote.number != pull_request.number or remote.head_repository != repo
-                        or remote.head_branch != effect.branch or remote.base_branch != effect.base_branch
-                        or remote.head_sha != effect.head_sha):
-                    raise FlowToolRejected(FlowToolErrorKind.CONFLICT, "closed INITIAL PR identity changed")
+                if plan.delivery is None:
+                    raise ResultPending("INITIAL PR intent is missing")
+                validate_created_pull_request(remote, repo, pull_request.number, plan.delivery)
                 if remote.state == "closed":
-                    from app.control.lifecycle import pause_delivery
-                    from app.control.service import ControlService
-                    from app.domain.github_models import PullRequestMerge
-
-                    with self.store.transaction() as tx:
-                        fresh = tx.lock_workflow(plan.flow_id)
-                        current_delivery = tx.get_delivery(plan.flow_id)
-                        if (fresh is None or current_delivery is None or plan.delivery is None
-                                or fresh.current_attempt_id != plan.attempt_id
-                                or current_delivery.version != plan.delivery.version
-                                or current_delivery.head_sha != effect.head_sha
-                                or current_delivery.pr_number not in {None, remote.number}):
-                            raise ResultPending("INITIAL delivery changed during closed PR verification")
-                        current_delivery.pr_number = remote.number
-                        current_delivery.url = f"https://github.com/{repo}/pull/{remote.number}"
-                        if remote.merged:
-                            assert remote.merged_at is not None and remote.merge_commit_sha is not None
-                            ControlService.record_merge(tx, fresh, current_delivery, PullRequestMerge(
-                                number=remote.number, merged=True, merged_at=remote.merged_at,
-                                merge_commit_sha=remote.merge_commit_sha,
-                            ))
-                        else:
-                            pause_delivery(tx, current_delivery)
+                    adopt_created_pull_request(self.store, plan.attempt_id, plan.delivery, remote)
                     return EffectReceipt(pull_request=remote)
                 pull_request = remote
-            FlowToolService.validate_pull_request(
+            validate_open_pull_request(
                 pull_request,
                 effect.branch,
                 effect.base_branch,
@@ -422,7 +366,7 @@ class ResultEffects:
     def _delay(
         self,
         record: EffectRecord,
-        error: GitHubAdapterError | FlowToolRejected | None = None,
+        error: GitHubAdapterError | DeliveryConflict | None = None,
     ) -> float:
         return retry_delay(record.attempts, self.store.now(),
                            error if isinstance(error, GitHubAdapterError) else None)

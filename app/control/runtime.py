@@ -54,8 +54,6 @@ class ControlRuntime:
             heartbeat_interval=self.settings.worker_heartbeat_interval,
             heartbeat_timeout=self.settings.worker_heartbeat_timeout,
             poll_interval=self.settings.worker_poll_interval,
-            recovery_concurrency=self.settings.result_recovery_concurrency,
-            recovery_batch_size=self.settings.result_recovery_batch_size,
             metrics=self.metrics,
             execution_control=StopStore(self.store),
         )
@@ -138,7 +136,11 @@ class ControlRuntime:
         """Recover immediately at startup; network waits never hold the local scheduling loops."""
         while True:
             try:
-                await self.gateway.recover_pending_results()
+                await self.coordinator.results.recover_pending_results(
+                    concurrency=self.settings.result_recovery_concurrency,
+                    batch_size=self.settings.result_recovery_batch_size,
+                )
+                self.gateway.notify_jobs()
             except Exception:  # noqa: BLE001 -- a failed inbox query is retried next sweep
                 logger.exception("result recovery sweep failed; retrying next sweep")
             await asyncio.sleep(self.settings.worker_sweep_interval)

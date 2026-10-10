@@ -633,6 +633,36 @@ class ReviewStore:
                                (Jsonb(context.model_dump(mode="json")), batch.id))
         return context
 
+    def invalidate_context(self, batch: ReviewBatch, context: ReviewContext) -> None:
+        """Discard only this snapshot, retaining uncertain answer evidence under the workflow lock."""
+        with self.store.connection() as connection:
+            connection.execute(
+                "UPDATE review_batches SET context=NULL,decision=NULL WHERE id=%s"
+                " AND context=%s AND NOT answer_dispatched",
+                (batch.id, Jsonb(context.model_dump(mode="json"))),
+            )
+
+    def authorize_answer(self, batch: ReviewBatch, context_digest: str) -> bool:
+        """Fence the frozen context and authorize one POST under the workflow lock."""
+        fresh = self.get_batch(batch.id)
+        if (not self.current(batch) or fresh.answer_dispatched or fresh.context is None
+                or fresh.context.digest != context_digest):
+            return False
+        with self.store.connection() as connection:
+            connection.execute("UPDATE review_batches SET answer_dispatched=TRUE WHERE id=%s", (batch.id,))
+        return True
+
+    def reject_answer(self, batch: ReviewBatch, context_digest: str) -> None:
+        """An old rejected POST must not clear a replacement context's send marker."""
+        with self.store.transaction() as tx:
+            tx.lock_workflow(batch.flow_id)
+            fresh = tx.reviews.get_batch(batch.id)
+            if (fresh.state is not BatchState.READY or fresh.job_id is not None
+                    or fresh.context is None or fresh.context.digest != context_digest):
+                return
+            with tx.connection() as connection:
+                connection.execute("UPDATE review_batches SET answer_dispatched=FALSE WHERE id=%s", (batch.id,))
+
     def record_decision(self, batch: ReviewBatch, decision: JudgeDecision) -> None:
         """Persist the interpretation alongside its immutable batch input."""
         batch = self.get_batch(batch.id)

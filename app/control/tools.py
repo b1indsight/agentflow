@@ -6,7 +6,7 @@ import asyncio
 
 from app.contracts.protocol import FlowToolErrorKind, FlowToolRequest, FlowToolResponse
 from app.domain.delivery_models import DeliveryReceipt, OpenedDelivery, PreparedDelivery
-from app.domain.github_models import GitHubAdapterError, GitHubErrorKind, PullRequestSnapshot
+from app.domain.github_models import GitHubAdapterError, GitHubErrorKind
 from app.domain.models import TERMINAL_STATES, DeliveryState, FlowDelivery
 from app.domain.ports import GitHubClient
 from app.persistence.store import Store
@@ -190,25 +190,6 @@ class FlowToolService:
                 )
             tx.complete_tool_call(request.call_id, prepared_response)
         return FlowToolResponse(call_id=request.call_id, result=prepared_response)
-
-    @staticmethod
-    def validate_pull_request(
-        pull_request: PullRequestSnapshot, branch: str, base: str, head_sha: str
-    ) -> None:
-        if pull_request.state.casefold() != "open":
-            raise FlowToolRejected(
-                FlowToolErrorKind.CONFLICT,
-                f"pull request is {pull_request.state}, expected open",
-            )
-        if (
-            pull_request.head_branch != branch
-            or pull_request.base_branch != base
-            or pull_request.head_sha != head_sha
-        ):
-            raise FlowToolRejected(
-                FlowToolErrorKind.CONFLICT,
-                "pull request head, base, or SHA conflicts with Flow delivery",
-            )
 
     @staticmethod
     def _delivery_response(delivery: FlowDelivery) -> OpenedDelivery:

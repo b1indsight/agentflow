@@ -180,3 +180,11 @@ class GitHubAdapterError(RuntimeError):
         if request_id:
             details.append(f"request_id={request_id}")
         super().__init__("; ".join(details))
+
+
+    @property
+    def definitely_rejected(self) -> bool:
+        """Evidence for this request only; an earlier uncertain write still needs a receipt."""
+        return self.definitely_unsent or (
+            self.status_code is not None and 400 <= self.status_code < 500 and self.status_code != 408
+        )

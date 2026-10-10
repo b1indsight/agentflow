@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Literal, Protocol
 
+from loguru import logger
 from pluggy import PluginManager
 
 from app.contracts.protocol import (
@@ -72,8 +74,49 @@ class ResultApplication:
         self.effects = ResultEffects(store, github)
         self.settings = settings
         self.plugins = plugins
+        self._result_locks: dict[int, asyncio.Lock] = {}
+        self._recovery_lock = asyncio.Lock()
+        self._recovery_cursor = self._recovery_ceiling = 0
 
     async def apply(self, job_id: int) -> JobState:
+        """Serialize live and recovered applications of the same persisted result."""
+        async with self._result_locks.setdefault(job_id, asyncio.Lock()):
+            job = self.store.get_job(job_id)
+            if job is not None and job.result_applied_at is not None:
+                return job.state
+            return await self._apply(job_id)
+
+    async def recover_pending_results(self, *, concurrency: int = 4, batch_size: int = 64) -> None:
+        """Advance bounded pages past uncertain results, with a fixed ceiling and worker pool."""
+        async with self._recovery_lock:
+            if not self._recovery_ceiling:
+                self._recovery_ceiling = self.store.unapplied_result_ceiling()
+            jobs = self.store.list_unapplied_results(
+                after_id=self._recovery_cursor, through_id=self._recovery_ceiling, limit=batch_size,
+            )
+            if not jobs and self._recovery_cursor:
+                self._recovery_ceiling = self.store.unapplied_result_ceiling()
+                jobs = self.store.list_unapplied_results(through_id=self._recovery_ceiling, limit=batch_size)
+            self._recovery_cursor = jobs[-1].id if jobs else 0
+            if len(jobs) < batch_size or self._recovery_cursor >= self._recovery_ceiling:
+                self._recovery_cursor = self._recovery_ceiling = 0
+            pending = iter(jobs)
+
+            async def drain() -> None:
+                # next() does not yield: each job belongs to exactly one pool task.
+                for job in pending:
+                    try:
+                        await self.apply(job.id)
+                    except ResultPending:
+                        continue
+                    except Exception:  # noqa: BLE001 -- one corrupt result must not stop the recovery pool
+                        logger.exception("persisted result recovery failed for job {}", job.id)
+
+            async with asyncio.TaskGroup() as group:
+                for _ in range(min(concurrency, len(jobs))):
+                    group.create_task(drain())
+
+    async def _apply(self, job_id: int) -> JobState:
         job = self.store.get_job(job_id)
         if job is None:
             raise ValueError(f"job {job_id} disappeared")

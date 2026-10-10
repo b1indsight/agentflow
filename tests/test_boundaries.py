@@ -75,8 +75,22 @@ def test_initial_delivery_validation_keeps_result_orchestration_out_of_lifecycle
     # results -> effects -> lifecycle -> results cycle; ordinary imports hid it.
     assert not contains_forbidden(
         imported_modules(Path("app/control/lifecycle.py")),
-        {"app.control.results", "app.control.effects"},
+        {"app.control.results", "app.control.effects", "app.control.service", "app.control.tools"},
     )
     assert not contains_forbidden(
         imported_modules(Path("app/control/initial.py")), {"app.control"},
     )
+
+
+def test_effects_do_not_depend_on_worker_tool_service() -> None:
+    # PR lifecycle conflicts used to import the MCP service solely for validation
+    # and error types, coupling recovery to a different public API.
+    assert not contains_forbidden(imported_modules(Path("app/control/effects.py")), {"app.control.tools"})
+
+
+def test_coordinator_does_not_update_business_tables_directly() -> None:
+    # Batch context/answer SQL belongs to ReviewStore, so future schema changes
+    # must not require editing both the repository and its business caller.
+    tree = ast.parse(Path("app/control/coordinator.py").read_text())
+    assert not [node.lineno for node in ast.walk(tree) if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute) and node.func.attr == "connection"]

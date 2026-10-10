@@ -8,6 +8,10 @@
 
 ## Unreleased
 
+- Control 的批次 SQL 收回 ReviewStore；评论统一明确拒绝的判定，保留各自的事务授权。
+  PR 身份核验及生命周期提交集中到 lifecycle，实时结果和后台恢复共用已有 ResultApplication
+  及逐 job 互斥。保留现有数据库结构、消息协议和响应丢失后的只读恢复语义。
+
 - RevisionTaskResult 直接拥有 batch_id 和 feedback_refs，删除未独立使用的 ReviewResult
   父类；字段约束、JSON wire、schema 和协议 v13 保持不变。
 
