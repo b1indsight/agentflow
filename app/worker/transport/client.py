@@ -223,14 +223,14 @@ class WorkerClient:
         await connection.send(result.model_dump_json())
 
     async def _run_connection(self, connection: Connection) -> None:
+        """Register, supervise assignment traffic and heartbeats, and join both on exit."""
         await connection.send(
             Register(
                 worker_id=self.worker_id,
                 recovery=self._recovery_descriptor(),
             ).model_dump_json()
         )
-        heartbeat_interval = 15.0
-        first: ServerMessage | None = await self._receive_message(connection)
+        first = await self._receive_message(connection)
         self._connection_epoch = getattr(first, "connection_epoch", None)
         if isinstance(first, ProtocolError):
             raise WorkerProtocolError(
@@ -247,33 +247,58 @@ class WorkerClient:
             self.session.validate_recovery(first.job_id, first.assignment_token)
             self._acknowledge(first)
             first = await self._receive_message(connection)
-        elif isinstance(first, ResumeAssignment):
+        if not isinstance(first, (Registered, ResumeAssignment, ReplayResult)):
+            raise WorkerProtocolError(
+                f"expected registration or recovery, received {type(first).__name__}"
+            )
+        if isinstance(first, (ResumeAssignment, ReplayResult)):
             self.session.validate_recovery(first.job_id, first.assignment_token)
+        self._connection_epoch = first.connection_epoch
+        self.connected = True
+        logger.bind(event="worker_connected", reason_code="ok", worker_id=self.worker_id).info("")
+
+        async def heartbeat() -> None:
+            while True:
+                await asyncio.sleep(first.heartbeat_interval)
+                assignment = self.session.assignment
+                execution = self._execution
+                # Idle connections and terminal results have no execution lease to renew.
+                if assignment is None or execution is None or execution.done():
+                    continue
+                await connection.send(Heartbeat(
+                    job_id=assignment.job_id,
+                    assignment_token=assignment.assignment_token,
+                    connection_epoch=assignment.connection_epoch,
+                ).model_dump_json())
+
+        heartbeat_task = asyncio.create_task(heartbeat())
+        assignments = asyncio.create_task(self._serve_assignments(connection, first))
+        try:
+            completed, _ = await asyncio.wait(
+                {heartbeat_task, assignments}, return_when=asyncio.FIRST_COMPLETED,
+            )
+            if heartbeat_task in completed:
+                heartbeat_task.result()
+                raise WorkerProtocolError("heartbeat task stopped unexpectedly")
+            assignments.result()
+        finally:
+            heartbeat_task.cancel()
+            assignments.cancel()
+            await asyncio.gather(heartbeat_task, assignments, return_exceptions=True)
+
+    async def _serve_assignments(
+        self, connection: Connection, first: Registered | ResumeAssignment | ReplayResult,
+    ) -> None:
+        """Resume prior work, then process assignments on the registered connection."""
+        if isinstance(first, ResumeAssignment):
             had_execution = self.session.assignment is not None and self._execution is not None
             assignment = self.session.resume(first.connection_epoch, executor_active=had_execution)
             if not had_execution:
                 # Only archive cleanup can resume without the original process.
                 self._execution = asyncio.create_task(self.executor.execute(assignment.task, tool_caller=self))
-            heartbeat_interval = first.heartbeat_interval
-            self.connected = True
-            await self._drive_assignment(connection, first.heartbeat_interval)
-            first = None
+            await self._drive_assignment(connection)
         elif isinstance(first, ReplayResult):
-            self.session.validate_recovery(first.job_id, first.assignment_token)
-            heartbeat_interval = first.heartbeat_interval
-            self.connected = True
             await self._replay_result(connection, first)
-            first = None
-        if first is not None and not isinstance(first, Registered):
-            raise WorkerProtocolError(
-                f"expected Registered, received {type(first).__name__}"
-            )
-        self.connected = True
-        logger.bind(event="worker_connected", reason_code="ok", worker_id=self.worker_id).info("")
-
-        if isinstance(first, Registered):
-            self._connection_epoch = first.connection_epoch
-            heartbeat_interval = first.heartbeat_interval
         while not self._stop.is_set():
             message = await self._receive_message(connection)
             if isinstance(message, ProtocolError):
@@ -287,13 +312,12 @@ class WorkerClient:
                 raise WorkerProtocolError(
                     f"expected Assignment, received {type(message).__name__}"
                 )
-            await self._execute_assignment(connection, message, heartbeat_interval)
+            await self._execute_assignment(connection, message)
 
     async def _execute_assignment(
         self,
         connection: Connection,
         assignment: Assignment,
-        heartbeat_interval: float,
     ) -> None:
         if self.session.assignment is not None or self._execution is not None:
             raise WorkerProtocolError("received a second assignment while busy")
@@ -312,12 +336,11 @@ class WorkerClient:
             self._execution = asyncio.create_task(
                 self.executor.execute(assignment.task, assignment.secret, tool_caller=self)
             )
-        await self._drive_assignment(connection, heartbeat_interval)
+        await self._drive_assignment(connection)
 
     async def _drive_assignment(
         self,
         connection: Connection,
-        heartbeat_interval: float,
     ) -> None:
         assignment = self.session.assignment
         execution = self._execution
@@ -326,31 +349,22 @@ class WorkerClient:
         record = self.session.load()
         if execution is None and (record is None or record.terminal is None):
             raise WorkerProtocolError("active assignment has no executor or terminal result")
-        heartbeat = asyncio.create_task(
-            self._heartbeat(connection, assignment, heartbeat_interval)
-        )
         incoming = asyncio.create_task(self._receive_message(connection))
+        next_tool: asyncio.Task[_PendingTool] | None = None
         try:
             if execution is not None:
                 while not execution.done():
                     next_tool = asyncio.create_task(self._tool_requests.get())
                     completed, _ = await asyncio.wait(
-                        {execution, heartbeat, next_tool, incoming},
+                        {execution, next_tool, incoming},
                         return_when=asyncio.FIRST_COMPLETED,
                     )
-                    if heartbeat in completed:
-                        next_tool.cancel()
-                        await asyncio.gather(next_tool, return_exceptions=True)
-                        heartbeat.result()
-                        raise WorkerProtocolError("heartbeat task stopped unexpectedly")
                     if incoming in completed:
                         next_tool.cancel()
                         await asyncio.gather(next_tool, return_exceptions=True)
                         message = incoming.result()
                         if not isinstance(message, StopExecution):
                             raise WorkerProtocolError("unexpected message during execution")
-                        heartbeat.cancel()
-                        await asyncio.gather(heartbeat, return_exceptions=True)
                         await self._handle_stop(connection, message)
                         return
                     if next_tool in completed:
@@ -362,8 +376,6 @@ class WorkerClient:
                             await connection.send(request.model_dump_json())
                             response = await incoming
                             if isinstance(response, StopExecution):
-                                heartbeat.cancel()
-                                await asyncio.gather(heartbeat, return_exceptions=True)
                                 pending.future.cancel()
                                 await self._handle_stop(connection, response)
                                 return
@@ -393,8 +405,6 @@ class WorkerClient:
             else:
                 terminal = self.session.replay(assignment.connection_epoch)
 
-            heartbeat.cancel()
-            await asyncio.gather(heartbeat, return_exceptions=True)
             await connection.send(terminal.model_dump_json())
             accepted = await incoming
             if isinstance(accepted, StopExecution):
@@ -410,8 +420,10 @@ class WorkerClient:
             self._acknowledge(accepted)
         finally:
             incoming.cancel()
-            heartbeat.cancel()
-            await asyncio.gather(incoming, heartbeat, return_exceptions=True)
+            if next_tool is not None:
+                next_tool.cancel()
+                await asyncio.gather(next_tool, return_exceptions=True)
+            await asyncio.gather(incoming, return_exceptions=True)
 
     async def _handle_stop(self, connection: Connection, request: StopExecution) -> None:
         record = self.session.load()
@@ -467,22 +479,6 @@ class WorkerClient:
         terminal = self.session.complete(outcome)
         self._execution = None
         return terminal
-
-    async def _heartbeat(
-        self,
-        connection: Connection,
-        assignment: Assignment,
-        interval: float,
-    ) -> None:
-        while True:
-            await asyncio.sleep(interval)
-            await connection.send(
-                Heartbeat(
-                    job_id=assignment.job_id,
-                    assignment_token=assignment.assignment_token,
-                    connection_epoch=assignment.connection_epoch,
-                ).model_dump_json()
-            )
 
     def stop(self) -> None:
         self.connected = False
