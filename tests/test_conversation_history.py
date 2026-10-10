@@ -102,6 +102,23 @@ def test_history_prefers_active_file_over_archived_copy(tmp_path: Path) -> None:
     assert [item.content.text for item in page.items] == ["active"]
 
 
+@pytest.mark.parametrize("inside_record", [False, True])
+def test_history_rejects_cursor_before_metadata_or_inside_record(tmp_path: Path, inside_record: bool) -> None:
+    path = rollout(tmp_path, [message("user", "first")])
+    reader = CodexHistory(tmp_path)
+    page = reader.query(HistoryQuery(session_id=SESSION))
+    resumed = HistoryQuery(session_id=SESSION, cursor=page.next_cursor)
+    _, identity = resumed.position
+    assert identity is not None
+    with path.open("rb") as file:
+        metadata_size = len(file.readline())
+    # A well-formed cursor can still point into metadata or the middle of a JSONL record.
+    offset = metadata_size + 1 if inside_record else 0
+    cursor = resumed.cursor_at(offset, identity)
+    with pytest.raises(ConversationFailure, match="cursor_invalid"):
+        reader.query(HistoryQuery(session_id=SESSION, cursor=cursor))
+
+
 def test_history_malformed_limits_and_secret_filter(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "private-key-value")
     path = rollout(tmp_path, [message("assistant", "private-key-value Bearer abc123 ghp_testsecret")])
