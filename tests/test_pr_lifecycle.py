@@ -7,7 +7,7 @@ import pytest
 from app.contracts.protocol import PROTOCOL_VERSION, InitialTaskResult, Succeeded, terminal_digest
 from app.contracts.result_models import ResultPending
 from app.control.gateway import ProtocolViolation, WorkerGateway
-from app.control.lifecycle import pause_delivery
+from app.control.lifecycle import adopt_created_pull_request, pause_delivery
 from app.control.reconcile import Reconciler
 from app.control.router import EventRouter
 from app.control.service import ControlService
@@ -372,6 +372,24 @@ async def test_initial_close_before_final_commit_keeps_verified_identity_and_can
     await check(store, flow, github)
     assert store.get_delivery(flow.id).state is DeliveryState.OPEN
     assert store.get_current_attempt(flow).codex_session_id == "session-1"
+
+
+def test_closed_creation_observation_cannot_bind_a_newer_intent(store, review_flow):
+    # A slow PR read may finish after another transaction changed the delivery.
+    # The old receipt must not bind its PR number or pause the replacement intent.
+    flow, _ = review_flow
+    delivery = store.get_delivery(flow.id)
+    delivery.state, delivery.pr_number = DeliveryState.OPENING, None
+    delivery.head_sha, delivery.base_branch = "abc", "main"
+    store.update_delivery(delivery)
+    expected = store.get_delivery(flow.id)
+    remote = GitHub(flow, head_sha="abc").remote
+    delivery.version += 1
+    store.update_delivery(delivery)
+    with pytest.raises(ResultPending):
+        adopt_created_pull_request(store, flow.current_attempt_id, expected, remote)
+    current = store.get_delivery(flow.id)
+    assert current.state is DeliveryState.OPENING and current.pr_number is None
 
 
 def test_close_and_queued_retirement_roll_back_together(store, lifecycle_flow, monkeypatch):

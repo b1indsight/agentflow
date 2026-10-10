@@ -26,7 +26,9 @@ from app.control.results import ResultApplication, ResultSettings
 from app.control.review_context import build_review_context
 from app.control.revisions import verify_revision_remote
 from app.control.tools import FlowToolService
+from app.domain.context_models import ReviewContext
 from app.domain.github_models import GitHubAdapterError, GitHubErrorKind
+from app.domain.judge_models import JudgeDecision
 from app.domain.models import (
     TERMINAL_STATES,
     DeliveryState,
@@ -52,7 +54,7 @@ class CoordinatorSettings(ResultSettings, Protocol):
 
 
 class JobCoordinator:
-    """The sole owner of flow state transitions and GitHub side effects."""
+    """Build worker tasks and interpret review decisions, delegating durable result application."""
 
     def __init__(
         self,
@@ -100,21 +102,13 @@ class JobCoordinator:
         elif verdict.verdict is Verdict.REVISE and verdict.confidence < self.settings.confidence_threshold:
             verdict = TriageVerdict(verdict=Verdict.WAIT, confidence=verdict.confidence,
                 reason=f"low-confidence: {verdict.reason}"[:2000], open_points=verdict.open_points)
-        marker = f"<!-- agentflow:batch:{batch.id}:answer -->"
         if verdict.verdict is Verdict.ANSWER:
-            found = await self.github.find_comment(flow.installation_id, flow.repo, context.pr_number, marker)
-            with self.store.transaction() as tx:
-                tx.lock_workflow(flow.id)
-                if not tx.reviews.current(batch):
-                    return
-                if found is not None:
-                    tx.reviews.complete(batch.id, BatchState.COMPLETED, list(batch.feedback), [])
-                    return
-                if tx.reviews.get_batch(batch.id).answer_dispatched:
-                    return  # An uncertain POST is reconciled by marker, never blindly repeated.
+            if await self._answer(flow, batch, context, decision.model_copy(update={"verdict": verdict})):
+                emit_hook(self.plugins, "on_review", flow=flow)
+            return
         # Remote reads can outlive close/merge or a changed PR baseline.
         remote = (await self.github.get_pull_request(flow.installation_id, flow.repo, context.pr_number)
-                  if verdict.verdict in {Verdict.REVISE, Verdict.ANSWER} else None)
+                  if verdict.verdict is Verdict.REVISE else None)
         with self.store.transaction() as tx:
             tx.lock_workflow(flow.id)
             if not tx.reviews.current(batch):
@@ -122,45 +116,64 @@ class JobCoordinator:
             if remote is not None and (context.pull_request is None or remote.state != "open" or remote.merged
                     or remote.head_sha != context.pull_request.head_sha
                     or remote.base_sha != context.pull_request.base_sha):
-                with tx.connection() as connection:
-                    connection.execute("UPDATE review_batches SET context=NULL,decision=NULL WHERE id=%s", (batch.id,))
+                tx.reviews.invalidate_context(batch, context)
                 return
             tx.reviews.record_decision(batch, decision.model_copy(update={"verdict": verdict}))
             if verdict.verdict is Verdict.REVISE:
                 job = tx.enqueue_job(flow.id, JobKind.REVISION,
                     {"batch_id": batch.id, "instruction": verdict.instruction})
                 tx.reviews.advance(batch.id, job)
-            elif verdict.verdict is not Verdict.ANSWER:
+            else:
                 tx.reviews.complete(batch.id,
                     BatchState.COMPLETED if verdict.verdict is Verdict.IGNORE else BatchState.WAITING,
                     list(batch.feedback) if verdict.verdict is Verdict.IGNORE else [],
                     verdict.open_points or ([verdict.reason or "Awaiting more discussion."]
                         if verdict.verdict is Verdict.WAIT else []))
-        if verdict.verdict is Verdict.ANSWER:
+        emit_hook(self.plugins, "on_review", flow=flow)
+
+    async def _answer(
+        self, flow: Flow, batch: ReviewBatch, context: ReviewContext, decision: JudgeDecision,
+    ) -> bool:
+        """Recover a frozen answer, authorizing its POST only after a fresh PR observation."""
+        installation = flow.installation_id
+        assert installation is not None
+        marker = f"<!-- agentflow:batch:{batch.id}:answer -->"
+        authorized = False
+
+        found = await self.github.find_comment(installation, flow.repo, context.pr_number, marker)
+        if found is None:
+            if batch.answer_dispatched:
+                return False
+            # Like result comments, an uncertain POST needs its marker before any retry.
+            remote = await self.github.get_pull_request(installation, flow.repo, context.pr_number)
             with self.store.transaction() as tx:
                 tx.lock_workflow(flow.id)
                 if not tx.reviews.current(batch):
-                    return
-                with tx.connection() as connection:
-                    connection.execute("UPDATE review_batches SET answer_dispatched=TRUE WHERE id=%s", (batch.id,))
+                    return False
+                if (context.pull_request is None or remote.state != "open" or remote.merged
+                        or remote.head_sha != context.pull_request.head_sha
+                        or remote.base_sha != context.pull_request.base_sha):
+                    tx.reviews.invalidate_context(batch, context)
+                else:
+                    tx.reviews.record_decision(batch, decision)
+                    authorized = tx.reviews.authorize_answer(batch, context.digest)
+            if not authorized:
+                return False
             sources = ", ".join(f"[{f.kind.value} {f.github_id}]({feedback_link(flow.repo,
                 context.pr_number, f.kind, f.github_id)})" for f in batch.feedback)
             try:
-                await self.github.comment(flow.installation_id, flow.repo, context.pr_number,
-                    f"{verdict.answer}\n\n来源：{sources}\n\n{marker}")
-            except GitHubAdapterError as exc:
-                # Same definite-rejection boundary as ResultEffects.run; uncertain writes stay marked.
-                if exc.definitely_unsent or (exc.status_code is not None and 400 <= exc.status_code < 500
-                                            and exc.status_code != 408):
-                    with self.store.connection() as connection:
-                        connection.execute("UPDATE review_batches SET answer_dispatched=FALSE WHERE id=%s", (batch.id,))
+                await self.github.comment(installation, flow.repo, context.pr_number,
+                    f"{decision.verdict.answer}\n\n来源：{sources}\n\n{marker}")
+            except GitHubAdapterError as error:
+                if error.definitely_rejected:
+                    self.store.reviews.reject_answer(batch, context.digest)
                 raise
-            with self.store.transaction() as tx:
-                tx.lock_workflow(flow.id)
-                if not tx.reviews.current(batch):
-                    return
-                tx.reviews.complete(batch.id, BatchState.COMPLETED, list(batch.feedback), [])
-        emit_hook(self.plugins, "on_review", flow=flow)
+        with self.store.transaction() as tx:
+            tx.lock_workflow(flow.id)
+            if not tx.reviews.current(batch):
+                return False
+            tx.reviews.complete(batch.id, BatchState.COMPLETED, list(batch.feedback), [])
+        return authorized
 
     async def prepare_for_assignment(
         self, job: Job, worker: str, token: str, epoch: str,

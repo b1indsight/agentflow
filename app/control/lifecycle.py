@@ -1,4 +1,4 @@
-"""Pause delivery intent and verify the original repository before resuming a closed PR."""
+"""Own delivery identity, PR creation adoption, close/reopen and merge transitions."""
 
 import json
 from dataclasses import dataclass
@@ -9,10 +9,19 @@ from app.contracts.protocol import (
     Succeeded,
     parse_worker_message,
 )
+from app.contracts.result_models import ResultPending
 from app.control.initial import initial_delivery_mismatch
 from app.control.revisions import frozen_revision, revision_mismatch, verify_revision_remote
-from app.domain.github_models import PullRequestStatus
-from app.domain.models import DeliveryState, Flow, FlowDelivery, Job
+from app.domain.github_models import PullRequestMerge, PullRequestSnapshot, PullRequestStatus
+from app.domain.models import (
+    TERMINAL_STATES,
+    DeliveryState,
+    Flow,
+    FlowDelivery,
+    FlowState,
+    Job,
+    JobKind,
+)
 from app.domain.ports import GitHubClient
 from app.persistence.store import Store
 
@@ -22,6 +31,65 @@ class ReopenProof:
     head_sha: str
     session_id: str | None = None
     session_generation: int | None = None
+
+
+class DeliveryConflict(RuntimeError):
+    """The observed PR cannot fulfill this delivery intent."""
+
+
+def validate_open_pull_request(
+    remote: PullRequestSnapshot, branch: str, base: str, head_sha: str,
+) -> None:
+    """Require an open PR with the exact prepared branch, base and commit."""
+    if remote.state.casefold() != "open":
+        raise DeliveryConflict(f"pull request is {remote.state}, expected open")
+    if remote.head_branch != branch or remote.base_branch != base or remote.head_sha != head_sha:
+        raise DeliveryConflict("pull request head, base, or SHA conflicts with Flow delivery")
+
+
+def validate_created_pull_request(
+    remote: PullRequestStatus, repo: str, number: int, expected: FlowDelivery,
+) -> None:
+    """Closed/cancelled creation recovery must prove repository ownership too."""
+    if (remote.repo != repo or remote.number != number or remote.head_repository != repo
+            or remote.head_branch != expected.branch or remote.base_branch != expected.base_branch
+            or remote.head_sha != expected.head_sha):
+        raise DeliveryConflict("INITIAL PR identity changed during recovery")
+
+
+def adopt_created_pull_request(
+    store: Store, attempt_id: int | None, expected: FlowDelivery, remote: PullRequestStatus,
+) -> None:
+    """Bind a verified creation receipt and apply its lifecycle under the unchanged intent."""
+    with store.transaction() as tx:
+        flow = tx.lock_workflow(expected.flow_id)
+        current = tx.get_delivery(expected.flow_id)
+        if (flow is None or current is None or flow.current_attempt_id != attempt_id
+                or current.version != expected.version or current.head_sha != expected.head_sha
+                or current.pr_number not in {None, remote.number}):
+            raise ResultPending("INITIAL delivery changed during PR verification")
+        cancelled = flow.state is FlowState.CANCELLED
+        if cancelled and (current.state is not DeliveryState.OPENING or current.pr_number is not None
+                          or current.branch != expected.branch):
+            raise ResultPending("cancelled delivery changed during recovery")
+        if not cancelled and remote.state != "closed":
+            raise ResultPending("active PR creation has not closed")
+        current.pr_number = remote.number
+        current.url = f"https://github.com/{flow.repo}/pull/{remote.number}"
+        if remote.merged:
+            record_merge(tx, flow, current, _merge_observation(remote))
+        elif cancelled:
+            current.state = DeliveryState.CLOSED if remote.state == "closed" else DeliveryState.OPEN
+            current.version += 1
+            tx.update_delivery(current)
+        else:
+            pause_delivery(tx, current)
+
+
+def _merge_observation(remote: PullRequestStatus) -> PullRequestMerge:
+    assert remote.merged_at is not None and remote.merge_commit_sha is not None
+    return PullRequestMerge(number=remote.number, merged=True, merged_at=remote.merged_at,
+                            merge_commit_sha=remote.merge_commit_sha)
 
 
 def pause_delivery(tx: Store, delivery: FlowDelivery) -> None:
@@ -104,3 +172,31 @@ def resume_delivery(
             attempt.session_generation = proof.session_generation
         tx.update_attempt(attempt)
     tx.reviews.reopened(flow.id, settle_seconds)
+
+
+def record_merge(tx: Store, flow: Flow, delivery: FlowDelivery, merge: PullRequestMerge) -> bool:
+    """Apply verified merge facts under the caller's workflow lock, for webhook or poll."""
+    if delivery.flow_id != flow.id or delivery.pr_number != merge.number:
+        raise ValueError("merge does not belong to delivery")
+    if ((delivery.merged_at is not None and delivery.merged_at != merge.merged_at)
+            or (delivery.merge_commit_sha is not None
+                and delivery.merge_commit_sha != merge.merge_commit_sha)):
+        raise ValueError("merge event conflicts with recorded merge facts")
+    first_merge = delivery.state is not DeliveryState.MERGED
+    if first_merge or delivery.merged_at is None or delivery.merge_commit_sha is None:
+        delivery.state = DeliveryState.MERGED
+        delivery.merged_at = merge.merged_at
+        delivery.merge_commit_sha = merge.merge_commit_sha
+        delivery.version += 1
+        tx.update_delivery(delivery)
+    binding = tx.get_flow_execution(flow.id)
+    if (first_merge and flow.state is FlowState.CANCELLED and binding is not None
+            and binding.released_at is None and tx.stops.has_pending(flow.id)
+            and tx.get_active_flow(flow.repo, flow.issue_number) is None):
+        # Merge facts supersede cancellation only for archive on the retained original binding.
+        flow.state = FlowState.ACTIVE
+        tx.update_flow(flow)
+    if first_merge and flow.state not in TERMINAL_STATES:
+        tx.cancel_jobs(flow.id, reason="PR merged; queued work retired")
+        tx.enqueue_job(flow.id, JobKind.ARCHIVE)
+    return first_merge

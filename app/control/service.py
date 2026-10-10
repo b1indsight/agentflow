@@ -8,12 +8,11 @@ from functools import partial
 from loguru import logger
 
 from app.control.archive import verify_archive
+from app.control.lifecycle import record_merge
 from app.domain.github_models import PullRequestMerge
 from app.domain.models import (
-    TERMINAL_STATES,
     DeliveryState,
     Flow,
-    FlowDelivery,
     FlowState,
     JobKind,
     JobState,
@@ -86,37 +85,9 @@ class ControlService:
                 return
             if not tx.record_event(delivery_id, "pull_request", fresh.id, payload):
                 return
-            first_merge = self.record_merge(tx, fresh, delivery, merge)
+            first_merge = record_merge(tx, fresh, delivery, merge)
         if first_merge:
             self.notify_merge(fresh)
-
-    @staticmethod
-    def record_merge(tx: Store, flow: Flow, delivery: FlowDelivery, merge: PullRequestMerge) -> bool:
-        """Apply verified merge facts under the caller's workflow lock, for webhook or poll."""
-        if delivery.flow_id != flow.id or delivery.pr_number != merge.number:
-            raise ValueError("merge does not belong to delivery")
-        if ((delivery.merged_at is not None and delivery.merged_at != merge.merged_at)
-                or (delivery.merge_commit_sha is not None
-                    and delivery.merge_commit_sha != merge.merge_commit_sha)):
-            raise ValueError("merge event conflicts with recorded merge facts")
-        first_merge = delivery.state is not DeliveryState.MERGED
-        if first_merge or delivery.merged_at is None or delivery.merge_commit_sha is None:
-            delivery.state = DeliveryState.MERGED
-            delivery.merged_at = merge.merged_at
-            delivery.merge_commit_sha = merge.merge_commit_sha
-            delivery.version += 1
-            tx.update_delivery(delivery)
-        binding = tx.get_flow_execution(flow.id)
-        if (first_merge and flow.state is FlowState.CANCELLED and binding is not None
-                and binding.released_at is None and tx.stops.has_pending(flow.id)
-                and tx.get_active_flow(flow.repo, flow.issue_number) is None):
-            # Merge facts supersede cancellation only for archive on the retained original binding.
-            flow.state = FlowState.ACTIVE
-            tx.update_flow(flow)
-        if first_merge and flow.state not in TERMINAL_STATES:
-            tx.cancel_jobs(flow.id, reason="PR merged; queued work retired")
-            tx.enqueue_job(flow.id, JobKind.ARCHIVE)
-        return first_merge
 
     def notify_merge(self, flow: Flow) -> None:
         """Notify plugins and workers only after merge facts and archive work have committed."""

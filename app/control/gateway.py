@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import hmac
-import json
 from collections.abc import Mapping
 from typing import Protocol
 from uuid import uuid4
@@ -112,12 +111,6 @@ class GatewayStore(Protocol):
         digest: str,
     ) -> str: ...
 
-    def unapplied_result_ceiling(self) -> int: ...
-
-    def list_unapplied_results(
-        self, *, after_id: int = 0, through_id: int | None = None, limit: int = 64,
-    ) -> list[Job]: ...
-
     def finish_assignment(
         self,
         job_id: int,
@@ -160,8 +153,6 @@ class WorkerGateway:
         heartbeat_interval: float = 15.0,
         heartbeat_timeout: float = 45.0,
         poll_interval: float = 2.0,
-        recovery_concurrency: int = 4,
-        recovery_batch_size: int = 64,
         metrics: Metrics | None = None,
         execution_control: WorkerExecutionControl,
     ) -> None:
@@ -173,14 +164,8 @@ class WorkerGateway:
         self.heartbeat_interval = heartbeat_interval
         self.heartbeat_timeout = heartbeat_timeout
         self.poll_interval = poll_interval
-        self.recovery_concurrency = recovery_concurrency
-        self.recovery_batch_size = recovery_batch_size
-        self._recovery_cursor = 0
-        self._recovery_ceiling = 0
-        self._recovery_lock = asyncio.Lock()
         self._sessions: dict[str, tuple[asyncio.Event, WorkerSocket]] = {}
         self._registry_lock = asyncio.Lock()
-        self._result_locks: dict[int, asyncio.Lock] = {}
         self.conversations = ConversationBroker()
 
     async def _prepare_assignment(
@@ -367,30 +352,11 @@ class WorkerGateway:
                             raise ProtocolViolation("result conflicts with the persisted result")
                         if receipt == "rejected":
                             raise ProtocolViolation("result belongs to an inactive assignment")
-                        state: JobState
-                        if receipt == "applied":
-                            persisted = self.store.get_job(job.id)
-                            if persisted is None or persisted.state not in (
-                                JobState.DONE,
-                                JobState.FAILED,
-                            ):
-                                raise ProtocolViolation("applied result has no terminal job")
-                            state = persisted.state
-                        else:
-                            async with self._result_lock(job.id):
-                                persisted = self.store.get_job(job.id)
-                                if (
-                                    persisted is not None
-                                    and persisted.result_applied_at is not None
-                                ):
-                                    state = persisted.state
-                                else:
-                                    state = await self._apply_terminal(job, message)
-                                    applied = self.store.get_job(job.id)
-                                    if applied is None or applied.result_applied_at is None:
-                                        raise ProtocolViolation(
-                                            "coordinator returned before committing the result"
-                                        )
+                        state = await self.coordinator.apply_result(job.id)
+                        applied = self.store.get_job(job.id)
+                        if (applied is None or applied.result_applied_at is None
+                                or applied.state not in {JobState.DONE, JobState.FAILED}):
+                            raise ProtocolViolation("result application has not committed")
                         await socket.send_text(
                             ResultAccepted(
                                 job_id=job.id,
@@ -468,10 +434,7 @@ class WorkerGateway:
                     if receipt in {'conflict', 'rejected'}:
                         raise ProtocolViolation("stop result conflicts with persisted facts")
                     if receipt != 'applied':
-                        async with self._result_lock(job.id):
-                            latest = self.store.get_job(job.id)
-                            if latest is not None and latest.result_applied_at is None:
-                                await self._apply_terminal(latest, message)
+                        await self.coordinator.apply_result(job.id)
                 if isinstance(message, ExecutionStopped):
                     if message.request_id != stop.request_id or not self.execution_control.confirm(worker_id, message):
                         raise ProtocolViolation("stop blocked: receipt or external effects not converged")
@@ -533,73 +496,6 @@ class WorkerGateway:
         """Wake all idle sessions after an enqueue or slot-state transition."""
         for wake, _ in self._sessions.values():
             wake.set()
-
-    async def recover_pending_results(self) -> None:
-        """Recover one bounded page with fixed concurrency and no overlapping recovery sweeps.
-
-        Advance past still-pending results before wrapping, so a permanently uncertain low ID
-        cannot monopolize every batch. Live WebSocket results retain the same per-job lock.
-        """
-        async with self._recovery_lock:
-            if not self._recovery_ceiling:
-                self._recovery_ceiling = self.store.unapplied_result_ceiling()
-            jobs = self.store.list_unapplied_results(
-                after_id=self._recovery_cursor, through_id=self._recovery_ceiling,
-                limit=self.recovery_batch_size,
-            )
-            if not jobs and self._recovery_cursor:
-                self._recovery_ceiling = self.store.unapplied_result_ceiling()
-                jobs = self.store.list_unapplied_results(
-                    through_id=self._recovery_ceiling, limit=self.recovery_batch_size,
-                )
-            self._recovery_cursor = jobs[-1].id if jobs else 0
-            if (len(jobs) < self.recovery_batch_size
-                    or self._recovery_cursor >= self._recovery_ceiling):
-                self._recovery_cursor = self._recovery_ceiling = 0
-            pending = iter(jobs)
-
-            async def drain() -> None:
-                # next() does not yield: each job belongs to exactly one pool task.
-                for job in pending:
-                    await self._recover_result(job.id)
-
-            async with asyncio.TaskGroup() as group:
-                for _ in range(min(self.recovery_concurrency, len(jobs))):
-                    group.create_task(drain())
-        self.notify_jobs()
-
-    async def _recover_result(self, job_id: int) -> None:
-        """Apply one durable message, isolating operational errors from other Flows."""
-        async with self._result_lock(job_id):
-            try:
-                current = self.store.get_job(job_id)
-                if current is None or current.result_applied_at is not None:
-                    return
-                payload = current.result_payload
-                if payload is None:
-                    return
-                message = parse_worker_message(json.dumps(payload))
-                if not isinstance(message, (Succeeded, Failed)):
-                    raise ProtocolViolation("persisted result is not terminal")
-                await self._apply_terminal(current, message)
-            except ResultPending:
-                return
-            except Exception:  # noqa: BLE001 -- one corrupt result must not stop the recovery pool
-                logger.exception("persisted result recovery failed for job {}", job_id)
-                return
-            logger.info("recovered persisted result for job {}", job_id)
-
-    def _result_lock(self, job_id: int) -> asyncio.Lock:
-        return self._result_locks.setdefault(job_id, asyncio.Lock())
-
-    async def _apply_terminal(self, job: Job, message: Succeeded | Failed) -> JobState:
-        with logger.contextualize(job_id=job.id, flow_id=job.flow_id,
-                                  worker_id=job.assigned_worker_id):
-            logger.bind(event="job_result", reason_code="ok").info("")
-            if isinstance(message, Succeeded):
-                return await self.coordinator.apply_result(job.id)
-            await self.coordinator.fail(job, message.error)
-            return JobState.FAILED
 
     @staticmethod
     def _validate_assignment_message(

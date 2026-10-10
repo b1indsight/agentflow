@@ -24,7 +24,7 @@ from app.contracts.result_models import ResultPending
 from app.control.gateway import WorkerGateway
 from app.domain.delivery_models import OpenedDelivery
 from app.domain.models import FlowDelivery, Job, JobKind, JobState, VcsKind
-from tests.worker_fakes import NoPendingStops, connected_worker
+from tests.worker_fakes import NoPendingStops, connected_worker, make_results
 
 
 class RecordingStore:
@@ -412,8 +412,8 @@ async def test_recovery_continues_after_one_broken_result():
             return await super().apply_result(job_id)
 
     store = RecoveryStore()
-    gateway = WorkerGateway(store, RecoveryCoordinator(store), execution_control=NoPendingStops(), worker_tokens={"worker-1": "secret"})
-    await gateway.recover_pending_results()
+    processor = make_results(store, RecoveryCoordinator(store))
+    await processor.recover_pending_results()
     assert store.jobs[0].result_applied_at is None
     assert store.jobs[1].result_applied_at is not None
 
