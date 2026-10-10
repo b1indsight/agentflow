@@ -15,7 +15,6 @@ from pydantic import ValidationError
 
 from app.contracts.protocol import (
     Assignment,
-    AssignmentSecret,
     ExecutionStopped,
     ExecutionTask,
     Failed,
@@ -39,7 +38,7 @@ from app.contracts.protocol import (
 )
 from app.contracts.result_models import ResultPending
 from app.control.conversation import ConversationBroker
-from app.control.preparation import PreparationStale
+from app.control.preparation import PreparationStale, PreparationState
 from app.control.worker_connection import ProtocolViolation, WorkerConnection, WorkerSocket
 from app.domain.models import (
     DeliveryState,
@@ -136,9 +135,7 @@ class GatewayStore(Protocol):
 class AssignmentCoordinator(Protocol):
     async def prepare_for_assignment(
         self, job: Job, worker: str, token: str, epoch: str,
-    ) -> ExecutionTask | JobState: ...
-
-    async def assignment_secret(self, job: Job, task: ExecutionTask) -> AssignmentSecret | None: ...
+    ) -> Assignment | PreparationState: ...
 
     async def execute_tool(
         self, request: FlowToolRequest, *, worker_id: str
@@ -188,23 +185,13 @@ class WorkerGateway:
 
     async def _prepare_assignment(
         self, job: Job, worker_id: str, token: str, epoch: str,
-    ) -> tuple[ExecutionTask | JobState, AssignmentSecret | None]:
+    ) -> Assignment | PreparationState:
         """Keep the unstarted lease alive across both context and capability I/O; fence dispatch."""
-        async def build() -> tuple[ExecutionTask | JobState, AssignmentSecret | None]:
+        async def build() -> Assignment | PreparationState:
             try:
-                prepared = await self.coordinator.prepare_for_assignment(job, worker_id, token, epoch)
+                return await self.coordinator.prepare_for_assignment(job, worker_id, token, epoch)
             except PreparationStale as error:
                 raise ProtocolViolation(str(error)) from error
-            if isinstance(prepared, JobState):
-                return prepared, None
-            try:
-                secret = await self.coordinator.assignment_secret(job, prepared)
-            except Exception as exc:  # noqa: BLE001
-                if not self.store.heartbeat_assignment(job.id, worker_id, token, epoch):
-                    raise ProtocolViolation("assignment expired during capability preparation") from None
-                await self.coordinator.fail(job, f"assignment capability failed: {type(exc).__name__}")
-                return JobState.FAILED, None
-            return prepared, secret
 
         preparing = asyncio.create_task(build())
         try:
@@ -213,19 +200,7 @@ class WorkerGateway:
                     raise ProtocolViolation("assignment expired during preparation")
                 done, _ = await asyncio.wait({preparing}, timeout=self.heartbeat_interval)
                 if done:
-                    prepared, secret = preparing.result()
-                    if not isinstance(prepared, JobState) and not self.store.heartbeat_assignment(
-                        job.id, worker_id, token, epoch,
-                    ):
-                        raise ProtocolViolation("assignment changed before dispatch")
-                    delivery = self.store.get_delivery(job.flow_id)
-                    if (not isinstance(prepared, JobState) and delivery is not None
-                            and delivery.supersedes(job.kind)):
-                        if delivery.state is DeliveryState.CLOSED:
-                            return JobState.DONE, None
-                        await self.coordinator.fail(job, "PR merged before task dispatch")
-                        return JobState.FAILED, None
-                    return prepared, secret
+                    return preparing.result()
         finally:
             preparing.cancel()
             await asyncio.gather(preparing, return_exceptions=True)
@@ -303,7 +278,7 @@ class WorkerGateway:
                     if job is None:
                         await self._wait_while_idle(socket, wake)
                         continue
-                    prepared, secret = await self._prepare_assignment(job, worker_id, token, connection_epoch)
+                    prepared = await self._prepare_assignment(job, worker_id, token, connection_epoch)
                     if isinstance(prepared, JobState):
                         if prepared is JobState.QUEUED:
                             self.store.requeue_assignment(job.id, worker_id, token, connection_epoch)
@@ -315,17 +290,8 @@ class WorkerGateway:
                         continue
                     if not self.execution_control.authorize_dispatch(job.id, worker_id, token, connection_epoch):
                         raise ProtocolViolation("assignment changed before dispatch authorization")
-                    current = (job, token, prepared)
-                    await socket.send_text(
-                        Assignment(
-                            job_id=job.id,
-                            flow_id=job.flow_id,
-                            assignment_token=token,
-                            connection_epoch=connection_epoch,
-                            task=prepared,
-                            secret=secret,
-                        ).model_dump_json()
-                    )
+                    current = (job, token, prepared.task)
+                    await socket.send_text(prepared.model_dump_json())
 
                     first = await self._receive(socket)
                     if not isinstance(first, Started):
@@ -339,13 +305,13 @@ class WorkerGateway:
                     )
                     if not self.store.start_assignment(
                         job.id,
-                        prepared.attempt_id,
+                        prepared.task.attempt_id,
                         worker_id,
                         token,
                         connection_epoch,
                     ):
                         raise ProtocolViolation("assignment is no longer active")
-                    self.coordinator.mark_started(job, prepared, worker_id)
+                    self.coordinator.mark_started(job, prepared.task, worker_id)
 
                 while True:
                     job, token, _ = current

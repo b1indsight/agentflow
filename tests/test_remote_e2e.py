@@ -4,6 +4,7 @@ from collections.abc import Mapping
 import pytest
 
 from app.contracts.protocol import (
+    Assignment,
     ExecutionResult,
     ExecutionTask,
     FlowToolResponse,
@@ -171,7 +172,11 @@ class RemoteStore:
 
 class RemoteCoordinator:
     async def prepare_for_assignment(self, job, worker, token, epoch):
-        return await self.prepare(job)
+        task = await self.prepare(job)
+        if isinstance(task, JobState):
+            return task
+        return Assignment(job_id=job.id, flow_id=job.flow_id, assignment_token=token,
+                          connection_epoch=epoch, task=task)
 
     def __init__(self, store: RemoteStore) -> None:
         self.store = store
@@ -188,9 +193,6 @@ class RemoteCoordinator:
             issue_body="Body",
             branch="flow/issue-8",
         )
-
-    async def assignment_secret(self, job: Job, task: ExecutionTask):
-        return None
 
     async def execute_tool(self, request, *, worker_id: str):
         self.tool_calls += 1

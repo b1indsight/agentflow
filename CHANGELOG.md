@@ -8,6 +8,9 @@
 
 ## Unreleased
 
+- Assignment 准备业务统一由 coordinator 完成，直接构造既有消息；签发后复查未启动状态、
+  token/epoch、租约和 delivery。gateway 保留心跳、取消清理和发送前授权，读取重试与签发失败政策不变。
+
 - CodingAgent start/resume 显式接收当前 Flow 目录，CLI 与进程目录保持一致；删除 context.cwd
   和未使用的 push_repository，VCS 只接收 push token。flow MCP 按当前 endpoint/token 配置，
   缺少 endpoint 时显式关闭，覆盖修订 resume 与 fallback。

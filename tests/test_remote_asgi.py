@@ -4,7 +4,6 @@ from starlette.testclient import TestClient
 
 from app.contracts.protocol import (
     Assignment,
-    AssignmentSecret,
     ExecutionTask,
     FlowToolErrorKind,
     FlowToolRequest,
@@ -29,7 +28,11 @@ from app.telemetry.metrics import Metrics
 
 class AsgiCoordinator:
     async def prepare_for_assignment(self, job, worker, token, epoch):
-        return await self.prepare(job)
+        task = await self.prepare(job)
+        if isinstance(task, JobState):
+            return task
+        return Assignment(job_id=job.id, flow_id=job.flow_id, assignment_token=token,
+                          connection_epoch=epoch, task=task)
 
     def __init__(self, attempt_id: int, store: Store) -> None:
         self.attempt_id = attempt_id
@@ -45,9 +48,6 @@ class AsgiCoordinator:
             issue_body="Body",
             branch="flow/issue-8",
         )
-
-    async def assignment_secret(self, job: Job, task: ExecutionTask) -> AssignmentSecret | None:
-        return None
 
     async def execute_tool(self, request: FlowToolRequest, *, worker_id: str) -> FlowToolResponse:
         return FlowToolResponse(
