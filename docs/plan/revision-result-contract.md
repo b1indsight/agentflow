@@ -1,6 +1,6 @@
 # Revision 结果契约去掉中间父类 — Feature record
 
-**Stage:** Planning — 待审阅，尚未实施。
+**Stage:** Implemented — 实现及本地验证完成。
 **PR:** [#72](https://github.com/b1indsight/agentflow/pull/72)。
 **Bookmark:** `refactor/revision-result-contract`
 **基线:** `main` / `a7c91202`（PR #68），2026-10-10。
@@ -48,3 +48,35 @@ revision 解析与结果恢复用例。无需机制消融，用相同输入比�
 实施与合并，本项可先完成。
 
 ## 2. PR change timeline
+
+### 2026-10-10 — 实际结果类型直接拥有反馈字段
+
+- **实现：** `RevisionTaskResult` 直接继承 `ProtocolModel`，在原字段顺序位置声明
+  `batch_id: int = Field(gt=0)` 和 `feedback_refs: list[FeedbackRef]`，删除
+  `ReviewResult`。生产代码和测试无遗留引用，未增加兼容别名或替代抽象。
+  更新 CHANGELOG；本 PR 更新到已包含 #69、#70、#71 的最新 main `8610b43d`。
+- **兼容性证据：** 修改前保存 validation/serialization 两种模式下的
+  `RevisionTaskResult`、`Succeeded`、`ExecutionResult` 共 6 份 schema；用最小结果、
+  成功 resume、双 invocation fallback 和执行失败 4 组输入比较结果 JSON、完整消息
+  JSON、解析往返及 terminal digest。另比较 9 组校验错误，覆盖 batch_id 正数约束、
+  两个字段必需性、feedback_refs 类型/元素约束、extra forbid 和 invocation 上限。
+  修改前后全部一致，schema 元数据也无变化，协议版本仍为 v13。
+- **实验与取舍：** 本次只移除一层继承，没有增加需要消融的机制。采用上述同输入
+  前后对照，保留既有业务回归，不新增镜像结构测试。比较脚本和基线位于仓库本地
+  `.cache/2026-10-10/pr72-contract-comparison.py` 与 `pr72-contract-baseline.json`，
+  不进入版本控制。在本次独立工作区中复现：
+
+  ```bash
+  # capture 在修改前运行；compare 在修改后运行。
+  ../../../.venv/bin/python ../pr72-contract-comparison.py capture
+  ../../../.venv/bin/python ../pr72-contract-comparison.py compare
+  FLOWTOOL_TEST_DATABASE_URL=postgresql://flowtool@127.0.0.1:55469/postgres \
+    ../../../.venv/bin/python -m pytest -q --tb=short
+  ../../../.venv/bin/ruff check app tests
+  ../../../.venv/bin/mypy app tests
+  uv build --no-sources
+  ```
+
+- **验证结果：** 实现前协议/修订交付/恢复/coordinator 基线 71 passed；实现后完整
+  PostgreSQL 回归 **844 passed，0 skipped**。Ruff、Mypy（160 个源文件）、sdist/wheel
+  构建和 diff 空白检查通过。测试有 1 条现有 Starlette/httpx 弃用提示。

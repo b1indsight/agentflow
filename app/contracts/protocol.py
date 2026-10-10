@@ -163,12 +163,9 @@ class InitialTaskResult(ProtocolModel):
     delivery_receipt: DeliveryReceipt | None = None
 
 
-class ReviewResult(ProtocolModel):
+class RevisionTaskResult(ProtocolModel):
     batch_id: int = Field(gt=0)
     feedback_refs: list[FeedbackRef]
-
-
-class RevisionTaskResult(ReviewResult):
     kind: Literal["revision"] = "revision"
     session_id: str | None
     last_message: str

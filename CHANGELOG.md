@@ -8,6 +8,9 @@
 
 ## Unreleased
 
+- RevisionTaskResult 直接拥有 batch_id 和 feedback_refs，删除未独立使用的 ReviewResult
+  父类；字段约束、JSON wire、schema 和协议 v13 保持不变。
+
 - Assignment 准备业务统一由 coordinator 完成，直接构造既有消息；签发后复查未启动状态、
   token/epoch、租约和 delivery。gateway 保留心跳、取消清理和发送前授权，读取重试与签发失败政策不变。
 
