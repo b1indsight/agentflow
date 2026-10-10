@@ -73,60 +73,70 @@ class CodexHistory:
         raise error
 
     def _read(self, query: HistoryQuery) -> HistoryPage:
-        offset, previous_identity = query.position
+        """Locate the source, validate its position, and read one bounded page."""
         path = self._path(query.session_id)
-        page = HistoryPage(session_id=query.session_id)
         if path is None:
-            if previous_identity is not None:
+            if query.cursor is not None:
                 raise ConversationFailure("cursor_invalid")
-            page.status = "not_found"
-            return page
+            return HistoryPage(session_id=query.session_id, status="not_found")
         with self._open(path) as file:
-            file_stat = os.fstat(file.fileno())
-            if previous_identity is not None and offset > file_stat.st_size:
-                raise ConversationFailure("cursor_invalid")
-            meta_line = file.readline(MAX_LINE + 1)
-            if len(meta_line) > MAX_LINE or not meta_line.endswith(b"\n"):
-                raise ConversationFailure("history_unreadable")
-            meta = json.loads(meta_line)
-            if meta.get("type") != "session_meta" or meta.get("payload", {}).get("id") != query.session_id:
-                raise ConversationFailure("history_unreadable")
-            identity = f"{file_stat.st_dev}:{file_stat.st_ino}:{hashlib.sha256(meta_line).hexdigest()}"
-            if previous_identity is not None:
-                # A valid cursor can outlive its file; recheck identity and line position.
-                if identity != previous_identity or not len(meta_line) <= offset <= file_stat.st_size:
-                    raise ConversationFailure("cursor_invalid")
-                file.seek(offset - 1)
-                if file.read(1) != b"\n":
-                    raise ConversationFailure("cursor_invalid")
-            else:
-                offset = len(meta_line)
-            file.seek(offset)
-            scanned = size = 0
-            while True:
-                raw = file.readline(MAX_LINE + 1)
-                if len(raw) > MAX_LINE:
-                    raise ConversationFailure("history_limit")
-                if not raw.endswith(b"\n"):
-                    # Leave a partially written final record for the next poll.
+            identity = self._seek_history(file, query)
+            return self._read_page(file, query, identity)
+
+    @staticmethod
+    def _seek_history(file: BinaryIO, query: HistoryQuery) -> str:
+        """Validate the source and cursor, seek to the first record, and return its identity."""
+        offset, previous_identity = query.position
+        file_stat = os.fstat(file.fileno())
+        # Report a stale cursor before parsing metadata, even if the file was emptied.
+        if previous_identity is not None and offset > file_stat.st_size:
+            raise ConversationFailure("cursor_invalid")
+        meta_line = file.readline(MAX_LINE + 1)
+        if len(meta_line) > MAX_LINE or not meta_line.endswith(b"\n"):
+            raise ConversationFailure("history_unreadable")
+        meta = json.loads(meta_line)
+        if meta.get("type") != "session_meta" or meta.get("payload", {}).get("id") != query.session_id:
+            raise ConversationFailure("history_unreadable")
+        identity = f"{file_stat.st_dev}:{file_stat.st_ino}:{hashlib.sha256(meta_line).hexdigest()}"
+        if previous_identity is None:
+            return identity
+        # Query validation cannot detect file replacement or a cursor inside a record.
+        if identity != previous_identity or offset < len(meta_line):
+            raise ConversationFailure("cursor_invalid")
+        file.seek(offset - 1)
+        if file.read(1) != b"\n":
+            raise ConversationFailure("cursor_invalid")
+        return identity
+
+    def _read_page(self, file: BinaryIO, query: HistoryQuery, identity: str) -> HistoryPage:
+        """Scan complete records, retaining the offset of any unconsumed record."""
+        page = HistoryPage(session_id=query.session_id)
+        offset = file.tell()
+        scanned = size = 0
+        while True:
+            raw = file.readline(MAX_LINE + 1)
+            if len(raw) > MAX_LINE:
+                raise ConversationFailure("history_limit")
+            if not raw.endswith(b"\n"):
+                # Leave a partially written final record for the next poll.
+                break
+            scanned += len(raw)
+            item, unsupported = self._item(json.loads(raw), query.session_id, offset)
+            if unsupported:
+                page.status = "unsupported"
+            if item is not None:
+                item_size = len(item.model_dump_json().encode())
+                if len(page.items) >= query.limit or size + item_size > MAX_PAGE:
+                    # Keep offset before this record: it belongs to the next page.
+                    page.has_more = True
                     break
-                scanned += len(raw)
-                item, unsupported = self._item(json.loads(raw), query.session_id, offset)
-                if unsupported:
-                    page.status = "unsupported"
-                if item is not None:
-                    item_size = len(item.model_dump_json().encode())
-                    if len(page.items) >= query.limit or size + item_size > MAX_PAGE:
-                        # Keep offset before this record: it belongs to the next page.
-                        page.has_more = True
-                        break
-                    page.items.append(item)
-                    size += item_size
-                offset = file.tell()
-                if scanned >= MAX_SCAN:
-                    page.has_more = self._has_complete_line(file)
-                    break
-            page.next_cursor = query.cursor_at(offset, identity)
+                page.items.append(item)
+                size += item_size
+            offset = file.tell()
+            if scanned >= MAX_SCAN:
+                page.has_more = self._has_complete_line(file)
+                break
+        page.next_cursor = query.cursor_at(offset, identity)
         return page
 
     def _open(self, path: Path) -> BinaryIO:
