@@ -256,11 +256,20 @@ class CancellableExecutor:
 
 
 class BrokenHeartbeatConnection:
+    def __init__(self, assignment: Assignment) -> None:
+        self.messages = iter([
+            Registered(heartbeat_interval=0.01, connection_epoch=assignment.connection_epoch).model_dump_json(),
+            assignment.model_dump_json(),
+        ])
+
     async def send(self, data: str) -> None:
         if isinstance(parse_worker_message(data), Heartbeat):
             raise ConnectionError("connection lost")
 
     async def recv(self) -> str:
+        message = next(self.messages, None)
+        if message is not None:
+            return message
         await asyncio.Event().wait()
         raise AssertionError("unreachable")
 
@@ -292,11 +301,7 @@ async def test_heartbeat_failure_preserves_the_running_executor_for_reconnect(tm
         ),
     )
 
-    execution = asyncio.create_task(
-        client._execute_assignment(
-            BrokenHeartbeatConnection(), assignment, heartbeat_interval=0.01
-        )
-    )
+    execution = asyncio.create_task(client.run_connection(BrokenHeartbeatConnection(assignment)))
     await executor.started.wait()
     try:
         with pytest.raises(ConnectionError, match="connection lost"):
@@ -308,7 +313,11 @@ async def test_heartbeat_failure_preserves_the_running_executor_for_reconnect(tm
         class ResumedConnection:
             first = True
             async def send(self, data):
-                if isinstance(parse_worker_message(data), Heartbeat):
+                message = parse_worker_message(data)
+                if isinstance(message, Heartbeat):
+                    assert message.job_id == assignment.job_id
+                    assert message.assignment_token == assignment.assignment_token
+                    assert message.connection_epoch == "epoch-2"
                     heartbeat.set()
             async def recv(self):
                 if self.first:
@@ -327,6 +336,28 @@ async def test_heartbeat_failure_preserves_the_running_executor_for_reconnect(tm
     finally:
         await client._cancel_execution()
     assert executor.cancelled.is_set() is True
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_failure_interrupts_waiting_for_tool_reply(tmp_path) -> None:
+    from tests.test_worker_session import _assignment
+
+    # A stalled control-side tool reply must not prevent a failed heartbeat from reconnecting.
+    assignment = _assignment()
+    client = WorkerClient(
+        worker_id="worker-1", worker_token="worker-secret", serve_ws_url="ws://unused",
+        executor=ToolCallingExecutor(), session=WorkerSession(tmp_path),
+    )
+    connection = BrokenHeartbeatConnection(assignment)
+    try:
+        with pytest.raises(ConnectionError, match="connection lost"):
+            await asyncio.wait_for(client.run_connection(connection), timeout=1)
+        assert client._execution is not None and not client._execution.done()
+        pending = client._tool_requests.get_nowait()
+        assert pending.request.name == "flow.open_pr"
+        assert not pending.future.done()
+    finally:
+        await client._cancel_execution()
 
 
 @pytest.mark.parametrize("fails", [False, True])
