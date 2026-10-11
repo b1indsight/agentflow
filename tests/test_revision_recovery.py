@@ -13,12 +13,6 @@ from app.contracts.protocol import (
     Succeeded,
     terminal_digest,
 )
-from app.domain.github_models import (
-    GitHubAdapterError,
-    GitHubErrorKind,
-    PullRequestStatus,
-    RemoteRef,
-)
 from app.domain.models import (
     AddressedComment,
     DeliveryState,
@@ -28,8 +22,10 @@ from app.domain.models import (
     ReviewItemKind,
 )
 from app.domain.review_models import FeedbackUpdate
+from app.github import GitHubError, GitHubErrorKind, Issue, PullRequest, RemoteRef, Repository
 from app.persistence.store import Store
-from tests.test_coordinator import RecordingGitHub, coordinator
+from tests.github import RecordingGitHub, record_call
+from tests.test_coordinator import coordinator
 from tests.test_revision_delivery import revision_output, verified_result
 
 
@@ -39,21 +35,31 @@ class RevisionGitHub(RecordingGitHub):
         self.sha = "baseline"
         self.reads = 0
 
-    async def get_pull_request(self, *args):
-        self.reads += 1
-        return PullRequestStatus(repo="owner/repo", merged=False, number=17, state="open", head_branch="flow/1", head_sha=self.sha,
-                                  head_repository="owner/repo",
-                                  base_branch="main", base_sha="base", title="Task", body="Requirements")
+@pytest.fixture
+def revision_resources(recording_resources, monkeypatch):
+    async def refetch(pr):
+        state = record_call(pr.repository, "fetch_pull_request", number=pr.number)
+        state.reads += 1
+        return PullRequest(pr.repository, pr.number, merged=False, state="open",
+                           head_branch="flow/1", head_sha=state.sha,
+                           head_repository=pr.repository.full_name, base_branch="main",
+                           base_sha="base", title="Task", body="Requirements")
 
-    async def get_ref(self, installation_id, repo, branch, *, retry_transient=False):
-        return RemoteRef(branch=branch, sha=self.sha)
+    async def fetch_ref(repo, branch, *, retry_transient=False):
+        state = record_call(repo, "fetch_ref", branch=branch)
+        return RemoteRef(branch=branch, sha=state.sha)
 
-    async def compare_commits(self, installation_id, repo, base, head):
+    async def compare_commits(repo, base, head):
+        record_call(repo, "compare_commits", base=base, head=head)
         return (base, head) == ("baseline", "revision")
+
+    monkeypatch.setattr(PullRequest, "refetch", refetch)
+    monkeypatch.setattr(Repository, "fetch_ref", fetch_ref)
+    monkeypatch.setattr(Repository, "compare_commits", compare_commits)
 
 
 @pytest.fixture
-async def pending_revision(store):
+async def pending_revision(store, revision_resources):
     flow = store.create_flow("owner/repo", 8, 42)
     attempt = store.create_attempt(flow.id)
     attempt.codex_session_id = "old-session"
@@ -166,13 +172,13 @@ async def test_cancel_during_remote_verification_prevents_effects_and_commit(
     assert store.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
     subject.mark_started(job, task, "worker-a")
     assert accept(store, job, verified_result(task)) == "pending"
-    original = github.get_ref
+    original = Repository.fetch_ref
 
-    async def cancel(*args):
+    async def cancel(repo, branch, *, retry_transient=False):
         ControlService(store).cancel(flow)
-        return await original(*args)
+        return await original(repo, branch, retry_transient=retry_transient)
 
-    monkeypatch.setattr(github, "get_ref", cancel)
+    monkeypatch.setattr(Repository, "fetch_ref", cancel)
     await subject.results.apply(job.id)
     assert store.get_flow(flow.id).state is FlowState.CANCELLED
     assert github.comments == [] and github.review_requests == []
@@ -262,11 +268,11 @@ async def test_rejected_revision_notification_keeps_verified_result_recoverable(
     github.sha = "revision"
     assert accept(store, job, result) == "pending"
 
-    async def rejected(*args, **kwargs):
-        raise GitHubAdapterError(GitHubErrorKind.VALIDATION, "request_reviewers", status_code=422)
+    async def rejected(pr, reviewers):
+        raise GitHubError(GitHubErrorKind.VALIDATION, "request_reviewers", status_code=422)
 
     with monkeypatch.context() as patch:
-        patch.setattr(github, "request_reviewers", rejected)
+        patch.setattr(PullRequest, "request_reviewers", rejected)
         with pytest.raises(ResultPending, match="422"):
             await subject.results.apply(job.id)
     assert store.get_job(job.id).result_applied_at is None
@@ -327,8 +333,8 @@ async def test_merge_during_revision_application_preserves_delivery_and_session(
     github.sha = "revision"
     assert accept(store, job, result) == "pending"
     accepted = store.get_job(job.id)
-    owner = github if merge_at == "verification" else subject.results.effects
-    method = "get_pull_request" if merge_at == "verification" else "run"
+    owner = PullRequest if merge_at == "verification" else subject.results.effects
+    method = "refetch" if merge_at == "verification" else "run"
     original = getattr(owner, method)
 
     async def merge_after_read(*args, **kwargs):
@@ -351,25 +357,24 @@ async def test_merge_during_revision_application_preserves_delivery_and_session(
     assert persisted.result_applied_at is not None
 
 
-
-@pytest.mark.parametrize(("endpoint", "kind", "status"), [
-    ("get_pull_request", GitHubErrorKind.NOT_FOUND, 404),
-    ("get_ref", GitHubErrorKind.NOT_FOUND, 404),
-    ("get_issue", GitHubErrorKind.NOT_FOUND, 404),
-    ("get_ref", GitHubErrorKind.TRANSIENT, 503),
+@pytest.mark.parametrize(("owner", "method", "endpoint", "kind", "status"), [
+    (PullRequest, "refetch", "fetch_pull_request", GitHubErrorKind.NOT_FOUND, 404),
+    (Repository, "fetch_ref", "fetch_ref", GitHubErrorKind.NOT_FOUND, 404),
+    (Issue, "refetch", "fetch_issue", GitHubErrorKind.NOT_FOUND, 404),
+    (Repository, "fetch_ref", "fetch_ref", GitHubErrorKind.TRANSIENT, 503),
 ])
 async def test_revision_preparation_failure_is_persisted_and_explicitly_retryable(
-    store, pending_revision, monkeypatch, endpoint, kind, status,
+    store, pending_revision, monkeypatch, owner, method, endpoint, kind, status,
 ):
     from app.control.service import ControlService
 
-    flow, job, task, github, subject = pending_revision
+    flow, job, task, _github, subject = pending_revision
 
-    async def unavailable(*args):
-        raise GitHubAdapterError(kind, endpoint, status_code=status)
+    async def unavailable(resource, *args, **kwargs):
+        raise GitHubError(kind, endpoint, status_code=status)
 
     with monkeypatch.context() as patch:
-        patch.setattr(github, endpoint, unavailable)
+        patch.setattr(owner, method, unavailable)
         if kind is GitHubErrorKind.TRANSIENT:
             from app.control.preparation import PreparationReadFailure
 
@@ -395,15 +400,15 @@ async def test_uncertain_revision_notification_cannot_be_explicitly_resent(
     from app.contracts.result_models import EffectState, ResultPending
     from app.control.service import ControlService
 
-    flow, job, task, github, subject = pending_revision
+    flow, job, task, _github, subject = pending_revision
     assert store.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
     subject.mark_started(job, task, "worker-a")
     assert accept(store, job, verified_result(task)) == "pending"
 
     async def unknown(*args, **kwargs):
-        raise GitHubAdapterError(GitHubErrorKind.TRANSIENT, "comment")
+        raise GitHubError(GitHubErrorKind.TRANSIENT, "comment")
 
-    monkeypatch.setattr(github, "comment", unknown)
+    monkeypatch.setattr(Issue, "comment", unknown)
     with pytest.raises(ResultPending):
         await subject.results.apply(job.id)
     assert store.results.list_effects(job.id)[0].state is EffectState.UNCERTAIN

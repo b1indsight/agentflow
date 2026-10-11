@@ -9,14 +9,18 @@ from githubkit import GitHub as SDK
 
 from app.contracts.result_models import ResultPending
 from app.domain.models import JobState
-from app.github.client import GitHubApp
+from app.github import GitHubApp, Installation, PullRequest, Repository
 from app.persistence.store import Store
+from tests.github import NATIVE_PULL_REQUEST_REFETCH, NATIVE_REPOSITORY_FETCH_REF
 from tests.test_coordinator import coordinator
 from tests.test_github_client import settings
 from tests.test_revision_delivery import verified_result
 from tests.test_revision_recovery import accept
 from tests.test_revision_recovery import (
     pending_revision as pending_revision,  # noqa: PLC0414 - fixture re-export
+)
+from tests.test_revision_recovery import (
+    revision_resources as revision_resources,  # noqa: PLC0414 - fixture re-export
 )
 
 
@@ -30,13 +34,16 @@ async def test_result_verification_honors_retry_after_across_restart(store, pend
         return httpx.Response(429, json={"message": "rate limited"}, headers={"Retry-After": "600"})
 
     app = GitHubApp(settings(tmp_path))
-    monkeypatch.setattr(app, "_installation_client", lambda _, **options: SDK(
+    monkeypatch.setattr(Installation, "_client", lambda _, **options: SDK(
         "test-token", async_transport=httpx.MockTransport(limited), **options,
     ))
     subject.results.effects.github = app
     before = store.now()
-    with pytest.raises(ResultPending):
-        await asyncio.wait_for(subject.results.apply(job.id), 1)
+    with monkeypatch.context() as native:
+        native.setattr(PullRequest, "refetch", NATIVE_PULL_REQUEST_REFETCH)
+        native.setattr(Repository, "fetch_ref", NATIVE_REPOSITORY_FETCH_REF)
+        with pytest.raises(ResultPending):
+            await asyncio.wait_for(subject.results.apply(job.id), 1)
     pending = store.get_job(job.id)
     assert pending.verify_next_at >= before + timedelta(seconds=600)
     assert pending.verify_failures == 1 and pending.prepare_failures == 0

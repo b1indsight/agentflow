@@ -9,8 +9,8 @@ from app.contracts.protocol import PROTOCOL_VERSION, Assignment, RevisionTask
 from app.control.gateway import WorkerGateway
 from app.control.lifecycle import pause_delivery
 from app.control.preparation import PreparationStale
-from app.domain.github_models import GitHubAdapterError, GitHubErrorKind
 from app.domain.models import JobKind, JobState
+from app.github import GitHubError, GitHubErrorKind, Repository
 from app.persistence.stop_store import StopStore
 from app.persistence.store import Store
 from tests.test_coordinator import coordinator
@@ -19,6 +19,7 @@ from tests.test_revision_recovery import accept
 from tests.test_revision_recovery import (
     pending_revision as pending_revision,  # noqa: PLC0414 - fixture re-export
 )
+from tests.test_revision_recovery import revision_resources as revision_resources  # noqa: PLC0414
 
 
 def gateway(store, subject):
@@ -31,11 +32,11 @@ def gateway(store, subject):
 ])
 async def test_coordinator_rechecks_after_capability_io(store, pending_revision, monkeypatch, change, signing_fails):
     # Webhooks or a new connection can retire an assignment while signing is in flight.
-    flow, job, task, github, subject = pending_revision
-    original = github.create_push_capability
+    flow, job, task, _github, subject = pending_revision
+    original = Repository.create_push_capability
 
-    async def changed(*args):
-        capability = await original(*args)
+    async def changed(repo):
+        capability = await original(repo)
         if change == "closed":
             with store.transaction() as tx:
                 tx.lock_workflow(flow.id)
@@ -48,10 +49,10 @@ async def test_coordinator_rechecks_after_capability_io(store, pending_revision,
         else:
             store.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
         if signing_fails:
-            raise GitHubAdapterError(GitHubErrorKind.TRANSIENT, "create_push_capability")
+            raise GitHubError(GitHubErrorKind.TRANSIENT, "create_push_capability")
         return capability
 
-    monkeypatch.setattr(github, "create_push_capability", changed)
+    monkeypatch.setattr(Repository, "create_push_capability", changed)
     if change in {"epoch", "started"}:
         with pytest.raises(PreparationStale):
             await subject.prepare_for_assignment(job, "worker-a", "token", "epoch")
@@ -64,10 +65,10 @@ async def test_coordinator_rechecks_after_capability_io(store, pending_revision,
 
 async def test_cancelling_preparation_joins_capability_io(store, pending_revision, monkeypatch):
     # Disconnect cleanup must wait for the signer to stop before releasing the connection.
-    _, job, _, github, subject = pending_revision
+    _, job, _, _github, subject = pending_revision
     entered, cleaning, release, ended = (asyncio.Event() for _ in range(4))
 
-    async def blocked(*args):
+    async def blocked(repo):
         entered.set()
         try:
             await asyncio.Event().wait()
@@ -76,7 +77,7 @@ async def test_cancelling_preparation_joins_capability_io(store, pending_revisio
             await release.wait()
             ended.set()
 
-    monkeypatch.setattr(github, "create_push_capability", blocked)
+    monkeypatch.setattr(Repository, "create_push_capability", blocked)
     preparing = asyncio.create_task(gateway(store, subject)._prepare_assignment(job, "worker-a", "token", "epoch"))
     await entered.wait()
     preparing.cancel()
@@ -92,13 +93,13 @@ async def test_cancelling_preparation_joins_capability_io(store, pending_revisio
 
 
 async def test_transient_read_requeues_and_recovers_without_a_revision_cycle(store, pending_revision, monkeypatch):
-    flow, job, task, github, subject = pending_revision
-    original = github.get_ref
+    flow, job, task, _github, subject = pending_revision
+    original = Repository.fetch_ref
 
-    async def unavailable(*args):
-        raise GitHubAdapterError(GitHubErrorKind.TRANSIENT, "get_ref", status_code=503)
+    async def unavailable(repo, branch, *, retry_transient=False):
+        raise GitHubError(GitHubErrorKind.TRANSIENT, "get_ref", status_code=503)
 
-    monkeypatch.setattr(github, "get_ref", unavailable)
+    monkeypatch.setattr(Repository, "fetch_ref", unavailable)
     prepared = await gateway(store, subject)._prepare_assignment(job, "worker-a", "token", "epoch")
     assert prepared is JobState.QUEUED
     pending = store.get_job(job.id)
@@ -109,7 +110,7 @@ async def test_transient_read_requeues_and_recovers_without_a_revision_cycle(sto
     assert store.assign_job("worker-a", "too-early", "epoch") is None
     future = pending.prepare_next_at + timedelta(seconds=1)
     monkeypatch.setattr(store, "_clock", lambda: future)
-    monkeypatch.setattr(github, "get_ref", original)
+    monkeypatch.setattr(Repository, "fetch_ref", original)
     retry = store.assign_job("worker-a", "retry", "epoch")
     prepared = await gateway(store, subject)._prepare_assignment(retry, "worker-a", "retry", "epoch")
     assert isinstance(prepared, Assignment) and isinstance(prepared.task, RevisionTask) and prepared.secret is not None
@@ -121,10 +122,10 @@ async def test_transient_read_requeues_and_recovers_without_a_revision_cycle(sto
 async def test_retry_after_and_count_survive_restart(store, pending_revision, monkeypatch):
     _, job, _, github, subject = pending_revision
 
-    async def limited(*args):
-        raise GitHubAdapterError(GitHubErrorKind.RATE_LIMITED, "get_ref", retry_after="120")
+    async def limited(repo, branch, *, retry_transient=False):
+        raise GitHubError(GitHubErrorKind.RATE_LIMITED, "get_ref", retry_after="120")
 
-    monkeypatch.setattr(github, "get_ref", limited)
+    monkeypatch.setattr(Repository, "fetch_ref", limited)
     await gateway(store, subject)._prepare_assignment(job, "worker-a", "token", "epoch")
     pending = store.get_job(job.id)
     assert pending.prepare_next_at >= pending.prepare_first_failed_at + timedelta(seconds=120)
@@ -143,13 +144,13 @@ async def test_retry_after_and_count_survive_restart(store, pending_revision, mo
 
 @pytest.mark.parametrize("maximum,header", [(1, None), (5, "901")])
 async def test_failure_or_time_budget_stops_without_early_retry(store, pending_revision, monkeypatch, maximum, header):
-    _, job, _, github, subject = pending_revision
+    _, job, _, _github, subject = pending_revision
     subject.settings.prepare_max_failures = maximum
 
-    async def unavailable(*args):
-        raise GitHubAdapterError(GitHubErrorKind.RATE_LIMITED, "get_ref", retry_after=header)
+    async def unavailable(repo, branch, *, retry_transient=False):
+        raise GitHubError(GitHubErrorKind.RATE_LIMITED, "get_ref", retry_after=header)
 
-    monkeypatch.setattr(github, "get_ref", unavailable)
+    monkeypatch.setattr(Repository, "fetch_ref", unavailable)
     prepared = await gateway(store, subject)._prepare_assignment(job, "worker-a", "token", "epoch")
     assert prepared is JobState.FAILED
     failed = store.get_job(job.id)
@@ -172,22 +173,22 @@ def test_defer_requires_the_exact_unstarted_assignment(store, pending_revision, 
         assert store.requeue_assignment(job.id, "worker-a", "token", "epoch")
         assert store.assign_job("worker-a", "new-token", "epoch") is not None
     result = store.defer_preparation(job.id, "worker-a", "token", "epoch",
-        GitHubAdapterError(GitHubErrorKind.TRANSIENT, "get_ref"), max_failures=5, window_seconds=900)
+        GitHubError(GitHubErrorKind.TRANSIENT, "get_ref"), max_failures=5, window_seconds=900)
     assert result is None
     assert store.get_job(job.id).prepare_failures == 0
     assert store.get_flow_execution(flow.id).released_at is None
 
 
 async def test_close_wins_over_a_read_failure(store, pending_revision, monkeypatch):
-    flow, job, _, github, subject = pending_revision
+    flow, job, _, _github, subject = pending_revision
 
-    async def close(*args):
+    async def close(repo, branch, *, retry_transient=False):
         with store.transaction() as tx:
             tx.lock_workflow(flow.id)
             pause_delivery(tx, tx.get_delivery(flow.id))
-        raise GitHubAdapterError(GitHubErrorKind.TRANSIENT, "get_ref")
+        raise GitHubError(GitHubErrorKind.TRANSIENT, "get_ref")
 
-    monkeypatch.setattr(github, "get_ref", close)
+    monkeypatch.setattr(Repository, "fetch_ref", close)
     prepared = await gateway(store, subject)._prepare_assignment(job, "worker-a", "token", "epoch")
     assert prepared is JobState.DONE
     assert store.get_job(job.id).prepare_next_at is None
@@ -195,12 +196,12 @@ async def test_close_wins_over_a_read_failure(store, pending_revision, monkeypat
 
 
 async def test_capability_signing_failure_never_enters_the_read_retry_budget(store, pending_revision, monkeypatch):
-    _, job, _, github, subject = pending_revision
+    _, job, _, _github, subject = pending_revision
 
-    async def fail(*args):
-        raise GitHubAdapterError(GitHubErrorKind.TRANSIENT, "create_push_capability")
+    async def fail(repo):
+        raise GitHubError(GitHubErrorKind.TRANSIENT, "create_push_capability")
 
-    monkeypatch.setattr(github, "create_push_capability", fail)
+    monkeypatch.setattr(Repository, "create_push_capability", fail)
     prepared = await gateway(store, subject)._prepare_assignment(job, "worker-a", "token", "epoch")
     assert prepared is JobState.FAILED
     assert store.get_job(job.id).prepare_failures == 0
@@ -208,14 +209,14 @@ async def test_capability_signing_failure_never_enters_the_read_retry_budget(sto
 
 
 async def test_expired_window_stops_before_another_github_request(store, pending_revision, monkeypatch):
-    _, job, _, github, subject = pending_revision
+    _, job, _, _github, subject = pending_revision
     calls = []
 
-    async def unavailable(*args):
-        calls.append(args)
-        raise GitHubAdapterError(GitHubErrorKind.TRANSIENT, "get_ref")
+    async def unavailable(repo, branch, *, retry_transient=False):
+        calls.append(branch)
+        raise GitHubError(GitHubErrorKind.TRANSIENT, "get_ref")
 
-    monkeypatch.setattr(github, "get_ref", unavailable)
+    monkeypatch.setattr(Repository, "fetch_ref", unavailable)
     await gateway(store, subject)._prepare_assignment(job, "worker-a", "token", "epoch")
     first = store.get_job(job.id).prepare_first_failed_at
     monkeypatch.setattr(store, "_clock", lambda: first + timedelta(seconds=901))
@@ -231,7 +232,7 @@ async def test_expired_window_stops_before_another_github_request(store, pending
 def test_another_worker_can_progress_while_original_binding_waits(store, pending_revision):
     flow, job, _, _, _ = pending_revision
     assert store.defer_preparation(job.id, "worker-a", "token", "epoch",
-        GitHubAdapterError(GitHubErrorKind.TRANSIENT, "get_ref"), max_failures=5, window_seconds=900) is JobState.QUEUED
+        GitHubError(GitHubErrorKind.TRANSIENT, "get_ref"), max_failures=5, window_seconds=900) is JobState.QUEUED
     other = store.create_flow("owner/other", 8, 42)
     store.enqueue_job(other.id, JobKind.INITIAL)
     store.worker_connected("worker-b", PROTOCOL_VERSION, "other-epoch")
@@ -251,24 +252,24 @@ def test_retry_budget_and_requeue_are_one_transaction(store, pending_revision, m
     monkeypatch.setattr(Store, "requeue_assignment", crash)
     with pytest.raises(RuntimeError):
         store.defer_preparation(job.id, "worker-a", "token", "epoch",
-            GitHubAdapterError(GitHubErrorKind.TRANSIENT, "get_ref"), max_failures=5, window_seconds=900)
+            GitHubError(GitHubErrorKind.TRANSIENT, "get_ref"), max_failures=5, window_seconds=900)
     assert store.get_job(job.id).state is JobState.RUNNING
     assert store.get_job(job.id).prepare_failures == 0
 
 
 async def test_a_slow_retry_read_cannot_run_beyond_the_window(store, pending_revision, monkeypatch):
-    _, job, _, github, subject = pending_revision
+    _, job, _, _github, subject = pending_revision
     store.defer_preparation(job.id, "worker-a", "token", "epoch",
-        GitHubAdapterError(GitHubErrorKind.TRANSIENT, "get_ref"), max_failures=5, window_seconds=900)
+        GitHubError(GitHubErrorKind.TRANSIENT, "get_ref"), max_failures=5, window_seconds=900)
     first = store.get_job(job.id).prepare_first_failed_at
     monkeypatch.setattr(store, "_clock", lambda: first + timedelta(seconds=10))
     subject.settings.prepare_retry_window_seconds = 10.01
     retry = store.assign_job("worker-a", "slow", "epoch")
 
-    async def slow(*args):
+    async def slow(repo, branch, *, retry_transient=False):
         await asyncio.Event().wait()
 
-    monkeypatch.setattr(github, "get_ref", slow)
+    monkeypatch.setattr(Repository, "fetch_ref", slow)
     prepared = await gateway(store, subject)._prepare_assignment(retry, "worker-a", "slow", "epoch")
     assert prepared is JobState.FAILED
     assert "window" in store.get_job(job.id).last_error

@@ -5,9 +5,9 @@ from datetime import UTC, datetime
 import pytest
 
 from app.control.resolution import covered_thread
-from app.domain.github_models import ReviewComment, ReviewThread
 from app.domain.models import ReviewItemKind
 from app.domain.review_models import ReviewFeedback
+from app.github import ReviewComment, ReviewThread
 
 
 def human(number=1, **updates):
@@ -18,7 +18,7 @@ def human(number=1, **updates):
 
 def snapshot(*comments):
     return ReviewThread(thread_id="T1", repo="owner/repo", pr_number=17, path="app.py",
-                        resolved=False, outdated=False, comments=list(comments or [human()]))
+                        resolved=False, outdated=False, comments=tuple(comments or [human()]), complete=True)
 
 
 def feedback(comment, *, kind=ReviewItemKind.INLINE):
@@ -33,9 +33,9 @@ def test_resolution_requires_complete_exact_human_coverage(change):
     current = snapshot(before)
     addressed = [feedback(before)]
     if change == "new":
-        current.comments.append(human(2))
+        current = current.model_copy(update={"comments": (*current.comments, human(2))})
     elif change == "edit":
-        current.comments[0] = human(body="Another issue")
+        current = current.model_copy(update={"comments": (human(body="Another issue"), *current.comments[1:])})
     elif change == "kind":
         addressed = [feedback(before, kind=ReviewItemKind.REVIEW_BODY)]
     elif change == "incomplete":

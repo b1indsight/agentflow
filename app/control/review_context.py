@@ -8,15 +8,16 @@ from app.domain.context_models import (
     MAX_FILES,
     SOURCE_CHARS,
     ContextDiscussion,
+    ContextFile,
     ReviewContext,
 )
 from app.domain.models import Flow
-from app.domain.ports import GitHubClient
 from app.domain.review_models import ReviewBatch
+from app.github import Repository
 
 
 async def build_review_context(
-    github: GitHubClient, flow: Flow, batch: ReviewBatch, pr_number: int,
+    repo: Repository, flow: Flow, batch: ReviewBatch, pr_number: int,
 ) -> ReviewContext:
     """Capture bounded evidence and explicit incompleteness; callers persist once after network I/O.
 
@@ -34,30 +35,70 @@ async def build_review_context(
         return value[:SOURCE_CHARS]
 
     # API failures belong to the pre-Assignment retry boundary, not a frozen partial context.
-    pr = await github.get_pull_request(installation, flow.repo, pr_number)
-    issue = await github.get_issue(installation, flow.repo, flow.issue_number)
-    files = await github.list_pull_request_files(installation, flow.repo, pr_number)
-    discussion = await github.list_pull_request_discussions(installation, flow.repo, pr_number)
-    after = await github.get_pull_request(installation, flow.repo, pr_number)
+    pr = await repo.fetch_pull_request(pr_number)
+    issue = await repo.fetch_issue(flow.issue_number)
+    files: list[ContextFile] = []
+    files_truncated = False
+    async for item in pr.list_files():
+        if len(files) == MAX_FILES:
+            files_truncated = True
+            break
+        patch = item.patch
+        file_limitations = []
+        if patch is None:
+            file_limitations.append("patch:unavailable-or-binary")
+        elif len(patch) > SOURCE_CHARS:
+            file_limitations.append("patch:truncated")
+        files.append(ContextFile(
+            path=item.filename, status=item.status,
+            patch=patch[:SOURCE_CHARS] if patch is not None else None,
+            previous_path=item.previous_filename, limitations=file_limitations,
+        ))
+
+    discussion: list[ContextDiscussion] = []
+    discussion_truncated = False
+    for kind in ("conversation", "review_body", "inline"):
+        count = 0
+        async for item in pr.list_discussions(kind):
+            if count == MAX_DISCUSSIONS // 3:
+                discussion_truncated = True
+                break
+            body = item.body or ""
+            hunk = item.diff_hunk if kind == "inline" else None
+            discussion_limitations = []
+            if len(body) > SOURCE_CHARS:
+                discussion_limitations.append("body:truncated")
+            if hunk and len(hunk) > SOURCE_CHARS:
+                discussion_limitations.append("diff_hunk:truncated")
+            discussion.append(ContextDiscussion(
+                kind=kind, github_id=item.id,
+                author=item.user.login if item.user else "[deleted]",
+                body=body[:SOURCE_CHARS],
+                updated_at=item.submitted_at if kind == "review_body" else item.updated_at,
+                path=item.path if kind == "inline" else None,
+                original_commit_id=item.original_commit_id if kind == "inline" else None,
+                diff_hunk=hunk[:SOURCE_CHARS] if hunk else hunk, limitations=discussion_limitations,
+            ))
+            count += 1
+    after = await pr.refetch()
     if (pr.head_sha, pr.base_sha, pr.state, pr.merged) != (
         after.head_sha, after.base_sha, after.state, after.merged,
     ):
         limitations.append("pull_request:changed-during-read")
     if pr.number != pr_number or pr.state != "open" or pr.merged:
         limitations.append("pull_request:not-current-open-pr")
-    if issue and issue.number != flow.issue_number:
+    if issue.number != flow.issue_number:
         limitations.append("issue:identity-mismatch")
     pr = pr.model_copy(update={"title": clip(pr.title, "pr-title"),
                                "body": clip(pr.body, "pr-body")})
-    if issue:
-        issue = issue.model_copy(update={"title": clip(issue.title, "issue-title"),
-                                         "body": clip(issue.body, "issue-body")})
+    issue = issue.model_copy(update={"title": clip(issue.title, "issue-title"),
+                                     "body": clip(issue.body, "issue-body")})
 
     bounded_files = []
     if files:
-        if files.truncated or len(files.files) > MAX_FILES:
+        if files_truncated or len(files) > MAX_FILES:
             limitations.append("files:truncated")
-        for item in files.files[:MAX_FILES]:
+        for item in files[:MAX_FILES]:
             limitations.extend(f"file:{item.path}:{reason}" for reason in item.limitations)
             if item.patch is None:
                 limitations.append(f"patch:{item.path}:unavailable-or-binary")
@@ -86,9 +127,9 @@ async def build_review_context(
     frozen_ids = {(item.kind, item.github_id) for item in batch.feedback}
     discussions = []
     if discussion:
-        if discussion.truncated:
+        if discussion_truncated:
             limitations.append("discussion:truncated")
-        for comment in discussion.discussions:
+        for comment in discussion:
             if (comment.kind, comment.github_id) in frozen_ids:
                 continue
             if comment.updated_at is None:

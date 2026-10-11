@@ -5,9 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.domain.github_models import GitHubAdapterError, GitHubErrorKind
-from app.github.client import GitHubApp
-from tests.test_github_client import AsyncEndpoint, response, settings
+from app.github import GitHubApp, GitHubError, GitHubErrorKind, Issue, PullRequest
+from tests.test_github_client import AsyncEndpoint, install_client, response, settings
 
 
 def adapter(tmp_path, monkeypatch, client):
@@ -17,8 +16,8 @@ def adapter(tmp_path, monkeypatch, client):
         assert installation_id == 42 and auto_retry is False
         return client
 
-    monkeypatch.setattr(app, "_installation_client", installation)
-    return app
+    install_client(monkeypatch, installation)
+    return PullRequest(app.installation(42).repository("owner/repo"), 17)
 
 
 @pytest.mark.parametrize("source", ["issue_comments", "pr_comments"])
@@ -30,7 +29,9 @@ async def test_rest_preserves_full_body_and_explicit_page(tmp_path, monkeypatch,
     app = adapter(tmp_path, monkeypatch, SimpleNamespace(rest=SimpleNamespace(
         issues=SimpleNamespace(async_list_comments=endpoint),
     )))
-    page = await app.list_feedback_page(42, "owner/repo", 17, source, "2")
+    if source == "issue_comments":
+        app = Issue(app.repository, app.number)
+    page = await app.list_comments_page("2")
     assert page.next_cursor == "3" and len(page.items) == 50
     assert page.items[0].body == body
     assert endpoint.calls == [(("owner", "repo", 17), {"page": 2, "per_page": 50})]
@@ -47,7 +48,7 @@ def reviews(**changes):
 async def test_graphql_review_uses_edit_time_and_64_bit_identity(tmp_path, monkeypatch):
     endpoint = AsyncEndpoint(reviews())
     app = adapter(tmp_path, monkeypatch, SimpleNamespace(async_graphql=endpoint))
-    page = await app.list_feedback_page(42, "owner/repo", 17, "reviews", "previous")
+    page = await app.list_reviews_page("previous")
     assert page.next_cursor == "following"
     assert page.items[0].github_id == 8589934593
     assert page.items[0].updated_at == datetime(2026, 9, 9, 12, tzinfo=UTC)
@@ -70,6 +71,6 @@ async def test_incomplete_graphql_data_never_commits_a_page(tmp_path, monkeypatc
             "endCursor": "previous",
         }
     app = adapter(tmp_path, monkeypatch, SimpleNamespace(async_graphql=AsyncEndpoint(data)))
-    with pytest.raises(GitHubAdapterError) as caught:
-        await app.list_feedback_page(42, "owner/repo", 17, "reviews", "previous")
+    with pytest.raises(GitHubError) as caught:
+        await app.list_reviews_page("previous")
     assert caught.value.kind is GitHubErrorKind.UNEXPECTED_RESPONSE

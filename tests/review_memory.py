@@ -3,18 +3,19 @@
 from datetime import UTC, datetime
 
 from app.domain.context_models import ReviewContext
-from app.domain.github_models import PullRequestStatus
 from app.domain.judge_models import JudgeDecision
 from app.domain.models import FeedbackRef, Job, ReviewItemKind, TriageVerdict
 from app.domain.review_models import BatchState, ReviewBatch, ReviewFeedback
+from app.github import PullRequest, ReviewThreads
 
 
 def review_context(batch_id: int = 1) -> ReviewContext:
     return ReviewContext(
         batch_id=batch_id, repo="owner/repo", issue_number=8, pr_number=17,
-        pull_request=PullRequestStatus(repo="owner/repo", merged=False,
+        pull_request=PullRequest(repo="owner/repo", merged=False,
             number=17, state="open", head_branch="flow/8", head_sha="abc",
             head_repository="owner/repo",
+            merged_at=None, merge_commit_sha=None,
             base_branch="main", base_sha="def", title="Bound retries", body="Use 10 retries",
         ),
     )
@@ -66,7 +67,7 @@ class MemoryReviews:
 
     def freeze_context(self, job: Job, context: ReviewContext) -> ReviewContext:
         if self.batch.context is None:
-            self.batch.context = context
+            self.batch.context = ReviewContext.model_validate_json(context.model_dump_json())
         return self.batch.context
 
     def record_decision(self, job: Job, decision: JudgeDecision) -> None:
@@ -75,7 +76,7 @@ class MemoryReviews:
 
     def freeze_threads(self, job, snapshot):
         if self.batch.threads is None:
-            self.batch.threads = snapshot
+            self.batch.threads = ReviewThreads.model_validate_json(snapshot.model_dump_json())
         return self.batch.threads
 
     def addressed(self, flow_id, attempt_id):

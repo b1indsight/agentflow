@@ -10,7 +10,7 @@ dependencies = [
     "uvicorn[standard]>=0.32",
     "githubkit[auth-app]>=0.16,<0.17",  # calibrated App auth and REST surface
     "bub==0.4.1",            # Calibrated private ModelRunner completion contract
-    "pydantic>=2.7",
+    "pydantic>=2.12",
     "pydantic-settings>=2.3",
     "psycopg[binary,pool]>=3.2",
     "pluggy>=1.5",           # plugin hooks

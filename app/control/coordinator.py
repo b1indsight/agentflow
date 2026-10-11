@@ -27,7 +27,6 @@ from app.control.review_context import build_review_context
 from app.control.revisions import verify_revision_remote
 from app.control.tools import FlowToolService
 from app.domain.context_models import ReviewContext
-from app.domain.github_models import GitHubAdapterError, GitHubErrorKind
 from app.domain.judge_models import JudgeDecision
 from app.domain.models import (
     TERMINAL_STATES,
@@ -41,8 +40,9 @@ from app.domain.models import (
     TriageVerdict,
     Verdict,
 )
-from app.domain.ports import GitHubClient, Judge
+from app.domain.ports import Judge
 from app.domain.review_models import BatchState, ReviewBatch
+from app.github import GitHubApp, GitHubError, GitHubErrorKind, PullRequest
 from app.persistence.store import Store
 from app.plugins import emit_hook, get_plugin_manager
 
@@ -59,7 +59,7 @@ class JobCoordinator:
     def __init__(
         self,
         store: Store,
-        github: GitHubClient,
+        github: GitHubApp,
         settings: CoordinatorSettings,
         plugins=None,
     ) -> None:
@@ -83,8 +83,9 @@ class JobCoordinator:
             if not tx.reviews.current(batch):
                 return
         assert flow is not None and flow.installation_id is not None
+        repo = self.github.installation(flow.installation_id).repository(flow.repo)
         context = batch.context or await build_review_context(
-            self.github, flow, batch, self._pr_number(flow),
+            repo, flow, batch, self._pr_number(flow),
         )
         with self.store.transaction() as tx:
             tx.lock_workflow(flow.id)
@@ -107,7 +108,7 @@ class JobCoordinator:
                 emit_hook(self.plugins, "on_review", flow=flow)
             return
         # Remote reads can outlive close/merge or a changed PR baseline.
-        remote = (await self.github.get_pull_request(flow.installation_id, flow.repo, context.pr_number)
+        remote = (await repo.fetch_pull_request(context.pr_number)
                   if verdict.verdict is Verdict.REVISE else None)
         with self.store.transaction() as tx:
             tx.lock_workflow(flow.id)
@@ -137,15 +138,17 @@ class JobCoordinator:
         """Recover a frozen answer, authorizing its POST only after a fresh PR observation."""
         installation = flow.installation_id
         assert installation is not None
+        repo = self.github.installation(installation).repository(flow.repo)
+        pr = PullRequest(repo, context.pr_number)
         marker = f"<!-- agentflow:batch:{batch.id}:answer -->"
         authorized = False
 
-        found = await self.github.find_comment(installation, flow.repo, context.pr_number, marker)
+        found = await pr.find_comment(marker)
         if found is None:
             if batch.answer_dispatched:
                 return False
             # Like result comments, an uncertain POST needs its marker before any retry.
-            remote = await self.github.get_pull_request(installation, flow.repo, context.pr_number)
+            remote = await pr.refetch()
             with self.store.transaction() as tx:
                 tx.lock_workflow(flow.id)
                 if not tx.reviews.current(batch):
@@ -162,9 +165,8 @@ class JobCoordinator:
             sources = ", ".join(f"[{f.kind.value} {f.github_id}]({feedback_link(flow.repo,
                 context.pr_number, f.kind, f.github_id)})" for f in batch.feedback)
             try:
-                await self.github.comment(installation, flow.repo, context.pr_number,
-                    f"{decision.verdict.answer}\n\n来源：{sources}\n\n{marker}")
-            except GitHubAdapterError as error:
+                await pr.comment(f'{decision.verdict.answer}\n\n来源：{sources}\n\n{marker}')
+            except GitHubError as error:
                 if error.definitely_rejected:
                     self.store.reviews.reject_answer(batch, context.digest)
                 raise
@@ -240,7 +242,7 @@ class JobCoordinator:
             async with asyncio.timeout(remaining):
                 return await operation()
         except TimeoutError as error:
-            raise PreparationReadFailure(GitHubAdapterError(
+            raise PreparationReadFailure(GitHubError(
                 GitHubErrorKind.TRANSIENT, "preparation read window expired",
             )) from error
 
@@ -288,9 +290,10 @@ class JobCoordinator:
                 delivery = tx.get_or_create_delivery(fresh.id, f"flow/{fresh.id}")
                 flow = fresh
             try:
-                issue = await self._read(job, lambda: self.github.get_issue(installation_id, flow.repo, flow.issue_number))
-                repository = await self._read(job, lambda: self.github.get_repository(installation_id, flow.repo))
-            except GitHubAdapterError as exc:
+                repo = self.github.installation(installation_id).repository(flow.repo)
+                issue = await self._read(job, lambda: repo.fetch_issue(flow.issue_number))
+                repository = await self._read(job, repo.refetch)
+            except GitHubError as exc:
                 raise PreparationReadFailure(exc) from exc
             if repository.full_name != flow.repo:
                 await self.fail(job, "GitHub repository identity 不匹配。")
@@ -335,14 +338,17 @@ class JobCoordinator:
             f.kind is ReviewItemKind.INLINE for f in batch.feedback
         ):
             assert flow.installation_id is not None
-            number = self._pr_number(flow)
+            repository = self.github.installation(flow.installation_id).repository(flow.repo)
+            # Bind persisted identity; the thread query does not need current PR facts.
+            pr = PullRequest(repository, self._pr_number(flow))
             try:
-                installation = flow.installation_id
-                threads = await self._read(job, lambda: self.github.list_review_threads(installation, flow.repo, number))
-            except GitHubAdapterError as exc:
+                threads = await self._read(job, pr.list_review_threads)
+            except GitHubError as exc:
                 raise PreparationReadFailure(exc) from exc
 
         if job.kind is JobKind.REVISION:
+            assert flow.installation_id is not None
+            repository = self.github.installation(flow.installation_id).repository(flow.repo)
             delivery = self._delivery(flow)
             if attempt.revision_cycles + 1 > self.settings.max_revision_cycles:
                 await self.fail(job, "已达最大修订轮数，暂停。")
@@ -353,15 +359,13 @@ class JobCoordinator:
                 return JobState.FAILED
             try:
                 mismatch = await self._read(job, lambda: verify_revision_remote(
-                    self.github, flow, delivery, delivery.head_sha or "",
+                    repository,
+                    flow, delivery, delivery.head_sha or "",
                 ))
                 if not mismatch:
                     assert flow.installation_id is not None
-                    installation = flow.installation_id
-                    issue = await self._read(job, lambda: self.github.get_issue(
-                        installation, flow.repo, flow.issue_number,
-                    ))
-            except GitHubAdapterError as exc:
+                    issue = await self._read(job, lambda: repository.fetch_issue(flow.issue_number))
+            except GitHubError as exc:
                 raise PreparationReadFailure(exc) from exc
             if mismatch:
                 await self.fail(job, mismatch)
@@ -428,7 +432,7 @@ class JobCoordinator:
         flow = self.store.get_flow(job.flow_id)
         if flow is None or flow.installation_id is None:
             raise ValueError("coding assignment has no GitHub installation")
-        capability = await self.github.create_push_capability(flow.installation_id, flow.repo)
+        capability = await self.github.installation(flow.installation_id).repository(flow.repo).create_push_capability()
         return AssignmentSecret(
             push=PushSecret(
                 token=capability.token,

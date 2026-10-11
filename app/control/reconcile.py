@@ -8,10 +8,8 @@ from loguru import logger
 
 from app.control.lifecycle import pause_delivery, prove_reopen, record_merge, resume_delivery
 from app.control.service import ControlService
-from app.domain.github_models import GitHubAdapterError, GitHubErrorKind, PullRequestMerge
-from app.domain.github_retry import retry_delay
 from app.domain.models import TERMINAL_STATES, DeliveryState, FlowState
-from app.domain.ports import GitHubClient
+from app.github import GitHubApp, GitHubError, GitHubErrorKind, PullRequestMerge, retry_delay
 from app.persistence.reconcile_store import ReconcileState
 from app.persistence.store import Store
 
@@ -20,7 +18,7 @@ class Reconciler:
     """Read tracked PRs outside transactions and apply only still-current observations."""
 
     def __init__(
-        self, store: Store, github: GitHubClient, service: ControlService, *,
+        self, store: Store, github: GitHubApp, service: ControlService, *,
         interval: float = 300.0, batch_size: int = 64, concurrency: int = 4,
         settle_seconds: float = 75,
     ) -> None:
@@ -74,9 +72,8 @@ class Reconciler:
                     raise ValueError("missing installation")
                 coding = tx.lifecycle_job(flow.id)
                 blocked = tx.reopen_blocked(flow.id)
-            remote = await self.github.get_pull_request(
-                flow.installation_id, flow.repo, delivery.pr_number,
-            )
+            repo = self.github.installation(flow.installation_id).repository(flow.repo)
+            remote = await repo.fetch_pull_request(delivery.pr_number)
             if (remote.repo != flow.repo or remote.number != delivery.pr_number
                     or remote.head_repository != flow.repo):
                 raise ValueError("PR observation identity mismatch")
@@ -86,7 +83,7 @@ class Reconciler:
                 if blocked:
                     diagnostic = "old executor or result must settle before reopening"
                 else:
-                    proof, diagnostic = await prove_reopen(self.store, self.github, flow, delivery, remote, coding)
+                    proof, diagnostic = await prove_reopen(self.store, repo, flow, delivery, remote, coding)
             merged = False
             with self.store.transaction() as tx:
                 fresh = tx.lock_workflow(flow.id)
@@ -127,7 +124,7 @@ class Reconciler:
                 tx.reconcile.succeeded(flow.id, delay, diagnostic, hint_version=check.hint_version)
             if merged:
                 self.service.notify_merge(fresh)
-        except GitHubAdapterError as error:
+        except GitHubError as error:
             delay = retry_delay(check.failures + 1, self.store.now(), error)
             if error.kind not in {GitHubErrorKind.TRANSIENT, GitHubErrorKind.RATE_LIMITED}:
                 delay = max(1800.0, delay)

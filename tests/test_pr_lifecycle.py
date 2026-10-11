@@ -12,17 +12,12 @@ from app.control.reconcile import Reconciler
 from app.control.router import EventRouter
 from app.control.service import ControlService
 from app.domain.delivery_models import PreparedDelivery
-from app.domain.github_models import (
-    GitHubAdapterError,
-    GitHubErrorKind,
-    PullRequestSnapshot,
-    PullRequestStatus,
-    RemoteRef,
-)
 from app.domain.models import DeliveryState, FlowState, JobKind, JobState, VcsKind
 from app.domain.review_models import BatchState
+from app.github import GitHubError, GitHubErrorKind, Issue, PullRequest, RemoteRef, Repository
 from app.persistence.stop_store import StopStore
-from tests.test_coordinator import RecordingGitHub, coordinator
+from tests.github import RecordingGitHub, record_call
+from tests.test_coordinator import coordinator
 from tests.test_review_batches import batch_for, feedback, ingest, settle
 from tests.test_review_batches import (
     review_flow as review_flow,  # noqa: PLC0414 - fixture re-export
@@ -31,6 +26,9 @@ from tests.test_revision_delivery import verified_result
 from tests.test_revision_recovery import accept
 from tests.test_revision_recovery import (
     pending_revision as pending_revision,  # noqa: PLC0414 - fixture re-export
+)
+from tests.test_revision_recovery import (
+    revision_resources as revision_resources,  # noqa: PLC0414 - fixture re-export
 )
 from tests.test_workflow_transactions import accepted_coding
 
@@ -44,23 +42,31 @@ def lifecycle_flow(store, review_flow):
     return flow, clock
 
 
-class GitHub:
+class GitHub(RecordingGitHub):
     def __init__(self, flow, state="closed", **updates):
-        self.remote = PullRequestStatus(title="PR", body="",
+        super().__init__()
+        self.remote = PullRequest(title="PR", body="",
             repo=flow.repo, number=17, state=state, merged=False, head_branch=f"flow/{flow.id}",
             head_sha="b" * 40, base_branch="main", base_sha="a" * 40, head_repository=flow.repo,
         ).model_copy(update=updates)
         self.before_return = None
         self.calls = 0
 
-    async def get_pull_request(self, *args):
-        self.calls += 1
-        if self.before_return:
-            self.before_return()
-        return self.remote
+@pytest.fixture
+def lifecycle_resources(recording_resources, monkeypatch):
+    async def refetch(pr):
+        state = record_call(pr.repository, "fetch_pull_request", number=pr.number)
+        state.calls += 1
+        if state.before_return:
+            state.before_return()
+        return PullRequest(pr.repository, **state.remote.model_dump(exclude_unset=True))
 
-    async def get_ref(self, installation, repo, branch, *, retry_transient=False):
-        return RemoteRef(branch=branch, sha=self.remote.head_sha)
+    async def fetch_ref(repo, branch, *, retry_transient=False):
+        state = record_call(repo, "fetch_ref", branch=branch)
+        return RemoteRef(branch=branch, sha=state.remote.head_sha)
+
+    monkeypatch.setattr(PullRequest, "refetch", refetch)
+    monkeypatch.setattr(Repository, "fetch_ref", fetch_ref)
 
 
 async def check(store, flow, github):
@@ -69,7 +75,7 @@ async def check(store, flow, github):
 
 
 @pytest.mark.parametrize("started", [False, True])
-async def test_closed_binding_survives_expiry_and_original_started_job_can_resume(store, lifecycle_flow, started):
+async def test_closed_binding_survives_expiry_and_original_started_job_can_resume(store, lifecycle_flow, started, lifecycle_resources):
     flow, clock = lifecycle_flow
     store.worker_connected("worker", PROTOCOL_VERSION, "old-epoch")
     store.enqueue_job(flow.id, JobKind.INITIAL)
@@ -93,7 +99,7 @@ async def test_closed_binding_survives_expiry_and_original_started_job_can_resum
         assert store.get_delivery(flow.id).state is DeliveryState.OPEN
 
 
-async def test_closed_missing_journal_preserves_late_result_and_reopen(store, pending_revision):
+async def test_closed_missing_journal_preserves_late_result_and_reopen(store, pending_revision, monkeypatch):
     flow, job, task, github, subject = pending_revision
     assert store.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
     with store.transaction() as tx:
@@ -116,14 +122,18 @@ async def test_closed_missing_journal_preserves_late_result_and_reopen(store, pe
         message.model_dump(mode="json"), terminal_digest(message)) == "pending"
     assert await subject.results.apply(job.id) is JobState.DONE
     remote = GitHub(flow, "open", head_branch=task.branch, head_sha=task.expected_head_sha)
-    github.get_pull_request = remote.get_pull_request
+    async def reopened(pr):
+        record_call(pr.repository, "fetch_pull_request", number=pr.number)
+        return PullRequest(pr.repository, **remote.remote.model_dump(exclude_unset=True))
+
+    monkeypatch.setattr(PullRequest, "refetch", reopened)
     await check(store, flow, github)
     assert store.get_delivery(flow.id).state is DeliveryState.OPEN
     assert store.get_flow_execution(flow.id).released_at is None
 
 
 @pytest.mark.parametrize("recovery", ["explicit", "lease", "restart"])
-async def test_reopen_retires_unstarted_jobs_requeued_after_pause(store, lifecycle_flow, recovery):
+async def test_reopen_retires_unstarted_jobs_requeued_after_pause(store, lifecycle_flow, recovery, lifecycle_resources):
     flow, clock = lifecycle_flow
     ingest(store, flow, feedback(clock, signal="request_changes"))
     clock.now += timedelta(seconds=76)
@@ -150,7 +160,7 @@ async def test_reopen_retires_unstarted_jobs_requeued_after_pause(store, lifecyc
     assert store.reviews.pending_triage()[0].id == fresh.id
 
 
-async def test_lifecycle_hint_during_query_schedules_a_fresh_observation(store, lifecycle_flow):
+async def test_lifecycle_hint_during_query_schedules_a_fresh_observation(store, lifecycle_flow, lifecycle_resources):
     flow, _ = lifecycle_flow
     github = GitHub(flow, "closed")
     github.before_return = lambda: store.reconcile.hint(flow.id)
@@ -162,7 +172,7 @@ async def test_lifecycle_hint_during_query_schedules_a_fresh_observation(store, 
     assert github.calls == 2 and store.get_delivery(flow.id).state is DeliveryState.OPEN
 
 
-async def test_close_retires_queued_work_and_keeps_running_executor_slot(store, lifecycle_flow):
+async def test_close_retires_queued_work_and_keeps_running_executor_slot(store, lifecycle_flow, lifecycle_resources):
     flow, _ = lifecycle_flow
     store.enqueue_job(flow.id, JobKind.INITIAL)
     store.worker_connected("worker", PROTOCOL_VERSION, "epoch")
@@ -184,7 +194,7 @@ async def test_close_retires_queued_work_and_keeps_running_executor_slot(store, 
         ControlService(store).retry(flow)
 
 
-async def test_reopen_refreezes_feedback_through_judge_and_keeps_binding(store, lifecycle_flow):
+async def test_reopen_refreezes_feedback_through_judge_and_keeps_binding(store, lifecycle_flow, lifecycle_resources):
     flow, clock = lifecycle_flow
     ingest(store, flow, feedback(clock, signal="request_changes", submitted=True))
     clock.now += timedelta(seconds=76)
@@ -204,7 +214,7 @@ async def test_reopen_refreezes_feedback_through_judge_and_keeps_binding(store, 
     assert batch.feedback[0].body == "Edited while closed"
 
 
-async def test_reopen_waits_for_old_executor_and_pending_result(store, lifecycle_flow):
+async def test_reopen_waits_for_old_executor_and_pending_result(store, lifecycle_flow, lifecycle_resources):
     flow, _ = lifecycle_flow
     store.enqueue_job(flow.id, JobKind.INITIAL)
     store.worker_connected("worker", PROTOCOL_VERSION, "epoch")
@@ -216,7 +226,7 @@ async def test_reopen_waits_for_old_executor_and_pending_result(store, lifecycle
 
 
 @pytest.mark.parametrize("changed", [{"head_sha": "c" * 40}, {"base_branch": "other"}])
-async def test_human_drift_pauses_without_adopting_a_new_baseline(store, lifecycle_flow, changed):
+async def test_human_drift_pauses_without_adopting_a_new_baseline(store, lifecycle_flow, changed, lifecycle_resources):
     flow, _ = lifecycle_flow
     await check(store, flow, GitHub(flow, "open", **changed))
     delivery = store.get_delivery(flow.id)
@@ -227,7 +237,7 @@ async def test_human_drift_pauses_without_adopting_a_new_baseline(store, lifecyc
     assert "head/base" in store.reconcile.get(flow.id).last_error
 
 
-async def test_delayed_close_observation_cannot_replace_newer_reopen(store, lifecycle_flow):
+async def test_delayed_close_observation_cannot_replace_newer_reopen(store, lifecycle_flow, lifecycle_resources):
     flow, _ = lifecycle_flow
     await check(store, flow, GitHub(flow))
     github = GitHub(flow)
@@ -244,7 +254,7 @@ async def test_delayed_close_observation_cannot_replace_newer_reopen(store, life
 
 
 @pytest.mark.parametrize("state", [FlowState.FAILED, FlowState.CANCELLED])
-async def test_reopen_never_reactivates_terminal_flow(store, lifecycle_flow, state):
+async def test_reopen_never_reactivates_terminal_flow(store, lifecycle_flow, state, lifecycle_resources):
     flow, _ = lifecycle_flow
     await check(store, flow, GitHub(flow))
     flow.state = state
@@ -270,17 +280,17 @@ async def test_lifecycle_webhooks_are_durable_query_hints(store, lifecycle_flow,
 
 
 async def test_close_during_capability_preparation_never_dispatches(store, pending_revision, monkeypatch):
-    flow, job, _, github, subject = pending_revision
-    original = github.create_push_capability
+    flow, job, _, _github, subject = pending_revision
+    original = Repository.create_push_capability
 
-    async def close_before_return(*args):
-        secret = await original(*args)
+    async def close_before_return(repo):
+        secret = await original(repo)
         with store.transaction() as tx:
             tx.lock_workflow(flow.id)
             pause_delivery(tx, tx.get_delivery(flow.id))
         return secret
 
-    monkeypatch.setattr(github, "create_push_capability", close_before_return)
+    monkeypatch.setattr(Repository, "create_push_capability", close_before_return)
     gateway = WorkerGateway(store, subject, execution_control=StopStore(store), worker_tokens={})
     prepared = await gateway._prepare_assignment(job, "worker-a", "token", "epoch")
     assert prepared is JobState.DONE
@@ -294,7 +304,13 @@ async def test_inflight_revision_is_acknowledged_then_verified_before_reopen(sto
     subject.mark_started(job, task, "worker-a")
     github.sha = "revision"
     remote = GitHub(flow, head_sha="revision")
-    await check(store, flow, remote)
+    async def observe_remote(pr):
+        record_call(pr.repository, "fetch_pull_request", number=pr.number)
+        return PullRequest(pr.repository, **remote.remote.model_dump(exclude_unset=True))
+
+    with monkeypatch.context() as patch:
+        patch.setattr(PullRequest, "refetch", observe_remote)
+        await check(store, flow, remote)
     result = verified_result(task, commit_sha="revision", remote_sha="revision")
     assert accept(store, job, result) == "pending"
     assert await subject.results.apply(job.id) is JobState.DONE
@@ -303,7 +319,7 @@ async def test_inflight_revision_is_acknowledged_then_verified_before_reopen(sto
     assert github.comments == [] and github.review_requests == []
     assert len(store.reviews.pending(flow.id)) == 1
     remote.remote = remote.remote.model_copy(update={"state": "open"})
-    monkeypatch.setattr(github, "get_pull_request", remote.get_pull_request)
+    monkeypatch.setattr(PullRequest, "refetch", observe_remote)
     await check(store, flow, github)
     assert store.get_delivery(flow.id).state is DeliveryState.OPEN
     assert store.get_delivery(flow.id).head_sha == "revision"
@@ -312,19 +328,19 @@ async def test_inflight_revision_is_acknowledged_then_verified_before_reopen(sto
     assert queued.job_id is None
 
 
-async def test_close_after_comment_dispatch_recovers_only_the_existing_marker(store, monkeypatch):
+async def test_close_after_comment_dispatch_recovers_only_the_existing_marker(store, monkeypatch, recording_resources):
     job, _ = accepted_coding(store)
     github = RecordingGitHub()
-    original = github.comment
+    original = Issue.comment
 
-    async def close_and_lose_response(*args):
-        await original(*args)
+    async def close_and_lose_response(issue, body):
+        await original(issue, body)
         with store.transaction() as tx:
             tx.lock_workflow(job.flow_id)
             pause_delivery(tx, tx.get_delivery(job.flow_id))
-        raise GitHubAdapterError(GitHubErrorKind.TRANSIENT, "comment")
+        raise GitHubError(GitHubErrorKind.TRANSIENT, "comment")
 
-    monkeypatch.setattr(github, "comment", close_and_lose_response)
+    monkeypatch.setattr(Issue, "comment", close_and_lose_response)
     subject = coordinator(store, github)
     with pytest.raises(ResultPending):
         await subject.results.apply(job.id)
@@ -336,7 +352,7 @@ async def test_close_after_comment_dispatch_recovers_only_the_existing_marker(st
     assert all(j.kind is not JobKind.REVISION for j in store.list_jobs(job.flow_id))
 
 
-async def test_initial_close_before_final_commit_keeps_verified_identity_and_can_reopen(store):
+async def test_initial_close_before_final_commit_keeps_verified_identity_and_can_reopen(store, recording_resources):
     flow = ControlService(store).on_trigger("owner/repo", 8, 42)
     store.worker_connected("worker", PROTOCOL_VERSION, "epoch")
     job = store.assign_job("worker", "token", "epoch")
@@ -359,7 +375,7 @@ async def test_initial_close_before_final_commit_keeps_verified_identity_and_can
     assert store.record_assignment_result(job.id, "worker", "token", "epoch",
         terminal.model_dump(mode="json"), terminal_digest(terminal)) == "pending"
     github = RecordingGitHub()
-    github.pull_request = PullRequestSnapshot(number=17, state="closed", head_branch=delivery.branch,
+    github.pull_request = PullRequest(number=17, state="closed", head_branch=delivery.branch,
                                               head_sha="abc123", base_branch="trunk")
     subject = coordinator(store, github)
     assert await subject.results.apply(job.id) is JobState.DONE

@@ -7,12 +7,6 @@ import pytest
 from app.contracts.protocol import FlowToolErrorKind, FlowToolRequest
 from app.control.tools import FlowToolService
 from app.domain.delivery_models import DeliveryReceipt, PreparedDelivery
-from app.domain.github_models import (
-    GitHubAdapterError,
-    GitHubErrorKind,
-    PullRequestSnapshot,
-    RemoteRef,
-)
 from app.domain.models import (
     Attempt,
     DeliveryState,
@@ -23,8 +17,17 @@ from app.domain.models import (
     FlowToolCall,
     VcsKind,
 )
-from app.domain.ports import GitHubClient
+from app.github import (
+    GitHubApp,
+    GitHubError,
+    GitHubErrorKind,
+    Issue,
+    PullRequest,
+    RemoteRef,
+    Repository,
+)
 from app.persistence.store import Store
+from tests.github import RecordingGitHub, record_call
 
 
 class ToolStore:
@@ -99,45 +102,35 @@ class ToolStore:
         return self.calls.get(call_id)
 
 
-class ToolGitHub:
+class ToolGitHub(RecordingGitHub):
     def __init__(self) -> None:
-        self.opened = 0
-        self.labels = 0
-        self.reviews = 0
+        super().__init__()
+        self.opened_count = 0
+        self.labels_count = 0
+        self.reviews_count = 0
 
-    async def get_ref(self, installation_id: int, repo: str, branch: str, *, retry_transient=False) -> RemoteRef:
-        return RemoteRef(branch=branch, sha="abc123")
 
-    async def find_pull_request_by_head(
-        self, installation_id: int, repo: str, branch: str
-    ) -> PullRequestSnapshot | None:
-        return None
-
-    async def open_pull_request(
-        self,
-        installation_id: int,
-        repo: str,
-        head: str,
-        base: str,
-        title: str,
-        body: str,
-    ) -> PullRequestSnapshot:
-        self.opened += 1
+@pytest.fixture
+def tool_resources(recording_resources, monkeypatch):
+    async def open_pull_request(repo, *, head, base, title, body):
+        state = record_call(repo, "open_pull_request", head=head)
+        state.opened_count += 1
         assert base == "trunk"
         assert "Closes #9" in body
-        return PullRequestSnapshot(
-            number=17,
-            state="open",
-            head_branch=head,
-            head_sha="abc123",
-            base_branch=base,
-        )
+        return PullRequest(repo, 17, state="open", head_branch=head,
+                           head_sha="abc123", base_branch=base)
 
-    async def add_label(self, *args: object) -> None:
-        self.labels += 1
+    async def add_label(issue, label):
+        state = record_call(issue.repository, "add_label", number=issue.number)
+        state.labels_count += 1
 
-    async def request_reviewers(self, *args: object) -> None:
-        self.reviews += 1
+    async def request_reviewers(pr, reviewers):
+        state = record_call(pr.repository, "request_reviewers", number=pr.number)
+        state.reviews_count += 1
+
+    monkeypatch.setattr(Repository, "open_pull_request", open_pull_request)
+    monkeypatch.setattr(Issue, "add_label", add_label)
+    monkeypatch.setattr(PullRequest, "request_reviewers", request_reviewers)
 
 
 def request(name: str = "flow.open_pr") -> FlowToolRequest:
@@ -158,12 +151,12 @@ def request(name: str = "flow.open_pr") -> FlowToolRequest:
 
 
 @pytest.mark.asyncio
-async def test_open_pr_prepares_and_replays_without_remote_delivery() -> None:
+async def test_open_pr_prepares_and_replays_without_remote_delivery(tool_resources) -> None:
     store = ToolStore()
     github = ToolGitHub()
     service = FlowToolService(
         cast(Store, cast(Any, store)),
-        cast(GitHubClient, cast(Any, github)),
+        cast(GitHubApp, cast(Any, github)),
     )
 
     first = await service.execute(request(), worker_id="worker-a")
@@ -174,27 +167,27 @@ async def test_open_pr_prepares_and_replays_without_remote_delivery() -> None:
     assert first.result == PreparedDelivery(status="prepared", head_sha="abc123", delivery_version=0)
     assert store.delivery.state is DeliveryState.OPENING
     assert store.delivery.head_sha == "abc123"
-    assert github.opened == 0
-    assert github.labels == github.reviews == 0
+    assert github.opened_count == 0
+    assert github.labels_count == github.reviews_count == 0
 
 
 @pytest.mark.asyncio
-async def test_open_pr_after_merge_cannot_restore_opening_delivery() -> None:
+async def test_open_pr_after_merge_cannot_restore_opening_delivery(tool_resources) -> None:
     # INITIAL may still be running and call the tool again after its PR was merged.
     store = ToolStore()
     store.delivery.state = DeliveryState.MERGED
     store.delivery.pr_number = 17
-    service = FlowToolService(cast(Store, store), cast(GitHubClient, ToolGitHub()))
+    service = FlowToolService(cast(Store, store), cast(GitHubApp, ToolGitHub()))
     response = await service.execute(request(), worker_id="worker-a")
     assert response.error_kind is FlowToolErrorKind.CONFLICT
     assert store.delivery.state is DeliveryState.MERGED
     assert store.calls == {}
 
 
-async def test_unknown_flow_tool_fails_closed() -> None:
+async def test_unknown_flow_tool_fails_closed(tool_resources) -> None:
     service = FlowToolService(
         cast(Store, cast(Any, ToolStore())),
-        cast(GitHubClient, cast(Any, ToolGitHub())),
+        cast(GitHubApp, cast(Any, ToolGitHub())),
     )
 
     response = await service.execute(request("flow.spawn"), worker_id="worker-a")
@@ -206,10 +199,10 @@ async def test_unknown_flow_tool_fails_closed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_prepared_delivery_and_tool_receipt_roll_back_together(monkeypatch) -> None:
+async def test_prepared_delivery_and_tool_receipt_roll_back_together(monkeypatch, tool_resources) -> None:
     # A crash saving the tool reply must not leave a half-prepared delivery behind.
     store = ToolStore()
-    service = FlowToolService(cast(Store, store), cast(GitHubClient, ToolGitHub()))
+    service = FlowToolService(cast(Store, store), cast(GitHubApp, ToolGitHub()))
     complete = store.complete_tool_call
 
     def crash(*args, **kwargs):
@@ -224,7 +217,7 @@ async def test_prepared_delivery_and_tool_receipt_roll_back_together(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_cancel_during_remote_verification_cannot_prepare_delivery(monkeypatch) -> None:
+async def test_cancel_during_remote_verification_cannot_prepare_delivery(monkeypatch, tool_resources) -> None:
     # The GitHub read yields control; cancellation wins before local intent is committed.
     store = ToolStore()
     github = ToolGitHub()
@@ -233,8 +226,8 @@ async def test_cancel_during_remote_verification_cannot_prepare_delivery(monkeyp
         store.flow.state = FlowState.CANCELLED
         return RemoteRef(branch="flow/3", sha="abc123")
 
-    monkeypatch.setattr(github, "get_ref", cancel_and_read)
-    service = FlowToolService(cast(Store, store), cast(GitHubClient, github))
+    monkeypatch.setattr(Repository, "fetch_ref", cancel_and_read)
+    service = FlowToolService(cast(Store, store), cast(GitHubApp, github))
     response = await service.execute(request(), worker_id="worker-a")
     assert response.error_kind is FlowToolErrorKind.STALE_ASSIGNMENT
     assert store.delivery.state is DeliveryState.NONE
@@ -242,18 +235,18 @@ async def test_cancel_during_remote_verification_cannot_prepare_delivery(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_stale_assignment_is_distinct_from_invalid_arguments() -> None:
+async def test_stale_assignment_is_distinct_from_invalid_arguments(tool_resources) -> None:
     store = ToolStore()
     store.assignment_is_active = False
     service = FlowToolService(
         cast(Store, cast(Any, store)),
-        cast(GitHubClient, cast(Any, ToolGitHub())),
+        cast(GitHubApp, cast(Any, ToolGitHub())),
     )
 
     stale = await service.execute(request(), worker_id="worker-a")
     active_service = FlowToolService(
         cast(Store, cast(Any, ToolStore())),
-        cast(GitHubClient, cast(Any, ToolGitHub())),
+        cast(GitHubApp, cast(Any, ToolGitHub())),
     )
     invalid = await active_service.execute(
         request().model_copy(update={"arguments": {"title": "", "body": "Done"}}),
@@ -266,19 +259,15 @@ async def test_stale_assignment_is_distinct_from_invalid_arguments() -> None:
 
 
 @pytest.mark.asyncio
-async def test_github_rate_limit_is_returned_as_retryable() -> None:
-    class RateLimitedGitHub(ToolGitHub):
-        async def get_ref(self, installation_id: int, repo: str, branch: str, *, retry_transient=False) -> RemoteRef:
-            raise GitHubAdapterError(
-                GitHubErrorKind.RATE_LIMITED,
-                "get ref",
-                status_code=429,
-                retry_after="30",
-            )
+async def test_github_rate_limit_is_returned_as_retryable(tool_resources, monkeypatch) -> None:
+    async def limited(repo, branch, *, retry_transient=False):
+        raise GitHubError(GitHubErrorKind.RATE_LIMITED, "get ref", status_code=429,
+                          retry_after="30")
 
+    monkeypatch.setattr(Repository, "fetch_ref", limited)
     service = FlowToolService(
         cast(Store, cast(Any, ToolStore())),
-        cast(GitHubClient, cast(Any, RateLimitedGitHub())),
+        cast(GitHubApp, cast(Any, ToolGitHub())),
     )
 
     response = await service.execute(request(), worker_id="worker-a")
@@ -289,12 +278,12 @@ async def test_github_rate_limit_is_returned_as_retryable() -> None:
 
 
 @pytest.mark.asyncio
-async def test_new_call_cannot_change_existing_pr_arguments() -> None:
+async def test_new_call_cannot_change_existing_pr_arguments(tool_resources) -> None:
     store = ToolStore()
     github = ToolGitHub()
     service = FlowToolService(
         cast(Store, cast(Any, store)),
-        cast(GitHubClient, cast(Any, github)),
+        cast(GitHubApp, cast(Any, github)),
     )
     assert (await service.execute(request(), worker_id="worker-a")).error is None
     conflicting = request().model_copy(
@@ -308,16 +297,16 @@ async def test_new_call_cannot_change_existing_pr_arguments() -> None:
 
     assert response.result is None
     assert response.error == "flow.open_pr arguments conflict with the existing delivery"
-    assert github.opened == 0
+    assert github.opened_count == 0
 
 
 @pytest.mark.asyncio
-async def test_remote_sha_mismatch_fails_before_opening_pr() -> None:
+async def test_remote_sha_mismatch_fails_before_opening_pr(tool_resources) -> None:
     store = ToolStore()
     github = ToolGitHub()
     service = FlowToolService(
         cast(Store, cast(Any, store)),
-        cast(GitHubClient, cast(Any, github)),
+        cast(GitHubApp, cast(Any, github)),
     )
     mismatched = request().model_copy(update={"commit_sha": "different", "remote_sha": "different"})
 
@@ -325,4 +314,4 @@ async def test_remote_sha_mismatch_fails_before_opening_pr() -> None:
 
     assert response.result is None
     assert response.error == "remote branch SHA does not match the worker-verified commit"
-    assert github.opened == 0
+    assert github.opened_count == 0

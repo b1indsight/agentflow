@@ -2,12 +2,11 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from copy import deepcopy
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
-from pydantic import SecretStr
 
 from app.contracts.protocol import (
     ExecutionResult,
@@ -21,15 +20,6 @@ from app.contracts.protocol import (
 )
 from app.control.coordinator import JobCoordinator
 from app.domain.delivery_models import DeliveryReceipt
-from app.domain.github_models import (
-    IssueSnapshot,
-    PullRequestSnapshot,
-    PullRequestStatus,
-    PushCapability,
-    RemoteRef,
-    RepositorySnapshot,
-    ReviewThread,
-)
 from app.domain.models import (
     Attempt,
     DeliveryState,
@@ -42,10 +32,13 @@ from app.domain.models import (
     JobState,
     VcsKind,
 )
-from app.domain.ports import GitHubClient
+from app.github import GitHubApp, PullRequest
 from app.persistence.store import Store
+from tests.github import RecordingGitHub
 from tests.result_memory import MemoryResults, MemoryStops
 from tests.review_memory import MemoryReviews
+
+pytestmark = pytest.mark.usefixtures("recording_resources")
 
 
 class MemoryStore:
@@ -220,129 +213,6 @@ class MemoryStore:
             self.sources[source_job_id, source_key] = job
         return job
 
-class RecordingGitHub:
-    def __init__(self) -> None:
-        self.comments: list[str] = []
-        self.comment_bodies: list[str] = []
-        self.pull_request: PullRequestSnapshot | None = None
-        self.opened: list[str] = []
-        self.review_requests: list[list[str]] = []
-        self.labels: list[list[str]] = []
-        self.threads: list[ReviewThread] = []
-        self.thread_replies: list[str] = []
-
-    async def get_issue(self, installation_id: int, repo: str, number: int) -> IssueSnapshot:
-        return IssueSnapshot(number=number, title="Real issue", body="Real body", state="open")
-
-    async def list_pull_request_files(self, *args):
-        from app.domain.context_models import FilePage
-        return FilePage(files=[])
-
-    async def list_pull_request_discussions(self, *args):
-        from app.domain.context_models import DiscussionPage
-        return DiscussionPage(discussions=[])
-
-    async def list_review_threads(self, installation_id, repo, number):
-        from app.domain.github_models import ReviewThreads
-        return ReviewThreads(repo=repo, pr_number=number, fetched_at=datetime.now(UTC),
-                             threads=[t.model_copy(deep=True) for t in self.threads])
-
-    async def get_review_thread(self, installation, repo, number, thread_id):
-        return await self.list_review_threads(installation, repo, number)
-
-    async def find_review_reply(self, installation, repo, number, thread_id, marker):
-        return next((i + 1 for i, body in enumerate(self.thread_replies)
-                     if marker in body.splitlines()), None)
-
-    async def reply_review_thread(self, installation, repo, number, root, body):
-        self.thread_replies.append(body)
-        return len(self.thread_replies)
-
-    async def get_repository(self, installation_id: int, repo: str) -> RepositorySnapshot:
-        return RepositorySnapshot(full_name=repo, default_branch="trunk")
-
-    async def create_push_capability(self, installation_id: int, repo: str) -> PushCapability:
-        return PushCapability(
-            token=SecretStr("push-token"),
-            repository=repo,
-            permissions={"contents": "write"},
-            expires_at=datetime.now(UTC) + timedelta(minutes=10),
-        )
-
-    async def get_ref(self, installation_id: int, repo: str, branch: str, *, retry_transient=False) -> RemoteRef:
-        return RemoteRef(branch=branch, sha="abc123")
-
-    async def find_pull_request_by_head(self, *args: object) -> PullRequestSnapshot | None:
-        return self.pull_request
-
-    async def get_pull_request(self, installation: int, repo: str, number: int) -> PullRequestStatus:
-        from tests.review_memory import review_context
-        pr = review_context().pull_request
-        assert pr is not None
-        details = pr.model_dump()
-        if self.pull_request is not None:
-            details.update(self.pull_request.model_dump())
-        return PullRequestStatus.model_validate(details | {"repo": repo})
-
-    async def open_pull_request(
-        self,
-        installation_id: int,
-        repo: str,
-        head: str,
-        base: str,
-        title: str,
-        body: str,
-    ) -> PullRequestSnapshot:
-        self.opened.append(head)
-        self.pull_request = PullRequestSnapshot(
-            number=17,
-            state="open",
-            head_branch=head,
-            head_sha="abc123",
-            base_branch=base,
-        )
-        return self.pull_request
-
-    async def find_comment(self, installation_id: int, repo: str, number: int, marker: str):
-        return next(
-            (index + 1 for index, body in enumerate(self.comment_bodies) if marker in body), None
-        )
-
-    async def comment(self, installation_id: int, repo: str, number: int, body: str) -> int:
-        self.comment_bodies.append(body)
-        self.comments.append(body.split("\n\n<!-- flowtool:effect:")[0])
-        return len(self.comment_bodies)
-
-    async def get_labels(self, installation_id: int, repo: str, number: int) -> list[str]:
-        return self.labels[-1] if self.labels else []
-
-    async def get_reviewers(self, installation_id: int, repo: str, number: int, *, since: datetime):
-        return set(self.review_requests[-1]) if self.review_requests else set()
-
-    async def review_thread_resolved(self, installation_id: int, thread_id: str) -> bool:
-        return False
-
-    async def request_reviewers(
-        self,
-        installation_id: int,
-        repo: str,
-        number: int,
-        reviewers: list[str],
-    ) -> None:
-        self.review_requests.append(reviewers)
-
-    async def add_label(self, installation_id, repo, number, label):
-        self.labels.append([*await self.get_labels(installation_id, repo, number), label])
-
-    async def remove_label(self, installation_id, repo, number, label):
-        self.labels.append([item for item in await self.get_labels(installation_id, repo, number)
-                            if item.casefold() != label.casefold()])
-
-    async def resolve_review_thread(self, installation_id: int, thread_id: str) -> None:
-        self.threads = [t.model_copy(update={"resolved": True}) if t.thread_id == thread_id else t
-                        for t in self.threads]
-
-
 async def apply_result(subject: JobCoordinator, job: Job, result: ExecutionResult) -> JobState:
     """Model the accepted-inbox boundary before invoking the production result application."""
     store = cast(MemoryStore, subject.store)
@@ -356,7 +226,7 @@ async def prepare(subject: JobCoordinator, job: Job):
     return await subject.prepare(job)
 
 
-def coordinator(store: Store | MemoryStore, github: RecordingGitHub) -> JobCoordinator:
+def coordinator(store: Store | MemoryStore, github: GitHubApp) -> JobCoordinator:
     settings = SimpleNamespace(
         allowlist=["alice"],
         reviewers=["carol"],
@@ -369,7 +239,7 @@ def coordinator(store: Store | MemoryStore, github: RecordingGitHub) -> JobCoord
     )
     return JobCoordinator(
         cast(Store, store),
-        cast(GitHubClient, github),
+        github,
         settings,
     )
 
@@ -572,14 +442,16 @@ async def test_revision_results_remain_control_plane_side_effects(monkeypatch) -
     github = RecordingGitHub()
     from tests.review_memory import review_context
 
-    async def current_pr(*args):
-        return review_context().pull_request.model_copy(update={
-            "head_branch": "flow/1", "base_branch": "trunk", "head_sha": "abc123",
-        })
+    async def current_pr(pr: PullRequest) -> PullRequest:
+        observed = review_context().pull_request
+        assert observed is not None
+        return PullRequest(pr.repository, **(observed.model_dump(exclude_unset=True) | {
+            "number": pr.number, "head_branch": "flow/1", "base_branch": "trunk", "head_sha": "abc123",
+        }))
 
     subject = coordinator(store, github)
 
-    monkeypatch.setattr(github, "get_pull_request", current_pr)
+    monkeypatch.setattr(PullRequest, "refetch", current_pr)
 
     revision_job = Job(id=7, flow_id=1, kind=JobKind.REVISION, state=JobState.RUNNING)
     task = await prepare(subject, revision_job)

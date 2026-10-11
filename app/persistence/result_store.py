@@ -9,9 +9,8 @@ from psycopg.rows import class_row
 from psycopg.types.json import Jsonb
 
 from app.contracts.result_models import EffectReceipt, EffectRecord, EffectState, ResultPlan
-from app.domain.github_models import GitHubAdapterError
-from app.domain.github_retry import retry_delay
 from app.domain.models import Job
+from app.github import GitHubError, retry_delay
 
 if TYPE_CHECKING:
     from app.persistence.store import Store
@@ -61,7 +60,7 @@ class ResultStore:
             ).fetchone()
             return ResultPlan.model_validate(row["plan"]) if row else None
 
-    def defer_verification(self, job: Job, error: GitHubAdapterError) -> None:
+    def defer_verification(self, job: Job, error: GitHubError) -> None:
         """Retain a server deadline only while this accepted result still needs verification."""
         with self.store.transaction() as tx:
             tx.lock_workflow(job.flow_id)
@@ -182,7 +181,7 @@ class ResultStore:
                 " WHERE job_id=%s AND effect_key=%s AND claimed_by=%s AND state=%s",
                 (
                     state,
-                    Jsonb(receipt.model_dump(mode="json")) if receipt else None,
+                    Jsonb(receipt.model_dump(mode="json", exclude_unset=True)) if receipt else None,
                     error,
                     self.store.now() + timedelta(seconds=delay),
                     definitely_unsent,

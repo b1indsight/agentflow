@@ -25,8 +25,9 @@ from app.worker.execution.vcs import prepare_flow_repo
 from app.worker.runtime import WorkerRootLock
 from app.worker.state.session import WorkerSession
 from app.worker.transport.client import WorkerClient
+from tests.github import RecordingGitHub
 from tests.test_archive_recovery import ready_archive, receive
-from tests.test_coordinator import RecordingGitHub, coordinator
+from tests.test_coordinator import coordinator
 from tests.test_merge import route_merge
 from tests.test_remote_e2e import QueueConnection, QueueSocket
 from tests.test_vcs import _git_fixture, _jj
@@ -96,7 +97,7 @@ async def connect_once(store, subject, executor, journal, *, drop_ack=False, cli
     shutil.which("jj") is None, reason="jj is not installed",
 ))])
 async def test_original_worker_recovers_cleanup_and_replays_without_redeleting(
-    store, tmp_path, monkeypatch, window, backend,
+    store, tmp_path, monkeypatch, window, backend, recording_resources,
 ):
     flow, job, task, subject = await ready_archive(
         store, start=window not in {"before-received", "started-lost", "result-started-lost"},
@@ -180,7 +181,9 @@ async def test_original_worker_recovers_cleanup_and_replays_without_redeleting(
 
 
 @pytest.mark.parametrize("window", ["completed-disconnected", "unstarted-rejected"])
-async def test_merge_recovery_preserves_coding_completion_and_root_provenance(store, tmp_path, window):
+async def test_merge_recovery_preserves_coding_completion_and_root_provenance(
+    store, tmp_path, window, recording_resources,
+):
     old, result = accepted_coding(store, receive=False)
     flow = store.get_flow(old.flow_id)
     if window == "unstarted-rejected":

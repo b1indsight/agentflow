@@ -10,7 +10,6 @@ from psycopg.types.json import Jsonb
 
 from app.contracts.protocol import RevisionTask
 from app.domain.context_models import MAX_DISCUSSIONS, ReviewContext
-from app.domain.github_models import ReviewThreads
 from app.domain.judge_models import JudgeDecision
 from app.domain.models import (
     TERMINAL_STATES,
@@ -28,6 +27,7 @@ from app.domain.review_models import (
     ReviewFeedback,
 )
 from app.domain.review_policy import decide_review_batch
+from app.github import ReviewThreads
 
 if TYPE_CHECKING:
     from app.persistence.store import Store
@@ -502,7 +502,7 @@ class ReviewStore:
         with self.store.connection() as connection:
             connection.execute(
                 "UPDATE review_batches SET threads=COALESCE(threads,%s) WHERE id=%s",
-                (Jsonb(snapshot.model_dump(mode="json")), batch.id),
+                (Jsonb(snapshot.model_dump(mode="json", exclude_unset=True)), batch.id),
             )
         return batch.threads or snapshot
 
@@ -557,7 +557,7 @@ class ReviewStore:
                     " snapshot=EXCLUDED.snapshot WHERE review_thread_observations.fetched_at"
                     " <= EXCLUDED.fetched_at",
                     (flow_id, thread.thread_id, snapshot.fetched_at,
-                     Jsonb(thread.model_dump(mode="json"))),
+                     Jsonb(thread.model_dump(mode="json", exclude_unset=True))),
                 )
                 for comment in thread.comments:
                     if comment.is_bot:

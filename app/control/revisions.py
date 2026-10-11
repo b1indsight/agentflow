@@ -2,7 +2,7 @@
 
 from app.contracts.protocol import RevisionTask, RevisionTaskResult
 from app.domain.models import DeliveryState, Flow, FlowDelivery, Job
-from app.domain.ports import GitHubClient
+from app.github import Repository
 
 
 def frozen_revision(job: Job) -> RevisionTask:
@@ -51,21 +51,19 @@ def revision_mismatch(task: RevisionTask, result: RevisionTaskResult) -> str | N
 
 
 async def verify_revision_remote(
-    github: GitHubClient, flow: Flow, delivery: FlowDelivery, head_sha: str,
+    repo: Repository, flow: Flow, delivery: FlowDelivery, head_sha: str,
 ) -> str | None:
     """Require the original open PR and exact branch/ref SHA; API errors remain retryable."""
     if (flow.installation_id is None or delivery.state is not DeliveryState.OPEN
             or delivery.pr_number is None or not delivery.base_branch or not delivery.head_sha):
         return "revision has no open verified delivery"
-    pr = await github.get_pull_request(flow.installation_id, flow.repo, delivery.pr_number)
-    ref = await github.get_ref(flow.installation_id, flow.repo, delivery.branch)
+    pr = await repo.fetch_pull_request(delivery.pr_number)
+    ref = await repo.fetch_ref(delivery.branch)
     if (pr.number != delivery.pr_number or pr.state != "open" or pr.merged
             or pr.head_repository != flow.repo
             or pr.head_branch != delivery.branch or pr.base_branch != delivery.base_branch
             or ref.branch != delivery.branch or pr.head_sha != head_sha or ref.sha != head_sha):
         return "original PR or remote branch changed; revision paused"
-    if head_sha != delivery.head_sha and not await github.compare_commits(
-        flow.installation_id, flow.repo, delivery.head_sha, head_sha,
-    ):
+    if head_sha != delivery.head_sha and not await repo.compare_commits(delivery.head_sha, head_sha):
         return "revision commit does not advance the frozen delivery head"
     return None

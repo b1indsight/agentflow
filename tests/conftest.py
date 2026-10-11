@@ -11,6 +11,50 @@ from app.persistence.store import Store
 
 
 @pytest.fixture
+def recording_resources(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.github import Issue, PullRequest, Repository, ReviewThread
+    from tests.github import (
+        RecordingIssue,
+        RecordingPullRequest,
+        RecordingRepository,
+        RecordingReviewThread,
+    )
+
+    monkeypatch.setattr(Repository, "refetch", RecordingRepository.refetch)
+    monkeypatch.setattr(Repository, "fetch_ref", RecordingRepository.fetch_ref)
+    monkeypatch.setattr(Repository, "compare_commits", RecordingRepository.compare_commits)
+    monkeypatch.setattr(Repository, "create_push_capability", RecordingRepository.create_push_capability)
+    monkeypatch.setattr(Repository, "find_pull_request_by_head", RecordingRepository.find_pull_request_by_head)
+    monkeypatch.setattr(Repository, "open_pull_request", RecordingRepository.open_pull_request)
+    monkeypatch.setattr(Issue, "refetch", RecordingIssue.refetch)
+    monkeypatch.setattr(Issue, "comment", RecordingIssue.comment)
+    monkeypatch.setattr(Issue, "find_comment", RecordingIssue.find_comment)
+    monkeypatch.setattr(Issue, "fetch_labels", RecordingIssue.fetch_labels)
+    monkeypatch.setattr(Issue, "add_label", RecordingIssue.add_label)
+    monkeypatch.setattr(Issue, "remove_label", RecordingIssue.remove_label)
+    monkeypatch.setattr(Issue, "list_comments_page", RecordingIssue.list_comments_page)
+    monkeypatch.setattr(PullRequest, "refetch", RecordingPullRequest.refetch)
+    monkeypatch.setattr(PullRequest, "comment", RecordingIssue.comment)
+    monkeypatch.setattr(PullRequest, "find_comment", RecordingIssue.find_comment)
+    monkeypatch.setattr(PullRequest, "fetch_labels", RecordingIssue.fetch_labels)
+    monkeypatch.setattr(PullRequest, "add_label", RecordingIssue.add_label)
+    monkeypatch.setattr(PullRequest, "remove_label", RecordingIssue.remove_label)
+    monkeypatch.setattr(PullRequest, "fetch_reviewers", RecordingPullRequest.fetch_reviewers)
+    monkeypatch.setattr(PullRequest, "request_reviewers", RecordingPullRequest.request_reviewers)
+    monkeypatch.setattr(PullRequest, "list_comments_page", RecordingPullRequest.list_comments_page)
+    monkeypatch.setattr(PullRequest, "list_reviews_page", RecordingPullRequest.list_reviews_page)
+    monkeypatch.setattr(PullRequest, "list_review_threads", RecordingPullRequest.list_review_threads)
+    monkeypatch.setattr(PullRequest, "list_review_thread_page", RecordingPullRequest.list_review_thread_page)
+    monkeypatch.setattr(PullRequest, "list_files", RecordingPullRequest.list_files)
+    monkeypatch.setattr(PullRequest, "list_discussions", RecordingPullRequest.list_discussions)
+    monkeypatch.setattr(ReviewThread, "refetch", RecordingReviewThread.refetch)
+    monkeypatch.setattr(ReviewThread, "find_reply", RecordingReviewThread.find_reply)
+    monkeypatch.setattr(ReviewThread, "reply", RecordingReviewThread.reply)
+    monkeypatch.setattr(ReviewThread, "fetch_resolution", RecordingReviewThread.fetch_resolution)
+    monkeypatch.setattr(ReviewThread, "resolve", RecordingReviewThread.resolve)
+
+
+@pytest.fixture
 def postgresql_url() -> Iterator[str]:
     base_url = os.getenv("FLOWTOOL_TEST_DATABASE_URL")
     if not base_url:

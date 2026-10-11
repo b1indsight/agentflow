@@ -6,9 +6,8 @@ import asyncio
 
 from app.contracts.protocol import FlowToolErrorKind, FlowToolRequest, FlowToolResponse
 from app.domain.delivery_models import DeliveryReceipt, OpenedDelivery, PreparedDelivery
-from app.domain.github_models import GitHubAdapterError, GitHubErrorKind
 from app.domain.models import TERMINAL_STATES, DeliveryState, FlowDelivery
-from app.domain.ports import GitHubClient
+from app.github import GitHubApp, GitHubError, GitHubErrorKind
 from app.persistence.store import Store
 
 
@@ -26,7 +25,7 @@ class FlowToolService:
     def __init__(
         self,
         store: Store,
-        github: GitHubClient,
+        github: GitHubApp,
     ) -> None:
         self.store = store
         self.github = github
@@ -44,7 +43,7 @@ class FlowToolService:
                 return await self._open_pr(request, worker_id)
             except FlowToolRejected as exc:
                 return self._error(request, exc.kind, str(exc))
-            except GitHubAdapterError as exc:
+            except GitHubError as exc:
                 return self._github_error(request, exc)
 
     async def _open_pr(self, request: FlowToolRequest, worker_id: str) -> FlowToolResponse:
@@ -136,7 +135,8 @@ class FlowToolService:
                 FlowToolErrorKind.AUTHORIZATION,
                 "Flow has no GitHub installation",
             )
-        remote = await self.github.get_ref(installation_id, flow.repo, delivery.branch, retry_transient=True)
+        repo = self.github.installation(installation_id).repository(flow.repo)
+        remote = await repo.fetch_ref(delivery.branch, retry_transient=True)
         if remote.branch != delivery.branch:
             raise FlowToolRejected(
                 FlowToolErrorKind.UPSTREAM,
@@ -204,7 +204,7 @@ class FlowToolService:
         return body if marker.casefold() in body.casefold() else f"{marker}\n\n{body}".rstrip()
 
     @staticmethod
-    def _github_error(request: FlowToolRequest, error: GitHubAdapterError) -> FlowToolResponse:
+    def _github_error(request: FlowToolRequest, error: GitHubError) -> FlowToolResponse:
         kinds = {
             GitHubErrorKind.AUTHENTICATION: FlowToolErrorKind.AUTHORIZATION,
             GitHubErrorKind.PERMISSION: FlowToolErrorKind.AUTHORIZATION,

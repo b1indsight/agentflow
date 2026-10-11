@@ -6,11 +6,10 @@ from types import SimpleNamespace
 import pytest
 
 from app.control.resolution import covered_thread
-from app.domain.github_models import GitHubAdapterError, GitHubErrorKind
-from app.github.client import GitHubApp
+from app.github import GitHubApp, GitHubError, GitHubErrorKind, PullRequest, ReviewThread
 from app.github.thread_pages import ThreadCursor
 from app.github.threads import MAX_THREAD_BYTES
-from tests.test_github_client import AsyncEndpoint, settings
+from tests.test_github_client import AsyncEndpoint, install_client, settings
 from tests.test_github_feedback import adapter
 from tests.test_review_resolution import feedback
 
@@ -43,13 +42,16 @@ async def test_all_thread_reads_preserve_the_same_comment_identity(tmp_path, mon
     raw["author"] = None
     app = GitHubApp(settings(tmp_path))
     client = Client(outer(thread), {"node": thread}, outer(thread))
-    monkeypatch.setattr(app, "_installation_client", lambda *args, **kwargs: client)
+    install_client(monkeypatch, lambda *args, **kwargs: client)
 
-    full = await app.list_review_threads(42, "owner/repo", 17)
-    single = await app.get_review_thread(42, "owner/repo", 17, "T1")
-    page = await app.list_review_thread_page(42, "owner/repo", 17, None)
+    pr = PullRequest(app.installation(42).repository("owner/repo"), 17)
+    full = await pr.list_review_threads()
+    single = await ReviewThread(pr, "T1").refetch()
+    page = await pr.list_review_thread_page(None)
 
-    assert full.threads == single.threads == page.snapshot.threads
+    observations = (full.threads[0], single, page.snapshot.threads[0])
+    assert all(type(item) is ReviewThread and item.pull_request is pr for item in observations)
+    assert all(item.comments == single.comments for item in observations)
     comment = full.threads[0].comments[0]
     assert (comment.github_id, comment.reply_to_id) == (2**33 + 1, 2**33)
     assert comment.author == "deleted-user" and not comment.is_bot
@@ -79,10 +81,10 @@ async def test_real_sdk_missing_nested_node_keeps_outer_continuation(tmp_path, m
     ))
     app = adapter(tmp_path, monkeypatch, client)
     cursor = ThreadCursor(thread_id="T1", comments="c20", following="t1").model_dump_json()
-    missing = await app.list_review_thread_page(42, "owner/repo", 17, cursor)
-    assert missing.snapshot.limitations == ["thread:missing-node"]
+    missing = await app.list_review_thread_page(cursor)
+    assert missing.snapshot.limitations == ("thread:missing-node",)
     assert missing.next_cursor is not None
-    later = await app.list_review_thread_page(42, "owner/repo", 17, missing.next_cursor)
+    later = await app.list_review_thread_page(missing.next_cursor)
     assert later.snapshot.threads[0].thread_id == "T2"
 
 
@@ -99,17 +101,17 @@ async def test_other_graphql_errors_do_not_skip_unread_feedback(tmp_path, monkey
     ))
     app = adapter(tmp_path, monkeypatch, client)
     cursor = ThreadCursor(thread_id="T1", comments="c20", following="t1").model_dump_json() if nested else None
-    with pytest.raises(GitHubAdapterError):
-        await app.list_review_thread_page(42, "owner/repo", 17, cursor)
+    with pytest.raises(GitHubError):
+        await app.list_review_thread_page(cursor)
 
 
 async def test_nested_and_outer_pages_resume_with_distinct_cursors(tmp_path, monkeypatch):
     client = Client(outer(node(following="comments-20"), following="threads-1"),
                     {"node": node(number=21)}, outer(node("T2", 22)))
     app = adapter(tmp_path, monkeypatch, client)
-    first = await app.list_review_thread_page(42, "owner/repo", 17, None)
-    second = await app.list_review_thread_page(42, "owner/repo", 17, first.next_cursor)
-    third = await app.list_review_thread_page(42, "owner/repo", 17, second.next_cursor)
+    first = await app.list_review_thread_page(None)
+    second = await app.list_review_thread_page(first.next_cursor)
+    third = await app.list_review_thread_page(second.next_cursor)
     assert first.snapshot.threads[0].comments[0].github_id == 2**33 + 1
     assert not first.snapshot.complete and not second.snapshot.complete
     assert third.snapshot.complete and third.next_cursor is None
@@ -128,10 +130,10 @@ async def test_removed_nested_thread_does_not_trap_later_threads(tmp_path, monke
     client = Client({"node": None}, outer(node("T2")))
     app = adapter(tmp_path, monkeypatch, client)
     cursor = ThreadCursor(thread_id="T1", comments="c20", following="t1").model_dump_json()
-    missing = await app.list_review_thread_page(42, "owner/repo", 17, cursor)
-    assert missing.snapshot.limitations == ["thread:missing-node"]
+    missing = await app.list_review_thread_page(cursor)
+    assert missing.snapshot.limitations == ("thread:missing-node",)
     assert missing.next_cursor is not None
-    later = await app.list_review_thread_page(42, "owner/repo", 17, missing.next_cursor)
+    later = await app.list_review_thread_page(missing.next_cursor)
     assert later.snapshot.threads[0].thread_id == "T2"
 
 
@@ -157,14 +159,14 @@ async def test_invalid_pages_do_not_masquerade_as_complete(tmp_path, monkeypatch
     else:
         thread["comments"]["pageInfo"]["hasNextPage"] = "false"
     app = adapter(tmp_path, monkeypatch, Client(data))
-    with pytest.raises(GitHubAdapterError) as caught:
-        await app.list_review_thread_page(42, "owner/repo", 17, None)
+    with pytest.raises(GitHubError) as caught:
+        await app.list_review_thread_page(None)
     assert caught.value.kind is GitHubErrorKind.UNEXPECTED_RESPONSE
 
 
 async def test_cursor_is_validated_before_network_io(tmp_path, monkeypatch):
     endpoint = AsyncEndpoint()
     app = adapter(tmp_path, monkeypatch, SimpleNamespace(async_graphql=endpoint))
-    with pytest.raises(GitHubAdapterError):
-        await app.list_review_thread_page(42, "owner/repo", 17, json.dumps({"thread_id": "T1"}))
+    with pytest.raises(GitHubError):
+        await app.list_review_thread_page(json.dumps({"thread_id": "T1"}))
     assert endpoint.calls == []

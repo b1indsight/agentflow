@@ -24,7 +24,8 @@ class MemoryResults:
         if plan.job_id in self.plans:
             assert self.plans[plan.job_id].digest == plan.digest
             return
-        self.plans[plan.job_id] = plan.model_copy(deep=True)
+        plan = ResultPlan.model_validate_json(plan.model_dump_json())
+        self.plans[plan.job_id] = plan
         self.records[plan.job_id] = [
             EffectRecord(
                 job_id=plan.job_id,
@@ -83,6 +84,8 @@ class MemoryResults:
         definitely_unsent: bool = False,
     ) -> None:
         persisted = self._owned(record)
+        if receipt is not None:
+            receipt = EffectReceipt.model_validate_json(receipt.model_dump_json(exclude_unset=True))
         persisted.state, persisted.receipt, persisted.last_error = state, receipt, error
         persisted.next_attempt_at = self.clock + timedelta(seconds=delay)
         persisted.claimed_by = persisted.claim_expires_at = None

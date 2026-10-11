@@ -7,15 +7,15 @@ import pytest
 from githubkit import GitHub as SDK
 
 from app.control.tools import FlowToolService
-from app.domain.ports import GitHubClient
-from app.github.client import GitHubApp
+from app.github import GitHubApp, Installation, Repository
 from app.persistence.store import Store
+from tests.github import NATIVE_REPOSITORY_FETCH_REF
 from tests.test_flow_tools import ToolGitHub, ToolStore, request
 from tests.test_github_client import settings
 
 
 @pytest.mark.parametrize("status", [503, 429])
-async def test_open_pr_ref_recovers_within_the_same_tool_call(tmp_path, monkeypatch, status):
+async def test_open_pr_ref_recovers_within_the_same_tool_call(tmp_path, monkeypatch, status, recording_resources):
     calls, sleeps = [], []
 
     def transport(incoming):
@@ -32,13 +32,17 @@ async def test_open_pr_ref_recovers_within_the_same_tool_call(tmp_path, monkeypa
         sleeps.append(seconds)
 
     app = GitHubApp(settings(tmp_path))
-    monkeypatch.setattr(app, "_installation_client", lambda _, **options: SDK(
+    monkeypatch.setattr(Installation, "_client", lambda self, **options: SDK(
         "test-token", async_transport=httpx.MockTransport(transport), **options,
     ))
     monkeypatch.setattr("githubkit.core.anyio.sleep", sleep)
     memory, github = ToolStore(), ToolGitHub()
-    monkeypatch.setattr(github, "get_ref", app.get_ref)
-    service = FlowToolService(cast(Store, memory), cast(GitHubClient, github))
+    async def fetch_ref(repo, branch, *, retry_transient=False):
+        native_repo = app.installation(repo.installation.installation_id).repository(repo.full_name)
+        return await NATIVE_REPOSITORY_FETCH_REF(native_repo, branch, retry_transient=retry_transient)
+
+    monkeypatch.setattr(Repository, "fetch_ref", fetch_ref)
+    service = FlowToolService(cast(Store, memory), cast(GitHubApp, github))
     invocation = request().model_copy(update={"commit_sha": "a" * 40, "remote_sha": "a" * 40})
     response = await service.execute(invocation, worker_id="worker-a")
     assert response.error_kind is None and response.result is not None

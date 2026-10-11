@@ -4,9 +4,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.domain.github_models import GitHubAdapterError
-from app.github.client import GitHubApp
-from tests.test_github_client import AsyncEndpoint, request_failed, response, settings
+from app.github import GitHubApp, GitHubError, PullRequest
+from tests.test_github_client import (
+    AsyncEndpoint,
+    install_client,
+    request_failed,
+    response,
+    settings,
+)
 
 
 async def test_add_label_requires_existing_definition_and_uses_incremental_api(tmp_path, monkeypatch):
@@ -16,8 +21,8 @@ async def test_add_label_requires_existing_definition_and_uses_incremental_api(t
     client = SimpleNamespace(rest=SimpleNamespace(issues=SimpleNamespace(
         async_get_label=get, async_add_labels=add,
     )))
-    monkeypatch.setattr(github, "_installation_client", lambda _, **kwargs: client)
-    await github.add_label(42, "octo/repo", 7, "flow:done")
+    install_client(monkeypatch, lambda _, **kwargs: client)
+    await PullRequest(github.installation(42).repository("octo/repo"), 7).add_label("flow:done")
     assert get.calls == [(("octo", "repo", "flow:done"), {})]
     assert add.calls == [(("octo", "repo", 7), {"labels": ["flow:done"]})]
 
@@ -25,8 +30,8 @@ async def test_add_label_requires_existing_definition_and_uses_incremental_api(t
         raise request_failed(404)
 
     client.rest.issues.async_get_label = missing
-    with pytest.raises(GitHubAdapterError, match="label"):
-        await github.add_label(42, "octo/repo", 7, "missing")
+    with pytest.raises(GitHubError, match="label"):
+        await PullRequest(github.installation(42).repository("octo/repo"), 7).add_label("missing")
     assert len(add.calls) == 1
 
 
@@ -44,10 +49,10 @@ async def test_remove_label_404_requires_positive_target_lookup(tmp_path, monkey
     client = SimpleNamespace(rest=SimpleNamespace(issues=SimpleNamespace(
         async_remove_label=missing, async_list_labels_on_issue=listed,
     )))
-    monkeypatch.setattr(github, "_installation_client", lambda _, **kwargs: client)
+    install_client(monkeypatch, lambda _, **kwargs: client)
     # A concurrent removal is success; a hidden repo or a still-present label is not.
     if remaining == []:
-        await github.remove_label(42, "octo/repo", 7, "flow:in-review")
+        await PullRequest(github.installation(42).repository("octo/repo"), 7).remove_label("flow:in-review")
     else:
-        with pytest.raises(GitHubAdapterError):
-            await github.remove_label(42, "octo/repo", 7, "flow:in-review")
+        with pytest.raises(GitHubError):
+            await PullRequest(github.installation(42).repository("octo/repo"), 7).remove_label("flow:in-review")

@@ -55,16 +55,16 @@ def inbox_retry(delivery_id: str) -> None:
 def project_check(repo: str) -> None:
     """只读校验已配置的组织 Project、Status 字段及选项。"""
     from app.control.config import settings
-    from app.domain.github_models import GitHubAdapterError
-    from app.github.client import GitHubApp
+    from app.github import GitHubApp, GitHubError
 
     config = settings.projects.get(repo.casefold())
     if config is None:
         typer.echo(f"{repo}: Projects disabled")
         return
     try:
-        target = asyncio.run(GitHubApp(settings).project_client(config).validate(repo))
-    except GitHubAdapterError as error:
+        installation = GitHubApp(settings).installation(config.installation_id)
+        target = asyncio.run(installation.project(config).validate(installation.repository(repo)))
+    except GitHubError as error:
         typer.echo(str(error), err=True)
         raise typer.Exit(1) from None
     typer.echo(f"{repo}: {target.title} ({config.project_id}), Status={target.status_name} ({config.status_field_id})")

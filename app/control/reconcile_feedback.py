@@ -4,23 +4,25 @@ import asyncio
 
 from loguru import logger
 
-from app.domain.github_models import (
+from app.domain.models import DeliveryState, FlowState, ReviewItemKind
+from app.domain.review_models import FeedbackUpdate
+from app.github import (
     FeedbackPage,
     FeedbackSource,
-    GitHubAdapterError,
+    GitHubApp,
+    GitHubError,
     GitHubErrorKind,
+    Issue,
+    PullRequest,
+    retry_delay,
 )
-from app.domain.github_retry import retry_delay
-from app.domain.models import DeliveryState, FlowState, ReviewItemKind
-from app.domain.ports import GitHubClient
-from app.domain.review_models import FeedbackUpdate
 from app.persistence.reconcile_store import FeedbackCheck
 from app.persistence.store import Store
 
 
 class FeedbackReconciler:
     def __init__(
-        self, store: Store, github: GitHubClient, *, settle_seconds: float,
+        self, store: Store, github: GitHubApp, *, settle_seconds: float,
         bot_login: str = "flowtool[bot]", interval: float = 300, batch_size: int = 64,
         concurrency: int = 4,
     ) -> None:
@@ -69,26 +71,28 @@ class FeedbackReconciler:
                     raise ValueError("missing installation")
                 boundary = tx.reviews.observation_boundary()
             number = flow.issue_number if check.source == "issue_comments" else delivery.pr_number
+            repo = self.github.installation(flow.installation_id).repository(flow.repo)
             threads, diagnostic = None, None
             updates: list[FeedbackUpdate] = []
             if check.source == "threads":
-                thread_page = await self.github.list_review_thread_page(
-                    flow.installation_id, flow.repo, number, check.cursor,
-                )
+                thread_page = await PullRequest(repo, number).list_review_thread_page(check.cursor)
                 threads = thread_page.snapshot
-                threads = threads.model_copy(update={"threads": [thread.model_copy(update={
-                    "comments": [comment.model_copy(update={"is_bot": comment.is_bot
-                        or comment.author.casefold() == self.bot_login}) for comment in thread.comments],
-                }) for thread in threads.threads]})
+                threads = threads.model_copy(update={"threads": tuple(thread.model_copy(update={
+                    "comments": tuple(comment.model_copy(update={"is_bot": comment.is_bot
+                        or comment.author.casefold() == self.bot_login}) for comment in thread.comments),
+                }) for thread in threads.threads)})
                 following = thread_page.next_cursor
                 diagnostic = "; ".join(threads.limitations) or (
                     "partial thread fragments; resolution requires a complete fresh read"
                     if any(not thread.complete for thread in threads.threads) else None
                 )
             else:
-                page = await self.github.list_feedback_page(
-                    flow.installation_id, flow.repo, number, check.source, check.cursor,
-                )
+                if check.source == "issue_comments":
+                    page = await Issue(repo, number).list_comments_page(check.cursor)
+                elif check.source == "reviews":
+                    page = await PullRequest(repo, number).list_reviews_page(check.cursor)
+                else:
+                    page = await PullRequest(repo, number).list_comments_page(check.cursor)
                 updates, diagnostic = self._discussion_updates(page, check.source)
                 following = page.next_cursor
             with self.store.transaction() as tx:
@@ -111,7 +115,7 @@ class FeedbackReconciler:
                     diagnostic or ("scan incomplete; continuation saved" if following else None),
                     complete=not threads.limitations if threads is not None else True,
                 )
-        except GitHubAdapterError as error:
+        except GitHubError as error:
             delay = retry_delay(check.failures + 1, self.store.now(), error)
             if error.kind not in {GitHubErrorKind.TRANSIENT, GitHubErrorKind.RATE_LIMITED}:
                 delay = max(1800, delay)

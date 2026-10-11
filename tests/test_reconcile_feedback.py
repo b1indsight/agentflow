@@ -6,35 +6,56 @@ from datetime import timedelta
 import pytest
 
 from app.control.reconcile_feedback import FeedbackReconciler
-from app.domain.github_models import (
+from app.domain.models import DeliveryState, FlowState, ReviewItemKind
+from app.github import (
     FeedbackPage,
-    GitHubAdapterError,
+    GitHubError,
     GitHubErrorKind,
+    Issue,
+    PullRequest,
     RemoteFeedback,
 )
-from app.domain.models import DeliveryState, FlowState, ReviewItemKind
 from app.persistence.reconcile_store import ReconcileStore
 from app.persistence.store import Store
+from tests.github import RecordingGitHub, record_call
 from tests.test_review_batches import batch_for, feedback, ingest, settle
 from tests.test_review_batches import (
     review_flow as review_flow,  # noqa: PLC0414 - fixture re-export
 )
 
 
-class GitHub:
+class GitHub(RecordingGitHub):
     def __init__(self, clock):
+        super().__init__()
         self.clock, self.calls = clock, []
         self.pages = {}
         self.before_return = None
 
-    async def list_feedback_page(self, installation, repo, number, source, cursor):
-        self.calls.append((number, source, cursor))
-        if self.before_return:
-            self.before_return()
-        result = self.pages.get((source, cursor), FeedbackPage(items=[]))
-        if isinstance(result, Exception):
-            raise result
-        return result
+
+@pytest.fixture
+def feedback_resources(recording_resources, monkeypatch):
+    def read(resource, source, cursor):
+        state = record_call(resource.repository, "list_" + source + "_page", number=resource.number)
+        state.calls.append((resource.number, source, cursor))
+        if state.before_return:
+            state.before_return()
+        value = state.pages.get((source, cursor), FeedbackPage(items=[]))
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    async def issue_comments(issue, cursor):
+        return read(issue, "issue_comments", cursor)
+
+    async def pr_comments(pr, cursor):
+        return read(pr, "pr_comments", cursor)
+
+    async def reviews(pr, cursor):
+        return read(pr, "reviews", cursor)
+
+    monkeypatch.setattr(Issue, "list_comments_page", issue_comments)
+    monkeypatch.setattr(PullRequest, "list_comments_page", pr_comments)
+    monkeypatch.setattr(PullRequest, "list_reviews_page", reviews)
 
 
 def page(clock, github_id=101, **changes):
@@ -49,8 +70,7 @@ def poller(store, github, **options):
 
 
 async def test_three_missing_sources_are_ingested_once_without_webhook_or_strong_signal(
-    store, review_flow,
-):
+    store, review_flow, feedback_resources):
     flow, clock = review_flow
     github = GitHub(clock)
     for i, source in enumerate(("issue_comments", "pr_comments", "reviews")):
@@ -68,7 +88,7 @@ async def test_three_missing_sources_are_ingested_once_without_webhook_or_strong
         assert connection.execute("SELECT generation FROM review_buffers").fetchone()["generation"] == 3
 
 
-async def test_continuation_survives_failure_and_restart(store, review_flow):
+async def test_continuation_survives_failure_and_restart(store, review_flow, feedback_resources):
     flow, clock = review_flow
     github = GitHub(clock)
     github.pages["issue_comments", None] = page(clock).model_copy(update={"next_cursor": "2"})
@@ -93,7 +113,7 @@ async def test_continuation_survives_failure_and_restart(store, review_flow):
     assert len(store.reviews.pending(flow.id)) == 2
 
 
-async def test_page_and_cursor_commit_atomically(store, review_flow, monkeypatch):
+async def test_page_and_cursor_commit_atomically(store, review_flow, monkeypatch, feedback_resources):
     flow, clock = review_flow
     github = GitHub(clock)
     github.pages["issue_comments", None] = page(clock)
@@ -115,7 +135,7 @@ async def test_page_and_cursor_commit_atomically(store, review_flow, monkeypatch
 
 
 @pytest.mark.parametrize("deleted", [False, True])
-async def test_slow_same_second_page_cannot_overwrite_webhook(store, review_flow, deleted):
+async def test_slow_same_second_page_cannot_overwrite_webhook(store, review_flow, deleted, feedback_resources):
     flow, clock = review_flow
     github = GitHub(clock)
     github.pages["issue_comments", None] = page(clock)
@@ -130,7 +150,7 @@ async def test_slow_same_second_page_cannot_overwrite_webhook(store, review_flow
     assert items == [] if deleted else items[0].body == "newer webhook"
 
 
-async def test_review_edits_and_invalidation_preserve_versions(store, review_flow):
+async def test_review_edits_and_invalidation_preserve_versions(store, review_flow, feedback_resources):
     flow, clock = review_flow
     github = GitHub(clock)
     github.pages["reviews", None] = page(clock)
@@ -151,7 +171,7 @@ async def test_review_edits_and_invalidation_preserve_versions(store, review_flo
 
 @pytest.mark.parametrize("field,value", [("is_bot", True), ("body", "/flow stop"),
                                          ("state", "pending"), ("author", "flowtool[bot]")])
-async def test_old_commands_and_bots_never_wake_or_control(store, review_flow, field, value):
+async def test_old_commands_and_bots_never_wake_or_control(store, review_flow, field, value, feedback_resources):
     flow, clock = review_flow
     github = GitHub(clock)
     item = page(clock).items[0].model_copy(update={field: value})
@@ -161,14 +181,14 @@ async def test_old_commands_and_bots_never_wake_or_control(store, review_flow, f
     assert store.get_flow(flow.id).state is FlowState.ACTIVE
 
 
-async def test_page_absence_never_infers_deletion(store, review_flow):
+async def test_page_absence_never_infers_deletion(store, review_flow, feedback_resources):
     flow, clock = review_flow
     ingest(store, flow, feedback(clock, kind=ReviewItemKind.CONVERSATION))
     await poller(store, GitHub(clock))._sweep()
     assert len(store.reviews.pending(flow.id)) == 1
 
 
-async def test_changed_delivery_discards_the_page(store, review_flow):
+async def test_changed_delivery_discards_the_page(store, review_flow, feedback_resources):
     flow, clock = review_flow
     github = GitHub(clock)
     github.pages["issue_comments", None] = page(clock)
@@ -183,7 +203,7 @@ async def test_changed_delivery_discards_the_page(store, review_flow):
     assert store.reviews.pending(flow.id) == []
 
 
-async def test_repeated_review_does_not_downgrade_an_authorized_signal(store, review_flow):
+async def test_repeated_review_does_not_downgrade_an_authorized_signal(store, review_flow, feedback_resources):
     flow, clock = review_flow
     update = feedback(clock, kind=ReviewItemKind.REVIEW_BODY, signal="request_changes", submitted=True)
     ingest(store, flow, update)
@@ -197,7 +217,7 @@ async def test_repeated_review_does_not_downgrade_an_authorized_signal(store, re
     assert item.version == 1 and item.signal == "request_changes" and item.submitted
 
 
-async def test_observed_review_then_authorized_submission_preserves_request_changes(store, review_flow):
+async def test_observed_review_then_authorized_submission_preserves_request_changes(store, review_flow, feedback_resources):
     flow, clock = review_flow
     github = GitHub(clock)
     github.pages["reviews", None] = page(clock, state="changes_requested")
@@ -211,7 +231,7 @@ async def test_observed_review_then_authorized_submission_preserves_request_chan
     assert settle(store)[0].kind.value == "revision"
 
 
-async def test_polling_missing_predecessor_applies_the_queued_successor(store, review_flow):
+async def test_polling_missing_predecessor_applies_the_queued_successor(store, review_flow, feedback_resources):
     flow, clock = review_flow
     ingest(store, flow, feedback(clock, kind=ReviewItemKind.CONVERSATION, body="A"))
     github = GitHub(clock)
@@ -226,7 +246,7 @@ async def test_polling_missing_predecessor_applies_the_queued_successor(store, r
     assert store.reviews.pending(flow.id)[0].body == "C"
 
 
-async def test_edit_to_command_supersedes_feedback_and_later_edit_recovers(store, review_flow):
+async def test_edit_to_command_supersedes_feedback_and_later_edit_recovers(store, review_flow, feedback_resources):
     flow, clock = review_flow
     ingest(store, flow, feedback(clock, kind=ReviewItemKind.CONVERSATION, body="Change old code"))
     github = GitHub(clock)
@@ -240,7 +260,7 @@ async def test_edit_to_command_supersedes_feedback_and_later_edit_recovers(store
     assert store.reviews.pending(flow.id)[0].body == "Please add a bound."
 
 
-async def test_poll_marks_same_webhook_command_body_inert(store, review_flow):
+async def test_poll_marks_same_webhook_command_body_inert(store, review_flow, feedback_resources):
     flow, clock = review_flow
     ingest(store, flow, feedback(clock, kind=ReviewItemKind.CONVERSATION, body="/flow stop"))
     github = GitHub(clock)
@@ -258,7 +278,7 @@ async def test_poll_marks_same_webhook_command_body_inert(store, review_flow):
 
 
 @pytest.mark.parametrize("verdict", ["ignore", "wait"])
-async def test_blank_backlog_cannot_hide_text_or_repeat_forever(store, review_flow, verdict):
+async def test_blank_backlog_cannot_hide_text_or_repeat_forever(store, review_flow, verdict, recording_resources):
     from app.domain.models import TriageVerdict, Verdict
     from tests.test_review_batches import claim, run_triage
 
@@ -294,7 +314,7 @@ def test_blank_authorized_signal_stays_with_bounded_text_batch(store, review_flo
 
 
 @pytest.mark.parametrize("verdict", ["ignore", "wait"])
-async def test_recovered_backlog_drains_without_oversized_or_repeated_wait_batches(store, review_flow, verdict):
+async def test_recovered_backlog_drains_without_oversized_or_repeated_wait_batches(store, review_flow, verdict, feedback_resources):
     from app.domain.models import TriageVerdict, Verdict
     from tests.test_review_batches import claim, run_triage
 
@@ -319,10 +339,10 @@ async def test_recovered_backlog_drains_without_oversized_or_repeated_wait_batch
         assert store.reviews.pending(flow.id) == []
 
 
-async def test_rate_limit_preserves_cursor_and_deadline(store, review_flow):
+async def test_rate_limit_preserves_cursor_and_deadline(store, review_flow, feedback_resources):
     flow, clock = review_flow
     github = GitHub(clock)
-    github.pages["reviews", None] = GitHubAdapterError(
+    github.pages["reviews", None] = GitHubError(
         GitHubErrorKind.RATE_LIMITED, "feedback_page", retry_after="600",
     )
     await poller(store, github)._sweep()
@@ -334,26 +354,31 @@ async def test_rate_limit_preserves_cursor_and_deadline(store, review_flow):
     assert sum(source == "reviews" for _, source, _ in github.calls) == 1
 
 
-async def test_source_pool_is_bounded_and_cancellation_joins_reads(store, review_flow):
+async def test_source_pool_is_bounded_and_cancellation_joins_reads(store, review_flow, feedback_resources, monkeypatch):
     _, clock = review_flow
     entered, release = asyncio.Event(), asyncio.Event()
 
     class Slow(GitHub):
-        active = 0
-        maximum = 0
-
-        async def list_feedback_page(self, *args):
-            self.active += 1
-            self.maximum = max(self.maximum, self.active)
-            if self.active == 2:
-                entered.set()
-            try:
-                await release.wait()
-                return FeedbackPage(items=[])
-            finally:
-                self.active -= 1
+        active: int = 0
+        maximum: int = 0
 
     github = Slow(clock)
+
+    async def slow_page(resource, cursor):
+        record_call(resource.repository, "list_feedback_page", number=resource.number)
+        github.active += 1
+        github.maximum = max(github.maximum, github.active)
+        if github.active == 2:
+            entered.set()
+        try:
+            await release.wait()
+            return FeedbackPage(items=[])
+        finally:
+            github.active -= 1
+
+    monkeypatch.setattr(Issue, "list_comments_page", slow_page)
+    monkeypatch.setattr(PullRequest, "list_comments_page", slow_page)
+    monkeypatch.setattr(PullRequest, "list_reviews_page", slow_page)
     task = asyncio.create_task(poller(store, github, concurrency=2)._sweep())
     await asyncio.wait_for(entered.wait(), 1)
     task.cancel()

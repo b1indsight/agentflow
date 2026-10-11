@@ -9,7 +9,6 @@ from loguru import logger
 
 from app.control.archive import verify_archive
 from app.control.lifecycle import record_merge
-from app.domain.github_models import PullRequestMerge
 from app.domain.models import (
     DeliveryState,
     Flow,
@@ -19,6 +18,7 @@ from app.domain.models import (
     WorkerStatus,
     WorkerView,
 )
+from app.github import PullRequestMerge
 from app.persistence.store import Store
 from app.plugins import emit_hook, get_plugin_manager
 

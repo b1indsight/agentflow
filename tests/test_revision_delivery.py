@@ -14,6 +14,7 @@ from app.domain.models import (
     RevisionCodingOutput,
     VcsKind,
 )
+from app.github import PullRequest, RemoteRef, Repository
 from app.worker.execution.executor import WorkerExecutor
 from app.worker.execution.vcs import flow_repo_path, prepare_flow_repo
 from app.worker.state.session import WorkerSession
@@ -152,9 +153,10 @@ def test_revision_output_requires_every_field_and_rejects_extra_data():
 
 
 @pytest.fixture
-async def revision_control():
+async def revision_control(recording_resources):
     from app.domain.models import Attempt, DeliveryState, FlowDelivery, Job, JobKind, JobState
-    from tests.test_coordinator import MemoryStore, RecordingGitHub, coordinator, prepare
+    from tests.github import RecordingGitHub
+    from tests.test_coordinator import MemoryStore, coordinator, prepare
 
     store, github = MemoryStore(), RecordingGitHub()
     store.attempt = Attempt(id=1, flow_id=1, codex_session_id="session-1")
@@ -162,21 +164,18 @@ async def revision_control():
     store.delivery = FlowDelivery(flow_id=1, branch="flow/1", base_branch="trunk",
                                   state=DeliveryState.OPEN, pr_number=17, head_sha="abc123")
     job = Job(id=21, flow_id=1, kind=JobKind.REVISION, state=JobState.RUNNING)
-    from app.domain.github_models import ReviewComment, ReviewThread
+    from app.github import ReviewComment, ReviewThread
     item = store.reviews.batch.feedback[0]
     github.threads = [ReviewThread(thread_id="T1", repo="owner/repo", pr_number=17,
-        path="app.py", resolved=False, outdated=False, comments=[ReviewComment(
+        path="app.py", resolved=False, outdated=False, complete=True, comments=[ReviewComment(
             github_id=item.github_id, node_id="C500", author=item.author, is_bot=False,
             body=item.body, updated_at=item.updated_at)])]
     subject = coordinator(store, github)
     from tests.review_memory import review_context
 
-    async def current_pr(*args):
-        return review_context().pull_request.model_copy(update={
-            "head_branch": "flow/1", "head_sha": "abc123", "base_branch": "trunk",
-        })
-
-    github.get_pull_request = current_pr
+    github.pull_request = review_context().pull_request.model_copy(update={
+        "head_branch": "flow/1", "head_sha": "abc123", "base_branch": "trunk",
+    })
     task = await prepare(subject, job)
     return store, github, job, subject, task
 
@@ -203,8 +202,8 @@ async def test_resolve_payloads_only_carry_their_threads_current_and_historical_
 
     from app.contracts.result_models import ResolveEffect
     from app.control.resolution import plan_resolution
-    from app.domain.github_models import ReviewThreads
     from app.domain.models import AddressedComment, ReviewItemKind
+    from app.github import ReviewThreads
     from tests.test_review_resolution import feedback, human, snapshot
 
     store, _, _, _, task = revision_control
@@ -270,10 +269,10 @@ async def test_control_checks_actual_pr_and_lineage(revision_control, monkeypatc
     from tests.test_coordinator import apply_result
 
     store, github, job, subject, task = revision_control
-    original = github.get_pull_request
+    original = PullRequest.refetch
 
-    async def changed_pr(*args):
-        pr = await original(*args)
+    async def changed_pr(pr):
+        pr = await original(pr)
         return pr.model_copy(update={
             "state": "closed" if change == "closed" else "open",
             "base_branch": "other" if change == "base" else task.base_branch,
@@ -281,18 +280,16 @@ async def test_control_checks_actual_pr_and_lineage(revision_control, monkeypatc
             "head_repository": "fork/repo" if change == "fork" else task.repo,
         })
 
-    async def ref(*args):
-        from app.domain.github_models import RemoteRef
-
+    async def ref(repo, branch, *, retry_transient=False):
         return RemoteRef(branch=task.branch, sha="new")
 
-    async def compare(*args):
+    async def compare(repo, base, head):
         return False
 
-    monkeypatch.setattr(github, "get_pull_request", changed_pr)
+    monkeypatch.setattr(PullRequest, "refetch", changed_pr)
     if change == "lineage":
-        monkeypatch.setattr(github, "get_ref", ref)
-        monkeypatch.setattr(github, "compare_commits", compare, raising=False)
+        monkeypatch.setattr(Repository, "fetch_ref", ref)
+        monkeypatch.setattr(Repository, "compare_commits", compare)
     result = verified_result(task, **(
         {"commit_sha": "new", "remote_sha": "new"} if change == "lineage" else {}
     ))
@@ -303,25 +300,24 @@ async def test_control_checks_actual_pr_and_lineage(revision_control, monkeypatc
 
 @pytest.mark.parametrize("pending", ["deferred", "clarification", "none"])
 async def test_verified_partial_delivery_waits_without_rereview(revision_control, monkeypatch, pending):
-    from app.domain.github_models import RemoteRef
     from app.domain.models import AddressedComment, DeferredComment
     from tests.test_coordinator import apply_result
 
     store, github, job, subject, task = revision_control
-    original = github.get_pull_request
+    original = PullRequest.refetch
 
-    async def current_pr(*args):
-        return (await original(*args)).model_copy(update={"head_sha": "new"})
+    async def current_pr(pr):
+        return (await original(pr)).model_copy(update={"head_sha": "new"})
 
-    async def ref(*args):
+    async def ref(repo, branch, *, retry_transient=False):
         return RemoteRef(branch=task.branch, sha="new")
 
-    async def compare(*args):
+    async def compare(repo, base, head):
         return True
 
-    monkeypatch.setattr(github, "get_pull_request", current_pr)
-    monkeypatch.setattr(github, "get_ref", ref)
-    monkeypatch.setattr(github, "compare_commits", compare, raising=False)
+    monkeypatch.setattr(PullRequest, "refetch", current_pr)
+    monkeypatch.setattr(Repository, "fetch_ref", ref)
+    monkeypatch.setattr(Repository, "compare_commits", compare)
     item = task.feedback[0]
     identity = {"item_id": item.item_id, "version": item.version, "comment_id": item.github_id}
     output = revision_output(

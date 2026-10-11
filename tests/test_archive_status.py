@@ -14,14 +14,19 @@ from app.contracts.result_models import CommentEffect, EffectState, ResultPendin
 from app.control.archive import archive_progress
 from app.control.effects import ResultEffects
 from app.control.service import ControlService
-from app.domain.github_models import GitHubAdapterError, GitHubErrorKind
 from app.domain.models import FlowState, JobState
-from app.github.client import GitHubApp
+from app.github import GitHubApp, GitHubError, GitHubErrorKind, Issue, PullRequest
 from app.persistence.result_store import ResultStore
 from app.persistence.store import Store
 from app.plugins.hookspecs import hookimpl
+from tests.github import (
+    NATIVE_ISSUE_COMMENT,
+    NATIVE_ISSUE_FIND_COMMENT,
+    RecordingGitHub,
+    record_call,
+)
 from tests.test_archive_recovery import ready_archive, receive
-from tests.test_coordinator import RecordingGitHub, coordinator
+from tests.test_coordinator import coordinator
 from tests.test_github_client import settings
 from tests.test_merge import route_merge
 
@@ -33,25 +38,36 @@ class ArchiveGitHub(RecordingGitHub):
         self.writes: list[tuple[str, int]] = []
         self.notifications: list[tuple[int, str]] = []
 
-    async def get_labels(self, installation_id, repo, number):
-        return list(self.targets.setdefault(number, {"flow", "Flow:In-Review", "user-label"}))
 
-    async def add_label(self, installation_id, repo, number, label):
-        self.writes.append(("add", number))
-        self.targets[number].update({label, "concurrent-user-label"})
+@pytest.fixture
+def archive_resources(recording_resources, monkeypatch):
+    original_comment = Issue.comment
 
-    async def remove_label(self, installation_id, repo, number, label):
-        self.writes.append(("remove", number))
-        self.targets[number] = {item for item in self.targets[number]
-                                if item.casefold() != label.casefold()}
+    async def fetch_labels(issue):
+        state = record_call(issue.repository, "fetch_labels", number=issue.number)
+        return list(state.targets.setdefault(issue.number, {"flow", "Flow:In-Review", "user-label"}))
 
-    async def set_labels(self, *args):
-        raise AssertionError("archive must preserve unrelated labels")
+    async def add_label(issue, label):
+        state = record_call(issue.repository, "add_label", number=issue.number)
+        state.writes.append(("add", issue.number))
+        state.targets[issue.number].update({label, "concurrent-user-label"})
 
-    async def comment(self, installation_id, repo, number, body):
-        self.writes.append(("comment", number))
-        self.notifications.append((number, body))
-        return await super().comment(installation_id, repo, number, body)
+    async def remove_label(issue, label):
+        state = record_call(issue.repository, "remove_label", number=issue.number)
+        state.writes.append(("remove", issue.number))
+        state.targets[issue.number] = {item for item in state.targets[issue.number]
+                                     if item.casefold() != label.casefold()}
+
+    async def comment(issue, body):
+        state = issue.repository.installation.app
+        state.writes.append(("comment", issue.number))
+        state.notifications.append((issue.number, body))
+        return await original_comment(issue, body)
+
+    monkeypatch.setattr(Issue, "fetch_labels", fetch_labels)
+    monkeypatch.setattr(Issue, "add_label", add_label)
+    monkeypatch.setattr(Issue, "remove_label", remove_label)
+    monkeypatch.setattr(Issue, "comment", comment)
 
 
 async def pending_archive(store):
@@ -85,11 +101,11 @@ def archive_adapter(tmp_path, monkeypatch, transport, *, invalid_key=False):
         return GitHub(*args, **kwargs, async_transport=httpx.MockTransport(transport),
                       cache_strategy=cache)
 
-    monkeypatch.setattr("app.github.client.GitHub", client)
+    monkeypatch.setattr("githubkit.GitHub", client)
     return GitHubApp(config), cache
 
 
-async def test_archive_publishes_stable_status_and_replay_does_not_backfill(store):
+async def test_archive_publishes_stable_status_and_replay_does_not_backfill(store, archive_resources):
     flow, job, result, github, subject = await pending_archive(store)
     assert await subject.results.apply(job.id) is JobState.DONE
     assert set(github.targets) == {flow.issue_number, 17}
@@ -117,16 +133,16 @@ async def test_archive_publishes_stable_status_and_replay_does_not_backfill(stor
     assert store.get_flow_execution(flow.id).released_at is not None
 
 
-async def test_permanent_archive_write_failure_retries_only_frozen_missing_effects(store, monkeypatch):
+async def test_permanent_archive_write_failure_retries_only_frozen_missing_effects(store, monkeypatch, archive_resources):
     flow, job, result, github, subject = await pending_archive(store)
-    comment = github.comment
+    comment = Issue.comment
 
-    async def forbidden(installation, repo, number, body):
-        if number == 17:
-            raise GitHubAdapterError(GitHubErrorKind.PERMISSION, "comment", status_code=403)
-        return await comment(installation, repo, number, body)
+    async def forbidden(issue, body):
+        if issue.number == 17:
+            raise GitHubError(GitHubErrorKind.PERMISSION, "comment", status_code=403)
+        return await comment(issue, body)
 
-    monkeypatch.setattr(github, "comment", forbidden)
+    monkeypatch.setattr(Issue, "comment", forbidden)
     with pytest.raises(ResultPending):
         await subject.results.apply(job.id)
     plan = store.results.get_plan(job.id)
@@ -138,7 +154,7 @@ async def test_permanent_archive_write_failure_retries_only_frozen_missing_effec
     assert "GitHub" in archive_progress(store, flow, store.list_jobs(flow.id))
     assert [number for number, _ in github.notifications] == [flow.issue_number]
     jobs = store.list_jobs(flow.id)
-    monkeypatch.setattr(github, "comment", comment)
+    monkeypatch.setattr(Issue, "comment", comment)
     ControlService(store).retry(flow)
     assert len(store.list_jobs(flow.id)) == len(jobs)
     assert store.get_flow(flow.id).current_attempt_id == flow.current_attempt_id
@@ -152,19 +168,19 @@ async def test_permanent_archive_write_failure_retries_only_frozen_missing_effec
 
 
 @pytest.mark.parametrize("operation", ["add_label", "remove_label", "comment"])
-async def test_archive_recovers_remote_write_before_receipt_after_restart(store, monkeypatch, operation):
+async def test_archive_recovers_remote_write_before_receipt_after_restart(store, monkeypatch, operation, archive_resources):
     flow, job, _, github, subject = await pending_archive(store)
-    original = getattr(github, operation)
+    original = getattr(Issue, operation)
 
     async def lost_response(*args):
         await original(*args)
-        raise GitHubAdapterError(GitHubErrorKind.TRANSIENT, operation)
+        raise GitHubError(GitHubErrorKind.TRANSIENT, operation)
 
-    monkeypatch.setattr(github, operation, lost_response)
+    monkeypatch.setattr(Issue, operation, lost_response)
     with pytest.raises(ResultPending):
         await subject.results.apply(job.id)
     assert store.get_flow_execution(flow.id).released_at is None
-    monkeypatch.setattr(github, operation, original)
+    monkeypatch.setattr(Issue, operation, original)
     store.results.recover_claims()
     due(store, job.id)
     assert await coordinator(store, github).results.apply(job.id) is JobState.DONE
@@ -172,13 +188,13 @@ async def test_archive_recovers_remote_write_before_receipt_after_restart(store,
     assert len(github.notifications) == 2
 
 
-async def test_unknown_archive_comment_stays_pending_without_resending_or_recleaning(store, monkeypatch):
+async def test_unknown_archive_comment_stays_pending_without_resending_or_recleaning(store, monkeypatch, archive_resources):
     flow, job, result, github, subject = await pending_archive(store)
 
-    async def unknown(*args):
-        raise GitHubAdapterError(GitHubErrorKind.TRANSIENT, "comment")
+    async def unknown(issue, body):
+        raise GitHubError(GitHubErrorKind.TRANSIENT, "comment")
 
-    monkeypatch.setattr(github, "comment", unknown)
+    monkeypatch.setattr(Issue, "comment", unknown)
     with pytest.raises(ResultPending):
         await subject.results.apply(job.id)
     due(store, job.id)
@@ -194,10 +210,9 @@ async def test_unknown_archive_comment_stays_pending_without_resending_or_reclea
 @pytest.mark.parametrize("failure", ["invalid_key", "token_rejected", "token_unavailable"])
 @pytest.mark.parametrize("already_dispatched", [False, True])
 async def test_archive_auth_failure_preserves_whether_comment_was_sent(
-    store, tmp_path, monkeypatch, failure, already_dispatched,
-):
+    store, tmp_path, monkeypatch, failure, already_dispatched, archive_resources):
     flow, job, result, github, subject = await pending_archive(store)
-    comment, find_comment = github.comment, github.find_comment
+    comment, find_comment = Issue.comment, Issue.find_comment
     requests = []
 
     def transport(request):
@@ -212,16 +227,18 @@ async def test_archive_auth_failure_preserves_whether_comment_was_sent(
     if already_dispatched:
         async def lost_response(*args):
             await comment(*args)
-            raise GitHubAdapterError(GitHubErrorKind.TRANSIENT, "comment")
-        monkeypatch.setattr(github, "comment", lost_response)
+            raise GitHubError(GitHubErrorKind.TRANSIENT, "comment")
+        monkeypatch.setattr(Issue, "comment", lost_response)
         with pytest.raises(ResultPending):
             await subject.results.apply(job.id)
         due(store, job.id)
         # A failed lookup cannot clear evidence of the preceding uncertain write.
-        monkeypatch.setattr(github, "find_comment", adapter.find_comment)
+        monkeypatch.setattr(Issue, "find_comment", lambda issue, marker:
+            NATIVE_ISSUE_FIND_COMMENT(Issue(adapter.installation(issue.repository.installation.installation_id).repository(issue.repository.full_name), issue.number), marker))
     else:
         # Credentials can expire between the marker lookup and the comment request.
-        monkeypatch.setattr(github, "comment", adapter.comment)
+        monkeypatch.setattr(Issue, "comment", lambda issue, body:
+            NATIVE_ISSUE_COMMENT(Issue(adapter.installation(issue.repository.installation.installation_id).repository(issue.repository.full_name), issue.number), body))
     with pytest.raises(ResultPending, match=("transient" if failure == "token_unavailable"
                                              else "authentication")):
         await subject.results.apply(job.id)
@@ -233,8 +250,8 @@ async def test_archive_auth_failure_preserves_whether_comment_was_sent(
     assert store.results.get_plan(job.id).archive == result
     assert store.get_flow_execution(flow.id).released_at is None
 
-    monkeypatch.setattr(github, "comment", comment)
-    monkeypatch.setattr(github, "find_comment", find_comment)
+    monkeypatch.setattr(Issue, "comment", comment)
+    monkeypatch.setattr(Issue, "find_comment", find_comment)
     if already_dispatched:
         with pytest.raises(ValueError, match="pending result"):
             ControlService(store).retry(flow)
@@ -249,8 +266,8 @@ async def test_archive_auth_failure_preserves_whether_comment_was_sent(
     assert store.get_flow_execution(flow.id).released_at is not None
 
 
-async def test_archive_keeps_dispatch_evidence_when_token_expires_after_post(store, tmp_path, monkeypatch):
-    flow, job, _, github, subject = await pending_archive(store)
+async def test_archive_keeps_dispatch_evidence_when_token_expires_after_post(store, tmp_path, monkeypatch, archive_resources):
+    flow, job, _, _github, subject = await pending_archive(store)
     requests = []
 
     def transport(request):
@@ -270,7 +287,8 @@ async def test_archive_keeps_dispatch_evidence_when_token_expires_after_post(sto
 
     adapter, cache = archive_adapter(tmp_path, monkeypatch, transport)
     monkeypatch.setattr("githubkit.core.anyio.sleep", no_wait)
-    monkeypatch.setattr(github, "comment", adapter.comment)
+    monkeypatch.setattr(Issue, "comment", lambda issue, body:
+        NATIVE_ISSUE_COMMENT(Issue(adapter.installation(issue.repository.installation.installation_id).repository(issue.repository.full_name), issue.number), body))
     with pytest.raises(ResultPending):
         await subject.results.apply(job.id)
     effect = store.results.list_effects(job.id)[2]
@@ -295,7 +313,7 @@ async def test_archive_retry_policy_keeps_push_token_acquisition_retryable(tmp_p
     adapter, _ = archive_adapter(tmp_path, monkeypatch, transport)
     monkeypatch.setattr("githubkit.core.anyio.sleep", no_wait)
     # Credential issuance precedes the worker assignment and has no effect-ledger retry.
-    response = await adapter._app_client().arequest(
+    response = await adapter._client().arequest(
         "POST", "/app/installations/42/access_tokens", json={"repositories": ["repo"]},
     )
     assert response.status_code == 201
@@ -322,11 +340,11 @@ async def test_preparation_discovery_defers_retries_to_its_durable_owner(tmp_pat
 
     adapter, _ = archive_adapter(tmp_path, monkeypatch, transport)
     monkeypatch.setattr("githubkit.core.anyio.sleep", no_wait)
-    with pytest.raises(GitHubAdapterError) as caught:
-        await adapter.list_review_threads(42, "owner/repo", 17)
+    with pytest.raises(GitHubError) as caught:
+        await PullRequest(adapter.installation(42).repository("owner/repo"), 17).list_review_threads()
     assert caught.value.kind is GitHubErrorKind.TRANSIENT
     assert len(queries) == 1
-    snapshot = await adapter.list_review_threads(42, "owner/repo", 17)
+    snapshot = await PullRequest(adapter.installation(42).repository("owner/repo"), 17).list_review_threads()
     assert snapshot.complete
     assert len(queries) == 2
 
@@ -359,15 +377,15 @@ async def test_add_label_retries_definition_read_but_not_write(tmp_path, monkeyp
     adapter, _ = archive_adapter(tmp_path, monkeypatch, transport)
     monkeypatch.setattr("githubkit.core.anyio.sleep", no_wait)
     # A transient definition lookup is safe to repeat; the subsequent write may have committed.
-    with pytest.raises(GitHubAdapterError) as failure:
-        await adapter.add_label(42, "owner/repo", 17, "flow:done")
+    with pytest.raises(GitHubError) as failure:
+        await Issue(adapter.installation(42).repository("owner/repo"), 17).add_label("flow:done")
     assert failure.value.endpoint == "add_label"
     assert failure.value.status_code == 503
     assert requests == [("GET", definition_path), ("GET", definition_path), ("POST", write_path)]
 
 
-async def test_archive_rate_limit_waits_until_reset_without_retry_after(store, tmp_path, monkeypatch):
-    _, job, _, github, subject = await pending_archive(store)
+async def test_archive_rate_limit_waits_until_reset_without_retry_after(store, tmp_path, monkeypatch, archive_resources):
+    _flow, job, _, _github, subject = await pending_archive(store)
     reset = datetime.fromtimestamp(int(store.now().timestamp()) + 3600, UTC)
     requests = []
 
@@ -381,7 +399,8 @@ async def test_archive_rate_limit_waits_until_reset_without_retry_after(store, t
         })
 
     adapter, _ = archive_adapter(tmp_path, monkeypatch, transport)
-    monkeypatch.setattr(github, "comment", adapter.comment)
+    monkeypatch.setattr(Issue, "comment", lambda issue, body:
+        NATIVE_ISSUE_COMMENT(Issue(adapter.installation(issue.repository.installation.installation_id).repository(issue.repository.full_name), issue.number), body))
     with pytest.raises(ResultPending):
         await subject.results.apply(job.id)
     effect = store.results.list_effects(job.id)[2]
@@ -393,13 +412,13 @@ async def test_archive_rate_limit_waits_until_reset_without_retry_after(store, t
     assert len(requests) == 2
 
 
-async def test_archive_effect_retry_checks_current_ownership_before_rearming(store, monkeypatch):
-    flow, job, _, github, subject = await pending_archive(store)
+async def test_archive_effect_retry_checks_current_ownership_before_rearming(store, monkeypatch, archive_resources):
+    flow, job, _, _github, subject = await pending_archive(store)
 
-    async def forbidden(*args):
-        raise GitHubAdapterError(GitHubErrorKind.PERMISSION, "comment", status_code=403)
+    async def forbidden(issue, body):
+        raise GitHubError(GitHubErrorKind.PERMISSION, "comment", status_code=403)
 
-    monkeypatch.setattr(github, "comment", forbidden)
+    monkeypatch.setattr(Issue, "comment", forbidden)
     with pytest.raises(ResultPending):
         await subject.results.apply(job.id)
     before = store.results.list_effects(job.id)
@@ -414,43 +433,43 @@ async def test_archive_effect_retry_checks_current_ownership_before_rearming(sto
 
 @pytest.mark.parametrize("status,kind", [(429, GitHubErrorKind.RATE_LIMITED),
                                        (503, GitHubErrorKind.TRANSIENT)])
-async def test_archive_transient_label_errors_resume_automatically(store, monkeypatch, status, kind):
-    flow, job, _, github, subject = await pending_archive(store)
-    original = github.add_label
+async def test_archive_transient_label_errors_resume_automatically(store, monkeypatch, status, kind, archive_resources):
+    flow, job, _, _github, subject = await pending_archive(store)
+    original = Issue.add_label
 
-    async def unavailable(*args):
-        raise GitHubAdapterError(kind, "add_label", status_code=status)
+    async def unavailable(issue, label):
+        raise GitHubError(kind, "add_label", status_code=status)
 
-    monkeypatch.setattr(github, "add_label", unavailable)
+    monkeypatch.setattr(Issue, "add_label", unavailable)
     with pytest.raises(ResultPending):
         await subject.results.apply(job.id)
     record = store.results.list_effects(job.id)[0]
     assert record.state in {EffectState.RETRY, EffectState.UNCERTAIN}
     assert store.get_flow_execution(flow.id).released_at is None
-    monkeypatch.setattr(github, "add_label", original)
+    monkeypatch.setattr(Issue, "add_label", original)
     due(store, job.id)
     assert await subject.results.apply(job.id) is JobState.DONE
 
 
-async def test_archive_fences_changed_delivery_before_github_mutation(store, monkeypatch):
+async def test_archive_fences_changed_delivery_before_github_mutation(store, monkeypatch, archive_resources):
     flow, job, _, github, subject = await pending_archive(store)
-    original = github.get_labels
+    original = Issue.fetch_labels
 
-    async def changed(*args):
-        labels = await original(*args)
+    async def changed(issue):
+        labels = await original(issue)
         delivery = store.get_delivery(flow.id)
         delivery.version += 1
         store.update_delivery(delivery)
         return labels
 
-    monkeypatch.setattr(github, "get_labels", changed)
+    monkeypatch.setattr(Issue, "fetch_labels", changed)
     with pytest.raises(ResultPending, match="archive ownership changed"):
         await subject.results.apply(job.id)
     assert github.writes == []
     assert store.get_flow_execution(flow.id).released_at is None
 
 
-async def test_existing_status_labels_need_no_mutation(store):
+async def test_existing_status_labels_need_no_mutation(store, archive_resources):
     flow, job, _, github, subject = await pending_archive(store)
     github.targets = {number: {"Flow:Done", "flow", "user-label"}
                       for number in (flow.issue_number, 17)}
@@ -458,7 +477,7 @@ async def test_existing_status_labels_need_no_mutation(store):
     assert github.writes == [("comment", flow.issue_number), ("comment", 17)]
 
 
-async def test_restart_recovers_comment_before_receipt_and_isolates_plugin_failure(store, monkeypatch):
+async def test_restart_recovers_comment_before_receipt_and_isolates_plugin_failure(store, monkeypatch, archive_resources):
     flow, job, _, github, subject = await pending_archive(store)
     finish = ResultStore.finish
 

@@ -9,7 +9,6 @@ import pytest
 from app.contracts.protocol import InitialTaskResult, Succeeded, terminal_digest
 from app.contracts.result_models import EffectState, ResultPending
 from app.control.service import ControlService
-from app.domain.github_models import GitHubAdapterError, GitHubErrorKind
 from app.domain.models import (
     Attempt,
     DeliveryState,
@@ -21,12 +20,14 @@ from app.domain.models import (
     JobState,
     VcsKind,
 )
+from app.github import GitHubError, GitHubErrorKind, Issue, Repository
 from app.persistence.store import Store
-from tests.test_coordinator import MemoryStore, RecordingGitHub, apply_result, coordinator
+from tests.github import RecordingGitHub
+from tests.test_coordinator import MemoryStore, apply_result, coordinator
 
 
 @pytest.fixture
-async def scenario():
+async def scenario(recording_resources):
     store = MemoryStore()
     store.attempt = Attempt(id=1, flow_id=1, codex_session_id="session-1")
     store.flow.current_attempt_id = 1
@@ -115,22 +116,26 @@ async def test_review_label_preserves_user_labels_on_delivery_and_replay(initial
     await apply_result(subject, job, result)
     assert github.labels[-1] == ["bug", "user-owned", "flow:in-review"]
     assert len(github.labels) == 2
+    assert [call for call in github.resource_calls if call["operation"] == "add_label"] == [{
+        "operation": "add_label", "installation_id": store.flow.installation_id,
+        "repo": store.flow.repo, "number": 17,
+    }]
 
 
 async def test_initial_delivery_commits_only_after_all_required_effects(
     initial_scenario, monkeypatch
 ) -> None:
     store, github, job, result = initial_scenario
-    original = github.add_label
+    original = Issue.add_label
     limited = [True]
 
-    async def add_label(*args):
+    async def add_label(issue, label):
         if limited:
             limited.pop()
-            raise GitHubAdapterError(GitHubErrorKind.RATE_LIMITED, "add_label", status_code=429)
-        await original(*args)
+            raise GitHubError(GitHubErrorKind.RATE_LIMITED, "add_label", status_code=429)
+        await original(issue, label)
 
-    monkeypatch.setattr(github, "add_label", add_label)
+    monkeypatch.setattr(Issue, "add_label", add_label)
     with pytest.raises(ResultPending):
         await apply_result(coordinator(store, github), job, result)
     assert store.delivery.state is DeliveryState.OPENING
@@ -149,10 +154,10 @@ async def test_initial_delivery_commits_only_after_all_required_effects(
 
 
 async def test_initial_delivery_records_closed_pr_without_reopening(initial_scenario) -> None:
-    from app.domain.github_models import PullRequestSnapshot
+    from app.github import PullRequest
 
     store, github, job, result = initial_scenario
-    github.pull_request = PullRequestSnapshot(
+    github.pull_request = PullRequest(
         number=17,
         state="closed",
         head_branch="flow/1",
@@ -170,13 +175,13 @@ async def test_closed_pr_after_lost_creation_response_finishes_without_new_write
     initial_scenario, monkeypatch
 ):
     store, github, job, result = initial_scenario
-    create = github.open_pull_request
+    create = Repository.open_pull_request
 
-    async def create_then_lose_response(*args, **kwargs):
-        await create(*args, **kwargs)
-        raise GitHubAdapterError(GitHubErrorKind.TRANSIENT, "open_pull_request")
+    async def create_then_lose_response(repo, head, base, title, body):
+        await create(repo, head, base, title, body)
+        raise GitHubError(GitHubErrorKind.TRANSIENT, "open_pull_request")
 
-    monkeypatch.setattr(github, "open_pull_request", create_then_lose_response)
+    monkeypatch.setattr(Repository, "open_pull_request", create_then_lose_response)
     subject = coordinator(store, github)
     with pytest.raises(ResultPending):
         await apply_result(subject, job, result)
@@ -193,13 +198,13 @@ async def test_closed_pr_after_lost_creation_response_finishes_without_new_write
 async def test_remote_comment_is_recovered_after_response_loss(scenario, monkeypatch) -> None:
     # GitHub accepted the POST, but the control process never received its response.
     store, github, job, result = scenario
-    original = github.comment
+    original = Issue.comment
 
-    async def lose_response(*args):
-        await original(*args)
-        raise GitHubAdapterError(GitHubErrorKind.TRANSIENT, "comment")
+    async def lose_response(issue, body):
+        await original(issue, body)
+        raise GitHubError(GitHubErrorKind.TRANSIENT, "comment")
 
-    monkeypatch.setattr(github, "comment", lose_response)
+    monkeypatch.setattr(Issue, "comment", lose_response)
     with pytest.raises(ResultPending):
         await apply_result(coordinator(store, github), job, result)
     assert store.enqueued == []
@@ -209,6 +214,11 @@ async def test_remote_comment_is_recovered_after_response_loss(scenario, monkeyp
     assert state is JobState.FAILED
     assert len(github.comments) == 1 and store.enqueued == []
     assert store.jobs[job.id].result_applied_at is not None
+    assert [(call["operation"], call["installation_id"], call["repo"], call["number"])
+            for call in github.resource_calls if call["operation"] in {"comment", "find_comment"}] == [
+        ("find_comment", 42, "owner/repo", 17), ("comment", 42, "owner/repo", 17),
+        ("find_comment", 42, "owner/repo", 17),
+    ]
 
 
 @pytest.mark.parametrize("exit_code", [0, 1])
@@ -240,15 +250,15 @@ async def test_merged_initial_result_keeps_execution_facts_without_reopening(ini
 async def test_merge_during_comment_lookup_prevents_dispatch(scenario, monkeypatch):
     # The merge commits while an old result is awaiting a GitHub read, just before POST.
     store, github, job, result = scenario
-    original = github.find_comment
+    original = Issue.find_comment
 
-    async def merge_during_lookup(*args):
+    async def merge_during_lookup(issue, marker):
         store.delivery.state = DeliveryState.MERGED
         store.delivery.version += 1
         store.reviews.cancel(store.flow.id)
-        return await original(*args)
+        return await original(issue, marker)
 
-    monkeypatch.setattr(github, "find_comment", merge_during_lookup)
+    monkeypatch.setattr(Issue, "find_comment", merge_during_lookup)
     subject = coordinator(store, github)
     try:
         await apply_result(subject, job, result)
@@ -268,16 +278,16 @@ async def test_retired_result_reconciles_dispatched_comment_without_resending(
 ):
     # Merge must not discard an uncertain POST or let its recovered result enqueue REVISION.
     store, github, job, result = scenario
-    original = github.comment
+    original = Issue.comment
     calls = []
 
-    async def lose_response(*args):
-        calls.append(args)
+    async def lose_response(issue, body):
+        calls.append((issue.number, body))
         if remote_receipt:
-            await original(*args)
-        raise GitHubAdapterError(GitHubErrorKind.TRANSIENT, "comment")
+            await original(issue, body)
+        raise GitHubError(GitHubErrorKind.TRANSIENT, "comment")
 
-    monkeypatch.setattr(github, "comment", lose_response)
+    monkeypatch.setattr(Issue, "comment", lose_response)
     subject = coordinator(store, github)
     with pytest.raises(ResultPending):
         await apply_result(subject, job, result)
@@ -304,11 +314,11 @@ async def test_unknown_comment_is_not_resubmitted_and_blocks_retry(scenario, mon
     store, github, job, result = scenario
     sent = []
 
-    async def ambiguous_post(*args):
-        sent.append(args)
-        raise GitHubAdapterError(GitHubErrorKind.TRANSIENT, "comment")
+    async def ambiguous_post(issue, body):
+        sent.append((issue.number, body))
+        raise GitHubError(GitHubErrorKind.TRANSIENT, "comment")
 
-    monkeypatch.setattr(github, "comment", ambiguous_post)
+    monkeypatch.setattr(Issue, "comment", ambiguous_post)
     for _ in range(3):
         with pytest.raises(ResultPending):
             await apply_result(coordinator(store, github), job, result)
@@ -350,10 +360,10 @@ async def test_cancel_during_remote_lookup_does_not_authorize_a_comment(
 ) -> None:
     store, github, job, result = scenario
 
-    async def cancel_during_lookup(*args):
+    async def cancel_during_lookup(issue, marker):
         ControlService(cast(Store, store)).cancel(store.flow)
 
-    monkeypatch.setattr(github, "find_comment", cancel_during_lookup)
+    monkeypatch.setattr(Issue, "find_comment", cancel_during_lookup)
     with pytest.raises(ResultPending):
         await apply_result(coordinator(store, github), job, result)
     await apply_result(coordinator(store, github), job, result)
@@ -365,15 +375,15 @@ async def test_cancel_during_remote_lookup_does_not_authorize_a_comment(
 async def test_concurrent_application_has_one_remote_sender(scenario, monkeypatch) -> None:
     store, github, job, result = scenario
     started, release = asyncio.Event(), asyncio.Event()
-    original = github.comment
+    original = Issue.comment
 
-    async def delayed_comment(*args):
-        comment_id = await original(*args)
+    async def delayed_comment(issue, body):
+        comment_id = await original(issue, body)
         started.set()
         await release.wait()
         return comment_id
 
-    monkeypatch.setattr(github, "comment", delayed_comment)
+    monkeypatch.setattr(Issue, "comment", delayed_comment)
     first = asyncio.create_task(apply_result(coordinator(store, github), job, result))
     try:
         await asyncio.wait_for(started.wait(), timeout=1)
@@ -388,14 +398,14 @@ async def test_concurrent_application_has_one_remote_sender(scenario, monkeypatc
 async def test_process_interruption_recovers_a_running_effect(scenario, monkeypatch) -> None:
     store, github, job, result = scenario
     accepted = asyncio.Event()
-    original = github.comment
+    original = Issue.comment
 
-    async def interrupted_comment(*args):
-        await original(*args)
+    async def interrupted_comment(issue, body):
+        await original(issue, body)
         accepted.set()
         await asyncio.Event().wait()
 
-    monkeypatch.setattr(github, "comment", interrupted_comment)
+    monkeypatch.setattr(Issue, "comment", interrupted_comment)
     running = asyncio.create_task(apply_result(coordinator(store, github), job, result))
     await asyncio.wait_for(accepted.wait(), timeout=1)
     running.cancel()
@@ -411,21 +421,21 @@ async def test_rate_limit_waits_then_retries_a_definitely_rejected_request(
     scenario, monkeypatch
 ) -> None:
     store, github, job, result = scenario
-    original = github.comment
+    original = Issue.comment
     attempts = []
 
-    async def limited_comment(*args):
-        attempts.append(args)
+    async def limited_comment(issue, body):
+        attempts.append((issue.number, body))
         if len(attempts) == 1:
-            raise GitHubAdapterError(
+            raise GitHubError(
                 GitHubErrorKind.RATE_LIMITED,
                 "comment",
                 status_code=429,
                 retry_after="60",
             )
-        return await original(*args)
+        return await original(issue, body)
 
-    monkeypatch.setattr(github, "comment", limited_comment)
+    monkeypatch.setattr(Issue, "comment", limited_comment)
     with pytest.raises(ResultPending):
         await apply_result(coordinator(store, github), job, result)
     record = store.results.list_effects(job.id)[0]

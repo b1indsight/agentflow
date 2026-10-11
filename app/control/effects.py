@@ -26,11 +26,17 @@ from app.control.lifecycle import (
     validate_open_pull_request,
 )
 from app.control.thread_effects import has_pending_thread_feedback, resolve_thread, revision_current
-from app.domain.github_models import GitHubAdapterError, GitHubErrorKind
-from app.domain.github_retry import retry_delay
 from app.domain.models import TERMINAL_STATES, DeliveryState, FlowState
-from app.domain.ports import GitHubClient
 from app.domain.review_models import BatchState
+from app.github import (
+    GitHubApp,
+    GitHubError,
+    GitHubErrorKind,
+    Issue,
+    PullRequest,
+    ReviewThread,
+    retry_delay,
+)
 from app.persistence.store import Store
 
 
@@ -46,7 +52,7 @@ def _pending_feedback(store: Store, plan: ResultPlan) -> bool:
 class ResultEffects:
     """Resume ordered effects; an uncertain non-idempotent write is reconciled, never guessed."""
 
-    def __init__(self, store: Store, github: GitHubClient) -> None:
+    def __init__(self, store: Store, github: GitHubApp) -> None:
         self.store = store
         self.github = github
 
@@ -99,7 +105,7 @@ class ResultEffects:
                 self.store.results.finish(record, EffectState.SUCCEEDED,
                                           receipt=EffectReceipt(pending_reason=str(exc)))
             except ResultPending as exc:
-                cause = exc.__cause__ if isinstance(exc.__cause__, GitHubAdapterError) else None
+                cause = exc.__cause__ if isinstance(exc.__cause__, GitHubError) else None
                 self.store.results.finish(
                     record,
                     EffectState.UNCERTAIN,
@@ -107,13 +113,13 @@ class ResultEffects:
                     delay=self._delay(record, cause),
                 )
                 raise
-            except (GitHubAdapterError, DeliveryConflict) as exc:
+            except (GitHubError, DeliveryConflict) as exc:
                 # An error while querying an earlier uncertain write cannot prove it was unsent.
-                definite_rejection = isinstance(exc, GitHubAdapterError) and exc.definitely_rejected
-                ambiguous = isinstance(exc, GitHubAdapterError) and (
+                definite_rejection = isinstance(exc, GitHubError) and exc.definitely_rejected
+                ambiguous = isinstance(exc, GitHubError) and (
                     uncertain or (record.dispatched_at is not None and not definite_rejection)
                 )
-                retryable = isinstance(exc, GitHubAdapterError) and exc.retryable
+                retryable = isinstance(exc, GitHubError) and exc.retryable
                 if (isinstance(record.payload, (ThreadReplyEffect, ResolveEffect))
                         and not ambiguous and not retryable):
                     # A definite permission/deletion failure leaves a diagnostic and pending input;
@@ -196,11 +202,12 @@ class ResultEffects:
         """Observe dispatched writes after merge/cancel; never reissue a mutation."""
         effect = record.payload
         installation, repo = effect.installation_id, effect.repo
+        repository = self.github.installation(installation).repository(repo)
         if isinstance(effect, (CommentEffect, ThreadReplyEffect)):
             # This path already reconciles by marker and forbids resending a dispatched comment.
             return await self._execute(plan, record, records)
         if isinstance(effect, PullRequestEffect):
-            found = await self.github.find_pull_request_by_head(installation, repo, effect.branch)
+            found = await repository.find_pull_request_by_head(effect.branch)
             delivery = self.store.get_delivery(plan.flow_id)
             flow = self.store.get_flow(plan.flow_id)
             cancelled_opening = (flow is not None and flow.state is FlowState.CANCELLED
@@ -210,7 +217,7 @@ class ResultEffects:
                     or found.head_branch != effect.branch or found.base_branch != effect.base_branch):
                 raise ResultPending("retired PR creation awaits its remote identity")
             if cancelled_opening:
-                remote = await self.github.get_pull_request(installation, repo, found.number)
+                remote = await repository.fetch_pull_request(found.number)
                 if plan.delivery is None:
                     raise ResultPending("cancelled PR intent is missing")
                 try:
@@ -221,7 +228,7 @@ class ResultEffects:
                 found = remote
             return EffectReceipt(pull_request=found)
         if isinstance(effect, ResolveEffect):
-            resolved = await self.github.review_thread_resolved(installation, effect.thread_id)
+            resolved = await ReviewThread(PullRequest(repository, effect.number), effect.thread_id).fetch_resolution()
             return EffectReceipt(thread_id=effect.thread_id, remote_resolved=resolved,
                                  pending_reason="PR merged; observed thread without resolving")
         number = effect.number
@@ -232,10 +239,10 @@ class ResultEffects:
                 raise ResultPending("merged PR notification awaits its creation receipt")
             number = created[0].number
         if isinstance(effect, LabelEffect):
-            await self.github.get_labels(installation, repo, number)
+            await Issue(repository, number).fetch_labels()
         else:
             assert record.dispatched_at is not None
-            await self.github.get_reviewers(installation, repo, number, since=record.dispatched_at)
+            await PullRequest(repository, number).fetch_reviewers(since=record.dispatched_at)
         return EffectReceipt(pending_reason="PR merged; observed notification without reissuing it")
 
     async def _execute(
@@ -246,63 +253,50 @@ class ResultEffects:
     ) -> EffectReceipt:
         effect = record.payload
         installation, repo = effect.installation_id, effect.repo
+        repository = self.github.installation(installation).repository(repo)
         if isinstance(effect, (CommentEffect, ThreadReplyEffect)):
             marker = self._comment_marker(plan, effect)
 
             if isinstance(effect, ThreadReplyEffect):
-                comment_id = await self.github.find_review_reply(
-                    installation, repo, effect.number, effect.thread_id, marker)
+                thread = ReviewThread(PullRequest(repository, effect.number), effect.thread_id,
+                                      root_comment_id=effect.root_comment_id)
+                comment_id = await thread.find_reply(marker)
             else:
-                comment_id = await self.github.find_comment(installation, repo, effect.number, marker)
+                issue = Issue(repository, effect.number)
+                comment_id = await issue.find_comment(marker)
             if comment_id is None:
                 # Batch answers follow this same marker-before-retry rule in JobCoordinator._answer.
                 if record.dispatched_at is not None:
                     raise ResultPending("comment outcome is unknown; waiting for its remote marker")
-                if isinstance(effect, ThreadReplyEffect) and not await revision_current(self.github, plan, effect.number):
+                if isinstance(effect, ThreadReplyEffect) and not await revision_current(repository, plan, effect.number):
                     return EffectReceipt(thread_id=effect.thread_id,
                                          pending_reason="PR 已关闭或 head 已变化，未发送线程说明")
                 self._dispatch(plan, record)
                 body = f"{effect.body}\n\n{marker}"
                 if isinstance(effect, ThreadReplyEffect):
-                    comment_id = await self.github.reply_review_thread(
-                        installation, repo, effect.number, effect.root_comment_id, body)
+                    comment_id = await thread.reply(body)
                 else:
-                    comment_id = await self.github.comment(installation, repo, effect.number, body)
+                    comment_id = await issue.comment(body)
             return EffectReceipt(comment_id=comment_id,
                                  thread_id=effect.thread_id if isinstance(effect, ThreadReplyEffect) else None)
         if isinstance(effect, PullRequestEffect):
-            pull_request = await self.github.find_pull_request_by_head(
-                installation,
-                repo,
-                effect.branch,
-            )
+            pull_request = await repository.find_pull_request_by_head(effect.branch)
             if pull_request is None:
                 if record.dispatched_at is not None:
                     raise ResultPending("pull request outcome is unknown; waiting for its head")
                 self._dispatch(plan, record)
                 try:
-                    pull_request = await self.github.open_pull_request(
-                        installation,
-                        repo,
-                        head=effect.branch,
-                        base=effect.base_branch,
-                        title=effect.title,
-                        body=effect.body,
-                    )
-                except GitHubAdapterError as exc:
+                    pull_request = await repository.open_pull_request(head=effect.branch, base=effect.base_branch, title=effect.title, body=effect.body)
+                except GitHubError as exc:
                     if exc.kind not in {GitHubErrorKind.CONFLICT, GitHubErrorKind.VALIDATION}:
                         raise
-                    pull_request = await self.github.find_pull_request_by_head(
-                        installation,
-                        repo,
-                        effect.branch,
-                    )
+                    pull_request = await repository.find_pull_request_by_head(effect.branch)
                     if pull_request is None:
                         raise
             if pull_request.state == "closed":
                 # PR creation may have succeeded before INITIAL's final local commit.
                 # Bind its verified identity and retire intent instead of re-opening it.
-                remote = await self.github.get_pull_request(installation, repo, pull_request.number)
+                remote = await repository.fetch_pull_request(pull_request.number)
                 if plan.delivery is None:
                     raise ResultPending("INITIAL PR intent is missing")
                 validate_created_pull_request(remote, repo, pull_request.number, plan.delivery)
@@ -323,7 +317,7 @@ class ResultEffects:
                 assert isinstance(number, int)
                 if (any(r.receipt and r.receipt.pending_reason for r in records)
                         or _pending_feedback(self.store, plan)
-                        or not await revision_current(self.github, plan, number)):
+                        or not await revision_current(repository, plan, number)):
                     return EffectReceipt(pending_reason="仍有未决反馈或 PR 已变化，暂停 re-review")
             if number == "created_pr":
                 receipts = [
@@ -337,21 +331,18 @@ class ResultEffects:
                     )
                 number = receipts[0].number
             if isinstance(effect, LabelEffect):
-                labels = {label.casefold() for label in await self.github.get_labels(installation, repo, number)}
+                issue = Issue(repository, number)
+                labels = {label.casefold() for label in await issue.fetch_labels()}
                 if (effect.label.casefold() in labels) != effect.present:
                     self._dispatch(plan, record)
                     if effect.present:
-                        await self.github.add_label(installation, repo, number, effect.label)
+                        await issue.add_label(effect.label)
                     else:
-                        await self.github.remove_label(installation, repo, number, effect.label)
+                        await issue.remove_label(effect.label)
             else:
                 # Include completed reviews since dispatch so recovery does not request them again.
-                satisfied = await self.github.get_reviewers(
-                    installation,
-                    repo,
-                    number,
-                    since=(record.dispatched_at or self.store.now()).replace(microsecond=0),
-                )
+                pull_request = PullRequest(repository, number)
+                satisfied = await pull_request.fetch_reviewers(since=(record.dispatched_at or self.store.now()).replace(microsecond=0))
                 missing = sorted(set(effect.reviewers) - satisfied)
                 if missing:
                     if record.dispatched_at is not None:
@@ -359,14 +350,14 @@ class ResultEffects:
                             "review request outcome is unknown; waiting for remote state"
                         )
                     self._dispatch(plan, record)
-                    await self.github.request_reviewers(installation, repo, number, missing)
+                    await pull_request.request_reviewers(missing)
             return EffectReceipt()
-        return await resolve_thread(self.store, self.github, plan, record, records, self._dispatch)
+        return await resolve_thread(self.store, repository, plan, record, records, self._dispatch)
 
     def _delay(
         self,
         record: EffectRecord,
-        error: GitHubAdapterError | DeliveryConflict | None = None,
+        error: GitHubError | DeliveryConflict | None = None,
     ) -> float:
         return retry_delay(record.attempts, self.store.now(),
-                           error if isinstance(error, GitHubAdapterError) else None)
+                           error if isinstance(error, GitHubError) else None)

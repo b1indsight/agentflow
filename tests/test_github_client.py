@@ -1,3 +1,6 @@
+import asyncio
+import json
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,11 +11,19 @@ import pytest
 from githubkit import GitHub
 from githubkit.exception import RequestFailed
 from githubkit.response import Response
-from pydantic import SecretStr
+from pydantic import BaseModel, SecretStr, ValidationError
 
 from app.control.config import ServeSettings
-from app.domain.github_models import GitHubAdapterError, GitHubErrorKind, PushCapability
-from app.github.client import GitHubApp
+from app.github import (
+    GitHubApp,
+    GitHubError,
+    GitHubErrorKind,
+    Installation,
+    Issue,
+    PullRequest,
+    PushCapability,
+    Repository,
+)
 
 
 class AsyncEndpoint:
@@ -28,7 +39,18 @@ class AsyncEndpoint:
         return self.result
 
 
-@pytest.mark.parametrize("method,target", [("get_issue", 7), ("get_ref", "flow/7")])
+def install_client(monkeypatch, factory):
+    def client(installation, *, auto_retry=True):
+        return factory(installation.installation_id, auto_retry=auto_retry)
+
+    monkeypatch.setattr(Installation, "_client", client)
+
+
+def app_client(monkeypatch, factory):
+    monkeypatch.setattr(GitHubApp, "_client", lambda self, **kwargs: factory(**kwargs))
+
+
+@pytest.mark.parametrize("method,target", [("fetch_issue", 7), ("fetch_ref", "flow/7")])
 async def test_preparation_rate_limit_is_returned_without_sdk_sleep(tmp_path, monkeypatch, method, target):
     import asyncio
 
@@ -45,9 +67,9 @@ async def test_preparation_rate_limit_is_returned_without_sdk_sleep(tmp_path, mo
         assert auto_retry is False
         return GitHub("test-token", auto_retry=auto_retry, async_transport=httpx.MockTransport(limited))
 
-    monkeypatch.setattr(app, "_installation_client", installation)
-    with pytest.raises(GitHubAdapterError) as caught:
-        await asyncio.wait_for(getattr(app, method)(42, "owner/repo", target), 1)
+    install_client(monkeypatch, installation)
+    with pytest.raises(GitHubError) as caught:
+        await asyncio.wait_for(getattr(app.installation(42).repository("owner/repo"), method)(target), 1)
     assert caught.value.kind is GitHubErrorKind.RATE_LIMITED
     assert caught.value.retry_after == "600" and len(requests) == 1
 
@@ -65,54 +87,74 @@ async def test_revision_lineage_requires_github_fast_forward(
     )))
     client = SimpleNamespace(rest=SimpleNamespace(repos=SimpleNamespace(async_compare_commits=endpoint)))
     app = GitHubApp(settings(tmp_path))
-    monkeypatch.setattr(app, "_installation_client", lambda _, **kwargs: client)
-    assert await app.compare_commits(1, "owner/repo", "base", "head") is expected
+    install_client(monkeypatch, lambda _, **kwargs: client)
+    assert await app.installation(1).repository("owner/repo").compare_commits("base", "head") is expected
     assert endpoint.calls == [(("owner", "repo", "base...head"), {"per_page": 1})]
 
 
-async def test_review_files_paginate_and_mark_missing_patch(tmp_path, monkeypatch):
-    pages = []
+async def test_review_files_preserve_raw_facts_and_page_requests(tmp_path, monkeypatch):
+    calls = []
 
     async def files(*args, **kwargs):
-        pages.append(kwargs["page"])
+        calls.append((args, kwargs))
         count = 20 if kwargs["page"] == 1 else 1
         return response([SimpleNamespace(filename=f"{kwargs['page']}-{i}.py", status="modified",
             patch=None if i == 0 else "+line", previous_filename=None) for i in range(count)])
 
     client = SimpleNamespace(rest=SimpleNamespace(pulls=SimpleNamespace(async_list_files=files)))
+
+    def installed(installation_id, *, auto_retry):
+        assert installation_id == 1 and auto_retry is False
+        return client
+
     app = GitHubApp(settings(tmp_path))
-    monkeypatch.setattr(app, "_installation_client", lambda _, **kwargs: client)
-    result = await app.list_pull_request_files(1, "owner/repo", 17)
-    assert pages == [1, 2]
-    assert len(result.files) == 21
-    assert not result.truncated
-    assert result.files[0].patch is None
-    assert result.files[0].limitations == ["patch:unavailable-or-binary"]
+    install_client(monkeypatch, installed)
+    pr = PullRequest(app.installation(1).repository("owner/repo"), 17)
+    result = [item async for item in pr.list_files()]
+    assert calls == [
+        (("owner", "repo", 17), {"per_page": 20, "page": 1}),
+        (("owner", "repo", 17), {"per_page": 20, "page": 2}),
+    ]
+    assert len(result) == 21
+    assert result[0].patch is None
+    assert result[20].filename == "2-0.py"
 
 
-async def test_review_discussions_cover_all_sources_with_a_finite_page_limit(tmp_path, monkeypatch):
-    pages = []
+@pytest.mark.parametrize("source", ["conversation", "review_body", "inline"])
+async def test_review_discussions_preserve_bodies_and_page_requests(tmp_path, monkeypatch, source):
+    calls = []
 
-    async def discussion(*args, **kwargs):
-        pages.append(kwargs["page"])
-        return response([SimpleNamespace(id=i + kwargs["page"] * 10, body="x" * 5000,
-            user=SimpleNamespace(login="reviewer"), updated_at=datetime.now(UTC),
-            submitted_at=datetime.now(UTC), path="app.py", original_commit_id="old",
-            diff_hunk="+x") for i in range(10)])
+    def discussion(kind):
+        async def endpoint(*args, **kwargs):
+            calls.append((kind, args, kwargs))
+            count = 10 if kwargs["page"] == 1 else 1
+            return response([SimpleNamespace(id=i + kwargs["page"] * 10, body="x" * 5000,
+                user=SimpleNamespace(login="reviewer"), updated_at=datetime.now(UTC),
+                submitted_at=datetime.now(UTC), path="app.py", original_commit_id="old",
+                diff_hunk="+x") for i in range(count)])
+
+        return endpoint
 
     client = SimpleNamespace(rest=SimpleNamespace(
-        pulls=SimpleNamespace(async_list_reviews=discussion, async_list_review_comments=discussion),
-        issues=SimpleNamespace(async_list_comments=discussion),
+        pulls=SimpleNamespace(async_list_reviews=discussion("review_body"),
+            async_list_review_comments=discussion("inline")),
+        issues=SimpleNamespace(async_list_comments=discussion("conversation")),
     ))
+
+    def installed(installation_id, *, auto_retry):
+        assert installation_id == 1 and auto_retry is False
+        return client
+
     app = GitHubApp(settings(tmp_path))
-    monkeypatch.setattr(app, "_installation_client", lambda _, **kwargs: client)
-    result = await app.list_pull_request_discussions(1, "owner/repo", 17)
-    assert result.truncated
-    assert len(result.discussions) == 60
-    assert pages == [1, 2, 3] * 3
-    assert {item.kind for item in result.discussions} == {"conversation", "review_body", "inline"}
-    assert all(len(item.body) == 4000 and "body:truncated" in item.limitations
-               for item in result.discussions)
+    install_client(monkeypatch, installed)
+    pr = PullRequest(app.installation(1).repository("owner/repo"), 17)
+    result = [item async for item in pr.list_discussions(source)]
+    assert calls == [
+        (source, ("owner", "repo", 17), {"per_page": 10, "page": 1}),
+        (source, ("owner", "repo", 17), {"per_page": 10, "page": 2}),
+    ]
+    assert len(result) == 11
+    assert all(len(item.body) == 5000 for item in result)
 
 
 def response(data: Any) -> SimpleNamespace:
@@ -170,14 +212,27 @@ def test_both_github_auth_clients_use_finite_timeouts(
         monkeypatch.setenv("FLOWTOOL_GITHUB_REQUEST_TIMEOUT_SECONDS", configured_timeout)
     github = GitHubApp(settings(tmp_path))
     expected = float(configured_timeout) if configured_timeout is not None else 30.0
+    transport = httpx.MockTransport(lambda _: httpx.Response(200))
+    github._sdk.config = replace(github._sdk.config, transport=transport, async_transport=transport)
 
-    for client in (github._app_client(), github._installation_client(42)):
-        timeout = client.config.timeout
-        assert (timeout.connect, timeout.read, timeout.write, timeout.pool) == (expected,) * 4
+    for binding in (github, github.installation(42)):
+        original = binding._sdk.config
+        original_retry = original.auto_retry
+        read = binding._client()
+        write = binding._client(auto_retry=False)
+        later_read = binding._client()
+        for client in (read, write, later_read):
+            assert client.auth is binding._sdk.auth
+            timeout = client.config.timeout
+            assert (timeout.connect, timeout.read, timeout.write, timeout.pool) == (expected,) * 4
+            assert client.config.transport is transport and client.config.async_transport is transport
+        assert write.config.auto_retry is None
+        assert read.config.auto_retry is not None and later_read.config.auto_retry is not None
+        assert binding._sdk.config is original and binding._sdk.config.auto_retry is original_retry
 
 
 @pytest.mark.asyncio
-async def test_reads_issue_repository_and_remote_ref_as_internal_snapshots(
+async def test_fetches_issue_repository_and_remote_ref(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     issue = AsyncEndpoint(
@@ -197,26 +252,150 @@ async def test_reads_issue_repository_and_remote_ref_as_internal_snapshots(
         )
     )
     github = GitHubApp(settings(tmp_path))
-    monkeypatch.setattr(github, "_installation_client", lambda installation_id, **kwargs: client)
+    install_client(monkeypatch, lambda installation_id, **kwargs: client)
 
-    issue_snapshot = await github.get_issue(42, "octo/repo", 7)
-    repository_snapshot = await github.get_repository(42, "octo/repo")
-    ref_snapshot = await github.get_ref(42, "octo/repo", "topic")
+    observed_issue = await github.installation(42).repository("octo/repo").fetch_issue(7)
+    observed_repository = await github.installation(42).repository("octo/repo").refetch()
+    remote_ref = await github.installation(42).repository("octo/repo").fetch_ref("topic")
 
-    assert issue_snapshot.model_dump() == {
+    assert observed_issue.model_dump() == {
         "number": 7,
         "title": "Ship it",
         "body": "",
         "state": "open",
     }
-    assert repository_snapshot.model_dump() == {
+    assert observed_repository.model_dump() == {
         "full_name": "octo/repo",
         "default_branch": "trunk",
     }
-    assert ref_snapshot.model_dump() == {"branch": "topic", "sha": "abc123"}
+    assert remote_ref.model_dump() == {"branch": "topic", "sha": "abc123"}
     assert issue.calls == [(("octo", "repo", 7), {})]
     assert repository.calls == [(("octo", "repo"), {})]
     assert get_ref.calls == [(("octo", "repo", "heads/topic"), {})]
+
+
+async def test_concurrent_refetches_keep_separate_observations(tmp_path, monkeypatch):
+    # A slow older response cannot overwrite the newer observation held by another caller.
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+
+    async def issue(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        first = calls == 1
+        if first:
+            started.set()
+            await release.wait()
+        return response(SimpleNamespace(number=7, title="older" if first else "newer",
+                                        body=None, state="open" if first else "closed"))
+
+    client = SimpleNamespace(rest=SimpleNamespace(issues=SimpleNamespace(async_get=issue)))
+    install_client(monkeypatch, lambda _, **kwargs: client)
+    repo = GitHubApp(settings(tmp_path)).installation(42).repository("octo/repo")
+    before = Issue(repo, 7, title="original", body="", state="open")
+    pending = asyncio.create_task(before.refetch())
+    await asyncio.wait_for(started.wait(), 1)
+    try:
+        newer = await before.refetch()
+    finally:
+        release.set()
+    older = await asyncio.wait_for(pending, 1)
+    assert before.title == "original" and before.state == "open"
+    assert newer.title == "newer" and newer.state == "closed"
+    assert older.title == "older" and older.state == "open"
+    assert older is not newer and older is not before
+    assert newer.model_dump(mode="json", exclude_unset=True) == {
+        "number": 7, "title": "newer", "body": "", "state": "closed",
+    }
+    assert "test-private-key" not in newer.model_dump_json(exclude_unset=True)
+
+
+@pytest.mark.parametrize("full_name", ["other/repo", "OCTO/REPO"])
+async def test_repository_refetch_keeps_identity_and_observed_casing(tmp_path, monkeypatch, full_name):
+    # A redirected response must not retarget a resource; casing remains an observed fact.
+    endpoint = AsyncEndpoint(response(SimpleNamespace(full_name=full_name, default_branch="trunk")))
+    sdk = SimpleNamespace(rest=SimpleNamespace(repos=SimpleNamespace(async_get=endpoint)))
+    install_client(monkeypatch, lambda _, **kwargs: sdk)
+    installation = GitHubApp(settings(tmp_path)).installation(42)
+    before = Repository(installation, "octo/repo", default_branch="main")
+    if full_name == "other/repo":
+        with pytest.raises(GitHubError) as caught:
+            await before.refetch()
+        assert caught.value.kind is GitHubErrorKind.UNEXPECTED_RESPONSE
+        assert caught.value.endpoint == "get_repository"
+    else:
+        after = await before.refetch()
+        assert after.full_name == full_name and after.default_branch == "trunk"
+    assert before.full_name == "octo/repo" and before.default_branch == "main"
+    assert endpoint.calls == [(("octo", "repo"), {})]
+
+
+@pytest.mark.parametrize("resource,facts", [
+    (Repository, {"full_name": "octo/repo", "installation": "unexpected"}),
+    (Issue, {"number": 7, "repository": "unexpected"}),
+    (PullRequest, {"number": 17, "repository": {"full_name": "octo/repo"}}),
+])
+def test_standard_resource_validation_rejects_invalid_runtime_parent(resource, facts):
+    with pytest.raises(ValidationError):
+        resource.model_validate_json(json.dumps(facts))
+
+
+def test_partial_pull_request_distinguishes_unobserved_nullable_facts_from_null():
+    # Old short receipts omit repo and merge details; absence cannot become a known null.
+    short = {"number": 17, "state": "open", "head_branch": "topic",
+             "head_sha": "abc", "base_branch": "main"}
+    pr = PullRequest.model_validate(short)
+    assert pr.model_dump() == short
+    for name in ("repo", "head_repository", "merged_at", "merge_commit_sha"):
+        with pytest.raises(AttributeError):
+            getattr(pr, name)
+    explicit = PullRequest.model_validate(short | {
+        "head_repository": None, "merged_at": None, "merge_commit_sha": None,
+    })
+    assert explicit.head_repository is explicit.merged_at is explicit.merge_commit_sha is None
+    assert explicit.model_dump() == short | {
+        "head_repository": None, "merged_at": None, "merge_commit_sha": None,
+    }
+    with pytest.raises(ValidationError):
+        PullRequest.model_validate(short | {"merged": True})
+
+
+def test_pull_request_preserves_persisted_json_field_order():
+    # Frozen context digests use this JSON, including the historical order of its fields.
+    original = (
+        '{"number":17,"state":"open","head_branch":"topic","head_sha":"abc",'
+        '"base_branch":"main","repo":"octo/repo","title":"PR","body":"",'
+        '"base_sha":"def","head_repository":null,"merged":false,"merged_at":null,'
+        '"merge_commit_sha":null}'
+    )
+    assert PullRequest.model_validate_json(original).model_dump_json() == original
+
+
+def test_bound_resources_serialize_and_restore_inside_standard_container(tmp_path):
+    class Document(BaseModel):
+        repository: Repository
+        issue: Issue
+        pull_request: PullRequest
+
+    # Default nested serialization must omit unknown sentinels and all authentication references.
+    repository = GitHubApp(settings(tmp_path)).installation(42).repository("octo/repo")
+    document = Document(
+        repository=repository, issue=Issue(repository, 7), pull_request=PullRequest(repository, 17),
+    )
+    expected = {"repository": {"full_name": "octo/repo"}, "issue": {"number": 7},
+                "pull_request": {"number": 17, "repo": "octo/repo"}}
+    assert document.model_dump() == expected
+    with pytest.raises(AttributeError):
+        _ = document.issue.state
+    restored = Document.model_validate_json(document.model_dump_json())
+    assert restored.model_dump() == expected
+    assert type(restored.repository) is Repository and type(restored.issue) is Issue
+    assert type(restored.pull_request) is PullRequest
+    for resource, parent in ((restored.repository, "installation"),
+                             (restored.issue, "repository"), (restored.pull_request, "repository")):
+        with pytest.raises(AttributeError, match="not bound"):
+            getattr(resource, parent)
 
 
 @pytest.mark.asyncio
@@ -239,9 +418,9 @@ async def test_creates_repository_scoped_contents_push_capability(
         )
     )
     github = GitHubApp(settings(tmp_path))
-    monkeypatch.setattr(github, "_app_client", lambda: client)
+    app_client(monkeypatch, lambda **kwargs: client)
 
-    capability = await github.create_push_capability(42, "octo/repo")
+    capability = await github.installation(42).repository("octo/repo").create_push_capability()
 
     assert capability.repository == "octo/repo"
     assert capability.permissions == {"contents": "write"}
@@ -259,13 +438,13 @@ async def test_creates_repository_scoped_contents_push_capability(
             repositories=[SimpleNamespace(full_name="octo/repo")],
         )
     )
-    with pytest.raises(GitHubAdapterError) as captured:
-        await github.create_push_capability(42, "octo/repo")
+    with pytest.raises(GitHubError) as captured:
+        await github.installation(42).repository("octo/repo").create_push_capability()
     assert captured.value.kind is GitHubErrorKind.UNEXPECTED_RESPONSE
 
 
 @pytest.mark.asyncio
-async def test_pull_request_primitives_map_snapshots_and_skip_empty_reviewers(
+async def test_finds_and_opens_pull_requests_and_skips_empty_reviewers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     existing = SimpleNamespace(
@@ -293,11 +472,11 @@ async def test_pull_request_primitives_map_snapshots_and_skip_empty_reviewers(
         )
     )
     github = GitHubApp(settings(tmp_path))
-    monkeypatch.setattr(github, "_installation_client", lambda installation_id, **kwargs: client)
+    install_client(monkeypatch, lambda installation_id, **kwargs: client)
 
-    found = await github.find_pull_request_by_head(42, "octo/repo", "topic")
-    opened = await github.open_pull_request(42, "octo/repo", "new-topic", "trunk", "Title", "Body")
-    await github.request_reviewers(42, "octo/repo", 10, [])
+    found = await github.installation(42).repository("octo/repo").find_pull_request_by_head("topic")
+    opened = await github.installation(42).repository("octo/repo").open_pull_request("new-topic", "trunk", "Title", "Body")
+    await PullRequest(github.installation(42).repository("octo/repo"), 10).request_reviewers([])
 
     assert found is not None and found.number == 9
     assert found.head_branch == "topic"
@@ -359,10 +538,10 @@ async def test_comment_recovery_checks_author_and_paginates(tmp_path, monkeypatc
         )
     )
     github = GitHubApp(settings(tmp_path))
-    monkeypatch.setattr(github, "_installation_client", lambda _, **kwargs: client)
-    assert await github.find_comment(42, "octo/repo", 10, marker) == 700
+    install_client(monkeypatch, lambda _, **kwargs: client)
+    assert await PullRequest(github.installation(42).repository("octo/repo"), 10).find_comment(marker) == 700
     assert pages == [1, 2]
-    assert await github.comment(42, "octo/repo", 10, "Another comment") == 701
+    assert await PullRequest(github.installation(42).repository("octo/repo"), 10).comment("Another comment") == 701
 
 
 @pytest.mark.asyncio
@@ -401,8 +580,8 @@ async def test_reviewer_reconciliation_includes_completed_reviews_across_pages(
         )
     )
     github = GitHubApp(settings(tmp_path))
-    monkeypatch.setattr(github, "_installation_client", lambda _, **kwargs: client)
-    assert await github.get_reviewers(42, "octo/repo", 10, since=since) == {"requested", "finished"}
+    install_client(monkeypatch, lambda _, **kwargs: client)
+    assert await PullRequest(github.installation(42).repository("octo/repo"), 10).fetch_reviewers(since=since) == {"requested", "finished"}
     assert pages == [1, 2]
 
 
@@ -432,10 +611,10 @@ async def test_maps_github_failures_without_response_bodies(
     get_issue = AsyncEndpoint(error=request_failed(status, **headers))
     client = SimpleNamespace(rest=SimpleNamespace(issues=SimpleNamespace(async_get=get_issue)))
     github = GitHubApp(settings(tmp_path))
-    monkeypatch.setattr(github, "_installation_client", lambda installation_id, **kwargs: client)
+    install_client(monkeypatch, lambda installation_id, **kwargs: client)
 
-    with pytest.raises(GitHubAdapterError) as captured:
-        await github.get_issue(42, "octo/repo", 7)
+    with pytest.raises(GitHubError) as captured:
+        await github.installation(42).repository("octo/repo").fetch_issue(7)
 
     error = captured.value
     assert error.kind is kind
@@ -451,10 +630,10 @@ async def test_rate_limit_403_is_retryable(tmp_path: Path, monkeypatch: pytest.M
     )
     client = SimpleNamespace(rest=SimpleNamespace(issues=SimpleNamespace(async_get=get_issue)))
     github = GitHubApp(settings(tmp_path))
-    monkeypatch.setattr(github, "_installation_client", lambda installation_id, **kwargs: client)
+    install_client(monkeypatch, lambda installation_id, **kwargs: client)
 
-    with pytest.raises(GitHubAdapterError) as captured:
-        await github.get_issue(42, "octo/repo", 7)
+    with pytest.raises(GitHubError) as captured:
+        await github.installation(42).repository("octo/repo").fetch_issue(7)
 
     assert captured.value.kind is GitHubErrorKind.RATE_LIMITED
     assert captured.value.retry_after == "12"
@@ -474,10 +653,10 @@ async def test_maps_real_githubkit_transport_wrappers_as_transient(
 
     client = GitHub("test-token", async_transport=httpx.MockTransport(fail))
     github = GitHubApp(settings(tmp_path))
-    monkeypatch.setattr(github, "_installation_client", lambda installation_id, **kwargs: client)
+    install_client(monkeypatch, lambda installation_id, **kwargs: client)
 
-    with pytest.raises(GitHubAdapterError) as captured:
-        await github.get_issue(42, "octo/repo", 7)
+    with pytest.raises(GitHubError) as captured:
+        await github.installation(42).repository("octo/repo").fetch_issue(7)
 
     assert captured.value.kind is GitHubErrorKind.TRANSIENT
     assert captured.value.retryable is True

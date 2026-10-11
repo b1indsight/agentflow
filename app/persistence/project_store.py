@@ -13,9 +13,8 @@ from psycopg import sql
 from psycopg.rows import class_row
 from pydantic import BaseModel
 
-from app.domain.github_models import GitHubAdapterError
-from app.domain.github_retry import retry_delay
-from app.domain.project_models import ProjectConfig, ProjectStatus
+from app.domain.project_models import ProjectStatus
+from app.github import GitHubError, ProjectConfig, retry_delay
 
 if TYPE_CHECKING:
     from app.persistence.store import Store
@@ -174,7 +173,7 @@ class ProjectStore:
                  self.store.now(), row.id, row.config_key),
             )
 
-    def failed(self, row: Projection, error: GitHubAdapterError) -> None:
+    def failed(self, row: Projection, error: GitHubError) -> None:
         attempts = row.failures + 1
         self.save(row, failures=attempts, last_error=str(error), blocked=not error.retryable,
                   next_at=self.store.now()+timedelta(seconds=retry_delay(attempts, self.store.now(), error)))
