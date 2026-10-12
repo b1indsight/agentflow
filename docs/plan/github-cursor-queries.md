@@ -213,3 +213,18 @@ REST 操作迁移均延后。
 - **局限：** 验证覆盖真实 SDK MockTransport、资源解码和实际 PostgreSQL，
   未进行真实 GitHub App 在线调用。未重置已有开发数据库；旧评论数组和旧扫描状态
   需要按 `docs/operations/github-cursor-development.md` 使用新的开发数据库。
+
+### [004] — 2026-10-12 — 删除重复测试并合并恢复场景
+
+- **要求与实际变更：** 用户要求先删除多余测试和步骤，再合并适合的用例。
+  删除 test_github_batches.py，其中多 thread 的独立评论游标和单次请求断言并入
+  原 thread 分页用例；重复的评论续读用例与简单 limit 条件枚举删除。
+  SDK 节点删除用例只保留 NOT_FOUND 分类，后续 thread 查询由扫描器用例覆盖。
+- **恢复场景合并：** 原模拟重启用例与真实资源查询的扫描用例合成一个，涵盖
+  第二批请求失败、断点不推进、重启后重试同一评论游标、末批保持片段标记，
+  最后继续下个 thread。将 45 条评论缩到最小跨批场景的 21 条，减少一次续读及
+  多余循环；请求游标为 None / comments-20 / comments-20 / threads-next。
+- **边界与验证：** 未修改生产实现或请求参数校验。相关 51 项测试、Ruff 和 Mypy
+  通过；实际 PostgreSQL 全量回归 `885 passed / 0 skipped`，保留既有 Starlette warning。
+  测试文件净减少 81 行，总计删除 7 个执行用例，保留独立游标、完整性、
+  删除节点、事务回滚和新 webhook 竞争的行为覆盖。没有新增机制，不另做消融实验。

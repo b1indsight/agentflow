@@ -87,34 +87,6 @@ async def test_resolved_thread_still_collects_missed_human_input(store, review_f
     assert store.reconcile.feedback_get(flow.id, "threads").last_success_at is not None
 
 
-async def test_nested_continuation_and_partial_thread_survive_restart(store, review_flow, thread_page_resources):
-    flow, clock = review_flow
-    github = GitHub(clock)
-    github.pages[None] = page(clock, comments_cursor="nested", complete=False)
-    github.pages["nested"] = RuntimeError("interrupted")
-    await sweep(store, github)
-    assert observed(store)["complete"] is False
-    check = store.reconcile.feedback_get(flow.id, "threads")
-    saved = check.cursor
-    state = ThreadScanState.model_validate_json(saved)
-    assert state.thread.comments.next_cursor == "nested" and state.thread.comments.items == ()
-    assert check.last_success_at is None
-    clock.now += timedelta(seconds=6)
-    await sweep(store, github)
-    check = store.reconcile.feedback_get(flow.id, "threads")
-    assert check.cursor == saved and check.failures == 1
-    github.pages["nested"] = page(clock, human(2, updated_at=clock.now), complete=False)
-    clock.now = check.next_at + timedelta(seconds=1)
-    restarted = Store(store.database_url, clock=lambda: clock.now)
-    try:
-        await sweep(restarted, github)
-    finally:
-        restarted.close()
-    assert len(store.reviews.pending(flow.id)) == 2
-    assert observed(store)["complete"] is False
-    assert store.reconcile.feedback_get(flow.id, "threads").cursor is None
-
-
 @pytest.mark.parametrize("deleted", [False, True])
 async def test_new_webhook_version_wins_over_slow_thread_page(store, review_flow, deleted, thread_page_resources):
     flow, clock = review_flow
@@ -189,10 +161,10 @@ async def test_later_pages_cannot_erase_an_incomplete_scan(store, review_flow, t
     assert store.reconcile.feedback_get(flow.id, "threads").last_success_at is not None
 
 
-async def test_native_nested_scan_resumes_without_repeating_initial_comments(
+async def test_nested_scan_retries_and_resumes_after_restart(
     store, review_flow, recording_resources, monkeypatch,
 ):
-    # Forty-five comments require two suffix reads, then the saved outer cursor selects T2.
+    # A failed suffix request must leave the saved position intact across a process restart.
     from types import SimpleNamespace
 
     from tests.test_github_client import install_client
@@ -201,17 +173,16 @@ async def test_native_nested_scan_resumes_without_repeating_initial_comments(
     flow, clock = review_flow
     first = node(following="comments-20")
     first["comments"]["nodes"] = [node(number=i)["comments"]["nodes"][0] for i in range(1, 21)]
-    second = node(following="comments-40")
-    second["comments"]["nodes"] = [node(number=i)["comments"]["nodes"][0] for i in range(21, 41)]
-    third = node()
-    third["comments"]["nodes"] = [node(number=i)["comments"]["nodes"][0] for i in range(41, 46)]
-    responses = iter([outer(first, following="threads-next"), {"node": second},
-                      {"node": third}, outer(node("T2", number=46))])
+    responses = iter([outer(first, following="threads-next"), RuntimeError("interrupted"),
+                      {"node": node(number=21)}, outer(node("T2", number=22))])
     calls = []
 
     async def graphql(query, variables):
         calls.append(variables)
-        return next(responses)
+        result = next(responses)
+        if isinstance(result, Exception):
+            raise result
+        return result
 
     install_client(monkeypatch, lambda *args, **kwargs: SimpleNamespace(async_graphql=graphql))
     monkeypatch.setattr(PullRequest, "fetch_threads", NATIVE_FETCH_THREADS)
@@ -222,14 +193,20 @@ async def test_native_nested_scan_resumes_without_repeating_initial_comments(
     state = ThreadScanState.model_validate_json(check.cursor)
     assert state.cursor == "threads-next" and state.thread.comments.items == ()
     assert len(store.reviews.pending(flow.id)) == 20
+    saved = check.cursor
+    clock.now += timedelta(seconds=6)
+    await sweep(store, github)
+    check = store.reconcile.feedback_get(flow.id, "threads")
+    assert check.cursor == saved and check.failures == 1 and check.last_success_at is None
+    clock.now = check.next_at + timedelta(seconds=1)
     restarted = Store(store.database_url, clock=lambda: clock.now)
     try:
-        for _ in range(3):
-            clock.now += timedelta(seconds=6)
-            await sweep(restarted, github)
+        await sweep(restarted, github)
+        assert observed(store)["complete"] is False
+        clock.now += timedelta(seconds=6)
+        await sweep(restarted, github)
     finally:
         restarted.close()
-    assert len(store.reviews.pending(flow.id)) == 46
-    assert [call["cursor"] for call in calls] == [None, "comments-20", "comments-40", "threads-next"]
-    assert [call["limit"] for call in calls] == [1, 20, 20, 1]
+    assert len(store.reviews.pending(flow.id)) == 22
+    assert [call["cursor"] for call in calls] == [None, "comments-20", "comments-20", "threads-next"]
     assert store.reconcile.feedback_get(flow.id, "threads").cursor is None
