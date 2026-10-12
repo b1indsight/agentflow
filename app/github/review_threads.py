@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Annotated, Any
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, PrivateAttr
 
 from app.github._fields import unobserved_field
 from app.github.errors import GitHubError, GitHubErrorKind, translate_errors
+from app.github.pagination import Batch, validate_limit
 
 if TYPE_CHECKING:
     from app.github.pull_requests import PullRequest
@@ -46,7 +48,7 @@ class ReviewThread(BaseModel):
     path: Annotated[str, unobserved_field()]
     resolved: Annotated[bool, unobserved_field()]
     outdated: Annotated[bool, unobserved_field()]
-    comments: Annotated[tuple[ReviewComment, ...], unobserved_field()]
+    comments: Annotated[Batch[ReviewComment], unobserved_field()]
     complete: Annotated[bool, unobserved_field()]
     fetched_at: Annotated[AwareDatetime, unobserved_field()]
     limitations: Annotated[tuple[str, ...], unobserved_field()]
@@ -70,11 +72,12 @@ class ReviewThread(BaseModel):
             facts.update(repo=repo, pr_number=number)
         if "comments" in facts:
             # Revalidate local model copies too, so mutable input cannot enter facts.
-            comments = tuple(ReviewComment.model_validate(
-                comment.model_dump() if isinstance(comment, ReviewComment) else comment,
-            ) for comment in facts["comments"])
+            raw = facts["comments"]
+            comments = Batch[ReviewComment].model_validate(
+                raw.model_dump() if isinstance(raw, Batch) else raw,
+            )
             facts["comments"] = comments
-        self._validate_root_comment_id(root_comment_id, facts.get("comments", ()))
+        self._validate_root_comment_id(root_comment_id, comments.items if "comments" in facts else ())
         if thread_id is not None:
             facts["thread_id"] = thread_id
         super().__init__(**facts)
@@ -115,11 +118,55 @@ class ReviewThread(BaseModel):
         with translate_errors("get_review_thread"):
             return await reader.one(self.thread_id, root_comment_id=self.root_comment_id)
 
+    async def fetch_comments(
+        self, *, cursor: str | None = None, limit: int = 20,
+    ) -> Batch[ReviewComment]:
+        """Request one comment batch from this thread using its native comment cursor.
+
+        A thread removed during traversal raises NOT_FOUND; scanners own the decision
+        to advance to the next thread rather than hiding that failure in this query.
+        """
+        from githubkit.exception import GraphQLFailed
+
+        from app.github.threads import (
+            MAX_THREAD_BYTES,
+            THREAD_QUERY,
+            belongs_to_pr,
+            decode_comment_batch,
+        )
+
+        validate_limit(limit)
+        pr = self.pull_request
+        client = pr.repository.installation._client(auto_retry=False)
+        with translate_errors("review_thread_comments"):
+            try:
+                data = await client.async_graphql(THREAD_QUERY, {
+                    "id": self.thread_id, "cursor": cursor, "limit": limit,
+                })
+            except GraphQLFailed as error:
+                errors = error.response.errors or []
+                if (error.response.data != {"node": None} or not errors
+                        or any(item.type != "NOT_FOUND" for item in errors)):
+                    raise
+                data = {"node": None}
+            if data.get("errors") or len(json.dumps(data).encode()) > MAX_THREAD_BYTES:
+                raise ValueError("partial or oversized thread response")
+            node = data["node"]
+            if node is None:
+                raise GitHubError(GitHubErrorKind.NOT_FOUND, "review_thread_comments", status_code=404)
+            if (node["id"] != self.thread_id
+                    or not belongs_to_pr(node, pr.repository.full_name, pr.number)):
+                raise ValueError("thread identity changed")
+            batch, valid = decode_comment_batch(node["comments"], cursor, limit)
+            if not valid:
+                raise ValueError("missing or duplicate comment identity")
+            return batch
+
     async def find_reply(self, marker: str) -> int | None:
         """Find an exact bot marker; incomplete coverage cannot prove absence."""
         observed = await self.refetch()
         bot_login = self.pull_request.repository.installation.app.bot_login
-        for comment in observed.comments:
+        for comment in observed.comments.items:
             if (comment.is_bot and comment.author == bot_login
                     and marker in comment.body.splitlines()):
                 return comment.github_id

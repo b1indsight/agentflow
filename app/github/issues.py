@@ -8,7 +8,8 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 from app.github._fields import unobserved_field
 from app.github.errors import GitHubError, GitHubErrorKind, translate_errors
-from app.github.feedback import FeedbackPage, RemoteFeedback
+from app.github.feedback import RemoteFeedback, decode_feedback
+from app.github.pagination import Batch, validate_limit
 
 if TYPE_CHECKING:
     from app.github.pull_requests import PullRequest
@@ -53,23 +54,37 @@ async def _find_comment(target: Issue | PullRequest, marker: str) -> int | None:
             page += 1
 
 
-async def _list_comments_page(target: Issue | PullRequest, cursor: str | None) -> FeedbackPage:
-    """Read one full comment page for durable polling through the bound resource."""
+_COMMENTS = """
+query($owner:String!,$name:String!,$number:Int!,$cursor:String,$limit:Int!){
+  repository(owner:$owner,name:$name){issueOrPullRequest(number:$number){
+    ... on Issue { comments(first:$limit,after:$cursor) { nodes {
+      fullDatabaseId body updatedAt author {login __typename}
+    } pageInfo {hasNextPage endCursor} } }
+    ... on PullRequest { comments(first:$limit,after:$cursor) { nodes {
+      fullDatabaseId body updatedAt author {login __typename}
+    } pageInfo {hasNextPage endCursor} } }
+  }}
+}
+"""
+
+
+async def _fetch_comments(
+    target: Issue | PullRequest, *, cursor: str | None = None, limit: int = 50,
+) -> Batch[RemoteFeedback]:
+    """Request one GraphQL batch of discussion comments, preserving full bodies."""
+    validate_limit(limit)
     repo = target.repository
     client = repo.installation._client(auto_retry=False)
 
     with translate_errors("feedback_page"):
-        page = int(cursor) if cursor is not None else 1
-        if page < 1:
-            raise ValueError("invalid comment page")
-        rows: list[Any] = (await client.rest.issues.async_list_comments(
-            repo.owner, repo.name, target.number, page=page, per_page=50,
-        )).parsed_data
-        return FeedbackPage(items=[RemoteFeedback(
-            github_id=row.id, author=row.user.login, is_bot=row.user.type == "Bot",
-            body=row.body or "", updated_at=row.updated_at,
-        ) for row in rows if row.user is not None],
-            next_cursor=str(page + 1) if len(rows) == 50 else None)
+        data = await client.async_graphql(_COMMENTS, {
+            "owner": repo.owner, "name": repo.name, "number": target.number,
+            "cursor": cursor, "limit": limit,
+        })
+        if data.get("errors"):
+            raise ValueError("partial comment response")
+        connection = data["repository"]["issueOrPullRequest"]["comments"]
+        return decode_feedback(connection, cursor, limit)
 
 
 async def _fetch_labels(target: Issue | PullRequest) -> list[str]:
@@ -197,7 +212,7 @@ class Issue(BaseModel):
     # Function descriptors bind the shared Issues endpoint operations to each resource.
     comment = _comment
     find_comment = _find_comment
-    list_comments_page = _list_comments_page
+    fetch_comments = _fetch_comments
     fetch_labels = _fetch_labels
     add_label = _add_label
     remove_label = _remove_label

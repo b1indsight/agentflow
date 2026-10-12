@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import AwareDatetime, BaseModel, ConfigDict
 
 from app.github.errors import GitHubError, GitHubErrorKind
-from app.github.pagination import next_cursor
+from app.github.pagination import Batch, next_cursor
 from app.github.review_threads import ReviewComment, ReviewThread
 
 if TYPE_CHECKING:
@@ -33,30 +33,27 @@ class ReviewThreads(BaseModel):
         )
 
 
-class ReviewThreadPage(BaseModel):
-    """One scan page; partial comment fragments cannot prove resolution coverage."""
-
-    model_config = ConfigDict(frozen=True)
-    snapshot: ReviewThreads
-    next_cursor: str | None = None
-
 MAX_THREAD_REQUESTS = 50
 MAX_THREAD_BYTES = 2_000_000
 
-THREAD_FIELDS = """
+THREAD_METADATA = """
 id isResolved isOutdated path
 pullRequest { number repository { nameWithOwner } }
-comments(first:20,after:$comments) {
+"""
+COMMENT_FIELDS = """
   nodes { fullDatabaseId id body updatedAt author { login __typename }
           replyTo { fullDatabaseId } originalCommit { oid } }
   pageInfo { hasNextPage endCursor }
-}
 """
-THREAD_QUERY = "query($id:ID!,$comments:String){node(id:$id){... on PullRequestReviewThread{" + THREAD_FIELDS + "}}}"
+THREAD_FIELDS = THREAD_METADATA + "comments(first:20){" + COMMENT_FIELDS + "}"
+THREAD_QUERY = (
+    "query($id:ID!,$cursor:String,$limit:Int!){node(id:$id){... on PullRequestReviewThread{"
+    + THREAD_METADATA + "comments(first:$limit,after:$cursor){" + COMMENT_FIELDS + "}}}}"
+)
 _THREADS = """
-query($owner:String!,$name:String!,$pr:Int!,$cursor:String,$comments:String){
+query($owner:String!,$name:String!,$pr:Int!,$cursor:String,$limit:Int!){
 repository(owner:$owner,name:$name){pullRequest(number:$pr){
-reviewThreads(first:100,after:$cursor){nodes{
+reviewThreads(first:$limit,after:$cursor){nodes{
 """ + THREAD_FIELDS + "} pageInfo {hasNextPage endCursor}}}}}"
 
 
@@ -66,14 +63,12 @@ def belongs_to_pr(node: dict[str, Any], repo: str, pr: int) -> bool:
     return pull["number"] == pr and pull["repository"]["nameWithOwner"].casefold() == repo.casefold()
 
 
-def decode_thread(node: dict[str, Any], pull_request: PullRequest) -> ReviewThread:
-    """Decode an identity-checked page; traversal must still prove all pages were read.
-
-    Missing or duplicate comments make the fragment incomplete. Bounded readers retain
-    usable observations; durable page readers reject such fragments before advancing.
-    """
-    raw_comments = node["comments"]["nodes"]
-    if len(raw_comments) > 20:
+def decode_comment_batch(
+    connection: dict[str, Any], cursor: str | None, limit: int,
+) -> tuple[Batch[ReviewComment], bool]:
+    """Share decoding and integrity facts between strict queries and bounded evidence reads."""
+    raw_comments = connection["nodes"]
+    if len(raw_comments) > limit:
         raise ValueError("invalid comment page size")
     comments: list[ReviewComment] = []
     ids: set[int] = set()
@@ -95,10 +90,20 @@ def decode_thread(node: dict[str, Any], pull_request: PullRequest) -> ReviewThre
             continue
         ids.add(comment.github_id)
         comments.append(comment)
+    following = next_cursor(connection, cursor)
+    if not raw_comments and following:
+        raise ValueError("empty comment continuation")
+    return Batch[ReviewComment](items=tuple(comments), next_cursor=following), complete
+
+
+def decode_thread(node: dict[str, Any], pull_request: PullRequest) -> ReviewThread:
+    """Decode a thread's first comment batch; callers still establish coverage."""
+    comments, valid = decode_comment_batch(node["comments"], None, 20)
     return ReviewThread(
         pull_request, node["id"], path=node["path"],
-        resolved=node["isResolved"], outdated=node["isOutdated"], comments=tuple(comments),
-        complete=complete,
+        resolved=node["isResolved"], outdated=node["isOutdated"], comments=comments,
+        complete=valid and bool(comments.items) and comments.next_cursor is None,
+        fetched_at=datetime.now(UTC), limitations=() if valid else ("thread:invalid-comments",),
     )
 
 
@@ -154,10 +159,10 @@ class ThreadReader:
         comments = []
         seen: set[str] = set()
         ids: set[int] = set()
-        complete = fragment.complete
+        complete = not fragment.limitations
         page = node["comments"]
         while True:
-            for comment in fragment.comments:
+            for comment in fragment.comments.items:
                 if comment.github_id in ids:
                     complete = False
                     continue
@@ -166,7 +171,7 @@ class ThreadReader:
             cursor = self._cursor(page, seen)
             if cursor is None:
                 break
-            data = await self._read(THREAD_QUERY, {"id": node["id"], "comments": cursor})
+            data = await self._read(THREAD_QUERY, {"id": node["id"], "cursor": cursor, "limit": 20})
             follow = data.get("node") if data else None
             if (not follow or follow["id"] != node["id"]
                     or follow["pullRequest"] != pull):
@@ -174,14 +179,14 @@ class ThreadReader:
                 break
             page = follow["comments"]
             fragment = decode_thread(follow, self.pull_request)
-            complete &= fragment.complete
+            complete &= not fragment.limitations
         self._threads.append(thread.model_copy(update={
-            "comments": tuple(comments), "complete": complete and bool(comments),
+            "comments": Batch[ReviewComment](items=tuple(comments)), "complete": complete and bool(comments),
         }))
 
     async def one(self, thread_id: str, *, root_comment_id: int | None = None) -> ReviewThread:
         """Read bounded evidence, checking a known root against all collected comments."""
-        data = await self._read(THREAD_QUERY, {"id": thread_id, "comments": None})
+        data = await self._read(THREAD_QUERY, {"id": thread_id, "cursor": None, "limit": 20})
         node = data.get("node") if data else None
         if node and node["id"] == thread_id:
             await self._thread(node)
@@ -196,11 +201,11 @@ class ThreadReader:
             })
         else:
             observed = ReviewThread(
-                self.pull_request, thread_id, complete=False, comments=(),
+                self.pull_request, thread_id, complete=False, comments=Batch[ReviewComment](),
                 fetched_at=self.snapshot.fetched_at, limitations=tuple(self._limitations),
             )
         # The root can occur after the first comment page; bind only the final observation.
-        observed._validate_root_comment_id(root_comment_id, observed.comments)
+        observed._validate_root_comment_id(root_comment_id, observed.comments.items)
         observed._root_comment_id = root_comment_id
         return observed
 
@@ -211,7 +216,7 @@ class ThreadReader:
         ids: set[str] = set()
         while True:
             data = await self._read(_THREADS, {"owner": owner, "name": name,
-                "pr": self.snapshot.pr_number, "cursor": cursor, "comments": None})
+                "pr": self.snapshot.pr_number, "cursor": cursor, "limit": 100})
             if data is None:
                 break
             pull = (data.get("repository") or {}).get("pullRequest")

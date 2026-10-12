@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.github import GitHubApp, GitHubError, GitHubErrorKind, Issue, PullRequest
-from tests.test_github_client import AsyncEndpoint, install_client, response, settings
+from tests.test_github_client import AsyncEndpoint, install_client, settings
 
 
 def adapter(tmp_path, monkeypatch, client):
@@ -21,20 +21,24 @@ def adapter(tmp_path, monkeypatch, client):
 
 
 @pytest.mark.parametrize("source", ["issue_comments", "pr_comments"])
-async def test_rest_preserves_full_body_and_explicit_page(tmp_path, monkeypatch, source):
+async def test_graphql_comments_preserve_full_body_and_native_cursor(tmp_path, monkeypatch, source):
     body = "long discussion " * 500
-    rows = [SimpleNamespace(id=i + 1, body=body, updated_at=datetime.now(UTC),
-                            user=SimpleNamespace(login="human", type="User")) for i in range(50)]
-    endpoint = AsyncEndpoint(response(rows))
-    app = adapter(tmp_path, monkeypatch, SimpleNamespace(rest=SimpleNamespace(
-        issues=SimpleNamespace(async_list_comments=endpoint),
-    )))
+    rows = [{"fullDatabaseId": str(2**33 + i), "body": body,
+             "updatedAt": datetime.now(UTC).isoformat(),
+             "author": {"login": "human", "__typename": "User"}} for i in range(2)]
+    endpoint = AsyncEndpoint({"repository": {"issueOrPullRequest": {"comments": {
+        "nodes": rows, "pageInfo": {"hasNextPage": False, "endCursor": "last"},
+    }}}})
+    app = adapter(tmp_path, monkeypatch, SimpleNamespace(async_graphql=endpoint))
     if source == "issue_comments":
         app = Issue(app.repository, app.number)
-    page = await app.list_comments_page("2")
-    assert page.next_cursor == "3" and len(page.items) == 50
+    page = await app.fetch_comments(cursor="previous", limit=2)
+    assert page.next_cursor is None and len(page.items) == 2
     assert page.items[0].body == body
-    assert endpoint.calls == [(("owner", "repo", 17), {"page": 2, "per_page": 50})]
+    assert page.items[0].github_id == 2**33
+    query, variables = endpoint.calls[0][0]
+    assert "comments(first:$limit,after:$cursor)" in query
+    assert variables == {"owner": "owner", "name": "repo", "number": 17, "cursor": "previous", "limit": 2}
 
 
 def reviews(**changes):
@@ -48,7 +52,7 @@ def reviews(**changes):
 async def test_graphql_review_uses_edit_time_and_64_bit_identity(tmp_path, monkeypatch):
     endpoint = AsyncEndpoint(reviews())
     app = adapter(tmp_path, monkeypatch, SimpleNamespace(async_graphql=endpoint))
-    page = await app.list_reviews_page("previous")
+    page = await app.fetch_reviews(cursor="previous", limit=1)
     assert page.next_cursor == "following"
     assert page.items[0].github_id == 8589934593
     assert page.items[0].updated_at == datetime(2026, 9, 9, 12, tzinfo=UTC)
@@ -72,5 +76,5 @@ async def test_incomplete_graphql_data_never_commits_a_page(tmp_path, monkeypatc
         }
     app = adapter(tmp_path, monkeypatch, SimpleNamespace(async_graphql=AsyncEndpoint(data)))
     with pytest.raises(GitHubError) as caught:
-        await app.list_reviews_page("previous")
+        await app.fetch_reviews(cursor="previous", limit=1)
     assert caught.value.kind is GitHubErrorKind.UNEXPECTED_RESPONSE

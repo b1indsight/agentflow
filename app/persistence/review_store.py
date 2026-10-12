@@ -559,7 +559,7 @@ class ReviewStore:
                     (flow_id, thread.thread_id, snapshot.fetched_at,
                      Jsonb(thread.model_dump(mode="json", exclude_unset=True))),
                 )
-                for comment in thread.comments:
+                for comment in thread.comments.items:
                     if comment.is_bot:
                         continue
                     row = connection.execute(

@@ -104,6 +104,12 @@ control 在执行前把 repo/PR、thread node ID、comment database/node ID、�
 worker wire contract 不携带远端操作权限。线程和评论独立 cursor 分页，每次读取最多 50 个请求、2 MB
 JSON 数据；异常或不完整映射保留待处理。REST reply 使用根评论 database ID，不能用 reply ID 或 thread ID。
 
+GraphQL 批量查询使用原生 `cursor + limit`，返回 `Batch[T]`。thread 查询同时返回首批评论，
+外层 batch 与每个 thread 的评论 batch 各自提供 `next_cursor`。后续评论通过 thread
+资源单独请求；`next_cursor=None` 仅表示这次查询到达末尾，完整覆盖还需核对起点和遍历历史。
+持久扫描器拥有嵌套续读状态，不将评论进度编码进 thread 查询的 cursor；末批评论片段
+保持 `complete=False`，自动 resolve 必须重新取得完整证据。
+
 每线程说明经持久回执确认后，检查本轮与历史已核验修订对所有人类反馈的精确覆盖；deferred、遗漏、
 clarification、缺失映射或变化的 head 阻止完成。历史依据只接受当前 attempt 的最新 item/version。
 resolve 前刷新线程并补入尚未收到 webhook 的反馈；也核对本地新版本，避免迟到查询撤销同秒编辑。

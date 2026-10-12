@@ -1,23 +1,55 @@
 """Recover missing discussion pages into the existing versioned settle/Judge pipeline."""
 
+from __future__ import annotations
+
 import asyncio
 
 from loguru import logger
+from pydantic import BaseModel, ConfigDict, model_validator
 
 from app.domain.models import DeliveryState, FlowState, ReviewItemKind
 from app.domain.review_models import FeedbackUpdate
 from app.github import (
-    FeedbackPage,
+    Batch,
     FeedbackSource,
     GitHubApp,
     GitHubError,
     GitHubErrorKind,
     Issue,
     PullRequest,
+    RemoteFeedback,
+    ReviewComment,
+    ReviewThread,
+    ReviewThreads,
     retry_delay,
 )
 from app.persistence.reconcile_store import FeedbackCheck
 from app.persistence.store import Store
+
+
+class ThreadScanState(BaseModel):
+    """Scanner-owned continuation: next thread position and an unfinished thread.
+
+    Only metadata and the comment cursor are saved, never the already observed bodies.
+    Query methods receive native cursors and do not understand this serialized state.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    cursor: str | None = None
+    thread: ReviewThread | None = None
+
+    @model_validator(mode="after")
+    def unfinished_thread(self) -> ThreadScanState:
+        if self.thread is not None:
+            required = {"path", "resolved", "outdated", "comments", "complete"}
+            if (not required.issubset(self.thread.model_fields_set)
+                    or self.thread.comments.next_cursor is None or self.thread.comments.items
+                    or self.thread.complete):
+                raise ValueError("invalid unfinished thread state")
+        return self
+
+    def continuation(self) -> str | None:
+        return self.model_dump_json(exclude_unset=True) if self.cursor or self.thread is not None else None
 
 
 class FeedbackReconciler:
@@ -75,24 +107,24 @@ class FeedbackReconciler:
             threads, diagnostic = None, None
             updates: list[FeedbackUpdate] = []
             if check.source == "threads":
-                thread_page = await PullRequest(repo, number).list_review_thread_page(check.cursor)
-                threads = thread_page.snapshot
+                threads, following = await self._scan_threads(PullRequest(repo, number), check.cursor)
                 threads = threads.model_copy(update={"threads": tuple(thread.model_copy(update={
-                    "comments": tuple(comment.model_copy(update={"is_bot": comment.is_bot
-                        or comment.author.casefold() == self.bot_login}) for comment in thread.comments),
+                    "comments": thread.comments.model_copy(update={"items": tuple(
+                        comment.model_copy(update={"is_bot": comment.is_bot
+                        or comment.author.casefold() == self.bot_login}) for comment in thread.comments.items),
+                    }),
                 }) for thread in threads.threads)})
-                following = thread_page.next_cursor
                 diagnostic = "; ".join(threads.limitations) or (
                     "partial thread fragments; resolution requires a complete fresh read"
                     if any(not thread.complete for thread in threads.threads) else None
                 )
             else:
                 if check.source == "issue_comments":
-                    page = await Issue(repo, number).list_comments_page(check.cursor)
+                    page = await Issue(repo, number).fetch_comments(cursor=check.cursor, limit=50)
                 elif check.source == "reviews":
-                    page = await PullRequest(repo, number).list_reviews_page(check.cursor)
+                    page = await PullRequest(repo, number).fetch_reviews(cursor=check.cursor, limit=50)
                 else:
-                    page = await PullRequest(repo, number).list_comments_page(check.cursor)
+                    page = await PullRequest(repo, number).fetch_comments(cursor=check.cursor, limit=50)
                 updates, diagnostic = self._discussion_updates(page, check.source)
                 following = page.next_cursor
             with self.store.transaction() as tx:
@@ -125,8 +157,43 @@ class FeedbackReconciler:
                 check, retry_delay(check.failures + 1, self.store.now()), type(error).__name__,
             )
 
+    async def _scan_threads(
+        self, pr: PullRequest, cursor: str | None,
+    ) -> tuple[ReviewThreads, str | None]:
+        """Observe one request and advance durable traversal separately from queries."""
+        state = ThreadScanState.model_validate_json(cursor) if cursor else ThreadScanState()
+        snapshot = ReviewThreads(
+            repo=pr.repository.full_name, pr_number=pr.number, fetched_at=self.store.now(),
+        )
+        if state.thread is None:
+            batch = await pr.fetch_threads(cursor=state.cursor, limit=1)
+            following = batch.next_cursor
+            threads = batch.items
+        else:
+            thread = ReviewThread(pr, **state.thread.model_dump(exclude_unset=True))
+            following = state.cursor
+            try:
+                comments = await thread.fetch_comments(cursor=thread.comments.next_cursor, limit=20)
+            except GitHubError as error:
+                if error.kind is not GitHubErrorKind.NOT_FOUND:
+                    raise
+                # A removed thread cannot indefinitely block observation of later threads.
+                snapshot = snapshot.model_copy(update={"limitations": ("thread:missing-node",)})
+                threads = ()
+            else:
+                # A suffix, including its final batch, never proves coverage of the whole thread.
+                threads = (thread.model_copy(update={"comments": comments, "complete": False}),)
+        unfinished = next((thread for thread in threads if thread.comments.next_cursor), None)
+        if unfinished is not None:
+            unfinished = unfinished.model_copy(update={
+                "comments": Batch[ReviewComment](next_cursor=unfinished.comments.next_cursor),
+                "complete": False,
+            })
+        continuation = ThreadScanState(cursor=following, thread=unfinished).continuation()
+        return snapshot.model_copy(update={"threads": threads}), continuation
+
     def _discussion_updates(
-        self, page: FeedbackPage, source: FeedbackSource,
+        self, page: Batch[RemoteFeedback], source: FeedbackSource,
     ) -> tuple[list[FeedbackUpdate], str | None]:
         updates, diagnostic = [], None
         for item in page.items:

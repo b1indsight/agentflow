@@ -8,6 +8,11 @@
 
 ## Unreleased
 
+- GitHub 反馈读取统一 GraphQL：`fetch_threads`、`fetch_comments`、`fetch_reviews` 使用
+  原生游标和可指定的批量大小，统一返回不可变 `Batch[T]`。thread 同请求携带首批评论及
+  独立评论游标；持久扫描进度收归 control，删除旧 Page 类型和混合查询接口。
+  评论事实改为嵌套 Batch，不读取旧评论列表或旧扫描状态；完整覆盖和 resolve 校验保留。
+
 - GitHub 按 App、Installation、Repository、Issue、PullRequest、ReviewThread 和 Project/Item
   组织为不可变资源；查询返回新实例，已承载状态的更新返回确认字段改变的副本，使用标准序列化。
   控制层按持久身份绑定资源，分页上下文加工收归 control，删除 GitHub/Projects 协议和旧 client 入口；
