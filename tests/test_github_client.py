@@ -92,7 +92,7 @@ async def test_revision_lineage_requires_github_fast_forward(
     assert endpoint.calls == [(("owner", "repo", "base...head"), {"per_page": 1})]
 
 
-async def test_review_files_preserve_raw_facts_and_page_requests(tmp_path, monkeypatch):
+async def test_review_files_preserve_facts_and_page_requests(tmp_path, monkeypatch):
     calls = []
 
     async def files(*args, **kwargs):
@@ -120,8 +120,7 @@ async def test_review_files_preserve_raw_facts_and_page_requests(tmp_path, monke
     assert result[20].filename == "2-0.py"
 
 
-@pytest.mark.parametrize("source", ["conversation", "review_body", "inline"])
-async def test_review_discussions_preserve_bodies_and_page_requests(tmp_path, monkeypatch, source):
+async def test_inline_comments_preserve_bodies_and_page_requests(tmp_path, monkeypatch):
     calls = []
 
     def discussion(kind):
@@ -136,9 +135,7 @@ async def test_review_discussions_preserve_bodies_and_page_requests(tmp_path, mo
         return endpoint
 
     client = SimpleNamespace(rest=SimpleNamespace(
-        pulls=SimpleNamespace(async_list_reviews=discussion("review_body"),
-            async_list_review_comments=discussion("inline")),
-        issues=SimpleNamespace(async_list_comments=discussion("conversation")),
+        pulls=SimpleNamespace(async_list_review_comments=discussion("inline")),
     ))
 
     def installed(installation_id, *, auto_retry):
@@ -148,10 +145,10 @@ async def test_review_discussions_preserve_bodies_and_page_requests(tmp_path, mo
     app = GitHubApp(settings(tmp_path))
     install_client(monkeypatch, installed)
     pr = PullRequest(app.installation(1).repository("owner/repo"), 17)
-    result = [item async for item in pr.list_discussions(source)]
+    result = [item async for item in pr.list_review_comments()]
     assert calls == [
-        (source, ("owner", "repo", 17), {"per_page": 10, "page": 1}),
-        (source, ("owner", "repo", 17), {"per_page": 10, "page": 2}),
+        ("inline", ("owner", "repo", 17), {"per_page": 10, "page": 1}),
+        ("inline", ("owner", "repo", 17), {"per_page": 10, "page": 2}),
     ]
     assert len(result) == 11
     assert all(len(item.body) == 5000 for item in result)

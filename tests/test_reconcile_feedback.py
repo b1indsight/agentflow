@@ -328,12 +328,12 @@ async def test_recovered_backlog_drains_without_oversized_or_repeated_wait_batch
     await poller(store, github)._sweep()
     first = claim(store, clock)[0]
     assert len(batch_for(store, first).feedback) == 60
-    await run_triage(store, flow, first, TriageVerdict(verdict=Verdict(verdict), reason="Await clarification"))
+    await run_triage(store, flow, first, TriageVerdict(verdict=Verdict(verdict), reason="Await clarification"), github=github)
     # No new webhook is needed to deliver feedback omitted from the bounded first batch.
     second = claim(store, clock)[0]
     assert len(batch_for(store, second).feedback) <= 60
     assert any(item.github_id == 61 for item in batch_for(store, second).feedback)
-    await run_triage(store, flow, second, TriageVerdict(verdict=Verdict(verdict), reason="Await clarification"))
+    await run_triage(store, flow, second, TriageVerdict(verdict=Verdict(verdict), reason="Await clarification"), github=github)
     assert claim(store, clock) == []
     if verdict == "ignore":
         assert store.reviews.pending(flow.id) == []

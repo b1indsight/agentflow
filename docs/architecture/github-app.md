@@ -70,7 +70,13 @@ control 按 Webhook 保存的 `installation_id` 绑定 `Installation`，再绑�
 看板配置绑定安装下的 Project/Item。资源查询返回新实例，状态更新只复制已确认字段；旧事实不原地刷新。
 已有身份可本地构造资源，未知事实访问会失败。`model_dump(exclude_unset=True)` 区分尚未读取的字段
 与已知 `None`，私有 SDK/认证及父绑定不进入 JSON。domain 容器、持久层和 worker 使用同一个资源模型，
-`PullRequest.list_files()` 和 `list_discussions(source)` 在资源内管理请求、分页与 SDK 解析，按项异步产出。
+`PullRequest.list_files()` 和 `list_review_comments()` 在资源内管理 REST 请求和分页，
+按项异步产出 SDK 已有的文件与 inline 评论类型，保留 patch、diff_hunk 等来源字段。
+文件缺失的 patch/previous_filename（SDK Unset）在上下文映射为 None。
+审查上下文的普通评论和 review 正文直接使用现有 `RemoteFeedback`，每类只请求最多
+21 条，保留前 20 条；第 21 条或后续 cursor 表示截断。review 使用实际更新时间，
+晚于批次截止的编辑正文不进入上下文。已删除作者保留为 None，上下文显示 `[deleted]`，
+持久反馈扫描继续跳过没有作者身份的条目。
 control 直接遍历条目，仅负责审核配额、哨兵、映射、裁剪、过滤和冻结，保持原有字段与 digest。
 Issue/PR 的 `fetch_comments(cursor, limit)`、PR 的 `fetch_reviews(cursor, limit)` 和
 `fetch_threads(cursor, limit)` 请求 GraphQL，返回不可变 `Batch[T](items, next_cursor)`。

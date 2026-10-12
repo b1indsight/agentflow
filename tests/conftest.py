@@ -46,7 +46,7 @@ def recording_resources(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(PullRequest, "list_review_threads", RecordingPullRequest.list_review_threads)
     monkeypatch.setattr(PullRequest, "fetch_threads", RecordingPullRequest.fetch_threads)
     monkeypatch.setattr(PullRequest, "list_files", RecordingPullRequest.list_files)
-    monkeypatch.setattr(PullRequest, "list_discussions", RecordingPullRequest.list_discussions)
+    monkeypatch.setattr(PullRequest, "list_review_comments", RecordingPullRequest.list_review_comments)
     monkeypatch.setattr(ReviewThread, "fetch_comments", RecordingReviewThread.fetch_comments)
     monkeypatch.setattr(ReviewThread, "refetch", RecordingReviewThread.refetch)
     monkeypatch.setattr(ReviewThread, "find_reply", RecordingReviewThread.find_reply)

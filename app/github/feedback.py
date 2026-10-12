@@ -14,7 +14,7 @@ class RemoteFeedback(BaseModel):
 
     model_config = ConfigDict(frozen=True)
     github_id: int = Field(gt=0)
-    author: str
+    author: str | None
     body: str
     updated_at: AwareDatetime
     is_bot: bool = False
@@ -30,10 +30,12 @@ def decode_feedback(connection: dict[str, Any], cursor: str | None, limit: int) 
     if not rows and following:
         raise ValueError("empty feedback continuation")
     items = tuple(RemoteFeedback(
-        github_id=row["fullDatabaseId"], author=row["author"]["login"],
-        is_bot=row["author"]["__typename"] == "Bot", body=row["body"],
+        github_id=row["fullDatabaseId"],
+        author=row["author"]["login"] if row["author"] is not None else None,
+        is_bot=row["author"]["__typename"] == "Bot" if row["author"] is not None else False,
+        body=row["body"],
         updated_at=row["updatedAt"], state=row.get("state", "COMMENTED").lower(),
-    ) for row in rows if row["author"] is not None)
+    ) for row in rows)
     if len({item.github_id for item in items}) != len(items):
         raise ValueError("duplicate feedback identity")
     return Batch[RemoteFeedback](items=items, next_cursor=following)

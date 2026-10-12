@@ -39,47 +39,48 @@ async def build_review_context(
     issue = await repo.fetch_issue(flow.issue_number)
     files: list[ContextFile] = []
     files_truncated = False
-    async for item in pr.list_files():
+    async for remote_file in pr.list_files():
         if len(files) == MAX_FILES:
             files_truncated = True
             break
-        patch = item.patch
+        # The SDK represents omitted optional fields as Unset rather than None.
+        patch = remote_file.patch if isinstance(remote_file.patch, str) else None
+        previous_path = (remote_file.previous_filename
+                         if isinstance(remote_file.previous_filename, str) else None)
         file_limitations = []
         if patch is None:
             file_limitations.append("patch:unavailable-or-binary")
         elif len(patch) > SOURCE_CHARS:
             file_limitations.append("patch:truncated")
         files.append(ContextFile(
-            path=item.filename, status=item.status,
+            path=remote_file.filename, status=remote_file.status,
             patch=patch[:SOURCE_CHARS] if patch is not None else None,
-            previous_path=item.previous_filename, limitations=file_limitations,
+            previous_path=previous_path, limitations=file_limitations,
         ))
 
     discussion: list[ContextDiscussion] = []
     discussion_truncated = False
-    for kind in ("conversation", "review_body", "inline"):
-        count = 0
-        async for item in pr.list_discussions(kind):
-            if count == MAX_DISCUSSIONS // 3:
-                discussion_truncated = True
-                break
-            body = item.body or ""
-            hunk = item.diff_hunk if kind == "inline" else None
-            discussion_limitations = []
-            if len(body) > SOURCE_CHARS:
-                discussion_limitations.append("body:truncated")
-            if hunk and len(hunk) > SOURCE_CHARS:
-                discussion_limitations.append("diff_hunk:truncated")
-            discussion.append(ContextDiscussion(
-                kind=kind, github_id=item.id,
-                author=item.user.login if item.user else "[deleted]",
-                body=body[:SOURCE_CHARS],
-                updated_at=item.submitted_at if kind == "review_body" else item.updated_at,
-                path=item.path if kind == "inline" else None,
-                original_commit_id=item.original_commit_id if kind == "inline" else None,
-                diff_hunk=hunk[:SOURCE_CHARS] if hunk else hunk, limitations=discussion_limitations,
-            ))
-            count += 1
+    quota = MAX_DISCUSSIONS // 3
+    for kind, fetch in (("conversation", pr.fetch_comments), ("review_body", pr.fetch_reviews)):
+        # A bounded prefix plus one sentinel is enough; filtered rows still consume quota.
+        page = await fetch(limit=quota + 1)
+        discussion_truncated |= len(page.items) > quota or page.next_cursor is not None
+        discussion.extend(ContextDiscussion(
+            kind=kind, github_id=item.github_id, author=item.author or "[deleted]",
+            body=item.body, updated_at=item.updated_at,
+        ) for item in page.items[:quota])
+    count = 0
+    async for inline in pr.list_review_comments():
+        if count == quota:
+            discussion_truncated = True
+            break
+        discussion.append(ContextDiscussion(
+            kind="inline", github_id=inline.id,
+            author=inline.user.login if inline.user else "[deleted]",
+            body=inline.body or "", updated_at=inline.updated_at,
+            path=inline.path, original_commit_id=inline.original_commit_id, diff_hunk=inline.diff_hunk,
+        ))
+        count += 1
     after = await pr.refetch()
     if (pr.head_sha, pr.base_sha, pr.state, pr.merged) != (
         after.head_sha, after.base_sha, after.state, after.merged,
@@ -137,6 +138,16 @@ async def build_review_context(
                 continue
             if comment.updated_at > batch.created_at:
                 continue
+            comment_limitations = []
+            if len(comment.body) > SOURCE_CHARS:
+                comment_limitations.append("body:truncated")
+            if comment.diff_hunk and len(comment.diff_hunk) > SOURCE_CHARS:
+                comment_limitations.append("diff_hunk:truncated")
+            comment = comment.model_copy(update={
+                "body": comment.body[:SOURCE_CHARS],
+                "diff_hunk": comment.diff_hunk[:SOURCE_CHARS] if comment.diff_hunk else comment.diff_hunk,
+                "limitations": comment_limitations,
+            })
             discussions.append(bound_comment(comment))
     if len(discussions) > MAX_DISCUSSIONS:
         limitations.append("discussion:truncated")

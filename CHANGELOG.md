@@ -8,6 +8,11 @@
 
 ## Unreleased
 
+- 审查上下文的普通评论与 review 正文复用 `RemoteFeedback`，删除多来源 REST 讨论
+  读取入口；每类单次读取 21 条并保留前 20 条，review 使用实际更新时间。空作者
+  保留在批量中供上下文展示，持久反馈扫描继续跳过。文件和 inline 片段使用 SDK
+  已有类型，明确处理文件可选字段的 Unset；完整线程仍使用 `ReviewThread`。
+
 - GitHub 反馈读取统一 GraphQL：`fetch_threads`、`fetch_comments`、`fetch_reviews` 使用
   原生游标和可指定的批量大小，统一返回不可变 `Batch[T]`。thread 同请求携带首批评论及
   独立评论游标；持久扫描进度收归 control，删除旧 Page 类型和混合查询接口。
