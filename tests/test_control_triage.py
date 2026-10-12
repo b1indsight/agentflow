@@ -8,17 +8,18 @@ import pytest
 
 from app.control.runtime import ControlRuntime
 from app.control.service import ControlService
-from app.domain.github_models import GitHubAdapterError, GitHubErrorKind
 from app.domain.models import JobKind, TriageVerdict, Verdict
 from app.domain.review_models import BatchState
+from app.github import GitHubError, GitHubErrorKind, PullRequest
+from tests.github import RecordingGitHub
 from tests.review_memory import judge_decision
-from tests.test_coordinator import RecordingGitHub, coordinator
+from tests.test_coordinator import coordinator
 from tests.test_merge import route_merge
 from tests.test_review_batches import claim, feedback, ingest, review_flow  # noqa: F401
 
 
 @pytest.fixture
-def triage_runtime(store, review_flow):  # noqa: F811
+def triage_runtime(store, review_flow, recording_resources):  # noqa: F811
     flow, clock = review_flow
     ingest(store, flow, feedback(clock))
     batch = claim(store, clock)[0]
@@ -72,7 +73,7 @@ async def test_interrupted_judge_retries_unfinished_batch(store, triage_runtime)
     assert len(store.list_jobs(batch.flow_id)) == 1
 
 
-async def test_concurrent_answers_authorize_only_one_post(store, triage_runtime):
+async def test_concurrent_answers_authorize_only_one_post(store, triage_runtime, monkeypatch):
     # Two callers can both miss the marker while the first POST is still in flight.
     # The batch's durable authorization must serialize their remote mutations.
     runtime, batch = triage_runtime
@@ -80,14 +81,14 @@ async def test_concurrent_answers_authorize_only_one_post(store, triage_runtime)
         TriageVerdict(verdict=Verdict.ANSWER, answer="Ten."), context)
     github = runtime.coordinator.github
     entered, release = asyncio.Event(), asyncio.Event()
-    comment = github.comment
+    comment = PullRequest.comment
 
-    async def slow_comment(*args):
+    async def slow_comment(pr, body):
         entered.set()
         await release.wait()
-        return await comment(*args)
+        return await comment(pr, body)
 
-    github.comment = slow_comment
+    monkeypatch.setattr(PullRequest, "comment", slow_comment)
     first = asyncio.create_task(runtime.coordinator.triage(batch, runtime.judge))
     try:
         await asyncio.wait_for(entered.wait(), 1)
@@ -99,20 +100,23 @@ async def test_concurrent_answers_authorize_only_one_post(store, triage_runtime)
     assert store.reviews.get_batch(batch.id).state is BatchState.COMPLETED
 
 
-async def test_answer_definite_rejection_can_retry_saved_decision(store, triage_runtime):
+async def test_answer_definite_rejection_can_retry_saved_decision(store, triage_runtime, monkeypatch):
     # An explicit rejection proves the POST was not accepted; it must not leave
     # the batch permanently uncertain like a lost response does.
     runtime, batch = triage_runtime
     runtime.judge.triage.side_effect = lambda context: judge_decision(
         TriageVerdict(verdict=Verdict.ANSWER, answer="Ten."), context)
     github = runtime.coordinator.github
-    comment = github.comment
-    github.comment = AsyncMock(side_effect=GitHubAdapterError(
-        GitHubErrorKind.RATE_LIMITED, "comment", status_code=429))
-    with pytest.raises(GitHubAdapterError):
+    comment = PullRequest.comment
+
+    async def rejected_comment(pr, body):
+        raise GitHubError(GitHubErrorKind.RATE_LIMITED, "comment", status_code=429)
+
+    monkeypatch.setattr(PullRequest, "comment", rejected_comment)
+    with pytest.raises(GitHubError):
         await runtime.coordinator.triage(batch, runtime.judge)
     assert not store.reviews.get_batch(batch.id).answer_dispatched
-    github.comment = comment
+    monkeypatch.setattr(PullRequest, "comment", comment)
     await runtime.coordinator.triage(store.reviews.get_batch(batch.id), runtime.judge)
     assert len(github.comments) == 1
     assert runtime.judge.triage.await_count == 1

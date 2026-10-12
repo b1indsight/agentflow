@@ -12,7 +12,6 @@ from app.contracts.protocol import (
 from app.contracts.result_models import ResultPending
 from app.control.initial import initial_delivery_mismatch
 from app.control.revisions import frozen_revision, revision_mismatch, verify_revision_remote
-from app.domain.github_models import PullRequestMerge, PullRequestSnapshot, PullRequestStatus
 from app.domain.models import (
     TERMINAL_STATES,
     DeliveryState,
@@ -22,7 +21,7 @@ from app.domain.models import (
     Job,
     JobKind,
 )
-from app.domain.ports import GitHubClient
+from app.github import PullRequest, PullRequestMerge, Repository
 from app.persistence.store import Store
 
 
@@ -38,7 +37,7 @@ class DeliveryConflict(RuntimeError):
 
 
 def validate_open_pull_request(
-    remote: PullRequestSnapshot, branch: str, base: str, head_sha: str,
+    remote: PullRequest, branch: str, base: str, head_sha: str,
 ) -> None:
     """Require an open PR with the exact prepared branch, base and commit."""
     if remote.state.casefold() != "open":
@@ -48,7 +47,7 @@ def validate_open_pull_request(
 
 
 def validate_created_pull_request(
-    remote: PullRequestStatus, repo: str, number: int, expected: FlowDelivery,
+    remote: PullRequest, repo: str, number: int, expected: FlowDelivery,
 ) -> None:
     """Closed/cancelled creation recovery must prove repository ownership too."""
     if (remote.repo != repo or remote.number != number or remote.head_repository != repo
@@ -58,7 +57,7 @@ def validate_created_pull_request(
 
 
 def adopt_created_pull_request(
-    store: Store, attempt_id: int | None, expected: FlowDelivery, remote: PullRequestStatus,
+    store: Store, attempt_id: int | None, expected: FlowDelivery, remote: PullRequest,
 ) -> None:
     """Bind a verified creation receipt and apply its lifecycle under the unchanged intent."""
     with store.transaction() as tx:
@@ -86,7 +85,7 @@ def adopt_created_pull_request(
             pause_delivery(tx, current)
 
 
-def _merge_observation(remote: PullRequestStatus) -> PullRequestMerge:
+def _merge_observation(remote: PullRequest) -> PullRequestMerge:
     assert remote.merged_at is not None and remote.merge_commit_sha is not None
     return PullRequestMerge(number=remote.number, merged=True, merged_at=remote.merged_at,
                             merge_commit_sha=remote.merge_commit_sha)
@@ -103,8 +102,8 @@ def pause_delivery(tx: Store, delivery: FlowDelivery) -> None:
 
 
 async def prove_reopen(
-    store: Store, github: GitHubClient, flow: Flow, delivery: FlowDelivery,
-    remote: PullRequestStatus, job: Job | None,
+    store: Store, repo: Repository, flow: Flow, delivery: FlowDelivery,
+    remote: PullRequest, job: Job | None,
 ) -> tuple[ReopenProof | None, str | None]:
     """Only an exact old head or a verified frozen worker delivery may resume this PR."""
     if (not delivery.head_sha or not delivery.base_branch or flow.installation_id is None
@@ -143,12 +142,12 @@ async def prove_reopen(
         return None, "PR head/base changed; verified delivery is unchanged"
     if revision is not None:
         mismatch = await verify_revision_remote(
-            github, flow, delivery.model_copy(update={"state": DeliveryState.OPEN}), proof.head_sha,
+            repo, flow, delivery.model_copy(update={"state": DeliveryState.OPEN}), proof.head_sha,
         )
         if mismatch:
             return None, mismatch
     else:
-        ref = await github.get_ref(flow.installation_id, flow.repo, delivery.branch)
+        ref = await repo.fetch_ref(delivery.branch)
         if ref.branch != delivery.branch or ref.sha != proof.head_sha:
             return None, "PR head/base and remote branch disagree"
     return proof, None

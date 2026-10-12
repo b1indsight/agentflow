@@ -5,7 +5,7 @@ from datetime import timedelta
 
 import pytest
 
-from app.domain.github_models import ReviewThreads
+from app.github import ReviewThreads
 from app.persistence.review_store import ReviewStore
 from app.persistence.store import Store
 from tests.test_review_batches import batch_for, feedback, ingest, settle

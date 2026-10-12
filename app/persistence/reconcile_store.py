@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Literal
 from psycopg.rows import class_row
 from pydantic import BaseModel
 
-from app.domain.github_models import FeedbackSource
+from app.github import FeedbackSource
 
 ReconcileSource = FeedbackSource | Literal["threads"]
 PR_RECONCILE_ELIGIBLE = "f.state<>'succeeded' AND d.pr_number IS NOT NULL AND d.state<>'merged'"

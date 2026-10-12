@@ -19,10 +19,12 @@ from app.domain.models import (
     Verdict,
 )
 from app.domain.review_models import BatchState, FeedbackUpdate, ReviewBatch
+from app.github import GitHubError, GitHubErrorKind, PullRequest
 from app.persistence.review_store import ReviewStore
 from app.persistence.store import Store
+from tests.github import RecordingGitHub
 from tests.review_memory import judge_decision
-from tests.test_coordinator import RecordingGitHub, coordinator
+from tests.test_coordinator import coordinator
 
 
 @pytest.fixture
@@ -372,7 +374,7 @@ async def run_triage(store, flow, batch, verdict, *, before_apply=None, github=N
 
 @pytest.mark.parametrize("confidence,expected", [(0.6, JobKind.REVISION), (0.599, None)])
 async def test_revise_confidence_boundary_and_unresolved_points_persist(
-    store, review_flow, confidence, expected,
+    store, review_flow, confidence, expected, recording_resources,
 ):
     flow, clock = review_flow
     ingest(store, flow, feedback(clock))
@@ -393,20 +395,23 @@ async def test_revise_confidence_boundary_and_unresolved_points_persist(
 
 
 @pytest.mark.parametrize("receipt", [True, False])
-async def test_answer_recovery_waits_for_receipt_and_preserves_a_new_version(store, review_flow, receipt):
-    from app.domain.github_models import GitHubAdapterError, GitHubErrorKind
+async def test_answer_recovery_waits_for_receipt_and_preserves_a_new_version(
+    store, review_flow, receipt, recording_resources, monkeypatch,
+):
+    comment = PullRequest.comment
 
-    class LostResponseGitHub(RecordingGitHub):
-        async def comment(self, *args):
-            if receipt:
-                await super().comment(*args)
-            raise GitHubAdapterError(GitHubErrorKind.TRANSIENT, "comment")
+    async def lost_response(pr, body):
+        if receipt:
+            await comment(pr, body)
+        raise GitHubError(GitHubErrorKind.TRANSIENT, "comment")
+
+    monkeypatch.setattr(PullRequest, "comment", lost_response)
 
     flow, clock = review_flow
     ingest(store, flow, feedback(clock))
     job = claim(store, clock)[0]
-    github = LostResponseGitHub()
-    with pytest.raises(GitHubAdapterError):
+    github = RecordingGitHub()
+    with pytest.raises(GitHubError):
         await run_triage(store, flow, job, TriageVerdict(
             verdict=Verdict.ANSWER, answer="The bound is ten.", confidence=0.8,
         ), github=github)
@@ -431,26 +436,33 @@ async def test_answer_recovery_waits_for_receipt_and_preserves_a_new_version(sto
 
 
 @pytest.mark.parametrize("change", ["cancel", "closed", "merged", "head", "attempt"])
-async def test_answer_rechecks_lifecycle_and_remote_head_before_sending(store, review_flow, change):
-    class ChangedGitHub(RecordingGitHub):
-        changed = False
+async def test_answer_rechecks_lifecycle_and_remote_head_before_sending(
+    store, review_flow, change, recording_resources, monkeypatch,
+):
+    read = PullRequest.refetch
+    changed = False
 
-        async def get_pull_request(self, *args):
-            pr = await super().get_pull_request(*args)
-            if self.changed and change in {"closed", "merged", "head"}:
-                return pr.model_copy(update={
-                    "state": "closed" if change == "closed" else "open",
-                    "merged": change == "merged", "head_sha": "changed" if change == "head" else "abc",
-                })
-            return pr
+    async def changed_pr(pr):
+        observed = await read(pr)
+        if changed and change in {"closed", "merged", "head"}:
+            return observed.model_copy(update={
+                "state": "closed" if change in {"closed", "merged"} else "open",
+                "merged": change == "merged", "head_sha": "changed" if change == "head" else "abc",
+                "merged_at": datetime.now(UTC) if change == "merged" else None,
+                "merge_commit_sha": "merged" if change == "merged" else None,
+            })
+        return observed
+
+    monkeypatch.setattr(PullRequest, "refetch", changed_pr)
 
     flow, clock = review_flow
     ingest(store, flow, feedback(clock))
     job = claim(store, clock)[0]
-    github = ChangedGitHub()
+    github = RecordingGitHub()
 
     def change_state():
-        github.changed = True
+        nonlocal changed
+        changed = True
         if change == "cancel":
             ControlService(store).cancel(flow)
         if change == "attempt":
@@ -464,7 +476,7 @@ async def test_answer_rechecks_lifecycle_and_remote_head_before_sending(store, r
     assert len(store.reviews.pending(flow.id)) == 1
 
 
-async def test_ignore_consumes_frozen_input_once_and_leaves_newer_version(store, review_flow):
+async def test_ignore_consumes_frozen_input_once_and_leaves_newer_version(store, review_flow, recording_resources):
     flow, clock = review_flow
     ingest(store, flow, feedback(clock))
     job = claim(store, clock)[0]
@@ -479,7 +491,7 @@ async def test_ignore_consumes_frozen_input_once_and_leaves_newer_version(store,
     assert [(f.github_id, f.version) for f in store.reviews.pending(flow.id)] == [(101, 2)]
 
 
-async def test_revise_transfers_batch_to_one_derived_job(store, review_flow):
+async def test_revise_transfers_batch_to_one_derived_job(store, review_flow, recording_resources):
     flow, clock = review_flow
     ingest(store, flow, feedback(clock))
     job = claim(store, clock)[0]
@@ -523,7 +535,7 @@ def test_retry_after_successful_replacement_does_not_select_historical_failure(
     assert store.get_flow(flow.id).state is FlowState.ACTIVE
 
 
-async def test_answer_uses_frozen_decision_once_and_consumes_after_comment(store, review_flow):
+async def test_answer_uses_frozen_decision_once_and_consumes_after_comment(store, review_flow, recording_resources):
     flow, clock = review_flow
     ingest(store, flow, feedback(clock))
     job = claim(store, clock)[0]

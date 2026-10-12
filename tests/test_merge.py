@@ -13,7 +13,8 @@ from app.control.router import EventRouter
 from app.control.service import ControlService
 from app.domain.models import DeliveryState, Flow, FlowState, JobKind, JobState
 from app.persistence.store import Store
-from tests.test_coordinator import RecordingGitHub, coordinator
+from tests.github import RecordingGitHub
+from tests.test_coordinator import coordinator
 from tests.test_workflow_transactions import accepted_coding
 
 
@@ -125,7 +126,7 @@ async def test_invalid_merge_facts_can_be_corrected_before_redelivery(store, mer
     assert store.get_delivery(merge_flow.id).state is DeliveryState.MERGED
 
 
-async def test_merge_retires_review_but_waits_for_running_result(store):
+async def test_merge_retires_review_but_waits_for_running_result(store, recording_resources):
     # Merge can arrive after worker completion but before its durable result has been applied.
     job, _ = accepted_coding(store)
     flow = store.get_flow(job.flow_id)

@@ -10,13 +10,14 @@ from app.domain.review_models import BatchState, FeedbackRef
 from app.persistence.store import Store
 from tests.test_pr_lifecycle import GitHub, check
 from tests.test_pr_lifecycle import lifecycle_flow as lifecycle_flow  # noqa: PLC0414
+from tests.test_pr_lifecycle import lifecycle_resources as lifecycle_resources  # noqa: PLC0414
 from tests.test_review_batches import batch_for, feedback, ingest, settle
 from tests.test_review_batches import review_flow as review_flow  # noqa: PLC0414
 
 
 @pytest.mark.parametrize("outcome", [BatchState.COMPLETED, BatchState.WAITING])
 async def test_reopen_retained_signals_stay_retired_across_batches_and_restart(
-    store, lifecycle_flow, outcome,
+    store, lifecycle_flow, outcome, lifecycle_resources,
 ):
     flow, clock = lifecycle_flow
     await check(store, flow, GitHub(flow))
@@ -48,7 +49,7 @@ async def test_reopen_retained_signals_stay_retired_across_batches_and_restart(
 
 @pytest.mark.parametrize("new_kind", ["new_review", "edited_version"])
 async def test_reopen_retires_duplicates_but_preserves_new_authorization(
-    store, lifecycle_flow, new_kind,
+    store, lifecycle_flow, new_kind, lifecycle_resources,
 ):
     flow, clock = lifecycle_flow
     old = feedback(clock, signal="request_changes", submitted=True)
@@ -85,7 +86,9 @@ async def test_reopen_retires_duplicates_but_preserves_new_authorization(
     assert settle(store)[0].job_id is None
 
 
-async def test_empty_reopen_batch_does_not_restore_retired_review_authorization(store, lifecycle_flow):
+async def test_empty_reopen_batch_does_not_restore_retired_review_authorization(
+    store, lifecycle_flow, lifecycle_resources,
+):
     flow, clock = lifecycle_flow
     ingest(store, flow, feedback(clock, body="", signal="request_changes", submitted=True))
     await check(store, flow, GitHub(flow))

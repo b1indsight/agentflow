@@ -7,7 +7,6 @@ import pytest
 
 from app.contracts.protocol import PROTOCOL_VERSION, RevisionTask
 from app.contracts.result_models import EffectState, ResolveEffect, ResultPending
-from app.domain.github_models import GitHubAdapterError, GitHubErrorKind, ReviewThreads
 from app.domain.models import (
     AddressedComment,
     DeferredComment,
@@ -17,12 +16,23 @@ from app.domain.models import (
     ReviewItemKind,
 )
 from app.domain.review_models import FeedbackUpdate
+from app.github import (
+    GitHubError,
+    GitHubErrorKind,
+    Issue,
+    PullRequest,
+    Repository,
+    ReviewThread,
+    ReviewThreads,
+)
+from tests.github import NATIVE_THREAD_REFETCH, record_call
 from tests.test_archive_status import archive_adapter
 from tests.test_coordinator import coordinator
 from tests.test_review_batches import batch_for, settle
 from tests.test_review_resolution import human, snapshot
 from tests.test_revision_delivery import revision_output, verified_result
 from tests.test_revision_recovery import RevisionGitHub, accept
+from tests.test_revision_recovery import revision_resources as revision_resources  # noqa: PLC0414
 
 
 class ThreadGitHub(RevisionGitHub):
@@ -34,35 +44,63 @@ class ThreadGitHub(RevisionGitHub):
         self.lose_reply = False
         self.lose_resolve = False
 
-    async def list_review_threads(self, *args):
-        return ReviewThreads(repo="owner/repo", pr_number=17, fetched_at=datetime.now(UTC),
-                             threads=[self.thread.model_copy(deep=True)])
 
-    async def get_review_thread(self, *args):
-        return await self.list_review_threads()
+@pytest.fixture
+def thread_resources(revision_resources, monkeypatch):
+    async def list_threads(pr):
+        state = record_call(pr.repository, "list_review_threads", number=pr.number)
+        return ReviewThreads(repo=pr.repository.full_name, pr_number=pr.number,
+            fetched_at=datetime.now(UTC),
+            threads=(ReviewThread(pr, **state.thread.model_dump(exclude_unset=True)),))
 
-    async def find_review_reply(self, installation, repo, number, thread_id, marker):
-        return next((900 + i for i, body in enumerate(self.replies) if marker in body.splitlines()), None)
+    async def refetch(thread):
+        pr = thread.pull_request
+        state = record_call(pr.repository, "fetch_review_thread", number=pr.number,
+                            thread_id=thread.thread_id)
+        return ReviewThread(pr, root_comment_id=thread.root_comment_id,
+            **(state.thread.model_dump(exclude_unset=True) | {
+                "fetched_at": datetime.now(UTC), "limitations": (),
+            }))
 
-    async def reply_review_thread(self, installation, repo, number, root, body):
-        assert root == 1
-        self.replies.append(body)
-        if self.lose_reply:
-            self.lose_reply = False
-            raise GitHubAdapterError(GitHubErrorKind.TRANSIENT, "reply")
+    async def find_reply(thread, marker):
+        pr = thread.pull_request
+        state = record_call(pr.repository, "find_review_reply", number=pr.number,
+                            thread_id=thread.thread_id)
+        return next((900 + i for i, body in enumerate(state.replies)
+                     if marker in body.splitlines()), None)
+
+    async def reply(thread, body):
+        pr = thread.pull_request
+        state = record_call(pr.repository, "reply_review_thread", number=pr.number,
+                            thread_id=thread.thread_id, root_comment_id=thread.root_comment_id)
+        assert thread.root_comment_id == 1
+        state.replies.append(body)
+        if state.lose_reply:
+            state.lose_reply = False
+            raise GitHubError(GitHubErrorKind.TRANSIENT, "reply")
         return 900
 
-    async def resolve_review_thread(self, installation, thread_id):
-        assert self.replies
-        self.resolves.append(thread_id)
-        self.thread = self.thread.model_copy(update={"resolved": True})
-        if self.lose_resolve:
-            self.lose_resolve = False
-            raise GitHubAdapterError(GitHubErrorKind.TRANSIENT, "resolve")
+    async def resolve(thread):
+        pr = thread.pull_request
+        state = record_call(pr.repository, "resolve_review_thread", number=pr.number,
+                            thread_id=thread.thread_id)
+        assert state.replies
+        state.resolves.append(thread.thread_id)
+        state.thread = state.thread.model_copy(update={"resolved": True})
+        if state.lose_resolve:
+            state.lose_resolve = False
+            raise GitHubError(GitHubErrorKind.TRANSIENT, "resolve")
+        return thread.model_copy(update={"resolved": True})
+
+    monkeypatch.setattr(PullRequest, "list_review_threads", list_threads)
+    monkeypatch.setattr(ReviewThread, "refetch", refetch)
+    monkeypatch.setattr(ReviewThread, "find_reply", find_reply)
+    monkeypatch.setattr(ReviewThread, "reply", reply)
+    monkeypatch.setattr(ReviewThread, "resolve", resolve)
 
 
 @pytest.fixture
-async def thread_revision(store, request):
+async def thread_revision(store, request, thread_resources):
     mode = getattr(request, "param", "one")
     flow = store.create_flow("owner/repo", 8, 42)
     attempt = store.create_attempt(flow.id)
@@ -76,7 +114,7 @@ async def thread_revision(store, request):
     store.update_delivery(delivery)
     github = ThreadGitHub()
     if mode in {"multiple", "mixed"}:
-        github.thread.comments.append(human(2, reply_to_id=1))
+        github.thread = github.thread.model_copy(update={"comments": (*github.thread.comments, human(2, reply_to_id=1))})
     for comment in github.thread.comments:
         update = FeedbackUpdate(kind=ReviewItemKind.INLINE, github_id=comment.github_id,
             author=comment.author, body=comment.body, updated_at=comment.updated_at,
@@ -131,7 +169,7 @@ async def test_auth_failure_after_resolve_waits_for_confirmation(
     store, thread_revision, tmp_path, monkeypatch, status,
 ):
     _, job, github, subject = thread_revision
-    read = github.get_review_thread
+    read = ReviewThread.refetch
 
     def rejected_token(request):
         assert request.url.path == "/app/installations/42/access_tokens"
@@ -140,12 +178,15 @@ async def test_auth_failure_after_resolve_waits_for_confirmation(
 
     adapter, _ = archive_adapter(tmp_path, monkeypatch, rejected_token)
 
-    async def auth_after_resolve(*args):
+    async def auth_after_resolve(thread):
         if github.resolves:
-            return await adapter.get_review_thread(*args)
-        return await read(*args)
+            repo = adapter.installation(thread.pull_request.repository.installation.installation_id).repository(
+                thread.pull_request.repository.full_name)
+            return await NATIVE_THREAD_REFETCH(ReviewThread(PullRequest(repo, thread.pull_request.number),
+                thread.thread_id, root_comment_id=thread.root_comment_id))
+        return await read(thread)
 
-    monkeypatch.setattr(github, "get_review_thread", auth_after_resolve)
+    monkeypatch.setattr(ReviewThread, "refetch", auth_after_resolve)
     before = store.now()
     with pytest.raises(ResultPending):
         await subject.results.apply(job.id)
@@ -156,7 +197,7 @@ async def test_auth_failure_after_resolve_waits_for_confirmation(
     if status == 429:
         assert effect.next_attempt_at >= before + timedelta(seconds=120)
     assert github.review_requests == []
-    monkeypatch.setattr(github, "get_review_thread", read)
+    monkeypatch.setattr(ReviewThread, "refetch", read)
     with store.connection() as connection:
         connection.execute("UPDATE result_effects SET next_attempt_at=now() WHERE job_id=%s", (job.id,))
     assert await coordinator(store, github).results.apply(job.id) is JobState.DONE
@@ -165,27 +206,28 @@ async def test_auth_failure_after_resolve_waits_for_confirmation(
 
 
 @pytest.mark.parametrize("change", ["new", "edited", "manual-resolve", "during-resolve", "head"])
-async def test_racing_input_survives_ack_and_prevents_rereview(store, thread_revision, change):
+async def test_racing_input_survives_ack_and_prevents_rereview(store, thread_revision, change, monkeypatch):
     flow, job, github, subject = thread_revision
     if change == "edited":
-        github.thread.comments[0] = human(body="Also handle negative values")
+        github.thread = github.thread.model_copy(update={"comments": (human(body="Also handle negative values"), *github.thread.comments[1:])})
     elif change == "head":
-        original = github.reply_review_thread
+        original = ReviewThread.reply
 
-        async def advance(*args):
-            result = await original(*args)
+        async def advance(thread, body):
+            result = await original(thread, body)
             github.sha = "someone-elses-head"
             return result
-        github.reply_review_thread = advance
+        monkeypatch.setattr(ReviewThread, "reply", advance)
     elif change == "during-resolve":
-        original_resolve = github.resolve_review_thread
+        original_resolve = ReviewThread.resolve
 
-        async def race(*args):
-            await original_resolve(*args)
-            github.thread.comments.append(human(2))
-        github.resolve_review_thread = race
+        async def race(thread):
+            updated = await original_resolve(thread)
+            github.thread = github.thread.model_copy(update={"comments": (*github.thread.comments, human(2))})
+            return updated
+        monkeypatch.setattr(ReviewThread, "resolve", race)
     else:
-        github.thread.comments.append(human(2))
+        github.thread = github.thread.model_copy(update={"comments": (*github.thread.comments, human(2))})
         if change == "manual-resolve":
             github.thread = github.thread.model_copy(update={"resolved": True})
     assert await subject.results.apply(job.id) is JobState.DONE
@@ -205,9 +247,9 @@ async def test_permission_denial_keeps_diagnostic_without_rerunning_code(
     flow, job, github, subject = thread_revision
 
     async def denied(*args):
-        raise GitHubAdapterError(GitHubErrorKind.PERMISSION, operation, status_code=403)
+        raise GitHubError(GitHubErrorKind.PERMISSION, operation, status_code=403)
 
-    monkeypatch.setattr(github, operation, denied)
+    monkeypatch.setattr(ReviewThread, "reply" if operation == "reply_review_thread" else "resolve", denied)
     assert await subject.results.apply(job.id) is JobState.DONE
     assert store.get_delivery(flow.id).head_sha == "revision"
     batch = batch_for(store, store.get_job(job.id))
@@ -222,10 +264,10 @@ async def test_cancel_after_reply_lookup_prevents_any_write(store, thread_revisi
 
     flow, job, github, subject = thread_revision
 
-    async def cancel(*args):
+    async def cancel(thread, marker):
         ControlService(store).cancel(flow)
 
-    monkeypatch.setattr(github, "find_review_reply", cancel)
+    monkeypatch.setattr(ReviewThread, "find_reply", cancel)
     with pytest.raises(ResultPending):
         await subject.results.apply(job.id)
     await subject.results.apply(job.id)
@@ -256,7 +298,7 @@ async def test_commit_failure_keeps_remote_receipts_and_exact_consumption(store,
 async def test_discovered_feedback_and_late_webhook_share_one_version(store, thread_revision):
     flow, job, github, subject = thread_revision
     new = human(2)
-    github.thread.comments.append(new)
+    github.thread = github.thread.model_copy(update={"comments": (*github.thread.comments, new)})
     await subject.results.apply(job.id)
     update = FeedbackUpdate(kind=ReviewItemKind.INLINE, github_id=2, author=new.author,
         body=new.body, updated_at=new.updated_at, path="app.py")
@@ -290,7 +332,7 @@ async def test_same_second_round_trip_keeps_the_latest_webhook_version(store, th
                 kind=ReviewItemKind.INLINE, github_id=1, author="alice",
                 body=body, updated_at=human().updated_at,
             ), settle_seconds=0, submit_grace_seconds=0)
-    github.thread.comments[0] = human(body="Intermediate")
+    github.thread = github.thread.model_copy(update={"comments": (human(body="Intermediate"), *github.thread.comments[1:])})
     await subject.results.apply(job.id)
     assert [(f.version, f.body) for f in store.reviews.pending(flow.id)] == [(3, original)]
     assert github.resolves == [] and github.review_requests == []
@@ -311,7 +353,7 @@ async def test_remote_predecessor_releases_the_queued_webhook_edit(store, thread
             tx.lock_workflow(flow.id)
             assert tx.reviews._append_version(flow.id, flow.current_attempt_id, None,
                 latest.model_copy(update={"body": "Intermediate"}), previous_body=human().body)
-    github.thread.comments[0] = human(body="Intermediate")
+    github.thread = github.thread.model_copy(update={"comments": (human(body="Intermediate"), *github.thread.comments[1:])})
     await subject.results.apply(job.id)
     assert [(f.version, f.body) for f in store.reviews.pending(flow.id)] == [(3, "Latest")]
     with store.connection() as connection:
@@ -324,12 +366,13 @@ async def test_remote_predecessor_releases_the_queued_webhook_edit(store, thread
     assert batch_for(store, queued[0]).feedback[0].body == "Latest"
 
 
-@pytest.mark.parametrize("query,write", [("get_labels", "labels"), ("get_reviewers", "review_requests")])
+@pytest.mark.parametrize("query,write", [("fetch_labels", "labels"), ("fetch_reviewers", "review_requests")])
 async def test_new_feedback_during_notification_query_fences_dispatch(
     store, thread_revision, monkeypatch, query, write,
 ):
     flow, job, github, subject = thread_revision
-    original = getattr(github, query)
+    owner = Issue if query == "fetch_labels" else PullRequest
+    original = getattr(owner, query)
 
     async def with_feedback(*args, **kwargs):
         # The old batch has already resolved its thread; a new question arrives during the last read.
@@ -339,7 +382,7 @@ async def test_new_feedback_during_notification_query_fences_dispatch(
         ), settle_seconds=0, submit_grace_seconds=0)
         return await original(*args, **kwargs)
 
-    monkeypatch.setattr(github, query, with_feedback)
+    monkeypatch.setattr(owner, query, with_feedback)
     assert await subject.results.apply(job.id) is JobState.DONE
     assert getattr(github, write) == [] and github.review_requests == []
     batch = batch_for(store, store.get_job(job.id))
@@ -351,18 +394,18 @@ async def test_new_feedback_during_notification_query_fences_dispatch(
 
 async def test_dispatch_rechecks_input_arriving_during_head_read(store, thread_revision, monkeypatch):
     flow, job, github, subject = thread_revision
-    original = github.get_pull_request
+    original = PullRequest.refetch
 
-    async def edited(*args):
+    async def edited(pr):
         if github.replies:
             store.reviews.ingest(flow.id, "just-before-resolve", "pull_request_review_comment",
                 {"changes": {"body": {"from": human().body}}}, FeedbackUpdate(
                     kind=ReviewItemKind.INLINE, github_id=1, author="alice",
                     body="Last moment edit", updated_at=human().updated_at,
                 ), settle_seconds=0, submit_grace_seconds=0)
-        return await original(*args)
+        return await original(pr)
 
-    monkeypatch.setattr(github, "get_pull_request", edited)
+    monkeypatch.setattr(PullRequest, "refetch", edited)
     await subject.results.apply(job.id)
     assert github.resolves == [] and github.review_requests == []
     assert store.reviews.pending(flow.id)[0].body == "Last moment edit"
@@ -392,7 +435,7 @@ async def test_next_revision_combines_valid_historical_coverage_on_the_same_pr(
     await subject.results.apply(first.id)
     assert github.resolves == []
     new = human(3, reply_to_id=1, body="Decision made; finish the remaining change")
-    github.thread.comments.append(new)
+    github.thread = github.thread.model_copy(update={"comments": (*github.thread.comments, new)})
     store.reviews.ingest(flow.id, "decision", "pull_request_review_comment", {}, FeedbackUpdate(
         kind=ReviewItemKind.INLINE, github_id=3, author=new.author, body=new.body,
         updated_at=new.updated_at, signal="request_changes", submitted=True,
@@ -407,10 +450,10 @@ async def test_next_revision_combines_valid_historical_coverage_on_the_same_pr(
     subject.mark_started(job, task, "worker-a")
     github.sha = "revision2"
 
-    async def lineage(*args):
-        return args[-2:] == ("revision", "revision2")
+    async def lineage(repo, base, head):
+        return (base, head) == ("revision", "revision2")
 
-    monkeypatch.setattr(github, "compare_commits", lineage)
+    monkeypatch.setattr(Repository, "compare_commits", lineage)
     result = verified_result(task, commit_sha="revision2", remote_sha="revision2",
         output=revision_output(addressed=[AddressedComment(item_id=f.item_id, version=f.version,
             comment_id=f.github_id, note="Implemented the decision") for f in task.feedback]))

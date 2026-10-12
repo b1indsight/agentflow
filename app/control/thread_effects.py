@@ -10,9 +10,8 @@ from app.contracts.result_models import (
     ResultPlan,
 )
 from app.control.resolution import covered_thread
-from app.domain.github_models import GitHubAdapterError, ReviewThreads
 from app.domain.models import TERMINAL_STATES, ReviewItemKind
-from app.domain.ports import GitHubClient
+from app.github import GitHubError, PullRequest, Repository, ReviewThread, ReviewThreads
 from app.persistence.store import Store
 
 
@@ -27,11 +26,13 @@ def observe(store: Store, plan: ResultPlan, snapshot: ReviewThreads) -> None:
         tx.reviews.observe_threads(flow.id, snapshot, tx.reviews.get_batch(plan.batch_id).feedback)
 
 
-async def revision_current(github: GitHubClient, plan: ResultPlan, number: int) -> bool:
+async def revision_current(repo: Repository, plan: ResultPlan, number: int) -> bool:
     if plan.revision is None or plan.delivery is None:
         return False
     effect = plan.effects[0]
-    current = await github.get_pull_request(effect.installation_id, effect.repo, number)
+    # Revision authorization retains the first frozen effect's identity, even on recovery.
+    target = repo.installation.app.installation(effect.installation_id).repository(effect.repo)
+    current = await target.fetch_pull_request(number)
     return (current.number == number and current.state == "open" and not current.merged
             and current.head_sha == plan.revision.commit_sha
             and current.head_branch == plan.delivery.branch
@@ -53,51 +54,56 @@ def has_pending_thread_feedback(store: Store, plan: ResultPlan, effect: ResolveE
 
 
 async def resolve_thread(
-    store: Store, github: GitHubClient, plan: ResultPlan, record: EffectRecord,
+    store: Store, repo: Repository, plan: ResultPlan, record: EffectRecord,
     records: list[EffectRecord], dispatch: Callable[[ResultPlan, EffectRecord], None],
 ) -> EffectReceipt:
     """A successful note and exact human coverage are required even on uncertain-write recovery."""
     effect = record.payload
     assert isinstance(effect, ResolveEffect)
-    snapshot = await github.get_review_thread(
-        effect.installation_id, effect.repo, effect.number, effect.thread_id,
+    thread = await ReviewThread(PullRequest(repo, effect.number), effect.thread_id).refetch()
+    snapshot = ReviewThreads(
+        repo=thread.repo, pr_number=thread.pr_number, fetched_at=thread.fetched_at,
+        threads=(thread,) if "resolved" in thread.model_fields_set else (),
+        limitations=thread.limitations,
     )
     observe(store, plan, snapshot)
-    thread = next((t for t in snapshot.threads if t.thread_id == effect.thread_id), None)
+    present = thread.thread_id == effect.thread_id and "resolved" in thread.model_fields_set
     local_pending = has_pending_thread_feedback(store, plan, effect)
     reason = None
     receipt = EffectReceipt(thread_id=effect.thread_id,
-                            remote_resolved=thread.resolved if thread else None)
-    if not snapshot.complete or thread is None:
+                            remote_resolved=thread.resolved if present else None)
+    if not snapshot.complete or not present:
         reason = "线程数据缺失或不完整"
     elif local_pending or not effect.allow_resolve or not covered_thread(thread, effect.covered):
         reason = "线程仍有未处理反馈或新的评论版本"
     elif not any(r.effect_key == effect.reply_key and r.receipt is not None
                  and r.receipt.comment_id is not None and not r.receipt.pending_reason for r in records):
         reason = "线程处理说明尚未确认发送"
-    elif not await revision_current(github, plan, effect.number):
+    elif not await revision_current(repo, plan, effect.number):
         reason = "PR 已关闭或 head 已变化"
     if reason:
         return receipt.model_copy(update={"pending_reason": f"{effect.thread_id}：{reason}"})
-    assert thread is not None
     if not thread.resolved:
         dispatch(plan, record)
-        await github.resolve_review_thread(effect.installation_id, effect.thread_id)
+        updated = await thread.resolve()
         # GitHub has no conditional resolve. Retain raced comments without automatically reopening.
         try:
-            after = await github.get_review_thread(
-                effect.installation_id, effect.repo, effect.number, effect.thread_id,
+            refreshed = await updated.refetch()
+            after = ReviewThreads(
+                repo=refreshed.repo, pr_number=refreshed.pr_number, fetched_at=refreshed.fetched_at,
+                threads=(refreshed,) if "resolved" in refreshed.model_fields_set else (),
+                limitations=refreshed.limitations,
             )
-        except GitHubAdapterError as error:
+        except GitHubError as error:
             # A rejected confirmation read says nothing about the completed mutation.
             raise ResultPending(f"resolve confirmation is pending: {error}") from error
         observe(store, plan, after)
-        current = next((t for t in after.threads if t.thread_id == effect.thread_id), None)
-        if current is None or not after.complete:
+        if (refreshed.thread_id != effect.thread_id or "resolved" not in refreshed.model_fields_set
+                or not after.complete):
             raise ResultPending("resolve outcome awaits a complete remote thread read")
-        receipt = EffectReceipt(thread_id=effect.thread_id, remote_resolved=current.resolved)
-        if not current.resolved:
+        receipt = EffectReceipt(thread_id=effect.thread_id, remote_resolved=refreshed.resolved)
+        if not refreshed.resolved:
             raise ResultPending("resolve outcome awaits remote confirmation")
-        if not covered_thread(current, effect.covered):
+        if not covered_thread(refreshed, effect.covered):
             return receipt.model_copy(update={"pending_reason": f"{effect.thread_id}：resolve 期间出现新反馈"})
     return receipt.model_copy(update={"remote_resolved": True})

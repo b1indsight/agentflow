@@ -4,9 +4,9 @@ from dataclasses import dataclass, field
 
 from app.contracts.protocol import RevisionTaskResult
 from app.contracts.result_models import CommentEffect, Effect, ResolveEffect, ThreadReplyEffect
-from app.domain.github_models import ReviewComment, ReviewThread
 from app.domain.models import FeedbackRef, Flow, ReviewItemKind
 from app.domain.review_models import ReviewBatch, ReviewFeedback
+from app.github import ReviewComment, ReviewThread
 
 
 def matches(comment: ReviewComment, feedback: ReviewFeedback) -> bool:
@@ -18,6 +18,8 @@ def matches(comment: ReviewComment, feedback: ReviewFeedback) -> bool:
 
 def covered_thread(thread: ReviewThread, addressed: list[ReviewFeedback]) -> bool:
     """Every human comment is an unresolved input unless a verified revision addressed its version."""
+    if not {"comments", "complete"}.issubset(thread.model_fields_set):
+        return False
     humans = [comment for comment in thread.comments if not comment.is_bot]
     return thread.complete and bool(humans) and all(
         any(matches(comment, item) for item in addressed) for comment in humans

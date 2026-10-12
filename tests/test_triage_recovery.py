@@ -7,14 +7,17 @@ import pytest
 
 from app.domain.models import JobKind, TriageVerdict, Verdict
 from app.persistence.review_store import ReviewStore
+from tests.github import RecordingGitHub
 from tests.review_memory import judge_decision
-from tests.test_coordinator import RecordingGitHub, coordinator
+from tests.test_coordinator import coordinator
 from tests.test_merge import route_merge
 from tests.test_review_batches import claim, feedback, ingest, review_flow  # noqa: F401
 from tests.test_workflow_transactions import bound_review_flow
 
 
-async def test_revision_and_batch_transition_commit_together(store, review_flow, monkeypatch):  # noqa: F811
+async def test_revision_and_batch_transition_commit_together(
+    store, review_flow, monkeypatch, recording_resources,  # noqa: F811
+):
     flow, clock = review_flow
     ingest(store, flow, feedback(clock))
     batch = claim(store, clock)[0]
@@ -39,7 +42,9 @@ async def test_revision_and_batch_transition_commit_together(store, review_flow,
 
 
 @pytest.mark.parametrize("violation", ["digest", "incomplete-context"])
-async def test_invalid_evidence_never_dispatches(store, review_flow, violation):  # noqa: F811
+async def test_invalid_evidence_never_dispatches(
+    store, review_flow, violation, recording_resources,  # noqa: F811
+):
     flow, clock = review_flow
     ingest(store, flow, feedback(clock))
     batch = claim(store, clock)[0]
@@ -54,7 +59,8 @@ async def test_invalid_evidence_never_dispatches(store, review_flow, violation):
     # The production context is immutable input; incomplete evidence is frozen before Judge.
     if violation == "incomplete-context":
         from app.control.review_context import build_review_context
-        context = await build_review_context(subject.github, flow, batch, 17)
+        repo = subject.github.installation(flow.installation_id).repository(flow.repo)
+        context = await build_review_context(repo, flow, batch, 17)
         context.limitations.append("files:truncated")
         store.reviews.freeze_context(batch, context)
         batch = store.reviews.get_batch(batch.id)
@@ -68,7 +74,7 @@ async def test_invalid_evidence_never_dispatches(store, review_flow, violation):
     assert store.reviews.pending(flow.id)
 
 
-async def test_judge_failure_then_ignore_keeps_archive_owner(store):
+async def test_judge_failure_then_ignore_keeps_archive_owner(store, recording_resources):
     # A provider failure must not release the worker needed after a later PR merge.
     flow = bound_review_flow(store)
     from app.domain.models import ReviewItemKind

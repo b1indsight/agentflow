@@ -17,7 +17,8 @@ from app.control.service import ControlService
 from app.domain.models import FlowState, JobKind, JobState
 from app.persistence.stop_store import StopStore
 from app.persistence.store import Store
-from tests.test_coordinator import RecordingGitHub, coordinator
+from tests.github import RecordingGitHub
+from tests.test_coordinator import coordinator
 from tests.test_merge import route_merge
 from tests.test_workflow_transactions import accepted_coding
 
@@ -42,7 +43,7 @@ def receive(store, job, result, *, worker="worker-a", token="archive-token", epo
                                           message.model_dump(mode="json"), terminal_digest(message))
 
 
-async def test_archive_release_rolls_back_and_replays_atomically(store, monkeypatch):
+async def test_archive_release_rolls_back_and_replays_atomically(store, monkeypatch, recording_resources):
     flow, job, task, subject = await ready_archive(store)
     result = ArchiveResult(**task.model_dump(), cleanup="removed")
     assert receive(store, job, result) == "pending"
@@ -74,7 +75,7 @@ async def test_archive_release_rolls_back_and_replays_atomically(store, monkeypa
 @pytest.mark.parametrize("field,value", [("flow_id", 99), ("attempt_id", 99),
     ("worker_id", "worker-b"), ("repo", "owner/other"),
     ("repo_identity", "worker-b:owner/repo"), ("delivery_version", 999)])
-async def test_mismatched_archive_receipt_retains_binding(store, field, value):
+async def test_mismatched_archive_receipt_retains_binding(store, field, value, recording_resources):
     flow, job, task, subject = await ready_archive(store)
     result = ArchiveResult(**task.model_dump(), cleanup="removed").model_copy(update={field: value})
     assert receive(store, job, result) == "pending"
@@ -85,7 +86,7 @@ async def test_mismatched_archive_receipt_retains_binding(store, field, value):
     assert subject.github.comments == []
 
 
-async def test_archive_fences_and_digest_conflict_do_not_release_binding(store):
+async def test_archive_fences_and_digest_conflict_do_not_release_binding(store, recording_resources):
     flow, job, task, _subject = await ready_archive(store)
     result = ArchiveResult(**task.model_dump(), cleanup="removed")
     for kwargs in [{"worker": "worker-b"}, {"token": "old"}, {"epoch": "old"}]:
@@ -95,7 +96,7 @@ async def test_archive_fences_and_digest_conflict_do_not_release_binding(store):
     assert store.get_flow_execution(flow.id).released_at is None
 
 
-async def test_failed_archive_retry_keeps_attempt_and_original_worker(store):
+async def test_failed_archive_retry_keeps_attempt_and_original_worker(store, recording_resources):
     flow, job, task, subject = await ready_archive(store)
     message = Failed(job_id=job.id, assignment_token="archive-token", connection_epoch="epoch-a",
                      error="Permission denied")
@@ -136,7 +137,7 @@ async def test_expired_merged_executor_is_pinned_until_original_worker_returns(s
     assert store.resume_assignment(old.id, "worker-a", "triage-token", "new-epoch")
 
 
-async def test_archive_without_original_binding_cannot_be_adopted(store):
+async def test_archive_without_original_binding_cannot_be_adopted(store, recording_resources):
     flow, job, _task, subject = await ready_archive(store)
     await subject.fail(job, "cleanup failed")
     store.release_flow_execution(flow.id)
@@ -147,7 +148,7 @@ async def test_archive_without_original_binding_cannot_be_adopted(store):
     assert store.assign_job("worker-b", "other", "epoch-b") is None
 
 
-async def test_delivery_change_after_receipt_freeze_blocks_commit(store, monkeypatch):
+async def test_delivery_change_after_receipt_freeze_blocks_commit(store, monkeypatch, recording_resources):
     from app.control.results import ResultPending
 
     flow, job, task, subject = await ready_archive(store)
@@ -194,7 +195,7 @@ async def test_merged_coding_process_without_exit_proof_cannot_unlock_archive(st
     assert store.get_flow_execution(flow.id).released_at is None
 
 
-async def test_restart_between_archive_claim_and_freeze_requeues_safely(store):
+async def test_restart_between_archive_claim_and_freeze_requeues_safely(store, recording_resources):
     # A claim commits before coordinator.prepare(). This is a current, unstarted delivery.
     old, _ = accepted_coding(store)
     flow = store.get_flow(old.flow_id)
@@ -215,7 +216,7 @@ async def test_restart_between_archive_claim_and_freeze_requeues_safely(store):
     assert store.get_flow_execution(flow.id).released_at is None
 
 
-async def test_superseded_queued_coding_does_not_block_archive_retry(store):
+async def test_superseded_queued_coding_does_not_block_archive_retry(store, recording_resources):
     # Lease recovery can requeue coding work after merge already retired its initial queue.
     flow, job, _task, subject = await ready_archive(store)
     stale = store.enqueue_job(flow.id, JobKind.REVISION)
@@ -227,7 +228,7 @@ async def test_superseded_queued_coding_does_not_block_archive_retry(store):
 
 
 @pytest.mark.parametrize("mismatch", ["worker", "token", "epoch", "delivery", "attempt", "binding"])
-async def test_lost_archive_started_requires_original_fence_and_frozen_identity(store, mismatch):
+async def test_lost_archive_started_requires_original_fence_and_frozen_identity(store, mismatch, recording_resources):
     flow, job, _task, _subject = await ready_archive(store, start=False)
     worker, token, epoch = "worker-a", "archive-token", "epoch-a"
     if mismatch == "worker":

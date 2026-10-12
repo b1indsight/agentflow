@@ -2,14 +2,14 @@
 
 from typing import Literal
 
-from app.domain.github_models import GitHubAdapterError
 from app.domain.models import JobState
+from app.github import GitHubError
 
 PreparationState = Literal[JobState.QUEUED, JobState.DONE, JobState.FAILED]
 
 
 class PreparationReadFailure(Exception):
-    def __init__(self, error: GitHubAdapterError) -> None:
+    def __init__(self, error: GitHubError) -> None:
         self.error = error
         super().__init__(error.kind.value)
 

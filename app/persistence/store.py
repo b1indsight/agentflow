@@ -15,8 +15,6 @@ from psycopg_pool import ConnectionPool
 
 from app.contracts.protocol import ArchiveTask, Failed, terminal_digest
 from app.domain.delivery_models import DeliveryReceipt
-from app.domain.github_models import GitHubAdapterError
-from app.domain.github_retry import retry_delay
 from app.domain.models import (
     Attempt,
     DeliveryState,
@@ -41,6 +39,7 @@ from app.domain.recovery_policy import (
     decide_job_recovery,
     should_release_binding,
 )
+from app.github import GitHubError, retry_delay
 from app.persistence.project_store import PROJECT_SCHEMA
 from app.persistence.reconcile_store import RECONCILE_SCHEMA, ReconcileStore
 from app.persistence.result_store import RESULT_SCHEMA, ResultStore
@@ -1301,7 +1300,7 @@ class Store:
             return True
 
     def defer_preparation(
-        self, job_id: int, worker: str, token: str, epoch: str, error: GitHubAdapterError | None,
+        self, job_id: int, worker: str, token: str, epoch: str, error: GitHubError | None,
         *, max_failures: int, window_seconds: float,
     ) -> JobState | None:
         """Atomically retry or fail a read; None rejects stale assignment evidence.

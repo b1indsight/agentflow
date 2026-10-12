@@ -65,9 +65,25 @@ Issue/PR 标签和归档评论需要对应的 Issues/Pull requests write 权限�
 缺少 label 定义或权限会保留清理凭据与未完成回写，不自动创建仓库 label；修正后通过
 `flow retry <id>` 继续原结果。仅标签缺失且目标仍可读取时把 remove 404 视为已完成。
 
-`GitHubApp` 启动时验证正 App ID 和可读非空私钥，按 Webhook 保存的 `installation_id` 构造 githubkit
-0.16 client。core 只接收类型化的 Issue、repository、remote ref、PR snapshot 和 secret-aware push
-capability，不接触 githubkit schema。
+`GitHubApp` 启动时验证正 App ID 和可读非空私钥，使用 githubkit 0.16 原生认证。
+control 按 Webhook 保存的 `installation_id` 绑定 `Installation`，再绑定具体仓库、Issue、PR 或线程；
+看板配置绑定安装下的 Project/Item。资源查询返回新实例，状态更新只复制已确认字段；旧事实不原地刷新。
+已有身份可本地构造资源，未知事实访问会失败。`model_dump(exclude_unset=True)` 区分尚未读取的字段
+与已知 `None`，私有 SDK/认证及父绑定不进入 JSON。domain 容器、持久层和 worker 使用同一个资源模型，
+`PullRequest.list_files()` 和 `list_discussions(source)` 在资源内管理请求、分页与 SDK 解析，按项异步产出。
+control 直接遍历条目，仅负责审核配额、哨兵、映射、裁剪、过滤和冻结，保持原有字段与 digest。
+Issue/PR 直接绑定同一评论分页方法；PR 方法直接实现 review 反馈和线程单页查询。
+持久轮询仍逐页提交游标，线程读取器保留两种资源读取共用的完整性和遍历预算。
+PR 响应由资源私有工厂直接转换为实例，保留完整读取与部分响应的字段差异。
+资源方法用 `with translate_errors(endpoint)` 包住 SDK 请求和响应解析，保持原错误范围与取消传播；
+客户端通过原生 `with_auth()` 复制配置，写入关闭副本的重试，后续读取仍保持原策略。
+
+资源、评论、反馈页、ref、凭证、合并事件、Project 绑定配置、操作错误和重试计时统一从 `app.github` 导入，例如
+`from app.github import GitHubApp, Issue, PullRequest, Repository`。
+`ReviewComment` 与 `ReviewThread` 同属线程模块；其他查询数据按实际操作归入对应资源或反馈模块。
+`__all__` 明确公开类型和 `retry_delay`；字段声明、解码与扫描器由包内使用。
+导入公开类型与标准 JSON 恢复不加载 SDK；SDK 在实际 App 或客户端构造时加载。
+父资源使用模块导入创建子资源，反向构造类型校验和 SDK 导入只保留必要的延迟加载。
 
 已由自动化覆盖：
 
@@ -81,6 +97,7 @@ capability，不接触 githubkit schema。
 
 线程能力已由自动化覆盖：GraphQL reviewThreads/comments 独立分页、完整性与身份校验；
 REST 根评论回复、分页精确 marker 恢复、resolve 后远端复读及 GraphQL 部分错误分类。
+单项查询直接返回同一资源模型；所有评论页收集后核对持久根评论身份，远端冲突统一返回 GitHub 操作错误。
 线程读取共享 50 请求 / 2 MB 数据预算，超限保留未完成状态。Pull requests: write 用于原线程回复和 resolve。
 REST 写路径见 [Create a reply for a review comment](https://docs.github.com/en/rest/pulls/comments#create-a-reply-for-a-review-comment)；
 线程字段见 [GitHub GraphQL pulls](https://docs.github.com/en/graphql/reference/pulls)。
@@ -129,8 +146,9 @@ App 需要额外的**组织级 Projects read/write** 权限，且 installation �
 修改配置后重启 serve。用 `flowtool project check owner/repo` 只读校验真实 repo installation、
 组织 Project 可写性、字段归属和全部选项；命令不创建测试卡片，也不访问数据库。
 
-adapter 逐页返回 items 和不可见内容标记，调用方必须完成遍历才能确认不存在；已知 item 的
-Status 按字段 ID 读取。add Issue 与 set Status 是两次独立 mutation，均禁止 SDK 自动重试。
+`Project.list_items_page` 返回 items 和不可见内容标记，调用方必须完成遍历才能确认不存在；
+`Project.fetch_item` 按字段 ID 读取已知条目的 Status。`Project.add_issue` 与
+`ProjectItem.set_status` 是两次独立 mutation，均禁止 SDK 自动重试。
 HTTP 200 中的 GraphQL errors/partial data 是失败，异常仅显示分类与 endpoint，不打印 token。
 F8 提供接口；F9 已接入独立持久的 Flow 状态同步与响应丢失核对。
 

@@ -9,16 +9,43 @@ from pathlib import Path
 import pytest
 
 
-def test_worker_startup_does_not_load_control_plane_dependencies() -> None:
+@pytest.mark.parametrize("operation", [
+    "import app.worker.runtime",
+    """
+from pydantic import BaseModel
+from app.github import Issue, ProjectConfig, PullRequest, RemoteRef, Repository, ReviewComment
+
+class Document(BaseModel):
+    repository: Repository
+    issue: Issue
+    pull_request: PullRequest
+    remote_ref: RemoteRef
+    comment: ReviewComment
+    project: ProjectConfig
+
+original = ('{"repository":{"full_name":"octo/repo"},"issue":{"number":7},'
+            '"pull_request":{"number":17,"state":"open","head_branch":"topic",'
+            '"head_sha":"abc","base_branch":"main"},'
+            '"remote_ref":{"branch":"topic","sha":"abc"},'
+            '"comment":{"github_id":1,"node_id":"C1","author":"alice","is_bot":false,'
+            '"body":"Fix it","updated_at":"2026-09-07T00:00:00Z",'
+            '"reply_to_id":null,"original_commit_id":null},'
+            '"project":{"installation_id":42,"project_id":"P","status_field_id":"F",'
+            '"options":{"todo":"T","in_progress":"W","in_review":"R","blocked":"B","done":"D"}}}')
+assert Document.model_validate_json(original).model_dump_json() == original
+""",
+], ids=["worker-startup", "resource-json-restoration"])
+def test_worker_data_paths_do_not_load_control_plane_dependencies(operation: str) -> None:
     # Shared logging previously pulled SQL stores into worker startup transitively.
     # A fresh interpreter observes real imports without pytest's loaded modules.
     result = subprocess.run(
         [sys.executable, "-c",
-         "import json, sys; import app.worker.runtime; print(json.dumps(sorted(sys.modules)))"],
+         f"import json, sys\n{operation}\nprint(json.dumps(sorted(sys.modules)))"],
         check=True, capture_output=True, text=True,
     )
     modules = set(json.loads(result.stdout))
-    forbidden = {"app.control", "app.persistence", "app.github", "psycopg", "githubkit", "bub"}
+    # The public entry point includes binding types; restoring facts needs no SDK or authentication.
+    forbidden = {"app.control", "app.persistence", "psycopg", "githubkit", "bub"}
     assert not contains_forbidden(modules, forbidden), sorted(
         module for module in modules if contains_forbidden({module}, forbidden)
     )
@@ -54,10 +81,10 @@ def contains_forbidden(modules: set[str], prefixes: set[str]) -> bool:
 
 @pytest.mark.parametrize(("package", "forbidden"), [
     ("domain", {"app.contracts", "app.control", "app.worker", "app.persistence",
-                "app.github", "app.telemetry", "psycopg", "githubkit", "fastapi"}),
-    ("contracts", {"app.control", "app.worker", "app.persistence", "app.github",
+                "app.telemetry", "psycopg", "githubkit", "fastapi"}),
+    ("contracts", {"app.control", "app.worker", "app.persistence",
                    "app.telemetry", "psycopg", "githubkit", "fastapi"}),
-    ("persistence", {"app.control", "app.worker", "app.github", "githubkit"}),
+    ("persistence", {"app.control", "app.worker", "githubkit"}),
     ("github", {"app.control", "app.worker", "app.persistence", "psycopg"}),
     ("control", {"app.worker"}),
     ("worker", {"app.control", "app.persistence", "app.github", "app.telemetry.metrics",

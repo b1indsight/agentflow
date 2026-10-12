@@ -32,7 +32,6 @@ from app.control.effects import ResultEffects
 from app.control.initial import initial_delivery_mismatch
 from app.control.resolution import plan_resolution
 from app.control.revisions import frozen_revision, revision_mismatch, verify_revision_remote
-from app.domain.github_models import GitHubAdapterError
 from app.domain.models import (
     TERMINAL_STATES,
     AddressedComment,
@@ -47,8 +46,8 @@ from app.domain.models import (
     JobState,
     ReviewItemKind,
 )
-from app.domain.ports import GitHubClient
 from app.domain.review_models import BatchState
+from app.github import GitHubApp, GitHubError
 from app.persistence.store import Store
 from app.plugins import emit_hook
 
@@ -66,7 +65,7 @@ class ResultApplication:
     def __init__(
         self,
         store: Store,
-        github: GitHubClient,
+        github: GitHubApp,
         settings: ResultSettings,
         plugins: PluginManager,
     ) -> None:
@@ -228,9 +227,12 @@ class ResultApplication:
         if job.verify_next_at is not None and job.verify_next_at > self.store.now():
             raise ResultPending(job.verify_last_error or "revision verification backoff")
         assert result.commit_sha is not None
+        if flow.installation_id is None:
+            return "revision has no open verified delivery"
         try:
-            return await verify_revision_remote(self.effects.github, flow, delivery, result.commit_sha)
-        except GitHubAdapterError as error:
+            repo = self.effects.github.installation(flow.installation_id).repository(flow.repo)
+            return await verify_revision_remote(repo, flow, delivery, result.commit_sha)
+        except GitHubError as error:
             if error.retryable:
                 self.store.results.defer_verification(job, error)
                 raise ResultPending(str(error)) from error

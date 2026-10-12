@@ -17,7 +17,7 @@ from app.control.reconcile import Reconciler
 from app.control.reconcile_feedback import FeedbackReconciler
 from app.control.service import ControlService
 from app.control.webhooks import WebhookConsumer
-from app.github.client import GitHubApp
+from app.github import GitHubApp
 from app.persistence.readiness import database_ready
 from app.persistence.stop_store import StopStore
 from app.persistence.store import Store
@@ -76,7 +76,7 @@ class ControlRuntime:
             batch_size=self.settings.reconcile_batch_size, concurrency=self.settings.reconcile_concurrency,
         )
         self.project_sync = ProjectSync(
-            self.store, self.settings.projects, github.project_client,
+            self.store, self.settings.projects, github,
             interval=self.settings.reconcile_interval_seconds, batch_size=self.settings.reconcile_batch_size,
             concurrency=self.settings.reconcile_concurrency,
         )

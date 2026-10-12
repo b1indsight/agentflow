@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Annotated, Literal
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
-from app.domain.project_models import ProjectConfig
+from app.github import ProjectConfig
 
 
 class ServeSettings(BaseSettings):

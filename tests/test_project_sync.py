@@ -2,76 +2,187 @@
 
 import asyncio
 from datetime import timedelta
+from typing import Any
 
 import pytest
+from pydantic import BaseModel, ConfigDict, PrivateAttr
 
 from app.control.projects import ProjectSync
 from app.control.service import ControlService
-from app.domain.github_models import GitHubAdapterError, GitHubErrorKind
 from app.domain.models import DeliveryState, FlowState, JobKind, JobState
-from app.domain.project_models import ProjectItem, ProjectItemsPage, ProjectStatus, ProjectTarget
+from app.domain.project_models import ProjectStatus
+from app.github import (
+    GitHubError,
+    GitHubErrorKind,
+    Installation,
+    Issue,
+    Project,
+    ProjectItem,
+    ProjectItemsPage,
+    ProjectTarget,
+    Repository,
+)
 from app.persistence.project_store import ProjectStore
 from app.persistence.store import Store
 from tests.test_github_projects import config
 from tests.test_review_batches import review_flow as review_flow  # noqa: PLC0414
 
 
-class Remote:
+class RemoteProject(Project):
+    # Mutable remote state belongs to this scoped backend, not resource facts.
+    model_config = ConfigDict(extra="allow", frozen=False)
+    _remote_item: ProjectItem | None = PrivateAttr(default=None)
+    _calls: list[Any] = PrivateAttr(default_factory=list)
+    _failure: str | None = PrivateAttr(default=None)
+    _after_read: Any = PrivateAttr(default=None)
+    _after_set: Any = PrivateAttr(default=None)
+    _pages: Any = PrivateAttr(default=None)
+
     def __init__(self):
-        self.item = None
-        self.calls = []
-        self.failure = None
-        self.after_read = None
-        self.after_set = None
-        self.pages = None
-        self.options = config().options
+        target = config()
+        super().__init__(Installation.model_construct(installation_id=target.installation_id), target)
+
+    @property
+    def item(self):
+        return self._remote_item
+
+    @item.setter
+    def item(self, value):
+        self._remote_item = value
+
+    @property
+    def calls(self):
+        return self._calls
+
+    @property
+    def failure(self):
+        return self._failure
+
+    @failure.setter
+    def failure(self, value):
+        self._failure = value
+
+    @property
+    def after_read(self):
+        return self._after_read
+
+    @after_read.setter
+    def after_read(self, value):
+        self._after_read = value
+
+    @property
+    def after_set(self):
+        return self._after_set
+
+    @after_set.setter
+    def after_set(self, value):
+        self._after_set = value
+
+    @property
+    def pages(self):
+        return self._pages
+
+    @pages.setter
+    def pages(self, value):
+        self._pages = value
 
     async def validate(self, repo):
         self.calls.append("validate")
         if self.failure == "offline":
-            raise GitHubAdapterError(GitHubErrorKind.RATE_LIMITED, "projects", retry_after="600")
+            raise GitHubError(GitHubErrorKind.RATE_LIMITED, "projects", retry_after="600")
         return ProjectTarget(title="board", status_name="Status")
 
-    async def issue_id(self, repo, number):
+    async def fetch_content_id(self, repo, number):
         self.calls.append("issue")
         return f"ISSUE-{number}"
 
-    async def items_page(self, cursor):
+    async def list_items_page(self, cursor):
         self.calls.append(("page", cursor))
         if self.pages:
             return self.pages[cursor]
         return ProjectItemsPage(items=[self.item] if self.item else [], next_cursor=None, complete=True)
 
-    async def read_item(self, item_id):
+    async def fetch_item(self, item_id):
         self.calls.append("read")
         value = self.item.model_copy() if self.item else None
         if self.after_read:
             await self.after_read()
-        return value
+        if value is None:
+            return None
+        facts = value.model_dump(exclude={"id"})
+        facts.setdefault("option_id", None)
+        return RemoteProjectItem(self, value.id, **facts)
 
     async def add_issue(self, content_id):
         self.calls.append("add")
-        self.item = ProjectItem(id="ITEM", content_id=content_id, archived=False)
+        self.item = ProjectItem(id="ITEM", content_id=content_id, archived=False, option_id=None)
         if self.failure == "add":
-            raise GitHubAdapterError(GitHubErrorKind.TRANSIENT, "add")
-        return self.item.model_copy()
+            raise GitHubError(GitHubErrorKind.TRANSIENT, "add")
+        return RemoteProjectItem(self, self.item.id, content_id=content_id, archived=False)
 
     async def set_status(self, item_id, status):
         self.calls.append(("set", status))
-        self.item.option_id = self.options[status]
+        self.item = self.item.model_copy(update={"option_id": self.options[status]})
         if self.after_set:
             await self.after_set()
         if self.failure == "set":
-            raise GitHubAdapterError(GitHubErrorKind.TRANSIENT, "set")
+            raise GitHubError(GitHubErrorKind.TRANSIENT, "set")
+
+
+class RemoteProjectItem(ProjectItem):
+    async def set_status(self, status):
+        await self.project.set_status(self.id, status)
+        return self.model_copy(update={"option_id": self.project.options[status]})
+
+
+class RemoteInstallation(Installation):
+    """Only the concrete binders exercised by projection recovery tests."""
+
+    _remote: Any = PrivateAttr()
+
+    def __init__(self, remote, installation_id):
+        BaseModel.__init__(self, installation_id=installation_id)
+        self._remote = remote
+
+    @property
+    def remote(self):
+        return self._remote
+
+    def repository(self, full_name):
+        return Repository(self, full_name)
+
+    def project(self, config):
+        assert config.installation_id == self.installation_id
+        return self.remote
+
+
+class RemoteApp:
+    def __init__(self, remote):
+        self.remote = remote
+
+    def installation(self, installation_id):
+        remote = self.remote.pop(0) if isinstance(self.remote, list) else self.remote
+        return RemoteInstallation(remote, installation_id)
 
 
 @pytest.fixture
-def projection(store, review_flow, monkeypatch):
+def remote_app(monkeypatch):
+    async def content_id(issue):
+        return await issue.repository.installation.remote.fetch_content_id(
+            issue.repository.full_name, issue.number,
+        )
+
+    monkeypatch.setattr(Issue, "fetch_content_id", content_id)
+    return RemoteApp
+
+
+@pytest.fixture
+def projection(store, review_flow, monkeypatch, remote_app):
     flow, clock = review_flow
     monkeypatch.setattr("app.persistence.store.utcnow", lambda: clock.now)
     configs = {flow.repo: config()}
-    remote = Remote()
-    sync = ProjectSync(store, configs, lambda _: remote, interval=30, batch_size=8, concurrency=2)
+    remote = RemoteProject()
+    sync = ProjectSync(store, configs, remote_app(remote), interval=30, batch_size=8, concurrency=2)
     return flow, clock, configs, remote, sync
 
 
@@ -134,7 +245,7 @@ async def test_lost_response_restart_reads_before_another_write(store, projectio
     clock.now += timedelta(seconds=61)
     reopened = Store(store.database_url, clock=lambda: clock.now)
     try:
-        await converge(ProjectSync(reopened, configs, lambda _: remote, interval=30))
+        await converge(ProjectSync(reopened, configs, sync.github, interval=30))
         assert state(reopened).synced_version == state(reopened).desired_version
         assert remote.calls.count("add") == 1
         assert remote.calls.count(("set", ProjectStatus.IN_REVIEW)) == 1
@@ -202,7 +313,7 @@ async def test_manual_removal_is_never_reversed_even_after_retry(store, projecti
     if removed == "deleted":
         remote.item = None
     else:
-        remote.item.archived = True
+        remote.item = remote.item.model_copy(update={"archived": True})
     clock.now += timedelta(seconds=31)
     await sync.sweep()
     assert state(store).blocked
@@ -217,7 +328,7 @@ async def test_discovered_archived_card_recovers_after_restore_and_restart(store
     import httpx
     from githubkit import GitHub as SDK
 
-    from app.github.client import GitHubApp
+    from app.github import GitHubApp, Installation
     from tests.test_github_client import settings
     from tests.test_github_projects import item, page
 
@@ -234,20 +345,20 @@ async def test_discovered_archived_card_recovers_after_restore_and_restart(store
         pytest.fail("an existing archived card must not enter the add path")
 
     app = GitHubApp(settings(tmp_path))
-    monkeypatch.setattr(app, "_installation_client", lambda _, **options: SDK(
+    monkeypatch.setattr(Installation, "_client", lambda self, **options: SDK(
         "test-token", async_transport=httpx.MockTransport(transport), **options,
     ))
-    monkeypatch.setattr(remote, "items_page", app.project_client(config()).items_page)
+    monkeypatch.setattr(remote, "list_items_page", app.installation(42).project(config()).list_items_page)
     monkeypatch.setattr(remote, "add_issue", unexpected_add)
     await sync.sweep()
     assert state(store).item_id == "ITEM" and state(store).blocked
     assert not state(store).add_started
     # Restoring the card is a human action; retry resumes the saved item without another add.
-    remote.item.archived = False
+    remote.item = remote.item.model_copy(update={"archived": False})
     reopened = Store(store.database_url, clock=lambda: clock.now)
     try:
         ProjectStore(reopened).retry(flow.repo)
-        await ProjectSync(reopened, configs, lambda _: remote).sweep()
+        await ProjectSync(reopened, configs, sync.github).sweep()
         row = state(reopened)
         assert row.item_id == "ITEM" and not row.blocked
         assert row.synced_version == row.desired_version
@@ -301,8 +412,7 @@ async def test_definite_add_rejection_can_retry_after_restart(store, projection,
     import httpx
     from githubkit import GitHub as SDK
 
-    from app.github.client import GitHubApp
-    from app.github.projects import GitHubProjects
+    from app.github import GitHubApp, Installation
     from tests.test_github_client import settings
     from tests.test_github_projects import item
 
@@ -319,13 +429,14 @@ async def test_definite_add_rejection_can_retry_after_restart(store, projection,
         }}})
 
     app = GitHubApp(settings(tmp_path))
-    monkeypatch.setattr(app, "_installation_client", lambda _, **options: SDK(
+    monkeypatch.setattr(Installation, "_client", lambda self, **options: SDK(
         "test-token", async_transport=httpx.MockTransport(rejected), **options,
     ))
 
     async def add(content):
-        remote.item = await GitHubProjects(app, config()).add_issue(content)
-        return remote.item.model_copy()
+        receipt = await app.installation(42).project(config()).add_issue(content)
+        remote.item = ProjectItem.model_validate(receipt.model_dump())
+        return receipt
 
     monkeypatch.setattr(remote, "add_issue", add)
     await sync.sweep()
@@ -334,7 +445,7 @@ async def test_definite_add_rejection_can_retry_after_restart(store, projection,
     assert pending.blocked is (status == 403)
     restarted = Store(store.database_url, clock=lambda: clock.now)
     try:
-        resumed = ProjectSync(restarted, configs, lambda _: remote)
+        resumed = ProjectSync(restarted, configs, sync.github)
         await resumed.sweep()
         assert len(calls) == 1
         if status == 403:
@@ -376,7 +487,7 @@ async def test_two_sync_instances_serialize_the_same_item(store, projection):
     task = asyncio.create_task(first.sweep())
     await asyncio.wait_for(entered.wait(), 2)
     try:
-        await asyncio.wait_for(ProjectSync(store, configs, lambda _: remote).sweep(), 2)
+        await asyncio.wait_for(ProjectSync(store, configs, first.github).sweep(), 2)
         assert remote.calls.count("read") == 1
     finally:
         release.set()
@@ -419,14 +530,16 @@ async def test_explicit_job_failure_blocks_but_pending_retry_does_not(store, pro
     assert state(store).desired_status is ProjectStatus.BLOCKED
 
 
-async def test_archive_ack_and_worker_release_succeed_while_projects_are_offline(store):
+async def test_archive_ack_and_worker_release_succeed_while_projects_are_offline(
+    store, remote_app, recording_resources,
+):
     from app.contracts.protocol import ArchiveResult
     from tests.test_archive_recovery import ready_archive, receive
 
     flow, job, task, subject = await ready_archive(store)
-    remote = Remote()
+    remote = RemoteProject()
     remote.failure = "offline"
-    sync = ProjectSync(store, {flow.repo: config()}, lambda _: remote)
+    sync = ProjectSync(store, {flow.repo: config()}, remote_app(remote))
     await sync.sweep()
     assert state(store).failures == 1
     assert receive(store, job, ArchiveResult(**task.model_dump(), cleanup="removed")) == "pending"
@@ -471,11 +584,11 @@ async def test_failed_projection_transaction_rolls_back_version(store, projectio
     assert state(store).desired_version == before.desired_version
 
 
-async def test_slow_item_does_not_block_another_issue(store, projection):
+async def test_slow_item_does_not_block_another_issue(store, projection, remote_app):
     flow, _, configs, remote, _ = projection
     other = store.create_flow(flow.repo, 8, 42)
     entered, release, progressed = asyncio.Event(), asyncio.Event(), asyncio.Event()
-    slow = Remote()
+    slow = RemoteProject()
 
     async def issue(repo, number):
         if number == flow.issue_number:
@@ -485,10 +598,9 @@ async def test_slow_item_does_not_block_another_issue(store, projection):
             progressed.set()
         return f"ISSUE-{number}"
 
-    # Separate API instances represent separate items; delay only the first identity lookup.
-    remotes = iter([slow, remote])
-    slow.issue_id = remote.issue_id = issue
-    sync = ProjectSync(store, configs, lambda _: next(remotes), concurrency=2)
+    # Separate project bindings represent separate items; delay only the first identity lookup.
+    slow.fetch_content_id = remote.fetch_content_id = issue
+    sync = ProjectSync(store, configs, remote_app([slow, remote]), concurrency=2)
     task = asyncio.create_task(sync.sweep())
     try:
         await asyncio.wait_for(entered.wait(), 2)
@@ -508,7 +620,9 @@ async def test_unknown_archive_executor_is_an_explicit_block(store, projection):
     assert state(store).desired_status is ProjectStatus.BLOCKED
 
 
-async def test_received_archive_result_is_in_progress_despite_old_recovery_deadline(store, monkeypatch):
+async def test_received_archive_result_is_in_progress_despite_old_recovery_deadline(
+    store, monkeypatch, remote_app, recording_resources,
+):
     from app.contracts.protocol import ArchiveResult
     from app.contracts.result_models import ResultPending
     from tests.test_archive_recovery import ready_archive, receive
@@ -525,8 +639,8 @@ async def test_received_archive_result_is_in_progress_despite_old_recovery_deadl
     monkeypatch.setattr(subject.results.effects, "run", delayed)
     with pytest.raises(ResultPending):
         await subject.results.apply(job.id)
-    remote = Remote()
-    sync = ProjectSync(store, {flow.repo: config()}, lambda _: remote)
+    remote = RemoteProject()
+    sync = ProjectSync(store, {flow.repo: config()}, remote_app(remote))
     await sync.sweep()
     assert state(store).desired_status is ProjectStatus.IN_PROGRESS
     assert store.get_job(job.id).result_applied_at is None

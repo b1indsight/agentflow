@@ -4,12 +4,12 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.contracts.protocol import ArchiveResult, RevisionTaskResult
-from app.domain.github_models import PullRequestSnapshot, ReviewThread
 from app.domain.models import FeedbackRef, FlowDelivery, FlowState, JobState
 from app.domain.review_models import BatchState, ReviewFeedback
+from app.github import PullRequest, ReviewThread
 
 
 class FrozenModel(BaseModel):
@@ -60,6 +60,13 @@ class ResolveEffect(EffectSpec):
     covered: list[ReviewFeedback] = Field(default_factory=list)
     reply_key: str | None = None
     allow_resolve: bool = False
+
+    @model_validator(mode="after")
+    def _require_observed_thread(self) -> "ResolveEffect":
+        required = {"thread_id", "repo", "pr_number", "path", "resolved", "outdated", "comments"}
+        if not required.issubset(self.snapshot.model_fields_set):
+            raise ValueError("resolution effect requires observed thread facts")
+        return self
 
 
 class ThreadReplyEffect(EffectSpec):
@@ -117,7 +124,7 @@ class EffectState(StrEnum):
 
 class EffectReceipt(FrozenModel):
     comment_id: int | None = None
-    pull_request: PullRequestSnapshot | None = None
+    pull_request: PullRequest | None = None
     thread_id: str | None = None
     remote_resolved: bool | None = None
     pending_reason: str | None = None

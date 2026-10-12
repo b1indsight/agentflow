@@ -5,6 +5,8 @@
 
 ## 当前计划
 
+- [`github-capability-boundaries.md`](github-capability-boundaries.md) — PR #77：GitHubApp → Installation → Repository/Project，不可变资源拥有各自操作；查询返回新实例、更新返回副本、标准序列化和本地构造；873 项 PostgreSQL 回归、静态检查、构建、上下文等价对照及三项消融通过，待评审。
+
 - [`worker-layout.md`](worker-layout.md) — PR #65：worker 按 execution/transport/state 归组，830 项回归与构建通过。
 
 - [`worker-mcp.md`](worker-mcp.md) — worker 内嵌 HTTP MCP，仅 open_pr；修复取消后迟到回复，830 项回归通过，SDK 握手和鉴权消融通过。

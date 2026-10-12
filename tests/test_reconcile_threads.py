@@ -5,10 +5,11 @@ from datetime import timedelta
 import pytest
 
 from app.control.reconcile_feedback import FeedbackReconciler
-from app.domain.github_models import FeedbackPage, ReviewThreadPage, ReviewThreads
 from app.domain.models import DeliveryState
+from app.github import PullRequest, ReviewThreadPage, ReviewThreads
 from app.persistence.reconcile_store import ReconcileStore
 from app.persistence.store import Store
+from tests.github import RecordingGitHub, record_call
 from tests.test_review_batches import feedback, ingest
 from tests.test_review_batches import (
     review_flow as review_flow,  # noqa: PLC0414 - fixture re-export
@@ -16,29 +17,33 @@ from tests.test_review_batches import (
 from tests.test_review_resolution import human, snapshot
 
 
-class GitHub:
+class GitHub(RecordingGitHub):
     def __init__(self, clock):
+        super().__init__()
         self.clock, self.calls = clock, []
         self.pages = {}
         self.before_return = None
 
-    async def list_feedback_page(self, *args):
-        return FeedbackPage(items=[])
 
-    async def list_review_thread_page(self, installation, repo, number, cursor):
-        self.calls.append(cursor)
-        if self.before_return:
-            self.before_return()
-        value = self.pages.get(cursor, page(self.clock))
+@pytest.fixture
+def thread_page_resources(recording_resources, monkeypatch):
+    async def read(pr, cursor):
+        state = record_call(pr.repository, "list_review_thread_page", number=pr.number)
+        state.calls.append(cursor)
+        if state.before_return:
+            state.before_return()
+        value = state.pages.get(cursor, page(state.clock))
         if isinstance(value, Exception):
             raise value
         return value
+
+    monkeypatch.setattr(PullRequest, "list_review_thread_page", read)
 
 
 def page(clock, *comments, cursor=None, **changes):
     thread = snapshot(*(comments or [human(updated_at=clock.now)])).model_copy(update=changes)
     return ReviewThreadPage(snapshot=ReviewThreads(
-        repo="owner/repo", pr_number=17, fetched_at=clock.now, threads=[thread],
+        repo="owner/repo", pr_number=17, fetched_at=clock.now, threads=(thread,),
     ), next_cursor=cursor)
 
 
@@ -51,7 +56,7 @@ def observed(store):
         return connection.execute("SELECT snapshot FROM review_thread_observations").fetchone()["snapshot"]
 
 
-async def test_resolved_thread_still_collects_missed_human_input(store, review_flow):
+async def test_resolved_thread_still_collects_missed_human_input(store, review_flow, thread_page_resources):
     flow, clock = review_flow
     github = GitHub(clock)
     github.pages[None] = page(clock, human(updated_at=clock.now), human(2, is_bot=True), resolved=True)
@@ -68,7 +73,7 @@ async def test_resolved_thread_still_collects_missed_human_input(store, review_f
     assert store.reconcile.feedback_get(flow.id, "threads").last_success_at is not None
 
 
-async def test_nested_continuation_and_partial_thread_survive_restart(store, review_flow):
+async def test_nested_continuation_and_partial_thread_survive_restart(store, review_flow, thread_page_resources):
     flow, clock = review_flow
     github = GitHub(clock)
     github.pages[None] = page(clock, cursor="nested", complete=False)
@@ -94,7 +99,7 @@ async def test_nested_continuation_and_partial_thread_survive_restart(store, rev
 
 
 @pytest.mark.parametrize("deleted", [False, True])
-async def test_new_webhook_version_wins_over_slow_thread_page(store, review_flow, deleted):
+async def test_new_webhook_version_wins_over_slow_thread_page(store, review_flow, deleted, thread_page_resources):
     flow, clock = review_flow
     github = GitHub(clock)
 
@@ -107,7 +112,7 @@ async def test_new_webhook_version_wins_over_slow_thread_page(store, review_flow
     assert items == [] if deleted else items[0].body == "new content"
 
 
-async def test_thread_observations_and_progress_roll_back_together(store, review_flow, monkeypatch):
+async def test_thread_observations_and_progress_roll_back_together(store, review_flow, monkeypatch, thread_page_resources):
     flow, clock = review_flow
     original = ReconcileStore.feedback_finish
 
@@ -125,7 +130,7 @@ async def test_thread_observations_and_progress_roll_back_together(store, review
 
 
 @pytest.mark.parametrize("change", ["merged", "attempt", "head"])
-async def test_retired_or_changed_delivery_rejects_inflight_page(store, review_flow, change):
+async def test_retired_or_changed_delivery_rejects_inflight_page(store, review_flow, change, thread_page_resources):
     flow, clock = review_flow
     github = GitHub(clock)
 
@@ -146,7 +151,7 @@ async def test_retired_or_changed_delivery_rejects_inflight_page(store, review_f
     assert store.reviews.pending(flow.id) == []
 
 
-async def test_later_pages_cannot_erase_an_incomplete_scan(store, review_flow):
+async def test_later_pages_cannot_erase_an_incomplete_scan(store, review_flow, thread_page_resources):
     flow, clock = review_flow
     github = GitHub(clock)
     github.pages[None] = ReviewThreadPage(snapshot=ReviewThreads(

@@ -191,10 +191,9 @@ def test_confirmed_stop_can_be_reacknowledged_after_flow_rebind(store):
 
 
 @pytest.mark.parametrize("remote_state", ["open", "closed", "merged", "foreign"])
-async def test_cancelled_creation_persists_pr_identity_and_merge_before_stop(store, remote_state):
-    from types import SimpleNamespace
-    from unittest.mock import AsyncMock
-
+async def test_cancelled_creation_persists_pr_identity_and_merge_before_stop(
+    store, remote_state, recording_resources,
+):
     from app.contracts.protocol import ExecutionStopped
     from app.contracts.result_models import (
         EffectState,
@@ -203,8 +202,8 @@ async def test_cancelled_creation_persists_pr_identity_and_merge_before_stop(sto
         ResultPlan,
     )
     from app.control.effects import ResultEffects
-    from app.domain.github_models import PullRequestStatus
     from app.domain.models import DeliveryState, FlowState, JobState
+    from app.github import PullRequest
     flow, job = running(store)
     delivery = store.get_or_create_delivery(flow.id, 'flow/1')
     delivery.state, delivery.base_branch, delivery.head_sha = DeliveryState.OPENING, 'main', 'a' * 40
@@ -218,11 +217,13 @@ async def test_cancelled_creation_persists_pr_identity_and_merge_before_stop(sto
     store.results.mark_dispatched(record)
     store.results.finish(record, EffectState.UNCERTAIN, error='lost response', delay=0)
     ControlService(store).cancel(flow)
-    remote = PullRequestStatus(title="PR", body="", number=17, repo=flow.repo, state='closed' if remote_state == 'merged' else 'open' if remote_state == 'foreign' else remote_state, head_repository='fork/repo' if remote_state == 'foreign' else flow.repo,
+    remote = PullRequest(title="PR", body="", number=17, repo=flow.repo, state='closed' if remote_state == 'merged' else 'open' if remote_state == 'foreign' else remote_state, head_repository='fork/repo' if remote_state == 'foreign' else flow.repo,
                                head_branch=delivery.branch, base_branch='main', head_sha='a' * 40,
                                base_sha='b' * 40, merged=remote_state == 'merged', merged_at=store.now() if remote_state == 'merged' else None, merge_commit_sha='c' * 40 if remote_state == 'merged' else None)
-    github = SimpleNamespace(find_pull_request_by_head=AsyncMock(return_value=remote),
-                             get_pull_request=AsyncMock(return_value=remote))
+    from tests.github import RecordingGitHub
+
+    github = RecordingGitHub()
+    github.pull_request = remote
     if remote_state == 'foreign':
         with pytest.raises(ResultPending):
             await ResultEffects(store, github).run(plan)
@@ -244,9 +245,10 @@ async def test_cancelled_creation_persists_pr_identity_and_merge_before_stop(sto
         assert store.get_flow_execution(flow.id).released_at is not None
 
 
-async def test_preparation_result_releases_cancelled_binding_after_application(store):
+async def test_preparation_result_releases_cancelled_binding_after_application(store, recording_resources):
     from app.contracts.protocol import Failed, terminal_digest
-    from tests.test_coordinator import RecordingGitHub, coordinator
+    from tests.github import RecordingGitHub
+    from tests.test_coordinator import coordinator
     flow = store.create_flow('owner/repo', 1, 1)
     store.worker_connected('w', PROTOCOL_VERSION, 'epoch')
     job = store.enqueue_job(flow.id, JobKind.INITIAL)

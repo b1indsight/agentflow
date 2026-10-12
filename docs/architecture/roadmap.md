@@ -42,10 +42,10 @@ flowtool/
 
 M1/M2 已合并不等于真实闭环已验收；M3 尚未完成，M4–M5 仍为目标里程碑。实际状态见[架构入口](README.md#当前实现状态)。
 
-## 9. 未来扩展与架构预留（Roadmap）
+## 9. 未来方向（Roadmap）
 
-> 以下是 MVP 之后的方向。列在这里是为了**现在就把接缝（ports）留好**，避免日后大改——
-> core 只依赖抽象端口，扩展一律做成"换 adapter"或"挂插件"，不动 core。
+> 以下是 MVP 之后的方向，接口与类型在实际需要时扩展。GitHub 使用具体资源；
+> CodingAgent、Judge 和插件沿用各自已有职责。
 
 1. **Web 控制台（Kanban）** —— 一个 webapp 打开项目看板，每张卡 = 一条被追踪的对话，可点进去实时参与对话。
    - 预留：core 状态经 store + 一层 API 暴露；headless（GitHub）与 webapp 是同一 core 的两个入口适配器。
@@ -60,7 +60,7 @@ M1/M2 已合并不等于真实闭环已验收；M3 尚未完成，M4–M5 仍为
      FlowLink、派生、durable join、result acceptance 和可释放的跨 worker checkpoint 后续分阶段实现。
 
 3. **完善 GitHub 协作** —— 覆盖常见协作动作（reviewer 指派、draft PR、labels、Projects 联动、review 线程 resolve 等）。
-   - 预留：GitHub Client 保持薄封装，能力按需追加即可，不影响 core。
+   - GitHub 使用具体资源对象，能力按真实需求添加到相应资源；control 同步使用实际接口。
 
 4. **Code Agent 标准接口** —— 把"与 code agent 交互"抽象成统一端口，方便接入新的底层 agent（不只 codex）。
    - **当前接缝已就位**：`CodingAgent` port 已定义 `start / resume`，Codex 是第一个 adapter；实时
@@ -81,9 +81,8 @@ M1/M2 已合并不等于真实闭环已验收；M3 尚未完成，M4–M5 仍为
    - **已接线（2026-08-02）**：五个生命周期 hook（`on_flow_start / on_pr_opened / on_review / on_merged / on_archived`）已在 engine 的对应状态转移处触发，插件可订阅；插件异常被隔离（不掀翻 core）。
      待实现：示例插件 `post-merge-summary` 的插件体（读会话 + diff → 提炼风格偏好 → 提 PR 更新 repo 的 skill），目前只打日志。
 
-**架构取向：hexagonal（ports & adapters）。** control core（ControlService + JobCoordinator + store）只依赖端口：
-`CodingAgent` / `Judge` / `GitHubClient` / `Plugin hooks`；worker 执行器直接管理执行与工作区约束。
+control 直接依赖具体 GitHub 资源，由 App/Installation 绑定身份并调用 Repository、Issue、PR、Thread 和 Project/Item。
+GitHub 不预留 adapter 或替代协议。`CodingAgent` / `Judge` 保留已有接口，插件使用生命周期 hooks；
+worker 执行器直接管理执行与工作区约束。
 **VCS 不是端口**：它由 Flow repo 准备、自探测 guidance 和只读事实核验函数组成（见 §4.6）。
-当前已给端口放置最简 adapter 或桩
-（codex / bub / WebSocket worker / githubkit / 插件集）。
-“存在 adapter”不代表外部契约已校准；未来扩展仍优先通过换 adapter 或加插件保持 core 边界稳定。
+当前使用 codex、bub、WebSocket worker、githubkit 和插件集；外部契约校准情况由各组件的验收记录说明。

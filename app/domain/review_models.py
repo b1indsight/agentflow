@@ -7,9 +7,9 @@ from typing import Literal
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 from app.domain.context_models import ReviewContext
-from app.domain.github_models import ReviewThreads
 from app.domain.judge_models import JudgeDecision
 from app.domain.models import FeedbackRef, ReviewItemKind
+from app.github import ReviewThreads
 
 
 class FeedbackUpdate(BaseModel):

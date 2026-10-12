@@ -5,13 +5,15 @@
 ## 包依赖边界
 
 `domain/` 保存领域事实、端口与纯策略；`contracts/` 在这些类型上定义跨进程消息与冻结结果。
-`persistence/` 拥有 SQL 和事务，`github/` 拥有 GitHub SDK/GraphQL 适配，两者不反向依赖编排层。
+`persistence/` 拥有 SQL 和事务，`github/` 拥有资源、远端查询数据、绑定配置及其 GitHub SDK/GraphQL 操作，两者不反向依赖编排层。
+领域容器、合同和仓储直接引用同一个资源模型；公开事实可以离线恢复，SDK/认证只在实际操作时加载。
 `control/` 组合仓储、GitHub、协议与插件，负责工作流、Judge 决策和外部副作用；`worker/` 组合协议、CodingAgent
 执行器及 VCS，不加载 control、数据库或 GitHub SDK 实现。配置与 CLI 保留原入口。
 
 `telemetry/logging.py` 只提供通用日志配置；`telemetry/metrics.py` 由控制端使用，并调用
 `persistence/metrics_store.py` 读取数据库指标。两者不在包入口集中导出，避免 worker 经日志导入 SQL。
-`domain/github_retry.py` 是纯退避计算，不属于 GitHub SDK 适配，仓储可以直接复用。
+GitHub 错误分类和 Retry-After 计时由 `github/errors.py` 提供，仓储通过 `app.github` 复用纯计算，
+不会初始化 SDK。`domain/project_models.py` 只保留业务目标状态，GitHub Project 绑定配置及远端目标数据归 `github/projects.py`。
 职责边界由 `tests/test_boundaries.py` 检查，另以独立解释器验证 worker 启动的传递导入。
 
 目录列表见[当前目录](roadmap.md#8-当前目录与里程碑)。Judge 内部子进程入口为
@@ -137,14 +139,15 @@ REVISION 的有序 invocations（包括 resume 失败后 fallback）均以该结
 `result_received_at` 和 `result_applied_at` 分别表示接收与应用时间，不表示进程执行开始/结束。
 跨协议不回传完整 prompt 或原始 JSONL。GitHub-only egress 和多轮 context 增长仍待验证。
 
-## 4.5 GitHub Client
+## 4.5 GitHub 资源
 
 目标职责：以 GitHub App installation 身份创建 PR、评论、设置 labels、请求 reviewers、列出 review
 threads、resolve thread，并签发 push 所需的短时 installation token。自动合并明确不在职责内。
 
-`GitHubApp` 已对齐锁定的 githubkit 0.16：返回稳定的 Issue、repository、remote ref 和 PR snapshot，
-用 App 身份签发只含单仓库 Contents write 的短时 capability，并把常见 HTTP/认证故障映射为不含响应
-body 的类型化错误。M2 已加入类型化 GraphQL 线程/comment 分页、共享预算、原线程回复和 resolve/复读，
+`GitHubApp` 已对齐锁定的 githubkit 0.16，负责 App 认证及安装绑定；`Repository` 读取仓库事实、
+获取 Issue/PR，并通过父 App 签发只含单仓库 Contents write 的短时 capability。
+Issue/PR、线程和 Project/Item 拥有各自操作；查询返回新的不可变观察，错误转换不含响应 body。
+M2 已加入类型化 GraphQL 线程/comment 分页、共享预算、原线程回复和 resolve/复读，
 并通过隔离自动化。真实 GitHub App smoke 尚未执行；Project v2、关闭 issue 和通用 reconcile
 仍未校准。接入边界见 [GitHub App 文档](github-app.md)。
 
@@ -221,10 +224,17 @@ Store 继续使用同步接口。assignment claim 无锁读取公平候选，只
 目标用户体验完全位于 GitHub：标签触发、PR review 反馈、网页人工合并、状态 labels 与评论。
 
 当前 router 已识别触发、取消、review/comment 和 merged 事件；PR 创建、评论、reviewer 和 label 已有
-经隔离测试的 adapter primitive，且 reviewer 配置不复用 trigger allowlist。真实 Issue/default branch、
+经隔离测试的具体资源操作，且 reviewer 配置不复用 trigger allowlist。真实 Issue/default branch、
 head PR 查询和 capability 已接入 INITIAL；M2 原线程回复/resolve 已接入并有自动化覆盖，
 真实 App 校准与 Project 状态更新仍待完成。
 工具没有自动合并实现。
+
+`app/github` 以 `GitHubApp → Installation → Repository → Issue/PullRequest → ReviewThread`
+组织仓库资源，`Installation → Project → ProjectItem` 组织看板资源。App 持有认证配置，安装
+持有 installation ID；control 从 Flow、effect 或 Project 配置的持久身份绑定具体资源，方法只传操作数据。
+`fetch_*` 和 `refetch()` 返回当次查询的新实例，成功状态更新返回仅确认字段改变的副本。
+已有字段保留之前的观察，嵌套线程与项目配置不可变；仅绑定身份时，未知事实不能作为属性读取。
+标准序列化排除私有认证及父资源引用，持久化直接序列化同一个资源模型，离线恢复不创建认证对象。
 
 ## 4.9 Context Builder
 
@@ -248,7 +258,7 @@ REVISE 在工作流事务中创建 revision job 并关联批次；ANSWER/IGNORE/
 关联避免迟到决定或重复下发，过程不更改 worker 状态或 Flow binding。答案已发送但回执不明时，
 只查询批次 marker，不重复 POST。`ReviewStore` 拥有上下文失效、答案发送授权和确定拒绝后的复位；
 coordinator 不直接更新业务表。批次答案与结果评论保留各自的事务授权和 marker 恢复，
-共享 `GitHubAdapterError.definitely_rejected` 的拒绝判定；线程回复与普通结果评论共用一个执行分支。
+共享 `GitHubError.definitely_rejected` 的拒绝判定；线程回复与普通结果评论共用一个执行分支。
 
 control 的 `BubJudge` 启动独立 `judge_runner` 子进程，显式配置 bub 0.4.1 `ModelRunner.completion_response`，
 不创建 framework、加载插件、读写 tape 或执行工具。每批次独立请求与会话 ID；凭据仅通过允许的

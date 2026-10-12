@@ -7,9 +7,7 @@ from collections.abc import Awaitable, Callable
 
 from loguru import logger
 
-from app.domain.github_models import GitHubAdapterError, GitHubErrorKind
-from app.domain.ports import ProjectsClient
-from app.domain.project_models import ProjectConfig
+from app.github import GitHubApp, GitHubError, GitHubErrorKind, Issue, ProjectConfig
 from app.persistence.project_store import Projection, ProjectStore
 from app.persistence.store import Store
 
@@ -20,9 +18,9 @@ class DestinationChanged(Exception):
 
 class ProjectSync:
     def __init__(self, store: Store, configs: dict[str, ProjectConfig],
-                 client: Callable[[ProjectConfig], ProjectsClient], *, interval: float = 300,
+                 github: GitHubApp, *, interval: float = 300,
                  batch_size: int = 64, concurrency: int = 4) -> None:
-        self.store, self.configs, self.client = store, configs, client
+        self.store, self.configs, self.github = store, configs, github
         self.projects = ProjectStore(store)
         self.interval, self.batch_size, self.concurrency = interval, batch_size, concurrency
         self.after = 0
@@ -71,15 +69,17 @@ class ProjectSync:
         row = self.projects.refresh(row.id, config)
         if row.blocked or row.next_at > self.store.now():
             return
-        api = self.client(config)
+        installation = self.github.installation(config.installation_id)
+        repository = installation.repository(row.repo)
+        api = installation.project(config)
         try:
-            await self._call(row, config, lambda: api.validate(row.repo))
+            await self._call(row, config, lambda: api.validate(repository))
             if row.content_id is None:
-                content = await self._call(row, config, lambda: api.issue_id(row.repo, row.issue_number))
+                content = await self._call(row, config, lambda: Issue(repository, row.issue_number).fetch_content_id())
                 self.projects.save(row, content_id=content)
                 row = self.projects.get(row.id)
             if row.item_id is None:
-                page = await self._call(row, config, lambda: api.items_page(row.cursor))
+                page = await self._call(row, config, lambda: api.list_items_page(row.cursor))
                 found = [item for item in page.items if item.content_id == row.content_id]
                 if found:
                     self.projects.save(row, item_id=found[0].id, cursor=None, scan_incomplete=False, add_started=False)
@@ -98,14 +98,14 @@ class ProjectSync:
                     self.projects.save(row, add_started=True, cursor=None, scan_incomplete=False)
                     try:
                         added = await self._call(row, config, lambda: api.add_issue(row.content_id or ""))
-                    except GitHubAdapterError as error:
+                    except GitHubError as error:
                         if error.definitely_unsent or error.request_rejected:
                             self.projects.save(row, add_started=False)
                         raise
                     self.projects.save(row, item_id=added.id, add_started=False)
                 row = self.projects.get(row.id)
             assert row.item_id is not None
-            remote = await self._call(row, config, lambda: api.read_item(row.item_id or ""))
+            remote = await self._call(row, config, lambda: api.fetch_item(row.item_id or ""))
             if remote is None or remote.archived or remote.content_id != row.content_id:
                 self.projects.save(row, blocked=True, last_error="known project item missing, archived, or content unavailable")
                 return
@@ -113,11 +113,11 @@ class ProjectSync:
             if fresh.desired_version != row.desired_version or fresh.blocked:
                 return
             if remote.option_id != config.options[row.desired_status]:
-                await self._call(row, config, lambda: api.set_status(row.item_id or "", row.desired_status))
+                await self._call(row, config, lambda: remote.set_status(row.desired_status))
             self.projects.acknowledge(row, self.interval)
         except DestinationChanged:
             return
-        except GitHubAdapterError as error:
+        except GitHubError as error:
             # A known NOT_FOUND item is blocked, never reinterpreted as permission to add.
             if row.item_id and error.kind is GitHubErrorKind.NOT_FOUND:
                 self.projects.save(row, blocked=True, last_error="known project item not found or inaccessible")

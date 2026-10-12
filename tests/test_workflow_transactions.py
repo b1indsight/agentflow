@@ -16,7 +16,8 @@ from app.domain.models import (
     JobState,
 )
 from app.persistence.store import Store
-from tests.test_coordinator import RecordingGitHub, coordinator
+from tests.github import RecordingGitHub
+from tests.test_coordinator import coordinator
 
 
 def test_transaction_view_reuses_its_connection_without_leaking_to_other_callers(
@@ -168,7 +169,9 @@ def test_expired_cancelled_executor_does_not_overwrite_cancelled_flow(store: Sto
 
 
 
-async def test_accepted_result_survives_expired_worker_recovery(store: Store, monkeypatch) -> None:
+async def test_accepted_result_survives_expired_worker_recovery(
+    store: Store, monkeypatch, recording_resources,
+) -> None:
     # Once control accepted the terminal result, an offline executor cannot invalidate its delivery.
     job, _ = accepted_coding(store)
     store.worker_disconnected("worker-a", "connection lost", "epoch-a")
