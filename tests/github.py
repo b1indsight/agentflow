@@ -1,8 +1,10 @@
 """Explicit recording resources for control tests; App owns identity and remote state."""
 
+from __future__ import annotations
+
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any
 
 from githubkit import AppAuthStrategy, GitHub
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
@@ -20,6 +22,9 @@ from app.github import (
     ReviewThread,
     ReviewThreads,
 )
+
+if TYPE_CHECKING:
+    from githubkit_schemas.latest.models import DiffEntry, PullRequestReviewComment
 
 # Mixed control/SDK cases call the particular native operation explicitly.
 NATIVE_ISSUE_COMMENT = Issue.comment
@@ -169,17 +174,15 @@ class RecordingPullRequest(PullRequest):
         record_call(self.repository, "fetch_reviews", number=self.number)
         return Batch[RemoteFeedback]()
 
-    async def list_files(self) -> AsyncIterator[Any]:
+    async def list_files(self) -> AsyncIterator[DiffEntry]:
         record_call(self.repository, "list_files", number=self.number)
-        items: tuple[Any, ...] = ()
+        items: tuple[DiffEntry, ...] = ()
         for item in items:
             yield item
 
-    async def list_discussions(
-        self, source: Literal["conversation", "review_body", "inline"],
-    ) -> AsyncIterator[Any]:
-        record_call(self.repository, "list_discussions", number=self.number)
-        items: tuple[Any, ...] = ()
+    async def list_review_comments(self) -> AsyncIterator[PullRequestReviewComment]:
+        record_call(self.repository, "list_review_comments", number=self.number)
+        items: tuple[PullRequestReviewComment, ...] = ()
         for item in items:
             yield item
 

@@ -32,6 +32,8 @@ from app.github.threads import (
 )
 
 if TYPE_CHECKING:
+    from githubkit_schemas.latest.models import DiffEntry, PullRequestReviewComment
+
     from app.github.repositories import Repository
 
 _REVIEWS = """
@@ -208,13 +210,13 @@ class PullRequest(BaseModel):
             connection = data["repository"]["pullRequest"]["reviews"]
             return decode_feedback(connection, cursor, limit)
 
-    async def list_files(self) -> AsyncIterator[Any]:
-        """Yield parsed files in API order; callers may stop after their evidence quota."""
+    async def list_files(self) -> AsyncIterator[DiffEntry]:
+        """Yield SDK file changes in API order; callers own the evidence quota."""
         repo = self.repository
         client = repo.installation._client(auto_retry=False)
         page = 1
         while True:
-            data: list[Any]
+            data: list[DiffEntry]
             with translate_errors("list_pull_request_files"):
                 data = (await client.rest.pulls.async_list_files(
                     repo.owner, repo.name, self.number, per_page=20, page=page,
@@ -225,28 +227,17 @@ class PullRequest(BaseModel):
                 break
             page += 1
 
-    async def list_discussions(
-        self, source: Literal["conversation", "review_body", "inline"],
-    ) -> AsyncIterator[Any]:
-        """Yield parsed discussions for one source, stopping when its final page is read."""
+    async def list_review_comments(self) -> AsyncIterator[PullRequestReviewComment]:
+        """Yield inline snippets with their REST diff hunks; callers bound the evidence."""
         repo = self.repository
         client = repo.installation._client(auto_retry=False)
         page = 1
         while True:
-            data: list[Any]
+            data: list[PullRequestReviewComment]
             with translate_errors("list_pull_request_discussions"):
-                if source == "conversation":
-                    data = (await client.rest.issues.async_list_comments(
-                        repo.owner, repo.name, self.number, per_page=10, page=page,
-                    )).parsed_data
-                elif source == "review_body":
-                    data = (await client.rest.pulls.async_list_reviews(
-                        repo.owner, repo.name, self.number, per_page=10, page=page,
-                    )).parsed_data
-                else:
-                    data = (await client.rest.pulls.async_list_review_comments(
-                        repo.owner, repo.name, self.number, per_page=10, page=page,
-                    )).parsed_data
+                data = (await client.rest.pulls.async_list_review_comments(
+                    repo.owner, repo.name, self.number, per_page=10, page=page,
+                )).parsed_data
             for item in data:
                 yield item
             if len(data) < 10:

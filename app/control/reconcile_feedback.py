@@ -197,7 +197,8 @@ class FeedbackReconciler:
     ) -> tuple[list[FeedbackUpdate], str | None]:
         updates, diagnostic = [], None
         for item in page.items:
-            if item.is_bot or item.author.casefold() == self.bot_login or item.state == "pending":
+            if (item.author is None or item.is_bot or item.author.casefold() == self.bot_login
+                    or item.state == "pending"):
                 continue
             inert = item.body.strip().startswith("/flow")
             if inert:

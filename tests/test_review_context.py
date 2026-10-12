@@ -36,6 +36,18 @@ def discussion_row(number, updated_at, *, body="A discussion"):
                            original_commit_id="old-sha", diff_hunk="+line")
 
 
+def feedback_response(source, rows=(), *, following=None):
+    field = "reviews" if source == "review_body" else "comments"
+    parent = "pullRequest" if source == "review_body" else "issueOrPullRequest"
+    return {"repository": {parent: {field: {
+        "nodes": [{"fullDatabaseId": row.id, "body": row.body,
+                   "updatedAt": row.updated_at, "state": "COMMENTED",
+                   "author": {"login": row.user.login, "__typename": "User"} if row.user else None}
+                  for row in rows],
+        "pageInfo": {"hasNextPage": following is not None, "endCursor": following},
+    }}}}
+
+
 def review_store():
     return SimpleNamespace(
         flow=Flow(id=1, repo="owner/repo", issue_number=8, installation_id=42, state=FlowState.ACTIVE),
@@ -59,18 +71,21 @@ def remote(tmp_path, monkeypatch):
         events.append("files")
         return response([file_row()])
 
-    def discussions(source):
-        async def read(*args, **kwargs):
-            events.append(source)
-            return response([])
-        return read
+    async def inline(*args, **kwargs):
+        events.append("inline")
+        return response([])
+
+    async def graphql(query, variables):
+        source = "review_body" if "reviews(first:" in query else "conversation"
+        events.append(source)
+        assert variables["limit"] == 21 and variables["cursor"] is None
+        return feedback_response(source)
 
     client = SimpleNamespace(rest=SimpleNamespace(
-        issues=SimpleNamespace(async_get=issue, async_list_comments=discussions("conversation")),
+        issues=SimpleNamespace(async_get=issue),
         pulls=SimpleNamespace(async_get=pull_request, async_list_files=files,
-                              async_list_reviews=discussions("review_body"),
-                              async_list_review_comments=discussions("inline")),
-    ))
+                              async_list_review_comments=inline),
+    ), async_graphql=graphql)
     install_client(monkeypatch, lambda _, **kwargs: client)
     repo = GitHubApp(settings(tmp_path)).installation(42).repository("owner/repo")
     return repo, client, events
@@ -110,6 +125,22 @@ async def test_context_total_byte_limit_and_missing_patch_are_explicit(remote):
     assert "files:truncated" in result.limitations
     assert any("patch" in reason for reason in result.limitations)
     assert "context:truncated" in result.limitations
+
+
+async def test_sdk_unset_file_fields_are_explicit_missing_evidence(remote):
+    # GitHub can omit patches for binary files. The real SDK uses Unset for these
+    # fields; treating it as text crashes context preparation before assignment.
+    from githubkit_schemas.latest.models import DiffEntry
+
+    repo, client, _ = remote
+    client.rest.pulls.async_list_files = AsyncEndpoint(response([DiffEntry(
+        sha=None, filename="image.png", status="modified", additions=0, deletions=0,
+        changes=0, blob_url=None, raw_url=None, contents_url="https://example.test/image.png",
+    )]))
+    store = review_store()
+    result = await build_review_context(repo, store.flow, store.reviews.batch, 17)
+    assert result.files[0].patch is None and result.files[0].previous_path is None
+    assert "patch:image.png:unavailable-or-binary" in result.limitations
 
 
 @pytest.mark.parametrize("permission", [False, True])
@@ -171,20 +202,25 @@ async def test_discussion_sources_keep_their_page_quotas_and_body_limits(remote)
     observed = store.reviews.batch.created_at - timedelta(minutes=1)
     pages = []
 
-    def discussions(source, offset):
-        async def read(*args, page, per_page):
-            assert per_page == 10
-            pages.append((source, page))
-            return response([discussion_row(offset + page * 10 + i, observed,
-                body="x" * 5000 if page == 1 and i == 0 else "body") for i in range(10)])
-        return read
+    async def graphql(query, variables):
+        source = "review_body" if "reviews(first:" in query else "conversation"
+        assert variables["limit"] == 21 and variables["cursor"] is None
+        pages.append((source, 1))
+        offset = 2010 if source == "review_body" else 1010
+        return feedback_response(source, [discussion_row(offset + i, observed,
+            body="x" * 5000 if i == 0 else "body") for i in range(21)])
 
-    client.rest.issues.async_list_comments = discussions("conversation", 1000)
-    client.rest.pulls.async_list_reviews = discussions("review_body", 2000)
-    client.rest.pulls.async_list_review_comments = discussions("inline", 3000)
+    async def inline(*args, page, per_page):
+        assert per_page == 10
+        pages.append(("inline", page))
+        return response([discussion_row(3000 + page * 10 + i, observed,
+            body="x" * 5000 if page == 1 and i == 0 else "body") for i in range(10)])
+
+    client.async_graphql = graphql
+    client.rest.pulls.async_list_review_comments = inline
     result = await build_review_context(repo, store.flow, store.reviews.batch, 17)
-    assert pages == [(source, page) for source in ("conversation", "review_body", "inline")
-                     for page in (1, 2, 3)]
+    assert pages == [("conversation", 1), ("review_body", 1),
+                     ("inline", 1), ("inline", 2), ("inline", 3)]
     assert len(result.discussions) == 60 and "discussion:truncated" in result.limitations
     assert {item.kind for item in result.discussions} == {"conversation", "review_body", "inline"}
     assert sum(len(item.body) == 4000 for item in result.discussions) == 3
@@ -199,15 +235,18 @@ async def test_filtered_discussions_do_not_refill_quota_or_leak_diagnostics(remo
     store = review_store()
     pages = []
 
-    async def comments(*args, page, **kwargs):
-        pages.append(page)
-        offset = timedelta(minutes=1 if page < 3 else -1)
-        return response([discussion_row(page * 10 + i, store.reviews.batch.created_at + offset,
-                                        body="x" * 5000) for i in range(10)])
+    async def comments(query, variables):
+        source = "review_body" if "reviews(first:" in query else "conversation"
+        if source == "review_body":
+            return feedback_response(source)
+        pages.append(variables["cursor"])
+        rows = [discussion_row(1000 + i, store.reviews.batch.created_at
+            + timedelta(minutes=1 if i < 20 else -1), body="x" * 5000) for i in range(21)]
+        return feedback_response(source, rows, following="later")
 
-    client.rest.issues.async_list_comments = comments
+    client.async_graphql = comments
     result = await build_review_context(repo, store.flow, store.reviews.batch, 17)
-    assert pages == [1, 2, 3] and result.discussions == []
+    assert pages == [None] and result.discussions == []
     assert "discussion:truncated" in result.limitations
     assert not any("body:truncated" in reason for reason in result.limitations)
 
@@ -230,7 +269,65 @@ async def test_later_page_errors_never_freeze_partial_context(remote, source, fa
     if source == "files":
         client.rest.pulls.async_list_files = read
     else:
-        client.rest.issues.async_list_comments = read
+        client.rest.pulls.async_list_review_comments = read
+    with pytest.raises(GitHubError) as caught:
+        await build_review_context(repo, store.flow, store.reviews.batch, 17)
+    assert caught.value is error
+
+
+async def test_review_edited_after_cutoff_stays_out_of_context(remote):
+    # A review submitted before the batch can be edited later; its current body
+    # must be excluded using the feedback model's actual edit time.
+    repo, client, _ = remote
+    store = review_store()
+    row = discussion_row(999, store.reviews.batch.created_at + timedelta(minutes=1))
+    row.submitted_at = store.reviews.batch.created_at - timedelta(days=1)
+
+    async def graphql(query, variables):
+        source = "review_body" if "reviews(first:" in query else "conversation"
+        return feedback_response(source, [row] if source == "review_body" else [])
+
+    client.async_graphql = graphql
+    result = await build_review_context(repo, store.flow, store.reviews.batch, 17)
+    assert not result.discussions and not result.limitations
+
+
+@pytest.mark.parametrize("count, following, truncated", [(20, None, False), (21, None, True),
+                                                       (20, "later", True)])
+async def test_deleted_authors_count_toward_bounded_context_prefix(remote, count, following, truncated):
+    # Removing deleted authors at decode time would shift the prefix and lose evidence.
+    repo, client, _ = remote
+    store = review_store()
+    rows = [discussion_row(1000 + i, store.reviews.batch.created_at - timedelta(minutes=1))
+            for i in range(count)]
+    rows[0].user = None
+
+    async def graphql(query, variables):
+        source = "review_body" if "reviews(first:" in query else "conversation"
+        assert variables["limit"] == 21
+        return feedback_response(source, rows if source == "conversation" else [],
+                                 following=following if source == "conversation" else None)
+
+    client.async_graphql = graphql
+    result = await build_review_context(repo, store.flow, store.reviews.batch, 17)
+    assert len(result.discussions) == 20
+    assert result.discussions[0].author == "[deleted]"
+    assert ("discussion:truncated" in result.limitations) is truncated
+
+
+@pytest.mark.parametrize("source", ["conversation", "review_body"])
+async def test_feedback_query_errors_do_not_freeze_partial_context(remote, source):
+    repo, client, _ = remote
+    store = review_store()
+    error = GitHubError(GitHubErrorKind.PERMISSION, "feedback_page")
+
+    async def graphql(query, variables):
+        current = "review_body" if "reviews(first:" in query else "conversation"
+        if current == source:
+            raise error
+        return feedback_response(current)
+
+    client.async_graphql = graphql
     with pytest.raises(GitHubError) as caught:
         await build_review_context(repo, store.flow, store.reviews.batch, 17)
     assert caught.value is error

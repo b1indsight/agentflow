@@ -62,6 +62,21 @@ async def test_graphql_review_uses_edit_time_and_64_bit_identity(tmp_path, monke
     assert variables["cursor"] == "previous"
 
 
+async def test_deleted_author_stays_in_batch_but_does_not_become_reviewer_input(tmp_path, monkeypatch):
+    # Deleted authors still consume the context quota; durable scanning must keep
+    # its previous rule of ignoring feedback without a known reviewer identity.
+    from app.control.reconcile_feedback import FeedbackReconciler
+
+    data = reviews()
+    data["repository"]["pullRequest"]["reviews"]["nodes"][0]["author"] = None
+    pr = adapter(tmp_path, monkeypatch, SimpleNamespace(async_graphql=AsyncEndpoint(data)))
+    page = await pr.fetch_reviews(limit=1)
+    assert len(page.items) == 1 and page.items[0].author is None
+    assert page.items[0].body == "edited review" and not page.items[0].is_bot
+    scanner = FeedbackReconciler(SimpleNamespace(), pr.repository.installation.app, settle_seconds=0)
+    assert scanner._discussion_updates(page, "reviews") == ([], None)
+
+
 @pytest.mark.parametrize("malformation", ["partial", "cursor", "completeness", "missing"])
 async def test_incomplete_graphql_data_never_commits_a_page(tmp_path, monkeypatch, malformation):
     data = reviews()
