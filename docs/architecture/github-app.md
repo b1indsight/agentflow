@@ -72,13 +72,19 @@ control 按 Webhook 保存的 `installation_id` 绑定 `Installation`，再绑�
 与已知 `None`，私有 SDK/认证及父绑定不进入 JSON。domain 容器、持久层和 worker 使用同一个资源模型，
 `PullRequest.list_files()` 和 `list_discussions(source)` 在资源内管理请求、分页与 SDK 解析，按项异步产出。
 control 直接遍历条目，仅负责审核配额、哨兵、映射、裁剪、过滤和冻结，保持原有字段与 digest。
-Issue/PR 直接绑定同一评论分页方法；PR 方法直接实现 review 反馈和线程单页查询。
-持久轮询仍逐页提交游标，线程读取器保留两种资源读取共用的完整性和遍历预算。
+Issue/PR 的 `fetch_comments(cursor, limit)`、PR 的 `fetch_reviews(cursor, limit)` 和
+`fetch_threads(cursor, limit)` 请求 GraphQL，返回不可变 `Batch[T](items, next_cursor)`。
+thread 批次直接携带各 thread 已反序列化的首批最多 20 条评论，其 `comments` 也是
+`Batch[ReviewComment]`；评论续读使用该 thread 的 `fetch_comments(cursor, limit)`。
+批量大小范围为 1–100，两层游标各自属于对应列表；访问容器不会隐式请求下一批。
+持久轮询每次调度最多一个请求；`control.reconcile_feedback.ThreadScanState` 单独保存
+外层位置及未读完 thread 的元数据和评论游标，观察结果与进度仍在同一事务提交。
+完整线程读取器复用查询字段和解码，保留请求/字节预算、跨页去重及完整覆盖判断。
 PR 响应由资源私有工厂直接转换为实例，保留完整读取与部分响应的字段差异。
 资源方法用 `with translate_errors(endpoint)` 包住 SDK 请求和响应解析，保持原错误范围与取消传播；
 客户端通过原生 `with_auth()` 复制配置，写入关闭副本的重试，后续读取仍保持原策略。
 
-资源、评论、反馈页、ref、凭证、合并事件、Project 绑定配置、操作错误和重试计时统一从 `app.github` 导入，例如
+资源、评论、批量容器、ref、凭证、合并事件、Project 绑定配置、操作错误和重试计时统一从 `app.github` 导入，例如
 `from app.github import GitHubApp, Issue, PullRequest, Repository`。
 `ReviewComment` 与 `ReviewThread` 同属线程模块；其他查询数据按实际操作归入对应资源或反馈模块。
 `__all__` 明确公开类型和 `retry_delay`；字段声明、解码与扫描器由包内使用。

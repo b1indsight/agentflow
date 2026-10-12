@@ -52,7 +52,7 @@ def test_full_context_roundtrip_retains_resource_types_and_known_nulls():
 def test_frozen_thread_and_resolution_effect_share_the_resource_model():
     observed = snapshot()
     evidence = ReviewThreads(repo="owner/repo", pr_number=17,
-                             fetched_at=observed.comments[0].updated_at, threads=(observed,))
+                             fetched_at=observed.comments.items[0].updated_at, threads=(observed,))
     restored = ReviewThreads.model_validate_json(evidence.model_dump_json())
     assert type(restored.threads[0]) is ReviewThread
     assert restored.model_dump(mode="json") == evidence.model_dump(mode="json")

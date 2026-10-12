@@ -8,7 +8,7 @@ import pytest
 from app.control.reconcile_feedback import FeedbackReconciler
 from app.domain.models import DeliveryState, FlowState, ReviewItemKind
 from app.github import (
-    FeedbackPage,
+    Batch,
     GitHubError,
     GitHubErrorKind,
     Issue,
@@ -39,27 +39,27 @@ def feedback_resources(recording_resources, monkeypatch):
         state.calls.append((resource.number, source, cursor))
         if state.before_return:
             state.before_return()
-        value = state.pages.get((source, cursor), FeedbackPage(items=[]))
+        value = state.pages.get((source, cursor), Batch(items=[]))
         if isinstance(value, Exception):
             raise value
         return value
 
-    async def issue_comments(issue, cursor):
+    async def issue_comments(issue, *, cursor=None, limit=50):
         return read(issue, "issue_comments", cursor)
 
-    async def pr_comments(pr, cursor):
+    async def pr_comments(pr, *, cursor=None, limit=50):
         return read(pr, "pr_comments", cursor)
 
-    async def reviews(pr, cursor):
+    async def reviews(pr, *, cursor=None, limit=50):
         return read(pr, "reviews", cursor)
 
-    monkeypatch.setattr(Issue, "list_comments_page", issue_comments)
-    monkeypatch.setattr(PullRequest, "list_comments_page", pr_comments)
-    monkeypatch.setattr(PullRequest, "list_reviews_page", reviews)
+    monkeypatch.setattr(Issue, "fetch_comments", issue_comments)
+    monkeypatch.setattr(PullRequest, "fetch_comments", pr_comments)
+    monkeypatch.setattr(PullRequest, "fetch_reviews", reviews)
 
 
 def page(clock, github_id=101, **changes):
-    return FeedbackPage(items=[RemoteFeedback(
+    return Batch(items=[RemoteFeedback(
         github_id=github_id, author="alice", body="Please add a bound.", updated_at=clock.now,
         **changes,
     )])
@@ -156,7 +156,7 @@ async def test_review_edits_and_invalidation_preserve_versions(store, review_flo
     github.pages["reviews", None] = page(clock)
     await poller(store, github)._sweep()
     clock.now += timedelta(seconds=301)
-    github.pages["reviews", None] = FeedbackPage(items=[RemoteFeedback(
+    github.pages["reviews", None] = Batch(items=[RemoteFeedback(
         github_id=101, author="alice", body="Edited after submission", updated_at=clock.now,
     )])
     await poller(store, github)._sweep()
@@ -175,7 +175,7 @@ async def test_old_commands_and_bots_never_wake_or_control(store, review_flow, f
     flow, clock = review_flow
     github = GitHub(clock)
     item = page(clock).items[0].model_copy(update={field: value})
-    github.pages["reviews", None] = FeedbackPage(items=[item])
+    github.pages["reviews", None] = Batch(items=[item])
     await poller(store, github)._sweep()
     assert store.reviews.pending(flow.id) == []
     assert store.get_flow(flow.id).state is FlowState.ACTIVE
@@ -208,7 +208,7 @@ async def test_repeated_review_does_not_downgrade_an_authorized_signal(store, re
     update = feedback(clock, kind=ReviewItemKind.REVIEW_BODY, signal="request_changes", submitted=True)
     ingest(store, flow, update)
     github = GitHub(clock)
-    github.pages["reviews", None] = FeedbackPage(items=[RemoteFeedback(
+    github.pages["reviews", None] = Batch(items=[RemoteFeedback(
         github_id=update.github_id, author=update.author, body=update.body, updated_at=clock.now,
         state="changes_requested",
     )])
@@ -235,7 +235,7 @@ async def test_polling_missing_predecessor_applies_the_queued_successor(store, r
     flow, clock = review_flow
     ingest(store, flow, feedback(clock, kind=ReviewItemKind.CONVERSATION, body="A"))
     github = GitHub(clock)
-    github.pages["issue_comments", None] = FeedbackPage(items=[page(clock).items[0].model_copy(update={"body": "B"})])
+    github.pages["issue_comments", None] = Batch(items=[page(clock).items[0].model_copy(update={"body": "B"})])
 
     def arriving():
         store.reviews.ingest(flow.id, "b-c", "issue_comment", {"changes": {"body": {"from": "B"}}},
@@ -250,7 +250,7 @@ async def test_edit_to_command_supersedes_feedback_and_later_edit_recovers(store
     flow, clock = review_flow
     ingest(store, flow, feedback(clock, kind=ReviewItemKind.CONVERSATION, body="Change old code"))
     github = GitHub(clock)
-    github.pages["issue_comments", None] = FeedbackPage(items=[page(clock).items[0].model_copy(update={"body": "/flow stop"})])
+    github.pages["issue_comments", None] = Batch(items=[page(clock).items[0].model_copy(update={"body": "/flow stop"})])
     await poller(store, github)._sweep()
     assert store.reviews.pending(flow.id) == []
     assert store.get_flow(flow.id).state is FlowState.ACTIVE
@@ -264,7 +264,7 @@ async def test_poll_marks_same_webhook_command_body_inert(store, review_flow, fe
     flow, clock = review_flow
     ingest(store, flow, feedback(clock, kind=ReviewItemKind.CONVERSATION, body="/flow stop"))
     github = GitHub(clock)
-    github.pages["issue_comments", None] = FeedbackPage(items=[
+    github.pages["issue_comments", None] = Batch(items=[
         page(clock).items[0].model_copy(update={"body": "/flow stop"}),
     ])
     # An edited command can reach storage before polling identifies it as inert.
@@ -321,8 +321,8 @@ async def test_recovered_backlog_drains_without_oversized_or_repeated_wait_batch
     flow, clock = review_flow
     github = GitHub(clock)
     comments = [page(clock, number).items[0] for number in range(1, 62)]
-    github.pages["issue_comments", None] = FeedbackPage(items=comments[:50], next_cursor="2")
-    github.pages["issue_comments", "2"] = FeedbackPage(items=comments[50:])
+    github.pages["issue_comments", None] = Batch(items=comments[:50], next_cursor="2")
+    github.pages["issue_comments", "2"] = Batch(items=comments[50:])
     await poller(store, github)._sweep()
     clock.now += timedelta(seconds=6)
     await poller(store, github)._sweep()
@@ -364,7 +364,7 @@ async def test_source_pool_is_bounded_and_cancellation_joins_reads(store, review
 
     github = Slow(clock)
 
-    async def slow_page(resource, cursor):
+    async def slow_page(resource, *, cursor=None, limit=50):
         record_call(resource.repository, "list_feedback_page", number=resource.number)
         github.active += 1
         github.maximum = max(github.maximum, github.active)
@@ -372,13 +372,13 @@ async def test_source_pool_is_bounded_and_cancellation_joins_reads(store, review
             entered.set()
         try:
             await release.wait()
-            return FeedbackPage(items=[])
+            return Batch(items=[])
         finally:
             github.active -= 1
 
-    monkeypatch.setattr(Issue, "list_comments_page", slow_page)
-    monkeypatch.setattr(PullRequest, "list_comments_page", slow_page)
-    monkeypatch.setattr(PullRequest, "list_reviews_page", slow_page)
+    monkeypatch.setattr(Issue, "fetch_comments", slow_page)
+    monkeypatch.setattr(PullRequest, "fetch_comments", slow_page)
+    monkeypatch.setattr(PullRequest, "fetch_reviews", slow_page)
     task = asyncio.create_task(poller(store, github, concurrency=2)._sweep())
     await asyncio.wait_for(entered.wait(), 1)
     task.cancel()

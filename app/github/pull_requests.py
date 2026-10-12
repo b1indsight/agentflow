@@ -4,29 +4,27 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
 from app.github._fields import unobserved_field
 from app.github.errors import translate_errors
-from app.github.feedback import FeedbackPage, RemoteFeedback
+from app.github.feedback import RemoteFeedback, decode_feedback
 from app.github.issues import (
     _add_label,
     _comment,
+    _fetch_comments,
     _fetch_labels,
     _find_comment,
-    _list_comments_page,
     _remove_label,
 )
-from app.github.pagination import next_cursor
+from app.github.pagination import Batch, next_cursor, validate_limit
 from app.github.review_threads import ReviewThread
-from app.github.thread_pages import _THREAD_PAGE_QUERY, ThreadCursor
 from app.github.threads import (
+    _THREADS,
     MAX_THREAD_BYTES,
-    THREAD_QUERY,
-    ReviewThreadPage,
     ReviewThreads,
     ThreadReader,
     belongs_to_pr,
@@ -37,9 +35,9 @@ if TYPE_CHECKING:
     from app.github.repositories import Repository
 
 _REVIEWS = """
-query($owner:String!,$name:String!,$number:Int!,$cursor:String){
+query($owner:String!,$name:String!,$number:Int!,$cursor:String,$limit:Int!){
   repository(owner:$owner,name:$name){pullRequest(number:$number){
-    reviews(first:50,after:$cursor){
+    reviews(first:$limit,after:$cursor){
       nodes { fullDatabaseId body updatedAt state author {login __typename} }
       pageInfo {hasNextPage endCursor}
     }
@@ -194,23 +192,21 @@ class PullRequest(BaseModel):
                 repo.owner, repo.name, self.number, reviewers=reviewers,
             )
 
-    async def list_reviews_page(self, cursor: str | None) -> FeedbackPage:
-        """Read a durable page using edit timestamps, rather than REST submitted_at."""
+    async def fetch_reviews(
+        self, *, cursor: str | None = None, limit: int = 50,
+    ) -> Batch[RemoteFeedback]:
+        """Request a review batch using actual edit timestamps and its native cursor."""
+        validate_limit(limit)
         repo = self.repository
         client = repo.installation._client(auto_retry=False)
         with translate_errors("feedback_page"):
             data = await client.async_graphql(_REVIEWS, {
-                "owner": repo.owner, "name": repo.name, "number": self.number, "cursor": cursor,
+                "owner": repo.owner, "name": repo.name, "number": self.number, "cursor": cursor, "limit": limit,
             })
             if data.get("errors"):
                 raise ValueError("partial review response")
             connection = data["repository"]["pullRequest"]["reviews"]
-            following = next_cursor(connection, cursor)
-            return FeedbackPage(items=[RemoteFeedback(
-                github_id=node["fullDatabaseId"], author=node["author"]["login"], body=node["body"],
-                updated_at=node["updatedAt"], state=node["state"].lower(),
-                is_bot=node["author"]["__typename"] == "Bot",
-            ) for node in connection["nodes"] if node["author"] is not None], next_cursor=following)
+            return decode_feedback(connection, cursor, limit)
 
     async def list_files(self) -> AsyncIterator[Any]:
         """Yield parsed files in API order; callers may stop after their evidence quota."""
@@ -257,72 +253,35 @@ class PullRequest(BaseModel):
                 break
             page += 1
 
-    async def list_review_thread_page(self, cursor: str | None) -> ReviewThreadPage:
-        """Read resolved and unresolved threads with at most one request per invocation."""
-        with translate_errors("review_thread_page"):
-            from githubkit.exception import GraphQLFailed
-
-            state = ThreadCursor.model_validate_json(cursor) if cursor else ThreadCursor()
-            if bool(state.thread_id) != bool(state.comments):
-                raise ValueError("invalid nested cursor")
-            repository = self.repository
-            repo, pr = repository.full_name, self.number
-            client = repository.installation._client(auto_retry=False)
-            snapshot = ReviewThreads(repo=repo, pr_number=pr, fetched_at=datetime.now(UTC))
-            threads: list[ReviewThread] = []
-            limitations: list[str] = []
-            owner, name = repo.split("/")
-            try:
-                data = await client.async_graphql(
-                    THREAD_QUERY if state.thread_id else _THREAD_PAGE_QUERY,
-                    {"id": state.thread_id, "comments": state.comments} if state.thread_id else
-                    {"owner": owner, "name": name, "pr": pr, "after": state.after, "comments": None},
-                )
-            except GraphQLFailed as error:
-                # Only this exact missing nested lookup can advance, and it remains incomplete evidence.
-                errors = error.response.errors or []
-                if (not state.thread_id or error.response.data != {"node": None}
-                        or not errors or any(item.type != "NOT_FOUND" for item in errors)):
-                    raise
-                data = {"node": None}
+    async def fetch_threads(
+        self, *, cursor: str | None = None, limit: int = 100,
+    ) -> Batch[ReviewThread]:
+        """Request threads with their first 20 comments and independent comment cursors."""
+        validate_limit(limit)
+        repo = self.repository
+        client = repo.installation._client(auto_retry=False)
+        with translate_errors("review_threads"):
+            data = await client.async_graphql(_THREADS, {
+                "owner": repo.owner, "name": repo.name, "pr": self.number, "cursor": cursor, "limit": limit,
+            })
             if data.get("errors") or len(json.dumps(data).encode()) > MAX_THREAD_BYTES:
-                raise ValueError("partial or oversized thread page")
-            following = state.following
-            if state.thread_id:
-                node = data["node"]
-                if node is None:
-                    # A thread removed between nested pages must not trap the entire PR scan forever.
-                    limitations.append("thread:missing-node")
-                elif node["id"] != state.thread_id:
-                    raise ValueError("thread identity changed")
-            else:
-                connection = data["repository"]["pullRequest"]["reviewThreads"]
-                following = next_cursor(connection, state.after)
-                nodes = connection["nodes"]
-                if len(nodes) > 1 or (not nodes and following):
-                    raise ValueError("invalid thread page size")
-                node = nodes[0] if nodes else None
-                if nodes and node is None:
-                    raise ValueError("missing thread entry")
-            continuation = ThreadCursor(after=following).model_dump_json() if following else None
-            if node is not None:
-                if not belongs_to_pr(node, repo, pr):
-                    raise ValueError("thread does not belong to tracked PR")
-                comments_page = node["comments"]
-                comments_after = next_cursor(comments_page, state.comments)
+                raise ValueError("partial or oversized thread batch")
+            connection = data["repository"]["pullRequest"]["reviewThreads"]
+            following = next_cursor(connection, cursor)
+            nodes = connection["nodes"]
+            if len(nodes) > limit or (not nodes and following):
+                raise ValueError("invalid thread batch size")
+            threads = []
+            for node in nodes:
+                if node is None or not belongs_to_pr(node, repo.full_name, self.number):
+                    raise ValueError("missing or foreign thread")
                 thread = decode_thread(node, self)
-                if not thread.complete:
+                if thread.limitations:
                     raise ValueError("missing or duplicate comment identity")
-                threads.append(thread.model_copy(update={
-                    # Even the final nested page is a fragment, never a complete coverage snapshot.
-                    "complete": bool(thread.comments) and not comments_after and not state.thread_id,
-                }))
-                if comments_after:
-                    continuation = ThreadCursor(
-                        after=state.after, thread_id=node["id"], comments=comments_after, following=following,
-                    ).model_dump_json()
-            snapshot = snapshot.model_copy(update={"threads": tuple(threads), "limitations": tuple(limitations)})
-            return ReviewThreadPage(snapshot=snapshot, next_cursor=continuation)
+                threads.append(thread)
+            if len({thread.thread_id for thread in threads}) != len(threads):
+                raise ValueError("duplicate thread identity")
+            return Batch[ReviewThread](items=tuple(threads), next_cursor=following)
 
     async def list_review_threads(self) -> ReviewThreads:
         reader = ThreadReader(self, auto_retry=False)
@@ -331,7 +290,7 @@ class PullRequest(BaseModel):
 
     comment = _comment
     find_comment = _find_comment
-    list_comments_page = _list_comments_page
+    fetch_comments = _fetch_comments
     fetch_labels = _fetch_labels
     add_label = _add_label
     remove_label = _remove_label

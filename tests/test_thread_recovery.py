@@ -17,11 +17,13 @@ from app.domain.models import (
 )
 from app.domain.review_models import FeedbackUpdate
 from app.github import (
+    Batch,
     GitHubError,
     GitHubErrorKind,
     Issue,
     PullRequest,
     Repository,
+    ReviewComment,
     ReviewThread,
     ReviewThreads,
 )
@@ -114,8 +116,8 @@ async def thread_revision(store, request, thread_resources):
     store.update_delivery(delivery)
     github = ThreadGitHub()
     if mode in {"multiple", "mixed"}:
-        github.thread = github.thread.model_copy(update={"comments": (*github.thread.comments, human(2, reply_to_id=1))})
-    for comment in github.thread.comments:
+        github.thread = github.thread.model_copy(update={"comments": Batch[ReviewComment](items=(*github.thread.comments.items, human(2, reply_to_id=1)))})
+    for comment in github.thread.comments.items:
         update = FeedbackUpdate(kind=ReviewItemKind.INLINE, github_id=comment.github_id,
             author=comment.author, body=comment.body, updated_at=comment.updated_at,
             signal="request_changes", submitted=True)
@@ -209,7 +211,7 @@ async def test_auth_failure_after_resolve_waits_for_confirmation(
 async def test_racing_input_survives_ack_and_prevents_rereview(store, thread_revision, change, monkeypatch):
     flow, job, github, subject = thread_revision
     if change == "edited":
-        github.thread = github.thread.model_copy(update={"comments": (human(body="Also handle negative values"), *github.thread.comments[1:])})
+        github.thread = github.thread.model_copy(update={"comments": Batch[ReviewComment](items=(human(body="Also handle negative values"), *github.thread.comments.items[1:]))})
     elif change == "head":
         original = ReviewThread.reply
 
@@ -223,11 +225,11 @@ async def test_racing_input_survives_ack_and_prevents_rereview(store, thread_rev
 
         async def race(thread):
             updated = await original_resolve(thread)
-            github.thread = github.thread.model_copy(update={"comments": (*github.thread.comments, human(2))})
+            github.thread = github.thread.model_copy(update={"comments": Batch[ReviewComment](items=(*github.thread.comments.items, human(2)))})
             return updated
         monkeypatch.setattr(ReviewThread, "resolve", race)
     else:
-        github.thread = github.thread.model_copy(update={"comments": (*github.thread.comments, human(2))})
+        github.thread = github.thread.model_copy(update={"comments": Batch[ReviewComment](items=(*github.thread.comments.items, human(2)))})
         if change == "manual-resolve":
             github.thread = github.thread.model_copy(update={"resolved": True})
     assert await subject.results.apply(job.id) is JobState.DONE
@@ -298,7 +300,7 @@ async def test_commit_failure_keeps_remote_receipts_and_exact_consumption(store,
 async def test_discovered_feedback_and_late_webhook_share_one_version(store, thread_revision):
     flow, job, github, subject = thread_revision
     new = human(2)
-    github.thread = github.thread.model_copy(update={"comments": (*github.thread.comments, new)})
+    github.thread = github.thread.model_copy(update={"comments": Batch[ReviewComment](items=(*github.thread.comments.items, new))})
     await subject.results.apply(job.id)
     update = FeedbackUpdate(kind=ReviewItemKind.INLINE, github_id=2, author=new.author,
         body=new.body, updated_at=new.updated_at, path="app.py")
@@ -332,7 +334,7 @@ async def test_same_second_round_trip_keeps_the_latest_webhook_version(store, th
                 kind=ReviewItemKind.INLINE, github_id=1, author="alice",
                 body=body, updated_at=human().updated_at,
             ), settle_seconds=0, submit_grace_seconds=0)
-    github.thread = github.thread.model_copy(update={"comments": (human(body="Intermediate"), *github.thread.comments[1:])})
+    github.thread = github.thread.model_copy(update={"comments": Batch[ReviewComment](items=(human(body="Intermediate"), *github.thread.comments.items[1:]))})
     await subject.results.apply(job.id)
     assert [(f.version, f.body) for f in store.reviews.pending(flow.id)] == [(3, original)]
     assert github.resolves == [] and github.review_requests == []
@@ -353,7 +355,7 @@ async def test_remote_predecessor_releases_the_queued_webhook_edit(store, thread
             tx.lock_workflow(flow.id)
             assert tx.reviews._append_version(flow.id, flow.current_attempt_id, None,
                 latest.model_copy(update={"body": "Intermediate"}), previous_body=human().body)
-    github.thread = github.thread.model_copy(update={"comments": (human(body="Intermediate"), *github.thread.comments[1:])})
+    github.thread = github.thread.model_copy(update={"comments": Batch[ReviewComment](items=(human(body="Intermediate"), *github.thread.comments.items[1:]))})
     await subject.results.apply(job.id)
     assert [(f.version, f.body) for f in store.reviews.pending(flow.id)] == [(3, "Latest")]
     with store.connection() as connection:
@@ -435,7 +437,7 @@ async def test_next_revision_combines_valid_historical_coverage_on_the_same_pr(
     await subject.results.apply(first.id)
     assert github.resolves == []
     new = human(3, reply_to_id=1, body="Decision made; finish the remaining change")
-    github.thread = github.thread.model_copy(update={"comments": (*github.thread.comments, new)})
+    github.thread = github.thread.model_copy(update={"comments": Batch[ReviewComment](items=(*github.thread.comments.items, new))})
     store.reviews.ingest(flow.id, "decision", "pull_request_review_comment", {}, FeedbackUpdate(
         kind=ReviewItemKind.INLINE, github_id=3, author=new.author, body=new.body,
         updated_at=new.updated_at, signal="request_changes", submitted=True,

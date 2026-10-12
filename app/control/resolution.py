@@ -20,7 +20,7 @@ def covered_thread(thread: ReviewThread, addressed: list[ReviewFeedback]) -> boo
     """Every human comment is an unresolved input unless a verified revision addressed its version."""
     if not {"comments", "complete"}.issubset(thread.model_fields_set):
         return False
-    humans = [comment for comment in thread.comments if not comment.is_bot]
+    humans = [comment for comment in thread.comments.items if not comment.is_bot]
     return thread.complete and bool(humans) and all(
         any(matches(comment, item) for item in addressed) for comment in humans
     )
@@ -61,7 +61,7 @@ def plan_resolution(
             if text is not None:
                 conversation.append(f"[{item.kind.value} {item.github_id}]({link})：{text}")
             continue
-        candidates = [t for t in threads.threads if any(matches(c, item) for c in t.comments)] if (
+        candidates = [t for t in threads.threads if any(matches(c, item) for c in t.comments.items)] if (
             threads and threads.complete and threads.repo == flow.repo and threads.pr_number == number
         ) else []
         if len(candidates) != 1:
@@ -85,7 +85,7 @@ def plan_resolution(
     commit = f"已核验提交：[ `{result.commit_sha}` ](https://github.com/{flow.repo}/commit/{result.commit_sha})"
     for thread_id, items in groups.items():
         thread = mapped[thread_id]
-        roots = [c for c in thread.comments if c.reply_to_id is None]
+        roots = [c for c in thread.comments.items if c.reply_to_id is None]
         lines = [f"#{f.github_id}：{reported[(f.item_id, f.version)]}" for f in items
                  if (f.item_id, f.version) in reported]
         if associated:
@@ -104,7 +104,7 @@ def plan_resolution(
             notes.blocked.extend(FeedbackRef(item_id=f.item_id, version=f.version) for f in items)
             conversation.append(reason)
             reply_key = None
-        coverage = [item for comment in thread.comments
+        coverage = [item for comment in thread.comments.items
                     for item in coverage_by_comment.get(comment.github_id, []) if matches(comment, item)]
         notes.effects.append(ResolveEffect(
             installation_id=flow.installation_id, repo=flow.repo, key=f"resolve:{thread_id}", number=number, thread_id=thread_id,

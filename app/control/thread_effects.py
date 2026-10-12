@@ -45,7 +45,7 @@ def has_pending_thread_feedback(store: Store, plan: ResultPlan, effect: ResolveE
     assert plan.batch_id is not None
     batch = store.reviews.get_batch(plan.batch_id)
     other_ids = {c.github_id for t in batch.threads.threads if t.thread_id != effect.thread_id
-                 for c in t.comments} if batch.threads else set()
+                 for c in t.comments.items} if batch.threads else set()
     covered_refs = {(f.item_id, f.version) for f in effect.covered}
     return any(
         f.kind is ReviewItemKind.INLINE and f.github_id not in other_ids

@@ -8,15 +8,16 @@ from githubkit import AppAuthStrategy, GitHub
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from app.github import (
-    FeedbackPage,
+    Batch,
     GitHubApp,
     Issue,
     PullRequest,
     PushCapability,
+    RemoteFeedback,
     RemoteRef,
     Repository,
+    ReviewComment,
     ReviewThread,
-    ReviewThreadPage,
     ReviewThreads,
 )
 
@@ -131,9 +132,9 @@ class RecordingIssue(Issue):
         state.labels.append([item for item in await self.fetch_labels()
                              if item.casefold() != label.casefold()])
 
-    async def list_comments_page(self, cursor: str | None) -> FeedbackPage:
+    async def fetch_comments(self, *, cursor: str | None = None, limit: int = 50) -> Batch[RemoteFeedback]:
         record_call(self.repository, "list_issue_comments_page", number=self.number)
-        return FeedbackPage(items=[])
+        return Batch[RemoteFeedback]()
 
 
 class RecordingPullRequest(PullRequest):
@@ -160,13 +161,13 @@ class RecordingPullRequest(PullRequest):
         state = record_call(self.repository, "request_reviewers", number=self.number)
         state.review_requests.append(reviewers)
 
-    async def list_comments_page(self, cursor: str | None) -> FeedbackPage:
+    async def fetch_comments(self, *, cursor: str | None = None, limit: int = 50) -> Batch[RemoteFeedback]:
         record_call(self.repository, "list_pr_comments_page", number=self.number)
-        return FeedbackPage(items=[])
+        return Batch[RemoteFeedback]()
 
-    async def list_reviews_page(self, cursor: str | None) -> FeedbackPage:
-        record_call(self.repository, "list_reviews_page", number=self.number)
-        return FeedbackPage(items=[])
+    async def fetch_reviews(self, *, cursor: str | None = None, limit: int = 50) -> Batch[RemoteFeedback]:
+        record_call(self.repository, "fetch_reviews", number=self.number)
+        return Batch[RemoteFeedback]()
 
     async def list_files(self) -> AsyncIterator[Any]:
         record_call(self.repository, "list_files", number=self.number)
@@ -190,15 +191,18 @@ class RecordingPullRequest(PullRequest):
                           for thread in state.threads),
         )
 
-    async def list_review_thread_page(self, cursor: str | None) -> ReviewThreadPage:
-        record_call(self.repository, "list_review_thread_page", number=self.number)
-        return ReviewThreadPage(snapshot=ReviewThreads(
-            repo=self.repository.full_name, pr_number=self.number, fetched_at=datetime.now(UTC),
-        ), next_cursor=None)
+    async def fetch_threads(self, *, cursor: str | None = None, limit: int = 100) -> Batch[ReviewThread]:
+        record_call(self.repository, "fetch_threads", number=self.number)
+        return Batch[ReviewThread]()
 
 
 class RecordingReviewThread(ReviewThread):
     """Thread observations and confirmed writes without extra identity lookups."""
+
+    async def fetch_comments(self, *, cursor: str | None = None, limit: int = 20) -> Batch[ReviewComment]:
+        record_call(self.pull_request.repository, "fetch_thread_comments", number=self.pull_request.number,
+                    thread_id=self.thread_id)
+        return Batch[ReviewComment]()
 
     async def refetch(self) -> ReviewThread:
         pr = self.pull_request
@@ -209,7 +213,7 @@ class RecordingReviewThread(ReviewThread):
         if observed is None:
             return ReviewThread(
                 pr, self.thread_id, root_comment_id=self.root_comment_id,
-                comments=(), complete=False, fetched_at=datetime.now(UTC),
+                comments=Batch[ReviewComment](), complete=False, fetched_at=datetime.now(UTC),
                 limitations=("thread:missing-node",),
             )
         return ReviewThread(

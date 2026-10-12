@@ -62,7 +62,7 @@ async def test_threads_and_comments_have_independent_cursors(tmp_path, monkeypat
     async def graphql(query, variables):
         calls.append(variables)
         if "id" in variables:
-            assert variables == {"id": "T1", "comments": "comments-1"}
+            assert variables == {"id": "T1", "cursor": "comments-1", "limit": 20}
             return {"node": thread(comments=[comment(999)])}
         first = variables["cursor"] is None
         nodes = [thread(i) for i in range(1, 101)] if first else [thread(101)]
@@ -76,8 +76,8 @@ async def test_threads_and_comments_have_independent_cursors(tmp_path, monkeypat
     install_client(monkeypatch, lambda _, **kwargs: SimpleNamespace(async_graphql=graphql))
     result = await PullRequest(app.installation(1).repository("owner/repo"), 17).list_review_threads()
     assert result.complete and len(result.threads) == 101
-    assert len(result.threads[0].comments) == 21
-    assert result.threads[0].comments[-1].node_id == "C999"
+    assert len(result.threads[0].comments.items) == 21
+    assert result.threads[0].comments.items[-1].node_id == "C999"
     assert calls[-1]["cursor"] == "threads-1"
 
 
@@ -145,9 +145,9 @@ async def test_observed_thread_checks_root_identity_without_inventing_it(
         graphql_calls.append(variables)
         if later_root:
             # Recovery knows a root ID before the root itself appears on a later page.
-            if variables["comments"] is None:
+            if variables["cursor"] is None:
                 return {"node": thread(comments=[comment(3, reply_to=2)], cursor="root-page")}
-            assert variables["comments"] == "root-page"
+            assert variables["cursor"] == "root-page"
             return {"node": thread(comments=[comment(2)])}
         return {"node": thread()}
 
@@ -202,10 +202,10 @@ async def test_resolve_returns_new_immutable_evidence_without_an_extra_read(tmp_
     assert after.comments == before.comments
     assert len(calls) == 2 and calls[1] == {"threadId": "T1"}
     with pytest.raises(AttributeError):
-        before.comments.append(before.comments[0])
+        before.comments.items.append(before.comments.items[0])
     exported = before.model_dump(mode="json", exclude_unset=True)
-    exported["comments"][0]["body"] = "local edit"
-    assert before.comments[0].body == "Fix this"
+    exported["comments"]["items"][0]["body"] = "local edit"
+    assert before.comments.items[0].body == "Fix this"
     restored = ReviewThread.model_validate_json(before.model_dump_json(exclude_unset=True))
     assert type(restored) is type(before) and restored.comments == before.comments
     with pytest.raises(AttributeError):

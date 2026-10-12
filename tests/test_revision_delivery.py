@@ -164,12 +164,12 @@ async def revision_control(recording_resources):
     store.delivery = FlowDelivery(flow_id=1, branch="flow/1", base_branch="trunk",
                                   state=DeliveryState.OPEN, pr_number=17, head_sha="abc123")
     job = Job(id=21, flow_id=1, kind=JobKind.REVISION, state=JobState.RUNNING)
-    from app.github import ReviewComment, ReviewThread
+    from app.github import Batch, ReviewComment, ReviewThread
     item = store.reviews.batch.feedback[0]
     github.threads = [ReviewThread(thread_id="T1", repo="owner/repo", pr_number=17,
-        path="app.py", resolved=False, outdated=False, complete=True, comments=[ReviewComment(
+        path="app.py", resolved=False, outdated=False, complete=True, comments=Batch[ReviewComment](items=(ReviewComment(
             github_id=item.github_id, node_id="C500", author=item.author, is_bot=False,
-            body=item.body, updated_at=item.updated_at)])]
+            body=item.body, updated_at=item.updated_at),)))]
     subject = coordinator(store, github)
     from tests.review_memory import review_context
 
@@ -223,7 +223,7 @@ async def test_resolve_payloads_only_carry_their_threads_current_and_historical_
     plan = plan_resolution(store.flow, 17, batch, result, historical)
     resolves = [effect for effect in plan.effects if isinstance(effect, ResolveEffect)]
     assert len(resolves) == len(threads) and all(effect.allow_resolve for effect in resolves)
-    assert all({f.github_id for f in effect.covered} == {c.github_id for c in effect.snapshot.comments}
+    assert all({f.github_id for f in effect.covered} == {c.github_id for c in effect.snapshot.comments.items}
                and all(f.kind is ReviewItemKind.INLINE for f in effect.covered) for effect in resolves)
     assert sum(len(effect.model_dump_json()) for effect in resolves) < 3 * len(remote.model_dump_json())
 
