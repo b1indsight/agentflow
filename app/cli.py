@@ -9,13 +9,16 @@ import asyncio
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 import typer
+import uvicorn
 
-from app.control.archive import archive_progress
-from app.control.service import ControlService
+from app import github
 from app.domain.models import DeliveryState
-from app.persistence.store import Store
+
+if TYPE_CHECKING:
+    from app.persistence.store import Store
 
 app = typer.Typer(help="FlowTool admin CLI")
 flow_app = typer.Typer(help="flow 运维")
@@ -55,16 +58,15 @@ def inbox_retry(delivery_id: str) -> None:
 def project_check(repo: str) -> None:
     """只读校验已配置的组织 Project、Status 字段及选项。"""
     from app.control.config import settings
-    from app.github import GitHubApp, GitHubError
 
     config = settings.projects.get(repo.casefold())
     if config is None:
         typer.echo(f"{repo}: Projects disabled")
         return
     try:
-        installation = GitHubApp(settings).installation(config.installation_id)
+        installation = github.GitHubApp(settings).installation(config.installation_id)
         target = asyncio.run(installation.project(config).validate(installation.repository(repo)))
-    except GitHubError as error:
+    except github.GitHubError as error:
         typer.echo(str(error), err=True)
         raise typer.Exit(1) from None
     typer.echo(f"{repo}: {target.title} ({config.project_id}), Status={target.status_name} ({config.status_field_id})")
@@ -96,6 +98,7 @@ def project_retry(repo: str) -> None:
 @contextmanager
 def _store() -> Iterator[Store]:
     from app.control.config import settings
+    from app.persistence.store import Store
 
     store = Store(settings.database_url)
     store.init_db()
@@ -108,8 +111,6 @@ def _store() -> Iterator[Store]:
 @app.command()
 def serve() -> None:
     """启动 webhook 常驻进程（uvicorn）。"""
-    import uvicorn
-
     from app.control.api import create_app
     from app.control.config import settings
     from app.control.runtime import ControlRuntime
@@ -147,16 +148,16 @@ def flows(active: bool = typer.Option(False, help="只看未终结的")) -> None
 @app.command("worker-drain")
 def worker_drain(worker_id: str, undo: bool = typer.Option(False, "--undo")) -> None:
     """暂停给 worker 分配新 Flow；已有绑定继续收尾。"""
-    from app.persistence.stop_store import StopStore
-
     with _store() as store:
-        StopStore(store).drain(worker_id, not undo)
+        store.stops.drain(worker_id, not undo)
     typer.echo(f"{worker_id}: draining={not undo}")
 
 
 @app.command()
 def workers() -> None:
     """列出 worker 在线状态和当前 assignment。"""
+    from app.control.service import ControlService
+
     with _store() as store:
         typer.echo("WORKER\tSTATUS\tDRAINING\tJOB\tFLOW\tEPOCH\tLEASE\tRECOVERY\tLAST_SEEN\tREASON")
         for worker in ControlService(store).list_workers():
@@ -188,6 +189,8 @@ def _remaining(value: datetime | None) -> str:
 
 @flow_app.command("show")
 def flow_show(flow_id: int) -> None:
+    from app.control.archive import archive_progress
+
     with _store() as store:
         f = store.get_flow(flow_id)
         if not f:
@@ -253,6 +256,8 @@ def flow_show(flow_id: int) -> None:
 
 @flow_app.command("cancel")
 def flow_cancel(flow_id: int) -> None:
+    from app.control.service import ControlService
+
     with _store() as store:
         f = store.get_flow(flow_id)
         if not f:
@@ -265,6 +270,8 @@ def flow_cancel(flow_id: int) -> None:
 @flow_app.command("retry")
 def flow_retry(flow_id: int) -> None:
     """重试失败任务，或补发已核验修订中被明确拒绝的 GitHub 通知。"""
+    from app.control.service import ControlService
+
     with _store() as store:
         f = store.get_flow(flow_id)
         if not f:

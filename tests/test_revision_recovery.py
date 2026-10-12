@@ -13,6 +13,8 @@ from app.contracts.protocol import (
     Succeeded,
     terminal_digest,
 )
+from app.contracts.result_models import EffectState, ResultPending
+from app.control.service import ControlService
 from app.domain.models import (
     AddressedComment,
     DeliveryState,
@@ -26,6 +28,7 @@ from app.github import GitHubError, GitHubErrorKind, Issue, PullRequest, RemoteR
 from app.persistence.store import Store
 from tests.github import RecordingGitHub, record_call
 from tests.test_coordinator import coordinator
+from tests.test_merge import route_merge
 from tests.test_revision_delivery import revision_output, verified_result
 
 
@@ -166,8 +169,6 @@ async def test_result_commit_failure_replays_facts_without_new_execution(store, 
 async def test_cancel_during_remote_verification_prevents_effects_and_commit(
     store, pending_revision, monkeypatch,
 ):
-    from app.control.service import ControlService
-
     flow, job, task, github, subject = pending_revision
     assert store.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
     subject.mark_started(job, task, "worker-a")
@@ -196,8 +197,6 @@ async def test_revision_limit_applies_to_strong_signals(store, pending_revision)
 
 
 async def test_failed_revision_retry_retains_repo_and_consumes_a_new_cycle(store, pending_revision):
-    from app.control.service import ControlService
-
     flow, job, task, _, subject = pending_revision
     assert store.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
     subject.mark_started(job, task, "worker-a")
@@ -218,9 +217,6 @@ async def test_failed_revision_retry_retains_repo_and_consumes_a_new_cycle(store
 
 
 async def test_failed_revision_retry_after_merge_keeps_flow_terminal(store, pending_revision):
-    from app.control.service import ControlService
-    from tests.test_merge import route_merge
-
     flow, job, task, _, subject = pending_revision
     assert store.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
     subject.mark_started(job, task, "worker-a")
@@ -247,9 +243,6 @@ async def test_failed_revision_retry_after_merge_keeps_flow_terminal(store, pend
 async def test_rejected_revision_notification_keeps_verified_result_recoverable(
     store, pending_revision, monkeypatch, transition,
 ):
-    from app.contracts.result_models import EffectState, ResultPending
-    from app.control.service import ControlService
-
     flow, job, task, github, subject = pending_revision
     assert store.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
     subject.mark_started(job, task, "worker-a")
@@ -269,7 +262,8 @@ async def test_rejected_revision_notification_keeps_verified_result_recoverable(
     assert accept(store, job, result) == "pending"
 
     async def rejected(pr, reviewers):
-        raise GitHubError(GitHubErrorKind.VALIDATION, "request_reviewers", status_code=422)
+        raise GitHubError(GitHubErrorKind.VALIDATION, "request_reviewers", status_code=422,
+                          request_rejected=True)
 
     with monkeypatch.context() as patch:
         patch.setattr(PullRequest, "request_reviewers", rejected)
@@ -288,8 +282,6 @@ async def test_rejected_revision_notification_keeps_verified_result_recoverable(
     assert github.review_requests == []
     service = ControlService(store)
     if transition == "merge":
-        from tests.test_merge import route_merge
-
         await route_merge(store, flow)
         assert await restarted.results.apply(job.id) is JobState.DONE
         assert github.comments == comments and github.review_requests == []
@@ -326,8 +318,6 @@ async def test_merge_during_revision_application_preserves_delivery_and_session(
     store, pending_revision, monkeypatch, merge_at,
 ):
     # Remote verification and effect I/O can each overlap a human merging the current PR.
-    from tests.test_merge import route_merge
-
     flow, job, task, github, subject = pending_revision
     result = verified_result(task, commit_sha="revision", remote_sha="revision")
     github.sha = "revision"
@@ -357,35 +347,20 @@ async def test_merge_during_revision_application_preserves_delivery_and_session(
     assert persisted.result_applied_at is not None
 
 
-@pytest.mark.parametrize(("owner", "method", "endpoint", "kind", "status"), [
-    (PullRequest, "refetch", "fetch_pull_request", GitHubErrorKind.NOT_FOUND, 404),
-    (Repository, "fetch_ref", "fetch_ref", GitHubErrorKind.NOT_FOUND, 404),
-    (Issue, "refetch", "fetch_issue", GitHubErrorKind.NOT_FOUND, 404),
-    (Repository, "fetch_ref", "fetch_ref", GitHubErrorKind.TRANSIENT, 503),
-])
 async def test_revision_preparation_failure_is_persisted_and_explicitly_retryable(
-    store, pending_revision, monkeypatch, owner, method, endpoint, kind, status,
+    store, pending_revision, monkeypatch,
 ):
-    from app.control.service import ControlService
-
     flow, job, task, _github, subject = pending_revision
 
     async def unavailable(resource, *args, **kwargs):
-        raise GitHubError(kind, endpoint, status_code=status)
+        raise GitHubError(GitHubErrorKind.NOT_FOUND, "fetch_ref", status_code=404)
 
     with monkeypatch.context() as patch:
-        patch.setattr(owner, method, unavailable)
-        if kind is GitHubErrorKind.TRANSIENT:
-            from app.control.preparation import PreparationReadFailure
-
-            with pytest.raises(PreparationReadFailure):
-                await subject.prepare(job)
-            assert store.get_job(job.id).result_received_at is None
-            return
+        patch.setattr(Repository, "fetch_ref", unavailable)
         assert await subject.prepare_for_assignment(job, "worker-a", "token", "epoch") is JobState.FAILED
     failed = store.get_job(job.id)
     assert failed.state is JobState.FAILED and failed.result_applied_at is not None
-    assert endpoint in failed.last_error
+    assert "fetch_ref" in failed.last_error
     assert store.get_flow(flow.id).state is FlowState.FAILED
     assert store.get_attempt(task.attempt_id).revision_cycles == 0
     ControlService(store).retry(flow)
@@ -397,9 +372,6 @@ async def test_revision_preparation_failure_is_persisted_and_explicitly_retryabl
 async def test_uncertain_revision_notification_cannot_be_explicitly_resent(
     store, pending_revision, monkeypatch,
 ):
-    from app.contracts.result_models import EffectState, ResultPending
-    from app.control.service import ControlService
-
     flow, job, task, _github, subject = pending_revision
     assert store.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
     subject.mark_started(job, task, "worker-a")

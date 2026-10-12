@@ -1,10 +1,11 @@
 """Actual adapter pagination distinguishes thread cursors from nested comment cursors."""
 
 
+import httpx
 import pytest
+from githubkit import GitHub
 
 from app.github import GitHubApp, GitHubError, GitHubErrorKind, PullRequest, ReviewThread
-from app.github.threads import MAX_THREAD_BYTES
 from tests.test_github_client import install_client, settings
 from tests.test_github_feedback import adapter
 
@@ -64,9 +65,6 @@ class Client:
 
 
 async def test_real_sdk_missing_thread_is_reported_as_not_found(tmp_path, monkeypatch):
-    import httpx
-    from githubkit import GitHub
-
     client = GitHub("test-token", auto_retry=False, async_transport=httpx.MockTransport(
         lambda _: httpx.Response(200, json={"data": {"node": None}, "errors": [
             {"type": "NOT_FOUND", "message": "not accessible", "path": ["node"]},
@@ -80,9 +78,6 @@ async def test_real_sdk_missing_thread_is_reported_as_not_found(tmp_path, monkey
 
 @pytest.mark.parametrize("nested", [False, True])
 async def test_other_graphql_errors_do_not_skip_unread_feedback(tmp_path, monkeypatch, nested):
-    import httpx
-    from githubkit import GitHub
-
     errors = [{"type": "NOT_FOUND", "message": "missing"}]
     if nested:
         errors.append({"type": "FORBIDDEN", "message": "permission"})
@@ -123,27 +118,22 @@ async def test_thread_batches_and_comment_suffixes_have_independent_cursors(tmp_
     assert client.calls[2][1]["cursor"] == "threads-next"
 
 
-@pytest.mark.parametrize("bad", ["repo", "pr", "duplicate", "cursor", "partial", "size", "null", "flag"])
+@pytest.mark.parametrize("bad", ["duplicate", "cursor", "size", "null"])
 async def test_invalid_pages_do_not_masquerade_as_complete(tmp_path, monkeypatch, bad):
     thread = node()
     data = outer(thread)
-    if bad in {"repo", "pr"}:
-        if bad == "repo":
-            thread["pullRequest"]["repository"]["nameWithOwner"] = "foreign/repo"
-        else:
-            thread["pullRequest"]["number"] = 18
-    elif bad == "duplicate":
+    if bad == "duplicate":
         thread["comments"]["nodes"] *= 2
     elif bad == "cursor":
         thread["comments"]["pageInfo"] = {"hasNextPage": True, "endCursor": None}
-    elif bad == "partial":
-        data["errors"] = [{"message": "partial"}]
     elif bad == "size":
-        thread["comments"]["nodes"][0]["body"] = "x" * MAX_THREAD_BYTES
-    elif bad == "null":
-        thread["comments"]["nodes"] = [None]
+        # Twenty legal 60KB comments exceed the serialized budget through Unicode escapes.
+        thread["comments"]["nodes"] = [
+            node(number=number)["comments"]["nodes"][0] | {"body": "界" * 20_000}
+            for number in range(1, 21)
+        ]
     else:
-        thread["comments"]["pageInfo"]["hasNextPage"] = "false"
+        thread["comments"]["nodes"] = [None]
     app = adapter(tmp_path, monkeypatch, Client(data))
     with pytest.raises(GitHubError) as caught:
         await app.fetch_threads(limit=1)

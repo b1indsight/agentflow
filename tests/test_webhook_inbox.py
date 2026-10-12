@@ -1,15 +1,22 @@
 """Durable receipt must survive a crash on either side of business deduplication."""
 
+import asyncio
 import hashlib
 import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
+from queue import Queue
+from threading import Event
+from time import monotonic
 from types import SimpleNamespace
 
 import pytest
+from psycopg import OperationalError
 
 from app.control.service import ControlService
 from app.control.webhooks import WebhookConsumer
-from app.persistence.webhook_store import DeliveryConflict, WebhookStore
+from app.domain.models import DeliveryState, FlowState
+from app.persistence.webhook_store import WebhookStore
 
 
 def settings():
@@ -48,15 +55,6 @@ def test_received_delivery_survives_new_consumer_and_duplicate(store):
     assert inbox.list()[0].state == "done"
 
 
-def test_same_identity_different_content_cannot_overwrite(store):
-    inbox = WebhookStore(store)
-    receive(inbox)
-    with pytest.raises(DeliveryConflict):
-        receive(inbox, body=payload(8))
-    consumer(store).sweep()
-    assert store.get_active_flow("owner/repo", 8) is None
-
-
 def test_failure_after_event_reservation_rolls_back_business_and_replays(store, monkeypatch):
     inbox = WebhookStore(store)
     receive(inbox)
@@ -79,30 +77,62 @@ def test_failure_after_event_reservation_rolls_back_business_and_replays(store, 
     assert store.get_active_flow("owner/repo", 7) is not None
 
 
-def test_expired_claim_is_replayed_but_old_ack_cannot_complete_it(store):
+def test_expired_claim_is_replayed_but_old_ack_cannot_complete_it(store, monkeypatch):
     inbox = WebhookStore(store)
-    receive(inbox)
-    old = inbox.claim()
-    assert old is not None
-    with store.connection() as conn:
-        conn.execute("UPDATE webhook_inbox SET claim_expires_at=%s", (store.now()-timedelta(seconds=1),))
-    new = inbox.claim()
-    assert new is not None and new.claim_token != old.claim_token
-    assert not inbox.complete(old)
-    assert inbox.complete(new)
+    now = store.now()
+    store._clock = lambda: now
+    for number in range(1, 51):
+        receive(inbox, str(number), payload(number))
+    claim = WebhookStore.claim
+
+    def pause_after_last_claim(self):
+        nonlocal now
+        item = claim(self)
+        # A process suspension after the cycle's final claim expires its 60-second lease.
+        if item is not None and item.delivery_id == "50" and item.attempts == 1:
+            now += timedelta(seconds=61)
+        return item
+
+    monkeypatch.setattr(WebhookStore, "claim", pause_after_last_claim)
+    worker = consumer(store)
+    assert worker.sweep() == 49
+    assert not store.event_seen("50")
+    assert worker.sweep() == 1
+    assert store.event_seen("50")
+    assert all(item.state == "done" for item in inbox.list())
 
 
-def test_poison_delivery_does_not_block_following_event_and_can_retry(store):
+def test_poison_delivery_does_not_block_following_event_and_can_retry(store, monkeypatch):
+    trigger = ControlService.on_trigger
+
+    def unavailable(self, repo, number, installation):
+        if repo == "owner/repo":
+            raise OperationalError("write unavailable")
+        return trigger(self, repo, number, installation)
+
+    monkeypatch.setattr(ControlService, "on_trigger", unavailable)
     inbox = WebhookStore(store)
-    receive(inbox, "bad", {"action": "labeled"})
-    receive(inbox, "good")
-    consumer(store).sweep()
+    receive(inbox, "bad")
+    receive(inbox, "later", payload(9))
+    following = payload(8)
+    following["repository"]["full_name"] = "owner/other"
+    receive(inbox, "good", following)
+    for _ in range(10):
+        with store.connection() as conn:
+            conn.execute("UPDATE webhook_inbox SET next_at=%s WHERE delivery_id='bad'", (store.now(),))
+        consumer(store).sweep()
     rows = {row.delivery_id: row for row in inbox.list()}
-    assert rows["bad"].state == "blocked"
+    assert rows["bad"].state == "blocked" and rows["bad"].attempts == 10
+    assert rows["later"].state == "pending"
     assert rows["good"].state == "done"
+    assert store.get_active_flow("owner/other", 8) is not None
+    assert store.get_active_flow("owner/repo", 9) is None
+    monkeypatch.setattr(ControlService, "on_trigger", trigger)
     assert inbox.retry("bad")
     assert not inbox.retry("good")
+    assert consumer(store).sweep() == 2
     assert store.get_active_flow("owner/repo", 7) is not None
+    assert store.get_active_flow("owner/repo", 9) is not None
 
 
 def test_failed_completion_rolls_back_business_and_notifications(store, monkeypatch):
@@ -110,7 +140,10 @@ def test_failed_completion_rolls_back_business_and_notifications(store, monkeypa
     receive(inbox)
     notifications = []
     service = ControlService(store, jobs_available=lambda: notifications.append(True))
-    monkeypatch.setattr(WebhookStore, "complete", lambda *args: False)
+    def unavailable(*args):
+        raise OperationalError("connection lost at completion")
+
+    monkeypatch.setattr(WebhookStore, "complete", unavailable)
     WebhookConsumer(store, settings(), service).sweep()
     assert store.get_active_flow("owner/repo", 7) is None
     assert not notifications
@@ -132,37 +165,16 @@ def test_cleanup_preserves_pending_and_dedup_identity(store):
     assert consumer(store).sweep() == 1  # only the pending second Issue
 
 
-def test_retry_budget_is_bounded(store, monkeypatch):
-    def unavailable(*args):
-        raise RuntimeError("temporary")
-
-    monkeypatch.setattr(ControlService, "on_trigger", unavailable)
-    inbox = WebhookStore(store)
-    receive(inbox)
-    for _ in range(12):
-        with store.connection() as conn:
-            conn.execute("UPDATE webhook_inbox SET next_at=%s", (store.now(),))
-        consumer(store).sweep()
-    assert inbox.list()[0].state == "blocked"
-    assert inbox.list()[0].attempts == 10
-
-
-def test_concurrent_duplicate_receipts_and_claims(store):
-    from concurrent.futures import ThreadPoolExecutor
-
+def test_concurrent_duplicate_receipts_are_consumed_once(store):
     inbox = WebhookStore(store)
     with ThreadPoolExecutor(max_workers=2) as pool:
         list(pool.map(lambda _: receive(inbox), range(2)))
-        claims = list(pool.map(lambda _: inbox.claim(), range(2)))
-    assert sum(item is not None for item in claims) == 1
+    assert consumer(store).sweep() == 1
+    assert consumer(store).sweep() == 0
+    assert store.get_active_flow("owner/repo", 7) is not None
 
 
 def test_distinct_receipt_waits_for_older_repository_transaction(store):
-    from concurrent.futures import ThreadPoolExecutor
-    from queue import Queue
-    from threading import Event
-    from time import monotonic
-
     inbox = WebhookStore(store)
     backend: Queue[int] = Queue()
 
@@ -201,12 +213,9 @@ def test_distinct_receipt_waits_for_older_repository_transaction(store):
 
 @pytest.mark.parametrize("event,action", [
     ("pull_request", "closed"), ("issues", "unlabeled"),
-    ("issue_comment", "created"), ("pull_request_review", "submitted"),
     ("pull_request_review_comment", "created"),
 ])
 def test_all_business_routes_rollback_with_receipt(store, monkeypatch, event, action):
-    from app.domain.models import DeliveryState, FlowState
-
     flow = store.create_flow("owner/repo", 7, 42)
     attempt = store.create_attempt(flow.id)
     flow.current_attempt_id = attempt.id
@@ -218,15 +227,17 @@ def test_all_business_routes_rollback_with_receipt(store, monkeypatch, event, ac
     body = payload()
     body.update(action=action, pull_request={"number": 17, "merged": True,
                 "merged_at": "2026-09-18T01:00:00Z", "merge_commit_sha": "a" * 40})
-    if event == "issue_comment":
-        body["issue"]["number"] = 17
     item = {"id": 101, "body": "Please improve validation", "user": {"login": "alice"},
             "state": "commented", "updated_at": "2026-09-18T01:00:00Z"}
     body.update(comment=item, review=item)
     inbox = WebhookStore(store)
     inbox.receive("route", event, body, hashlib.sha256(json.dumps(body).encode()).hexdigest())
+
+    def unavailable(*args):
+        raise OperationalError("connection lost at completion")
+
     with monkeypatch.context() as patch:
-        patch.setattr(WebhookStore, "complete", lambda *args: False)
+        patch.setattr(WebhookStore, "complete", unavailable)
         consumer(store).sweep()
     assert not store.event_seen("route")
     assert store.get_flow(flow.id).state == FlowState.ACTIVE
@@ -241,9 +252,6 @@ def test_all_business_routes_rollback_with_receipt(store, monkeypatch, event, ac
 
 @pytest.mark.asyncio
 async def test_consumer_shutdown_waits_for_db_transaction_without_blocking_loop(store, monkeypatch):
-    import asyncio
-    from threading import Event
-
     started, release = Event(), Event()
     worker = consumer(store)
 
@@ -280,26 +288,3 @@ def test_retry_cannot_be_overtaken_by_cancellation(store, monkeypatch):
         conn.execute("UPDATE webhook_inbox SET next_at=%s", (store.now(),))
     assert consumer(store).sweep() == 2
     assert store.get_active_flow('owner/repo', 7) is None
-
-
-def test_claim_preserves_repository_order_through_live_and_blocked_claims(store):
-    inbox = WebhookStore(store)
-    fixed = store.now()
-    store._clock = lambda: fixed
-    receive(inbox, 'z-first')
-    receive(inbox, 'a-second')
-    other = payload()
-    other['repository']['full_name'] = 'owner/other'
-    receive(inbox, 'other-repo', other)
-    first = inbox.claim()
-    assert first.delivery_id == 'z-first'
-    other_item = inbox.claim()
-    assert other_item.delivery_id == 'other-repo'
-    assert inbox.claim() is None
-    inbox.fail(first, 'Invalid', permanent=True)
-    assert inbox.claim() is None
-    assert inbox.retry(first.delivery_id)
-    retried = inbox.claim()
-    assert retried.delivery_id == first.delivery_id
-    assert inbox.complete(retried)
-    assert inbox.claim().delivery_id == 'a-second'

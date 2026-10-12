@@ -1,10 +1,12 @@
+import asyncio
+import signal
 from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
 from pydantic import SecretStr
 
-from app.domain.models import CodingExecutionContext
+from app.domain.models import CodingExecutionContext, SessionUnavailable
 from app.worker.execution.codex import CodexAgent, _codex_environment, _start_args
 
 
@@ -121,15 +123,6 @@ async def test_resume_uses_current_directory_and_disables_saved_broker(monkeypat
     assert 'mcp_servers.flow={url="http://127.0.0.1", enabled=false}' in args
 
 
-@pytest.mark.parametrize("context", [
-    CodingExecutionContext(mcp_url="http://127.0.0.1:12345/mcp"),
-    CodingExecutionContext(mcp_token=SecretStr("orphan-token")),
-])
-def test_mcp_requires_endpoint_and_token_together(tmp_path, context):
-    with pytest.raises(ValueError, match="MCP"):
-        _start_args("task", tmp_path, trusted_host=True, context=context)
-
-
 @pytest.mark.parametrize("events,error,unavailable", [
     (b"", ("Error: thread/resume: thread/resume failed: no rollout found for thread id "
      "session-1 (code -32600)"), True),
@@ -141,8 +134,6 @@ def test_mcp_requires_endpoint_and_token_together(tmp_path, context):
 async def test_cli_session_rejection_is_classified_only_before_any_events(
     monkeypatch, tmp_path, events, error, unavailable,
 ):
-    from app.domain.models import SessionUnavailable
-
     class Process:
         returncode = 1
 
@@ -163,9 +154,6 @@ async def test_cli_session_rejection_is_classified_only_before_any_events(
 
 
 async def test_revision_deadline_cancels_the_whole_codex_process_group(monkeypatch, tmp_path):
-    import asyncio
-    import signal
-
     entered = asyncio.Event()
     stopped = []
     files = []

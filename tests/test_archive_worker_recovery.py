@@ -12,6 +12,7 @@ from app.contracts.protocol import (
     Assignment,
     InitialTask,
     ResultAccepted,
+    RevisionTask,
     Succeeded,
     parse_server_message,
     parse_worker_message,
@@ -30,7 +31,7 @@ from tests.test_archive_recovery import ready_archive, receive
 from tests.test_coordinator import coordinator
 from tests.test_merge import route_merge
 from tests.test_remote_e2e import QueueConnection, QueueSocket
-from tests.test_vcs import _git_fixture, _jj
+from tests.test_vcs import _git_fixture
 from tests.test_worker_executor import RecordingAgent, RecordingToolCaller
 from tests.test_workflow_transactions import accepted_coding
 
@@ -93,23 +94,13 @@ async def connect_once(store, subject, executor, journal, *, drop_ack=False, cli
 
 @pytest.mark.parametrize("window", ["before-received", "before-delete", "after-delete",
                                    "terminal", "pending", "ack", "started-lost", "result-started-lost"])
-@pytest.mark.parametrize("backend", ["git", pytest.param("jj", marks=pytest.mark.skipif(
-    shutil.which("jj") is None, reason="jj is not installed",
-))])
 async def test_original_worker_recovers_cleanup_and_replays_without_redeleting(
-    store, tmp_path, monkeypatch, window, backend, recording_resources,
+    store, tmp_path, monkeypatch, window, recording_resources,
 ):
     flow, job, task, subject = await ready_archive(
         store, start=window not in {"before-received", "started-lost", "result-started-lost"},
     )
     seed, _ = _git_fixture(tmp_path)
-    if backend == "jj":
-        import os
-
-        config = tmp_path / "jj-config.toml"
-        config.write_text('[user]\nname="Archive Test"\nemail="archive@example.test"\n')
-        await _jj("git", "init", "--colocate", cwd=seed,
-                  env={**os.environ, "JJ_CONFIG": str(config)})
     root = tmp_path / "worker"
     managed_seed = root / "repos/owner/repo"
     managed_seed.parent.mkdir(parents=True)
@@ -184,12 +175,8 @@ async def test_original_worker_recovers_cleanup_and_replays_without_redeleting(
 async def test_merge_recovery_preserves_coding_completion_and_root_provenance(
     store, tmp_path, window, recording_resources,
 ):
-    old, result = accepted_coding(store, receive=False)
+    old, result = accepted_coding(store, receive=False, started=window != "unstarted-rejected")
     flow = store.get_flow(old.flow_id)
-    if window == "unstarted-rejected":
-        # Recreate the fixture's delivery before Started, while retaining its frozen context.
-        with store.connection() as connection:
-            connection.execute("UPDATE jobs SET started_at=NULL WHERE id=%s", (old.id,))
     await route_merge(store, flow)
     archive_id = store.list_jobs(flow.id)[-1].id
     seed, _ = _git_fixture(tmp_path)
@@ -200,9 +187,7 @@ async def test_merge_recovery_preserves_coding_completion_and_root_provenance(
     repo = await prepare_flow_repo(managed_seed, flow.id)
     journal = WorkerSession(root)
     assignment = Assignment(job_id=old.id, flow_id=flow.id, assignment_token=old.assignment_token,
-        connection_epoch="epoch-a", task=InitialTask(flow_id=flow.id,
-            attempt_id=flow.current_attempt_id, repo=flow.repo, repo_identity="worker-a:" + flow.repo,
-            issue_number=flow.issue_number, issue_title="Issue", issue_body="", branch=f"flow/{flow.id}"))
+        connection_epoch="epoch-a", task=RevisionTask.model_validate(old.payload["revision"]))
     journal.record_received(assignment)
     executor = WorkerExecutor(root, RecordingAgent(), worker_id="worker-a",
                               session=journal)

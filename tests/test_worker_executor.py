@@ -11,18 +11,15 @@ from app.contracts.protocol import (
     InitialTaskResult,
     PushSecret,
 )
-from app.domain.delivery_models import OpenedDelivery
+from app.domain.delivery_models import PreparedDelivery
 from app.domain.models import (
     CodingExecutionResult,
     InitialCodingOutput,
-    TriageVerdict,
     VcsKind,
     VcsOutcome,
-    Verdict,
 )
 from app.worker.execution.executor import WorkerExecutor
 from app.worker.state.session import WorkerSession
-from tests.review_memory import judge_decision
 
 
 class RecordingAgent:
@@ -39,7 +36,7 @@ class RecordingAgent:
                 }, json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
                     "name": "open_pr", "arguments": {"title": "Implement", "body": "Done"},
                 }})
-                assert response.json()["result"]["structuredContent"]["pr_number"] == 17
+                assert response.json()["result"]["structuredContent"]["status"] == "prepared"
         return CodingExecutionResult(
             session_id="session-1",
             last_message=InitialCodingOutput(
@@ -57,13 +54,6 @@ class RecordingAgent:
         )
 
 
-class RecordingJudge:
-    async def triage(self, context):
-        return judge_decision(
-            TriageVerdict(verdict=Verdict.REVISE, confidence=0.9, instruction="Fix it"), context,
-        )
-
-
 class BackendlessAgent(RecordingAgent):
     async def start(self, task: str, cwd: Path, *, output_schema=None, context=None) -> CodingExecutionResult:
         return CodingExecutionResult(
@@ -78,7 +68,7 @@ class RecordingToolCaller:
         assert name == "flow.open_pr"
         assert call_id
         assert vcs_outcome.commit_sha == "abc"
-        return OpenedDelivery(pr_number=17, url="https://github.com/owner/repo/pull/17", head_sha="abc", delivery_version=1)
+        return PreparedDelivery(head_sha="abc", delivery_version=1)
 
 
 def assignment_secret() -> AssignmentSecret:
@@ -89,29 +79,6 @@ def assignment_secret() -> AssignmentSecret:
             expires_at=datetime.now(UTC) + timedelta(minutes=5),
         )
     )
-
-
-@pytest.mark.asyncio
-async def test_initial_with_delivery_channel_requires_push_capability(tmp_path: Path) -> None:
-    executor = WorkerExecutor(
-        tmp_path, RecordingAgent(), worker_id="worker-1", session=WorkerSession(tmp_path)
-    )
-
-    result = await executor.execute(
-        InitialTask(
-            flow_id=3,
-            attempt_id=1,
-            repo="owner/repo", repo_identity="worker-1:owner/repo",
-            issue_number=8,
-            issue_title="Issue",
-            issue_body="Body",
-            branch="flow/3",
-        ), tool_caller=RecordingToolCaller()
-    )
-
-    assert isinstance(result, InitialTaskResult)
-    assert result.failure_stage == "capability"
-    assert result.failure_detail == "push capability is missing"
 
 
 @pytest.mark.asyncio

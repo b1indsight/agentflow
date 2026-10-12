@@ -3,7 +3,6 @@ from typing import Any, cast
 
 import pytest
 
-from app.contracts.protocol import PROTOCOL_VERSION
 from app.control.service import ControlService
 from app.domain.models import (
     DeliveryState,
@@ -13,9 +12,6 @@ from app.domain.models import (
     Job,
     JobKind,
     JobState,
-    WorkerRecord,
-    WorkerStatus,
-    utcnow,
 )
 from app.persistence.store import Store
 from tests.result_memory import MemoryStops
@@ -105,39 +101,3 @@ def test_merged_terminal_flow_requires_manual_archive_reconciliation() -> None:
 
     assert store.flow.state is FlowState.FAILED
     assert store.enqueued == []
-
-
-def test_list_workers_aggregates_current_flow() -> None:
-    now = utcnow()
-    worker = WorkerRecord(
-        worker_id="worker-a",
-        protocol_version=PROTOCOL_VERSION,
-        status=WorkerStatus.BUSY,
-        current_job_id=9,
-        first_connected_at=now,
-        last_connected_at=now,
-        last_seen_at=now,
-    )
-    job = Job(id=9, flow_id=3, kind=JobKind.INITIAL, state=JobState.RUNNING)
-    store = SimpleWorkerStore(worker, job)
-
-    views = ControlService(cast(Store, cast(Any, store))).list_workers()
-
-    assert views[0].worker_id == "worker-a"
-    assert views[0].current_job_id == 9
-    assert views[0].current_flow_id == 3
-
-
-class SimpleWorkerStore:
-    def __init__(self, worker: WorkerRecord, job: Job) -> None:
-        self.worker = worker
-        self.job = job
-
-    def list_workers(self) -> list[WorkerRecord]:
-        return [self.worker]
-
-    def get_job(self, job_id: int) -> Job | None:
-        return self.job if job_id == self.job.id else None
-
-    def get_worker_execution(self, worker_id: str):
-        return None

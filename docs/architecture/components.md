@@ -8,13 +8,15 @@
 `persistence/` 拥有 SQL 和事务，`github/` 拥有资源、远端查询数据、绑定配置及其 GitHub SDK/GraphQL 操作，两者不反向依赖编排层。
 领域容器、合同和仓储直接引用同一个资源模型；公开事实可以离线恢复，SDK/认证只在实际操作时加载。
 `control/` 组合仓储、GitHub、协议与插件，负责工作流、Judge 决策和外部副作用；`worker/` 组合协议、CodingAgent
-执行器及 VCS，不加载 control、数据库或 GitHub SDK 实现。配置与 CLI 保留原入口。
+执行器及 VCS，不加载 control、数据库或 GitHub SDK 实现。轻量或通常会使用的依赖在模块级导入；
+局部导入仅用于实际循环或依赖隔离。CLI 的 uvicorn、领域类型和离线 GitHub 资源直接导入，
+控制端运行时、数据库与配置实例化仍归对应命令；加载 CLI 不提前加载 SQL、SDK 或控制端。
 
 `telemetry/logging.py` 只提供通用日志配置；`telemetry/metrics.py` 由控制端使用，并调用
 `persistence/metrics_store.py` 读取数据库指标。两者不在包入口集中导出，避免 worker 经日志导入 SQL。
 GitHub 错误分类和 Retry-After 计时由 `github/errors.py` 提供，仓储通过 `app.github` 复用纯计算，
 不会初始化 SDK。`domain/project_models.py` 只保留业务目标状态，GitHub Project 绑定配置及远端目标数据归 `github/projects.py`。
-职责边界由 `tests/test_boundaries.py` 检查，另以独立解释器验证 worker 启动的传递导入。
+职责边界由 `tests/test_boundaries.py` 检查，另以独立解释器验证 worker 启动、实际 CLI 入口和资源 JSON 恢复的传递导入。
 
 目录列表见[当前目录](roadmap.md#8-当前目录与里程碑)。Judge 内部子进程入口为
 `app.control.judge_runner`；对外 CLI、`app.control.api` 和 `app.live_smoke` 入口保持不变。
@@ -71,6 +73,8 @@ Review:   settle → READY → PROCESSING → COMPLETED / WAITING
 并按 job ID 调用 `ResultApplication`，由后者读取并校验已持久接收的 result，
 冻结一次结果的领域变更和 GitHub 操作，
 由 `ResultEffects` 查询/执行远端操作并保存回执，最后一起提交本地状态和结果确认。
+PR 依赖操作与 INITIAL 提交复用 `contracts.result_models.unique_pull_request_receipt`，
+只消费已读取的唯一创建回执；退休恢复缺少唯一回执时继续等待，不提交本地完成状态。
 `ResultApplication` 同时拥有逐 job 锁、有界分页和固定并发恢复；Runtime 调度其恢复方法，
 Gateway 持久接收后经 coordinator 调用同一个结果入口，核验提交完成后才发送 ACK。
 网络请求不占用数据库事务；plugin hook 在提交后调用，不具备持久化投递保证。worker 不能直接更新这些状态。

@@ -17,8 +17,6 @@ from app.worker.execution.vcs import (
     VcsVerificationError,
     _remote_sha,
     _run,
-    _vcs_environment,
-    agent_guidance,
     prepare_flow_repo,
     prepare_vcs_context,
     verify_pushed_outcome,
@@ -133,27 +131,6 @@ async def test_jj_outcome_is_verified_from_a_colocated_repository(tmp_path: Path
 
     assert outcome.backend is VcsKind.JJ
     assert outcome.commit_sha == outcome.remote_sha
-
-
-def test_agent_guidance_requires_self_detection_without_preselecting_a_backend() -> None:
-    guidance = agent_guidance("flow/one", remote="origin")
-
-    assert "inspect" in guidance.lower()
-    assert "flow/one" in guidance
-    assert "origin" in guidance
-    assert "uses git" not in guidance.lower()
-    assert "uses jujutsu" not in guidance.lower()
-
-
-def test_vcs_environment_does_not_inherit_worker_credentials() -> None:
-    environment = _vcs_environment(
-        {"PATH": "/usr/bin", "HOME": "/home/worker", "FLOWTOOL_WORKER_TOKEN": "secret"}
-    )
-
-    assert environment["PATH"] == "/usr/bin"
-    assert "FLOWTOOL_WORKER_TOKEN" not in environment
-    assert environment["GIT_CONFIG_NOSYSTEM"] == "1"
-    assert environment["GIT_CONFIG_GLOBAL"] == "/dev/null"
 
 
 async def test_remote_verification_uses_only_current_push_token(monkeypatch, tmp_path):

@@ -1,151 +1,68 @@
-# 全仓库职责与证据契约收敛 — Feature record
+# 仓库职责与写入证据收敛
 
-**Stage:** Planning，待用户批准，尚未修改实现或测试。
-**Bookmark:** `refactor/repository-ownership-convergence`
-**PR:** [#80](https://github.com/b1indsight/agentflow/pull/80)。
-**基线:** `main` / `3c7e39a566417270fdf82b49fba5a125eaee81f0`（已合并 #79），2026-10-12。
+**PR:** [#80](https://github.com/b1indsight/agentflow/pull/80) · **Bookmark:** `refactor/repository-ownership-convergence`
+**基线:** `main` / `3c7e39a5`（#79） · **状态:** 已实现，测试复查修正与本地验证完成；外部 API 契约未明确的场景继续保留。
 
-## 1. Initial plan
+## 已批准范围
 
-### 背景与目标
+2026-10-12，按用户要求审计全仓库，处理实际重复的规则、无效合同与越界导入：
 
-用户要求沿用 10 月 11–12 日的重构思路优化整个仓库：减少重复模型和入口，
-让状态与操作有明确归属，分开单次查询、编排和恢复。本轮检查 control、GitHub、
-domain/contracts、worker、持久层与 CLI，并对照实际调用者、相关测试及既有设计记录。
+- [GitHub 错误](../../app/github/errors.py)：拒绝判定使用未发送或真实 HTTP 拒绝证据；
+  HTTP 4xx 排除 408，GraphQL HTTP 200 的部分失败保持写入不确定，诊断状态码不证明未写入。
+- [结果合同](../../app/contracts/result_models.py)：三处共用唯一 PR 创建回执规则；
+  retired 将缺失/重复转为 `ResultPending`，正常执行与 INITIAL 提交仍拒绝非唯一回执。
+- [启动恢复](../../app/control/runtime.py)：删除恒为零的返回计数及不可达日志，实际 sweep 保留统计。
+- [任务合同](../../app/contracts/protocol.py)：删除单一子类的 `ReviewTask`，保留字段顺序与 Flow 身份校验。
+- [CLI](../../app/cli.py)：控制端依赖归对应命令，worker 入口加载时不提前导入控制端。
 
-审计发现的修改集中在五处：写入拒绝证据有两种解释；PR 创建回执的唯一性规则重复三次；
-启动恢复仍返回无意义的计数；任务合同留有单一子类的中间模型；CLI 导入越过运行边界。
-这些问题可以复用现有模块处理，不需要再拆服务或引入通用框架。
+保持数据库 schema、协议、持久 JSON、CLI 签名及重试规则；继续由既有模块拥有事务、查询和恢复。
 
-目标是删除实际重复的概念和分支，同时让副作用恢复依赖明确的远端证据。
-本轮是全仓库审计后选出的具体改动集合；未发现问题的模块不为覆盖目录而修改。
+## 2026-10-12 — 实施与行为证据
 
-### 拟议行为与验收条件
+五项变更已实现。历史写入不确定性不会被后续读取拒绝清除，持久提交边界保持原有归属。
+验证复用既有 SDK、Projects、结果恢复、启动恢复和进程导入测试：
 
-1. 写入是否明确拒绝由 GitHub 错误模型统一表达。HTTP 200 的 GraphQL 部分失败
-   保持写入不确定；错误类别、用于诊断的状态码和未写入证据分别承担各自作用。
-2. 三个调用者共用唯一 PR 创建回执规则；缺失或重复回执仍拒绝提交，恢复等待语义保留。
-3. 启动恢复只记录离线及恢复期限；实际 sweep 才返回重排、失败计数。
-4. `RevisionTask` 直接拥有其全部字段；Assignment 的 Flow 身份校验直接利用已限定的任务联合。
-5. 实际 CLI 入口可加载 worker 命令而不提前导入 control、数据库和 GitHub SDK。
+- 原实现的 GraphQL 部分写入用例失败；修复后通过，真实 HTTP 拒绝仍可重试。
+- 任务 JSON Schema、字段顺序与实际序列化对照一致；三种任务均拒绝不匹配 Flow。
+- PostgreSQL 全量测试 900 passed；Ruff、Mypy（165 个文件）、构建与差异检查通过。
+- 消融只恢复旧状态码推断：同组 6 项中 2 failed / 4 passed；当前实现 6 passed。
+  保留证据来源判定；其他改动删除既有层次，无新增恢复机制需要消融。
 
-验收报告列出删除的概念、生产代码净变化及行为验证。数据库 schema、协议版本、
-持久 JSON、任务字段顺序、命令签名和既有重试时间规则继续使用现有契约。
+## 2026-10-13 — 按总维护成本精简
 
-### 技术设计与模块归属
+用户指出简化 PR 净增 277 行，要求修正。压缩重复的设计说明和过程记录，保留范围、行为约束及验证证据；
+删除 INITIAL 缺失/重复回执的独立参数组，retired 保留缺失回执等待、恢复后不重发；继续保留写入误判和导入边界回归。
 
-#### A. GitHub 错误保留证据来源，调用层共用拒绝判定
+本轮 PostgreSQL 全量测试 897 passed；Ruff、Mypy（165 个文件）、包构建及差异检查通过。本轮只缩减文档、注释与测试，无新增运行机制。
 
-当前 [错误转换与判定](../../app/github/errors.py) 把 GraphQL 业务错误映射为诊断状态码，
-`definitely_rejected` 又依据状态码推断本次请求未生效；[Projects](../../app/control/projects.py)
-另外使用 `definitely_unsent or request_rejected`。已有
-[真实 SDK 部分 mutation 用例](../../tests/test_github_projects.py) 模拟 HTTP 200 同时返回新增 item 和 FORBIDDEN。
+## 2026-10-13 — 清理既有测试
 
-- `request_error()` 从 SDK 原始 HTTP 响应设置 `request_rejected`，按现有 Effects 策略
-  接受真实 4xx 拒绝，排除 408；该字段表示传输事实，不从业务错误类别反推。
-- `GitHubError.definitely_rejected` 统一使用 `definitely_unsent or request_rejected`。
-  GraphQL 200 的合成 403/404/429 继续用于分类和诊断，不设置真实 HTTP 拒绝事实。
-- Projects 改用同一属性；Effects、Coordinator 保持使用既有属性。
-- 保留 [Effects](../../app/control/effects.py) 中历史 `uncertain` 判断与
-  `definite_rejection and not uncertain`，后续读取失败不能清除之前的写入不确定性。
-  [ResultStore](../../app/persistence/result_store.py) 的持久提交边界不移动。
-- 测试替身手造真实 HTTP 错误时显式提供拒绝证据，避免只靠状态码猜测来源。
+按用户要求审查旧测试，删除 7 个完整用例、1 个重复参数及未使用的 `RecordingJudge`：基础模型解析、限流/重启、空修订、共享 Store 和工具调用的重复覆盖。
+保留真实 SDK、完整重启恢复、修订结果重放、双 Store 并发及 Gateway/Client E2E；严格 schema 与不同失败路径继续各自验证。
 
-#### B. 唯一 PR 创建回执规则归现有结果合同
+本轮 PostgreSQL 全量测试 889 passed；Ruff、Mypy、包构建和差异检查通过。只清理测试，无新增生产机制需要消融。
 
-[Effects](../../app/control/effects.py) 的 retired 恢复、正常 PR 依赖通知，以及
-[Results](../../app/control/results.py) 的 INITIAL 提交各自筛选回执并检查唯一性。
-在已有 [result_models](../../app/contracts/result_models.py) 增加一个小的具名选择函数，
-接收已读取的 `EffectRecord` 集合并返回唯一 `PullRequest`，删除三份相同筛选规则。
+## 2026-10-13 — 全量测试必要性审查
 
-函数不查询数据库、不绑定资源、不执行 I/O。缺失或重复回执以 `ValueError` 表示；
-retired 调用边界转换为 `ResultPending`，保持稍后恢复。正常调用保留契约破坏的错误类别；
-INITIAL 仍在事务内读取回执。若传入集合已经过时，不通过额外查询掩盖调用契约。
+按用户要求逐项审查 71 个测试文件、556 个函数、889 个参数实例；每项记录触发条件、生产入口和保留/删除理由。
+删除 160 个原实例，既有边界断言展开增加 1 个实例，最终 510 个函数、730 个实例；运维脚本、告警与渲染验证也逐项审查。
+删除原子提交已排除的残缺状态、无实际消费者的并发调用、不可变归档身份篡改及重复矩阵；断线、超时、事务失败、重启重放等真实风险保留。
+有效恢复测试的夹具改用真实 REVISION、PreparedDelivery 和已接收结果，不再借用当前 worker 无法产出的 INITIAL 成功状态。
+本轮取代先前保留 retired 缺失回执用例的决定：本地写入证据与回执原子提交，单独删除回执没有当前生产入口。
+完整逐项审查表与原始/最终收集清单保存于本地忽略目录 `.cache/2026-10-12/test-necessity/`，不增加仓库维护文件。
+本轮 PostgreSQL 全量测试 730 passed、无跳过；Ruff、Mypy（165 个文件）、包构建与差异检查通过。未新增生产机制，无新增消融项。
 
-#### C. 启动恢复删除恒为零的返回和无效日志
+## 2026-10-13 — 交叉复查后的覆盖修正
 
-[Store.recover_abandoned_assignments](../../app/persistence/store.py) 只标记离线和恢复期限，
-始终返回 `(0, 0)`；[ControlRuntime.startup](../../app/control/runtime.py) 据此记录的统计日志永不触发。
-方法返回 `None`，runtime 直接调用，删除无效解包和日志分支。
-现有启动恢复测试断言持久状态，去除旧零计数断言。
-`sweep_expired_assignments()` 的真实统计及日志保持原有归属。
+复查修正上轮 INITIAL 只能首次执行的判断：完成 OPEN PR 后取消并重试，可以保留 attempt/delivery 再派 INITIAL；新 worker 从 seed A 检出已有后代 H，可以返回 OpenedDelivery。补回回执 wire、重试期间合并后的成功/失败结果，以及重新绑定前合并时禁止接管归档的代表；两种恢复场景共用首次 INITIAL 完成夹具。GraphQL 按 thread ID 读取也可观察仓库改名，增加一个真实身份漂移参数。
+删除三个 attempt 替换参数、head-only foreign/lineage 参数、终端 cleanup/nonce 变造断言及不受支持的旧 schema 迁移测试。真实 webhook 并发 receive 保留；单 consumer claim、串行重启 settle 与 blocked 队首按实际入口验证，后者并入既有 poison/retry 用例。issue 争锁改用 webhook trigger 与独立 CLI retry 两入口。
+ProjectSync 用真实取消验证版本/read/backoff/rollback/activation；不完整末页使用不可见 item，独立 job 失败使用 ACTIVE+MERGED 的 ARCHIVE Failed→retry。真实风险继续覆盖，虚构两个同步实例和旧 Flow 迟到 SUCCEEDED 删除。
+本轮删 8 个不可达实例，补回或替换 6 个真实路径实例，最终 510 个函数、728 个实例；原 889 实例最终删除 162 个，既有边界断言展开增加 1 个。15 项复查问题已落实，5 个外部契约缺充分依据的函数保留；最终映射及逐项理由在本地忽略目录 `.cache/2026-10-12/test-necessity/final-audit.csv`。
+PostgreSQL 全量 728 passed、无跳过；Ruff、Mypy（165 个文件）、sdist/wheel 构建和差异检查通过。仅修正测试，没有新增生产机制需要消融。
 
-#### D. 任务合同删除无独立消费者的中间层
+## 2026-10-13 — 按使用概率与成本整理导入
 
-[protocol](../../app/contracts/protocol.py) 的 `ReviewTask` 只有 `RevisionTask` 一个子类，
-没有独立消费者。将 `batch_id`、`attempt_id`、`feedback` 按原字段顺序直接声明在
-`RevisionTask(ProtocolModel)`，删除 `ReviewTask`。
-
-`Assignment.task` 已限定为 INITIAL/REVISION/ARCHIVE 联合，三种都拥有 `flow_id`。
-身份校验直接比较 `task.flow_id`，删除穷尽全部合法类型的 `isinstance` 分支。
-保留字段约束、错误文本、序列化顺序和 JSON Schema；不增加兼容别名或协议升级。
-
-#### E. CLI 导入按实际命令归属
-
-[CLI](../../app/cli.py) 是 `flowtool` 的实际入口，顶层导入 `Store`、`ControlService`、
-`archive_progress`，使 worker 命令提前加载 control 和 PostgreSQL 依赖。
-
-- Store 类型放在 `TYPE_CHECKING` 下；实际构造导入归 `_store()`。
-- ControlService 导入归 `workers()`、`flow_cancel()`、`flow_retry()`。
-- archive_progress 和 DeliveryState 导入归 `flow_show()`。
-- 保留同一个 Typer 入口；不新增 facade、装配参数或 CLI 模块。
-- 扩充现有 [进程导入边界用例](../../tests/test_boundaries.py)，覆盖 `import app.cli`。
-
-### 方案比较与保留的设计
-
-选择上述改动，是因为它们删除已有重复规则、无效合同或跨职责加载。
-只统一 Projects 的一行条件会混淆 GraphQL 部分失败的证据来源，因此先修正错误合同。
-PR 回执规则已出现三次且必须同步维护，具名函数比三份实现更简单；不为此新增服务。
-
-审计后保留以下设计：
-
-- WorkerSession 已统一任务状态、恢复和历史入口；拆开历史读取会反转
-  [既有归属](worker-session.md) 并增加装配参数。
-- ProjectItemsPage.complete 表示不可见内容对缺席证明的影响，不能仅因形状相似就替换为普通 Batch。
-- PushCapability/PushSecret、WorkerRecord/WorkerView 保留
-  [已有安全与展示边界](internal-contract-simplification.md)。
-- 资源的未观察字段保护不改成共用资源基类；符合
-  [不可变资源设计](github-capability-boundaries.md)，目前抽象收益不足。
-- 连接心跳、身份复查、双层超时和归档重校验分别保护实际边界；不按表面相似合并。
-- Store 不按文件长度拆分，SQL、事务和锁顺序继续归持久层；API Protocol 的实际测试替换边界保留。
-
-### 成本、风险与处理
-
-主要风险是把 GraphQL 部分写入误判为未写入，或让后续失败覆盖历史不确定性。
-使用原生 SDK MockTransport 与持久恢复用例验证这两种情况。真实 HTTP 4xx 的范围
-沿用既有 Effects 策略，Projects 同步采用该明确的请求证据规则。
-
-回执收拢可能把恢复等待变成永久失败；在调用边界保留错误类别与有用的诊断。
-任务继承精简可能改变字段顺序或 Schema；实现前后对照实际序列化与 schema。
-CLI 延迟导入可能影响测试补丁目标；检查真实命令与既有 `_store` 替换方式。
-上述修改不需要数据迁移或额外运行配置。
-
-### 实施顺序
-
-1. 固定当前任务 JSON/Schema 与恢复行为基线，修正拒绝证据来源并迁移 Projects 判定。
-2. 收拢唯一 PR 创建回执规则，保留 retired、正常执行和 INITIAL 提交的各自错误策略。
-3. 删除启动恢复无效返回，精简任务合同和穷尽类型分支。
-4. 收回 CLI 命令导入，复用现有边界用例覆盖实际入口。
-5. 更新受影响的当前架构说明与 changelog，检查 diff、完成验证与代码审查。
-
-### 验证与消融
-
-- 复用 GitHub SDK、Projects 同步、结果恢复、线程恢复、triage、INITIAL 交付及启动恢复测试。
-  关键场景为真实 HTTP 拒绝、408/超时、GraphQL 部分 mutation，以及先写入不确定再读取失败。
-- 回执复用现有 INITIAL 与 retired 路径；缺失/重复的同一规则只保留足以覆盖不同后果的用例。
-- 对照 `RevisionTask`、`Assignment` 的 JSON Schema 与序列化字段顺序；保留三种任务身份拒绝测试。
-- 扩充现有独立解释器导入边界用例，验证 `app.cli` 不加载 control/persistence/psycopg/githubkit/bub；
-  复用现有 CLI 命令行为测试。
-- 最终运行 PostgreSQL 全量 pytest、`uv run ruff check app tests`、`uv run mypy app tests`、
-  `uv build --no-sources` 与 `git diff --check`，依照 [CI](../../.github/workflows/ci.yml)。
-- 错误证据修正涉及恢复判断：实现后、自动代码审查前，在独立进程恢复旧的状态码推断，
-  同一 GraphQL 部分失败场景必须重新失败；脚本与输出置于本会话 `.cache/2026-10-12/`。
-  其余改动删除无效层次，不新增状态机制，不另造消融实验。
-
-### 未决问题与延后事项
-
-实施前需要用户明确批准上述范围；没有额外产品选择阻塞方案。
-本地 PostgreSQL 的运行状态与检查环境在实施时确认，不将旧计划报告视为本轮验证。
-真实 GitHub App 在线调用、数据库迁移、部署修改和新增运行功能不属于本轮范围。
-
-## 2. PR change timeline
+按用户要求，低成本或通常会使用的依赖直接导入：归档处理、API 默认 runtime 和 Judge 子进程依赖移到模块级；API 配置仍到创建 context 时实例化，Judge 保留 stdout→stderr 的输出隔离。CLI 直接加载 uvicorn、领域类型和离线 GitHub 资源，drain 复用既有 `store.stops`。
+测试的 199 处函数内导入全部提升并合并重复项；TYPE_CHECKING 与子解释器字符串不动，非导入 AST、断言及 728 个收集用例保持一致。生产与测试共消除 209 处函数内导入，保留 28 处有实际循环或 CLI/worker 角色隔离的入口；逐处依据和冷导入测量保存于 `.cache/2026-10-12/lazy-imports/`。
+复用现有恢复、SDK、进程与边界测试，不增加导入计数或实现镜像测试；无新增缓存、代理或包装层，无新增生产机制需要消融。
+PostgreSQL 全量 728 passed、无跳过；Ruff、Mypy（165 个文件）、sdist/wheel 构建与差异检查通过，独立数据库 schema 的 drain/undo 命令验证通过。

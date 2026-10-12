@@ -1377,7 +1377,7 @@ class Store:
         return result.rowcount == 1
 
 
-    def recover_abandoned_assignments(self) -> tuple[int, int]:
+    def recover_abandoned_assignments(self) -> None:
         """Mark persisted work recoverable without replaying or failing it at startup."""
 
         now = self._clock()
@@ -1396,7 +1396,6 @@ class Store:
                 " WHERE released_at IS NULL",
                 (now + self.recovery_grace,),
             )
-        return 0, 0
 
     def sweep_expired_assignments(self) -> tuple[int, int]:
         """Apply pure recovery decisions under the existing worker-first transaction fence."""

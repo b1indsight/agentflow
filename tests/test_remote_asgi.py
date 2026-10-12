@@ -1,3 +1,4 @@
+from threading import Event
 from types import SimpleNamespace
 
 from starlette.testclient import TestClient
@@ -94,8 +95,6 @@ class AsgiContext:
 
 
 def test_real_asgi_websocket_completes_a_postgresql_job(store: Store, monkeypatch) -> None:
-    from threading import Event
-
     disconnected = Event()
     handle = WorkerGateway.handle
 

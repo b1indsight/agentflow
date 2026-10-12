@@ -20,7 +20,9 @@ from pydantic import SecretStr
 from starlette.middleware.base import RequestResponseEndpoint
 
 from app.contracts.conversation import ConversationFailure, ConversationPage
+from app.control import config
 from app.control.conversation import ConversationService
+from app.control.runtime import ControlRuntime
 from app.persistence.webhook_store import DeliveryConflict
 from app.telemetry.metrics import Metrics
 
@@ -72,10 +74,7 @@ def _reject_json_constant(value: str) -> None:
 
 
 def _default_context() -> ApplicationContext:
-    from app.control.config import settings
-    from app.control.runtime import ControlRuntime
-
-    return ControlRuntime(settings)
+    return ControlRuntime(config.settings)
 
 
 async def _wait_for_disconnect(request: Request, cancel_scope: anyio.CancelScope) -> None:

@@ -7,19 +7,18 @@ import pytest
 from psycopg import sql
 from psycopg.conninfo import make_conninfo
 
+from app.github import Issue, PullRequest, Repository, ReviewThread
 from app.persistence.store import Store
+from tests.github import (
+    RecordingIssue,
+    RecordingPullRequest,
+    RecordingRepository,
+    RecordingReviewThread,
+)
 
 
 @pytest.fixture
 def recording_resources(monkeypatch: pytest.MonkeyPatch) -> None:
-    from app.github import Issue, PullRequest, Repository, ReviewThread
-    from tests.github import (
-        RecordingIssue,
-        RecordingPullRequest,
-        RecordingRepository,
-        RecordingReviewThread,
-    )
-
     monkeypatch.setattr(Repository, "refetch", RecordingRepository.refetch)
     monkeypatch.setattr(Repository, "fetch_ref", RecordingRepository.fetch_ref)
     monkeypatch.setattr(Repository, "compare_commits", RecordingRepository.compare_commits)

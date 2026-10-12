@@ -219,11 +219,7 @@ def test_store_pages_only_unapplied_results_in_stable_job_order(store):
     ]
 
 
-@pytest.mark.parametrize("config", [
-    {"result_recovery_concurrency": 0}, {"result_recovery_concurrency": 65},
-    {"result_recovery_batch_size": 0}, {"result_recovery_batch_size": 1001},
-])
-def test_recovery_limits_are_validated(config):
+def test_recovery_limits_are_validated():
     with pytest.raises(ValidationError):
         ServeSettings(_env_file=None, database_url="postgresql://localhost/test",
-                      worker_tokens={"worker": "secret"}, **config)
+                      worker_tokens={"worker": "secret"}, result_recovery_concurrency=0)

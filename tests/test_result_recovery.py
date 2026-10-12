@@ -1,4 +1,4 @@
-"""Failure injection at the remote-write and final-commit boundaries, without network or sleeps."""
+"""Failure injection at the remote-write and final-commit boundaries without network."""
 
 import asyncio
 from datetime import timedelta
@@ -6,16 +6,26 @@ from typing import cast
 
 import pytest
 
-from app.contracts.protocol import InitialTaskResult, Succeeded, terminal_digest
+from app.contracts.protocol import (
+    PROTOCOL_VERSION,
+    FlowToolRequest,
+    InitialTask,
+    InitialTaskResult,
+    RevisionExecutionRecord,
+    RevisionTaskResult,
+    Succeeded,
+    terminal_digest,
+)
 from app.contracts.result_models import EffectState, ResultPending
+from app.control.coordinator import JobCoordinator
 from app.control.service import ControlService
+from app.domain.delivery_models import OpenedDelivery
 from app.domain.models import (
-    Attempt,
     DeliveryState,
+    Flow,
     FlowDelivery,
     FlowState,
     FlowToolCall,
-    Job,
     JobKind,
     JobState,
     VcsKind,
@@ -24,43 +34,29 @@ from app.github import GitHubError, GitHubErrorKind, Issue, Repository
 from app.persistence.store import Store
 from tests.github import RecordingGitHub
 from tests.test_coordinator import MemoryStore, apply_result, coordinator
+from tests.test_merge import route_merge
+from tests.test_revision_delivery import revision_control as revision_control  # noqa: PLC0414
 
 
 @pytest.fixture
-async def scenario(recording_resources):
-    store = MemoryStore()
-    store.attempt = Attempt(id=1, flow_id=1, codex_session_id="session-1")
-    store.flow.current_attempt_id = 1
-    store.delivery = FlowDelivery(
-        flow_id=1,
-        branch="flow/1",
-        base_branch="trunk",
-        state=DeliveryState.OPEN,
-        pr_number=17,
+def scenario(revision_control):
+    store, github, job, _subject, task = revision_control
+    result = RevisionTaskResult(
+        flow_id=task.flow_id, attempt_id=task.attempt_id, batch_id=task.batch_id,
+        feedback_refs=list(task.feedback), previous_session_id=task.session_id,
+        session_id=task.session_id, session_generation=task.session_generation,
+        mode="resume", last_message="failed", exit_code=1,
+        invocations=[RevisionExecutionRecord(mode="resume", session_id=task.session_id, exit_code=1)],
     )
-    github = RecordingGitHub()
-    job = Job(id=6, flow_id=1, kind=JobKind.INITIAL, state=JobState.RUNNING)
-    result = InitialTaskResult(session_id=None, last_message="failed", exit_code=1)
     return store, github, job, result
-
-
-
-
-async def test_old_attempt_failure_does_not_publish_or_fail_current_attempt(scenario):
-    store, github, job, _ = scenario
-    job.kind = JobKind.REVISION
-    store.jobs[job.id] = job
-    store.attempt = Attempt(id=2, flow_id=1, codex_session_id="new-session")
-    store.flow.current_attempt_id = 2
-    await coordinator(store, github).fail(job, "Old worker failed")
-    assert github.comments == []
-    assert store.flow.state is FlowState.ACTIVE
 
 
 @pytest.fixture
 def initial_scenario(scenario):
     store, github, job, _ = scenario
+    github.pull_request = None
     job.kind = JobKind.INITIAL
+    store.jobs[job.id] = job.model_copy(deep=True)
     store.delivery = FlowDelivery(
         flow_id=1,
         branch="flow/1",
@@ -93,6 +89,91 @@ def initial_scenario(scenario):
         delivery_receipt=prepared,
     )
     return store, github, job, result
+
+
+@pytest.fixture
+async def completed_open_initial(
+    store: Store, recording_resources: None,
+) -> tuple[Flow, JobCoordinator, RecordingGitHub, FlowToolRequest, InitialTaskResult]:
+    """Complete a real INITIAL assignment before testing retries of its existing PR."""
+    flow = ControlService(store).on_trigger("owner/repo", 8, 42)
+    assert flow is not None
+    store.worker_connected("worker-a", PROTOCOL_VERSION, "epoch")
+    job = store.assign_job("worker-a", "token", "epoch")
+    assert job is not None
+    github = RecordingGitHub()
+    subject = coordinator(store, github)
+    task = await subject.prepare(job)
+    assert isinstance(task, InitialTask)
+    assert store.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
+    request = FlowToolRequest(
+        job_id=job.id, flow_id=flow.id, attempt_id=task.attempt_id,
+        assignment_token="token", connection_epoch="epoch", call_id="initial-open",
+        name="flow.open_pr", arguments={"title": "Title", "body": "Body"},
+        vcs_backend=VcsKind.GIT, branch=task.branch, commit_sha="abc123", remote_sha="abc123",
+    )
+    tool = await subject.execute_tool(request, worker_id="worker-a")
+    result = InitialTaskResult(
+        session_id="initial-session", last_message="done", exit_code=0,
+        vcs_backend=VcsKind.GIT, branch=task.branch, commit_sha="abc123", remote_sha="abc123",
+        pushed=True, open_pr_call_id="initial-open", delivery_receipt=tool.result,
+    )
+    terminal = Succeeded(job_id=job.id, assignment_token="token", connection_epoch="epoch", result=result)
+    assert store.record_assignment_result(job.id, "worker-a", "token", "epoch",
+        terminal.model_dump(mode="json"), terminal_digest(terminal)) == "pending"
+    assert await subject.results.apply(job.id) is JobState.DONE
+    completed = store.get_flow(flow.id)
+    assert completed is not None
+    return completed, subject, github, request, result
+
+
+@pytest.mark.parametrize("exit_code", [0, 1])
+async def test_merged_initial_retry_keeps_execution_facts_without_reopening(
+    store, completed_open_initial, exit_code,
+):
+    # A cancelled completed INITIAL can retry against its still-open PR, which a human can merge.
+    flow, subject, github, initial_request, initial_result = completed_open_initial
+    service = ControlService(store)
+    service.cancel(flow)
+    service.retry(flow)
+    # Fresh worker-b starts from seed A, then checks out existing H where H descends A and H != A.
+    store.worker_connected("worker-b", PROTOCOL_VERSION, "epoch-b")
+    job = store.assign_job("worker-b", "retry-token", "epoch-b")
+    assert job is not None and job.kind is JobKind.INITIAL
+    task = await subject.prepare(job)
+    assert isinstance(task, InitialTask) and task.attempt_id == flow.current_attempt_id
+    assert task.branch == initial_request.branch
+    assert task.repo_identity == "worker-b:owner/repo"
+    assert store.start_assignment(job.id, task.attempt_id, "worker-b", "retry-token", "epoch-b")
+    tool = await subject.execute_tool(initial_request.model_copy(update={
+        "job_id": job.id, "assignment_token": "retry-token", "connection_epoch": "epoch-b",
+        "call_id": "retry-open",
+    }), worker_id="worker-b")
+    assert isinstance(tool.result, OpenedDelivery)
+    call = store.get_tool_call("retry-open")
+    assert call is not None and call.job_id == job.id and call.response == tool.result
+    await route_merge(store, flow)
+    merged = store.get_delivery(flow.id)
+    assert merged is not None and merged.state is DeliveryState.MERGED
+    if exit_code == 0:
+        result = initial_result.model_copy(update={
+            "session_id": "retry-session", "open_pr_call_id": "retry-open", "delivery_receipt": tool.result,
+        })
+    else:
+        result = InitialTaskResult(session_id="retry-session", last_message="failed", exit_code=exit_code)
+    terminal = Succeeded(job_id=job.id, assignment_token="retry-token", connection_epoch="epoch-b", result=result)
+    digest = terminal_digest(terminal)
+    assert store.record_assignment_result(job.id, "worker-b", "retry-token", "epoch-b",
+        terminal.model_dump(mode="json"), digest) == "pending"
+    expected = JobState.DONE if exit_code == 0 else JobState.FAILED
+    assert await subject.results.apply(job.id) is expected
+    assert store.get_delivery(flow.id) == merged
+    assert store.get_flow(flow.id).state is FlowState.ACTIVE
+    assert store.get_attempt(task.attempt_id).codex_session_id == "initial-session"
+    accepted = store.get_job(job.id)
+    assert accepted.result_digest == digest and accepted.result_applied_at is not None
+    assert accepted.result_payload == terminal.model_dump(mode="json")
+    assert github.opened == [task.branch]
 
 
 async def test_cancel_before_terminal_keeps_executor_slot_until_result_ack(scenario):
@@ -132,7 +213,8 @@ async def test_initial_delivery_commits_only_after_all_required_effects(
     async def add_label(issue, label):
         if limited:
             limited.pop()
-            raise GitHubError(GitHubErrorKind.RATE_LIMITED, "add_label", status_code=429)
+            raise GitHubError(GitHubErrorKind.RATE_LIMITED, "add_label", status_code=429,
+                              request_rejected=True)
         await original(issue, label)
 
     monkeypatch.setattr(Issue, "add_label", add_label)
@@ -151,24 +233,6 @@ async def test_initial_delivery_commits_only_after_all_required_effects(
     assert persisted.result_digest == accepted.result_digest
     assert persisted.result_received_at == accepted.result_received_at
     assert store.jobs[job.id].result_applied_at is not None
-
-
-async def test_initial_delivery_records_closed_pr_without_reopening(initial_scenario) -> None:
-    from app.github import PullRequest
-
-    store, github, job, result = initial_scenario
-    github.pull_request = PullRequest(
-        number=17,
-        state="closed",
-        head_branch="flow/1",
-        head_sha="abc123",
-        base_branch="trunk",
-    )
-    state = await apply_result(coordinator(store, github), job, result)
-    assert state is JobState.DONE
-    assert store.flow.state is FlowState.ACTIVE
-    assert store.delivery.state is DeliveryState.CLOSED and store.delivery.pr_number == 17
-    assert github.opened == github.labels == github.review_requests == []
 
 
 async def test_closed_pr_after_lost_creation_response_finishes_without_new_writes(
@@ -219,32 +283,6 @@ async def test_remote_comment_is_recovered_after_response_loss(scenario, monkeyp
         ("find_comment", 42, "owner/repo", 17), ("comment", 42, "owner/repo", 17),
         ("find_comment", 42, "owner/repo", 17),
     ]
-
-
-@pytest.mark.parametrize("exit_code", [0, 1])
-async def test_merged_initial_result_keeps_execution_facts_without_reopening(initial_scenario, exit_code):
-    # The human merged the PR opened by flow.open_pr before INITIAL returned its final result.
-    store, github, job, result = initial_scenario
-    store.delivery.state = DeliveryState.MERGED
-    store.delivery.pr_number = 17
-    store.delivery.version += 1
-    result = result.model_copy(update={"exit_code": exit_code})
-    subject = coordinator(store, github)
-    await apply_result(subject, job, result)
-    accepted = store.get_job(job.id)
-    await apply_result(subject, job, result)
-    assert store.flow.state is FlowState.ACTIVE
-    assert store.delivery.state is DeliveryState.MERGED
-    assert store.execution.released_at is None
-    persisted = store.get_job(job.id)
-    terminal = Succeeded.model_validate(persisted.result_payload)
-    assert terminal.result == result
-    assert persisted.result_digest == terminal_digest(terminal)
-    assert persisted.result_received_at == accepted.result_received_at
-    assert persisted.result_applied_at == accepted.result_applied_at
-    assert store.attempt.codex_session_id == "session-1"
-    assert github.comments == []
-    assert store.results.list_effects(job.id) == []
 
 
 async def test_merge_during_comment_lookup_prevents_dispatch(scenario, monkeypatch):
@@ -384,14 +422,19 @@ async def test_concurrent_application_has_one_remote_sender(scenario, monkeypatc
         return comment_id
 
     monkeypatch.setattr(Issue, "comment", delayed_comment)
-    first = asyncio.create_task(apply_result(coordinator(store, github), job, result))
+    subject = coordinator(store, github)
+    first = asyncio.create_task(apply_result(subject, job, result))
+    second = None
     try:
         await asyncio.wait_for(started.wait(), timeout=1)
-        with pytest.raises(ResultPending):
-            await apply_result(coordinator(store, github), job, result)
+        second = asyncio.create_task(subject.results.apply(job.id))
+        await asyncio.sleep(0)
+        assert not second.done()
     finally:
         release.set()
         await first
+        if second is not None:
+            await second
     assert len(github.comments) == 1 and store.enqueued == []
 
 
@@ -432,6 +475,7 @@ async def test_rate_limit_waits_then_retries_a_definitely_rejected_request(
                 "comment",
                 status_code=429,
                 retry_after="60",
+                request_rejected=True,
             )
         return await original(issue, body)
 

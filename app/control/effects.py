@@ -17,6 +17,7 @@ from app.contracts.result_models import (
     ResultPlan,
     ReviewersEffect,
     ThreadReplyEffect,
+    unique_pull_request_receipt,
 )
 from app.control.archive import verify_archive
 from app.control.lifecycle import (
@@ -233,11 +234,10 @@ class ResultEffects:
                                  pending_reason="PR merged; observed thread without resolving")
         number = effect.number
         if number == "created_pr":
-            created = [r.receipt.pull_request for r in records
-                       if r.receipt is not None and r.receipt.pull_request is not None]
-            if len(created) != 1:
-                raise ResultPending("merged PR notification awaits its creation receipt")
-            number = created[0].number
+            try:
+                number = unique_pull_request_receipt(records).number
+            except ValueError as error:
+                raise ResultPending(str(error)) from error
         if isinstance(effect, LabelEffect):
             await Issue(repository, number).fetch_labels()
         else:
@@ -320,16 +320,7 @@ class ResultEffects:
                         or not await revision_current(repository, plan, number)):
                     return EffectReceipt(pending_reason="仍有未决反馈或 PR 已变化，暂停 re-review")
             if number == "created_pr":
-                receipts = [
-                    r.receipt.pull_request
-                    for r in records
-                    if r.receipt is not None and r.receipt.pull_request is not None
-                ]
-                if len(receipts) != 1:
-                    raise ValueError(
-                        "PR-dependent effect requires exactly one persisted PR receipt"
-                    )
-                number = receipts[0].number
+                number = unique_pull_request_receipt(records).number
             if isinstance(effect, LabelEffect):
                 issue = Issue(repository, number)
                 labels = {label.casefold() for label in await issue.fetch_labels()}

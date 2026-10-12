@@ -64,12 +64,6 @@ class ConversationResult(Message):
         return self
 
 
-class ReviewTask(ProtocolModel):
-    batch_id: int = Field(gt=0)
-    attempt_id: int
-    feedback: list[ReviewFeedback]
-
-
 class InitialTask(ProtocolModel):
     kind: Literal["initial"] = "initial"
     flow_id: int = Field(gt=0)
@@ -100,7 +94,10 @@ class AssignmentSecret(ProtocolModel):
     push: PushSecret
 
 
-class RevisionTask(ReviewTask):
+class RevisionTask(ProtocolModel):
+    batch_id: int = Field(gt=0)
+    attempt_id: int
+    feedback: list[ReviewFeedback]
     kind: Literal["revision"] = "revision"
     flow_id: int = Field(gt=0)
     repo: str
@@ -319,8 +316,7 @@ class Assignment(Message):
 
     @model_validator(mode="after")
     def _flow_identity(self) -> Assignment:
-        if (isinstance(self.task, (InitialTask, RevisionTask, ArchiveTask))
-                and self.task.flow_id != self.flow_id):
+        if self.task.flow_id != self.flow_id:
             raise ValueError("assignment and task belong to different Flows")
         return self
 

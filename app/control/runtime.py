@@ -85,13 +85,7 @@ class ControlRuntime:
     def startup(self) -> None:
         self.store.init_db()
         self.store.results.recover_claims()
-        requeued, failed = self.store.recover_abandoned_assignments()
-        if requeued or failed:
-            logger.warning(
-                "recovered abandoned assignments: {} requeued, {} failed closed",
-                requeued,
-                failed,
-            )
+        self.store.recover_abandoned_assignments()
         self._tasks = [
             asyncio.create_task(self.webhooks.run()),
             asyncio.create_task(self.project_sync.run()),

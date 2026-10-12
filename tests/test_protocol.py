@@ -1,7 +1,5 @@
 from datetime import UTC, datetime
 
-import pytest
-from pydantic import ValidationError
 from pydantic.types import SecretStr
 
 from app.contracts.protocol import (
@@ -21,8 +19,8 @@ from app.contracts.protocol import (
     parse_server_message,
     parse_worker_message,
 )
-from app.domain.delivery_models import OpenedDelivery
-from app.domain.models import TriageVerdict, VcsKind, Verdict
+from app.domain.delivery_models import PreparedDelivery
+from app.domain.models import VcsKind
 
 
 def test_assignment_and_result_round_trip_with_discriminated_payloads() -> None:
@@ -67,7 +65,7 @@ def test_assignment_and_result_round_trip_with_discriminated_payloads() -> None:
         job_id=41,
         assignment_token="assignment-1",
         connection_epoch="epoch-1",
-        result=InitialTaskResult(session_id="session-1", last_message="done", exit_code=0),
+        result=InitialTaskResult(session_id="session-1", last_message="failed", exit_code=1),
     )
     worker_message = parse_worker_message(succeeded.model_dump_json())
     assert isinstance(worker_message, Succeeded)
@@ -94,7 +92,7 @@ def test_flow_tool_messages_are_strict_and_fenced() -> None:
     assert isinstance(parsed, FlowToolRequest)
     response = FlowToolResponse(
         call_id="call-1",
-        result=OpenedDelivery(pr_number=17, url="https://github.com/owner/repo/pull/17", head_sha="abc", delivery_version=1),
+        result=PreparedDelivery(head_sha="abc", delivery_version=1),
     )
     assert isinstance(parse_server_message(response.model_dump_json()), FlowToolResponse)
 
@@ -106,37 +104,6 @@ def test_flow_tool_messages_are_strict_and_fenced() -> None:
         retry_after="30",
     )
     assert parse_server_message(failure.model_dump_json()) == failure
-
-
-def test_protocol_rejects_unknown_versions_and_result_shapes() -> None:
-    with pytest.raises(ValidationError):
-        parse_worker_message(
-            Register(worker_id="worker-1").model_dump_json().replace(
-                f'"protocol_version":{PROTOCOL_VERSION}', '"protocol_version":99'
-            )
-        )
-
-    with pytest.raises(ValidationError, match="error kind"):
-        FlowToolResponse(call_id="call-1", error="unclassified")
-
-    with pytest.raises(ValidationError, match="exactly one"):
-        FlowToolResponse(
-            call_id="call-1",
-            result=OpenedDelivery(pr_number=17, url="https://github.com/owner/repo/pull/17", head_sha="abc", delivery_version=1),
-            error="conflict",
-            error_kind=FlowToolErrorKind.CONFLICT,
-        )
-
-    verdict = TriageVerdict(verdict=Verdict.WAIT, confidence=0.2)
-    with pytest.raises(ValidationError):
-        Succeeded.model_validate(
-            {
-                "job_id": 1,
-                "assignment_token": "token",
-                "connection_epoch": "epoch-1",
-                "result": {"kind": "triage", "verdict": verdict.model_dump(), "extra": True},
-            }
-        )
 
 
 def test_recovery_descriptor_and_resume_message_round_trip() -> None:

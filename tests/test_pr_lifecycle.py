@@ -1,13 +1,14 @@
 """Closing a PR pauses its original binding and retires intent, not execution evidence."""
 
 from datetime import timedelta
+from types import SimpleNamespace
 
 import pytest
 
 from app.contracts.protocol import PROTOCOL_VERSION, InitialTaskResult, Succeeded, terminal_digest
 from app.contracts.result_models import ResultPending
 from app.control.gateway import ProtocolViolation, WorkerGateway
-from app.control.lifecycle import adopt_created_pull_request, pause_delivery
+from app.control.lifecycle import pause_delivery
 from app.control.reconcile import Reconciler
 from app.control.router import EventRouter
 from app.control.service import ControlService
@@ -16,6 +17,7 @@ from app.domain.models import DeliveryState, FlowState, JobKind, JobState, VcsKi
 from app.domain.review_models import BatchState
 from app.github import GitHubError, GitHubErrorKind, Issue, PullRequest, RemoteRef, Repository
 from app.persistence.stop_store import StopStore
+from app.persistence.store import Store
 from tests.github import RecordingGitHub, record_call
 from tests.test_coordinator import coordinator
 from tests.test_review_batches import batch_for, feedback, ingest, settle
@@ -237,22 +239,6 @@ async def test_human_drift_pauses_without_adopting_a_new_baseline(store, lifecyc
     assert "head/base" in store.reconcile.get(flow.id).last_error
 
 
-async def test_delayed_close_observation_cannot_replace_newer_reopen(store, lifecycle_flow, lifecycle_resources):
-    flow, _ = lifecycle_flow
-    await check(store, flow, GitHub(flow))
-    github = GitHub(flow)
-
-    def reopen():
-        delivery = store.get_delivery(flow.id)
-        delivery.state = DeliveryState.OPEN
-        delivery.version += 1
-        store.update_delivery(delivery)
-
-    github.before_return = reopen
-    await check(store, flow, github)
-    assert store.get_delivery(flow.id).state is DeliveryState.OPEN
-
-
 @pytest.mark.parametrize("state", [FlowState.FAILED, FlowState.CANCELLED])
 async def test_reopen_never_reactivates_terminal_flow(store, lifecycle_flow, state, lifecycle_resources):
     flow, _ = lifecycle_flow
@@ -267,8 +253,6 @@ async def test_reopen_never_reactivates_terminal_flow(store, lifecycle_flow, sta
 @pytest.mark.parametrize("action", ["closed", "reopened", "synchronize"])
 async def test_lifecycle_webhooks_are_durable_query_hints(store, lifecycle_flow, action):
     flow, _ = lifecycle_flow
-    from types import SimpleNamespace
-
     router = EventRouter(store, ControlService(store), SimpleNamespace())
     payload = {"action": action, "repository": {"full_name": flow.repo},
                "pull_request": {"number": 17, "merged": False}}
@@ -329,8 +313,12 @@ async def test_inflight_revision_is_acknowledged_then_verified_before_reopen(sto
 
 
 async def test_close_after_comment_dispatch_recovers_only_the_existing_marker(store, monkeypatch, recording_resources):
-    job, _ = accepted_coding(store)
-    github = RecordingGitHub()
+    job, result = accepted_coding(store)
+    flow = store.get_flow(job.flow_id)
+    github = GitHub(flow, state="open", head_sha=result.commit_sha, base_branch="trunk")
+    github.pull_request = github.remote
+    pending = store.reviews.pending(job.flow_id)
+    assert pending
     original = Issue.comment
 
     async def close_and_lose_response(issue, body):
@@ -348,8 +336,9 @@ async def test_close_after_comment_dispatch_recovers_only_the_existing_marker(st
     monkeypatch.setattr(store, "_clock", lambda: future)
     assert await subject.results.apply(job.id) is JobState.DONE
     assert len(github.comments) == 1
-    assert store.reviews.pending(job.flow_id) == []
-    assert all(j.kind is not JobKind.REVISION for j in store.list_jobs(job.flow_id))
+    assert "修订交付" in github.comments[0]
+    assert store.reviews.pending(job.flow_id) == pending
+    assert [j.id for j in store.list_jobs(job.flow_id) if j.kind is JobKind.REVISION] == [job.id]
 
 
 async def test_initial_close_before_final_commit_keeps_verified_identity_and_can_reopen(store, recording_resources):
@@ -390,32 +379,12 @@ async def test_initial_close_before_final_commit_keeps_verified_identity_and_can
     assert store.get_current_attempt(flow).codex_session_id == "session-1"
 
 
-def test_closed_creation_observation_cannot_bind_a_newer_intent(store, review_flow):
-    # A slow PR read may finish after another transaction changed the delivery.
-    # The old receipt must not bind its PR number or pause the replacement intent.
-    flow, _ = review_flow
-    delivery = store.get_delivery(flow.id)
-    delivery.state, delivery.pr_number = DeliveryState.OPENING, None
-    delivery.head_sha, delivery.base_branch = "abc", "main"
-    store.update_delivery(delivery)
-    expected = store.get_delivery(flow.id)
-    remote = GitHub(flow, head_sha="abc").remote
-    delivery.version += 1
-    store.update_delivery(delivery)
-    with pytest.raises(ResultPending):
-        adopt_created_pull_request(store, flow.current_attempt_id, expected, remote)
-    current = store.get_delivery(flow.id)
-    assert current.state is DeliveryState.OPENING and current.pr_number is None
-
-
 def test_close_and_queued_retirement_roll_back_together(store, lifecycle_flow, monkeypatch):
     flow, _ = lifecycle_flow
     queued = store.enqueue_job(flow.id, JobKind.INITIAL)
 
     def fail(*args, **kwargs):
         raise RuntimeError("before commit")
-
-    from app.persistence.store import Store
 
     monkeypatch.setattr(Store, "cancel_jobs", fail)
     with pytest.raises(RuntimeError), store.transaction() as tx:

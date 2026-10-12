@@ -15,6 +15,11 @@ from app.domain.context_models import MAX_CONTEXT_BYTES
 from app.domain.judge_models import JudgeDecision, JudgeRequest, strict_json, waiting
 from app.domain.models import TriageVerdict
 
+# Keep SDK initialization off the envelope channel, including import-time output.
+with contextlib.redirect_stdout(sys.stderr):
+    from bub.builtin.model_runner import ModelRunner
+    from bub.builtin.settings import AgentSettings
+
 SYSTEM_PROMPT = """You judge a GitHub pull request feedback batch. Return exactly one JSON object:
 {"verdict":"revise|wait|answer|ignore","confidence":0.0,"reason":"...",
  "instruction":"","answer":"","open_points":[]}
@@ -34,9 +39,6 @@ confidence must be a finite number in [0,1]. Use the participants' language for 
 
 async def run(request: JudgeRequest) -> JudgeDecision:
     """Invoke bub's completion helper once with empty tools, no fallback, and no SDK retries."""
-    from bub.builtin.model_runner import ModelRunner
-    from bub.builtin.settings import AgentSettings
-
     class ExplicitSettings(AgentSettings):
         @classmethod
         def settings_customise_sources(cls, settings_cls, init_settings, env_settings,

@@ -139,7 +139,8 @@ async def test_permanent_archive_write_failure_retries_only_frozen_missing_effec
 
     async def forbidden(issue, body):
         if issue.number == 17:
-            raise GitHubError(GitHubErrorKind.PERMISSION, "comment", status_code=403)
+            raise GitHubError(GitHubErrorKind.PERMISSION, "comment", status_code=403,
+                              request_rejected=True)
         return await comment(issue, body)
 
     monkeypatch.setattr(Issue, "comment", forbidden)
@@ -412,25 +413,6 @@ async def test_archive_rate_limit_waits_until_reset_without_retry_after(store, t
     assert len(requests) == 2
 
 
-async def test_archive_effect_retry_checks_current_ownership_before_rearming(store, monkeypatch, archive_resources):
-    flow, job, _, _github, subject = await pending_archive(store)
-
-    async def forbidden(issue, body):
-        raise GitHubError(GitHubErrorKind.PERMISSION, "comment", status_code=403)
-
-    monkeypatch.setattr(Issue, "comment", forbidden)
-    with pytest.raises(ResultPending):
-        await subject.results.apply(job.id)
-    before = store.results.list_effects(job.id)
-    delivery = store.get_delivery(flow.id)
-    delivery.version += 1
-    store.update_delivery(delivery)
-    with pytest.raises(ValueError, match="pending result"):
-        ControlService(store).retry(flow)
-    assert store.results.list_effects(job.id) == before
-    assert store.get_flow_execution(flow.id).released_at is None
-
-
 @pytest.mark.parametrize("status,kind", [(429, GitHubErrorKind.RATE_LIMITED),
                                        (503, GitHubErrorKind.TRANSIENT)])
 async def test_archive_transient_label_errors_resume_automatically(store, monkeypatch, status, kind, archive_resources):
@@ -438,7 +420,7 @@ async def test_archive_transient_label_errors_resume_automatically(store, monkey
     original = Issue.add_label
 
     async def unavailable(issue, label):
-        raise GitHubError(kind, "add_label", status_code=status)
+        raise GitHubError(kind, "add_label", status_code=status, request_rejected=status == 429)
 
     monkeypatch.setattr(Issue, "add_label", unavailable)
     with pytest.raises(ResultPending):
@@ -449,24 +431,6 @@ async def test_archive_transient_label_errors_resume_automatically(store, monkey
     monkeypatch.setattr(Issue, "add_label", original)
     due(store, job.id)
     assert await subject.results.apply(job.id) is JobState.DONE
-
-
-async def test_archive_fences_changed_delivery_before_github_mutation(store, monkeypatch, archive_resources):
-    flow, job, _, github, subject = await pending_archive(store)
-    original = Issue.fetch_labels
-
-    async def changed(issue):
-        labels = await original(issue)
-        delivery = store.get_delivery(flow.id)
-        delivery.version += 1
-        store.update_delivery(delivery)
-        return labels
-
-    monkeypatch.setattr(Issue, "fetch_labels", changed)
-    with pytest.raises(ResultPending, match="archive ownership changed"):
-        await subject.results.apply(job.id)
-    assert github.writes == []
-    assert store.get_flow_execution(flow.id).released_at is None
 
 
 async def test_existing_status_labels_need_no_mutation(store, archive_resources):

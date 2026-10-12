@@ -22,6 +22,7 @@ from app.github import (
     ReviewThread,
     ReviewThreads,
 )
+from tests.review_memory import review_context
 
 if TYPE_CHECKING:
     from githubkit_schemas.latest.models import DiffEntry, PullRequestReviewComment
@@ -146,8 +147,6 @@ class RecordingPullRequest(PullRequest):
     """PR observations and writes; ordinary Issue endpoints are installed separately."""
 
     async def refetch(self) -> PullRequest:
-        from tests.review_memory import review_context
-
         state = record_call(self.repository, "fetch_pull_request", number=self.number)
         pr = review_context().pull_request
         assert pr is not None

@@ -5,14 +5,13 @@ from pydantic import SecretStr, ValidationError
 
 from app.control.config import ServeSettings
 from app.worker.config import WorkerSettings
+from app.worker.execution.codex import _codex_environment
 from app.worker.runtime import validate_worker_environment
 
 
 @pytest.mark.parametrize("labels", [
-    {"done_label": ""}, {"in_review_label": "  "}, {"trigger_label": ""},
-    {"done_label": "FLOW"}, {"done_label": "Flow:In-Review"},
-    {"in_review_label": "FLOW"},
-])
+    {"in_review_label": "  "}, {"done_label": "FLOW"},
+], ids=["blank-label", "label-collision"])
 def test_archive_status_labels_cannot_be_empty_or_conflict(labels):
     with pytest.raises(ValidationError, match="label"):
         ServeSettings(_env_file=None, database_url="postgresql://localhost/test",
@@ -20,8 +19,6 @@ def test_archive_status_labels_cannot_be_empty_or_conflict(labels):
 
 
 def test_judge_credentials_stay_out_of_config_serialization_and_code_agent_environment(monkeypatch):
-    from app.worker.execution.codex import _codex_environment
-
     monkeypatch.setenv("FLOWTOOL_JUDGE_MODEL", "openai:test")
     monkeypatch.setenv("FLOWTOOL_JUDGE_API_KEY", "judge-secret")
     configured = ServeSettings(database_url="postgresql://localhost/test",
@@ -33,9 +30,13 @@ def test_judge_credentials_stay_out_of_config_serialization_and_code_agent_envir
     assert "FLOWTOOL_JUDGE_API_KEY" not in _codex_environment()
 
 
-def test_settings_parse_csv_allowlist_and_expand_paths(monkeypatch, tmp_path) -> None:
+@pytest.mark.parametrize("value,expected", [
+    ("alice, bob ,carol", ["alice", "bob", "carol"]),
+    ('["alice", "bob"]', ["alice", "bob"]),
+], ids=["csv", "json"])
+def test_settings_parse_allowlist_environment_formats(monkeypatch, tmp_path, value, expected) -> None:
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("FLOWTOOL_ALLOWLIST", "alice, bob ,carol")
+    monkeypatch.setenv("FLOWTOOL_ALLOWLIST", value)
     monkeypatch.setenv(
         "FLOWTOOL_DATABASE_URL", "postgresql://flowtool:secret@db.example/flowtool"
     )
@@ -44,20 +45,8 @@ def test_settings_parse_csv_allowlist_and_expand_paths(monkeypatch, tmp_path) ->
 
     settings = ServeSettings()  # type: ignore[call-arg]
 
-    assert settings.allowlist == ["alice", "bob", "carol"]
+    assert settings.allowlist == expected
     assert settings.database_url == "postgresql://flowtool:secret@db.example/flowtool"
-
-
-def test_settings_preserve_json_allowlist_environment_values(monkeypatch) -> None:
-    # pydantic-settings historically accepted JSON arrays for list-valued env vars.
-    monkeypatch.setenv("FLOWTOOL_ALLOWLIST", '["alice", "bob"]')
-    monkeypatch.setenv("FLOWTOOL_DATABASE_URL", "postgresql://localhost/flowtool")
-
-    monkeypatch.setenv("FLOWTOOL_WORKER_TOKENS", '{"worker-1":"secret"}')
-
-    settings = ServeSettings()  # type: ignore[call-arg]
-
-    assert settings.allowlist == ["alice", "bob"]
 
 
 def test_reviewers_are_configured_independently_from_trigger_allowlist(monkeypatch) -> None:

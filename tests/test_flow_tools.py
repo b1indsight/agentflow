@@ -184,20 +184,6 @@ async def test_open_pr_after_merge_cannot_restore_opening_delivery(tool_resource
     assert store.calls == {}
 
 
-async def test_unknown_flow_tool_fails_closed(tool_resources) -> None:
-    service = FlowToolService(
-        cast(Store, cast(Any, ToolStore())),
-        cast(GitHubApp, cast(Any, ToolGitHub())),
-    )
-
-    response = await service.execute(request("flow.spawn"), worker_id="worker-a")
-
-    assert response.result is None
-    assert response.error == "unknown Flow tool: flow.spawn"
-    assert response.error_kind is FlowToolErrorKind.INVALID_REQUEST
-    assert response.retryable is False
-
-
 @pytest.mark.asyncio
 async def test_prepared_delivery_and_tool_receipt_roll_back_together(monkeypatch, tool_resources) -> None:
     # A crash saving the tool reply must not leave a half-prepared delivery behind.

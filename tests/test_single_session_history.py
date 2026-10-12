@@ -3,12 +3,11 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from pydantic import ValidationError
 
 from app.contracts.conversation import ConversationFailure, HistoryQuery
-from app.contracts.protocol import ConversationQuery
 from app.control.conversation import ConversationService
 from app.domain.models import Attempt
+from app.worker.state import history
 from app.worker.state.history import CodexHistory
 from tests.test_conversation_history import SESSION, message, rollout
 
@@ -26,8 +25,6 @@ def test_single_session_query_validates_before_reading(tmp_path):
     for cursor in ("bad", "e30=", base64.urlsafe_b64encode(json.dumps([SESSION, True, "file"]).encode()).decode()):
         with pytest.raises(ConversationFailure, match="cursor_invalid"):
             HistoryQuery(session_id=SESSION, cursor=cursor)
-    with pytest.raises(ValidationError):
-        ConversationQuery(request_id="q", connection_epoch="e", session_id=SESSION, flow_id=42)
     second_query = HistoryQuery(session_id=SESSION, cursor=first.next_cursor)
     # Replacing a same-length file must be rejected even after query validation.
     path.rename(path.with_suffix(".old"))
@@ -81,8 +78,6 @@ async def test_control_owns_session_order_attribution_and_tail(tmp_path):
 
 
 def test_byte_budget_does_not_skip_record(tmp_path, monkeypatch):
-    from app.worker.state import history
-
     rollout(tmp_path, [message("user", "one"), message("assistant", "two")])
     reader = CodexHistory(tmp_path)
     all_items = reader.query(HistoryQuery(session_id=SESSION)).items

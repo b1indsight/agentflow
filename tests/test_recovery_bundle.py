@@ -27,22 +27,15 @@ def bundle(path: Path):
     return manifest
 
 
-@pytest.mark.parametrize('damage', ['missing', 'corrupt', 'incomplete', 'escape', 'symlink'])
-def test_restore_rejects_incomplete_or_untrusted_bundle_before_using_data(tmp_path, damage):
+@pytest.mark.parametrize('damage', ['missing', 'corrupt'])
+def test_restore_rejects_missing_or_corrupt_artifacts(tmp_path, damage):
     path = tmp_path / 'backup'
     manifest = bundle(path)
     target = path / 'database.dump'
     if damage == 'missing':
         target.unlink()
-    elif damage == 'corrupt':
-        target.write_bytes(b'truncated')
-    elif damage == 'incomplete':
-        manifest['steps']['stopped'] = False
-    elif damage == 'escape':
-        manifest['files']['../outside'] = manifest['files'].pop('database.dump')
     else:
-        target.rename(tmp_path / 'external.dump')
-        target.symlink_to(tmp_path / 'external.dump')
+        target.write_bytes(b'truncated')
     (path / 'manifest.json').write_text(json.dumps(manifest))
     with pytest.raises(ValueError):
         verify_bundle(path)

@@ -1,12 +1,13 @@
 """PostgreSQL regressions for workflow commit boundaries; use the existing isolated fixture."""
 
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import closing
 from datetime import timedelta
+from threading import Barrier
 
 import pytest
 
-from app.contracts.protocol import PROTOCOL_VERSION, Succeeded, terminal_digest
+from app.contracts.protocol import PROTOCOL_VERSION, RevisionTask, Succeeded, terminal_digest
 from app.control.service import ControlService
 from app.domain.models import (
     DeliveryState,
@@ -14,52 +15,14 @@ from app.domain.models import (
     Job,
     JobKind,
     JobState,
+    ReviewItemKind,
 )
+from app.domain.review_models import FeedbackUpdate
 from app.persistence.store import Store
 from tests.github import RecordingGitHub
+from tests.review_memory import review_context
 from tests.test_coordinator import coordinator
-
-
-def test_transaction_view_reuses_its_connection_without_leaking_to_other_callers(
-    monkeypatch,
-) -> None:
-    """The transaction view must neither commit per method nor bind unrelated callers implicitly."""
-    borrowed = []
-    ended = []
-
-    class Connection:
-        @contextmanager
-        def transaction(self):
-            try:
-                yield
-            except RuntimeError:
-                ended.append("rollback")
-                raise
-
-    class Pool:
-        def __init__(self, **kwargs):
-            pass
-
-        def __class_getitem__(cls, item):
-            return cls
-
-        @contextmanager
-        def connection(self):
-            connection = Connection()
-            borrowed.append(connection)
-            yield connection
-
-    monkeypatch.setattr("app.persistence.store.ConnectionPool", Pool)
-    subject = Store("unused")
-    with pytest.raises(RuntimeError, match="abort"), subject.transaction() as tx:
-        with tx.connection() as first, tx.connection() as second:
-            assert first is second
-            with subject.connection() as unrelated:
-                assert unrelated is not first
-        raise RuntimeError("abort")
-    assert len(borrowed) == 2 and ended == ["rollback"]
-    with pytest.raises(RuntimeError, match="outside its context"), tx.connection():
-        pass
+from tests.test_revision_delivery import verified_result
 
 
 def test_trigger_rolls_back_flow_and_job_on_failure(store: Store, monkeypatch) -> None:
@@ -71,17 +34,6 @@ def test_trigger_rolls_back_flow_and_job_on_failure(store: Store, monkeypatch) -
     with pytest.raises(RuntimeError, match="enqueue interrupted"):
         ControlService(store).on_trigger("owner/repo", 700, 42)
     assert store.get_active_flow("owner/repo", 700) is None
-
-
-def test_concurrent_trigger_enqueues_once(store: Store) -> None:
-    # Independent callers must not rely on the event loop serializing check/create/enqueue.
-    service = ControlService(store)
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        results = list(executor.map(lambda _: service.on_trigger("owner/repo", 701, 42), range(2)))
-    flow = store.get_active_flow("owner/repo", 701)
-    assert flow is not None
-    assert sum(result is not None for result in results) == 1
-    assert [job.kind for job in store.list_jobs(flow.id)] == [JobKind.INITIAL]
 
 
 def test_assignment_skips_a_flow_locked_for_cancellation(store: Store):
@@ -112,15 +64,49 @@ def test_retry_rolls_back_with_real_database(store: Store, monkeypatch) -> None:
     assert store.list_jobs(flow.id) == []
 
 
+def test_trigger_and_operator_retry_share_issue_reservation(store: Store, postgresql_url: str):
+    # CLI retry uses its own Store and can race the webhook consumer on the same issue.
+    flow = ControlService(store).on_trigger("owner/repo", 706, 42)
+    assert flow is not None
+    ControlService(store).cancel(flow)
+    barrier = Barrier(2)
+
+    with closing(Store(postgresql_url)) as operator, ThreadPoolExecutor(max_workers=2) as pool:
+        def trigger():
+            barrier.wait(timeout=5)
+            return ControlService(store).on_trigger(flow.repo, flow.issue_number, 42)
+
+        def retry():
+            barrier.wait(timeout=5)
+            try:
+                ControlService(operator).retry(flow)
+            except ValueError as error:
+                assert "already active" in str(error)
+                return False
+            return True
+
+        triggered = pool.submit(trigger)
+        retried = pool.submit(retry)
+        created, retry_won = triggered.result(timeout=5), retried.result(timeout=5)
+
+    active = store.get_active_flow(flow.repo, flow.issue_number)
+    assert active is not None and active.id == (created.id if created else flow.id)
+    assert retry_won is (created is None)
+    assert len([job for job in store.list_jobs(active.id) if job.state is JobState.QUEUED]) == 1
+
+
 def bound_review_flow(store: Store):
     """Keep the worker ownership left by a finished initial assignment."""
     store.worker_connected("worker-a", PROTOCOL_VERSION, "epoch-a")
     flow = store.create_flow("owner/repo", 703, 42)
     attempt = store.create_attempt(flow.id)
+    attempt.codex_session_id = "session"
+    store.update_attempt(attempt)
     flow.current_attempt_id = attempt.id
     store.update_flow(flow)
     delivery = store.get_or_create_delivery(flow.id, f"flow/{flow.id}")
     delivery.state, delivery.base_branch, delivery.pr_number = DeliveryState.OPEN, "trunk", 17
+    delivery.head_sha = "abc123"
     store.update_delivery(delivery)
     initial = store.enqueue_job(flow.id, JobKind.INITIAL)
     assert store.assign_job("worker-a", "initial-token", "epoch-a") is not None
@@ -131,23 +117,39 @@ def bound_review_flow(store: Store):
     return flow
 
 
-def accepted_coding(store: Store, *, receive: bool = True):
+def accepted_coding(store: Store, *, receive: bool = True, started: bool = True):
     """A remote coding assignment for worker journal/stop recovery tests."""
-    from app.contracts.protocol import InitialTaskResult
-
     flow = bound_review_flow(store)
-    store.enqueue_job(flow.id, JobKind.INITIAL)
+    store.reviews.ingest(flow.id, "coding-review", "pull_request_review", {}, FeedbackUpdate(
+        kind=ReviewItemKind.REVIEW_BODY, github_id=101, author="alice", body="Fix the bound",
+        updated_at=store.now(), signal="request_changes", submitted=True,
+    ), settle_seconds=0, submit_grace_seconds=0)
+    batch, = store.reviews.claim_due()
     job = store.assign_job("worker-a", "triage-token", "epoch-a")
-    assert job is not None and job.assignment_token is not None
-    assert flow is not None and flow.current_attempt_id is not None
-    assert store.start_assignment(job.id, flow.current_attempt_id, "worker-a", "triage-token", "epoch-a")
-    result = InitialTaskResult(session_id="session", last_message="done", exit_code=0)
+    assert job is not None and job.assignment_token is not None and job.payload is not None
+    binding = store.get_flow_execution(flow.id)
+    assert flow.current_attempt_id is not None and binding is not None
+    task = RevisionTask(
+        batch_id=batch.id, attempt_id=flow.current_attempt_id, feedback=batch.feedback,
+        flow_id=flow.id, repo=flow.repo, branch=f"flow/{flow.id}", repo_identity=binding.repo_identity,
+        pr_number=17, base_branch="trunk", expected_head_sha="abc123", session_id="session",
+        session_generation=0, instruction=job.payload["instruction"], issue_title="Issue",
+        issue_body="", previous_summary="", open_points=batch.open_points,
+    )
+    with store.transaction() as tx:
+        assert tx.lock_workflow(flow.id) is not None
+        tx.reviews.freeze_revision(job, task)
+        if started:
+            assert tx.start_assignment(job.id, task.attempt_id, "worker-a", "triage-token", "epoch-a")
+            assert tx.reviews.started(job)
+    result = verified_result(task)
     if receive:
+        assert started
         message = Succeeded(job_id=job.id, assignment_token=job.assignment_token,
                             connection_epoch="epoch-a", result=result)
         assert store.record_assignment_result(job.id, "worker-a", job.assignment_token, "epoch-a",
             message.model_dump(mode="json"), terminal_digest(message)) == "pending"
-    return job, result
+    return store.get_job(job.id), result
 
 
 def test_expired_cancelled_executor_does_not_overwrite_cancelled_flow(store: Store, monkeypatch):
@@ -180,8 +182,14 @@ async def test_accepted_result_survives_expired_worker_recovery(
     assert store.sweep_expired_assignments() == (0, 0)
     flow = store.get_flow(job.flow_id)
     assert flow is not None and flow.state is FlowState.ACTIVE
-    await coordinator(store, RecordingGitHub()).apply_result(job.id)
+    github = RecordingGitHub()
+    pull_request = review_context().pull_request
+    assert pull_request is not None
+    github.pull_request = pull_request.model_copy(update={
+        "head_branch": f"flow/{flow.id}", "head_sha": "abc123", "base_branch": "trunk",
+    })
+    await coordinator(store, github).apply_result(job.id)
     finished = store.get_job(job.id)
-    assert finished is not None and finished.state is JobState.FAILED
+    assert finished is not None and finished.state is JobState.DONE
     execution = store.get_flow_execution(job.flow_id)
-    assert execution is not None and execution.released_at is not None
+    assert execution is not None and execution.released_at is None

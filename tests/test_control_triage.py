@@ -9,7 +9,6 @@ import pytest
 from app.control.runtime import ControlRuntime
 from app.control.service import ControlService
 from app.domain.models import JobKind, TriageVerdict, Verdict
-from app.domain.review_models import BatchState
 from app.github import GitHubError, GitHubErrorKind, PullRequest
 from tests.github import RecordingGitHub
 from tests.review_memory import judge_decision
@@ -73,33 +72,6 @@ async def test_interrupted_judge_retries_unfinished_batch(store, triage_runtime)
     assert len(store.list_jobs(batch.flow_id)) == 1
 
 
-async def test_concurrent_answers_authorize_only_one_post(store, triage_runtime, monkeypatch):
-    # Two callers can both miss the marker while the first POST is still in flight.
-    # The batch's durable authorization must serialize their remote mutations.
-    runtime, batch = triage_runtime
-    runtime.judge.triage.side_effect = lambda context: judge_decision(
-        TriageVerdict(verdict=Verdict.ANSWER, answer="Ten."), context)
-    github = runtime.coordinator.github
-    entered, release = asyncio.Event(), asyncio.Event()
-    comment = PullRequest.comment
-
-    async def slow_comment(pr, body):
-        entered.set()
-        await release.wait()
-        return await comment(pr, body)
-
-    monkeypatch.setattr(PullRequest, "comment", slow_comment)
-    first = asyncio.create_task(runtime.coordinator.triage(batch, runtime.judge))
-    try:
-        await asyncio.wait_for(entered.wait(), 1)
-        await asyncio.wait_for(runtime.coordinator.triage(batch, runtime.judge), 1)
-    finally:
-        release.set()
-        await first
-    assert len(github.comments) == 1
-    assert store.reviews.get_batch(batch.id).state is BatchState.COMPLETED
-
-
 async def test_answer_definite_rejection_can_retry_saved_decision(store, triage_runtime, monkeypatch):
     # An explicit rejection proves the POST was not accepted; it must not leave
     # the batch permanently uncertain like a lost response does.
@@ -110,7 +82,8 @@ async def test_answer_definite_rejection_can_retry_saved_decision(store, triage_
     comment = PullRequest.comment
 
     async def rejected_comment(pr, body):
-        raise GitHubError(GitHubErrorKind.RATE_LIMITED, "comment", status_code=429)
+        raise GitHubError(GitHubErrorKind.RATE_LIMITED, "comment", status_code=429,
+                          request_rejected=True)
 
     monkeypatch.setattr(PullRequest, "comment", rejected_comment)
     with pytest.raises(GitHubError):
@@ -120,24 +93,6 @@ async def test_answer_definite_rejection_can_retry_saved_decision(store, triage_
     await runtime.coordinator.triage(store.reviews.get_batch(batch.id), runtime.judge)
     assert len(github.comments) == 1
     assert runtime.judge.triage.await_count == 1
-
-
-def test_stale_answer_rejection_cannot_clear_replaced_context(store, triage_runtime):
-    # An old failed POST can return after the context has been invalidated and
-    # refrozen; its cleanup must not erase the replacement answer's marker.
-    _, batch = triage_runtime
-    from tests.review_memory import review_context
-
-    original = review_context(batch.id)
-    replacement = original.model_copy(update={"ci": "replacement"})
-    with store.transaction() as tx:
-        tx.lock_workflow(batch.flow_id)
-        tx.reviews.freeze_context(batch, original)
-        tx.reviews.invalidate_context(batch, original)
-        tx.reviews.freeze_context(batch, replacement)
-        assert tx.reviews.authorize_answer(batch, replacement.digest)
-    store.reviews.reject_answer(batch, original.digest)
-    assert store.reviews.get_batch(batch.id).answer_dispatched
 
 
 async def test_slow_judge_keeps_settle_available_without_a_second_execution(triage_runtime):

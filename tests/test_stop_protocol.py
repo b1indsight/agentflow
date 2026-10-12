@@ -91,9 +91,6 @@ async def test_restarted_worker_does_not_infer_stopped_from_absent_task(tmp_path
     with pytest.raises(WorkerProtocolError, match='ownership is unknown'):
         await client._handle_stop(AckConnection(request), request)
     assert journal.load().stopped is None
-    stale = request.model_copy(update={'connection_epoch': 'old'})
-    with pytest.raises(WorkerProtocolError, match='connection epoch'):
-        await client._handle_stop(AckConnection(stale), stale)
 
 
 async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path):

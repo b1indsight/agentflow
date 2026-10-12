@@ -6,7 +6,14 @@ from datetime import timedelta
 import pytest
 
 from app.control.reconcile_feedback import FeedbackReconciler
-from app.domain.models import DeliveryState, FlowState, ReviewItemKind
+from app.domain.models import (
+    DeliveryState,
+    FlowState,
+    JobKind,
+    ReviewItemKind,
+    TriageVerdict,
+    Verdict,
+)
 from app.github import (
     Batch,
     GitHubError,
@@ -18,7 +25,7 @@ from app.github import (
 from app.persistence.reconcile_store import ReconcileStore
 from app.persistence.store import Store
 from tests.github import RecordingGitHub, record_call
-from tests.test_review_batches import batch_for, feedback, ingest, settle
+from tests.test_review_batches import batch_for, claim, feedback, ingest, run_triage, settle
 from tests.test_review_batches import (
     review_flow as review_flow,  # noqa: PLC0414 - fixture re-export
 )
@@ -279,9 +286,6 @@ async def test_poll_marks_same_webhook_command_body_inert(store, review_flow, fe
 
 @pytest.mark.parametrize("verdict", ["ignore", "wait"])
 async def test_blank_backlog_cannot_hide_text_or_repeat_forever(store, review_flow, verdict, recording_resources):
-    from app.domain.models import TriageVerdict, Verdict
-    from tests.test_review_batches import claim, run_triage
-
     flow, clock = review_flow
     for identity in range(1, 71):
         ingest(store, flow, feedback(clock, identity, body=" \n\t", kind=ReviewItemKind.REVIEW_BODY), str(identity))
@@ -300,9 +304,6 @@ async def test_blank_backlog_cannot_hide_text_or_repeat_forever(store, review_fl
 
 
 def test_blank_authorized_signal_stays_with_bounded_text_batch(store, review_flow):
-    from app.domain.models import JobKind
-    from tests.test_review_batches import claim
-
     flow, clock = review_flow
     for identity in range(1, 61):
         ingest(store, flow, feedback(clock, identity, body="", kind=ReviewItemKind.REVIEW_BODY,
@@ -315,9 +316,6 @@ def test_blank_authorized_signal_stays_with_bounded_text_batch(store, review_flo
 
 @pytest.mark.parametrize("verdict", ["ignore", "wait"])
 async def test_recovered_backlog_drains_without_oversized_or_repeated_wait_batches(store, review_flow, verdict, feedback_resources):
-    from app.domain.models import TriageVerdict, Verdict
-    from tests.test_review_batches import claim, run_triage
-
     flow, clock = review_flow
     github = GitHub(clock)
     comments = [page(clock, number).items[0] for number in range(1, 62)]

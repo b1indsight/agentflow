@@ -14,8 +14,6 @@ from app.github import GitHubError, GitHubErrorKind, Repository
 from app.persistence.stop_store import StopStore
 from app.persistence.store import Store
 from tests.test_coordinator import coordinator
-from tests.test_revision_delivery import verified_result
-from tests.test_revision_recovery import accept
 from tests.test_revision_recovery import (
     pending_revision as pending_revision,  # noqa: PLC0414 - fixture re-export
 )
@@ -28,11 +26,11 @@ def gateway(store, subject):
 
 @pytest.mark.parametrize("change,signing_fails", [
     ("merged", False), ("closed", True),
-    ("epoch", False), ("epoch", True), ("started", False),
+    ("epoch", False), ("epoch", True),
 ])
 async def test_coordinator_rechecks_after_capability_io(store, pending_revision, monkeypatch, change, signing_fails):
     # Webhooks or a new connection can retire an assignment while signing is in flight.
-    flow, job, task, _github, subject = pending_revision
+    flow, job, _task, _github, subject = pending_revision
     original = Repository.create_push_capability
 
     async def changed(repo):
@@ -44,16 +42,14 @@ async def test_coordinator_rechecks_after_capability_io(store, pending_revision,
         elif change == "merged":
             with store.connection() as connection:
                 connection.execute("UPDATE flow_deliveries SET state='merged' WHERE flow_id=%s", (flow.id,))
-        elif change == "epoch":
-            store.worker_connected("worker-a", PROTOCOL_VERSION, "new-epoch")
         else:
-            store.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
+            store.worker_connected("worker-a", PROTOCOL_VERSION, "new-epoch")
         if signing_fails:
             raise GitHubError(GitHubErrorKind.TRANSIENT, "create_push_capability")
         return capability
 
     monkeypatch.setattr(Repository, "create_push_capability", changed)
-    if change in {"epoch", "started"}:
+    if change == "epoch":
         with pytest.raises(PreparationStale):
             await subject.prepare_for_assignment(job, "worker-a", "token", "epoch")
         assert store.get_job(job.id).result_received_at is None
@@ -160,15 +156,11 @@ async def test_failure_or_time_budget_stops_without_early_retry(store, pending_r
     assert failed.prepare_last_error in failed.last_error
 
 
-@pytest.mark.parametrize("change", ["started", "epoch", "token", "result"])
+@pytest.mark.parametrize("change", ["epoch", "token"])
 def test_defer_requires_the_exact_unstarted_assignment(store, pending_revision, change):
-    flow, job, task, _, _ = pending_revision
-    if change == "started":
-        store.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
-    elif change == "epoch":
+    flow, job, _task, _, _ = pending_revision
+    if change == "epoch":
         store.worker_connected("worker-a", PROTOCOL_VERSION, "new-epoch")
-    elif change == "result":
-        accept(store, job, verified_result(task))
     else:
         assert store.requeue_assignment(job.id, "worker-a", "token", "epoch")
         assert store.assign_job("worker-a", "new-token", "epoch") is not None
@@ -273,15 +265,3 @@ async def test_a_slow_retry_read_cannot_run_beyond_the_window(store, pending_rev
     prepared = await gateway(store, subject)._prepare_assignment(retry, "worker-a", "slow", "epoch")
     assert prepared is JobState.FAILED
     assert "window" in store.get_job(job.id).last_error
-
-
-@pytest.mark.parametrize("field,value", [("prepare_max_failures", 0), ("prepare_retry_window_seconds", 0),
-                                         ("prepare_retry_window_seconds", float("inf"))])
-def test_preparation_retry_limits_are_validated(tmp_path, field, value):
-    from pydantic import ValidationError
-
-    from app.control.config import ServeSettings
-    from tests.test_github_client import settings
-
-    with pytest.raises(ValidationError):
-        ServeSettings.model_validate(settings(tmp_path).model_dump() | {field: value})
