@@ -7,11 +7,11 @@ import pytest
 
 from app.contracts.protocol import PROTOCOL_VERSION, InitialTaskResult, Succeeded, terminal_digest
 from app.contracts.result_models import ResultPending
-from app.control.gateway import ProtocolViolation, WorkerGateway
-from app.control.lifecycle import pause_delivery
-from app.control.reconcile import Reconciler
-from app.control.router import EventRouter
-from app.control.service import ControlService
+from app.controler.events.router import EventRouter
+from app.controler.reconciliation.pull_requests import Reconciler
+from app.controler.workers.gateway import ProtocolViolation, WorkerGateway
+from app.controler.workflow.lifecycle import pause_delivery
+from app.controler.workflow.service import ControlService
 from app.domain.delivery_models import PreparedDelivery
 from app.domain.models import DeliveryState, FlowState, JobKind, JobState, VcsKind
 from app.domain.review_models import BatchState

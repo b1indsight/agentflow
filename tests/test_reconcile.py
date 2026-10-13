@@ -8,8 +8,8 @@ import httpx
 import pytest
 from githubkit import GitHub as SDK
 
-from app.control.reconcile import Reconciler
-from app.control.service import ControlService
+from app.controler.reconciliation.pull_requests import Reconciler
+from app.controler.workflow.service import ControlService
 from app.domain.models import DeliveryState, FlowState, JobKind
 from app.github import (
     GitHubApp,

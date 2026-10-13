@@ -3,9 +3,9 @@ import pytest
 from pydantic import SecretStr
 
 from app.contracts.protocol import PROTOCOL_VERSION
-from app.control.config import ServeSettings
-from app.control.router import EventRouter
-from app.control.service import ControlService
+from app.controler.config import ServerSettings
+from app.controler.events.router import EventRouter
+from app.controler.workflow.service import ControlService
 from app.domain.models import DeliveryState, Flow, FlowState, JobKind
 from app.persistence.store import Store
 
@@ -33,7 +33,7 @@ class RecordingService(ControlService):
 
 @pytest.fixture
 def router(store: Store, monkeypatch) -> EventRouter:
-    settings = ServeSettings.model_construct(
+    settings = ServerSettings.model_construct(
         database_url="postgresql://localhost/test",
         worker_tokens={"worker-1": SecretStr("worker-secret")},
         allowlist=["alice"],

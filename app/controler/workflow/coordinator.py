@@ -18,14 +18,18 @@ from app.contracts.protocol import (
     RevisionTask,
     terminal_digest,
 )
-from app.control.archive import archive_task
-from app.control.config import ServeSettings
-from app.control.preparation import PreparationReadFailure, PreparationStale, PreparationState
-from app.control.resolution import feedback_link
-from app.control.results import ResultApplication
-from app.control.review_context import build_review_context
-from app.control.revisions import verify_revision_remote
-from app.control.tools import FlowToolService
+from app.controler.config import ServerSettings
+from app.controler.review.context import build_review_context
+from app.controler.review.resolution import feedback_link
+from app.controler.workflow.archive import archive_task
+from app.controler.workflow.preparation import (
+    PreparationReadFailure,
+    PreparationStale,
+    PreparationState,
+)
+from app.controler.workflow.results import ResultApplication
+from app.controler.workflow.revisions import verify_revision_remote
+from app.controler.workflow.tools import FlowToolService
 from app.domain.context_models import ReviewContext
 from app.domain.judge_models import JudgeDecision
 from app.domain.models import (
@@ -54,7 +58,7 @@ class JobCoordinator:
         self,
         store: Store,
         github: GitHubApp,
-        settings: ServeSettings,
+        settings: ServerSettings,
         plugins: PluginManager | None = None,
     ) -> None:
         self.store = store

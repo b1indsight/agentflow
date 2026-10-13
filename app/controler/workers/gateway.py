@@ -34,10 +34,10 @@ from app.contracts.protocol import (
     terminal_digest,
 )
 from app.contracts.result_models import ResultPending
-from app.control.conversation import ConversationBroker
-from app.control.coordinator import JobCoordinator
-from app.control.preparation import PreparationStale, PreparationState
-from app.control.worker_connection import ProtocolViolation, WorkerConnection, WorkerSocket
+from app.controler.workers.connection import ProtocolViolation, WorkerConnection, WorkerSocket
+from app.controler.workers.conversation import ConversationBroker
+from app.controler.workflow.coordinator import JobCoordinator
+from app.controler.workflow.preparation import PreparationStale, PreparationState
 from app.domain.models import (
     DeliveryState,
     Job,

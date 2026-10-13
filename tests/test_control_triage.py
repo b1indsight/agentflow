@@ -6,8 +6,8 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from app.control.runtime import ControlRuntime
-from app.control.service import ControlService
+from app.controler.runtime import ServerRuntime
+from app.controler.workflow.service import ControlService
 from app.domain.models import JobKind, TriageVerdict, Verdict
 from app.github import GitHubError, GitHubErrorKind, PullRequest
 from tests.github import RecordingGitHub
@@ -22,7 +22,7 @@ def triage_runtime(store, review_flow, recording_resources):  # noqa: F811
     flow, clock = review_flow
     ingest(store, flow, feedback(clock))
     batch = claim(store, clock)[0]
-    runtime = ControlRuntime.__new__(ControlRuntime)
+    runtime = ServerRuntime.__new__(ServerRuntime)
     runtime.store = store
     runtime.coordinator = coordinator(store, RecordingGitHub())
     runtime.judge = SimpleNamespace(triage=AsyncMock(side_effect=lambda context: judge_decision(

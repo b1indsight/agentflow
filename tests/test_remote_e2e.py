@@ -13,9 +13,9 @@ from app.contracts.protocol import (
     InitialTaskResult,
     Succeeded,
 )
-from app.control.coordinator import JobCoordinator
-from app.control.gateway import WorkerGateway
-from app.control.tools import FlowToolService
+from app.controler.workers.gateway import WorkerGateway
+from app.controler.workflow.coordinator import JobCoordinator
+from app.controler.workflow.tools import FlowToolService
 from app.domain.delivery_models import OpenedDelivery
 from app.domain.models import FlowDelivery, Job, JobKind, JobState, VcsKind, VcsOutcome
 from app.persistence.stop_store import StopStore

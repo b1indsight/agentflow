@@ -12,7 +12,7 @@ from pydantic import ValidationError
 from typer.testing import CliRunner
 
 from app import cli
-from app.control import config as control_config
+from app.controler import config as server_config
 from app.domain.project_models import ProjectStatus
 from app.github import (
     GitHubApp,
@@ -282,7 +282,7 @@ async def test_real_sdk_never_retries_or_accepts_partial_mutation(tmp_path, monk
 @pytest.fixture
 def serve_config(tmp_path, monkeypatch):
     configured = settings(tmp_path)
-    monkeypatch.setattr(control_config, "ServeSettings", lambda: configured)
+    monkeypatch.setattr(server_config, "ServerSettings", lambda: configured)
     return configured
 
 

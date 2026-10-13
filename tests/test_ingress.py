@@ -12,23 +12,23 @@ from psycopg import OperationalError
 from pydantic import SecretStr
 
 from app.contracts.protocol import PROTOCOL_VERSION
-from app.control.api import create_app
-from app.control.config import ServeSettings
-from app.control.conversation import ConversationService
-from app.control.gateway import WorkerGateway
-from app.control.router import EventRouter
-from app.control.runtime import ControlRuntime
-from app.control.service import ControlService
-from app.control.webhooks import WebhookConsumer
+from app.controler.api import create_app
+from app.controler.config import ServerSettings
+from app.controler.events.router import EventRouter
+from app.controler.events.webhooks import WebhookConsumer
+from app.controler.runtime import ServerRuntime
+from app.controler.workers.conversation import ConversationService
+from app.controler.workers.gateway import WorkerGateway
+from app.controler.workflow.service import ControlService
 from app.domain.models import Flow, FlowState, JobKind
 from app.persistence.store import Store
 from app.persistence.webhook_store import WebhookStore
 from app.telemetry.metrics import Metrics
 
 
-class WebhookRuntime(ControlRuntime):
-    def __init__(self, router: EventRouter | None = None, settings: ServeSettings | None = None) -> None:
-        self.settings = settings or ServeSettings.model_construct(
+class WebhookRuntime(ServerRuntime):
+    def __init__(self, router: EventRouter | None = None, settings: ServerSettings | None = None) -> None:
+        self.settings = settings or ServerSettings.model_construct(
             database_url="postgresql://localhost/test",
             worker_tokens={"worker-1": SecretStr("worker-secret")},
             github_webhook_secret="webhook-secret",
@@ -113,7 +113,7 @@ async def test_health_and_invalid_signature(client: httpx.AsyncClient) -> None:
 async def test_valid_signature_dispatches_webhook(
     store: Store, monkeypatch
 ) -> None:
-    settings = ServeSettings.model_construct(
+    settings = ServerSettings.model_construct(
         database_url="postgresql://localhost/test",
         worker_tokens={"worker-1": SecretStr("worker-secret")},
         allowlist=["alice"],

@@ -8,8 +8,8 @@ from functools import partial
 from loguru import logger
 from pluggy import PluginManager
 
-from app.control.archive import verify_archive
-from app.control.lifecycle import record_merge
+from app.controler.workflow.archive import verify_archive
+from app.controler.workflow.lifecycle import record_merge
 from app.domain.models import (
     DeliveryState,
     Flow,

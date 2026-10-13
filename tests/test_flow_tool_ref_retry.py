@@ -6,7 +6,7 @@ import httpx
 import pytest
 from githubkit import GitHub as SDK
 
-from app.control.tools import FlowToolService
+from app.controler.workflow.tools import FlowToolService
 from app.github import GitHubApp, Installation, Repository
 from app.persistence.store import Store
 from tests.github import NATIVE_REPOSITORY_FETCH_REF

@@ -13,8 +13,8 @@ from app.contracts.protocol import (
     Succeeded,
     terminal_digest,
 )
-from app.control.gateway import ProtocolViolation, WorkerGateway
-from app.control.service import ControlService
+from app.controler.workers.gateway import ProtocolViolation, WorkerGateway
+from app.controler.workflow.service import ControlService
 from app.domain.models import DeliveryState, FlowState, JobKind, JobState
 from app.persistence.store import Store
 from tests.github import RecordingGitHub

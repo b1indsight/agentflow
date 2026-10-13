@@ -13,7 +13,7 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 from app.github import ProjectConfig
 
 
-class ServeSettings(BaseSettings):
+class ServerSettings(BaseSettings):
     """Secrets and tuning used only by the control-plane process."""
 
     log_format: Literal["text", "json"] = "text"
@@ -90,7 +90,7 @@ class ServeSettings(BaseSettings):
         return value.strip()
 
     @model_validator(mode="after")
-    def _validate_status_labels(self) -> ServeSettings:
+    def _validate_status_labels(self) -> ServerSettings:
         labels = {label.casefold() for label in
                   (self.trigger_label, self.in_review_label, self.done_label)}
         if len(labels) != 3:
@@ -98,7 +98,7 @@ class ServeSettings(BaseSettings):
         return self
 
     @model_validator(mode="after")
-    def _validate_recovery_timing(self) -> ServeSettings:
+    def _validate_recovery_timing(self) -> ServerSettings:
         if self.worker_lease_duration <= max(
             self.worker_heartbeat_interval * 3,
             self.worker_heartbeat_timeout,

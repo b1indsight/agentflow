@@ -25,7 +25,7 @@ from app.domain.models import Attempt
 from app.persistence.store import Store
 
 if TYPE_CHECKING:
-    from app.control.worker_connection import WorkerConnection
+    from app.controler.workers.connection import WorkerConnection
 
 
 @dataclass

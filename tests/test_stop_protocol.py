@@ -14,8 +14,8 @@ from app.contracts.protocol import (
     StopExecution,
     parse_worker_message,
 )
-from app.control.gateway import WorkerGateway
-from app.control.service import ControlService
+from app.controler.workers.gateway import WorkerGateway
+from app.controler.workflow.service import ControlService
 from app.domain.models import JobKind
 from app.persistence.stop_store import StopStore
 from app.worker.execution.vcs import _run

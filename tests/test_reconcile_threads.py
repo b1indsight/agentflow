@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.control.reconcile_feedback import FeedbackReconciler, ThreadScanState
+from app.controler.reconciliation.feedback import FeedbackReconciler, ThreadScanState
 from app.domain.models import DeliveryState
 from app.github import Batch, GitHubError, GitHubErrorKind, PullRequest, ReviewComment, ReviewThread
 from app.persistence.reconcile_store import ReconcileStore

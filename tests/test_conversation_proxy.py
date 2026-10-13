@@ -10,8 +10,8 @@ from app.contracts.protocol import (
     ConversationResult,
     parse_server_message,
 )
-from app.control.conversation import ConversationBroker, ConversationService
-from app.control.worker_connection import WorkerConnection
+from app.controler.workers.connection import WorkerConnection
+from app.controler.workers.conversation import ConversationBroker, ConversationService
 from app.domain.models import JobKind
 from tests.test_conversation_history import SESSION
 

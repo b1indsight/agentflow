@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from app.control.resolution import covered_thread
+from app.controler.review.resolution import covered_thread
 from app.domain.models import ReviewItemKind
 from app.domain.review_models import ReviewFeedback
 from app.github import Batch, ReviewComment, ReviewThread

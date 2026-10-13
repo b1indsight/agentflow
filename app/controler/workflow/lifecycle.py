@@ -10,8 +10,12 @@ from app.contracts.protocol import (
     parse_worker_message,
 )
 from app.contracts.result_models import ResultPending
-from app.control.initial import initial_delivery_mismatch
-from app.control.revisions import frozen_revision, revision_mismatch, verify_revision_remote
+from app.controler.workflow.initial import initial_delivery_mismatch
+from app.controler.workflow.revisions import (
+    frozen_revision,
+    revision_mismatch,
+    verify_revision_remote,
+)
 from app.domain.models import (
     TERMINAL_STATES,
     DeliveryState,

@@ -46,7 +46,7 @@ def test_worker_data_paths_do_not_load_control_plane_dependencies(operation: str
     )
     modules = set(json.loads(result.stdout))
     # The public entry point includes binding types; restoring facts needs no SDK or authentication.
-    forbidden = {"app.control", "app.persistence", "psycopg", "githubkit", "bub"}
+    forbidden = {"app.controler", "app.persistence", "psycopg", "githubkit", "bub"}
     assert not contains_forbidden(modules, forbidden), sorted(
         module for module in modules if contains_forbidden({module}, forbidden)
     )
@@ -80,21 +80,33 @@ def contains_forbidden(modules: set[str], prefixes: set[str]) -> bool:
     )
 
 
+_SERVER_ENTRYPOINTS = {"app.controler.api", "app.controler.runtime"}
+
+
 @pytest.mark.parametrize(("package", "forbidden"), [
-    ("domain", {"app.contracts", "app.control", "app.worker", "app.persistence",
+    ("domain", {"app.contracts", "app.controler", "app.worker", "app.persistence",
                 "app.telemetry", "psycopg", "githubkit", "fastapi"}),
-    ("contracts", {"app.control", "app.worker", "app.persistence",
+    ("contracts", {"app.controler", "app.worker", "app.persistence",
                    "app.telemetry", "psycopg", "githubkit", "fastapi"}),
-    ("persistence", {"app.control", "app.worker", "githubkit"}),
-    ("github", {"app.control", "app.worker", "app.persistence", "psycopg"}),
-    ("control", {"app.worker"}),
-    ("worker", {"app.control", "app.persistence", "app.github", "app.telemetry.metrics",
+    ("persistence", {"app.controler", "app.worker", "githubkit"}),
+    ("github", {"app.controler", "app.worker", "app.persistence", "psycopg"}),
+    ("controler", {"app.worker"}),
+    ("worker", {"app.controler", "app.persistence", "app.github", "app.telemetry.metrics",
                 "psycopg", "githubkit", "bub", "app.contracts.control"}),
     ("worker/execution", {"fastapi"}),
-    ("control/lifecycle.py", {"app.control.results", "app.control.effects",
-                              "app.control.service", "app.control.tools"}),
-    ("control/initial.py", {"app.control"}),
-    ("control/effects.py", {"app.control.tools"}),
+    ("controler/workflow/lifecycle.py", {"app.controler.workflow.results", "app.controler.workflow.effects",
+                                        "app.controler.workflow.service", "app.controler.workflow.tools"}),
+    ("controler/workflow/initial.py", {"app.controler"}),
+    ("controler/workflow/effects.py", {"app.controler.workflow.tools"}),
+    ("controler/events", _SERVER_ENTRYPOINTS | {"app.controler.workers", "app.controler.reconciliation"}),
+    ("controler/workers", _SERVER_ENTRYPOINTS | {"app.controler.events", "app.controler.reconciliation"}),
+    ("controler/reconciliation", _SERVER_ENTRYPOINTS | {"app.controler.events", "app.controler.workers"}),
+    ("controler/workflow", _SERVER_ENTRYPOINTS | {
+        "app.controler.events", "app.controler.workers", "app.controler.reconciliation",
+    }),
+    ("controler/review", _SERVER_ENTRYPOINTS | {
+        "app.controler.events", "app.controler.workers", "app.controler.reconciliation", "app.controler.workflow",
+    }),
 ])
 def test_packages_keep_responsibility_boundaries(package: str, forbidden: set[str]) -> None:
     modules = imported_modules(Path("app") / package)

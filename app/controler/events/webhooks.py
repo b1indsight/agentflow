@@ -9,15 +9,15 @@ from functools import partial
 from loguru import logger
 from pydantic import ValidationError
 
-from app.control.config import ServeSettings
-from app.control.router import EventRouter
-from app.control.service import ControlService
+from app.controler.config import ServerSettings
+from app.controler.events.router import EventRouter
+from app.controler.workflow.service import ControlService
 from app.persistence.store import Store
 from app.persistence.webhook_store import WebhookStore
 
 
 class WebhookConsumer:
-    def __init__(self, store: Store, settings: ServeSettings, service: ControlService) -> None:
+    def __init__(self, store: Store, settings: ServerSettings, service: ControlService) -> None:
         self.store, self.settings, self.service = store, settings, service
         self.wakeup = asyncio.Event()
 

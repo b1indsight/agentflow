@@ -6,8 +6,13 @@ import asyncio
 
 from loguru import logger
 
-from app.control.lifecycle import pause_delivery, prove_reopen, record_merge, resume_delivery
-from app.control.service import ControlService
+from app.controler.workflow.lifecycle import (
+    pause_delivery,
+    prove_reopen,
+    record_merge,
+    resume_delivery,
+)
+from app.controler.workflow.service import ControlService
 from app.domain.models import TERMINAL_STATES, DeliveryState, FlowState
 from app.github import GitHubApp, GitHubError, GitHubErrorKind, PullRequestMerge, retry_delay
 from app.persistence.reconcile_store import ReconcileState

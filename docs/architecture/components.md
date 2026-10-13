@@ -7,7 +7,7 @@
 `domain/` 保存领域事实、端口与纯策略；`contracts/` 在这些类型上定义跨进程消息与冻结结果。
 `persistence/` 拥有 SQL 和事务，`github/` 拥有资源、远端查询数据、绑定配置及其 GitHub SDK/GraphQL 操作，两者不反向依赖编排层。
 领域容器、合同和仓储直接引用同一个资源模型；公开事实可以离线恢复，SDK/认证只在实际操作时加载。
-`control/` 组合仓储、GitHub、协议与插件，负责工作流、Judge 决策和外部副作用；`worker/` 组合协议、CodingAgent
+`controler/` 是控制服务端，组合仓储、GitHub、协议与插件，负责工作流、Judge 决策和外部副作用；`worker/` 组合协议、CodingAgent
 执行器及 VCS，不加载 control、数据库或 GitHub SDK 实现。轻量或通常会使用的依赖在模块级导入；
 局部导入仅用于实际循环或依赖隔离。CLI 的 uvicorn、领域类型和离线 GitHub 资源直接导入，
 控制端运行时、数据库与配置实例化仍归对应命令；加载 CLI 不提前加载 SQL、SDK 或控制端。
@@ -18,8 +18,17 @@ GitHub 错误分类和 Retry-After 计时由 `github/errors.py` 提供，仓储�
 不会初始化 SDK。`domain/project_models.py` 只保留业务目标状态，GitHub Project 绑定配置及远端目标数据归 `github/projects.py`。
 职责边界由 `tests/test_boundaries.py` 检查，另以独立解释器验证 worker 启动、实际 CLI 入口和资源 JSON 恢复的传递导入。
 
-目录列表见[当前目录](roadmap.md#8-当前目录与里程碑)。Judge 内部子进程入口为
-`app.control.judge_runner`；对外 CLI、`app.control.api` 和 `app.live_smoke` 入口保持不变。
+`controler/` 根目录的 `api.py`、`config.py`、`runtime.py` 分别拥有 HTTP/WS 入口、
+`ServerSettings` 与 `ServerRuntime` 装配。子包按职责归组：`events/` 消费并路由持久 webhook，
+`workers/` 管理 Worker 连接、派发通信与历史查询，`workflow/` 拥有 Flow/Job 准备、交付转换、
+结果提交及副作用恢复，`review/` 加工审核上下文和反馈并运行 Judge，`reconciliation/` 对账
+PR、反馈与 Projects。事件、Worker 管理和对账调用工作流，工作流调用审核模块；
+各子包直接引用已有领域类型、协议、Store/GitHub 及配置，不反向依赖 API 或运行时。
+各包入口只说明职责，调用者直接导入具体模块。
+
+目录列表见[当前目录](roadmap.md#8-当前目录与里程碑)。ASGI Python 入口为
+`app.controler.api`，Judge 内部子进程入口为 `app.controler.review.runner`；
+CLI 命令为 `flowtool serve` / `flowtool worker`，真实验收入口为 `app.live_smoke`。
 
 ## 4.1 Webhook Ingress（FastAPI + uvicorn）
 

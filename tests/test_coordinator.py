@@ -16,8 +16,8 @@ from app.contracts.protocol import (
     Succeeded,
     terminal_digest,
 )
-from app.control.config import ServeSettings
-from app.control.coordinator import JobCoordinator
+from app.controler.config import ServerSettings
+from app.controler.workflow.coordinator import JobCoordinator
 from app.domain.delivery_models import DeliveryReceipt
 from app.domain.models import (
     Attempt,
@@ -225,7 +225,7 @@ async def prepare(subject: JobCoordinator, job: Job):
 
 
 def coordinator(store: Store | MemoryStore, github: GitHubApp) -> JobCoordinator:
-    settings = ServeSettings.model_construct(
+    settings = ServerSettings.model_construct(
         database_url="postgresql://localhost/test",
         worker_tokens={"worker-1": SecretStr("worker-secret")},
         allowlist=["alice"],

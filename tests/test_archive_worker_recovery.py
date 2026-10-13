@@ -17,8 +17,8 @@ from app.contracts.protocol import (
     parse_server_message,
     parse_worker_message,
 )
-from app.control.gateway import WorkerGateway
-from app.control.service import ControlService
+from app.controler.workers.gateway import WorkerGateway
+from app.controler.workflow.service import ControlService
 from app.domain.models import FlowState, JobKind, JobState
 from app.worker.execution.executor import WorkerExecutor
 from app.worker.execution.vcs import prepare_flow_repo

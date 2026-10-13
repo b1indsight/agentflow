@@ -11,9 +11,9 @@ from githubkit.cache.mem_cache import MemCacheStrategy
 
 from app.contracts.protocol import ArchiveResult
 from app.contracts.result_models import CommentEffect, EffectState, ResultPending
-from app.control.archive import archive_progress
-from app.control.effects import ResultEffects
-from app.control.service import ControlService
+from app.controler.workflow.archive import archive_progress
+from app.controler.workflow.effects import ResultEffects
+from app.controler.workflow.service import ControlService
 from app.domain.models import FlowState, JobState
 from app.github import GitHubApp, GitHubError, GitHubErrorKind, Issue, PullRequest
 from app.persistence.result_store import ResultStore

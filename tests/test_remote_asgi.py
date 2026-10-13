@@ -19,13 +19,13 @@ from app.contracts.protocol import (
     Succeeded,
     parse_server_message,
 )
-from app.control.api import create_app
-from app.control.config import ServeSettings
-from app.control.conversation import ConversationService
-from app.control.coordinator import JobCoordinator
-from app.control.gateway import WorkerGateway
-from app.control.runtime import ControlRuntime
-from app.control.tools import FlowToolService
+from app.controler.api import create_app
+from app.controler.config import ServerSettings
+from app.controler.runtime import ServerRuntime
+from app.controler.workers.conversation import ConversationService
+from app.controler.workers.gateway import WorkerGateway
+from app.controler.workflow.coordinator import JobCoordinator
+from app.controler.workflow.tools import FlowToolService
 from app.domain.models import Job, JobKind, JobState
 from app.persistence.store import Store
 from app.telemetry.metrics import Metrics
@@ -75,9 +75,9 @@ class AsgiCoordinator(JobCoordinator):
         pass
 
 
-class AsgiRuntime(ControlRuntime):
+class AsgiRuntime(ServerRuntime):
     def __init__(self, store: Store, attempt_id: int) -> None:
-        self.settings = ServeSettings.model_construct(database_url=store.database_url,
+        self.settings = ServerSettings.model_construct(database_url=store.database_url,
                                       worker_tokens={"worker-1": SecretStr("worker-secret")},
                                       github_webhook_secret="unused", webhook_max_body_bytes=1024,
                                       metrics_token=None, host="test", port=0)

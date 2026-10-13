@@ -10,7 +10,7 @@ from typing import Protocol
 from fastapi import WebSocketDisconnect
 
 from app.contracts.protocol import parse_worker_message
-from app.control.conversation import ConversationBroker
+from app.controler.workers.conversation import ConversationBroker
 
 
 class WorkerSocket(Protocol):

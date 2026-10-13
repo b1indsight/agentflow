@@ -13,8 +13,8 @@ from types import SimpleNamespace
 import pytest
 from psycopg import OperationalError
 
-from app.control.service import ControlService
-from app.control.webhooks import WebhookConsumer
+from app.controler.events.webhooks import WebhookConsumer
+from app.controler.workflow.service import ControlService
 from app.domain.models import DeliveryState, FlowState
 from app.persistence.webhook_store import WebhookStore
 

@@ -20,7 +20,7 @@ from app.contracts.protocol import (
     RevisionTaskResult,
 )
 from app.contracts.result_models import ResolveEffect
-from app.control.resolution import plan_resolution
+from app.controler.review.resolution import plan_resolution
 from app.domain.models import (
     AddressedComment,
     Attempt,

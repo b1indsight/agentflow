@@ -6,7 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.contracts.result_models import EffectReceipt, ResolveEffect
-from app.control.resolution import covered_thread
+from app.controler.review.resolution import covered_thread
 from app.domain.context_models import ReviewContext
 from app.github import Issue, PullRequest, ReviewThread, ReviewThreads
 from tests.review_memory import review_context

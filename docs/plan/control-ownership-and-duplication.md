@@ -12,8 +12,8 @@
 代码准则审查发现四项维护问题：coordinator 直接修改 review_batches 表；Judge 答复和
 结果评论分别实现幂等投递规则；ResultEffects 同时管理 PR 生命周期；WorkerGateway
 同时拥有持久结果扫描、并发恢复和实时消息处理。
-依据：[coordinator](../../app/control/coordinator.py)、[effects](../../app/control/effects.py)、
-[gateway](../../app/control/gateway.py)、[代码准则](../../.agents/skills/code-principles/SKILL.md)。
+依据：[coordinator](https://github.com/b1indsight/agentflow/blob/a50ac2c0615bea1f8c8e42b23b3307deaa1e4ba8/app/control/coordinator.py)、[effects](https://github.com/b1indsight/agentflow/blob/a50ac2c0615bea1f8c8e42b23b3307deaa1e4ba8/app/control/effects.py)、
+[gateway](https://github.com/b1indsight/agentflow/blob/a50ac2c0615bea1f8c8e42b23b3307deaa1e4ba8/app/control/gateway.py)、[代码准则](../../.agents/skills/code-principles/SKILL.md)。
 
 目标是让 SQL、评论投递、delivery 生命周期和结果恢复各有明确归属，删除需要同步维护的
 核心重复。验收以当前行为回归和职责边界为依据，文件长度不作为拆分标准。

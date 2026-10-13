@@ -7,8 +7,8 @@ from typing import Literal
 
 from loguru import logger
 
-from app.control.config import ServeSettings
-from app.control.service import ControlService
+from app.controler.config import ServerSettings
+from app.controler.workflow.service import ControlService
 from app.domain.models import ReviewItemKind
 from app.domain.review_models import FeedbackUpdate
 from app.persistence.store import Store
@@ -19,7 +19,7 @@ class EventRouter:
         self,
         store: Store,
         service: ControlService,
-        settings: ServeSettings,
+        settings: ServerSettings,
     ) -> None:
         self.store = store
         self.service = service

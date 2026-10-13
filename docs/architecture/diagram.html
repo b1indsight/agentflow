@@ -312,19 +312,19 @@
           <article class="node" data-status="done">
             <div class="node__top"><span class="node__name">Ingress</span><span class="pill">M0 已验</span></div>
             <p class="node__role">FastAPI · HMAC 验签 · /webhook · /healthz · 后台交接 · 202 响应</p>
-            <code class="node__file">app/control/api.py</code>
+            <code class="node__file">app/controler/api.py</code>
           </article>
           <span class="arrow" aria-hidden="true">→</span>
           <article class="node" data-status="done">
             <div class="node__top"><span class="node__name">Event Router</span><span class="pill">M2 自动化</span></div>
             <p class="node__role">delivery/反馈版本原子入库 · allowlist · 持久 settle/冻结批次 · 同秒历史转换核对</p>
-            <code class="node__file">app/control/router.py</code>
+            <code class="node__file">app/controler/events/router.py</code>
           </article>
           <span class="arrow" aria-hidden="true">→</span>
           <article class="node" data-status="partial">
             <div class="node__top"><span class="node__name">Control Service + Coordinator</span><span class="pill">部分</span></div>
             <p class="node__role">Issue→PR · 语义决策/交付核验 · 原线程回复/resolve · 真实 E2E、kill、冲突处理待完成</p>
-            <code class="node__file">app/control/service.py · coordinator.py</code>
+            <code class="node__file">app/controler/workflow/service.py · coordinator.py</code>
           </article>
         </div>
       </div>
@@ -344,7 +344,7 @@
         <article class="node" data-status="done">
           <div class="node__top"><span class="node__name">Worker Gateway</span><span class="pill">已验证</span></div>
           <p class="node__role">多 identity WebSocket · bearer 鉴权 · epoch fencing · busy reconnect / takeover</p>
-          <code class="node__file">app/control/gateway.py</code>
+          <code class="node__file">app/controler/workers/gateway.py</code>
         </article>
         <article class="node" data-status="partial">
           <div class="node__top"><span class="node__name">GitHub Client</span><span class="pill">部分</span></div>
@@ -358,12 +358,12 @@
         <article class="node" data-status="done">
           <div class="node__top"><span class="node__name">Remote Worker Session</span><span class="pill">Features 1–3 已验</span></div>
           <p class="node__role">多出站长连接 · lease/recovery grace · journal/result replay · serve restart</p>
-          <code class="node__file">app/control/gateway.py</code>
+          <code class="node__file">app/controler/workers/gateway.py</code>
         </article>
         <article class="node" data-status="stub">
           <div class="node__top"><span class="node__name">Reconciler</span><span class="pill">桩</span></div>
           <p class="node__role">周期对账兜底 · 补 webhook 漏投 · _sweep() 目前空转</p>
-          <code class="node__file">app/control/reconcile.py · V1</code>
+          <code class="node__file">app/controler/reconciliation/pull_requests.py · V1</code>
         </article>
       </div>
     </div>

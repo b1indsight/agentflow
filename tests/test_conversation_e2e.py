@@ -7,10 +7,10 @@ import httpx
 import pytest
 from pydantic import SecretStr
 
-from app.control.api import create_app
-from app.control.conversation import ConversationService
-from app.control.gateway import WorkerGateway
-from app.control.runtime import ControlRuntime
+from app.controler.api import create_app
+from app.controler.runtime import ServerRuntime
+from app.controler.workers.conversation import ConversationService
+from app.controler.workers.gateway import WorkerGateway
 from app.domain.models import Attempt, Flow, FlowExecution, FlowState
 from app.worker.state.session import WorkerSession
 from app.worker.transport.client import WorkerClient
@@ -75,7 +75,7 @@ async def test_http_query_while_worker_or_control_busy_and_idle(tmp_path, phase,
                             worker_tokens={"worker-1": "worker-secret"}, poll_interval=0.01)
     gateway.conversations.timeout = 1
     service = ConversationService(store, gateway.conversations)
-    runtime = Mock(spec=ControlRuntime, settings=SimpleNamespace(control_api_token=SecretStr("reader")), conversations=service)
+    runtime = Mock(spec=ServerRuntime, settings=SimpleNamespace(control_api_token=SecretStr("reader")), conversations=service)
     app = create_app(runtime)
     app.state.runtime = runtime
     to_worker: asyncio.Queue[str] = asyncio.Queue()

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.contracts.conversation import ConversationFailure, HistoryQuery
-from app.control.conversation import ConversationService
+from app.controler.workers.conversation import ConversationService
 from app.domain.models import Attempt
 from app.worker.state import history
 from app.worker.state.history import CodexHistory

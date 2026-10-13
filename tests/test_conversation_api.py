@@ -7,7 +7,7 @@ from pydantic import SecretStr
 from starlette.testclient import TestClient
 
 from app.contracts.conversation import ConversationFailure, ConversationPage
-from app.control.api import create_app
+from app.controler.api import create_app
 from app.telemetry.metrics import Metrics
 
 

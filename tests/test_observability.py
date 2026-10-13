@@ -12,13 +12,13 @@ from fastapi.testclient import TestClient
 from loguru import logger
 from pydantic import SecretStr
 
-import app.control.config as control_config
-import app.control.runtime as control_runtime
+import app.controler.config as server_config
+import app.controler.runtime as server_runtime
 import app.telemetry.metrics as metrics_module
 from app import cli
 from app.contracts.protocol import PROTOCOL_VERSION, InitialTaskResult, Succeeded
-from app.control.api import create_app
-from app.control.config import ServeSettings
+from app.controler.api import create_app
+from app.controler.config import ServerSettings
 from app.domain.models import DeliveryState, FlowState, JobKind, JobState, utcnow
 from app.persistence import metrics_store
 from app.persistence.metrics_store import read_snapshot
@@ -161,12 +161,12 @@ def test_standard_logging_preserves_level_and_origin_without_payload():
 
 def test_serve_preserves_sanitized_uvicorn_logging(monkeypatch, capsys):
     output = io.StringIO()
-    settings = ServeSettings.model_construct(database_url="postgresql://localhost/test",
+    settings = ServerSettings.model_construct(database_url="postgresql://localhost/test",
         worker_tokens={"worker-1": SecretStr("worker-secret")}, log_format="json")
-    monkeypatch.setattr(control_config, "ServeSettings", lambda: settings)
-    monkeypatch.setattr(control_runtime, "Store", Mock())
-    monkeypatch.setattr(control_runtime, "GitHubApp", Mock())
-    monkeypatch.setattr(control_runtime, "configure_logging",
+    monkeypatch.setattr(server_config, "ServerSettings", lambda: settings)
+    monkeypatch.setattr(server_runtime, "Store", Mock())
+    monkeypatch.setattr(server_runtime, "GitHubApp", Mock())
+    monkeypatch.setattr(server_runtime, "configure_logging",
                         lambda role, output_format: configure_logging(role, output_format, output))
 
     def initialize_server(application, **kwargs):

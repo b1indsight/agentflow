@@ -29,12 +29,16 @@ from app.contracts.result_models import (
     ThreadReplyEffect,
     unique_pull_request_receipt,
 )
-from app.control.archive import archive_effects, verify_archive
-from app.control.config import ServeSettings
-from app.control.effects import ResultEffects
-from app.control.initial import initial_delivery_mismatch
-from app.control.resolution import plan_resolution
-from app.control.revisions import frozen_revision, revision_mismatch, verify_revision_remote
+from app.controler.config import ServerSettings
+from app.controler.review.resolution import plan_resolution
+from app.controler.workflow.archive import archive_effects, verify_archive
+from app.controler.workflow.effects import ResultEffects
+from app.controler.workflow.initial import initial_delivery_mismatch
+from app.controler.workflow.revisions import (
+    frozen_revision,
+    revision_mismatch,
+    verify_revision_remote,
+)
 from app.domain.models import (
     TERMINAL_STATES,
     AddressedComment,
@@ -62,7 +66,7 @@ class ResultApplication:
         self,
         store: Store,
         github: GitHubApp,
-        settings: ServeSettings,
+        settings: ServerSettings,
         plugins: PluginManager,
     ) -> None:
         self.store = store

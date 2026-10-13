@@ -27,9 +27,9 @@ from app.contracts.protocol import (
     terminal_digest,
 )
 from app.contracts.result_models import ResultPending
-from app.control.coordinator import JobCoordinator
-from app.control.gateway import WorkerGateway
-from app.control.tools import FlowToolService
+from app.controler.workers.gateway import WorkerGateway
+from app.controler.workflow.coordinator import JobCoordinator
+from app.controler.workflow.tools import FlowToolService
 from app.domain.delivery_models import PreparedDelivery
 from app.domain.models import (
     FlowDelivery,

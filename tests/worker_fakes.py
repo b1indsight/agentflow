@@ -4,7 +4,7 @@ from collections.abc import Awaitable, Callable
 from unittest.mock import Mock
 
 from app.contracts.protocol import ExecutionStopped
-from app.control.results import ResultApplication
+from app.controler.workflow.results import ResultApplication
 from app.domain.models import JobState, WorkerRecord, WorkerStatus, utcnow
 from app.persistence.stop_store import StopIntent, StopStore
 from app.persistence.store import Store

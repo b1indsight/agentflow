@@ -13,7 +13,7 @@
 prompt/log_path；Store 将开始、结束时间同时设为应用结果时的时间。
 这行数据表示一次 job 结果应用，不能表示真实 Codex 调用：一次 revision 可先 resume
 失败再 fallback 成功，调用事实已经保存在结果的 invocations 中。
-依据：[结果应用](../../app/control/results.py)、[存储与建表](../../app/persistence/store.py)、
+依据：[结果应用](https://github.com/b1indsight/agentflow/blob/a50ac2c0615bea1f8c8e42b23b3307deaa1e4ba8/app/control/results.py)、[存储与建表](../../app/persistence/store.py)、
 [结果协议](../../app/contracts/protocol.py)。
 
 目标是消除第二套含义不准确的运行记录，以 jobs 中的持久化结果、结果接收/应用时间及

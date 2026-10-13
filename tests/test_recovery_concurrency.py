@@ -9,8 +9,8 @@ from pydantic import ValidationError
 
 from app.contracts.protocol import InitialTaskResult, Succeeded
 from app.contracts.result_models import ResultPending
-from app.control.config import ServeSettings
-from app.control.runtime import ControlRuntime
+from app.controler.config import ServerSettings
+from app.controler.runtime import ServerRuntime
 from app.domain.models import JobKind, JobState
 from tests.test_gateway import RecordingCoordinator, RecordingStore
 from tests.worker_fakes import result_application
@@ -172,7 +172,7 @@ async def test_runtime_sweeps_continue_while_result_recovery_waits():
         finally:
             exited.set()
 
-    runtime = ControlRuntime.__new__(ControlRuntime)
+    runtime = ServerRuntime.__new__(ServerRuntime)
     runtime._triage_task = None
     runtime.coordinator = SimpleNamespace(triage=AsyncMock())
     runtime.judge = Mock()
@@ -221,5 +221,5 @@ def test_store_pages_only_unapplied_results_in_stable_job_order(store):
 
 def test_recovery_limits_are_validated():
     with pytest.raises(ValidationError):
-        ServeSettings(_env_file=None, database_url="postgresql://localhost/test",
+        ServerSettings(_env_file=None, database_url="postgresql://localhost/test",
                       worker_tokens={"worker": "secret"}, result_recovery_concurrency=0)

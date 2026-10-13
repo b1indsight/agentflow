@@ -12,7 +12,7 @@
 coordinator 准备任务并决定读取失败的重试；gateway 随后获取 capability，又处理 capability
 失败落库、delivery 在等待期间关闭/合并的业务决策。gateway 多次区分 ExecutionTask 与
 JobState。职责分散使传输代码必须理解准备阶段的业务失败规则。
-依据：[coordinator](../../app/control/coordinator.py)、[gateway](../../app/control/gateway.py)、
+依据：[coordinator](https://github.com/b1indsight/agentflow/blob/a50ac2c0615bea1f8c8e42b23b3307deaa1e4ba8/app/control/coordinator.py)、[gateway](https://github.com/b1indsight/agentflow/blob/a50ac2c0615bea1f8c8e42b23b3307deaa1e4ba8/app/control/gateway.py)、
 [准备重试测试](../../tests/test_preparation_retry.py)。
 
 目标是 coordinator 完整拥有准备业务，gateway 拥有连接、租约心跳、取消和消息发送。

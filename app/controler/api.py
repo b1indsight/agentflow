@@ -17,8 +17,8 @@ from psycopg_pool import PoolTimeout
 from starlette.middleware.base import RequestResponseEndpoint
 
 from app.contracts.conversation import ConversationFailure, ConversationPage
-from app.control.config import ServeSettings
-from app.control.runtime import ControlRuntime
+from app.controler.config import ServerSettings
+from app.controler.runtime import ServerRuntime
 from app.persistence.webhook_store import DeliveryConflict
 
 
@@ -40,12 +40,12 @@ async def _wait_for_disconnect(request: Request, cancel_scope: anyio.CancelScope
             pass
 
 
-def create_app(runtime: ControlRuntime | None = None) -> FastAPI:
+def create_app(runtime: ServerRuntime | None = None) -> FastAPI:
     """Create the HTTP app; construct the default runtime when its lifespan starts."""
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
-        active_runtime = runtime if runtime is not None else ControlRuntime(ServeSettings())  # type: ignore[call-arg]
+        active_runtime = runtime if runtime is not None else ServerRuntime(ServerSettings())  # type: ignore[call-arg]
         application.state.runtime = active_runtime
         application.state.metrics = active_runtime.metrics
         active_runtime.startup()
@@ -74,7 +74,7 @@ def create_app(runtime: ControlRuntime | None = None) -> FastAPI:
         cursor: str | None = Query(default=None, min_length=1, max_length=2048),
         limit: int = Query(default=100, ge=1, le=500),
     ) -> ConversationPage | Response:
-        runtime: ControlRuntime = request.app.state.runtime
+        runtime: ServerRuntime = request.app.state.runtime
         token = runtime.settings.control_api_token
         headers = {"Cache-Control": "no-store"}
         if token is None or not token.get_secret_value():
@@ -106,7 +106,7 @@ def create_app(runtime: ControlRuntime | None = None) -> FastAPI:
 
     @application.get("/metrics")
     async def metrics(request: Request) -> Response:
-        runtime: ControlRuntime = request.app.state.runtime
+        runtime: ServerRuntime = request.app.state.runtime
         token = runtime.settings.metrics_token
         if token is None or not token.get_secret_value():
             return Response(status_code=404)
@@ -117,7 +117,7 @@ def create_app(runtime: ControlRuntime | None = None) -> FastAPI:
 
     @application.get("/readyz")
     async def readyz(request: Request) -> Response:
-        runtime: ControlRuntime = request.app.state.runtime
+        runtime: ServerRuntime = request.app.state.runtime
         ready = await runtime.ready()
         return Response(status_code=200 if ready else 503, content="ready" if ready else "not ready")
 
@@ -132,7 +132,7 @@ def create_app(runtime: ControlRuntime | None = None) -> FastAPI:
         x_github_delivery: str = Header(default=""),
         x_hub_signature_256: str | None = Header(default=None),
     ) -> Response:
-        runtime: ControlRuntime = request.app.state.runtime
+        runtime: ServerRuntime = request.app.state.runtime
         body = bytearray()
         async for chunk in request.stream():
             if len(body) + len(chunk) > runtime.settings.webhook_max_body_bytes:
@@ -164,7 +164,7 @@ def create_app(runtime: ControlRuntime | None = None) -> FastAPI:
 
     @application.websocket("/internal/workers/connect")
     async def worker_connect(socket: WebSocket) -> None:
-        runtime: ControlRuntime = socket.app.state.runtime
+        runtime: ServerRuntime = socket.app.state.runtime
         await runtime.gateway.handle(socket)
 
     return application

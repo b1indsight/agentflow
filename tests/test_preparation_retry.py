@@ -6,9 +6,9 @@ from datetime import timedelta
 import pytest
 
 from app.contracts.protocol import PROTOCOL_VERSION, Assignment, RevisionTask
-from app.control.gateway import WorkerGateway
-from app.control.lifecycle import pause_delivery
-from app.control.preparation import PreparationStale
+from app.controler.workers.gateway import WorkerGateway
+from app.controler.workflow.lifecycle import pause_delivery
+from app.controler.workflow.preparation import PreparationStale
 from app.domain.models import JobKind, JobState
 from app.github import GitHubError, GitHubErrorKind, Repository
 from app.persistence.store import Store

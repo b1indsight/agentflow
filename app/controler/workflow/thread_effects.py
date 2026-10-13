@@ -9,7 +9,7 @@ from app.contracts.result_models import (
     ResultPending,
     ResultPlan,
 )
-from app.control.resolution import covered_thread
+from app.controler.review.resolution import covered_thread
 from app.domain.models import TERMINAL_STATES, ReviewItemKind
 from app.github import GitHubError, PullRequest, Repository, ReviewThread, ReviewThreads
 from app.persistence.store import Store

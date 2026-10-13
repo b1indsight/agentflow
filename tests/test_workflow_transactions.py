@@ -8,7 +8,7 @@ from threading import Barrier
 import pytest
 
 from app.contracts.protocol import PROTOCOL_VERSION, RevisionTask, Succeeded, terminal_digest
-from app.control.service import ControlService
+from app.controler.workflow.service import ControlService
 from app.domain.models import (
     DeliveryState,
     FlowState,

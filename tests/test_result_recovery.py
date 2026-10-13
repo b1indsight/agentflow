@@ -17,8 +17,8 @@ from app.contracts.protocol import (
     terminal_digest,
 )
 from app.contracts.result_models import EffectState, ResultPending
-from app.control.coordinator import JobCoordinator
-from app.control.service import ControlService
+from app.controler.workflow.coordinator import JobCoordinator
+from app.controler.workflow.service import ControlService
 from app.domain.delivery_models import OpenedDelivery
 from app.domain.models import (
     DeliveryState,

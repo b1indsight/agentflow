@@ -17,7 +17,7 @@
 initial、revision、archive 及原有对话查询。保留四类判定、置信度门槛、冻结反馈版本、
 答复副作用和授权 request-changes 直接修订的现有语义。
 
-依据：[现有准备逻辑](../../app/control/coordinator.py)、[结果应用](../../app/control/results.py)、
+依据：[现有准备逻辑](https://github.com/b1indsight/agentflow/blob/a50ac2c0615bea1f8c8e42b23b3307deaa1e4ba8/app/control/coordinator.py)、[结果应用](https://github.com/b1indsight/agentflow/blob/a50ac2c0615bea1f8c8e42b23b3307deaa1e4ba8/app/control/results.py)、
 [worker 执行器](../../app/worker/executor.py)、[Judge](../../app/worker/judge.py)。
 这是对已完成 [M2 semantic triage](m2-semantic-triage.md) 中“worker 执行 Judge”决策的后续变更；
 原计划作为历史保留。本 PR 不更改模型供应商或判定 prompt，不拆分全部 Python 安装依赖，
@@ -134,9 +134,9 @@ GitHub effect ledger。新增另一套 triage 队列、结果存储或恢复器�
 增加代表性回归，证明本地 triage 完成及恢复不会改写原 worker 的槽状态或 Flow binding
 恢复期限，并证明本地与远程结果均通过同一套结果应用和副作用恢复路径。
 
-依据：[runtime](../../app/control/runtime.py)、[coordinator](../../app/control/coordinator.py)、
-[现有恢复](../../app/control/gateway.py)、[结果存储与完成](../../app/persistence/store.py)、
-[结果应用](../../app/control/results.py)。
+依据：[runtime](https://github.com/b1indsight/agentflow/blob/a50ac2c0615bea1f8c8e42b23b3307deaa1e4ba8/app/control/runtime.py)、[coordinator](https://github.com/b1indsight/agentflow/blob/a50ac2c0615bea1f8c8e42b23b3307deaa1e4ba8/app/control/coordinator.py)、
+[现有恢复](https://github.com/b1indsight/agentflow/blob/a50ac2c0615bea1f8c8e42b23b3307deaa1e4ba8/app/control/gateway.py)、[结果存储与完成](../../app/persistence/store.py)、
+[结果应用](https://github.com/b1indsight/agentflow/blob/a50ac2c0615bea1f8c8e42b23b3307deaa1e4ba8/app/control/results.py)。
 
 
 ### 2026-10-08 · 2. 方案批准与实现

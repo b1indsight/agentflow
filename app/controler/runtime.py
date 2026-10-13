@@ -7,16 +7,16 @@ from datetime import timedelta
 
 from loguru import logger
 
-from app.control.config import ServeSettings
-from app.control.conversation import ConversationService
-from app.control.coordinator import JobCoordinator
-from app.control.gateway import WorkerGateway
-from app.control.judge import BubJudge
-from app.control.projects import ProjectSync
-from app.control.reconcile import Reconciler
-from app.control.reconcile_feedback import FeedbackReconciler
-from app.control.service import ControlService
-from app.control.webhooks import WebhookConsumer
+from app.controler.config import ServerSettings
+from app.controler.events.webhooks import WebhookConsumer
+from app.controler.reconciliation.feedback import FeedbackReconciler
+from app.controler.reconciliation.projects import ProjectSync
+from app.controler.reconciliation.pull_requests import Reconciler
+from app.controler.review.judge import BubJudge
+from app.controler.workers.conversation import ConversationService
+from app.controler.workers.gateway import WorkerGateway
+from app.controler.workflow.coordinator import JobCoordinator
+from app.controler.workflow.service import ControlService
 from app.github import GitHubApp
 from app.persistence.readiness import database_ready
 from app.persistence.store import Store
@@ -26,10 +26,10 @@ from app.telemetry.logging import configure_logging
 from app.telemetry.metrics import Metrics
 
 
-class ControlRuntime:
+class ServerRuntime:
     """Own control adapters, local review decisions and background recovery."""
 
-    def __init__(self, settings: ServeSettings) -> None:
+    def __init__(self, settings: ServerSettings) -> None:
         self.settings = settings
         configure_logging("serve", self.settings.log_format)
         self.metrics = Metrics()
