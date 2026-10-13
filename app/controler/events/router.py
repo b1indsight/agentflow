@@ -37,7 +37,7 @@ class EventRouter:
         if event_type in {"issue_comment", "pull_request_review", "pull_request_review_comment"}:
             self._on_feedback(event_type, delivery_id, payload)
             return
-        if not self.store.record_event(delivery_id, event_type, None, payload):
+        if not self.store.webhooks.record_event(delivery_id, event_type, None, payload):
             return
         handler = {
             "issues": self._on_issues,
@@ -58,7 +58,7 @@ class EventRouter:
                 return
             self.service.on_trigger(repo, issue_number, installation_id)
         elif action == "unlabeled" and label == self.settings.trigger_label:
-            flow = self.store.get_active_flow(repo, issue_number)
+            flow = self.store.flows.get_active_flow(repo, issue_number)
             if flow:
                 self.service.cancel(flow)
 
@@ -68,9 +68,9 @@ class EventRouter:
         conversation = event_type == "issue_comment"
         review = event_type == "pull_request_review"
         number = payload["issue" if conversation else "pull_request"]["number"]
-        flow = self.store.get_flow_by_pr(repo, number)
+        flow = self.store.flows.get_flow_by_pr(repo, number)
         if conversation and flow is None:
-            flow = self.store.get_active_flow(repo, number)
+            flow = self.store.flows.get_active_flow(repo, number)
         action = payload.get("action")
         allowed = (
             {"submitted", "edited", "dismissed"} if review else {"created", "edited", "deleted"}
@@ -83,11 +83,11 @@ class EventRouter:
             or author.get("type") == "Bot"
             or author.get("login") == self.settings.bot_login
         ):
-            self.store.record_event(delivery_id, event_type, flow.id if flow else None, payload)
+            self.store.webhooks.record_event(delivery_id, event_type, flow.id if flow else None, payload)
             return
         body = item.get("body") or ""
         if conversation and action == "created" and body.strip() == "/flow stop":
-            if self.store.record_event(delivery_id, event_type, flow.id, payload):
+            if self.store.webhooks.record_event(delivery_id, event_type, flow.id, payload):
                 self.service.cancel(flow)
             return
         sender = (payload.get("sender") or {}).get("login", "")
@@ -133,11 +133,11 @@ class EventRouter:
         pull_request = payload.get("pull_request") or {}
         if payload.get("action") not in {"closed", "reopened", "synchronize"}:
             return
-        flow = self.store.get_flow_by_pr(payload["repository"]["full_name"], pull_request["number"])
+        flow = self.store.flows.get_flow_by_pr(payload["repository"]["full_name"], pull_request["number"])
         if flow and payload.get("action") == "closed" and pull_request.get("merged") is True:
             self.service.on_merged(flow, delivery_id, payload)
         elif flow:
             with self.store.transaction() as tx:
                 fresh = tx.lock_workflow(flow.id)
-                if fresh is not None and tx.record_event(delivery_id, "pull_request", flow.id, payload):
+                if fresh is not None and tx.webhooks.record_event(delivery_id, "pull_request", flow.id, payload):
                     tx.reconcile.hint(flow.id)

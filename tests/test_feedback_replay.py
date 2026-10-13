@@ -6,7 +6,7 @@ from datetime import timedelta
 import pytest
 
 from app.github import ReviewThreads
-from app.persistence.review_store import ReviewStore
+from app.persistence.reviews import ReviewStore
 from app.persistence.store import Store
 from tests.test_review_batches import batch_for, feedback, ingest, settle
 from tests.test_review_batches import (
@@ -122,7 +122,7 @@ def test_late_edit_reservation_rolls_back_with_the_observation(store, review_flo
         patch.setattr(ReviewStore, "_append_version", interrupted)
         with pytest.raises(RuntimeError, match="version decision"):
             edit(store, flow, clock, "late-b", "A", "B")
-    assert not store.event_seen("late-b")
+    assert not store.webhooks.event_seen("late-b")
     assert not edit(store, flow, clock, "late-b", "A", "B")
     observe(store, flow, clock, "A")
     assert store.reviews.pending(flow.id)[0].body == "A"

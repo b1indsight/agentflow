@@ -8,6 +8,11 @@
 
 ## Unreleased
 
+- Persistence 的业务 SQL 归 Flow/Delivery/Job/Worker 功能仓储，Store 管理共享连接、事务、时钟和共用锁。
+  完整 schema 集中初始化；事件审计归 Webhook、drain 归 Worker，Projects/Webhook 使用统一入口。
+  注入时钟覆盖创建和更新记录；Projects 局部更新字段有明确类型，事务退出后的功能对象拒绝继续使用。
+  功能模块使用职责名称，调用与测试同步迁移；跨表提交、锁顺序、数据库和持久消息合同保持现状。
+
 - Control 内部直接依赖具体配置、仓储与服务，删除 12 个 Protocol 和 coordinator 的工具/结果转发；
   停止操作使用 `store.stops`。API 显式接收 runtime，配置在实际入口构造；原始 socket 与接收泵连接
   分别表达传输和消息处理边界，派发授权、结果互斥、恢复及 ACK 规则保持现状。

@@ -17,31 +17,6 @@ if TYPE_CHECKING:
     from app.persistence.store import Store
 
 
-RECONCILE_SCHEMA = """
-CREATE TABLE IF NOT EXISTS flow_reconcile (
-  flow_id BIGINT PRIMARY KEY REFERENCES flows(id),
-  next_at TIMESTAMPTZ NOT NULL,
-  last_success_at TIMESTAMPTZ,
-  failures INTEGER NOT NULL DEFAULT 0,
-  last_error TEXT,
-  hint_version BIGINT NOT NULL DEFAULT 0
-);
-CREATE INDEX IF NOT EXISTS ix_reconcile_due ON flow_reconcile(next_at,flow_id);
-CREATE TABLE IF NOT EXISTS feedback_reconcile (
-  flow_id BIGINT NOT NULL REFERENCES flows(id),
-  source TEXT NOT NULL,
-  cursor TEXT,
-  next_at TIMESTAMPTZ NOT NULL,
-  last_success_at TIMESTAMPTZ,
-  failures INTEGER NOT NULL DEFAULT 0,
-  last_error TEXT,
-  scan_incomplete BOOLEAN NOT NULL DEFAULT FALSE,
-  PRIMARY KEY(flow_id,source)
-);
-CREATE INDEX IF NOT EXISTS ix_feedback_reconcile_due ON feedback_reconcile(next_at,flow_id);
-"""
-
-
 class ReconcileState(BaseModel):
     flow_id: int
     next_at: datetime

@@ -70,7 +70,7 @@ class JobCoordinator:
 
     @staticmethod
     def _retired(store: Store, flow: Flow, job: Job) -> bool:
-        delivery = store.get_delivery(flow.id)
+        delivery = store.deliveries.get_delivery(flow.id)
         return (flow.state in TERMINAL_STATES
                 or (delivery is not None and delivery.supersedes(job.kind)))
 
@@ -119,7 +119,7 @@ class JobCoordinator:
                 return
             tx.reviews.record_decision(batch, decision.model_copy(update={"verdict": verdict}))
             if verdict.verdict is Verdict.REVISE:
-                job = tx.enqueue_job(flow.id, JobKind.REVISION,
+                job = tx.jobs.enqueue_job(flow.id, JobKind.REVISION,
                     {"batch_id": batch.id, "instruction": verdict.instruction})
                 tx.reviews.advance(batch.id, job)
             else:
@@ -185,14 +185,14 @@ class JobCoordinator:
         try:
             secret = await self._assignment_secret(job, prepared)
         except Exception as exc:  # noqa: BLE001 - signing errors become durable control failures
-            if not self.store.clear_preparation(job.id, worker, token, epoch):
+            if not self.store.workers.clear_preparation(job.id, worker, token, epoch):
                 raise PreparationStale("assignment expired during capability preparation") from None
             await self.fail(job, f"assignment capability failed: {type(exc).__name__}")
             return JobState.FAILED
         # Signing may outlive the lease or race a webhook; validate even without a gateway.
-        if not self.store.clear_preparation(job.id, worker, token, epoch):
+        if not self.store.workers.clear_preparation(job.id, worker, token, epoch):
             raise PreparationStale("assignment changed before dispatch")
-        delivery = self.store.get_delivery(job.flow_id)
+        delivery = self.store.deliveries.get_delivery(job.flow_id)
         if delivery is not None and delivery.supersedes(job.kind):
             if delivery.state is DeliveryState.CLOSED:
                 return JobState.DONE
@@ -216,10 +216,10 @@ class JobCoordinator:
             else:
                 if isinstance(prepared, JobState):
                     assert prepared in (JobState.QUEUED, JobState.DONE, JobState.FAILED)
-                if not isinstance(prepared, JobState) and not self.store.clear_preparation(job.id, worker, token, epoch):
+                if not isinstance(prepared, JobState) and not self.store.workers.clear_preparation(job.id, worker, token, epoch):
                     raise PreparationStale("preparation changed before dispatch")
                 return prepared
-        state = self.store.defer_preparation(
+        state = self.store.workers.defer_preparation(
             job.id, worker, token, epoch, error, max_failures=self.settings.prepare_max_failures,
             window_seconds=self.settings.prepare_retry_window_seconds,
         )
@@ -258,7 +258,7 @@ class JobCoordinator:
         invalid internal state raises ValueError. Failure handling may itself raise
         ResultPending while durable failure effects await recovery.
         """
-        flow = self.store.get_flow(job.flow_id)
+        flow = self.store.flows.get_flow(job.flow_id)
         if flow is None:
             return JobState.FAILED
         if self._retired(self.store, flow, job):
@@ -269,7 +269,7 @@ class JobCoordinator:
                 await self.fail(job, "Flow 缺少 GitHub installation。")
                 return JobState.FAILED
             installation_id = flow.installation_id
-            execution = self.store.get_flow_execution(flow.id)
+            execution = self.store.workers.get_flow_execution(flow.id)
             if execution is None or execution.released_at is not None:
                 await self.fail(job, "Flow 缺少 active execution binding。")
                 return JobState.FAILED
@@ -280,12 +280,12 @@ class JobCoordinator:
                 fresh = tx.lock_workflow(flow.id)
                 if fresh is None or self._retired(tx, fresh, job):
                     return JobState.DONE
-                attempt = tx.get_current_attempt(fresh)
+                attempt = tx.flows.get_current_attempt(fresh)
                 if attempt is None:
-                    attempt = tx.create_attempt(fresh.id)
+                    attempt = tx.flows.create_attempt(fresh.id)
                     fresh.current_attempt_id = attempt.id
-                    tx.update_flow(fresh)
-                delivery = tx.get_or_create_delivery(fresh.id, f"flow/{fresh.id}")
+                    tx.flows.update_flow(fresh)
+                delivery = tx.deliveries.get_or_create_delivery(fresh.id, f"flow/{fresh.id}")
                 flow = fresh
             try:
                 repo = self.github.installation(installation_id).repository(flow.repo)
@@ -300,11 +300,11 @@ class JobCoordinator:
                 fresh = tx.lock_workflow(flow.id)
                 if fresh is None or self._retired(tx, fresh, job):
                     return JobState.DONE
-                current_delivery = tx.get_delivery(flow.id)
+                current_delivery = tx.deliveries.get_delivery(flow.id)
                 if current_delivery is None:
                     raise ValueError("prepared delivery disappeared")
                 current_delivery.base_branch = repository.default_branch
-                tx.update_delivery(current_delivery)
+                tx.deliveries.update_delivery(current_delivery)
                 delivery = current_delivery
             return InitialTask(
                 flow_id=flow.id,
@@ -319,7 +319,7 @@ class JobCoordinator:
                 repo_identity=execution.repo_identity,
             )
 
-        attempt = self.store.get_current_attempt(flow)
+        attempt = self.store.flows.get_current_attempt(flow)
         if attempt is None:
             await self.fail(job, f"{job.kind} job has no current attempt")
             return JobState.FAILED
@@ -351,7 +351,7 @@ class JobCoordinator:
             if attempt.revision_cycles + 1 > self.settings.max_revision_cycles:
                 await self.fail(job, "已达最大修订轮数，暂停。")
                 return JobState.FAILED
-            execution = self.store.get_flow_execution(flow.id)
+            execution = self.store.workers.get_flow_execution(flow.id)
             if execution is None or execution.released_at is not None:
                 await self.fail(job, "修订任务缺少有效 worker binding。")
                 return JobState.FAILED
@@ -393,8 +393,8 @@ class JobCoordinator:
             with self.store.transaction() as tx:
                 fresh = tx.lock_workflow(flow.id)
                 current = tx.lock_job(job.id)
-                binding = tx.get_flow_execution(flow.id)
-                latest = tx.get_delivery(flow.id)
+                binding = tx.workers.get_flow_execution(flow.id)
+                latest = tx.deliveries.get_delivery(flow.id)
                 if (fresh is None or current is None or self._retired(tx, fresh, job)
                         or fresh.current_attempt_id != attempt.id):
                     return JobState.DONE
@@ -417,7 +417,7 @@ class JobCoordinator:
                     if fresh is None or current is None:
                         raise ValueError("archive workflow disappeared")
                     archive = archive_task(tx, fresh, current)
-                    tx.freeze_archive(current, archive)
+                    tx.jobs.freeze_archive(current, archive)
                     return archive
             except ValueError as error:
                 await self.fail(job, str(error))
@@ -427,7 +427,7 @@ class JobCoordinator:
     async def _assignment_secret(self, job: Job, task: ExecutionTask) -> AssignmentSecret | None:
         if not isinstance(task, (InitialTask, RevisionTask)):
             return None
-        flow = self.store.get_flow(job.flow_id)
+        flow = self.store.flows.get_flow(job.flow_id)
         if flow is None or flow.installation_id is None:
             raise ValueError("coding assignment has no GitHub installation")
         capability = await self.github.installation(flow.installation_id).repository(flow.repo).create_push_capability()
@@ -440,15 +440,15 @@ class JobCoordinator:
         )
 
     def mark_started(self, job: Job, task: ExecutionTask, worker_id: str) -> None:
-        flow = self.store.get_flow(job.flow_id)
+        flow = self.store.flows.get_flow(job.flow_id)
         if flow is None:
             raise ValueError(f"flow {job.flow_id} disappeared")
         if self._retired(self.store, flow, job):
             return
-        attempt = self.store.get_attempt(task.attempt_id)
+        attempt = self.store.flows.get_attempt(task.attempt_id)
         if attempt is None:
             raise ValueError(f"attempt {task.attempt_id} disappeared")
-        execution = self.store.get_flow_execution(flow.id)
+        execution = self.store.workers.get_flow_execution(flow.id)
         if execution is None or execution.worker_id != worker_id:
             raise ValueError(f"flow {flow.id} is not bound to worker {worker_id}")
         if job.kind is JobKind.REVISION:
@@ -475,7 +475,7 @@ class JobCoordinator:
                     connection_epoch="control",
                     error=reason,
                 )
-                tx.record_control_result(
+                tx.jobs.record_control_result(
                     job.id,
                     message.model_dump(mode="json"),
                     terminal_digest(message),
@@ -484,7 +484,7 @@ class JobCoordinator:
         await self.results.apply(job.id)
 
     def _delivery(self, flow: Flow) -> FlowDelivery:
-        delivery = self.store.get_delivery(flow.id)
+        delivery = self.store.deliveries.get_delivery(flow.id)
         if delivery is None:
             raise ValueError(f"flow {flow.id} has no delivery")
         return delivery

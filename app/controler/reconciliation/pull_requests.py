@@ -15,7 +15,7 @@ from app.controler.workflow.lifecycle import (
 from app.controler.workflow.service import ControlService
 from app.domain.models import TERMINAL_STATES, DeliveryState, FlowState
 from app.github import GitHubApp, GitHubError, GitHubErrorKind, PullRequestMerge, retry_delay
-from app.persistence.reconcile_store import ReconcileState
+from app.persistence.reconciliation import ReconcileState
 from app.persistence.store import Store
 
 
@@ -69,14 +69,14 @@ class Reconciler:
         try:
             with self.store.transaction() as tx:
                 flow = tx.lock_workflow(check.flow_id)
-                delivery = tx.get_delivery(check.flow_id)
+                delivery = tx.deliveries.get_delivery(check.flow_id)
                 if (flow is None or delivery is None or delivery.pr_number is None
                         or flow.state is FlowState.SUCCEEDED or delivery.state is DeliveryState.MERGED):
                     return
                 if flow.installation_id is None:
                     raise ValueError("missing installation")
-                coding = tx.lifecycle_job(flow.id)
-                blocked = tx.reopen_blocked(flow.id)
+                coding = tx.jobs.lifecycle_job(flow.id)
+                blocked = tx.jobs.reopen_blocked(flow.id)
             repo = self.github.installation(flow.installation_id).repository(flow.repo)
             remote = await repo.fetch_pull_request(delivery.pr_number)
             if (remote.repo != flow.repo or remote.number != delivery.pr_number
@@ -92,7 +92,7 @@ class Reconciler:
             merged = False
             with self.store.transaction() as tx:
                 fresh = tx.lock_workflow(flow.id)
-                current = tx.get_delivery(flow.id)
+                current = tx.deliveries.get_delivery(flow.id)
                 if (fresh is None or current is None
                         or fresh.current_attempt_id != flow.current_attempt_id
                         or fresh.state != flow.state or fresh.installation_id != flow.installation_id
@@ -112,8 +112,8 @@ class Reconciler:
                         pause_delivery(tx, current)
                         diagnostic = "PR closed; binding retained until a verified reopen"
                     elif current.state is DeliveryState.CLOSED:
-                        if (proof is not None and not tx.reopen_blocked(flow.id)
-                                and tx.lifecycle_job(flow.id) == coding):
+                        if (proof is not None and not tx.jobs.reopen_blocked(flow.id)
+                                and tx.jobs.lifecycle_job(flow.id) == coding):
                             resume_delivery(tx, fresh, current, proof, self.settle_seconds)
                         elif diagnostic is None:
                             diagnostic = "old executor or result changed during reopen verification"

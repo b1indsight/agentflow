@@ -22,7 +22,6 @@ from app.controler.workers.gateway import WorkerGateway
 from app.controler.workflow.service import ControlService
 from app.domain.models import Flow, FlowState, JobKind
 from app.persistence.store import Store
-from app.persistence.webhook_store import WebhookStore
 from app.telemetry.metrics import Metrics
 
 
@@ -45,7 +44,7 @@ class WebhookRuntime(ServerRuntime):
     async def receive_webhook(self, event_type: str, delivery_id: str, payload: dict, digest: str) -> None:
         assert isinstance(self.router, EventRouter)
         store = self.router.store
-        WebhookStore(store).receive(delivery_id, event_type, payload, digest)
+        store.webhooks.receive(delivery_id, event_type, payload, digest)
 
         async def consume() -> None:
             WebhookConsumer(store, self.settings, ControlService(store)).sweep()
@@ -68,17 +67,17 @@ class RoutingService(ControlService):
         self.store = store
 
     def on_trigger(self, repo: str, issue_number: int, installation_id: int | None) -> Flow:
-        flow = self.store.create_flow(repo, issue_number, installation_id)
-        self.store.enqueue_job(flow.id, JobKind.INITIAL)
+        flow = self.store.flows.create_flow(repo, issue_number, installation_id)
+        self.store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
         return flow
 
     def cancel(self, flow: Flow) -> None:
         flow.state = FlowState.CANCELLED
-        self.store.update_flow(flow)
+        self.store.flows.update_flow(flow)
 
     def on_merged(self, flow: Flow, delivery_id: str, payload: dict) -> None:
         flow.state = FlowState.SUCCEEDED
-        self.store.update_flow(flow)
+        self.store.flows.update_flow(flow)
 
     def notify_jobs(self) -> None:
         pass
@@ -157,11 +156,11 @@ async def test_valid_signature_dispatches_webhook(
         await asyncio.gather(*runtime.tasks)
 
     assert response.status_code == 202
-    flow = store.get_active_flow("owner/repo", 7)
+    flow = store.flows.get_active_flow("owner/repo", 7)
     assert flow is not None
     assert flow.state is FlowState.ACTIVE
-    store.worker_connected("worker-1", protocol_version=PROTOCOL_VERSION)
-    assert store.assign_job("worker-1", "assignment-1") is not None
+    store.workers.worker_connected("worker-1", protocol_version=PROTOCOL_VERSION)
+    assert store.workers.assign_job("worker-1", "assignment-1") is not None
 
 
 def signed_headers(body: bytes) -> dict[str, str]:

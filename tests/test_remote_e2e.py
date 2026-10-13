@@ -18,11 +18,12 @@ from app.controler.workflow.coordinator import JobCoordinator
 from app.controler.workflow.tools import FlowToolService
 from app.domain.delivery_models import OpenedDelivery
 from app.domain.models import FlowDelivery, Job, JobKind, JobState, VcsKind, VcsOutcome
-from app.persistence.stop_store import StopStore
+from app.persistence.stops import StopStore
 from app.persistence.store import Store
 from app.worker.state.session import WorkerSession
 from app.worker.transport.client import WorkerClient
 from app.worker.transport.mcp import FlowToolCaller
+from tests.persistence_fakes import RepositoryViews
 from tests.worker_fakes import NoPendingStops, connected_worker, result_application
 
 
@@ -64,7 +65,7 @@ class QueueConnection:
         return await self._incoming.get()
 
 
-class RemoteStore(Store):
+class RemoteStore(RepositoryViews, Store):
     @property
     def stops(self) -> StopStore:
         return NoPendingStops(self)
@@ -216,12 +217,12 @@ class RemoteCoordinator(JobCoordinator):
         pass
 
     async def _commit_result(self, job_id: int) -> JobState:
-        job = self.store.get_job(job_id)
+        job = self.store.jobs.get_job(job_id)
         assert job is not None and job.result_payload is not None
         result = Succeeded.model_validate(job.result_payload).result
         assert isinstance(result, InitialTaskResult)
         self.result = result
-        self.store.complete_persisted_result(job.id, JobState.DONE)
+        self.store.jobs.complete_persisted_result(job.id, JobState.DONE)
         return JobState.DONE
 
     async def fail(self, job: Job, reason: str) -> None:

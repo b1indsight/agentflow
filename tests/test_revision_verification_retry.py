@@ -44,7 +44,7 @@ async def test_result_verification_honors_retry_after_across_restart(store, pend
         native.setattr(Repository, "fetch_ref", NATIVE_REPOSITORY_FETCH_REF)
         with pytest.raises(ResultPending):
             await asyncio.wait_for(subject.results.apply(job.id), 1)
-    pending = store.get_job(job.id)
+    pending = store.jobs.get_job(job.id)
     assert pending.verify_next_at >= before + timedelta(seconds=600)
     assert pending.verify_failures == 1 and pending.prepare_failures == 0
     assert len(calls) == 1
@@ -57,6 +57,6 @@ async def test_result_verification_honors_retry_after_across_restart(store, pend
         monkeypatch.setattr(restarted, "_clock", lambda: pending.verify_next_at)
         github.sha = "revision"
         assert await coordinator(restarted, github).results.apply(job.id) is JobState.DONE
-        assert restarted.get_job(job.id).verify_next_at is None
+        assert restarted.jobs.get_job(job.id).verify_next_at is None
     finally:
         restarted.close()

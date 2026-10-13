@@ -29,7 +29,7 @@ def judge_decision(verdict: TriageVerdict, context: ReviewContext | None = None)
 
 class MemoryReviews:
     def __init__(self) -> None:
-        self.jobs: dict[int, Job] = {}
+        self.job_records: dict[int, Job] = {}
         self.batch = ReviewBatch(
             id=1,
             flow_id=1,
@@ -61,7 +61,7 @@ class MemoryReviews:
     def freeze_revision(self, job, task):
         if (job.payload or {}).get("revision") is None:
             job.payload = {**(job.payload or {}), "revision": task.model_dump(mode="json")}
-            self.jobs[job.id].payload = job.payload
+            self.job_records[job.id].payload = job.payload
         return RevisionTask.model_validate(job.payload["revision"])
 
     def freeze_context(self, job: Job, context: ReviewContext) -> ReviewContext:

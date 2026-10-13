@@ -40,12 +40,13 @@ from app.domain.models import (
     VcsKind,
     utcnow,
 )
-from app.persistence.stop_store import StopStore
+from app.persistence.stops import StopStore
 from app.persistence.store import Store
+from tests.persistence_fakes import RepositoryViews
 from tests.worker_fakes import NoPendingStops, connected_worker, result_application
 
 
-class RecordingStore(Store):
+class RecordingStore(RepositoryViews, Store):
     @property
     def stops(self) -> StopStore:
         return NoPendingStops(self)
@@ -209,7 +210,7 @@ class RecordingCoordinator(JobCoordinator):
         self.started = True
 
     async def _commit_result(self, job_id: int) -> JobState:
-        job = self.store.get_job(job_id)
+        job = self.store.jobs.get_job(job_id)
         assert job is not None and job.result_payload is not None
         result = Succeeded.model_validate(job.result_payload).result
         assert isinstance(result, InitialTaskResult)
@@ -368,7 +369,7 @@ async def test_gateway_authorizes_dispatch_after_preparation(monkeypatch):
 
     monkeypatch.setattr(NoPendingStops, "authorize_dispatch",
                         lambda self, job_id, worker_id, token, epoch:
-                        store.assignment_active(job_id, worker_id, token))
+                        store.workers.assignment_active(job_id, worker_id, token))
 
     socket = ScriptedSocket()
     gateway = WorkerGateway(store, ChangedCoordinator(store), worker_tokens={"worker-1": "worker-secret"})
@@ -417,8 +418,8 @@ async def test_recovery_continues_after_one_broken_result():
     class RecoveryStore(RecordingStore):
         def __init__(self):
             super().__init__()
-            self.jobs = [self.job, self.job.model_copy(update={"id": 6, "flow_id": 4})]
-            for job in self.jobs:
+            self.job_records = [self.job, self.job.model_copy(update={"id": 6, "flow_id": 4})]
+            for job in self.job_records:
                 job.state, job.assigned_worker_id = JobState.RUNNING, f"worker-{job.id}"
                 job.assignment_token = f"token-{job.id}"
                 job.started_at, job.result_received_at = job.created_at, job.updated_at
@@ -431,14 +432,14 @@ async def test_recovery_continues_after_one_broken_result():
                 job.result_payload, job.result_digest = result.model_dump(mode="json"), terminal_digest(result)
 
         def unapplied_result_ceiling(self):
-            return max(job.id for job in self.jobs)
+            return max(job.id for job in self.job_records)
 
         def list_unapplied_results(self, *, after_id=0, through_id=None, limit=64):
-            return [job for job in self.jobs if job.id > after_id
+            return [job for job in self.job_records if job.id > after_id
                     and (through_id is None or job.id <= through_id)][:limit]
 
         def get_job(self, job_id):
-            return next(job for job in self.jobs if job.id == job_id)
+            return next(job for job in self.job_records if job.id == job_id)
 
     class RecoveryCoordinator(RecordingCoordinator):
         async def _commit_result(self, job_id):
@@ -449,8 +450,8 @@ async def test_recovery_continues_after_one_broken_result():
     store = RecoveryStore()
     processor = result_application(store, RecoveryCoordinator(store)._commit_result)
     await processor.recover_pending_results()
-    assert store.jobs[0].result_applied_at is None
-    assert store.jobs[1].result_applied_at is not None
+    assert store.job_records[0].result_applied_at is None
+    assert store.job_records[1].result_applied_at is not None
 
 
 @pytest.mark.asyncio

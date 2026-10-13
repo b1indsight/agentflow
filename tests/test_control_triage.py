@@ -34,10 +34,10 @@ def triage_runtime(store, review_flow, recording_resources):  # noqa: F811
 
 async def test_only_revision_enters_job_queue(store, triage_runtime):
     runtime, batch = triage_runtime
-    assert store.list_jobs(batch.flow_id) == []
+    assert store.jobs.list_jobs(batch.flow_id) == []
     await runtime._run_triage()
     await runtime._run_triage()
-    jobs = store.list_jobs(batch.flow_id)
+    jobs = store.jobs.list_jobs(batch.flow_id)
     assert len(jobs) == 1 and jobs[0].kind is JobKind.REVISION
     assert store.reviews.get_batch(batch.id).job_id == jobs[0].id
     assert runtime.judge.triage.await_count == 1
@@ -49,7 +49,7 @@ async def test_late_decision_cannot_dispatch_retired_batch(store, triage_runtime
     decide = runtime.judge.triage.side_effect
 
     async def intervening(context):
-        flow = store.get_flow(batch.flow_id)
+        flow = store.flows.get_flow(batch.flow_id)
         if action == "cancel":
             ControlService(store).cancel(flow)
         else:
@@ -58,7 +58,7 @@ async def test_late_decision_cannot_dispatch_retired_batch(store, triage_runtime
 
     runtime.judge.triage.side_effect = intervening
     await runtime._run_triage()
-    assert not any(j.kind is JobKind.REVISION for j in store.list_jobs(batch.flow_id))
+    assert not any(j.kind is JobKind.REVISION for j in store.jobs.list_jobs(batch.flow_id))
 
 
 async def test_interrupted_judge_retries_unfinished_batch(store, triage_runtime):
@@ -66,10 +66,10 @@ async def test_interrupted_judge_retries_unfinished_batch(store, triage_runtime)
     decide = runtime.judge.triage.side_effect
     runtime.judge.triage.side_effect = RuntimeError("interrupted")
     await runtime._run_triage()
-    assert store.list_jobs(batch.flow_id) == []
+    assert store.jobs.list_jobs(batch.flow_id) == []
     runtime.judge.triage.side_effect = decide
     await runtime._run_triage()
-    assert len(store.list_jobs(batch.flow_id)) == 1
+    assert len(store.jobs.list_jobs(batch.flow_id)) == 1
 
 
 async def test_answer_definite_rejection_can_retry_saved_decision(store, triage_runtime, monkeypatch):

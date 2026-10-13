@@ -15,17 +15,17 @@ class RecordingService(ControlService):
         self.store = store
 
     def on_trigger(self, repo: str, issue_number: int, installation_id: int | None) -> Flow:
-        flow = self.store.create_flow(repo, issue_number, installation_id)
-        self.store.enqueue_job(flow.id, JobKind.INITIAL)
+        flow = self.store.flows.create_flow(repo, issue_number, installation_id)
+        self.store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
         return flow
 
     def cancel(self, flow: Flow) -> None:
         flow.state = FlowState.CANCELLED
-        self.store.update_flow(flow)
+        self.store.flows.update_flow(flow)
 
     def on_merged(self, flow: Flow, delivery_id: str, payload: dict) -> None:
         flow.state = FlowState.SUCCEEDED
-        self.store.update_flow(flow)
+        self.store.flows.update_flow(flow)
 
     def notify_jobs(self) -> None:
         pass
@@ -66,12 +66,12 @@ async def test_allowed_label_creates_one_flow_and_job(
     router.dispatch("issues", "delivery-1", payload)
     router.dispatch("issues", "delivery-1", payload)
 
-    flow = store.get_active_flow("owner/repo", 7)
+    flow = store.flows.get_active_flow("owner/repo", 7)
     assert flow is not None
     assert flow.state is FlowState.ACTIVE
-    store.worker_connected("worker-1", protocol_version=PROTOCOL_VERSION)
-    assert store.assign_job("worker-1", "assignment-1") is not None
-    assert store.assign_job("worker-1", "assignment-2") is None
+    store.workers.worker_connected("worker-1", protocol_version=PROTOCOL_VERSION)
+    assert store.workers.assign_job("worker-1", "assignment-1") is not None
+    assert store.workers.assign_job("worker-1", "assignment-2") is None
 
 
 @pytest.mark.asyncio
@@ -81,9 +81,9 @@ async def test_bot_and_non_allowlisted_users_do_not_trigger(
     router.dispatch("issues", "bot-delivery", issue_event(action="labeled", sender="flowtool[bot]"))
     router.dispatch("issues", "outsider-delivery", issue_event(action="labeled", sender="mallory"))
 
-    assert store.get_active_flow("owner/repo", 7) is None
-    assert store.event_seen("bot-delivery") is False
-    assert store.event_seen("outsider-delivery") is True
+    assert store.flows.get_active_flow("owner/repo", 7) is None
+    assert store.webhooks.event_seen("bot-delivery") is False
+    assert store.webhooks.event_seen("outsider-delivery") is True
 
 
 @pytest.mark.asyncio
@@ -92,10 +92,10 @@ async def test_unlabel_and_stop_comment_cancel_active_flow(
 ) -> None:
     router.dispatch("issues", "create-1", issue_event(action="labeled"))
     router.dispatch("issues", "cancel-1", issue_event(action="unlabeled"))
-    cancelled = store.list_flows()[0]
+    cancelled = store.flows.list_flows()[0]
     assert cancelled.state is FlowState.CANCELLED
 
-    replacement = store.create_flow("owner/repo", 7, installation_id=42)
+    replacement = store.flows.create_flow("owner/repo", 7, installation_id=42)
     stop_payload = {
         "action": "created",
         "repository": {"full_name": "owner/repo"},
@@ -105,7 +105,7 @@ async def test_unlabel_and_stop_comment_cancel_active_flow(
     }
     router.dispatch("issue_comment", "cancel-2", stop_payload)
 
-    stopped = store.get_flow(replacement.id)
+    stopped = store.flows.get_flow(replacement.id)
     assert stopped is not None
     assert stopped.state is FlowState.CANCELLED
 
@@ -114,14 +114,14 @@ async def test_unlabel_and_stop_comment_cancel_active_flow(
 async def test_review_comment_is_stored_for_current_attempt(
     router: EventRouter, store: Store, monkeypatch
 ) -> None:
-    flow = store.create_flow("owner/repo", 7, installation_id=42)
-    attempt = store.create_attempt(flow.id)
+    flow = store.flows.create_flow("owner/repo", 7, installation_id=42)
+    attempt = store.flows.create_attempt(flow.id)
     flow.current_attempt_id = attempt.id
-    store.update_flow(flow)
-    delivery = store.get_or_create_delivery(flow.id, f"flow/{flow.id}")
+    store.flows.update_flow(flow)
+    delivery = store.deliveries.get_or_create_delivery(flow.id, f"flow/{flow.id}")
     delivery.pr_number = 17
     delivery.state = DeliveryState.OPEN
-    store.update_delivery(delivery)
+    store.deliveries.update_delivery(delivery)
 
     payload = {
         "action": "created",

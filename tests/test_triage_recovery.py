@@ -7,7 +7,7 @@ import pytest
 
 from app.domain.models import JobKind, ReviewItemKind, TriageVerdict, Verdict
 from app.domain.review_models import FeedbackUpdate
-from app.persistence.review_store import ReviewStore
+from app.persistence.reviews import ReviewStore
 from tests.github import RecordingGitHub
 from tests.review_memory import judge_decision
 from tests.test_coordinator import coordinator
@@ -35,11 +35,11 @@ async def test_revision_and_batch_transition_commit_together(
         patch.setattr(ReviewStore, "advance", interrupt)
         with pytest.raises(RuntimeError, match="interrupted transaction"):
             await subject.triage(batch, judge)
-    assert store.list_jobs(flow.id) == []
+    assert store.jobs.list_jobs(flow.id) == []
     assert store.reviews.get_batch(batch.id).job_id is None
     await subject.triage(store.reviews.get_batch(batch.id), judge)
     await subject.triage(store.reviews.get_batch(batch.id), judge)
-    assert len(store.list_jobs(flow.id)) == 1
+    assert len(store.jobs.list_jobs(flow.id)) == 1
 
 
 async def test_judge_failure_then_ignore_keeps_archive_owner(store, recording_resources):
@@ -49,14 +49,14 @@ async def test_judge_failure_then_ignore_keeps_archive_owner(store, recording_re
         FeedbackUpdate(kind=ReviewItemKind.INLINE, github_id=101, author="alice", body="Check",
                        updated_at=store.now()), settle_seconds=0, submit_grace_seconds=0)
     batch = store.reviews.claim_due()[0]
-    before = store.get_flow_execution(flow.id)
+    before = store.workers.get_flow_execution(flow.id)
     subject = coordinator(store, RecordingGitHub())
     judge = SimpleNamespace(triage=AsyncMock(side_effect=RuntimeError("provider stopped")))
     with pytest.raises(RuntimeError, match="provider stopped"):
         await subject.triage(batch, judge)
     judge.triage.side_effect = lambda context: judge_decision(TriageVerdict(verdict=Verdict.IGNORE), context)
     await subject.triage(store.reviews.get_batch(batch.id), judge)
-    assert store.get_flow_execution(flow.id) == before
+    assert store.workers.get_flow_execution(flow.id) == before
     await route_merge(store, flow)
-    archive = store.assign_job("worker-a", "archive", "epoch-a")
+    archive = store.workers.assign_job("worker-a", "archive", "epoch-a")
     assert archive is not None and archive.kind is JobKind.ARCHIVE

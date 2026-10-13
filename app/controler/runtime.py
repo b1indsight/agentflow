@@ -20,7 +20,6 @@ from app.controler.workflow.service import ControlService
 from app.github import GitHubApp
 from app.persistence.readiness import database_ready
 from app.persistence.store import Store
-from app.persistence.webhook_store import WebhookStore
 from app.plugins import get_plugin_manager
 from app.telemetry.logging import configure_logging
 from app.telemetry.metrics import Metrics
@@ -83,7 +82,7 @@ class ServerRuntime:
     def startup(self) -> None:
         self.store.init_db()
         self.store.results.recover_claims()
-        self.store.recover_abandoned_assignments()
+        self.store.workers.recover_abandoned_assignments()
         self._tasks = [
             asyncio.create_task(self.webhooks.run()),
             asyncio.create_task(self.project_sync.run()),
@@ -111,7 +110,7 @@ class ServerRuntime:
         while True:
             await asyncio.sleep(self.settings.worker_sweep_interval)
             try:
-                requeued, failed = self.store.sweep_expired_assignments()
+                requeued, failed = self.store.workers.sweep_expired_assignments()
                 self.metrics.expired.labels("requeued").inc(requeued)
                 self.metrics.expired.labels("failed").inc(failed)
                 if requeued or failed:
@@ -167,7 +166,7 @@ class ServerRuntime:
                 logger.exception("review settle sweep failed; retrying next sweep")
 
     async def receive_webhook(self, event_type: str, delivery_id: str, payload: dict, digest: str) -> None:
-        await asyncio.to_thread(WebhookStore(self.store).receive, delivery_id, event_type, payload, digest)
+        await asyncio.to_thread(self.store.webhooks.receive, delivery_id, event_type, payload, digest)
         self.webhooks.wakeup.set()
 
     async def shutdown(self) -> None:

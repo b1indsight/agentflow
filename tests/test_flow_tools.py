@@ -28,9 +28,10 @@ from app.github import (
 )
 from app.persistence.store import Store
 from tests.github import RecordingGitHub, record_call
+from tests.persistence_fakes import RepositoryViews
 
 
-class ToolStore:
+class ToolStore(RepositoryViews):
     def __init__(self) -> None:
         self.flow = Flow(
             id=3,
@@ -189,7 +190,7 @@ async def test_prepared_delivery_and_tool_receipt_roll_back_together(monkeypatch
     # A crash saving the tool reply must not leave a half-prepared delivery behind.
     store = ToolStore()
     service = FlowToolService(cast(Store, store), cast(GitHubApp, ToolGitHub()))
-    complete = store.complete_tool_call
+    complete = store.deliveries.complete_tool_call
 
     def crash(*args, **kwargs):
         complete(*args, **kwargs)

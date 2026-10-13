@@ -122,13 +122,13 @@ class ConversationService:
         self.broker = broker
 
     def _resolve(self, flow_id: int) -> tuple[str | None, list[Attempt]]:
-        if self.store.get_flow(flow_id) is None:
+        if self.store.flows.get_flow(flow_id) is None:
             raise ConversationFailure("flow_not_found")
-        execution = self.store.get_flow_execution(flow_id)
+        execution = self.store.workers.get_flow_execution(flow_id)
         if execution is None:
             return None, []
         attempts: dict[str, Attempt] = {}
-        for attempt in sorted(self.store.list_attempts(flow_id), key=lambda a: a.id):
+        for attempt in sorted(self.store.flows.list_attempts(flow_id), key=lambda a: a.id):
             if attempt.codex_session_id:
                 try:
                     HistoryQuery(session_id=attempt.codex_session_id)

@@ -19,6 +19,7 @@ from app.github import (
     PullRequest,
     retry_delay,
 )
+from app.persistence.jobs import JobStore
 from app.persistence.store import Store
 from tests.github import RecordingGitHub, record_call
 from tests.test_github_client import AsyncEndpoint, response, settings
@@ -66,9 +67,9 @@ async def test_missing_merge_webhook_enters_the_existing_archive_path(store, mer
     poller = subject(store, github)
     await poller._sweep()
     await poller._sweep()
-    assert store.get_delivery(merge_flow.id).state is DeliveryState.MERGED
-    assert store.get_delivery(merge_flow.id).merge_commit_sha == "a" * 40
-    assert [j.kind for j in store.list_jobs(merge_flow.id)] == [JobKind.ARCHIVE]
+    assert store.deliveries.get_delivery(merge_flow.id).state is DeliveryState.MERGED
+    assert store.deliveries.get_delivery(merge_flow.id).merge_commit_sha == "a" * 40
+    assert [j.kind for j in store.jobs.list_jobs(merge_flow.id)] == [JobKind.ARCHIVE]
     assert github.resource_calls == [{
         "operation": "fetch_pull_request", "installation_id": merge_flow.installation_id,
         "repo": merge_flow.repo, "number": 17,
@@ -82,7 +83,7 @@ async def test_missing_merge_webhook_enters_the_existing_archive_path(store, mer
 async def test_merge_and_archive_roll_back_before_a_later_poll_can_retry(
     store, merge_flow, monkeypatch, polling_resources):
     poller = subject(store, GitHub(status(merge_flow)))
-    original = Store.enqueue_job
+    original = JobStore.enqueue_job
 
     def interrupted(self, flow_id, kind, *args, **kwargs):
         if kind is JobKind.ARCHIVE:
@@ -90,15 +91,15 @@ async def test_merge_and_archive_roll_back_before_a_later_poll_can_retry(
         return original(self, flow_id, kind, *args, **kwargs)
 
     with monkeypatch.context() as patch:
-        patch.setattr(Store, "enqueue_job", interrupted)
+        patch.setattr(JobStore, "enqueue_job", interrupted)
         await poller._sweep()
-    assert store.get_delivery(merge_flow.id).state is DeliveryState.OPEN
+    assert store.deliveries.get_delivery(merge_flow.id).state is DeliveryState.OPEN
     failed = store.reconcile.get(merge_flow.id)
     assert failed.last_success_at is None and failed.failures == 1
     assert "private operational details" not in failed.last_error
     monkeypatch.setattr(store, "_clock", lambda: failed.next_at + timedelta(seconds=1))
     await poller._sweep()
-    assert [j.kind for j in store.list_jobs(merge_flow.id)] == [JobKind.ARCHIVE]
+    assert [j.kind for j in store.jobs.list_jobs(merge_flow.id)] == [JobKind.ARCHIVE]
 
 
 async def test_open_polling_resumes_its_success_and_retry_deadlines_after_restart(
@@ -136,16 +137,16 @@ async def test_open_polling_resumes_its_success_and_retry_deadlines_after_restar
         recovered = restarted.reconcile.get(merge_flow.id)
         assert recovered.failures == 0 and recovered.last_error is None
         assert recovered.next_at == clock.now + timedelta(seconds=300)
-        assert restarted.get_delivery(merge_flow.id).state is DeliveryState.OPEN
-        assert restarted.list_jobs(merge_flow.id) == []
+        assert restarted.deliveries.get_delivery(merge_flow.id).state is DeliveryState.OPEN
+        assert restarted.jobs.list_jobs(merge_flow.id) == []
     finally:
         restarted.close()
 
 
 async def test_read_errors_do_not_invent_pr_lifecycle_facts(store, merge_flow, polling_resources):
     await subject(store, GitHub(GitHubError(GitHubErrorKind.NOT_FOUND, "status")))._sweep()
-    assert store.get_delivery(merge_flow.id).state is DeliveryState.OPEN
-    assert store.list_jobs(merge_flow.id) == []
+    assert store.deliveries.get_delivery(merge_flow.id).state is DeliveryState.OPEN
+    assert store.jobs.list_jobs(merge_flow.id) == []
     assert GitHubErrorKind.NOT_FOUND.value in store.reconcile.get(merge_flow.id).last_error
 
 
@@ -157,34 +158,34 @@ async def test_late_query_cannot_overwrite_a_changed_workflow(store, merge_flow,
         if change == "merged":
             ControlService(store).on_merged(merge_flow, "real-merge", merge_payload(merge_flow))
         elif change == "version":
-            delivery = store.get_delivery(merge_flow.id)
+            delivery = store.deliveries.get_delivery(merge_flow.id)
             delivery.version += 1
-            store.update_delivery(delivery)
+            store.deliveries.update_delivery(delivery)
 
     github.before_return = mutate
     await subject(store, github)._sweep()
-    jobs = store.list_jobs(merge_flow.id)
+    jobs = store.jobs.list_jobs(merge_flow.id)
     assert [j.kind for j in jobs] == ([JobKind.ARCHIVE] if change == "merged" else [])
     expected = DeliveryState.MERGED if change == "merged" else DeliveryState.OPEN
-    assert store.get_delivery(merge_flow.id).state is expected
+    assert store.deliveries.get_delivery(merge_flow.id).state is expected
 
 
 @pytest.mark.parametrize("state", [FlowState.FAILED, FlowState.CANCELLED])
 async def test_historical_terminal_flow_only_records_merge_facts(store, merge_flow, state, polling_resources):
     merge_flow.state = state
-    store.update_flow(merge_flow)
+    store.flows.update_flow(merge_flow)
     await subject(store, GitHub(status(merge_flow)))._sweep()
-    assert store.get_flow(merge_flow.id).state is state
-    assert store.get_delivery(merge_flow.id).state is DeliveryState.MERGED
-    assert store.list_jobs(merge_flow.id) == []
+    assert store.flows.get_flow(merge_flow.id).state is state
+    assert store.deliveries.get_delivery(merge_flow.id).state is DeliveryState.MERGED
+    assert store.jobs.list_jobs(merge_flow.id) == []
 
 
 async def test_polling_is_bounded_and_one_error_does_not_starve_later_flows(store, merge_flow, polling_resources):
     for i in range(3):
-        flow = store.create_flow(f"owner/repo-{i}", 100 + i, 43 + i)
-        delivery = store.get_or_create_delivery(flow.id, f"flow/{flow.id}")
+        flow = store.flows.create_flow(f"owner/repo-{i}", 100 + i, 43 + i)
+        delivery = store.deliveries.get_or_create_delivery(flow.id, f"flow/{flow.id}")
         delivery.pr_number, delivery.state = 20 + i, DeliveryState.OPEN
-        store.update_delivery(delivery)
+        store.deliveries.update_delivery(delivery)
     github = GitHub(GitHubError(GitHubErrorKind.TRANSIENT, "status"))
     poller = subject(store, github, batch_size=2)
     await poller._sweep()
@@ -220,10 +221,10 @@ async def test_status_adapter_reads_by_number_and_keeps_merge_sha(tmp_path, monk
 
 async def test_reconcile_concurrency_and_shutdown_are_bounded(store, merge_flow, polling_resources, monkeypatch):
     for i in range(2):
-        flow = store.create_flow("owner/repo", 100 + i, 42)
-        delivery = store.get_or_create_delivery(flow.id, f"flow/{flow.id}")
+        flow = store.flows.create_flow("owner/repo", 100 + i, 42)
+        delivery = store.deliveries.get_or_create_delivery(flow.id, f"flow/{flow.id}")
         delivery.pr_number, delivery.state = 20 + i, DeliveryState.OPEN
-        store.update_delivery(delivery)
+        store.deliveries.update_delivery(delivery)
     started, release = asyncio.Event(), asyncio.Event()
     active = set()
 

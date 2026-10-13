@@ -5,6 +5,8 @@
 
 ## 当前计划
 
+- [`persistence-simplification.md`](persistence-simplification.md) — PR #82：业务 SQL 归功能仓储，Store 管理共享事务和锁；schema/时钟/Projects 更新边界已整理，736 项 PostgreSQL 回归、静态检查及隔离 wheel 导入通过，独立审查与 CI 见 PR。
+
 - [`control-simplification.md`](control-simplification.md) — PR #81：依赖简化并按批准方案迁入 app/controler，按 events/workers/workflow/review/reconciliation 归组；生产净减少 174 行，734 项 PostgreSQL 回归、静态检查、隔离入口及构建通过，独立审查与 CI 见 PR。
 
 - [`repository-ownership-convergence.md`](repository-ownership-convergence.md) — PR #80：职责与证据契约收敛已实施，900 项 PostgreSQL 回归、静态检查、构建、任务合同对照与错误来源消融通过；待用户评审。

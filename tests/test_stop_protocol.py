@@ -17,7 +17,6 @@ from app.contracts.protocol import (
 from app.controler.workers.gateway import WorkerGateway
 from app.controler.workflow.service import ControlService
 from app.domain.models import JobKind
-from app.persistence.stop_store import StopStore
 from app.worker.execution.vcs import _run
 from app.worker.state.session import WorkerSession
 from app.worker.transport.client import WorkerClient, WorkerProtocolError
@@ -94,11 +93,11 @@ async def test_restarted_worker_does_not_infer_stopped_from_absent_task(tmp_path
 
 
 async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path):
-    flow = store.create_flow('owner/repo', 1, 1)
-    attempt = store.create_attempt(flow.id)
+    flow = store.flows.create_flow('owner/repo', 1, 1)
+    attempt = store.flows.create_attempt(flow.id)
     flow.current_attempt_id = attempt.id
-    store.update_flow(flow)
-    store.enqueue_job(flow.id, JobKind.INITIAL)
+    store.flows.update_flow(flow)
+    store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
     started, ended = asyncio.Event(), asyncio.Event()
     to_worker, to_serve = asyncio.Queue(), asyncio.Queue()
 
@@ -147,12 +146,12 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path):
                 if worker.done(): worker.result()
                 await asyncio.sleep(0.01)
             ControlService(store, jobs_available=gateway.notify_jobs).cancel(flow)
-            while store.get_flow_execution(flow.id).released_at is None:
+            while store.workers.get_flow_execution(flow.id).released_at is None:
                 if server.done(): server.result()
                 if worker.done(): worker.result()
                 await asyncio.sleep(0.01)
         assert ended.is_set()
-        assert StopStore(store).pending('w') is None
+        assert store.stops.pending('w') is None
     finally:
         server.cancel(); worker.cancel()
         await asyncio.gather(server, worker, return_exceptions=True)

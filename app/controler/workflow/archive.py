@@ -10,8 +10,8 @@ from app.persistence.store import Store
 
 def archive_task(store: Store, flow: Flow, job: Job) -> ArchiveTask:
     """Check current ownership and quiescence before freezing or accepting cleanup."""
-    execution = store.get_flow_execution(flow.id)
-    delivery = store.get_delivery(flow.id)
+    execution = store.workers.get_flow_execution(flow.id)
+    delivery = store.deliveries.get_delivery(flow.id)
     if (flow.state is not FlowState.ACTIVE or flow.current_attempt_id is None
             or job.kind is not JobKind.ARCHIVE or job.state is not JobState.RUNNING
             or delivery is None or delivery.state is not DeliveryState.MERGED):
@@ -20,7 +20,7 @@ def archive_task(store: Store, flow: Flow, job: Job) -> ArchiveTask:
             or execution.worker_id != job.assigned_worker_id
             or execution.repo_identity != f"{execution.worker_id}:{flow.repo}"):
         raise ValueError("archive requires the original worker and repository binding")
-    if store.has_unsettled_jobs(flow.id, excluding_job_id=job.id):
+    if store.jobs.has_unsettled_jobs(flow.id, excluding_job_id=job.id):
         raise ValueError("archive is blocked by an executor or unapplied result")
     task = ArchiveTask(
         flow_id=flow.id, attempt_id=flow.current_attempt_id, repo=flow.repo,
@@ -97,7 +97,7 @@ def archive_progress(store: Store, flow: Flow, jobs: list[Job]) -> str:
         return "blocked: original executor status unknown" if archive.recovery_deadline else "cleaning"
     if any(job.state is JobState.RUNNING for job in jobs):
         return "waiting for the original executor and its result"
-    binding = store.get_flow_execution(flow.id)
+    binding = store.workers.get_flow_execution(flow.id)
     if binding is None or binding.released_at is not None:
         return "blocked: original binding is missing; manual reconciliation required"
     return "waiting for the original worker"

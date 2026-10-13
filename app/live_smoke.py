@@ -221,17 +221,17 @@ class SmokeSession:
             if len(rows) > 1:
                 raise SmokeError("multiple Flows exist for this smoke Issue")
             if rows:
-                flow = tx.get_flow(rows[0]["id"])
+                flow = tx.flows.get_flow(rows[0]["id"])
                 if flow is None:
                     raise SmokeError("Flow disappeared during observation")
                 evidence.flow = flow.id
                 if flow.state in {FlowState.FAILED, FlowState.CANCELLED}:
                     raise SmokeError("Flow failed or was cancelled; inspect flow show privately")
-                delivery = tx.get_delivery(flow.id)
-                attempts = tx.list_attempts(flow.id)
+                delivery = tx.deliveries.get_delivery(flow.id)
+                attempts = tx.flows.list_attempts(flow.id)
                 evidence.revisions = sum(attempt.revision_cycles for attempt in attempts)
-                binding = tx.get_flow_execution(flow.id)
-                jobs = tx.list_jobs(flow.id)
+                binding = tx.workers.get_flow_execution(flow.id)
+                jobs = tx.jobs.list_jobs(flow.id)
                 evidence.archived = (flow.state == FlowState.SUCCEEDED and binding is not None
                                      and binding.released_at is not None and any(
                                          j.kind == JobKind.ARCHIVE and j.state == JobState.DONE

@@ -34,10 +34,9 @@ app.add_typer(inbox_app, name="inbox")
 @inbox_app.command("status")
 def inbox_status(limit: int = typer.Option(50, min=1, max=500)) -> None:
     """Show bounded delivery diagnostics without payload or authentication data."""
-    from app.persistence.webhook_store import WebhookStore
 
     with _store() as store:
-        for item in WebhookStore(store).list(limit):
+        for item in store.webhooks.list(limit):
             typer.echo(f"{item.delivery_id} event={item.event_type} state={item.state} "
                        f"attempts={item.attempts} next={item.next_at.isoformat()} error={item.error_code or '-'}")
 
@@ -45,10 +44,9 @@ def inbox_status(limit: int = typer.Option(50, min=1, max=500)) -> None:
 @inbox_app.command("retry")
 def inbox_retry(delivery_id: str) -> None:
     """Requeue only a blocked receipt; never reset a live claim or completed event."""
-    from app.persistence.webhook_store import WebhookStore
 
     with _store() as store:
-        if not WebhookStore(store).retry(delivery_id):
+        if not store.webhooks.retry(delivery_id):
             typer.echo("delivery is not blocked or has no retained payload", err=True)
             raise typer.Exit(1)
     typer.echo(f"delivery {delivery_id} queued")
@@ -76,10 +74,9 @@ def project_check(repo: str) -> None:
 @project_app.command("status")
 def project_status(repo: str, limit: int = typer.Option(100, min=1, max=1000)) -> None:
     """显示持久投影、期望/确认版本、退避和阻塞原因。"""
-    from app.persistence.project_store import ProjectStore
 
     with _store() as store:
-        for row in ProjectStore(store).list_projections(repo=repo.casefold(), limit=limit):
+        for row in store.projects.list_projections(repo=repo.casefold(), limit=limit):
             typer.echo(f"{row.repo}#{row.issue_number} flow={row.flow_id} project={row.project_id} "
                        f"item={row.item_id or '-'} {row.desired_status} "
                        f"version={row.synced_version}/{row.desired_version} blocked={row.blocked} "
@@ -89,10 +86,9 @@ def project_status(repo: str, limit: int = typer.Option(100, min=1, max=1000)) -
 @project_app.command("retry")
 def project_retry(repo: str) -> None:
     """修复配置或远端条件后重新核对；不清除已知卡片或未确认的 add。"""
-    from app.persistence.project_store import ProjectStore
 
     with _store() as store:
-        count = ProjectStore(store).retry(repo)
+        count = store.projects.retry(repo)
     typer.echo(f"{count} project projections scheduled for recheck")
 
 
@@ -141,9 +137,9 @@ def worker() -> None:
 def flows(active: bool = typer.Option(False, help="只看未终结的")) -> None:
     """列出 flows。"""
     with _store() as store:
-        for f in store.list_flows(active_only=active):
-            att = store.get_current_attempt(f)
-            delivery = store.get_delivery(f.id)
+        for f in store.flows.list_flows(active_only=active):
+            att = store.flows.get_current_attempt(f)
+            delivery = store.deliveries.get_delivery(f.id)
             pr = f"PR#{delivery.pr_number}" if delivery and delivery.pr_number else "-"
             cycles = att.revision_cycles if att else 0
             typer.echo(f"[{f.id}] {f.repo}#{f.issue_number:<5} {f.state:<10} {pr} cycles={cycles}")
@@ -153,7 +149,7 @@ def flows(active: bool = typer.Option(False, help="只看未终结的")) -> None
 def worker_drain(worker_id: str, undo: bool = typer.Option(False, "--undo")) -> None:
     """暂停给 worker 分配新 Flow；已有绑定继续收尾。"""
     with _store() as store:
-        store.stops.drain(worker_id, not undo)
+        store.workers.drain(worker_id, not undo)
     typer.echo(f"{worker_id}: draining={not undo}")
 
 
@@ -196,12 +192,12 @@ def flow_show(flow_id: int) -> None:
     from app.controler.workflow.archive import archive_progress
 
     with _store() as store:
-        f = store.get_flow(flow_id)
+        f = store.flows.get_flow(flow_id)
         if not f:
             raise typer.Exit(1)
         typer.echo(f"flow {f.id}\n  repo={f.repo} issue=#{f.issue_number} state={f.state}")
-        execution = store.get_flow_execution(f.id)
-        delivery = store.get_delivery(f.id)
+        execution = store.workers.get_flow_execution(f.id)
+        delivery = store.deliveries.get_delivery(f.id)
         if execution is not None:
             typer.echo(
                 f"  execution: worker={execution.worker_id} repo={execution.repo_identity}"
@@ -225,13 +221,13 @@ def flow_show(flow_id: int) -> None:
                 typer.echo(f"  feedback {source}: cursor={observation.cursor or '-'}"
                            f" last={observation.last_success_at or '-'} next={observation.next_at}"
                            f" failures={observation.failures} reason={observation.last_error or '-'}")
-        for att in store.list_attempts(f.id):
+        for att in store.flows.list_attempts(f.id):
             cur = " (current)" if att.id == f.current_attempt_id else ""
             typer.echo(
                 f"  attempt {att.id}{cur}: session={att.codex_session_id}"
                 f" cycles={att.revision_cycles}"
             )
-        jobs = store.list_jobs(f.id)
+        jobs = store.jobs.list_jobs(f.id)
         if delivery is not None and delivery.state is DeliveryState.MERGED:
             typer.echo(f"  archive: {archive_progress(store, f, jobs)}")
         for job in jobs:
@@ -263,7 +259,7 @@ def flow_cancel(flow_id: int) -> None:
     from app.controler.workflow.service import ControlService
 
     with _store() as store:
-        f = store.get_flow(flow_id)
+        f = store.flows.get_flow(flow_id)
         if not f:
             raise typer.Exit(1)
         ControlService(store).cancel(f)
@@ -277,7 +273,7 @@ def flow_retry(flow_id: int) -> None:
     from app.controler.workflow.service import ControlService
 
     with _store() as store:
-        f = store.get_flow(flow_id)
+        f = store.flows.get_flow(flow_id)
         if not f:
             raise typer.Exit(1)
         ControlService(store).retry(f)

@@ -19,7 +19,7 @@ from starlette.middleware.base import RequestResponseEndpoint
 from app.contracts.conversation import ConversationFailure, ConversationPage
 from app.controler.config import ServerSettings
 from app.controler.runtime import ServerRuntime
-from app.persistence.webhook_store import DeliveryConflict
+from app.persistence.webhooks import DeliveryConflict
 
 
 def verify_signature(secret: str, body: bytes, signature_header: str | None) -> bool:

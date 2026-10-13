@@ -8,7 +8,7 @@ from collections.abc import Awaitable, Callable
 from loguru import logger
 
 from app.github import GitHubApp, GitHubError, GitHubErrorKind, Issue, ProjectConfig
-from app.persistence.project_store import Projection, ProjectStore
+from app.persistence.projects import Projection
 from app.persistence.store import Store
 
 
@@ -21,7 +21,7 @@ class ProjectSync:
                  github: GitHubApp, *, interval: float = 300,
                  batch_size: int = 64, concurrency: int = 4) -> None:
         self.store, self.configs, self.github = store, configs, github
-        self.projects = ProjectStore(store)
+        self.projects = store.projects
         self.interval, self.batch_size, self.concurrency = interval, batch_size, concurrency
         self.after = 0
 

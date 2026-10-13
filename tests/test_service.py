@@ -14,11 +14,12 @@ from app.domain.models import (
     JobState,
 )
 from app.persistence.store import Store
+from tests.persistence_fakes import RepositoryViews
 from tests.result_memory import MemoryStops
 from tests.review_memory import MemoryReviews
 
 
-class RetryStore:
+class RetryStore(RepositoryViews):
     def __init__(self, failed_job: Job | None = None) -> None:
         self.reviews = MemoryReviews()
         self.stops = MemoryStops()

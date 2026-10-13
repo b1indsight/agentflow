@@ -13,6 +13,7 @@ from app.controler.events.router import EventRouter
 from app.controler.workflow.service import ControlService
 from app.domain.models import DeliveryState, Flow, FlowState, JobKind, JobState
 from app.domain.review_models import BatchState
+from app.persistence.jobs import JobStore
 from app.persistence.store import Store
 from tests.github import RecordingGitHub
 from tests.test_coordinator import coordinator
@@ -44,21 +45,21 @@ async def route_merge(store: Store, flow: Flow, event: str = "merge-1", payload=
 
 @pytest.fixture
 def merge_flow(store: Store) -> Flow:
-    flow = store.create_flow("owner/repo", 7, 42)
-    attempt = store.create_attempt(flow.id)
+    flow = store.flows.create_flow("owner/repo", 7, 42)
+    attempt = store.flows.create_attempt(flow.id)
     flow.current_attempt_id = attempt.id
-    store.update_flow(flow)
-    delivery = store.get_or_create_delivery(flow.id, f"flow/{flow.id}")
+    store.flows.update_flow(flow)
+    delivery = store.deliveries.get_or_create_delivery(flow.id, f"flow/{flow.id}")
     delivery.state, delivery.pr_number = DeliveryState.OPEN, 17
     delivery.head_sha = "b" * 40  # A squash/rebase merge need not equal the PR head.
-    store.update_delivery(delivery)
+    store.deliveries.update_delivery(delivery)
     return flow
 
 
 async def test_merge_transaction_failure_can_replay_same_delivery(store, merge_flow, monkeypatch):
     # A recorded webhook without its archive job would otherwise be lost on redelivery.
-    queued = store.enqueue_job(merge_flow.id, JobKind.REVISION)
-    original = Store.enqueue_job
+    queued = store.jobs.enqueue_job(merge_flow.id, JobKind.REVISION)
+    original = JobStore.enqueue_job
 
     def interrupted(self, flow_id, kind, *args, **kwargs):
         if kind is JobKind.ARCHIVE:
@@ -66,15 +67,15 @@ async def test_merge_transaction_failure_can_replay_same_delivery(store, merge_f
         return original(self, flow_id, kind, *args, **kwargs)
 
     with monkeypatch.context() as patch:
-        patch.setattr(Store, "enqueue_job", interrupted)
+        patch.setattr(JobStore, "enqueue_job", interrupted)
         with pytest.raises(RuntimeError, match="archive enqueue interrupted"):
             await route_merge(store, merge_flow)
-    assert not store.event_seen("merge-1")
-    assert store.get_delivery(merge_flow.id).state is DeliveryState.OPEN
-    assert store.get_job(queued.id).state is JobState.QUEUED
+    assert not store.webhooks.event_seen("merge-1")
+    assert store.deliveries.get_delivery(merge_flow.id).state is DeliveryState.OPEN
+    assert store.jobs.get_job(queued.id).state is JobState.QUEUED
     await route_merge(store, merge_flow)
-    assert store.event_seen("merge-1")
-    assert store.get_job(queued.id).state is JobState.FAILED
+    assert store.webhooks.event_seen("merge-1")
+    assert store.jobs.get_job(queued.id).state is JobState.FAILED
 
 
 def test_concurrent_merge_deliveries_enqueue_once(store, merge_flow):
@@ -84,12 +85,12 @@ def test_concurrent_merge_deliveries_enqueue_once(store, merge_flow):
             lambda event: asyncio.run(route_merge(store, merge_flow, event)),
             ["merge-1", "merge-1", "merge-2"],
         ))
-    delivery = store.get_delivery(merge_flow.id)
+    delivery = store.deliveries.get_delivery(merge_flow.id)
     assert delivery.state is DeliveryState.MERGED
     assert delivery.merge_commit_sha == "a" * 40
     assert delivery.merged_at == datetime(2026, 9, 8, 8, tzinfo=UTC)
     assert delivery.version == 1
-    assert [job.kind for job in store.list_jobs(merge_flow.id)] == [JobKind.ARCHIVE]
+    assert [job.kind for job in store.jobs.list_jobs(merge_flow.id)] == [JobKind.ARCHIVE]
 
 
 @pytest.mark.parametrize("case", ["bot", "wrong-installation", "unmerged", "approved", "unknown"])
@@ -106,17 +107,17 @@ async def test_merge_routing_uses_pr_identity_not_feedback_authorization(store, 
     else:
         payload["pull_request"]["number"] = 999
     await route_merge(store, merge_flow, payload=payload)
-    assert bool(store.list_jobs(merge_flow.id)) is (case == "bot")
+    assert bool(store.jobs.list_jobs(merge_flow.id)) is (case == "bot")
 
 
 @pytest.mark.parametrize("state", [FlowState.FAILED, FlowState.CANCELLED])
 async def test_terminal_flow_keeps_merge_fact_without_reactivation(store, merge_flow, state):
     merge_flow.state = state
-    store.update_flow(merge_flow)
+    store.flows.update_flow(merge_flow)
     await route_merge(store, merge_flow)
-    assert store.get_delivery(merge_flow.id).state is DeliveryState.MERGED
-    assert store.get_flow(merge_flow.id).state is state
-    assert store.list_jobs(merge_flow.id) == []
+    assert store.deliveries.get_delivery(merge_flow.id).state is DeliveryState.MERGED
+    assert store.flows.get_flow(merge_flow.id).state is state
+    assert store.jobs.list_jobs(merge_flow.id) == []
 
 
 async def test_invalid_merge_facts_can_be_corrected_before_redelivery(store, merge_flow):
@@ -124,38 +125,38 @@ async def test_invalid_merge_facts_can_be_corrected_before_redelivery(store, mer
     payload["pull_request"]["merged_at"] = None
     with pytest.raises(ValidationError):
         await route_merge(store, merge_flow, payload=payload)
-    assert not store.event_seen("merge-1")
+    assert not store.webhooks.event_seen("merge-1")
     await route_merge(store, merge_flow)
-    assert store.get_delivery(merge_flow.id).state is DeliveryState.MERGED
+    assert store.deliveries.get_delivery(merge_flow.id).state is DeliveryState.MERGED
 
 
 async def test_merge_retires_review_but_waits_for_running_result(store, recording_resources):
     # Merge can arrive after worker completion but before its durable result has been applied.
     job, _ = accepted_coding(store)
-    flow = store.get_flow(job.flow_id)
+    flow = store.flows.get_flow(job.flow_id)
     await route_merge(store, flow)
     assert store.reviews.for_job(job).state is BatchState.CANCELLED
-    assert store.assign_job("worker-a", "archive-token", "epoch-a") is None
+    assert store.workers.assign_job("worker-a", "archive-token", "epoch-a") is None
     github = RecordingGitHub()
     subject = coordinator(store, github)
     assert await subject.results.apply(job.id) is JobState.DONE
     assert await subject.results.apply(job.id) is JobState.DONE
     assert github.comments == []
-    assert store.get_flow(flow.id).state is FlowState.ACTIVE
-    assert store.get_delivery(flow.id).state is DeliveryState.MERGED
-    archive = store.assign_job("worker-a", "archive-token", "epoch-a")
+    assert store.flows.get_flow(flow.id).state is FlowState.ACTIVE
+    assert store.deliveries.get_delivery(flow.id).state is DeliveryState.MERGED
+    archive = store.workers.assign_job("worker-a", "archive-token", "epoch-a")
     assert archive is not None and archive.kind is JobKind.ARCHIVE
-    assert [j.id for j in store.list_jobs(flow.id) if j.kind is JobKind.REVISION] == [job.id]
-    assert store.get_flow_execution(flow.id).released_at is None
+    assert [j.id for j in store.jobs.list_jobs(flow.id) if j.kind is JobKind.REVISION] == [job.id]
+    assert store.workers.get_flow_execution(flow.id).released_at is None
     task = await subject.prepare(archive)
     assert isinstance(task, ArchiveTask)
-    assert store.start_assignment(archive.id, task.attempt_id, "worker-a", "archive-token", "epoch-a")
+    assert store.workers.start_assignment(archive.id, task.attempt_id, "worker-a", "archive-token", "epoch-a")
     message = Succeeded(job_id=archive.id, assignment_token="archive-token",
                         connection_epoch="epoch-a",
                         result=ArchiveResult(**task.model_dump(), cleanup="removed"))
-    assert store.record_assignment_result(
+    assert store.workers.record_assignment_result(
         archive.id, "worker-a", "archive-token", "epoch-a",
         message.model_dump(mode="json"), terminal_digest(message),
     ) == "pending"
     assert await subject.results.apply(archive.id) is JobState.DONE
-    assert store.get_flow(flow.id).state is FlowState.SUCCEEDED
+    assert store.flows.get_flow(flow.id).state is FlowState.SUCCEEDED

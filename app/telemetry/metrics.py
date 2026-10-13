@@ -12,7 +12,7 @@ from loguru import logger
 from prometheus_client import CollectorRegistry, Counter, generate_latest
 from prometheus_client.core import GaugeMetricFamily, Metric
 
-from app.persistence.metrics_store import Snapshot, read_snapshot
+from app.persistence.metrics import Snapshot, read_snapshot
 
 KINDS = ('initial', 'triage', 'revision', 'answer', 'archive', 'other')
 FAMILIES: dict[str, tuple[tuple[str, ...], tuple[tuple[str, ...], ...]]] = {

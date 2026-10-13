@@ -73,7 +73,7 @@ class ResultEffects:
                 if flow.current_attempt_id != plan.attempt_id:
                     tx.results.skip_remaining(plan.job_id, "result attempt is no longer current")
                     return "result attempt is no longer current"
-                job = tx.get_job(plan.job_id)
+                job = tx.jobs.get_job(plan.job_id)
                 if job is None:
                     raise ValueError("result job disappeared")
                 if plan.archive is not None:
@@ -81,7 +81,7 @@ class ResultEffects:
                         verify_archive(tx, flow, job, plan.archive)
                     except ValueError as error:
                         raise ResultPending(str(error)) from error
-                delivery = tx.get_delivery(plan.flow_id)
+                delivery = tx.deliveries.get_delivery(plan.flow_id)
                 retired = cancelled or (delivery is not None and delivery.supersedes(job.kind))
                 if retired:
                     tx.results.retire_for_merge(plan.job_id)
@@ -167,7 +167,7 @@ class ResultEffects:
                 or flow.current_attempt_id != plan.attempt_id
             ):
                 raise ResultPending("Flow changed before GitHub dispatch")
-            delivery = tx.get_delivery(flow.id)
+            delivery = tx.deliveries.get_delivery(flow.id)
             if plan.archive is not None:
                 try:
                     verify_archive(tx, flow, job, plan.archive)
@@ -177,7 +177,7 @@ class ResultEffects:
                 raise DeliveryConflict("PR closed or merged before GitHub dispatch")
             if plan.batch_id is not None:
                 batch = tx.reviews.for_job(job)
-                delivery = tx.get_delivery(flow.id)
+                delivery = tx.deliveries.get_delivery(flow.id)
                 if (batch.id != plan.batch_id
                         or batch.state not in {BatchState.READY, BatchState.PROCESSING}
                         or delivery is None or delivery.state is not DeliveryState.OPEN):
@@ -213,8 +213,8 @@ class ResultEffects:
             return await self._execute(plan, record, records)
         if isinstance(effect, PullRequestEffect):
             found = await repository.find_pull_request_by_head(effect.branch)
-            delivery = self.store.get_delivery(plan.flow_id)
-            flow = self.store.get_flow(plan.flow_id)
+            delivery = self.store.deliveries.get_delivery(plan.flow_id)
+            flow = self.store.flows.get_flow(plan.flow_id)
             cancelled_opening = (flow is not None and flow.state is FlowState.CANCELLED
                                  and delivery is not None and delivery.state is DeliveryState.OPENING
                                  and delivery.pr_number is None)

@@ -8,7 +8,7 @@ import pytest
 from app.controler.reconciliation.feedback import FeedbackReconciler, ThreadScanState
 from app.domain.models import DeliveryState
 from app.github import Batch, GitHubError, GitHubErrorKind, PullRequest, ReviewComment, ReviewThread
-from app.persistence.reconcile_store import ReconcileStore
+from app.persistence.reconciliation import ReconcileStore
 from app.persistence.store import Store
 from tests.github import RecordingGitHub, record_call
 from tests.test_github_client import install_client
@@ -127,12 +127,12 @@ async def test_retired_or_changed_delivery_rejects_inflight_page(store, review_f
     github = GitHub(clock)
 
     def changed():
-        delivery = store.get_delivery(flow.id)
+        delivery = store.deliveries.get_delivery(flow.id)
         if change == "merged":
             delivery.state = DeliveryState.MERGED
         else:
             delivery.head_sha = "c" * 40
-        store.update_delivery(delivery)
+        store.deliveries.update_delivery(delivery)
 
     github.before_return = changed
     await sweep(store, github)

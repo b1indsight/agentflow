@@ -13,27 +13,6 @@ from pydantic import BaseModel
 if TYPE_CHECKING:
     from app.persistence.store import Store
 
-WEBHOOK_SCHEMA = """
-CREATE TABLE IF NOT EXISTS webhook_inbox (
-    inbox_position BIGINT GENERATED ALWAYS AS IDENTITY,
-    delivery_id TEXT PRIMARY KEY,
-    event_type TEXT NOT NULL,
-    payload JSONB,
-    body_digest TEXT NOT NULL,
-    received_at TIMESTAMPTZ NOT NULL,
-    state TEXT NOT NULL DEFAULT 'pending',
-    attempts INTEGER NOT NULL DEFAULT 0,
-    next_at TIMESTAMPTZ NOT NULL,
-    claim_token TEXT,
-    claim_expires_at TIMESTAMPTZ,
-    processed_at TIMESTAMPTZ,
-    error_code TEXT
-);
-CREATE INDEX IF NOT EXISTS ix_webhook_pending ON webhook_inbox(state, next_at, received_at);
-CREATE INDEX IF NOT EXISTS ix_webhook_order ON webhook_inbox
- ((payload #>> '{repository,full_name}'), inbox_position) WHERE state != 'done';
-"""
-
 
 class DeliveryConflict(ValueError):
     """The sender reused a delivery identity for different bytes or an event type."""
@@ -55,6 +34,8 @@ class Webhook(BaseModel):
 
 
 class WebhookStore:
+    """Own durable receipt consumption and transaction-bound delivery audit deduplication."""
+
     def __init__(self, store: Store) -> None:
         self.store = store
 
@@ -159,3 +140,23 @@ class WebhookStore:
                 "WHERE state='done' AND processed_at<%s ORDER BY processed_at LIMIT 500)",
                 (now - timedelta(days=90),),
             )
+
+    def event_seen(self, delivery_id: str) -> bool:
+        with self.store.connection() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM events WHERE delivery_id=%s", (delivery_id,)
+            ).fetchone()
+        return row is not None
+
+    def record_event(
+        self, delivery_id: str, event_type: str, flow_id: int | None, payload: dict
+    ) -> bool:
+        """Atomically reserve a delivery and report whether this caller won."""
+        with self.store.connection() as connection:
+            row = connection.execute(
+                "INSERT INTO events(delivery_id, event_type, flow_id, payload, processed_at)"
+                " VALUES (%s,%s,%s,%s,%s) ON CONFLICT (delivery_id) DO NOTHING"
+                " RETURNING delivery_id",
+                (delivery_id, event_type, flow_id, Jsonb(payload), self.store.now()),
+            ).fetchone()
+        return row is not None

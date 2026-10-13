@@ -23,7 +23,7 @@ from app.github import (
     ReviewThreads,
     retry_delay,
 )
-from app.persistence.reconcile_store import FeedbackCheck
+from app.persistence.reconciliation import FeedbackCheck
 from app.persistence.store import Store
 
 
@@ -94,7 +94,7 @@ class FeedbackReconciler:
         try:
             with self.store.transaction() as tx:
                 flow = tx.lock_workflow(check.flow_id)
-                delivery = tx.get_delivery(check.flow_id)
+                delivery = tx.deliveries.get_delivery(check.flow_id)
                 if (flow is None or flow.state is not FlowState.ACTIVE or flow.current_attempt_id is None
                         or delivery is None or delivery.state is not DeliveryState.OPEN
                         or delivery.pr_number is None):
@@ -129,7 +129,7 @@ class FeedbackReconciler:
                 following = page.next_cursor
             with self.store.transaction() as tx:
                 fresh = tx.lock_workflow(flow.id)
-                current = tx.get_delivery(flow.id)
+                current = tx.deliveries.get_delivery(flow.id)
                 if (fresh is None or current is None or fresh.state is not FlowState.ACTIVE
                         or fresh.current_attempt_id != flow.current_attempt_id
                         or fresh.installation_id != flow.installation_id

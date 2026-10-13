@@ -19,25 +19,25 @@ from tests.worker_fakes import result_application
 class Inbox(RecordingStore):
     def __init__(self, count):
         super().__init__()
-        self.jobs = {}
+        self.job_records = {}
         self.pages = []
         for i in range(1, count + 1):
             message = Succeeded(job_id=i, assignment_token="token", connection_epoch="epoch",
                 result=InitialTaskResult(session_id="session", last_message="done", exit_code=0))
-            self.jobs[i] = self.job.model_copy(update={
+            self.job_records[i] = self.job.model_copy(update={
                 "id": i, "flow_id": i, "state": JobState.RUNNING,
                 "result_payload": message.model_dump(mode="json"),
             })
 
     def get_job(self, job_id):
-        return self.jobs.get(job_id)
+        return self.job_records.get(job_id)
 
     def unapplied_result_ceiling(self):
-        return max((j.id for j in self.jobs.values() if j.result_applied_at is None), default=0)
+        return max((j.id for j in self.job_records.values() if j.result_applied_at is None), default=0)
 
     def list_unapplied_results(self, *, after_id=0, through_id=None, limit=64):
         self.pages.append((after_id, limit))
-        return [j for j in self.jobs.values()
+        return [j for j in self.job_records.values()
                 if j.id > after_id and (through_id is None or j.id <= through_id)
                 and j.result_applied_at is None][:limit]
 
@@ -154,9 +154,9 @@ async def test_new_arrivals_cannot_extend_a_recovery_cycle_forever():
     processor = result_application(inbox, Coordinator(inbox)._commit_result)
     await processor.recover_pending_results(batch_size=1)
     # A busy service keeps producing new IDs; the initial scan must still end at ID 2.
-    inbox.jobs[3] = Inbox(3).jobs[3]
+    inbox.job_records[3] = Inbox(3).job_records[3]
     await processor.recover_pending_results(batch_size=1)
-    inbox.jobs[4] = Inbox(4).jobs[4]
+    inbox.job_records[4] = Inbox(4).job_records[4]
     await processor.recover_pending_results(batch_size=1)
     assert calls == [1, 2, 1]
 
@@ -180,7 +180,8 @@ async def test_runtime_sweeps_continue_while_result_recovery_waits():
     runtime.store = SimpleNamespace(
         reviews=SimpleNamespace(claim_due=Mock(side_effect=lambda: (settled.set() or True)),
                                 pending_triage=Mock(return_value=[])),
-        sweep_expired_assignments=Mock(side_effect=lambda: (lease.set() or 0, 0)), close=Mock(),
+        workers=SimpleNamespace(sweep_expired_assignments=Mock(side_effect=lambda: (lease.set() or 0, 0))),
+        close=Mock(),
     )
     runtime.coordinator.results = SimpleNamespace(recover_pending_results=AsyncMock(side_effect=recover))
     runtime.gateway = SimpleNamespace(notify_jobs=Mock())
@@ -201,20 +202,20 @@ async def test_runtime_sweeps_continue_while_result_recovery_waits():
 def test_store_pages_only_unapplied_results_in_stable_job_order(store):
     jobs = []
     for i in range(5):
-        flow = store.create_flow("owner/repo", i + 1, 42)
-        job = store.enqueue_job(flow.id, JobKind.INITIAL)
+        flow = store.flows.create_flow("owner/repo", i + 1, 42)
+        job = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
         jobs.append(job)
         with store.connection() as conn:
             conn.execute("UPDATE jobs SET state='running', result_received_at=%s WHERE id=%s",
                          (store.now(), job.id))
-    first = store.list_unapplied_results(limit=2)
-    assert store.unapplied_result_ceiling() == jobs[-1].id
-    assert [j.id for j in store.list_unapplied_results(through_id=jobs[1].id)] == [
+    first = store.jobs.list_unapplied_results(limit=2)
+    assert store.jobs.unapplied_result_ceiling() == jobs[-1].id
+    assert [j.id for j in store.jobs.list_unapplied_results(through_id=jobs[1].id)] == [
         j.id for j in jobs[:2]
     ]
     assert [j.id for j in first] == [j.id for j in jobs[:2]]
-    store.complete_persisted_result(jobs[2].id, JobState.DONE)
-    assert [j.id for j in store.list_unapplied_results(after_id=first[-1].id, limit=2)] == [
+    store.jobs.complete_persisted_result(jobs[2].id, JobState.DONE)
+    assert [j.id for j in store.jobs.list_unapplied_results(after_id=first[-1].id, limit=2)] == [
         jobs[3].id, jobs[4].id,
     ]
 

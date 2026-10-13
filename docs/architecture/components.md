@@ -13,7 +13,7 @@
 控制端运行时、数据库与配置实例化仍归对应命令；加载 CLI 不提前加载 SQL、SDK 或控制端。
 
 `telemetry/logging.py` 只提供通用日志配置；`telemetry/metrics.py` 由控制端使用，并调用
-`persistence/metrics_store.py` 读取数据库指标。两者不在包入口集中导出，避免 worker 经日志导入 SQL。
+`persistence/metrics.py` 读取数据库指标。两者不在包入口集中导出，避免 worker 经日志导入 SQL。
 GitHub 错误分类和 Retry-After 计时由 `github/errors.py` 提供，仓储通过 `app.github` 复用纯计算，
 不会初始化 SDK。`domain/project_models.py` 只保留业务目标状态，GitHub Project 绑定配置及远端目标数据归 `github/projects.py`。
 职责边界由 `tests/test_boundaries.py` 检查，另以独立解释器验证 worker 启动、实际 CLI 入口和资源 JSON 恢复的传递导入。
@@ -186,16 +186,34 @@ terminal result 三方核对。当前缺口包括：
 
 反馈批次的前置判断/直接修订选择、指令和未决问题归并由 `review_policy` 的纯函数决定；
 `recovery_policy` 根据固定时间及读取的事实决定重排、失败、保留诊断和绑定释放。
-Store 负责候选查询、信号/回执事实、锁和原子写入。恢复扫描在原 worker 锁事务内先提交 job
-动作，再查询事务内更新后的绑定事实；策略函数不执行 SQL、读取时钟或调用外部服务。
+功能仓储负责候选查询、信号/回执事实和原子写入，Store 统一维护连接、事务、时钟和共用锁。
+WorkerStore 的恢复扫描在原 worker 锁事务内先提交 job 动作，再查询事务内更新后的绑定事实；
+策略函数不执行 SQL、读取时钟或调用外部服务。
 
 当前 Store 使用 Psycopg 3 的同步连接池访问 PostgreSQL：
+
+| 入口与模块 | 操作归属 |
+| --- | --- |
+| `store.flows` / `flows.py` | Flow 与 Attempt 的事实读写 |
+| `store.deliveries` / `deliveries.py` | 交付状态与 tool-call 去重账本 |
+| `store.jobs` / `jobs.py` | Job 生命周期、未应用结果分页及完成提交 |
+| `store.workers` / `workers.py` | Worker、Flow binding、fenced assignment、准备与租约恢复、drain |
+| `store.stops` / `stops.py` | 停止请求、发送授权与停止回执 |
+| `store.results` / `results.py` | 冻结结果计划和 effects/receipt 恢复 |
+| `store.reviews` / `reviews.py` | 反馈版本、批次、审核上下文及线程事实 |
+| `store.webhooks` / `webhooks.py` | Webhook inbox 消费和事件去重审计 |
+| `store.reconcile` / `reconciliation.py` | PR 与反馈对账进度 |
+| `store.projects` / `projects.py` | Projects 投影与有类型的局部更新 |
+
+`schema.py` 集中完整建表 SQL，初始化沿用既有依赖顺序；`records.py` 仅提供原生行类型及
+必需记录回读校验。功能入口每次绑定当前 Store，事务视图不会复用根 Store 的子对象。
+领域数据类型继续拥有自己的校验和纯规则，持久化操作归上述仓储；时间统一使用 Store 的注入时钟。
 
 `Flow`、`FlowExecution`、`FlowDelivery`、`FlowToolCall`、`Attempt`、`Job` 是 Pydantic
 持久化模型。返回这些领域对象的查询在
 cursor 上使用 Psycopg `class_row(Model)`，由模型统一校验枚举、时间和其他字段；其余轻量查询继续
-使用 pool 的 `dict_row` 默认值。SQL、事务边界、JSONB 适配和并发协议仍由 Store 显式维护，没有引入
-ORM。
+使用 pool 的 `dict_row` 默认值。SQL、JSONB 适配和原子操作由对应仓储显式维护，
+事务边界与共用锁仍由 Store 提供，没有引入 ORM。
 
 - `flows`：issue 级状态，`(repo, issue)` 仅允许一个非终态 flow；
 - `flow_executions`：Flow 到单槽 worker/repo identity 的生命周期 binding 与 recovery deadline；
@@ -219,11 +237,12 @@ ORM。
 
 自动化覆盖 active 唯一约束、flow/attempt/job 往返、review upsert、assignment start/heartbeat/fencing、
 lease 到期 requeue、started grace/deadline、epoch fencing、result inbox 去重、跨 Store 可见性、delivery 去重和并发 assign。
-`assign_job()` 使用事务内的 `FOR UPDATE SKIP LOCKED`，gateway 接受多个独立配置 worker。
+`store.workers.assign_job()` 使用事务内的 `FOR UPDATE SKIP LOCKED`，gateway 接受多个独立配置 worker。
 
 Store 继续使用同步接口。assignment claim 无锁读取公平候选，只有请求方就是候选时才锁定自身 worker，
 重新检查 epoch、在线状态、空闲槽位及 drain/binding；随后锁定最早 eligible Flow job，并原子创建
-或复用 lifecycle binding。`with store.transaction() as tx` 提供连接绑定的 Store 视图，各领域步骤显式使用 `tx`。
+或复用 lifecycle binding。`with store.transaction() as tx` 提供连接绑定的 Store 视图，各领域步骤显式使用
+`tx.flows`、`tx.jobs` 等对象；所有步骤共用该连接，异常一起回滚，事务退出后这些视图拒绝继续使用。
 结果的最终事务同时写入 flow/delivery/attempt、带源 job 唯一键的派生 job/codex run、`result_applied_at` 和 worker slot。
 `flow_tool_calls` 的 prepared delivery 与 response 也一起提交。
 

@@ -92,7 +92,7 @@ class ResultApplication:
         retry the same job_id through recover_pending_results, honoring backoff.
         """
         async with self._result_locks.setdefault(job_id, asyncio.Lock()):
-            job = self.store.get_job(job_id)
+            job = self.store.jobs.get_job(job_id)
             if job is not None and job.result_applied_at is not None:
                 return job.state
             return await self._apply(job_id)
@@ -101,13 +101,13 @@ class ResultApplication:
         """Advance bounded pages past uncertain results, with a fixed ceiling and worker pool."""
         async with self._recovery_lock:
             if not self._recovery_ceiling:
-                self._recovery_ceiling = self.store.unapplied_result_ceiling()
-            jobs = self.store.list_unapplied_results(
+                self._recovery_ceiling = self.store.jobs.unapplied_result_ceiling()
+            jobs = self.store.jobs.list_unapplied_results(
                 after_id=self._recovery_cursor, through_id=self._recovery_ceiling, limit=batch_size,
             )
             if not jobs and self._recovery_cursor:
-                self._recovery_ceiling = self.store.unapplied_result_ceiling()
-                jobs = self.store.list_unapplied_results(through_id=self._recovery_ceiling, limit=batch_size)
+                self._recovery_ceiling = self.store.jobs.unapplied_result_ceiling()
+                jobs = self.store.jobs.list_unapplied_results(through_id=self._recovery_ceiling, limit=batch_size)
             self._recovery_cursor = jobs[-1].id if jobs else 0
             if len(jobs) < batch_size or self._recovery_cursor >= self._recovery_ceiling:
                 self._recovery_cursor = self._recovery_ceiling = 0
@@ -129,7 +129,7 @@ class ResultApplication:
 
     async def _apply(self, job_id: int) -> JobState:
         """Resume result intent and commit completion while the caller holds the job lock."""
-        job = self.store.get_job(job_id)
+        job = self.store.jobs.get_job(job_id)
         if job is None:
             raise ValueError(f"job {job_id} disappeared")
         revision_error = await self._check_revision(job)
@@ -161,12 +161,12 @@ class ResultApplication:
                     and flow.current_attempt_id == plan.attempt_id
                     and current.result_applied_at is None
                     and not (
-                        (delivery := tx.get_delivery(plan.flow_id)) is not None
+                        (delivery := tx.deliveries.get_delivery(plan.flow_id)) is not None
                         and delivery.supersedes(current.kind)
                     )
                 )
                 if pending:
-                    tx.set_job_error(job_id, failure)
+                    tx.jobs.set_job_error(job_id, failure)
             if pending:
                 raise ResultPending(failure)
         with self.store.transaction() as tx:
@@ -178,7 +178,7 @@ class ResultApplication:
                 return current.state
             if current.result_digest != plan.digest:
                 raise ValueError("result digest changed before commit")
-            delivery = tx.get_delivery(flow.id)
+            delivery = tx.deliveries.get_delivery(flow.id)
             retired = delivery is not None and delivery.supersedes(current.kind)
             if retired:
                 # Preserve the frozen plan/receipts as history; only execution facts survive merge.
@@ -192,12 +192,12 @@ class ResultApplication:
                 else:
                     self._commit(tx, flow, current, plan, failure)
             if failure or plan.error:
-                tx.set_job_error(job_id, failure or plan.error or "result failed")
+                tx.jobs.set_job_error(job_id, failure or plan.error or "result failed")
                 tx.results.skip_remaining(job_id, failure or plan.error or "result failed")
-            if not tx.complete_persisted_result(job_id, state):
+            if not tx.jobs.complete_persisted_result(job_id, state):
                 raise ResultPending("result has not reached its atomic completion boundary")
             if flow.state is FlowState.CANCELLED:
-                tx.release_flow_execution(flow.id)
+                tx.workers.release_flow_execution(flow.id)
         if not retired:
             self._after_commit(flow, current, plan, state)
         return state
@@ -207,10 +207,10 @@ class ResultApplication:
         if (job.kind is not JobKind.REVISION or job.result_applied_at is not None
                 or job.result_payload is None or self.store.results.get_plan(job.id) is not None):
             return None
-        flow = self.store.get_flow(job.flow_id)
+        flow = self.store.flows.get_flow(job.flow_id)
         if flow is None or flow.state in TERMINAL_STATES:
             return None
-        delivery = self.store.get_delivery(flow.id)
+        delivery = self.store.deliveries.get_delivery(flow.id)
         if delivery is not None and delivery.supersedes(job.kind):
             return None
         message = parse_worker_message(json.dumps(job.result_payload))
@@ -221,7 +221,7 @@ class ResultApplication:
         mismatch = revision_mismatch(task, result)
         if mismatch:
             return mismatch
-        delivery = self.store.get_delivery(flow.id)
+        delivery = self.store.deliveries.get_delivery(flow.id)
         if delivery is None or delivery.head_sha != task.expected_head_sha:
             return "revision baseline no longer matches delivery"
         if job.verify_next_at is not None and job.verify_next_at > self.store.now():
@@ -244,7 +244,7 @@ class ResultApplication:
         """Freeze state-dependent inputs once; later attempts use this same plan and effect order."""
         message = parse_worker_message(json.dumps(job.result_payload))
         assert job.result_digest is not None
-        attempt = tx.get_current_attempt(flow)
+        attempt = tx.flows.get_current_attempt(flow)
         base = ResultPlan(
             job_id=job.id,
             flow_id=flow.id,
@@ -261,7 +261,7 @@ class ResultApplication:
         batch = tx.reviews.for_job(job) if job.kind in {JobKind.REVISION} else None
         if batch is not None:
             base = base.model_copy(update={"attempt_id": batch.attempt_id, "batch_id": batch.id})
-        delivery = tx.get_delivery(flow.id)
+        delivery = tx.deliveries.get_delivery(flow.id)
         if delivery is not None and delivery.supersedes(job.kind):
             return self._retired_plan(job, base.attempt_id)
         if batch is not None and (batch.attempt_id != flow.current_attempt_id
@@ -301,8 +301,8 @@ class ResultApplication:
                         f"{result.failure_detail}。未开 PR。"
                     )
                 return self._failure(tx, flow, base, reason)
-            delivery = tx.get_delivery(flow.id)
-            call = tx.get_tool_call(result.open_pr_call_id) if result.open_pr_call_id else None
+            delivery = tx.deliveries.get_delivery(flow.id)
+            call = tx.deliveries.get_tool_call(result.open_pr_call_id) if result.open_pr_call_id else None
             mismatch = initial_delivery_mismatch(job, attempt, result, delivery, call)
             if mismatch is not None:
                 return self._failure(
@@ -355,8 +355,8 @@ class ResultApplication:
                     f"{result.failure_detail or '执行结果不确定'}。反馈保留，需核对工作区和远端。",
                 )
             task = frozen_revision(job)
-            delivery = tx.get_delivery(flow.id)
-            execution = tx.get_flow_execution(flow.id)
+            delivery = tx.deliveries.get_delivery(flow.id)
+            execution = tx.workers.get_flow_execution(flow.id)
             mismatch = revision_error or revision_mismatch(task, result)
             if mismatch:
                 return self._failure(tx, flow, base, mismatch)
@@ -425,7 +425,7 @@ class ResultApplication:
                 verify_archive(tx, flow, job, result)
             except ValueError as error:
                 return self._failure(tx, flow, base, str(error))
-            delivery = tx.get_delivery(flow.id)
+            delivery = tx.deliveries.get_delivery(flow.id)
             assert delivery is not None
             return base.model_copy(update={
                 "flow_state": FlowState.SUCCEEDED, "archive": result,
@@ -467,10 +467,10 @@ class ResultApplication:
         failure: str | None,
     ) -> None:
         """Commit local consequences under the same connection as the final result marker."""
-        delivery = tx.get_delivery(flow.id)
+        delivery = tx.deliveries.get_delivery(flow.id)
         retired = delivery is not None and delivery.supersedes(job.kind)
         if plan.run is not None and plan.attempt_id is not None:
-            attempt = tx.get_attempt(plan.attempt_id)
+            attempt = tx.flows.get_attempt(plan.attempt_id)
             if attempt is None:
                 raise ValueError("result attempt disappeared")
             if not retired and (plan.run.kind == "initial" or (
@@ -481,7 +481,7 @@ class ResultApplication:
                     attempt.session_generation = plan.revision.session_generation
                     assert plan.revision.output is not None
                     attempt.last_revision_summary = plan.revision.output.summary
-                tx.update_attempt(attempt)
+                tx.flows.update_attempt(attempt)
         if retired:
             return
         if job.kind is JobKind.ARCHIVE:
@@ -495,19 +495,19 @@ class ResultApplication:
         state = FlowState.FAILED if failure else plan.flow_state
         if state is not None:
             flow.state = state
-            tx.update_flow(flow)
+            tx.flows.update_flow(flow)
             if job.kind is not JobKind.REVISION:
-                tx.release_flow_execution(flow.id)
+                tx.workers.release_flow_execution(flow.id)
         if failure or plan.state is JobState.FAILED:
             return
         if plan.delivery is not None:
-            current = tx.get_delivery(flow.id)
+            current = tx.deliveries.get_delivery(flow.id)
             if current is None or current.version != plan.delivery.version:
                 raise ResultPending("delivery version changed before result commit")
             if plan.revision is not None:
                 current.head_sha = plan.revision.commit_sha
                 current.version += 1
-                tx.update_delivery(current)
+                tx.deliveries.update_delivery(current)
             else:
                 self._commit_initial_delivery(tx, job, current, flow)
         if plan.batch_id is not None and plan.batch_state is not None:
@@ -535,10 +535,10 @@ class ResultApplication:
         current.pr_number = pull_request.number
         current.url = f"https://github.com/{flow.repo}/pull/{pull_request.number}"
         current.version += 1
-        tx.update_delivery(current)
+        tx.deliveries.update_delivery(current)
 
     def _failure(self, tx: Store, flow: Flow, base: ResultPlan, reason: str) -> ResultPlan:
-        delivery = tx.get_delivery(flow.id)
+        delivery = tx.deliveries.get_delivery(flow.id)
         if delivery is not None and delivery.state is DeliveryState.MERGED:
             return base.model_copy(update={"state": JobState.FAILED, "error": reason})
         number = delivery.pr_number if delivery and delivery.pr_number else flow.issue_number
@@ -595,7 +595,7 @@ class ResultApplication:
 
     @staticmethod
     def _pr_number(tx: Store, flow: Flow) -> int:
-        delivery = tx.get_delivery(flow.id)
+        delivery = tx.deliveries.get_delivery(flow.id)
         if delivery is None or delivery.pr_number is None:
             raise ValueError("Flow has no delivered PR")
         return delivery.pr_number

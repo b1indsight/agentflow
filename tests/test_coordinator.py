@@ -35,19 +35,20 @@ from app.domain.models import (
 from app.github import GitHubApp
 from app.persistence.store import Store
 from tests.github import RecordingGitHub
+from tests.persistence_fakes import RepositoryViews
 from tests.result_memory import MemoryResults, MemoryStops
 from tests.review_memory import MemoryReviews
 
 pytestmark = pytest.mark.usefixtures("recording_resources")
 
 
-class MemoryStore:
+class MemoryStore(RepositoryViews):
     def __init__(self) -> None:
-        self.jobs: dict[int, Job] = {}
+        self.job_records: dict[int, Job] = {}
         self.results = MemoryResults()
         self.stops = MemoryStops()
         self.reviews = MemoryReviews()
-        self.reviews.jobs = self.jobs
+        self.reviews.job_records = self.job_records
         self.sources: dict[tuple[int, str], Job] = {}
         self.flow = Flow(
             id=1,
@@ -87,11 +88,11 @@ class MemoryStore:
             job.flow_id == flow_id
             and job.result_received_at is not None
             and job.result_applied_at is None
-            for job in self.jobs.values()
+            for job in self.job_records.values()
         )
 
     def cancel_jobs(self, flow_id: int, *, reason: str = "Flow cancelled") -> None:
-        for job in self.jobs.values():
+        for job in self.job_records.values():
             if job.flow_id == flow_id and job.state is JobState.QUEUED:
                 job.state = JobState.FAILED
 
@@ -103,13 +104,13 @@ class MemoryStore:
 
 
     def get_job(self, job_id: int) -> Job | None:
-        job = self.jobs.get(job_id)
+        job = self.job_records.get(job_id)
         return job.model_copy(deep=True) if job else None
 
     def accept(self, job: Job, result: ExecutionResult) -> None:
         message = Succeeded(job_id=job.id, assignment_token="test-token",
                             connection_epoch="test-epoch", result=result)
-        current = self.jobs.setdefault(job.id, job.model_copy(deep=True))
+        current = self.job_records.setdefault(job.id, job.model_copy(deep=True))
         digest = terminal_digest(message)
         if current.result_digest is not None:
             assert current.result_digest == digest
@@ -119,19 +120,19 @@ class MemoryStore:
         current.result_received_at = self.now()
 
     def complete_persisted_result(self, job_id: int, state: JobState) -> bool:
-        job = self.jobs[job_id]
+        job = self.job_records[job_id]
         if job.result_applied_at is not None:
             return False
         job.state, job.result_applied_at = state, self.now()
         return True
 
     def record_control_result(self, job_id: int, payload: dict, digest: str, reason: str) -> None:
-        job = self.jobs[job_id]
+        job = self.job_records[job_id]
         job.result_payload, job.result_digest = payload, digest
         job.result_received_at, job.last_error = self.now(), reason
 
     def set_job_error(self, job_id: int, reason: str) -> None:
-        self.jobs[job_id].last_error = reason
+        self.job_records[job_id].last_error = reason
 
     def get_flow(self, flow_id: int) -> Flow | None:
         return self.flow if flow_id == self.flow.id else None
@@ -220,7 +221,7 @@ async def apply_result(subject: JobCoordinator, job: Job, result: ExecutionResul
 
 async def prepare(subject: JobCoordinator, job: Job):
     store = cast(MemoryStore, subject.store)
-    store.jobs.setdefault(job.id, job.model_copy(deep=True))
+    store.job_records.setdefault(job.id, job.model_copy(deep=True))
     return await subject.prepare(job)
 
 

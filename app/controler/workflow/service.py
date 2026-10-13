@@ -46,11 +46,11 @@ class ControlService:
     def on_trigger(self, repo: str, issue_number: int, installation_id: int | None) -> Flow | None:
         with self.store.transaction() as tx:
             tx.serialize_issue(repo, issue_number)
-            if tx.get_active_flow(repo, issue_number):
+            if tx.flows.get_active_flow(repo, issue_number):
                 logger.info("flow already active for {}#{}", repo, issue_number)
                 return None
-            flow = tx.create_flow(repo, issue_number, installation_id)
-            tx.enqueue_job(flow.id, JobKind.INITIAL, payload={"issue_number": issue_number})
+            flow = tx.flows.create_flow(repo, issue_number, installation_id)
+            tx.jobs.enqueue_job(flow.id, JobKind.INITIAL, payload={"issue_number": issue_number})
         self._jobs_available()
         logger.info("flow {} created (ACTIVE) for {}#{}", flow.id, repo, issue_number)
         return flow
@@ -60,14 +60,14 @@ class ControlService:
             fresh = tx.lock_workflow(flow.id)
             if fresh is None or fresh.state is FlowState.SUCCEEDED:
                 return
-            delivery = tx.get_delivery(fresh.id)
+            delivery = tx.deliveries.get_delivery(fresh.id)
             if delivery is not None and delivery.state is DeliveryState.MERGED:
                 raise ValueError("a merged Flow must finish archive before its worker can be released")
             fresh.state = FlowState.CANCELLED
-            tx.update_flow(fresh)
+            tx.flows.update_flow(fresh)
             tx.stops.request(fresh.id)
-            tx.release_flow_execution(fresh.id)
-            tx.cancel_jobs(fresh.id)
+            tx.workers.release_flow_execution(fresh.id)
+            tx.jobs.cancel_jobs(fresh.id)
         self._jobs_available()
         logger.info("flow {} cancelled", flow.id)
 
@@ -76,7 +76,7 @@ class ControlService:
         merge = PullRequestMerge.model_validate(payload["pull_request"])
         with self.store.transaction() as tx:
             fresh = tx.lock_workflow(flow.id)
-            delivery = tx.get_delivery(flow.id)
+            delivery = tx.deliveries.get_delivery(flow.id)
             if (fresh is None or delivery is None or payload.get("action") != "closed"
                     or (payload.get("repository") or {}).get("full_name") != fresh.repo
                     or fresh.installation_id is None
@@ -84,7 +84,7 @@ class ControlService:
                     or delivery.pr_number != merge.number):
                 logger.warning("merge identity does not match flow {}", flow.id)
                 return
-            if not tx.record_event(delivery_id, "pull_request", fresh.id, payload):
+            if not tx.webhooks.record_event(delivery_id, "pull_request", fresh.id, payload):
                 return
             first_merge = record_merge(tx, fresh, delivery, merge)
         if first_merge:
@@ -103,16 +103,16 @@ class ControlService:
                 raise ValueError(f"flow {flow.id} disappeared")
             if tx.stops.has_pending(fresh.id):
                 raise ValueError("cancellation is awaiting confirmed stop or pending result reconciliation")
-            delivery = tx.get_delivery(fresh.id)
+            delivery = tx.deliveries.get_delivery(fresh.id)
             if delivery is not None and delivery.state is DeliveryState.CLOSED:
                 raise ValueError("PR is closed or paused; reopen and reconcile its baseline before retry")
             if delivery is not None and delivery.state is DeliveryState.MERGED:
                 self._retry_archive(tx, fresh)
-            elif tx.has_pending_result(flow.id):
+            elif tx.jobs.has_pending_result(flow.id):
                 if fresh.state is not FlowState.ACTIVE or not self._retry_delivery_effects(tx, fresh):
                     raise ValueError("Flow has a pending result; reconcile its effects before retry")
             else:
-                active = tx.get_active_flow(fresh.repo, fresh.issue_number)
+                active = tx.flows.get_active_flow(fresh.repo, fresh.issue_number)
                 if active is not None and active.id != fresh.id:
                     raise ValueError(
                         f"flow {active.id} is already active for {fresh.repo}#{fresh.issue_number}"
@@ -122,15 +122,15 @@ class ControlService:
                 if fresh.state is FlowState.SUCCEEDED:
                     raise ValueError("a succeeded Flow cannot be retried")
                 # Recovery may have failed the Flow before its queued work was swept.
-                tx.cancel_jobs(fresh.id)
-                failed_job = tx.latest_failed_job(fresh.id)
+                tx.jobs.cancel_jobs(fresh.id)
+                failed_job = tx.jobs.latest_failed_job(fresh.id)
                 kind = failed_job.kind if failed_job is not None else JobKind.INITIAL
-                delivery = tx.get_delivery(fresh.id)
+                delivery = tx.deliveries.get_delivery(fresh.id)
                 if delivery is not None and delivery.supersedes(kind):
                     raise ValueError("a merged PR cannot retry coding or review jobs")
                 fresh.state = FlowState.ACTIVE
-                tx.update_flow(fresh)
-                replacement = tx.enqueue_job(
+                tx.flows.update_flow(fresh)
+                replacement = tx.jobs.enqueue_job(
                     fresh.id, kind,
                     payload=failed_job.payload if failed_job else {"issue_number": fresh.issue_number},
                 )
@@ -161,19 +161,19 @@ class ControlService:
         """Retry only a settled archive on its original binding and current Attempt."""
         if flow.state is not FlowState.ACTIVE:
             raise ValueError("a merged PR cannot retry coding or review jobs or terminal Flows")
-        execution = tx.get_flow_execution(flow.id)
+        execution = tx.workers.get_flow_execution(flow.id)
         if execution is None or execution.released_at is not None:
             raise ValueError("archive retry requires the original active binding")
-        if tx.has_pending_result(flow.id):
+        if tx.jobs.has_pending_result(flow.id):
             if ControlService._retry_delivery_effects(tx, flow):
                 return
             raise ValueError("archive has a pending result; wait for result reconciliation")
-        jobs = tx.list_jobs(flow.id)
+        jobs = tx.jobs.list_jobs(flow.id)
         if any(job.state is JobState.RUNNING for job in jobs):
             raise ValueError("archive retry is blocked by a running or unknown executor")
         if any(job.kind is JobKind.ARCHIVE and job.state is JobState.QUEUED for job in jobs):
             raise ValueError("archive is already queued; wait for the original worker")
-        workers = tx.list_workers()
+        workers = tx.workers.list_workers()
         worker = next((w for w in workers if w.worker_id == execution.worker_id), None)
         if worker is None or worker.status is not WorkerStatus.ONLINE or worker.current_job_id is not None:
             raise ValueError("archive retry requires the original worker online with no executor")
@@ -181,17 +181,17 @@ class ControlService:
                        if job.kind is JobKind.ARCHIVE and job.state is JobState.FAILED), None)
         if failed is None:
             raise ValueError("Flow has no failed archive to retry")
-        tx.enqueue_job(flow.id, JobKind.ARCHIVE, payload=failed.payload)
+        tx.jobs.enqueue_job(flow.id, JobKind.ARCHIVE, payload=failed.payload)
 
     def notify_jobs(self) -> None:
         self._jobs_available()
 
     def list_workers(self) -> list[WorkerView]:
         views: list[WorkerView] = []
-        for worker in self.store.list_workers():
-            execution = self.store.get_worker_execution(worker.worker_id)
+        for worker in self.store.workers.list_workers():
+            execution = self.store.workers.get_worker_execution(worker.worker_id)
             job = (
-                self.store.get_job(worker.current_job_id)
+                self.store.jobs.get_job(worker.current_job_id)
                 if worker.current_job_id is not None
                 else None
             )

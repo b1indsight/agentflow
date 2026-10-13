@@ -41,9 +41,10 @@ async def test_control_owns_session_order_attribution_and_tail(tmp_path):
                            + json.dumps(message("assistant", "two")) + "\n")
     attempts = [Attempt(id=7, flow_id=42, codex_session_id=SESSION),
                 Attempt(id=8, flow_id=42, codex_session_id=OTHER, session_generation=1)]
-    store = SimpleNamespace(get_flow=lambda _: object(),
-                            get_flow_execution=lambda _: SimpleNamespace(worker_id="worker"),
-                            list_attempts=lambda _: attempts)
+    store = SimpleNamespace(
+        flows=SimpleNamespace(get_flow=lambda _: object(), list_attempts=lambda _: attempts),
+        workers=SimpleNamespace(get_flow_execution=lambda _: SimpleNamespace(worker_id="worker")),
+    )
     calls = []
     reader = CodexHistory(tmp_path)
 

@@ -68,7 +68,7 @@ class AsgiCoordinator(JobCoordinator):
         pass
 
     async def _commit_result(self, job_id: int) -> JobState:
-        self.store.complete_persisted_result(job_id, JobState.DONE)
+        self.store.jobs.complete_persisted_result(job_id, JobState.DONE)
         return JobState.DONE
 
     async def fail(self, job: Job, reason: str) -> None:
@@ -112,11 +112,11 @@ def test_real_asgi_websocket_completes_a_postgresql_job(store: Store, monkeypatc
         disconnected.set()
 
     monkeypatch.setattr(WorkerGateway, "handle", handle_until_disconnected)
-    flow = store.create_flow("owner/repo", 8, installation_id=42)
-    attempt = store.create_attempt(flow.id)
+    flow = store.flows.create_flow("owner/repo", 8, installation_id=42)
+    attempt = store.flows.create_attempt(flow.id)
     flow.current_attempt_id = attempt.id
-    store.update_flow(flow)
-    job = store.enqueue_job(flow.id, JobKind.INITIAL)
+    store.flows.update_flow(flow)
+    job = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
     application = create_app(AsgiRuntime(store, attempt.id))
 
     with (
@@ -157,6 +157,6 @@ def test_real_asgi_websocket_completes_a_postgresql_job(store: Store, monkeypatc
         socket.close()
         assert disconnected.wait(timeout=2)
 
-    completed = store.get_job(job.id)
+    completed = store.jobs.get_job(job.id)
     assert completed is not None
     assert completed.state is JobState.DONE

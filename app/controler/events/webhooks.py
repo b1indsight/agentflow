@@ -13,7 +13,6 @@ from app.controler.config import ServerSettings
 from app.controler.events.router import EventRouter
 from app.controler.workflow.service import ControlService
 from app.persistence.store import Store
-from app.persistence.webhook_store import WebhookStore
 
 
 class WebhookConsumer:
@@ -22,7 +21,7 @@ class WebhookConsumer:
         self.wakeup = asyncio.Event()
 
     def sweep(self, loop: asyncio.AbstractEventLoop | None = None) -> int:
-        inbox = WebhookStore(self.store)
+        inbox = self.store.webhooks
         handled = 0
         for _ in range(50):
             item = inbox.claim()
@@ -36,7 +35,7 @@ class WebhookConsumer:
                 with self.store.transaction() as tx:
                     with tx.connection() as conn:
                         conn.execute("SET LOCAL statement_timeout = '2s'")
-                    leased = WebhookStore(tx)
+                    leased = tx.webhooks
                     if not leased.lock(item):
                         continue
                     service = ControlService(
@@ -72,7 +71,7 @@ class WebhookConsumer:
 
     def _cycle(self, loop: asyncio.AbstractEventLoop) -> None:
         self.sweep(loop)
-        WebhookStore(self.store).cleanup()
+        self.store.webhooks.cleanup()
 
     async def run(self) -> None:
         while True:

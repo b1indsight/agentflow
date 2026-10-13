@@ -20,9 +20,8 @@ from app.contracts.protocol import PROTOCOL_VERSION, InitialTaskResult, Succeede
 from app.controler.api import create_app
 from app.controler.config import ServerSettings
 from app.domain.models import DeliveryState, FlowState, JobKind, JobState, utcnow
-from app.persistence import metrics_store
-from app.persistence.metrics_store import read_snapshot
-from app.persistence.webhook_store import WebhookStore
+from app.persistence import metrics as database_metrics
+from app.persistence.metrics import read_snapshot
 from app.telemetry.logging import configure_logging
 from app.telemetry.metrics import Metrics
 
@@ -72,7 +71,7 @@ def test_metrics_default_off_and_bearer_protected():
 
 
 def test_persistent_backlog_and_empty_age(store, postgresql_url):
-    WebhookStore(store).receive('sensitive-delivery-id', 'ping', {}, 'a' * 64)
+    store.webhooks.receive('sensitive-delivery-id', 'ping', {}, 'a' * 64)
     snapshot = read_snapshot(postgresql_url)
     metrics = Metrics()
     metrics.accept(snapshot)
@@ -112,13 +111,13 @@ async def test_snapshot_runs_off_event_loop_and_scrape_never_reads_database(monk
 
 
 def test_repeated_snapshots_do_not_count_execution_receipt_twice(store, postgresql_url):
-    flow = store.create_flow('private/repository', 1, 1)
-    job = store.enqueue_job(flow.id, JobKind.INITIAL)
-    store.worker_connected('w', PROTOCOL_VERSION, 'epoch')
-    assert store.assign_job('w', 'token', 'epoch')
+    flow = store.flows.create_flow('private/repository', 1, 1)
+    job = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
+    store.workers.worker_connected('w', PROTOCOL_VERSION, 'epoch')
+    assert store.workers.assign_job('w', 'token', 'epoch')
     result = Succeeded(job_id=job.id, assignment_token='token', connection_epoch='epoch',
                        result=InitialTaskResult(session_id='session', last_message='', exit_code=1))
-    assert store.record_assignment_result(job.id, 'w', 'token', 'epoch',
+    assert store.workers.record_assignment_result(job.id, 'w', 'token', 'epoch',
                                           result.model_dump(mode='json'), 'digest') == 'pending'
     with store.connection() as connection:
         connection.execute("UPDATE jobs SET started_at=result_received_at-interval '3 seconds' WHERE id=%s", (job.id,))
@@ -135,7 +134,7 @@ def test_snapshot_query_timeout_preserves_previous_facts(store, postgresql_url, 
     metrics = Metrics()
     metrics.accept(read_snapshot(postgresql_url))
     previous = metrics.snapshot
-    monkeypatch.setattr(metrics_store, 'SNAPSHOT_SQL', 'SELECT pg_sleep(10)')
+    monkeypatch.setattr(database_metrics, 'SNAPSHOT_SQL', 'SELECT pg_sleep(10)')
     with pytest.raises(psycopg.errors.QueryCanceled): read_snapshot(postgresql_url)
     metrics.failed()
     assert metrics.snapshot is previous
@@ -199,12 +198,12 @@ def test_reconcile_metrics_match_scheduler_eligibility(store, postgresql_url):
         (4, FlowState.ACTIVE, DeliveryState.MERGED, 14),
         (5, FlowState.ACTIVE, DeliveryState.NONE, None),
     ]:
-        flow = store.create_flow('fixture/repo', number, 1)
+        flow = store.flows.create_flow('fixture/repo', number, 1)
         flow.state = state
-        store.update_flow(flow)
-        delivery = store.get_or_create_delivery(flow.id, f'flow/{number}')
+        store.flows.update_flow(flow)
+        delivery = store.deliveries.get_or_create_delivery(flow.id, f'flow/{number}')
         delivery.state, delivery.pr_number = delivery_state, pr
-        store.update_delivery(delivery)
+        store.deliveries.update_delivery(delivery)
         store.reconcile.hint(flow.id)
         with store.connection() as conn:
             conn.execute("UPDATE flow_reconcile SET next_at=now()-(%s * interval '1 second') WHERE flow_id=%s",
@@ -218,31 +217,31 @@ def test_reconcile_metrics_match_scheduler_eligibility(store, postgresql_url):
 
 
 def test_archive_alert_age_uses_latest_job_of_active_bound_flow(store, postgresql_url):
-    flow = store.create_flow('fixture/recovery', 1, 1)
-    store.worker_connected('w', PROTOCOL_VERSION, 'epoch')
-    initial = store.enqueue_job(flow.id, JobKind.INITIAL)
-    assert store.assign_job('w', 'token', 'epoch')
-    assert store.finish_assignment(initial.id, 'w', 'token', JobState.DONE, 'epoch')
-    delivery = store.get_or_create_delivery(flow.id, 'flow/1')
+    flow = store.flows.create_flow('fixture/recovery', 1, 1)
+    store.workers.worker_connected('w', PROTOCOL_VERSION, 'epoch')
+    initial = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
+    assert store.workers.assign_job('w', 'token', 'epoch')
+    assert store.workers.finish_assignment(initial.id, 'w', 'token', JobState.DONE, 'epoch')
+    delivery = store.deliveries.get_or_create_delivery(flow.id, 'flow/1')
     delivery.state, delivery.pr_number = DeliveryState.MERGED, 17
     delivery.head_sha, delivery.merge_commit_sha, delivery.merged_at = 'head', 'merge', utcnow()
-    store.update_delivery(delivery)
-    job = store.enqueue_job(flow.id, JobKind.ARCHIVE)
+    store.deliveries.update_delivery(delivery)
+    job = store.jobs.enqueue_job(flow.id, JobKind.ARCHIVE)
     with store.connection() as conn:
         conn.execute("UPDATE jobs SET created_at=now()-interval '20 minutes' WHERE id=%s", (job.id,))
     def age():
         return next(s.value for s in read_snapshot(postgresql_url).samples
                     if s.family == 'archive_pending_age_seconds')
     assert age() >= 1200
-    assert store.assign_job('w', 'archive-token', 'epoch')
-    assert store.finish_assignment(job.id, 'w', 'archive-token', JobState.FAILED, 'epoch')
+    assert store.workers.assign_job('w', 'archive-token', 'epoch')
+    assert store.workers.finish_assignment(job.id, 'w', 'archive-token', JobState.FAILED, 'epoch')
     # A newer queued retry replaces the age of the failed attempt.
-    retry = store.enqueue_job(flow.id, JobKind.ARCHIVE)
+    retry = store.jobs.enqueue_job(flow.id, JobKind.ARCHIVE)
     assert age() < 10
     # Successful archive application also terminates the Flow and releases its binding.
-    assert store.assign_job('w', 'retry-token', 'epoch')
-    assert store.finish_assignment(retry.id, 'w', 'retry-token', JobState.DONE, 'epoch')
+    assert store.workers.assign_job('w', 'retry-token', 'epoch')
+    assert store.workers.finish_assignment(retry.id, 'w', 'retry-token', JobState.DONE, 'epoch')
     flow.state = FlowState.SUCCEEDED
-    store.update_flow(flow)
-    assert store.release_flow_execution(flow.id)
+    store.flows.update_flow(flow)
+    assert store.workers.release_flow_execution(flow.id)
     assert age() == 0

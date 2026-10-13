@@ -5,7 +5,7 @@ from __future__ import annotations
 import psycopg
 from pydantic import BaseModel
 
-from app.persistence.reconcile_store import PR_RECONCILE_ELIGIBLE
+from app.persistence.reconciliation import PR_RECONCILE_ELIGIBLE
 
 # One statement gives a consistent snapshot and one total SQL execution budget.
 SNAPSHOT_SQL = f"""

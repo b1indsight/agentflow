@@ -16,36 +16,6 @@ if TYPE_CHECKING:
     from app.persistence.store import Store
 
 
-RESULT_SCHEMA = """
-CREATE UNIQUE INDEX IF NOT EXISTS ux_jobs_source ON jobs(source_job_id, source_key)
-  WHERE source_job_id IS NOT NULL;
-CREATE TABLE IF NOT EXISTS result_applications (
-  job_id BIGINT PRIMARY KEY REFERENCES jobs(id),
-  digest TEXT NOT NULL,
-  plan JSONB NOT NULL,
-  created_at TIMESTAMPTZ NOT NULL
-);
-CREATE TABLE IF NOT EXISTS result_effects (
-  job_id BIGINT NOT NULL REFERENCES result_applications(job_id),
-  effect_key TEXT NOT NULL,
-  position INTEGER NOT NULL,
-  payload JSONB NOT NULL,
-  state TEXT NOT NULL,
-  receipt JSONB,
-  claimed_by TEXT,
-  claim_expires_at TIMESTAMPTZ,
-  dispatched_at TIMESTAMPTZ,
-  attempts INTEGER NOT NULL DEFAULT 0,
-  next_attempt_at TIMESTAMPTZ NOT NULL,
-  last_error TEXT,
-  PRIMARY KEY(job_id, effect_key),
-  UNIQUE(job_id, position)
-);
-CREATE INDEX IF NOT EXISTS ix_result_effects_due ON result_effects(next_attempt_at)
-  WHERE state NOT IN ('succeeded','failed','skipped');
-"""
-
-
 class ResultStore:
     """Share the owning Store's connection, including its explicit transaction when preparing."""
 
