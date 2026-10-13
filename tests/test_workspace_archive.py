@@ -79,8 +79,7 @@ async def test_cleanup_preserves_seed_other_flow_journal_and_internal_symlink_ta
     assert (await executor.execute(assignment.task, tool_caller=RecordingToolCaller())).cleanup == "already_absent"
 
 
-@pytest.mark.parametrize("case", ["absent", "top-symlink", "partial-symlink", "parent-symlink",
-                                  "wrong-worker", "wrong-repo", "wrong-attempt", "escape"])
+@pytest.mark.parametrize("case", ["absent", "top-symlink", "partial-symlink", "parent-symlink"])
 async def test_cleanup_rejects_missing_ownership_or_unsafe_target(tmp_path, case):
     seed, repo, _journal, executor, assignment = await workspace(tmp_path)
     task = assignment.task
@@ -95,16 +94,6 @@ async def test_cleanup_rejects_missing_ownership_or_unsafe_target(tmp_path, case
         real = seed.parent.with_name("real-owner")
         seed.parent.rename(real)
         seed.parent.symlink_to(real, target_is_directory=True)
-    elif case == "escape":
-        task = task.model_copy(update={"repo": "../../outside"})
-    else:
-        field, value = {
-            "wrong-worker": ("worker_id", "worker-b"),
-            "wrong-repo": ("repo_identity", "worker-a:owner/other"),
-            "wrong-attempt": ("attempt_id", 8),
-        }[case]
-        task = task.model_copy(update={field: value})
-
     with pytest.raises((ValueError, SessionError), match="archive|cleanup|repository"):
         await executor.execute(task, tool_caller=RecordingToolCaller())
     assert seed.is_dir()

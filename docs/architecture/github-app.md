@@ -89,6 +89,9 @@ thread 批次直接携带各 thread 已反序列化的首批最多 20 条评论�
 PR 响应由资源私有工厂直接转换为实例，保留完整读取与部分响应的字段差异。
 资源方法用 `with translate_errors(endpoint)` 包住 SDK 请求和响应解析，保持原错误范围与取消传播；
 客户端通过原生 `with_auth()` 复制配置，写入关闭副本的重试，后续读取仍保持原策略。
+`GitHubError.definitely_rejected` 统一使用目标请求未发送或真实 HTTP 拒绝的证据，
+后者沿用 4xx 排除 408 的判定。GraphQL 业务错误映射出的状态码仅用于诊断，
+HTTP 200 的部分 mutation 保留不确定性；后续读取失败不能清除之前的写入记录。
 
 资源、评论、批量容器、ref、凭证、合并事件、Project 绑定配置、操作错误和重试计时统一从 `app.github` 导入，例如
 `from app.github import GitHubApp, Issue, PullRequest, Repository`。

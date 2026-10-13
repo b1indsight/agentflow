@@ -99,7 +99,7 @@ class ProjectSync:
                     try:
                         added = await self._call(row, config, lambda: api.add_issue(row.content_id or ""))
                     except GitHubError as error:
-                        if error.definitely_unsent or error.request_rejected:
+                        if error.definitely_rejected:
                             self.projects.save(row, add_started=False)
                         raise
                     self.projects.save(row, item_id=added.id, add_started=False)

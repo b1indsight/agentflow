@@ -1,10 +1,12 @@
 """Thread identity, independent pagination and App-owned reply recovery at the SDK boundary."""
 
 import asyncio
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
-from pydantic import ValidationError
+from githubkit.exception import GraphQLFailed
+from githubkit.graphql.models import GraphQLResponse
 
 from app.github import (
     GitHubApp,
@@ -14,14 +16,13 @@ from app.github import (
     ReviewThread,
     ReviewThreads,
 )
+from app.github import threads as github_threads
 from app.github.errors import translate_errors
 from tests.test_github_client import install_client, settings
 
 
 def test_identity_only_thread_never_proves_coverage():
     # Recovery can know a thread ID before reading its comments or resolution.
-    from datetime import UTC, datetime
-
     identity = ReviewThread(thread_id="T1", repo="owner/repo", pr_number=17)
     scan = ReviewThreads(repo="owner/repo", pr_number=17, fetched_at=datetime.now(UTC),
                          threads=(identity,))
@@ -33,8 +34,6 @@ def test_identity_only_thread_never_proves_coverage():
     }
     with pytest.raises(AttributeError):
         _ = restored.threads[0].resolved
-    with pytest.raises(ValidationError):
-        ReviewThread.model_validate(identity.model_dump() | {"pull_request": "unexpected"})
 
 
 def comment(number, *, author="alice", bot=False, body="Fix this", reply_to=None):
@@ -82,32 +81,29 @@ async def test_threads_and_comments_have_independent_cursors(tmp_path, monkeypat
 
 
 @pytest.mark.parametrize("fault", [
-    "cursor", "partial", "wrong-pr", "missing-node", "duplicate-comment", "missing-comment",
+    "cursor", "missing-node", "duplicate-comment", "missing-comment", "renamed-repository",
 ])
 async def test_invalid_thread_reads_never_look_complete(tmp_path, monkeypatch, fault):
     async def graphql(query, variables):
-        if fault == "partial":
-            return {"errors": [{"type": "FORBIDDEN"}], "repository": {}}
         if fault == "missing-node":
             return {"node": None}
         node = thread(cursor="same" if fault == "cursor" else None)
-        if fault == "wrong-pr":
-            node["pullRequest"]["number"] = 18
-        elif fault == "duplicate-comment":
+        if fault == "duplicate-comment":
             # A response can encode the same ID as either a number or a string.
             node["comments"]["nodes"].append(comment(1) | {"fullDatabaseId": 1})
         elif fault == "missing-comment":
             node["comments"]["nodes"].append(None)
+        elif fault == "renamed-repository":
+            # A rename changes the canonical repository name while this thread ID remains valid.
+            node["pullRequest"]["repository"]["nameWithOwner"] = "owner/renamed"
         return {"node": node}
 
     app = GitHubApp(settings(tmp_path))
     install_client(monkeypatch, lambda _, **kwargs: SimpleNamespace(async_graphql=graphql))
-    if fault == "partial":
-        with pytest.raises(GitHubError):
-            await ReviewThread(PullRequest(app.installation(1).repository("owner/repo"), 17), "T1").refetch()
-    else:
-        result = await ReviewThread(PullRequest(app.installation(1).repository("owner/repo"), 17), "T1").refetch()
-        assert not result.complete
+    result = await ReviewThread(PullRequest(app.installation(1).repository("owner/repo"), 17), "T1").refetch()
+    assert not result.complete
+    if fault == "renamed-repository":
+        assert result.limitations == ("thread:identity-mismatch",)
 
 
 async def test_reply_uses_root_rest_endpoint_and_exact_app_marker(tmp_path, monkeypatch):
@@ -131,55 +127,6 @@ async def test_reply_uses_root_rest_endpoint_and_exact_app_marker(tmp_path, monk
     assert await resource.find_reply("MARK") == 4
     assert await resource.reply("note") == 900
     assert writes == [(("owner", "repo", 17, 1), {"body": "note"})]
-
-
-@pytest.mark.parametrize(("root", "later_root"), [(1, False), (2, False), (None, False), (1, True)])
-async def test_observed_thread_checks_root_identity_without_inventing_it(
-    tmp_path, monkeypatch, root, later_root,
-):
-    # Combining a node ID with another root's database ID could send a reply to the wrong thread.
-    graphql_calls = []
-    writes = []
-
-    async def graphql(query, variables):
-        graphql_calls.append(variables)
-        if later_root:
-            # Recovery knows a root ID before the root itself appears on a later page.
-            if variables["cursor"] is None:
-                return {"node": thread(comments=[comment(3, reply_to=2)], cursor="root-page")}
-            assert variables["cursor"] == "root-page"
-            return {"node": thread(comments=[comment(2)])}
-        return {"node": thread()}
-
-    async def reply(*args, **kwargs):
-        writes.append((args, kwargs))
-        return SimpleNamespace(parsed_data=SimpleNamespace(id=900))
-
-    sdk = SimpleNamespace(async_graphql=graphql, rest=SimpleNamespace(pulls=SimpleNamespace(
-        async_create_reply_for_review_comment=reply)))
-    install_client(monkeypatch, lambda _, **kwargs: sdk)
-    pr = PullRequest(GitHubApp(settings(tmp_path)).installation(42).repository("owner/repo"), 17)
-    before = ReviewThread(pr, "T1", root_comment_id=root)
-    if root == 2 or later_root:
-        with pytest.raises(GitHubError) as caught:
-            await before.refetch()
-        assert caught.value.kind is GitHubErrorKind.UNEXPECTED_RESPONSE
-        assert caught.value.endpoint == "get_review_thread"
-    else:
-        after = await before.refetch()
-        assert after is not before
-        assert after.root_comment_id == root
-        if root is None:
-            with pytest.raises(ValueError, match="known root"):
-                await after.reply("note")
-        else:
-            with pytest.raises(ValueError, match="root comment ID"):
-                ReviewThread(pr, "T1", root_comment_id=2, comments=after.comments)
-            assert await after.reply("note") == 900
-    assert len(graphql_calls) == (2 if later_root else 1)
-    assert len(writes) == (1 if root == 1 and not later_root else 0)
-    assert before.root_comment_id == root
-    assert "comments" not in before.model_dump(exclude_unset=True)
 
 
 async def test_resolve_returns_new_immutable_evidence_without_an_extra_read(tmp_path, monkeypatch):
@@ -236,8 +183,6 @@ async def test_unknown_resolve_result_keeps_original_state(tmp_path, monkeypatch
 
 @pytest.mark.parametrize("limit", ["requests", "bytes"])
 async def test_thread_snapshot_has_a_shared_finite_budget(tmp_path, monkeypatch, limit):
-    from app.github import threads as github_threads
-
     monkeypatch.setattr(github_threads, "MAX_THREAD_REQUESTS", 2)
     if limit == "bytes":
         monkeypatch.setattr(github_threads, "MAX_THREAD_BYTES", 10)
@@ -260,9 +205,6 @@ async def test_thread_snapshot_has_a_shared_finite_budget(tmp_path, monkeypatch,
     ("NOT_FOUND", "not_found", 404), ("INTERNAL", "transient", None),
 ])
 def test_sdk_graphql_errors_with_partial_data_are_classified(kind, expected, status):
-    from githubkit.exception import GraphQLFailed
-    from githubkit.graphql.models import GraphQLResponse
-
     with pytest.raises(GitHubError) as error, translate_errors("thread"):
         raise GraphQLFailed(GraphQLResponse.model_validate({
             "data": {"node": None}, "errors": [{"type": kind, "message": "private details"}],

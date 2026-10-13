@@ -1,5 +1,6 @@
 """Frozen result applications and the finite set of recoverable GitHub operations."""
 
+from collections.abc import Sequence
 from datetime import datetime
 from enum import StrEnum
 from typing import Annotated, Literal
@@ -143,6 +144,15 @@ class EffectRecord(BaseModel):
     attempts: int = 0
     next_attempt_at: datetime
     last_error: str | None = None
+
+
+def unique_pull_request_receipt(records: Sequence[EffectRecord]) -> PullRequest:
+    """Select the single persisted PR creation receipt from already-read effects."""
+    receipts = [record.receipt.pull_request for record in records
+                if record.receipt is not None and record.receipt.pull_request is not None]
+    if len(receipts) != 1:
+        raise ValueError("result requires exactly one persisted PR receipt")
+    return receipts[0]
 
 
 class ResultPending(RuntimeError):

@@ -12,6 +12,7 @@ from app.contracts.protocol import ArchiveResult, ArchiveTask, Succeeded, termin
 from app.control.router import EventRouter
 from app.control.service import ControlService
 from app.domain.models import DeliveryState, Flow, FlowState, JobKind, JobState
+from app.domain.review_models import BatchState
 from app.persistence.store import Store
 from tests.github import RecordingGitHub
 from tests.test_coordinator import coordinator
@@ -106,7 +107,7 @@ async def test_merge_routing_uses_pr_identity_not_feedback_authorization(store, 
     assert bool(store.list_jobs(merge_flow.id)) is (case == "bot")
 
 
-@pytest.mark.parametrize("state", [FlowState.FAILED, FlowState.CANCELLED, FlowState.SUCCEEDED])
+@pytest.mark.parametrize("state", [FlowState.FAILED, FlowState.CANCELLED])
 async def test_terminal_flow_keeps_merge_fact_without_reactivation(store, merge_flow, state):
     merge_flow.state = state
     store.update_flow(merge_flow)
@@ -131,6 +132,7 @@ async def test_merge_retires_review_but_waits_for_running_result(store, recordin
     job, _ = accepted_coding(store)
     flow = store.get_flow(job.flow_id)
     await route_merge(store, flow)
+    assert store.reviews.for_job(job).state is BatchState.CANCELLED
     assert store.assign_job("worker-a", "archive-token", "epoch-a") is None
     github = RecordingGitHub()
     subject = coordinator(store, github)
@@ -141,7 +143,7 @@ async def test_merge_retires_review_but_waits_for_running_result(store, recordin
     assert store.get_delivery(flow.id).state is DeliveryState.MERGED
     archive = store.assign_job("worker-a", "archive-token", "epoch-a")
     assert archive is not None and archive.kind is JobKind.ARCHIVE
-    assert sum(j.kind is JobKind.REVISION for j in store.list_jobs(flow.id)) == 0
+    assert [j.id for j in store.list_jobs(flow.id) if j.kind is JobKind.REVISION] == [job.id]
     assert store.get_flow_execution(flow.id).released_at is None
     task = await subject.prepare(archive)
     assert isinstance(task, ArchiveTask)

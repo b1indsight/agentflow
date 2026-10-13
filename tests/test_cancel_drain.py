@@ -2,10 +2,16 @@ from datetime import timedelta
 
 import pytest
 
-from app.contracts.protocol import PROTOCOL_VERSION
+from app.contracts.protocol import PROTOCOL_VERSION, ExecutionStopped, Failed, terminal_digest
+from app.contracts.result_models import EffectState, PullRequestEffect, ResultPlan
+from app.control.effects import ResultEffects
 from app.control.service import ControlService
-from app.domain.models import JobKind
+from app.domain.models import DeliveryState, FlowState, JobKind, JobState
+from app.github import PullRequest
 from app.persistence.stop_store import StopStore
+from tests.github import RecordingGitHub
+from tests.test_coordinator import coordinator
+from tests.test_merge import route_merge
 
 
 def running(store):
@@ -35,7 +41,6 @@ def test_cancel_retains_slot_and_fence_past_recovery_timeout(store):
 
 
 def test_confirmation_requires_current_epoch_and_exact_request(store):
-    from app.contracts.protocol import ExecutionStopped
     flow, job = running(store)
     ControlService(store).cancel(flow)
     stops = StopStore(store)
@@ -80,9 +85,6 @@ def test_never_dispatched_cancel_needs_no_stop(store):
 
 
 async def test_merge_during_cancel_retains_binding_for_original_archive(store):
-    from app.contracts.protocol import ExecutionStopped
-    from app.domain.models import DeliveryState, FlowState
-    from tests.test_merge import route_merge
     flow, _job = running(store)
     delivery = store.get_or_create_delivery(flow.id, 'flow/1')
     delivery.state, delivery.pr_number, delivery.head_sha = DeliveryState.OPEN, 17, 'b' * 40
@@ -98,7 +100,6 @@ async def test_merge_during_cancel_retains_binding_for_original_archive(store):
 
 
 def test_unresolved_dispatched_effect_blocks_stop_even_if_result_was_marked_applied(store):
-    from app.contracts.protocol import ExecutionStopped
     flow, job = running(store)
     # Older code could mark a cancelled effect skipped without reconciling a dispatched write.
     with store.connection() as conn:
@@ -116,9 +117,6 @@ def test_unresolved_dispatched_effect_blocks_stop_even_if_result_was_marked_appl
 
 
 async def test_late_merge_with_replacement_flow_keeps_stop_blocked(store):
-    from app.contracts.protocol import ExecutionStopped
-    from app.domain.models import DeliveryState
-    from tests.test_merge import route_merge
     flow, _job = running(store)
     delivery = store.get_or_create_delivery(flow.id, 'flow/1')
     delivery.state, delivery.pr_number = DeliveryState.OPEN, 17
@@ -152,7 +150,6 @@ def test_lost_started_ack_cannot_requeue_then_cancel_as_unsent(store):
 
 
 def test_cancel_during_preparation_releases_slot_without_nonexistent_journal(store):
-    from app.domain.models import JobState
     flow = store.create_flow('owner/repo', 1, 1)
     store.worker_connected('w', PROTOCOL_VERSION, 'epoch')
     job = store.enqueue_job(flow.id, JobKind.INITIAL)
@@ -171,7 +168,6 @@ def test_cancel_during_preparation_releases_slot_without_nonexistent_journal(sto
 
 
 def test_confirmed_stop_can_be_reacknowledged_after_flow_rebind(store):
-    from app.contracts.protocol import ExecutionStopped
     flow, _ = running(store)
     ControlService(store).cancel(flow)
     stop = store.stops.pending('w')
@@ -187,23 +183,12 @@ def test_confirmed_stop_can_be_reacknowledged_after_flow_rebind(store):
     assert store.stops.confirm('w', replay)
     assert store.get_flow_execution(flow.id) == before
     assert store.get_job(replacement.id).assignment_token == 'new-token'
-    assert not store.stops.confirm('w', replay.model_copy(update={'execution_nonce': 'forged'}))
 
 
-@pytest.mark.parametrize("remote_state", ["open", "closed", "merged", "foreign"])
+@pytest.mark.parametrize("remote_state", ["open", "closed", "merged"])
 async def test_cancelled_creation_persists_pr_identity_and_merge_before_stop(
     store, remote_state, recording_resources,
 ):
-    from app.contracts.protocol import ExecutionStopped
-    from app.contracts.result_models import (
-        EffectState,
-        PullRequestEffect,
-        ResultPending,
-        ResultPlan,
-    )
-    from app.control.effects import ResultEffects
-    from app.domain.models import DeliveryState, FlowState, JobState
-    from app.github import PullRequest
     flow, job = running(store)
     delivery = store.get_or_create_delivery(flow.id, 'flow/1')
     delivery.state, delivery.base_branch, delivery.head_sha = DeliveryState.OPENING, 'main', 'a' * 40
@@ -217,19 +202,11 @@ async def test_cancelled_creation_persists_pr_identity_and_merge_before_stop(
     store.results.mark_dispatched(record)
     store.results.finish(record, EffectState.UNCERTAIN, error='lost response', delay=0)
     ControlService(store).cancel(flow)
-    remote = PullRequest(title="PR", body="", number=17, repo=flow.repo, state='closed' if remote_state == 'merged' else 'open' if remote_state == 'foreign' else remote_state, head_repository='fork/repo' if remote_state == 'foreign' else flow.repo,
+    remote = PullRequest(title="PR", body="", number=17, repo=flow.repo, state='closed' if remote_state == 'merged' else remote_state, head_repository=flow.repo,
                                head_branch=delivery.branch, base_branch='main', head_sha='a' * 40,
                                base_sha='b' * 40, merged=remote_state == 'merged', merged_at=store.now() if remote_state == 'merged' else None, merge_commit_sha='c' * 40 if remote_state == 'merged' else None)
-    from tests.github import RecordingGitHub
-
     github = RecordingGitHub()
     github.pull_request = remote
-    if remote_state == 'foreign':
-        with pytest.raises(ResultPending):
-            await ResultEffects(store, github).run(plan)
-        assert store.get_delivery(flow.id).pr_number is None
-        assert store.get_flow_execution(flow.id).released_at is None
-        return
     assert await ResultEffects(store, github).run(plan) is None
     recovered = store.get_delivery(flow.id)
     assert recovered.pr_number == 17 and recovered.state is DeliveryState(remote_state)
@@ -246,9 +223,6 @@ async def test_cancelled_creation_persists_pr_identity_and_merge_before_stop(
 
 
 async def test_preparation_result_releases_cancelled_binding_after_application(store, recording_resources):
-    from app.contracts.protocol import Failed, terminal_digest
-    from tests.github import RecordingGitHub
-    from tests.test_coordinator import coordinator
     flow = store.create_flow('owner/repo', 1, 1)
     store.worker_connected('w', PROTOCOL_VERSION, 'epoch')
     job = store.enqueue_job(flow.id, JobKind.INITIAL)

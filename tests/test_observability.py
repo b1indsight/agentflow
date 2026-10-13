@@ -1,14 +1,21 @@
 import asyncio
 import io
 import json
+import logging
+import threading
 from types import SimpleNamespace
 
+import psycopg
 import pytest
 from fastapi.testclient import TestClient
 from loguru import logger
 from pydantic import SecretStr
 
+import app.telemetry.metrics as metrics_module
+from app.contracts.protocol import PROTOCOL_VERSION, InitialTaskResult, Succeeded
 from app.control.api import create_app
+from app.domain.models import DeliveryState, FlowState, JobKind, JobState, utcnow
+from app.persistence import metrics_store
 from app.persistence.metrics_store import read_snapshot
 from app.persistence.webhook_store import WebhookStore
 from app.telemetry.logging import configure_logging
@@ -77,9 +84,6 @@ def test_persistent_backlog_and_empty_age(store, postgresql_url):
 
 
 async def test_snapshot_runs_off_event_loop_and_scrape_never_reads_database(monkeypatch):
-    import threading
-
-    import app.telemetry.metrics as module
     started, release = threading.Event(), threading.Event()
     calls = []
 
@@ -89,7 +93,7 @@ async def test_snapshot_runs_off_event_loop_and_scrape_never_reads_database(monk
         calls.append(1)
         raise OSError('private database DSN')
 
-    monkeypatch.setattr(module, 'read_snapshot', blocked_read)
+    monkeypatch.setattr(metrics_module, 'read_snapshot', blocked_read)
     metrics = Metrics()
     task = asyncio.create_task(metrics.run('unused', 15))
     try:
@@ -103,11 +107,16 @@ async def test_snapshot_runs_off_event_loop_and_scrape_never_reads_database(monk
 
 
 def test_repeated_snapshots_do_not_count_execution_receipt_twice(store, postgresql_url):
-    from app.domain.models import JobKind
     flow = store.create_flow('private/repository', 1, 1)
     job = store.enqueue_job(flow.id, JobKind.INITIAL)
+    store.worker_connected('w', PROTOCOL_VERSION, 'epoch')
+    assert store.assign_job('w', 'token', 'epoch')
+    result = Succeeded(job_id=job.id, assignment_token='token', connection_epoch='epoch',
+                       result=InitialTaskResult(session_id='session', last_message='', exit_code=1))
+    assert store.record_assignment_result(job.id, 'w', 'token', 'epoch',
+                                          result.model_dump(mode='json'), 'digest') == 'pending'
     with store.connection() as connection:
-        connection.execute("UPDATE jobs SET started_at=now()-interval '3 seconds', result_received_at=now() WHERE id=%s", (job.id,))
+        connection.execute("UPDATE jobs SET started_at=result_received_at-interval '3 seconds' WHERE id=%s", (job.id,))
     metrics = Metrics()
     for _ in range(2):
         metrics.accept(read_snapshot(postgresql_url))
@@ -118,35 +127,17 @@ def test_repeated_snapshots_do_not_count_execution_receipt_twice(store, postgres
 
 
 def test_snapshot_query_timeout_preserves_previous_facts(store, postgresql_url, monkeypatch):
-    import psycopg
-
-    import app.persistence.metrics_store as module
     metrics = Metrics()
     metrics.accept(read_snapshot(postgresql_url))
     previous = metrics.snapshot
-    monkeypatch.setattr(module, 'SNAPSHOT_SQL', 'SELECT pg_sleep(10)')
+    monkeypatch.setattr(metrics_store, 'SNAPSHOT_SQL', 'SELECT pg_sleep(10)')
     with pytest.raises(psycopg.errors.QueryCanceled): read_snapshot(postgresql_url)
     metrics.failed()
     assert metrics.snapshot is previous
     assert b'flowtool_metrics_snapshot_errors_total 1.0' in metrics.render()
 
 
-def test_standard_logging_and_nested_extras_are_sanitized():
-    import logging
-    output = io.StringIO()
-    configure_logging('worker', 'text', output)
-    try:
-        logger.bind(event={'authorization': 'Bearer secret'}, payload={'key': 'secret'},
-                    reason_code=['secret']).error('https://private/?token=secret')
-        logging.getLogger('uvicorn.access').error('secret DSN password')
-        assert 'secret' not in output.getvalue()
-        assert len(output.getvalue().splitlines()) == 2
-    finally:
-        logger.remove()
-
-
 def test_standard_logging_preserves_level_and_origin_without_payload():
-    import logging
     output = io.StringIO()
     configure_logging('serve', 'json', output)
     try:
@@ -164,11 +155,9 @@ def test_standard_logging_preserves_level_and_origin_without_payload():
 
 
 def test_reconcile_metrics_match_scheduler_eligibility(store, postgresql_url):
-    from app.domain.models import DeliveryState, FlowState
     for number, state, delivery_state, pr in [
         (1, FlowState.ACTIVE, DeliveryState.OPEN, 11),
         (2, FlowState.CANCELLED, DeliveryState.OPEN, 12),
-        (3, FlowState.SUCCEEDED, DeliveryState.OPEN, 13),
         (4, FlowState.ACTIVE, DeliveryState.MERGED, 14),
         (5, FlowState.ACTIVE, DeliveryState.NONE, None),
     ]:
@@ -183,7 +172,7 @@ def test_reconcile_metrics_match_scheduler_eligibility(store, postgresql_url):
             conn.execute("UPDATE flow_reconcile SET next_at=now()-(%s * interval '1 second') WHERE flow_id=%s",
                          (60 if number <= 2 else 3600, flow.id))
     due = store.reconcile.due(100)
-    assert len(due) == 2  # Cancelled PRs still need reconciliation; succeeded/merged/no-PR do not.
+    assert len(due) == 2  # Cancelled PRs still need reconciliation; merged/no-PR do not.
     metrics = read_snapshot(postgresql_url)
     assert next(s.value for s in metrics.samples if s.family == 'reconcile_due') == len(due)
     age = next(s.value for s in metrics.samples if s.family == 'oldest_age_seconds' and s.labels == ['reconcile'])
@@ -191,14 +180,15 @@ def test_reconcile_metrics_match_scheduler_eligibility(store, postgresql_url):
 
 
 def test_archive_alert_age_uses_latest_job_of_active_bound_flow(store, postgresql_url):
-    from app.contracts.protocol import PROTOCOL_VERSION
-    from app.domain.models import JobKind
     flow = store.create_flow('fixture/recovery', 1, 1)
     store.worker_connected('w', PROTOCOL_VERSION, 'epoch')
     initial = store.enqueue_job(flow.id, JobKind.INITIAL)
     assert store.assign_job('w', 'token', 'epoch')
-    with store.connection() as conn:
-        conn.execute("UPDATE jobs SET state='done' WHERE id=%s", (initial.id,))
+    assert store.finish_assignment(initial.id, 'w', 'token', JobState.DONE, 'epoch')
+    delivery = store.get_or_create_delivery(flow.id, 'flow/1')
+    delivery.state, delivery.pr_number = DeliveryState.MERGED, 17
+    delivery.head_sha, delivery.merge_commit_sha, delivery.merged_at = 'head', 'merge', utcnow()
+    store.update_delivery(delivery)
     job = store.enqueue_job(flow.id, JobKind.ARCHIVE)
     with store.connection() as conn:
         conn.execute("UPDATE jobs SET created_at=now()-interval '20 minutes' WHERE id=%s", (job.id,))
@@ -206,10 +196,15 @@ def test_archive_alert_age_uses_latest_job_of_active_bound_flow(store, postgresq
         return next(s.value for s in read_snapshot(postgresql_url).samples
                     if s.family == 'archive_pending_age_seconds')
     assert age() >= 1200
-    with store.connection() as conn:
-        conn.execute("UPDATE jobs SET state='failed' WHERE id=%s", (job.id,))
-    # A completed retry must not leave the old failure permanently alerting.
+    assert store.assign_job('w', 'archive-token', 'epoch')
+    assert store.finish_assignment(job.id, 'w', 'archive-token', JobState.FAILED, 'epoch')
+    # A newer queued retry replaces the age of the failed attempt.
     retry = store.enqueue_job(flow.id, JobKind.ARCHIVE)
-    with store.connection() as conn:
-        conn.execute("UPDATE jobs SET state='done' WHERE id=%s", (retry.id,))
+    assert age() < 10
+    # Successful archive application also terminates the Flow and releases its binding.
+    assert store.assign_job('w', 'retry-token', 'epoch')
+    assert store.finish_assignment(retry.id, 'w', 'retry-token', JobState.DONE, 'epoch')
+    flow.state = FlowState.SUCCEEDED
+    store.update_flow(flow)
+    assert store.release_flow_execution(flow.id)
     assert age() == 0

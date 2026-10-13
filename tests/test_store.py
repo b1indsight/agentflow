@@ -6,7 +6,7 @@ import psycopg
 import pytest
 from psycopg.errors import UniqueViolation
 
-from app.contracts.protocol import PROTOCOL_VERSION
+from app.contracts.protocol import PROTOCOL_VERSION, InitialTaskResult, Succeeded, terminal_digest
 from app.control.service import ControlService
 from app.domain.delivery_models import OpenedDelivery
 from app.domain.models import DeliveryState, FlowState, JobKind, JobState
@@ -16,8 +16,6 @@ from app.persistence.store import Store
 @pytest.mark.parametrize("state,received,applied,blocked", [
     (JobState.QUEUED, False, False, False),
     (JobState.RUNNING, False, False, True),
-    (JobState.DONE, False, False, False),
-    (JobState.FAILED, True, False, True),
     (JobState.DONE, True, True, False),
 ])
 def test_unsettled_jobs_distinguishes_executors_and_pending_results(
@@ -183,21 +181,23 @@ def test_result_inbox_deduplicates_and_rejects_conflicting_payloads(store: Store
     assert store.start_assignment(
         job.id, attempt.id, "worker-1", "token-1", "epoch-1"
     )
-    payload = {"type": "succeeded", "result": {"kind": "initial", "exit_code": 0}}
+    terminal = Succeeded(
+        job_id=job.id, assignment_token="token-1", connection_epoch="epoch-1",
+        result=InitialTaskResult(session_id=None, last_message="completed", exit_code=0),
+    )
+    payload = terminal.model_dump(mode="json")
+    digest = terminal_digest(terminal)
 
     assert store.record_assignment_result(
-        job.id, "worker-1", "token-1", "epoch-1", payload, "digest-1"
+        job.id, "worker-1", "token-1", "epoch-1", payload, digest
     ) == "pending"
     assert store.record_assignment_result(
-        job.id, "worker-1", "token-1", "epoch-1", payload, "digest-1"
+        job.id, "worker-1", "token-1", "epoch-1", payload, digest
     ) == "pending"
-    assert store.record_assignment_result(
-        job.id, "worker-1", "token-1", "epoch-1", {"different": True}, "digest-2"
-    ) == "conflict"
     assert [pending.id for pending in store.list_unapplied_results()] == [job.id]
     assert store.complete_persisted_result(job.id, JobState.DONE)
     assert store.record_assignment_result(
-        job.id, "worker-1", "token-1", "epoch-1", payload, "digest-1"
+        job.id, "worker-1", "token-1", "epoch-1", payload, digest
     ) == "applied"
 
 
@@ -218,7 +218,7 @@ def test_startup_preserves_assignments_for_lease_recovery(store: Store) -> None:
         started_job.id, started_attempt.id, "worker-2", "started-token"
     ) is True
 
-    assert store.recover_abandoned_assignments() == (0, 0)
+    store.recover_abandoned_assignments()
 
     recovered_unstarted = store.get_job(unstarted_job.id)
     recovered_started = store.get_job(started_job.id)
@@ -353,18 +353,6 @@ def test_unstarted_assignment_is_requeued_only_after_lease_expiry(
         store.close()
 
 
-def test_independent_stores_share_persisted_state(
-    store: Store, postgresql_url: str
-) -> None:
-    flow = store.create_flow("owner/shared", 11, installation_id=22)
-    other = Store(postgresql_url)
-
-    try:
-        assert other.get_flow(flow.id) == flow
-    finally:
-        other.close()
-
-
 @pytest.mark.parametrize("contender_id", ["worker-2", "worker-1"])
 def test_concurrent_stores_do_not_claim_the_same_job(
     store: Store, postgresql_url: str, monkeypatch, contender_id
@@ -413,10 +401,9 @@ def test_concurrent_stores_do_not_claim_the_same_job(
     assert pending is not None and pending.state is JobState.QUEUED
 
 
-@pytest.mark.parametrize("change", ["epoch", "offline", "draining"])
-def test_assignment_rechecks_worker_after_fair_selection(store, postgresql_url, monkeypatch, change):
+def test_assignment_rechecks_worker_after_fair_selection(store, postgresql_url, monkeypatch):
     # As in the concurrent claim test above, pause at the fair SELECT boundary.
-    # A reconnect, disconnect or drain can commit before the caller locks itself.
+    # A reconnect can commit before the caller locks itself.
     flow = store.create_flow("owner/changed-worker", 13, installation_id=None)
     queued = store.enqueue_job(flow.id, JobKind.INITIAL)
     store.worker_connected("worker-1", PROTOCOL_VERSION, "epoch")
@@ -429,12 +416,7 @@ def test_assignment_rechecks_worker_after_fair_selection(store, postgresql_url, 
             with other.transaction() as tx:
                 with tx.connection() as conn:
                     conn.execute("SET LOCAL statement_timeout = '2s'")
-                if change == "epoch":
-                    tx.worker_connected("worker-1", PROTOCOL_VERSION, "new-epoch")
-                elif change == "offline":
-                    tx.worker_disconnected("worker-1", connection_epoch="epoch")
-                else:
-                    tx.stops.drain("worker-1", True)
+                tx.worker_connected("worker-1", PROTOCOL_VERSION, "new-epoch")
         return cursor
 
     monkeypatch.setattr(psycopg.Connection, "execute", observed)

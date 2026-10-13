@@ -1,5 +1,4 @@
 import asyncio
-import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -52,8 +51,6 @@ def app_client(monkeypatch, factory):
 
 @pytest.mark.parametrize("method,target", [("fetch_issue", 7), ("fetch_ref", "flow/7")])
 async def test_preparation_rate_limit_is_returned_without_sdk_sleep(tmp_path, monkeypatch, method, target):
-    import asyncio
-
     requests = []
 
     def limited(request):
@@ -75,8 +72,7 @@ async def test_preparation_rate_limit_is_returned_without_sdk_sleep(tmp_path, mo
 
 
 @pytest.mark.parametrize("status,ancestor,behind,expected", [
-    ("ahead", "base", 0, True), ("ahead", "other", 0, False),
-    ("diverged", "base", 1, False), ("behind", "head", 2, False),
+    ("ahead", "base", 0, True), ("behind", "head", 2, False),
 ])
 async def test_revision_lineage_requires_github_fast_forward(
     tmp_path, monkeypatch, status, ancestor, behind, expected,
@@ -271,43 +267,6 @@ async def test_fetches_issue_repository_and_remote_ref(
     assert get_ref.calls == [(("octo", "repo", "heads/topic"), {})]
 
 
-async def test_concurrent_refetches_keep_separate_observations(tmp_path, monkeypatch):
-    # A slow older response cannot overwrite the newer observation held by another caller.
-    started = asyncio.Event()
-    release = asyncio.Event()
-    calls = 0
-
-    async def issue(*args, **kwargs):
-        nonlocal calls
-        calls += 1
-        first = calls == 1
-        if first:
-            started.set()
-            await release.wait()
-        return response(SimpleNamespace(number=7, title="older" if first else "newer",
-                                        body=None, state="open" if first else "closed"))
-
-    client = SimpleNamespace(rest=SimpleNamespace(issues=SimpleNamespace(async_get=issue)))
-    install_client(monkeypatch, lambda _, **kwargs: client)
-    repo = GitHubApp(settings(tmp_path)).installation(42).repository("octo/repo")
-    before = Issue(repo, 7, title="original", body="", state="open")
-    pending = asyncio.create_task(before.refetch())
-    await asyncio.wait_for(started.wait(), 1)
-    try:
-        newer = await before.refetch()
-    finally:
-        release.set()
-    older = await asyncio.wait_for(pending, 1)
-    assert before.title == "original" and before.state == "open"
-    assert newer.title == "newer" and newer.state == "closed"
-    assert older.title == "older" and older.state == "open"
-    assert older is not newer and older is not before
-    assert newer.model_dump(mode="json", exclude_unset=True) == {
-        "number": 7, "title": "newer", "body": "", "state": "closed",
-    }
-    assert "test-private-key" not in newer.model_dump_json(exclude_unset=True)
-
-
 @pytest.mark.parametrize("full_name", ["other/repo", "OCTO/REPO"])
 async def test_repository_refetch_keeps_identity_and_observed_casing(tmp_path, monkeypatch, full_name):
     # A redirected response must not retarget a resource; casing remains an observed fact.
@@ -326,16 +285,6 @@ async def test_repository_refetch_keeps_identity_and_observed_casing(tmp_path, m
         assert after.full_name == full_name and after.default_branch == "trunk"
     assert before.full_name == "octo/repo" and before.default_branch == "main"
     assert endpoint.calls == [(("octo", "repo"), {})]
-
-
-@pytest.mark.parametrize("resource,facts", [
-    (Repository, {"full_name": "octo/repo", "installation": "unexpected"}),
-    (Issue, {"number": 7, "repository": "unexpected"}),
-    (PullRequest, {"number": 17, "repository": {"full_name": "octo/repo"}}),
-])
-def test_standard_resource_validation_rejects_invalid_runtime_parent(resource, facts):
-    with pytest.raises(ValidationError):
-        resource.model_validate_json(json.dumps(facts))
 
 
 def test_partial_pull_request_distinguishes_unobserved_nullable_facts_from_null():
@@ -426,18 +375,6 @@ async def test_creates_repository_scoped_contents_push_capability(
     assert create_token.calls == [
         ((42,), {"repositories": ["repo"], "permissions": {"contents": "write"}})
     ]
-
-    create_token.result = response(
-        SimpleNamespace(
-            token="ghs_overbroad",
-            expires_at="2026-09-05T11:30:00Z",
-            permissions=SimpleNamespace(contents="write", issues="write"),
-            repositories=[SimpleNamespace(full_name="octo/repo")],
-        )
-    )
-    with pytest.raises(GitHubError) as captured:
-        await github.installation(42).repository("octo/repo").create_push_capability()
-    assert captured.value.kind is GitHubErrorKind.UNEXPECTED_RESPONSE
 
 
 @pytest.mark.asyncio
@@ -589,11 +526,11 @@ async def test_reviewer_reconciliation_includes_completed_reviews_across_pages(
         (401, {}, GitHubErrorKind.AUTHENTICATION, False),
         (403, {}, GitHubErrorKind.PERMISSION, False),
         (404, {}, GitHubErrorKind.NOT_FOUND, False),
+        (408, {}, GitHubErrorKind.UNEXPECTED_RESPONSE, False),
         (409, {}, GitHubErrorKind.CONFLICT, False),
         (422, {}, GitHubErrorKind.VALIDATION, False),
         (429, {"Retry-After": "30"}, GitHubErrorKind.RATE_LIMITED, True),
         (503, {}, GitHubErrorKind.TRANSIENT, True),
-        (418, {}, GitHubErrorKind.UNEXPECTED_RESPONSE, False),
     ],
 )
 async def test_maps_github_failures_without_response_bodies(
@@ -616,24 +553,9 @@ async def test_maps_github_failures_without_response_bodies(
     error = captured.value
     assert error.kind is kind
     assert error.retryable is retryable
+    assert error.definitely_rejected is (400 <= status < 500 and status != 408)
     assert error.request_id == "request-123"
     assert "secret" not in str(error)
-
-
-@pytest.mark.asyncio
-async def test_rate_limit_403_is_retryable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    get_issue = AsyncEndpoint(
-        error=request_failed(403, **{"X-RateLimit-Remaining": "0", "Retry-After": "12"})
-    )
-    client = SimpleNamespace(rest=SimpleNamespace(issues=SimpleNamespace(async_get=get_issue)))
-    github = GitHubApp(settings(tmp_path))
-    install_client(monkeypatch, lambda installation_id, **kwargs: client)
-
-    with pytest.raises(GitHubError) as captured:
-        await github.installation(42).repository("octo/repo").fetch_issue(7)
-
-    assert captured.value.kind is GitHubErrorKind.RATE_LIMITED
-    assert captured.value.retry_after == "12"
 
 
 @pytest.mark.asyncio

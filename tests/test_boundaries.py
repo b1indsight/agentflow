@@ -11,6 +11,7 @@ import pytest
 
 @pytest.mark.parametrize("operation", [
     "import app.worker.runtime",
+    "import app.cli",
     """
 from pydantic import BaseModel
 from app.github import Issue, ProjectConfig, PullRequest, RemoteRef, Repository, ReviewComment
@@ -34,7 +35,7 @@ original = ('{"repository":{"full_name":"octo/repo"},"issue":{"number":7},'
             '"options":{"todo":"T","in_progress":"W","in_review":"R","blocked":"B","done":"D"}}}')
 assert Document.model_validate_json(original).model_dump_json() == original
 """,
-], ids=["worker-startup", "resource-json-restoration"])
+], ids=["worker-startup", "cli-entrypoint", "resource-json-restoration"])
 def test_worker_data_paths_do_not_load_control_plane_dependencies(operation: str) -> None:
     # Shared logging previously pulled SQL stores into worker startup transitively.
     # A fresh interpreter observes real imports without pytest's loaded modules.
@@ -90,34 +91,12 @@ def contains_forbidden(modules: set[str], prefixes: set[str]) -> bool:
     ("worker", {"app.control", "app.persistence", "app.github", "app.telemetry.metrics",
                 "psycopg", "githubkit", "bub", "app.contracts.control"}),
     ("worker/execution", {"fastapi"}),
+    ("control/lifecycle.py", {"app.control.results", "app.control.effects",
+                              "app.control.service", "app.control.tools"}),
+    ("control/initial.py", {"app.control"}),
+    ("control/effects.py", {"app.control.tools"}),
 ])
 def test_packages_keep_responsibility_boundaries(package: str, forbidden: set[str]) -> None:
     modules = imported_modules(Path("app") / package)
     assert modules, f"No imports found in {package}; check the package path"
     assert not contains_forbidden(modules, forbidden)
-
-
-def test_initial_delivery_validation_keeps_result_orchestration_out_of_lifecycle() -> None:
-    # Reopening an INITIAL delivery used a function-local import that closed the
-    # results -> effects -> lifecycle -> results cycle; ordinary imports hid it.
-    assert not contains_forbidden(
-        imported_modules(Path("app/control/lifecycle.py")),
-        {"app.control.results", "app.control.effects", "app.control.service", "app.control.tools"},
-    )
-    assert not contains_forbidden(
-        imported_modules(Path("app/control/initial.py")), {"app.control"},
-    )
-
-
-def test_effects_do_not_depend_on_worker_tool_service() -> None:
-    # PR lifecycle conflicts used to import the MCP service solely for validation
-    # and error types, coupling recovery to a different public API.
-    assert not contains_forbidden(imported_modules(Path("app/control/effects.py")), {"app.control.tools"})
-
-
-def test_coordinator_does_not_update_business_tables_directly() -> None:
-    # Batch context/answer SQL belongs to ReviewStore, so future schema changes
-    # must not require editing both the repository and its business caller.
-    tree = ast.parse(Path("app/control/coordinator.py").read_text())
-    assert not [node.lineno for node in ast.walk(tree) if isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute) and node.func.attr == "connection"]

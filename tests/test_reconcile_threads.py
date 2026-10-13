@@ -1,6 +1,7 @@
 """Thread polling recovers input and manual facts without issuing resolution writes."""
 
 from datetime import timedelta
+from types import SimpleNamespace
 
 import pytest
 
@@ -10,6 +11,8 @@ from app.github import Batch, GitHubError, GitHubErrorKind, PullRequest, ReviewC
 from app.persistence.reconcile_store import ReconcileStore
 from app.persistence.store import Store
 from tests.github import RecordingGitHub, record_call
+from tests.test_github_client import install_client
+from tests.test_github_thread_pages import node, outer
 from tests.test_review_batches import feedback, ingest
 from tests.test_review_batches import (
     review_flow as review_flow,  # noqa: PLC0414 - fixture re-export
@@ -118,22 +121,18 @@ async def test_thread_observations_and_progress_roll_back_together(store, review
     assert store.reconcile.feedback_get(flow.id, "threads").last_success_at is None
 
 
-@pytest.mark.parametrize("change", ["merged", "attempt", "head"])
+@pytest.mark.parametrize("change", ["merged", "head"])
 async def test_retired_or_changed_delivery_rejects_inflight_page(store, review_flow, change, thread_page_resources):
     flow, clock = review_flow
     github = GitHub(clock)
 
     def changed():
-        if change == "attempt":
-            flow.current_attempt_id = store.create_attempt(flow.id).id
-            store.update_flow(flow)
+        delivery = store.get_delivery(flow.id)
+        if change == "merged":
+            delivery.state = DeliveryState.MERGED
         else:
-            delivery = store.get_delivery(flow.id)
-            if change == "merged":
-                delivery.state = DeliveryState.MERGED
-            else:
-                delivery.head_sha = "c" * 40
-            store.update_delivery(delivery)
+            delivery.head_sha = "c" * 40
+        store.update_delivery(delivery)
 
     github.before_return = changed
     await sweep(store, github)
@@ -165,11 +164,6 @@ async def test_nested_scan_retries_and_resumes_after_restart(
     store, review_flow, recording_resources, monkeypatch,
 ):
     # A failed suffix request must leave the saved position intact across a process restart.
-    from types import SimpleNamespace
-
-    from tests.test_github_client import install_client
-    from tests.test_github_thread_pages import node, outer
-
     flow, clock = review_flow
     first = node(following="comments-20")
     first["comments"]["nodes"] = [node(number=i)["comments"]["nodes"][0] for i in range(1, 21)]

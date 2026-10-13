@@ -13,8 +13,6 @@ from app.contracts.protocol import (
     FlowToolRequest,
     InitialTask,
     InitialTaskResult,
-    RevisionTask,
-    RevisionTaskResult,
     Succeeded,
     terminal_digest,
 )
@@ -27,12 +25,13 @@ from app.domain.models import (
     FlowDelivery,
     FlowExecution,
     FlowState,
+    FlowToolCall,
     Job,
     JobKind,
     JobState,
     VcsKind,
 )
-from app.github import GitHubApp, PullRequest
+from app.github import GitHubApp
 from app.persistence.store import Store
 from tests.github import RecordingGitHub
 from tests.result_memory import MemoryResults, MemoryStops
@@ -175,8 +174,6 @@ class MemoryStore:
         return True
 
     def reserve_tool_call(self, **values: Any):
-        from app.domain.models import FlowToolCall
-
         previous = self.tool_calls.get(values["call_id"])
         if previous:
             return previous, False
@@ -387,103 +384,3 @@ async def test_initial_vcs_failure_is_reported_with_sanitized_stage_and_detail()
     assert github.comments == [
         "⚠️ 编码失败（codex exit=65）；VCS push: remote branch is missing。未开 PR。"
     ]
-
-
-@pytest.mark.asyncio
-async def test_initial_delivery_failure_reports_the_broken_invariant() -> None:
-    store = MemoryStore()
-    github = RecordingGitHub()
-    subject = coordinator(store, github)
-    job = Job(id=5, flow_id=1, kind=JobKind.INITIAL, state=JobState.RUNNING)
-    task = await prepare(subject, job)
-    assert isinstance(task, InitialTask)
-
-    state = await apply_result(
-        subject,
-        job,
-        InitialTaskResult(
-            session_id="session-1",
-            last_message="done",
-            exit_code=0,
-            vcs_backend=VcsKind.GIT,
-            branch="flow/1",
-            commit_sha="abc123",
-            remote_sha="abc123",
-            pushed=True,
-        ),
-    )
-
-    assert state is JobState.FAILED
-    assert github.comments == [
-        "⚠️ 编码结果与已验证的 Flow delivery 不一致：delivery state is none, expected opening or open。"
-    ]
-
-
-
-
-@pytest.mark.asyncio
-async def test_revision_results_remain_control_plane_side_effects(monkeypatch) -> None:
-    store = MemoryStore()
-    store.attempt = Attempt(
-        id=1,
-        flow_id=1,
-        codex_session_id="session-1",
-    )
-    store.flow.current_attempt_id = 1
-    store.flow.state = FlowState.ACTIVE
-    store.delivery = FlowDelivery(
-        flow_id=1,
-        branch="flow/1",
-        base_branch="trunk",
-        state=DeliveryState.OPEN,
-        pr_number=17,
-        head_sha="abc123",
-    )
-    github = RecordingGitHub()
-    from tests.review_memory import review_context
-
-    async def current_pr(pr: PullRequest) -> PullRequest:
-        observed = review_context().pull_request
-        assert observed is not None
-        return PullRequest(pr.repository, **(observed.model_dump(exclude_unset=True) | {
-            "number": pr.number, "head_branch": "flow/1", "base_branch": "trunk", "head_sha": "abc123",
-        }))
-
-    subject = coordinator(store, github)
-
-    monkeypatch.setattr(PullRequest, "refetch", current_pr)
-
-    revision_job = Job(id=7, flow_id=1, kind=JobKind.REVISION, state=JobState.RUNNING)
-    task = await prepare(subject, revision_job)
-    assert isinstance(task, RevisionTask)
-    subject.mark_started(revision_job, task, "worker-1")
-    from tests.test_revision_delivery import verified_result
-
-    revision_state = await apply_result(
-        subject,
-        revision_job,
-        verified_result(task),
-    )
-
-    assert revision_state is JobState.DONE
-    assert store.flow.state is FlowState.ACTIVE
-    assert store.attempt is not None
-    assert store.attempt.revision_cycles == 0  # This fake does not execute Store.start_assignment.
-    assert store.reviews.batch.state.value == "waiting"
-    assert store.reviews.consumed == []
-
-
-@pytest.mark.asyncio
-async def test_result_kind_must_match_persisted_job_kind() -> None:
-    subject = coordinator(MemoryStore(), RecordingGitHub())
-    job = Job(id=8, flow_id=1, kind=JobKind.INITIAL, state=JobState.RUNNING)
-
-    with pytest.raises(ValueError, match="result kind does not match persisted job"):
-        await apply_result(
-            subject,
-            job,
-            RevisionTaskResult(batch_id=1, feedback_refs=[], session_id="s", exit_code=1, last_message="",
-                           flow_id=1, attempt_id=1, previous_session_id="s", session_generation=0, mode="resume"),
-        )
-
-

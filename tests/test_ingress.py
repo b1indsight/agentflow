@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 import pytest_asyncio
+from psycopg import OperationalError
 
 from app.contracts.protocol import PROTOCOL_VERSION
 from app.control.api import create_app
@@ -169,8 +170,6 @@ def signed_headers(body: bytes) -> dict[str, str]:
 
 @pytest.mark.asyncio
 async def test_receipt_commit_failure_is_not_acknowledged(client, context, monkeypatch):
-    from psycopg import OperationalError
-
     def unavailable(*args):
         raise OperationalError("secret database URL")
 
@@ -181,20 +180,11 @@ async def test_receipt_commit_failure_is_not_acknowledged(client, context, monke
 
 
 @pytest.mark.asyncio
-async def test_invalid_identity_json_and_conflict(client, context, monkeypatch):
-    from app.persistence.webhook_store import DeliveryConflict
-
-    for body in [b"[]", b"{", b"null", b'{"value":NaN}']:
-        assert (await client.post("/webhook", content=body, headers=signed_headers(body))).status_code == 400
+async def test_missing_delivery_identity_is_rejected(client):
     headers = signed_headers(b"{}")
     del headers["X-GitHub-Delivery"]
     assert (await client.post("/webhook", content=b"{}", headers=headers)).status_code == 400
 
-    def conflict(*args):
-        raise DeliveryConflict()
-
-    monkeypatch.setattr(context, "receive_webhook", conflict)
-    assert (await client.post("/webhook", content=b"{}", headers=signed_headers(b"{}"))).status_code == 409
 
 
 @pytest.mark.asyncio

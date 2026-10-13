@@ -1,12 +1,19 @@
 """The live harness must never turn a retry into a second GitHub write."""
 
 import json
+import os
+import signal
+import socket
+import subprocess
+import sys
+import time
 from types import SimpleNamespace
 
 import pytest
 
 from app.contracts.protocol import PROTOCOL_VERSION
-from app.live_smoke import GitHubProbe, SmokeError, SmokeSession
+from app.domain.models import DeliveryState, FlowState, JobKind, JobState
+from app.live_smoke import GitHubProbe, Pull, SmokeError, SmokeSession
 
 
 class FakeGitHub:
@@ -62,7 +69,7 @@ def test_unknown_create_outcome_never_blindly_retries(tmp_path):
         assert smoke.ensure_issue() == 7
 
 
-@pytest.mark.parametrize("repo,run", [("--bad", "run"), ("owner/repo", "../../escape"),
+@pytest.mark.parametrize("repo,run", [("owner/repo", "../../escape"),
                                      ("https://token@host/a/b", "run")])
 def test_invalid_identifiers_cannot_reach_tools_or_paths(tmp_path, repo, run):
     with pytest.raises(SmokeError):
@@ -91,9 +98,6 @@ def test_truncated_issue_listing_is_not_absence(monkeypatch):
 
 
 def test_observe_reads_without_creating_work_and_does_not_claim_partial_success(store, tmp_path, monkeypatch):
-    from app.domain.models import DeliveryState
-    from app.live_smoke import Pull
-
     gh = FakeGitHub()
     gh.issue = 7
     flow = store.create_flow("owner/smoke", 7, 42)
@@ -129,49 +133,48 @@ def test_deadline_prevents_even_read_requests(monkeypatch):
 
 
 def test_core_pass_requires_three_verified_heads_and_matching_merge(store, tmp_path, monkeypatch):
-    from app.domain.models import DeliveryState, FlowState, JobKind
-    from app.live_smoke import Pull
-
     gh = FakeGitHub()
     gh.issue = 7
     flow = store.create_flow("owner/smoke", 7, 42)
-    flow.state = FlowState.SUCCEEDED
     attempt = store.create_attempt(flow.id)
-    attempt.revision_cycles = 2
-    store.update_attempt(attempt)
     flow.current_attempt_id = attempt.id
     store.update_flow(flow)
     delivery = store.get_or_create_delivery(flow.id, "flow/7")
-    delivery.state, delivery.pr_number = DeliveryState.MERGED, 8
-    delivery.merge_commit_sha = "d"*40
+    delivery.state, delivery.pr_number = DeliveryState.OPEN, 8
     store.update_delivery(delivery)
-    archive = store.enqueue_job(flow.id, JobKind.ARCHIVE)
     store.worker_connected("worker-1", protocol_version=PROTOCOL_VERSION)
-    with store.connection() as conn:
-        conn.execute("INSERT INTO flow_executions(flow_id,worker_id,repo_identity,bound_at,released_at) "
-                     "VALUES (%s,'worker-1','worker-1:owner/smoke',%s,%s)", (flow.id, store.now(), store.now()))
-        conn.execute("UPDATE jobs SET state='done',result_applied_at=%s WHERE id=%s", (store.now(), archive.id))
-    remote = Pull(number=8, merged=True, merge_commit_sha="d"*40,
+    initial = store.enqueue_job(flow.id, JobKind.INITIAL)
+    assert store.assign_job("worker-1", "initial").id == initial.id
+    assert store.finish_assignment(initial.id, "worker-1", "initial", JobState.DONE)
+    remote = Pull(number=8, merged=False,
                   head={"sha": "a"*40, "ref": "flow/7", "repo": {"full_name": "owner/smoke"}},
                   base={"sha": "b"*40, "ref": "main", "repo": {"full_name": "owner/smoke"}})
     probe = GitHubProbe()
     monkeypatch.setattr(probe, "pull", lambda *args: remote)
     with session(tmp_path, gh) as smoke:
         smoke.ensure_issue()
-        for letter in ["a", "b", "c"]:
+        for revisions, letter in enumerate(["a", "b", "c"]):
+            attempt.revision_cycles = revisions
+            store.update_attempt(attempt)
             delivery.head_sha = remote.head.sha = letter*40
+            if letter == "c":
+                delivery.state = DeliveryState.MERGED
+                delivery.merge_commit_sha = remote.merge_commit_sha = "d"*40
+                remote.merged = True
             store.update_delivery(delivery)
+            if letter == "c":
+                archive = store.enqueue_job(flow.id, JobKind.ARCHIVE)
+                assert store.assign_job("worker-1", "archive").id == archive.id
+                assert store.finish_assignment(archive.id, "worker-1", "archive", JobState.DONE)
+                flow.state = FlowState.SUCCEEDED
+                store.update_flow(flow)
+                assert store.release_flow_execution(flow.id)
             result = smoke.observe(store, probe, "actual-revision")
             assert result.core_passed == (letter == "c")
-        remote.merge_commit_sha = "e"*40
-        assert not smoke.observe(store, probe, "actual-revision").core_passed
 
 
 @pytest.mark.parametrize('observe,expected', [(False, 0), (True, 2)])
 def test_cli_missing_issue_is_not_successful_observation(tmp_path, observe, expected):
-    import os
-    import subprocess
-    import sys
     gh = tmp_path / 'gh'
     gh.write_text(f'#!{sys.executable}\nprint("[]")\n')
     gh.chmod(0o700)
@@ -184,11 +187,6 @@ def test_cli_missing_issue_is_not_successful_observation(tmp_path, observe, expe
 
 
 def test_cli_deadline_bounds_unresponsive_database_connection(tmp_path):
-    import os
-    import socket
-    import subprocess
-    import sys
-    import time
     # A TCP listener accepts the kernel handshake but never speaks PostgreSQL.
     # The pool's normal acquisition timeout must not exceed the smoke's total budget.
     gh = tmp_path / 'gh'
@@ -213,12 +211,6 @@ def test_cli_deadline_bounds_unresponsive_database_connection(tmp_path):
 
 
 def test_parent_sigterm_reaps_observer_and_gh_and_releases_state_lock(tmp_path):
-    import os
-    import signal
-    import socket
-    import subprocess
-    import sys
-
     # Signal only the watchdog after gh proves the observer owns the session lock.
     # Inherited stdout keeps communicate blocked if either descendant survives.
     with socket.socket() as listener:

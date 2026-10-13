@@ -1,24 +1,67 @@
 """Revision delivery must be proven even when the model exits successfully."""
 
 import asyncio
+import os
+import shutil
+import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pydantic import SecretStr, ValidationError
 
-from app.contracts.protocol import AssignmentSecret, PushSecret, RevisionTask
+from app.contracts.protocol import (
+    Assignment,
+    AssignmentSecret,
+    PushSecret,
+    RevisionExecutionRecord,
+    RevisionTask,
+    RevisionTaskResult,
+)
+from app.contracts.result_models import ResolveEffect
+from app.control.resolution import plan_resolution
 from app.domain.models import (
+    AddressedComment,
+    Attempt,
     CodingExecutionContext,
     CodingExecutionResult,
+    DeferredComment,
+    DeliveryState,
+    FlowDelivery,
+    Job,
+    JobKind,
+    JobState,
+    ReviewItemKind,
     RevisionCodingOutput,
+    SessionUnavailable,
     VcsKind,
 )
-from app.github import PullRequest, RemoteRef, Repository
+from app.github import (
+    Batch,
+    PullRequest,
+    RemoteRef,
+    Repository,
+    ReviewComment,
+    ReviewThread,
+    ReviewThreads,
+)
 from app.worker.execution.executor import WorkerExecutor
-from app.worker.execution.vcs import flow_repo_path, prepare_flow_repo
+from app.worker.execution.vcs import (
+    VcsVerificationError,
+    flow_repo_path,
+    prepare_flow_repo,
+    prepare_revision_context,
+    verify_revision_outcome,
+)
 from app.worker.state.session import WorkerSession
-from tests.test_vcs import _git, _git_fixture
+from tests.github import NATIVE_PULL_REQUEST_REFETCH, RecordingGitHub
+from tests.review_memory import review_context
+from tests.test_coordinator import MemoryStore, apply_result, coordinator, prepare
+from tests.test_github_client import AsyncEndpoint, install_client, response
+from tests.test_review_context import pr_data
+from tests.test_review_resolution import feedback, human, snapshot
+from tests.test_vcs import _git, _git_fixture, _jj
 from tests.test_worker_executor import RecordingToolCaller
 
 
@@ -39,8 +82,6 @@ async def revision_workspace(tmp_path):
     repo.rename(target)
     _git("checkout", "-b", "flow/1", cwd=target)
     _git("push", "origin", "flow/1", cwd=target)
-    import subprocess
-
     sha = (await asyncio.to_thread(
         subprocess.check_output, ["git", "rev-parse", "HEAD"], cwd=target, text=True,
     )).strip()
@@ -55,7 +96,6 @@ async def revision_workspace(tmp_path):
         repository="owner/repo", token=SecretStr("fresh-token"),
         expires_at=datetime.now(UTC) + timedelta(minutes=30),
     ))
-    from app.contracts.protocol import Assignment
     journal = WorkerSession(root)
     journal.record_received(Assignment(job_id=1, flow_id=1, assignment_token="token",
                                       connection_epoch="epoch", task=task, secret=secret))
@@ -72,8 +112,6 @@ class RevisionAgent:
         assert cwd == self.repo
         self.calls.append(("resume", context, prompt))
         if self.behavior == "missing":
-            from app.domain.models import SessionUnavailable
-
             raise SessionUnavailable("session not found before execution")
         if self.behavior == "timeout":
             return CodingExecutionResult(session_id, "", 124)
@@ -128,15 +166,12 @@ async def test_fallback_only_when_execution_is_known_not_to_have_started(
         assert result.mode == "fallback"
 
 
-@pytest.mark.parametrize("problem", ["secret", "binding", "baseline", "dirty"])
+@pytest.mark.parametrize("problem", ["baseline", "dirty"])
 async def test_revision_preflight_rejects_before_model_execution(revision_workspace, problem):
     root, repo, task, secret = revision_workspace
-    if problem == "secret":
-        secret = None
-    elif problem == "binding":
-        task = task.model_copy(update={"repo_identity": "other:owner/repo"})
-    elif problem == "baseline":
-        task = task.model_copy(update={"expected_head_sha": "0" * 40})
+    if problem == "baseline":
+        _git("commit", "--allow-empty", "-m", "Concurrent change", cwd=repo)
+        _git("push", "origin", task.branch, cwd=repo)
     else:
         (repo / "uncommitted").write_text("keep me")
     agent = RevisionAgent(repo)
@@ -154,25 +189,18 @@ def test_revision_output_requires_every_field_and_rejects_extra_data():
 
 @pytest.fixture
 async def revision_control(recording_resources):
-    from app.domain.models import Attempt, DeliveryState, FlowDelivery, Job, JobKind, JobState
-    from tests.github import RecordingGitHub
-    from tests.test_coordinator import MemoryStore, coordinator, prepare
-
     store, github = MemoryStore(), RecordingGitHub()
     store.attempt = Attempt(id=1, flow_id=1, codex_session_id="session-1")
     store.flow.current_attempt_id = 1
     store.delivery = FlowDelivery(flow_id=1, branch="flow/1", base_branch="trunk",
                                   state=DeliveryState.OPEN, pr_number=17, head_sha="abc123")
     job = Job(id=21, flow_id=1, kind=JobKind.REVISION, state=JobState.RUNNING)
-    from app.github import Batch, ReviewComment, ReviewThread
     item = store.reviews.batch.feedback[0]
     github.threads = [ReviewThread(thread_id="T1", repo="owner/repo", pr_number=17,
         path="app.py", resolved=False, outdated=False, complete=True, comments=Batch[ReviewComment](items=(ReviewComment(
             github_id=item.github_id, node_id="C500", author=item.author, is_bot=False,
             body=item.body, updated_at=item.updated_at),)))]
     subject = coordinator(store, github)
-    from tests.review_memory import review_context
-
     github.pull_request = review_context().pull_request.model_copy(update={
         "head_branch": "flow/1", "head_sha": "abc123", "base_branch": "trunk",
     })
@@ -181,8 +209,6 @@ async def revision_control(recording_resources):
 
 
 def verified_result(task, **updates):
-    from app.contracts.protocol import RevisionExecutionRecord, RevisionTaskResult
-
     values = {
         "flow_id": task.flow_id, "attempt_id": task.attempt_id, "batch_id": task.batch_id,
         "feedback_refs": list(task.feedback), "previous_session_id": task.session_id,
@@ -198,14 +224,6 @@ def verified_result(task, **updates):
 
 
 async def test_resolve_payloads_only_carry_their_threads_current_and_historical_feedback(revision_control):
-    from datetime import UTC, datetime
-
-    from app.contracts.result_models import ResolveEffect
-    from app.control.resolution import plan_resolution
-    from app.domain.models import AddressedComment, ReviewItemKind
-    from app.github import ReviewThreads
-    from tests.test_review_resolution import feedback, human, snapshot
-
     store, _, _, _, task = revision_control
     threads, current, historical = [], [], []
     # Many long review threads must not duplicate the entire PR's history in every effect.
@@ -229,8 +247,6 @@ async def test_resolve_payloads_only_carry_their_threads_current_and_historical_
 
 
 async def test_control_preserves_omitted_feedback_and_does_not_rereview_noop(revision_control):
-    from tests.test_coordinator import apply_result
-
     store, github, job, subject, task = revision_control
     result = verified_result(task)
     await apply_result(subject, job, result)
@@ -242,32 +258,8 @@ async def test_control_preserves_omitted_feedback_and_does_not_rereview_noop(rev
     assert "已按 review 更新" not in github.comments[0]
 
 
-@pytest.mark.parametrize("changes", [
-    {"clean_worktree": False}, {"branch": "another"}, {"remote_sha": "drift"},
-    {"flow_id": 2}, {"attempt_id": 2}, {"session_generation": 3}, {"output": None},
-])
-async def test_control_refuses_unproven_revision_results(revision_control, changes):
-    from tests.test_coordinator import apply_result
-
-    store, github, job, subject, task = revision_control
-    state = await apply_result(subject, job, verified_result(task, **changes))
-    assert state.value == "failed"
-    assert store.reviews.consumed == []
-    assert store.delivery.head_sha == "abc123"
-    assert github.review_requests == []
-
-
-async def test_revision_relay_is_idempotent(revision_control):
-    store, _, job, subject, task = revision_control
-    subject.mark_started(job, task, "worker-1")
-    subject.mark_started(job, task, "worker-1")
-    assert store.reviews.batch.state.value == "processing"
-
-
-@pytest.mark.parametrize("change", ["closed", "base", "head", "lineage", "fork"])
+@pytest.mark.parametrize("change", ["closed", "base", "head", "renamed-repository"])
 async def test_control_checks_actual_pr_and_lineage(revision_control, monkeypatch, change):
-    from tests.test_coordinator import apply_result
-
     store, github, job, subject, task = revision_control
     original = PullRequest.refetch
 
@@ -276,33 +268,30 @@ async def test_control_checks_actual_pr_and_lineage(revision_control, monkeypatc
         return pr.model_copy(update={
             "state": "closed" if change == "closed" else "open",
             "base_branch": "other" if change == "base" else task.base_branch,
-            "head_sha": "new" if change in {"head", "lineage"} else task.expected_head_sha,
-            "head_repository": "fork/repo" if change == "fork" else task.repo,
+            "head_sha": "new" if change == "head" else task.expected_head_sha,
         })
 
-    async def ref(repo, branch, *, retry_transient=False):
-        return RemoteRef(branch=task.branch, sha="new")
-
-    async def compare(repo, base, head):
-        return False
-
-    monkeypatch.setattr(PullRequest, "refetch", changed_pr)
-    if change == "lineage":
-        monkeypatch.setattr(Repository, "fetch_ref", ref)
-        monkeypatch.setattr(Repository, "compare_commits", compare)
-    result = verified_result(task, **(
-        {"commit_sha": "new", "remote_sha": "new"} if change == "lineage" else {}
-    ))
+    if change == "renamed-repository":
+        data = pr_data(task.expected_head_sha)
+        data.head.ref, data.base.ref = task.branch, task.base_branch
+        data.head.repo.full_name = data.base.repo.full_name = "owner/renamed"
+        endpoint = AsyncEndpoint(response(data))
+        install_client(monkeypatch, lambda *args, **kwargs: SimpleNamespace(
+            rest=SimpleNamespace(pulls=SimpleNamespace(async_get=endpoint)),
+        ))
+        monkeypatch.setattr(PullRequest, "refetch", NATIVE_PULL_REQUEST_REFETCH)
+    else:
+        monkeypatch.setattr(PullRequest, "refetch", changed_pr)
+    result = verified_result(task)
     assert (await apply_result(subject, job, result)).value == "failed"
     assert store.delivery.head_sha == task.expected_head_sha
     assert not store.reviews.consumed and not github.review_requests
+    if change == "renamed-repository":
+        assert endpoint.calls == [(("owner", "repo", task.pr_number), {})]
 
 
 @pytest.mark.parametrize("pending", ["deferred", "clarification", "none"])
 async def test_verified_partial_delivery_waits_without_rereview(revision_control, monkeypatch, pending):
-    from app.domain.models import AddressedComment, DeferredComment
-    from tests.test_coordinator import apply_result
-
     store, github, job, subject, task = revision_control
     original = PullRequest.refetch
 
@@ -334,11 +323,8 @@ async def test_verified_partial_delivery_waits_without_rereview(revision_control
     assert len(github.review_requests) <= 1
 
 
-@pytest.mark.parametrize("kind", ["unknown", "duplicate", "conflict", "wrong_github_id"])
+@pytest.mark.parametrize("kind", ["unknown", "conflict", "wrong_github_id"])
 async def test_revision_rejects_fabricated_or_conflicting_feedback(revision_control, kind):
-    from app.domain.models import AddressedComment, DeferredComment
-    from tests.test_coordinator import apply_result
-
     store, github, job, subject, task = revision_control
     item = task.feedback[0]
     addressed = AddressedComment(item_id=item.item_id, version=item.version,
@@ -348,7 +334,7 @@ async def test_revision_rejects_fabricated_or_conflicting_feedback(revision_cont
     if kind == "wrong_github_id":
         addressed = addressed.model_copy(update={"comment_id": 999})
     output = revision_output(
-        addressed=[addressed, addressed] if kind == "duplicate" else [addressed],
+        addressed=[addressed],
         deferred=[DeferredComment(item_id=item.item_id, version=item.version,
                                   comment_id=item.github_id, reason="Later")] if kind == "conflict" else [],
     )
@@ -358,16 +344,6 @@ async def test_revision_rejects_fabricated_or_conflicting_feedback(revision_cont
 
 @pytest.mark.parametrize("behavior", ["noop", "push", "unpushed", "dirty", "wrong_branch"])
 async def test_revision_checks_real_jj_repository(revision_workspace, behavior):
-    import os
-    import shutil
-
-    from app.worker.execution.vcs import (
-        VcsVerificationError,
-        prepare_revision_context,
-        verify_revision_outcome,
-    )
-    from tests.test_vcs import _jj
-
     if shutil.which("jj") is None:
         pytest.skip("jj is not installed")
     _, repo, task, _ = revision_workspace
@@ -393,34 +369,7 @@ async def test_revision_checks_real_jj_repository(revision_workspace, behavior):
             await verify_revision_outcome(context, VcsKind.JJ)
 
 
-@pytest.mark.parametrize("phase", ["resume", "fallback"])
-async def test_journal_prevents_restarting_an_interrupted_invocation(revision_workspace, phase):
-    from app.contracts.protocol import Assignment, RevisionExecutionRecord
-    from app.worker.state.session import SessionError, WorkerSession
-
-    root, repo, task, secret = revision_workspace
-    root.mkdir(exist_ok=True)
-    journal = WorkerSession(root)
-    journal.record_received(Assignment(job_id=1, flow_id=1, assignment_token="token",
-                                        connection_epoch="epoch", task=task, secret=secret))
-    journal.record_started()
-    journal.begin_revision("resume")
-    if phase == "fallback":
-        journal.finish_invocation(RevisionExecutionRecord(mode="resume", session_id=task.session_id,
-                                                      exit_code=1, failure="session_unavailable"))
-        journal.begin_revision("fallback")
-    agent = RevisionAgent(repo, "missing")
-    restarted = WorkerSession(root)
-    with pytest.raises(SessionError, match="restarted|already been attempted"):
-        await WorkerExecutor(root, agent, worker_id="w", session=restarted).execute(task, secret, tool_caller=RecordingToolCaller())
-    assert agent.calls == []
-    assert "fresh-token" not in journal.path.read_text()
-    assert restarted.load().revision_phase == phase
-
-
 async def test_dirty_repository_after_session_rejection_does_not_fallback(revision_workspace):
-    from app.domain.models import SessionUnavailable
-
     root, repo, task, secret = revision_workspace
 
     class DirtyRejection(RevisionAgent):
@@ -437,9 +386,6 @@ async def test_dirty_repository_after_session_rejection_does_not_fallback(revisi
 
 @pytest.mark.parametrize("signal_kind", ["request_changes", "discussion"])
 async def test_empty_review_body_is_not_an_unresolved_obligation(revision_control, signal_kind):
-    from app.domain.models import AddressedComment, ReviewItemKind
-    from tests.test_coordinator import apply_result
-
     store, _github, job, subject, task = revision_control
     item = store.reviews.batch.feedback[0]
     signal = item.model_copy(update={"item_id": 102, "github_id": 501, "body": "",

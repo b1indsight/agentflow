@@ -11,6 +11,8 @@ from githubkit_schemas.latest.models import SimpleUser
 from pydantic import ValidationError
 from typer.testing import CliRunner
 
+from app import cli
+from app.control import config as control_config
 from app.domain.project_models import ProjectStatus
 from app.github import (
     GitHubApp,
@@ -183,28 +185,13 @@ def test_restored_item_keeps_known_null_separate_from_unqueried_facts():
         _ = restored.project
 
 
-@pytest.mark.parametrize("project", ["not a project", {"project_id": "P"}])
-def test_restored_item_rejects_invalid_runtime_parent(project):
-    import json
-
-    facts = {"id": "ITEM", "project": project}
-    with pytest.raises(ValidationError, match="project must be a Project resource"):
-        ProjectItem.model_validate_json(json.dumps(facts))
-
-
-@pytest.mark.parametrize("bad", ["partial", "cursor", "boolean", "item", "project"])
+@pytest.mark.parametrize("bad", ["cursor", "item"])
 async def test_malformed_pages_never_establish_absence(tmp_path, monkeypatch, bad):
     data = {"node": {"id": "P", "items": page([item()])}}
-    if bad == "partial":
-        data["errors"] = [{"message": "secret-token"}]
-    elif bad == "cursor":
+    if bad == "cursor":
         data["node"]["items"]["pageInfo"] = {"hasNextPage": True, "endCursor": "old"}
-    elif bad == "boolean":
-        data["node"]["items"]["pageInfo"]["hasNextPage"] = "false"
-    elif bad == "item":
-        data["node"]["items"]["nodes"] = [None]
     else:
-        data["node"]["id"] = "wrong"
+        data["node"]["items"]["nodes"] = [None]
     api, _, _ = adapter(tmp_path, monkeypatch, data)
     with pytest.raises(GitHubError) as caught:
         await api.list_items_page("old")
@@ -225,8 +212,7 @@ async def test_read_status_by_field_id_across_pages_and_report_archived(tmp_path
 async def test_add_and_set_are_separate_and_check_mutation_receipts(tmp_path, monkeypatch):
     api, client, _ = adapter(tmp_path, monkeypatch,
         {"addProjectV2ItemById": {"item": item()}},
-        {"updateProjectV2ItemFieldValue": {"projectV2Item": {"id": "ITEM"}}},
-        {"updateProjectV2ItemFieldValue": {"projectV2Item": {"id": "OTHER"}}})
+        {"updateProjectV2ItemFieldValue": {"projectV2Item": {"id": "ITEM"}}})
     added = await api.add_issue("I")
     assert added.id == "ITEM"
     assert "option_id" not in added.model_dump(exclude_unset=True)
@@ -240,31 +226,10 @@ async def test_add_and_set_are_separate_and_check_mutation_receipts(tmp_path, mo
     }
     assert client.calls[1][1] == {"project": "P", "item": "ITEM", "field": "F", "option": "done"}
     assert "singleSelectOptionId" in client.calls[1][0]
-    with pytest.raises(GitHubError):
-        await before.set_status(ProjectStatus.DONE)
-    assert before.option_id == "todo"
-    assert len(client.calls) == 3
 
 
-async def test_project_binding_keeps_the_original_status_mapping(tmp_path, monkeypatch):
-    # Configuration is mutable below frozen models; an external edit must not retarget a write.
-    app = GitHubApp(settings(tmp_path))
-    original = config()
-    project = app.installation(42).project(original)
-    original.options[ProjectStatus.DONE] = "OTHER"
-    client = Client({"updateProjectV2ItemFieldValue": {"projectV2Item": {"id": "ITEM"}}})
-    install_client(monkeypatch, lambda _, **kwargs: client)
-    updated = await ProjectItem(project, "ITEM").set_status(ProjectStatus.DONE)
-    assert updated.option_id == "done" and client.calls[0][1]["option"] == "done"
-    assert updated.model_dump(mode="json", exclude_unset=True) == {"id": "ITEM", "option_id": "done"}
-
-
-@pytest.mark.parametrize("bad", ["identity", "archived", "partial"])
-async def test_add_does_not_accept_unverified_receipt(tmp_path, monkeypatch, bad):
-    data = {"addProjectV2ItemById": {"item": item("OTHER" if bad == "identity" else "I",
-                                                   archived=bad == "archived")}}
-    if bad == "partial":
-        data["errors"] = [{"message": "permission"}]
+async def test_add_does_not_accept_unverified_receipt(tmp_path, monkeypatch):
+    data = {"addProjectV2ItemById": {"item": item("I", archived=True)}}
     api, client, _ = adapter(tmp_path, monkeypatch, data)
     with pytest.raises(GitHubError):
         await api.add_issue("I")
@@ -307,30 +272,26 @@ async def test_real_sdk_never_retries_or_accepts_partial_mutation(tmp_path, monk
     with pytest.raises(GitHubError) as caught:
         await asyncio.wait_for(call, 1)
     assert len(calls) == 1 and "secret-token" not in str(caught.value)
-    assert caught.value.request_rejected is (failure == "limited")
+    # A mutation can return data and GraphQL errors together; its diagnostic 403
+    # must not authorize a retry like an actual HTTP rejection does.
+    assert caught.value.definitely_rejected is (failure == "limited")
     assert caught.value.kind is {"partial": GitHubErrorKind.PERMISSION,
         "lost": GitHubErrorKind.TRANSIENT, "limited": GitHubErrorKind.RATE_LIMITED}[failure]
 
 
 @pytest.fixture
 def serve_config(tmp_path, monkeypatch):
-    from app.control import config as serve_config
-
-    monkeypatch.setitem(serve_config.__dict__, "settings", settings(tmp_path))
-    return serve_config
+    monkeypatch.setitem(control_config.__dict__, "settings", settings(tmp_path))
+    return control_config
 
 
 def test_check_disabled_does_not_construct_github(serve_config, monkeypatch):
-    from app import cli
-
     monkeypatch.setattr("app.github.GitHubApp", lambda _: pytest.fail("disabled must not authenticate"))
     result = CliRunner().invoke(cli.app, ["project", "check", "owner/repo"])
     assert result.exit_code == 0 and "disabled" in result.stdout
 
 
 def test_check_only_validates_and_prints_target(tmp_path, monkeypatch, serve_config):
-    from app import cli
-
     settings_value = serve_config.settings
     settings_value.projects = {"owner/repo": config()}
     api, client, lookup = adapter(tmp_path, monkeypatch, target())

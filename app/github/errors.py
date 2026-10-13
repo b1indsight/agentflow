@@ -28,7 +28,7 @@ class GitHubErrorKind(StrEnum):
 
 
 class GitHubError(RuntimeError):
-    """Sanitized failure; definitely_unsent proves this call sent no target request."""
+    """Sanitized failure; request evidence is independent of diagnostic status codes."""
 
     def __init__(
         self,
@@ -60,9 +60,7 @@ class GitHubError(RuntimeError):
     @property
     def definitely_rejected(self) -> bool:
         """Evidence for this request only; an earlier uncertain write still needs a receipt."""
-        return self.definitely_unsent or (
-            self.status_code is not None and 400 <= self.status_code < 500 and self.status_code != 408
-        )
+        return self.definitely_unsent or self.request_rejected
 
 
 def retry_delay(attempts: int, now: datetime, error: GitHubError | None = None) -> float:
@@ -159,5 +157,5 @@ def request_error(endpoint: str, error: RequestFailed) -> GitHubError:
     return GitHubError(
         kind, endpoint, status_code=status,
         request_id=response.headers.get("X-GitHub-Request-Id"), retry_after=retry_after,
-        request_rejected=status in {401, 403, 429},
+        request_rejected=400 <= status < 500 and status != 408,
     )

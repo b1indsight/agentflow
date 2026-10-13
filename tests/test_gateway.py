@@ -1,17 +1,21 @@
 import asyncio
 from collections.abc import Mapping
+from datetime import timedelta
 
 import pytest
 from fastapi import WebSocketDisconnect
+from pydantic import SecretStr
 
 from app.contracts.protocol import (
     Assignment,
+    AssignmentSecret,
     ExecutionTask,
     FlowToolRequest,
     FlowToolResponse,
     Heartbeat,
     InitialTask,
     InitialTaskResult,
+    PushSecret,
     RecoveryDescriptor,
     Register,
     ResultAccepted,
@@ -19,11 +23,20 @@ from app.contracts.protocol import (
     Started,
     Succeeded,
     parse_server_message,
+    terminal_digest,
 )
 from app.contracts.result_models import ResultPending
 from app.control.gateway import WorkerGateway
-from app.domain.delivery_models import OpenedDelivery
-from app.domain.models import FlowDelivery, Job, JobKind, JobState, VcsKind
+from app.domain.delivery_models import PreparedDelivery
+from app.domain.models import (
+    FlowDelivery,
+    InitialCodingOutput,
+    Job,
+    JobKind,
+    JobState,
+    VcsKind,
+    utcnow,
+)
 from tests.worker_fakes import NoPendingStops, connected_worker, make_results
 
 
@@ -150,8 +163,11 @@ class RecordingCoordinator:
         task = await self.prepare(job)
         if isinstance(task, JobState):
             return task
+        task = task.model_copy(update={"repo_identity": f"{worker}:{task.repo}"})
         return Assignment(job_id=job.id, flow_id=job.flow_id, assignment_token=token,
-                          connection_epoch=epoch, task=task)
+                          connection_epoch=epoch, task=task,
+                          secret=AssignmentSecret(push=PushSecret(token=SecretStr('push-token'),
+                              repository=task.repo, expires_at=utcnow() + timedelta(hours=1))))
 
     def __init__(self, store: RecordingStore) -> None:
         self.store = store
@@ -174,7 +190,7 @@ class RecordingCoordinator:
         assert worker_id == "worker-1"
         return FlowToolResponse(
             call_id=request.call_id,
-            result=OpenedDelivery(pr_number=17, head_sha="abc", url="https://github.com/owner/repo/pull/17", delivery_version=1),
+            result=PreparedDelivery(head_sha="abc", delivery_version=1),
         )
 
     def mark_started(self, job: Job, task: ExecutionTask, worker_id: str) -> None:
@@ -188,9 +204,9 @@ class RecordingCoordinator:
         assert isinstance(result, InitialTaskResult)
         self.results.append(result)
         # This transport fixture shares its stored Job object with the coordinator.
-        job.state = JobState.DONE
+        job.state = JobState.DONE if result.exit_code == 0 else JobState.FAILED
         job.result_applied_at = job.updated_at
-        return JobState.DONE
+        return job.state
 
     async def fail(self, job: Job, reason: str) -> None:
         self.failures.append(reason)
@@ -247,7 +263,7 @@ class ScriptedSocket:
                 assignment_token=assignment.assignment_token,
                 connection_epoch=assignment.connection_epoch,
                 result=InitialTaskResult(
-                    session_id="session-1", last_message="implemented", exit_code=0
+                    session_id="session-1", last_message="execution failed", exit_code=1
                 ),
             ).model_dump_json()
         raise WebSocketDisconnect()
@@ -264,6 +280,7 @@ class ToolSocket(ScriptedSocket):
             for raw in self.sent
             if isinstance((message := parse_server_message(raw)), Assignment)
         )
+        assert isinstance(assignment.task, InitialTask)
         if self._step == 2:
             return Started(
                 job_id=assignment.job_id,
@@ -281,7 +298,7 @@ class ToolSocket(ScriptedSocket):
                 name="flow.open_pr",
                 arguments={"title": "Implement", "body": "Done"},
                 vcs_backend=VcsKind.GIT,
-                branch="flow/3",
+                branch=assignment.task.branch,
                 commit_sha="abc",
                 remote_sha="abc",
             ).model_dump_json()
@@ -292,7 +309,12 @@ class ToolSocket(ScriptedSocket):
                 assignment_token=assignment.assignment_token,
                 connection_epoch=assignment.connection_epoch,
                 result=InitialTaskResult(
-                    session_id="session-1", last_message="implemented", exit_code=0
+                    session_id="session-1", last_message=InitialCodingOutput(
+                        summary="implemented", vcs_backend_used=VcsKind.GIT,
+                    ).model_dump_json(), exit_code=0,
+                    vcs_backend=VcsKind.GIT, branch=assignment.task.branch,
+                    commit_sha="abc", remote_sha="abc", pushed=True, open_pr_call_id="call-1",
+                    delivery_receipt=PreparedDelivery(head_sha="abc", delivery_version=1),
                 ),
             ).model_dump_json()
         raise WebSocketDisconnect()
@@ -318,7 +340,7 @@ async def test_gateway_runs_one_remote_assignment_to_ack() -> None:
     assert any(isinstance(message, Assignment) for message in messages)
     assert any(isinstance(message, ResultAccepted) for message in messages)
     assert store.started is True
-    assert store.job.state is JobState.DONE
+    assert store.job.state is JobState.FAILED
     assert store.job.result_applied_at is not None
     assert coordinator.started is True
     assert coordinator.results[0].session_id == "session-1"
@@ -360,18 +382,16 @@ async def test_gateway_multiplexes_flow_tool_calls_during_execution() -> None:
     responses = [parse_server_message(raw) for raw in socket.sent]
     assert any(isinstance(message, FlowToolResponse) for message in responses)
     assert any(isinstance(message, ResultAccepted) for message in responses)
+    assert store.job.state is JobState.DONE
 
 
-@pytest.mark.parametrize("pending", [True, False])
-async def test_gateway_never_acknowledges_an_uncommitted_result(pending, monkeypatch):
+async def test_gateway_never_acknowledges_an_uncommitted_result(monkeypatch):
     store = RecordingStore()
     coordinator = RecordingCoordinator(store)
     socket = ScriptedSocket()
 
     async def unfinished(*args):
-        if pending:
-            raise ResultPending("GitHub outcome requires reconciliation")
-        return JobState.DONE
+        raise ResultPending("GitHub outcome requires reconciliation")
 
     monkeypatch.setattr(coordinator, "apply_result", unfinished)
     gateway = WorkerGateway(store, coordinator, execution_control=NoPendingStops(), worker_tokens={"worker-1": "worker-secret"})
@@ -379,21 +399,25 @@ async def test_gateway_never_acknowledges_an_uncommitted_result(pending, monkeyp
     assert store.job.result_payload is not None
     assert store.job.result_applied_at is None
     assert not any(isinstance(parse_server_message(raw), ResultAccepted) for raw in socket.sent)
-    assert socket.closed == (1013 if pending else 1008)
+    assert socket.closed == 1013
 
 
 async def test_recovery_continues_after_one_broken_result():
     class RecoveryStore(RecordingStore):
         def __init__(self):
             super().__init__()
-            self.jobs = [self.job, self.job.model_copy(update={"id": 6})]
+            self.jobs = [self.job, self.job.model_copy(update={"id": 6, "flow_id": 4})]
             for job in self.jobs:
-                job.result_payload = Succeeded(
+                job.state, job.assigned_worker_id = JobState.RUNNING, f"worker-{job.id}"
+                job.assignment_token = f"token-{job.id}"
+                job.started_at, job.result_received_at = job.created_at, job.updated_at
+                result = Succeeded(
                     job_id=job.id,
-                    assignment_token="token",
-                    connection_epoch="epoch",
-                    result=InitialTaskResult(session_id="session", last_message="done", exit_code=0),
-                ).model_dump(mode="json")
+                    assignment_token=job.assignment_token,
+                    connection_epoch=f"epoch-{job.id}",
+                    result=InitialTaskResult(session_id="session", last_message="execution failed", exit_code=1),
+                )
+                job.result_payload, job.result_digest = result.model_dump(mode="json"), terminal_digest(result)
 
         def unapplied_result_ceiling(self):
             return max(job.id for job in self.jobs)
@@ -477,6 +501,7 @@ class WaitingSocket(ScriptedSocket):
 async def test_gateway_new_epoch_takes_over_a_duplicate_worker_connection() -> None:
     store = RecordingStore()
     store.job.state = JobState.DONE
+    store.job.result_applied_at = store.job.updated_at
     gateway = WorkerGateway(
         store,
         RecordingCoordinator(store), execution_control=NoPendingStops(),
@@ -504,6 +529,7 @@ async def test_gateway_new_epoch_takes_over_a_duplicate_worker_connection() -> N
 async def test_gateway_accepts_different_worker_identities_concurrently() -> None:
     store = RecordingStore()
     store.job.state = JobState.DONE
+    store.job.result_applied_at = store.job.updated_at
     gateway = WorkerGateway(
         store,
         RecordingCoordinator(store), execution_control=NoPendingStops(),

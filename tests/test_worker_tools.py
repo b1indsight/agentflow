@@ -1,7 +1,11 @@
+import asyncio
+import signal
+from types import SimpleNamespace
+
 import httpx
 import pytest
 
-from app.domain.delivery_models import OpenedDelivery
+from app.domain.delivery_models import PreparedDelivery
 from app.domain.models import VcsExecutionContext, VcsKind, VcsOutcome
 from app.worker.transport import mcp
 
@@ -15,8 +19,7 @@ async def test_worker_mcp_http_open_pr_and_lifecycle(tmp_path, monkeypatch):
     class Caller:
         async def call_tool(self, name, arguments, *, call_id, vcs_outcome):
             assert name == "flow.open_pr" and vcs_outcome == outcome and call_id
-            return OpenedDelivery(pr_number=17, url="https://github.com/o/r/pull/17",
-                                  head_sha="abc", delivery_version=1)
+            return PreparedDelivery(head_sha="abc", delivery_version=1)
 
     monkeypatch.setattr(mcp, "verify_pushed_outcome", verify)
     context = VcsExecutionContext(tmp_path, "flow/test", "origin", None, None, None, None, None)
@@ -41,18 +44,14 @@ async def test_worker_mcp_http_open_pr_and_lifecycle(tmp_path, monkeypatch):
             "jsonrpc": "2.0", "id": 2, "method": "tools/call",
             "params": {"name": "open_pr", "arguments": {"title": "Implement", "body": "Done"}},
         })).json()
-        assert called["result"]["structuredContent"]["pr_number"] == 17
-        assert server.last_result.pr_number == 17
+        assert called["result"]["structuredContent"]["status"] == "prepared"
+        assert server.last_result == PreparedDelivery(head_sha="abc", delivery_version=1)
     async with httpx.AsyncClient(trust_env=False) as client:
         with pytest.raises(httpx.ConnectError):
             await client.post(server.url, json=request)
 
 
 async def test_cancelled_invocation_closes_mcp_without_replacing_worker_signal_handler(tmp_path):
-    import asyncio
-    import signal
-    from types import SimpleNamespace
-
     previous = signal.getsignal(signal.SIGTERM)
     context = VcsExecutionContext(tmp_path, "flow/test", "origin", None, None, None, None, None)
     server = mcp.WorkerMCP(SimpleNamespace(), context)

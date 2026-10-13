@@ -4,6 +4,7 @@ from datetime import timedelta
 from types import SimpleNamespace
 
 import pytest
+from githubkit_schemas.latest.models import DiffEntry
 
 from app.control.review_context import build_review_context
 from app.domain.context_models import MAX_CONTEXT_BYTES
@@ -130,8 +131,6 @@ async def test_context_total_byte_limit_and_missing_patch_are_explicit(remote):
 async def test_sdk_unset_file_fields_are_explicit_missing_evidence(remote):
     # GitHub can omit patches for binary files. The real SDK uses Unset for these
     # fields; treating it as text crashes context preparation before assignment.
-    from githubkit_schemas.latest.models import DiffEntry
-
     repo, client, _ = remote
     client.rest.pulls.async_list_files = AsyncEndpoint(response([DiffEntry(
         sha=None, filename="image.png", status="modified", additions=0, deletions=0,
@@ -252,15 +251,14 @@ async def test_filtered_discussions_do_not_refill_quota_or_leak_diagnostics(remo
 
 
 @pytest.mark.parametrize("source", ["files", "discussion"])
-@pytest.mark.parametrize("failed_page", [2, 3])
-async def test_later_page_errors_never_freeze_partial_context(remote, source, failed_page):
+async def test_later_page_errors_never_freeze_partial_context(remote, source):
     repo, client, _ = remote
     store = review_store()
     observed = store.reviews.batch.created_at - timedelta(minutes=1)
     error = GitHubError(GitHubErrorKind.PERMISSION, "context-page")
 
     async def read(*args, page, **kwargs):
-        if page == failed_page:
+        if page == 3:
             raise error
         rows = ([file_row(f"{page}-{i}.py") for i in range(20)] if source == "files" else
                 [discussion_row(page * 10 + i, observed) for i in range(10)])

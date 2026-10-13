@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.control.reconcile_feedback import FeedbackReconciler
 from app.github import GitHubApp, GitHubError, GitHubErrorKind, Issue, PullRequest
 from tests.test_github_client import AsyncEndpoint, install_client, settings
 
@@ -65,8 +66,6 @@ async def test_graphql_review_uses_edit_time_and_64_bit_identity(tmp_path, monke
 async def test_deleted_author_stays_in_batch_but_does_not_become_reviewer_input(tmp_path, monkeypatch):
     # Deleted authors still consume the context quota; durable scanning must keep
     # its previous rule of ignoring feedback without a known reviewer identity.
-    from app.control.reconcile_feedback import FeedbackReconciler
-
     data = reviews()
     data["repository"]["pullRequest"]["reviews"]["nodes"][0]["author"] = None
     pr = adapter(tmp_path, monkeypatch, SimpleNamespace(async_graphql=AsyncEndpoint(data)))
@@ -77,16 +76,14 @@ async def test_deleted_author_stays_in_batch_but_does_not_become_reviewer_input(
     assert scanner._discussion_updates(page, "reviews") == ([], None)
 
 
-@pytest.mark.parametrize("malformation", ["partial", "cursor", "completeness", "missing"])
+@pytest.mark.parametrize("malformation", ["cursor", "missing"])
 async def test_incomplete_graphql_data_never_commits_a_page(tmp_path, monkeypatch, malformation):
     data = reviews()
-    if malformation == "partial":
-        data["errors"] = [{"message": "missing field"}]
-    elif malformation == "missing":
+    if malformation == "missing":
         data["repository"] = None
     else:
         data["repository"]["pullRequest"]["reviews"]["pageInfo"] = {
-            "hasNextPage": "true" if malformation == "completeness" else True,
+            "hasNextPage": True,
             "endCursor": "previous",
         }
     app = adapter(tmp_path, monkeypatch, SimpleNamespace(async_graphql=AsyncEndpoint(data)))

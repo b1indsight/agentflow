@@ -27,7 +27,9 @@ from app.contracts.result_models import (
     ReviewersEffect,
     RunUpdate,
     ThreadReplyEffect,
+    unique_pull_request_receipt,
 )
+from app.control.archive import archive_effects, verify_archive
 from app.control.effects import ResultEffects
 from app.control.initial import initial_delivery_mismatch
 from app.control.resolution import plan_resolution
@@ -421,8 +423,6 @@ class ResultApplication:
                 }
             )
         if isinstance(result, ArchiveResult):
-            from app.control.archive import archive_effects, verify_archive
-
             try:
                 verify_archive(tx, flow, job, result)
             except ValueError as error:
@@ -489,8 +489,6 @@ class ResultApplication:
         if job.kind is JobKind.ARCHIVE:
             if failure or plan.state is JobState.FAILED:
                 return
-            from app.control.archive import verify_archive
-
             assert plan.archive is not None
             try:
                 verify_archive(tx, flow, job, plan.archive)
@@ -534,14 +532,7 @@ class ResultApplication:
 
     @staticmethod
     def _commit_initial_delivery(tx: Store, job: Job, current: FlowDelivery, flow: Flow) -> None:
-        receipts = [
-                r.receipt.pull_request
-                for r in tx.results.list_effects(job.id)
-                if r.receipt is not None and r.receipt.pull_request is not None
-        ]
-        if len(receipts) != 1:
-            raise ValueError("initial result has no unique PR receipt")
-        pull_request = receipts[0]
+        pull_request = unique_pull_request_receipt(tx.results.list_effects(job.id))
         current.state = DeliveryState.OPEN
         current.pr_number = pull_request.number
         current.url = f"https://github.com/{flow.repo}/pull/{pull_request.number}"

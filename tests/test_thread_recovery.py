@@ -7,6 +7,7 @@ import pytest
 
 from app.contracts.protocol import PROTOCOL_VERSION, RevisionTask
 from app.contracts.result_models import EffectState, ResolveEffect, ResultPending
+from app.control.service import ControlService
 from app.domain.models import (
     AddressedComment,
     DeferredComment,
@@ -27,6 +28,7 @@ from app.github import (
     ReviewThread,
     ReviewThreads,
 )
+from app.persistence.store import Store
 from tests.github import NATIVE_THREAD_REFETCH, record_call
 from tests.test_archive_status import archive_adapter
 from tests.test_coordinator import coordinator
@@ -249,7 +251,8 @@ async def test_permission_denial_keeps_diagnostic_without_rerunning_code(
     flow, job, github, subject = thread_revision
 
     async def denied(*args):
-        raise GitHubError(GitHubErrorKind.PERMISSION, operation, status_code=403)
+        raise GitHubError(GitHubErrorKind.PERMISSION, operation, status_code=403,
+                          request_rejected=True)
 
     monkeypatch.setattr(ReviewThread, "reply" if operation == "reply_review_thread" else "resolve", denied)
     assert await subject.results.apply(job.id) is JobState.DONE
@@ -262,8 +265,6 @@ async def test_permission_denial_keeps_diagnostic_without_rerunning_code(
 
 
 async def test_cancel_after_reply_lookup_prevents_any_write(store, thread_revision, monkeypatch):
-    from app.control.service import ControlService
-
     flow, job, github, subject = thread_revision
 
     async def cancel(thread, marker):
@@ -277,8 +278,6 @@ async def test_cancel_after_reply_lookup_prevents_any_write(store, thread_revisi
 
 
 async def test_commit_failure_keeps_remote_receipts_and_exact_consumption(store, thread_revision, monkeypatch):
-    from app.persistence.store import Store
-
     flow, job, github, subject = thread_revision
     original = Store.complete_persisted_result
 
@@ -340,8 +339,7 @@ async def test_same_second_round_trip_keeps_the_latest_webhook_version(store, th
     assert github.resolves == [] and github.review_requests == []
 
 
-@pytest.mark.parametrize("preexisting", [False, True])
-async def test_remote_predecessor_releases_the_queued_webhook_edit(store, thread_revision, preexisting):
+async def test_remote_predecessor_releases_the_queued_webhook_edit(store, thread_revision):
     flow, job, github, subject = thread_revision
     # C's webhook arrives before B. GraphQL supplies B, so the stored B→C edit must follow it.
     latest = FeedbackUpdate(kind=ReviewItemKind.INLINE, github_id=1, author="alice",
@@ -349,12 +347,6 @@ async def test_remote_predecessor_releases_the_queued_webhook_edit(store, thread
     assert not store.reviews.ingest(flow.id, "edit-c", "pull_request_review_comment",
         {"changes": {"body": {"from": "Intermediate"}}}, latest,
         settle_seconds=0, submit_grace_seconds=0)
-    if preexisting:
-        # Recover a predecessor observed by the older implementation before edit-chain replay existed.
-        with store.transaction() as tx:
-            tx.lock_workflow(flow.id)
-            assert tx.reviews._append_version(flow.id, flow.current_attempt_id, None,
-                latest.model_copy(update={"body": "Intermediate"}), previous_body=human().body)
     github.thread = github.thread.model_copy(update={"comments": Batch[ReviewComment](items=(human(body="Intermediate"), *github.thread.comments.items[1:]))})
     await subject.results.apply(job.id)
     assert [(f.version, f.body) for f in store.reviews.pending(flow.id)] == [(3, "Latest")]

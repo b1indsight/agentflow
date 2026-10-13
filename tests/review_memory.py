@@ -2,6 +2,7 @@
 
 from datetime import UTC, datetime
 
+from app.contracts.protocol import RevisionTask
 from app.domain.context_models import ReviewContext
 from app.domain.judge_models import JudgeDecision
 from app.domain.models import FeedbackRef, Job, ReviewItemKind, TriageVerdict
@@ -58,8 +59,6 @@ class MemoryReviews:
         return self.batch.model_copy(update={"job_id": job.id})
 
     def freeze_revision(self, job, task):
-        from app.contracts.protocol import RevisionTask
-
         if (job.payload or {}).get("revision") is None:
             job.payload = {**(job.payload or {}), "revision": task.model_dump(mode="json")}
             self.jobs[job.id].payload = job.payload

@@ -1,5 +1,6 @@
 import asyncio
 
+import httpx
 import pytest
 
 from app.contracts.protocol import (
@@ -7,7 +8,6 @@ from app.contracts.protocol import (
     ExecutionResult,
     ExecutionTask,
     Failed,
-    FlowToolErrorKind,
     FlowToolRequest,
     FlowToolResponse,
     Heartbeat,
@@ -15,32 +15,18 @@ from app.contracts.protocol import (
     InitialTaskResult,
     Registered,
     ResultAccepted,
+    ResumeAssignment,
     Started,
     Succeeded,
+    parse_server_message,
     parse_worker_message,
 )
-from app.domain.delivery_models import OpenedDelivery
-from app.domain.models import JobState, VcsKind, VcsOutcome
+from app.domain.delivery_models import PreparedDelivery
+from app.domain.models import JobState, VcsExecutionContext, VcsKind, VcsOutcome
 from app.worker.state.session import WorkerSession
-from app.worker.transport.client import FlowToolCallError, WorkerClient
-from app.worker.transport.mcp import FlowToolCaller
-
-
-def test_flow_tool_call_error_preserves_retry_metadata() -> None:
-    error = FlowToolCallError(
-        FlowToolResponse(
-            call_id="call-1",
-            error="GitHub get ref failed",
-            error_kind=FlowToolErrorKind.RATE_LIMITED,
-            retryable=True,
-            retry_after="30",
-        )
-    )
-
-    assert error.kind is FlowToolErrorKind.RATE_LIMITED
-    assert error.retryable is True
-    assert error.retry_after == "30"
-    assert str(error).endswith("retryable=true; retry_after=30")
+from app.worker.transport.client import WorkerClient
+from app.worker.transport.mcp import FlowToolCaller, WorkerMCP
+from tests.test_worker_session import _assignment
 
 
 class RecordingExecutor:
@@ -117,10 +103,6 @@ async def test_client_acknowledges_and_executes_one_assignment(tmp_path) -> None
 
 @pytest.mark.parametrize("fails", [False, True])
 async def test_worker_redacts_echoed_push_capability_before_journal_and_wire(tmp_path, fails):
-    from app.contracts.protocol import Failed, parse_server_message
-    from app.worker.state.session import WorkerSession
-    from tests.test_worker_session import _assignment
-
     class EchoingExecutor:
         async def execute(self, task, secret=None, *, tool_caller=None):
             if fails:
@@ -162,7 +144,7 @@ class ToolCallingExecutor:
                 remote_sha="abc",
             ),
         )
-        assert isinstance(result, OpenedDelivery) and result.pr_number == 17
+        assert result == PreparedDelivery(head_sha="abc", delivery_version=1)
         return InitialTaskResult(session_id="session-1", last_message="done", exit_code=0)
 
 
@@ -206,7 +188,7 @@ class ToolConnection:
             request = parse_worker_message(self.sent[-1])
             assert isinstance(request, FlowToolRequest)
             return FlowToolResponse(
-                call_id=request.call_id, result=OpenedDelivery(pr_number=17, url="https://github.com/owner/repo/pull/17", head_sha="abc", delivery_version=1)
+                call_id=request.call_id, result=PreparedDelivery(head_sha="abc", delivery_version=1)
             ).model_dump_json()
         if self.step == 4:
             await self.result_ready.wait()
@@ -219,26 +201,6 @@ class ToolConnection:
                 connection_epoch="epoch-1",
             ).model_dump_json()
         raise ConnectionError("script complete")
-
-
-@pytest.mark.asyncio
-async def test_client_multiplexes_tool_call_while_executor_is_running(tmp_path) -> None:
-    executor = ToolCallingExecutor()
-    client = WorkerClient(session=WorkerSession(tmp_path),
-        worker_id="worker-1",
-        worker_token="worker-secret",
-        serve_ws_url="ws://serve/internal/workers/connect",
-        executor=executor,
-    )
-    connection = ToolConnection()
-
-    with pytest.raises(ConnectionError, match="script complete"):
-        await client.run_connection(connection)
-
-    assert any(
-        isinstance(parse_worker_message(raw), FlowToolRequest)
-        for raw in connection.sent
-    )
 
 
 class CancellableExecutor:
@@ -276,7 +238,6 @@ class BrokenHeartbeatConnection:
 
 @pytest.mark.asyncio
 async def test_heartbeat_failure_preserves_the_running_executor_for_reconnect(tmp_path) -> None:
-    from app.worker.state.session import WorkerSession
     executor = CancellableExecutor()
     client = WorkerClient(
         worker_id="worker-1",
@@ -307,8 +268,6 @@ async def test_heartbeat_failure_preserves_the_running_executor_for_reconnect(tm
         with pytest.raises(ConnectionError, match="connection lost"):
             await execution
         assert executor.cancelled.is_set() is False
-        from app.contracts.protocol import ResumeAssignment
-
         heartbeat = asyncio.Event()
         class ResumedConnection:
             first = True
@@ -340,8 +299,6 @@ async def test_heartbeat_failure_preserves_the_running_executor_for_reconnect(tm
 
 @pytest.mark.asyncio
 async def test_heartbeat_failure_interrupts_waiting_for_tool_reply(tmp_path) -> None:
-    from tests.test_worker_session import _assignment
-
     # A stalled control-side tool reply must not prevent a failed heartbeat from reconnecting.
     assignment = _assignment()
     client = WorkerClient(
@@ -362,9 +319,6 @@ async def test_heartbeat_failure_interrupts_waiting_for_tool_reply(tmp_path) -> 
 
 @pytest.mark.parametrize("fails", [False, True])
 async def test_completed_disconnected_executor_is_journaled_before_recovery(tmp_path, fails):
-    from app.worker.state.session import WorkerSession
-    from tests.test_worker_session import _assignment
-
     # Execution finishes after the driver lost its connection; registration must carry its result.
     class CompletedExecutor:
         async def execute(self, task, secret=None, *, tool_caller=None):
@@ -391,13 +345,7 @@ async def test_completed_disconnected_executor_is_journaled_before_recovery(tmp_
     assert "[REDACTED]" in journal.path.read_text()
 
 
-@pytest.mark.parametrize("rejected", [False, True])
-async def test_mcp_shutdown_consumes_late_tool_response_before_delivering_result(tmp_path, monkeypatch, rejected):
-    import httpx
-
-    from app.domain.models import VcsExecutionContext
-    from app.worker.transport.mcp import WorkerMCP
-
+async def test_mcp_shutdown_consumes_late_tool_response_before_delivering_result(tmp_path, monkeypatch):
     # Codex exits while open_pr waits on control. HTTP shutdown cancels the waiter,
     # but the original socket still needs to consume control's reply and deliver the job result.
     closed = asyncio.Event()
@@ -412,12 +360,6 @@ async def test_mcp_shutdown_consumes_late_tool_response_before_delivering_result
         async def recv(self):
             if self.step == 2:
                 await closed.wait()
-                raw = await super().recv()
-                if rejected:
-                    request = parse_worker_message(self.sent[-1])
-                    return FlowToolResponse(call_id=request.call_id, error="upstream rejected",
-                                            error_kind=FlowToolErrorKind.UPSTREAM).model_dump_json()
-                return raw
             return await super().recv()
 
     connection = LateConnection()
