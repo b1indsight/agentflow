@@ -208,3 +208,24 @@ wheel 包含全部 17 个 persistence 模块，隔离解释器成功导入 16 �
 结构对照同时确认：聚合 Store 显式持有十个仓储，十个功能模块均已删除对 Store 的反向导入。
 新增一个数据库资源上下文，复用原有驱动和 SQL，不增加运行模式、配置开关或领域数据持久化职责。
 本次补充相对上条实现：生产净增加 79 行，测试净增加 16 行；测试新增一项，其余为资源观察点适配。
+
+### 2026-10-14 — 补齐旧调用方与类型检查
+
+**要求与实施。** 用户指出旧调用方未迁移完整。检查 app、scripts 和 tests 的全部 180 个 Python
+文件，发现 Webhook 接收提交顺序回归仍调用 `WebhookStore(first)`，而 `first` 是绑定事务的
+聚合 Store。改为 `receive(first.webhooks, "first")`，使用 Store 已持有的仓储；为原有测试函数
+补充 `store: Store` 与返回类型，使 Mypy 检查该函数体。运行时原有资源 API 仍能支持旧写法，
+函数又未标注类型，因此此前运行回归与 Mypy 没有暴露这处错误。
+依据：[调用方](../../tests/test_webhook_inbox.py)。
+
+**验证。** 先只添加类型标注，`uv run --no-sync mypy app tests` 明确报出一处构造参数错误：
+传入 Store，实际需要 Database；修正调用后 178 个源文件类型检查通过。Ruff 与差异检查通过，
+Webhook 和工作流事务回归 **21 passed**；沿用既有 PostgreSQL 环境，执行
+`uv run --no-sync --env-file .cache/2026-10-13/persistence-test.env pytest tests/test_webhook_inbox.py
+tests/test_workflow_transactions.py -q --tb=short`。别名与事务变量的 AST 扫描未发现其他旧业务方法
+调用、旧模块导入或 persistence 外的直接仓储构造；复现命令为
+`python3 .cache/2026-10-13/audit-persistence-callers.py`，报告为
+`.cache/2026-10-13/persistence-caller-audit.json`。独立审查与最新全量 CI 见 PR。
+
+**代价。** 修改一处现有测试调用并开启该函数的类型检查，测试净增加一行；生产代码与运行机制
+未增加，继续使用原有并发与事务回归，因此本次无需运行机制消融。

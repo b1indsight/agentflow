@@ -16,6 +16,7 @@ from psycopg import OperationalError
 from app.controler.events.webhooks import WebhookConsumer
 from app.controler.workflow.service import ControlService
 from app.domain.models import DeliveryState, FlowState
+from app.persistence.store import Store
 from app.persistence.webhooks import WebhookStore
 
 
@@ -174,7 +175,7 @@ def test_concurrent_duplicate_receipts_are_consumed_once(store):
     assert store.flows.get_active_flow("owner/repo", 7) is not None
 
 
-def test_distinct_receipt_waits_for_older_repository_transaction(store):
+def test_distinct_receipt_waits_for_older_repository_transaction(store: Store) -> None:
     inbox = store.webhooks
     backend: Queue[int] = Queue()
 
@@ -187,7 +188,7 @@ def test_distinct_receipt_waits_for_older_repository_transaction(store):
     # concurrent, distinct receipt from becoming visible and claimable first.
     with ThreadPoolExecutor(max_workers=1) as pool:
         with store.transaction() as first:
-            receive(WebhookStore(first), "first")
+            receive(first.webhooks, "first")
             pending = pool.submit(second_receipt)
             pid = backend.get(timeout=5)
             deadline = monotonic() + 1.5
