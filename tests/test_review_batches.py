@@ -6,8 +6,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.control.router import EventRouter
-from app.control.service import ControlService
+from app.controler.events.router import EventRouter
+from app.controler.workflow.service import ControlService
 from app.domain.models import (
     DeliveryState,
     FlowState,

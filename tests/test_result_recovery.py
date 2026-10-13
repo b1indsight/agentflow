@@ -17,8 +17,8 @@ from app.contracts.protocol import (
     terminal_digest,
 )
 from app.contracts.result_models import EffectState, ResultPending
-from app.control.coordinator import JobCoordinator
-from app.control.service import ControlService
+from app.controler.workflow.coordinator import JobCoordinator
+from app.controler.workflow.service import ControlService
 from app.domain.delivery_models import OpenedDelivery
 from app.domain.models import (
     DeliveryState,
@@ -112,7 +112,7 @@ async def completed_open_initial(
         name="flow.open_pr", arguments={"title": "Title", "body": "Body"},
         vcs_backend=VcsKind.GIT, branch=task.branch, commit_sha="abc123", remote_sha="abc123",
     )
-    tool = await subject.execute_tool(request, worker_id="worker-a")
+    tool = await subject.tools.execute(request, worker_id="worker-a")
     result = InitialTaskResult(
         session_id="initial-session", last_message="done", exit_code=0,
         vcs_backend=VcsKind.GIT, branch=task.branch, commit_sha="abc123", remote_sha="abc123",
@@ -145,7 +145,7 @@ async def test_merged_initial_retry_keeps_execution_facts_without_reopening(
     assert task.branch == initial_request.branch
     assert task.repo_identity == "worker-b:owner/repo"
     assert store.start_assignment(job.id, task.attempt_id, "worker-b", "retry-token", "epoch-b")
-    tool = await subject.execute_tool(initial_request.model_copy(update={
+    tool = await subject.tools.execute(initial_request.model_copy(update={
         "job_id": job.id, "assignment_token": "retry-token", "connection_epoch": "epoch-b",
         "call_id": "retry-open",
     }), worker_id="worker-b")

@@ -19,14 +19,18 @@ from app.contracts.result_models import (
     ThreadReplyEffect,
     unique_pull_request_receipt,
 )
-from app.control.archive import verify_archive
-from app.control.lifecycle import (
+from app.controler.workflow.archive import verify_archive
+from app.controler.workflow.lifecycle import (
     DeliveryConflict,
     adopt_created_pull_request,
     validate_created_pull_request,
     validate_open_pull_request,
 )
-from app.control.thread_effects import has_pending_thread_feedback, resolve_thread, revision_current
+from app.controler.workflow.thread_effects import (
+    has_pending_thread_feedback,
+    resolve_thread,
+    revision_current,
+)
 from app.domain.models import TERMINAL_STATES, DeliveryState, FlowState
 from app.domain.review_models import BatchState
 from app.github import (

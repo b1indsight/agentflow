@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 from pydantic import SecretStr, ValidationError
 
-from app.control.config import ServeSettings
+from app.controler.config import ServerSettings
 from app.worker.config import WorkerSettings
 from app.worker.execution.codex import _codex_environment
 from app.worker.runtime import validate_worker_environment
@@ -14,14 +14,14 @@ from app.worker.runtime import validate_worker_environment
 ], ids=["blank-label", "label-collision"])
 def test_archive_status_labels_cannot_be_empty_or_conflict(labels):
     with pytest.raises(ValidationError, match="label"):
-        ServeSettings(_env_file=None, database_url="postgresql://localhost/test",
+        ServerSettings(_env_file=None, database_url="postgresql://localhost/test",
                       worker_tokens={"worker": SecretStr("secret")}, **labels)
 
 
 def test_judge_credentials_stay_out_of_config_serialization_and_code_agent_environment(monkeypatch):
     monkeypatch.setenv("FLOWTOOL_JUDGE_MODEL", "openai:test")
     monkeypatch.setenv("FLOWTOOL_JUDGE_API_KEY", "judge-secret")
-    configured = ServeSettings(database_url="postgresql://localhost/test",
+    configured = ServerSettings(database_url="postgresql://localhost/test",
                                worker_tokens={"worker": SecretStr("worker-secret")})
     assert "judge_model" not in WorkerSettings.model_fields
     assert configured.judge_model == "openai:test"
@@ -43,7 +43,7 @@ def test_settings_parse_allowlist_environment_formats(monkeypatch, tmp_path, val
 
     monkeypatch.setenv("FLOWTOOL_WORKER_TOKENS", '{"worker-1":"secret"}')
 
-    settings = ServeSettings()  # type: ignore[call-arg]
+    settings = ServerSettings()  # type: ignore[call-arg]
 
     assert settings.allowlist == expected
     assert settings.database_url == "postgresql://flowtool:secret@db.example/flowtool"
@@ -55,7 +55,7 @@ def test_reviewers_are_configured_independently_from_trigger_allowlist(monkeypat
     monkeypatch.setenv("FLOWTOOL_DATABASE_URL", "postgresql://localhost/flowtool")
     monkeypatch.setenv("FLOWTOOL_WORKER_TOKENS", '{"worker-1":"secret"}')
 
-    settings = ServeSettings()  # type: ignore[call-arg]
+    settings = ServerSettings()  # type: ignore[call-arg]
 
     assert settings.allowlist == ["alice", "bob"]
     assert settings.reviewers == ["carol", "dave"]
@@ -66,17 +66,17 @@ def test_serve_settings_require_unique_nonempty_worker_credentials(monkeypatch) 
     monkeypatch.setenv("FLOWTOOL_DATABASE_URL", "postgresql://localhost/flowtool")
 
     with pytest.raises(ValidationError):
-        ServeSettings(
+        ServerSettings(
             database_url="postgresql://localhost/flowtool",
             worker_tokens={"": SecretStr("secret")},
         )
     with pytest.raises(ValidationError):
-        ServeSettings(
+        ServerSettings(
             database_url="postgresql://localhost/flowtool",
             worker_tokens={"worker-1": SecretStr("")},
         )
     with pytest.raises(ValidationError):
-        ServeSettings(
+        ServerSettings(
             database_url="postgresql://localhost/flowtool",
             worker_tokens={
                 "worker-1": SecretStr("shared"),
@@ -168,14 +168,14 @@ def test_recovery_timing_settings_require_safe_ordering(monkeypatch) -> None:
     monkeypatch.setenv("FLOWTOOL_DATABASE_URL", "postgresql://localhost/flowtool")
 
     with pytest.raises(ValidationError, match="lease duration"):
-        ServeSettings(
+        ServerSettings(
             database_url="postgresql://localhost/flowtool",
             worker_tokens={"worker-1": SecretStr("secret")},
             worker_heartbeat_interval=10,
             worker_lease_duration=20,
         )
     with pytest.raises(ValidationError, match="recovery grace"):
-        ServeSettings(
+        ServerSettings(
             database_url="postgresql://localhost/flowtool",
             worker_tokens={"worker-1": SecretStr("secret")},
             worker_heartbeat_interval=10,

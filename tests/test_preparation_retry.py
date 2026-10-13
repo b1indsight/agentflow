@@ -6,12 +6,11 @@ from datetime import timedelta
 import pytest
 
 from app.contracts.protocol import PROTOCOL_VERSION, Assignment, RevisionTask
-from app.control.gateway import WorkerGateway
-from app.control.lifecycle import pause_delivery
-from app.control.preparation import PreparationStale
+from app.controler.workers.gateway import WorkerGateway
+from app.controler.workflow.lifecycle import pause_delivery
+from app.controler.workflow.preparation import PreparationStale
 from app.domain.models import JobKind, JobState
 from app.github import GitHubError, GitHubErrorKind, Repository
-from app.persistence.stop_store import StopStore
 from app.persistence.store import Store
 from tests.test_coordinator import coordinator
 from tests.test_revision_recovery import (
@@ -21,7 +20,7 @@ from tests.test_revision_recovery import revision_resources as revision_resource
 
 
 def gateway(store, subject):
-    return WorkerGateway(store, subject, execution_control=StopStore(store), worker_tokens={})
+    return WorkerGateway(store, subject, worker_tokens={})
 
 
 @pytest.mark.parametrize("change,signing_fails", [

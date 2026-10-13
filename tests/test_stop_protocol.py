@@ -14,8 +14,8 @@ from app.contracts.protocol import (
     StopExecution,
     parse_worker_message,
 )
-from app.control.gateway import WorkerGateway
-from app.control.service import ControlService
+from app.controler.workers.gateway import WorkerGateway
+from app.controler.workflow.service import ControlService
 from app.domain.models import JobKind
 from app.persistence.stop_store import StopStore
 from app.worker.execution.vcs import _run
@@ -135,7 +135,7 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path):
         def worker_disconnected(self, *args): pass
 
     gateway = WorkerGateway(store, Coordinator(), worker_tokens={'w': 'secret'},
-                            heartbeat_interval=0.01, poll_interval=0.01, execution_control=StopStore(store))
+                            heartbeat_interval=0.01, poll_interval=0.01)
     client = WorkerClient(worker_id='w', worker_token='secret', serve_ws_url='unused',
                           executor=Executor(), session=WorkerSession(tmp_path))
     server = asyncio.create_task(gateway.handle(Socket()))

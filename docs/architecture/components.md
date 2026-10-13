@@ -7,7 +7,7 @@
 `domain/` 保存领域事实、端口与纯策略；`contracts/` 在这些类型上定义跨进程消息与冻结结果。
 `persistence/` 拥有 SQL 和事务，`github/` 拥有资源、远端查询数据、绑定配置及其 GitHub SDK/GraphQL 操作，两者不反向依赖编排层。
 领域容器、合同和仓储直接引用同一个资源模型；公开事实可以离线恢复，SDK/认证只在实际操作时加载。
-`control/` 组合仓储、GitHub、协议与插件，负责工作流、Judge 决策和外部副作用；`worker/` 组合协议、CodingAgent
+`controler/` 是控制服务端，组合仓储、GitHub、协议与插件，负责工作流、Judge 决策和外部副作用；`worker/` 组合协议、CodingAgent
 执行器及 VCS，不加载 control、数据库或 GitHub SDK 实现。轻量或通常会使用的依赖在模块级导入；
 局部导入仅用于实际循环或依赖隔离。CLI 的 uvicorn、领域类型和离线 GitHub 资源直接导入，
 控制端运行时、数据库与配置实例化仍归对应命令；加载 CLI 不提前加载 SQL、SDK 或控制端。
@@ -18,8 +18,17 @@ GitHub 错误分类和 Retry-After 计时由 `github/errors.py` 提供，仓储�
 不会初始化 SDK。`domain/project_models.py` 只保留业务目标状态，GitHub Project 绑定配置及远端目标数据归 `github/projects.py`。
 职责边界由 `tests/test_boundaries.py` 检查，另以独立解释器验证 worker 启动、实际 CLI 入口和资源 JSON 恢复的传递导入。
 
-目录列表见[当前目录](roadmap.md#8-当前目录与里程碑)。Judge 内部子进程入口为
-`app.control.judge_runner`；对外 CLI、`app.control.api` 和 `app.live_smoke` 入口保持不变。
+`controler/` 根目录的 `api.py`、`config.py`、`runtime.py` 分别拥有 HTTP/WS 入口、
+`ServerSettings` 与 `ServerRuntime` 装配。子包按职责归组：`events/` 消费并路由持久 webhook，
+`workers/` 管理 Worker 连接、派发通信与历史查询，`workflow/` 拥有 Flow/Job 准备、交付转换、
+结果提交及副作用恢复，`review/` 加工审核上下文和反馈并运行 Judge，`reconciliation/` 对账
+PR、反馈与 Projects。事件、Worker 管理和对账调用工作流，工作流调用审核模块；
+各子包直接引用已有领域类型、协议、Store/GitHub 及配置，不反向依赖 API 或运行时。
+各包入口只说明职责，调用者直接导入具体模块。
+
+目录列表见[当前目录](roadmap.md#8-当前目录与里程碑)。ASGI Python 入口为
+`app.controler.api`，Judge 内部子进程入口为 `app.controler.review.runner`；
+CLI 命令为 `flowtool serve` / `flowtool worker`，真实验收入口为 `app.live_smoke`。
 
 ## 4.1 Webhook Ingress（FastAPI + uvicorn）
 
@@ -69,19 +78,20 @@ Review:   settle → READY → PROCESSING → COMPLETED / WAITING
 
 `ControlService` 在显式事务中负责触发、取消和 retry，并由 `lifecycle` 提交合并事实；
 `lifecycle` 也拥有创建 PR 的身份核验、绑定及 close/reopen。`JobCoordinator` 把 INITIAL、REVISION、ARCHIVE
-持久 job 构造成版本化 task，并在创建 revision 前直接处理需要 Judge 判断的反馈批次，
-并按 job ID 调用 `ResultApplication`，由后者读取并校验已持久接收的 result，
+持久 job 构造成版本化 task，并在创建 revision 前直接处理需要 Judge 判断的反馈批次。
+它创建的 `ResultApplication` 按 job ID 读取并校验已持久接收的 result，
 冻结一次结果的领域变更和 GitHub 操作，
 由 `ResultEffects` 查询/执行远端操作并保存回执，最后一起提交本地状态和结果确认。
 PR 依赖操作与 INITIAL 提交复用 `contracts.result_models.unique_pull_request_receipt`，
 只消费已读取的唯一创建回执；退休恢复缺少唯一回执时继续等待，不提交本地完成状态。
 `ResultApplication` 同时拥有逐 job 锁、有界分页和固定并发恢复；Runtime 调度其恢复方法，
-Gateway 持久接收后经 coordinator 调用同一个结果入口，核验提交完成后才发送 ACK。
+Gateway 持久接收后直接调用 `coordinator.results.apply`，核验提交完成后才发送 ACK；
+工具请求直接调用 `coordinator.tools.execute`。内部配置、仓储与服务依赖使用具体类型。
 网络请求不占用数据库事务；plugin hook 在提交后调用，不具备持久化投递保证。worker 不能直接更新这些状态。
 `JobCoordinator.prepare_for_assignment` 完成任务构造、push capability 签发和 I/O 后业务复查，
 直接返回 wire `Assignment` 或 QUEUED/DONE/FAILED。读取故障使用持久重试预算，签发故障直接失败。
 `WorkerGateway` 在准备期间维持租约心跳，连接结束时取消并等待准备协程；发送前仍独立调用
-`authorize_dispatch`，再发送 coordinator 构造的消息。
+`store.stops.authorize_dispatch`，再发送 coordinator 构造的消息。
 非零 Codex exit 会转 FAILED。revision 成功后仅消费明确 addressed 的 item/version，deferred/遗漏项/
 clarification 保持 waiting；不把 addressed 当作远端 resolved。有未决问题时不重新请求审核。
 

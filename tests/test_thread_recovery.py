@@ -7,7 +7,7 @@ import pytest
 
 from app.contracts.protocol import PROTOCOL_VERSION, RevisionTask
 from app.contracts.result_models import EffectState, ResolveEffect, ResultPending
-from app.control.service import ControlService
+from app.controler.workflow.service import ControlService
 from app.domain.models import (
     AddressedComment,
     DeferredComment,

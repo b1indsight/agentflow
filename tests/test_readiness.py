@@ -1,11 +1,12 @@
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 from fastapi.testclient import TestClient
 
-import app.control.runtime as control_runtime
+import app.controler.runtime as server_runtime
 import app.worker.health as worker_health
-from app.control.api import create_app
+from app.controler.api import create_app
 from app.persistence import readiness
 from app.persistence.readiness import database_ready
 from app.telemetry.metrics import Metrics
@@ -23,14 +24,11 @@ async def test_database_failure_is_not_liveness_failure(monkeypatch):
     monkeypatch.setattr(readiness.psycopg.AsyncConnection, 'connect', fail)
     assert not await database_ready('unused')
 
-    class Context:
-        settings = SimpleNamespace(host="test", port=0, metrics_token=None)
-        metrics = Metrics()
-        def startup(self): pass
-        async def shutdown(self): pass
-        async def ready(self): return False
-
-    with TestClient(create_app(Context)) as client:
+    runtime = Mock(spec=server_runtime.ServerRuntime,
+                   settings=SimpleNamespace(host="test", port=0, metrics_token=None),
+                   metrics=Metrics(), startup=Mock(), shutdown=AsyncMock(),
+                   ready=AsyncMock(return_value=False))
+    with TestClient(create_app(runtime)) as client:
         assert client.get('/healthz').status_code == 200
         response = client.get('/readyz')
         assert response.status_code == 503
@@ -68,8 +66,8 @@ async def test_shutdown_during_probe_cannot_return_ready(monkeypatch):
         entered.set()
         await release.wait()
         return True
-    monkeypatch.setattr(control_runtime, 'database_ready', probe)
-    runtime = control_runtime.ControlRuntime.__new__(control_runtime.ControlRuntime)
+    monkeypatch.setattr(server_runtime, 'database_ready', probe)
+    runtime = server_runtime.ServerRuntime.__new__(server_runtime.ServerRuntime)
     runtime.settings = SimpleNamespace(database_url='unused')
     runtime._ready, runtime._readiness_lock = True, asyncio.Lock()
     task = asyncio.create_task(runtime.ready())

@@ -92,12 +92,12 @@ review 的实际更新时间可能使较晚编辑的正文被批次截止排除�
 
 **背景与证据：**
 
-- [`review_context.py`](../../app/control/review_context.py) 在每种来源读到第 21 条时
+- [`review_context.py`](https://github.com/b1indsight/agentflow/blob/a50ac2c0615bea1f8c8e42b23b3307deaa1e4ba8/app/control/review_context.py) 在每种来源读到第 21 条时
   停止，并在过滤批次截止、冻结反馈前消耗预算。
   [`test_review_context.py`](../../tests/test_review_context.py) 已覆盖 sentinel、
   过滤后不补满预算、后续页错误和缺失时间。上下文只要有界前缀，不需要完整扫描。
 - [`feedback.py`](../../app/github/feedback.py) 当前在解码时跳过 null author；
-  [`review_context.py`](../../app/control/review_context.py) 的 REST 读取保留它们，
+  [`review_context.py`](https://github.com/b1indsight/agentflow/blob/a50ac2c0615bea1f8c8e42b23b3307deaa1e4ba8/app/control/review_context.py) 的 REST 读取保留它们，
   显示 `[deleted]`。直接切换查询会改变证据条数和截断边界。
 - [`repositories.py`](../../app/github/repositories.py) 的 `fetch_pull_request` 本来
   就是绑定 PR 后调用 `refetch`。单纯更换调用写法不减少业务分支或身份来源。

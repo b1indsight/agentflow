@@ -9,7 +9,12 @@ flowtool/
     contracts/        # 版本化 task/result/message 与冻结结果应用契约
     persistence/      # PostgreSQL schema、事务仓储、指标查询与就绪探针
     github/           # githubkit App 认证、GraphQL 分页与远端数据解码
-    control/          # HTTP/WS 服务、调度、工作流编排、审核证据与 Judge
+    controler/        # 控制服务端，根目录为 API、配置与运行时装配
+      events/         # 持久 webhook 消费与事件路由
+      workers/        # Worker 连接、派发通信与历史查询
+      workflow/       # Flow/Job 准备、交付转换、结果与副作用恢复
+      review/         # 审核上下文、反馈解释与 Judge
+      reconciliation/ # PR、反馈与 Projects 对账
     worker/           # WS client、journal、CodingAgent、prompt、工作目录与 VCS
     telemetry/        # 通用 logging 与控制端 metrics，分开依赖
     cli.py            # admin CLI（§10-8）

@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 import pytest
 from pydantic import SecretStr, ValidationError
 
-from app.control.judge import BubJudge
+from app.controler.review.judge import BubJudge
 from app.domain.models import TriageVerdict
 from tests.review_memory import review_context as context
 
@@ -171,7 +171,7 @@ async def test_child_output_and_exit_contract(monkeypatch):
     child = ChildProcess(err=b"secret", code=1)
 
     async def start(*args, **kwargs):
-        assert args[1:4] == ("-I", "-m", "app.control.judge_runner")
+        assert args[1:4] == ("-I", "-m", "app.controler.review.runner")
         assert set(kwargs["env"]) == {
             "PATH", "LANG", "FLOWTOOL_JUDGE_MODEL", "FLOWTOOL_JUDGE_API_KEY", "BUB_HOME",
         }
@@ -195,7 +195,7 @@ async def test_timeout_and_cancellation_kill_and_reap_child(monkeypatch, error, 
         raise error
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", start)
-    monkeypatch.setattr("app.control.judge._exchange", exchange)
+    monkeypatch.setattr("app.controler.review.judge._exchange", exchange)
     judge = BubJudge(model="openai:test", api_key=SecretStr("fake"))
     if failure:
         assert (await judge.triage(context())).failure == failure

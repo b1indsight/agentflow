@@ -57,8 +57,9 @@ def inbox_retry(delivery_id: str) -> None:
 @project_app.command("check")
 def project_check(repo: str) -> None:
     """只读校验已配置的组织 Project、Status 字段及选项。"""
-    from app.control.config import settings
+    from app.controler.config import ServerSettings
 
+    settings = ServerSettings()  # type: ignore[call-arg]
     config = settings.projects.get(repo.casefold())
     if config is None:
         typer.echo(f"{repo}: Projects disabled")
@@ -97,9 +98,10 @@ def project_retry(repo: str) -> None:
 
 @contextmanager
 def _store() -> Iterator[Store]:
-    from app.control.config import settings
+    from app.controler.config import ServerSettings
     from app.persistence.store import Store
 
+    settings = ServerSettings()  # type: ignore[call-arg]
     store = Store(settings.database_url)
     store.init_db()
     try:
@@ -111,15 +113,17 @@ def _store() -> Iterator[Store]:
 @app.command()
 def serve() -> None:
     """启动 webhook 常驻进程（uvicorn）。"""
-    from app.control.api import create_app
-    from app.control.config import settings
-    from app.control.runtime import ControlRuntime
+    from app.controler.api import create_app
+    from app.controler.config import ServerSettings
+    from app.controler.runtime import ServerRuntime
 
+    settings = ServerSettings()  # type: ignore[call-arg]
     uvicorn.run(
-        create_app(lambda: ControlRuntime(settings)),
+        create_app(ServerRuntime(settings)),
         host=settings.host,
         port=settings.port,
         log_level="info",
+        log_config=None,  # Keep the runtime's sanitized handlers when Uvicorn initializes.
         timeout_graceful_shutdown=20,
     )
 
@@ -156,7 +160,7 @@ def worker_drain(worker_id: str, undo: bool = typer.Option(False, "--undo")) -> 
 @app.command()
 def workers() -> None:
     """列出 worker 在线状态和当前 assignment。"""
-    from app.control.service import ControlService
+    from app.controler.workflow.service import ControlService
 
     with _store() as store:
         typer.echo("WORKER\tSTATUS\tDRAINING\tJOB\tFLOW\tEPOCH\tLEASE\tRECOVERY\tLAST_SEEN\tREASON")
@@ -189,7 +193,7 @@ def _remaining(value: datetime | None) -> str:
 
 @flow_app.command("show")
 def flow_show(flow_id: int) -> None:
-    from app.control.archive import archive_progress
+    from app.controler.workflow.archive import archive_progress
 
     with _store() as store:
         f = store.get_flow(flow_id)
@@ -256,7 +260,7 @@ def flow_show(flow_id: int) -> None:
 
 @flow_app.command("cancel")
 def flow_cancel(flow_id: int) -> None:
-    from app.control.service import ControlService
+    from app.controler.workflow.service import ControlService
 
     with _store() as store:
         f = store.get_flow(flow_id)
@@ -270,7 +274,7 @@ def flow_cancel(flow_id: int) -> None:
 @flow_app.command("retry")
 def flow_retry(flow_id: int) -> None:
     """重试失败任务，或补发已核验修订中被明确拒绝的 GitHub 通知。"""
-    from app.control.service import ControlService
+    from app.controler.workflow.service import ControlService
 
     with _store() as store:
         f = store.get_flow(flow_id)

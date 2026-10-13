@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.control.reconcile_feedback import FeedbackReconciler
+from app.controler.reconciliation.feedback import FeedbackReconciler
 from app.github import GitHubApp, GitHubError, GitHubErrorKind, Issue, PullRequest
 from tests.test_github_client import AsyncEndpoint, install_client, settings
 

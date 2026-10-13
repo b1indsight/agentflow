@@ -15,8 +15,8 @@ from typer.testing import CliRunner
 from app import cli
 from app.contracts.protocol import PROTOCOL_VERSION, ArchiveResult, Failed, terminal_digest
 from app.contracts.result_models import ResultPending
-from app.control.projects import ProjectSync
-from app.control.service import ControlService
+from app.controler.reconciliation.projects import ProjectSync
+from app.controler.workflow.service import ControlService
 from app.domain.models import DeliveryState, FlowState, JobKind, JobState
 from app.domain.project_models import ProjectStatus
 from app.github import (

@@ -13,7 +13,7 @@ from app.github.repositories import Repository
 if TYPE_CHECKING:
     from githubkit import AppAuthStrategy, AppInstallationAuthStrategy, GitHub
 
-    from app.control.config import ServeSettings
+    from app.controler.config import ServerSettings
 
 
 class GitHubApp(BaseModel):
@@ -24,7 +24,7 @@ class GitHubApp(BaseModel):
     bot_login: str
     _sdk: GitHub[AppAuthStrategy] = PrivateAttr()
 
-    def __init__(self, settings: ServeSettings) -> None:
+    def __init__(self, settings: ServerSettings) -> None:
         from githubkit import AppAuthStrategy, GitHub
 
         if settings.github_app_id <= 0:

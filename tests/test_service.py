@@ -3,7 +3,7 @@ from typing import Any, cast
 
 import pytest
 
-from app.control.service import ControlService
+from app.controler.workflow.service import ControlService
 from app.domain.models import (
     DeliveryState,
     Flow,

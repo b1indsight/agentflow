@@ -5,6 +5,8 @@
 
 ## 当前计划
 
+- [`control-simplification.md`](control-simplification.md) — PR #81：依赖简化并按批准方案迁入 app/controler，按 events/workers/workflow/review/reconciliation 归组；生产净减少 174 行，734 项 PostgreSQL 回归、静态检查、隔离入口及构建通过，独立审查与 CI 见 PR。
+
 - [`repository-ownership-convergence.md`](repository-ownership-convergence.md) — PR #80：职责与证据契约收敛已实施，900 项 PostgreSQL 回归、静态检查、构建、任务合同对照与错误来源消融通过；待用户评审。
 
 - [`github-capability-boundaries.md`](github-capability-boundaries.md) — PR #77：GitHubApp → Installation → Repository/Project，不可变资源拥有各自操作；查询返回新实例、更新返回副本、标准序列化和本地构造；873 项 PostgreSQL 回归、静态检查、构建、上下文等价对照及三项消融通过，待评审。

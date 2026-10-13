@@ -3,10 +3,10 @@ from __future__ import annotations
 from contextlib import contextmanager
 from copy import deepcopy
 from datetime import UTC, datetime
-from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from pydantic import SecretStr
 
 from app.contracts.protocol import (
     ExecutionResult,
@@ -16,7 +16,8 @@ from app.contracts.protocol import (
     Succeeded,
     terminal_digest,
 )
-from app.control.coordinator import JobCoordinator
+from app.controler.config import ServerSettings
+from app.controler.workflow.coordinator import JobCoordinator
 from app.domain.delivery_models import DeliveryReceipt
 from app.domain.models import (
     Attempt,
@@ -214,7 +215,7 @@ async def apply_result(subject: JobCoordinator, job: Job, result: ExecutionResul
     """Model the accepted-inbox boundary before invoking the production result application."""
     store = cast(MemoryStore, subject.store)
     store.accept(job, result)
-    return await subject.apply_result(job.id)
+    return await subject.results.apply(job.id)
 
 
 async def prepare(subject: JobCoordinator, job: Job):
@@ -224,7 +225,9 @@ async def prepare(subject: JobCoordinator, job: Job):
 
 
 def coordinator(store: Store | MemoryStore, github: GitHubApp) -> JobCoordinator:
-    settings = SimpleNamespace(
+    settings = ServerSettings.model_construct(
+        database_url="postgresql://localhost/test",
+        worker_tokens={"worker-1": SecretStr("worker-secret")},
         allowlist=["alice"],
         reviewers=["carol"],
         in_review_label="flow:in-review",
@@ -262,7 +265,7 @@ async def test_initial_job_crosses_worker_boundary_and_opens_pr() -> None:
     assert task.base_branch == "trunk"
     assert task.branch == "flow/1"
     subject.mark_started(job, task, "worker-1")
-    tool = await subject.execute_tool(
+    tool = await subject.tools.execute(
         FlowToolRequest(
             job_id=job.id,
             flow_id=store.flow.id,
@@ -327,7 +330,7 @@ async def test_initial_failure_after_open_pr_request_has_no_github_pr_side_effec
     task = await prepare(subject, job)
     assert isinstance(task, InitialTask)
     subject.mark_started(job, task, "worker-1")
-    tool = await subject.execute_tool(
+    tool = await subject.tools.execute(
         FlowToolRequest(
             job_id=job.id,
             flow_id=store.flow.id,

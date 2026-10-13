@@ -7,19 +7,18 @@ from datetime import timedelta
 
 from loguru import logger
 
-from app.control.config import ServeSettings
-from app.control.conversation import ConversationService
-from app.control.coordinator import JobCoordinator
-from app.control.gateway import WorkerGateway
-from app.control.judge import BubJudge
-from app.control.projects import ProjectSync
-from app.control.reconcile import Reconciler
-from app.control.reconcile_feedback import FeedbackReconciler
-from app.control.service import ControlService
-from app.control.webhooks import WebhookConsumer
+from app.controler.config import ServerSettings
+from app.controler.events.webhooks import WebhookConsumer
+from app.controler.reconciliation.feedback import FeedbackReconciler
+from app.controler.reconciliation.projects import ProjectSync
+from app.controler.reconciliation.pull_requests import Reconciler
+from app.controler.review.judge import BubJudge
+from app.controler.workers.conversation import ConversationService
+from app.controler.workers.gateway import WorkerGateway
+from app.controler.workflow.coordinator import JobCoordinator
+from app.controler.workflow.service import ControlService
 from app.github import GitHubApp
 from app.persistence.readiness import database_ready
-from app.persistence.stop_store import StopStore
 from app.persistence.store import Store
 from app.persistence.webhook_store import WebhookStore
 from app.plugins import get_plugin_manager
@@ -27,10 +26,10 @@ from app.telemetry.logging import configure_logging
 from app.telemetry.metrics import Metrics
 
 
-class ControlRuntime:
+class ServerRuntime:
     """Own control adapters, local review decisions and background recovery."""
 
-    def __init__(self, settings: ServeSettings) -> None:
+    def __init__(self, settings: ServerSettings) -> None:
         self.settings = settings
         configure_logging("serve", self.settings.log_format)
         self.metrics = Metrics()
@@ -55,7 +54,6 @@ class ControlRuntime:
             heartbeat_timeout=self.settings.worker_heartbeat_timeout,
             poll_interval=self.settings.worker_poll_interval,
             metrics=self.metrics,
-            execution_control=StopStore(self.store),
         )
         self.judge = BubJudge(model=settings.judge_model, api_key=settings.judge_api_key,
                          api_base=settings.judge_api_base, timeout=settings.judge_timeout_seconds)
@@ -64,14 +62,14 @@ class ControlRuntime:
         self.conversations = ConversationService(self.store, self.gateway.conversations)
         self.webhooks = WebhookConsumer(self.store, self.settings, self.service)
         self.reconciler = Reconciler(
-            self.store, self.coordinator.github, self.service,
+            self.store, github, self.service,
             settle_seconds=self.settings.settle_seconds,
             interval=self.settings.reconcile_interval_seconds,
             batch_size=self.settings.reconcile_batch_size,
             concurrency=self.settings.reconcile_concurrency,
         )
         self.feedback_reconciler = FeedbackReconciler(
-            self.store, self.coordinator.github, settle_seconds=self.settings.settle_seconds,
+            self.store, github, settle_seconds=self.settings.settle_seconds,
             bot_login=self.settings.bot_login, interval=self.settings.reconcile_interval_seconds,
             batch_size=self.settings.reconcile_batch_size, concurrency=self.settings.reconcile_concurrency,
         )

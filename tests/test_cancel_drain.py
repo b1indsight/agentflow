@@ -4,8 +4,8 @@ import pytest
 
 from app.contracts.protocol import PROTOCOL_VERSION, ExecutionStopped, Failed, terminal_digest
 from app.contracts.result_models import EffectState, PullRequestEffect, ResultPlan
-from app.control.effects import ResultEffects
-from app.control.service import ControlService
+from app.controler.workflow.effects import ResultEffects
+from app.controler.workflow.service import ControlService
 from app.domain.models import DeliveryState, FlowState, JobKind, JobState
 from app.github import PullRequest
 from app.persistence.stop_store import StopStore

@@ -10,8 +10,8 @@ from app.contracts.protocol import (
     Heartbeat,
     parse_server_message,
 )
-from app.control.conversation import ConversationBroker
-from app.control.worker_connection import ProtocolViolation, WorkerConnection
+from app.controler.workers.connection import ProtocolViolation, WorkerConnection
+from app.controler.workers.conversation import ConversationBroker
 from tests.test_conversation_history import SESSION
 
 

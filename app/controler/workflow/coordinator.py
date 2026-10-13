@@ -1,31 +1,35 @@
-"""Translate persisted jobs into remote tasks and apply remote results."""
+"""Prepare worker assignments and interpret frozen review decisions."""
 
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import timedelta
-from typing import Protocol
+
+from pluggy import PluginManager
 
 from app.contracts.protocol import (
     Assignment,
     AssignmentSecret,
     ExecutionTask,
     Failed,
-    FlowToolRequest,
-    FlowToolResponse,
     InitialTask,
     PushSecret,
     RevisionTask,
     terminal_digest,
 )
-from app.control.archive import archive_task
-from app.control.preparation import PreparationReadFailure, PreparationStale, PreparationState
-from app.control.resolution import feedback_link
-from app.control.results import ResultApplication, ResultSettings
-from app.control.review_context import build_review_context
-from app.control.revisions import verify_revision_remote
-from app.control.tools import FlowToolService
+from app.controler.config import ServerSettings
+from app.controler.review.context import build_review_context
+from app.controler.review.resolution import feedback_link
+from app.controler.workflow.archive import archive_task
+from app.controler.workflow.preparation import (
+    PreparationReadFailure,
+    PreparationStale,
+    PreparationState,
+)
+from app.controler.workflow.results import ResultApplication
+from app.controler.workflow.revisions import verify_revision_remote
+from app.controler.workflow.tools import FlowToolService
 from app.domain.context_models import ReviewContext
 from app.domain.judge_models import JudgeDecision
 from app.domain.models import (
@@ -47,12 +51,6 @@ from app.persistence.store import Store
 from app.plugins import emit_hook, get_plugin_manager
 
 
-class CoordinatorSettings(ResultSettings, Protocol):
-    max_revision_cycles: int
-    prepare_max_failures: int
-    prepare_retry_window_seconds: float
-
-
 class JobCoordinator:
     """Build worker tasks and interpret review decisions, delegating durable result application."""
 
@@ -60,8 +58,8 @@ class JobCoordinator:
         self,
         store: Store,
         github: GitHubApp,
-        settings: CoordinatorSettings,
-        plugins=None,
+        settings: ServerSettings,
+        plugins: PluginManager | None = None,
     ) -> None:
         self.store = store
         self.github = github
@@ -441,9 +439,6 @@ class JobCoordinator:
             )
         )
 
-    async def execute_tool(self, request: FlowToolRequest, *, worker_id: str) -> FlowToolResponse:
-        return await self.tools.execute(request, worker_id=worker_id)
-
     def mark_started(self, job: Job, task: ExecutionTask, worker_id: str) -> None:
         flow = self.store.get_flow(job.flow_id)
         if flow is None:
@@ -465,10 +460,6 @@ class JobCoordinator:
                 tx.reviews.started(current)
         elif job.kind is JobKind.INITIAL:
             emit_hook(self.plugins, "on_flow_start", flow=flow)
-
-    async def apply_result(self, job_id: int) -> JobState:
-        """Apply the accepted result from the durable inbox, including recovery replays."""
-        return await self.results.apply(job_id)
 
     async def fail(self, job: Job, reason: str) -> None:
         """Persist control failures too, so recovery and live failures use the same atomic finish."""

@@ -12,7 +12,7 @@ from githubkit.exception import RequestFailed
 from githubkit.response import Response
 from pydantic import BaseModel, SecretStr, ValidationError
 
-from app.control.config import ServeSettings
+from app.controler.config import ServerSettings
 from app.github import (
     GitHubApp,
     GitHubError,
@@ -154,10 +154,10 @@ def response(data: Any) -> SimpleNamespace:
     return SimpleNamespace(parsed_data=data)
 
 
-def settings(tmp_path: Path) -> ServeSettings:
+def settings(tmp_path: Path) -> ServerSettings:
     key = tmp_path / "app.pem"
     key.write_text("test-private-key")
-    return ServeSettings(
+    return ServerSettings(
         database_url="postgresql://localhost/flowtool",
         worker_tokens={"worker-1": SecretStr("secret")},
         github_app_id=123,

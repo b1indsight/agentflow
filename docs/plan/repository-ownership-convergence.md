@@ -11,7 +11,7 @@
   HTTP 4xx 排除 408，GraphQL HTTP 200 的部分失败保持写入不确定，诊断状态码不证明未写入。
 - [结果合同](../../app/contracts/result_models.py)：三处共用唯一 PR 创建回执规则；
   retired 将缺失/重复转为 `ResultPending`，正常执行与 INITIAL 提交仍拒绝非唯一回执。
-- [启动恢复](../../app/control/runtime.py)：删除恒为零的返回计数及不可达日志，实际 sweep 保留统计。
+- [启动恢复](https://github.com/b1indsight/agentflow/blob/a50ac2c0615bea1f8c8e42b23b3307deaa1e4ba8/app/control/runtime.py)：删除恒为零的返回计数及不可达日志，实际 sweep 保留统计。
 - [任务合同](../../app/contracts/protocol.py)：删除单一子类的 `ReviewTask`，保留字段顺序与 Flow 身份校验。
 - [CLI](../../app/cli.py)：控制端依赖归对应命令，worker 入口加载时不提前导入控制端。
 

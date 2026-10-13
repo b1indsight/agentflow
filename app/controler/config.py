@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Literal
+from typing import Annotated, Literal
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -13,7 +13,7 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 from app.github import ProjectConfig
 
 
-class ServeSettings(BaseSettings):
+class ServerSettings(BaseSettings):
     """Secrets and tuning used only by the control-plane process."""
 
     log_format: Literal["text", "json"] = "text"
@@ -90,7 +90,7 @@ class ServeSettings(BaseSettings):
         return value.strip()
 
     @model_validator(mode="after")
-    def _validate_status_labels(self) -> ServeSettings:
+    def _validate_status_labels(self) -> ServerSettings:
         labels = {label.casefold() for label in
                   (self.trigger_label, self.in_review_label, self.done_label)}
         if len(labels) != 3:
@@ -98,7 +98,7 @@ class ServeSettings(BaseSettings):
         return self
 
     @model_validator(mode="after")
-    def _validate_recovery_timing(self) -> ServeSettings:
+    def _validate_recovery_timing(self) -> ServerSettings:
         if self.worker_lease_duration <= max(
             self.worker_heartbeat_interval * 3,
             self.worker_heartbeat_timeout,
@@ -150,15 +150,3 @@ class ServeSettings(BaseSettings):
     @classmethod
     def _expand_path(cls, value: Path) -> Path:
         return value.expanduser()
-
-if TYPE_CHECKING:
-    settings: ServeSettings
-
-
-def __getattr__(name: str) -> ServeSettings:
-    """Create the process-wide settings on first access, keeping type imports inert."""
-    if name != "settings":
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    value = ServeSettings()  # type: ignore[call-arg]
-    globals()["settings"] = value
-    return value

@@ -7,7 +7,7 @@ import pytest
 from psycopg.errors import UniqueViolation
 
 from app.contracts.protocol import PROTOCOL_VERSION, InitialTaskResult, Succeeded, terminal_digest
-from app.control.service import ControlService
+from app.controler.workflow.service import ControlService
 from app.domain.delivery_models import OpenedDelivery
 from app.domain.models import DeliveryState, FlowState, JobKind, JobState
 from app.persistence.store import Store
