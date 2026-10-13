@@ -39,7 +39,30 @@ def receive(inbox, delivery="one", body=None):
 
 
 def consumer(store):
-    return WebhookConsumer(store, settings(), ControlService(store))
+    return WebhookConsumer(
+        settings(),
+        ControlService(
+            database=store.database,
+            deliveries=store.deliveries,
+            flows=store.flows,
+            jobs=store.jobs,
+            result_store=store.results,
+            reviews=store.reviews,
+            stops=store.stops,
+            webhook_store=store.webhooks,
+            workers=store.workers,
+        ),
+        database=store.database,
+        deliveries=store.deliveries,
+        flows=store.flows,
+        jobs=store.jobs,
+        reconcile_store=store.reconcile,
+        result_store=store.results,
+        reviews=store.reviews,
+        stops=store.stops,
+        webhook_store=store.webhooks,
+        workers=store.workers,
+    )
 
 
 def test_received_delivery_survives_new_consumer_and_duplicate(store):
@@ -140,12 +163,37 @@ def test_failed_completion_rolls_back_business_and_notifications(store, monkeypa
     inbox = store.webhooks
     receive(inbox)
     notifications = []
-    service = ControlService(store, jobs_available=lambda: notifications.append(True))
+    service = ControlService(
+        jobs_available=lambda: notifications.append(True),
+        database=store.database,
+        deliveries=store.deliveries,
+        flows=store.flows,
+        jobs=store.jobs,
+        result_store=store.results,
+        reviews=store.reviews,
+        stops=store.stops,
+        webhook_store=store.webhooks,
+        workers=store.workers,
+    )
+
     def unavailable(*args):
         raise OperationalError("connection lost at completion")
 
     monkeypatch.setattr(WebhookStore, "complete", unavailable)
-    WebhookConsumer(store, settings(), service).sweep()
+    WebhookConsumer(
+        settings(),
+        service,
+        database=store.database,
+        deliveries=store.deliveries,
+        flows=store.flows,
+        jobs=store.jobs,
+        reconcile_store=store.reconcile,
+        result_store=store.results,
+        reviews=store.reviews,
+        stops=store.stops,
+        webhook_store=store.webhooks,
+        workers=store.workers,
+    ).sweep()
     assert store.flows.get_active_flow("owner/repo", 7) is None
     assert not notifications
 

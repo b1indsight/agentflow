@@ -26,7 +26,7 @@ from app.telemetry.metrics import Metrics
 
 
 class WebhookRuntime(ServerRuntime):
-    def __init__(self, router: EventRouter | None = None, settings: ServerSettings | None = None) -> None:
+    def __init__(self, router: EventRouter | None = None, settings: ServerSettings | None = None, store: Store | None = None) -> None:
         self.settings = settings or ServerSettings.model_construct(
             database_url="postgresql://localhost/test",
             worker_tokens={"worker-1": SecretStr("worker-secret")},
@@ -40,14 +40,39 @@ class WebhookRuntime(ServerRuntime):
         self.gateway = Mock(spec=WorkerGateway)
         self.conversations = Mock(spec=ConversationService)
         self.tasks: list[asyncio.Task[None]] = []
+        self.webhooks = Mock(spec=WebhookConsumer)
+        if store is not None:
+            self.webhooks = WebhookConsumer(
+                self.settings,
+                ControlService(
+                    database=store.database,
+                    deliveries=store.deliveries,
+                    flows=store.flows,
+                    jobs=store.jobs,
+                    result_store=store.results,
+                    reviews=store.reviews,
+                    stops=store.stops,
+                    webhook_store=store.webhooks,
+                    workers=store.workers,
+                ),
+                database=store.database,
+                deliveries=store.deliveries,
+                flows=store.flows,
+                jobs=store.jobs,
+                reconcile_store=store.reconcile,
+                result_store=store.results,
+                reviews=store.reviews,
+                stops=store.stops,
+                webhook_store=store.webhooks,
+                workers=store.workers,
+            )
 
     async def receive_webhook(self, event_type: str, delivery_id: str, payload: dict, digest: str) -> None:
         assert isinstance(self.router, EventRouter)
-        store = self.router.store
-        store.webhooks.receive(delivery_id, event_type, payload, digest)
+        self.webhooks.webhook_store.receive(delivery_id, event_type, payload, digest)
 
         async def consume() -> None:
-            WebhookConsumer(store, self.settings, ControlService(store)).sweep()
+            self.webhooks.sweep()
 
         self.tasks.append(asyncio.create_task(consume()))
 
@@ -64,20 +89,21 @@ class WebhookRuntime(ServerRuntime):
 
 class RoutingService(ControlService):
     def __init__(self, store: Store) -> None:
-        self.store = store
+        self.flows = store.flows
+        self.jobs = store.jobs
 
     def on_trigger(self, repo: str, issue_number: int, installation_id: int | None) -> Flow:
-        flow = self.store.flows.create_flow(repo, issue_number, installation_id)
-        self.store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
+        flow = self.flows.create_flow(repo, issue_number, installation_id)
+        self.jobs.enqueue_job(flow.id, JobKind.INITIAL)
         return flow
 
     def cancel(self, flow: Flow) -> None:
         flow.state = FlowState.CANCELLED
-        self.store.flows.update_flow(flow)
+        self.flows.update_flow(flow)
 
     def on_merged(self, flow: Flow, delivery_id: str, payload: dict) -> None:
         flow.state = FlowState.SUCCEEDED
-        self.store.flows.update_flow(flow)
+        self.flows.update_flow(flow)
 
     def notify_jobs(self) -> None:
         pass
@@ -124,7 +150,19 @@ async def test_valid_signature_dispatches_webhook(
         settle_seconds=75.0,
         submit_grace_seconds=15.0,
     )
-    runtime = WebhookRuntime(EventRouter(store, RoutingService(store), settings), settings)
+    runtime = WebhookRuntime(
+        EventRouter(
+            RoutingService(store),
+            settings,
+            database=store.database,
+            flows=store.flows,
+            reconcile_store=store.reconcile,
+            reviews=store.reviews,
+            webhook_store=store.webhooks,
+        ),
+        settings,
+        store,
+    )
     application = create_app(runtime)
     transport = httpx.ASGITransport(app=application)
     payload = {

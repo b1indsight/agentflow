@@ -229,3 +229,40 @@ tests/test_workflow_transactions.py -q --tb=short`。别名与事务变量的 AS
 
 **代价。** 修改一处现有测试调用并开启该函数的类型检查，测试净增加一行；生产代码与运行机制
 未增加，继续使用原有并发与事务回归，因此本次无需运行机制消融。
+
+### 2026-10-14 — 服务直接持有具体仓储
+
+**要求与决定。** 用户进一步明确「PullRequestService 直接持有 FlowStore」，业务代码不再使用
+`self.store.flows`。本条更新初始计划及上文的调用方边界：服务构造参数显式声明所需的具体仓储，
+以 `self.flows.get_flow_by_pr(...)` 等形式调用。Store 继续拥有仓储实例，仅用于应用装配、
+数据库初始化和关闭；服务及生命周期辅助不接收聚合 Store，不增加 Store 业务方法转发。
+Database 继续管理共享连接池、时钟和锁，跨仓储事务显式绑定具体仓储。
+
+**实施。** 12 个服务的构造参数与成员、生命周期/归档/线程辅助和静态辅助均迁移到具体仓储。
+Runtime 在启动装配处注入依赖，后台恢复和 Webhook 接收直接使用自身持有的仓储。
+CLI、只读 live smoke、测试装配和协议模拟同步迁移。`Repository.using(tx)` 使用副本保留具体
+仓储类型，绑定 `Database.transaction()` 提供的连接上下文；原对象的连接范围不变。
+Webhook 重放的服务和路由使用同一绑定上下文，通知仍在提交后执行，网络调用仍位于事务外。
+测试中的结果、反馈和停止模拟支持相同绑定接口，回滚原位恢复服务已持有的模拟状态。
+依据：[事件查询与注入](../../app/controler/events/router.py)、
+[服务事务](../../app/controler/workflow/service.py)、[具体仓储绑定](../../app/persistence/repository.py)、
+[Runtime 装配](../../app/controler/runtime.py)、[Webhook 重放](../../app/controler/events/webhooks.py)。
+
+**验证。** `uv run --no-sync --env-file .cache/2026-10-13/persistence-test.env pytest -q --tb=short
+--show-capture=no`：**737 passed，无跳过**；仅保留既有 Starlette 弃用提示。
+`uv run --no-sync mypy app tests` 检查 179 个源文件通过，Ruff、构建及差异检查通过。
+结构检查覆盖 controler 的 188 个函数，12 个服务均显式接收具体仓储，未发现聚合 Store 参数或
+业务成员访问；与此前发布的 `29c266f3` 对照，144 个仓储/数据库方法的 AST 及 schema 完全一致。
+181 个 Python 文件的旧业务入口、旧模块导入和 persistence 外仓储构造检查均为空。
+wheel 包含 18 个 persistence 模块，17 个实现模块从 wheel 隔离导入成功。
+本地结构验证脚本为 `.cache/2026-10-13/verify-concrete-service-dependencies.py`，
+报告为 `.cache/2026-10-13/concrete-service-verification.json`；调用方检查沿用
+`.cache/2026-10-13/audit-persistence-callers.py`，独立审查与当前 CI 见 PR。
+
+**消融与代价。** 在独立测试进程将 `Repository.using` 简化为直接返回原仓储，以相同输入运行
+事务退出后拒绝使用、普通仓储范围独立、触发失败同时回滚 Flow/Job 三项现有回归。
+三项均失败：退出后仍可查询、回滚后的 Flow 已提交、Job 入队失败留下活跃 Flow；完整实现三项通过。
+复现命令为 `uv run --no-sync --env-file .cache/2026-10-13/persistence-test.env python
+.cache/2026-10-13/concrete-binding-ablation.py`。据此保留 25 行的公共绑定实现，十个仓储共用
+构造和绑定合同。构造参数与事务调用增加显式依赖，服务无需通过聚合对象查找仓储；事务范围由
+代码直接表达，无线程全局状态或隐式上下文切换。

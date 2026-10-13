@@ -177,7 +177,17 @@ async def test_cancel_during_remote_verification_prevents_effects_and_commit(
     original = Repository.fetch_ref
 
     async def cancel(repo, branch, *, retry_transient=False):
-        ControlService(store).cancel(flow)
+        ControlService(
+            database=store.database,
+            deliveries=store.deliveries,
+            flows=store.flows,
+            jobs=store.jobs,
+            result_store=store.results,
+            reviews=store.reviews,
+            stops=store.stops,
+            webhook_store=store.webhooks,
+            workers=store.workers,
+        ).cancel(flow)
         return await original(repo, branch, retry_transient=retry_transient)
 
     monkeypatch.setattr(Repository, "fetch_ref", cancel)
@@ -206,7 +216,17 @@ async def test_failed_revision_retry_retains_repo_and_consumes_a_new_cycle(store
     assert await subject.results.apply(job.id) is JobState.FAILED
     binding = store.workers.get_flow_execution(flow.id)
     assert binding.released_at is None
-    ControlService(store).retry(store.flows.get_flow(flow.id))
+    ControlService(
+        database=store.database,
+        deliveries=store.deliveries,
+        flows=store.flows,
+        jobs=store.jobs,
+        result_store=store.results,
+        reviews=store.reviews,
+        stops=store.stops,
+        webhook_store=store.webhooks,
+        workers=store.workers,
+    ).retry(store.flows.get_flow(flow.id))
     replacement = store.workers.assign_job("worker-a", "new-token", "epoch")
     assert replacement.id != job.id
     prepared = await subject.prepare(replacement)
@@ -231,7 +251,17 @@ async def test_failed_revision_retry_after_merge_keeps_flow_terminal(store, pend
     assert delivery.state is DeliveryState.MERGED
 
     with pytest.raises(ValueError, match="merged PR"):
-        ControlService(store).retry(flow)
+        ControlService(
+            database=store.database,
+            deliveries=store.deliveries,
+            flows=store.flows,
+            jobs=store.jobs,
+            result_store=store.results,
+            reviews=store.reviews,
+            stops=store.stops,
+            webhook_store=store.webhooks,
+            workers=store.workers,
+        ).retry(flow)
 
     assert store.flows.get_flow(flow.id).state is FlowState.FAILED
     assert store.flows.get_active_flow(flow.repo, flow.issue_number) is None
@@ -281,7 +311,17 @@ async def test_rejected_revision_notification_keeps_verified_result_recoverable(
     with pytest.raises(ResultPending):
         await restarted.results.apply(job.id)
     assert github.review_requests == []
-    service = ControlService(store)
+    service = ControlService(
+        database=store.database,
+        deliveries=store.deliveries,
+        flows=store.flows,
+        jobs=store.jobs,
+        result_store=store.results,
+        reviews=store.reviews,
+        stops=store.stops,
+        webhook_store=store.webhooks,
+        workers=store.workers,
+    )
     if transition == "merge":
         await route_merge(store, flow)
         assert await restarted.results.apply(job.id) is JobState.DONE
@@ -364,7 +404,17 @@ async def test_revision_preparation_failure_is_persisted_and_explicitly_retryabl
     assert "fetch_ref" in failed.last_error
     assert store.flows.get_flow(flow.id).state is FlowState.FAILED
     assert store.flows.get_attempt(task.attempt_id).revision_cycles == 0
-    ControlService(store).retry(flow)
+    ControlService(
+        database=store.database,
+        deliveries=store.deliveries,
+        flows=store.flows,
+        jobs=store.jobs,
+        result_store=store.results,
+        reviews=store.reviews,
+        stops=store.stops,
+        webhook_store=store.webhooks,
+        workers=store.workers,
+    ).retry(flow)
     replacement = store.workers.assign_job("worker-a", "retry-token", "epoch")
     assert isinstance(await subject.prepare(replacement), RevisionTask)
     assert store.flows.get_attempt(task.attempt_id).revision_cycles == 0
@@ -386,5 +436,15 @@ async def test_uncertain_revision_notification_cannot_be_explicitly_resent(
         await subject.results.apply(job.id)
     assert store.results.list_effects(job.id)[0].state is EffectState.UNCERTAIN
     with pytest.raises(ValueError, match="pending result"):
-        ControlService(store).retry(flow)
+        ControlService(
+            database=store.database,
+            deliveries=store.deliveries,
+            flows=store.flows,
+            jobs=store.jobs,
+            result_store=store.results,
+            reviews=store.reviews,
+            stops=store.stops,
+            webhook_store=store.webhooks,
+            workers=store.workers,
+        ).retry(flow)
     assert store.jobs.get_job(job.id).result_applied_at is None

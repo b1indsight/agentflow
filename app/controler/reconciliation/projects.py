@@ -8,8 +8,8 @@ from collections.abc import Awaitable, Callable
 from loguru import logger
 
 from app.github import GitHubApp, GitHubError, GitHubErrorKind, Issue, ProjectConfig
-from app.persistence.projects import Projection
-from app.persistence.store import Store
+from app.persistence.database import Database
+from app.persistence.projects import Projection, ProjectStore
 
 
 class DestinationChanged(Exception):
@@ -17,11 +17,21 @@ class DestinationChanged(Exception):
 
 
 class ProjectSync:
-    def __init__(self, store: Store, configs: dict[str, ProjectConfig],
-                 github: GitHubApp, *, interval: float = 300,
-                 batch_size: int = 64, concurrency: int = 4) -> None:
-        self.store, self.configs, self.github = store, configs, github
-        self.projects = store.projects
+    def __init__(
+        self,
+        configs: dict[str, ProjectConfig],
+        github: GitHubApp,
+        *,
+        interval: float = 300,
+        batch_size: int = 64,
+        concurrency: int = 4,
+        database: Database,
+        projects: ProjectStore,
+    ) -> None:
+        self.database = database
+        self.projects = projects
+        self.configs = configs
+        self.github = github
         self.interval, self.batch_size, self.concurrency = interval, batch_size, concurrency
         self.after = 0
 
@@ -67,7 +77,7 @@ class ProjectSync:
         if not config or config.project_id != row.project_id:
             return
         row = self.projects.refresh(row.id, config)
-        if row.blocked or row.next_at > self.store.now():
+        if row.blocked or row.next_at > self.database.now():
             return
         installation = self.github.installation(config.installation_id)
         repository = installation.repository(row.repo)

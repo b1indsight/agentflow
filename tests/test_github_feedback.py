@@ -2,6 +2,7 @@
 
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -72,7 +73,14 @@ async def test_deleted_author_stays_in_batch_but_does_not_become_reviewer_input(
     page = await pr.fetch_reviews(limit=1)
     assert len(page.items) == 1 and page.items[0].author is None
     assert page.items[0].body == "edited review" and not page.items[0].is_bot
-    scanner = FeedbackReconciler(SimpleNamespace(), pr.repository.installation.app, settle_seconds=0)
+    scanner = FeedbackReconciler(
+        pr.repository.installation.app,
+        settle_seconds=0,
+        database=Mock(),
+        deliveries=Mock(),
+        reconcile_store=Mock(),
+        reviews=Mock(),
+    )
     assert scanner._discussion_updates(page, "reviews") == ([], None)
 
 

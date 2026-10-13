@@ -177,12 +177,10 @@ async def test_runtime_sweeps_continue_while_result_recovery_waits():
     runtime.coordinator = SimpleNamespace(triage=AsyncMock())
     runtime.judge = Mock()
     runtime.settings = SimpleNamespace(worker_sweep_interval=0, result_recovery_concurrency=4, result_recovery_batch_size=64)
-    runtime.store = SimpleNamespace(
-        reviews=SimpleNamespace(claim_due=Mock(side_effect=lambda: (settled.set() or True)),
-                                pending_triage=Mock(return_value=[])),
-        workers=SimpleNamespace(sweep_expired_assignments=Mock(side_effect=lambda: (lease.set() or 0, 0))),
-        close=Mock(),
-    )
+    runtime.reviews = SimpleNamespace(claim_due=Mock(side_effect=lambda: (settled.set() or True)),
+                                     pending_triage=Mock(return_value=[]))
+    runtime.workers = SimpleNamespace(sweep_expired_assignments=Mock(side_effect=lambda: (lease.set() or 0, 0)))
+    runtime.store = SimpleNamespace(close=Mock())
     runtime.coordinator.results = SimpleNamespace(recover_pending_results=AsyncMock(side_effect=recover))
     runtime.gateway = SimpleNamespace(notify_jobs=Mock())
     runtime.reconciler = SimpleNamespace(stop=Mock())

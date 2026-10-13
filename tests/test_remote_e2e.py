@@ -189,7 +189,7 @@ class RemoteCoordinator(JobCoordinator):
                           connection_epoch=epoch, task=task)
 
     def __init__(self, store: RemoteStore) -> None:
-        self.store = store
+        self.jobs = store.jobs
         self.tools = Mock(spec=FlowToolService, execute=AsyncMock(side_effect=self._tool_response))
         self.results = result_application(store, self._commit_result)
         self.result: InitialTaskResult | None = None
@@ -217,12 +217,12 @@ class RemoteCoordinator(JobCoordinator):
         pass
 
     async def _commit_result(self, job_id: int) -> JobState:
-        job = self.store.jobs.get_job(job_id)
+        job = self.jobs.get_job(job_id)
         assert job is not None and job.result_payload is not None
         result = Succeeded.model_validate(job.result_payload).result
         assert isinstance(result, InitialTaskResult)
         self.result = result
-        self.store.jobs.complete_persisted_result(job.id, JobState.DONE)
+        self.jobs.complete_persisted_result(job.id, JobState.DONE)
         return JobState.DONE
 
     async def fail(self, job: Job, reason: str) -> None:
@@ -255,10 +255,13 @@ async def test_control_gateway_and_worker_client_complete_one_remote_job(tmp_pat
     store = RemoteStore()
     coordinator = RemoteCoordinator(store)
     gateway = WorkerGateway(
-        store,
         coordinator,
         worker_tokens={"worker-1": "worker-secret"},
         poll_interval=0.01,
+        deliveries=store.deliveries,
+        jobs=store.jobs,
+        stops=store.stops,
+        workers=store.workers,
     )
     executor = FakeExecutor()
     client = WorkerClient(session=WorkerSession(tmp_path),

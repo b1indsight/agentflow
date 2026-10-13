@@ -47,7 +47,14 @@ from app.domain.models import (
 from app.domain.ports import Judge
 from app.domain.review_models import BatchState, ReviewBatch
 from app.github import GitHubApp, GitHubError, GitHubErrorKind, PullRequest
-from app.persistence.store import Store
+from app.persistence.database import Database
+from app.persistence.deliveries import DeliveryStore
+from app.persistence.flows import FlowStore
+from app.persistence.jobs import JobStore
+from app.persistence.results import ResultStore
+from app.persistence.reviews import ReviewStore
+from app.persistence.stops import StopStore
+from app.persistence.workers import WorkerStore
 from app.plugins import emit_hook, get_plugin_manager
 
 
@@ -56,41 +63,76 @@ class JobCoordinator:
 
     def __init__(
         self,
-        store: Store,
         github: GitHubApp,
         settings: ServerSettings,
         plugins: PluginManager | None = None,
+        *,
+        database: Database,
+        deliveries: DeliveryStore,
+        flows: FlowStore,
+        jobs: JobStore,
+        result_store: ResultStore,
+        reviews: ReviewStore,
+        stops: StopStore,
+        workers: WorkerStore,
     ) -> None:
-        self.store = store
+        self.database = database
+        self.deliveries = deliveries
+        self.flows = flows
+        self.jobs = jobs
+        self.result_store = result_store
+        self.reviews = reviews
+        self.stops = stops
+        self.workers = workers
         self.github = github
         self.settings = settings
         self.plugins = plugins or get_plugin_manager()
-        self.tools = FlowToolService(store, github)
-        self.results = ResultApplication(store, github, settings, self.plugins)
+        self.tools = FlowToolService(
+            github,
+            database=self.database,
+            deliveries=self.deliveries,
+            flows=self.flows,
+            workers=self.workers,
+        )
+        self.results = ResultApplication(
+            github,
+            settings,
+            self.plugins,
+            database=self.database,
+            deliveries=self.deliveries,
+            flows=self.flows,
+            jobs=self.jobs,
+            result_store=self.result_store,
+            reviews=self.reviews,
+            stops=self.stops,
+            workers=self.workers,
+        )
 
     @staticmethod
-    def _retired(store: Store, flow: Flow, job: Job) -> bool:
-        delivery = store.deliveries.get_delivery(flow.id)
+    def _retired(flow: Flow, job: Job, *, deliveries: DeliveryStore) -> bool:
+        delivery = deliveries.get_delivery(flow.id)
         return (flow.state in TERMINAL_STATES
                 or (delivery is not None and delivery.supersedes(job.kind)))
 
     async def triage(self, batch: ReviewBatch, judge: Judge) -> None:
         """Resolve a feedback prerequisite, enqueueing a worker job only for revision."""
-        with self.store.transaction() as tx:
+        with self.database.transaction() as tx:
+            reviews_tx = self.reviews.using(tx)
             flow = tx.lock_workflow(batch.flow_id)
-            if not tx.reviews.current(batch):
+            if not reviews_tx.current(batch):
                 return
         assert flow is not None and flow.installation_id is not None
         repo = self.github.installation(flow.installation_id).repository(flow.repo)
         context = batch.context or await build_review_context(
             repo, flow, batch, self._pr_number(flow),
         )
-        with self.store.transaction() as tx:
+        with self.database.transaction() as tx:
+            reviews_tx = self.reviews.using(tx)
             tx.lock_workflow(flow.id)
-            if not tx.reviews.current(batch):
+            if not reviews_tx.current(batch):
                 return
-            context = tx.reviews.freeze_context(batch, context)
-            tx.reviews.relayed(batch)
+            context = reviews_tx.freeze_context(batch, context)
+            reviews_tx.relayed(batch)
         decision = batch.decision or await judge.triage(context)
         if decision.context_digest != context.digest:
             raise ValueError("Judge decision does not match its frozen context")
@@ -108,22 +150,24 @@ class JobCoordinator:
         # Remote reads can outlive close/merge or a changed PR baseline.
         remote = (await repo.fetch_pull_request(context.pr_number)
                   if verdict.verdict is Verdict.REVISE else None)
-        with self.store.transaction() as tx:
+        with self.database.transaction() as tx:
+            jobs_tx = self.jobs.using(tx)
+            reviews_tx = self.reviews.using(tx)
             tx.lock_workflow(flow.id)
-            if not tx.reviews.current(batch):
+            if not reviews_tx.current(batch):
                 return
             if remote is not None and (context.pull_request is None or remote.state != "open" or remote.merged
                     or remote.head_sha != context.pull_request.head_sha
                     or remote.base_sha != context.pull_request.base_sha):
-                tx.reviews.invalidate_context(batch, context)
+                reviews_tx.invalidate_context(batch, context)
                 return
-            tx.reviews.record_decision(batch, decision.model_copy(update={"verdict": verdict}))
+            reviews_tx.record_decision(batch, decision.model_copy(update={"verdict": verdict}))
             if verdict.verdict is Verdict.REVISE:
-                job = tx.jobs.enqueue_job(flow.id, JobKind.REVISION,
+                job = jobs_tx.enqueue_job(flow.id, JobKind.REVISION,
                     {"batch_id": batch.id, "instruction": verdict.instruction})
-                tx.reviews.advance(batch.id, job)
+                reviews_tx.advance(batch.id, job)
             else:
-                tx.reviews.complete(batch.id,
+                reviews_tx.complete(batch.id,
                     BatchState.COMPLETED if verdict.verdict is Verdict.IGNORE else BatchState.WAITING,
                     list(batch.feedback) if verdict.verdict is Verdict.IGNORE else [],
                     verdict.open_points or ([verdict.reason or "Awaiting more discussion."]
@@ -147,17 +191,18 @@ class JobCoordinator:
                 return False
             # Like result comments, an uncertain POST needs its marker before any retry.
             remote = await pr.refetch()
-            with self.store.transaction() as tx:
+            with self.database.transaction() as tx:
+                reviews_tx = self.reviews.using(tx)
                 tx.lock_workflow(flow.id)
-                if not tx.reviews.current(batch):
+                if not reviews_tx.current(batch):
                     return False
                 if (context.pull_request is None or remote.state != "open" or remote.merged
                         or remote.head_sha != context.pull_request.head_sha
                         or remote.base_sha != context.pull_request.base_sha):
-                    tx.reviews.invalidate_context(batch, context)
+                    reviews_tx.invalidate_context(batch, context)
                 else:
-                    tx.reviews.record_decision(batch, decision)
-                    authorized = tx.reviews.authorize_answer(batch, context.digest)
+                    reviews_tx.record_decision(batch, decision)
+                    authorized = reviews_tx.authorize_answer(batch, context.digest)
             if not authorized:
                 return False
             sources = ", ".join(f"[{f.kind.value} {f.github_id}]({feedback_link(flow.repo,
@@ -166,13 +211,14 @@ class JobCoordinator:
                 await pr.comment(f'{decision.verdict.answer}\n\n来源：{sources}\n\n{marker}')
             except GitHubError as error:
                 if error.definitely_rejected:
-                    self.store.reviews.reject_answer(batch, context.digest)
+                    self.reviews.reject_answer(batch, context.digest)
                 raise
-        with self.store.transaction() as tx:
+        with self.database.transaction() as tx:
+            reviews_tx = self.reviews.using(tx)
             tx.lock_workflow(flow.id)
-            if not tx.reviews.current(batch):
+            if not reviews_tx.current(batch):
                 return False
-            tx.reviews.complete(batch.id, BatchState.COMPLETED, list(batch.feedback), [])
+            reviews_tx.complete(batch.id, BatchState.COMPLETED, list(batch.feedback), [])
         return authorized
 
     async def prepare_for_assignment(
@@ -185,14 +231,14 @@ class JobCoordinator:
         try:
             secret = await self._assignment_secret(job, prepared)
         except Exception as exc:  # noqa: BLE001 - signing errors become durable control failures
-            if not self.store.workers.clear_preparation(job.id, worker, token, epoch):
+            if not self.workers.clear_preparation(job.id, worker, token, epoch):
                 raise PreparationStale("assignment expired during capability preparation") from None
             await self.fail(job, f"assignment capability failed: {type(exc).__name__}")
             return JobState.FAILED
         # Signing may outlive the lease or race a webhook; validate even without a gateway.
-        if not self.store.workers.clear_preparation(job.id, worker, token, epoch):
+        if not self.workers.clear_preparation(job.id, worker, token, epoch):
             raise PreparationStale("assignment changed before dispatch")
-        delivery = self.store.deliveries.get_delivery(job.flow_id)
+        delivery = self.deliveries.get_delivery(job.flow_id)
         if delivery is not None and delivery.supersedes(job.kind):
             if delivery.state is DeliveryState.CLOSED:
                 return JobState.DONE
@@ -206,7 +252,7 @@ class JobCoordinator:
     ) -> ExecutionTask | PreparationState:
         """Bound read preparation for remote assignments."""
         error = None
-        expired = (job.prepare_first_failed_at is not None and self.store.now()
+        expired = (job.prepare_first_failed_at is not None and self.database.now()
                    >= job.prepare_first_failed_at + timedelta(seconds=self.settings.prepare_retry_window_seconds))
         if not expired:
             try:
@@ -216,10 +262,10 @@ class JobCoordinator:
             else:
                 if isinstance(prepared, JobState):
                     assert prepared in (JobState.QUEUED, JobState.DONE, JobState.FAILED)
-                if not isinstance(prepared, JobState) and not self.store.workers.clear_preparation(job.id, worker, token, epoch):
+                if not isinstance(prepared, JobState) and not self.workers.clear_preparation(job.id, worker, token, epoch):
                     raise PreparationStale("preparation changed before dispatch")
                 return prepared
-        state = self.store.workers.defer_preparation(
+        state = self.workers.defer_preparation(
             job.id, worker, token, epoch, error, max_failures=self.settings.prepare_max_failures,
             window_seconds=self.settings.prepare_retry_window_seconds,
         )
@@ -234,7 +280,7 @@ class JobCoordinator:
         """Bound only GitHub reads by the remaining retry window, never failure effects or signing."""
         remaining = None if job.prepare_first_failed_at is None else max(0, (
             job.prepare_first_failed_at + timedelta(seconds=self.settings.prepare_retry_window_seconds)
-            - self.store.now()
+            - self.database.now()
         ).total_seconds())
         try:
             async with asyncio.timeout(remaining):
@@ -258,10 +304,10 @@ class JobCoordinator:
         invalid internal state raises ValueError. Failure handling may itself raise
         ResultPending while durable failure effects await recovery.
         """
-        flow = self.store.flows.get_flow(job.flow_id)
+        flow = self.flows.get_flow(job.flow_id)
         if flow is None:
             return JobState.FAILED
-        if self._retired(self.store, flow, job):
+        if self._retired(flow, job, deliveries=self.deliveries):
             return JobState.DONE
 
         if job.kind is JobKind.INITIAL:
@@ -269,23 +315,25 @@ class JobCoordinator:
                 await self.fail(job, "Flow 缺少 GitHub installation。")
                 return JobState.FAILED
             installation_id = flow.installation_id
-            execution = self.store.workers.get_flow_execution(flow.id)
+            execution = self.workers.get_flow_execution(flow.id)
             if execution is None or execution.released_at is not None:
                 await self.fail(job, "Flow 缺少 active execution binding。")
                 return JobState.FAILED
             if job.assigned_worker_id and execution.worker_id != job.assigned_worker_id:
                 await self.fail(job, "Flow execution binding 与 assignment 不匹配。")
                 return JobState.FAILED
-            with self.store.transaction() as tx:
+            with self.database.transaction() as tx:
+                deliveries_tx = self.deliveries.using(tx)
+                flows_tx = self.flows.using(tx)
                 fresh = tx.lock_workflow(flow.id)
-                if fresh is None or self._retired(tx, fresh, job):
+                if fresh is None or self._retired(fresh, job, deliveries=deliveries_tx):
                     return JobState.DONE
-                attempt = tx.flows.get_current_attempt(fresh)
+                attempt = flows_tx.get_current_attempt(fresh)
                 if attempt is None:
-                    attempt = tx.flows.create_attempt(fresh.id)
+                    attempt = flows_tx.create_attempt(fresh.id)
                     fresh.current_attempt_id = attempt.id
-                    tx.flows.update_flow(fresh)
-                delivery = tx.deliveries.get_or_create_delivery(fresh.id, f"flow/{fresh.id}")
+                    flows_tx.update_flow(fresh)
+                delivery = deliveries_tx.get_or_create_delivery(fresh.id, f"flow/{fresh.id}")
                 flow = fresh
             try:
                 repo = self.github.installation(installation_id).repository(flow.repo)
@@ -296,15 +344,16 @@ class JobCoordinator:
             if repository.full_name != flow.repo:
                 await self.fail(job, "GitHub repository identity 不匹配。")
                 return JobState.FAILED
-            with self.store.transaction() as tx:
+            with self.database.transaction() as tx:
+                deliveries_tx = self.deliveries.using(tx)
                 fresh = tx.lock_workflow(flow.id)
-                if fresh is None or self._retired(tx, fresh, job):
+                if fresh is None or self._retired(fresh, job, deliveries=deliveries_tx):
                     return JobState.DONE
-                current_delivery = tx.deliveries.get_delivery(flow.id)
+                current_delivery = deliveries_tx.get_delivery(flow.id)
                 if current_delivery is None:
                     raise ValueError("prepared delivery disappeared")
                 current_delivery.base_branch = repository.default_branch
-                tx.deliveries.update_delivery(current_delivery)
+                deliveries_tx.update_delivery(current_delivery)
                 delivery = current_delivery
             return InitialTask(
                 flow_id=flow.id,
@@ -319,13 +368,13 @@ class JobCoordinator:
                 repo_identity=execution.repo_identity,
             )
 
-        attempt = self.store.flows.get_current_attempt(flow)
+        attempt = self.flows.get_current_attempt(flow)
         if attempt is None:
             await self.fail(job, f"{job.kind} job has no current attempt")
             return JobState.FAILED
 
         if job.kind is JobKind.REVISION:
-            batch = self.store.reviews.for_job(job)
+            batch = self.reviews.for_job(job)
             if batch.attempt_id != attempt.id or batch.state not in {
                 BatchState.READY, BatchState.PROCESSING,
             }:
@@ -351,7 +400,7 @@ class JobCoordinator:
             if attempt.revision_cycles + 1 > self.settings.max_revision_cycles:
                 await self.fail(job, "已达最大修订轮数，暂停。")
                 return JobState.FAILED
-            execution = self.store.workers.get_flow_execution(flow.id)
+            execution = self.workers.get_flow_execution(flow.id)
             if execution is None or execution.released_at is not None:
                 await self.fail(job, "修订任务缺少有效 worker binding。")
                 return JobState.FAILED
@@ -390,13 +439,20 @@ class JobCoordinator:
                 instruction=(job.payload or {}).get("instruction", "Address the review feedback."),
                 feedback=batch.feedback,
             )
-            with self.store.transaction() as tx:
+            with self.database.transaction() as tx:
+                deliveries_tx = self.deliveries.using(tx)
+                reviews_tx = self.reviews.using(tx)
+                workers_tx = self.workers.using(tx)
                 fresh = tx.lock_workflow(flow.id)
                 current = tx.lock_job(job.id)
-                binding = tx.workers.get_flow_execution(flow.id)
-                latest = tx.deliveries.get_delivery(flow.id)
-                if (fresh is None or current is None or self._retired(tx, fresh, job)
-                        or fresh.current_attempt_id != attempt.id):
+                binding = workers_tx.get_flow_execution(flow.id)
+                latest = deliveries_tx.get_delivery(flow.id)
+                if (
+                    fresh is None
+                    or current is None
+                    or self._retired(fresh, job, deliveries=deliveries_tx)
+                    or fresh.current_attempt_id != attempt.id
+                ):
                     return JobState.DONE
                 if (binding != execution or latest != delivery
                         or current.assignment_token != job.assignment_token
@@ -407,17 +463,22 @@ class JobCoordinator:
                             or current.lease_expires_at <= tx.now()))):
                     return JobState.QUEUED
                 if threads is not None:
-                    tx.reviews.freeze_threads(current, threads)
-                return tx.reviews.freeze_revision(current, task)
+                    reviews_tx.freeze_threads(current, threads)
+                return reviews_tx.freeze_revision(current, task)
         if job.kind is JobKind.ARCHIVE:
             try:
-                with self.store.transaction() as tx:
+                with self.database.transaction() as tx:
+                    deliveries_tx = self.deliveries.using(tx)
+                    jobs_tx = self.jobs.using(tx)
+                    workers_tx = self.workers.using(tx)
                     fresh = tx.lock_workflow(flow.id)
                     current = tx.lock_job(job.id)
                     if fresh is None or current is None:
                         raise ValueError("archive workflow disappeared")
-                    archive = archive_task(tx, fresh, current)
-                    tx.jobs.freeze_archive(current, archive)
+                    archive = archive_task(
+                        fresh, current, deliveries=deliveries_tx, jobs=jobs_tx, workers=workers_tx
+                    )
+                    jobs_tx.freeze_archive(current, archive)
                     return archive
             except ValueError as error:
                 await self.fail(job, str(error))
@@ -427,7 +488,7 @@ class JobCoordinator:
     async def _assignment_secret(self, job: Job, task: ExecutionTask) -> AssignmentSecret | None:
         if not isinstance(task, (InitialTask, RevisionTask)):
             return None
-        flow = self.store.flows.get_flow(job.flow_id)
+        flow = self.flows.get_flow(job.flow_id)
         if flow is None or flow.installation_id is None:
             raise ValueError("coding assignment has no GitHub installation")
         capability = await self.github.installation(flow.installation_id).repository(flow.repo).create_push_capability()
@@ -440,30 +501,37 @@ class JobCoordinator:
         )
 
     def mark_started(self, job: Job, task: ExecutionTask, worker_id: str) -> None:
-        flow = self.store.flows.get_flow(job.flow_id)
+        flow = self.flows.get_flow(job.flow_id)
         if flow is None:
             raise ValueError(f"flow {job.flow_id} disappeared")
-        if self._retired(self.store, flow, job):
+        if self._retired(flow, job, deliveries=self.deliveries):
             return
-        attempt = self.store.flows.get_attempt(task.attempt_id)
+        attempt = self.flows.get_attempt(task.attempt_id)
         if attempt is None:
             raise ValueError(f"attempt {task.attempt_id} disappeared")
-        execution = self.store.workers.get_flow_execution(flow.id)
+        execution = self.workers.get_flow_execution(flow.id)
         if execution is None or execution.worker_id != worker_id:
             raise ValueError(f"flow {flow.id} is not bound to worker {worker_id}")
         if job.kind is JobKind.REVISION:
-            with self.store.transaction() as tx:
+            with self.database.transaction() as tx:
+                deliveries_tx = self.deliveries.using(tx)
+                reviews_tx = self.reviews.using(tx)
                 fresh = tx.lock_workflow(flow.id)
                 current = tx.lock_job(job.id)
-                if fresh is None or current is None or self._retired(tx, fresh, job):
+                if (
+                    fresh is None
+                    or current is None
+                    or self._retired(fresh, job, deliveries=deliveries_tx)
+                ):
                     return
-                tx.reviews.started(current)
+                reviews_tx.started(current)
         elif job.kind is JobKind.INITIAL:
             emit_hook(self.plugins, "on_flow_start", flow=flow)
 
     async def fail(self, job: Job, reason: str) -> None:
         """Persist control failures too, so recovery and live failures use the same atomic finish."""
-        with self.store.transaction() as tx:
+        with self.database.transaction() as tx:
+            jobs_tx = self.jobs.using(tx)
             tx.lock_workflow(job.flow_id)
             current = tx.lock_job(job.id)
             if current is None or current.state is not JobState.RUNNING:
@@ -475,7 +543,7 @@ class JobCoordinator:
                     connection_epoch="control",
                     error=reason,
                 )
-                tx.jobs.record_control_result(
+                jobs_tx.record_control_result(
                     job.id,
                     message.model_dump(mode="json"),
                     terminal_digest(message),
@@ -484,7 +552,7 @@ class JobCoordinator:
         await self.results.apply(job.id)
 
     def _delivery(self, flow: Flow) -> FlowDelivery:
-        delivery = self.store.deliveries.get_delivery(flow.id)
+        delivery = self.deliveries.get_delivery(flow.id)
         if delivery is None:
             raise ValueError(f"flow {flow.id} has no delivery")
         return delivery

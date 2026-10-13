@@ -160,7 +160,17 @@ def workers() -> None:
 
     with _store() as store:
         typer.echo("WORKER\tSTATUS\tDRAINING\tJOB\tFLOW\tEPOCH\tLEASE\tRECOVERY\tLAST_SEEN\tREASON")
-        for worker in ControlService(store).list_workers():
+        for worker in ControlService(
+            database=store.database,
+            deliveries=store.deliveries,
+            flows=store.flows,
+            jobs=store.jobs,
+            result_store=store.results,
+            reviews=store.reviews,
+            stops=store.stops,
+            webhook_store=store.webhooks,
+            workers=store.workers,
+        ).list_workers():
             typer.echo(
                 f"{worker.worker_id}\t{worker.status.value}\t{worker.draining}\t"
                 f"{worker.current_job_id or '-'}\t{worker.current_flow_id or '-'}\t"
@@ -229,7 +239,9 @@ def flow_show(flow_id: int) -> None:
             )
         jobs = store.jobs.list_jobs(f.id)
         if delivery is not None and delivery.state is DeliveryState.MERGED:
-            typer.echo(f"  archive: {archive_progress(store, f, jobs)}")
+            typer.echo(
+                f"  archive: {archive_progress(f, jobs, result_store=store.results, workers=store.workers)}"
+            )
         for job in jobs:
             recovery = _remaining(job.recovery_deadline)
             result = "received" if job.result_received_at is not None else "-"
@@ -262,7 +274,17 @@ def flow_cancel(flow_id: int) -> None:
         f = store.flows.get_flow(flow_id)
         if not f:
             raise typer.Exit(1)
-        ControlService(store).cancel(f)
+        ControlService(
+            database=store.database,
+            deliveries=store.deliveries,
+            flows=store.flows,
+            jobs=store.jobs,
+            result_store=store.results,
+            reviews=store.reviews,
+            stops=store.stops,
+            webhook_store=store.webhooks,
+            workers=store.workers,
+        ).cancel(f)
         waiting = store.stops.has_pending(flow_id)
     typer.echo(f"flow {flow_id}: cancellation requested; stop_pending={waiting}")
 
@@ -276,7 +298,17 @@ def flow_retry(flow_id: int) -> None:
         f = store.flows.get_flow(flow_id)
         if not f:
             raise typer.Exit(1)
-        ControlService(store).retry(f)
+        ControlService(
+            database=store.database,
+            deliveries=store.deliveries,
+            flows=store.flows,
+            jobs=store.jobs,
+            result_store=store.results,
+            reviews=store.reviews,
+            stops=store.stops,
+            webhook_store=store.webhooks,
+            workers=store.workers,
+        ).retry(f)
     typer.echo(f"retry requested for flow {flow_id}")
 
 

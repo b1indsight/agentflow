@@ -11,17 +11,30 @@ from app.controler.config import ServerSettings
 from app.controler.workflow.service import ControlService
 from app.domain.models import ReviewItemKind
 from app.domain.review_models import FeedbackUpdate
-from app.persistence.store import Store
+from app.persistence.database import Database
+from app.persistence.flows import FlowStore
+from app.persistence.reconciliation import ReconcileStore
+from app.persistence.reviews import ReviewStore
+from app.persistence.webhooks import WebhookStore
 
 
 class EventRouter:
     def __init__(
         self,
-        store: Store,
         service: ControlService,
         settings: ServerSettings,
+        *,
+        database: Database,
+        flows: FlowStore,
+        reconcile_store: ReconcileStore,
+        reviews: ReviewStore,
+        webhook_store: WebhookStore,
     ) -> None:
-        self.store = store
+        self.database = database
+        self.flows = flows
+        self.reconcile_store = reconcile_store
+        self.reviews = reviews
+        self.webhook_store = webhook_store
         self.service = service
         self.settings = settings
 
@@ -37,7 +50,7 @@ class EventRouter:
         if event_type in {"issue_comment", "pull_request_review", "pull_request_review_comment"}:
             self._on_feedback(event_type, delivery_id, payload)
             return
-        if not self.store.webhooks.record_event(delivery_id, event_type, None, payload):
+        if not self.webhook_store.record_event(delivery_id, event_type, None, payload):
             return
         handler = {
             "issues": self._on_issues,
@@ -58,7 +71,7 @@ class EventRouter:
                 return
             self.service.on_trigger(repo, issue_number, installation_id)
         elif action == "unlabeled" and label == self.settings.trigger_label:
-            flow = self.store.flows.get_active_flow(repo, issue_number)
+            flow = self.flows.get_active_flow(repo, issue_number)
             if flow:
                 self.service.cancel(flow)
 
@@ -68,9 +81,9 @@ class EventRouter:
         conversation = event_type == "issue_comment"
         review = event_type == "pull_request_review"
         number = payload["issue" if conversation else "pull_request"]["number"]
-        flow = self.store.flows.get_flow_by_pr(repo, number)
+        flow = self.flows.get_flow_by_pr(repo, number)
         if conversation and flow is None:
-            flow = self.store.flows.get_active_flow(repo, number)
+            flow = self.flows.get_active_flow(repo, number)
         action = payload.get("action")
         allowed = (
             {"submitted", "edited", "dismissed"} if review else {"created", "edited", "deleted"}
@@ -83,11 +96,11 @@ class EventRouter:
             or author.get("type") == "Bot"
             or author.get("login") == self.settings.bot_login
         ):
-            self.store.webhooks.record_event(delivery_id, event_type, flow.id if flow else None, payload)
+            self.webhook_store.record_event(delivery_id, event_type, flow.id if flow else None, payload)
             return
         body = item.get("body") or ""
         if conversation and action == "created" and body.strip() == "/flow stop":
-            if self.store.webhooks.record_event(delivery_id, event_type, flow.id, payload):
+            if self.webhook_store.record_event(delivery_id, event_type, flow.id, payload):
                 self.service.cancel(flow)
             return
         sender = (payload.get("sender") or {}).get("login", "")
@@ -111,14 +124,14 @@ class EventRouter:
             author=author.get("login", "unknown"),
             body="" if deleted else body,
             deleted=deleted,
-            updated_at=datetime.fromisoformat(timestamp) if timestamp else self.store.now(),
+            updated_at=datetime.fromisoformat(timestamp) if timestamp else self.database.now(),
             signal=signal,
             submitted=review and action == "submitted",
             path=item.get("path"),
             original_commit_id=item.get("original_commit_id"),
             diff_hunk=item.get("diff_hunk"),
         )
-        if self.store.reviews.ingest(
+        if self.reviews.ingest(
             flow.id,
             delivery_id,
             event_type,
@@ -133,11 +146,13 @@ class EventRouter:
         pull_request = payload.get("pull_request") or {}
         if payload.get("action") not in {"closed", "reopened", "synchronize"}:
             return
-        flow = self.store.flows.get_flow_by_pr(payload["repository"]["full_name"], pull_request["number"])
+        flow = self.flows.get_flow_by_pr(payload["repository"]["full_name"], pull_request["number"])
         if flow and payload.get("action") == "closed" and pull_request.get("merged") is True:
             self.service.on_merged(flow, delivery_id, payload)
         elif flow:
-            with self.store.transaction() as tx:
+            with self.database.transaction() as tx:
+                reconcile_store_tx = self.reconcile_store.using(tx)
+                webhook_store_tx = self.webhook_store.using(tx)
                 fresh = tx.lock_workflow(flow.id)
-                if fresh is not None and tx.webhooks.record_event(delivery_id, "pull_request", flow.id, payload):
-                    tx.reconcile.hint(flow.id)
+                if fresh is not None and webhook_store_tx.record_event(delivery_id, "pull_request", flow.id, payload):
+                    reconcile_store_tx.hint(flow.id)

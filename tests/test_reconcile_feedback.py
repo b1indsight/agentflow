@@ -73,7 +73,15 @@ def page(clock, github_id=101, **changes):
 
 
 def poller(store, github, **options):
-    return FeedbackReconciler(store, github, settle_seconds=75, **options)
+    return FeedbackReconciler(
+        github,
+        settle_seconds=75,
+        **options,
+        database=store.database,
+        deliveries=store.deliveries,
+        reconcile_store=store.reconcile,
+        reviews=store.reviews,
+    )
 
 
 async def test_three_missing_sources_are_ingested_once_without_webhook_or_strong_signal(

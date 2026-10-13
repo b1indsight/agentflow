@@ -42,7 +42,7 @@ class AsgiCoordinator(JobCoordinator):
 
     def __init__(self, attempt_id: int, store: Store) -> None:
         self.attempt_id = attempt_id
-        self.store = store
+        self.jobs = store.jobs
         self.tools = Mock(spec=FlowToolService, execute=AsyncMock(side_effect=self._tool_response))
         self.results = result_application(store, self._commit_result)
 
@@ -68,7 +68,7 @@ class AsgiCoordinator(JobCoordinator):
         pass
 
     async def _commit_result(self, job_id: int) -> JobState:
-        self.store.jobs.complete_persisted_result(job_id, JobState.DONE)
+        self.jobs.complete_persisted_result(job_id, JobState.DONE)
         return JobState.DONE
 
     async def fail(self, job: Job, reason: str) -> None:
@@ -83,12 +83,17 @@ class AsgiRuntime(ServerRuntime):
                                       metrics_token=None, host="test", port=0)
         self.metrics = Metrics()
         self.gateway = WorkerGateway(
-            store,
             AsgiCoordinator(attempt_id, store),
             worker_tokens={"worker-1": "worker-secret"},
             poll_interval=0.01,
+            deliveries=store.deliveries,
+            jobs=store.jobs,
+            stops=store.stops,
+            workers=store.workers,
         )
-        self.conversations = ConversationService(store, self.gateway.conversations)
+        self.conversations = ConversationService(
+            self.gateway.conversations, flows=store.flows, workers=store.workers
+        )
 
     async def ready(self) -> bool:
         return True

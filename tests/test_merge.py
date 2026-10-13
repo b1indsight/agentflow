@@ -38,8 +38,28 @@ async def route_merge(store: Store, flow: Flow, event: str = "merge-1", payload=
                              worker_tokens={"worker-1": SecretStr("worker-secret")},
                              allowlist=["alice"], bot_login="flowtool[bot]", trigger_label="flow",
                                settle_seconds=75.0, submit_grace_seconds=15.0)
-    EventRouter(store, ControlService(store), settings).dispatch(
-        "pull_request", event, payload if payload is not None else merge_payload(flow),
+    EventRouter(
+        ControlService(
+            database=store.database,
+            deliveries=store.deliveries,
+            flows=store.flows,
+            jobs=store.jobs,
+            result_store=store.results,
+            reviews=store.reviews,
+            stops=store.stops,
+            webhook_store=store.webhooks,
+            workers=store.workers,
+        ),
+        settings,
+        database=store.database,
+        flows=store.flows,
+        reconcile_store=store.reconcile,
+        reviews=store.reviews,
+        webhook_store=store.webhooks,
+    ).dispatch(
+        "pull_request",
+        event,
+        payload if payload is not None else merge_payload(flow),
     )
 
 

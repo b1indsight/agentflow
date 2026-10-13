@@ -1,8 +1,10 @@
 """Expose the grouped repository API over existing in-memory protocol simulations."""
 
-from typing import cast
+from contextlib import contextmanager
+from typing import Self, cast
 from unittest.mock import Mock
 
+from app.persistence.database import Database
 from app.persistence.deliveries import DeliveryStore
 from app.persistence.flows import FlowStore
 from app.persistence.jobs import JobStore
@@ -17,22 +19,49 @@ class RepositoryViews:
     patches/overrides on that state remain visible to every repository view.
     """
 
+    def transaction(self):
+        raise NotImplementedError("the simulation must implement transaction rollback")
+
+    @property
+    def database(self) -> Database:
+        view = Mock(spec=Database, wraps=self)
+
+        @contextmanager
+        def transaction():
+            with self.transaction():
+                yield view
+
+        view.transaction.side_effect = transaction
+        return cast(Database, view)
+
+    def _view(self, repository: type) -> Mock:
+        view = Mock(spec=repository, wraps=self)
+        view.using = Mock(return_value=view)
+        return view
+
     @property
     def flows(self) -> FlowStore:
-        return cast(FlowStore, Mock(spec=FlowStore, wraps=self))
+        return cast(FlowStore, self._view(FlowStore))
 
     @property
     def deliveries(self) -> DeliveryStore:
-        return cast(DeliveryStore, Mock(spec=DeliveryStore, wraps=self))
+        return cast(DeliveryStore, self._view(DeliveryStore))
 
     @property
     def jobs(self) -> JobStore:
-        return cast(JobStore, Mock(spec=JobStore, wraps=self))
+        return cast(JobStore, self._view(JobStore))
 
     @property
     def workers(self) -> WorkerStore:
-        return cast(WorkerStore, Mock(spec=WorkerStore, wraps=self))
+        return cast(WorkerStore, self._view(WorkerStore))
 
     @property
     def webhooks(self) -> WebhookStore:
-        return cast(WebhookStore, Mock(spec=WebhookStore, wraps=self))
+        return cast(WebhookStore, self._view(WebhookStore))
+
+
+class MemoryRepository:
+    """Bind a fake repository while keeping its simulation state shared."""
+
+    def using(self, database: Database) -> Self:
+        return self

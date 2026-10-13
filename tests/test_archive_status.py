@@ -152,11 +152,23 @@ async def test_permanent_archive_write_failure_retries_only_frozen_missing_effec
     assert store.workers.get_flow_execution(flow.id).released_at is None
     assert store.jobs.get_job(job.id).result_applied_at is None
     assert "comment" in store.jobs.get_job(job.id).last_error
-    assert "GitHub" in archive_progress(store, flow, store.jobs.list_jobs(flow.id))
+    assert "GitHub" in archive_progress(
+        flow, store.jobs.list_jobs(flow.id), result_store=store.results, workers=store.workers
+    )
     assert [number for number, _ in github.notifications] == [flow.issue_number]
     jobs = store.jobs.list_jobs(flow.id)
     monkeypatch.setattr(Issue, "comment", comment)
-    ControlService(store).retry(flow)
+    ControlService(
+        database=store.database,
+        deliveries=store.deliveries,
+        flows=store.flows,
+        jobs=store.jobs,
+        result_store=store.results,
+        reviews=store.reviews,
+        stops=store.stops,
+        webhook_store=store.webhooks,
+        workers=store.workers,
+    ).retry(flow)
     assert len(store.jobs.list_jobs(flow.id)) == len(jobs)
     assert store.flows.get_flow(flow.id).current_attempt_id == flow.current_attempt_id
     restarted = coordinator(store, github)
@@ -202,7 +214,17 @@ async def test_unknown_archive_comment_stays_pending_without_resending_or_reclea
     with pytest.raises(ResultPending, match="outcome is unknown"):
         await coordinator(store, github).results.apply(job.id)
     with pytest.raises(ValueError, match="pending result"):
-        ControlService(store).retry(flow)
+        ControlService(
+            database=store.database,
+            deliveries=store.deliveries,
+            flows=store.flows,
+            jobs=store.jobs,
+            result_store=store.results,
+            reviews=store.reviews,
+            stops=store.stops,
+            webhook_store=store.webhooks,
+            workers=store.workers,
+        ).retry(flow)
     assert store.results.get_plan(job.id).archive == result
     assert store.flows.get_flow(flow.id).state is FlowState.ACTIVE
     assert not github.notifications
@@ -255,12 +277,32 @@ async def test_archive_auth_failure_preserves_whether_comment_was_sent(
     monkeypatch.setattr(Issue, "find_comment", find_comment)
     if already_dispatched:
         with pytest.raises(ValueError, match="pending result"):
-            ControlService(store).retry(flow)
+            ControlService(
+                database=store.database,
+                deliveries=store.deliveries,
+                flows=store.flows,
+                jobs=store.jobs,
+                result_store=store.results,
+                reviews=store.reviews,
+                stops=store.stops,
+                webhook_store=store.webhooks,
+                workers=store.workers,
+            ).retry(flow)
         due(store, job.id)
     elif failure == "token_unavailable":
         due(store, job.id)
     else:
-        ControlService(store).retry(flow)
+        ControlService(
+            database=store.database,
+            deliveries=store.deliveries,
+            flows=store.flows,
+            jobs=store.jobs,
+            result_store=store.results,
+            reviews=store.reviews,
+            stops=store.stops,
+            webhook_store=store.webhooks,
+            workers=store.workers,
+        ).retry(flow)
     assert await coordinator(store, github).results.apply(job.id) is JobState.DONE
     assert len(github.notifications) == 2
     assert store.flows.get_flow(flow.id).current_attempt_id == result.attempt_id

@@ -64,7 +64,17 @@ async def test_archive_release_rolls_back_and_replays_atomically(store, monkeypa
     assert store.workers.get_flow_execution(flow.id).released_at is None
     assert store.jobs.get_job(job.id).result_applied_at is None
     assert store.results.get_plan(job.id).archive == result
-    other = ControlService(store).on_trigger("owner/repo", 999, 42)
+    other = ControlService(
+        database=store.database,
+        deliveries=store.deliveries,
+        flows=store.flows,
+        jobs=store.jobs,
+        result_store=store.results,
+        reviews=store.reviews,
+        stops=store.stops,
+        webhook_store=store.webhooks,
+        workers=store.workers,
+    ).on_trigger("owner/repo", 999, 42)
     assert store.workers.assign_job("worker-a", "next", "epoch-a") is None
 
     monkeypatch.setattr(JobStore, "complete_persisted_result", original)
@@ -88,7 +98,17 @@ async def test_archive_fences_do_not_release_binding(store, recording_resources)
 async def test_archive_after_initial_retry_cannot_adopt_a_released_binding(store, completed_open_initial):
     # Merge can arrive after retry commits ACTIVE but before a new worker reacquires ownership.
     flow, _subject, _github, _request, _result = completed_open_initial
-    service = ControlService(store)
+    service = ControlService(
+        database=store.database,
+        deliveries=store.deliveries,
+        flows=store.flows,
+        jobs=store.jobs,
+        result_store=store.results,
+        reviews=store.reviews,
+        stops=store.stops,
+        webhook_store=store.webhooks,
+        workers=store.workers,
+    )
     service.cancel(flow)
     service.retry(flow)
     await route_merge(store, flow)
@@ -111,7 +131,17 @@ async def test_failed_archive_retry_keeps_attempt_and_original_worker(store, rec
     assert await subject.results.apply(job.id) is JobState.FAILED
     assert store.flows.get_flow(flow.id).state is FlowState.ACTIVE
     assert store.workers.get_flow_execution(flow.id).released_at is None
-    service = ControlService(store)
+    service = ControlService(
+        database=store.database,
+        deliveries=store.deliveries,
+        flows=store.flows,
+        jobs=store.jobs,
+        result_store=store.results,
+        reviews=store.reviews,
+        stops=store.stops,
+        webhook_store=store.webhooks,
+        workers=store.workers,
+    )
     with pytest.raises(ValueError, match="merged.*archive|archive.*merged"):
         service.cancel(flow)
     service.retry(flow)
@@ -136,7 +166,17 @@ async def test_expired_merged_executor_is_pinned_until_original_worker_returns(s
     assert store.jobs.get_job(old.id).state is JobState.RUNNING
     assert "executor" in store.jobs.get_job(old.id).last_error
     with pytest.raises(ValueError, match="executor|running"):
-        ControlService(store).retry(flow)
+        ControlService(
+            database=store.database,
+            deliveries=store.deliveries,
+            flows=store.flows,
+            jobs=store.jobs,
+            result_store=store.results,
+            reviews=store.reviews,
+            stops=store.stops,
+            webhook_store=store.webhooks,
+            workers=store.workers,
+        ).retry(flow)
     store.workers.worker_connected("worker-b", PROTOCOL_VERSION, "epoch-b")
     assert store.workers.assign_job("worker-b", "other", "epoch-b") is None
     store.workers.worker_connected("worker-a", PROTOCOL_VERSION, "new-epoch")
@@ -149,7 +189,14 @@ async def test_merged_coding_process_without_exit_proof_cannot_unlock_archive(st
     flow = store.flows.get_flow(old.flow_id)
     await route_merge(store, flow)
     subject = coordinator(store, RecordingGitHub())
-    gateway = WorkerGateway(store, subject, worker_tokens={"worker-a": "secret"})
+    gateway = WorkerGateway(
+        subject,
+        worker_tokens={"worker-a": "secret"},
+        deliveries=store.deliveries,
+        jobs=store.jobs,
+        stops=store.stops,
+        workers=store.workers,
+    )
     store.workers.worker_connected("worker-a", PROTOCOL_VERSION, "restart")
     with pytest.raises(ProtocolViolation, match="archive blocked"):
         if journal == "missing":
@@ -190,7 +237,17 @@ async def test_superseded_queued_coding_does_not_block_archive_retry(store, reco
     flow, job, _task, subject = await ready_archive(store)
     stale = store.jobs.enqueue_job(flow.id, JobKind.REVISION)
     await subject.fail(job, "cleanup permission denied")
-    ControlService(store).retry(flow)
+    ControlService(
+        database=store.database,
+        deliveries=store.deliveries,
+        flows=store.flows,
+        jobs=store.jobs,
+        result_store=store.results,
+        reviews=store.reviews,
+        stops=store.stops,
+        webhook_store=store.webhooks,
+        workers=store.workers,
+    ).retry(flow)
     retry = store.workers.assign_job("worker-a", "retry", "epoch-a")
     assert retry.kind is JobKind.ARCHIVE and retry.id != job.id
     assert store.jobs.get_job(stale.id).state is JobState.QUEUED

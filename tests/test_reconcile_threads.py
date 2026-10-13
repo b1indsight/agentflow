@@ -65,7 +65,14 @@ def page(clock, *comments, cursor=None, comments_cursor=None, **changes):
 
 
 async def sweep(store, github):
-    await FeedbackReconciler(store, github, settle_seconds=75)._sweep()
+    await FeedbackReconciler(
+        github,
+        settle_seconds=75,
+        database=store.database,
+        deliveries=store.deliveries,
+        reconcile_store=store.reconcile,
+        reviews=store.reviews,
+    )._sweep()
 
 
 def observed(store):

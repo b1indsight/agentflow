@@ -6,6 +6,8 @@ from unittest.mock import Mock
 from app.contracts.protocol import ExecutionStopped
 from app.controler.workflow.results import ResultApplication
 from app.domain.models import JobState, WorkerRecord, WorkerStatus, utcnow
+from app.persistence.results import ResultStore
+from app.persistence.reviews import ReviewStore
 from app.persistence.stops import StopIntent, StopStore
 from app.persistence.store import Store
 
@@ -38,6 +40,18 @@ def connected_worker(worker_id: str, protocol_version: int, connection_epoch: st
 
 def result_application(store: Store, commit_result: Callable[[int], Awaitable[JobState]]) -> ResultApplication:
     """Exercise result locking and recovery around the supplied commit callback."""
-    results = ResultApplication(store, Mock(), Mock(), Mock())
+    results = ResultApplication(
+        Mock(),
+        Mock(),
+        Mock(),
+        database=store.database,
+        deliveries=store.deliveries,
+        flows=store.flows,
+        jobs=store.jobs,
+        result_store=Mock(spec=ResultStore),
+        reviews=Mock(spec=ReviewStore),
+        stops=store.stops,
+        workers=store.workers,
+    )
     results._apply = commit_result  # type: ignore[method-assign, assignment]
     return results

@@ -8,6 +8,7 @@ from app.domain.judge_models import JudgeDecision
 from app.domain.models import FeedbackRef, Job, ReviewItemKind, TriageVerdict
 from app.domain.review_models import BatchState, ReviewBatch, ReviewFeedback
 from app.github import PullRequest, ReviewThreads
+from tests.persistence_fakes import MemoryRepository
 
 
 def review_context(batch_id: int = 1) -> ReviewContext:
@@ -27,7 +28,7 @@ def judge_decision(verdict: TriageVerdict, context: ReviewContext | None = None)
                          session_id="test-session", model="fake", verdict=verdict)
 
 
-class MemoryReviews:
+class MemoryReviews(MemoryRepository):
     def __init__(self) -> None:
         self.job_records: dict[int, Job] = {}
         self.batch = ReviewBatch(

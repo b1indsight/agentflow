@@ -23,8 +23,10 @@ from app.github import (
     ReviewThreads,
     retry_delay,
 )
-from app.persistence.reconciliation import FeedbackCheck
-from app.persistence.store import Store
+from app.persistence.database import Database
+from app.persistence.deliveries import DeliveryStore
+from app.persistence.reconciliation import FeedbackCheck, ReconcileStore
+from app.persistence.reviews import ReviewStore
 
 
 class ThreadScanState(BaseModel):
@@ -54,11 +56,24 @@ class ThreadScanState(BaseModel):
 
 class FeedbackReconciler:
     def __init__(
-        self, store: Store, github: GitHubApp, *, settle_seconds: float,
-        bot_login: str = "flowtool[bot]", interval: float = 300, batch_size: int = 64,
+        self,
+        github: GitHubApp,
+        *,
+        settle_seconds: float,
+        bot_login: str = "flowtool[bot]",
+        interval: float = 300,
+        batch_size: int = 64,
         concurrency: int = 4,
+        database: Database,
+        deliveries: DeliveryStore,
+        reconcile_store: ReconcileStore,
+        reviews: ReviewStore,
     ) -> None:
-        self.store, self.github = store, github
+        self.database = database
+        self.deliveries = deliveries
+        self.reconcile_store = reconcile_store
+        self.reviews = reviews
+        self.github = github
         self.settle_seconds, self.bot_login = settle_seconds, bot_login.casefold()
         self.interval, self.batch_size, self.concurrency = interval, batch_size, concurrency
         self._sweep_lock = asyncio.Lock()
@@ -75,8 +90,8 @@ class FeedbackReconciler:
     async def _sweep(self) -> None:
         # Keep task creation bounded, as in Reconciler; each source reads one page per turn.
         async with self._sweep_lock:
-            self.store.reconcile.feedback_seed(self.batch_size)
-            checks = self.store.reconcile.feedback_due(self.batch_size)
+            self.reconcile_store.feedback_seed(self.batch_size)
+            checks = self.reconcile_store.feedback_due(self.batch_size)
             pending = iter(checks)
 
             async def drain() -> None:
@@ -92,16 +107,18 @@ class FeedbackReconciler:
 
     async def _check(self, check: FeedbackCheck) -> None:
         try:
-            with self.store.transaction() as tx:
+            with self.database.transaction() as tx:
+                deliveries_tx = self.deliveries.using(tx)
+                reviews_tx = self.reviews.using(tx)
                 flow = tx.lock_workflow(check.flow_id)
-                delivery = tx.deliveries.get_delivery(check.flow_id)
+                delivery = deliveries_tx.get_delivery(check.flow_id)
                 if (flow is None or flow.state is not FlowState.ACTIVE or flow.current_attempt_id is None
                         or delivery is None or delivery.state is not DeliveryState.OPEN
                         or delivery.pr_number is None):
                     return
                 if flow.installation_id is None:
                     raise ValueError("missing installation")
-                boundary = tx.reviews.observation_boundary()
+                boundary = reviews_tx.observation_boundary()
             number = flow.issue_number if check.source == "issue_comments" else delivery.pr_number
             repo = self.github.installation(flow.installation_id).repository(flow.repo)
             threads, diagnostic = None, None
@@ -127,34 +144,37 @@ class FeedbackReconciler:
                     page = await PullRequest(repo, number).fetch_comments(cursor=check.cursor, limit=50)
                 updates, diagnostic = self._discussion_updates(page, check.source)
                 following = page.next_cursor
-            with self.store.transaction() as tx:
+            with self.database.transaction() as tx:
+                deliveries_tx = self.deliveries.using(tx)
+                reconcile_store_tx = self.reconcile_store.using(tx)
+                reviews_tx = self.reviews.using(tx)
                 fresh = tx.lock_workflow(flow.id)
-                current = tx.deliveries.get_delivery(flow.id)
+                current = deliveries_tx.get_delivery(flow.id)
                 if (fresh is None or current is None or fresh.state is not FlowState.ACTIVE
                         or fresh.current_attempt_id != flow.current_attempt_id
                         or fresh.installation_id != flow.installation_id
                         or current != delivery):
-                    tx.reconcile.feedback_failed(check, 5, "Flow changed during observation")
+                    reconcile_store_tx.feedback_failed(check, 5, "Flow changed during observation")
                     return
                 if threads is None:
-                    tx.reviews.observe_feedback(flow.id, flow.current_attempt_id, updates, boundary, self.settle_seconds)
+                    reviews_tx.observe_feedback(flow.id, flow.current_attempt_id, updates, boundary, self.settle_seconds)
                 else:
-                    tx.reviews.observe_threads(
+                    reviews_tx.observe_threads(
                         flow.id, threads, [], boundary=boundary, settle_seconds=self.settle_seconds,
                     )
-                tx.reconcile.feedback_finish(
+                reconcile_store_tx.feedback_finish(
                     check, following, 5 if following else self.interval,
                     diagnostic or ("scan incomplete; continuation saved" if following else None),
                     complete=not threads.limitations if threads is not None else True,
                 )
         except GitHubError as error:
-            delay = retry_delay(check.failures + 1, self.store.now(), error)
+            delay = retry_delay(check.failures + 1, self.database.now(), error)
             if error.kind not in {GitHubErrorKind.TRANSIENT, GitHubErrorKind.RATE_LIMITED}:
                 delay = max(1800, delay)
-            self.store.reconcile.feedback_failed(check, delay, error.kind.value)
+            self.reconcile_store.feedback_failed(check, delay, error.kind.value)
         except Exception as error:  # noqa: BLE001 -- persist only the error class, never SDK credentials
-            self.store.reconcile.feedback_failed(
-                check, retry_delay(check.failures + 1, self.store.now()), type(error).__name__,
+            self.reconcile_store.feedback_failed(
+                check, retry_delay(check.failures + 1, self.database.now()), type(error).__name__,
             )
 
     async def _scan_threads(
@@ -163,7 +183,7 @@ class FeedbackReconciler:
         """Observe one request and advance durable traversal separately from queries."""
         state = ThreadScanState.model_validate_json(cursor) if cursor else ThreadScanState()
         snapshot = ReviewThreads(
-            repo=pr.repository.full_name, pr_number=pr.number, fetched_at=self.store.now(),
+            repo=pr.repository.full_name, pr_number=pr.number, fetched_at=self.database.now(),
         )
         if state.thread is None:
             batch = await pr.fetch_threads(cursor=state.cursor, limit=1)

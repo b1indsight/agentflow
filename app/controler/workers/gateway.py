@@ -44,8 +44,10 @@ from app.domain.models import (
     JobKind,
     JobState,
 )
-from app.persistence.stops import StopIntent
-from app.persistence.store import Store
+from app.persistence.deliveries import DeliveryStore
+from app.persistence.jobs import JobStore
+from app.persistence.stops import StopIntent, StopStore
+from app.persistence.workers import WorkerStore
 from app.telemetry.metrics import Metrics
 
 
@@ -54,7 +56,6 @@ class WorkerGateway:
 
     def __init__(
         self,
-        store: Store,
         coordinator: JobCoordinator,
         *,
         worker_tokens: Mapping[str, str],
@@ -62,9 +63,16 @@ class WorkerGateway:
         heartbeat_timeout: float = 45.0,
         poll_interval: float = 2.0,
         metrics: Metrics | None = None,
+        deliveries: DeliveryStore,
+        jobs: JobStore,
+        stops: StopStore,
+        workers: WorkerStore,
     ) -> None:
+        self.deliveries = deliveries
+        self.jobs = jobs
+        self.stops = stops
+        self.workers = workers
         self.metrics = metrics
-        self.store = store
         self.coordinator = coordinator
         self.worker_tokens = dict(worker_tokens)
         self.heartbeat_interval = heartbeat_interval
@@ -87,7 +95,7 @@ class WorkerGateway:
         preparing = asyncio.create_task(build())
         try:
             while True:
-                if not self.store.workers.heartbeat_assignment(job.id, worker_id, token, epoch):
+                if not self.workers.heartbeat_assignment(job.id, worker_id, token, epoch):
                     raise ProtocolViolation("assignment expired during preparation")
                 done, _ = await asyncio.wait({preparing}, timeout=self.heartbeat_interval)
                 if done:
@@ -117,14 +125,14 @@ class WorkerGateway:
             connection = WorkerConnection(socket, self.conversations, worker_id, connection_epoch)
             wake = await self._register_session(worker_id, connection)
             registered_session = True
-            worker = self.store.workers.worker_connected(
+            worker = self.workers.worker_connected(
                 worker_id, register.protocol_version, connection_epoch
             )
             connected = True
-            stop = self.store.stops.pending(worker_id)
+            stop = self.stops.pending(worker_id)
             if (stop is None and register.recovery is not None
                     and register.recovery.stop_request_id is not None):
-                stop = self.store.stops.receipt_request(worker_id, register.recovery.stop_request_id)
+                stop = self.stops.receipt_request(worker_id, register.recovery.stop_request_id)
             if stop is not None:
                 await self._stop_worker(connection, worker_id, connection_epoch, stop)
             elif register.recovery is not None:
@@ -143,9 +151,9 @@ class WorkerGateway:
                     # acknowledged receipt. Recover the unstarted delivery behind that receipt.
                     await self._reject_missing_journal(worker_id, connection_epoch, stale_job_id)
                 elif register.recovery is None and (
-                    binding := self.store.workers.get_worker_execution(worker_id)
+                    binding := self.workers.get_worker_execution(worker_id)
                 ) is not None:
-                    delivery = self.store.deliveries.get_delivery(binding.flow_id)
+                    delivery = self.deliveries.get_delivery(binding.flow_id)
                     if delivery is not None and delivery.state is DeliveryState.MERGED:
                         raise ProtocolViolation("archive blocked: original worker journal is missing")
             if current is None:
@@ -160,25 +168,25 @@ class WorkerGateway:
                 if current is None:
                     assert wake is not None
                     wake.clear()
-                    stop = self.store.stops.pending(worker_id)
+                    stop = self.stops.pending(worker_id)
                     if stop is not None:
                         await self._stop_worker(connection, worker_id, connection_epoch, stop)
                     token = uuid4().hex
-                    job = self.store.workers.assign_job(worker_id, token, connection_epoch)
+                    job = self.workers.assign_job(worker_id, token, connection_epoch)
                     if job is None:
                         await self._wait_while_idle(connection, wake)
                         continue
                     prepared = await self._prepare_assignment(job, worker_id, token, connection_epoch)
                     if isinstance(prepared, JobState):
                         if prepared is JobState.QUEUED:
-                            self.store.workers.requeue_assignment(job.id, worker_id, token, connection_epoch)
+                            self.workers.requeue_assignment(job.id, worker_id, token, connection_epoch)
                         else:
-                            self.store.workers.finish_assignment(
+                            self.workers.finish_assignment(
                                 job.id, worker_id, token, prepared, connection_epoch,
                             )
                         self.notify_jobs()
                         continue
-                    if not self.store.stops.authorize_dispatch(job.id, worker_id, token, connection_epoch):
+                    if not self.stops.authorize_dispatch(job.id, worker_id, token, connection_epoch):
                         raise ProtocolViolation("assignment changed before dispatch authorization")
                     current = (job, token, prepared.task)
                     await connection.send_text(prepared.model_dump_json())
@@ -193,7 +201,7 @@ class WorkerGateway:
                         current,
                         connection_epoch,
                     )
-                    if not self.store.workers.start_assignment(
+                    if not self.workers.start_assignment(
                         job.id,
                         prepared.task.attempt_id,
                         worker_id,
@@ -205,7 +213,7 @@ class WorkerGateway:
 
                 while True:
                     job, token, _ = current
-                    stop = self.store.stops.pending(worker_id)
+                    stop = self.stops.pending(worker_id)
                     if stop is not None:
                         await self._stop_worker(connection, worker_id, connection_epoch, stop)
                         current = None
@@ -219,7 +227,7 @@ class WorkerGateway:
                             current,
                             connection_epoch,
                         )
-                        if not self.store.workers.heartbeat_assignment(
+                        if not self.workers.heartbeat_assignment(
                             job.id, worker_id, token, connection_epoch
                         ):
                             raise ProtocolViolation("heartbeat belongs to an inactive assignment")
@@ -245,7 +253,7 @@ class WorkerGateway:
                             current,
                             connection_epoch,
                         )
-                        receipt = self.store.workers.record_assignment_result(
+                        receipt = self.workers.record_assignment_result(
                             job.id,
                             worker_id,
                             token,
@@ -258,7 +266,7 @@ class WorkerGateway:
                         if receipt == "rejected":
                             raise ProtocolViolation("result belongs to an inactive assignment")
                         state = await self.coordinator.results.apply(job.id)
-                        applied = self.store.jobs.get_job(job.id)
+                        applied = self.jobs.get_job(job.id)
                         if (applied is None or applied.result_applied_at is None
                                 or applied.state not in {JobState.DONE, JobState.FAILED}):
                             raise ProtocolViolation("result application has not committed")
@@ -311,7 +319,7 @@ class WorkerGateway:
             if connection is not None:
                 await connection.stop()
             if connected:
-                self.store.workers.worker_disconnected(
+                self.workers.worker_disconnected(
                     worker_id,
                     disconnect_reason,
                     connection_epoch=connection_epoch,
@@ -332,17 +340,17 @@ class WorkerGateway:
                         stop.job_id, stop.assignment_token, epoch):
                     raise ProtocolViolation("stop reply has stale assignment credentials")
                 if isinstance(message, (Succeeded, Failed)):
-                    job = self.store.jobs.get_job(stop.job_id)
+                    job = self.jobs.get_job(stop.job_id)
                     if job is None:
                         raise ProtocolViolation("stop result job is missing")
-                    receipt = self.store.workers.record_assignment_result(job.id, worker_id, stop.assignment_token,
+                    receipt = self.workers.record_assignment_result(job.id, worker_id, stop.assignment_token,
                                                                  epoch, message.model_dump(mode="json"), terminal_digest(message))
                     if receipt in {'conflict', 'rejected'}:
                         raise ProtocolViolation("stop result conflicts with persisted facts")
                     if receipt != 'applied':
                         await self.coordinator.results.apply(job.id)
                 if isinstance(message, ExecutionStopped):
-                    if message.request_id != stop.request_id or not self.store.stops.confirm(worker_id, message):
+                    if message.request_id != stop.request_id or not self.stops.confirm(worker_id, message):
                         raise ProtocolViolation("stop blocked: receipt or external effects not converged")
                     await connection.send_text(StopAccepted(**stop.message(epoch).model_dump(exclude={'type'})).model_dump_json())
                     self.notify_jobs()
@@ -426,7 +434,7 @@ class WorkerGateway:
         connection_epoch: str,
         recovery: RecoveryDescriptor,
     ) -> tuple[Job, str, ExecutionTask | None] | None:
-        job = self.store.jobs.get_job(recovery.job_id)
+        job = self.jobs.get_job(recovery.job_id)
         if (
             job is None
             or job.assigned_worker_id != worker_id
@@ -457,7 +465,7 @@ class WorkerGateway:
             )
             return None
         if recovery.state == "received":
-            requeued = self.store.workers.requeue_assignment(
+            requeued = self.workers.requeue_assignment(
                 job.id,
                 worker_id,
                 recovery.assignment_token,
@@ -473,13 +481,13 @@ class WorkerGateway:
         if (recovery.state == "started" and not recovery.executor_active
                 and not (job.kind is JobKind.ARCHIVE and recovery.archive_resume)):
             reason = "worker restarted after remote execution started"
-            delivery = self.store.deliveries.get_delivery(job.flow_id)
+            delivery = self.deliveries.get_delivery(job.flow_id)
             if delivery is not None and delivery.supersedes(job.kind):
                 raise ProtocolViolation("archive blocked: original executor exit cannot be confirmed")
             await self.coordinator.fail(job, reason)
             await connection.send_text(RecoveryRejected(job_id=job.id, reason=reason).model_dump_json())
             return None
-        if not self.store.workers.resume_assignment(
+        if not self.workers.resume_assignment(
             job.id,
             worker_id,
             recovery.assignment_token,
@@ -514,14 +522,14 @@ class WorkerGateway:
     async def _reject_missing_journal(
         self, worker_id: str, connection_epoch: str, job_id: int
     ) -> None:
-        job = self.store.jobs.get_job(job_id)
+        job = self.jobs.get_job(job_id)
         if job is None or job.assignment_token is None:
             return
         if job.started_at is None:
-            self.store.workers.requeue_assignment(job.id, worker_id, job.assignment_token, connection_epoch)
+            self.workers.requeue_assignment(job.id, worker_id, job.assignment_token, connection_epoch)
             self.notify_jobs()
             return
-        delivery = self.store.deliveries.get_delivery(job.flow_id)
+        delivery = self.deliveries.get_delivery(job.flow_id)
         if delivery is not None and delivery.state in {DeliveryState.CLOSED, DeliveryState.MERGED}:
             action = "reopen" if delivery.state is DeliveryState.CLOSED else "archive"
             raise ProtocolViolation(f"{action} blocked: original worker assignment journal is missing")

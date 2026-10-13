@@ -59,7 +59,29 @@ def polling_resources(recording_resources, monkeypatch):
 
 
 def subject(store, github, **options):
-    return Reconciler(store, github, ControlService(store), **options)
+    return Reconciler(
+        github,
+        ControlService(
+            database=store.database,
+            deliveries=store.deliveries,
+            flows=store.flows,
+            jobs=store.jobs,
+            result_store=store.results,
+            reviews=store.reviews,
+            stops=store.stops,
+            webhook_store=store.webhooks,
+            workers=store.workers,
+        ),
+        **options,
+        database=store.database,
+        deliveries=store.deliveries,
+        flows=store.flows,
+        jobs=store.jobs,
+        reconcile_store=store.reconcile,
+        reviews=store.reviews,
+        stops=store.stops,
+        workers=store.workers,
+    )
 
 
 async def test_missing_merge_webhook_enters_the_existing_archive_path(store, merge_flow, polling_resources):
@@ -156,7 +178,17 @@ async def test_late_query_cannot_overwrite_a_changed_workflow(store, merge_flow,
 
     def mutate():
         if change == "merged":
-            ControlService(store).on_merged(merge_flow, "real-merge", merge_payload(merge_flow))
+            ControlService(
+                database=store.database,
+                deliveries=store.deliveries,
+                flows=store.flows,
+                jobs=store.jobs,
+                result_store=store.results,
+                reviews=store.reviews,
+                stops=store.stops,
+                webhook_store=store.webhooks,
+                workers=store.workers,
+            ).on_merged(merge_flow, "real-merge", merge_payload(merge_flow))
         elif change == "version":
             delivery = store.deliveries.get_delivery(merge_flow.id)
             delivery.version += 1

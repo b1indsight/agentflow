@@ -114,14 +114,38 @@ def test_observe_reads_without_creating_work_and_does_not_claim_partial_success(
     monkeypatch.setattr(probe, "pull", lambda *args: remote)
     with session(tmp_path, gh) as smoke:
         smoke.ensure_issue()
-        observed = smoke.observe(store, probe, "test-revision")
+        observed = smoke.observe(
+            probe,
+            "test-revision",
+            database=store.database,
+            flows=store.flows,
+            deliveries=store.deliveries,
+            jobs=store.jobs,
+            workers=store.workers,
+        )
         assert observed.pr == 8 and not observed.core_passed
         assert smoke.state.observed_heads == ["a"*40]
-        smoke.observe(store, probe, "test-revision")
+        smoke.observe(
+            probe,
+            "test-revision",
+            database=store.database,
+            flows=store.flows,
+            deliveries=store.deliveries,
+            jobs=store.jobs,
+            workers=store.workers,
+        )
         assert smoke.state.observed_heads == ["a"*40]
         remote.head.ref = "unexpected"
         with pytest.raises(SmokeError, match="identity"):
-            smoke.observe(store, probe, "test-revision")
+            smoke.observe(
+                probe,
+                "test-revision",
+                database=store.database,
+                flows=store.flows,
+                deliveries=store.deliveries,
+                jobs=store.jobs,
+                workers=store.workers,
+            )
     assert not store.jobs.list_jobs(flow.id)
     assert "Please" not in next(tmp_path.glob("*.json")).read_text()
 
@@ -169,7 +193,15 @@ def test_core_pass_requires_three_verified_heads_and_matching_merge(store, tmp_p
                 flow.state = FlowState.SUCCEEDED
                 store.flows.update_flow(flow)
                 assert store.workers.release_flow_execution(flow.id)
-            result = smoke.observe(store, probe, "actual-revision")
+            result = smoke.observe(
+                probe,
+                "actual-revision",
+                database=store.database,
+                flows=store.flows,
+                deliveries=store.deliveries,
+                jobs=store.jobs,
+                workers=store.workers,
+            )
             assert result.core_passed == (letter == "c")
 
 

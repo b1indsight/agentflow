@@ -25,7 +25,12 @@ from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 
 from app.contracts.protocol import PROTOCOL_VERSION
 from app.domain.models import FlowState, JobKind, JobState
+from app.persistence.database import Database
+from app.persistence.deliveries import DeliveryStore
+from app.persistence.flows import FlowStore
+from app.persistence.jobs import JobStore
 from app.persistence.store import Store
+from app.persistence.workers import WorkerStore
 
 TASK = """Add smoke/greeting.py exposing greet(name), returning 'Hello, <name>!'.
 Add a focused Python standard-library unittest. Only change files under smoke/. Do not modify CI, dependencies or credentials.
@@ -208,12 +213,19 @@ class SmokeSession:
         self.save()
         return issue
 
-    def observe(self, store: Store, github: GitHubProbe, revision: str) -> Evidence:
+    def observe(
+        self, github: GitHubProbe, revision: str, *, database: Database,
+        flows: FlowStore, deliveries: DeliveryStore, jobs: JobStore, workers: WorkerStore,
+    ) -> Evidence:
         """Only read persistent workflow facts; never initialize or repair the database."""
         if self.state.issue is None:
             raise SmokeError("run has no observed Issue")
         evidence = Evidence(issue=self.state.issue, source_revision=revision, phase="waiting-for-flow")
-        with store.transaction() as tx, tx.connection() as conn:
+        with database.transaction() as tx, tx.connection() as conn:
+            flows_tx = flows.using(tx)
+            deliveries_tx = deliveries.using(tx)
+            jobs_tx = jobs.using(tx)
+            workers_tx = workers.using(tx)
             conn.execute("SET TRANSACTION READ ONLY")
             conn.execute("SET LOCAL statement_timeout = '2s'")
             rows = conn.execute("SELECT id FROM flows WHERE repo=%s AND issue_number=%s LIMIT 2",
@@ -221,21 +233,21 @@ class SmokeSession:
             if len(rows) > 1:
                 raise SmokeError("multiple Flows exist for this smoke Issue")
             if rows:
-                flow = tx.flows.get_flow(rows[0]["id"])
+                flow = flows_tx.get_flow(rows[0]["id"])
                 if flow is None:
                     raise SmokeError("Flow disappeared during observation")
                 evidence.flow = flow.id
                 if flow.state in {FlowState.FAILED, FlowState.CANCELLED}:
                     raise SmokeError("Flow failed or was cancelled; inspect flow show privately")
-                delivery = tx.deliveries.get_delivery(flow.id)
-                attempts = tx.flows.list_attempts(flow.id)
+                delivery = deliveries_tx.get_delivery(flow.id)
+                attempts = flows_tx.list_attempts(flow.id)
                 evidence.revisions = sum(attempt.revision_cycles for attempt in attempts)
-                binding = tx.workers.get_flow_execution(flow.id)
-                jobs = tx.jobs.list_jobs(flow.id)
+                binding = workers_tx.get_flow_execution(flow.id)
+                job_records = jobs_tx.list_jobs(flow.id)
                 evidence.archived = (flow.state == FlowState.SUCCEEDED and binding is not None
                                      and binding.released_at is not None and any(
                                          j.kind == JobKind.ARCHIVE and j.state == JobState.DONE
-                                         and j.result_applied_at is not None for j in jobs))
+                                         and j.result_applied_at is not None for j in job_records))
             else:
                 delivery = None
         # No network call holds the database transaction open.
@@ -279,7 +291,15 @@ def _run(args: argparse.Namespace, deadline: float) -> int:
             store = Store(database_url)
             try:
                 while True:
-                    evidence = smoke.observe(store, github, args.source_revision)
+                    evidence = smoke.observe(
+                        github,
+                        args.source_revision,
+                        database=store.database,
+                        flows=store.flows,
+                        deliveries=store.deliveries,
+                        jobs=store.jobs,
+                        workers=store.workers,
+                    )
                     print(evidence.model_dump_json())
                     if evidence.core_passed:
                         return 0

@@ -6,7 +6,7 @@ import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, TypedDict, Unpack
+from typing import TypedDict, Unpack
 
 import psycopg
 from psycopg import sql
@@ -15,9 +15,7 @@ from pydantic import BaseModel
 
 from app.domain.project_models import ProjectStatus
 from app.github import GitHubError, ProjectConfig, retry_delay
-
-if TYPE_CHECKING:
-    from app.persistence.database import Database
+from app.persistence.repository import Repository
 
 
 class Projection(BaseModel):
@@ -59,11 +57,8 @@ class ProjectionUpdate(TypedDict, total=False):
     next_at: datetime
 
 
-class ProjectStore:
+class ProjectStore(Repository):
     """Persist projections and partial sync checkpoints without overwriting newer desired facts."""
-
-    def __init__(self, db: Database) -> None:
-        self._db = db
 
     def seed(self, repo: str, config: ProjectConfig, limit: int) -> None:
         now = self._db.now()

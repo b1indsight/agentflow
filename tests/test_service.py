@@ -15,12 +15,13 @@ from app.domain.models import (
 )
 from app.persistence.store import Store
 from tests.persistence_fakes import RepositoryViews
-from tests.result_memory import MemoryStops
+from tests.result_memory import MemoryResults, MemoryStops
 from tests.review_memory import MemoryReviews
 
 
 class RetryStore(RepositoryViews):
     def __init__(self, failed_job: Job | None = None) -> None:
+        self.results = MemoryResults()
         self.reviews = MemoryReviews()
         self.stops = MemoryStops()
         self.flow = Flow(
@@ -85,7 +86,17 @@ def test_explicit_retry_reactivates_flow_and_requeues_kind(failed_kind, expected
                       payload={"instruction": "Address feedback"})
                   if failed_kind is not None else None)
     store = RetryStore(failed_job)
-    service = ControlService(cast(Store, cast(Any, store)))
+    service = ControlService(
+        database=cast(Store, cast(Any, store)).database,
+        deliveries=cast(Store, cast(Any, store)).deliveries,
+        flows=cast(Store, cast(Any, store)).flows,
+        jobs=cast(Store, cast(Any, store)).jobs,
+        result_store=cast(Store, cast(Any, store)).results,
+        reviews=cast(Store, cast(Any, store)).reviews,
+        stops=cast(Store, cast(Any, store)).stops,
+        webhook_store=cast(Store, cast(Any, store)).webhooks,
+        workers=cast(Store, cast(Any, store)).workers,
+    )
 
     service.retry(store.flow)
 
@@ -98,7 +109,17 @@ def test_merged_terminal_flow_requires_manual_archive_reconciliation() -> None:
     store.delivery = FlowDelivery(flow_id=1, branch="flow/1", state=DeliveryState.MERGED)
 
     with pytest.raises(ValueError, match="terminal"):
-        ControlService(cast(Store, cast(Any, store))).retry(store.flow)
+        ControlService(
+            database=cast(Store, cast(Any, store)).database,
+            deliveries=cast(Store, cast(Any, store)).deliveries,
+            flows=cast(Store, cast(Any, store)).flows,
+            jobs=cast(Store, cast(Any, store)).jobs,
+            result_store=cast(Store, cast(Any, store)).results,
+            reviews=cast(Store, cast(Any, store)).reviews,
+            stops=cast(Store, cast(Any, store)).stops,
+            webhook_store=cast(Store, cast(Any, store)).webhooks,
+            workers=cast(Store, cast(Any, store)).workers,
+        ).retry(store.flow)
 
     assert store.flow.state is FlowState.FAILED
     assert store.enqueued == []

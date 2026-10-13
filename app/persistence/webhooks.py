@@ -4,14 +4,13 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from random import uniform
-from typing import TYPE_CHECKING, Literal
+from typing import Literal
 from uuid import uuid4
 
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel
 
-if TYPE_CHECKING:
-    from app.persistence.database import Database
+from app.persistence.repository import Repository
 
 
 class DeliveryConflict(ValueError):
@@ -33,11 +32,8 @@ class Webhook(BaseModel):
     error_code: str | None
 
 
-class WebhookStore:
+class WebhookStore(Repository):
     """Own durable receipt consumption and transaction-bound delivery audit deduplication."""
-
-    def __init__(self, db: Database) -> None:
-        self._db = db
 
     def receive(self, delivery_id: str, event_type: str, payload: dict, digest: str) -> None:
         """Commit receipt before responding; duplicates never reset processing state."""

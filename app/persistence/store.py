@@ -26,11 +26,11 @@ from app.persistence.workers import WorkerStore
 
 
 class Store:
-    """Own a repository set sharing one database context and its lifetime.
+    """Create repositories and own database initialization and shutdown at assembly.
 
-    Use ``with store.transaction() as tx:`` and call ``tx.flows``, ``tx.jobs``, etc.
-    Each transaction owns a freshly bound set; ordinary repositories retain their scope.
-    No network await belongs in a database transaction.
+    Inject concrete repositories into services. Bind those repositories with ``using(tx)``
+    inside ``database.transaction()`` for atomic work spanning multiple repositories.
+    ``transaction()`` also supplies a bound repository set for setup and administrative use.
     """
 
     def __init__(
@@ -101,6 +101,10 @@ class Store:
     @property
     def database_url(self) -> str:
         return self._db.database_url
+
+    @property
+    def database(self) -> Database:
+        return self._db
 
     def connection(self) -> AbstractContextManager[Connection[Row]]:
         return self._db.connection()

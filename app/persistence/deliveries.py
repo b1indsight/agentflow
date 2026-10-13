@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import TYPE_CHECKING
 
 from psycopg.rows import class_row
 from psycopg.types.json import Jsonb
@@ -15,16 +14,11 @@ from app.domain.models import (
     FlowToolCall,
 )
 from app.persistence.records import required
-
-if TYPE_CHECKING:
-    from app.persistence.database import Database
+from app.persistence.repository import Repository
 
 
-class DeliveryStore:
+class DeliveryStore(Repository):
     """Flow delivery identity and the idempotent tool-call ledger."""
-
-    def __init__(self, db: Database) -> None:
-        self._db = db
 
     def get_or_create_delivery(self, flow_id: int, branch: str) -> FlowDelivery:
         now = self._db.now()

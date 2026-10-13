@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 from psycopg.rows import class_row
 
 from app.domain.models import (
@@ -12,16 +10,11 @@ from app.domain.models import (
     FlowState,
 )
 from app.persistence.records import required
-
-if TYPE_CHECKING:
-    from app.persistence.database import Database
+from app.persistence.repository import Repository
 
 
-class FlowStore:
+class FlowStore(Repository):
     """Flow and Attempt facts using the current database transaction."""
-
-    def __init__(self, db: Database) -> None:
-        self._db = db
 
     def create_flow(self, repo: str, issue_number: int, installation_id: int | None) -> Flow:
         now = self._db.now()

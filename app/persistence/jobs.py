@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import TYPE_CHECKING
 
 from psycopg.rows import class_row
 from psycopg.types.json import Jsonb
@@ -16,16 +15,11 @@ from app.domain.models import (
     WorkerStatus,
 )
 from app.persistence.records import required
-
-if TYPE_CHECKING:
-    from app.persistence.database import Database
+from app.persistence.repository import Repository
 
 
-class JobStore:
+class JobStore(Repository):
     """Durable jobs, lifecycle checks, and accepted-result application."""
-
-    def __init__(self, db: Database) -> None:
-        self._db = db
 
     def cancel_jobs(self, flow_id: int, *, reason: str = "Flow cancelled") -> None:
         """Retire queued/never-dispatched preparation; actual execution requires stop proof."""

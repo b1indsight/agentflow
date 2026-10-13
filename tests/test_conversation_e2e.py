@@ -71,10 +71,17 @@ async def test_http_query_while_worker_or_control_busy_and_idle(tmp_path, phase,
         + json.dumps(message("assistant", "Follow-up")) + "\n"
     )
     store = HistoryStore()
-    gateway = WorkerGateway(store, Coordinator(store),
-                            worker_tokens={"worker-1": "worker-secret"}, poll_interval=0.01)
+    gateway = WorkerGateway(
+        Coordinator(store),
+        worker_tokens={"worker-1": "worker-secret"},
+        poll_interval=0.01,
+        deliveries=store.deliveries,
+        jobs=store.jobs,
+        stops=store.stops,
+        workers=store.workers,
+    )
     gateway.conversations.timeout = 1
-    service = ConversationService(store, gateway.conversations)
+    service = ConversationService(gateway.conversations, flows=store.flows, workers=store.workers)
     runtime = Mock(spec=ServerRuntime, settings=SimpleNamespace(control_api_token=SecretStr("reader")), conversations=service)
     app = create_app(runtime)
     app.state.runtime = runtime

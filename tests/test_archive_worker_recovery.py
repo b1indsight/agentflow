@@ -67,7 +67,15 @@ class ObservedClient(WorkerClient):
 
 async def connect_once(store, subject, executor, journal, *, drop_ack=False, client=None):
     outgoing, incoming = asyncio.Queue(), asyncio.Queue()
-    gateway = WorkerGateway(store, subject, worker_tokens={"worker-a": "secret"}, poll_interval=60)
+    gateway = WorkerGateway(
+        subject,
+        worker_tokens={"worker-a": "secret"},
+        poll_interval=60,
+        deliveries=store.deliveries,
+        jobs=store.jobs,
+        stops=store.stops,
+        workers=store.workers,
+    )
     archive_id = next(job.id for job in store.jobs.list_jobs(journal.load().flow_id)
                       if job.kind is JobKind.ARCHIVE)
     if client is None:
@@ -164,7 +172,17 @@ async def test_original_worker_recovers_cleanup_and_replays_without_redeleting(
     assert store.flows.get_flow(flow.id).state is FlowState.SUCCEEDED
     assert store.workers.get_flow_execution(flow.id).released_at is not None
     assert store.jobs.get_job(job.id).state is JobState.DONE
-    next_flow = ControlService(store).on_trigger("owner/repo", 999, 42)
+    next_flow = ControlService(
+        database=store.database,
+        deliveries=store.deliveries,
+        flows=store.flows,
+        jobs=store.jobs,
+        result_store=store.results,
+        reviews=store.reviews,
+        stops=store.stops,
+        webhook_store=store.webhooks,
+        workers=store.workers,
+    ).on_trigger("owner/repo", 999, 42)
     store.workers.worker_connected("worker-a", PROTOCOL_VERSION, "next")
     next_job = store.workers.assign_job("worker-a", "next-token", "next")
     assert next_job.flow_id == next_flow.id and next_job.kind is JobKind.INITIAL

@@ -268,7 +268,17 @@ async def test_cancel_after_reply_lookup_prevents_any_write(store, thread_revisi
     flow, job, github, subject = thread_revision
 
     async def cancel(thread, marker):
-        ControlService(store).cancel(flow)
+        ControlService(
+            database=store.database,
+            deliveries=store.deliveries,
+            flows=store.flows,
+            jobs=store.jobs,
+            result_store=store.results,
+            reviews=store.reviews,
+            stops=store.stops,
+            webhook_store=store.webhooks,
+            workers=store.workers,
+        ).cancel(flow)
 
     monkeypatch.setattr(ReviewThread, "find_reply", cancel)
     with pytest.raises(ResultPending):

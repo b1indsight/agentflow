@@ -42,50 +42,87 @@ from app.github import (
     ReviewThread,
     retry_delay,
 )
-from app.persistence.store import Store
+from app.persistence.database import Database
+from app.persistence.deliveries import DeliveryStore
+from app.persistence.flows import FlowStore
+from app.persistence.jobs import JobStore
+from app.persistence.results import ResultStore
+from app.persistence.reviews import ReviewStore
+from app.persistence.stops import StopStore
+from app.persistence.workers import WorkerStore
 
 
 class _PendingReviewFeedback(RuntimeError):
     """A notification became unnecessary while its remote prerequisites were being queried."""
 
 
-def _pending_feedback(store: Store, plan: ResultPlan) -> bool:
+def _pending_feedback(plan: ResultPlan, *, reviews: ReviewStore) -> bool:
     frozen = {(f.item_id, f.version) for f in plan.consumed}
-    return any((f.item_id, f.version) not in frozen for f in store.reviews.pending(plan.flow_id))
+    return any((f.item_id, f.version) not in frozen for f in reviews.pending(plan.flow_id))
 
 
 class ResultEffects:
     """Resume ordered effects; an uncertain non-idempotent write is reconciled, never guessed."""
 
-    def __init__(self, store: Store, github: GitHubApp) -> None:
-        self.store = store
+    def __init__(
+        self,
+        github: GitHubApp,
+        *,
+        database: Database,
+        deliveries: DeliveryStore,
+        flows: FlowStore,
+        jobs: JobStore,
+        result_store: ResultStore,
+        reviews: ReviewStore,
+        stops: StopStore,
+        workers: WorkerStore,
+    ) -> None:
+        self.database = database
+        self.deliveries = deliveries
+        self.flows = flows
+        self.jobs = jobs
+        self.result_store = result_store
+        self.reviews = reviews
+        self.stops = stops
+        self.workers = workers
         self.github = github
 
     async def run(self, plan: ResultPlan) -> str | None:
         """Return a permanent failure, or finish all effects; pending work raises ResultPending."""
         while True:
-            with self.store.transaction() as tx:
+            with self.database.transaction() as tx:
+                deliveries_tx = self.deliveries.using(tx)
+                jobs_tx = self.jobs.using(tx)
+                result_store_tx = self.result_store.using(tx)
+                workers_tx = self.workers.using(tx)
                 flow = tx.lock_workflow(plan.flow_id)
                 cancelled = flow is not None and flow.state is FlowState.CANCELLED
                 if flow is None or (flow.state in TERMINAL_STATES and not cancelled):
-                    tx.results.skip_remaining(plan.job_id, "Flow is terminal")
+                    result_store_tx.skip_remaining(plan.job_id, "Flow is terminal")
                     return None
                 if flow.current_attempt_id != plan.attempt_id:
-                    tx.results.skip_remaining(plan.job_id, "result attempt is no longer current")
+                    result_store_tx.skip_remaining(plan.job_id, "result attempt is no longer current")
                     return "result attempt is no longer current"
-                job = tx.jobs.get_job(plan.job_id)
+                job = jobs_tx.get_job(plan.job_id)
                 if job is None:
                     raise ValueError("result job disappeared")
                 if plan.archive is not None:
                     try:
-                        verify_archive(tx, flow, job, plan.archive)
+                        verify_archive(
+                            flow,
+                            job,
+                            plan.archive,
+                            deliveries=deliveries_tx,
+                            jobs=jobs_tx,
+                            workers=workers_tx,
+                        )
                     except ValueError as error:
                         raise ResultPending(str(error)) from error
-                delivery = tx.deliveries.get_delivery(plan.flow_id)
+                delivery = deliveries_tx.get_delivery(plan.flow_id)
                 retired = cancelled or (delivery is not None and delivery.supersedes(job.kind))
                 if retired:
-                    tx.results.retire_for_merge(plan.job_id)
-            records = self.store.results.list_effects(plan.job_id)
+                    result_store_tx.retire_for_merge(plan.job_id)
+            records = self.result_store.list_effects(plan.job_id)
             unfinished = [
                 r
                 for r in records
@@ -99,7 +136,7 @@ class ResultEffects:
                 return None
             if unfinished[0].state is EffectState.FAILED:
                 return unfinished[0].last_error or "GitHub effect failed"
-            record = self.store.results.claim(plan.job_id, uuid4().hex)
+            record = self.result_store.claim(plan.job_id, uuid4().hex)
             if record is None:
                 raise ResultPending("result effects are awaiting retry or reconciliation")
             uncertain = record.dispatched_at is not None
@@ -107,11 +144,11 @@ class ResultEffects:
                 receipt = (await self._recover_retired(plan, record, records) if retired
                            else await self._execute(plan, record, records))
             except _PendingReviewFeedback as exc:
-                self.store.results.finish(record, EffectState.SUCCEEDED,
+                self.result_store.finish(record, EffectState.SUCCEEDED,
                                           receipt=EffectReceipt(pending_reason=str(exc)))
             except ResultPending as exc:
                 cause = exc.__cause__ if isinstance(exc.__cause__, GitHubError) else None
-                self.store.results.finish(
+                self.result_store.finish(
                     record,
                     EffectState.UNCERTAIN,
                     error=str(exc),
@@ -129,7 +166,7 @@ class ResultEffects:
                         and not ambiguous and not retryable):
                     # A definite permission/deletion failure leaves a diagnostic and pending input;
                     # already delivered code must not trigger another Codex run to repair GitHub.
-                    self.store.results.finish(record, EffectState.SUCCEEDED, receipt=EffectReceipt(
+                    self.result_store.finish(record, EffectState.SUCCEEDED, receipt=EffectReceipt(
                         thread_id=record.payload.thread_id, pending_reason=str(exc),
                     ))
                     continue
@@ -140,7 +177,7 @@ class ResultEffects:
                     if retryable
                     else EffectState.FAILED
                 )
-                self.store.results.finish(
+                self.result_store.finish(
                     record,
                     state,
                     error=str(exc),
@@ -151,11 +188,16 @@ class ResultEffects:
                     return str(exc)
                 raise ResultPending(str(exc)) from exc
             else:
-                self.store.results.finish(record, EffectState.SUCCEEDED, receipt=receipt)
+                self.result_store.finish(record, EffectState.SUCCEEDED, receipt=receipt)
 
     def _dispatch(self, plan: ResultPlan, record: EffectRecord) -> None:
         # Check cancellation again after remote reads, immediately before authorizing the write.
-        with self.store.transaction() as tx:
+        with self.database.transaction() as tx:
+            deliveries_tx = self.deliveries.using(tx)
+            jobs_tx = self.jobs.using(tx)
+            result_store_tx = self.result_store.using(tx)
+            reviews_tx = self.reviews.using(tx)
+            workers_tx = self.workers.using(tx)
             flow = tx.lock_workflow(plan.flow_id)
             job = tx.lock_job(plan.job_id)
             if (
@@ -167,17 +209,24 @@ class ResultEffects:
                 or flow.current_attempt_id != plan.attempt_id
             ):
                 raise ResultPending("Flow changed before GitHub dispatch")
-            delivery = tx.deliveries.get_delivery(flow.id)
+            delivery = deliveries_tx.get_delivery(flow.id)
             if plan.archive is not None:
                 try:
-                    verify_archive(tx, flow, job, plan.archive)
+                    verify_archive(
+                        flow,
+                        job,
+                        plan.archive,
+                        deliveries=deliveries_tx,
+                        jobs=jobs_tx,
+                        workers=workers_tx,
+                    )
                 except ValueError as error:
                     raise ResultPending(str(error)) from error
             if delivery is not None and delivery.supersedes(job.kind):
                 raise DeliveryConflict("PR closed or merged before GitHub dispatch")
             if plan.batch_id is not None:
-                batch = tx.reviews.for_job(job)
-                delivery = tx.deliveries.get_delivery(flow.id)
+                batch = reviews_tx.for_job(job)
+                delivery = deliveries_tx.get_delivery(flow.id)
                 if (batch.id != plan.batch_id
                         or batch.state not in {BatchState.READY, BatchState.PROCESSING}
                         or delivery is None or delivery.state is not DeliveryState.OPEN):
@@ -185,14 +234,16 @@ class ResultEffects:
                 if plan.delivery is not None and delivery != plan.delivery:
                     raise DeliveryConflict("delivery changed before GitHub dispatch")
                 if isinstance(record.payload, ResolveEffect) and has_pending_thread_feedback(
-                    tx, plan, record.payload,
+                    plan, record.payload, reviews=reviews_tx
                 ):
                     raise DeliveryConflict("new feedback arrived before resolve dispatch")
-                if (plan.revision is not None
-                        and isinstance(record.payload, (LabelEffect, ReviewersEffect))
-                        and _pending_feedback(tx, plan)):
+                if (
+                    plan.revision is not None
+                    and isinstance(record.payload, (LabelEffect, ReviewersEffect))
+                    and _pending_feedback(plan, reviews=reviews_tx)
+                ):
                     raise _PendingReviewFeedback("出现新反馈，暂停 re-review")
-            tx.results.mark_dispatched(record)
+            result_store_tx.mark_dispatched(record)
 
     @staticmethod
     def _comment_marker(plan: ResultPlan, effect: CommentEffect | ThreadReplyEffect) -> str:
@@ -213,8 +264,8 @@ class ResultEffects:
             return await self._execute(plan, record, records)
         if isinstance(effect, PullRequestEffect):
             found = await repository.find_pull_request_by_head(effect.branch)
-            delivery = self.store.deliveries.get_delivery(plan.flow_id)
-            flow = self.store.flows.get_flow(plan.flow_id)
+            delivery = self.deliveries.get_delivery(plan.flow_id)
+            flow = self.flows.get_flow(plan.flow_id)
             cancelled_opening = (flow is not None and flow.state is FlowState.CANCELLED
                                  and delivery is not None and delivery.state is DeliveryState.OPENING
                                  and delivery.pr_number is None)
@@ -229,7 +280,17 @@ class ResultEffects:
                     validate_created_pull_request(remote, repo, found.number, plan.delivery)
                 except DeliveryConflict as error:
                     raise ResultPending(str(error)) from error
-                adopt_created_pull_request(self.store, plan.attempt_id, plan.delivery, remote)
+                adopt_created_pull_request(
+                    plan.attempt_id,
+                    plan.delivery,
+                    remote,
+                    database=self.database,
+                    deliveries=self.deliveries,
+                    flows=self.flows,
+                    jobs=self.jobs,
+                    stops=self.stops,
+                    workers=self.workers,
+                )
                 found = remote
             return EffectReceipt(pull_request=found)
         if isinstance(effect, ResolveEffect):
@@ -305,7 +366,17 @@ class ResultEffects:
                     raise ResultPending("INITIAL PR intent is missing")
                 validate_created_pull_request(remote, repo, pull_request.number, plan.delivery)
                 if remote.state == "closed":
-                    adopt_created_pull_request(self.store, plan.attempt_id, plan.delivery, remote)
+                    adopt_created_pull_request(
+                        plan.attempt_id,
+                        plan.delivery,
+                        remote,
+                        database=self.database,
+                        deliveries=self.deliveries,
+                        flows=self.flows,
+                        jobs=self.jobs,
+                        stops=self.stops,
+                        workers=self.workers,
+                    )
                     return EffectReceipt(pull_request=remote)
                 pull_request = remote
             validate_open_pull_request(
@@ -319,9 +390,11 @@ class ResultEffects:
             number = effect.number
             if plan.revision is not None:
                 assert isinstance(number, int)
-                if (any(r.receipt and r.receipt.pending_reason for r in records)
-                        or _pending_feedback(self.store, plan)
-                        or not await revision_current(repository, plan, number)):
+                if (
+                    any(r.receipt and r.receipt.pending_reason for r in records)
+                    or _pending_feedback(plan, reviews=self.reviews)
+                    or not await revision_current(repository, plan, number)
+                ):
                     return EffectReceipt(pending_reason="仍有未决反馈或 PR 已变化，暂停 re-review")
             if number == "created_pr":
                 number = unique_pull_request_receipt(records).number
@@ -337,7 +410,7 @@ class ResultEffects:
             else:
                 # Include completed reviews since dispatch so recovery does not request them again.
                 pull_request = PullRequest(repository, number)
-                satisfied = await pull_request.fetch_reviewers(since=(record.dispatched_at or self.store.now()).replace(microsecond=0))
+                satisfied = await pull_request.fetch_reviewers(since=(record.dispatched_at or self.database.now()).replace(microsecond=0))
                 missing = sorted(set(effect.reviewers) - satisfied)
                 if missing:
                     if record.dispatched_at is not None:
@@ -347,12 +420,20 @@ class ResultEffects:
                     self._dispatch(plan, record)
                     await pull_request.request_reviewers(missing)
             return EffectReceipt()
-        return await resolve_thread(self.store, repository, plan, record, records, self._dispatch)
+        return await resolve_thread(
+            repository,
+            plan,
+            record,
+            records,
+            self._dispatch,
+            database=self.database,
+            reviews=self.reviews,
+        )
 
     def _delay(
         self,
         record: EffectRecord,
         error: GitHubError | DeliveryConflict | None = None,
     ) -> float:
-        return retry_delay(record.attempts, self.store.now(),
+        return retry_delay(record.attempts, self.database.now(),
                            error if isinstance(error, GitHubError) else None)

@@ -52,7 +52,9 @@ async def test_control_owns_session_order_attribution_and_tail(tmp_path):
         calls.append(request)
         return reader.query(request)
 
-    service = ConversationService(store, SimpleNamespace(query=query))
+    service = ConversationService(
+        SimpleNamespace(query=query), flows=store.flows, workers=store.workers
+    )
     first = await service.read(42, None, 100)
     assert len(calls) == 1 and first.has_more
     second = await service.read(42, first.next_cursor, 100)

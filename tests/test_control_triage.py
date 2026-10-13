@@ -24,6 +24,7 @@ def triage_runtime(store, review_flow, recording_resources):  # noqa: F811
     batch = claim(store, clock)[0]
     runtime = ServerRuntime.__new__(ServerRuntime)
     runtime.store = store
+    runtime.reviews = store.reviews
     runtime.coordinator = coordinator(store, RecordingGitHub())
     runtime.judge = SimpleNamespace(triage=AsyncMock(side_effect=lambda context: judge_decision(
         TriageVerdict(verdict=Verdict.REVISE, confidence=1, instruction="Fix the bound"), context)))
@@ -51,7 +52,17 @@ async def test_late_decision_cannot_dispatch_retired_batch(store, triage_runtime
     async def intervening(context):
         flow = store.flows.get_flow(batch.flow_id)
         if action == "cancel":
-            ControlService(store).cancel(flow)
+            ControlService(
+                database=store.database,
+                deliveries=store.deliveries,
+                flows=store.flows,
+                jobs=store.jobs,
+                result_store=store.results,
+                reviews=store.reviews,
+                stops=store.stops,
+                webhook_store=store.webhooks,
+                workers=store.workers,
+            ).cancel(flow)
         else:
             await route_merge(store, flow)
         return decide(context)

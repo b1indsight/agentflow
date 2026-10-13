@@ -8,8 +8,9 @@ flowtool/
     domain/           # 领域事实、类型、端口与纯策略（无运行时 I/O）
     contracts/        # 版本化 task/result/message 与冻结结果应用契约
     persistence/      # PostgreSQL schema、事务仓储、指标查询与就绪探针
-      store.py        # 拥有仓储实例，装配完整事务视图与生命周期
+      store.py        # 创建仓储并负责数据库初始化与关闭；服务接收具体仓储
       database.py     # 独立连接/事务上下文、注入时钟和共用锁
+      repository.py   # 保留具体类型的显式事务绑定
       schema.py       # 按依赖顺序初始化的完整建表 SQL
       records.py      # 原生行类型与必需记录回读校验
       flows.py        # Flow/Attempt

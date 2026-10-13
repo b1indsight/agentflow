@@ -34,16 +34,27 @@ class ServerRuntime:
         self.metrics = Metrics()
         self._ready = False
         self._readiness_lock = asyncio.Lock()
-        self.store = Store(
+        store = Store(
             self.settings.database_url,
             lease_duration=timedelta(seconds=self.settings.worker_lease_duration),
             recovery_grace=timedelta(seconds=self.settings.worker_recovery_grace),
         )
         plugins = get_plugin_manager()
         github = GitHubApp(self.settings)
-        self.coordinator = JobCoordinator(self.store, github, self.settings, plugins)
+        self.coordinator = JobCoordinator(
+            github,
+            self.settings,
+            plugins,
+            database=store.database,
+            deliveries=store.deliveries,
+            flows=store.flows,
+            jobs=store.jobs,
+            result_store=store.results,
+            reviews=store.reviews,
+            stops=store.stops,
+            workers=store.workers,
+        )
         self.gateway = WorkerGateway(
-            self.store,
             self.coordinator,
             worker_tokens={
                 worker_id: token.get_secret_value()
@@ -53,36 +64,92 @@ class ServerRuntime:
             heartbeat_timeout=self.settings.worker_heartbeat_timeout,
             poll_interval=self.settings.worker_poll_interval,
             metrics=self.metrics,
+            deliveries=store.deliveries,
+            jobs=store.jobs,
+            stops=store.stops,
+            workers=store.workers,
         )
         self.judge = BubJudge(model=settings.judge_model, api_key=settings.judge_api_key,
                          api_base=settings.judge_api_base, timeout=settings.judge_timeout_seconds)
         self._triage_task: asyncio.Task[None] | None = None
-        self.service = ControlService(self.store, plugins, self.gateway.notify_jobs)
-        self.conversations = ConversationService(self.store, self.gateway.conversations)
-        self.webhooks = WebhookConsumer(self.store, self.settings, self.service)
+        self.service = ControlService(
+            plugins,
+            self.gateway.notify_jobs,
+            database=store.database,
+            deliveries=store.deliveries,
+            flows=store.flows,
+            jobs=store.jobs,
+            result_store=store.results,
+            reviews=store.reviews,
+            stops=store.stops,
+            webhook_store=store.webhooks,
+            workers=store.workers,
+        )
+        self.conversations = ConversationService(
+            self.gateway.conversations, flows=store.flows, workers=store.workers
+        )
+        self.webhooks = WebhookConsumer(
+            self.settings,
+            self.service,
+            database=store.database,
+            deliveries=store.deliveries,
+            flows=store.flows,
+            jobs=store.jobs,
+            reconcile_store=store.reconcile,
+            result_store=store.results,
+            reviews=store.reviews,
+            stops=store.stops,
+            webhook_store=store.webhooks,
+            workers=store.workers,
+        )
         self.reconciler = Reconciler(
-            self.store, github, self.service,
+            github,
+            self.service,
             settle_seconds=self.settings.settle_seconds,
             interval=self.settings.reconcile_interval_seconds,
             batch_size=self.settings.reconcile_batch_size,
             concurrency=self.settings.reconcile_concurrency,
+            database=store.database,
+            deliveries=store.deliveries,
+            flows=store.flows,
+            jobs=store.jobs,
+            reconcile_store=store.reconcile,
+            reviews=store.reviews,
+            stops=store.stops,
+            workers=store.workers,
         )
         self.feedback_reconciler = FeedbackReconciler(
-            self.store, github, settle_seconds=self.settings.settle_seconds,
-            bot_login=self.settings.bot_login, interval=self.settings.reconcile_interval_seconds,
-            batch_size=self.settings.reconcile_batch_size, concurrency=self.settings.reconcile_concurrency,
+            github,
+            settle_seconds=self.settings.settle_seconds,
+            bot_login=self.settings.bot_login,
+            interval=self.settings.reconcile_interval_seconds,
+            batch_size=self.settings.reconcile_batch_size,
+            concurrency=self.settings.reconcile_concurrency,
+            database=store.database,
+            deliveries=store.deliveries,
+            reconcile_store=store.reconcile,
+            reviews=store.reviews,
         )
         self.project_sync = ProjectSync(
-            self.store, self.settings.projects, github,
-            interval=self.settings.reconcile_interval_seconds, batch_size=self.settings.reconcile_batch_size,
+            self.settings.projects,
+            github,
+            interval=self.settings.reconcile_interval_seconds,
+            batch_size=self.settings.reconcile_batch_size,
             concurrency=self.settings.reconcile_concurrency,
+            database=store.database,
+            projects=store.projects,
         )
+        self.store = store
+        self.workers = store.workers
+        self.reviews = store.reviews
+        self.result_store = store.results
+        self.webhook_store = store.webhooks
         self._tasks: list[asyncio.Task[None]] = []
 
     def startup(self) -> None:
         self.store.init_db()
-        self.store.results.recover_claims()
-        self.store.workers.recover_abandoned_assignments()
+        self.result_store.recover_claims()
+        self.workers.recover_abandoned_assignments()
         self._tasks = [
             asyncio.create_task(self.webhooks.run()),
             asyncio.create_task(self.project_sync.run()),
@@ -110,7 +177,7 @@ class ServerRuntime:
         while True:
             await asyncio.sleep(self.settings.worker_sweep_interval)
             try:
-                requeued, failed = self.store.workers.sweep_expired_assignments()
+                requeued, failed = self.workers.sweep_expired_assignments()
                 self.metrics.expired.labels("requeued").inc(requeued)
                 self.metrics.expired.labels("failed").inc(failed)
                 if requeued or failed:
@@ -137,7 +204,7 @@ class ServerRuntime:
             await asyncio.sleep(self.settings.worker_sweep_interval)
 
     def _settle_reviews(self) -> None:
-        if self.store.reviews.claim_due():
+        if self.reviews.claim_due():
             self.gateway.notify_jobs()
 
         if self._triage_task is None or self._triage_task.done():
@@ -145,7 +212,7 @@ class ServerRuntime:
 
     async def _run_triage(self) -> None:
         try:
-            batches = self.store.reviews.pending_triage()
+            batches = self.reviews.pending_triage()
         except Exception:  # noqa: BLE001 -- retry a temporarily unavailable database next sweep
             logger.exception("could not read pending review batches")
             return
@@ -166,7 +233,7 @@ class ServerRuntime:
                 logger.exception("review settle sweep failed; retrying next sweep")
 
     async def receive_webhook(self, event_type: str, delivery_id: str, payload: dict, digest: str) -> None:
-        await asyncio.to_thread(self.store.webhooks.receive, delivery_id, event_type, payload, digest)
+        await asyncio.to_thread(self.webhook_store.receive, delivery_id, event_type, payload, digest)
         self.webhooks.wakeup.set()
 
     async def shutdown(self) -> None:

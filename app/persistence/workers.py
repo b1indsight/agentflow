@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import timedelta
-from typing import TYPE_CHECKING
 
 from psycopg.rows import class_row
 from psycopg.types.json import Jsonb
@@ -33,10 +32,7 @@ from app.persistence.deliveries import DeliveryStore
 from app.persistence.flows import FlowStore
 from app.persistence.jobs import JobStore
 from app.persistence.records import required
-
-if TYPE_CHECKING:
-    from app.persistence.database import Database
-
+from app.persistence.repository import Repository
 
 # A frozen archive may have started deleting before its Started frame reached serve.
 _MAY_HAVE_EXECUTED = (
@@ -44,11 +40,8 @@ _MAY_HAVE_EXECUTED = (
 )
 
 
-class WorkerStore:
+class WorkerStore(Repository):
     """Worker slots, fenced assignments, preparation, and lease recovery."""
-
-    def __init__(self, db: Database) -> None:
-        self._db = db
 
     def get_flow_execution(self, flow_id: int) -> FlowExecution | None:
         with (

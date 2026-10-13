@@ -21,7 +21,14 @@ from tests.test_revision_recovery import revision_resources as revision_resource
 
 
 def gateway(store, subject):
-    return WorkerGateway(store, subject, worker_tokens={})
+    return WorkerGateway(
+        subject,
+        worker_tokens={},
+        deliveries=store.deliveries,
+        jobs=store.jobs,
+        stops=store.stops,
+        workers=store.workers,
+    )
 
 
 @pytest.mark.parametrize("change,signing_fails", [
@@ -38,7 +45,9 @@ async def test_coordinator_rechecks_after_capability_io(store, pending_revision,
         if change == "closed":
             with store.transaction() as tx:
                 tx.lock_workflow(flow.id)
-                pause_delivery(tx, tx.deliveries.get_delivery(flow.id))
+                pause_delivery(
+                    tx.deliveries.get_delivery(flow.id), deliveries=tx.deliveries, jobs=tx.jobs
+                )
         elif change == "merged":
             with store.connection() as connection:
                 connection.execute("UPDATE flow_deliveries SET state='merged' WHERE flow_id=%s", (flow.id,))
@@ -177,7 +186,9 @@ async def test_close_wins_over_a_read_failure(store, pending_revision, monkeypat
     async def close(repo, branch, *, retry_transient=False):
         with store.transaction() as tx:
             tx.lock_workflow(flow.id)
-            pause_delivery(tx, tx.deliveries.get_delivery(flow.id))
+            pause_delivery(
+                tx.deliveries.get_delivery(flow.id), deliveries=tx.deliveries, jobs=tx.jobs
+            )
         raise GitHubError(GitHubErrorKind.TRANSIENT, "get_ref")
 
     monkeypatch.setattr(Repository, "fetch_ref", close)

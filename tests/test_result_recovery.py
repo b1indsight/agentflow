@@ -96,7 +96,17 @@ async def completed_open_initial(
     store: Store, recording_resources: None,
 ) -> tuple[Flow, JobCoordinator, RecordingGitHub, FlowToolRequest, InitialTaskResult]:
     """Complete a real INITIAL assignment before testing retries of its existing PR."""
-    flow = ControlService(store).on_trigger("owner/repo", 8, 42)
+    flow = ControlService(
+        database=store.database,
+        deliveries=store.deliveries,
+        flows=store.flows,
+        jobs=store.jobs,
+        result_store=store.results,
+        reviews=store.reviews,
+        stops=store.stops,
+        webhook_store=store.webhooks,
+        workers=store.workers,
+    ).on_trigger("owner/repo", 8, 42)
     assert flow is not None
     store.workers.worker_connected("worker-a", PROTOCOL_VERSION, "epoch")
     job = store.workers.assign_job("worker-a", "token", "epoch")
@@ -133,7 +143,17 @@ async def test_merged_initial_retry_keeps_execution_facts_without_reopening(
 ):
     # A cancelled completed INITIAL can retry against its still-open PR, which a human can merge.
     flow, subject, github, initial_request, initial_result = completed_open_initial
-    service = ControlService(store)
+    service = ControlService(
+        database=store.database,
+        deliveries=store.deliveries,
+        flows=store.flows,
+        jobs=store.jobs,
+        result_store=store.results,
+        reviews=store.reviews,
+        stops=store.stops,
+        webhook_store=store.webhooks,
+        workers=store.workers,
+    )
     service.cancel(flow)
     service.retry(flow)
     # Fresh worker-b starts from seed A, then checks out existing H where H descends A and H != A.
@@ -180,7 +200,17 @@ async def test_cancel_before_terminal_keeps_executor_slot_until_result_ack(scena
     # Cancel is not a remote kill: leave the running assignment receivable until its result arrives.
     store, github, job, result = scenario
     store.job_records[job.id] = job
-    ControlService(cast(Store, store)).cancel(store.flow)
+    ControlService(
+        database=cast(Store, store).database,
+        deliveries=cast(Store, store).deliveries,
+        flows=cast(Store, store).flows,
+        jobs=cast(Store, store).jobs,
+        result_store=cast(Store, store).results,
+        reviews=cast(Store, store).reviews,
+        stops=cast(Store, store).stops,
+        webhook_store=cast(Store, store).webhooks,
+        workers=cast(Store, store).workers,
+    ).cancel(store.flow)
     assert store.job_records[job.id].state is JobState.RUNNING
     assert await apply_result(coordinator(store, github), job, result) is JobState.DONE
     assert store.flow.state is FlowState.CANCELLED
@@ -334,7 +364,17 @@ async def test_retired_result_reconciles_dispatched_comment_without_resending(
         store.delivery.version += 1
         store.reviews.cancel(store.flow.id)
     else:
-        ControlService(cast(Store, store)).cancel(store.flow)
+        ControlService(
+            database=cast(Store, store).database,
+            deliveries=cast(Store, store).deliveries,
+            flows=cast(Store, store).flows,
+            jobs=cast(Store, store).jobs,
+            result_store=cast(Store, store).results,
+            reviews=cast(Store, store).reviews,
+            stops=cast(Store, store).stops,
+            webhook_store=cast(Store, store).webhooks,
+            workers=cast(Store, store).workers,
+        ).cancel(store.flow)
     store.results.clock += timedelta(seconds=30)
     if remote_receipt:
         assert await apply_result(subject, job, result) is JobState.FAILED
@@ -364,7 +404,17 @@ async def test_unknown_comment_is_not_resubmitted_and_blocks_retry(scenario, mon
     assert len(sent) == 1
     assert store.job_records[job.id].result_applied_at is None
     with pytest.raises(ValueError, match="pending result"):
-        ControlService(cast(Store, store)).retry(store.flow)
+        ControlService(
+            database=cast(Store, store).database,
+            deliveries=cast(Store, store).deliveries,
+            flows=cast(Store, store).flows,
+            jobs=cast(Store, store).jobs,
+            result_store=cast(Store, store).results,
+            reviews=cast(Store, store).reviews,
+            stops=cast(Store, store).stops,
+            webhook_store=cast(Store, store).webhooks,
+            workers=cast(Store, store).workers,
+        ).retry(store.flow)
 
 
 async def test_final_commit_failure_rolls_back_completion_but_keeps_effect_receipt(
@@ -399,7 +449,17 @@ async def test_cancel_during_remote_lookup_does_not_authorize_a_comment(
     store, github, job, result = scenario
 
     async def cancel_during_lookup(issue, marker):
-        ControlService(cast(Store, store)).cancel(store.flow)
+        ControlService(
+            database=cast(Store, store).database,
+            deliveries=cast(Store, store).deliveries,
+            flows=cast(Store, store).flows,
+            jobs=cast(Store, store).jobs,
+            result_store=cast(Store, store).results,
+            reviews=cast(Store, store).reviews,
+            stops=cast(Store, store).stops,
+            webhook_store=cast(Store, store).webhooks,
+            workers=cast(Store, store).workers,
+        ).cancel(store.flow)
 
     monkeypatch.setattr(Issue, "find_comment", cancel_during_lookup)
     with pytest.raises(ResultPending):

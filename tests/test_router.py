@@ -12,20 +12,21 @@ from app.persistence.store import Store
 
 class RecordingService(ControlService):
     def __init__(self, store: Store) -> None:
-        self.store = store
+        self.flows = store.flows
+        self.jobs = store.jobs
 
     def on_trigger(self, repo: str, issue_number: int, installation_id: int | None) -> Flow:
-        flow = self.store.flows.create_flow(repo, issue_number, installation_id)
-        self.store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
+        flow = self.flows.create_flow(repo, issue_number, installation_id)
+        self.jobs.enqueue_job(flow.id, JobKind.INITIAL)
         return flow
 
     def cancel(self, flow: Flow) -> None:
         flow.state = FlowState.CANCELLED
-        self.store.flows.update_flow(flow)
+        self.flows.update_flow(flow)
 
     def on_merged(self, flow: Flow, delivery_id: str, payload: dict) -> None:
         flow.state = FlowState.SUCCEEDED
-        self.store.flows.update_flow(flow)
+        self.flows.update_flow(flow)
 
     def notify_jobs(self) -> None:
         pass
@@ -43,7 +44,15 @@ def router(store: Store, monkeypatch) -> EventRouter:
         submit_grace_seconds=15.0,
     )
     service = RecordingService(store)
-    return EventRouter(store, service, settings)
+    return EventRouter(
+        service,
+        settings,
+        database=store.database,
+        flows=store.flows,
+        reconcile_store=store.reconcile,
+        reviews=store.reviews,
+        webhook_store=store.webhooks,
+    )
 
 
 def issue_event(*, action: str, sender: str = "alice") -> dict:

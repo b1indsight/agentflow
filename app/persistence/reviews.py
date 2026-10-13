@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from datetime import timedelta
-from typing import TYPE_CHECKING
 
 from psycopg.rows import class_row
 from psycopg.types.json import Jsonb
@@ -31,17 +30,12 @@ from app.github import ReviewThreads
 from app.persistence.deliveries import DeliveryStore
 from app.persistence.flows import FlowStore
 from app.persistence.jobs import JobStore
+from app.persistence.repository import Repository
 from app.persistence.webhooks import WebhookStore
 
-if TYPE_CHECKING:
-    from app.persistence.database import Database
 
-
-class ReviewStore:
+class ReviewStore(Repository):
     """Use the database clock and explicit transaction views; never hold locks across I/O."""
-
-    def __init__(self, db: Database) -> None:
-        self._db = db
 
     def ingest(
         self,

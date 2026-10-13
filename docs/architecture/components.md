@@ -186,14 +186,15 @@ terminal result 三方核对。当前缺口包括：
 
 反馈批次的前置判断/直接修订选择、指令和未决问题归并由 `review_policy` 的纯函数决定；
 `recovery_policy` 根据固定时间及读取的事实决定重排、失败、保留诊断和绑定释放。
-功能仓储负责候选查询、信号/回执事实和原子写入，Store 统一维护连接、事务、时钟和共用锁。
+功能仓储负责候选查询、信号/回执事实和原子写入，Database 统一维护连接、事务、时钟和共用锁。
 WorkerStore 的恢复扫描在原 worker 锁事务内先提交 job 动作，再查询事务内更新后的绑定事实；
 策略函数不执行 SQL、读取时钟或调用外部服务。
 
 Store 显式创建并持有以下仓储实例；它们共享独立的 `Database` 上下文，使用 Psycopg 3
-同步连接池访问 PostgreSQL。功能仓储接收数据库上下文，不持有或导入聚合 Store：
+同步连接池访问 PostgreSQL。应用装配时将具体仓储注入服务；服务直接持有 `FlowStore`、
+`JobStore` 等，调用 `self.flows.get_flow_by_pr(...)`。服务与功能仓储均不依赖聚合 Store：
 
-| 入口与模块 | 操作归属 |
+| 装配入口与模块 | 操作归属 |
 | --- | --- |
 | `store.flows` / `flows.py` | Flow 与 Attempt 的事实读写 |
 | `store.deliveries` / `deliveries.py` | 交付状态与 tool-call 去重账本 |
@@ -208,8 +209,9 @@ Store 显式创建并持有以下仓储实例；它们共享独立的 `Database`
 
 `schema.py` 集中完整建表 SQL，初始化沿用既有依赖顺序；`records.py` 仅提供原生行类型及
 必需记录回读校验。`database.py` 提供连接、显式事务、注入时钟与共用锁；Store 负责
-整组仓储的装配和生命周期。只读入口返回 Store 已持有的实例，事务视图重新装配自己的一组，
-普通实例保留原有连接范围。仓储需要其他仓储的 SQL 操作时，显式使用具体类型并传入同一上下文。
+整组仓储的装配、数据库初始化和关闭。`repository.py` 的 `using(tx)` 保留具体仓储类型，
+返回绑定事务连接的视图；原仓储保留自己的连接范围。仓储需要其他仓储的 SQL 操作时，
+显式使用具体类型并传入同一上下文。Store 的整组事务视图用于初始化、运维及测试装配。
 领域数据类型继续拥有自己的校验和纯规则，持久化操作归上述仓储；时间统一使用注入时钟。
 
 `Flow`、`FlowExecution`、`FlowDelivery`、`FlowToolCall`、`Attempt`、`Job` 是 Pydantic
@@ -240,12 +242,13 @@ cursor 上使用 Psycopg `class_row(Model)`，由模型统一校验枚举、时�
 
 自动化覆盖 active 唯一约束、flow/attempt/job 往返、review upsert、assignment start/heartbeat/fencing、
 lease 到期 requeue、started grace/deadline、epoch fencing、result inbox 去重、跨 Store 可见性、delivery 去重和并发 assign。
-`store.workers.assign_job()` 使用事务内的 `FOR UPDATE SKIP LOCKED`，gateway 接受多个独立配置 worker。
+`WorkerStore.assign_job()` 使用事务内的 `FOR UPDATE SKIP LOCKED`，gateway 接受多个独立配置 worker。
 
-Store 继续使用同步接口。assignment claim 无锁读取公平候选，只有请求方就是候选时才锁定自身 worker，
+仓储继续使用同步接口。assignment claim 无锁读取公平候选，只有请求方就是候选时才锁定自身 worker，
 重新检查 epoch、在线状态、空闲槽位及 drain/binding；随后锁定最早 eligible Flow job，并原子创建
-或复用 lifecycle binding。`with store.transaction() as tx` 使用新数据库上下文装配 Store 视图，各领域步骤显式使用
-`tx.flows`、`tx.jobs` 等对象；所有步骤共用该连接，异常一起回滚，事务退出后这些视图拒绝继续使用。
+或复用 lifecycle binding。`with database.transaction() as tx` 提供绑定连接的数据库上下文；
+服务用 `self.flows.using(tx)`、`self.jobs.using(tx)` 绑定自己持有的仓储。
+所有步骤共用该连接，异常一起回滚，事务退出后这些视图拒绝继续使用。
 结果的最终事务同时写入 flow/delivery/attempt、带源 job 唯一键的派生 job/codex run、`result_applied_at` 和 worker slot。
 `flow_tool_calls` 的 prepared delivery 与 response 也一起提交。
 

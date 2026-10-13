@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Literal
+from typing import Literal
 
 from psycopg.rows import class_row
 from pydantic import BaseModel
@@ -13,8 +13,7 @@ from app.github import FeedbackSource
 ReconcileSource = FeedbackSource | Literal["threads"]
 PR_RECONCILE_ELIGIBLE = "f.state<>'succeeded' AND d.pr_number IS NOT NULL AND d.state<>'merged'"
 
-if TYPE_CHECKING:
-    from app.persistence.database import Database
+from app.persistence.repository import Repository
 
 
 class ReconcileState(BaseModel):
@@ -32,11 +31,8 @@ class FeedbackCheck(ReconcileState):
     scan_incomplete: bool = False
 
 
-class ReconcileStore:
+class ReconcileStore(Repository):
     """Use the database connection, including the caller's workflow transaction."""
-
-    def __init__(self, db: Database) -> None:
-        self._db = db
 
     def feedback_seed(self, limit: int) -> None:
         with self._db.connection() as connection:

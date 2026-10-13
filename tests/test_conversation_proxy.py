@@ -98,7 +98,7 @@ async def test_replacement_connection_and_busy_limit() -> None:
 async def test_service_resolves_existing_database_metadata_and_released_binding(store, monkeypatch) -> None:
     flow = store.flows.create_flow("owner/repo", 8, installation_id=42)
     broker = ConversationBroker()
-    service = ConversationService(store, broker)
+    service = ConversationService(broker, flows=store.flows, workers=store.workers)
     assert (await service.read(flow.id, None, 100)).unavailable_reason == "no_worker"
     attempt = store.flows.create_attempt(flow.id)
     flow.current_attempt_id = attempt.id

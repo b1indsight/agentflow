@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 from datetime import datetime
-from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from psycopg.rows import class_row
@@ -14,10 +13,8 @@ from app.contracts.protocol import ExecutionStopped, StopExecution
 from app.domain.models import DeliveryState, FlowState
 from app.persistence.deliveries import DeliveryStore
 from app.persistence.jobs import JobStore
+from app.persistence.repository import Repository
 from app.persistence.workers import WorkerStore
-
-if TYPE_CHECKING:
-    from app.persistence.database import Database
 
 
 class StopIntent(BaseModel):
@@ -38,9 +35,7 @@ class StopIntent(BaseModel):
                              assignment_token=self.assignment_token, connection_epoch=epoch)
 
 
-class StopStore:
-    def __init__(self, db: Database) -> None:
-        self._db = db
+class StopStore(Repository):
 
     def request(self, flow_id: int) -> None:
         """Called under the workflow lock before attempting to release the binding."""

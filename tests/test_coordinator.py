@@ -73,6 +73,12 @@ class MemoryStore(RepositoryViews):
         try:
             yield self
         except Exception:
+            # Services retain these injected objects; rollback must restore them in place.
+            for name in ("results", "reviews", "stops"):
+                current = getattr(self, name)
+                current.__dict__.clear()
+                current.__dict__.update(snapshot[name].__dict__)
+                snapshot[name] = current
             self.__dict__.clear()
             self.__dict__.update(snapshot)
             raise
@@ -212,20 +218,24 @@ class MemoryStore(RepositoryViews):
             self.sources[source_job_id, source_key] = job
         return job
 
-async def apply_result(subject: JobCoordinator, job: Job, result: ExecutionResult) -> JobState:
+class CoordinatorFixture(JobCoordinator):
+    memory: Store | MemoryStore
+
+
+async def apply_result(subject: CoordinatorFixture, job: Job, result: ExecutionResult) -> JobState:
     """Model the accepted-inbox boundary before invoking the production result application."""
-    store = cast(MemoryStore, subject.store)
+    store = cast(MemoryStore, subject.memory)
     store.accept(job, result)
     return await subject.results.apply(job.id)
 
 
-async def prepare(subject: JobCoordinator, job: Job):
-    store = cast(MemoryStore, subject.store)
+async def prepare(subject: CoordinatorFixture, job: Job):
+    store = cast(MemoryStore, subject.memory)
     store.job_records.setdefault(job.id, job.model_copy(deep=True))
     return await subject.prepare(job)
 
 
-def coordinator(store: Store | MemoryStore, github: GitHubApp) -> JobCoordinator:
+def coordinator(store: Store | MemoryStore, github: GitHubApp) -> CoordinatorFixture:
     settings = ServerSettings.model_construct(
         database_url="postgresql://localhost/test",
         worker_tokens={"worker-1": SecretStr("worker-secret")},
@@ -238,11 +248,20 @@ def coordinator(store: Store | MemoryStore, github: GitHubApp) -> JobCoordinator
         prepare_max_failures=5,
         prepare_retry_window_seconds=900,
     )
-    return JobCoordinator(
-        cast(Store, store),
+    subject = CoordinatorFixture(
         github,
         settings,
+        database=cast(Store, store).database,
+        deliveries=cast(Store, store).deliveries,
+        flows=cast(Store, store).flows,
+        jobs=cast(Store, store).jobs,
+        result_store=cast(Store, store).results,
+        reviews=cast(Store, store).reviews,
+        stops=cast(Store, store).stops,
+        workers=cast(Store, store).workers,
     )
+    subject.memory = store
+    return subject
 
 
 @pytest.mark.asyncio

@@ -133,8 +133,16 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path):
         def worker_connected(self, *args): pass
         def worker_disconnected(self, *args): pass
 
-    gateway = WorkerGateway(store, Coordinator(), worker_tokens={'w': 'secret'},
-                            heartbeat_interval=0.01, poll_interval=0.01)
+    gateway = WorkerGateway(
+        Coordinator(),
+        worker_tokens={"w": "secret"},
+        heartbeat_interval=0.01,
+        poll_interval=0.01,
+        deliveries=store.deliveries,
+        jobs=store.jobs,
+        stops=store.stops,
+        workers=store.workers,
+    )
     client = WorkerClient(worker_id='w', worker_token='secret', serve_ws_url='unused',
                           executor=Executor(), session=WorkerSession(tmp_path))
     server = asyncio.create_task(gateway.handle(Socket()))
@@ -145,7 +153,18 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path):
                 if server.done(): server.result()
                 if worker.done(): worker.result()
                 await asyncio.sleep(0.01)
-            ControlService(store, jobs_available=gateway.notify_jobs).cancel(flow)
+            ControlService(
+                jobs_available=gateway.notify_jobs,
+                database=store.database,
+                deliveries=store.deliveries,
+                flows=store.flows,
+                jobs=store.jobs,
+                result_store=store.results,
+                reviews=store.reviews,
+                stops=store.stops,
+                webhook_store=store.webhooks,
+                workers=store.workers,
+            ).cancel(flow)
             while store.workers.get_flow_execution(flow.id).released_at is None:
                 if server.done(): server.result()
                 if worker.done(): worker.result()

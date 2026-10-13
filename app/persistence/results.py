@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from datetime import timedelta
-from typing import TYPE_CHECKING
 
 from psycopg.rows import class_row
 from psycopg.types.json import Jsonb
@@ -11,16 +10,11 @@ from psycopg.types.json import Jsonb
 from app.contracts.result_models import EffectReceipt, EffectRecord, EffectState, ResultPlan
 from app.domain.models import Job
 from app.github import GitHubError, retry_delay
-
-if TYPE_CHECKING:
-    from app.persistence.database import Database
+from app.persistence.repository import Repository
 
 
-class ResultStore:
+class ResultStore(Repository):
     """Share the database context's connection, including its explicit transaction when preparing."""
-
-    def __init__(self, db: Database) -> None:
-        self._db = db
 
     def get_plan(self, job_id: int) -> ResultPlan | None:
         with self._db.connection() as connection:
