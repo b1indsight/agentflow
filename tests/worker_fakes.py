@@ -1,14 +1,16 @@
 """Explicit worker dependencies for in-memory protocol tests."""
 
+from collections.abc import Awaitable, Callable
 from unittest.mock import Mock
 
 from app.contracts.protocol import ExecutionStopped
 from app.control.results import ResultApplication
-from app.domain.models import WorkerRecord, WorkerStatus, utcnow
-from app.persistence.stop_store import StopIntent
+from app.domain.models import JobState, WorkerRecord, WorkerStatus, utcnow
+from app.persistence.stop_store import StopIntent, StopStore
+from app.persistence.store import Store
 
 
-class NoPendingStops:
+class NoPendingStops(StopStore):
     def pending(self, worker_id: str) -> StopIntent | None:
         return None
 
@@ -30,8 +32,8 @@ def connected_worker(worker_id: str, protocol_version: int, connection_epoch: st
 
 
 
-def make_results(store, coordinator):
-    """Exercise real result locking and recovery around an in-memory commit."""
+def result_application(store: Store, commit_result: Callable[[int], Awaitable[JobState]]) -> ResultApplication:
+    """Exercise result locking and recovery around the supplied commit callback."""
     results = ResultApplication(store, Mock(), Mock(), Mock())
-    results._apply = coordinator.apply_result
+    results._apply = commit_result  # type: ignore[method-assign, assignment]
     return results

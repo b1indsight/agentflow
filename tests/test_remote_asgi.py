@@ -1,6 +1,7 @@
 from threading import Event
-from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
+from pydantic import SecretStr
 from starlette.testclient import TestClient
 
 from app.contracts.protocol import (
@@ -19,15 +20,19 @@ from app.contracts.protocol import (
     parse_server_message,
 )
 from app.control.api import create_app
+from app.control.config import ServeSettings
 from app.control.conversation import ConversationService
+from app.control.coordinator import JobCoordinator
 from app.control.gateway import WorkerGateway
+from app.control.runtime import ControlRuntime
+from app.control.tools import FlowToolService
 from app.domain.models import Job, JobKind, JobState
-from app.persistence.stop_store import StopStore
 from app.persistence.store import Store
 from app.telemetry.metrics import Metrics
+from tests.worker_fakes import result_application
 
 
-class AsgiCoordinator:
+class AsgiCoordinator(JobCoordinator):
     async def prepare_for_assignment(self, job, worker, token, epoch):
         task = await self.prepare(job)
         if isinstance(task, JobState):
@@ -38,6 +43,8 @@ class AsgiCoordinator:
     def __init__(self, attempt_id: int, store: Store) -> None:
         self.attempt_id = attempt_id
         self.store = store
+        self.tools = Mock(spec=FlowToolService, execute=AsyncMock(side_effect=self._tool_response))
+        self.results = result_application(store, self._commit_result)
 
     async def prepare(self, job: Job) -> ExecutionTask | JobState:
         return InitialTask(
@@ -50,7 +57,7 @@ class AsgiCoordinator:
             branch="flow/issue-8",
         )
 
-    async def execute_tool(self, request: FlowToolRequest, *, worker_id: str) -> FlowToolResponse:
+    async def _tool_response(self, request: FlowToolRequest, *, worker_id: str) -> FlowToolResponse:
         return FlowToolResponse(
             call_id=request.call_id,
             error="unused",
@@ -60,7 +67,7 @@ class AsgiCoordinator:
     def mark_started(self, job: Job, task: ExecutionTask, worker_id: str) -> None:
         pass
 
-    async def apply_result(self, job_id: int) -> JobState:
+    async def _commit_result(self, job_id: int) -> JobState:
         self.store.complete_persisted_result(job_id, JobState.DONE)
         return JobState.DONE
 
@@ -68,14 +75,16 @@ class AsgiCoordinator:
         pass
 
 
-class AsgiContext:
+class AsgiRuntime(ControlRuntime):
     def __init__(self, store: Store, attempt_id: int) -> None:
-        self.settings = SimpleNamespace(github_webhook_secret="unused", webhook_max_body_bytes=1024,
-                                        metrics_token=None, host="test", port=0)
+        self.settings = ServeSettings.model_construct(database_url=store.database_url,
+                                      worker_tokens={"worker-1": SecretStr("worker-secret")},
+                                      github_webhook_secret="unused", webhook_max_body_bytes=1024,
+                                      metrics_token=None, host="test", port=0)
         self.metrics = Metrics()
         self.gateway = WorkerGateway(
             store,
-            AsgiCoordinator(attempt_id, store), execution_control=StopStore(store),
+            AsgiCoordinator(attempt_id, store),
             worker_tokens={"worker-1": "worker-secret"},
             poll_interval=0.01,
         )
@@ -108,7 +117,7 @@ def test_real_asgi_websocket_completes_a_postgresql_job(store: Store, monkeypatc
     flow.current_attempt_id = attempt.id
     store.update_flow(flow)
     job = store.enqueue_job(flow.id, JobKind.INITIAL)
-    application = create_app(lambda: AsgiContext(store, attempt.id))  # type: ignore[arg-type]
+    application = create_app(AsgiRuntime(store, attempt.id))
 
     with (
         TestClient(application) as client,

@@ -188,7 +188,7 @@ async def test_accepted_result_survives_expired_worker_recovery(
     github.pull_request = pull_request.model_copy(update={
         "head_branch": f"flow/{flow.id}", "head_sha": "abc123", "base_branch": "trunk",
     })
-    await coordinator(store, github).apply_result(job.id)
+    await coordinator(store, github).results.apply(job.id)
     finished = store.get_job(job.id)
     assert finished is not None and finished.state is JobState.DONE
     execution = store.get_flow_execution(job.flow_id)

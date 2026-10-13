@@ -1,5 +1,5 @@
 import asyncio
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -11,29 +11,28 @@ from app.contracts.protocol import (
     parse_server_message,
 )
 from app.control.conversation import ConversationBroker, ConversationService
+from app.control.worker_connection import WorkerConnection
 from app.domain.models import JobKind
 from tests.test_conversation_history import SESSION
 
 
-class Socket:
-    def __init__(self):
-        self.sent = asyncio.Queue()
-
-    async def send_text(self, raw):
-        await self.sent.put(parse_server_message(raw))
+def history_connection() -> Mock:
+    connection = Mock(spec=WorkerConnection, sent=asyncio.Queue())
+    connection.send_text = AsyncMock(side_effect=lambda raw: connection.sent.put_nowait(parse_server_message(raw)))
+    return connection
 
 
 @pytest.mark.asyncio
 async def test_query_correlates_response_and_rejects_other_connection() -> None:
     broker = ConversationBroker()
-    socket = Socket()
-    broker.connect("worker", "epoch", socket)
+    connection = history_connection()
+    broker.connect("worker", "epoch", connection)
     query = asyncio.create_task(broker.query("worker", HistoryQuery(session_id=SESSION)))
-    request = await socket.sent.get()
+    request = await connection.sent.get()
     assert isinstance(request, ConversationQuery)
     response = ConversationResult(request_id=request.request_id, connection_epoch="epoch",
                                   page=HistoryPage(session_id=SESSION))
-    assert broker.accept(socket, response)
+    assert broker.accept(connection, response)
     assert (await query).session_id == SESSION
     assert not broker.pending
 
@@ -41,15 +40,15 @@ async def test_query_correlates_response_and_rejects_other_connection() -> None:
 @pytest.mark.asyncio
 async def test_disconnect_and_timeout_cleanup() -> None:
     broker = ConversationBroker()
-    socket = Socket()
-    broker.connect("worker", "epoch", socket)
+    connection = history_connection()
+    broker.connect("worker", "epoch", connection)
     query = asyncio.create_task(broker.query("worker", HistoryQuery(session_id=SESSION)))
-    await socket.sent.get()
-    broker.disconnect(socket)
+    await connection.sent.get()
+    broker.disconnect(connection)
     with pytest.raises(ConversationFailure, match="worker_unavailable"):
         await query
     assert not broker.pending
-    broker.connect("worker", "next", socket)
+    broker.connect("worker", "next", connection)
     broker.timeout = 0.001
     with pytest.raises(ConversationFailure, match="query_timeout"):
         await broker.query("worker", HistoryQuery(session_id=SESSION))
@@ -59,10 +58,10 @@ async def test_disconnect_and_timeout_cleanup() -> None:
 @pytest.mark.asyncio
 async def test_cancellation_and_invalid_response() -> None:
     broker = ConversationBroker()
-    socket = Socket()
-    broker.connect("worker", "epoch", socket)
+    connection = history_connection()
+    broker.connect("worker", "epoch", connection)
     query = asyncio.create_task(broker.query("worker", HistoryQuery(session_id=SESSION)))
-    await socket.sent.get()
+    await connection.sent.get()
     query.cancel()
     with pytest.raises(asyncio.CancelledError):
         await query
@@ -70,7 +69,7 @@ async def test_cancellation_and_invalid_response() -> None:
 @pytest.mark.asyncio
 async def test_replacement_connection_and_busy_limit() -> None:
     broker = ConversationBroker()
-    old, new = Socket(), Socket()
+    old, new = history_connection(), history_connection()
     broker.connect("worker", "old", old)
     first = asyncio.create_task(broker.query("worker", HistoryQuery(session_id=SESSION)))
     old_request = await old.sent.get()

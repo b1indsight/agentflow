@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Literal
+from typing import Annotated, Literal
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -150,15 +150,3 @@ class ServeSettings(BaseSettings):
     @classmethod
     def _expand_path(cls, value: Path) -> Path:
         return value.expanduser()
-
-if TYPE_CHECKING:
-    settings: ServeSettings
-
-
-def __getattr__(name: str) -> ServeSettings:
-    """Create the process-wide settings on first access, keeping type imports inert."""
-    if name != "settings":
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    value = ServeSettings()  # type: ignore[call-arg]
-    globals()["settings"] = value
-    return value

@@ -13,7 +13,7 @@ from app.control.config import ServeSettings
 from app.control.runtime import ControlRuntime
 from app.domain.models import JobKind, JobState
 from tests.test_gateway import RecordingCoordinator, RecordingStore
-from tests.worker_fakes import make_results
+from tests.worker_fakes import result_application
 
 
 class Inbox(RecordingStore):
@@ -46,16 +46,16 @@ async def test_slow_result_does_not_block_another_flow():
     blocked, release, advanced = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
     class Coordinator(RecordingCoordinator):
-        async def apply_result(self, job_id):
+        async def _commit_result(self, job_id):
             if job_id == 1:
                 blocked.set()
                 await release.wait()
             else:
                 advanced.set()
-            return await super().apply_result(job_id)
+            return await super()._commit_result(job_id)
 
     inbox = Inbox(2)
-    processor = make_results(inbox, Coordinator(inbox))
+    processor = result_application(inbox, Coordinator(inbox)._commit_result)
     recovery = asyncio.create_task(processor.recover_pending_results())
     try:
         await asyncio.wait_for(blocked.wait(), 1)
@@ -71,7 +71,7 @@ async def test_recovery_pool_is_bounded_and_cancellation_joins_all_tasks():
     active = set()
 
     class Coordinator(RecordingCoordinator):
-        async def apply_result(self, job_id):
+        async def _commit_result(self, job_id):
             active.add(job_id)
             if len(active) == 2:
                 started.set()
@@ -79,10 +79,10 @@ async def test_recovery_pool_is_bounded_and_cancellation_joins_all_tasks():
                 await release.wait()
             finally:
                 active.remove(job_id)
-            return await super().apply_result(job_id)
+            return await super()._commit_result(job_id)
 
     inbox = Inbox(20)
-    processor = make_results(inbox, Coordinator(inbox))
+    processor = result_application(inbox, Coordinator(inbox)._commit_result)
     recovery = asyncio.create_task(processor.recover_pending_results(concurrency=2))
     try:
         await asyncio.wait_for(started.wait(), 1)
@@ -98,14 +98,14 @@ async def test_bounded_batches_advance_past_a_persistently_pending_result():
     calls = []
 
     class Coordinator(RecordingCoordinator):
-        async def apply_result(self, job_id):
+        async def _commit_result(self, job_id):
             calls.append(job_id)
             if job_id == 1:
                 raise ResultPending("waiting for a receipt")
-            return await super().apply_result(job_id)
+            return await super()._commit_result(job_id)
 
     inbox = Inbox(5)
-    processor = make_results(inbox, Coordinator(inbox))
+    processor = result_application(inbox, Coordinator(inbox)._commit_result)
     for _ in range(4):
         await processor.recover_pending_results(batch_size=2)
     assert calls == [1, 2, 3, 4, 5, 1]
@@ -116,17 +116,17 @@ async def test_live_result_holds_the_same_job_lock_as_recovery():
     entered, release, advanced = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
     class Coordinator(RecordingCoordinator):
-        async def apply_result(self, job_id):
+        async def _commit_result(self, job_id):
             if job_id == 1:
                 entered.set()
                 await release.wait()
             else:
                 advanced.set()
-            return await super().apply_result(job_id)
+            return await super()._commit_result(job_id)
 
     inbox = Inbox(2)
     coordinator = Coordinator(inbox)
-    processor = make_results(inbox, coordinator)
+    processor = result_application(inbox, coordinator._commit_result)
     # Live transport and recovery can observe the same accepted inbox payload.
     # Hold the real application, so removing the shared lock duplicates its commit.
     live = asyncio.create_task(processor.apply(1))
@@ -139,19 +139,19 @@ async def test_live_result_holds_the_same_job_lock_as_recovery():
     finally:
         release.set()
         await asyncio.gather(live, recovery, duplicate_sweep)
-    assert len(coordinator.results) == 2
+    assert len(coordinator.received_results) == 2
 
 
 async def test_new_arrivals_cannot_extend_a_recovery_cycle_forever():
     calls = []
 
     class Coordinator(RecordingCoordinator):
-        async def apply_result(self, job_id):
+        async def _commit_result(self, job_id):
             calls.append(job_id)
             raise ResultPending("still waiting")
 
     inbox = Inbox(2)
-    processor = make_results(inbox, Coordinator(inbox))
+    processor = result_application(inbox, Coordinator(inbox)._commit_result)
     await processor.recover_pending_results(batch_size=1)
     # A busy service keeps producing new IDs; the initial scan must still end at ID 2.
     inbox.jobs[3] = Inbox(3).jobs[3]

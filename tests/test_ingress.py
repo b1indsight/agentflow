@@ -3,17 +3,21 @@ import hashlib
 import hmac
 import json
 from collections.abc import AsyncIterator
-from types import SimpleNamespace
+from unittest.mock import Mock
 
 import httpx
 import pytest
 import pytest_asyncio
 from psycopg import OperationalError
+from pydantic import SecretStr
 
 from app.contracts.protocol import PROTOCOL_VERSION
 from app.control.api import create_app
+from app.control.config import ServeSettings
 from app.control.conversation import ConversationService
+from app.control.gateway import WorkerGateway
 from app.control.router import EventRouter
+from app.control.runtime import ControlRuntime
 from app.control.service import ControlService
 from app.control.webhooks import WebhookConsumer
 from app.domain.models import Flow, FlowState, JobKind
@@ -22,24 +26,20 @@ from app.persistence.webhook_store import WebhookStore
 from app.telemetry.metrics import Metrics
 
 
-class RecordingGateway:
-    async def handle(self, socket) -> None:
-        pass
-
-
-class FakeContext:
-    @property
-    def conversations(self) -> ConversationService:
-        raise AssertionError("webhook tests do not query conversations")
-
-    def __init__(self, router: EventRouter | None = None, settings=None) -> None:
-        self.settings = settings or SimpleNamespace(github_webhook_secret="webhook-secret")
+class WebhookRuntime(ControlRuntime):
+    def __init__(self, router: EventRouter | None = None, settings: ServeSettings | None = None) -> None:
+        self.settings = settings or ServeSettings.model_construct(
+            database_url="postgresql://localhost/test",
+            worker_tokens={"worker-1": SecretStr("worker-secret")},
+            github_webhook_secret="webhook-secret",
+        )
         self.settings.webhook_max_body_bytes = 25 * 1024 * 1024
         self.settings.metrics_token = None
         self.settings.host, self.settings.port = "test", 0
         self.metrics = Metrics()
         self.router = router
-        self.gateway = RecordingGateway()
+        self.gateway = Mock(spec=WorkerGateway)
+        self.conversations = Mock(spec=ConversationService)
         self.tasks: list[asyncio.Task[None]] = []
 
     async def receive_webhook(self, event_type: str, delivery_id: str, payload: dict, digest: str) -> None:
@@ -63,7 +63,7 @@ class FakeContext:
             await asyncio.gather(*self.tasks)
 
 
-class RoutingService:
+class RoutingService(ControlService):
     def __init__(self, store: Store) -> None:
         self.store = store
 
@@ -85,13 +85,13 @@ class RoutingService:
 
 
 @pytest.fixture
-def context() -> FakeContext:
-    return FakeContext()
+def runtime() -> WebhookRuntime:
+    return WebhookRuntime()
 
 
 @pytest_asyncio.fixture
-async def client(context: FakeContext) -> AsyncIterator[httpx.AsyncClient]:
-    application = create_app(lambda: context)
+async def client(runtime: WebhookRuntime) -> AsyncIterator[httpx.AsyncClient]:
+    application = create_app(runtime)
     transport = httpx.ASGITransport(app=application)
     async with (
         application.router.lifespan_context(application),
@@ -113,7 +113,9 @@ async def test_health_and_invalid_signature(client: httpx.AsyncClient) -> None:
 async def test_valid_signature_dispatches_webhook(
     store: Store, monkeypatch
 ) -> None:
-    settings = SimpleNamespace(
+    settings = ServeSettings.model_construct(
+        database_url="postgresql://localhost/test",
+        worker_tokens={"worker-1": SecretStr("worker-secret")},
         allowlist=["alice"],
         bot_login="flowtool[bot]",
         github_webhook_secret="webhook-secret",
@@ -123,8 +125,8 @@ async def test_valid_signature_dispatches_webhook(
         settle_seconds=75.0,
         submit_grace_seconds=15.0,
     )
-    context = FakeContext(EventRouter(store, RoutingService(store), settings), settings)
-    application = create_app(lambda: context)
+    runtime = WebhookRuntime(EventRouter(store, RoutingService(store), settings), settings)
+    application = create_app(runtime)
     transport = httpx.ASGITransport(app=application)
     payload = {
         "action": "labeled",
@@ -136,7 +138,7 @@ async def test_valid_signature_dispatches_webhook(
     }
     body = json.dumps(payload).encode()
     signature = "sha256=" + hmac.new(
-        context.settings.github_webhook_secret.encode(), body, hashlib.sha256
+        runtime.settings.github_webhook_secret.encode(), body, hashlib.sha256
     ).hexdigest()
 
     async with (
@@ -152,7 +154,7 @@ async def test_valid_signature_dispatches_webhook(
                 "X-Hub-Signature-256": signature,
             },
         )
-        await asyncio.gather(*context.tasks)
+        await asyncio.gather(*runtime.tasks)
 
     assert response.status_code == 202
     flow = store.get_active_flow("owner/repo", 7)
@@ -169,11 +171,11 @@ def signed_headers(body: bytes) -> dict[str, str]:
 
 
 @pytest.mark.asyncio
-async def test_receipt_commit_failure_is_not_acknowledged(client, context, monkeypatch):
+async def test_receipt_commit_failure_is_not_acknowledged(client, runtime, monkeypatch):
     def unavailable(*args):
         raise OperationalError("secret database URL")
 
-    monkeypatch.setattr(context, "receive_webhook", unavailable)
+    monkeypatch.setattr(runtime, "receive_webhook", unavailable)
     response = await client.post("/webhook", content=b"{}", headers=signed_headers(b"{}"))
     assert response.status_code == 503
     assert "secret" not in response.text
@@ -188,8 +190,8 @@ async def test_missing_delivery_identity_is_rejected(client):
 
 
 @pytest.mark.asyncio
-async def test_streamed_request_body_limit(client, context):
-    context.settings.webhook_max_body_bytes = 3
+async def test_streamed_request_body_limit(client, runtime):
+    runtime.settings.webhook_max_body_bytes = 3
 
     async def chunks():
         yield b"{"

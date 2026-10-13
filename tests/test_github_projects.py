@@ -281,8 +281,9 @@ async def test_real_sdk_never_retries_or_accepts_partial_mutation(tmp_path, monk
 
 @pytest.fixture
 def serve_config(tmp_path, monkeypatch):
-    monkeypatch.setitem(control_config.__dict__, "settings", settings(tmp_path))
-    return control_config
+    configured = settings(tmp_path)
+    monkeypatch.setattr(control_config, "ServeSettings", lambda: configured)
+    return configured
 
 
 def test_check_disabled_does_not_construct_github(serve_config, monkeypatch):
@@ -292,7 +293,7 @@ def test_check_disabled_does_not_construct_github(serve_config, monkeypatch):
 
 
 def test_check_only_validates_and_prints_target(tmp_path, monkeypatch, serve_config):
-    settings_value = serve_config.settings
+    settings_value = serve_config
     settings_value.projects = {"owner/repo": config()}
     api, client, lookup = adapter(tmp_path, monkeypatch, target())
     monkeypatch.setattr("app.github.GitHubApp", lambda _: api.installation.app)

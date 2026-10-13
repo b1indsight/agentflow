@@ -7,7 +7,7 @@ import base64
 import hashlib
 import json
 from dataclasses import dataclass
-from typing import Protocol
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from pydantic import ValidationError
@@ -21,24 +21,16 @@ from app.contracts.conversation import (
     SessionHistory,
 )
 from app.contracts.protocol import ConversationQuery, ConversationResult, WorkerMessage
-from app.domain.models import Attempt, Flow, FlowExecution
+from app.domain.models import Attempt
+from app.persistence.store import Store
 
-
-class ConversationSocket(Protocol):
-    async def send_text(self, data: str) -> None: ...
-
-
-class ConversationStore(Protocol):
-    def get_flow(self, flow_id: int) -> Flow | None: ...
-
-    def get_flow_execution(self, flow_id: int) -> FlowExecution | None: ...
-
-    def list_attempts(self, flow_id: int) -> list[Attempt]: ...
+if TYPE_CHECKING:
+    from app.control.worker_connection import WorkerConnection
 
 
 @dataclass
 class PendingQuery:
-    socket: ConversationSocket
+    connection: WorkerConnection
     request: ConversationQuery
     future: asyncio.Future[HistoryPage]
 
@@ -48,39 +40,39 @@ class ConversationBroker:
 
     def __init__(self) -> None:
         self.timeout = 10.0
-        self.connections: dict[str, tuple[str, ConversationSocket]] = {}
+        self.connections: dict[str, tuple[str, WorkerConnection]] = {}
         self.pending: dict[str, PendingQuery] = {}
 
-    def connect(self, worker_id: str, epoch: str, socket: ConversationSocket) -> None:
+    def connect(self, worker_id: str, epoch: str, connection: WorkerConnection) -> None:
         previous = self.connections.get(worker_id)
         if previous is not None:
             self.disconnect(previous[1])
-        self.connections[worker_id] = (epoch, socket)
+        self.connections[worker_id] = (epoch, connection)
 
-    def disconnect(self, socket: ConversationSocket) -> None:
+    def disconnect(self, connection: WorkerConnection) -> None:
         for worker_id, (_, current) in list(self.connections.items()):
-            if current is socket:
+            if current is connection:
                 del self.connections[worker_id]
         for pending in self.pending.values():
-            if pending.socket is socket and not pending.future.done():
+            if pending.connection is connection and not pending.future.done():
                 pending.future.set_exception(ConversationFailure("worker_unavailable"))
 
     async def query(
         self, worker_id: str, query: HistoryQuery,
     ) -> HistoryPage:
-        connection = self.connections.get(worker_id)
-        if connection is None:
+        session = self.connections.get(worker_id)
+        if session is None:
             raise ConversationFailure("worker_unavailable")
-        epoch, socket = connection
-        if len(self.pending) >= 64 or sum(p.socket is socket for p in self.pending.values()) >= 4:
+        epoch, connection = session
+        if len(self.pending) >= 64 or sum(p.connection is connection for p in self.pending.values()) >= 4:
             raise ConversationFailure("query_busy")
         request = ConversationQuery(request_id=uuid4().hex, connection_epoch=epoch,
                                     **query.model_dump())
         future: asyncio.Future[HistoryPage] = asyncio.get_running_loop().create_future()
-        self.pending[request.request_id] = PendingQuery(socket, request, future)
+        self.pending[request.request_id] = PendingQuery(connection, request, future)
         try:
             async with asyncio.timeout(self.timeout):
-                await socket.send_text(request.model_dump_json())
+                await connection.send_text(request.model_dump_json())
                 return await future
         except TimeoutError as exc:
             raise ConversationFailure("query_timeout") from exc
@@ -93,13 +85,13 @@ class ConversationBroker:
             elif not future.cancelled():
                 future.exception()
 
-    def accept(self, socket: ConversationSocket, message: WorkerMessage) -> bool:
+    def accept(self, connection: WorkerConnection, message: WorkerMessage) -> bool:
         """Consume query responses in every execution state, ignoring stale replies."""
 
         if not isinstance(message, ConversationResult):
             return False
         pending = self.pending.get(message.request_id)
-        if (pending is None or pending.socket is not socket or pending.future.done()
+        if (pending is None or pending.connection is not connection or pending.future.done()
                 or message.connection_epoch != pending.request.connection_epoch):
             return True
         if message.error is not None:
@@ -125,7 +117,7 @@ class ConversationBroker:
 class ConversationService:
     """Resolve trusted flow/session metadata before sending a worker query."""
 
-    def __init__(self, store: ConversationStore, broker: ConversationBroker) -> None:
+    def __init__(self, store: Store, broker: ConversationBroker) -> None:
         self.store = store
         self.broker = broker
 

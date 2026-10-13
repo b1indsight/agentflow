@@ -1,6 +1,7 @@
 import asyncio
 from collections.abc import Mapping
 from datetime import timedelta
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from fastapi import WebSocketDisconnect
@@ -26,7 +27,9 @@ from app.contracts.protocol import (
     terminal_digest,
 )
 from app.contracts.result_models import ResultPending
+from app.control.coordinator import JobCoordinator
 from app.control.gateway import WorkerGateway
+from app.control.tools import FlowToolService
 from app.domain.delivery_models import PreparedDelivery
 from app.domain.models import (
     FlowDelivery,
@@ -37,10 +40,16 @@ from app.domain.models import (
     VcsKind,
     utcnow,
 )
-from tests.worker_fakes import NoPendingStops, connected_worker, make_results
+from app.persistence.stop_store import StopStore
+from app.persistence.store import Store
+from tests.worker_fakes import NoPendingStops, connected_worker, result_application
 
 
-class RecordingStore:
+class RecordingStore(Store):
+    @property
+    def stops(self) -> StopStore:
+        return NoPendingStops(self)
+
     def __init__(self) -> None:
         self.job = Job(id=5, flow_id=3, kind=JobKind.INITIAL, state=JobState.QUEUED)
         self.started = False
@@ -59,7 +68,7 @@ class RecordingStore:
     def get_worker_execution(self, worker_id: str):
         return None
 
-    def worker_connected(self, worker_id: str, protocol_version: int, connection_epoch: str):
+    def worker_connected(self, worker_id: str, protocol_version: int, connection_epoch: str = ""):
         self.presence[worker_id] = "online"
         self.connection_epoch = connection_epoch
         return connected_worker(worker_id, protocol_version, connection_epoch)
@@ -72,7 +81,7 @@ class RecordingStore:
     ) -> None:
         self.presence[worker_id] = "offline"
 
-    def assign_job(self, worker_id: str, token: str, connection_epoch: str) -> Job | None:
+    def assign_job(self, worker_id: str, token: str, connection_epoch: str = "") -> Job | None:
         if self.job.state is not JobState.QUEUED:
             return None
         self.job.state = JobState.RUNNING
@@ -86,13 +95,13 @@ class RecordingStore:
         attempt_id: int,
         worker_id: str,
         token: str,
-        connection_epoch: str,
+        connection_epoch: str = "",
     ) -> bool:
         self.started = (job_id, worker_id, token) == (5, "worker-1", self.job.assignment_token)
         return self.started
 
     def heartbeat_assignment(
-        self, job_id: int, worker_id: str, token: str, connection_epoch: str
+        self, job_id: int, worker_id: str, token: str, connection_epoch: str = ""
     ) -> bool:
         return (job_id, worker_id, token) == (5, "worker-1", self.job.assignment_token)
 
@@ -136,7 +145,7 @@ class RecordingStore:
         worker_id: str,
         token: str,
         state: JobState,
-        connection_epoch: str,
+        connection_epoch: str = "",
     ) -> bool:
         if (job_id, worker_id, token) != (5, "worker-1", self.job.assignment_token):
             return False
@@ -144,7 +153,7 @@ class RecordingStore:
         self.job.state = state
         return True
 
-    def assignment_active(self, job_id: int, worker_id: str, token: str) -> bool:
+    def assignment_active(self, job_id: int, worker_id: str, token: str, connection_epoch: str = "") -> bool:
         return self.job.state is JobState.RUNNING and (job_id, worker_id, token) == (
             5,
             "worker-1",
@@ -152,13 +161,13 @@ class RecordingStore:
         )
 
     def requeue_assignment(
-        self, job_id: int, worker_id: str, token: str, connection_epoch: str
+        self, job_id: int, worker_id: str, token: str, connection_epoch: str = ""
     ) -> bool:
         self.requeued = True
         return True
 
 
-class RecordingCoordinator:
+class RecordingCoordinator(JobCoordinator):
     async def prepare_for_assignment(self, job, worker, token, epoch):
         task = await self.prepare(job)
         if isinstance(task, JobState):
@@ -172,7 +181,9 @@ class RecordingCoordinator:
     def __init__(self, store: RecordingStore) -> None:
         self.store = store
         self.started = False
-        self.results: list[InitialTaskResult] = []
+        self.received_results: list[InitialTaskResult] = []
+        self.tools = Mock(spec=FlowToolService, execute=AsyncMock(side_effect=self._tool_response))
+        self.results = result_application(store, self._commit_result)
         self.failures: list[str] = []
 
     async def prepare(self, job: Job) -> ExecutionTask | JobState:
@@ -186,7 +197,7 @@ class RecordingCoordinator:
             branch="flow/issue-8",
         )
 
-    async def execute_tool(self, request: FlowToolRequest, *, worker_id: str) -> FlowToolResponse:
+    async def _tool_response(self, request: FlowToolRequest, *, worker_id: str) -> FlowToolResponse:
         assert worker_id == "worker-1"
         return FlowToolResponse(
             call_id=request.call_id,
@@ -197,12 +208,12 @@ class RecordingCoordinator:
         assert isinstance(task, InitialTask)
         self.started = True
 
-    async def apply_result(self, job_id: int) -> JobState:
+    async def _commit_result(self, job_id: int) -> JobState:
         job = self.store.get_job(job_id)
         assert job is not None and job.result_payload is not None
         result = Succeeded.model_validate(job.result_payload).result
         assert isinstance(result, InitialTaskResult)
-        self.results.append(result)
+        self.received_results.append(result)
         # This transport fixture shares its stored Job object with the coordinator.
         job.state = JobState.DONE if result.exit_code == 0 else JobState.FAILED
         job.result_applied_at = job.updated_at
@@ -327,7 +338,7 @@ async def test_gateway_runs_one_remote_assignment_to_ack() -> None:
     socket = ScriptedSocket()
     gateway = WorkerGateway(
         store,
-        coordinator, execution_control=NoPendingStops(),
+        coordinator,
         worker_tokens={"worker-1": "worker-secret"},
         heartbeat_interval=10,
         heartbeat_timeout=30,
@@ -343,10 +354,10 @@ async def test_gateway_runs_one_remote_assignment_to_ack() -> None:
     assert store.job.state is JobState.FAILED
     assert store.job.result_applied_at is not None
     assert coordinator.started is True
-    assert coordinator.results[0].session_id == "session-1"
+    assert coordinator.received_results[0].session_id == "session-1"
 
 
-async def test_gateway_authorizes_dispatch_after_preparation():
+async def test_gateway_authorizes_dispatch_after_preparation(monkeypatch):
     store = RecordingStore()
 
     class ChangedCoordinator(RecordingCoordinator):
@@ -355,12 +366,12 @@ async def test_gateway_authorizes_dispatch_after_preparation():
             store.job.assignment_token = "reassigned-token"
             return assignment
 
-    class AssignmentControl(NoPendingStops):
-        def authorize_dispatch(self, job_id, worker_id, token, epoch):
-            return store.assignment_active(job_id, worker_id, token)
+    monkeypatch.setattr(NoPendingStops, "authorize_dispatch",
+                        lambda self, job_id, worker_id, token, epoch:
+                        store.assignment_active(job_id, worker_id, token))
 
     socket = ScriptedSocket()
-    gateway = WorkerGateway(store, ChangedCoordinator(store), execution_control=AssignmentControl(), worker_tokens={"worker-1": "worker-secret"})
+    gateway = WorkerGateway(store, ChangedCoordinator(store), worker_tokens={"worker-1": "worker-secret"})
     await gateway.handle(socket)
     assert not any(isinstance(parse_server_message(raw), Assignment) for raw in socket.sent)
     assert not store.started
@@ -372,7 +383,7 @@ async def test_gateway_multiplexes_flow_tool_calls_during_execution() -> None:
     store = RecordingStore()
     gateway = WorkerGateway(
         store,
-        RecordingCoordinator(store), execution_control=NoPendingStops(),
+        RecordingCoordinator(store),
         worker_tokens={"worker-1": "worker-secret"},
         poll_interval=0.01,
     )
@@ -393,8 +404,8 @@ async def test_gateway_never_acknowledges_an_uncommitted_result(monkeypatch):
     async def unfinished(*args):
         raise ResultPending("GitHub outcome requires reconciliation")
 
-    monkeypatch.setattr(coordinator, "apply_result", unfinished)
-    gateway = WorkerGateway(store, coordinator, execution_control=NoPendingStops(), worker_tokens={"worker-1": "worker-secret"})
+    monkeypatch.setattr(coordinator.results, "_apply", unfinished)
+    gateway = WorkerGateway(store, coordinator, worker_tokens={"worker-1": "worker-secret"})
     await gateway.handle(socket)
     assert store.job.result_payload is not None
     assert store.job.result_applied_at is None
@@ -430,13 +441,13 @@ async def test_recovery_continues_after_one_broken_result():
             return next(job for job in self.jobs if job.id == job_id)
 
     class RecoveryCoordinator(RecordingCoordinator):
-        async def apply_result(self, job_id):
+        async def _commit_result(self, job_id):
             if job_id == 5:
                 raise RuntimeError("broken local result")
-            return await super().apply_result(job_id)
+            return await super()._commit_result(job_id)
 
     store = RecoveryStore()
-    processor = make_results(store, RecoveryCoordinator(store))
+    processor = result_application(store, RecoveryCoordinator(store)._commit_result)
     await processor.recover_pending_results()
     assert store.jobs[0].result_applied_at is None
     assert store.jobs[1].result_applied_at is not None
@@ -448,7 +459,7 @@ async def test_gateway_rejects_bad_credentials_before_accepting() -> None:
     store = RecordingStore()
     gateway = WorkerGateway(
         store,
-        RecordingCoordinator(store), execution_control=NoPendingStops(),
+        RecordingCoordinator(store),
         worker_tokens={"worker-1": "worker-secret"},
     )
 
@@ -469,7 +480,7 @@ async def test_gateway_closes_messages_with_an_incompatible_protocol_version() -
     store = RecordingStore()
     gateway = WorkerGateway(
         store,
-        RecordingCoordinator(store), execution_control=NoPendingStops(),
+        RecordingCoordinator(store),
         worker_tokens={"worker-1": "worker-secret"},
     )
 
@@ -504,7 +515,7 @@ async def test_gateway_new_epoch_takes_over_a_duplicate_worker_connection() -> N
     store.job.result_applied_at = store.job.updated_at
     gateway = WorkerGateway(
         store,
-        RecordingCoordinator(store), execution_control=NoPendingStops(),
+        RecordingCoordinator(store),
         worker_tokens={"worker-1": "worker-secret"},
         poll_interval=60,
     )
@@ -532,7 +543,7 @@ async def test_gateway_accepts_different_worker_identities_concurrently() -> Non
     store.job.result_applied_at = store.job.updated_at
     gateway = WorkerGateway(
         store,
-        RecordingCoordinator(store), execution_control=NoPendingStops(),
+        RecordingCoordinator(store),
         worker_tokens={"worker-1": "secret-1", "worker-2": "secret-2"},
         poll_interval=60,
     )
@@ -573,7 +584,7 @@ async def test_gateway_disconnect_policy(disconnect_after_start: bool) -> None:
     coordinator = RecordingCoordinator(store)
     gateway = WorkerGateway(
         store,
-        coordinator, execution_control=NoPendingStops(),
+        coordinator,
         worker_tokens={"worker-1": "worker-secret"},
         poll_interval=0.01,
     )
@@ -623,7 +634,7 @@ async def test_gateway_resumes_started_assignment_under_a_new_epoch() -> None:
     socket = RecoveringSocket()
     gateway = WorkerGateway(
         store,
-        RecordingCoordinator(store), execution_control=NoPendingStops(),
+        RecordingCoordinator(store),
         worker_tokens={"worker-1": "worker-secret"},
     )
 

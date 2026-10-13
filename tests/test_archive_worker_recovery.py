@@ -20,7 +20,6 @@ from app.contracts.protocol import (
 from app.control.gateway import WorkerGateway
 from app.control.service import ControlService
 from app.domain.models import FlowState, JobKind, JobState
-from app.persistence.stop_store import StopStore
 from app.worker.execution.executor import WorkerExecutor
 from app.worker.execution.vcs import prepare_flow_repo
 from app.worker.runtime import WorkerRootLock
@@ -68,7 +67,7 @@ class ObservedClient(WorkerClient):
 
 async def connect_once(store, subject, executor, journal, *, drop_ack=False, client=None):
     outgoing, incoming = asyncio.Queue(), asyncio.Queue()
-    gateway = WorkerGateway(store, subject, execution_control=StopStore(store), worker_tokens={"worker-a": "secret"}, poll_interval=60)
+    gateway = WorkerGateway(store, subject, worker_tokens={"worker-a": "secret"}, poll_interval=60)
     archive_id = next(job.id for job in store.list_jobs(journal.load().flow_id)
                       if job.kind is JobKind.ARCHIVE)
     if client is None:

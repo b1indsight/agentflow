@@ -3,41 +3,23 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal, Protocol
+from typing import Literal
 
 from loguru import logger
 
-from app.domain.models import Flow, ReviewItemKind
+from app.control.config import ServeSettings
+from app.control.service import ControlService
+from app.domain.models import ReviewItemKind
 from app.domain.review_models import FeedbackUpdate
 from app.persistence.store import Store
-
-
-class FlowEventHandler(Protocol):
-    def on_trigger(
-        self, repo: str, issue_number: int, installation_id: int | None
-    ) -> Flow | None: ...
-
-    def cancel(self, flow: Flow) -> None: ...
-
-    def on_merged(self, flow: Flow, delivery_id: str, payload: dict) -> None: ...
-
-    def notify_jobs(self) -> None: ...
-
-
-class RouterSettings(Protocol):
-    allowlist: list[str]
-    bot_login: str
-    trigger_label: str
-    settle_seconds: float
-    submit_grace_seconds: float
 
 
 class EventRouter:
     def __init__(
         self,
         store: Store,
-        service: FlowEventHandler,
-        settings: RouterSettings,
+        service: ControlService,
+        settings: ServeSettings,
     ) -> None:
         self.store = store
         self.service = service

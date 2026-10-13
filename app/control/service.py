@@ -6,6 +6,7 @@ from collections.abc import Callable
 from functools import partial
 
 from loguru import logger
+from pluggy import PluginManager
 
 from app.control.archive import verify_archive
 from app.control.lifecycle import record_merge
@@ -27,7 +28,7 @@ class ControlService:
     def __init__(
         self,
         store: Store,
-        plugins=None,
+        plugins: PluginManager | None = None,
         jobs_available: Callable[[], None] | None = None,
         *, after_commit: list[Callable[[], None]] | None = None,
     ) -> None:

@@ -4,6 +4,7 @@ import json
 import logging
 import threading
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import psycopg
 import pytest
@@ -11,9 +12,13 @@ from fastapi.testclient import TestClient
 from loguru import logger
 from pydantic import SecretStr
 
+import app.control.config as control_config
+import app.control.runtime as control_runtime
 import app.telemetry.metrics as metrics_module
+from app import cli
 from app.contracts.protocol import PROTOCOL_VERSION, InitialTaskResult, Succeeded
 from app.control.api import create_app
+from app.control.config import ServeSettings
 from app.domain.models import DeliveryState, FlowState, JobKind, JobState, utcnow
 from app.persistence import metrics_store
 from app.persistence.metrics_store import read_snapshot
@@ -55,7 +60,7 @@ def test_metrics_default_off_and_bearer_protected():
         async def shutdown(self): pass
 
     context = Context()
-    with TestClient(create_app(lambda: context)) as client:
+    with TestClient(create_app(context)) as client:
         assert client.get('/metrics').status_code == 401
         assert client.get('/metrics', headers={'Authorization': 'Bearer worker-token'}).status_code == 401
         response = client.get('/metrics', headers={'Authorization': 'Bearer monitor-only'})
@@ -150,6 +155,39 @@ def test_standard_logging_preserves_level_and_origin_without_payload():
         assert [row['level'] for row in rows] == ['WARNING', 'ERROR']
         assert {row['source'] for row in rows} == {'fixture.original:original_fn:123'}
         assert 'credential' not in output.getvalue() and '/private' not in output.getvalue()
+    finally:
+        logger.remove()
+
+
+def test_serve_preserves_sanitized_uvicorn_logging(monkeypatch, capsys):
+    output = io.StringIO()
+    settings = ServeSettings.model_construct(database_url="postgresql://localhost/test",
+        worker_tokens={"worker-1": SecretStr("worker-secret")}, log_format="json")
+    monkeypatch.setattr(control_config, "ServeSettings", lambda: settings)
+    monkeypatch.setattr(control_runtime, "Store", Mock())
+    monkeypatch.setattr(control_runtime, "GitHubApp", Mock())
+    monkeypatch.setattr(control_runtime, "configure_logging",
+                        lambda role, output_format: configure_logging(role, output_format, output))
+
+    def initialize_server(application, **kwargs):
+        # CLI constructs the runtime first; Uvicorn configures its handlers afterwards.
+        cli.uvicorn.Config(application, **kwargs)
+        logging.getLogger("uvicorn.access").info('%s - "%s %s HTTP/%s" %d',
+            "127.0.0.1:1", "GET", "/probe?token=secret-query", "1.1", 200)
+        try:
+            raise RuntimeError("private secret-error")
+        except RuntimeError:
+            logging.getLogger("uvicorn.error").exception("raw exception payload")
+
+    monkeypatch.setattr(cli.uvicorn, "run", initialize_server)
+    try:
+        cli.serve()
+        captured = capsys.readouterr()
+        rendered = output.getvalue() + captured.out + captured.err
+        assert not any(secret in rendered for secret in ("secret-query", "secret-error", "raw exception payload"))
+        rows = [json.loads(line) for line in output.getvalue().splitlines()]
+        assert {row["level"] for row in rows} == {"INFO", "ERROR"}
+        assert rows[-1]["exception_type"] == "RuntimeError"
     finally:
         logger.remove()
 

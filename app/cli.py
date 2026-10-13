@@ -57,8 +57,9 @@ def inbox_retry(delivery_id: str) -> None:
 @project_app.command("check")
 def project_check(repo: str) -> None:
     """只读校验已配置的组织 Project、Status 字段及选项。"""
-    from app.control.config import settings
+    from app.control.config import ServeSettings
 
+    settings = ServeSettings()  # type: ignore[call-arg]
     config = settings.projects.get(repo.casefold())
     if config is None:
         typer.echo(f"{repo}: Projects disabled")
@@ -97,9 +98,10 @@ def project_retry(repo: str) -> None:
 
 @contextmanager
 def _store() -> Iterator[Store]:
-    from app.control.config import settings
+    from app.control.config import ServeSettings
     from app.persistence.store import Store
 
+    settings = ServeSettings()  # type: ignore[call-arg]
     store = Store(settings.database_url)
     store.init_db()
     try:
@@ -112,14 +114,16 @@ def _store() -> Iterator[Store]:
 def serve() -> None:
     """启动 webhook 常驻进程（uvicorn）。"""
     from app.control.api import create_app
-    from app.control.config import settings
+    from app.control.config import ServeSettings
     from app.control.runtime import ControlRuntime
 
+    settings = ServeSettings()  # type: ignore[call-arg]
     uvicorn.run(
-        create_app(lambda: ControlRuntime(settings)),
+        create_app(ControlRuntime(settings)),
         host=settings.host,
         port=settings.port,
         log_level="info",
+        log_config=None,  # Keep the runtime's sanitized handlers when Uvicorn initializes.
         timeout_graceful_shutdown=20,
     )
 

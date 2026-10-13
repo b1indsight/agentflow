@@ -7,59 +7,19 @@ import hashlib
 import hmac
 import json
 import re
-from collections.abc import Callable
 from contextlib import asynccontextmanager
-from typing import Protocol
 
 import anyio
 from fastapi import FastAPI, Header, HTTPException, Path, Query, Request, Response, WebSocket
 from loguru import logger
 from psycopg import Error as DatabaseError
 from psycopg_pool import PoolTimeout
-from pydantic import SecretStr
 from starlette.middleware.base import RequestResponseEndpoint
 
 from app.contracts.conversation import ConversationFailure, ConversationPage
-from app.control import config
-from app.control.conversation import ConversationService
+from app.control.config import ServeSettings
 from app.control.runtime import ControlRuntime
 from app.persistence.webhook_store import DeliveryConflict
-from app.telemetry.metrics import Metrics
-
-
-class ApplicationSettings(Protocol):
-    github_webhook_secret: str
-    webhook_max_body_bytes: int
-    metrics_token: SecretStr | None
-    control_api_token: SecretStr | None
-    host: str
-    port: int
-
-
-class WorkerGateway(Protocol):
-    async def handle(self, socket: WebSocket) -> None: ...
-
-
-class ApplicationContext(Protocol):
-    @property
-    def settings(self) -> ApplicationSettings: ...
-
-    @property
-    def metrics(self) -> Metrics: ...
-
-    @property
-    def gateway(self) -> WorkerGateway: ...
-
-    @property
-    def conversations(self) -> ConversationService: ...
-
-    async def ready(self) -> bool: ...
-
-    def startup(self) -> None: ...
-
-    async def receive_webhook(self, event_type: str, delivery_id: str, payload: dict, digest: str) -> None: ...
-
-    async def shutdown(self) -> None: ...
 
 
 def verify_signature(secret: str, body: bytes, signature_header: str | None) -> bool:
@@ -73,10 +33,6 @@ def _reject_json_constant(value: str) -> None:
     raise ValueError("non-finite JSON number")
 
 
-def _default_context() -> ApplicationContext:
-    return ControlRuntime(config.settings)
-
-
 async def _wait_for_disconnect(request: Request, cancel_scope: anyio.CancelScope) -> None:
     """Consume the GET request stream until the caller disconnects."""
     with cancel_scope:
@@ -84,22 +40,20 @@ async def _wait_for_disconnect(request: Request, cancel_scope: anyio.CancelScope
             pass
 
 
-def create_app(
-    context_factory: Callable[[], ApplicationContext] | None = None,
-) -> FastAPI:
-    factory = context_factory or _default_context
+def create_app(runtime: ControlRuntime | None = None) -> FastAPI:
+    """Create the HTTP app; construct the default runtime when its lifespan starts."""
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
-        context = factory()
-        application.state.ctx = context
-        application.state.metrics = context.metrics
-        context.startup()
-        logger.info("FlowTool control plane up on {}:{}", context.settings.host, context.settings.port)
+        active_runtime = runtime if runtime is not None else ControlRuntime(ServeSettings())  # type: ignore[call-arg]
+        application.state.runtime = active_runtime
+        application.state.metrics = active_runtime.metrics
+        active_runtime.startup()
+        logger.info("FlowTool control plane up on {}:{}", active_runtime.settings.host, active_runtime.settings.port)
         try:
             yield
         finally:
-            await context.shutdown()
+            await active_runtime.shutdown()
 
     application = FastAPI(title="FlowTool", lifespan=lifespan)
 
@@ -120,15 +74,15 @@ def create_app(
         cursor: str | None = Query(default=None, min_length=1, max_length=2048),
         limit: int = Query(default=100, ge=1, le=500),
     ) -> ConversationPage | Response:
-        context: ApplicationContext = request.app.state.ctx
-        token = context.settings.control_api_token
+        runtime: ControlRuntime = request.app.state.runtime
+        token = runtime.settings.control_api_token
         headers = {"Cache-Control": "no-store"}
         if token is None or not token.get_secret_value():
             raise HTTPException(503, "conversation_api_disabled", headers=headers)
         expected = "Bearer " + token.get_secret_value()
         if not hmac.compare_digest(request.headers.get("authorization", "").encode(), expected.encode()):
             raise HTTPException(401, "unauthorized", headers={**headers, "WWW-Authenticate": "Bearer"})
-        query = asyncio.create_task(context.conversations.read(flow_id, cursor, limit))
+        query = asyncio.create_task(runtime.conversations.read(flow_id, cursor, limit))
         # Starlette's receive middleware uses AnyIO scopes; level cancellation is
         # needed so cancelling the watcher cannot be swallowed by its nested scope.
         disconnect_scope = anyio.CancelScope()
@@ -152,8 +106,8 @@ def create_app(
 
     @application.get("/metrics")
     async def metrics(request: Request) -> Response:
-        context: ApplicationContext = request.app.state.ctx
-        token = context.settings.metrics_token
+        runtime: ControlRuntime = request.app.state.runtime
+        token = runtime.settings.metrics_token
         if token is None or not token.get_secret_value():
             return Response(status_code=404)
         expected = "Bearer " + token.get_secret_value()
@@ -163,8 +117,8 @@ def create_app(
 
     @application.get("/readyz")
     async def readyz(request: Request) -> Response:
-        context: ApplicationContext = request.app.state.ctx
-        ready = await context.ready()
+        runtime: ControlRuntime = request.app.state.runtime
+        ready = await runtime.ready()
         return Response(status_code=200 if ready else 503, content="ready" if ready else "not ready")
 
     @application.get("/healthz")
@@ -178,14 +132,14 @@ def create_app(
         x_github_delivery: str = Header(default=""),
         x_hub_signature_256: str | None = Header(default=None),
     ) -> Response:
-        context: ApplicationContext = request.app.state.ctx
+        runtime: ControlRuntime = request.app.state.runtime
         body = bytearray()
         async for chunk in request.stream():
-            if len(body) + len(chunk) > context.settings.webhook_max_body_bytes:
+            if len(body) + len(chunk) > runtime.settings.webhook_max_body_bytes:
                 return Response(status_code=413)
             body.extend(chunk)
         if not verify_signature(
-            context.settings.github_webhook_secret, bytes(body), x_hub_signature_256
+            runtime.settings.github_webhook_secret, bytes(body), x_hub_signature_256
         ):
             return Response(status_code=401, content="bad signature")
         if (not re.fullmatch(r"[A-Za-z0-9_-]{1,200}", x_github_delivery)
@@ -198,7 +152,7 @@ def create_app(
         if not isinstance(payload, dict):
             return Response(status_code=400)
         try:
-            await context.receive_webhook(
+            await runtime.receive_webhook(
                 x_github_event, x_github_delivery, payload, hashlib.sha256(body).hexdigest(),
             )
         except DeliveryConflict:
@@ -210,8 +164,8 @@ def create_app(
 
     @application.websocket("/internal/workers/connect")
     async def worker_connect(socket: WebSocket) -> None:
-        context: ApplicationContext = socket.app.state.ctx
-        await context.gateway.handle(socket)
+        runtime: ControlRuntime = socket.app.state.runtime
+        await runtime.gateway.handle(socket)
 
     return application
 

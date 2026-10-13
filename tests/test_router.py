@@ -1,14 +1,16 @@
-from types import SimpleNamespace
 
 import pytest
+from pydantic import SecretStr
 
 from app.contracts.protocol import PROTOCOL_VERSION
+from app.control.config import ServeSettings
 from app.control.router import EventRouter
+from app.control.service import ControlService
 from app.domain.models import DeliveryState, Flow, FlowState, JobKind
 from app.persistence.store import Store
 
 
-class RecordingService:
+class RecordingService(ControlService):
     def __init__(self, store: Store) -> None:
         self.store = store
 
@@ -31,7 +33,9 @@ class RecordingService:
 
 @pytest.fixture
 def router(store: Store, monkeypatch) -> EventRouter:
-    settings = SimpleNamespace(
+    settings = ServeSettings.model_construct(
+        database_url="postgresql://localhost/test",
+        worker_tokens={"worker-1": SecretStr("worker-secret")},
         allowlist=["alice"],
         bot_login="flowtool[bot]",
         trigger_label="flow",

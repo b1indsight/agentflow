@@ -3,12 +3,12 @@
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
-from types import SimpleNamespace
 
 import pytest
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 
 from app.contracts.protocol import ArchiveResult, ArchiveTask, Succeeded, terminal_digest
+from app.control.config import ServeSettings
 from app.control.router import EventRouter
 from app.control.service import ControlService
 from app.domain.models import DeliveryState, Flow, FlowState, JobKind, JobState
@@ -33,7 +33,9 @@ def merge_payload(flow: Flow) -> dict:
 
 
 async def route_merge(store: Store, flow: Flow, event: str = "merge-1", payload=None):
-    settings = SimpleNamespace(allowlist=["alice"], bot_login="flowtool[bot]", trigger_label="flow",
+    settings = ServeSettings.model_construct(database_url="postgresql://localhost/test",
+                             worker_tokens={"worker-1": SecretStr("worker-secret")},
+                             allowlist=["alice"], bot_login="flowtool[bot]", trigger_label="flow",
                                settle_seconds=75.0, submit_grace_seconds=15.0)
     EventRouter(store, ControlService(store), settings).dispatch(
         "pull_request", event, payload if payload is not None else merge_payload(flow),

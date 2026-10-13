@@ -8,6 +8,11 @@
 
 ## Unreleased
 
+- Control 内部直接依赖具体配置、仓储与服务，删除 12 个 Protocol 和 coordinator 的工具/结果转发；
+  停止操作使用 `store.stops`。API 显式接收 runtime，配置在实际入口构造；原始 socket 与接收泵连接
+  分别表达传输和消息处理边界，派发授权、结果互斥、恢复及 ACK 规则保持现状。
+  CLI 禁止 Uvicorn 覆盖 runtime 的日志配置，保留异常与查询参数脱敏和结构化 JSON 输出。
+
 - GitHub 写入拒绝统一依据真实 HTTP 或未发送证据，GraphQL 部分 mutation 的合成状态码
   保留诊断用途，不据此清除写入不确定性。PR 创建回执唯一性规则由结果合同统一。
   启动恢复删除恒为零的计数；RevisionTask 直接拥有字段，CLI 控制端导入归对应命令。

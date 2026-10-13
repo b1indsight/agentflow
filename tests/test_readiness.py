@@ -1,5 +1,6 @@
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 from fastapi.testclient import TestClient
 
@@ -23,14 +24,11 @@ async def test_database_failure_is_not_liveness_failure(monkeypatch):
     monkeypatch.setattr(readiness.psycopg.AsyncConnection, 'connect', fail)
     assert not await database_ready('unused')
 
-    class Context:
-        settings = SimpleNamespace(host="test", port=0, metrics_token=None)
-        metrics = Metrics()
-        def startup(self): pass
-        async def shutdown(self): pass
-        async def ready(self): return False
-
-    with TestClient(create_app(Context)) as client:
+    runtime = Mock(spec=control_runtime.ControlRuntime,
+                   settings=SimpleNamespace(host="test", port=0, metrics_token=None),
+                   metrics=Metrics(), startup=Mock(), shutdown=AsyncMock(),
+                   ready=AsyncMock(return_value=False))
+    with TestClient(create_app(runtime)) as client:
         assert client.get('/healthz').status_code == 200
         response = client.get('/readyz')
         assert response.status_code == 503

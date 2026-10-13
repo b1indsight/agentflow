@@ -49,13 +49,6 @@ class WorkerConnection:
         self.conversations.connect(worker_id, epoch, self)
         self._reader = asyncio.create_task(self._receive())
 
-    @property
-    def headers(self) -> Mapping[str, str]:
-        return self.socket.headers
-
-    async def accept(self) -> None:
-        await self.socket.accept()
-
     async def send_text(self, data: str) -> None:
         await self.socket.send_text(data)
 

@@ -19,7 +19,6 @@ from app.control.service import ControlService
 from app.control.webhooks import WebhookConsumer
 from app.github import GitHubApp
 from app.persistence.readiness import database_ready
-from app.persistence.stop_store import StopStore
 from app.persistence.store import Store
 from app.persistence.webhook_store import WebhookStore
 from app.plugins import get_plugin_manager
@@ -55,7 +54,6 @@ class ControlRuntime:
             heartbeat_timeout=self.settings.worker_heartbeat_timeout,
             poll_interval=self.settings.worker_poll_interval,
             metrics=self.metrics,
-            execution_control=StopStore(self.store),
         )
         self.judge = BubJudge(model=settings.judge_model, api_key=settings.judge_api_key,
                          api_base=settings.judge_api_base, timeout=settings.judge_timeout_seconds)
@@ -64,14 +62,14 @@ class ControlRuntime:
         self.conversations = ConversationService(self.store, self.gateway.conversations)
         self.webhooks = WebhookConsumer(self.store, self.settings, self.service)
         self.reconciler = Reconciler(
-            self.store, self.coordinator.github, self.service,
+            self.store, github, self.service,
             settle_seconds=self.settings.settle_seconds,
             interval=self.settings.reconcile_interval_seconds,
             batch_size=self.settings.reconcile_batch_size,
             concurrency=self.settings.reconcile_concurrency,
         )
         self.feedback_reconciler = FeedbackReconciler(
-            self.store, self.coordinator.github, settle_seconds=self.settings.settle_seconds,
+            self.store, github, settle_seconds=self.settings.settle_seconds,
             bot_login=self.settings.bot_login, interval=self.settings.reconcile_interval_seconds,
             batch_size=self.settings.reconcile_batch_size, concurrency=self.settings.reconcile_concurrency,
         )

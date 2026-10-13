@@ -1,5 +1,6 @@
 import asyncio
 from collections.abc import Mapping
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -12,13 +13,17 @@ from app.contracts.protocol import (
     InitialTaskResult,
     Succeeded,
 )
+from app.control.coordinator import JobCoordinator
 from app.control.gateway import WorkerGateway
+from app.control.tools import FlowToolService
 from app.domain.delivery_models import OpenedDelivery
 from app.domain.models import FlowDelivery, Job, JobKind, JobState, VcsKind, VcsOutcome
+from app.persistence.stop_store import StopStore
+from app.persistence.store import Store
 from app.worker.state.session import WorkerSession
 from app.worker.transport.client import WorkerClient
 from app.worker.transport.mcp import FlowToolCaller
-from tests.worker_fakes import NoPendingStops, connected_worker
+from tests.worker_fakes import NoPendingStops, connected_worker, result_application
 
 
 class QueueSocket:
@@ -59,7 +64,11 @@ class QueueConnection:
         return await self._incoming.get()
 
 
-class RemoteStore:
+class RemoteStore(Store):
+    @property
+    def stops(self) -> StopStore:
+        return NoPendingStops(self)
+
     def __init__(self) -> None:
         self.job = Job(id=5, flow_id=3, kind=JobKind.INITIAL, state=JobState.QUEUED)
         self.done = asyncio.Event()
@@ -73,7 +82,7 @@ class RemoteStore:
     def get_worker_execution(self, worker_id: str):
         return None
 
-    def worker_connected(self, worker_id: str, protocol_version: int, connection_epoch: str):
+    def worker_connected(self, worker_id: str, protocol_version: int, connection_epoch: str = ""):
         return connected_worker(worker_id, protocol_version, connection_epoch)
 
     def worker_disconnected(
@@ -84,7 +93,7 @@ class RemoteStore:
     ) -> None:
         pass
 
-    def assign_job(self, worker_id: str, token: str, connection_epoch: str) -> Job | None:
+    def assign_job(self, worker_id: str, token: str, connection_epoch: str = "") -> Job | None:
         if self.job.state is not JobState.QUEUED:
             return None
         self.job.state = JobState.RUNNING
@@ -98,12 +107,12 @@ class RemoteStore:
         attempt_id: int,
         worker_id: str,
         token: str,
-        connection_epoch: str,
+        connection_epoch: str = "",
     ) -> bool:
         return self.assignment_active(job_id, worker_id, token)
 
     def heartbeat_assignment(
-        self, job_id: int, worker_id: str, token: str, connection_epoch: str
+        self, job_id: int, worker_id: str, token: str, connection_epoch: str = ""
     ) -> bool:
         return self.assignment_active(job_id, worker_id, token)
 
@@ -141,7 +150,7 @@ class RemoteStore:
         self.done.set()
         return True
 
-    def assignment_active(self, job_id: int, worker_id: str, token: str) -> bool:
+    def assignment_active(self, job_id: int, worker_id: str, token: str, connection_epoch: str = "") -> bool:
         return (
             self.job.state is JobState.RUNNING
             and self.job.id == job_id
@@ -155,7 +164,7 @@ class RemoteStore:
         worker_id: str,
         token: str,
         state: JobState,
-        connection_epoch: str,
+        connection_epoch: str = "",
     ) -> bool:
         if not self.assignment_active(job_id, worker_id, token):
             return False
@@ -164,13 +173,13 @@ class RemoteStore:
         return True
 
     def requeue_assignment(
-        self, job_id: int, worker_id: str, token: str, connection_epoch: str
+        self, job_id: int, worker_id: str, token: str, connection_epoch: str = ""
     ) -> bool:
         self.job.state = JobState.QUEUED
         return True
 
 
-class RemoteCoordinator:
+class RemoteCoordinator(JobCoordinator):
     async def prepare_for_assignment(self, job, worker, token, epoch):
         task = await self.prepare(job)
         if isinstance(task, JobState):
@@ -180,6 +189,8 @@ class RemoteCoordinator:
 
     def __init__(self, store: RemoteStore) -> None:
         self.store = store
+        self.tools = Mock(spec=FlowToolService, execute=AsyncMock(side_effect=self._tool_response))
+        self.results = result_application(store, self._commit_result)
         self.result: InitialTaskResult | None = None
         self.tool_calls = 0
 
@@ -194,7 +205,7 @@ class RemoteCoordinator:
             branch="flow/issue-8",
         )
 
-    async def execute_tool(self, request, *, worker_id: str):
+    async def _tool_response(self, request, *, worker_id: str):
         self.tool_calls += 1
         return FlowToolResponse(
             call_id=request.call_id,
@@ -204,7 +215,7 @@ class RemoteCoordinator:
     def mark_started(self, job: Job, task: ExecutionTask, worker_id: str) -> None:
         pass
 
-    async def apply_result(self, job_id: int) -> JobState:
+    async def _commit_result(self, job_id: int) -> JobState:
         job = self.store.get_job(job_id)
         assert job is not None and job.result_payload is not None
         result = Succeeded.model_validate(job.result_payload).result
@@ -244,7 +255,7 @@ async def test_control_gateway_and_worker_client_complete_one_remote_job(tmp_pat
     coordinator = RemoteCoordinator(store)
     gateway = WorkerGateway(
         store,
-        coordinator, execution_control=NoPendingStops(),
+        coordinator,
         worker_tokens={"worker-1": "worker-secret"},
         poll_interval=0.01,
     )

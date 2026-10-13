@@ -5,6 +5,8 @@
 
 ## 当前计划
 
+- [`control-simplification.md`](control-simplification.md) — PR #81：删除 control 内部协议、纯转发、停止接口注入与应用工厂，明确命名与具体类型边界，修复日志初始化覆盖；生产净减少 200 行，729 项 PostgreSQL 回归、静态检查及构建通过。
+
 - [`repository-ownership-convergence.md`](repository-ownership-convergence.md) — PR #80：职责与证据契约收敛已实施，900 项 PostgreSQL 回归、静态检查、构建、任务合同对照与错误来源消融通过；待用户评审。
 
 - [`github-capability-boundaries.md`](github-capability-boundaries.md) — PR #77：GitHubApp → Installation → Repository/Project，不可变资源拥有各自操作；查询返回新实例、更新返回副本、标准序列化和本地构造；873 项 PostgreSQL 回归、静态检查、构建、上下文等价对照及三项消融通过，待评审。

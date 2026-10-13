@@ -135,7 +135,7 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path):
         def worker_disconnected(self, *args): pass
 
     gateway = WorkerGateway(store, Coordinator(), worker_tokens={'w': 'secret'},
-                            heartbeat_interval=0.01, poll_interval=0.01, execution_control=StopStore(store))
+                            heartbeat_interval=0.01, poll_interval=0.01)
     client = WorkerClient(worker_id='w', worker_token='secret', serve_ws_url='unused',
                           executor=Executor(), session=WorkerSession(tmp_path))
     server = asyncio.create_task(gateway.handle(Socket()))

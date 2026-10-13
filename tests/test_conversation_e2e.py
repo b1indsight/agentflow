@@ -1,6 +1,7 @@
 import asyncio
 import json
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import httpx
 import pytest
@@ -9,6 +10,7 @@ from pydantic import SecretStr
 from app.control.api import create_app
 from app.control.conversation import ConversationService
 from app.control.gateway import WorkerGateway
+from app.control.runtime import ControlRuntime
 from app.domain.models import Attempt, Flow, FlowExecution, FlowState
 from app.worker.state.session import WorkerSession
 from app.worker.transport.client import WorkerClient
@@ -20,7 +22,6 @@ from tests.test_remote_e2e import (
     RemoteCoordinator,
     RemoteStore,
 )
-from tests.worker_fakes import NoPendingStops
 
 OTHER_SESSION = "019eac3b-a60c-7a93-a442-3718f660fc8d"
 
@@ -51,13 +52,13 @@ async def test_http_query_while_worker_or_control_busy_and_idle(tmp_path, phase,
             await block("preparation")
             return await super().prepare_for_assignment(job, worker, token, epoch)
 
-        async def execute_tool(self, request, *, worker_id):
+        async def _tool_response(self, request, *, worker_id):
             await block("tool")
-            return await super().execute_tool(request, worker_id=worker_id)
+            return await super()._tool_response(request, worker_id=worker_id)
 
-        async def apply_result(self, job_id):
+        async def _commit_result(self, job_id):
             await block("result")
-            return await super().apply_result(job_id)
+            return await super()._commit_result(job_id)
 
     class Executor(FakeExecutor):
         async def execute(self, task, secret=None, *, tool_caller):
@@ -70,13 +71,13 @@ async def test_http_query_while_worker_or_control_busy_and_idle(tmp_path, phase,
         + json.dumps(message("assistant", "Follow-up")) + "\n"
     )
     store = HistoryStore()
-    gateway = WorkerGateway(store, Coordinator(store), execution_control=NoPendingStops(),
+    gateway = WorkerGateway(store, Coordinator(store),
                             worker_tokens={"worker-1": "worker-secret"}, poll_interval=0.01)
     gateway.conversations.timeout = 1
     service = ConversationService(store, gateway.conversations)
-    context = SimpleNamespace(settings=SimpleNamespace(control_api_token=SecretStr("reader")), conversations=service)
-    app = create_app(lambda: context)
-    app.state.ctx = context
+    runtime = Mock(spec=ControlRuntime, settings=SimpleNamespace(control_api_token=SecretStr("reader")), conversations=service)
+    app = create_app(runtime)
+    app.state.runtime = runtime
     to_worker: asyncio.Queue[str] = asyncio.Queue()
     to_control: asyncio.Queue[str] = asyncio.Queue()
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex"))
