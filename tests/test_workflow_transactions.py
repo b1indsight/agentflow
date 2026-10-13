@@ -35,6 +35,17 @@ def test_functional_store_cannot_escape_its_transaction(store):
         flows.get_flow(flow.id)
 
 
+def test_owned_repository_keeps_its_connection_scope_on_rollback(store):
+    # Binding a transaction must not enroll a previously retained ordinary repository in it.
+    flows = store.flows
+    with pytest.raises(RuntimeError, match="abort transaction"), store.transaction() as tx:
+        rolled_back = tx.flows.create_flow("owner/repo", 708, 42)
+        committed = flows.create_flow("owner/repo", 709, 42)
+        raise RuntimeError("abort transaction")
+    assert flows.get_flow(rolled_back.id) is None
+    assert flows.get_flow(committed.id) is not None
+
+
 def test_trigger_rolls_back_flow_and_job_on_failure(store: Store, monkeypatch) -> None:
     # Reservation without its first job would permanently suppress delivery retries.
     def fail_enqueue(*args: object, **kwargs: object) -> Job:
@@ -171,7 +182,7 @@ def test_expired_cancelled_executor_does_not_overwrite_cancelled_flow(store: Sto
     assert running is not None and running.state is JobState.RUNNING
     store.workers.worker_disconnected("worker-a", "offline", "epoch-a")
     later = store.now() + timedelta(minutes=10)
-    monkeypatch.setattr(store, "_clock", lambda: later)
+    monkeypatch.setattr(store._db, "_clock", lambda: later)
     assert store.workers.sweep_expired_assignments() == (0, 0)
     execution = store.workers.get_flow_execution(flow.id)
     assert execution is not None and execution.released_at is None
@@ -188,7 +199,7 @@ async def test_accepted_result_survives_expired_worker_recovery(
     job, _ = accepted_coding(store)
     store.workers.worker_disconnected("worker-a", "connection lost", "epoch-a")
     later = store.now() + timedelta(minutes=10)
-    monkeypatch.setattr(store, "_clock", lambda: later)
+    monkeypatch.setattr(store._db, "_clock", lambda: later)
     assert store.workers.sweep_expired_assignments() == (0, 0)
     flow = store.flows.get_flow(job.flow_id)
     assert flow is not None and flow.state is FlowState.ACTIVE

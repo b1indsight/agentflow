@@ -12,9 +12,12 @@ from pydantic import BaseModel
 
 from app.contracts.protocol import ExecutionStopped, StopExecution
 from app.domain.models import DeliveryState, FlowState
+from app.persistence.deliveries import DeliveryStore
+from app.persistence.jobs import JobStore
+from app.persistence.workers import WorkerStore
 
 if TYPE_CHECKING:
-    from app.persistence.store import Store
+    from app.persistence.database import Database
 
 
 class StopIntent(BaseModel):
@@ -36,15 +39,15 @@ class StopIntent(BaseModel):
 
 
 class StopStore:
-    def __init__(self, store: Store) -> None:
-        self.store = store
+    def __init__(self, db: Database) -> None:
+        self._db = db
 
     def request(self, flow_id: int) -> None:
         """Called under the workflow lock before attempting to release the binding."""
-        binding = self.store.workers.get_flow_execution(flow_id)
+        binding = WorkerStore(self._db).get_flow_execution(flow_id)
         if binding is None or binding.released_at is not None:
             return
-        with self.store.connection() as conn:
+        with self._db.connection() as conn:
             job = conn.execute(
                 "SELECT id,assignment_token FROM jobs WHERE flow_id=%s AND assigned_worker_id=%s"
                 " AND (started_at IS NOT NULL OR dispatch_authorized_at IS NOT NULL)"
@@ -61,22 +64,22 @@ class StopStore:
                     " binding_at,requested_at) VALUES(%s,%s,%s,%s,%s,%s,%s)"
                     " ON CONFLICT(flow_id,binding_at) DO NOTHING",
                     (uuid4().hex, flow_id, job['id'], binding.worker_id, job['assignment_token'],
-                     binding.bound_at, self.store.now()),
+                     binding.bound_at, self._db.now()),
                 )
 
     def authorize_dispatch(self, job_id: int, worker_id: str, token: str, epoch: str) -> bool:
         """Persist the point after which a lost Started ACK cannot mean 'never sent'."""
-        job = self.store.jobs.get_job(job_id)
+        job = JobStore(self._db).get_job(job_id)
         if job is None:
             return False
-        with self.store.transaction() as tx:
+        with self._db.transaction() as tx:
             flow = tx.lock_workflow(job.flow_id)
             if flow is None or flow.state is not FlowState.ACTIVE:
                 return False
-            delivery = tx.deliveries.get_delivery(job.flow_id)
+            delivery = DeliveryStore(tx).get_delivery(job.flow_id)
             if delivery is not None and (delivery.state is DeliveryState.CLOSED or delivery.supersedes(job.kind)):
                 return False
-            if not tx.workers.assignment_active(job_id, worker_id, token, epoch):
+            if not WorkerStore(tx).assignment_active(job_id, worker_id, token, epoch):
                 return False
             with tx.connection() as conn:
                 conn.execute("UPDATE jobs SET dispatch_authorized_at=COALESCE(dispatch_authorized_at,%s) WHERE id=%s",
@@ -84,19 +87,19 @@ class StopStore:
             return True
 
     def has_pending(self, flow_id: int) -> bool:
-        with self.store.connection() as conn:
+        with self._db.connection() as conn:
             return conn.execute("SELECT 1 FROM execution_stops WHERE flow_id=%s AND state!='confirmed' LIMIT 1",
                                 (flow_id,)).fetchone() is not None
 
     def pending(self, worker_id: str) -> StopIntent | None:
-        with self.store.connection() as conn:
+        with self._db.connection() as conn:
             return conn.cursor(row_factory=class_row(StopIntent)).execute(
                 "SELECT * FROM execution_stops WHERE worker_id=%s AND state!='confirmed'"
                 " ORDER BY requested_at LIMIT 1", (worker_id,),
             ).fetchone()
 
     def receipt_request(self, worker_id: str, request_id: str) -> StopIntent | None:
-        with self.store.connection() as conn:
+        with self._db.connection() as conn:
             return conn.cursor(row_factory=class_row(StopIntent)).execute(
                 "SELECT * FROM execution_stops WHERE worker_id=%s AND request_id=%s",
                 (worker_id, request_id),
@@ -104,7 +107,7 @@ class StopStore:
 
     def confirm(self, worker_id: str, receipt: ExecutionStopped) -> bool:
         """A stopped executor alone cannot release a binding with unapplied external facts."""
-        with self.store.transaction() as tx:
+        with self._db.transaction() as tx:
             flow = tx.lock_workflow(receipt.flow_id)
             if flow is None:
                 return False
@@ -112,7 +115,7 @@ class StopStore:
                 intent = conn.cursor(row_factory=class_row(StopIntent)).execute(
                     "SELECT * FROM execution_stops WHERE request_id=%s FOR UPDATE", (receipt.request_id,),
                 ).fetchone()
-                binding = tx.workers.get_flow_execution(receipt.flow_id)
+                binding = WorkerStore(tx).get_flow_execution(receipt.flow_id)
                 worker = conn.execute("SELECT connection_epoch FROM workers WHERE worker_id=%s", (worker_id,)).fetchone()
                 if (intent is None or worker is None
                         or worker['connection_epoch'] != receipt.connection_epoch
@@ -128,13 +131,13 @@ class StopStore:
                     return False
                 conn.execute("UPDATE execution_stops SET state='stopped',receipt_digest=%s WHERE request_id=%s",
                              (digest, intent.request_id))
-                if tx.jobs.has_pending_result(receipt.flow_id) or conn.execute(
+                if JobStore(tx).has_pending_result(receipt.flow_id) or conn.execute(
                         "SELECT 1 FROM result_effects e JOIN jobs j ON j.id=e.job_id"
                         " WHERE j.flow_id=%s AND e.dispatched_at IS NOT NULL AND e.receipt IS NULL LIMIT 1",
                         (receipt.flow_id,),
                 ).fetchone() is not None:
                     return False
-                delivery = tx.deliveries.get_delivery(intent.flow_id)
+                delivery = DeliveryStore(tx).get_delivery(intent.flow_id)
                 if (delivery is not None and delivery.state is DeliveryState.MERGED
                         and flow.state not in {FlowState.ACTIVE, FlowState.SUCCEEDED}):
                     return False
@@ -144,7 +147,7 @@ class StopStore:
                 conn.execute("UPDATE jobs SET state='failed',last_error='execution stopped',updated_at=%s"
                              " WHERE id=%s AND result_received_at IS NULL", (tx.now(), intent.job_id))
                 if delivery is None or delivery.state is not DeliveryState.MERGED:
-                    tx.workers.release_flow_execution(intent.flow_id)
+                    WorkerStore(tx).release_flow_execution(intent.flow_id)
                 conn.execute("UPDATE workers SET current_job_id=NULL,status='online' WHERE worker_id=%s"
                              " AND (current_job_id=%s OR current_job_id IS NULL)", (worker_id, intent.job_id))
                 return True

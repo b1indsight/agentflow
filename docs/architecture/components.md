@@ -190,7 +190,8 @@ terminal result 三方核对。当前缺口包括：
 WorkerStore 的恢复扫描在原 worker 锁事务内先提交 job 动作，再查询事务内更新后的绑定事实；
 策略函数不执行 SQL、读取时钟或调用外部服务。
 
-当前 Store 使用 Psycopg 3 的同步连接池访问 PostgreSQL：
+Store 显式创建并持有以下仓储实例；它们共享独立的 `Database` 上下文，使用 Psycopg 3
+同步连接池访问 PostgreSQL。功能仓储接收数据库上下文，不持有或导入聚合 Store：
 
 | 入口与模块 | 操作归属 |
 | --- | --- |
@@ -206,8 +207,10 @@ WorkerStore 的恢复扫描在原 worker 锁事务内先提交 job 动作，再�
 | `store.projects` / `projects.py` | Projects 投影与有类型的局部更新 |
 
 `schema.py` 集中完整建表 SQL，初始化沿用既有依赖顺序；`records.py` 仅提供原生行类型及
-必需记录回读校验。功能入口每次绑定当前 Store，事务视图不会复用根 Store 的子对象。
-领域数据类型继续拥有自己的校验和纯规则，持久化操作归上述仓储；时间统一使用 Store 的注入时钟。
+必需记录回读校验。`database.py` 提供连接、显式事务、注入时钟与共用锁；Store 负责
+整组仓储的装配和生命周期。只读入口返回 Store 已持有的实例，事务视图重新装配自己的一组，
+普通实例保留原有连接范围。仓储需要其他仓储的 SQL 操作时，显式使用具体类型并传入同一上下文。
+领域数据类型继续拥有自己的校验和纯规则，持久化操作归上述仓储；时间统一使用注入时钟。
 
 `Flow`、`FlowExecution`、`FlowDelivery`、`FlowToolCall`、`Attempt`、`Job` 是 Pydantic
 持久化模型。返回这些领域对象的查询在
@@ -241,7 +244,7 @@ lease 到期 requeue、started grace/deadline、epoch fencing、result inbox 去
 
 Store 继续使用同步接口。assignment claim 无锁读取公平候选，只有请求方就是候选时才锁定自身 worker，
 重新检查 epoch、在线状态、空闲槽位及 drain/binding；随后锁定最早 eligible Flow job，并原子创建
-或复用 lifecycle binding。`with store.transaction() as tx` 提供连接绑定的 Store 视图，各领域步骤显式使用
+或复用 lifecycle binding。`with store.transaction() as tx` 使用新数据库上下文装配 Store 视图，各领域步骤显式使用
 `tx.flows`、`tx.jobs` 等对象；所有步骤共用该连接，异常一起回滚，事务退出后这些视图拒绝继续使用。
 结果的最终事务同时写入 flow/delivery/attempt、带源 job 唯一键的派生 job/codex run、`result_applied_at` 和 worker slot。
 `flow_tool_calls` 的 prepared delivery 与 response 也一起提交。

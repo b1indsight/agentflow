@@ -80,7 +80,7 @@ def test_failure_after_event_reservation_rolls_back_business_and_replays(store, 
 def test_expired_claim_is_replayed_but_old_ack_cannot_complete_it(store, monkeypatch):
     inbox = store.webhooks
     now = store.now()
-    store._clock = lambda: now
+    store._db._clock = lambda: now
     for number in range(1, 51):
         receive(inbox, str(number), payload(number))
     claim = WebhookStore.claim

@@ -11,6 +11,10 @@ from app.persistence.store import Store
 
 
 class NoPendingStops(StopStore):
+    def __init__(self) -> None:
+        # This simulation supplies stop responses and never acquires database resources.
+        pass
+
     def pending(self, worker_id: str) -> StopIntent | None:
         return None
 

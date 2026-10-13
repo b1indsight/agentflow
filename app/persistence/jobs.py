@@ -18,19 +18,22 @@ from app.domain.models import (
 from app.persistence.records import required
 
 if TYPE_CHECKING:
-    from app.persistence.store import Store
+    from app.persistence.database import Database
 
 
 class JobStore:
     """Durable jobs, lifecycle checks, and accepted-result application."""
 
-    def __init__(self, store: Store) -> None:
-        self.store = store
+    def __init__(self, db: Database) -> None:
+        self._db = db
 
     def cancel_jobs(self, flow_id: int, *, reason: str = "Flow cancelled") -> None:
         """Retire queued/never-dispatched preparation; actual execution requires stop proof."""
-        self.store.reviews.cancel(flow_id)
-        with self.store.connection() as connection:
+        # Like FlowStore.update_flow, cancellation reuses reviews without an import cycle.
+        from app.persistence.reviews import ReviewStore
+
+        ReviewStore(self._db).cancel(flow_id)
+        with self._db.connection() as connection:
             connection.execute(
                 "WITH retired AS (UPDATE jobs SET state=%s, last_error=%s, updated_at=%s WHERE flow_id=%s"
                 " AND (state=%s OR (state='running' AND started_at IS NULL AND dispatch_authorized_at IS NULL"
@@ -41,7 +44,7 @@ class JobStore:
                 (
                     JobState.FAILED,
                     reason,
-                    self.store.now(),
+                    self._db.now(),
                     flow_id,
                     JobState.QUEUED,
                 ),
@@ -49,7 +52,7 @@ class JobStore:
 
     def lifecycle_job(self, flow_id: int) -> Job | None:
         """Latest coding execution, excluding jobs cancelled before they could run."""
-        with self.store.connection() as connection:
+        with self._db.connection() as connection:
             return connection.cursor(row_factory=class_row(Job)).execute(
                 "SELECT * FROM jobs WHERE flow_id=%s AND kind IN ('initial','revision')"
                 " AND (state='running' OR started_at IS NOT NULL OR result_received_at IS NOT NULL)"
@@ -59,7 +62,7 @@ class JobStore:
 
     def reopen_blocked(self, flow_id: int) -> bool:
         """A timeout cannot prove that an executor exited or a dispatched effect settled."""
-        with self.store.connection() as connection:
+        with self._db.connection() as connection:
             return connection.execute(
                 "SELECT 1 FROM jobs WHERE flow_id=%s AND (state='running'"
                 " OR (result_received_at IS NOT NULL AND result_applied_at IS NULL)"
@@ -67,7 +70,7 @@ class JobStore:
             ).fetchone() is not None
 
     def has_pending_result(self, flow_id: int) -> bool:
-        with self.store.connection() as connection:
+        with self._db.connection() as connection:
             return (
                 connection.execute(
                     "SELECT 1 FROM jobs WHERE flow_id=%s AND result_received_at IS NOT NULL"
@@ -79,7 +82,7 @@ class JobStore:
 
     def has_unsettled_jobs(self, flow_id: int, *, excluding_job_id: int) -> bool:
         """Check for another executor or unapplied result without loading job payloads."""
-        with self.store.connection() as connection:
+        with self._db.connection() as connection:
             return connection.execute(
                 "SELECT 1 FROM jobs WHERE flow_id=%s AND id<>%s"
                 " AND (state=%s OR (result_received_at IS NOT NULL"
@@ -98,9 +101,9 @@ class JobStore:
     ) -> Job:
         if (source_job_id is None) != (source_key is None):
             raise ValueError("derived jobs require both source job and purpose")
-        now = self.store.now()
+        now = self._db.now()
         with (
-            self.store.connection() as connection,
+            self._db.connection() as connection,
             connection.cursor(row_factory=class_row(Job)) as cursor,
         ):
             row = cursor.execute(
@@ -126,14 +129,14 @@ class JobStore:
 
     def get_job(self, job_id: int) -> Job | None:
         with (
-            self.store.connection() as connection,
+            self._db.connection() as connection,
             connection.cursor(row_factory=class_row(Job)) as cursor,
         ):
             return cursor.execute("SELECT * FROM jobs WHERE id=%s", (job_id,)).fetchone()
 
     def list_jobs(self, flow_id: int) -> list[Job]:
         with (
-            self.store.connection() as connection,
+            self._db.connection() as connection,
             connection.cursor(row_factory=class_row(Job)) as cursor,
         ):
             return cursor.execute(
@@ -142,7 +145,7 @@ class JobStore:
 
     def freeze_archive(self, job: Job, task: ArchiveTask) -> None:
         """Persist the command under the caller's workflow/job locks before dispatch."""
-        with self.store.connection() as connection:
+        with self._db.connection() as connection:
             connection.execute(
                 "UPDATE jobs SET payload=%s WHERE id=%s",
                 (Jsonb({**(job.payload or {}), "archive": task.model_dump(mode="json")}), job.id),
@@ -151,7 +154,7 @@ class JobStore:
     def latest_failed_job(self, flow_id: int) -> Job | None:
         """Return the current failed job; a later job retires every earlier retry candidate."""
         with (
-            self.store.connection() as connection,
+            self._db.connection() as connection,
             connection.cursor(row_factory=class_row(Job)) as cursor,
         ):
             return cursor.execute(
@@ -162,7 +165,7 @@ class JobStore:
 
     def unapplied_result_ceiling(self) -> int:
         """Freeze a finite scan boundary so new results cannot postpone older retries forever."""
-        with self.store.connection() as connection:
+        with self._db.connection() as connection:
             row = connection.execute(
                 "SELECT COALESCE(MAX(id),0) AS ceiling FROM jobs WHERE state=%s"
                 " AND result_received_at IS NOT NULL AND result_applied_at IS NULL",
@@ -177,7 +180,7 @@ class JobStore:
         """Page interrupted terminal results by stable job ID; recovery wraps after the last page."""
 
         with (
-            self.store.connection() as connection,
+            self._db.connection() as connection,
             connection.cursor(row_factory=class_row(Job)) as cursor,
         ):
             return cursor.execute(
@@ -192,14 +195,14 @@ class JobStore:
 
         if state not in (JobState.DONE, JobState.FAILED):
             raise ValueError("persisted results can only complete terminal jobs")
-        now = self.store.now()
-        with self.store.connection() as connection, connection.transaction():
+        now = self._db.now()
+        with self._db.connection() as connection, connection.transaction():
             owner = connection.execute(
                 "SELECT assigned_worker_id FROM jobs WHERE id=%s",
                 (job_id,),
             ).fetchone()
             if owner and owner["assigned_worker_id"]:
-                self.store._lock_worker(connection, owner["assigned_worker_id"])
+                self._db._lock_worker(connection, owner["assigned_worker_id"])
             completed = connection.execute(
                 "UPDATE jobs SET state=%s, result_applied_at=%s, updated_at=%s"
                 " WHERE id=%s AND state=%s AND result_received_at IS NOT NULL"
@@ -228,7 +231,7 @@ class JobStore:
                     (
                         completed["assigned_worker_id"],
                         WorkerStatus.ONLINE,
-                        now + self.store.recovery_grace,
+                        now + self._db.recovery_grace,
                         job_id,
                     ),
                 )
@@ -242,14 +245,14 @@ class JobStore:
         reason: str,
     ) -> None:
         """Record a control-generated terminal outcome while holding the workflow/job locks."""
-        with self.store.connection() as connection:
+        with self._db.connection() as connection:
             connection.execute(
                 "UPDATE jobs SET result_payload=%s,result_digest=%s,result_received_at=%s,"
                 " last_error=%s WHERE id=%s AND state=%s"
                 " AND result_received_at IS NULL",
-                (Jsonb(dict(payload)), digest, self.store.now(), reason, job_id, JobState.RUNNING),
+                (Jsonb(dict(payload)), digest, self._db.now(), reason, job_id, JobState.RUNNING),
             )
 
     def set_job_error(self, job_id: int, reason: str) -> None:
-        with self.store.connection() as connection:
+        with self._db.connection() as connection:
             connection.execute("UPDATE jobs SET last_error=%s WHERE id=%s", (reason, job_id))

@@ -97,7 +97,7 @@ async def test_merge_and_archive_roll_back_before_a_later_poll_can_retry(
     failed = store.reconcile.get(merge_flow.id)
     assert failed.last_success_at is None and failed.failures == 1
     assert "private operational details" not in failed.last_error
-    monkeypatch.setattr(store, "_clock", lambda: failed.next_at + timedelta(seconds=1))
+    monkeypatch.setattr(store._db, "_clock", lambda: failed.next_at + timedelta(seconds=1))
     await poller._sweep()
     assert [j.kind for j in store.jobs.list_jobs(merge_flow.id)] == [JobKind.ARCHIVE]
 
@@ -105,7 +105,7 @@ async def test_merge_and_archive_roll_back_before_a_later_poll_can_retry(
 async def test_open_polling_resumes_its_success_and_retry_deadlines_after_restart(
     store, merge_flow, monkeypatch, polling_resources):
     clock = SimpleNamespace(now=datetime(2026, 9, 18, tzinfo=UTC))
-    monkeypatch.setattr(store, "_clock", lambda: clock.now)
+    monkeypatch.setattr(store._db, "_clock", lambda: clock.now)
     remote = status(merge_flow, state="open", merged=False)
     github = GitHub(remote)
     await subject(store, github)._sweep()

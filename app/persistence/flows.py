@@ -1,4 +1,4 @@
-"""Flow and Attempt facts using the current Store transaction."""
+"""Flow and Attempt facts using the current database transaction."""
 
 from __future__ import annotations
 
@@ -14,19 +14,19 @@ from app.domain.models import (
 from app.persistence.records import required
 
 if TYPE_CHECKING:
-    from app.persistence.store import Store
+    from app.persistence.database import Database
 
 
 class FlowStore:
-    """Flow and Attempt facts using the current Store transaction."""
+    """Flow and Attempt facts using the current database transaction."""
 
-    def __init__(self, store: Store) -> None:
-        self.store = store
+    def __init__(self, db: Database) -> None:
+        self._db = db
 
     def create_flow(self, repo: str, issue_number: int, installation_id: int | None) -> Flow:
-        now = self.store.now()
+        now = self._db.now()
         with (
-            self.store.connection() as connection,
+            self._db.connection() as connection,
             connection.cursor(row_factory=class_row(Flow)) as cursor,
         ):
             row = cursor.execute(
@@ -38,14 +38,14 @@ class FlowStore:
 
     def get_flow(self, flow_id: int) -> Flow | None:
         with (
-            self.store.connection() as connection,
+            self._db.connection() as connection,
             connection.cursor(row_factory=class_row(Flow)) as cursor,
         ):
             return cursor.execute("SELECT * FROM flows WHERE id=%s", (flow_id,)).fetchone()
 
     def get_active_flow(self, repo: str, issue_number: int) -> Flow | None:
         with (
-            self.store.connection() as connection,
+            self._db.connection() as connection,
             connection.cursor(row_factory=class_row(Flow)) as cursor,
         ):
             return cursor.execute(
@@ -56,7 +56,7 @@ class FlowStore:
 
     def get_flow_by_pr(self, repo: str, pr_number: int) -> Flow | None:
         with (
-            self.store.connection() as connection,
+            self._db.connection() as connection,
             connection.cursor(row_factory=class_row(Flow)) as cursor,
         ):
             return cursor.execute(
@@ -66,8 +66,11 @@ class FlowStore:
             ).fetchone()
 
     def update_flow(self, flow: Flow) -> None:
-        flow.updated_at = self.store.now()
-        with self.store.transaction() as tx, tx.connection() as connection:
+        # Review processing reads flows too; resolve its repository after module initialization.
+        from app.persistence.reviews import ReviewStore
+
+        flow.updated_at = self._db.now()
+        with self._db.transaction() as tx, tx.connection() as connection:
             connection.execute(
                 "UPDATE flows SET installation_id=%s, state=%s, current_attempt_id=%s,"
                 " updated_at=%s WHERE id=%s",
@@ -80,7 +83,7 @@ class FlowStore:
                 ),
             )
             if flow.state in {FlowState.CANCELLED, FlowState.FAILED, FlowState.SUCCEEDED}:
-                tx.reviews.cancel(flow.id)
+                ReviewStore(tx).cancel(flow.id)
 
     def list_flows(self, *, active_only: bool = False) -> list[Flow]:
         query = "SELECT * FROM flows"
@@ -88,15 +91,15 @@ class FlowStore:
             query += " WHERE state NOT IN ('succeeded','cancelled','failed')"
         query += " ORDER BY id DESC"
         with (
-            self.store.connection() as connection,
+            self._db.connection() as connection,
             connection.cursor(row_factory=class_row(Flow)) as cursor,
         ):
             return cursor.execute(query).fetchall()
 
     def create_attempt(self, flow_id: int) -> Attempt:
-        now = self.store.now()
+        now = self._db.now()
         with (
-            self.store.connection() as connection,
+            self._db.connection() as connection,
             connection.cursor(row_factory=class_row(Attempt)) as cursor,
         ):
             row = cursor.execute(
@@ -108,7 +111,7 @@ class FlowStore:
 
     def get_attempt(self, attempt_id: int) -> Attempt | None:
         with (
-            self.store.connection() as connection,
+            self._db.connection() as connection,
             connection.cursor(row_factory=class_row(Attempt)) as cursor,
         ):
             return cursor.execute("SELECT * FROM attempts WHERE id=%s", (attempt_id,)).fetchone()
@@ -118,7 +121,7 @@ class FlowStore:
 
     def list_attempts(self, flow_id: int) -> list[Attempt]:
         with (
-            self.store.connection() as connection,
+            self._db.connection() as connection,
             connection.cursor(row_factory=class_row(Attempt)) as cursor,
         ):
             return cursor.execute(
@@ -126,8 +129,8 @@ class FlowStore:
             ).fetchall()
 
     def update_attempt(self, attempt: Attempt) -> None:
-        attempt.updated_at = self.store.now()
-        with self.store.connection() as connection:
+        attempt.updated_at = self._db.now()
+        with self._db.connection() as connection:
             connection.execute(
                 "UPDATE attempts SET codex_session_id=%s, revision_cycles=%s,"
                 " session_generation=%s,last_revision_summary=%s,"

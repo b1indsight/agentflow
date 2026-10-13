@@ -29,10 +29,13 @@ from app.domain.recovery_policy import (
     should_release_binding,
 )
 from app.github import GitHubError, retry_delay
+from app.persistence.deliveries import DeliveryStore
+from app.persistence.flows import FlowStore
+from app.persistence.jobs import JobStore
 from app.persistence.records import required
 
 if TYPE_CHECKING:
-    from app.persistence.store import Store
+    from app.persistence.database import Database
 
 
 # A frozen archive may have started deleting before its Started frame reached serve.
@@ -44,12 +47,12 @@ _MAY_HAVE_EXECUTED = (
 class WorkerStore:
     """Worker slots, fenced assignments, preparation, and lease recovery."""
 
-    def __init__(self, store: Store) -> None:
-        self.store = store
+    def __init__(self, db: Database) -> None:
+        self._db = db
 
     def get_flow_execution(self, flow_id: int) -> FlowExecution | None:
         with (
-            self.store.connection() as connection,
+            self._db.connection() as connection,
             connection.cursor(row_factory=class_row(FlowExecution)) as cursor,
         ):
             return cursor.execute(
@@ -58,7 +61,7 @@ class WorkerStore:
 
     def get_worker_execution(self, worker_id: str) -> FlowExecution | None:
         with (
-            self.store.connection() as connection,
+            self._db.connection() as connection,
             connection.cursor(row_factory=class_row(FlowExecution)) as cursor,
         ):
             return cursor.execute(
@@ -67,8 +70,8 @@ class WorkerStore:
             ).fetchone()
 
     def release_flow_execution(self, flow_id: int) -> bool:
-        now = self.store.now()
-        with self.store.connection() as connection:
+        now = self._db.now()
+        with self._db.connection() as connection:
             result = connection.execute(
                 "UPDATE flow_executions SET released_at=%s"
                 " WHERE flow_id=%s AND released_at IS NULL"
@@ -90,9 +93,9 @@ class WorkerStore:
         protocol_version: int,
         connection_epoch: str = "",
     ) -> WorkerRecord:
-        now = self.store.now()
+        now = self._db.now()
         with (
-            self.store.connection() as connection,
+            self._db.connection() as connection,
             connection.cursor(row_factory=class_row(WorkerRecord)) as cursor,
         ):
             row = cursor.execute(
@@ -127,15 +130,15 @@ class WorkerStore:
         reason: str | None = None,
         connection_epoch: str = "",
     ) -> None:
-        now = self.store.now()
-        with self.store.connection() as connection, connection.transaction():
-            self.store._lock_worker(connection, worker_id)
+        now = self._db.now()
+        with self._db.connection() as connection, connection.transaction():
+            self._db._lock_worker(connection, worker_id)
             connection.execute(
                 "UPDATE flow_executions SET recovery_deadline=COALESCE(recovery_deadline,%s)"
                 " WHERE worker_id=%s AND released_at IS NULL"
                 " AND EXISTS (SELECT 1 FROM workers WHERE worker_id=%s"
                 " AND connection_epoch=%s)",
-                (now + self.store.recovery_grace, worker_id, worker_id, connection_epoch),
+                (now + self._db.recovery_grace, worker_id, worker_id, connection_epoch),
             )
             connection.execute(
                 "UPDATE jobs SET recovery_deadline=COALESCE(recovery_deadline,%s), updated_at=%s"
@@ -143,7 +146,7 @@ class WorkerStore:
                 " AND EXISTS (SELECT 1 FROM workers WHERE worker_id=%s"
                 " AND connection_epoch=%s)",
                 (
-                    now + self.store.recovery_grace,
+                    now + self._db.recovery_grace,
                     now,
                     JobState.RUNNING,
                     worker_id,
@@ -173,7 +176,7 @@ class WorkerStore:
 
     def list_workers(self) -> list[WorkerRecord]:
         with (
-            self.store.connection() as connection,
+            self._db.connection() as connection,
             connection.cursor(row_factory=class_row(WorkerRecord)) as cursor,
         ):
             return cursor.execute("SELECT * FROM workers ORDER BY worker_id").fetchall()
@@ -181,7 +184,7 @@ class WorkerStore:
     def assign_job(self, worker_id: str, token: str, connection_epoch: str = "") -> Job | None:
         """Claim work while retaining a Flow's worker slot between individual jobs."""
 
-        now = self.store.now()
+        now = self._db.now()
         # Share this predicate across fair-worker selection and both binding paths.
         eligible = (
             " AND (j.prepare_next_at IS NULL OR j.prepare_next_at<=%s)"
@@ -196,7 +199,7 @@ class WorkerStore:
             " AND (prior.state='running' OR (prior.result_received_at IS NOT NULL"
             " AND prior.result_applied_at IS NULL))))"
         )
-        with self.store.connection() as connection, connection.transaction():
+        with self._db.connection() as connection, connection.transaction():
             candidate = connection.execute(
                 "SELECT w.worker_id FROM workers w WHERE w.status=%s"
                 " AND w.current_job_id IS NULL AND EXISTS (SELECT 1 FROM jobs j"
@@ -273,7 +276,7 @@ class WorkerStore:
                         worker_id,
                         token,
                         now,
-                        now + self.store.lease_duration,
+                        now + self._db.lease_duration,
                         now,
                         row["id"],
                     ),
@@ -293,9 +296,9 @@ class WorkerStore:
         token: str,
         connection_epoch: str = "",
     ) -> bool:
-        now = self.store.now()
-        with self.store.connection() as connection, connection.transaction():
-            self.store._lock_worker(connection, worker_id)
+        now = self._db.now()
+        with self._db.connection() as connection, connection.transaction():
+            self._db._lock_worker(connection, worker_id)
             job = connection.execute(
                 "SELECT flow_id,kind FROM jobs WHERE id=%s AND state=%s"
                 " AND assigned_worker_id=%s AND assignment_token=%s"
@@ -321,7 +324,7 @@ class WorkerStore:
                 (
                     now,
                     now,
-                    now + self.store.lease_duration,
+                    now + self._db.lease_duration,
                     now,
                     job_id,
                     JobState.RUNNING,
@@ -345,9 +348,9 @@ class WorkerStore:
         token: str,
         connection_epoch: str = "",
     ) -> bool:
-        now = self.store.now()
-        with self.store.connection() as connection:
-            self.store._lock_worker(connection, worker_id)
+        now = self._db.now()
+        with self._db.connection() as connection:
+            self._db._lock_worker(connection, worker_id)
             result = connection.execute(
                 "UPDATE jobs SET heartbeat_at=%s, lease_expires_at=%s, updated_at=%s"
                 " WHERE id=%s AND state=%s AND assigned_worker_id=%s"
@@ -358,7 +361,7 @@ class WorkerStore:
                 " WHERE worker_id=%s AND connection_epoch=%s)",
                 (
                     now,
-                    now + self.store.lease_duration,
+                    now + self._db.lease_duration,
                     now,
                     job_id,
                     JobState.RUNNING,
@@ -381,9 +384,9 @@ class WorkerStore:
     ) -> bool:
         """Resume started work, including a frozen archive whose Started frame was lost."""
 
-        now = self.store.now()
-        with self.store.connection() as connection, connection.transaction():
-            self.store._lock_worker(connection, worker_id)
+        now = self._db.now()
+        with self._db.connection() as connection, connection.transaction():
+            self._db._lock_worker(connection, worker_id)
             # Recover a lost Started only against the complete frozen ArchiveTask identity.
             resumed = connection.execute(
                 "UPDATE jobs SET recovery_deadline=NULL, heartbeat_at=%s,"
@@ -406,7 +409,7 @@ class WorkerStore:
                 " WHERE worker_id=%s AND connection_epoch=%s)",
                 (
                     now,
-                    now + self.store.lease_duration,
+                    now + self._db.lease_duration,
                     now,
                     now,
                     job_id,
@@ -433,7 +436,7 @@ class WorkerStore:
         token: str,
         connection_epoch: str = "",
     ) -> bool:
-        with self.store.connection() as connection:
+        with self._db.connection() as connection:
             row = connection.execute(
                 "SELECT 1 FROM jobs WHERE id=%s AND state=%s AND assigned_worker_id=%s"
                 " AND assignment_token=%s AND EXISTS (SELECT 1 FROM workers"
@@ -453,9 +456,9 @@ class WorkerStore:
     ) -> str:
         """Persist a fenced terminal message before domain-side result application."""
 
-        now = self.store.now()
-        with self.store.connection() as connection, connection.transaction():
-            self.store._lock_worker(connection, worker_id)
+        now = self._db.now()
+        with self._db.connection() as connection, connection.transaction():
+            self._db._lock_worker(connection, worker_id)
             row = connection.execute(
                 "SELECT result_digest, result_applied_at FROM jobs WHERE id=%s"
                 " AND assigned_worker_id=%s AND assignment_token=%s"
@@ -487,8 +490,8 @@ class WorkerStore:
     ) -> bool:
         if state not in (JobState.DONE, JobState.FAILED):
             raise ValueError("remote assignments can only finish as done or failed")
-        with self.store.connection() as connection:
-            self.store._lock_worker(connection, worker_id)
+        with self._db.connection() as connection:
+            self._db._lock_worker(connection, worker_id)
             result = connection.execute(
                 "UPDATE jobs SET state=%s, result_applied_at=COALESCE(result_applied_at,%s),"
                 " updated_at=%s"
@@ -497,8 +500,8 @@ class WorkerStore:
                 " WHERE worker_id=%s AND connection_epoch=%s)",
                 (
                     state,
-                    self.store.now(),
-                    self.store.now(),
+                    self._db.now(),
+                    self._db.now(),
                     job_id,
                     JobState.RUNNING,
                     worker_id,
@@ -511,26 +514,26 @@ class WorkerStore:
                 connection.execute(
                     "UPDATE workers SET status=%s, current_job_id=NULL, last_seen_at=%s"
                     " WHERE worker_id=%s AND current_job_id=%s",
-                    (WorkerStatus.ONLINE, self.store.now(), worker_id, job_id),
+                    (WorkerStatus.ONLINE, self._db.now(), worker_id, job_id),
                 )
         return result.rowcount == 1
 
     def _lock_preparation(self, job_id: int, worker: str, token: str, epoch: str) -> Job | None:
-        job = self.store.jobs.get_job(job_id)
+        job = JobStore(self._db).get_job(job_id)
         if job is None:
             return None
-        self.store.lock_workflow(job.flow_id)
-        current = self.store.lock_job(job_id)
+        self._db.lock_workflow(job.flow_id)
+        current = self._db.lock_job(job_id)
         if (current is None or current.started_at is not None or current.result_received_at is not None
-                or current.lease_expires_at is None or current.lease_expires_at <= self.store.now()
+                or current.lease_expires_at is None or current.lease_expires_at <= self._db.now()
                 or not self.assignment_active(job_id, worker, token, epoch)):
             return None
         return current
 
     def clear_preparation(self, job_id: int, worker: str, token: str, epoch: str) -> bool:
         """Clear the read budget only for the same successful, un-dispatched preparation."""
-        with self.store.transaction() as tx:
-            current = tx.workers._lock_preparation(job_id, worker, token, epoch)
+        with self._db.transaction() as tx:
+            current = WorkerStore(tx)._lock_preparation(job_id, worker, token, epoch)
             if current is None:
                 return False
             with tx.connection() as connection:
@@ -549,11 +552,11 @@ class WorkerStore:
         A missing error means the persisted window expired before issuing another request.
         The caller has not emitted Assignment and must complete the ordinary result path on failure.
         """
-        with self.store.transaction() as tx:
-            current = tx.workers._lock_preparation(job_id, worker, token, epoch)
+        with self._db.transaction() as tx:
+            current = WorkerStore(tx)._lock_preparation(job_id, worker, token, epoch)
             if current is None:
                 return None
-            flow, delivery = tx.flows.get_flow(current.flow_id), tx.deliveries.get_delivery(current.flow_id)
+            flow, delivery = FlowStore(tx).get_flow(current.flow_id), DeliveryStore(tx).get_delivery(current.flow_id)
             if (flow is None or flow.state is not FlowState.ACTIVE
                     or (delivery is not None and delivery.supersedes(current.kind))):
                 return JobState.DONE
@@ -575,9 +578,9 @@ class WorkerStore:
                 )
             if exhausted:
                 message = Failed(job_id=job_id, assignment_token=token, connection_epoch="control", error=reason)
-                tx.jobs.record_control_result(job_id, message.model_dump(mode="json"), terminal_digest(message), reason)
+                JobStore(tx).record_control_result(job_id, message.model_dump(mode="json"), terminal_digest(message), reason)
                 return JobState.FAILED
-            if not tx.workers.requeue_assignment(job_id, worker, token, epoch):
+            if not WorkerStore(tx).requeue_assignment(job_id, worker, token, epoch):
                 raise ValueError("locked preparation could not be requeued")
             return JobState.QUEUED
 
@@ -588,8 +591,8 @@ class WorkerStore:
         token: str,
         connection_epoch: str = "",
     ) -> bool:
-        with self.store.connection() as connection:
-            self.store._lock_worker(connection, worker_id)
+        with self._db.connection() as connection:
+            self._db._lock_worker(connection, worker_id)
             result = connection.execute(
                 "UPDATE jobs SET state=%s, assigned_worker_id=NULL, assignment_token=NULL,"
                 " heartbeat_at=NULL, updated_at=%s WHERE id=%s AND state=%s"
@@ -600,7 +603,7 @@ class WorkerStore:
                 " AND connection_epoch=%s)",
                 (
                     JobState.QUEUED,
-                    self.store.now(),
+                    self._db.now(),
                     job_id,
                     JobState.RUNNING,
                     worker_id,
@@ -613,15 +616,15 @@ class WorkerStore:
                 connection.execute(
                     "UPDATE workers SET status=%s, current_job_id=NULL, last_seen_at=%s"
                     " WHERE worker_id=%s AND current_job_id=%s",
-                    (WorkerStatus.ONLINE, self.store.now(), worker_id, job_id),
+                    (WorkerStatus.ONLINE, self._db.now(), worker_id, job_id),
                 )
         return result.rowcount == 1
 
     def recover_abandoned_assignments(self) -> None:
         """Mark persisted work recoverable without replaying or failing it at startup."""
 
-        now = self.store.now()
-        with self.store.connection() as connection:
+        now = self._db.now()
+        with self._db.connection() as connection:
             connection.execute(
                 "UPDATE workers SET status=%s",
                 (WorkerStatus.OFFLINE,),
@@ -629,19 +632,19 @@ class WorkerStore:
             connection.execute(
                 "UPDATE jobs SET recovery_deadline=COALESCE(recovery_deadline,%s),"
                 " updated_at=%s WHERE state=%s AND " + _MAY_HAVE_EXECUTED,
-                (now + self.store.recovery_grace, now, JobState.RUNNING),
+                (now + self._db.recovery_grace, now, JobState.RUNNING),
             )
             connection.execute(
                 "UPDATE flow_executions SET recovery_deadline=COALESCE(recovery_deadline,%s)"
                 " WHERE released_at IS NULL",
-                (now + self.store.recovery_grace,),
+                (now + self._db.recovery_grace,),
             )
 
     def sweep_expired_assignments(self) -> tuple[int, int]:
         """Apply pure recovery decisions under the existing worker-first transaction fence."""
 
-        now = self.store.now()
-        with self.store.connection() as connection, connection.transaction():
+        now = self._db.now()
+        with self._db.connection() as connection, connection.transaction():
             connection.execute(
                 "SELECT worker_id FROM workers ORDER BY worker_id FOR UPDATE"
             ).fetchall()
@@ -755,7 +758,7 @@ class WorkerStore:
         return len(requeued_rows), len(failed_rows) + len(expired_executions)
 
     def drain(self, worker_id: str, enabled: bool) -> None:
-        with self.store.connection() as conn:
+        with self._db.connection() as conn:
             result = conn.execute("UPDATE workers SET draining=%s WHERE worker_id=%s", (enabled, worker_id))
             if result.rowcount != 1:
                 raise ValueError('unknown worker')

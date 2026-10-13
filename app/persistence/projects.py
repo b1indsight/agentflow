@@ -17,7 +17,7 @@ from app.domain.project_models import ProjectStatus
 from app.github import GitHubError, ProjectConfig, retry_delay
 
 if TYPE_CHECKING:
-    from app.persistence.store import Store
+    from app.persistence.database import Database
 
 
 class Projection(BaseModel):
@@ -62,12 +62,12 @@ class ProjectionUpdate(TypedDict, total=False):
 class ProjectStore:
     """Persist projections and partial sync checkpoints without overwriting newer desired facts."""
 
-    def __init__(self, store: Store) -> None:
-        self.store = store
+    def __init__(self, db: Database) -> None:
+        self._db = db
 
     def seed(self, repo: str, config: ProjectConfig, limit: int) -> None:
-        now = self.store.now()
-        with self.store.connection() as connection:
+        now = self._db.now()
+        with self._db.connection() as connection:
             connection.execute(
                 "INSERT INTO project_destinations VALUES (%s,%s,%s) ON CONFLICT DO NOTHING",
                 (repo, config.project_id, now),
@@ -86,14 +86,14 @@ class ProjectStore:
             )
 
     def list_projections(self, *, after: int = 0, limit: int = 100, repo: str | None = None) -> list[Projection]:
-        with self.store.connection() as connection:
+        with self._db.connection() as connection:
             return connection.cursor(row_factory=class_row(Projection)).execute(
                 "SELECT * FROM project_projections WHERE id>%s AND (%s::text IS NULL OR repo=%s)"
                 " ORDER BY id LIMIT %s", (after, repo, repo, limit),
             ).fetchall()
 
     def get(self, identity: int) -> Projection:
-        with self.store.connection() as connection:
+        with self._db.connection() as connection:
             row = connection.cursor(row_factory=class_row(Projection)).execute(
                 "SELECT * FROM project_projections WHERE id=%s", (identity,),
             ).fetchone()
@@ -103,16 +103,16 @@ class ProjectStore:
     def due(self, configs: dict[str, ProjectConfig], limit: int) -> list[Projection]:
         if not configs:
             return []
-        with self.store.connection() as connection:
+        with self._db.connection() as connection:
             return connection.cursor(row_factory=class_row(Projection)).execute(
                 "SELECT * FROM project_projections WHERE NOT blocked AND next_at<=%s"
                 " AND (repo,project_id) IN (SELECT * FROM unnest(%s::text[],%s::text[]))"
                 " ORDER BY next_at,id LIMIT %s",
-                (self.store.now(), list(configs), [c.project_id for c in configs.values()], limit),
+                (self._db.now(), list(configs), [c.project_id for c in configs.values()], limit),
             ).fetchall()
 
     def refresh(self, identity: int, config: ProjectConfig) -> Projection:
-        with self.store.transaction() as tx, tx.connection() as connection:
+        with self._db.transaction() as tx, tx.connection() as connection:
             row = connection.cursor(row_factory=class_row(Projection)).execute(
                 "SELECT * FROM project_projections WHERE id=%s FOR UPDATE", (identity,),
             ).fetchone()
@@ -152,44 +152,44 @@ class ProjectStore:
             if fact["installation_id"] != config.installation_id:
                 connection.execute("UPDATE project_projections SET blocked=TRUE,last_error=%s WHERE id=%s",
                                    ("project installation does not match owner Flow", identity))
-            return tx.projects.get(identity)
+            return ProjectStore(tx).get(identity)
 
     def save(self, row: Projection, **values: Unpack[ProjectionUpdate]) -> None:
         """Update only supplied sync fields while retaining the projection's config fence."""
         if not values:
             raise ValueError("projection update requires at least one field")
-        with self.store.connection() as connection:
+        with self._db.connection() as connection:
             connection.execute(sql.SQL("UPDATE project_projections SET {} WHERE id=%s AND config_key=%s").format(
                 sql.SQL(",").join(sql.SQL("{}=%s").format(sql.Identifier(key)) for key in values)),
                 (*values.values(), row.id, row.config_key),
             )
 
     def acknowledge(self, row: Projection, interval: float) -> None:
-        with self.store.connection() as connection:
+        with self._db.connection() as connection:
             connection.execute(
                 "UPDATE project_projections SET synced_version=GREATEST(synced_version,%s),"
                 " failures=0,last_error=NULL,next_at=CASE WHEN desired_version=%s THEN %s ELSE %s END"
                 " WHERE id=%s AND config_key=%s",
-                (row.desired_version, row.desired_version, self.store.now()+timedelta(seconds=interval),
-                 self.store.now(), row.id, row.config_key),
+                (row.desired_version, row.desired_version, self._db.now()+timedelta(seconds=interval),
+                 self._db.now(), row.id, row.config_key),
             )
 
     def failed(self, row: Projection, error: GitHubError) -> None:
         attempts = row.failures + 1
         self.save(row, failures=attempts, last_error=str(error), blocked=not error.retryable,
-                  next_at=self.store.now()+timedelta(seconds=retry_delay(attempts, self.store.now(), error)))
+                  next_at=self._db.now()+timedelta(seconds=retry_delay(attempts, self._db.now(), error)))
 
     def retry(self, repo: str) -> int:
-        with self.store.connection() as connection:
+        with self._db.connection() as connection:
             return connection.execute(
                 "UPDATE project_projections SET blocked=FALSE,failures=0,last_error=NULL,next_at=%s,"
-                " cursor=NULL,scan_incomplete=FALSE WHERE repo=%s", (self.store.now(), repo.casefold()),
+                " cursor=NULL,scan_incomplete=FALSE WHERE repo=%s", (self._db.now(), repo.casefold()),
             ).rowcount
 
     @asynccontextmanager
     async def claim(self, row: Projection) -> AsyncIterator[bool]:
         # A dedicated session lock spans I/O without holding workflow transactions or pool slots.
-        async with await psycopg.AsyncConnection.connect(self.store.database_url, autocommit=True) as connection:
+        async with await psycopg.AsyncConnection.connect(self._db.database_url, autocommit=True) as connection:
             cursor = await connection.execute("SELECT pg_try_advisory_lock(hashtextextended(%s,1))",
                                               (f"{row.project_id}:{row.repo}#{row.issue_number}",))
             acquired = await cursor.fetchone()

@@ -31,9 +31,9 @@ def test_cancel_retains_slot_and_fence_past_recovery_timeout(store):
     assert store.workers.get_flow_execution(flow.id).released_at is None
     stop = store.stops.pending('w')
     assert stop.job_id == job.id and stop.assignment_token == 'token'
-    store._clock = lambda: job.created_at + timedelta(days=1)
+    store._db._clock = lambda: job.created_at + timedelta(days=1)
     store.workers.recover_abandoned_assignments()
-    store._clock = lambda: job.created_at + timedelta(days=2)
+    store._db._clock = lambda: job.created_at + timedelta(days=2)
     store.workers.sweep_expired_assignments()
     assert store.workers.get_flow_execution(flow.id).released_at is None
     assert store.jobs.get_job(job.id).assignment_token == 'token'
@@ -124,9 +124,9 @@ async def test_late_merge_with_replacement_flow_keeps_stop_blocked(store):
     await route_merge(store, flow)
     stop = store.stops.pending('w')
     assert not store.stops.confirm('w', ExecutionStopped(**stop.message('epoch').model_dump(exclude={'type'}), execution_nonce='owned'))
-    store._clock = lambda: flow.created_at + timedelta(days=1)
+    store._db._clock = lambda: flow.created_at + timedelta(days=1)
     store.workers.recover_abandoned_assignments()
-    store._clock = lambda: flow.created_at + timedelta(days=2)
+    store._db._clock = lambda: flow.created_at + timedelta(days=2)
     store.workers.sweep_expired_assignments()
     assert store.workers.get_flow_execution(flow.id).released_at is None
 
@@ -139,7 +139,7 @@ def test_lost_started_ack_cannot_requeue_then_cancel_as_unsent(store):
     assert store.stops.authorize_dispatch(job.id, 'w', 'token', 'epoch')
     assert not store.workers.requeue_assignment(job.id, 'w', 'token', 'epoch')
     store.workers.worker_disconnected('w', 'lost ACK', 'epoch')
-    store._clock = lambda: job.created_at + timedelta(days=1)
+    store._db._clock = lambda: job.created_at + timedelta(days=1)
     assert store.workers.sweep_expired_assignments() == (0, 0)
     assert store.workers.get_flow_execution(flow.id).released_at is None
     ControlService(store).cancel(flow)

@@ -17,19 +17,19 @@ from app.domain.models import (
 from app.persistence.records import required
 
 if TYPE_CHECKING:
-    from app.persistence.store import Store
+    from app.persistence.database import Database
 
 
 class DeliveryStore:
     """Flow delivery identity and the idempotent tool-call ledger."""
 
-    def __init__(self, store: Store) -> None:
-        self.store = store
+    def __init__(self, db: Database) -> None:
+        self._db = db
 
     def get_or_create_delivery(self, flow_id: int, branch: str) -> FlowDelivery:
-        now = self.store.now()
+        now = self._db.now()
         with (
-            self.store.connection() as connection,
+            self._db.connection() as connection,
             connection.cursor(row_factory=class_row(FlowDelivery)) as cursor,
         ):
             row = cursor.execute(
@@ -46,7 +46,7 @@ class DeliveryStore:
 
     def get_delivery(self, flow_id: int) -> FlowDelivery | None:
         with (
-            self.store.connection() as connection,
+            self._db.connection() as connection,
             connection.cursor(row_factory=class_row(FlowDelivery)) as cursor,
         ):
             return cursor.execute(
@@ -54,8 +54,8 @@ class DeliveryStore:
             ).fetchone()
 
     def update_delivery(self, delivery: FlowDelivery) -> None:
-        delivery.updated_at = self.store.now()
-        with self.store.connection() as connection:
+        delivery.updated_at = self._db.now()
+        with self._db.connection() as connection:
             connection.execute(
                 "UPDATE flow_deliveries SET branch=%s, base_branch=%s, state=%s,"
                 " pr_number=%s, url=%s, head_sha=%s, title=%s, body=%s,"
@@ -91,9 +91,9 @@ class DeliveryStore:
     ) -> tuple[FlowToolCall, bool]:
         """Create an idempotency record or return an exactly matching prior call."""
 
-        now = self.store.now()
+        now = self._db.now()
         with (
-            self.store.connection() as connection,
+            self._db.connection() as connection,
             connection.cursor(row_factory=class_row(FlowToolCall)) as cursor,
         ):
             row = cursor.execute(
@@ -121,8 +121,8 @@ class DeliveryStore:
     def complete_tool_call(
         self, call_id: str, response: DeliveryReceipt
     ) -> None:
-        now = self.store.now()
-        with self.store.connection() as connection:
+        now = self._db.now()
+        with self._db.connection() as connection:
             result = connection.execute(
                 "UPDATE flow_tool_calls SET response=%s, updated_at=%s WHERE call_id=%s",
                 (Jsonb(response.model_dump(mode="json")), now, call_id),
@@ -132,7 +132,7 @@ class DeliveryStore:
 
     def get_tool_call(self, call_id: str) -> FlowToolCall | None:
         with (
-            self.store.connection() as connection,
+            self._db.connection() as connection,
             connection.cursor(row_factory=class_row(FlowToolCall)) as cursor,
         ):
             return cursor.execute(

@@ -30,7 +30,7 @@ from tests.test_coordinator import coordinator
 @pytest.fixture
 def review_flow(store, monkeypatch):
     clock = SimpleNamespace(now=datetime(2026, 9, 7, tzinfo=UTC))
-    monkeypatch.setattr(store, "_clock", lambda: clock.now)
+    monkeypatch.setattr(store._db, "_clock", lambda: clock.now)
     flow = store.flows.create_flow("owner/repo", 7, 42)
     attempt = store.flows.create_attempt(flow.id)
     flow.current_attempt_id = attempt.id

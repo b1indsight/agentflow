@@ -105,7 +105,7 @@ async def test_transient_read_requeues_and_recovers_without_a_revision_cycle(sto
     assert store.workers.get_flow_execution(flow.id).released_at is None
     assert store.workers.assign_job("worker-a", "too-early", "epoch") is None
     future = pending.prepare_next_at + timedelta(seconds=1)
-    monkeypatch.setattr(store, "_clock", lambda: future)
+    monkeypatch.setattr(store._db, "_clock", lambda: future)
     monkeypatch.setattr(Repository, "fetch_ref", original)
     retry = store.workers.assign_job("worker-a", "retry", "epoch")
     prepared = await gateway(store, subject)._prepare_assignment(retry, "worker-a", "retry", "epoch")
@@ -211,7 +211,7 @@ async def test_expired_window_stops_before_another_github_request(store, pending
     monkeypatch.setattr(Repository, "fetch_ref", unavailable)
     await gateway(store, subject)._prepare_assignment(job, "worker-a", "token", "epoch")
     first = store.jobs.get_job(job.id).prepare_first_failed_at
-    monkeypatch.setattr(store, "_clock", lambda: first + timedelta(seconds=901))
+    monkeypatch.setattr(store._db, "_clock", lambda: first + timedelta(seconds=901))
     retry = store.workers.assign_job("worker-a", "expired", "epoch")
     prepared = await gateway(store, subject)._prepare_assignment(retry, "worker-a", "expired", "epoch")
     assert prepared is JobState.FAILED and len(calls) == 1
@@ -254,7 +254,7 @@ async def test_a_slow_retry_read_cannot_run_beyond_the_window(store, pending_rev
     store.workers.defer_preparation(job.id, "worker-a", "token", "epoch",
         GitHubError(GitHubErrorKind.TRANSIENT, "get_ref"), max_failures=5, window_seconds=900)
     first = store.jobs.get_job(job.id).prepare_first_failed_at
-    monkeypatch.setattr(store, "_clock", lambda: first + timedelta(seconds=10))
+    monkeypatch.setattr(store._db, "_clock", lambda: first + timedelta(seconds=10))
     subject.settings.prepare_retry_window_seconds = 10.01
     retry = store.workers.assign_job("worker-a", "slow", "epoch")
 

@@ -68,7 +68,7 @@ class QueueConnection:
 class RemoteStore(RepositoryViews, Store):
     @property
     def stops(self) -> StopStore:
-        return NoPendingStops(self)
+        return NoPendingStops()
 
     def __init__(self) -> None:
         self.job = Job(id=5, flow_id=3, kind=JobKind.INITIAL, state=JobState.QUEUED)

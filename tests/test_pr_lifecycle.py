@@ -332,7 +332,7 @@ async def test_close_after_comment_dispatch_recovers_only_the_existing_marker(st
     with pytest.raises(ResultPending):
         await subject.results.apply(job.id)
     future = store.now() + timedelta(seconds=300)
-    monkeypatch.setattr(store, "_clock", lambda: future)
+    monkeypatch.setattr(store._db, "_clock", lambda: future)
     assert await subject.results.apply(job.id) is JobState.DONE
     assert len(github.comments) == 1
     assert "修订交付" in github.comments[0]

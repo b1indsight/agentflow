@@ -149,7 +149,7 @@ async def test_original_worker_recovers_cleanup_and_replays_without_redeleting(
         if window in {"started-lost", "result-started-lost"}:
             # The original frozen token must survive a lost Started frame and expired grace.
             now = store.now()
-            store._clock = lambda: now + timedelta(hours=1)
+            store._db._clock = lambda: now + timedelta(hours=1)
             store.workers.sweep_expired_assignments()
             assert store.jobs.get_job(job.id).assignment_token == "archive-token"
         await connect_once(store, subject, executor, WorkerSession(root), drop_ack=window == "ack")

@@ -54,7 +54,7 @@ async def test_result_verification_honors_retry_after_across_restart(store, pend
             await coordinator(restarted, app).results.apply(job.id)
         assert len(calls) == 1
         # At the deadline the original accepted result can finish without running a worker again.
-        monkeypatch.setattr(restarted, "_clock", lambda: pending.verify_next_at)
+        monkeypatch.setattr(restarted._db, "_clock", lambda: pending.verify_next_at)
         github.sha = "revision"
         assert await coordinator(restarted, github).results.apply(job.id) is JobState.DONE
         assert restarted.jobs.get_job(job.id).verify_next_at is None

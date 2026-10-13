@@ -396,7 +396,7 @@ def test_concurrent_stores_do_not_claim_the_same_job(
         with other.transaction() as contender:
             def observed(connection, query, *args, **kwargs):
                 cursor = execute(connection, query, *args, **kwargs)
-                if (connection is contender._bound_connection
+                if (connection is contender._db._bound_connection
                         and query.startswith("SELECT w.worker_id FROM workers w")):
                     selected.set()
                     assert release.wait(5)

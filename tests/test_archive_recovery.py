@@ -129,7 +129,7 @@ async def test_expired_merged_executor_is_pinned_until_original_worker_returns(s
     await route_merge(store, flow)
     store.workers.worker_disconnected("worker-a", connection_epoch="epoch-a")
     now = store.now()
-    store._clock = lambda: now + timedelta(hours=1)
+    store._db._clock = lambda: now + timedelta(hours=1)
     store.workers.sweep_expired_assignments()
     assert store.flows.get_flow(flow.id).state is FlowState.ACTIVE
     assert store.workers.get_flow_execution(flow.id).released_at is None
@@ -175,7 +175,7 @@ async def test_restart_between_archive_claim_and_freeze_requeues_safely(store, r
     assert job.payload is None and job.started_at is None
     store.workers.recover_abandoned_assignments()
     now = store.now()
-    store._clock = lambda: now + timedelta(hours=1)
+    store._db._clock = lambda: now + timedelta(hours=1)
     store.workers.sweep_expired_assignments()
     assert store.jobs.get_job(job.id).state is JobState.QUEUED
     store.workers.worker_connected("worker-a", PROTOCOL_VERSION, "restart")

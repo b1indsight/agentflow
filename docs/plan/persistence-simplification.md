@@ -171,3 +171,40 @@ fixture 仍为每项集成测试创建独立 schema。wheel 包含全部 16 个 
 **变化。** 生产（app 与 scripts）增加 1967 行、删除 1815 行，净增加 **152 行**，用于功能对象入口、职责模块和明确类型边界。
 测试增加 1091 行、删除 1015 行，净增加 **76 行**，新增两项回归，其余为入口/替身适配。
 文档增加 226 行、删除 12 行，净增加 214 行；统计相对本 PR 的 `f601472a` 基线。
+
+### 2026-10-14 — Store 拥有仓储，仓储依赖数据库上下文
+
+**要求与决定。** 用户澄清「应该是 Store 拥有存储类，而不是相反」，关注所有权与依赖方向。
+接受该补充设计，未发布的入口更名已撤回；入口继续使用 `store.flows`、`store.jobs` 等名称。
+本条取代上条实施记录中“入口每次构造视图、功能仓储持有 Store”的设计：聚合 Store 创建并持有
+具体仓储，各仓储接收共享数据库上下文，通过明确的具体类型复用其他仓储的操作。
+
+**实施。** `Store._bind_repositories` 显式构造十个仓储，只读属性返回已持有的实例。
+独立 `Database` 承接原有连接池、事务、时钟和共用锁，九个原有基础方法的执行逻辑原样迁移；
+不依赖聚合 Store 或具体仓储。功能仓储只持有该上下文；事务内需要其他仓储时显式构造对应类型，
+传入同一上下文。Flow/Job 终止继续复用 ReviewStore 的取消操作，局部导入避免反馈读取形成加载循环。
+Store 保留连接、时钟与共用锁的公共入口，统一委托其拥有的数据库上下文。
+`Store.transaction` 复制聚合视图，再为绑定连接重新装配整组仓储；普通实例保持原有范围，
+事务实例在退出后拒绝再次访问。测试中的时钟和连接观察点迁到实际资源所有者；停止协议替身
+只提供确定的模拟响应。依据：[Store 装配](../../app/persistence/store.py)、
+[Database](../../app/persistence/database.py)、[显式仓储调用](../../app/persistence/stops.py)、
+[当前架构](../architecture/components.md#47-storepostgresql)。
+
+**验证。** PostgreSQL 全量 **737 passed、无跳过**，保留既有 Starlette 弃用提示。
+Ruff、Mypy（178 个源文件）、sdist/wheel 构建及差异检查通过；沿用上条全量测试命令和独立 schema fixture。
+wheel 包含全部 17 个 persistence 模块，隔离解释器成功导入 16 个实现模块。
+135 个仓储操作、9 个迁移到 Database 的基础操作，在规范化接收对象与等价具体类型调用后，
+业务 AST 一致；七段 schema 的完整文本与执行顺序一致。新增一项事务范围回归，验证事务内
+回滚的 Flow 不会提交，同时预先取得的普通仓储独立提交的 Flow 不会被该回滚影响。
+证据：`python3 .cache/2026-10-13/verify-persistence-composition.py`，报告
+`.cache/2026-10-13/persistence-composition-verification.json`；
+[事务回归](../../tests/test_workflow_transactions.py)。独立审查和最新 CI 结果见 PR。
+
+**消融与代价。** 用同一 PostgreSQL fixture，对比实际实现与省去整组重新绑定的简化版本，
+运行退出后访问、普通仓储范围、触发失败回滚三项回归。实际实现全部通过；简化版本三项全部失败：
+事务数据错误提交，退出后仓储仍能取得连接。保留重新绑定以满足事务与生命周期约束。
+复现：`uv run --no-sync --env-file .cache/2026-10-13/persistence-test.env python
+.cache/2026-10-13/persistence-binding-ablation.py`，脚本只在独立测试进程替换事务方法。
+结构对照同时确认：聚合 Store 显式持有十个仓储，十个功能模块均已删除对 Store 的反向导入。
+新增一个数据库资源上下文，复用原有驱动和 SQL，不增加运行模式、配置开关或领域数据持久化职责。
+本次补充相对上条实现：生产净增加 79 行，测试净增加 16 行；测试新增一项，其余为资源观察点适配。

@@ -14,7 +14,7 @@ NOW = datetime(2026, 9, 29, tzinfo=UTC)
 
 
 def expiring(store, *, started=False):
-    store._clock = lambda: NOW
+    store._db._clock = lambda: NOW
     flow = store.flows.create_flow("owner/recovery", 1, 1)
     attempt = store.flows.create_attempt(flow.id)
     flow.current_attempt_id = attempt.id

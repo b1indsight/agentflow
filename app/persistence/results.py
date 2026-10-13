@@ -13,17 +13,17 @@ from app.domain.models import Job
 from app.github import GitHubError, retry_delay
 
 if TYPE_CHECKING:
-    from app.persistence.store import Store
+    from app.persistence.database import Database
 
 
 class ResultStore:
-    """Share the owning Store's connection, including its explicit transaction when preparing."""
+    """Share the database context's connection, including its explicit transaction when preparing."""
 
-    def __init__(self, store: Store) -> None:
-        self.store = store
+    def __init__(self, db: Database) -> None:
+        self._db = db
 
     def get_plan(self, job_id: int) -> ResultPlan | None:
-        with self.store.connection() as connection:
+        with self._db.connection() as connection:
             row = connection.execute(
                 "SELECT plan FROM result_applications WHERE job_id=%s",
                 (job_id,),
@@ -32,11 +32,11 @@ class ResultStore:
 
     def defer_verification(self, job: Job, error: GitHubError) -> None:
         """Retain a server deadline only while this accepted result still needs verification."""
-        with self.store.transaction() as tx:
+        with self._db.transaction() as tx:
             tx.lock_workflow(job.flow_id)
             current = tx.lock_job(job.id)
             if (current is None or current.result_digest != job.result_digest
-                    or current.result_applied_at is not None or tx.results.get_plan(job.id) is not None):
+                    or current.result_applied_at is not None or ResultStore(tx).get_plan(job.id) is not None):
                 return
             failures = current.verify_failures + 1
             next_at = tx.now() + timedelta(seconds=retry_delay(failures, tx.now(), error))
@@ -49,8 +49,8 @@ class ResultStore:
 
     def prepare(self, plan: ResultPlan) -> None:
         """Reserve a frozen plan and its effects atomically; caller holds the workflow/job locks."""
-        now = self.store.now()
-        with self.store.connection() as connection:
+        now = self._db.now()
+        with self._db.connection() as connection:
             inserted = connection.execute(
                 "INSERT INTO result_applications(job_id,digest,plan,created_at)"
                 " VALUES (%s,%s,%s,%s) ON CONFLICT(job_id) DO NOTHING RETURNING job_id",
@@ -81,7 +81,7 @@ class ResultStore:
 
     def list_effects(self, job_id: int) -> list[EffectRecord]:
         with (
-            self.store.connection() as connection,
+            self._db.connection() as connection,
             connection.cursor(row_factory=class_row(EffectRecord)) as cursor,
         ):
             return cursor.execute(
@@ -91,9 +91,9 @@ class ResultStore:
 
     def claim(self, job_id: int, token: str) -> EffectRecord | None:
         """Claim only the first unfinished effect, including reconciliation of an expired sender."""
-        now = self.store.now()
+        now = self._db.now()
         with (
-            self.store.connection() as connection,
+            self._db.connection() as connection,
             connection.cursor(row_factory=class_row(EffectRecord)) as cursor,
         ):
             return cursor.execute(
@@ -117,12 +117,12 @@ class ResultStore:
 
     def mark_dispatched(self, record: EffectRecord) -> None:
         """Persist the uncertain-outcome boundary before making a potentially non-idempotent call."""
-        with self.store.connection() as connection:
+        with self._db.connection() as connection:
             result = connection.execute(
                 "UPDATE result_effects SET dispatched_at=COALESCE(dispatched_at,%s)"
                 " WHERE job_id=%s AND effect_key=%s AND claimed_by=%s AND state=%s",
                 (
-                    self.store.now(),
+                    self._db.now(),
                     record.job_id,
                     record.effect_key,
                     record.claimed_by,
@@ -131,7 +131,7 @@ class ResultStore:
             )
             if result.rowcount != 1:
                 raise RuntimeError("effect claim expired before dispatch")
-        record.dispatched_at = record.dispatched_at or self.store.now()
+        record.dispatched_at = record.dispatched_at or self._db.now()
 
     def finish(
         self,
@@ -143,7 +143,7 @@ class ResultStore:
         delay: float = 0,
         definitely_unsent: bool = False,
     ) -> None:
-        with self.store.connection() as connection:
+        with self._db.connection() as connection:
             result = connection.execute(
                 "UPDATE result_effects SET state=%s,receipt=%s,last_error=%s,"
                 " next_attempt_at=%s,claimed_by=NULL,claim_expires_at=NULL,"
@@ -153,7 +153,7 @@ class ResultStore:
                     state,
                     Jsonb(receipt.model_dump(mode="json", exclude_unset=True)) if receipt else None,
                     error,
-                    self.store.now() + timedelta(seconds=delay),
+                    self._db.now() + timedelta(seconds=delay),
                     definitely_unsent,
                     record.job_id,
                     record.effect_key,
@@ -165,7 +165,7 @@ class ResultStore:
                 raise RuntimeError("effect completion lost its claim")
 
     def skip_remaining(self, job_id: int, reason: str) -> None:
-        with self.store.connection() as connection:
+        with self._db.connection() as connection:
             connection.execute(
                 "UPDATE result_effects SET state=%s,last_error=%s,claimed_by=NULL,"
                 " claim_expires_at=NULL WHERE job_id=%s AND state NOT IN (%s,%s)",
@@ -174,7 +174,7 @@ class ResultStore:
 
     def retire_for_merge(self, job_id: int) -> None:
         """Skip unsent work, retaining active senders and uncertain writes for read-only recovery."""
-        with self.store.connection() as connection:
+        with self._db.connection() as connection:
             connection.execute(
                 "UPDATE result_effects SET state=CASE WHEN dispatched_at IS NULL THEN %s ELSE %s END,"
                 " last_error=%s,claimed_by=NULL,claim_expires_at=NULL,next_attempt_at=%s"
@@ -182,13 +182,13 @@ class ResultStore:
                 " AND (claimed_by IS NULL OR claim_expires_at<=%s)"
                 " AND (dispatched_at IS NULL OR state=%s)",
                 (EffectState.SKIPPED, EffectState.UNCERTAIN, "PR merged; no further writes",
-                 self.store.now(), job_id, EffectState.SUCCEEDED, EffectState.SKIPPED,
-                 self.store.now(), EffectState.FAILED),
+                 self._db.now(), job_id, EffectState.SUCCEEDED, EffectState.SKIPPED,
+                 self._db.now(), EffectState.FAILED),
             )
 
     def get_pending_plan(self, flow_id: int) -> ResultPlan | None:
         """Find a unique unapplied inbox plan; the caller holds the workflow lock."""
-        with self.store.connection() as connection:
+        with self._db.connection() as connection:
             jobs = connection.execute(
                 "SELECT id FROM jobs WHERE flow_id=%s AND result_received_at IS NOT NULL"
                 " AND result_applied_at IS NULL FOR UPDATE",
@@ -198,7 +198,7 @@ class ResultStore:
 
     def retry_failed_effects(self, job_id: int) -> bool:
         """Rearm definite rejections after control validates the plan under its workflow lock."""
-        with self.store.connection() as connection:
+        with self._db.connection() as connection:
             effects = self.list_effects(job_id)
             failed = [effect for effect in effects if effect.state is EffectState.FAILED]
             if (not failed or any(effect.dispatched_at is not None for effect in failed)
@@ -208,14 +208,14 @@ class ResultStore:
             connection.execute(
                 "UPDATE result_effects SET state=%s,next_attempt_at=%s,last_error=NULL"
                 " WHERE job_id=%s AND state=%s",
-                (EffectState.RETRY, self.store.now(), job_id, EffectState.FAILED),
+                (EffectState.RETRY, self._db.now(), job_id, EffectState.FAILED),
             )
             connection.execute("UPDATE jobs SET last_error=NULL WHERE id=%s", (job_id,))
             return True
 
     def recover_claims(self) -> None:
         """Called once after the old single-serve process has stopped, before accepting work."""
-        with self.store.connection() as connection:
+        with self._db.connection() as connection:
             connection.execute(
                 "UPDATE result_effects SET state=CASE WHEN dispatched_at IS NULL THEN %s ELSE %s END,"
                 " claimed_by=NULL,claim_expires_at=NULL WHERE state=%s",
