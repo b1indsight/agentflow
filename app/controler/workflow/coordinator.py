@@ -29,7 +29,6 @@ from app.controler.workflow.preparation import (
 )
 from app.controler.workflow.results import ResultApplication
 from app.controler.workflow.revisions import verify_revision_remote
-from app.controler.workflow.tools import FlowToolService
 from app.domain.context_models import ReviewContext
 from app.domain.judge_models import JudgeDecision
 from app.domain.models import (
@@ -51,9 +50,7 @@ from app.persistence.database import Database
 from app.persistence.deliveries import DeliveryStore
 from app.persistence.flows import FlowStore
 from app.persistence.jobs import JobStore
-from app.persistence.results import ResultStore
 from app.persistence.reviews import ReviewStore
-from app.persistence.stops import StopStore
 from app.persistence.workers import WorkerStore
 from app.plugins import emit_hook, get_plugin_manager
 
@@ -71,42 +68,20 @@ class JobCoordinator:
         deliveries: DeliveryStore,
         flows: FlowStore,
         jobs: JobStore,
-        result_store: ResultStore,
         reviews: ReviewStore,
-        stops: StopStore,
         workers: WorkerStore,
+        results: ResultApplication,
     ) -> None:
         self.database = database
         self.deliveries = deliveries
         self.flows = flows
         self.jobs = jobs
-        self.result_store = result_store
         self.reviews = reviews
-        self.stops = stops
         self.workers = workers
         self.github = github
         self.settings = settings
         self.plugins = plugins or get_plugin_manager()
-        self.tools = FlowToolService(
-            github,
-            database=self.database,
-            deliveries=self.deliveries,
-            flows=self.flows,
-            workers=self.workers,
-        )
-        self.results = ResultApplication(
-            github,
-            settings,
-            self.plugins,
-            database=self.database,
-            deliveries=self.deliveries,
-            flows=self.flows,
-            jobs=self.jobs,
-            result_store=self.result_store,
-            reviews=self.reviews,
-            stops=self.stops,
-            workers=self.workers,
-        )
+        self.results = results
 
     @staticmethod
     def _retired(flow: Flow, job: Job, *, deliveries: DeliveryStore) -> bool:

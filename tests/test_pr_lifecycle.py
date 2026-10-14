@@ -9,6 +9,7 @@ from app.contracts.protocol import PROTOCOL_VERSION, InitialTaskResult, Succeede
 from app.contracts.result_models import ResultPending
 from app.controler.events.router import EventRouter
 from app.controler.reconciliation.pull_requests import Reconciler
+from app.controler.workers.conversation import ConversationBroker
 from app.controler.workers.gateway import ProtocolViolation, WorkerGateway
 from app.controler.workflow.lifecycle import pause_delivery
 from app.controler.workflow.service import ControlService
@@ -137,6 +138,9 @@ async def test_closed_missing_journal_preserves_late_result_and_reopen(store, pe
         jobs=store.jobs,
         stops=store.stops,
         workers=store.workers,
+        tools=subject.tools,
+        results=subject.results,
+        conversations=ConversationBroker(),
     )
     # Missing journal is not proof of execution failure: its original result may still arrive.
     with pytest.raises(ProtocolViolation, match="journal is missing"):
@@ -362,6 +366,9 @@ async def test_close_during_capability_preparation_never_dispatches(store, pendi
         jobs=store.jobs,
         stops=store.stops,
         workers=store.workers,
+        tools=subject.tools,
+        results=subject.results,
+        conversations=ConversationBroker(),
     )
     prepared = await gateway._prepare_assignment(job, "worker-a", "token", "epoch")
     assert prepared is JobState.DONE

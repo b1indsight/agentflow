@@ -27,6 +27,7 @@ from app.contracts.protocol import (
     terminal_digest,
 )
 from app.contracts.result_models import ResultPending
+from app.controler.workers.conversation import ConversationBroker
 from app.controler.workers.gateway import WorkerGateway
 from app.controler.workflow.coordinator import JobCoordinator
 from app.controler.workflow.tools import FlowToolService
@@ -347,6 +348,9 @@ async def test_gateway_runs_one_remote_assignment_to_ack() -> None:
         jobs=store.jobs,
         stops=store.stops,
         workers=store.workers,
+        tools=coordinator.tools,
+        results=coordinator.results,
+        conversations=ConversationBroker(),
     )
 
     await gateway.handle(socket)
@@ -375,13 +379,17 @@ async def test_gateway_authorizes_dispatch_after_preparation(monkeypatch):
                         store.workers.assignment_active(job_id, worker_id, token))
 
     socket = ScriptedSocket()
+    gateway_coordinator = ChangedCoordinator(store)
     gateway = WorkerGateway(
-        ChangedCoordinator(store),
+        gateway_coordinator,
         worker_tokens={"worker-1": "worker-secret"},
         deliveries=store.deliveries,
         jobs=store.jobs,
         stops=store.stops,
         workers=store.workers,
+        tools=gateway_coordinator.tools,
+        results=gateway_coordinator.results,
+        conversations=ConversationBroker(),
     )
     await gateway.handle(socket)
     assert not any(isinstance(parse_server_message(raw), Assignment) for raw in socket.sent)
@@ -392,14 +400,18 @@ async def test_gateway_authorizes_dispatch_after_preparation(monkeypatch):
 async def test_gateway_multiplexes_flow_tool_calls_during_execution() -> None:
     socket = ToolSocket()
     store = RecordingStore()
+    gateway_coordinator = RecordingCoordinator(store)
     gateway = WorkerGateway(
-        RecordingCoordinator(store),
+        gateway_coordinator,
         worker_tokens={"worker-1": "worker-secret"},
         poll_interval=0.01,
         deliveries=store.deliveries,
         jobs=store.jobs,
         stops=store.stops,
         workers=store.workers,
+        tools=gateway_coordinator.tools,
+        results=gateway_coordinator.results,
+        conversations=ConversationBroker(),
     )
 
     await gateway.handle(socket)
@@ -426,6 +438,9 @@ async def test_gateway_never_acknowledges_an_uncommitted_result(monkeypatch):
         jobs=store.jobs,
         stops=store.stops,
         workers=store.workers,
+        tools=coordinator.tools,
+        results=coordinator.results,
+        conversations=ConversationBroker(),
     )
     await gateway.handle(socket)
     assert store.job.result_payload is not None
@@ -478,13 +493,17 @@ async def test_recovery_continues_after_one_broken_result():
 async def test_gateway_rejects_bad_credentials_before_accepting() -> None:
     socket = ScriptedSocket(token="wrong")
     store = RecordingStore()
+    gateway_coordinator = RecordingCoordinator(store)
     gateway = WorkerGateway(
-        RecordingCoordinator(store),
+        gateway_coordinator,
         worker_tokens={"worker-1": "worker-secret"},
         deliveries=store.deliveries,
         jobs=store.jobs,
         stops=store.stops,
         workers=store.workers,
+        tools=gateway_coordinator.tools,
+        results=gateway_coordinator.results,
+        conversations=ConversationBroker(),
     )
 
     await gateway.handle(socket)
@@ -502,13 +521,17 @@ class InvalidRegisterSocket(ScriptedSocket):
 async def test_gateway_closes_messages_with_an_incompatible_protocol_version() -> None:
     socket = InvalidRegisterSocket()
     store = RecordingStore()
+    gateway_coordinator = RecordingCoordinator(store)
     gateway = WorkerGateway(
-        RecordingCoordinator(store),
+        gateway_coordinator,
         worker_tokens={"worker-1": "worker-secret"},
         deliveries=store.deliveries,
         jobs=store.jobs,
         stops=store.stops,
         workers=store.workers,
+        tools=gateway_coordinator.tools,
+        results=gateway_coordinator.results,
+        conversations=ConversationBroker(),
     )
 
     await gateway.handle(socket)
@@ -540,14 +563,18 @@ async def test_gateway_new_epoch_takes_over_a_duplicate_worker_connection() -> N
     store = RecordingStore()
     store.job.state = JobState.DONE
     store.job.result_applied_at = store.job.updated_at
+    gateway_coordinator = RecordingCoordinator(store)
     gateway = WorkerGateway(
-        RecordingCoordinator(store),
+        gateway_coordinator,
         worker_tokens={"worker-1": "worker-secret"},
         poll_interval=60,
         deliveries=store.deliveries,
         jobs=store.jobs,
         stops=store.stops,
         workers=store.workers,
+        tools=gateway_coordinator.tools,
+        results=gateway_coordinator.results,
+        conversations=ConversationBroker(),
     )
     first = WaitingSocket()
     first_session = asyncio.create_task(gateway.handle(first))
@@ -571,14 +598,18 @@ async def test_gateway_accepts_different_worker_identities_concurrently() -> Non
     store = RecordingStore()
     store.job.state = JobState.DONE
     store.job.result_applied_at = store.job.updated_at
+    gateway_coordinator = RecordingCoordinator(store)
     gateway = WorkerGateway(
-        RecordingCoordinator(store),
+        gateway_coordinator,
         worker_tokens={"worker-1": "secret-1", "worker-2": "secret-2"},
         poll_interval=60,
         deliveries=store.deliveries,
         jobs=store.jobs,
         stops=store.stops,
         workers=store.workers,
+        tools=gateway_coordinator.tools,
+        results=gateway_coordinator.results,
+        conversations=ConversationBroker(),
     )
     first = WaitingSocket(worker_id="worker-1", token="secret-1")
     second = WaitingSocket(worker_id="worker-2", token="secret-2")
@@ -623,6 +654,9 @@ async def test_gateway_disconnect_policy(disconnect_after_start: bool) -> None:
         jobs=store.jobs,
         stops=store.stops,
         workers=store.workers,
+        tools=coordinator.tools,
+        results=coordinator.results,
+        conversations=ConversationBroker(),
     )
 
     await gateway.handle(DisconnectingSocket(disconnect_after_start=disconnect_after_start))
@@ -668,13 +702,17 @@ async def test_gateway_resumes_started_assignment_under_a_new_epoch() -> None:
     store.job.assignment_token = "assignment-1"
     store.job.started_at = store.job.created_at
     socket = RecoveringSocket()
+    gateway_coordinator = RecordingCoordinator(store)
     gateway = WorkerGateway(
-        RecordingCoordinator(store),
+        gateway_coordinator,
         worker_tokens={"worker-1": "worker-secret"},
         deliveries=store.deliveries,
         jobs=store.jobs,
         stops=store.stops,
         workers=store.workers,
+        tools=gateway_coordinator.tools,
+        results=gateway_coordinator.results,
+        conversations=ConversationBroker(),
     )
 
     await gateway.handle(socket)

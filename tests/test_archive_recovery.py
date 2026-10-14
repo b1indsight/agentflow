@@ -13,6 +13,7 @@ from app.contracts.protocol import (
     Succeeded,
     terminal_digest,
 )
+from app.controler.workers.conversation import ConversationBroker
 from app.controler.workers.gateway import ProtocolViolation, WorkerGateway
 from app.controler.workflow.service import ControlService
 from app.domain.models import DeliveryState, FlowState, JobKind, JobState
@@ -196,6 +197,9 @@ async def test_merged_coding_process_without_exit_proof_cannot_unlock_archive(st
         jobs=store.jobs,
         stops=store.stops,
         workers=store.workers,
+        tools=subject.tools,
+        results=subject.results,
+        conversations=ConversationBroker(),
     )
     store.workers.worker_connected("worker-a", PROTOCOL_VERSION, "restart")
     with pytest.raises(ProtocolViolation, match="archive blocked"):

@@ -23,7 +23,11 @@ GitHub 错误分类和 Retry-After 计时由 `github/errors.py` 提供，仓储�
 `workers/` 管理 Worker 连接、派发通信与历史查询，`workflow/` 拥有 Flow/Job 准备、交付转换、
 结果提交及副作用恢复，`review/` 加工审核上下文和反馈并运行 Judge，`reconciliation/` 对账
 PR、反馈与 Projects。事件、Worker 管理和对账调用工作流，工作流调用审核模块；
-各子包直接引用已有领域类型、协议、Store/GitHub 及配置，不反向依赖 API 或运行时。
+各子包直接引用已有领域类型、协议、具体仓储/GitHub 及配置，不反向依赖 API 或运行时。
+Runtime 统一初始化工具、effects、结果应用、路由和 conversation broker；各服务仅接收实际
+使用的仓储与服务。Gateway 直接使用工具和结果应用，结果应用的锁由 Runtime、coordinator
+与 Gateway 共享。Webhook 消费器接收已装配的路由，在每次 receipt 事务内绑定路由及控制服务
+的副本；副本使用同一连接，并将通知和 hook 排到外层提交后，原服务保留正常连接范围。
 各包入口只说明职责，调用者直接导入具体模块。
 
 目录列表见[当前目录](roadmap.md#8-当前目录与里程碑)。ASGI Python 入口为
@@ -218,7 +222,7 @@ Store 显式创建并持有以下仓储实例；它们共享独立的 `Database`
 持久化模型。返回这些领域对象的查询在
 cursor 上使用 Psycopg `class_row(Model)`，由模型统一校验枚举、时间和其他字段；其余轻量查询继续
 使用 pool 的 `dict_row` 默认值。SQL、JSONB 适配和原子操作由对应仓储显式维护，
-事务边界与共用锁仍由 Store 提供，没有引入 ORM。
+事务边界与共用锁由 Database 提供，没有引入 ORM。
 
 - `flows`：issue 级状态，`(repo, issue)` 仅允许一个非终态 flow；
 - `flow_executions`：Flow 到单槽 worker/repo identity 的生命周期 binding 与 recovery deadline；

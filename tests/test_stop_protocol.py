@@ -2,6 +2,7 @@ import asyncio
 import os
 import sys
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -14,8 +15,11 @@ from app.contracts.protocol import (
     StopExecution,
     parse_worker_message,
 )
+from app.controler.workers.conversation import ConversationBroker
 from app.controler.workers.gateway import WorkerGateway
+from app.controler.workflow.results import ResultApplication
 from app.controler.workflow.service import ControlService
+from app.controler.workflow.tools import FlowToolService
 from app.domain.models import JobKind
 from app.worker.execution.vcs import _run
 from app.worker.state.session import WorkerSession
@@ -133,8 +137,9 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path):
         def worker_connected(self, *args): pass
         def worker_disconnected(self, *args): pass
 
+    gateway_coordinator = Coordinator()
     gateway = WorkerGateway(
-        Coordinator(),
+        gateway_coordinator,
         worker_tokens={"w": "secret"},
         heartbeat_interval=0.01,
         poll_interval=0.01,
@@ -142,6 +147,9 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path):
         jobs=store.jobs,
         stops=store.stops,
         workers=store.workers,
+        tools=Mock(spec=FlowToolService),
+        results=Mock(spec=ResultApplication),
+        conversations=ConversationBroker(),
     )
     client = WorkerClient(worker_id='w', worker_token='secret', serve_ws_url='unused',
                           executor=Executor(), session=WorkerSession(tmp_path))

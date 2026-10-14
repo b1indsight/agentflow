@@ -5,7 +5,7 @@
 
 ## 当前计划
 
-- [`persistence-simplification.md`](persistence-simplification.md) — PR #82：服务直接注入具体仓储，Store 负责装配、初始化和关闭，Database 提供共享资源；跨仓储事务显式绑定，schema/时钟/Projects 更新边界已整理，737 项 PostgreSQL 回归及静态检查通过，事务绑定的消融证据见记录，独立审查与 CI 见 PR。
+- [`persistence-simplification.md`](persistence-simplification.md) — PR #82：服务直接注入具体仓储，Store 负责仓储装配，Runtime 集中初始化服务并删除中转依赖；跨仓储事务及 Webhook 服务副本显式绑定，738 项 PostgreSQL 回归通过，事务范围的消融证据见记录，独立审查与 CI 见 PR。
 
 - [`control-simplification.md`](control-simplification.md) — PR #81：依赖简化并按批准方案迁入 app/controler，按 events/workers/workflow/review/reconciliation 归组；生产净减少 174 行，734 项 PostgreSQL 回归、静态检查、隔离入口及构建通过，独立审查与 CI 见 PR。
 

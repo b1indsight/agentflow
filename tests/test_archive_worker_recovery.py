@@ -17,6 +17,7 @@ from app.contracts.protocol import (
     parse_server_message,
     parse_worker_message,
 )
+from app.controler.workers.conversation import ConversationBroker
 from app.controler.workers.gateway import WorkerGateway
 from app.controler.workflow.service import ControlService
 from app.domain.models import FlowState, JobKind, JobState
@@ -75,6 +76,9 @@ async def connect_once(store, subject, executor, journal, *, drop_ack=False, cli
         jobs=store.jobs,
         stops=store.stops,
         workers=store.workers,
+        tools=subject.tools,
+        results=subject.results,
+        conversations=ConversationBroker(),
     )
     archive_id = next(job.id for job in store.jobs.list_jobs(journal.load().flow_id)
                       if job.kind is JobKind.ARCHIVE)

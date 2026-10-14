@@ -22,7 +22,7 @@ from app.contracts.protocol import (
 from app.controler.api import create_app
 from app.controler.config import ServerSettings
 from app.controler.runtime import ServerRuntime
-from app.controler.workers.conversation import ConversationService
+from app.controler.workers.conversation import ConversationBroker, ConversationService
 from app.controler.workers.gateway import WorkerGateway
 from app.controler.workflow.coordinator import JobCoordinator
 from app.controler.workflow.tools import FlowToolService
@@ -82,14 +82,18 @@ class AsgiRuntime(ServerRuntime):
                                       github_webhook_secret="unused", webhook_max_body_bytes=1024,
                                       metrics_token=None, host="test", port=0)
         self.metrics = Metrics()
+        gateway_coordinator = AsgiCoordinator(attempt_id, store)
         self.gateway = WorkerGateway(
-            AsgiCoordinator(attempt_id, store),
+            gateway_coordinator,
             worker_tokens={"worker-1": "worker-secret"},
             poll_interval=0.01,
             deliveries=store.deliveries,
             jobs=store.jobs,
             stops=store.stops,
             workers=store.workers,
+            tools=gateway_coordinator.tools,
+            results=gateway_coordinator.results,
+            conversations=ConversationBroker(),
         )
         self.conversations = ConversationService(
             self.gateway.conversations, flows=store.flows, workers=store.workers

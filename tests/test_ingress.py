@@ -43,28 +43,27 @@ class WebhookRuntime(ServerRuntime):
         self.webhooks = Mock(spec=WebhookConsumer)
         if store is not None:
             self.webhooks = WebhookConsumer(
-                self.settings,
-                ControlService(
+                EventRouter(
+                    ControlService(
+                        database=store.database,
+                        deliveries=store.deliveries,
+                        flows=store.flows,
+                        jobs=store.jobs,
+                        result_store=store.results,
+                        reviews=store.reviews,
+                        stops=store.stops,
+                        webhook_store=store.webhooks,
+                        workers=store.workers,
+                    ),
+                    self.settings,
                     database=store.database,
-                    deliveries=store.deliveries,
                     flows=store.flows,
-                    jobs=store.jobs,
-                    result_store=store.results,
+                    reconcile_store=store.reconcile,
                     reviews=store.reviews,
-                    stops=store.stops,
                     webhook_store=store.webhooks,
-                    workers=store.workers,
                 ),
                 database=store.database,
-                deliveries=store.deliveries,
-                flows=store.flows,
-                jobs=store.jobs,
-                reconcile_store=store.reconcile,
-                result_store=store.results,
-                reviews=store.reviews,
-                stops=store.stops,
                 webhook_store=store.webhooks,
-                workers=store.workers,
             )
 
     async def receive_webhook(self, event_type: str, delivery_id: str, payload: dict, digest: str) -> None:

@@ -4,6 +4,7 @@ from collections.abc import Awaitable, Callable
 from unittest.mock import Mock
 
 from app.contracts.protocol import ExecutionStopped
+from app.controler.workflow.effects import ResultEffects
 from app.controler.workflow.results import ResultApplication
 from app.domain.models import JobState, WorkerRecord, WorkerStatus, utcnow
 from app.persistence.results import ResultStore
@@ -50,8 +51,8 @@ def result_application(store: Store, commit_result: Callable[[int], Awaitable[Jo
         jobs=store.jobs,
         result_store=Mock(spec=ResultStore),
         reviews=Mock(spec=ReviewStore),
-        stops=store.stops,
         workers=store.workers,
+        effects=Mock(spec=ResultEffects),
     )
     results._apply = commit_result  # type: ignore[method-assign, assignment]
     return results

@@ -38,6 +38,8 @@ from app.controler.workers.connection import ProtocolViolation, WorkerConnection
 from app.controler.workers.conversation import ConversationBroker
 from app.controler.workflow.coordinator import JobCoordinator
 from app.controler.workflow.preparation import PreparationStale, PreparationState
+from app.controler.workflow.results import ResultApplication
+from app.controler.workflow.tools import FlowToolService
 from app.domain.models import (
     DeliveryState,
     Job,
@@ -67,6 +69,9 @@ class WorkerGateway:
         jobs: JobStore,
         stops: StopStore,
         workers: WorkerStore,
+        tools: FlowToolService,
+        results: ResultApplication,
+        conversations: ConversationBroker,
     ) -> None:
         self.deliveries = deliveries
         self.jobs = jobs
@@ -74,13 +79,15 @@ class WorkerGateway:
         self.workers = workers
         self.metrics = metrics
         self.coordinator = coordinator
+        self.tools = tools
+        self.results = results
         self.worker_tokens = dict(worker_tokens)
         self.heartbeat_interval = heartbeat_interval
         self.heartbeat_timeout = heartbeat_timeout
         self.poll_interval = poll_interval
         self._sessions: dict[str, tuple[asyncio.Event, WorkerConnection]] = {}
         self._registry_lock = asyncio.Lock()
-        self.conversations = ConversationBroker()
+        self.conversations = conversations
 
     async def _prepare_assignment(
         self, job: Job, worker_id: str, token: str, epoch: str,
@@ -242,7 +249,7 @@ class WorkerGateway:
                         )
                         if message.flow_id != job.flow_id:
                             raise ProtocolViolation("Flow tool call belongs to another Flow")
-                        response = await self.coordinator.tools.execute(message, worker_id=worker_id)
+                        response = await self.tools.execute(message, worker_id=worker_id)
                         await connection.send_text(response.model_dump_json())
                         continue
                     if isinstance(message, (Succeeded, Failed)):
@@ -265,7 +272,7 @@ class WorkerGateway:
                             raise ProtocolViolation("result conflicts with the persisted result")
                         if receipt == "rejected":
                             raise ProtocolViolation("result belongs to an inactive assignment")
-                        state = await self.coordinator.results.apply(job.id)
+                        state = await self.results.apply(job.id)
                         applied = self.jobs.get_job(job.id)
                         if (applied is None or applied.result_applied_at is None
                                 or applied.state not in {JobState.DONE, JobState.FAILED}):
@@ -348,7 +355,7 @@ class WorkerGateway:
                     if receipt in {'conflict', 'rejected'}:
                         raise ProtocolViolation("stop result conflicts with persisted facts")
                     if receipt != 'applied':
-                        await self.coordinator.results.apply(job.id)
+                        await self.results.apply(job.id)
                 if isinstance(message, ExecutionStopped):
                     if message.request_id != stop.request_id or not self.stops.confirm(worker_id, message):
                         raise ProtocolViolation("stop blocked: receipt or external effects not converged")

@@ -13,6 +13,7 @@ from app.contracts.protocol import (
     InitialTaskResult,
     Succeeded,
 )
+from app.controler.workers.conversation import ConversationBroker
 from app.controler.workers.gateway import WorkerGateway
 from app.controler.workflow.coordinator import JobCoordinator
 from app.controler.workflow.tools import FlowToolService
@@ -262,6 +263,9 @@ async def test_control_gateway_and_worker_client_complete_one_remote_job(tmp_pat
         jobs=store.jobs,
         stops=store.stops,
         workers=store.workers,
+        tools=coordinator.tools,
+        results=coordinator.results,
+        conversations=ConversationBroker(),
     )
     executor = FakeExecutor()
     client = WorkerClient(session=WorkerSession(tmp_path),

@@ -15,6 +15,8 @@
   服务直接接收所需的具体仓储，业务调用使用 `self.flows`、`self.jobs` 等；Store 负责装配、初始化和关闭。
   跨仓储事务使用 `repository.using(tx)` 显式绑定同一连接，普通实例保留自己的连接范围。
   Webhook 重放、生命周期辅助、CLI/live smoke 和测试装配同步迁移。
+  Runtime 统一初始化工具、effects、结果应用、路由与 conversation broker；服务删除仅用于初始化
+  下游对象的仓储参数，Gateway 直接使用工具和结果应用。Webhook 使用事务绑定的路由/控制服务副本。
   跨表提交、锁顺序、数据库和持久消息合同保持现状。
 
 - Control 内部直接依赖具体配置、仓储与服务，删除 12 个 Protocol 和 coordinator 的工具/结果转发；

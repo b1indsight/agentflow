@@ -18,6 +18,9 @@ from app.contracts.protocol import (
 )
 from app.controler.config import ServerSettings
 from app.controler.workflow.coordinator import JobCoordinator
+from app.controler.workflow.effects import ResultEffects
+from app.controler.workflow.results import ResultApplication
+from app.controler.workflow.tools import FlowToolService
 from app.domain.delivery_models import DeliveryReceipt
 from app.domain.models import (
     Attempt,
@@ -34,6 +37,7 @@ from app.domain.models import (
 )
 from app.github import GitHubApp
 from app.persistence.store import Store
+from app.plugins import get_plugin_manager
 from tests.github import RecordingGitHub
 from tests.persistence_fakes import RepositoryViews
 from tests.result_memory import MemoryResults, MemoryStops
@@ -220,6 +224,7 @@ class MemoryStore(RepositoryViews):
 
 class CoordinatorFixture(JobCoordinator):
     memory: Store | MemoryStore
+    tools: FlowToolService
 
 
 async def apply_result(subject: CoordinatorFixture, job: Job, result: ExecutionResult) -> JobState:
@@ -248,17 +253,50 @@ def coordinator(store: Store | MemoryStore, github: GitHubApp) -> CoordinatorFix
         prepare_max_failures=5,
         prepare_retry_window_seconds=900,
     )
+    repositories = cast(Store, store)
+    plugins = get_plugin_manager()
+    effects = ResultEffects(
+        github,
+        database=repositories.database,
+        deliveries=repositories.deliveries,
+        flows=repositories.flows,
+        jobs=repositories.jobs,
+        result_store=repositories.results,
+        reviews=repositories.reviews,
+        stops=repositories.stops,
+        workers=repositories.workers,
+    )
+    results = ResultApplication(
+        github,
+        settings,
+        plugins,
+        effects=effects,
+        database=repositories.database,
+        deliveries=repositories.deliveries,
+        flows=repositories.flows,
+        jobs=repositories.jobs,
+        result_store=repositories.results,
+        reviews=repositories.reviews,
+        workers=repositories.workers,
+    )
     subject = CoordinatorFixture(
         github,
         settings,
+        plugins,
         database=cast(Store, store).database,
         deliveries=cast(Store, store).deliveries,
         flows=cast(Store, store).flows,
         jobs=cast(Store, store).jobs,
-        result_store=cast(Store, store).results,
         reviews=cast(Store, store).reviews,
-        stops=cast(Store, store).stops,
         workers=cast(Store, store).workers,
+        results=results,
+    )
+    subject.tools = FlowToolService(
+        github,
+        database=repositories.database,
+        deliveries=repositories.deliveries,
+        flows=repositories.flows,
+        workers=repositories.workers,
     )
     subject.memory = store
     return subject

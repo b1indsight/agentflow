@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 from psycopg import OperationalError
 
+from app.controler.events.router import EventRouter
 from app.controler.events.webhooks import WebhookConsumer
 from app.controler.workflow.service import ControlService
 from app.domain.models import DeliveryState, FlowState
@@ -40,28 +41,27 @@ def receive(inbox, delivery="one", body=None):
 
 def consumer(store):
     return WebhookConsumer(
-        settings(),
-        ControlService(
+        EventRouter(
+            ControlService(
+                database=store.database,
+                deliveries=store.deliveries,
+                flows=store.flows,
+                jobs=store.jobs,
+                result_store=store.results,
+                reviews=store.reviews,
+                stops=store.stops,
+                webhook_store=store.webhooks,
+                workers=store.workers,
+            ),
+            settings(),
             database=store.database,
-            deliveries=store.deliveries,
             flows=store.flows,
-            jobs=store.jobs,
-            result_store=store.results,
+            reconcile_store=store.reconcile,
             reviews=store.reviews,
-            stops=store.stops,
             webhook_store=store.webhooks,
-            workers=store.workers,
         ),
         database=store.database,
-        deliveries=store.deliveries,
-        flows=store.flows,
-        jobs=store.jobs,
-        reconcile_store=store.reconcile,
-        result_store=store.results,
-        reviews=store.reviews,
-        stops=store.stops,
         webhook_store=store.webhooks,
-        workers=store.workers,
     )
 
 
@@ -181,21 +181,35 @@ def test_failed_completion_rolls_back_business_and_notifications(store, monkeypa
 
     monkeypatch.setattr(WebhookStore, "complete", unavailable)
     WebhookConsumer(
-        settings(),
-        service,
+        EventRouter(
+            service,
+            settings(),
+            database=store.database,
+            flows=store.flows,
+            reconcile_store=store.reconcile,
+            reviews=store.reviews,
+            webhook_store=store.webhooks,
+        ),
         database=store.database,
-        deliveries=store.deliveries,
-        flows=store.flows,
-        jobs=store.jobs,
-        reconcile_store=store.reconcile,
-        result_store=store.results,
-        reviews=store.reviews,
-        stops=store.stops,
         webhook_store=store.webhooks,
-        workers=store.workers,
     ).sweep()
     assert store.flows.get_active_flow("owner/repo", 7) is None
     assert not notifications
+
+
+def test_webhook_transaction_does_not_rebind_the_root_service(store, monkeypatch):
+    # Replaying a receipt must not leave the shared service on an expired connection
+    # or keep its later notifications queued in the completed receipt's callback list.
+    worker = consumer(store)
+    service = worker.router.service
+    notifications = []
+    monkeypatch.setattr(service, "_jobs_available", lambda: notifications.append(True))
+    receive(store.webhooks)
+    assert worker.sweep() == 1
+    assert notifications == [True]
+    flow = service.on_trigger("owner/repo", 8, 42)
+    assert flow is not None and store.flows.get_flow(flow.id) is not None
+    assert notifications == [True, True]
 
 
 def test_cleanup_preserves_pending_and_dedup_identity(store):

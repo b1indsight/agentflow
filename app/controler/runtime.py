@@ -8,15 +8,19 @@ from datetime import timedelta
 from loguru import logger
 
 from app.controler.config import ServerSettings
+from app.controler.events.router import EventRouter
 from app.controler.events.webhooks import WebhookConsumer
 from app.controler.reconciliation.feedback import FeedbackReconciler
 from app.controler.reconciliation.projects import ProjectSync
 from app.controler.reconciliation.pull_requests import Reconciler
 from app.controler.review.judge import BubJudge
-from app.controler.workers.conversation import ConversationService
+from app.controler.workers.conversation import ConversationBroker, ConversationService
 from app.controler.workers.gateway import WorkerGateway
 from app.controler.workflow.coordinator import JobCoordinator
+from app.controler.workflow.effects import ResultEffects
+from app.controler.workflow.results import ResultApplication
 from app.controler.workflow.service import ControlService
+from app.controler.workflow.tools import FlowToolService
 from app.github import GitHubApp
 from app.persistence.readiness import database_ready
 from app.persistence.store import Store
@@ -41,10 +45,8 @@ class ServerRuntime:
         )
         plugins = get_plugin_manager()
         github = GitHubApp(self.settings)
-        self.coordinator = JobCoordinator(
+        effects = ResultEffects(
             github,
-            self.settings,
-            plugins,
             database=store.database,
             deliveries=store.deliveries,
             flows=store.flows,
@@ -54,8 +56,44 @@ class ServerRuntime:
             stops=store.stops,
             workers=store.workers,
         )
+        self.results = ResultApplication(
+            github,
+            self.settings,
+            plugins,
+            effects=effects,
+            database=store.database,
+            deliveries=store.deliveries,
+            flows=store.flows,
+            jobs=store.jobs,
+            result_store=store.results,
+            reviews=store.reviews,
+            workers=store.workers,
+        )
+        tools = FlowToolService(
+            github,
+            database=store.database,
+            deliveries=store.deliveries,
+            flows=store.flows,
+            workers=store.workers,
+        )
+        conversations = ConversationBroker()
+        self.coordinator = JobCoordinator(
+            github,
+            self.settings,
+            plugins,
+            database=store.database,
+            deliveries=store.deliveries,
+            flows=store.flows,
+            jobs=store.jobs,
+            reviews=store.reviews,
+            workers=store.workers,
+            results=self.results,
+        )
         self.gateway = WorkerGateway(
             self.coordinator,
+            tools=tools,
+            results=self.results,
+            conversations=conversations,
             worker_tokens={
                 worker_id: token.get_secret_value()
                 for worker_id, token in self.settings.worker_tokens.items()
@@ -86,21 +124,21 @@ class ServerRuntime:
             workers=store.workers,
         )
         self.conversations = ConversationService(
-            self.gateway.conversations, flows=store.flows, workers=store.workers
+            conversations, flows=store.flows, workers=store.workers
+        )
+        router = EventRouter(
+            self.service,
+            self.settings,
+            database=store.database,
+            flows=store.flows,
+            reconcile_store=store.reconcile,
+            reviews=store.reviews,
+            webhook_store=store.webhooks,
         )
         self.webhooks = WebhookConsumer(
-            self.settings,
-            self.service,
+            router,
             database=store.database,
-            deliveries=store.deliveries,
-            flows=store.flows,
-            jobs=store.jobs,
-            reconcile_store=store.reconcile,
-            result_store=store.results,
-            reviews=store.reviews,
-            stops=store.stops,
             webhook_store=store.webhooks,
-            workers=store.workers,
         )
         self.reconciler = Reconciler(
             github,
@@ -194,7 +232,7 @@ class ServerRuntime:
         """Recover immediately at startup; network waits never hold the local scheduling loops."""
         while True:
             try:
-                await self.coordinator.results.recover_pending_results(
+                await self.results.recover_pending_results(
                     concurrency=self.settings.result_recovery_concurrency,
                     batch_size=self.settings.result_recovery_batch_size,
                 )

@@ -61,7 +61,6 @@ from app.persistence.flows import FlowStore
 from app.persistence.jobs import JobStore
 from app.persistence.results import ResultStore
 from app.persistence.reviews import ReviewStore
-from app.persistence.stops import StopStore
 from app.persistence.workers import WorkerStore
 from app.plugins import emit_hook
 
@@ -81,8 +80,8 @@ class ResultApplication:
         jobs: JobStore,
         result_store: ResultStore,
         reviews: ReviewStore,
-        stops: StopStore,
         workers: WorkerStore,
+        effects: ResultEffects,
     ) -> None:
         self.database = database
         self.deliveries = deliveries
@@ -90,19 +89,9 @@ class ResultApplication:
         self.jobs = jobs
         self.result_store = result_store
         self.reviews = reviews
-        self.stops = stops
         self.workers = workers
-        self.effects = ResultEffects(
-            github,
-            database=self.database,
-            deliveries=self.deliveries,
-            flows=self.flows,
-            jobs=self.jobs,
-            result_store=self.result_store,
-            reviews=self.reviews,
-            stops=self.stops,
-            workers=self.workers,
-        )
+        self.github = github
+        self.effects = effects
         self.settings = settings
         self.plugins = plugins
         self._result_locks: dict[int, asyncio.Lock] = {}
@@ -269,7 +258,7 @@ class ResultApplication:
         if flow.installation_id is None:
             return "revision has no open verified delivery"
         try:
-            repo = self.effects.github.installation(flow.installation_id).repository(flow.repo)
+            repo = self.github.installation(flow.installation_id).repository(flow.repo)
             return await verify_revision_remote(repo, flow, delivery, result.commit_sha)
         except GitHubError as error:
             if error.retryable:

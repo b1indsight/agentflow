@@ -266,3 +266,35 @@ wheel 包含 18 个 persistence 模块，17 个实现模块从 wheel 隔离导�
 .cache/2026-10-13/concrete-binding-ablation.py`。据此保留 25 行的公共绑定实现，十个仓储共用
 构造和绑定合同。构造参数与事务调用增加显式依赖，服务无需通过聚合对象查找仓储；事务范围由
 代码直接表达，无线程全局状态或隐式上下文切换。
+
+### 2026-10-15 — 集中服务初始化，删除仅用于转发的依赖
+
+**要求与决定。** 用户指出初始化位置仍不受控，多处依赖仅用于创建或转交下游对象。
+检查发现 coordinator 接收 ResultStore/StopStore 来创建结果服务，并替 Gateway 持有工具；
+结果应用接收 StopStore 来创建 effects；Webhook 消费器接收九个仓储来创建控制服务和路由。
+本条继续收敛上条的显式依赖边界：Runtime 负责长生命周期服务初始化，服务只接收真正使用的对象。
+
+**实施。** Runtime 初始化 ResultEffects、ResultApplication、FlowToolService、EventRouter 和
+ConversationBroker，结果应用由 Runtime 的恢复循环、coordinator 及 Gateway 共用，保留原有结果锁。
+Gateway 直接接收工具、结果应用和 broker，删除经 coordinator 的访问；结果应用直接持有其验证
+需要的 GitHubApp。删除 11 个仅用于下游初始化的仓储参数和对应成员。
+Webhook 消费器仅接收 Database、WebhookStore 和 EventRouter，在 receipt 事务内使用路由副本；
+路由和控制服务的 `using` 绑定自己持有的仓储，控制服务副本收集提交后 hook/通知。
+初始化和事务范围绑定分开，根服务不被重新绑定，也不为每个事件重复初始化服务状态。
+依据：[Runtime 装配](../../app/controler/runtime.py)、[coordinator 依赖](../../app/controler/workflow/coordinator.py)、
+[Gateway 直接调用](../../app/controler/workers/gateway.py)、[Webhook 消费](../../app/controler/events/webhooks.py)、
+[服务事务视图](../../app/controler/workflow/service.py)。
+
+**验证。** 原有 Webhook 原子提交、通知回滚和业务路由回滚回归继续通过；新增一项回归，验证
+receipt 提交后原服务仍能创建新 Flow 并立即通知。全量 PostgreSQL **738 passed，无跳过**，
+仅既有 Starlette 弃用提示；构造参数与相关行为的首轮检查为 42 passed，Mypy 检查 179 个源文件通过。
+复现全量命令：`uv run --no-sync --env-file .cache/2026-10-13/persistence-test.env pytest -q
+--tb=short --show-capture=no`。测试替身及装配入口同步适配新构造参数。
+
+**消融与代价。** 将路由的 `using` 简化为返回根对象时，receipt 完成失败仍留下已提交 Flow，
+现有原子回滚回归失败。原位更新控制服务的首次简化触发通知回调自循环，实验进程已终止；
+固定捕获原通知回调后重新隔离原位绑定，新增回归明确报出原服务使用过期事务连接。
+复现两个可终止的比较：`uv run --no-sync --env-file .cache/2026-10-13/persistence-test.env python
+.cache/2026-10-13/service-scope-ablation.py unbound` 与同命令的 `in-place` 参数；完整实现通过同样输入。
+据此保留路由和控制服务的显式副本绑定，避免引入通用反射绑定器或新的服务工厂转发层。
+SQL、schema、仓储初始化和持久协议均未修改，服务初始化集中在已有 Runtime。

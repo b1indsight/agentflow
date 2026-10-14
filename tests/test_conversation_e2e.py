@@ -25,6 +25,9 @@ from tests.test_remote_e2e import (
 
 OTHER_SESSION = "019eac3b-a60c-7a93-a442-3718f660fc8d"
 
+from app.controler.workers.conversation import ConversationBroker
+
+
 class HistoryStore(RemoteStore):
     def get_flow(self, flow_id):
         return Flow(id=3, repo="owner/repo", issue_number=8, state=FlowState.ACTIVE) if flow_id == 3 else None
@@ -71,14 +74,18 @@ async def test_http_query_while_worker_or_control_busy_and_idle(tmp_path, phase,
         + json.dumps(message("assistant", "Follow-up")) + "\n"
     )
     store = HistoryStore()
+    gateway_coordinator = Coordinator(store)
     gateway = WorkerGateway(
-        Coordinator(store),
+        gateway_coordinator,
         worker_tokens={"worker-1": "worker-secret"},
         poll_interval=0.01,
         deliveries=store.deliveries,
         jobs=store.jobs,
         stops=store.stops,
         workers=store.workers,
+        tools=gateway_coordinator.tools,
+        results=gateway_coordinator.results,
+        conversations=ConversationBroker(),
     )
     gateway.conversations.timeout = 1
     service = ConversationService(gateway.conversations, flows=store.flows, workers=store.workers)

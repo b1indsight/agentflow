@@ -6,6 +6,7 @@ from datetime import timedelta
 import pytest
 
 from app.contracts.protocol import PROTOCOL_VERSION, Assignment, RevisionTask
+from app.controler.workers.conversation import ConversationBroker
 from app.controler.workers.gateway import WorkerGateway
 from app.controler.workflow.lifecycle import pause_delivery
 from app.controler.workflow.preparation import PreparationStale
@@ -28,6 +29,9 @@ def gateway(store, subject):
         jobs=store.jobs,
         stops=store.stops,
         workers=store.workers,
+        tools=subject.tools,
+        results=subject.results,
+        conversations=ConversationBroker(),
     )
 
 
