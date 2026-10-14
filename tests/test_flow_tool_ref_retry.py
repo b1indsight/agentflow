@@ -45,9 +45,6 @@ async def test_open_pr_ref_recovers_within_the_same_tool_call(tmp_path, monkeypa
     service = FlowToolService(
         cast(GitHubApp, github),
         database=cast(Store, memory).database,
-        deliveries=cast(Store, memory).deliveries,
-        flows=cast(Store, memory).flows,
-        workers=cast(Store, memory).workers,
     )
     invocation = request().model_copy(update={"commit_sha": "a" * 40, "remote_sha": "a" * 40})
     response = await service.execute(invocation, worker_id="worker-a")

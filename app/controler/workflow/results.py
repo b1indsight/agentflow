@@ -75,21 +75,15 @@ class ResultApplication:
         plugins: PluginManager,
         *,
         database: Database,
-        deliveries: DeliveryStore,
-        flows: FlowStore,
-        jobs: JobStore,
-        result_store: ResultStore,
-        reviews: ReviewStore,
-        workers: WorkerStore,
         effects: ResultEffects,
     ) -> None:
         self.database = database
-        self.deliveries = deliveries
-        self.flows = flows
-        self.jobs = jobs
-        self.result_store = result_store
-        self.reviews = reviews
-        self.workers = workers
+        self.deliveries = DeliveryStore(database)
+        self.flows = FlowStore(database)
+        self.jobs = JobStore(database)
+        self.result_store = ResultStore(database)
+        self.reviews = ReviewStore(database)
+        self.workers = WorkerStore(database)
         self.github = github
         self.effects = effects
         self.settings = settings

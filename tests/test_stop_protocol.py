@@ -139,14 +139,10 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path):
 
     gateway_coordinator = Coordinator()
     gateway = WorkerGateway(
-        gateway_coordinator,
+        gateway_coordinator, database=store.database,
         worker_tokens={"w": "secret"},
         heartbeat_interval=0.01,
         poll_interval=0.01,
-        deliveries=store.deliveries,
-        jobs=store.jobs,
-        stops=store.stops,
-        workers=store.workers,
         tools=Mock(spec=FlowToolService),
         results=Mock(spec=ResultApplication),
         conversations=ConversationBroker(),
@@ -164,14 +160,6 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path):
             ControlService(
                 jobs_available=gateway.notify_jobs,
                 database=store.database,
-                deliveries=store.deliveries,
-                flows=store.flows,
-                jobs=store.jobs,
-                result_store=store.results,
-                reviews=store.reviews,
-                stops=store.stops,
-                webhook_store=store.webhooks,
-                workers=store.workers,
             ).cancel(flow)
             while store.workers.get_flow_execution(flow.id).released_at is None:
                 if server.done(): server.result()

@@ -22,8 +22,12 @@ from app.controler.workflow.results import ResultApplication
 from app.controler.workflow.service import ControlService
 from app.controler.workflow.tools import FlowToolService
 from app.github import GitHubApp
+from app.persistence.database import Database
 from app.persistence.readiness import database_ready
-from app.persistence.store import Store
+from app.persistence.results import ResultStore
+from app.persistence.reviews import ReviewStore
+from app.persistence.webhooks import WebhookStore
+from app.persistence.workers import WorkerStore
 from app.plugins import get_plugin_manager
 from app.telemetry.logging import configure_logging
 from app.telemetry.metrics import Metrics
@@ -38,59 +42,33 @@ class ServerRuntime:
         self.metrics = Metrics()
         self._ready = False
         self._readiness_lock = asyncio.Lock()
-        store = Store(
+        database = Database(
             self.settings.database_url,
             lease_duration=timedelta(seconds=self.settings.worker_lease_duration),
             recovery_grace=timedelta(seconds=self.settings.worker_recovery_grace),
         )
         plugins = get_plugin_manager()
         github = GitHubApp(self.settings)
-        effects = ResultEffects(
-            github,
-            database=store.database,
-            deliveries=store.deliveries,
-            flows=store.flows,
-            jobs=store.jobs,
-            result_store=store.results,
-            reviews=store.reviews,
-            stops=store.stops,
-            workers=store.workers,
-        )
+        effects = ResultEffects(github, database=database)
         self.results = ResultApplication(
             github,
             self.settings,
             plugins,
             effects=effects,
-            database=store.database,
-            deliveries=store.deliveries,
-            flows=store.flows,
-            jobs=store.jobs,
-            result_store=store.results,
-            reviews=store.reviews,
-            workers=store.workers,
+            database=database,
         )
-        tools = FlowToolService(
-            github,
-            database=store.database,
-            deliveries=store.deliveries,
-            flows=store.flows,
-            workers=store.workers,
-        )
+        tools = FlowToolService(github, database=database)
         conversations = ConversationBroker()
         self.coordinator = JobCoordinator(
             github,
             self.settings,
             plugins,
-            database=store.database,
-            deliveries=store.deliveries,
-            flows=store.flows,
-            jobs=store.jobs,
-            reviews=store.reviews,
-            workers=store.workers,
+            database=database,
             results=self.results,
         )
         self.gateway = WorkerGateway(
             self.coordinator,
+            database=database,
             tools=tools,
             results=self.results,
             conversations=conversations,
@@ -102,10 +80,6 @@ class ServerRuntime:
             heartbeat_timeout=self.settings.worker_heartbeat_timeout,
             poll_interval=self.settings.worker_poll_interval,
             metrics=self.metrics,
-            deliveries=store.deliveries,
-            jobs=store.jobs,
-            stops=store.stops,
-            workers=store.workers,
         )
         self.judge = BubJudge(model=settings.judge_model, api_key=settings.judge_api_key,
                          api_base=settings.judge_api_base, timeout=settings.judge_timeout_seconds)
@@ -113,32 +87,17 @@ class ServerRuntime:
         self.service = ControlService(
             plugins,
             self.gateway.notify_jobs,
-            database=store.database,
-            deliveries=store.deliveries,
-            flows=store.flows,
-            jobs=store.jobs,
-            result_store=store.results,
-            reviews=store.reviews,
-            stops=store.stops,
-            webhook_store=store.webhooks,
-            workers=store.workers,
+            database=database,
         )
-        self.conversations = ConversationService(
-            conversations, flows=store.flows, workers=store.workers
-        )
+        self.conversations = ConversationService(conversations, database=database)
         router = EventRouter(
             self.service,
             self.settings,
-            database=store.database,
-            flows=store.flows,
-            reconcile_store=store.reconcile,
-            reviews=store.reviews,
-            webhook_store=store.webhooks,
+            database=database,
         )
         self.webhooks = WebhookConsumer(
             router,
-            database=store.database,
-            webhook_store=store.webhooks,
+            database=database,
         )
         self.reconciler = Reconciler(
             github,
@@ -147,14 +106,7 @@ class ServerRuntime:
             interval=self.settings.reconcile_interval_seconds,
             batch_size=self.settings.reconcile_batch_size,
             concurrency=self.settings.reconcile_concurrency,
-            database=store.database,
-            deliveries=store.deliveries,
-            flows=store.flows,
-            jobs=store.jobs,
-            reconcile_store=store.reconcile,
-            reviews=store.reviews,
-            stops=store.stops,
-            workers=store.workers,
+            database=database,
         )
         self.feedback_reconciler = FeedbackReconciler(
             github,
@@ -163,10 +115,7 @@ class ServerRuntime:
             interval=self.settings.reconcile_interval_seconds,
             batch_size=self.settings.reconcile_batch_size,
             concurrency=self.settings.reconcile_concurrency,
-            database=store.database,
-            deliveries=store.deliveries,
-            reconcile_store=store.reconcile,
-            reviews=store.reviews,
+            database=database,
         )
         self.project_sync = ProjectSync(
             self.settings.projects,
@@ -174,18 +123,17 @@ class ServerRuntime:
             interval=self.settings.reconcile_interval_seconds,
             batch_size=self.settings.reconcile_batch_size,
             concurrency=self.settings.reconcile_concurrency,
-            database=store.database,
-            projects=store.projects,
+            database=database,
         )
-        self.store = store
-        self.workers = store.workers
-        self.reviews = store.reviews
-        self.result_store = store.results
-        self.webhook_store = store.webhooks
+        self.database = database
+        self.workers = WorkerStore(database)
+        self.reviews = ReviewStore(database)
+        self.result_store = ResultStore(database)
+        self.webhook_store = WebhookStore(database)
         self._tasks: list[asyncio.Task[None]] = []
 
     def startup(self) -> None:
-        self.store.init_db()
+        self.database.init_db()
         self.result_store.recover_claims()
         self.workers.recover_abandoned_assignments()
         self._tasks = [
@@ -284,4 +232,4 @@ class ServerRuntime:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
-        self.store.close()
+        self.database.close()

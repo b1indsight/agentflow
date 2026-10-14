@@ -7,8 +7,6 @@ from app.contracts.protocol import ExecutionStopped
 from app.controler.workflow.effects import ResultEffects
 from app.controler.workflow.results import ResultApplication
 from app.domain.models import JobState, WorkerRecord, WorkerStatus, utcnow
-from app.persistence.results import ResultStore
-from app.persistence.reviews import ReviewStore
 from app.persistence.stops import StopIntent, StopStore
 from app.persistence.store import Store
 
@@ -46,12 +44,6 @@ def result_application(store: Store, commit_result: Callable[[int], Awaitable[Jo
         Mock(),
         Mock(),
         database=store.database,
-        deliveries=store.deliveries,
-        flows=store.flows,
-        jobs=store.jobs,
-        result_store=Mock(spec=ResultStore),
-        reviews=Mock(spec=ReviewStore),
-        workers=store.workers,
         effects=Mock(spec=ResultEffects),
     )
     results._apply = commit_result  # type: ignore[method-assign, assignment]

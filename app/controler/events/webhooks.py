@@ -19,10 +19,9 @@ class WebhookConsumer:
         router: EventRouter,
         *,
         database: Database,
-        webhook_store: WebhookStore,
     ) -> None:
         self.database = database
-        self.webhook_store = webhook_store
+        self.webhook_store = WebhookStore(database)
         self.router = router
         self.wakeup = asyncio.Event()
 

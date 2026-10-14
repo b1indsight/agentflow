@@ -160,14 +160,6 @@ async def test_permanent_archive_write_failure_retries_only_frozen_missing_effec
     monkeypatch.setattr(Issue, "comment", comment)
     ControlService(
         database=store.database,
-        deliveries=store.deliveries,
-        flows=store.flows,
-        jobs=store.jobs,
-        result_store=store.results,
-        reviews=store.reviews,
-        stops=store.stops,
-        webhook_store=store.webhooks,
-        workers=store.workers,
     ).retry(flow)
     assert len(store.jobs.list_jobs(flow.id)) == len(jobs)
     assert store.flows.get_flow(flow.id).current_attempt_id == flow.current_attempt_id
@@ -216,14 +208,6 @@ async def test_unknown_archive_comment_stays_pending_without_resending_or_reclea
     with pytest.raises(ValueError, match="pending result"):
         ControlService(
             database=store.database,
-            deliveries=store.deliveries,
-            flows=store.flows,
-            jobs=store.jobs,
-            result_store=store.results,
-            reviews=store.reviews,
-            stops=store.stops,
-            webhook_store=store.webhooks,
-            workers=store.workers,
         ).retry(flow)
     assert store.results.get_plan(job.id).archive == result
     assert store.flows.get_flow(flow.id).state is FlowState.ACTIVE
@@ -279,14 +263,6 @@ async def test_archive_auth_failure_preserves_whether_comment_was_sent(
         with pytest.raises(ValueError, match="pending result"):
             ControlService(
                 database=store.database,
-                deliveries=store.deliveries,
-                flows=store.flows,
-                jobs=store.jobs,
-                result_store=store.results,
-                reviews=store.reviews,
-                stops=store.stops,
-                webhook_store=store.webhooks,
-                workers=store.workers,
             ).retry(flow)
         due(store, job.id)
     elif failure == "token_unavailable":
@@ -294,14 +270,6 @@ async def test_archive_auth_failure_preserves_whether_comment_was_sent(
     else:
         ControlService(
             database=store.database,
-            deliveries=store.deliveries,
-            flows=store.flows,
-            jobs=store.jobs,
-            result_store=store.results,
-            reviews=store.reviews,
-            stops=store.stops,
-            webhook_store=store.webhooks,
-            workers=store.workers,
         ).retry(flow)
     assert await coordinator(store, github).results.apply(job.id) is JobState.DONE
     assert len(github.notifications) == 2

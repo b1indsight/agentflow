@@ -78,9 +78,6 @@ def poller(store, github, **options):
         settle_seconds=75,
         **options,
         database=store.database,
-        deliveries=store.deliveries,
-        reconcile_store=store.reconcile,
-        reviews=store.reviews,
     )
 
 

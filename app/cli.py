@@ -162,14 +162,6 @@ def workers() -> None:
         typer.echo("WORKER\tSTATUS\tDRAINING\tJOB\tFLOW\tEPOCH\tLEASE\tRECOVERY\tLAST_SEEN\tREASON")
         for worker in ControlService(
             database=store.database,
-            deliveries=store.deliveries,
-            flows=store.flows,
-            jobs=store.jobs,
-            result_store=store.results,
-            reviews=store.reviews,
-            stops=store.stops,
-            webhook_store=store.webhooks,
-            workers=store.workers,
         ).list_workers():
             typer.echo(
                 f"{worker.worker_id}\t{worker.status.value}\t{worker.draining}\t"
@@ -276,14 +268,6 @@ def flow_cancel(flow_id: int) -> None:
             raise typer.Exit(1)
         ControlService(
             database=store.database,
-            deliveries=store.deliveries,
-            flows=store.flows,
-            jobs=store.jobs,
-            result_store=store.results,
-            reviews=store.reviews,
-            stops=store.stops,
-            webhook_store=store.webhooks,
-            workers=store.workers,
         ).cancel(f)
         waiting = store.stops.has_pending(flow_id)
     typer.echo(f"flow {flow_id}: cancellation requested; stop_pending={waiting}")
@@ -300,14 +284,6 @@ def flow_retry(flow_id: int) -> None:
             raise typer.Exit(1)
         ControlService(
             database=store.database,
-            deliveries=store.deliveries,
-            flows=store.flows,
-            jobs=store.jobs,
-            result_store=store.results,
-            reviews=store.reviews,
-            stops=store.stops,
-            webhook_store=store.webhooks,
-            workers=store.workers,
         ).retry(f)
     typer.echo(f"retry requested for flow {flow_id}")
 

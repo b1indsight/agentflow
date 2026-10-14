@@ -84,19 +84,15 @@ class AsgiRuntime(ServerRuntime):
         self.metrics = Metrics()
         gateway_coordinator = AsgiCoordinator(attempt_id, store)
         self.gateway = WorkerGateway(
-            gateway_coordinator,
+            gateway_coordinator, database=store.database,
             worker_tokens={"worker-1": "worker-secret"},
             poll_interval=0.01,
-            deliveries=store.deliveries,
-            jobs=store.jobs,
-            stops=store.stops,
-            workers=store.workers,
             tools=gateway_coordinator.tools,
             results=gateway_coordinator.results,
             conversations=ConversationBroker(),
         )
         self.conversations = ConversationService(
-            self.gateway.conversations, flows=store.flows, workers=store.workers
+            self.gateway.conversations, database=store.database,
         )
 
     async def ready(self) -> bool:

@@ -69,13 +69,9 @@ class ObservedClient(WorkerClient):
 async def connect_once(store, subject, executor, journal, *, drop_ack=False, client=None):
     outgoing, incoming = asyncio.Queue(), asyncio.Queue()
     gateway = WorkerGateway(
-        subject,
+        subject, database=store.database,
         worker_tokens={"worker-a": "secret"},
         poll_interval=60,
-        deliveries=store.deliveries,
-        jobs=store.jobs,
-        stops=store.stops,
-        workers=store.workers,
         tools=subject.tools,
         results=subject.results,
         conversations=ConversationBroker(),
@@ -178,14 +174,6 @@ async def test_original_worker_recovers_cleanup_and_replays_without_redeleting(
     assert store.jobs.get_job(job.id).state is JobState.DONE
     next_flow = ControlService(
         database=store.database,
-        deliveries=store.deliveries,
-        flows=store.flows,
-        jobs=store.jobs,
-        result_store=store.results,
-        reviews=store.reviews,
-        stops=store.stops,
-        webhook_store=store.webhooks,
-        workers=store.workers,
     ).on_trigger("owner/repo", 999, 42)
     store.workers.worker_connected("worker-a", PROTOCOL_VERSION, "next")
     next_job = store.workers.assign_job("worker-a", "next-token", "next")

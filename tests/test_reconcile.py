@@ -63,24 +63,9 @@ def subject(store, github, **options):
         github,
         ControlService(
             database=store.database,
-            deliveries=store.deliveries,
-            flows=store.flows,
-            jobs=store.jobs,
-            result_store=store.results,
-            reviews=store.reviews,
-            stops=store.stops,
-            webhook_store=store.webhooks,
-            workers=store.workers,
         ),
         **options,
         database=store.database,
-        deliveries=store.deliveries,
-        flows=store.flows,
-        jobs=store.jobs,
-        reconcile_store=store.reconcile,
-        reviews=store.reviews,
-        stops=store.stops,
-        workers=store.workers,
     )
 
 
@@ -180,14 +165,6 @@ async def test_late_query_cannot_overwrite_a_changed_workflow(store, merge_flow,
         if change == "merged":
             ControlService(
                 database=store.database,
-                deliveries=store.deliveries,
-                flows=store.flows,
-                jobs=store.jobs,
-                result_store=store.results,
-                reviews=store.reviews,
-                stops=store.stops,
-                webhook_store=store.webhooks,
-                workers=store.workers,
             ).on_merged(merge_flow, "real-merge", merge_payload(merge_flow))
         elif change == "version":
             delivery = store.deliveries.get_delivery(merge_flow.id)

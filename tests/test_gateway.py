@@ -339,15 +339,11 @@ async def test_gateway_runs_one_remote_assignment_to_ack() -> None:
     coordinator = RecordingCoordinator(store)
     socket = ScriptedSocket()
     gateway = WorkerGateway(
-        coordinator,
+        coordinator, database=store.database,
         worker_tokens={"worker-1": "worker-secret"},
         heartbeat_interval=10,
         heartbeat_timeout=30,
         poll_interval=0.01,
-        deliveries=store.deliveries,
-        jobs=store.jobs,
-        stops=store.stops,
-        workers=store.workers,
         tools=coordinator.tools,
         results=coordinator.results,
         conversations=ConversationBroker(),
@@ -381,12 +377,8 @@ async def test_gateway_authorizes_dispatch_after_preparation(monkeypatch):
     socket = ScriptedSocket()
     gateway_coordinator = ChangedCoordinator(store)
     gateway = WorkerGateway(
-        gateway_coordinator,
+        gateway_coordinator, database=store.database,
         worker_tokens={"worker-1": "worker-secret"},
-        deliveries=store.deliveries,
-        jobs=store.jobs,
-        stops=store.stops,
-        workers=store.workers,
         tools=gateway_coordinator.tools,
         results=gateway_coordinator.results,
         conversations=ConversationBroker(),
@@ -402,13 +394,9 @@ async def test_gateway_multiplexes_flow_tool_calls_during_execution() -> None:
     store = RecordingStore()
     gateway_coordinator = RecordingCoordinator(store)
     gateway = WorkerGateway(
-        gateway_coordinator,
+        gateway_coordinator, database=store.database,
         worker_tokens={"worker-1": "worker-secret"},
         poll_interval=0.01,
-        deliveries=store.deliveries,
-        jobs=store.jobs,
-        stops=store.stops,
-        workers=store.workers,
         tools=gateway_coordinator.tools,
         results=gateway_coordinator.results,
         conversations=ConversationBroker(),
@@ -432,12 +420,8 @@ async def test_gateway_never_acknowledges_an_uncommitted_result(monkeypatch):
 
     monkeypatch.setattr(coordinator.results, "_apply", unfinished)
     gateway = WorkerGateway(
-        coordinator,
+        coordinator, database=store.database,
         worker_tokens={"worker-1": "worker-secret"},
-        deliveries=store.deliveries,
-        jobs=store.jobs,
-        stops=store.stops,
-        workers=store.workers,
         tools=coordinator.tools,
         results=coordinator.results,
         conversations=ConversationBroker(),
@@ -495,12 +479,8 @@ async def test_gateway_rejects_bad_credentials_before_accepting() -> None:
     store = RecordingStore()
     gateway_coordinator = RecordingCoordinator(store)
     gateway = WorkerGateway(
-        gateway_coordinator,
+        gateway_coordinator, database=store.database,
         worker_tokens={"worker-1": "worker-secret"},
-        deliveries=store.deliveries,
-        jobs=store.jobs,
-        stops=store.stops,
-        workers=store.workers,
         tools=gateway_coordinator.tools,
         results=gateway_coordinator.results,
         conversations=ConversationBroker(),
@@ -523,12 +503,8 @@ async def test_gateway_closes_messages_with_an_incompatible_protocol_version() -
     store = RecordingStore()
     gateway_coordinator = RecordingCoordinator(store)
     gateway = WorkerGateway(
-        gateway_coordinator,
+        gateway_coordinator, database=store.database,
         worker_tokens={"worker-1": "worker-secret"},
-        deliveries=store.deliveries,
-        jobs=store.jobs,
-        stops=store.stops,
-        workers=store.workers,
         tools=gateway_coordinator.tools,
         results=gateway_coordinator.results,
         conversations=ConversationBroker(),
@@ -565,13 +541,9 @@ async def test_gateway_new_epoch_takes_over_a_duplicate_worker_connection() -> N
     store.job.result_applied_at = store.job.updated_at
     gateway_coordinator = RecordingCoordinator(store)
     gateway = WorkerGateway(
-        gateway_coordinator,
+        gateway_coordinator, database=store.database,
         worker_tokens={"worker-1": "worker-secret"},
         poll_interval=60,
-        deliveries=store.deliveries,
-        jobs=store.jobs,
-        stops=store.stops,
-        workers=store.workers,
         tools=gateway_coordinator.tools,
         results=gateway_coordinator.results,
         conversations=ConversationBroker(),
@@ -600,13 +572,9 @@ async def test_gateway_accepts_different_worker_identities_concurrently() -> Non
     store.job.result_applied_at = store.job.updated_at
     gateway_coordinator = RecordingCoordinator(store)
     gateway = WorkerGateway(
-        gateway_coordinator,
+        gateway_coordinator, database=store.database,
         worker_tokens={"worker-1": "secret-1", "worker-2": "secret-2"},
         poll_interval=60,
-        deliveries=store.deliveries,
-        jobs=store.jobs,
-        stops=store.stops,
-        workers=store.workers,
         tools=gateway_coordinator.tools,
         results=gateway_coordinator.results,
         conversations=ConversationBroker(),
@@ -647,13 +615,9 @@ async def test_gateway_disconnect_policy(disconnect_after_start: bool) -> None:
     store = RecordingStore()
     coordinator = RecordingCoordinator(store)
     gateway = WorkerGateway(
-        coordinator,
+        coordinator, database=store.database,
         worker_tokens={"worker-1": "worker-secret"},
         poll_interval=0.01,
-        deliveries=store.deliveries,
-        jobs=store.jobs,
-        stops=store.stops,
-        workers=store.workers,
         tools=coordinator.tools,
         results=coordinator.results,
         conversations=ConversationBroker(),
@@ -704,12 +668,8 @@ async def test_gateway_resumes_started_assignment_under_a_new_epoch() -> None:
     socket = RecoveringSocket()
     gateway_coordinator = RecordingCoordinator(store)
     gateway = WorkerGateway(
-        gateway_coordinator,
+        gateway_coordinator, database=store.database,
         worker_tokens={"worker-1": "worker-secret"},
-        deliveries=store.deliveries,
-        jobs=store.jobs,
-        stops=store.stops,
-        workers=store.workers,
         tools=gateway_coordinator.tools,
         results=gateway_coordinator.results,
         conversations=ConversationBroker(),

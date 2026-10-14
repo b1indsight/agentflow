@@ -12,15 +12,17 @@
   独立 Database 上下文提供共享连接、事务、时钟和共用锁，功能仓储只依赖该上下文。
   完整 schema 集中初始化；事件审计归 Webhook、drain 归 Worker，Projects/Webhook 使用统一入口。
   注入时钟覆盖创建和更新记录；Projects 局部更新字段有明确类型，事务退出后的功能对象拒绝继续使用。
-  服务直接接收所需的具体仓储，业务调用使用 `self.flows`、`self.jobs` 等；Store 负责装配、初始化和关闭。
+  服务接收 Database 并自行创建所需仓储，业务调用使用 `self.flows`、`self.jobs` 等；
+  Runtime 管理共享数据库的初始化和关闭。Store 的整组仓储入口用于 CLI 运维、live smoke 和测试。
   跨仓储事务使用 `repository.using(tx)` 显式绑定同一连接，普通实例保留自己的连接范围。
   Webhook 重放、生命周期辅助、CLI/live smoke 和测试装配同步迁移。
   Runtime 统一初始化工具、effects、结果应用、路由与 conversation broker；服务删除仅用于初始化
-  下游对象的仓储参数，Gateway 直接使用工具和结果应用。Webhook 使用事务绑定的路由/控制服务副本。
+  下游对象的仓储参数，并删除全部 51 个仓储构造参数及旧调用方的批量转发；
+  Gateway 直接使用工具和结果应用。Webhook 使用事务绑定的路由/控制服务副本。
   跨表提交、锁顺序、数据库和持久消息合同保持现状。
 
 - Control 内部直接依赖具体配置、仓储与服务，删除 12 个 Protocol 和 coordinator 的工具/结果转发；
-  停止操作由直接注入的 StopStore 执行。API 显式接收 runtime，配置在实际入口构造；原始 socket 与接收泵连接
+  停止操作由 Gateway 持有的 StopStore 执行。API 显式接收 runtime，配置在实际入口构造；原始 socket 与接收泵连接
   分别表达传输和消息处理边界，派发授权、结果互斥、恢复及 ACK 规则保持现状。
   CLI 禁止 Uvicorn 覆盖 runtime 的日志配置，保留异常与查询参数脱敏和结构化 JSON 输出。
   控制服务端迁入 `app/controler`，按 `events/workers/workflow/review/reconciliation` 归组，

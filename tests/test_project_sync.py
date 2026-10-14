@@ -198,7 +198,6 @@ def projection(store, review_flow, remote_app):
         batch_size=8,
         concurrency=2,
         database=store.database,
-        projects=store.projects,
     )
     return flow, clock, configs, remote, sync
 
@@ -266,7 +265,6 @@ async def test_lost_response_restart_reads_before_another_write(store, projectio
                 sync.github,
                 interval=30,
                 database=reopened.database,
-                projects=reopened.projects,
             )
         )
         assert state(reopened).synced_version == state(reopened).desired_version
@@ -295,14 +293,6 @@ async def test_new_desired_version_during_set_is_not_acknowledged_by_old_respons
     async def change():
         ControlService(
             database=store.database,
-            deliveries=store.deliveries,
-            flows=store.flows,
-            jobs=store.jobs,
-            result_store=store.results,
-            reviews=store.reviews,
-            stops=store.stops,
-            webhook_store=store.webhooks,
-            workers=store.workers,
         ).cancel(flow)
         store.projects.refresh(state(store).id, config())
 
@@ -323,14 +313,6 @@ async def test_change_during_read_prevents_obsolete_write(store, projection):
     async def change():
         ControlService(
             database=store.database,
-            deliveries=store.deliveries,
-            flows=store.flows,
-            jobs=store.jobs,
-            result_store=store.results,
-            reviews=store.reviews,
-            stops=store.stops,
-            webhook_store=store.webhooks,
-            workers=store.workers,
         ).cancel(flow)
 
     remote.after_read = change
@@ -385,7 +367,7 @@ async def test_discovered_archived_card_recovers_after_restore_and_restart(store
     try:
         reopened.projects.retry(flow.repo)
         await ProjectSync(
-            configs, sync.github, database=reopened.database, projects=reopened.projects
+            configs, sync.github, database=reopened.database,
         ).sweep()
         row = state(reopened)
         assert row.item_id == "ITEM" and not row.blocked
@@ -431,14 +413,6 @@ async def test_rate_limit_deadline_survives_and_does_not_change_flow(store, proj
     # User cancellation changes the desired status without bypassing the remote deadline.
     ControlService(
         database=store.database,
-        deliveries=store.deliveries,
-        flows=store.flows,
-        jobs=store.jobs,
-        result_store=store.results,
-        reviews=store.reviews,
-        stops=store.stops,
-        webhook_store=store.webhooks,
-        workers=store.workers,
     ).cancel(flow)
     await sync.sweep()
     assert state(store).desired_status is ProjectStatus.BLOCKED
@@ -478,7 +452,7 @@ async def test_definite_add_rejection_can_retry_after_restart(store, projection,
     restarted = Store(store.database_url, clock=lambda: clock.now)
     try:
         resumed = ProjectSync(
-            configs, sync.github, database=restarted.database, projects=restarted.projects
+            configs, sync.github, database=restarted.database,
         )
         await resumed.sweep()
         assert len(calls) == 1
@@ -499,14 +473,6 @@ async def test_activation_skips_history_but_discovers_completion_before_seed(sto
     history = store.flows.create_flow(flow.repo, 99, 42)
     ControlService(
         database=store.database,
-        deliveries=store.deliveries,
-        flows=store.flows,
-        jobs=store.jobs,
-        result_store=store.results,
-        reviews=store.reviews,
-        stops=store.stops,
-        webhook_store=store.webhooks,
-        workers=store.workers,
     ).cancel(history)
     clock.now += timedelta(seconds=1)
     await sync.sweep()
@@ -514,14 +480,6 @@ async def test_activation_skips_history_but_discovers_completion_before_seed(sto
     recent = store.flows.create_flow(flow.repo, 100, 42)
     ControlService(
         database=store.database,
-        deliveries=store.deliveries,
-        flows=store.flows,
-        jobs=store.jobs,
-        result_store=store.results,
-        reviews=store.reviews,
-        stops=store.stops,
-        webhook_store=store.webhooks,
-        workers=store.workers,
     ).cancel(recent)
     await sync.sweep()
     assert {row.issue_number for row in store.projects.list_projections()} == {flow.issue_number, 100}
@@ -533,14 +491,6 @@ async def test_project_error_does_not_block_control_cancellation_or_worker_relea
     await sync.sweep()
     ControlService(
         database=store.database,
-        deliveries=store.deliveries,
-        flows=store.flows,
-        jobs=store.jobs,
-        result_store=store.results,
-        reviews=store.reviews,
-        stops=store.stops,
-        webhook_store=store.webhooks,
-        workers=store.workers,
     ).cancel(flow)
     assert store.flows.get_flow(flow.id).state is FlowState.CANCELLED
     assert state(store).failures == 1
@@ -552,7 +502,6 @@ async def test_explicit_job_failure_blocks_but_pending_retry_does_not(store, rem
         {flow.repo: config()},
         remote_app(RemoteProject()),
         database=store.database,
-        projects=store.projects,
     )
     await converge(sync)
     assert state(store).desired_status is ProjectStatus.IN_PROGRESS
@@ -568,14 +517,6 @@ async def test_explicit_job_failure_blocks_but_pending_retry_does_not(store, rem
     assert state(store).desired_status is ProjectStatus.BLOCKED
     ControlService(
         database=store.database,
-        deliveries=store.deliveries,
-        flows=store.flows,
-        jobs=store.jobs,
-        result_store=store.results,
-        reviews=store.reviews,
-        stops=store.stops,
-        webhook_store=store.webhooks,
-        workers=store.workers,
     ).retry(flow)
     assert store.jobs.list_jobs(flow.id)[-1].state is JobState.QUEUED
     await sync.sweep()
@@ -589,7 +530,7 @@ async def test_archive_ack_and_worker_release_succeed_while_projects_are_offline
     remote = RemoteProject()
     remote.failure = "offline"
     sync = ProjectSync(
-        {flow.repo: config()}, remote_app(remote), database=store.database, projects=store.projects
+        {flow.repo: config()}, remote_app(remote), database=store.database,
     )
     await sync.sweep()
     assert state(store).failures == 1
@@ -611,7 +552,6 @@ async def test_config_change_revalidates_and_reuses_same_item(store, projection)
         {flow.repo: config().model_copy(update={"options": options})},
         sync.github,
         database=store.database,
-        projects=store.projects,
     )
     await restarted.sweep()
     assert state(store).desired_version == old_version + 1
@@ -634,14 +574,6 @@ async def test_failed_projection_transaction_rolls_back_version(store, projectio
     before = state(store)
     ControlService(
         database=store.database,
-        deliveries=store.deliveries,
-        flows=store.flows,
-        jobs=store.jobs,
-        result_store=store.results,
-        reviews=store.reviews,
-        stops=store.stops,
-        webhook_store=store.webhooks,
-        workers=store.workers,
     ).cancel(flow)
     with pytest.raises(RuntimeError), store.transaction() as tx:
         tx.projects.refresh(before.id, config())
@@ -670,7 +602,6 @@ async def test_slow_item_does_not_block_another_issue(store, projection, remote_
         remote_app([slow, remote]),
         concurrency=2,
         database=store.database,
-        projects=store.projects,
     )
     task = asyncio.create_task(sync.sweep())
     try:
@@ -689,7 +620,6 @@ async def test_unknown_archive_executor_is_an_explicit_block(store, remote_app, 
         {flow.repo: config()},
         remote_app(RemoteProject()),
         database=store.database,
-        projects=store.projects,
     )
     await sync.sweep()
     assert state(store).desired_status is ProjectStatus.BLOCKED
@@ -712,7 +642,7 @@ async def test_received_archive_result_is_in_progress_despite_old_recovery_deadl
         await subject.results.apply(job.id)
     remote = RemoteProject()
     sync = ProjectSync(
-        {flow.repo: config()}, remote_app(remote), database=store.database, projects=store.projects
+        {flow.repo: config()}, remote_app(remote), database=store.database,
     )
     await sync.sweep()
     assert state(store).desired_status is ProjectStatus.IN_PROGRESS

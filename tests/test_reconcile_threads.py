@@ -69,9 +69,6 @@ async def sweep(store, github):
         github,
         settle_seconds=75,
         database=store.database,
-        deliveries=store.deliveries,
-        reconcile_store=store.reconcile,
-        reviews=store.reviews,
     )._sweep()
 
 

@@ -8,6 +8,10 @@ from app.persistence.database import Database
 from app.persistence.deliveries import DeliveryStore
 from app.persistence.flows import FlowStore
 from app.persistence.jobs import JobStore
+from app.persistence.repository import Repository
+from app.persistence.results import ResultStore
+from app.persistence.reviews import ReviewStore
+from app.persistence.stops import StopStore
 from app.persistence.webhooks import WebhookStore
 from app.persistence.workers import WorkerStore
 
@@ -34,10 +38,21 @@ class RepositoryViews:
         view.transaction.side_effect = transaction
         return cast(Database, view)
 
-    def _view(self, repository: type) -> Mock:
-        view = Mock(spec=repository, wraps=self)
+    def _view(self, repository: type, backend: object | None = None) -> Mock:
+        view = Mock(spec=repository, wraps=self if backend is None else backend)
         view.using = Mock(return_value=view)
         return view
+
+    def repository(self, repository: type[Repository]) -> Mock:
+        """Construct a view over this simulation when a service receives its database."""
+        field = {ResultStore: "results", ReviewStore: "reviews", StopStore: "stops"}.get(repository)
+        if field is None:
+            return self._view(repository)
+        if repository is StopStore:
+            backend = getattr(self, field)
+        else:
+            backend = self.__dict__.get(field, self)
+        return self._view(repository, backend)
 
     @property
     def flows(self) -> FlowStore:

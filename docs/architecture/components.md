@@ -25,7 +25,8 @@ GitHub 错误分类和 Retry-After 计时由 `github/errors.py` 提供，仓储�
 PR、反馈与 Projects。事件、Worker 管理和对账调用工作流，工作流调用审核模块；
 各子包直接引用已有领域类型、协议、具体仓储/GitHub 及配置，不反向依赖 API 或运行时。
 Runtime 统一初始化工具、effects、结果应用、路由和 conversation broker；各服务仅接收实际
-使用的仓储与服务。Gateway 直接使用工具和结果应用，结果应用的锁由 Runtime、coordinator
+使用的数据库与服务，自行创建需要的具体仓储。Runtime 管理共享 Database 的初始化和关闭，
+向服务提供同一 Database。Gateway 直接使用工具和结果应用，结果应用的锁由 Runtime、coordinator
 与 Gateway 共享。Webhook 消费器接收已装配的路由，在每次 receipt 事务内绑定路由及控制服务
 的副本；副本使用同一连接，并将通知和 hook 排到外层提交后，原服务保留正常连接范围。
 各包入口只说明职责，调用者直接导入具体模块。
@@ -90,7 +91,7 @@ PR 依赖操作与 INITIAL 提交复用 `contracts.result_models.unique_pull_req
 只消费已读取的唯一创建回执；退休恢复缺少唯一回执时继续等待，不提交本地完成状态。
 `ResultApplication` 同时拥有逐 job 锁、有界分页和固定并发恢复；Runtime 调度其恢复方法，
 Gateway 持久接收后直接调用 `coordinator.results.apply`，核验提交完成后才发送 ACK；
-工具请求直接调用 `coordinator.tools.execute`。内部配置、仓储与服务依赖使用具体类型。
+工具请求直接调用 `gateway.tools.execute`。内部配置、数据库、仓储与服务依赖使用具体类型。
 网络请求不占用数据库事务；plugin hook 在提交后调用，不具备持久化投递保证。worker 不能直接更新这些状态。
 `JobCoordinator.prepare_for_assignment` 完成任务构造、push capability 签发和 I/O 后业务复查，
 直接返回 wire `Assignment` 或 QUEUED/DONE/FAILED。读取故障使用持久重试预算，签发故障直接失败。
@@ -194,28 +195,29 @@ terminal result 三方核对。当前缺口包括：
 WorkerStore 的恢复扫描在原 worker 锁事务内先提交 job 动作，再查询事务内更新后的绑定事实；
 策略函数不执行 SQL、读取时钟或调用外部服务。
 
-Store 显式创建并持有以下仓储实例；它们共享独立的 `Database` 上下文，使用 Psycopg 3
-同步连接池访问 PostgreSQL。应用装配时将具体仓储注入服务；服务直接持有 `FlowStore`、
-`JobStore` 等，调用 `self.flows.get_flow_by_pr(...)`。服务与功能仓储均不依赖聚合 Store：
+服务接收共享的 `Database`，自行创建并持有以下具体仓储，使用 Psycopg 3 同步连接池访问
+PostgreSQL，例如在构造函数内执行 `self.flows = FlowStore(database)`，业务调用使用
+`self.flows.get_flow_by_pr(...)`。服务与功能仓储均不依赖聚合 Store：
 
-| 装配入口与模块 | 操作归属 |
+| 仓储与模块 | 操作归属 |
 | --- | --- |
-| `store.flows` / `flows.py` | Flow 与 Attempt 的事实读写 |
-| `store.deliveries` / `deliveries.py` | 交付状态与 tool-call 去重账本 |
-| `store.jobs` / `jobs.py` | Job 生命周期、未应用结果分页及完成提交 |
-| `store.workers` / `workers.py` | Worker、Flow binding、fenced assignment、准备与租约恢复、drain |
-| `store.stops` / `stops.py` | 停止请求、发送授权与停止回执 |
-| `store.results` / `results.py` | 冻结结果计划和 effects/receipt 恢复 |
-| `store.reviews` / `reviews.py` | 反馈版本、批次、审核上下文及线程事实 |
-| `store.webhooks` / `webhooks.py` | Webhook inbox 消费和事件去重审计 |
-| `store.reconcile` / `reconciliation.py` | PR 与反馈对账进度 |
-| `store.projects` / `projects.py` | Projects 投影与有类型的局部更新 |
+| `FlowStore` / `flows.py` | Flow 与 Attempt 的事实读写 |
+| `DeliveryStore` / `deliveries.py` | 交付状态与 tool-call 去重账本 |
+| `JobStore` / `jobs.py` | Job 生命周期、未应用结果分页及完成提交 |
+| `WorkerStore` / `workers.py` | Worker、Flow binding、fenced assignment、准备与租约恢复、drain |
+| `StopStore` / `stops.py` | 停止请求、发送授权与停止回执 |
+| `ResultStore` / `results.py` | 冻结结果计划和 effects/receipt 恢复 |
+| `ReviewStore` / `reviews.py` | 反馈版本、批次、审核上下文及线程事实 |
+| `WebhookStore` / `webhooks.py` | Webhook inbox 消费和事件去重审计 |
+| `ReconcileStore` / `reconciliation.py` | PR 与反馈对账进度 |
+| `ProjectStore` / `projects.py` | Projects 投影与有类型的局部更新 |
 
 `schema.py` 集中完整建表 SQL，初始化沿用既有依赖顺序；`records.py` 仅提供原生行类型及
-必需记录回读校验。`database.py` 提供连接、显式事务、注入时钟与共用锁；Store 负责
-整组仓储的装配、数据库初始化和关闭。`repository.py` 的 `using(tx)` 保留具体仓储类型，
+必需记录回读校验。`database.py` 提供连接、显式事务、注入时钟、共用锁和 schema 初始化；
+Runtime 管理该数据库的生命周期。`repository.py` 的 `using(tx)` 保留具体仓储类型，
 返回绑定事务连接的视图；原仓储保留自己的连接范围。仓储需要其他仓储的 SQL 操作时，
-显式使用具体类型并传入同一上下文。Store 的整组事务视图用于初始化、运维及测试装配。
+显式使用具体类型并传入同一上下文。Store 仅为 CLI 运维、live smoke 和测试提供整组仓储，
+其事务视图用于这些入口的数据库操作；Runtime 不使用 Store 装配服务。
 领域数据类型继续拥有自己的校验和纯规则，持久化操作归上述仓储；时间统一使用注入时钟。
 
 `Flow`、`FlowExecution`、`FlowDelivery`、`FlowToolCall`、`Attempt`、`Job` 是 Pydantic

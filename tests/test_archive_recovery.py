@@ -67,14 +67,6 @@ async def test_archive_release_rolls_back_and_replays_atomically(store, monkeypa
     assert store.results.get_plan(job.id).archive == result
     other = ControlService(
         database=store.database,
-        deliveries=store.deliveries,
-        flows=store.flows,
-        jobs=store.jobs,
-        result_store=store.results,
-        reviews=store.reviews,
-        stops=store.stops,
-        webhook_store=store.webhooks,
-        workers=store.workers,
     ).on_trigger("owner/repo", 999, 42)
     assert store.workers.assign_job("worker-a", "next", "epoch-a") is None
 
@@ -101,14 +93,6 @@ async def test_archive_after_initial_retry_cannot_adopt_a_released_binding(store
     flow, _subject, _github, _request, _result = completed_open_initial
     service = ControlService(
         database=store.database,
-        deliveries=store.deliveries,
-        flows=store.flows,
-        jobs=store.jobs,
-        result_store=store.results,
-        reviews=store.reviews,
-        stops=store.stops,
-        webhook_store=store.webhooks,
-        workers=store.workers,
     )
     service.cancel(flow)
     service.retry(flow)
@@ -134,14 +118,6 @@ async def test_failed_archive_retry_keeps_attempt_and_original_worker(store, rec
     assert store.workers.get_flow_execution(flow.id).released_at is None
     service = ControlService(
         database=store.database,
-        deliveries=store.deliveries,
-        flows=store.flows,
-        jobs=store.jobs,
-        result_store=store.results,
-        reviews=store.reviews,
-        stops=store.stops,
-        webhook_store=store.webhooks,
-        workers=store.workers,
     )
     with pytest.raises(ValueError, match="merged.*archive|archive.*merged"):
         service.cancel(flow)
@@ -169,14 +145,6 @@ async def test_expired_merged_executor_is_pinned_until_original_worker_returns(s
     with pytest.raises(ValueError, match="executor|running"):
         ControlService(
             database=store.database,
-            deliveries=store.deliveries,
-            flows=store.flows,
-            jobs=store.jobs,
-            result_store=store.results,
-            reviews=store.reviews,
-            stops=store.stops,
-            webhook_store=store.webhooks,
-            workers=store.workers,
         ).retry(flow)
     store.workers.worker_connected("worker-b", PROTOCOL_VERSION, "epoch-b")
     assert store.workers.assign_job("worker-b", "other", "epoch-b") is None
@@ -191,12 +159,8 @@ async def test_merged_coding_process_without_exit_proof_cannot_unlock_archive(st
     await route_merge(store, flow)
     subject = coordinator(store, RecordingGitHub())
     gateway = WorkerGateway(
-        subject,
+        subject, database=store.database,
         worker_tokens={"worker-a": "secret"},
-        deliveries=store.deliveries,
-        jobs=store.jobs,
-        stops=store.stops,
-        workers=store.workers,
         tools=subject.tools,
         results=subject.results,
         conversations=ConversationBroker(),
@@ -243,14 +207,6 @@ async def test_superseded_queued_coding_does_not_block_archive_retry(store, reco
     await subject.fail(job, "cleanup permission denied")
     ControlService(
         database=store.database,
-        deliveries=store.deliveries,
-        flows=store.flows,
-        jobs=store.jobs,
-        result_store=store.results,
-        reviews=store.reviews,
-        stops=store.stops,
-        webhook_store=store.webhooks,
-        workers=store.workers,
     ).retry(flow)
     retry = store.workers.assign_job("worker-a", "retry", "epoch-a")
     assert retry.kind is JobKind.ARCHIVE and retry.id != job.id

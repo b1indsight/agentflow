@@ -1,12 +1,14 @@
 import base64
 import json
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
 from app.contracts.conversation import ConversationFailure, HistoryQuery
 from app.controler.workers.conversation import ConversationService
 from app.domain.models import Attempt
+from app.persistence.database import Database
 from app.worker.state import history
 from app.worker.state.history import CodexHistory
 from tests.test_conversation_history import SESSION, message, rollout
@@ -53,8 +55,10 @@ async def test_control_owns_session_order_attribution_and_tail(tmp_path):
         return reader.query(request)
 
     service = ConversationService(
-        SimpleNamespace(query=query), flows=store.flows, workers=store.workers
+        SimpleNamespace(query=query), database=Mock(spec=Database),
     )
+    service.flows = store.flows
+    service.workers = store.workers
     first = await service.read(42, None, 100)
     assert len(calls) == 1 and first.has_more
     second = await service.read(42, first.next_cursor, 100)

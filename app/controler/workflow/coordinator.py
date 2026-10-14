@@ -65,19 +65,14 @@ class JobCoordinator:
         plugins: PluginManager | None = None,
         *,
         database: Database,
-        deliveries: DeliveryStore,
-        flows: FlowStore,
-        jobs: JobStore,
-        reviews: ReviewStore,
-        workers: WorkerStore,
         results: ResultApplication,
     ) -> None:
         self.database = database
-        self.deliveries = deliveries
-        self.flows = flows
-        self.jobs = jobs
-        self.reviews = reviews
-        self.workers = workers
+        self.deliveries = DeliveryStore(database)
+        self.flows = FlowStore(database)
+        self.jobs = JobStore(database)
+        self.reviews = ReviewStore(database)
+        self.workers = WorkerStore(database)
         self.github = github
         self.settings = settings
         self.plugins = plugins or get_plugin_manager()

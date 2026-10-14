@@ -44,24 +44,11 @@ def consumer(store):
         EventRouter(
             ControlService(
                 database=store.database,
-                deliveries=store.deliveries,
-                flows=store.flows,
-                jobs=store.jobs,
-                result_store=store.results,
-                reviews=store.reviews,
-                stops=store.stops,
-                webhook_store=store.webhooks,
-                workers=store.workers,
             ),
             settings(),
             database=store.database,
-            flows=store.flows,
-            reconcile_store=store.reconcile,
-            reviews=store.reviews,
-            webhook_store=store.webhooks,
         ),
         database=store.database,
-        webhook_store=store.webhooks,
     )
 
 
@@ -166,14 +153,6 @@ def test_failed_completion_rolls_back_business_and_notifications(store, monkeypa
     service = ControlService(
         jobs_available=lambda: notifications.append(True),
         database=store.database,
-        deliveries=store.deliveries,
-        flows=store.flows,
-        jobs=store.jobs,
-        result_store=store.results,
-        reviews=store.reviews,
-        stops=store.stops,
-        webhook_store=store.webhooks,
-        workers=store.workers,
     )
 
     def unavailable(*args):
@@ -185,13 +164,8 @@ def test_failed_completion_rolls_back_business_and_notifications(store, monkeypa
             service,
             settings(),
             database=store.database,
-            flows=store.flows,
-            reconcile_store=store.reconcile,
-            reviews=store.reviews,
-            webhook_store=store.webhooks,
         ),
         database=store.database,
-        webhook_store=store.webhooks,
     ).sweep()
     assert store.flows.get_active_flow("owner/repo", 7) is None
     assert not notifications

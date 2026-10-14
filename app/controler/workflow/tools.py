@@ -30,14 +30,11 @@ class FlowToolService:
         github: GitHubApp,
         *,
         database: Database,
-        deliveries: DeliveryStore,
-        flows: FlowStore,
-        workers: WorkerStore,
     ) -> None:
         self.database = database
-        self.deliveries = deliveries
-        self.flows = flows
-        self.workers = workers
+        self.deliveries = DeliveryStore(database)
+        self.flows = FlowStore(database)
+        self.workers = WorkerStore(database)
         self.github = github
         self._locks: dict[int, asyncio.Lock] = {}
 

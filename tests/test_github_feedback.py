@@ -77,9 +77,6 @@ async def test_deleted_author_stays_in_batch_but_does_not_become_reviewer_input(
         pr.repository.installation.app,
         settle_seconds=0,
         database=Mock(),
-        deliveries=Mock(),
-        reconcile_store=Mock(),
-        reviews=Mock(),
     )
     assert scanner._discussion_updates(page, "reviews") == ([], None)
 

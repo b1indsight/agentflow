@@ -22,6 +22,7 @@ from app.contracts.conversation import (
 )
 from app.contracts.protocol import ConversationQuery, ConversationResult, WorkerMessage
 from app.domain.models import Attempt
+from app.persistence.database import Database
 from app.persistence.flows import FlowStore
 from app.persistence.workers import WorkerStore
 
@@ -119,10 +120,10 @@ class ConversationService:
     """Resolve trusted flow/session metadata before sending a worker query."""
 
     def __init__(
-        self, broker: ConversationBroker, *, flows: FlowStore, workers: WorkerStore
+        self, broker: ConversationBroker, *, database: Database
     ) -> None:
-        self.flows = flows
-        self.workers = workers
+        self.flows = FlowStore(database)
+        self.workers = WorkerStore(database)
         self.broker = broker
 
     def _resolve(self, flow_id: int) -> tuple[str | None, list[Attempt]]:

@@ -298,3 +298,39 @@ receipt 提交后原服务仍能创建新 Flow 并立即通知。全量 PostgreS
 .cache/2026-10-13/service-scope-ablation.py unbound` 与同命令的 `in-place` 参数；完整实现通过同样输入。
 据此保留路由和控制服务的显式副本绑定，避免引入通用反射绑定器或新的服务工厂转发层。
 SQL、schema、仓储初始化和持久协议均未修改，服务初始化集中在已有 Runtime。
+
+### 2026-10-15 — 服务自行创建仓储，Runtime 只提供数据库
+
+**要求与决定。** 用户指出上一条仍未解决初始化边界，并明确选择「服务自行创建所需仓储，
+Runtime 只提供数据库」。这条决定替代 2026-10-14 的具体仓储构造参数注入，以及上一条由
+Runtime 分发仓储的装配边界。服务继续直接持有 `FlowStore` 等具体对象，在构造函数中以
+`self.flows = FlowStore(database)` 创建；Runtime 管理共享 Database 的初始化和关闭。
+工具、结果应用和 broker 仍由 Runtime 装配，共享结果锁和会话状态。
+
+**实施。** 12 个服务接收 Database 并创建所需仓储，删除全部 51 个仓储构造参数；同步修改
+CLI、协议模拟和测试的 158 处调用，移除 906 个仓储实参。Runtime 直接创建一个 Database，
+并只创建自身实际使用的 Worker/Review/Result/Webhook 仓储，向下游服务只传数据库。
+`Database.init_db()` 按原顺序执行完整 schema；Store 继续供 CLI 运维、live smoke 和测试
+访问整组仓储，其初始化调用同一实现。服务及 Runtime 不通过 Store 查找或转发仓储。
+依据：[服务内部初始化](../../app/controler/workflow/service.py)、
+[Runtime 装配](../../app/controler/runtime.py)、[数据库生命周期](../../app/persistence/database.py)。
+
+**测试与代价。** 仓储构造只保存 Database 引用，不创建连接池；服务各自持有轻量仓储实例，
+它们共享同一连接池、时钟和锁协议，事务继续使用 `using(tx)` 显式绑定。内存模拟在仓储
+创建处替换实例，真实 PostgreSQL 场景仍构造真实仓储；生产代码不增加测试专用参数或工厂。
+本次只移动既有仓储构造并删除转发，未增加事务或恢复机制，因此无需新增运行机制消融。
+继续使用已有 Webhook 原子回滚、服务视图独立、跨仓储事务、并发恢复及关闭回归。
+首轮全量回归发现遗漏的 conversation 模拟构造及日志测试旧 Store 替换，已同步修正。
+内存构造替换使用独立 MonkeyPatch 上下文，避免提前请求测试的 monkeypatch fixture 而让
+SQL 观察器延迟恢复；该公平分配回归及 PostgreSQL schema 清理已验证通过。
+
+**验证。** `uv run --no-sync --env-file .cache/2026-10-13/persistence-test.env pytest -q
+--tb=short --show-capture=no --maxfail=5`：**738 passed，无失败和跳过**，49.51 秒，仅保留既有
+Starlette 弃用提示。Ruff、Mypy（179 个源文件）、`uv build --no-sources`、36 项针对性回归及
+差异检查通过；wheel 中的 18 个 persistence 模块包含 17 个可隔离导入的实现模块。
+`python3 .cache/2026-10-13/verify-service-owned-repositories.py` 确认 12 个服务均自行创建仓储，
+构造参数及旧调用无仓储实参，Runtime 只创建一个 Database，controler 无聚合 Store 访问。
+与此前发布的 `f15037be` 比较，143 个既有 persistence 方法 AST 一致，schema 原样保留；
+另一个既有方法仅将关闭权限错误信息中的 repository 改为 database，关闭条件和行为一致。
+新增 `Database.init_db()` 原样承接 Store 的 schema 执行顺序。
+结构证据为 `.cache/2026-10-13/service-owned-repositories-verification.json`；独立审查与 CI 见 PR。

@@ -46,24 +46,11 @@ class WebhookRuntime(ServerRuntime):
                 EventRouter(
                     ControlService(
                         database=store.database,
-                        deliveries=store.deliveries,
-                        flows=store.flows,
-                        jobs=store.jobs,
-                        result_store=store.results,
-                        reviews=store.reviews,
-                        stops=store.stops,
-                        webhook_store=store.webhooks,
-                        workers=store.workers,
                     ),
                     self.settings,
                     database=store.database,
-                    flows=store.flows,
-                    reconcile_store=store.reconcile,
-                    reviews=store.reviews,
-                    webhook_store=store.webhooks,
                 ),
                 database=store.database,
-                webhook_store=store.webhooks,
             )
 
     async def receive_webhook(self, event_type: str, delivery_id: str, payload: dict, digest: str) -> None:
@@ -154,10 +141,6 @@ async def test_valid_signature_dispatches_webhook(
             RoutingService(store),
             settings,
             database=store.database,
-            flows=store.flows,
-            reconcile_store=store.reconcile,
-            reviews=store.reviews,
-            webhook_store=store.webhooks,
         ),
         settings,
         store,

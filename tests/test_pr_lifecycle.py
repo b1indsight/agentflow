@@ -77,24 +77,9 @@ async def check(store, flow, github):
         github,
         ControlService(
             database=store.database,
-            deliveries=store.deliveries,
-            flows=store.flows,
-            jobs=store.jobs,
-            result_store=store.results,
-            reviews=store.reviews,
-            stops=store.stops,
-            webhook_store=store.webhooks,
-            workers=store.workers,
         ),
         settle_seconds=0,
         database=store.database,
-        deliveries=store.deliveries,
-        flows=store.flows,
-        jobs=store.jobs,
-        reconcile_store=store.reconcile,
-        reviews=store.reviews,
-        stops=store.stops,
-        workers=store.workers,
     )._sweep()
 
 
@@ -132,12 +117,8 @@ async def test_closed_missing_journal_preserves_late_result_and_reopen(store, pe
     store.workers.worker_disconnected("worker-a", "disconnected during closed PR", "epoch")
     store.workers.worker_connected("worker-a", PROTOCOL_VERSION, "restart")
     gateway = WorkerGateway(
-        subject,
+        subject, database=store.database,
         worker_tokens={},
-        deliveries=store.deliveries,
-        jobs=store.jobs,
-        stops=store.stops,
-        workers=store.workers,
         tools=subject.tools,
         results=subject.results,
         conversations=ConversationBroker(),
@@ -206,24 +187,9 @@ async def test_lifecycle_hint_during_query_schedules_a_fresh_observation(store, 
         github,
         ControlService(
             database=store.database,
-            deliveries=store.deliveries,
-            flows=store.flows,
-            jobs=store.jobs,
-            result_store=store.results,
-            reviews=store.reviews,
-            stops=store.stops,
-            webhook_store=store.webhooks,
-            workers=store.workers,
         ),
         settle_seconds=0,
         database=store.database,
-        deliveries=store.deliveries,
-        flows=store.flows,
-        jobs=store.jobs,
-        reconcile_store=store.reconcile,
-        reviews=store.reviews,
-        stops=store.stops,
-        workers=store.workers,
     )._sweep()
     assert github.calls == 2 and store.deliveries.get_delivery(flow.id).state is DeliveryState.OPEN
 
@@ -249,14 +215,6 @@ async def test_close_retires_queued_work_and_keeps_running_executor_slot(store, 
     with pytest.raises(ValueError, match="closed|CLOSED"):
         ControlService(
             database=store.database,
-            deliveries=store.deliveries,
-            flows=store.flows,
-            jobs=store.jobs,
-            result_store=store.results,
-            reviews=store.reviews,
-            stops=store.stops,
-            webhook_store=store.webhooks,
-            workers=store.workers,
         ).retry(flow)
 
 
@@ -320,21 +278,9 @@ async def test_lifecycle_webhooks_are_durable_query_hints(store, lifecycle_flow,
     router = EventRouter(
         ControlService(
             database=store.database,
-            deliveries=store.deliveries,
-            flows=store.flows,
-            jobs=store.jobs,
-            result_store=store.results,
-            reviews=store.reviews,
-            stops=store.stops,
-            webhook_store=store.webhooks,
-            workers=store.workers,
         ),
         SimpleNamespace(),
         database=store.database,
-        flows=store.flows,
-        reconcile_store=store.reconcile,
-        reviews=store.reviews,
-        webhook_store=store.webhooks,
     )
     payload = {"action": action, "repository": {"full_name": flow.repo},
                "pull_request": {"number": 17, "merged": False}}
@@ -360,12 +306,8 @@ async def test_close_during_capability_preparation_never_dispatches(store, pendi
 
     monkeypatch.setattr(Repository, "create_push_capability", close_before_return)
     gateway = WorkerGateway(
-        subject,
+        subject, database=store.database,
         worker_tokens={},
-        deliveries=store.deliveries,
-        jobs=store.jobs,
-        stops=store.stops,
-        workers=store.workers,
         tools=subject.tools,
         results=subject.results,
         conversations=ConversationBroker(),
@@ -440,14 +382,6 @@ async def test_close_after_comment_dispatch_recovers_only_the_existing_marker(st
 async def test_initial_close_before_final_commit_keeps_verified_identity_and_can_reopen(store, recording_resources):
     flow = ControlService(
         database=store.database,
-        deliveries=store.deliveries,
-        flows=store.flows,
-        jobs=store.jobs,
-        result_store=store.results,
-        reviews=store.reviews,
-        stops=store.stops,
-        webhook_store=store.webhooks,
-        workers=store.workers,
     ).on_trigger("owner/repo", 8, 42)
     store.workers.worker_connected("worker", PROTOCOL_VERSION, "epoch")
     job = store.workers.assign_job("worker", "token", "epoch")

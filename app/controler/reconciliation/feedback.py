@@ -65,14 +65,11 @@ class FeedbackReconciler:
         batch_size: int = 64,
         concurrency: int = 4,
         database: Database,
-        deliveries: DeliveryStore,
-        reconcile_store: ReconcileStore,
-        reviews: ReviewStore,
     ) -> None:
         self.database = database
-        self.deliveries = deliveries
-        self.reconcile_store = reconcile_store
-        self.reviews = reviews
+        self.deliveries = DeliveryStore(database)
+        self.reconcile_store = ReconcileStore(database)
+        self.reviews = ReviewStore(database)
         self.github = github
         self.settle_seconds, self.bot_login = settle_seconds, bot_login.casefold()
         self.interval, self.batch_size, self.concurrency = interval, batch_size, concurrency

@@ -41,21 +41,9 @@ async def route_merge(store: Store, flow: Flow, event: str = "merge-1", payload=
     EventRouter(
         ControlService(
             database=store.database,
-            deliveries=store.deliveries,
-            flows=store.flows,
-            jobs=store.jobs,
-            result_store=store.results,
-            reviews=store.reviews,
-            stops=store.stops,
-            webhook_store=store.webhooks,
-            workers=store.workers,
         ),
         settings,
         database=store.database,
-        flows=store.flows,
-        reconcile_store=store.reconcile,
-        reviews=store.reviews,
-        webhook_store=store.webhooks,
     ).dispatch(
         "pull_request",
         event,

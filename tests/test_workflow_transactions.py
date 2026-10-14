@@ -55,14 +55,6 @@ def test_trigger_rolls_back_flow_and_job_on_failure(store: Store, monkeypatch) -
     with pytest.raises(RuntimeError, match="enqueue interrupted"):
         ControlService(
             database=store.database,
-            deliveries=store.deliveries,
-            flows=store.flows,
-            jobs=store.jobs,
-            result_store=store.results,
-            reviews=store.reviews,
-            stops=store.stops,
-            webhook_store=store.webhooks,
-            workers=store.workers,
         ).on_trigger("owner/repo", 700, 42)
     assert store.flows.get_active_flow("owner/repo", 700) is None
 
@@ -72,14 +64,6 @@ def test_assignment_skips_a_flow_locked_for_cancellation(store: Store):
     store.workers.worker_connected("worker-a", PROTOCOL_VERSION, "epoch-a")
     flow = ControlService(
         database=store.database,
-        deliveries=store.deliveries,
-        flows=store.flows,
-        jobs=store.jobs,
-        result_store=store.results,
-        reviews=store.reviews,
-        stops=store.stops,
-        webhook_store=store.webhooks,
-        workers=store.workers,
     ).on_trigger("owner/repo", 705, 42)
     assert flow is not None
     with store.transaction() as tx:
@@ -87,14 +71,6 @@ def test_assignment_skips_a_flow_locked_for_cancellation(store: Store):
         assert store.workers.assign_job("worker-a", "token-a", "epoch-a") is None
         ControlService(
             database=tx.database,
-            deliveries=tx.deliveries,
-            flows=tx.flows,
-            jobs=tx.jobs,
-            result_store=tx.results,
-            reviews=tx.reviews,
-            stops=tx.stops,
-            webhook_store=tx.webhooks,
-            workers=tx.workers,
         ).cancel(flow)
     assert store.workers.get_flow_execution(flow.id) is None
 
@@ -111,14 +87,6 @@ def test_retry_rolls_back_with_real_database(store: Store, monkeypatch) -> None:
     with pytest.raises(RuntimeError, match="enqueue interrupted"):
         ControlService(
             database=store.database,
-            deliveries=store.deliveries,
-            flows=store.flows,
-            jobs=store.jobs,
-            result_store=store.results,
-            reviews=store.reviews,
-            stops=store.stops,
-            webhook_store=store.webhooks,
-            workers=store.workers,
         ).retry(flow)
     persisted = store.flows.get_flow(flow.id)
     assert persisted is not None and persisted.state is FlowState.FAILED
@@ -129,26 +97,10 @@ def test_trigger_and_operator_retry_share_issue_reservation(store: Store, postgr
     # CLI retry uses its own Store and can race the webhook consumer on the same issue.
     flow = ControlService(
         database=store.database,
-        deliveries=store.deliveries,
-        flows=store.flows,
-        jobs=store.jobs,
-        result_store=store.results,
-        reviews=store.reviews,
-        stops=store.stops,
-        webhook_store=store.webhooks,
-        workers=store.workers,
     ).on_trigger("owner/repo", 706, 42)
     assert flow is not None
     ControlService(
         database=store.database,
-        deliveries=store.deliveries,
-        flows=store.flows,
-        jobs=store.jobs,
-        result_store=store.results,
-        reviews=store.reviews,
-        stops=store.stops,
-        webhook_store=store.webhooks,
-        workers=store.workers,
     ).cancel(flow)
     barrier = Barrier(2)
 
@@ -157,14 +109,6 @@ def test_trigger_and_operator_retry_share_issue_reservation(store: Store, postgr
             barrier.wait(timeout=5)
             return ControlService(
                 database=store.database,
-                deliveries=store.deliveries,
-                flows=store.flows,
-                jobs=store.jobs,
-                result_store=store.results,
-                reviews=store.reviews,
-                stops=store.stops,
-                webhook_store=store.webhooks,
-                workers=store.workers,
             ).on_trigger(flow.repo, flow.issue_number, 42)
 
         def retry():
@@ -172,14 +116,6 @@ def test_trigger_and_operator_retry_share_issue_reservation(store: Store, postgr
             try:
                 ControlService(
                     database=operator.database,
-                    deliveries=operator.deliveries,
-                    flows=operator.flows,
-                    jobs=operator.jobs,
-                    result_store=operator.results,
-                    reviews=operator.reviews,
-                    stops=operator.stops,
-                    webhook_store=operator.webhooks,
-                    workers=operator.workers,
                 ).retry(flow)
             except ValueError as error:
                 assert "already active" in str(error)
@@ -259,14 +195,6 @@ def test_expired_cancelled_executor_does_not_overwrite_cancelled_flow(store: Sto
     assert flow is not None
     ControlService(
         database=store.database,
-        deliveries=store.deliveries,
-        flows=store.flows,
-        jobs=store.jobs,
-        result_store=store.results,
-        reviews=store.reviews,
-        stops=store.stops,
-        webhook_store=store.webhooks,
-        workers=store.workers,
     ).cancel(flow)
     running = store.jobs.get_job(job.id)
     assert running is not None and running.state is JobState.RUNNING

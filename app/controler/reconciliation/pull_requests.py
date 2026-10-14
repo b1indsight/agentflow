@@ -38,22 +38,15 @@ class Reconciler:
         concurrency: int = 4,
         settle_seconds: float = 75,
         database: Database,
-        deliveries: DeliveryStore,
-        flows: FlowStore,
-        jobs: JobStore,
-        reconcile_store: ReconcileStore,
-        reviews: ReviewStore,
-        stops: StopStore,
-        workers: WorkerStore,
     ) -> None:
         self.database = database
-        self.deliveries = deliveries
-        self.flows = flows
-        self.jobs = jobs
-        self.reconcile_store = reconcile_store
-        self.reviews = reviews
-        self.stops = stops
-        self.workers = workers
+        self.deliveries = DeliveryStore(database)
+        self.flows = FlowStore(database)
+        self.jobs = JobStore(database)
+        self.reconcile_store = ReconcileStore(database)
+        self.reviews = ReviewStore(database)
+        self.stops = StopStore(database)
+        self.workers = WorkerStore(database)
         self.github = github
         self.service = service
         self.interval, self.batch_size, self.concurrency = interval, batch_size, concurrency

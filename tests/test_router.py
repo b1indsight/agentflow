@@ -48,10 +48,6 @@ def router(store: Store, monkeypatch) -> EventRouter:
         service,
         settings,
         database=store.database,
-        flows=store.flows,
-        reconcile_store=store.reconcile,
-        reviews=store.reviews,
-        webhook_store=store.webhooks,
     )
 
 

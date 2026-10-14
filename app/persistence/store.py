@@ -1,4 +1,4 @@
-"""Own the repositories and bind the complete set to one database context."""
+"""Group repositories for administrative commands and database test setup."""
 
 from __future__ import annotations
 
@@ -19,18 +19,16 @@ from app.persistence.reconciliation import ReconcileStore
 from app.persistence.records import Row
 from app.persistence.results import ResultStore
 from app.persistence.reviews import ReviewStore
-from app.persistence.schema import SCHEMAS
 from app.persistence.stops import StopStore
 from app.persistence.webhooks import WebhookStore
 from app.persistence.workers import WorkerStore
 
 
 class Store:
-    """Create repositories and own database initialization and shutdown at assembly.
+    """Provide a complete repository set for administrative commands and test setup.
 
-    Inject concrete repositories into services. Bind those repositories with ``using(tx)``
-    inside ``database.transaction()`` for atomic work spanning multiple repositories.
-    ``transaction()`` also supplies a bound repository set for setup and administrative use.
+    Services receive a Database and construct only the repositories they need.
+    ``transaction()`` supplies a bound repository set for setup and administrative use.
     """
 
     def __init__(
@@ -128,9 +126,7 @@ class Store:
 
     def init_db(self) -> None:
         """Initialize the complete schema in its foreign-key dependency order."""
-        with self._db.connection() as connection:
-            for schema in SCHEMAS:
-                connection.execute(schema)
+        self._db.init_db()
 
     def now(self) -> datetime:
         return self._db.now()

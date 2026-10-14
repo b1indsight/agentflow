@@ -46,6 +46,7 @@ from app.domain.models import (
     JobKind,
     JobState,
 )
+from app.persistence.database import Database
 from app.persistence.deliveries import DeliveryStore
 from app.persistence.jobs import JobStore
 from app.persistence.stops import StopIntent, StopStore
@@ -65,18 +66,15 @@ class WorkerGateway:
         heartbeat_timeout: float = 45.0,
         poll_interval: float = 2.0,
         metrics: Metrics | None = None,
-        deliveries: DeliveryStore,
-        jobs: JobStore,
-        stops: StopStore,
-        workers: WorkerStore,
+        database: Database,
         tools: FlowToolService,
         results: ResultApplication,
         conversations: ConversationBroker,
     ) -> None:
-        self.deliveries = deliveries
-        self.jobs = jobs
-        self.stops = stops
-        self.workers = workers
+        self.deliveries = DeliveryStore(database)
+        self.jobs = JobStore(database)
+        self.stops = StopStore(database)
+        self.workers = WorkerStore(database)
         self.metrics = metrics
         self.coordinator = coordinator
         self.tools = tools

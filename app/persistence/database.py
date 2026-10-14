@@ -14,10 +14,11 @@ from psycopg_pool import ConnectionPool
 
 from app.domain.models import Flow, Job, utcnow
 from app.persistence.records import Row
+from app.persistence.schema import SCHEMAS
 
 
 class Database:
-    """Provide database resources without knowing the owning Store or its repositories.
+    """Own database resources independently of the services and repositories using them.
 
     A transaction yields a separate context bound to one connection; repositories built
     from it share that transaction and reject access after the context exits.
@@ -116,10 +117,16 @@ class Database:
             (worker_id,),
         ).fetchone()
 
+    def init_db(self) -> None:
+        """Initialize the complete schema in its foreign-key dependency order."""
+        with self.connection() as connection:
+            for schema in SCHEMAS:
+                connection.execute(schema)
+
     def now(self) -> datetime:
         return self._clock()
 
     def close(self) -> None:
         if self._bound_connection is not None:
-            raise RuntimeError("only the owning repository can close the connection pool")
+            raise RuntimeError("only the owning database can close the connection pool")
         self._pool.close()

@@ -26,10 +26,9 @@ class ProjectSync:
         batch_size: int = 64,
         concurrency: int = 4,
         database: Database,
-        projects: ProjectStore,
     ) -> None:
         self.database = database
-        self.projects = projects
+        self.projects = ProjectStore(database)
         self.configs = configs
         self.github = github
         self.interval, self.batch_size, self.concurrency = interval, batch_size, concurrency

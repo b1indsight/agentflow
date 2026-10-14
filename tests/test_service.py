@@ -88,14 +88,6 @@ def test_explicit_retry_reactivates_flow_and_requeues_kind(failed_kind, expected
     store = RetryStore(failed_job)
     service = ControlService(
         database=cast(Store, cast(Any, store)).database,
-        deliveries=cast(Store, cast(Any, store)).deliveries,
-        flows=cast(Store, cast(Any, store)).flows,
-        jobs=cast(Store, cast(Any, store)).jobs,
-        result_store=cast(Store, cast(Any, store)).results,
-        reviews=cast(Store, cast(Any, store)).reviews,
-        stops=cast(Store, cast(Any, store)).stops,
-        webhook_store=cast(Store, cast(Any, store)).webhooks,
-        workers=cast(Store, cast(Any, store)).workers,
     )
 
     service.retry(store.flow)
@@ -111,14 +103,6 @@ def test_merged_terminal_flow_requires_manual_archive_reconciliation() -> None:
     with pytest.raises(ValueError, match="terminal"):
         ControlService(
             database=cast(Store, cast(Any, store)).database,
-            deliveries=cast(Store, cast(Any, store)).deliveries,
-            flows=cast(Store, cast(Any, store)).flows,
-            jobs=cast(Store, cast(Any, store)).jobs,
-            result_store=cast(Store, cast(Any, store)).results,
-            reviews=cast(Store, cast(Any, store)).reviews,
-            stops=cast(Store, cast(Any, store)).stops,
-            webhook_store=cast(Store, cast(Any, store)).webhooks,
-            workers=cast(Store, cast(Any, store)).workers,
         ).retry(store.flow)
 
     assert store.flow.state is FlowState.FAILED

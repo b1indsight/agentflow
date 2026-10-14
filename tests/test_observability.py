@@ -163,7 +163,7 @@ def test_serve_preserves_sanitized_uvicorn_logging(monkeypatch, capsys):
     settings = ServerSettings.model_construct(database_url="postgresql://localhost/test",
         worker_tokens={"worker-1": SecretStr("worker-secret")}, log_format="json")
     monkeypatch.setattr(server_config, "ServerSettings", lambda: settings)
-    monkeypatch.setattr(server_runtime, "Store", Mock())
+    monkeypatch.setattr(server_runtime, "Database", Mock())
     monkeypatch.setattr(server_runtime, "GitHubApp", Mock())
     monkeypatch.setattr(server_runtime, "configure_logging",
                         lambda role, output_format: configure_logging(role, output_format, output))

@@ -1,5 +1,7 @@
 import os
 from collections.abc import Iterator
+from functools import partial
+from unittest.mock import Mock
 from uuid import uuid4
 
 import psycopg
@@ -15,6 +17,42 @@ from tests.github import (
     RecordingRepository,
     RecordingReviewThread,
 )
+
+
+@pytest.fixture(autouse=True)
+def memory_repository_construction() -> Iterator[None]:
+    """Replace constructor calls only for databases wrapping an in-memory simulation.
+
+    PostgreSQL scenarios still construct real repositories. This keeps test doubles at
+    the repository creation boundary without adding injection parameters to services.
+    """
+    from app.controler.workers import conversation, gateway
+    from app.controler.workflow import coordinator, effects, results, service, tools
+    from app.persistence.deliveries import DeliveryStore
+    from app.persistence.flows import FlowStore
+    from app.persistence.jobs import JobStore
+    from app.persistence.results import ResultStore
+    from app.persistence.reviews import ReviewStore
+    from app.persistence.stops import StopStore
+    from app.persistence.webhooks import WebhookStore
+    from app.persistence.workers import WorkerStore
+    from tests.persistence_fakes import RepositoryViews
+
+    def construct(repository: type, database):
+        if isinstance(database, Mock) and isinstance(database._mock_wraps, RepositoryViews):
+            return database._mock_wraps.repository(repository)
+        return repository(database)
+
+    repositories = (DeliveryStore, FlowStore, JobStore, ResultStore,
+                    ReviewStore, StopStore, WebhookStore, WorkerStore)
+    # Keep these constructor patches independent of each test's monkeypatch fixture;
+    # SQL observers must be restored before the PostgreSQL fixture drops its schema.
+    with pytest.MonkeyPatch.context() as patch:
+        for module in (coordinator, effects, results, service, tools, conversation, gateway):
+            for repository in repositories:
+                if getattr(module, repository.__name__, None) is repository:
+                    patch.setattr(module, repository.__name__, partial(construct, repository))
+        yield
 
 
 @pytest.fixture

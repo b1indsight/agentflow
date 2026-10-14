@@ -69,22 +69,15 @@ class ResultEffects:
         github: GitHubApp,
         *,
         database: Database,
-        deliveries: DeliveryStore,
-        flows: FlowStore,
-        jobs: JobStore,
-        result_store: ResultStore,
-        reviews: ReviewStore,
-        stops: StopStore,
-        workers: WorkerStore,
     ) -> None:
         self.database = database
-        self.deliveries = deliveries
-        self.flows = flows
-        self.jobs = jobs
-        self.result_store = result_store
-        self.reviews = reviews
-        self.stops = stops
-        self.workers = workers
+        self.deliveries = DeliveryStore(database)
+        self.flows = FlowStore(database)
+        self.jobs = JobStore(database)
+        self.result_store = ResultStore(database)
+        self.reviews = ReviewStore(database)
+        self.stops = StopStore(database)
+        self.workers = WorkerStore(database)
         self.github = github
 
     async def run(self, plan: ResultPlan) -> str | None:

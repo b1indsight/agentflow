@@ -493,14 +493,6 @@ def test_failed_flow_retry_reactivates_its_released_execution(store: Store) -> N
 
     ControlService(
         database=store.database,
-        deliveries=store.deliveries,
-        flows=store.flows,
-        jobs=store.jobs,
-        result_store=store.results,
-        reviews=store.reviews,
-        stops=store.stops,
-        webhook_store=store.webhooks,
-        workers=store.workers,
     ).retry(flow)
 
     retried = store.workers.assign_job("worker-a", "token-b")

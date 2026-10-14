@@ -258,13 +258,6 @@ def coordinator(store: Store | MemoryStore, github: GitHubApp) -> CoordinatorFix
     effects = ResultEffects(
         github,
         database=repositories.database,
-        deliveries=repositories.deliveries,
-        flows=repositories.flows,
-        jobs=repositories.jobs,
-        result_store=repositories.results,
-        reviews=repositories.reviews,
-        stops=repositories.stops,
-        workers=repositories.workers,
     )
     results = ResultApplication(
         github,
@@ -272,31 +265,17 @@ def coordinator(store: Store | MemoryStore, github: GitHubApp) -> CoordinatorFix
         plugins,
         effects=effects,
         database=repositories.database,
-        deliveries=repositories.deliveries,
-        flows=repositories.flows,
-        jobs=repositories.jobs,
-        result_store=repositories.results,
-        reviews=repositories.reviews,
-        workers=repositories.workers,
     )
     subject = CoordinatorFixture(
         github,
         settings,
         plugins,
         database=cast(Store, store).database,
-        deliveries=cast(Store, store).deliveries,
-        flows=cast(Store, store).flows,
-        jobs=cast(Store, store).jobs,
-        reviews=cast(Store, store).reviews,
-        workers=cast(Store, store).workers,
         results=results,
     )
     subject.tools = FlowToolService(
         github,
         database=repositories.database,
-        deliveries=repositories.deliveries,
-        flows=repositories.flows,
-        workers=repositories.workers,
     )
     subject.memory = store
     return subject

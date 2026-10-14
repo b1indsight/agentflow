@@ -27,16 +27,12 @@ class EventRouter:
         settings: ServerSettings,
         *,
         database: Database,
-        flows: FlowStore,
-        reconcile_store: ReconcileStore,
-        reviews: ReviewStore,
-        webhook_store: WebhookStore,
     ) -> None:
         self.database = database
-        self.flows = flows
-        self.reconcile_store = reconcile_store
-        self.reviews = reviews
-        self.webhook_store = webhook_store
+        self.flows = FlowStore(database)
+        self.reconcile_store = ReconcileStore(database)
+        self.reviews = ReviewStore(database)
+        self.webhook_store = WebhookStore(database)
         self.service = service
         self.settings = settings
 

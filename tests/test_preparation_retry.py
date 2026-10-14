@@ -23,12 +23,8 @@ from tests.test_revision_recovery import revision_resources as revision_resource
 
 def gateway(store, subject):
     return WorkerGateway(
-        subject,
+        subject, database=store.database,
         worker_tokens={},
-        deliveries=store.deliveries,
-        jobs=store.jobs,
-        stops=store.stops,
-        workers=store.workers,
         tools=subject.tools,
         results=subject.results,
         conversations=ConversationBroker(),

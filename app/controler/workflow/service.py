@@ -41,24 +41,16 @@ class ControlService:
         *,
         after_commit: list[Callable[[], None]] | None = None,
         database: Database,
-        deliveries: DeliveryStore,
-        flows: FlowStore,
-        jobs: JobStore,
-        result_store: ResultStore,
-        reviews: ReviewStore,
-        stops: StopStore,
-        webhook_store: WebhookStore,
-        workers: WorkerStore,
     ) -> None:
         self.database = database
-        self.deliveries = deliveries
-        self.flows = flows
-        self.jobs = jobs
-        self.result_store = result_store
-        self.reviews = reviews
-        self.stops = stops
-        self.webhook_store = webhook_store
-        self.workers = workers
+        self.deliveries = DeliveryStore(database)
+        self.flows = FlowStore(database)
+        self.jobs = JobStore(database)
+        self.result_store = ResultStore(database)
+        self.reviews = ReviewStore(database)
+        self.stops = StopStore(database)
+        self.webhook_store = WebhookStore(database)
+        self.workers = WorkerStore(database)
         self._after_commit = after_commit
         self.plugins = plugins or get_plugin_manager()
         self._jobs_available = jobs_available or (lambda: None)

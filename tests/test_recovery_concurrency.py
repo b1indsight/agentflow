@@ -180,7 +180,7 @@ async def test_runtime_sweeps_continue_while_result_recovery_waits():
     runtime.reviews = SimpleNamespace(claim_due=Mock(side_effect=lambda: (settled.set() or True)),
                                      pending_triage=Mock(return_value=[]))
     runtime.workers = SimpleNamespace(sweep_expired_assignments=Mock(side_effect=lambda: (lease.set() or 0, 0)))
-    runtime.store = SimpleNamespace(close=Mock())
+    runtime.database = SimpleNamespace(close=Mock())
     runtime.results = SimpleNamespace(recover_pending_results=AsyncMock(side_effect=recover))
     runtime.gateway = SimpleNamespace(notify_jobs=Mock())
     runtime.reconciler = SimpleNamespace(stop=Mock())
@@ -194,7 +194,7 @@ async def test_runtime_sweeps_continue_while_result_recovery_waits():
     finally:
         await runtime.shutdown()
     assert exited.is_set() and all(task.done() for task in runtime._tasks)
-    runtime.store.close.assert_called_once()
+    runtime.database.close.assert_called_once()
 
 
 def test_store_pages_only_unapplied_results_in_stable_job_order(store):

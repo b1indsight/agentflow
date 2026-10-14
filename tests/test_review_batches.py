@@ -235,14 +235,6 @@ def test_cancel_retires_buffer_and_batch_atomically(store, review_flow):
     ingest(store, flow, feedback(clock, 102), "next")
     ControlService(
         database=store.database,
-        deliveries=store.deliveries,
-        flows=store.flows,
-        jobs=store.jobs,
-        result_store=store.results,
-        reviews=store.reviews,
-        stops=store.stops,
-        webhook_store=store.webhooks,
-        workers=store.workers,
     ).cancel(flow)
     assert store.reviews.get_batch(batch.id).state is BatchState.CANCELLED
     assert claim(store, clock) == []
@@ -271,21 +263,9 @@ async def test_bot_mentions_always_enter_triage(
     router = EventRouter(
         ControlService(
             database=store.database,
-            deliveries=store.deliveries,
-            flows=store.flows,
-            jobs=store.jobs,
-            result_store=store.results,
-            reviews=store.reviews,
-            stops=store.stops,
-            webhook_store=store.webhooks,
-            workers=store.workers,
         ),
         settings,
         database=store.database,
-        flows=store.flows,
-        reconcile_store=store.reconcile,
-        reviews=store.reviews,
-        webhook_store=store.webhooks,
     )
     # An allowlisted author's direct request still needs Judge.
     router.dispatch(
@@ -341,21 +321,9 @@ async def test_review_actions_have_explicit_dispatch_semantics(
     router = EventRouter(
         ControlService(
             database=store.database,
-            deliveries=store.deliveries,
-            flows=store.flows,
-            jobs=store.jobs,
-            result_store=store.results,
-            reviews=store.reviews,
-            stops=store.stops,
-            webhook_store=store.webhooks,
-            workers=store.workers,
         ),
         settings,
         database=store.database,
-        flows=store.flows,
-        reconcile_store=store.reconcile,
-        reviews=store.reviews,
-        webhook_store=store.webhooks,
     )
     router.dispatch(
         "pull_request_review",
@@ -390,14 +358,6 @@ def test_failed_batch_retry_restores_ownership_and_cancel_fences_old_work(store,
     assert store.reviews.get_batch(batch_for(store, job).id).state is BatchState.CANCELLED
     ControlService(
         database=store.database,
-        deliveries=store.deliveries,
-        flows=store.flows,
-        jobs=store.jobs,
-        result_store=store.results,
-        reviews=store.reviews,
-        stops=store.stops,
-        webhook_store=store.webhooks,
-        workers=store.workers,
     ).retry(flow)
     replacement = store.jobs.list_jobs(flow.id)[-1]
     assert replacement.id != job.id
@@ -515,14 +475,6 @@ async def test_answer_rechecks_lifecycle_and_remote_head_before_sending(
         if change == "cancel":
             ControlService(
                 database=store.database,
-                deliveries=store.deliveries,
-                flows=store.flows,
-                jobs=store.jobs,
-                result_store=store.results,
-                reviews=store.reviews,
-                stops=store.stops,
-                webhook_store=store.webhooks,
-                workers=store.workers,
             ).cancel(flow)
 
     await run_triage(store, flow, job, TriageVerdict(verdict=Verdict.ANSWER, answer="Reply"),
@@ -575,14 +527,6 @@ def test_retry_after_successful_replacement_does_not_select_historical_failure(
     original = claim(store, clock)[0]
     service = ControlService(
         database=store.database,
-        deliveries=store.deliveries,
-        flows=store.flows,
-        jobs=store.jobs,
-        result_store=store.results,
-        reviews=store.reviews,
-        stops=store.stops,
-        webhook_store=store.webhooks,
-        workers=store.workers,
     )
     service.cancel(flow)
     service.retry(flow)
@@ -635,14 +579,6 @@ async def test_approval_invalidates_body_without_waking_waiting_feedback(
     router = EventRouter(
         ControlService(
             database=store.database,
-            deliveries=store.deliveries,
-            flows=store.flows,
-            jobs=store.jobs,
-            result_store=store.results,
-            reviews=store.reviews,
-            stops=store.stops,
-            webhook_store=store.webhooks,
-            workers=store.workers,
         ),
         SimpleNamespace(
             allowlist=["alice"],
@@ -652,10 +588,6 @@ async def test_approval_invalidates_body_without_waking_waiting_feedback(
             submit_grace_seconds=15,
         ),
         database=store.database,
-        flows=store.flows,
-        reconcile_store=store.reconcile,
-        reviews=store.reviews,
-        webhook_store=store.webhooks,
     )
     # Both a fresh approval and approval of an existing review must leave discussion asleep.
     router.dispatch("pull_request_review", "approval", {
