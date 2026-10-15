@@ -2,6 +2,8 @@
 
 容器部署见 [Docker / Compose](docker.md) 和 [Kubernetes](kubernetes.md)。
 常驻服务、告警与维护见 [运维手册](../operations/runbook.md)。
+用户 API 的 GitHub 登录、单账号限制和 MFA 见 [Cloudflare Access](access.md)；
+本文默认仍仅公开 Webhook，不将整个 serve 暴露到公网。
 
 本文使用现有 `flowtool serve`、`flowtool worker` 和官方 `cloudflared`，说明直接运行进程的
 部署步骤。示例基于同一主机、不同 OS 账号的首次联调；容器方式使用上面的专门文档。

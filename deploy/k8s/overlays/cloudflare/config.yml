@@ -4,4 +4,8 @@ ingress:
   - hostname: REPLACE_WITH_WEBHOOK_HOSTNAME
     path: ^/webhook$
     service: http://flowtool-serve:8000
+  # Optional: configure owner-only Access and MFA first; see docs/deployment/access.md.
+  # - hostname: REPLACE_WITH_ADMIN_HOSTNAME
+  #   path: ^/api/flows/[1-9][0-9]*/conversation$
+  #   service: http://flowtool-serve:8000
   - service: http_status:404

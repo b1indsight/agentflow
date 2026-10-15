@@ -10,7 +10,17 @@ import re
 from contextlib import asynccontextmanager
 
 import anyio
-from fastapi import FastAPI, Header, HTTPException, Path, Query, Request, Response, WebSocket
+from fastapi import (
+    Depends,
+    FastAPI,
+    Header,
+    HTTPException,
+    Path,
+    Query,
+    Request,
+    Response,
+    WebSocket,
+)
 from loguru import logger
 from psycopg import Error as DatabaseError
 from psycopg_pool import PoolTimeout
@@ -40,6 +50,12 @@ async def _wait_for_disconnect(request: Request, cancel_scope: anyio.CancelScope
             pass
 
 
+async def _require_owner(request: Request) -> None:
+    runtime: ServerRuntime = request.app.state.runtime
+    assertions = request.headers.getlist("cf-access-jwt-assertion")
+    await runtime.access.authenticate(assertions[0] if len(assertions) == 1 else None)
+
+
 def create_app(runtime: ServerRuntime | None = None) -> FastAPI:
     """Create the HTTP app; construct the default runtime when its lifespan starts."""
 
@@ -60,13 +76,16 @@ def create_app(runtime: ServerRuntime | None = None) -> FastAPI:
     @application.middleware("http")
     async def observe_request(request: Request, call_next: RequestResponseEndpoint) -> Response:
         response = await call_next(request)
+        if request.url.path.startswith("/api/"):
+            response.headers["Cache-Control"] = "no-store"
         if request.url.path == "/webhook":
             request.app.state.metrics.request(response.status_code)
             logger.bind(event="webhook_received", reason_code="ok" if response.status_code == 202 else "unspecified",
                         delivery_id=request.headers.get("x-github-delivery", "")).info("")
         return response
 
-    @application.get("/api/flows/{flow_id}/conversation", response_model=ConversationPage)
+    @application.get("/api/flows/{flow_id}/conversation", response_model=ConversationPage,
+                     dependencies=[Depends(_require_owner)])
     async def conversation(
         request: Request,
         response: Response,
@@ -75,13 +94,7 @@ def create_app(runtime: ServerRuntime | None = None) -> FastAPI:
         limit: int = Query(default=100, ge=1, le=500),
     ) -> ConversationPage | Response:
         runtime: ServerRuntime = request.app.state.runtime
-        token = runtime.settings.control_api_token
         headers = {"Cache-Control": "no-store"}
-        if token is None or not token.get_secret_value():
-            raise HTTPException(503, "conversation_api_disabled", headers=headers)
-        expected = "Bearer " + token.get_secret_value()
-        if not hmac.compare_digest(request.headers.get("authorization", "").encode(), expected.encode()):
-            raise HTTPException(401, "unauthorized", headers={**headers, "WWW-Authenticate": "Bearer"})
         query = asyncio.create_task(runtime.conversations.read(flow_id, cursor, limit))
         # Starlette's receive middleware uses AnyIO scopes; level cancellation is
         # needed so cancelling the watcher cannot be swallowed by its nested scope.

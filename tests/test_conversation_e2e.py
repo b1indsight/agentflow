@@ -1,11 +1,9 @@
 import asyncio
 import json
-from types import SimpleNamespace
 from unittest.mock import Mock
 
 import httpx
 import pytest
-from pydantic import SecretStr
 
 from app.controler.api import create_app
 from app.controler.runtime import ServerRuntime
@@ -14,6 +12,7 @@ from app.controler.workers.gateway import WorkerGateway
 from app.domain.models import Attempt, Flow, FlowExecution, FlowState
 from app.worker.state.session import WorkerSession
 from app.worker.transport.client import WorkerClient
+from tests.access import AccessIssuer
 from tests.test_conversation_history import SESSION, message, rollout
 from tests.test_remote_e2e import (
     FakeExecutor,
@@ -85,7 +84,8 @@ async def test_http_query_while_worker_or_control_busy_and_idle(tmp_path, phase,
     )
     gateway.conversations.timeout = 1
     service = ConversationService(gateway.conversations, database=store.database, )
-    runtime = Mock(spec=ServerRuntime, settings=SimpleNamespace(control_api_token=SecretStr("reader")), conversations=service)
+    issuer = AccessIssuer()
+    runtime = Mock(spec=ServerRuntime, settings=issuer.settings, access=issuer.auth, conversations=service)
     app = create_app(runtime)
     app.state.runtime = runtime
     to_worker: asyncio.Queue[str] = asyncio.Queue()
@@ -98,7 +98,7 @@ async def test_http_query_while_worker_or_control_busy_and_idle(tmp_path, phase,
     try:
         await asyncio.wait_for(started.wait(), 2)
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test",
-                                    headers={"Authorization": "Bearer reader"}) as http:
+                                    headers=issuer.headers()) as http:
             # GitHub I/O can hold preparation/tools/result application longer than the
             # query timeout. The query must complete before that operation is released.
             first = await http.get("/api/flows/3/conversation?limit=1")
@@ -123,3 +123,4 @@ async def test_http_query_while_worker_or_control_busy_and_idle(tmp_path, phase,
         server.cancel()
         client.cancel()
         await asyncio.gather(server, client, return_exceptions=True)
+        await issuer.auth.close()

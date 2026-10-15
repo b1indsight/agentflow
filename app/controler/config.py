@@ -26,7 +26,9 @@ class ServerSettings(BaseSettings):
     )
 
     metrics_token: SecretStr | None = None
-    control_api_token: SecretStr | None = None
+    access_issuer: str | None = None
+    access_audience: str | None = None
+    access_owner_email: str | None = None
     metrics_interval_seconds: float = Field(default=15, ge=5, le=300, allow_inf_nan=False)
 
     webhook_max_body_bytes: int = Field(default=25 * 1024 * 1024, ge=1, le=100 * 1024 * 1024)
@@ -42,6 +44,26 @@ class ServerSettings(BaseSettings):
     in_review_label: str = "flow:in-review"
     done_label: str = "flow:done"
     projects: dict[str, ProjectConfig] = Field(default_factory=dict)
+
+    @field_validator("access_issuer", "access_audience", "access_owner_email", mode="before")
+    @classmethod
+    def _access_blank_is_disabled(cls, value: object) -> object:
+        return value.strip() or None if isinstance(value, str) else value
+
+    @model_validator(mode="after")
+    def _validate_access(self) -> ServerSettings:
+        values = (self.access_issuer, self.access_audience, self.access_owner_email)
+        if any(values) and not all(values):
+            raise ValueError("Access issuer, audience and owner email must be configured together")
+        if self.access_issuer and not re.fullmatch(
+            r"https://[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.cloudflareaccess\.com", self.access_issuer,
+        ):
+            raise ValueError("Access issuer must be an HTTPS Cloudflare team domain without a path")
+        if self.access_audience and not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", self.access_audience):
+            raise ValueError("Invalid Access application audience")
+        if self.access_owner_email and not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", self.access_owner_email):
+            raise ValueError("Access owner email must be a single email address")
+        return self
 
     @field_validator("projects")
     @classmethod

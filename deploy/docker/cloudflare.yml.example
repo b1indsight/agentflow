@@ -4,4 +4,9 @@ ingress:
   - hostname: hooks.example.com
     path: ^/webhook$
     service: http://serve:8000
+  # Optional: configure the owner-only Access application and MFA before enabling.
+  # See docs/deployment/access.md. Never publish the entire serve origin.
+  # - hostname: admin.example.com
+  #   path: ^/api/flows/[1-9][0-9]*/conversation$
+  #   service: http://serve:8000
   - service: http_status:404
