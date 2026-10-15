@@ -80,7 +80,8 @@ def test_retry_rolls_back_with_real_database(store: Store, monkeypatch) -> None:
     flow.state = FlowState.FAILED
     store.flows.update_flow(flow)
 
-    def fail_enqueue(*args: object, **kwargs: object) -> Job:
+    def fail_enqueue(self: JobStore, flow_id: int, kind: JobKind, **kwargs: object) -> Job:
+        assert kind is JobKind.INITIAL
         raise RuntimeError("enqueue interrupted")
 
     monkeypatch.setattr(JobStore, "enqueue_job", fail_enqueue)

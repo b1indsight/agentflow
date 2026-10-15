@@ -366,3 +366,14 @@ ignore-plugins`，另一变体参数为 `early-hooks`。据此保留原插件实
 运行路径删除了复制绑定机制，未增加事务或恢复机制。独立审查与 CI 见 PR。
 本地结构检查结果为 `.cache/2026-10-13/receipt-scoped-services-verification.json`，
 确认两个服务层 using 为零，两个服务均在 receipt 事务内以同一个 tx 构造，并记录逐文件行数。
+
+### 2026-10-15 — 删除被数据库回归覆盖的旧重试测试
+
+用户要求检查旧测试是否仍有作用。删除 `tests/test_service.py` 的三个内存场景及专用 RetryStore：
+失败任务重试和合并终态保护已由 [数据库重试](../../tests/test_store.py) 与
+[修订恢复](../../tests/test_revision_recovery.py) 覆盖；将无失败任务时默认 INITIAL 的独有断言
+并入既有 [重试回滚用例](../../tests/test_workflow_transactions.py)，测试净减 108 行。
+同上全量 PostgreSQL 命令：**735 passed，无跳过**，48.46 秒；Ruff、Mypy（178 个源文件）通过。
+保留四项数据库用例正常通过；分别注入错误默认类型、错误重试类型、移除终态保护，均触发预期失败。
+对照命令：`uv run --no-sync --env-file .cache/2026-10-13/persistence-test.env python
+.cache/2026-10-13/retry-test-coverage-ablation.py`，参数为 `default-kind`、`failed-kind`、`terminal-guard`。
