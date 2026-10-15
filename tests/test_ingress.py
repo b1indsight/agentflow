@@ -22,6 +22,7 @@ from app.controler.workers.gateway import WorkerGateway
 from app.controler.workflow.service import ControlService
 from app.domain.models import Flow, FlowState, JobKind
 from app.persistence.store import Store
+from app.plugins import get_plugin_manager
 from app.telemetry.metrics import Metrics
 
 
@@ -43,14 +44,10 @@ class WebhookRuntime(ServerRuntime):
         self.webhooks = Mock(spec=WebhookConsumer)
         if store is not None:
             self.webhooks = WebhookConsumer(
-                EventRouter(
-                    ControlService(
-                        database=store.database,
-                    ),
-                    self.settings,
-                    database=store.database,
-                ),
+                self.settings,
                 database=store.database,
+                plugins=get_plugin_manager(),
+                jobs_available=lambda: None,
             )
 
     async def receive_webhook(self, event_type: str, delivery_id: str, payload: dict, digest: str) -> None:

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from copy import copy
 from functools import partial
 
 from loguru import logger
@@ -54,22 +53,6 @@ class ControlService:
         self._after_commit = after_commit
         self.plugins = plugins or get_plugin_manager()
         self._jobs_available = jobs_available or (lambda: None)
-
-    def using(self, database: Database, *, after_commit: list[Callable[[], None]]) -> ControlService:
-        """Bind a view whose hooks and notifications wait for the caller's outer commit."""
-        bound = copy(self)
-        bound.database = database
-        bound.deliveries = self.deliveries.using(database)
-        bound.flows = self.flows.using(database)
-        bound.jobs = self.jobs.using(database)
-        bound.result_store = self.result_store.using(database)
-        bound.reviews = self.reviews.using(database)
-        bound.stops = self.stops.using(database)
-        bound.webhook_store = self.webhook_store.using(database)
-        bound.workers = self.workers.using(database)
-        bound._after_commit = after_commit
-        bound._jobs_available = partial(after_commit.append, self.notify_jobs)
-        return bound
 
     def _fire(self, hook: str, **kwargs: object) -> None:
         if self._after_commit is not None:

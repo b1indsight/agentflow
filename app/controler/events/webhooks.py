@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from functools import partial
 
 from loguru import logger
+from pluggy import PluginManager
 from pydantic import ValidationError
 
+from app.controler.config import ServerSettings
 from app.controler.events.router import EventRouter
+from app.controler.workflow.service import ControlService
 from app.persistence.database import Database
 from app.persistence.webhooks import WebhookStore
 
@@ -16,16 +20,21 @@ from app.persistence.webhooks import WebhookStore
 class WebhookConsumer:
     def __init__(
         self,
-        router: EventRouter,
+        settings: ServerSettings,
         *,
         database: Database,
+        plugins: PluginManager,
+        jobs_available: Callable[[], None],
     ) -> None:
         self.database = database
         self.webhook_store = WebhookStore(database)
-        self.router = router
+        self.settings = settings
+        self.plugins = plugins
+        self.jobs_available = jobs_available
         self.wakeup = asyncio.Event()
 
     def sweep(self, loop: asyncio.AbstractEventLoop | None = None) -> int:
+        """Create services per receipt and publish notifications after its transaction commits."""
         inbox = self.webhook_store
         handled = 0
         for _ in range(50):
@@ -46,7 +55,14 @@ class WebhookConsumer:
                     if item.payload is None:
                         raise ValueError("pending webhook payload missing")
                     # dispatch is synchronous DB-only work; nested transactions share this connection.
-                    self.router.using(tx, after_commit=callbacks).dispatch(
+                    service = ControlService(
+                        plugins=self.plugins,
+                        jobs_available=partial(callbacks.append, self.jobs_available),
+                        after_commit=callbacks,
+                        database=tx,
+                    )
+                    router = EventRouter(service, self.settings, database=tx)
+                    router.dispatch(
                         item.event_type,
                         item.delivery_id,
                         item.payload,

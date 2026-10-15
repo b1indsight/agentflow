@@ -24,11 +24,12 @@ GitHub 错误分类和 Retry-After 计时由 `github/errors.py` 提供，仓储�
 结果提交及副作用恢复，`review/` 加工审核上下文和反馈并运行 Judge，`reconciliation/` 对账
 PR、反馈与 Projects。事件、Worker 管理和对账调用工作流，工作流调用审核模块；
 各子包直接引用已有领域类型、协议、具体仓储/GitHub 及配置，不反向依赖 API 或运行时。
-Runtime 统一初始化工具、effects、结果应用、路由和 conversation broker；各服务仅接收实际
+Runtime 统一初始化工具、effects、结果应用和 conversation broker；各服务仅接收实际
 使用的数据库与服务，自行创建需要的具体仓储。Runtime 管理共享 Database 的初始化和关闭，
 向服务提供同一 Database。Gateway 直接使用工具和结果应用，结果应用的锁由 Runtime、coordinator
-与 Gateway 共享。Webhook 消费器接收已装配的路由，在每次 receipt 事务内绑定路由及控制服务
-的副本；副本使用同一连接，并将通知和 hook 排到外层提交后，原服务保留正常连接范围。
+与 Gateway 共享。Webhook 消费器接收配置、插件、通知回调和 Database，在每次 receipt
+事务内直接创建 ControlService 与 EventRouter，构造函数以事务上下文创建仓储；通知和 hook
+排到外层提交后执行。API 和对账使用独立的常驻控制服务。
 各包入口只说明职责，调用者直接导入具体模块。
 
 目录列表见[当前目录](roadmap.md#8-当前目录与里程碑)。ASGI Python 入口为

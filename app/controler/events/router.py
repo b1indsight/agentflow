@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from copy import copy
 from datetime import datetime
 from typing import Literal
 
@@ -35,17 +33,6 @@ class EventRouter:
         self.webhook_store = WebhookStore(database)
         self.service = service
         self.settings = settings
-
-    def using(self, database: Database, *, after_commit: list[Callable[[], None]]) -> EventRouter:
-        """Bind an existing router and its control service to one receipt transaction."""
-        bound = copy(self)
-        bound.database = database
-        bound.flows = self.flows.using(database)
-        bound.reconcile_store = self.reconcile_store.using(database)
-        bound.reviews = self.reviews.using(database)
-        bound.webhook_store = self.webhook_store.using(database)
-        bound.service = self.service.using(database, after_commit=after_commit)
-        return bound
 
     def dispatch(self, event_type: str, delivery_id: str, payload: dict) -> None:
         """Apply DB-only event transitions; callers may bind one outer transaction."""

@@ -13,12 +13,13 @@ from types import SimpleNamespace
 import pytest
 from psycopg import OperationalError
 
-from app.controler.events.router import EventRouter
 from app.controler.events.webhooks import WebhookConsumer
 from app.controler.workflow.service import ControlService
 from app.domain.models import DeliveryState, FlowState
 from app.persistence.store import Store
 from app.persistence.webhooks import WebhookStore
+from app.plugins import get_plugin_manager
+from app.plugins.hookspecs import hookimpl
 
 
 def settings():
@@ -41,14 +42,10 @@ def receive(inbox, delivery="one", body=None):
 
 def consumer(store):
     return WebhookConsumer(
-        EventRouter(
-            ControlService(
-                database=store.database,
-            ),
-            settings(),
-            database=store.database,
-        ),
+        settings(),
         database=store.database,
+        plugins=get_plugin_manager(),
+        jobs_available=lambda: None,
     )
 
 
@@ -160,24 +157,29 @@ def test_failed_completion_rolls_back_business_and_notifications(store, monkeypa
 
     monkeypatch.setattr(WebhookStore, "complete", unavailable)
     WebhookConsumer(
-        EventRouter(
-            service,
-            settings(),
-            database=store.database,
-        ),
+        settings(),
         database=store.database,
+        plugins=service.plugins,
+        jobs_available=service.notify_jobs,
     ).sweep()
     assert store.flows.get_active_flow("owner/repo", 7) is None
     assert not notifications
 
 
-def test_webhook_transaction_does_not_rebind_the_root_service(store, monkeypatch):
-    # Replaying a receipt must not leave the shared service on an expired connection
-    # or keep its later notifications queued in the completed receipt's callback list.
-    worker = consumer(store)
-    service = worker.router.service
+def test_webhook_transaction_does_not_rebind_the_root_service(store):
+    # The API service shares the database and notification callback with receipt-local
+    # services; replay must not expire its connection or defer its later notifications.
     notifications = []
-    monkeypatch.setattr(service, "_jobs_available", lambda: notifications.append(True))
+    service = ControlService(
+        jobs_available=lambda: notifications.append(True),
+        database=store.database,
+    )
+    worker = WebhookConsumer(
+        settings(),
+        database=store.database,
+        plugins=service.plugins,
+        jobs_available=service.notify_jobs,
+    )
     receive(store.webhooks)
     assert worker.sweep() == 1
     assert notifications == [True]
@@ -270,21 +272,41 @@ def test_all_business_routes_rollback_with_receipt(store, monkeypatch, event, ac
     inbox = store.webhooks
     inbox.receive("route", event, body, hashlib.sha256(json.dumps(body).encode()).hexdigest())
 
+    # Receipt-local construction must keep the supplied plugin and run its hook only
+    # after commit; failed completion must not leak an external merge notification.
+    observed = []
+
+    class MergeObserver:
+        @hookimpl
+        def on_merged(self, flow):
+            observed.append((flow.id, inbox.list()[0].state))
+
+    plugins = get_plugin_manager()
+    plugins.register(MergeObserver())
+    worker = WebhookConsumer(
+        settings(),
+        database=store.database,
+        plugins=plugins,
+        jobs_available=lambda: None,
+    )
+
     def unavailable(*args):
         raise OperationalError("connection lost at completion")
 
     with monkeypatch.context() as patch:
         patch.setattr(WebhookStore, "complete", unavailable)
-        consumer(store).sweep()
+        worker.sweep()
     assert not store.webhooks.event_seen("route")
     assert store.flows.get_flow(flow.id).state == FlowState.ACTIVE
     assert store.deliveries.get_delivery(flow.id).state == DeliveryState.OPEN
     assert not store.reviews.pending(flow.id)
+    assert observed == []
     with store.connection() as conn:
         conn.execute("UPDATE webhook_inbox SET next_at=%s", (store.now(),))
-    consumer(store).sweep()
+    worker.sweep()
     assert inbox.list()[0].state == "done"
     assert store.webhooks.event_seen("route")
+    assert observed == ([(flow.id, "done")] if event == "pull_request" else [])
 
 
 @pytest.mark.asyncio

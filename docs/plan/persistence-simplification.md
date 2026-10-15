@@ -334,3 +334,35 @@ Starlette 弃用提示。Ruff、Mypy（179 个源文件）、`uv build --no-sour
 另一个既有方法仅将关闭权限错误信息中的 repository 改为 database，关闭条件和行为一致。
 新增 `Database.init_db()` 原样承接 Store 的 schema 执行顺序。
 结构证据为 `.cache/2026-10-13/service-owned-repositories-verification.json`；独立审查与 CI 见 PR。
+
+### 2026-10-15 — 删除服务层 using，直接构造事务内对象
+
+**要求与决定。** 用户要求「删除 using 吧」，选择在 Webhook receipt 事务内直接创建
+ControlService 和 EventRouter。这条决定替代前述路由/控制服务的浅拷贝及逐仓储重新绑定；
+服务继续接收 Database 并在构造函数内创建所需仓储，仓储自身的事务绑定接口保持使用。
+
+**实施与代价。** 删除两个 `using()` 方法、两处 `copy` 导入及 Router 的 Callable 导入，
+清除 12 处手工仓储绑定。WebhookConsumer 显式接收配置、插件、通知回调和 Database，
+在 receipt 已锁定且 payload 有效后，用 `tx` 创建 ControlService 和 EventRouter。
+服务的 hook 收集到当前 receipt 的 `after_commit`；jobs 通知同样先收集回调，仅在外层
+提交后执行。Runtime 删除常驻 Router 的创建，API/对账使用的常驻控制服务继续独立工作。
+4 个生产文件净减 18 行；2 个测试文件同步修改装配和常驻服务独立性回归。
+代价是消费器负责事务内的对象装配并保存配置、插件和回调，不增加服务工厂或新的运行模式。
+依据：[事务内初始化](../../app/controler/events/webhooks.py)、
+[Runtime 装配](../../app/controler/runtime.py)、[回滚与提交后 hook 回归](../../tests/test_webhook_inbox.py)。
+
+**验证与对照。** 复用 Webhook、Ingress、Merge、Router 与跨仓储事务测试，42 项通过；
+扩展既有多路由回滚测试，以自定义合并插件记录 receipt 状态，验证完成写入失败时不调用
+hook，重放成功后仅调用一次且此时 receipt 已为 done。没有新增测试用例数量。
+全量 PostgreSQL 命令 `uv run --no-sync --env-file .cache/2026-10-13/persistence-test.env
+pytest -q --tb=short --show-capture=no --maxfail=5`：**738 passed，无失败和跳过**，51.12 秒；
+仅保留既有 Starlette 弃用提示。Ruff、Mypy（179 个源文件）、sdist/wheel 构建与差异检查通过。
+
+以相同合并 receipt 的失败/重放输入，分别在独立进程忽略传入插件和移除 after_commit 参数：
+前者因自定义 hook 未被调用失败，后者因完成写入失败前已观察到 processing 状态而失败；
+完整实现的同一回归通过。复现命令为 `uv run --no-sync --env-file
+.cache/2026-10-13/persistence-test.env python .cache/2026-10-13/receipt-construction-ablation.py
+ignore-plugins`，另一变体参数为 `early-hooks`。据此保留原插件实例和提交后回调队列；
+运行路径删除了复制绑定机制，未增加事务或恢复机制。独立审查与 CI 见 PR。
+本地结构检查结果为 `.cache/2026-10-13/receipt-scoped-services-verification.json`，
+确认两个服务层 using 为零，两个服务均在 receipt 事务内以同一个 tx 构造，并记录逐文件行数。

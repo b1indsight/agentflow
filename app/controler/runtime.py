@@ -8,7 +8,6 @@ from datetime import timedelta
 from loguru import logger
 
 from app.controler.config import ServerSettings
-from app.controler.events.router import EventRouter
 from app.controler.events.webhooks import WebhookConsumer
 from app.controler.reconciliation.feedback import FeedbackReconciler
 from app.controler.reconciliation.projects import ProjectSync
@@ -90,14 +89,11 @@ class ServerRuntime:
             database=database,
         )
         self.conversations = ConversationService(conversations, database=database)
-        router = EventRouter(
-            self.service,
+        self.webhooks = WebhookConsumer(
             self.settings,
             database=database,
-        )
-        self.webhooks = WebhookConsumer(
-            router,
-            database=database,
+            plugins=plugins,
+            jobs_available=self.gateway.notify_jobs,
         )
         self.reconciler = Reconciler(
             github,
