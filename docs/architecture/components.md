@@ -44,6 +44,9 @@ Codex 等长任务占用 GitHub 的 Webhook 请求。
 当前实现：
 
 - `GET /healthz` 返回 `{"status": "ok"}`；它是存活探针，不检查数据库或外部依赖；
+- `GET /readyz` 检查运行时启动状态与数据库；`GET /metrics` 由独立 token 保护，未配置时关闭；
+- `GET /api/flows/{flow_id}/conversation` 由 control API token 保护，经 WS 查询原 worker 历史，
+  不在数据库复制完整会话正文，详见[会话查询 API](conversation-api.md)；
 - `POST /webhook` 缺少或带错误签名时返回 401；签名正确时持久化 webhook inbox 后返回 202；
 - `WS /internal/workers/connect` 按 token map 鉴权，并为每个 worker identity 保持一条连接；
 - FastAPI lifespan 初始化 PostgreSQL schema，启动 reconciler、lease sweeper 和 result inbox recovery，不启动进程内 worker；
@@ -67,9 +70,13 @@ Codex 等长任务占用 GitHub 的 Webhook 请求。
 - 合并后的任务派发、flow.open_pr、结果应用和 GitHub 写入均检查 delivery；迟到结果只保存
   执行事实并收尾 ACK，已发 GitHub 操作只查询回执，ARCHIVE 等待旧执行/结果收尾。
 
-M2 F1 自动化覆盖反馈工作流锁、同 Flow 批次串行、重启恢复和精确版本消费。尚未实现：
-未合并 PR close 的取消语义、后台 handler 失败后的自动 delivery 重试，以及真实 GitHub payload
-的完整兼容性。M4 F3 的 Reconciler 已补偿已追踪 PR 的漏失合并，反馈与 close/reopen 对账后续实现。
+M2 F1 自动化覆盖反馈工作流锁、同 Flow 批次串行、重启恢复和精确版本消费。
+WebhookConsumer 已持久化失败退避和重放；PR 对账处理已追踪 PR 的 merge/close/reopen，
+反馈对账补充 Issue/PR/review/线程漏投。未合并 close 暂挂而不取消 Flow，保留原绑定，
+重开后核验基线再恢复；漏失的新 Flow trigger 不由对账补建。真实 GitHub payload 兼容性
+仍需服务验收。依据：[消费者](../../app/controler/events/webhooks.py)、
+[PR 对账](../../app/controler/reconciliation/pull_requests.py)、
+[反馈对账](../../app/controler/reconciliation/feedback.py)。
 
 ## 4.3 Control Service / Job Coordinator（状态机核心）
 
@@ -85,19 +92,19 @@ Review:   settle → READY → PROCESSING → COMPLETED / WAITING
 `ControlService` 在显式事务中负责触发、取消和 retry，并由 `lifecycle` 提交合并事实；
 `lifecycle` 也拥有创建 PR 的身份核验、绑定及 close/reopen。`JobCoordinator` 把 INITIAL、REVISION、ARCHIVE
 持久 job 构造成版本化 task，并在创建 revision 前直接处理需要 Judge 判断的反馈批次。
-它创建的 `ResultApplication` 按 job ID 读取并校验已持久接收的 result，
+Runtime 创建并共享的 `ResultApplication` 按 job ID 读取并校验已持久接收的 result，
 冻结一次结果的领域变更和 GitHub 操作，
 由 `ResultEffects` 查询/执行远端操作并保存回执，最后一起提交本地状态和结果确认。
 PR 依赖操作与 INITIAL 提交复用 `contracts.result_models.unique_pull_request_receipt`，
 只消费已读取的唯一创建回执；退休恢复缺少唯一回执时继续等待，不提交本地完成状态。
 `ResultApplication` 同时拥有逐 job 锁、有界分页和固定并发恢复；Runtime 调度其恢复方法，
-Gateway 持久接收后直接调用 `coordinator.results.apply`，核验提交完成后才发送 ACK；
+Gateway 持久接收后直接调用 `self.results.apply`，核验提交完成后才发送 ACK；
 工具请求直接调用 `gateway.tools.execute`。内部配置、数据库、仓储与服务依赖使用具体类型。
 网络请求不占用数据库事务；plugin hook 在提交后调用，不具备持久化投递保证。worker 不能直接更新这些状态。
 `JobCoordinator.prepare_for_assignment` 完成任务构造、push capability 签发和 I/O 后业务复查，
 直接返回 wire `Assignment` 或 QUEUED/DONE/FAILED。读取故障使用持久重试预算，签发故障直接失败。
 `WorkerGateway` 在准备期间维持租约心跳，连接结束时取消并等待准备协程；发送前仍独立调用
-`store.stops.authorize_dispatch`，再发送 coordinator 构造的消息。
+`self.stops.authorize_dispatch`，再发送 coordinator 构造的消息。
 非零 Codex exit 会转 FAILED。revision 成功后仅消费明确 addressed 的 item/version，deferred/遗漏项/
 clarification 保持 waiting；不把 addressed 当作远端 resolved。有未决问题时不重新请求审核。
 
@@ -107,8 +114,10 @@ M2 已接入有界 Issue/PR/patch/讨论快照、线程/comment 映射与原线�
 - 上述路径有自动化覆盖，真实 GitHub App/Codex/bub 闭环待验收；
 - 同秒已出现的编辑转换保留待核对，不重复回放；新鲜观察可推进，见 [M4 F1](../plan/m4-feedback-replay.md)；
 - 冻结上下文尚不包含 CI 状态；
-- cancel 只更新数据库状态，不 kill Codex、不清工作区；
-- 修订会检测并拒绝远端 head 漂移；未合并 close、人工 push 合并、rebase/冲突处理尚未实现。
+- cancel 持久化停止意图，worker 取消执行并回收持有的进程组；未知旧执行和未决 effects
+  保留绑定，无强制释放。cancel 不撤销已发生的 push/PR/评论，也不执行归档清理；
+- 未合并 close 暂挂，reopen 核验 head/base 和旧执行后恢复；修订拒绝远端 head 漂移，
+  人工 push 的自动接纳、rebase/冲突处理尚未实现。
 
 因此状态转换代码存在不等于目标闭环可用。
 
@@ -120,8 +129,12 @@ worker `last_assigned_at` 和 Flow execution binding 事务化领取任务。wor
 `WorkerExecutor` 只依赖 CodingAgent 和 Flow repo/VCS helpers，不导入 Store、FastAPI 或 GitHub。
 
 不同 identity 可并发在线；同 identity 新连接取得新 epoch 并关闭旧 socket，数据库条件保证旧连接最终失效。
-任务未 Started 断线后保留到 lease 到期再 requeue；Started job 进入 RECOVERING，只允许原 identity 在 grace 内恢复，
-到期才把 job/活跃 flow 置 FAILED，不覆盖 CANCELLED。取消只退掉 queued job，running executor 仍需交回结果或等待租约清理。
+未授权派发的任务断线后可在 lease 到期 requeue；已授权派发但缺少 Started 的未知执行不当作
+未发送重排。Started job 进入 RECOVERING，只允许原 identity 在 grace 内恢复，
+到期才把 job/活跃 flow 置 FAILED，不覆盖 CANCELLED。取消通过持久 StopExecution /
+ExecutionStopped / StopAccepted 握手收敛；停止凭据与已发送 effects 未确认前不释放绑定，
+离线和 lease 到期不能替代停止证明。drain 只阻止分配新 Flow，已有绑定继续 revision/archive。
+详见[取消、drain 与停机](../operations/cancel-drain.md)。
 已持久接收的终态结果由 control 接管，不因 worker 的 recovery deadline 到期重新执行或失败；
 后台循环持续恢复未应用结果。必要的 GitHub 操作未完成时不发 ResultAccepted，worker 保留 journal 重连。
 Flow 非终态时，即使暂时没有 running job，binding 也继续独占该 worker/repo。
@@ -168,8 +181,8 @@ threads、resolve thread，并签发 push 所需的短时 installation token。�
 获取 Issue/PR，并通过父 App 签发只含单仓库 Contents write 的短时 capability。
 Issue/PR、线程和 Project/Item 拥有各自操作；查询返回新的不可变观察，错误转换不含响应 body。
 M2 已加入类型化 GraphQL 线程/comment 分页、共享预算、原线程回复和 resolve/复读，
-并通过隔离自动化。真实 GitHub App smoke 尚未执行；Project v2、关闭 issue 和通用 reconcile
-仍未校准。接入边界见 [GitHub App 文档](github-app.md)。
+并通过隔离自动化。Projects v2 资源 API 与独立同步已接入；真实 GitHub App/看板 smoke、
+关闭 issue 等未纳入当前流程的动作仍待验收或实现。接入边界见 [GitHub App 文档](github-app.md)。
 
 ## 4.6 本地平面：Flow repo / execution policy / VCS
 
@@ -189,6 +202,8 @@ terminal result 三方核对。当前缺口包括：
 - 大 repo 的完整复制成本和 terminal cleanup 故障恢复仍待验证。
 
 ## 4.7 Store（PostgreSQL）
+
+当前持久层由 Database 与具体仓储组成；Store 只为运维、live smoke 和测试聚合仓储。
 
 反馈批次的前置判断/直接修订选择、指令和未决问题归并由 `review_policy` 的纯函数决定；
 `recovery_policy` 根据固定时间及读取的事实决定重排、失败、保留诊断和绑定释放。
@@ -237,6 +252,8 @@ cursor 上使用 Psycopg `class_row(Model)`，由模型统一校验枚举、时�
 - `result_effects`：有序 GitHub 操作、claim/fencing、远端回执、退避时间和最后错误；
 - `workers`：identity、协议版本、epoch、online/busy/recovering/offline/failed、当前 job、连接/心跳与断线原因；
 - `events`：delivery 去重和 payload 审计；
+- `webhook_inbox`：202 前持久接收的原始事件、消费 claim、重试与保留状态；
+- `execution_stops`：绑定到具体执行的停止意图、凭据 digest 与确认状态；
 - `review_items` / `review_versions`：Flow 内稳定反馈身份、不可变版本、独立 relay/consume 时间和已核验 addressed 依据；
 - `review_pending_edits`：同秒乱序编辑的前序正文与原始来源；只有未在历史表示且后继无歧义时原子回放，其余保留待核对；
 - `review_buffers` / `review_batches`：持久 deadline/generation、冻结反馈/上下文/线程快照、批次所有者 job 和未决问题；
@@ -256,14 +273,15 @@ lease 到期 requeue、started grace/deadline、epoch fencing、result inbox 去
 或复用 lifecycle binding。`with database.transaction() as tx` 提供绑定连接的数据库上下文；
 服务用 `self.flows.using(tx)`、`self.jobs.using(tx)` 绑定自己持有的仓储。
 所有步骤共用该连接，异常一起回滚，事务退出后这些视图拒绝继续使用。
-结果的最终事务同时写入 flow/delivery/attempt、带源 job 唯一键的派生 job/codex run、`result_applied_at` 和 worker slot。
+结果的最终事务同时写入 flow/delivery/attempt、带源 job 唯一键的派生 job、`result_applied_at` 和 worker slot；
+编码审计保存在源 job 的终态结果，不再写 `codex_runs`。
 `flow_tool_calls` 的 prepared delivery 与 response 也一起提交。
 
 评论使用稳定隐藏 marker 并分页核对本 bot 作者，PR 使用固定 head 查询，labels/reviewers 则核对目标状态。
 不能确认是否成功的非幂等请求保持 uncertain，不盲目重复 POST；`flow show` 显示待处理操作，retry 不能绕过它们。
 因此不宣称跨 PostgreSQL/GitHub 的通用 exactly-once。跨 worker session 迁移和多 serve HA 仍未实现。
 当前只初始化完整 schema，不执行历史迁移、数据回填或跨版本结果转换。serve/worker 使用同一
-版本，wire protocol v10 / journal v3；持久结果的重放保障适用于当前版本的重启恢复。
+版本，wire protocol v13 / journal v3；持久结果的重放保障适用于当前版本的重启恢复。
 
 ## 4.8 GitHub 交互面
 
@@ -272,7 +290,7 @@ lease 到期 requeue、started grace/deadline、epoch fencing、result inbox 去
 当前 router 已识别触发、取消、review/comment 和 merged 事件；PR 创建、评论、reviewer 和 label 已有
 经隔离测试的具体资源操作，且 reviewer 配置不复用 trigger allowlist。真实 Issue/default branch、
 head PR 查询和 capability 已接入 INITIAL；M2 原线程回复/resolve 已接入并有自动化覆盖，
-真实 App 校准与 Project 状态更新仍待完成。
+Project 状态更新由独立 ProjectSync 投影循环负责，远端失败不改变 Flow；真实 App/看板校准仍待完成。
 工具没有自动合并实现。
 
 `app/github` 以 `GitHubApp → Installation → Repository → Issue/PullRequest → ReviewThread`
@@ -295,7 +313,7 @@ F4 的完整线程映射由 control 持有，遵循当前 worker v13 契约。is
 
 ## 4.10 Judge / Triage
 
-语义见 [Review 修订循环](review-loop.md)。`review_context.py` 在 control 读取 Issue、PR 与分页文件/
+语义见 [Review 修订循环](review-loop.md)。`review/context.py` 在 control 读取 Issue、PR 与分页文件/
 讨论，冻结有界 JSON 快照；先后读取 PR 防止 head/base 在取数期间变化，未完成批次复用入库快照。
 
 triage 是 worker 请求之前的批次判断，由 control 的 review sweep 顺序处理 ready 且无 job 的批次。
@@ -306,12 +324,13 @@ REVISE 在工作流事务中创建 revision job 并关联批次；ANSWER/IGNORE/
 coordinator 不直接更新业务表。批次答案与结果评论保留各自的事务授权和 marker 恢复，
 共享 `GitHubError.definitely_rejected` 的拒绝判定；线程回复与普通结果评论共用一个执行分支。
 
-control 的 `BubJudge` 启动独立 `judge_runner` 子进程，显式配置 bub 0.4.1 `ModelRunner.completion_response`，
+control 的 `BubJudge` 启动独立 `app.controler.review.runner` 子进程，显式配置 bub 0.4.1 `ModelRunner.completion_response`，
 不创建 framework、加载插件、读写 tape 或执行工具。每批次独立请求与会话 ID；凭据仅通过允许的
 子进程环境传入。单次调用无 fallback/SDK retry，父进程限制时长和 stdout/stderr，取消时回收子进程。
 
 严格校验四类 verdict、有限 confidence、动作字段和 envelope 身份。结果持久保存模型/adapter 版本、
-context digest、reason/open_points；answer 使用同一个答案经现有副作用账本发布，不再调用模型。
+context digest、reason/open_points；answer 使用同一个答案，由反馈批次持久化发送授权并通过
+批次 marker 核对回执，不再调用模型。
 adapter/控制流已通过自动化，真实 provider 的语义准确性仍待 smoke 验收。
 
 

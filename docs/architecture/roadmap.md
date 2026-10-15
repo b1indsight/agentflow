@@ -8,8 +8,8 @@ flowtool/
     domain/           # 领域事实、类型、端口与纯策略（无运行时 I/O）
     contracts/        # 版本化 task/result/message 与冻结结果应用契约
     persistence/      # PostgreSQL schema、事务仓储、指标查询与就绪探针
-      store.py        # 创建仓储并负责数据库初始化与关闭；服务接收具体仓储
-      database.py     # 独立连接/事务上下文、注入时钟和共用锁
+      store.py        # CLI、live smoke 与测试使用的仓储聚合
+      database.py     # 共享连接池、事务上下文、时钟、共用锁及 schema 初始化
       repository.py   # 保留具体类型的显式事务绑定
       schema.py       # 按依赖顺序初始化的完整建表 SQL
       records.py      # 原生行类型与必需记录回读校验
@@ -57,12 +57,18 @@ flowtool/
 - **M3（F1/F2/F3 已合并，真实闭环待验收）** 人工合并检测（`pull_request.closed`）→ 归档 + 状态标签 / 评论；
   拆为 F1 合并检测与任务收敛、F2 工作区清理与 worker 释放、F3 状态回写与闭环验收三个 PR，
   [F3 实施与验收](../plan/m3-archive-status.md)记录增量回写、恢复操作及真实闭环待办。
-- **M4（已批准按序实施）** 在现有多 worker 能力上补恢复并发、已追踪 Flow 的 PR/反馈对账、
-  close/reopen、准备期有界重试与 Projects v2 看板；拆为九个 feature，每 PR 约 1000 行，
-  依赖、预算和验收见 [M4 阶段计划](../plan/m4-stage.md)。
-- **M5** 安全隔离（容器化 codex）+ 公网 / 隧道部署 + 完整运维与可观测性
+- **M4（实现已落地，真实验收待完成）** 恢复并发、已追踪 Flow 的 PR/反馈对账、
+  close/reopen、准备期有界重试与 Projects v2 同步已接入；阶段范围见
+  [M4 阶段计划](../plan/m4-stage.md)，当前实现以[状态表](README.md#当前实现状态)为准。
+- **M5（部署与运维实现已落地，环境验收待完成）** 持久 Webhook inbox、真实 smoke 入口、
+  Docker/Compose、结构化日志/指标、取消/drain/停机、Kubernetes 及运维恢复文档已提供；
+  真实模型闭环、镜像发布、目标集群与备份恢复仍待验收。每 Flow 动态容器/微 VM 和默认拒绝
+  egress 后置，见 [M5 阶段范围与记录](../plan/m5-stage.md)。
+- **2026-10-15 持久层简化** Runtime 管理共享 Database，服务自行创建所需仓储；Webhook 在
+  receipt 事务内直接构造服务/路由，保留仓储级显式事务绑定。见[实施记录](../plan/persistence-simplification.md)。
 
-M1/M2 已合并不等于真实闭环已验收；M3 尚未完成，M4–M5 仍为目标里程碑。实际状态见[架构入口](README.md#当前实现状态)。
+上述实现状态不代表真实闭环或部署已经验收。当前事实见[架构入口](README.md#当前实现状态)，
+历史计划中的待合并/Draft 描述保留当时语境，不作为当前分支状态。
 
 ## 9. 未来方向（Roadmap）
 
@@ -96,7 +102,7 @@ M1/M2 已合并不等于真实闭环已验收；M3 尚未完成，M4–M5 仍为
    持久 lease 与 result replay 已完成。
    - M1 先增加 Flow 生命周期固定 binding：一个 worker 同时服务一个 Flow，空闲 job 期间也不复用。
    - 后续方向：可释放 checkpoint、跨 worker 重建 session/repo、多 serve leader election、外部副作用幂等键
-     和通用可观测性。
+     及更完整的可观测性；当前结构化日志和指标已提供。
 
 7. **端口插件扩展** —— 在生命周期端口挂插件。
    例：合并后总结插件——归纳上一段对话里的代码风格偏好、更新仓库的 skill 文件。

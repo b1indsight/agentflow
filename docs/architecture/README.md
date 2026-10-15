@@ -1,7 +1,7 @@
 # FlowTool 架构文档
 
-> 状态：M0 已验收；M1、M2 已实现并合并，真实 E2E 待验收。
-> 初始日期：2026-08-02 · M0 验收：2026-08-26 · 文档核对：2026-09-08。
+> 状态：M0 已验收；M1–M4 功能及 M5 部署、接收、运维实现已落地，真实 E2E 与部署验收待完成。
+> 初始日期：2026-08-02 · M0 验收：2026-08-26 · 文档核对：2026-10-15（最新 main，含 PR #82）。
 
 本目录是 FlowTool 架构的唯一入口。代码、测试、配置示例和已执行的运行验证是“当前实现”的事实
 来源；目标流程不会因为已经写入设计文档就被视为可用。
@@ -26,19 +26,32 @@
 
 | 范围 | 状态 | 当前事实 |
 |---|---|---|
-| 配置与领域契约 | 已验证 | serve/worker 独立配置、v7 task/result/tool/recovery message、冻结修订基线与 session generation、批次/item-version/context digest 身份有覆盖 |
-| PostgreSQL Store | 已验证（自动化） | flow/attempt/job、binding、结果账本与反馈版本/buffer/batch 事务、并发和恢复通过实际 PostgreSQL 测试 |
-| Webhook Ingress | 已验证（M0） | `/healthz`、HMAC 拒绝/接受、持久化 inbox 和 202 响应有覆盖；health 仅表示进程可响应 |
+| 配置与领域契约 | 已验证（自动化） | serve/worker 独立配置、v13 task/result/tool/recovery/stop/conversation 消息、journal v3、修订基线与 session generation、批次/item-version/context digest 身份有覆盖 |
+| PostgreSQL 持久层 | 已验证（自动化） | Runtime 管理共享 Database，服务自行创建具体仓储；显式事务与共用锁保护 flow/attempt/job、binding、结果回执与反馈批次；聚合 Store 用于 CLI、live smoke 和测试 |
+| Webhook Ingress | 已验证（自动化） | HMAC 验签后、202 前持久化 inbox；后台消费者在每条 receipt 事务内创建服务/路由，提交后通知；失败退避、重放和请求体限制有覆盖 |
 | Event Router | 已验证（M2 F1 自动化） | 反馈 delivery/版本/deadline 原子写入，持久 settle、强信号授权、显式 action、同 Flow 冻结批次串行和重启恢复已覆盖 |
 | M3 合并与清理 | F1/F2/F3 已合并 | 原 worker 提交清理凭据后，持久恢复 Issue/PR 完成标签和固定归档说明；全部回写后原子成功、释放与 ACK；真实 M3 闭环待验收 |
 | Control/Worker 边界 | 已验证（Features 1–3） | 多 worker 鉴权/调度、Flow 生命周期 binding、tool multiplex、busy reconnect、result replay 与 journal secret 负向覆盖 |
-| Control Service / Job Coordinator | 部分 | 真实 issue/default branch prepare、tool fencing/幂等 PR delivery 已接线；原线程回复/保守 resolve 与持久恢复有自动化；取消 kill、冲突处理与真实副作用 E2E 未完成 |
+| Control Service / Job Coordinator | 部分 | Issue/default branch prepare、tool fencing、INITIAL 成功后创建 PR、原线程回复/保守 resolve 与持久恢复已接线；冲突自动处理与真实副作用 E2E 未完成 |
 | Codex / Context / Sandbox / VCS | 部分 | Flow repo、临时凭据、首轮 MCP、修订 resume/一次性 fallback、Git/jj clean/remote/lineage 双端核验有自动化；GitHub-only egress 与真实多轮 run 未验证 |
 | GitHub Client | 部分 | githubkit 0.16 App/installation 认证、Issue/repository/ref/PR、单仓库 Contents capability 与错误映射有隔离测试；M2 线程分页、回复、resolve 及竞态恢复有自动化；真实 App smoke 待验证 |
-| Judge | 已验证（adapter 自动化） | bub 0.4.1 受控无工具单次调用、有界冻结上下文、严格判定、直接答复及持久恢复已覆盖；真实 provider 语义 smoke 待执行 |
-| Reconciler | 桩 | 5 分钟循环存在，`_sweep()` 目前只记录 active flow，不拉取远端状态 |
-| CLI | 部分验证 | `serve` 与 `worker` 双进程 smoke、help 和 health 已验证；flows/show/cancel/retry 尚无 CLI 级覆盖 |
+| Judge | 已验证（adapter 自动化） | control 本地 bub 0.4.1 无工具子进程调用；批次冻结上下文、严格判定、直接答复及持久恢复已覆盖；仅 revise 创建 worker job，真实 provider smoke 待执行 |
+| PR / 反馈对账 | 已实现、有自动化覆盖 | 独立有界循环读取已追踪 PR 的 merge/close/reopen 及 Issue/PR/review/线程反馈；cursor、退避和诊断持久化，不补建漏失的新 Flow trigger |
+| Projects v2 | 已实现、有自动化覆盖 | 可选组织看板配置、资源 API、独立投影同步及 check/status/retry；远端失败不改写 Flow，真实看板待验收 |
+| 取消 / drain / 停机 | 已实现、有自动化覆盖 | 持久 stop intent、执行 nonce、进程组取消与停止凭据握手；未知执行/未决 effects 保留占用；drain 不派新 Flow，已有绑定继续收尾 |
+| 会话查询 | 已实现、有自动化覆盖 | token 保护的 HTTP API 经 broker/WS 读取原 worker 的 Codex 历史；control 绑定 Flow/Attempt/session 并管理跨 session 分页 |
+| 可观测性 / 部署 | 部分 | 结构化日志、受保护 metrics、DB readiness、worker 状态文件、Docker/Compose、Kubernetes 与运维文档已落地；镜像发布、目标集群与恢复演练待验收 |
+| CLI / 真实验收入口 | 部分验证 | Flow、worker-drain、inbox、project 运维命令及 `app.live_smoke` 已提供；真实 GitHub/Codex/模型闭环仍须按验收清单执行 |
 | 插件 | 部分 | 五个生命周期 hook 已接线并隔离异常；post-merge-summary 仍只写日志 |
+
+装配与运行依据：[ServerRuntime](../../app/controler/runtime.py)、
+[事务内 Webhook 服务](../../app/controler/events/webhooks.py)、[Database](../../app/persistence/database.py)、
+[协议](../../app/contracts/protocol.py)。对账与运维依据：
+[PR 对账](../../app/controler/reconciliation/pull_requests.py)、
+[反馈对账](../../app/controler/reconciliation/feedback.py)、
+[Projects](../../app/controler/reconciliation/projects.py)、
+[取消边界](../operations/cancel-drain.md)、[会话查询](conversation-api.md)、
+[部署指南](../deployment/README.md)。
 
 ## M2 状态与待办
 
@@ -67,10 +80,13 @@ M4 F1 已修复同秒旧转换重放：历史中已表示的编辑及不能定�
 ## 当前验证基线
 
 - pytest 覆盖协议、角色边界、远程执行闭环与真实 PostgreSQL 持久层场景；
-- 2026-09-07 M2 F4 本机临时 PostgreSQL 完整测试为 377 passed、0 skipped；外部模型/GitHub 使用替身；
-- `uv sync --locked`、`ruff check app tests`、`mypy app tests` 与 `flowtool --help` 通过；
+- 最近完整记录为 2026-10-15 持久层简化后的 **735 passed、无跳过**，Ruff、Mypy 通过；
+  这是既有实施记录，不代表本次文档更新重新运行了完整测试，见[验证与对照](../plan/persistence-simplification.md)；
 - PostgreSQL-backed `flowtool serve` 与两个 worker 在 CI 中独立启动，并在 serve 重启后自动重新注册；
 - 测试不访问真实 GitHub、Codex 或模型服务；Judge 契约测试运行真实 bub 库连接假模型端点。
+
+真实验收入口和待办见 [M5 E2E 清单](../verification/m5-live-e2e.md)；
+部署/恢复检查见[运维手册](../operations/runbook.md)。已有命令、清单和自动化不等于真实环境已通过。
 
 M0 在 2026-08-26 使用 SQLite 和 19 项测试完成原始验收；该记录保留在
 [`m0.md`](../plan/m0.md)与[`m0-closeout.md`](../plan/m0-closeout.md)。当前 PostgreSQL 替换不证明
