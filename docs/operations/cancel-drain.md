@@ -9,7 +9,7 @@
 
 ## 停止确认
 
-同一鉴权 WebSocket 使用 v10 的 StopExecution / ExecutionStopped / StopAccepted 消息。
+同一鉴权 WebSocket 使用 v13 的 StopExecution / ExecutionStopped / StopAccepted 消息。
 请求绑定 flow、worker、job、assignment token、binding 创建时间、当前 epoch 和独立 request ID。
 worker 必须持有匹配 journal，当前执行只能由持有该 task / 子进程对象的进程取消。
 每次 assignment 在启动前持久化执行 nonce；停止凭据包含 nonce，原 journal 继续保存直到 ACK。
@@ -52,7 +52,8 @@ serve 用 Uvicorn 的 20 秒 graceful shutdown 窗口停止接收并收敛请求
 STOP 请求和有效凭据握手能完成取消。未写出凭据的进程崩溃依然按未知执行处理。
 容器 stop grace / Kubernetes terminationGracePeriod 至少 45 秒，超时 SIGKILL 只靠持久事实恢复。
 
-当前仅支持协议 v10 / journal v3，serve/worker 必须使用同一版本。仓库未部署，未保留跨版本
+当前仅支持协议 v13 / journal v3，serve/worker 必须使用同一版本；版本定义见
+[协议](../../app/contracts/protocol.py)与 [WorkerSession](../../app/worker/state/session.py)。仓库未部署，未保留跨版本
 数据库或 journal 迁移。当前版本停机重启仍应先 drain，再保存数据和 worker root/HOME；
 按原身份启动并核对恢复状态后 undrain。不要通过编辑 journal 版本号绕过验证。
 

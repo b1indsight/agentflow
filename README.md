@@ -8,9 +8,11 @@ FlowTool 的目标是把带 `flow` 标签的 GitHub issue 编排成
 `telemetry` 与 `plugins`。`controler` 是控制服务端，内部按事件、Worker 管理、工作流、审核
 和远端对账归组；目录和依赖边界见[组件职责](docs/architecture/components.md#包依赖边界)。
 
-> 当前状态（2026-09-08）：**M0 已验收；M1 Issue→PR、M2 F1–F4 已实现并合并，真实 E2E 待验收**。
-> M2 包含持久反馈批次、语义决策、修订交付核验与 session 兜底、原线程回复与保守 resolve。
-> 自动化使用实际 PostgreSQL 与临时 Git/jj 仓库；M4 F1 已修复同秒 webhook 重放，真实闭环待办见 [M2 状态与待办](docs/architecture/README.md#m2-状态与待办)。
+> 当前状态（2026-10-15，核对最新 main）：**M0 已验收；M1–M4 功能及 M5 部署、接收、运维代码已落地，真实 E2E 与部署验收仍待完成**。
+> Control 运行 Judge 并管理 GitHub 操作，Worker 执行编码、修订和归档清理。Runtime 管理共享
+> Database，各服务自行创建所需仓储；Webhook 在 receipt 事务内创建服务与路由。
+> 实现与验收边界见[架构状态表](docs/architecture/README.md#当前实现状态)，最近装配调整见
+> [持久层简化记录](docs/plan/persistence-simplification.md)。
 
 ## 当前能力
 
@@ -41,9 +43,11 @@ FlowTool 的目标是把带 `flow` 标签的 GitHub issue 编排成
 - **接收与持久化**：校验 GitHub Webhook 的 `X-Hub-Signature-256`，处理 delivery 去重、allowlist、
   触发、取消和 review 入库；PostgreSQL 是唯一运行时数据库，启动时初始化 schema。
 - **远程执行**：`flowtool serve` 管理状态、数据库和 GitHub 操作；`flowtool worker` 主动通过认证
-  WebSocket 连接，执行 Codex/Judge 任务。支持多 worker 公平调度，每个 worker 同时执行一个 job。
+  WebSocket 连接，执行 INITIAL、REVISION、ARCHIVE 任务；Judge 在 control 本地运行。
+  支持多 worker 公平调度，每个 worker 同时执行一个 job。
 - **执行环境与恢复**：Flow 生命周期独占 worker/repo，Attempt 保存本次运行和 session；
-  assignment 使用 worker/epoch/job/token 校验。未 Started 的任务可在租约到期后重排，Started 任务在
+  assignment 使用 worker/epoch/job/token 校验。未授权派发的任务可在租约到期后重排，已授权
+  派发但缺少 Started 的未知执行不按未发送重排；Started 任务在
   recovery grace 内等待原 worker；worker journal 支持忙碌重连、serve 重启恢复与终态结果重放。
 - **Issue→PR 交付**：读取真实 Issue 和仓库默认分支，为 Codex 提供单仓库、短时 Contents write
   push capability，由 agent 自主 commit/push。`flow.open_pr` 先核验远端 SHA 并持久化 PR 意图，
@@ -68,6 +72,12 @@ FlowTool 的目标是把带 `flow` 标签的 GitHub issue 编排成
   [env.example](env.example)。未配置时 Judge 等待，不在健康检查中调用模型。
 - **运维入口**：CLI 可查看 Flow、交付分支/PR、worker、任务恢复状态和未完成的 GitHub 操作，
   并提供 cancel/retry 命令。已核验修订中被明确拒绝的通知可补发；结果不确定时拒绝直接 retry。
+- **取消与 drain**：cancel 持久化停止意图，worker 取消当前执行并回收其持有的 Codex/VCS
+  进程组；停止凭据与已发送 effects 未确认前不释放绑定。drain 停止分配新 Flow，已有绑定
+  继续收尾。未知旧执行保持阻塞，无强制释放入口，见[取消与停机](docs/operations/cancel-drain.md)。
+- **Projects 与可观测性**：可选组织 Projects v2 同步独立运行；结构化日志、受 token 保护的
+  `/metrics`、数据库就绪探针 `/readyz` 与 worker 状态文件已接入。Docker/Compose、Kubernetes
+  和常驻运维说明见[部署指南](docs/deployment/README.md)，不代表真实环境已验收。
 - **可靠修订**：每轮更新单仓库 push 凭据，复用原 repo/branch/PR；worker 核验 Git/jj 工作区及远端，
   control 再核验 PR/head/base/ref 与提交关系。缺 session 或明确未执行的 session 拒绝仅兜底一次，
   journal 防止中断后盲目重跑。未决反馈保留；no-op 或部分完成不重新请求 review。
@@ -84,9 +94,9 @@ FlowTool 的目标是把带 `flow` 标签的 GitHub issue 编排成
   自动化测试使用外部服务替身，不代表真实 GitHub、Codex、bub 集成已验收。
 - bub adapter 已通过真实库加本机假模型端点的契约测试；真实 provider 语义 smoke 仍待执行。
   review thread 映射、回复和 resolve 已通过自动化；冲突处理和真实多轮闭环仍待验收。
-- PR 合并对账已实现；普通 close/reopen、评论/线程漏投和新 Flow trigger 的补偿仍待后续范围。
-- cancel 会取消本地流程和任务，尚不终止正在执行的 agent 进程；跨 worker session 迁移、
-  多 serve 高可用、GitHub-only 网络限制和由项目管理的强隔离运行环境仍属后续工作。
+- 已追踪 PR 的 merge/close/reopen 及评论/线程漏投补偿已实现；漏失的新 Flow trigger 不由对账补建。
+- 真实取消/恢复演练、镜像发布与目标集群验收仍待完成。跨 worker session 迁移、
+  多 serve 高可用、冲突自动处理、GitHub-only 网络限制和每 Flow 动态强隔离仍属后续工作。
 
 详细边界见[架构状态表](docs/architecture/README.md#当前实现状态)；M2 合并记录与剩余验收见
 [M2 状态与待办](docs/architecture/README.md#m2-状态与待办)和 [F4 实施记录](docs/plan/m2-review-resolution.md)。
@@ -100,8 +110,9 @@ FlowTool 的目标是把带 `flow` 标签的 GitHub issue 编排成
 
 ## 平面边界
 
-- **Control plane**：Webhook、状态机、持久化和 GitHub API，是唯一数据库与外部副作用权威；
-- **Worker execution plane**：Judge、prompt、Codex 和 Flow 独占 repo，通过出站 WebSocket 接收结构化任务；
+- **Control plane**：Webhook、状态机、持久化、Judge 和 GitHub API，是唯一数据库与 GitHub API 操作权威；
+- **Worker execution plane**：prompt、Codex 和 Flow 独占 repo，通过出站 WebSocket 接收结构化任务，
+  使用单仓库短时 capability push；不持有数据库、GitHub App 或 Judge 凭据；
 - **本地执行**：Flow repo 负责目录所有权；只有运行在无法读取 control-plane secret 的专用 OS account、
   container 或 VM 中的 worker 才能显式开启 full access。Agent 自选 Git/jj，worker 只做结果核验。
 
@@ -244,7 +255,8 @@ M3 F3 及审查修复本地验证（2026-09-08）：真实 PostgreSQL 下 **502 
 
 修订失败保留原 worker binding；处理脏工作区或远端偏移后可显式 retry，不自动 reset/rebase/force push。
 修订准备阶段的 GitHub 错误会持久记录为失败；恢复后显式 retry，未 Started 的准备失败不消耗修订轮数。
-CodingAgent 总时限覆盖 resume、fallback 和 VCS 核验，超时回收并等待对应进程组退出；用户 cancel 仍不终止运行中的进程。
+CodingAgent 总时限覆盖 resume、fallback 和 VCS 核验，超时回收并等待对应进程组退出；
+用户 cancel 通过持久停止握手取消执行，未确认停止或远端结果不明时继续保留绑定。
 
 可选组织 Projects v2 的配置及只读 `flowtool project check <repo>` 见 [GitHub App 接入](docs/architecture/github-app.md#a4-可选的组织-projects-v2)。
 
