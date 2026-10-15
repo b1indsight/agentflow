@@ -8,7 +8,10 @@ from app.contracts.protocol import FlowToolErrorKind, FlowToolRequest, FlowToolR
 from app.domain.delivery_models import DeliveryReceipt, OpenedDelivery, PreparedDelivery
 from app.domain.models import TERMINAL_STATES, DeliveryState, FlowDelivery
 from app.github import GitHubApp, GitHubError, GitHubErrorKind
-from app.persistence.store import Store
+from app.persistence.database import Database
+from app.persistence.deliveries import DeliveryStore
+from app.persistence.flows import FlowStore
+from app.persistence.workers import WorkerStore
 
 
 class FlowToolRejected(RuntimeError):
@@ -24,10 +27,14 @@ class FlowToolService:
 
     def __init__(
         self,
-        store: Store,
         github: GitHubApp,
+        *,
+        database: Database,
     ) -> None:
-        self.store = store
+        self.database = database
+        self.deliveries = DeliveryStore(database)
+        self.flows = FlowStore(database)
+        self.workers = WorkerStore(database)
         self.github = github
         self._locks: dict[int, asyncio.Lock] = {}
 
@@ -47,7 +54,7 @@ class FlowToolService:
                 return self._github_error(request, exc)
 
     async def _open_pr(self, request: FlowToolRequest, worker_id: str) -> FlowToolResponse:
-        if not self.store.assignment_active(
+        if not self.workers.assignment_active(
             request.job_id,
             worker_id,
             request.assignment_token,
@@ -57,10 +64,10 @@ class FlowToolService:
                 FlowToolErrorKind.STALE_ASSIGNMENT,
                 "Flow tool assignment fence expired",
             )
-        flow = self.store.get_flow(request.flow_id)
-        attempt = self.store.get_attempt(request.attempt_id)
-        execution = self.store.get_flow_execution(request.flow_id)
-        delivery = self.store.get_delivery(request.flow_id)
+        flow = self.flows.get_flow(request.flow_id)
+        attempt = self.flows.get_attempt(request.attempt_id)
+        execution = self.workers.get_flow_execution(request.flow_id)
+        delivery = self.deliveries.get_delivery(request.flow_id)
         if flow is None or flow.state in TERMINAL_STATES:
             raise FlowToolRejected(FlowToolErrorKind.CONFLICT, "Flow is not active")
         if attempt is None or attempt.flow_id != flow.id or flow.current_attempt_id != attempt.id:
@@ -116,7 +123,7 @@ class FlowToolService:
                 "flow.open_pr arguments conflict with the existing delivery",
             )
         try:
-            call, _ = self.store.reserve_tool_call(
+            call, _ = self.deliveries.reserve_tool_call(
                 call_id=request.call_id,
                 flow_id=flow.id,
                 attempt_id=attempt.id,
@@ -149,13 +156,15 @@ class FlowToolService:
             )
         # The remote read may overlap cancellation or reconnect. Recheck the fence and save
         # both pieces of prepared intent on one connection before acknowledging the tool call.
-        with self.store.transaction() as tx:
+        with self.database.transaction() as tx:
+            deliveries_tx = self.deliveries.using(tx)
+            workers_tx = self.workers.using(tx)
             current_flow = tx.lock_workflow(flow.id)
             if (
                 current_flow is None
                 or current_flow.state in TERMINAL_STATES
                 or current_flow.current_attempt_id != request.attempt_id
-                or not tx.assignment_active(
+                or not workers_tx.assignment_active(
                     request.job_id,
                     worker_id,
                     request.assignment_token,
@@ -166,7 +175,7 @@ class FlowToolService:
                     FlowToolErrorKind.STALE_ASSIGNMENT,
                     "Flow changed during remote verification",
                 )
-            current_delivery = tx.get_delivery(flow.id)
+            current_delivery = deliveries_tx.get_delivery(flow.id)
             if current_delivery != delivery:
                 raise FlowToolRejected(
                     FlowToolErrorKind.CONFLICT,
@@ -184,11 +193,11 @@ class FlowToolService:
                 delivery.head_sha = remote.sha
                 delivery.title = title
                 delivery.body = body
-                tx.update_delivery(delivery)
+                deliveries_tx.update_delivery(delivery)
                 prepared_response = PreparedDelivery(
                     status="prepared", head_sha=remote.sha, delivery_version=delivery.version,
                 )
-            tx.complete_tool_call(request.call_id, prepared_response)
+            deliveries_tx.complete_tool_call(request.call_id, prepared_response)
         return FlowToolResponse(call_id=request.call_id, result=prepared_response)
 
     @staticmethod

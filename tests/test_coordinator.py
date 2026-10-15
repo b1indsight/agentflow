@@ -18,6 +18,9 @@ from app.contracts.protocol import (
 )
 from app.controler.config import ServerSettings
 from app.controler.workflow.coordinator import JobCoordinator
+from app.controler.workflow.effects import ResultEffects
+from app.controler.workflow.results import ResultApplication
+from app.controler.workflow.tools import FlowToolService
 from app.domain.delivery_models import DeliveryReceipt
 from app.domain.models import (
     Attempt,
@@ -34,20 +37,22 @@ from app.domain.models import (
 )
 from app.github import GitHubApp
 from app.persistence.store import Store
+from app.plugins import get_plugin_manager
 from tests.github import RecordingGitHub
+from tests.persistence_fakes import RepositoryViews
 from tests.result_memory import MemoryResults, MemoryStops
 from tests.review_memory import MemoryReviews
 
 pytestmark = pytest.mark.usefixtures("recording_resources")
 
 
-class MemoryStore:
+class MemoryStore(RepositoryViews):
     def __init__(self) -> None:
-        self.jobs: dict[int, Job] = {}
+        self.job_records: dict[int, Job] = {}
         self.results = MemoryResults()
         self.stops = MemoryStops()
         self.reviews = MemoryReviews()
-        self.reviews.jobs = self.jobs
+        self.reviews.job_records = self.job_records
         self.sources: dict[tuple[int, str], Job] = {}
         self.flow = Flow(
             id=1,
@@ -72,6 +77,12 @@ class MemoryStore:
         try:
             yield self
         except Exception:
+            # Services retain these injected objects; rollback must restore them in place.
+            for name in ("results", "reviews", "stops"):
+                current = getattr(self, name)
+                current.__dict__.clear()
+                current.__dict__.update(snapshot[name].__dict__)
+                snapshot[name] = current
             self.__dict__.clear()
             self.__dict__.update(snapshot)
             raise
@@ -87,11 +98,11 @@ class MemoryStore:
             job.flow_id == flow_id
             and job.result_received_at is not None
             and job.result_applied_at is None
-            for job in self.jobs.values()
+            for job in self.job_records.values()
         )
 
     def cancel_jobs(self, flow_id: int, *, reason: str = "Flow cancelled") -> None:
-        for job in self.jobs.values():
+        for job in self.job_records.values():
             if job.flow_id == flow_id and job.state is JobState.QUEUED:
                 job.state = JobState.FAILED
 
@@ -103,13 +114,13 @@ class MemoryStore:
 
 
     def get_job(self, job_id: int) -> Job | None:
-        job = self.jobs.get(job_id)
+        job = self.job_records.get(job_id)
         return job.model_copy(deep=True) if job else None
 
     def accept(self, job: Job, result: ExecutionResult) -> None:
         message = Succeeded(job_id=job.id, assignment_token="test-token",
                             connection_epoch="test-epoch", result=result)
-        current = self.jobs.setdefault(job.id, job.model_copy(deep=True))
+        current = self.job_records.setdefault(job.id, job.model_copy(deep=True))
         digest = terminal_digest(message)
         if current.result_digest is not None:
             assert current.result_digest == digest
@@ -119,19 +130,19 @@ class MemoryStore:
         current.result_received_at = self.now()
 
     def complete_persisted_result(self, job_id: int, state: JobState) -> bool:
-        job = self.jobs[job_id]
+        job = self.job_records[job_id]
         if job.result_applied_at is not None:
             return False
         job.state, job.result_applied_at = state, self.now()
         return True
 
     def record_control_result(self, job_id: int, payload: dict, digest: str, reason: str) -> None:
-        job = self.jobs[job_id]
+        job = self.job_records[job_id]
         job.result_payload, job.result_digest = payload, digest
         job.result_received_at, job.last_error = self.now(), reason
 
     def set_job_error(self, job_id: int, reason: str) -> None:
-        self.jobs[job_id].last_error = reason
+        self.job_records[job_id].last_error = reason
 
     def get_flow(self, flow_id: int) -> Flow | None:
         return self.flow if flow_id == self.flow.id else None
@@ -211,20 +222,25 @@ class MemoryStore:
             self.sources[source_job_id, source_key] = job
         return job
 
-async def apply_result(subject: JobCoordinator, job: Job, result: ExecutionResult) -> JobState:
+class CoordinatorFixture(JobCoordinator):
+    memory: Store | MemoryStore
+    tools: FlowToolService
+
+
+async def apply_result(subject: CoordinatorFixture, job: Job, result: ExecutionResult) -> JobState:
     """Model the accepted-inbox boundary before invoking the production result application."""
-    store = cast(MemoryStore, subject.store)
+    store = cast(MemoryStore, subject.memory)
     store.accept(job, result)
     return await subject.results.apply(job.id)
 
 
-async def prepare(subject: JobCoordinator, job: Job):
-    store = cast(MemoryStore, subject.store)
-    store.jobs.setdefault(job.id, job.model_copy(deep=True))
+async def prepare(subject: CoordinatorFixture, job: Job):
+    store = cast(MemoryStore, subject.memory)
+    store.job_records.setdefault(job.id, job.model_copy(deep=True))
     return await subject.prepare(job)
 
 
-def coordinator(store: Store | MemoryStore, github: GitHubApp) -> JobCoordinator:
+def coordinator(store: Store | MemoryStore, github: GitHubApp) -> CoordinatorFixture:
     settings = ServerSettings.model_construct(
         database_url="postgresql://localhost/test",
         worker_tokens={"worker-1": SecretStr("worker-secret")},
@@ -237,11 +253,32 @@ def coordinator(store: Store | MemoryStore, github: GitHubApp) -> JobCoordinator
         prepare_max_failures=5,
         prepare_retry_window_seconds=900,
     )
-    return JobCoordinator(
-        cast(Store, store),
+    repositories = cast(Store, store)
+    plugins = get_plugin_manager()
+    effects = ResultEffects(
+        github,
+        database=repositories.database,
+    )
+    results = ResultApplication(
         github,
         settings,
+        plugins,
+        effects=effects,
+        database=repositories.database,
     )
+    subject = CoordinatorFixture(
+        github,
+        settings,
+        plugins,
+        database=cast(Store, store).database,
+        results=results,
+    )
+    subject.tools = FlowToolService(
+        github,
+        database=repositories.database,
+    )
+    subject.memory = store
+    return subject
 
 
 @pytest.mark.asyncio

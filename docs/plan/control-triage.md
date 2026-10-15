@@ -135,7 +135,7 @@ GitHub effect ledger。新增另一套 triage 队列、结果存储或恢复器�
 恢复期限，并证明本地与远程结果均通过同一套结果应用和副作用恢复路径。
 
 依据：[runtime](https://github.com/b1indsight/agentflow/blob/a50ac2c0615bea1f8c8e42b23b3307deaa1e4ba8/app/control/runtime.py)、[coordinator](https://github.com/b1indsight/agentflow/blob/a50ac2c0615bea1f8c8e42b23b3307deaa1e4ba8/app/control/coordinator.py)、
-[现有恢复](https://github.com/b1indsight/agentflow/blob/a50ac2c0615bea1f8c8e42b23b3307deaa1e4ba8/app/control/gateway.py)、[结果存储与完成](../../app/persistence/store.py)、
+[现有恢复](https://github.com/b1indsight/agentflow/blob/a50ac2c0615bea1f8c8e42b23b3307deaa1e4ba8/app/control/gateway.py)、[结果存储与完成](https://github.com/b1indsight/agentflow/blob/f601472a6133966e0647aa7c666bdd5c71952804/app/persistence/store.py)、
 [结果应用](https://github.com/b1indsight/agentflow/blob/a50ac2c0615bea1f8c8e42b23b3307deaa1e4ba8/app/control/results.py)。
 
 

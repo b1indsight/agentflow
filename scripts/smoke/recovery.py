@@ -32,7 +32,6 @@ from app.contracts.protocol import (
 )
 from app.domain.models import JobKind
 from app.persistence.store import Store
-from app.persistence.webhook_store import WebhookStore
 from app.worker.state.session import SessionError, WorkerSession
 
 FILES = {'database.dump', 'worker.tar.gz'}
@@ -136,17 +135,17 @@ def drill(work: Path, postgres_bin: Path, revision: str) -> dict:
     store = Store(scoped)
     try:
         store.init_db()
-        flow = store.create_flow('fixture/no-network', 1, 1)
-        attempt = store.create_attempt(flow.id)
+        flow = store.flows.create_flow('fixture/no-network', 1, 1)
+        attempt = store.flows.create_attempt(flow.id)
         flow.current_attempt_id = attempt.id
-        store.update_flow(flow)
-        store.worker_connected('fixture-worker', PROTOCOL_VERSION, 'fixture-epoch')
-        job = store.enqueue_job(flow.id, JobKind.INITIAL)
-        if not store.assign_job('fixture-worker', 'fixture-token', 'fixture-epoch'):
+        store.flows.update_flow(flow)
+        store.workers.worker_connected('fixture-worker', PROTOCOL_VERSION, 'fixture-epoch')
+        job = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
+        if not store.workers.assign_job('fixture-worker', 'fixture-token', 'fixture-epoch'):
             raise RuntimeError('fixture assignment failed')
-        if not store.start_assignment(job.id, attempt.id, 'fixture-worker', 'fixture-token', 'fixture-epoch'):
+        if not store.workers.start_assignment(job.id, attempt.id, 'fixture-worker', 'fixture-token', 'fixture-epoch'):
             raise RuntimeError('fixture start failed')
-        WebhookStore(store).receive('fixture-delivery', 'ping', {}, 'a' * 64)
+        store.webhooks.receive('fixture-delivery', 'ping', {}, 'a' * 64)
         journal = WorkerSession(root)
         journal.record_received(Assignment(
             job_id=job.id, flow_id=flow.id, assignment_token='fixture-token',
@@ -189,12 +188,12 @@ def drill(work: Path, postgres_bin: Path, revision: str) -> dict:
        '--no-owner', '--no-acl', str(backup / 'database.dump'))
     restored = Store(scoped)
     try:
-        restored_job = restored.get_job(job.id)
-        binding = restored.get_flow_execution(flow.id)
-        if (restored.get_flow(flow.id) != flow or not restored_job
+        restored_job = restored.jobs.get_job(job.id)
+        binding = restored.workers.get_flow_execution(flow.id)
+        if (restored.flows.get_flow(flow.id) != flow or not restored_job
                 or restored_job.assignment_token != 'fixture-token'
                 or not binding or binding.released_at is not None
-                or len(WebhookStore(restored).list()) != 1):
+                or len(restored.webhooks.list()) != 1):
             raise RuntimeError('restored database facts differ from fixture')
     finally:
         restored.close()

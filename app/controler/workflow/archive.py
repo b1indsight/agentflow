@@ -5,13 +5,18 @@ from datetime import UTC
 from app.contracts.protocol import ArchiveResult, ArchiveTask
 from app.contracts.result_models import CommentEffect, Effect, EffectState, LabelEffect
 from app.domain.models import DeliveryState, Flow, FlowDelivery, FlowState, Job, JobKind, JobState
-from app.persistence.store import Store
+from app.persistence.deliveries import DeliveryStore
+from app.persistence.jobs import JobStore
+from app.persistence.results import ResultStore
+from app.persistence.workers import WorkerStore
 
 
-def archive_task(store: Store, flow: Flow, job: Job) -> ArchiveTask:
+def archive_task(
+    flow: Flow, job: Job, *, deliveries: DeliveryStore, jobs: JobStore, workers: WorkerStore
+) -> ArchiveTask:
     """Check current ownership and quiescence before freezing or accepting cleanup."""
-    execution = store.get_flow_execution(flow.id)
-    delivery = store.get_delivery(flow.id)
+    execution = workers.get_flow_execution(flow.id)
+    delivery = deliveries.get_delivery(flow.id)
     if (flow.state is not FlowState.ACTIVE or flow.current_attempt_id is None
             or job.kind is not JobKind.ARCHIVE or job.state is not JobState.RUNNING
             or delivery is None or delivery.state is not DeliveryState.MERGED):
@@ -20,7 +25,7 @@ def archive_task(store: Store, flow: Flow, job: Job) -> ArchiveTask:
             or execution.worker_id != job.assigned_worker_id
             or execution.repo_identity != f"{execution.worker_id}:{flow.repo}"):
         raise ValueError("archive requires the original worker and repository binding")
-    if store.has_unsettled_jobs(flow.id, excluding_job_id=job.id):
+    if jobs.has_unsettled_jobs(flow.id, excluding_job_id=job.id):
         raise ValueError("archive is blocked by an executor or unapplied result")
     task = ArchiveTask(
         flow_id=flow.id, attempt_id=flow.current_attempt_id, repo=flow.repo,
@@ -33,9 +38,17 @@ def archive_task(store: Store, flow: Flow, job: Job) -> ArchiveTask:
     return task
 
 
-def verify_archive(store: Store, flow: Flow, job: Job, result: ArchiveResult) -> None:
+def verify_archive(
+    flow: Flow,
+    job: Job,
+    result: ArchiveResult,
+    *,
+    deliveries: DeliveryStore,
+    jobs: JobStore,
+    workers: WorkerStore,
+) -> None:
     """Accept cleanup only against both the dispatched command and current binding."""
-    expected = archive_task(store, flow, job)
+    expected = archive_task(flow, job, deliveries=deliveries, jobs=jobs, workers=workers)
     if (job.started_at is None or "archive" not in (job.payload or {})
             or ArchiveTask.model_validate(result.model_dump(exclude={"cleanup"})) != expected):
         raise ValueError("archive receipt does not match its frozen command")
@@ -70,7 +83,9 @@ def archive_effects(
     return effects
 
 
-def archive_progress(store: Store, flow: Flow, jobs: list[Job]) -> str:
+def archive_progress(
+    flow: Flow, jobs: list[Job], *, result_store: ResultStore, workers: WorkerStore
+) -> str:
     """Derive operator-visible cleanup progress from existing jobs and frozen results."""
     archive = next((job for job in reversed(jobs) if job.kind is JobKind.ARCHIVE), None)
     if archive is None:
@@ -78,9 +93,9 @@ def archive_progress(store: Store, flow: Flow, jobs: list[Job]) -> str:
     if archive.result_applied_at is not None and archive.state is JobState.DONE:
         return f"complete at {archive.result_applied_at.isoformat()}"
     if archive.result_received_at is not None and archive.result_applied_at is None:
-        plan = store.results.get_plan(archive.id)
+        plan = result_store.get_plan(archive.id)
         if plan is not None and plan.archive is not None:
-            unfinished = [record for record in store.results.list_effects(archive.id)
+            unfinished = [record for record in result_store.list_effects(archive.id)
                           if record.state not in {EffectState.SUCCEEDED, EffectState.SKIPPED}]
             if unfinished:
                 first = unfinished[0]
@@ -97,7 +112,7 @@ def archive_progress(store: Store, flow: Flow, jobs: list[Job]) -> str:
         return "blocked: original executor status unknown" if archive.recovery_deadline else "cleaning"
     if any(job.state is JobState.RUNNING for job in jobs):
         return "waiting for the original executor and its result"
-    binding = store.get_flow_execution(flow.id)
+    binding = workers.get_flow_execution(flow.id)
     if binding is None or binding.released_at is not None:
         return "blocked: original binding is missing; manual reconciliation required"
     return "waiting for the original worker"

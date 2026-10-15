@@ -19,7 +19,8 @@ from app.domain.models import (
 )
 from app.domain.review_models import BatchState, FeedbackUpdate, ReviewBatch
 from app.github import GitHubError, GitHubErrorKind, PullRequest
-from app.persistence.review_store import ReviewStore
+from app.persistence.jobs import JobStore
+from app.persistence.reviews import ReviewStore
 from app.persistence.store import Store
 from tests.github import RecordingGitHub
 from tests.review_memory import judge_decision
@@ -29,14 +30,14 @@ from tests.test_coordinator import coordinator
 @pytest.fixture
 def review_flow(store, monkeypatch):
     clock = SimpleNamespace(now=datetime(2026, 9, 7, tzinfo=UTC))
-    monkeypatch.setattr(store, "_clock", lambda: clock.now)
-    flow = store.create_flow("owner/repo", 7, 42)
-    attempt = store.create_attempt(flow.id)
+    monkeypatch.setattr(store._db, "_clock", lambda: clock.now)
+    flow = store.flows.create_flow("owner/repo", 7, 42)
+    attempt = store.flows.create_attempt(flow.id)
     flow.current_attempt_id = attempt.id
-    store.update_flow(flow)
-    delivery = store.get_or_create_delivery(flow.id, f"flow/{flow.id}")
+    store.flows.update_flow(flow)
+    delivery = store.deliveries.get_or_create_delivery(flow.id, f"flow/{flow.id}")
     delivery.pr_number, delivery.state = 17, DeliveryState.OPEN
-    store.update_delivery(delivery)
+    store.deliveries.update_delivery(delivery)
     return flow, clock
 
 
@@ -67,7 +68,7 @@ def batch_for(store, work):
 
 
 def settle(store):
-    return [store.get_job(b.job_id) if b.job_id is not None else b for b in store.reviews.claim_due()]
+    return [store.jobs.get_job(b.job_id) if b.job_id is not None else b for b in store.reviews.claim_due()]
 
 
 def claim(store, clock):
@@ -88,7 +89,7 @@ def test_delivery_and_feedback_are_one_transaction(store, review_flow, monkeypat
         patch.setattr(ReviewStore, "_append_version", crash)
         with pytest.raises(RuntimeError, match="interrupted"):
             ingest(store, flow, feedback(clock))
-    assert not store.event_seen("delivery-1")
+    assert not store.webhooks.event_seen("delivery-1")
     assert ingest(store, flow, feedback(clock))
     assert len(claim(store, clock)) == 1
 
@@ -168,17 +169,17 @@ def test_same_second_edit_uses_the_github_predecessor_to_order_versions(store, r
 def test_failed_batch_claim_rolls_back_deadline_and_job(store, review_flow, monkeypatch):
     flow, clock = review_flow
     ingest(store, flow, feedback(clock, signal="request_changes"))
-    original = Store.enqueue_job
+    original = JobStore.enqueue_job
 
     def interrupted(*args, **kwargs):
         original(*args, **kwargs)
         raise RuntimeError("claim interrupted")
 
     with monkeypatch.context() as patch:
-        patch.setattr(Store, "enqueue_job", interrupted)
+        patch.setattr(JobStore, "enqueue_job", interrupted)
         with pytest.raises(RuntimeError, match="claim interrupted"):
             claim(store, clock)
-    assert store.list_jobs(flow.id) == []
+    assert store.jobs.list_jobs(flow.id) == []
     assert len(settle(store)) == 1
 
 
@@ -232,7 +233,9 @@ def test_cancel_retires_buffer_and_batch_atomically(store, review_flow):
     ingest(store, flow, feedback(clock))
     batch = batch_for(store, claim(store, clock)[0])
     ingest(store, flow, feedback(clock, 102), "next")
-    ControlService(store).cancel(flow)
+    ControlService(
+        database=store.database,
+    ).cancel(flow)
     assert store.reviews.get_batch(batch.id).state is BatchState.CANCELLED
     assert claim(store, clock) == []
 
@@ -257,7 +260,13 @@ async def test_bot_mentions_always_enter_triage(
         settle_seconds=75,
         submit_grace_seconds=15,
     )
-    router = EventRouter(store, ControlService(store), settings)
+    router = EventRouter(
+        ControlService(
+            database=store.database,
+        ),
+        settings,
+        database=store.database,
+    )
     # An allowlisted author's direct request still needs Judge.
     router.dispatch(
         event_type,
@@ -309,7 +318,13 @@ async def test_review_actions_have_explicit_dispatch_semantics(
         settle_seconds=75,
         submit_grace_seconds=15,
     )
-    router = EventRouter(store, ControlService(store), settings)
+    router = EventRouter(
+        ControlService(
+            database=store.database,
+        ),
+        settings,
+        database=store.database,
+    )
     router.dispatch(
         "pull_request_review",
         "review",
@@ -338,11 +353,13 @@ def test_failed_batch_retry_restores_ownership_and_cancel_fences_old_work(store,
     with store.transaction() as tx:
         tx.lock_workflow(flow.id)
         flow.state = FlowState.FAILED
-        tx.update_flow(flow)
-        tx.cancel_jobs(flow.id)
+        tx.flows.update_flow(flow)
+        tx.jobs.cancel_jobs(flow.id)
     assert store.reviews.get_batch(batch_for(store, job).id).state is BatchState.CANCELLED
-    ControlService(store).retry(flow)
-    replacement = store.list_jobs(flow.id)[-1]
+    ControlService(
+        database=store.database,
+    ).retry(flow)
+    replacement = store.jobs.list_jobs(flow.id)[-1]
     assert replacement.id != job.id
     assert batch_for(store, replacement).state is BatchState.READY
     assert batch_for(store, replacement).feedback[0].github_id == 101
@@ -381,7 +398,7 @@ async def test_revise_confidence_boundary_and_unresolved_points_persist(
     assert batch.open_points == ["Which name?"]
     assert batch.decision.verdict.confidence == confidence
     if expected:
-        assert store.list_jobs(flow.id)[-1].kind is expected
+        assert store.jobs.list_jobs(flow.id)[-1].kind is expected
     else:
         assert batch.state is BatchState.WAITING
         assert github.comments == []
@@ -424,7 +441,7 @@ async def test_answer_recovery_waits_for_receipt_and_preserves_a_new_version(
         assert len(github.comments) == int(receipt)
         assert [(f.github_id, f.version) for f in restarted.reviews.pending(flow.id)] == [(101, 2)]
         assert batch_for(restarted, job).state is (BatchState.COMPLETED if receipt else BatchState.READY)
-        assert restarted.list_jobs(flow.id) == []
+        assert restarted.jobs.list_jobs(flow.id) == []
     finally:
         restarted.close()
 
@@ -456,7 +473,9 @@ async def test_answer_rechecks_lifecycle_and_remote_head_before_sending(
         nonlocal changed
         changed = True
         if change == "cancel":
-            ControlService(store).cancel(flow)
+            ControlService(
+                database=store.database,
+            ).cancel(flow)
 
     await run_triage(store, flow, job, TriageVerdict(verdict=Verdict.ANSWER, answer="Reply"),
                      github=github, before_apply=change_state)
@@ -489,7 +508,7 @@ async def test_revise_transfers_batch_to_one_derived_job(store, review_flow, rec
         job,
         TriageVerdict(verdict=Verdict.REVISE, confidence=0.9, instruction="Fix the bound"),
     )
-    revisions = [j for j in store.list_jobs(flow.id) if j.kind is JobKind.REVISION]
+    revisions = [j for j in store.jobs.list_jobs(flow.id) if j.kind is JobKind.REVISION]
     assert len(revisions) == 1
     assert batch_for(store, revisions[0]).id == batch_for(store, job).id
     assert github.comments == []
@@ -506,10 +525,12 @@ def test_retry_after_successful_replacement_does_not_select_historical_failure(
     flow, clock = review_flow
     ingest(store, flow, feedback(clock, signal="request_changes"))
     original = claim(store, clock)[0]
-    service = ControlService(store)
+    service = ControlService(
+        database=store.database,
+    )
     service.cancel(flow)
     service.retry(flow)
-    replacement = store.list_jobs(flow.id)[-1]
+    replacement = store.jobs.list_jobs(flow.id)[-1]
     batch = batch_for(store, replacement)
     store.reviews.complete(batch.id, outcome, [], [])
     with store.connection() as connection:
@@ -518,9 +539,9 @@ def test_retry_after_successful_replacement_does_not_select_historical_failure(
     # A later idle cancellation must not resurrect the old failure whose owner was replaced.
     service.cancel(flow)
     service.retry(flow)
-    assert store.get_job(original.id).state is JobState.FAILED
-    assert store.list_jobs(flow.id)[-1].kind is JobKind.INITIAL
-    assert store.get_flow(flow.id).state is FlowState.ACTIVE
+    assert store.jobs.get_job(original.id).state is JobState.FAILED
+    assert store.jobs.list_jobs(flow.id)[-1].kind is JobKind.INITIAL
+    assert store.flows.get_flow(flow.id).state is FlowState.ACTIVE
 
 
 async def test_answer_uses_frozen_decision_once_and_consumes_after_comment(store, review_flow, recording_resources):
@@ -543,7 +564,7 @@ async def test_answer_uses_frozen_decision_once_and_consumes_after_comment(store
     assert "#discussion_r102" in github.comments[0]
     assert batch.state is BatchState.COMPLETED
     assert not store.reviews.pending(flow.id)
-    assert all(item.kind.value != "answer" for item in store.list_jobs(flow.id))
+    assert all(item.kind.value != "answer" for item in store.jobs.list_jobs(flow.id))
 
 
 @pytest.mark.parametrize("approval_id", [101, 102])
@@ -555,10 +576,19 @@ async def test_approval_invalidates_body_without_waking_waiting_feedback(
     ingest(store, flow, feedback(clock, 201), "inline")
     batch = batch_for(store, claim(store, clock)[0])
     store.reviews.complete(batch.id, BatchState.WAITING, [], ["Which limit?"])
-    router = EventRouter(store, ControlService(store), SimpleNamespace(
-        allowlist=["alice"], bot_login="flowtool[bot]", trigger_label="flow",
-        settle_seconds=75, submit_grace_seconds=15,
-    ))
+    router = EventRouter(
+        ControlService(
+            database=store.database,
+        ),
+        SimpleNamespace(
+            allowlist=["alice"],
+            bot_login="flowtool[bot]",
+            trigger_label="flow",
+            settle_seconds=75,
+            submit_grace_seconds=15,
+        ),
+        database=store.database,
+    )
     # Both a fresh approval and approval of an existing review must leave discussion asleep.
     router.dispatch("pull_request_review", "approval", {
         "action": "submitted", "repository": {"full_name": "owner/repo"},
@@ -599,7 +629,7 @@ def test_same_second_out_of_order_edits_reconcile_after_restart(
         patch.setattr(ReviewStore, "_append_version", crash_after_replaying_c)
         with pytest.raises(RuntimeError, match="replay interrupted"):
             edit(store, "B", "A", "B")
-    assert not store.event_seen("B")
+    assert not store.webhooks.event_seen("B")
     assert store.reviews.pending(flow.id)[0].body == "A"
     restarted = Store(store.database_url, clock=lambda: clock.now)
     try:

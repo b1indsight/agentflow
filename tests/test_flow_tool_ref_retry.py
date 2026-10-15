@@ -42,7 +42,10 @@ async def test_open_pr_ref_recovers_within_the_same_tool_call(tmp_path, monkeypa
         return await NATIVE_REPOSITORY_FETCH_REF(native_repo, branch, retry_transient=retry_transient)
 
     monkeypatch.setattr(Repository, "fetch_ref", fetch_ref)
-    service = FlowToolService(cast(Store, memory), cast(GitHubApp, github))
+    service = FlowToolService(
+        cast(GitHubApp, github),
+        database=cast(Store, memory).database,
+    )
     invocation = request().model_copy(update={"commit_sha": "a" * 40, "remote_sha": "a" * 40})
     response = await service.execute(invocation, worker_id="worker-a")
     assert response.error_kind is None and response.result is not None

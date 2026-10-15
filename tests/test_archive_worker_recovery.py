@@ -17,6 +17,7 @@ from app.contracts.protocol import (
     parse_server_message,
     parse_worker_message,
 )
+from app.controler.workers.conversation import ConversationBroker
 from app.controler.workers.gateway import WorkerGateway
 from app.controler.workflow.service import ControlService
 from app.domain.models import FlowState, JobKind, JobState
@@ -67,8 +68,15 @@ class ObservedClient(WorkerClient):
 
 async def connect_once(store, subject, executor, journal, *, drop_ack=False, client=None):
     outgoing, incoming = asyncio.Queue(), asyncio.Queue()
-    gateway = WorkerGateway(store, subject, worker_tokens={"worker-a": "secret"}, poll_interval=60)
-    archive_id = next(job.id for job in store.list_jobs(journal.load().flow_id)
+    gateway = WorkerGateway(
+        subject, database=store.database,
+        worker_tokens={"worker-a": "secret"},
+        poll_interval=60,
+        tools=subject.tools,
+        results=subject.results,
+        conversations=ConversationBroker(),
+    )
+    archive_id = next(job.id for job in store.jobs.list_jobs(journal.load().flow_id)
                       if job.kind is JobKind.ARCHIVE)
     if client is None:
         client = ObservedClient(archive_id=archive_id,
@@ -107,7 +115,7 @@ async def test_original_worker_recovers_cleanup_and_replays_without_redeleting(
     repo = await prepare_flow_repo(managed_seed, flow.id)
     other_repo = await prepare_flow_repo(managed_seed, 999)
     journal = WorkerSession(root)
-    prior = store.list_jobs(flow.id)[-2]
+    prior = store.jobs.list_jobs(flow.id)[-2]
     # Preserve the preceding acknowledged job, as a real worker does between assignments.
     journal.record_received(Assignment(
         job_id=prior.id, flow_id=flow.id, assignment_token=prior.assignment_token,
@@ -145,13 +153,13 @@ async def test_original_worker_recovers_cleanup_and_replays_without_redeleting(
     # Process restart reacquires the same root lock before any cleanup can resume.
     lock.acquire()
     try:
-        store.recover_abandoned_assignments()
+        store.workers.recover_abandoned_assignments()
         if window in {"started-lost", "result-started-lost"}:
             # The original frozen token must survive a lost Started frame and expired grace.
             now = store.now()
-            store._clock = lambda: now + timedelta(hours=1)
-            store.sweep_expired_assignments()
-            assert store.get_job(job.id).assignment_token == "archive-token"
+            store._db._clock = lambda: now + timedelta(hours=1)
+            store.workers.sweep_expired_assignments()
+            assert store.jobs.get_job(job.id).assignment_token == "archive-token"
         await connect_once(store, subject, executor, WorkerSession(root), drop_ack=window == "ack")
         if window == "ack":
             assert journal.load() is not None
@@ -161,12 +169,14 @@ async def test_original_worker_recovers_cleanup_and_replays_without_redeleting(
     assert not repo.exists() and managed_seed.exists() and other_repo.exists()
     assert not agent.started
     assert journal.load() is None
-    assert store.get_flow(flow.id).state is FlowState.SUCCEEDED
-    assert store.get_flow_execution(flow.id).released_at is not None
-    assert store.get_job(job.id).state is JobState.DONE
-    next_flow = ControlService(store).on_trigger("owner/repo", 999, 42)
-    store.worker_connected("worker-a", PROTOCOL_VERSION, "next")
-    next_job = store.assign_job("worker-a", "next-token", "next")
+    assert store.flows.get_flow(flow.id).state is FlowState.SUCCEEDED
+    assert store.workers.get_flow_execution(flow.id).released_at is not None
+    assert store.jobs.get_job(job.id).state is JobState.DONE
+    next_flow = ControlService(
+        database=store.database,
+    ).on_trigger("owner/repo", 999, 42)
+    store.workers.worker_connected("worker-a", PROTOCOL_VERSION, "next")
+    next_job = store.workers.assign_job("worker-a", "next-token", "next")
     assert next_job.flow_id == next_flow.id and next_job.kind is JobKind.INITIAL
 
 
@@ -175,9 +185,9 @@ async def test_merge_recovery_preserves_coding_completion_and_root_provenance(
     store, tmp_path, window, recording_resources,
 ):
     old, result = accepted_coding(store, receive=False, started=window != "unstarted-rejected")
-    flow = store.get_flow(old.flow_id)
+    flow = store.flows.get_flow(old.flow_id)
     await route_merge(store, flow)
-    archive_id = store.list_jobs(flow.id)[-1].id
+    archive_id = store.jobs.list_jobs(flow.id)[-1].id
     seed, _ = _git_fixture(tmp_path)
     root = tmp_path / "worker"
     managed_seed = root / "repos/owner/repo"
@@ -203,6 +213,6 @@ async def test_merge_recovery_preserves_coding_completion_and_root_provenance(
         await connect_once(store, coordinator(store, RecordingGitHub()), executor, journal, client=client)
     finally:
         lock.release()
-    assert store.get_flow(flow.id).state is FlowState.SUCCEEDED
-    assert store.get_flow_execution(flow.id).released_at is not None
+    assert store.flows.get_flow(flow.id).state is FlowState.SUCCEEDED
+    assert store.workers.get_flow_execution(flow.id).released_at is not None
     assert not repo.exists() and managed_seed.exists()

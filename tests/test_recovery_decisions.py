@@ -14,16 +14,16 @@ NOW = datetime(2026, 9, 29, tzinfo=UTC)
 
 
 def expiring(store, *, started=False):
-    store._clock = lambda: NOW
-    flow = store.create_flow("owner/recovery", 1, 1)
-    attempt = store.create_attempt(flow.id)
+    store._db._clock = lambda: NOW
+    flow = store.flows.create_flow("owner/recovery", 1, 1)
+    attempt = store.flows.create_attempt(flow.id)
     flow.current_attempt_id = attempt.id
-    store.update_flow(flow)
-    store.worker_connected("w", PROTOCOL_VERSION, "epoch")
-    job = store.enqueue_job(flow.id, JobKind.INITIAL)
-    assert store.assign_job("w", "token", "epoch").id == job.id
+    store.flows.update_flow(flow)
+    store.workers.worker_connected("w", PROTOCOL_VERSION, "epoch")
+    job = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
+    assert store.workers.assign_job("w", "token", "epoch").id == job.id
     if started:
-        assert store.start_assignment(job.id, attempt.id, "w", "token", "epoch")
+        assert store.workers.start_assignment(job.id, attempt.id, "w", "token", "epoch")
     with store.connection() as connection:
         connection.execute("UPDATE jobs SET lease_expires_at=%s,recovery_deadline=%s WHERE id=%s",
                            (NOW, NOW, job.id))
@@ -53,11 +53,11 @@ def test_sweep_waiting_on_worker_reads_committed_receipt(store, monkeypatch, rec
     with ThreadPoolExecutor(max_workers=1) as pool:
         with store.transaction() as tx:
             tx.lock_workflow(flow.id)
-            sweep = pool.submit(store.sweep_expired_assignments)
+            sweep = pool.submit(store.workers.sweep_expired_assignments)
             assert waiting.wait(5)
             assert not sweep.done()
             if receipt == "result":
-                assert tx.record_assignment_result(job.id, "w", "token", "epoch", {}, "receipt") == "pending"
+                assert tx.workers.record_assignment_result(job.id, "w", "token", "epoch", {}, "receipt") == "pending"
             else:
                 stop = tx.stops.pending("w")
                 assert tx.stops.confirm("w", ExecutionStopped(
@@ -65,13 +65,13 @@ def test_sweep_waiting_on_worker_reads_committed_receipt(store, monkeypatch, rec
                     assignment_token="token", connection_epoch="epoch", execution_nonce="executor",
                 ))
         assert sweep.result(timeout=5) == (0, 0)
-    assert store.get_flow(flow.id).state is FlowState.ACTIVE
+    assert store.flows.get_flow(flow.id).state is FlowState.ACTIVE
     if receipt == "result":
-        assert store.get_job(job.id).result_received_at == NOW
-        assert store.get_flow_execution(flow.id).released_at is None
+        assert store.jobs.get_job(job.id).result_received_at == NOW
+        assert store.workers.get_flow_execution(flow.id).released_at is None
     else:
-        assert store.get_job(job.id).last_error == "execution stopped"
-        assert store.get_flow_execution(flow.id).released_at == NOW
+        assert store.jobs.get_job(job.id).last_error == "execution stopped"
+        assert store.workers.get_flow_execution(flow.id).released_at == NOW
 
 
 def test_binding_decision_failure_rolls_back_prior_job_updates(store, monkeypatch):
@@ -82,11 +82,11 @@ def test_binding_decision_failure_rolls_back_prior_job_updates(store, monkeypatc
     def interrupted(*args):
         raise RuntimeError("binding decision interrupted")
 
-    monkeypatch.setattr("app.persistence.store.should_release_binding", interrupted)
+    monkeypatch.setattr("app.persistence.workers.should_release_binding", interrupted)
     with pytest.raises(RuntimeError, match="binding decision interrupted"):
-        store.sweep_expired_assignments()
-    assert store.get_job(job.id).state is JobState.RUNNING
-    assert store.get_job(job.id).assignment_token == "token"
-    assert store.get_flow(flow.id).state is FlowState.ACTIVE
-    assert store.list_workers()[0].status is WorkerStatus.BUSY
-    assert store.get_flow_execution(flow.id).released_at is None
+        store.workers.sweep_expired_assignments()
+    assert store.jobs.get_job(job.id).state is JobState.RUNNING
+    assert store.jobs.get_job(job.id).assignment_token == "token"
+    assert store.flows.get_flow(flow.id).state is FlowState.ACTIVE
+    assert store.workers.list_workers()[0].status is WorkerStatus.BUSY
+    assert store.workers.get_flow_execution(flow.id).released_at is None

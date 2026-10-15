@@ -8,6 +8,7 @@ from app.domain.judge_models import JudgeDecision
 from app.domain.models import FeedbackRef, Job, ReviewItemKind, TriageVerdict
 from app.domain.review_models import BatchState, ReviewBatch, ReviewFeedback
 from app.github import PullRequest, ReviewThreads
+from tests.persistence_fakes import MemoryRepository
 
 
 def review_context(batch_id: int = 1) -> ReviewContext:
@@ -27,9 +28,9 @@ def judge_decision(verdict: TriageVerdict, context: ReviewContext | None = None)
                          session_id="test-session", model="fake", verdict=verdict)
 
 
-class MemoryReviews:
+class MemoryReviews(MemoryRepository):
     def __init__(self) -> None:
-        self.jobs: dict[int, Job] = {}
+        self.job_records: dict[int, Job] = {}
         self.batch = ReviewBatch(
             id=1,
             flow_id=1,
@@ -61,7 +62,7 @@ class MemoryReviews:
     def freeze_revision(self, job, task):
         if (job.payload or {}).get("revision") is None:
             job.payload = {**(job.payload or {}), "revision": task.model_dump(mode="json")}
-            self.jobs[job.id].payload = job.payload
+            self.job_records[job.id].payload = job.payload
         return RevisionTask.model_validate(job.payload["revision"])
 
     def freeze_context(self, job: Job, context: ReviewContext) -> ReviewContext:

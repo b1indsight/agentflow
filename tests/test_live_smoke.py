@@ -100,13 +100,13 @@ def test_truncated_issue_listing_is_not_absence(monkeypatch):
 def test_observe_reads_without_creating_work_and_does_not_claim_partial_success(store, tmp_path, monkeypatch):
     gh = FakeGitHub()
     gh.issue = 7
-    flow = store.create_flow("owner/smoke", 7, 42)
-    attempt = store.create_attempt(flow.id)
+    flow = store.flows.create_flow("owner/smoke", 7, 42)
+    attempt = store.flows.create_attempt(flow.id)
     flow.current_attempt_id = attempt.id
-    store.update_flow(flow)
-    delivery = store.get_or_create_delivery(flow.id, "flow/7")
+    store.flows.update_flow(flow)
+    delivery = store.deliveries.get_or_create_delivery(flow.id, "flow/7")
     delivery.state, delivery.pr_number, delivery.head_sha = DeliveryState.OPEN, 8, "a"*40
-    store.update_delivery(delivery)
+    store.deliveries.update_delivery(delivery)
     probe = GitHubProbe()
     remote = Pull(number=8, merged=False, head={"sha": "a"*40, "ref": "flow/7",
                   "repo": {"full_name": "owner/smoke"}}, base={"sha": "b"*40, "ref": "main",
@@ -114,15 +114,39 @@ def test_observe_reads_without_creating_work_and_does_not_claim_partial_success(
     monkeypatch.setattr(probe, "pull", lambda *args: remote)
     with session(tmp_path, gh) as smoke:
         smoke.ensure_issue()
-        observed = smoke.observe(store, probe, "test-revision")
+        observed = smoke.observe(
+            probe,
+            "test-revision",
+            database=store.database,
+            flows=store.flows,
+            deliveries=store.deliveries,
+            jobs=store.jobs,
+            workers=store.workers,
+        )
         assert observed.pr == 8 and not observed.core_passed
         assert smoke.state.observed_heads == ["a"*40]
-        smoke.observe(store, probe, "test-revision")
+        smoke.observe(
+            probe,
+            "test-revision",
+            database=store.database,
+            flows=store.flows,
+            deliveries=store.deliveries,
+            jobs=store.jobs,
+            workers=store.workers,
+        )
         assert smoke.state.observed_heads == ["a"*40]
         remote.head.ref = "unexpected"
         with pytest.raises(SmokeError, match="identity"):
-            smoke.observe(store, probe, "test-revision")
-    assert not store.list_jobs(flow.id)
+            smoke.observe(
+                probe,
+                "test-revision",
+                database=store.database,
+                flows=store.flows,
+                deliveries=store.deliveries,
+                jobs=store.jobs,
+                workers=store.workers,
+            )
+    assert not store.jobs.list_jobs(flow.id)
     assert "Please" not in next(tmp_path.glob("*.json")).read_text()
 
 
@@ -135,17 +159,17 @@ def test_deadline_prevents_even_read_requests(monkeypatch):
 def test_core_pass_requires_three_verified_heads_and_matching_merge(store, tmp_path, monkeypatch):
     gh = FakeGitHub()
     gh.issue = 7
-    flow = store.create_flow("owner/smoke", 7, 42)
-    attempt = store.create_attempt(flow.id)
+    flow = store.flows.create_flow("owner/smoke", 7, 42)
+    attempt = store.flows.create_attempt(flow.id)
     flow.current_attempt_id = attempt.id
-    store.update_flow(flow)
-    delivery = store.get_or_create_delivery(flow.id, "flow/7")
+    store.flows.update_flow(flow)
+    delivery = store.deliveries.get_or_create_delivery(flow.id, "flow/7")
     delivery.state, delivery.pr_number = DeliveryState.OPEN, 8
-    store.update_delivery(delivery)
-    store.worker_connected("worker-1", protocol_version=PROTOCOL_VERSION)
-    initial = store.enqueue_job(flow.id, JobKind.INITIAL)
-    assert store.assign_job("worker-1", "initial").id == initial.id
-    assert store.finish_assignment(initial.id, "worker-1", "initial", JobState.DONE)
+    store.deliveries.update_delivery(delivery)
+    store.workers.worker_connected("worker-1", protocol_version=PROTOCOL_VERSION)
+    initial = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
+    assert store.workers.assign_job("worker-1", "initial").id == initial.id
+    assert store.workers.finish_assignment(initial.id, "worker-1", "initial", JobState.DONE)
     remote = Pull(number=8, merged=False,
                   head={"sha": "a"*40, "ref": "flow/7", "repo": {"full_name": "owner/smoke"}},
                   base={"sha": "b"*40, "ref": "main", "repo": {"full_name": "owner/smoke"}})
@@ -155,21 +179,29 @@ def test_core_pass_requires_three_verified_heads_and_matching_merge(store, tmp_p
         smoke.ensure_issue()
         for revisions, letter in enumerate(["a", "b", "c"]):
             attempt.revision_cycles = revisions
-            store.update_attempt(attempt)
+            store.flows.update_attempt(attempt)
             delivery.head_sha = remote.head.sha = letter*40
             if letter == "c":
                 delivery.state = DeliveryState.MERGED
                 delivery.merge_commit_sha = remote.merge_commit_sha = "d"*40
                 remote.merged = True
-            store.update_delivery(delivery)
+            store.deliveries.update_delivery(delivery)
             if letter == "c":
-                archive = store.enqueue_job(flow.id, JobKind.ARCHIVE)
-                assert store.assign_job("worker-1", "archive").id == archive.id
-                assert store.finish_assignment(archive.id, "worker-1", "archive", JobState.DONE)
+                archive = store.jobs.enqueue_job(flow.id, JobKind.ARCHIVE)
+                assert store.workers.assign_job("worker-1", "archive").id == archive.id
+                assert store.workers.finish_assignment(archive.id, "worker-1", "archive", JobState.DONE)
                 flow.state = FlowState.SUCCEEDED
-                store.update_flow(flow)
-                assert store.release_flow_execution(flow.id)
-            result = smoke.observe(store, probe, "actual-revision")
+                store.flows.update_flow(flow)
+                assert store.workers.release_flow_execution(flow.id)
+            result = smoke.observe(
+                probe,
+                "actual-revision",
+                database=store.database,
+                flows=store.flows,
+                deliveries=store.deliveries,
+                jobs=store.jobs,
+                workers=store.workers,
+            )
             assert result.core_passed == (letter == "c")
 
 

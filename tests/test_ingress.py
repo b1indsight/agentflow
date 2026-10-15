@@ -22,12 +22,12 @@ from app.controler.workers.gateway import WorkerGateway
 from app.controler.workflow.service import ControlService
 from app.domain.models import Flow, FlowState, JobKind
 from app.persistence.store import Store
-from app.persistence.webhook_store import WebhookStore
+from app.plugins import get_plugin_manager
 from app.telemetry.metrics import Metrics
 
 
 class WebhookRuntime(ServerRuntime):
-    def __init__(self, router: EventRouter | None = None, settings: ServerSettings | None = None) -> None:
+    def __init__(self, router: EventRouter | None = None, settings: ServerSettings | None = None, store: Store | None = None) -> None:
         self.settings = settings or ServerSettings.model_construct(
             database_url="postgresql://localhost/test",
             worker_tokens={"worker-1": SecretStr("worker-secret")},
@@ -41,14 +41,21 @@ class WebhookRuntime(ServerRuntime):
         self.gateway = Mock(spec=WorkerGateway)
         self.conversations = Mock(spec=ConversationService)
         self.tasks: list[asyncio.Task[None]] = []
+        self.webhooks = Mock(spec=WebhookConsumer)
+        if store is not None:
+            self.webhooks = WebhookConsumer(
+                self.settings,
+                database=store.database,
+                plugins=get_plugin_manager(),
+                jobs_available=lambda: None,
+            )
 
     async def receive_webhook(self, event_type: str, delivery_id: str, payload: dict, digest: str) -> None:
         assert isinstance(self.router, EventRouter)
-        store = self.router.store
-        WebhookStore(store).receive(delivery_id, event_type, payload, digest)
+        self.webhooks.webhook_store.receive(delivery_id, event_type, payload, digest)
 
         async def consume() -> None:
-            WebhookConsumer(store, self.settings, ControlService(store)).sweep()
+            self.webhooks.sweep()
 
         self.tasks.append(asyncio.create_task(consume()))
 
@@ -65,20 +72,21 @@ class WebhookRuntime(ServerRuntime):
 
 class RoutingService(ControlService):
     def __init__(self, store: Store) -> None:
-        self.store = store
+        self.flows = store.flows
+        self.jobs = store.jobs
 
     def on_trigger(self, repo: str, issue_number: int, installation_id: int | None) -> Flow:
-        flow = self.store.create_flow(repo, issue_number, installation_id)
-        self.store.enqueue_job(flow.id, JobKind.INITIAL)
+        flow = self.flows.create_flow(repo, issue_number, installation_id)
+        self.jobs.enqueue_job(flow.id, JobKind.INITIAL)
         return flow
 
     def cancel(self, flow: Flow) -> None:
         flow.state = FlowState.CANCELLED
-        self.store.update_flow(flow)
+        self.flows.update_flow(flow)
 
     def on_merged(self, flow: Flow, delivery_id: str, payload: dict) -> None:
         flow.state = FlowState.SUCCEEDED
-        self.store.update_flow(flow)
+        self.flows.update_flow(flow)
 
     def notify_jobs(self) -> None:
         pass
@@ -125,7 +133,15 @@ async def test_valid_signature_dispatches_webhook(
         settle_seconds=75.0,
         submit_grace_seconds=15.0,
     )
-    runtime = WebhookRuntime(EventRouter(store, RoutingService(store), settings), settings)
+    runtime = WebhookRuntime(
+        EventRouter(
+            RoutingService(store),
+            settings,
+            database=store.database,
+        ),
+        settings,
+        store,
+    )
     application = create_app(runtime)
     transport = httpx.ASGITransport(app=application)
     payload = {
@@ -157,11 +173,11 @@ async def test_valid_signature_dispatches_webhook(
         await asyncio.gather(*runtime.tasks)
 
     assert response.status_code == 202
-    flow = store.get_active_flow("owner/repo", 7)
+    flow = store.flows.get_active_flow("owner/repo", 7)
     assert flow is not None
     assert flow.state is FlowState.ACTIVE
-    store.worker_connected("worker-1", protocol_version=PROTOCOL_VERSION)
-    assert store.assign_job("worker-1", "assignment-1") is not None
+    store.workers.worker_connected("worker-1", protocol_version=PROTOCOL_VERSION)
+    assert store.workers.assign_job("worker-1", "assignment-1") is not None
 
 
 def signed_headers(body: bytes) -> dict[str, str]:

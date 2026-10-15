@@ -4,13 +4,18 @@ from collections.abc import Awaitable, Callable
 from unittest.mock import Mock
 
 from app.contracts.protocol import ExecutionStopped
+from app.controler.workflow.effects import ResultEffects
 from app.controler.workflow.results import ResultApplication
 from app.domain.models import JobState, WorkerRecord, WorkerStatus, utcnow
-from app.persistence.stop_store import StopIntent, StopStore
+from app.persistence.stops import StopIntent, StopStore
 from app.persistence.store import Store
 
 
 class NoPendingStops(StopStore):
+    def __init__(self) -> None:
+        # This simulation supplies stop responses and never acquires database resources.
+        pass
+
     def pending(self, worker_id: str) -> StopIntent | None:
         return None
 
@@ -34,6 +39,12 @@ def connected_worker(worker_id: str, protocol_version: int, connection_epoch: st
 
 def result_application(store: Store, commit_result: Callable[[int], Awaitable[JobState]]) -> ResultApplication:
     """Exercise result locking and recovery around the supplied commit callback."""
-    results = ResultApplication(store, Mock(), Mock(), Mock())
+    results = ResultApplication(
+        Mock(),
+        Mock(),
+        Mock(),
+        database=store.database,
+        effects=Mock(spec=ResultEffects),
+    )
     results._apply = commit_result  # type: ignore[method-assign, assignment]
     return results

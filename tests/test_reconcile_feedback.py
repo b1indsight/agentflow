@@ -22,7 +22,7 @@ from app.github import (
     PullRequest,
     RemoteFeedback,
 )
-from app.persistence.reconcile_store import ReconcileStore
+from app.persistence.reconciliation import ReconcileStore
 from app.persistence.store import Store
 from tests.github import RecordingGitHub, record_call
 from tests.test_review_batches import batch_for, claim, feedback, ingest, run_triage, settle
@@ -73,7 +73,12 @@ def page(clock, github_id=101, **changes):
 
 
 def poller(store, github, **options):
-    return FeedbackReconciler(store, github, settle_seconds=75, **options)
+    return FeedbackReconciler(
+        github,
+        settle_seconds=75,
+        **options,
+        database=store.database,
+    )
 
 
 async def test_three_missing_sources_are_ingested_once_without_webhook_or_strong_signal(
@@ -185,7 +190,7 @@ async def test_old_commands_and_bots_never_wake_or_control(store, review_flow, f
     github.pages["reviews", None] = Batch(items=[item])
     await poller(store, github)._sweep()
     assert store.reviews.pending(flow.id) == []
-    assert store.get_flow(flow.id).state is FlowState.ACTIVE
+    assert store.flows.get_flow(flow.id).state is FlowState.ACTIVE
 
 
 async def test_page_absence_never_infers_deletion(store, review_flow, feedback_resources):
@@ -201,9 +206,9 @@ async def test_changed_delivery_discards_the_page(store, review_flow, feedback_r
     github.pages["issue_comments", None] = page(clock)
 
     def close():
-        delivery = store.get_delivery(flow.id)
+        delivery = store.deliveries.get_delivery(flow.id)
         delivery.state = DeliveryState.CLOSED
-        store.update_delivery(delivery)
+        store.deliveries.update_delivery(delivery)
 
     github.before_return = close
     await poller(store, github)._sweep()
@@ -260,7 +265,7 @@ async def test_edit_to_command_supersedes_feedback_and_later_edit_recovers(store
     github.pages["issue_comments", None] = Batch(items=[page(clock).items[0].model_copy(update={"body": "/flow stop"})])
     await poller(store, github)._sweep()
     assert store.reviews.pending(flow.id) == []
-    assert store.get_flow(flow.id).state is FlowState.ACTIVE
+    assert store.flows.get_flow(flow.id).state is FlowState.ACTIVE
     clock.now += timedelta(seconds=301)
     github.pages["issue_comments", None] = page(clock)
     await poller(store, github)._sweep()
@@ -277,7 +282,7 @@ async def test_poll_marks_same_webhook_command_body_inert(store, review_flow, fe
     # An edited command can reach storage before polling identifies it as inert.
     await poller(store, github)._sweep()
     assert store.reviews.pending(flow.id) == []
-    assert store.get_flow(flow.id).state is FlowState.ACTIVE
+    assert store.flows.get_flow(flow.id).state is FlowState.ACTIVE
     clock.now += timedelta(seconds=301)
     github.pages["issue_comments", None] = page(clock)
     await poller(store, github)._sweep()

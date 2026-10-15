@@ -2,6 +2,7 @@ import asyncio
 import os
 import sys
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -14,10 +15,12 @@ from app.contracts.protocol import (
     StopExecution,
     parse_worker_message,
 )
+from app.controler.workers.conversation import ConversationBroker
 from app.controler.workers.gateway import WorkerGateway
+from app.controler.workflow.results import ResultApplication
 from app.controler.workflow.service import ControlService
+from app.controler.workflow.tools import FlowToolService
 from app.domain.models import JobKind
-from app.persistence.stop_store import StopStore
 from app.worker.execution.vcs import _run
 from app.worker.state.session import WorkerSession
 from app.worker.transport.client import WorkerClient, WorkerProtocolError
@@ -94,11 +97,11 @@ async def test_restarted_worker_does_not_infer_stopped_from_absent_task(tmp_path
 
 
 async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path):
-    flow = store.create_flow('owner/repo', 1, 1)
-    attempt = store.create_attempt(flow.id)
+    flow = store.flows.create_flow('owner/repo', 1, 1)
+    attempt = store.flows.create_attempt(flow.id)
     flow.current_attempt_id = attempt.id
-    store.update_flow(flow)
-    store.enqueue_job(flow.id, JobKind.INITIAL)
+    store.flows.update_flow(flow)
+    store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
     started, ended = asyncio.Event(), asyncio.Event()
     to_worker, to_serve = asyncio.Queue(), asyncio.Queue()
 
@@ -134,8 +137,16 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path):
         def worker_connected(self, *args): pass
         def worker_disconnected(self, *args): pass
 
-    gateway = WorkerGateway(store, Coordinator(), worker_tokens={'w': 'secret'},
-                            heartbeat_interval=0.01, poll_interval=0.01)
+    gateway_coordinator = Coordinator()
+    gateway = WorkerGateway(
+        gateway_coordinator, database=store.database,
+        worker_tokens={"w": "secret"},
+        heartbeat_interval=0.01,
+        poll_interval=0.01,
+        tools=Mock(spec=FlowToolService),
+        results=Mock(spec=ResultApplication),
+        conversations=ConversationBroker(),
+    )
     client = WorkerClient(worker_id='w', worker_token='secret', serve_ws_url='unused',
                           executor=Executor(), session=WorkerSession(tmp_path))
     server = asyncio.create_task(gateway.handle(Socket()))
@@ -146,13 +157,16 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path):
                 if server.done(): server.result()
                 if worker.done(): worker.result()
                 await asyncio.sleep(0.01)
-            ControlService(store, jobs_available=gateway.notify_jobs).cancel(flow)
-            while store.get_flow_execution(flow.id).released_at is None:
+            ControlService(
+                jobs_available=gateway.notify_jobs,
+                database=store.database,
+            ).cancel(flow)
+            while store.workers.get_flow_execution(flow.id).released_at is None:
                 if server.done(): server.result()
                 if worker.done(): worker.result()
                 await asyncio.sleep(0.01)
         assert ended.is_set()
-        assert StopStore(store).pending('w') is None
+        assert store.stops.pending('w') is None
     finally:
         server.cancel(); worker.cancel()
         await asyncio.gather(server, worker, return_exceptions=True)

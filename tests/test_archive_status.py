@@ -16,7 +16,7 @@ from app.controler.workflow.effects import ResultEffects
 from app.controler.workflow.service import ControlService
 from app.domain.models import FlowState, JobState
 from app.github import GitHubApp, GitHubError, GitHubErrorKind, Issue, PullRequest
-from app.persistence.result_store import ResultStore
+from app.persistence.results import ResultStore
 from app.persistence.store import Store
 from app.plugins.hookspecs import hookimpl
 from tests.github import (
@@ -129,8 +129,8 @@ async def test_archive_publishes_stable_status_and_replay_does_not_backfill(stor
     await route_merge(store, flow, "duplicate-merge")
     assert await subject.results.apply(job.id) is JobState.DONE
     assert len(github.notifications) == 2
-    assert store.get_flow(flow.id).state is FlowState.SUCCEEDED
-    assert store.get_flow_execution(flow.id).released_at is not None
+    assert store.flows.get_flow(flow.id).state is FlowState.SUCCEEDED
+    assert store.workers.get_flow_execution(flow.id).released_at is not None
 
 
 async def test_permanent_archive_write_failure_retries_only_frozen_missing_effects(store, monkeypatch, archive_resources):
@@ -148,24 +148,28 @@ async def test_permanent_archive_write_failure_retries_only_frozen_missing_effec
         await subject.results.apply(job.id)
     plan = store.results.get_plan(job.id)
     assert plan.archive == result
-    assert store.get_flow(flow.id).state is FlowState.ACTIVE
-    assert store.get_flow_execution(flow.id).released_at is None
-    assert store.get_job(job.id).result_applied_at is None
-    assert "comment" in store.get_job(job.id).last_error
-    assert "GitHub" in archive_progress(store, flow, store.list_jobs(flow.id))
+    assert store.flows.get_flow(flow.id).state is FlowState.ACTIVE
+    assert store.workers.get_flow_execution(flow.id).released_at is None
+    assert store.jobs.get_job(job.id).result_applied_at is None
+    assert "comment" in store.jobs.get_job(job.id).last_error
+    assert "GitHub" in archive_progress(
+        flow, store.jobs.list_jobs(flow.id), result_store=store.results, workers=store.workers
+    )
     assert [number for number, _ in github.notifications] == [flow.issue_number]
-    jobs = store.list_jobs(flow.id)
+    jobs = store.jobs.list_jobs(flow.id)
     monkeypatch.setattr(Issue, "comment", comment)
-    ControlService(store).retry(flow)
-    assert len(store.list_jobs(flow.id)) == len(jobs)
-    assert store.get_flow(flow.id).current_attempt_id == flow.current_attempt_id
+    ControlService(
+        database=store.database,
+    ).retry(flow)
+    assert len(store.jobs.list_jobs(flow.id)) == len(jobs)
+    assert store.flows.get_flow(flow.id).current_attempt_id == flow.current_attempt_id
     restarted = coordinator(store, github)
     restarted.results.settings.done_label = "new-config"
     assert await restarted.results.apply(job.id) is JobState.DONE
     assert store.results.get_plan(job.id) == plan
     assert len(github.notifications) == 2
     assert len(github.writes) == 6
-    assert [item.id for item in store.list_jobs(flow.id)] == [item.id for item in jobs]
+    assert [item.id for item in store.jobs.list_jobs(flow.id)] == [item.id for item in jobs]
 
 
 @pytest.mark.parametrize("operation", ["add_label", "remove_label", "comment"])
@@ -180,7 +184,7 @@ async def test_archive_recovers_remote_write_before_receipt_after_restart(store,
     monkeypatch.setattr(Issue, operation, lost_response)
     with pytest.raises(ResultPending):
         await subject.results.apply(job.id)
-    assert store.get_flow_execution(flow.id).released_at is None
+    assert store.workers.get_flow_execution(flow.id).released_at is None
     monkeypatch.setattr(Issue, operation, original)
     store.results.recover_claims()
     due(store, job.id)
@@ -202,9 +206,11 @@ async def test_unknown_archive_comment_stays_pending_without_resending_or_reclea
     with pytest.raises(ResultPending, match="outcome is unknown"):
         await coordinator(store, github).results.apply(job.id)
     with pytest.raises(ValueError, match="pending result"):
-        ControlService(store).retry(flow)
+        ControlService(
+            database=store.database,
+        ).retry(flow)
     assert store.results.get_plan(job.id).archive == result
-    assert store.get_flow(flow.id).state is FlowState.ACTIVE
+    assert store.flows.get_flow(flow.id).state is FlowState.ACTIVE
     assert not github.notifications
 
 
@@ -249,22 +255,26 @@ async def test_archive_auth_failure_preserves_whether_comment_was_sent(
     assert effect.state is (EffectState.UNCERTAIN if already_dispatched else expected)
     assert (effect.dispatched_at is not None) is already_dispatched
     assert store.results.get_plan(job.id).archive == result
-    assert store.get_flow_execution(flow.id).released_at is None
+    assert store.workers.get_flow_execution(flow.id).released_at is None
 
     monkeypatch.setattr(Issue, "comment", comment)
     monkeypatch.setattr(Issue, "find_comment", find_comment)
     if already_dispatched:
         with pytest.raises(ValueError, match="pending result"):
-            ControlService(store).retry(flow)
+            ControlService(
+                database=store.database,
+            ).retry(flow)
         due(store, job.id)
     elif failure == "token_unavailable":
         due(store, job.id)
     else:
-        ControlService(store).retry(flow)
+        ControlService(
+            database=store.database,
+        ).retry(flow)
     assert await coordinator(store, github).results.apply(job.id) is JobState.DONE
     assert len(github.notifications) == 2
-    assert store.get_flow(flow.id).current_attempt_id == result.attempt_id
-    assert store.get_flow_execution(flow.id).released_at is not None
+    assert store.flows.get_flow(flow.id).current_attempt_id == result.attempt_id
+    assert store.workers.get_flow_execution(flow.id).released_at is not None
 
 
 async def test_archive_keeps_dispatch_evidence_when_token_expires_after_post(store, tmp_path, monkeypatch, archive_resources):
@@ -297,7 +307,7 @@ async def test_archive_keeps_dispatch_evidence_when_token_expires_after_post(sto
     assert effect.dispatched_at is not None
     assert requests == ["/app/installations/42/access_tokens",
                         f"/repos/{flow.repo}/issues/{flow.issue_number}/comments"]
-    assert store.get_flow_execution(flow.id).released_at is None
+    assert store.workers.get_flow_execution(flow.id).released_at is None
 
 
 async def test_archive_retry_policy_keeps_push_token_acquisition_retryable(tmp_path, monkeypatch):
@@ -427,7 +437,7 @@ async def test_archive_transient_label_errors_resume_automatically(store, monkey
         await subject.results.apply(job.id)
     record = store.results.list_effects(job.id)[0]
     assert record.state in {EffectState.RETRY, EffectState.UNCERTAIN}
-    assert store.get_flow_execution(flow.id).released_at is None
+    assert store.workers.get_flow_execution(flow.id).released_at is None
     monkeypatch.setattr(Issue, "add_label", original)
     due(store, job.id)
     assert await subject.results.apply(job.id) is JobState.DONE
@@ -472,6 +482,6 @@ async def test_restart_recovers_comment_before_receipt_and_isolates_plugin_failu
     finally:
         reopened.close()
     assert len(github.notifications) == 2
-    assert store.get_job(job.id).result_applied_at is not None
-    assert store.get_flow(flow.id).state is FlowState.SUCCEEDED
-    assert store.get_flow_execution(flow.id).released_at is not None
+    assert store.jobs.get_job(job.id).result_applied_at is not None
+    assert store.flows.get_flow(flow.id).state is FlowState.SUCCEEDED
+    assert store.workers.get_flow_execution(flow.id).released_at is not None

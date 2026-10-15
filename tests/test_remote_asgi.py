@@ -22,7 +22,7 @@ from app.contracts.protocol import (
 from app.controler.api import create_app
 from app.controler.config import ServerSettings
 from app.controler.runtime import ServerRuntime
-from app.controler.workers.conversation import ConversationService
+from app.controler.workers.conversation import ConversationBroker, ConversationService
 from app.controler.workers.gateway import WorkerGateway
 from app.controler.workflow.coordinator import JobCoordinator
 from app.controler.workflow.tools import FlowToolService
@@ -42,7 +42,7 @@ class AsgiCoordinator(JobCoordinator):
 
     def __init__(self, attempt_id: int, store: Store) -> None:
         self.attempt_id = attempt_id
-        self.store = store
+        self.jobs = store.jobs
         self.tools = Mock(spec=FlowToolService, execute=AsyncMock(side_effect=self._tool_response))
         self.results = result_application(store, self._commit_result)
 
@@ -68,7 +68,7 @@ class AsgiCoordinator(JobCoordinator):
         pass
 
     async def _commit_result(self, job_id: int) -> JobState:
-        self.store.complete_persisted_result(job_id, JobState.DONE)
+        self.jobs.complete_persisted_result(job_id, JobState.DONE)
         return JobState.DONE
 
     async def fail(self, job: Job, reason: str) -> None:
@@ -82,13 +82,18 @@ class AsgiRuntime(ServerRuntime):
                                       github_webhook_secret="unused", webhook_max_body_bytes=1024,
                                       metrics_token=None, host="test", port=0)
         self.metrics = Metrics()
+        gateway_coordinator = AsgiCoordinator(attempt_id, store)
         self.gateway = WorkerGateway(
-            store,
-            AsgiCoordinator(attempt_id, store),
+            gateway_coordinator, database=store.database,
             worker_tokens={"worker-1": "worker-secret"},
             poll_interval=0.01,
+            tools=gateway_coordinator.tools,
+            results=gateway_coordinator.results,
+            conversations=ConversationBroker(),
         )
-        self.conversations = ConversationService(store, self.gateway.conversations)
+        self.conversations = ConversationService(
+            self.gateway.conversations, database=store.database,
+        )
 
     async def ready(self) -> bool:
         return True
@@ -112,11 +117,11 @@ def test_real_asgi_websocket_completes_a_postgresql_job(store: Store, monkeypatc
         disconnected.set()
 
     monkeypatch.setattr(WorkerGateway, "handle", handle_until_disconnected)
-    flow = store.create_flow("owner/repo", 8, installation_id=42)
-    attempt = store.create_attempt(flow.id)
+    flow = store.flows.create_flow("owner/repo", 8, installation_id=42)
+    attempt = store.flows.create_attempt(flow.id)
     flow.current_attempt_id = attempt.id
-    store.update_flow(flow)
-    job = store.enqueue_job(flow.id, JobKind.INITIAL)
+    store.flows.update_flow(flow)
+    job = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
     application = create_app(AsgiRuntime(store, attempt.id))
 
     with (
@@ -157,6 +162,6 @@ def test_real_asgi_websocket_completes_a_postgresql_job(store: Store, monkeypatc
         socket.close()
         assert disconnected.wait(timeout=2)
 
-    completed = store.get_job(job.id)
+    completed = store.jobs.get_job(job.id)
     assert completed is not None
     assert completed.state is JobState.DONE

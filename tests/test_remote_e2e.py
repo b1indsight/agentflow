@@ -13,16 +13,18 @@ from app.contracts.protocol import (
     InitialTaskResult,
     Succeeded,
 )
+from app.controler.workers.conversation import ConversationBroker
 from app.controler.workers.gateway import WorkerGateway
 from app.controler.workflow.coordinator import JobCoordinator
 from app.controler.workflow.tools import FlowToolService
 from app.domain.delivery_models import OpenedDelivery
 from app.domain.models import FlowDelivery, Job, JobKind, JobState, VcsKind, VcsOutcome
-from app.persistence.stop_store import StopStore
+from app.persistence.stops import StopStore
 from app.persistence.store import Store
 from app.worker.state.session import WorkerSession
 from app.worker.transport.client import WorkerClient
 from app.worker.transport.mcp import FlowToolCaller
+from tests.persistence_fakes import RepositoryViews
 from tests.worker_fakes import NoPendingStops, connected_worker, result_application
 
 
@@ -64,10 +66,10 @@ class QueueConnection:
         return await self._incoming.get()
 
 
-class RemoteStore(Store):
+class RemoteStore(RepositoryViews, Store):
     @property
     def stops(self) -> StopStore:
-        return NoPendingStops(self)
+        return NoPendingStops()
 
     def __init__(self) -> None:
         self.job = Job(id=5, flow_id=3, kind=JobKind.INITIAL, state=JobState.QUEUED)
@@ -188,7 +190,7 @@ class RemoteCoordinator(JobCoordinator):
                           connection_epoch=epoch, task=task)
 
     def __init__(self, store: RemoteStore) -> None:
-        self.store = store
+        self.jobs = store.jobs
         self.tools = Mock(spec=FlowToolService, execute=AsyncMock(side_effect=self._tool_response))
         self.results = result_application(store, self._commit_result)
         self.result: InitialTaskResult | None = None
@@ -216,12 +218,12 @@ class RemoteCoordinator(JobCoordinator):
         pass
 
     async def _commit_result(self, job_id: int) -> JobState:
-        job = self.store.get_job(job_id)
+        job = self.jobs.get_job(job_id)
         assert job is not None and job.result_payload is not None
         result = Succeeded.model_validate(job.result_payload).result
         assert isinstance(result, InitialTaskResult)
         self.result = result
-        self.store.complete_persisted_result(job.id, JobState.DONE)
+        self.jobs.complete_persisted_result(job.id, JobState.DONE)
         return JobState.DONE
 
     async def fail(self, job: Job, reason: str) -> None:
@@ -254,10 +256,12 @@ async def test_control_gateway_and_worker_client_complete_one_remote_job(tmp_pat
     store = RemoteStore()
     coordinator = RemoteCoordinator(store)
     gateway = WorkerGateway(
-        store,
-        coordinator,
+        coordinator, database=store.database,
         worker_tokens={"worker-1": "worker-secret"},
         poll_interval=0.01,
+        tools=coordinator.tools,
+        results=coordinator.results,
+        conversations=ConversationBroker(),
     )
     executor = FakeExecutor()
     client = WorkerClient(session=WorkerSession(tmp_path),

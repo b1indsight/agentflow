@@ -28,7 +28,7 @@ from app.github import (
     ReviewThread,
     ReviewThreads,
 )
-from app.persistence.store import Store
+from app.persistence.jobs import JobStore
 from tests.github import NATIVE_THREAD_REFETCH, record_call
 from tests.test_archive_status import archive_adapter
 from tests.test_coordinator import coordinator
@@ -106,16 +106,16 @@ def thread_resources(revision_resources, monkeypatch):
 @pytest.fixture
 async def thread_revision(store, request, thread_resources):
     mode = getattr(request, "param", "one")
-    flow = store.create_flow("owner/repo", 8, 42)
-    attempt = store.create_attempt(flow.id)
+    flow = store.flows.create_flow("owner/repo", 8, 42)
+    attempt = store.flows.create_attempt(flow.id)
     attempt.codex_session_id = "old-session"
-    store.update_attempt(attempt)
+    store.flows.update_attempt(attempt)
     flow.current_attempt_id = attempt.id
-    store.update_flow(flow)
-    delivery = store.get_or_create_delivery(flow.id, "flow/1")
+    store.flows.update_flow(flow)
+    delivery = store.deliveries.get_or_create_delivery(flow.id, "flow/1")
     delivery.pr_number, delivery.state = 17, DeliveryState.OPEN
     delivery.head_sha, delivery.base_branch = "baseline", "main"
-    store.update_delivery(delivery)
+    store.deliveries.update_delivery(delivery)
     github = ThreadGitHub()
     if mode in {"multiple", "mixed"}:
         github.thread = github.thread.model_copy(update={"comments": Batch[ReviewComment](items=(*github.thread.comments.items, human(2, reply_to_id=1)))})
@@ -131,12 +131,12 @@ async def thread_revision(store, request, thread_resources):
     if mode == "incomplete":
         github.thread = github.thread.model_copy(update={"complete": False})
     settle(store)
-    store.worker_connected("worker-a", PROTOCOL_VERSION, "epoch")
-    job = store.assign_job("worker-a", "token", "epoch")
+    store.workers.worker_connected("worker-a", PROTOCOL_VERSION, "epoch")
+    job = store.workers.assign_job("worker-a", "token", "epoch")
     subject = coordinator(store, github)
     task = await subject.prepare(job)
     assert isinstance(task, RevisionTask)
-    assert store.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
+    assert store.workers.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
     subject.mark_started(job, task, "worker-a")
     github.sha = "baseline" if mode == "noop" else "revision"
     addressed, deferred = [], []
@@ -165,7 +165,7 @@ async def test_lost_response_replays_one_reply_and_one_resolve(store, thread_rev
     assert await subject.results.apply(job.id) is JobState.DONE
     assert len(github.replies) == 1 and github.resolves == ["T1"]
     assert store.reviews.pending(flow.id) == []
-    assert store.get_delivery(flow.id).head_sha == "revision"
+    assert store.deliveries.get_delivery(flow.id).head_sha == "revision"
 
 
 @pytest.mark.parametrize("status", [401, 429])
@@ -241,7 +241,7 @@ async def test_racing_input_survives_ack_and_prevents_rereview(store, thread_rev
         pending = store.reviews.pending(flow.id)
         assert len(pending) == 1
         assert pending[0].github_id == (1 if change == "edited" else 2)
-    assert store.get_flow(flow.id).state is FlowState.ACTIVE
+    assert store.flows.get_flow(flow.id).state is FlowState.ACTIVE
 
 
 @pytest.mark.parametrize("operation", ["reply_review_thread", "resolve_review_thread"])
@@ -256,8 +256,8 @@ async def test_permission_denial_keeps_diagnostic_without_rerunning_code(
 
     monkeypatch.setattr(ReviewThread, "reply" if operation == "reply_review_thread" else "resolve", denied)
     assert await subject.results.apply(job.id) is JobState.DONE
-    assert store.get_delivery(flow.id).head_sha == "revision"
-    batch = batch_for(store, store.get_job(job.id))
+    assert store.deliveries.get_delivery(flow.id).head_sha == "revision"
+    batch = batch_for(store, store.jobs.get_job(job.id))
     assert batch.state.value == "waiting"
     assert any("permission" in point for point in batch.open_points)
     assert github.review_requests == []
@@ -268,7 +268,9 @@ async def test_cancel_after_reply_lookup_prevents_any_write(store, thread_revisi
     flow, job, github, subject = thread_revision
 
     async def cancel(thread, marker):
-        ControlService(store).cancel(flow)
+        ControlService(
+            database=store.database,
+        ).cancel(flow)
 
     monkeypatch.setattr(ReviewThread, "find_reply", cancel)
     with pytest.raises(ResultPending):
@@ -279,17 +281,17 @@ async def test_cancel_after_reply_lookup_prevents_any_write(store, thread_revisi
 
 async def test_commit_failure_keeps_remote_receipts_and_exact_consumption(store, thread_revision, monkeypatch):
     flow, job, github, subject = thread_revision
-    original = Store.complete_persisted_result
+    original = JobStore.complete_persisted_result
 
     def fail_commit(self, *args):
         original(self, *args)
         raise RuntimeError("commit failed")
 
     with monkeypatch.context() as patch:
-        patch.setattr(Store, "complete_persisted_result", fail_commit)
+        patch.setattr(JobStore, "complete_persisted_result", fail_commit)
         with pytest.raises(RuntimeError, match="commit failed"):
             await subject.results.apply(job.id)
-    assert store.get_job(job.id).result_applied_at is None
+    assert store.jobs.get_job(job.id).result_applied_at is None
     assert len(store.reviews.pending(flow.id)) == 1
     assert await coordinator(store, github).results.apply(job.id) is JobState.DONE
     assert len(github.replies) == 1 and github.resolves == ["T1"]
@@ -379,7 +381,7 @@ async def test_new_feedback_during_notification_query_fences_dispatch(
     monkeypatch.setattr(owner, query, with_feedback)
     assert await subject.results.apply(job.id) is JobState.DONE
     assert getattr(github, write) == [] and github.review_requests == []
-    batch = batch_for(store, store.get_job(job.id))
+    batch = batch_for(store, store.jobs.get_job(job.id))
     assert batch.state.value == "waiting" and batch.open_points
     assert [f.github_id for f in store.reviews.pending(flow.id)] == [2]
     assert await coordinator(store, github).results.apply(job.id) is JobState.DONE
@@ -435,12 +437,12 @@ async def test_next_revision_combines_valid_historical_coverage_on_the_same_pr(
         updated_at=new.updated_at, signal="request_changes", submitted=True,
     ), settle_seconds=0, submit_grace_seconds=0)
     settle(store)
-    job = store.assign_job("worker-a", "token", "epoch")
+    job = store.workers.assign_job("worker-a", "token", "epoch")
     task = await subject.prepare(job)
     assert isinstance(task, RevisionTask)
     assert task.expected_head_sha == "revision" and task.session_id == "old-session"
     assert [f.github_id for f in task.feedback] == [2, 3]
-    assert store.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
+    assert store.workers.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
     subject.mark_started(job, task, "worker-a")
     github.sha = "revision2"
 
@@ -454,6 +456,6 @@ async def test_next_revision_combines_valid_historical_coverage_on_the_same_pr(
     assert accept(store, job, result)
     assert await subject.results.apply(job.id) is JobState.DONE
     assert len(github.replies) == 2 and github.resolves == ["T1"]
-    assert github.opened == [] and store.get_delivery(flow.id).pr_number == 17
+    assert github.opened == [] and store.deliveries.get_delivery(flow.id).pr_number == 17
     assert store.reviews.pending(flow.id) == []
-    assert store.get_current_attempt(store.get_flow(flow.id)).revision_cycles == 2
+    assert store.flows.get_current_attempt(store.flows.get_flow(flow.id)).revision_cycles == 2

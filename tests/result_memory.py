@@ -4,9 +4,10 @@ from datetime import timedelta
 
 from app.contracts.result_models import EffectReceipt, EffectRecord, EffectState, ResultPlan
 from app.domain.models import utcnow
+from tests.persistence_fakes import MemoryRepository
 
 
-class MemoryResults:
+class MemoryResults(MemoryRepository):
     def __init__(self) -> None:
         self.clock = utcnow()
         self.plans: dict[int, ResultPlan] = {}
@@ -121,7 +122,7 @@ class MemoryResults:
                     record.claimed_by = record.claim_expires_at = None
 
 
-class MemoryStops:
+class MemoryStops(MemoryRepository):
     """Domain-test double only; stop fencing and confirmation are covered against PostgreSQL."""
 
     def __init__(self) -> None:

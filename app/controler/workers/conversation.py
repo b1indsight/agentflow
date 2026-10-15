@@ -22,7 +22,9 @@ from app.contracts.conversation import (
 )
 from app.contracts.protocol import ConversationQuery, ConversationResult, WorkerMessage
 from app.domain.models import Attempt
-from app.persistence.store import Store
+from app.persistence.database import Database
+from app.persistence.flows import FlowStore
+from app.persistence.workers import WorkerStore
 
 if TYPE_CHECKING:
     from app.controler.workers.connection import WorkerConnection
@@ -117,18 +119,21 @@ class ConversationBroker:
 class ConversationService:
     """Resolve trusted flow/session metadata before sending a worker query."""
 
-    def __init__(self, store: Store, broker: ConversationBroker) -> None:
-        self.store = store
+    def __init__(
+        self, broker: ConversationBroker, *, database: Database
+    ) -> None:
+        self.flows = FlowStore(database)
+        self.workers = WorkerStore(database)
         self.broker = broker
 
     def _resolve(self, flow_id: int) -> tuple[str | None, list[Attempt]]:
-        if self.store.get_flow(flow_id) is None:
+        if self.flows.get_flow(flow_id) is None:
             raise ConversationFailure("flow_not_found")
-        execution = self.store.get_flow_execution(flow_id)
+        execution = self.workers.get_flow_execution(flow_id)
         if execution is None:
             return None, []
         attempts: dict[str, Attempt] = {}
-        for attempt in sorted(self.store.list_attempts(flow_id), key=lambda a: a.id):
+        for attempt in sorted(self.flows.list_attempts(flow_id), key=lambda a: a.id):
             if attempt.codex_session_id:
                 try:
                     HistoryQuery(session_id=attempt.codex_session_id)

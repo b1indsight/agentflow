@@ -4,9 +4,9 @@ from app.domain.models import FlowState
 
 
 def test_current_schema_initialization_is_idempotent(store):
-    flow = store.create_flow("owner/repo", 8, 42)
+    flow = store.flows.create_flow("owner/repo", 8, 42)
     store.init_db()
-    current = store.get_flow(flow.id)
+    current = store.flows.get_flow(flow.id)
     assert current is not None and current.state is FlowState.ACTIVE
     with store.connection() as connection:
         assert connection.execute("SELECT to_regclass('review_threads') AS name").fetchone()["name"] is None

@@ -1,12 +1,14 @@
 import base64
 import json
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
 from app.contracts.conversation import ConversationFailure, HistoryQuery
 from app.controler.workers.conversation import ConversationService
 from app.domain.models import Attempt
+from app.persistence.database import Database
 from app.worker.state import history
 from app.worker.state.history import CodexHistory
 from tests.test_conversation_history import SESSION, message, rollout
@@ -41,9 +43,10 @@ async def test_control_owns_session_order_attribution_and_tail(tmp_path):
                            + json.dumps(message("assistant", "two")) + "\n")
     attempts = [Attempt(id=7, flow_id=42, codex_session_id=SESSION),
                 Attempt(id=8, flow_id=42, codex_session_id=OTHER, session_generation=1)]
-    store = SimpleNamespace(get_flow=lambda _: object(),
-                            get_flow_execution=lambda _: SimpleNamespace(worker_id="worker"),
-                            list_attempts=lambda _: attempts)
+    store = SimpleNamespace(
+        flows=SimpleNamespace(get_flow=lambda _: object(), list_attempts=lambda _: attempts),
+        workers=SimpleNamespace(get_flow_execution=lambda _: SimpleNamespace(worker_id="worker")),
+    )
     calls = []
     reader = CodexHistory(tmp_path)
 
@@ -51,7 +54,11 @@ async def test_control_owns_session_order_attribution_and_tail(tmp_path):
         calls.append(request)
         return reader.query(request)
 
-    service = ConversationService(store, SimpleNamespace(query=query))
+    service = ConversationService(
+        SimpleNamespace(query=query), database=Mock(spec=Database),
+    )
+    service.flows = store.flows
+    service.workers = store.workers
     first = await service.read(42, None, 100)
     assert len(calls) == 1 and first.has_more
     second = await service.read(42, first.next_cursor, 100)

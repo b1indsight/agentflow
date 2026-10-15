@@ -13,14 +13,20 @@ from app.controler.reconciliation.feedback import FeedbackReconciler
 from app.controler.reconciliation.projects import ProjectSync
 from app.controler.reconciliation.pull_requests import Reconciler
 from app.controler.review.judge import BubJudge
-from app.controler.workers.conversation import ConversationService
+from app.controler.workers.conversation import ConversationBroker, ConversationService
 from app.controler.workers.gateway import WorkerGateway
 from app.controler.workflow.coordinator import JobCoordinator
+from app.controler.workflow.effects import ResultEffects
+from app.controler.workflow.results import ResultApplication
 from app.controler.workflow.service import ControlService
+from app.controler.workflow.tools import FlowToolService
 from app.github import GitHubApp
+from app.persistence.database import Database
 from app.persistence.readiness import database_ready
-from app.persistence.store import Store
-from app.persistence.webhook_store import WebhookStore
+from app.persistence.results import ResultStore
+from app.persistence.reviews import ReviewStore
+from app.persistence.webhooks import WebhookStore
+from app.persistence.workers import WorkerStore
 from app.plugins import get_plugin_manager
 from app.telemetry.logging import configure_logging
 from app.telemetry.metrics import Metrics
@@ -35,17 +41,36 @@ class ServerRuntime:
         self.metrics = Metrics()
         self._ready = False
         self._readiness_lock = asyncio.Lock()
-        self.store = Store(
+        database = Database(
             self.settings.database_url,
             lease_duration=timedelta(seconds=self.settings.worker_lease_duration),
             recovery_grace=timedelta(seconds=self.settings.worker_recovery_grace),
         )
         plugins = get_plugin_manager()
         github = GitHubApp(self.settings)
-        self.coordinator = JobCoordinator(self.store, github, self.settings, plugins)
+        effects = ResultEffects(github, database=database)
+        self.results = ResultApplication(
+            github,
+            self.settings,
+            plugins,
+            effects=effects,
+            database=database,
+        )
+        tools = FlowToolService(github, database=database)
+        conversations = ConversationBroker()
+        self.coordinator = JobCoordinator(
+            github,
+            self.settings,
+            plugins,
+            database=database,
+            results=self.results,
+        )
         self.gateway = WorkerGateway(
-            self.store,
             self.coordinator,
+            database=database,
+            tools=tools,
+            results=self.results,
+            conversations=conversations,
             worker_tokens={
                 worker_id: token.get_secret_value()
                 for worker_id, token in self.settings.worker_tokens.items()
@@ -58,32 +83,55 @@ class ServerRuntime:
         self.judge = BubJudge(model=settings.judge_model, api_key=settings.judge_api_key,
                          api_base=settings.judge_api_base, timeout=settings.judge_timeout_seconds)
         self._triage_task: asyncio.Task[None] | None = None
-        self.service = ControlService(self.store, plugins, self.gateway.notify_jobs)
-        self.conversations = ConversationService(self.store, self.gateway.conversations)
-        self.webhooks = WebhookConsumer(self.store, self.settings, self.service)
+        self.service = ControlService(
+            plugins,
+            self.gateway.notify_jobs,
+            database=database,
+        )
+        self.conversations = ConversationService(conversations, database=database)
+        self.webhooks = WebhookConsumer(
+            self.settings,
+            database=database,
+            plugins=plugins,
+            jobs_available=self.gateway.notify_jobs,
+        )
         self.reconciler = Reconciler(
-            self.store, github, self.service,
+            github,
+            self.service,
             settle_seconds=self.settings.settle_seconds,
             interval=self.settings.reconcile_interval_seconds,
             batch_size=self.settings.reconcile_batch_size,
             concurrency=self.settings.reconcile_concurrency,
+            database=database,
         )
         self.feedback_reconciler = FeedbackReconciler(
-            self.store, github, settle_seconds=self.settings.settle_seconds,
-            bot_login=self.settings.bot_login, interval=self.settings.reconcile_interval_seconds,
-            batch_size=self.settings.reconcile_batch_size, concurrency=self.settings.reconcile_concurrency,
+            github,
+            settle_seconds=self.settings.settle_seconds,
+            bot_login=self.settings.bot_login,
+            interval=self.settings.reconcile_interval_seconds,
+            batch_size=self.settings.reconcile_batch_size,
+            concurrency=self.settings.reconcile_concurrency,
+            database=database,
         )
         self.project_sync = ProjectSync(
-            self.store, self.settings.projects, github,
-            interval=self.settings.reconcile_interval_seconds, batch_size=self.settings.reconcile_batch_size,
+            self.settings.projects,
+            github,
+            interval=self.settings.reconcile_interval_seconds,
+            batch_size=self.settings.reconcile_batch_size,
             concurrency=self.settings.reconcile_concurrency,
+            database=database,
         )
+        self.database = database
+        self.workers = WorkerStore(database)
+        self.reviews = ReviewStore(database)
+        self.result_store = ResultStore(database)
+        self.webhook_store = WebhookStore(database)
         self._tasks: list[asyncio.Task[None]] = []
 
     def startup(self) -> None:
-        self.store.init_db()
-        self.store.results.recover_claims()
-        self.store.recover_abandoned_assignments()
+        self.database.init_db()
+        self.result_store.recover_claims()
+        self.workers.recover_abandoned_assignments()
         self._tasks = [
             asyncio.create_task(self.webhooks.run()),
             asyncio.create_task(self.project_sync.run()),
@@ -111,7 +159,7 @@ class ServerRuntime:
         while True:
             await asyncio.sleep(self.settings.worker_sweep_interval)
             try:
-                requeued, failed = self.store.sweep_expired_assignments()
+                requeued, failed = self.workers.sweep_expired_assignments()
                 self.metrics.expired.labels("requeued").inc(requeued)
                 self.metrics.expired.labels("failed").inc(failed)
                 if requeued or failed:
@@ -128,7 +176,7 @@ class ServerRuntime:
         """Recover immediately at startup; network waits never hold the local scheduling loops."""
         while True:
             try:
-                await self.coordinator.results.recover_pending_results(
+                await self.results.recover_pending_results(
                     concurrency=self.settings.result_recovery_concurrency,
                     batch_size=self.settings.result_recovery_batch_size,
                 )
@@ -138,7 +186,7 @@ class ServerRuntime:
             await asyncio.sleep(self.settings.worker_sweep_interval)
 
     def _settle_reviews(self) -> None:
-        if self.store.reviews.claim_due():
+        if self.reviews.claim_due():
             self.gateway.notify_jobs()
 
         if self._triage_task is None or self._triage_task.done():
@@ -146,7 +194,7 @@ class ServerRuntime:
 
     async def _run_triage(self) -> None:
         try:
-            batches = self.store.reviews.pending_triage()
+            batches = self.reviews.pending_triage()
         except Exception:  # noqa: BLE001 -- retry a temporarily unavailable database next sweep
             logger.exception("could not read pending review batches")
             return
@@ -167,7 +215,7 @@ class ServerRuntime:
                 logger.exception("review settle sweep failed; retrying next sweep")
 
     async def receive_webhook(self, event_type: str, delivery_id: str, payload: dict, digest: str) -> None:
-        await asyncio.to_thread(WebhookStore(self.store).receive, delivery_id, event_type, payload, digest)
+        await asyncio.to_thread(self.webhook_store.receive, delivery_id, event_type, payload, digest)
         self.webhooks.wakeup.set()
 
     async def shutdown(self) -> None:
@@ -180,4 +228,4 @@ class ServerRuntime:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
-        self.store.close()
+        self.database.close()

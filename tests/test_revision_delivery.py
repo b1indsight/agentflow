@@ -392,7 +392,7 @@ async def test_empty_review_body_is_not_an_unresolved_obligation(revision_contro
                                      "signal": signal_kind, "kind": ReviewItemKind.REVIEW_BODY})
     store.reviews.batch.feedback.append(signal)
     task = task.model_copy(update={"feedback": [item, signal]})
-    store.jobs[job.id].payload["revision"] = task.model_dump(mode="json")
+    store.job_records[job.id].payload["revision"] = task.model_dump(mode="json")
     result = verified_result(
         task, feedback_refs=[item, signal],
         output=RevisionCodingOutput(summary="Fixed", vcs_backend_used=VcsKind.GIT,

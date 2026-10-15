@@ -7,22 +7,35 @@ from collections.abc import Callable
 from functools import partial
 
 from loguru import logger
+from pluggy import PluginManager
 from pydantic import ValidationError
 
 from app.controler.config import ServerSettings
 from app.controler.events.router import EventRouter
 from app.controler.workflow.service import ControlService
-from app.persistence.store import Store
-from app.persistence.webhook_store import WebhookStore
+from app.persistence.database import Database
+from app.persistence.webhooks import WebhookStore
 
 
 class WebhookConsumer:
-    def __init__(self, store: Store, settings: ServerSettings, service: ControlService) -> None:
-        self.store, self.settings, self.service = store, settings, service
+    def __init__(
+        self,
+        settings: ServerSettings,
+        *,
+        database: Database,
+        plugins: PluginManager,
+        jobs_available: Callable[[], None],
+    ) -> None:
+        self.database = database
+        self.webhook_store = WebhookStore(database)
+        self.settings = settings
+        self.plugins = plugins
+        self.jobs_available = jobs_available
         self.wakeup = asyncio.Event()
 
     def sweep(self, loop: asyncio.AbstractEventLoop | None = None) -> int:
-        inbox = WebhookStore(self.store)
+        """Create services per receipt and publish notifications after its transaction commits."""
+        inbox = self.webhook_store
         handled = 0
         for _ in range(50):
             item = inbox.claim()
@@ -33,21 +46,26 @@ class WebhookConsumer:
                 if item.attempts > 10:
                     inbox.fail(item, "AttemptsExhausted", permanent=True)
                     continue
-                with self.store.transaction() as tx:
+                with self.database.transaction() as tx:
                     with tx.connection() as conn:
                         conn.execute("SET LOCAL statement_timeout = '2s'")
-                    leased = WebhookStore(tx)
+                    leased = self.webhook_store.using(tx)
                     if not leased.lock(item):
                         continue
-                    service = ControlService(
-                        tx, self.service.plugins,
-                        partial(callbacks.append, self.service.notify_jobs), after_commit=callbacks,
-                    )
                     if item.payload is None:
                         raise ValueError("pending webhook payload missing")
                     # dispatch is synchronous DB-only work; nested transactions share this connection.
-                    EventRouter(tx, service, self.settings).dispatch(
-                        item.event_type, item.delivery_id, item.payload,
+                    service = ControlService(
+                        plugins=self.plugins,
+                        jobs_available=partial(callbacks.append, self.jobs_available),
+                        after_commit=callbacks,
+                        database=tx,
+                    )
+                    router = EventRouter(service, self.settings, database=tx)
+                    router.dispatch(
+                        item.event_type,
+                        item.delivery_id,
+                        item.payload,
                     )
                     if not leased.complete(item):
                         raise RuntimeError("webhook claim changed")
@@ -72,7 +90,7 @@ class WebhookConsumer:
 
     def _cycle(self, loop: asyncio.AbstractEventLoop) -> None:
         self.sweep(loop)
-        WebhookStore(self.store).cleanup()
+        self.webhook_store.cleanup()
 
     async def run(self) -> None:
         while True:

@@ -96,20 +96,20 @@ async def test_replacement_connection_and_busy_limit() -> None:
 
 @pytest.mark.asyncio
 async def test_service_resolves_existing_database_metadata_and_released_binding(store, monkeypatch) -> None:
-    flow = store.create_flow("owner/repo", 8, installation_id=42)
+    flow = store.flows.create_flow("owner/repo", 8, installation_id=42)
     broker = ConversationBroker()
-    service = ConversationService(store, broker)
+    service = ConversationService(broker, database=store.database, )
     assert (await service.read(flow.id, None, 100)).unavailable_reason == "no_worker"
-    attempt = store.create_attempt(flow.id)
+    attempt = store.flows.create_attempt(flow.id)
     flow.current_attempt_id = attempt.id
-    store.update_flow(flow)
-    store.worker_connected("worker-1", PROTOCOL_VERSION, "epoch")
-    store.enqueue_job(flow.id, JobKind.INITIAL)
-    assert store.assign_job("worker-1", "assignment", "epoch") is not None
+    store.flows.update_flow(flow)
+    store.workers.worker_connected("worker-1", PROTOCOL_VERSION, "epoch")
+    store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
+    assert store.workers.assign_job("worker-1", "assignment", "epoch") is not None
     assert (await service.read(flow.id, None, 100)).unavailable_reason == "no_session"
     attempt.codex_session_id = SESSION
-    store.update_attempt(attempt)
-    assert store.release_flow_execution(flow.id)
+    store.flows.update_attempt(attempt)
+    assert store.workers.release_flow_execution(flow.id)
     query = AsyncMock(return_value=HistoryPage(session_id=SESSION))
     monkeypatch.setattr(broker, "query", query)
     await service.read(flow.id, None, 100)

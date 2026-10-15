@@ -28,9 +28,10 @@ from app.github import (
 )
 from app.persistence.store import Store
 from tests.github import RecordingGitHub, record_call
+from tests.persistence_fakes import RepositoryViews
 
 
-class ToolStore:
+class ToolStore(RepositoryViews):
     def __init__(self) -> None:
         self.flow = Flow(
             id=3,
@@ -155,8 +156,8 @@ async def test_open_pr_prepares_and_replays_without_remote_delivery(tool_resourc
     store = ToolStore()
     github = ToolGitHub()
     service = FlowToolService(
-        cast(Store, cast(Any, store)),
         cast(GitHubApp, cast(Any, github)),
+        database=cast(Store, cast(Any, store)).database,
     )
 
     first = await service.execute(request(), worker_id="worker-a")
@@ -177,7 +178,10 @@ async def test_open_pr_after_merge_cannot_restore_opening_delivery(tool_resource
     store = ToolStore()
     store.delivery.state = DeliveryState.MERGED
     store.delivery.pr_number = 17
-    service = FlowToolService(cast(Store, store), cast(GitHubApp, ToolGitHub()))
+    service = FlowToolService(
+        cast(GitHubApp, ToolGitHub()),
+        database=cast(Store, store).database,
+    )
     response = await service.execute(request(), worker_id="worker-a")
     assert response.error_kind is FlowToolErrorKind.CONFLICT
     assert store.delivery.state is DeliveryState.MERGED
@@ -188,8 +192,11 @@ async def test_open_pr_after_merge_cannot_restore_opening_delivery(tool_resource
 async def test_prepared_delivery_and_tool_receipt_roll_back_together(monkeypatch, tool_resources) -> None:
     # A crash saving the tool reply must not leave a half-prepared delivery behind.
     store = ToolStore()
-    service = FlowToolService(cast(Store, store), cast(GitHubApp, ToolGitHub()))
-    complete = store.complete_tool_call
+    service = FlowToolService(
+        cast(GitHubApp, ToolGitHub()),
+        database=cast(Store, store).database,
+    )
+    complete = store.deliveries.complete_tool_call
 
     def crash(*args, **kwargs):
         complete(*args, **kwargs)
@@ -213,7 +220,10 @@ async def test_cancel_during_remote_verification_cannot_prepare_delivery(monkeyp
         return RemoteRef(branch="flow/3", sha="abc123")
 
     monkeypatch.setattr(Repository, "fetch_ref", cancel_and_read)
-    service = FlowToolService(cast(Store, store), cast(GitHubApp, github))
+    service = FlowToolService(
+        cast(GitHubApp, github),
+        database=cast(Store, store).database,
+    )
     response = await service.execute(request(), worker_id="worker-a")
     assert response.error_kind is FlowToolErrorKind.STALE_ASSIGNMENT
     assert store.delivery.state is DeliveryState.NONE
@@ -225,14 +235,15 @@ async def test_stale_assignment_is_distinct_from_invalid_arguments(tool_resource
     store = ToolStore()
     store.assignment_is_active = False
     service = FlowToolService(
-        cast(Store, cast(Any, store)),
         cast(GitHubApp, cast(Any, ToolGitHub())),
+        database=cast(Store, cast(Any, store)).database,
     )
 
     stale = await service.execute(request(), worker_id="worker-a")
+    active_store = ToolStore()
     active_service = FlowToolService(
-        cast(Store, cast(Any, ToolStore())),
         cast(GitHubApp, cast(Any, ToolGitHub())),
+        database=cast(Store, cast(Any, active_store)).database,
     )
     invalid = await active_service.execute(
         request().model_copy(update={"arguments": {"title": "", "body": "Done"}}),
@@ -251,9 +262,10 @@ async def test_github_rate_limit_is_returned_as_retryable(tool_resources, monkey
                           retry_after="30")
 
     monkeypatch.setattr(Repository, "fetch_ref", limited)
+    store = ToolStore()
     service = FlowToolService(
-        cast(Store, cast(Any, ToolStore())),
         cast(GitHubApp, cast(Any, ToolGitHub())),
+        database=cast(Store, cast(Any, store)).database,
     )
 
     response = await service.execute(request(), worker_id="worker-a")
@@ -268,8 +280,8 @@ async def test_new_call_cannot_change_existing_pr_arguments(tool_resources) -> N
     store = ToolStore()
     github = ToolGitHub()
     service = FlowToolService(
-        cast(Store, cast(Any, store)),
         cast(GitHubApp, cast(Any, github)),
+        database=cast(Store, cast(Any, store)).database,
     )
     assert (await service.execute(request(), worker_id="worker-a")).error is None
     conflicting = request().model_copy(
@@ -291,8 +303,8 @@ async def test_remote_sha_mismatch_fails_before_opening_pr(tool_resources) -> No
     store = ToolStore()
     github = ToolGitHub()
     service = FlowToolService(
-        cast(Store, cast(Any, store)),
         cast(GitHubApp, cast(Any, github)),
+        database=cast(Store, cast(Any, store)).database,
     )
     mismatched = request().model_copy(update={"commit_sha": "different", "remote_sha": "different"})
 

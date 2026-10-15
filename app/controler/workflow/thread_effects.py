@@ -12,18 +12,22 @@ from app.contracts.result_models import (
 from app.controler.review.resolution import covered_thread
 from app.domain.models import TERMINAL_STATES, ReviewItemKind
 from app.github import GitHubError, PullRequest, Repository, ReviewThread, ReviewThreads
-from app.persistence.store import Store
+from app.persistence.database import Database
+from app.persistence.reviews import ReviewStore
 
 
-def observe(store: Store, plan: ResultPlan, snapshot: ReviewThreads) -> None:
+def observe(
+    plan: ResultPlan, snapshot: ReviewThreads, *, database: Database, reviews: ReviewStore
+) -> None:
     """Persist observations separately from ACK; a crash must not lose webhook-missing feedback."""
-    with store.transaction() as tx:
+    with database.transaction() as tx:
+        reviews_tx = reviews.using(tx)
         flow = tx.lock_workflow(plan.flow_id)
         if (flow is None or flow.state in TERMINAL_STATES
                 or flow.current_attempt_id != plan.attempt_id):
             raise ResultPending("Flow changed during thread refresh")
         assert plan.batch_id is not None
-        tx.reviews.observe_threads(flow.id, snapshot, tx.reviews.get_batch(plan.batch_id).feedback)
+        reviews_tx.observe_threads(flow.id, snapshot, reviews_tx.get_batch(plan.batch_id).feedback)
 
 
 async def revision_current(repo: Repository, plan: ResultPlan, number: int) -> bool:
@@ -40,22 +44,30 @@ async def revision_current(repo: Repository, plan: ResultPlan, number: int) -> b
             and current.head_repository == effect.repo)
 
 
-def has_pending_thread_feedback(store: Store, plan: ResultPlan, effect: ResolveEffect) -> bool:
+def has_pending_thread_feedback(
+    plan: ResultPlan, effect: ResolveEffect, *, reviews: ReviewStore
+) -> bool:
     """Fence locally known updates too, including input whose thread mapping has not arrived yet."""
     assert plan.batch_id is not None
-    batch = store.reviews.get_batch(plan.batch_id)
+    batch = reviews.get_batch(plan.batch_id)
     other_ids = {c.github_id for t in batch.threads.threads if t.thread_id != effect.thread_id
                  for c in t.comments.items} if batch.threads else set()
     covered_refs = {(f.item_id, f.version) for f in effect.covered}
     return any(
         f.kind is ReviewItemKind.INLINE and f.github_id not in other_ids
-        and (f.item_id, f.version) not in covered_refs for f in store.reviews.pending(plan.flow_id)
+        and (f.item_id, f.version) not in covered_refs for f in reviews.pending(plan.flow_id)
     )
 
 
 async def resolve_thread(
-    store: Store, repo: Repository, plan: ResultPlan, record: EffectRecord,
-    records: list[EffectRecord], dispatch: Callable[[ResultPlan, EffectRecord], None],
+    repo: Repository,
+    plan: ResultPlan,
+    record: EffectRecord,
+    records: list[EffectRecord],
+    dispatch: Callable[[ResultPlan, EffectRecord], None],
+    *,
+    database: Database,
+    reviews: ReviewStore,
 ) -> EffectReceipt:
     """A successful note and exact human coverage are required even on uncertain-write recovery."""
     effect = record.payload
@@ -66,9 +78,9 @@ async def resolve_thread(
         threads=(thread,) if "resolved" in thread.model_fields_set else (),
         limitations=thread.limitations,
     )
-    observe(store, plan, snapshot)
+    observe(plan, snapshot, database=database, reviews=reviews)
     present = thread.thread_id == effect.thread_id and "resolved" in thread.model_fields_set
-    local_pending = has_pending_thread_feedback(store, plan, effect)
+    local_pending = has_pending_thread_feedback(plan, effect, reviews=reviews)
     reason = None
     receipt = EffectReceipt(thread_id=effect.thread_id,
                             remote_resolved=thread.resolved if present else None)
@@ -97,7 +109,7 @@ async def resolve_thread(
         except GitHubError as error:
             # A rejected confirmation read says nothing about the completed mutation.
             raise ResultPending(f"resolve confirmation is pending: {error}") from error
-        observe(store, plan, after)
+        observe(plan, after, database=database, reviews=reviews)
         if (refreshed.thread_id != effect.thread_id or "resolved" not in refreshed.model_fields_set
                 or not after.complete):
             raise ResultPending("resolve outcome awaits a complete remote thread read")

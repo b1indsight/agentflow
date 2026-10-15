@@ -13,7 +13,7 @@
 控制端运行时、数据库与配置实例化仍归对应命令；加载 CLI 不提前加载 SQL、SDK 或控制端。
 
 `telemetry/logging.py` 只提供通用日志配置；`telemetry/metrics.py` 由控制端使用，并调用
-`persistence/metrics_store.py` 读取数据库指标。两者不在包入口集中导出，避免 worker 经日志导入 SQL。
+`persistence/metrics.py` 读取数据库指标。两者不在包入口集中导出，避免 worker 经日志导入 SQL。
 GitHub 错误分类和 Retry-After 计时由 `github/errors.py` 提供，仓储通过 `app.github` 复用纯计算，
 不会初始化 SDK。`domain/project_models.py` 只保留业务目标状态，GitHub Project 绑定配置及远端目标数据归 `github/projects.py`。
 职责边界由 `tests/test_boundaries.py` 检查，另以独立解释器验证 worker 启动、实际 CLI 入口和资源 JSON 恢复的传递导入。
@@ -23,7 +23,13 @@ GitHub 错误分类和 Retry-After 计时由 `github/errors.py` 提供，仓储�
 `workers/` 管理 Worker 连接、派发通信与历史查询，`workflow/` 拥有 Flow/Job 准备、交付转换、
 结果提交及副作用恢复，`review/` 加工审核上下文和反馈并运行 Judge，`reconciliation/` 对账
 PR、反馈与 Projects。事件、Worker 管理和对账调用工作流，工作流调用审核模块；
-各子包直接引用已有领域类型、协议、Store/GitHub 及配置，不反向依赖 API 或运行时。
+各子包直接引用已有领域类型、协议、具体仓储/GitHub 及配置，不反向依赖 API 或运行时。
+Runtime 统一初始化工具、effects、结果应用和 conversation broker；各服务仅接收实际
+使用的数据库与服务，自行创建需要的具体仓储。Runtime 管理共享 Database 的初始化和关闭，
+向服务提供同一 Database。Gateway 直接使用工具和结果应用，结果应用的锁由 Runtime、coordinator
+与 Gateway 共享。Webhook 消费器接收配置、插件、通知回调和 Database，在每次 receipt
+事务内直接创建 ControlService 与 EventRouter，构造函数以事务上下文创建仓储；通知和 hook
+排到外层提交后执行。API 和对账使用独立的常驻控制服务。
 各包入口只说明职责，调用者直接导入具体模块。
 
 目录列表见[当前目录](roadmap.md#8-当前目录与里程碑)。ASGI Python 入口为
@@ -86,7 +92,7 @@ PR 依赖操作与 INITIAL 提交复用 `contracts.result_models.unique_pull_req
 只消费已读取的唯一创建回执；退休恢复缺少唯一回执时继续等待，不提交本地完成状态。
 `ResultApplication` 同时拥有逐 job 锁、有界分页和固定并发恢复；Runtime 调度其恢复方法，
 Gateway 持久接收后直接调用 `coordinator.results.apply`，核验提交完成后才发送 ACK；
-工具请求直接调用 `coordinator.tools.execute`。内部配置、仓储与服务依赖使用具体类型。
+工具请求直接调用 `gateway.tools.execute`。内部配置、数据库、仓储与服务依赖使用具体类型。
 网络请求不占用数据库事务；plugin hook 在提交后调用，不具备持久化投递保证。worker 不能直接更新这些状态。
 `JobCoordinator.prepare_for_assignment` 完成任务构造、push capability 签发和 I/O 后业务复查，
 直接返回 wire `Assignment` 或 QUEUED/DONE/FAILED。读取故障使用持久重试预算，签发故障直接失败。
@@ -186,16 +192,40 @@ terminal result 三方核对。当前缺口包括：
 
 反馈批次的前置判断/直接修订选择、指令和未决问题归并由 `review_policy` 的纯函数决定；
 `recovery_policy` 根据固定时间及读取的事实决定重排、失败、保留诊断和绑定释放。
-Store 负责候选查询、信号/回执事实、锁和原子写入。恢复扫描在原 worker 锁事务内先提交 job
-动作，再查询事务内更新后的绑定事实；策略函数不执行 SQL、读取时钟或调用外部服务。
+功能仓储负责候选查询、信号/回执事实和原子写入，Database 统一维护连接、事务、时钟和共用锁。
+WorkerStore 的恢复扫描在原 worker 锁事务内先提交 job 动作，再查询事务内更新后的绑定事实；
+策略函数不执行 SQL、读取时钟或调用外部服务。
 
-当前 Store 使用 Psycopg 3 的同步连接池访问 PostgreSQL：
+服务接收共享的 `Database`，自行创建并持有以下具体仓储，使用 Psycopg 3 同步连接池访问
+PostgreSQL，例如在构造函数内执行 `self.flows = FlowStore(database)`，业务调用使用
+`self.flows.get_flow_by_pr(...)`。服务与功能仓储均不依赖聚合 Store：
+
+| 仓储与模块 | 操作归属 |
+| --- | --- |
+| `FlowStore` / `flows.py` | Flow 与 Attempt 的事实读写 |
+| `DeliveryStore` / `deliveries.py` | 交付状态与 tool-call 去重账本 |
+| `JobStore` / `jobs.py` | Job 生命周期、未应用结果分页及完成提交 |
+| `WorkerStore` / `workers.py` | Worker、Flow binding、fenced assignment、准备与租约恢复、drain |
+| `StopStore` / `stops.py` | 停止请求、发送授权与停止回执 |
+| `ResultStore` / `results.py` | 冻结结果计划和 effects/receipt 恢复 |
+| `ReviewStore` / `reviews.py` | 反馈版本、批次、审核上下文及线程事实 |
+| `WebhookStore` / `webhooks.py` | Webhook inbox 消费和事件去重审计 |
+| `ReconcileStore` / `reconciliation.py` | PR 与反馈对账进度 |
+| `ProjectStore` / `projects.py` | Projects 投影与有类型的局部更新 |
+
+`schema.py` 集中完整建表 SQL，初始化沿用既有依赖顺序；`records.py` 仅提供原生行类型及
+必需记录回读校验。`database.py` 提供连接、显式事务、注入时钟、共用锁和 schema 初始化；
+Runtime 管理该数据库的生命周期。`repository.py` 的 `using(tx)` 保留具体仓储类型，
+返回绑定事务连接的视图；原仓储保留自己的连接范围。仓储需要其他仓储的 SQL 操作时，
+显式使用具体类型并传入同一上下文。Store 仅为 CLI 运维、live smoke 和测试提供整组仓储，
+其事务视图用于这些入口的数据库操作；Runtime 不使用 Store 装配服务。
+领域数据类型继续拥有自己的校验和纯规则，持久化操作归上述仓储；时间统一使用注入时钟。
 
 `Flow`、`FlowExecution`、`FlowDelivery`、`FlowToolCall`、`Attempt`、`Job` 是 Pydantic
 持久化模型。返回这些领域对象的查询在
 cursor 上使用 Psycopg `class_row(Model)`，由模型统一校验枚举、时间和其他字段；其余轻量查询继续
-使用 pool 的 `dict_row` 默认值。SQL、事务边界、JSONB 适配和并发协议仍由 Store 显式维护，没有引入
-ORM。
+使用 pool 的 `dict_row` 默认值。SQL、JSONB 适配和原子操作由对应仓储显式维护，
+事务边界与共用锁由 Database 提供，没有引入 ORM。
 
 - `flows`：issue 级状态，`(repo, issue)` 仅允许一个非终态 flow；
 - `flow_executions`：Flow 到单槽 worker/repo identity 的生命周期 binding 与 recovery deadline；
@@ -219,11 +249,13 @@ ORM。
 
 自动化覆盖 active 唯一约束、flow/attempt/job 往返、review upsert、assignment start/heartbeat/fencing、
 lease 到期 requeue、started grace/deadline、epoch fencing、result inbox 去重、跨 Store 可见性、delivery 去重和并发 assign。
-`assign_job()` 使用事务内的 `FOR UPDATE SKIP LOCKED`，gateway 接受多个独立配置 worker。
+`WorkerStore.assign_job()` 使用事务内的 `FOR UPDATE SKIP LOCKED`，gateway 接受多个独立配置 worker。
 
-Store 继续使用同步接口。assignment claim 无锁读取公平候选，只有请求方就是候选时才锁定自身 worker，
+仓储继续使用同步接口。assignment claim 无锁读取公平候选，只有请求方就是候选时才锁定自身 worker，
 重新检查 epoch、在线状态、空闲槽位及 drain/binding；随后锁定最早 eligible Flow job，并原子创建
-或复用 lifecycle binding。`with store.transaction() as tx` 提供连接绑定的 Store 视图，各领域步骤显式使用 `tx`。
+或复用 lifecycle binding。`with database.transaction() as tx` 提供绑定连接的数据库上下文；
+服务用 `self.flows.using(tx)`、`self.jobs.using(tx)` 绑定自己持有的仓储。
+所有步骤共用该连接，异常一起回滚，事务退出后这些视图拒绝继续使用。
 结果的最终事务同时写入 flow/delivery/attempt、带源 job 唯一键的派生 job/codex run、`result_applied_at` 和 worker slot。
 `flow_tool_calls` 的 prepared delivery 与 response 也一起提交。
 
