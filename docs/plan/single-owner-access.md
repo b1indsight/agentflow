@@ -1,7 +1,7 @@
 # 单账号 Cloudflare Access 接入 — Feature record
 
 **Stage:** Implemented locally（自动化验证通过，真实 Access 部署待验收）
-**PR:** 待创建实现 PR；真实部署验收仍未完成。
+**PR:** [#84](https://github.com/b1indsight/agentflow/pull/84)（Draft；真实部署验收仍未完成）
 
 ## 1. Initial plan
 
@@ -136,6 +136,23 @@
 - **未完成部署验收：** 未配置用户邮箱、Access team/audience、OAuth App 或真实域名；
   未运行真实 GitHub 登录/MFA、Cloudflare 策略拒绝其他账号和源站网络不可绕过的验收。
   当前只有本地实现，无 commit、push、PR 或上线；这些状态不由自动化通过推断。
+
+### [002] — 2026-10-15 — 修复公钥刷新并发测试缺口
+
+- **触发：** 独立审查指出同步 JWKS fixture 不暂停，原测试不能检测刷新锁失效；
+  用户明确要求修复该测试。
+- **实际变更：** 只修改现有并发测试，不修改生产认证逻辑或通用 JWKS fixture。
+  异步 MockTransport 通过事件暂停取钥；观察进入认证的十个请求，待全部进入后再释放
+  首次请求和轮换请求的响应。每批断言仅新增一次取钥且十个 HTTP 请求均返回 200。
+  保留未知 kid 冷却和旧 kid 拒绝检查；finally 释放事件并回收所有请求。
+- **消融证据：** 从 PR 首个提交读取旧测试，对比修复后测试；仅在内存去掉 `_key()` 的锁。
+  旧测试有锁/无锁均通过；修复后有锁通过、无锁失败。实验共用测试的受控时钟，未修改
+  产品文件；结果保留于本线程 `.amp/in/artifacts/access-lock-ablation.json`，不提交仓库。
+- **验证：** 会话 API 和会话端到端测试共 36 passed；目标并发测试独立连续运行五次通过。
+  `uv run --no-sync ruff check app tests`、`uv run --no-sync mypy app tests` 和
+  `git diff --check` 通过。此前全量 768 passed 为 [001] 的记录，本次仅重跑受影响测试。
+- **交付：** 在原 PR #84 分支提交本次返修；推送前进行一次独立审查，真实 Access 部署
+  验收范围保持不变。
 
 ## 3. References
 

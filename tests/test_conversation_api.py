@@ -85,23 +85,59 @@ def test_owner_access_cannot_be_spoofed(runtime, kind) -> None:
 async def test_access_key_rotation_and_unknown_kid_requests_are_bounded(runtime, monkeypatch) -> None:
     clock = [100.0]
     monkeypatch.setattr(access, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    fetch_started, release_fetch, all_started = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    started = 0
+    original_authenticate = runtime.access.authenticate
+
+    async def authenticate(token):
+        nonlocal started
+        started += 1
+        if started == 10:
+            all_started.set()
+        await original_authenticate(token)
+
+    async def respond(request):
+        response = runtime.issuer.respond(request)
+        fetch_started.set()
+        await release_fetch.wait()
+        return response
+
+    monkeypatch.setattr(runtime.access, "authenticate", authenticate)
+    await runtime.access.client.aclose()
+    runtime.access.client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
     app = create_app(runtime)
     app.state.runtime = runtime
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://test") as client:
         path = "/api/flows/42/conversation"
+
+        async def concurrent_queries(headers, expected_fetches):
+            nonlocal started
+            started = 0
+            fetch_started.clear()
+            release_fetch.clear()
+            all_started.clear()
+            requests = [asyncio.create_task(client.get(path, headers=headers)) for _ in range(10)]
+            try:
+                # Keep the first fetch suspended until every authentication has entered;
+                # an immediate mock response would hide missing refresh serialization.
+                await asyncio.wait_for(all_started.wait(), 1)
+                await asyncio.wait_for(fetch_started.wait(), 1)
+                assert runtime.issuer.requests == expected_fetches
+            finally:
+                release_fetch.set()
+                responses = await asyncio.gather(*requests)
+            assert all(response.status_code == 200 for response in responses)
+            assert runtime.issuer.requests == expected_fetches
+
         owner_headers = runtime.issuer.headers()
-        responses = await asyncio.gather(*(client.get(path, headers=owner_headers) for _ in range(10)))
-        assert all(response.status_code == 200 for response in responses)
-        assert runtime.issuer.requests == 1
+        await concurrent_queries(owner_headers, 1)
         runtime.issuer.kid = "rotated"
         rotated_headers = runtime.issuer.headers()
         for _ in range(5):
             assert (await client.get(path, headers=rotated_headers)).status_code == 401
         assert runtime.issuer.requests == 1
         clock[0] += 61
-        responses = await asyncio.gather(*(client.get(path, headers=rotated_headers) for _ in range(10)))
-        assert all(response.status_code == 200 for response in responses)
-        assert runtime.issuer.requests == 2
+        await concurrent_queries(rotated_headers, 2)
         assert (await client.get(path, headers=owner_headers)).status_code == 401
     await runtime.access.close()
 
