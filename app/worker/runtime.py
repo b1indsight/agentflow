@@ -21,7 +21,6 @@ from app.worker.transport.client import WorkerClient
 _CONTROL_ENVIRONMENT_KEYS = frozenset(
     {
         "FLOWTOOL_DATABASE_URL",
-        "FLOWTOOL_CONTROL_API_TOKEN",
         "FLOWTOOL_GITHUB_APP_ID",
         "FLOWTOOL_GITHUB_PRIVATE_KEY_PATH",
         "FLOWTOOL_GITHUB_WEBHOOK_SECRET",

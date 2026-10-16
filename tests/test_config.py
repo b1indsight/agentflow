@@ -9,6 +9,38 @@ from app.worker.execution.codex import _codex_environment
 from app.worker.runtime import validate_worker_environment
 
 
+@pytest.mark.parametrize("changes", [
+    {"access_owner_email": None},
+    {"access_issuer": "http://test.cloudflareaccess.com"},
+    {"access_issuer": "https://attacker.example"},
+    {"access_issuer": "https://test.cloudflareaccess.com/path"},
+    {"access_issuer": "https://user@test.cloudflareaccess.com"},
+    {"access_audience": "app,other"},
+    {"access_owner_email": "owner"},
+    {"access_owner_email": "a@example.com,b@example.com"},
+])
+def test_access_requires_complete_single_owner_configuration(changes: dict[str, str | None],
+                                                           monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    values: dict[str, str | None] = {"access_issuer": "https://test.cloudflareaccess.com", "access_audience": "app",
+              "access_owner_email": "owner@example.com"}
+    values.update(changes)
+    with pytest.raises(ValidationError, match="Access"):
+        ServerSettings(database_url="postgresql://localhost/test",
+                       worker_tokens={"worker": SecretStr("secret")},
+                       access_issuer=values["access_issuer"], access_audience=values["access_audience"],
+                       access_owner_email=values["access_owner_email"])
+
+
+def test_blank_access_configuration_disables_user_api(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    settings = ServerSettings(database_url="postgresql://localhost/test",
+                              worker_tokens={"worker": SecretStr("secret")}, access_issuer="",
+                              access_audience=" ", access_owner_email="")
+    assert settings.access_issuer is settings.access_audience is settings.access_owner_email is None
+    assert "control_api_token" not in ServerSettings.model_fields
+
+
 @pytest.mark.parametrize("labels", [
     {"in_review_label": "  "}, {"done_label": "FLOW"},
 ], ids=["blank-label", "label-collision"])

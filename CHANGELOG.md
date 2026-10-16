@@ -8,6 +8,10 @@
 
 ## Unreleased
 
+- 用户会话 API 改为 Cloudflare Access JWT 验签和单 owner 邮箱授权，删除共享 Bearer Token。
+  Control 有界缓存/轮换公钥，取钥失败时保守拒绝；Worker/Webhook/metrics 认证保持独立。
+  提供 GitHub 登录、MFA 和独立管理域名部署说明；真实 Access 环境验收仍待完成。
+
 - Persistence 的业务 SQL 归 Flow/Delivery/Job/Worker 功能仓储，Store 显式持有各仓储实例；
   独立 Database 上下文提供共享连接、事务、时钟和共用锁，功能仓储只依赖该上下文。
   完整 schema 集中初始化；事件审计归 Webhook、drain 归 Worker，Projects/Webhook 使用统一入口。

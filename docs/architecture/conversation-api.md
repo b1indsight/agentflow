@@ -9,13 +9,16 @@ Flow/Attempt 归属和多会话顺序由 control 处理；无独立 SessionRef�
 
 ## 配置与请求
 
-在 control 设置非空 `FLOWTOOL_CONTROL_API_TOKEN`，通过
-`Authorization: Bearer <token>` 调用。未配置时返回 503。token 不传给 worker，也不写进
-前端静态资源；WebUI 服务端可代为调用。认证成功后的响应带 `Cache-Control: no-store`。
+在 control 配置 `FLOWTOOL_ACCESS_ISSUER`、`FLOWTOOL_ACCESS_AUDIENCE` 和唯一的
+`FLOWTOOL_ACCESS_OWNER_EMAIL`，通过 Cloudflare Access 完成 GitHub 登录和 MFA。
+后端仅接受 `Cf-Access-Jwt-Assertion`，独立验签并限制 owner 邮箱；不接受旧共享 Bearer Token、
+邮箱 header 或直接传入的 Cookie。三项均未配置时返回 503，部分配置时启动失败。
+所有 API 响应带 `Cache-Control: no-store`。配置、公钥缓存和真实验收见
+[单账号 Access 部署](../deployment/access.md)。
 
 ```http
 GET /api/flows/42/conversation?limit=100
-Authorization: Bearer <control-api-token>
+Cf-Access-Jwt-Assertion: <Access 添加的已签名应用 JWT>
 ```
 
 参数：`flow_id` 为正整数；`limit` 默认 100，范围 1–500；`cursor` 为上次返回的
@@ -75,11 +78,12 @@ cursor，稍后轮询新增完整记录，不代表 agent 执行结束。
 | HTTP | code / 情况 |
 | --- | --- |
 | 401 | `unauthorized` |
+| 403 | `forbidden`（其他邮箱、非用户身份或非应用 token） |
 | 404 | `flow_not_found` |
 | 409 | `cursor_invalid` |
 | 422 | 非法 flow_id、limit 或 cursor 长度 |
 | 502 | `history_unreadable`、`history_limit`、`invalid_response` |
-| 503 | `conversation_api_disabled`、`worker_unavailable`、`query_busy`、`database_unavailable` |
+| 503 | `conversation_api_disabled`、`access_keys_unavailable`、`worker_unavailable`、`query_busy`、`database_unavailable` |
 | 504 | `query_timeout`（worker 查询 10 秒超时） |
 
 已有 flow 尚无 worker/session 时返回 200、空 items、`unavailable_reason: no_worker/no_session`。

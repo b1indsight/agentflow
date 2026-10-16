@@ -181,6 +181,7 @@ async def test_runtime_sweeps_continue_while_result_recovery_waits():
                                      pending_triage=Mock(return_value=[]))
     runtime.workers = SimpleNamespace(sweep_expired_assignments=Mock(side_effect=lambda: (lease.set() or 0, 0)))
     runtime.database = SimpleNamespace(close=Mock())
+    runtime.access = SimpleNamespace(close=AsyncMock())
     runtime.results = SimpleNamespace(recover_pending_results=AsyncMock(side_effect=recover))
     runtime.gateway = SimpleNamespace(notify_jobs=Mock())
     runtime.reconciler = SimpleNamespace(stop=Mock())
@@ -194,6 +195,7 @@ async def test_runtime_sweeps_continue_while_result_recovery_waits():
     finally:
         await runtime.shutdown()
     assert exited.is_set() and all(task.done() for task in runtime._tasks)
+    runtime.access.close.assert_awaited_once()
     runtime.database.close.assert_called_once()
 
 

@@ -45,7 +45,7 @@ Codex 等长任务占用 GitHub 的 Webhook 请求。
 
 - `GET /healthz` 返回 `{"status": "ok"}`；它是存活探针，不检查数据库或外部依赖；
 - `GET /readyz` 检查运行时启动状态与数据库；`GET /metrics` 由独立 token 保护，未配置时关闭；
-- `GET /api/flows/{flow_id}/conversation` 由 control API token 保护，经 WS 查询原 worker 历史，
+- `GET /api/flows/{flow_id}/conversation` 校验 Cloudflare Access JWT 并限制单 owner 邮箱，经 WS 查询原 worker 历史，
   不在数据库复制完整会话正文，详见[会话查询 API](conversation-api.md)；
 - `POST /webhook` 缺少或带错误签名时返回 401；签名正确时持久化 webhook inbox 后返回 202；
 - `WS /internal/workers/connect` 按 token map 鉴权，并为每个 worker identity 保持一条连接；

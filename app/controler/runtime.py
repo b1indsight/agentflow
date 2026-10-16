@@ -7,6 +7,7 @@ from datetime import timedelta
 
 from loguru import logger
 
+from app.controler.access import OwnerAccess
 from app.controler.config import ServerSettings
 from app.controler.events.webhooks import WebhookConsumer
 from app.controler.reconciliation.feedback import FeedbackReconciler
@@ -37,6 +38,7 @@ class ServerRuntime:
 
     def __init__(self, settings: ServerSettings) -> None:
         self.settings = settings
+        self.access = OwnerAccess(settings)
         configure_logging("serve", self.settings.log_format)
         self.metrics = Metrics()
         self._ready = False
@@ -228,4 +230,5 @@ class ServerRuntime:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        await self.access.close()
         self.database.close()
