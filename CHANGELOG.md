@@ -8,6 +8,20 @@
 
 ## Unreleased
 
+- 增加只读 Web 控制台前端预览：五列 Kanban、筛选搜索、独立详情、可折叠 Flow 导航，
+  GitHub/Agent 混合活动样例支持下滑加载和末尾分界线刷新。当前仅使用本地 fixture，
+  不修改或连接后端；接口、GitHub 聚合、鉴权托管需求记录在 GitHub #85。
+  前端采用 React、TypeScript、Vite、Tailwind CSS 和按需 shadcn/ui 组件，保留已确认布局与交互；
+  新增独立前端检查，Python/Docker 打包排除本机 npm 依赖和预览构建产物。
+  正文统一为 16px，桌面/手机详情保持固定头部和独立内容滚动；查询合并为 GitHub 风格单框，
+  支持组合条件、统一建议、输入法安全提交和 URL 恢复。长列表每窗口最多挂载 60 条，
+  长正文/代码分段浏览，会话缓存有界淘汰并可回读旧历史，保留折叠、阅读段和键盘焦点。
+  看板按窗口可用高度自适应，五列独立滚动、列标题固定，返回看板恢复各列位置与卡片焦点。
+  修复手机导航折叠分组后的焦点回绕，收紧关键进展类型并独立状态展示目录；
+  新增 Playwright 浏览器回归及 CI 检查，覆盖窗口化阅读、看板返回与缓存淘汰回读。
+  修复虚拟列表尺寸测量期间强制同步渲染引发的 ResizeObserver 循环告警，
+  浏览器回归同时检查 window error 事件与页面异常，防止行为断言通过却遗漏调度错误。
+
 - 用户会话 API 改为 Cloudflare Access JWT 验签和单 owner 邮箱授权，删除共享 Bearer Token。
   Control 有界缓存/轮换公钥，取钥失败时保守拒绝；Worker/Webhook/metrics 认证保持独立。
   提供 GitHub 登录、MFA 和独立管理域名部署说明；真实 Access 环境验收仍待完成。
