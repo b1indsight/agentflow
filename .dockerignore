@@ -11,3 +11,4 @@ app/**/*.pyc
 app/controler/web/node_modules/
 app/controler/web/dist/
 app/controler/web/test-results/
+app/controler/console_static/

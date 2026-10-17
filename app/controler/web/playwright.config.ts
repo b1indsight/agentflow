@@ -9,8 +9,7 @@ export default defineConfig({
     trace: "retain-on-failure",
   },
   webServer: {
-    command:
-      "npm run dev -- --config e2e/vite.config.ts --port 5174 --strictPort",
+    command: "npm run dev -- --port 5174 --strictPort",
     url: "http://127.0.0.1:5174",
   },
 });

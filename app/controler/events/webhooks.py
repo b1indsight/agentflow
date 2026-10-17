@@ -13,6 +13,7 @@ from pydantic import ValidationError
 from app.controler.config import ServerSettings
 from app.controler.events.router import EventRouter
 from app.controler.workflow.service import ControlService
+from app.persistence.console_sync import ConsoleSyncStore
 from app.persistence.database import Database
 from app.persistence.webhooks import WebhookStore
 
@@ -67,6 +68,7 @@ class WebhookConsumer:
                         item.delivery_id,
                         item.payload,
                     )
+                    ConsoleSyncStore(tx).observe_webhook(item.event_type, item.payload)
                     if not leased.complete(item):
                         raise RuntimeError("webhook claim changed")
             except Exception as error:  # noqa: BLE001 -- each failure has durable retry/blocked state

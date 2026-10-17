@@ -1,10 +1,18 @@
 # syntax=docker/dockerfile:1
 ARG PYTHON_IMAGE=python:3.12-slim-bookworm@sha256:782412e85d0f0984994c290652577d4018aff08145c85b262bb63dc0c7522254
+FROM node:24-bookworm-slim AS console-build
+WORKDIR /opt/console
+COPY app/controler/web/package*.json ./
+RUN npm ci
+COPY app/controler/web/ ./
+RUN npm run build
+
 FROM ${PYTHON_IMAGE} AS build
 WORKDIR /opt/flowtool
 RUN pip install --no-cache-dir uv==0.11.3
 COPY pyproject.toml uv.lock README.md ./
 COPY app ./app
+COPY --from=console-build /opt/console/dist ./app/controler/console_static
 RUN uv sync --locked --no-dev --no-editable
 
 FROM ${PYTHON_IMAGE} AS runtime

@@ -9,6 +9,7 @@ from loguru import logger
 
 from app.controler.access import OwnerAccess
 from app.controler.config import ServerSettings
+from app.controler.console.sync import ConsoleSynchronizer
 from app.controler.events.webhooks import WebhookConsumer
 from app.controler.reconciliation.feedback import FeedbackReconciler
 from app.controler.reconciliation.projects import ProjectSync
@@ -91,6 +92,7 @@ class ServerRuntime:
             database=database,
         )
         self.conversations = ConversationService(conversations, database=database)
+        self.console = ConsoleSynchronizer(github, self.conversations, database=database)
         self.webhooks = WebhookConsumer(
             self.settings,
             database=database,
@@ -136,6 +138,7 @@ class ServerRuntime:
         self.workers.recover_abandoned_assignments()
         self._tasks = [
             asyncio.create_task(self.webhooks.run()),
+            asyncio.create_task(self.console.run()),
             asyncio.create_task(self.project_sync.run()),
             asyncio.create_task(self.reconciler.run()),
             asyncio.create_task(self.feedback_reconciler.run()),

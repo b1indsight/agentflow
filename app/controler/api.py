@@ -8,6 +8,7 @@ import hmac
 import json
 import re
 from contextlib import asynccontextmanager
+from pathlib import Path as FilePath
 
 import anyio
 from fastapi import (
@@ -25,9 +26,12 @@ from loguru import logger
 from psycopg import Error as DatabaseError
 from psycopg_pool import PoolTimeout
 from starlette.middleware.base import RequestResponseEndpoint
+from starlette.responses import FileResponse, JSONResponse, RedirectResponse
 
+from app.contracts.console import ConsoleFailure
 from app.contracts.conversation import ConversationFailure, ConversationPage
 from app.controler.config import ServerSettings
+from app.controler.console.api import router as console_router
 from app.controler.runtime import ServerRuntime
 from app.persistence.webhooks import DeliveryConflict
 
@@ -72,17 +76,49 @@ def create_app(runtime: ServerRuntime | None = None) -> FastAPI:
             await active_runtime.shutdown()
 
     application = FastAPI(title="FlowTool", lifespan=lifespan)
+    application.include_router(console_router, dependencies=[Depends(_require_owner)])
+
+    @application.exception_handler(ConsoleFailure)
+    async def console_failure(request: Request, error: ConsoleFailure) -> Response:
+        return JSONResponse({"detail": error.code}, status_code=error.status,
+                            headers={"Cache-Control": "no-store"})
+
+    @application.exception_handler(DatabaseError)
+    @application.exception_handler(PoolTimeout)
+    async def database_failure(request: Request, error: Exception) -> Response:
+        return JSONResponse({"detail": "database_unavailable"}, status_code=503,
+                            headers={"Cache-Control": "no-store"})
 
     @application.middleware("http")
     async def observe_request(request: Request, call_next: RequestResponseEndpoint) -> Response:
         response = await call_next(request)
-        if request.url.path.startswith("/api/"):
+        if request.url.path.startswith(("/api/", "/console")):
             response.headers["Cache-Control"] = "no-store"
+            response.headers["X-Content-Type-Options"] = "nosniff"
+            response.headers["Referrer-Policy"] = "no-referrer"
+        if request.url.path.startswith("/console"):
+            response.headers["Content-Security-Policy"] = (
+                "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
+                "connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+            )
         if request.url.path == "/webhook":
             request.app.state.metrics.request(response.status_code)
             logger.bind(event="webhook_received", reason_code="ok" if response.status_code == 202 else "unspecified",
                         delivery_id=request.headers.get("x-github-delivery", "")).info("")
         return response
+
+    @application.get("/console", dependencies=[Depends(_require_owner)], include_in_schema=False)
+    async def console_redirect() -> Response:
+        return RedirectResponse("/console/")
+
+    @application.get("/console/{asset:path}", dependencies=[Depends(_require_owner)], include_in_schema=False)
+    async def console_static(asset: str) -> Response:
+        # Authenticate before filesystem access and conditional responses; no unprotected mount.
+        directory = FilePath(__file__).parent / "console_static"
+        path = (directory / (asset or "index.html")).resolve()
+        if not path.is_relative_to(directory.resolve()) or not path.is_file():
+            raise HTTPException(503 if not asset else 404, "console_assets_unavailable" if not asset else "asset_not_found")
+        return FileResponse(path)
 
     @application.get("/api/flows/{flow_id}/conversation", response_model=ConversationPage,
                      dependencies=[Depends(_require_owner)])

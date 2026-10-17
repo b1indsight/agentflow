@@ -1,7 +1,8 @@
 # Web 控制台与 Flow Kanban — Feature record
 
-**Stage:** Frontend / 前端预览已实现；使用示例数据，真实后端接入另列需求
-**PR branch:** `feat/web-console-kanban`；前端预览，真实后端接入另列需求
+**Stage:** Backend implementation / 本地实现与自动化检查已完成；审查、远端 CI 及真实部署验收分别记录
+**PR branch:** `feat/web-console-backend`；同一草稿 PR 承载方案及后续实现
+**Frontend PR:** [#86](https://github.com/b1indsight/agentflow/pull/86)
 **Backend issue:** [#85](https://github.com/b1indsight/agentflow/issues/85)
 
 ## 1. Initial plan
@@ -685,3 +686,461 @@ Projects 保留自身 Issue 归属选择与远端投影逻辑；只抽取真正�
   `resize-observer-after.log`、`resize-observer-browser-checks.log`。
 - **Delivery / limits:** 更新前端说明、changelog 和单文件预览，仅本地修改，未提交、推送、创建 PR 或部署。
   未改后端，GitHub CI 与真实后端 / GitHub / Access 集成仍未验收。
+
+### [023] — 2026-10-17 — #85 后端接入方案（提案，待批准）
+
+#### 背景、目标与边界
+
+用户要求在新分支和新 PR 实现 [#85](https://github.com/b1indsight/agentflow/issues/85)。
+前端已经通过 [#86](https://github.com/b1indsight/agentflow/pull/86) 合并，
+本轮以包含该 PR 的 `main` 为基础；继续维护本功能记录，后端使用新的
+`feat/web-console-backend` 分支及一个草稿 PR，批准后在同一 PR 实现。
+
+本提案取代“本轮只做前端”的交付边界，保留既有 React 布局、只读定位、owner 认证及 Worker 协议。
+不增加创建 Flow、评论、审核、拖卡、注入消息、cancel/retry/drain 或合并入口。
+读取不触发 GitHub mutation，不改调度、结果应用、审核或 Projects 同步业务语义。
+所有下述接口、限额和完整性声明均为拟实施契约，尚未实现或通过验收。
+
+#### 已核实的复用点与缺口
+
+- `app/controler/api.py` 已有 owner dependency、API no-store、会话请求断连清理；
+  页面及其他控制台 API 尚未挂接。认证复用 `app/controler/access.py`，缺配置拒绝服务。
+- `app/persistence/projects.py::ProjectStore.refresh()` 内联了阶段 SQL，包含终态、
+  closed/失败 effects、archive 恢复、merged、无 PR/无执行者及 pending job/result 的优先级。
+  控制台不能另写一份近似规则，也不能依赖 Projects 是否配置。
+- `flows.py::list_flows()` 全量返回；控制台需要独立批量查询，不改变内部调用方的全量语义。
+  `flow_deliveries` 已有可空 title/PR；Issue 标题未作为独立事实持久化，搜索先限定本地已知标题。
+- `ConversationService.read()` 每页只读一个 session，按 attempt ID 向前推进，游标绑定 session 集合及版本；
+  EOF 保留最后 session 游标。它不提供跨 session 的事件时间排序，也不提供旧 session 的刷新索引。
+  复用现有 Worker `HistoryQuery`、文件身份校验和单页预算，不能将 EOF 解释为整个 Flow 结束。
+- 现有 GitHub 评论、Review 和线程读取主要服务审核，部分展示字段缺失；
+  timeline、PR 提交及 checks 等需要补充专用只读查询。不能直接对外序列化审核对象或内部 payload。
+- Docker 目前只有 Python build stage，wheel 构建排除前端 `dist`；
+  Tunnel 管理路径目前仅允许 conversation。需要落实静态构建产物分发及精确路径白名单。
+- [#49](https://github.com/b1indsight/agentflow/issues/49) 的 CLI 分页和
+  [#47](https://github.com/b1indsight/agentflow/issues/47) 的全局异步数据库治理继续独立跟踪；
+  本轮仅保证新增查询无逐行往返且不阻塞事件循环，不宣称这两个 issue 已解决。
+
+#### 提议的接口与本地查询合同
+
+| 接口 | 内容与分页 |
+| --- | --- |
+| `GET /api/flows` | `q`、可选列阶段、cursor、limit；默认 50、上限 100，返回卡片摘要、过滤全集阶段计数和计数观察时间。五列可独立续读。 |
+| `GET /api/repos` | 从全部本地 Flow 聚合完整 `owner/name`，支持搜索及字典序游标，不依赖当前任务页，不访问 GitHub。 |
+| `GET /api/flows/{id}` | 详情及有界关键进展、当前动作/原因/下一步、交付、当前或最后 Worker、安全诊断；不受列表筛选影响。 |
+| `GET /api/flows/{id}/jobs` | 默认 50、上限 100，按 job ID 稳定分页，保留 job/attempt 身份、类型、状态及时间，不只取最近几项。 |
+| `GET /api/flows/{id}/activity` | 下述多来源活动、覆盖信息、各源读取与刷新续读位置。保留原 conversation 接口不变。 |
+| `GET /api/flows/{id}/activity/threads/{thread_id}` | 线程内回复独立分页，验证 thread 归属本 Flow 的 PR，限制单次条数和字节。 |
+
+- 服务端拥有查询语法和阶段真值；普通词/引号短语、`repo:`、`is:`、`status:`、`issue:`、`pr:`
+  与现有 UI 交互一致，增加明确的 Flow 编号搜索。未知、重复或无效条件返回安全的 422，不能放宽查询。
+  repo 必须使用完整身份，不再移除特定 owner 前缀；不因候选页尚未加载而拒绝有效的完整仓库名。
+- SQL 先筛选再分页；每页固定数量的批量语句，不逐卡查询或调用 GitHub。
+  阶段判定在 persistence 内最小提取共用 SQL，由控制台和 Projects 同时引用并对照测试。
+  当前动作只依据 job、交付、结果应用及恢复事实，无法推导时明确 unknown；终态显示历史 Worker。
+- 列表采用 Flow ID 倒序 keyset，游标绑定规范化过滤、列、版本和首段最高 ID；
+  新 Flow 由首段刷新发现。它不是跨请求 MVCC 快照：并发状态变化可改变过滤成员和计数，
+  返回观察时间，前端按 ID 合并；首段刷新后清空该查询旧分页，不混用旧游标。
+  jobs 使用同类有界 keyset。错误/跨 Flow/跨查询游标返回可恢复的 409，不静默重置为首段。
+- DTO 显式列白名单；排队无分支/Worker 时返回 null，终态与待恢复分开。
+  URL 从已验证的 GitHub 仓库和编号构造或校验，不透传任意协议；错误只暴露代码。
+  不输出 assignment token、App/Worker/push token、内部路径、job/result/effect 原始 payload。
+- 同步查询以完整数据库工作单元移入受控线程，使用数据库/连接池超时限制实际占用；
+  取消 await 不等于已停止线程，不能提前释放并发许可后让后台 SQL 无限累积。
+  不在数据库事务中 await GitHub 或 Worker。仅在查询计划证明需要时增加局部索引。
+
+#### GitHub 覆盖、聚合与刷新合同
+
+1. **先核对覆盖表再编写读取器。** 对 Issue/PR 描述、普通评论、Review、线程和回复、
+   PR 提交、checks/statuses、生命周期、标签、指派、审核请求、reactions 等逐类核验当前 API、
+   App 权限、来源身份和分页；区分“支持”“无权限”“远端不可用”“不可恢复历史”，
+   不能将尚未实现的类型列成已支持。删除正文、过期日志和 API 不提供的历史无法还原。
+2. **复用认证和错误分类，新增展示读取。** 扩展 `app/github/` 对应概念的只读接口，
+   补足作者、发生/更新时间、原始链接、文件/行号、代码片段、resolved/outdated 等字段。
+   以来源命名空间和远端稳定 ID 标识；timeline 中已有对应实体的事件只引用该身份，
+   不重复产生第二条评论。Review、thread、reply 保留父子关系。
+3. **明确排序限制，不承诺全局时间有序。** 首版提议保证每个来源、session 及线程的原生向前顺序，
+   跨来源通过确定性的有界轮转取得记录，携带发生时间和来源位置，标明 `source_ordered`。
+   页面沿已读窗口稳定展示，较早时间的补录明确标识；不把两页局部排序说成全局时间排序。
+   现有 GitHub 读取与 Worker 契约没有建立可验证的跨来源单调时间下界，若要求严格跨来源时间序，
+   需要预读完整历史或新增索引/投影，不能在有界首屏中无条件保证；这是本方案待批准的产品取舍。
+4. **双向阅读不复用 mock offset。** 每个来源/session 保留明确游标，聚合游标绑定 Flow、
+   契约版本及读取方向；页面按已读窗口记录续读锚点，淘汰后从对应源锚点回读。
+   旧 Worker session 复查使用现有单 session query，不修改协议或复用仅能前进的最后 session 游标。
+   单页不内嵌无限增长的 session/线程游标数组，线程回复独立读取。
+5. **刷新有可恢复核对过程。** 新增、编辑/状态更新、早期补录和无变化分别表达。
+   有更新过滤的来源利用其原生边界；缺少可靠变更索引的线程、reactions 等需要从已知起点分段复核，
+   输出覆盖范围和 refresh continuation。预算用完或某源失败时显示“核对未完成”，
+   不能显示“无新增/全部读完”；完成所声明范围的检查后才显示对应范围无变化。
+   对已被缓存淘汰的旧对象也可回读并按稳定 ID 更新，不只查询最后一页。
+6. **来源独立失败。** GitHub 和 Worker 以及 GitHub 子类型均返回 available/partial/unavailable、
+   安全原因、最后成功观察时间/位置和续读信息。无 session 不等于无 GitHub 历史；
+   一个来源失败不丢弃其他来源的结果或前端旧数据。空页有 continuation 时继续，
+   `has_more=false` 仅表示当前读取位置，不代表流程结束或未来没有新增。
+7. **资源预算。** 初拟活动默认 50、上限 100 条、响应最多 512 KiB；每个 HTTP 请求最多
+   8 次远端读取、总 deadline 12 秒，GitHub 并发最多 2、Worker 保留既有并发/10 秒超时约束。
+   实施时按完整响应（含嵌套回复和元数据）计费，GraphQL 外层/内层都限制，超额保留未消费位置；
+   解析前约束远端响应大小，不能先下载无限数据再裁剪。尊重 Retry-After，浏览器请求内不无限重试。
+   大正文/工具输出有明确分段或来源截断信息；原 Worker 已截断内容不能假装可恢复全文。
+   这些是总预算，不能对每个来源分别重置预算后宣称请求整体有界。
+8. **保留策略。** 首版不新增永久活动库，不把 webhook inbox 当历史库，不持久化完整 Worker 日志。
+   优先使用可校验的来源游标和客户端有界阅读窗口；如实际游标/变更检查需要服务端状态，
+   在实现前补充容量、TTL、失效恢复和退出清理方案并说明取舍，不隐式加入无限缓存。
+   若最终需要 schema 或持久投影，应先在本记录提案，明确迁移、保留和淘汰后再实施。
+
+#### 模块、鉴权、打包与前端接入
+
+- `app/contracts/console.py`：对外只读 DTO、分页/错误和覆盖状态，不暴露持久模型。
+  `app/persistence/console.py`：批量读取；共用阶段 SQL 归 persistence。
+  `app/controler/console/`：路由、读取编排和来源聚合，按实际职责拆分，避免继续扩大 `api.py`。
+  不在现有 React 源码目录里混入后端实现，不为单一实现新建 Protocol/通用数据源框架。
+- `ServerRuntime` 显式装配依赖并负责相关读取资源关闭；复用 GitHubApp、数据库和 conversation broker。
+  断开 HTTP、切页或超时取消等待中的 GitHub/Worker 请求并回收控制端 pending；
+  无法中断的线程/Worker 文件读仍受自身预算约束，不能宣称取消 HTTP 即中止远端文件 I/O。
+- `/console`、固定静态资源前缀及全部新增 API 均先执行现有 owner 验签，
+  StaticFiles mount 不能因未执行 dependency 绕过保护。无配置 503，无效身份 401，其他 owner 403。
+  鉴权必须先于文件内容或 304 返回；API no-store，静态缓存不允许跨身份共享敏感响应。
+- 使用同源生产构建，CSP 将 `connect-src 'none'` 审查调整为 `'self'`，不开放 CDN、任意域或脚本执行。
+  浏览器依靠 Access 传递身份，不接触后端凭据。后端只提供结构化文本，不输出可执行 HTML。
+- Node 仅在构建期使用。增加明确静态产物目录（如 `app/controler/console_static/`），
+  由锁定 npm 构建生成，wheel/sdist 含该产物，运行时不需要 Node；保留排除 node_modules/test-results。
+  发布构建必须先生成资源，再由 sdist 重建 wheel 验证资源仍在；未构建源码环境明确提示资源缺失，
+  不悄悄转为 mock。Docker 增加锁定 Node 构建阶段，将同一产物接入 Python 安装过程。
+- 原生/Docker/K8s Tunnel 模板仅增加控制台、静态资源和明确的用户 API 路径，
+  仍拒绝 `/docs`、openapi、Worker、metrics 和探针；只修改模板，不代为配置线上 Access/Tunnel。
+- React 改用实际接口，删除生产入口的 fixture/隐式回退；测试样例仅留在测试入口。
+  保留现有布局和 DOM/缓存上限，适配完整仓库身份、列级续读/总数、真实 DTO、来源完整性、编辑合并、
+  反向回读和可恢复错误。取消旧请求并检查响应归属；正式验证延迟乱序、失败重试和 Worker 离线。
+  PR #86 的三项 low finding 不自动视为已修复；若接入修改了相同导航/读取路径，记录实际覆盖和变化。
+
+#### 备选方案、成本与风险
+
+- **继续只提供前端样例**成本最低，但不能满足 #85；本轮选择真实读取接入。
+- **不持久化、按来源向前读取（提议）**保留现有协议与运维边界，首屏有界；
+  代价是跨源不保证严格事件时间序，旧状态完整复核可能需要多次续读。
+- **永久聚合事件库/索引**可支持更强排序与增量刷新，但引入 schema、同步、修正、保留和删除隐私成本；
+  首版不默认采用。不能为了更好看的时间线把全量抓取藏在一次 HTTP 请求里。
+- 查询 keyset 只保证稳定键顺序，不冻结可变事实；明确弱快照语义和首段刷新避免给出错误完整性承诺。
+  GitHub 权限/限流、Worker 离线及源历史截断属于预期状态，必须展示范围而非吞掉错误。
+
+#### 实施顺序与验收
+
+1. 批准方案后先确定 DTO、GitHub 覆盖表、查询语法、游标/刷新/排序契约和预算；更新对应架构文档。
+2. 实现控制台批量查询、共用阶段判定和详情/jobs；通过真实 PostgreSQL 的过滤分页、
+   全集计数、优先级、查询次数与敏感字段排除测试，再接 HTTP owner 保护。
+3. 逐来源补足 GitHub 读取，接入 Worker 历史；实现有界聚合、去重、编辑/状态复核、
+   多级续读、部分失败、限流和取消。不把不可恢复或未核对范围标成完整。
+4. 接入 React 真实请求并验证阅读/焦点、列分页、下滑、末尾刷新及各错误状态；
+   加入可控延迟/失败/乱序的公开合同回归，测试样例不进入生产包。
+5. 增加受保护静态托管、Node 构建、wheel/sdist/serve 镜像和 Tunnel 白名单；
+   检查安装后的产物和直接深链接，不只在 Vite 开发模式验证。
+6. 执行格式/前端类型/单元和浏览器检查、Ruff、Mypy、完整 pytest、分发构建、部署模板检查；
+   做完下述对照后经过代码审查门禁，在同一分支/PR 推送实现，不自动合并。
+
+**对照/故障验证（实施后执行，当前未运行）：**
+
+- 对同一批真实 PostgreSQL 数据移除过滤前置/共用阶段，验证跨页结果、全集计数和
+  merged + pending-result 等组合的断言会失败；扩大页长时应用 SQL 往返数量保持固定。
+- 对受锁 SQL 比较移出完整工作单元前后事件循环响应性，确认健康读取不被新增查询阻塞；
+  取消后实际数据库工作仍受语句超时/并发边界约束，不以取消 await 作为证明。
+- 对多页、嵌套回复、同 ID 多路径、旧评论编辑、线程状态、checks/reactions 变化及
+  有 continuation 的空页移除预算/规范身份/复核步骤，验证对应完整性或更新断言失效。
+  Worker 跨 session、EOF 后追加和旧 session 核对单独验证，不用 mock offset 推导协议能力。
+- 安装 wheel 与 serve 镜像分别请求页面、资源、API、非法路径和未认证路径；
+  移除资源鉴权后拒绝断言应失败。浏览器走真实 HTTP DTO，GitHub/Worker I/O 仅在受控验证中替换。
+- 真实 GitHub 私有读取和 Cloudflare Access 登录/MFA 验收单独报告，需要环境时明确阻塞；
+  不执行会影响他人仓库的写入，不用替身或单元测试替代真实登录成功的结论。
+
+#### 待批准事项与实现中核验项
+
+- **待批准的主要取舍：** 首版采用显式 `source_ordered`、可标识补录的混合阅读，
+  保证来源内顺序并披露跨源限制，不默认新增永久聚合库；刷新可能需要多段核对。
+  若要求所有来源严格按事件时间全局排序，应先调整该设计及索引/保留成本，再开始实现。
+- **实现中核验：** GitHub 各类 API 的准确字段、权限、排序和更新过滤，SDK 的流式响应字节上限，
+  统计查询执行计划、静态产物发布入口、预算具体值。核验发现改变上述合同的限制时追加提案，
+  不静默缩减 #85 覆盖或宣称完成。
+- 本轮仅交付方案文档；未写实现和测试，未运行后端接入验收，#85 保持未完成。
+
+### [024] — 2026-10-17 — 选择 C：本地活动索引/投影，继续讨论合同
+
+- **Requirement / decision:** 用户明确选择方案 C，并要求继续讨论细节。采用本地持久活动索引/投影，
+  由受控同步读取 GitHub/Worker，再向控制台提供统一查询；不再采用 [023] 的不持久化、
+  跨来源轮转 `source_ordered` 作为最终混合会话展示合同。
+- **Superseded scope:** [023] 中“不新增永久活动库”的保留策略、跨来源读取顺序展示方案及相关
+  前端续读设计需要据此修订；只读、owner 验签、资源预算、来源完整性、Worker 原协议、
+  有界分页及真实环境验收等约束继续适用。本地投影不能充当工作流状态真值或触发 GitHub 写操作。
+- **Guarantee boundary:** 本地可按已同步版本的事件时间及稳定身份建立统一顺序和分页；
+  这不证明远端历史已经全部同步，也不能保证未来不会发现更早事件。
+  首次回填、增量同步、旧对象核对和来源不可用仍需独立呈现范围及进度。
+- **Pending details:** 保存规范正文还是只存索引/摘要、正文与工具输出的容量及保留策略、
+  编辑历史和删除语义、同步触发与公平调度、快照/变更游标与补录、迁移/恢复及清理成本仍待讨论。
+  “选 C”不等于批准永久保存所有 Worker 原始日志，也不自动确定上述默认值。
+- **Implementation / validation:** 仅记录已选架构方向；未写 schema、实现或测试，
+  未执行后端接入验收，整体方案仍处讨论阶段。
+
+### [025] — 2026-10-17 — 确定按 Flow 保存时间线及分层内容
+
+- **Confirmed requirements:** 用户要求以 `flow_id` 为关联键保存 Flow 时间线。
+  GitHub 交互和 Flow 变更保存完整内容；Worker 输出保存展示正文；其他过长的工具输出、
+  代码 diff 等保存必要信息、摘要、跳转链接和查询方式。
+  用户另提出 Flow 查看状态及最新状态可独立保存或从时间线计算，具体方案继续讨论。
+- **Content contract:** 时间线条目保留来源、稳定身份、发生/观察/更新时间及对象关系。
+  完整 GitHub/Flow 内容指已观察的交互正文和业务变更内容，不直接持久化或对外暴露
+  内部凭据及原始 job/result/effect payload。无法获取的源历史和既有源截断继续明确标记，
+  不把摘要伪装为原文。完整内容可分段存取，不因单个 HTTP 响应预算静默截断。
+- **Large artifact proposal:** 长工具输出和 diff 保留类型、必要上下文、可得的大小/行数/文件统计、
+  摘要及定位信息；查询定位绑定 Flow/来源身份和适用的 session/commit/记录位置，
+  不把任意内部路径、命令或凭据作为浏览器可执行入口。
+  查询时重新检查 owner 与 Flow 归属；区分定位内容的准确版本、原文已变化/清理和来源不可用。
+  元数据与摘要的具体格式、阈值及保留期限仍待定，不默认增加 LLM 摘要调用。
+- **View/latest-state proposal (not yet approved):** 将“查看状态”暂理解为 owner 的已读状态及阅读位置，
+  与业务状态分开存储；如用户指的是用于看板展示的派生状态，应归当前状态投影，不混用概念。
+  阅读进度应参考本地变更版本/续读范围与稳定条目锚点，不能仅用事件发生时间或最大自增 ID
+  代表已读，避免补录、旧条目编辑及并发提交漏报。读取页面本身不等于整条时间线已读。
+  个人阅读状态写入只修改 UI 元信息，不新增工作流/GitHub 业务写入口。
+- **Latest-state boundary proposal:** 当前业务状态继续以已有 Flow/job/交付等持久事实为准，
+  实时通过共用阶段查询读取，确有需要再维护可重建的看板摘要；不每次打开页面回放整条时间线，
+  也不把异步 GitHub 补录或最后一条活动当作最新 Flow 状态。
+  新增本地业务变更记录应和对应事实在同一事务落地；历史不能还原的变更只能标为迁移基线，
+  不伪造完整旧历史。具体事务边界与摘要维护策略在实现方案中核实。
+- **Status:** 已确认内容分类和 Flow 归属；查看状态含义、状态存储方案及其他细节仍在讨论。
+  本轮仅更新文档，未写实现、迁移或测试，未执行后端接入验收。
+
+### [026] — 2026-10-17 — 个人阅读状态独立跟踪，本轮聚焦 #85
+
+- **Clarification / scope:** 用户确认“查看状态”指个人阅读状态，随后要求先记录 issue、后续再实现，
+  当前专注补全控制台后端能力。已创建 [#88](https://github.com/b1indsight/agentflow/issues/88)，
+  跟踪个人已读/未读、阅读位置和跨设备同步；前述具体已读判定建议不视为全部获批。
+- **Deferred:** 本 PR 不新增阅读状态表、个人阅读状态写 API、未读提醒或跨设备阅读进度合并。
+  个人阅读状态不作为 #85 后端交付的前置条件。
+  现有页面交互所需的临时滚动/焦点/折叠恢复继续保留，不扩展为个人已读持久化。
+- **Still in scope:** 按 `flow_id` 保存分层时间线、GitHub 与 Worker 同步、完整性和来源状态、
+  当前业务状态与阶段查询、列表/详情/jobs/activity API、真实前端接入及受保护静态托管。
+  内容保存范围继续按 [025]，持久投影方向继续按 [024]；不把业务状态或同步状态误删出范围。
+- **Status / validation:** 仅更新功能记录和 PR 范围，保留方案讨论状态，未写实现或测试。
+  #88 为后续需求，未实现、未关闭；#85 和本 PR 的后端能力仍待实现及验收。
+
+### [027] — 2026-10-17 — 确定永久版本、响应式同步、阅读快照与当前状态表
+
+- **Decision / status:** 用户明确决定下列六项产品策略，取代 [023]–[026] 中相应候选方案；
+  决策已确定，数据库结构、同步与迁移实现仍未完成，不能将文档更新当作能力交付。
+
+#### 1. 永久保存
+
+按 [025] 确定的分层内容永久保存，Flow 终态不触发自动过期或正文清理。
+这包括完整 GitHub/Flow 业务内容、Worker 展示正文，以及长工具输出/diff 的必要信息、
+摘要和定位；不扩大为永久保存全部 Worker 原始日志或本轮原本不归档的大型原文。
+请求/响应/渲染仍有界，长期保存意味着数据库总量可以增长，不宣称总存储固定。
+
+#### 2. 保存每个采集版本，删除只追加标记
+
+保存实际观察到的各个内容/状态版本，编辑追加版本，历史版本不覆盖；
+远端删除只追加删除标记，不清除已采集正文或旧版本。
+相同对象的相同版本重复投递/重复读取需幂等，不因一次重试复制同一版本。
+删除必须有足够证据，权限变化、远端错误或孤立 404 不能当作确认删除。
+首次采集前未观察到的编辑不能还原；远端删除也不会从本地永久档案中擦除正文，
+归档内容继续受 owner 鉴权保护。此项取代此前“删除后清除正文”的候选建议。
+
+#### 3. Flow → Issue 单向关联及此前交互
+
+由 `flow_id` 指向明确的仓库/Issue 身份，不把 Issue 号当作唯一 Flow 身份，
+不新增独立的反向映射真值；事件路由所需的索引/查询不改变该关联方向。
+时间线仍按 `flow_id` 归属；关联 Issue/PR 中早于本轮 Flow 创建的交互标为“此前交互”，
+不能将采集时间冒充发生时间，也不能伪装为本轮执行事件。
+Worker session 与本地业务变更保持真实 Flow 归属，不因共享 Issue 混入其他轮次执行记录。
+
+#### 4. 响应式触发，活跃 Flow 打开详情/刷新时后台同步
+
+不新增对所有 Flow 高频扫描的控制台同步循环。优先响应 webhook、已提交的本地业务变更和
+Worker 相关连接/执行事件；活跃 Flow 打开详情或点击刷新时，另外触发该 Flow 的后台同步。
+合并重复触发，按来源保存持久检查点、失败重试和限流退避；事件消费与网络读取解耦，
+重试/启动恢复只处理待完成工作，不借此引入全量定时抓取。
+页面先读取已有本地档案，明确展示同步中、最后成功位置和来源不完整，不等待全量回填结束。
+
+**已核实的现状边界：** `ServerRuntime.receive_webhook()` 持久接收后唤醒 consumer，
+Worker 连接处理心跳、工具请求和执行结果；但现有 `ConversationQuery/Result` 是主动查询响应，
+Worker 不会自动推送每条会话正文。正文同步需要在触发后复用该有界历史查询。
+心跳本身不作为每次全量抓取正文的信号，不修改 Worker 协议以虚构实时输出流。
+当前服务还包含租约、结果、审核及远端 reconciliation 的周期补偿；保留这些既有正确性机制，
+不将“响应式优先”误写为当前没有任何周期任务。
+Webhook 未覆盖的交互/字段需在明确触发的核对中补齐，不能宣称 webhook 单独保证全部历史。
+
+#### 5. 本次阅读快照 + 显式刷新
+
+时间线读取绑定本地已发布版本/快照，并按发生时间及稳定身份排序；后续分页保持同一视图，
+后来的新增、编辑、补录或删除标记不悄悄改变已打开的分页内容。
+显式刷新先触发适用的后台同步，再在可读取的新版本上检查并切换/合并变化，保留稳定阅读锚点；
+同步尚未完成时显示对应范围，不以旧快照未变化冒充远端无变化。
+此前交互及新发现的早期记录分别标识，刷新不隐式标为个人已读；个人阅读状态仍由 #88 后续实现。
+具体快照发布、提交可见性和变更游标由实现设计验证，不能直接把未提交的最大自增 ID 当作连续快照。
+
+#### 6. 维护当前状态表
+
+新增按 `flow_id` 维护的当前状态投影表，供看板/详情读取最新生命周期、派生阶段、当前动作和
+执行摘要等白名单字段；不采用“每次实时联表查询即可、暂不维护状态表”的旧候选方案。
+现有工作流事实继续拥有业务写入语义，状态表复用共用阶段规则，不能成为另一套调度状态机。
+本地业务变更的事实、历史记录和当前投影需在一致事务边界更新；远端观察经身份/版本校验后应用，
+不能让旧 webhook、补录活动或晚返回响应覆盖较新状态。
+支持从当前业务事实重建/核对投影；历史不完整时标记迁移基线，不从缺失事件伪造过去。
+时间线阅读快照与当前状态版本分别表明，不能让“最新状态”被历史阅读快照无意冻结。
+
+- **Validation planned:** 增加重复事件幂等、编辑版本永久可读、删除后旧正文保留、此前交互归属、
+  事件触发合并与恢复、无全量扫描、快照隔离/刷新、事务回滚及状态投影重建/防回退验证。
+  真实 API 能力、索引和预算等继续由实现核验；不再把上述六项列为待用户选择的问题。
+- **Implementation:** 本轮仅记录决策并更新同一草稿 PR；未新增状态表、同步服务、API 或测试。
+
+### [028] 2026-10-17 — 永久归档、当前投影和主动 Worker 会话采集
+
+- **Requirement / context:** 用户要求按 [027] 六项策略实现，明确 Worker 会话正文采用主动查询。
+  本项实现取代 [024]—[027] 中尚未实现的候选机制；个人阅读状态继续留在 #88。
+- **Implementation:**
+  - `app/persistence/console_schema.py` 新增 `console_flows` 当前投影、`console_activity` 不可变
+    版本、`console_sync` 持久来源任务及 installation 限流退避。现有事实的数据库触发器在原事务内
+    更新投影、追加业务历史、排队同步；迁移只为缺失 Flow 建立明确的基线，不伪造旧业务历史。
+  - `console_facts` 共用看板和 Projects 的阶段优先级。投影可从事实重建；看板状态版本与
+    时间线阅读版本独立。远端标题以实际更新时间防回退，包括较新但正文未变化的观察。
+  - `app/persistence/activity.py` 按 Flow 行锁串行分配发布版本，版本与正文一起提交；读取已提交
+    的发布版本作为快照。重复观察幂等，编辑和确认删除追加版本，已保存正文永久可读。
+    查询按发生时间与稳定身份排序，关联 GitHub 早期内容标为“此前交互”。
+  - `app/persistence/console_sync.py` 将页面内容和检查点原子提交；持久 claim、失效 claim 栅栏、
+    dirty 合并、重启恢复和来源独立失败避免中途崩溃或重复触发丢失工作。GitHub 子来源独立续读，
+    installation 级限流不阻断 Worker。事务锁顺序统一为 Flow 发布锁后来源记录。
+  - `app/controler/console/sync.py` 每轮最多处理四个来源任务，网络限时 30 秒，数据库工作在线程内
+    受限执行并在取消时等待完成。每秒只检查到期任务，不周期扫描所有 Flow。
+    webhook、本地事实、session 注册/变更和连接 epoch 变更触发同步，普通心跳不触发全量读取。
+    活跃 Flow 详情/显式刷新另外排队同步，页面立即返回已有本地档案。
+  - Worker 复用 `ConversationService.read(flow_id, cursor, 50)`，保存 EOF 游标继续增量查询；
+    generation/cursor 失效后重新读取且幂等归档，不修改现有 Worker 协议。
+    message 保留来源展示正文，tool_call/tool_result 保存最多 2000 字符摘要、截断信息及
+    attempt/session/generation/record/call 查询定位；仅 arguments 的工具调用也有可见摘要。
+- **Decision / consequences:** 选择数据库事务触发器覆盖所有规范写入口，避免恢复路径漏发 outbox；
+  代价是新增 PostgreSQL 投影/触发器维护成本。保留永久数据库增长，有界的是请求、页面及 DOM，
+  不声称总存储有界。继续复用现有会话有界查询，不能恢复来源已经截断或丢失的原始日志。
+- **Validation:** 真实 PostgreSQL 回归覆盖幂等版本、删除后旧内容、此前交互、事务回滚、重建、
+  旧标题防回退、未提交版本不可见、过期 claim 不可发布、限流隔离、Worker 主动查询及 EOF 恢复。
+
+### [029] 2026-10-17 — GitHub 多来源、受保护 API 与真实数据前端
+
+- **Implementation:**
+  - `app/github/console.py` 对 Issue/PR 描述、评论、timeline、reviews、threads/replies、reactions、
+    commits、check runs/statuses 分来源分页采集；旧对象编辑和线程状态可通过再次核对形成新版本。
+    使用规范对象身份；webhook 保存实际观察版本及明确删除标记，不凭 404 推断删除。
+    lifecycle webhook 元信息保存在对象版本上，规范 timeline 负责事件身份，避免 delivery 重复事件。
+    GraphQL review 使用真实 updatedAt，回复使用 fullDatabaseId；checks/status 游标绑定 commit SHA。
+  - 单次 GitHub 请求最多两对象、响应预算 1 MiB，控制页最多处理 20 对象；子来源独立续读。
+    超预算/权限/限流均保留档案并明确报告来源状态，不静默丢弃后声称完整。
+  - `app/contracts/console.py` 定义白名单 DTO；新增 `/api/repos`、`/api/flows`、详情、jobs、
+    activity、activity/versions、activity/content。筛选先于分页、计数不受当前列分页影响；
+    流列表为可变事实下的弱快照，时间线分页绑定本地已发布快照，正文按 Unicode 字符分页。
+  - owner Access 同时保护 `/console/`、所有静态资源和 API，鉴权先于文件访问；安全错误、
+    无缓存及 CSP 头保留边界。保留原 conversation、webhook 与 Worker 路由。
+  - React 删除生产 fixtures 和旧展示入口，改用同源请求；看板、仓库、jobs、thread 和版本均分页。
+    请求取消及旧响应检查防止切换后覆盖；失败保留原内容并支持重试。
+    每列表最多挂载 60 行，每 Flow 最多缓存 240 条活动正文、最多四个 Flow；保留轻量页游标以便回读。
+    正文/回复/版本窗口替换而非无限拼接；临时折叠、滚动、焦点及正文分段恢复保留。
+    显式刷新按新快照重建游标到阅读锚点，不混用新旧版本。界面显示当前同步范围，不宣称远端完整。
+  - `scripts/build_console.py` 与 Node 24 Docker 构建阶段生成静态资源，随 wheel/sdist 安装；
+    serve 运行时不需要 Node。CI 构建包含资源断言；Tunnel 仅白名单控制台与精确 API 路由。
+- **Limitations:** 首次采集前的编辑/删除、缺少时间戳的 reaction 移除或 thread 状态变化无法重建；
+  PR commits REST 上限 250、已过期远端日志及 Worker 来源截断明确披露。
+  未知 Worker 时间以 Flow 时间作排序回退并标记 `timestamp_unknown`，不伪造精确发生时间。
+  GitHub/Worker 文本按不可信文本展示，不执行 HTML。未增加个人已读/未读或跨设备状态。
+- **Validation:** GitHub 来源契约用受控响应覆盖分页、编辑、线程及错误；对自有仓库执行只读
+  GraphQL schema 核验，但未替代真实 installation 全来源回填。浏览器使用 API DTO 替身，
+  真实 HTTP/鉴权及数据库边界另由集成测试验证，不声称已经完成真实线上全链路。
+
+### [030] 2026-10-17 — 自动化验证与机制消融
+
+- **Validation results:**
+  - `FLOWTOOL_TEST_DATABASE_URL=postgresql://127.0.0.1/flowtool_test uv run pytest -q`：
+    781 passed；有一条 Starlette TestClient/httpx 依赖弃用提示，未修改或抑制上游依赖告警。
+  - `uv run ruff check .`、新增 Python 文件 `ruff format --check`、`uv run mypy app tests`：
+    通过，mypy 检查 193 个文件。`git diff --check` 通过。
+  - 前端 `npm run format:check`、`npm run test`、`npm run build` 通过；
+    `npm run test:e2e`：4 passed，覆盖 API DTO、错误态、320 条活动窗口/淘汰回读、固定头部、
+    显式快照刷新、Unicode 正文续读、卸载重挂后的分段恢复及手机导航。
+    已查看看板、详情/版本、概览、手机会话和错误态截图，无可见布局遮挡；截图使用替身数据。
+  - `python3 scripts/build_console.py && uv build` 成功；wheel 与 sdist 均含 HTML/JS/CSS，
+    不含 node_modules。隔离安装 wheel 后以其模块运行 HTTP smoke，验证 HTML/JS/CSS
+    授权成功、未授权全部拒绝，运行检查不依赖 Node。
+  - 两份可选 Tunnel 表达式各用 11 个允许路径和 8 个拒绝路径通过 Python regex smoke。
+    本机无 Docker/cloudflared/kubectl，实际镜像、RE2 ingress 和集群验收不能据此宣称通过。
+- **Ablation setup:** 使用临时 pytest 插件在进程内替换单一方法，不改产品文件。
+  环境为同一 PostgreSQL 测试库；完整实现上述测试通过。对照分别执行：
+  1. `ActivityStore.append` 的 `if duplicate:` 改成 `if False:`，归档版本测试失败，重复观察被追加。
+  2. `ConsoleSyncStore.finish` 的 `next_cursor` 无条件设为 `None`，Worker EOF/刷新测试失败，
+     持久续读位置丢失。
+  3. `ActivityStore.page` 的 `if snapshot is None:` 改为无条件取最新版本，归档快照测试失败，
+     旧阅读视图被删除版本替换。
+  命令为 `CONSOLE_ABLATION=<mode> PYTHONPATH=.amp/in FLOWTOOL_TEST_DATABASE_URL=...`
+  `uv run pytest -q -p console_ablation <test>`，mode 分别 dedupe/checkpoint/snapshot；
+  test 为 `tests/test_console_archive.py::test_archive_versions_snapshots_and_prior_interactions`，
+  checkpoint 使用 `tests/test_console_sync.py::test_worker_is_actively_queried_and_eof_checkpoint_survives_refresh`。
+  三组均按预期 1 failed，保留幂等、检查点、快照三项机制。
+  临时插件 `.amp/in/console_ablation.py` 和 `.amp/in/artifacts/ablation-*.log` 仅本地保存，不发布。
+- **Remaining acceptance:** 真实 GitHub App 权限/全来源采集、Access 登录/MFA、目标 Tunnel/镜像部署，
+  以及此次推送后的远端 CI。未合并、未部署，#85 不提前关闭。
+
+### [031] 2026-10-17 — “已编辑”链接与上一版差异
+
+- **Requirement:** 用户要求移除历史版本按钮/列表，只保留可点击的“已编辑”提示，点击展开上一版 diff。
+- **Implementation:** Activity DTO 返回该归档版本的上一内容版本；只有已观察到标题/正文变化才显示
+  无背景边框的文字按钮，首次采集、仅元信息变化及删除标记不展示“已编辑”。点击按需请求
+  `/activity/content?compare=true`，在原活动下展开红删绿增 unified diff，再次点击收起。
+  不再重复列出各版完整正文，也不将 Flow 归档序号展示为编辑次数；归档及版本查询能力仍保留。
+- **Decision / bounds:** 比较绑定不可变版本，后续采集不改变当前比较对象；跳过元信息重复观察。
+  复用 Python 标准库，无新增依赖。每版最多比较 65536 字符正文、4096 字符标题和 2000 行，
+  超预算明确提示，仍可阅读正文/使用已有来源链接，绝不把截断预览冒充完整差异。
+  diff 响应每部分最多 16384 字符，DOM 继续使用现有代码窗口，展开结果只保留一个响应部分。
+- **Validation:** Python 完整测试 782 passed；Ruff、Mypy、前端格式/单测/类型检查/构建通过；
+  Playwright 4 passed，更新回归验证默认收起、键盘展开、红删绿增、点击收起和手机无横向溢出。
+  HTTP 回归使用真实 PostgreSQL，验证无旧版不显示、元信息变化不误报、超过预览长度的 Unicode
+  修改仍可比较、授权、分页、旧比较对稳定和超预算明确失败。wheel/sdist 已重新构建。
+  已检查桌面收起、桌面展开及手机展开截图，使用 API DTO 测试数据。
+- **Ablation:** 临时进程内把比较输入改为旧的 2000 字符展示预览，同一 HTTP 回归因遗漏尾部修改
+  而失败（1 failed）；完整实现通过。命令：`PYTHONPATH=.amp/in FLOWTOOL_TEST_DATABASE_URL=...`
+  `uv run pytest -q -p edited_diff_ablation tests/test_console_api.py::test_edited_hint_and_diff_compare_full_immutable_content_not_preview`。
+  插件和日志仅保留在 `.amp/in/`；本轮改动仍在本地，未推送，不绕过此前超时的发布审查门禁。
+
+### [032] 2026-10-17 — 时间拆行、简化计数和对齐修正
+
+- **Requirement / implementation:** 按用户连续反馈，概览“创建 / 更新”拆成两个独立标签/时间行；
+  看板及侧栏移除“已加载”数量，只保留任务总数和分页入口，不改变分页/窗口化。
+  会话头像与作者组共享响应式高度、移除顶部补偿，作者与来源标签用基线对齐；
+  侧栏任务圆点取消固定顶部偏移，用 flex 垂直居中，标题换行时仍随标题块居中。
+- **Validation:** 前端格式、2 项单测、类型检查/构建和 4 项浏览器回归通过；检查桌面看板、
+  桌面/手机概览及会话截图，确认无已加载数量、时间两行、头像/文字及侧栏圆点对齐。
+  仅修改展示布局，不引入新机制，无需另做消融；本地改动仍未推送。
+
+### [033] 2026-10-17 — 完整 patch 与 react-diff-view
+
+- **Requirement / decision:** 用户选择 react-diff-view，并要求后端返回完整 diff。
+  替代 [031] 的 diff 字符分页及自制逐行着色，正文分页不变；不引入双栏切换或代码编辑器。
+- **Implementation:** `compare=true` 一次返回完整 unified patch，`next_offset=null`，
+  `offset` 必须为零，正文的 `limit` 不切割 patch。继续绑定不可变比较版本，保留每版
+  65536 正文字符、4096 标题字符和 2000 行的计算预算；超限明确失败，不返回截断结果。
+  新增 `DiffWindow`，用 react-diff-view 解析完整 patch 并生成行内高亮，再按已解析变更行
+  窗口化：每次最多 200 行，保持原始行号和完整文本，视口最高 480px，切换无需网络请求。
+  “已编辑”仍默认收起，移除旧 diff 专用 TextWindow 分支及 CSS；普通正文/工具摘要不变。
+- **Validation:** HTTP 回归先在原实现失败（超过 16K 的上下文截断了尾部修改），修改后通过；
+  完整 Python 782 passed，Ruff/Mypy 通过，仍有一条上游 Starlette/httpx 弃用提示。
+  前端类型/构建、格式、2 项单测、5 项浏览器测试通过；新增长 patch 浏览器回归覆盖
+  多窗口、跨差异块、旧新行号、恶意 HTML 按文本展示、只请求一次及收起后恢复窗口。
+  已检查桌面/手机差异截图及固定高度长 diff 截图，均使用 API DTO 测试数据。
+- **Ablation:** 同一份 24120 字符、900 行 patch，直接使用库渲染会挂载 900 行，
+  `DiffWindow` 挂载 200 行；长 diff 浏览器测试确认切换后末尾仍可达，不丢文本。
+  对照用 `npx tsx --input-type=module` 调用 React SSR，日志保存于
+  `.amp/in/artifacts/console-diff-window-ablation.log`；保留窗口机制以满足固定最大 DOM 要求。
+  本轮仅本地实现与验证，未推送，不绕过此前超时的发布审查门禁。
+
+### [034] 2026-10-17 — macOS 风格状态色表
+
+- **Requirement / implementation:** 用户要求参考苹果 App 左上角窗口按钮配色调整状态图标。
+  用共享 CSS 色表统一排队灰、执行蓝、待审黄、受阻红、完成绿；红黄绿参考窗口按钮，
+  补充灰蓝以区分五个业务阶段。保持圆点形状、尺寸和文字，覆盖看板、卡片、侧栏与详情。
+  来源状态带上既有 status 类，pending/syncing/partial/unavailable/available 对应同一色表，
+  修正原先来源圆点未区分状态的问题；不改变数据或状态含义。
+- **Validation:** 前端格式、类型/构建、2 项单测与5项浏览器回归通过；本地临时浏览器脚本
+  `.amp/in/verify-status-palette.mjs` 校验五阶段各处实际计算色值、五种来源状态色值、
+  手机无横向溢出和无页面异常，检查桌面看板/详情及手机截图。纯配色调整无新增复杂机制，
+  不新增永久样式测试或消融；仅本地改动，未推送。

@@ -6,6 +6,11 @@
   --line: #e6eae8;
   --green: #147657;
   --wash: #edf6f1;
+  --status-gray: #8e8e93;
+  --status-blue: #0a84ff;
+  --status-yellow: #febc2e;
+  --status-red: #ff5f57;
+  --status-green: #28c840;
   --mono: ui-monospace, SFMono-Regular, Consolas, monospace;
   --text-body: 1rem;
   --text-nav: 0.9375rem;
@@ -104,19 +109,19 @@ svg {
   flex-shrink: 0;
 }
 .phase-queued {
-  --phase: #8b95a5;
+  --phase: var(--status-gray);
 }
 .phase-running {
-  --phase: #27856a;
+  --phase: var(--status-blue);
 }
 .phase-review {
-  --phase: #c38d33;
+  --phase: var(--status-yellow);
 }
 .phase-blocked {
-  --phase: #c75e53;
+  --phase: var(--status-red);
 }
 .phase-done {
-  --phase: #679786;
+  --phase: var(--status-green);
 }
 .badge {
   display: inline-flex;
@@ -553,7 +558,7 @@ svg {
   display: flex;
   width: 100%;
   gap: 10px;
-  align-items: flex-start;
+  align-items: center;
   background: transparent;
   padding: 10px;
   border-radius: 7px;
@@ -570,7 +575,6 @@ svg {
   color: #205c40;
 }
 .flow-tab .dot {
-  margin-top: 5px;
   width: 6px;
   height: 6px;
 }
@@ -684,12 +688,21 @@ svg {
   gap: 6px;
 }
 .source-state .dot {
-  background: #7d9b88;
+  background: var(--status-gray);
   width: 5px;
   height: 5px;
 }
+.source-state.syncing .dot {
+  background: var(--status-blue);
+}
+.source-state.available .dot {
+  background: var(--status-green);
+}
+.source-state.partial .dot {
+  background: var(--status-yellow);
+}
 .source-state.unavailable .dot {
-  background: #c38d33;
+  background: var(--status-red);
 }
 .conversation-sources .sample-hint {
   margin-left: auto;
@@ -711,14 +724,15 @@ svg {
   flex: 1;
 }
 .message {
+  --avatar-size: 28px;
   display: flex;
   align-items: flex-start;
   gap: 13px;
   margin-bottom: 27px;
 }
 .message-avatar {
-  width: 28px;
-  height: 28px;
+  width: var(--avatar-size);
+  height: var(--avatar-size);
   flex-shrink: 0;
   background: #f1f3f5;
   color: #65748b;
@@ -741,10 +755,16 @@ svg {
   display: flex;
   gap: 9px;
   align-items: center;
+  min-height: var(--avatar-size);
   font-size: var(--text-control);
   font-weight: 550;
-  margin: 3px 0 9px;
+  margin: 0 0 9px;
   flex-wrap: wrap;
+}
+.message-identity {
+  display: inline-flex;
+  align-items: baseline;
+  gap: inherit;
 }
 .message-label time {
   font-family: var(--mono);
@@ -1355,12 +1375,9 @@ pre code {
     gap: 7px;
   }
   .message {
+    --avatar-size: 25px;
     gap: 9px;
     margin-bottom: 22px;
-  }
-  .message-avatar {
-    width: 25px;
-    height: 25px;
   }
   .github-bubble {
     padding: 10px 12px;
@@ -1395,4 +1412,82 @@ pre code {
   .links {
     gap: 8px;
   }
+}
+.task-facts {
+  display: grid;
+  grid-template-columns: minmax(100px, 1fr) minmax(0, 3fr);
+  gap: 12px 24px;
+  margin: 20px 0 32px;
+  font-size: var(--text-nav);
+}
+.task-facts dt {
+  color: var(--muted);
+}
+.task-facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.edited-link {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: var(--muted);
+  font: inherit;
+  font-size: var(--text-nav);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+.edited-link:hover {
+  color: var(--ink);
+}
+.edit-history {
+  margin-top: 8px;
+}
+.activity-diff {
+  margin-top: 12px;
+  min-width: 0;
+}
+.diff-window {
+  --diff-font-family: var(--mono);
+  --diff-text-color: var(--ink);
+  --diff-code-insert-background-color: #dafbe1;
+  --diff-code-delete-background-color: #ffebe9;
+  --diff-code-insert-edit-background-color: #aceebb;
+  --diff-code-delete-edit-background-color: #ffcecb;
+  --diff-gutter-insert-background-color: #ccffd8;
+  --diff-gutter-delete-background-color: #ffd7d5;
+  margin: 8px 0;
+  max-height: 480px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow: auto;
+  font-size: var(--text-control);
+}
+.diff-window .diff-gutter-col {
+  width: 4ch;
+}
+.diff-window .diff-code {
+  position: relative;
+  padding: 0 8px 0 2ch;
+  word-break: normal;
+  overflow-wrap: anywhere;
+}
+.diff-window .diff-code-insert::before,
+.diff-window .diff-code-delete::before {
+  position: absolute;
+  left: 0.4ch;
+  width: 1ch;
+  text-align: center;
+  user-select: none;
+}
+.diff-window .diff-code-insert::before {
+  content: "+";
+}
+.diff-window .diff-code-delete::before {
+  content: "−";
+}
+.diff-window .diff-decoration {
+  background: #ddf4ff;
+  color: #0550ae;
 }

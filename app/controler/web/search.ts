@@ -1,4 +1,4 @@
-import type { Flow, Phase } from "./types";
+import type { Phase } from "./types";
 import { phases } from "./phases";
 
 export interface SearchQuery {
@@ -10,7 +10,7 @@ export interface SearchQuery {
   pr?: number;
 }
 
-/** Parse the preview's documented subset; malformed qualifiers must never silently broaden results. */
+/** Validate submitted syntax; the backend owns repository membership and filtering. */
 export function parseSearch(
   raw: string,
   repos: readonly string[],
@@ -33,10 +33,9 @@ export function parseSearch(
     seen.add(key);
     switch (key) {
       case "repo": {
-        const repo = value.replace(/^b1indsight\//, "");
-        if (!repos.includes(repo))
-          return { ok: false, error: "请选择已有仓库。" };
-        query.repo = repo;
+        if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(value))
+          return { ok: false, error: "repo: 使用 owner/name 格式。" };
+        query.repo = value;
         break;
       }
       case "is":
@@ -63,6 +62,7 @@ export function parseSearch(
         if (
           !/^\d+$/.test(value) ||
           !Number.isSafeInteger(number) ||
+          number >= 2 ** 31 ||
           number <= 0
         )
           return { ok: false, error: `${key}: 后请输入有效的正整数编号。` };
@@ -77,20 +77,4 @@ export function parseSearch(
     }
   }
   return { ok: true, query };
-}
-
-export function matchesFlow(flow: Flow, query: SearchQuery) {
-  const text =
-    `${flow.title} ${flow.id} ${flow.issue} ${flow.pr ?? ""} ${flow.repo}`.toLowerCase();
-  return (
-    (!query.repo || flow.repo === query.repo) &&
-    (!query.lifecycle ||
-      (query.lifecycle === "done"
-        ? flow.phase === "done"
-        : flow.phase !== "done")) &&
-    (!query.status || flow.phase === query.status) &&
-    (!query.issue || flow.issue === query.issue) &&
-    (!query.pr || flow.pr === query.pr) &&
-    query.terms.every((term) => text.includes(term))
-  );
 }

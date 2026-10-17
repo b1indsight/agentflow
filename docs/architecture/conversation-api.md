@@ -1,7 +1,9 @@
 # Flow 会话查询
 
 `GET /api/flows/{flow_id}/conversation` 按需代理对应 worker 读取 Codex 历史。
-control 仅查询现有 flow、attempt、session 和 worker 归属，不保存会话内容，也不维护队列。
+此接口本身仅查询现有 flow、attempt、session 和 worker 归属，不保存会话内容，也不维护队列。
+Web 控制台的独立同步器会主动复用该服务，将展示正文归档到本地 Flow 时间线；
+控制台 `/activity` 读取本地快照，不等同于此处的实时 Worker 代理读取。
 
 worker 每次只接收 `session_id`、`cursor`、`limit`，由 `HistoryQuery` 校验后直接交给
 `CodexHistory.query()`。返回的 `HistoryPage` 只含该会话的记录、状态及续读位置。

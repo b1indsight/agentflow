@@ -113,22 +113,10 @@ class ProjectStore(Repository):
             ).fetchone()
             assert row is not None
             fact = connection.execute(
-                "SELECT f.id,f.installation_id,CASE"
-                " WHEN f.state='succeeded' THEN 'done' WHEN f.state IN ('failed','cancelled') THEN 'blocked'"
-                " WHEN d.state='closed' OR j.state='failed' OR (j.kind='archive'"
-                " AND j.recovery_deadline IS NOT NULL AND j.result_received_at IS NULL) OR EXISTS (SELECT 1 FROM result_effects e"
-                " JOIN jobs ej ON ej.id=e.job_id WHERE ej.flow_id=f.id AND ej.result_applied_at IS NULL"
-                " AND e.state='failed') THEN 'blocked'"
-                " WHEN d.state='merged' THEN 'in_progress'"
-                " WHEN d.pr_number IS NULL AND x.worker_id IS NULL THEN 'todo'"
-                " WHEN EXISTS (SELECT 1 FROM jobs pending WHERE pending.flow_id=f.id"
-                " AND (pending.state IN ('queued','running') OR (pending.result_received_at IS NOT NULL"
-                " AND pending.result_applied_at IS NULL))) THEN 'in_progress'"
-                " WHEN d.state='open' THEN 'in_review' ELSE 'in_progress' END AS status"
-                " FROM flows f LEFT JOIN flow_deliveries d ON d.flow_id=f.id"
-                " LEFT JOIN flow_executions x ON x.flow_id=f.id AND x.released_at IS NULL"
-                " LEFT JOIN LATERAL (SELECT state,kind,recovery_deadline,result_received_at"
-                " FROM jobs WHERE flow_id=f.id ORDER BY id DESC LIMIT 1) j ON TRUE"
+                "SELECT f.id,f.installation_id,CASE c.phase"
+                " WHEN 'queued' THEN 'todo' WHEN 'running' THEN 'in_progress'"
+                " WHEN 'review' THEN 'in_review' ELSE c.phase END AS status"
+                " FROM flows f JOIN console_facts c ON c.id=f.id"
                 " WHERE lower(f.repo)=%s AND f.issue_number=%s ORDER BY (f.state='active') DESC,f.id DESC LIMIT 1",
                 (row.repo, row.issue_number),
             ).fetchone()
