@@ -22,7 +22,7 @@ type State = {
   sources: SourceStatus[];
   changes: Record<string, number>;
   busy: boolean;
-  error: string | null;
+  error: { message: string; cursor: string | null; refresh: boolean } | null;
 };
 const empty = (): State => ({
   items: new Map(),
@@ -52,8 +52,7 @@ export function useConversation(
   const [state, setState] = useState(() => cache.get(flowId) ?? empty());
   const current = useRef(state),
     controller = useRef<AbortController | null>(null),
-    wanted = useRef<number[]>([]),
-    attempt = useRef<(() => void) | null>(null);
+    wanted = useRef<number[]>([]);
   const put = (s: State) => {
     current.current = s;
     remember(flowId, s);
@@ -79,7 +78,6 @@ export function useConversation(
       const anchorTop = anchor?.getBoundingClientRect().top ?? 0;
       const scrollTop = viewport?.scrollTop ?? 0;
       put({ ...before, busy: true, error: null });
-      attempt.current = () => void read(cursor, refresh);
       try {
         const p = await getActivity(
           flowId,
@@ -195,7 +193,11 @@ export function useConversation(
           put({
             ...before,
             busy: false,
-            error: e instanceof Error ? e.message : "读取交互失败",
+            error: {
+              message: e instanceof Error ? e.message : "读取交互失败",
+              cursor,
+              refresh,
+            },
           });
       }
     },
@@ -246,5 +248,13 @@ export function useConversation(
     o.observe(sentinel);
     return () => o.disconnect();
   }, [load, root, state.busy, state.error, state.has_more]);
-  return { state, load, onRange, retry: () => attempt.current?.() };
+  return {
+    state,
+    load,
+    onRange,
+    retry: () => {
+      const { error, busy } = current.current;
+      if (error && !busy) void read(error.cursor, error.refresh);
+    },
+  };
 }

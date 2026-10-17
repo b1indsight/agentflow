@@ -383,3 +383,111 @@ test("thread replies and body continuation use the pinned snapshot and Unicode o
     fullPage: true,
   });
 });
+
+test("refresh resets reply cursors even when the thread version is unchanged", async ({
+  page,
+}) => {
+  let snapshot = 2;
+  const reads: string[] = [];
+  await page.route("**/api/flows/42/activity?**", async (route) => {
+    const url = new URL(route.request().url());
+    const parent = url.searchParams.get("parent");
+    if (url.searchParams.get("refresh") === "true") snapshot = 3;
+    if (parent) {
+      const cursor = url.searchParams.get("cursor");
+      const pinned = url.searchParams.get("snapshot");
+      reads.push(`${cursor}:${pinned}`);
+      if (cursor && cursor !== `reply-${pinned}`)
+        return route.fulfill({
+          status: 422,
+          json: { detail: "cursor_invalid" },
+        });
+      return route.fulfill({
+        json: {
+          items: [
+            {
+              ...activity,
+              key: `reply-${pinned}`,
+              body: `快照 ${pinned} 回复`,
+            },
+          ],
+          snapshot,
+          total: 2,
+          has_more: true,
+          next_cursor: `reply-${pinned}`,
+          sources: [],
+          changes: {},
+        },
+      });
+    }
+    return route.fulfill({
+      json: {
+        items: [{ ...activity, kind: "thread" }],
+        snapshot,
+        total: 1,
+        has_more: false,
+        next_cursor: null,
+        sources: [],
+        changes: {},
+      },
+    });
+  });
+  await page.goto("/#flow/42/conversation");
+  await page.getByRole("button", { name: "查看线程回复" }).click();
+  await expect(page.getByText("快照 2 回复", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "刷新当前视图" }).click();
+  await expect(
+    page.getByRole("button", { name: "查看线程回复" }),
+  ).toBeVisible();
+  await expect(page.getByText("快照 2 回复", { exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "查看线程回复" }).click();
+  await expect(page.getByText("快照 3 回复", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "下一页线程回复" }).click();
+  await expect.poll(() => reads).toEqual(["null:2", "null:3", "reply-3:3"]);
+  await expect(page.getByRole("alert")).toHaveCount(0);
+});
+
+test("cached later-page errors retain a working retry after changing tabs", async ({
+  page,
+}) => {
+  const cursors: string[] = [];
+  let failures = 1;
+  await page.route("**/api/flows/42/activity?**", async (route) => {
+    const url = new URL(route.request().url());
+    const cursor = url.searchParams.get("cursor");
+    if (cursor) {
+      cursors.push(`${cursor}:${url.searchParams.get("snapshot")}`);
+      if (failures-- > 0)
+        return route.fulfill({ status: 503, json: { detail: "临时断开" } });
+    }
+    return route.fulfill({
+      json: {
+        items: [
+          {
+            ...activity,
+            key: cursor ? "later" : "first",
+            body: cursor ? "后页正文" : "首页正文",
+          },
+        ],
+        snapshot: 2,
+        total: 2,
+        has_more: !cursor,
+        next_cursor: cursor ? null : "page-2",
+        sources: [],
+        changes: {},
+      },
+    });
+  });
+  await page.goto("/#flow/42/conversation");
+  const retry = page.getByRole("button", {
+    name: "读取失败：临时断开（重试）",
+  });
+  await expect(retry).toBeVisible();
+  await page.getByRole("tab", { name: "概览" }).click();
+  await page.getByRole("tab", { name: "会话" }).click();
+  await expect(retry).toBeVisible();
+  await retry.click();
+  await expect(page.getByText("后页正文", { exact: true })).toBeVisible();
+  expect(cursors).toEqual(["page-2:2", "page-2:2"]);
+  await expect(retry).toHaveCount(0);
+});

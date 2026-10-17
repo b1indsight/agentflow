@@ -319,7 +319,12 @@ export function ActivityView({
           flowId={flowId}
         />
         {entry.kind === "thread" && (
-          <ThreadReplies entry={entry} flowId={flowId} snapshot={snapshot} />
+          <ThreadReplies
+            key={`${flowId}-${entry.key}-${snapshot}`}
+            entry={entry}
+            flowId={flowId}
+            snapshot={snapshot}
+          />
         )}
       </div>
     </article>

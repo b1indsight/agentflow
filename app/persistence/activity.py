@@ -57,6 +57,36 @@ class ActivityStore(Repository):
     """Serialize publication with its archive rows, without sequence/commit visibility gaps."""
 
     def append(self, flow_id: int, item: Observation) -> bool:
+        # PostgreSQL TEXT/JSONB cannot store NUL. Keep its visible escape and disclose
+        # the encoding; hash the original so a literal escape is a different version.
+        content = item.model_dump(mode="json", exclude={"source"})
+        escaped = item.model_copy(
+            update={
+                "key": item.key.replace("\0", "\\u0000"),
+                "source": item.source.replace("\0", "\\u0000"),
+                "kind": item.kind.replace("\0", "\\u0000"),
+                "author": item.author.replace("\0", "\\u0000"),
+                "title": item.title.replace("\0", "\\u0000"),
+                "body": item.body.replace("\0", "\\u0000"),
+                "url": item.url.replace("\0", "\\u0000") if item.url is not None else None,
+                "parent_key": item.parent_key.replace("\0", "\\u0000")
+                if item.parent_key is not None
+                else None,
+                "metadata": {
+                    key.replace("\0", "\\u0000"): value.replace("\0", "\\u0000")
+                    if isinstance(value, str)
+                    else value
+                    for key, value in item.metadata.items()
+                },
+            }
+        )
+        if escaped != item:
+            escaped = escaped.model_copy(
+                update={
+                    "metadata": {**escaped.metadata, "unsupported_characters_escaped": True},
+                }
+            )
+        item = escaped
         with self._db.transaction() as tx, tx.connection() as connection:
             row = connection.execute(
                 "SELECT activity_version FROM console_flows WHERE flow_id=%s FOR UPDATE", (flow_id,)
@@ -70,7 +100,7 @@ class ActivityStore(Repository):
             ).fetchone()
             if previous and previous["parent_key"] and item.parent_key is None:
                 item = item.model_copy(update={"parent_key": previous["parent_key"]})
-            content = item.model_dump(mode="json", exclude={"source"})
+                content["parent_key"] = previous["parent_key"]
             digest = hashlib.sha256(
                 json.dumps(content, sort_keys=True, separators=(",", ":")).encode()
             ).hexdigest()

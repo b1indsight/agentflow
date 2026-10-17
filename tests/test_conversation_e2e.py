@@ -104,18 +104,25 @@ async def test_http_query_while_worker_or_control_busy_and_idle(tmp_path, phase,
             first = await http.get("/api/flows/3/conversation?limit=1")
             assert first.status_code == 200, first.text
             assert first.json()["items"][0]["role"] == "user"
+            assert first.json()["sessions"][0]["starts_at_beginning"]
+            assert not first.json()["sessions"][0]["reached_end"]
             release.set()
             await asyncio.wait_for(store.done.wait(), 2)
             second = await http.get("/api/flows/3/conversation", params={"cursor": first.json()["next_cursor"]})
             assert second.status_code == 200, second.text
             assert second.json()["items"][0]["content"]["text"] == "Fixed"
             assert second.json()["has_more"]
+            # Flow continuation points to another session; this session is complete.
+            assert not second.json()["sessions"][0]["starts_at_beginning"]
+            assert second.json()["sessions"][0]["reached_end"]
             third = await http.get("/api/flows/3/conversation", params={"cursor": second.json()["next_cursor"]})
             assert third.status_code == 200, third.text
             item = third.json()["items"][0]
             assert (item["attempt_id"], item["session_id"], item["session_generation"]) == (8, OTHER_SESSION, 1)
             assert item["content"]["text"] == "Follow-up"
             assert not third.json()["has_more"]
+            assert third.json()["sessions"][0]["starts_at_beginning"]
+            assert third.json()["sessions"][0]["reached_end"]
             assert (await http.get("/api/flows/99/conversation")).status_code == 404
             assert not gateway.conversations.pending
     finally:

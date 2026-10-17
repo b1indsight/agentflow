@@ -47,10 +47,14 @@ class HistoryQuery(ConversationModel):
 
 
 class SessionHistory(ConversationModel):
+    """Coverage for one page, with boundaries of the underlying session scan."""
+
     attempt_id: int = Field(gt=0)
     session_id: str = Field(pattern=r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$")
     session_generation: int = Field(ge=0)
     status: Literal["available", "not_found", "unsupported"]
+    starts_at_beginning: bool
+    reached_end: bool
 
 
 class ConversationContent(ConversationModel):

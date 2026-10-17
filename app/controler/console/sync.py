@@ -17,6 +17,22 @@ from app.persistence.console_sync import ConsoleSyncStore, SyncClaim
 from app.persistence.database import Database
 
 
+async def _drain[T](future: asyncio.Future[T]) -> T:
+    """Settle owned work before delivering cancellation, even after repeated requests."""
+    cancelled = False
+    try:
+        while not future.done():
+            try:
+                await asyncio.shield(future)
+            except asyncio.CancelledError:
+                cancelled = True
+        return future.result()
+    finally:
+        # Shutdown must still propagate if the work itself fails while being drained.
+        if cancelled:
+            raise asyncio.CancelledError
+
+
 class ConsoleSynchronizer:
     """Bound source/network concurrency; only pending work is retried after restart.
 
@@ -36,11 +52,7 @@ class ConsoleSynchronizer:
         """Drain short DB-only threads before releasing capacity or closing the pool."""
         async with self._slots:
             task = asyncio.create_task(asyncio.to_thread(call))
-            try:
-                return await asyncio.shield(task)
-            except asyncio.CancelledError:
-                await task
-                raise
+            return await _drain(task)
 
     async def run(self) -> None:
         while True:
@@ -52,7 +64,16 @@ class ConsoleSynchronizer:
                         break
                     claims.append(claim)
                 if claims:
-                    await asyncio.gather(*(self.sync(claim) for claim in claims))
+                    tasks = [asyncio.create_task(self.sync(claim)) for claim in claims]
+                    try:
+                        await asyncio.gather(*tasks)
+                    finally:
+                        # gather propagates the first failure before siblings finish.
+                        # Do not cancel twice while db() is draining a shielded thread.
+                        for task in tasks:
+                            if not task.done() and not task.cancelling():
+                                task.cancel()
+                        await _drain(asyncio.gather(*tasks, return_exceptions=True))
                     continue
             except (DatabaseError, PoolTimeout):
                 logger.warning(
@@ -80,11 +101,7 @@ class ConsoleSynchronizer:
                     )
                 elif claim.source == "worker":
                     page = await self.conversations.read(claim.flow_id, claim.cursor, 50)
-                    limitations: list[str] = [
-                        s.status for s in page.sessions if s.status != "available"
-                    ]
-                    if page.unavailable_reason:
-                        limitations.append(page.unavailable_reason)
+                    limitations: list[str] = []
                     items = [self._worker(item, claim) for item in page.items]
                     if any(item.truncated for item in page.items):
                         limitations.append("worker_source_truncated")
@@ -95,6 +112,8 @@ class ConsoleSynchronizer:
                             cursor=page.next_cursor,
                             more=page.has_more,
                             limitations=limitations,
+                            unavailable_reason=page.unavailable_reason,
+                            sessions=page.sessions,
                         )
                     )
                 else:
