@@ -8,3 +8,6 @@
 !app/**
 app/**/__pycache__/
 app/**/*.pyc
+app/controler/web/node_modules/
+app/controler/web/dist/
+app/controler/web/test-results/

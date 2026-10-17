@@ -2,7 +2,8 @@
 
 FlowTool 的目标是把带 `flow` 标签的 GitHub issue 编排成
 `code agent 编码 → PR → 人工审核 → 自动回喂修订 → 人工合并 → 归档` 的 headless 闭环。
-项目自身不提供业务 UI，交互面是 GitHub issue 和 PR。
+工作流交互面是 GitHub issue 和 PR；另提供使用示例数据的
+[Web 控制台前端预览](app/controler/web/README.md)，真实后端接入仍待实现。
 
 代码按职责分为 `domain`、`contracts`、`persistence`、`github`、`controler`、`worker`、
 `telemetry` 与 `plugins`。`controler` 是控制服务端，内部按事件、Worker 管理、工作流、审核

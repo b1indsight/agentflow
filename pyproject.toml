@@ -40,6 +40,11 @@ build-backend = "uv_build"
 [tool.uv.build-backend]
 module-name = "app"
 module-root = ""
+source-exclude = [
+    "app/controler/web/node_modules",
+    "app/controler/web/dist",
+    "app/controler/web/test-results",
+]
 
 [tool.ruff]
 target-version = "py312"
