@@ -11,7 +11,7 @@ interface Suggestion {
   description: string;
 }
 const fields: Suggestion[] = [
-  { value: "repo:", label: "仓库", description: "repo:agentflow" },
+  { value: "repo:", label: "仓库", description: "repo:owner/name" },
   { value: "is:", label: "生命周期", description: "is:active · is:done" },
   { value: "status:", label: "执行状态", description: "status:running" },
   { value: "issue:", label: "Issue 编号", description: "issue:82" },
@@ -59,9 +59,7 @@ export function SearchBox({
       ? fields.filter((field) => field.value.startsWith(token.toLowerCase()))
       : key === "repo"
         ? repos
-            .filter((repo) =>
-              repo.toLowerCase().includes(prefix.replace(/^b1indsight\//, "")),
-            )
+            .filter((repo) => repo.toLowerCase().includes(prefix))
             .map((repo) => ({
               value: `repo:${repo}`,
               label: repo,

@@ -1,6 +1,6 @@
 # Web 控制台与 Flow Kanban — Feature record
 
-**Stage:** Backend planning / 前端已通过 #86 合并；本轮后端方案待批准，尚未实现
+**Stage:** Backend implementation / 本地实现与自动化检查已完成；审查、远端 CI 及真实部署验收分别记录
 **PR branch:** `feat/web-console-backend`；同一草稿 PR 承载方案及后续实现
 **Frontend PR:** [#86](https://github.com/b1indsight/agentflow/pull/86)
 **Backend issue:** [#85](https://github.com/b1indsight/agentflow/issues/85)
@@ -988,3 +988,159 @@ Webhook 未覆盖的交互/字段需在明确触发的核对中补齐，不能�
   事件触发合并与恢复、无全量扫描、快照隔离/刷新、事务回滚及状态投影重建/防回退验证。
   真实 API 能力、索引和预算等继续由实现核验；不再把上述六项列为待用户选择的问题。
 - **Implementation:** 本轮仅记录决策并更新同一草稿 PR；未新增状态表、同步服务、API 或测试。
+
+### [028] 2026-10-17 — 永久归档、当前投影和主动 Worker 会话采集
+
+- **Requirement / context:** 用户要求按 [027] 六项策略实现，明确 Worker 会话正文采用主动查询。
+  本项实现取代 [024]—[027] 中尚未实现的候选机制；个人阅读状态继续留在 #88。
+- **Implementation:**
+  - `app/persistence/console_schema.py` 新增 `console_flows` 当前投影、`console_activity` 不可变
+    版本、`console_sync` 持久来源任务及 installation 限流退避。现有事实的数据库触发器在原事务内
+    更新投影、追加业务历史、排队同步；迁移只为缺失 Flow 建立明确的基线，不伪造旧业务历史。
+  - `console_facts` 共用看板和 Projects 的阶段优先级。投影可从事实重建；看板状态版本与
+    时间线阅读版本独立。远端标题以实际更新时间防回退，包括较新但正文未变化的观察。
+  - `app/persistence/activity.py` 按 Flow 行锁串行分配发布版本，版本与正文一起提交；读取已提交
+    的发布版本作为快照。重复观察幂等，编辑和确认删除追加版本，已保存正文永久可读。
+    查询按发生时间与稳定身份排序，关联 GitHub 早期内容标为“此前交互”。
+  - `app/persistence/console_sync.py` 将页面内容和检查点原子提交；持久 claim、失效 claim 栅栏、
+    dirty 合并、重启恢复和来源独立失败避免中途崩溃或重复触发丢失工作。GitHub 子来源独立续读，
+    installation 级限流不阻断 Worker。事务锁顺序统一为 Flow 发布锁后来源记录。
+  - `app/controler/console/sync.py` 每轮最多处理四个来源任务，网络限时 30 秒，数据库工作在线程内
+    受限执行并在取消时等待完成。每秒只检查到期任务，不周期扫描所有 Flow。
+    webhook、本地事实、session 注册/变更和连接 epoch 变更触发同步，普通心跳不触发全量读取。
+    活跃 Flow 详情/显式刷新另外排队同步，页面立即返回已有本地档案。
+  - Worker 复用 `ConversationService.read(flow_id, cursor, 50)`，保存 EOF 游标继续增量查询；
+    generation/cursor 失效后重新读取且幂等归档，不修改现有 Worker 协议。
+    message 保留来源展示正文，tool_call/tool_result 保存最多 2000 字符摘要、截断信息及
+    attempt/session/generation/record/call 查询定位；仅 arguments 的工具调用也有可见摘要。
+- **Decision / consequences:** 选择数据库事务触发器覆盖所有规范写入口，避免恢复路径漏发 outbox；
+  代价是新增 PostgreSQL 投影/触发器维护成本。保留永久数据库增长，有界的是请求、页面及 DOM，
+  不声称总存储有界。继续复用现有会话有界查询，不能恢复来源已经截断或丢失的原始日志。
+- **Validation:** 真实 PostgreSQL 回归覆盖幂等版本、删除后旧内容、此前交互、事务回滚、重建、
+  旧标题防回退、未提交版本不可见、过期 claim 不可发布、限流隔离、Worker 主动查询及 EOF 恢复。
+
+### [029] 2026-10-17 — GitHub 多来源、受保护 API 与真实数据前端
+
+- **Implementation:**
+  - `app/github/console.py` 对 Issue/PR 描述、评论、timeline、reviews、threads/replies、reactions、
+    commits、check runs/statuses 分来源分页采集；旧对象编辑和线程状态可通过再次核对形成新版本。
+    使用规范对象身份；webhook 保存实际观察版本及明确删除标记，不凭 404 推断删除。
+    lifecycle webhook 元信息保存在对象版本上，规范 timeline 负责事件身份，避免 delivery 重复事件。
+    GraphQL review 使用真实 updatedAt，回复使用 fullDatabaseId；checks/status 游标绑定 commit SHA。
+  - 单次 GitHub 请求最多两对象、响应预算 1 MiB，控制页最多处理 20 对象；子来源独立续读。
+    超预算/权限/限流均保留档案并明确报告来源状态，不静默丢弃后声称完整。
+  - `app/contracts/console.py` 定义白名单 DTO；新增 `/api/repos`、`/api/flows`、详情、jobs、
+    activity、activity/versions、activity/content。筛选先于分页、计数不受当前列分页影响；
+    流列表为可变事实下的弱快照，时间线分页绑定本地已发布快照，正文按 Unicode 字符分页。
+  - owner Access 同时保护 `/console/`、所有静态资源和 API，鉴权先于文件访问；安全错误、
+    无缓存及 CSP 头保留边界。保留原 conversation、webhook 与 Worker 路由。
+  - React 删除生产 fixtures 和旧展示入口，改用同源请求；看板、仓库、jobs、thread 和版本均分页。
+    请求取消及旧响应检查防止切换后覆盖；失败保留原内容并支持重试。
+    每列表最多挂载 60 行，每 Flow 最多缓存 240 条活动正文、最多四个 Flow；保留轻量页游标以便回读。
+    正文/回复/版本窗口替换而非无限拼接；临时折叠、滚动、焦点及正文分段恢复保留。
+    显式刷新按新快照重建游标到阅读锚点，不混用新旧版本。界面显示当前同步范围，不宣称远端完整。
+  - `scripts/build_console.py` 与 Node 24 Docker 构建阶段生成静态资源，随 wheel/sdist 安装；
+    serve 运行时不需要 Node。CI 构建包含资源断言；Tunnel 仅白名单控制台与精确 API 路由。
+- **Limitations:** 首次采集前的编辑/删除、缺少时间戳的 reaction 移除或 thread 状态变化无法重建；
+  PR commits REST 上限 250、已过期远端日志及 Worker 来源截断明确披露。
+  未知 Worker 时间以 Flow 时间作排序回退并标记 `timestamp_unknown`，不伪造精确发生时间。
+  GitHub/Worker 文本按不可信文本展示，不执行 HTML。未增加个人已读/未读或跨设备状态。
+- **Validation:** GitHub 来源契约用受控响应覆盖分页、编辑、线程及错误；对自有仓库执行只读
+  GraphQL schema 核验，但未替代真实 installation 全来源回填。浏览器使用 API DTO 替身，
+  真实 HTTP/鉴权及数据库边界另由集成测试验证，不声称已经完成真实线上全链路。
+
+### [030] 2026-10-17 — 自动化验证与机制消融
+
+- **Validation results:**
+  - `FLOWTOOL_TEST_DATABASE_URL=postgresql://127.0.0.1/flowtool_test uv run pytest -q`：
+    781 passed；有一条 Starlette TestClient/httpx 依赖弃用提示，未修改或抑制上游依赖告警。
+  - `uv run ruff check .`、新增 Python 文件 `ruff format --check`、`uv run mypy app tests`：
+    通过，mypy 检查 193 个文件。`git diff --check` 通过。
+  - 前端 `npm run format:check`、`npm run test`、`npm run build` 通过；
+    `npm run test:e2e`：4 passed，覆盖 API DTO、错误态、320 条活动窗口/淘汰回读、固定头部、
+    显式快照刷新、Unicode 正文续读、卸载重挂后的分段恢复及手机导航。
+    已查看看板、详情/版本、概览、手机会话和错误态截图，无可见布局遮挡；截图使用替身数据。
+  - `python3 scripts/build_console.py && uv build` 成功；wheel 与 sdist 均含 HTML/JS/CSS，
+    不含 node_modules。隔离安装 wheel 后以其模块运行 HTTP smoke，验证 HTML/JS/CSS
+    授权成功、未授权全部拒绝，运行检查不依赖 Node。
+  - 两份可选 Tunnel 表达式各用 11 个允许路径和 8 个拒绝路径通过 Python regex smoke。
+    本机无 Docker/cloudflared/kubectl，实际镜像、RE2 ingress 和集群验收不能据此宣称通过。
+- **Ablation setup:** 使用临时 pytest 插件在进程内替换单一方法，不改产品文件。
+  环境为同一 PostgreSQL 测试库；完整实现上述测试通过。对照分别执行：
+  1. `ActivityStore.append` 的 `if duplicate:` 改成 `if False:`，归档版本测试失败，重复观察被追加。
+  2. `ConsoleSyncStore.finish` 的 `next_cursor` 无条件设为 `None`，Worker EOF/刷新测试失败，
+     持久续读位置丢失。
+  3. `ActivityStore.page` 的 `if snapshot is None:` 改为无条件取最新版本，归档快照测试失败，
+     旧阅读视图被删除版本替换。
+  命令为 `CONSOLE_ABLATION=<mode> PYTHONPATH=.amp/in FLOWTOOL_TEST_DATABASE_URL=...`
+  `uv run pytest -q -p console_ablation <test>`，mode 分别 dedupe/checkpoint/snapshot；
+  test 为 `tests/test_console_archive.py::test_archive_versions_snapshots_and_prior_interactions`，
+  checkpoint 使用 `tests/test_console_sync.py::test_worker_is_actively_queried_and_eof_checkpoint_survives_refresh`。
+  三组均按预期 1 failed，保留幂等、检查点、快照三项机制。
+  临时插件 `.amp/in/console_ablation.py` 和 `.amp/in/artifacts/ablation-*.log` 仅本地保存，不发布。
+- **Remaining acceptance:** 真实 GitHub App 权限/全来源采集、Access 登录/MFA、目标 Tunnel/镜像部署，
+  以及此次推送后的远端 CI。未合并、未部署，#85 不提前关闭。
+
+### [031] 2026-10-17 — “已编辑”链接与上一版差异
+
+- **Requirement:** 用户要求移除历史版本按钮/列表，只保留可点击的“已编辑”提示，点击展开上一版 diff。
+- **Implementation:** Activity DTO 返回该归档版本的上一内容版本；只有已观察到标题/正文变化才显示
+  无背景边框的文字按钮，首次采集、仅元信息变化及删除标记不展示“已编辑”。点击按需请求
+  `/activity/content?compare=true`，在原活动下展开红删绿增 unified diff，再次点击收起。
+  不再重复列出各版完整正文，也不将 Flow 归档序号展示为编辑次数；归档及版本查询能力仍保留。
+- **Decision / bounds:** 比较绑定不可变版本，后续采集不改变当前比较对象；跳过元信息重复观察。
+  复用 Python 标准库，无新增依赖。每版最多比较 65536 字符正文、4096 字符标题和 2000 行，
+  超预算明确提示，仍可阅读正文/使用已有来源链接，绝不把截断预览冒充完整差异。
+  diff 响应每部分最多 16384 字符，DOM 继续使用现有代码窗口，展开结果只保留一个响应部分。
+- **Validation:** Python 完整测试 782 passed；Ruff、Mypy、前端格式/单测/类型检查/构建通过；
+  Playwright 4 passed，更新回归验证默认收起、键盘展开、红删绿增、点击收起和手机无横向溢出。
+  HTTP 回归使用真实 PostgreSQL，验证无旧版不显示、元信息变化不误报、超过预览长度的 Unicode
+  修改仍可比较、授权、分页、旧比较对稳定和超预算明确失败。wheel/sdist 已重新构建。
+  已检查桌面收起、桌面展开及手机展开截图，使用 API DTO 测试数据。
+- **Ablation:** 临时进程内把比较输入改为旧的 2000 字符展示预览，同一 HTTP 回归因遗漏尾部修改
+  而失败（1 failed）；完整实现通过。命令：`PYTHONPATH=.amp/in FLOWTOOL_TEST_DATABASE_URL=...`
+  `uv run pytest -q -p edited_diff_ablation tests/test_console_api.py::test_edited_hint_and_diff_compare_full_immutable_content_not_preview`。
+  插件和日志仅保留在 `.amp/in/`；本轮改动仍在本地，未推送，不绕过此前超时的发布审查门禁。
+
+### [032] 2026-10-17 — 时间拆行、简化计数和对齐修正
+
+- **Requirement / implementation:** 按用户连续反馈，概览“创建 / 更新”拆成两个独立标签/时间行；
+  看板及侧栏移除“已加载”数量，只保留任务总数和分页入口，不改变分页/窗口化。
+  会话头像与作者组共享响应式高度、移除顶部补偿，作者与来源标签用基线对齐；
+  侧栏任务圆点取消固定顶部偏移，用 flex 垂直居中，标题换行时仍随标题块居中。
+- **Validation:** 前端格式、2 项单测、类型检查/构建和 4 项浏览器回归通过；检查桌面看板、
+  桌面/手机概览及会话截图，确认无已加载数量、时间两行、头像/文字及侧栏圆点对齐。
+  仅修改展示布局，不引入新机制，无需另做消融；本地改动仍未推送。
+
+### [033] 2026-10-17 — 完整 patch 与 react-diff-view
+
+- **Requirement / decision:** 用户选择 react-diff-view，并要求后端返回完整 diff。
+  替代 [031] 的 diff 字符分页及自制逐行着色，正文分页不变；不引入双栏切换或代码编辑器。
+- **Implementation:** `compare=true` 一次返回完整 unified patch，`next_offset=null`，
+  `offset` 必须为零，正文的 `limit` 不切割 patch。继续绑定不可变比较版本，保留每版
+  65536 正文字符、4096 标题字符和 2000 行的计算预算；超限明确失败，不返回截断结果。
+  新增 `DiffWindow`，用 react-diff-view 解析完整 patch 并生成行内高亮，再按已解析变更行
+  窗口化：每次最多 200 行，保持原始行号和完整文本，视口最高 480px，切换无需网络请求。
+  “已编辑”仍默认收起，移除旧 diff 专用 TextWindow 分支及 CSS；普通正文/工具摘要不变。
+- **Validation:** HTTP 回归先在原实现失败（超过 16K 的上下文截断了尾部修改），修改后通过；
+  完整 Python 782 passed，Ruff/Mypy 通过，仍有一条上游 Starlette/httpx 弃用提示。
+  前端类型/构建、格式、2 项单测、5 项浏览器测试通过；新增长 patch 浏览器回归覆盖
+  多窗口、跨差异块、旧新行号、恶意 HTML 按文本展示、只请求一次及收起后恢复窗口。
+  已检查桌面/手机差异截图及固定高度长 diff 截图，均使用 API DTO 测试数据。
+- **Ablation:** 同一份 24120 字符、900 行 patch，直接使用库渲染会挂载 900 行，
+  `DiffWindow` 挂载 200 行；长 diff 浏览器测试确认切换后末尾仍可达，不丢文本。
+  对照用 `npx tsx --input-type=module` 调用 React SSR，日志保存于
+  `.amp/in/artifacts/console-diff-window-ablation.log`；保留窗口机制以满足固定最大 DOM 要求。
+  本轮仅本地实现与验证，未推送，不绕过此前超时的发布审查门禁。
+
+### [034] 2026-10-17 — macOS 风格状态色表
+
+- **Requirement / implementation:** 用户要求参考苹果 App 左上角窗口按钮配色调整状态图标。
+  用共享 CSS 色表统一排队灰、执行蓝、待审黄、受阻红、完成绿；红黄绿参考窗口按钮，
+  补充灰蓝以区分五个业务阶段。保持圆点形状、尺寸和文字，覆盖看板、卡片、侧栏与详情。
+  来源状态带上既有 status 类，pending/syncing/partial/unavailable/available 对应同一色表，
+  修正原先来源圆点未区分状态的问题；不改变数据或状态含义。
+- **Validation:** 前端格式、类型/构建、2 项单测与5项浏览器回归通过；本地临时浏览器脚本
+  `.amp/in/verify-status-palette.mjs` 校验五阶段各处实际计算色值、五种来源状态色值、
+  手机无横向溢出和无页面异常，检查桌面看板/详情及手机截图。纯配色调整无新增复杂机制，
+  不新增永久样式测试或消融；仅本地改动，未推送。

@@ -23,7 +23,7 @@ export function ReadingState({ children }: { children: ReactNode }) {
   return <Memory value={store.current}>{children}</Memory>;
 }
 
-function useReadingState(key: string, initial: number) {
+export function useReadingState(key: string, initial: number) {
   const store = useContext(Memory);
   const [value, setValue] = useState(() => store.get(key) ?? initial);
   useEffect(() => setValue(store.get(key) ?? initial), [key, initial, store]);

@@ -1,489 +1,742 @@
 import {
   type KeyboardEvent,
-  type Ref,
-  type RefObject,
   useEffect,
-  useImperativeHandle,
   useLayoutEffect,
   useRef,
   useState,
 } from "react";
-import { RefreshCw } from "lucide-react";
-import { flows } from "./fixtures";
-import { phases } from "./phases";
-import type { Flow, Tab } from "./types";
+import { Menu, PanelLeftClose, PanelLeftOpen, RefreshCw } from "lucide-react";
+import { getFlow, getFlows, getJobs, getRepos } from "./api";
 import { ActivityView } from "./activity";
-import { useConversation } from "./useConversation";
-import { Board, DetailHeader, Jobs, Overview, Rail } from "./views";
-import { Button } from "./components/ui/button";
+import { phases } from "./phases";
 import { SearchBox } from "./SearchBox";
-import { matchesFlow, parseSearch } from "./search";
-import { WindowList } from "./windowing";
+import type { FlowDetail, FlowSummary, JobSummary, Phase, Tab } from "./types";
+import { useConversation } from "./useConversation";
+import { SavedDetails, WindowList } from "./windowing";
 import { focusableControls } from "./focus";
 
-const parseRoute = (): { flow: Flow | null; tab: Tab; invalid: boolean } => {
-  const match = location.hash.match(
+type Column = {
+  items: FlowSummary[];
+  next: string | null;
+  more: boolean;
+  busy: boolean;
+  error: string;
+};
+const column = (): Column => ({
+  items: [],
+  next: null,
+  more: true,
+  busy: false,
+  error: "",
+});
+const blank = (): Record<Phase, Column> => ({
+  queued: column(),
+  running: column(),
+  review: column(),
+  blocked: column(),
+  done: column(),
+});
+const positions = new Map<string, number>();
+const route = () => {
+  const m = location.hash.match(
     /^#flow\/(\d+)(?:\/(overview|conversation|jobs))?$/,
   );
   return {
-    flow: match
-      ? (flows.find((item) => item.id === Number(match[1])) ?? null)
-      : null,
-    tab:
-      match?.[2] === "overview"
-        ? "overview"
-        : match?.[2] === "jobs"
-          ? "jobs"
-          : "conversation",
-    invalid: match
-      ? !flows.some((item) => item.id === Number(match[1]))
-      : Boolean(location.hash && location.hash !== "#board"),
+    id: m ? Number(m[1]) : null,
+    tab: (m?.[2] ?? "conversation") as Tab,
   };
 };
+const name = (f: FlowSummary) => f.title ?? `Issue #${f.issue_number}`;
+const ref = (f: FlowSummary) =>
+  f.pr_number ? `PR #${f.pr_number}` : `Issue #${f.issue_number}`;
 
-function readFilters() {
-  const params = new URL(location.href).searchParams;
-  const phase = params.get("phase") || "running";
-  return {
-    query: params.get("q") || "",
-    phase: phases.some(([key]) => key === phase) ? phase : "running",
-  };
+function Board({
+  columns,
+  counts,
+  load,
+  go,
+}: {
+  columns: ReturnType<typeof blank>;
+  counts: Record<Phase, number>;
+  load: (p: Phase) => void;
+  go: (id: number) => void;
+}) {
+  const [mobile, setMobile] = useState<Phase>("running");
+  const host = useRef<HTMLElement>(null);
+  useLayoutEffect(() => {
+    const roots = [
+      ...(host.current?.querySelectorAll<HTMLElement>("[data-phase]") ?? []),
+    ];
+    roots.forEach((x) => {
+      x.scrollTop = positions.get(x.dataset.phase!) ?? 0;
+    });
+    const frame = requestAnimationFrame(() => {
+      host.current
+        ?.querySelector<HTMLElement>(
+          `[data-flow="${positions.get("card-focus")}"]`,
+        )
+        ?.focus({ preventScroll: true });
+    });
+    return () => {
+      cancelAnimationFrame(frame);
+      roots.forEach((x) => positions.set(x.dataset.phase!, x.scrollTop));
+    };
+  }, []);
+  return (
+    <main ref={host} className="board-page" aria-label="工作看板">
+      <div className="mobile-stages">
+        {phases.map(([p, l]) => (
+          <button
+            key={p}
+            className={`phase-${p}${mobile === p ? " active" : ""}`}
+            onClick={() => setMobile(p)}
+          >
+            <i className="dot" />
+            {l}
+            <span>{counts[p]}</span>
+          </button>
+        ))}
+      </div>
+      <section className="kanban" aria-label="Flow 看板">
+        {phases.map(([phase, label]) => {
+          const c = columns[phase];
+          return (
+            <section
+              className={`column phase-${phase}${mobile === phase ? " mobile-selected" : ""}`}
+              key={phase}
+            >
+              <div className="col-header">
+                <i className="dot" />
+                {label}
+                <span className="count">{counts[phase]}</span>
+              </div>
+              <div
+                className="column-scroll"
+                data-scroll-root
+                data-phase={phase}
+                onScroll={(e) => {
+                  const x = e.currentTarget;
+                  if (x.scrollTop + x.clientHeight >= x.scrollHeight - 120)
+                    load(phase);
+                }}
+              >
+                <WindowList
+                  count={c.items.length}
+                  label={`看板-${phase}`}
+                  itemKey={(i) => c.items[i].id}
+                  estimate={250}
+                >
+                  {(i) => {
+                    const f = c.items[i];
+                    return (
+                      <button
+                        className={`card phase-${f.phase}`}
+                        data-flow={f.id}
+                        onClick={() => {
+                          positions.set("card-focus", f.id);
+                          go(f.id);
+                        }}
+                      >
+                        <div className="card-top">
+                          <span>{ref(f)}</span>
+                        </div>
+                        <h2>{name(f)}</h2>
+                        <div className="repo-label">{f.repo}</div>
+                        <div className="card-foot">
+                          <span className="current-action">
+                            <i className="dot" />
+                            {f.action}
+                          </span>
+                        </div>
+                      </button>
+                    );
+                  }}
+                </WindowList>
+                {c.error && (
+                  <button className="btn" onClick={() => load(phase)}>
+                    读取失败：{c.error}（重试）
+                  </button>
+                )}
+                {c.busy && <p>正在加载…</p>}
+                {!c.busy && c.more && <div className="load-sentinel" />}
+                {!c.items.length && !c.busy && (
+                  <div className="empty-col">暂无任务</div>
+                )}
+              </div>
+            </section>
+          );
+        })}
+      </section>
+    </main>
+  );
 }
 
-type ConversationHandle = { refresh: () => void };
-function Conversation({
-  flow,
-  root,
-  ref,
+function Detail({
+  id,
+  tab,
+  all,
+  counts,
+  load,
+  refresh,
+  onBack,
 }: {
-  flow: Flow;
-  root: RefObject<HTMLElement | null>;
-  ref: Ref<ConversationHandle>;
+  id: number;
+  tab: Tab;
+  all: FlowSummary[];
+  counts: Record<Phase, number>;
+  load: (p: Phase) => void;
+  refresh: number;
+  onBack: () => void;
 }) {
-  const { state, advance, onRange, retry } = useConversation(flow, root);
-  useImperativeHandle(
-    ref,
-    () => ({
-      refresh: () => {
-        if (!state.hasMore) void advance(true);
-      },
-    }),
-    [advance, state.hasMore],
+  const [flow, setFlow] = useState<FlowDetail | null>(null),
+    [error, setError] = useState(""),
+    [collapsed, setCollapsed] = useState(
+      () => positions.get("collapsed") === 1,
+    ),
+    [nav, setNav] = useState(false);
+  const [jobs, setJobs] = useState<JobSummary[]>([]),
+    [jobNext, setJobNext] = useState<string | null>(null),
+    [jobMore, setJobMore] = useState(true),
+    [jobError, setJobError] = useState("");
+  const detail = useRef<HTMLDivElement>(null),
+    rail = useRef<HTMLElement>(null);
+  const jobsRequest = useRef<AbortController | null>(null);
+  const jobsBusy = useRef(false);
+  useLayoutEffect(() => {
+    const node = detail.current;
+    if (!node) return;
+    const key = `detail:${id}:${tab}`;
+    node.scrollTop = positions.get(key) ?? 0;
+    return () => {
+      positions.set(key, node.scrollTop);
+    };
+  }, [id, tab, Boolean(flow)]);
+  useEffect(() => {
+    const c = new AbortController();
+    setError("");
+    void getFlow(id, c.signal)
+      .then((value) => !c.signal.aborted && setFlow(value))
+      .catch((e) => !c.signal.aborted && setError(e.message));
+    return () => c.abort();
+  }, [id, refresh]);
+  const moreJobs = (reset = false) => {
+    if (!reset && (!jobMore || jobsBusy.current)) return;
+    jobsRequest.current?.abort();
+    const c = new AbortController();
+    jobsRequest.current = c;
+    jobsBusy.current = true;
+    setJobError("");
+    void getJobs(id, reset ? null : jobNext, c.signal)
+      .then((p) => {
+        if (c.signal.aborted) return;
+        setJobs((x) => (reset ? p.items : [...x, ...p.items]));
+        setJobNext(p.next_cursor);
+        setJobMore(p.has_more);
+      })
+      .catch((e) => !c.signal.aborted && setJobError(e.message))
+      .finally(() => {
+        if (jobsRequest.current === c) jobsBusy.current = false;
+      });
+  };
+  useEffect(() => {
+    setJobs([]);
+    setJobNext(null);
+    setJobMore(true);
+    setJobError("");
+    if (tab === "jobs") moreJobs(true);
+    return () => jobsRequest.current?.abort();
+  }, [id, tab, refresh]);
+  useEffect(() => {
+    if (!nav) return;
+    const before = document.activeElement;
+    focusableControls(rail.current)[0]?.focus();
+    const key = (e: globalThis.KeyboardEvent) => {
+      if (e.key === "Escape") setNav(false);
+      if (e.key === "Tab") {
+        const controls = focusableControls(rail.current),
+          index = controls.findIndex((x) => x === document.activeElement);
+        if (
+          (e.shiftKey && index <= 0) ||
+          (!e.shiftKey && index === controls.length - 1)
+        ) {
+          e.preventDefault();
+          (e.shiftKey ? controls.at(-1) : controls[0])?.focus();
+        }
+      }
+    };
+    addEventListener("keydown", key);
+    return () => {
+      removeEventListener("keydown", key);
+      if (before instanceof HTMLElement) before.focus();
+    };
+  }, [nav]);
+  if (error)
+    return (
+      <main className="empty-state">
+        <strong>无法读取 Flow</strong>
+        <span>{error}</span>
+        <button className="btn" onClick={onBack}>
+          返回看板
+        </button>
+      </main>
+    );
+  if (!flow) return <main className="empty-state">正在读取 Flow…</main>;
+  const switchTab = (t: Tab) => (location.hash = `flow/${id}/${t}`);
+  const tabs = (e: KeyboardEvent) => {
+    if (!["ArrowLeft", "ArrowRight"].includes(e.key)) return;
+    e.preventDefault();
+    const x: Tab[] = ["overview", "conversation", "jobs"],
+      n = (x.indexOf(tab) + (e.key === "ArrowRight" ? 1 : 2)) % 3;
+    switchTab(x[n]);
+  };
+  return (
+    <div
+      className={`detail-shell${collapsed ? " rail-collapsed" : ""}${nav ? " nav-open" : ""}`}
+    >
+      <aside
+        ref={rail}
+        className="rail"
+        aria-label="Flow 导航"
+        role={nav ? "dialog" : undefined}
+        aria-modal={nav || undefined}
+      >
+        <div className="rail-head">
+          <button className="btn ghost back" onClick={onBack}>
+            返回看板
+          </button>
+          <button
+            className="btn rail-toggle"
+            aria-label={collapsed ? "展开任务侧栏" : "折叠任务侧栏"}
+            onClick={() =>
+              setCollapsed((x) => {
+                positions.set("collapsed", x ? 0 : 1);
+                return !x;
+              })
+            }
+          >
+            {collapsed ? <PanelLeftOpen /> : <PanelLeftClose />}
+          </button>
+        </div>
+        <nav className="rail-scroll" data-scroll-root>
+          {phases.map(([p, l]) => {
+            const group = all.filter((f) => f.phase === p);
+            return (
+              <SavedDetails
+                open
+                key={p}
+                stateKey={`rail-group-${p}`}
+                className={`rail-group phase-${p}`}
+              >
+                <summary>
+                  {l}
+                  <span className="count">{counts[p]}</span>
+                </summary>
+                <WindowList
+                  count={group.length}
+                  label={`侧栏-${p}`}
+                  itemKey={(i) => group[i].id}
+                  estimate={78}
+                >
+                  {(i) => (
+                    <button
+                      className={`flow-tab${group[i].id === id ? " active" : ""}`}
+                      onClick={() => {
+                        setNav(false);
+                        location.hash = `flow/${group[i].id}/${tab}`;
+                      }}
+                    >
+                      <i className="dot" />
+                      <span className="name">{name(group[i])}</span>
+                    </button>
+                  )}
+                </WindowList>
+                {group.length < counts[p] && (
+                  <button className="btn" onClick={() => load(p)}>
+                    更多{l}任务
+                  </button>
+                )}
+              </SavedDetails>
+            );
+          })}
+        </nav>
+      </aside>
+      <button
+        className="mobile-shade"
+        aria-label="关闭任务导航"
+        onClick={() => setNav(false)}
+      />
+      <main className="detail">
+        <header className="detail-head">
+          <button
+            className="btn mobile-nav"
+            aria-expanded={nav}
+            onClick={() => setNav(true)}
+          >
+            <Menu />
+            切换任务
+          </button>
+          <div className="detail-title-row">
+            <h1 id="detail-heading">{name(flow)}</h1>
+            <span className={`badge phase-${flow.phase}`}>
+              <i className="dot" />
+              {flow.action}
+            </span>
+          </div>
+          <div className="links">
+            <span>{flow.repo}</span>
+            <a href={flow.issue_url} target="_blank" rel="noreferrer">
+              Issue #{flow.issue_number} ↗
+            </a>
+            {flow.pr_url && (
+              <a href={flow.pr_url} target="_blank" rel="noreferrer">
+                PR #{flow.pr_number} ↗
+              </a>
+            )}
+            <span className="tag">只读</span>
+          </div>
+          <div className="tabs" role="tablist" onKeyDown={tabs}>
+            {(
+              [
+                ["overview", "概览"],
+                ["conversation", "会话"],
+                ["jobs", "执行记录"],
+              ] as [Tab, string][]
+            ).map(([t, l]) => (
+              <button
+                role="tab"
+                id={`tab-${t}`}
+                aria-selected={tab === t}
+                tabIndex={tab === t ? 0 : -1}
+                onClick={() => switchTab(t)}
+                key={t}
+              >
+                {l}
+              </button>
+            ))}
+          </div>
+        </header>
+        <div className="detail-body" data-scroll-root ref={detail}>
+          <section className="content" role="tabpanel">
+            {tab === "overview" ? (
+              <>
+                <section className={`execution-summary phase-${flow.phase}`}>
+                  <span className="eyebrow">当前动作</span>
+                  <h2>{flow.action}</h2>
+                  <p>{flow.reason}</p>
+                  <div className="next-step">
+                    <span>下一步条件</span>
+                    <p>{flow.next_condition}</p>
+                  </div>
+                </section>
+                <h2 className="panel-title">任务信息</h2>
+                <dl className="task-facts">
+                  <dt>生命周期 / 阶段</dt>
+                  <dd>
+                    {flow.lifecycle} /{" "}
+                    {phases.find(([p]) => p === flow.phase)?.[1]}
+                  </dd>
+                  <dt>Worker</dt>
+                  <dd>
+                    {flow.worker_id ?? "尚未绑定"}
+                    {flow.worker_historical ? "（历史归属）" : ""}
+                  </dd>
+                  <dt>分支</dt>
+                  <dd>{flow.branch ?? "尚未创建"}</dd>
+                  <dt>修订轮数</dt>
+                  <dd>{flow.revision_cycles}</dd>
+                  <dt>创建</dt>
+                  <dd>{new Date(flow.created_at).toLocaleString()}</dd>
+                  <dt>更新</dt>
+                  <dd>{new Date(flow.updated_at).toLocaleString()}</dd>
+                  <dt>当前状态版本</dt>
+                  <dd>{flow.state_version}（与阅读快照独立）</dd>
+                </dl>
+                <h2 className="panel-title">数据来源</h2>
+                {flow.sources.map((s) => (
+                  <p key={s.source}>
+                    {s.source} · {s.status}
+                    {s.reason ? ` · ${s.reason}` : ""}
+                    {s.last_success_at
+                      ? ` · 上次成功 ${s.last_success_at}`
+                      : ""}
+                    {s.limitations.length
+                      ? ` · ${s.limitations.join("；")}`
+                      : ""}
+                  </p>
+                ))}
+              </>
+            ) : tab === "conversation" ? (
+              <Conversation key={id} id={id} root={detail} refresh={refresh} />
+            ) : (
+              <>
+                <WindowList
+                  count={jobs.length}
+                  label="执行记录"
+                  itemKey={(i) => jobs[i].id}
+                >
+                  {(i) => (
+                    <article className="job">
+                      <strong>
+                        {jobs[i].kind} #{jobs[i].attempt}
+                      </strong>
+                      <span className="badge">{jobs[i].state}</span>
+                      <p>
+                        {jobs[i].worker_id ?? "无 Worker"}
+                        {jobs[i].error_code ? ` · ${jobs[i].error_code}` : ""}
+                      </p>
+                    </article>
+                  )}
+                </WindowList>
+                {jobError && (
+                  <button className="btn" onClick={() => moreJobs()}>
+                    读取失败：{jobError}（重试）
+                  </button>
+                )}
+                {jobMore && (
+                  <button className="btn" onClick={() => moreJobs()}>
+                    读取更多执行记录
+                  </button>
+                )}
+              </>
+            )}
+          </section>
+        </div>
+      </main>
+    </div>
   );
+}
+
+function Conversation({
+  id,
+  root,
+  refresh,
+}: {
+  id: number;
+  root: React.RefObject<HTMLElement | null>;
+  refresh: number;
+}) {
+  const { state, load, onRange, retry } = useConversation(id, root);
+  const previousRefresh = useRef(refresh);
+  useEffect(() => {
+    if (previousRefresh.current !== refresh) {
+      previousRefresh.current = refresh;
+      load(true);
+    }
+  }, [refresh, load]);
   return (
     <>
       <div className="conversation-sources">
-        <span className="source-state">
-          <i className="dot" />
-          GitHub · 可读取
-        </span>
-        <span
-          className={`source-state${flow.phase === "blocked" || flow.phase === "queued" ? " unavailable" : ""}`}
-        >
-          <i className="dot" />
-          Worker ·{" "}
-          {flow.phase === "blocked"
-            ? "暂时离线"
-            : flow.phase === "queued"
-              ? "尚无会话"
-              : "历史可读取"}
-        </span>
-        <span className="sample-hint">全部为示例 · 下滑加载更多</span>
-      </div>
-      {flow.phase === "blocked" ? (
-        <div className="notice">
-          <span>
-            <strong>Worker 离线，新执行记录暂不可读取</strong>
-            <br />
-            已有历史样例仍保留，GitHub 交互可独立更新。
+        {state.sources.map((s) => (
+          <span className={`source-state ${s.status}`} key={s.source}>
+            <i className="dot" />
+            {s.source} · {s.status}
+            {s.reason ? ` (${s.reason})` : ""}
+            {s.last_success_at ? ` · ${s.last_success_at}` : ""}
           </span>
-        </div>
-      ) : flow.phase === "queued" ? (
-        <div className="notice">
-          Agent 会话尚未开始，已有关联 Issue 的交互。
-        </div>
-      ) : null}
-      <div className="date-label">
-        2026 年 10 月 16 日 · 关联 Issue / PR 与 Agent 会话
+        ))}
       </div>
-      <div
-        className="conversation-stream"
-        data-flow-id={flow.id}
-        data-cached-rows={state.items.size}
-      >
+      {Object.values(state.changes).some(Boolean) && (
+        <p className="conversation-divider" role="status">
+          快照更新：
+          {Object.entries(state.changes)
+            .filter(([, n]) => n)
+            .map(([k, n]) => `${k} ${n}`)
+            .join("，")}
+        </p>
+      )}
+      <div className="conversation-stream">
         <WindowList
-          count={state.count}
+          count={state.keys.length}
           label="会话活动"
-          itemKey={(index) => `${flow.id}-activity-${index}`}
+          itemKey={(i) => state.keys[i] ?? `${id}-${i}`}
           onRange={onRange}
-          estimate={250}
+          estimate={220}
         >
-          {(index) => {
-            const entry = state.items.get(index);
-            return (
-              <>
-                {state.newStart === index && (
-                  <div
-                    className="new-records conversation-divider"
-                    role="status"
-                  >
-                    本次新增交互
-                  </div>
-                )}
-                {entry ? (
-                  <ActivityView
-                    entry={entry}
-                    stateKey={`${flow.id}-${entry.id}`}
-                  />
-                ) : (
-                  <div className="history-placeholder" role="status">
-                    正在读取第 {index + 1} 条历史交互…
-                  </div>
-                )}
-              </>
+          {(i) => {
+            const e = state.items.get(i);
+            return e ? (
+              <ActivityView
+                key={`${e.key}-${e.version}`}
+                entry={e}
+                flowId={id}
+                snapshot={state.snapshot ?? 0}
+              />
+            ) : (
+              <div className="history-placeholder">正在读取历史交互…</div>
             );
           }}
         </WindowList>
       </div>
-      <div className="conversation-tail" aria-live="polite">
-        {state.error ? (
-          <>
-            <button
-              className="refresh-boundary conversation-divider"
-              data-action="conversation-retry"
-              onClick={retry}
-            >
-              读取失败 · 点击重试
-            </button>
-            <p className="boundary-caption" role="alert">
-              {state.error}
-            </p>
-          </>
-        ) : state.hasMore ? (
-          <div className="load-sentinel" role="status">
-            {state.busy ? "正在加载更多交互…" : "向下滚动，继续读取交互"}
-          </div>
-        ) : (
-          <>
-            <button
-              className="refresh-boundary conversation-divider"
-              data-action="conversation-refresh"
-              disabled={state.busy}
-              onClick={() => void advance(true)}
-            >
-              <span>
-                {state.busy
-                  ? "正在检查更新…"
-                  : state.checked
-                    ? "暂无新交互 · 点击再次检查"
-                    : `已加载到 ${state.latestTime ?? "当前读取位置"} · 点击刷新`}
-              </span>
-            </button>
-            <p className="boundary-caption">
-              仅表示本次读取位置 ·{" "}
-              {flow.phase === "blocked"
-                ? "Worker 暂时离线，仍可获取 GitHub 交互"
-                : "不代表任务执行结束"}
-            </p>
-          </>
-        )}
-      </div>
+      {state.error ? (
+        <button className="btn" onClick={retry}>
+          读取失败：{state.error}（重试）
+        </button>
+      ) : state.has_more ? (
+        <div className="load-sentinel" role="status">
+          {state.busy ? "正在加载更多交互…" : "向下滚动，继续读取交互"}
+        </div>
+      ) : (
+        <button
+          className="refresh-boundary conversation-divider"
+          disabled={state.busy}
+          onClick={() => void load(true)}
+        >
+          {state.busy ? "正在检查更新…" : "已到当前本地快照末尾 · 点击刷新"}
+        </button>
+      )}
     </>
   );
 }
 
 export default function App() {
-  const [route, setRoute] = useState(parseRoute),
-    [query, setQuery] = useState(() => readFilters().query),
-    [mobilePhase, setMobilePhase] = useState(() => readFilters().phase),
-    [collapsed, setCollapsed] = useState(false),
-    [navOpen, setNavOpen] = useState(false),
-    [toast, setToast] = useState("");
-  const detail = useRef<HTMLDivElement>(null);
-  const rail = useRef<HTMLElement>(null);
-  const conversation = useRef<ConversationHandle>(null);
-  const boardScroll = useRef(new Map<string, number>());
-  const previousRoute = useRef(route);
-  useEffect(() => {
-    const sync = () => {
-      setRoute(parseRoute());
-      const filters = readFilters();
-      setQuery(filters.query);
-      setMobilePhase(filters.phase);
-      setNavOpen(false);
-    };
-    addEventListener("hashchange", sync);
-    addEventListener("popstate", sync);
-    return () => {
-      removeEventListener("hashchange", sync);
-      removeEventListener("popstate", sync);
-    };
-  }, []);
-  useEffect(() => {
-    const url = new URL(location.href);
-    (
-      [
-        ["q", query, ""],
-        ["phase", mobilePhase, "running"],
-      ] as const
-    ).forEach(([key, value, base]) =>
-      value === base
-        ? url.searchParams.delete(key)
-        : url.searchParams.set(key, value),
+  const [current, setCurrent] = useState(route),
+    [query, setQuery] = useState(
+      new URL(location.href).searchParams.get("q") ?? "",
+    ),
+    [repos, setRepos] = useState<string[]>([]),
+    [repoNext, setRepoNext] = useState<string | null>(null),
+    [repoError, setRepoError] = useState(""),
+    [refresh, setRefresh] = useState(0),
+    [columns, setColumns] = useState(blank),
+    [counts, setCounts] = useState(
+      Object.fromEntries(phases.map(([p]) => [p, 0])) as Record<Phase, number>,
     );
-    history.replaceState(null, "", url);
-  }, [query, mobilePhase]);
+  const boardRequests = useRef(new Map<Phase, AbortController>());
   useEffect(() => {
-    const close = () => setNavOpen(false);
-    const media = matchMedia("(max-width: 760px)");
-    media.addEventListener("change", close);
-    return () => media.removeEventListener("change", close);
+    const sync = () => setCurrent(route());
+    addEventListener("hashchange", sync);
+    return () => removeEventListener("hashchange", sync);
   }, []);
   useEffect(() => {
-    if (!toast) return;
-    const timer = setTimeout(() => setToast(""), 2600);
-    return () => clearTimeout(timer);
-  }, [toast]);
-  useLayoutEffect(() => {
-    const before = previousRoute.current;
-    previousRoute.current = route;
-    if (before.flow?.id === route.flow?.id && before.tab === route.tab) return;
-    if (!route.flow) {
-      let focusFrame = 0;
-      // Virtual lists need their scroll roots measured before restoring each column.
-      const scrollFrame = requestAnimationFrame(() => {
-        for (const [phase, top] of boardScroll.current)
-          document
-            .querySelector(`.column-scroll[data-phase="${phase}"]`)
-            ?.scrollTo(0, top);
-        focusFrame = requestAnimationFrame(() => {
-          document
-            .querySelector<HTMLElement>(`.card[data-flow="${before.flow?.id}"]`)
-            ?.focus({ preventScroll: true });
-        });
-      });
-      return () => {
-        cancelAnimationFrame(scrollFrame);
-        cancelAnimationFrame(focusFrame);
-      };
-    } else if (before.flow?.id !== route.flow.id) {
-      if (detail.current) detail.current.scrollTop = 0;
-      document.getElementById("detail-heading")?.focus({ preventScroll: true });
-    } else
-      document
-        .getElementById(`tab-${route.tab}`)
-        ?.focus({ preventScroll: true });
-  }, [route.flow?.id, route.tab]);
-  useEffect(() => {
-    if (!navOpen) return;
-    rail.current?.querySelector<HTMLButtonElement>(".back")?.focus();
-    const keydown = (event: globalThis.KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        setNavOpen(false);
-        return;
-      }
-      if (event.key !== "Tab") return;
-      const controls = focusableControls(rail.current);
-      const first = controls[0],
-        last = controls.at(-1);
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last?.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first?.focus();
-      }
-    };
-    document.addEventListener("keydown", keydown);
-    return () => {
-      document.removeEventListener("keydown", keydown);
-      document
-        .querySelector<HTMLButtonElement>('[data-action="nav"]')
-        ?.focus({ preventScroll: true });
-    };
-  }, [navOpen]);
-  useEffect(() => {
-    document.title = route.flow
-      ? `Flow ${route.flow.id} · AgentFlow 前端预览`
-      : "工作看板 · AgentFlow 前端预览";
-  }, [route.flow]);
-  const repos = [...new Set(flows.map((flow) => flow.repo))];
-  const parsed = parseSearch(query, repos);
-  const visible = parsed.ok
-    ? flows.filter((flow) => matchesFlow(flow, parsed.query))
-    : [];
-  const go = (
-    id: number,
-    tab: Tab = route.flow ? route.tab : "conversation",
-  ) => {
-    if (!route.flow)
-      boardScroll.current = new Map(
-        phases.map(([phase]) => [
-          phase,
-          document.querySelector(`.column-scroll[data-phase="${phase}"]`)
-            ?.scrollTop ?? 0,
-        ]),
-      );
-    location.hash = `flow/${id}/${tab}`;
-    setNavOpen(false);
-  };
-  const keyTabs = (event: KeyboardEvent) => {
-    if (
-      !route.flow ||
-      !["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)
+    const c = new AbortController();
+    void getRepos(null, c.signal)
+      .then((page) => {
+        if (!c.signal.aborted) {
+          setRepos(page.items);
+          setRepoNext(page.next_cursor);
+        }
+      })
+      .catch((e) => !c.signal.aborted && setRepoError(e.message));
+    return () => c.abort();
+  }, []);
+  const load = (phase: Phase, reset = false) => {
+    const prior = columns[phase];
+    if ((prior.busy || !prior.more) && !reset) return;
+    boardRequests.current.get(phase)?.abort();
+    const c = new AbortController();
+    boardRequests.current.set(phase, c);
+    setColumns((x) => ({
+      ...x,
+      [phase]: {
+        ...(reset
+          ? { items: [], next: null, more: true, error: "" }
+          : x[phase]),
+        busy: true,
+        error: "",
+      },
+    }));
+    void getFlows(
+      {
+        q: query,
+        phase,
+        cursor: reset ? undefined : (prior.next ?? undefined),
+        limit: 50,
+      },
+      c.signal,
     )
-      return;
-    event.preventDefault();
-    const all: Tab[] = ["overview", "conversation", "jobs"],
-      index = all.indexOf(route.tab);
-    const next =
-      event.key === "Home"
-        ? 0
-        : event.key === "End"
-          ? 2
-          : (index + (event.key === "ArrowRight" ? 1 : 2)) % 3;
-    location.hash = `flow/${route.flow.id}/${all[next]}`;
+      .then((page) => {
+        if (c.signal.aborted || boardRequests.current.get(phase) !== c) return;
+        setCounts(page.counts);
+        setColumns((x) => ({
+          ...x,
+          [phase]: {
+            items: reset ? page.items : [...x[phase].items, ...page.items],
+            next: page.next_cursor,
+            more: page.has_more,
+            busy: false,
+            error: "",
+          },
+        }));
+      })
+      .catch(
+        (e) =>
+          !c.signal.aborted &&
+          boardRequests.current.get(phase) === c &&
+          setColumns((x) => ({
+            ...x,
+            [phase]: { ...x[phase], busy: false, error: e.message },
+          })),
+      );
   };
-  const copy = async (value: string) => {
-    try {
-      await navigator.clipboard.writeText(value);
-      setToast("交付分支已复制");
-    } catch {
-      setToast("浏览器未允许复制，请选中分支文本手动复制");
-    }
-  };
+  useEffect(() => {
+    phases.forEach(([p]) => load(p, true));
+    const url = new URL(location.href);
+    if (query) url.searchParams.set("q", query);
+    else url.searchParams.delete("q");
+    history.replaceState(null, "", url);
+    return () => boardRequests.current.forEach((c) => c.abort());
+  }, [query]);
+  const all = phases.flatMap(([p]) => columns[p].items);
   return (
     <>
-      <header className="workspace-bar" inert={navOpen}>
-        <nav className="bar-path" aria-label="当前位置">
+      <header className="workspace-bar">
+        <nav className="bar-path">
           <span>工作空间</span>
           <span>/</span>
-          <strong>{route.flow ? `Flow ${route.flow.id}` : "看板"}</strong>
+          <strong>{current.id ? `任务详情` : "看板"}</strong>
         </nav>
         <div className="bar-filters">
-          <SearchBox
-            query={query}
-            repos={repos}
-            onQuery={(value) => {
-              if (value === query) return;
-              const url = new URL(location.href);
-              if (value) url.searchParams.set("q", value);
-              else url.searchParams.delete("q");
-              history.pushState(null, "", url);
-              setQuery(value);
-            }}
-          />
+          <SearchBox query={query} repos={repos} onQuery={setQuery} />
+          {(repoNext || repoError) && (
+            <button
+              className="btn"
+              onClick={() => {
+                setRepoError("");
+                void getRepos(repoNext)
+                  .then((p) => {
+                    setRepos((x) => (repoNext ? [...x, ...p.items] : p.items));
+                    setRepoNext(p.next_cursor);
+                  })
+                  .catch((e) => setRepoError(e.message));
+              }}
+            >
+              {repoError ? `仓库读取失败：${repoError}（重试）` : "更多仓库"}
+            </button>
+          )}
         </div>
         <div className="bar-status">
-          <span className="sync-state" title="后端尚未接入，不代表真实服务在线">
-            前端预览 · 示例数据
-          </span>
-          <Button
-            className="btn"
-            data-action="refresh"
+          <span>本地档案 · 只读</span>
+          <button
+            className="btn ghost"
+            aria-label="刷新当前视图"
             onClick={() => {
-              setToast("示例快照已刷新 · 未请求真实服务");
-              conversation.current?.refresh();
+              if (current.id) setRefresh((x) => x + 1);
+              else phases.forEach(([p]) => load(p, true));
             }}
           >
             <RefreshCw />
-            刷新
-          </Button>
+          </button>
         </div>
       </header>
-      {route.flow ? (
-        <div
-          className={`detail-shell${collapsed ? " rail-collapsed" : ""}${navOpen ? " nav-open" : ""}`}
-        >
-          <Rail
-            ref={rail}
-            navOpen={navOpen}
-            visible={visible}
-            selected={route.flow.id}
-            collapsed={collapsed}
-            onBoard={() => {
-              setNavOpen(false);
-              location.hash = "board";
-            }}
-            onToggle={() => setCollapsed((value) => !value)}
-            onFlow={(id) => go(id)}
-          />
-          <button
-            className="mobile-shade"
-            data-action="close-nav"
-            aria-label="关闭任务导航"
-            onClick={() => setNavOpen(false)}
-          />
-          <main className="detail" inert={navOpen || undefined}>
-            <DetailHeader
-              flow={route.flow}
-              tab={route.tab}
-              navOpen={navOpen}
-              onTab={(tab) => {
-                if (route.flow) location.hash = `flow/${route.flow.id}/${tab}`;
-              }}
-              onNav={() => setNavOpen(true)}
-              onTabKeyDown={keyTabs}
-              onSampleLink={() => setToast("示例链接 · 未连接真实 GitHub")}
-            />
-            <div className="detail-body" data-scroll-root ref={detail}>
-              <section
-                className="content"
-                role="tabpanel"
-                id="detail-panel"
-                tabIndex={-1}
-                aria-labelledby={`tab-${route.tab}`}
-              >
-                <div id="filter-notice">
-                  {visible.some((f) => f.id === route.flow?.id) ? (
-                    ""
-                  ) : (
-                    <div className="notice">
-                      当前任务不在筛选结果中，仍为你保留详情。
-                    </div>
-                  )}
-                </div>
-                {route.tab === "overview" ? (
-                  <Overview flow={route.flow} onCopy={copy} />
-                ) : route.tab === "jobs" ? (
-                  <Jobs flow={route.flow} />
-                ) : (
-                  <Conversation
-                    key={route.flow.id}
-                    flow={route.flow}
-                    root={detail}
-                    ref={conversation}
-                  />
-                )}
-              </section>
-            </div>
-          </main>
-        </div>
-      ) : route.invalid ? (
-        <main className="empty-state">
-          <strong>找不到这个示例页面</strong>
-          <Button
-            className="btn"
-            data-action="board"
-            onClick={() => {
-              location.hash = "board";
-            }}
-          >
-            返回看板
-          </Button>
-        </main>
+      {current.id ? (
+        <Detail
+          key={current.id}
+          id={current.id}
+          tab={current.tab}
+          all={all}
+          counts={counts}
+          load={load}
+          refresh={refresh}
+          onBack={() => (location.hash = "board")}
+        />
       ) : (
         <Board
-          visible={visible}
-          mobilePhase={mobilePhase}
-          onPhase={setMobilePhase}
-          onFlow={go}
+          columns={columns}
+          counts={counts}
+          load={load}
+          go={(id) => (location.hash = `flow/${id}/conversation`)}
         />
       )}
-      <div id="announcer" role="status" aria-live="polite">
-        {toast && <div className="toast">{toast}</div>}
-      </div>
     </>
   );
 }

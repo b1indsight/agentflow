@@ -1,7 +1,7 @@
 # 单账号登录：Cloudflare Access
 
 用户 HTTP API 使用 Cloudflare Access 的签名身份凭证，并且只允许部署配置中的一个 owner
-邮箱。当前只有只读[会话查询 API](../architecture/conversation-api.md)，不包含 Web 控制台。
+邮箱。保护只读 Web 控制台、静态资源及[会话查询 API](../architecture/conversation-api.md)。
 后端认证已提供；真实域名、GitHub 登录和 MFA 必须在部署环境完成下面的配置和验收。
 
 ## 1. 创建登录与访问策略
@@ -52,7 +52,7 @@ ingress:
     path: ^/webhook$
     service: http://127.0.0.1:8000
   - hostname: admin.example.com
-    path: ^/api/flows/[1-9][0-9]*/conversation$
+    path: ^/(console(/.*)?|api/(repos|flows(/[1-9][0-9]*(/(jobs|conversation|activity(/(content|versions))?))?)?))$
     service: http://127.0.0.1:8000
   - service: http_status:404
 ```
@@ -87,6 +87,7 @@ Control 固定使用 RS256，验证签名、issuer、audience、exp、iat 和可
 ## 5. 部署验收
 
 - 浏览器未登录时进入 Access 登录；你完成 GitHub 登录与 MFA 后可查询已存在 Flow。
+- `/console/`、JS/CSS 及全部 console API 都受相同 owner 策略保护；不为资源设置 Bypass。
 - 用其他 GitHub 账号登录被 Access 拒绝；不只是依赖应用返回空数据。
 - Access 配置确实只允许 GitHub、指定邮箱并要求 MFA；不用本地签名测试替代此项。
 - 公网 `/docs`、`/openapi.json`、`/metrics`、探针和 Worker 路径返回 404。

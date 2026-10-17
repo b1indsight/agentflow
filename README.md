@@ -192,6 +192,29 @@ uv run flowtool flow retry <FLOW_ID>
 并占用原 worker。配置变更不改写已经冻结的通知；历史 SUCCEEDED Flow 和升级前冻结的空 effects
 归档计划不补通知。`on_archived` 是提交后的尽力插件回调，异常不破坏完成，不承诺跨崩溃仅调用一次。
 
+## Web 控制台
+
+控制台在 serve 的 `/console/` 提供，看板、详情、执行记录和时间线通过同源 `/api/` 读取。
+页面、静态资源及 API 都要求现有 Cloudflare Access owner 身份；缺少配置时拒绝访问。
+Tunnel/Access 必须将 `/console*` 与 `/api/*` 交给同一服务并应用相同 owner 策略，
+不要为静态资源增加公开旁路。Webhook 与 Worker 端点继续使用各自原有鉴权。
+
+时间线永久保存已观察版本和删除标记；本次阅读绑定本地快照，末尾分界线显式刷新。
+活跃 Flow 打开详情或刷新会排队后台同步，未完成的来源明确显示 pending/partial/unavailable，
+不将尚未同步或权限错误当成“没有更新”。Worker 会话复用主动分页查询，心跳不触发全量抓取。
+首次采集前的历史编辑/删除、远端已过期内容无法还原；个人阅读状态另见 #88。
+
+从源码制作带控制台的 wheel/sdist 时，先在 Node 24 环境构建静态文件：
+
+```bash
+python scripts/build_console.py
+uv build --no-sources
+```
+
+生成的静态文件随 Python 包安装，serve 运行时不需要 Node；Docker 使用独立 Node 构建阶段。
+仅运行 Python 源码而未构建控制台时，`/console/` 返回明确的资源不可用错误，不退回示例数据。
+前端开发可在 `app/controler/web` 运行 `npm ci && npm run dev`，API 代理至本地 serve 的 8000 端口。
+
 ## 验证基线
 
 本地检查：
@@ -200,6 +223,7 @@ uv run flowtool flow retry <FLOW_ID>
 uv run pytest -q -p no:cacheprovider
 uv run ruff check app tests
 uv run mypy app tests
+python scripts/build_console.py
 uv build --no-sources
 uv run flowtool --help
 ```

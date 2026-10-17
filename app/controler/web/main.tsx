@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import App from "./App";
 import { ReadingState } from "./windowing";
 import "./theme.css";
+import "react-diff-view/style/index.css";
 import "./styles.css";
 
 const root = document.getElementById("app");

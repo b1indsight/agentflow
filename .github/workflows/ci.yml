@@ -86,9 +86,18 @@ jobs:
         if: matrix.id == 'mypy'
         run: uv run mypy app tests
 
+      - name: Install Node for packaged console
+        if: matrix.id == 'build'
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24"
+
       - name: Build distributions
         if: matrix.id == 'build'
-        run: uv build --no-sources
+        run: |
+          python scripts/build_console.py
+          uv build --no-sources
+          python -c "import glob,zipfile; w=zipfile.ZipFile(glob.glob('dist/*.whl')[0]); assert 'app/controler/console_static/index.html' in w.namelist()"
 
   pytest:
     name: pytest
