@@ -179,7 +179,10 @@ class Repository(BaseModel):
             )).parsed_data
             permissions = _permissions(data.permissions)
             repositories = [item.full_name for item in (data.repositories or [])]
-            if permissions != {"contents": "write"} or repositories != [self.full_name]:
+            # GitHub may include implicit read-only repository metadata access.
+            if permissions not in (
+                {"contents": "write"}, {"contents": "write", "metadata": "read"},
+            ) or repositories != [self.full_name]:
                 raise GitHubError(GitHubErrorKind.UNEXPECTED_RESPONSE, "create_push_capability")
             return PushCapability(
                 token=SecretStr(data.token), repository=self.full_name,
