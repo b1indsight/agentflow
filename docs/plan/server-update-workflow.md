@@ -1,7 +1,11 @@
 # 单节点 Server 自动构建与部署 — Feature record
 
-**Stage:** Planning
-**PR:** [#93](https://github.com/b1indsight/agentflow/pull/93)；本计划 PR 后续直接承载实现。
+**Stage:** Review — 本次仅交付 main 更新后的自动镜像构建与发布。
+**PR:** [#93](https://github.com/b1indsight/agentflow/pull/93)
+
+**Current scope:** 本 PR 包含 Images 工作流、镜像发布文档及本记录；不包含本地试用的部署
+脚本及其测试，不执行自动部署。下方 Initial plan 保留最初完整设想，实际交付范围以本节和
+后续变更记录为准。
 
 ## 1. Initial plan
 
@@ -150,3 +154,31 @@ kubectl 使用现有 kubeconfig，containerd 权限通过预先配置的用户�
   schema 迁移、零停机、无人值守回滚和全局维护锁。
 
 ## 2. PR change timeline
+
+### 2026-10-19 — 先交付本地试用脚本，暂不更新 PR
+
+- **Context / requirement:** 用户要求“先不做 pr，先做一个流程脚本我试试”，并希望仓库中的
+  实现足够泛用。已有草稿 PR 保持不动，本轮仅保留本地文件，不提交、推送或部署。
+- **Decision:** 将首轮范围收敛为参数化的单节点 build/import/stop/start/verify 脚本。
+  入口为 `scripts/update_server.py`，默认只读预检；不引入配置框架或服务端管理 API。
+  context、namespace、工作负载、应用容器、节点、镜像、Git revision、CRI socket 均可指定。
+- **Supersedes for this trial:** 暂不实现初始计划的自动 drain/恢复、Worker 集合/业务持久状态
+  检查、schema/protocol 指纹检查和 JSON 配置文件。操作者先完成维护检查，再明确传入
+  `--apply --maintenance-confirmed`；脚本永不自动 undrain。该确认不是自动业务安全检查。
+  完整维护编排延后，避免把应用内部模型写进通用构建部署入口。
+- **Implementation:** 导出固定 Git 提交构建唯一 tag；核对 CRI socket/镜像；构建导入成功后才
+  缩至零，正常等待旧 Pod 删除和控制器确认，再更新镜像并恢复一个副本。支持 Deployment /
+  OnDelete StatefulSet；拒绝 HPA、多副本及缩容删 PVC。使用本地锁、带 UID/resourceVersion
+  的条件 patch 和持久操作记录；未完成记录阻止盲目重试，无自动回退。
+- **Validation:** CLI 模拟命令边界覆盖两种工作负载、只读默认值、维护确认、构建/导入失败、
+  镜像身份、并发变更、旧 Pod 删除超时和 readiness 失败。真实 Docker/containerd/K8s 验收
+  留给目标节点试跑，不把模拟结果当作部署通过。试用步骤和恢复边界写在本地的
+  `docs/deployment/server-update.md`，该脚本、说明和测试暂不纳入本 PR。
+
+### 2026-10-19 — 先启用 main 合并后的自动镜像发布
+
+- **Requirement / decision:** 用户要求先做到合并后自动制作镜像；本轮只启用 main push 的
+  Images 工作流，复用现有 serve/worker 构建、候选 digest smoke 和 GHCR 晋升步骤。
+- **Behavior:** PR 保持只构建测试；main 更新后发布 `sha-<完整提交 SHA>`，保留 `v*` 标签与
+  手工发布入口。不增加 latest 标签，不自动更新集群或 Worker。
+- **Delivery:** 仅保留本地工作流和文档修改，暂不提交、推送或更新既有草稿 PR。

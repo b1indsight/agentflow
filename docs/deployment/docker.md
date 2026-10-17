@@ -75,13 +75,18 @@ Cloudflare 仅在部署层，不能访问模型凭据；worker WS、数据库和
 
 ## 镜像发布与版本
 
-PR 的 Images 工作流只 build/test，不登录 GHCR。tag `v*` 或手工选择 publish 才执行发布；
-仓库需自行保护 release tag 和 workflow 权限。默认包名为
+PR 的 Images 工作流只 build/test，不登录 GHCR。合并到 main（以及直接 push main）后自动
+构建并发布镜像；tag `v*` 或手工选择 publish 也会执行发布。仓库需自行保护 main、release
+tag 和 workflow 权限。默认包名为
 `ghcr.io/b1indsight/agentflow-serve` 和 `ghcr.io/b1indsight/agentflow-worker`。
 发布先上传 candidate（尚未验收，禁止用于部署），拉取精确 digest 执行 Compose smoke，成功后
 将同一 manifest 标记为 `sha-<完整提交 SHA>` / release tag。失败留下 candidate 供诊断，
 不会更新 release tag；两个角色的 tag 更新不是跨镜像事务，以同一成功 job 输出的 digest 对为准。
 SBOM/provenance 附在候选 manifest 上，晋升不重新 build。
+
+main 发布使用 `sha-<完整提交 SHA>`，不更新 `latest`，也不会自动更新已部署的 server/worker。
+例如 main 更新后的 serve 镜像为 `ghcr.io/b1indsight/agentflow-serve:sha-<main 提交的完整 SHA>`；
+实际部署仍应使用该成功发布 job 的镜像 digest。
 
 使用 job summary 里的真实 digest 设置 `FLOWTOOL_SERVE_IMAGE`、`FLOWTOOL_WORKER_IMAGE`，
 然后 `docker compose ... pull` 和 `up -d --no-build`。当前文档不宣称包已发布。
