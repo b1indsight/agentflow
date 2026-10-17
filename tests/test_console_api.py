@@ -35,6 +35,18 @@ def console_runtime(store):
 
 def test_console_and_every_public_read_require_owner_before_io(console_runtime, store):
     flow = store.flows.create_flow("owner/repo", 7, 42)
+    ActivityStore(store._db).append(
+        flow.id,
+        Observation(
+            key="comment:7",
+            source="issue.comments",
+            kind="comment",
+            author="owner",
+            body="会话正文",
+            occurred_at=flow.created_at,
+            updated_at=flow.created_at,
+        ),
+    )
     with TestClient(create_app(console_runtime)) as client:
         paths = [
             "/console",
@@ -180,6 +192,53 @@ def test_detail_explains_execution_facts_without_exposing_internal_errors(
     assert "private-" not in response.text and "/private/repo" not in response.text
     if scenario in {"effect_failed", "older_result", "running", "preparing"}:
         assert f"#{job.id}" in body["reason"]
+
+
+def test_conversation_excludes_flow_audit_from_items_pagination_and_changes(console_runtime, store):
+    # Flow changes must not become chat messages or inflate unread/update counts.
+    flow = store.flows.create_flow("owner/repo", 7, 42)
+    archive = ActivityStore(store._db)
+    with TestClient(create_app(console_runtime)) as client:
+        path = f"/api/flows/{flow.id}/activity"
+        headers = console_runtime.issuer.headers()
+        initial = client.get(path, headers=headers).json()
+        assert initial["items"] == [] and initial["total"] == 0
+        assert not initial["has_more"] and initial["next_cursor"] is None
+        for source in ("issue.comments", "worker"):
+            archive.append(
+                flow.id,
+                Observation(
+                    key=source,
+                    source=source,
+                    kind="message",
+                    author="owner",
+                    body="保留的会话正文",
+                    occurred_at=flow.created_at,
+                    updated_at=flow.created_at,
+                ),
+            )
+        first = client.get(
+            path, headers=headers, params={"limit": 1, "since": initial["snapshot"]}
+        ).json()
+        assert first["total"] == 2 and first["has_more"]
+        assert first["changes"] == {"new": 2}
+        flow.state = FlowState.FAILED
+        store.flows.update_flow(flow)
+        second = client.get(
+            path, headers=headers, params={"limit": 1, "cursor": first["next_cursor"]}
+        ).json()
+        assert second["snapshot"] == first["snapshot"] and second["total"] == 2
+        assert not second["has_more"] and second["next_cursor"] is None
+        assert {item["source"] for item in first["items"] + second["items"]} == {
+            "issue.comments",
+            "worker",
+        }
+        refreshed = client.get(
+            path, headers=headers, params={"refresh": True, "since": first["snapshot"]}
+        ).json()
+        assert refreshed["snapshot"] > first["snapshot"]
+        assert refreshed["total"] == 2 and refreshed["changes"] == {}
+        assert all(item["source"] != "flow" for item in refreshed["items"])
 
 
 def test_edited_hint_and_diff_compare_full_immutable_content_not_preview(console_runtime, store):

@@ -78,7 +78,7 @@ function ActivityBody({
           {body}
         </SavedDetails>
       ) : (
-        <p>{body}</p>
+        <p className="message-body">{body}</p>
       )}
       {(segment.start > 0 || segment.next !== null) && (
         <div className="text-window-controls">
@@ -288,36 +288,59 @@ export function ActivityView({
             <span>{entry.author}</span>
             <span className="source-tag">{entry.source}</span>
           </span>
+          {entry.prior && (
+            <span
+              className="message-context"
+              title="发生于此 Flow 创建之前的历史内容"
+            >
+              此前交互
+            </span>
+          )}
+          {entry.deleted && (
+            <span className="message-context">已删除（保留历史版本）</span>
+          )}
           <time>{new Date(entry.occurred_at).toLocaleString()}</time>
         </div>
-        {entry.prior && <span className="tag">此前交互</span>}
-        {entry.deleted && <span className="tag">已删除（保留历史版本）</span>}
-        {entry.title && <h3>{entry.title}</h3>}
+        {entry.title && <h3 className="message-title">{entry.title}</h3>}
         <ActivityBody
           key={`${entry.key}-${entry.version}`}
           entry={entry}
           flowId={flowId}
         />
-        {Object.keys(entry.metadata).length > 0 && (
-          <SavedDetails stateKey={`${entry.key}-${entry.version}-metadata`}>
-            <summary>来源信息与查询定位</summary>
-            <TextWindow
-              code
-              text={JSON.stringify(entry.metadata, null, 2)}
-              stateKey={`${entry.key}-${entry.version}-metadata-text`}
+        {(Object.keys(entry.metadata).length > 0 ||
+          entry.url ||
+          (entry.previous_version !== null && !entry.deleted)) && (
+          <div className="message-footer">
+            {Object.keys(entry.metadata).length > 0 && (
+              <SavedDetails
+                className="message-provenance"
+                stateKey={`${entry.key}-${entry.version}-metadata`}
+              >
+                <summary>来源信息与查询定位</summary>
+                <TextWindow
+                  code
+                  text={JSON.stringify(entry.metadata, null, 2)}
+                  stateKey={`${entry.key}-${entry.version}-metadata-text`}
+                />
+              </SavedDetails>
+            )}
+            {entry.url && (
+              <a
+                className="message-source-link"
+                href={entry.url}
+                target="_blank"
+                rel="noreferrer"
+              >
+                在 GitHub 中查看 ↗
+              </a>
+            )}
+            <EditedDiff
+              key={`diff-${entry.key}-${entry.version}`}
+              entry={entry}
+              flowId={flowId}
             />
-          </SavedDetails>
+          </div>
         )}
-        {entry.url && (
-          <a href={entry.url} target="_blank" rel="noreferrer">
-            在 GitHub 中查看 ↗
-          </a>
-        )}
-        <EditedDiff
-          key={`diff-${entry.key}-${entry.version}`}
-          entry={entry}
-          flowId={flowId}
-        />
         {entry.kind === "thread" && (
           <ThreadReplies
             key={`${flowId}-${entry.key}-${snapshot}`}
