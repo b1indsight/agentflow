@@ -81,7 +81,9 @@ async def activity(
 ) -> ActivityPage:
     runtime: ServerRuntime = request.app.state.runtime
     if refresh:
-        await runtime.console.db(partial(ConsoleStore(runtime.database).request_sync, flow_id))
+        await runtime.console.db(
+            partial(ConsoleStore(runtime.database).request_sync, flow_id, active_only=False)
+        )
     return await runtime.console.db(
         partial(
             ActivityStore(runtime.database).page,
