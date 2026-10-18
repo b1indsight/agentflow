@@ -7,8 +7,10 @@ from unittest.mock import AsyncMock
 import pytest
 from starlette.testclient import TestClient
 
+from app.contracts.protocol import PROTOCOL_VERSION
 from app.controler.api import create_app
 from app.controler.console.sync import ConsoleSynchronizer
+from app.domain.models import DeliveryState, FlowState, JobKind
 from app.github.console import Observation
 from app.persistence.activity import ActivityStore
 from app.telemetry.metrics import Metrics
@@ -70,6 +72,114 @@ def test_console_and_every_public_read_require_owner_before_io(console_runtime, 
         )
         console_runtime.settings.access_owner_email = None
         assert client.get("/console/", headers=headers).status_code == 503
+
+
+@pytest.mark.parametrize(
+    "scenario,reason,condition",
+    [
+        ("queued", "等待分配 Worker", "可用 Worker"),
+        ("preparing", "准备失败", "自动重试"),
+        ("dispatching", "等待 Worker 确认开始", "确认执行"),
+        ("running", "首轮编码正在执行", "执行结果"),
+        ("revision", "修订正在执行", "执行结果"),
+        ("execution_failed", "首轮编码失败", "执行记录"),
+        ("recovering", "执行状态待确认", "原 Worker"),
+        ("verifying", "结果校验暂时失败", "自动重试"),
+        ("applying", "结果已收到", "校验与应用"),
+        ("effect_failed", "GitHub 写入失败", "核对远端写入结果"),
+        ("older_result", "GitHub 写入失败", "核对远端写入结果"),
+        ("closed", "PR 已关闭", "重新打开 PR"),
+        ("archive_recovery", "归档执行状态待确认", "不能强制释放"),
+        ("archive_failed", "归档失败", "原 Worker"),
+        ("archive_running", "归档正在执行", "执行结果"),
+        ("archive_queued", "等待原 Worker 接收", "原 Worker"),
+        ("review", "PR 已打开", "审核或人工合并"),
+        ("failed", "Flow 已失败", "执行记录"),
+        ("cancelled", "Flow 已取消", "停止确认"),
+        ("done", "Flow 已归档完成", "无需后续动作"),
+    ],
+)
+def test_detail_explains_execution_facts_without_exposing_internal_errors(
+    console_runtime, store, scenario, reason, condition
+):
+    # Multiple blocked states need different recovery instructions; a phase alone is insufficient.
+    flow = store.flows.create_flow("owner/repo", 7, 42)
+    kind = JobKind.ARCHIVE if scenario.startswith("archive_") else JobKind.INITIAL
+    if scenario == "revision":
+        kind = JobKind.REVISION
+    job = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
+    if scenario != "queued":
+        store.workers.worker_connected(
+            "worker-safe", protocol_version=PROTOCOL_VERSION, connection_epoch="epoch-safe"
+        )
+        assert store.workers.assign_job("worker-safe", "private-assignment", "epoch-safe")
+    delivery = store.deliveries.get_or_create_delivery(flow.id, "flow/7")
+    delivery.pr_number = 17
+    delivery.state = DeliveryState.MERGED if kind is JobKind.ARCHIVE else DeliveryState.OPEN
+    if scenario == "closed":
+        delivery.state = DeliveryState.CLOSED
+    store.deliveries.update_delivery(delivery)
+    now = flow.created_at
+    result_pending = scenario in {
+        "verifying",
+        "applying",
+        "effect_failed",
+        "older_result",
+        "closed",
+    }
+    job_state = "running"
+    if scenario in {"queued", "archive_queued"}:
+        job_state = "queued"
+    elif scenario == "review":
+        job_state = "done"
+    elif scenario in {"archive_failed", "execution_failed", "closed"}:
+        job_state = "failed"
+    with store._db.connection() as connection:
+        connection.execute(
+            "UPDATE jobs SET kind=%s,state=%s,started_at=%s,recovery_deadline=%s,"
+            "result_received_at=%s,prepare_next_at=%s,verify_next_at=%s,last_error=%s WHERE id=%s",
+            (
+                kind,
+                job_state,
+                None if job_state == "queued" or scenario in {"preparing", "dispatching"} else now,
+                now + timedelta(minutes=5)
+                if scenario in {"archive_recovery", "recovering", "applying"}
+                else None,
+                now if result_pending else None,
+                now + timedelta(minutes=1) if scenario == "preparing" else None,
+                now + timedelta(minutes=1) if scenario == "verifying" else None,
+                "private-exception /private/repo token=private-token",
+                job.id,
+            ),
+        )
+        if scenario in {"effect_failed", "older_result", "closed"}:
+            connection.execute(
+                "INSERT INTO result_applications(job_id,digest,plan,created_at) VALUES (%s,'d','{}',%s)",
+                (job.id, now),
+            )
+            connection.execute(
+                "INSERT INTO result_effects(job_id,effect_key,position,payload,state,next_attempt_at)"
+                " VALUES (%s,'private-effect',0,'{}','failed',%s)",
+                (job.id, now),
+            )
+    if scenario == "older_result":
+        store.jobs.enqueue_job(flow.id, JobKind.REVISION)
+    if scenario in {"failed", "cancelled", "done"}:
+        flow.state = {
+            "failed": FlowState.FAILED,
+            "cancelled": FlowState.CANCELLED,
+            "done": FlowState.SUCCEEDED,
+        }[scenario]
+        store.flows.update_flow(flow)
+    with TestClient(create_app(console_runtime)) as client:
+        response = client.get(f"/api/flows/{flow.id}", headers=console_runtime.issuer.headers())
+    assert response.status_code == 200
+    body = response.json()
+    assert reason in body["reason"]
+    assert condition in body["next_condition"]
+    assert "private-" not in response.text and "/private/repo" not in response.text
+    if scenario in {"effect_failed", "older_result", "running", "preparing"}:
+        assert f"#{job.id}" in body["reason"]
 
 
 def test_edited_hint_and_diff_compare_full_immutable_content_not_preview(console_runtime, store):
