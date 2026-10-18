@@ -129,6 +129,82 @@ def _summary(row: Row) -> FlowSummary:
     )
 
 
+def _explanation(row: Row) -> tuple[str, str]:
+    """Explain persisted blockers, without exposing errors or promising retry eligibility."""
+    facts = row["facts"]
+    if facts["lifecycle"] == "succeeded":
+        return "Flow 已归档完成", "无需后续动作"
+    if facts["lifecycle"] == "cancelled":
+        return "Flow 已取消", "确认在途任务的停止确认与结果对账完成后，再评估是否重试"
+    if facts["lifecycle"] == "failed":
+        return "Flow 已失败", "检查执行记录与恢复状态，排除故障后由运维核验是否允许重试"
+    # A closed delivery is a hold: retry must not bypass reopen/baseline reconciliation.
+    if facts["delivery_state"] == "closed":
+        return (
+            "PR 已关闭，编码与修订已暂停",
+            "重新打开 PR 并完成执行状态及 head/base 对账后才能继续",
+        )
+    label = {"initial": "首轮编码", "revision": "修订", "archive": "归档"}.get(
+        row["diagnostic_kind"], "任务"
+    )
+    job = f"任务 #{row['diagnostic_job_id']}（{label}）"
+    if row["effect_failed"]:
+        return (
+            f"{job}的 GitHub 写入失败，结果尚未应用",
+            "核对远端写入结果与权限，排除故障后由运维核验是否允许重试；不要重复执行编码",
+        )
+    if row["result_pending"]:
+        if row["verification_retry"]:
+            return (
+                f"{job}的结果校验暂时失败，已安排重试",
+                "等待 Control 按退避计划自动重试校验；持续失败时检查 GitHub 权限与可用性",
+            )
+        return (
+            f"{job}的结果已收到，尚未完成校验与应用",
+            "等待 Control 完成结果校验与应用及相关 GitHub 写入",
+        )
+    if row["diagnostic_state"] == "failed":
+        condition = (
+            "检查执行记录；归档只能在原 Worker 与执行状态确认安全后由运维重试"
+            if row["diagnostic_kind"] == "archive"
+            else "检查执行记录与恢复状态，排除故障后由运维核验是否允许重试"
+        )
+        return f"{job}：{label}失败", condition
+    if row["diagnostic_state"] == "running":
+        if row["recovering"]:
+            return (
+                f"{job}：{label}执行状态待确认",
+                "等待原 Worker 恢复连接并确认执行或结果；不能强制释放绑定或启动重复执行",
+            )
+        if not row["execution_started"]:
+            if row["preparation_retry"]:
+                return (
+                    f"{job}准备失败，已安排重试",
+                    "等待 Control 按退避计划自动重试准备；持续失败时检查执行记录",
+                )
+            return (
+                f"{job}等待 Worker 确认开始",
+                "等待 Worker 确认执行；未收到开始确认不代表可以安全重派",
+            )
+        return f"{job}：{label}正在执行", "等待 Worker 返回执行结果"
+    if row["diagnostic_state"] == "queued":
+        if row["diagnostic_kind"] == "archive":
+            return f"{job}等待原 Worker 接收", "等待原 Worker 在线且无未确认执行，再接收归档任务"
+        if facts["worker_id"] is None or facts["worker_historical"]:
+            return f"{job}等待分配 Worker", "等待可用 Worker 接收任务"
+        return f"{job}等待绑定的 Worker 接收", "等待该 Worker 可接收任务并完成派发"
+    if facts["delivery_state"] == "merged":
+        return "PR 已合并，尚未完成归档", "检查归档执行记录与原 Worker 绑定，等待归档完成"
+    if facts["phase"] == "review":
+        return (
+            "PR 已打开，当前没有待执行任务",
+            "等待 GitHub 审核或人工合并；新修订请求会触发后续任务",
+        )
+    if facts["phase"] == "queued":
+        return "尚未绑定可用执行资源", "检查任务排队与 Worker 可用状态"
+    return "当前没有可确认的执行进展", "刷新详情并检查执行记录；不根据阶段推断执行进度"
+
+
 class ConsoleStore(Repository):
     """Read current state without per-card queries or network work inside transactions."""
 
@@ -185,22 +261,27 @@ class ConsoleStore(Repository):
     def detail(self, flow_id: int) -> FlowDetail:
         with self._db.connection() as connection:
             row = connection.execute(
-                "SELECT flow_id,facts-'delivery_body'-'delivery_title' AS facts,"
-                "coalesce(title,facts->>'delivery_title') AS title,state_version"
-                " FROM console_flows WHERE flow_id=%s",
+                "SELECT c.flow_id,c.facts-'delivery_body'-'delivery_title' AS facts,"
+                "coalesce(c.title,c.facts->>'delivery_title') AS title,c.state_version,diagnostic.*"
+                " FROM console_flows c LEFT JOIN LATERAL ("
+                " SELECT j.id AS diagnostic_job_id,j.kind AS diagnostic_kind,"
+                " j.state AS diagnostic_state,j.started_at IS NOT NULL AS execution_started,"
+                " j.recovery_deadline IS NOT NULL AS recovering,"
+                " j.prepare_next_at IS NOT NULL AS preparation_retry,"
+                " j.verify_next_at IS NOT NULL AS verification_retry,"
+                " (j.result_received_at IS NOT NULL AND j.result_applied_at IS NULL) AS result_pending,"
+                " EXISTS (SELECT 1 FROM result_effects e WHERE e.job_id=j.id"
+                " AND j.result_applied_at IS NULL AND e.state='failed') AS effect_failed"
+                " FROM jobs j WHERE j.flow_id=c.flow_id"
+                " ORDER BY effect_failed DESC,result_pending DESC,(j.state='running') DESC,"
+                " (j.state='queued') DESC,j.id DESC LIMIT 1"
+                ") diagnostic ON TRUE WHERE c.flow_id=%s",
                 (flow_id,),
             ).fetchone()
         if row is None:
             raise ConsoleFailure("flow_not_found", 404)
         flow = _summary(row)
-        explanations = {
-            "queued": ("等待可用执行资源", "Worker 接收任务"),
-            "running": ("任务执行、结果应用或恢复中", "等待执行或归档结果"),
-            "review": ("交付已打开且无待执行任务", "等待 GitHub 审核或人工合并"),
-            "blocked": ("任务已停止或存在执行/交付阻塞", "检查执行状态及 GitHub 交付"),
-            "done": ("任务已归档完成", "无需后续动作"),
-        }
-        reason, condition = explanations[flow.phase]
+        reason, condition = _explanation(row)
         return FlowDetail(
             **flow.model_dump(),
             reason=reason,

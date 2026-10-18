@@ -1297,3 +1297,38 @@ Webhook 未覆盖的交互/字段需在明确触发的核对中补齐，不能�
   `CONSOLE_ABLATION=without_freshness_boundary` / `without_error_priority`，运行
   `uv run pytest -q -p console_source_ablation tests/test_console_sync.py -k freshness`。
   日志为 `.amp/in/artifacts/console-source-<模式>.log`。修改仅在本地，尚未推送或部署。
+
+### [041] 2026-10-18 — 详情根据执行与交付事实解释原因和下一步
+
+- **Requirement / scope:** 用户要求实现 #85 收尾核对的第 1 项：详情的 `reason` 与
+  `next_condition` 不再仅按五阶段返回通用文案。此次是既有详情读取的局部修复，沿用原 API
+  字段及页面，不新增状态表、领域类、迁移、控制入口或个人阅读状态。
+- **Implementation / decision:** `ConsoleStore.detail()` 在同一 SQL 语句快照内读取当前投影及
+  一条相关任务的白名单诊断事实。未完成 GitHub 写入、未应用结果、执行中和排队任务优先于
+  普通历史任务，避免较新的排队记录遮住旧任务的未完成写入。展示函数区分准备重试、等待开始
+  确认、首轮编码/修订/归档执行、恢复待确认、校验重试、结果应用、GitHub 写入失败，以及
+  关闭 PR、等待审核、归档与终态；有任务时带安全任务 ID。终态与关闭 PR 优先解释，保留重开
+  与 head/base 对账要求；原执行状态未知时明确不能强制释放绑定或重复执行。
+- **Trade-offs:** 直接从规范任务读取几个布尔事实，无需扩展持久投影或复制恢复策略。
+  诊断只解释已保存事实，不承诺重试一定被允许，不返回异常正文、路径、凭据或 effect payload。
+  详情固定增加 SQL 内的任务选择与失败 effect 检查，不增加逐任务查询或远端请求；阶段和
+  `action` 仍由原有事实规则决定，具体诊断不反过来驱动调度。
+- **Validation:** 新增一项参数化真实 PostgreSQL HTTP 回归，20 个场景验证任务类型、阻塞
+  优先级、结果优先于恢复状态、关闭 PR 优先于写入错误及敏感字段排除。原实现的 16 个初始
+  场景均因通用诊断失败；修复后 20 场景通过。全量 Python 818 passed，保留上游
+  Starlette/httpx 弃用提示；Ruff、格式检查、Mypy 193 文件、前端类型检查、2 项单测、7 项
+  Playwright 和 `uv build` 通过。证据：`.amp/in/artifacts/console-diagnostics-before.log`、
+  `console-diagnostics-contract.log`、`console-diagnostics-python.log`。
+- **Ablation:** 临时插件分别将诊断任务选择改为只取最新 ID、去掉关闭 PR 优先解释。在相同的
+  older_result / closed 两场景上分别得到 1 failed / 1 passed：前者漏报旧任务的 GitHub 写入
+  阻塞，后者用写入错误遮住必须重开/对账的交付限制，故保留两项规则。复现插件文本为
+  `.amp/in/artifacts/console-diagnostics-probe.txt`；临时恢复为 `.amp/in/console_diagnostics_probe.py`，
+  以 `PYTHONPATH=.amp/in FLOWTOOL_TEST_DATABASE_URL=postgresql://127.0.0.1/flowtool_test`
+  和 `DIAGNOSTICS_ABLATION=without_blocker_priority` 或 `without_closed_guard` 执行
+  `uv run pytest -q -p console_diagnostics_probe tests/test_console_api.py -k 'older_result or closed'`。
+  日志为 `console-diagnostics-<模式>.log`；临时插件已删除。
+- **Rendered check / delivery:** 将真实 PostgreSQL HTTP 测试返回的 DTO 注入浏览器路由，验证
+  桌面执行中、关闭 PR 和 390px 手机归档恢复的完整原因/条件可见、无横向溢出或页面异常，
+  并检查截图。证据位于 `.amp/in/artifacts/console-diagnostics-{running,closed,archive_recovery}.png`
+  及 `console-diagnostics-browser.log`。这不替代真实 Access/GitHub 线上全链路验收；此次修改
+  仅在本地，尚未提交、推送或部署，#85 仍保持开放。
