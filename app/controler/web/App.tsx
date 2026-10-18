@@ -569,7 +569,7 @@ function Conversation({
       </div>
       {state.error ? (
         <button className="btn" onClick={retry}>
-          读取失败：{state.error}（重试）
+          读取失败：{state.error.message}（重试）
         </button>
       ) : state.has_more ? (
         <div className="load-sentinel" role="status">

@@ -210,6 +210,8 @@ class ConsoleStore(Repository):
 
     def sources(self, flow_id: int) -> list[SourceStatus]:
         """Summarize all child connections without hiding coverage behind a row limit."""
+        # Worker children describe historical coverage, not current connection health.
+        # Keep their gaps in the status, but let the root own freshness/current errors.
         with self._db.connection() as connection:
             rows = connection.execute(
                 "WITH grouped AS (SELECT split_part(source,':',1) AS source,"
@@ -217,7 +219,11 @@ class ConsoleStore(Repository):
                 " WHEN bool_or(status='syncing') THEN 'syncing'"
                 " WHEN bool_or(pending) THEN 'pending'"
                 " WHEN bool_or(status='partial') THEN 'partial' ELSE 'available' END AS status,"
-                " min(reason) AS reason,min(last_success_at) AS last_success_at"
+                " coalesce(min(reason) FILTER (WHERE source='worker' AND status='unavailable'),"
+                " min(reason)) AS reason,"
+                " CASE WHEN split_part(source,':',1)='worker'"
+                " THEN min(last_success_at) FILTER (WHERE source='worker')"
+                " ELSE min(last_success_at) END AS last_success_at"
                 " FROM console_sync WHERE flow_id=%s GROUP BY split_part(source,':',1))"
                 " SELECT source,status,reason,last_success_at,"
                 " coalesce((SELECT jsonb_agg(DISTINCT limitation) FROM console_sync child,"

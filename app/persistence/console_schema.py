@@ -81,6 +81,7 @@ CREATE TABLE IF NOT EXISTS console_sync (
  last_success_at TIMESTAMPTZ, limitations JSONB NOT NULL DEFAULT '[]',
  PRIMARY KEY(flow_id,source)
 );
+ALTER TABLE console_sync ADD COLUMN IF NOT EXISTS worker_scan_clean BOOLEAN NOT NULL DEFAULT FALSE;
 CREATE INDEX IF NOT EXISTS ix_console_sync_due ON console_sync(next_at,flow_id)
  WHERE pending;
 CREATE TABLE IF NOT EXISTS console_installation_backoff (
@@ -89,6 +90,8 @@ CREATE TABLE IF NOT EXISTS console_installation_backoff (
 
 CREATE OR REPLACE FUNCTION console_enqueue(identity BIGINT) RETURNS VOID AS $$
 BEGIN
+ -- Reconnects also refresh execution facts: use the same publication -> source order.
+ PERFORM flow_id FROM console_flows WHERE flow_id=identity FOR UPDATE;
  INSERT INTO console_sync(flow_id,source) VALUES(identity,'github'),(identity,'worker')
  ON CONFLICT(flow_id,source) DO UPDATE SET
  dirty=console_sync.pending,
@@ -146,7 +149,7 @@ END $$;
 CREATE OR REPLACE FUNCTION console_worker_changed() RETURNS TRIGGER AS $$
 BEGIN
  IF TG_OP='INSERT' OR NEW.connection_epoch IS DISTINCT FROM OLD.connection_epoch THEN
- PERFORM console_enqueue(flow_id) FROM flow_executions WHERE worker_id=NEW.worker_id;
+ PERFORM console_enqueue(flow_id) FROM flow_executions WHERE worker_id=NEW.worker_id ORDER BY flow_id;
  END IF;
  RETURN NEW;
 END;

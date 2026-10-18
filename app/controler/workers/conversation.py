@@ -188,7 +188,20 @@ class ConversationService:
         ).encode()).decode()
         return ConversationPage(
             flow_id=flow_id,
-            items=[ConversationItem.model_validate({**item.model_dump(), **attribution}) for item in page.items],
-            sessions=[SessionHistory.model_validate({**attribution, "status": page.status})],
-            next_cursor=next_cursor, has_more=has_more,
+            items=[
+                ConversationItem.model_validate({**item.model_dump(), **attribution})
+                for item in page.items
+            ],
+            sessions=[
+                SessionHistory.model_validate(
+                    {
+                        **attribution,
+                        "status": page.status,
+                        "starts_at_beginning": inner_cursor is None,
+                        "reached_end": not page.has_more,
+                    }
+                )
+            ],
+            next_cursor=next_cursor,
+            has_more=has_more,
         )

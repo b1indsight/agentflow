@@ -1144,3 +1144,156 @@ Webhook 未覆盖的交互/字段需在明确触发的核对中补齐，不能�
   `.amp/in/verify-status-palette.mjs` 校验五阶段各处实际计算色值、五种来源状态色值、
   手机无横向溢出和无页面异常，检查桌面看板/详情及手机截图。纯配色调整无新增复杂机制，
   不新增永久样式测试或消融；仅本地改动，未推送。
+
+### [035] 2026-10-17 — 同步并发、归档字符与阅读恢复修复
+
+- **Requirement:** 用户要求修复上一轮独立审查报告中的六项问题，继续使用同一功能分支和 PR #87。
+- **Implementation:** `console_enqueue` 先锁 Flow 发布行再操作来源队列，Worker 重连按 flow_id 顺序
+  排队，与 `ConsoleSyncStore.finish` 保持一致；同步批次显式持有任务，失败或取消时取消并等待
+  全部兄弟任务，避免超出并发上限或在数据库关闭后继续写入。已处于取消状态的任务不二次取消，
+  保证 `db()` 完成底层线程回收。
+  `ActivityStore.append` 在 PostgreSQL 边界将 NUL 显示为 `\u0000`，覆盖文本和来源元信息，
+  标记 `unsupported_characters_escaped`；仍以原始观察内容计算摘要，保持重复采集幂等，
+  不把原始 NUL 与字面转义串混为一版。非法 Unicode 代理码点已被输入模型拒绝，无需重复处理。
+  来源限制去重累计，后续干净页/增量 EOF 不再覆盖历史缺口。
+  线程回复读取器以 Flow/线程/快照作为组件身份，快照更新会中止旧请求并清空旧分页状态；
+  会话错误连同失败请求的 cursor/refresh 参数一起缓存，切换标签再回来仍可显式重试。
+- **Decision / trade-offs:** 保留已有发布锁、任务并发限制及快照协议，不引入新队列或缓存层。
+  当前没有可确认历史覆盖已修复的回填操作，因此保守保留来源限制，不因一次成功采集自动清除；
+  未来确实修复对应缺口时再增加显式清除能力。前端只缓存失败参数，不缓存跨组件生命周期的闭包；
+  快照更新后线程回复需要重新打开，避免混合两个快照的游标/正文。界面样式保持不变。
+- **Validation / ablation:** 修复前用同一组针对性测试复现 PostgreSQL 死锁、NUL 入库错误、
+  缺口误报 available、失败批次遗留兄弟任务，以及线程旧游标/缓存重试无效的两项浏览器故障。
+  修复后 `FLOWTOOL_TEST_DATABASE_URL=postgresql://127.0.0.1/flowtool_test uv run pytest -q`
+  全量 786 passed，仍有一条上游 Starlette/httpx 弃用提示；Ruff、Mypy（193 个文件）通过。
+  前端格式检查、2 项单测、类型/构建与 7 项 Playwright 测试通过；本轮是交互修复，以 DOM 和
+  实际请求的 cursor/snapshot 断言验收。`python3 scripts/build_console.py && uv build` 通过。
+  对照日志见 `.amp/in/artifacts/console-fixes-before-python.log`、
+  `console-fixes-before-nul.log`、`console-fixes-before-browser.log`，修复后全量日志见
+  `console-fixes-python.log`。新增机制均由对应失败场景验证必要性，取消场景同时作为正常回收对照。
+  本轮修改及验证在本地完成，尚未推送或部署。
+
+### [036] 2026-10-17 — 临时不可用恢复与取消期间的线程回收
+
+- **Requirement / context:** 用户要求修复 [035] 复审剩余的两项中等问题：启动阶段的
+  `no_worker` / `no_session` 被永久累计为覆盖缺口；失败批次正在回收线程时，停服再次取消
+  会中断等待，使数据库线程在同步器退出后仍持有连接。
+- **Implementation / decision:** 补充 [035] 的限制分类：会话页的 `unavailable_reason` 单独写入
+  既有 `reason`，显示为 unavailable，不再进入永久累计的 `limitations`。随后成功读取清除
+  临时原因，真实截断/历史缺口仍保留。无会话的读取不更新 `last_success_at`，也不算失败重试；
+  保留已有 dirty/repeat 处理，读取期间新到的 Worker/session 事件仍能排队下一轮同步。
+  新增同步器内部 `_drain`，数据库线程等待和批次清理共用：屏蔽取消向下传播，记录取消请求，
+  等所拥有的任务真正结束后再向上抛出取消。重复停服取消、来源超时追加取消均不提前释放连接槽。
+- **Trade-offs:** 复用现有 reason/limitations 字段，不新增状态表、数据库列或兼容层。
+  停服可能需要等数据库操作完成；不能安全强制终止 Python 线程，因此不以提前退出冒充清理完成。
+  只保护已拥有的工作，开始工作前等待信号量仍可直接取消；不把整个同步过程改为不可取消。
+- **Validation / ablation:** 先运行新增的两个可用性恢复参数场景及真实线程回归，修复前
+  3 failed；修复后同步测试 10 passed。线程回归让三条真实 PostgreSQL 连接停在事件屏障上，
+  第四个来源失败后连续取消父任务，再追加子任务取消，确认三条线程退出后同步器才结束。
+  只保护父任务清理、保留旧 `db()` 等待方式的简化实现仍失败（3 个子任务均提前返回），
+  因而在两个等待点共用取消安全的回收逻辑。日志保留于
+  `.amp/in/artifacts/console-recovery-before.log`、`console-recovery-drain-ablation.log`。
+  全量 Python 789 passed（仍有一条上游 Starlette/httpx 弃用提示），Ruff、Mypy 193 个文件通过；
+  前端格式、类型检查、2 项单测和 7 项浏览器回归通过。本轮没有前端代码或视觉变化。
+  全量日志：`.amp/in/artifacts/console-recovery-python.log`；本轮尚未推送或部署。
+
+### [037] 2026-10-17 — 按会话恢复覆盖状态并清理旧临时限制
+
+- **Requirement / context:** 用户要求补齐 [036] 复审剩余的问题：`not_found` 也可能恢复，
+  旧版写进 limitations 的临时状态还会阻止已有来源恢复。
+- **Implementation:** Worker 会话页不再把 session status 写进永久限制；`finish` 在同一事务内
+  将每个会话的当前状态写入 `console_sync` 的 `worker:<attempt>:<generation>:<session>` 子行。
+  子行始终不排队，复用现有来源汇总；missing/unsupported 显示 partial 和具体原因，只有同一
+  会话再次被观察为 available 时才能清除。后面的干净会话页不会覆盖前面的未恢复状态。
+  扫到 EOF 仍有未恢复会话时，将主来源游标设为 NULL，下一次事件/显式刷新从第一会话重查；
+  全部会话可读后保留 EOF 增量检查点，不引入周期全量查询或自动无限重扫。
+  对旧 `no_worker` / `no_session` / `not_found` / `unsupported` 限制，claim 从第一会话重新读取，
+  成功提交时移除旧的无身份临时标记，用这轮实际采集的会话状态替代。读取失败不提前清除，
+  多页未完成时仍为 pending；`worker_source_truncated` 等真实内容缺口继续永久累计。
+- **Decision / trade-offs:** 按会话保存状态，避免“最后一页成功就清除所有缺口”和“所有缺口永不恢复”
+  两种错误。复用子来源状态和已有联合主键，不新增表/列；缺失会话存在时，显式同步成本比单纯 EOF
+  增量读取高，换取此前未读到的会话确实能被补采。归档版本和业务状态不被此恢复清理删除或改写。
+- **Validation:** 修复前，旧限制清理、跨会话恢复和保留真实截断的 7 个目标场景失败；修复后
+  同步测试 16 passed，全量 Python 795 passed（仍有一条上游 Starlette/httpx 弃用提示）。
+  Ruff、Mypy 193 个文件、前端格式/类型检查、2 项单测、7 项浏览器回归、`uv build` 通过。
+  日志：`.amp/in/artifacts/console-session-recovery-before.log`、`console-session-recovery-python.log`。
+- **Ablation:** 同一多会话/重启场景，去掉会话子状态后两项参数测试失败（误报 available）；
+  只去掉 EOF 重置后同样两项失败（下次仍从最后会话开始，无法重读早期会话）。保留两个机制。
+  临时 pytest 插件已删除，文本证据留在 `console-session-ablation-plugin.txt`；复现时恢复为
+  `.amp/in/console_session_ablation.py`，以 `PYTHONPATH=.amp/in CONSOLE_ABLATION=without_sessions`
+  或 `without_rewind` 加上述测试数据库变量，运行 `uv run pytest -q -p console_session_ablation`
+  `tests/test_console_sync.py -k missing_session`。日志：`console-session-ablation-state.log`、
+  `console-session-ablation-rewind.log`，均位于 `.amp/in/artifacts/`。本轮尚未推送或部署。
+
+### [038] 2026-10-17 — 同一会话跨页累计覆盖，完整重读后恢复
+
+- **Requirement / context:** 用户要求修复 [037] 复审的中等问题：Worker 的 `unsupported`
+  只描述当前页，同一会话后续正常页会覆盖此前 partial，错误地保留 EOF 检查点。
+- **Implementation / decision:** 补充 [037] 的恢复条件：只有从同一会话开头完整读到末尾且全程
+  available，才清除其可恢复缺口。`SessionHistory` 显式携带 `starts_at_beginning` 和
+  `reached_end`，由 Control 使用原始 inner cursor 和 Worker `HistoryPage.has_more` 赋值，
+  不把 Flow 跨会话续页误当成本会话尚未读完。既有 `console_sync` 新增布尔列
+  `worker_scan_clean`，在会话子行记录这轮是否从头开始且截至当前页均正常，与归档和主游标
+  同事务提交；完成或出现不支持页后清零。重启可继续已有扫描，干净尾页和未完成的干净重扫
+  均不能清除旧原因。仍有缺口时沿用 [037] 的 EOF 回退和事件/显式刷新触发策略。
+- **Trade-offs:** 新增一个持久布尔字段，避免依赖易丢失的进程内累计状态，也避免存储逐页副本。
+  旧子行默认 FALSE，已有缺口需完整重读才能恢复；不改 Worker 传输协议、不加周期全量扫描。
+  本次仅修复覆盖判断，不改变内容永久保存、版本或个人阅读状态范围。
+- **Validation:** 新增真实 PostgreSQL 回归，修复前 1 failed：unsupported 首页面后接正常
+  末页会误变 available；修复后同步/会话测试 26 passed。回归逐页重建同步器，覆盖旧增量
+  EOF、未完成重扫和完整正常重扫；已有 HTTP/Worker 端到端测试同时验证会话/Flow 边界。
+  全量 Python 796 passed，保留一条上游 Starlette/httpx 弃用提示；Ruff、Mypy 193 个文件、
+  前端格式/类型检查、2 项单测、7 项浏览器测试及 `uv build` 通过，无新增视觉变化。
+  证据：`.amp/in/artifacts/console-page-coverage-before.log`、`console-page-coverage-python.log`。
+- **Ablation:** 同一回归分别移除跨页持久状态、起点边界和终点边界，三组均 1 failed：
+  无持久状态不能在重启后完成恢复；无起点判断会让正常尾页误清除；无终点判断会让正常重扫
+  首页面提前清除。保留三个机制。插件文本保存在 `console-page-ablation-plugin.txt`；复现时
+  恢复为 `.amp/in/console_page_ablation.py`，以 `PYTHONPATH=.amp/in`、上述测试数据库变量及
+  `CONSOLE_ABLATION=without_persistence` / `without_start_boundary` / `without_end_boundary`
+  运行 `uv run pytest -q -p console_page_ablation tests/test_console_sync.py -k session_gap`。
+  日志为 `.amp/in/artifacts/console-page-ablation-<模式>.log`。临时插件删除，本轮尚未推送或部署。
+
+### [039] 2026-10-17 — 跨页回归改为验证公开来源状态和后续读取位置
+
+- **Requirement / scope:** 用户仅要求修复代码准则审查的第 3 项：跨页回归对内部子行结构和
+  位置元组依赖较重。本轮不处理“上次成功”时间和不可用原因类型两项问题，不改生产代码。
+- **Implementation:** `test_session_gap_survives_clean_pages_until_complete_clean_rescan`
+  使用具名的 unsupported 首段、正常尾段、正常重扫首段，按场景顺序直接调用；删除六列元组、
+  基于循环索引的分支，以及读取子行 status/reason 和主行 cursor 的断言 SQL。通过
+  `ConsoleStore.sources()` 检查对外状态/原因，通过后续 `claim().cursor` 和会话读取参数验证
+  检查点回退与保留。保留模拟旧 EOF 的 SQL，调度仍直接推进 next_at 以免依赖实际等待。
+  一个局部有类型的读取辅助函数复用真实同步和重启步骤，不引入通用场景框架或新永久测试。
+- **Validation / trade-offs:** 同步/会话相关测试 26 passed，Ruff 和目标测试文件 Mypy 通过。
+  沿用 [038] 的三种故障注入，新测试在每种情况下均按预期 1 failed，保留原回归保护能力。
+  本轮只调整既有测试，没有新增生产机制；无需新增机制消融。证据：
+  `.amp/in/artifacts/console-test-contract-validation.log`、
+  `console-test-contract-without_persistence.log`、`console-test-contract-without_start_boundary.log`、
+  `console-test-contract-without_end_boundary.log`；注入方法同 [038]，临时插件已删除。
+  本轮未重跑全量 Python、前端和打包，生产代码未变；修改仅在本地，尚未推送或部署。
+
+### [040] 2026-10-17 — 分清 Worker 当前同步健康与历史会话覆盖的汇总规则
+
+- **Requirement / scope:** 用户要求先修结构审查第 1 项：共用 `console_sync` 的队列记录与
+  历史会话覆盖记录，不应无差别合并所有字段。此次不迁表、不改 Observation 归属或原因类型。
+- **Implementation / decision:** `ConsoleStore.sources()` 继续让全部 Worker 行参与状态优先级
+  和缺口汇总，但 Worker 最近成功时间只取主来源行；当前主来源为 unavailable 时，其错误
+  优先于历史会话原因。主来源没有当前不可用错误时，保留原有覆盖原因汇总。GitHub 来源的
+  时间、原因和状态规则保持不变，归档与同步任务状态不修改；会话缺口不会因显示连接错误而清除。
+- **Trade-offs:** 在已有聚合查询中增加明确的字段归属规则，无新增表、类、API 字段或查询轮次。
+  单个 reason 优先解释当前连接故障，历史覆盖原因仍持久保存；恢复连接后可继续显示未恢复的
+  历史缺口。该约定避免用旧会话时间表达当前新鲜度，也避免按字典顺序决定当前连接错误。
+- **Validation:** 新增一个双场景真实 PostgreSQL 回归，通过公开 `finish` / `fail` / `sources`
+  接口验证：较早正常会话不能固定较新读取的成功时间，历史 unsupported 不能遮住当前
+  worker_unavailable。修复前两场景均失败，修复后控制台同步/API 21 passed，全量 Python
+  798 passed（保留上游 Starlette/httpx 弃用提示）；Ruff、Mypy 193 个文件、测试文件格式、
+  前端类型检查、2 项单测、7 项浏览器测试及 `uv build` 通过。一次目标测试命令引用了不存在的
+  `test_console_persistence.py`，未执行测试；修正目标文件后通过，本轮全量已覆盖实际 archive 测试。
+  日志：`.amp/in/artifacts/console-source-boundary-before.log`、
+  `console-source-boundary-targeted.log`、`console-source-boundary-python.log`。
+- **Ablation:** 分别恢复旧时间汇总和旧原因汇总，同一回归分别得到 2 failed 和
+  1 failed / 1 passed，证明两个规则各自必要。临时插件已删除，文本证据保存在
+  `console-source-ablation-plugin.txt`；复现时恢复为 `.amp/in/console_source_ablation.py`，设置
+  `PYTHONPATH=.amp/in`、上述测试数据库变量及
+  `CONSOLE_ABLATION=without_freshness_boundary` / `without_error_priority`，运行
+  `uv run pytest -q -p console_source_ablation tests/test_console_sync.py -k freshness`。
+  日志为 `.amp/in/artifacts/console-source-<模式>.log`。修改仅在本地，尚未推送或部署。
