@@ -345,15 +345,24 @@ def test_bound_resources_serialize_and_restore_inside_standard_container(tmp_pat
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("permissions,accepted", [
+    ({"contents": "write"}, True),
+    ({"contents": "write", "metadata": "read"}, True),
+    ({"contents": "read", "metadata": "read"}, False),
+    ({"metadata": "read"}, False),
+    ({"contents": "write", "metadata": "write"}, False),
+    ({"contents": "write", "metadata": "read", "issues": "write"}, False),
+])
 async def test_creates_repository_scoped_contents_push_capability(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    permissions: dict[str, str], accepted: bool,
 ) -> None:
     create_token = AsyncEndpoint(
         response(
             SimpleNamespace(
                 token="ghs_scoped",
                 expires_at="2026-09-05T11:30:00Z",
-                permissions=SimpleNamespace(contents="write"),
+                permissions=SimpleNamespace(**permissions),
                 repositories=[SimpleNamespace(full_name="octo/repo")],
             )
         )
@@ -366,10 +375,16 @@ async def test_creates_repository_scoped_contents_push_capability(
     github = GitHubApp(settings(tmp_path))
     app_client(monkeypatch, lambda **kwargs: client)
 
+    if not accepted:
+        with pytest.raises(GitHubError) as caught:
+            await github.installation(42).repository("octo/repo").create_push_capability()
+        assert caught.value.kind is GitHubErrorKind.UNEXPECTED_RESPONSE
+        return
+
     capability = await github.installation(42).repository("octo/repo").create_push_capability()
 
     assert capability.repository == "octo/repo"
-    assert capability.permissions == {"contents": "write"}
+    assert capability.permissions == permissions
     assert capability.expires_at == datetime(2026, 9, 5, 11, 30, tzinfo=UTC)
     assert capability.token.get_secret_value() == "ghs_scoped"
     assert create_token.calls == [
