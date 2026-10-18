@@ -172,7 +172,7 @@ class ActivityStore(Repository):
         since: int | None = None,
         parent: str | None = None,
     ) -> ActivityPage:
-        """Select latest observed object versions as of one committed publication watermark."""
+        """Read conversation versions at one watermark, excluding internal Flow audit records."""
         head = self._head(flow_id)
         position = ActivityCursor.decode(cursor) if cursor else None
         if position:
@@ -195,7 +195,8 @@ class ActivityStore(Repository):
             raise ConsoleFailure("snapshot_invalid")
         prefix = (
             "WITH latest AS (SELECT DISTINCT ON (key) * FROM console_activity"
-            " WHERE flow_id=%s AND version<=%s ORDER BY key,deleted DESC,updated_at DESC,version DESC) "
+            " WHERE flow_id=%s AND version<=%s AND source!='flow'"
+            " ORDER BY key,deleted DESC,updated_at DESC,version DESC) "
         )
         with self._db.connection() as connection:
             count = connection.execute(
@@ -245,9 +246,11 @@ class ActivityStore(Repository):
         with self._db.connection() as connection:
             rows = connection.execute(
                 "WITH old AS (SELECT DISTINCT ON(key) key,version,occurred_at FROM console_activity"
-                " WHERE flow_id=%s AND version<=%s ORDER BY key,deleted DESC,updated_at DESC,version DESC),"
+                " WHERE flow_id=%s AND version<=%s AND source!='flow'"
+                " ORDER BY key,deleted DESC,updated_at DESC,version DESC),"
                 " new AS (SELECT DISTINCT ON(key) key,version,occurred_at,deleted FROM console_activity"
-                " WHERE flow_id=%s AND version<=%s ORDER BY key,deleted DESC,updated_at DESC,version DESC)"
+                " WHERE flow_id=%s AND version<=%s AND source!='flow'"
+                " ORDER BY key,deleted DESC,updated_at DESC,version DESC)"
                 " SELECT CASE WHEN n.deleted THEN 'deleted' WHEN o.key IS NOT NULL THEN 'edited'"
                 " WHEN n.occurred_at<(SELECT max(occurred_at) FROM old) THEN 'backfilled' ELSE 'new' END AS kind,"
                 " count(*) AS n FROM new n LEFT JOIN old o USING(key) WHERE n.version IS DISTINCT FROM o.version GROUP BY 1",

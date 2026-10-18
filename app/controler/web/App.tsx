@@ -8,6 +8,7 @@ import {
 import { Menu, PanelLeftClose, PanelLeftOpen, RefreshCw } from "lucide-react";
 import { getFlow, getFlows, getJobs, getRepos } from "./api";
 import { ActivityView } from "./activity";
+import { ConversationSources } from "./ConversationSources";
 import { phases } from "./phases";
 import { SearchBox } from "./SearchBox";
 import type { FlowDetail, FlowSummary, JobSummary, Phase, Tab } from "./types";
@@ -525,16 +526,11 @@ function Conversation({
   }, [refresh, load]);
   return (
     <>
-      <div className="conversation-sources">
-        {state.sources.map((s) => (
-          <span className={`source-state ${s.status}`} key={s.source}>
-            <i className="dot" />
-            {s.source} · {s.status}
-            {s.reason ? ` (${s.reason})` : ""}
-            {s.last_success_at ? ` · ${s.last_success_at}` : ""}
-          </span>
-        ))}
-      </div>
+      <ConversationSources
+        sources={state.sources}
+        busy={state.busy}
+        refresh={() => load(true)}
+      />
       {Object.values(state.changes).some(Boolean) && (
         <p className="conversation-divider" role="status">
           快照更新：

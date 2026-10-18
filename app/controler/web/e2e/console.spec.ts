@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import type { SourceStatus } from "../types";
 
 const now = "2026-10-17T12:00:00Z";
 const flow = {
@@ -93,6 +94,175 @@ test.beforeEach(async ({ page }) => {
         },
       });
     return route.fulfill({ status: 500, json: { detail: "模拟失败" } });
+  });
+});
+
+test("conversation sources keep routine diagnostics collapsed and surface actionable failures", async ({
+  page,
+}) => {
+  // Historical coverage limits and a not-yet-created worker session are normal
+  // on a new flow; an actual read failure must still be visible and retryable.
+  const historyLimit = "pre_ingestion_edits_and_deleted_bodies_unrecoverable";
+  let sources: SourceStatus[] = [
+    {
+      source: "github.issue_comments",
+      status: "partial",
+      reason: null,
+      last_success_at: now,
+      limitations: [historyLimit],
+    },
+    {
+      source: "worker",
+      status: "available",
+      reason: null,
+      last_success_at: now,
+      limitations: [],
+    },
+  ];
+  await page.route("**/api/flows/42/activity?**", (route) =>
+    route.fulfill({
+      json: {
+        items: [activity],
+        next_cursor: null,
+        has_more: false,
+        snapshot: 2,
+        total: 1,
+        sources,
+        changes: {},
+      },
+    }),
+  );
+  await page.goto("/#flow/42/conversation");
+  const status = page.getByRole("region", { name: "会话数据状态" });
+  const details = status.locator("details");
+  const warning = status.getByRole("alert");
+  const refresh = page.getByRole("button", { name: "刷新当前视图" });
+  await expect(status).toBeVisible();
+  await expect(details).not.toHaveAttribute("open");
+  await expect(status.getByText(historyLimit, { exact: true })).toBeHidden();
+  await expect(warning).toHaveCount(0);
+  await page.screenshot({
+    path: "../../../.amp/in/artifacts/sources-normal.png",
+  });
+
+  sources = [
+    sources[0],
+    { ...sources[1], status: "unavailable", reason: "no_session" },
+  ];
+  await refresh.click();
+  await expect(status.getByRole("status")).toHaveText("尚无执行会话");
+  await expect(warning).toHaveCount(0);
+  await page.screenshot({
+    path: "../../../.amp/in/artifacts/sources-empty.png",
+  });
+  sources = [sources[0], { ...sources[1], reason: "no_worker" }];
+  await refresh.click();
+  await expect(status.getByRole("status")).toHaveText(
+    "尚未绑定 Worker，暂不读取执行会话",
+  );
+  await expect(warning).toHaveCount(0);
+
+  sources = [sources[0], { ...sources[1], reason: "query_timeout" }];
+  await refresh.click();
+  await expect(warning).toContainText("执行会话：会话读取超时");
+  await expect(page.getByText("真实活动正文", { exact: true })).toBeVisible();
+  await page.screenshot({
+    path: "../../../.amp/in/artifacts/sources-warning.png",
+  });
+  await details.locator("summary").click();
+  await expect(status.getByText(historyLimit, { exact: true })).toBeVisible();
+  await expect(status.locator("time").first()).toHaveAttribute("datetime", now);
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+  ).toBe(true);
+  await page.screenshot({
+    path: "../../../.amp/in/artifacts/sources-details-mobile.png",
+    fullPage: true,
+  });
+
+  sources = sources.map((source) => ({
+    ...source,
+    status: "available",
+    reason: null,
+    limitations: [],
+  }));
+  await warning.getByRole("button", { name: "重新同步" }).click();
+  await expect(warning).toHaveCount(0);
+  await expect(status.getByRole("status")).toHaveCount(0);
+
+  // Unexplained or newly introduced partial coverage must not be hidden.
+  for (const limitations of [[], ["new_unknown_limitation"]]) {
+    sources = [{ ...sources[0], status: "partial", limitations }];
+    await refresh.click();
+    await expect(warning).toContainText("内容采集不完整");
+  }
+});
+
+test("activity content hierarchy keeps provenance secondary and expandable", async ({
+  page,
+}) => {
+  const description = {
+    ...activity,
+    author: "b1indsight",
+    source: "issue.description",
+    title: "测试 agentflow 是否正常运行",
+    body: "如果能正常响应就返回 ok",
+    body_length: Array.from("如果能正常响应就返回 ok").length,
+    prior: true,
+    previous_version: null,
+    url: "https://example.test/issues/85",
+    metadata: { issue_number: 85, repository: "b1indsight/agentflow" },
+  };
+  await page.route("**/api/flows/42/activity?**", (route) =>
+    route.fulfill({
+      json: {
+        items: [description],
+        next_cursor: null,
+        has_more: false,
+        snapshot: 2,
+        total: 1,
+        sources: [],
+        changes: {},
+      },
+    }),
+  );
+  await page.goto("/#flow/42/conversation");
+  const message = page.locator("article[data-entry='comment-1']");
+  await expect(message.getByText("此前交互", { exact: true })).toBeVisible();
+  await expect(message.getByText("此前交互", { exact: true })).toHaveAttribute(
+    "title",
+    "发生于此 Flow 创建之前的历史内容",
+  );
+  await expect(
+    message.getByRole("heading", { name: description.title }),
+  ).toBeVisible();
+  await expect(
+    message.getByText(description.body, { exact: true }),
+  ).toBeVisible();
+  await expect(
+    message.getByRole("link", { name: "在 GitHub 中查看" }),
+  ).toHaveAttribute("href", description.url);
+  const metadata = message.locator("details");
+  await expect(metadata).not.toHaveAttribute("open");
+  await page.locator(".conversation-stream").screenshot({
+    path: "../../../.amp/in/artifacts/activity-hierarchy-desktop.png",
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.locator(".conversation-stream").screenshot({
+    path: "../../../.amp/in/artifacts/activity-hierarchy-mobile.png",
+  });
+  await metadata.locator("summary").click();
+  await expect(metadata.getByLabel("文本")).toContainText("issue_number");
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+  ).toBe(true);
+  await page.locator(".conversation-stream").screenshot({
+    path: "../../../.amp/in/artifacts/activity-hierarchy-details-mobile.png",
   });
 });
 

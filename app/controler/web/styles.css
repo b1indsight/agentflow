@@ -673,24 +673,73 @@ svg {
   padding: 24px 42px 50px;
   margin: auto;
 }
-.conversation-sources {
-  display: flex;
-  align-items: center;
-  gap: 15px;
-  flex-wrap: wrap;
+.conversation-source-status {
   font-size: var(--text-meta);
   color: var(--muted);
   margin-bottom: 20px;
+}
+.conversation-source-empty {
+  margin: 0 0 10px;
+}
+.conversation-source-warning {
+  border-left: 3px solid #c58a14;
+  background: #fff9ed;
+  color: #78571a;
+  padding: 12px 16px;
+  margin-bottom: 14px;
+  overflow-wrap: anywhere;
+}
+.conversation-source-warning p {
+  margin: 6px 0 10px;
+}
+.conversation-source-warning button {
+  color: inherit;
+  border: 1px solid #e4d2ac;
+  border-radius: 5px;
+  background: var(--paper);
+  padding: 5px 10px;
+}
+.conversation-source-details summary {
+  cursor: pointer;
+  width: fit-content;
+}
+.conversation-source-details[open] summary {
+  color: var(--ink);
+}
+.source-details-hint {
+  margin: 12px 0;
+  line-height: 1.6;
+}
+.conversation-source-details > ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.conversation-source-details > ul > li {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  padding: 8px 0;
+  border-top: 1px solid var(--line);
+  overflow-wrap: anywhere;
+}
+.source-limitations {
+  width: 100%;
+  padding-left: 18px;
+  font-size: var(--text-small);
 }
 .source-state {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  min-width: 0;
 }
 .source-state .dot {
   background: var(--status-gray);
   width: 5px;
   height: 5px;
+  flex-shrink: 0;
 }
 .source-state.syncing .dot {
   background: var(--status-blue);
@@ -703,10 +752,6 @@ svg {
 }
 .source-state.unavailable .dot {
   background: var(--status-red);
-}
-.conversation-sources .sample-hint {
-  margin-left: auto;
-  font-size: var(--text-small);
 }
 .date-label {
   display: flex;
@@ -750,34 +795,83 @@ svg {
 .message-main {
   min-width: 0;
   flex: 1;
+  overflow-wrap: anywhere;
 }
 .message-label {
   display: flex;
   gap: 9px;
   align-items: center;
   min-height: var(--avatar-size);
-  font-size: var(--text-control);
+  font-size: var(--text-meta);
   font-weight: 550;
-  margin: 0 0 9px;
+  margin: 0 0 8px;
   flex-wrap: wrap;
 }
 .message-identity {
   display: inline-flex;
   align-items: baseline;
   gap: inherit;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.message-context {
+  color: var(--muted);
+  background: var(--bg);
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-size: var(--text-small);
+  font-weight: 400;
 }
 .message-label time {
-  font-family: var(--mono);
   font-weight: 400;
   font-size: var(--text-small);
-  color: #a1aaa4;
+  color: var(--muted);
   margin-left: auto;
+}
+.message-title {
+  font-size: var(--text-body);
+  font-weight: 600;
+  line-height: 1.5;
+  margin: 0 0 6px;
 }
 .message p {
   font-size: var(--text-body);
-  line-height: 1.9;
+  line-height: 1.75;
   margin: 5px 0;
-  color: #5a675e;
+  color: var(--ink);
+}
+.message .message-body {
+  margin: 0;
+}
+.message-footer {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+  font-size: var(--text-meta);
+  line-height: 1.5;
+  color: var(--muted);
+}
+.message-provenance summary {
+  cursor: pointer;
+  width: fit-content;
+}
+.message-provenance pre {
+  max-width: 100%;
+  overflow-x: auto;
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  background: var(--bg);
+  border-radius: 5px;
+  font-size: var(--text-small);
+  color: var(--ink);
+}
+.message-source-link {
+  width: fit-content;
+  color: inherit;
+}
+.message-source-link:hover,
+.message-provenance summary:hover {
+  color: var(--green);
 }
 .github-bubble {
   padding: 12px 16px;
@@ -1359,14 +1453,6 @@ pre code {
   .content {
     padding: 20px 18px 35px;
   }
-  .conversation-sources {
-    gap: 8px;
-    margin-bottom: 20px;
-  }
-  .conversation-sources .sample-hint {
-    width: 100%;
-    margin: 0;
-  }
   .message-label {
     gap: 6px;
   }
@@ -1433,7 +1519,7 @@ pre code {
   padding: 0;
   color: var(--muted);
   font: inherit;
-  font-size: var(--text-nav);
+  font-size: var(--text-meta);
   text-decoration: underline;
   text-underline-offset: 3px;
   cursor: pointer;
@@ -1442,7 +1528,7 @@ pre code {
   color: var(--ink);
 }
 .edit-history {
-  margin-top: 8px;
+  min-width: 0;
 }
 .activity-diff {
   margin-top: 12px;
