@@ -1,7 +1,7 @@
 # 已取消 Flow 手动归档 — Feature record
 
 **Stage:** Implemented — 实现与本地验证通过；交付目标为 `feat/cancelled-flow-archive`，未合并或部署，真实 Access 环境待验收。
-**PR:** 未创建；本次仅推送独立功能分支，不包含其他任务的未提交改动。
+**PR:** [#95](https://github.com/b1indsight/agentflow/pull/95)（Draft）；HTTPS 代理来源校验尚未修复，未标记可合并，不包含其他任务的未提交改动。
 
 ## 1. Initial plan
 
