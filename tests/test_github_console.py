@@ -56,6 +56,31 @@ async def test_sdk_comments_full_body_paging_and_webhook_identity(tmp_path, monk
     assert webhook_observations("issue_comment", payload | {"comment": {"id": 9}}) == []
 
 
+async def test_cross_referenced_timeline_events_without_ids_have_stable_distinct_keys(tmp_path, monkeypatch):
+    # GitHub's cross-reference event has no id/node_id, unlike other timeline events.
+    issue = comment(body="referencing PR") | {
+        "number": 17, "state": "closed", "title": "PR", "labels": [], "user": None,
+        "milestone": None, "locked": False, "comments": 0, "closed_at": None,
+        "repository_url": "https://api.github.com/repos/owner/repo",
+        "labels_url": "https://api.github.com/repos/owner/repo/issues/17/labels",
+        "comments_url": "https://api.github.com/repos/owner/repo/issues/17/comments",
+        "events_url": "https://api.github.com/repos/owner/repo/issues/17/events",
+    }
+    events = [
+        {"event": "cross-referenced", "actor": None, "source": {"type": "issue", "issue": issue},
+         "created_at": f"2026-01-02T00:00:0{index}Z", "updated_at": "2026-01-02T00:00:02Z"}
+        for index in range(2)
+    ]
+    repo = adapter(tmp_path, monkeypatch, lambda request: httpx.Response(200, json=events))
+    first = await read_source(repo, 7, 17, "issue.timeline")
+    assert len(first.items) == 2 and len({item.key for item in first.items}) == 2
+    assert all(item.metadata["event"] == "cross-referenced" for item in first.items)
+    issue["title"] = "edited source PR"
+    events[0]["updated_at"] = "2026-01-03T00:00:00Z"
+    again = await read_source(repo, 7, 17, "issue.timeline")
+    assert [item.key for item in first.items] == [item.key for item in again.items]
+
+
 async def test_threads_use_separate_bounded_reply_connection(tmp_path, monkeypatch):
     def handler(request):
         import json

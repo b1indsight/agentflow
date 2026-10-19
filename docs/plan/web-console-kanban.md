@@ -1332,3 +1332,286 @@ Webhook 未覆盖的交互/字段需在明确触发的核对中补齐，不能�
   并检查截图。证据位于 `.amp/in/artifacts/console-diagnostics-{running,closed,archive_recovery}.png`
   及 `console-diagnostics-browser.log`。这不替代真实 Access/GitHub 线上全链路验收；此次修改
   仅在本地，尚未提交、推送或部署，#85 仍保持开放。
+
+### [042] 2026-10-18 — 会话事件、内部标记和长正文阅读修复提案
+
+- **Requirement / scope:** 用户连续提供三张截图：无正文的 `labeled` 事件展示不明确且占用
+  完整消息布局；GitHub 评论将 `<!-- flowtool:effect:… -->` 显示为正文；长正文同时出现
+  “下一段”和“下一部分”，用户报告点击后无法继续阅读，并要求按钮更贴合页面背景。
+  本记录仅保存需求与修复提案，尚未批准或实现。不改变截图中的实际仓库执行错误，也不
+  将 developer/skills 指令隐藏或删除；用户未要求这些行为。
+- **Observed code / context:** `app/github/console.py` 已采集标签名称到 metadata，当前活动
+  组件直接使用原始事件标题。`app/controler/workflow/effects.py` 在评论末尾附加 effect
+  标记，用于副作用去重和结果恢复，不能从 GitHub 原文移除。`ActivityBody` 从归档读取
+  正文部分，内部 `TextWindow` 再进行本地分段，形成两套独立导航。分页点击失败的具体
+  触发条件仍需浏览器复现，不能仅凭截图确定。
+- **Proposed behavior:** 无正文的标签事件用紧凑行展示“添加标签：标签名”或“移除标签：
+  标签名”，保留作者、时间和可展开来源信息；缺失标签名称时只陈述已知动作，不伪造名称。
+  其他无正文事件使用明确的动作摘要，未知事件保留原始名称供查询。GitHub 评论的正文、
+  续读和编辑差异均不显示末尾内部 effect 标记；原始归档及远端评论保持不变。
+  长正文只显示一套上一段/下一段控件和基于全文的阅读范围，到已读取部分末尾时继续读取
+  后续部分；加载失败保留当前正文并允许重试。按钮使用与背景协调的低强调样式，同时
+  保留 hover、键盘焦点、禁用和加载状态。
+- **Technical direction / alternatives:** 在展示读取边界处理内部标记，并保证分页偏移和
+  长度使用同一份展示文本，避免前端逐片删除导致跨边界标记泄漏或字符统计错误。只识别
+  实际生成格式的末尾 effect 标记，不引入任意 HTML 渲染或通用 Markdown 清理。
+  统一活动正文导航，保留现有有界读取、工具行数预算、Unicode 安全和虚拟列表阅读恢复；
+  不采用一次加载整篇正文或只隐藏其中一排按钮的方案。预计涉及 `activity.tsx`、
+  `windowing.tsx`、`styles.css`、归档读取及对应回归；不新增依赖、表或写接口。
+- **Implementation order / validation:** 获批后先用浏览器复现截图所示两层分页，再统一
+  阅读状态和跨部分导航；随后处理事件摘要和内部标记。验证短文、超过预览长度、跨多个
+  后端部分、emoji、前后往返、读取失败重试、卸载后恢复；验证标记位于预览/分段边界、
+  正常正文和非内部 HTML 注释不被误删、编辑差异与正文一致。运行相关 PostgreSQL/API
+  回归、前端单测、类型/格式检查、构建和 Playwright；检查桌面与手机的默认、翻页、
+  加载/失败状态截图。此轮定位尚未执行上述测试或浏览器复现。消融优先对比修复前后
+  同一失败场景，不为样式或文案添加额外机制。
+- **Outcome / pending:** 等待用户批准本提案；实现、验证、提交、推送及部署均未进行。
+
+### [043] 2026-10-18 — 补充同轮 Agent 输出分组与技术标题去除
+
+- **Requirement update:** 用户补充第四张截图，要求相关输出合并展示，`message` 不应作为
+  消息标题。截图同时包含 assistant 说明、`exec` 调用和独立的 `tool_result`。
+- **Context:** `ConsoleSynchronizer._worker()` 以工具名称或 `item.kind` 生成标题，因此
+  普通消息得到 `message`，工具结果得到 `tool_result`；前端又同时展示工具标题和折叠摘要。
+  归档 metadata 已包含 attempt、session、generation 和 call_id，可作为关联依据。
+- **Proposed decision / status:** 在 [042] 的待批准范围内增加输出分组：普通消息直接展示
+  正文，去除 `message` / `tool_result` 等内部类型标题；同一会话内有关联的工具调用和结果
+  合并为一个可折叠工具块，工具名称只出现一次；相关 assistant 说明和连续输出组合展示，
+  减少重复头像与来源信息。保留每条原始记录的定位和顺序，不修改归档身份或丢弃正文。
+  缺少明确关联信息时不凭相同时间戳强行配对，不跨 session / generation / attempt 合并，
+  用户消息或其他来源插入时保留边界。此处为提案，尚未实现。
+- **Validation additions:** 覆盖调用和结果跨活动页、并行调用结果交错、缺失/未返回结果、
+  会话切换、刷新及虚拟列表卸载重挂；确认完整正文与各自来源仍可达，分组不突破 DOM 与
+  正文读取预算。桌面和手机截图检查分组展开/收起以及普通消息不再出现技术标题。
+- **Outcome / pending:** 与 [042] 一起等待方案批准；本轮仅更新记录，未修改实现代码。
+
+### [044] 2026-10-18 — 补充手动关闭 PR 后的 502 与状态恢复问题
+
+- **Requirement update:** 用户报告手动关闭 PR 后，页面出现“读取失败：请求失败 (502)
+  （重试）”，状态永久卡住。截图没有请求 URL、响应 detail、Flow 编号或服务端日志，
+  目前只能确认用户报告的操作顺序，不能认定关闭 PR 与 502 已有明确因果关系。
+- **Observed code / boundary:** PR 对账在发现未合并关闭时调用 `pause_delivery()`，将
+  delivery 设为 CLOSED 并取消排队任务，按现有约定保留 Flow 和运行中的执行绑定，等待
+  验证后重开。这个受阻状态本身不能作为死锁证据。会话活动来自本地归档读取，前端发生
+  错误后停止自动加载，并允许手动重试原请求；另一个实时 conversation API 会将部分
+  `ConversationFailure` 映射为 502。截图尚不能区分应用响应和代理错误。
+- **Proposed investigation / decision pending:** 将本项纳入同批修复并优先定位。获取受影响
+  Flow/PR、失败请求路径与响应及对应时间日志；分别复现关闭时排队中、执行中、等待审核
+  三种情形，检查 webhook、对账、绑定、任务、同步任务与页面读取是否能继续推进。根据
+  证据修复实际失败边界，保证已归档会话仍可读、失败可重试、状态和下一步说明与事实一致。
+  不以捕获所有异常、无限重试、清空归档或强制释放未确认执行的绑定掩盖错误。
+  未经用户确认，不将“关闭但可重开”的现有语义改为自动取消/归档。
+- **Validation additions:** 同一失败场景修复前后对比；关闭/重开及漏 webhook 对账回归，
+  页面 502 后重试成功、切换页面后重试、归档继续读取；确认关闭 PR 不造成服务进程退出
+  或后台同步失去后续执行机会。真实线上 502 的根因与具体修复仍待请求和日志证据。
+- **Outcome / pending:** [042]–[044] 共记录五项用户问题，均待批准实施；本轮只更新本地
+  需求记录，未改产品代码、未运行行为验证、未提交、推送或部署。
+
+### [045] — 关闭 PR 故障的目标与关闭时间核实
+
+- **Requirement evidence:** 用户提供受影响 PR：
+  [b1indsight/neural_network#2](https://github.com/b1indsight/neural_network/pull/2)，
+  标题“测试 agentflow 正常运行”，head 为 `flow/1`，base 为 `main`。
+- **Read-only verification:** `gh pr view 2 --repo b1indsight/neural_network` 返回 CLOSED、
+  mergedAt 为 null；GitHub timeline 显示 b1indsight 于 2026-10-18 21:20:16 UTC
+  （新加坡时间 2026-10-19 05:20:16）关闭 PR。读取时未发现后续重开事件。
+  这确认了手动关闭且未合并，但不能据此确定 502 的服务端原因或 Flow 执行状态。
+- **Outcome / pending:** 已补齐 [044] 的 PR 定位与日志时间窗口；失败请求及服务端日志
+  仍待核查。用户此次提供定位信息，未明确批准 [042]–[044] 的实施方案；产品代码未修改。
+
+### [046] — 补充手机详情标题随阅读收缩
+
+- **Requirement update:** 用户反馈手机详情中不随正文滚动的标题区域占用过多高度，要求
+  向上滑动、继续阅读正文时收缩为一行，只保留最简信息，为会话内容留出更多空间。
+- **Observed code / context:** `App.tsx` 的 `detail-head` 包含任务切换、完整标题、状态、
+  仓库与 Issue/PR 链接和页签，位于独立滚动的 `detail-body` 之外；手机 CSS 将标题与
+  状态纵向排列，因此这些内容始终占据正文上方的固定空间。
+- **Proposed behavior / status:** 仅手机窄屏：初次进入且位于正文顶部时保留完整详情头；
+  向上滑动使正文继续向下阅读后，整个固定详情头收缩为一行，保留返回入口、PR 编号
+  （无 PR 时使用 Issue 编号）和省略的短标题。完整标题、仓库链接、状态及页签不继续
+  占用固定高度；回到顶部时恢复完整头部，并提供明确的展开入口，确保阅读中仍能切换
+  页签和任务。桌面布局不变。此处为待批准提案，尚未实现。
+- **Technical direction / risks:** 以现有 `detail-body` 为滚动观察对象，不监听错误的
+  window 滚动；使用稳定阈值，避免头部变高/变矮导致反复展开收缩、正文跳动或虚拟列表
+  阅读位置丢失。遵循减少动画偏好，隐藏区域不可继续接收键盘焦点；切换 Flow、页签、
+  屏幕方向和恢复已有阅读位置时，折叠状态应与实际滚动位置一致。不增加依赖或新的
+  持久化阅读状态。
+- **Validation additions:** 手机普通/长标题的顶部展开、连续阅读单行收缩、展开入口、
+  返回顶部恢复、横竖屏和页签切换；检查头部实际高度、正文可用高度、无横向溢出和
+  折叠阈值附近无抖动，确认正文分页、列表加载及阅读锚点不受影响。浏览器执行检查，
+  并分别检查展开与收缩状态截图；桌面作不变对照。
+- **Outcome / pending:** 与前五项一起等待批准实施；本轮仅追加本地需求记录，未修改
+  产品代码、未执行渲染或行为验证、未提交、推送或部署。
+
+### [047] — 会话展示、正文续读与手机详情的本地修复
+
+- **Implemented:** 空标签等事件使用紧凑动作摘要；展示读取统一去除 GitHub 评论末尾
+  的 effect 标记，预览、长度、续读和编辑差异使用同一正文，原始归档保持不变。
+  正文改用单套低强调分段导航，支持 Unicode 偏移、读取失败保留当前内容并重试，
+  页签切换后恢复阅读位置。连续 Agent 输出减少重复身份、来源和内部类型标题。
+  同会话、同代且 call_id 匹配的相邻工具调用/结果共用折叠框，交错结果保持原始顺序并
+  联动展开；没有匹配调用或调用已离开虚拟窗口时保留独立入口，不改变原始记录顺序。
+  手机阅读时详情头收为一行，可手动展开或回到顶部恢复；高度变化补偿正文位置，
+  桌面保持完整头部，隐藏导航不能继续接收焦点。
+- **Verification:** 全量 Python 825 项通过；恢复临时验证改动后，后端相关 122 项、
+  Ruff、格式及 Mypy（112 个源文件）通过。前端格式、TypeScript/Vite 构建、2 项单元测试
+  和 12 项 Playwright 回归通过。浏览器使用受控 API 响应，验证真实组件、分页及窗口化；
+  不代表线上服务、Access 或关闭 PR 的生产故障已修复。已检查桌面折叠/展开、手机完整/
+  收缩头部、正文导航/失败重试截图。日志及最终截图位于 `.amp/in/artifacts/console-fixes-*`。
+- **Regression evidence:** 临时移除展示标记过滤后，公开读取测试出现标记泄漏；移除手机
+  高度补偿后，正文位置跳动约 180px；移除工具展开关联后，展开调用不再显示对应结果。
+  以上临时改动均已恢复，最终验证通过。
+- **Unresolved:** 用户提供的 neural_network PR #2 已手动关闭且未合并。关闭交付的现有
+  生命周期会暂停并保留重开对账要求，但本地没有关联的线上失败请求或服务日志，无法
+  确定 502 与卡住状态的根因。已覆盖空响应 502 后跨页签重试保留游标和快照的浏览器
+  场景；该回归不能证明生产故障已解决。仍需关闭时刻附近的部署端请求、响应和日志。
+- **Delivery:** 用户批准后完成上述五项本地实现，保留工作区已有改动；未提交、推送、
+  创建 PR 或部署。关闭 PR 后线上 502 的修复仍受日志缺失阻塞。
+
+### [048] — 工具活动改为 assistant 对话中的共享短栏
+
+- **Requirement / supersedes:** 用户提供紧凑工具摘要截图，明确要求多次工具响应与
+  assistant 正文放在同一段对话展示，并汇总到一个短栏。本项替代 [047] 的逐调用配对
+  折叠方案；该方案虽减少了重复结果，仍留下多个工具框，未达到用户要求。
+- **Implemented / decision:** `App.tsx` 按连续工具记录及执行归属划分短栏，
+  `activity.tsx` 使用组内共享展开状态，默认只显示调用/结果数量；展开后按归档顺序
+  显示各条详情，assistant 前后正文始终可读。用户消息、其他来源和不同 session /
+  attempt / generation 截断分组，缺少明确归属的记录不自动合并；不跨 assistant 正文
+  搬移工具记录，不从任意工具正文猜测文件或命令统计。移除旧的逐调用配对组件和样式。
+- **Virtualization trade-off:** 保留原始分页、记录身份及最多 60 行挂载限制，不把整个
+  工具序列塞进一个不受限组件。长序列只展示当前挂载片段，短栏明确标注“当前片段”；
+  已缓存连续记录共享展开状态。原始归档及后端接口不变。
+- **Validation / comparison:** 同一回归在上一版失败：找不到共享的“2 次调用 · 2 条结果”
+  短栏；改动后通过。覆盖跨页交错结果、切换页签后恢复展开、键盘展开、手机宽度、
+  不同会话/用户轮次之间的状态隔离。另用 140 条连续工具记录加末尾正文验证跨虚拟
+  窗口展开和末尾可读，挂载行数不超过 60。前端格式、TypeScript/Vite 构建、2 项单元
+  测试及全部 13 项 Playwright 回归通过；已检查桌面与手机的收起/展开截图。
+  对比日志为 `.amp/in/artifacts/tool-bar-before.log`，最终日志为
+  `.amp/in/artifacts/tool-bar-verification.log`，截图为 `tool-bar-*.png`。
+  本轮只修改前端和文档，未重跑 Python；[047] 的线上 502 日志阻塞不变。
+- **Delivery:** 本地实现与验证完成，未提交、推送或部署。
+
+### [049] — 短栏内部按 call_id 合并调用与结果
+
+- **Requirement / supersedes:** 用户进一步要求同 call_id 的调用和结果合并。本项替代
+  [048] 在短栏内部逐条保留交错结果顺序的显示方式，保留其外层共享短栏和分组边界。
+- **Implemented / trade-off:** 在同一执行归属、连续工具区间的当前挂载片段内，按非空
+  call_id 将结果归到前面的对应调用下；交错返回时仍按调用顺序显示，每个调用包含参数
+  和返回内容。匹配结果的原始行隐藏，不重复挂载正文；原始归档、分页及统计不改变。
+  多个同 ID 结果按到达顺序保留；同 ID 再次出现调用时，后续结果归给最近一次调用。
+  调用不在当前片段内、没有匹配调用或 call_id 为空时保留独立结果，避免丢失内容或
+  跨用户消息/会话误配。结果的正文分页及编辑差异在合并区域内仍可使用。
+- **Verification / comparison:** 新增的公开界面断言在上一版失败：call-a 区域内没有
+  “工作目录干净”；实施后，call-a 与 call-b 各自包含正确的命令及结果，原结果行
+  不再单独显示。覆盖跨页交错返回、不同会话重复 ID、用户新轮次重复 ID、空 ID 与
+  孤立结果保留，以及长序列的 60 行挂载上限。格式、TypeScript/Vite 构建、2 项单元
+  测试和全部 13 项 Playwright 回归通过；已检查桌面及手机配对后的展开截图。
+  对比日志为 `.amp/in/artifacts/tool-pair-before.log`，最终日志为
+  `.amp/in/artifacts/tool-pair-verification.log`；最终截图为 `tool-bar-*-expanded.png`。
+- **Delivery / remaining:** 本轮只改前端和文档，未重跑 Python，未提交、推送或部署。
+  [047] 中关闭 PR 后线上 502 的日志阻塞不变。
+
+### [050] — 工具详情简化为调用行与结果引用
+
+- **Requirement / supersedes:** 用户指定 `exec {command}` 下接 `> {result}` 的格式，
+  替代 [049] 展开区域中的工具名称/ID 标题和单独“结果”标题，保留其 call_id 配对逻辑。
+- **Implemented:** `ActivityBody` 在同一代码行显示工具名与命令/参数；返回内容使用
+  原生 blockquote 和低强调左侧竖线，去除 call_id、重复标题及上下分隔线。原始输入文本
+  不做猜测解析或删减；内部 ID 仍用于关联及来源查询。无法配对的结果也使用引用样式，
+  保留独立入口、正文分页与差异查看。外层短栏、虚拟窗口及数据协议不变。
+- **Validation:** 更新后的界面回归在上一版失败（调用行不含工具名），改动后通过；
+  断言同行命令、结果引用块、无可见 ID/重复标题。格式、TypeScript/Vite 构建、2 项
+  单元测试及全部 13 项 Playwright 回归通过，桌面与手机展开截图均已检查。仅为展示
+  标记与样式调整，没有新增状态机制，不需要额外消融实验。
+  对比日志为 `.amp/in/artifacts/tool-inline-before.log`，最终日志为
+  `.amp/in/artifacts/tool-inline-verification.log`；最终截图为 `tool-bar-*-expanded.png`。
+- **Delivery / remaining:** 仅本地前端与文档修改，未重跑 Python，未提交、推送或部署；
+  [047] 的线上 502 日志阻塞不变。
+
+### [051] — 关闭 PR 的权威对账、无 ID 时间线与固定来源限制
+
+- **Evidence / supersedes:** 用户提供 `event=closed` 的归档元信息，但控制台仍显示
+  awaiting_review。只读核查 neural_network PR #2 确实关闭且未合并，Issue #1 仍打开。
+  真实 REST 返回中存在 merge_commit_sha，githubkit 生成的 PullRequest 模型却没有该字段，
+  原读取路径触发 unexpected_response，对账保留旧的 OPEN 交付；issue.timeline 还包含
+  没有 id/node_id 的 cross-referenced 事件，旧的键生成会令整个来源同步失败。
+  这两项原因已复现，替代 [047]–[050] 对“卡住”原因尚未确定的结论；最初的线上 502
+  仍没有对应失败接口、响应和日志，不能据此断言同因。
+- **Implemented / decision:** PR GET 保留 SDK 的传输、认证及错误处理，从原始响应使用
+  小型类型投影校验当前 PR 事实，保留 merge_commit_sha；字段缺失仍拒绝，不补造 null。
+  不修改第三方 SDK、不添加依赖，也不从历史 closed 事件推断完整当前状态。
+  关闭且未合并沿用已有生命周期，交付转 CLOSED、控制台 blocked / delivery_closed，
+  Flow 仍 ACTIVE 并保留原绑定供重新打开后对账；不误报成功，不强制释放绑定。
+  cross-referenced 缺少事件 ID 时使用引用来源身份与发生时间建立稳定键，编辑来源
+  不改变键；其他缺少身份的异常仍拒绝。
+- **Source UI:** 提交列表 250 条上限和线程没有远端变更时间加入固定历史限制，仍可在
+  折叠来源明细查看，不再单独触发重试告警；真实同步失败仍告警并保留重试按钮。
+  浏览器断言覆盖固定限制可查、无告警，以及叠加真实 issue.timeline 异常时只显示该错误。
+  已检查 `closed-pr-sources-normal.png`、`closed-pr-sources-desktop.png` 和
+  `closed-pr-sources-mobile.png`，默认入口紧凑，桌面/手机告警无重叠或横向溢出。
+- **Before / after / ablation:** 捕获的真实响应在旧代码中重放，PR 读取与 issue.timeline
+  均失败；修复后读到 closed / merged=False，Issue 与 PR 时间线分别读取 2 / 3 条。
+  新的 4 个读取/时间线用例在旧实现失败，修复后相关 39 项通过。
+  新增真实 HTTP 解码 + PostgreSQL 对账 + 控制台查询回归，确认 awaiting_review 转为
+  delivery_closed；临时恢复 SDK parsed_data 后，该回归复现持久化对账失败，随后恢复修复。
+  证据为 `.amp/in/artifacts/closed-pr-github-replay*.log`、
+  `closed-pr-regression-before.log`、`closed-pr-regression-after.log` 和
+  `closed-pr-without-response-decoder.log`；临时重放脚本删除，保留证据日志。
+- **Validation:** 更新既有 PR GET 测试桩以提供原始 HTTP JSON，保留 review context、
+  仓库重命名与合并证据的原断言。全量 Python 845 项通过，Ruff、Mypy（111 个源文件）
+  和 diff 检查通过；Python 日志为 `closed-pr-python-final.log`。
+  前端 `npm run format:check`、`npm run build`、2 项单元测试及 13 项浏览器回归通过。
+  长工具回归此前会在倒数工具短暂可见后停止滚动，动态测量再改变列表高度时漏掉末尾正文；
+  改为同时确认末条工具结果及最终正文可见后停止，保留 60 行挂载上限断言，额外并发重复
+  3 次通过，日志为 `closed-pr-long-tool-repeat.log`。浏览器来源测试使用受控 API 响应，
+  真实 GitHub 捕获只读；以上不代表线上已部署或原 502 已验收。
+- **Delivery:** 仅本地实现与验证，保留工作区其他改动；未提交、推送、创建 PR、部署或
+  修改线上 Flow。上线新版本并完成一次成功 PR 对账后，线上状态才能反映关闭事实。
+
+### [052] — 已完成列改为已归档，并收纳关闭未合并的 PR
+
+- **Requirement / supersedes:** 用户要求关闭的 PR 从受阻列移入结束事项分组，并将
+  “已完成”改名为“已归档”。本项替代 [051] 中关闭 PR 显示 blocked 的归类决定，
+  保留其当前 PR 对账、Flow 生命周期及原交付绑定要求。
+- **Implemented / decision:** 保留内部 done 阶段和查询 token，统一看板、手机阶段切换、
+  侧栏、详情与搜索提示的“已归档”文案。成功归档和关闭未合并共用该列，后者明确显示
+  “已关闭 · 未合并”，不修改 Flow 为 succeeded、不派发归档执行，也不释放绑定。
+  关闭事实优先于旧任务的失败或待应用结果显示为 delivery_closed，执行记录仍保留。
+  is:done / status:done 查询归档分组，is:active 排除已归档卡片；重新打开后依据当前事实
+  回到相应列。初始化仅刷新阶段与新规则不一致的既有投影，重复启动不重复发布。
+- **Shared-contract boundary:** 全量测试发现 GitHub Projects 同步复用了 console_facts.phase，
+  直接改归类会把关闭未合并错误同步为 Done。ProjectStore 明确保留其原有 blocked 语义，
+  原终态优先级用例不修改预期并通过；控制台“已归档”仅为界面分组，不扩大成功语义。
+  本次未运行真实 Projects 写入，测试使用隔离的远端替身。
+- **Validation:** PostgreSQL 回归覆盖关闭后的归档计数、两种归档查询、活跃查询排除、
+  原生命周期保留、旧投影刷新及幂等、重新打开移出归档。既有 PR HTTP 对账测试与 API
+  关闭场景同步验证 done / delivery_closed，含旧任务失败及待应用结果。
+  全量 Python 846 项通过，Ruff、Mypy（111 个源文件）及 diff 检查通过；日志为
+  `.amp/in/artifacts/archived-python-verified.log`。
+  前端格式、TypeScript/Vite 构建、2 项单元测试及全部 14 项浏览器回归通过；浏览器验证
+  两种归档结果、搜索提示、桌面/手机归档列及关闭详情。已有长工具测试在异步测量完成前
+  读到短暂的末尾节点，补充等待 ResizeObserver 后的绘制帧再断言，保留最终正文与 60 行
+  上限断言，额外重复 10 次通过；日志为 `archived-frontend-verified.log`。
+- **Visual evidence:** 已检查 `archived-board-desktop.png`、`archived-board-mobile.png`、
+  `archived-detail-desktop.png` 和 `archived-detail-mobile.png`；列名、计数与两种结果
+  正确，关闭详情保留 active / 已归档 和重新打开要求，未见重叠或裁切。
+  浏览器使用受控 API 响应，生命周期、查询及投影另由真实 PostgreSQL 测试覆盖。
+- **Delivery / remaining:** 仅本地实现与验证，未提交、推送、部署或修改线上状态。
+  [051] 中原始线上 502 尚未关联请求及日志的限制不变。
+
+### [053] — 在最新 main 上隔离本轮修复并准备后续 PR
+
+- **Publication scope:** 用户要求更新 PR。只读核查已有控制台 PR 均已合并、没有开放 PR，
+  因而以最新远端 main 建立独立发布 workspace，准备本轮后续修复 PR，不改已合并记录。
+  只纳入 [042]–[052] 的控制台、归档展示、PR 读取及相关测试文档；原工作区保持不变，
+  服务器更新脚本、部署与架构文档等其他未发布改动不纳入。
+- **Upstream preservation:** 保留 main 上已合并的 GitHub push capability metadata 修复与
+  测试，仅向当前测试文件追加 PR 读取回归，避免旧工作区覆盖新上游行为。
+  控制台 README 的说明链接指向本功能记录，不依赖本次排除的架构文档更新。
+- **Validation:** 发布候选在独立 workspace 上重跑全量 Python 836 项、Ruff、Mypy
+  （111 个源文件）、前端格式/构建、2 项单元测试与 14 项浏览器回归，全部通过。
+  此计数针对候选 PR 的源码，不包含原工作区未发布的服务器更新测试。
+  日志为 `.amp/in/artifacts/pr-console-python.log` 和 `pr-console-frontend.log`。
+  临时依赖链接在验证后移除，不进入发布 diff。
+- **Delivery boundary:** 本记录写入时准备发布前独立审查；审查通过后才推送并创建后续 PR。
+  不合并、不部署；原始线上 502 仍不具备已解决的证据，限制沿用 [051]。

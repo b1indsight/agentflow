@@ -82,7 +82,8 @@ def _filters(q: str) -> tuple[str, list[object]]:
                 values.append(value.lower())
             elif name == "is" and value in ("active", "done"):
                 clauses.append(
-                    "facts->>'lifecycle'=" + ("'active'" if value == "active" else "'succeeded'")
+                    "facts->>'lifecycle'='active' AND facts->>'phase'<>'done'"
+                    if value == "active" else "facts->>'phase'='done'"
                 )
             elif name == "status" and value in PHASES:
                 clauses.append("facts->>'phase'=%s")
@@ -141,7 +142,7 @@ def _explanation(row: Row) -> tuple[str, str]:
     # A closed delivery is a hold: retry must not bypass reopen/baseline reconciliation.
     if facts["delivery_state"] == "closed":
         return (
-            "PR 已关闭，编码与修订已暂停",
+            "PR 已关闭（未合并），编码与修订已暂停",
             "重新打开 PR 并完成执行状态及 head/base 对账后才能继续",
         )
     label = {"initial": "首轮编码", "revision": "修订", "archive": "归档"}.get(

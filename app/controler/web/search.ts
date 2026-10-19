@@ -42,7 +42,7 @@ export function parseSearch(
         if (value !== "active" && value !== "done")
           return {
             ok: false,
-            error: "is: 支持 active（活跃）或 done（已完成）。",
+            error: "is: 支持 active（活跃）或 done（已归档）。",
           };
         query.lifecycle = value;
         break;
@@ -51,7 +51,7 @@ export function parseSearch(
         if (!phase)
           return {
             ok: false,
-            error: "请选择排队、执行、审核、受阻或完成状态。",
+            error: "请选择排队、执行、审核、受阻或归档状态。",
           };
         query.status = phase;
         break;

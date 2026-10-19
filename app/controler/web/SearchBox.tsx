@@ -12,7 +12,7 @@ interface Suggestion {
 }
 const fields: Suggestion[] = [
   { value: "repo:", label: "仓库", description: "repo:owner/name" },
-  { value: "is:", label: "生命周期", description: "is:active · is:done" },
+  { value: "is:", label: "归档状态", description: "is:active · is:done" },
   { value: "status:", label: "执行状态", description: "status:running" },
   { value: "issue:", label: "Issue 编号", description: "issue:82" },
   { value: "pr:", label: "PR 编号", description: "pr:95" },
@@ -68,7 +68,7 @@ export function SearchBox({
         : key === "is"
           ? [
               ["active", "活跃任务"],
-              ["done", "已完成"],
+              ["done", "已归档"],
             ]
               .filter(([value]) => value.startsWith(prefix))
               .map(([value, label]) => ({

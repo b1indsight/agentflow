@@ -22,7 +22,7 @@ from app.github import (
 from app.persistence.jobs import JobStore
 from app.persistence.store import Store
 from tests.github import RecordingGitHub, record_call
-from tests.test_github_client import AsyncEndpoint, response, settings
+from tests.test_github_client import AsyncEndpoint, settings
 from tests.test_merge import (
     merge_flow as merge_flow,  # noqa: PLC0414 - fixture re-export
 )
@@ -209,11 +209,13 @@ async def test_polling_is_bounded_and_one_error_does_not_starve_later_flows(stor
 
 
 async def test_status_adapter_reads_by_number_and_keeps_merge_sha(tmp_path, monkeypatch):
-    data = SimpleNamespace(number=17, state="closed", merged=True, title="PR", body=None,
-        merged_at=datetime(2026, 9, 8, tzinfo=UTC), merge_commit_sha="a" * 40,
-        head=SimpleNamespace(ref="flow/1", sha="b" * 40, repo=SimpleNamespace(full_name="owner/repo")),
-        base=SimpleNamespace(ref="main", sha="c" * 40, repo=SimpleNamespace(full_name="owner/repo")))
-    endpoint = AsyncEndpoint(response(data))
+    data = {
+        "number": 17, "state": "closed", "merged": True, "title": "PR", "body": None,
+        "merged_at": "2026-09-08T00:00:00Z", "merge_commit_sha": "a" * 40,
+        "head": {"ref": "flow/1", "sha": "b" * 40, "repo": {"full_name": "owner/repo"}},
+        "base": {"ref": "main", "sha": "c" * 40, "repo": {"full_name": "owner/repo"}},
+    }
+    endpoint = AsyncEndpoint(SimpleNamespace(raw_response=httpx.Response(200, json=data)))
     client = SimpleNamespace(rest=SimpleNamespace(pulls=SimpleNamespace(async_get=endpoint)))
     app = GitHubApp(settings(tmp_path))
     monkeypatch.setattr(Installation, "_client", lambda self, **kwargs: client)
@@ -223,7 +225,8 @@ async def test_status_adapter_reads_by_number_and_keeps_merge_sha(tmp_path, monk
     assert result.title == "PR" and result.body == ""
     assert result.repo == "owner/repo" and result.merge_commit_sha == "a" * 40
     assert result.head_sha == "b" * 40
-    data.merged_at = None
+    data["merged_at"] = None
+    endpoint.result = SimpleNamespace(raw_response=httpx.Response(200, json=data))
     with pytest.raises(GitHubError):
         await repo.fetch_pull_request(17)
 

@@ -37,18 +37,33 @@ class ActivityCursor(BaseModel):
             raise ConsoleFailure("cursor_invalid") from error
 
 
+# GitHub effect receipts are transport metadata, not conversation text. This expression
+# stays in PostgreSQL so projections and paged reads never transfer an unbounded body.
+def _display_body(body: str, source: str) -> str:
+    return (
+        f"CASE WHEN {source}='worker' THEN {body} ELSE "
+        f"regexp_replace({body}, E'\\n\\n<!-- flowtool:effect:[0-9a-f]{{64}} -->$', '') END"
+    )
+
+
+_CURRENT_DISPLAY_BODY = _display_body("current.body", "current.source")
+_PREVIOUS_DISPLAY_BODY = _display_body("p.body", "p.source")
+
+
 # Metadata-only observations do not make a comment look edited. The predecessor
 # belongs to this immutable version, never to a newer page/snapshot.
 _PREVIOUS = (
     "CASE WHEN NOT current.deleted THEN (SELECT p.version FROM console_activity p"
     " WHERE p.flow_id=current.flow_id AND p.key=current.key AND p.version<current.version"
     " AND p.updated_at<=current.updated_at AND NOT p.deleted"
-    " AND (p.title,p.body) IS DISTINCT FROM (current.title,current.body)"
+    f" AND (p.title,{_PREVIOUS_DISPLAY_BODY}) IS DISTINCT FROM "
+    f"(current.title,{_CURRENT_DISPLAY_BODY})"
     " ORDER BY p.updated_at DESC,p.version DESC LIMIT 1) END AS previous_version"
 )
 _SELECT = (
     "key,version,source,kind,occurred_at,updated_at,observed_at,author,title,"
-    "left(body,2000) AS body,length(body) AS body_length,url,parent_key,deleted,metadata,"
+    f"left({_CURRENT_DISPLAY_BODY},2000) AS body,length({_CURRENT_DISPLAY_BODY}) AS body_length,"
+    "url,parent_key,deleted,metadata,"
     "(source!='flow' AND source!='worker' AND occurred_at<%s) AS prior," + _PREVIOUS
 )
 
@@ -245,15 +260,24 @@ class ActivityStore(Repository):
         """Compare visible versions, including old edits/deletions and early backfill."""
         with self._db.connection() as connection:
             rows = connection.execute(
-                "WITH old AS (SELECT DISTINCT ON(key) key,version,occurred_at FROM console_activity"
+                "WITH old AS (SELECT DISTINCT ON(key) key,version,occurred_at,deleted,title,body,source,"
+                "metadata,author,url,parent_key"
+                " FROM console_activity"
                 " WHERE flow_id=%s AND version<=%s AND source!='flow'"
                 " ORDER BY key,deleted DESC,updated_at DESC,version DESC),"
-                " new AS (SELECT DISTINCT ON(key) key,version,occurred_at,deleted FROM console_activity"
+                " new AS (SELECT DISTINCT ON(key) key,version,occurred_at,deleted,title,body,source,"
+                "metadata,author,url,parent_key"
+                " FROM console_activity"
                 " WHERE flow_id=%s AND version<=%s AND source!='flow'"
                 " ORDER BY key,deleted DESC,updated_at DESC,version DESC)"
                 " SELECT CASE WHEN n.deleted THEN 'deleted' WHEN o.key IS NOT NULL THEN 'edited'"
                 " WHEN n.occurred_at<(SELECT max(occurred_at) FROM old) THEN 'backfilled' ELSE 'new' END AS kind,"
-                " count(*) AS n FROM new n LEFT JOIN old o USING(key) WHERE n.version IS DISTINCT FROM o.version GROUP BY 1",
+                " count(*) AS n FROM new n LEFT JOIN old o USING(key)"
+                " WHERE n.version IS DISTINCT FROM o.version AND (o.key IS NULL OR (n.title,"
+                + _display_body("n.body", "n.source")
+                + ",n.deleted,n.metadata,n.author,n.url,n.parent_key) IS DISTINCT FROM (o.title,"
+                + _display_body("o.body", "o.source")
+                + ",o.deleted,o.metadata,o.author,o.url,o.parent_key)) GROUP BY 1",
                 (flow_id, before, flow_id, after),
             ).fetchall()
         return {row["kind"]: row["n"] for row in rows}
@@ -348,7 +372,11 @@ class ActivityStore(Repository):
             )
         with self._db.connection() as connection:
             row = connection.execute(
-                "SELECT substring(body FROM %s FOR %s) AS text,length(body) AS n"
+                "SELECT substring("
+                + _display_body("body", "source")
+                + " FROM %s FOR %s) AS text,length("
+                + _display_body("body", "source")
+                + ") AS n"
                 " FROM console_activity WHERE flow_id=%s AND key=%s AND version=%s",
                 (offset + 1, limit, flow_id, key, version),
             ).fetchone()
@@ -369,7 +397,9 @@ class ActivityStore(Repository):
         """Compare complete immutable text, with explicit CPU/input budgets, never a clipped diff."""
         with self._db.connection() as connection:
             current = connection.execute(
-                "SELECT left(body,65537) AS body,left(title,4097) AS title,"
+                "SELECT left("
+                + _CURRENT_DISPLAY_BODY
+                + ",65537) AS body,left(title,4097) AS title,"
                 + _PREVIOUS
                 + " FROM console_activity current WHERE flow_id=%s AND key=%s AND version=%s",
                 (flow_id, key, version),
@@ -380,7 +410,9 @@ class ActivityStore(Repository):
             if previous is None:
                 raise ConsoleFailure("previous_version_not_found", 404)
             old = connection.execute(
-                "SELECT left(body,65537) AS body,left(title,4097) AS title"
+                "SELECT left("
+                + _display_body("body", "source")
+                + ",65537) AS body,left(title,4097) AS title"
                 " FROM console_activity WHERE flow_id=%s AND key=%s AND version=%s",
                 (flow_id, key, previous),
             ).fetchone()

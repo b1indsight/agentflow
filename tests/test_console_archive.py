@@ -5,6 +5,7 @@ from datetime import timedelta
 import pytest
 
 from app.contracts.console import ConsoleFailure
+from app.domain.models import DeliveryState, FlowState
 from app.github.console import Observation
 from app.persistence.activity import ActivityStore
 from app.persistence.console import ConsoleStore
@@ -87,6 +88,38 @@ def test_filter_counts_precede_column_pagination_and_payloads_are_private(store)
         console.flows(q="repo:other/repo", phase="queued", cursor=first.next_cursor)
     assert console.repos(limit=1).has_more
     assert "installation_id" not in first.model_dump_json()
+
+
+def test_closed_pr_archive_filters_reopen_and_existing_projection_refresh(store):
+    # Closing a PR archives its card, while preserving the lifecycle needed for a verified reopen.
+    flow = store.flows.create_flow("octo/repo", 7, 1)
+    delivery = store.deliveries.get_or_create_delivery(flow.id, "flow/7")
+    delivery.pr_number, delivery.state = 17, DeliveryState.CLOSED
+    store.deliveries.update_delivery(delivery)
+    console = ConsoleStore(store._db)
+    archived = console.flows(q="is:done", phase="done")
+    assert [item.id for item in archived.items] == [flow.id]
+    assert archived.counts["done"] == 1 and archived.counts["blocked"] == 0
+    assert not console.flows(q="is:active").items
+    assert [item.id for item in console.flows(q="status:done").items] == [flow.id]
+    assert store.flows.get_flow(flow.id).state is FlowState.ACTIVE
+    assert "未合并" in console.detail(flow.id).reason
+    # An upgrade must also move a previously projected blocked card, once, without a GitHub event.
+    with store.connection() as connection:
+        connection.execute(
+            "UPDATE console_flows SET facts=jsonb_set(facts,'{phase}','\"blocked\"') WHERE flow_id=%s",
+            (flow.id,),
+        )
+    store.init_db()
+    refreshed = console.detail(flow.id)
+    assert refreshed.phase == "done"
+    store.init_db()
+    assert console.detail(flow.id) == refreshed
+    delivery.state = DeliveryState.OPEN
+    store.deliveries.update_delivery(delivery)
+    assert console.detail(flow.id).phase == "review"
+    assert not console.flows(q="is:done").items
+    assert [item.id for item in console.flows(q="is:active").items] == [flow.id]
 
 
 def test_late_description_cannot_regress_current_title_after_unchanged_newer_observation(store):

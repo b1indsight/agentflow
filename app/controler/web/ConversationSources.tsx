@@ -8,6 +8,8 @@ const historyLimits = new Set([
   "expired_remote_logs_unrecoverable",
   "pending_review_timestamp_unavailable",
   "source_event_timestamp_unavailable",
+  "github_pr_commit_list_maximum_250",
+  "thread_state_has_no_remote_change_timestamp",
 ]);
 const statusLabels: Record<SourceStatus["status"], string> = {
   pending: "等待同步",
