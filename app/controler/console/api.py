@@ -1,4 +1,4 @@
-"""Thin owner-only HTTP reads; all blocking database units run outside the event loop."""
+"""Owner-only console HTTP; all blocking database units run outside the event loop."""
 
 from functools import partial
 from typing import Annotated
@@ -7,6 +7,8 @@ from fastapi import APIRouter, Path, Query, Request
 
 from app.contracts.console import (
     ActivityPage,
+    ArchiveRequest,
+    ConsoleFailure,
     ContentPage,
     FlowDetail,
     FlowPage,
@@ -53,6 +55,20 @@ async def detail(request: Request, flow_id: FlowId) -> FlowDetail:
     store = ConsoleStore(runtime.database)
     await runtime.console.db(partial(store.request_sync, flow_id))
     return await runtime.console.db(partial(store.detail, flow_id))
+
+
+@router.post("/flows/{flow_id}/archive", response_model=FlowDetail)
+async def archive(request: Request, flow_id: FlowId, body: ArchiveRequest) -> FlowDetail:
+    """Archive only local display state; JSON and origin checks prevent form-based CSRF."""
+    origin = request.headers.get("origin")
+    if (origin is not None and origin != str(request.base_url).rstrip("/")) or (
+        request.headers.get("sec-fetch-site") not in (None, "same-origin", "none")
+    ):
+        raise ConsoleFailure("cross_origin_request", 403)
+    if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json":
+        raise ConsoleFailure("json_required", 415)
+    runtime: ServerRuntime = request.app.state.runtime
+    return await runtime.console.db(partial(ConsoleStore(runtime.database).archive, flow_id))
 
 
 @router.get("/flows/{flow_id}/jobs", response_model=JobPage)

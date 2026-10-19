@@ -1,4 +1,4 @@
-"""Bounded console reads from the transactional current-state projection."""
+"""Console display state and bounded reads from its transactional projection."""
 
 import base64
 import hashlib
@@ -19,6 +19,7 @@ from app.contracts.console import (
     RepositoryPage,
     SourceStatus,
 )
+from app.domain.models import FlowState
 from app.persistence.records import Row
 from app.persistence.repository import Repository
 
@@ -126,6 +127,7 @@ def _summary(row: Row) -> FlowSummary:
         branch=facts["branch"],
         created_at=facts["created_at"],
         updated_at=facts["updated_at"],
+        archived_at=row["archived_at"],
         state_version=row["state_version"],
     )
 
@@ -136,7 +138,10 @@ def _explanation(row: Row) -> tuple[str, str]:
     if facts["lifecycle"] == "succeeded":
         return "Flow 已归档完成", "无需后续动作"
     if facts["lifecycle"] == "cancelled":
-        return "Flow 已取消", "确认在途任务的停止确认与结果对账完成后，再评估是否重试"
+        reason = "Flow 已取消"
+        if row["archived_at"] is not None:
+            reason += "并归档；归档仅改变展示分组"
+        return reason, "确认在途任务的停止确认与结果对账完成后，再评估是否重试"
     if facts["lifecycle"] == "failed":
         return "Flow 已失败", "检查执行记录与恢复状态，排除故障后由运维核验是否允许重试"
     # A closed delivery is a hold: retry must not bypass reopen/baseline reconciliation.
@@ -207,7 +212,22 @@ def _explanation(row: Row) -> tuple[str, str]:
 
 
 class ConsoleStore(Repository):
-    """Read current state without per-card queries or network work inside transactions."""
+    """Own console display state without changing execution or making network calls."""
+
+    def archive(self, flow_id: int) -> FlowDetail:
+        """Idempotently archive a cancelled card, serialized with lifecycle commands."""
+        with self._db.transaction() as tx, tx.connection() as connection:
+            flow = tx.lock_workflow(flow_id)
+            if flow is None:
+                raise ConsoleFailure("flow_not_found", 404)
+            if flow.state is not FlowState.CANCELLED:
+                raise ConsoleFailure("archive_requires_cancelled_flow")
+            connection.execute(
+                "UPDATE console_flows SET archived_at=%s WHERE flow_id=%s AND archived_at IS NULL",
+                (tx.now(), flow_id),
+            )
+            connection.execute("SELECT console_refresh(%s)", (flow_id,))
+            return self.using(tx).detail(flow_id)
 
     def flows(
         self, *, q: str = "", phase: Phase | None = None, cursor: str | None = None, limit: int = 50
@@ -235,7 +255,8 @@ class ConsoleStore(Repository):
             column = " AND facts->>'phase'=%s" if phase else ""
             rows = connection.execute(
                 "SELECT flow_id,facts-'delivery_body'-'delivery_title' AS facts,"
-                "coalesce(title,facts->>'delivery_title') AS title,state_version FROM console_flows WHERE "
+                "coalesce(title,facts->>'delivery_title') AS title,state_version,archived_at"
+                " FROM console_flows WHERE "
                 + where
                 + column
                 + " AND flow_id<=%s AND flow_id<%s ORDER BY flow_id DESC LIMIT %s",
@@ -263,7 +284,7 @@ class ConsoleStore(Repository):
         with self._db.connection() as connection:
             row = connection.execute(
                 "SELECT c.flow_id,c.facts-'delivery_body'-'delivery_title' AS facts,"
-                "coalesce(c.title,c.facts->>'delivery_title') AS title,c.state_version,diagnostic.*"
+                "coalesce(c.title,c.facts->>'delivery_title') AS title,c.state_version,c.archived_at,diagnostic.*"
                 " FROM console_flows c LEFT JOIN LATERAL ("
                 " SELECT j.id AS diagnostic_job_id,j.kind AS diagnostic_kind,"
                 " j.state AS diagnostic_state,j.started_at IS NOT NULL AS execution_started,"

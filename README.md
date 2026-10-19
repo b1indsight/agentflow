@@ -2,8 +2,9 @@
 
 FlowTool 的目标是把带 `flow` 标签的 GitHub issue 编排成
 `code agent 编码 → PR → 人工审核 → 自动回喂修订 → 人工合并 → 归档` 的 headless 闭环。
-工作流交互面是 GitHub issue 和 PR；另提供使用示例数据的
-[Web 控制台前端预览](app/controler/web/README.md)，真实后端接入仍待实现。
+工作流交互面是 GitHub issue 和 PR；另提供 [Web 控制台](app/controler/web/README.md)，通过同源 API
+展示真实 Flow、执行记录和持久时间线，支持 cancelled Flow 的手动展示归档，
+由 Cloudflare Access 限制单 owner 访问；归档保留取消状态，不触发交付清理或 GitHub 写入。
 
 代码按职责分为 `domain`、`contracts`、`persistence`、`github`、`controler`、`worker`、
 `telemetry` 与 `plugins`。`controler` 是控制服务端，内部按事件、Worker 管理、工作流、审核
@@ -105,6 +106,7 @@ FlowTool 的目标是把带 `flow` 标签的 GitHub issue 编排成
 ## 文档
 
 - [Flow 会话查询 API](docs/architecture/conversation-api.md)：control 代理 worker 读取 Codex 历史，供 WebUI 分页展示；
+- [已取消 Flow 手动归档](docs/plan/cancelled-flow-archive.md)：归档入口、持久化与取消/恢复的安全边界；
 - [`docs/architecture/`](docs/architecture/README.md)：当前实现状态、目标架构、组件、流程、决策和接入说明；
 - [`docs/architecture/diagram.html`](docs/architecture/diagram.html)：手工维护的交互式架构可视化；
 - [`docs/plan/`](docs/plan/README.md)：计划、批准状态和实施结果记录。

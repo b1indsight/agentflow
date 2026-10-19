@@ -75,9 +75,10 @@ flowtool/
 > 以下是 MVP 之后的方向，接口与类型在实际需要时扩展。GitHub 使用具体资源；
 > CodingAgent、Judge 和插件沿用各自已有职责。
 
-1. **Web 控制台（Kanban）** —— 一个 webapp 打开项目看板，每张卡 = 一条被追踪的对话，可点进去实时参与对话。
-   - 预留：core 状态经 store + 一层 API 暴露；headless（GitHub）与 webapp 是同一 core 的两个入口适配器。
-     Driver 除"批量回喂 review"外，要留一个**实时注入消息**的入口，webapp 才能"插话"。
+1. **Web 控制台后续能力** —— Kanban、持久混合时间线、同源 API 与单 owner Access 已实现。
+   - cancelled Flow 支持手动展示归档，不改写生命周期、执行或交付事实，见[功能记录](../plan/cancelled-flow-archive.md)。
+   - 实时插话、个人阅读状态和工作流写操作仍待实现，需要明确授权、持久消息语义与 CodingAgent 实时注入契约。
+   - 真实 GitHub App 全来源回填、Access 登录/MFA 与目标部署仍需验收。
 
 2. **可派生 Flow 编排** —— Flow 像持久化的分布式 subagent 一样 spawn/send/wait/inspect/accept 其他 Flow；
    每个子 Flow 拥有自己的隔离执行环境、repo、干净上下文、skills、结果和最多一张 PR。

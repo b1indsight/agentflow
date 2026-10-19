@@ -52,7 +52,7 @@ ingress:
     path: ^/webhook$
     service: http://127.0.0.1:8000
   - hostname: admin.example.com
-    path: ^/(console(/.*)?|api/(repos|flows(/[1-9][0-9]*(/(jobs|conversation|activity(/(content|versions))?))?)?))$
+    path: ^/(console(/.*)?|api/(repos|flows(/[1-9][0-9]*(/(archive|jobs|conversation|activity(/(content|versions))?))?)?))$
     service: http://127.0.0.1:8000
   - service: http_status:404
 ```

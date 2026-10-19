@@ -6,6 +6,7 @@ import {
   useState,
 } from "react";
 import {
+  Archive,
   ArrowLeft,
   ChevronDown,
   Menu,
@@ -13,7 +14,7 @@ import {
   PanelLeftOpen,
   RefreshCw,
 } from "lucide-react";
-import { getFlow, getFlows, getJobs, getRepos } from "./api";
+import { archiveFlow, getFlow, getFlows, getJobs, getRepos } from "./api";
 import {
   ActivityView,
   isToolActivity,
@@ -165,7 +166,7 @@ function Board({
                         <div className="card-foot">
                           <span className="current-action">
                             <i className="dot" />
-                            {actionLabel(f.action)}
+                            {actionLabel(f)}
                           </span>
                         </div>
                       </button>
@@ -198,6 +199,7 @@ function Detail({
   counts,
   load,
   refresh,
+  onArchived,
   onBack,
 }: {
   id: number;
@@ -206,6 +208,7 @@ function Detail({
   counts: Record<Phase, number>;
   load: (p: Phase) => void;
   refresh: number;
+  onArchived: () => void;
   onBack: () => void;
 }) {
   const [flow, setFlow] = useState<FlowDetail | null>(null),
@@ -214,6 +217,34 @@ function Detail({
       () => positions.get("collapsed") === 1,
     ),
     [nav, setNav] = useState(false);
+  const [archiving, setArchiving] = useState(false);
+  const [archiveError, setArchiveError] = useState("");
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  const archive = async () => {
+    if (archiving) return;
+    setArchiving(true);
+    setArchiveError("");
+    try {
+      // Let the write finish after navigation so the board can refresh its committed outcome.
+      const value = await archiveFlow(id);
+      onArchived();
+      if (mounted.current)
+        setFlow((prior) =>
+          prior && prior.state_version > value.state_version ? prior : value,
+        );
+    } catch (error) {
+      if (mounted.current)
+        setArchiveError(error instanceof Error ? error.message : "请求失败");
+    } finally {
+      if (mounted.current) setArchiving(false);
+    }
+  };
   const [compactHead, setCompactHead] = useState(false);
   const head = useRef<HTMLElement>(null);
   const expandedHeight = useRef(0);
@@ -306,7 +337,13 @@ function Detail({
     const c = new AbortController();
     setError("");
     void getFlow(id, c.signal)
-      .then((value) => !c.signal.aborted && setFlow(value))
+      .then(
+        (value) =>
+          !c.signal.aborted &&
+          setFlow((prior) =>
+            prior && prior.state_version > value.state_version ? prior : value,
+          ),
+      )
       .catch((e) => !c.signal.aborted && setError(e.message));
     return () => c.abort();
   }, [id, refresh]);
@@ -503,7 +540,7 @@ function Detail({
               <h1 id="detail-heading">{name(flow)}</h1>
               <span className={`badge phase-${flow.phase}`}>
                 <i className="dot" />
-                {actionLabel(flow.action)}
+                {actionLabel(flow)}
               </span>
             </div>
             <div className="links">
@@ -516,7 +553,7 @@ function Detail({
                   PR #{flow.pr_number} ↗
                 </a>
               )}
-              <span className="tag">只读</span>
+              <span className="tag">工作流只读</span>
             </div>
             <div className="tabs" role="tablist" onKeyDown={tabs}>
               {(
@@ -546,19 +583,37 @@ function Detail({
               <>
                 <section className={`execution-summary phase-${flow.phase}`}>
                   <span className="eyebrow">当前动作</span>
-                  <h2>{actionLabel(flow.action)}</h2>
+                  <h2>{actionLabel(flow)}</h2>
                   <p>{flow.reason}</p>
                   <div className="next-step">
                     <span>下一步条件</span>
                     <p>{flow.next_condition}</p>
                   </div>
+                  {flow.lifecycle === "cancelled" && flow.phase !== "done" && (
+                    <>
+                      <p className="muted">
+                        归档只调整展示分组，保留取消状态和全部历史。
+                      </p>
+                      <button
+                        className="btn"
+                        disabled={archiving}
+                        onClick={() => void archive()}
+                      >
+                        <Archive />
+                        {archiving ? "正在归档…" : "归档"}
+                      </button>
+                    </>
+                  )}
+                  {archiveError && (
+                    <p role="alert">归档失败：{archiveError}，请重试。</p>
+                  )}
                 </section>
                 <h2 className="panel-title">任务信息</h2>
                 <dl className="task-facts">
                   <dt>生命周期 / 阶段</dt>
                   <dd>
-                    {flow.lifecycle} /{" "}
-                    {phases.find(([p]) => p === flow.phase)?.[1]}
+                    {flow.lifecycle === "cancelled" ? "已取消" : flow.lifecycle}{" "}
+                    / {phases.find(([p]) => p === flow.phase)?.[1]}
                   </dd>
                   <dt>Worker</dt>
                   <dd>
@@ -573,6 +628,12 @@ function Detail({
                   <dd>{new Date(flow.created_at).toLocaleString()}</dd>
                   <dt>更新</dt>
                   <dd>{new Date(flow.updated_at).toLocaleString()}</dd>
+                  {flow.archived_at && (
+                    <>
+                      <dt>手动归档</dt>
+                      <dd>{new Date(flow.archived_at).toLocaleString()}</dd>
+                    </>
+                  )}
                   <dt>当前状态版本</dt>
                   <dd>{flow.state_version}（与阅读快照独立）</dd>
                 </dl>
@@ -788,6 +849,7 @@ export default function App() {
     [repoNext, setRepoNext] = useState<string | null>(null),
     [repoError, setRepoError] = useState(""),
     [refresh, setRefresh] = useState(0),
+    [boardRevision, setBoardRevision] = useState(0),
     [columns, setColumns] = useState(blank),
     [counts, setCounts] = useState(
       Object.fromEntries(phases.map(([p]) => [p, 0])) as Record<Phase, number>,
@@ -866,7 +928,7 @@ export default function App() {
     else url.searchParams.delete("q");
     history.replaceState(null, "", url);
     return () => boardRequests.current.forEach((c) => c.abort());
-  }, [query]);
+  }, [query, boardRevision]);
   const all = phases.flatMap(([p]) => columns[p].items);
   return (
     <>
@@ -896,7 +958,7 @@ export default function App() {
           )}
         </div>
         <div className="bar-status">
-          <span>本地档案 · 只读</span>
+          <span>本地档案</span>
           <button
             className="btn ghost"
             aria-label="刷新当前视图"
@@ -918,6 +980,7 @@ export default function App() {
           counts={counts}
           load={load}
           refresh={refresh}
+          onArchived={() => setBoardRevision((x) => x + 1)}
           onBack={() => (location.hash = "board")}
         />
       ) : (

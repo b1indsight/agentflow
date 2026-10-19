@@ -16,17 +16,19 @@ export class ApiError extends Error {
   }
 }
 
-/** Same-origin API reader. Responses are deliberately never replaced with fixtures. */
+/** Same-origin API client. Responses are deliberately never replaced with fixtures. */
 export async function api<T>(
   path: string,
   params: Record<string, string | number | boolean | null | undefined> = {},
   signal?: AbortSignal,
+  options: RequestInit = {},
 ): Promise<T> {
   const url = new URL(path, location.origin);
   for (const [key, value] of Object.entries(params))
     if (value !== null && value !== undefined && value !== "")
       url.searchParams.set(key, String(value));
   const response = await fetch(url, {
+    ...options,
     credentials: "same-origin",
     cache: "no-store",
     signal,
@@ -52,6 +54,12 @@ export const getRepos = (cursor: string | null, signal?: AbortSignal) =>
   api<RepositoryPage>("/api/repos", { cursor, limit: 100 }, signal);
 export const getFlow = (id: number, signal?: AbortSignal) =>
   api<FlowDetail>(`/api/flows/${id}`, {}, signal);
+export const archiveFlow = (id: number) =>
+  api<FlowDetail>(`/api/flows/${id}/archive`, {}, undefined, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
 export const getJobs = (
   id: number,
   cursor: string | null,

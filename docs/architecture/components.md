@@ -55,6 +55,16 @@ Codex 等长任务占用 GitHub 的 Webhook 请求。
 边界：202 表示事件已持久化到 webhook inbox；后台消费者在事务内调用 Event Router，失败后可重试。
 202 不表示业务处理已经完成。
 
+### 4.1.1 Web 控制台展示归档
+
+控制台的 `POST /api/flows/{id}/archive` 接受空 JSON 对象，复用单 owner Access 验签，
+拒绝明确跨站请求；工作流业务命令仍由 GitHub 与 CLI 发起。
+它在 workflow/publication 锁内重新校验 cancelled，持久保存 `console_flows.archived_at`，
+将卡片移到 done 并保留取消状态、停止确认与结果对账要求；重复请求幂等，任务和会话历史仍可阅读。
+投影刷新和重建保留该标记；重试或合并对账恢复生命周期后清除。
+此入口不创建 ARCHIVE job，不修改 Worker、交付或 GitHub，不将取消当作成功。
+见[功能记录](../plan/cancelled-flow-archive.md)与[控制台说明](../../app/controler/web/README.md)。
+
 ## 4.2 Event Router
 
 当前实现：
