@@ -171,3 +171,19 @@ failed 的归档、手动取消归档、批量归档以及 cancel/retry Web 管�
   `npm run format:check`、`npm run test:e2e`。
 - **Outcome / pending:** 发布范围仅为独立功能分支；没有创建 PR、修改 main、部署或升级目标数据库。
   原工作区及其中其他任务的改动保留，真实 Access 环境仍待验收。
+
+### [003] — 补齐 Cloudflare 管理路由中的归档接口
+
+- **Context / requirement:** 推送前审查指出管理域名使用精确路径白名单，遗漏新增的
+  `/api/flows/{id}/archive`；用户要求修复模板并推送。本次仅处理路由遗漏，
+  容器反代下的 HTTPS 来源校验问题仍未修复，不据此宣称目标部署可用。
+- **Implemented changes:** 同步更新原生部署文档、Docker 示例及 Kubernetes overlay 示例的
+  管理路由正则，在现有子路径白名单中加入 `archive`。保留 owner Access 前提、默认注释的
+  管理路由、独立 Webhook 路由及 404 兜底，不扩大为任意 `/api/*` 路径转发。
+- **Validation:** 修复前在三份模板中均复现已有 jobs 路径可匹配、archive 路径不匹配。
+  修复后通过 YAML 解析及每份模板的 12 项允许路径、15 项拒绝路径检查，
+  三份管理路由保持一致；`/internal`、metrics、探针、未知 API 与归档子路径仍被拒绝。
+  既有 `tests/test_console_api.py` 的 28 项真实 PostgreSQL API 检查通过。
+  此次只增加一个白名单分支，未增加其他机制；修前/修后匹配检查覆盖该差异。
+- **Scope / limitations:** 路由检查使用 PyYAML 6.0.2 与 Python 正则，未运行 cloudflared
+  或连接真实隧道；没有重载线上配置、部署服务或修改业务代码。目标环境仍需单独更新配置并验收。

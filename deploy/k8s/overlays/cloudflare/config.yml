@@ -6,6 +6,6 @@ ingress:
     service: http://flowtool-serve:8000
   # Optional: configure owner-only Access and MFA first; see docs/deployment/access.md.
   # - hostname: REPLACE_WITH_ADMIN_HOSTNAME
-  #   path: ^/(console(/.*)?|api/(repos|flows(/[1-9][0-9]*(/(jobs|conversation|activity(/(content|versions))?))?)?))$
+  #   path: ^/(console(/.*)?|api/(repos|flows(/[1-9][0-9]*(/(archive|jobs|conversation|activity(/(content|versions))?))?)?))$
   #   service: http://flowtool-serve:8000
   - service: http_status:404
