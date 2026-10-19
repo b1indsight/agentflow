@@ -10,6 +10,7 @@
 
 - 本页的状态表描述当前实现，是架构文档中的 current truth；
 - [会话查询 API](conversation-api.md)描述按 flow 读取 worker Codex 历史的接口、分页与可用性边界；
+- [已取消 Flow 手动归档](../plan/cancelled-flow-archive.md)描述控制台展示归档、持久化与恢复边界；
 - [总览](overview.md)、[组件职责](components.md)和[端到端流程](workflows.md)同时记录目标设计，
   每处涉及未完成能力时明确标注当前边界；
 - [关键决策](decisions.md)记录已定方案、开放风险和退出条件；
@@ -40,6 +41,7 @@
 | Projects v2 | 已实现、有自动化覆盖 | 可选组织看板配置、资源 API、独立投影同步及 check/status/retry；远端失败不改写 Flow，真实看板待验收 |
 | 取消 / drain / 停机 | 已实现、有自动化覆盖 | 持久 stop intent、执行 nonce、进程组取消与停止凭据握手；未知执行/未决 effects 保留占用；drain 不派新 Flow，已有绑定继续收尾 |
 | 会话查询 | 已实现、有自动化覆盖 | token 保护的 HTTP API 经 broker/WS 读取原 worker 的 Codex 历史；control 绑定 Flow/Attempt/session 并管理跨 session 分页 |
+| Web 控制台 | 已实现、有自动化覆盖 | 单 owner Access 保护的真实看板、详情与持久时间线；支持 cancelled Flow 手动展示归档，保留取消状态和历史，不改写执行或交付；真实 Access 登录与部署仍待验收 |
 | 可观测性 / 部署 | 部分 | 结构化日志、受保护 metrics、DB readiness、worker 状态文件、Docker/Compose、Kubernetes 与运维文档已落地；镜像发布、目标集群与恢复演练待验收 |
 | CLI / 真实验收入口 | 部分验证 | Flow、worker-drain、inbox、project 运维命令及 `app.live_smoke` 已提供；真实 GitHub/Codex/模型闭环仍须按验收清单执行 |
 | 插件 | 部分 | 五个生命周期 hook 已接线并隔离异常；post-merge-summary 仍只写日志 |

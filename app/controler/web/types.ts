@@ -17,6 +17,7 @@ export interface FlowSummary {
   branch: string | null;
   created_at: string;
   updated_at: string;
+  archived_at: string | null;
   state_version: number;
 }
 export interface SourceStatus {

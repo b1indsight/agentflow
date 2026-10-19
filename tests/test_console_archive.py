@@ -5,10 +5,12 @@ from datetime import timedelta
 import pytest
 
 from app.contracts.console import ConsoleFailure
+from app.controler.workflow.service import ControlService
 from app.domain.models import DeliveryState, FlowState
 from app.github.console import Observation
 from app.persistence.activity import ActivityStore
 from app.persistence.console import ConsoleStore
+from tests.test_cancel_drain import running
 
 
 def test_archive_versions_snapshots_and_prior_interactions(store):
@@ -120,6 +122,66 @@ def test_closed_pr_archive_filters_reopen_and_existing_projection_refresh(store)
     assert console.detail(flow.id).phase == "review"
     assert not console.flows(q="is:done").items
     assert [item.id for item in console.flows(q="is:active").items] == [flow.id]
+
+
+def test_cancelled_manual_archive_survives_refresh_and_retry_clears_it(store):
+    # A display archive must survive projection rebuilds without turning cancellation into success.
+    flow = store.flows.create_flow("octo/repo", 7, 1)
+    control = ControlService(database=store.database)
+    control.cancel(flow)
+    console = ConsoleStore(store.database)
+    history = ActivityStore(store.database)
+    observation = Observation(
+        key="comment:7", source="issue.comments", kind="comment", author="owner",
+        body="归档后仍可阅读", occurred_at=flow.created_at, updated_at=flow.created_at,
+    )
+    history.append(flow.id, observation)
+    before = console.detail(flow.id)
+    archived = console.archive(flow.id)
+    assert archived.phase == "done" and archived.lifecycle == "cancelled"
+    assert archived.action == "cancelled" and archived.archived_at is not None
+    assert archived.state_version == before.state_version + 1
+    assert "停止确认" in archived.next_condition
+    assert console.archive(flow.id) == archived
+    assert [item.id for item in console.flows(q="is:done").items] == [flow.id]
+    assert [item.id for item in console.flows(q="status:done").items] == [flow.id]
+    assert not console.flows(q="status:blocked").items
+    assert console.flows().counts == {"queued": 0, "running": 0, "review": 0, "blocked": 0, "done": 1}
+    assert history.page(flow.id).items[0].body == observation.body
+    assert store.flows.get_flow(flow.id).state is FlowState.CANCELLED
+    assert not store.jobs.list_jobs(flow.id)
+
+    console.rebuild(flow.id)
+    store.init_db()
+    store.init_db()
+    assert console.detail(flow.id) == archived
+    delivery = store.deliveries.get_or_create_delivery(flow.id, "flow/7")
+    assert console.detail(flow.id).archived_at == archived.archived_at
+    assert console.detail(flow.id).phase == "done"
+    control.retry(store.flows.get_flow(flow.id))
+    assert console.detail(flow.id).archived_at is None
+    assert console.detail(flow.id).phase == "queued"
+    assert console.detail(flow.id).lifecycle == "active"
+    control.cancel(store.flows.get_flow(flow.id))
+    assert console.detail(flow.id).phase == "blocked"
+    assert console.detail(flow.id).archived_at is None
+    assert store.deliveries.get_delivery(flow.id) == delivery
+
+
+def test_manual_archive_leaves_pending_stop_and_original_execution_untouched(store):
+    # Cancelling an in-flight executor retains its slot until a real stop receipt arrives.
+    flow, job = running(store)
+    control = ControlService(database=store.database)
+    control.cancel(flow)
+    stop = store.stops.pending("w")
+    binding = store.workers.get_flow_execution(flow.id)
+    job_before = store.jobs.get_job(job.id)
+    ConsoleStore(store.database).archive(flow.id)
+    assert store.stops.pending("w") == stop
+    assert store.workers.get_flow_execution(flow.id) == binding
+    assert store.jobs.get_job(job.id) == job_before
+    with pytest.raises(ValueError, match="awaiting confirmed stop"):
+        control.retry(store.flows.get_flow(flow.id))
 
 
 def test_late_description_cannot_regress_current_title_after_unchanged_newer_observation(store):

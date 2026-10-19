@@ -1,6 +1,7 @@
 # Web 控制台
 
-当前由 `flowtool serve` 在 `/console/` 提供，使用真实同源只读 `/api/`，**没有生产示例数据或 mock 回退**。
+当前由 `flowtool serve` 在 `/console/` 提供，使用真实同源 `/api/`，**没有生产示例数据或 mock 回退**。
+工作流操作保持只读，额外提供 cancelled Flow 的手动展示归档，不修改交付或执行状态。
 页面、静态资源和 API 均要求 Cloudflare Access 的单 owner 身份；数据库、GitHub 与 Worker
 读取由 control 负责。真实 Access 登录/MFA、GitHub App 全来源回填和目标部署仍待验收。
 架构与持久化边界见[控制台功能记录](../../../docs/plan/web-console-kanban.md)。
@@ -62,11 +63,18 @@ API 错误显式显示，已有内容不会被示例数据替换；Worker 离线
 
 顶栏只有一个查询框，支持普通关键词、双引号短语、`repo:`、`is:active|done`、
 `status:queued|running|review|blocked|done`、`issue:`、`pr:`；词和条件之间为 AND。
-`done` 的展示名称为“已归档”，包含成功归档与 PR 关闭未合并；`is:done` / `status:done`
+`done` 的展示名称为“已归档”，包含成功归档、PR 关闭未合并与取消后的手动归档；`is:done` / `status:done`
 查询该分组，`is:active` 排除已归档卡片，不改变 Flow 的真实生命周期。
 Enter 提交；聚焦或输入字段显示统一建议，方向键 / 点击选择，Enter 补入后再次 Enter 提交。
 中文组合输入不提交；Escape 关闭建议，清空恢复全部结果，浏览器前进/后退恢复已提交查询。
 无效、重复或未知条件提示错误，保留上一有效结果；不实现 GitHub 全套搜索语法。
+
+cancelled 且仍在「受阻」列的 Flow 可在「概览」点击「归档」，持久移入「已归档」并注明
+「已取消 · 已归档」及归档时间；生命周期仍为 cancelled，任务和会话历史不变。
+此操作不创建清理任务、不修改 GitHub 或 Worker、不确认停止，也不绕过未决结果对账；
+恢复执行仍须经过现有安全重试，恢复后自动清除展示归档。失败可重试，不提前移动卡片。
+归档接口 `POST /api/flows/{id}/archive` 仅接受 owner 的同源 JSON 请求（空对象），
+不存在返回 404，非 cancelled 返回 409，重复请求不重复记录；未授权和明确跨站请求拒绝。
 
 本次阅读固定本地已提交快照，编辑和补录在末尾显式刷新后才进入新快照；线程回复使用同一快照。
 刷新活跃 Flow 会排队后台同步，响应不等待 GitHub/Worker 全部抓取；来源可能仍是
@@ -155,11 +163,12 @@ npm run test:e2e
 ```
 
 Playwright 自动启动并关闭端口 5174 的隔离测试服务器，无需手工运行 Vite。
-当前 14 条浏览器回归覆盖真实 DTO 展示、编辑 diff/大 patch 窗口、API 故障、
+当前 16 条浏览器回归覆盖真实 DTO 展示、编辑 diff/大 patch 窗口、API 故障、
 大时间线缓存淘汰/回读/刷新、固定快照的线程/Unicode 正文续读、刷新后的回复游标重置，
 以及切换页签后缓存 502 分页错误的重试、统一 Unicode 正文导航、跨页工具短栏与轮次隔离、
 长工具序列展开后的虚拟窗口上限、归档分组与关闭未合并的结果区分、
-手机长标题收缩与阅读锚点保持。测试拦截 `/api/` 网络响应，组件、分页 hook 与窗口化均用正式实现；
+手机长标题收缩与阅读锚点保持，以及桌面/手机取消归档的失败重试、提交状态、分组更新和历史保留。
+测试拦截 `/api/` 网络响应，组件、分页 hook 与窗口化均用正式实现；
 回归还检查 window error 与 pageerror，包含 ResizeObserver 调度错误。浏览器回归不证明真实后端或 Access 可用。
 
 CI 的 Frontend job 执行锁定安装、格式检查、正文安全和查询合同回归、类型检查/构建，

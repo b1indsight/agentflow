@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS console_flows (
  state_version BIGINT NOT NULL DEFAULT 0,
  activity_version BIGINT NOT NULL DEFAULT 0
 );
+ALTER TABLE console_flows ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS ix_console_phase ON console_flows ((facts->>'phase'),flow_id DESC);
 CREATE INDEX IF NOT EXISTS ix_console_repo ON console_flows ((lower(facts->>'repo')),flow_id DESC);
 CREATE INDEX IF NOT EXISTS ix_console_flow_issue ON flows (lower(repo),issue_number);
@@ -106,12 +107,24 @@ $$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION console_refresh(identity BIGINT, baseline BOOLEAN DEFAULT FALSE)
 RETURNS VOID AS $$
 DECLARE next_facts JSONB; previous_facts JSONB; next_version BIGINT; state_revision BIGINT;
+ manual_archived_at TIMESTAMPTZ;
 BEGIN
  -- This per-Flow row is also the publication fence: allocation and archive commit together.
  INSERT INTO console_flows(flow_id,facts) VALUES(identity,'{}') ON CONFLICT DO NOTHING;
- SELECT facts INTO previous_facts FROM console_flows WHERE flow_id=identity FOR UPDATE;
+ SELECT facts,archived_at INTO previous_facts,manual_archived_at
+ FROM console_flows WHERE flow_id=identity FOR UPDATE;
  SELECT to_jsonb(f) INTO next_facts FROM console_facts f WHERE id=identity;
- IF next_facts IS NULL OR previous_facts-'updated_at'=next_facts-'updated_at' THEN RETURN; END IF;
+ IF next_facts IS NULL THEN RETURN; END IF;
+ -- Display-only archival survives rebuilds, but never hides a resumed lifecycle.
+ IF manual_archived_at IS NOT NULL AND next_facts->>'lifecycle'<>'cancelled' THEN
+ UPDATE console_flows SET archived_at=NULL WHERE flow_id=identity;
+ manual_archived_at := NULL;
+ END IF;
+ IF manual_archived_at IS NOT NULL THEN
+ next_facts := next_facts || jsonb_build_object('phase','done','archived_at',manual_archived_at,
+ 'updated_at',GREATEST((next_facts->>'updated_at')::timestamptz,manual_archived_at));
+ END IF;
+ IF previous_facts-'updated_at'=next_facts-'updated_at' THEN RETURN; END IF;
  UPDATE console_flows SET facts=next_facts,state_version=state_version+1,
  activity_version=activity_version+1 WHERE flow_id=identity
  RETURNING activity_version,state_version INTO next_version,state_revision;
@@ -162,5 +175,7 @@ SELECT console_refresh(id,TRUE) FROM flows
 -- Reclassify existing cards once when a display-phase rule changes.
 SELECT console_refresh(c.flow_id) FROM console_flows c
  JOIN console_facts f ON f.id=c.flow_id
- WHERE c.facts->>'phase' IS DISTINCT FROM f.phase ORDER BY c.flow_id;
+ WHERE c.facts->>'phase' IS DISTINCT FROM
+ CASE WHEN c.archived_at IS NOT NULL AND f.lifecycle='cancelled' THEN 'done' ELSE f.phase END
+ ORDER BY c.flow_id;
 """

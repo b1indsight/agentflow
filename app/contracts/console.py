@@ -1,4 +1,4 @@
-"""Read-only console DTOs; internal execution payloads never cross this boundary."""
+"""Console display DTOs; internal execution payloads never cross this boundary."""
 
 from datetime import datetime
 from typing import Literal
@@ -10,6 +10,10 @@ Phase = Literal["queued", "running", "review", "blocked", "done"]
 
 class ConsoleModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+
+class ArchiveRequest(ConsoleModel):
+    """An explicit empty JSON command, with no workflow fields writable by clients."""
 
 
 class FlowSummary(ConsoleModel):
@@ -29,6 +33,7 @@ class FlowSummary(ConsoleModel):
     branch: str | None
     created_at: datetime
     updated_at: datetime
+    archived_at: datetime | None
     state_version: int
 
 
