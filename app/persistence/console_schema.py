@@ -10,9 +10,9 @@ SELECT f.id, f.repo, f.issue_number, f.state AS lifecycle, f.created_at,
  GREATEST(f.updated_at,COALESCE(d.updated_at,f.updated_at),
           COALESCE(j.updated_at,f.updated_at),COALESCE(a.updated_at,f.updated_at)) AS updated_at,
  CASE
- WHEN f.state='succeeded' THEN 'done'
+ WHEN f.state='succeeded' OR d.state='closed' THEN 'done'
  WHEN f.state IN ('failed','cancelled') THEN 'blocked'
- WHEN d.state='closed' OR j.state='failed' OR (j.kind='archive'
+ WHEN j.state='failed' OR (j.kind='archive'
  AND j.recovery_deadline IS NOT NULL AND j.result_received_at IS NULL) OR EXISTS (
  SELECT 1 FROM result_effects e JOIN jobs ej ON ej.id=e.job_id
  WHERE ej.flow_id=f.id AND ej.result_applied_at IS NULL AND e.state='failed') THEN 'blocked'
@@ -23,13 +23,13 @@ SELECT f.id, f.repo, f.issue_number, f.state AS lifecycle, f.created_at,
  AND pending.result_applied_at IS NULL))) THEN 'running'
  WHEN d.state='open' THEN 'review' ELSE 'running' END AS phase,
  CASE WHEN f.state='succeeded' THEN 'archived'
+ WHEN d.state='closed' THEN 'delivery_closed'
  WHEN f.state IN ('failed','cancelled') THEN f.state
  WHEN j.result_received_at IS NOT NULL AND j.result_applied_at IS NULL THEN 'applying_result'
  WHEN j.state='running' AND j.recovery_deadline IS NOT NULL THEN 'recovering'
  WHEN j.state IN ('queued','running') THEN j.kind || ':' || j.state
  WHEN j.state='failed' THEN 'execution_failed'
  WHEN d.state='merged' THEN 'awaiting_archive'
- WHEN d.state='closed' THEN 'delivery_closed'
  WHEN d.state='open' THEN 'awaiting_review'
  ELSE 'unknown' END AS action,
  COALESCE(x.worker_id,j.assigned_worker_id) AS worker_id,
@@ -159,4 +159,8 @@ CREATE OR REPLACE TRIGGER console_worker_changed AFTER INSERT OR UPDATE ON worke
 -- Only missing projections are seeded; ordinary restarts never rescan archived source bodies.
 SELECT console_refresh(id,TRUE) FROM flows
  WHERE NOT EXISTS (SELECT 1 FROM console_flows c WHERE c.flow_id=flows.id);
+-- Reclassify existing cards once when a display-phase rule changes.
+SELECT console_refresh(c.flow_id) FROM console_flows c
+ JOIN console_facts f ON f.id=c.flow_id
+ WHERE c.facts->>'phase' IS DISTINCT FROM f.phase ORDER BY c.flow_id;
 """

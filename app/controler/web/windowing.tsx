@@ -7,6 +7,7 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 import { defaultRangeExtractor, useVirtualizer } from "@tanstack/react-virtual";
 import { focusableControls } from "./focus";
@@ -15,21 +16,38 @@ export const MAX_ROWS = 60;
 export const TEXT_CHARS = 2048;
 export const CODE_CHARS = 8192;
 export const CODE_LINES = 200;
-const Memory = createContext(new Map<string, number>());
+function readingMemory() {
+  return {
+    values: new Map<string, number>(),
+    listeners: new Map<string, Set<() => void>>(),
+  };
+}
+const Memory = createContext(readingMemory());
 
 /** Reading state is separate from mounted DOM and from evictable activity pages. */
 export function ReadingState({ children }: { children: ReactNode }) {
-  const store = useRef(new Map<string, number>());
+  const store = useRef(readingMemory());
   return <Memory value={store.current}>{children}</Memory>;
 }
 
 export function useReadingState(key: string, initial: number) {
   const store = useContext(Memory);
-  const [value, setValue] = useState(() => store.get(key) ?? initial);
-  useEffect(() => setValue(store.get(key) ?? initial), [key, initial, store]);
+  const value = useSyncExternalStore(
+    (notify) => {
+      const listeners = store.listeners.get(key) ?? new Set<() => void>();
+      store.listeners.set(key, listeners);
+      listeners.add(notify);
+      return () => {
+        listeners.delete(notify);
+        if (!listeners.size) store.listeners.delete(key);
+      };
+    },
+    () => store.values.get(key) ?? initial,
+    () => initial,
+  );
   const update = (next: number) => {
-    store.set(key, next);
-    setValue(next);
+    store.values.set(key, next);
+    store.listeners.get(key)?.forEach((notify) => notify());
   };
   return [value, update] as const;
 }
@@ -145,7 +163,7 @@ export function TextWindow({
 interface WindowProps {
   count: number;
   itemKey: (index: number) => string | number;
-  children: (index: number) => ReactNode;
+  children: (index: number, mounted: ReadonlySet<number>) => ReactNode;
   estimate?: number;
   onRange?: (indexes: number[]) => void;
   label: string;
@@ -249,6 +267,7 @@ export function WindowList({
         key: itemKey(index),
         start: 0,
       }));
+  const mounted = new Set(rows.map(({ index }) => index));
   const indexes = rows.map(({ index }) => index).join(",");
   useEffect(() => {
     if (indexes) onRange?.(indexes.split(",").map(Number));
@@ -258,6 +277,14 @@ export function WindowList({
     const row = host.current?.querySelector<HTMLElement>(
       `:scope > [data-window-row="${pending.index}"]`,
     );
+    if (row && row.getBoundingClientRect().height === 0) {
+      const next = pending.index + (pending.reverse ? -1 : 1);
+      if (next >= 0 && next < count) {
+        setPending({ index: next, reverse: pending.reverse });
+        virtual.scrollToIndex(next, { align: "auto" });
+      } else setPending(null);
+      return;
+    }
     const controls = focusableControls(row);
     const target = pending.reverse
       ? (controls.at(-1) ?? row)
@@ -310,7 +337,14 @@ export function WindowList({
         const edge = event.shiftKey
           ? (controls[0] ?? row)
           : (controls.at(-1) ?? row);
-        const next = index + (event.shiftKey ? -1 : 1);
+        let next = index + (event.shiftKey ? -1 : 1);
+        while (next >= 0 && next < count) {
+          const candidate = host.current?.querySelector<HTMLElement>(
+            `:scope > [data-window-row="${next}"]`,
+          );
+          if (!candidate || candidate.getBoundingClientRect().height > 0) break;
+          next += event.shiftKey ? -1 : 1;
+        }
         if (event.target !== edge || next < 0 || next >= count) return;
         // Native Tab would skip every unmounted record between two DOM windows.
         event.preventDefault();
@@ -345,7 +379,7 @@ export function WindowList({
               : undefined
           }
         >
-          {children(row.index)}
+          {children(row.index, mounted)}
         </div>
       ))}
     </div>

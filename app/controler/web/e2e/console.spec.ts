@@ -97,6 +97,89 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
+test("archived column distinguishes closed unmerged PRs from completed archives", async ({
+  page,
+}) => {
+  const closed = {
+    ...flow,
+    title: "已关闭的 PR",
+    phase: "done",
+    action: "delivery_closed",
+  };
+  const archived = {
+    ...closed,
+    id: 43,
+    title: "正常归档的 PR",
+    lifecycle: "succeeded",
+    action: "archived",
+  };
+  await page.route("**/api/flows?**", (route) =>
+    route.fulfill({
+      json: {
+        items:
+          new URL(route.request().url()).searchParams.get("phase") === "done"
+            ? [closed, archived]
+            : [],
+        counts: { queued: 0, running: 0, review: 0, blocked: 0, done: 2 },
+        next_cursor: null,
+        has_more: false,
+      },
+    }),
+  );
+  await page.route("**/api/flows/42", (route) =>
+    route.fulfill({
+      json: {
+        ...closed,
+        reason: "PR 已关闭（未合并），编码与修订已暂停",
+        next_condition: "重新打开 PR 并完成执行状态及 head/base 对账后才能继续",
+        sources: [],
+      },
+    }),
+  );
+  await page.goto("/#board");
+  const column = page.locator(".column.phase-done");
+  await expect(column.locator(".col-header")).toHaveText("已归档2");
+  await expect(
+    column.getByText("已关闭 · 未合并", { exact: true }),
+  ).toBeVisible();
+  await expect(column.getByText("归档完成", { exact: true })).toBeVisible();
+  await expect(page.getByText("已完成", { exact: true })).toHaveCount(0);
+  await page.screenshot({
+    path: "../../../.amp/in/artifacts/archived-board-desktop.png",
+  });
+  const search = page.getByRole("combobox", { name: "搜索任务与筛选条件" });
+  await search.fill("is:d");
+  await expect(page.getByRole("option", { name: /已归档/ })).toBeVisible();
+  await search.fill("");
+  await search.press("Escape");
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page
+    .locator(".mobile-stages")
+    .getByRole("button", { name: /已归档/ })
+    .click();
+  await expect(
+    column.getByText("已关闭 · 未合并", { exact: true }),
+  ).toBeVisible();
+  await page.screenshot({
+    path: "../../../.amp/in/artifacts/archived-board-mobile.png",
+  });
+  await column.locator('.card[data-flow="42"]').click();
+  await expect(page.locator(".detail-head .badge")).toHaveText(
+    "已关闭 · 未合并",
+  );
+  await page.getByRole("tab", { name: "概览" }).click();
+  await expect(
+    page.getByText("active / 已归档", { exact: true }),
+  ).toBeVisible();
+  await page.screenshot({
+    path: "../../../.amp/in/artifacts/archived-detail-mobile.png",
+  });
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.screenshot({
+    path: "../../../.amp/in/artifacts/archived-detail-desktop.png",
+  });
+});
+
 test("conversation sources keep routine diagnostics collapsed and surface actionable failures", async ({
   page,
 }) => {
@@ -117,6 +200,20 @@ test("conversation sources keep routine diagnostics collapsed and surface action
       reason: null,
       last_success_at: now,
       limitations: [],
+    },
+    {
+      source: "pr.commits",
+      status: "partial",
+      reason: null,
+      last_success_at: now,
+      limitations: ["github_pr_commit_list_maximum_250"],
+    },
+    {
+      source: "pr.review_threads",
+      status: "partial",
+      reason: null,
+      last_success_at: now,
+      limitations: ["thread_state_has_no_remote_change_timestamp"],
     },
   ];
   await page.route("**/api/flows/42/activity?**", (route) =>
@@ -141,10 +238,43 @@ test("conversation sources keep routine diagnostics collapsed and surface action
   await expect(details).not.toHaveAttribute("open");
   await expect(status.getByText(historyLimit, { exact: true })).toBeHidden();
   await expect(warning).toHaveCount(0);
-  await page.screenshot({
-    path: "../../../.amp/in/artifacts/sources-normal.png",
+  await details.locator("summary").click();
+  await expect(
+    status.getByText("github_pr_commit_list_maximum_250", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    status.getByText("thread_state_has_no_remote_change_timestamp", {
+      exact: true,
+    }),
+  ).toBeVisible();
+  await details.locator("summary").click();
+  await status.screenshot({
+    path: "../../../.amp/in/artifacts/closed-pr-sources-normal.png",
   });
 
+  sources = [
+    ...sources,
+    {
+      source: "issue.timeline",
+      status: "unavailable",
+      reason: "unexpected_response",
+      last_success_at: null,
+      limitations: [],
+    },
+  ];
+  await refresh.click();
+  await expect(warning).toContainText("issue.timeline：同步异常");
+  await expect(warning).not.toContainText("pr.commits");
+  await expect(warning).not.toContainText("pr.review_threads");
+  await warning.screenshot({
+    path: "../../../.amp/in/artifacts/closed-pr-sources-desktop.png",
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.locator("body")).toHaveJSProperty("scrollWidth", 390);
+  await warning.screenshot({
+    path: "../../../.amp/in/artifacts/closed-pr-sources-mobile.png",
+  });
+  await page.setViewportSize({ width: 1440, height: 900 });
   sources = [
     sources[0],
     { ...sources[1], status: "unavailable", reason: "no_session" },
@@ -535,7 +665,7 @@ test("thread replies and body continuation use the pinned snapshot and Unicode o
     });
   });
   await page.goto("/#flow/42/conversation");
-  await page.getByRole("button", { name: "下一部分" }).click();
+  await page.getByRole("button", { name: "下一段", exact: true }).click();
   await expect(page.getByText("后文", { exact: true })).toBeVisible();
   // Tab changes unmount the activity row, just as virtual-window eviction does.
   await page.getByRole("tab", { name: "概览" }).click();
@@ -627,8 +757,7 @@ test("cached later-page errors retain a working retry after changing tabs", asyn
     const cursor = url.searchParams.get("cursor");
     if (cursor) {
       cursors.push(`${cursor}:${url.searchParams.get("snapshot")}`);
-      if (failures-- > 0)
-        return route.fulfill({ status: 503, json: { detail: "临时断开" } });
+      if (failures-- > 0) return route.fulfill({ status: 502, body: "" });
     }
     return route.fulfill({
       json: {
@@ -650,7 +779,7 @@ test("cached later-page errors retain a working retry after changing tabs", asyn
   });
   await page.goto("/#flow/42/conversation");
   const retry = page.getByRole("button", {
-    name: "读取失败：临时断开（重试）",
+    name: "读取失败：请求失败 (502)（重试）",
   });
   await expect(retry).toBeVisible();
   await page.getByRole("tab", { name: "概览" }).click();
@@ -660,4 +789,537 @@ test("cached later-page errors retain a working retry after changing tabs", asyn
   await expect(page.getByText("后页正文", { exact: true })).toBeVisible();
   expect(cursors).toEqual(["page-2:2", "page-2:2"]);
   await expect(retry).toHaveCount(0);
+});
+
+test("body navigation has one control and continues across preview boundaries", async ({
+  page,
+}) => {
+  // Real archive previews stop at 2000 code points, before the local 2048-character window.
+  const body = "首".repeat(2000) + "😀".repeat(2500) + "末尾";
+  const points = Array.from(body);
+  let fail = true;
+  await page.route("**/api/flows/42/activity?**", (route) =>
+    route.fulfill({
+      json: {
+        items: [
+          {
+            ...activity,
+            previous_version: null,
+            body: points.slice(0, 2000).join(""),
+            body_length: points.length,
+          },
+        ],
+        snapshot: 2,
+        total: 1,
+        has_more: false,
+        next_cursor: null,
+        sources: [],
+        changes: {},
+      },
+    }),
+  );
+  await page.route("**/api/flows/42/activity/content?**", (route) => {
+    const url = new URL(route.request().url());
+    const offset = Number(url.searchParams.get("offset"));
+    const limit = Number(url.searchParams.get("limit"));
+    if (fail) {
+      fail = false;
+      return route.fulfill({ status: 502, body: "" });
+    }
+    const text = points.slice(offset, offset + limit).join("");
+    return route.fulfill({
+      json: {
+        key: activity.key,
+        version: 2,
+        text,
+        total: points.length,
+        next_offset:
+          offset + Array.from(text).length < points.length
+            ? offset + Array.from(text).length
+            : null,
+      },
+    });
+  });
+  await page.goto("/#flow/42/conversation");
+  const row = page.locator("[data-entry='comment-1']");
+  const next = row.getByRole("button", { name: "下一段", exact: true });
+  await expect(next).toHaveCount(1);
+  await next.click();
+  await expect(row.getByRole("alert")).toBeVisible();
+  await expect(row.locator(".message-body")).toHaveText("首".repeat(2000));
+  await row.getByRole("alert").screenshot({
+    path: "../../../.amp/in/artifacts/console-fixes-body-error.png",
+  });
+  await row.getByRole("button", { name: "重试正文读取" }).click();
+  await expect(row.locator(".message-body")).toHaveText("😀".repeat(1024));
+  await expect(next).toHaveCount(1);
+  await row.getByRole("group", { name: "正文分段浏览" }).screenshot({
+    path: "../../../.amp/in/artifacts/console-fixes-body-controls.png",
+  });
+  await row.getByRole("button", { name: "上一段", exact: true }).click();
+  await expect(row.locator(".message-body")).toHaveText("首".repeat(2000));
+  for (let i = 0; i < 4; i++) {
+    await next.click();
+    await expect(
+      row.getByRole("group", { name: "正文分段浏览" }),
+    ).toHaveAttribute("aria-busy", "false");
+    if (await next.isDisabled()) break;
+  }
+  await expect(row.locator(".message-body")).toContainText("末尾");
+  await expect(next).toBeDisabled();
+  await page.getByRole("tab", { name: "概览" }).click();
+  await page.getByRole("tab", { name: "会话" }).click();
+  await expect(row.locator(".message-body")).toContainText("末尾");
+});
+
+test("assistant tools share one compact activity bar across pages without crossing turns", async ({
+  page,
+}) => {
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  const context = {
+    attempt_id: 1,
+    session_id: "session-a",
+    session_generation: 0,
+  };
+  const worker = {
+    ...activity,
+    source: "worker",
+    previous_version: null,
+    metadata: context,
+  };
+  const items = [
+    {
+      ...activity,
+      key: "label",
+      source: "issue.timeline",
+      kind: "event",
+      title: "labeled",
+      body: "",
+      body_length: 0,
+      previous_version: null,
+      metadata: { event: "labeled", label: "flow" },
+    },
+    {
+      ...worker,
+      key: "message",
+      author: "assistant",
+      kind: "message",
+      title: "message",
+      body: "我会先检查仓库，再运行验证。",
+      body_length: 14,
+    },
+    {
+      ...worker,
+      key: "call-a",
+      author: "assistant",
+      kind: "tool_call",
+      title: "exec",
+      body: "git status --short",
+      body_length: 18,
+      metadata: { ...context, call_id: "call-a" },
+    },
+    {
+      ...worker,
+      key: "call-b",
+      author: "assistant",
+      kind: "tool_call",
+      title: "test",
+      body: "pytest",
+      body_length: 6,
+      metadata: { ...context, call_id: "call-b" },
+    },
+    {
+      ...worker,
+      key: "result-b",
+      author: "tool",
+      kind: "tool_result",
+      title: "tool_result",
+      body: "测试通过",
+      body_length: 4,
+      metadata: { ...context, call_id: "call-b" },
+    },
+    {
+      ...worker,
+      key: "result-a",
+      author: "tool",
+      kind: "tool_result",
+      title: "tool_result",
+      body: "工作目录干净",
+      body_length: 6,
+      metadata: { ...context, call_id: "call-a" },
+    },
+    {
+      ...worker,
+      key: "answer",
+      author: "assistant",
+      kind: "message",
+      title: "message",
+      body: "验证完成，下面是修复结果。",
+      body_length: 13,
+    },
+    {
+      ...worker,
+      key: "orphan",
+      author: "tool",
+      kind: "tool_result",
+      title: "tool_result",
+      body: "其他会话的结果",
+      body_length: 7,
+      metadata: { ...context, session_id: "session-b", call_id: "call-a" },
+    },
+    {
+      ...worker,
+      key: "missing-id",
+      author: "tool",
+      kind: "tool_result",
+      title: "tool_result",
+      body: "没有调用编号的结果",
+      body_length: 9,
+      metadata: { ...context, session_id: "session-b", call_id: "" },
+    },
+    {
+      ...worker,
+      key: "user-turn",
+      author: "user",
+      kind: "message",
+      title: "message",
+      body: "继续",
+      body_length: 2,
+    },
+    {
+      ...worker,
+      key: "next-call",
+      author: "assistant",
+      kind: "tool_call",
+      title: "exec",
+      body: "pwd",
+      body_length: 3,
+      metadata: { ...context, call_id: "call-a" },
+    },
+    {
+      ...worker,
+      key: "next-result",
+      author: "tool",
+      kind: "tool_result",
+      title: "tool_result",
+      body: "下一轮的目录",
+      body_length: 6,
+      metadata: { ...context, call_id: "call-a" },
+    },
+  ];
+  await page.route("**/api/flows/42/activity?**", (route) => {
+    const later = new URL(route.request().url()).searchParams.has("cursor");
+    return route.fulfill({
+      json: {
+        items: later ? items.slice(4) : items.slice(0, 4),
+        snapshot: 2,
+        total: items.length,
+        has_more: !later,
+        next_cursor: later ? null : "tools",
+        sources: [],
+        changes: {},
+      },
+    });
+  });
+  await page.goto("/#flow/42/conversation");
+  await expect(page.locator("[data-entry='orphan']")).toBeAttached();
+  await expect(page.getByText("添加标签：flow", { exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: /^(message|tool_result|exec|labeled)$/ }),
+  ).toHaveCount(0);
+  await expect(page.locator("[data-entry='call-a']")).toHaveClass(
+    /continuation/,
+  );
+  await expect(page.locator("[data-entry='orphan']")).not.toHaveClass(
+    /continuation/,
+  );
+  await expect(
+    page.getByText("工作目录干净", { exact: true }),
+  ).not.toBeVisible();
+  const tools = page.getByRole("button", {
+    name: "工具活动 · 2 次调用 · 2 条结果",
+    exact: true,
+  });
+  await expect(tools).toHaveCount(1);
+  await expect(
+    page.getByText("验证完成，下面是修复结果。", { exact: true }),
+  ).toBeVisible();
+  await expect(page.locator("[data-entry='answer']")).toHaveClass(
+    /continuation/,
+  );
+  await expect(
+    page.getByText("下一轮的目录", { exact: true }),
+  ).not.toBeVisible();
+  // Capture this turn only; later fixture rows deliberately exercise unrelated sessions/turns.
+  const captureOutput = async (name: string) => {
+    const first = await page.locator("[data-entry='message']").boundingBox();
+    const last = await page.locator("[data-entry='answer']").boundingBox();
+    if (!first || !last) throw new Error("Assistant output is not mounted");
+    await page.screenshot({
+      path: `../../../.amp/in/artifacts/tool-bar-${name}.png`,
+      clip: {
+        x: first.x,
+        y: first.y,
+        width: first.width,
+        height: last.y + last.height - first.y,
+      },
+    });
+  };
+  await captureOutput("desktop-collapsed");
+  await tools.click();
+  await expect(page.getByText("工作目录干净", { exact: true })).toBeVisible();
+  await expect(page.getByText("测试通过", { exact: true })).toBeVisible();
+  await expect(
+    page.getByText("其他会话的结果", { exact: true }),
+  ).not.toBeVisible();
+  await expect(
+    page.getByText("下一轮的目录", { exact: true }),
+  ).not.toBeVisible();
+  await expect(page.locator(".tool-activity-body pre")).toHaveCount(4);
+  const callA = page.locator("article[data-entry='call-a']");
+  const callB = page.locator("article[data-entry='call-b']");
+  await expect(callA.getByText("工作目录干净", { exact: true })).toBeVisible();
+  await expect(callB.getByText("测试通过", { exact: true })).toBeVisible();
+  await expect(callA.locator("pre")).toHaveText([
+    "exec git status --short",
+    "工作目录干净",
+  ]);
+  await expect(callB.locator("pre")).toHaveText(["test pytest", "测试通过"]);
+  await expect(callA.locator("blockquote")).toHaveText("工作目录干净");
+  await expect(callB.locator("blockquote")).toHaveText("测试通过");
+  await expect(page.locator(".tool-activity-body small")).toHaveCount(0);
+  await expect(callA.locator(".tool-activity-body")).not.toContainText(
+    "call-a",
+  );
+  await expect(callB.locator(".tool-activity-body")).not.toContainText(
+    "call-b",
+  );
+  await expect(
+    page.locator("article[data-entry='result-a']"),
+  ).not.toBeVisible();
+  await expect(
+    page.locator("article[data-entry='result-b']"),
+  ).not.toBeVisible();
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  await captureOutput("desktop-expanded");
+  await page.setViewportSize({ width: 390, height: 844 });
+  await tools.click();
+  await expect(tools).toHaveAttribute("aria-expanded", "false");
+  await expect(
+    page.getByText("验证完成，下面是修复结果。", { exact: true }),
+  ).toBeVisible();
+  await expect(page.locator("body")).toHaveJSProperty("scrollWidth", 390);
+  await captureOutput("mobile-collapsed");
+  await tools.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByText("工作目录干净", { exact: true })).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 1100 });
+  await captureOutput("mobile-expanded");
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  await page.getByRole("tab", { name: "概览" }).click();
+  await page.getByRole("tab", { name: "会话" }).click();
+  await expect(page.getByText("工作目录干净", { exact: true })).toBeVisible();
+  await expect(page.getByText("测试通过", { exact: true })).toBeVisible();
+  await tools.click();
+  await expect(
+    page.getByText("工作目录干净", { exact: true }),
+  ).not.toBeVisible();
+  await expect(page.getByText("测试通过", { exact: true })).not.toBeVisible();
+  await page
+    .getByRole("button", {
+      name: "工具活动 · 1 次调用 · 1 条结果",
+      exact: true,
+    })
+    .click();
+  await expect(page.getByText("下一轮的目录", { exact: true })).toBeVisible();
+  await expect(
+    page
+      .locator("article[data-entry='next-call']")
+      .getByText("下一轮的目录", { exact: true }),
+  ).toBeVisible();
+  await page
+    .locator("[data-entry='orphan']")
+    .getByRole("button", { name: /^工具活动/ })
+    .click();
+  await expect(
+    page
+      .locator("article[data-entry='orphan']")
+      .getByText("其他会话的结果", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page
+      .locator("article[data-entry='missing-id']")
+      .getByText("没有调用编号的结果", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("工作目录干净", { exact: true }),
+  ).not.toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test("long tool activity remains bounded and readable across virtual windows", async ({
+  page,
+}) => {
+  // A long uninterrupted tool run must not bypass the raw-row mounting budget when opened.
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.route("**/api/flows/42/activity?**", (route) => {
+    const start = Number(
+      new URL(route.request().url()).searchParams.get("cursor") ?? 0,
+    );
+    return route.fulfill({
+      json: {
+        items: Array.from({ length: Math.min(20, 141 - start) }, (_, index) => {
+          const n = start + index;
+          const body = n === 140 ? "本轮全部完成" : `工具记录 ${n}`;
+          return {
+            ...activity,
+            key: `tool-run-${n}`,
+            source: "worker",
+            author: n % 2 ? "tool" : "assistant",
+            kind: n === 140 ? "message" : n % 2 ? "tool_result" : "tool_call",
+            title: n === 140 ? "message" : n % 2 ? "tool_result" : "exec",
+            body,
+            body_length: body.length,
+            previous_version: null,
+            metadata: {
+              attempt_id: 1,
+              session_id: "long-tools",
+              session_generation: 0,
+              call_id: `call-${Math.floor(n / 2)}`,
+            },
+          };
+        }),
+        snapshot: 2,
+        total: 141,
+        next_cursor: start + 20 < 141 ? String(start + 20) : null,
+        has_more: start + 20 < 141,
+        sources: [],
+        changes: {},
+      },
+    });
+  });
+  await page.goto("/#flow/42/conversation");
+  const root = page.locator(".detail-body");
+  const list = page.locator('[data-window-list="会话活动"]');
+  await expect
+    .poll(
+      async () => {
+        await root.evaluate((e) => {
+          e.scrollTop = e.scrollHeight;
+        });
+        return list.getAttribute("data-window-count");
+      },
+      { timeout: 15000 },
+    )
+    .toBe("141");
+  await root.evaluate((e) => {
+    e.scrollTop = 0;
+  });
+  const bar = page.getByRole("button", { name: /^工具活动/ }).first();
+  await expect(bar).toHaveAttribute("aria-expanded", "false");
+  await bar.click();
+  await expect(page.getByText("工具记录 0", { exact: true })).toBeVisible();
+  await expect
+    .poll(async () => {
+      await root.evaluate(async (e) => {
+        e.scrollTop = e.scrollHeight;
+        // ResizeObserver and the next React range update must settle before asserting visibility.
+        await new Promise<void>((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+        );
+      });
+      // Measured tool rows can grow after scrolling; reach the final message as well.
+      return (
+        (await page.getByText("工具记录 139", { exact: true }).isVisible()) &&
+        (await page.getByText("本轮全部完成", { exact: true }).isVisible())
+      );
+    })
+    .toBe(true);
+  await expect(page.getByText("本轮全部完成", { exact: true })).toBeVisible();
+  expect(
+    await list.locator(":scope > [data-window-row]").count(),
+  ).toBeLessThanOrEqual(60);
+  expect(errors).toEqual([]);
+});
+
+test("mobile detail header contracts to one line without losing reading position", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const title = "修复会话正文分页、工具输出分组与手机详情阅读布局";
+  await page.route("**/api/flows/42", (route) =>
+    route.fulfill({
+      json: {
+        ...flow,
+        title,
+        reason: "正在验证",
+        next_condition: "等待验证完成",
+        sources: [],
+      },
+    }),
+  );
+  await page.route("**/api/flows/42/activity?**", (route) =>
+    route.fulfill({
+      json: {
+        items: Array.from({ length: 20 }, (_, i) => ({
+          ...activity,
+          key: `mobile-${i}`,
+          previous_version: null,
+          body: `第 ${i} 条会话内容`,
+          body_length: `第 ${i} 条会话内容`.length,
+        })),
+        snapshot: 2,
+        total: 20,
+        has_more: false,
+        next_cursor: null,
+        sources: [],
+        changes: {},
+      },
+    }),
+  );
+  await page.goto("/#flow/42/conversation");
+  const head = page.locator(".detail-head");
+  await expect(page.getByRole("heading", { name: title })).toBeVisible();
+  await page.screenshot({
+    path: "../../../.amp/in/artifacts/console-fixes-mobile-expanded.png",
+  });
+  const expanded = await head.evaluate((e) => e.getBoundingClientRect().height);
+  const anchorTop = await page.locator(".detail-body").evaluate((e, offset) => {
+    e.scrollTop = offset;
+    return e.querySelector('[data-entry="mobile-5"]')!.getBoundingClientRect()
+      .top;
+  }, expanded + 180);
+  await expect(head).toHaveClass(/compact/);
+  expect(
+    Math.abs(
+      (await page
+        .locator('[data-entry="mobile-5"]')
+        .evaluate((e) => e.getBoundingClientRect().top)) - anchorTop,
+    ),
+  ).toBeLessThan(2);
+  expect(
+    await head.evaluate((e) => e.getBoundingClientRect().height),
+  ).toBeLessThan(65);
+  expect(expanded).toBeGreaterThan(150);
+  await expect(head.getByRole("tablist")).not.toBeVisible();
+  await expect(head.getByRole("button", { name: "返回看板" })).toBeVisible();
+  await page.screenshot({
+    path: "../../../.amp/in/artifacts/console-fixes-mobile-compact.png",
+  });
+  await head.getByRole("button", { name: "展开详情标题" }).click();
+  await expect(head.getByRole("tablist")).toBeVisible();
+  expect(
+    await page.locator(".detail-body").evaluate((e) => e.scrollTop),
+  ).toBeGreaterThan(350);
+  await page.locator(".detail-body").evaluate((e) => {
+    e.scrollTop = 0;
+  });
+  await expect(head).not.toHaveClass(/compact/);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.locator(".detail-body").evaluate((e) => {
+    e.scrollTop = 420;
+  });
+  await expect(head).not.toHaveClass(/compact/);
 });

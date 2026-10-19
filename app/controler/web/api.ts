@@ -78,11 +78,12 @@ export const getContent = (
   key: string,
   version: number,
   offset: number,
+  limit: number,
   signal?: AbortSignal,
 ) =>
   api<ContentPage>(
     `/api/flows/${id}/activity/content`,
-    { key, version, offset, limit: 16384 },
+    { key, version, offset, limit },
     signal,
   );
 export const getDiff = (

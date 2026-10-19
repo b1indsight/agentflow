@@ -64,6 +64,30 @@ def _observed(data: Any, field: str) -> bool:
     return field in (fields if fields is not None else vars(data))
 
 
+class _PullRequestRepository(BaseModel):
+    full_name: str
+
+
+class _PullRequestRef(BaseModel):
+    ref: str
+    sha: str
+    repo: _PullRequestRepository | None
+
+
+class _PullRequestRead(BaseModel):
+    """Required GET facts, including merge_commit_sha omitted by the generated SDK model."""
+
+    number: int
+    state: Literal["open", "closed"]
+    title: str
+    body: str | None
+    head: _PullRequestRef
+    base: _PullRequestRef
+    merged: bool
+    merged_at: AwareDatetime | None
+    merge_commit_sha: str | None
+
+
 class PullRequest(BaseModel):
     """A concrete PR identity with the facts observed by its construction or query."""
 
@@ -153,9 +177,10 @@ class PullRequest(BaseModel):
         client = repo.installation._client(auto_retry=False)
 
         with translate_errors("get_pull_request"):
-            data: Any = (await client.rest.pulls.async_get(
+            response = await client.rest.pulls.async_get(
                 repo.owner, repo.name, self.number,
-            )).parsed_data
+            )
+            data = _PullRequestRead.model_validate_json(response.raw_response.content)
             if data.number != self.number:
                 raise ValueError("pull-request response does not match its bound number")
             return PullRequest._from_response(repo, data, full=True)

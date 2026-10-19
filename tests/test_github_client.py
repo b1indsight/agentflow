@@ -287,6 +287,38 @@ async def test_repository_refetch_keeps_identity_and_observed_casing(tmp_path, m
     assert endpoint.calls == [(("octo", "repo"), {})]
 
 
+@pytest.mark.parametrize("state,merged", [("open", False), ("closed", False), ("closed", True)])
+async def test_full_pr_read_preserves_merge_sha_even_when_sdk_schema_omits_it(tmp_path, monkeypatch, state, merged):
+    # A closed unmerged PR still has a merge SHA in GitHub's JSON; dropping it stalls reconciliation.
+    payload = {
+        "number": 17, "state": state, "title": "PR", "body": None,
+        "head": {"ref": "flow/7", "sha": "b" * 40, "repo": {"full_name": "octo/repo"}},
+        "base": {"ref": "main", "sha": "a" * 40, "repo": {"full_name": "octo/repo"}},
+        "merged": merged, "merged_at": "2026-01-02T00:00:00Z" if merged else None,
+        "merge_commit_sha": "c" * 40,
+    }
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        assert request.method == "GET" and request.url.path == "/repos/octo/repo/pulls/17"
+        return httpx.Response(200, json=payload)
+
+    sdk = GitHub("test-token", auto_retry=None, async_transport=httpx.MockTransport(handler))
+    install_client(monkeypatch, lambda _, **kwargs: sdk)
+    repo = GitHubApp(settings(tmp_path)).installation(42).repository("octo/repo")
+    observed = await repo.fetch_pull_request(17)
+    assert observed.state == state and observed.merged is merged
+    assert observed.merge_commit_sha == "c" * 40
+    assert observed.head_repository == "octo/repo" and observed.body == ""
+    assert len(calls) == 1
+    # Missing merge evidence must fail closed, never manufacture a merge or null observation.
+    del payload["merge_commit_sha"]
+    with pytest.raises(GitHubError) as error:
+        await repo.fetch_pull_request(17)
+    assert error.value.kind is GitHubErrorKind.UNEXPECTED_RESPONSE
+
+
 def test_partial_pull_request_distinguishes_unobserved_nullable_facts_from_null():
     # Old short receipts omit repo and merge details; absence cannot become a known null.
     short = {"number": 17, "state": "open", "head_branch": "topic",

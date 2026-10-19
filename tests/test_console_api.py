@@ -192,6 +192,9 @@ def test_detail_explains_execution_facts_without_exposing_internal_errors(
     assert reason in body["reason"]
     assert condition in body["next_condition"]
     assert "private-" not in response.text and "/private/repo" not in response.text
+    if scenario == "closed":
+        assert body["phase"] == "done" and body["action"] == "delivery_closed"
+        assert body["lifecycle"] == "active"
     if scenario in {"effect_failed", "older_result", "running", "preparing"}:
         assert f"#{job.id}" in body["reason"]
 

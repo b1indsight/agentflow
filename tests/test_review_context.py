@@ -3,6 +3,7 @@
 from datetime import timedelta
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from githubkit_schemas.latest.models import DiffEntry
 
@@ -17,14 +18,14 @@ from tests.test_github_client import AsyncEndpoint, install_client, response, se
 
 def pr_data(head_sha="abc"):
     facts = context().pull_request
-    return SimpleNamespace(
-        number=facts.number, title=facts.title, body=facts.body, state=facts.state,
-        head=SimpleNamespace(ref=facts.head_branch, sha=head_sha,
-                             repo=SimpleNamespace(full_name=facts.head_repository)),
-        base=SimpleNamespace(ref=facts.base_branch, sha=facts.base_sha,
-                             repo=SimpleNamespace(full_name=facts.repo)),
-        merged=facts.merged, merged_at=None, merge_commit_sha=None,
-    )
+    return {
+        "number": facts.number, "title": facts.title, "body": facts.body, "state": facts.state,
+        "head": {"ref": facts.head_branch, "sha": head_sha,
+                 "repo": {"full_name": facts.head_repository}},
+        "base": {"ref": facts.base_branch, "sha": facts.base_sha,
+                 "repo": {"full_name": facts.repo}},
+        "merged": facts.merged, "merged_at": None, "merge_commit_sha": None,
+    }
 
 
 def file_row(path="app.py", patch="+limit = 10"):
@@ -62,7 +63,7 @@ def remote(tmp_path, monkeypatch):
 
     async def pull_request(*args, **kwargs):
         events.append("pr")
-        return response(pr_data())
+        return SimpleNamespace(raw_response=httpx.Response(200, json=pr_data()))
 
     async def issue(*args, **kwargs):
         events.append("issue")
@@ -150,7 +151,7 @@ async def test_api_errors_propagate_while_head_changes_remain_explicit(remote, p
     async def pull_request(*args, **kwargs):
         nonlocal reads
         reads += 1
-        return response(pr_data(str(reads)))
+        return SimpleNamespace(raw_response=httpx.Response(200, json=pr_data(str(reads))))
 
     client.rest.pulls.async_get = pull_request
     if permission:

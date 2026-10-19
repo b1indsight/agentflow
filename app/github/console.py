@@ -88,6 +88,13 @@ def _url(value: Any, repo: str) -> str | None:
 
 def _key(repo: str, kind: str, node: dict) -> str:
     identity = node.get("node_id") or node.get("id") or node.get("sha")
+    if identity is None and kind == "event" and node.get("event") == "cross-referenced":
+        # GitHub omits an event ID here; source identity + occurrence survives source edits.
+        source = node.get("source") or {}
+        issue = source.get("issue") or {}
+        reference = issue.get("node_id") or issue.get("id")
+        if isinstance(reference, (str, int)) and not isinstance(reference, bool):
+            identity = f"cross-referenced:{reference}:{_date(node['created_at']).isoformat()}"
     if not isinstance(identity, (str, int)) or isinstance(identity, bool):
         raise TypeError("missing source identity")
     return f"github:{repo.casefold()}:{kind}:{identity}"

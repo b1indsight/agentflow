@@ -218,6 +218,38 @@ async def test_close_retires_queued_work_and_keeps_running_executor_slot(store, 
         ).retry(flow)
 
 
+async def test_closed_pr_http_observation_replaces_awaiting_review_in_console(store, lifecycle_flow, tmp_path, monkeypatch):
+    import httpx
+    from githubkit import GitHub as SDK
+
+    from app.github import GitHubApp
+    from app.persistence.console import ConsoleStore
+    from tests.test_github_client import install_client, settings
+
+    # Exercise real REST decoding and PostgreSQL projection together, not a resource refetch fake.
+    flow, _ = lifecycle_flow
+    console = ConsoleStore(store.database)
+    assert console.detail(flow.id).action == "awaiting_review"
+    payload = {
+        "number": 17, "state": "closed", "title": "PR", "body": None,
+        "head": {"ref": f"flow/{flow.id}", "sha": "b" * 40, "repo": {"full_name": flow.repo}},
+        "base": {"ref": "main", "sha": "a" * 40, "repo": {"full_name": flow.repo}},
+        "merged": False, "merged_at": None, "merge_commit_sha": "c" * 40,
+    }
+    sdk = SDK("test-token", auto_retry=None, async_transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, json=payload),
+    ))
+    install_client(monkeypatch, lambda _, **kwargs: sdk)
+    await check(store, flow, GitHubApp(settings(tmp_path)))
+    assert store.reconcile.get(flow.id).failures == 0
+    assert store.deliveries.get_delivery(flow.id).state is DeliveryState.CLOSED
+    detail = console.detail(flow.id)
+    assert detail.action == "delivery_closed" and detail.phase == "done"
+    assert "PR 已关闭" in detail.reason
+    assert store.flows.get_flow(flow.id).state is FlowState.ACTIVE
+    assert not store.jobs.list_jobs(flow.id)
+
+
 async def test_reopen_refreezes_feedback_through_judge_and_keeps_binding(store, lifecycle_flow, lifecycle_resources):
     flow, clock = lifecycle_flow
     ingest(store, flow, feedback(clock, signal="request_changes", submitted=True))

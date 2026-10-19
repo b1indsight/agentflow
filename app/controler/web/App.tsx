@@ -5,13 +5,32 @@ import {
   useRef,
   useState,
 } from "react";
-import { Menu, PanelLeftClose, PanelLeftOpen, RefreshCw } from "lucide-react";
+import {
+  ArrowLeft,
+  ChevronDown,
+  Menu,
+  PanelLeftClose,
+  PanelLeftOpen,
+  RefreshCw,
+} from "lucide-react";
 import { getFlow, getFlows, getJobs, getRepos } from "./api";
-import { ActivityView } from "./activity";
+import {
+  ActivityView,
+  isToolActivity,
+  sameWorkerOutput,
+  type ToolActivityGroup,
+} from "./activity";
 import { ConversationSources } from "./ConversationSources";
-import { phases } from "./phases";
+import { actionLabel, phases } from "./phases";
 import { SearchBox } from "./SearchBox";
-import type { FlowDetail, FlowSummary, JobSummary, Phase, Tab } from "./types";
+import type {
+  ActivityItem,
+  FlowDetail,
+  FlowSummary,
+  JobSummary,
+  Phase,
+  Tab,
+} from "./types";
 import { useConversation } from "./useConversation";
 import { SavedDetails, WindowList } from "./windowing";
 import { focusableControls } from "./focus";
@@ -146,7 +165,7 @@ function Board({
                         <div className="card-foot">
                           <span className="current-action">
                             <i className="dot" />
-                            {f.action}
+                            {actionLabel(f.action)}
                           </span>
                         </div>
                       </button>
@@ -195,6 +214,13 @@ function Detail({
       () => positions.get("collapsed") === 1,
     ),
     [nav, setNav] = useState(false);
+  const [compactHead, setCompactHead] = useState(false);
+  const head = useRef<HTMLElement>(null);
+  const expandedHeight = useRef(0);
+  const headTransition = useRef<{ height: number; scroll: number } | null>(
+    null,
+  );
+  const expandedAt = useRef<number | null>(null);
   const [jobs, setJobs] = useState<JobSummary[]>([]),
     [jobNext, setJobNext] = useState<string | null>(null),
     [jobMore, setJobMore] = useState(true),
@@ -210,6 +236,70 @@ function Detail({
     node.scrollTop = positions.get(key) ?? 0;
     return () => {
       positions.set(key, node.scrollTop);
+    };
+  }, [id, tab, Boolean(flow)]);
+  useLayoutEffect(() => {
+    const node = detail.current;
+    const header = head.current;
+    const before = headTransition.current;
+    if (node && header && before && before.scroll > before.height) {
+      node.scrollTop = Math.max(
+        0,
+        before.scroll + header.offsetHeight - before.height,
+      );
+      if (expandedAt.current !== null) expandedAt.current = node.scrollTop;
+    }
+    if (
+      compactHead &&
+      header
+        ?.querySelector(".detail-head-full")
+        ?.contains(document.activeElement)
+    ) {
+      header
+        .querySelector<HTMLButtonElement>(
+          ".compact-detail-bar button:last-child",
+        )
+        ?.focus({ preventScroll: true });
+    }
+    headTransition.current = null;
+  }, [compactHead]);
+  useEffect(() => {
+    const node = detail.current;
+    if (!node) return;
+    expandedAt.current = null;
+    const mobile = matchMedia("(max-width: 760px)");
+    const update = () => {
+      const header = head.current;
+      if (!header) return;
+      if (!header.classList.contains("compact"))
+        expandedHeight.current = header.offsetHeight;
+      if (
+        expandedAt.current !== null &&
+        Math.abs(node.scrollTop - expandedAt.current) > 48
+      )
+        expandedAt.current = null;
+      const shrink =
+        mobile.matches &&
+        expandedAt.current === null &&
+        (header.classList.contains("compact")
+          ? node.scrollTop > 8
+          : node.scrollTop > expandedHeight.current + 96);
+      if (shrink !== header.classList.contains("compact")) {
+        headTransition.current = {
+          height: header.offsetHeight,
+          scroll: node.scrollTop,
+        };
+        setCompactHead(shrink);
+      }
+    };
+    node.addEventListener("scroll", update, { passive: true });
+    mobile.addEventListener("change", update);
+    window.addEventListener("resize", update);
+    update();
+    return () => {
+      node.removeEventListener("scroll", update);
+      mobile.removeEventListener("change", update);
+      window.removeEventListener("resize", update);
     };
   }, [id, tab, Boolean(flow)]);
   useEffect(() => {
@@ -367,53 +457,87 @@ function Detail({
         onClick={() => setNav(false)}
       />
       <main className="detail">
-        <header className="detail-head">
-          <button
-            className="btn mobile-nav"
-            aria-expanded={nav}
-            onClick={() => setNav(true)}
-          >
-            <Menu />
-            切换任务
-          </button>
-          <div className="detail-title-row">
-            <h1 id="detail-heading">{name(flow)}</h1>
-            <span className={`badge phase-${flow.phase}`}>
-              <i className="dot" />
-              {flow.action}
-            </span>
-          </div>
-          <div className="links">
-            <span>{flow.repo}</span>
-            <a href={flow.issue_url} target="_blank" rel="noreferrer">
-              Issue #{flow.issue_number} ↗
-            </a>
-            {flow.pr_url && (
-              <a href={flow.pr_url} target="_blank" rel="noreferrer">
-                PR #{flow.pr_number} ↗
-              </a>
-            )}
-            <span className="tag">只读</span>
-          </div>
-          <div className="tabs" role="tablist" onKeyDown={tabs}>
-            {(
-              [
-                ["overview", "概览"],
-                ["conversation", "会话"],
-                ["jobs", "执行记录"],
-              ] as [Tab, string][]
-            ).map(([t, l]) => (
+        <header
+          ref={head}
+          className={`detail-head${compactHead ? " compact" : ""}`}
+        >
+          {compactHead && (
+            <div className="compact-detail-bar">
               <button
-                role="tab"
-                id={`tab-${t}`}
-                aria-selected={tab === t}
-                tabIndex={tab === t ? 0 : -1}
-                onClick={() => switchTab(t)}
-                key={t}
+                type="button"
+                className="btn ghost"
+                aria-label="返回看板"
+                onClick={onBack}
               >
-                {l}
+                <ArrowLeft />
               </button>
-            ))}
+              <span className="compact-detail-ref">{ref(flow)}</span>
+              <span className="compact-detail-title">{name(flow)}</span>
+              <button
+                type="button"
+                className="btn ghost"
+                aria-label="展开详情标题"
+                onClick={() => {
+                  expandedAt.current = detail.current?.scrollTop ?? 0;
+                  headTransition.current = {
+                    height: head.current?.offsetHeight ?? 0,
+                    scroll: detail.current?.scrollTop ?? 0,
+                  };
+                  setCompactHead(false);
+                }}
+              >
+                <ChevronDown />
+              </button>
+            </div>
+          )}
+          <div className="detail-head-full" hidden={compactHead}>
+            <button
+              className="btn mobile-nav"
+              aria-expanded={nav}
+              onClick={() => setNav(true)}
+            >
+              <Menu />
+              切换任务
+            </button>
+            <div className="detail-title-row">
+              <h1 id="detail-heading">{name(flow)}</h1>
+              <span className={`badge phase-${flow.phase}`}>
+                <i className="dot" />
+                {actionLabel(flow.action)}
+              </span>
+            </div>
+            <div className="links">
+              <span>{flow.repo}</span>
+              <a href={flow.issue_url} target="_blank" rel="noreferrer">
+                Issue #{flow.issue_number} ↗
+              </a>
+              {flow.pr_url && (
+                <a href={flow.pr_url} target="_blank" rel="noreferrer">
+                  PR #{flow.pr_number} ↗
+                </a>
+              )}
+              <span className="tag">只读</span>
+            </div>
+            <div className="tabs" role="tablist" onKeyDown={tabs}>
+              {(
+                [
+                  ["overview", "概览"],
+                  ["conversation", "会话"],
+                  ["jobs", "执行记录"],
+                ] as [Tab, string][]
+              ).map(([t, l]) => (
+                <button
+                  role="tab"
+                  id={`tab-${t}`}
+                  aria-selected={tab === t}
+                  tabIndex={tab === t ? 0 : -1}
+                  onClick={() => switchTab(t)}
+                  key={t}
+                >
+                  {l}
+                </button>
+              ))}
+            </div>
           </div>
         </header>
         <div className="detail-body" data-scroll-root ref={detail}>
@@ -422,7 +546,7 @@ function Detail({
               <>
                 <section className={`execution-summary phase-${flow.phase}`}>
                   <span className="eyebrow">当前动作</span>
-                  <h2>{flow.action}</h2>
+                  <h2>{actionLabel(flow.action)}</h2>
                   <p>{flow.reason}</p>
                   <div className="next-step">
                     <span>下一步条件</span>
@@ -548,14 +672,85 @@ function Conversation({
           onRange={onRange}
           estimate={220}
         >
-          {(i) => {
+          {(i, mounted) => {
             const e = state.items.get(i);
+            const previous = mounted.has(i - 1)
+              ? state.items.get(i - 1)
+              : undefined;
+            // Keep raw rows virtualized; only their compact activity bar and open state are shared.
+            let toolGroup: ToolActivityGroup | undefined;
+            const toolResults: ActivityItem[] = [];
+            let mergedIntoCall = false;
+            if (e?.source === "worker" && isToolActivity(e)) {
+              let start = i;
+              while (
+                isToolActivity(state.items.get(start - 1)) &&
+                sameWorkerOutput(state.items.get(start - 1), e)
+              )
+                start--;
+              let first = i,
+                end = i;
+              while (mounted.has(first - 1) && first > start) first--;
+              while (
+                mounted.has(end + 1) &&
+                isToolActivity(state.items.get(end + 1)) &&
+                sameWorkerOutput(e, state.items.get(end + 1))
+              )
+                end++;
+              let calls = 0,
+                results = 0;
+              const callIndexes = new Map<string, number>();
+              for (let index = first; index <= end; index++) {
+                const item = state.items.get(index);
+                if (!item) continue;
+                const callId = item.metadata.call_id;
+                if (item.kind === "tool_call") {
+                  calls++;
+                  if (typeof callId === "string" && callId)
+                    callIndexes.set(callId, index);
+                } else {
+                  results++;
+                  const callIndex =
+                    typeof callId === "string" && callId
+                      ? callIndexes.get(callId)
+                      : undefined;
+                  if (callIndex !== undefined) {
+                    if (callIndex === i) toolResults.push(item);
+                    if (index === i) mergedIntoCall = true;
+                  }
+                }
+              }
+              toolGroup = {
+                key: state.keys[start],
+                leader: i === first,
+                calls,
+                results,
+                partial:
+                  first > start ||
+                  (isToolActivity(state.items.get(end + 1)) &&
+                    sameWorkerOutput(e, state.items.get(end + 1))),
+              };
+            }
+            const provenance: ActivityItem[] = [];
+            if (e && !sameWorkerOutput(previous, e)) {
+              provenance.push(e);
+              for (let index = i + 1; mounted.has(index); index++) {
+                const following = state.items.get(index);
+                if (!following || !sameWorkerOutput(e, following)) break;
+                provenance.push(following);
+              }
+            }
             return e ? (
               <ActivityView
                 key={`${e.key}-${e.version}`}
                 entry={e}
                 flowId={id}
                 snapshot={state.snapshot ?? 0}
+                continuation={sameWorkerOutput(previous, e)}
+                toolGroup={toolGroup}
+                toolResults={toolResults}
+                mergedIntoCall={mergedIntoCall}
+                provenance={provenance}
               />
             ) : (
               <div className="history-placeholder">正在读取历史交互…</div>

@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from pydantic import SecretStr, ValidationError
 
@@ -58,7 +59,7 @@ from app.worker.state.session import WorkerSession
 from tests.github import NATIVE_PULL_REQUEST_REFETCH, RecordingGitHub
 from tests.review_memory import review_context
 from tests.test_coordinator import MemoryStore, apply_result, coordinator, prepare
-from tests.test_github_client import AsyncEndpoint, install_client, response
+from tests.test_github_client import AsyncEndpoint, install_client
 from tests.test_review_context import pr_data
 from tests.test_review_resolution import feedback, human, snapshot
 from tests.test_vcs import _git, _git_fixture, _jj
@@ -273,9 +274,9 @@ async def test_control_checks_actual_pr_and_lineage(revision_control, monkeypatc
 
     if change == "renamed-repository":
         data = pr_data(task.expected_head_sha)
-        data.head.ref, data.base.ref = task.branch, task.base_branch
-        data.head.repo.full_name = data.base.repo.full_name = "owner/renamed"
-        endpoint = AsyncEndpoint(response(data))
+        data["head"]["ref"], data["base"]["ref"] = task.branch, task.base_branch
+        data["head"]["repo"]["full_name"] = data["base"]["repo"]["full_name"] = "owner/renamed"
+        endpoint = AsyncEndpoint(SimpleNamespace(raw_response=httpx.Response(200, json=data)))
         install_client(monkeypatch, lambda *args, **kwargs: SimpleNamespace(
             rest=SimpleNamespace(pulls=SimpleNamespace(async_get=endpoint)),
         ))
