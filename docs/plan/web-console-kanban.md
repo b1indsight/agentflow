@@ -1641,7 +1641,77 @@ Webhook 未覆盖的交互/字段需在明确触发的核对中补齐，不能�
   CI 检查展示或未批准方案；原工作区保持不变。发布前按项目 review gate 审查，结果随 PR
   记录；不自动合并或部署。
 
-### [055] — 2026-10-20 — 修复 Markdown 相对目标与消息内脚注导航
+### [055] — 2026-10-20 — CI 活动显示工作流、任务和状态（方案待批准）
+
+- **Requirement:** 用户要求检查活动使用 `{workflow}: {job}: {status}`，例如
+  `CI: check (3.10): success`。保留 `app.name` 作者、紧凑行、每个检查的独立身份、
+  摘要正文与来源入口；不改变同作者分组及 Markdown 渲染。
+- **Evidence:** 已只读核对真实 GitHub 响应：check run 提供任务名、status、conclusion
+  和 check_suite.id，但没有 workflow 名。按该 suite ID 查询 Actions workflow runs，
+  实际返回 `name=CI`；安装的 githubkit 原生接口支持 check_suite_id 过滤。
+  [GitHub Actions API](https://docs.github.com/en/rest/actions/workflow-runs#list-workflow-runs-for-a-repository)
+  及 [GitHub App 权限表](https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps#repository-permissions-for-actions)
+  是接口和 Actions read 权限依据；生产 installation 是否已经授权尚未核实。
+- **Proposed data flow:** 仅在既有检查分页中，为 GitHub Actions 的 check_suite.id
+  查询真实 workflow 名，同页按 suite 去重；当前每页最多两个检查，因此最多增加两次
+  有界只读请求。使用 suite 身份关联，不解析链接、不假设 job/check ID 相同、不硬编码
+  `CI`。将名称补入检查元数据，保留归档 title 中的原始 job 名；界面组合显示三部分。
+  状态优先使用非空 conclusion，否则使用当前 status，缺失时明确显示 unknown。
+- **Incomplete data / errors:** workflow 名尚未取得时明确显示“未知工作流”，不从作者
+  或任务名称猜测；可选补全遇到权限不足、远端缺失或暂时故障时保留已读检查及状态，
+  在来源元数据注明原因，后续正常刷新可再次查询，不把暂时失败永久累计成历史缺口。
+  补全请求须有短超时并遵守现有同步总预算。同步 webhook 映射保持无 I/O，收到原始
+  检查时允许名称暂缺，后续既有 API 重扫补全；既有归档不会被宣称已自动补齐。
+- **Implementation / validation after approval:** 依次补读取与元数据、前端格式、权限说明
+  和公开接口回归。覆盖成功/失败、queued/in_progress、同 suite 去重、多 workflow、
+  缺失名称与权限不足、webhook 先到和重扫补全；桌面及手机检查同行格式、摘要和来源
+  入口，并运行相关 Python、前端单测、格式、类型/构建及浏览器回归。
+- **Scope / risk / delivery:** 不新增依赖、表结构、同步来源、Webhook 订阅或长期缓存。
+  额外请求会增加延迟与 API 配额消耗；App 的 Actions read 如需增加，由用户手动配置。
+  本项目前仅记录本地方案，等待明确批准；尚未为本项修改产品代码或测试，未提交、
+  推送、创建 PR、修改线上权限或部署。
+
+### [056] — 2026-10-20 — CI 活动格式实现及独立发布候选
+
+- **Requirement / implemented:** 用户批准 [055] 后实现 `{workflow}: {job}: {status}`，
+  随后要求提 PR。检查作者使用 `app.name`，标题进入作者右侧的紧凑活动栏，保留原始 job
+  title、摘要及来源入口；状态优先非空 conclusion，否则当前 status，缺失为 unknown。
+  后端在既有分页中按 Actions suite 查询真实 workflow name，同页去重、共用 2 秒预算，
+  外层取消继续传播。权限、限流和暂时故障阻止同页后续可选请求，原因进入元数据，
+  不永久累计为历史限制。Webhook 不联网，后续 API 重扫补全同一检查身份。
+- **Publication isolation:** 从最新远端 main 建立独立 jj workspace，仅迁入本线程 CI
+  作者、紧凑标题、工作流补全和相关测试文档。保留 main 的 [053]；编号 [054] 对应
+  [独立 Markdown PR #98](https://github.com/b1indsight/agentflow/pull/98) 的功能记录，
+  此处不复制其作者分组、Markdown、代码换行、依赖或浏览器回归。原共享工作区不修改。
+  不新增生产依赖、表结构、同步来源、Webhook 订阅或长期缓存；补充 Changelog 与 Actions
+  read 权限说明。生产 installation 授权尚未核实，用户如需增加权限须手动配置。
+- **Validation:** 发布候选运行全量 Python：438 passed、411 skipped，跳过项需要当前
+  未配置的 PostgreSQL 测试数据库；Ruff 和 Mypy（194 个源文件）通过。前端锁定安装、
+  Prettier、3 项单测、TypeScript/Vite 构建及全部 17 项浏览器回归通过。
+  桌面和 390px 手机另检查 6 种 CI 状态、独立作者栏、无重复标题、摘要、来源入口与原因
+  展开、无横向溢出，截图已检查。证据位于原工作区 `.amp/in/artifacts/` 的
+  `ci-pr-python.log`、`ci-pr-frontend.log`、`ci-pr-visual.log`、`ci-pr-desktop.png` 和
+  `ci-pr-mobile.png`。浏览器拦截 API，未宣称真实 App、数据库或线上部署验收。
+- **Ablation / trade-off:** 与发布候选后端相同的实现已使用真实 GitHub JSON 经原生
+  SDK/MockTransport 回放，同页 2 个同 suite job 只查询 1 次，移除去重后 2 次；
+  两个 suite 遇到 403 时仅查询 1 次，移除同页故障阻止后查询 2 次。两次查询分别延迟
+  1.2 秒，共用预算在 2.005 秒保留首个名称并中止第二次，移除预算后等待 2.422 秒。
+  保留机制以限制重复请求与可选补全延迟，慢查询可能需要后续刷新才能补齐。
+  原实验命令为 `PYTHONPATH=. uv run python .amp/in/verify-ci-workflow.py`，临时脚本
+  已清理，输入样本留在原工作区 `.amp/in/`；结果为
+  `.amp/in/artifacts/ci-workflow-sdk-validation.log`，另覆盖缺失名称、403/404/429/503、
+  不匹配 suite、webhook 先到及外层取消传播。
+- **Delivery boundary:** 本记录写入时发布候选已验证、等待独立审查；通过后按用户请求
+  推送并创建 PR，不合并、不部署、不修改 GitHub App 权限。已有归档不保证立即补齐名称。
+
+### [057] — 2026-10-20 — 修复工作流名补全恢复被历史去重拒绝
+
+- 修复 #100 问题 1：检查补全 A→B→A 时，远端时间不变，恢复版本被全历史去重拒绝。
+  检查改为仅对连续相同结果去重，保留旧版本和远端时间；不新增缓存或名称合并规则。
+- 保留一条真实 PostgreSQL 回归，验证名称恢复及重复读取幂等；详细验证记录见
+  [PR #101](https://github.com/b1indsight/agentflow/pull/101)。#100 问题 2 不在本次范围。
+
+### [058] — 2026-10-20 — 修复 Markdown 相对目标与消息内脚注导航
 
 - **Requirement / scope:** 用户要求先修 PR #98 首次审查的第 1、2 项：相对链接误指向
   控制台域名，以及 GFM 脚注覆盖 hash 路由并丢失引用属性。第 3 项带链接图片产生嵌套
@@ -1665,9 +1735,9 @@ Webhook 未覆盖的交互/字段需在明确触发的核对中补齐，不能�
   单 JS 包约 561 kB 的非阻断构建警告保留；本项未改后端，未重跑 Python。
   发布前按 review gate 审查；不自动处理新发现项，不合并或部署。
 
-### [056] — 2026-10-20 — 保留脚注引用的 Tab 顺序并消除标签后缀冲突
+### [059] — 2026-10-20 — 保留脚注引用的 Tab 顺序并消除标签后缀冲突
 
-- **Requirement / scope:** 用户要求修复 [055] 复审新增的两项 low：脚注回链将原引用
+- **Requirement / scope:** 用户要求修复 [058] 复审新增的两项 low：脚注回链将原引用
   移出 Tab 顺序，以及同条消息中的 `a` 重复引用与 `a-2` 标签生成相同引用 ID。
   首次审查的带链接图片嵌套锚点仍不在本轮范围内。
 - **Implemented / decision:** 仅从引用跳到脚注定义时添加负 tabindex，回到原引用时
@@ -1687,3 +1757,23 @@ Webhook 未覆盖的交互/字段需在明确触发的核对中补齐，不能�
   API 使用受控响应，不代表真实后端或线上部署。构建约 562 kB 的单包警告保留，未改后端，
   未重跑 Python。继续在同一独立 workspace / bookmark / PR 发布，不改共享工作区，
   发布前执行一次 review gate；新发现项只报告，不自动合并或部署。
+
+### [060] — 2026-10-20 — 合入最新 main 并解决 PR #98 冲突
+
+- **Requirement / integration:** 用户要求修复合并冲突。在独立 workspace 将最新 main
+  合入原功能分支，保留主线 CI 工作流、任务和状态摘要，以及本分支的同作者分组、来源
+  汇总、Markdown 和脚注行为；安全测试同时覆盖检查活动，保留双方新增回归。
+- **Record reconciliation:** 保留主线 [055]–[057] 及本分支 [054]。本分支相对链接修复
+  和脚注修复的原 [055]、[056] 分别顺延为 [058]、[059]，同步其内部引用，正文依据与
+  历次验证记录不变；Changelog 保留双方条目。
+- **Validation:** 整合后前端格式、TypeScript/Vite 构建、4 项单测与全部 20 项浏览器
+  回归通过，日志为 `.amp/in/artifacts/conflict-checks.log` 和 `conflict-e2e.log`。
+  临时浏览器场景另验证空元数据消息仍能展开合并来源，三条 CI 检查独立显示 success、
+  failure 和 queued，摘要正文继续渲染 Markdown。桌面和 390px 宽截图已检查，无重叠、
+  裁切或横向溢出，长代码完整换行；证据为 `conflict-visual.log`、`conflict-desktop.png`
+  和 `conflict-mobile.png`，临时测试源码已清理。
+  双方新增的 CI/相对链接回归和原功能记录逐段比对保留；主线后端未改，未重跑 Python。
+  浏览器使用受控 API 响应，不代表真实后端或线上验收；约 562 kB 单包警告保留。
+- **Delivery boundary:** 仍使用原 bookmark 和 PR；不修改共享工作区，不自动处理带链接
+  图片嵌套锚点，不合并 PR 或部署。发布前执行一次 review gate，更新 PR 后另核对
+  GitHub 合并状态；本地无冲突不代替远端确认。

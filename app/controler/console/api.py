@@ -61,11 +61,19 @@ async def detail(request: Request, flow_id: FlowId) -> FlowDetail:
 async def archive(request: Request, flow_id: FlowId, body: ArchiveRequest) -> FlowDetail:
     """Archive only local display state; JSON and origin checks prevent form-based CSRF."""
     origin = request.headers.get("origin")
-    if (origin is not None and origin != str(request.base_url).rstrip("/")) or (
-        request.headers.get("sec-fetch-site") not in (None, "same-origin", "none")
+    fetch_site = request.headers.get("sec-fetch-site")
+    # Browser-controlled Fetch Metadata survives proxy TLS termination and Host rewriting.
+    # Fall back to Origin comparison when there is no explicit same-origin signal.
+    if fetch_site not in (None, "same-origin", "none") or (
+        fetch_site != "same-origin"
+        and origin is not None
+        and origin != str(request.base_url).rstrip("/")
     ):
         raise ConsoleFailure("cross_origin_request", 403)
-    if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json":
+    if (
+        request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        != "application/json"
+    ):
         raise ConsoleFailure("json_required", 415)
     runtime: ServerRuntime = request.app.state.runtime
     return await runtime.console.db(partial(ConsoleStore(runtime.database).archive, flow_id))

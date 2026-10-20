@@ -10,7 +10,14 @@ test("GitHub and Agent content cannot inject HTML, unsafe links or remote images
   const payload =
     '\"><img src=x onerror="alert(1)"><script>alert(2)</script>&\n\n' +
     "[危险](javascript:alert%281%29)\n\n![图片](https://example.test/track.png)";
-  const kinds = ["comment", "message", "tool_call", "tool_result", "event"];
+  const kinds = [
+    "comment",
+    "message",
+    "tool_call",
+    "tool_result",
+    "event",
+    "check",
+  ];
   for (const kind of kinds) {
     const html = renderToStaticMarkup(
       <ActivityView
@@ -32,7 +39,11 @@ test("GitHub and Agent content cannot inject HTML, unsafe links or remote images
             deleted: false,
             prior: false,
             previous_version: null,
-            metadata: { name: payload },
+            metadata: {
+              name: payload,
+              workflow_name: payload,
+              status: payload,
+            },
           } satisfies ActivityItem
         }
       />,
@@ -100,5 +111,60 @@ test("Markdown destinations use the message source, never the console origin", (
     assert.match(withoutSource, /href="https:\/\/example.test\/guide"/);
     assert.match(withoutSource, /相关/);
     assert.match(withoutSource, /图片：相对图片/);
+  }
+});
+
+test("CI checks show workflow, job and status beside the app without hiding summaries", () => {
+  // Checks have app identity and job names; completed alone would hide success versus failure.
+  const check: ActivityItem = {
+    key: "check-1",
+    version: 1,
+    source: "commit.check_runs:head",
+    kind: "check",
+    author: "GitHub Actions",
+    title: "check (3.10)",
+    occurred_at: "2026-10-20T06:49:33Z",
+    updated_at: "2026-10-20T06:49:33Z",
+    observed_at: "2026-10-20T06:49:33Z",
+    body: "检查通过",
+    body_length: 4,
+    url: null,
+    parent_key: null,
+    deleted: false,
+    prior: false,
+    previous_version: null,
+    metadata: {
+      workflow_name: "CI",
+      status: "completed",
+      conclusion: "success",
+    },
+  };
+  const html = renderToStaticMarkup(<ActivityView entry={check} />);
+  assert.match(
+    html,
+    /class="event-action">CI: check \(3\.10\): success<\/span>/,
+  );
+  assert.doesNotMatch(html, /class="message-title"/);
+  assert.match(html, /检查通过/);
+  for (const [metadata, label] of [
+    [
+      { workflow_name: "CI", conclusion: "failure" },
+      "CI: check (3.10): failure",
+    ],
+    [{ workflow_name: "CI", status: "queued" }, "CI: check (3.10): queued"],
+    [
+      { workflow_name: "Release", status: "in_progress", conclusion: "" },
+      "Release: check (3.10): in_progress",
+    ],
+    [
+      { status: "completed", conclusion: "cancelled" },
+      "未知工作流: check (3.10): cancelled",
+    ],
+    [{}, "未知工作流: check (3.10): unknown"],
+  ] satisfies [ActivityItem["metadata"], string][]) {
+    const markup = renderToStaticMarkup(
+      <ActivityView entry={{ ...check, metadata }} />,
+    );
+    assert.ok(markup.includes(`class="event-action">${label}</span>`), label);
   }
 });
