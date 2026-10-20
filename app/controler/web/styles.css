@@ -1013,34 +1013,70 @@ svg {
   margin: 16px 0;
 }
 .message-footer {
-  display: grid;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
   gap: 8px;
   margin-top: 12px;
   font-size: var(--text-meta);
   line-height: 1.5;
   color: var(--muted);
 }
-.message-provenance summary {
+.message-footer .edit-history:has(.activity-diff) {
+  flex-basis: 100%;
+  min-width: 0;
+  order: 1;
+}
+.message-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+.message-provenance {
+  flex-basis: 100%;
+  min-width: 0;
+}
+.message-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
   cursor: pointer;
-  width: fit-content;
+}
+.message-icon svg {
+  width: 18px;
+  height: 18px;
+}
+.message-icon .github-mark {
+  fill: currentColor;
+  stroke: none;
+}
+.message-icon:focus-visible {
+  outline: none;
+}
+.message-icon:focus-visible svg path {
+  stroke-width: 3;
+}
+.message-icon:hover,
+.message-icon:focus-visible,
+.message-icon[aria-expanded="true"] {
+  color: var(--green);
 }
 .message-provenance pre {
   max-width: 100%;
   overflow-x: auto;
-  margin: 8px 0 0;
+  margin: 0;
   padding: 10px 12px;
   background: var(--bg);
   border-radius: 5px;
   font-size: var(--text-small);
   color: var(--ink);
-}
-.message-source-link {
-  width: fit-content;
-  color: inherit;
-}
-.message-source-link:hover,
-.message-provenance summary:hover {
-  color: var(--green);
 }
 .compact-event .source-tag,
 .continuation .message-label {
