@@ -119,11 +119,11 @@ class ActivityStore(Repository):
             digest = hashlib.sha256(
                 json.dumps(content, sort_keys=True, separators=(",", ":")).encode()
             ).hexdigest()
-            # GitHub exposes no revision clock for thread resolution. Reopening A→B→A
-            # must keep the second A; repeated reads of the current A are still idempotent.
+            # Thread resolution and optional check enrichment have no remote revision clock.
+            # Keep A→B→A transitions; repeated reads of the current A are still idempotent.
             duplicate = (
                 (previous and previous["digest"] == digest)
-                if item.kind == "thread"
+                if item.kind in ("thread", "check")
                 else connection.execute(
                     "SELECT 1 FROM console_activity WHERE flow_id=%s AND key=%s AND digest=%s",
                     (flow_id, item.key, digest),
