@@ -12,7 +12,8 @@
 ## 1. 准备运行环境
 
 准备 Python 3.12+、uv、PostgreSQL，以及 worker 账号可运行且已配置认证的 Codex CLI、Git
-和所需项目工具链。若项目使用 jj，还需安装 jj。serve、worker 应使用同一个应用版本。
+和所需项目工具链。若项目使用 jj，还需安装 jj。Worker 更新为独立的 opt-in 流程；Server 部署不
+等待所有 Worker 升级，但连接中的 Worker 仍须通过现有协议和身份鉴权。
 
 在 control 账号的应用检出目录执行：
 
@@ -49,7 +50,8 @@ docker compose up -d postgres
 此命令只运行现有开发数据库，不容器化应用；没有 Docker 时使用自行安装的 PostgreSQL。
 仓库 Compose 的示例账号只适合本机开发。远程数据库使用独立凭据和 TLS。
 serve 启动时初始化/更新 schema，数据库账号需拥有应用 schema。当前没有单独部署迁移命令；
-从旧版本升级前先备份，并阅读 [README 中的升级说明](../../README.md)，不要并行运行新旧 serve。
+不要并行运行新旧 serve。Webhook 驱动的 Server 镜像更新只保留定向删列检查，不执行备份、
+恢复或广泛的 schema/协议兼容性检查，详见 [Server 更新](server-update.md)。
 
 ## 2. 启动 serve 和 worker
 
@@ -99,6 +101,10 @@ uv run flowtool worker
 worker 不自动读取 `.env`，上述加载仅针对 worker 私有文件。回到 control 终端运行
 `uv run flowtool workers`，确认 `worker-1` 在线。保留 worker root、journal 和会话数据，
 不要为重启临时更换 identity/root。启动注册成功尚不代表真实编码闭环已通过。
+
+macOS 登录用户的原生 Worker 可另行接入按执行空闲更新，首次接入、私有环境 JSON、
+LaunchAgent 和本地 CLI 见 [Worker 更新](worker-update.md)。Linux Worker 自动更新尚未提供；
+不要把该流程套用到 systemd、Compose 或 Kubernetes Worker。
 
 ## 3. 配置 Cloudflare 入口
 

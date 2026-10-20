@@ -7,6 +7,11 @@
 脚本及其测试，不执行自动部署。下方 Initial plan 保留最初完整设想，实际交付范围以本节和
 后续变更记录为准。
 
+**当前后续（Planning）：** 上述 Stage/PR/Current scope 记录历史 #93 的交付。本次草稿
+[#104](https://github.com/b1indsight/agentflow/pull/104) 先评审本文末尾的「Server 与 Worker
+按执行空闲更新」方案；Worker 实现及此前本地 Server 更新代码待方案批准后进入同一个
+PR。当前不含实现，也不执行线上部署。
+
 ## 1. Initial plan
 
 ### Summary and motivation
@@ -182,3 +187,214 @@ kubectl 使用现有 kubeconfig，containerd 权限通过预先配置的用户�
 - **Behavior:** PR 保持只构建测试；main 更新后发布 `sha-<完整提交 SHA>`，保留 `v*` 标签与
   手工发布入口。不增加 latest 标签，不自动更新集群或 Worker。
 - **Delivery:** 仅保留本地工作流和文档修改，暂不提交、推送或更新既有草稿 PR。
+
+### 2026-10-20 — 后续方案：Server 与 Worker 按执行空闲更新
+
+**状态：方案草稿，Worker 未实现，等待用户批准。** 此后续工作使用新的 bookmark 和草稿
+PR；历史 [#93](https://github.com/b1indsight/agentflow/pull/93) 已合并，不更新或复用已关闭 PR。
+批准后在本次同一个 PR 交付 Worker 更新和此前仅保存在本地的 Server 更新代码，不混入
+其他控制台功能。不在此任务中安装、停止、重启或部署真实服务。
+
+#### 需求与现有事实
+
+- 用户追加“再加一个 worker 更新部署功能，然后提 pr，要求同上”。此前要求继续生效：
+  等当前执行收敛即可更新，不等待 Flow 完成或 binding 释放；新增/修改 Worker 不阻止
+  Controller 部署；不备份/还原，不增加 schema/源码/协议指纹、固定名单或全员重连门槛。
+  已在本地完成的 Server 定向删列检查保留，后续一并交付。
+- 本记录初始计划描述另一台机器上的 macOS 原生 Worker；[运行说明](../operations/runbook.md)
+  也仅提供手动 macOS 进程，没有 launchd。实际主机未检查，**本方案暂按 macOS 原生
+  Worker 实施，需用户确认**。现有 Images 仅发布 Linux/amd64，不能直接用于 macOS。
+- [drain](../operations/cancel-drain.md) 只阻止新 Flow，已绑定的 revision/archive 仍会
+  派发；`SIGTERM` 会取消当前执行，不能作为“等空闲”的实现。journal 在已确认结果后
+  可继续留作原 Flow 的 provenance，文件存在不代表忙碌。
+- [现有网关](../../app/controler/workers/gateway.py) 通过 token 验证 Worker 身份并核对
+  Register，协议严格拒绝未知字段。更新通知应走这个已认证的连接；不建立第二个同身份
+  WebSocket 抢占当前 epoch，不给 Worker 注入 DB/App/GitHub 凭据。
+
+#### 提议的使用方式和边界
+
+1. **首版覆盖 macOS 原生 Worker。** 提供 launchd LaunchAgent 模板及稳定 launcher，按
+   已有运行账号显式配置路径；默认仅生成/检查，不执行 `launchctl`。首次接入由用户安排
+   人工维护，确认旧进程已安全退出后再托管。LaunchAgent 依赖用户登录；如需开机无人
+   登录运行，应先把方案改为 LaunchDaemon，而不在实现中偷偷改系统服务。
+2. **后续事件沿用 GitHub Webhook 入口。** 将本地既有事件消费者整理为受版本管理的
+   源码，保留原 Server enqueue/SQLite 队列和调用合同。验证成功的 Images/main/push
+   run、attempt、完整 SHA 后，为 Worker 发布独立的原生 release 通知；Worker 更新的
+   失败、离线或未启用更新，不改变 Server 事件结果，也不阻止 Controller 部署。
+   主机端接入仅提供本地代码、安装包及说明，本任务不替主机安装或改消费者。
+3. **通知只包含固定仓库的完整 SHA 与发布事件身份。** Controller 经现有认证 WSS
+   发送给声明支持更新的 Worker；无任意命令/脚本/下载 URL 字段，不新增公网管理接口、
+   远程 shell 或 SSH 部署能力。旧 Worker 仍可工作，只跳过其自动更新；扩展 Register
+   的可选能力字段，不能把支持更新变成所有 Worker 的注册前提。
+4. **本地显式启用自动 apply。** 未启用或未由受支持 launcher 托管时只检查/报告。
+   暂定运维入口为 `agentflow-worker-update --sha <40hex>` 和带 `--apply` 的版本；
+   check 不暂停或改运行指针，apply 请求由拥有执行对象的 Worker runtime 协调完成。
+   同一 Worker 一次只允许一个 operation，不用外部 PID 猜测当前执行或发送更新 SIGTERM。
+5. **先准备，再暂停。** 对公开仓库做只读 fetch，核实候选为所通知的成功 main 发布且
+   没有被更新的 main/已采用版本淘汰。在单独的、唯一的最终 release 目录导出固定 SHA，
+   创建锁定依赖的非 editable venv、自检后写入完整标记；不 `git pull` 或 `uv sync`
+   正在运行的 checkout。venv 含绝对路径，不在构建后搬动目录；只原子切换启动指针。
+
+#### 执行空闲、停启和恢复
+
+- **只暂停目标 Worker。** 在数据库增加 operation-owned 的 per-worker 维护记录，
+  不修改 drain；任务领取与暂停都先取得现有全局维护锁，再按相同顺序锁定目标 Worker，
+  领取后复查暂停。公平选择也跳过暂停者；INITIAL、绑定 revision、archive 全部受控。
+  暂停提交前已领取的任务继续完成，不归还或伪装为未派发；其他 Worker 正常接任务。
+- **两端确认同一次空闲。** Controller 检查目标的 running job、已授权未 Started 派发、
+  未确认 stop、未应用 result、未知/未完成 effect 和占用执行槽。Worker 检查当前持有的
+  executor/task、assignment 及结果/停止 ACK 持久化。Flow/binding 数、journal 文件存在、
+  health 文件、离线或单独 `_execution is None` 都不能代替这两个确认。
+- **先记录切换意图，再切换和退出。** 确认绑定 operation、原 Worker 进程实例和当前
+  epoch；将 cutover-intent 持久化后才原子切换启动指针。旧 Worker 自行正常退出，释放
+  原 root lock，launcher 解析新 release 的真实路径后启动同一身份的新进程。旧进程的
+  延迟 import 不经过可变指针。部署状态与 assignment journal 分开保存。
+- **新进程就绪后才解除本次暂停。** 需要新进程实例/epoch、实际运行 release SHA、
+  Worker ID、root 路径/设备/inode、HOME 和 journal 校验一致；不以“进程出现”或旧健康
+  文件代替。保留 root、HOME、repo、session 和凭据，不改 journal 版本、不清历史。
+  运行时无法读取 journal 或完成注册是启动失败；不因协议/源码摘要不同提前拦截更新。
+- **保留等待 review 的绑定。** 维护期间不因该 Worker 重连宽限过期而回收其空闲绑定；
+  恢复时重新给予正常宽限。未知执行、stop/result/effect fence 仍生效。Controller 重启
+  保留 Worker 暂停，Server 全局 resume 不能清除它，Worker 维护也不能解除全局暂停。
+- **故障保留现场。** 准备失败不暂停；进入切换意图前，只有原实例仍健康且暂停归属
+  匹配时才能中止并恢复接单。切换尝试后故障/超时/断电保留暂停和 incomplete 记录，
+  不自动回退代码、不自动恢复派发、不盲目重放。launcher 对一个更新 operation 只消费
+  一次启动授权，不能用 KeepAlive 无限重试掩盖歧义失败；人工恢复另行明确操作。
+
+#### 最小改动范围与实施顺序
+
+1. 在 `app/persistence/maintenance.py`、`workers.py`、schema 和恢复策略中实现目标暂停、
+   同序事务 fence、空闲判定及 binding 宽限，复用已有 Server 暂停的安全边界。
+2. 在 `app/contracts/protocol.py`、Controller Worker gateway/connection 和 Worker client
+   接入版本明确的更新通知、维护请求/确认；身份来自已有会话，只允许维护自己。维护
+   消息必须由统一接收路径分流，不能破坏运行中任务的 tool/result/stop 消息及 ACK。
+3. 在 `app/worker/` 增加原生 release 准备及更新协调模块，接入 runtime 的计划退出和
+   新实例确认；CLI 只提交受限的本地更新请求，不独立抢占 Worker 连接或执行对象。
+4. 在 `scripts/` 纳入事件消费者及 Worker 安装/检查入口，提供 `deploy/launchd/` 模板；
+   对 Server 与 Worker 分别记录结果，不将 Worker 的完成条件加入 Server cutover。
+5. 整理本线程已有 Server 更新/删列代码，隔离工作区的无关变更，在同一个 PR 中验证、
+   审查和交付；同步部署说明、停机 runbook 与 changelog。Linux Worker 的 K8s/Compose/
+   systemd 自动更新、跨节点/卷迁移、无人值守回滚和数据库恢复暂不纳入本次范围。
+
+#### 验证与消融（尚未执行）
+
+- PostgreSQL 回归：空闲 active Flow/绑定允许更新；目标暂停阻止新 Flow 和绑定后续
+  任务，其他 Worker 继续；用确定性屏障测试领取与暂停两种提交顺序及全局暂停交错。
+- 本地进程/协议回归：运行中任务、未 Started 派发、ResultAccepted/StopAccepted 丢失、
+  未应用结果与未知 effect 均不能提前退出；ACK 收敛后以原身份和 journal 完成更新。
+  串联真实无害子进程和 release/venv，验证旧进程未受准备影响、无双实例、指针变化及
+  新实例确认；使用 launchd 命令替身不代表已完成真实服务验收。
+- 失败矩阵：准备失败、重复/过期事件、并发 operation、连接断开、切换后启动失败、
+  错误 SHA/root/实例、Controller 重启、超出 binding 宽限以及未启用更新的旧 Worker。
+  Server 队列历史/去重、空闲更新、Worker 增减不阻断和定向删列回归必须继续通过。
+- 消融分别移除目标领取 fence、本地 ACK 确认、实际运行版本确认与维护宽限保护；相同
+  场景必须捕获提前分配/停机、旧实例冒充就绪或错误回收。若简化后仍满足合同，就删除
+  没有证据支持的机制。实现后、代码审查前执行并记录，不把方案当作验证结果。
+- 执行相关 pytest、Ruff/format、Mypy 和现有镜像 smoke；macOS 用 `plutil` 检查模板，
+  真实 launchd、发布获取及进程替换在获准的隔离环境另行验收。不得触碰当前实际 Worker。
+
+#### 需要批准的选择
+
+请确认：**首版按当前记录的 macOS 原生 Worker，使用登录用户 LaunchAgent 托管，经过
+既有认证 WSS 接收发布通知，再按目标 Worker 执行空闲更新；Linux 容器 Worker 自动部署
+后续再做。** 如果实际 Worker 平台或需要无人登录开机运行与此不同，应先修订本方案。
+
+本轮只阅读本地代码和 GitHub 只读元数据，未检查真实 Worker 主机。方案草稿使用本地
+Claude Opus 5.5，初始化及响应模型一致、工具/MCP 为空、成功退出；已按实际认证/恢复
+实现核对，修正 venv 搬动、切换意图时点及盲目 KeepAlive 等建议。咨询不替代运行验证。
+
+### 2026-10-20 — 实施：独立发布队列、执行空闲切换与本地验证
+
+**实施状态：本地代码、部署说明与回归验证已完成，尚未安装或部署真实服务。** 本条承接上面的
+后续方案；前面的“方案草稿 / 未实现 / 等待确认”保留为当时记录。本次实现仍使用
+[#104](https://github.com/b1indsight/agentflow/pull/104) 和 `feat/execution-idle-updates`，
+没有混入原工作区中的 label、GitHub client 或控制台会话展示改动。
+
+#### 实际实现和决策
+
+- 纳入本地已有的 [Server 更新器](../../scripts/server_update/update-agentflow-server.py)、
+  [全局维护暂停](../../app/persistence/maintenance.py) 和
+  [定向删列检查](../../scripts/server_update/column-check.py)。暂停关闭任务领取、triage、
+  Webhook 消费和对账/Console 同步的新批次，等已接纳执行收敛；活动 Flow、空闲 binding、
+  queued job 和 Worker 名单均不作为部署门槛。删列在临时 PostgreSQL 做 schema-only
+  对比与重放，覆盖声明移除、动态 DROP 和同名重建；新增列/默认值变化放行。
+  无数据库备份/还原、源码/协议指纹或 Worker 全员重连条件。
+- [Worker 维护记录](../../app/persistence/worker_updates.py) 与 Server 暂停相互独立。
+  `assign_job` 公平选择和加锁后的复查均排除目标暂停；绑定宽限保留。对正在 busy 的
+  同一连接允许取得 pause，但不能 commit，直至现有任务和 effect 收敛；其他 Worker
+  正常接单。领取先提交、暂停先提交两种顺序均由真实 PostgreSQL 事务验证。
+- [协议扩展](../../app/contracts/updates.py) 经原认证 WSS 的单接收器分流，只有
+  `Register.update_version=1` 才获得通知。旧 Worker 不需要声明该能力。消息只含固定
+  公开仓库的 SHA/run/attempt、operation 和身份，无可执行命令或下载 URL。
+- [本地协调器](../../app/worker/updates/coordinator.py) 先验证发布并准备最终路径的非 editable
+  release，再申请 pause。Worker 的 executor、assignment、结果/stop ACK 与 Controller
+  执行事实都空闲后，先持久化 cutover intent，再请求 commit、切换指针并正常退出。
+  实际导入的安装包 SHA、真实父 launcher、venv 路径、root/HOME/journal 和新 instance/epoch
+  共同确认完成。丢失 resume 回应只允许同一新实例重连后确认，不能用另一个进程重放。
+- [稳定 launcher](../../scripts/worker_update/launcher.py) 使用最终路径解释器和 `-I`，
+  旧子进程退出后才启动新实例；每次 cutover 只消费一次持久化启动授权。选择
+  `RunAtLoad=true / KeepAlive=false`，启动失败保留暂停和现场，不自动 rollback/retry/resume。
+  首次安装默认仅渲染；显式 apply 仍不执行 launchctl。Linux Worker 自动更新继续延期。
+- [事件消费者](../../scripts/image_event.py) 保留 Server 队列历史，新增独立 Worker 队列、
+  锁、状态和重试入口。Worker notifier 失败后 Server 同一事件仍能部署成功。发布器核对
+  Ready Pod 的 StatefulSet 归属和 UID；adapter 再次核验公开发布，只有 apply 才写 DB，
+  不初始化 DB。相同 run/SHA 的更高 attempt 可替换发布，旧 attempt 和身份冲突被拒绝。
+- 新增 [Worker 部署指南](../deployment/worker-update.md)，同步
+  [Server 指南](../deployment/server-update.md)、README、runbook 与 changelog。
+  首次接入和主机端 notifier/消费者安装由操作者另外安排，本任务不访问部署主机。
+
+#### 验证结果和边界
+
+在隔离 jj workspace 使用独立 PostgreSQL 17（`127.0.0.1:50528`，每个测试独立 schema）：
+
+```sh
+PYTHONPATH="$PWD" FLOWTOOL_TEST_DATABASE_URL="$SCRATCH_TEST_DATABASE_URL" \
+  /path/to/test-venv/bin/python -m pytest -q
+/path/to/test-venv/bin/python -m ruff check app scripts tests
+/path/to/test-venv/bin/python -m mypy app tests
+python scripts/build_console.py
+uv build --no-sources --out-dir .amp/in/artifacts/dist
+```
+
+- 全量 **927 passed、0 skipped**，仅既有 Starlette 弃用告警；Ruff 通过，新增文件及更新器
+  29 个文件 format check 通过；Mypy 213 个源文件无错误。`uv lock --check` 通过，无新依赖。
+- [Worker 切换测试](../../tests/test_worker_cutover.py) 验证真实 journal ACK、准备失败、
+  commit 回应丢失、指针写失败、check-only、新实例确认及新旧 epoch。实际生产两端
+  parser/reader 和 PostgreSQL 在内存双向 transport 上交换通知/维护回复，保留执行帧顺序；
+  没有为维护另外建立同身份连接。
+- [launcher 测试](../../tests/test_worker_launcher.py) 使用真实最终路径 venv 和无害子进程：
+  旧版延迟 import 仍读旧代码，同 root 锁无重叠，journal 字节不变，新版失败不重放启动。
+  单独复制候选包并写 build stamp，执行 `uv sync --locked --no-dev --no-editable`，
+  以 `python -I` 实际导入安装包并读到预期 SHA，CLI entrypoint 的 `--help` 通过。
+- Console 生产构建、sdist/wheel 成功；wheel 包含构建后的 console。macOS `plutil -lint`
+  检查模板和真实 render 输出通过，默认安装未创建目标目录。构建仅有现存的 bundle-size 告警。
+- Docker 不可用，本地镜像 smoke 未执行。Kubernetes、GHCR/GitHub 发布和主机服务边界用替身；
+  未做真实 launchd、完整原生 Worker 进程与真实 WSS/发布链路的联合验收，也未安装/停止/重启
+  实际服务。这些结果不能解释为已部署。PR CI 以随后推送的实现 head 为准。
+
+#### 已执行消融
+
+临时脚本 `.amp/in/ablate_updates.py` 只在内存中重新编译被比较的方法，不改源码文件。
+对 `baseline / admission / acks / actual-sha / new-instance / grace` 各自单独运行：
+
+```sh
+PYTHONPATH="$PWD" FLOWTOOL_TEST_DATABASE_URL="$SCRATCH_TEST_DATABASE_URL" \
+  /path/to/test-venv/bin/python .amp/in/ablate_updates.py VARIANT
+```
+
+共同输入为 `test_target_pause_keeps_binding_and_other_workers_running`、
+`test_cutover_requires_idle_and_new_version_identity_before_resume` 和
+`test_local_idle_requires_result_and_stop_ack_even_without_executor`。基线 **3 passed**；
+每个简化变体均 **1 failed、2 passed**，失败位置对应下表，未发生其他用例故障。
+
+| 简化变体 | 单独移除/替代 | 实测违反的要求 |
+| --- | --- | --- |
+| admission | `assign_job` 的两个目标暂停排除谓词 | pause 后绑定 revision 仍被派发 |
+| acks | `idle_for_update` 仅检查 executor 不存在 | 未确认 terminal result 被误判为空闲 |
+| actual-sha | resume 的实际运行 SHA 检查 | 错误 SHA 的新实例能解除暂停 |
+| new-instance | resume 的原 instance/epoch 排除 | 旧 epoch 可完成切换 |
+| grace | sweep 的目标维护宽限保护 | 超时后等待 review 的 binding 被错误释放 |
+
+另测联合移除 SHA/新实例确认，同样捕获旧实例提前 resume。保留这些机制；没有增加全员版本
+检查或全员等待。原始结果位于本地 `.amp/in/artifacts/ablation-*.log`，全量/构建/安装验证
+分别为 `pytest-full.log`、`build.log`、`native-package.log`；以上均为未跟踪的本地证据。

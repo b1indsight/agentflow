@@ -9,8 +9,6 @@ from enum import StrEnum
 from typing import Annotated, Literal
 
 from pydantic import (
-    BaseModel,
-    ConfigDict,
     Field,
     SecretStr,
     TypeAdapter,
@@ -18,23 +16,16 @@ from pydantic import (
     model_validator,
 )
 
+from app.contracts import protocol_base
 from app.contracts.conversation import ConversationError, HistoryPage
+from app.contracts.protocol_base import Message, ProtocolModel
+from app.contracts.updates import MaintenanceReply, ReleaseAvailable, WorkerMaintenance
 from app.domain.context_models import ReviewContext
 from app.domain.delivery_models import DeliveryReceipt
 from app.domain.models import FeedbackRef, JobState, RevisionCodingOutput, VcsKind
 from app.domain.review_models import ReviewFeedback
 
-PROTOCOL_VERSION: Literal[13] = 13
-
-
-class ProtocolModel(BaseModel):
-    """Strict protocol base so malformed remote input fails at the trust boundary."""
-
-    model_config = ConfigDict(extra="forbid")
-
-
-class Message(ProtocolModel):
-    protocol_version: Literal[13] = PROTOCOL_VERSION
+PROTOCOL_VERSION = protocol_base.PROTOCOL_VERSION
 
 
 class ConversationQuery(Message):
@@ -208,6 +199,7 @@ class Register(Message):
     type: Literal["register"] = "register"
     worker_id: str
     recovery: RecoveryDescriptor | None = None
+    update_version: Literal[1] | None = None
 
 
 class Started(Message):
@@ -278,7 +270,7 @@ class StopAccepted(StopFence):
 
 
 WorkerMessage = Annotated[
-    Register | Started | Heartbeat | Succeeded | Failed | FlowToolRequest | ExecutionStopped | ConversationResult,
+    Register | Started | Heartbeat | Succeeded | Failed | FlowToolRequest | ExecutionStopped | ConversationResult | WorkerMaintenance,
     Field(discriminator="type"),
 ]
 
@@ -405,7 +397,9 @@ ServerMessage = Annotated[
     | FlowToolResponse
     | StopExecution
     | StopAccepted
-    | ConversationQuery,
+    | ConversationQuery
+    | MaintenanceReply
+    | ReleaseAvailable,
     Field(discriminator="type"),
 ]
 

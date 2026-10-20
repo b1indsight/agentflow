@@ -50,6 +50,7 @@ from app.persistence.database import Database
 from app.persistence.deliveries import DeliveryStore
 from app.persistence.jobs import JobStore
 from app.persistence.stops import StopIntent, StopStore
+from app.persistence.worker_updates import WorkerUpdateStore
 from app.persistence.workers import WorkerStore
 from app.telemetry.metrics import Metrics
 
@@ -75,6 +76,7 @@ class WorkerGateway:
         self.jobs = JobStore(database)
         self.stops = StopStore(database)
         self.workers = WorkerStore(database)
+        self.updates = WorkerUpdateStore(database)
         self.metrics = metrics
         self.coordinator = coordinator
         self.tools = tools
@@ -127,7 +129,8 @@ class WorkerGateway:
             register = parse_worker_message(await socket.receive_text())
             if not isinstance(register, Register) or register.worker_id != worker_id:
                 raise ProtocolViolation("worker registration does not match authenticated identity")
-            connection = WorkerConnection(socket, self.conversations, worker_id, connection_epoch)
+            connection = WorkerConnection(socket, self.conversations, worker_id, connection_epoch,
+                                          self.updates if register.update_version == 1 else None)
             wake = await self._register_session(worker_id, connection)
             registered_session = True
             worker = self.workers.worker_connected(
@@ -169,6 +172,7 @@ class WorkerGateway:
                     ).model_dump_json()
                 )
 
+            connection.start_updates()
             while True:
                 if current is None:
                     assert wake is not None

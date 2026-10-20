@@ -25,6 +25,7 @@ from app.github import (
 )
 from app.persistence.database import Database
 from app.persistence.deliveries import DeliveryStore
+from app.persistence.maintenance import MaintenanceStore
 from app.persistence.reconciliation import FeedbackCheck, ReconcileStore
 from app.persistence.reviews import ReviewStore
 
@@ -67,6 +68,7 @@ class FeedbackReconciler:
         database: Database,
     ) -> None:
         self.database = database
+        self.maintenance = MaintenanceStore(database)
         self.deliveries = DeliveryStore(database)
         self.reconcile_store = ReconcileStore(database)
         self.reviews = ReviewStore(database)
@@ -79,7 +81,9 @@ class FeedbackReconciler:
         # Separate from PR polling: slow PR reads must not delay feedback scheduling.
         while True:
             try:
-                await self._sweep()
+                with self.maintenance.activity("feedback") as admitted:
+                    if admitted:
+                        await self._sweep()
             except Exception:  # noqa: BLE001 -- failed DB operations remain durably due
                 logger.exception("feedback sweep failed")
             await asyncio.sleep(min(5.0, self.interval))

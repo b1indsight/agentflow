@@ -1,0 +1,484 @@
+"""Run the webhook updater CLI with real PostgreSQL and a simulated Kubernetes boundary."""
+
+import copy
+import importlib.util
+import itertools
+import json
+import os
+import runpy
+import shlex
+import subprocess
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from app.contracts.protocol import PROTOCOL_VERSION
+from app.persistence.maintenance import MaintenanceStore
+from app.persistence.schema import SCHEMAS
+from scripts.server_update.build_installer import build
+from tests.test_maintenance import idle_binding
+from tests.test_server_update import Commands
+
+TOOLS = Path(__file__).parents[1] / "scripts/server_update"
+IMAGE = "ghcr.io/example/serve@sha256:" + "a" * 64
+REAL_RUN = subprocess.run
+
+
+class ImageCommands(Commands):
+    """Keep the real exec adapter and DB, replacing only Kubernetes/process transport."""
+
+    def __init__(self, store, failure=""):
+        super().__init__("StatefulSet", failure)
+        self.store = store
+        self.image = IMAGE
+        self.workload["spec"]["template"]["spec"]["terminationGracePeriodSeconds"] = 60
+        self.probe = None
+        self.probe_result = None
+        self.events = []
+        self.paused_status_reads = 0
+        # Authorized-but-not-registered and registered-but-not-authorized workers
+        # must not turn a controller/frontend update into a worker rollout gate.
+        self.env = dict(
+            os.environ,
+            FLOWTOOL_DATABASE_URL=store.database_url,
+            FLOWTOOL_WORKER_TOKENS='{"unregistered":"TEST-UPDATER-SECRET"}',
+        )
+
+    def pod(self):
+        pod = super().pod()
+        pod["metadata"]["name"] = "server-0"
+        new = pod["metadata"]["uid"] == "new"
+        pod["status"]["containerStatuses"][0]["imageID"] = (
+            "wrong" if new and self.failure == "running-digest" else "checked" if new else "old"
+        )
+        if new and self.failure != "readiness":
+            self.events.append("new-ready")
+        return pod
+
+    def run_probe(self):
+        schemas = list(SCHEMAS)
+        changes = {
+            "add-column": "ALTER TABLE workers ADD COLUMN IF NOT EXISTS controller_hint TEXT",
+            "change-default": "ALTER TABLE workers ALTER COLUMN draining SET DEFAULT true",
+            "drop-readd": "ALTER TABLE workers DROP COLUMN draining;"
+            "ALTER TABLE workers ADD COLUMN draining BOOLEAN NOT NULL DEFAULT false",
+            "dynamic-drop": "DO $$ BEGIN EXECUTE 'ALTER TABLE workers DROP COLUMN draining'; END $$",
+            "drop-table": "DROP TABLE server_activities",
+            "legacy-drop": "ALTER TABLE workers DROP COLUMN IF EXISTS legacy_hint",
+        }
+        if self.failure == "remove-definition":
+            schemas[0] = schemas[0].replace("  draining BOOLEAN NOT NULL DEFAULT FALSE,\n", "")
+        elif self.failure in changes:
+            schemas.append(changes[self.failure])
+        check = self.probe["spec"]["containers"][0]["command"]
+        assert check[2] == (TOOLS / "column-check.py").read_text()
+        # Replace only the socket transport. Candidate DDL, isolated databases and
+        # the production checker all execute against the real test PostgreSQL.
+        bootstrap = (
+            "import os, psycopg\n"
+            "from psycopg.conninfo import make_conninfo\n"
+            "import app.persistence.schema as schema\n"
+            f"schema.SCHEMAS = {schemas!r}\n"
+            "namespace = {'__name__': 'column_probe'}\n"
+            f"exec({check[2]!r}, namespace)\n"
+            "dsn = os.environ['FLOWTOOL_DATABASE_URL']\n"
+            "with psycopg.connect(dsn) as connection: admin = connection.info.user\n"
+            "namespace['connect'] = lambda database, user: psycopg.connect(\n"
+            "    make_conninfo(dsn, dbname=database, user=admin if user == 'postgres' else user),\n"
+            "    autocommit=True)\n"
+            "namespace['main']()\n"
+        )
+        return REAL_RUN(
+            [sys.executable, "-c", bootstrap, check[3]],
+            text=True,
+            capture_output=True,
+            env=self.env,
+            check=False,
+            timeout=30,
+        )
+
+    def __call__(self, command, *, input=None, **kwargs):
+        self.calls.append(tuple(command))
+        assert list(command[:6]) == [
+            "kubectl",
+            "--context",
+            "test-context",
+            "--namespace",
+            "test-namespace",
+            "--request-timeout=30s",
+        ]
+        args = list(command[6:])
+        operation, resource = args[:2]
+        if operation == "exec":
+            inner = args[args.index("--") + 1 :]
+            assert inner[:2] == ["python", "-"]
+            self.events.append("adapter-" + inner[2])
+            assert input == (TOOLS / "agentflow-maintenance.py").read_text()
+            if inner[2] == "status" and MaintenanceStore(self.store.database).status().operation_id:
+                self.paused_status_reads += 1
+                if self.failure == "finishes-job" and self.paused_status_reads == 2:
+                    assert "scale-zero" not in self.events
+                    with self.store.connection() as connection:
+                        connection.execute(
+                            "UPDATE jobs SET state='done',result_received_at=now(),result_applied_at=now()"
+                        )
+                        connection.execute("UPDATE workers SET status='online',current_job_id=NULL")
+                    self.events.append("job-finished")
+            return REAL_RUN(
+                [sys.executable, "-", *inner[2:]],
+                input=input,
+                text=True,
+                capture_output=True,
+                env=self.env,
+                check=False,
+                timeout=15,
+            )
+        if operation == "create":
+            self.probe = json.loads(input)
+            self.probe_result = None
+            spec = self.probe["spec"]
+            assert spec["automountServiceAccountToken"] is False
+            assert all(volume.keys() == {"name", "emptyDir"} for volume in spec["volumes"])
+            assert all(not c.get("env") and not c.get("envFrom") for c in spec["containers"])
+            assert spec["containers"][0]["volumeMounts"] == [
+                {"name": "socket", "mountPath": "/socket"},
+            ]
+            postgres = spec["containers"][1]
+            assert postgres["image"].startswith("postgres:17-alpine@sha256:")
+            assert "listen_addresses=" in postgres["command"][2]
+            assert not postgres.get("ports")
+            self.events.append("probe-create")
+            result = {}
+        elif operation == "logs":
+            assert self.probe_result is not None
+            result = json.loads(self.probe_result.stdout)
+            # These old compatibility payloads cannot reintroduce source/schema gates.
+            result.update(
+                fingerprint={"worker": "changed"},
+                schemas=["additive change"],
+                wire_schemas={"DTO": "changed"},
+            )
+        elif operation == "delete":
+            assert resource.startswith("pod/agentflow-image-check-")
+            assert "--force" not in args and "--grace-period=0" not in args
+            self.probe = None
+            self.events.append("probe-delete")
+            result = {}
+        elif operation == "get" and resource.startswith("pod/agentflow-image-check-"):
+            if self.failure != "pull" and self.probe_result is None:
+                self.probe_result = self.run_probe()
+            result = {
+                "metadata": self.probe["metadata"],
+                "status": {
+                    "phase": "Failed" if self.failure == "pull" else "Running",
+                    "containerStatuses": [
+                        {
+                            "name": "check",
+                            "imageID": "checked",
+                            "state": {"terminated": {"exitCode": self.probe_result.returncode}}
+                            if self.probe_result is not None
+                            else {},
+                        },
+                        {"name": "postgres", "state": {"running": {}}},
+                    ],
+                },
+            }
+        elif operation == "get" and resource == "pod/server-0":
+            result = self.pod()
+        elif operation == "get" and resource == "node/node":
+            result = super().kube(("get", "nodes"))["items"][0]
+        else:
+            if operation == "patch":
+                changes = json.loads(args[args.index("-p") + 1])
+                scaling = next(c["value"] for c in changes if c["path"] == "/spec/replicas")
+                assert MaintenanceStore(self.store.database).status().operation_id is not None
+                if scaling == 0:
+                    self.events.append("scale-zero")
+                    self.store.workers.worker_connected(
+                        "added-during-update", PROTOCOL_VERSION, "new"
+                    )
+                    assert (
+                        self.store.workers.assign_job("added-during-update", "blocked", "new")
+                        is None
+                    )
+                else:
+                    assert self.old_gone
+                    self.events.append("scale-one")
+                    if self.failure != "stale-instance":
+                        MaintenanceStore(self.store.database).start_instance()
+                        self.store.workers.recover_abandoned_assignments()
+                        with self.store.connection() as connection:
+                            connection.execute(
+                                "ALTER TABLE workers ADD COLUMN new_worker_metadata TEXT"
+                            )
+            result = super().kube(tuple(args))
+            if self.old_gone and "old-gone" not in self.events:
+                self.events.append("old-gone")
+        return subprocess.CompletedProcess(command, 0, json.dumps(copy.deepcopy(result)), "")
+
+
+@pytest.fixture
+def invoke_image_update(monkeypatch, tmp_path):
+    spec = importlib.util.spec_from_file_location(
+        "image_updater", TOOLS / "update-agentflow-server.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    def invoke(commands, apply=True):
+        ticks = itertools.count()
+        monkeypatch.setattr(
+            module, "time", SimpleNamespace(monotonic=lambda: next(ticks), sleep=lambda _: None)
+        )
+        monkeypatch.setattr(module.subprocess, "run", commands)
+        arguments = [
+            "update",
+            "--context",
+            "test-context",
+            "--namespace",
+            "test-namespace",
+            "--workload",
+            "statefulset/server",
+            "--container",
+            "app",
+            "--node",
+            "node",
+            "--image",
+            IMAGE,
+            "--timeout",
+            "4",
+            "--state-dir",
+            str(tmp_path),
+        ]
+        monkeypatch.setattr(sys, "argv", arguments + (["--apply"] if apply else []))
+        return module.main()
+
+    return invoke
+
+
+@pytest.mark.parametrize("apply", [False, True])
+def test_idle_active_flow_and_worker_changes_do_not_block_update(
+    store, invoke_image_update, tmp_path, capsys, apply
+):
+    flow = idle_binding(store)
+    store.workers.drain("w", True)
+    store.jobs.enqueue_job(flow.id, "revision")
+    maintenance = MaintenanceStore(store.database)
+    maintenance.start_instance()
+    commands = ImageCommands(store)
+    assert invoke_image_update(commands, apply) == 0
+    assert store.flows.get_flow(flow.id).state == "active"
+    assert store.workers.get_flow_execution(flow.id).released_at is None
+    assert next(w for w in store.workers.list_workers() if w.worker_id == "w").draining
+    assert maintenance.status().operation_id is None
+    if apply:
+        order = [
+            "probe-create",
+            "probe-delete",
+            "adapter-pause",
+            "scale-zero",
+            "old-gone",
+            "scale-one",
+            "new-ready",
+            "adapter-resume",
+        ]
+        assert [commands.events.index(e) for e in order] == sorted(
+            commands.events.index(e) for e in order
+        )
+        report = next(tmp_path.glob("*/operation.json"))
+        saved = json.loads(report.read_text())
+        assert saved["status"] == "complete" and saved["before_stop"]["bindings"] == 1
+        assert (
+            saved["backup_policy"] == "disabled"
+            and saved["compatibility_policy"] == "column-removal-only"
+        )
+        assert report.stat().st_mode & 0o777 == 0o600
+        assert (
+            "TEST-UPDATER-SECRET" not in report.read_text()
+            and store.database_url not in report.read_text()
+        )
+        assert all(
+            w.status == "offline" or w.worker_id == "added-during-update"
+            for w in store.workers.list_workers()
+        )
+    else:
+        assert "adapter-pause" not in commands.events and "scale-zero" not in commands.events
+        assert not list(tmp_path.glob("*/operation.json"))
+    output = capsys.readouterr()
+    assert "TEST-UPDATER-SECRET" not in output.out + output.err
+    assert not any("pg_dump" in call or "pg_restore" in call for call in commands.calls)
+
+
+@pytest.mark.parametrize(
+    "change,allowed",
+    [
+        ("add-column", True),
+        ("change-default", True),
+        ("legacy-column", True),
+        ("remove-definition", False),
+        ("drop-readd", False),
+        ("dynamic-drop", False),
+        ("drop-table", False),
+        ("legacy-drop", False),
+    ],
+)
+def test_column_removal_is_rejected_before_pause_but_additions_are_allowed(
+    store, invoke_image_update, capsys, change, allowed
+):
+    # DROP+ADD preserves names but loses data; a legacy column left alone must not
+    # turn every harmless update into a missing-declaration failure.
+    maintenance = MaintenanceStore(store.database)
+    maintenance.start_instance()
+    store.workers.worker_connected("existing-worker", PROTOCOL_VERSION, "epoch")
+    store.workers.drain("existing-worker", True)
+    if change.startswith("legacy"):
+        with store.connection() as connection:
+            connection.execute("ALTER TABLE workers ADD COLUMN legacy_hint TEXT")
+    commands = ImageCommands(store, change)
+    assert invoke_image_update(commands) == (0 if allowed else 1)
+    assert ("adapter-pause" in commands.events) is allowed
+    assert ("scale-zero" in commands.events) is allowed
+    assert maintenance.status().operation_id is None
+    assert next(
+        w for w in store.workers.list_workers() if w.worker_id == "existing-worker"
+    ).draining
+    if not allowed:
+        assert commands.probe is not None
+        output = capsys.readouterr()
+        assert "Database column removal detected:" in output.err
+        table = "server_activities" if change == "drop-table" else "workers"
+        column = "legacy_hint" if change == "legacy-drop" else "draining"
+        assert table in output.err
+        if change != "drop-table":
+            assert column in output.err
+
+
+@pytest.mark.parametrize("pending", ["job", "dispatch", "stop", "result", "effect", "control"])
+def test_inflight_work_prevents_cutover_and_timeout_resumes_healthy_old_server(
+    store,
+    invoke_image_update,
+    tmp_path,
+    pending,
+):
+    flow = store.flows.create_flow("owner/repo", 1, 1)
+    job = store.jobs.enqueue_job(flow.id, "initial")
+    maintenance = MaintenanceStore(store.database)
+    maintenance.start_instance()
+    store.workers.worker_connected("w", PROTOCOL_VERSION, "epoch")
+    with store.connection() as connection:
+        if pending == "job":
+            # Claimed but not Started is still in flight.
+            assert store.workers.assign_job("w", "token", "epoch")
+        elif pending == "dispatch":
+            connection.execute(
+                "UPDATE jobs SET state='failed',dispatch_authorized_at=now() WHERE id=%s", (job.id,)
+            )
+        elif pending == "stop":
+            connection.execute(
+                "INSERT INTO execution_stops(request_id,flow_id,job_id,worker_id,assignment_token,binding_at,requested_at) VALUES('stop',%s,%s,'w','token',now(),now())",
+                (flow.id, job.id),
+            )
+        elif pending == "result":
+            connection.execute(
+                "UPDATE jobs SET state='done',result_received_at=now() WHERE id=%s", (job.id,)
+            )
+        elif pending == "effect":
+            connection.execute(
+                "INSERT INTO result_applications(job_id,digest,plan,created_at) VALUES(%s,'digest','{}',now())",
+                (job.id,),
+            )
+            connection.execute(
+                "INSERT INTO result_effects(job_id,effect_key,position,payload,state,dispatched_at,next_attempt_at) VALUES(%s,'effect',0,'{}','skipped',now(),now())",
+                (job.id,),
+            )
+        else:
+            connection.execute("INSERT INTO server_activities VALUES('running','triage')")
+    commands = ImageCommands(store)
+    assert invoke_image_update(commands) == 1
+    assert "adapter-pause" in commands.events and "scale-zero" not in commands.events
+    assert maintenance.status().operation_id is None
+    assert json.loads(next(tmp_path.glob("*/operation.json")).read_text())["status"] == "aborted"
+
+
+def test_running_job_finishes_before_cutover_without_finishing_its_flow(store, invoke_image_update):
+    flow = store.flows.create_flow("owner/repo", 1, 1)
+    store.jobs.enqueue_job(flow.id, "initial")
+    store.workers.worker_connected("w", PROTOCOL_VERSION, "epoch")
+    assert store.workers.assign_job("w", "running", "epoch")
+    MaintenanceStore(store.database).start_instance()
+    commands = ImageCommands(store, "finishes-job")
+    assert invoke_image_update(commands) == 0
+    assert commands.events.index("job-finished") < commands.events.index("scale-zero")
+    assert store.flows.get_flow(flow.id).state == "active"
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ["pull", "pvc-delete", "hpa", "old-stuck", "readiness", "running-digest", "stale-instance"],
+)
+def test_target_and_cutover_failures_preserve_safety(store, invoke_image_update, tmp_path, failure):
+    maintenance = MaintenanceStore(store.database)
+    maintenance.start_instance()
+    commands = ImageCommands(store, failure)
+    assert invoke_image_update(commands) == 1
+    if failure in {"pull", "pvc-delete", "hpa"}:
+        assert "adapter-pause" not in commands.events and "scale-zero" not in commands.events
+        assert maintenance.status().operation_id is None
+    else:
+        assert maintenance.status().operation_id is not None
+        assert "adapter-resume" not in commands.events
+        assert (
+            json.loads(next(tmp_path.glob("*/operation.json")).read_text())["status"]
+            == "incomplete"
+        )
+        # Retrying must not blindly overwrite the incomplete operation or restart execution.
+        before = list(commands.calls)
+        assert invoke_image_update(commands) == 1
+        assert commands.calls == before
+
+
+def test_installer_bundles_current_sources_and_preserves_existing_launcher_target(tmp_path):
+    source = build()
+    assert source == build()
+    installer = tmp_path / "installer.py"
+    installer.write_text(source)
+    namespace = runpy.run_path(str(installer))
+    directory = tmp_path / "extracted"
+    directory.mkdir()
+    namespace["extract"](directory)
+    for name in ("update-agentflow-server.py", "agentflow-maintenance.py", "column-check.py"):
+        assert (directory / name).read_bytes() == (TOOLS / name).read_bytes()
+    assert len(list(directory.iterdir())) == 3
+    home = tmp_path / "home"
+    library = home / ".local/lib/agentflow-server-update"
+    library.mkdir(parents=True)
+    for name in ("update-agentflow-server.py", "agentflow-maintenance.py"):
+        (library / name).write_text("# original\n")
+    launcher = home / ".local/bin/agentflow-server-update"
+    launcher.parent.mkdir(parents=True)
+    pinned = [
+        sys.executable,
+        "--context",
+        "test-context",
+        "--namespace",
+        "test-namespace",
+        "--workload",
+        "statefulset/server",
+        "--container",
+        "app",
+        "--node",
+        "node",
+    ]
+    launcher.write_text(
+        "#!/bin/sh\nexec "
+        + shlex.join([pinned[0], str(library / "update-agentflow-server.py"), *pinned[1:]])
+        + ' "$@"\n'
+    )
+    target, before = namespace["target"](home)
+    assert target == pinned
+    namespace["install"](home, directory, target, before)
+    assert namespace["target"](home)[0] == pinned
+    assert (library / "update-agentflow-server.py").read_text() == "# original\n"
+    assert str(library / "releases") in launcher.read_text()

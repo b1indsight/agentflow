@@ -40,10 +40,12 @@ from app.contracts.protocol import (
     Succeeded,
     parse_server_message,
 )
+from app.contracts.updates import MaintenanceReply, ReleaseAvailable
 from app.domain.delivery_models import DeliveryReceipt
 from app.domain.models import VcsOutcome
 from app.worker.state.session import WorkerSession
 from app.worker.transport.mcp import FlowToolCaller
+from app.worker.updates.channel import UpdateChannel
 
 
 class Connection(Protocol):
@@ -98,8 +100,10 @@ class WorkerClient:
         reconnect_min_backoff: float = 1.0,
         reconnect_max_backoff: float = 30.0,
         reconnect_jitter: float = 0.2,
+        updates: UpdateChannel | None = None,
     ) -> None:
         self.connected = False
+        self.updates = updates
         self.worker_id = worker_id
         self.worker_token = worker_token
         self.serve_ws_url = serve_ws_url
@@ -184,6 +188,8 @@ class WorkerClient:
         try:
             await self._run_connection(connection)
         finally:
+            if self.updates is not None:
+                self.updates.disconnect()
             tasks = list(self._history_tasks)
             for task in tasks:
                 task.cancel()
@@ -195,6 +201,9 @@ class WorkerClient:
         while True:
             raw = await connection.recv()
             message = parse_server_message(raw.decode() if isinstance(raw, bytes) else raw)
+            if self.updates is not None and isinstance(message, (MaintenanceReply, ReleaseAvailable)):
+                self.updates.accept(message)
+                continue
             if not isinstance(message, ConversationQuery):
                 return message
             if len(self._history_tasks) >= 4:
@@ -228,7 +237,8 @@ class WorkerClient:
             Register(
                 worker_id=self.worker_id,
                 recovery=self._recovery_descriptor(),
-            ).model_dump_json()
+                update_version=1 if self.updates is not None else None,
+            ).model_dump_json(exclude_none=True)
         )
         first = await self._receive_message(connection)
         self._connection_epoch = getattr(first, "connection_epoch", None)
@@ -255,6 +265,8 @@ class WorkerClient:
             self.session.validate_recovery(first.job_id, first.assignment_token)
         self._connection_epoch = first.connection_epoch
         self.connected = True
+        if self.updates is not None:
+            self.updates.connect(connection, first.connection_epoch)
         logger.bind(event="worker_connected", reason_code="ok", worker_id=self.worker_id).info("")
 
         async def heartbeat() -> None:
@@ -486,6 +498,12 @@ class WorkerClient:
         if self._connection_task is not None:
             self._connection_task.cancel()
 
+    def idle_for_update(self) -> bool:
+        """Include durable result/stop ACK settlement, not just executor completion."""
+        record = self.session.load()
+        return (self._execution is None and self.session.assignment is None
+                and self._tool_requests.empty() and (record is None or record.acknowledged))
+
     def _recovery_descriptor(self) -> RecoveryDescriptor | None:
         if (self._execution is not None
                 and self._execution.done() and not self._execution.cancelled()):
@@ -526,4 +544,3 @@ class WorkerClient:
             pending = self._tool_requests.get_nowait()
             if not pending.future.done():
                 pending.future.set_exception(WorkerProtocolError("assignment was cancelled"))
-

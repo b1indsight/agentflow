@@ -9,6 +9,7 @@ from loguru import logger
 
 from app.github import GitHubApp, GitHubError, GitHubErrorKind, Issue, ProjectConfig
 from app.persistence.database import Database
+from app.persistence.maintenance import MaintenanceStore
 from app.persistence.projects import Projection, ProjectStore
 
 
@@ -28,6 +29,7 @@ class ProjectSync:
         database: Database,
     ) -> None:
         self.database = database
+        self.maintenance = MaintenanceStore(database)
         self.projects = ProjectStore(database)
         self.configs = configs
         self.github = github
@@ -37,7 +39,9 @@ class ProjectSync:
     async def run(self) -> None:
         while True:
             try:
-                await self.sweep()
+                with self.maintenance.activity("projects") as admitted:
+                    if admitted:
+                        await self.sweep()
             except Exception:  # noqa: BLE001 -- operational failures retry independently
                 logger.exception("Projects sweep failed")
             await asyncio.sleep(5)

@@ -24,6 +24,7 @@ from app.controler.workflow.service import ControlService
 from app.controler.workflow.tools import FlowToolService
 from app.github import GitHubApp
 from app.persistence.database import Database
+from app.persistence.maintenance import MaintenanceStore
 from app.persistence.readiness import database_ready
 from app.persistence.results import ResultStore
 from app.persistence.reviews import ReviewStore
@@ -126,6 +127,7 @@ class ServerRuntime:
             database=database,
         )
         self.database = database
+        self.maintenance = MaintenanceStore(database)
         self.workers = WorkerStore(database)
         self.reviews = ReviewStore(database)
         self.result_store = ResultStore(database)
@@ -134,6 +136,7 @@ class ServerRuntime:
 
     def startup(self) -> None:
         self.database.init_db()
+        self.maintenance.start_instance()
         self.result_store.recover_claims()
         self.workers.recover_abandoned_assignments()
         self._tasks = [
@@ -198,17 +201,20 @@ class ServerRuntime:
             self._triage_task = asyncio.create_task(self._run_triage())
 
     async def _run_triage(self) -> None:
-        try:
-            batches = self.reviews.pending_triage()
-        except Exception:  # noqa: BLE001 -- retry a temporarily unavailable database next sweep
-            logger.exception("could not read pending review batches")
-            return
-        for batch in batches:
+        with self.maintenance.activity("triage") as admitted:
+            if not admitted:
+                return
             try:
-                await self.coordinator.triage(batch, self.judge)
-            except Exception:  # noqa: BLE001 -- isolate unavailable providers/feedback batches
-                logger.exception("review prerequisite interrupted; unfinished batch will be retried")
-        self.gateway.notify_jobs()
+                batches = self.reviews.pending_triage()
+            except Exception:  # noqa: BLE001 -- retry a temporarily unavailable database next sweep
+                logger.exception("could not read pending review batches")
+                return
+            for batch in batches:
+                try:
+                    await self.coordinator.triage(batch, self.judge)
+                except Exception:  # noqa: BLE001 -- isolate unavailable providers/feedback batches
+                    logger.exception("review prerequisite interrupted; unfinished batch will be retried")
+            self.gateway.notify_jobs()
 
     async def _sweep_reviews(self) -> None:
         """Keep settle independent of both lease errors and slow remote receipt checks."""

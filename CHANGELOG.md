@@ -8,6 +8,16 @@
 
 ## Unreleased
 
+- Webhook 驱动的 Controller/前端更新改为暂停新接单并等待当前执行收敛，保留活动 Flow 和绑定；
+  Worker 新增、修改和离线不阻止部署。跳过数据库备份/还原与广泛兼容性校验，仅保留自动删列
+  检查，包括声明移除、动态 DROP 和删后同名重建；非破坏性的新增字段、默认值变化放行。
+- 增加 macOS 登录用户原生 Worker 的 opt-in 执行空闲更新：首次接入使用 LaunchAgent，默认
+  仅渲染 plist，`--apply` 仅准备 immutable release/launcher 而不调用 `launchctl`。更新保留
+  Worker ID、root、HOME、journal 和模型认证，私有环境 JSON 要求 0600；本地 check/apply 只能由
+  当前 runtime 协调。现有镜像 webhook 队列新增独立 Worker 消费路径和固定 notifier 的人工接入
+  约束。两端 ACK、target-scoped pause、失败保留记录和单次启动授权均不阻塞 Server 部署；Linux
+  Worker 自动更新仍延期。尚未执行真实主机安装、发布、launchd 或服务更新验收。
+
 - 会话连续同来源、同作者消息共用头像与作者栏，Worker 分组保留执行和会话归属边界，
   来源信息、正文分页与编辑差异独立保留。正文支持安全的 Markdown/GFM 渲染；原始 HTML
   保持转义，图片显示为链接，工具输出与 diff 保持原文。代码块在可用宽度内自动换行，

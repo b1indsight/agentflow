@@ -3,7 +3,7 @@
 首版为单 serve、固定 worker ID/root/HOME。部署入口见 [部署文档](../deployment/README.md)，
 不新增部署 CLI；Cloudflare 只属于接入部署。生产环境完整恢复与 RPO/RTO 尚未验收。
 
-## Linux systemd
+## Linux systemd（手动更新）
 
 先按直接进程文档安装固定 commit 的 `/opt/flowtool/.venv`，worker 另外安装同镜像版本的
 Git、jj、Codex 并确保 service PATH 可见；模型认证使用 `CODEX_API_KEY` 或预置受限 HOME。
@@ -24,7 +24,25 @@ sudo journalctl -u flowtool-serve -u flowtool-worker --since '10 minutes ago'
 worker token/ID/WSS/CA 与现有 [worker 配置](../deployment/docker.md) 同义；serve 设置私有监听地址。
 跨主机经内部 TLS 网关连接，公网仍只放行 webhook；勿为方便而公开 worker/metrics 路由。
 unit 的 cgroup 在超时后会清理子进程，但强杀不是应用层 stop receipt，仍需遵守恢复 fence。
-macOS 使用现有手动运行方式；本 PR 没有 launchd。systemd 实际主机验收尚未执行。
+Linux Worker 自动更新尚未实现，不能把 `scripts/worker_update/` 或 macOS LaunchAgent 配置用于
+systemd。systemd 实际主机验收尚未执行。
+
+## macOS Worker 按执行空闲更新
+
+原生 Worker 使用登录用户 LaunchAgent 时，按[Worker 更新部署](../deployment/worker-update.md)
+首次接入。默认安装命令只渲染 plist；即使 `--apply` 也只准备 release/launcher，不执行
+`launchctl`。人工首次交接前确认旧 Worker 已安全退出，保持同一登录用户、HOME、Worker ID、
+root、journal 和 Codex 认证，环境 JSON 必须为 0600。
+
+本地 `agentflow-worker-update --sha SHA` 只检查；带 `--apply --root UPDATE_ROOT` 只交给当前
+launcher 托管的 runtime 请求更新。它不会直接杀进程或切换指针。Server 与 Worker 对同一次执行
+空闲 ACK 后，旧进程正常退出，新实例以相同身份/根目录和实际 release SHA 注册后才解除本次
+target-scoped pause。Server 更新不等待所有 Worker 更新。
+
+若出现 `operation.json` 的 incomplete cutover、单次启动授权已消费、Worker 未以新 epoch/SHA
+注册或 Server 侧 pause 未解除，保留现场：不要删 operation/startup/journal、不要手工 resume、
+不要重放 notifier 或并起同一 Worker ID。先核对私有记录、现有进程、root lock 和 Server
+`worker_updates` 状态；恢复必须由明确的人工操作决定。Linux 自动更新延期。
 
 ## 日常与故障操作
 

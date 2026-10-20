@@ -24,6 +24,7 @@ dependencies = [
 
 [project.scripts]
 flowtool = "app.cli:app"
+agentflow-worker-update = "app.worker.updates.cli:main"
 
 [dependency-groups]
 dev = [

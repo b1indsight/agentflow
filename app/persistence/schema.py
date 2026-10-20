@@ -320,6 +320,43 @@ CREATE TABLE IF NOT EXISTS project_projections (
 CREATE INDEX IF NOT EXISTS ix_projects_due ON project_projections(next_at,id) WHERE NOT blocked;
 """
 
+MAINTENANCE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS server_maintenance (
+  singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK(singleton),
+  operation_id TEXT,
+  paused_at TIMESTAMPTZ,
+  instance_id TEXT NOT NULL DEFAULT '',
+  CHECK ((operation_id IS NULL) = (paused_at IS NULL))
+);
+INSERT INTO server_maintenance(singleton) VALUES(TRUE) ON CONFLICT DO NOTHING;
+CREATE TABLE IF NOT EXISTS server_activities (
+  token TEXT PRIMARY KEY,
+  name TEXT NOT NULL
+);
+"""
+
+WORKER_UPDATE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS worker_releases (
+  singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK(singleton),
+  release JSONB NOT NULL,
+  run_number BIGINT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS worker_updates (
+  worker_id TEXT PRIMARY KEY REFERENCES workers(worker_id),
+  operation_id TEXT NOT NULL,
+  phase TEXT NOT NULL CHECK(phase IN ('paused','cutover','complete','aborted')),
+  source_instance TEXT NOT NULL,
+  source_epoch TEXT NOT NULL,
+  source_sha TEXT NOT NULL,
+  release JSONB NOT NULL,
+  identity JSONB NOT NULL,
+  resumed_instance TEXT,
+  resumed_epoch TEXT,
+  applied_number BIGINT NOT NULL DEFAULT 0,
+  updated_at TIMESTAMPTZ NOT NULL
+);
+"""
+
 SCHEMAS = (
     SCHEMA,
     WEBHOOK_SCHEMA,
@@ -329,4 +366,6 @@ SCHEMAS = (
     RECONCILE_SCHEMA,
     PROJECT_SCHEMA,
     CONSOLE_SCHEMA,
+    MAINTENANCE_SCHEMA,
+    WORKER_UPDATE_SCHEMA,
 )

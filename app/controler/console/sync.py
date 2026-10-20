@@ -15,6 +15,7 @@ from app.github import GitHubApp, GitHubError, retry_delay
 from app.github.console import Observation, read_source, sources
 from app.persistence.console_sync import ConsoleSyncStore, SyncClaim
 from app.persistence.database import Database
+from app.persistence.maintenance import MaintenanceStore
 
 
 async def _drain[T](future: asyncio.Future[T]) -> T:
@@ -46,6 +47,7 @@ class ConsoleSynchronizer:
         self.github = github
         self.conversations = conversations
         self.store = ConsoleSyncStore(database)
+        self.maintenance = MaintenanceStore(database)
         self._slots = asyncio.Semaphore(4)
 
     async def db[T](self, call: Callable[[], T]) -> T:
@@ -57,29 +59,36 @@ class ConsoleSynchronizer:
     async def run(self) -> None:
         while True:
             try:
-                claims = []
-                for _ in range(4):
-                    claim = await self.db(self.store.claim)
-                    if claim is None:
-                        break
-                    claims.append(claim)
-                if claims:
-                    tasks = [asyncio.create_task(self.sync(claim)) for claim in claims]
-                    try:
-                        await asyncio.gather(*tasks)
-                    finally:
-                        # gather propagates the first failure before siblings finish.
-                        # Do not cancel twice while db() is draining a shielded thread.
-                        for task in tasks:
-                            if not task.done() and not task.cancelling():
-                                task.cancel()
-                        await _drain(asyncio.gather(*tasks, return_exceptions=True))
-                    continue
+                with self.maintenance.activity("console") as admitted:
+                    if admitted and await self._batch():
+                        continue
             except (DatabaseError, PoolTimeout):
                 logger.warning(
                     "console synchronization database unavailable; durable work retained"
                 )
             await asyncio.sleep(1)
+
+    async def _batch(self) -> bool:
+        """Settle every admitted source before releasing the maintenance receipt."""
+        claims = []
+        for _ in range(4):
+            claim = await self.db(self.store.claim)
+            if claim is None:
+                break
+            claims.append(claim)
+        if not claims:
+            return False
+        tasks = [asyncio.create_task(self.sync(claim)) for claim in claims]
+        try:
+            await asyncio.gather(*tasks)
+        finally:
+            # gather propagates the first failure before siblings finish.
+            # Do not cancel twice while db() is draining a shielded thread.
+            for task in tasks:
+                if not task.done() and not task.cancelling():
+                    task.cancel()
+            await _drain(asyncio.gather(*tasks, return_exceptions=True))
+        return True
 
     async def sync(self, claim: SyncClaim) -> None:
         """A source failure never discards other sources or already archived contents."""

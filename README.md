@@ -77,6 +77,10 @@ FlowTool 的目标是把带 `flow` 标签的 GitHub issue 编排成
 - **取消与 drain**：cancel 持久化停止意图，worker 取消当前执行并回收其持有的 Codex/VCS
   进程组；停止凭据与已发送 effects 未确认前不释放绑定。drain 停止分配新 Flow，已有绑定
   继续收尾。未知旧执行保持阻塞，无强制释放入口，见[取消与停机](docs/operations/cancel-drain.md)。
+- **Worker 按执行空闲更新**：macOS 登录用户的原生 Worker 可选择由 LaunchAgent 托管固定
+  release。准备完成后由现有认证 WSS 上的目标暂停和两端空闲 ACK 协调切换；旧进程正常退出，
+  新实例以相同 ID/root/HOME/journal 和实际 SHA 注册后才恢复接单。发布通知、离线或未升级
+  Worker 不阻塞 Server 部署；Linux 自动更新仍未提供，见[Worker 更新](docs/deployment/worker-update.md)。
 - **Projects 与可观测性**：可选组织 Projects v2 同步独立运行；结构化日志、受 token 保护的
   `/metrics`、数据库就绪探针 `/readyz` 与 worker 状态文件已接入。Docker/Compose、Kubernetes
   和常驻运维说明见[部署指南](docs/deployment/README.md)，不代表真实环境已验收。
@@ -263,8 +267,10 @@ M3 F3 及审查修复本地验证（2026-09-08）：真实 PostgreSQL 下 **502 
 
 当前仅支持 wire protocol **v13**、worker journal **v3** 与当前完整 PostgreSQL schema。
 仓库尚未部署，不提供旧版本数据库、任务、结果或 journal 的迁移；首次运行使用新数据库/schema
-和新 worker root。serve/worker 使用同一 commit/镜像版本，不混跑；协议不匹配直接拒绝。
-同版本重启仍保留冻结任务、结果摘要、effect ledger 与 journal 恢复能力。
+和新 worker root。Server 部署不以所有 Worker 更新为前提；Worker 连接仍按实际 protocol 和
+认证结果处理，不匹配直接拒绝。已接入的 macOS 原生 Worker 只在其自身 opt-in 更新流程完成
+两端确认后切换；Linux Worker 自动更新延期。同版本重启仍保留冻结任务、结果摘要、effect ledger
+与 journal 恢复能力。
 
 新 journal 在任务 ACK 后保留上一任务的 Flow 和 root 归属，成功归档 ACK 后才移除。不要更换
 `FLOWTOOL_WORKER_ROOT`、复制 journal 到其他 root 或复用 worker ID 接管工作区。清理仅删除

@@ -33,6 +33,8 @@ class WorkerSettings(BaseSettings):
     reconnect_min_backoff: float = Field(default=1.0, gt=0)
     reconnect_max_backoff: float = Field(default=30.0, gt=0)
     reconnect_jitter: float = Field(default=0.2, ge=0, le=1)
+    worker_update_root: Path | None = None
+    worker_update_apply: bool = False
 
     @model_validator(mode="after")
     def _require_full_access_isolation(self) -> WorkerSettings:
