@@ -88,29 +88,66 @@ def test_console_and_every_public_read_require_owner_before_io(console_runtime, 
         assert client.get("/console/", headers=headers).status_code == 503
 
 
-def test_manual_archive_requires_owner_json_and_same_origin(console_runtime, store):
+@pytest.mark.parametrize(
+    "base_url,origin_headers",
+    [
+        ("http://testserver", {"Origin": "http://testserver"}),
+        ("https://admin.example.com", {"Origin": "https://admin.example.com"}),
+        (
+            "http://admin.example.com",
+            {"Origin": "https://admin.example.com", "Sec-Fetch-Site": "same-origin"},
+        ),
+        (
+            "http://serve:8000",
+            {"Origin": "https://admin.example.com", "Sec-Fetch-Site": "same-origin"},
+        ),
+    ],
+    ids=["direct-http", "direct-https", "https-tunnel", "rewritten-host-proxy"],
+)
+def test_manual_archive_requires_owner_json_and_same_origin(
+    console_runtime, store, base_url, origin_headers
+):
+    # TLS termination (and sometimes Host rewriting) changes the backend URL,
+    # while the browser still sends the public HTTPS Origin for a same-origin POST.
     flow = store.flows.create_flow("owner/repo", 7, 42)
     flow.state = FlowState.CANCELLED
     store.flows.update_flow(flow)
     path = f"/api/flows/{flow.id}/archive"
     console = ConsoleStore(store.database)
     before = console.detail(flow.id)
-    with TestClient(create_app(console_runtime)) as client:
+    with TestClient(create_app(console_runtime), base_url=base_url) as client:
         assert client.post(path, json={}).status_code == 401
-        assert client.post(
-            path, json={}, headers=console_runtime.issuer.headers(email="other@example.com")
-        ).status_code == 403
-        headers = console_runtime.issuer.headers()
-        for extra in ({"Origin": "https://evil.test"}, {"Sec-Fetch-Site": "cross-site"}):
-            assert client.post(path, json={}, headers=headers | extra).status_code == 403
-        # FastAPI rejects the non-JSON body before calling the endpoint.
-        assert client.post(
-            path, content="{}", headers=headers | {"Content-Type": "text/plain"}
-        ).status_code == 422
-        assert console.detail(flow.id) == before
-        response = client.post(
-            path, json={}, headers=headers | {"Origin": "http://testserver"}
+        assert (
+            client.post(
+                path, json={}, headers=console_runtime.issuer.headers(email="other@example.com")
+            ).status_code
+            == 403
         )
+        headers = console_runtime.issuer.headers()
+        for extra in (
+            {"Origin": "https://evil.test"},
+            {"Origin": "null"},
+            {"Origin": base_url, "Sec-Fetch-Site": "cross-site"},
+            {"Origin": base_url, "Sec-Fetch-Site": "same-site"},
+            {"Origin": "https://evil.test", "Sec-Fetch-Site": "none"},
+            {
+                "Origin": "https://evil.test",
+                "X-Forwarded-Proto": "https",
+                "X-Forwarded-Host": "evil.test",
+            },
+        ):
+            response = client.post(path, json={}, headers=headers | extra)
+            assert response.status_code == 403
+            assert response.json()["detail"] == "cross_origin_request"
+        # FastAPI rejects the non-JSON body before calling the endpoint.
+        assert (
+            client.post(
+                path, content="{}", headers=headers | {"Content-Type": "text/plain"}
+            ).status_code
+            == 422
+        )
+        assert console.detail(flow.id) == before
+        response = client.post(path, json={}, headers=headers | origin_headers)
         assert response.status_code == 200
         assert response.headers["cache-control"] == "no-store"
         assert response.json()["phase"] == "done"
