@@ -712,7 +712,6 @@ svg {
 }
 .conversation-source-warning {
   border-left: 3px solid #c58a14;
-  background: #fff9ed;
   color: #78571a;
   padding: 12px 16px;
   margin-bottom: 14px;
@@ -725,7 +724,7 @@ svg {
   color: inherit;
   border: 1px solid #e4d2ac;
   border-radius: 5px;
-  background: var(--paper);
+  background: none;
   padding: 5px 10px;
 }
 .conversation-source-details summary {
@@ -738,31 +737,63 @@ svg {
 .source-details-hint {
   margin: 12px 0;
   line-height: 1.6;
+  color: var(--muted);
+  font-size: var(--text-meta);
 }
-.conversation-source-details > ul {
+.source-list {
   list-style: none;
   padding: 0;
   margin: 0;
+  border-bottom: 1px solid var(--line);
+  font-size: var(--text-meta);
+  line-height: 1.6;
 }
-.conversation-source-details > ul > li {
-  display: flex;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: 6px 12px;
-  padding: 8px 0;
+.source-list > li {
+  padding: 14px 0;
   border-top: 1px solid var(--line);
   overflow-wrap: anywhere;
 }
+.source-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+}
+.source-heading strong {
+  color: var(--ink);
+  font-size: var(--text-control);
+  font-weight: 600;
+}
+.source-list .source-last-success,
+.source-list .source-reason {
+  margin: 4px 0 0;
+  color: var(--muted);
+}
+.source-coverage {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+  margin-top: 8px;
+  color: #78571a;
+}
+.source-coverage > span {
+  font-weight: 600;
+}
 .source-limitations {
-  width: 100%;
-  padding-left: 18px;
-  font-size: var(--text-small);
+  flex: 1 1 220px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
 }
 .source-state {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   min-width: 0;
+  white-space: nowrap;
+  color: var(--muted);
 }
 .source-state .dot {
   background: var(--status-gray);
@@ -770,14 +801,26 @@ svg {
   height: 5px;
   flex-shrink: 0;
 }
+.source-state.syncing {
+  color: #0969da;
+}
 .source-state.syncing .dot {
   background: var(--status-blue);
+}
+.source-state.available {
+  color: var(--green);
 }
 .source-state.available .dot {
   background: var(--status-green);
 }
+.source-state.partial {
+  color: #78571a;
+}
 .source-state.partial .dot {
   background: var(--status-yellow);
+}
+.source-state.unavailable {
+  color: #b42318;
 }
 .source-state.unavailable .dot {
   background: var(--status-red);
