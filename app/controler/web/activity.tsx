@@ -1,4 +1,6 @@
 import { useEffect, useId, useRef, useState } from "react";
+import Markdown, { type Components } from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { getContent, getDiff, getThread } from "./api";
 import { DiffWindow } from "./DiffWindow";
 import type { ActivityItem, ActivityPage, ContentPage } from "./types";
@@ -10,6 +12,26 @@ import {
   textEnd,
   useReadingState,
 } from "./windowing";
+
+const markdownComponents: Components = {
+  a: ({ href, title, children }) => (
+    <a href={href} title={title} target="_blank" rel="noopener noreferrer">
+      {children}
+    </a>
+  ),
+  // Archived content must not make automatic requests to repository-supplied image URLs.
+  img: ({ src, alt }) => (
+    <a href={src} target="_blank" rel="noopener noreferrer">
+      图片：{alt || "查看图片"}
+    </a>
+  ),
+  pre: ({ children }) => <pre tabIndex={0}>{children}</pre>,
+  table: ({ children }) => (
+    <div className="markdown-table" tabIndex={0} aria-label="Markdown 表格">
+      <table>{children}</table>
+    </div>
+  ),
+};
 
 /** Keep only one immutable body segment in memory; API offsets count Unicode code points. */
 function ActivityBody({
@@ -96,7 +118,11 @@ function ActivityBody({
       </code>
     </pre>
   ) : (
-    <p className="message-body">{segment.text}</p>
+    <div className="message-body markdown-body">
+      <Markdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+        {segment.text}
+      </Markdown>
+    </div>
   );
   const content = (
     <>
@@ -318,27 +344,38 @@ function ThreadReplies({
   );
 }
 
-/** Only explicitly attributed assistant/tool records can share a visual output group. */
-export function sameWorkerOutput(
+/** Adjacent authors share identity; worker records must also have the same explicit session. */
+export function sameActivityGroup(
   left: ActivityItem | undefined,
   right: ActivityItem | undefined,
 ): boolean {
   return Boolean(
     left &&
     right &&
-    left.source === "worker" &&
-    right.source === "worker" &&
+    left.source === right.source &&
     !left.deleted &&
     !right.deleted &&
-    [left.author, right.author].every(
-      (role) => role === "assistant" || role === "tool",
+    left.prior === right.prior &&
+    left.parent_key === right.parent_key &&
+    [left, right].every(
+      (item) =>
+        item.kind !== "event" &&
+        item.kind !== "thread" &&
+        item.kind !== "check",
     ) &&
-    ["attempt_id", "session_id", "session_generation"].every(
-      (key) =>
-        left.metadata[key] !== undefined &&
-        left.metadata[key] !== null &&
-        left.metadata[key] === right.metadata[key],
-    ),
+    ((left.author !== "" && left.author === right.author) ||
+      (left.source === "worker" &&
+        [left.author, right.author].every(
+          (role) => role === "assistant" || role === "tool",
+        ))) &&
+    (left.source === "worker"
+      ? ["attempt_id", "session_id", "session_generation"].every(
+          (key) =>
+            left.metadata[key] !== undefined &&
+            left.metadata[key] !== null &&
+            left.metadata[key] === right.metadata[key],
+        )
+      : left.kind === right.kind),
   );
 }
 
@@ -389,7 +426,7 @@ export interface ToolActivityGroup {
   partial: boolean;
 }
 
-/** Untrusted content is React text, never repository-supplied HTML. */
+/** Markdown produces safe React elements; repository-supplied HTML stays escaped text. */
 export function ActivityView({
   entry,
   flowId = 0,
@@ -419,7 +456,9 @@ export function ActivityView({
     event || tool || (entry.source === "worker" && entry.title === "message")
       ? ""
       : entry.title;
-  const metadata = !continuation && Object.keys(entry.metadata).length > 0;
+  const metadata =
+    !continuation &&
+    (Object.keys(entry.metadata).length > 0 || (provenance?.length ?? 0) > 1);
   return (
     <article
       className={`message${entry.deleted ? " deleted" : ""}${event ? " compact-event" : ""}${continuation ? " continuation" : ""}${toolGroup ? " tool-activity" : ""}`}

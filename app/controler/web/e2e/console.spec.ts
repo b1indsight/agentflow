@@ -1108,6 +1108,170 @@ test("body navigation has one control and continues across preview boundaries", 
   await expect(row.locator(".message-body")).toContainText("末尾");
 });
 
+test("consecutive authors share identity while conversation bodies render safe Markdown", async ({
+  page,
+}) => {
+  // Codex emits multiple developer instructions in one session; page boundaries must not repeat identity.
+  const context = {
+    attempt_id: 1,
+    session_id: "session-a",
+    session_generation: 0,
+  };
+  const message = (key: string, author: string, body: string) => ({
+    ...activity,
+    key,
+    source: "worker",
+    kind: "message",
+    title: "message",
+    author,
+    body,
+    body_length: Array.from(body).length,
+    previous_version: null,
+    metadata: context,
+  });
+  const command =
+    "npm run build -- --example=" +
+    "long-argument-".repeat(12) +
+    "\n  echo " +
+    "x".repeat(96) +
+    " --complete";
+  const items = [
+    message(
+      "instructions-a",
+      "developer",
+      "## 会话阅读\n\n- 连续同作者共用 **作者栏**\n- 正文支持 `Markdown`\n\n[查看说明](https://example.test/guide)",
+    ),
+    message(
+      "instructions-b",
+      "developer",
+      `> 保留每条消息的来源信息。\n\n\`\`\`sh\n${command}\n\`\`\`\n\n| 内容 | 状态 |\n| --- | --- |\n| Markdown | 已启用 |`,
+    ),
+    message("system", "system", "系统消息保留独立作者栏。"),
+    message("instructions-c", "developer", "间隔其他作者后重新显示作者栏。"),
+    {
+      ...message("other-session", "developer", "不同会话不合并。"),
+      metadata: { ...context, session_id: "session-b" },
+    },
+    {
+      ...message("unattributed", "developer", "缺少归属不合并。"),
+      metadata: {},
+    },
+    {
+      ...message("unattributed-2", "developer", "归属不明仍独立。"),
+      metadata: {},
+    },
+    {
+      ...message("github-a", "owner", "### GitHub 评论\n\n支持 **Markdown**。"),
+      source: "pr.comments",
+      kind: "comment",
+      title: "评论",
+      metadata: { comment_id: 1 },
+      url: "https://example.test/comments/1",
+    },
+    {
+      ...message("github-b", "owner", "同作者下一条评论。"),
+      source: "pr.comments",
+      kind: "comment",
+      title: "评论",
+      metadata: { comment_id: 2 },
+      url: "https://example.test/comments/2",
+    },
+  ];
+  await page.route("**/api/flows/42/activity?**", (route) => {
+    const later = new URL(route.request().url()).searchParams.has("cursor");
+    return route.fulfill({
+      json: {
+        items: later ? items.slice(1) : items.slice(0, 1),
+        snapshot: 2,
+        total: items.length,
+        has_more: !later,
+        next_cursor: later ? null : "instructions",
+        sources: [],
+        changes: {},
+      },
+    });
+  });
+  await page.goto("/#flow/42/conversation");
+  const first = page.locator("article[data-entry='instructions-a']");
+  const second = page.locator("article[data-entry='instructions-b']");
+  await expect(second).toHaveClass(/continuation/);
+  await expect(first.getByRole("heading", { name: "会话阅读" })).toBeVisible();
+  await expect(first.locator("li")).toHaveCount(2);
+  await expect(first.locator("strong")).toHaveText("作者栏");
+  await expect(first.locator(".message-body code")).toHaveText("Markdown");
+  await expect(first.getByRole("link", { name: "查看说明" })).toHaveAttribute(
+    "href",
+    "https://example.test/guide",
+  );
+  await expect(second.locator("blockquote")).toHaveText(
+    "保留每条消息的来源信息。",
+  );
+  await expect(second.locator("pre code")).toContainText("npm run build");
+  await expect(second.getByRole("cell", { name: "已启用" })).toBeVisible();
+  await expect(second.locator(".message-label")).not.toBeVisible();
+  for (const key of [
+    "system",
+    "instructions-c",
+    "other-session",
+    "unattributed",
+    "unattributed-2",
+  ])
+    await expect(
+      page.locator(`article[data-entry='${key}'] .message-label`),
+    ).toBeVisible();
+  const github = page.locator("article[data-entry='github-b']");
+  await expect(github.locator(".message-label")).not.toBeVisible();
+  await expect(
+    github.getByRole("link", { name: "在 GitHub 中查看" }),
+  ).toHaveAttribute("href", "https://example.test/comments/2");
+  const capture = async (name: string) => {
+    await first.scrollIntoViewIfNeeded();
+    const a = await first.boundingBox();
+    const b = await second.boundingBox();
+    if (!a || !b) throw new Error("Developer messages are not mounted");
+    await page.screenshot({
+      path: `../../../.amp/in/artifacts/conversation-markdown-${name}.png`,
+      clip: { x: a.x, y: a.y, width: a.width, height: b.y + b.height - a.y },
+    });
+  };
+  await page.setViewportSize({ width: 1440, height: 1200 });
+  await capture("desktop");
+  await page.setViewportSize({ width: 390, height: 1200 });
+  await capture("mobile");
+  const code = second.locator(".message-body pre");
+  // Narrow screens must show the full command, including unbroken tokens, without horizontal scrolling.
+  await expect(code).toHaveText(`${command}\n`);
+  await expect
+    .poll(() =>
+      code.evaluate((element) => element.scrollWidth <= element.clientWidth),
+    )
+    .toBe(true);
+  expect(
+    await code.evaluate((element) => {
+      const style = getComputedStyle(element);
+      return (
+        element.clientHeight -
+          parseFloat(style.paddingTop) -
+          parseFloat(style.paddingBottom) >
+        parseFloat(style.lineHeight) * 2
+      );
+    }),
+  ).toBe(true);
+  await code.screenshot({
+    path: "../../../.amp/in/artifacts/conversation-markdown-code-wrapped.png",
+  });
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+  ).toBe(true);
+  await first.getByText(/来源信息与查询定位/).click();
+  await expect(first.getByLabel("文本")).toContainText("instructions-b");
+  await first.locator(".message-provenance").screenshot({
+    path: "../../../.amp/in/artifacts/conversation-markdown-provenance.png",
+  });
+});
+
 test("assistant tools share one compact activity bar across pages without crossing turns", async ({
   page,
 }) => {

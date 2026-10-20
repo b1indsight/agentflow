@@ -5,10 +5,12 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { ActivityView } from "./activity";
 import type { ActivityItem } from "./types";
 
-test("GitHub and Agent content remains text in every activity surface", () => {
+test("GitHub and Agent content cannot inject HTML, unsafe links or remote images", () => {
   // Reviews, tool output and identity attributes all carry untrusted repository text.
-  const payload = '\"><img src=x onerror="alert(1)"><script>alert(2)</script>&';
-  const kinds = ["github", "tool", "event"];
+  const payload =
+    '\"><img src=x onerror="alert(1)"><script>alert(2)</script>&\n\n' +
+    "[危险](javascript:alert%281%29)\n\n![图片](https://example.test/track.png)";
+  const kinds = ["comment", "message", "tool_call", "tool_result", "event"];
   for (const kind of kinds) {
     const html = renderToStaticMarkup(
       <ActivityView
@@ -40,6 +42,7 @@ test("GitHub and Agent content remains text in every activity surface", () => {
     assert.match(html, /&quot;/);
     assert.match(html, /&amp;/);
     assert.match(html, /&quot;&gt;&lt;img/);
+    assert.doesNotMatch(html, /href="javascript:|<iframe|<svg/);
     assert.doesNotMatch(html, /已编辑|查看历史版本/);
   }
 });

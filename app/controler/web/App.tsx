@@ -18,7 +18,7 @@ import { archiveFlow, getFlow, getFlows, getJobs, getRepos } from "./api";
 import {
   ActivityView,
   isToolActivity,
-  sameWorkerOutput,
+  sameActivityGroup,
   type ToolActivityGroup,
 } from "./activity";
 import { ConversationSources, SourceList } from "./ConversationSources";
@@ -735,7 +735,7 @@ function Conversation({
               let start = i;
               while (
                 isToolActivity(state.items.get(start - 1)) &&
-                sameWorkerOutput(state.items.get(start - 1), e)
+                sameActivityGroup(state.items.get(start - 1), e)
               )
                 start--;
               let first = i,
@@ -744,7 +744,7 @@ function Conversation({
               while (
                 mounted.has(end + 1) &&
                 isToolActivity(state.items.get(end + 1)) &&
-                sameWorkerOutput(e, state.items.get(end + 1))
+                sameActivityGroup(e, state.items.get(end + 1))
               )
                 end++;
               let calls = 0,
@@ -778,15 +778,15 @@ function Conversation({
                 partial:
                   first > start ||
                   (isToolActivity(state.items.get(end + 1)) &&
-                    sameWorkerOutput(e, state.items.get(end + 1))),
+                    sameActivityGroup(e, state.items.get(end + 1))),
               };
             }
             const provenance: ActivityItem[] = [];
-            if (e && !sameWorkerOutput(previous, e)) {
+            if (e && !sameActivityGroup(previous, e)) {
               provenance.push(e);
               for (let index = i + 1; mounted.has(index); index++) {
                 const following = state.items.get(index);
-                if (!following || !sameWorkerOutput(e, following)) break;
+                if (!following || !sameActivityGroup(e, following)) break;
                 provenance.push(following);
               }
             }
@@ -796,7 +796,7 @@ function Conversation({
                 entry={e}
                 flowId={id}
                 snapshot={state.snapshot ?? 0}
-                continuation={sameWorkerOutput(previous, e)}
+                continuation={sameActivityGroup(previous, e)}
                 toolGroup={toolGroup}
                 toolResults={toolResults}
                 mergedIntoCall={mergedIntoCall}
