@@ -54,6 +54,26 @@ def test_archive_versions_snapshots_and_prior_interactions(store):
         archive.page(flow.id + 1, cursor=before.next_cursor, limit=20)
 
 
+def test_check_workflow_name_recovers_after_temporary_lookup_failure(store):
+    # Actions enrichment can recover A→B→A without changing a completed check's remote clock.
+    flow = store.flows.create_flow("octo/repo", 7, 1)
+    archive = ActivityStore(store._db)
+    original = Observation(
+        key="github:octo/repo:check:9",
+        source="pr.check_runs",
+        kind="check",
+        author="GitHub Actions",
+        occurred_at=flow.created_at,
+        updated_at=flow.created_at,
+        metadata={"workflow_name": "CI"},
+    )
+    unavailable = original.model_copy(update={"metadata": {"workflow_name": None}})
+    for item in (original, unavailable, original):
+        assert archive.append(flow.id, item)
+    assert archive.page(flow.id).items[0].metadata["workflow_name"] == "CI"
+    assert not archive.append(flow.id, original)
+
+
 def test_current_projection_and_history_rollback_with_facts(store):
     flow = store.flows.create_flow("octo/repo", 7, 1)
     console = ConsoleStore(store._db)
