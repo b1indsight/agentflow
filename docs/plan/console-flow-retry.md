@@ -1,7 +1,7 @@
 # 控制台 Flow 重试按钮 — 功能记录
 
 **阶段：** 计划待批准；尚未修改实现或测试。
-**PR：** 按 plan-first 流程创建计划草稿，批准后沿用同一 PR 实施。
+**PR：** [Draft PR #106](https://github.com/b1indsight/agentflow/pull/106)；批准后沿用同一 PR 实施。
 
 ## 1. 初始计划
 
