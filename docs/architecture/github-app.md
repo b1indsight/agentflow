@@ -67,11 +67,24 @@ payload 获取，不需要静态写入 `.env`。
 
 ## A.3 已实现能力与缺口
 
-归档前在目标仓库创建 `FLOWTOOL_DONE_LABEL`（默认 `flow:done`）和 `FLOWTOOL_IN_REVIEW_LABEL`
-（默认 `flow:in-review`）。两个状态标签与 trigger label 不得重名（忽略大小写）或为空。
+serve 的 `LabelSynchronizer` 启动后在后台枚举 App installation 及其已授权仓库，完整分页，
+跳过暂停的 installation 和归档仓库；已有仓库即使没有 Flow 或 Projects 配置也会被发现。
+按当前 `FLOWTOOL_TRIGGER_LABEL`（默认 `flow`）、`FLOWTOOL_IN_REVIEW_LABEL`（默认
+`flow:in-review`）、`FLOWTOOL_DONE_LABEL`（默认 `flow:done`）补齐缺失定义；名称不得重名
+（忽略大小写）或为空。已有标签的名称、颜色和描述保留，触发和取消也按忽略大小写匹配。
+新授权发现每 300 秒进行；未建齐或上次失败每 300 秒检查，三个标签均确认存在后每 86400 秒
+复查并补回缺失项。人工预建的同样转每日检查，改配置名称后重新确认。
+仓库检查时间与扫描退避截止时间保存在 PostgreSQL，重启沿用；历史记录不授予访问权，
+当前授权枚举中已移除的仓库不处理。维护暂停不接纳新扫描单元，停机取消会释放当前 activity。
+这些频率独立于 PR reconcile 配置；网络耗时、维护和限流会延后检查。
+只有完整读取标签列表后才创建缺失定义；422 必须复读确认同名标签存在，其他验证错误不当成功。
+创建响应丢失后下一轮先重新读取，不盲重发。限流停止本次扫描，并在此 App 的标签扫描层
+持久化至少 300 秒或 Retry-After 指定的更长退避；这不改变其他业务循环的限流策略。
+需要 Issues write 权限，失败不影响本地 readiness，不自动改权限、扩大授权或给 Issue 添加触发标签。
+
 Issue/PR 标签和归档评论需要对应的 Issues/Pull requests write 权限；状态回写使用
 [Labels API](https://docs.github.com/en/rest/issues/labels) 的增量 add/remove，保留用户标签和 `flow`。
-缺少 label 定义或权限会保留清理凭据与未完成回写，不自动创建仓库 label；修正后通过
+缺少 label 定义或权限仍可能保留清理凭据与未完成回写；标签补齐或权限修正后通过
 `flow retry <id>` 继续原结果。仅标签缺失且目标仍可读取时把 remove 404 视为已完成。
 
 `GitHubApp` 启动时验证正 App ID 和可读非空私钥，使用 githubkit 0.16 原生认证。

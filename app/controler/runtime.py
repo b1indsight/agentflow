@@ -12,6 +12,7 @@ from app.controler.config import ServerSettings
 from app.controler.console.sync import ConsoleSynchronizer
 from app.controler.events.webhooks import WebhookConsumer
 from app.controler.reconciliation.feedback import FeedbackReconciler
+from app.controler.reconciliation.labels import LabelSynchronizer
 from app.controler.reconciliation.projects import ProjectSync
 from app.controler.reconciliation.pull_requests import Reconciler
 from app.controler.review.judge import BubJudge
@@ -24,6 +25,7 @@ from app.controler.workflow.service import ControlService
 from app.controler.workflow.tools import FlowToolService
 from app.github import GitHubApp
 from app.persistence.database import Database
+from app.persistence.maintenance import MaintenanceStore
 from app.persistence.readiness import database_ready
 from app.persistence.results import ResultStore
 from app.persistence.reviews import ReviewStore
@@ -125,7 +127,9 @@ class ServerRuntime:
             concurrency=self.settings.reconcile_concurrency,
             database=database,
         )
+        self.label_sync = LabelSynchronizer(github, self.settings, database=database)
         self.database = database
+        self.maintenance = MaintenanceStore(database)
         self.workers = WorkerStore(database)
         self.reviews = ReviewStore(database)
         self.result_store = ResultStore(database)
@@ -134,6 +138,7 @@ class ServerRuntime:
 
     def startup(self) -> None:
         self.database.init_db()
+        self.maintenance.start_instance()
         self.result_store.recover_claims()
         self.workers.recover_abandoned_assignments()
         self._tasks = [
@@ -142,6 +147,7 @@ class ServerRuntime:
             asyncio.create_task(self.project_sync.run()),
             asyncio.create_task(self.reconciler.run()),
             asyncio.create_task(self.feedback_reconciler.run()),
+            asyncio.create_task(self.label_sync.run()),
             asyncio.create_task(self._sweep_assignments()),
             asyncio.create_task(self._sweep_results()),
             asyncio.create_task(self._sweep_reviews()),

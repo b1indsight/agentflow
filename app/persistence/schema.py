@@ -320,6 +320,36 @@ CREATE TABLE IF NOT EXISTS project_projections (
 CREATE INDEX IF NOT EXISTS ix_projects_due ON project_projections(next_at,id) WHERE NOT blocked;
 """
 
+MAINTENANCE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS server_maintenance (
+  singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK(singleton),
+  operation_id TEXT,
+  paused_at TIMESTAMPTZ,
+  instance_id TEXT NOT NULL DEFAULT '',
+  CHECK ((operation_id IS NULL) = (paused_at IS NULL))
+);
+INSERT INTO server_maintenance(singleton) VALUES(TRUE) ON CONFLICT DO NOTHING;
+CREATE TABLE IF NOT EXISTS server_activities (
+  token TEXT PRIMARY KEY,
+  name TEXT NOT NULL
+);
+"""
+
+LABEL_SCHEMA = """
+CREATE TABLE IF NOT EXISTS repository_label_backoff (
+  app_id BIGINT PRIMARY KEY,
+  next_at TIMESTAMPTZ NOT NULL
+);
+CREATE TABLE IF NOT EXISTS repository_label_checks (
+  app_id BIGINT NOT NULL,
+  installation_id BIGINT NOT NULL,
+  repo TEXT NOT NULL,
+  names TEXT[] NOT NULL CHECK(cardinality(names)=3),
+  next_at TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY(app_id,installation_id,repo)
+);
+"""
+
 SCHEMAS = (
     SCHEMA,
     WEBHOOK_SCHEMA,
@@ -329,4 +359,6 @@ SCHEMAS = (
     RECONCILE_SCHEMA,
     PROJECT_SCHEMA,
     CONSOLE_SCHEMA,
+    MAINTENANCE_SCHEMA,
+    LABEL_SCHEMA,
 )

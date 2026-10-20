@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, PrivateAttr, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, SecretStr, TypeAdapter
 
 from app.github._fields import unobserved_field
 from app.github.errors import GitHubError, GitHubErrorKind, translate_errors
@@ -20,6 +21,22 @@ class RemoteRef(BaseModel):
     model_config = ConfigDict(frozen=True)
     branch: str
     sha: str
+
+
+class LabelDefinition(BaseModel):
+    """Defaults used only when a repository label does not already exist."""
+
+    model_config = ConfigDict(frozen=True)
+    name: str = Field(min_length=1)
+    color: str = Field(pattern=r"^[0-9a-fA-F]{6}$")
+    description: str = Field(max_length=100)
+
+
+class _LabelName(BaseModel):
+    name: str
+
+
+_LABEL_NAMES = TypeAdapter(list[_LabelName])
 
 
 class PushCapability(BaseModel):
@@ -119,6 +136,55 @@ class Repository(BaseModel):
 
     async def fetch_pull_request(self, number: int) -> PullRequest:
         return await PullRequest(self, number).refetch()
+
+    async def ensure_labels(self, definitions: Sequence[LabelDefinition]) -> tuple[str, ...]:
+        """Create missing definitions only; uncertain writes are recovered by the next full read.
+
+        A 422 is success only after a positive lookup of the concurrently created label.
+        Return the names created by this call, leaving all existing metadata untouched.
+        """
+        client = self.installation._client(auto_retry=False)
+        existing: set[str] = set()
+        page = 1
+        with translate_errors("list_repository_labels"):
+            while True:
+                result = await client.rest.issues.async_list_labels_for_repo(
+                    self.owner, self.name, per_page=100, page=page,
+                )
+                labels = _LABEL_NAMES.validate_python(result.parsed_data, from_attributes=True)
+                existing.update(label.name.casefold() for label in labels)
+                if len(labels) < 100:
+                    break
+                page += 1
+        created: list[str] = []
+        for definition in definitions:
+            if definition.name.casefold() in existing:
+                continue
+            try:
+                with translate_errors(f"create_label ({definition.name})"):
+                    data = (await client.rest.issues.async_create_label(
+                        self.owner, self.name, name=definition.name, color=definition.color,
+                        description=definition.description,
+                    )).parsed_data
+            except GitHubError as error:
+                if error.status_code != 422:
+                    raise
+                try:
+                    with translate_errors(f"get_label ({definition.name})"):
+                        data = (await client.rest.issues.async_get_label(
+                            self.owner, self.name, definition.name,
+                        )).parsed_data
+                except GitHubError as lookup:
+                    if lookup.status_code == 404:
+                        raise error from None
+                    raise
+            else:
+                created.append(definition.name)
+            with translate_errors("repository_label_identity"):
+                if data.name.casefold() != definition.name.casefold():
+                    raise ValueError("label response identity mismatch")
+            existing.add(definition.name.casefold())
+        return tuple(created)
 
     async def fetch_ref(self, branch: str, *, retry_transient: bool = False) -> RemoteRef:
         """Durable callers own retries; Flow tools opt into the original bounded SDK retry."""

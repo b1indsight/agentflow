@@ -62,11 +62,13 @@ def issue_event(*, action: str, sender: str = "alice") -> dict:
     }
 
 
+@pytest.mark.parametrize("label", ["flow", "Flow"])
 @pytest.mark.asyncio
 async def test_allowed_label_creates_one_flow_and_job(
-    router: EventRouter, store: Store
+    router: EventRouter, store: Store, label: str,
 ) -> None:
     payload = issue_event(action="labeled")
+    payload["label"]["name"] = label
 
     router.dispatch("issues", "delivery-1", payload)
     router.dispatch("issues", "delivery-1", payload)
@@ -79,24 +81,31 @@ async def test_allowed_label_creates_one_flow_and_job(
     assert store.workers.assign_job("worker-1", "assignment-2") is None
 
 
+@pytest.mark.parametrize("label", ["flow", "Flow"])
 @pytest.mark.asyncio
 async def test_bot_and_non_allowlisted_users_do_not_trigger(
-    router: EventRouter, store: Store
+    router: EventRouter, store: Store, label: str,
 ) -> None:
-    router.dispatch("issues", "bot-delivery", issue_event(action="labeled", sender="flowtool[bot]"))
-    router.dispatch("issues", "outsider-delivery", issue_event(action="labeled", sender="mallory"))
+    bot = issue_event(action="labeled", sender="flowtool[bot]")
+    outsider = issue_event(action="labeled", sender="mallory")
+    bot["label"]["name"] = outsider["label"]["name"] = label
+    router.dispatch("issues", "bot-delivery", bot)
+    router.dispatch("issues", "outsider-delivery", outsider)
 
     assert store.flows.get_active_flow("owner/repo", 7) is None
     assert store.webhooks.event_seen("bot-delivery") is False
     assert store.webhooks.event_seen("outsider-delivery") is True
 
 
+@pytest.mark.parametrize("label", ["flow", "Flow"])
 @pytest.mark.asyncio
 async def test_unlabel_and_stop_comment_cancel_active_flow(
-    router: EventRouter, store: Store
+    router: EventRouter, store: Store, label: str,
 ) -> None:
     router.dispatch("issues", "create-1", issue_event(action="labeled"))
-    router.dispatch("issues", "cancel-1", issue_event(action="unlabeled"))
+    unlabel = issue_event(action="unlabeled")
+    unlabel["label"]["name"] = label
+    router.dispatch("issues", "cancel-1", unlabel)
     cancelled = store.flows.list_flows()[0]
     assert cancelled.state is FlowState.CANCELLED
 
