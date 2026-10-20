@@ -1,7 +1,7 @@
 # 自动创建仓库标签 — Feature record
 
-**Stage:** Implementation — 独立发布分支验证完成，结果见 [003]；尚未部署或执行真实 App 写入验收。
-**PR:** 准备发布至 `main`；独立工作区保留源工作区的其他改动。
+**Stage:** Review — PR 已提交，独立验证与已报告风险见 [003]；未合并或部署。
+**PR:** [#105](https://github.com/b1indsight/agentflow/pull/105)，目标 `main`；源工作区的其他改动保留。
 **Bookmark:** `feat/repository-label-bootstrap`
 
 ## 1. Initial plan
@@ -227,4 +227,11 @@ API 依据：[App installation 枚举](https://docs.github.com/en/rest/apps/apps
   放入包目录后 `uv build --no-sources` 通过，并验证 wheel 包含控制台资源和标签同步模块。
   数量与 [002] 的混合工作区不同，不将未纳入 PR 的功能测试计入发布验证。
   本地日志为 `.amp/in/artifacts/repository-label-pr-tests.log` 与 `repository-label-pr-checks.log`。
-- **边界：** 尚未合并、部署或执行真实 GitHub 标签写入；发布前还需独立代码审查。
+- **独立审查：** 审查及最终树复核均无 critical；两轮合计报告四项 medium，尚未修复：
+  installation 枚举 503 可能忽略 Retry-After；检查点/退避保存失败可能丢失限流控制；
+  仓库名复用可能继承旧每日时间；无特定响应头的二级限流 403 可能被当作权限错误继续扫描。
+  首轮另报的临时 node_modules 绝对路径链接已在结果返回前清理，最终树不包含该链接。
+  完整说明见 [PR 审查发现](https://github.com/b1indsight/agentflow/pull/105)。
+  仅报告这些发现，未自动修改相关逻辑；发布代码使用最终审查返回的精确提交。
+- **交付：** 已提交 [PR #105](https://github.com/b1indsight/agentflow/pull/105)；
+  未合并、部署或执行真实 GitHub 标签写入。
