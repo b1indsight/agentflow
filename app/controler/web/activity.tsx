@@ -1,4 +1,5 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
+import type { Nodes, Root } from "mdast";
 import Markdown, { defaultUrlTransform, type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { getContent, getDiff, getThread } from "./api";
@@ -27,6 +28,26 @@ const markdownComponents: Components = {
     </div>
   ),
 };
+
+/** Numeric identifiers keep labels such as `a-2` distinct from repeated citations of `a`. */
+function numberFootnoteIdentifiers() {
+  return (tree: Root) => {
+    const identifiers = new Map<string, string>();
+    const visit = (node: Nodes) => {
+      if (
+        node.type === "footnoteDefinition" ||
+        node.type === "footnoteReference"
+      ) {
+        const key = node.identifier.toUpperCase();
+        const identifier = identifiers.get(key) ?? String(identifiers.size + 1);
+        identifiers.set(key, identifier);
+        node.identifier = identifier;
+      }
+      if ("children" in node) node.children.forEach(visit);
+    };
+    visit(tree);
+  };
+}
 
 /** Resolve archived destinations at their source; footnotes stay local to this body segment. */
 function ActivityMarkdown({
@@ -65,7 +86,7 @@ function ActivityMarkdown({
                 if (!href?.startsWith("#")) return;
                 const target = document.getElementById(href.slice(1));
                 if (target && body.current?.contains(target)) {
-                  target.tabIndex = -1;
+                  if (reference) target.tabIndex = -1;
                   target.focus({ preventScroll: true });
                   target.scrollIntoView({ block: "nearest" });
                 }
@@ -83,7 +104,7 @@ function ActivityMarkdown({
   return (
     <div ref={body} className="message-body markdown-body">
       <Markdown
-        remarkPlugins={[remarkGfm]}
+        remarkPlugins={[remarkGfm, numberFootnoteIdentifiers]}
         remarkRehypeOptions={{ clobberPrefix: `${id}-` }}
         urlTransform={(url, _key, node) => {
           const safe = defaultUrlTransform(url);

@@ -1328,6 +1328,11 @@ test("footnotes navigate within their own message without replacing the conversa
       await backrefs.nth(index).press("Enter");
       await expect(ref).toBeFocused();
       await expect(page).toHaveURL(/#flow\/42\/conversation$/);
+      // A backlink must not remove its reference from native keyboard traversal.
+      await page.keyboard.press("Tab");
+      await expect(index === 0 ? refs.nth(1) : backrefs.first()).toBeFocused();
+      await page.keyboard.press("Shift+Tab");
+      await expect(ref).toBeFocused();
     }
     await refs.first().click({ button: "middle" });
   }
@@ -1336,6 +1341,58 @@ test("footnotes navigate within their own message without replacing the conversa
     .evaluateAll((elements) => elements.map((element) => element.id));
   expect(new Set(ids).size).toBe(ids.length);
   expect(page.context().pages()).toHaveLength(1);
+});
+
+test("footnote labels cannot collide with repeated-reference suffixes", async ({
+  page,
+}) => {
+  // The second citation of `a` and the first citation of `a-2` previously shared an ID.
+  const body = "A[^a] B[^a] C[^a-2]\n\n[^a]: 第一条脚注\n[^a-2]: 第二条脚注";
+  await page.route("**/api/flows/42/activity?**", (route) =>
+    route.fulfill({
+      json: {
+        items: [
+          {
+            ...activity,
+            previous_version: null,
+            body,
+            body_length: Array.from(body).length,
+          },
+        ],
+        snapshot: 2,
+        total: 1,
+        has_more: false,
+        next_cursor: null,
+        sources: [],
+        changes: {},
+      },
+    }),
+  );
+  await page.goto("/#flow/42/conversation");
+  const message = page.locator(
+    "article[data-entry='comment-1'] .markdown-body",
+  );
+  const refs = message.locator("a[data-footnote-ref]");
+  const notes = message.locator("section[data-footnotes] li");
+  await expect(refs).toHaveText(["1", "1", "2"]);
+  await expect(notes.nth(0)).toContainText("第一条脚注");
+  await expect(notes.nth(1)).toContainText("第二条脚注");
+  const ids = await message
+    .locator("[id]")
+    .evaluateAll((elements) => elements.map((element) => element.id));
+  expect(new Set(ids).size).toBe(ids.length);
+  for (let index = 0; index < 3; index++) {
+    const ref = refs.nth(index);
+    const note = notes.nth(index === 2 ? 1 : 0);
+    await ref.click();
+    await expect(note).toBeFocused();
+    await note
+      .locator("a[data-footnote-backref]")
+      .nth(index === 1 ? 1 : 0)
+      .press("Enter");
+    await expect(ref).toBeFocused();
+    await expect(page).toHaveURL(/#flow\/42\/conversation$/);
+  }
 });
 
 test("assistant tools share one compact activity bar across pages without crossing turns", async ({
