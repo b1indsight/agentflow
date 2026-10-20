@@ -21,7 +21,7 @@ import {
   sameWorkerOutput,
   type ToolActivityGroup,
 } from "./activity";
-import { ConversationSources } from "./ConversationSources";
+import { ConversationSources, SourceList } from "./ConversationSources";
 import { actionLabel, phases } from "./phases";
 import { SearchBox } from "./SearchBox";
 import type {
@@ -638,18 +638,7 @@ function Detail({
                   <dd>{flow.state_version}（与阅读快照独立）</dd>
                 </dl>
                 <h2 className="panel-title">数据来源</h2>
-                {flow.sources.map((s) => (
-                  <p key={s.source}>
-                    {s.source} · {s.status}
-                    {s.reason ? ` · ${s.reason}` : ""}
-                    {s.last_success_at
-                      ? ` · 上次成功 ${s.last_success_at}`
-                      : ""}
-                    {s.limitations.length
-                      ? ` · ${s.limitations.join("；")}`
-                      : ""}
-                  </p>
-                ))}
+                <SourceList sources={flow.sources} />
               </>
             ) : tab === "conversation" ? (
               <Conversation key={id} id={id} root={detail} refresh={refresh} />

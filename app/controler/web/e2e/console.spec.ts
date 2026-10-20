@@ -318,15 +318,107 @@ for (const width of [1440, 390]) {
   });
 }
 
+test("overview sources explain sync progress separately from historical gaps", async ({
+  page,
+}) => {
+  // A new sync retains its last result: pending + no_session must not claim
+  // there is still no session, and a history gap must not look like a read error.
+  const sources: SourceStatus[] = [
+    {
+      source: "github",
+      status: "pending",
+      reason: null,
+      last_success_at: "2026-10-20T06:42:31.689912Z",
+      limitations: ["remote_deleted_or_pre_ingestion_versions_unrecoverable"],
+    },
+    {
+      source: "issue.comments",
+      status: "available",
+      reason: null,
+      last_success_at: "2026-10-20T06:42:33.701871Z",
+      limitations: [],
+    },
+    {
+      source: "issue.description",
+      status: "partial",
+      reason: null,
+      last_success_at: "2026-10-20T06:42:32.510914Z",
+      limitations: ["pre_ingestion_edits_and_deleted_bodies_unrecoverable"],
+    },
+    {
+      source: "issue.reactions",
+      status: "partial",
+      reason: null,
+      last_success_at: "2026-10-20T06:42:32.557021Z",
+      limitations: ["reaction_removals_have_no_webhook_or_revision_clock"],
+    },
+    {
+      source: "issue.timeline",
+      status: "available",
+      reason: null,
+      last_success_at: "2026-10-20T06:42:32.505066Z",
+      limitations: [],
+    },
+    {
+      source: "worker",
+      status: "pending",
+      reason: "no_session",
+      last_success_at: null,
+      limitations: [],
+    },
+  ];
+  await page.route("**/api/flows/42", (route) =>
+    route.fulfill({
+      json: {
+        ...flow,
+        reason: "正在验证",
+        next_condition: "等待验证结果",
+        sources,
+      },
+    }),
+  );
+  await page.goto("/#flow/42/overview");
+  const list = page.getByRole("list", { name: "数据来源明细" });
+  const github = list.getByRole("listitem").filter({
+    has: page.getByText("GitHub 同步入口", { exact: true }),
+  });
+  await expect(github).toContainText("等待同步");
+  await expect(github).toContainText("上次成功同步：");
+  await expect(github.locator("time")).toHaveAttribute(
+    "datetime",
+    "2026-10-20T06:42:31.689912Z",
+  );
+  await expect(list.getByText("历史记录受限", { exact: true })).toHaveCount(2);
+  await expect(list).toContainText("无法完整追踪表情回应的移除记录。");
+  await expect(list).toContainText("上次读取：尚无执行会话");
+  await expect(list).toContainText("上次成功同步：暂无记录");
+  await expect(list).not.toContainText("no_session");
+  await expect(list).not.toContainText("unrecoverable");
+  await expect(list.getByText("读取失败", { exact: true })).toHaveCount(0);
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: 1200 });
+    await list.scrollIntoViewIfNeeded();
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBe(true);
+    await list.screenshot({
+      path: `../../../.amp/in/artifacts/source-list-${width}.png`,
+    });
+  }
+});
+
 test("conversation sources keep routine diagnostics collapsed and surface actionable failures", async ({
   page,
 }) => {
   // Historical coverage limits and a not-yet-created worker session are normal
   // on a new flow; an actual read failure must still be visible and retryable.
   const historyLimit = "pre_ingestion_edits_and_deleted_bodies_unrecoverable";
+  const historyExplanation = "无法恢复首次采集前的正文编辑历史和已删除的正文。";
   let sources: SourceStatus[] = [
     {
-      source: "github.issue_comments",
+      source: "issue.description",
       status: "partial",
       reason: null,
       last_success_at: now,
@@ -374,14 +466,18 @@ test("conversation sources keep routine diagnostics collapsed and surface action
   const refresh = page.getByRole("button", { name: "刷新当前视图" });
   await expect(status).toBeVisible();
   await expect(details).not.toHaveAttribute("open");
-  await expect(status.getByText(historyLimit, { exact: true })).toBeHidden();
+  await expect(
+    status.getByText(historyExplanation, { exact: true }),
+  ).toBeHidden();
   await expect(warning).toHaveCount(0);
   await details.locator("summary").click();
   await expect(
-    status.getByText("github_pr_commit_list_maximum_250", { exact: true }),
+    status.getByText("GitHub 最多返回此 PR 的 250 条提交记录。", {
+      exact: true,
+    }),
   ).toBeVisible();
   await expect(
-    status.getByText("thread_state_has_no_remote_change_timestamp", {
+    status.getByText("评审讨论状态缺少远端变更时间，无法精确还原变更历史。", {
       exact: true,
     }),
   ).toBeVisible();
@@ -401,9 +497,9 @@ test("conversation sources keep routine diagnostics collapsed and surface action
     },
   ];
   await refresh.click();
-  await expect(warning).toContainText("issue.timeline：同步异常");
-  await expect(warning).not.toContainText("pr.commits");
-  await expect(warning).not.toContainText("pr.review_threads");
+  await expect(warning).toContainText("Issue 时间线：来源返回了无法识别的数据");
+  await expect(warning).not.toContainText("PR 提交记录");
+  await expect(warning).not.toContainText("PR 评审讨论");
   await warning.screenshot({
     path: "../../../.amp/in/artifacts/closed-pr-sources-desktop.png",
   });
@@ -438,7 +534,9 @@ test("conversation sources keep routine diagnostics collapsed and surface action
     path: "../../../.amp/in/artifacts/sources-warning.png",
   });
   await details.locator("summary").click();
-  await expect(status.getByText(historyLimit, { exact: true })).toBeVisible();
+  await expect(
+    status.getByText(historyExplanation, { exact: true }),
+  ).toBeVisible();
   await expect(status.locator("time").first()).toHaveAttribute("datetime", now);
   await page.setViewportSize({ width: 390, height: 844 });
   expect(
