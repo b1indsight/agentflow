@@ -410,19 +410,30 @@ export function ActivityView({
   provenance?: ActivityItem[];
 }) {
   const event = entry.kind === "event" && entry.body_length === 0;
+  const compact = event || entry.kind === "check";
   const tool = isToolActivity(entry);
   const [toolsOpen, setToolsOpen] = useReadingState(
     `${flowId}-${toolGroup?.key ?? entry.key}-tools`,
     0,
   );
   const title =
-    event || tool || (entry.source === "worker" && entry.title === "message")
+    compact || tool || (entry.source === "worker" && entry.title === "message")
       ? ""
       : entry.title;
+  let action = event ? eventSummary(entry) : entry.title;
+  if (entry.kind === "check") {
+    const workflow = entry.metadata.workflow_name;
+    const conclusion = entry.metadata.conclusion;
+    const status =
+      typeof conclusion === "string" && conclusion
+        ? conclusion
+        : entry.metadata.status;
+    action = `${typeof workflow === "string" && workflow ? workflow : "未知工作流"}: ${entry.title}: ${typeof status === "string" && status ? status : "unknown"}`;
+  }
   const metadata = !continuation && Object.keys(entry.metadata).length > 0;
   return (
     <article
-      className={`message${entry.deleted ? " deleted" : ""}${event ? " compact-event" : ""}${continuation ? " continuation" : ""}${toolGroup ? " tool-activity" : ""}`}
+      className={`message${entry.deleted ? " deleted" : ""}${compact ? " compact-event" : ""}${continuation ? " continuation" : ""}${toolGroup ? " tool-activity" : ""}`}
       data-entry={entry.key}
       hidden={
         mergedIntoCall || Boolean(toolGroup && !toolGroup.leader && !toolsOpen)
@@ -442,7 +453,7 @@ export function ActivityView({
             <span>{entry.author}</span>
             <span className="source-tag">{entry.source}</span>
           </span>
-          {event && <span className="event-action">{eventSummary(entry)}</span>}
+          {compact && <span className="event-action">{action}</span>}
           {entry.prior && (
             <span
               className="message-context"

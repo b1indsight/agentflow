@@ -1615,3 +1615,66 @@ Webhook 未覆盖的交互/字段需在明确触发的核对中补齐，不能�
   临时依赖链接在验证后移除，不进入发布 diff。
 - **Delivery boundary:** 本记录写入时准备发布前独立审查；审查通过后才推送并创建后续 PR。
   不合并、不部署；原始线上 502 仍不具备已解决的证据，限制沿用 [051]。
+
+### [055] — 2026-10-20 — CI 活动显示工作流、任务和状态（方案待批准）
+
+- **Requirement:** 用户要求检查活动使用 `{workflow}: {job}: {status}`，例如
+  `CI: check (3.10): success`。保留 `app.name` 作者、紧凑行、每个检查的独立身份、
+  摘要正文与来源入口；不改变同作者分组及 Markdown 渲染。
+- **Evidence:** 已只读核对真实 GitHub 响应：check run 提供任务名、status、conclusion
+  和 check_suite.id，但没有 workflow 名。按该 suite ID 查询 Actions workflow runs，
+  实际返回 `name=CI`；安装的 githubkit 原生接口支持 check_suite_id 过滤。
+  [GitHub Actions API](https://docs.github.com/en/rest/actions/workflow-runs#list-workflow-runs-for-a-repository)
+  及 [GitHub App 权限表](https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps#repository-permissions-for-actions)
+  是接口和 Actions read 权限依据；生产 installation 是否已经授权尚未核实。
+- **Proposed data flow:** 仅在既有检查分页中，为 GitHub Actions 的 check_suite.id
+  查询真实 workflow 名，同页按 suite 去重；当前每页最多两个检查，因此最多增加两次
+  有界只读请求。使用 suite 身份关联，不解析链接、不假设 job/check ID 相同、不硬编码
+  `CI`。将名称补入检查元数据，保留归档 title 中的原始 job 名；界面组合显示三部分。
+  状态优先使用非空 conclusion，否则使用当前 status，缺失时明确显示 unknown。
+- **Incomplete data / errors:** workflow 名尚未取得时明确显示“未知工作流”，不从作者
+  或任务名称猜测；可选补全遇到权限不足、远端缺失或暂时故障时保留已读检查及状态，
+  在来源元数据注明原因，后续正常刷新可再次查询，不把暂时失败永久累计成历史缺口。
+  补全请求须有短超时并遵守现有同步总预算。同步 webhook 映射保持无 I/O，收到原始
+  检查时允许名称暂缺，后续既有 API 重扫补全；既有归档不会被宣称已自动补齐。
+- **Implementation / validation after approval:** 依次补读取与元数据、前端格式、权限说明
+  和公开接口回归。覆盖成功/失败、queued/in_progress、同 suite 去重、多 workflow、
+  缺失名称与权限不足、webhook 先到和重扫补全；桌面及手机检查同行格式、摘要和来源
+  入口，并运行相关 Python、前端单测、格式、类型/构建及浏览器回归。
+- **Scope / risk / delivery:** 不新增依赖、表结构、同步来源、Webhook 订阅或长期缓存。
+  额外请求会增加延迟与 API 配额消耗；App 的 Actions read 如需增加，由用户手动配置。
+  本项目前仅记录本地方案，等待明确批准；尚未为本项修改产品代码或测试，未提交、
+  推送、创建 PR、修改线上权限或部署。
+
+### [056] — 2026-10-20 — CI 活动格式实现及独立发布候选
+
+- **Requirement / implemented:** 用户批准 [055] 后实现 `{workflow}: {job}: {status}`，
+  随后要求提 PR。检查作者使用 `app.name`，标题进入作者右侧的紧凑活动栏，保留原始 job
+  title、摘要及来源入口；状态优先非空 conclusion，否则当前 status，缺失为 unknown。
+  后端在既有分页中按 Actions suite 查询真实 workflow name，同页去重、共用 2 秒预算，
+  外层取消继续传播。权限、限流和暂时故障阻止同页后续可选请求，原因进入元数据，
+  不永久累计为历史限制。Webhook 不联网，后续 API 重扫补全同一检查身份。
+- **Publication isolation:** 从最新远端 main 建立独立 jj workspace，仅迁入本线程 CI
+  作者、紧凑标题、工作流补全和相关测试文档。保留 main 的 [053]；编号 [054] 对应
+  [独立 Markdown PR #98](https://github.com/b1indsight/agentflow/pull/98) 的功能记录，
+  此处不复制其作者分组、Markdown、代码换行、依赖或浏览器回归。原共享工作区不修改。
+  不新增生产依赖、表结构、同步来源、Webhook 订阅或长期缓存；补充 Changelog 与 Actions
+  read 权限说明。生产 installation 授权尚未核实，用户如需增加权限须手动配置。
+- **Validation:** 发布候选运行全量 Python：438 passed、411 skipped，跳过项需要当前
+  未配置的 PostgreSQL 测试数据库；Ruff 和 Mypy（194 个源文件）通过。前端锁定安装、
+  Prettier、3 项单测、TypeScript/Vite 构建及全部 17 项浏览器回归通过。
+  桌面和 390px 手机另检查 6 种 CI 状态、独立作者栏、无重复标题、摘要、来源入口与原因
+  展开、无横向溢出，截图已检查。证据位于原工作区 `.amp/in/artifacts/` 的
+  `ci-pr-python.log`、`ci-pr-frontend.log`、`ci-pr-visual.log`、`ci-pr-desktop.png` 和
+  `ci-pr-mobile.png`。浏览器拦截 API，未宣称真实 App、数据库或线上部署验收。
+- **Ablation / trade-off:** 与发布候选后端相同的实现已使用真实 GitHub JSON 经原生
+  SDK/MockTransport 回放，同页 2 个同 suite job 只查询 1 次，移除去重后 2 次；
+  两个 suite 遇到 403 时仅查询 1 次，移除同页故障阻止后查询 2 次。两次查询分别延迟
+  1.2 秒，共用预算在 2.005 秒保留首个名称并中止第二次，移除预算后等待 2.422 秒。
+  保留机制以限制重复请求与可选补全延迟，慢查询可能需要后续刷新才能补齐。
+  原实验命令为 `PYTHONPATH=. uv run python .amp/in/verify-ci-workflow.py`，临时脚本
+  已清理，输入样本留在原工作区 `.amp/in/`；结果为
+  `.amp/in/artifacts/ci-workflow-sdk-validation.log`，另覆盖缺失名称、403/404/429/503、
+  不匹配 suite、webhook 先到及外层取消传播。
+- **Delivery boundary:** 本记录写入时发布候选已验证、等待独立审查；通过后按用户请求
+  推送并创建 PR，不合并、不部署、不修改 GitHub App 权限。已有归档不保证立即补齐名称。
