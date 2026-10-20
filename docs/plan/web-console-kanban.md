@@ -1616,6 +1616,31 @@ Webhook 未覆盖的交互/字段需在明确触发的核对中补齐，不能�
 - **Delivery boundary:** 本记录写入时准备发布前独立审查；审查通过后才推送并创建后续 PR。
   不合并、不部署；原始线上 502 仍不具备已解决的证据，限制沿用 [051]。
 
+### [054] — 2026-10-20 — 同作者消息合并、Markdown 与窄屏代码换行
+
+- **Requirement / decision:** 用户要求连续同作者消息合并展示并渲染 Markdown，随后要求
+  宽度不足的代码也能完整阅读。连续同来源同作者消息共用头像、作者栏和来源定位；Worker
+  仍要求执行、会话与会话代次明确一致，已有 assistant/tool 分组及调用结果配对不变。
+  不跨事件、检查、线程、删除记录或历史归属合并；每条正文、来源链接和编辑差异独立保留。
+- **Implemented / trade-offs:** 使用 react-markdown + remark-gfm 渲染有界正文段与线程回复，
+  支持标题、列表、引用、代码、链接及表格。原始 HTML 仍是转义文本，危险 URL 被过滤，
+  图片显示为链接以避免自动请求外部资源；工具输出和 diff 保持原文。
+  Markdown 按当前正文段独立解析，不为跨段语法加载整篇正文。代码块最终采用 pre-wrap
+  与 overflow-wrap:anywhere，替代最初的横向滚动方案；保留缩进、原始换行与完整文本，
+  连续无空格长串也能折行。宽表格仍局部横向滚动。
+- **Validation:** 同作者回归在旧实现因 developer 未分组而失败；换行断言在旧样式因代码
+  scrollWidth 超过 clientWidth 而失败。新增既有浏览器用例覆盖跨 API 页分组、身份与会话
+  边界、缺失归属、独立 GitHub 链接、Markdown 结构、代码完整文本与折行后的尺寸。
+  扩展既有安全测试，验证 HTML、危险链接及外部图片不会注入执行或自动加载。
+  发布候选在最新 main 的独立 jj workspace 完成 npm ci、格式、TypeScript/Vite 构建、
+  2 项单测与全部 18 项浏览器回归，均通过；桌面及 390px 手机截图已检查。
+  日志为 `.amp/in/artifacts/pr-markdown-verification.log`。构建保留单 JS 包约 560 kB
+  的非阻断警告；浏览器使用受控 API 响应，不代表真实后端或线上部署验收。
+- **Publication scope:** 用户已要求提 PR；仅发布本项前端、依赖锁文件、README、Changelog
+  与功能记录，保留 main 上已合并的来源状态和归档说明。不带入共享工作区中的其他后端、
+  CI 检查展示或未批准方案；原工作区保持不变。发布前按项目 review gate 审查，结果随 PR
+  记录；不自动合并或部署。
+
 ### [055] — 2026-10-20 — CI 活动显示工作流、任务和状态（方案待批准）
 
 - **Requirement:** 用户要求检查活动使用 `{workflow}: {job}: {status}`，例如
@@ -1685,3 +1710,70 @@ Webhook 未覆盖的交互/字段需在明确触发的核对中补齐，不能�
   检查改为仅对连续相同结果去重，保留旧版本和远端时间；不新增缓存或名称合并规则。
 - 保留一条真实 PostgreSQL 回归，验证名称恢复及重复读取幂等；详细验证记录见
   [PR #101](https://github.com/b1indsight/agentflow/pull/101)。#100 问题 2 不在本次范围。
+
+### [058] — 2026-10-20 — 修复 Markdown 相对目标与消息内脚注导航
+
+- **Requirement / scope:** 用户要求先修 PR #98 首次审查的第 1、2 项：相对链接误指向
+  控制台域名，以及 GFM 脚注覆盖 hash 路由并丢失引用属性。第 3 项带链接图片产生嵌套
+  锚点仍按未处理项保留；在同一独立 jj workspace、bookmark 和 PR 上追加修复。
+- **Implemented / decision:** 相对普通链接（含片段、查询）与图片地址按消息原始 URL
+  解析，保留默认危险 URL 过滤，解析后的目标再次过滤；来源缺失或无效时保留文字，
+  禁用相对目标，避免猜测控制台或其他来源。绝对链接不依赖来源，图片仍不自动加载。
+  脚注使用每条正文段独立的引用、定义和标题 ID，保留 data / aria 属性；鼠标点击和
+  Enter 激活仅在当前正文内定位、转移焦点，保留会话 hash，不开新窗口。中键不创建
+  路由失效的新页。渲染组件身份保持稳定，避免 WindowList 焦点更新重挂载锚点而丢失点击。
+  仍按有界正文段解析，不为跨段脚注加载整篇内容。
+- **Before / after:** 新增公开 ActivityView 渲染回归在旧实现因相对链接未解析而失败；
+  新增浏览器回归在旧实现因脚注引用属性丢失而失败。修复后分别通过，覆盖多条消息
+  重用中文脚注名、一条消息重复引用、有/无来源 URL、往返焦点、唯一 ID 和路由不变。
+  日志为 `.amp/in/artifacts/markdown-links-before.log`、`markdown-links-after.log`、
+  `markdown-footnotes-before.log` 和 `markdown-footnotes-after.log`。
+- **Validation / boundary:** 前端格式、TypeScript/Vite 构建、全部 3 项单测与全部 19 项
+  浏览器回归通过，证据为 `.amp/in/artifacts/markdown-review-fixes-checks.log` 和
+  `markdown-review-fixes-e2e.log`。此修复仅改变链接/脚注语义，浏览器实际点击与键盘
+  激活验证 DOM、可访问属性和焦点；API 使用受控响应，不代表真实后端或线上部署验收。
+  单 JS 包约 561 kB 的非阻断构建警告保留；本项未改后端，未重跑 Python。
+  发布前按 review gate 审查；不自动处理新发现项，不合并或部署。
+
+### [059] — 2026-10-20 — 保留脚注引用的 Tab 顺序并消除标签后缀冲突
+
+- **Requirement / scope:** 用户要求修复 [058] 复审新增的两项 low：脚注回链将原引用
+  移出 Tab 顺序，以及同条消息中的 `a` 重复引用与 `a-2` 标签生成相同引用 ID。
+  首次审查的带链接图片嵌套锚点仍不在本轮范围内。
+- **Implemented / decision:** 仅从引用跳到脚注定义时添加负 tabindex，回到原引用时
+  保留链接自身的键盘行为。渲染 HTML 前将脚注定义和引用的标识一致映射为内部数字，
+  不含重复次数分隔符，保留大小写等价关系；沿用渲染器的编号和回链生成，避免 DOM
+  后补去重只改 ID 却漏改回链。消息前缀继续隔离跨消息脚注，正文与显示编号不变。
+  显式声明已在锁文件中的 @types/mdast 作为开发依赖供树转换类型使用，不新增运行时依赖。
+- **Before / after:** 扩展既有脚注浏览器回归，实际使用 Tab / Shift+Tab 验证回链后
+  仍能遍历引用；新增 `A[^a] B[^a] C[^a-2]` 的唯一 ID 和三处引用往返回归。两项在旧
+  实现分别因焦点被跳过和重复 ID 失败，修复后均通过；证据为
+  `.amp/in/artifacts/footnote-low-before.log` 和 `footnote-low-after.log`。
+  临时渲染矩阵另验证数字标签、大小写别名、定义顺序、中文标签及重复后缀组合的编号、
+  ID 唯一性与全部回链配对，5 组通过，仅保留 `footnote-low-matrix.log`。
+- **Validation / boundary:** 锁定安装、前端格式、TypeScript/Vite 构建、3 项单测与全部
+  20 项浏览器回归通过，日志为 `.amp/in/artifacts/footnote-low-checks.log` 和
+  `footnote-low-e2e.log`。此轮仅改脚注导航语义，以实际浏览器键盘和 DOM 检查验收；
+  API 使用受控响应，不代表真实后端或线上部署。构建约 562 kB 的单包警告保留，未改后端，
+  未重跑 Python。继续在同一独立 workspace / bookmark / PR 发布，不改共享工作区，
+  发布前执行一次 review gate；新发现项只报告，不自动合并或部署。
+
+### [060] — 2026-10-20 — 合入最新 main 并解决 PR #98 冲突
+
+- **Requirement / integration:** 用户要求修复合并冲突。在独立 workspace 将最新 main
+  合入原功能分支，保留主线 CI 工作流、任务和状态摘要，以及本分支的同作者分组、来源
+  汇总、Markdown 和脚注行为；安全测试同时覆盖检查活动，保留双方新增回归。
+- **Record reconciliation:** 保留主线 [055]–[057] 及本分支 [054]。本分支相对链接修复
+  和脚注修复的原 [055]、[056] 分别顺延为 [058]、[059]，同步其内部引用，正文依据与
+  历次验证记录不变；Changelog 保留双方条目。
+- **Validation:** 整合后前端格式、TypeScript/Vite 构建、4 项单测与全部 20 项浏览器
+  回归通过，日志为 `.amp/in/artifacts/conflict-checks.log` 和 `conflict-e2e.log`。
+  临时浏览器场景另验证空元数据消息仍能展开合并来源，三条 CI 检查独立显示 success、
+  failure 和 queued，摘要正文继续渲染 Markdown。桌面和 390px 宽截图已检查，无重叠、
+  裁切或横向溢出，长代码完整换行；证据为 `conflict-visual.log`、`conflict-desktop.png`
+  和 `conflict-mobile.png`，临时测试源码已清理。
+  双方新增的 CI/相对链接回归和原功能记录逐段比对保留；主线后端未改，未重跑 Python。
+  浏览器使用受控 API 响应，不代表真实后端或线上验收；约 562 kB 单包警告保留。
+- **Delivery boundary:** 仍使用原 bookmark 和 PR；不修改共享工作区，不自动处理带链接
+  图片嵌套锚点，不合并 PR 或部署。发布前执行一次 review gate，更新 PR 后另核对
+  GitHub 合并状态；本地无冲突不代替远端确认。

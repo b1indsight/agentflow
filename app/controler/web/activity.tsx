@@ -1,4 +1,7 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
+import type { Nodes, Root } from "mdast";
+import Markdown, { defaultUrlTransform, type Components } from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { getContent, getDiff, getThread } from "./api";
 import { DiffWindow } from "./DiffWindow";
 import type { ActivityItem, ActivityPage, ContentPage } from "./types";
@@ -10,6 +13,125 @@ import {
   textEnd,
   useReadingState,
 } from "./windowing";
+
+const markdownComponents: Components = {
+  // Archived content must not make automatic requests to repository-supplied image URLs.
+  img: ({ src, alt }) => (
+    <a href={src} target="_blank" rel="noopener noreferrer">
+      图片：{alt || "查看图片"}
+    </a>
+  ),
+  pre: ({ children }) => <pre tabIndex={0}>{children}</pre>,
+  table: ({ children }) => (
+    <div className="markdown-table" tabIndex={0} aria-label="Markdown 表格">
+      <table>{children}</table>
+    </div>
+  ),
+};
+
+/** Numeric identifiers keep labels such as `a-2` distinct from repeated citations of `a`. */
+function numberFootnoteIdentifiers() {
+  return (tree: Root) => {
+    const identifiers = new Map<string, string>();
+    const visit = (node: Nodes) => {
+      if (
+        node.type === "footnoteDefinition" ||
+        node.type === "footnoteReference"
+      ) {
+        const key = node.identifier.toUpperCase();
+        const identifier = identifiers.get(key) ?? String(identifiers.size + 1);
+        identifiers.set(key, identifier);
+        node.identifier = identifier;
+      }
+      if ("children" in node) node.children.forEach(visit);
+    };
+    visit(tree);
+  };
+}
+
+/** Resolve archived destinations at their source; footnotes stay local to this body segment. */
+function ActivityMarkdown({
+  text,
+  url: sourceUrl,
+}: {
+  text: string;
+  url: string | null;
+}) {
+  const id = useId();
+  const body = useRef<HTMLDivElement>(null);
+  const footnoteLabel = `${id}-footnote-label`;
+  // Focusing a row rerenders WindowList; keep anchors mounted so click and keyboard focus survive.
+  const components = useMemo<Components>(
+    () => ({
+      ...markdownComponents,
+      h2: ({ node: _node, id: headingId, ...props }) => (
+        <h2
+          {...props}
+          id={headingId === "footnote-label" ? footnoteLabel : headingId}
+        />
+      ),
+      a: ({ node, href, ...props }) => {
+        const reference = node?.properties.dataFootnoteRef !== undefined;
+        if (reference || node?.properties.dataFootnoteBackref !== undefined)
+          return (
+            <a
+              {...props}
+              href={href}
+              aria-describedby={
+                reference ? footnoteLabel : props["aria-describedby"]
+              }
+              onClick={(event) => {
+                // Fragment navigation would overwrite the application's hash route.
+                event.preventDefault();
+                if (!href?.startsWith("#")) return;
+                const target = document.getElementById(href.slice(1));
+                if (target && body.current?.contains(target)) {
+                  if (reference) target.tabIndex = -1;
+                  target.focus({ preventScroll: true });
+                  target.scrollIntoView({ block: "nearest" });
+                }
+              }}
+              onAuxClick={(event) => event.preventDefault()}
+            />
+          );
+        return (
+          <a {...props} href={href} target="_blank" rel="noopener noreferrer" />
+        );
+      },
+    }),
+    [footnoteLabel],
+  );
+  return (
+    <div ref={body} className="message-body markdown-body">
+      <Markdown
+        remarkPlugins={[remarkGfm, numberFootnoteIdentifiers]}
+        remarkRehypeOptions={{ clobberPrefix: `${id}-` }}
+        urlTransform={(url, _key, node) => {
+          const safe = defaultUrlTransform(url);
+          if (!safe) return undefined;
+          if (
+            node.properties.dataFootnoteRef !== undefined ||
+            node.properties.dataFootnoteBackref !== undefined
+          )
+            return safe;
+          if (/^[a-z][a-z\d+.-]*:/i.test(safe)) return safe;
+          try {
+            return (
+              defaultUrlTransform(new URL(safe, sourceUrl ?? undefined).href) ||
+              undefined
+            );
+          } catch {
+            // Missing or malformed source URLs must not send relative links to the console.
+            return undefined;
+          }
+        }}
+        components={components}
+      >
+        {text}
+      </Markdown>
+    </div>
+  );
+}
 
 /** Keep only one immutable body segment in memory; API offsets count Unicode code points. */
 function ActivityBody({
@@ -96,7 +218,7 @@ function ActivityBody({
       </code>
     </pre>
   ) : (
-    <p className="message-body">{segment.text}</p>
+    <ActivityMarkdown text={segment.text} url={entry.url} />
   );
   const content = (
     <>
@@ -318,27 +440,38 @@ function ThreadReplies({
   );
 }
 
-/** Only explicitly attributed assistant/tool records can share a visual output group. */
-export function sameWorkerOutput(
+/** Adjacent authors share identity; worker records must also have the same explicit session. */
+export function sameActivityGroup(
   left: ActivityItem | undefined,
   right: ActivityItem | undefined,
 ): boolean {
   return Boolean(
     left &&
     right &&
-    left.source === "worker" &&
-    right.source === "worker" &&
+    left.source === right.source &&
     !left.deleted &&
     !right.deleted &&
-    [left.author, right.author].every(
-      (role) => role === "assistant" || role === "tool",
+    left.prior === right.prior &&
+    left.parent_key === right.parent_key &&
+    [left, right].every(
+      (item) =>
+        item.kind !== "event" &&
+        item.kind !== "thread" &&
+        item.kind !== "check",
     ) &&
-    ["attempt_id", "session_id", "session_generation"].every(
-      (key) =>
-        left.metadata[key] !== undefined &&
-        left.metadata[key] !== null &&
-        left.metadata[key] === right.metadata[key],
-    ),
+    ((left.author !== "" && left.author === right.author) ||
+      (left.source === "worker" &&
+        [left.author, right.author].every(
+          (role) => role === "assistant" || role === "tool",
+        ))) &&
+    (left.source === "worker"
+      ? ["attempt_id", "session_id", "session_generation"].every(
+          (key) =>
+            left.metadata[key] !== undefined &&
+            left.metadata[key] !== null &&
+            left.metadata[key] === right.metadata[key],
+        )
+      : left.kind === right.kind),
   );
 }
 
@@ -389,7 +522,7 @@ export interface ToolActivityGroup {
   partial: boolean;
 }
 
-/** Untrusted content is React text, never repository-supplied HTML. */
+/** Markdown produces safe React elements; repository-supplied HTML stays escaped text. */
 export function ActivityView({
   entry,
   flowId = 0,
@@ -430,7 +563,9 @@ export function ActivityView({
         : entry.metadata.status;
     action = `${typeof workflow === "string" && workflow ? workflow : "未知工作流"}: ${entry.title}: ${typeof status === "string" && status ? status : "unknown"}`;
   }
-  const metadata = !continuation && Object.keys(entry.metadata).length > 0;
+  const metadata =
+    !continuation &&
+    (Object.keys(entry.metadata).length > 0 || (provenance?.length ?? 0) > 1);
   return (
     <article
       className={`message${entry.deleted ? " deleted" : ""}${compact ? " compact-event" : ""}${continuation ? " continuation" : ""}${toolGroup ? " tool-activity" : ""}`}
