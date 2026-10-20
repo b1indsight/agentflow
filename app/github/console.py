@@ -7,6 +7,7 @@ child sources instead of unbounded embedded connections.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import re
@@ -145,17 +146,21 @@ def _object(
             code_characters=len(hunk),
             code_summary_truncated=len(hunk) > 2000,
         )
+    author = user.get("login")
     body = node.get("body") or node.get("description")
     if kind == "check":
+        author = (node.get("app") or {}).get("name")
         output = node.get("output") or {}
         body = "\n\n".join(value for value in (output.get("summary"), output.get("text")) if value)
+        metadata["workflow_name"] = node.get("workflow_name")
+        metadata["workflow_name_reason"] = node.get("workflow_name_reason", "not_loaded")
     return Observation(
         key=_key(repo, kind, node),
         source=source,
         kind=kind,
         occurred_at=occurred,
         updated_at=updated,
-        author=user.get("login") or "deleted-user",
+        author=author or "deleted-user",
         title=node.get("title")
         or node.get("name")
         or node.get("event")
@@ -350,6 +355,49 @@ async def _reviews(
     return items, following, children
 
 
+async def _check_workflows(repo: Repository, nodes: list[dict]) -> None:
+    """Enrich a check page within a shared two-second budget; keep checks on lookup failure."""
+    client = repo.installation._client(auto_retry=False)
+    deadline = asyncio.get_running_loop().time() + 2
+    workflows: dict[int, tuple[str | None, str | None]] = {}
+    blocked: str | None = None
+    for node in nodes:
+        node["workflow_name"] = None
+        if (node.get("app") or {}).get("slug") != "github-actions":
+            node["workflow_name_reason"] = "not_github_actions"
+            continue
+        suite = (node.get("check_suite") or {}).get("id")
+        if not isinstance(suite, int) or isinstance(suite, bool) or suite <= 0:
+            node["workflow_name_reason"] = "missing_check_suite"
+            continue
+        if suite not in workflows:
+            workflow, reason = None, blocked
+            if blocked is None:
+                try:
+                    async with asyncio.timeout_at(deadline):
+                        with translate_errors("console_check_workflow"):
+                            response = await client.rest.actions.async_list_workflow_runs_for_repo(
+                                repo.owner, repo.name, check_suite_id=suite, per_page=1,
+                                exclude_pull_requests=True,
+                            )
+                            workflow = next((
+                                run.name for run in response.parsed_data.workflow_runs
+                                if run.check_suite_id == suite and run.name
+                            ), None)
+                    reason = None if workflow else "not_found"
+                except TimeoutError:
+                    blocked = reason = "query_timeout"
+                except GitHubError as error:
+                    reason = error.kind.value
+                    if error.kind in (
+                        GitHubErrorKind.AUTHENTICATION, GitHubErrorKind.PERMISSION,
+                        GitHubErrorKind.RATE_LIMITED, GitHubErrorKind.TRANSIENT,
+                    ):
+                        blocked = reason
+            workflows[suite] = workflow, reason
+        node["workflow_name"], node["workflow_name_reason"] = workflows[suite]
+
+
 async def read_source(
     repo: Repository,
     issue_number: int,
@@ -453,6 +501,7 @@ async def read_source(
                         owner, name, sha, filter_="all", per_page=size, page=page
                     )
                     nodes = [n.model_dump(mode="json") for n in checks.parsed_data.check_runs]
+                    await _check_workflows(repo, nodes)
                     kind = "check"
                 else:
                     statuses = await client.rest.repos.async_list_commit_statuses_for_ref(

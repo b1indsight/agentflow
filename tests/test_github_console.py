@@ -1,12 +1,15 @@
-"""Actual SDK HTTP contracts for console sources, without real GitHub traffic."""
+"""Console source contracts, with SDK HTTP and optional Actions lookup fixtures."""
+
+from types import SimpleNamespace
 
 import httpx
 import pytest
 from githubkit import GitHub
+from pydantic import BaseModel
 
 from app.github import GitHubApp, GitHubError, GitHubErrorKind
 from app.github.console import read_source, webhook_observations
-from tests.test_github_client import install_client, settings
+from tests.test_github_client import AsyncEndpoint, install_client, response, settings
 
 
 def comment(**changes):
@@ -54,6 +57,92 @@ async def test_sdk_comments_full_body_paging_and_webhook_identity(tmp_path, monk
     assert edit.body == deleted.body == first.items[0].body
     assert not edit.deleted and deleted.deleted
     assert webhook_observations("issue_comment", payload | {"comment": {"id": 9}}) == []
+
+
+def test_check_run_author_is_the_producing_app_name():
+    # CI check runs identify their producing app, without a user/actor/author login.
+    payload = {
+        "repository": {"full_name": "owner/repo"},
+        "action": "completed",
+        "check_run": {
+            "id": 9,
+            "name": "check (3.10)",
+            "started_at": "2026-01-01T00:00:00Z",
+            "completed_at": "2026-01-01T00:01:00Z",
+            "app": {"name": "GitHub Actions", "slug": "github-actions"},
+        },
+    }
+    item = webhook_observations("check_run", payload)[0]
+    assert item.author == "GitHub Actions"
+    assert item.metadata["workflow_name"] is None
+    assert item.metadata["workflow_name_reason"] == "not_loaded"
+
+
+class CheckNode(BaseModel):
+    id: int
+    name: str = "check (3.10)"
+    started_at: str = "2026-01-01T00:00:00Z"
+    status: str = "completed"
+    conclusion: str | None = "success"
+    app: dict[str, str] = {"name": "GitHub Actions", "slug": "github-actions"}
+    check_suite: dict[str, int]
+
+
+@pytest.mark.parametrize("suites", [(11, 11), (11, 12)])
+async def test_check_workflows_use_suite_identity_and_deduplicate_reads(tmp_path, monkeypatch, suites):
+    # A workflow can have many matrix jobs; another workflow on the same head has its own suite.
+    checks = [CheckNode(id=index, check_suite={"id": suite}) for index, suite in enumerate(suites, 1)]
+    listing = AsyncEndpoint(response(SimpleNamespace(check_runs=checks)))
+    calls = []
+
+    async def workflows(owner, name, **kwargs):
+        calls.append(kwargs)
+        suite = kwargs["check_suite_id"]
+        return response(SimpleNamespace(workflow_runs=[SimpleNamespace(
+            check_suite_id=suite, name="CI" if suite == 11 else "Release",
+        )]))
+
+    client = SimpleNamespace(rest=SimpleNamespace(
+        checks=SimpleNamespace(async_list_for_ref=listing),
+        actions=SimpleNamespace(async_list_workflow_runs_for_repo=workflows),
+    ))
+    install_client(monkeypatch, lambda _, **kwargs: client)
+    repo = GitHubApp(settings(tmp_path)).installation(42).repository("owner/repo")
+    page = await read_source(repo, 7, 17, "commit.check_runs:" + "a" * 40)
+    assert [item.metadata["workflow_name"] for item in page.items] == [
+        "CI" if suite == 11 else "Release" for suite in suites
+    ]
+    assert all(item.title == "check (3.10)" and item.author == "GitHub Actions" for item in page.items)
+    assert all(item.metadata["conclusion"] == "success" for item in page.items)
+    assert [call["check_suite_id"] for call in calls] == sorted(set(suites))
+    assert all(call["per_page"] == 1 for call in calls)
+
+
+@pytest.mark.parametrize("kind", [
+    GitHubErrorKind.PERMISSION, GitHubErrorKind.NOT_FOUND, GitHubErrorKind.RATE_LIMITED,
+    GitHubErrorKind.TRANSIENT,
+])
+async def test_workflow_lookup_failure_keeps_check_rows_and_their_status(tmp_path, monkeypatch, kind):
+    # Optional Actions metadata must not hide checks when the App lacks Actions read.
+    listing = AsyncEndpoint(response(SimpleNamespace(check_runs=[
+        CheckNode(id=1, check_suite={"id": 11}, status="in_progress", conclusion=None),
+        CheckNode(id=2, check_suite={"id": 12}, status="in_progress", conclusion=None),
+    ])))
+    workflows = AsyncEndpoint(error=GitHubError(kind, "console_check_workflow"))
+    client = SimpleNamespace(rest=SimpleNamespace(
+        checks=SimpleNamespace(async_list_for_ref=listing),
+        actions=SimpleNamespace(async_list_workflow_runs_for_repo=workflows),
+    ))
+    install_client(monkeypatch, lambda _, **kwargs: client)
+    repo = GitHubApp(settings(tmp_path)).installation(42).repository("owner/repo")
+    page = await read_source(repo, 7, 17, "commit.check_runs:" + "a" * 40)
+    assert len(page.items) == 2
+    for item in page.items:
+        assert item.metadata["workflow_name"] is None
+        assert item.metadata["workflow_name_reason"] == kind.value
+        assert item.metadata["status"] == "in_progress" and item.metadata["conclusion"] is None
+    assert len(workflows.calls) == (2 if kind == GitHubErrorKind.NOT_FOUND else 1)
+    assert page.limitations == ["expired_remote_logs_unrecoverable"]
 
 
 async def test_cross_referenced_timeline_events_without_ids_have_stable_distinct_keys(tmp_path, monkeypatch):

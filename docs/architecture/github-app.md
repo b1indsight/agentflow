@@ -39,7 +39,16 @@ App JWT ── POST /app/installations/{id}/access_tokens ──► Installation
 | Git 内容与 HTTP push | Contents: read/write | 读取代码并推送分支 |
 | issue 评论与 labels | Issues: read/write | 状态评论、触发/取消标签 |
 | PR、reviewer、review threads | Pull requests: read/write | 创建 PR、请求审核、读取/解决线程 |
+| 检查活动的工作流名称 | Actions: read | 按 check_suite.id 读取 Actions workflow run 的真实名称 |
 | 仓库身份 | Metadata: read | GitHub App 默认需要的仓库元数据 |
+
+控制台的检查活动显示 `{workflow}: {job}: {status}`，作者使用检查的 `app.name`。
+工作流名补全仅用于 GitHub Actions，同页按 suite 去重，合计最多等待 2 秒，并受既有同步总时限约束。
+缺少 Actions read 或查询失败时，检查及状态仍显示，工作流标为“未知工作流”，原因在来源元数据中；
+后续正常刷新会再次尝试。Webhook 接收时不联网补全，既有归档也不会立即获得工作流名。
+如需增加权限，由用户手动修改 App 并批准 installation 的新授权，程序不自动变更权限。
+依据：[Actions workflow runs API](https://docs.github.com/en/rest/actions/workflow-runs#list-workflow-runs-for-a-repository)
+及 [Actions 权限表](https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps#repository-permissions-for-actions)。
 
 `FLOWTOOL_ALLOWLIST` 只控制谁能触发 flow；`FLOWTOOL_REVIEWERS` 独立配置 PR reviewer，空列表表示不
 请求 reviewer。`FLOWTOOL_IN_REVIEW_LABEL` 配置 review 状态 label。
