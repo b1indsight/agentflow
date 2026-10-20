@@ -1,5 +1,5 @@
-import { useEffect, useId, useRef, useState } from "react";
-import Markdown, { type Components } from "react-markdown";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
+import Markdown, { defaultUrlTransform, type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { getContent, getDiff, getThread } from "./api";
 import { DiffWindow } from "./DiffWindow";
@@ -14,11 +14,6 @@ import {
 } from "./windowing";
 
 const markdownComponents: Components = {
-  a: ({ href, title, children }) => (
-    <a href={href} title={title} target="_blank" rel="noopener noreferrer">
-      {children}
-    </a>
-  ),
   // Archived content must not make automatic requests to repository-supplied image URLs.
   img: ({ src, alt }) => (
     <a href={src} target="_blank" rel="noopener noreferrer">
@@ -32,6 +27,90 @@ const markdownComponents: Components = {
     </div>
   ),
 };
+
+/** Resolve archived destinations at their source; footnotes stay local to this body segment. */
+function ActivityMarkdown({
+  text,
+  url: sourceUrl,
+}: {
+  text: string;
+  url: string | null;
+}) {
+  const id = useId();
+  const body = useRef<HTMLDivElement>(null);
+  const footnoteLabel = `${id}-footnote-label`;
+  // Focusing a row rerenders WindowList; keep anchors mounted so click and keyboard focus survive.
+  const components = useMemo<Components>(
+    () => ({
+      ...markdownComponents,
+      h2: ({ node: _node, id: headingId, ...props }) => (
+        <h2
+          {...props}
+          id={headingId === "footnote-label" ? footnoteLabel : headingId}
+        />
+      ),
+      a: ({ node, href, ...props }) => {
+        const reference = node?.properties.dataFootnoteRef !== undefined;
+        if (reference || node?.properties.dataFootnoteBackref !== undefined)
+          return (
+            <a
+              {...props}
+              href={href}
+              aria-describedby={
+                reference ? footnoteLabel : props["aria-describedby"]
+              }
+              onClick={(event) => {
+                // Fragment navigation would overwrite the application's hash route.
+                event.preventDefault();
+                if (!href?.startsWith("#")) return;
+                const target = document.getElementById(href.slice(1));
+                if (target && body.current?.contains(target)) {
+                  target.tabIndex = -1;
+                  target.focus({ preventScroll: true });
+                  target.scrollIntoView({ block: "nearest" });
+                }
+              }}
+              onAuxClick={(event) => event.preventDefault()}
+            />
+          );
+        return (
+          <a {...props} href={href} target="_blank" rel="noopener noreferrer" />
+        );
+      },
+    }),
+    [footnoteLabel],
+  );
+  return (
+    <div ref={body} className="message-body markdown-body">
+      <Markdown
+        remarkPlugins={[remarkGfm]}
+        remarkRehypeOptions={{ clobberPrefix: `${id}-` }}
+        urlTransform={(url, _key, node) => {
+          const safe = defaultUrlTransform(url);
+          if (!safe) return undefined;
+          if (
+            node.properties.dataFootnoteRef !== undefined ||
+            node.properties.dataFootnoteBackref !== undefined
+          )
+            return safe;
+          if (/^[a-z][a-z\d+.-]*:/i.test(safe)) return safe;
+          try {
+            return (
+              defaultUrlTransform(new URL(safe, sourceUrl ?? undefined).href) ||
+              undefined
+            );
+          } catch {
+            // Missing or malformed source URLs must not send relative links to the console.
+            return undefined;
+          }
+        }}
+        components={components}
+      >
+        {text}
+      </Markdown>
+    </div>
+  );
+}
 
 /** Keep only one immutable body segment in memory; API offsets count Unicode code points. */
 function ActivityBody({
@@ -118,11 +197,7 @@ function ActivityBody({
       </code>
     </pre>
   ) : (
-    <div className="message-body markdown-body">
-      <Markdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
-        {segment.text}
-      </Markdown>
-    </div>
+    <ActivityMarkdown text={segment.text} url={entry.url} />
   );
   const content = (
     <>

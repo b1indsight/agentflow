@@ -46,3 +46,59 @@ test("GitHub and Agent content cannot inject HTML, unsafe links or remote images
     assert.doesNotMatch(html, /已编辑|查看历史版本/);
   }
 });
+
+test("Markdown destinations use the message source, never the console origin", () => {
+  // Archived GitHub comments commonly contain root-, path-, query- and fragment-relative links.
+  const body = [
+    "[相关](/owner/agentflow/issues/7)",
+    "[同级](../pull/98)",
+    "[查询](?page=2)",
+    "[片段](#issuecomment-456)",
+    "[外部](https://example.test/guide)",
+    "[邮件](mailto:owner@example.test)",
+    "[危险](javascript:alert%281%29)",
+    "![相对图片](../assets/status.svg)",
+    "![危险图片](javascript:alert%281%29)",
+  ].join("\n\n");
+  const entry: ActivityItem = {
+    key: "source-links",
+    version: 1,
+    author: "owner",
+    occurred_at: "2026-10-20T00:00:00Z",
+    updated_at: "2026-10-20T00:00:00Z",
+    observed_at: "2026-10-20T00:00:00Z",
+    source: "pr.comments",
+    kind: "comment",
+    title: "评论",
+    body,
+    body_length: body.length,
+    url: "https://github.com/owner/agentflow/issues/85#issuecomment-123",
+    parent_key: null,
+    deleted: false,
+    prior: false,
+    previous_version: null,
+    metadata: {},
+  };
+  const html = renderToStaticMarkup(<ActivityView entry={entry} />);
+  for (const destination of [
+    "https://github.com/owner/agentflow/issues/7",
+    "https://github.com/owner/agentflow/pull/98",
+    "https://github.com/owner/agentflow/issues/85?page=2",
+    "https://github.com/owner/agentflow/issues/85#issuecomment-456",
+    "https://github.com/owner/agentflow/assets/status.svg",
+    "https://example.test/guide",
+    "mailto:owner@example.test",
+  ])
+    assert.ok(html.includes(`href="${destination}"`), destination);
+  assert.doesNotMatch(html, /<img|href="javascript:/);
+
+  for (const url of [null, "invalid source"]) {
+    const withoutSource = renderToStaticMarkup(
+      <ActivityView entry={{ ...entry, url }} />,
+    );
+    assert.doesNotMatch(withoutSource, /href="(?:\/|\.\.|\?|#)/);
+    assert.match(withoutSource, /href="https:\/\/example.test\/guide"/);
+    assert.match(withoutSource, /相关/);
+    assert.match(withoutSource, /图片：相对图片/);
+  }
+});

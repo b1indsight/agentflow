@@ -1640,3 +1640,27 @@ Webhook 未覆盖的交互/字段需在明确触发的核对中补齐，不能�
   与功能记录，保留 main 上已合并的来源状态和归档说明。不带入共享工作区中的其他后端、
   CI 检查展示或未批准方案；原工作区保持不变。发布前按项目 review gate 审查，结果随 PR
   记录；不自动合并或部署。
+
+### [055] — 2026-10-20 — 修复 Markdown 相对目标与消息内脚注导航
+
+- **Requirement / scope:** 用户要求先修 PR #98 首次审查的第 1、2 项：相对链接误指向
+  控制台域名，以及 GFM 脚注覆盖 hash 路由并丢失引用属性。第 3 项带链接图片产生嵌套
+  锚点仍按未处理项保留；在同一独立 jj workspace、bookmark 和 PR 上追加修复。
+- **Implemented / decision:** 相对普通链接（含片段、查询）与图片地址按消息原始 URL
+  解析，保留默认危险 URL 过滤，解析后的目标再次过滤；来源缺失或无效时保留文字，
+  禁用相对目标，避免猜测控制台或其他来源。绝对链接不依赖来源，图片仍不自动加载。
+  脚注使用每条正文段独立的引用、定义和标题 ID，保留 data / aria 属性；鼠标点击和
+  Enter 激活仅在当前正文内定位、转移焦点，保留会话 hash，不开新窗口。中键不创建
+  路由失效的新页。渲染组件身份保持稳定，避免 WindowList 焦点更新重挂载锚点而丢失点击。
+  仍按有界正文段解析，不为跨段脚注加载整篇内容。
+- **Before / after:** 新增公开 ActivityView 渲染回归在旧实现因相对链接未解析而失败；
+  新增浏览器回归在旧实现因脚注引用属性丢失而失败。修复后分别通过，覆盖多条消息
+  重用中文脚注名、一条消息重复引用、有/无来源 URL、往返焦点、唯一 ID 和路由不变。
+  日志为 `.amp/in/artifacts/markdown-links-before.log`、`markdown-links-after.log`、
+  `markdown-footnotes-before.log` 和 `markdown-footnotes-after.log`。
+- **Validation / boundary:** 前端格式、TypeScript/Vite 构建、全部 3 项单测与全部 19 项
+  浏览器回归通过，证据为 `.amp/in/artifacts/markdown-review-fixes-checks.log` 和
+  `markdown-review-fixes-e2e.log`。此修复仅改变链接/脚注语义，浏览器实际点击与键盘
+  激活验证 DOM、可访问属性和焦点；API 使用受控响应，不代表真实后端或线上部署验收。
+  单 JS 包约 561 kB 的非阻断构建警告保留；本项未改后端，未重跑 Python。
+  发布前按 review gate 审查；不自动处理新发现项，不合并或部署。

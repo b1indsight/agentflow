@@ -1272,6 +1272,72 @@ test("consecutive authors share identity while conversation bodies render safe M
   });
 });
 
+test("footnotes navigate within their own message without replacing the conversation route", async ({
+  page,
+}) => {
+  // Different comments reuse footnote labels, and one comment can cite the same note twice.
+  const items = ["first", "second"].map((key) => {
+    const body = `正文 ${key}[^同名]，再次引用[^同名]。\n\n[^同名]: ${key} 的脚注内容。`;
+    return {
+      ...activity,
+      key,
+      previous_version: null,
+      body,
+      body_length: Array.from(body).length,
+      url:
+        key === "first"
+          ? "https://github.com/owner/agentflow/issues/85#issuecomment-first"
+          : null,
+    };
+  });
+  await page.route("**/api/flows/42/activity?**", (route) =>
+    route.fulfill({
+      json: {
+        items,
+        snapshot: 2,
+        total: items.length,
+        has_more: false,
+        next_cursor: null,
+        sources: [],
+        changes: {},
+      },
+    }),
+  );
+  await page.goto("/#flow/42/conversation");
+  for (const key of ["first", "second"]) {
+    const body = page.locator(`article[data-entry='${key}'] .markdown-body`);
+    const refs = body.locator("a[data-footnote-ref]");
+    const note = body.locator("section[data-footnotes] li");
+    const backrefs = note.locator("a[data-footnote-backref]");
+    await expect(refs).toHaveCount(2);
+    await expect(backrefs).toHaveCount(2);
+    await expect(note).toContainText(`${key} 的脚注内容。`);
+    const labelId = await body
+      .locator("section[data-footnotes] h2")
+      .getAttribute("id");
+    if (!labelId) throw new Error("Footnotes have no accessible label target");
+    for (let index = 0; index < 2; index++) {
+      const ref = refs.nth(index);
+      const refId = await ref.getAttribute("id");
+      expect(refId).toBeTruthy();
+      await expect(ref).toHaveAttribute("aria-describedby", labelId);
+      await expect(backrefs.nth(index)).toHaveAttribute("href", `#${refId}`);
+      await ref.click();
+      await expect(note).toBeFocused();
+      await expect(page).toHaveURL(/#flow\/42\/conversation$/);
+      await backrefs.nth(index).press("Enter");
+      await expect(ref).toBeFocused();
+      await expect(page).toHaveURL(/#flow\/42\/conversation$/);
+    }
+    await refs.first().click({ button: "middle" });
+  }
+  const ids = await page
+    .locator(".markdown-body [id]")
+    .evaluateAll((elements) => elements.map((element) => element.id));
+  expect(new Set(ids).size).toBe(ids.length);
+  expect(page.context().pages()).toHaveLength(1);
+});
+
 test("assistant tools share one compact activity bar across pages without crossing turns", async ({
   page,
 }) => {
