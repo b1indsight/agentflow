@@ -608,28 +608,118 @@ test("activity content hierarchy keeps provenance secondary and expandable", asy
   await expect(
     message.getByText(description.body, { exact: true }),
   ).toBeVisible();
-  await expect(
-    message.getByRole("link", { name: "在 GitHub 中查看" }),
-  ).toHaveAttribute("href", description.url);
-  const metadata = message.locator("details");
-  await expect(metadata).not.toHaveAttribute("open");
-  await page.locator(".conversation-stream").screenshot({
-    path: "../../../.amp/in/artifacts/activity-hierarchy-desktop.png",
+  const github = message.getByRole("link", { name: "在 GitHub 中查看" });
+  await expect(github).toHaveAttribute("href", description.url);
+  await expect(github).toHaveAttribute("title", "在 GitHub 中查看");
+  await expect(github).toHaveText("");
+  await expect(github.locator("svg")).toBeVisible();
+  const metadata = message.locator(".message-provenance");
+  const toggle = message.getByRole("button", { name: "来源信息与查询定位" });
+  await expect(toggle).toHaveAccessibleName("来源信息与查询定位");
+  await expect(toggle).toHaveAttribute("title", "来源信息与查询定位");
+  await expect(toggle).toHaveText("");
+  await expect(toggle.locator("svg")).toBeVisible();
+  const expectUnframedIcon = async () => {
+    for (const control of [github, toggle]) {
+      await expect(control).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+      await expect(control).toHaveCSS("border-top-width", "0px");
+      await expect(control).toHaveCSS("outline-style", "none");
+    }
+  };
+  const expectCornerIcon = async () => {
+    // Both controls must stay adjacent when the separate metadata panel expands.
+    const icon = await toggle.boundingBox();
+    const footer = await message.locator(".message-footer").boundingBox();
+    const link = await github.boundingBox();
+    if (!icon || !footer || !link) throw new Error("Message footer is missing");
+    expect(icon.width).toBeLessThanOrEqual(28);
+    expect(icon.height).toBeGreaterThanOrEqual(24);
+    expect(link.width).toBeLessThanOrEqual(28);
+    expect(
+      Math.abs(icon.x + icon.width - footer.x - footer.width),
+    ).toBeLessThan(1);
+    expect(Math.abs(link.y - icon.y)).toBeLessThan(1);
+    expect(icon.x - link.x - link.width).toBeCloseTo(4);
+    // Equal SVG boxes can still contain differently sized drawings and padding.
+    const [githubInk, infoInk] = await message
+      .locator(".message-actions")
+      .evaluate((actions) =>
+        [...actions.querySelectorAll("svg")].map((svg) => {
+          const shape = svg.querySelector("circle, path");
+          if (!shape) throw new Error("Icon drawing is missing");
+          const bounds = shape.getBoundingClientRect();
+          const style = getComputedStyle(shape);
+          const stroke =
+            style.stroke === "none"
+              ? 0
+              : (parseFloat(style.strokeWidth) *
+                  svg.getBoundingClientRect().width) /
+                svg.viewBox.baseVal.width;
+          return {
+            width: bounds.width + stroke,
+            height: bounds.height + stroke,
+            centerY: bounds.y + bounds.height / 2,
+          };
+        }),
+      );
+    expect(Math.abs(githubInk.width - infoInk.width)).toBeLessThan(0.5);
+    expect(Math.abs(githubInk.height - infoInk.height)).toBeLessThan(0.5);
+    expect(Math.abs(githubInk.centerY - infoInk.centerY)).toBeLessThan(0.5);
+  };
+  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await expect(metadata).not.toBeVisible();
+  await expectCornerIcon();
+  await expectUnframedIcon();
+  await page.locator(".content").screenshot({
+    path: "../../../.amp/in/artifacts/activity-icons-aligned-desktop.png",
   });
-  await page.setViewportSize({ width: 390, height: 844 });
-  await page.locator(".conversation-stream").screenshot({
-    path: "../../../.amp/in/artifacts/activity-hierarchy-mobile.png",
+  await toggle.hover();
+  await expectUnframedIcon();
+  await page.locator(".content").screenshot({
+    path: "../../../.amp/in/artifacts/activity-icons-aligned-hover-desktop.png",
   });
-  await metadata.locator("summary").click();
+  await github.focus();
+  await github.press("Tab");
+  await expect(toggle).toBeFocused();
+  await toggle.press("Enter");
+  await expect(toggle).toHaveAttribute("aria-expanded", "true");
   await expect(metadata.getByLabel("文本")).toContainText("issue_number");
+  await expectCornerIcon();
+  await expectUnframedIcon();
+  await expect(toggle.locator("svg path").first()).toHaveCSS(
+    "stroke-width",
+    "3px",
+  );
+  await page.locator(".content").screenshot({
+    path: "../../../.amp/in/artifacts/activity-icons-aligned-details-desktop.png",
+  });
+  await toggle.press("Space");
+  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await expect(metadata).not.toBeVisible();
+  await toggle.evaluate((element) => element.blur());
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expectCornerIcon();
+  await expectUnframedIcon();
+  await page.locator(".content").screenshot({
+    path: "../../../.amp/in/artifacts/activity-icons-aligned-mobile.png",
+  });
+  await toggle.click();
+  await expect(metadata.getByLabel("文本")).toContainText("issue_number");
+  await expectCornerIcon();
+  await expectUnframedIcon();
   expect(
     await page.evaluate(
       () => document.documentElement.scrollWidth <= innerWidth,
     ),
   ).toBe(true);
-  await page.locator(".conversation-stream").screenshot({
-    path: "../../../.amp/in/artifacts/activity-hierarchy-details-mobile.png",
+  await page.locator(".content").screenshot({
+    path: "../../../.amp/in/artifacts/activity-icons-aligned-details-mobile.png",
   });
+  await page.getByRole("tab", { name: "概览" }).click();
+  await page.getByRole("tab", { name: "会话" }).click();
+  await expect(toggle).toHaveAttribute("aria-expanded", "true");
+  await expect(metadata.getByLabel("文本")).toContainText("issue_number");
+  await expectCornerIcon();
 });
 
 test("uses console DTOs and a collapsible edited hint with the previous-version diff", async ({
@@ -1265,7 +1355,7 @@ test("consecutive authors share identity while conversation bodies render safe M
       () => document.documentElement.scrollWidth <= innerWidth,
     ),
   ).toBe(true);
-  await first.getByText(/来源信息与查询定位/).click();
+  await first.getByLabel(/来源信息与查询定位/).click();
   await expect(first.getByLabel("文本")).toContainText("instructions-b");
   await first.locator(".message-provenance").screenshot({
     path: "../../../.amp/in/artifacts/conversation-markdown-provenance.png",

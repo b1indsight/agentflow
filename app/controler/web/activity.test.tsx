@@ -9,6 +9,7 @@ test("GitHub and Agent content cannot inject HTML, unsafe links or remote images
   // Reviews, tool output and identity attributes all carry untrusted repository text.
   const payload =
     '\"><img src=x onerror="alert(1)"><script>alert(2)</script>&\n\n' +
+    '<svg onload="alert(3)"></svg>\n\n' +
     "[危险](javascript:alert%281%29)\n\n![图片](https://example.test/track.png)";
   const kinds = [
     "comment",
@@ -53,7 +54,8 @@ test("GitHub and Agent content cannot inject HTML, unsafe links or remote images
     assert.match(html, /&quot;/);
     assert.match(html, /&amp;/);
     assert.match(html, /&quot;&gt;&lt;img/);
-    assert.doesNotMatch(html, /href="javascript:|<iframe|<svg/);
+    assert.match(html, /&lt;svg onload=/);
+    assert.doesNotMatch(html, /href="javascript:|<iframe|<svg[^>]*onload=/);
     assert.doesNotMatch(html, /已编辑|查看历史版本/);
   }
 });

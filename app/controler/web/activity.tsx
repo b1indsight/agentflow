@@ -1,4 +1,5 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { Info } from "lucide-react";
 import type { Nodes, Root } from "mdast";
 import Markdown, { defaultUrlTransform, type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -549,6 +550,11 @@ export function ActivityView({
     `${flowId}-${toolGroup?.key ?? entry.key}-tools`,
     0,
   );
+  const [metadataOpen, setMetadataOpen] = useReadingState(
+    `${entry.key}-${entry.version}-metadata`,
+    0,
+  );
+  const metadataId = useId();
   const title =
     compact || tool || (entry.source === "worker" && entry.title === "message")
       ? ""
@@ -566,6 +572,11 @@ export function ActivityView({
   const metadata =
     !continuation &&
     (Object.keys(entry.metadata).length > 0 || (provenance?.length ?? 0) > 1);
+  const provenanceLabel =
+    "来源信息与查询定位" +
+    (provenance && provenance.length > 1
+      ? ` · ${provenance.length} 条记录`
+      : "");
   return (
     <article
       className={`message${entry.deleted ? " deleted" : ""}${compact ? " compact-event" : ""}${continuation ? " continuation" : ""}${toolGroup ? " tool-activity" : ""}`}
@@ -654,17 +665,53 @@ export function ActivityView({
             entry.url ||
             (entry.previous_version !== null && !entry.deleted)) && (
             <div className="message-footer">
+              <EditedDiff
+                key={`diff-${entry.key}-${entry.version}`}
+                entry={entry}
+                flowId={flowId}
+              />
+              {(entry.url || metadata) && (
+                <div className="message-actions">
+                  {entry.url && (
+                    <a
+                      className="message-icon"
+                      href={entry.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      aria-label="在 GitHub 中查看"
+                      title="在 GitHub 中查看"
+                    >
+                      {/* Primer Octicons mark-github-16, padded to match the Info glyph. */}
+                      <svg
+                        className="github-mark"
+                        viewBox="-0.75 -1 17.5 17.5"
+                        aria-hidden="true"
+                      >
+                        <path d="M6.766 11.328c-2.063-.25-3.516-1.734-3.516-3.656 0-.781.281-1.625.75-2.188-.203-.515-.172-1.609.063-2.062.625-.078 1.468.25 1.968.703.594-.187 1.219-.281 1.985-.281.765 0 1.39.094 1.953.265.484-.437 1.344-.765 1.969-.687.218.422.25 1.515.046 2.047.5.593.766 1.39.766 2.203 0 1.922-1.453 3.375-3.547 3.64.531.344.89 1.094.89 1.954v1.625c0 .468.391.734.86.547C13.781 14.359 16 11.53 16 8.03 16 3.61 12.406 0 7.984 0 3.563 0 0 3.61 0 8.031a7.88 7.88 0 0 0 5.172 7.422c.422.156.828-.125.828-.547v-1.25c-.219.094-.5.156-.75.156-1.031 0-1.64-.562-2.078-1.609-.172-.422-.36-.672-.719-.719-.187-.015-.25-.093-.25-.187 0-.188.313-.328.625-.328.453 0 .844.281 1.25.86.313.452.64.655 1.031.655s.641-.14 1-.5c.266-.265.47-.5.657-.656" />
+                      </svg>
+                    </a>
+                  )}
+                  {metadata && (
+                    <button
+                      type="button"
+                      className="message-icon"
+                      aria-label={provenanceLabel}
+                      title={provenanceLabel}
+                      aria-expanded={Boolean(metadataOpen)}
+                      aria-controls={metadataId}
+                      onClick={() => setMetadataOpen(metadataOpen ? 0 : 1)}
+                    >
+                      <Info aria-hidden="true" />
+                    </button>
+                  )}
+                </div>
+              )}
               {metadata && (
-                <SavedDetails
+                <div
                   className="message-provenance"
-                  stateKey={`${entry.key}-${entry.version}-metadata`}
+                  id={metadataId}
+                  hidden={!metadataOpen}
                 >
-                  <summary>
-                    来源信息与查询定位
-                    {provenance && provenance.length > 1
-                      ? ` · ${provenance.length} 条记录`
-                      : ""}
-                  </summary>
                   <TextWindow
                     code
                     text={JSON.stringify(
@@ -682,23 +729,8 @@ export function ActivityView({
                     )}
                     stateKey={`${entry.key}-${entry.version}-metadata-text`}
                   />
-                </SavedDetails>
+                </div>
               )}
-              {entry.url && (
-                <a
-                  className="message-source-link"
-                  href={entry.url}
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  在 GitHub 中查看 ↗
-                </a>
-              )}
-              <EditedDiff
-                key={`diff-${entry.key}-${entry.version}`}
-                entry={entry}
-                flowId={flowId}
-              />
             </div>
           )}
         {entry.kind === "thread" && (
