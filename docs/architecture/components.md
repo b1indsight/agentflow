@@ -170,7 +170,7 @@ worker socket 与 executor 解耦，root 内原子 journal 在 ack 前保存进�
   shell 进程组。该快照无法保证回收任意脱离进程树的进程；仍依赖外部隔离。
 - `WorkerSession` 按 ID 格式选择历史来源。Amp 原生 export 经公开块映射与脱敏后短时缓存，
   支持外部追加、块内分页、前缀编辑失效；不保存第二套捕获历史，不显示 thinking。
-  记录 ID 保留 session 前缀，满足 control 的来源校验；两端使用 protocol v16。
+  记录 ID 保留 session 前缀，满足 control 的来源校验；两端使用 protocol v15。
 - workspace Amp 设置可能覆盖临时设置，因此执行前发现设置即拒绝。managed policy/账户插件仍由
   运维核查；有效工具列表检查只影响结果接收，不能替代权限或 OS 隔离。
 

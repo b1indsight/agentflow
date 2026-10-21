@@ -163,15 +163,16 @@ worker 不自动读取 `.env`，上述加载仅针对 worker 私有文件。回�
   也继承 bot 环境，但不经包装的本地期限检查。认证最终由 GitHub 判断，任何权限失败都不
   回退个人凭据或自动重放写操作。仍须专用账户/容器/VM 隔离。
 
-取消回收沿用原停止握手，以 `StopAccepted.release_workspace` 区分取消删除和 merge 保留。
-worker 核验 ACK 后删除准确归属的取消 workspace，包括未提交、未跟踪文件及缓存，
-成功后才落盘 journal ACK 并读取下一任务；不保存快照、不增加清理完成回执。
-控制面仍在停止确认时释放绑定，`stop_pending=False` 不证明磁盘删除完成。清理失败重连时，
-已派发的下一 Flow 可能无法自动推进；这是 #109 已披露的 high，当前不建议合并部署。
-已知 PR 合并则保留原目录给 ARCHIVE，详细边界见[取消说明](../operations/cancel-drain.md)。
+取消时先持久保存停止证据，再清理受管 workspace 的未提交修改和未跟踪文件；原 copy/worktree、
+已推送 commit 和 ignored 缓存保留，位置归还空闲池。成功后才发送 `ExecutionStopped`，
+清理或 manifest 提交失败时保留控制面绑定并重连重试，不增加 ACK 字段或清理完成回执。
+旧停止重放仍核对下一任务；已 dispatch 却缺 journal 的普通任务明确失败，不自动重跑。
+停止 ACK 保留原位置证明，供取消期间已知合并后的 ARCHIVE 使用；详见[取消说明](../operations/cancel-drain.md)。
+当前 #109 仍有取消 REVISION 后显式重试无法重新占用 idle 位置的 medium，尚不建议合并部署。
 
-Amp 接入在收窄后的取消回收合同上递增为 protocol v16，沿用 journal v4 / workspace manifest v1，
-数据库 schema 不变；serve/worker 必须同步升级，不混跑原 Amp v15 或仅包含取消回收的 v15。
+取消回收基线恢复为原 protocol v14，Amp 会话查询扩展在其上递增为 v15，沿用 journal v4 /
+workspace manifest v1，数据库 schema 不变。serve/worker 固定同一 commit 或镜像同步升级；
+不混跑仅含取消回收的 v14、历史含 `release_workspace` 的 v15 或旧 Amp v16 快照。
 旧 journal 不自动迁移；在没有活跃/未知执行且归档与停止 ACK 完成后升级两端。
 保留旧数据作人工核查，不将旧 per-Flow 目录迁入池，详见[升级说明](../operations/upgrade.md)。
 

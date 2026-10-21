@@ -1,6 +1,6 @@
 # Worker Amp CLI 适配 — Feature record
 
-**Stage:** Implementation — Amp v16 已重放到收窄后的取消回收基线，本地组合验证 938 项通过；依赖仍有已披露 high，目前不建议合并，Docker/Linux 与线上 GitHub 闭环未验收。
+**Stage:** Implementation — 取消重连与 Amp JSON 漏脱敏修复已完成本地组合验证，943 项通过；后续审查与发布见 PR，仍保留依赖 medium 和两项 low，Docker/Linux 与线上 GitHub 闭环未验收。
 **PR:** [Draft PR #107](https://github.com/b1indsight/agentflow/pull/107)，依赖 [PR #109](https://github.com/b1indsight/agentflow/pull/109) 的取消回收合同；原 bootstrap [PR #103](https://github.com/b1indsight/agentflow/pull/103) 已合并，Amp 未合并或部署。
 **Bookmark:** `feat/worker-amp-cli`
 
@@ -421,3 +421,50 @@ CLI 升级可能改变错误和输出格式，因此固定部署版本，未确�
 - **交付边界：** 保持同一 bookmark 和 Draft PR #107，依赖顺序仍为 #109 → #107；未合并或部署。
   取消入口、权限和状态优化仍由 [#108](https://github.com/b1indsight/agentflow/issues/108) 跟踪。
   Docker/Linux 与真实 installation-token GitHub 写入验收仍未完成。
+
+### [010] — 2026-10-21：修复 JSON 转义后的凭据漏脱敏
+
+- **触发与范围：** 用户指定修复 [009] 报告的前两项：取消清理失败重连后的下一 Flow 卡住，
+  以及 Amp JSON 漏脱敏。前者由 #109 原负责线程在专用 workspace 修复；本次 Amp 增量只修
+  后者，不处理 INITIAL 诊断传递或 merge 保留路径的两项 low，也不恢复已撤出的额外功能。
+- **决定：** 保留既有 token 词边界，在共享 `redact_amp_text` 内解析合法 JSON，递归检查
+  解码后的字符串、对象键和嵌套载荷，再按需序列化。历史、最终答案和诊断继续共用入口；
+  当前运行凭据在递归时复用同一份已固定的集合，普通文本沿用原规则，无新增 token 语法。
+  仅有实际替换时重写 JSON，非敏感格式、标量类型和 `task-…` 等普通路径保持不变。
+- **对照与回归：** 新增一个公开 AmpAgent 最终答案回归，扩展既有 AmpHistory 外部 token
+  回归，覆盖工具输入/结果、换行/制表/回车、嵌套列表与对象键，以及缓存后的公开页面。
+  未改生产代码时 **2 failed**，修改后同组 **2 passed**；相关套件 **35 passed**。
+  另做 12 组 JSON 形状/分隔符对照，验证嵌套 JSON、普通诊断、幂等性和原格式保留；
+  取消词边界的简化方案会误改 `task-abcdefghijklmnop`，因此保留解码后检查。
+- **本地验证：** 仍在 [009] 基线上，PostgreSQL 全量 **939 passed**，一条既有弃用警告；
+  Ruff、mypy（206 个源文件）、wheel/sdist 构建及 Shell/差异检查通过。日志位于同一证据目录：
+  `amp-json-before.log`、`amp-json-after.log`、`amp-json-targeted.log`、`amp-json-controls.log`、
+  `pytest-json-fix.log`、`mypy-json-fix.log`、`build-json-fix.log`。本次结果不含 #109 的新修复，
+  待准确基线完成后整合复验，再进行本次授权的一次后续审查并更新原 #107。
+
+### [011] — 2026-10-22：整合清理后报告停止的最小回收基线
+
+- **基线及范围：** 将三个 Amp change 重放到 #109 已发布的
+  [`8caaa8b63028`](https://github.com/b1indsight/agentflow/commit/8caaa8b63028557692021392f01f1a892975f4cb)。
+  只切换 Amp 专用 workspace 的自身 change，没有修改共享树或原负责线程的 workspace。
+  相对新基线，gateway/client、workspace/VCS、数据库没有 Amp 增量；WorkerSession 仍只新增
+  历史来源选择，原取消回收与恢复实现保持不动。
+- **取代 [009] 的取消合同：** 执行停止后先持久保存停止凭据，清理原目录的 staged/unstaged/
+  untracked 修改，将 copy/worktree 原地归还 idle；保留目录、已推送 commit 及 ignored 缓存。
+  清理成功后才发送 ExecutionStopped，失败保留 journal 和控制面 binding，重连可重试。
+  旧 stop 重放仅排除旧 job，下一任务照常对账；未 dispatch 可重排，已 dispatch 却缺 journal
+  的普通任务明确失败且不重跑。已知 merge 仍保留位置证明供 ARCHIVE，不删除整个目录。
+- **协议决定：** #109 已撤掉 `release_workspace`，恢复原 wire v14；Amp 的 SessionId 扩展
+  仍独立递增一次，最终使用 **wire v15 / journal v4 / manifest v1**，数据库不变。
+  旧 v16 属于 [008]/[009] 的 ACK 字段方案，不保留该中间合同或转换层；serve/worker 必须
+  固定同一 commit。更新当前部署、架构与升级说明，历史条目仍按当时版本保留。
+- **组合验证：** PostgreSQL 全量 **943 passed**，96.91 秒，一条既有弃用警告；包含实际
+  gateway/client + Git 的清理失败和丢 ACK 两条永久回归，以及本轮两条 Amp 脱敏回归，
+  四条定向场景 **4 passed**。Ruff、mypy（206 个源文件）、wheel/sdist 构建、Shell 和差异
+  检查通过。额外五类公开消息 v15 round-trip，拒绝 v14/v16 及已删除 ACK 字段，确认无
+  StopCompleted。证据为 `pytest-fixes12.log`、`targeted-fixes12.log`、`protocol-fixes12.log`、
+  `ruff-fixes12.log`、`mypy-fixes12.log`、`build-fixes12.log`；测试 schema 为 0，专用数据库已停止。
+- **未扩大修复范围：** #109 本次后续审查另报一个 medium：取消 REVISION 后显式 retry
+  仅 lookup occupied 位置，已回收的 idle 位置未重新分配，导致 exit 65。保留该新 finding，
+  不擅自修复。INITIAL 启动诊断传递和取消期间已知 merge/ARCHIVE 的永久回归缺口两项 low
+  仍不在用户本次指定的前两项内。保持原 #107/#109，不合并或部署；新 head CI 单独订阅。

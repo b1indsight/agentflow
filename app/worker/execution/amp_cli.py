@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from loguru import logger
+from pydantic import JsonValue
 
 from app.domain.models import CodingExecutionContext
 from app.worker.execution.credentials import git_credential_environment
@@ -37,12 +38,31 @@ _BEARER_PATTERN = re.compile(r"(?i)(Bearer\s+)[A-Za-z0-9._~+/-]+")
 
 
 def redact_amp_text(value: str, secrets: Iterable[str] = ()) -> str:
-    """Redact current credentials and tokens introduced by other clients before retaining output."""
+    """Redact plaintext and decoded JSON strings before retaining Amp output."""
+    secrets = tuple(secret for secret in secrets if secret)
     for secret in secrets:
-        if secret:
-            value = value.replace(secret, "[REDACTED]")
+        value = value.replace(secret, "[REDACTED]")
     value = _SECRET_PATTERN.sub("[REDACTED]", value)
-    return _BEARER_PATTERN.sub(r"\1[REDACTED]", value)
+    value = _BEARER_PATTERN.sub(r"\1[REDACTED]", value)
+
+    def redact_json(payload: JsonValue) -> JsonValue:
+        if isinstance(payload, str):
+            return redact_amp_text(payload, secrets)
+        if isinstance(payload, list):
+            return [redact_json(item) for item in payload]
+        if isinstance(payload, dict):
+            return {redact_amp_text(key, secrets): redact_json(item) for key, item in payload.items()}
+        return payload
+
+    # Escaped separators hide regex word boundaries in tool payloads and final JSON.
+    # Reuse the same rules on decoded keys/values, retaining unchanged formatting.
+    try:
+        payload: JsonValue = json.loads(value)
+    except json.JSONDecodeError:
+        return value
+    redacted = redact_json(payload)
+    return (value if redacted == payload else
+            json.dumps(redacted, ensure_ascii=False, separators=(",", ":")))
 
 
 def amp_environment(

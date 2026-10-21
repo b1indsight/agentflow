@@ -82,6 +82,27 @@ async def test_jsonl_keeps_unicode_separators_inside_the_final_answer(monkeypatc
     assert result.exit_code == 0 and result.last_message == answer
 
 
+async def test_final_json_redacts_credentials_after_escaped_separators(monkeypatch, tmp_path):
+    # JSON encodes the newline as \\n; redaction must still see the token's real boundary.
+    monkeypatch.setenv("AMP_API_KEY", "current-private-key")
+    payload = {"summary": "line\nsgamp_external-client_123456789",
+               "nested": [{"key": "line\tghp_external_client_123456789"},
+                          "line\rcurrent-private-key"],
+               "path": "task-abcdefghijklmnop", "count": 2, "ok": True}
+
+    async def execute(*args, **kwargs):
+        return AmpProcessResult(stream(result=json.dumps(payload)), b"", 0)
+
+    monkeypatch.setattr("app.worker.execution.amp.run_amp", execute)
+    result = await AmpAgent(trusted_host=True).start("task", tmp_path)
+    assert result.exit_code == 0
+    assert json.loads(result.last_message) == {
+        "summary": "line\n[REDACTED]",
+        "nested": [{"key": "line\t[REDACTED]"}, "line\r[REDACTED]"],
+        "path": "task-abcdefghijklmnop", "count": 2, "ok": True,
+    }
+
+
 @pytest.mark.parametrize("stdout,exit_code", [
     (stream(is_error=True, subtype="error_during_execution", error="User cancelled"), 0),
     (stream(session="T-00000000-0000-0000-0000-000000000000"), 0),

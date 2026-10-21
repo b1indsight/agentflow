@@ -8,6 +8,9 @@
 
 ## Unreleased
 
+- Amp 脱敏继续检查 JSON 解码后的字符串和键，覆盖转义换行后的外部 token、嵌套工具载荷及
+  结构化最终答案；沿用同一凭据规则，保留非敏感 JSON 的原始格式和普通路径。
+
 - 修复 Amp JSONL 中合法 Unicode 分隔符导致的误拒收；历史与诊断统一过滤 `sgamp_` 等凭据，
   初始化前失败保留有界脱敏 stderr，仍不自动重跑。控制侧 worker 历史查询延长至 30 秒，
   为 20 秒 Amp 导出及进程清理留出预算。
@@ -22,7 +25,7 @@
   `0.0.1792555249-g702cd1` 并校验官方 Linux x64 SHA-256，serve 不安装 Amp。部署示例说明
   专用持久 HOME 的原生登录/可选 `AMP_API_KEY`、逐轮 GitHub App Git/gh 凭据、原生历史快照
   的滞后可能及未知续跑不自动重跑；镜像 smoke 只检查 CLI 启动和角色边界，不构成真实模型或
-  GitHub 闭环验收。Amp 会话查询在取消回收合同上递增为 protocol v16，沿用 journal v4 / manifest v1，
+  GitHub 闭环验收。Amp 会话查询在取消回收合同上递增为 protocol v15，沿用 journal v4 / manifest v1，
   支持外部追加与公开块分页；错误 result 即使
   CLI 退出 0 也失败。取消先 SIGTERM，再升级清理捕获到的独立子进程组，仍依赖外部隔离。
 

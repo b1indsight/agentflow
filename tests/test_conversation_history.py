@@ -227,10 +227,15 @@ def test_amp_history_redacts_other_clients_access_tokens(monkeypatch) -> None:
     # External continuation can introduce a credential absent from this worker's environment.
     monkeypatch.delenv("AMP_API_KEY", raising=False)
     token = "sgamp_external-client_123456789"
+    # Native tool payloads become JSON strings before entering the public history cache.
+    payload = {f"line\n{token}": [f"line\t{token}", {"output": f"line\r{token}"}],
+               "path": "task-abcdefghijklmnop", "count": 2, "ok": True}
+    redacted = {"line\n[REDACTED]": ["line\t[REDACTED]", {"output": "line\r[REDACTED]"}],
+                "path": "task-abcdefghijklmnop", "count": 2, "ok": True}
     message = {"role": "assistant", "protocolMessageID": "M-token", "content": [
-        {"type": "text", "text": token},
-        {"type": "tool_use", "id": "TU-token", "name": "shell", "input": {"key": token}},
-        {"type": "tool_result", "toolUseID": "TU-token", "run": {"result": {"output": token}}},
+        {"type": "text", "text": f"line\n{token}"},
+        {"type": "tool_use", "id": "TU-token", "name": "shell", "input": payload},
+        {"type": "tool_result", "toolUseID": "TU-token", "run": {"result": payload}},
     ]}
 
     async def export(*args, **kwargs):
@@ -242,4 +247,7 @@ def test_amp_history_redacts_other_clients_access_tokens(monkeypatch) -> None:
         page = reader.query(HistoryQuery(session_id=AMP_SESSION))
         assert len(page.items) == 3
         assert token not in page.model_dump_json()
-        assert page.model_dump_json().count("[REDACTED]") == 3
+        assert page.items[0].content.text == "line\n[REDACTED]"
+        assert page.items[1].content.arguments is not None
+        assert json.loads(page.items[1].content.arguments) == redacted
+        assert json.loads(page.items[2].content.text) == redacted
