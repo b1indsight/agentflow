@@ -284,6 +284,48 @@ async def test_jj_copy_can_return_to_pool_and_reuse_committed_baseline(tmp_path,
     assert (pool.path(reused) / "README.md").read_text() == "updated committed baseline\n"
 
 
+@pytest.mark.skipif(shutil.which("jj") is None, reason="jj is not installed")
+@pytest.mark.parametrize("colocated", [True, False])
+async def test_cancel_recycles_jj_directory_without_changing_pushed_commit(tmp_path, colocated):
+    # Cancel can interrupt a dirty jj working copy; reuse must preserve its pushed history/cache.
+    root, remote = managed_seed(tmp_path)
+    seed = root / "repos/owner/repo"
+    environment = os.environ | {"JJ_USER": "FlowTool Test", "JJ_EMAIL": "flowtool@example.test"}
+    if colocated:
+        await _jj("git", "init", "--colocate", cwd=seed, env=environment)
+    else:
+        shutil.rmtree(seed)
+        await _jj("git", "clone", "--no-colocate", "-b", "main", str(remote), str(seed),
+                  cwd=root, env=environment)
+        (seed / ".gitignore").write_text(".venv/\n")
+        await _jj("commit", "-m", "ignore caches", cwd=seed, env=environment)
+        await _jj("bookmark", "set", "main", "-r", "@-", cwd=seed, env=environment)
+    pool = RepositoryWorkspaces(root, "worker-a", limit=1)
+    binding = await acquire(pool, 1)
+    repo = pool.path(binding)
+    inode = repo.stat().st_ino
+    (repo / "README.md").write_text("committed agent work\n")
+    await _jj("commit", "-m", "agent commit", cwd=repo, env=environment)
+    await _jj("bookmark", "set", "flow/cancel", "-r", "@-", cwd=repo, env=environment)
+    await _jj("git", "push", "--bookmark", "flow/cancel", cwd=repo, env=environment)
+    pushed = await asyncio.to_thread(subprocess.check_output,
+                                    ["git", "rev-parse", "refs/heads/flow/cancel"], cwd=remote)
+    (repo / "README.md").write_text("cancelled edit")
+    (repo / "untracked").write_text("cancelled file")
+    (repo / ".venv").mkdir()
+    (repo / ".venv/cache").write_text("warm cache")
+    assert await pool.release(binding, recycle=True) == "released"
+    assert (repo / "README.md").read_text() == "committed agent work\n"
+    assert not (repo / "untracked").exists()
+    reused = await acquire(pool, 1)
+    assert reused.slot_id == binding.slot_id and reused.generation > binding.generation
+    assert repo.stat().st_ino == inode and (repo / ".venv/cache").read_text() == "warm cache"
+    assert (repo / "README.md").read_text() == "base\n"
+    assert await asyncio.to_thread(subprocess.check_output,
+                                   ["git", "rev-parse", "refs/heads/flow/cancel"], cwd=remote) == pushed
+    assert pool.lookup("owner/repo", 1) == reused
+
+
 @pytest.mark.parametrize("cancellations", [1, 2])
 async def test_cancelled_copy_waits_for_thread_and_cleans_only_owned_partial(
     tmp_path, monkeypatch, cancellations,

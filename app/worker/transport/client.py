@@ -57,6 +57,8 @@ class TaskExecutor(Protocol):
         self, task: ExecutionTask, secret: AssignmentSecret | None = None, *, tool_caller: FlowToolCaller
     ) -> ExecutionResult: ...
 
+    async def reclaim_workspace(self) -> None: ...
+
 
 class WorkerProtocolError(RuntimeError):
     pass
@@ -455,6 +457,9 @@ class WorkerClient:
         if receipt.request_id != request.request_id:
             raise WorkerProtocolError("stop request conflicts with durable receipt")
         self._discard_tool_requests()
+        # Keep stopped-process evidence durable, but do not let control dispatch until reuse is safe.
+        if record.stopped is None or not record.acknowledged:
+            await self.executor.reclaim_workspace()
         receipt = receipt.model_copy(update={'connection_epoch': request.connection_epoch})
         await connection.send(receipt.model_dump_json())
         # A result may already have been sent when the server requested stop. Only a matching
@@ -526,4 +531,3 @@ class WorkerClient:
             pending = self._tool_requests.get_nowait()
             if not pending.future.done():
                 pending.future.set_exception(WorkerProtocolError("assignment was cancelled"))
-

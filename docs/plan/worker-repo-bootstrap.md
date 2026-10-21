@@ -1,8 +1,8 @@
 # Worker 仓库自动初始化与 bot GitHub 交付 — Feature record
 
-**Stage:** Ready for review — 已同步最新 main 并通过本地完整回归；原审查的 1 high / 4 medium 保留待处理，远端 CI 另行确认，未合并、未部署。
-**PR:** [#103](https://github.com/b1indsight/agentflow/pull/103)；沿用原 bookmark/PR，不混入工作区其他功能。
-**Bookmark:** `fix/worker-repo-bootstrap`
+**Stage:** Narrowed cancellation fix — 当前按 [009] 收窄为取消 workspace 回收：wire v15 / journal v4 / manifest v1；[007]、[008] 是已撤出本次实现的历史方案，不代表当前代码。
+**PR:** [#103](https://github.com/b1indsight/agentflow/pull/103) 已合并；取消回收沿用 [#109](https://github.com/b1indsight/agentflow/pull/109)，不混入 Amp，不合并或部署。
+**原实现 Bookmark:** `fix/worker-repo-bootstrap`
 
 阅读顺序：初始计划定义自动 clone，[001] 增加 bot gh 包装，[002] 详解 Git push 认证、
 MCP 请求与 controler 创建 PR 的完整链路，[003] 修订为副本复用与 Git worktree 溢出，
@@ -667,3 +667,199 @@ installation token 做 GitHub clone/push/PR 写入验收。PR 保持 draft；独
   worktree 部分删除恢复、路径规范化、合法仓库名和分支名五项问题，详见 PR 顶部报告；
   本次未根据这些 findings 扩大修改范围或声称已修复。冲突解决仅涉及文档，不重新进行代码消融。
   Docker/真实 GitHub App 验收限制不变；本地通过不替代新 head 的 CI，也不表示已合并或部署。
+
+### [007] — 2026-10-21 — 审查后修复路径、输入与部分删除恢复
+
+#### 触发与本地实现
+
+已报告的 review 为 1 high / 4 medium，用户随后要求修复。本条记录已完成的四项 medium；
+取消后的容量回收另有下述待决边界，尚不能将本批报告为五项全部修复。
+
+- 仓库标识分别校验 owner 和 repository；允许 `.github`、`_templates`、`-tools` 等仓库名，
+  仍拒绝路径逃逸、`.git` 以及既有的目录保留标记。不改变 owner 的现有字符规则。
+- 默认分支交由 `git check-ref-format refs/heads/<branch>` 验证，不再复制一套 ASCII 白名单；
+  允许 `release+ci` 及 Unicode 分支，继续拒绝空分支、前导 `-` 和 Git 不合法的 ref。
+- worker root 在保留直接 root symlink 拒绝规则的前提下 resolve；common directory 和 Git
+  worktree registry 的路径比较采用 canonical 路径。受管路径内部的 symlink 仍不接管。
+- 正常归档仍先校验干净状态、worktree common directory 与登记归属；随后将 checkout 和
+  该 worktree 专用 Git admin directory 的 device/inode 一起持久化，再进入 `releasing`。
+  重试使用这份绑定及目录证据，不要求一个已删掉 `.git` 的 checkout 再通过完整仓库检查。
+  若 Git 已部分删除目录或登记，重试仅完成这两个已证明归属的目录；descriptor-relative
+  删除不跟随内部 symlink，替换目录/inode 或登记目标变动则拒绝。不会执行全局 prune。
+
+#### 验证及必要性
+
+- 先增加公共 pool acquire/release 合同回归，在未改生产代码时运行：**10 failed、2 passed**；
+  两个对照是替换目录和 symlink 保留检查。修改后同一组 **12 passed**。
+  部分删除覆盖 checkout 残缺、checkout 全失但登记残留、登记已删而 checkout 残留；
+  重试后均释放容量，且保留另一个无关的、路径已缺失的 worktree 登记。
+- 额外真实 Git 探针：删除 checkout 的 `.git` 后，直接重试 `git worktree remove --force`
+  返回 128（validation failed）；登记先删除时也返回 128（not a working tree）。
+  checkout 全失而登记仍在时该命令成功。这证明单纯重复原命令不能覆盖两种部分删除窗口，
+  保留有持久目录证据的定向恢复，未引入仓库级 prune 或通用目录接管。
+- 隔离 delivery workspace 的 PostgreSQL 全量：**907 passed，0 skipped，94.09 秒**；
+  Ruff、Mypy（199 个源文件）、`uv build --no-sources` 通过。
+  只有既存 Starlette TestClient 弃用警告。证据位于本地
+  `.amp/in/artifacts/worker-bootstrap-rework-{before,after,pytest,static,build}.log`，不纳入提交。
+- 收到 #103 合并通知后，将本批修复重放到已合并的
+  [main 基线](https://github.com/b1indsight/agentflow/commit/b22b862c2773e5860abb538ebfa44d5627ca547a)，
+  保留其完整 [006] 冲突解决历史，本条顺延为 [007]；没有改写已合并分支。
+  重放后的 PostgreSQL 全量 **919 passed，0 skipped，97.17 秒**；Ruff、Mypy（201 个源文件）
+  和 Python wheel/sdist 构建通过，证据为本地 `worker-bootstrap-rework-main-*.log`。
+  #103 已无法接收后续修复，交付方式待确认；合并事件不构成部署或继续写 GitHub 的授权。
+- 本批修改只在 `worker-bootstrap-delivery`，不修改共享工作区、Amp 文件或 Amp PR workspace。
+  此时仍为 protocol v14 / journal v4；新本地修复未推送，未消耗本次授权的一次后续 review。
+
+#### 取消回收仍待用户决定
+
+取消会留下 tracked edits、untracked files，原 pool 合同明确要求保留未知修改；现有
+`StopAccepted` 也不区分取消和需保留原工作区的 merged Flow。因此不能直接对所有 stop
+执行删除或默认丢弃 dirty checkout。已向用户询问：保留取消快照并移出可执行池（保留磁盘
+直至人工清理），或允许删除准确归属的已取消目录。策略明确后再完成取消链路及其回归，
+然后对完整修复执行一次后续独立审查；新 findings 仅报告，不自动继续修复。
+
+### [008] — 2026-10-21 — 确认取消必须回收受管 workspace
+
+#### 要求、决策与范围
+
+用户随后要求“暂时 fix 这个 high bug，worker 的取消流程要回收 workspace”，并将入口与逻辑
+优化记入 issue。采用删除准确归属的取消目录，包含未提交修改和 ignored 缓存，不增加另一个
+无限增长的取消快照目录；本条取代 [007] 的待决数据保留策略。未来入口/权限/状态反馈工作
+记录于 [#108](https://github.com/b1indsight/agentflow/issues/108)，本批不改变入口授权或命令语义。
+
+初始方案由隔离的 Claude Code Opus 5.5 从显式代码材料生成，验证 tools/MCP 均为空；
+建议与实际代码核对后，由本线程实现并执行测试，未将模型建议当作验证证据。
+
+#### 实际实现与必要合同
+
+- `StopStore.request` 选择本 binding 建立后最后一次实际派发/开始的任务，即使该任务已经
+  done、worker 正在等 review，也创建 stop intent。尚未派发的全新 Flow 仍可直接释放；
+  后续 revision 尚在 control 准备时，停止对象仍是 worker journal 中上一条已派发任务。
+- 控制面确认进程停止、结果/effect 收敛后，在 workflow 锁内保存 `release_workspace` 决定。
+  只有 CANCELLED 且未记录 MERGED 才授权删除。`StopAccepted` 重放同一持久决定，不重新
+  根据可变交付状态猜测；先已知合并则保留原 binding/workspace 和归档 journal。
+- stop 从 stopped 进入 accepted，不立即释放 binding；worker 持久保存授权，再调用专用
+  discard，完成 pool 提交及 journal 清理证据后发送 `StopCompleted`。控制面验证当前 epoch、
+  request/worker/Flow/job/token 和原 execution nonce 的 digest，才将 stop 置 confirmed 并
+  释放取消绑定。保留目录的 stop 同样发送完成回执，使后续 archive 不抢占未退休 journal。
+- 进程停止等待仍为 15 秒，控制面等待停止凭据为 20 秒；文件清理另有 120 秒回执等待。
+  失败或断线保持 accepted，先重连恢复 stop，不先派发另一条任务。未完成的 stop journal
+  拒绝被新 assignment 覆盖；清理完成回执丢失后只重发，不触碰已复用的新代次。
+- pool 在成功分配时保存 checkout device/inode。取消路径按精确 binding/代次及该目录身份
+  验证归属，先记录 releasing，再用 descriptor-relative 删除处理 dirty copy 或 worktree。
+  worktree 使用 [007] 的 checkout/admin 双目录证明及部分删除恢复，不调用全仓 prune。
+  正常 archive 的 release 保持干净 warm copy 复用策略，不共用取消的破坏性 discard。
+- 无 journal binding 但存在该 Flow 的 live/quarantined pool 位置时拒绝释放，避免掩盖准备阶段
+  的未知分配。缺失 journal、未知旧 executor、替换目录或 symlink 均保留阻塞供人工核验。
+- 删除授权前已知 merge 可保留原目录；授权后才得知的远端 merge 不能恢复已删除内容。
+  此时控制面阻止释放 merged binding，留待人工对账，不自动重新编码或假报 archive 成功。
+  取消也不撤销此前 GitHub push/PR。此边界在运维说明中明确。
+- 新 wire 为 v15（停止授权/完成回执），journal v5（授权及清理完成证据），manifest v2
+  （分配时目录身份）。仓库未部署，不增加旧 schema/journal/manifest 迁移或兼容分支。
+  #103 的 v14 快照已独立合并，本次不改写；不带 AmpHistory/Amp 配置，也不改共享工作区。
+  Amp 线程重接本修复基线后须将其独立协议增量调整为 v16。
+
+#### 回归、消融与交付边界
+
+- 先在未改生产代码时执行公共停止流程的 dirty copy/worktree 容量回归：**2 failed**，
+  两种目录在 stop ACK 后都仍存在；修复后这两项通过，连续两次取消后第 3 条 Flow 可分配。
+  覆盖 tracked/untracked/ignored 内容清理，同时保留 seed 和另一个 Flow 的位置。
+- 覆盖丢 ACK、清理提交前崩溃、重新创建 client/journal 后恢复、旧回执重复、新代次隔离、
+  取消期间已知 merge、不一致释放决定、缺失 journal 绑定、替换目录和 symlink。
+  PostgreSQL 双向 gateway/client + 真实 Git pool 回归主动暂停文件清理：清理前 intent 仍为
+  accepted、binding 未释放、文件仍在；放行后文件和停止占用同时收敛。
+- 旧的“取消已完成 INITIAL 后立即 retry”三例与新合同冲突，先验证确实被 stop pending 拒绝，
+  再更新其准备阶段模拟完整停止/清理回执；保留原测试的 merge、retry 和跨 worker 不接管目标。
+- 以同一回归输入，临时 pytest plugin 逐项移除机制（未修改产品代码）：
+
+  | 简化变体 | 结果 | 保留的决定 |
+  | --- | --- | --- |
+  | 取消复用普通 archive release | 2 failed，dirty checkout 拒绝清理 | 取消单独 discard，正常归档仍复用 |
+  | 停止凭据一确认就提前释放绑定 | 1 failed，清理被暂停时 pending 已消失 | accepted/完成回执隔开清理与分配 |
+  | 以当前位置 inode 代替分配时保存的 inode | 1 failed，替换目录被删除 | 分配时身份和删除进度分别持久化 |
+
+  日志为本地 `.amp/in/artifacts/worker-cancel-ablation-*.log`。未移除的机制由停止/归档合同
+  回归共同验证，未引入取消快照保留、后台清扫器或强制释放接口。
+- 最终 PostgreSQL 全量 **929 passed、0 skipped、101.89 秒**；Ruff、Mypy（202 个源文件）、
+  `uv build --no-sources` 及 wheel 包含控制台资源检查通过。仅保留既存 Starlette 弃用警告。
+  日志为本地 `.amp/in/artifacts/worker-cancel-reclaim-{before,after,pytest-final,build-static}.log`。
+- 五项修复在同一 delivery change 中，后续仅执行本次修复授权的一次独立审查；所有新 findings
+  只报告，不自动继续修复或重跑。#103 已合并，当前本地修复未推送、未建新 PR、未部署。
+  没有通过真实安装 token 执行 GitHub 写入，也没有容器运行环境验收。
+
+### [009] — 2026-10-21 — 按用户要求收窄取消回收补丁
+
+- **要求与取代范围：** 用户指出 #109 过度变更并要求修改，只保留“worker 取消后回收
+  workspace”。撤出 [007] 的四项 VCS/workspace 修复，取消 [008] 的 `StopCompleted`、
+  accepted 中间状态、数据库列、journal v5、manifest v2 以及通用 inode/部分删除恢复。
+  [007]、[008] 的理由和当时验证保留为历史，当前实现以本条为准。
+- **最小实现：** 沿用原 `StopExecution → ExecutionStopped → StopAccepted`。ACK 只增加
+  `release_workspace`，由原停止确认后的 binding 是否仍保留给 archive 决定；已知 merge
+  保留目录，旧 stop 重放不操作新 binding。此字段使 wire 升到 v15；journal v4、manifest v1、
+  数据库 schema 和 stop confirmed 的原时机不变，不持久化第二套清理决定。
+- worker 验证 ACK fence 后，通过现有 pool `release(discard=True)` 删除精确 binding/代次
+  的 dirty copy/worktree，再用既有 journal 写入 ACK 并清空 workspace；失败不退休 journal，
+  退出连接重试，已 ACK 的旧 stop 不再执行删除。普通 ARCHIVE 的干净检查与 warm copy
+  复用不变；无法由原归属检查恢复的部分删除留待人工处理，不接管未知目录或全局 prune。
+- 等 review 的已完成任务也需要清理，`StopStore.request` 因此选择当前 binding 最后实际派发
+  的任务，忽略尚未派发的准备任务。每个 worker 同时只有一个 unreleased Flow binding，
+  期间不会改派其他 Flow；binding 已释放则不创建 stop。
+- **取舍：** 控制面仍在原停止确认时释放绑定；`stop_pending=False` 不再承诺磁盘删除完成。
+  worker 必须完成本地回收才读取下一 assignment。清理异常/崩溃仍按原连接与 journal 恢复，
+  不新增全局回收事务或用户状态；取消确认后才出现的 merge 需人工核验，无法恢复已删修改。
+- **验证：** 在现有 PostgreSQL 双向 gateway/client 回归中加入真实 dirty copy/worktree，
+  连续取消两次后第三次分配成功，并保留 seed/无关位置；取消、归档、池及协议定向共
+  **78 passed**。临时去掉回收调用，同一回归 **2 failed**（目录残留），恢复后通过。
+  另有临时 **7 passed** 覆盖丢 ACK、删除后 manifest 提交中断、重启重放、旧代次重放、
+  merge 保留及错误 ACK fence；临时测试/消融插件均删除。最终 PostgreSQL 全量
+  **910 passed、0 skipped、91.18 秒**，Ruff、Mypy（201 个源文件）、`uv build --no-sources`
+  与 wheel 控制台资源检查通过；保留既存 Starlette 弃用警告。相对 [008] 的测试减少来自
+  撤出的四项修复及其专属测试，当前原有测试未删除，仅更新必要的协议/取消准备。
+  证据为本地 `.amp/in/artifacts/worker-cancel-minimal-{targeted,scratch,ablation,pytest,static-build}.log`。
+- **边界与交付：** 保留同一 #109/bookmark，在专用 delivery workspace 重建最小快照，
+  不改共享工作区和 Amp；[008] 的旧快照保留在版本历史，不改其独立子分支。入口/权限/
+  可观测性重设计继续由 #108 跟踪。只执行本次修改的一次后续 review，新 findings 仅报告。
+
+### [010] — 2026-10-21 — 取消后清理并复用原目录，修复清理失败与停止重放后的恢复
+
+- **要求与决定：** 用户继续指出新增字段和删除目录不符合预期，明确要求“修 #109”“清理后
+  复用目录”，并授权修复后续 review 的下一 Flow 滞留问题。本条取代 [008]/[009] 的删除
+  方案：撤销 `release_workspace`，沿用原 wire v14 / journal v4 / manifest v1 和数据库，
+  不恢复 `StopCompleted` 或额外完成阶段。保持同一 PR，不带 Amp，不恢复 [007] 的四项
+  已撤出修复；入口与权限优化仍由 #108 跟踪。
+- **实际实现：** 原执行 task/子进程退出后，先将停止凭据持久化，再通过既有 pool 的
+  `release(recycle=True)` 清理 Git staged/unstaged/untracked 内容；jj 用 `jj restore`
+  清理工作副本。保留原目录、VCS 元数据、已推送提交和 ignored 缓存，将 copy/worktree
+  都置 idle。再次分配使用原位置、递增 generation；overflow worktree 不再对已有路径
+  调用 `worktree add`。普通 ARCHIVE 的 release 行为保持不变。
+- **失败与顺序：** 清理完成后才发送 `ExecutionStopped`。清理或 manifest 提交失败保留
+  停止证据和原控制面 binding，下一 Flow 仍 queued；重连重试同一位置。先落停止证据
+  再清理，使 worker 重启后仍能证明旧进程确实退出，不从缺失 task/PID 推测安全。
+  沿用已有 releasing/idle 状态，不增加回收事务、后台清扫、强制解除或 inode 协议。
+- **停止重放与下一任务：** 原 stop ACK 丢失且控制面已授权下一次 dispatch 时，重连不能
+  因为正在重放旧 stop 就跳过另一 job 的 missing-journal 对账。gateway 只排除本次 stop
+  对应的 job；未曾 dispatch 的准备任务仍可安全重排，已 dispatch 却无对应 journal 的
+  普通任务走已有持久失败路径，不自动重新运行。CLOSED/MERGED 的原绑定仍阻塞供对账。
+- **journal 与归属：** stop ACK 保留原 workspace 证明，取消期间已知 merge 时用于原地
+  ARCHIVE；同 Flow 的新编码任务不继承已回收代次。没有 journal binding 而存在该 Flow
+  的未完成分配时阻塞；旧 generation 不得操作新分配。未知归属、异常锁、无法清理的
+  VCS 操作仍需人工恢复，不增加通用部分删除恢复，也不撤销 GitHub push/PR。
+- **永久回归：** 真实 PostgreSQL + gateway/client + Git copy/worktree 连续取消两次后
+  第三次分配成功，原 inode、ignored 缓存、seed 和无关位置保留；增加 colocated 与
+  non-colocated jj 回收、pushed commit 保留回归。清理失败/stop ACK 丢失双向回归验证
+  下一任务分别正常开始或明确失败且不重跑；gateway 改动前 **1 passed / 1 failed**，
+  改动后 **2 passed**。最终相关定向 **139 passed**，PostgreSQL 全量 **914 passed、
+  0 skipped、94.97 秒**；Ruff、Mypy（201 源文件）、`uv build --no-sources` 和 wheel
+  控制台入口检查通过，仅既有 Starlette 弃用警告。
+- **临时故障验证：** cleanup/manifest 提交失败 × copy/worktree × 普通取消/已知 merge，
+  加同 Flow retry，共 **9 passed**；重连后可启动下一任务，merge 保留原绑定并完成
+  ARCHIVE，旧 stop/generation 拒绝触碰新任务。临时探针和消融插件不进入永久测试。
+- **消融：** 复用普通 archive release 而不做取消清理，同一 Git/jj 回归 **4 failed**；
+  去掉 `jj restore`，non-colocated 回归 **1 failed / 1 passed**。分别去掉停止重放时的
+  新 job 对账、忽略 requeue 拒绝，两次同输入各 **1 failed**（下一任务继续滞留）。保留
+  上述必要机制。命令为 `python -m pytest -q -p no:cacheprovider` 加相应测试选择；消融
+  加临时 plugin 与 `REUSE_ABLATION`。证据为本地
+  `.amp/in/artifacts/worker-cancel-reuse-{targeted-final,pytest-final,faults-final,static-final,reconnect-before,reconnect-after,ablation-release-final,ablation-jj,ablation-reconnect}.log`。
+- **交付边界：** 只修改专用 worker-bootstrap-delivery workspace；共享工作区及 Amp 快照
+  不变。完成本次授权的一次后续独立 review 后更新原 #109，新 findings 仅报告，不自动
+  继续修复。未运行真实 installation-token 写入或容器验收，不合并、不部署。

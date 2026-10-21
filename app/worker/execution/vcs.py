@@ -161,6 +161,18 @@ async def require_idle_repository(repo: Path) -> None:
             raise VcsVerificationError("workspace", "repository has unresolved jj conflicts")
 
 
+async def clean_repository(repo: Path) -> None:
+    """Discard cancelled working-copy edits without deleting the checkout or ignored caches."""
+    require_repository(repo)
+    if (repo / ".jj").exists():
+        await _required_stdout("workspace", "jj", "restore", cwd=repo)
+    if (repo / ".git").exists():
+        await _required_stdout("workspace", "git", "reset", "--hard", "HEAD", cwd=repo)
+        # jj metadata is not disposable even if Git considers it an untracked directory.
+        await _required_stdout("workspace", "git", "clean", "-ffd", "-e", ".jj/", cwd=repo)
+    await require_idle_repository(repo)
+
+
 async def align_repository(repo: Path, seed: Path, base_branch: str) -> None:
     """Move only an idle managed copy to the committed seed baseline, preserving caches."""
     await require_idle_repository(seed)

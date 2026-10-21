@@ -46,12 +46,10 @@ class StopStore(Repository):
             job = conn.execute(
                 "SELECT id,assignment_token FROM jobs WHERE flow_id=%s AND assigned_worker_id=%s"
                 " AND (started_at IS NOT NULL OR dispatch_authorized_at IS NOT NULL)"
-                " AND assignment_token IS NOT NULL AND (state='running'"
-                " OR ((started_at IS NOT NULL OR dispatch_authorized_at IS NOT NULL) AND result_received_at IS NULL)"
-                " OR (result_received_at IS NOT NULL AND result_applied_at IS NULL)"
-                " OR EXISTS (SELECT 1 FROM result_effects e WHERE e.job_id=jobs.id"
-                " AND e.dispatched_at IS NOT NULL AND e.receipt IS NULL))"
-                " ORDER BY id DESC LIMIT 1 FOR UPDATE", (flow_id, binding.worker_id),
+                " AND assignment_token IS NOT NULL"
+                " AND (started_at>=%s OR dispatch_authorized_at>=%s)"
+                " ORDER BY id DESC LIMIT 1 FOR UPDATE",
+                (flow_id, binding.worker_id, binding.bound_at, binding.bound_at),
             ).fetchone()
             if job is not None:
                 conn.execute(

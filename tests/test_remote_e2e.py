@@ -248,6 +248,9 @@ class FakeExecutor:
         assert isinstance(tool, OpenedDelivery) and tool.pr_number == 17
         return InitialTaskResult(session_id="session-1", last_message="done", exit_code=0)
 
+    async def reclaim_workspace(self) -> None:
+        raise AssertionError("no stop was requested")
+
 
 @pytest.mark.asyncio
 async def test_control_gateway_and_worker_client_complete_one_remote_job(tmp_path) -> None:

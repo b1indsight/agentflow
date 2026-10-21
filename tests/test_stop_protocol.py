@@ -2,7 +2,7 @@ import asyncio
 import os
 import sys
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -13,6 +13,7 @@ from app.contracts.protocol import (
     InitialTaskResult,
     StopAccepted,
     StopExecution,
+    parse_server_message,
     parse_worker_message,
 )
 from app.controler.workers.conversation import ConversationBroker
@@ -20,10 +21,17 @@ from app.controler.workers.gateway import WorkerGateway
 from app.controler.workflow.results import ResultApplication
 from app.controler.workflow.service import ControlService
 from app.controler.workflow.tools import FlowToolService
-from app.domain.models import JobKind
+from app.domain.models import JobKind, JobState
+from app.worker.execution.executor import WorkerExecutor
 from app.worker.execution.vcs import _run
 from app.worker.state.session import WorkerSession
 from app.worker.transport.client import WorkerClient, WorkerProtocolError
+from tests.github import RecordingGitHub
+from tests.test_coordinator import coordinator
+from tests.test_remote_e2e import QueueConnection, QueueSocket
+from tests.test_vcs import _git
+from tests.test_worker_executor import RecordingAgent
+from tests.test_worker_workspaces import acquire, managed_seed
 
 
 def assignment():
@@ -55,7 +63,7 @@ async def test_stop_kills_owned_process_and_child_then_replays_lost_ack(tmp_path
         async with asyncio.timeout(5):
             while not ready.exists(): await asyncio.sleep(0.01)
         client = WorkerClient(worker_id='w', worker_token='secret', serve_ws_url='unused',
-                              executor=SimpleNamespace(), session=journal)
+                              executor=SimpleNamespace(reclaim_workspace=AsyncMock()), session=journal)
         client.session.assignment, client._execution, client._connection_epoch = work, execution, 'epoch'
         request = StopExecution(job_id=1, flow_id=1, assignment_token='token', connection_epoch='epoch', request_id='stop')
         with pytest.raises(ConnectionError): await client._handle_stop(AckConnection(request, lost=True), request)
@@ -70,7 +78,7 @@ async def test_stop_kills_owned_process_and_child_then_replays_lost_ack(tmp_path
                     except ProcessLookupError: break
                     await asyncio.sleep(0.01)
         restarted = WorkerClient(worker_id='w', worker_token='secret', serve_ws_url='unused',
-                                 executor=SimpleNamespace(), session=WorkerSession(tmp_path))
+                                 executor=SimpleNamespace(reclaim_workspace=AsyncMock()), session=WorkerSession(tmp_path))
         request = request.model_copy(update={'connection_epoch': 'new'})
         restarted._connection_epoch = 'new'
         connection = AckConnection(request)
@@ -96,12 +104,10 @@ async def test_restarted_worker_does_not_infer_stopped_from_absent_task(tmp_path
     assert journal.load().stopped is None
 
 
-async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path):
-    flow = store.flows.create_flow('owner/repo', 1, 1)
-    attempt = store.flows.create_attempt(flow.id)
-    flow.current_attempt_id = attempt.id
-    store.flows.update_flow(flow)
-    store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
+@pytest.mark.parametrize("overflow", [False, True])
+async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path, overflow):
+    # Two cancellations used to keep both pool positions occupied, blocking the third Flow.
+    root, _ = managed_seed(tmp_path)
     started, ended = asyncio.Event(), asyncio.Event()
     to_worker, to_serve = asyncio.Queue(), asyncio.Queue()
 
@@ -114,14 +120,30 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path):
         async def receive_text(self): return await to_serve.get()
 
     class Connection:
-        async def send(self, raw): await to_serve.put(raw)
+        async def send(self, raw):
+            if isinstance(parse_worker_message(raw), ExecutionStopped):
+                # Cleanup must finish before control can release the binding and dispatch again.
+                repo = executor.workspaces.path(session.load().workspace)
+                assert repo.is_dir() and (repo / 'README.md').read_text() == 'base\n'
+                assert not (repo / 'untracked').exists()
+                assert store.workers.get_flow_execution(flow.id).released_at is None
+            await to_serve.put(raw)
         async def recv(self):
             raw = await to_worker.get()
             if isinstance(raw, Exception): raise raw
             return raw
 
-    class Executor:
+    class Executor(WorkerExecutor):
         async def execute(self, task, secret=None, *, tool_caller=None):
+            binding = await acquire(self.workspaces, task.flow_id)
+            self.session.bind_workspace(binding)
+            path = self.workspaces.path(binding)
+            (path / 'README.md').write_text('cancelled staged edit')
+            _git('add', 'README.md', cwd=path)
+            (path / 'README.md').write_text('cancelled tracked edit')
+            (path / 'untracked').write_text('cancelled untracked edit')
+            (path / '.venv').mkdir(exist_ok=True)
+            (path / '.venv/cache').write_text('cancelled ignored cache')
             started.set()
             try: await asyncio.Event().wait()
             finally: ended.set()
@@ -147,26 +169,164 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path):
         results=Mock(spec=ResultApplication),
         conversations=ConversationBroker(),
     )
+    session = WorkerSession(root)
+    executor = Executor(root, RecordingAgent(), worker_id='w', session=session)
+    unrelated = await acquire(executor.workspaces, 999) if overflow else None
     client = WorkerClient(worker_id='w', worker_token='secret', serve_ws_url='unused',
-                          executor=Executor(), session=WorkerSession(tmp_path))
+                          executor=executor, session=session)
     server = asyncio.create_task(gateway.handle(Socket()))
     worker = asyncio.create_task(client.run_connection(Connection()))
+    allocations = []
     try:
-        async with asyncio.timeout(3):
-            while not started.is_set():
+        async with asyncio.timeout(10):
+            for issue_number in (1, 2):
+                flow = store.flows.create_flow('owner/repo', issue_number, 1)
+                attempt = store.flows.create_attempt(flow.id)
+                flow.current_attempt_id = attempt.id
+                store.flows.update_flow(flow)
+                store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
+                started.clear()
+                ended.clear()
+                gateway.notify_jobs()
+                while not started.is_set():
+                    if server.done(): server.result()
+                    if worker.done(): worker.result()
+                    await asyncio.sleep(0.01)
+                binding = session.load().workspace
+                path = executor.workspaces.path(binding)
+                allocations.append((binding, path.stat().st_ino))
+                ControlService(jobs_available=gateway.notify_jobs, database=store.database).cancel(flow)
+                while not session.load().acknowledged:
+                    if server.done(): server.result()
+                    if worker.done(): worker.result()
+                    await asyncio.sleep(0.01)
+                assert ended.is_set() and path.is_dir()
+                assert (path / 'README.md').read_text() == 'base\n'
+                assert not (path / 'untracked').exists()
+                assert (path / '.venv/cache').read_text() == 'cancelled ignored cache'
+                assert session.load().workspace == binding and store.stops.pending('w') is None
+        replacement = await acquire(executor.workspaces, 3)
+        assert replacement.slot_id == allocations[0][0].slot_id == allocations[1][0].slot_id
+        assert replacement.generation > allocations[1][0].generation > allocations[0][0].generation
+        assert executor.workspaces.path(replacement).stat().st_ino == allocations[0][1] == allocations[1][1]
+        assert (root / 'repos/owner/repo/README.md').read_text() == 'base\n'
+        if unrelated is not None:
+            assert executor.workspaces.lookup('owner/repo', 999) == unrelated
+    finally:
+        server.cancel(); worker.cancel()
+        await asyncio.gather(server, worker, return_exceptions=True)
+        await client._cancel_execution()
+
+
+@pytest.mark.parametrize("failure", ["cleanup", "lost-ack"])
+async def test_stop_reconnect_reconciles_successor(store, tmp_path, monkeypatch, recording_resources, failure):
+    # A lost stop ACK can leave an older journal behind a newer authorized dispatch.
+    root, _ = managed_seed(tmp_path)
+    flows, attempts, jobs = [], {}, []
+    for issue in (1, 2):
+        flow = store.flows.create_flow("owner/repo", issue, 1)
+        attempt = store.flows.create_attempt(flow.id)
+        flow.current_attempt_id = attempt.id
+        store.flows.update_flow(flow)
+        flows.append(flow)
+        attempts[flow.id] = attempt
+        jobs.append(store.jobs.enqueue_job(flow.id, JobKind.INITIAL))
+    started, successor_dispatched = asyncio.Event(), asyncio.Event()
+    subject = coordinator(store, RecordingGitHub())
+
+    async def prepare(job, worker_id, token, epoch):
+        return Assignment(job_id=job.id, flow_id=job.flow_id, assignment_token=token,
+                          connection_epoch=epoch, task=InitialTask(
+                              flow_id=job.flow_id, attempt_id=attempts[job.flow_id].id,
+                              repo="owner/repo", issue_number=job.flow_id, issue_title="test",
+                              issue_body="", branch="flow/test"))
+
+    monkeypatch.setattr(subject, "prepare_for_assignment", prepare)
+
+    class Executor(WorkerExecutor):
+        def __init__(self):
+            super().__init__(root, RecordingAgent(), worker_id="worker-1", session=session)
+            self.executed, self.cleanups = [], 0
+
+        async def execute(self, task, secret=None, *, tool_caller=None):
+            self.session.bind_workspace(await acquire(self.workspaces, task.flow_id))
+            self.executed.append(task.flow_id)
+            repo = self.workspaces.path(self.session.load().workspace)
+            (repo / "untracked").write_text("cancelled edit")
+            started.set()
+            await asyncio.Event().wait()
+
+        async def reclaim_workspace(self):
+            self.cleanups += 1
+            if failure == "cleanup" and self.cleanups == 1:
+                raise OSError("temporary cleanup failure")
+            await super().reclaim_workspace()
+
+    gateway = WorkerGateway(subject, database=store.database,
+                            worker_tokens={"worker-1": "worker-secret"}, heartbeat_interval=.01,
+                            poll_interval=.01, tools=subject.tools, results=subject.results,
+                            conversations=ConversationBroker())
+    session = WorkerSession(root)
+    executor = Executor()
+    client = WorkerClient(worker_id="worker-1", worker_token="worker-secret", serve_ws_url="unused",
+                          executor=executor, session=session)
+
+    class Socket(QueueSocket):
+        async def send_text(self, raw):
+            await super().send_text(raw)
+            message = parse_server_message(raw)
+            if isinstance(message, Assignment) and message.flow_id == flows[1].id:
+                successor_dispatched.set()
+
+    class LostAckConnection(QueueConnection):
+        async def recv(self):
+            raw = await super().recv()
+            if isinstance(parse_server_message(raw), StopAccepted):
+                await successor_dispatched.wait()
+                raise ConnectionError("stop ACK lost after successor dispatch")
+            return raw
+
+    async def connect(connection_type):
+        incoming, outgoing = asyncio.Queue(), asyncio.Queue()
+        return (asyncio.create_task(gateway.handle(Socket(incoming, outgoing))),
+                asyncio.create_task(client.run_connection(connection_type(incoming, outgoing))))
+
+    server, worker = await connect(LostAckConnection if failure == "lost-ack" else QueueConnection)
+    try:
+        async with asyncio.timeout(5):
+            await started.wait()
+            binding = session.load().workspace
+            path = executor.workspaces.path(binding)
+            inode = path.stat().st_ino
+            ControlService(database=store.database, jobs_available=gateway.notify_jobs).cancel(flows[0])
+            with pytest.raises((OSError, ConnectionError), match="cleanup failure|ACK lost"):
+                await worker
+        assert not session.load().acknowledged
+        assert store.jobs.get_job(jobs[1].id).started_at is None
+        assert (store.stops.pending("worker-1") is not None) == (failure == "cleanup")
+    finally:
+        server.cancel(); worker.cancel()
+        await asyncio.gather(server, worker, return_exceptions=True)
+    started.clear()
+    server, worker = await connect(QueueConnection)
+    try:
+        async with asyncio.timeout(5):
+            while not (
+                store.jobs.get_job(jobs[1].id).state is JobState.FAILED
+                if failure == "lost-ack" else started.is_set()
+            ):
                 if server.done(): server.result()
                 if worker.done(): worker.result()
-                await asyncio.sleep(0.01)
-            ControlService(
-                jobs_available=gateway.notify_jobs,
-                database=store.database,
-            ).cancel(flow)
-            while store.workers.get_flow_execution(flow.id).released_at is None:
-                if server.done(): server.result()
-                if worker.done(): worker.result()
-                await asyncio.sleep(0.01)
-        assert ended.is_set()
-        assert store.stops.pending('w') is None
+                await asyncio.sleep(.01)
+        successor = store.jobs.get_job(jobs[1].id)
+        if failure == "cleanup":
+            assert successor.started_at is not None and executor.executed == [f.id for f in flows]
+        else:
+            assert session.load().acknowledged
+            assert successor.result_applied_at is not None and successor.started_at is None
+            assert "journal" in successor.last_error
+            assert executor.executed == [flows[0].id]  # Unknown dispatch is failed, never rerun.
+        assert path.is_dir() and path.stat().st_ino == inode
     finally:
         server.cancel(); worker.cancel()
         await asyncio.gather(server, worker, return_exceptions=True)
