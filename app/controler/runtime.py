@@ -25,7 +25,6 @@ from app.controler.workflow.service import ControlService
 from app.controler.workflow.tools import FlowToolService
 from app.github import GitHubApp
 from app.persistence.database import Database
-from app.persistence.maintenance import MaintenanceStore
 from app.persistence.readiness import database_ready
 from app.persistence.results import ResultStore
 from app.persistence.reviews import ReviewStore
@@ -127,9 +126,8 @@ class ServerRuntime:
             concurrency=self.settings.reconcile_concurrency,
             database=database,
         )
-        self.label_sync = LabelSynchronizer(github, self.settings, database=database)
+        self.label_sync = LabelSynchronizer(github, self.settings)
         self.database = database
-        self.maintenance = MaintenanceStore(database)
         self.workers = WorkerStore(database)
         self.reviews = ReviewStore(database)
         self.result_store = ResultStore(database)
@@ -138,7 +136,6 @@ class ServerRuntime:
 
     def startup(self) -> None:
         self.database.init_db()
-        self.maintenance.start_instance()
         self.result_store.recover_claims()
         self.workers.recover_abandoned_assignments()
         self._tasks = [

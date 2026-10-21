@@ -1,8 +1,7 @@
-"""Repository label bootstrap preserves user definitions and its durable cadence."""
+"""Repository label bootstrap preserves user definitions with disposable scan state."""
 
 import asyncio
 import json
-from datetime import timedelta
 from types import SimpleNamespace
 
 import httpx
@@ -131,14 +130,14 @@ def remote_inventory(monkeypatch, github, names):
     monkeypatch.setattr(Installation, "fetch_repositories", repositories)
 
 
-async def test_mixed_repositories_keep_300_second_and_daily_deadlines_across_restart(
-    store, tmp_path, monkeypatch,
+async def test_mixed_repositories_use_daily_cache_and_rescan_after_restart(
+    tmp_path, monkeypatch,
 ):
     configured = settings(tmp_path)
     github = GitHubApp(configured)
     remote_inventory(monkeypatch, github, ["owner/pending", "owner/ready"])
-    now = store.now()
-    store.database._clock = lambda: now
+    now = 0.0
+    monkeypatch.setattr("app.controler.reconciliation.labels.monotonic", lambda: now)
     calls = []
     pending = True
 
@@ -149,54 +148,51 @@ async def test_mixed_repositories_keep_300_second_and_daily_deadlines_across_res
         return ()
 
     monkeypatch.setattr(Repository, "ensure_labels", ensure)
-    sync = LabelSynchronizer(github, configured, database=store.database)
+    sync = LabelSynchronizer(github, configured)
     assert await sync.sweep() == 300
     assert [name for name, _ in calls] == ["owner/pending", "owner/ready"]
-    # New service instance represents a restart: healthy labels are not read early.
-    sync = LabelSynchronizer(github, configured, database=store.database)
-    now += timedelta(seconds=299)
-    assert await sync.sweep() == 1
-    assert len(calls) == 2
-    now += timedelta(seconds=1)
+    now = 300.0
     pending = False
     await sync.sweep()
     assert [name for name, _ in calls] == ["owner/pending", "owner/ready", "owner/pending"]
-    now += timedelta(seconds=86400 - 300)
+    now = 86100.0
+    await sync.sweep()
+    assert len(calls) == 3
+    now = 86400.0
     await sync.sweep()
     assert calls[-1][0] == "owner/ready" and len(calls) == 4
-    changed = configured.model_copy(update={"done_label": "custom:done"})
-    await LabelSynchronizer(github, changed, database=store.database).sweep()
+    # A restart discards timing hints: read both repositories again instead of recovering state.
+    await LabelSynchronizer(github, configured).sweep()
     assert len(calls) == 6
+    changed = configured.model_copy(update={"done_label": "custom:done"})
+    await LabelSynchronizer(github, changed).sweep()
+    assert len(calls) == 8
     assert calls[-1][1][-1] == "custom:done"
 
 
-async def test_daily_failure_retries_after_300_seconds_and_maintenance_skips_network(
-    store, tmp_path, monkeypatch,
+async def test_daily_failure_returns_to_300_second_checks(
+    tmp_path, monkeypatch,
 ):
     configured = settings(tmp_path)
     github = GitHubApp(configured)
     remote_inventory(monkeypatch, github, ["owner/repo"])
-    now = store.now()
-    store.database._clock = lambda: now
+    now = 0.0
+    monkeypatch.setattr("app.controler.reconciliation.labels.monotonic", lambda: now)
     ensure = AsyncEndpoint(())
     monkeypatch.setattr(Repository, "ensure_labels", ensure)
-    sync = LabelSynchronizer(github, configured, database=store.database)
+    sync = LabelSynchronizer(github, configured)
     await sync.sweep()
-    now += timedelta(days=1)
+    now = 86400.0
     ensure.error = GitHubError(GitHubErrorKind.TRANSIENT, "list_labels", status_code=503)
-    await sync.sweep()
-    ensure.error = None
-    now += timedelta(seconds=299)
-    await LabelSynchronizer(github, configured, database=store.database).sweep()
+    assert await sync.sweep() == 300
     assert len(ensure.calls) == 2
-    now += timedelta(seconds=1)
+    ensure.error = None
+    now += 300
     await sync.sweep()
     assert len(ensure.calls) == 3
-    sync.maintenance.pause("update")
-    now += timedelta(days=1)
+    now += 300
     await sync.sweep()
     assert len(ensure.calls) == 3
-    assert sync.maintenance.active() == []
 
 
 @pytest.mark.parametrize("status", [403, 404, 503])
@@ -245,53 +241,49 @@ async def test_lost_creation_response_is_recovered_by_listing_without_repeating_
     assert requests == ["GET", "POST", "GET"]
 
 
-@pytest.mark.parametrize("limited_endpoint", ["inventory", "labels"])
-async def test_retry_after_survives_restart_without_requesting_another_repository(
-    store, tmp_path, monkeypatch, limited_endpoint,
+@pytest.mark.parametrize("limited_endpoint", ["inventory", "repositories", "labels"])
+async def test_run_honors_retry_after_without_requesting_another_repository(
+    tmp_path, monkeypatch, limited_endpoint,
 ):
     configured = settings(tmp_path)
     github = GitHubApp(configured)
     remote_inventory(monkeypatch, github, ["owner/limited", "owner/other"])
-    now = store.now()
-    store.database._clock = lambda: now
     calls = []
-    limited = True
 
     async def installations(self, *, page=1):
         calls.append("inventory")
-        if limited and limited_endpoint == "inventory":
+        if limited_endpoint == "inventory":
             raise GitHubError(GitHubErrorKind.RATE_LIMITED, "inventory", retry_after="900")
         return Batch(items=(self.installation(42),))
 
+    async def repositories(self, *, page=1):
+        calls.append("repositories")
+        raise GitHubError(GitHubErrorKind.TRANSIENT, "repositories",
+                          status_code=503, retry_after="900")
+
     async def ensure(self, definitions):
         calls.append(self.full_name)
-        if limited:
-            raise GitHubError(GitHubErrorKind.RATE_LIMITED, "labels", retry_after="900")
-        return ()
+        raise GitHubError(GitHubErrorKind.RATE_LIMITED, "labels", retry_after="900")
+
+    async def sleep(delay):
+        assert delay == 900
+        raise asyncio.CancelledError
 
     monkeypatch.setattr(GitHubApp, "fetch_installations", installations)
     monkeypatch.setattr(Repository, "ensure_labels", ensure)
-    assert await LabelSynchronizer(github, configured, database=store.database).sweep() == 900
-    first_calls = list(calls)
-    now += timedelta(seconds=300)
-    # Changing configured names must not bypass an active server rate limit either.
-    changed = configured.model_copy(update={"done_label": "custom:done"})
-    restarted = LabelSynchronizer(github, changed, database=store.database)
-    assert await restarted.sweep() == 600
-    assert calls == first_calls
-    limited = False
-    now += timedelta(seconds=600)
-    await restarted.sweep()
-    assert calls[-3:] == ["inventory", "owner/limited", "owner/other"]
+    if limited_endpoint == "repositories":
+        monkeypatch.setattr(Installation, "fetch_repositories", repositories)
+    monkeypatch.setattr("app.controler.reconciliation.labels.asyncio.sleep", sleep)
+    with pytest.raises(asyncio.CancelledError):
+        await LabelSynchronizer(github, configured).run()
+    assert "owner/other" not in calls
 
 
-async def test_scan_paginates_current_grants_and_does_not_use_removed_repository_checkpoint(
-    store, tmp_path, monkeypatch,
+async def test_scan_paginates_current_grants_and_does_not_check_removed_repository(
+    tmp_path, monkeypatch,
 ):
     configured = settings(tmp_path)
     github = GitHubApp(configured)
-    now = store.now()
-    store.database._clock = lambda: now
     granted = True
     visited, checked = [], []
 
@@ -311,40 +303,14 @@ async def test_scan_paginates_current_grants_and_does_not_use_removed_repository
     monkeypatch.setattr(GitHubApp, "fetch_installations", installations)
     monkeypatch.setattr(Installation, "fetch_repositories", repositories)
     monkeypatch.setattr(Repository, "ensure_labels", ensure)
-    sync = LabelSynchronizer(github, configured, database=store.database)
+    sync = LabelSynchronizer(github, configured)
     await sync.sweep()
     assert visited == [("installations", 1), (41, 1), (41, 2),
                        ("installations", 2), (42, 1), (42, 2)]
     assert checked == ["owner/repo-41-1", "owner/repo-41-2", "owner/repo-42-1", "owner/repo-42-2"]
     granted = False
-    now += timedelta(days=1)
     await sync.sweep()
     assert len(checked) == 4
-
-
-async def test_shutdown_cancels_inflight_label_check_and_releases_maintenance_activity(
-    store, tmp_path, monkeypatch,
-):
-    configured = settings(tmp_path)
-    github = GitHubApp(configured)
-    remote_inventory(monkeypatch, github, ["owner/repo"])
-    entered = asyncio.Event()
-
-    async def ensure(self, definitions):
-        entered.set()
-        await asyncio.Event().wait()
-
-    monkeypatch.setattr(Repository, "ensure_labels", ensure)
-    sync = LabelSynchronizer(github, configured, database=store.database)
-    task = asyncio.create_task(sync.run())
-    try:
-        await asyncio.wait_for(entered.wait(), 3)
-        assert sync.maintenance.active() == ["repository-labels"]
-    finally:
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-    assert sync.maintenance.active() == []
 
 
 async def test_background_label_discovery_does_not_block_readiness_and_stops_with_server(

@@ -5,7 +5,7 @@
 
 ## 当前计划
 
-- [`repository-label-bootstrap.md`](repository-label-bootstrap.md) — PR #105：自动补齐仓库标签，未建齐每 300 秒检查，已确认齐全每 24 小时复查，检查时间与扫描退避持久化；独立分支 868 项回归、静态检查和构建通过，审查无 critical、四项 medium 尚未修复，未合并或部署。
+- [`repository-label-bootstrap.md`](repository-label-bootstrap.md) — PR #105：轻量后台补齐标签，未建齐每 300 秒检查，确认齐全后每天复查；只缓存内存时间，重启重新扫描，不新增数据库表或维护机制。868 项回归、静态检查和构建通过，审查及交付状态见 PR，未合并或部署。
 
 - [`persistence-simplification.md`](persistence-simplification.md) — PR #82：服务接收 Database 并自行创建所需仓储，Runtime 管理共享数据库生命周期；Webhook 在 receipt 事务内直接构造服务和路由，删除两者的 `using()` 及重复绑定清单；删除已被数据库回归覆盖的旧 RetryStore 内存测试，735 项 PostgreSQL 回归通过，覆盖对照证据见记录，独立审查与 CI 见 PR。
 

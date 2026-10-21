@@ -1,6 +1,6 @@
 # 自动创建仓库标签 — Feature record
 
-**Stage:** Review — PR 已提交，独立验证与已报告风险见 [003]；未合并或部署。
+**Stage:** Review — 轻量化实现与验证见 [004]，审查及交付状态以 PR 为准；未合并或部署。
 **PR:** [#105](https://github.com/b1indsight/agentflow/pull/105)，目标 `main`；源工作区的其他改动保留。
 **Bookmark:** `feat/repository-label-bootstrap`
 
@@ -235,3 +235,21 @@ API 依据：[App installation 枚举](https://docs.github.com/en/rest/apps/apps
   仅报告这些发现，未自动修改相关逻辑；发布代码使用最终审查返回的精确提交。
 - **交付：** 已提交 [PR #105](https://github.com/b1indsight/agentflow/pull/105)；
   未合并、部署或执行真实 GitHub 标签写入。
+
+### [004] — 2026-10-21 — 按用户要求移除持久化及维护依赖
+
+- **需求与取舍：** 用户要求功能轻量、低副作用，允许不持久化、不确定时重新扫描。
+  本条取代 [001]–[003] 的跨重启检查点、退避和维护接纳决定；此前记录保留作历史。
+- **实现：** 只在内存保存成功确认的每日检查时间，使用单调时钟；未知或失败仓库下一轮重新读取。
+  每轮结束等待 300 秒；已确认仓库未到每日时间跳过标签 API。重启丢弃缓存和退避，重新确认即可。
+  删除 `LabelStore`、随本功能带入的 `MaintenanceStore` 及四张新增表，schema 恢复为 PR 基线；
+  Runtime 仅装配并取消后台任务。只补缺失、分页、已有定义保留与 422 复读确认不变。
+- **错误处理：** 运行期间收到限流或 Retry-After 时暂停本轮并等待，不再保存数据库退避。
+  installation 仓库枚举的 503 + Retry-After 同样传递到等待逻辑；权限失败仍隔离到对应仓库。
+  同名仓库复用缓存、无特定响应头的二级限流 403 仍是限制，不宣称旧审查发现全部解决。
+- **验证：** 标签/路由/原标签回写 26 项通过；PostgreSQL 全量 **868 passed**，Ruff、Mypy
+  （196 文件）、sdist/wheel 构建通过；wheel 包含扫描器与控制台资源，不含已删除存储模块。
+  日志为 `.amp/in/artifacts/repository-label-lightweight-{tests,checks}.log`。
+- **消融：** 仅在临时 Python 进程移除缓存跳过条件，相同混合仓库测试因成功仓库在第 300 秒
+  被提前检查而失败；完整实现通过。内存缓存用于满足每日频率，不再引入恢复账本或持久任务机制。
+  证据：`.amp/in/artifacts/repository-label-lightweight-ablation.log`；没有真实 GitHub 标签写入。
