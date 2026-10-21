@@ -52,6 +52,12 @@ spec:
           value: 'false'
         - name: FLOWTOOL_LOG_FORMAT
           value: json
+        # Codex remains the default. Change this worker through an overlay and drain it before
+        # switching an idle worker to Amp; do not mix agent backends for an active Flow.
+        - name: FLOWTOOL_CODING_AGENT
+          value: codex
+        - name: FLOWTOOL_AMP_RUN_TIMEOUT_SECONDS
+          value: '1200'
         - name: FLOWTOOL_EXECUTION_ISOLATION
           value: container
         - name: FLOWTOOL_TRUSTED_HOST_EXECUTION

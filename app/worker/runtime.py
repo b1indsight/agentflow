@@ -12,6 +12,7 @@ from typing import IO
 
 from app.telemetry.logging import configure_logging
 from app.worker.config import WorkerSettings
+from app.worker.execution.amp import AmpAgent
 from app.worker.execution.codex import CodexAgent
 from app.worker.execution.executor import WorkerExecutor
 from app.worker.health import HealthFile
@@ -34,7 +35,7 @@ _CONTROL_ENVIRONMENT_KEYS = frozenset(
 def validate_worker_environment(
     settings: WorkerSettings, source: Mapping[str, str] | None = None
 ) -> None:
-    """Fail closed when full-access Codex shares control-plane process secrets."""
+    """Fail closed when a full-access coding agent shares control-plane process secrets."""
 
     if not settings.trusted_host_execution:
         return
@@ -97,15 +98,18 @@ class WorkerRuntime:
         configure_logging("worker", self.settings.log_format)
         self.root_lock = WorkerRootLock(self.settings.worker_root, self.settings.worker_id)
         session = WorkerSession(self.settings.worker_root)
+        timeout = (self.settings.amp_run_timeout_seconds if self.settings.coding_agent == "amp"
+                   else self.settings.codex_run_timeout_seconds)
+        agent_type = AmpAgent if self.settings.coding_agent == "amp" else CodexAgent
         executor = WorkerExecutor(
             self.settings.worker_root,
-            CodexAgent(
+            agent_type(
                 trusted_host=self.settings.trusted_host_execution,
-                timeout=self.settings.codex_run_timeout_seconds,
+                timeout=timeout,
             ),
             worker_id=self.settings.worker_id,
             session=session,
-            revision_timeout=self.settings.codex_run_timeout_seconds,
+            revision_timeout=timeout,
             workspace_limit=self.settings.worker_repo_workspace_limit,
         )
         self.client = WorkerClient(

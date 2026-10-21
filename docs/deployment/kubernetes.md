@@ -23,7 +23,9 @@ CA bundle 应包含公共根证书和内部 CA，准备方法见 Docker 文档�
   映射、allowlist/reviewers、Judge model/API key，以及可选独立 metrics token；
   用户 API 启用时还需 Access issuer/audience/owner email，见 [单账号登录](access.md)。
 - flowtool-app-key：`app.pem`。
-- flowtool-worker-1-env：worker token、`CODEX_API_KEY`；禁止放 DB/App key 或 Judge API key。
+- flowtool-worker-1-env：worker token、`CODEX_API_KEY`；若将该 worker 配为 Amp，可改用可选
+  `AMP_API_KEY`，或在其专用持久 HOME 中预先执行原生 `amp login`。禁止放 DB/App key 或
+  Judge API key。
 - flowtool-worker-ca：`ca-bundle.pem`。
 - flowtool-worker-tls：标准 TLS Secret 的 tls.crt/tls.key。
 
@@ -33,6 +35,16 @@ worker ID 固定为 worker-1，需与 serve token 映射对应。模板不挂载
 worker 也没有 App/DB/Cloudflare Secret。基础 NetworkPolicy 禁止 worker 访问控制面 HTTP
 端口，只允许 WSS、DNS 和公网 HTTPS/SSH；使用私有模型代理/仓库时显式补充目的地规则。
 它不是域名级模型执行隔离，实际策略行为须在目标 CNI 验证。
+
+worker 模板显式保持 `FLOWTOOL_CODING_AGENT=codex`，并为可选 Amp 设置
+`FLOWTOOL_AMP_RUN_TIMEOUT_SECONDS=1200`。只在 worker 已 drain、没有活跃或未知执行时，才在
+自己的受控 overlay 中切换为 `amp`；不会为未知续跑自动重跑。Amp adapter 固定使用 `--mode low`。
+Amp CLI 只在 worker
+镜像中，固定版本和校验依据见 [Docker 镜像](docker.md#镜像发布与版本)。`/home/flowtool` 是
+这个长期 StatefulSet worker 的专用 PVC 子路径，不得替换为个人 HOME 或 hostPath/Docker
+socket，也不代表每个取消 Flow 都会自动销毁容器。每轮 Git/gh 认证仍由 GitHub App assignment
+凭据提供，临时配置不改动个人全局 Git/gh；提交作者仍由 worker Git 配置控制。原生 Amp 历史
+读取是完整 thread 快照，可能滞后于最新外部续跑。
 
 ## 初次启动
 
@@ -110,3 +122,4 @@ FLOWTOOL_K8S_STORAGE_CLASS 和 FLOWTOOL_K8S_RENDERED。先把已渲染清单的 
 显式设置 FLOWTOOL_K8S_RECREATE_IDLE_WORKER=yes 才执行 drain、确认无 Flow/JOB、正常删除
 测试 worker Pod 并验证普通文件持久化；失败保留资源和 drain 状态，不自动删 namespace/PVC。
 输出集群版本和 CSI provisioner 供记录；活动 journal 恢复、节点失联和真实闭环仍需单独验收。
+该 smoke 也不验证真实 Amp 模型、原生登录、thread 恢复或完整 GitHub 闭环。

@@ -53,6 +53,11 @@ done
 docker run --rm --env-file deploy/docker/worker.env.example --entrypoint sh "$FLOWTOOL_WORKER_IMAGE" -ec 'test -n "$CODEX_API_KEY"'
 docker run --rm --entrypoint codex "$FLOWTOOL_WORKER_IMAGE" --version
 docker run --rm --entrypoint jj "$FLOWTOOL_WORKER_IMAGE" --version
+docker run --rm --entrypoint amp "$FLOWTOOL_WORKER_IMAGE" --version
+if docker run --rm --entrypoint amp "$FLOWTOOL_SERVE_IMAGE" --version >/dev/null 2>&1; then
+  echo 'Serve image must not contain the Amp CLI' >&2
+  exit 1
+fi
 "${compose[@]}" up -d postgres serve worker-gateway worker
 # Read the full epoch from the isolated fixture DB, not truncated CLI output or
 # a persisted online row which can outlive its socket when serve disappears.
@@ -103,4 +108,4 @@ new_epoch=$(wait_online_epoch "$old_epoch")
 test "$worker_id" = "$("${compose[@]}" ps -q worker)"
 test "$worker_process" = "$(docker inspect -f '{{.Id}} {{.State.StartedAt}} {{.RestartCount}} {{.State.Running}}' "$worker_id")"
 printf 'Live worker reconnected: epoch %s -> %s; worker process unchanged.\n' "$old_epoch" "$new_epoch"
-printf 'Docker role/TLS/volume/reconnect smoke passed (no live model or GitHub task).\n'
+printf 'Docker role/TLS/volume/reconnect/CLI-boundary smoke passed (no live model or GitHub task).\n'

@@ -11,8 +11,8 @@
 
 ## 1. 准备运行环境
 
-准备 Python 3.12+、uv、PostgreSQL，以及 worker 账号可运行且已配置认证的 Codex CLI、Git、gh
-和所需项目工具链。若项目使用 jj，还需安装 jj。serve、worker 应使用同一个应用版本。
+准备 Python 3.12+、uv、PostgreSQL，以及 worker 账号可运行且已配置认证的 Codex CLI 或 Amp
+CLI、Git、gh 和所需项目工具链。若项目使用 jj，还需安装 jj。serve、worker 应使用同一个应用版本。
 
 在 control 账号的应用检出目录执行：
 
@@ -87,11 +87,40 @@ FLOWTOOL_WORKER_ROOT=~/.flowtool/workers/worker-1
 FLOWTOOL_WORKER_REPO_WORKSPACE_LIMIT=2
 FLOWTOOL_TRUSTED_HOST_EXECUTION=true
 FLOWTOOL_EXECUTION_ISOLATION=dedicated-account
+# 默认 codex；仅在该空闲 worker 明确采用 Amp 时改为 amp。
+FLOWTOOL_CODING_AGENT=codex
+FLOWTOOL_AMP_RUN_TIMEOUT_SECONDS=1200
 ```
 
 本文的明文 WS 只用于同机 loopback 联调；跨主机连接需要 WSS，不通过公开的 webhook 域名连接 worker。
 `dedicated-account` 必须对应已建立的真实账号边界。Codex 所需认证在该 worker 账号下独立准备，
 不复制 control 环境变量或 Judge 密钥。
+
+Amp 同样只在该专用 worker 身份下认证：使用其专用 HOME 执行 `amp login`，或提供可选
+`AMP_API_KEY`（Amp CLI 自行处理其优先级）。不要复制或挂载个人 HOME、Docker socket、control
+secret 或个人 Git/gh 配置。每轮 Git/gh 继续使用 GitHub App 下发的 assignment 凭据和临时配置，
+不改变个人全局配置；提交作者仍由 worker 的 Git 配置决定。切换为 `amp` 前先 drain 并等待该
+worker 的 Flow 收尾；未知续跑不自动重跑。Amp 历史是原生完整 thread 快照，可能滞后于刚发生的
+外部续跑，且不承诺离线可用。adapter 固定使用 Amp `--mode low`，不从 worker 环境提供模式覆写。
+
+Amp 的最终业务 JSON 通过 Schema 提示与现有 Pydantic/VCS 核验接收，没有 Codex 的
+`--output-schema` 生成约束；无效 JSON、错误终态或不完整输出均失败，不自动整理或重跑。
+`threads continue` 的错误（包括尚未充分分类的 thread 不存在）不会触发自动新建；只有任务原本
+没有 session 时，沿用 executor 的一次性 start fallback。ARCHIVE 继续使用既有 workspace
+释放流程，不会远程删除或归档 Amp thread。
+
+临时 `--settings-file` 限制工具与本轮 MCP，但 workspace 设置优先级更高，因此 adapter 在执行前
+拒绝发现的 `.amp/settings.json` / `.amp/settings.jsonc`，不修改这些文件。机器或 workspace 的
+[managed settings](https://ampcode.com/docs/cli/settings#managed-settings) 仍可能覆盖/合并本地策略；
+运维必须核查专用 Amp 账户的插件、服务端 MCP 与 managed policy，不将 CLI 工具列表当作隔离边界。
+有效工具列表检查用于拒收不符合策略的执行结果，不保证在额外工具运行前阻止其副作用。
+执行期间不要从其他客户端并发继续同一 worker thread；手工续跑的公开历史在后续快照刷新后可见。
+
+历史导出单次最多 20 秒、2 MiB，最多两个并发；只缓存已脱敏的公开块，缓存至多 16 个 thread，
+两秒后重新导出。页面最多 500 项、256 KiB；导出超限报告 `history_limit`，不展示不完整快照。
+取消/超时先 SIGTERM，等待最多三秒后升级清理捕获到的子进程组。`ps` 必须可用（Linux worker
+镜像包含 procps）；进程树快照有竞态，任意双重 fork/脱离进程树的守护进程不在可靠回收保证内。
+worker 容器是长期运行的，不会在每次取消后销毁；需要更强保证时必须使用外部每次执行隔离。
 
 在 worker 应用目录加载自己编写的文件并启动：
 
@@ -131,8 +160,9 @@ worker 不自动读取 `.env`，上述加载仅针对 worker 私有文件。回�
   也继承 bot 环境，但不经包装的本地期限检查。认证最终由 GitHub 判断，任何权限失败都不
   回退个人凭据或自动重放写操作。仍须专用账户/容器/VM 隔离。
 
-本次 journal v4 与 protocol v14 不兼容旧记录；在没有活跃/未知执行且归档与 ACK 完成后升级
-serve 和 worker。保留旧数据作人工核查，不将旧 per-Flow 目录迁入池，也不混跑协议版本。
+Amp 接入要求 serve/worker 同步使用 protocol v15；journal 仍为 bootstrap 使用的 v4，不迁移更早
+格式。在没有活跃/未知执行且归档与 ACK 完成后升级两端。保留旧数据作人工核查，不将旧
+per-Flow 目录迁入池，也不混跑协议版本。
 
 ## 3. 配置 Cloudflare 入口
 

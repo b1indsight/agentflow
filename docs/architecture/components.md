@@ -152,7 +152,32 @@ worker socket 与 executor 解耦，root 内原子 journal 在 ack 前保存进�
 进程重启可重放终态，但不会猜测恢复已经消失的 executor。同一 attempt 的后续任务仍只回到首次 Started 的 worker，
 不支持跨 worker session 迁移。同机默认 root 按 identity 派生，并用持久 identity 标记与独占锁拒绝并发或顺序复用。
 
-## 4.4 Codex Driver
+## 4.4 CodingAgent Drivers
+
+`WorkerRuntime` 默认装配 Codex；`FLOWTOOL_CODING_AGENT=amp` 装配本地 Amp CLI，采用各自的
+单轮超时，并将所选超时用于 revision deadline。INITIAL/REVISION 的业务 Schema、VCS 核验、
+交付回执和 ARCHIVE 的 workspace 释放由共用 executor 负责。
+
+### Amp
+
+- `AmpAgent` 使用私有 local execute thread；prompt 经 stdin，恢复显式指定同一 `T-UUID`，
+  固定 `--mode low`，不运行 orb、runner 或 SDK。原生登录或 `AMP_API_KEY` 归专用 worker 账户。
+- 临时 settings、Git helper 和 `gh` 环境在每轮重建，复用本轮 GitHub capability；INITIAL 配置
+  当前 WorkerMCP，REVISION 禁用旧 `flow` broker。进程环境不继承 control/worker 或个人 GH token。
+- 成功必须具有完整、同 session 的 init/result、进程退出 0、`is_error=false` 和 `subtype=success`。
+  最终文本原样交给 executor，Schema 只作提示，不修复 JSON 或自动重跑未知执行。
+- `amp_cli.run_amp` 并行有界读取两条管道；取消/超时先 SIGTERM，升级时包含事前捕获的独立
+  shell 进程组。该快照无法保证回收任意脱离进程树的进程；仍依赖外部隔离。
+- `WorkerSession` 按 ID 格式选择历史来源。Amp 原生 export 经公开块映射与脱敏后短时缓存，
+  支持外部追加、块内分页、前缀编辑失效；不保存第二套捕获历史，不显示 thinking。
+  记录 ID 保留 session 前缀，满足 control 的来源校验；两端使用 protocol v15。
+- workspace Amp 设置可能覆盖临时设置，因此执行前发现设置即拒绝。managed policy/账户插件仍由
+  运维核查；有效工具列表检查只影响结果接收，不能替代权限或 OS 隔离。
+
+配置、历史预算和取消限制见[部署说明](../deployment/README.md)；实现与实测记录见
+[Amp feature record](../plan/worker-amp-cli.md)。
+
+### Codex
 
 `CodexAgent` 已实现 `CodingAgent` 端口的 `start` / `resume`：
 

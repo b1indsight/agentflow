@@ -23,6 +23,7 @@ from app.contracts.protocol import (
 )
 from app.domain.models import JobState
 from app.worker.execution.workspaces import WorkspaceBinding
+from app.worker.state.amp_history import AmpHistory
 from app.worker.state.files import write_private_record
 from app.worker.state.history import CodexHistory
 
@@ -63,10 +64,11 @@ class WorkerSession:
         self.path = worker_root / "assignment-journal.json"
         self.assignment: Assignment | None = None
         self._history = CodexHistory()
+        self._amp_history = AmpHistory()
 
     def read(self, query: HistoryQuery) -> HistoryPage:
         """Read the session selected by control, independent of the active assignment."""
-        return self._history.query(query)
+        return (self._amp_history if query.session_id.startswith("T-") else self._history).query(query)
 
     def recovery(self, *, executor_active: bool) -> RecoveryDescriptor | None:
         record = self.load()

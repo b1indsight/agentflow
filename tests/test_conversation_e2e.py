@@ -10,6 +10,7 @@ from app.controler.runtime import ServerRuntime
 from app.controler.workers.conversation import ConversationService
 from app.controler.workers.gateway import WorkerGateway
 from app.domain.models import Attempt, Flow, FlowExecution, FlowState
+from app.worker.execution.amp_cli import AmpProcessResult
 from app.worker.state.session import WorkerSession
 from app.worker.transport.client import WorkerClient
 from tests.access import AccessIssuer
@@ -28,6 +29,10 @@ from app.controler.workers.conversation import ConversationBroker
 
 
 class HistoryStore(RemoteStore):
+    def __init__(self, session=SESSION, other_session=OTHER_SESSION):
+        super().__init__()
+        self.session, self.other_session = session, other_session
+
     def get_flow(self, flow_id):
         return Flow(id=3, repo="owner/repo", issue_number=8, state=FlowState.ACTIVE) if flow_id == 3 else None
 
@@ -35,13 +40,14 @@ class HistoryStore(RemoteStore):
         return FlowExecution(flow_id=flow_id, worker_id="worker-1", repo_identity="repo")
 
     def list_attempts(self, flow_id):
-        return [Attempt(id=7, flow_id=flow_id, codex_session_id=SESSION),
-                Attempt(id=8, flow_id=flow_id, codex_session_id=OTHER_SESSION, session_generation=1)]
+        return [Attempt(id=7, flow_id=flow_id, codex_session_id=self.session),
+                Attempt(id=8, flow_id=flow_id, codex_session_id=self.other_session, session_generation=1)]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ["worker", "preparation", "tool", "result"])
-async def test_http_query_while_worker_or_control_busy_and_idle(tmp_path, phase, monkeypatch) -> None:
+@pytest.mark.parametrize("backend", ["codex", "amp"])
+async def test_http_query_while_worker_or_control_busy_and_idle(tmp_path, phase, monkeypatch, backend) -> None:
     started, release = asyncio.Event(), asyncio.Event()
 
     async def block(selected):
@@ -72,7 +78,18 @@ async def test_http_query_while_worker_or_control_busy_and_idle(tmp_path, phase,
         json.dumps({"type": "session_meta", "payload": {"id": OTHER_SESSION}}) + "\n"
         + json.dumps(message("assistant", "Follow-up")) + "\n"
     )
-    store = HistoryStore()
+    session = ("T-" if backend == "amp" else "") + SESSION
+    other_session = ("T-" if backend == "amp" else "") + OTHER_SESSION
+    if backend == "amp":
+        async def export(args, **kwargs):
+            entries = [("user", "PR feedback"), ("assistant", "Fixed")] if args[2] == session else [("assistant", "Follow-up")]
+            messages = [{"role": role, "protocolMessageID": f"M-{index}",
+                         "content": [{"type": "text", "text": text}]}
+                        for index, (role, text) in enumerate(entries)]
+            return AmpProcessResult(json.dumps({"id": args[2], "messages": messages}).encode(), b"", 0)
+
+        monkeypatch.setattr("app.worker.state.amp_history.run_amp", export)
+    store = HistoryStore(session, other_session)
     gateway_coordinator = Coordinator(store)
     gateway = WorkerGateway(
         gateway_coordinator, database=store.database,
@@ -118,7 +135,7 @@ async def test_http_query_while_worker_or_control_busy_and_idle(tmp_path, phase,
             third = await http.get("/api/flows/3/conversation", params={"cursor": second.json()["next_cursor"]})
             assert third.status_code == 200, third.text
             item = third.json()["items"][0]
-            assert (item["attempt_id"], item["session_id"], item["session_generation"]) == (8, OTHER_SESSION, 1)
+            assert (item["attempt_id"], item["session_id"], item["session_generation"]) == (8, other_session, 1)
             assert item["content"]["text"] == "Follow-up"
             assert not third.json()["has_more"]
             assert third.json()["sessions"][0]["starts_at_beginning"]

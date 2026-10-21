@@ -13,6 +13,14 @@
   protocol v14 / journal v4 / manifest v1，不增加字段或整目录删除。旧停止重放仍核对下一
   任务，已 dispatch 却缺 journal 时明确失败且不重跑，避免空等。入口优化见 #108。
 
+- worker 可保持默认 Codex，或以 `FLOWTOOL_CODING_AGENT=amp` 选择固定版本的 Amp CLI；Amp
+  单轮超时为 `FLOWTOOL_AMP_RUN_TIMEOUT_SECONDS=1200`。worker 镜像固定安装
+  `0.0.1792555249-g702cd1` 并校验官方 Linux x64 SHA-256，serve 不安装 Amp。部署示例说明
+  专用持久 HOME 的原生登录/可选 `AMP_API_KEY`、逐轮 GitHub App Git/gh 凭据、原生历史快照
+  的滞后可能及未知续跑不自动重跑；镜像 smoke 只检查 CLI 启动和角色边界，不构成真实模型或
+  GitHub 闭环验收。Amp 会话查询共用 protocol v15，支持外部追加与公开块分页；错误 result 即使
+  CLI 退出 0 也失败。取消先 SIGTERM，再升级清理捕获到的独立子进程组，仍依赖外部隔离。
+
 - worker 自动 clone 缺失/空 seed；每次编码使用 assignment bot 的临时 gh 包装、独立配置与
   隔离的 Git helper，INITIAL 的 MCP/最终远端核验也使用当前 token。执行位置按 worker/仓库
   复用一个完整副本并以临时 Git worktree 溢出，总上限默认 2，可用

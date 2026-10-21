@@ -150,7 +150,12 @@ FLOWTOOL_SERVE_WS_URL=ws://127.0.0.1:8000/internal/workers/connect \
 FLOWTOOL_ALLOW_INSECURE_WORKER_WS=true uv run flowtool worker
 ```
 
-实际编码需安装 `git`、`gh` 和 Codex CLI（使用 jj 时另装 jj）。INITIAL 会在
+实际编码需安装 `git`、`gh` 和所选的 Codex 或 Amp CLI（使用 jj 时另装 jj）。默认 `FLOWTOOL_CODING_AGENT=codex`；
+专用 worker 可改为 `amp`，并设置 `FLOWTOOL_AMP_RUN_TIMEOUT_SECONDS=1200`。Amp 使用该 worker
+专用 HOME 的原生 `amp login`，或可选 `AMP_API_KEY`；不要复制个人 HOME、Docker socket 或
+control secret。Git/gh 每轮只使用 GitHub App 下发的 assignment 凭据和临时配置，不改个人全局
+Git/gh 设置，提交作者仍由 worker Git 配置决定。Amp 历史读取是完整原生 thread 快照，可能滞后；
+未知续跑不会自动重跑，Amp adapter 固定使用 `--mode low`。INITIAL 会在
 `<worker_root>/repos/<owner>/<repo>` 缺失或为空时，用当前任务的短期 installation token
 原子 clone；已有 seed 保持原状，不自动 fetch/reset 或安装依赖。seed 必须有任务基线分支，
 不自动处理空远端、submodule 或 LFS。
@@ -164,7 +169,9 @@ Git worktree。`FLOWTOOL_WORKER_REPO_WORKSPACE_LIMIT=2` 设置每仓库总上限
 每次 INITIAL、REVISION resume/fallback 都提供本轮 bot `gh` 包装、独立配置和 Git helper，
 不使用个人登录态；token 过期/权限不足即失败，不自动续期或扩权。worker 保持单仓库
 Contents write，PR 通过 MCP `open_pr` 请求 controler 校验后创建。包装不构成 OS 沙箱。
-新版本使用 protocol v14 / journal v4，serve 与 worker 应同时升级；旧 journal 不自动迁移。
+Amp 接入使用 protocol v15 / journal v4，serve 与 worker 应同时升级；旧 journal 不自动迁移。
+Amp 的临时 settings 不覆盖 managed policy；发现 workspace `.amp/settings.json[c]` 时拒绝执行，
+避免覆盖本轮工具/MCP 设置。完整配置与取消边界见[部署说明](docs/deployment/README.md)。
 
 `WorkerSettings` 不读取当前目录的 `.env`，worker 配置通过进程环境提供；默认要求 `wss://`，示例中的
 `FLOWTOOL_ALLOW_INSECURE_WORKER_WS=true` 仅用于开发。要运行 `danger-full-access` CodingAgent，必须在专用 OS account、
@@ -180,6 +187,7 @@ schema，因此数据库账号需要拥有应用 schema，但不应具有数据�
 和 `/healthz` 不等于 GitHub/Codex/bub 集成已经可用；接入外部服务前请先阅读
 [GitHub App 接入说明](docs/architecture/github-app.md)和[已知短板](docs/architecture/decisions.md)。多个 worker
 必须各自配置唯一 identity/token；未显式设置 root 时会按 worker id 派生，显式 root 由 identity 标记和进程锁防止复用。
+worker 是长期进程或容器，而非每个 Flow 的临时容器；取消不表示容器会自动回收。
 serve 的 heartbeat、lease、recovery grace 配置见 [`env.example`](env.example)；worker 的
 `FLOWTOOL_RECONNECT_MIN_BACKOFF`、`FLOWTOOL_RECONNECT_MAX_BACKOFF` 和 `FLOWTOOL_RECONNECT_JITTER`
 通过进程环境调整。非法时间关系会在启动时拒绝。
