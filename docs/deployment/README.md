@@ -36,7 +36,12 @@ chmod 600 .env
 | `FLOWTOOL_WORKER_TOKENS` | 例如 `{"worker-1":"替换为随机token"}`，与 worker 一致 |
 | `FLOWTOOL_HOST` / `FLOWTOOL_PORT` | 本文使用 `127.0.0.1` / `8000` |
 
-提前创建 `flow`、`flow:in-review`、`flow:done` 标签；如修改名称，同步修改对应配置。
+无需提前创建 `flow`、`flow:in-review`、`flow:done`：serve 首轮后台扫描会在 App 已授权的
+非归档仓库补齐缺失定义。修改名称时同步修改对应配置；已有标签的名称、颜色和描述保留。
+未建齐或检查失败每 300 秒重试，确认齐全后每 24 小时复查；检查时间只保存在内存，重启后重新确认。
+新安装与新增授权仓库每 300 秒发现，扫描耗时和限流会延后处理；退避不跨重启保存。
+App 需有 Issues write 权限，程序不会自动申请权限或扩大仓库授权；有权限仍需等首轮完成后再添加
+触发标签。`/readyz` 只验证本地启动与数据库，不代表仓库标签已建好。
 Judge 配置只提供给 control，在 serve 的 `.env` 配置 `FLOWTOOL_JUDGE_MODEL`、
 `FLOWTOOL_JUDGE_API_KEY`，可选 `FLOWTOOL_JUDGE_API_BASE` 和 `FLOWTOOL_JUDGE_TIMEOUT_SECONDS`。
 
@@ -198,6 +203,7 @@ curl -i https://hooks.example.com/docs
 | webhook 返回 401 | GitHub App 与 serve 的 webhook secret 是否一致 |
 | webhook 返回 404 | hostname、精确 `/webhook` 路径和配置匹配顺序 |
 | worker 不在线 | identity/token、连接地址，以及是否错误继承了 control secret |
+| 仓库缺少 FlowTool 标签 | App 授权范围、Issues write 权限、是否暂停/归档；日志 `repository labels pending` / `inventory deferred` 的 kind、status、request ID；修复后等待重试 |
 | delivery 成功但没有 Flow | allowlist、触发事件/标签、App 安装仓库及 serve 日志 |
 | CodingAgent/Judge 失败 | worker 的工具链、独立认证、模型配置及 Flow 错误记录 |
 

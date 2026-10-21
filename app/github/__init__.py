@@ -10,7 +10,7 @@ from app.github.issues import Issue
 from app.github.pagination import Batch
 from app.github.projects import Project, ProjectConfig, ProjectItem, ProjectItemsPage, ProjectTarget
 from app.github.pull_requests import PullRequest, PullRequestMerge
-from app.github.repositories import PushCapability, RemoteRef, Repository
+from app.github.repositories import LabelDefinition, PushCapability, RemoteRef, Repository
 from app.github.review_threads import ReviewComment, ReviewThread
 from app.github.threads import ReviewThreads
 
@@ -22,6 +22,7 @@ __all__ = [
     "GitHubErrorKind",
     "Installation",
     "Issue",
+    "LabelDefinition",
     "Project",
     "ProjectConfig",
     "ProjectItem",

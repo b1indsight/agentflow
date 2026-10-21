@@ -1,6 +1,6 @@
 # Worker 仓库自动初始化与 bot GitHub 交付 — Feature record
 
-**Stage:** Implementation — 本地实现、隔离回归与消融已通过；独立审查与远端 CI 另行确认，未合并、未部署。
+**Stage:** Ready for review — 已同步最新 main 并通过本地完整回归；原审查的 1 high / 4 medium 保留待处理，远端 CI 另行确认，未合并、未部署。
 **PR:** [#103](https://github.com/b1indsight/agentflow/pull/103)；沿用原 bookmark/PR，不混入工作区其他功能。
 **Bookmark:** `fix/worker-repo-bootstrap`
 
@@ -647,3 +647,23 @@ gh 使用离线 fake executable，不调用真实编码模型；Git fixture 只�
 本机没有 Docker/Podman/容器运行时，无法执行镜像构建与镜像内 gh smoke；也未使用真实
 installation token 做 GitHub clone/push/PR 写入验收。PR 保持 draft；独立审查通过后才可
 更新同一 bookmark，远端 CI、真实 App/镜像 smoke 与部署状态以实际结果为准。
+
+### [006] — 同步 main，保留双方文档并验证集成结果
+
+- **要求与范围：** 用户要求解决 PR 冲突并取消 Draft，不执行合并。以已发布的实现快照和
+  当时最新 [main](https://github.com/b1indsight/agentflow/commit/9b219e9427c186e8b1b2d988427c62b255ec4f8f)
+  为双亲创建合并提交，不改写现有实现历史，也不带入主工作区的其他未提交改动。
+- **冲突处理：** 仅 `CHANGELOG.md` 与 `docs/plan/README.md` 有内容冲突，两份文档均保留
+  worker 初始化/复用与 main 已合入的仓库标签初始化条目。README 和部署说明自动合并；
+  与 Git 自动合并树逐路径比较，除这两处冲突文档和本条实施记录外，不另行修改产品代码。
+  main 的标签功能和本 PR 的 worker 功能同时存在，不选择整份 ours/theirs 覆盖。
+- **本地验证：** 在独立合并工作区，使用本机 PostgreSQL 执行完整 pytest：
+  **907 passed、0 skipped、91.38 秒**，只有既存 Starlette TestClient 弃用警告。
+  Ruff、Mypy（201 个源文件）、控制台构建和 `uv build --no-sources` 全部通过；
+  Vite 仍有既存的 500 kB chunk 提示。检查无冲突标记，原 PR 及 main 双方内容均保留。
+  记录见[本线程](https://ampcode.com/threads/T-01a15a9b-ba3f-763b-a7e1-37e4d1a4eefd)，
+  本地日志为 `.amp/in/artifacts/pr103-conflicts-pytest.log` 和 `pr103-conflicts-build.log`。
+- **审查与限制：** 原实现的独立审查门禁已通过（0 critical），但仍有取消后位置容量不释放、
+  worktree 部分删除恢复、路径规范化、合法仓库名和分支名五项问题，详见 PR 顶部报告；
+  本次未根据这些 findings 扩大修改范围或声称已修复。冲突解决仅涉及文档，不重新进行代码消融。
+  Docker/真实 GitHub App 验收限制不变；本地通过不替代新 head 的 CI，也不表示已合并或部署。
