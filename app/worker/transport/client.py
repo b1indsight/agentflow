@@ -379,9 +379,11 @@ class WorkerClient:
                             raise WorkerProtocolError("unexpected message during execution")
                         await self._handle_stop(connection, message)
                         return
-                    if next_tool in completed:
+                    if next_tool in completed and not execution.done():
                         pending = next_tool.result()
                         next_tool = None
+                        if pending.future.done():
+                            continue
                         request = pending.request.model_copy(
                             update={"connection_epoch": assignment.connection_epoch}
                         )
@@ -497,6 +499,7 @@ class WorkerClient:
             outcome = exc
         terminal = self.session.complete(outcome)
         self._execution = None
+        self._discard_tool_requests()
         return terminal
 
     def stop(self) -> None:

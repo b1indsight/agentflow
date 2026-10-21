@@ -8,6 +8,8 @@
 
 ## Unreleased
 
+- 修复 Controller 长时间维护后已收到但未应用的结果被误判恢复超时；Worker 终态写入后
+  清理旧任务工具队列，发送前跳过已取消调用，避免重连和下一任务重发旧 job/token。
 - Webhook 驱动的 Controller/前端更新改为暂停新业务并等待当前业务交换及 Controller 批次结束，
   允许 Worker 本地任务继续执行、重连及重放工具/结果；维护期间保留执行和绑定的恢复宽限。
   Worker 自身更新仍要求执行结束及 ACK 收敛，旧/新 Controller 镜像均需具有业务交换跟踪能力。

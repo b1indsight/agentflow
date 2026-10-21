@@ -1,6 +1,7 @@
 """Controller cutover keeps the real Worker driver and its local executor alive."""
 
 import asyncio
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -199,6 +200,77 @@ async def test_running_worker_reconnects_to_new_controller_and_finishes_once(
         assert case.tools.execute.await_count == int(not terminal_during_pause)
         assert store.workers.get_flow_execution(case.job.flow_id).released_at is None
         assert maintenance.active() == []
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await client._cancel_execution()
+
+
+async def test_unapplied_result_replays_after_controller_pause_outlasts_recovery_grace(
+    store, tmp_path
+):
+    # A persisted result may still await domain application when maintenance
+    # starts. Its original Worker journal must remain recoverable after restart.
+    case = scenario(store)
+    store.workers.worker_connected("w", PROTOCOL_VERSION, "old-epoch")
+    assert store.workers.assign_job("w", "token", "old-epoch")
+    assignment = await case.gateway().coordinator.prepare_for_assignment(
+        case.job, "w", "token", "old-epoch"
+    )
+    assert store.workers.start_assignment(
+        case.job.id, assignment.task.attempt_id, "w", "token", "old-epoch"
+    )
+    session = WorkerSession(tmp_path)
+    session.record_received(assignment)
+    session.record_started()
+    terminal = session.complete(
+        InitialTaskResult(session_id="same-session", last_message="done", exit_code=0)
+    )
+    assert (
+        store.workers.record_assignment_result(
+            case.job.id,
+            "w",
+            "token",
+            "old-epoch",
+            terminal.model_dump(mode="json"),
+            session.load().result_digest,
+        )
+        == "pending"
+    )
+
+    maintenance = MaintenanceStore(store.database)
+    maintenance.pause("update")
+    store.workers.worker_disconnected("w", "controller restart", "old-epoch")
+    store._db._clock = lambda: case.job.created_at + timedelta(days=1)
+    store.workers.recover_abandoned_assignments()
+    maintenance.resume("update")
+
+    executor = Mock(execute=AsyncMock(side_effect=AssertionError("terminal must not rerun")))
+    client = WorkerClient(
+        worker_id="w",
+        worker_token="test",
+        serve_ws_url="ws://unused",
+        executor=executor,
+        session=session,
+    )
+    socket = DuplexSocket()
+    tasks = [
+        asyncio.create_task(case.gateway().handle(socket)),
+        asyncio.create_task(client.run_connection(socket)),
+    ]
+    try:
+        async with asyncio.timeout(2):
+            while (record := session.load()) is not None and not record.acknowledged:
+                await asyncio.sleep(0)
+        assert record is not None, (
+            "controller rejected the persisted result and cleared its journal"
+        )
+        assert session.load().terminal == terminal
+        assert store.jobs.get_job(case.job.id).state == "done"
+        assert store.workers.get_flow_execution(case.job.flow_id).released_at is None
+        case.results.apply.assert_awaited_once_with(case.job.id)
+        executor.execute.assert_not_awaited()
     finally:
         for task in tasks:
             task.cancel()

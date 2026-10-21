@@ -105,8 +105,7 @@ class MaintenanceStore(Repository):
             )
             connection.execute(
                 "UPDATE jobs SET recovery_deadline=GREATEST(recovery_deadline,%s)"
-                " WHERE state='running' AND recovery_deadline IS NOT NULL"
-                " AND result_received_at IS NULL",
+                " WHERE state='running' AND recovery_deadline IS NOT NULL",
                 (self._db.now() + self._db.recovery_grace,),
             )
             connection.execute(

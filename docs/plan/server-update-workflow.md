@@ -486,3 +486,38 @@ PYTHONPATH="$PWD" FLOWTOOL_TEST_DATABASE_URL="$SCRATCH_TEST_DATABASE_URL" \
 因此保留以上机制；未增加等待整个 job 或全员升级的路径。能力检查是两个直接判断，其
 缺失/拒绝由旧运行时与旧候选镜像的验收测试直接验证，没有另建版本兼容框架。
 证据为未跟踪的 `.amp/in/artifacts/communication-ablation-*.log`。
+
+### 2026-10-21 — 返修：待应用结果的恢复宽限与旧任务工具清理
+
+**触发与范围。** 用户要求修复上一轮独立审查报告的两个 medium 问题。仅调整
+`MaintenanceStore.resume()` 和 Worker 工具调用生命周期；保留上文按可恢复业务交换边界
+更新 Controller 的决定，Worker 自身更新仍等待执行与 ACK 收敛。未操作主机服务或部署。
+
+**决定与实现（已完成）。**
+
+- 已收到但尚未应用的结果仍可能是 running，并携带旧的恢复截止时间。维护恢复时不再
+  排除这类 job，与其他带恢复截止时间的 running job 一同延长宽限；不放宽 token/epoch
+  校验，也不允许任意过期执行无限重放。保留待应用结果的 journal，使后续归档仍有原始证据。
+- Worker 在发出工具请求前跳过已取消或已完成的调用者；执行已结束时优先记录终态。
+  终态成功写入 journal 后使用现有清理函数清空遗留工具，避免旧 job/token 进入下一任务。
+  不增加第二套队列、调用状态或 ACK 规则；断连期间仍保存活跃任务的有效工具调用。
+
+**验证（已完成）。** 新增公共协议回归场景：真实 PostgreSQL 中已持久但未应用的结果经历
+超过恢复宽限的维护后，由原 journal 重放、应用一次并收到 ACK，执行器不重跑；工具调用在
+断连期间取消后分别恢复原执行，或重放终态再接收下一任务，均不重发旧调用且可重新空闲。
+修改前这三个场景全部失败；修改后相关测试 28 passed，全量 944 passed、零跳过，仅有既存
+Starlette 弃用警告。Ruff lint、修改段格式检查及 Mypy（214 files）通过。
+
+**简化对照。** 未跟踪脚本 `.amp/in/communication_repair_ablation.py` 只在独立进程的内存中
+替换一个方法，不修改源文件。相同三个公共回归输入，在 `baseline` 下 3 passed；
+`pending-grace` 恢复旧排除条件、`cancelled-tools` 删除发送前取消检查、`retirement` 删除
+终态时工具清理，分别 1 failed、2 passed，故保留三处修复。可复现命令：
+
+```sh
+PYTHONPATH="$PWD" FLOWTOOL_TEST_DATABASE_URL="$SCRATCH_TEST_DATABASE_URL" \
+  /path/to/test-venv/bin/python .amp/in/communication_repair_ablation.py VARIANT
+```
+
+日志：`.amp/in/artifacts/communication-repair-{before,focused,full,ruff,mypy}.log` 与
+`communication-repair-ablation-*.log`。协议传输使用内存替身，未执行真实 Codex、网络
+WebSocket、Kubernetes、GHCR 或 launchd 更新；本地测试不代表 GitHub CI 或真实部署通过。
