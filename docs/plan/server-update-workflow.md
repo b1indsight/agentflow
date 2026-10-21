@@ -410,3 +410,79 @@ PYTHONPATH="$PWD" FLOWTOOL_TEST_DATABASE_URL="$SCRATCH_TEST_DATABASE_URL" \
 非超级用户执行，不放宽 CI 认证，不修改实际部署探针或删列规则。修复后 TCP 密码认证下
 全量 927 passed，trust socket 下相关 25 passed；角色权限检查及尝试自提权被拒绝的验证
 通过，Ruff lint/format 通过。证据为本地 `.amp/in/artifacts/ci-auth-fix-*.log`。
+
+### 2026-10-21 — Controller 改按可恢复业务交换边界切换
+
+**需求与决定。** 用户进一步确认：Controller/前端更新可与 Worker 本地 Codex 执行并行，
+只等待两端正在处理的业务交换结束；替换 Worker 进程本身仍等待本地执行和 ACK 收敛。
+此决定取代上文「执行空闲、停启和恢复」及 2026-10-20 实施记录中 Server 要求 running
+job/执行槽归零的部分，不改变 Worker 更新条件、独立发布队列或定向删列检查。
+
+**实现与取舍。**
+
+- 复用 `server_maintenance` 的 admission 锁和 `server_activities`，不新增 Worker 协议。
+  Gateway 覆盖注册/恢复、准备派发至 Started、工具请求至响应、结果接收/应用至 ACK、
+  停止请求至 ACK；独立接收器中的 Worker 维护请求也覆盖其数据库写入至响应。
+  后者不能仅以“同步事务”视为空闲，回复发送仍可能在 await 中等待。
+- 等待普通消息、心跳和 Worker 本地 executor 不持有 activity。暂停后不接纳新的业务处理，
+  返回可重试断连；Worker 保留执行及原 token，工具/终态通过既有恢复路径继续或重放。
+  Worker 维护操作仍受原有故障处理约束，没有承诺其任意断连后自动完成。
+- 后台结果恢复逐批纳入 activity。更新器只以 `controls == 0` 判断业务切换空闲；原有
+  job、dispatch、stop、result、effect、slot 数量保留为诊断。活动 Flow、持久化待办、Worker
+  名单/版本/离线均不新增门槛。仍先停旧 Pod，再启新 Pod，并验证 Ready/imageID/实例。
+- 暂停期间 sweep 不对可能已执行的任务应用恢复超时失败/阻塞，绑定继续保留；resume 为
+  已存在的 job 恢复 deadline 重新给予正常宽限，不修改执行 token 或扩大 lease。
+  真正丢失的 Worker 在恢复后宽限结束仍按原规则失败，未执行任务仍可正常重排。
+- 修复本次切换场景暴露的 Worker 工具队列竞争：断连与 `queue.get()` 同时完成时，已取出
+  但尚未处理的调用重新入队；已消费的调用立即移交所有权，避免 finally 重复入队。
+- 当前运行镜像及候选镜像均要求明确的 `COMMUNICATION_IDLE` 能力标记。仅有旧版 pause
+  能力的运行时没有上述 receipts，不能安全放宽条件；明确拒绝，不隐式降级，首次接入仍需
+  人工维护部署支持版本。这是本次安全边界检查，不是 schema/wire 指纹或 Worker 同版本检查。
+
+先使用本地 Claude Code 的 `claude-opus-5-5` 从编号源码材料生成方案；初始化 tools/MCP
+均为空且最终结果成功。实际实现额外覆盖独立 WorkerMaintenance 响应，未采纳依赖未经验证
+重试幂等性的“不跟踪该响应”建议；没有引入新的协议或部署执行权限。
+
+**验证。** 原代码运行新增/改写场景为 **10 failed、1 passed**：复现等待 job/backlog、
+暂停期间租约失败、丢失待发工具及缺少旧运行时能力检查。实现后本地 TCP + SCRAM 的
+PostgreSQL 17 全量 **941 passed**，仅有既存 Starlette 弃用警告；Ruff lint、Mypy 通过。
+新增协议测试使用真实 Gateway、WorkerClient、journal、数据库和双向模拟传输，外部 GitHub
+工具/结果业务以替身隔离，覆盖：
+
+- 原 executor 仅启动一次，暂停期间发出的工具或终态在新 Controller 上恢复，结果只应用一次；
+- 派发/工具/结果/停止/Worker 维护 ACK 发送受阻时 activity 保持，发送完成后归零；
+- 本地执行及维护期间心跳不占 activity，暂停注册不替换原 epoch，结果恢复不接纳新批次；
+- 超过一天的暂停仍保留执行，resume 后能以原 token 恢复；不重连则在正常宽限后失败；
+- 实际 exec adapter 与列探针配合模拟 K8s 更新，保留运行中的 job 切换并恢复，拒绝缺少
+  业务交换能力的旧/候选镜像，原删列检查及非破坏性变化放行仍通过。
+
+可复现命令：
+
+```sh
+PYTHONPATH="$PWD" FLOWTOOL_TEST_DATABASE_URL="$SCRATCH_TEST_DATABASE_URL" \
+  /path/to/test-venv/bin/python -m pytest -q
+```
+
+本地证据：`.amp/in/artifacts/communication-before.log`、`communication-full-final.log`、
+`communication-mypy.log`、`communication-ruff.log`。未执行真实 Codex、网络 WebSocket、
+Kubernetes/GHCR、主机安装、launchd 或线上更新；上述协议验证不能替代真实部署验收。
+
+**简化对照。** Scratch 脚本仅在独立 Python 进程中替换内存方法，不修改实际源文件。
+共同输入为协议 ACK 边界测试的五个分支、长暂停恢复的两个分支及待发工具恢复测试：
+
+```sh
+PYTHONPATH="$PWD" FLOWTOOL_TEST_DATABASE_URL="$SCRATCH_TEST_DATABASE_URL" \
+  /path/to/test-venv/bin/python .amp/in/communication_ablation.py VARIANT
+```
+
+| 变体 | 单独简化 | 实测 |
+| --- | --- | --- |
+| baseline | 保留实现 | 8 passed |
+| receipts | 业务交换不记录 activity | 5 failed、3 passed，全部 ACK 边界失去保护 |
+| sweep | 暂停期间继续应用恢复失败 | 2 failed、6 passed，执行在长暂停中失败 |
+| grace | resume 不更新 job 恢复宽限 | 2 failed、6 passed，恢复后立即误判超时 |
+| tool-ownership | 取消 waiter 后不归还已取出的工具 | 1 failed、7 passed，重连后的工具调用丢失 |
+
+因此保留以上机制；未增加等待整个 job 或全员升级的路径。能力检查是两个直接判断，其
+缺失/拒绝由旧运行时与旧候选镜像的验收测试直接验证，没有另建版本兼容框架。
+证据为未跟踪的 `.amp/in/artifacts/communication-ablation-*.log`。

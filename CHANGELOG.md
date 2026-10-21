@@ -8,7 +8,9 @@
 
 ## Unreleased
 
-- Webhook 驱动的 Controller/前端更新改为暂停新接单并等待当前执行收敛，保留活动 Flow 和绑定；
+- Webhook 驱动的 Controller/前端更新改为暂停新业务并等待当前业务交换及 Controller 批次结束，
+  允许 Worker 本地任务继续执行、重连及重放工具/结果；维护期间保留执行和绑定的恢复宽限。
+  Worker 自身更新仍要求执行结束及 ACK 收敛，旧/新 Controller 镜像均需具有业务交换跟踪能力。
   Worker 新增、修改和离线不阻止部署。跳过数据库备份/还原与广泛兼容性校验，仅保留自动删列
   检查，包括声明移除、动态 DROP 和删后同名重建；非破坏性的新增字段、默认值变化放行。
 - 增加 macOS 登录用户原生 Worker 的 opt-in 执行空闲更新：首次接入使用 LaunchAgent，默认

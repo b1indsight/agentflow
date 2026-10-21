@@ -129,14 +129,17 @@ class ImageCommands(Commands):
             assert input == (TOOLS / "agentflow-maintenance.py").read_text()
             if inner[2] == "status" and MaintenanceStore(self.store.database).status().operation_id:
                 self.paused_status_reads += 1
-                if self.failure == "finishes-job" and self.paused_status_reads == 2:
+                if self.failure == "finishes-exchange" and self.paused_status_reads == 2:
                     assert "scale-zero" not in self.events
                     with self.store.connection() as connection:
-                        connection.execute(
-                            "UPDATE jobs SET state='done',result_received_at=now(),result_applied_at=now()"
-                        )
-                        connection.execute("UPDATE workers SET status='online',current_job_id=NULL")
-                    self.events.append("job-finished")
+                        connection.execute("DELETE FROM server_activities WHERE token='exchange'")
+                    self.events.append("exchange-finished")
+            if self.failure == "old-runtime" and inner[2] == "status":
+                result = REAL_RUN([sys.executable, "-", *inner[2:]], input=input, text=True,
+                                  capture_output=True, env=self.env, check=True, timeout=15)
+                snapshot = json.loads(result.stdout)
+                snapshot.pop("communication_idle", None)
+                return subprocess.CompletedProcess(command, 0, json.dumps(snapshot), "")
             return REAL_RUN(
                 [sys.executable, "-", *inner[2:]],
                 input=input,
@@ -171,6 +174,8 @@ class ImageCommands(Commands):
                 schemas=["additive change"],
                 wire_schemas={"DTO": "changed"},
             )
+            if self.failure == "old-candidate":
+                result.pop("communication_idle", None)
         elif operation == "delete":
             assert resource.startswith("pod/agentflow-image-check-")
             assert "--force" not in args and "--grace-period=0" not in args
@@ -368,7 +373,7 @@ def test_column_removal_is_rejected_before_pause_but_additions_are_allowed(
 
 
 @pytest.mark.parametrize("pending", ["job", "dispatch", "stop", "result", "effect", "control"])
-def test_inflight_work_prevents_cutover_and_timeout_resumes_healthy_old_server(
+def test_only_active_controller_work_blocks_cutover_not_durable_backlog(
     store,
     invoke_image_update,
     tmp_path,
@@ -381,7 +386,7 @@ def test_inflight_work_prevents_cutover_and_timeout_resumes_healthy_old_server(
     store.workers.worker_connected("w", PROTOCOL_VERSION, "epoch")
     with store.connection() as connection:
         if pending == "job":
-            # Claimed but not Started is still in flight.
+            # A persisted claim alone is recoverable; active dispatch has a receipt.
             assert store.workers.assign_job("w", "token", "epoch")
         elif pending == "dispatch":
             connection.execute(
@@ -408,22 +413,45 @@ def test_inflight_work_prevents_cutover_and_timeout_resumes_healthy_old_server(
         else:
             connection.execute("INSERT INTO server_activities VALUES('running','triage')")
     commands = ImageCommands(store)
-    assert invoke_image_update(commands) == 1
-    assert "adapter-pause" in commands.events and "scale-zero" not in commands.events
+    blocked = pending == "control"
+    assert invoke_image_update(commands) == (1 if blocked else 0)
+    assert "adapter-pause" in commands.events
+    assert ("scale-zero" in commands.events) is not blocked
     assert maintenance.status().operation_id is None
-    assert json.loads(next(tmp_path.glob("*/operation.json")).read_text())["status"] == "aborted"
+    assert json.loads(next(tmp_path.glob("*/operation.json")).read_text())["status"] == (
+        "aborted" if blocked else "complete"
+    )
 
 
-def test_running_job_finishes_before_cutover_without_finishing_its_flow(store, invoke_image_update):
+def test_exchange_finishes_before_cutover_while_job_remains_running(store, invoke_image_update):
     flow = store.flows.create_flow("owner/repo", 1, 1)
-    store.jobs.enqueue_job(flow.id, "initial")
+    attempt = store.flows.create_attempt(flow.id)
+    job = store.jobs.enqueue_job(flow.id, "initial")
     store.workers.worker_connected("w", PROTOCOL_VERSION, "epoch")
     assert store.workers.assign_job("w", "running", "epoch")
-    MaintenanceStore(store.database).start_instance()
-    commands = ImageCommands(store, "finishes-job")
+    assert store.workers.start_assignment(job.id, attempt.id, "w", "running", "epoch")
+    maintenance = MaintenanceStore(store.database)
+    maintenance.start_instance()
+    with store.connection() as connection:
+        connection.execute("INSERT INTO server_activities VALUES('exchange','worker-tool')")
+    commands = ImageCommands(store, "finishes-exchange")
     assert invoke_image_update(commands) == 0
-    assert commands.events.index("job-finished") < commands.events.index("scale-zero")
+    assert commands.events.index("exchange-finished") < commands.events.index("scale-zero")
+    assert store.jobs.get_job(job.id).state == "running"
+    assert store.jobs.get_job(job.id).assignment_token == "running"
     assert store.flows.get_flow(flow.id).state == "active"
+    store.workers.worker_connected("w", PROTOCOL_VERSION, "new-epoch")
+    assert store.workers.resume_assignment(job.id, "w", "running", "new-epoch")
+
+
+@pytest.mark.parametrize("unsupported", ["old-runtime", "old-candidate"])
+def test_runtime_without_communication_receipts_is_rejected_before_pause(
+    store, invoke_image_update, unsupported
+):
+    MaintenanceStore(store.database).start_instance()
+    commands = ImageCommands(store, unsupported)
+    assert invoke_image_update(commands) == 1
+    assert "adapter-pause" not in commands.events and "scale-zero" not in commands.events
 
 
 @pytest.mark.parametrize(

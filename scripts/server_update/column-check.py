@@ -140,7 +140,7 @@ def verify(admin: psycopg.Connection, baseline: dict, candidate: list[str]) -> d
 def main() -> None:
     """Wait only for initial DB startup; never retry candidate DDL after a lost response."""
     importlib.import_module("app.controler.runtime")
-    importlib.import_module("app.persistence.maintenance")
+    from app.persistence.maintenance import MaintenanceStore
     from app.persistence.schema import SCHEMAS
 
     baseline = json.loads(sys.argv[1])
@@ -155,6 +155,7 @@ def main() -> None:
             time.sleep(1)
     with admin:
         result = verify(admin, baseline, list(SCHEMAS))
+    result["communication_idle"] = getattr(MaintenanceStore, "COMMUNICATION_IDLE", None)
     print(json.dumps(result, sort_keys=True))
 
 

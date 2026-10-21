@@ -667,7 +667,12 @@ class WorkerStore(Repository):
             ).fetchall()
             actions: dict[RecoveryAction, list[int]] = {action: [] for action in RecoveryAction}
             for candidate in candidates:
-                actions[decide_job_recovery(candidate, now)].append(candidate.id)
+                action = decide_job_recovery(candidate, now)
+                # The controller can be unavailable longer than recovery_grace
+                # while the original Worker executor continues running locally.
+                if paused and action in {RecoveryAction.FAIL, RecoveryAction.BLOCKED}:
+                    action = RecoveryAction.KEEP
+                actions[action].append(candidate.id)
             requeued_rows = connection.execute(
                 "UPDATE jobs SET state=%s, assigned_worker_id=NULL, assignment_token=NULL,"
                 " heartbeat_at=NULL, lease_expires_at=NULL, updated_at=%s"

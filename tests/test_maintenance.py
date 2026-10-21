@@ -137,3 +137,35 @@ def test_maintenance_preserves_idle_binding_past_restart_until_normal_reconnect_
     revision = store.jobs.enqueue_job(flow.id, JobKind.REVISION)
     assert store.workers.assign_job("w", "followup", "reconnected").id == revision.id
     assert store.flows.get_flow(flow.id).state is FlowState.ACTIVE
+
+
+@pytest.mark.parametrize("reconnect", [False, True])
+def test_running_execution_survives_long_controller_pause_with_bounded_recovery(store, reconnect):
+    # A controller update can outlast recovery_grace while Codex keeps running.
+    flow = store.flows.create_flow("owner/repo", 1, 1)
+    attempt = store.flows.create_attempt(flow.id)
+    job = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
+    store.workers.worker_connected("w", PROTOCOL_VERSION, "epoch")
+    assert store.workers.assign_job("w", "token", "epoch")
+    assert store.workers.start_assignment(job.id, attempt.id, "w", "token", "epoch")
+    maintenance = MaintenanceStore(store.database)
+    maintenance.pause("update")
+    store.workers.worker_disconnected("w", "controller restart", "epoch")
+    resumed_at = flow.created_at + timedelta(days=1)
+    store._db._clock = lambda: resumed_at
+    store.workers.recover_abandoned_assignments()
+    assert store.workers.sweep_expired_assignments() == (0, 0)
+    assert store.jobs.get_job(job.id).state == "running"
+    assert store.workers.get_flow_execution(flow.id).released_at is None
+    maintenance.resume("update")
+    assert store.workers.sweep_expired_assignments() == (0, 0)
+    if reconnect:
+        store.workers.worker_connected("w", PROTOCOL_VERSION, "new-epoch")
+        assert store.workers.resume_assignment(job.id, "w", "token", "new-epoch")
+        assert store.jobs.get_job(job.id).assignment_token == "token"
+        assert store.jobs.get_job(job.id).recovery_deadline is None
+    else:
+        # The pause must not hide an executor that really died indefinitely.
+        store._db._clock = lambda: resumed_at + store.database.recovery_grace + timedelta(seconds=1)
+        assert store.workers.sweep_expired_assignments()[1] > 0
+        assert store.jobs.get_job(job.id).state == "failed"

@@ -15,6 +15,7 @@ from psycopg_pool import PoolTimeout
 from app.contracts.protocol import parse_worker_message
 from app.contracts.updates import ReleaseAvailable, WorkerMaintenance
 from app.controler.workers.conversation import ConversationBroker
+from app.persistence.maintenance import MaintenanceStore
 from app.persistence.worker_updates import WorkerUpdateStore
 
 
@@ -45,10 +46,11 @@ class WorkerConnection:
     """
 
     def __init__(self, socket: WorkerSocket, conversations: ConversationBroker, worker_id: str, epoch: str,
-                 updates: WorkerUpdateStore | None = None) -> None:
+                 updates: WorkerUpdateStore | None = None, *, maintenance: MaintenanceStore) -> None:
         self.socket = socket
         self.conversations = conversations
         self.updates = updates
+        self.maintenance = maintenance
         self.worker_id, self.epoch = worker_id, epoch
         self._send_lock = asyncio.Lock()
         self._release_task: asyncio.Task[None] | None = None
@@ -120,8 +122,9 @@ class WorkerConnection:
                 if isinstance(message, WorkerMaintenance):
                     if self.updates is None:
                         raise ProtocolViolation("worker did not negotiate updates")
-                    reply = self.updates.handle(self.worker_id, self.epoch, message)
-                    await self.send_text(reply.model_dump_json())
+                    with self.maintenance.exchange("worker-maintenance"):
+                        reply = self.updates.handle(self.worker_id, self.epoch, message)
+                        await self.send_text(reply.model_dump_json())
                     continue
                 size = len(raw.encode())
                 if len(self._messages) >= 32 or self._bytes + size > 16 * 1024 * 1024:

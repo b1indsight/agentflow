@@ -30,8 +30,15 @@ class MaintenanceStatus:
     instance_id: str
 
 
+class MaintenancePaused(RuntimeError):
+    """A late business exchange must retry against the replacement controller."""
+
+
 class MaintenanceStore(Repository):
     """Pause new work, retain ongoing work, and never mutate per-worker drain flags."""
+
+    # Only runtimes tracking gateway exchanges may cut over with jobs still running.
+    COMMUNICATION_IDLE = 1
 
     def start_instance(self) -> str:
         """Fence stale activity after the old, single controller has exited.
@@ -81,7 +88,7 @@ class MaintenanceStore(Repository):
                 raise ValueError("maintenance is owned by another operation")
 
     def resume(self, operation_id: str) -> None:
-        """Release only our pause and give disconnected idle bindings a reconnect grace."""
+        """Release our pause and give disconnected executions a fresh reconnect grace."""
         with self._db.connection() as connection, connection.transaction():
             row = connection.execute(
                 "SELECT operation_id FROM server_maintenance WHERE singleton FOR UPDATE"
@@ -97,8 +104,22 @@ class MaintenanceStore(Repository):
                 (self._db.now() + self._db.recovery_grace,),
             )
             connection.execute(
+                "UPDATE jobs SET recovery_deadline=GREATEST(recovery_deadline,%s)"
+                " WHERE state='running' AND recovery_deadline IS NOT NULL"
+                " AND result_received_at IS NULL",
+                (self._db.now() + self._db.recovery_grace,),
+            )
+            connection.execute(
                 "UPDATE server_maintenance SET operation_id=NULL,paused_at=NULL WHERE singleton"
             )
+
+    @contextmanager
+    def exchange(self, name: str) -> Iterator[None]:
+        """Fence one business exchange through its reply, never the local executor."""
+        with self.activity(name) as admitted:
+            if not admitted:
+                raise MaintenancePaused("controller maintenance; retry after reconnect")
+            yield
 
     @contextmanager
     def activity(self, name: str) -> Iterator[bool]:

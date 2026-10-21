@@ -1,8 +1,8 @@
-"""Replace one server from a GitHub image event during an execution-idle gap.
+"""Replace one server from a GitHub image event between business exchanges.
 
 Default execution checks the target and pulls an immutable image without pausing
 business work. Apply pauses admissions, waits for admitted work, then stops the old
-Pod before starting the replacement. Active Flows and idle bindings may remain.
+Pod before starting the replacement. Worker-local executions and bindings may remain.
 Removed database columns are rejected before pause; additive columns are allowed.
 No backup/restore, schema fingerprints, wire, worker-set or reconnect gates.
 Do not deploy or edit configuration concurrently. No force deletion or rollback.
@@ -311,6 +311,8 @@ class Update:
             result = json.loads(self.run("logs", name, "-c", "check"))
             if result.get("maintenance") is not True:
                 raise RuntimeError("Candidate image lacks execution-idle maintenance support")
+            if result.get("communication_idle") != 1:
+                raise RuntimeError("Candidate image lacks communication-idle maintenance support")
             removed = result.get("removed_columns")
             if (
                 not isinstance(removed, list)
@@ -350,7 +352,9 @@ class Update:
             "controls",
         } or any(type(value) is not int or value < 0 for value in counts.values()):
             raise RuntimeError("Incomplete execution safety snapshot")
-        return not any(counts.values())
+        # Durable job/result/stop backlog survives restart. Only active controller
+        # effects and communication exchanges must finish before the old Pod exits.
+        return counts["controls"] == 0
 
     def execute(self) -> None:
         if self.record.exists() and json.loads(self.record.read_text()).get("status") not in {
@@ -365,6 +369,11 @@ class Update:
         instance = initial["maintenance"]["instance_id"]
         if not instance:
             raise RuntimeError("Running server has not initialized maintenance support")
+        if initial.get("communication_idle") != 1:
+            raise RuntimeError(
+                "Running controller lacks communication receipts; "
+                "a one-time manual idle update is required"
+            )
         print(f"Target: {self.args.context}/{self.args.namespace}/{self.args.workload}", flush=True)
         print("Execution counts: " + json.dumps(initial["counts"], sort_keys=True), flush=True)
         schema = self.inspect(old_pod, "schema")
@@ -430,7 +439,7 @@ class Update:
                 return snapshot if self.settled(snapshot) else None
 
             self.report["before_stop"] = self.wait(
-                idle, "admitted jobs, results, stops and controller work"
+                idle, "admitted business exchanges and controller work"
             )
             self.current(original, original["spec"])
             self.save("stopping-old-pod")

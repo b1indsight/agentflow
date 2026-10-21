@@ -130,7 +130,7 @@ python3 /path/to/update_server.py \
 更新器的受版本管理源码为：
 
 - [`update-agentflow-server.py`](../../scripts/server_update/update-agentflow-server.py)：
-  GHCR 镜像准备、执行空闲等待、单实例停启和操作记录。
+  GHCR 镜像准备、业务交换空闲等待、单实例停启和操作记录。
 - [`agentflow-maintenance.py`](../../scripts/server_update/agentflow-maintenance.py)：
   通过已有 `kubectl exec` 通道设置暂停、读取一致业务快照、恢复接单，不新增公网管理 API，
   不在旧实例内初始化或升级数据库。
@@ -140,7 +140,7 @@ python3 /path/to/update_server.py \
   [`install.py.in`](../../scripts/server_update/install.py.in)：构建并安装以上工具，复用
   已有 launcher 的 interpreter/context/namespace/workload/container/node 参数。
 
-### 执行空闲规则
+### Controller 业务交换空闲规则
 
 1. 在暂停业务前拉取不可变 digest，并在无应用凭据/生产数据卷的临时 Pod 中验证导入、
    镜像身份和数据库删列检查。临时数据库仅使用 emptyDir 与 Unix socket，使用固定 digest
@@ -150,13 +150,23 @@ python3 /path/to/update_server.py \
 2. 持久化本次 operation 的全局暂停。暂停与任务领取共用数据库事务锁，覆盖所有 Worker，
    包括已绑定 Flow 的 revision/archive 和维护期间新注册的 Worker；不改变 Worker drain。
    不再接纳新的 triage、普通 Webhook 消费和对账/Console 同步批次。
-3. 等已接纳的 job、控制批次、派发、停止回执、结果应用及 effect 收敛。心跳、结果接收
-   和恢复继续运行；新 Webhook 保留在持久收件队列。**不等待 Flow 完成、binding 释放或
-   queued job 清空，不检查固定 Worker 名单，也不要求所有 Worker 在线。**
+3. 等当前已接纳的业务交换和 Controller 批次结束：注册/恢复、准备派发到 Started 确认、
+   工具调用到响应发出、结果持久化/应用到 ACK、停止交换到 ACK，以及 Worker 更新维护的
+   单次请求/响应。后台结果恢复也停止接纳新批次，已开始的一批先收尾。等待普通消息和
+   Worker 本地 Codex 执行不占用 activity；心跳继续续租，不阻止切换。
+   暂停后到达的新工具/结果/维护请求不开始处理，连接以可重试状态关闭；Worker 保留原执行、
+   待响应工具和终态 journal，工具/结果在重连后继续或重放；Worker 更新维护操作仍遵守其
+   原有断连/故障处理规则。新 Webhook 保留在持久收件队列。
+   **running job、持久化派发/stop/result/effect 待办和执行槽数量只用于诊断，不要求归零；
+   不等待 Flow 完成、binding 释放或 queued job 清空，不检查固定 Worker 名单或在线状态。**
 4. 先将原副本缩到 0，等旧 Pod 正常退出，再切换镜像并恢复 1 个副本。新实例启动保留
    暂停；确认新 Pod Ready、实际 imageID 与已验证镜像一致、实例 ID 已更换后，仅解除
-   本次 operation 拥有的暂停。Worker 可陆续重连；暂停期间保留空闲绑定，恢复时给予
-   正常重连宽限，队列及原 Flow 继续运行。
+   本次 operation 拥有的暂停。Worker 可陆续重连；暂停期间不因恢复超时使已执行任务失败，
+   也不释放绑定。恢复时为已断连的执行及绑定重新给予正常重连宽限；宽限结束仍未恢复的
+   执行继续按原恢复规则处理，队列及原 Flow 继续运行。
+
+这条规则只用于 Controller/前端部署。**更新 Worker 进程本身仍必须等待其本地执行结束，
+并确认 assignment、result/stop ACK 全部收敛**，见 [Worker 更新](worker-update.md)。
 
 前端随 serve 镜像一起更新，不增加独立前端部署。前端、Controller、Console DTO、
 非破坏性 schema 或 Worker 代码/配置的变化，不再因源码摘要、schema/wire 指纹、兼容
@@ -185,8 +195,10 @@ python3 /path/to/update_server.py \
 python3 scripts/server_update/build_installer.py --output /tmp/install-agentflow-updater.py
 ```
 
-**旧 Controller 没有全局暂停能力时，首次接入需要人工维护安装支持该能力的应用版本。**
-安装包会明确拒绝缺少暂停能力的旧实例，不会退回仅设置 drain。该首次应用部署与后续
+**首次接入需要人工维护安装同时支持全局暂停和业务交换 activity 的应用版本。**
+安装包检查当前运行镜像及候选镜像的 `COMMUNICATION_IDLE` 能力标记，拒绝仅有旧版全局暂停、
+却没有覆盖业务交换的实例，不会把未跟踪的执行误判为空闲，也不退回仅设置 drain。
+这是切换安全能力检查，不要求 Worker 同版本。该首次应用部署与后续
 主机工具安装都需要单独安排；修改源码或生成安装包不会自动让现有主机采用新逻辑。
 
 在运行维护能力已具备、现有 Webhook/队列/launcher 均已安装的主机上，由操作者转交包

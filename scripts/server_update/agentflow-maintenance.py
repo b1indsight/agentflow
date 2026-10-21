@@ -1,4 +1,4 @@
-"""Private exec adapter for execution-idle updates; never initializes the live database."""
+"""Private exec adapter for communication-idle updates; never initializes the live database."""
 
 from __future__ import annotations
 
@@ -73,6 +73,8 @@ def execute() -> None:
                 "controls": "SELECT count(*) AS n FROM server_activities",
             }
             result = {
+                # Read from the live image, not the host's injected adapter source.
+                "communication_idle": getattr(MaintenanceStore, "COMMUNICATION_IDLE", None),
                 "maintenance": asdict(maintenance.status()),
                 "counts": {
                     name: required(connection.execute(query).fetchone())["n"]

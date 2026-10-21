@@ -317,6 +317,47 @@ async def test_heartbeat_failure_interrupts_waiting_for_tool_reply(tmp_path) -> 
         await client._cancel_execution()
 
 
+async def test_disconnect_with_queued_tool_replays_it_after_controller_restart(tmp_path):
+    # Disconnect and queue.get can complete in the same scheduling turn. The
+    # pending call must survive even when no bytes of its request were sent.
+    assignment = _assignment()
+    session = WorkerSession(tmp_path)
+    session.record_received(assignment)
+    session.record_started()
+    executor = ToolCallingExecutor()
+    client = WorkerClient(worker_id="worker-1", worker_token="test", serve_ws_url="ws://unused",
+                          executor=executor, session=session)
+    client._execution = asyncio.create_task(executor.execute(assignment.task, tool_caller=client))
+    await asyncio.sleep(0)
+
+    class ReconnectedTool(ToolConnection):
+        async def recv(self):
+            if self.step == 0:
+                self.step = 2
+                return ResumeAssignment(job_id=assignment.job_id,
+                                        assignment_token=assignment.assignment_token,
+                                        connection_epoch="epoch-1", heartbeat_interval=60).model_dump_json()
+            return await super().recv()
+
+    class Disconnect(ReconnectedTool):
+        async def recv(self):
+            if self.step == 0:
+                return await super().recv()
+            raise ConnectionError("controller stopped")
+
+    try:
+        with pytest.raises(ConnectionError, match="controller stopped"):
+            await client.run_connection(Disconnect())
+        recovered = ReconnectedTool()
+        with pytest.raises(ConnectionError, match="script complete"):
+            await asyncio.wait_for(client.run_connection(recovered), 1)
+        calls = [parse_worker_message(raw) for raw in recovered.sent]
+        assert len([message for message in calls if isinstance(message, FlowToolRequest)]) == 1
+        assert session.load().acknowledged
+    finally:
+        await client._cancel_execution()
+
+
 @pytest.mark.parametrize("fails", [False, True])
 async def test_completed_disconnected_executor_is_journaled_before_recovery(tmp_path, fails):
     # Execution finishes after the driver lost its connection; registration must carry its result.

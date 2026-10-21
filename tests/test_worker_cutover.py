@@ -19,6 +19,7 @@ from app.contracts.updates import MaintenanceReply
 from app.controler.workers.connection import WorkerConnection
 from app.controler.workers.conversation import ConversationBroker
 from app.domain.models import JobState
+from app.persistence.maintenance import MaintenanceStore
 from app.persistence.worker_updates import WorkerUpdateStore
 from app.releases import ReleaseError
 from app.worker.state.session import WorkerSession
@@ -224,7 +225,8 @@ async def test_release_and_maintenance_share_the_execution_stream(store, tmp_pat
     try:
         registration = parse_worker_message(await asyncio.wait_for(socket.incoming.get(), 1))
         assert isinstance(registration, Register) and registration.update_version == 1
-        connection = WorkerConnection(socket, ConversationBroker(), "w", "epoch", updates)
+        connection = WorkerConnection(socket, ConversationBroker(), "w", "epoch", updates,
+                                      maintenance=MaintenanceStore(store.database))
         await connection.send_text(
             Registered(connection_epoch="epoch", heartbeat_interval=60).model_dump_json()
         )

@@ -184,10 +184,12 @@ class ServerRuntime:
         """Recover immediately at startup; network waits never hold the local scheduling loops."""
         while True:
             try:
-                await self.results.recover_pending_results(
-                    concurrency=self.settings.result_recovery_concurrency,
-                    batch_size=self.settings.result_recovery_batch_size,
-                )
+                with self.maintenance.activity("result-recovery") as admitted:
+                    if admitted:
+                        await self.results.recover_pending_results(
+                            concurrency=self.settings.result_recovery_concurrency,
+                            batch_size=self.settings.result_recovery_batch_size,
+                        )
                 self.gateway.notify_jobs()
             except Exception:  # noqa: BLE001 -- a failed inbox query is retried next sweep
                 logger.exception("result recovery sweep failed; retrying next sweep")

@@ -7,6 +7,8 @@
 Server 更新和 Worker 更新是独立流程。Server 可在 Worker 尚未升级时部署；Worker 发布、离线、
 未启用更新或更新失败都不改变 Server 镜像事件的结果。Server 的部署边界见
 [Server 更新](server-update.md)，运行时协议和现有 WSS/token 鉴权仍必须满足。
+Controller/前端只等待当前业务交换结束，允许 Worker 保持本地执行并在重连后继续；下面的
+严格执行空闲条件只约束替换目标 Worker 进程，不能用来阻止 Controller 部署。
 
 ## 边界和所需文件
 
