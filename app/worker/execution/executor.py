@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import tempfile
-from datetime import UTC, datetime
+from dataclasses import replace
 from pathlib import Path
 
 from loguru import logger
@@ -26,24 +26,23 @@ from app.contracts.protocol import (
 from app.domain.delivery_models import DeliveryReceipt
 from app.domain.models import (
     CodingExecutionContext,
+    GitHubCapability,
     InitialCodingOutput,
     RevisionCodingOutput,
     SessionUnavailable,
 )
 from app.domain.ports import CodingAgent
+from app.worker.execution.gh import require_gh
 from app.worker.execution.prompts import build_initial_prompt, build_revision_prompt
 from app.worker.execution.vcs import (
     VcsVerificationError,
     agent_guidance,
-    cleanup_flow_repo,
-    flow_cleanup_paths,
-    flow_repo_path,
-    prepare_flow_repo,
     prepare_revision_context,
     prepare_vcs_context,
     verify_revision_outcome,
     verify_vcs_outcome,
 )
+from app.worker.execution.workspaces import RepositoryWorkspaces
 from app.worker.state.session import WorkerSession
 from app.worker.transport.mcp import FlowToolCaller, WorkerMCP
 
@@ -65,12 +64,14 @@ class WorkerExecutor:
         worker_id: str,
         session: WorkerSession,
         revision_timeout: float = 1200.0,
+        workspace_limit: int = 2,
     ) -> None:
         self.worker_root = worker_root
         self.code_agent = code_agent
         self.worker_id = worker_id
         self.session = session
         self.revision_timeout = revision_timeout
+        self.workspaces = RepositoryWorkspaces(worker_root, worker_id, limit=workspace_limit)
 
     async def execute(
         self, task: ExecutionTask, secret: AssignmentSecret | None = None,
@@ -89,10 +90,8 @@ class WorkerExecutor:
             if (self.worker_id != task.worker_id
                     or task.repo_identity != f"{self.worker_id}:{task.repo}"):
                 raise ValueError("archive repository identity does not match worker")
-            repo_path = self._repo_path(task.repo)
-            paths = flow_cleanup_paths(repo_path, task.flow_id, self.worker_root)
-            self.session.verify_cleanup(task, repo_present=paths[0].is_dir())
-            cleanup = await cleanup_flow_repo(repo_path, task.flow_id, worker_root=self.worker_root)
+            binding = self.session.verify_cleanup(task)
+            cleanup = await self.workspaces.release(binding)
             return ArchiveResult(**task.model_dump(), cleanup=cleanup)
         raise TypeError(f"unsupported execution task: {type(task).__name__}")
 
@@ -101,20 +100,27 @@ class WorkerExecutor:
     ) -> InitialTaskResult:
         if task.repo_identity != f"{self.worker_id}:{task.repo}":
             return _vcs_failure(None, "", "binding", "repo identity does not match worker")
-        if secret is None:
-            return _vcs_failure(None, "", "capability", "push capability is missing")
-        if secret.push.repository != task.repo:
-            return _vcs_failure(None, "", "capability", "push capability repository mismatch")
-        if secret.push.expires_at <= datetime.now(UTC):
-            return _vcs_failure(None, "", "capability", "push capability expired")
-        repo_path = self._repo_path(task.repo)
-        workspace = await prepare_flow_repo(repo_path, task.flow_id)
-        vcs_context = await prepare_vcs_context(workspace, task.branch)
+        try:
+            capability = _github_capability(secret, task.repo)
+            binding = await self.workspaces.acquire(
+                task.repo, task.flow_id, base_branch=task.base_branch, remote=task.remote,
+                push_token=capability.token,
+            )
+            self.session.bind_workspace(binding)
+            workspace = self.workspaces.path(binding)
+            vcs_context = replace(
+                await prepare_vcs_context(workspace, task.branch, remote=task.remote),
+                push_token=capability.token,
+            )
+        except VcsVerificationError as error:
+            return _vcs_failure(None, "", error.stage, str(error))
+        except OSError:
+            return _vcs_failure(None, "", "bootstrap", "repository filesystem preparation failed")
         prompt = build_initial_prompt(
             task.issue_title,
             task.issue_body,
             self._repo_conventions(workspace),
-            agent_guidance(task.branch),
+            agent_guidance(task.branch, remote=task.remote),
         )
         schema_path = _write_output_schema(InitialCodingOutput)
         tool_call_id: str | None = None
@@ -127,7 +133,7 @@ class WorkerExecutor:
                     workspace,
                     output_schema=schema_path,
                     context=CodingExecutionContext(
-                        push_token=secret.push.token,
+                        github=capability,
                         mcp_url=mcp.url,
                         mcp_token=mcp.token,
                     ),
@@ -135,6 +141,8 @@ class WorkerExecutor:
                 tool_call_id = mcp.last_call_id
                 tool_result = mcp.last_result
                 tool_vcs_outcome = mcp.last_vcs_outcome
+        except VcsVerificationError as error:
+            return _vcs_failure(None, "", error.stage, str(error))
         finally:
             schema_path.unlink(missing_ok=True)
         if run.exit_code != 0:
@@ -199,13 +207,13 @@ class WorkerExecutor:
         try:
             if task.repo_identity != f"{self.worker_id}:{task.repo}":
                 raise VcsVerificationError("binding", "repo identity does not match worker")
-            if (secret is None or secret.push.repository != task.repo
-                    or secret.push.expires_at <= datetime.now(UTC)):
-                raise VcsVerificationError("capability", "missing, mismatched or expired push capability")
-            workspace = flow_repo_path(self._repo_path(task.repo), task.flow_id)
-            context = CodingExecutionContext(push_token=secret.push.token)
+            capability = _github_capability(secret, task.repo)
+            binding = self.workspaces.lookup(task.repo, task.flow_id)
+            self.session.bind_workspace(binding)
+            workspace = self.workspaces.path(binding)
+            context = CodingExecutionContext(github=capability)
             vcs_context = await prepare_revision_context(
-                workspace, task.branch, task.expected_head_sha, secret.push.token,
+                workspace, task.branch, task.expected_head_sha, capability.token,
             )
             prompt = build_revision_prompt(task, self._repo_conventions(workspace))
             schema_path = _write_output_schema(RevisionCodingOutput)
@@ -222,7 +230,7 @@ class WorkerExecutor:
                     result.invocations = self.session.finish_invocation(invocation)
                     # A rejection is insufficient if anything changed while resume was attempted.
                     fallback_context = await prepare_revision_context(
-                        workspace, task.branch, task.expected_head_sha, secret.push.token,
+                        workspace, task.branch, task.expected_head_sha, capability.token,
                     )
                     if ((fallback_context.git_remote_url, fallback_context.jj_remote_url)
                             != (vcs_context.git_remote_url, vcs_context.jj_remote_url)):
@@ -269,9 +277,6 @@ class WorkerExecutor:
                 schema_path.unlink(missing_ok=True)
         return result
 
-    def _repo_path(self, repo: str) -> Path:
-        return self.worker_root / "repos" / repo
-
     @staticmethod
     def _repo_conventions(workspace: Path) -> str:
         for name in ("AGENTS.md", "CLAUDE.md"):
@@ -279,6 +284,14 @@ class WorkerExecutor:
             if path.exists():
                 return path.read_text()
         return ""
+
+
+def _github_capability(secret: AssignmentSecret | None, repository: str) -> GitHubCapability:
+    if secret is None:
+        raise VcsVerificationError("capability", "push capability is missing")
+    capability = GitHubCapability(secret.push.token, secret.push.repository, secret.push.expires_at)
+    require_gh(capability, repository)
+    return capability
 
 
 def _write_output_schema(model: type[RevisionCodingOutput | InitialCodingOutput]) -> Path:

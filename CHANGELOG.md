@@ -8,6 +8,12 @@
 
 ## Unreleased
 
+- worker 自动 clone 缺失/空 seed；每次编码使用 assignment bot 的临时 gh 包装、独立配置与
+  隔离的 Git helper，INITIAL 的 MCP/最终远端核验也使用当前 token。执行位置按 worker/仓库
+  复用一个完整副本并以临时 Git worktree 溢出，总上限默认 2，可用
+  `FLOWTOOL_WORKER_REPO_WORKSPACE_LIMIT` 配置；归档按持久位置/代次释放，保留温热缓存，
+  拒绝覆盖异常或未知目录。worker 镜像安装 gh。protocol v14 / journal v4，旧目录不自动接管。
+
 - 受阻 Flow 的概览提供「重试」，复用现有安全重试，保留停止确认、结果对账及归档绑定限制。
   请求未执行或被拒绝时显示原因；受理后刷新真实详情与分组，不承诺任务已运行。
   重试与展示归档互斥；响应丢失时提示先刷新核对，不自动重复提交，切换 Flow 不受旧响应覆盖。

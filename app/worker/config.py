@@ -26,6 +26,7 @@ class WorkerSettings(BaseSettings):
     serve_ws_url: str
     worker_status_path: Path | None = None
     worker_root: Path = Path("~/.flowtool/workers/{worker_id}")
+    worker_repo_workspace_limit: int = Field(default=2, ge=1)
     codex_run_timeout_seconds: float = 1200.0
     trusted_host_execution: bool = False
     execution_isolation: Literal["dedicated-account", "container", "vm"] | None = None

@@ -17,7 +17,6 @@ from app.worker.execution.vcs import (
     VcsVerificationError,
     _remote_sha,
     _run,
-    prepare_flow_repo,
     prepare_vcs_context,
     verify_pushed_outcome,
     verify_vcs_outcome,
@@ -55,23 +54,10 @@ async def _jj(*args: str, cwd: Path, env: dict[str, str]) -> None:
 
 
 @pytest.mark.asyncio
-async def test_flow_repo_is_reused_by_flow_id_and_separated_between_flows(tmp_path: Path) -> None:
-    seed, _ = _git_fixture(tmp_path)
-
-    first = await prepare_flow_repo(seed, 1)
-    (first / "flow-marker").write_text("kept")
-
-    assert await prepare_flow_repo(seed, 1) == first
-    assert (first / "flow-marker").read_text() == "kept"
-    assert await prepare_flow_repo(seed, 2) != first
-
-
-@pytest.mark.asyncio
 async def test_git_outcome_requires_new_clean_commit_on_target_remote_branch(
     tmp_path: Path,
 ) -> None:
-    seed, _ = _git_fixture(tmp_path)
-    repo = await prepare_flow_repo(seed, 1)
+    repo, _ = _git_fixture(tmp_path)
     context = await prepare_vcs_context(repo, "flow/one")
 
     _git("checkout", "-b", "flow/one", cwd=repo)
@@ -90,8 +76,7 @@ async def test_git_outcome_requires_new_clean_commit_on_target_remote_branch(
 
 @pytest.mark.asyncio
 async def test_git_outcome_rejects_a_branch_without_a_new_commit(tmp_path: Path) -> None:
-    seed, _ = _git_fixture(tmp_path)
-    repo = await prepare_flow_repo(seed, 1)
+    repo, _ = _git_fixture(tmp_path)
     context = await prepare_vcs_context(repo, "flow/one")
     _git("checkout", "-b", "flow/one", cwd=repo)
     _git("push", "-u", "origin", "flow/one", cwd=repo)
@@ -104,8 +89,7 @@ async def test_git_outcome_rejects_a_branch_without_a_new_commit(tmp_path: Path)
 
 @pytest.mark.asyncio
 async def test_declared_backend_must_match_repository_metadata(tmp_path: Path) -> None:
-    seed, _ = _git_fixture(tmp_path)
-    repo = await prepare_flow_repo(seed, 1)
+    repo, _ = _git_fixture(tmp_path)
     context = await prepare_vcs_context(repo, "flow/one")
 
     with pytest.raises(VcsVerificationError, match="jj") as error:
@@ -117,10 +101,9 @@ async def test_declared_backend_must_match_repository_metadata(tmp_path: Path) -
 @pytest.mark.asyncio
 @pytest.mark.skipif(shutil.which("jj") is None, reason="jj is not installed")
 async def test_jj_outcome_is_verified_from_a_colocated_repository(tmp_path: Path) -> None:
-    seed, _ = _git_fixture(tmp_path)
+    repo, _ = _git_fixture(tmp_path)
     env = os.environ | {"JJ_USER": "FlowTool Test", "JJ_EMAIL": "flowtool@example.test"}
-    await _jj("git", "init", "--colocate", cwd=seed, env=env)
-    repo = await prepare_flow_repo(seed, 1)
+    await _jj("git", "init", "--colocate", cwd=repo, env=env)
     context = await prepare_vcs_context(repo, "flow/jj")
     (repo / "README.md").write_text("changed by jj\n")
     await _jj("commit", "-m", "change", cwd=repo, env=env)
@@ -226,8 +209,7 @@ async def test_pushed_outcome_discovers_the_single_backend(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_git_outcome_rejects_unrelated_history(tmp_path: Path) -> None:
-    seed, _ = _git_fixture(tmp_path)
-    repo = await prepare_flow_repo(seed, 1)
+    repo, _ = _git_fixture(tmp_path)
     context = await prepare_vcs_context(repo, "flow/one")
     _git("checkout", "--orphan", "flow/one", cwd=repo)
     _git("rm", "-rf", ".", cwd=repo)
@@ -244,8 +226,7 @@ async def test_git_outcome_rejects_unrelated_history(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_git_outcome_rejects_remote_reconfiguration(tmp_path: Path) -> None:
-    seed, _ = _git_fixture(tmp_path)
-    repo = await prepare_flow_repo(seed, 1)
+    repo, _ = _git_fixture(tmp_path)
     context = await prepare_vcs_context(repo, "flow/one")
     replacement = tmp_path / "replacement.git"
     _git("init", "--bare", str(replacement), cwd=tmp_path)

@@ -1,3 +1,4 @@
+import shutil
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -20,6 +21,8 @@ from app.domain.models import (
 )
 from app.worker.execution.executor import WorkerExecutor
 from app.worker.state.session import WorkerSession
+from tests.test_vcs import _git, _git_fixture
+from tests.test_worker_session import _assignment
 
 
 class RecordingAgent:
@@ -81,22 +84,27 @@ def assignment_secret() -> AssignmentSecret:
     )
 
 
+@pytest.fixture
+def initial_workspace(tmp_path):
+    seed, _ = _git_fixture(tmp_path)
+    target = tmp_path / "repos/owner/repo"
+    target.parent.mkdir(parents=True)
+    shutil.move(seed, target)
+    (target / "AGENTS.md").write_text("Run tests.")
+    _git("add", "AGENTS.md", cwd=target)
+    _git("commit", "-m", "conventions", cwd=target)
+    journal = WorkerSession(tmp_path)
+    journal.record_received(_assignment())
+    journal.record_started()
+    return journal
+
+
 @pytest.mark.asyncio
 async def test_executor_runs_agent_without_store(
-    monkeypatch, tmp_path: Path
+    monkeypatch, tmp_path: Path, initial_workspace,
 ) -> None:
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    (workspace / "AGENTS.md").write_text("Run tests.")
-
-    async def fake_workspace(repo_path: Path, flow_id: int) -> Path:
-        assert flow_id == 3
-        return workspace
-
-    async def fake_context(repo_path: Path, branch: str):
-        return object()
-
     async def fake_verify(context, backend):
+        assert context.push_token.get_secret_value() == "push-token"
         assert backend is VcsKind.GIT
         return VcsOutcome(
             backend=VcsKind.GIT,
@@ -105,8 +113,6 @@ async def test_executor_runs_agent_without_store(
             remote_sha="abc",
         )
 
-    monkeypatch.setattr("app.worker.execution.executor.prepare_flow_repo", fake_workspace)
-    monkeypatch.setattr("app.worker.execution.executor.prepare_vcs_context", fake_context)
     monkeypatch.setattr("app.worker.execution.executor.verify_vcs_outcome", fake_verify)
     monkeypatch.setattr(
         "app.worker.transport.mcp.verify_pushed_outcome",
@@ -134,24 +140,14 @@ async def test_executor_runs_agent_without_store(
     assert initial.open_pr_call_id
     assert initial.delivery_receipt is not None
     assert agent.started
+    workspace = executor.workspaces.path(executor.workspaces.lookup("owner/repo", 3))
     assert agent.started[0][1] == workspace
 
 
 @pytest.mark.asyncio
 async def test_initial_exit_zero_without_a_declared_backend_is_a_failure(
-    monkeypatch, tmp_path: Path
+    monkeypatch, tmp_path: Path, initial_workspace,
 ) -> None:
-    workspace = tmp_path / "flow-repo"
-    workspace.mkdir()
-
-    async def fake_workspace(repo_path: Path, flow_id: int) -> Path:
-        return workspace
-
-    async def fake_context(repo_path: Path, branch: str):
-        return object()
-
-    monkeypatch.setattr("app.worker.execution.executor.prepare_flow_repo", fake_workspace)
-    monkeypatch.setattr("app.worker.execution.executor.prepare_vcs_context", fake_context)
     executor = WorkerExecutor(tmp_path, BackendlessAgent(), worker_id="worker-1", session=WorkerSession(tmp_path))
 
     result = await executor.execute(
@@ -171,3 +167,81 @@ async def test_initial_exit_zero_without_a_declared_backend_is_a_failure(
     assert result.failure_stage == "result"
     assert result.failure_detail == "missing VCS backend"
     assert "missing VCS backend" in result.last_message
+
+
+@pytest.mark.parametrize("problem", ["missing-gh", "expired", "mismatch", "clone-failure", "capacity"])
+async def test_initial_preparation_failure_does_not_start_agent_or_expose_token(
+    tmp_path, monkeypatch, problem,
+):
+    secret = assignment_secret()
+    if problem == "expired":
+        secret.push.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+    elif problem == "mismatch":
+        secret.push.repository = "another/repo"
+    elif problem == "missing-gh":
+        monkeypatch.setattr("app.worker.execution.gh.shutil.which", lambda *_args, **_kwargs: None)
+    else:
+        async def failed_prepare(*args, **kwargs):
+            from app.worker.execution.vcs import VcsVerificationError
+            raise VcsVerificationError("bootstrap", problem)
+
+        monkeypatch.setattr("app.worker.execution.executor.RepositoryWorkspaces.acquire", failed_prepare)
+    agent = RecordingAgent()
+    assignment = _assignment()
+    task = assignment.task.model_copy(update={"repo_identity": "worker-1:owner/repo"})
+    journal = WorkerSession(tmp_path)
+    journal.record_received(assignment)
+    journal.record_started()
+    result = await WorkerExecutor(tmp_path, agent, worker_id="worker-1", session=journal).execute(
+        task, secret, tool_caller=RecordingToolCaller(),
+    )
+    assert result.exit_code != 0 and not agent.started
+    assert "push-token" not in result.model_dump_json()
+
+
+async def test_initial_bootstrap_push_mcp_and_final_verification_share_current_capability(
+    tmp_path, monkeypatch,
+):
+    from app.worker.execution import vcs
+    _, remote = _git_fixture(tmp_path)
+    root = tmp_path / "new-worker"
+    authenticated = []
+    run = vcs._run
+
+    async def offline(*args, **kwargs):
+        if "clone" in args or "ls-remote" in args:
+            assert kwargs["environment"]["FLOWTOOL_PUSH_TOKEN"] == "push-token"
+            authenticated.append("clone" if "clone" in args else "verify")
+            args = tuple(str(remote) if value == "https://github.com/owner/repo.git" else value
+                         for value in args)
+        return await run(*args, **kwargs)
+
+    class Agent(RecordingAgent):
+        async def start(self, task, cwd, *, output_schema=None, context=None):
+            assert context.github.token.get_secret_value() == "push-token"
+            _git("config", "user.name", "Test Bot", cwd=cwd)
+            _git("config", "user.email", "bot@example.test", cwd=cwd)
+            _git("checkout", "-b", "flow/issue-8", cwd=cwd)
+            (cwd / "README.md").write_text("implemented\n")
+            _git("add", ".", cwd=cwd)
+            _git("commit", "-m", "implement", cwd=cwd)
+            _git("push", "origin", "flow/issue-8", cwd=cwd)
+            return await super().start(task, cwd, output_schema=output_schema, context=context)
+
+    class Caller:
+        async def call_tool(self, name, arguments, *, call_id=None, vcs_outcome):
+            assert name == "flow.open_pr" and vcs_outcome.commit_sha == vcs_outcome.remote_sha
+            return PreparedDelivery(head_sha=vcs_outcome.commit_sha, delivery_version=1)
+
+    monkeypatch.setattr(vcs, "_run", offline)
+    assignment = _assignment()
+    task = assignment.task.model_copy(update={"repo_identity": "worker-1:owner/repo"})
+    journal = WorkerSession(root)
+    journal.record_received(assignment)
+    journal.record_started()
+    result = await WorkerExecutor(root, Agent(), worker_id="worker-1", session=journal).execute(
+        task, assignment_secret(), tool_caller=Caller(),
+    )
+    assert result.exit_code == 0 and result.pushed and result.open_pr_call_id
+    assert result.delivery_receipt.status == "prepared"
+    assert authenticated == ["clone", "verify", "verify"]

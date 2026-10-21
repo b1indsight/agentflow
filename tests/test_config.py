@@ -122,6 +122,7 @@ def test_worker_settings_do_not_require_control_plane_secrets(monkeypatch, tmp_p
     monkeypatch.delenv("FLOWTOOL_DATABASE_URL", raising=False)
     monkeypatch.delenv("FLOWTOOL_GITHUB_WEBHOOK_SECRET", raising=False)
     monkeypatch.delenv("FLOWTOOL_WORKER_ROOT", raising=False)
+    monkeypatch.delenv("FLOWTOOL_WORKER_REPO_WORKSPACE_LIMIT", raising=False)
     monkeypatch.delenv("FLOWTOOL_ALLOW_INSECURE_WORKER_WS", raising=False)
 
     settings = WorkerSettings(
@@ -131,8 +132,16 @@ def test_worker_settings_do_not_require_control_plane_secrets(monkeypatch, tmp_p
     )
 
     assert settings.worker_root == Path("~/.flowtool/workers/worker-1").expanduser()
+    assert settings.worker_repo_workspace_limit == 2
     assert settings.trusted_host_execution is False
     assert not hasattr(settings, "database_url")
+
+    monkeypatch.setenv("FLOWTOOL_WORKER_REPO_WORKSPACE_LIMIT", "4")
+    assert WorkerSettings(**settings.model_dump(exclude={"worker_repo_workspace_limit"})).worker_repo_workspace_limit == 4
+    for value in ("0", "-1", "invalid"):
+        monkeypatch.setenv("FLOWTOOL_WORKER_REPO_WORKSPACE_LIMIT", value)
+        with pytest.raises(ValidationError, match="worker_repo_workspace_limit"):
+            WorkerSettings(**settings.model_dump(exclude={"worker_repo_workspace_limit"}))
 
 
 def test_worker_rejects_full_access_without_external_isolation() -> None:

@@ -50,11 +50,10 @@ from app.github import (
 from app.worker.execution.executor import WorkerExecutor
 from app.worker.execution.vcs import (
     VcsVerificationError,
-    flow_repo_path,
-    prepare_flow_repo,
     prepare_revision_context,
     verify_revision_outcome,
 )
+from app.worker.execution.workspaces import RepositoryWorkspaces
 from app.worker.state.session import WorkerSession
 from tests.github import NATIVE_PULL_REQUEST_REFETCH, RecordingGitHub
 from tests.review_memory import review_context
@@ -77,10 +76,12 @@ def revision_output(**updates):
 async def revision_workspace(tmp_path):
     root = tmp_path / "worker"
     seed, _ = _git_fixture(tmp_path)
-    repo = await prepare_flow_repo(seed, 1)
-    target = flow_repo_path(root / "repos/owner/repo", 1)
-    target.parent.mkdir(parents=True)
-    repo.rename(target)
+    managed_seed = root / "repos/owner/repo"
+    managed_seed.parent.mkdir(parents=True)
+    shutil.move(seed, managed_seed)
+    pool = RepositoryWorkspaces(root, "w", limit=2)
+    binding = await pool.acquire("owner/repo", 1, base_branch="main", remote="origin", push_token=None)
+    target = pool.path(binding)
     _git("checkout", "-b", "flow/1", cwd=target)
     _git("push", "origin", "flow/1", cwd=target)
     sha = (await asyncio.to_thread(
@@ -141,7 +142,7 @@ async def test_revision_verifies_real_git_delivery(revision_workspace, behavior,
     agent = RevisionAgent(repo, behavior)
     result = await WorkerExecutor(root, agent, session=WorkerSession(root), worker_id="w").execute(task, secret, tool_caller=RecordingToolCaller())
     assert (result.exit_code == 0) is success
-    assert agent.calls[0][1].push_token.get_secret_value() == "fresh-token"
+    assert agent.calls[0][1].github.token.get_secret_value() == "fresh-token"
     assert "flow.open_pr" not in agent.calls[0][2]
     if success:
         assert result.clean_worktree and result.commit_sha == result.remote_sha

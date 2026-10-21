@@ -11,7 +11,7 @@
 
 ## 1. 准备运行环境
 
-准备 Python 3.12+、uv、PostgreSQL，以及 worker 账号可运行且已配置认证的 Codex CLI、Git
+准备 Python 3.12+、uv、PostgreSQL，以及 worker 账号可运行且已配置认证的 Codex CLI、Git、gh
 和所需项目工具链。若项目使用 jj，还需安装 jj。serve、worker 应使用同一个应用版本。
 
 在 control 账号的应用检出目录执行：
@@ -79,6 +79,7 @@ FLOWTOOL_WORKER_TOKEN='替换为serve登记的token'
 FLOWTOOL_SERVE_WS_URL=ws://127.0.0.1:8000/internal/workers/connect
 FLOWTOOL_ALLOW_INSECURE_WORKER_WS=true
 FLOWTOOL_WORKER_ROOT=~/.flowtool/workers/worker-1
+FLOWTOOL_WORKER_REPO_WORKSPACE_LIMIT=2
 FLOWTOOL_TRUSTED_HOST_EXECUTION=true
 FLOWTOOL_EXECUTION_ISOLATION=dedicated-account
 ```
@@ -99,6 +100,34 @@ uv run flowtool worker
 worker 不自动读取 `.env`，上述加载仅针对 worker 私有文件。回到 control 终端运行
 `uv run flowtool workers`，确认 `worker-1` 在线。保留 worker root、journal 和会话数据，
 不要为重启临时更换 identity/root。启动注册成功尚不代表真实编码闭环已通过。
+
+### 仓库准备与执行位置
+
+- 不需要提前登录个人 gh 或复制 controler token。controler 为每次编码任务下发目标仓库的
+  installation token，worker 为 Git 与 gh 注入它；每次执行销毁临时包装和空配置目录。
+  App 需授权该仓库且具备 Contents write；worker 不持有 App 私钥，不新增 PR/Issue 权限。
+  PR 仍经本地 MCP `open_pr` 提交交付意图，由 controler 在结果通过校验后创建或复用。
+- INITIAL 自动 clone 缺失/空的 `<worker_root>/repos/<owner>/<repo>`，使用任务的基线分支及
+  remote。已有 seed 不自动 fetch、checkout、reset 或改写 remote；保持所需的已提交基线可用。
+  空远端、缺分支、非空非仓库目录、symlink、缺 gh 或过期能力均在编码前失败。SSH remote
+  不在当前核验范围内，使用不含凭据的 HTTPS URL。项目依赖、LFS/submodule 另行准备。
+- 执行目录位于 `<worker_root>/workspaces/<owner>/<repo>/<slot_id>`；
+  `workspace-pool.json` 与 `assignment-journal.json` 一起保存所有权、分配代次和恢复证据。
+  不要编辑、删除清单后让程序重新接管现有目录。准备中断、未知内容和损坏清单需要人工核查；
+  没有实际 checkout 的失败 clone 可安全重试，已执行或未知状态不会自动重放。
+- `FLOWTOOL_WORKER_REPO_WORKSPACE_LIMIT` 默认 2、最小 1，启动时读取；完整副本、临时
+  worktree、准备/清理中和隔离位置共同计数，seed 不计入，各仓库独立计数。降低上限不会删除
+  既有位置；原 Flow 可继续，数量回落前不扩容。完整副本归档返回 `released` 并保留目录和
+  ignored 依赖/构建缓存；worktree 返回 `removed`，经 Git 注销后删除。`flow show` 会注明目录保留。
+- Git worktree 共享对象库，不共享可写依赖目录。tracked 修改、未知非 ignored 文件、进行中的
+  VCS 操作或基线会覆盖缓存时拒绝复用，不使用 reset/clean 丢弃内容。jj 完整副本可复用；
+  溢出要求独立 Git seed，只准备 Git worktree，不复制 `.jj`。本策略不提供总字节配额或后台 GC。
+- token 不自动续期，运行超出有效期可能失败。gh 包装每次调用检查有效期；普通绝对路径 gh
+  也继承 bot 环境，但不经包装的本地期限检查。认证最终由 GitHub 判断，任何权限失败都不
+  回退个人凭据或自动重放写操作。仍须专用账户/容器/VM 隔离。
+
+本次 journal v4 与 protocol v14 不兼容旧记录；在没有活跃/未知执行且归档与 ACK 完成后升级
+serve 和 worker。保留旧数据作人工核查，不将旧 per-Flow 目录迁入池，也不混跑协议版本。
 
 ## 3. 配置 Cloudflare 入口
 

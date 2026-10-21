@@ -24,7 +24,7 @@ from app.domain.delivery_models import DeliveryReceipt
 from app.domain.models import FeedbackRef, JobState, RevisionCodingOutput, VcsKind
 from app.domain.review_models import ReviewFeedback
 
-PROTOCOL_VERSION: Literal[13] = 13
+PROTOCOL_VERSION: Literal[14] = 14
 
 
 class ProtocolModel(BaseModel):
@@ -34,7 +34,7 @@ class ProtocolModel(BaseModel):
 
 
 class Message(ProtocolModel):
-    protocol_version: Literal[13] = PROTOCOL_VERSION
+    protocol_version: Literal[14] = PROTOCOL_VERSION
 
 
 class ConversationQuery(Message):
@@ -185,7 +185,7 @@ class RevisionTaskResult(ProtocolModel):
 
 class ArchiveResult(ArchiveIdentity):
     kind: Literal["archive"] = "archive"
-    cleanup: Literal["removed", "already_absent"]
+    cleanup: Literal["released", "removed", "already_absent"]
 
 
 ExecutionResult = Annotated[

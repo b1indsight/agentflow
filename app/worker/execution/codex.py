@@ -18,6 +18,7 @@ from app.domain.models import (
     SessionUnavailable,
 )
 from app.worker.execution.credentials import git_credential_environment
+from app.worker.execution.gh import github_environment
 
 CODEX_BIN = "codex"
 
@@ -65,7 +66,7 @@ def _codex_environment(
         key: value for key, value in values.items() if key in _CODEX_ENVIRONMENT_KEYS
     }
     if context is not None:
-        environment.update(git_credential_environment(context.push_token))
+        environment.update(git_credential_environment(context.github.token if context.github else None))
         if context.mcp_token is not None:
             environment["FLOWTOOL_MCP_TOKEN"] = context.mcp_token.get_secret_value()
     return environment
@@ -180,58 +181,61 @@ class CodexAgent:
         session_id: str | None = None,
         context: CodingExecutionContext | None = None,
     ) -> CodingExecutionResult:
-        with tempfile.NamedTemporaryFile(prefix="codex-last-", suffix=".txt", delete=False) as file:
-            last_file = Path(file.name)
-        args += ["-o", str(last_file)]
-        if output_schema is not None:
-            args += ["--output-schema", str(output_schema)]
+        with tempfile.TemporaryDirectory(prefix="flowtool-coding-") as directory:
+            run_directory = Path(directory)
+            environment = _codex_environment(context=context)
+            if context is not None and context.github is not None:
+                environment.update(github_environment(context.github, run_directory, environment))
+            last_file = run_directory / "last-message.txt"
+            args += ["-o", str(last_file)]
+            if output_schema is not None:
+                args += ["--output-schema", str(output_schema)]
 
-        logger.info("codex run started: resume={} output_schema={}", not parse_thread, output_schema is not None)
-        proc = await asyncio.create_subprocess_exec(
-            *args,
-            stdin=asyncio.subprocess.DEVNULL,   # 必须：否则 codex 会挂等 stdin
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=_codex_environment(context=context),
-            cwd=cwd,
-            start_new_session=True,
-        )
-        try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self.timeout)
-        except (TimeoutError, asyncio.CancelledError) as error:
+            logger.info("codex run started: resume={} output_schema={}", not parse_thread, output_schema is not None)
+            proc = await asyncio.create_subprocess_exec(
+                *args,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=environment,
+                cwd=cwd,
+                start_new_session=True,
+            )
             try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            await proc.wait()
-            last_file.unlink(missing_ok=True)
-            if isinstance(error, asyncio.CancelledError):
-                raise
-            logger.error("codex run timed out after {}s", self.timeout)
-            return CodingExecutionResult(session_id=session_id, last_message="", exit_code=124)
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self.timeout)
+            except TimeoutError:
+                logger.error("codex run timed out after {}s", self.timeout)
+                return CodingExecutionResult(session_id=session_id, last_message="", exit_code=124)
+            finally:
+                # Reap the group before removing its wrapper/config, including surviving children
+                # after a successful CLI exit. Cancellation must propagate only after this step.
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                await proc.wait()
 
-        jsonl = stdout.decode(errors="replace")
-        sid = _parse_thread_id(jsonl)
-        last_message = last_file.read_text() if last_file.exists() else ""
-        if context is not None and context.mcp_token is not None:
-            last_message = last_message.replace(context.mcp_token.get_secret_value(), "[REDACTED]")
-
-        if last_file.exists():
-            last_file.unlink()
-        if proc.returncode != 0:
-            logger.error("codex exit={}", proc.returncode)
-            # Only a complete pre-execution rejection is a fallback signal. Output/events,
-            # generic errors, timeouts and malformed results may follow edits or a push.
-            error_lines = stderr.decode(errors="replace").strip().splitlines()
-            if (session_id and not jsonl.strip() and not last_message.strip() and error_lines
-                    and error_lines[-1] == "Error: thread/resume: thread/resume failed: "
-                    f"no rollout found for thread id {session_id} (code -32600)"):
-                raise SessionUnavailable("Codex rejected the saved session before execution")
-
-        detail = stderr.decode(errors="replace")[-4000:] if proc.returncode else None
-        if detail and context is not None and context.push_token is not None:
-            detail = detail.replace(context.push_token.get_secret_value(), "[REDACTED]")
-        if detail and context is not None and context.mcp_token is not None:
-            detail = detail.replace(context.mcp_token.get_secret_value(), "[REDACTED]")
-        return CodingExecutionResult(session_id=sid, last_message=last_message, exit_code=proc.returncode or 0,
-                        failure_detail=detail)
+            jsonl = stdout.decode(errors="replace")
+            sid = _parse_thread_id(jsonl)
+            last_message = last_file.read_text() if last_file.exists() else ""
+            detail = stderr.decode(errors="replace") if proc.returncode else None
+            if context is not None:
+                tokens = [context.mcp_token, context.github.token if context.github else None]
+                for token in tokens:
+                    if token is not None:
+                        last_message = last_message.replace(token.get_secret_value(), "[REDACTED]")
+                        if detail:
+                            detail = detail.replace(token.get_secret_value(), "[REDACTED]")
+            if proc.returncode != 0:
+                logger.error("codex exit={}", proc.returncode)
+                # Only a complete pre-execution rejection permits fallback. Generic errors or
+                # partial output may follow edits or a push and must not replay execution.
+                error_lines = stderr.decode(errors="replace").strip().splitlines()
+                if (session_id and not jsonl.strip() and not last_message.strip() and error_lines
+                        and error_lines[-1] == "Error: thread/resume: thread/resume failed: "
+                        f"no rollout found for thread id {session_id} (code -32600)"):
+                    raise SessionUnavailable("Codex rejected the saved session before execution")
+            return CodingExecutionResult(
+                session_id=sid, last_message=last_message, exit_code=proc.returncode or 0,
+                failure_detail=detail[-4000:] if detail else None,
+            )

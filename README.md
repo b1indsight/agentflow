@@ -113,9 +113,9 @@ FlowTool 的目标是把带 `flow` 标签的 GitHub issue 编排成
 
 ## 平面边界
 
-- **Control plane**：Webhook、状态机、持久化、Judge 和 GitHub API，是唯一数据库与 GitHub API 操作权威；
+- **Control plane**：Webhook、状态机、持久化和 Judge，独占数据库操作与 Flow 的 PR 创建、标签和 review 编排；
 - **Worker execution plane**：prompt、Codex 和 Flow 独占 repo，通过出站 WebSocket 接收结构化任务，
-  使用单仓库短时 capability push；不持有数据库、GitHub App 或 Judge 凭据；
+  Git/gh 使用当前 assignment 的单仓库短时 installation token；不持有数据库、GitHub App 或 Judge 凭据；
 - **本地执行**：Flow repo 负责目录所有权；只有运行在无法读取 control-plane secret 的专用 OS account、
   container 或 VM 中的 worker 才能显式开启 full access。Agent 自选 Git/jj，worker 只做结果核验。
 
@@ -147,6 +147,22 @@ FLOWTOOL_WORKER_ID=worker-1 FLOWTOOL_WORKER_TOKEN=change-me-worker-token \
 FLOWTOOL_SERVE_WS_URL=ws://127.0.0.1:8000/internal/workers/connect \
 FLOWTOOL_ALLOW_INSECURE_WORKER_WS=true uv run flowtool worker
 ```
+
+实际编码需安装 `git`、`gh` 和 Codex CLI（使用 jj 时另装 jj）。INITIAL 会在
+`<worker_root>/repos/<owner>/<repo>` 缺失或为空时，用当前任务的短期 installation token
+原子 clone；已有 seed 保持原状，不自动 fetch/reset 或安装依赖。seed 必须有任务基线分支，
+不自动处理空远端、submodule 或 LFS。
+
+每个 worker 按仓库维护执行位置池：优先复用原 Flow 绑定和空闲完整副本，全部占用时增加临时
+Git worktree。`FLOWTOOL_WORKER_REPO_WORKSPACE_LIMIT=2` 设置每仓库总上限（正整数、最小 1，
+重启生效），seed 不计入。归档后完整副本归还池并保留 ignored 缓存；临时 worktree 注销并删除。
+达到上限、目录异常或所有权不明时拒绝执行，不自动清掉未知文件；旧未登记目录不迁移或接管。
+位置数量上限不限制单个缓存的字节数，也不改变 Flow 生命周期独占 worker 的调度。
+
+每次 INITIAL、REVISION resume/fallback 都提供本轮 bot `gh` 包装、独立配置和 Git helper，
+不使用个人登录态；token 过期/权限不足即失败，不自动续期或扩权。worker 保持单仓库
+Contents write，PR 通过 MCP `open_pr` 请求 controler 校验后创建。包装不构成 OS 沙箱。
+新版本使用 protocol v14 / journal v4，serve 与 worker 应同时升级；旧 journal 不自动迁移。
 
 `WorkerSettings` 不读取当前目录的 `.env`，worker 配置通过进程环境提供；默认要求 `wss://`，示例中的
 `FLOWTOOL_ALLOW_INSECURE_WORKER_WS=true` 仅用于开发。要运行 `danger-full-access` CodingAgent，必须在专用 OS account、
