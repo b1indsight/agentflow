@@ -1,8 +1,10 @@
 """Owner authentication, whitelist reads and installed static routing contracts."""
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
+from threading import Barrier, get_ident
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from starlette.testclient import TestClient
@@ -32,6 +34,7 @@ def console_runtime(store):
         shutdown=issuer.auth.close,
         console=ConsoleSynchronizer(SimpleNamespace(), SimpleNamespace(), database=store._db),
         conversations=SimpleNamespace(read=AsyncMock()),
+        gateway=SimpleNamespace(notify_jobs=Mock()),
     )
 
 
@@ -88,6 +91,7 @@ def test_console_and_every_public_read_require_owner_before_io(console_runtime, 
         assert client.get("/console/", headers=headers).status_code == 503
 
 
+@pytest.mark.parametrize("command", ["archive", "retry"])
 @pytest.mark.parametrize(
     "base_url,origin_headers",
     [
@@ -104,15 +108,15 @@ def test_console_and_every_public_read_require_owner_before_io(console_runtime, 
     ],
     ids=["direct-http", "direct-https", "https-tunnel", "rewritten-host-proxy"],
 )
-def test_manual_archive_requires_owner_json_and_same_origin(
-    console_runtime, store, base_url, origin_headers
+def test_console_commands_require_owner_json_and_same_origin(
+    console_runtime, store, base_url, origin_headers, command
 ):
     # TLS termination (and sometimes Host rewriting) changes the backend URL,
     # while the browser still sends the public HTTPS Origin for a same-origin POST.
     flow = store.flows.create_flow("owner/repo", 7, 42)
     flow.state = FlowState.CANCELLED
     store.flows.update_flow(flow)
-    path = f"/api/flows/{flow.id}/archive"
+    path = f"/api/flows/{flow.id}/{command}"
     console = ConsoleStore(store.database)
     before = console.detail(flow.id)
     with TestClient(create_app(console_runtime), base_url=base_url) as client:
@@ -146,20 +150,108 @@ def test_manual_archive_requires_owner_json_and_same_origin(
             ).status_code
             == 422
         )
+        assert client.post(path, json={"force": True}, headers=headers).status_code == 422
         assert console.detail(flow.id) == before
         response = client.post(path, json={}, headers=headers | origin_headers)
         assert response.status_code == 200
         assert response.headers["cache-control"] == "no-store"
+        assert client.post(f"/api/flows/99999/{command}", json={}, headers=headers).status_code == 404
+
+
+def test_manual_archive_is_idempotent_and_only_accepts_cancelled_flows(console_runtime, store):
+    flow = store.flows.create_flow("owner/repo", 7, 42)
+    flow.state = FlowState.CANCELLED
+    store.flows.update_flow(flow)
+    path = f"/api/flows/{flow.id}/archive"
+    with TestClient(create_app(console_runtime)) as client:
+        headers = console_runtime.issuer.headers()
+        response = client.post(path, json={}, headers=headers)
+        assert response.status_code == 200
         assert response.json()["phase"] == "done"
         assert response.json()["lifecycle"] == "cancelled"
         assert response.json()["archived_at"] is not None
         assert client.post(path, json={}, headers=headers).json() == response.json()
-        assert client.post("/api/flows/99999/archive", json={}, headers=headers).status_code == 404
         for state in (FlowState.ACTIVE, FlowState.FAILED, FlowState.SUCCEEDED):
             flow.state = state
             store.flows.update_flow(flow)
             assert client.post(path, json={}, headers=headers).status_code == 409
-            assert console.detail(flow.id).archived_at is None
+            assert ConsoleStore(store.database).detail(flow.id).archived_at is None
+
+
+def test_retry_commits_before_waking_workers_on_the_event_loop(console_runtime, store):
+    # A browser retry must resume the failed job, not just report an ACTIVE no-op.
+    flow = store.flows.create_flow("owner/repo", 7, 42)
+    original = store.jobs.enqueue_job(flow.id, JobKind.INITIAL, payload={"issue_number": 7})
+    with store.connection() as connection:
+        connection.execute("UPDATE jobs SET state='failed' WHERE id=%s", (original.id,))
+    flow.state = FlowState.FAILED
+    store.flows.update_flow(flow)
+    notifications = []
+
+    def notified():
+        # A separate pooled read sees the commit, and the callback runs on the ASGI loop.
+        notifications.append(
+            (get_ident(), store.flows.get_flow(flow.id).state, len(store.jobs.list_jobs(flow.id)))
+        )
+
+    console_runtime.gateway.notify_jobs = notified
+    with TestClient(create_app(console_runtime)) as client:
+        loop_thread = client.portal.call(get_ident)
+        response = client.post(
+            f"/api/flows/{flow.id}/retry", json={}, headers=console_runtime.issuer.headers()
+        )
+        repeated = client.post(
+            f"/api/flows/{flow.id}/retry", json={}, headers=console_runtime.issuer.headers()
+        )
+        assert repeated.status_code == 409
+        assert repeated.json() == {"detail": "retry_no_change"}
+        client.portal.call(lambda: None)
+    assert response.status_code == 200
+    assert response.json()["lifecycle"] == "active"
+    assert response.json()["phase"] == "queued"
+    jobs = store.jobs.list_jobs(flow.id)
+    assert len(jobs) == 2
+    assert jobs[-1].kind == original.kind and jobs[-1].payload == original.payload
+    assert notifications == [(loop_thread, FlowState.ACTIVE, 2)]
+
+
+def test_concurrent_browser_retries_enqueue_only_once(console_runtime, store):
+    # Two tabs can submit despite local button disabling; the business lock is authoritative.
+    flow = store.flows.create_flow("owner/repo", 7, 42)
+    flow.state = FlowState.FAILED
+    store.flows.update_flow(flow)
+    barrier = Barrier(2)
+    headers = console_runtime.issuer.headers()
+    with TestClient(create_app(console_runtime)) as client, ThreadPoolExecutor(2) as pool:
+
+        def submit():
+            barrier.wait(timeout=5)
+            return client.post(f"/api/flows/{flow.id}/retry", json={}, headers=headers)
+
+        responses = list(pool.map(lambda _: submit(), range(2)))
+        client.portal.call(lambda: None)
+    assert sorted(response.status_code for response in responses) == [200, 409]
+    assert len(store.jobs.list_jobs(flow.id)) == 1
+    console_runtime.gateway.notify_jobs.assert_called_once_with()
+
+
+def test_browser_retry_reports_business_refusal_without_changes(console_runtime, store):
+    # The API translates canonical refusals; individual safety rules have service-level coverage.
+    flow = store.flows.create_flow("owner/repo", 7, 42)
+    delivery = store.deliveries.get_or_create_delivery(flow.id, "flow/7")
+    delivery.state = DeliveryState.CLOSED
+    store.deliveries.update_delivery(delivery)
+    console = ConsoleStore(store.database)
+    before = console.detail(flow.id)
+    with TestClient(create_app(console_runtime)) as client:
+        response = client.post(
+            f"/api/flows/{flow.id}/retry", json={}, headers=console_runtime.issuer.headers()
+        )
+    assert response.status_code == 409
+    assert response.json() == {"detail": "retry_delivery_closed"}
+    assert console.detail(flow.id) == before
+    assert store.jobs.list_jobs(flow.id) == []
+    console_runtime.gateway.notify_jobs.assert_not_called()
 
 
 @pytest.mark.parametrize(

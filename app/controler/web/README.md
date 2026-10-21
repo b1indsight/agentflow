@@ -1,7 +1,7 @@
 # Web 控制台
 
 当前由 `flowtool serve` 在 `/console/` 提供，使用真实同源 `/api/`，**没有生产示例数据或 mock 回退**。
-工作流操作保持只读，额外提供 cancelled Flow 的手动展示归档，不修改交付或执行状态。
+提供 cancelled Flow 的手动展示归档，以及受阻 Flow 的安全重试；其余工作流管理操作不在页面提供。
 页面、静态资源和 API 均要求 Cloudflare Access 的单 owner 身份；数据库、GitHub 与 Worker
 读取由 control 负责。真实 Access 登录/MFA、GitHub App 全来源回填和目标部署仍待验收。
 架构与持久化边界见[控制台功能记录](../../../docs/plan/web-console-kanban.md)。
@@ -75,6 +75,14 @@ cancelled 且仍在「受阻」列的 Flow 可在「概览」点击「归档」�
 恢复执行仍须经过现有安全重试，恢复后自动清除展示归档。失败可重试，不提前移动卡片。
 归档接口 `POST /api/flows/{id}/archive` 仅接受 owner 的同源 JSON 请求（空对象），
 不存在返回 404，非 cancelled 返回 409，重复请求不重复记录；未授权和明确跨站请求拒绝。
+
+受阻 Flow（包括尚未展示归档的 cancelled Flow）可在「概览 → 当前动作」点击「重试」。
+`POST /api/flows/{id}/retry` 同样只接受 owner 的同源空 JSON，复用 `ControlService.retry`；
+仍需满足停止确认、结果对账、PR 状态、活跃 Flow 冲突及原 Worker 归档绑定等检查。
+没有可重试工作或安全检查未通过时返回 409，并在页面解释原因；不存在返回 404。
+提交期间重试与归档互斥，受理后按已提交详情刷新分组，不提前移动卡片，也不承诺任务已运行。
+网络异常可能发生在提交之后，页面会提示先刷新核对，不自动重发；切换 Flow 不受旧响应覆盖。
+已展示归档的 Flow 不额外提供恢复按钮。范围与验证见[重试功能记录](../../../docs/plan/console-flow-retry.md)。
 
 本次阅读固定本地已提交快照，编辑和补录在末尾显式刷新后才进入新快照；线程回复使用同一快照。
 刷新活跃 Flow 会排队后台同步，响应不等待 GitHub/Worker 全部抓取；来源可能仍是
