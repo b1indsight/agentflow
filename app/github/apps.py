@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
+from app.github.errors import translate_errors
+from app.github.pagination import Batch
 from app.github.projects import Project, ProjectConfig
 from app.github.repositories import Repository
 
@@ -48,6 +50,19 @@ class GitHubApp(BaseModel):
     def installation(self, installation_id: int) -> Installation:
         return Installation(self, installation_id)
 
+    async def fetch_installations(self, *, page: int = 1) -> Batch[Installation]:
+        """Read one inventory page, excluding suspended installations without losing pagination."""
+        client = self._client(auto_retry=False)
+        with translate_errors("list_installations"):
+            data = (await client.rest.apps.async_list_installations(
+                per_page=100, page=page,
+            )).parsed_data
+            return Batch(
+                items=tuple(self.installation(item.id) for item in data
+                            if item.suspended_at is None),
+                next_cursor=str(page + 1) if len(data) == 100 else None,
+            )
+
 
 class Installation(BaseModel):
     """An installation identity and its native, dynamically refreshed credentials."""
@@ -74,6 +89,19 @@ class Installation(BaseModel):
 
     def repository(self, full_name: str) -> Repository:
         return Repository(self, full_name)
+
+    async def fetch_repositories(self, *, page: int = 1) -> Batch[Repository]:
+        """Read one page of granted repositories, omitting archived repositories."""
+        client = self._client(auto_retry=False)
+        with translate_errors("list_installation_repositories"):
+            data = (await client.rest.apps.async_list_repos_accessible_to_installation(
+                per_page=100, page=page,
+            )).parsed_data
+            return Batch(
+                items=tuple(self.repository(item.full_name) for item in data.repositories
+                            if not item.archived),
+                next_cursor=str(page + 1) if len(data.repositories) == 100 else None,
+            )
 
     def project(self, config: ProjectConfig) -> Project:
         return Project(self, config)

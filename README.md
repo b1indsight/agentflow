@@ -183,8 +183,13 @@ uv run flowtool flow retry <FLOW_ID>
 只重试失败通知，成功后原子提交交付/session/反馈，不重新运行修订。状态不明的操作仍须先核对。
 
 归档使用 `FLOWTOOL_DONE_LABEL`（默认 `flow:done`）与 `FLOWTOOL_IN_REVIEW_LABEL`。
-部署前在仓库创建这两个标签；它们与 trigger label 必须非空且互不相同（忽略大小写）。
-缺少标签或 GitHub App 权限会保留待处理结果，服务不会创建仓库标签。
+serve 启动后在后台发现 GitHub App 已授权的仓库，自动补齐 `flow`、`flow:in-review`、
+`flow:done`；自定义名称使用对应配置，三个名称必须非空且互不相同（忽略大小写）。
+未建齐或检查失败的仓库每 **300 秒**检查；确认三个标签齐全后每 **24 小时**复查并补回缺失项，
+人工预建的也计入，已有名称、颜色和描述不变。检查时间只保存在内存，重启后重新扫描确认。
+新安装与新增授权仓库每 300 秒发现；暂停的 installation 和归档仓库跳过。
+App 需有 Issues write 权限；初始化失败不阻塞服务 readiness，日志记录待重试原因，限流可延长等待。
+这只创建仓库标签定义，不给 Issue/PR 自动添加触发标签。缺少标签或权限仍可能保留待处理结果。
 `flow show` 区分清理与 GitHub 回写进度；清理已确认但回写被明确拒绝时，修正远端原因后
 执行 `flow retry <id>`，只重置原 job 的失败 effects，保留已完成回执、attempt 和 worker journal。
 评论发送前的本地认证失败也可在修复凭据后按此方式重试；后续查询失败不会清除已有不确定发送记录。
