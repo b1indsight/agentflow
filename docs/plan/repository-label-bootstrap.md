@@ -1,6 +1,6 @@
 # 自动创建仓库标签 — Feature record
 
-**Stage:** Review — 轻量化实现与验证见 [004]，审查及交付状态以 PR 为准；未合并或部署。
+**Stage:** Review — 轻量化实现见 [004]，测试精简与验证见 [005]；未合并或部署。
 **PR:** [#105](https://github.com/b1indsight/agentflow/pull/105)，目标 `main`；源工作区的其他改动保留。
 **Bookmark:** `feat/repository-label-bootstrap`
 
@@ -253,3 +253,14 @@ API 依据：[App installation 枚举](https://docs.github.com/en/rest/apps/apps
 - **消融：** 仅在临时 Python 进程移除缓存跳过条件，相同混合仓库测试因成功仓库在第 300 秒
   被提前检查而失败；完整实现通过。内存缓存用于满足每日频率，不再引入恢复账本或持久任务机制。
   证据：`.amp/in/artifacts/repository-label-lightweight-ablation.log`；没有真实 GitHub 标签写入。
+
+### [005] — 2026-10-21 — 按用户要求精简测试，不改产品代码
+
+- **精简：** 标签测试从 338 行减至 243 行，15 个情形合并为 10 个；合并适配器与扫描器分页测试、
+  混合仓库与每日失败恢复场景，用一个不可读仓库代表错误列表，通用 HTTP 错误分类沿用已有测试。
+  三种 Retry-After 入口复用参数化验证，删除调用顺序等实现细节断言；路由移除一项重复大小写情形。
+- **保留：** 分页过滤、授权移除、只补缺失与重复运行、422 正反例、响应丢失、分频与失败重试、
+  重启重新读取、限流等待、readiness 和取消；正常触发及取消继续覆盖两种大小写。
+- **验证：** 相关测试 **20 passed**，全量 **862 passed**；Ruff、Mypy（196 文件）通过。
+  在临时进程分别移除缓存跳过、installation 续页及只补缺失保护，三个回归均被精简后的测试捕获。
+  日志为 `.amp/in/artifacts/repository-label-trim-{tests,checks,mutations}.log`；未改产品代码或执行真实 GitHub 写入。

@@ -81,16 +81,12 @@ async def test_allowed_label_creates_one_flow_and_job(
     assert store.workers.assign_job("worker-1", "assignment-2") is None
 
 
-@pytest.mark.parametrize("label", ["flow", "Flow"])
 @pytest.mark.asyncio
 async def test_bot_and_non_allowlisted_users_do_not_trigger(
-    router: EventRouter, store: Store, label: str,
+    router: EventRouter, store: Store,
 ) -> None:
-    bot = issue_event(action="labeled", sender="flowtool[bot]")
-    outsider = issue_event(action="labeled", sender="mallory")
-    bot["label"]["name"] = outsider["label"]["name"] = label
-    router.dispatch("issues", "bot-delivery", bot)
-    router.dispatch("issues", "outsider-delivery", outsider)
+    router.dispatch("issues", "bot-delivery", issue_event(action="labeled", sender="flowtool[bot]"))
+    router.dispatch("issues", "outsider-delivery", issue_event(action="labeled", sender="mallory"))
 
     assert store.flows.get_active_flow("owner/repo", 7) is None
     assert store.webhooks.event_seen("bot-delivery") is False
