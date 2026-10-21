@@ -76,18 +76,29 @@ class ImageCommands(Commands):
         assert check[2] == (TOOLS / "column-check.py").read_text()
         # Replace only the socket transport. Candidate DDL, isolated databases and
         # the production checker all execute against the real test PostgreSQL.
+        # CI requires TCP password auth. Give the probe role its own password,
+        # preserving its non-superuser privileges instead of running DDL as admin.
         bootstrap = (
             "import os, psycopg\n"
+            "from secrets import token_urlsafe\n"
+            "from psycopg import sql\n"
             "from psycopg.conninfo import make_conninfo\n"
             "import app.persistence.schema as schema\n"
             f"schema.SCHEMAS = {schemas!r}\n"
             "namespace = {'__name__': 'column_probe'}\n"
             f"exec({check[2]!r}, namespace)\n"
             "dsn = os.environ['FLOWTOOL_DATABASE_URL']\n"
-            "with psycopg.connect(dsn) as connection: admin = connection.info.user\n"
-            "namespace['connect'] = lambda database, user: psycopg.connect(\n"
-            "    make_conninfo(dsn, dbname=database, user=admin if user == 'postgres' else user),\n"
-            "    autocommit=True)\n"
+            "password = token_urlsafe(32)\n"
+            "def connect(database, user):\n"
+            "    if user == 'postgres':\n"
+            "        return psycopg.connect(make_conninfo(dsn, dbname=database), autocommit=True)\n"
+            "    with psycopg.connect(dsn, autocommit=True) as admin:\n"
+            "        admin.execute(sql.SQL('ALTER ROLE {} PASSWORD {}').format(\n"
+            "            sql.Identifier(user), sql.Literal(password)))\n"
+            "    return psycopg.connect(\n"
+            "        make_conninfo(dsn, dbname=database, user=user, password=password),\n"
+            "        autocommit=True)\n"
+            "namespace['connect'] = connect\n"
             "namespace['main']()\n"
         )
         return REAL_RUN(
@@ -169,6 +180,7 @@ class ImageCommands(Commands):
         elif operation == "get" and resource.startswith("pod/agentflow-image-check-"):
             if self.failure != "pull" and self.probe_result is None:
                 self.probe_result = self.run_probe()
+                assert self.probe_result.returncode == 0, self.probe_result.stderr
             result = {
                 "metadata": self.probe["metadata"],
                 "status": {

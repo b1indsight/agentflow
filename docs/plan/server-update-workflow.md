@@ -398,3 +398,15 @@ PYTHONPATH="$PWD" FLOWTOOL_TEST_DATABASE_URL="$SCRATCH_TEST_DATABASE_URL" \
 另测联合移除 SHA/新实例确认，同样捕获旧实例提前 resume。保留这些机制；没有增加全员版本
 检查或全员等待。原始结果位于本地 `.amp/in/artifacts/ablation-*.log`，全量/构建/安装验证
 分别为 `pytest-full.log`、`build.log`、`native-package.log`；以上均为未跟踪的本地证据。
+
+### 2026-10-21 — 修复 CI 列检查的测试认证适配
+
+[实现提交的 CI](https://github.com/b1indsight/agentflow/actions/runs/39482720558) 中，
+`test_image_update.py` 的 21 个失败均发生在临时列检查角色登录时。独立 PostgreSQL 17
+对照复现：TCP + SCRAM 为 21 failed / 4 passed，trust socket 为 25 passed。
+原因是测试仅替换用户名，却继续使用原数据库用户的密码；临时角色没有配置密码。
+
+测试适配现在为临时角色配置独立随机密码，并在子进程失败时显示 stderr；候选 DDL 仍以
+非超级用户执行，不放宽 CI 认证，不修改实际部署探针或删列规则。修复后 TCP 密码认证下
+全量 927 passed，trust socket 下相关 25 passed；角色权限检查及尝试自提权被拒绝的验证
+通过，Ruff lint/format 通过。证据为本地 `.amp/in/artifacts/ci-auth-fix-*.log`。
