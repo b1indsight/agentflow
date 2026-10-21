@@ -106,6 +106,7 @@ class WorkerRuntime:
             worker_id=self.settings.worker_id,
             session=session,
             revision_timeout=self.settings.codex_run_timeout_seconds,
+            workspace_limit=self.settings.worker_repo_workspace_limit,
         )
         self.client = WorkerClient(
             worker_id=self.settings.worker_id,

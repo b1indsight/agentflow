@@ -10,9 +10,11 @@ def git_credential_environment(push_token: SecretStr | None) -> dict[str, str]:
     return {
         "FLOWTOOL_PUSH_TOKEN": push_token.get_secret_value(),
         "GIT_TERMINAL_PROMPT": "0",
-        "GIT_CONFIG_COUNT": "2",
+        "GIT_CONFIG_COUNT": "3",
         "GIT_CONFIG_KEY_0": "credential.https://github.com.username",
         "GIT_CONFIG_VALUE_0": "x-access-token",
         "GIT_CONFIG_KEY_1": "credential.https://github.com.helper",
-        "GIT_CONFIG_VALUE_1": "!f() { echo password=$FLOWTOOL_PUSH_TOKEN; }; f",
+        "GIT_CONFIG_VALUE_1": "",
+        "GIT_CONFIG_KEY_2": "credential.https://github.com.helper",
+        "GIT_CONFIG_VALUE_2": '!f() { [ "$1" = get ] && printf "password=%s\\n" "$FLOWTOOL_PUSH_TOKEN"; }; f',
     }

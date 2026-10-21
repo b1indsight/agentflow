@@ -91,10 +91,16 @@ def archive_progress(
     if archive is None:
         return "blocked: no archive job; manual reconciliation required"
     if archive.result_applied_at is not None and archive.state is JobState.DONE:
-        return f"complete at {archive.result_applied_at.isoformat()}"
+        plan = result_store.get_plan(archive.id)
+        retained = "; workspace retained for reuse" if (
+            plan is not None and plan.archive is not None and plan.archive.cleanup == "released"
+        ) else ""
+        return f"complete at {archive.result_applied_at.isoformat()}{retained}"
     if archive.result_received_at is not None and archive.result_applied_at is None:
         plan = result_store.get_plan(archive.id)
         if plan is not None and plan.archive is not None:
+            cleanup = ("released (workspace retained)" if plan.archive.cleanup == "released"
+                       else "cleaned")
             unfinished = [record for record in result_store.list_effects(archive.id)
                           if record.state not in {EffectState.SUCCEEDED, EffectState.SKIPPED}]
             if unfinished:
@@ -102,9 +108,9 @@ def archive_progress(
                 reason = first.last_error or first.state.value
                 retry = ("; use flow retry after resolving the error"
                          if first.state is EffectState.FAILED else "")
-                return (f"cleaned; GitHub status pending ({len(unfinished)} effects): "
+                return (f"{cleanup}; GitHub status pending ({len(unfinished)} effects): "
                         f"{first.effect_key}: {reason}{retry}")
-            return "cleaned; waiting for atomic completion"
+            return f"{cleanup}; waiting for atomic completion"
         return "result received; waiting for verification"
     if archive.state is JobState.FAILED:
         return "cleanup failed; original worker retained; use flow retry after resolving the error"

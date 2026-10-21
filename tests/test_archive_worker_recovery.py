@@ -11,6 +11,7 @@ from app.contracts.protocol import (
     PROTOCOL_VERSION,
     Assignment,
     InitialTask,
+    InitialTaskResult,
     ResultAccepted,
     RevisionTask,
     Succeeded,
@@ -19,10 +20,11 @@ from app.contracts.protocol import (
 )
 from app.controler.workers.conversation import ConversationBroker
 from app.controler.workers.gateway import WorkerGateway
+from app.controler.workflow.archive import archive_progress
 from app.controler.workflow.service import ControlService
 from app.domain.models import FlowState, JobKind, JobState
 from app.worker.execution.executor import WorkerExecutor
-from app.worker.execution.vcs import prepare_flow_repo
+from app.worker.execution.workspaces import RepositoryWorkspaces
 from app.worker.runtime import WorkerRootLock
 from app.worker.state.session import WorkerSession
 from app.worker.transport.client import WorkerClient
@@ -101,8 +103,9 @@ async def connect_once(store, subject, executor, journal, *, drop_ack=False, cli
 
 @pytest.mark.parametrize("window", ["before-received", "before-delete", "after-delete",
                                    "terminal", "pending", "ack", "started-lost", "result-started-lost"])
+@pytest.mark.parametrize("overflow", [False, True])
 async def test_original_worker_recovers_cleanup_and_replays_without_redeleting(
-    store, tmp_path, monkeypatch, window, recording_resources,
+    store, tmp_path, monkeypatch, window, recording_resources, overflow,
 ):
     flow, job, task, subject = await ready_archive(
         store, start=window not in {"before-received", "started-lost", "result-started-lost"},
@@ -112,8 +115,15 @@ async def test_original_worker_recovers_cleanup_and_replays_without_redeleting(
     managed_seed = root / "repos/owner/repo"
     managed_seed.parent.mkdir(parents=True)
     shutil.move(seed, managed_seed)
-    repo = await prepare_flow_repo(managed_seed, flow.id)
-    other_repo = await prepare_flow_repo(managed_seed, 999)
+    pool = RepositoryWorkspaces(root, "worker-a", limit=2)
+    if overflow:
+        await pool.acquire("owner/repo", 999, base_branch="main", remote="origin", push_token=None)
+    binding = await pool.acquire("owner/repo", flow.id, base_branch="main", remote="origin", push_token=None)
+    repo = pool.path(binding)
+    other = (pool.lookup("owner/repo", 999) if overflow else await pool.acquire(
+        "owner/repo", 999, base_branch="main", remote="origin", push_token=None,
+    ))
+    other_repo = pool.path(other)
     journal = WorkerSession(root)
     prior = store.jobs.list_jobs(flow.id)[-2]
     # Preserve the preceding acknowledged job, as a real worker does between assignments.
@@ -123,6 +133,7 @@ async def test_original_worker_recovers_cleanup_and_replays_without_redeleting(
             repo=flow.repo, issue_number=703, issue_title="Issue", issue_body="", branch="flow/1"),
     ))
     journal.record_started()
+    journal.bind_workspace(binding)
     terminal = parse_worker_message(json.dumps(prior.result_payload))
     assert isinstance(terminal, Succeeded)
     journal.record_terminal(terminal)
@@ -166,12 +177,17 @@ async def test_original_worker_recovers_cleanup_and_replays_without_redeleting(
             await connect_once(store, subject, executor, WorkerSession(root))
     finally:
         lock.release()
-    assert not repo.exists() and managed_seed.exists() and other_repo.exists()
+    assert repo.exists() is not overflow
+    assert managed_seed.exists() and other_repo.exists()
     assert not agent.started
     assert journal.load() is None
     assert store.flows.get_flow(flow.id).state is FlowState.SUCCEEDED
     assert store.workers.get_flow_execution(flow.id).released_at is not None
     assert store.jobs.get_job(job.id).state is JobState.DONE
+    progress = archive_progress(flow, store.jobs.list_jobs(flow.id),
+                               result_store=store.results, workers=store.workers)
+    assert progress.startswith("complete at ")
+    assert ("workspace retained for reuse" in progress) is not overflow
     next_flow = ControlService(
         database=store.database,
     ).on_trigger("owner/repo", 999, 42)
@@ -193,8 +209,20 @@ async def test_merge_recovery_preserves_coding_completion_and_root_provenance(
     managed_seed = root / "repos/owner/repo"
     managed_seed.parent.mkdir(parents=True)
     shutil.move(seed, managed_seed)
-    repo = await prepare_flow_repo(managed_seed, flow.id)
+    pool = RepositoryWorkspaces(root, "worker-a", limit=2)
+    binding = await pool.acquire("owner/repo", flow.id, base_branch="main", remote="origin", push_token=None)
+    repo = pool.path(binding)
     journal = WorkerSession(root)
+    # The rejected revision has not started, but its preceding INITIAL owns this allocation.
+    journal.record_received(Assignment(job_id=old.id - 1, flow_id=flow.id,
+        assignment_token="previous", connection_epoch="epoch-a",
+        task=InitialTask(flow_id=flow.id, attempt_id=1, repo=flow.repo,
+            issue_number=1, issue_title="Issue", issue_body="", branch="flow/1")))
+    journal.record_started()
+    journal.bind_workspace(binding)
+    journal.record_terminal(Succeeded(job_id=old.id - 1, assignment_token="previous",
+        connection_epoch="epoch-a", result=InitialTaskResult(session_id="session", last_message="", exit_code=0)))
+    journal.acknowledge(old.id - 1, JobState.DONE)
     assignment = Assignment(job_id=old.id, flow_id=flow.id, assignment_token=old.assignment_token,
         connection_epoch="epoch-a", task=RevisionTask.model_validate(old.payload["revision"]))
     journal.record_received(assignment)
@@ -215,4 +243,4 @@ async def test_merge_recovery_preserves_coding_completion_and_root_provenance(
         lock.release()
     assert store.flows.get_flow(flow.id).state is FlowState.SUCCEEDED
     assert store.workers.get_flow_execution(flow.id).released_at is not None
-    assert not repo.exists() and managed_seed.exists()
+    assert repo.exists() and managed_seed.exists()

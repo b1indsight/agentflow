@@ -36,7 +36,8 @@ ARG CODEX_VERSION=0.153.4
 ARG JJ_VERSION=0.45.1
 ARG JJ_SHA256=f35438350b5d61963aac5dd74ede510b31d6b9690769d1a6268cf058cc825f72
 RUN test "$(dpkg --print-architecture)" = amd64 \
-    && apt-get update && apt-get install -y --no-install-recommends git curl nodejs npm \
+    && apt-get update && apt-get install -y --no-install-recommends git gh curl nodejs npm \
+    && gh --version \
     && rm -rf /var/lib/apt/lists/* \
     && npm install --global --ignore-scripts --no-audit --no-fund "@openai/codex@${CODEX_VERSION}" \
     && npm cache clean --force \
