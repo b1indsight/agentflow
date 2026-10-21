@@ -12,7 +12,6 @@ from starlette.testclient import TestClient
 from app.contracts.protocol import PROTOCOL_VERSION
 from app.controler.api import create_app
 from app.controler.console.sync import ConsoleSynchronizer
-from app.controler.workflow.service import ControlService
 from app.domain.models import DeliveryState, FlowState, JobKind
 from app.github.console import Observation
 from app.persistence.activity import ActivityStore
@@ -157,24 +156,26 @@ def test_console_commands_require_owner_json_and_same_origin(
         assert response.status_code == 200
         assert response.headers["cache-control"] == "no-store"
         assert client.post(f"/api/flows/99999/{command}", json={}, headers=headers).status_code == 404
-        if command == "archive":
-            assert response.json()["phase"] == "done"
-            assert response.json()["lifecycle"] == "cancelled"
-            assert response.json()["archived_at"] is not None
-            assert client.post(path, json={}, headers=headers).json() == response.json()
-            for state in (FlowState.ACTIVE, FlowState.FAILED, FlowState.SUCCEEDED):
-                flow.state = state
-                store.flows.update_flow(flow)
-                assert client.post(path, json={}, headers=headers).status_code == 409
-                assert console.detail(flow.id).archived_at is None
-        else:
-            assert response.json()["phase"] == "queued"
-            assert response.json()["lifecycle"] == "active"
-            assert response.json()["archived_at"] is None
-            repeated = client.post(path, json={}, headers=headers)
-            assert repeated.status_code == 409
-            assert repeated.json() == {"detail": "retry_no_change"}
-            assert len(store.jobs.list_jobs(flow.id)) == 1
+
+
+def test_manual_archive_is_idempotent_and_only_accepts_cancelled_flows(console_runtime, store):
+    flow = store.flows.create_flow("owner/repo", 7, 42)
+    flow.state = FlowState.CANCELLED
+    store.flows.update_flow(flow)
+    path = f"/api/flows/{flow.id}/archive"
+    with TestClient(create_app(console_runtime)) as client:
+        headers = console_runtime.issuer.headers()
+        response = client.post(path, json={}, headers=headers)
+        assert response.status_code == 200
+        assert response.json()["phase"] == "done"
+        assert response.json()["lifecycle"] == "cancelled"
+        assert response.json()["archived_at"] is not None
+        assert client.post(path, json={}, headers=headers).json() == response.json()
+        for state in (FlowState.ACTIVE, FlowState.FAILED, FlowState.SUCCEEDED):
+            flow.state = state
+            store.flows.update_flow(flow)
+            assert client.post(path, json={}, headers=headers).status_code == 409
+            assert ConsoleStore(store.database).detail(flow.id).archived_at is None
 
 
 def test_retry_commits_before_waking_workers_on_the_event_loop(console_runtime, store):
@@ -199,6 +200,11 @@ def test_retry_commits_before_waking_workers_on_the_event_loop(console_runtime, 
         response = client.post(
             f"/api/flows/{flow.id}/retry", json={}, headers=console_runtime.issuer.headers()
         )
+        repeated = client.post(
+            f"/api/flows/{flow.id}/retry", json={}, headers=console_runtime.issuer.headers()
+        )
+        assert repeated.status_code == 409
+        assert repeated.json() == {"detail": "retry_no_change"}
         client.portal.call(lambda: None)
     assert response.status_code == 200
     assert response.json()["lifecycle"] == "active"
@@ -229,58 +235,22 @@ def test_concurrent_browser_retries_enqueue_only_once(console_runtime, store):
     console_runtime.gateway.notify_jobs.assert_called_once_with()
 
 
-@pytest.mark.parametrize(
-    "blocker,code",
-    [
-        ("stop", "retry_stop_pending"),
-        ("closed", "retry_delivery_closed"),
-        ("result", "retry_result_pending"),
-        ("archive", "retry_archive_worker_unavailable"),
-    ],
-)
-def test_browser_retry_preserves_business_blockers(console_runtime, store, blocker, code):
-    # Showing a blocked card must not bypass stop proof, unsettled results or archive affinity.
+def test_browser_retry_reports_business_refusal_without_changes(console_runtime, store):
+    # The API translates canonical refusals; individual safety rules have service-level coverage.
     flow = store.flows.create_flow("owner/repo", 7, 42)
-    attempt = store.flows.create_attempt(flow.id)
-    flow.current_attempt_id = attempt.id
-    store.flows.update_flow(flow)
-    job = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
-    store.workers.worker_connected("original", PROTOCOL_VERSION, "epoch")
-    assert store.workers.assign_job("original", "private-token", "epoch")
-    if blocker == "stop":
-        assert store.workers.start_assignment(
-            job.id, attempt.id, "original", "private-token", "epoch"
-        )
-        ControlService(database=store.database).cancel(flow)
-    elif blocker == "result":
-        with store.connection() as connection:
-            connection.execute("UPDATE jobs SET result_received_at=now() WHERE id=%s", (job.id,))
-    else:
-        delivery = store.deliveries.get_or_create_delivery(flow.id, "flow/7")
-        delivery.state = DeliveryState.MERGED if blocker == "archive" else DeliveryState.CLOSED
-        store.deliveries.update_delivery(delivery)
-        if blocker == "archive":
-            with store.connection() as connection:
-                connection.execute(
-                    "UPDATE jobs SET kind='archive',state='failed' WHERE id=%s", (job.id,)
-                )
-                connection.execute("UPDATE workers SET current_job_id=NULL,status='offline'")
-    before = (
-        store.flows.get_flow(flow.id),
-        store.jobs.list_jobs(flow.id),
-        store.workers.get_flow_execution(flow.id),
-    )
+    delivery = store.deliveries.get_or_create_delivery(flow.id, "flow/7")
+    delivery.state = DeliveryState.CLOSED
+    store.deliveries.update_delivery(delivery)
+    console = ConsoleStore(store.database)
+    before = console.detail(flow.id)
     with TestClient(create_app(console_runtime)) as client:
         response = client.post(
             f"/api/flows/{flow.id}/retry", json={}, headers=console_runtime.issuer.headers()
         )
     assert response.status_code == 409
-    assert response.json() == {"detail": code}
-    assert (
-        store.flows.get_flow(flow.id),
-        store.jobs.list_jobs(flow.id),
-        store.workers.get_flow_execution(flow.id),
-    ) == before
+    assert response.json() == {"detail": "retry_delivery_closed"}
+    assert console.detail(flow.id) == before
+    assert store.jobs.list_jobs(flow.id) == []
     console_runtime.gateway.notify_jobs.assert_not_called()
 
 
