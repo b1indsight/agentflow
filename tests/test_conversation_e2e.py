@@ -45,13 +45,16 @@ class HistoryStore(RemoteStore):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("phase", ["worker", "preparation", "tool", "result"])
-@pytest.mark.parametrize("backend", ["codex", "amp"])
+@pytest.mark.parametrize("backend,phase", [
+    (backend, phase) for backend in ("codex", "amp")
+    for phase in ("worker", "preparation", "tool", "result")
+] + [("amp", "slow_export")])
 async def test_http_query_while_worker_or_control_busy_and_idle(tmp_path, phase, monkeypatch, backend) -> None:
     started, release = asyncio.Event(), asyncio.Event()
+    blocked_phase = "worker" if phase == "slow_export" else phase
 
     async def block(selected):
-        if phase == selected:
+        if blocked_phase == selected:
             started.set()
             await release.wait()
 
@@ -82,6 +85,9 @@ async def test_http_query_while_worker_or_control_busy_and_idle(tmp_path, phase,
     other_session = ("T-" if backend == "amp" else "") + OTHER_SESSION
     if backend == "amp":
         async def export(args, **kwargs):
+            if phase == "slow_export" and args[2] == session:
+                # Scale time 1:10: a valid 15s export must outlast the old 10s broker budget.
+                await asyncio.sleep(1.5)
             entries = [("user", "PR feedback"), ("assistant", "Fixed")] if args[2] == session else [("assistant", "Follow-up")]
             messages = [{"role": role, "protocolMessageID": f"M-{index}",
                          "content": [{"type": "text", "text": text}]}
@@ -99,7 +105,10 @@ async def test_http_query_while_worker_or_control_busy_and_idle(tmp_path, phase,
         results=gateway_coordinator.results,
         conversations=ConversationBroker(),
     )
-    gateway.conversations.timeout = 1
+    if phase == "slow_export":
+        gateway.conversations.timeout /= 10
+    else:
+        gateway.conversations.timeout = 1
     service = ConversationService(gateway.conversations, database=store.database, )
     issuer = AccessIssuer()
     runtime = Mock(spec=ServerRuntime, settings=issuer.settings, access=issuer.auth, conversations=service)

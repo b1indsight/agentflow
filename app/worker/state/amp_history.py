@@ -6,7 +6,6 @@ import asyncio
 import hashlib
 import json
 import os
-import re
 import tempfile
 import threading
 import time
@@ -22,7 +21,12 @@ from app.contracts.conversation import (
     HistoryPage,
     HistoryQuery,
 )
-from app.worker.execution.amp_cli import amp_environment, run_amp, write_amp_settings
+from app.worker.execution.amp_cli import (
+    amp_environment,
+    redact_amp_text,
+    run_amp,
+    write_amp_settings,
+)
 
 MAX_EXPORT = 2 * 1024 * 1024
 MAX_ITEMS = 500
@@ -30,10 +34,6 @@ EXPORT_TIMEOUT = 20
 CACHE_SIZE = 16
 CACHE_SECONDS = 2
 MAX_PAGE = 256 * 1024
-_SECRET_PATTERN = re.compile(
-    r"\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]{16,})"
-)
-_BEARER_PATTERN = re.compile(r"(?i)(Bearer\s+)[A-Za-z0-9._~+/-]+")
 
 
 @dataclass
@@ -196,11 +196,9 @@ class AmpHistory:
 
     @staticmethod
     def _text(value: str) -> tuple[str, bool]:
-        for key in ("AMP_API_KEY", "OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN",
-                    "FLOWTOOL_WORKER_TOKEN", "FLOWTOOL_PUSH_TOKEN", "FLOWTOOL_MCP_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"):
-            secret = os.environ.get(key)
-            if secret:
-                value = value.replace(secret, "[REDACTED]")
-        value = _SECRET_PATTERN.sub("[REDACTED]", value)
-        value = _BEARER_PATTERN.sub(r"\1[REDACTED]", value)
+        secrets = (os.environ.get(key, "") for key in (
+            "AMP_API_KEY", "OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN",
+            "FLOWTOOL_WORKER_TOKEN", "FLOWTOOL_PUSH_TOKEN", "FLOWTOOL_MCP_TOKEN", "GH_TOKEN", "GITHUB_TOKEN",
+        ))
+        value = redact_amp_text(value, secrets)
         return value[:8192], len(value) > 8192

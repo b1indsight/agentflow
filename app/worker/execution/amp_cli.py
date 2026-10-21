@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import signal
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,6 +30,19 @@ _ENVIRONMENT_KEYS = frozenset({
     "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "NODE_EXTRA_CA_CERTS",
     "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
 })
+_SECRET_PATTERN = re.compile(
+    r"\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|sgamp_[A-Za-z0-9_-]+|sk-[A-Za-z0-9_-]{16,})"
+)
+_BEARER_PATTERN = re.compile(r"(?i)(Bearer\s+)[A-Za-z0-9._~+/-]+")
+
+
+def redact_amp_text(value: str, secrets: Iterable[str] = ()) -> str:
+    """Redact current credentials and tokens introduced by other clients before retaining output."""
+    for secret in secrets:
+        if secret:
+            value = value.replace(secret, "[REDACTED]")
+    value = _SECRET_PATTERN.sub("[REDACTED]", value)
+    return _BEARER_PATTERN.sub(r"\1[REDACTED]", value)
 
 
 def amp_environment(

@@ -20,7 +20,7 @@ THREAD = "T-01a15d70-eb3d-722c-9f6d-563dd65eb0a8"
 def stream(*, result=None, session=THREAD, **overrides):
     final = {"type": "result", "subtype": "success", "is_error": False,
              "session_id": session, "result": result or '{"caller_owned":true}'} | overrides
-    return "\n".join(json.dumps(event) for event in [
+    return "\n".join(json.dumps(event, ensure_ascii=False) for event in [
         {"type": "system", "subtype": "init", "session_id": THREAD, "tools": ["shell_command"]}, final,
     ]).encode()
 
@@ -70,6 +70,18 @@ async def test_amp_uses_current_capabilities_and_raw_caller_schema(monkeypatch, 
     assert all(not directory.exists() for directory in directories)
 
 
+async def test_jsonl_keeps_unicode_separators_inside_the_final_answer(monkeypatch, tmp_path):
+    # These are valid JSON string characters, not JSONL record delimiters.
+    answer = json.dumps({"caller_owned": "a\u0085b\u2028c\u2029d"}, ensure_ascii=False)
+
+    async def execute(*args, **kwargs):
+        return AmpProcessResult(stream(result=answer), b"", 0)
+
+    monkeypatch.setattr("app.worker.execution.amp.run_amp", execute)
+    result = await AmpAgent(trusted_host=True).start("task", tmp_path)
+    assert result.exit_code == 0 and result.last_message == answer
+
+
 @pytest.mark.parametrize("stdout,exit_code", [
     (stream(is_error=True, subtype="error_during_execution", error="User cancelled"), 0),
     (stream(session="T-00000000-0000-0000-0000-000000000000"), 0),
@@ -89,12 +101,21 @@ async def test_incomplete_or_failed_execution_never_succeeds(monkeypatch, tmp_pa
 
 async def test_unproven_missing_thread_does_not_trigger_replay(monkeypatch, tmp_path):
     # A single observed stderr spelling cannot establish all authentication/network cases.
+    monkeypatch.setenv("AMP_API_KEY", "current-test-token")
+
     async def execute(*args, **kwargs):
-        return AmpProcessResult(b"", f"Thread https://ampcode.com/threads/{THREAD} does not exist.\n".encode(), 1)
+        stderr = ("startup diagnostic\n" * 300
+                  + f"Thread https://ampcode.com/threads/{THREAD} does not exist.\n"
+                  + "AMP_API_KEY=current-test-token other=sgamp_old-client_ABC\n")
+        return AmpProcessResult(b"", stderr.encode(), 1)
 
     monkeypatch.setattr("app.worker.execution.amp.run_amp", execute)
     result = await AmpAgent(trusted_host=True).resume(THREAD, "task", cwd=tmp_path)
     assert result.exit_code != 0
+    assert result.failure_detail and "does not exist" in result.failure_detail
+    assert len(result.failure_detail) <= 4000
+    assert "current-test-token" not in result.failure_detail
+    assert "sgamp_old-client_ABC" not in result.failure_detail
     with pytest.raises(ValueError, match="Amp thread"):
         await AmpAgent(trusted_host=True).resume("../thread", "task", cwd=tmp_path)
     with pytest.raises(RuntimeError, match="trusted-host"):

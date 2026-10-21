@@ -24,7 +24,7 @@ from app.domain.delivery_models import DeliveryReceipt
 from app.domain.models import FeedbackRef, JobState, RevisionCodingOutput, VcsKind
 from app.domain.review_models import ReviewFeedback
 
-PROTOCOL_VERSION: Literal[15] = 15
+PROTOCOL_VERSION: Literal[16] = 16
 
 
 class ProtocolModel(BaseModel):
@@ -34,7 +34,7 @@ class ProtocolModel(BaseModel):
 
 
 class Message(ProtocolModel):
-    protocol_version: Literal[15] = PROTOCOL_VERSION
+    protocol_version: Literal[16] = PROTOCOL_VERSION
 
 
 class ConversationQuery(Message):

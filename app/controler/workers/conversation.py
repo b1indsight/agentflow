@@ -41,7 +41,8 @@ class ConversationBroker:
     """Correlate bounded live requests; no queue, retries, or transcript storage."""
 
     def __init__(self) -> None:
-        self.timeout = 10.0
+        # Amp export allows 20s, followed by up to 9s of descendant/process cleanup.
+        self.timeout = 30.0
         self.connections: dict[str, tuple[str, WorkerConnection]] = {}
         self.pending: dict[str, PendingQuery] = {}
 

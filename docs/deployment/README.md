@@ -118,6 +118,9 @@ Amp 的最终业务 JSON 通过 Schema 提示与现有 Pydantic/VCS 核验接收
 
 历史导出单次最多 20 秒、2 MiB，最多两个并发；只缓存已脱敏的公开块，缓存至多 16 个 thread，
 两秒后重新导出。页面最多 500 项、256 KiB；导出超限报告 `history_limit`，不展示不完整快照。
+控制侧单次 worker 查询允许 30 秒，覆盖导出与清理预算，不在导出仍正常进行时提前按旧 10 秒超时。
+公开历史与执行诊断共用脱敏规则，过滤 `sgamp_` 等 token；初始化前失败保留有界、脱敏 stderr，
+仍不据此自动重跑任务。
 取消/超时先 SIGTERM，等待最多三秒后升级清理捕获到的子进程组。`ps` 必须可用（Linux worker
 镜像包含 procps）；进程树快照有竞态，任意双重 fork/脱离进程树的守护进程不在可靠回收保证内。
 worker 容器是长期运行的，不会在每次取消后销毁；需要更强保证时必须使用外部每次执行隔离。
@@ -160,9 +163,17 @@ worker 不自动读取 `.env`，上述加载仅针对 worker 私有文件。回�
   也继承 bot 环境，但不经包装的本地期限检查。认证最终由 GitHub 判断，任何权限失败都不
   回退个人凭据或自动重放写操作。仍须专用账户/容器/VM 隔离。
 
-Amp 接入要求 serve/worker 同步使用 protocol v15；journal 仍为 bootstrap 使用的 v4，不迁移更早
-格式。在没有活跃/未知执行且归档与 ACK 完成后升级两端。保留旧数据作人工核查，不将旧
-per-Flow 目录迁入池，也不混跑协议版本。
+取消回收沿用原停止握手，以 `StopAccepted.release_workspace` 区分取消删除和 merge 保留。
+worker 核验 ACK 后删除准确归属的取消 workspace，包括未提交、未跟踪文件及缓存，
+成功后才落盘 journal ACK 并读取下一任务；不保存快照、不增加清理完成回执。
+控制面仍在停止确认时释放绑定，`stop_pending=False` 不证明磁盘删除完成。清理失败重连时，
+已派发的下一 Flow 可能无法自动推进；这是 #109 已披露的 high，当前不建议合并部署。
+已知 PR 合并则保留原目录给 ARCHIVE，详细边界见[取消说明](../operations/cancel-drain.md)。
+
+Amp 接入在收窄后的取消回收合同上递增为 protocol v16，沿用 journal v4 / workspace manifest v1，
+数据库 schema 不变；serve/worker 必须同步升级，不混跑原 Amp v15 或仅包含取消回收的 v15。
+旧 journal 不自动迁移；在没有活跃/未知执行且归档与停止 ACK 完成后升级两端。
+保留旧数据作人工核查，不将旧 per-Flow 目录迁入池，详见[升级说明](../operations/upgrade.md)。
 
 ## 3. 配置 Cloudflare 入口
 

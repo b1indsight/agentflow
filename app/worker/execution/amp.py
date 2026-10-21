@@ -16,6 +16,7 @@ from app.worker.execution.amp_cli import (
     AMP_TOOLS,
     AmpProcessResult,
     amp_environment,
+    redact_amp_text,
     run_amp,
     write_amp_settings,
 )
@@ -57,7 +58,7 @@ def _outcome(process: AmpProcessResult, expected: str | None) -> CodingExecution
     try:
         init: _Init | None = None
         final: _Result | None = None
-        for line in process.stdout.decode().splitlines():
+        for line in process.stdout.split(b"\n"):
             if not line.strip():
                 continue
             event = json.loads(line)
@@ -100,6 +101,8 @@ def _outcome(process: AmpProcessResult, expected: str | None) -> CodingExecution
         detail = ("Amp execution timed out" if process.timed_out else
                   "Amp execution output exceeded byte limit" if process.overflow else
                   str(error) if type(error) is ValueError else "invalid Amp event stream")
+        if init is None and process.stderr.strip():
+            detail += ": " + process.stderr.decode(errors="replace").strip()
         return CodingExecutionResult(
             session_id=session_id, last_message="", exit_code=124 if process.timed_out else process.exit_code or 1,
             failure_detail=detail,
@@ -159,10 +162,7 @@ class AmpAgent:
             # proven that every missing-thread rejection precedes all execution.
             secrets = [value for key, value in environment.items()
                        if key in {"AMP_API_KEY", "FLOWTOOL_MCP_TOKEN", "FLOWTOOL_PUSH_TOKEN", "GH_TOKEN"} and value]
-            for secret in secrets:
-                result.last_message = result.last_message.replace(secret, "[REDACTED]")
-                if result.failure_detail:
-                    result.failure_detail = result.failure_detail.replace(secret, "[REDACTED]")
+            result.last_message = redact_amp_text(result.last_message, secrets)
             if result.failure_detail:
-                result.failure_detail = result.failure_detail[-4000:]
+                result.failure_detail = redact_amp_text(result.failure_detail, secrets)[-4000:]
             return result

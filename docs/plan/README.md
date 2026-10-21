@@ -6,8 +6,9 @@
 ## 当前计划
 
 - [`worker-amp-cli.md`](worker-amp-cli.md) — 可选 Amp CLI 后端已实现：同 thread 修订、原生历史、
-  protocol v15、取消监督和固定版本镜像；本地真实 adapter 及回归验证通过，线上闭环未验收。
-  独立交付依赖 PR #103 的 bootstrap / GitHub capability 合同，未合并或部署。
+  protocol v16、取消监督和固定版本镜像；重放到收窄后的 PR #109，沿用 journal v4 / manifest v1。
+  原 bootstrap 合同已随 PR #103 合并 main，当前组合复验 938 项通过；
+  PR #107 与 PR #109 均未合并或部署，依赖仍有 high，线上闭环未验收，当前不建议合并。
 
 - [`worker-repo-bootstrap.md`](worker-repo-bootstrap.md) — [PR #103](https://github.com/b1indsight/agentflow/pull/103)：自动 clone、bot Git/gh 及有上限的位置池已本地实现；完整副本温热复用，溢出使用临时 Git worktree；独立验证与审查状态见实施记录，尚未合并或部署。
 

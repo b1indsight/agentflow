@@ -1,7 +1,7 @@
 # Worker Amp CLI 适配 — Feature record
 
-**Stage:** Implementation — 本地实现与验证完成；Docker/Linux 与线上 GitHub 闭环未验收。
-**PR:** 独立交付依赖 [PR #103](https://github.com/b1indsight/agentflow/pull/103) 的 bootstrap / GitHub capability 合同；未合并或部署。
+**Stage:** Implementation — Amp v16 已重放到收窄后的取消回收基线，本地组合验证 938 项通过；依赖仍有已披露 high，目前不建议合并，Docker/Linux 与线上 GitHub 闭环未验收。
+**PR:** [Draft PR #107](https://github.com/b1indsight/agentflow/pull/107)，依赖 [PR #109](https://github.com/b1indsight/agentflow/pull/109) 的取消回收合同；原 bootstrap [PR #103](https://github.com/b1indsight/agentflow/pull/103) 已合并，Amp 未合并或部署。
 **Bookmark:** `feat/worker-amp-cli`
 
 ## 1. Initial plan
@@ -327,3 +327,97 @@ CLI 升级可能改变错误和输出格式，因此固定部署版本，未确�
   `pytest-pr.log`。Ruff、mypy（204 个源文件）、wheel/sdist 构建和 Docker smoke 的 Shell
   语法检查通过；测试 schema 为 0，专用 PostgreSQL 实例已停止。该 PR 依赖 #103 先发布，
   共享工作区的 969 项结果保留作集成证据，不冒充独立快照的测试数量。
+
+### [006] — 2026-10-21：修复首轮审查报告的四项 Amp 问题
+
+- **JSONL：** 仅按 LF 字节切分记录，保留 JSON 字符串内合法的 U+0085/U+2028/U+2029，
+  不改变完整 init/result、同 session 与错误终态检查。
+- **脱敏与诊断：** 将 Amp 历史已有的通用 token/运行时凭据过滤集中到 Amp CLI 边界，
+  新增官方 `sgamp_` 访问 token 前缀；历史公开块、最终答案和失败诊断复用同一规则。
+  初始化前失败保留 stderr，先脱敏再限至 4000 字符；保持未知执行不自动重跑。
+- **时限取舍：** 保留原生导出 20 秒，将 control broker 的单次查询窗口统一从 10 秒调整为
+  30 秒，覆盖最长约 9 秒的进程清理；避免新增按后端分支的超时设置。控制台同步已有外层
+  30 秒时限，HTTP 仅在客户端断开时取消；既有超时/取消清理与并发限额不变。
+- **回归证据：** 两项新测试及两项既有场景扩展，在修复前得到 **4 failed**，修复后同组
+  **4 passed**（`amp-fixes-before.log` / `amp-fixes-after.log`）。慢导出通过实际 HTTP → WS →
+  Worker → AmpHistory 链路，以 1:10 缩时验证 15 秒等效导出超过旧 10 秒窗口仍可返回，
+  不是只断言配置值。其余覆盖三类公开块的外部客户端 token、Unicode 答案及脱敏有界诊断。
+- **当前快照验证：** 在原 v14 基线上带 PostgreSQL 复验 **923 passed**，一个既有弃用警告，
+  日志 `pytest-fixes.log`。Ruff、mypy（204 个源文件）、wheel/sdist 构建、Shell 语法及差异
+  检查通过；测试 schema 已清空，专用 PostgreSQL 已停止。尚未整合 #103 后续修复，
+  不沿用旧 head 的绿色 CI 作为本轮修复结果；后续审查与发布仍待完成。
+- **依赖：** #103 的五项问题由原负责线程在独立 workspace 修复，避免并发改动相同文件；
+  取消后数据保留策略尚待确认，不把本轮 Amp 修复表述为已完成全部依赖修复。
+
+### [007] — 2026-10-21：将 Amp 实现及修复重放到已合并的 main
+
+- **基线变化：** #103 已合并为
+  [`b22b862c2773`](https://github.com/b1indsight/agentflow/commit/b22b862c2773e5860abb538ebfa44d5627ca547a)。
+  在专用 `amp-pr` workspace 将原 Amp 实现及 [006] 修复重放到该 main，无冲突；保留 main
+  的标签初始化等已合并功能，不切换或重置共享工作区。protocol 仍为 v15，journal 仍为 v4。
+- **复验：** 独立 PostgreSQL 全量 **935 passed**，一个既有 Starlette/httpx 弃用警告；
+  Ruff、mypy（206 个源文件）、wheel/sdist 构建、Shell 语法及差异检查通过。日志为同一
+  本地证据目录的 `pytest-rebase-main.log`、`ruff-rebase-main.log`、`mypy-rebase-main.log`
+  与 `build-rebase-main.log`；测试 schema 为 0，专用数据库已停止。
+- **未纳入范围：** 不把 bootstrap 线程尚未发布的四项 medium 修复当成 main 内容，也未
+  整合其未完成的取消回收修复。取消快照保留或删除策略仍待用户确认，不清理 dirty/untracked
+  工作区，不修改 merged Flow 的 ARCHIVE 绑定。
+- **交付边界：** 本次重放仅本地完成；#107 的远端 head 与 base 尚未更新，本轮后续审查未运行，
+  未推送、合并或部署，不将旧 head 的 CI 结果用于这份快照。
+
+### [008] — 2026-10-21：接入取消回收合同，Amp 协议递增为 v16
+
+- **基线：** 将 Amp 实现及 [006] 修复重放到 [PR #109](https://github.com/b1indsight/agentflow/pull/109)
+  的固定 head [`fdd08abea14c`](https://github.com/b1indsight/agentflow/commit/fdd08abea14ce3a70c912904eee21810ba478d6d)。
+  该 PR 保留四项 workspace/VCS 修复，并完成取消回收；不同于已合并的 #103，尚未合并 main。
+  只在 Amp 专用 workspace 整合，保留双方 CHANGELOG 与 README 的冲突内容，未修改共享树。
+- **协议决定：** 取消回收独立使用 wire v15 / journal v5 / manifest v2；Amp 的会话 ID 扩展
+  单独递增到 wire v16，继承新的 journal/manifest，不复用两种不同的 v15 消息合同。
+  同步修改协议断言、部署、升级和取消说明；旧 v15 消息按现有严格解析规则拒绝。
+- **取消语义：** 继承用户明确要求的取消回收策略：执行停止并取得持久授权后，删除准确归属
+  的取消 workspace，含未提交、未跟踪文件与缓存，不额外保存快照；落盘后发送 StopCompleted。
+  清理失败仍阻塞分配，已知 merge 保留原目录归档。Amp 的历史读取与新增清理 journal 同时保留。
+- **组合验证：** PostgreSQL 全量 **957 passed**，一个既有弃用警告；Ruff、mypy（207 个源文件）、
+  wheel/sdist 构建、Shell 语法与差异检查通过。额外从公开解析入口验证 register、停止授权与
+  清理回执的 v16 round-trip、拒绝对应 v15 消息，并确认 journal v5 / manifest v2。
+  证据为 `pytest-cancel-v16.log`、`ruff-cancel-v16.log`、`mypy-cancel-v16.log`、
+  `build-cancel-v16.log` 与 `protocol-cancel-v16.log`；测试 schema 为 0，专用 PostgreSQL 已停止。
+- **保留的依赖风险：** #109 的后续审查无 critical/high，但另报两个 medium，本次不擅自修复：
+  取消 overflow 后，同 Flow 重试改用另一 idle copy 时，旧 absent 条目可能干扰 lookup；
+  jj seed 对 `main;feature` 等 Git 合法分支名仍直接按 revset 解析并失败。
+  取消入口、权限与状态优化继续由 [Issue #108](https://github.com/b1indsight/agentflow/issues/108) 跟踪。
+- **发布边界：** 合并顺序为 #109 → #107；保持原 Amp bookmark/PR，不新建第二个实现 PR。
+  本次组合验证不代替新 head CI，也不扩大 Docker/Linux、真实 installation-token 写入验收范围。
+
+### [009] — 2026-10-21：跟随 #109 收窄取消回收，不增加二阶段清理合同
+
+- **取代 [008] 的基线和取消方案：** 用户要求 #109 只保留取消 workspace 回收，已撤出四项额外
+  workspace/VCS 修复、StopCompleted、清理决定数据库列和 journal/manifest 升级。Amp 在独立
+  workspace 重放到其新固定 head
+  [`cf718394272f`](https://github.com/b1indsight/agentflow/commit/cf718394272f854cb8fdccfdb10a1c71c13fe2d2)，
+  未将共享树其他功能或已撤出的修复带回。相对该 head 的 gateway/client、workspace/VCS、
+  数据库及 journal 文件管理实现没有增量；Amp 仅在 WorkerSession 增加历史来源选择。
+- **当前合同：** wire 仍递增为 v16，沿用 journal v4 / manifest v1 和原数据库 schema。
+  停止保持 StopExecution → ExecutionStopped → StopAccepted，worker 依据 ACK 的
+  `release_workspace` 区分取消删除与 merge 保留；删除成功后才持久化 journal ACK 并读取
+  下一任务。控制面仍在原停止确认时释放 binding，`stop_pending=False` 不证明磁盘删除完成。
+  不增加第二次完成握手、持久清理决定、inode 协议或通用部分删除恢复。
+- **复验：** 独立 PostgreSQL 全量 **938 passed**，一个既有 Starlette/httpx 弃用警告；Ruff、
+  mypy（206 个源文件）、wheel/sdist 构建、Shell 语法与差异检查通过。额外从公开解析入口
+  验证 register 及 `release_workspace=True/False` 的 v16 round-trip，拒绝对应 v15 消息，
+  确认 journal v4 / manifest v1；这项临时解析验证不代替 merge 保留的永久端到端回归。
+  日志为 `pytest-cancel-minimal.log`、`ruff-cancel-minimal.log`、`mypy-cancel-minimal.log`、
+  `build-cancel-minimal.log` 与 `protocol-cancel-minimal.log`。测试 schema 为 0，专用数据库
+  已停止。957 项属于 [008] 的旧组合；本次少 19 项来自依赖撤出的修复及专属测试。
+- **依赖风险：** #109 新后续审查披露 **1 high / 1 low**，不与 [008] 旧基线的两个 medium
+  混用。High 是旧 workspace 清理失败后携带旧 stop journal 重连，gateway 跳过下一条已派发
+  Flow 的 assignment 对账，重试清理成功后任务仍可能 RUNNING/未 Started，worker 等待任务；
+  原负责线程用真实 PostgreSQL 及实际 gateway/client 独立复现。Low 是缺少永久的
+  `release_workspace=False` 端到端保留测试。两项均未在 Amp 增量中修复，目前不建议合并。
+- **Amp 保留风险：** [008] 对应 Amp 修复的后续独立审查为 **0 critical/high、1 medium、1 low**。
+  Medium 是工具载荷先 JSON 编码，换行后的外部 token 可能绕过词边界过滤；Low 是 INITIAL
+  executor 未把 adapter 的启动诊断传到控制面。按约定仅报告，本次基线重放不追加修复。
+  发布前另行检查本次基线整合；不把旧 head 的绿色 CI 或无检查结果当作新组合通过。
+- **交付边界：** 保持同一 bookmark 和 Draft PR #107，依赖顺序仍为 #109 → #107；未合并或部署。
+  取消入口、权限和状态优化仍由 [#108](https://github.com/b1indsight/agentflow/issues/108) 跟踪。
+  Docker/Linux 与真实 installation-token GitHub 写入验收仍未完成。

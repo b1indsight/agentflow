@@ -221,3 +221,25 @@ def test_amp_history_pages_inside_native_messages_and_bounds_bytes(monkeypatch) 
     rest = reader.query(HistoryQuery(session_id=AMP_SESSION, cursor=first.next_cursor))
     assert rest.items[0].id == f"{AMP_SESSION}:M-many:1" and rest.has_more
     assert len(rest.model_dump_json().encode()) < 262144
+
+
+def test_amp_history_redacts_other_clients_access_tokens(monkeypatch) -> None:
+    # External continuation can introduce a credential absent from this worker's environment.
+    monkeypatch.delenv("AMP_API_KEY", raising=False)
+    token = "sgamp_external-client_123456789"
+    message = {"role": "assistant", "protocolMessageID": "M-token", "content": [
+        {"type": "text", "text": token},
+        {"type": "tool_use", "id": "TU-token", "name": "shell", "input": {"key": token}},
+        {"type": "tool_result", "toolUseID": "TU-token", "run": {"result": {"output": token}}},
+    ]}
+
+    async def export(*args, **kwargs):
+        return AmpProcessResult(json.dumps({"id": AMP_SESSION, "messages": [message]}).encode(), b"", 0)
+
+    monkeypatch.setattr("app.worker.state.amp_history.run_amp", export)
+    reader = AmpHistory()
+    for _ in range(2):
+        page = reader.query(HistoryQuery(session_id=AMP_SESSION))
+        assert len(page.items) == 3
+        assert token not in page.model_dump_json()
+        assert page.model_dump_json().count("[REDACTED]") == 3
