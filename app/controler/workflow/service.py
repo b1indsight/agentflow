@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from functools import partial
+from typing import Literal
 
 from loguru import logger
 from pluggy import PluginManager
@@ -30,6 +31,30 @@ from app.persistence.stops import StopStore
 from app.persistence.webhooks import WebhookStore
 from app.persistence.workers import WorkerStore
 from app.plugins import emit_hook, get_plugin_manager
+
+type RetryFailureCode = Literal[
+    "flow_not_found",
+    "retry_stop_pending",
+    "retry_delivery_closed",
+    "retry_result_pending",
+    "retry_flow_conflict",
+    "retry_succeeded",
+    "retry_delivery_merged",
+    "retry_archive_inactive",
+    "retry_archive_binding_missing",
+    "retry_execution_unsettled",
+    "retry_archive_queued",
+    "retry_archive_worker_unavailable",
+    "retry_archive_missing",
+]
+
+
+class RetryRejected(ValueError):
+    """Expected retry refusal; public clients consume the code, not the internal message."""
+
+    def __init__(self, code: RetryFailureCode, message: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class ControlService:
@@ -134,7 +159,8 @@ class ControlService:
         self._fire("on_merged", flow=flow)
         self._jobs_available()
 
-    def retry(self, flow: Flow) -> None:
+    def retry(self, flow: Flow) -> bool:
+        """Requeue eligible work, returning False when an active Flow needs no retry."""
         with self.database.transaction() as tx:
             deliveries_tx = self.deliveries.using(tx)
             flows_tx = self.flows.using(tx)
@@ -146,12 +172,18 @@ class ControlService:
             tx.serialize_issue(flow.repo, flow.issue_number)
             fresh = tx.lock_workflow(flow.id)
             if fresh is None:
-                raise ValueError(f"flow {flow.id} disappeared")
+                raise RetryRejected("flow_not_found", f"flow {flow.id} disappeared")
             if stops_tx.has_pending(fresh.id):
-                raise ValueError("cancellation is awaiting confirmed stop or pending result reconciliation")
+                raise RetryRejected(
+                    "retry_stop_pending",
+                    "cancellation is awaiting confirmed stop or pending result reconciliation",
+                )
             delivery = deliveries_tx.get_delivery(fresh.id)
             if delivery is not None and delivery.state is DeliveryState.CLOSED:
-                raise ValueError("PR is closed or paused; reopen and reconcile its baseline before retry")
+                raise RetryRejected(
+                    "retry_delivery_closed",
+                    "PR is closed or paused; reopen and reconcile its baseline before retry",
+                )
             if delivery is not None and delivery.state is DeliveryState.MERGED:
                 self._retry_archive(
                     fresh,
@@ -170,33 +202,43 @@ class ControlService:
                     result_store=result_store_tx,
                     workers=workers_tx,
                 ):
-                    raise ValueError("Flow has a pending result; reconcile its effects before retry")
+                    raise RetryRejected(
+                        "retry_result_pending",
+                        "Flow has a pending result; reconcile its effects before retry",
+                    )
             else:
                 active = flows_tx.get_active_flow(fresh.repo, fresh.issue_number)
                 if active is not None and active.id != fresh.id:
-                    raise ValueError(
-                        f"flow {active.id} is already active for {fresh.repo}#{fresh.issue_number}"
+                    raise RetryRejected(
+                        "retry_flow_conflict",
+                        f"flow {active.id} is already active for {fresh.repo}#{fresh.issue_number}",
                     )
                 if fresh.state is FlowState.ACTIVE:
-                    return
+                    return False
                 if fresh.state is FlowState.SUCCEEDED:
-                    raise ValueError("a succeeded Flow cannot be retried")
+                    raise RetryRejected("retry_succeeded", "a succeeded Flow cannot be retried")
                 # Recovery may have failed the Flow before its queued work was swept.
                 jobs_tx.cancel_jobs(fresh.id)
                 failed_job = jobs_tx.latest_failed_job(fresh.id)
                 kind = failed_job.kind if failed_job is not None else JobKind.INITIAL
                 delivery = deliveries_tx.get_delivery(fresh.id)
                 if delivery is not None and delivery.supersedes(kind):
-                    raise ValueError("a merged PR cannot retry coding or review jobs")
+                    raise RetryRejected(
+                        "retry_delivery_merged", "a merged PR cannot retry coding or review jobs"
+                    )
                 fresh.state = FlowState.ACTIVE
                 flows_tx.update_flow(fresh)
                 replacement = jobs_tx.enqueue_job(
-                    fresh.id, kind,
-                    payload=failed_job.payload if failed_job else {"issue_number": fresh.issue_number},
+                    fresh.id,
+                    kind,
+                    payload=failed_job.payload
+                    if failed_job
+                    else {"issue_number": fresh.issue_number},
                 )
                 if failed_job is not None and kind is JobKind.REVISION:
                     reviews_tx.retry(failed_job, replacement)
         self._jobs_available()
+        return True
 
     @staticmethod
     def _retry_delivery_effects(
@@ -210,9 +252,12 @@ class ControlService:
     ) -> bool:
         """Validate verified delivery or cleanup before rearming its failed GitHub effects."""
         plan = result_store.get_pending_plan(flow.id)
-        if (plan is None or (plan.revision is None and plan.archive is None)
-                or plan.state is not JobState.DONE
-                or plan.attempt_id != flow.current_attempt_id):
+        if (
+            plan is None
+            or (plan.revision is None and plan.archive is None)
+            or plan.state is not JobState.DONE
+            or plan.attempt_id != flow.current_attempt_id
+        ):
             return False
         if plan.archive is not None:
             job = database.lock_job(plan.job_id)
@@ -238,10 +283,16 @@ class ControlService:
     ) -> None:
         """Retry only a settled archive on its original binding and current Attempt."""
         if flow.state is not FlowState.ACTIVE:
-            raise ValueError("a merged PR cannot retry coding or review jobs or terminal Flows")
+            raise RetryRejected(
+                "retry_archive_inactive",
+                "a merged PR cannot retry coding or review jobs or terminal Flows",
+            )
         execution = workers.get_flow_execution(flow.id)
         if execution is None or execution.released_at is not None:
-            raise ValueError("archive retry requires the original active binding")
+            raise RetryRejected(
+                "retry_archive_binding_missing",
+                "archive retry requires the original active binding",
+            )
         if jobs.has_pending_result(flow.id):
             if ControlService._retry_delivery_effects(
                 flow,
@@ -252,19 +303,42 @@ class ControlService:
                 workers=workers,
             ):
                 return
-            raise ValueError("archive has a pending result; wait for result reconciliation")
+            raise RetryRejected(
+                "retry_result_pending",
+                "archive has a pending result; wait for result reconciliation",
+            )
         job_records = jobs.list_jobs(flow.id)
         if any(job.state is JobState.RUNNING for job in job_records):
-            raise ValueError("archive retry is blocked by a running or unknown executor")
+            raise RetryRejected(
+                "retry_execution_unsettled",
+                "archive retry is blocked by a running or unknown executor",
+            )
         if any(job.kind is JobKind.ARCHIVE and job.state is JobState.QUEUED for job in job_records):
-            raise ValueError("archive is already queued; wait for the original worker")
-        worker = next((w for w in workers.list_workers() if w.worker_id == execution.worker_id), None)
-        if worker is None or worker.status is not WorkerStatus.ONLINE or worker.current_job_id is not None:
-            raise ValueError("archive retry requires the original worker online with no executor")
-        failed = next((job for job in reversed(job_records)
-                       if job.kind is JobKind.ARCHIVE and job.state is JobState.FAILED), None)
+            raise RetryRejected(
+                "retry_archive_queued", "archive is already queued; wait for the original worker"
+            )
+        worker = next(
+            (w for w in workers.list_workers() if w.worker_id == execution.worker_id), None
+        )
+        if (
+            worker is None
+            or worker.status is not WorkerStatus.ONLINE
+            or worker.current_job_id is not None
+        ):
+            raise RetryRejected(
+                "retry_archive_worker_unavailable",
+                "archive retry requires the original worker online with no executor",
+            )
+        failed = next(
+            (
+                job
+                for job in reversed(job_records)
+                if job.kind is JobKind.ARCHIVE and job.state is JobState.FAILED
+            ),
+            None,
+        )
         if failed is None:
-            raise ValueError("Flow has no failed archive to retry")
+            raise RetryRejected("retry_archive_missing", "Flow has no failed archive to retry")
         jobs.enqueue_job(flow.id, JobKind.ARCHIVE, payload=failed.payload)
 
     def notify_jobs(self) -> None:

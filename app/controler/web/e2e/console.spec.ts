@@ -182,6 +182,147 @@ test("archived column distinguishes closed unmerged PRs from completed archives"
 });
 
 for (const width of [1440, 390]) {
+  test(`blocked flow retry reports refusals and refreshes committed state at ${width}px`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 900 });
+    let current: FlowDetail = {
+      ...flow,
+      lifecycle: "cancelled",
+      phase: "blocked",
+      action: "cancelled",
+      title: "修复受阻原因后继续执行",
+      reason: "Flow 已取消",
+      next_condition: "确认在途任务的停止确认与结果对账完成后，再评估是否重试",
+      sources: [],
+    };
+    await page.route("**/api/flows?**", (route) =>
+      route.fulfill({
+        json: {
+          items:
+            new URL(route.request().url()).searchParams.get("phase") ===
+            current.phase
+              ? [current]
+              : [],
+          counts: {
+            queued: current.phase === "queued" ? 1 : 0,
+            running: 0,
+            review: 0,
+            blocked: current.phase === "blocked" ? 1 : 0,
+            done: 0,
+          },
+          next_cursor: null,
+          has_more: false,
+        },
+      }),
+    );
+    await page.route("**/api/flows/42", (route) =>
+      route.fulfill({ json: current }),
+    );
+    let attempts = 0;
+    let finish = () => {};
+    const committed = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    await page.route("**/api/flows/42/retry", async (route) => {
+      expect(route.request().method()).toBe("POST");
+      expect(route.request().headers()["content-type"]).toBe(
+        "application/json",
+      );
+      expect(route.request().postDataJSON()).toEqual({});
+      attempts++;
+      if (attempts <= 2)
+        return route.fulfill({
+          status: 409,
+          json: {
+            detail: attempts === 1 ? "retry_stop_pending" : "retry_no_change",
+          },
+        });
+      if (attempts === 3) return route.abort("failed");
+      await committed;
+      current = {
+        ...current,
+        lifecycle: "active",
+        phase: "queued",
+        action: "initial:queued",
+        state_version: 3,
+        reason: "等待可用 Worker 接收任务",
+        next_condition: "等待调度",
+      };
+      return route.fulfill({ json: current });
+    });
+    await page.goto("/?q=repo%3Aowner%2Fagentflow#flow/42/overview");
+    const retry = page.getByRole("button", { name: "重试", exact: true });
+    await expect(retry).toBeVisible();
+    await page.locator(".detail-head").screenshot({
+      path: `../../../.amp/in/artifacts/flow-retry-header-${width}.png`,
+    });
+    await page.locator(".execution-summary").screenshot({
+      path: `../../../.amp/in/artifacts/flow-retry-default-${width}.png`,
+    });
+    await retry.click();
+    await expect(page.getByRole("alert")).toContainText("停止确认");
+    await expect(retry).toBeEnabled();
+    await page.locator(".execution-summary").screenshot({
+      path: `../../../.amp/in/artifacts/flow-retry-refused-${width}.png`,
+    });
+    await retry.click();
+    await expect(page.getByRole("alert")).toContainText("没有可重试的任务");
+    await expect(page.getByRole("status")).toHaveCount(0);
+    await retry.click();
+    await expect(page.getByRole("alert")).toContainText(
+      "无法确认重试是否已提交",
+    );
+    expect(attempts).toBe(3);
+    await retry.click();
+    await expect(
+      page.getByRole("button", { name: "正在提交重试…" }),
+    ).toBeDisabled();
+    await expect(
+      page.getByRole("button", { name: "归档", exact: true }),
+    ).toBeDisabled();
+    await expect(page.locator(".detail-head .badge")).toHaveText("已取消");
+    await page.locator(".execution-summary").screenshot({
+      path: `../../../.amp/in/artifacts/flow-retry-pending-${width}.png`,
+    });
+    expect(attempts).toBe(4);
+    finish();
+    await expect(page.getByRole("status")).toContainText("重试请求已受理");
+    await expect(page.getByRole("alert")).toHaveCount(0);
+    await expect(retry).toHaveCount(0);
+    await expect(page.locator(".detail-head .badge")).toHaveText(
+      "initial:queued",
+    );
+    await expect(page.locator(".rail-group.phase-queued .count")).toHaveText(
+      "1",
+    );
+    await expect(page.locator(".rail-group.phase-blocked .count")).toHaveText(
+      "0",
+    );
+    await page.locator(".execution-summary").screenshot({
+      path: `../../../.amp/in/artifacts/flow-retry-accepted-${width}.png`,
+    });
+    await page.getByRole("tab", { name: "会话" }).click();
+    await expect(page.getByText("真实活动正文", { exact: true })).toBeVisible();
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBe(true);
+    await page.evaluate(() => {
+      location.hash = "board";
+    });
+    if (width === 390)
+      await page
+        .locator(".mobile-stages")
+        .getByRole("button", { name: /排队中/ })
+        .click();
+    await expect(page.locator(".column.phase-queued .card")).toContainText(
+      "修复受阻原因后继续执行",
+    );
+    await expect(page.locator(".column.phase-blocked .card")).toHaveCount(0);
+  });
+
   test(`cancelled flow manual archive persists and refreshes groups at ${width}px`, async ({
     page,
   }) => {
@@ -265,6 +406,9 @@ for (const width of [1440, 390]) {
     await expect(
       page.getByRole("button", { name: "正在归档…" }),
     ).toBeDisabled();
+    await expect(
+      page.getByRole("button", { name: "重试", exact: true }),
+    ).toBeDisabled();
     finish();
     await expect(page.locator(".detail-head .badge")).toHaveText(
       "已取消 · 已归档",
@@ -317,6 +461,74 @@ for (const width of [1440, 390]) {
     ).toBe(true);
   });
 }
+
+test("a retry finishing after navigation cannot overwrite another flow", async ({
+  page,
+}) => {
+  await page.route("**/api/flows/42", (route) =>
+    route.fulfill({
+      json: {
+        ...flow,
+        lifecycle: "failed",
+        phase: "blocked",
+        action: "failed",
+        reason: "Flow 已失败",
+        next_condition: "修复后重试",
+        sources: [],
+      },
+    }),
+  );
+  await page.route("**/api/flows/43", (route) =>
+    route.fulfill({
+      json: {
+        ...flow,
+        id: 43,
+        title: "另一条 Flow",
+        reason: "正在执行",
+        next_condition: "等待结果",
+        sources: [],
+      },
+    }),
+  );
+  let finish = () => {};
+  const committed = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  await page.route("**/api/flows/42/retry", async (route) => {
+    await committed;
+    return route.fulfill({
+      json: {
+        ...flow,
+        phase: "queued",
+        state_version: 3,
+        reason: "已重排",
+        next_condition: "等待 Worker",
+        sources: [],
+      },
+    });
+  });
+  await page.goto("/#flow/42/overview");
+  await page.getByRole("button", { name: "重试", exact: true }).click();
+  await expect(
+    page.getByRole("button", { name: "正在提交重试…" }),
+  ).toBeDisabled();
+  await page.evaluate(() => {
+    location.hash = "flow/43/overview";
+  });
+  await expect(
+    page.getByRole("heading", { name: "另一条 Flow", exact: true }),
+  ).toBeVisible();
+  const completed = page.waitForResponse("**/api/flows/42/retry");
+  finish();
+  await completed;
+  await expect(
+    page.getByRole("heading", { name: "另一条 Flow", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "重试", exact: true }),
+  ).toHaveCount(0);
+  await expect(page.getByRole("status")).toHaveCount(0);
+});
 
 test("overview sources explain sync progress separately from historical gaps", async ({
   page,

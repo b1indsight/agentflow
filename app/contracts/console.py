@@ -16,6 +16,10 @@ class ArchiveRequest(ConsoleModel):
     """An explicit empty JSON command, with no workflow fields writable by clients."""
 
 
+class RetryRequest(ConsoleModel):
+    """Retry the existing Flow without allowing clients to override its safety checks."""
+
+
 class FlowSummary(ConsoleModel):
     id: int
     repo: str

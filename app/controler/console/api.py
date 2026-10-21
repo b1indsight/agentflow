@@ -1,5 +1,6 @@
 """Owner-only console HTTP; all blocking database units run outside the event loop."""
 
+import asyncio
 from functools import partial
 from typing import Annotated
 
@@ -15,10 +16,13 @@ from app.contracts.console import (
     JobPage,
     Phase,
     RepositoryPage,
+    RetryRequest,
 )
 from app.controler.runtime import ServerRuntime
+from app.controler.workflow.service import ControlService, RetryRejected
 from app.persistence.activity import ActivityStore
 from app.persistence.console import ConsoleStore
+from app.persistence.flows import FlowStore
 
 router = APIRouter(prefix="/api")
 FlowId = Annotated[int, Path(gt=0)]
@@ -57,9 +61,8 @@ async def detail(request: Request, flow_id: FlowId) -> FlowDetail:
     return await runtime.console.db(partial(store.detail, flow_id))
 
 
-@router.post("/flows/{flow_id}/archive", response_model=FlowDetail)
-async def archive(request: Request, flow_id: FlowId, body: ArchiveRequest) -> FlowDetail:
-    """Archive only local display state; JSON and origin checks prevent form-based CSRF."""
+def _require_same_origin_json(request: Request) -> None:
+    """Protect both console commands, including behind TLS and Host-rewriting proxies."""
     origin = request.headers.get("origin")
     fetch_site = request.headers.get("sec-fetch-site")
     # Browser-controlled Fetch Metadata survives proxy TLS termination and Host rewriting.
@@ -75,8 +78,46 @@ async def archive(request: Request, flow_id: FlowId, body: ArchiveRequest) -> Fl
         != "application/json"
     ):
         raise ConsoleFailure("json_required", 415)
+
+
+@router.post("/flows/{flow_id}/archive", response_model=FlowDetail)
+async def archive(request: Request, flow_id: FlowId, body: ArchiveRequest) -> FlowDetail:
+    """Archive only local display state; JSON and origin checks prevent form-based CSRF."""
+    _require_same_origin_json(request)
     runtime: ServerRuntime = request.app.state.runtime
     return await runtime.console.db(partial(ConsoleStore(runtime.database).archive, flow_id))
+
+
+@router.post("/flows/{flow_id}/retry", response_model=FlowDetail)
+async def retry(request: Request, flow_id: FlowId, body: RetryRequest) -> FlowDetail:
+    """Request canonical retry, reporting refusal or no change without claiming execution."""
+    _require_same_origin_json(request)
+    runtime: ServerRuntime = request.app.state.runtime
+    loop = asyncio.get_running_loop()
+
+    def notify_jobs() -> None:
+        # Schedule on the ASGI loop after commit, including after client disconnect.
+        loop.call_soon_threadsafe(runtime.gateway.notify_jobs)
+
+    def command() -> FlowDetail:
+        flow = FlowStore(runtime.database).get_flow(flow_id)
+        if flow is None:
+            raise ConsoleFailure("flow_not_found", 404)
+        service = ControlService(
+            database=runtime.database,
+            jobs_available=notify_jobs,
+        )
+        try:
+            accepted = service.retry(flow)
+        except RetryRejected as error:
+            raise ConsoleFailure(
+                error.code, 404 if error.code == "flow_not_found" else 409
+            ) from error
+        if not accepted:
+            raise ConsoleFailure("retry_no_change")
+        return ConsoleStore(runtime.database).detail(flow_id)
+
+    return await runtime.console.db(command)
 
 
 @router.get("/flows/{flow_id}/jobs", response_model=JobPage)

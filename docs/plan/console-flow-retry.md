@@ -1,7 +1,7 @@
 # 控制台 Flow 重试按钮 — 功能记录
 
-**阶段：** 计划待批准；尚未修改实现或测试。
-**PR：** [Draft PR #106](https://github.com/b1indsight/agentflow/pull/106)；批准后沿用同一 PR 实施。
+**阶段：** 实现与本地验证完成；独立审查与发布状态见 PR，未合并或部署。
+**PR：** [PR #106](https://github.com/b1indsight/agentflow/pull/106)，沿用原计划书签与 PR。
 
 ## 1. 初始计划
 
@@ -121,3 +121,53 @@
 提前显示完整资格、展示归档后的恢复按钮、CLI 无操作文案改进、批量重试均不纳入本次。
 
 ## 2. PR 变更时间线
+
+### [001] — 2026-10-21 — 受阻 Flow 安全重试入口已实现
+
+- **触发与实现：** 用户要求处理受阻后可从页面继续原 Flow。`ControlService.retry`
+  现返回是否受理，并用 `RetryRejected` 表达稳定原因码；原异常消息、检查顺序、锁、
+  事务和重排行为保留。API 增加严格空 JSON 的 owner 同源端点，与归档共享请求保护，
+  无操作返回 409，成功返回已提交的 `FlowDetail`。
+- **线程边界：** 保留业务服务提交后通知，API 的显式 `None` 回调通过
+  `loop.call_soon_threadsafe` 通知 ASGI loop；不直接在线程中访问 gateway Event。
+  相比计划中的 `partial`，显式函数符合 `Callable[[], None]`，不把调度返回的 Handle
+  泄漏为业务回调返回值，也不使用类型断言。
+- **页面与取舍：** 受阻概览增加「重试」，包含 cancelled 但未展示归档的 Flow。
+  重试与归档共用本地提交函数，保留卸载保护和状态版本判断；同步 ref 防止同页连点，
+  渲染中的按钮禁用。成功提示只表示请求已受理；已提交详情才改变分组；拒绝映射为中文，
+  网络异常明确要求刷新核对，不自动重发。没有新增预检、表、依赖或通用命令框架。
+- **相关文件：** `app/contracts/console.py`、`app/controler/console/api.py`、
+  `app/controler/workflow/service.py`、`app/controler/web/{api.ts,App.tsx,README.md}`；
+  更新 changelog，扩展现有 API 与浏览器回归。
+
+### [002] — 2026-10-21 — 测试、可视检查与三项消融完成
+
+- **测试先行：** 新 API 受理回归在端点实现前返回 404；新浏览器回归在按钮实现前因找不到
+  「重试」失败。补齐实现后通过。浏览器使用测试路由，后端使用专用本地 PostgreSQL 实例及
+  每例独立 schema；没有执行真实 Flow、GitHub 写入或生产数据库操作。
+- **最终检查：** `ruff check .` 通过；`mypy app` 的 111 个源文件通过；使用
+  `FLOWTOOL_TEST_DATABASE_URL=postgresql://flowtool_test@127.0.0.1:55439/flowtool_retry_test`
+  运行 `python -m pytest -q`，860 项通过、无跳过（其中 console API 41 项）。
+  前端 `npm run typecheck`、`test`（4 项）、`format:check`、`build` 通过；
+  `npm run test:e2e` 的 23 项通过。保留一条已有 Starlette 弃用提示及构建大分包提示，
+  未抑制错误或为提示扩展本功能范围。
+- **覆盖行为：** owner/跨站/代理/非法正文、实际重排、无操作、双页并发只入队一次、
+  提交可见后在 loop 通知，以及停止未确认、PR 关闭、结果未决、原 Worker 离线时拒绝且不改状态。
+  1440px / 390px 浏览器覆盖重试与归档互斥、拒绝后可再操作、响应丢失提示、提交中不移动、
+  受理后详情及分组更新、会话保留、导航后旧响应隔离及无横向溢出；既有归档回归保留。
+- **可视证据：** 实际查看桌面与手机的默认、提交中、拒绝、受理四种状态，以及更新后的页头。
+  截图位于本地 `.amp/in/artifacts/flow-retry-{default,pending,refused,accepted,header}-{1440,390}.png`，
+  仅作页面渲染证据，不代表真实部署、Access 登录或 GitHub 恢复闭环。
+- **消融设置与结果：** 一次只临时删去一项机制，运行同一回归，再恢复；不保留消融代码。
+  1. 去掉 API 无操作分类：`pytest tests/test_console_api.py -q -k 'commands_require and retry and rewritten'`
+     失败，重复提交错误返回 200 而非 409。保留明确的未执行响应，避免误报成功。
+  2. 去掉提交中按钮禁用：`npm run test:e2e -- --grep 'blocked flow retry.*1440'`
+     失败，提交中按钮仍可用。保留重试/归档互斥的禁用状态。
+  3. 将线程安全调度替换成直接通知：
+     `pytest tests/test_console_api.py::test_retry_commits_before_waking_workers_on_the_event_loop -q`
+     失败，通知线程 ID 与 ASGI loop 不同。保留线程安全通知。
+  三项均命中对应断言；恢复后重新运行全量 Python 和浏览器检查，结果如上。
+  本地日志为 `.amp/in/artifacts/retry-ablation-{noop,disabled,thread}.log` 与
+  `retry-final-{python,frontend,browser}.log`；这些临时证据不加入版本控制。
+- **剩余边界：** 真实 Access/Tunnel、部署后的 Worker/GitHub 闭环仍须环境验收。
+  按原范围不增加展示归档后的恢复入口、不改变 CLI 无操作文案；独立审查与发布状态见 PR。
