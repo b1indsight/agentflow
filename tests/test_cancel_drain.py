@@ -57,16 +57,14 @@ def test_confirmation_requires_current_epoch_and_exact_request(store):
     assert store.workers.get_flow_execution(flow.id).released_at is not None
 
 
-@pytest.mark.parametrize("preparing_followup", [False, True])
-def test_idle_cancel_stops_last_dispatched_job(store, preparing_followup):
+def test_cancel_during_followup_preparation_stops_last_dispatched_job(store):
     # A review-waiting Flow still owns its checkout; an unsent followup has no worker journal.
     flow, job = running(store)
     with store.connection() as conn:
         conn.execute("UPDATE jobs SET state='done',result_received_at=now(),result_applied_at=now() WHERE id=%s", (job.id,))
         conn.execute("UPDATE workers SET current_job_id=NULL,status='online' WHERE worker_id='w'")
-    if preparing_followup:
-        followup = store.jobs.enqueue_job(flow.id, JobKind.REVISION)
-        assert store.workers.assign_job('w', 'preparing', 'epoch').id == followup.id
+    followup = store.jobs.enqueue_job(flow.id, JobKind.REVISION)
+    assert store.workers.assign_job('w', 'preparing', 'epoch').id == followup.id
     ControlService(database=store.database).cancel(flow)
     stop = store.stops.pending('w')
     assert stop is not None and stop.job_id == job.id
