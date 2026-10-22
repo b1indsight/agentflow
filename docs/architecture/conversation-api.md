@@ -86,7 +86,7 @@ cursor，稍后轮询新增完整记录，不代表 agent 执行结束。
 | 422 | 非法 flow_id、limit 或 cursor 长度 |
 | 502 | `history_unreadable`、`history_limit`、`invalid_response` |
 | 503 | `conversation_api_disabled`、`access_keys_unavailable`、`worker_unavailable`、`query_busy`、`database_unavailable` |
-| 504 | `query_timeout`（worker 查询 10 秒超时） |
+| 504 | `query_timeout`（单次 worker 查询 30 秒超时，包含 Amp 导出及进程清理预算） |
 
 已有 flow 尚无 worker/session 时返回 200、空 items、`unavailable_reason: no_worker/no_session`。
 部分文件不存在时逐 session 标记，其他 session 仍可读取。已归档 flow 使用保存的原 worker

@@ -1,11 +1,13 @@
 from datetime import UTC, datetime
 
+import pytest
 from pydantic.types import SecretStr
 
 from app.contracts.protocol import (
     PROTOCOL_VERSION,
     Assignment,
     AssignmentSecret,
+    ConversationQuery,
     FlowToolErrorKind,
     FlowToolRequest,
     FlowToolResponse,
@@ -24,7 +26,7 @@ from app.domain.models import VcsKind
 
 
 def test_assignment_and_result_round_trip_with_discriminated_payloads() -> None:
-    assert PROTOCOL_VERSION == 14
+    assert PROTOCOL_VERSION == 15
     assignment = Assignment(
         job_id=41,
         flow_id=7,
@@ -70,6 +72,14 @@ def test_assignment_and_result_round_trip_with_discriminated_payloads() -> None:
     worker_message = parse_worker_message(succeeded.model_dump_json())
     assert isinstance(worker_message, Succeeded)
     assert isinstance(worker_message.result, InitialTaskResult)
+
+
+def test_conversation_query_accepts_amp_thread_ids_only_in_the_shared_session_type() -> None:
+    query = ConversationQuery(request_id="request", connection_epoch="epoch",
+                              session_id="T-019eac3b-a60c-7a93-a442-3718f660fc8c")
+    assert parse_server_message(query.model_dump_json()) == query
+    with pytest.raises(ValueError):
+        ConversationQuery(request_id="request", connection_epoch="epoch", session_id="https://ampcode.com/T-x")
 
 
 def test_flow_tool_messages_are_strict_and_fenced() -> None:

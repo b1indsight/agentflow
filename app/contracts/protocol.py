@@ -18,13 +18,13 @@ from pydantic import (
     model_validator,
 )
 
-from app.contracts.conversation import ConversationError, HistoryPage
+from app.contracts.conversation import ConversationError, HistoryPage, SessionId
 from app.domain.context_models import ReviewContext
 from app.domain.delivery_models import DeliveryReceipt
 from app.domain.models import FeedbackRef, JobState, RevisionCodingOutput, VcsKind
 from app.domain.review_models import ReviewFeedback
 
-PROTOCOL_VERSION: Literal[14] = 14
+PROTOCOL_VERSION: Literal[15] = 15
 
 
 class ProtocolModel(BaseModel):
@@ -34,7 +34,7 @@ class ProtocolModel(BaseModel):
 
 
 class Message(ProtocolModel):
-    protocol_version: Literal[14] = PROTOCOL_VERSION
+    protocol_version: Literal[15] = PROTOCOL_VERSION
 
 
 class ConversationQuery(Message):
@@ -43,7 +43,7 @@ class ConversationQuery(Message):
     # HistoryQuery checks cursor semantics inside the task, so a bad cursor returns
     # a query error rather than aborting WebSocket message parsing and reconnecting.
     type: Literal["conversation_query"] = "conversation_query"
-    session_id: str = Field(pattern=r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$")
+    session_id: SessionId
     cursor: str | None = Field(default=None, min_length=1, max_length=1024)
     limit: int = Field(default=100, ge=1, le=500)
     request_id: str = Field(min_length=1, max_length=64)

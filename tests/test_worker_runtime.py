@@ -1,8 +1,12 @@
 from pathlib import Path
 
 import pytest
+from pydantic import SecretStr
 
-from app.worker.runtime import WorkerRootLock
+from app.worker.config import WorkerSettings
+from app.worker.execution.amp_agent import AmpCodingAgent
+from app.worker.execution.codex import CodexAgent
+from app.worker.runtime import WorkerRootLock, WorkerRuntime
 
 
 def test_worker_root_lock_prevents_a_second_process_root_owner(tmp_path: Path) -> None:
@@ -44,3 +48,19 @@ def test_worker_root_rejects_sequential_identity_reuse(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="belongs to worker-a"):
         WorkerRootLock(root, "worker-b").acquire()
+
+
+@pytest.mark.parametrize("backend,expected,timeout", [(None, CodexAgent, 23), ("amp", AmpCodingAgent, 47)])
+def test_runtime_selects_agent_and_its_revision_deadline(tmp_path, monkeypatch, backend, expected, timeout):
+    monkeypatch.setattr("app.worker.runtime.configure_logging", lambda *args: None)
+    if backend is None:
+        monkeypatch.delenv("FLOWTOOL_CODING_AGENT", raising=False)
+    else:
+        monkeypatch.setenv("FLOWTOOL_CODING_AGENT", backend)
+    settings = WorkerSettings(worker_id="worker", worker_token=SecretStr("secret"),
+                              worker_root=tmp_path, serve_ws_url="wss://control.example/connect",
+                              codex_run_timeout_seconds=23, amp_run_timeout_seconds=47)
+    runtime = WorkerRuntime(settings)
+    assert isinstance(runtime.client.executor.code_agent, expected)
+    assert runtime.client.executor.code_agent.timeout == timeout
+    assert runtime.client.executor.revision_timeout == timeout

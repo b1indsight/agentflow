@@ -5,6 +5,10 @@
 
 ## 当前计划
 
+- [`worker-amp-cli.md`](worker-amp-cli.md) — 可选 Amp CLI 后端已实现：同 thread 修订、原生历史、
+  protocol v15、取消监督和固定版本镜像；依赖 #109 已合并，#107 目标改为 main。
+  当前方案、验证证据及未修问题见精简后的功能记录；尚未部署。
+
 - [`worker-repo-bootstrap.md`](worker-repo-bootstrap.md) — [PR #103](https://github.com/b1indsight/agentflow/pull/103)：自动 clone、bot Git/gh 及有上限的位置池已本地实现；完整副本温热复用，溢出使用临时 Git worktree；独立验证与审查状态见实施记录，尚未合并或部署。
 
 - [`repository-label-bootstrap.md`](repository-label-bootstrap.md) — PR #105：轻量后台补齐标签，未建齐每 300 秒检查，确认齐全后每天复查；只缓存内存时间，重启重新扫描，不新增数据库表或维护机制。标签测试精简至 243 行，862 项回归及静态检查通过，审查及交付状态见 PR，未合并或部署。

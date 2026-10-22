@@ -307,10 +307,10 @@ def _github_capability(secret: AssignmentSecret | None, repository: str) -> GitH
 
 
 def _write_output_schema(model: type[RevisionCodingOutput | InitialCodingOutput]) -> Path:
-    """Write RevisionCodingOutput's schema to a private temporary file for the Codex CLI."""
+    """Write the caller's schema to a private temporary file for its CodingAgent."""
 
     with tempfile.NamedTemporaryFile(
-        mode="w", prefix="codex-schema-", suffix=".json", delete=False
+        mode="w", prefix="coding-schema-", suffix=".json", delete=False
     ) as output:
         json.dump(model.model_json_schema(), output)
         return Path(output.name)

@@ -2,9 +2,14 @@
 
 import base64
 import json
-from typing import Literal, Self
+from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
+
+SessionId = Annotated[
+    str,
+    Field(pattern=r"^(?:T-)?[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$"),
+]
 
 
 class ConversationModel(BaseModel):
@@ -16,7 +21,7 @@ class HistoryQuery(ConversationModel):
 
     model_config = ConfigDict(frozen=True)
 
-    session_id: str = Field(pattern=r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$")
+    session_id: SessionId
     cursor: str | None = Field(default=None, min_length=1, max_length=1024)
     limit: int = Field(default=100, ge=1, le=500)
     _position: tuple[int, str | None] = PrivateAttr(default=(0, None))
@@ -29,7 +34,7 @@ class HistoryQuery(ConversationModel):
                 if not isinstance(data, list) or len(data) != 3:
                     raise ValueError("invalid cursor shape")
                 session_id, offset, identity = data
-                # Bind byte offsets to their session before any filesystem access.
+                # Bind the source position to its session before accessing history.
                 if (session_id != self.session_id or type(offset) is not int or offset < 0
                         or not isinstance(identity, str) or not 1 <= len(identity) <= 256):
                     raise ValueError("invalid cursor position")
@@ -50,7 +55,7 @@ class SessionHistory(ConversationModel):
     """Coverage for one page, with boundaries of the underlying session scan."""
 
     attempt_id: int = Field(gt=0)
-    session_id: str = Field(pattern=r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$")
+    session_id: SessionId
     session_generation: int = Field(ge=0)
     status: Literal["available", "not_found", "unsupported"]
     starts_at_beginning: bool
@@ -76,7 +81,7 @@ class HistoryItem(ConversationModel):
 class HistoryPage(ConversationModel):
     """Worker response for one session; control adds Flow/Attempt attribution."""
 
-    session_id: str = Field(pattern=r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$")
+    session_id: SessionId
     items: list[HistoryItem] = Field(default_factory=list, max_length=500)
     status: Literal["available", "not_found", "unsupported"] = "available"
     next_cursor: str | None = Field(default=None, max_length=1024)
@@ -85,7 +90,7 @@ class HistoryPage(ConversationModel):
 
 class ConversationItem(HistoryItem):
     attempt_id: int = Field(gt=0)
-    session_id: str = Field(pattern=r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$")
+    session_id: SessionId
     session_generation: int = Field(ge=0)
 
 
