@@ -24,22 +24,29 @@ sudo journalctl -u flowtool-serve -u flowtool-worker --since '10 minutes ago'
 worker token/ID/WSS/CA 与现有 [worker 配置](../deployment/docker.md) 同义；serve 设置私有监听地址。
 跨主机经内部 TLS 网关连接，公网仍只放行 webhook；勿为方便而公开 worker/metrics 路由。
 unit 的 cgroup 在超时后会清理子进程，但强杀不是应用层 stop receipt，仍需遵守恢复 fence。
-Worker 不提供自动更新；systemd 的停止、执行路径变更和启动由操作者分别执行。
+Worker 更新命令不操作 systemd；服务停止和启动由操作者分别执行，原地更新不变更执行路径。
 systemd 实际主机验收尚未执行。
 
-## Worker 手动更新
+## Worker 显式自更新
 
-使用 `flowtool worker update --sha SHA` 只检查公开发布；人工完成既有任务和确认、正常停止
-旧 Worker 后，以 `--apply --root RELEASE_ROOT` 准备固定 SHA 的独立环境。CLI 复用原 Worker
-root 的进程锁，拒绝运行中的进程、身份不符、损坏或未确认的 journal。不要删除 journal 解锁。
-
-准备成功时输出 JSON 的 `python` 字段，由操作者核对后使用该解释器执行 `-I -m app.cli worker`，
-保持原登录用户、HOME、ID、root 和认证。若使用系统服务，先人工停止并禁用自动重启，再人工修改
-执行路径及启动。命令不操作服务、不启动新进程、不创建启动指针，也不自动迁移旧草稿服务。
+正式 uv Git 安装在原入口执行 `flowtool worker --update`，自动查询并更新当前包及依赖，
+通过新进程版本、CLI 和依赖核验后退出。人工完成既有任务和确认、正常停止共享安装的全部 Worker，
+更新成功后使用原启动方式重启；源码检出不执行此更新命令。
+保持原登录用户、HOME、ID、root、journal 和认证；若使用系统服务，先人工停止并禁用自动重启。
+CLI 的安装目录锁拒绝与本版 Worker 并发更新，但旧版本进程和手工包管理器仍须人工停止。
+不操作服务、不创建版本目录或独立环境，失败可能部分改变现有依赖；保持停止并修复原环境。
 
 没有后台发布检查、自动空闲切换或暂停接单协议。操作步骤见
 [Worker 更新部署](../deployment/worker-update.md)。Server 更新仍按
 [Server 更新](../deployment/server-update.md)的普通预检、停旧和启新流程执行，不等待 Worker 更新。
+
+## Server Webhook 更新
+
+独立更新器监听仓库 Images 完成事件，验签后写主机本地文件队列，由单消费者部署。
+它不使用业务 inbox 或宿主机数据库连接。先查 `image_event.py status` 和 operation.json；
+failed 可重投或 retry，running/停旧后的 incomplete 直接按原镜像续作，不删文件解锁。
+已 Ready 不重复停启，队列损坏、目标 UID/配置冲突须明确处置；不回滚或强删。
+首次端口、TLS、secret、状态目录和命令见 [Server 更新](../deployment/server-update.md)。
 
 ## 日常与故障操作
 

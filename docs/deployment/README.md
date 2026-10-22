@@ -12,7 +12,7 @@
 ## 1. 准备运行环境
 
 准备 Python 3.12+、uv、PostgreSQL，以及 worker 账号可运行且已配置认证的 Codex CLI、Git
-和所需项目工具链。若项目使用 jj，还需安装 jj。Worker 通过独立的手动流程更新；Server 部署不
+和所需项目工具链。若项目使用 jj，还需安装 jj。Worker 通过独立的显式命令更新；Server 部署不
 等待所有 Worker 升级，但连接中的 Worker 仍须通过现有协议和身份鉴权。
 
 在 control 账号的应用检出目录执行：
@@ -102,9 +102,14 @@ worker 不自动读取 `.env`，上述加载仅针对 worker 私有文件。回�
 `uv run flowtool workers`，确认 `worker-1` 在线。保留 worker root、journal 和会话数据，
 不要为重启临时更换 identity/root。启动注册成功尚不代表真实编码闭环已通过。
 
-原生 Worker 的手动更新入口为 `flowtool worker update`：先人工完成收尾并停止 Worker，再准备
-固定 SHA 的独立环境，由操作者显式启动新版本。没有后台更新或更新专用服务模板，见
-[Worker 更新](worker-update.md)。Compose 和 Kubernetes Worker 继续使用各自部署方式手动更新。
+正式 uv Git 安装的 Worker 使用原安装入口 `flowtool worker --update`，自动查询最新版、
+原地更新并核验后退出。操作者先停共享安装的全部 Worker，成功后按原方式重启；
+源码检出不执行此命令。安装合同与恢复边界见 [Worker 更新](worker-update.md)。
+Compose 和 Kubernetes Worker 继续使用各自部署方式换镜像，没有后台更新或专用服务模板。
+
+Kubernetes Server 的自动部署入口是部署主机独立端口上的仓库 Workflow runs Webhook，
+事件保存本地文件，不要求主机访问集群 PostgreSQL，详见 [Server 更新](server-update.md)。
+它与下文业务 GitHub App Webhook 的端口、secret 和持久化路径分开配置。
 
 ## 3. 配置 Cloudflare 入口
 

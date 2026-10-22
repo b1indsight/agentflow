@@ -1,7 +1,6 @@
 """Complete PostgreSQL schema in dependency order; no historical migrations."""
 
 from app.persistence.console_schema import CONSOLE_SCHEMA
-from app.persistence.server_updates import SERVER_UPDATE_SCHEMA
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS flows (
@@ -330,5 +329,4 @@ SCHEMAS = (
     RECONCILE_SCHEMA,
     PROJECT_SCHEMA,
     CONSOLE_SCHEMA,
-    SERVER_UPDATE_SCHEMA,
 )

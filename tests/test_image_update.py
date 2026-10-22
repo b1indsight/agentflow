@@ -1,6 +1,8 @@
 """Run the webhook updater CLI with real PostgreSQL and a simulated Kubernetes boundary."""
 
 import copy
+import hashlib
+import hmac
 import importlib.util
 import itertools
 import json
@@ -11,6 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from fastapi.testclient import TestClient
 
 from app.contracts.protocol import PROTOCOL_VERSION
 from app.persistence.schema import SCHEMAS
@@ -23,7 +26,7 @@ REAL_RUN = subprocess.run
 class ImageCommands:
     """Keep real schema inspection and PostgreSQL, replacing Kubernetes transport."""
 
-    def __init__(self, store, failure=""):
+    def __init__(self, store=None, failure=""):
         self.store = store
         self.failure = failure
         self.calls = []
@@ -65,7 +68,7 @@ class ImageCommands:
         # must not turn a controller/frontend update into a worker rollout gate.
         self.env = dict(
             os.environ,
-            FLOWTOOL_DATABASE_URL=store.database_url,
+            FLOWTOOL_DATABASE_URL=store.database_url if store else "unused",
             FLOWTOOL_WORKER_TOKENS='{"unregistered":"TEST-UPDATER-SECRET"}',
         )
 
@@ -221,6 +224,19 @@ class ImageCommands:
             assert inner == ["python", "-", "--snapshot"]
             self.events.append("schema-snapshot")
             assert input == (TOOLS / "column-check.py").read_text()
+            if self.store is None:
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    json.dumps(
+                        {
+                            "name": "public",
+                            "statements": ["CREATE TABLE sample (id INT)"],
+                            "columns": [{"table": "sample", "column": "id", "type": "integer"}],
+                        }
+                    ),
+                    "",
+                )
             return REAL_RUN(
                 [sys.executable, "-", *inner[2:]],
                 input=input,
@@ -232,6 +248,7 @@ class ImageCommands:
             )
         if operation == "create":
             self.probe = json.loads(input)
+            self.probe["metadata"]["uid"] = "probe-" + str(self.events.count("probe-create"))
             self.probe_result = None
             spec = self.probe["spec"]
             assert spec["automountServiceAccountToken"] is False
@@ -256,17 +273,28 @@ class ImageCommands:
                 wire_schemas={"DTO": "changed"},
             )
         elif operation == "delete":
-            assert resource.startswith("pod/agentflow-image-check-")
+            assert resource == "--raw" and "/pods/agentflow-image-check-" in args[2]
+            assert json.loads(input)["preconditions"]["uid"] == self.probe["metadata"]["uid"]
             assert "--force" not in args and "--grace-period=0" not in args
             self.probe = None
             self.events.append("probe-delete")
             result = {}
         elif operation == "get" and resource.startswith("pod/agentflow-image-check-"):
+            if self.probe is None:
+                assert "--ignore-not-found" in args
+                return subprocess.CompletedProcess(command, 0, "", "")
             if self.failure != "pull" and self.probe_result is None:
-                self.probe_result = self.run_probe()
+                self.probe_result = (
+                    self.run_probe()
+                    if self.store
+                    else subprocess.CompletedProcess(
+                        [], 0, json.dumps({"removed_columns": [], "checked_columns": 1}), ""
+                    )
+                )
                 assert self.probe_result.returncode == 0, self.probe_result.stderr
             result = {
                 "metadata": self.probe["metadata"],
+                "spec": self.probe["spec"],
                 "status": {
                     "phase": "Failed" if self.failure == "pull" else "Running",
                     "containerStatuses": [
@@ -289,17 +317,19 @@ class ImageCommands:
                 scaling = next(c["value"] for c in changes if c["path"] == "/spec/replicas")
                 if scaling == 0:
                     self.events.append("scale-zero")
-                    self.store.workers.worker_connected(
-                        "added-during-update", PROTOCOL_VERSION, "new"
-                    )
+                    if self.store:
+                        self.store.workers.worker_connected(
+                            "added-during-update", PROTOCOL_VERSION, "new"
+                        )
                 else:
                     assert self.old_gone
                     self.events.append("scale-one")
-                    self.store.workers.recover_abandoned_assignments()
-                    with self.store.connection() as connection:
-                        connection.execute(
-                            "ALTER TABLE workers ADD COLUMN new_worker_metadata TEXT"
-                        )
+                    if self.store:
+                        self.store.workers.recover_abandoned_assignments()
+                        with self.store.connection() as connection:
+                            connection.execute(
+                                "ALTER TABLE workers ADD COLUMN new_worker_metadata TEXT"
+                            )
             result = self.kube(args)
             if self.old_gone and "old-gone" not in self.events:
                 self.events.append("old-gone")
@@ -342,6 +372,7 @@ def invoke_image_update(monkeypatch, tmp_path):
         monkeypatch.setattr(sys, "argv", arguments + (["--apply"] if apply else []))
         return module.main()
 
+    invoke.module = module
     return invoke
 
 
@@ -495,7 +526,241 @@ def test_target_and_cutover_failures_preserve_safety(store, invoke_image_update,
             json.loads(next(tmp_path.glob("*/operation.json")).read_text())["status"]
             == "incomplete"
         )
-        # Retrying must not blindly overwrite the incomplete operation or restart execution.
+        # Retrying observes the cluster and never repeats the stop/start patches.
         before = list(commands.calls)
         assert invoke_image_update(commands) == 1
-        assert commands.calls == before
+        assert len(commands.calls) > len(before)
+        assert [c for c in commands.calls if "patch" in c] == [c for c in before if "patch" in c]
+
+
+@pytest.mark.parametrize(
+    "stage", ["checking-image", "image-checked", "stopping-old-pod", "starting-new-pod", "ready"]
+)
+def test_same_image_cli_resumes_every_durable_stage_without_restarting_ready_server(
+    invoke_image_update, monkeypatch, tmp_path, stage
+):
+    # A killed updater must converge from real observed state, not require the old Pod
+    # or manual deletion of operation.json. Repeat even after Ready was already saved.
+    module = invoke_image_update.module
+    save = module.Update.save
+    interrupted = False
+
+    def crash(update, current):
+        nonlocal interrupted
+        save(update, current)
+        if current == stage and not interrupted:
+            interrupted = True
+            raise OSError("simulated process interruption")
+
+    monkeypatch.setattr(module.Update, "save", crash)
+    commands = ImageCommands()
+    assert invoke_image_update(commands) == 1
+    assert interrupted
+    assert invoke_image_update(commands) == 0
+    assert invoke_image_update(commands) == 0
+    assert commands.events.count("scale-zero") == 1
+    assert commands.events.count("scale-one") == 1
+    assert commands.events.count("probe-create") == 1
+    assert commands.probe is None
+    assert commands.workload["spec"]["replicas"] == 1
+    assert commands.workload["spec"]["template"]["spec"]["containers"][0]["image"] == IMAGE
+    assert json.loads(next(tmp_path.glob("*/operation.json")).read_text())["status"] == "complete"
+
+
+@pytest.mark.parametrize("replicas", [0, 1])
+def test_lost_patch_response_reconciles_and_retry_never_stops_target_image(
+    invoke_image_update, monkeypatch, replicas
+):
+    commands = ImageCommands()
+    original = commands.__call__
+    interrupted = False
+
+    def lost_response(command, **kwargs):
+        nonlocal interrupted
+        result = original(command, **kwargs)
+        if "patch" in command:
+            changes = json.loads(command[command.index("-p") + 1])
+            if (
+                any(c["path"] == "/spec/replicas" and c["value"] == replicas for c in changes)
+                and not interrupted
+            ):
+                interrupted = True
+                raise subprocess.TimeoutExpired(command, 45)
+        return result
+
+    assert invoke_image_update(lost_response) == 0
+    assert invoke_image_update(commands) == 0
+    assert commands.events.count("scale-zero") == commands.events.count("scale-one") == 1
+
+
+@pytest.mark.parametrize("conflict", ["image", "uid", "config", "corrupt"])
+def test_retry_does_not_override_conflicting_image_target_or_record(
+    invoke_image_update, monkeypatch, tmp_path, conflict
+):
+    commands = ImageCommands(failure="readiness")
+    assert invoke_image_update(commands) == 1
+    if conflict == "image":
+        commands.workload["spec"]["template"]["spec"]["containers"][0]["image"] = "foreign:latest"
+    elif conflict == "uid":
+        commands.workload["metadata"]["uid"] = "recreated"
+    elif conflict == "config":
+        commands.workload["spec"]["template"]["spec"]["containers"][1]["image"] = "foreign-sidecar"
+    else:
+        next(tmp_path.glob("*/operation.json")).write_text("{corrupt")
+    patches = [c for c in commands.calls if "patch" in c]
+    assert invoke_image_update(commands) == 1
+    assert [c for c in commands.calls if "patch" in c] == patches
+
+
+@pytest.mark.parametrize("operation", ["create", "delete"])
+def test_candidate_request_response_loss_does_not_leave_duplicate_probe_or_restart(
+    invoke_image_update, operation
+):
+    commands = ImageCommands()
+    lost = False
+
+    def transport(command, **kwargs):
+        nonlocal lost
+        result = commands(command, **kwargs)
+        if command[6] == operation and not lost:
+            lost = True
+            raise subprocess.TimeoutExpired(command, 45)
+        return result
+
+    assert invoke_image_update(transport) == 0
+    assert invoke_image_update(commands) == 0
+    assert lost and commands.probe is None
+    assert commands.events.count("probe-create") == 1
+    assert commands.events.count("scale-zero") == 1
+
+
+def test_retry_before_stop_refreshes_recreated_old_pod_instead_of_becoming_unrecoverable(
+    invoke_image_update, monkeypatch
+):
+    commands = ImageCommands(failure="pull")
+    assert invoke_image_update(commands) == 1
+    assert "scale-zero" not in commands.events
+    pod = commands.pod
+
+    def restarted():
+        current = pod()
+        if current["metadata"]["uid"] == "old":
+            current["metadata"]["uid"] = "restarted"
+        return current
+
+    monkeypatch.setattr(commands, "pod", restarted)
+    commands.failure = ""
+    assert invoke_image_update(commands) == 0
+    assert commands.events.count("scale-zero") == 1
+    assert commands.probe is None
+
+
+def test_changed_candidate_inputs_are_not_reused_or_deleted(invoke_image_update):
+    commands = ImageCommands(failure="pull")
+    assert invoke_image_update(commands) == 1
+    commands.failure = ""
+    commands.probe["spec"]["containers"][0]["command"] = ["foreign-command"]
+    # Avoid executing the deliberately foreign command in the transport simulator.
+    commands.probe_result = subprocess.CompletedProcess([], 0, "{}", "")
+    assert invoke_image_update(commands) == 1
+    assert commands.probe is not None
+    assert "scale-zero" not in commands.events
+
+
+def test_damaged_stop_intent_is_rejected_without_overwriting_record(invoke_image_update, tmp_path):
+    commands = ImageCommands(failure="readiness")
+    assert invoke_image_update(commands) == 1
+    path = next(tmp_path.glob("*/operation.json"))
+    report = json.loads(path.read_text())
+    report["stop_intent"] = "false"
+    path.write_text(json.dumps(report))
+    before = path.read_bytes()
+    assert invoke_image_update(commands) == 1
+    assert path.read_bytes() == before
+    assert commands.events.count("scale-zero") == 1
+
+
+def test_signed_http_through_queue_cli_resumes_completed_deployment_after_event_write_failure(
+    monkeypatch, tmp_path
+):
+    # Exercise the real event CLI wiring to Update.apply, not only a deploy callback.
+    spec = importlib.util.spec_from_file_location("image_event_e2e", TOOLS / "image_event.py")
+    events = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, events)
+    spec.loader.exec_module(events)
+    target = [
+        "--context",
+        "test-context",
+        "--namespace",
+        "test-namespace",
+        "--workload",
+        "statefulset/server",
+        "--container",
+        "app",
+        "--node",
+        "node",
+        "--timeout",
+        "4",
+        "--state-dir",
+        str(tmp_path),
+    ]
+    monkeypatch.setattr(sys, "argv", ["image-event", "init", *target])
+    events.main()
+    queue = events.Queue(next(tmp_path.iterdir()))
+    sha = "a" * 40
+    raw = json.dumps(
+        {
+            "action": "completed",
+            "repository": {"full_name": events.REPOSITORY},
+            "workflow": {"path": events.WORKFLOW},
+            "workflow_run": {
+                "id": 2,
+                "run_attempt": 1,
+                "head_sha": sha,
+                "head_branch": "main",
+                "event": "push",
+                "status": "completed",
+                "conclusion": "success",
+            },
+        }
+    ).encode()
+    with TestClient(events.create_app(queue, "secret")) as client:
+        assert (
+            client.post(
+                "/webhook",
+                content=raw,
+                headers={
+                    "x-github-event": "workflow_run",
+                    "x-hub-signature-256": "sha256="
+                    + hmac.new(b"secret", raw, hashlib.sha256).hexdigest(),
+                },
+            ).status_code
+            == 202
+        )
+    image = "ghcr.io/b1indsight/agentflow-serve@sha256:" + "b" * 64
+    monkeypatch.setattr(
+        events,
+        "resolve",
+        lambda *_: {
+            "run_id": 2,
+            "attempt": 1,
+            "sha": sha,
+            "run_number": 2,
+            "image": image,
+        },
+    )
+    monkeypatch.setattr(events, "github", lambda _: {"object": {"sha": sha}})
+    commands = ImageCommands()
+    monkeypatch.setattr(subprocess, "run", commands)
+    monkeypatch.setattr(sys, "argv", ["image-event", "run", *target, "--apply", "--once"])
+    with monkeypatch.context() as failure:
+        failure.setattr(events.Queue, "finish", lambda *_: (_ for _ in ()).throw(OSError("disk")))
+        with pytest.raises(OSError):
+            events.main()
+    assert queue.events()[0].state == "running"
+    assert json.loads((queue.directory / "operation.json").read_text())["status"] == "complete"
+    events.main()
+    assert queue.events()[0].state == "deployed"
+    assert commands.workload["spec"]["template"]["spec"]["containers"][0]["image"] == image
+    assert commands.events.count("scale-zero") == commands.events.count("scale-one") == 1
+    assert commands.probe is None

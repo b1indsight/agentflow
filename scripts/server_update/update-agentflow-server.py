@@ -48,6 +48,7 @@ class Update:
         self.directory = args.state_dir / hashlib.sha256(identity.encode()).hexdigest()[:16]
         self.record = self.directory / "operation.json"
         self.report: dict = {}
+        self.publication: dict | None = None
 
     def run(self, *args: str, data: str | None = None) -> str:
         result = subprocess.run(
@@ -64,6 +65,51 @@ class Update:
 
     def get(self, resource: str) -> dict:
         return json.loads(self.run("get", resource, "-o", "json"))
+
+    def probe(self) -> dict | None:
+        raw = self.run(
+            "get", f"pod/{self.report['probe_name']}", "-o", "json", "--ignore-not-found"
+        )
+        if not raw.strip():
+            return None
+        pod = json.loads(raw)
+        if (
+            pod["metadata"].get("annotations", {}).get("agentflow.io/update-owner")
+            != self.report["probe_owner"]
+        ):
+            raise RuntimeError("Candidate Pod belongs to another operation")
+        if self.report.get("probe_uid") not in (None, pod["metadata"]["uid"]):
+            raise RuntimeError("Candidate Pod was replaced concurrently")
+        checks = [c for c in pod["spec"]["containers"] if c["name"] == "check"]
+        if (
+            pod["spec"].get("nodeName") != self.args.node
+            or len(checks) != 1
+            or checks[0]["image"] != self.report["new_image"]
+            or checks[0].get("command")
+            != ["python", "-c", self.column_check, json.dumps(self.report["schema"])]
+        ):
+            raise RuntimeError("Candidate Pod inputs differ from recorded validation")
+        return pod
+
+    def cleanup_probe(self) -> None:
+        """Delete only our recorded candidate UID; a lost response is reconciled by GET."""
+        if not self.report.get("probe_name"):
+            return
+        pod = self.probe()
+        if pod is not None:
+            uri = f"/api/v1/namespaces/{self.args.namespace}/pods/{self.report['probe_name']}"
+            options = {
+                "apiVersion": "v1",
+                "kind": "DeleteOptions",
+                "preconditions": {"uid": pod["metadata"]["uid"]},
+            }
+            try:
+                self.run("delete", "--raw", uri, "-f", "-", data=json.dumps(options))
+            except (RuntimeError, subprocess.TimeoutExpired):
+                if self.probe() is not None:
+                    raise
+            self.wait(lambda: True if self.probe() is None else None, "candidate Pod deletion")
+        self.report.pop("probe_uid", None)
 
     def schema_snapshot(self, pod: dict) -> dict:
         live = self.get(f"pod/{pod['metadata']['name']}")
@@ -128,20 +174,34 @@ class Update:
                 "value": obj["metadata"]["resourceVersion"],
             },
         ]
-        return json.loads(
-            self.run(
-                "patch",
-                self.args.workload,
-                "--type=json",
-                "-p",
-                json.dumps(tests + changes),
-                "-o",
-                "json",
+        try:
+            return json.loads(
+                self.run(
+                    "patch",
+                    self.args.workload,
+                    "--type=json",
+                    "-p",
+                    json.dumps(tests + changes),
+                    "-o",
+                    "json",
+                )
             )
-        )
+        except (RuntimeError, subprocess.TimeoutExpired):
+            current = self.get(self.args.workload)
+            if current["metadata"]["uid"] != obj["metadata"]["uid"]:
+                raise
+            for change in changes:
+                value = current
+                for part in change["path"].strip("/").split("/"):
+                    value = value[int(part)] if isinstance(value, list) else value[part]
+                if value != change["value"]:
+                    raise
+            return current
 
     def save(self, stage: str) -> None:
         self.report["stage"] = stage
+        if not self.args.apply:
+            return
         temporary = self.directory / "operation.tmp"
         with temporary.open("w") as stream:
             temporary.chmod(0o600)
@@ -167,12 +227,11 @@ class Update:
                 raise RuntimeError(f"Timed out waiting for {description}")
             time.sleep(min(2, max(0, deadline - time.monotonic())))
 
-    def preflight(self) -> tuple[dict, dict, int]:
+    def target(self) -> tuple[dict, int]:
+        """Checks shared by fresh operations and recovery; no healthy old Pod required."""
         workload = self.get(self.args.workload)
         if workload.get("kind") != "StatefulSet" or workload["metadata"].get("deletionTimestamp"):
             raise RuntimeError("Expected a live StatefulSet")
-        if workload["spec"].get("replicas", 1) != 1:
-            raise RuntimeError("Expected exactly one server replica")
         if (
             workload["spec"]
             .get("persistentVolumeClaimRetentionPolicy", {})
@@ -199,6 +258,12 @@ class Update:
             raise RuntimeError("Application readinessProbe must check /readyz")
         if workload["spec"]["template"]["spec"].get("terminationGracePeriodSeconds", 30) < 45:
             raise RuntimeError("Server termination grace must be at least 45 seconds")
+        return workload, index
+
+    def preflight(self) -> tuple[dict, dict, int]:
+        workload, index = self.target()
+        if workload["spec"].get("replicas", 1) != 1:
+            raise RuntimeError("Expected exactly one server replica")
         pods = self.pods(workload)
         if len(pods) != 1 or not self.ready(pods[0]):
             raise RuntimeError("Expected exactly one healthy server Pod")
@@ -208,11 +273,14 @@ class Update:
 
     def probe_image(self, old_pod: dict, schema: dict) -> str:
         """Inspect columns on disposable PostgreSQL, without live credentials or data."""
-        name = "agentflow-image-check-" + uuid.uuid4().hex[:12]
+        name = self.report["probe_name"]
         manifest = {
             "apiVersion": "v1",
             "kind": "Pod",
-            "metadata": {"name": name},
+            "metadata": {
+                "name": name,
+                "annotations": {"agentflow.io/update-owner": self.report["probe_owner"]},
+            },
             "spec": {
                 "nodeName": self.args.node,
                 "restartPolicy": "Never",
@@ -284,11 +352,33 @@ class Update:
         }
         created = succeeded = False
         try:
-            self.run("create", "-f", "-", data=json.dumps(manifest))
+            existing = self.probe()
+            if existing is not None and (
+                existing.get("status", {}).get("phase") == "Failed"
+                or any(
+                    row.get("state", {}).get("terminated", {}).get("exitCode", 0) != 0
+                    for row in existing.get("status", {}).get("containerStatuses", [])
+                )
+            ):
+                self.cleanup_probe()
+                existing = None
+            if existing is None:
+                try:
+                    self.run("create", "-f", "-", data=json.dumps(manifest))
+                except (RuntimeError, subprocess.TimeoutExpired):
+                    if self.probe() is None:
+                        raise
+            existing = self.probe()
+            if existing is None:
+                raise RuntimeError("Candidate Pod disappeared")
+            self.report["probe_uid"] = existing["metadata"]["uid"]
+            self.save("checking-image")
             created = True
 
             def finished():
-                pod = self.get(f"pod/{name}")
+                pod = self.probe()
+                if pod is None:
+                    raise RuntimeError("Candidate Pod disappeared during inspection")
                 if pod.get("status", {}).get("phase") == "Failed":
                     raise RuntimeError(f"Candidate image check failed; inspect pod/{name}")
                 statuses = pod.get("status", {}).get("containerStatuses", [])
@@ -326,93 +416,69 @@ class Update:
             image_id = self.status(pod, "check").get("imageID")
             if not image_id:
                 raise RuntimeError("Candidate image identity is missing")
+            self.report["new_image_id"] = image_id
+            self.save("image-checked")
             succeeded = True
             return image_id
         finally:
             if succeeded:
-                self.run("delete", f"pod/{name}", "--wait=true", "--timeout=30s")
+                self.cleanup_probe()
             elif created:
                 print(f"Image-check Pod retained for diagnostics: {name}", file=sys.stderr)
 
-    def execute(self) -> None:
-        if self.record.exists() and json.loads(self.record.read_text()).get("status") != "complete":
-            raise RuntimeError(f"Unfinished operation: inspect {self.record}; no automatic retry")
-        original, old_pod, index = self.preflight()
-        print(f"Target: {self.args.context}/{self.args.namespace}/{self.args.workload}", flush=True)
-        schema = self.schema_snapshot(old_pod)
-        image_id = self.probe_image(old_pod, schema)
-        _, pod, _ = self.preflight()
-        self.current(original, original["spec"])
-        if pod["metadata"]["uid"] != old_pod["metadata"]["uid"]:
-            raise RuntimeError("Old Pod changed during image validation")
-        print(
-            "Image, target and column-removal checks passed; backup/restore and broad compatibility gates disabled."
-        )
-        if not self.args.apply:
-            print("CHECK PASSED: no server replaced.")
-            return
-        old_container = original["spec"]["template"]["spec"]["containers"][index]
+    def spec_signature(self, workload: dict, index: int) -> str:
+        """Guard unmanaged configuration without writing environment values to disk."""
+        spec = copy.deepcopy(workload["spec"])
+        spec.pop("replicas", None)
+        container = spec["template"]["spec"]["containers"][index]
+        container.pop("image", None)
+        container.pop("imagePullPolicy", None)
+        return hashlib.sha256(
+            json.dumps(spec, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
+    def observed(self) -> tuple[dict, int, str]:
+        workload, index = self.target()
         if (
-            old_container["image"] == self.args.image
-            and old_container.get("imagePullPolicy") == "IfNotPresent"
-            and self.status(old_pod, self.args.container).get("imageID") == image_id
+            workload["metadata"]["uid"] != self.report["workload_uid"]
+            or self.spec_signature(workload, index) != self.report["spec_signature"]
         ):
-            print("ALREADY CURRENT: no server replacement needed.")
-            return
-
-        self.report = {
-            "status": "incomplete",
-            "context": self.args.context,
-            "namespace": self.args.namespace,
-            "workload": self.args.workload,
-            "container": self.args.container,
-            "workload_uid": original["metadata"]["uid"],
-            "old_pod_uid": old_pod["metadata"]["uid"],
-            "old_image": old_container["image"],
-            "old_pull_policy": old_container.get("imagePullPolicy"),
-            "new_image": self.args.image,
-            "new_image_id": image_id,
-            "backup_policy": "disabled",
-            "compatibility_policy": "column-removal-only",
-        }
-        self.save("stopping-old-pod")
-        current = self.current(original, original["spec"])
-        stopped = self.patch(current, [{"op": "add", "path": "/spec/replicas", "value": 0}])
-        expected = copy.deepcopy(original["spec"])
-        expected["replicas"] = 0
-
-        def gone():
-            obj = self.current(original, expected)
-            acknowledged = (
-                obj.get("status", {}).get("observedGeneration", 0)
-                >= stopped["metadata"]["generation"]
-            )
-            return True if acknowledged and not self.pods(obj) else None
-
-        self.wait(gone, "normal deletion of the old server Pod")
-        self.save("starting-new-pod")
-        current = self.current(original, expected)
-        prefix = f"/spec/template/spec/containers/{index}"
-        started = self.patch(
-            current,
-            [
-                {"op": "add", "path": f"{prefix}/image", "value": self.args.image},
-                {"op": "add", "path": f"{prefix}/imagePullPolicy", "value": "IfNotPresent"},
-                {"op": "add", "path": "/spec/replicas", "value": 1},
-            ],
+            raise RuntimeError("StatefulSet changed concurrently; refusing to overwrite it")
+        container = workload["spec"]["template"]["spec"]["containers"][index]
+        replicas = workload["spec"].get("replicas", 1)
+        if (
+            container["image"] == self.args.image
+            and container.get("imagePullPolicy") == "IfNotPresent"
+            and replicas == 1
+        ):
+            return workload, index, "target"
+        if (container["image"], container.get("imagePullPolicy")) == (
+            self.report["old_image"],
+            self.report["old_pull_policy"],
+        ) and replicas in (0, 1):
+            return workload, index, "stopped" if replicas == 0 else "old"
+        raise RuntimeError(
+            "Deployment image or replica configuration conflicts with recorded intent"
         )
 
+    def finish_ready(self) -> None:
         def ready():
-            workload = self.current(original, started["spec"])
+            workload, _, state = self.observed()
+            if state != "target":
+                raise RuntimeError("Target image changed while waiting for readiness")
+            if (
+                workload.get("status", {}).get("observedGeneration", 0)
+                < workload["metadata"]["generation"]
+            ):
+                return None
             pods = self.pods(workload)
             if len(pods) > 1:
                 raise RuntimeError("Multiple server Pods appeared")
             if not pods or not self.ready(pods[0]):
                 return None
             pod = pods[0]
-            if (
-                pod["metadata"]["uid"] == old_pod["metadata"]["uid"]
-                or pod["spec"].get("nodeName") != self.args.node
+            if pod["spec"].get("nodeName") != self.args.node or (
+                self.report["stop_intent"] and pod["metadata"]["uid"] == self.report["old_pod_uid"]
             ):
                 raise RuntimeError("Replacement Pod identity or node mismatch")
             container = next(
@@ -420,49 +486,242 @@ class Update:
             )
             if (
                 container["image"] != self.args.image
-                or self.status(pod, self.args.container).get("imageID") != image_id
+                or self.status(pod, self.args.container).get("imageID")
+                != self.report["new_image_id"]
             ):
                 raise RuntimeError("Running image does not match the checked candidate")
             return pod
 
-        new_pod = self.wait(ready, "replacement /readyz and matching runtime image identity")
-        self.report["new_pod_uid"] = new_pod["metadata"]["uid"]
-        self.current(original, started["spec"])
-        self.report["status"] = "complete"
+        pod = self.wait(ready, "replacement /readyz and matching runtime image identity")
+        self.cleanup_probe()
+        self.report.update(status="complete", new_pod_uid=pod["metadata"]["uid"])
         self.save("ready")
         print("UPDATE COMPLETE: server ready; workers reconnect normally; drain flags unchanged.")
 
+    def read_record(self) -> dict:
+        """Reject damaged authority before it can select recovery or be replaced."""
+        if self.record.is_symlink():
+            raise RuntimeError("Operation record must not be a symbolic link")
+        record = json.loads(self.record.read_text())
+        text_fields = (
+            "context",
+            "namespace",
+            "workload",
+            "container",
+            "node",
+            "workload_uid",
+            "old_pod_uid",
+            "old_image",
+            "new_image",
+            "probe_name",
+            "probe_owner",
+        )
+        if (
+            not isinstance(record, dict)
+            or type(record.get("version")) is not int
+            or record["version"] != 1
+            or record.get("status") not in {"incomplete", "complete"}
+            or type(record.get("stop_intent")) is not bool
+            or any(not isinstance(record.get(k), str) or not record[k] for k in text_fields)
+            or record.get("old_pull_policy") not in {None, "Always", "Never", "IfNotPresent"}
+            or "old_pull_policy" not in record
+            or not re.fullmatch(r"[a-f0-9]{64}", record.get("spec_signature", ""))
+            or not re.fullmatch(r"[a-f0-9]{32}", record["probe_owner"])
+            or record["probe_name"] != "agentflow-image-check-" + record["probe_owner"][:12]
+            or not re.fullmatch(r"ghcr\.io/[a-z0-9/_.-]+@sha256:[a-f0-9]{64}", record["new_image"])
+        ):
+            raise RuntimeError("Invalid operation record; refusing to discard authoritative state")
+        schema = record.get("schema")
+        if (
+            not isinstance(schema, dict)
+            or not isinstance(schema.get("name"), str)
+            or not schema["name"]
+            or not isinstance(schema.get("statements"), list)
+            or not schema["statements"]
+            or any(not isinstance(s, str) or not s.strip() for s in schema["statements"])
+            or not isinstance(schema.get("columns"), list)
+            or not schema["columns"]
+            or any(
+                not isinstance(row, dict)
+                or any(
+                    not isinstance(row.get(k), str) or not row[k]
+                    for k in ("table", "column", "type")
+                )
+                for row in schema["columns"]
+            )
+        ):
+            raise RuntimeError("Invalid column snapshot in operation record")
+        if (record["stop_intent"] or record["status"] == "complete") and not (
+            isinstance(record.get("new_image_id"), str) and record["new_image_id"]
+        ):
+            raise RuntimeError("Durable image validation is missing")
+        publication = record.get("publication")
+        if publication is not None and (
+            not isinstance(publication, dict)
+            or any(
+                type(publication.get(k)) is not int or publication[k] < 1
+                for k in ("run_id", "attempt", "run_number")
+            )
+            or not re.fullmatch(r"[a-f0-9]{40}", publication.get("sha", ""))
+            or publication.get("image") != record["new_image"]
+        ):
+            raise RuntimeError("Invalid publication authorization in operation record")
+        return record
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    for name in ("context", "namespace", "workload", "container", "node", "image"):
+    def execute(self) -> None:
+        """Converge from Kubernetes state, treating journal stages only as durable intent."""
+        if self.record.exists():
+            self.report = self.read_record()
+            if any(
+                self.report[key] != getattr(self.args, key)
+                for key in ("context", "namespace", "workload", "container", "node")
+            ):
+                raise RuntimeError("Operation belongs to a different deployment target")
+            if self.report["new_image"] != self.args.image:
+                if self.report["status"] != "complete" and self.report["stop_intent"]:
+                    raise RuntimeError("Another image has an unfinished deployment")
+                self.cleanup_probe()
+                self.report = {}
+            elif not self.args.apply and self.report["status"] != "complete":
+                raise RuntimeError("Use the apply command to reconcile an existing operation")
+            else:
+                self.save("resuming")
+
+        if not self.report:
+            original, old_pod, index = self.preflight()
+            container = original["spec"]["template"]["spec"]["containers"][index]
+            owner = uuid.uuid4().hex
+            self.report = {
+                "version": 1,
+                "status": "incomplete",
+                "stop_intent": False,
+                **{
+                    key: getattr(self.args, key)
+                    for key in ("context", "namespace", "workload", "container", "node")
+                },
+                "workload_uid": original["metadata"]["uid"],
+                "old_pod_uid": old_pod["metadata"]["uid"],
+                "old_image": container["image"],
+                "old_pull_policy": container.get("imagePullPolicy"),
+                "new_image": self.args.image,
+                "spec_signature": self.spec_signature(original, index),
+                "schema": self.schema_snapshot(old_pod),
+                "publication": self.publication,
+                "probe_name": "agentflow-image-check-" + owner[:12],
+                "probe_owner": owner,
+                "backup_policy": "disabled",
+                "compatibility_policy": "column-removal-only",
+            }
+            self.save("checking-image")
+
+        workload, index, state = self.observed()
+        if self.report.get("new_image_id") and state == "target":
+            self.finish_ready()
+            return
+        if not self.report["stop_intent"]:
+            original, old_pod, _ = self.preflight()
+            schema = self.schema_snapshot(old_pod)
+            if (
+                schema != self.report["schema"]
+                or old_pod["metadata"]["uid"] != self.report["old_pod_uid"]
+            ):
+                # Before stop intent, a normal controller restart can refresh the baseline.
+                self.cleanup_probe()
+                self.report["schema"] = schema
+                self.report["old_pod_uid"] = old_pod["metadata"]["uid"]
+                self.report.pop("new_image_id", None)
+                self.save("checking-image")
+            if not self.report.get("new_image_id"):
+                self.probe_image(old_pod, schema)
+            else:
+                self.cleanup_probe()
+            self.current(original, original["spec"])
+            workload, index, state = self.observed()
+            if not self.args.apply:
+                print("CHECK PASSED: no server replaced.")
+                return
+            if state == "target":
+                self.finish_ready()
+                return
+            self.report["stop_intent"] = True
+            self.save("stopping-old-pod")
+
+        if not self.report.get("new_image_id"):
+            raise RuntimeError("Durable image validation is missing")
+        workload, index, state = self.observed()
+        if state == "old":
+            pods = self.pods(workload)
+            if len(pods) != 1 or pods[0]["metadata"]["uid"] != self.report["old_pod_uid"]:
+                raise RuntimeError("Old Pod identity changed before scaling down")
+            self.patch(workload, [{"op": "add", "path": "/spec/replicas", "value": 0}])
+            state = "stopped"
+        if state == "stopped":
+
+            def gone():
+                obj, _, phase = self.observed()
+                if phase != "stopped":
+                    raise RuntimeError("Workload changed during normal old Pod deletion")
+                acknowledged = (
+                    obj.get("status", {}).get("observedGeneration", 0)
+                    >= obj["metadata"]["generation"]
+                )
+                return True if acknowledged and not self.pods(obj) else None
+
+            self.wait(gone, "normal deletion of the old server Pod")
+            self.save("starting-new-pod")
+            workload, index, _ = self.observed()
+            prefix = f"/spec/template/spec/containers/{index}"
+            self.patch(
+                workload,
+                [
+                    {"op": "add", "path": f"{prefix}/image", "value": self.args.image},
+                    {"op": "add", "path": f"{prefix}/imagePullPolicy", "value": "IfNotPresent"},
+                    {"op": "add", "path": "/spec/replicas", "value": 1},
+                ],
+            )
+        self.finish_ready()
+
+    def apply(self) -> None:
+        """Both the standalone CLI and queue use the same host deployment exclusion."""
+        self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with (self.directory / "lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.execute()
+
+
+def configure_target(parser: argparse.ArgumentParser) -> None:
+    for name in ("context", "namespace", "workload", "container", "node"):
         parser.add_argument(f"--{name}", required=True)
     parser.add_argument("--timeout", type=int, default=300)
     parser.add_argument(
         "--state-dir", type=Path, default=Path.home() / ".local/state/agentflow-deploy"
     )
-    parser.add_argument("--apply", action="store_true")
-    args = parser.parse_args()
+
+
+def validate_target(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     if any(
         not getattr(args, name).strip() for name in ("context", "namespace", "container", "node")
     ):
         parser.error("context, namespace, container and node must not be empty")
     if not re.fullmatch(r"statefulset/[a-z0-9][a-z0-9.-]*", args.workload):
         parser.error("--workload must be statefulset/NAME")
-    if not re.fullmatch(r"ghcr\.io/[a-z0-9/_.-]+@sha256:[a-f0-9]{64}", args.image):
-        parser.error("--image must be a fixed ghcr.io/REPOSITORY@sha256:DIGEST, not a tag")
     if args.timeout < 1:
         parser.error("--timeout must be positive")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    configure_target(parser)
+    parser.add_argument("--image", required=True)
+    parser.add_argument("--apply", action="store_true")
+    args = parser.parse_args()
+    validate_target(parser, args)
+    if not re.fullmatch(r"ghcr\.io/[a-z0-9/_.-]+@sha256:[a-f0-9]{64}", args.image):
+        parser.error("--image must be a fixed ghcr.io/REPOSITORY@sha256:DIGEST, not a tag")
     os.umask(0o077)
     update = Update(args)
     try:
-        if args.apply:
-            update.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-            with (update.directory / "lock").open("a") as lock:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                update.execute()
-        else:
-            update.execute()
+        update.apply()
     except (
         RuntimeError,
         OSError,
@@ -476,7 +735,7 @@ def main() -> int:
         print(f"Update stopped: {type(error).__name__}: {error}", file=sys.stderr)
         if update.report:
             print(
-                f"Inspect {update.record}. No rollback, force-delete or post-cutover failure resume.",
+                f"Inspect {update.record}; retry the same image to resume. No rollback or force-delete.",
                 file=sys.stderr,
             )
         return 1

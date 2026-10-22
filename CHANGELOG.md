@@ -8,14 +8,16 @@
 
 ## Unreleased
 
-- Webhook Server 更新使用 PostgreSQL `server_update_events`、消费者互斥、候选 Pod 预检和删列检查：
-  普通预检后缩至零，等待旧 Pod 正常退出，再以固定 digest 恢复一个副本并核验 `/readyz` 与镜像身份。
-  不暂停全局业务、不等待 Worker 更新或任务完成，沿用普通断线恢复；部署脚本直接复制到主机。
-  主机锁和 `operation.json` 防止并发或未完成操作被盲目重试；不自动备份、回滚或迁移旧 PR 部署。
-- Worker 手动更新入口 `flowtool worker update --sha SHA`：默认只校验发布，人工停止 Worker 后以
-  `--apply --root RELEASE_ROOT` 准备独立的固定 SHA 环境，输出解释器路径供人工启动。
-  复用原 Worker root 锁和身份校验，拒绝未确认或损坏的 journal；不覆盖旧环境和执行数据。
-  无后台轮询、自动切换、暂停接单协议或更新专用服务；未执行目标主机安装或真实发布验收。
+- Server 独立监听仓库 Workflow runs Webhook，验签后原子持久写入主机 JSON 队列，
+  由单消费者核验发布并部署；删除 PostgreSQL 更新事件模块和 schema 注册，不自动删旧表。
+  同镜像可在检查、缩零、删旧、启动和 Ready 结果落盘中断后直接续作，已 Ready 不重复停启；
+  候选 Pod 按固定归属/UID/输入复用，Kubernetes 写入响应丢失按实际状态核对，拒绝冲突与版本回退。
+  保留删列检查、正常停旧启新和普通恢复；无全局暂停、Worker 门槛、备份或自动回滚。
+  三个 Server 脚本集中到 `scripts/server_update/`，直接复制，不提供安装器或工具自升级。
+- `flowtool worker --update` 自动查询最新已核验发布，在原有可信 uv Git 安装中更新包及依赖，
+  新解释器核验 revision、导入路径、CLI 和依赖后退出；移除旧 `worker update --sha` 只读入口。
+  安装级锁保护共享安装的普通 Worker 与更新，不创建新环境、版本目录、源码跳过分支或后台服务；
+  操作者先正常停止旧进程，成功后按原方式启动，保留身份、root、journal 和认证。
 
 - 会话连续同来源、同作者消息共用头像与作者栏，Worker 分组保留执行和会话归属边界，
   来源信息、正文分页与编辑差异独立保留。正文支持安全的 Markdown/GFM 渲染；原始 HTML

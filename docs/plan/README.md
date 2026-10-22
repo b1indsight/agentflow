@@ -5,6 +5,8 @@
 
 ## 当前计划
 
+- [`server-auto-update.md`](server-auto-update.md) — PR #104：独立验签 Webhook、本地文件队列和同镜像幂等部署已实现；Worker `--update` 在原 uv Git 安装中更新并核验后退出。保留删列与普通停启，不新建环境；951 项回归及五项简化对照通过，真实接入待验收，审查及交付状态见 PR。
+
 - [`persistence-simplification.md`](persistence-simplification.md) — PR #82：服务接收 Database 并自行创建所需仓储，Runtime 管理共享数据库生命周期；Webhook 在 receipt 事务内直接构造服务和路由，删除两者的 `using()` 及重复绑定清单；删除已被数据库回归覆盖的旧 RetryStore 内存测试，735 项 PostgreSQL 回归通过，覆盖对照证据见记录，独立审查与 CI 见 PR。
 
 - [`control-simplification.md`](control-simplification.md) — PR #81：依赖简化并按批准方案迁入 app/controler，按 events/workers/workflow/review/reconciliation 归组；生产净减少 174 行，734 项 PostgreSQL 回归、静态检查、隔离入口及构建通过，独立审查与 CI 见 PR。

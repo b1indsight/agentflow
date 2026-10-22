@@ -77,15 +77,13 @@ FlowTool 的目标是把带 `flow` 标签的 GitHub issue 编排成
 - **取消与 drain**：cancel 持久化停止意图，worker 取消当前执行并回收其持有的 Codex/VCS
   进程组；停止凭据与已发送 effects 未确认前不释放绑定。drain 停止分配新 Flow，已有绑定
   继续收尾。未知旧执行保持阻塞，无强制释放入口，见[取消与停机](docs/operations/cancel-drain.md)。
-- **Server 镜像更新**：Webhook 事件只保存于 PostgreSQL `server_update_events`。更新器完成普通预检、
-  候选 Pod 预检和删列检查后，将 Server 缩至零、等待旧 Pod 正常退出，再以固定 digest 恢复一个副本，
-  核验 `/readyz` 与实际镜像身份。此流程不暂停全局业务、不等待通信活动或 Worker 更新，也不改变
-  既有 recovery grace；详情见 [Server 更新](docs/deployment/server-update.md)。
-- **Worker 手动更新**：`flowtool worker update --sha SHA` 只检查公开发布；人工停止原 Worker 后，
-  加 `--apply --root RELEASE_ROOT` 准备固定 SHA 的独立环境，并输出供操作者人工启动的解释器路径。
-  更新复用原 root 锁，拒绝运行中的 Worker 和未确认 journal；不启动后台检查、不自动切换进程、
-  不安装更新服务或发送暂停接单协议。普通 `flowtool worker` 启动行为不变，见
-  [Worker 更新](docs/deployment/worker-update.md)。
+- **Server 镜像更新**：独立更新器监听仓库 Webhook，验签后持久写入主机 JSON 队列，后台核验发布、
+  候选镜像和删列检查，再缩至零、等旧 Pod 正常退出、以固定 digest 恢复一个副本并核验 Ready/imageID。
+  同镜像中断可直接续作，目标已 Ready 不重复停启；不直连集群 PostgreSQL，不暂停全局业务，
+  不等待 Worker 更新或改变 recovery grace，见 [Server 更新](docs/deployment/server-update.md)。
+- **Worker 原地更新**：正式 uv Git 安装可用 `flowtool worker --update` 自动查询最新发布，更新
+  现有包和依赖，经过新进程版本/CLI/依赖核验后退出；操作者先停旧进程，成功后按原方式启动。
+  不创建新环境或版本目录，不增加源码运行跳过分支，见 [Worker 更新](docs/deployment/worker-update.md)。
 - **Projects 与可观测性**：可选组织 Projects v2 同步独立运行；结构化日志、受 token 保护的
   `/metrics`、数据库就绪探针 `/readyz` 与 worker 状态文件已接入。Docker/Compose、Kubernetes
   和常驻运维说明见[部署指南](docs/deployment/README.md)，不代表真实环境已验收。
@@ -273,9 +271,9 @@ M3 F3 及审查修复本地验证（2026-09-08）：真实 PostgreSQL 下 **502 
 当前仅支持 wire protocol **v13**、worker journal **v3** 与当前完整 PostgreSQL schema。
 仓库尚未部署，不提供旧版本数据库、任务、结果或 journal 的迁移；首次运行使用新数据库/schema
 和新 worker root。Server 部署不以所有 Worker 更新为前提；Worker 连接仍按实际 protocol 和
-认证结果处理，不匹配直接拒绝。原生 Worker 通过 `flowtool worker update` 手动准备新版本，
-由操作者正常停止旧进程后显式启动；没有自动更新或切换握手。同版本重启仍保留冻结任务、
-结果摘要、effect ledger 与 journal 恢复能力。
+认证结果处理，不匹配直接拒绝。`flowtool worker update` 只校验发布，原生 Worker 沿用现有
+安装方式手动更新并重启；没有自动更新或切换握手。同版本重启仍保留冻结任务、结果摘要、
+effect ledger 与 journal 恢复能力。
 
 新 journal 在任务 ACK 后保留上一任务的 Flow 和 root 归属，成功归档 ACK 后才移除。不要更换
 `FLOWTOOL_WORKER_ROOT`、复制 journal 到其他 root 或复用 worker ID 接管工作区。清理仅删除

@@ -1,65 +1,104 @@
-# Worker 手动更新
-
-Worker 只提供本体 CLI 的手动更新入口：`flowtool worker update`。普通 `flowtool worker` 仍直接
-启动执行进程。没有后台发布轮询、自动空闲切换、暂停接单协议或更新专用安装器/launcher；
-仓库不再提供 Worker 更新用的 LaunchAgent 模板，也不自动操作系统服务。
-
-Server 与 Worker 的更新互不等待。Server 镜像事件仍使用 PostgreSQL `server_update_events`，
-不保存 Worker 更新状态；Server 的预检、停旧和启新流程见 [Server 更新](server-update.md)。
-
-## 只检查发布
+# Worker 原地自更新
 
 ```sh
-flowtool worker update --sha <40位小写提交SHA>
+/原安装路径/bin/flowtool worker --update
 ```
 
-此命令只查询并核验公开 GitHub Images/main/push 成功发布，要求指定 SHA 同时为当前 main head。
-成功时输出含 `state: checked` 的 JSON；不下载源码、不准备环境、不读取 Worker 凭据、不连接
-Controller，也不修改本地启动方式。无效 SHA 在查询前拒绝。
+这是一次性命令：自动查询最新已核验发布，在**现有安装位置**更新包本体和所需依赖，核验后退出。
+成功也不会启动 Worker；普通 `flowtool worker` 仍启动执行进程。旧的
+`flowtool worker update --sha ...` 只读入口已删除，无需用户指定 SHA。
+实现入口见 [Worker CLI](../../app/worker/cli.py) 与 [原地更新模块](../../app/worker/self_update.py)。
 
-## 停止旧进程后准备新版本
+更新不读取 Worker 配置或凭据，不连接 Controller、Server 或 PostgreSQL，不要求 Server 在线。
+Server 与 Worker 的更新互不等待；Server 流程见 [Server 更新](server-update.md)。
+没有后台轮询、全局暂停/活动协议、更新安装器、launcher、新环境或 release 目录，也不操作系统服务。
 
-1. 使用原 Worker 的同一登录用户、HOME 和私有环境配置。保留 Worker ID、token、WSS URL、
-   `FLOWTOOL_WORKER_ROOT`、journal、仓库和模型认证；不要通过新建 root 或删除 journal 绕过检查。
-2. 按 [取消与停机](../operations/cancel-drain.md) 完成既有任务和结果/停止确认，再人工正常停止
-   Worker。若由系统服务管理，操作者应先停止服务并禁用其自动重启，避免它在准备完成后抢先启动旧版。
-3. 加载原 Worker 环境后，执行手动准备：
+## 首版支持的正式安装
 
-   ```sh
-   set -a
-   . "$HOME/.config/flowtool/worker.env"
-   set +a
-   flowtool worker update --sha <40位小写提交SHA> --apply \
-     --root "$HOME/.local/share/agentflow/worker-releases"
-   ```
+实现只支持一种原地更新合同，不自动选择其他安装器：
 
-`--apply` 和 `--root` 必须同时提供。`--root` 是新版本的存放目录，与保存 journal 和仓库的
-`FLOWTOOL_WORKER_ROOT` 不同。更新要求原 Worker root 已有匹配的 `.worker-id`；CLI 在该 root
-持有原有进程锁，并在锁内检查 journal。Worker 尚在运行、身份不符、journal 损坏，或仍有任何
-未确认记录时拒绝准备。待确认记录必须先用原版本走普通恢复流程，不能清空后重试。
+- Linux/macOS 等支持本地目录 `flock` 的 POSIX 主机；使用原有、固定路径的 Python 虚拟环境。
+- `flowtool` 由 `uv pip install` 从 `git+https://github.com/b1indsight/agentflow@<完整SHA>`
+  安装。`uv` 在 PATH 上可用；当前命令按 uv 0.11.3 的参数合同实现。Git、联网及构建所需工具
+  必须已存在，不由更新命令安装。
+- 安装包的 PEP 610 `direct_url.json` 必须记录固定仓库 HTTPS URL（也接受 `.git` 后缀）、
+  `vcs: git` 和 40 位小写不可变 `commit_id`。它属于实际安装包的来源元数据；
+  项目固定的 `0.0.1` 和独立缓存标记都不用于版本比较。
+- 虚拟环境、site-packages、包文件、来源元数据和入口必须属于运行命令的同一用户、可写，
+  且不能允许组或其他用户写入。包与元数据不能使用符号链接或安装在当前环境外；
+  `bin/flowtool` 必须直接使用当前环境 Python 的 shebang，入口为 `app.cli:app`。
+- 安装的 SHA-256 `RECORD` 必须完整覆盖包、来源元数据和 CLI，且与实际文件匹配；
+  发现本地改动、缺失文件或未记录包文件时拒绝覆盖。已有环境及安装器写入的元数据必须可信；
+  这些检查不能抵御安装所有者同时篡改代码和所有元数据。
 
-通过检查后，在 `--root/releases/<SHA>-<随机标识>/` 下载固定 SHA 的源码，按 lockfile 建立
-non-editable `.venv`，核验实际导入的版本后输出准备结果；不另存更新状态或完成标记。
-准备期间始终持有原 Worker root 锁；不覆盖旧环境，不复制 journal 或认证，也不创建新的私密环境文件。
+来源不明、只有 wheel/版本号没有 Git provenance、其他仓库、pip/系统包管理器、
+只读安装、混合所有权和非直接 shebang 启动方式在不满足上述检查时非零退出，不会声称 already-current。
+容器及 uv tool 等外部托管方式未经验证，不将元数据检查通过视为已支持其托管生命周期。
+源码运行不调用 `--update`；没有源码/editable 检测或跳过分支，
+也不执行源码拉取、检出切换或 `uv sync`。容器和 Kubernetes Worker 继续按原部署方式换镜像。
 
-## 人工启动新版本
+## 操作流程与安装级互斥
 
-成功输出的 JSON 包含 `state: prepared`、`release`、`path` 和 `python`。操作者核对后，使用其中
-的 `python` 绝对路径启动新版本；以下路径需替换为命令实际输出：
+1. 使用原 Worker 的同一登录用户、HOME 和原虚拟环境入口。保留 Worker ID、token、WSS URL、
+   `FLOWTOOL_WORKER_ROOT`、journal、仓库及模型认证；不要新建 root 或删除 journal。
+2. 按 [取消与停机](../operations/cancel-drain.md) 正常完成既有工作和停止确认，再人工停止
+   **共享此安装的全部 Worker**。由服务管理的进程应先暂停自动拉起，避免更新过程中反复启动。
+   CLI 不停服务、不强杀进程，也不等待任务或通信状态。
+3. 执行原入口的 `worker --update`。它先取得安装目录（`sys.prefix`）的排他锁，普通 Worker CLI
+   在读取配置、创建 Runtime 前取得同一目录的共享锁并持有至运行结束。因此，不同 root 的多个
+   Worker 可以共用安装运行，但任意一个都会阻止更新；更新也会阻止普通启动和另一更新。
+   占用时立即非零退出，不排队等锁。帮助不需要锁或 Worker 凭据。
+4. [latest_release()](../../app/releases.py) 取得固定 `b1indsight/agentflow` 的 Images/main/push 成功发布，核验具体运行、
+   发布步骤和当前 main SHA。新目标还须经公开 GitHub compare 核对为已安装提交的后继；
+   无法证明前进、降级、分叉或 API 失败都拒绝安装。选中后只安装这个固定 SHA，不再次解析 main。
+5. 安装后用新的隔离 Python 进程（`-I`，不继承 PYTHONPATH）核对实际导入路径、RECORD 和目标
+   revision，再用新进程执行原 `bin/flowtool worker --help`，最后执行 `uv pip check`。
+   相同 SHA 也做完整健康核验，不能因上次安装留下的目标元数据就假报成功。
+6. 全部通过才输出 JSON：`state` 为 `updated` 或 `already-current`，并包含 `previous_sha`、
+   `sha`、原 `package_path` 和 `python`，然后以 0 退出。操作者再通过原服务或入口显式启动 Worker，
+   仍走普通注册和断线恢复协议。
+
+目录锁不需要写锁文件，普通启动也可用于只读安装。原有 [WorkerRootLock](../../app/worker/runtime.py) 仍独立保护同一 root
+及其身份。更新子进程继承目录锁，避免调用进程中断后安装子进程尚未结束就允许 Worker 启动。
+此互斥只覆盖采用本版 CLI 的进程；升级前的旧 Worker、直接调用 Runtime、手工运行包管理器或
+其他服务不遵守此锁，必须由操作者先停妥。不得在运行中移动/替换整个虚拟环境目录。
+
+## 实际安装和核验命令
+
+自更新调用以下命令；`PYTHON` 是当前解释器的绝对路径，`SHA` 是本次经发布和前进检查核验的固定值：
 
 ```sh
-"/实际release目录/.venv/bin/python" -I -m app.cli worker
+uv --no-config pip install --python "$PYTHON" --no-python-downloads \
+  --link-mode copy --reinstall-package flowtool \
+  "flowtool @ git+https://github.com/b1indsight/agentflow@$SHA"
+uv --no-config pip check --python "$PYTHON" --no-python-downloads
 ```
 
-此进程继续使用已加载的同一组 Worker 环境变量；注册和断线恢复仍走普通协议。CLI 不修改系统
-服务的执行路径，不创建启动指针，不停止、启动或重启任何 Worker。若需要常驻运行，由操作者
-自行修改现有服务的解释器路径，再人工启动；不要并起同一 ID/root 的两个 Worker。
+`--reinstall-package flowtool` 确保版本号同为 `0.0.1` 时仍替换本体；不使用 `--no-deps`，
+由目标提交的包需求解析、安装或调整必要依赖，不删除环境里的额外包。依赖依据包需求解析，
+并非复现仓库 `uv.lock` 的完整锁定环境；不会升级 Git/jj/Codex 等外部工具。
 
-准备失败时保留不完整目录用于检查；旧版和 journal 不变。修复原因后可重新执行命令，新尝试使用
-另一个独立目录，不复用失败环境。清理旧目录前应确认没有进程或服务仍引用它。
+执行目录为现有环境；安装/核验子进程清除 `UV_*`、`PIP_*`、`FLOWTOOL_*`、PYTHONPATH、
+PYTHONHOME 和 VIRTUAL_ENV 环境覆盖，且使用 `--no-config`，避免重定向目标环境或关闭依赖安装。
+首版不接入私有索引/自定义 uv 配置，需此类设置的安装应继续走人工维护流程。
+HOME 和已有认证文件保持不变。安装超时为 600 秒，各进程核验超时为 60 秒。
 
-此前 PR 草稿的独立命令和 `FLOWTOOL_WORKER_UPDATE_ROOT` / `FLOWTOOL_WORKER_UPDATE_APPLY`
-配置已移除；不提供旧 launcher 的自动迁移。若曾安装旧草稿的自动更新服务，需由操作者人工退出
-该服务后改用此流程。容器和 Kubernetes Worker 仍通过各自既有部署方式手动更新。
+## 失败与恢复边界
 
-本文不代表真实 GitHub 发布下载、目标主机服务切换或真实编码任务验收已完成。
+发布、前进检查、安装、fresh-verification、cli-verification 或 dependencies 阶段失败均非零退出，
+报告阶段、开始时已知的 `installed` 和目标 `target`；来源未确认时 revision 为 `unknown`。
+`installed` 是开始时读取的实际版本，**不表示失败后的环境仍是该版本**。为避免泄漏私有索引地址
+或构建凭据，CLI 不转发安装器/核验子进程的原始输出。
+
+原地包更新不是原子事务；失败可能已改变本体或部分依赖，不自动回滚，不自动启动 Worker。
+保持服务停止，先使用同一个 `PYTHON` 人工检查 `direct_url.json`、实际导入路径和
+`uv --no-config pip check --python "$PYTHON" --no-python-downloads`。若包或依赖需修复，
+核对仍可信的固定发布 SHA 后，在**原环境**人工运行上面的安装命令并查看诊断，再重新核验 CLI。
+相同 SHA 的 `--update` 不重复安装，依赖损坏时会失败，须人工修复；若入口/依赖已坏到无法执行 CLI，
+也由同一 Python/uv 修复，不删 root、journal 或认证来绕过问题。
+
+此前草稿的独立 updater/launcher 及 `FLOWTOOL_WORKER_UPDATE_ROOT` /
+`FLOWTOOL_WORKER_UPDATE_APPLY` 不提供自动迁移；旧草稿服务须由操作者先退出。
+
+[本地 CLI 测试](../../tests/test_worker_cli.py) 使用临时安装、公开发布/安装边界替身、真实新解释器和只读 `uv pip check`；
+不据此宣称真实 GitHub 下载、正式主机原地安装、服务切换或编码任务已经验收。
