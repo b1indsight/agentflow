@@ -1,6 +1,7 @@
 """Complete PostgreSQL schema in dependency order; no historical migrations."""
 
 from app.persistence.console_schema import CONSOLE_SCHEMA
+from app.persistence.server_updates import SERVER_UPDATE_SCHEMA
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS flows (
@@ -335,28 +336,6 @@ CREATE TABLE IF NOT EXISTS server_activities (
 );
 """
 
-WORKER_UPDATE_SCHEMA = """
-CREATE TABLE IF NOT EXISTS worker_releases (
-  singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK(singleton),
-  release JSONB NOT NULL,
-  run_number BIGINT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS worker_updates (
-  worker_id TEXT PRIMARY KEY REFERENCES workers(worker_id),
-  operation_id TEXT NOT NULL,
-  phase TEXT NOT NULL CHECK(phase IN ('paused','cutover','complete','aborted')),
-  source_instance TEXT NOT NULL,
-  source_epoch TEXT NOT NULL,
-  source_sha TEXT NOT NULL,
-  release JSONB NOT NULL,
-  identity JSONB NOT NULL,
-  resumed_instance TEXT,
-  resumed_epoch TEXT,
-  applied_number BIGINT NOT NULL DEFAULT 0,
-  updated_at TIMESTAMPTZ NOT NULL
-);
-"""
-
 SCHEMAS = (
     SCHEMA,
     WEBHOOK_SCHEMA,
@@ -367,5 +346,5 @@ SCHEMAS = (
     PROJECT_SCHEMA,
     CONSOLE_SCHEMA,
     MAINTENANCE_SCHEMA,
-    WORKER_UPDATE_SCHEMA,
+    SERVER_UPDATE_SCHEMA,
 )

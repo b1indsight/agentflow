@@ -8,6 +8,8 @@
 
 ## Unreleased
 
+- 删除 Server 更新工具的自制打包生成器、安装模板、自升级逻辑和专用测试；三个部署脚本改为直接复制，
+  不再生成单文件安装器或自动替换主机入口。
 - 删除额外的本机源码构建部署试用流程；Webhook 更新只保留活跃业务交换快照，不再查询无关任务计数。
 - 修复 Controller 长时间维护后已收到但未应用的结果被误判恢复超时；Worker 终态写入后
   清理旧任务工具队列，发送前跳过已取消调用，避免重连和下一任务重发旧 job/token。
@@ -19,9 +21,13 @@
 - 增加 macOS 登录用户原生 Worker 的 opt-in 执行空闲更新：首次接入使用 LaunchAgent，默认
   仅渲染 plist，`--apply` 仅准备 immutable release/launcher 而不调用 `launchctl`。更新保留
   Worker ID、root、HOME、journal 和模型认证，私有环境 JSON 要求 0600；本地 check/apply 只能由
-  当前 runtime 协调。现有镜像 webhook 队列新增独立 Worker 消费路径和固定 notifier 的人工接入
-  约束。两端 ACK、target-scoped pause、失败保留记录和单次启动授权均不阻塞 Server 部署；Linux
-  Worker 自动更新仍延期。尚未执行真实主机安装、发布、launchd 或服务更新验收。
+  当前 runtime 协调。每个受管 Worker 每 300 秒自行核验 GitHub Images 发布；本地
+  `operation.json` 与 connection-scoped pause/commit/resume/ready 握手拥有 cutover，重连时
+  `Register.update_pending` 恢复 fencing。该修订取代早先的 SQLite Worker 队列、host notifier、
+  kubectl 发布器和 `worker_releases`/`worker_updates` 持久化方案：Server 事件只使用 PostgreSQL
+  `server_update_events`，不保存 Worker 状态。Worker 更新不阻塞 Server 部署，也没有独立于普通
+  binding-recovery grace 的持久豁免；Linux Worker 自动更新仍延期。尚未执行真实主机安装、
+  GitHub 发布、launchd 或服务更新验收。
 
 - 会话连续同来源、同作者消息共用头像与作者栏，Worker 分组保留执行和会话归属边界，
   来源信息、正文分页与编辑差异独立保留。正文支持安全的 Markdown/GFM 渲染；原始 HTML

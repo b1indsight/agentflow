@@ -8,7 +8,7 @@ from app.contracts.protocol_base import Message, ProtocolModel
 
 Sha = Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")]
 OperationId = Annotated[str, Field(pattern=r"^[0-9a-f]{32}$")]
-UpdateAction = Literal["pause", "commit", "abort", "resume"]
+UpdateAction = Literal["pause", "commit", "abort", "resume", "ready"]
 
 
 class ReleaseEvent(ProtocolModel):
@@ -51,8 +51,3 @@ class MaintenanceReply(Message):
     accepted: bool
     idle: bool = False
     reason: str | None = None
-
-
-class ReleaseAvailable(Message):
-    type: Literal["release_available"] = "release_available"
-    release: ReleaseEvent

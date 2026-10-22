@@ -1,26 +1,30 @@
-"""Regression coverage for independent release-event publication boundaries."""
-
-from __future__ import annotations
+"""Server events persist in PostgreSQL independently of Worker cutovers."""
 
 import importlib.util
-import json
 import subprocess
-import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
+from psycopg.pq import TransactionStatus
+
+from app.controler.workers.updates import WorkerUpdateSession
+from tests.test_maintenance import idle_binding
+from tests.test_worker_updates import request
 
 ROOT = Path(__file__).parents[1]
 SHA = "a" * 40
 
 
 @pytest.fixture
-def image_event(monkeypatch, tmp_path):
+def image_event(store, monkeypatch):
     spec = importlib.util.spec_from_file_location("image_event", ROOT / "scripts/image_event.py")
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)
-    monkeypatch.setattr(module, "ROOT", tmp_path)
+    monkeypatch.setenv("FLOWTOOL_DATABASE_URL", store.database.database_url)
+    monkeypatch.setattr(module, "resolve", candidate)
+    monkeypatch.setattr(module, "github", lambda _: {"object": {"sha": SHA}})
     return module
 
 
@@ -34,157 +38,96 @@ def candidate(run_id, attempt, sha):
     }
 
 
-def test_server_contract_and_history_are_unchanged_when_worker_publish_fails(
-    image_event, monkeypatch
+@pytest.mark.parametrize("apply", [False, True])
+def test_server_consumes_deduplicated_event_during_worker_cutover(
+    store, image_event, monkeypatch, apply
 ):
-    image_event.enqueue(1, 1, SHA)
-    with image_event.database() as db, db:
-        db.execute("UPDATE events SET state='deployed', reason='old history' WHERE run_id=1")
-        db.execute("DELETE FROM worker_events WHERE run_id=1")
+    # A Worker can remain in cutover while the Server deploys. Neither its update
+    # state nor a database transaction may be held across the external updater.
+    idle_binding(store)
+    worker = WorkerUpdateSession(store.workers, "w", "epoch")
+    assert worker.handle(request()).idle
+    assert worker.handle(request("commit")).accepted
     image_event.enqueue(2, 1, SHA)
-    monkeypatch.setattr(image_event, "resolve", candidate)
-    monkeypatch.setattr(image_event, "github", lambda _: {"object": {"sha": SHA}})
+    image_event.enqueue(2, 1, SHA)
+    with pytest.raises(image_event.Rejected, match="different commit"):
+        image_event.enqueue(2, 1, "c" * 40)
+    opened = []
+    connect = image_event.database
+
+    @contextmanager
+    def observed_database():
+        with connect() as db:
+            opened.append(db)
+            yield db
+
+    calls = []
+
+    def run(command, check):
+        assert opened[-1].info.transaction_status == TransactionStatus.IDLE
+        with connect() as db:
+            assert (
+                db.execute("SELECT state FROM server_update_events").fetchone()["state"]
+                == "running"
+            )
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(image_event, "database", observed_database)
+    monkeypatch.setattr(image_event.subprocess, "run", run)
+    assert image_event.consume(apply, True)
+    assert calls == [
+        [str(image_event.UPDATER), "--image", candidate(2, 1, SHA)["image"]]
+        + (["--apply"] if apply else [])
+    ]
+    image_event.enqueue(2, 1, SHA)  # Duplicate delivery cannot reset a terminal event.
+    with connect() as db:
+        rows = db.execute("SELECT * FROM server_update_events").fetchall()
+        assert len(rows) == 1
+        assert rows[0]["state"] == ("deployed" if apply else "checked")
+        assert rows[0]["run_number"] == 2
+        assert (
+            db.execute(
+                "SELECT tablename FROM pg_tables WHERE schemaname=current_schema()"
+                " AND tablename IN ('worker_releases','worker_updates')"
+            ).fetchall()
+            == []
+        )
+    assert worker.paused
+
+
+@pytest.mark.parametrize("stale", [False, True])
+def test_failure_and_stale_events_do_not_erase_deployment_history(image_event, monkeypatch, stale):
+    image_event.enqueue(1, 1, SHA)
+    with image_event.database() as db:
+        db.execute("UPDATE server_update_events SET state='deployed',run_number=1")
+    image_event.enqueue(2, 1, SHA)
     calls = []
     monkeypatch.setattr(
         image_event.subprocess,
         "run",
         lambda command, check: calls.append(command) or subprocess.CompletedProcess(command, 1),
     )
-
-    assert not image_event.worker_consume(True, True)
+    if stale:
+        monkeypatch.setattr(image_event, "github", lambda _: {"object": {"sha": "c" * 40}})
+    assert image_event.consume(True, True) is stale
     with image_event.database() as db:
-        assert db.execute("SELECT state FROM events WHERE run_id=1").fetchone()[0] == "deployed"
-        assert db.execute("SELECT state FROM events WHERE run_id=2").fetchone()[0] == "queued"
-        assert (
-            db.execute("SELECT state FROM worker_events WHERE run_id=2").fetchone()[0] == "failed"
-        )
-        assert db.execute("SELECT count(*) FROM worker_events WHERE run_id=1").fetchone()[0] == 0
-    assert calls == [[str(image_event.WORKER_NOTIFIER), "2", "1", SHA, "--apply"]]
-    monkeypatch.setattr(
-        image_event.subprocess,
-        "run",
-        lambda command, check: calls.append(command) or subprocess.CompletedProcess(command, 0),
-    )
-    assert image_event.consume(True, True)
-    assert calls[-1] == [
-        str(image_event.UPDATER),
-        "--image",
-        candidate(2, 1, SHA)["image"],
-        "--apply",
-    ]
+        states = db.execute("SELECT state FROM server_update_events ORDER BY run_id").fetchall()
+        assert [row["state"] for row in states] == ["deployed", "skipped" if stale else "failed"]
+    assert len(calls) == int(not stale)
+
+
+def test_consumer_lock_and_interrupted_event_guard(image_event):
+    image_event.enqueue(1, 1, SHA)
+    with (
+        image_event.database() as first,
+        image_event.consumer_lock(first),
+        pytest.raises(RuntimeError, match="already running"),
+    ):
+        image_event.consume(True, True)
     with image_event.database() as db:
-        assert db.execute("SELECT state FROM events WHERE run_id=2").fetchone()[0] == "deployed"
-
-
-def test_worker_check_and_apply_use_fixed_notifier_arguments(image_event, monkeypatch):
-    image_event.enqueue(3, 2, SHA)
-    monkeypatch.setattr(image_event, "resolve", candidate)
-    monkeypatch.setattr(image_event, "github", lambda _: {"object": {"sha": SHA}})
-    calls = []
-    monkeypatch.setattr(
-        image_event.subprocess,
-        "run",
-        lambda command, check: calls.append(command) or subprocess.CompletedProcess(command, 0),
-    )
-
-    assert image_event.worker_consume(False, True)
-    assert calls == [[str(image_event.WORKER_NOTIFIER), "3", "2", SHA]]
-    with image_event.database() as db, db:
-        db.execute("UPDATE worker_events SET state='queued' WHERE run_id=3")
-    assert image_event.worker_consume(True, True)
-    assert calls[-1] == [str(image_event.WORKER_NOTIFIER), "3", "2", SHA, "--apply"]
-
-
-def test_worker_duplicate_is_one_event_and_stale_event_does_not_touch_server(
-    image_event, monkeypatch
-):
-    image_event.enqueue(4, 1, SHA)
-    image_event.enqueue(4, 1, SHA)
-    monkeypatch.setattr(image_event, "resolve", candidate)
-    monkeypatch.setattr(image_event, "github", lambda _: {"object": {"sha": "c" * 40}})
-
-    assert image_event.worker_consume(False, True)
-    with image_event.database() as db:
-        assert db.execute("SELECT count(*) FROM worker_events WHERE run_id=4").fetchone()[0] == 1
-        assert (
-            db.execute("SELECT state FROM worker_events WHERE run_id=4").fetchone()[0] == "skipped"
-        )
-        assert db.execute("SELECT state FROM events WHERE run_id=4").fetchone()[0] == "queued"
-
-
-@pytest.fixture
-def publisher():
-    spec = importlib.util.spec_from_file_location(
-        "publish_release", ROOT / "scripts/worker_update/publish-release.py"
-    )
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    return module
-
-
-@pytest.mark.parametrize("apply", [False, True])
-def test_publisher_uses_one_owned_ready_pod_and_fixed_adapter(publisher, monkeypatch, apply):
-    responses = iter(
-        (
-            {"metadata": {"uid": "set-uid"}},
-            {
-                "items": [
-                    {
-                        "metadata": {
-                            "name": "server-0",
-                            "uid": "pod-uid",
-                            "ownerReferences": [
-                                {"uid": "set-uid", "kind": "StatefulSet", "controller": True}
-                            ],
-                        },
-                        "status": {"containerStatuses": [{"name": "app", "ready": True}]},
-                    }
-                ]
-            },
-            {"metadata": {"uid": "pod-uid"}},
-        )
-    )
-    calls = []
-
-    def fake_run(command, **kwargs):
-        calls.append((command, kwargs))
-        if "exec" in command:
-            return subprocess.CompletedProcess(command, 0, "", "")
-        return subprocess.CompletedProcess(command, 0, json.dumps(next(responses)), "")
-
-    monkeypatch.setattr(publisher.subprocess, "run", fake_run)
-    arguments = [
-        "publish-release.py",
-        "--context",
-        "ctx",
-        "--namespace",
-        "ns",
-        "--workload",
-        "statefulset/server",
-        "--container",
-        "app",
-        "9",
-        "2",
-        SHA,
-    ]
-    monkeypatch.setattr(sys, "argv", arguments + (["--apply"] if apply else []))
-    assert publisher.main() == 0
-    command, kwargs = calls[-1]
-    expected = ["-", "9", "2", SHA] + (["--apply"] if apply else [])
-    assert command[-len(expected) :] == expected
-    assert kwargs["input"] == publisher.ADAPTER.read_text()
-
-
-def test_publisher_rejects_unowned_or_non_ready_pods(publisher, monkeypatch):
-    monkeypatch.setattr(
-        publisher,
-        "read_json",
-        lambda *args: (
-            {"metadata": {"uid": "set-uid"}}
-            if args[0][1] == "statefulset/server"
-            else {"items": []}
-        ),
-    )
-    with pytest.raises(publisher.PublishError, match="exactly one Ready"):
-        publisher.ready_pod("ctx", "ns", "statefulset/server", "app")
+        db.execute("UPDATE server_update_events SET state='running'")
+    # A crashed consumer releases its lock, but the durable running event prevents
+    # silently repeating a possibly completed image switch after process restart.
+    with pytest.raises(RuntimeError, match="Interrupted Server update"):
+        image_event.consume(True, True)

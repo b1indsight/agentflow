@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import timedelta
 
 from psycopg.rows import class_row
@@ -175,9 +175,38 @@ class WorkerStore(Repository):
         ):
             return cursor.execute("SELECT * FROM workers ORDER BY worker_id").fetchall()
 
-    def assign_job(self, worker_id: str, token: str, connection_epoch: str = "") -> Job | None:
+    def idle_for_update(self, worker_id: str) -> bool:
+        """Read existing execution/ACK facts; update intent is owned by the Worker."""
+        with self._db.connection() as connection:
+            row = connection.execute(
+                "SELECT current_job_id IS NULL"
+                " AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.assigned_worker_id=w.worker_id"
+                " AND (j.state='running' OR (j.dispatch_authorized_at IS NOT NULL"
+                " AND j.started_at IS NULL AND j.result_received_at IS NULL)"
+                " OR (j.kind='archive' AND j.payload->'archive' IS NOT NULL AND j.result_received_at IS NULL)"
+                " OR (j.result_received_at IS NOT NULL AND j.result_applied_at IS NULL)))"
+                " AND NOT EXISTS (SELECT 1 FROM execution_stops s WHERE s.worker_id=w.worker_id"
+                " AND s.state!='confirmed')"
+                " AND NOT EXISTS (SELECT 1 FROM result_effects e JOIN jobs j ON j.id=e.job_id"
+                " WHERE j.assigned_worker_id=w.worker_id AND (e.state NOT IN ('succeeded','skipped','failed')"
+                " OR (e.dispatched_at IS NOT NULL AND e.receipt IS NULL))) AS idle"
+                " FROM workers w WHERE worker_id=%s",
+                (worker_id,),
+            ).fetchone()
+        return bool(row and row["idle"])
+
+    def assign_job(
+        self,
+        worker_id: str,
+        token: str,
+        connection_epoch: str = "",
+        *,
+        excluded: Sequence[str] = (),
+    ) -> Job | None:
         """Claim work while retaining a Flow's worker slot between individual jobs."""
 
+        if worker_id in excluded:
+            return None
         now = self._db.now()
         # Share this predicate across fair-worker selection and both binding paths.
         eligible = (
@@ -198,8 +227,7 @@ class WorkerStore(Repository):
                 return None
             candidate = connection.execute(
                 "SELECT w.worker_id FROM workers w WHERE w.status=%s"
-                " AND NOT EXISTS (SELECT 1 FROM worker_updates u WHERE u.worker_id=w.worker_id"
-                " AND u.phase IN ('paused','cutover'))"
+                " AND NOT (w.worker_id=ANY(%s))"
                 " AND w.current_job_id IS NULL AND EXISTS (SELECT 1 FROM jobs j"
                 " JOIN flows f ON f.id=j.flow_id"
                 " LEFT JOIN flow_executions own ON own.worker_id=w.worker_id"
@@ -209,7 +237,7 @@ class WorkerStore(Repository):
                 " AND f.state=%s AND ((own.flow_id=j.flow_id) OR"
                 " (own.flow_id IS NULL AND bound.flow_id IS NULL AND NOT w.draining))" + eligible + ")"
                 " ORDER BY w.last_assigned_at NULLS FIRST, w.worker_id LIMIT 1",
-                (WorkerStatus.ONLINE, JobState.QUEUED, FlowState.ACTIVE, now),
+                (WorkerStatus.ONLINE, list(excluded), JobState.QUEUED, FlowState.ACTIVE, now),
             ).fetchone()
             if candidate is None or candidate["worker_id"] != worker_id:
                 return None
@@ -222,8 +250,6 @@ class WorkerStore(Repository):
                     " AND status=%s AND current_job_id IS NULL"
                     " AND (NOT draining OR EXISTS (SELECT 1 FROM flow_executions e"
                     " WHERE e.worker_id=workers.worker_id AND e.released_at IS NULL))"
-                    " AND NOT EXISTS (SELECT 1 FROM worker_updates u WHERE u.worker_id=workers.worker_id"
-                    " AND u.phase IN ('paused','cutover'))"
                     " FOR UPDATE OF workers SKIP LOCKED",
                     (worker_id, connection_epoch, WorkerStatus.ONLINE),
                 ).fetchone()
@@ -740,8 +766,6 @@ class WorkerStore(Repository):
                 " LEFT JOIN flow_deliveries d ON d.flow_id=e.flow_id"
                 " WHERE e.released_at IS NULL AND e.recovery_deadline<=%s"
                 " AND NOT %s"
-                " AND NOT EXISTS (SELECT 1 FROM worker_updates u WHERE u.worker_id=e.worker_id"
-                " AND u.phase IN ('paused','cutover'))"
                 " ORDER BY e.flow_id FOR UPDATE OF e",
                 (now, paused),
             ).fetchall()

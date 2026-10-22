@@ -3,12 +3,7 @@
 import asyncio
 from typing import Protocol
 
-from app.contracts.updates import (
-    MaintenanceReply,
-    ReleaseAvailable,
-    ReleaseEvent,
-    WorkerMaintenance,
-)
+from app.contracts.updates import MaintenanceReply, WorkerMaintenance
 
 
 class UpdateSocket(Protocol):
@@ -16,10 +11,10 @@ class UpdateSocket(Protocol):
 
 
 class UpdateChannel:
-    """Connection-scoped replies and a bounded latest-release notification slot."""
+    """Connection-scoped replies and the Worker's own pending handoff."""
 
     def __init__(self) -> None:
-        self.notices: asyncio.Queue[ReleaseEvent] = asyncio.Queue(maxsize=1)
+        self.pending: WorkerMaintenance | None = None
         self.epoch: str | None = None
         self._socket: UpdateSocket | None = None
         self._pending: dict[str, asyncio.Future[MaintenanceReply]] = {}
@@ -33,13 +28,8 @@ class UpdateChannel:
             if not future.done():
                 future.set_exception(ConnectionError("update connection changed"))
 
-    def accept(self, message: MaintenanceReply | ReleaseAvailable) -> None:
+    def accept(self, message: MaintenanceReply) -> None:
         """Called only by the existing single reader, including while executing."""
-        if isinstance(message, ReleaseAvailable):
-            if not self.notices.empty():
-                self.notices.get_nowait()
-            self.notices.put_nowait(message.release)
-            return
         future = self._pending.get(message.request_id)
         if future is not None and not future.done() and message.connection_epoch == self.epoch:
             future.set_result(message)

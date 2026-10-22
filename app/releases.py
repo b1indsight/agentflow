@@ -126,14 +126,24 @@ def verify_release(release: ReleaseEvent) -> ReleaseEvent:
     return release
 
 
-def release_for_sha(sha: str) -> ReleaseEvent:
-    """Resolve a local CLI request using public metadata, not caller-supplied run claims."""
+def latest_release() -> ReleaseEvent:
+    """Read the latest verified publication independently of Server deployment state."""
     runs = _get(
         _Runs, "actions/workflows/images.yml/runs?branch=main&event=push&status=success&per_page=1"
     )
-    if not runs.workflow_runs or runs.workflow_runs[0].head_sha != sha:
-        raise ReleaseError("SHA does not match the latest successful main publication")
+    if not runs.workflow_runs:
+        raise ReleaseError("no successful main publication is available")
     run = runs.workflow_runs[0]
     return verify_release(
-        ReleaseEvent(sha=sha, run_id=run.id, attempt=run.run_attempt, run_number=run.run_number)
+        ReleaseEvent(
+            sha=run.head_sha, run_id=run.id, attempt=run.run_attempt, run_number=run.run_number
+        )
     )
+
+
+def release_for_sha(sha: str) -> ReleaseEvent:
+    """Resolve a local CLI request using verified metadata, never caller-supplied run claims."""
+    release = latest_release()
+    if release.sha != sha:
+        raise ReleaseError("SHA does not match the latest successful main publication")
+    return release

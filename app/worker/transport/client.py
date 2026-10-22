@@ -40,7 +40,7 @@ from app.contracts.protocol import (
     Succeeded,
     parse_server_message,
 )
-from app.contracts.updates import MaintenanceReply, ReleaseAvailable
+from app.contracts.updates import MaintenanceReply
 from app.domain.delivery_models import DeliveryReceipt
 from app.domain.models import VcsOutcome
 from app.worker.state.session import WorkerSession
@@ -201,7 +201,7 @@ class WorkerClient:
         while True:
             raw = await connection.recv()
             message = parse_server_message(raw.decode() if isinstance(raw, bytes) else raw)
-            if self.updates is not None and isinstance(message, (MaintenanceReply, ReleaseAvailable)):
+            if self.updates is not None and isinstance(message, MaintenanceReply):
                 self.updates.accept(message)
                 continue
             if not isinstance(message, ConversationQuery):
@@ -238,6 +238,7 @@ class WorkerClient:
                 worker_id=self.worker_id,
                 recovery=self._recovery_descriptor(),
                 update_version=1 if self.updates is not None else None,
+                update_pending=self.updates.pending if self.updates is not None else None,
             ).model_dump_json(exclude_none=True)
         )
         first = await self._receive_message(connection)

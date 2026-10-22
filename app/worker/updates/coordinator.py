@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import sys
+import time
 from collections.abc import Callable
 from pathlib import Path
 from uuid import uuid4
@@ -13,7 +14,7 @@ from uuid import uuid4
 from loguru import logger
 
 from app.contracts.updates import ReleaseEvent, UpdateAction, UpdateIdentity, WorkerMaintenance
-from app.releases import ReleaseError, release_for_sha, verify_release
+from app.releases import ReleaseError, latest_release, release_for_sha, verify_release
 from app.worker.transport.client import WorkerClient
 from app.worker.updates.channel import UpdateChannel
 from app.worker.updates.release import prepare, running_sha, validate_prepared
@@ -86,6 +87,7 @@ class UpdateCoordinator:
         claim = json.loads((self.root / "launch.json").read_bytes())
         if claim["operation"] != operation.operation_id:
             raise ReleaseError("startup authorization does not match the cutover")
+        self._pending(operation)
 
     async def run(self) -> None:
         """One coordinator per updater root; prepare failures never acquire a pause."""
@@ -97,6 +99,7 @@ class UpdateCoordinator:
                 if operation.phase == "cutover":
                     await self._finish(operation)
             last_notice: tuple[int, int] | None = None
+            next_check = 0.0
             while True:
                 request_path = self.root / "request.json"
                 try:
@@ -105,8 +108,9 @@ class UpdateCoordinator:
                         request_path.unlink()
                         release = await asyncio.to_thread(release_for_sha, request.sha)
                         await self.update(release, apply=request.apply and self.apply)
-                    elif not self.channel.notices.empty():
-                        release = self.channel.notices.get_nowait()
+                    elif time.monotonic() >= next_check:
+                        next_check = time.monotonic() + 300
+                        release = await asyncio.to_thread(latest_release)
                         key = release.run_number, release.attempt
                         if last_notice is None or key > last_notice:
                             last_notice = key
@@ -214,11 +218,38 @@ class UpdateCoordinator:
                     write_json(
                         self.root / "status.json", {"state": "complete", "sha": running_sha()}
                     )
+                    break
+            await asyncio.sleep(1)
+        # Keep dispatch paused until completion is durable locally. A lost resume
+        # response cannot let a new assignment change the journal under this check.
+        while True:
+            try:
+                reply = await self.channel.request(self._message(operation, "ready"))
+                if reply.accepted:
                     return
+            except (ConnectionError, TimeoutError):
+                pass
             await asyncio.sleep(1)
 
     def _save(self, operation: UpdateOperation) -> None:
         write_json(self.operation_path, operation.model_dump(mode="json"))
+        self._pending(operation)
+
+    def _pending(self, operation: UpdateOperation) -> None:
+        self.channel.pending = (
+            WorkerMaintenance(
+                action="commit" if operation.phase == "cutover" else "pause",
+                request_id=operation.operation_id,
+                operation_id=operation.operation_id,
+                instance_id=operation.source_instance,
+                connection_epoch=operation.source_epoch,
+                running_sha=operation.source_sha,
+                release=operation.prepared.release,
+                identity=operation.identity,
+            )
+            if operation.phase in {"paused", "cutover"}
+            else None
+        )
 
     def _message(self, operation: UpdateOperation, action: UpdateAction) -> WorkerMaintenance:
         sha, epoch = running_sha(), self.channel.epoch

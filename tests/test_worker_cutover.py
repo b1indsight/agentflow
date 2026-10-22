@@ -18,9 +18,9 @@ from app.contracts.protocol import (
 from app.contracts.updates import MaintenanceReply
 from app.controler.workers.connection import WorkerConnection
 from app.controler.workers.conversation import ConversationBroker
+from app.controler.workers.updates import WorkerUpdateSession
 from app.domain.models import JobState
 from app.persistence.maintenance import MaintenanceStore
-from app.persistence.worker_updates import WorkerUpdateStore
 from app.releases import ReleaseError
 from app.worker.state.session import WorkerSession
 from app.worker.transport.client import WorkerClient
@@ -79,12 +79,12 @@ def test_local_idle_requires_result_and_stop_ack_even_without_executor(tmp_path)
     assert client.idle_for_update()
 
 
-@pytest.mark.parametrize("failure", ["", "prepare", "commit-reply", "pointer"])
+@pytest.mark.parametrize("failure", ["", "prepare", "commit-reply", "pointer", "resume-reply"])
 async def test_cutover_orders_pause_intent_pointer_and_new_instance_confirmation(
     store, tmp_path, monkeypatch, failure
 ):
     idle_binding(store)
-    updates = WorkerUpdateStore(store.database)
+    updates = WorkerUpdateSession(store.workers, "w", "epoch")
     root = tmp_path / "update"
     root.mkdir()
     target = PreparedRelease(release=request().release, path=root / "releases/new")
@@ -97,7 +97,7 @@ async def test_cutover_orders_pause_intent_pointer_and_new_instance_confirmation
             actions.append(message.action)
             operation = UpdateOperation.model_validate_json((root / "operation.json").read_bytes())
             assert operation.phase == ("cutover" if message.action == "commit" else "paused")
-            reply = updates.handle("w", self.epoch, message)
+            reply = updates.handle(message)
             if failure == "commit-reply" and message.action == "commit":
                 raise ConnectionError("lost commit response")
             return reply
@@ -130,7 +130,7 @@ async def test_cutover_orders_pause_intent_pointer_and_new_instance_confirmation
         return real_write(path, value)
 
     monkeypatch.setattr(coordinator, "write_json", write)
-    if failure:
+    if failure and failure != "resume-reply":
         with pytest.raises((ConnectionError, OSError, ReleaseError)):
             await update.update(target.release, apply=True)
         assert not stopped.called
@@ -154,16 +154,30 @@ async def test_cutover_orders_pause_intent_pointer_and_new_instance_confirmation
     new = UpdateCoordinator(root, client, channel, apply=True, stop=Mock())
     monkeypatch.setattr(coordinator, "running_sha", lambda: target.release.sha)
     write_json(root / "launch.json", {"operation": operation.operation_id})
+    updates = WorkerUpdateSession(store.workers, "w", "new-epoch", channel.pending)
+    resumed = False
 
     async def resume(message):
-        assert message.action == "resume" and message.instance_id != operation.source_instance
-        return updates.handle("w", "new-epoch", message)
+        nonlocal resumed
+        assert message.instance_id != operation.source_instance
+        phase = UpdateOperation.model_validate_json(update.operation_path.read_bytes()).phase
+        if message.action == "resume":
+            assert phase == "cutover" and updates.paused
+            reply = updates.handle(message)
+            assert updates.paused  # No new assignment before completion is durable locally.
+            if failure == "resume-reply" and not resumed:
+                resumed = True
+                raise ConnectionError("lost resume response")
+            return reply
+        assert message.action == "ready" and phase == "complete"
+        return updates.handle(message)
 
     monkeypatch.setattr(channel, "request", resume)
     await asyncio.wait_for(new._finish(operation), 3)
     assert (
         UpdateOperation.model_validate_json(update.operation_path.read_bytes()).phase == "complete"
     )
+    assert not updates.paused
 
 
 async def test_check_only_does_not_pause_or_change_pointer(tmp_path, monkeypatch):
@@ -203,13 +217,12 @@ async def test_update_replies_are_connection_scoped_without_a_second_reader():
         await pending
 
 
-async def test_release_and_maintenance_share_the_execution_stream(store, tmp_path):
-    # Exercise both production parsers/readers, not a second maintenance socket.
+async def test_maintenance_and_reconnect_intent_share_the_execution_stream(store, tmp_path):
+    # Exercise both production parsers/readers and restore intent before dispatch.
     idle_binding(store)
-    updates = WorkerUpdateStore(store.database)
-    updates.publish(request().release)
     socket = ServerSocket()
     channel = UpdateChannel()
+    channel.pending = request()
     client = local_client(tmp_path, channel)
 
     class WorkerSocket:
@@ -225,13 +238,22 @@ async def test_release_and_maintenance_share_the_execution_stream(store, tmp_pat
     try:
         registration = parse_worker_message(await asyncio.wait_for(socket.incoming.get(), 1))
         assert isinstance(registration, Register) and registration.update_version == 1
-        connection = WorkerConnection(socket, ConversationBroker(), "w", "epoch", updates,
-                                      maintenance=MaintenanceStore(store.database))
+        assert registration.update_pending == request()
+        updates = WorkerUpdateSession(store.workers, "w", "epoch", registration.update_pending)
+        connection = WorkerConnection(
+            socket,
+            ConversationBroker(),
+            "w",
+            "epoch",
+            updates,
+            maintenance=MaintenanceStore(store.database),
+        )
         await connection.send_text(
             Registered(connection_epoch="epoch", heartbeat_interval=60).model_dump_json()
         )
-        connection.start_updates()
-        assert await asyncio.wait_for(channel.notices.get(), 1) == request().release
+        async with asyncio.timeout(1):
+            while not client.connected:
+                await asyncio.sleep(0)
         heartbeat = Heartbeat(
             job_id=1, assignment_token="token", connection_epoch="epoch"
         ).model_dump_json()

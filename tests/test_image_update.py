@@ -5,8 +5,6 @@ import importlib.util
 import itertools
 import json
 import os
-import runpy
-import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -17,7 +15,6 @@ import pytest
 from app.contracts.protocol import PROTOCOL_VERSION
 from app.persistence.maintenance import MaintenanceStore
 from app.persistence.schema import SCHEMAS
-from scripts.server_update.build_installer import build
 from tests.test_maintenance import idle_binding
 
 TOOLS = Path(__file__).parents[1] / "scripts/server_update"
@@ -582,48 +579,3 @@ def test_target_and_cutover_failures_preserve_safety(store, invoke_image_update,
         before = list(commands.calls)
         assert invoke_image_update(commands) == 1
         assert commands.calls == before
-
-
-def test_installer_bundles_current_sources_and_preserves_existing_launcher_target(tmp_path):
-    source = build()
-    assert source == build()
-    installer = tmp_path / "installer.py"
-    installer.write_text(source)
-    namespace = runpy.run_path(str(installer))
-    directory = tmp_path / "extracted"
-    directory.mkdir()
-    namespace["extract"](directory)
-    for name in ("update-agentflow-server.py", "agentflow-maintenance.py", "column-check.py"):
-        assert (directory / name).read_bytes() == (TOOLS / name).read_bytes()
-    assert len(list(directory.iterdir())) == 3
-    home = tmp_path / "home"
-    library = home / ".local/lib/agentflow-server-update"
-    library.mkdir(parents=True)
-    for name in ("update-agentflow-server.py", "agentflow-maintenance.py"):
-        (library / name).write_text("# original\n")
-    launcher = home / ".local/bin/agentflow-server-update"
-    launcher.parent.mkdir(parents=True)
-    pinned = [
-        sys.executable,
-        "--context",
-        "test-context",
-        "--namespace",
-        "test-namespace",
-        "--workload",
-        "statefulset/server",
-        "--container",
-        "app",
-        "--node",
-        "node",
-    ]
-    launcher.write_text(
-        "#!/bin/sh\nexec "
-        + shlex.join([pinned[0], str(library / "update-agentflow-server.py"), *pinned[1:]])
-        + ' "$@"\n'
-    )
-    target, before = namespace["target"](home)
-    assert target == pinned
-    namespace["install"](home, directory, target, before)
-    assert namespace["target"](home)[0] == pinned
-    assert (library / "update-agentflow-server.py").read_text() == "# original\n"
-    assert str(library / "releases") in launcher.read_text()

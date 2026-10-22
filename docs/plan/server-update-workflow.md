@@ -532,3 +532,59 @@ Worker/binding 列表；删列、身份、ACK、恢复与 Worker 更新逻辑不
 验证：相关 40 passed，全量 929 passed、零跳过（移除试用入口的 15 项测试）；Ruff、格式、
 Mypy、安装包生成/CLI help 通过，非法 activity 快照均拒绝。证据：`.amp/in/artifacts/cleanup-*.log`。
 外部 Kubernetes/GHCR 仍使用替身；未部署、安装或重启真实服务。
+
+### 2026-10-22 — PR #104 修订：仅用 PostgreSQL 保存 Server 更新事件
+
+**触发与决定。** 用户要求删除 SQLite、Worker 发布队列、版本表和维护状态表，并明确 Server
+更新不应考虑 Worker 更新状态。本条取代 2026-10-20 实现记录中的 SQLite 双队列、独立 Worker
+消费者、主机 notifier、`kubectl` Worker 发布器及 `worker_releases`/`worker_updates` 表方案；
+上文保留为历史，不再按其安装这些组件。没有把 Worker 更新状态转存进 Server 事件。
+
+**实现与边界（本地已完成）。**
+
+- `scripts/image_event.py` 只消费现有 PostgreSQL 的 `server_update_events`；同一行的 state
+  表示 queued/running/deployed/checked/failed/skipped，无独立版本表或更新维护表。重复投递
+  不覆盖终态，失败显式重试，残留 running 事件要求人工检查，避免中断后重复切换镜像。
+- 消费者与安装器使用同一 PostgreSQL 会话锁，部署期间不持有数据库事务。安装器只在停止
+  消费者的短窗口持有事件表锁，随后保留会话锁；启动消费者前先释放。安装包仍可独立转交，
+  只需既有 `psycopg` 环境，无需主机安装 `app` 包；消费者使用本次项目版本和相同 DB URL。
+- Worker 保留本地更新能力，每 300 秒独立核验 GitHub Images 发布。其 `operation.json`
+  持久化本机操作，现有认证连接中的 pause/commit/resume/ready 只暂停该连接的派发。
+  `Register.update_pending` 在重连时先恢复暂停；resume 确认后先落盘 complete，再以 ready
+  恢复派发，避免回复丢失时 journal 被新任务改变。公平调度同时排除暂停连接。
+- Server 更新继续使用已有的短业务交换回执，不等待 Worker 更新完成。没有 Server 侧持久化
+  Worker 维护豁免；离线 Worker 和等待 review 的绑定适用普通恢复宽限。没有对真实数据库
+  执行 DROP、删除旧文件、部署、安装或重启服务，历史实例的数据清理不在此次本地修改内。
+
+**验证。** 隔离 PostgreSQL 17 上全量 927 passed、零跳过，仅有既存 Starlette 弃用警告。
+相关场景覆盖 Worker 停在 cutover 时 Server 仍可消费、事件去重/失败/过期/中断、安装器和消费者
+互斥、真实 journal 交接、resume 回复丢失、重连暂停与其他 Worker 的公平派发。Ruff 通过，
+Mypy 214 files 通过，修改段格式检查和安装包构建/隔离模式 CLI help 通过。
+证据为未跟踪的 `.amp/in/artifacts/{pytest,focused-tests,ruff,mypy,installer-help}.log`。
+网络、Kubernetes、GHCR 和系统服务使用替身，未执行真实发布或目标主机更新验收。
+
+**简化对照。** 同一组三个回归输入，在独立进程中仅修改内存行为：baseline 为 3 passed；
+将 resume 直接当成解除暂停、取消公平选择中的暂停排除、取消认证注册携带本地意图，分别
+1 failed、2 passed。因此保留本地完成后的 ready 确认、调度排除和重连意图；未恢复任何
+Worker 持久表或发布队列。证据为 `.amp/in/artifacts/ablation-*.log`，临时比较脚本已删除。
+
+### 2026-10-22 — 删除 Server 更新工具的打包和自安装层
+
+**触发与决定。** 用户指出三个部署脚本可直接复制，要求删除相关打包安装机制。本条取代此前
+Server 单文件安装包、哈希版本目录和自动替换 launcher 的方案；此前的实现和验证记录仅作历史。
+
+**实现。** 删除 `scripts/server_update/build_installer.py`、`install.py.in` 及专用安装器测试，
+包括 tar/gzip/Base64 嵌入、解包校验、旧入口解析、版本目录、自动停启消费者和工具自升级。
+清除消费者代码和测试中的安装器引用；保留消费者互斥与异常中断保护。三个实际部署脚本及
+Server 业务交换暂停、删列检查和镜像切换不变。文档改为维护窗口中直接复制同版三个文件到
+现有入口实际使用的目录，检查或更新 Server、恢复消费者由操作者分别决定，不增加替代安装器。
+
+本次只做删除和引用清理，无新增机制或永久测试，不需要新增消融实验。真实部署主机未操作，
+未停止服务、复制文件到主机或推送 PR。
+
+**验证。** 隔离 PostgreSQL 17 上全量 926 passed、零跳过，仅有既存 Starlette 弃用警告；
+移除的专用安装器测试不再计入。仅复制三个部署脚本到临时目录，在隔离 Python 模式中运行
+CLI help，并让现有镜像更新测试使用复制后的文件，26 passed。Ruff、修改文件格式检查、
+Mypy（214 files）及 diff 空白检查通过。证据为未跟踪的
+`.amp/in/artifacts/remove-installer-{pytest,copied-tests,copied-help,ruff,format,mypy}.log`。
+Kubernetes、GitHub、GHCR 和系统服务边界仍使用替身，未进行真实部署验收。

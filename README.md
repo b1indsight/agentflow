@@ -78,9 +78,11 @@ FlowTool 的目标是把带 `flow` 标签的 GitHub issue 编排成
   进程组；停止凭据与已发送 effects 未确认前不释放绑定。drain 停止分配新 Flow，已有绑定
   继续收尾。未知旧执行保持阻塞，无强制释放入口，见[取消与停机](docs/operations/cancel-drain.md)。
 - **Worker 按执行空闲更新**：macOS 登录用户的原生 Worker 可选择由 LaunchAgent 托管固定
-  release。准备完成后由现有认证 WSS 上的目标暂停和两端空闲 ACK 协调切换；旧进程正常退出，
-  新实例以相同 ID/root/HOME/journal 和实际 SHA 注册后才恢复接单。发布通知、离线或未升级
-  Worker 不阻塞 Server 部署；Linux 自动更新仍未提供，见[Worker 更新](docs/deployment/worker-update.md)。
+  release。每个受管 Worker 每 300 秒自行核验 GitHub Images 发布；准备完成后，它以本地
+  `operation.json` 和现有认证 WSS 上 connection-scoped 的 pause/commit/resume/ready 握手协调
+  切换。旧进程正常退出，新实例以相同 ID/root/HOME/journal 和实际 SHA 注册；`Register.update_pending`
+  在重连后恢复该 operation 的 fence。Worker 更新不阻塞 Server 部署，也不取得独立的 binding
+  recovery-grace 豁免；Linux 自动更新仍未提供，见[Worker 更新](docs/deployment/worker-update.md)。
 - **Projects 与可观测性**：可选组织 Projects v2 同步独立运行；结构化日志、受 token 保护的
   `/metrics`、数据库就绪探针 `/readyz` 与 worker 状态文件已接入。Docker/Compose、Kubernetes
   和常驻运维说明见[部署指南](docs/deployment/README.md)，不代表真实环境已验收。

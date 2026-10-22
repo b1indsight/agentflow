@@ -37,12 +37,13 @@ root、journal 和 Codex 认证，环境 JSON 必须为 0600。
 本地 `agentflow-worker-update --sha SHA` 只检查；带 `--apply --root UPDATE_ROOT` 只交给当前
 launcher 托管的 runtime 请求更新。它不会直接杀进程或切换指针。Server 与 Worker 对同一次执行
 空闲 ACK 后，旧进程正常退出，新实例以相同身份/根目录和实际 release SHA 注册后才解除本次
-target-scoped pause。Server 更新不等待所有 Worker 更新。
+connection-scoped pause。Server 更新不等待所有 Worker 更新。
 
 若出现 `operation.json` 的 incomplete cutover、单次启动授权已消费、Worker 未以新 epoch/SHA
-注册或 Server 侧 pause 未解除，保留现场：不要删 operation/startup/journal、不要手工 resume、
-不要重放 notifier 或并起同一 Worker ID。先核对私有记录、现有进程、root lock 和 Server
-`worker_updates` 状态；恢复必须由明确的人工操作决定。Linux 自动更新延期。
+注册或 operation 的连接 scoped pause 未解除，保留现场：不要删 operation/startup/journal、不要手工 resume、
+不要并起同一 Worker ID。先核对私有记录、现有进程、root lock 及认证重连携带的
+`Register.update_pending`；恢复必须由明确的人工操作决定。不要假定更新有独立于普通
+binding-recovery grace 的豁免。Linux 自动更新延期。
 
 ## 日常与故障操作
 

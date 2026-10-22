@@ -11,9 +11,6 @@
   不在旧实例内初始化或升级数据库。
 - [`column-check.py`](../../scripts/server_update/column-check.py)：只读取得现有列元数据和旧版
   建表语句，在临时 PostgreSQL 中执行候选镜像建表逻辑，识别移除的列，不复制业务数据。
-- [`build_installer.py`](../../scripts/server_update/build_installer.py) 和
-  [`install.py.in`](../../scripts/server_update/install.py.in)：构建并安装以上工具，复用
-  已有 launcher 的 interpreter/context/namespace/workload/container/node 参数。
 
 ## Controller 业务交换空闲规则
 
@@ -26,12 +23,11 @@
    包括已绑定 Flow 的 revision/archive 和维护期间新注册的 Worker；不改变 Worker drain。
    不再接纳新的 triage、普通 Webhook 消费和对账/Console 同步批次。
 3. 等当前已接纳的业务交换和 Controller 批次结束：注册/恢复、准备派发到 Started 确认、
-   工具调用到响应发出、结果持久化/应用到 ACK、停止交换到 ACK，以及 Worker 更新维护的
-   单次请求/响应。后台结果恢复也停止接纳新批次，已开始的一批先收尾。等待普通消息和
-   Worker 本地 Codex 执行不占用 activity；心跳继续续租，不阻止切换。
-   暂停后到达的新工具/结果/维护请求不开始处理，连接以可重试状态关闭；Worker 保留原执行、
-   待响应工具和终态 journal，工具/结果在重连后继续或重放；Worker 更新维护操作仍遵守其
-   原有断连/故障处理规则。新 Webhook 保留在持久收件队列。
+   工具调用到响应发出、结果持久化/应用到 ACK、停止交换到 ACK。后台结果恢复也停止接纳
+   新批次，已开始的一批先收尾。等待普通消息和 Worker 本地 Codex 执行不占用 activity；
+   心跳继续续租，不阻止切换。
+   暂停后到达的新工具/结果不开始处理，连接以可重试状态关闭；Worker 保留原执行、待响应
+   工具和终态 journal，工具/结果在重连后继续或重放。新 Webhook 保留在持久收件队列。
    **running job、持久化派发/stop/result/effect 待办和执行槽不要求归零；
    不等待 Flow 完成、binding 释放或 queued job 清空，不检查固定 Worker 名单或在线状态。**
 4. 先将原副本缩到 0，等旧 Pod 正常退出，再切换镜像并恢复 1 个副本。新实例启动保留
@@ -62,32 +58,46 @@
   历史类型漂移、破坏性数据转换及移除仍被使用的 Worker 消息等不在保证范围，仍需作者
   单独安排升级；没有自动数据库回滚或无人值守恢复。
 
-## 本地构建安装包与首次接入
-
-构建只写本地文件，不连接部署主机或执行安装：
-
-```sh
-python3 scripts/server_update/build_installer.py --output /tmp/install-agentflow-updater.py
-```
+## 复制部署脚本与首次接入
 
 **首次接入需要人工维护安装同时支持全局暂停和业务交换 activity 的应用版本。**
-安装包检查当前运行镜像及候选镜像的 `COMMUNICATION_IDLE` 能力标记，拒绝仅有旧版全局暂停、
+更新脚本检查当前运行镜像及候选镜像的 `COMMUNICATION_IDLE` 能力标记，拒绝仅有旧版全局暂停、
 却没有覆盖业务交换的实例，不会把未跟踪的执行误判为空闲，也不退回仅设置 drain。
 这是切换安全能力检查，不要求 Worker 同版本。该首次应用部署与后续
-主机工具安装都需要单独安排；修改源码或生成安装包不会自动让现有主机采用新逻辑。
+主机脚本复制都需要单独安排；修改仓库源码不会自动让现有主机采用新逻辑。
 
-在运行维护能力已具备、现有 Webhook/队列/launcher 均已安装的主机上，由操作者转交包
-并选择经过发布验证的完整 digest，先检查，再决定是否安装及更新：
+直接将本文开头的三个脚本从同一受信任版本复制到部署主机的同一目录。先检查现有
+`~/.local/bin/agentflow-server-update`，确认其 Python 路径、脚本目录和固定的
+context/namespace/workload/container/node 参数；下面的 `TOOL_DIR` 必须是该入口实际使用的目录。
+本仓库不再生成安装器、哈希版本目录或自动替换 launcher。
+
+仅在事件消费者已安全停止、没有 running 事件或未完成 Server 更新操作的维护窗口替换文件；
+不要在部署进行中逐个覆盖脚本。由操作者传送源码并在部署主机执行复制，例如：
 
 ```sh
-python3 /path/to/install-agentflow-updater.py --image ghcr.io/OWNER/IMAGE@sha256:DIGEST
-python3 /path/to/install-agentflow-updater.py --image ghcr.io/OWNER/IMAGE@sha256:DIGEST --apply
+TOOL_DIR=/path/to/current-updater-directory
+cp scripts/server_update/update-agentflow-server.py \
+   scripts/server_update/agentflow-maintenance.py \
+   scripts/server_update/column-check.py "$TOOL_DIR/"
 ```
 
-以现有安装用户执行，不要 sudo 运行整个 Python。`--apply` 才暂停原消费者，取得队列和
-consumer 锁，原子切换 launcher 到校验和固定的新版本目录，然后调用更新器；成功后
-仅恢复原本 active 的消费者。保留队列历史、Webhook/tunnel 配置和旧更新工具，不重放
-旧失败事件，不重置未完成操作。不要同时部署、修改 workload 或更换 launcher。
+选择经过发布验证的完整 digest，用现有入口先检查，再决定是否更新 Server：
+
+```sh
+~/.local/bin/agentflow-server-update --image ghcr.io/OWNER/IMAGE@sha256:DIGEST
+~/.local/bin/agentflow-server-update --image ghcr.io/OWNER/IMAGE@sha256:DIGEST --apply
+```
+
+以现有部署用户执行。复制工具与更新 Server 是两个独立的人工操作；确认工具及服务状态后，
+由操作者恢复此前运行的消费者。保留事件历史和 Webhook/tunnel 配置，不重放旧失败事件，
+不重置未完成操作。不要同时部署、修改 workload 或更换 launcher。
+
+事件消费者使用项目既有的 Python/`psycopg` 环境，并直接读取
+`FLOWTOOL_DATABASE_URL`；即使 Server 已停止，该 URL 仍须能连接同一个 PostgreSQL 数据库。
+消费者须在安装了本次项目版本的 Python 环境中运行。
+`scripts/image_event.py` 的 `enqueue`、`run`、`status` 和 `retry` 都只读写既有
+`server_update_events`，不创建独立数据库、不使用 SQLite，也不在这些事件中持久化 Worker
+发布或更新状态。
 
 ## 等待、超时与故障
 
@@ -98,8 +108,7 @@ consumer 锁，原子切换 launcher 到校验和固定的新版本目录，然�
   不自动恢复接单。未完成记录会阻止盲目重复执行，应先人工核对 Pod、工作负载及日志。
 - 状态默认位于 `~/.local/state/agentflow-deploy/<目标标识>/operation.json`，记录权限
   0600，不保存数据库 URL、token 或完整环境变量。镜像检查失败的临时 Pod 保留供诊断。
-- 安装失败时消费者可能保持暂停；先检查安装阶段及 operation.json，再决定恢复方法。
+- 文件复制或手工更新失败时，先核对脚本是否完整及 operation.json，再决定是否恢复消费者。
   不为重试而直接删除操作记录、队列或 Worker journal。
 
-本轮已在本地真实 PostgreSQL 上验证应用/更新器和 SQLite 事件链路；Kubernetes、GitHub
-及 GHCR 边界使用模拟，尚未在真实主机安装或完成真实 Pod 停启验收。
+Kubernetes、GitHub 及 GHCR 边界使用模拟，尚未在真实主机安装或完成真实 Pod 停启验收。

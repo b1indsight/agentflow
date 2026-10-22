@@ -20,8 +20,6 @@ Controller/前端只等待当前业务交换结束，允许 Worker 保持本地�
   一次经过授权的正常交接后启动子进程；`KeepAlive` 为 false，更新不会发送 SIGTERM。
 - `agentflow-worker-update`：本地 check/apply CLI。它只向**拥有当前 runtime、执行器和 journal**
   的 Worker 提交请求，不能建立第二条同身份 WebSocket，也不能绕过空闲确认。
-- `scripts/worker_update/publish-release.py`：仅通过现有 Ready Server Pod 的 `kubectl exec`
-  写入经过验证的 Worker release 元数据；不接受 URL、脚本或任意命令作为发布内容。
 
 更新根目录（以下记为 `$UPDATE_ROOT`）和 Worker root 是不同概念。前者含 launcher、
 `environment.json`、`current.json`、`operation.json`、启动授权及 immutable releases；后者仍是
@@ -98,64 +96,39 @@ check 仅输出 `checked` 和 release 元数据。apply 需要已有 `current.js
 启动新进程。实际 apply 还要求环境中的 `FLOWTOOL_WORKER_UPDATE_APPLY=true`、macOS、由 launcher
 启动的 immutable release，以及当前 launcher claim、父 PID、SHA、venv 与 root 一致。
 
-收到通知或本地 apply 后，runtime 先在最终目录准备并验证固定 SHA 的非 editable venv。准备失败
-时不会取得 Server 侧暂停。准备成功后，Server 和 Worker 必须分别确认同一次空闲：Server 检查
+收到本地 apply 或周期检查发现的发布后，runtime 先在最终目录准备并验证固定 SHA 的非 editable venv。
+准备失败时不会取得连接 scoped 的暂停。准备成功后，Server 和 Worker 必须分别确认同一次空闲：Server 检查
 running job、已授权但未 Started 的派发、未确认 stop、未应用 result、未知/未完成 effect 和执行槽；
 Worker 检查 executor/task、assignment 及 result/stop ACK 的持久化。Flow/binding 数、journal 文件、
 health 文件、离线状态或单独 `_execution is None` 都不能替代这些确认。
 
-目标 Worker 的 pause 归本次 operation 所有，只阻止它领取新任务；其他 Worker 继续运行。暂停与
-领取使用相同的锁顺序，已领取的任务继续收尾。确认后先持久化 cutover intent，再原子切换
+目标 Worker 的连接 scoped pause 归本次 operation 所有，只阻止它领取新任务；其他 Worker 继续运行。
+暂停和领取在 Server 的同一事件循环中串行生效，调度时排除暂停的连接；已领取的任务继续收尾。
+确认后先持久化 cutover intent，再原子切换
 `current.json`，由旧 Worker 正常退出、释放 root lock，launcher 解析固定 release 后启动一次新实例。
-新实例必须以相同 Worker ID、root/HOME、journal 身份、新 epoch 和实际 SHA 注册，才会 resume 并
-解除本次暂停。等待 review 的绑定在维护中保留并在恢复后获得正常重连宽限。
+新实例必须以相同 Worker ID、root/HOME、journal 身份、新 epoch 和实际 SHA 注册。resume 确认
+通过后，Worker 先持久化本地 complete，再发送 ready 恢复派发，避免 resume 回复丢失时提前接单。
+若连接在完成前断开，认证的 `Register.update_pending` 会携带本地 operation 的
+pause/commit 意图，在新连接上恢复 fence；它不是第二条连接，也不改变普通身份或 epoch 校验。
+等待 review 的绑定仍适用普通 recovery grace；Worker 更新不保存或授予独立的 Server 侧维护豁免。
 
 准备前失败不会暂停；切换意图前失败只会在原实例健康且 pause 归属匹配时 abort。写入 cutover 后的
-超时、断连、启动失败或断电保留 pause 与 incomplete `operation.json`，不自动回滚代码、不自动
-恢复派发、不删除记录，也不重放启动授权。launcher 对该 operation 只消费一次启动授权；人工先
+超时、断连、启动失败或断电保留本地 incomplete `operation.json`；连接仍在时保持暂停，重连时恢复
+该连接的 fence，离线绑定仍按普通恢复规则处理。不自动回滚代码、清除暂停或删除记录，也不重放
+启动授权。launcher 对该 operation 只消费一次启动授权；人工先
 核查私有 operation/startup 记录、进程和 Server 状态，再决定恢复步骤。
 
-## Webhook 镜像事件的人工接入
+## 自动发布检查
 
-现有 `scripts/image_event.py enqueue RUN_ID ATTEMPT SHA` 会在本地 SQLite 中原子记录 Server
-`events` 和独立的 `worker_events`。`run` 消费 Server 队列；`worker-run` 只消费 Worker 队列。
-Worker 队列离线、失败或待重试不回写 Server 队列，也不延后 Server 部署。各自的 `status`/
-`worker-status` 和 `retry`/`worker-retry` 也分开；中断在 `running` 的 Worker 事件必须人工检查，
-不能直接重试。
+每个由 launcher 托管且启用自动 apply 的 Worker 自行每 **300 秒**查询并核验公开 GitHub Images
+发布；它只采用成功的 `main` 发布和已验证的固定 SHA。检查、准备和切换都属于目标 Worker，
+不需要也不会调用 host Worker notifier、`kubectl` Worker publisher 或 Server 端发布队列。
 
-`worker-run` 仅在 GitHub Actions 的成功 `Images`、`main`、push、run/attempt、完整 SHA、发布 job 和
-Linux/amd64 manifest 全部核验后，调用登录用户的固定 notifier：
+Server 镜像事件仍是独立流程：`scripts/image_event.py` 使用项目既有的 `psycopg` 环境和
+`FLOWTOOL_DATABASE_URL` 将 Server 事件写入 PostgreSQL `server_update_events`，即使 Server 停止时
+也可运行。它不使用 SQLite，不创建 `worker_releases` 或 `worker_updates`，也不持久化 Worker 的
+检查、准备、暂停或完成状态。Worker 的持久恢复依据仅为其本地 `$UPDATE_ROOT/operation.json`。
 
-```text
-~/.local/bin/agentflow-worker-release RUN_ID ATTEMPT SHA [--apply]
-```
-
-该 notifier 由部署者人工安装。它必须只接受上述三个位置参数和可选的尾随 `--apply`，并以固定的
-`--context`、`--namespace`、`--workload statefulset/NAME`、`--container` 调用
-`scripts/worker_update/publish-release.py`；这些 Kubernetes 参数不能来自 webhook 或事件字段。发布器
-再次确认唯一 Ready 且归属目标 StatefulSet 的 Pod，并在该 Pod 内验证发布元数据后才写入
-`worker_releases`。通知沿既有已认证 Worker WSS 发送给 Register 声明 `update_version=1` 的 Worker；
-不支持该扩展的旧 Worker 继续按原协议工作，不获得通知。
-
-人工安装的 notifier 可以按以下形状实现。安装时将路径及四个部署参数替换为受控的实际值，并以
-运行镜像事件消费者的登录用户保存；不要把它改成读取 webhook 内容、环境传入的 Kubernetes 参数或
-任意 shell 命令。
-
-```sh
-#!/bin/sh
-set -eu
-case "$#" in
-  3) ;;
-  4) [ "$4" = --apply ] || exit 64 ;;
-  *) exit 64 ;;
-esac
-exec /usr/bin/python3 /opt/agentflow/scripts/worker_update/publish-release.py \
-  --context '固定-kube-context' --namespace '固定-namespace' \
-  --workload 'statefulset/固定-server-name' --container '固定-container-name' \
-  "$@"
-```
-
-接入前先用 `worker-run --once` 检查 notifier 的固定参数与发布路径，再由操作者决定是否使用
-`worker-run --apply`。这两种命令都只处理队列/发布：真正 Worker 的自动切换仍受每台机器的
-`FLOWTOOL_WORKER_UPDATE_APPLY`、launcher 托管和两端空闲确认限制。本文没有执行 notifier 安装、
-发布、队列消费、launchd 或真实 Worker 更新。
+因此 Server 全局维护只等待已有的短通信回执，不等待任何 Worker 更新完成；Worker 更新的离线、
+失败或未启用不回写、阻塞或重试 Server 事件。本文没有执行真实 GitHub 发布检查、launchd 或真实
+Worker 更新验收。

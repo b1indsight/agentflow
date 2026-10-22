@@ -4,19 +4,16 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Protocol
 
 from fastapi import WebSocketDisconnect
-from loguru import logger
-from psycopg import Error as DatabaseError
-from psycopg_pool import PoolTimeout
 
 from app.contracts.protocol import parse_worker_message
-from app.contracts.updates import ReleaseAvailable, WorkerMaintenance
+from app.contracts.updates import WorkerMaintenance
 from app.controler.workers.conversation import ConversationBroker
+from app.controler.workers.updates import WorkerUpdateSession
 from app.persistence.maintenance import MaintenanceStore
-from app.persistence.worker_updates import WorkerUpdateStore
 
 
 class WorkerSocket(Protocol):
@@ -45,15 +42,24 @@ class WorkerConnection:
     a replacement connection.
     """
 
-    def __init__(self, socket: WorkerSocket, conversations: ConversationBroker, worker_id: str, epoch: str,
-                 updates: WorkerUpdateStore | None = None, *, maintenance: MaintenanceStore) -> None:
+    def __init__(
+        self,
+        socket: WorkerSocket,
+        conversations: ConversationBroker,
+        worker_id: str,
+        epoch: str,
+        updates: WorkerUpdateSession | None = None,
+        *,
+        maintenance: MaintenanceStore,
+        notify_jobs: Callable[[], None] | None = None,
+    ) -> None:
         self.socket = socket
         self.conversations = conversations
         self.updates = updates
+        self.notify_jobs = notify_jobs
         self.maintenance = maintenance
         self.worker_id, self.epoch = worker_id, epoch
         self._send_lock = asyncio.Lock()
-        self._release_task: asyncio.Task[None] | None = None
         self._messages: deque[tuple[str, int]] = deque()
         self._bytes = 0
         self._ready = asyncio.Event()
@@ -65,24 +71,6 @@ class WorkerConnection:
         async with self._send_lock:
             await self.socket.send_text(data)
 
-    def start_updates(self) -> None:
-        """Only a registered opt-in peer receives extension messages."""
-        if self.updates is not None:
-            self._release_task = asyncio.create_task(self._notify_releases())
-
-    async def _notify_releases(self) -> None:
-        assert self.updates is not None
-        previous = None
-        while True:
-            try:
-                release = self.updates.latest()
-                if release is not None and release != previous:
-                    await self.send_text(ReleaseAvailable(release=release).model_dump_json())
-                    previous = release
-            except (DatabaseError, PoolTimeout):
-                logger.warning("worker release notification delayed: database unavailable")
-            await asyncio.sleep(5)
-
     async def close(self, code: int = 1000) -> None:
         try:
             await self.socket.close(code)
@@ -92,11 +80,7 @@ class WorkerConnection:
     async def stop(self) -> None:
         """Join the receiver when the gateway exits or a new connection takes over."""
         self._reader.cancel()
-        tasks = [self._reader]
-        if self._release_task is not None:
-            self._release_task.cancel()
-            tasks.append(self._release_task)
-        await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.gather(self._reader, return_exceptions=True)
         self.conversations.disconnect(self)
         self._ready.set()
 
@@ -123,8 +107,10 @@ class WorkerConnection:
                     if self.updates is None:
                         raise ProtocolViolation("worker did not negotiate updates")
                     with self.maintenance.exchange("worker-maintenance"):
-                        reply = self.updates.handle(self.worker_id, self.epoch, message)
+                        reply = self.updates.handle(message)
                         await self.send_text(reply.model_dump_json())
+                    if self.notify_jobs is not None:
+                        self.notify_jobs()
                     continue
                 size = len(raw.encode())
                 if len(self._messages) >= 32 or self._bytes + size > 16 * 1024 * 1024:

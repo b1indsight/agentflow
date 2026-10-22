@@ -36,6 +36,7 @@ from app.contracts.protocol import (
 from app.contracts.result_models import ResultPending
 from app.controler.workers.connection import ProtocolViolation, WorkerConnection, WorkerSocket
 from app.controler.workers.conversation import ConversationBroker
+from app.controler.workers.updates import WorkerUpdateSession
 from app.controler.workflow.coordinator import JobCoordinator
 from app.controler.workflow.preparation import PreparationStale, PreparationState
 from app.controler.workflow.results import ResultApplication
@@ -51,7 +52,6 @@ from app.persistence.deliveries import DeliveryStore
 from app.persistence.jobs import JobStore
 from app.persistence.maintenance import MaintenancePaused, MaintenanceStore
 from app.persistence.stops import StopIntent, StopStore
-from app.persistence.worker_updates import WorkerUpdateStore
 from app.persistence.workers import WorkerStore
 from app.telemetry.metrics import Metrics
 
@@ -77,7 +77,6 @@ class WorkerGateway:
         self.jobs = JobStore(database)
         self.stops = StopStore(database)
         self.workers = WorkerStore(database)
-        self.updates = WorkerUpdateStore(database)
         self.maintenance = MaintenanceStore(database)
         self.metrics = metrics
         self.coordinator = coordinator
@@ -131,10 +130,26 @@ class WorkerGateway:
             register = parse_worker_message(await socket.receive_text())
             if not isinstance(register, Register) or register.worker_id != worker_id:
                 raise ProtocolViolation("worker registration does not match authenticated identity")
+            if register.update_pending is not None and (
+                register.update_version != 1
+                or register.update_pending.identity.worker_id != worker_id
+                or register.update_pending.action not in {"pause", "commit"}
+            ):
+                raise ProtocolViolation("invalid Worker handoff registration")
             with self.maintenance.exchange("worker-register"):
-                connection = WorkerConnection(socket, self.conversations, worker_id, connection_epoch,
-                                              self.updates if register.update_version == 1 else None,
-                                              maintenance=self.maintenance)
+                connection = WorkerConnection(
+                    socket,
+                    self.conversations,
+                    worker_id,
+                    connection_epoch,
+                    WorkerUpdateSession(
+                        self.workers, worker_id, connection_epoch, register.update_pending
+                    )
+                    if register.update_version == 1
+                    else None,
+                    maintenance=self.maintenance,
+                    notify_jobs=self.notify_jobs,
+                )
                 wake = await self._register_session(worker_id, connection)
                 registered_session = True
                 worker = self.workers.worker_connected(
@@ -176,17 +191,26 @@ class WorkerGateway:
                         ).model_dump_json()
                     )
 
-            connection.start_updates()
             while True:
                 if current is None:
                     assert wake is not None
                     wake.clear()
+                    if connection.updates is not None and connection.updates.paused:
+                        await self._wait_while_idle(connection, wake)
+                        continue
                     with self.maintenance.exchange("worker-dispatch"):
                         stop = self.stops.pending(worker_id)
                         if stop is not None:
                             await self._stop_worker(connection, worker_id, connection_epoch, stop)
                         token = uuid4().hex
-                        job = self.workers.assign_job(worker_id, token, connection_epoch)
+                        excluded = [
+                            identity
+                            for identity, (_, session) in self._sessions.items()
+                            if session.updates is not None and session.updates.paused
+                        ]
+                        job = self.workers.assign_job(
+                            worker_id, token, connection_epoch, excluded=excluded
+                        )
                         if job is not None:
                             prepared = await self._prepare_assignment(job, worker_id, token, connection_epoch)
                             if isinstance(prepared, JobState):

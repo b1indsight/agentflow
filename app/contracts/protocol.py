@@ -19,7 +19,7 @@ from pydantic import (
 from app.contracts import protocol_base
 from app.contracts.conversation import ConversationError, HistoryPage
 from app.contracts.protocol_base import Message, ProtocolModel
-from app.contracts.updates import MaintenanceReply, ReleaseAvailable, WorkerMaintenance
+from app.contracts.updates import MaintenanceReply, WorkerMaintenance
 from app.domain.context_models import ReviewContext
 from app.domain.delivery_models import DeliveryReceipt
 from app.domain.models import FeedbackRef, JobState, RevisionCodingOutput, VcsKind
@@ -200,6 +200,7 @@ class Register(Message):
     worker_id: str
     recovery: RecoveryDescriptor | None = None
     update_version: Literal[1] | None = None
+    update_pending: WorkerMaintenance | None = None
 
 
 class Started(Message):
@@ -398,8 +399,7 @@ ServerMessage = Annotated[
     | StopExecution
     | StopAccepted
     | ConversationQuery
-    | MaintenanceReply
-    | ReleaseAvailable,
+    | MaintenanceReply,
     Field(discriminator="type"),
 ]
 
