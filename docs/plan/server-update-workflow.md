@@ -521,3 +521,14 @@ PYTHONPATH="$PWD" FLOWTOOL_TEST_DATABASE_URL="$SCRATCH_TEST_DATABASE_URL" \
 日志：`.amp/in/artifacts/communication-repair-{before,focused,full,ruff,mypy}.log` 与
 `communication-repair-ablation-*.log`。协议传输使用内存替身，未执行真实 Codex、网络
 WebSocket、Kubernetes、GHCR 或 launchd 更新；本地测试不代表 GitHub CI 或真实部署通过。
+
+### 2026-10-22 — 清理额外部署流程与冗余快照
+
+用户要求减少新增内容。删除早期本机源码构建试用入口 `scripts/update_server.py`、其专用
+测试和过时操作说明，只保留 Webhook 镜像更新；所需 Kubernetes 替身移入现有镜像更新测试。
+Server 维护快照仅保留能力、暂停归属和 `control_work`，移除不参与切换的七类计数及
+Worker/binding 列表；删列、身份、ACK、恢复与 Worker 更新逻辑不变。本次只做删除和直接
+简化，未新增机制，不需要新增消融或永久测试。原试用流程的历史记录保留，以本条为准。
+验证：相关 40 passed，全量 929 passed、零跳过（移除试用入口的 15 项测试）；Ruff、格式、
+Mypy、安装包生成/CLI help 通过，非法 activity 快照均拒绝。证据：`.amp/in/artifacts/cleanup-*.log`。
+外部 Kubernetes/GHCR 仍使用替身；未部署、安装或重启真实服务。

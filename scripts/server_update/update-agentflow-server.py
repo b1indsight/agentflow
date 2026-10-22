@@ -341,20 +341,10 @@ class Update:
 
     @staticmethod
     def settled(snapshot: dict) -> bool:
-        counts = snapshot["counts"]
-        if set(counts) != {
-            "jobs",
-            "dispatches",
-            "stops",
-            "results",
-            "effects",
-            "slots",
-            "controls",
-        } or any(type(value) is not int or value < 0 for value in counts.values()):
-            raise RuntimeError("Incomplete execution safety snapshot")
-        # Durable job/result/stop backlog survives restart. Only active controller
-        # effects and communication exchanges must finish before the old Pod exits.
-        return counts["controls"] == 0
+        work = snapshot["control_work"]
+        if not isinstance(work, list) or any(not isinstance(name, str) for name in work):
+            raise RuntimeError("Invalid controller activity snapshot")
+        return not work
 
     def execute(self) -> None:
         if self.record.exists() and json.loads(self.record.read_text()).get("status") not in {
@@ -375,7 +365,7 @@ class Update:
                 "a one-time manual idle update is required"
             )
         print(f"Target: {self.args.context}/{self.args.namespace}/{self.args.workload}", flush=True)
-        print("Execution counts: " + json.dumps(initial["counts"], sort_keys=True), flush=True)
+        print("Controller activity: " + json.dumps(initial["control_work"]), flush=True)
         schema = self.inspect(old_pod, "schema")
         image_id = self.probe_image(old_pod, schema)
         _, pod, _ = self.preflight()
@@ -418,10 +408,10 @@ class Update:
         self.save("pausing-admissions")
         self.inspect(old_pod, "pause", operation_id)
         try:
-            previous_counts = None
+            previous_work = None
 
             def idle():
-                nonlocal previous_counts
+                nonlocal previous_work
                 self.current(original, original["spec"])
                 snapshot = self.inspect(old_pod)
                 if snapshot["maintenance"] != {
@@ -429,13 +419,12 @@ class Update:
                     "instance_id": instance,
                 }:
                     raise RuntimeError("Maintenance owner or server instance changed")
-                if snapshot["counts"] != previous_counts:
+                if snapshot["control_work"] != previous_work:
                     print(
-                        "Waiting for admitted work: "
-                        + json.dumps(snapshot["counts"], sort_keys=True),
+                        "Waiting for admitted work: " + json.dumps(snapshot["control_work"]),
                         flush=True,
                     )
-                    previous_counts = snapshot["counts"]
+                    previous_work = snapshot["control_work"]
                 return snapshot if self.settled(snapshot) else None
 
             self.report["before_stop"] = self.wait(

@@ -19,21 +19,50 @@ from app.persistence.maintenance import MaintenanceStore
 from app.persistence.schema import SCHEMAS
 from scripts.server_update.build_installer import build
 from tests.test_maintenance import idle_binding
-from tests.test_server_update import Commands
 
 TOOLS = Path(__file__).parents[1] / "scripts/server_update"
 IMAGE = "ghcr.io/example/serve@sha256:" + "a" * 64
 REAL_RUN = subprocess.run
 
 
-class ImageCommands(Commands):
+class ImageCommands:
     """Keep the real exec adapter and DB, replacing only Kubernetes/process transport."""
 
     def __init__(self, store, failure=""):
-        super().__init__("StatefulSet", failure)
         self.store = store
-        self.image = IMAGE
-        self.workload["spec"]["template"]["spec"]["terminationGracePeriodSeconds"] = 60
+        self.failure = failure
+        self.calls = []
+        self.workload = {
+            "kind": "StatefulSet",
+            "metadata": {
+                "uid": "workload",
+                "name": "server",
+                "resourceVersion": "1",
+                "generation": 1,
+            },
+            "spec": {
+                "replicas": 1,
+                "template": {
+                    "spec": {
+                        "terminationGracePeriodSeconds": 60,
+                        "containers": [
+                            {
+                                "name": "app",
+                                "image": "old:1",
+                                "imagePullPolicy": "IfNotPresent",
+                                "readinessProbe": {"httpGet": {"path": "/readyz", "port": 8000}},
+                            },
+                            {"name": "gateway", "image": "gateway:1"},
+                        ],
+                    }
+                },
+            },
+            "status": {"observedGeneration": 1},
+        }
+        if failure == "pvc-delete":
+            self.workload["spec"]["persistentVolumeClaimRetentionPolicy"] = {"whenScaled": "Delete"}
+        self.stopped_reads = 0
+        self.old_gone = False
         self.probe = None
         self.probe_result = None
         self.events = []
@@ -47,15 +76,86 @@ class ImageCommands(Commands):
         )
 
     def pod(self):
-        pod = super().pod()
-        pod["metadata"]["name"] = "server-0"
-        new = pod["metadata"]["uid"] == "new"
-        pod["status"]["containerStatuses"][0]["imageID"] = (
-            "wrong" if new and self.failure == "running-digest" else "checked" if new else "old"
-        )
+        new = self.workload["metadata"]["generation"] > 2
         if new and self.failure != "readiness":
             self.events.append("new-ready")
-        return pod
+        return {
+            "metadata": {
+                "name": "server-0",
+                "uid": "new" if new else "old",
+                "ownerReferences": [{"uid": "workload", "controller": True}],
+            },
+            "spec": {
+                "nodeName": "node",
+                # Admission may reorder containers; match the application by name.
+                "containers": list(
+                    reversed(copy.deepcopy(self.workload["spec"]["template"]["spec"]["containers"]))
+                ),
+            },
+            "status": {
+                "conditions": [
+                    {
+                        "type": "Ready",
+                        "status": "False" if new and self.failure == "readiness" else "True",
+                    }
+                ],
+                "containerStatuses": [
+                    {
+                        "name": "app",
+                        "imageID": "wrong"
+                        if new and self.failure == "running-digest"
+                        else "checked"
+                        if new
+                        else "old",
+                    }
+                ],
+            },
+        }
+
+    def kube(self, args):
+        operation, resource = args[:2]
+        if operation == "patch":
+            for patch in json.loads(args[args.index("-p") + 1]):
+                path = patch["path"].split("/")[1:]
+                target = self.workload
+                for key in path[:-1]:
+                    target = target[int(key)] if isinstance(target, list) else target[key]
+                if patch["op"] == "test":
+                    assert target[path[-1]] == patch["value"]
+                else:
+                    if patch["path"].endswith("/image"):
+                        assert self.old_gone, "must wait for old Pod deletion before replacement"
+                    target[path[-1]] = patch["value"]
+            self.workload["metadata"]["generation"] += 1
+            self.workload["metadata"]["resourceVersion"] = str(
+                self.workload["metadata"]["generation"]
+            )
+            self.workload["status"]["observedGeneration"] = self.workload["metadata"]["generation"]
+            return self.workload
+        if resource == "node/node":
+            return {
+                "metadata": {"name": "node"},
+                "status": {
+                    "conditions": [{"type": "Ready", "status": "True"}],
+                    "nodeInfo": {"operatingSystem": "linux", "architecture": "amd64"},
+                },
+            }
+        if resource == "statefulset/server":
+            return self.workload
+        if resource == "horizontalpodautoscalers":
+            return {
+                "items": [{"spec": {"scaleTargetRef": {"kind": "StatefulSet", "name": "server"}}}]
+                if self.failure == "hpa"
+                else []
+            }
+        assert resource == "pods"
+        if self.workload["spec"]["replicas"] == 0:
+            self.stopped_reads += 1
+            if self.failure == "old-stuck" or self.stopped_reads == 1:
+                return {"items": [self.pod()]}
+            self.old_gone = True
+            return {"items": []}
+        return {"items": [self.pod()]}
 
     def run_probe(self):
         schemas = list(SCHEMAS)
@@ -135,8 +235,15 @@ class ImageCommands(Commands):
                         connection.execute("DELETE FROM server_activities WHERE token='exchange'")
                     self.events.append("exchange-finished")
             if self.failure == "old-runtime" and inner[2] == "status":
-                result = REAL_RUN([sys.executable, "-", *inner[2:]], input=input, text=True,
-                                  capture_output=True, env=self.env, check=True, timeout=15)
+                result = REAL_RUN(
+                    [sys.executable, "-", *inner[2:]],
+                    input=input,
+                    text=True,
+                    capture_output=True,
+                    env=self.env,
+                    check=True,
+                    timeout=15,
+                )
                 snapshot = json.loads(result.stdout)
                 snapshot.pop("communication_idle", None)
                 return subprocess.CompletedProcess(command, 0, json.dumps(snapshot), "")
@@ -204,8 +311,6 @@ class ImageCommands(Commands):
             }
         elif operation == "get" and resource == "pod/server-0":
             result = self.pod()
-        elif operation == "get" and resource == "node/node":
-            result = super().kube(("get", "nodes"))["items"][0]
         else:
             if operation == "patch":
                 changes = json.loads(args[args.index("-p") + 1])
@@ -230,7 +335,7 @@ class ImageCommands(Commands):
                             connection.execute(
                                 "ALTER TABLE workers ADD COLUMN new_worker_metadata TEXT"
                             )
-            result = super().kube(tuple(args))
+            result = self.kube(args)
             if self.old_gone and "old-gone" not in self.events:
                 self.events.append("old-gone")
         return subprocess.CompletedProcess(command, 0, json.dumps(copy.deepcopy(result)), "")
@@ -306,7 +411,7 @@ def test_idle_active_flow_and_worker_changes_do_not_block_update(
         )
         report = next(tmp_path.glob("*/operation.json"))
         saved = json.loads(report.read_text())
-        assert saved["status"] == "complete" and saved["before_stop"]["bindings"] == 1
+        assert saved["status"] == "complete" and saved["before_stop"]["control_work"] == []
         assert (
             saved["backup_policy"] == "disabled"
             and saved["compatibility_policy"] == "column-removal-only"

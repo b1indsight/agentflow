@@ -57,39 +57,11 @@ def execute() -> None:
                 maintenance.pause(sys.argv[2])
             elif mode == "resume":
                 maintenance.resume(sys.argv[2])
-            queries = {
-                "jobs": "SELECT count(*) AS n FROM jobs WHERE state='running'",
-                "dispatches": "SELECT count(*) AS n FROM jobs"
-                " WHERE result_received_at IS NULL AND started_at IS NULL"
-                " AND (dispatch_authorized_at IS NOT NULL"
-                " OR (kind='archive' AND payload->'archive' IS NOT NULL))",
-                "stops": "SELECT count(*) AS n FROM execution_stops WHERE state!='confirmed'",
-                "results": "SELECT count(*) AS n FROM jobs"
-                " WHERE result_received_at IS NOT NULL AND result_applied_at IS NULL",
-                "effects": "SELECT count(*) AS n FROM result_effects"
-                " WHERE state NOT IN ('succeeded','skipped','failed')"
-                " OR (dispatched_at IS NOT NULL AND receipt IS NULL)",
-                "slots": "SELECT count(*) AS n FROM workers WHERE current_job_id IS NOT NULL",
-                "controls": "SELECT count(*) AS n FROM server_activities",
-            }
             result = {
                 # Read from the live image, not the host's injected adapter source.
                 "communication_idle": getattr(MaintenanceStore, "COMMUNICATION_IDLE", None),
                 "maintenance": asdict(maintenance.status()),
-                "counts": {
-                    name: required(connection.execute(query).fetchone())["n"]
-                    for name, query in queries.items()
-                },
                 "control_work": maintenance.active(),
-                # Bindings and worker states are diagnostic, never idle predicates.
-                "bindings": required(
-                    connection.execute(
-                        "SELECT count(*) AS n FROM flow_executions WHERE released_at IS NULL"
-                    ).fetchone()
-                )["n"],
-                "workers": connection.execute(
-                    "SELECT worker_id,draining,status,current_job_id FROM workers ORDER BY worker_id"
-                ).fetchall(),
             }
     finally:
         database.close()

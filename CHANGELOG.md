@@ -8,6 +8,7 @@
 
 ## Unreleased
 
+- 删除额外的本机源码构建部署试用流程；Webhook 更新只保留活跃业务交换快照，不再查询无关任务计数。
 - 修复 Controller 长时间维护后已收到但未应用的结果被误判恢复超时；Worker 终态写入后
   清理旧任务工具队列，发送前跳过已取消调用，避免重连和下一任务重发旧 job/token。
 - Webhook 驱动的 Controller/前端更新改为暂停新业务并等待当前业务交换及 Controller 批次结束，
