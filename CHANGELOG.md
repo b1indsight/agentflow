@@ -8,16 +8,15 @@
 
 ## Unreleased
 
-- 删除 Server 更新工具的自制打包生成器、安装模板、自升级逻辑和专用测试；三个部署脚本改为直接复制，
-  不再生成单文件安装器或自动替换主机入口。
-- 删除额外的本机源码构建部署试用流程；Webhook 更新只保留活跃业务交换快照，不再查询无关任务计数。
-- 修复 Controller 长时间维护后已收到但未应用的结果被误判恢复超时；Worker 终态写入后
-  清理旧任务工具队列，发送前跳过已取消调用，避免重连和下一任务重发旧 job/token。
-- Webhook 驱动的 Controller/前端更新改为暂停新业务并等待当前业务交换及 Controller 批次结束，
-  允许 Worker 本地任务继续执行、重连及重放工具/结果；维护期间保留执行和绑定的恢复宽限。
-  Worker 自身更新仍要求执行结束及 ACK 收敛，旧/新 Controller 镜像均需具有业务交换跟踪能力。
-  Worker 新增、修改和离线不阻止部署。跳过数据库备份/还原与广泛兼容性校验，仅保留自动删列
-  检查，包括声明移除、动态 DROP 和删后同名重建；非破坏性的新增字段、默认值变化放行。
+- Server 更新删除全局维护暂停、通信 activity/回执、`COMMUNICATION_IDLE` 校验和维护期间的
+  recovery grace 延长；移除 `MaintenanceStore` 及 `server_maintenance`/`server_activities`。
+  更新恢复普通业务路径，不等待 Worker 更新、任务完成或通信活动清空。
+- Webhook Server 更新保留 PostgreSQL `server_update_events`、消费者互斥、候选 Pod 预检和删列检查：
+  普通预检后缩至零，等待旧 Pod 正常退出，再以固定 digest 恢复一个副本并核验 `/readyz` 与镜像身份。
+  历史已安装的维护表不自动删除，也不兼容旧 PR 的部署。
+- 删除 `agentflow-maintenance.py`；Server 工具直接复制 `update-agentflow-server.py` 和
+  `column-check.py` 两个文件，不提供替代安装器或维护服务。主机锁和 `operation.json` 保留，
+  后者仅记录未完成或完成的部署报告。
 - 增加 macOS 登录用户原生 Worker 的 opt-in 执行空闲更新：首次接入使用 LaunchAgent，默认
   仅渲染 plist，`--apply` 仅准备 immutable release/launcher 而不调用 `launchctl`。更新保留
   Worker ID、root、HOME、journal 和模型认证，私有环境 JSON 要求 0600；本地 check/apply 只能由

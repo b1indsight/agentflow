@@ -1,7 +1,6 @@
 """A slow result must leave capacity for other Flows and local scheduling sweeps."""
 
 import asyncio
-from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -175,7 +174,6 @@ async def test_runtime_sweeps_continue_while_result_recovery_waits():
 
     runtime = ServerRuntime.__new__(ServerRuntime)
     runtime._triage_task = None
-    runtime.maintenance = SimpleNamespace(activity=lambda _: nullcontext(True))
     runtime.coordinator = SimpleNamespace(triage=AsyncMock())
     runtime.judge = Mock()
     runtime.settings = SimpleNamespace(worker_sweep_interval=0, result_recovery_concurrency=4, result_recovery_batch_size=64)

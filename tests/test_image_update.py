@@ -13,9 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.contracts.protocol import PROTOCOL_VERSION
-from app.persistence.maintenance import MaintenanceStore
 from app.persistence.schema import SCHEMAS
-from tests.test_maintenance import idle_binding
 
 TOOLS = Path(__file__).parents[1] / "scripts/server_update"
 IMAGE = "ghcr.io/example/serve@sha256:" + "a" * 64
@@ -23,7 +21,7 @@ REAL_RUN = subprocess.run
 
 
 class ImageCommands:
-    """Keep the real exec adapter and DB, replacing only Kubernetes/process transport."""
+    """Keep real schema inspection and PostgreSQL, replacing Kubernetes transport."""
 
     def __init__(self, store, failure=""):
         self.store = store
@@ -63,7 +61,6 @@ class ImageCommands:
         self.probe = None
         self.probe_result = None
         self.events = []
-        self.paused_status_reads = 0
         # Authorized-but-not-registered and registered-but-not-authorized workers
         # must not turn a controller/frontend update into a worker rollout gate.
         self.env = dict(
@@ -162,7 +159,7 @@ class ImageCommands:
             "drop-readd": "ALTER TABLE workers DROP COLUMN draining;"
             "ALTER TABLE workers ADD COLUMN draining BOOLEAN NOT NULL DEFAULT false",
             "dynamic-drop": "DO $$ BEGIN EXECUTE 'ALTER TABLE workers DROP COLUMN draining'; END $$",
-            "drop-table": "DROP TABLE server_activities",
+            "drop-table": "DROP TABLE workers CASCADE",
             "legacy-drop": "ALTER TABLE workers DROP COLUMN IF EXISTS legacy_hint",
         }
         if self.failure == "remove-definition":
@@ -221,29 +218,9 @@ class ImageCommands:
         operation, resource = args[:2]
         if operation == "exec":
             inner = args[args.index("--") + 1 :]
-            assert inner[:2] == ["python", "-"]
-            self.events.append("adapter-" + inner[2])
-            assert input == (TOOLS / "agentflow-maintenance.py").read_text()
-            if inner[2] == "status" and MaintenanceStore(self.store.database).status().operation_id:
-                self.paused_status_reads += 1
-                if self.failure == "finishes-exchange" and self.paused_status_reads == 2:
-                    assert "scale-zero" not in self.events
-                    with self.store.connection() as connection:
-                        connection.execute("DELETE FROM server_activities WHERE token='exchange'")
-                    self.events.append("exchange-finished")
-            if self.failure == "old-runtime" and inner[2] == "status":
-                result = REAL_RUN(
-                    [sys.executable, "-", *inner[2:]],
-                    input=input,
-                    text=True,
-                    capture_output=True,
-                    env=self.env,
-                    check=True,
-                    timeout=15,
-                )
-                snapshot = json.loads(result.stdout)
-                snapshot.pop("communication_idle", None)
-                return subprocess.CompletedProcess(command, 0, json.dumps(snapshot), "")
+            assert inner == ["python", "-", "--snapshot"]
+            self.events.append("schema-snapshot")
+            assert input == (TOOLS / "column-check.py").read_text()
             return REAL_RUN(
                 [sys.executable, "-", *inner[2:]],
                 input=input,
@@ -278,8 +255,6 @@ class ImageCommands:
                 schemas=["additive change"],
                 wire_schemas={"DTO": "changed"},
             )
-            if self.failure == "old-candidate":
-                result.pop("communication_idle", None)
         elif operation == "delete":
             assert resource.startswith("pod/agentflow-image-check-")
             assert "--force" not in args and "--grace-period=0" not in args
@@ -312,26 +287,19 @@ class ImageCommands:
             if operation == "patch":
                 changes = json.loads(args[args.index("-p") + 1])
                 scaling = next(c["value"] for c in changes if c["path"] == "/spec/replicas")
-                assert MaintenanceStore(self.store.database).status().operation_id is not None
                 if scaling == 0:
                     self.events.append("scale-zero")
                     self.store.workers.worker_connected(
                         "added-during-update", PROTOCOL_VERSION, "new"
                     )
-                    assert (
-                        self.store.workers.assign_job("added-during-update", "blocked", "new")
-                        is None
-                    )
                 else:
                     assert self.old_gone
                     self.events.append("scale-one")
-                    if self.failure != "stale-instance":
-                        MaintenanceStore(self.store.database).start_instance()
-                        self.store.workers.recover_abandoned_assignments()
-                        with self.store.connection() as connection:
-                            connection.execute(
-                                "ALTER TABLE workers ADD COLUMN new_worker_metadata TEXT"
-                            )
+                    self.store.workers.recover_abandoned_assignments()
+                    with self.store.connection() as connection:
+                        connection.execute(
+                            "ALTER TABLE workers ADD COLUMN new_worker_metadata TEXT"
+                        )
             result = self.kube(args)
             if self.old_gone and "old-gone" not in self.events:
                 self.events.append("old-gone")
@@ -381,34 +349,36 @@ def invoke_image_update(monkeypatch, tmp_path):
 def test_idle_active_flow_and_worker_changes_do_not_block_update(
     store, invoke_image_update, tmp_path, capsys, apply
 ):
-    flow = idle_binding(store)
+    flow = store.flows.create_flow("owner/repo", 1, 1)
+    store.workers.worker_connected("w", PROTOCOL_VERSION, "epoch")
+    initial = store.jobs.enqueue_job(flow.id, "initial")
+    assert store.workers.assign_job("w", "initial", "epoch")
+    with store.connection() as connection:
+        connection.execute("UPDATE jobs SET state='done' WHERE id=%s", (initial.id,))
+        connection.execute("UPDATE workers SET current_job_id=NULL,status='online'")
     store.workers.drain("w", True)
     store.jobs.enqueue_job(flow.id, "revision")
-    maintenance = MaintenanceStore(store.database)
-    maintenance.start_instance()
     commands = ImageCommands(store)
     assert invoke_image_update(commands, apply) == 0
     assert store.flows.get_flow(flow.id).state == "active"
     assert store.workers.get_flow_execution(flow.id).released_at is None
     assert next(w for w in store.workers.list_workers() if w.worker_id == "w").draining
-    assert maintenance.status().operation_id is None
     if apply:
         order = [
+            "schema-snapshot",
             "probe-create",
             "probe-delete",
-            "adapter-pause",
             "scale-zero",
             "old-gone",
             "scale-one",
             "new-ready",
-            "adapter-resume",
         ]
         assert [commands.events.index(e) for e in order] == sorted(
             commands.events.index(e) for e in order
         )
         report = next(tmp_path.glob("*/operation.json"))
         saved = json.loads(report.read_text())
-        assert saved["status"] == "complete" and saved["before_stop"]["control_work"] == []
+        assert saved["status"] == "complete"
         assert (
             saved["backup_policy"] == "disabled"
             and saved["compatibility_policy"] == "column-removal-only"
@@ -423,7 +393,7 @@ def test_idle_active_flow_and_worker_changes_do_not_block_update(
             for w in store.workers.list_workers()
         )
     else:
-        assert "adapter-pause" not in commands.events and "scale-zero" not in commands.events
+        assert "scale-zero" not in commands.events
         assert not list(tmp_path.glob("*/operation.json"))
     output = capsys.readouterr()
     assert "TEST-UPDATER-SECRET" not in output.out + output.err
@@ -443,13 +413,11 @@ def test_idle_active_flow_and_worker_changes_do_not_block_update(
         ("legacy-drop", False),
     ],
 )
-def test_column_removal_is_rejected_before_pause_but_additions_are_allowed(
+def test_column_removal_is_rejected_before_replacement_but_additions_are_allowed(
     store, invoke_image_update, capsys, change, allowed
 ):
     # DROP+ADD preserves names but loses data; a legacy column left alone must not
     # turn every harmless update into a missing-declaration failure.
-    maintenance = MaintenanceStore(store.database)
-    maintenance.start_instance()
     store.workers.worker_connected("existing-worker", PROTOCOL_VERSION, "epoch")
     store.workers.drain("existing-worker", True)
     if change.startswith("legacy"):
@@ -457,9 +425,7 @@ def test_column_removal_is_rejected_before_pause_but_additions_are_allowed(
             connection.execute("ALTER TABLE workers ADD COLUMN legacy_hint TEXT")
     commands = ImageCommands(store, change)
     assert invoke_image_update(commands) == (0 if allowed else 1)
-    assert ("adapter-pause" in commands.events) is allowed
     assert ("scale-zero" in commands.events) is allowed
-    assert maintenance.status().operation_id is None
     assert next(
         w for w in store.workers.list_workers() if w.worker_id == "existing-worker"
     ).draining
@@ -467,15 +433,14 @@ def test_column_removal_is_rejected_before_pause_but_additions_are_allowed(
         assert commands.probe is not None
         output = capsys.readouterr()
         assert "Database column removal detected:" in output.err
-        table = "server_activities" if change == "drop-table" else "workers"
         column = "legacy_hint" if change == "legacy-drop" else "draining"
-        assert table in output.err
+        assert "workers" in output.err
         if change != "drop-table":
             assert column in output.err
 
 
-@pytest.mark.parametrize("pending", ["job", "dispatch", "stop", "result", "effect", "control"])
-def test_only_active_controller_work_blocks_cutover_not_durable_backlog(
+@pytest.mark.parametrize("pending", ["job", "dispatch", "stop", "result", "effect"])
+def test_durable_backlog_does_not_block_replacement(
     store,
     invoke_image_update,
     tmp_path,
@@ -483,12 +448,10 @@ def test_only_active_controller_work_blocks_cutover_not_durable_backlog(
 ):
     flow = store.flows.create_flow("owner/repo", 1, 1)
     job = store.jobs.enqueue_job(flow.id, "initial")
-    maintenance = MaintenanceStore(store.database)
-    maintenance.start_instance()
     store.workers.worker_connected("w", PROTOCOL_VERSION, "epoch")
     with store.connection() as connection:
         if pending == "job":
-            # A persisted claim alone is recoverable; active dispatch has a receipt.
+            # A persisted claim is recovered by the ordinary startup sweep.
             assert store.workers.assign_job("w", "token", "epoch")
         elif pending == "dispatch":
             connection.execute(
@@ -503,7 +466,7 @@ def test_only_active_controller_work_blocks_cutover_not_durable_backlog(
             connection.execute(
                 "UPDATE jobs SET state='done',result_received_at=now() WHERE id=%s", (job.id,)
             )
-        elif pending == "effect":
+        else:
             connection.execute(
                 "INSERT INTO result_applications(job_id,digest,plan,created_at) VALUES(%s,'digest','{}',now())",
                 (job.id,),
@@ -512,65 +475,22 @@ def test_only_active_controller_work_blocks_cutover_not_durable_backlog(
                 "INSERT INTO result_effects(job_id,effect_key,position,payload,state,dispatched_at,next_attempt_at) VALUES(%s,'effect',0,'{}','skipped',now(),now())",
                 (job.id,),
             )
-        else:
-            connection.execute("INSERT INTO server_activities VALUES('running','triage')")
     commands = ImageCommands(store)
-    blocked = pending == "control"
-    assert invoke_image_update(commands) == (1 if blocked else 0)
-    assert "adapter-pause" in commands.events
-    assert ("scale-zero" in commands.events) is not blocked
-    assert maintenance.status().operation_id is None
-    assert json.loads(next(tmp_path.glob("*/operation.json")).read_text())["status"] == (
-        "aborted" if blocked else "complete"
-    )
-
-
-def test_exchange_finishes_before_cutover_while_job_remains_running(store, invoke_image_update):
-    flow = store.flows.create_flow("owner/repo", 1, 1)
-    attempt = store.flows.create_attempt(flow.id)
-    job = store.jobs.enqueue_job(flow.id, "initial")
-    store.workers.worker_connected("w", PROTOCOL_VERSION, "epoch")
-    assert store.workers.assign_job("w", "running", "epoch")
-    assert store.workers.start_assignment(job.id, attempt.id, "w", "running", "epoch")
-    maintenance = MaintenanceStore(store.database)
-    maintenance.start_instance()
-    with store.connection() as connection:
-        connection.execute("INSERT INTO server_activities VALUES('exchange','worker-tool')")
-    commands = ImageCommands(store, "finishes-exchange")
     assert invoke_image_update(commands) == 0
-    assert commands.events.index("exchange-finished") < commands.events.index("scale-zero")
-    assert store.jobs.get_job(job.id).state == "running"
-    assert store.jobs.get_job(job.id).assignment_token == "running"
-    assert store.flows.get_flow(flow.id).state == "active"
-    store.workers.worker_connected("w", PROTOCOL_VERSION, "new-epoch")
-    assert store.workers.resume_assignment(job.id, "w", "running", "new-epoch")
-
-
-@pytest.mark.parametrize("unsupported", ["old-runtime", "old-candidate"])
-def test_runtime_without_communication_receipts_is_rejected_before_pause(
-    store, invoke_image_update, unsupported
-):
-    MaintenanceStore(store.database).start_instance()
-    commands = ImageCommands(store, unsupported)
-    assert invoke_image_update(commands) == 1
-    assert "adapter-pause" not in commands.events and "scale-zero" not in commands.events
+    assert "scale-zero" in commands.events
+    assert json.loads(next(tmp_path.glob("*/operation.json")).read_text())["status"] == "complete"
 
 
 @pytest.mark.parametrize(
     "failure",
-    ["pull", "pvc-delete", "hpa", "old-stuck", "readiness", "running-digest", "stale-instance"],
+    ["pull", "pvc-delete", "hpa", "old-stuck", "readiness", "running-digest"],
 )
 def test_target_and_cutover_failures_preserve_safety(store, invoke_image_update, tmp_path, failure):
-    maintenance = MaintenanceStore(store.database)
-    maintenance.start_instance()
     commands = ImageCommands(store, failure)
     assert invoke_image_update(commands) == 1
     if failure in {"pull", "pvc-delete", "hpa"}:
-        assert "adapter-pause" not in commands.events and "scale-zero" not in commands.events
-        assert maintenance.status().operation_id is None
+        assert "scale-zero" not in commands.events
     else:
-        assert maintenance.status().operation_id is not None
-        assert "adapter-resume" not in commands.events
         assert (
             json.loads(next(tmp_path.glob("*/operation.json")).read_text())["status"]
             == "incomplete"

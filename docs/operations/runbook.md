@@ -40,7 +40,8 @@ launcher 托管的 runtime 请求更新。它不会直接杀进程或切换指�
 等待 `AvailabilityAccepted`，再等待本地执行和结果/停止 ACK 收齐。Server 仅在当前连接内存保存
 `dispatch_paused`，不会写数据库或改变 busy；心跳、工具、结果 ACK 和停止请求照常处理。旧进程
 正常退出、指针变化后 launcher 启动新 release；新实例只走既有 Register/断线重连，不登记 SHA 或
-升级完成。Server 更新不等待所有 Worker 更新。
+升级完成。Server 更新不等待所有 Worker 更新、任务完成或通信活动清空，也不设置全局暂停；它按
+[Server 更新](../deployment/server-update.md)的普通预检、停旧和启新流程执行。
 
 若无法解除暂停并得到 ACK，关闭连接并让普通重连恢复；新连接默认可接单。不要手工并起同一
 Worker ID，不要删除 `environment.json`、`current.json`、release 内的 `complete.json`、journal 或 root lock。

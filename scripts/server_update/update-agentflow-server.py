@@ -1,9 +1,9 @@
-"""Replace one server from a GitHub image event between business exchanges.
+"""Replace one server from a verified GitHub image event.
 
-Default execution checks the target and pulls an immutable image without pausing
-business work. Apply pauses admissions, waits for admitted work, then stops the old
-Pod before starting the replacement. Worker-local executions and bindings may remain.
-Removed database columns are rejected before pause; additive columns are allowed.
+Default execution checks the target and pulls an immutable image without replacing
+the server. Apply stops the old Pod before starting the replacement. Workers use
+ordinary reconnect and recovery; no business pause or activity tracking is required.
+Removed database columns are rejected before replacement; additive columns are allowed.
 No backup/restore, schema fingerprints, wire, worker-set or reconnect gates.
 Do not deploy or edit configuration concurrently. No force deletion or rollback.
 """
@@ -31,11 +31,10 @@ POSTGRES_IMAGE = (
 
 
 class Update:
-    """Own target identity, an operation-owned pause and stop-before-start cutover."""
+    """Own target identity, preflight checks and stop-before-start replacement."""
 
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
-        self.adapter = Path(__file__).with_name("agentflow-maintenance.py").read_text()
         self.column_check = Path(__file__).with_name("column-check.py").read_text()
         self.kubectl = [
             "kubectl",
@@ -66,26 +65,26 @@ class Update:
     def get(self, resource: str) -> dict:
         return json.loads(self.run("get", resource, "-o", "json"))
 
-    def inspect(self, pod: dict, mode: str = "status", operation_id: str | None = None) -> dict:
+    def schema_snapshot(self, pod: dict) -> dict:
         live = self.get(f"pod/{pod['metadata']['name']}")
         if live["metadata"]["uid"] != pod["metadata"]["uid"]:
-            raise RuntimeError("Server Pod was replaced during maintenance")
-        args = [
-            "exec",
-            "-i",
-            pod["metadata"]["name"],
-            "-c",
-            self.args.container,
-            "--",
-            "python",
-            "-",
-            mode,
-        ]
-        if operation_id is not None:
-            args.append(operation_id)
-        result = json.loads(self.run(*args, data=self.adapter))
+            raise RuntimeError("Server Pod was replaced during schema inspection")
+        result = json.loads(
+            self.run(
+                "exec",
+                "-i",
+                pod["metadata"]["name"],
+                "-c",
+                self.args.container,
+                "--",
+                "python",
+                "-",
+                "--snapshot",
+                data=self.column_check,
+            )
+        )
         if not isinstance(result, dict):
-            raise TypeError("maintenance adapter returned invalid JSON")
+            raise TypeError("schema inspection returned invalid JSON")
         return result
 
     @staticmethod
@@ -309,10 +308,6 @@ class Update:
 
             pod = self.wait(finished, "candidate image pull and database column inspection")
             result = json.loads(self.run("logs", name, "-c", "check"))
-            if result.get("maintenance") is not True:
-                raise RuntimeError("Candidate image lacks execution-idle maintenance support")
-            if result.get("communication_idle") != 1:
-                raise RuntimeError("Candidate image lacks communication-idle maintenance support")
             removed = result.get("removed_columns")
             if (
                 not isinstance(removed, list)
@@ -339,34 +334,12 @@ class Update:
             elif created:
                 print(f"Image-check Pod retained for diagnostics: {name}", file=sys.stderr)
 
-    @staticmethod
-    def settled(snapshot: dict) -> bool:
-        work = snapshot["control_work"]
-        if not isinstance(work, list) or any(not isinstance(name, str) for name in work):
-            raise RuntimeError("Invalid controller activity snapshot")
-        return not work
-
     def execute(self) -> None:
-        if self.record.exists() and json.loads(self.record.read_text()).get("status") not in {
-            "complete",
-            "aborted",
-        }:
+        if self.record.exists() and json.loads(self.record.read_text()).get("status") != "complete":
             raise RuntimeError(f"Unfinished operation: inspect {self.record}; no automatic retry")
         original, old_pod, index = self.preflight()
-        initial = self.inspect(old_pod)
-        if initial["maintenance"]["operation_id"] is not None:
-            raise RuntimeError("Server is already paused by another operation")
-        instance = initial["maintenance"]["instance_id"]
-        if not instance:
-            raise RuntimeError("Running server has not initialized maintenance support")
-        if initial.get("communication_idle") != 1:
-            raise RuntimeError(
-                "Running controller lacks communication receipts; "
-                "a one-time manual idle update is required"
-            )
         print(f"Target: {self.args.context}/{self.args.namespace}/{self.args.workload}", flush=True)
-        print("Controller activity: " + json.dumps(initial["control_work"]), flush=True)
-        schema = self.inspect(old_pod, "schema")
+        schema = self.schema_snapshot(old_pod)
         image_id = self.probe_image(old_pod, schema)
         _, pod, _ = self.preflight()
         self.current(original, original["spec"])
@@ -376,7 +349,7 @@ class Update:
             "Image, target and column-removal checks passed; backup/restore and broad compatibility gates disabled."
         )
         if not self.args.apply:
-            print("CHECK PASSED: no admissions paused or server replaced.")
+            print("CHECK PASSED: no server replaced.")
             return
         old_container = original["spec"]["template"]["spec"]["containers"][index]
         if (
@@ -384,13 +357,11 @@ class Update:
             and old_container.get("imagePullPolicy") == "IfNotPresent"
             and self.status(old_pod, self.args.container).get("imageID") == image_id
         ):
-            print("ALREADY CURRENT: no server replacement or maintenance changes needed.")
+            print("ALREADY CURRENT: no server replacement needed.")
             return
 
-        operation_id = uuid.uuid4().hex
         self.report = {
             "status": "incomplete",
-            "operation_id": operation_id,
             "context": self.args.context,
             "namespace": self.args.namespace,
             "workload": self.args.workload,
@@ -401,61 +372,10 @@ class Update:
             "old_pull_policy": old_container.get("imagePullPolicy"),
             "new_image": self.args.image,
             "new_image_id": image_id,
-            "before": initial,
             "backup_policy": "disabled",
             "compatibility_policy": "column-removal-only",
         }
-        self.save("pausing-admissions")
-        self.inspect(old_pod, "pause", operation_id)
-        try:
-            previous_work = None
-
-            def idle():
-                nonlocal previous_work
-                self.current(original, original["spec"])
-                snapshot = self.inspect(old_pod)
-                if snapshot["maintenance"] != {
-                    "operation_id": operation_id,
-                    "instance_id": instance,
-                }:
-                    raise RuntimeError("Maintenance owner or server instance changed")
-                if snapshot["control_work"] != previous_work:
-                    print(
-                        "Waiting for admitted work: " + json.dumps(snapshot["control_work"]),
-                        flush=True,
-                    )
-                    previous_work = snapshot["control_work"]
-                return snapshot if self.settled(snapshot) else None
-
-            self.report["before_stop"] = self.wait(
-                idle, "admitted business exchanges and controller work"
-            )
-            self.current(original, original["spec"])
-            self.save("stopping-old-pod")
-        except (
-            RuntimeError,
-            OSError,
-            ValueError,
-            KeyError,
-            TypeError,
-            subprocess.TimeoutExpired,
-            KeyboardInterrupt,
-        ):
-            # Before any cutover attempt, resume only if our original healthy server
-            # and target still exist. Otherwise retain the pause for manual inspection.
-            self.current(original, original["spec"])
-            live = self.get(f"pod/{old_pod['metadata']['name']}")
-            if live["metadata"]["uid"] == old_pod["metadata"]["uid"] and self.ready(live):
-                snapshot = self.inspect(old_pod)
-                if snapshot["maintenance"] == {
-                    "operation_id": operation_id,
-                    "instance_id": instance,
-                }:
-                    self.inspect(old_pod, "resume", operation_id)
-                    self.report["status"] = "aborted"
-                    self.save("resumed-before-cutover")
-            raise
-
+        self.save("stopping-old-pod")
         current = self.current(original, original["spec"])
         stopped = self.patch(current, [{"op": "add", "path": "/spec/replicas", "value": 0}])
         expected = copy.deepcopy(original["spec"])
@@ -507,22 +427,10 @@ class Update:
 
         new_pod = self.wait(ready, "replacement /readyz and matching runtime image identity")
         self.report["new_pod_uid"] = new_pod["metadata"]["uid"]
-        snapshot = self.inspect(new_pod)
-        maintenance = snapshot["maintenance"]
-        if (
-            maintenance["operation_id"] != operation_id
-            or not maintenance["instance_id"]
-            or maintenance["instance_id"] == instance
-        ):
-            raise RuntimeError("Replacement has not retained our pause in a new server instance")
         self.current(original, started["spec"])
-        self.save("resuming-admissions")
-        resumed = self.inspect(new_pod, "resume", operation_id)
-        if resumed["maintenance"]["operation_id"] is not None:
-            raise RuntimeError("Maintenance pause was not released")
         self.report["status"] = "complete"
         self.save("ready")
-        print("UPDATE COMPLETE: server ready; admissions resumed; worker drain flags unchanged.")
+        print("UPDATE COMPLETE: server ready; workers reconnect normally; drain flags unchanged.")
 
 
 def main() -> int:

@@ -6,7 +6,8 @@
 
 Server 更新和 Worker 更新是独立流程。Server 可在 Worker 尚未升级时部署；Worker 发布、离线、
 未启用更新或更新失败都不改变 Server 镜像事件的结果。Server 的部署边界见
-[Server 更新](server-update.md)。Server 更新只等待既有短业务交换，不等待 Worker 更新。
+[Server 更新](server-update.md)。Server 更新按普通预检、停旧和启新流程执行，不等待 Worker 更新、
+任务完成或通信活动清空，也不设置全局暂停。
 
 ## 边界和所需文件
 
@@ -121,6 +122,5 @@ Server 镜像事件仍是独立流程：`scripts/image_event.py` 使用项目既
 也可运行。它不使用 SQLite，不创建 `worker_releases` 或 `worker_updates`，也不持久化 Worker 的
 检查、准备、暂停或完成状态。
 
-因此 Server 全局维护只等待已有的短通信回执，不等待任何 Worker 更新完成；Worker 更新的离线、
-失败或未启用不回写、阻塞或重试 Server 事件。本文没有执行真实 GitHub 发布检查、launchd 或真实
-Worker 更新验收。
+因此 Server 更新不等待任何 Worker 更新完成；Worker 更新的离线、失败或未启用不回写、阻塞或重试
+Server 事件。本文没有执行真实 GitHub 发布检查、launchd 或真实 Worker 更新验收。

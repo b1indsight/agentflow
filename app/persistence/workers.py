@@ -31,7 +31,6 @@ from app.github import GitHubError, retry_delay
 from app.persistence.deliveries import DeliveryStore
 from app.persistence.flows import FlowStore
 from app.persistence.jobs import JobStore
-from app.persistence.maintenance import admissions_paused
 from app.persistence.records import required
 from app.persistence.repository import Repository
 
@@ -203,8 +202,6 @@ class WorkerStore(Repository):
             " AND prior.result_applied_at IS NULL))))"
         )
         with self._db.connection() as connection, connection.transaction():
-            if admissions_paused(connection):
-                return None
             candidate = connection.execute(
                 "SELECT w.worker_id FROM workers w WHERE w.status=%s"
                 " AND NOT (w.worker_id=ANY(%s))"
@@ -651,7 +648,6 @@ class WorkerStore(Repository):
 
         now = self._db.now()
         with self._db.connection() as connection, connection.transaction():
-            paused = admissions_paused(connection)
             connection.execute(
                 "SELECT worker_id FROM workers ORDER BY worker_id FOR UPDATE"
             ).fetchall()
@@ -673,12 +669,7 @@ class WorkerStore(Repository):
             ).fetchall()
             actions: dict[RecoveryAction, list[int]] = {action: [] for action in RecoveryAction}
             for candidate in candidates:
-                action = decide_job_recovery(candidate, now)
-                # The controller can be unavailable longer than recovery_grace
-                # while the original Worker executor continues running locally.
-                if paused and action in {RecoveryAction.FAIL, RecoveryAction.BLOCKED}:
-                    action = RecoveryAction.KEEP
-                actions[action].append(candidate.id)
+                actions[decide_job_recovery(candidate, now)].append(candidate.id)
             requeued_rows = connection.execute(
                 "UPDATE jobs SET state=%s, assigned_worker_id=NULL, assignment_token=NULL,"
                 " heartbeat_at=NULL, lease_expires_at=NULL, updated_at=%s"
@@ -745,9 +736,8 @@ class WorkerStore(Repository):
                 " FROM flow_executions e JOIN flows f ON f.id=e.flow_id"
                 " LEFT JOIN flow_deliveries d ON d.flow_id=e.flow_id"
                 " WHERE e.released_at IS NULL AND e.recovery_deadline<=%s"
-                " AND NOT %s"
                 " ORDER BY e.flow_id FOR UPDATE OF e",
-                (now, paused),
+                (now,),
             ).fetchall()
             release_ids = [binding.flow_id for binding in bindings if should_release_binding(binding, now)]
             expired_executions = connection.execute(

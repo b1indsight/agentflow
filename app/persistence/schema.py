@@ -321,21 +321,6 @@ CREATE TABLE IF NOT EXISTS project_projections (
 CREATE INDEX IF NOT EXISTS ix_projects_due ON project_projections(next_at,id) WHERE NOT blocked;
 """
 
-MAINTENANCE_SCHEMA = """
-CREATE TABLE IF NOT EXISTS server_maintenance (
-  singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK(singleton),
-  operation_id TEXT,
-  paused_at TIMESTAMPTZ,
-  instance_id TEXT NOT NULL DEFAULT '',
-  CHECK ((operation_id IS NULL) = (paused_at IS NULL))
-);
-INSERT INTO server_maintenance(singleton) VALUES(TRUE) ON CONFLICT DO NOTHING;
-CREATE TABLE IF NOT EXISTS server_activities (
-  token TEXT PRIMARY KEY,
-  name TEXT NOT NULL
-);
-"""
-
 SCHEMAS = (
     SCHEMA,
     WEBHOOK_SCHEMA,
@@ -345,6 +330,5 @@ SCHEMAS = (
     RECONCILE_SCHEMA,
     PROJECT_SCHEMA,
     CONSOLE_SCHEMA,
-    MAINTENANCE_SCHEMA,
     SERVER_UPDATE_SCHEMA,
 )

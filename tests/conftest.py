@@ -31,24 +31,20 @@ def memory_repository_construction() -> Iterator[None]:
     from app.persistence.deliveries import DeliveryStore
     from app.persistence.flows import FlowStore
     from app.persistence.jobs import JobStore
-    from app.persistence.maintenance import MaintenanceStore
     from app.persistence.results import ResultStore
     from app.persistence.reviews import ReviewStore
     from app.persistence.stops import StopStore
     from app.persistence.webhooks import WebhookStore
     from app.persistence.workers import WorkerStore
     from tests.persistence_fakes import RepositoryViews
-    from tests.worker_fakes import UnpausedMaintenance
 
     def construct(repository: type, database):
         if isinstance(database, Mock) and isinstance(database._mock_wraps, RepositoryViews):
-            if repository is MaintenanceStore:
-                return UnpausedMaintenance(database)
             return database._mock_wraps.repository(repository)
         return repository(database)
 
     repositories = (DeliveryStore, FlowStore, JobStore, ResultStore,
-                    ReviewStore, StopStore, WebhookStore, WorkerStore, MaintenanceStore)
+                    ReviewStore, StopStore, WebhookStore, WorkerStore)
     # Keep these constructor patches independent of each test's monkeypatch fixture;
     # SQL observers must be restored before the PostgreSQL fixture drops its schema.
     with pytest.MonkeyPatch.context() as patch:

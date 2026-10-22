@@ -1,23 +1,14 @@
 """Explicit worker dependencies for in-memory protocol tests."""
 
 from collections.abc import Awaitable, Callable
-from contextlib import nullcontext
 from unittest.mock import Mock
 
 from app.contracts.protocol import ExecutionStopped
 from app.controler.workflow.effects import ResultEffects
 from app.controler.workflow.results import ResultApplication
 from app.domain.models import JobState, WorkerRecord, WorkerStatus, utcnow
-from app.persistence.maintenance import MaintenanceStore
 from app.persistence.stops import StopIntent, StopStore
 from app.persistence.store import Store
-
-
-class UnpausedMaintenance(MaintenanceStore):
-    """Protocol simulations have no deployment process or database-backed pause."""
-
-    def activity(self, name: str):
-        return nullcontext(True)
 
 
 class NoPendingStops(StopStore):

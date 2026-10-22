@@ -1,8 +1,10 @@
-"""Detect removed columns using schema-only replay on the probe Pod's private PostgreSQL.
+"""Inspect live column metadata and detect removed columns in a private probe database.
 
-No production DSN or rows are accepted. Declaration differences cover removal from
-CREATE definitions; PostgreSQL column identities also catch DROP followed by ADD
-with the same name. Types, defaults, constraints and Worker protocols are not gates.
+The --snapshot mode only reads metadata from the configured application database.
+Replay uses the probe Pod's private PostgreSQL and accepts no production DSN or rows.
+Declaration differences cover removal from CREATE definitions; PostgreSQL column
+identities also catch DROP followed by ADD with the same name. Types, defaults,
+constraints and Worker protocols are not gates.
 """
 
 from __future__ import annotations
@@ -17,6 +19,38 @@ import psycopg
 from psycopg import sql
 
 Column = tuple[str, str]
+
+
+def snapshot() -> dict:
+    """Read live schema declarations and column metadata without initializing the database."""
+    from app.controler.config import ServerSettings
+    from app.persistence.database import Database
+    from app.persistence.records import required
+    from app.persistence.schema import SCHEMAS
+
+    database = Database(ServerSettings.model_validate({}).database_url)
+    try:
+        with database.connection() as connection, connection.transaction():
+            connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            connection.execute("SET LOCAL statement_timeout='10s'")
+            connection.execute("SET LOCAL lock_timeout='3s'")
+            return {
+                "name": required(connection.execute("SELECT current_schema() AS name").fetchone())[
+                    "name"
+                ],
+                "statements": list(SCHEMAS),
+                "columns": connection.execute(
+                    'SELECT c.relname AS "table",a.attname AS "column",'
+                    ' pg_catalog.format_type(a.atttypid,a.atttypmod) AS "type"'
+                    " FROM pg_catalog.pg_attribute a"
+                    " JOIN pg_catalog.pg_class c ON c.oid=a.attrelid"
+                    " JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace"
+                    " WHERE n.nspname=current_schema() AND c.relkind IN ('r','p')"
+                    " AND a.attnum>0 AND NOT a.attisdropped ORDER BY c.relname,a.attnum"
+                ).fetchall(),
+            }
+    finally:
+        database.close()
 
 
 def connect(database: str, user: str) -> psycopg.Connection:
@@ -127,7 +161,6 @@ def verify(admin: psycopg.Connection, baseline: dict, candidate: list[str]) -> d
             removed = (declared_old.keys() & live_names) - declared_candidate.keys()
             removed |= {name for name in live_names if after.get(name) != before[name]}
             return {
-                "maintenance": True,
                 "checked_columns": len(live_names),
                 "removed_columns": [list(name) for name in sorted(removed)],
             }
@@ -139,8 +172,10 @@ def verify(admin: psycopg.Connection, baseline: dict, candidate: list[str]) -> d
 
 def main() -> None:
     """Wait only for initial DB startup; never retry candidate DDL after a lost response."""
+    if sys.argv[1:] == ["--snapshot"]:
+        print(json.dumps(snapshot(), sort_keys=True))
+        return
     importlib.import_module("app.controler.runtime")
-    from app.persistence.maintenance import MaintenanceStore
     from app.persistence.schema import SCHEMAS
 
     baseline = json.loads(sys.argv[1])
@@ -155,7 +190,6 @@ def main() -> None:
             time.sleep(1)
     with admin:
         result = verify(admin, baseline, list(SCHEMAS))
-    result["communication_idle"] = getattr(MaintenanceStore, "COMMUNICATION_IDLE", None)
     print(json.dumps(result, sort_keys=True))
 
 

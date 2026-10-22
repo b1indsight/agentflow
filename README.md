@@ -77,6 +77,10 @@ FlowTool 的目标是把带 `flow` 标签的 GitHub issue 编排成
 - **取消与 drain**：cancel 持久化停止意图，worker 取消当前执行并回收其持有的 Codex/VCS
   进程组；停止凭据与已发送 effects 未确认前不释放绑定。drain 停止分配新 Flow，已有绑定
   继续收尾。未知旧执行保持阻塞，无强制释放入口，见[取消与停机](docs/operations/cancel-drain.md)。
+- **Server 镜像更新**：Webhook 事件只保存于 PostgreSQL `server_update_events`。更新器完成普通预检、
+  候选 Pod 预检和删列检查后，将 Server 缩至零、等待旧 Pod 正常退出，再以固定 digest 恢复一个副本，
+  核验 `/readyz` 与实际镜像身份。此流程不暂停全局业务、不等待通信活动或 Worker 更新，也不改变
+  既有 recovery grace；详情见 [Server 更新](docs/deployment/server-update.md)。
 - **Worker 按执行空闲更新**：macOS 登录用户的原生 Worker 可选择由 LaunchAgent 托管固定
   release。每个受管 Worker 每 300 秒自行核验 GitHub Images 发布；准备完成后，它以本地
   `WorkerAvailability(paused, request_id, connection_epoch)` 和 `AvailabilityAccepted` 暂停接收

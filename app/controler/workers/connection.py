@@ -11,7 +11,6 @@ from fastapi import WebSocketDisconnect
 
 from app.contracts.protocol import AvailabilityAccepted, WorkerAvailability, parse_worker_message
 from app.controler.workers.conversation import ConversationBroker
-from app.persistence.maintenance import MaintenanceStore
 
 
 class WorkerSocket(Protocol):
@@ -47,14 +46,12 @@ class WorkerConnection:
         worker_id: str,
         epoch: str,
         *,
-        maintenance: MaintenanceStore,
         notify_jobs: Callable[[], None] | None = None,
     ) -> None:
         self.socket = socket
         self.conversations = conversations
         self.dispatch_paused = False
         self.notify_jobs = notify_jobs
-        self.maintenance = maintenance
         self.worker_id, self.epoch = worker_id, epoch
         self._send_lock = asyncio.Lock()
         self._messages: deque[tuple[str, int]] = deque()
@@ -103,14 +100,13 @@ class WorkerConnection:
                 if isinstance(message, WorkerAvailability):
                     if message.connection_epoch != self.epoch:
                         raise ProtocolViolation("availability belongs to another connection")
-                    with self.maintenance.exchange("worker-availability"):
-                        self.dispatch_paused = message.paused
-                        reply = AvailabilityAccepted(
-                            request_id=message.request_id,
-                            connection_epoch=self.epoch,
-                            paused=self.dispatch_paused,
-                        )
-                        await self.send_text(reply.model_dump_json())
+                    self.dispatch_paused = message.paused
+                    reply = AvailabilityAccepted(
+                        request_id=message.request_id,
+                        connection_epoch=self.epoch,
+                        paused=self.dispatch_paused,
+                    )
+                    await self.send_text(reply.model_dump_json())
                     if self.notify_jobs is not None:
                         self.notify_jobs()
                     continue

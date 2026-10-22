@@ -19,7 +19,6 @@ from app.persistence.database import Database
 from app.persistence.deliveries import DeliveryStore
 from app.persistence.flows import FlowStore
 from app.persistence.jobs import JobStore
-from app.persistence.maintenance import MaintenanceStore
 from app.persistence.reconciliation import ReconcileState, ReconcileStore
 from app.persistence.reviews import ReviewStore
 from app.persistence.stops import StopStore
@@ -41,7 +40,6 @@ class Reconciler:
         database: Database,
     ) -> None:
         self.database = database
-        self.maintenance = MaintenanceStore(database)
         self.deliveries = DeliveryStore(database)
         self.flows = FlowStore(database)
         self.jobs = JobStore(database)
@@ -60,9 +58,7 @@ class Reconciler:
         logger.info("reconciler started")
         while not self._stop.is_set():
             try:
-                with self.maintenance.activity("pull-requests") as admitted:
-                    if admitted:
-                        await self._sweep()
+                await self._sweep()
             except Exception:  # noqa: BLE001 -- database failures leave due checks for the next sweep
                 logger.exception("reconcile sweep failed")
             try:

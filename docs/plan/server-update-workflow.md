@@ -651,3 +651,40 @@ baseline 为 6 passed；删除准备后的暂停复查、删除调度中的暂�
 传输与实际 WebSocket 异常类型，不宣称执行了真实网络或部署验收。证据：本地未跟踪的
 `.amp/in/artifacts/generic-pause-closed-send-{before,after}.log` 和
 `.amp/in/artifacts/generic-pause-final-{full,focused,ruff,format,mypy}.log`。
+
+### 2026-10-22 — 用户修订：删除 Server 维护控制层
+
+**决定。** 删除 `app/persistence/maintenance.py`、`MaintenanceStore`、`server_maintenance` 和
+`server_activities`。Server 更新不再设置全局 pause/resume、不等待活动或通信回执、不检查
+`COMMUNICATION_IDLE`，也不在维护期间延长 recovery deadline。业务路径在新 Server 就绪后直接按
+既有规则恢复；断线 Worker 和绑定继续使用普通 recovery grace。
+
+Server 更新改为普通预检，随后将副本缩至 0、等待旧 Pod 正常退出、以固定镜像 digest 恢复 1 个副本，
+并核验 `/readyz` 与实际镜像身份。不等待 Worker 更新、任务完成或通信活动清空。保留 PostgreSQL
+`server_update_events`、消费者互斥、候选 Pod 预检和删列检查。`agentflow-maintenance.py` 删除，
+部署主机直接复制 `update-agentflow-server.py` 与 `column-check.py` 两个文件；不提供替代安装器或
+维护服务。主机文件锁和 `operation.json` 保留，后者只保存 incomplete/complete 部署报告，
+不是 Server 维护表。
+
+Worker 的 `WorkerAvailability` 单 Worker 暂停新任务、本地升级 ACK 收尾与普通断线重连保持不变。
+历史已安装的 Server 维护表不自动 `DROP`，且本修订不兼容旧 PR 的部署。
+
+**取代的旧决定。** 本条取代 2026-10-21 的全局业务暂停、`server_activities` 通信等待、
+`COMMUNICATION_IDLE` 能力校验和维护恢复宽限，也取代 2026-10-22 的三个 Server 脚本复制说明。
+此前记录保留为历史上下文。
+
+**实现与验证。** 删除业务路径中的 admission/activity/exchange 包装和专用测试；只读 schema
+快照并入现有 `column-check.py --snapshot`，使用只读一致事务，不初始化业务库。未增加替代维护层、
+依赖或兼容分支；本次为删除和职责合并，没有新增机制需要消融实验。
+
+隔离 PostgreSQL 17 上全量 **903 passed、零跳过**，仅既有 Starlette 弃用警告；相关场景
+**54 passed**。覆盖普通断线后执行继续、离线完成后重连记录结果、超过重连宽限后的 Server
+持久结果恢复、Worker 通用暂停及公平派发、候选删列拦截、存量待办不阻止替换、停旧后启新和
+中断记录拒绝盲目重试。两个 Server 脚本单独复制到临时目录后，隔离模式 CLI help 和镜像更新
+测试 **21 passed**。Ruff、两个脚本/重写测试等七个文件的格式检查、Webhook 修改段格式检查、
+`mypy app scripts/worker_update scripts/server_update`（124 files）及 diff 空白检查通过；
+未格式化其他文件的既有无关代码。此前已记录的 `scripts/smoke/recovery.py` 类型错误不在本次范围。
+
+证据：本地未跟踪的 `.amp/in/artifacts/remove-server-maintenance-{full,focused-final,copied-tests,
+copied-help,ruff,format-final,mypy}.log`。PostgreSQL、Worker journal 与脚本实际执行；网络传输和
+Kubernetes/GHCR 边界仍使用替身，未执行真实数据库迁移、主机安装、部署或服务重启。

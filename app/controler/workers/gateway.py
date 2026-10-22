@@ -49,7 +49,6 @@ from app.domain.models import (
 from app.persistence.database import Database
 from app.persistence.deliveries import DeliveryStore
 from app.persistence.jobs import JobStore
-from app.persistence.maintenance import MaintenancePaused, MaintenanceStore
 from app.persistence.stops import StopIntent, StopStore
 from app.persistence.workers import WorkerStore
 from app.telemetry.metrics import Metrics
@@ -76,7 +75,6 @@ class WorkerGateway:
         self.jobs = JobStore(database)
         self.stops = StopStore(database)
         self.workers = WorkerStore(database)
-        self.maintenance = MaintenanceStore(database)
         self.metrics = metrics
         self.coordinator = coordinator
         self.tools = tools
@@ -129,124 +127,120 @@ class WorkerGateway:
             register = parse_worker_message(await socket.receive_text())
             if not isinstance(register, Register) or register.worker_id != worker_id:
                 raise ProtocolViolation("worker registration does not match authenticated identity")
-            with self.maintenance.exchange("worker-register"):
-                connection = WorkerConnection(
-                    socket,
-                    self.conversations,
+            connection = WorkerConnection(
+                socket,
+                self.conversations,
+                worker_id,
+                connection_epoch,
+                notify_jobs=self.notify_jobs,
+            )
+            wake = await self._register_session(worker_id, connection)
+            registered_session = True
+            worker = self.workers.worker_connected(
+                worker_id, register.protocol_version, connection_epoch
+            )
+            connected = True
+            stop = self.stops.pending(worker_id)
+            if (stop is None and register.recovery is not None
+                    and register.recovery.stop_request_id is not None):
+                stop = self.stops.receipt_request(worker_id, register.recovery.stop_request_id)
+            if stop is not None:
+                await self._stop_worker(connection, worker_id, connection_epoch, stop)
+            elif register.recovery is not None:
+                current = await self._recover(
+                    connection,
                     worker_id,
                     connection_epoch,
-                    maintenance=self.maintenance,
-                    notify_jobs=self.notify_jobs,
+                    register.recovery,
                 )
-                wake = await self._register_session(worker_id, connection)
-                registered_session = True
-                worker = self.workers.worker_connected(
-                    worker_id, register.protocol_version, connection_epoch
+            if current is None:
+                stale_job_id = None if stop is not None else worker.current_job_id
+                if stale_job_id is not None and (
+                    register.recovery is None or register.recovery.job_id != stale_job_id
+                ):
+                    # A crash before journaling a newly delivered command leaves the preceding
+                    # acknowledged receipt. Recover the unstarted delivery behind that receipt.
+                    await self._reject_missing_journal(worker_id, connection_epoch, stale_job_id)
+                elif register.recovery is None and (
+                    binding := self.workers.get_worker_execution(worker_id)
+                ) is not None:
+                    delivery = self.deliveries.get_delivery(binding.flow_id)
+                    if delivery is not None and delivery.state is DeliveryState.MERGED:
+                        raise ProtocolViolation("archive blocked: original worker journal is missing")
+            if current is None:
+                await connection.send_text(
+                    Registered(
+                        heartbeat_interval=self.heartbeat_interval,
+                        connection_epoch=connection_epoch,
+                    ).model_dump_json()
                 )
-                connected = True
-                stop = self.stops.pending(worker_id)
-                if (stop is None and register.recovery is not None
-                        and register.recovery.stop_request_id is not None):
-                    stop = self.stops.receipt_request(worker_id, register.recovery.stop_request_id)
-                if stop is not None:
-                    await self._stop_worker(connection, worker_id, connection_epoch, stop)
-                elif register.recovery is not None:
-                    current = await self._recover(
-                        connection,
-                        worker_id,
-                        connection_epoch,
-                        register.recovery,
-                    )
-                if current is None:
-                    stale_job_id = None if stop is not None else worker.current_job_id
-                    if stale_job_id is not None and (
-                        register.recovery is None or register.recovery.job_id != stale_job_id
-                    ):
-                        # A crash before journaling a newly delivered command leaves the preceding
-                        # acknowledged receipt. Recover the unstarted delivery behind that receipt.
-                        await self._reject_missing_journal(worker_id, connection_epoch, stale_job_id)
-                    elif register.recovery is None and (
-                        binding := self.workers.get_worker_execution(worker_id)
-                    ) is not None:
-                        delivery = self.deliveries.get_delivery(binding.flow_id)
-                        if delivery is not None and delivery.state is DeliveryState.MERGED:
-                            raise ProtocolViolation("archive blocked: original worker journal is missing")
-                if current is None:
-                    await connection.send_text(
-                        Registered(
-                            heartbeat_interval=self.heartbeat_interval,
-                            connection_epoch=connection_epoch,
-                        ).model_dump_json()
-                    )
 
             while True:
                 if current is None:
                     assert wake is not None
                     wake.clear()
-                    with self.maintenance.exchange("worker-dispatch"):
-                        stop = self.stops.pending(worker_id)
-                        if stop is not None:
-                            await self._stop_worker(connection, worker_id, connection_epoch, stop)
-                        token = uuid4().hex
-                        excluded = [
-                            identity
-                            for identity, (_, session) in self._sessions.items()
-                            if session.dispatch_paused
-                        ]
-                        job = self.workers.assign_job(
-                            worker_id, token, connection_epoch, excluded=excluded
-                        )
-                        if job is not None:
-                            prepared = await self._prepare_assignment(job, worker_id, token, connection_epoch)
-                            if isinstance(prepared, JobState):
-                                if prepared is JobState.QUEUED:
-                                    self.workers.requeue_assignment(job.id, worker_id, token, connection_epoch)
-                                else:
-                                    self.workers.finish_assignment(
-                                        job.id, worker_id, token, prepared, connection_epoch,
-                                    )
-                                self.notify_jobs()
-                                continue
-                            # Preparation awaits remote I/O; a pause ACK may already have
-                            # reached the Worker. Recheck before authorizing any dispatch.
-                            # From here to send_text's existing FIFO lock there is no await,
-                            # so an authorized frame is always ordered ahead of that ACK.
-                            if connection.dispatch_paused:
-                                requeued = self.workers.requeue_assignment(
-                                    job.id, worker_id, token, connection_epoch
+                    stop = self.stops.pending(worker_id)
+                    if stop is not None:
+                        await self._stop_worker(connection, worker_id, connection_epoch, stop)
+                    token = uuid4().hex
+                    excluded = [
+                        identity
+                        for identity, (_, session) in self._sessions.items()
+                        if session.dispatch_paused
+                    ]
+                    job = self.workers.assign_job(
+                        worker_id, token, connection_epoch, excluded=excluded
+                    )
+                    if job is not None:
+                        prepared = await self._prepare_assignment(job, worker_id, token, connection_epoch)
+                        if isinstance(prepared, JobState):
+                            if prepared is JobState.QUEUED:
+                                self.workers.requeue_assignment(job.id, worker_id, token, connection_epoch)
+                            else:
+                                self.workers.finish_assignment(
+                                    job.id, worker_id, token, prepared, connection_epoch,
                                 )
-                                if not requeued and self.stops.pending(worker_id) is None:
-                                    raise ProtocolViolation("assignment changed while pausing")
-                                self.notify_jobs()
-                                continue
-                            if not self.stops.authorize_dispatch(
+                            self.notify_jobs()
+                            continue
+                        # Preparation awaits remote I/O; a pause ACK may already have
+                        # reached the Worker. Recheck before authorizing any dispatch.
+                        # From here to send_text's existing FIFO lock there is no await,
+                        # so an authorized frame is always ordered ahead of that ACK.
+                        if connection.dispatch_paused:
+                            requeued = self.workers.requeue_assignment(
                                 job.id, worker_id, token, connection_epoch
-                            ):
-                                raise ProtocolViolation("assignment changed before dispatch authorization")
-                            current = (job, token, prepared.task)
-                            await connection.send_text(prepared.model_dump_json())
-
-                            first = await self._receive(connection)
-                            if not isinstance(first, Started):
-                                raise ProtocolViolation("assignment must be acknowledged with Started")
-                            self._validate_assignment_message(
-                                first.job_id,
-                                first.assignment_token,
-                                first.connection_epoch,
-                                current,
-                                connection_epoch,
                             )
-                            if not self.workers.start_assignment(
-                                job.id,
-                                prepared.task.attempt_id,
-                                worker_id,
-                                token,
-                                connection_epoch,
-                            ):
-                                raise ProtocolViolation("assignment is no longer active")
-                            self.coordinator.mark_started(job, prepared.task, worker_id)
+                            if not requeued and self.stops.pending(worker_id) is None:
+                                raise ProtocolViolation("assignment changed while pausing")
+                            self.notify_jobs()
+                            continue
+                        if not self.stops.authorize_dispatch(
+                            job.id, worker_id, token, connection_epoch
+                        ):
+                            raise ProtocolViolation("assignment changed before dispatch authorization")
+                        current = (job, token, prepared.task)
+                        await connection.send_text(prepared.model_dump_json())
+
+                        first = await self._receive(connection)
+                        if not isinstance(first, Started):
+                            raise ProtocolViolation("assignment must be acknowledged with Started")
+                        self._validate_assignment_message(
+                            first.job_id,
+                            first.assignment_token,
+                            first.connection_epoch,
+                            current,
+                            connection_epoch,
+                        )
+                        if not self.workers.start_assignment(
+                            job.id,
+                            prepared.task.attempt_id,
+                            worker_id,
+                            token,
+                            connection_epoch,
+                        ):
+                            raise ProtocolViolation("assignment is no longer active")
+                        self.coordinator.mark_started(job, prepared.task, worker_id)
                     if job is None:
-                        # Idle waits and the remote executor must never hold a receipt.
                         await self._wait_while_idle(connection, wake)
                         continue
 
@@ -255,8 +249,7 @@ class WorkerGateway:
                     job, token, _ = current
                     stop = self.stops.pending(worker_id)
                     if stop is not None:
-                        with self.maintenance.exchange("worker-stop"):
-                            await self._stop_worker(connection, worker_id, connection_epoch, stop)
+                        await self._stop_worker(connection, worker_id, connection_epoch, stop)
                         current = None
                         break
                     message = await self._receive(connection)
@@ -274,60 +267,58 @@ class WorkerGateway:
                             raise ProtocolViolation("heartbeat belongs to an inactive assignment")
                         continue
                     if isinstance(message, FlowToolRequest):
-                        with self.maintenance.exchange("worker-tool"):
-                            self._validate_assignment_message(
-                                message.job_id,
-                                message.assignment_token,
-                                message.connection_epoch,
-                                current,
-                                connection_epoch,
-                            )
-                            if message.flow_id != job.flow_id:
-                                raise ProtocolViolation("Flow tool call belongs to another Flow")
-                            response = await self.tools.execute(message, worker_id=worker_id)
-                            await connection.send_text(response.model_dump_json())
+                        self._validate_assignment_message(
+                            message.job_id,
+                            message.assignment_token,
+                            message.connection_epoch,
+                            current,
+                            connection_epoch,
+                        )
+                        if message.flow_id != job.flow_id:
+                            raise ProtocolViolation("Flow tool call belongs to another Flow")
+                        response = await self.tools.execute(message, worker_id=worker_id)
+                        await connection.send_text(response.model_dump_json())
                         continue
                     if isinstance(message, (Succeeded, Failed)):
-                        with self.maintenance.exchange("worker-result"):
-                            self._validate_assignment_message(
-                                message.job_id,
-                                message.assignment_token,
-                                message.connection_epoch,
-                                current,
-                                connection_epoch,
-                            )
-                            receipt = self.workers.record_assignment_result(
-                                job.id,
-                                worker_id,
-                                token,
-                                connection_epoch,
-                                message.model_dump(mode="json"),
-                                terminal_digest(message),
-                            )
-                            if receipt == "conflict":
-                                raise ProtocolViolation("result conflicts with the persisted result")
-                            if receipt == "rejected":
-                                raise ProtocolViolation("result belongs to an inactive assignment")
-                            state = await self.results.apply(job.id)
-                            applied = self.jobs.get_job(job.id)
-                            if (applied is None or applied.result_applied_at is None
-                                    or applied.state not in {JobState.DONE, JobState.FAILED}):
-                                raise ProtocolViolation("result application has not committed")
-                            await connection.send_text(
-                                ResultAccepted(
-                                    job_id=job.id,
-                                    state=state,
-                                    assignment_token=token,
-                                    connection_epoch=connection_epoch,
-                                ).model_dump_json()
-                            )
+                        self._validate_assignment_message(
+                            message.job_id,
+                            message.assignment_token,
+                            message.connection_epoch,
+                            current,
+                            connection_epoch,
+                        )
+                        receipt = self.workers.record_assignment_result(
+                            job.id,
+                            worker_id,
+                            token,
+                            connection_epoch,
+                            message.model_dump(mode="json"),
+                            terminal_digest(message),
+                        )
+                        if receipt == "conflict":
+                            raise ProtocolViolation("result conflicts with the persisted result")
+                        if receipt == "rejected":
+                            raise ProtocolViolation("result belongs to an inactive assignment")
+                        state = await self.results.apply(job.id)
+                        applied = self.jobs.get_job(job.id)
+                        if (applied is None or applied.result_applied_at is None
+                                or applied.state not in {JobState.DONE, JobState.FAILED}):
+                            raise ProtocolViolation("result application has not committed")
+                        await connection.send_text(
+                            ResultAccepted(
+                                job_id=job.id,
+                                state=state,
+                                assignment_token=token,
+                                connection_epoch=connection_epoch,
+                            ).model_dump_json()
+                        )
                         current = None
                         self.notify_jobs()
                         break
                     raise ProtocolViolation(
                         f"unexpected assignment message: {type(message).__name__}"
                     )
-        except (MaintenancePaused, ResultPending) as exc:
+        except ResultPending as exc:
             disconnect_reason = str(exc)
             # The Worker keeps its executor, pending tools and durable terminal journal.
             await socket.close(code=1013)

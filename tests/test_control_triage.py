@@ -10,7 +10,6 @@ from app.controler.runtime import ServerRuntime
 from app.controler.workflow.service import ControlService
 from app.domain.models import JobKind, TriageVerdict, Verdict
 from app.github import GitHubError, GitHubErrorKind, PullRequest
-from app.persistence.maintenance import MaintenanceStore
 from tests.github import RecordingGitHub
 from tests.review_memory import judge_decision
 from tests.test_coordinator import coordinator
@@ -25,7 +24,6 @@ def triage_runtime(store, review_flow, recording_resources):  # noqa: F811
     batch = claim(store, clock)[0]
     runtime = ServerRuntime.__new__(ServerRuntime)
     runtime.database = store.database
-    runtime.maintenance = MaintenanceStore(store.database)
     runtime.reviews = store.reviews
     runtime.coordinator = coordinator(store, RecordingGitHub())
     runtime.judge = SimpleNamespace(triage=AsyncMock(side_effect=lambda context: judge_decision(

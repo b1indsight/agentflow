@@ -15,7 +15,6 @@ from app.controler.events.router import EventRouter
 from app.controler.workflow.service import ControlService
 from app.persistence.console_sync import ConsoleSyncStore
 from app.persistence.database import Database
-from app.persistence.maintenance import MaintenanceStore
 from app.persistence.webhooks import WebhookStore
 
 
@@ -29,7 +28,6 @@ class WebhookConsumer:
         jobs_available: Callable[[], None],
     ) -> None:
         self.database = database
-        self.maintenance = MaintenanceStore(database)
         self.webhook_store = WebhookStore(database)
         self.settings = settings
         self.plugins = plugins
@@ -93,10 +91,8 @@ class WebhookConsumer:
         return handled
 
     def _cycle(self, loop: asyncio.AbstractEventLoop) -> None:
-        with self.maintenance.activity("webhooks") as admitted:
-            if admitted:
-                self.sweep(loop)
-                self.webhook_store.cleanup()
+        self.sweep(loop)
+        self.webhook_store.cleanup()
 
     async def run(self) -> None:
         while True:
