@@ -863,3 +863,23 @@ installation token 做 GitHub clone/push/PR 写入验收。PR 保持 draft；独
 - **交付边界：** 只修改专用 worker-bootstrap-delivery workspace；共享工作区及 Amp 快照
   不变。完成本次授权的一次后续独立 review 后更新原 #109，新 findings 仅报告，不自动
   继续修复。未运行真实 installation-token 写入或容器验收，不合并、不部署。
+
+### [011] — 2026-10-22 — 清理重复测试与无关准备
+
+- 用户要求“清理无意义测试”，本轮只调整 #109 的三个测试文件，不改业务代码、协议或
+  共享工作区。取消 REVISION 后 retry 的已披露 medium 不在本轮范围内，仍未修复。
+- 删除 jj 清理测试中与本地回收无关的 push/rev-parse 往返；保留两个 jj 布局下的
+  已提交内容保护、脏工作副本清理及同 Flow 再分配。目录 inode 与缓存断言集中保留在
+  真实 Git copy/worktree 双向取消回归，不在 jj 和协议重连测试中重复铺设。
+- 重连回归保留真实 PostgreSQL、gateway、client 和 journal，用可控 executor 注入清理
+  失败；移除重复的 Git pool 环境。复用现有 QueueSocket/QueueConnection，删除重复
+  传输实现、不可达返回值和重复 ACK 后断言。将 idle 参数变体缩为“已完成旧任务 +
+  准备中未派发 followup”这一代表场景。三个测试文件净减少 **45 行**，减少一个变体。
+- 验证：定向 **46 passed**；PostgreSQL 全量 **913 passed、0 skipped、96.35 秒**；
+  Ruff、Mypy（201 源文件）通过。仅保留既有 Starlette 弃用警告；产品及打包输入未变，
+  本轮不重复运行构建。新建子 change 保留上一版本快照，更新同一 #109。
+- 为确认精简没有删掉关键故障检测，临时运行时替换机制：禁用取消清理使 copy/worktree
+  **2 failed**；去掉 jj restore 使 non-colocated **1 failed**；跳过 stale-job 对账使
+  丢 ACK 重连 **1 failed**。三组均捕获预期回归；不修改产品文件，不保留临时测试。
+  日志为本地 `.amp/in/artifacts/worker-cancel-tests-trim-{targeted,pytest,static,mutations}.log`。
+  本轮无新增产品机制，无需增加复杂性消融；上述检查仅验证保留测试的故障敏感性。
