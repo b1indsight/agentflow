@@ -523,3 +523,12 @@ CLI 升级可能改变错误和输出格式，因此固定部署版本，未确�
   在隔离的 Python 导入路径下，从构建出的 wheel 导入 AmpCodingAgent、amp_process 和
   WorkerRuntime 成功，wheel 不含旧模块。证据为 `rename-ast.log`、`pytest-rename.log`、
   `ruff-rename.log`、`mypy-rename.log` 和 `build-rename.log`，位于既有证据目录。
+
+### [014] — 2026-10-22：删除容器配置文本断言
+
+- 用户要求删除 `tests/test_container_images.py`，移除两条锁定 Dockerfile、脚本和示例
+  字符串写法的测试；不增加替代静态断言。Dockerfile、部署示例及实际容器 smoke 均不变。
+- 验证：剩余 **943 tests collected**，Ruff、mypy（205 文件）和 smoke 脚本语法检查通过。
+  此轮仅删除测试，未重跑全量测试执行或实际容器 smoke；此前 945 passed 属于 [013]。
+  收集及 Ruff 日志为既有证据目录下的 `remove-container-tests-collect.log` 和
+  `remove-container-tests-ruff.log`。
