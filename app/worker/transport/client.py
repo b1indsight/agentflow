@@ -228,7 +228,7 @@ class WorkerClient:
             Register(
                 worker_id=self.worker_id,
                 recovery=self._recovery_descriptor(),
-            ).model_dump_json(exclude_none=True)
+            ).model_dump_json()
         )
         first = await self._receive_message(connection)
         self._connection_epoch = getattr(first, "connection_epoch", None)

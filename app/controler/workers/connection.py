@@ -39,16 +39,9 @@ class WorkerConnection:
     a replacement connection.
     """
 
-    def __init__(
-        self,
-        socket: WorkerSocket,
-        conversations: ConversationBroker,
-        worker_id: str,
-        epoch: str,
-    ) -> None:
+    def __init__(self, socket: WorkerSocket, conversations: ConversationBroker, worker_id: str, epoch: str) -> None:
         self.socket = socket
         self.conversations = conversations
-        self._send_lock = asyncio.Lock()
         self._messages: deque[tuple[str, int]] = deque()
         self._bytes = 0
         self._ready = asyncio.Event()
@@ -57,8 +50,7 @@ class WorkerConnection:
         self._reader = asyncio.create_task(self._receive())
 
     async def send_text(self, data: str) -> None:
-        async with self._send_lock:
-            await self.socket.send_text(data)
+        await self.socket.send_text(data)
 
     async def close(self, code: int = 1000) -> None:
         try:

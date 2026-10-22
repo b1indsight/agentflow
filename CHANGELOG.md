@@ -8,22 +8,14 @@
 
 ## Unreleased
 
-- Server 更新删除全局维护暂停、通信 activity/回执、`COMMUNICATION_IDLE` 校验和维护期间的
-  recovery grace 延长；移除 `MaintenanceStore` 及 `server_maintenance`/`server_activities`。
-  更新恢复普通业务路径，不等待 Worker 更新、任务完成或通信活动清空。
-- Webhook Server 更新保留 PostgreSQL `server_update_events`、消费者互斥、候选 Pod 预检和删列检查：
+- Webhook Server 更新使用 PostgreSQL `server_update_events`、消费者互斥、候选 Pod 预检和删列检查：
   普通预检后缩至零，等待旧 Pod 正常退出，再以固定 digest 恢复一个副本并核验 `/readyz` 与镜像身份。
-  历史已安装的维护表不自动删除，也不兼容旧 PR 的部署。
-- 删除 `agentflow-maintenance.py`；Server 工具直接复制 `update-agentflow-server.py` 和
-  `column-check.py` 两个文件，不提供替代安装器或维护服务。主机锁和 `operation.json` 保留，
-  后者仅记录未完成或完成的部署报告。
-- Worker 更新统一到 `flowtool worker update --sha SHA`：默认只校验发布，人工停止 Worker 后以
+  不暂停全局业务、不等待 Worker 更新或任务完成，沿用普通断线恢复；部署脚本直接复制到主机。
+  主机锁和 `operation.json` 防止并发或未完成操作被盲目重试；不自动备份、回滚或迁移旧 PR 部署。
+- Worker 手动更新入口 `flowtool worker update --sha SHA`：默认只校验发布，人工停止 Worker 后以
   `--apply --root RELEASE_ROOT` 准备独立的固定 SHA 环境，输出解释器路径供人工启动。
   复用原 Worker root 锁和身份校验，拒绝未确认或损坏的 journal；不覆盖旧环境和执行数据。
-  删除后台轮询、自动空闲切换、暂停接单协议、LaunchAgent 更新模板、独立安装器/launcher 和
-  `agentflow-worker-update` 入口；移除 `FLOWTOOL_WORKER_UPDATE_ROOT` / `FLOWTOOL_WORKER_UPDATE_APPLY`。
-  普通 Worker 启动、结果/停止确认与断线恢复不变；Server 更新脚本和事件消费流程不变。
-  不提供旧 PR 自动更新服务的兼容或自动迁移，也未执行目标主机安装、服务切换或真实发布验收。
+  无后台轮询、自动切换、暂停接单协议或更新专用服务；未执行目标主机安装或真实发布验收。
 
 - 会话连续同来源、同作者消息共用头像与作者栏，Worker 分组保留执行和会话归属边界，
   来源信息、正文分页与编辑差异独立保留。正文支持安全的 Markdown/GFM 渲染；原始 HTML

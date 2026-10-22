@@ -3,16 +3,16 @@
 from typing import Annotated, Literal
 
 import httpx
-from pydantic import BaseModel, Field, ValidationError
-
-from app.contracts.protocol_base import ProtocolModel
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 REPOSITORY = "b1indsight/agentflow"
 Sha = Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")]
 
 
-class ReleaseEvent(ProtocolModel):
+class ReleaseEvent(BaseModel):
     """Verified publication metadata used locally, never a Worker protocol message."""
+
+    model_config = ConfigDict(extra="forbid")
 
     version: Literal[1] = 1
     repository: Literal["b1indsight/agentflow"] = "b1indsight/agentflow"

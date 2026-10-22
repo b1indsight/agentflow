@@ -57,35 +57,29 @@ class ConsoleSynchronizer:
     async def run(self) -> None:
         while True:
             try:
-                if await self._batch():
+                claims = []
+                for _ in range(4):
+                    claim = await self.db(self.store.claim)
+                    if claim is None:
+                        break
+                    claims.append(claim)
+                if claims:
+                    tasks = [asyncio.create_task(self.sync(claim)) for claim in claims]
+                    try:
+                        await asyncio.gather(*tasks)
+                    finally:
+                        # gather propagates the first failure before siblings finish.
+                        # Do not cancel twice while db() is draining a shielded thread.
+                        for task in tasks:
+                            if not task.done() and not task.cancelling():
+                                task.cancel()
+                        await _drain(asyncio.gather(*tasks, return_exceptions=True))
                     continue
             except (DatabaseError, PoolTimeout):
                 logger.warning(
                     "console synchronization database unavailable; durable work retained"
                 )
             await asyncio.sleep(1)
-
-    async def _batch(self) -> bool:
-        """Settle all claimed sources before starting another batch."""
-        claims = []
-        for _ in range(4):
-            claim = await self.db(self.store.claim)
-            if claim is None:
-                break
-            claims.append(claim)
-        if not claims:
-            return False
-        tasks = [asyncio.create_task(self.sync(claim)) for claim in claims]
-        try:
-            await asyncio.gather(*tasks)
-        finally:
-            # gather propagates the first failure before siblings finish.
-            # Do not cancel twice while db() is draining a shielded thread.
-            for task in tasks:
-                if not task.done() and not task.cancelling():
-                    task.cancel()
-            await _drain(asyncio.gather(*tasks, return_exceptions=True))
-        return True
 
     async def sync(self, claim: SyncClaim) -> None:
         """A source failure never discards other sources or already archived contents."""

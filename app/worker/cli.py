@@ -64,13 +64,15 @@ def update(
                 record = WorkerSession(settings.worker_root).load()
                 if record is not None and not record.acknowledged:
                     raise RuntimeError("Worker journal needs ordinary recovery before updating")
-                prepared = prepare(root.expanduser().resolve(), releases.release_for_sha(sha))
+                publication = releases.release_for_sha(sha)
+                path = prepare(root.expanduser().resolve(), publication)
             finally:
                 lock.release()
             payload = {
                 "state": "prepared",
-                **prepared.model_dump(mode="json"),
-                "python": str(prepared.path / ".venv/bin/python"),
+                "release": publication.model_dump(mode="json"),
+                "path": str(path),
+                "python": str(path / ".venv/bin/python"),
             }
         typer.echo(json.dumps(payload, sort_keys=True))
     except RuntimeError as error:

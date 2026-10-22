@@ -273,9 +273,9 @@ M3 F3 及审查修复本地验证（2026-09-08）：真实 PostgreSQL 下 **502 
 当前仅支持 wire protocol **v13**、worker journal **v3** 与当前完整 PostgreSQL schema。
 仓库尚未部署，不提供旧版本数据库、任务、结果或 journal 的迁移；首次运行使用新数据库/schema
 和新 worker root。Server 部署不以所有 Worker 更新为前提；Worker 连接仍按实际 protocol 和
-认证结果处理，不匹配直接拒绝。已接入的 macOS 原生 Worker 只在其自身 opt-in 更新流程完成
-两端确认后切换；Linux Worker 自动更新延期。同版本重启仍保留冻结任务、结果摘要、effect ledger
-与 journal 恢复能力。
+认证结果处理，不匹配直接拒绝。原生 Worker 通过 `flowtool worker update` 手动准备新版本，
+由操作者正常停止旧进程后显式启动；没有自动更新或切换握手。同版本重启仍保留冻结任务、
+结果摘要、effect ledger 与 journal 恢复能力。
 
 新 journal 在任务 ACK 后保留上一任务的 Flow 和 root 归属，成功归档 ACK 后才移除。不要更换
 `FLOWTOOL_WORKER_ROOT`、复制 journal 到其他 root 或复用 worker ID 接管工作区。清理仅删除

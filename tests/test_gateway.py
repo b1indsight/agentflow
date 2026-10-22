@@ -83,12 +83,7 @@ class RecordingStore(RepositoryViews, Store):
     ) -> None:
         self.presence[worker_id] = "offline"
 
-    def assign_job(
-        self,
-        worker_id: str,
-        token: str,
-        connection_epoch: str = "",
-    ) -> Job | None:
+    def assign_job(self, worker_id: str, token: str, connection_epoch: str = "") -> Job | None:
         if self.job.state is not JobState.QUEUED:
             return None
         self.job.state = JobState.RUNNING

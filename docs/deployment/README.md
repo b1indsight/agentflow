@@ -12,7 +12,7 @@
 ## 1. 准备运行环境
 
 准备 Python 3.12+、uv、PostgreSQL，以及 worker 账号可运行且已配置认证的 Codex CLI、Git
-和所需项目工具链。若项目使用 jj，还需安装 jj。Worker 更新为独立的 opt-in 流程；Server 部署不
+和所需项目工具链。若项目使用 jj，还需安装 jj。Worker 通过独立的手动流程更新；Server 部署不
 等待所有 Worker 升级，但连接中的 Worker 仍须通过现有协议和身份鉴权。
 
 在 control 账号的应用检出目录执行：

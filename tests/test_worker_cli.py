@@ -14,7 +14,6 @@ from app.worker import config
 from app.worker.runtime import WorkerRootLock
 from app.worker.state.session import WorkerSession
 from app.worker.updates import release
-from app.worker.updates.state import PreparedRelease
 from tests.test_worker_session import _assignment
 
 SHA = "2" * 40
@@ -99,7 +98,7 @@ def test_manual_apply_prepares_under_root_lock_and_preserves_journal(
         session.acknowledge(assignment.job_id, JobState.FAILED)
     before = session.path.read_bytes() if session.path.exists() else None
     destination = tmp_path / "updates"
-    prepared = PreparedRelease(release=publication, path=destination / "releases" / SHA)
+    prepared = destination / "releases" / SHA
 
     def prepare(root, event):
         assert root == destination and event == publication
@@ -115,8 +114,9 @@ def test_manual_apply_prepares_under_root_lock_and_preserves_journal(
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout) == {
         "state": "prepared",
-        **prepared.model_dump(mode="json"),
-        "python": str(prepared.path / ".venv/bin/python"),
+        "release": publication.model_dump(mode="json"),
+        "path": str(prepared),
+        "python": str(prepared / ".venv/bin/python"),
     }
     assert (session.path.read_bytes() if session.path.exists() else None) == before
     lock = WorkerRootLock(worker_root, "worker-1")

@@ -725,3 +725,23 @@ Worker CLI help 和 build stamp，同时检查没有启动指针、launcher 或�
 证据：本地未跟踪的 `.amp/in/artifacts/worker-manual-cli-full-tcp.log`、
 `worker-manual-cli-installed.log`；首次 Unix socket 结果为 `worker-manual-cli-full.log`。
 本次修改保存在基于 #104 head 的本地隔离 workspace，未提交、推送、部署或重启真实服务。
+
+### 2026-10-22 — 用户修订：删除 PR 中的无关改动与废弃更新残留
+
+保留 Server 镜像更新、Worker 手动 CLI 和 Server 重启所需的工具调用重放修复。撤回 Console
+批处理抽取、Gateway 派发重排、原暂停确认所需的发送锁，以及 WorkerStore 和测试的纯格式改动。
+删除已无更新协议扩展使用的 `protocol_base.py`，原协议定义回到原文件；本地发布元数据直接
+使用严格 Pydantic 模型，不依赖 Worker wire 协议。
+
+删除无人读取的 `complete.json`、`PreparedRelease` 和 `updates/state.py` 原子状态写入层。
+准备过程仍在独立目录写入并核验实际安装包的版本标记，成功后直接返回路径，CLI JSON 不变。
+同步清除 README/部署指南中的自动切换说明，并精简 changelog；历史计划记录保留。
+本次仅删除和还原，没有新增机制或永久测试，不需要消融。
+
+验证：真实 PostgreSQL 下全量 **904 passed、零跳过**，仅既有 Starlette 弃用警告；Ruff、四个
+修改文件格式检查、`mypy app scripts/server_update`（118 files）及离线 lockfile 检查通过。
+实际离线非 editable 安装与安装后 CLI help/版本标记验证通过，JSON、journal 字节和 root 锁
+保持原有约束，未生成完成标记；发布元数据与远程 Git 导出使用替身，未启动或更新真实服务。
+证据：本地 `.amp/in/artifacts/pr104-cleanup-{pytest,static,installed}.log`。
+清理保存在独立的 `pr104-cleanup` workspace，按用户要求作本地提交；尚未推送到 #104，
+未处理其既有合并冲突。

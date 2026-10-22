@@ -39,8 +39,8 @@ Controller，也不修改本地启动方式。无效 SHA 在查询前拒绝。
 未确认记录时拒绝准备。待确认记录必须先用原版本走普通恢复流程，不能清空后重试。
 
 通过检查后，在 `--root/releases/<SHA>-<随机标识>/` 下载固定 SHA 的源码，按 lockfile 建立
-non-editable `.venv`，核验实际导入的版本，最后写 `complete.json`。准备期间始终持有原 Worker
-root 锁；不覆盖旧环境，不复制 journal 或认证，也不创建新的私密环境文件。
+non-editable `.venv`，核验实际导入的版本后输出准备结果；不另存更新状态或完成标记。
+准备期间始终持有原 Worker root 锁；不覆盖旧环境，不复制 journal 或认证，也不创建新的私密环境文件。
 
 ## 人工启动新版本
 

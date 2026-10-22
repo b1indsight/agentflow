@@ -127,12 +127,7 @@ class WorkerGateway:
             register = parse_worker_message(await socket.receive_text())
             if not isinstance(register, Register) or register.worker_id != worker_id:
                 raise ProtocolViolation("worker registration does not match authenticated identity")
-            connection = WorkerConnection(
-                socket,
-                self.conversations,
-                worker_id,
-                connection_epoch,
-            )
+            connection = WorkerConnection(socket, self.conversations, worker_id, connection_epoch)
             wake = await self._register_session(worker_id, connection)
             registered_session = True
             worker = self.workers.worker_connected(
@@ -182,52 +177,46 @@ class WorkerGateway:
                     if stop is not None:
                         await self._stop_worker(connection, worker_id, connection_epoch, stop)
                     token = uuid4().hex
-                    job = self.workers.assign_job(
-                        worker_id, token, connection_epoch
-                    )
-                    if job is not None:
-                        prepared = await self._prepare_assignment(job, worker_id, token, connection_epoch)
-                        if isinstance(prepared, JobState):
-                            if prepared is JobState.QUEUED:
-                                self.workers.requeue_assignment(job.id, worker_id, token, connection_epoch)
-                            else:
-                                self.workers.finish_assignment(
-                                    job.id, worker_id, token, prepared, connection_epoch,
-                                )
-                            self.notify_jobs()
-                            continue
-                        if not self.stops.authorize_dispatch(
-                            job.id, worker_id, token, connection_epoch
-                        ):
-                            raise ProtocolViolation("assignment changed before dispatch authorization")
-                        current = (job, token, prepared.task)
-                        await connection.send_text(prepared.model_dump_json())
-
-                        first = await self._receive(connection)
-                        if not isinstance(first, Started):
-                            raise ProtocolViolation("assignment must be acknowledged with Started")
-                        self._validate_assignment_message(
-                            first.job_id,
-                            first.assignment_token,
-                            first.connection_epoch,
-                            current,
-                            connection_epoch,
-                        )
-                        if not self.workers.start_assignment(
-                            job.id,
-                            prepared.task.attempt_id,
-                            worker_id,
-                            token,
-                            connection_epoch,
-                        ):
-                            raise ProtocolViolation("assignment is no longer active")
-                        self.coordinator.mark_started(job, prepared.task, worker_id)
+                    job = self.workers.assign_job(worker_id, token, connection_epoch)
                     if job is None:
                         await self._wait_while_idle(connection, wake)
                         continue
+                    prepared = await self._prepare_assignment(job, worker_id, token, connection_epoch)
+                    if isinstance(prepared, JobState):
+                        if prepared is JobState.QUEUED:
+                            self.workers.requeue_assignment(job.id, worker_id, token, connection_epoch)
+                        else:
+                            self.workers.finish_assignment(
+                                job.id, worker_id, token, prepared, connection_epoch,
+                            )
+                        self.notify_jobs()
+                        continue
+                    if not self.stops.authorize_dispatch(job.id, worker_id, token, connection_epoch):
+                        raise ProtocolViolation("assignment changed before dispatch authorization")
+                    current = (job, token, prepared.task)
+                    await connection.send_text(prepared.model_dump_json())
+
+                    first = await self._receive(connection)
+                    if not isinstance(first, Started):
+                        raise ProtocolViolation("assignment must be acknowledged with Started")
+                    self._validate_assignment_message(
+                        first.job_id,
+                        first.assignment_token,
+                        first.connection_epoch,
+                        current,
+                        connection_epoch,
+                    )
+                    if not self.workers.start_assignment(
+                        job.id,
+                        prepared.task.attempt_id,
+                        worker_id,
+                        token,
+                        connection_epoch,
+                    ):
+                        raise ProtocolViolation("assignment is no longer active")
+                    self.coordinator.mark_started(job, prepared.task, worker_id)
 
                 while True:
-                    assert current is not None
                     job, token, _ = current
                     stop = self.stops.pending(worker_id)
                     if stop is not None:
@@ -302,7 +291,7 @@ class WorkerGateway:
                     )
         except ResultPending as exc:
             disconnect_reason = str(exc)
-            # The Worker keeps its executor, pending tools and durable terminal journal.
+            # The worker retains its journal and reconnects; recovery owns the accepted result.
             await socket.close(code=1013)
         except (WebSocketDisconnect, ConnectionError, TimeoutError) as exc:
             disconnect_reason = str(exc) or type(exc).__name__

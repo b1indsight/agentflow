@@ -174,12 +174,7 @@ class WorkerStore(Repository):
         ):
             return cursor.execute("SELECT * FROM workers ORDER BY worker_id").fetchall()
 
-    def assign_job(
-        self,
-        worker_id: str,
-        token: str,
-        connection_epoch: str = "",
-    ) -> Job | None:
+    def assign_job(self, worker_id: str, token: str, connection_epoch: str = "") -> Job | None:
         """Claim work while retaining a Flow's worker slot between individual jobs."""
 
         now = self._db.now()

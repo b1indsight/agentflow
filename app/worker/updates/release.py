@@ -9,7 +9,6 @@ from pathlib import Path
 from uuid import uuid4
 
 from app.releases import ReleaseError, ReleaseEvent, verify_release
-from app.worker.updates.state import PreparedRelease, write_json
 
 
 def running_sha() -> str | None:
@@ -20,8 +19,8 @@ def running_sha() -> str | None:
     return ReleaseEvent.model_validate_json(marker.read_bytes()).sha
 
 
-def prepare(root: Path, release: ReleaseEvent) -> PreparedRelease:
-    """Verify, export the exact commit, lock dependencies, probe, and mark complete last.
+def prepare(root: Path, release: ReleaseEvent) -> Path:
+    """Verify, export the exact commit, lock dependencies, and return its probed path.
 
     Venv entrypoints contain absolute paths, so this unique directory is never moved.
     Failed/incomplete directories are retained for inspection and never reused.
@@ -69,7 +68,7 @@ def prepare(root: Path, release: ReleaseEvent) -> PreparedRelease:
         raise ReleaseError("fetched source does not match the verified release")
     with tarfile.open(fileobj=io.BytesIO(run([*git, "archive", release.sha]))) as archive:
         archive.extractall(path, filter="data")
-    write_json(path / "app/worker/_release.json", release.model_dump(mode="json"))
+    (path / "app/worker/_release.json").write_text(release.model_dump_json(), encoding="utf-8")
     run(
         [
             "uv",
@@ -96,6 +95,4 @@ def prepare(root: Path, release: ReleaseEvent) -> PreparedRelease:
     )
     if probe.decode().strip() != release.sha:
         raise ReleaseError("candidate interpreter did not import the expected installed release")
-    prepared = PreparedRelease(release=release, path=path)
-    write_json(path / "complete.json", prepared.model_dump(mode="json"))
-    return prepared
+    return path
