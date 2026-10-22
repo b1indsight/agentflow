@@ -1,52 +1,46 @@
-"""Exercise cooperative cutover against real journals and PostgreSQL fences."""
+"""The updater drains the ordinary protocol and the next process registers normally."""
 
 import asyncio
 import json
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
+from websockets.exceptions import ConnectionClosedError
 
 from app.contracts.protocol import (
+    AvailabilityAccepted,
     ExecutionStopped,
     Failed,
     Heartbeat,
+    InitialTaskResult,
     Register,
-    Registered,
+    ResultAccepted,
     StopAccepted,
     parse_worker_message,
 )
-from app.contracts.updates import MaintenanceReply
-from app.controler.workers.connection import WorkerConnection
-from app.controler.workers.conversation import ConversationBroker
-from app.controler.workers.updates import WorkerUpdateSession
 from app.domain.models import JobState
-from app.persistence.maintenance import MaintenanceStore
-from app.releases import ReleaseError
+from app.releases import ReleaseEvent
 from app.worker.state.session import WorkerSession
 from app.worker.transport.client import WorkerClient
 from app.worker.updates import coordinator
-from app.worker.updates.channel import UpdateChannel
 from app.worker.updates.coordinator import UpdateCoordinator
-from app.worker.updates.state import PreparedRelease, UpdateOperation, write_json
-from tests.test_maintenance import idle_binding
-from tests.test_worker_connection import Socket as ServerSocket
+from app.worker.updates.state import PreparedRelease, write_json
+from tests.test_controller_update_boundary import DuplexSocket, scenario
 from tests.test_worker_session import _assignment
-from tests.test_worker_updates import request
 
 
-def local_client(path, channel):
+def local_client(path, executor=None):
     return WorkerClient(
         worker_id="w",
         worker_token="test",
-        serve_ws_url="wss://example.test/worker",
-        executor=Mock(),
+        serve_ws_url="ws://unused",
+        executor=executor or Mock(),
         session=WorkerSession(path),
-        updates=channel,
     )
 
 
-def test_local_idle_requires_result_and_stop_ack_even_without_executor(tmp_path):
-    client = local_client(tmp_path, UpdateChannel())
+def test_local_idle_requires_durable_result_and_stop_ack_without_in_memory_assignment(tmp_path):
+    client = local_client(tmp_path)
     assignment = _assignment()
     client.session.record_received(assignment)
     record = client.session.record_started()
@@ -58,8 +52,7 @@ def test_local_idle_requires_result_and_stop_ack_even_without_executor(tmp_path)
             error="test",
         )
     )
-    assert not client.idle_for_update()
-    client.session.assignment = None  # A transport reconnect can have no in-memory assignment.
+    client.session.assignment = None  # An interrupted transport can have only the journal.
     assert not client.idle_for_update()
     client.session.acknowledge(assignment.job_id, JobState.FAILED)
     assert client.idle_for_update() and client.session.path.exists()
@@ -79,191 +72,212 @@ def test_local_idle_requires_result_and_stop_ack_even_without_executor(tmp_path)
     assert client.idle_for_update()
 
 
-@pytest.mark.parametrize("failure", ["", "prepare", "commit-reply", "pointer", "resume-reply"])
-async def test_cutover_orders_pause_intent_pointer_and_new_instance_confirmation(
-    store, tmp_path, monkeypatch, failure
-):
-    idle_binding(store)
-    updates = WorkerUpdateSession(store.workers, "w", "epoch")
+@pytest.fixture
+def prepared_update(tmp_path, monkeypatch):
     root = tmp_path / "update"
-    root.mkdir()
-    target = PreparedRelease(release=request().release, path=root / "releases/new")
-    write_json(root / "current.json", {"old": True})
-    stopped = Mock()
-    actions = []
-
-    class Channel(UpdateChannel):
-        async def request(self, message):
-            actions.append(message.action)
-            operation = UpdateOperation.model_validate_json((root / "operation.json").read_bytes())
-            assert operation.phase == ("cutover" if message.action == "commit" else "paused")
-            reply = updates.handle(message)
-            if failure == "commit-reply" and message.action == "commit":
-                raise ConnectionError("lost commit response")
-            return reply
-
-    channel = Channel()
-    channel.epoch = "epoch"
-    worker_root = tmp_path / "worker"
-    worker_root.mkdir()
-    client = local_client(worker_root, channel)
-    update = UpdateCoordinator(root, client, channel, apply=True, stop=stopped)
-    monkeypatch.setattr(coordinator, "running_sha", lambda: "1" * 40)
-    monkeypatch.setattr(UpdateCoordinator, "_managed", lambda *args: True)
+    old = PreparedRelease(
+        release=ReleaseEvent(run_id=1, attempt=1, run_number=1, sha="1" * 40),
+        path=root / "releases/old",
+    )
+    target = PreparedRelease(
+        release=ReleaseEvent(run_id=2, attempt=1, run_number=2, sha="2" * 40),
+        path=root / "releases/new",
+    )
+    write_json(root / "current.json", old.model_dump(mode="json"))
+    monkeypatch.setattr(coordinator, "prepare", lambda *args: target)
+    monkeypatch.setattr(coordinator, "running_sha", lambda: old.release.sha)
     monkeypatch.setattr(coordinator, "verify_release", lambda event: event)
     monkeypatch.setattr(coordinator, "validate_prepared", lambda *args: None)
+    monkeypatch.setattr(UpdateCoordinator, "_managed", lambda self: True)
+    return root, old, target
 
-    def prepare(*args):
-        if failure == "prepare":
-            raise ReleaseError("bad build")
-        return target
 
-    monkeypatch.setattr(coordinator, "prepare", prepare)
-    real_write = coordinator.write_json
+@pytest.mark.parametrize("ack", [ResultAccepted, StopAccepted])
+async def test_update_waits_for_execution_ack_then_next_process_registers_normally(
+    store,
+    tmp_path,
+    prepared_update,
+    ack,
+):
+    # Pause while execution is active, then withhold its terminal/stop ACK. The
+    # process cannot exit just because the executor has finished or was cancelled.
+    root, old, target = prepared_update
+    case = scenario(store)
+    gateway = case.gateway()
+    finish = asyncio.Event()
 
-    def write(path, value):
-        if path.name == "current.json":
-            assert actions[-1] == "commit"
-            assert not stopped.called
-            if failure == "pointer":
-                raise OSError("disk full")
-        return real_write(path, value)
+    async def execute(*args, **kwargs):
+        await finish.wait()
+        return InitialTaskResult(session_id="session", last_message="done", exit_code=0)
 
-    monkeypatch.setattr(coordinator, "write_json", write)
-    if failure and failure != "resume-reply":
-        with pytest.raises((ConnectionError, OSError, ReleaseError)):
-            await update.update(target.release, apply=True)
-        assert not stopped.called
-        assert json.loads((root / "current.json").read_text()) == {"old": True}
-        if failure == "prepare":
-            assert not actions and not update.operation_path.exists()
-        else:
-            assert (
-                UpdateOperation.model_validate_json(update.operation_path.read_bytes()).phase
-                == "cutover"
+    class RecordingSocket(DuplexSocket):
+        def __init__(self, blocked=None):
+            super().__init__(blocked)
+            self.registration = None
+
+        async def send(self, raw):
+            message = parse_worker_message(raw)
+            if isinstance(message, Register):
+                self.registration = json.loads(raw)
+            await super().send(raw)
+
+    client = local_client(tmp_path / "worker", Mock(execute=AsyncMock(side_effect=execute)))
+    socket = RecordingSocket(ack)
+    stopped = Mock()
+    updater = UpdateCoordinator(root, client, apply=True, stop=stopped)
+    tasks = [
+        asyncio.create_task(gateway.handle(socket)),
+        asyncio.create_task(client.run_connection(socket)),
+    ]
+    try:
+        await asyncio.wait_for(case.started.wait(), 2)
+        update = asyncio.create_task(updater.update(target.release, apply=True))
+        tasks.append(update)
+        async with asyncio.timeout(2):
+            while not gateway._sessions["w"][1].dispatch_paused:
+                await asyncio.sleep(0)
+        if ack is StopAccepted:
+            with store.transaction() as tx:
+                tx.lock_workflow(case.job.flow_id)
+                tx.stops.request(case.job.flow_id)
+            assignment = client.session.assignment
+            await socket.send(
+                Heartbeat(
+                    job_id=assignment.job_id,
+                    assignment_token=assignment.assignment_token,
+                    connection_epoch=assignment.connection_epoch,
+                ).model_dump_json()
             )
-            assert actions == ["pause", "commit"]  # No automatic abort/rollback after intent.
-        return
-    await update.update(target.release, apply=True)
-    assert stopped.call_count == 1
-    assert actions == ["pause", "commit"]
-    assert PreparedRelease.model_validate_json((root / "current.json").read_bytes()) == target
-    operation = UpdateOperation.model_validate_json(update.operation_path.read_bytes())
-    store.workers.worker_connected("w", 13, "new-epoch")
-    channel.epoch = "new-epoch"
-    new = UpdateCoordinator(root, client, channel, apply=True, stop=Mock())
-    monkeypatch.setattr(coordinator, "running_sha", lambda: target.release.sha)
-    write_json(root / "launch.json", {"operation": operation.operation_id})
-    updates = WorkerUpdateSession(store.workers, "w", "new-epoch", channel.pending)
-    resumed = False
+        else:
+            finish.set()
+        await asyncio.wait_for(socket.entered.wait(), 2)
+        assert not client.idle_for_update() and not stopped.called
+        assert PreparedRelease.model_validate_json((root / "current.json").read_bytes()) == old
+        socket.release.set()
+        await asyncio.wait_for(update, 3)
+        assert stopped.call_count == 1 and client.idle_for_update()
+        assert PreparedRelease.model_validate_json((root / "current.json").read_bytes()) == target
+        assert not (root / "operation.json").exists()
 
-    async def resume(message):
-        nonlocal resumed
-        assert message.instance_id != operation.source_instance
-        phase = UpdateOperation.model_validate_json(update.operation_path.read_bytes()).phase
-        if message.action == "resume":
-            assert phase == "cutover" and updates.paused
-            reply = updates.handle(message)
-            assert updates.paused  # No new assignment before completion is durable locally.
-            if failure == "resume-reply" and not resumed:
-                resumed = True
-                raise ConnectionError("lost resume response")
-            return reply
-        assert message.action == "ready" and phase == "complete"
-        return updates.handle(message)
-
-    monkeypatch.setattr(channel, "request", resume)
-    await asyncio.wait_for(new._finish(operation), 3)
-    assert (
-        UpdateOperation.model_validate_json(update.operation_path.read_bytes()).phase == "complete"
-    )
-    assert not updates.paused
+        new = RecordingSocket()
+        replacement = local_client(tmp_path / "worker")
+        tasks.extend(
+            [
+                asyncio.create_task(gateway.handle(new)),
+                asyncio.create_task(replacement.run_connection(new)),
+            ]
+        )
+        async with asyncio.timeout(2):
+            while replacement.availability.epoch is None:
+                await asyncio.sleep(0)
+        assert new.registration.keys() <= {"type", "protocol_version", "worker_id", "recovery"}
+        assert not gateway._sessions["w"][1].dispatch_paused
+        assert client.availability.epoch != replacement.availability.epoch
+        replacement.executor.execute.assert_not_called()
+    finally:
+        socket.release.set()
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await client._cancel_execution()
 
 
-async def test_check_only_does_not_pause_or_change_pointer(tmp_path, monkeypatch):
-    channel = UpdateChannel()
-    client = local_client(tmp_path, channel)
-    update = UpdateCoordinator(tmp_path, client, channel, apply=False, stop=Mock())
-    target = PreparedRelease(release=request().release, path=tmp_path / "releases/new")
-    monkeypatch.setattr(coordinator, "prepare", lambda *args: target)
-    await update.update(target.release, apply=False)
-    assert not update.operation_path.exists() and not (tmp_path / "current.json").exists()
-    assert json.loads((tmp_path / "status.json").read_text())["state"] == "checked"
-
-
-async def test_update_replies_are_connection_scoped_without_a_second_reader():
-    channel = UpdateChannel()
-    sent = asyncio.Queue()
+@pytest.mark.parametrize("reconnect_at", ["pause", "closed-send", "verification"])
+async def test_connection_change_requires_a_new_pause_before_switch(
+    tmp_path,
+    prepared_update,
+    monkeypatch,
+    reconnect_at,
+):
+    root, _, target = prepared_update
+    client = local_client(tmp_path)
+    channel = client.availability
+    attempted = asyncio.Queue()
 
     class Socket:
-        async def send(self, data):
-            await sent.put(data)
+        async def send(self, raw):
+            message = parse_worker_message(raw)
+            await attempted.put(message)
+            if message.connection_epoch == "old" and reconnect_at == "closed-send":
+                # The send can observe a closed WebSocket before its reader has
+                # cleared the old epoch; the updater must wait for normal reconnect.
+                asyncio.get_running_loop().call_soon(channel.connect, self, "new")
+                raise ConnectionClosedError(None, None)
+            if message.connection_epoch == "old" and reconnect_at == "pause":
+                channel.disconnect()
+                channel.connect(self, "new")
+                return
+            channel.accept(AvailabilityAccepted(**message.model_dump(exclude={"type"})))
+
+    socket = Socket()
+    channel.connect(socket, "old")
+    if reconnect_at == "verification":
+        real_thread = asyncio.to_thread
+
+        async def thread(function, *args):
+            if function is coordinator.verify_release and channel.epoch == "old":
+                channel.disconnect()
+                channel.connect(socket, "new")
+            return await real_thread(function, *args)
+
+        monkeypatch.setattr(asyncio, "to_thread", thread)
+    stopped = Mock()
+    await UpdateCoordinator(root, client, apply=True, stop=stopped).update(
+        target.release, apply=True
+    )
+    assert [(await attempted.get()).connection_epoch for _ in range(attempted.qsize())] == [
+        "old",
+        "new",
+    ]
+    stopped.assert_called_once()
+
+
+@pytest.mark.parametrize("lose_resume", [False, True])
+async def test_lost_pause_ack_resumes_or_closes_instead_of_leaving_worker_paused(
+    tmp_path,
+    prepared_update,
+    monkeypatch,
+    lose_resume,
+):
+    root, old, target = prepared_update
+    client = local_client(tmp_path)
+    channel = client.availability
+    sent = []
+    close = AsyncMock()
+    timeout = asyncio.timeout
+
+    monkeypatch.setattr(
+        asyncio, "timeout", lambda seconds: timeout(0.01 if seconds == 15 else seconds)
+    )
+
+    class Socket:
+        async def send(self, raw):
+            message = parse_worker_message(raw)
+            sent.append(message.paused)
+            if not message.paused and not lose_resume:
+                channel.accept(AvailabilityAccepted(**message.model_dump(exclude={"type"})))
+
+        async def close(self):
+            await close()
 
     channel.connect(Socket(), "epoch")
-    message = request()
-    pending = asyncio.create_task(channel.request(message))
-    await sent.get()
-    reply = MaintenanceReply(
-        request_id=message.request_id,
-        operation_id=message.operation_id,
-        connection_epoch="old-epoch",
-        accepted=True,
-        idle=True,
+    stopped = Mock()
+    with pytest.raises(TimeoutError):
+        await UpdateCoordinator(root, client, apply=True, stop=stopped).update(
+            target.release, apply=True
+        )
+    assert sent == [True, False] and not stopped.called
+    assert close.await_count == int(lose_resume)
+    assert PreparedRelease.model_validate_json((root / "current.json").read_bytes()) == old
+
+
+async def test_check_only_prepares_without_pausing_or_changing_pointer(tmp_path, prepared_update):
+    root, old, target = prepared_update
+    client = local_client(tmp_path)
+    stopped = Mock()
+    await UpdateCoordinator(root, client, apply=False, stop=stopped).update(
+        target.release, apply=False
     )
-    channel.accept(reply)
-    assert not pending.done()
-    channel.disconnect()
-    with pytest.raises(ConnectionError):
-        await pending
-
-
-async def test_maintenance_and_reconnect_intent_share_the_execution_stream(store, tmp_path):
-    # Exercise both production parsers/readers and restore intent before dispatch.
-    idle_binding(store)
-    socket = ServerSocket()
-    channel = UpdateChannel()
-    channel.pending = request()
-    client = local_client(tmp_path, channel)
-
-    class WorkerSocket:
-        async def send(self, raw):
-            await socket.incoming.put(raw)
-
-        async def recv(self):
-            return (await socket.sent.get()).model_dump_json()
-
-    transport = WorkerSocket()
-    task = asyncio.create_task(client.run_connection(transport))
-    connection = None
-    try:
-        registration = parse_worker_message(await asyncio.wait_for(socket.incoming.get(), 1))
-        assert isinstance(registration, Register) and registration.update_version == 1
-        assert registration.update_pending == request()
-        updates = WorkerUpdateSession(store.workers, "w", "epoch", registration.update_pending)
-        connection = WorkerConnection(
-            socket,
-            ConversationBroker(),
-            "w",
-            "epoch",
-            updates,
-            maintenance=MaintenanceStore(store.database),
-        )
-        await connection.send_text(
-            Registered(connection_epoch="epoch", heartbeat_interval=60).model_dump_json()
-        )
-        async with asyncio.timeout(1):
-            while not client.connected:
-                await asyncio.sleep(0)
-        heartbeat = Heartbeat(
-            job_id=1, assignment_token="token", connection_epoch="epoch"
-        ).model_dump_json()
-        await transport.send(heartbeat)
-        reply = await asyncio.wait_for(channel.request(request()), 1)
-        assert reply.accepted and reply.idle
-        assert await asyncio.wait_for(connection.receive_text(), 1) == heartbeat
-        assert client.connected and not task.done()
-    finally:
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
-        if connection is not None:
-            await connection.stop()
+    assert PreparedRelease.model_validate_json((root / "current.json").read_bytes()) == old
+    assert json.loads((root / "status.json").read_bytes())["state"] == "checked"
+    assert not stopped.called and client.availability.epoch is None

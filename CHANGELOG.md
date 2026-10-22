@@ -22,12 +22,16 @@
   仅渲染 plist，`--apply` 仅准备 immutable release/launcher 而不调用 `launchctl`。更新保留
   Worker ID、root、HOME、journal 和模型认证，私有环境 JSON 要求 0600；本地 check/apply 只能由
   当前 runtime 协调。每个受管 Worker 每 300 秒自行核验 GitHub Images 发布；本地
-  `operation.json` 与 connection-scoped pause/commit/resume/ready 握手拥有 cutover，重连时
-  `Register.update_pending` 恢复 fencing。该修订取代早先的 SQLite Worker 队列、host notifier、
-  kubectl 发布器和 `worker_releases`/`worker_updates` 持久化方案：Server 事件只使用 PostgreSQL
-  `server_update_events`，不保存 Worker 状态。Worker 更新不阻塞 Server 部署，也没有独立于普通
-  binding-recovery grace 的持久豁免；Linux Worker 自动更新仍延期。尚未执行真实主机安装、
-  GitHub 发布、launchd 或服务更新验收。
+  `WorkerAvailability(paused, request_id, connection_epoch)` / `AvailabilityAccepted` 通用暂停
+  接单。Server 只在当前连接内存保存 `dispatch_paused`，不写数据库、不改变 busy；心跳、工具、
+  结果 ACK 与停止请求继续处理，其他 Worker 正常调度。Worker 在本地执行及结果/停止 ACK 收齐后
+  核验 epoch、空闲和运行归属，写入 `current.json` 并正常退出；新进程仅走既有 Register/断线重连。
+  失败时确认解除暂停，解除确认失败则关闭连接并按普通重连恢复默认接单。该修订取代
+  `WorkerMaintenance`、升级身份/Register 字段、`operation.json`、启动授权及
+  pause/commit/resume/ready/cutover 协议；`ReleaseEvent` 仅保留下载核验元数据，不经 WSS 交换
+  发布身份。Server 事件仍只使用 PostgreSQL `server_update_events`，不保存 Worker 状态；Worker
+  更新不阻塞 Server 部署，Linux 自动更新仍延期。真实主机安装、GitHub 发布、launchd 或服务更新
+  验收未在本文档变更中声明完成。
 
 - 会话连续同来源、同作者消息共用头像与作者栏，Worker 分组保留执行和会话归属边界，
   来源信息、正文分页与编辑差异独立保留。正文支持安全的 Markdown/GFM 渲染；原始 HTML

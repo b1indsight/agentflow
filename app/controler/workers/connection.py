@@ -9,10 +9,8 @@ from typing import Protocol
 
 from fastapi import WebSocketDisconnect
 
-from app.contracts.protocol import parse_worker_message
-from app.contracts.updates import WorkerMaintenance
+from app.contracts.protocol import AvailabilityAccepted, WorkerAvailability, parse_worker_message
 from app.controler.workers.conversation import ConversationBroker
-from app.controler.workers.updates import WorkerUpdateSession
 from app.persistence.maintenance import MaintenanceStore
 
 
@@ -48,14 +46,13 @@ class WorkerConnection:
         conversations: ConversationBroker,
         worker_id: str,
         epoch: str,
-        updates: WorkerUpdateSession | None = None,
         *,
         maintenance: MaintenanceStore,
         notify_jobs: Callable[[], None] | None = None,
     ) -> None:
         self.socket = socket
         self.conversations = conversations
-        self.updates = updates
+        self.dispatch_paused = False
         self.notify_jobs = notify_jobs
         self.maintenance = maintenance
         self.worker_id, self.epoch = worker_id, epoch
@@ -103,11 +100,16 @@ class WorkerConnection:
                 message = parse_worker_message(raw)
                 if self.conversations.accept(self, message):
                     continue
-                if isinstance(message, WorkerMaintenance):
-                    if self.updates is None:
-                        raise ProtocolViolation("worker did not negotiate updates")
-                    with self.maintenance.exchange("worker-maintenance"):
-                        reply = self.updates.handle(message)
+                if isinstance(message, WorkerAvailability):
+                    if message.connection_epoch != self.epoch:
+                        raise ProtocolViolation("availability belongs to another connection")
+                    with self.maintenance.exchange("worker-availability"):
+                        self.dispatch_paused = message.paused
+                        reply = AvailabilityAccepted(
+                            request_id=message.request_id,
+                            connection_epoch=self.epoch,
+                            paused=self.dispatch_paused,
+                        )
                         await self.send_text(reply.model_dump_json())
                     if self.notify_jobs is not None:
                         self.notify_jobs()

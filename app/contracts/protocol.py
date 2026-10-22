@@ -19,7 +19,6 @@ from pydantic import (
 from app.contracts import protocol_base
 from app.contracts.conversation import ConversationError, HistoryPage
 from app.contracts.protocol_base import Message, ProtocolModel
-from app.contracts.updates import MaintenanceReply, WorkerMaintenance
 from app.domain.context_models import ReviewContext
 from app.domain.delivery_models import DeliveryReceipt
 from app.domain.models import FeedbackRef, JobState, RevisionCodingOutput, VcsKind
@@ -199,8 +198,22 @@ class Register(Message):
     type: Literal["register"] = "register"
     worker_id: str
     recovery: RecoveryDescriptor | None = None
-    update_version: Literal[1] | None = None
-    update_pending: WorkerMaintenance | None = None
+
+
+class WorkerAvailability(Message):
+    """Pause only new assignments on this authenticated connection."""
+
+    type: Literal["worker_availability"] = "worker_availability"
+    request_id: str = Field(min_length=1, max_length=64)
+    connection_epoch: str = Field(min_length=1, max_length=64)
+    paused: bool
+
+
+class AvailabilityAccepted(Message):
+    type: Literal["availability_accepted"] = "availability_accepted"
+    request_id: str
+    connection_epoch: str
+    paused: bool
 
 
 class Started(Message):
@@ -271,7 +284,15 @@ class StopAccepted(StopFence):
 
 
 WorkerMessage = Annotated[
-    Register | Started | Heartbeat | Succeeded | Failed | FlowToolRequest | ExecutionStopped | ConversationResult | WorkerMaintenance,
+    Register
+    | Started
+    | Heartbeat
+    | Succeeded
+    | Failed
+    | FlowToolRequest
+    | ExecutionStopped
+    | ConversationResult
+    | WorkerAvailability,
     Field(discriminator="type"),
 ]
 
@@ -399,7 +420,7 @@ ServerMessage = Annotated[
     | StopExecution
     | StopAccepted
     | ConversationQuery
-    | MaintenanceReply,
+    | AvailabilityAccepted,
     Field(discriminator="type"),
 ]
 

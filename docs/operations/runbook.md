@@ -35,15 +35,17 @@ systemd。systemd 实际主机验收尚未执行。
 root、journal 和 Codex 认证，环境 JSON 必须为 0600。
 
 本地 `agentflow-worker-update --sha SHA` 只检查；带 `--apply --root UPDATE_ROOT` 只交给当前
-launcher 托管的 runtime 请求更新。它不会直接杀进程或切换指针。Server 与 Worker 对同一次执行
-空闲 ACK 后，旧进程正常退出，新实例以相同身份/根目录和实际 release SHA 注册后才解除本次
-connection-scoped pause。Server 更新不等待所有 Worker 更新。
+launcher 托管的 runtime 请求更新。它不会直接杀进程或切换指针。准备好 release 后，runtime 以
+`WorkerAvailability(paused, request_id, connection_epoch)` 暂停新任务，
+等待 `AvailabilityAccepted`，再等待本地执行和结果/停止 ACK 收齐。Server 仅在当前连接内存保存
+`dispatch_paused`，不会写数据库或改变 busy；心跳、工具、结果 ACK 和停止请求照常处理。旧进程
+正常退出、指针变化后 launcher 启动新 release；新实例只走既有 Register/断线重连，不登记 SHA 或
+升级完成。Server 更新不等待所有 Worker 更新。
 
-若出现 `operation.json` 的 incomplete cutover、单次启动授权已消费、Worker 未以新 epoch/SHA
-注册或 operation 的连接 scoped pause 未解除，保留现场：不要删 operation/startup/journal、不要手工 resume、
-不要并起同一 Worker ID。先核对私有记录、现有进程、root lock 及认证重连携带的
-`Register.update_pending`；恢复必须由明确的人工操作决定。不要假定更新有独立于普通
-binding-recovery grace 的豁免。Linux 自动更新延期。
+若无法解除暂停并得到 ACK，关闭连接并让普通重连恢复；新连接默认可接单。不要手工并起同一
+Worker ID，不要删除 `environment.json`、`current.json`、release 内的 `complete.json`、journal 或 root lock。
+不存在 `operation.json`、启动授权、cutover/resume/ready 阶段或升级专用恢复记录；不要按旧维护
+协议操作。Linux 自动更新延期。
 
 ## 日常与故障操作
 

@@ -175,26 +175,6 @@ class WorkerStore(Repository):
         ):
             return cursor.execute("SELECT * FROM workers ORDER BY worker_id").fetchall()
 
-    def idle_for_update(self, worker_id: str) -> bool:
-        """Read existing execution/ACK facts; update intent is owned by the Worker."""
-        with self._db.connection() as connection:
-            row = connection.execute(
-                "SELECT current_job_id IS NULL"
-                " AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.assigned_worker_id=w.worker_id"
-                " AND (j.state='running' OR (j.dispatch_authorized_at IS NOT NULL"
-                " AND j.started_at IS NULL AND j.result_received_at IS NULL)"
-                " OR (j.kind='archive' AND j.payload->'archive' IS NOT NULL AND j.result_received_at IS NULL)"
-                " OR (j.result_received_at IS NOT NULL AND j.result_applied_at IS NULL)))"
-                " AND NOT EXISTS (SELECT 1 FROM execution_stops s WHERE s.worker_id=w.worker_id"
-                " AND s.state!='confirmed')"
-                " AND NOT EXISTS (SELECT 1 FROM result_effects e JOIN jobs j ON j.id=e.job_id"
-                " WHERE j.assigned_worker_id=w.worker_id AND (e.state NOT IN ('succeeded','skipped','failed')"
-                " OR (e.dispatched_at IS NOT NULL AND e.receipt IS NULL))) AS idle"
-                " FROM workers w WHERE worker_id=%s",
-                (worker_id,),
-            ).fetchone()
-        return bool(row and row["idle"])
-
     def assign_job(
         self,
         worker_id: str,

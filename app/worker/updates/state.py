@@ -1,28 +1,17 @@
-"""Updater state is durable and separate from the assignment journal."""
+"""Local release pointers and requests, separate from the assignment journal."""
 
 import json
 import os
 import tempfile
 from pathlib import Path
-from typing import Literal
 
 from app.contracts.protocol_base import ProtocolModel
-from app.contracts.updates import OperationId, ReleaseEvent, Sha, UpdateIdentity
+from app.releases import ReleaseEvent, Sha
 
 
 class PreparedRelease(ProtocolModel):
     release: ReleaseEvent
     path: Path
-
-
-class UpdateOperation(ProtocolModel):
-    operation_id: OperationId
-    phase: Literal["paused", "cutover", "complete", "aborted"]
-    source_instance: OperationId
-    source_epoch: str
-    source_sha: Sha
-    prepared: PreparedRelease
-    identity: UpdateIdentity
 
 
 class LocalRequest(ProtocolModel):

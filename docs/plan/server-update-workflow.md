@@ -588,3 +588,66 @@ CLI help，并让现有镜像更新测试使用复制后的文件，26 passed。
 Mypy（214 files）及 diff 空白检查通过。证据为未跟踪的
 `.amp/in/artifacts/remove-installer-{pytest,copied-tests,copied-help,ruff,format,mypy}.log`。
 Kubernetes、GitHub、GHCR 和系统服务边界仍使用替身，未进行真实部署验收。
+
+### 2026-10-22 — 用户修订：通用暂停接单取代 Worker 升级维护协议
+
+**决定。** 删除 Worker 升级专用通信状态：`WorkerMaintenance`、`MaintenanceReply`、
+`UpdateIdentity`、`Register.update_version`、`Register.update_pending`、`WorkerUpdateSession`、
+`UpdateOperation`、Worker `operation.json`、启动授权目录，以及 cutover/complete/aborted/resume/ready
+阶段协议。`ReleaseEvent` 仅保留发布元数据以核验下载，不通过 WSS 交换发布身份。
+
+以通用 `WorkerAvailability(paused, request_id, connection_epoch)` 及 `AvailabilityAccepted` 替代。
+Server 只在当前连接内存保存 `dispatch_paused`，不写数据库、不改变原有任务 busy；暂停只拦截该
+Worker 的新任务，心跳、工具调用、结果 ACK 和停止请求照常处理，其他 Worker 正常调度。Worker
+先准备并验证 immutable release，再暂停并等待 ACK，等本地执行、结果/停止 ACK 收齐；连接改变时在
+新连接重新取得暂停。最终核验连接 epoch、本地空闲与 launcher 的运行归属后写入 `current.json` 并
+正常退出。失败时确认解除暂停；解除确认失败则关闭连接，走普通重连，新连接默认可接单。
+
+新进程只复用既有 `Register` 和断线恢复，不发送升级完成通知或 SHA 注册。launcher 保留
+PID/token/SHA 运行归属与锁，以及 environment/current/complete 元数据；旧子进程正常退出且 current
+指针变化后启动新 release。非零退出不自动循环，明确人工重启仍可尝试当前指针。原生安装器保留。
+删除 operation 专用失败恢复说明，不保留旧协议兼容路径。
+
+Server 更新事件表与三个脚本的直接复制方式不变，Server 部署不等待 Worker 升级。本文之前的
+Worker 专用维护状态、重连携带更新身份、发布身份 WSS 交换和阶段化恢复方案均由本条取代；历史
+feature record 保留其当时上下文。
+
+**实现（本地完成）。** `protocol.py` 定义通用消息，`WorkerConnection` 保存连接内存标记，
+`WorkerClient` 的原有单 reader 分发 ACK；删除 Server 侧的升级空闲查询和 Worker 维护会话。
+准备任务期间收到暂停时，在授权派发前重新检查并退回未授权任务；已经开始发送的 Assignment
+使用既有 FIFO send lock 排在暂停 ACK 前面，不再增加一把派发锁。停止请求先于新任务暂停检查，
+因此暂停接单不阻断 stop 收尾。launcher 只依赖经过校验的 current 指针及子进程正常退出；
+不持久化操作阶段，也不在新进程启动时恢复升级握手。发布顺序检查复用 current 中的元数据。
+
+**验证。** 隔离 PostgreSQL 17 上全量 **921 passed、零跳过**，仅既有 Starlette 弃用警告；相关
+测试 **35 passed**。覆盖准备期间暂停、已授权派发与 ACK 顺序、其他 Worker 公平调度、暂停期间
+的工具/停止交换、结果/停止 ACK 等待、丢失暂停 ACK 的解除或断连、切换前重连重新暂停、仅检查，
+以及正常注册和保留 journal。真实无害子进程测试确认 root lock、不可变环境的延迟导入、正常交接
+和崩溃不循环；没有操作真实 launchd、Codex、Kubernetes/GHCR 或部署主机。传输使用内存替身，
+不把本地验证当作真实网络或部署验收。
+
+Ruff、改动文件/改动段格式检查、`mypy app scripts/worker_update`（123 files）与 diff 空白检查通过。
+扩大到 `mypy app scripts` 时，未修改的 `scripts/smoke/recovery.py:120–121` 有两个既有字典类型
+错误；用父提交该脚本的副本复现相同错误，未扩大范围修复。证据：本地未跟踪的
+`.amp/in/artifacts/generic-pause-{full,focused,ruff,format,scoped-mypy,mypy,baseline-mypy}.log`。
+
+**简化对照。** 在独立进程中仅替换一个方法的内存实现，以相同六个公共场景比较，不修改源码：
+baseline 为 6 passed；删除准备后的暂停复查、删除调度中的暂停排除、删除最终 epoch 复查、
+不等暂停 ACK，分别为 1 failed / 5 passed、2 failed / 4 passed、1 failed / 5 passed、
+1 failed / 5 passed。失败分别对应暂停后仍派发、暂停 Worker 抢占调度、未在新连接暂停即切换，
+以及确认丢失时仍切换。保留这四个直接检查，不恢复任何升级状态机或持久表。临时比较脚本和
+父提交检查副本已删除，日志保留于 `.amp/in/artifacts/generic-pause-ablation-*.log`。
+
+### 2026-10-22 — 发送暂停消息时断线，继续使用普通重连
+
+**触发与实现。** 自查发送失败路径时，复现 WebSocket 已关闭、reader 尚未清理旧 epoch 的
+窗口：`ConnectionClosedError` 未进入协调器的连接重试分支。通用 availability channel 现在将
+`ConnectionClosed` 转成 `ConnectionError`，仅清除仍属于该请求的旧连接；先取消本请求的 future，
+避免断连通知产生未消费异常。协调器继续等待普通重连，并在新 epoch 再次确认暂停，不增加升级状态。
+
+**验证与对照。** 给已有重连测试增加 closed-send 输入，修改前 1 failed，修复后同组三个重连输入
+3 passed。最终隔离 PostgreSQL 17 上全量 **922 passed、零跳过**，相关 **36 passed**；Ruff、
+修改文件格式、`mypy app scripts/worker_update`（123 files）和 diff 空白检查通过。测试仍使用内存
+传输与实际 WebSocket 异常类型，不宣称执行了真实网络或部署验收。证据：本地未跟踪的
+`.amp/in/artifacts/generic-pause-closed-send-{before,after}.log` 和
+`.amp/in/artifacts/generic-pause-final-{full,focused,ruff,format,mypy}.log`。

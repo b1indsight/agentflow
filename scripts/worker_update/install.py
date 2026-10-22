@@ -71,8 +71,8 @@ def main() -> None:
     for key in ("FLOWTOOL_WORKER_STATUS_PATH", "CODEX_HOME"):
         if key in environment:
             environment[key] = str(Path(environment[key]).expanduser().resolve())
-    if (root / "current.json").exists() or (root / "operation.json").exists():
-        raise ValueError("bootstrap refuses to replace an existing startup pointer or operation")
+    if (root / "current.json").exists():
+        raise ValueError("bootstrap refuses to replace an existing startup pointer")
     source = Path(__file__).resolve().parents[2]
     plist = plistlib.loads((source / "deploy/launchd/com.agentflow.worker.plist.in").read_bytes())
     plist["Label"] += "." + hashlib.sha256(settings.worker_id.encode()).hexdigest()[:12]

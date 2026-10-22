@@ -8,10 +8,6 @@ from pathlib import Path
 import pytest
 from psycopg.pq import TransactionStatus
 
-from app.controler.workers.updates import WorkerUpdateSession
-from tests.test_maintenance import idle_binding
-from tests.test_worker_updates import request
-
 ROOT = Path(__file__).parents[1]
 SHA = "a" * 40
 
@@ -39,15 +35,11 @@ def candidate(run_id, attempt, sha):
 
 
 @pytest.mark.parametrize("apply", [False, True])
-def test_server_consumes_deduplicated_event_during_worker_cutover(
+def test_server_consumes_deduplicated_event_without_worker_update_state(
     store, image_event, monkeypatch, apply
 ):
-    # A Worker can remain in cutover while the Server deploys. Neither its update
-    # state nor a database transaction may be held across the external updater.
-    idle_binding(store)
-    worker = WorkerUpdateSession(store.workers, "w", "epoch")
-    assert worker.handle(request()).idle
-    assert worker.handle(request("commit")).accepted
+    # Server deployment has no Worker update protocol or tables and does not
+    # hold a database transaction across the external updater.
     image_event.enqueue(2, 1, SHA)
     image_event.enqueue(2, 1, SHA)
     with pytest.raises(image_event.Rejected, match="different commit"):
@@ -93,7 +85,6 @@ def test_server_consumes_deduplicated_event_during_worker_cutover(
             ).fetchall()
             == []
         )
-    assert worker.paused
 
 
 @pytest.mark.parametrize("stale", [False, True])

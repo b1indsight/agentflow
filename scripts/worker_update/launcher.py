@@ -1,4 +1,4 @@
-"""Stable launchd parent: resolve immutable releases, never restart an ambiguous cutover.
+"""Stable launchd parent: follow release changes only after a normal child exit.
 
 This file intentionally uses only the standard library and is copied outside releases.
 RunAtLoad starts it once; there is no KeepAlive loop or update SIGTERM.
@@ -30,19 +30,6 @@ def flush_directory(path: Path) -> None:
         os.close(descriptor)
 
 
-def claim_start(root: Path, operation: str) -> None:
-    """Consume before spawning; even a spawn failure must not replay authorization."""
-    directory = root / "startups"
-    directory.mkdir(mode=0o700, exist_ok=True)
-    with (directory / operation).open("x") as handle:
-        os.fchmod(handle.fileno(), 0o600)
-        handle.write("startup attempted\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-    flush_directory(directory)
-    flush_directory(root)
-
-
 def launch(root: Path) -> int:
     """Supervise only normal cooperative handoffs after the previous child has exited."""
     root = root.resolve()
@@ -68,23 +55,10 @@ def launch(root: Path) -> int:
                 or read(path / "complete.json") != pointer
             ):
                 raise ValueError("startup pointer is not a completed fixed-repository release")
-            operation = "boot"
-            if (root / "operation.json").exists():
-                state = read(root / "operation.json")
-                if state["phase"] not in {"complete", "aborted"}:
-                    operation = state["operation_id"]
-                    if (
-                        state["phase"] != "cutover"
-                        or state["prepared"] != pointer
-                        or not re.fullmatch(r"[0-9a-f]{32}", operation)
-                    ):
-                        raise ValueError("incomplete cutover requires manual inspection")
-                    claim_start(root, operation)
             token = uuid4().hex
             claim = {
                 "pid": os.getpid(),
                 "token": token,
-                "operation": operation,
                 "sha": release["sha"],
             }
             temporary = root / ".launch.tmp"
@@ -110,9 +84,6 @@ def launch(root: Path) -> int:
                 return status
             if read(root / "current.json") == pointer:
                 return 0
-            state = read(root / "operation.json")
-            if state["phase"] != "cutover" or state["prepared"] != read(root / "current.json"):
-                raise ValueError("pointer changed without a matching cutover intent")
 
 
 def main() -> None:
@@ -124,7 +95,7 @@ def main() -> None:
         raise SystemExit(launch(args.root))
     except (OSError, ValueError, KeyError, TypeError):
         print(
-            "Worker launcher stopped; inspect private operation/startup records; no automatic retry",
+            "Worker launcher stopped; inspect private release/launcher files; no automatic retry",
             file=sys.stderr,
         )
         raise SystemExit(1) from None

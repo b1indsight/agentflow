@@ -1,11 +1,25 @@
 """Read-only verification of the fixed public Images/main publication contract."""
 
-import httpx
-from pydantic import BaseModel, ValidationError
+from typing import Annotated, Literal
 
-from app.contracts.updates import ReleaseEvent
+import httpx
+from pydantic import BaseModel, Field, ValidationError
+
+from app.contracts.protocol_base import ProtocolModel
 
 REPOSITORY = "b1indsight/agentflow"
+Sha = Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")]
+
+
+class ReleaseEvent(ProtocolModel):
+    """Verified publication metadata used locally, never a Worker protocol message."""
+
+    version: Literal[1] = 1
+    repository: Literal["b1indsight/agentflow"] = "b1indsight/agentflow"
+    sha: Sha
+    run_id: int = Field(gt=0, le=10**18)
+    attempt: int = Field(gt=0, le=10**9)
+    run_number: int = Field(gt=0, le=10**18)
 
 
 class ReleaseError(RuntimeError):

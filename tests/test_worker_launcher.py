@@ -9,14 +9,14 @@ from pathlib import Path
 
 import pytest
 
+from app.releases import ReleaseEvent
 from app.worker.updates.state import PreparedRelease, write_json
-from tests.test_worker_updates import request
 
 LAUNCHER = Path(__file__).parents[1] / "scripts/worker_update/launcher.py"
 
 
 @pytest.mark.parametrize("crash", [False, True])
-def test_launcher_waits_for_old_exit_and_consumes_one_cutover_start(tmp_path, crash):
+def test_launcher_waits_for_normal_exit_and_never_loops_on_a_crash(tmp_path, crash):
     # These tiny installed programs stand in for Worker processes. Both use the
     # same root lock and late import, exposing double-start and mutable-import bugs.
     worker = tmp_path / "worker"
@@ -42,8 +42,6 @@ def test_launcher_waits_for_old_exit_and_consumes_one_cutover_start(tmp_path, cr
             f"version={name!r}\n"
             "if version=='old':\n"
             "    pointer=json.loads((root/'next.json').read_text())\n"
-            "    state={'phase':'cutover','operation_id':'a'*32,'prepared':pointer}\n"
-            "    (root/'operation.json').write_text(json.dumps(state))\n"
             "    (root/'current.tmp').write_text(json.dumps(pointer))\n"
             "    os.replace(root/'current.tmp',root/'current.json')\n"
             "from app.late import VERSION\n"
@@ -51,11 +49,8 @@ def test_launcher_waits_for_old_exit_and_consumes_one_cutover_start(tmp_path, cr
             "    trace.write(json.dumps({'version':version,'late':VERSION,'pid':os.getpid()})+'\\n')\n"
             "if version=='new':\n"
             f"    if {crash!r}: raise SystemExit(7)\n"
-            "    state=json.loads((root/'operation.json').read_text())\n"
-            "    state['phase']='complete'\n"
-            "    (root/'operation.json').write_text(json.dumps(state))\n"
         )
-        release = request().release.model_copy(update={"sha": str(index) * 40})
+        release = ReleaseEvent(run_id=index, attempt=1, run_number=index, sha=str(index) * 40)
         pointer = PreparedRelease(path=path, release=release)
         write_json(path / "complete.json", pointer.model_dump(mode="json"))
         pointers.append(pointer)
@@ -77,7 +72,7 @@ def test_launcher_waits_for_old_exit_and_consumes_one_cutover_start(tmp_path, cr
     assert [entry["late"] for entry in traces] == ["old", "new"]
     assert traces[0]["pid"] != traces[1]["pid"]
     assert journal.read_bytes() == b"preserved journal"
-    assert (tmp_path / "startups" / ("a" * 32)).exists()
+    assert not (tmp_path / "operation.json").exists() and not (tmp_path / "startups").exists()
     if crash:
         again = subprocess.run(
             [sys.executable, str(LAUNCHER), "--root", str(tmp_path)],
@@ -86,5 +81,5 @@ def test_launcher_waits_for_old_exit_and_consumes_one_cutover_start(tmp_path, cr
             check=False,
             timeout=15,
         )
-        assert again.returncode == 1
-        assert len((tmp_path / "trace.jsonl").read_text().splitlines()) == 2
+        assert again.returncode == 7  # An explicit operator restart can try the current release.
+        assert len((tmp_path / "trace.jsonl").read_text().splitlines()) == 3

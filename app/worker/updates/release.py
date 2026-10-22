@@ -8,8 +8,7 @@ import tarfile
 from pathlib import Path
 from uuid import uuid4
 
-from app.contracts.updates import ReleaseEvent
-from app.releases import ReleaseError, verify_release
+from app.releases import ReleaseError, ReleaseEvent, verify_release
 from app.worker.updates.state import PreparedRelease, write_json
 
 

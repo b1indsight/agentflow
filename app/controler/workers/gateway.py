@@ -36,7 +36,6 @@ from app.contracts.protocol import (
 from app.contracts.result_models import ResultPending
 from app.controler.workers.connection import ProtocolViolation, WorkerConnection, WorkerSocket
 from app.controler.workers.conversation import ConversationBroker
-from app.controler.workers.updates import WorkerUpdateSession
 from app.controler.workflow.coordinator import JobCoordinator
 from app.controler.workflow.preparation import PreparationStale, PreparationState
 from app.controler.workflow.results import ResultApplication
@@ -130,23 +129,12 @@ class WorkerGateway:
             register = parse_worker_message(await socket.receive_text())
             if not isinstance(register, Register) or register.worker_id != worker_id:
                 raise ProtocolViolation("worker registration does not match authenticated identity")
-            if register.update_pending is not None and (
-                register.update_version != 1
-                or register.update_pending.identity.worker_id != worker_id
-                or register.update_pending.action not in {"pause", "commit"}
-            ):
-                raise ProtocolViolation("invalid Worker handoff registration")
             with self.maintenance.exchange("worker-register"):
                 connection = WorkerConnection(
                     socket,
                     self.conversations,
                     worker_id,
                     connection_epoch,
-                    WorkerUpdateSession(
-                        self.workers, worker_id, connection_epoch, register.update_pending
-                    )
-                    if register.update_version == 1
-                    else None,
                     maintenance=self.maintenance,
                     notify_jobs=self.notify_jobs,
                 )
@@ -195,9 +183,6 @@ class WorkerGateway:
                 if current is None:
                     assert wake is not None
                     wake.clear()
-                    if connection.updates is not None and connection.updates.paused:
-                        await self._wait_while_idle(connection, wake)
-                        continue
                     with self.maintenance.exchange("worker-dispatch"):
                         stop = self.stops.pending(worker_id)
                         if stop is not None:
@@ -206,7 +191,7 @@ class WorkerGateway:
                         excluded = [
                             identity
                             for identity, (_, session) in self._sessions.items()
-                            if session.updates is not None and session.updates.paused
+                            if session.dispatch_paused
                         ]
                         job = self.workers.assign_job(
                             worker_id, token, connection_epoch, excluded=excluded
@@ -222,7 +207,21 @@ class WorkerGateway:
                                     )
                                 self.notify_jobs()
                                 continue
-                            if not self.stops.authorize_dispatch(job.id, worker_id, token, connection_epoch):
+                            # Preparation awaits remote I/O; a pause ACK may already have
+                            # reached the Worker. Recheck before authorizing any dispatch.
+                            # From here to send_text's existing FIFO lock there is no await,
+                            # so an authorized frame is always ordered ahead of that ACK.
+                            if connection.dispatch_paused:
+                                requeued = self.workers.requeue_assignment(
+                                    job.id, worker_id, token, connection_epoch
+                                )
+                                if not requeued and self.stops.pending(worker_id) is None:
+                                    raise ProtocolViolation("assignment changed while pausing")
+                                self.notify_jobs()
+                                continue
+                            if not self.stops.authorize_dispatch(
+                                job.id, worker_id, token, connection_epoch
+                            ):
                                 raise ProtocolViolation("assignment changed before dispatch authorization")
                             current = (job, token, prepared.task)
                             await connection.send_text(prepared.model_dump_json())

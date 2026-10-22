@@ -19,7 +19,6 @@ from app.worker.execution.executor import WorkerExecutor
 from app.worker.health import HealthFile
 from app.worker.state.session import WorkerSession
 from app.worker.transport.client import WorkerClient
-from app.worker.updates.channel import UpdateChannel
 from app.worker.updates.coordinator import UpdateCoordinator
 
 _CONTROL_ENVIRONMENT_KEYS = frozenset(
@@ -101,7 +100,6 @@ class WorkerRuntime:
         configure_logging("worker", self.settings.log_format)
         self.root_lock = WorkerRootLock(self.settings.worker_root, self.settings.worker_id)
         session = WorkerSession(self.settings.worker_root)
-        updates = UpdateChannel() if settings.worker_update_root is not None else None
         executor = WorkerExecutor(
             self.settings.worker_root,
             CodexAgent(
@@ -121,11 +119,17 @@ class WorkerRuntime:
             reconnect_min_backoff=self.settings.reconnect_min_backoff,
             reconnect_max_backoff=self.settings.reconnect_max_backoff,
             reconnect_jitter=self.settings.reconnect_jitter,
-            updates=updates,
         )
-        self.updates = (UpdateCoordinator(settings.worker_update_root, self.client, updates,
-                                         apply=settings.worker_update_apply, stop=self._update_stop)
-                        if settings.worker_update_root is not None and updates is not None else None)
+        self.updates = (
+            UpdateCoordinator(
+                settings.worker_update_root,
+                self.client,
+                apply=settings.worker_update_apply,
+                stop=self._update_stop,
+            )
+            if settings.worker_update_root is not None
+            else None
+        )
 
     async def run(self) -> None:
         validate_worker_environment(self.settings)
@@ -137,7 +141,6 @@ class WorkerRuntime:
         try:
             if self.updates is not None:
                 self.client.session.load()
-                self.updates.validate_startup()
                 update_task = asyncio.create_task(self.updates.run())
                 update_task.add_done_callback(self._updates_finished)
             await self.client.run()
@@ -157,7 +160,7 @@ class WorkerRuntime:
     @staticmethod
     def _updates_finished(task: asyncio.Task[None]) -> None:
         if not task.cancelled() and task.exception() is not None:
-            logger.error("worker update coordinator failed; private operation retained; execution service unchanged")
+            logger.error("worker update coordinator failed; execution service unchanged")
 
     def _update_stop(self) -> None:
         """Cooperative update exit is allowed only after local executor/ACK settlement."""

@@ -6,13 +6,12 @@ import pytest
 from pydantic import ValidationError
 
 from app import releases
-from app.contracts.updates import ReleaseEvent
-from tests.test_worker_updates import request
+from app.releases import ReleaseEvent
 
 
 @pytest.mark.parametrize("fault", ["", "repository", "attempt", "event", "step", "head"])
 def test_native_publication_requires_successful_main_push_and_exact_attempt(monkeypatch, fault):
-    release = request().release
+    release = ReleaseEvent(run_id=1, attempt=1, run_number=1, sha="2" * 40)
     run = {
         "id": release.run_id,
         "run_attempt": release.attempt,

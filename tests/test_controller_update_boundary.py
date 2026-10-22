@@ -10,6 +10,7 @@ import pytest
 from app.contracts.protocol import (
     PROTOCOL_VERSION,
     Assignment,
+    AvailabilityAccepted,
     ExecutionStopped,
     FlowToolRequest,
     FlowToolResponse,
@@ -23,10 +24,10 @@ from app.contracts.protocol import (
     StopAccepted,
     StopExecution,
     Succeeded,
+    WorkerAvailability,
     WorkerMessage,
     parse_server_message,
 )
-from app.contracts.updates import MaintenanceReply
 from app.controler.runtime import ServerRuntime
 from app.controler.workers.conversation import ConversationBroker
 from app.controler.workers.gateway import WorkerGateway
@@ -39,7 +40,6 @@ from app.persistence.maintenance import MaintenanceStore
 from app.worker.state.session import WorkerSession
 from app.worker.transport.client import WorkerClient
 from tests.test_worker_connection import Socket
-from tests.test_worker_updates import request as maintenance_request
 
 
 class DuplexSocket(Socket):
@@ -279,13 +279,13 @@ async def test_unapplied_result_replays_after_controller_pause_outlasts_recovery
 
 
 @pytest.mark.parametrize(
-    "boundary", [Assignment, FlowToolResponse, ResultAccepted, MaintenanceReply, StopAccepted]
+    "boundary", [Assignment, FlowToolResponse, ResultAccepted, AvailabilityAccepted, StopAccepted]
 )
 async def test_cutover_waits_through_reply_but_not_heartbeats_or_local_execution(store, boundary):
     case = scenario(store)
     maintenance = MaintenanceStore(store.database)
     socket = DuplexSocket(boundary)
-    await socket.send(Register(worker_id="w", update_version=1).model_dump_json())
+    await socket.send(Register(worker_id="w").model_dump_json())
     task = asyncio.create_task(case.gateway().handle(socket))
     try:
         assert isinstance(await asyncio.wait_for(socket.sent.get(), 2), Registered)
@@ -341,8 +341,8 @@ async def test_cutover_waits_through_reply_but_not_heartbeats_or_local_execution
                 result=InitialTaskResult(session_id="session", last_message="done", exit_code=0),
             )
         else:
-            message = maintenance_request().model_copy(
-                update={"connection_epoch": assignment.connection_epoch}
+            message = WorkerAvailability(
+                request_id="pause", paused=True, connection_epoch=assignment.connection_epoch,
             )
         await socket.send(message.model_dump_json())
         await asyncio.wait_for(socket.entered.wait(), 2)
@@ -351,7 +351,7 @@ async def test_cutover_waits_through_reply_but_not_heartbeats_or_local_execution
             {
                 FlowToolResponse: "worker-tool",
                 ResultAccepted: "worker-result",
-                MaintenanceReply: "worker-maintenance",
+                AvailabilityAccepted: "worker-availability",
                 StopAccepted: "worker-stop",
             }[boundary]
         ]
