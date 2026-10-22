@@ -15,7 +15,6 @@ from app.contracts.conversation import ConversationFailure, HistoryQuery
 from app.contracts.protocol import (
     Assignment,
     AssignmentSecret,
-    AvailabilityAccepted,
     ConversationQuery,
     ConversationResult,
     ExecutionResult,
@@ -44,11 +43,12 @@ from app.contracts.protocol import (
 from app.domain.delivery_models import DeliveryReceipt
 from app.domain.models import VcsOutcome
 from app.worker.state.session import WorkerSession
-from app.worker.transport.availability import AvailabilityChannel, AvailabilitySocket
 from app.worker.transport.mcp import FlowToolCaller
 
 
-class Connection(AvailabilitySocket, Protocol):
+class Connection(Protocol):
+    async def send(self, data: str) -> None: ...
+
     async def recv(self) -> str | bytes: ...
 
 
@@ -100,7 +100,6 @@ class WorkerClient:
         reconnect_jitter: float = 0.2,
     ) -> None:
         self.connected = False
-        self.availability = AvailabilityChannel()
         self.worker_id = worker_id
         self.worker_token = worker_token
         self.serve_ws_url = serve_ws_url
@@ -185,7 +184,6 @@ class WorkerClient:
         try:
             await self._run_connection(connection)
         finally:
-            self.availability.disconnect()
             tasks = list(self._history_tasks)
             for task in tasks:
                 task.cancel()
@@ -197,9 +195,6 @@ class WorkerClient:
         while True:
             raw = await connection.recv()
             message = parse_server_message(raw.decode() if isinstance(raw, bytes) else raw)
-            if isinstance(message, AvailabilityAccepted):
-                self.availability.accept(message)
-                continue
             if not isinstance(message, ConversationQuery):
                 return message
             if len(self._history_tasks) >= 4:
@@ -260,7 +255,6 @@ class WorkerClient:
             self.session.validate_recovery(first.job_id, first.assignment_token)
         self._connection_epoch = first.connection_epoch
         self.connected = True
-        self.availability.connect(connection, first.connection_epoch)
         logger.bind(event="worker_connected", reason_code="ok", worker_id=self.worker_id).info("")
 
         async def heartbeat() -> None:
@@ -501,12 +495,6 @@ class WorkerClient:
         self._stop.set()
         if self._connection_task is not None:
             self._connection_task.cancel()
-
-    def idle_for_update(self) -> bool:
-        """Include durable result/stop ACK settlement, not just executor completion."""
-        record = self.session.load()
-        return (self._execution is None and self.session.assignment is None
-                and self._tool_requests.empty() and (record is None or record.acknowledged))
 
     def _recovery_descriptor(self) -> RecoveryDescriptor | None:
         if (self._execution is not None

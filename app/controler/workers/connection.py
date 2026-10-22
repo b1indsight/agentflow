@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from typing import Protocol
 
 from fastapi import WebSocketDisconnect
 
-from app.contracts.protocol import AvailabilityAccepted, WorkerAvailability, parse_worker_message
+from app.contracts.protocol import parse_worker_message
 from app.controler.workers.conversation import ConversationBroker
 
 
@@ -45,14 +45,9 @@ class WorkerConnection:
         conversations: ConversationBroker,
         worker_id: str,
         epoch: str,
-        *,
-        notify_jobs: Callable[[], None] | None = None,
     ) -> None:
         self.socket = socket
         self.conversations = conversations
-        self.dispatch_paused = False
-        self.notify_jobs = notify_jobs
-        self.worker_id, self.epoch = worker_id, epoch
         self._send_lock = asyncio.Lock()
         self._messages: deque[tuple[str, int]] = deque()
         self._bytes = 0
@@ -96,19 +91,6 @@ class WorkerConnection:
                 raw = await self.socket.receive_text()
                 message = parse_worker_message(raw)
                 if self.conversations.accept(self, message):
-                    continue
-                if isinstance(message, WorkerAvailability):
-                    if message.connection_epoch != self.epoch:
-                        raise ProtocolViolation("availability belongs to another connection")
-                    self.dispatch_paused = message.paused
-                    reply = AvailabilityAccepted(
-                        request_id=message.request_id,
-                        connection_epoch=self.epoch,
-                        paused=self.dispatch_paused,
-                    )
-                    await self.send_text(reply.model_dump_json())
-                    if self.notify_jobs is not None:
-                        self.notify_jobs()
                     continue
                 size = len(raw.encode())
                 if len(self._messages) >= 32 or self._bytes + size > 16 * 1024 * 1024:

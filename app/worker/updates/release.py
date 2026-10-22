@@ -99,13 +99,3 @@ def prepare(root: Path, release: ReleaseEvent) -> PreparedRelease:
     prepared = PreparedRelease(release=release, path=path)
     write_json(path / "complete.json", prepared.model_dump(mode="json"))
     return prepared
-
-
-def validate_prepared(root: Path, prepared: PreparedRelease) -> None:
-    """Only completed final-path releases can become startup pointers."""
-    path = prepared.path.resolve()
-    if path.parent != (root / "releases").resolve() or path != prepared.path:
-        raise ReleaseError("release is outside the configured immutable release directory")
-    actual = PreparedRelease.model_validate_json((path / "complete.json").read_bytes())
-    if actual != prepared or not (path / ".venv/bin/python").is_file():
-        raise ReleaseError("release is incomplete or differs from its completion marker")

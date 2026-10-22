@@ -688,3 +688,40 @@ Worker 的 `WorkerAvailability` 单 Worker 暂停新任务、本地升级 ACK �
 证据：本地未跟踪的 `.amp/in/artifacts/remove-server-maintenance-{full,focused-final,copied-tests,
 copied-help,ruff,format-final,mypy}.log`。PostgreSQL、Worker journal 与脚本实际执行；网络传输和
 Kubernetes/GHCR 边界仍使用替身，未执行真实数据库迁移、主机安装、部署或服务重启。
+
+### 2026-10-22 — 用户修订：Worker 仅保留本体 CLI 手动更新
+
+**背景、选项与决定。** 用户要求移除 deploy 侧 Worker 更新，并选择只保留
+`flowtool worker update` 手动入口。删除原生安装器、launcher、LaunchAgent 更新模板和独立
+`agentflow-worker-update` 命令；不将自动轮询和进程切换搬进 CLI。保留固定 SHA 发布核验及独立
+non-editable 环境准备。此条取代前述 Worker 按执行空闲更新、通用暂停接单与后台发布检查的决定；
+历史记录保留，Server 更新脚本及镜像事件消费流程不变。
+
+**实现与取舍。** `app/worker/cli.py` 挂载到现有 `flowtool worker`，无子命令仍启动普通 Worker。
+`update --sha SHA` 仅检查发布，不加载 Worker 凭据；`--apply --root RELEASE_ROOT` 必须同时提供，
+要求操作者先正常停止原 Worker。CLI 复用原 Worker root 进程锁和身份校验，在锁内拒绝损坏或
+尚未确认的 journal，再准备新环境并输出解释器路径。操作者保持相同身份、root、HOME 和认证，
+显式启动该解释器；命令不操作系统服务、不写启动指针、不发信号，也不自动重启。
+
+删除 `app/worker/updates/coordinator.py`、旧 CLI、`scripts/worker_update/`、部署模板及专用测试；
+删除更新配置、runtime 协调和 availability transport/protocol，以及 Controller 调度中的暂停排除
+与复查。保留普通派发、历史查询、结果/停止确认和断线恢复。代价是准备期间原 Worker 离线，
+服务执行路径与重启由操作者管理；不提供旧 PR 自动更新服务的兼容层或自动迁移。
+本次为删除机制和入口归并，身份、锁、journal 和发布准备复用既有实现，没有新增实质机制需要
+消融实验；新增 CLI 测试覆盖这些可观察约束。
+
+**验证。** 以 `FLOWTOOL_TEST_DATABASE_URL=postgresql://127.0.0.1/postgres` 运行完整 pytest，
+本地 PostgreSQL 17 上 **904 passed、零跳过**，仅既有 Starlette 弃用警告。覆盖普通启动、无凭据
+检查、非法参数、锁内准备、journal 字节保留，以及运行中、待确认、损坏和身份不符时拒绝更新。
+Ruff 全量检查、修改文件格式检查、`mypy app scripts/server_update`（120 files）及
+`uv lock --check --offline` 通过；未修改依赖或 lockfile。
+
+实际执行离线缓存的 `uv sync --locked --no-dev --no-editable`，使用安装后的隔离解释器确认
+Worker CLI help 和 build stamp，同时检查没有启动指针、launcher 或请求文件，journal 不变且锁
+已释放。该安装实验替换了发布元数据和远程 Git 导出，未执行真实 GitHub 发布下载或服务切换。
+首次全量检查使用 Unix socket 时有 3 个既有 recovery-bundle 测试因缺少 IP peer 失败；改用 TCP
+连接后完整通过，未修改这些测试或恢复代码。
+
+证据：本地未跟踪的 `.amp/in/artifacts/worker-manual-cli-full-tcp.log`、
+`worker-manual-cli-installed.log`；首次 Unix socket 结果为 `worker-manual-cli-full.log`。
+本次修改保存在基于 #104 head 的本地隔离 workspace，未提交、推送、部署或重启真实服务。

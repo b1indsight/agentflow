@@ -102,9 +102,9 @@ worker 不自动读取 `.env`，上述加载仅针对 worker 私有文件。回�
 `uv run flowtool workers`，确认 `worker-1` 在线。保留 worker root、journal 和会话数据，
 不要为重启临时更换 identity/root。启动注册成功尚不代表真实编码闭环已通过。
 
-macOS 登录用户的原生 Worker 可另行接入按执行空闲更新，首次接入、私有环境 JSON、
-LaunchAgent 和本地 CLI 见 [Worker 更新](worker-update.md)。Linux Worker 自动更新尚未提供；
-不要把该流程套用到 systemd、Compose 或 Kubernetes Worker。
+原生 Worker 的手动更新入口为 `flowtool worker update`：先人工完成收尾并停止 Worker，再准备
+固定 SHA 的独立环境，由操作者显式启动新版本。没有后台更新或更新专用服务模板，见
+[Worker 更新](worker-update.md)。Compose 和 Kubernetes Worker 继续使用各自部署方式手动更新。
 
 ## 3. 配置 Cloudflare 入口
 

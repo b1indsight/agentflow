@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from datetime import timedelta
 
 from psycopg.rows import class_row
@@ -179,13 +179,9 @@ class WorkerStore(Repository):
         worker_id: str,
         token: str,
         connection_epoch: str = "",
-        *,
-        excluded: Sequence[str] = (),
     ) -> Job | None:
         """Claim work while retaining a Flow's worker slot between individual jobs."""
 
-        if worker_id in excluded:
-            return None
         now = self._db.now()
         # Share this predicate across fair-worker selection and both binding paths.
         eligible = (
@@ -204,7 +200,6 @@ class WorkerStore(Repository):
         with self._db.connection() as connection, connection.transaction():
             candidate = connection.execute(
                 "SELECT w.worker_id FROM workers w WHERE w.status=%s"
-                " AND NOT (w.worker_id=ANY(%s))"
                 " AND w.current_job_id IS NULL AND EXISTS (SELECT 1 FROM jobs j"
                 " JOIN flows f ON f.id=j.flow_id"
                 " LEFT JOIN flow_executions own ON own.worker_id=w.worker_id"
@@ -214,7 +209,7 @@ class WorkerStore(Repository):
                 " AND f.state=%s AND ((own.flow_id=j.flow_id) OR"
                 " (own.flow_id IS NULL AND bound.flow_id IS NULL AND NOT w.draining))" + eligible + ")"
                 " ORDER BY w.last_assigned_at NULLS FIRST, w.worker_id LIMIT 1",
-                (WorkerStatus.ONLINE, list(excluded), JobState.QUEUED, FlowState.ACTIVE, now),
+                (WorkerStatus.ONLINE, JobState.QUEUED, FlowState.ACTIVE, now),
             ).fetchone()
             if candidate is None or candidate["worker_id"] != worker_id:
                 return None

@@ -22,8 +22,8 @@
 
 Server 更新不设置全局 pause/resume，不等待通信 activity、Worker 更新、任务完成或通信队列清空。
 新实例启动后业务路径直接按既有规则恢复；断线 Worker 和绑定继续适用普通 recovery grace，
-没有维护豁免或额外 deadline 延长。Worker 本地更新仍只暂停该 Worker 的新任务，并等待它自己的
-执行和 ACK 收敛，见 [Worker 更新](worker-update.md)。
+没有维护豁免或额外 deadline 延长。Worker 更新只保留停止旧进程后的本地手动 CLI，不发送暂停
+接单协议，也不自动切换进程，见 [Worker 更新](worker-update.md)。
 
 前端随 serve 镜像一起更新，不增加独立前端部署。前端、Controller、Console DTO、
 非破坏性 schema 或 Worker 代码/配置的变化，不再因源码摘要、schema/wire 指纹、兼容

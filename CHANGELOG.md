@@ -17,20 +17,13 @@
 - 删除 `agentflow-maintenance.py`；Server 工具直接复制 `update-agentflow-server.py` 和
   `column-check.py` 两个文件，不提供替代安装器或维护服务。主机锁和 `operation.json` 保留，
   后者仅记录未完成或完成的部署报告。
-- 增加 macOS 登录用户原生 Worker 的 opt-in 执行空闲更新：首次接入使用 LaunchAgent，默认
-  仅渲染 plist，`--apply` 仅准备 immutable release/launcher 而不调用 `launchctl`。更新保留
-  Worker ID、root、HOME、journal 和模型认证，私有环境 JSON 要求 0600；本地 check/apply 只能由
-  当前 runtime 协调。每个受管 Worker 每 300 秒自行核验 GitHub Images 发布；本地
-  `WorkerAvailability(paused, request_id, connection_epoch)` / `AvailabilityAccepted` 通用暂停
-  接单。Server 只在当前连接内存保存 `dispatch_paused`，不写数据库、不改变 busy；心跳、工具、
-  结果 ACK 与停止请求继续处理，其他 Worker 正常调度。Worker 在本地执行及结果/停止 ACK 收齐后
-  核验 epoch、空闲和运行归属，写入 `current.json` 并正常退出；新进程仅走既有 Register/断线重连。
-  失败时确认解除暂停，解除确认失败则关闭连接并按普通重连恢复默认接单。该修订取代
-  `WorkerMaintenance`、升级身份/Register 字段、`operation.json`、启动授权及
-  pause/commit/resume/ready/cutover 协议；`ReleaseEvent` 仅保留下载核验元数据，不经 WSS 交换
-  发布身份。Server 事件仍只使用 PostgreSQL `server_update_events`，不保存 Worker 状态；Worker
-  更新不阻塞 Server 部署，Linux 自动更新仍延期。真实主机安装、GitHub 发布、launchd 或服务更新
-  验收未在本文档变更中声明完成。
+- Worker 更新统一到 `flowtool worker update --sha SHA`：默认只校验发布，人工停止 Worker 后以
+  `--apply --root RELEASE_ROOT` 准备独立的固定 SHA 环境，输出解释器路径供人工启动。
+  复用原 Worker root 锁和身份校验，拒绝未确认或损坏的 journal；不覆盖旧环境和执行数据。
+  删除后台轮询、自动空闲切换、暂停接单协议、LaunchAgent 更新模板、独立安装器/launcher 和
+  `agentflow-worker-update` 入口；移除 `FLOWTOOL_WORKER_UPDATE_ROOT` / `FLOWTOOL_WORKER_UPDATE_APPLY`。
+  普通 Worker 启动、结果/停止确认与断线恢复不变；Server 更新脚本和事件消费流程不变。
+  不提供旧 PR 自动更新服务的兼容或自动迁移，也未执行目标主机安装、服务切换或真实发布验收。
 
 - 会话连续同来源、同作者消息共用头像与作者栏，Worker 分组保留执行和会话归属边界，
   来源信息、正文分页与编辑差异独立保留。正文支持安全的 Markdown/GFM 渲染；原始 HTML

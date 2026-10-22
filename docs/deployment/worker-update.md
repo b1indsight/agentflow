@@ -1,126 +1,65 @@
-# macOS 原生 Worker 按执行空闲更新
+# Worker 手动更新
 
-此流程只接入**已在 macOS 登录用户下运行的原生 Worker**。它保留现有 Worker ID、token、
-`HOME`、worker root、journal 和 Codex 认证；Worker 不会取得数据库、GitHub App、Webhook
-或 Server 管理凭据。Linux 的 systemd、容器、Kubernetes/Compose Worker 自动更新仍未提供。
+Worker 只提供本体 CLI 的手动更新入口：`flowtool worker update`。普通 `flowtool worker` 仍直接
+启动执行进程。没有后台发布轮询、自动空闲切换、暂停接单协议或更新专用安装器/launcher；
+仓库不再提供 Worker 更新用的 LaunchAgent 模板，也不自动操作系统服务。
 
-Server 更新和 Worker 更新是独立流程。Server 可在 Worker 尚未升级时部署；Worker 发布、离线、
-未启用更新或更新失败都不改变 Server 镜像事件的结果。Server 的部署边界见
-[Server 更新](server-update.md)。Server 更新按普通预检、停旧和启新流程执行，不等待 Worker 更新、
-任务完成或通信活动清空，也不设置全局暂停。
+Server 与 Worker 的更新互不等待。Server 镜像事件仍使用 PostgreSQL `server_update_events`，
+不保存 Worker 更新状态；Server 的预检、停旧和启新流程见 [Server 更新](server-update.md)。
 
-## 边界和所需文件
-
-保留原生安装器、`agentflow-worker-update` 本地 check/apply CLI 和稳定 launcher。安装器
-默认只渲染 plist，显式 `--apply` 只准备首个 immutable release、私有环境和 launcher，不执行
-`launchctl` 或停止旧 Worker。CLI 只向拥有当前 runtime、执行器和 journal 的 Worker 提交请求，
-不能建立第二条同身份 WebSocket，也不能绕过空闲确认。
-
-更新根目录（以下记为 `$UPDATE_ROOT`）和 Worker root 是不同概念。前者含 launcher、
-`environment.json`、`current.json` 和 immutable releases（各自带 `complete.json`）；后者仍是
-`FLOWTOOL_WORKER_ROOT`，含执行 journal 和仓库。launcher 保留 PID/token/SHA 的运行归属及 root
-锁；旧子进程正常退出且 `current.json` 已改变后，才启动新 release。非零退出不自动循环；明确的
-人工重启仍可尝试当前指针。两者必须由同一登录用户拥有，且不能为了更新复制、移动、清空或恢复
-journal/root。
-
-不再存在 `operation.json`、启动授权目录或 Worker 升级专用状态机。发布元数据仍以
-`ReleaseEvent` 用于核验下载；不会经 WSS 交换发布身份。
-
-## 首次接入 LaunchAgent
-
-先在**当前 Worker 的同一登录用户**会话中创建环境 JSON。不要 sudo，不要切换到 root，也不要
-用另一个 HOME。环境只允许显式 Worker 配置和 Codex 所需认证变量；至少包含 Worker ID、token、
-WSS URL 和 Worker root。生产连接必须使用 `wss://`；`ws://` 仅限已有的开发例外。
+## 只检查发布
 
 ```sh
-umask 077
-mkdir -p "$HOME/.config/flowtool"
-cat >"$HOME/.config/flowtool/worker-update-environment.json" <<'EOF'
-{
-  "FLOWTOOL_WORKER_ID": "worker-1",
-  "FLOWTOOL_WORKER_TOKEN": "替换为现有 token",
-  "FLOWTOOL_SERVE_WS_URL": "wss://serve.example/internal/workers/connect",
-  "FLOWTOOL_WORKER_ROOT": "/Users/you/.flowtool/workers/worker-1",
-  "FLOWTOOL_TRUSTED_HOST_EXECUTION": "true",
-  "FLOWTOOL_EXECUTION_ISOLATION": "dedicated-account",
-  "FLOWTOOL_WORKER_UPDATE_APPLY": "true",
-  "CODEX_HOME": "/Users/you/.codex"
-}
-EOF
-chmod 600 "$HOME/.config/flowtool/worker-update-environment.json"
-
-export UPDATE_ROOT="$HOME/.local/share/agentflow/worker-update"
-python3 scripts/worker_update/install.py \
-  --sha <已验证的40位小写提交SHA> --root "$UPDATE_ROOT" \
-  --environment "$HOME/.config/flowtool/worker-update-environment.json"
+flowtool worker update --sha <40位小写提交SHA>
 ```
 
-默认命令只验证输入并把 plist 写到 stdout；它不 fetch release、不写 `$UPDATE_ROOT`、不启动或停止
-服务。JSON 必须是 0600，所有值必须是字符串；安装器会拒绝额外键、缺失 identity/root/token/WSS、
-宽松权限或与当前登录用户不一致的 `HOME`。它会把实际 HOME 写入私有环境，并设置
-`FLOWTOOL_WORKER_UPDATE_ROOT`。Codex 登录状态与 `CODEX_HOME` 保持在这个用户身份下，不能改用
-control 用户的模型认证或 secret。
+此命令只查询并核验公开 GitHub Images/main/push 成功发布，要求指定 SHA 同时为当前 main head。
+成功时输出含 `state: checked` 的 JSON；不下载源码、不准备环境、不读取 Worker 凭据、不连接
+Controller，也不修改本地启动方式。无效 SHA 在查询前拒绝。
 
-审核输出的 plist 后，才由操作者显式执行接入准备：
+## 停止旧进程后准备新版本
+
+1. 使用原 Worker 的同一登录用户、HOME 和私有环境配置。保留 Worker ID、token、WSS URL、
+   `FLOWTOOL_WORKER_ROOT`、journal、仓库和模型认证；不要通过新建 root 或删除 journal 绕过检查。
+2. 按 [取消与停机](../operations/cancel-drain.md) 完成既有任务和结果/停止确认，再人工正常停止
+   Worker。若由系统服务管理，操作者应先停止服务并禁用其自动重启，避免它在准备完成后抢先启动旧版。
+3. 加载原 Worker 环境后，执行手动准备：
+
+   ```sh
+   set -a
+   . "$HOME/.config/flowtool/worker.env"
+   set +a
+   flowtool worker update --sha <40位小写提交SHA> --apply \
+     --root "$HOME/.local/share/agentflow/worker-releases"
+   ```
+
+`--apply` 和 `--root` 必须同时提供。`--root` 是新版本的存放目录，与保存 journal 和仓库的
+`FLOWTOOL_WORKER_ROOT` 不同。更新要求原 Worker root 已有匹配的 `.worker-id`；CLI 在该 root
+持有原有进程锁，并在锁内检查 journal。Worker 尚在运行、身份不符、journal 损坏，或仍有任何
+未确认记录时拒绝准备。待确认记录必须先用原版本走普通恢复流程，不能清空后重试。
+
+通过检查后，在 `--root/releases/<SHA>-<随机标识>/` 下载固定 SHA 的源码，按 lockfile 建立
+non-editable `.venv`，核验实际导入的版本，最后写 `complete.json`。准备期间始终持有原 Worker
+root 锁；不覆盖旧环境，不复制 journal 或认证，也不创建新的私密环境文件。
+
+## 人工启动新版本
+
+成功输出的 JSON 包含 `state: prepared`、`release`、`path` 和 `python`。操作者核对后，使用其中
+的 `python` 绝对路径启动新版本；以下路径需替换为命令实际输出：
 
 ```sh
-python3 scripts/worker_update/install.py \
-  --sha <已验证的40位小写提交SHA> --root "$UPDATE_ROOT" \
-  --environment "$HOME/.config/flowtool/worker-update-environment.json" --apply
-plutil -lint "$UPDATE_ROOT/worker.plist"
+"/实际release目录/.venv/bin/python" -I -m app.cli worker
 ```
 
-`--apply` 会在旧 Worker root 锁空闲时准备固定 SHA 的 release、写入 0600 的
-`environment.json`/`current.json`、复制 launcher 并写出 plist；它仍**不会**运行 `launchctl`，不会
-停止、卸载或加载旧服务。确认旧进程已按既有安全流程退出、plist 内容和登录用户正确后，操作者
-自行完成一次 `launchctl bootstrap`/`bootout` 交接。该人工交接不属于自动更新，也不应在未确认旧
-进程退出时与其并行启动同一 ID/root。
+此进程继续使用已加载的同一组 Worker 环境变量；注册和断线恢复仍走普通协议。CLI 不修改系统
+服务的执行路径，不创建启动指针，不停止、启动或重启任何 Worker。若需要常驻运行，由操作者
+自行修改现有服务的解释器路径，再人工启动；不要并起同一 ID/root 的两个 Worker。
 
-LaunchAgent 依赖该用户登录。需要无人登录启动时，先设计并审查 LaunchDaemon 方案；不要把此
-LaunchAgent 改成 root 服务。首次接入和真实 launchd 操作尚未在目标主机验收。
+准备失败时保留不完整目录用于检查；旧版和 journal 不变。修复原因后可重新执行命令，新尝试使用
+另一个独立目录，不复用失败环境。清理旧目录前应确认没有进程或服务仍引用它。
 
-## 本地 check/apply 与通用暂停
+此前 PR 草稿的独立命令和 `FLOWTOOL_WORKER_UPDATE_ROOT` / `FLOWTOOL_WORKER_UPDATE_APPLY`
+配置已移除；不提供旧 launcher 的自动迁移。若曾安装旧草稿的自动更新服务，需由操作者人工退出
+该服务后改用此流程。容器和 Kubernetes Worker 仍通过各自既有部署方式手动更新。
 
-`agentflow-worker-update` 始终要求完整小写 SHA：
-
-```sh
-# 只校验公开发布元数据；不改请求、暂停或启动指针。
-agentflow-worker-update --sha <40位SHA>
-
-# 写入原子本地请求；必须由已 launcher 托管的同一 Worker runtime 接收。
-agentflow-worker-update --sha <40位SHA> --apply --root "$UPDATE_ROOT"
-```
-
-check 仅输出 `checked` 和 release 元数据。apply 需要已有 `current.json`，以原子创建
-`request.json` 的方式提交给 runtime；它不直接 fetch、切换 `current.json`、暂停 Worker 或启动
-新进程。实际 apply 还要求环境中的 `FLOWTOOL_WORKER_UPDATE_APPLY=true`、macOS、由 launcher
-启动的 immutable release，以及当前 launcher claim、父 PID、SHA、venv 与 root 一致。
-
-收到本地 apply 或周期检查发现的发布后，runtime 先在最终目录准备并验证固定 SHA 的 non-editable
-release。准备失败时不会暂停接单。准备成功后，Worker 在现有认证 WSS 连接发送通用
-`WorkerAvailability(paused, request_id, connection_epoch)`，并等待对应的 `AvailabilityAccepted` ACK。
-Server 只在当前连接的内存中保存 `dispatch_paused`：它只阻止该 Worker 的**新**任务，不写数据库，
-不修改既有任务的 busy 占用；其他 Worker 继续调度。心跳、工具调用、结果 ACK 和停止请求照常处理。
-
-收到暂停 ACK 后，Worker 等本地执行、结果 ACK 和停止 ACK 收齐。连接变更时，它在新连接重新取得
-暂停。最终会核验当前连接 epoch、本地空闲和 launcher 的运行归属，再原子写入 `current.json` 并
-正常退出；旧进程释放 root lock 后 launcher 启动新 release。新进程仅使用原有 `Register` 和普通
-断线重连恢复，不发送升级完成通知，也不注册 SHA。
-
-失败时，Worker 请求解除暂停并确认 ACK；若解除确认也失败，则关闭连接并走普通重连。新连接默认
-可接新任务。不存在 cutover/complete/aborted/resume/ready 阶段协议，也不存在升级专用失败恢复或
-旧协议兼容路径。
-
-## 自动发布检查
-
-每个由 launcher 托管且启用自动 apply 的 Worker 自行每 **300 秒**查询并核验公开 GitHub Images
-发布；它只采用成功的 `main` 发布和已验证的固定 SHA。检查、准备和切换都属于目标 Worker，
-不需要也不会调用 host Worker notifier、`kubectl` Worker publisher 或 Server 端发布队列。
-
-Server 镜像事件仍是独立流程：`scripts/image_event.py` 使用项目既有的 `psycopg` 环境和
-`FLOWTOOL_DATABASE_URL` 将 Server 事件写入 PostgreSQL `server_update_events`，即使 Server 停止时
-也可运行。它不使用 SQLite，不创建 `worker_releases` 或 `worker_updates`，也不持久化 Worker 的
-检查、准备、暂停或完成状态。
-
-因此 Server 更新不等待任何 Worker 更新完成；Worker 更新的离线、失败或未启用不回写、阻塞或重试
-Server 事件。本文没有执行真实 GitHub 发布检查、launchd 或真实 Worker 更新验收。
+本文不代表真实 GitHub 发布下载、目标主机服务切换或真实编码任务验收已完成。

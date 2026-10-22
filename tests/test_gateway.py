@@ -1,5 +1,5 @@
 import asyncio
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from datetime import timedelta
 from unittest.mock import AsyncMock, Mock
 
@@ -88,10 +88,8 @@ class RecordingStore(RepositoryViews, Store):
         worker_id: str,
         token: str,
         connection_epoch: str = "",
-        *,
-        excluded: Sequence[str] = (),
     ) -> Job | None:
-        if worker_id in excluded or self.job.state is not JobState.QUEUED:
+        if self.job.state is not JobState.QUEUED:
             return None
         self.job.state = JobState.RUNNING
         self.job.assigned_worker_id = worker_id

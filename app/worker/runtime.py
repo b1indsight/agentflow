@@ -10,8 +10,6 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import IO
 
-from loguru import logger
-
 from app.telemetry.logging import configure_logging
 from app.worker.config import WorkerSettings
 from app.worker.execution.codex import CodexAgent
@@ -19,7 +17,6 @@ from app.worker.execution.executor import WorkerExecutor
 from app.worker.health import HealthFile
 from app.worker.state.session import WorkerSession
 from app.worker.transport.client import WorkerClient
-from app.worker.updates.coordinator import UpdateCoordinator
 
 _CONTROL_ENVIRONMENT_KEYS = frozenset(
     {
@@ -120,16 +117,6 @@ class WorkerRuntime:
             reconnect_max_backoff=self.settings.reconnect_max_backoff,
             reconnect_jitter=self.settings.reconnect_jitter,
         )
-        self.updates = (
-            UpdateCoordinator(
-                settings.worker_update_root,
-                self.client,
-                apply=settings.worker_update_apply,
-                stop=self._update_stop,
-            )
-            if settings.worker_update_root is not None
-            else None
-        )
 
     async def run(self) -> None:
         validate_worker_environment(self.settings)
@@ -137,12 +124,7 @@ class WorkerRuntime:
         health_task = asyncio.create_task(self._report_health()) if self.settings.worker_status_path else None
         loop = asyncio.get_running_loop()
         loop.add_signal_handler(signal.SIGTERM, self.stop)
-        update_task = None
         try:
-            if self.updates is not None:
-                self.client.session.load()
-                update_task = asyncio.create_task(self.updates.run())
-                update_task.add_done_callback(self._updates_finished)
             await self.client.run()
         except asyncio.CancelledError:
             if not self._shutdown_requested:
@@ -152,21 +134,7 @@ class WorkerRuntime:
             if health_task is not None:
                 health_task.cancel()
                 await asyncio.gather(health_task, return_exceptions=True)
-            if update_task is not None:
-                update_task.cancel()
-                await asyncio.gather(update_task, return_exceptions=True)
             self.root_lock.release()
-
-    @staticmethod
-    def _updates_finished(task: asyncio.Task[None]) -> None:
-        if not task.cancelled() and task.exception() is not None:
-            logger.error("worker update coordinator failed; execution service unchanged")
-
-    def _update_stop(self) -> None:
-        """Cooperative update exit is allowed only after local executor/ACK settlement."""
-        if not self.client.idle_for_update():
-            raise RuntimeError("update exit attempted before local execution settled")
-        self.stop()
 
     async def _report_health(self) -> None:
         assert self.settings.worker_status_path is not None

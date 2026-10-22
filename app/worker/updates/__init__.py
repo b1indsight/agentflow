@@ -1,1 +1,1 @@
-"""Opt-in native releases and cooperative execution-idle cutovers."""
+"""Immutable release preparation for explicit manual Worker updates."""

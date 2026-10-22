@@ -1,4 +1,4 @@
-"""Local release pointers and requests, separate from the assignment journal."""
+"""Completed release metadata, separate from the assignment journal."""
 
 import json
 import os
@@ -6,17 +6,12 @@ import tempfile
 from pathlib import Path
 
 from app.contracts.protocol_base import ProtocolModel
-from app.releases import ReleaseEvent, Sha
+from app.releases import ReleaseEvent
 
 
 class PreparedRelease(ProtocolModel):
     release: ReleaseEvent
     path: Path
-
-
-class LocalRequest(ProtocolModel):
-    sha: Sha
-    apply: bool = False
 
 
 def write_json(path: Path, value: object) -> None:

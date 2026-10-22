@@ -408,7 +408,7 @@ async def test_cancelled_disconnected_tool_does_not_leak_into_resumed_or_next_as
             if isinstance(message, Exception):
                 raise message
             if isinstance(message, Assignment):
-                assert client.idle_for_update()
+                assert client.session.assignment is None and client.session.load().acknowledged
             return message.model_dump_json()
 
     client = WorkerClient(
@@ -432,7 +432,7 @@ async def test_cancelled_disconnected_tool_does_not_leak_into_resumed_or_next_as
         assert [message.job_id for message in calls] == ([6] if finish_before_reconnect else [5, 6])
         assert len(invocations) == 2
         assert client.session.load().job_id == 6 and client.session.load().acknowledged
-        assert client.idle_for_update()
+        assert client.session.assignment is None
     finally:
         cancel_tool.set()
         await client._cancel_execution()

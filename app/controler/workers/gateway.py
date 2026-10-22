@@ -132,7 +132,6 @@ class WorkerGateway:
                 self.conversations,
                 worker_id,
                 connection_epoch,
-                notify_jobs=self.notify_jobs,
             )
             wake = await self._register_session(worker_id, connection)
             registered_session = True
@@ -183,13 +182,8 @@ class WorkerGateway:
                     if stop is not None:
                         await self._stop_worker(connection, worker_id, connection_epoch, stop)
                     token = uuid4().hex
-                    excluded = [
-                        identity
-                        for identity, (_, session) in self._sessions.items()
-                        if session.dispatch_paused
-                    ]
                     job = self.workers.assign_job(
-                        worker_id, token, connection_epoch, excluded=excluded
+                        worker_id, token, connection_epoch
                     )
                     if job is not None:
                         prepared = await self._prepare_assignment(job, worker_id, token, connection_epoch)
@@ -200,18 +194,6 @@ class WorkerGateway:
                                 self.workers.finish_assignment(
                                     job.id, worker_id, token, prepared, connection_epoch,
                                 )
-                            self.notify_jobs()
-                            continue
-                        # Preparation awaits remote I/O; a pause ACK may already have
-                        # reached the Worker. Recheck before authorizing any dispatch.
-                        # From here to send_text's existing FIFO lock there is no await,
-                        # so an authorized frame is always ordered ahead of that ACK.
-                        if connection.dispatch_paused:
-                            requeued = self.workers.requeue_assignment(
-                                job.id, worker_id, token, connection_epoch
-                            )
-                            if not requeued and self.stops.pending(worker_id) is None:
-                                raise ProtocolViolation("assignment changed while pausing")
                             self.notify_jobs()
                             continue
                         if not self.stops.authorize_dispatch(

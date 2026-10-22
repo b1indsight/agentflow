@@ -16,11 +16,13 @@ import uvicorn
 
 from app import github
 from app.domain.models import DeliveryState
+from app.worker.cli import app as worker_app
 
 if TYPE_CHECKING:
     from app.persistence.store import Store
 
 app = typer.Typer(help="FlowTool admin CLI")
+app.add_typer(worker_app, name="worker")
 flow_app = typer.Typer(help="flow 运维")
 app.add_typer(flow_app, name="flow")
 project_app = typer.Typer(help="Projects v2 运维")
@@ -122,15 +124,6 @@ def serve() -> None:
         log_config=None,  # Keep the runtime's sanitized handlers when Uvicorn initializes.
         timeout_graceful_shutdown=20,
     )
-
-
-@app.command()
-def worker() -> None:
-    """启动远程执行进程并主动连接 control plane。"""
-    from app.worker.config import settings
-    from app.worker.runtime import WorkerRuntime
-
-    asyncio.run(WorkerRuntime(settings).run())
 
 
 @app.command()

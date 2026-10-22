@@ -200,22 +200,6 @@ class Register(Message):
     recovery: RecoveryDescriptor | None = None
 
 
-class WorkerAvailability(Message):
-    """Pause only new assignments on this authenticated connection."""
-
-    type: Literal["worker_availability"] = "worker_availability"
-    request_id: str = Field(min_length=1, max_length=64)
-    connection_epoch: str = Field(min_length=1, max_length=64)
-    paused: bool
-
-
-class AvailabilityAccepted(Message):
-    type: Literal["availability_accepted"] = "availability_accepted"
-    request_id: str
-    connection_epoch: str
-    paused: bool
-
-
 class Started(Message):
     type: Literal["started"] = "started"
     job_id: int
@@ -291,8 +275,7 @@ WorkerMessage = Annotated[
     | Failed
     | FlowToolRequest
     | ExecutionStopped
-    | ConversationResult
-    | WorkerAvailability,
+    | ConversationResult,
     Field(discriminator="type"),
 ]
 
@@ -419,8 +402,7 @@ ServerMessage = Annotated[
     | FlowToolResponse
     | StopExecution
     | StopAccepted
-    | ConversationQuery
-    | AvailabilityAccepted,
+    | ConversationQuery,
     Field(discriminator="type"),
 ]
 
