@@ -284,6 +284,34 @@ async def test_jj_copy_can_return_to_pool_and_reuse_committed_baseline(tmp_path,
     assert (pool.path(reused) / "README.md").read_text() == "updated committed baseline\n"
 
 
+@pytest.mark.skipif(shutil.which("jj") is None, reason="jj is not installed")
+@pytest.mark.parametrize("colocated", [True, False])
+async def test_cancel_cleans_jj_edits_before_reusing_directory(tmp_path, colocated):
+    # Non-colocated jj has no .git checkout; Git reset alone cannot clean its working copy.
+    root, remote = managed_seed(tmp_path)
+    seed = root / "repos/owner/repo"
+    environment = os.environ | {"JJ_USER": "FlowTool Test", "JJ_EMAIL": "flowtool@example.test"}
+    if colocated:
+        await _jj("git", "init", "--colocate", cwd=seed, env=environment)
+    else:
+        shutil.rmtree(seed)
+        await _jj("git", "clone", "--no-colocate", "-b", "main", str(remote), str(seed),
+                  cwd=root, env=environment)
+    pool = RepositoryWorkspaces(root, "worker-a", limit=1)
+    binding = await acquire(pool, 1)
+    repo = pool.path(binding)
+    (repo / "README.md").write_text("committed agent work\n")
+    await _jj("commit", "-m", "agent commit", cwd=repo, env=environment)
+    (repo / "README.md").write_text("cancelled edit")
+    (repo / "untracked").write_text("cancelled file")
+    assert await pool.release(binding, recycle=True) == "released"
+    assert (repo / "README.md").read_text() == "committed agent work\n"
+    assert not (repo / "untracked").exists()
+    reused = await acquire(pool, 1)
+    assert reused.slot_id == binding.slot_id and reused.generation > binding.generation
+    assert (repo / "README.md").read_text() == "base\n"
+
+
 @pytest.mark.parametrize("cancellations", [1, 2])
 async def test_cancelled_copy_waits_for_thread_and_cleans_only_owned_partial(
     tmp_path, monkeypatch, cancellations,

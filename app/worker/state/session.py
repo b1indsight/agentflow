@@ -158,6 +158,7 @@ class WorkerSession:
             archive_task=archive,
             root_identity=self._root_identity(),
             workspace=(previous.workspace if previous and previous.flow_id == assignment.flow_id
+                       and (previous.stopped is None or archive is not None)
                        else None),
             cleanup_verified=bool(previous and previous.flow_id == assignment.flow_id
                                   and previous.cleanup_verified),

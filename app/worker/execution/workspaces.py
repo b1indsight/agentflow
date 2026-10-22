@@ -1,7 +1,7 @@
 """Worker-local bounded repository locations with durable ownership and release fencing.
 
 The runtime holds WorkerRootLock for this component's entire lifetime. An assignment ending
-does not free a location: only an archive with the exact journaled binding may release it.
+does not free a location: archive or a stopped execution must present the journaled binding.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from app.worker.execution.vcs import (
     VcsVerificationError,
     _required_stdout,
     align_repository,
+    clean_repository,
     ensure_seed,
     filesystem_operation,
     require_idle_repository,
@@ -146,6 +147,12 @@ class RepositoryWorkspaces:
         require_repository(self.path(slots[0].binding))
         return slots[0].binding
 
+    def assert_unallocated(self, flow_id: int) -> None:
+        """A missing journal binding must not hide an unfinished pool allocation."""
+        if any(slot.binding.flow_id == flow_id and slot.state not in {"absent", "idle"}
+               for slot in self._load().slots):
+            raise VcsVerificationError("workspace", "unjournaled workspace requires manual recovery")
+
     async def acquire(
         self, repository: str, flow_id: int, *, base_branch: str, remote: str,
         push_token: SecretStr | None,
@@ -164,13 +171,14 @@ class RepositoryWorkspaces:
             if directory.exists() and any(path.name not in known for path in directory.iterdir()):
                 raise VcsVerificationError("workspace", "unregistered repository workspace; refusing adoption")
             original = [slot for slot in slots if slot.binding.flow_id == flow_id]
-            if original and original[0].state != "absent":
+            if original and original[0].state not in {"absent", "idle"}:
                 if len(original) != 1 or original[0].state != "occupied":
                     state = original[0].state
                     raise VcsVerificationError("workspace", f"original workspace is {state}")
                 require_repository(self.path(original[0].binding))
                 return original[0].binding
-            slot = next((slot for slot in slots if slot.state == "idle"), None)
+            slot = (original[0] if original and original[0].state == "idle"
+                    else next((slot for slot in slots if slot.state == "idle"), None))
             if slot is not None:
                 try:
                     await require_idle_repository(self.path(slot.binding))
@@ -221,8 +229,12 @@ class RepositoryWorkspaces:
                 else:
                     if not (seed / ".git").is_dir():
                         raise VcsVerificationError("workspace", "overflow requires a standalone Git seed")
-                    await _required_stdout("workspace", "git", "worktree", "add", "--detach",
-                                           str(path), f"refs/heads/{base_branch}", cwd=seed)
+                    if path.exists():
+                        await _required_stdout("workspace", "git", "checkout", "--no-overwrite-ignore",
+                                               "--detach", f"refs/heads/{base_branch}", cwd=path)
+                    else:
+                        await _required_stdout("workspace", "git", "worktree", "add", "--detach",
+                                               str(path), f"refs/heads/{base_branch}", cwd=seed)
                 slot.state = "occupied"
                 self._write(manifest)
                 return slot.binding
@@ -239,8 +251,8 @@ class RepositoryWorkspaces:
                     self._write(manifest)
                 raise
 
-    async def release(self, binding: WorkspaceBinding) -> Cleanup:
-        """Release the journal-fenced location, retaining warm caches or unregistering overflow."""
+    async def release(self, binding: WorkspaceBinding, *, recycle: bool = False) -> Cleanup:
+        """Release an archive, or clean and retain a stopped execution's directory for reuse."""
         async with self._lock:
             manifest = self._load()
             slot = self._owned(manifest, binding)
@@ -257,13 +269,16 @@ class RepositoryWorkspaces:
                 path = self.path(binding)
                 seed = self._managed(Path("repos", *validate_repository(binding.repository)))
                 if not path.exists():
-                    if (slot.state != "releasing" or slot.kind != "worktree"
+                    if (recycle or slot.state != "releasing" or slot.kind != "worktree"
                             or await worktree_registered(seed, path)):
                         raise VcsVerificationError("workspace", "repository missing without release evidence")
                     slot.state = "absent"
                     self._write(manifest)
                     return "already_absent"
-                await require_idle_repository(path)
+                if recycle:
+                    require_repository(path)
+                else:
+                    await require_idle_repository(path)
                 if slot.kind == "copy" and (path / ".git").is_file():
                     raise VcsVerificationError("workspace", "full copy has external Git metadata")
                 if slot.kind == "worktree":
@@ -275,7 +290,9 @@ class RepositoryWorkspaces:
                         raise VcsVerificationError("workspace", "worktree ownership does not match seed")
                 slot.state = "releasing"
                 self._write(manifest)
-                if slot.kind == "copy":
+                if recycle:
+                    await clean_repository(path)
+                if slot.kind == "copy" or recycle:
                     slot.state = "idle"
                     cleanup: Cleanup = "released"
                 else:

@@ -95,6 +95,18 @@ class WorkerExecutor:
             return ArchiveResult(**task.model_dump(), cleanup=cleanup)
         raise TypeError(f"unsupported execution task: {type(task).__name__}")
 
+    async def reclaim_workspace(self) -> None:
+        """Clean and recycle the stopped session's allocation before reporting it stopped."""
+        record = self.session.load()
+        if record is None or record.stopped is None:
+            raise VcsVerificationError("workspace", "stopped worker session is missing")
+        if record.workspace is None:
+            self.workspaces.assert_unallocated(record.flow_id)
+            return
+        if record.workspace.flow_id != record.flow_id:
+            raise VcsVerificationError("workspace", "cancelled workspace belongs to another Flow")
+        await self.workspaces.release(record.workspace, recycle=True)
+
     async def _initial(
         self, task: InitialTask, secret: AssignmentSecret | None, tool_caller: FlowToolCaller
     ) -> InitialTaskResult:

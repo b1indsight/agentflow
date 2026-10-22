@@ -75,8 +75,10 @@ FlowTool 的目标是把带 `flow` 标签的 GitHub issue 编排成
 - **运维入口**：CLI 可查看 Flow、交付分支/PR、worker、任务恢复状态和未完成的 GitHub 操作，
   并提供 cancel/retry 命令。已核验修订中被明确拒绝的通知可补发；结果不确定时拒绝直接 retry。
 - **取消与 drain**：cancel 持久化停止意图，worker 取消当前执行并回收其持有的 Codex/VCS
-  进程组；停止凭据与已发送 effects 未确认前不释放绑定。drain 停止分配新 Flow，已有绑定
-  继续收尾。未知旧执行保持阻塞，无强制释放入口，见[取消与停机](docs/operations/cancel-drain.md)。
+  进程组，清理未提交修改和未跟踪文件后把原 workspace 归还空闲池，保留目录及 ignored 缓存。
+  完成回收才发送停止凭据；停止凭据与已发送 effects 未确认前不释放绑定。沿用 protocol v14，
+  不增加停止字段。drain 停止分配新 Flow，已有绑定继续收尾。未知旧执行保持阻塞，
+  无强制释放入口，见[取消与停机](docs/operations/cancel-drain.md)。
 - **Projects 与可观测性**：可选组织 Projects v2 同步独立运行；结构化日志、受 token 保护的
   `/metrics`、数据库就绪探针 `/readyz` 与 worker 状态文件已接入。Docker/Compose、Kubernetes
   和常驻运维说明见[部署指南](docs/deployment/README.md)，不代表真实环境已验收。

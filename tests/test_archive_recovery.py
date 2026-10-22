@@ -8,6 +8,7 @@ from app.contracts.protocol import (
     PROTOCOL_VERSION,
     ArchiveResult,
     ArchiveTask,
+    ExecutionStopped,
     Failed,
     RecoveryDescriptor,
     Succeeded,
@@ -95,6 +96,10 @@ async def test_archive_after_initial_retry_cannot_adopt_a_released_binding(store
         database=store.database,
     )
     service.cancel(flow)
+    stop = store.stops.pending('worker-a')
+    assert store.stops.confirm('worker-a', ExecutionStopped(
+        **stop.message('epoch').model_dump(exclude={'type'}), execution_nonce='owned',
+    ))
     service.retry(flow)
     await route_merge(store, flow)
     assert store.flows.get_flow(flow.id).state is FlowState.ACTIVE

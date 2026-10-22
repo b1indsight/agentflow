@@ -8,6 +8,11 @@
 
 ## Unreleased
 
+- worker 取消后清理未提交修改和未跟踪文件，将原 copy/worktree 归还空闲池，保留目录与
+  ignored 缓存；回收完成后才发送停止凭据，清理失败不释放控制面绑定。沿用原停止消息、
+  protocol v14 / journal v4 / manifest v1，不增加字段或整目录删除。旧停止重放仍核对下一
+  任务，已 dispatch 却缺 journal 时明确失败且不重跑，避免空等。入口优化见 #108。
+
 - worker 自动 clone 缺失/空 seed；每次编码使用 assignment bot 的临时 gh 包装、独立配置与
   隔离的 Git helper，INITIAL 的 MCP/最终远端核验也使用当前 token。执行位置按 worker/仓库
   复用一个完整副本并以临时 Git worktree 溢出，总上限默认 2，可用
