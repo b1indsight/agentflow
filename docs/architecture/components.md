@@ -160,13 +160,14 @@ worker socket 与 executor 解耦，root 内原子 journal 在 ack 前保存进�
 
 ### Amp
 
-- `AmpAgent` 使用私有 local execute thread；prompt 经 stdin，恢复显式指定同一 `T-UUID`，
+- `amp_agent.AmpCodingAgent` 适配 worker 的编码请求，使用私有 local execute thread；
+  prompt 经 stdin，恢复显式指定同一 `T-UUID`，
   固定 `--mode low`，不运行 orb、runner 或 SDK。原生登录或 `AMP_API_KEY` 归专用 worker 账户。
 - 临时 settings、Git helper 和 `gh` 环境在每轮重建，复用本轮 GitHub capability；INITIAL 配置
   当前 WorkerMCP，REVISION 禁用旧 `flow` broker。进程环境不继承 control/worker 或个人 GH token。
 - 成功必须具有完整、同 session 的 init/result、进程退出 0、`is_error=false` 和 `subtype=success`。
   最终文本原样交给 executor，Schema 只作提示，不修复 JSON 或自动重跑未知执行。
-- `amp_cli.run_amp` 并行有界读取两条管道；取消/超时先 SIGTERM，升级时包含事前捕获的独立
+- `amp_process.run_amp` 供编码与历史导出共用，并行有界读取两条管道；取消/超时先 SIGTERM，升级时包含事前捕获的独立
   shell 进程组。该快照无法保证回收任意脱离进程树的进程；仍依赖外部隔离。
 - `WorkerSession` 按 ID 格式选择历史来源。Amp 原生 export 经公开块映射与脱敏后短时缓存，
   支持外部追加、块内分页、前缀编辑失效；不保存第二套捕获历史，不显示 thinking。

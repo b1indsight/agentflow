@@ -4,7 +4,7 @@ import pytest
 from pydantic import SecretStr
 
 from app.worker.config import WorkerSettings
-from app.worker.execution.amp import AmpAgent
+from app.worker.execution.amp_agent import AmpCodingAgent
 from app.worker.execution.codex import CodexAgent
 from app.worker.runtime import WorkerRootLock, WorkerRuntime
 
@@ -50,7 +50,7 @@ def test_worker_root_rejects_sequential_identity_reuse(tmp_path: Path) -> None:
         WorkerRootLock(root, "worker-b").acquire()
 
 
-@pytest.mark.parametrize("backend,expected,timeout", [(None, CodexAgent, 23), ("amp", AmpAgent, 47)])
+@pytest.mark.parametrize("backend,expected,timeout", [(None, CodexAgent, 23), ("amp", AmpCodingAgent, 47)])
 def test_runtime_selects_agent_and_its_revision_deadline(tmp_path, monkeypatch, backend, expected, timeout):
     monkeypatch.setattr("app.worker.runtime.configure_logging", lambda *args: None)
     if backend is None:

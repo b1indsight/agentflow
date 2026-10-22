@@ -11,8 +11,8 @@ import pytest
 from pydantic import SecretStr
 
 from app.domain.models import CodingExecutionContext, GitHubCapability
-from app.worker.execution.amp import AmpAgent
-from app.worker.execution.amp_cli import AmpProcessResult, amp_environment, run_amp
+from app.worker.execution.amp_agent import AmpCodingAgent
+from app.worker.execution.amp_process import AmpProcessResult, amp_environment, run_amp
 
 THREAD = "T-01a15d70-eb3d-722c-9f6d-563dd65eb0a8"
 
@@ -60,9 +60,9 @@ async def test_amp_uses_current_capabilities_and_raw_caller_schema(monkeypatch, 
             assert env["FLOWTOOL_MCP_TOKEN"] == "broker-secret"
         return AmpProcessResult(stream(result='{"caller_owned":"bot-secret"}'), b"", 0)
 
-    monkeypatch.setattr("app.worker.execution.amp.github_environment", github)
-    monkeypatch.setattr("app.worker.execution.amp.run_amp", execute)
-    agent = AmpAgent(trusted_host=True)
+    monkeypatch.setattr("app.worker.execution.amp_agent.github_environment", github)
+    monkeypatch.setattr("app.worker.execution.amp_agent.run_amp", execute)
+    agent = AmpCodingAgent(trusted_host=True)
     result = (await agent.resume(THREAD, "task", cwd=tmp_path, output_schema=schema, context=context)
               if resume else await agent.start("task", tmp_path, output_schema=schema, context=context))
     assert result.session_id == THREAD and result.exit_code == 0
@@ -77,8 +77,8 @@ async def test_jsonl_keeps_unicode_separators_inside_the_final_answer(monkeypatc
     async def execute(*args, **kwargs):
         return AmpProcessResult(stream(result=answer), b"", 0)
 
-    monkeypatch.setattr("app.worker.execution.amp.run_amp", execute)
-    result = await AmpAgent(trusted_host=True).start("task", tmp_path)
+    monkeypatch.setattr("app.worker.execution.amp_agent.run_amp", execute)
+    result = await AmpCodingAgent(trusted_host=True).start("task", tmp_path)
     assert result.exit_code == 0 and result.last_message == answer
 
 
@@ -93,14 +93,26 @@ async def test_final_json_redacts_credentials_after_escaped_separators(monkeypat
     async def execute(*args, **kwargs):
         return AmpProcessResult(stream(result=json.dumps(payload)), b"", 0)
 
-    monkeypatch.setattr("app.worker.execution.amp.run_amp", execute)
-    result = await AmpAgent(trusted_host=True).start("task", tmp_path)
+    monkeypatch.setattr("app.worker.execution.amp_agent.run_amp", execute)
+    result = await AmpCodingAgent(trusted_host=True).start("task", tmp_path)
     assert result.exit_code == 0
     assert json.loads(result.last_message) == {
         "summary": "line\n[REDACTED]",
         "nested": [{"key": "line\t[REDACTED]"}, "line\r[REDACTED]"],
         "path": "task-abcdefghijklmnop", "count": 2, "ok": True,
     }
+
+
+@pytest.mark.parametrize("text", ["7" * 5000, "[" * 1200 + "0" + "]" * 1200],
+                         ids=["long-number", "deep-bracket-text"])
+async def test_final_answer_keeps_text_that_exceeds_json_decoder_limits(monkeypatch, tmp_path, text):
+    # A successful answer can quote long numbers or bracket text without being a JSON document.
+    async def execute(*args, **kwargs):
+        return AmpProcessResult(stream(result=json.dumps({"summary": text})), b"", 0)
+
+    monkeypatch.setattr("app.worker.execution.amp_agent.run_amp", execute)
+    result = await AmpCodingAgent(trusted_host=True).start("task", tmp_path)
+    assert result.exit_code == 0 and json.loads(result.last_message) == {"summary": text}
 
 
 @pytest.mark.parametrize("stdout,exit_code", [
@@ -115,8 +127,8 @@ async def test_incomplete_or_failed_execution_never_succeeds(monkeypatch, tmp_pa
     async def execute(*args, **kwargs):
         return AmpProcessResult(stdout, b"", exit_code)
 
-    monkeypatch.setattr("app.worker.execution.amp.run_amp", execute)
-    result = await AmpAgent(trusted_host=True).resume(THREAD, "task", cwd=tmp_path)
+    monkeypatch.setattr("app.worker.execution.amp_agent.run_amp", execute)
+    result = await AmpCodingAgent(trusted_host=True).resume(THREAD, "task", cwd=tmp_path)
     assert result.exit_code != 0 and result.failure_detail
 
 
@@ -130,17 +142,18 @@ async def test_unproven_missing_thread_does_not_trigger_replay(monkeypatch, tmp_
                   + "AMP_API_KEY=current-test-token other=sgamp_old-client_ABC\n")
         return AmpProcessResult(b"", stderr.encode(), 1)
 
-    monkeypatch.setattr("app.worker.execution.amp.run_amp", execute)
-    result = await AmpAgent(trusted_host=True).resume(THREAD, "task", cwd=tmp_path)
+    monkeypatch.setattr("app.worker.execution.amp_agent.run_amp", execute)
+    result = await AmpCodingAgent(trusted_host=True).resume(THREAD, "task", cwd=tmp_path)
     assert result.exit_code != 0
     assert result.failure_detail and "does not exist" in result.failure_detail
     assert len(result.failure_detail) <= 4000
     assert "current-test-token" not in result.failure_detail
     assert "sgamp_old-client_ABC" not in result.failure_detail
-    with pytest.raises(ValueError, match="Amp thread"):
-        await AmpAgent(trusted_host=True).resume("../thread", "task", cwd=tmp_path)
+    for invalid_session in ("../thread", THREAD.upper(), THREAD[2:]):
+        with pytest.raises(ValueError, match="Amp thread"):
+            await AmpCodingAgent(trusted_host=True).resume(invalid_session, "task", cwd=tmp_path)
     with pytest.raises(RuntimeError, match="trusted-host"):
-        await AmpAgent().start("task", tmp_path)
+        await AmpCodingAgent().start("task", tmp_path)
 
 
 async def test_workspace_settings_cannot_override_invocation_policy(tmp_path, monkeypatch):
@@ -152,9 +165,9 @@ async def test_workspace_settings_cannot_override_invocation_policy(tmp_path, mo
     async def execute(*args, **kwargs):
         pytest.fail("conflicting settings must be rejected before starting Amp")
 
-    monkeypatch.setattr("app.worker.execution.amp.run_amp", execute)
+    monkeypatch.setattr("app.worker.execution.amp_agent.run_amp", execute)
     with pytest.raises(ValueError, match="workspace Amp settings"):
-        await AmpAgent(trusted_host=True).start("task", tmp_path)
+        await AmpCodingAgent(trusted_host=True).start("task", tmp_path)
     assert settings.read_text() == '{"amp.mcpPermissions":[]}'
 
 
@@ -170,7 +183,7 @@ def test_environment_keeps_amp_login_but_excludes_ambient_credentials():
 
 
 async def test_process_supervisor_drains_both_pipes_and_bounds_output(monkeypatch, tmp_path):
-    monkeypatch.setattr("app.worker.execution.amp_cli.AMP_BIN", sys.executable)
+    monkeypatch.setattr("app.worker.execution.amp_process.AMP_BIN", sys.executable)
     result = await run_amp(["-c", "import os; os.write(1,b'o'*131072); os.write(2,b'e'*131072)"],
                            cwd=tmp_path, max_stdout=262144)
     assert result.exit_code == 0 and len(result.stdout) == len(result.stderr) == 131072
@@ -182,8 +195,8 @@ async def test_process_supervisor_drains_both_pipes_and_bounds_output(monkeypatc
 @pytest.mark.parametrize("cancel", [False, True])
 async def test_supervisor_cleans_separate_child_group_before_returning(monkeypatch, tmp_path, cancel):
     # Native Amp shells use their own PGID; killing just the CLI group leaks them.
-    monkeypatch.setattr("app.worker.execution.amp_cli.AMP_BIN", sys.executable)
-    monkeypatch.setattr("app.worker.execution.amp_cli.TERMINATION_GRACE", 0.1)
+    monkeypatch.setattr("app.worker.execution.amp_process.AMP_BIN", sys.executable)
+    monkeypatch.setattr("app.worker.execution.amp_process.TERMINATION_GRACE", 0.1)
     pidfile = tmp_path / "child.pid"
     code = f"""import pathlib, signal, subprocess, sys, time
 signal.signal(signal.SIGTERM, signal.SIG_IGN)

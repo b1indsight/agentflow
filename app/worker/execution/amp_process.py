@@ -1,4 +1,4 @@
-"""Invocation-owned Amp settings, environment and bounded local process supervision."""
+"""Shared Amp process supervision, invocation settings and output redaction."""
 
 from __future__ import annotations
 
@@ -35,34 +35,47 @@ _SECRET_PATTERN = re.compile(
     r"\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|sgamp_[A-Za-z0-9_-]+|sk-[A-Za-z0-9_-]{16,})"
 )
 _BEARER_PATTERN = re.compile(r"(?i)(Bearer\s+)[A-Za-z0-9._~+/-]+")
+# Escaped quotes cannot open a JSON literal; skip them when an unterminated string fails.
+_JSON_STRING = re.compile(
+    r'(?<!\\)"[^"\\\x00-\x1f]*(?:\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4})[^"\\\x00-\x1f]*)*"'
+)
 
 
 def redact_amp_text(value: str, secrets: Iterable[str] = ()) -> str:
-    """Redact plaintext and decoded JSON strings before retaining Amp output."""
+    """Redact plaintext and escaped JSON strings without parsing entire documents."""
     secrets = tuple(secret for secret in secrets if secret)
+
+    def literal(match: re.Match[str]) -> str:
+        raw = match.group()
+        if "\\" not in raw:
+            return raw
+        decoded: str = json.loads(raw)
+        redacted = redact_amp_text(decoded, secrets)
+        return raw if redacted == decoded else json.dumps(redacted)
+
+    # Decode string boundaries before plaintext rules, including escaped Bearer slashes.
+    # Only replaced literals are rewritten; non-sensitive formatting stays unchanged.
+    value = _JSON_STRING.sub(literal, value)
     for secret in secrets:
         value = value.replace(secret, "[REDACTED]")
     value = _SECRET_PATTERN.sub("[REDACTED]", value)
-    value = _BEARER_PATTERN.sub(r"\1[REDACTED]", value)
+    return _BEARER_PATTERN.sub(r"\1[REDACTED]", value)
 
-    def redact_json(payload: JsonValue) -> JsonValue:
-        if isinstance(payload, str):
-            return redact_amp_text(payload, secrets)
-        if isinstance(payload, list):
-            return [redact_json(item) for item in payload]
-        if isinstance(payload, dict):
-            return {redact_amp_text(key, secrets): redact_json(item) for key, item in payload.items()}
-        return payload
 
-    # Escaped separators hide regex word boundaries in tool payloads and final JSON.
-    # Reuse the same rules on decoded keys/values, retaining unchanged formatting.
-    try:
-        payload: JsonValue = json.loads(value)
-    except json.JSONDecodeError:
-        return value
-    redacted = redact_json(payload)
-    return (value if redacted == payload else
-            json.dumps(redacted, ensure_ascii=False, separators=(",", ":")))
+def redact_amp_json(value: JsonValue, secrets: Iterable[str] = ()) -> str:
+    """Redact parsed tool payloads and serialize once for public history."""
+    secrets = tuple(secret for secret in secrets if secret)
+
+    def walk(item: JsonValue) -> JsonValue:
+        if isinstance(item, str):
+            return redact_amp_text(item, secrets)
+        if isinstance(item, list):
+            return [walk(child) for child in item]
+        if isinstance(item, dict):
+            return {redact_amp_text(key, secrets): walk(child) for key, child in item.items()}
+        return item
+
+    return json.dumps(walk(value), separators=(",", ":"))
 
 
 def amp_environment(

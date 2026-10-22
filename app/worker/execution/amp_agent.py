@@ -1,18 +1,17 @@
-"""CodingAgent adapter for the pinned, locally supervised Amp CLI."""
+"""Worker CodingAgent adapter for locally supervised Amp threads."""
 
 from __future__ import annotations
 
 import json
 import os
-import re
 import tempfile
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, StrictBool, StrictStr, ValidationError
+from pydantic import BaseModel, ConfigDict, StrictBool, StrictStr, TypeAdapter, ValidationError
 
 from app.contracts.conversation import SessionId
 from app.domain.models import CodingExecutionContext, CodingExecutionResult
-from app.worker.execution.amp_cli import (
+from app.worker.execution.amp_process import (
     AMP_TOOLS,
     AmpProcessResult,
     amp_environment,
@@ -21,6 +20,8 @@ from app.worker.execution.amp_cli import (
     write_amp_settings,
 )
 from app.worker.execution.gh import github_environment
+
+_SESSION_ID = TypeAdapter(SessionId)
 
 
 class _Init(BaseModel):
@@ -109,8 +110,8 @@ def _outcome(process: AmpProcessResult, expected: str | None) -> CodingExecution
         )
 
 
-class AmpAgent:
-    """Execute/resume a private local thread; executor retains schema and VCS authority."""
+class AmpCodingAgent:
+    """Adapt coding requests to Amp threads; executor retains schema and VCS authority."""
 
     def __init__(self, *, trusted_host: bool = False, timeout: float = 1200.0):
         self.trusted_host = trusted_host
@@ -127,7 +128,11 @@ class AmpAgent:
         context: CodingExecutionContext | None = None,
     ) -> CodingExecutionResult:
         # Never select a recent thread or silently migrate another backend's session.
-        if not re.fullmatch(r"T-[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", session_id):
+        try:
+            thread_id = _SESSION_ID.validate_python(session_id, strict=True)
+        except ValidationError:
+            thread_id = ""
+        if not thread_id.startswith("T-"):
             raise ValueError("resume requires an explicit Amp thread ID")
         return await self._run(prompt, cwd, session_id=session_id, output_schema=output_schema, context=context)
 

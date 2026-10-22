@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from app.contracts.conversation import ConversationFailure, HistoryQuery
-from app.worker.execution.amp_cli import AmpProcessResult
+from app.worker.execution.amp_process import AmpProcessResult
 from app.worker.state import history
 from app.worker.state.amp_history import AmpHistory
 from app.worker.state.history import CodexHistory
@@ -229,8 +229,10 @@ def test_amp_history_redacts_other_clients_access_tokens(monkeypatch) -> None:
     token = "sgamp_external-client_123456789"
     # Native tool payloads become JSON strings before entering the public history cache.
     payload = {f"line\n{token}": [f"line\t{token}", {"output": f"line\r{token}"}],
+               "encoded": json.dumps({"output": f"line\n{token}"}), "unicode": "\ud800",
                "path": "task-abcdefghijklmnop", "count": 2, "ok": True}
     redacted = {"line\n[REDACTED]": ["line\t[REDACTED]", {"output": "line\r[REDACTED]"}],
+                "encoded": json.dumps({"output": "line\n[REDACTED]"}), "unicode": "\ud800",
                 "path": "task-abcdefghijklmnop", "count": 2, "ok": True}
     message = {"role": "assistant", "protocolMessageID": "M-token", "content": [
         {"type": "text", "text": f"line\n{token}"},

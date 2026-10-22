@@ -10,7 +10,7 @@ from app.controler.runtime import ServerRuntime
 from app.controler.workers.conversation import ConversationService
 from app.controler.workers.gateway import WorkerGateway
 from app.domain.models import Attempt, Flow, FlowExecution, FlowState
-from app.worker.execution.amp_cli import AmpProcessResult
+from app.worker.execution.amp_process import AmpProcessResult
 from app.worker.state.session import WorkerSession
 from app.worker.transport.client import WorkerClient
 from tests.access import AccessIssuer

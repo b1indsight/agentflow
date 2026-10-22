@@ -12,7 +12,7 @@ from typing import IO
 
 from app.telemetry.logging import configure_logging
 from app.worker.config import WorkerSettings
-from app.worker.execution.amp import AmpAgent
+from app.worker.execution.amp_agent import AmpCodingAgent
 from app.worker.execution.codex import CodexAgent
 from app.worker.execution.executor import WorkerExecutor
 from app.worker.health import HealthFile
@@ -100,7 +100,7 @@ class WorkerRuntime:
         session = WorkerSession(self.settings.worker_root)
         timeout = (self.settings.amp_run_timeout_seconds if self.settings.coding_agent == "amp"
                    else self.settings.codex_run_timeout_seconds)
-        agent_type = AmpAgent if self.settings.coding_agent == "amp" else CodexAgent
+        agent_type = AmpCodingAgent if self.settings.coding_agent == "amp" else CodexAgent
         executor = WorkerExecutor(
             self.settings.worker_root,
             agent_type(

@@ -1,6 +1,6 @@
 # Worker Amp CLI 适配 — Feature record
 
-**Stage:** Implementation — 取消重连与 Amp JSON 漏脱敏修复已完成本地组合验证，943 项通过；后续审查与发布见 PR，仍保留依赖 medium 和两项 low，Docker/Linux 与线上 GitHub 闭环未验收。
+**Stage:** Implementation — Amp 脱敏职责及重复校验已收窄，编码适配与进程调用命名已明确，945 项本地回归通过；后续审查与发布见 PR，仍保留依赖 medium、两项 low 和极深重复编码的既有递归限制，Docker/Linux 与线上 GitHub 闭环未验收。
 **PR:** [Draft PR #107](https://github.com/b1indsight/agentflow/pull/107)，依赖 [PR #109](https://github.com/b1indsight/agentflow/pull/109) 的取消回收合同；原 bootstrap [PR #103](https://github.com/b1indsight/agentflow/pull/103) 已合并，Amp 未合并或部署。
 **Bookmark:** `feat/worker-amp-cli`
 
@@ -468,3 +468,58 @@ CLI 升级可能改变错误和输出格式，因此固定部署版本，未确�
   仅 lookup occupied 位置，已回收的 idle 位置未重新分配，导致 exit 65。保留该新 finding，
   不擅自修复。INITIAL 启动诊断传递和取消期间已知 merge/ARCHIVE 的永久回归缺口两项 low
   仍不在用户本次指定的前两项内。保持原 #107/#109，不合并或部署；新 head CI 单独订阅。
+
+### [012] — 2026-10-22：收窄脱敏职责，复用会话校验并删除重复限制
+
+- **触发与范围：** 用户要求优化 Claude 复杂度审查指出的两处。只改 Amp 的文本/结构化
+  脱敏边界、resume ID 校验和明显重复的限制；不改缓存、进程监督、MCP、消息数预算或
+  wire v15 / journal v4 / manifest v1。仍基于 [011]，不带入 #109 后续仅测试清理的变更。
+- **取代 [010] 的实现方式：** 文本仅识别并解码 JSON 字符串字面量，不再尝试解析整份
+  数字、数组或对象。保留嵌套 JSON 字符串、对象键、Unicode 转义与原 token 边界检查；
+  先处理字面量，再运行明文规则，正确覆盖转义的 Bearer 斜线。仅替换有敏感内容的字面量，
+  不重写其余排版。已解析的历史工具 input/result 直接类型化遍历，再一次 ASCII 安全序列化，
+  删除 dump → 整文档 load → dump 往返和整树相等比较。历史边界把 RecursionError 映射为
+  既有 history_unreadable，不让查询等待错误回执超时。
+- **重复检查：** resume 复用 `TypeAdapter(SessionId)`，仅额外限制 Amp 的 `T-` 前缀，
+  删除另一套大小写不一致的正则；大写 ID 在执行前拒绝，错误不携带原 ID 或校验异常链。
+  删除 MAX_ITEMS/min() 和 supervisor 已保证不可达的 stdout 长度检查，保留分页字节、
+  对象数预算及 overflow 状态处理，单页仍最多 500 项。
+- **回归与对照：** 新增一条公开最终答案回归的长数字/括号文本变体；扩展既有历史回归，
+  包含 JSON-in-string 和孤立代理码点；扩展既有非法 ID 检查。生产代码未改时 **4 failed**，
+  修改后 **4 passed**，相关套件 **42 passed**。临时探针验证 14 层编码、转义 token、格式
+  保留、生成器凭据、幂等性、500+100 分页只导出一次，以及超时/溢出/消息数预算。
+- **复杂度消融：** 去掉字面量解码会重新泄漏嵌套 token，故保留该机制。对同一万个工具
+  字符串，直接遍历与先序列化后检查的语义结果一致；9 次本机运行中位数分别为 8.62 ms /
+  17.47 ms，tracemalloc 峰值 976,652 / 1,500,071 字节，保留结构化入口以避免无意义往返。
+  自查另发现未闭合字符串会从每个转义引号重复扫描；加入固定的起始引号约束，不增加解析器
+  或深度配置。8,000 个转义引号的对照从 500.30 ms 降至 0.34 ms，100,000 个为 5.01 ms。
+  复现输入为 `'"' + '\\"' * n`，对照仅移除正则开头的 `(?<!\\)`。这些是局部实验，
+  不代表整个 worker 的吞吐量。临时探针删除，结果保留在 `optimization-controls.log`。
+- **验证：** `FLOWTOOL_TEST_DATABASE_URL=postgresql://b1indsight@127.0.0.1:55477/postgres uv run pytest -q`
+  全量 **945 passed**，98.06 秒，一条既有弃用警告；`uv run ruff check app tests`、
+  `uv run mypy app tests`（206 个源文件）、静态资源与 wheel/sdist 构建通过。
+  额外的 `mypy .` 因既有 smoke 模块被重复发现而失败，使用项目 CI 的 app/tests 范围通过。
+  证据目录仍为 `.amp/in/artifacts/amp-cli-calibration-20261021/`，本轮日志前缀为
+  `optimization-`、`pytest-optimization`、`ruff-optimization`、`mypy-optimization` 与 `build-optimization`。
+- **保留边界：** 500 层 Unicode 重复编码字符串（约 1.26 MB）在已发布代码和本次代码均触发
+  Python 递归上限；历史现能返回有界错误，最终答案仍可能失败。本次不加通用深度策略或新配置。
+  其余依赖 medium、INITIAL 诊断及 merge/ARCHIVE 永久回归缺口不在本轮范围；保持 Draft，
+  不合并或部署，后续审查结果和准确发布 head 以原 PR 为准。
+
+### [013] — 2026-10-22：按编码适配与进程监督职责重命名
+
+- **触发与决定：** 用户要求通过文件名和类名说明职责。将 `execution/amp.py` 改为
+  `execution/amp_agent.py`，类 `AmpAgent` 改为 `AmpCodingAgent`，明确它实现 worker 的
+  CodingAgent 合同；将 `execution/amp_cli.py` 改为 `execution/amp_process.py`，明确它供编码
+  与原生历史导出共用，负责进程监督、调用环境/设置和脱敏。`AmpProcessResult` 已准确表达
+  进程输出，保留类名，不引入新的封装、别名或旧路径转发。
+- **实现与范围：** 同步 runtime 装配、历史查询、测试导入与 monkeypatch 路径，更新当前
+  架构说明和 CHANGELOG。历史条目保留当时的名称，本条取代其命名，不改变既有功能、
+  CLI 命令、环境变量、协议或存储版本；[012] 的尚未发布代码保持不动。
+- **验证：** 8 个受影响 Python 文件与 [012] 固定快照比较，规范化此次模块/类改名和
+  docstring 后 AST 相同；纯命名调整没有新增机制，不增加测试或消融。活动代码、测试、
+  架构和脚本没有旧名称引用；两个旧源文件已移除。PostgreSQL 全量 **945 passed**，
+  97.48 秒，一条既有弃用警告；Ruff、mypy（206 文件）及 wheel/sdist 构建通过。
+  在隔离的 Python 导入路径下，从构建出的 wheel 导入 AmpCodingAgent、amp_process 和
+  WorkerRuntime 成功，wheel 不含旧模块。证据为 `rename-ast.log`、`pytest-rename.log`、
+  `ruff-rename.log`、`mypy-rename.log` 和 `build-rename.log`，位于既有证据目录。

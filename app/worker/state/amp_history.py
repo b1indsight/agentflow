@@ -21,15 +21,15 @@ from app.contracts.conversation import (
     HistoryPage,
     HistoryQuery,
 )
-from app.worker.execution.amp_cli import (
+from app.worker.execution.amp_process import (
     amp_environment,
+    redact_amp_json,
     redact_amp_text,
     run_amp,
     write_amp_settings,
 )
 
 MAX_EXPORT = 2 * 1024 * 1024
-MAX_ITEMS = 500
 EXPORT_TIMEOUT = 20
 CACHE_SIZE = 16
 CACHE_SECONDS = 2
@@ -64,7 +64,7 @@ class AmpHistory:
             return self._page(query, self._refresh(query.session_id))
         except ConversationFailure:
             raise
-        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
+        except (OSError, ValueError, TypeError, KeyError, RecursionError) as exc:
             raise ConversationFailure("history_unreadable") from exc
         finally:
             self._reads.release()
@@ -91,8 +91,6 @@ class AmpHistory:
             if result.stderr.strip() == f"Thread https://ampcode.com/threads/{session_id} does not exist.".encode():
                 return None
             raise ConversationFailure("history_unreadable")
-        if len(result.stdout) > MAX_EXPORT:
-            raise ConversationFailure("history_limit")
         payload = json.loads(result.stdout)
         if not isinstance(payload, dict) or payload.get("id") != session_id:
             raise ConversationFailure("history_unreadable")
@@ -134,7 +132,7 @@ class AmpHistory:
         while index < len(snapshot.items):
             item = snapshot.items[index]
             item_size = len(item.model_dump_json().encode())
-            if len(page.items) >= min(query.limit, MAX_ITEMS) or size + item_size > MAX_PAGE:
+            if len(page.items) >= query.limit or size + item_size > MAX_PAGE:
                 break
             page.items.append(item)
             size += item_size
@@ -159,6 +157,10 @@ class AmpHistory:
         timestamp = message.get("createdAt") if isinstance(message.get("createdAt"), str) else None
         items: list[HistoryItem] = []
         unsupported = False
+        secrets = tuple(os.environ.get(key, "") for key in (
+            "AMP_API_KEY", "OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN",
+            "FLOWTOOL_WORKER_TOKEN", "FLOWTOOL_PUSH_TOKEN", "FLOWTOOL_MCP_TOKEN", "GH_TOKEN", "GITHUB_TOKEN",
+        ))
         for block_index, block in enumerate(blocks):
             if not isinstance(block, dict):
                 unsupported = True
@@ -168,11 +170,11 @@ class AmpHistory:
                 continue
             item_id = f"{session_id}:{message_id}:{block_index}"
             if kind == "text" and isinstance(block.get("text"), str):
-                text, truncated = self._text(block["text"])
+                text, truncated = self._text(redact_amp_text(block["text"], secrets))
                 items.append(HistoryItem(id=item_id, timestamp=timestamp, role=role, kind="message",
                                          content=ConversationContent(text=text), truncated=truncated))
             elif kind == "tool_use" and isinstance(block.get("name"), str):
-                arguments, truncated = self._text(json.dumps(block.get("input", {}), separators=(",", ":")))
+                arguments, truncated = self._text(redact_amp_json(block.get("input", {}), secrets))
                 call_id = block.get("id")
                 if not isinstance(call_id, str):
                     unsupported = True
@@ -186,7 +188,7 @@ class AmpHistory:
                     unsupported = True
                     continue
                 result = run.get("result", {})
-                text, truncated = self._text(json.dumps(result, separators=(",", ":")))
+                text, truncated = self._text(redact_amp_json(result, secrets))
                 items.append(HistoryItem(id=item_id, timestamp=timestamp, role="tool", kind="tool_result",
                                          call_id=block["toolUseID"], content=ConversationContent(text=text),
                                          truncated=truncated))
@@ -196,9 +198,4 @@ class AmpHistory:
 
     @staticmethod
     def _text(value: str) -> tuple[str, bool]:
-        secrets = (os.environ.get(key, "") for key in (
-            "AMP_API_KEY", "OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN",
-            "FLOWTOOL_WORKER_TOKEN", "FLOWTOOL_PUSH_TOKEN", "FLOWTOOL_MCP_TOKEN", "GH_TOKEN", "GITHUB_TOKEN",
-        ))
-        value = redact_amp_text(value, secrets)
         return value[:8192], len(value) > 8192
