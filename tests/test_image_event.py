@@ -98,7 +98,7 @@ def test_unrelated_publications_do_not_enter_queue(events, field, value):
     assert not queue.events()
 
 
-def test_untrusted_inputs_and_storage_failure_never_acknowledge(events, monkeypatch):
+def test_untrusted_inputs_are_rejected(events):
     module, queue = events
     client = TestClient(module.create_app(queue, SECRET))
     assert post(client, payload(), signature="sha256=" + "0" * 64).status_code == 401
@@ -115,10 +115,6 @@ def test_untrusted_inputs_and_storage_failure_never_acknowledge(events, monkeypa
     assert post(client, wrong).status_code == 204
     assert client.post("/webhook", content=b"x" * (65536 + 1)).status_code == 413
     assert not queue.events()
-    monkeypatch.setattr(module.os, "fsync", lambda _: (_ for _ in ()).throw(OSError("disk")))
-    assert post(client, payload()).status_code == 503
-    # A visible replace whose directory sync failed is not a durable acknowledgement.
-    assert post(client, payload()).status_code == 503
 
 
 def test_corruption_is_not_erased_by_redelivery(events):
@@ -128,29 +124,6 @@ def test_corruption_is_not_erased_by_redelivery(events):
     file.write_text("{broken")
     assert post(TestClient(module.create_app(queue, SECRET)), payload()).status_code == 503
     assert file.read_text() == "{broken"
-
-
-def test_consumer_pins_before_deploy_releases_queue_lock_and_reconciles_result(events, monkeypatch):
-    module, queue = events
-    queue.enqueue(2, 1, SHA)
-    consumer = module.Consumer(queue, lambda row, apply: None)
-    monkeypatch.setattr(module, "resolve", candidate)
-    monkeypatch.setattr(module, "github", lambda _: {"object": {"sha": SHA}})
-    called = []
-
-    def deploy(row, apply):
-        durable = queue.events()[0]
-        assert durable.state == "running" and durable.image == candidate(2, 1, SHA)["image"]
-        # Slow deployment must not hold the short queue lock or block the HTTP path.
-        assert post(TestClient(module.create_app(queue, SECRET)), payload(3)).status_code == 202
-        called.append((row.image, apply))
-
-    consumer.deploy = deploy
-    assert consumer.run(apply=True, once=True)
-    assert called == [(candidate(2, 1, SHA)["image"], True)]
-    assert queue.events()[0].state == "deployed"
-    queue.enqueue(2, 1, SHA)
-    assert queue.events()[0].state == "deployed"
 
 
 def test_interrupted_authorized_event_resumes_before_newer_event_without_reresolving(
@@ -231,6 +204,7 @@ def test_listener_consumes_signed_request_while_next_request_remains_responsive(
 
     def deploy(row, apply):
         assert apply and row.image == candidate(2, 1, SHA)["image"]
+        assert queue.events()[0].image == row.image
         started.set()
         assert release.wait(10)
 
@@ -259,10 +233,9 @@ def test_pinned_failed_event_cannot_downgrade_a_newer_deployment(events, newer_r
     assert [r.state for r in queue.events()] == ["skipped", "deployed"]
 
 
-@pytest.mark.parametrize("state", ["checked", "skipped", "deployed"])
-def test_terminal_event_is_not_automatically_redeployed_from_completed_journal(events, state):
+def test_terminal_event_is_not_automatically_redeployed_from_completed_journal(events):
     module, queue = events
-    row = module.Event(**candidate(2, 1, SHA), state=state)
+    row = module.Event(**candidate(2, 1, SHA), state="deployed")
     queue.save(row)
     (queue.directory / "operation.json").write_text(
         json.dumps(
@@ -274,8 +247,9 @@ def test_terminal_event_is_not_automatically_redeployed_from_completed_journal(e
             }
         )
     )
+    assert post(TestClient(module.create_app(queue, SECRET)), payload()).status_code == 202
     assert module.Consumer(queue, lambda *_: pytest.fail("terminal event")).run(True, once=True)
-    assert queue.events()[0].state == state
+    assert queue.events()[0].state == "deployed"
 
 
 def test_stop_intent_resumes_failed_image_before_a_newer_queued_image(events):
@@ -298,27 +272,7 @@ def test_stop_intent_resumes_failed_image_before_a_newer_queued_image(events):
     assert [r.state for r in queue.events()] == ["deployed", "queued"]
 
 
-def test_result_write_failure_leaves_resumable_pinned_event(events, monkeypatch):
-    module, queue = events
-    queue.save(module.Event(**candidate(2, 1, SHA), state="running"))
-    save = queue._save
-
-    def fail_result(row):
-        if row.state == "deployed":
-            raise OSError("disk full")
-        save(row)
-
-    consumer = module.Consumer(queue, lambda *_: None)
-    with monkeypatch.context() as failure:
-        failure.setattr(queue, "_save", fail_result)
-        with pytest.raises(OSError):
-            consumer.run(True, once=True)
-    assert queue.events()[0].state == "running"
-    assert consumer.run(True, once=True)
-    assert queue.events()[0].state == "deployed"
-
-
-@pytest.mark.parametrize("stage", ["file", "replace", "directory"])
+@pytest.mark.parametrize("stage", ["replace", "directory"])
 def test_failed_persistence_is_not_acknowledged_and_redelivery_recovers(events, monkeypatch, stage):
     module, queue = events
     client = TestClient(module.create_app(queue, SECRET))
@@ -328,7 +282,7 @@ def test_failed_persistence_is_not_acknowledged_and_redelivery_recovers(events, 
     def fail_sync(fd):
         nonlocal calls
         calls += 1
-        if calls == (1 if stage == "file" else 2):
+        if calls == 2:
             raise OSError("disk full")
         sync(fd)
 

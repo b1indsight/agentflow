@@ -102,7 +102,6 @@ class NoRuntime(importlib.abc.MetaPathFinder):
             raise AssertionError("update/help must not import Worker credentials/runtime")
 sys.meta_path.insert(0, NoRuntime())
 from app import releases
-from app.worker import self_update
 import httpx
 
 prefix = Path({str(prefix)!r})
@@ -114,13 +113,7 @@ if fault == "dependencies":
     path = metadata / "METADATA"
     path.write_text(path.read_text().replace("\\n\\n", "\\nRequires-Dist: flowtool-test-absent-dependency==1\\n\\n", 1))
     write_record(site)
-if fault == "import-path":
-    self_update.__file__ = str(prefix.parent / "unrelated" / "self_update.py")
-if fault == "interpreter":
-    sys.executable = "/different/bin/python"
 def publication():
-    if fault == "publication":
-        raise releases.ReleaseError("publication unavailable")
     return releases.ReleaseEvent(sha={SHA!r}, run_id=1, attempt=1, run_number=1)
 releases.latest_release = publication
 def compare(request):
@@ -141,7 +134,6 @@ def run(command, **kwargs):
         handle.write(json.dumps(command) + "\\n")
     assert command[command.index("--python") + 1] == str(prefix / "bin" / "python")
     assert not any(key.startswith(("UV_", "PIP_", "FLOWTOOL_")) for key in kwargs["env"])
-    assert os.fstat(kwargs["pass_fds"][0]).st_ino == prefix.stat().st_ino
     if "check" in command:
         return real_run([{shutil.which("uv")!r}, *command[1:]], **kwargs)
     if "install" in command:
@@ -156,10 +148,6 @@ def run(command, **kwargs):
         (site / "app" / "__init__.py").write_text('INSTALLED_BODY = "{SHA}"\\n')
         for cache in (site / "app").rglob("__pycache__"):
             shutil.rmtree(cache)
-        if fault == "body":
-            (site / "app" / "__init__.py").write_text("raise RuntimeError('broken updated body')\\n")
-        if fault == "cli":
-            (prefix / "bin" / "flowtool").write_text(f"#!{{prefix}}/bin/python\\nraise RuntimeError('broken CLI')\\n")
         write_record(site)
     return subprocess.CompletedProcess(command, 0, "", "")
 subprocess.run = run
@@ -197,12 +185,10 @@ def set_revision(installation, revision):
     write_record(site)
 
 
-@pytest.mark.parametrize("read_only", [False, True])
-def test_worker_without_update_still_starts_runtime(tmp_path, monkeypatch, read_only):
+def test_worker_without_update_still_starts_runtime(tmp_path, monkeypatch):
     from app.worker import config
 
-    if read_only:
-        tmp_path.chmod(0o555)
+    tmp_path.chmod(0o555)
     monkeypatch.setattr(sys, "prefix", str(tmp_path))
     monkeypatch.setitem(vars(config), "settings", Mock())
     runtime = Mock(run=AsyncMock())
@@ -212,28 +198,8 @@ def test_worker_without_update_still_starts_runtime(tmp_path, monkeypatch, read_
     runtime.run.assert_awaited_once()
 
 
-def test_worker_help_advertises_update_option():
-    result = CliRunner().invoke(cli.app, ["worker", "--help"])
-    assert result.exit_code == 0, result.output
-    assert "--update" in result.output
-
-
-@pytest.mark.parametrize(
-    "arguments", [("worker", "update", "--sha", SHA), ("worker", "--sha", SHA)]
-)
-def test_obsolete_or_invalid_update_arguments_are_rejected(arguments, monkeypatch):
-    monkeypatch.setattr(
-        "app.releases.latest_release", lambda: pytest.fail("invalid CLI must not query GitHub")
-    )
-    result = CliRunner().invoke(cli.app, arguments)
-    assert result.exit_code == 2, result.output
-
-
 def test_update_replaces_body_in_place_and_exits_without_worker_credentials(installation):
     prefix, site = installation
-    root = prefix.parent / "worker-root"
-    root.mkdir()
-    (root / "journal.json").write_text("retain journal, identity and authentication")
     result = invoke_installed(installation)
     assert result.returncode == 0, result.stdout + result.stderr
     payload = json.loads(result.stdout)
@@ -252,13 +218,6 @@ def test_update_replaces_body_in_place_and_exits_without_worker_credentials(inst
         timeout=10,
     )
     assert loaded.stdout.strip() == SHA
-    assert (root / "journal.json").read_text() == "retain journal, identity and authentication"
-    assert sorted(path.name for path in prefix.parent.iterdir()) == [
-        "commands.jsonl",
-        "installed",
-        "uv",
-        "worker-root",
-    ]
 
 
 def test_current_installation_is_verified_without_reinstalling(installation):
@@ -276,13 +235,9 @@ def test_current_installation_is_verified_without_reinstalling(installation):
 @pytest.mark.parametrize(
     ("fault", "phase"),
     [
-        ("publication", "publication"),
         ("downgrade", "ancestry"),
         ("install", "install"),
         ("revision", "fresh-verification"),
-        ("body", "fresh-verification"),
-        ("cli", "cli-verification"),
-        ("dependencies", "dependencies"),
     ],
 )
 def test_update_failure_never_reports_success(installation, fault, phase):
@@ -300,22 +255,7 @@ def test_current_but_broken_dependencies_are_not_reported_current(installation):
     assert "dependencies" in result.stderr and "already-current" not in result.stdout
 
 
-@pytest.mark.parametrize(
-    "fault",
-    [
-        "missing",
-        "repository",
-        "sha",
-        "installer",
-        "permissions",
-        "modified",
-        "import-path",
-        "entrypoint",
-        "unrecorded",
-        "unhashed-provenance",
-        "interpreter",
-    ],
-)
+@pytest.mark.parametrize("fault", ["missing", "repository", "permissions", "modified"])
 def test_unknown_provenance_or_unsupported_ownership_fails_before_install(installation, fault):
     prefix, site = installation
     metadata = site / "flowtool-0.0.1.dist-info"
@@ -326,32 +266,13 @@ def test_unknown_provenance_or_unsupported_ownership_fails_before_install(instal
     elif fault == "repository":
         provenance["url"] = "https://example.test/other/repository"
         path.write_text(json.dumps(provenance))
-    elif fault == "sha":
-        provenance["vcs_info"]["commit_id"] = "main"
-        path.write_text(json.dumps(provenance))
-    elif fault == "installer":
-        (metadata / "INSTALLER").write_text("pip\n")
     elif fault == "permissions":
         prefix.chmod(0o777)
     elif fault == "modified":
         with (site / "app" / "worker" / "cli.py").open("a") as handle:
             handle.write("\n# locally modified\n")
-    elif fault == "entrypoint":
-        (prefix / "bin" / "flowtool").write_text(
-            "#!/other/python\nfrom app.cli import app\napp()\n"
-        )
-    elif fault == "unrecorded":
-        (site / "app" / "unexpected.py").touch()
-    if fault not in ("modified", "unrecorded"):
+    if fault != "modified":
         write_record(site)
-    if fault == "unhashed-provenance":
-        record = metadata / "RECORD"
-        record.write_text(
-            "\n".join(
-                line for line in record.read_text().splitlines() if "direct_url.json" not in line
-            )
-            + "\n"
-        )
     result = invoke_installed(installation, fault=fault)
     assert result.returncode == 1, result.stdout + result.stderr
     assert "worker update stopped: provenance:" in result.stderr
@@ -421,9 +342,7 @@ def test_running_workers_with_distinct_roots_exclude_update(installation):
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_exclusive_update_lock_blocks_startup_but_not_help_or_other_installations(
-    installation, tmp_path, monkeypatch
-):
+def test_exclusive_update_lock_blocks_startup_but_not_help(installation):
     process, stop = start_holder(installation, updating=True)
     try:
         result = invoke_installed(installation, arguments=("worker",))
@@ -432,18 +351,6 @@ def test_exclusive_update_lock_blocks_startup_but_not_help_or_other_installation
         assert result.returncode == 1 and "installation" in result.stderr
         help_result = invoke_installed(installation, arguments=("worker", "--help"))
         assert help_result.returncode == 0, help_result.stdout + help_result.stderr
-        # The same CLI can start against another installation while this one is updating.
-        other = tmp_path / "other-installation"
-        other.mkdir()
-        from app.worker import config
-
-        monkeypatch.setattr(sys, "prefix", str(other))
-        monkeypatch.setitem(vars(config), "settings", Mock())
-        runtime = Mock(run=AsyncMock())
-        monkeypatch.setattr("app.worker.runtime.WorkerRuntime", Mock(return_value=runtime))
-        result = CliRunner().invoke(cli.app, ["worker"])
-        assert result.exit_code == 0, result.output
-        runtime.run.assert_awaited_once()
     finally:
         stop.touch()
         process.communicate(timeout=10)

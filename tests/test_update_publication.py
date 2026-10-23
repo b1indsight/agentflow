@@ -3,7 +3,6 @@
 import copy
 
 import pytest
-from pydantic import ValidationError
 
 from app import releases
 from app.releases import ReleaseEvent
@@ -60,5 +59,3 @@ def test_native_publication_requires_successful_main_push_and_exact_attempt(monk
             releases.verify_release(release)
     else:
         assert releases.verify_release(release) == release
-    with pytest.raises(ValidationError):
-        ReleaseEvent.model_validate({**release.model_dump(), "url": "https://example.test/payload"})

@@ -21,8 +21,10 @@ Server 更新器在部署主机独立监听端口，接收仓库的 `workflow_ru
 3. 按 `(run_id, attempt)` 去重并持久化到本地 JSON，成功后返回 202；同身份 SHA 冲突返回 409，
    存储或锁失败返回 503。202 只代表落盘，不代表部署成功；HTTP 不等待网络核验和部署。
 4. 单消费者先续作固定镜像的未完成操作，再按 run ID/attempt 从新到旧消费 queued。
-   在队列锁外核验 GitHub 运行、发布步骤、当前 main 和 GHCR candidate/SHA manifest，固定
-   digest 和授权。旧 run/attempt 不能替换更新的成功部署；已固定的进行中操作不因 main 前移换版本。
+   发布成功以已验签事件的 completed/success 为准，不再查询运行、job 或 step 是否成功。
+   在队列锁外查询运行身份和 run number，核对当前 main 与 GHCR candidate/SHA manifest，固定
+   digest 和授权。Webhook 的 head_branch/head_sha 只描述该次运行，不表示消费时 main 的最新提交。
+   旧 run/attempt 不能替换更新的成功部署；已固定的进行中操作不因 main 前移换版本。
 5. 拉取不可变 digest，并在无应用凭据/生产数据卷的临时 Pod 中验证导入、
    镜像身份和数据库删列检查。临时数据库仅使用 emptyDir 与 Unix socket，使用固定 digest
    的 PostgreSQL 17 镜像；不连接业务数据库。只读列元数据由旧实例单独提供。
@@ -114,7 +116,7 @@ chmod 700 "$STATE_DIR"
 "$PYTHON" "$TOOL_DIR/image_event.py" retry "${TARGET[@]}" RUN_ID ATTEMPT
 # 仅监听服务已停时使用独立消费者；失败退出，不与 listen 并发运行。
 "$PYTHON" "$TOOL_DIR/image_event.py" run "${TARGET[@]}" --apply --once
-# 手工补录也必须经过相同发布核验；不接受任意镜像。
+# 手工补录由操作者确认发布成功；工具仍核对运行身份、main 和 manifest，不接受任意镜像。
 "$PYTHON" "$TOOL_DIR/image_event.py" enqueue "${TARGET[@]}" RUN_ID ATTEMPT SHA
 ```
 

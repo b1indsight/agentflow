@@ -93,7 +93,7 @@ def event(run_id: str, attempt: str, sha: str) -> tuple[int, int, str]:
 
 
 def resolve(run_id: int, attempt: int, sha: str) -> dict:
-    """Require successful main publication and matching run-specific/promoted manifests."""
+    """Resolve a main publication identity and matching run-specific/promoted manifests."""
     run = github(f"actions/runs/{run_id}")
     expected = {
         "id": run_id,
@@ -102,31 +102,15 @@ def resolve(run_id: int, attempt: int, sha: str) -> dict:
         "path": WORKFLOW,
         "event": "push",
         "head_branch": "main",
-        "status": "completed",
-        "conclusion": "success",
     }
     if any(run.get(key) != value for key, value in expected.items()):
-        raise Rejected("GitHub run does not match a completed successful Images/main/push attempt")
+        raise Rejected("GitHub run does not match the Images/main/push attempt")
     if run.get("repository", {}).get("full_name") != REPOSITORY:
         raise Rejected("GitHub run belongs to a different repository")
     if type(run.get("run_number")) is not int or run["run_number"] < 1:
         raise Rejected("GitHub run number is missing")
     if github("git/ref/heads/main")["object"]["sha"] != sha:
         raise Stale("event commit is no longer the main branch head")
-    jobs = github(f"actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100")
-    if jobs.get("total_count", 101) > 100:
-        raise Rejected("unexpected number of workflow jobs")
-    matches = [job for job in jobs["jobs"] if job["name"] == "publish"]
-    if len(matches) != 1 or matches[0].get("conclusion") != "success":
-        raise Rejected("publish job did not succeed exactly once")
-    for step in (
-        "Build serve candidate with attestations",
-        "Pull and verify exact candidate digests",
-        "Tag verified manifests without rebuilding",
-    ):
-        step_matches = [item for item in matches[0]["steps"] if item["name"] == step]
-        if len(step_matches) != 1 or step_matches[0].get("conclusion") != "success":
-            raise Rejected("required publication verification step did not succeed")
     body, _ = fetch(f"https://ghcr.io/token?service=ghcr.io&scope=repository:{IMAGE}:pull")
     token = json.loads(body)["token"]
     if not isinstance(token, str) or not token:

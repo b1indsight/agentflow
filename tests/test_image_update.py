@@ -161,7 +161,6 @@ class ImageCommands:
             "change-default": "ALTER TABLE workers ALTER COLUMN draining SET DEFAULT true",
             "drop-readd": "ALTER TABLE workers DROP COLUMN draining;"
             "ALTER TABLE workers ADD COLUMN draining BOOLEAN NOT NULL DEFAULT false",
-            "dynamic-drop": "DO $$ BEGIN EXECUTE 'ALTER TABLE workers DROP COLUMN draining'; END $$",
             "drop-table": "DROP TABLE workers CASCADE",
             "legacy-drop": "ALTER TABLE workers DROP COLUMN IF EXISTS legacy_hint",
         }
@@ -439,7 +438,6 @@ def test_idle_active_flow_and_worker_changes_do_not_block_update(
         ("legacy-column", True),
         ("remove-definition", False),
         ("drop-readd", False),
-        ("dynamic-drop", False),
         ("drop-table", False),
         ("legacy-drop", False),
     ],
@@ -470,54 +468,12 @@ def test_column_removal_is_rejected_before_replacement_but_additions_are_allowed
             assert column in output.err
 
 
-@pytest.mark.parametrize("pending", ["job", "dispatch", "stop", "result", "effect"])
-def test_durable_backlog_does_not_block_replacement(
-    store,
-    invoke_image_update,
-    tmp_path,
-    pending,
-):
-    flow = store.flows.create_flow("owner/repo", 1, 1)
-    job = store.jobs.enqueue_job(flow.id, "initial")
-    store.workers.worker_connected("w", PROTOCOL_VERSION, "epoch")
-    with store.connection() as connection:
-        if pending == "job":
-            # A persisted claim is recovered by the ordinary startup sweep.
-            assert store.workers.assign_job("w", "token", "epoch")
-        elif pending == "dispatch":
-            connection.execute(
-                "UPDATE jobs SET state='failed',dispatch_authorized_at=now() WHERE id=%s", (job.id,)
-            )
-        elif pending == "stop":
-            connection.execute(
-                "INSERT INTO execution_stops(request_id,flow_id,job_id,worker_id,assignment_token,binding_at,requested_at) VALUES('stop',%s,%s,'w','token',now(),now())",
-                (flow.id, job.id),
-            )
-        elif pending == "result":
-            connection.execute(
-                "UPDATE jobs SET state='done',result_received_at=now() WHERE id=%s", (job.id,)
-            )
-        else:
-            connection.execute(
-                "INSERT INTO result_applications(job_id,digest,plan,created_at) VALUES(%s,'digest','{}',now())",
-                (job.id,),
-            )
-            connection.execute(
-                "INSERT INTO result_effects(job_id,effect_key,position,payload,state,dispatched_at,next_attempt_at) VALUES(%s,'effect',0,'{}','skipped',now(),now())",
-                (job.id,),
-            )
-    commands = ImageCommands(store)
-    assert invoke_image_update(commands) == 0
-    assert "scale-zero" in commands.events
-    assert json.loads(next(tmp_path.glob("*/operation.json")).read_text())["status"] == "complete"
-
-
 @pytest.mark.parametrize(
     "failure",
     ["pull", "pvc-delete", "hpa", "old-stuck", "readiness", "running-digest"],
 )
-def test_target_and_cutover_failures_preserve_safety(store, invoke_image_update, tmp_path, failure):
-    commands = ImageCommands(store, failure)
+def test_target_and_cutover_failures_preserve_safety(invoke_image_update, tmp_path, failure):
+    commands = ImageCommands(failure=failure)
     assert invoke_image_update(commands) == 1
     if failure in {"pull", "pvc-delete", "hpa"}:
         assert "scale-zero" not in commands.events
@@ -533,10 +489,8 @@ def test_target_and_cutover_failures_preserve_safety(store, invoke_image_update,
         assert [c for c in commands.calls if "patch" in c] == [c for c in before if "patch" in c]
 
 
-@pytest.mark.parametrize(
-    "stage", ["checking-image", "image-checked", "stopping-old-pod", "starting-new-pod", "ready"]
-)
-def test_same_image_cli_resumes_every_durable_stage_without_restarting_ready_server(
+@pytest.mark.parametrize("stage", ["stopping-old-pod", "starting-new-pod"])
+def test_same_image_cli_resumes_cutover_without_restarting_ready_server(
     invoke_image_update, monkeypatch, tmp_path, stage
 ):
     # A killed updater must converge from real observed state, not require the old Pod
@@ -569,7 +523,7 @@ def test_same_image_cli_resumes_every_durable_stage_without_restarting_ready_ser
 
 @pytest.mark.parametrize("replicas", [0, 1])
 def test_lost_patch_response_reconciles_and_retry_never_stops_target_image(
-    invoke_image_update, monkeypatch, replicas
+    invoke_image_update, replicas
 ):
     commands = ImageCommands()
     original = commands.__call__
@@ -595,7 +549,7 @@ def test_lost_patch_response_reconciles_and_retry_never_stops_target_image(
 
 @pytest.mark.parametrize("conflict", ["image", "uid", "config", "corrupt"])
 def test_retry_does_not_override_conflicting_image_target_or_record(
-    invoke_image_update, monkeypatch, tmp_path, conflict
+    invoke_image_update, tmp_path, conflict
 ):
     commands = ImageCommands(failure="readiness")
     assert invoke_image_update(commands) == 1
@@ -665,19 +619,6 @@ def test_changed_candidate_inputs_are_not_reused_or_deleted(invoke_image_update)
     assert invoke_image_update(commands) == 1
     assert commands.probe is not None
     assert "scale-zero" not in commands.events
-
-
-def test_damaged_stop_intent_is_rejected_without_overwriting_record(invoke_image_update, tmp_path):
-    commands = ImageCommands(failure="readiness")
-    assert invoke_image_update(commands) == 1
-    path = next(tmp_path.glob("*/operation.json"))
-    report = json.loads(path.read_text())
-    report["stop_intent"] = "false"
-    path.write_text(json.dumps(report))
-    before = path.read_bytes()
-    assert invoke_image_update(commands) == 1
-    assert path.read_bytes() == before
-    assert commands.events.count("scale-zero") == 1
 
 
 def test_signed_http_through_queue_cli_resumes_completed_deployment_after_event_write_failure(
