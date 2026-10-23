@@ -153,11 +153,3 @@ def latest_release() -> ReleaseEvent:
             sha=run.head_sha, run_id=run.id, attempt=run.run_attempt, run_number=run.run_number
         )
     )
-
-
-def release_for_sha(sha: str) -> ReleaseEvent:
-    """Resolve a local CLI request using verified metadata, never caller-supplied run claims."""
-    release = latest_release()
-    if release.sha != sha:
-        raise ReleaseError("SHA does not match the latest successful main publication")
-    return release
