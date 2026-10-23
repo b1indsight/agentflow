@@ -12,6 +12,7 @@ from app.controler.config import ServerSettings
 from app.controler.console.sync import ConsoleSynchronizer
 from app.controler.events.webhooks import WebhookConsumer
 from app.controler.reconciliation.feedback import FeedbackReconciler
+from app.controler.reconciliation.labels import LabelSynchronizer
 from app.controler.reconciliation.projects import ProjectSync
 from app.controler.reconciliation.pull_requests import Reconciler
 from app.controler.review.judge import BubJudge
@@ -125,6 +126,7 @@ class ServerRuntime:
             concurrency=self.settings.reconcile_concurrency,
             database=database,
         )
+        self.label_sync = LabelSynchronizer(github, self.settings)
         self.database = database
         self.workers = WorkerStore(database)
         self.reviews = ReviewStore(database)
@@ -142,6 +144,7 @@ class ServerRuntime:
             asyncio.create_task(self.project_sync.run()),
             asyncio.create_task(self.reconciler.run()),
             asyncio.create_task(self.feedback_reconciler.run()),
+            asyncio.create_task(self.label_sync.run()),
             asyncio.create_task(self._sweep_assignments()),
             asyncio.create_task(self._sweep_results()),
             asyncio.create_task(self._sweep_reviews()),

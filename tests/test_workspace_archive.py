@@ -1,8 +1,7 @@
-"""Archive must prove ownership before deletion and retain that proof across crashes."""
+"""Archive proves allocation ownership and survives release/result/ACK crash windows."""
 
-import asyncio
+import json
 import shutil
-import threading
 from pathlib import Path
 
 import pytest
@@ -17,7 +16,8 @@ from app.contracts.protocol import (
 )
 from app.domain.models import JobState
 from app.worker.execution.executor import WorkerExecutor
-from app.worker.execution.vcs import prepare_flow_repo
+from app.worker.execution.vcs import VcsVerificationError
+from app.worker.execution.workspaces import RepositoryWorkspaces
 from app.worker.state.session import SessionError, WorkerSession
 from tests.test_vcs import _git_fixture
 from tests.test_worker_executor import RecordingAgent, RecordingToolCaller
@@ -32,16 +32,21 @@ def archive_assignment(job_id: int = 10) -> Assignment:
     )
 
 
-async def workspace(tmp_path: Path, *, start=True):
+async def workspace(tmp_path: Path, *, start=True, overflow=False):
     seed, _ = _git_fixture(tmp_path)
     root = tmp_path / "worker"
     managed_seed = root / "repos/owner/repo"
     managed_seed.parent.mkdir(parents=True)
     shutil.move(seed, managed_seed)
-    repo = await prepare_flow_repo(managed_seed, 3)
+    pool = RepositoryWorkspaces(root, "worker-a", limit=2)
+    if overflow:
+        await pool.acquire("owner/repo", 999, base_branch="main", remote="origin", push_token=None)
+    binding = await pool.acquire("owner/repo", 3, base_branch="main", remote="origin", push_token=None)
+    repo = pool.path(binding)
     journal = WorkerSession(root)
     journal.record_received(_assignment())
     journal.record_started()
+    journal.bind_workspace(binding)
     journal.record_terminal(Succeeded(
         job_id=5, assignment_token="assignment-1", connection_epoch="epoch-1",
         result=InitialTaskResult(session_id="session", last_message="done", exit_code=0),
@@ -51,79 +56,69 @@ async def workspace(tmp_path: Path, *, start=True):
     journal.record_received(assignment)
     if start:
         journal.record_started()
-    executor = WorkerExecutor(root, RecordingAgent(),
-                              worker_id="worker-a", session=journal)
+    executor = WorkerExecutor(root, RecordingAgent(), worker_id="worker-a", session=journal)
     return managed_seed, repo, journal, executor, assignment
 
 
-async def test_cleanup_preserves_seed_other_flow_journal_and_internal_symlink_target(tmp_path):
+async def test_archive_releases_copy_retains_directory_and_replays_same_fence(tmp_path):
     seed, repo, journal, executor, assignment = await workspace(tmp_path)
-    other = await prepare_flow_repo(seed, 4)
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    (outside / "keep").write_text("keep")
-    (repo / "link").symlink_to(outside, target_is_directory=True)
-    partial = repo.with_name(repo.name + ".partial")
-    partial.mkdir()
-
+    other = await executor.workspaces.acquire("owner/repo", 4, base_branch="main", remote="origin",
+                                              push_token=None)
     result = await executor.execute(assignment.task, tool_caller=RecordingToolCaller())
-
-    assert isinstance(result, ArchiveResult) and result.cleanup == "removed"
+    assert isinstance(result, ArchiveResult) and result.cleanup == "released"
     assert (result.flow_id, result.attempt_id, result.repo_identity, result.delivery_version) == (
         3, 7, "worker-a:owner/repo", 2,
     )
-    assert not repo.exists() and not partial.exists()
-    assert seed.is_dir() and other.is_dir() and journal.path.exists()
-    assert (outside / "keep").read_text() == "keep"
-    # A crash after removal but before the terminal journal write must reuse durable proof.
-    assert (await executor.execute(assignment.task, tool_caller=RecordingToolCaller())).cleanup == "already_absent"
+    assert repo.is_dir() and seed.is_dir() and executor.workspaces.path(other).is_dir()
+    assert journal.path.exists()
+    assert (await executor.execute(assignment.task, tool_caller=RecordingToolCaller())).cleanup == "released"
+    reused = await executor.workspaces.acquire("owner/repo", 5, base_branch="main", remote="origin",
+                                               push_token=None)
+    with pytest.raises(VcsVerificationError, match="ownership"):
+        await executor.execute(assignment.task, tool_caller=RecordingToolCaller())
+    assert executor.workspaces.lookup("owner/repo", 5) == reused
 
 
-@pytest.mark.parametrize("case", ["absent", "top-symlink", "partial-symlink", "parent-symlink"])
+@pytest.mark.parametrize("case", ["absent", "top-symlink", "parent-symlink"])
 async def test_cleanup_rejects_missing_ownership_or_unsafe_target(tmp_path, case):
     seed, repo, _journal, executor, assignment = await workspace(tmp_path)
-    task = assignment.task
     if case == "absent":
         shutil.rmtree(repo)
     elif case == "top-symlink":
         shutil.rmtree(repo)
         repo.symlink_to(seed, target_is_directory=True)
-    elif case == "partial-symlink":
-        repo.with_name(repo.name + ".partial").symlink_to(seed, target_is_directory=True)
-    elif case == "parent-symlink":
-        real = seed.parent.with_name("real-owner")
-        seed.parent.rename(real)
-        seed.parent.symlink_to(real, target_is_directory=True)
-    with pytest.raises((ValueError, SessionError), match="archive|cleanup|repository"):
-        await executor.execute(task, tool_caller=RecordingToolCaller())
+    else:
+        real = repo.parent.with_name("saved-parent")
+        repo.parent.rename(real)
+        repo.parent.symlink_to(real, target_is_directory=True)
+    with pytest.raises(VcsVerificationError):
+        await executor.execute(assignment.task, tool_caller=RecordingToolCaller())
     assert seed.is_dir()
 
 
-async def test_failed_cleanup_keeps_proof_through_ack_and_explicit_retry(tmp_path, monkeypatch):
-    seed, repo, journal, executor, assignment = await workspace(tmp_path)
-    partial = repo.with_name(repo.name + ".partial")
-    partial.mkdir()
-    original = shutil.rmtree
+async def test_worktree_removal_crash_keeps_proof_through_ack_and_explicit_retry(tmp_path, monkeypatch):
+    seed, repo, journal, executor, assignment = await workspace(tmp_path, overflow=True)
+    from app.worker.execution import workspaces
+    write = workspaces.write_private_record
 
-    def fail_partial(path, *args, **kwargs):
-        if Path(path) == partial:
-            raise PermissionError("cleanup denied")
-        return original(path, *args, **kwargs)
+    def crash_after_removal(path, payload):
+        if json.loads(payload)["slots"][1]["state"] == "absent":
+            raise OSError("simulated crash before release commit")
+        write(path, payload)
 
-    monkeypatch.setattr(shutil, "rmtree", fail_partial)
-    with pytest.raises(PermissionError):
+    monkeypatch.setattr(workspaces, "write_private_record", crash_after_removal)
+    with pytest.raises(OSError, match="simulated crash"):
         await executor.execute(assignment.task, tool_caller=RecordingToolCaller())
-    assert not repo.exists() and partial.exists()
+    assert not repo.exists() and journal.load().cleanup_verified
     journal.record_terminal(Failed(job_id=10, assignment_token="token-10",
-                                   connection_epoch="epoch", error="cleanup denied"))
+                                   connection_epoch="epoch", error="release commit failed"))
     journal.acknowledge(10, JobState.FAILED)
-    assert journal.load() is not None
     retry = archive_assignment(11)
     journal.record_received(retry)
     journal.record_started()
-    monkeypatch.setattr(shutil, "rmtree", original)
-    assert (await executor.execute(retry.task, tool_caller=RecordingToolCaller())).cleanup == "removed"
-    assert seed.exists() and not partial.exists()
+    monkeypatch.setattr(workspaces, "write_private_record", write)
+    assert (await executor.execute(retry.task, tool_caller=RecordingToolCaller())).cleanup == "already_absent"
+    assert seed.exists() and not repo.exists()
 
 
 async def test_copied_journal_cannot_authorize_another_worker_root(tmp_path):
@@ -131,17 +126,17 @@ async def test_copied_journal_cannot_authorize_another_worker_root(tmp_path):
     await executor.execute(assignment.task, tool_caller=RecordingToolCaller())
     another_root = tmp_path / "new-root"
     shutil.copytree(journal.path.parent, another_root)
-    moved = WorkerSession(another_root)
     with pytest.raises(SessionError, match="root"):
-        moved.load()
+        WorkerSession(another_root).load()
 
 
-async def test_unstarted_archive_reassignment_retains_original_root_proof(tmp_path):
+async def test_unstarted_archive_reassignment_retains_original_allocation_proof(tmp_path):
     _, _, journal, _executor, assignment = await workspace(tmp_path, start=False)
-    # A delivery can disconnect before Started reaches serve. Requeue must keep root provenance.
+    binding = journal.load().workspace
     journal.clear_rejected(assignment.job_id)
     journal.record_received(archive_assignment(11))
     assert journal.load().archive_task == assignment.task
+    assert journal.load().workspace == binding
 
 
 async def test_archive_with_lost_journal_does_not_adopt_an_existing_directory(tmp_path):
@@ -150,41 +145,3 @@ async def test_archive_with_lost_journal_does_not_adopt_an_existing_directory(tm
     with pytest.raises(SessionError, match="original Flow"):
         journal.record_received(assignment)
     assert seed.is_dir() and repo.is_dir()
-
-
-async def test_rejected_unstarted_coding_retains_flow_provenance_for_archive(tmp_path):
-    seed, repo, journal, executor, assignment = await workspace(tmp_path, start=False)
-    # Reproduce merge after an ordinary task was journaled but before it could start.
-    journal.path.unlink()
-    journal.record_received(_assignment())
-    journal.clear_rejected(5)
-    journal.record_received(assignment)
-    journal.record_started()
-    assert (await executor.execute(assignment.task, tool_caller=RecordingToolCaller())).cleanup == "removed"
-    assert seed.exists() and not repo.exists()
-
-
-async def test_cancelling_archive_waits_for_filesystem_thread_to_stop(tmp_path, monkeypatch):
-    _, repo, journal, executor, assignment = await workspace(tmp_path)
-    entered = asyncio.Event()
-    release = threading.Event()
-    original = shutil.rmtree
-    loop = asyncio.get_running_loop()
-
-    def delayed_delete(path):
-        loop.call_soon_threadsafe(entered.set)
-        release.wait()
-        original(path)
-
-    monkeypatch.setattr(shutil, "rmtree", delayed_delete)
-    execution = asyncio.create_task(executor.execute(assignment.task, tool_caller=RecordingToolCaller()))
-    try:
-        await asyncio.wait_for(entered.wait(), 2)
-        execution.cancel()
-        await asyncio.sleep(0)
-        assert not execution.done()
-    finally:
-        release.set()
-        with pytest.raises(asyncio.CancelledError):
-            await execution
-    assert not repo.exists() and journal.load().cleanup_verified

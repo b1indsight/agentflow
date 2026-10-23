@@ -7,6 +7,16 @@
 
 - [`server-auto-update.md`](server-auto-update.md) — PR #104：独立验签 Webhook、本地文件队列和同镜像幂等部署已实现；Worker `--update` 在原 uv Git 安装中更新并核验后退出。保留删列与普通停启，不新建环境；951 项回归及五项简化对照通过，真实接入待验收，审查及交付状态见 PR。
 
+- [`worker-amp-cli.md`](worker-amp-cli.md) — 可选 Amp CLI 后端已实现：同 thread 修订、原生历史、
+  protocol v15、取消监督和固定版本镜像；依赖 #109 已合并，#107 目标改为 main。
+  当前方案、验证证据及未修问题见精简后的功能记录；尚未部署。
+
+- [`worker-repo-bootstrap.md`](worker-repo-bootstrap.md) — [PR #103](https://github.com/b1indsight/agentflow/pull/103)：自动 clone、bot Git/gh 及有上限的位置池已本地实现；完整副本温热复用，溢出使用临时 Git worktree；独立验证与审查状态见实施记录，尚未合并或部署。
+
+- [`repository-label-bootstrap.md`](repository-label-bootstrap.md) — PR #105：轻量后台补齐标签，未建齐每 300 秒检查，确认齐全后每天复查；只缓存内存时间，重启重新扫描，不新增数据库表或维护机制。标签测试精简至 243 行，862 项回归及静态检查通过，审查及交付状态见 PR，未合并或部署。
+
+- [`console-flow-retry.md`](console-flow-retry.md) — [PR #106](https://github.com/b1indsight/agentflow/pull/106)：受阻概览安全重试已实现，保留停止确认、结果对账和原 Worker 归档约束；按用户要求精简测试后，858 项 Python 回归、25 项浏览器检查及静态检查通过，原三项消融记录保留；审查与发布状态见 PR，未合并或部署。
+
 - [`persistence-simplification.md`](persistence-simplification.md) — PR #82：服务接收 Database 并自行创建所需仓储，Runtime 管理共享数据库生命周期；Webhook 在 receipt 事务内直接构造服务和路由，删除两者的 `using()` 及重复绑定清单；删除已被数据库回归覆盖的旧 RetryStore 内存测试，735 项 PostgreSQL 回归通过，覆盖对照证据见记录，独立审查与 CI 见 PR。
 
 - [`control-simplification.md`](control-simplification.md) — PR #81：依赖简化并按批准方案迁入 app/controler，按 events/workers/workflow/review/reconciliation 归组；生产净减少 174 行，734 项 PostgreSQL 回归、静态检查、隔离入口及构建通过，独立审查与 CI 见 PR。

@@ -12,10 +12,10 @@ import os
 import shutil
 import signal
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
-from typing import Literal
 from urllib.parse import urlparse
 
 from pydantic import SecretStr
@@ -80,80 +80,150 @@ async def _run(
     return proc.returncode or 0, out.decode(errors="replace"), err.decode(errors="replace")
 
 
-def flow_repo_path(seed_repo_path: Path, flow_id: int) -> Path:
-    """Return the unambiguous directory owned by a stable Flow identity."""
+def require_repository(repo_path: Path) -> None:
+    """Require metadata on this directory, never a repository discovered in an ancestor."""
+    if not repo_path.is_dir() or repo_path.is_symlink():
+        raise VcsVerificationError("workspace", "repository is missing or a symlink")
+    git, jj = repo_path / ".git", repo_path / ".jj"
+    if git.is_symlink() or jj.is_symlink() or not (git.exists() or jj.is_dir()):
+        raise VcsVerificationError("workspace", "repository has no owned Git/jj metadata")
 
-    if flow_id <= 0:
-        raise ValueError("flow_id must be positive")
-    return seed_repo_path.parent / f"{seed_repo_path.name}--flow-{flow_id}"
 
-
-async def prepare_flow_repo(seed_repo_path: Path, flow_id: int) -> Path:
-    """Create a full repo copy once and reuse it for later Attempts of the same Flow."""
-
-    if not seed_repo_path.is_dir():
-        raise FileNotFoundError(f"seed repository does not exist: {seed_repo_path}")
-    repo_path = flow_repo_path(seed_repo_path, flow_id)
-    if repo_path.exists():
-        if not repo_path.is_dir():
-            raise RuntimeError(f"Flow repository path is not a directory: {repo_path}")
-        return repo_path
-    partial_path = repo_path.with_name(f"{repo_path.name}.partial")
-    if partial_path.exists():
-        await asyncio.to_thread(shutil.rmtree, partial_path)
+async def filesystem_operation[**P, T](
+    function: Callable[P, T], *args: P.args, **kwargs: P.kwargs,
+) -> T:
+    """Hold the worker root lock until a filesystem thread stops, even on cancellation."""
+    operation = asyncio.get_running_loop().run_in_executor(None, partial(function, *args, **kwargs))
     try:
-        await asyncio.to_thread(shutil.copytree, seed_repo_path, partial_path, symlinks=True)
-        partial_path.replace(repo_path)
-    except BaseException:
-        if partial_path.exists():
-            await asyncio.to_thread(shutil.rmtree, partial_path)
-        raise
-    return repo_path
-
-
-def flow_cleanup_paths(seed_repo_path: Path, flow_id: int, worker_root: Path) -> tuple[Path, Path]:
-    """Validate managed directory boundaries, including ancestors and partial copies."""
-    root = worker_root.resolve()
-    seed = seed_repo_path.absolute()
-    if not seed.is_relative_to(worker_root.absolute()):
-        raise ValueError("archive repository escapes worker root")
-    relative = seed.relative_to(worker_root.absolute())
-    if (len(relative.parts) != 3 or relative.parts[0] != "repos"
-            or any(part in {".", ".."} for part in relative.parts)
-            or "--flow-" in relative.name):
-        raise ValueError("archive repository does not have a managed seed path")
-    cursor = worker_root.absolute()
-    for component in relative.parts:
-        cursor /= component
-        if cursor.is_symlink() or not cursor.is_dir():
-            raise ValueError("archive repository ancestor is missing or a symlink")
-    repo_path = flow_repo_path(seed_repo_path, flow_id)
-    paths = repo_path, repo_path.with_name(repo_path.name + ".partial")
-    for path in paths:
-        if (path.is_symlink() or not path.resolve().is_relative_to(root)
-                or path.resolve() in {root, seed.resolve()}
-                or (path.exists() and not path.is_dir())):
-            raise ValueError("unsafe archive cleanup target")
-    return paths
-
-
-async def cleanup_flow_repo(
-    seed_repo_path: Path, flow_id: int, *, worker_root: Path,
-) -> Literal["removed", "already_absent"]:
-    """Delete validated Flow directories; the caller must journal ownership first."""
-    paths = flow_cleanup_paths(seed_repo_path, flow_id, worker_root)
-    removed = False
-    for path in paths:
-        if path.exists():
-            deletion = asyncio.create_task(asyncio.to_thread(shutil.rmtree, path))
+        return await asyncio.shield(operation)
+    except asyncio.CancelledError:
+        while not operation.done():
             try:
-                await asyncio.shield(deletion)
+                await asyncio.shield(operation)
             except asyncio.CancelledError:
-                # Cancelling to_thread does not stop rmtree. Keep the root locked until it exits.
-                await deletion
-                raise
-            removed = True
-    return "removed" if removed else "already_absent"
+                continue
+        operation.result()
+        raise
+
+
+async def ensure_seed(
+    seed: Path, repository: str, base_branch: str, remote: str, push_token: SecretStr | None,
+) -> None:
+    """Atomically clone only a missing/empty seed; preserve every existing repository."""
+    if seed.exists() and any(seed.iterdir()):
+        require_repository(seed)
+        return
+    temporary = Path(tempfile.mkdtemp(prefix=f"{seed.name}.clone-", dir=seed.parent))
+    try:
+        environment = _vcs_environment()
+        environment.update(git_credential_environment(push_token))
+        # Clone outside any checkout. Local Git configuration must not rewrite the fixed URL.
+        with tempfile.TemporaryDirectory(prefix="flowtool-clone-cwd-") as directory:
+            code, _, _ = await _run(
+                "git", "-c", f"core.hooksPath={os.devnull}", "-c", "core.fsmonitor=false",
+                "-c", "protocol.ext.allow=never", "clone", "--no-hardlinks",
+                "--branch", base_branch, "--origin", remote, "--",
+                f"https://github.com/{repository}.git", str(temporary),
+                cwd=Path(directory), stage="bootstrap", environment=environment,
+            )
+        if code:
+            raise VcsVerificationError("bootstrap", f"repository clone failed with exit {code}")
+        require_repository(temporary)
+        await _required_stdout("bootstrap", "git", "rev-parse", "HEAD", cwd=temporary)
+        if seed.exists():
+            seed.rmdir()  # Fails without touching contents if another process populated it.
+        temporary.rename(seed)
+    finally:
+        if temporary.exists():
+            await filesystem_operation(shutil.rmtree, temporary)
+
+
+async def require_idle_repository(repo: Path) -> None:
+    """Reject unsettled operations, tracked edits and unknown files; ignored caches may stay."""
+    require_repository(repo)
+    if (repo / ".git").exists():
+        git_dir = Path(await _required_stdout(
+            "workspace", "git", "rev-parse", "--absolute-git-dir", cwd=repo,
+        ))
+        if any((git_dir / name).exists() for name in (
+            "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply",
+            "sequencer", "index.lock", "HEAD.lock",
+        )):
+            raise VcsVerificationError("workspace", "repository has an unfinished Git operation")
+        await _require_clean("git", "status", "--porcelain", "--untracked-files=all", cwd=repo)
+    if (repo / ".jj").exists():
+        await _require_clean("jj", "diff", "--summary", cwd=repo)
+        conflicts = await _required_stdout(
+            "workspace", "jj", "log", "-r", "@ & conflicts()", "--no-graph", "-T", "commit_id",
+            cwd=repo,
+        )
+        if conflicts:
+            raise VcsVerificationError("workspace", "repository has unresolved jj conflicts")
+
+
+async def clean_repository(repo: Path) -> None:
+    """Discard cancelled working-copy edits without deleting the checkout or ignored caches."""
+    require_repository(repo)
+    if (repo / ".jj").exists():
+        await _required_stdout("workspace", "jj", "restore", cwd=repo)
+    if (repo / ".git").exists():
+        await _required_stdout("workspace", "git", "reset", "--hard", "HEAD", cwd=repo)
+        # jj metadata is not disposable even if Git considers it an untracked directory.
+        await _required_stdout("workspace", "git", "clean", "-ffd", "-e", ".jj/", cwd=repo)
+    await require_idle_repository(repo)
+
+
+async def align_repository(repo: Path, seed: Path, base_branch: str) -> None:
+    """Move only an idle managed copy to the committed seed baseline, preserving caches."""
+    await require_idle_repository(seed)
+    await require_idle_repository(repo)
+    if (seed / ".jj").exists():
+        revision = await _required_stdout(
+            "workspace", "jj", "log", "-r", base_branch, "--no-graph", "-T", "commit_id",
+            cwd=seed,
+        )
+        # Import only committed objects, including non-colocated jj Git stores.
+        source_git = await _required_stdout("workspace", "jj", "git", "root", cwd=seed)
+        target_git = await _required_stdout("workspace", "jj", "git", "root", cwd=repo)
+        # A fetched object alone is not indexed by jj; a private remote ref makes import see it.
+        await _required_stdout("workspace", "git", "--git-dir", target_git, "fetch", "--no-tags",
+                               source_git, f"+{revision}:refs/remotes/flowtool-seed/baseline", cwd=repo)
+        await _required_stdout("workspace", "jj", "git", "import", cwd=repo)
+        current = set((await _required_stdout(
+            "workspace", "jj", "file", "list", "-T", r'"\x00" ++ path ++ "\x00"', cwd=repo,
+        )).split("\0"))
+        target = (await _required_stdout(
+            "workspace", "jj", "file", "list", "-r", revision,
+            "-T", r'"\x00" ++ path ++ "\x00"', cwd=repo,
+        )).split("\0")
+        # Check ancestors too: an ignored file or symlink can block a newly tracked directory.
+        for name in target:
+            if not name or name in current:
+                continue
+            path = repo / name
+            blocked_parent = any(
+                parent.is_symlink() or (parent.exists() and not parent.is_dir())
+                for parent in path.parents if parent != repo and repo in parent.parents
+            )
+            if path.exists() or path.is_symlink() or blocked_parent:
+                raise VcsVerificationError("workspace", "baseline would overwrite retained cache paths")
+        await _required_stdout("workspace", "jj", "new", revision, cwd=repo)
+    else:
+        revision = await _required_stdout(
+            "workspace", "git", "rev-parse", "--verify", f"refs/heads/{base_branch}^{{commit}}",
+            cwd=seed,
+        )
+        await _required_stdout("workspace", "git", "fetch", "--no-tags", str(seed), revision,
+                               cwd=repo)
+        await _required_stdout("workspace", "git", "checkout", "--no-overwrite-ignore",
+                               "--detach", revision, cwd=repo)
+
+
+async def worktree_registered(seed: Path, repo: Path) -> bool:
+    """Match the exact managed checkout in Git's registry, without pruning other worktrees."""
+    registry = await _required_stdout("workspace", "git", "worktree", "list", "--porcelain", "-z",
+                                      cwd=seed)
+    return f"worktree {repo}" in registry.split("\0")
 
 
 async def prepare_vcs_context(

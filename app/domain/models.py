@@ -263,10 +263,19 @@ class SessionUnavailable(RuntimeError):
 
 
 @dataclass(frozen=True)
+class GitHubCapability:
+    """One assignment's repository-scoped installation credential, held only in memory."""
+
+    token: SecretStr = field(repr=False)
+    repository: str
+    expires_at: datetime
+
+
+@dataclass(frozen=True)
 class CodingExecutionContext:
     """Ephemeral per-run capabilities; never persist or log this value."""
 
-    push_token: SecretStr | None = None
+    github: GitHubCapability | None = None
     mcp_url: str | None = None
     mcp_token: SecretStr | None = None
 

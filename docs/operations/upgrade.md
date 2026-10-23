@@ -1,6 +1,6 @@
 # 当前版本部署与重启
 
-仓库尚未部署，仅支持当前完整 PostgreSQL schema、wire protocol v10 和 worker journal v3。
+仓库尚未部署，仅支持当前完整 PostgreSQL schema、wire protocol v15、worker journal v4 和 workspace manifest v1。
 不提供旧数据库、旧任务或旧 journal 的升级/回滚转换。首次部署选择新数据库/schema 与新
 worker root，serve/worker 固定到同一 commit/镜像 digest；schema 初始化只创建当前结构。
 

@@ -75,8 +75,10 @@ FlowTool 的目标是把带 `flow` 标签的 GitHub issue 编排成
 - **运维入口**：CLI 可查看 Flow、交付分支/PR、worker、任务恢复状态和未完成的 GitHub 操作，
   并提供 cancel/retry 命令。已核验修订中被明确拒绝的通知可补发；结果不确定时拒绝直接 retry。
 - **取消与 drain**：cancel 持久化停止意图，worker 取消当前执行并回收其持有的 Codex/VCS
-  进程组；停止凭据与已发送 effects 未确认前不释放绑定。drain 停止分配新 Flow，已有绑定
-  继续收尾。未知旧执行保持阻塞，无强制释放入口，见[取消与停机](docs/operations/cancel-drain.md)。
+  进程组，清理未提交修改和未跟踪文件后把原 workspace 归还空闲池，保留目录及 ignored 缓存。
+  完成回收才发送停止凭据；停止凭据与已发送 effects 未确认前不释放绑定。沿用 protocol v14，
+  不增加停止字段。drain 停止分配新 Flow，已有绑定继续收尾。未知旧执行保持阻塞，
+  无强制释放入口，见[取消与停机](docs/operations/cancel-drain.md)。
 - **Server 镜像更新**：独立更新器监听仓库 Webhook，验签后持久写入主机 JSON 队列，后台核验发布、
   候选镜像和删列检查，再缩至零、等旧 Pod 正常退出、以固定 digest 恢复一个副本并核验 Ready/imageID。
   同镜像中断可直接续作，目标已 Ready 不重复停启；不直连集群 PostgreSQL，不暂停全局业务，
@@ -120,9 +122,9 @@ FlowTool 的目标是把带 `flow` 标签的 GitHub issue 编排成
 
 ## 平面边界
 
-- **Control plane**：Webhook、状态机、持久化、Judge 和 GitHub API，是唯一数据库与 GitHub API 操作权威；
+- **Control plane**：Webhook、状态机、持久化和 Judge，独占数据库操作与 Flow 的 PR 创建、标签和 review 编排；
 - **Worker execution plane**：prompt、Codex 和 Flow 独占 repo，通过出站 WebSocket 接收结构化任务，
-  使用单仓库短时 capability push；不持有数据库、GitHub App 或 Judge 凭据；
+  Git/gh 使用当前 assignment 的单仓库短时 installation token；不持有数据库、GitHub App 或 Judge 凭据；
 - **本地执行**：Flow repo 负责目录所有权；只有运行在无法读取 control-plane secret 的专用 OS account、
   container 或 VM 中的 worker 才能显式开启 full access。Agent 自选 Git/jj，worker 只做结果核验。
 
@@ -155,6 +157,29 @@ FLOWTOOL_SERVE_WS_URL=ws://127.0.0.1:8000/internal/workers/connect \
 FLOWTOOL_ALLOW_INSECURE_WORKER_WS=true uv run flowtool worker
 ```
 
+实际编码需安装 `git`、`gh` 和所选的 Codex 或 Amp CLI（使用 jj 时另装 jj）。默认 `FLOWTOOL_CODING_AGENT=codex`；
+专用 worker 可改为 `amp`，并设置 `FLOWTOOL_AMP_RUN_TIMEOUT_SECONDS=1200`。Amp 使用该 worker
+专用 HOME 的原生 `amp login`，或可选 `AMP_API_KEY`；不要复制个人 HOME、Docker socket 或
+control secret。Git/gh 每轮只使用 GitHub App 下发的 assignment 凭据和临时配置，不改个人全局
+Git/gh 设置，提交作者仍由 worker Git 配置决定。Amp 历史读取是完整原生 thread 快照，可能滞后；
+未知续跑不会自动重跑，Amp adapter 固定使用 `--mode low`。INITIAL 会在
+`<worker_root>/repos/<owner>/<repo>` 缺失或为空时，用当前任务的短期 installation token
+原子 clone；已有 seed 保持原状，不自动 fetch/reset 或安装依赖。seed 必须有任务基线分支，
+不自动处理空远端、submodule 或 LFS。
+
+每个 worker 按仓库维护执行位置池：优先复用原 Flow 绑定和空闲完整副本，全部占用时增加临时
+Git worktree。`FLOWTOOL_WORKER_REPO_WORKSPACE_LIMIT=2` 设置每仓库总上限（正整数、最小 1，
+重启生效），seed 不计入。归档后完整副本归还池并保留 ignored 缓存；临时 worktree 注销并删除。
+达到上限、目录异常或所有权不明时拒绝执行，不自动清掉未知文件；旧未登记目录不迁移或接管。
+位置数量上限不限制单个缓存的字节数，也不改变 Flow 生命周期独占 worker 的调度。
+
+每次 INITIAL、REVISION resume/fallback 都提供本轮 bot `gh` 包装、独立配置和 Git helper，
+不使用个人登录态；token 过期/权限不足即失败，不自动续期或扩权。worker 保持单仓库
+Contents write，PR 通过 MCP `open_pr` 请求 controler 校验后创建。包装不构成 OS 沙箱。
+Amp 接入使用 protocol v15 / journal v4，serve 与 worker 应同时升级；旧 journal 不自动迁移。
+Amp 的临时 settings 不覆盖 managed policy；发现 workspace `.amp/settings.json[c]` 时拒绝执行，
+避免覆盖本轮工具/MCP 设置。完整配置与取消边界见[部署说明](docs/deployment/README.md)。
+
 `WorkerSettings` 不读取当前目录的 `.env`，worker 配置通过进程环境提供；默认要求 `wss://`，示例中的
 `FLOWTOOL_ALLOW_INSECURE_WORKER_WS=true` 仅用于开发。要运行 `danger-full-access` CodingAgent，必须在专用 OS account、
 container 或 VM 中只注入 worker/Codex 所需变量，并设置
@@ -169,6 +194,7 @@ schema，因此数据库账号需要拥有应用 schema，但不应具有数据�
 和 `/healthz` 不等于 GitHub/Codex/bub 集成已经可用；接入外部服务前请先阅读
 [GitHub App 接入说明](docs/architecture/github-app.md)和[已知短板](docs/architecture/decisions.md)。多个 worker
 必须各自配置唯一 identity/token；未显式设置 root 时会按 worker id 派生，显式 root 由 identity 标记和进程锁防止复用。
+worker 是长期进程或容器，而非每个 Flow 的临时容器；取消不表示容器会自动回收。
 serve 的 heartbeat、lease、recovery grace 配置见 [`env.example`](env.example)；worker 的
 `FLOWTOOL_RECONNECT_MIN_BACKOFF`、`FLOWTOOL_RECONNECT_MAX_BACKOFF` 和 `FLOWTOOL_RECONNECT_JITTER`
 通过进程环境调整。非法时间关系会在启动时拒绝。
@@ -190,8 +216,13 @@ uv run flowtool flow retry <FLOW_ID>
 只重试失败通知，成功后原子提交交付/session/反馈，不重新运行修订。状态不明的操作仍须先核对。
 
 归档使用 `FLOWTOOL_DONE_LABEL`（默认 `flow:done`）与 `FLOWTOOL_IN_REVIEW_LABEL`。
-部署前在仓库创建这两个标签；它们与 trigger label 必须非空且互不相同（忽略大小写）。
-缺少标签或 GitHub App 权限会保留待处理结果，服务不会创建仓库标签。
+serve 启动后在后台发现 GitHub App 已授权的仓库，自动补齐 `flow`、`flow:in-review`、
+`flow:done`；自定义名称使用对应配置，三个名称必须非空且互不相同（忽略大小写）。
+未建齐或检查失败的仓库每 **300 秒**检查；确认三个标签齐全后每 **24 小时**复查并补回缺失项，
+人工预建的也计入，已有名称、颜色和描述不变。检查时间只保存在内存，重启后重新扫描确认。
+新安装与新增授权仓库每 300 秒发现；暂停的 installation 和归档仓库跳过。
+App 需有 Issues write 权限；初始化失败不阻塞服务 readiness，日志记录待重试原因，限流可延长等待。
+这只创建仓库标签定义，不给 Issue/PR 自动添加触发标签。缺少标签或权限仍可能保留待处理结果。
 `flow show` 区分清理与 GitHub 回写进度；清理已确认但回写被明确拒绝时，修正远端原因后
 执行 `flow retry <id>`，只重置原 job 的失败 effects，保留已完成回执、attempt 和 worker journal。
 评论发送前的本地认证失败也可在修复凭据后按此方式重试；后续查询失败不会清除已有不确定发送记录。

@@ -148,7 +148,9 @@ class WorkerGateway:
                     register.recovery,
                 )
             if current is None:
-                stale_job_id = None if stop is not None else worker.current_job_id
+                stale_job_id = worker.current_job_id
+                if stop is not None and stale_job_id == stop.job_id:
+                    stale_job_id = None
                 if stale_job_id is not None and (
                     register.recovery is None or register.recovery.job_id != stale_job_id
                 ):
@@ -530,13 +532,15 @@ class WorkerGateway:
         job = self.jobs.get_job(job_id)
         if job is None or job.assignment_token is None:
             return
-        if job.started_at is None:
-            self.workers.requeue_assignment(job.id, worker_id, job.assignment_token, connection_epoch)
+        if job.started_at is None and self.workers.requeue_assignment(
+            job.id, worker_id, job.assignment_token, connection_epoch
+        ):
             self.notify_jobs()
             return
         delivery = self.deliveries.get_delivery(job.flow_id)
         if delivery is not None and delivery.state in {DeliveryState.CLOSED, DeliveryState.MERGED}:
             action = "reopen" if delivery.state is DeliveryState.CLOSED else "archive"
             raise ProtocolViolation(f"{action} blocked: original worker assignment journal is missing")
-        reason = "worker reconnected without its started assignment journal"
+        # Dispatch without Started is still unknown execution: fail through normal recovery, never rerun.
+        reason = "worker reconnected without its assignment journal"
         await self.coordinator.fail(job, reason)

@@ -108,7 +108,7 @@ async def _add_label(target: Issue | PullRequest, label: str) -> None:
     """Check a configured repository label before adding it without replacement."""
     repo = target.repository
     client = repo.installation._client()
-    with translate_errors("get_label (preconfigure the repository status label)"):
+    with translate_errors("get_label (repository status label must be initialized)"):
         await client.rest.issues.async_get_label(repo.owner, repo.name, label)
     client = repo.installation._client(auto_retry=False)
     with translate_errors("add_label"):

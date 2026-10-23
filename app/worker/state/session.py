@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import os
-import tempfile
 from pathlib import Path
 from typing import Literal
 from uuid import uuid4
@@ -24,6 +22,9 @@ from app.contracts.protocol import (
     terminal_digest,
 )
 from app.domain.models import JobState
+from app.worker.execution.workspaces import WorkspaceBinding
+from app.worker.state.amp_history import AmpHistory
+from app.worker.state.files import write_private_record
 from app.worker.state.history import CodexHistory
 
 TerminalMessage = Succeeded | Failed
@@ -37,7 +38,7 @@ class SessionError(RuntimeError):
 class SessionState(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    version: Literal[3] = 3
+    version: Literal[4] = 4
     job_id: int
     flow_id: int
     assignment_token: str
@@ -51,6 +52,7 @@ class SessionState(BaseModel):
     root_identity: tuple[str, int, int]
     acknowledged: bool = False
     cleanup_verified: bool = False
+    workspace: WorkspaceBinding | None = None
     execution_nonce: str | None = None
     stopped: ExecutionStopped | None = None
 
@@ -62,10 +64,11 @@ class WorkerSession:
         self.path = worker_root / "assignment-journal.json"
         self.assignment: Assignment | None = None
         self._history = CodexHistory()
+        self._amp_history = AmpHistory()
 
     def read(self, query: HistoryQuery) -> HistoryPage:
         """Read the session selected by control, independent of the active assignment."""
-        return self._history.query(query)
+        return (self._amp_history if query.session_id.startswith("T-") else self._history).query(query)
 
     def recovery(self, *, executor_active: bool) -> RecoveryDescriptor | None:
         record = self.load()
@@ -156,7 +159,11 @@ class WorkerSession:
             execution_nonce=uuid4().hex,
             archive_task=archive,
             root_identity=self._root_identity(),
-            cleanup_verified=bool(previous and previous.cleanup_verified),
+            workspace=(previous.workspace if previous and previous.flow_id == assignment.flow_id
+                       and (previous.stopped is None or archive is not None)
+                       else None),
+            cleanup_verified=bool(previous and previous.flow_id == assignment.flow_id
+                                  and previous.cleanup_verified),
         )
         self._write(record)
         self.assignment = assignment
@@ -180,16 +187,25 @@ class WorkerSession:
         self._write(record)
         self.assignment = None
 
-    def verify_cleanup(self, task: ArchiveTask, *, repo_present: bool) -> None:
-        """Persist ownership before deletion; only that proof permits an absent workspace."""
+    def bind_workspace(self, binding: WorkspaceBinding) -> None:
+        """Fix the allocation fence before coding; the same Flow may not silently move."""
         record = self._required()
-        if record.state != "started" or record.archive_task != task:
+        if (record.state != "started" or binding.flow_id != record.flow_id
+                or (record.workspace is not None and record.workspace != binding)):
+            raise SessionError("workspace does not match the journal allocation")
+        record.workspace = binding
+        self._write(record)
+
+    def verify_cleanup(self, task: ArchiveTask) -> WorkspaceBinding:
+        """Persist the exact release fence; the pool separately proves filesystem safety."""
+        record = self._required()
+        if (record.state != "started" or record.archive_task != task or record.workspace is None
+                or (record.workspace.flow_id, record.workspace.repository) != (task.flow_id, task.repo)):
             raise SessionError("archive cleanup does not match the journal assignment")
         if not record.cleanup_verified:
-            if not repo_present:
-                raise SessionError("archive repository is absent without verified cleanup evidence")
             record.cleanup_verified = True
             self._write(record)
+        return record.workspace
 
     def _root_identity(self) -> tuple[str, int, int]:
         root = self.path.parent.resolve()
@@ -275,27 +291,4 @@ class WorkerSession:
         return record
 
     def _write(self, record: SessionState) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        payload = record.model_dump_json()
-        temporary: str | None = None
-        try:
-            with tempfile.NamedTemporaryFile(
-                mode="w",
-                dir=self.path.parent,
-                prefix=f".{self.path.name}.",
-                delete=False,
-            ) as handle:
-                temporary = handle.name
-                os.fchmod(handle.fileno(), 0o600)
-                handle.write(payload)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, self.path)
-            directory = os.open(self.path.parent, os.O_RDONLY)
-            try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
-        finally:
-            if temporary is not None and os.path.exists(temporary):
-                os.unlink(temporary)
+        write_private_record(self.path, record.model_dump_json())

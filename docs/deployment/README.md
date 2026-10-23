@@ -11,9 +11,9 @@
 
 ## 1. 准备运行环境
 
-准备 Python 3.12+、uv、PostgreSQL，以及 worker 账号可运行且已配置认证的 Codex CLI、Git
-和所需项目工具链。若项目使用 jj，还需安装 jj。Worker 通过独立的显式命令更新；Server 部署不
-等待所有 Worker 升级，但连接中的 Worker 仍须通过现有协议和身份鉴权。
+准备 Python 3.12+、uv、PostgreSQL，以及 worker 账号可运行且已配置认证的 Codex CLI 或 Amp
+CLI、Git、gh 和所需项目工具链。若项目使用 jj，还需安装 jj。Worker 通过独立的显式命令更新；
+Server 部署不等待所有 Worker 升级，但连接中的 Worker 仍须通过现有协议和身份鉴权。
 
 在 control 账号的应用检出目录执行：
 
@@ -37,7 +37,12 @@ chmod 600 .env
 | `FLOWTOOL_WORKER_TOKENS` | 例如 `{"worker-1":"替换为随机token"}`，与 worker 一致 |
 | `FLOWTOOL_HOST` / `FLOWTOOL_PORT` | 本文使用 `127.0.0.1` / `8000` |
 
-提前创建 `flow`、`flow:in-review`、`flow:done` 标签；如修改名称，同步修改对应配置。
+无需提前创建 `flow`、`flow:in-review`、`flow:done`：serve 首轮后台扫描会在 App 已授权的
+非归档仓库补齐缺失定义。修改名称时同步修改对应配置；已有标签的名称、颜色和描述保留。
+未建齐或检查失败每 300 秒重试，确认齐全后每 24 小时复查；检查时间只保存在内存，重启后重新确认。
+新安装与新增授权仓库每 300 秒发现，扫描耗时和限流会延后处理；退避不跨重启保存。
+App 需有 Issues write 权限，程序不会自动申请权限或扩大仓库授权；有权限仍需等首轮完成后再添加
+触发标签。`/readyz` 只验证本地启动与数据库，不代表仓库标签已建好。
 Judge 配置只提供给 control，在 serve 的 `.env` 配置 `FLOWTOOL_JUDGE_MODEL`、
 `FLOWTOOL_JUDGE_API_KEY`，可选 `FLOWTOOL_JUDGE_API_BASE` 和 `FLOWTOOL_JUDGE_TIMEOUT_SECONDS`。
 
@@ -81,13 +86,46 @@ FLOWTOOL_WORKER_TOKEN='替换为serve登记的token'
 FLOWTOOL_SERVE_WS_URL=ws://127.0.0.1:8000/internal/workers/connect
 FLOWTOOL_ALLOW_INSECURE_WORKER_WS=true
 FLOWTOOL_WORKER_ROOT=~/.flowtool/workers/worker-1
+FLOWTOOL_WORKER_REPO_WORKSPACE_LIMIT=2
 FLOWTOOL_TRUSTED_HOST_EXECUTION=true
 FLOWTOOL_EXECUTION_ISOLATION=dedicated-account
+# 默认 codex；仅在该空闲 worker 明确采用 Amp 时改为 amp。
+FLOWTOOL_CODING_AGENT=codex
+FLOWTOOL_AMP_RUN_TIMEOUT_SECONDS=1200
 ```
 
 本文的明文 WS 只用于同机 loopback 联调；跨主机连接需要 WSS，不通过公开的 webhook 域名连接 worker。
 `dedicated-account` 必须对应已建立的真实账号边界。Codex 所需认证在该 worker 账号下独立准备，
 不复制 control 环境变量或 Judge 密钥。
+
+Amp 同样只在该专用 worker 身份下认证：使用其专用 HOME 执行 `amp login`，或提供可选
+`AMP_API_KEY`（Amp CLI 自行处理其优先级）。不要复制或挂载个人 HOME、Docker socket、control
+secret 或个人 Git/gh 配置。每轮 Git/gh 继续使用 GitHub App 下发的 assignment 凭据和临时配置，
+不改变个人全局配置；提交作者仍由 worker 的 Git 配置决定。切换为 `amp` 前先 drain 并等待该
+worker 的 Flow 收尾；未知续跑不自动重跑。Amp 历史是原生完整 thread 快照，可能滞后于刚发生的
+外部续跑，且不承诺离线可用。adapter 固定使用 Amp `--mode low`，不从 worker 环境提供模式覆写。
+
+Amp 的最终业务 JSON 通过 Schema 提示与现有 Pydantic/VCS 核验接收，没有 Codex 的
+`--output-schema` 生成约束；无效 JSON、错误终态或不完整输出均失败，不自动整理或重跑。
+`threads continue` 的错误（包括尚未充分分类的 thread 不存在）不会触发自动新建；只有任务原本
+没有 session 时，沿用 executor 的一次性 start fallback。ARCHIVE 继续使用既有 workspace
+释放流程，不会远程删除或归档 Amp thread。
+
+临时 `--settings-file` 限制工具与本轮 MCP，但 workspace 设置优先级更高，因此 adapter 在执行前
+拒绝发现的 `.amp/settings.json` / `.amp/settings.jsonc`，不修改这些文件。机器或 workspace 的
+[managed settings](https://ampcode.com/docs/cli/settings#managed-settings) 仍可能覆盖/合并本地策略；
+运维必须核查专用 Amp 账户的插件、服务端 MCP 与 managed policy，不将 CLI 工具列表当作隔离边界。
+有效工具列表检查用于拒收不符合策略的执行结果，不保证在额外工具运行前阻止其副作用。
+执行期间不要从其他客户端并发继续同一 worker thread；手工续跑的公开历史在后续快照刷新后可见。
+
+历史导出单次最多 20 秒、2 MiB，最多两个并发；只缓存已脱敏的公开块，缓存至多 16 个 thread，
+两秒后重新导出。页面最多 500 项、256 KiB；导出超限报告 `history_limit`，不展示不完整快照。
+控制侧单次 worker 查询允许 30 秒，覆盖导出与清理预算，不在导出仍正常进行时提前按旧 10 秒超时。
+公开历史与执行诊断共用脱敏规则，过滤 `sgamp_` 等 token；初始化前失败保留有界、脱敏 stderr，
+仍不据此自动重跑任务。
+取消/超时先 SIGTERM，等待最多三秒后升级清理捕获到的子进程组。`ps` 必须可用（Linux worker
+镜像包含 procps）；进程树快照有竞态，任意双重 fork/脱离进程树的守护进程不在可靠回收保证内。
+worker 容器是长期运行的，不会在每次取消后销毁；需要更强保证时必须使用外部每次执行隔离。
 
 在 worker 应用目录加载自己编写的文件并启动：
 
@@ -110,6 +148,45 @@ Compose 和 Kubernetes Worker 继续使用各自部署方式换镜像，没有�
 Kubernetes Server 的自动部署入口是部署主机独立端口上的仓库 Workflow runs Webhook，
 事件保存本地文件，不要求主机访问集群 PostgreSQL，详见 [Server 更新](server-update.md)。
 它与下文业务 GitHub App Webhook 的端口、secret 和持久化路径分开配置。
+
+### 仓库准备与执行位置
+
+- 不需要提前登录个人 gh 或复制 controler token。controler 为每次编码任务下发目标仓库的
+  installation token，worker 为 Git 与 gh 注入它；每次执行销毁临时包装和空配置目录。
+  App 需授权该仓库且具备 Contents write；worker 不持有 App 私钥，不新增 PR/Issue 权限。
+  PR 仍经本地 MCP `open_pr` 提交交付意图，由 controler 在结果通过校验后创建或复用。
+- INITIAL 自动 clone 缺失/空的 `<worker_root>/repos/<owner>/<repo>`，使用任务的基线分支及
+  remote。已有 seed 不自动 fetch、checkout、reset 或改写 remote；保持所需的已提交基线可用。
+  空远端、缺分支、非空非仓库目录、symlink、缺 gh 或过期能力均在编码前失败。SSH remote
+  不在当前核验范围内，使用不含凭据的 HTTPS URL。项目依赖、LFS/submodule 另行准备。
+- 执行目录位于 `<worker_root>/workspaces/<owner>/<repo>/<slot_id>`；
+  `workspace-pool.json` 与 `assignment-journal.json` 一起保存所有权、分配代次和恢复证据。
+  不要编辑、删除清单后让程序重新接管现有目录。准备中断、未知内容和损坏清单需要人工核查；
+  没有实际 checkout 的失败 clone 可安全重试，已执行或未知状态不会自动重放。
+- `FLOWTOOL_WORKER_REPO_WORKSPACE_LIMIT` 默认 2、最小 1，启动时读取；完整副本、临时
+  worktree、准备/清理中和隔离位置共同计数，seed 不计入，各仓库独立计数。降低上限不会删除
+  既有位置；原 Flow 可继续，数量回落前不扩容。完整副本归档返回 `released` 并保留目录和
+  ignored 依赖/构建缓存；worktree 返回 `removed`，经 Git 注销后删除。`flow show` 会注明目录保留。
+- Git worktree 共享对象库，不共享可写依赖目录。tracked 修改、未知非 ignored 文件、进行中的
+  VCS 操作或基线会覆盖缓存时拒绝复用，不使用 reset/clean 丢弃内容。jj 完整副本可复用；
+  溢出要求独立 Git seed，只准备 Git worktree，不复制 `.jj`。本策略不提供总字节配额或后台 GC。
+- token 不自动续期，运行超出有效期可能失败。gh 包装每次调用检查有效期；普通绝对路径 gh
+  也继承 bot 环境，但不经包装的本地期限检查。认证最终由 GitHub 判断，任何权限失败都不
+  回退个人凭据或自动重放写操作。仍须专用账户/容器/VM 隔离。
+
+取消时先持久保存停止证据，再清理受管 workspace 的未提交修改和未跟踪文件；原 copy/worktree、
+已推送 commit 和 ignored 缓存保留，位置归还空闲池。成功后才发送 `ExecutionStopped`，
+清理或 manifest 提交失败时保留控制面绑定并重连重试，不增加 ACK 字段或清理完成回执。
+旧停止重放仍核对下一任务；已 dispatch 却缺 journal 的普通任务明确失败，不自动重跑。
+停止 ACK 保留原位置证明，供取消期间已知合并后的 ARCHIVE 使用；详见[取消说明](../operations/cancel-drain.md)。
+当前 #109 仍有取消 REVISION 后显式重试无法重新占用 idle 位置的 medium，尚不建议合并部署。
+
+取消回收基线恢复为原 protocol v14，Amp 会话查询扩展在其上递增为 v15，沿用 journal v4 /
+workspace manifest v1，数据库 schema 不变。涉及协议或 journal 格式变更时，由操作者协调
+serve/worker 使用同一 commit 或对应镜像升级；更新器不检查或等待 Worker 升级。
+不混跑仅含取消回收的 v14、历史含 `release_workspace` 的 v15 或旧 Amp v16 快照。
+旧 journal 不自动迁移；在没有活跃/未知执行且归档与停止 ACK 完成后升级两端。
+保留旧数据作人工核查，不将旧 per-Flow 目录迁入池，详见[升级说明](../operations/upgrade.md)。
 
 ## 3. 配置 Cloudflare 入口
 
@@ -180,6 +257,7 @@ curl -i https://hooks.example.com/docs
 | webhook 返回 401 | GitHub App 与 serve 的 webhook secret 是否一致 |
 | webhook 返回 404 | hostname、精确 `/webhook` 路径和配置匹配顺序 |
 | worker 不在线 | identity/token、连接地址，以及是否错误继承了 control secret |
+| 仓库缺少 FlowTool 标签 | App 授权范围、Issues write 权限、是否暂停/归档；日志 `repository labels pending` / `inventory deferred` 的 kind、status、request ID；修复后等待重试 |
 | delivery 成功但没有 Flow | allowlist、触发事件/标签、App 安装仓库及 serve 日志 |
 | CodingAgent/Judge 失败 | worker 的工具链、独立认证、模型配置及 Flow 错误记录 |
 

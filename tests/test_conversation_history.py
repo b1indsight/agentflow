@@ -5,10 +5,13 @@ from pathlib import Path
 import pytest
 
 from app.contracts.conversation import ConversationFailure, HistoryQuery
+from app.worker.execution.amp_process import AmpProcessResult
 from app.worker.state import history
+from app.worker.state.amp_history import AmpHistory
 from app.worker.state.history import CodexHistory
 
 SESSION = "019eac3b-a60c-7a93-a442-3718f660fc8c"
+AMP_SESSION = "T-019eac3b-a60c-7a93-a442-3718f660fc8c"
 
 
 def rollout(root: Path, records: list[dict]) -> Path:
@@ -161,3 +164,92 @@ def test_history_refuses_special_files_and_racing_directory_symlink(tmp_path: Pa
     (root / "link").symlink_to(outside, target_is_directory=True)
     with pytest.raises(OSError):
         reader._open(root / "link" / "data")
+
+
+def test_amp_history_maps_public_blocks_and_invalidates_edited_prefix(monkeypatch) -> None:
+    def native(role: str, message_id: str, content: list[dict]) -> dict:
+        return {"role": role, "protocolMessageID": message_id,
+                "createdAt": "2026-10-21T00:00:00Z", "content": content}
+
+    first = native("assistant", "M-first", [
+        {"type": "thinking", "thinking": "private"},
+        {"type": "text", "text": "Bearer abc123 private-key-value"},
+        {"type": "tool_use", "id": "TU-1", "name": "shell", "input": {"key": "private-key-value"}},
+    ])
+    second = native("user", "M-second", [
+        {"type": "tool_result", "toolUseID": "TU-1", "run": {"result": {"output": "done"}}},
+    ])
+    reader = AmpHistory()
+    monkeypatch.setenv("AMP_API_KEY", "private-key-value")
+    monkeypatch.setattr("app.worker.state.amp_history.CACHE_SECONDS", 0)
+    messages = [first]
+
+    async def export(*args, **kwargs):
+        return AmpProcessResult(json.dumps({"id": AMP_SESSION, "messages": messages}).encode(), b"", 0)
+
+    monkeypatch.setattr("app.worker.state.amp_history.run_amp", export)
+    page = reader.query(HistoryQuery(session_id=AMP_SESSION, limit=2))
+    assert [(item.role, item.kind, item.id) for item in page.items] == [
+        ("assistant", "message", f"{AMP_SESSION}:M-first:1"),
+        ("assistant", "tool_call", f"{AMP_SESSION}:M-first:2"),
+    ]
+    assert "private-key-value" not in page.items[0].content.text
+    # A native user tool_result is deliberately exposed as the existing tool role.
+    messages.append(second)
+    next_page = reader.query(HistoryQuery(session_id=AMP_SESSION, cursor=page.next_cursor))
+    assert [(item.role, item.call_id) for item in next_page.items] == [("tool", "TU-1")]
+
+    edited = native("assistant", "M-first", [{"type": "text", "text": "changed"}])
+    messages[0] = edited
+    with pytest.raises(ConversationFailure, match="cursor_invalid"):
+        reader.query(HistoryQuery(session_id=AMP_SESSION, cursor=page.next_cursor))
+
+
+def test_amp_history_pages_inside_native_messages_and_bounds_bytes(monkeypatch) -> None:
+    # One native message may contain more blocks than a page: the cursor must advance.
+    reader = AmpHistory()
+    message = {"role": "assistant", "protocolMessageID": "M-many", "content": [
+        {"type": "text", "text": "字" * 8192} for _ in range(50)
+    ]}
+
+    async def export(*args, **kwargs):
+        return AmpProcessResult(json.dumps({"id": AMP_SESSION, "messages": [message]}, ensure_ascii=False).encode(), b"", 0)
+
+    monkeypatch.setattr("app.worker.state.amp_history.run_amp", export)
+    first = reader.query(HistoryQuery(session_id=AMP_SESSION, limit=1))
+    assert len(first.items) == 1 and first.has_more
+    rest = reader.query(HistoryQuery(session_id=AMP_SESSION, cursor=first.next_cursor))
+    assert rest.items[0].id == f"{AMP_SESSION}:M-many:1" and rest.has_more
+    assert len(rest.model_dump_json().encode()) < 262144
+
+
+def test_amp_history_redacts_other_clients_access_tokens(monkeypatch) -> None:
+    # External continuation can introduce a credential absent from this worker's environment.
+    monkeypatch.delenv("AMP_API_KEY", raising=False)
+    token = "sgamp_external-client_123456789"
+    # Native tool payloads become JSON strings before entering the public history cache.
+    payload = {f"line\n{token}": [f"line\t{token}", {"output": f"line\r{token}"}],
+               "encoded": json.dumps({"output": f"line\n{token}"}), "unicode": "\ud800",
+               "path": "task-abcdefghijklmnop", "count": 2, "ok": True}
+    redacted = {"line\n[REDACTED]": ["line\t[REDACTED]", {"output": "line\r[REDACTED]"}],
+                "encoded": json.dumps({"output": "line\n[REDACTED]"}), "unicode": "\ud800",
+                "path": "task-abcdefghijklmnop", "count": 2, "ok": True}
+    message = {"role": "assistant", "protocolMessageID": "M-token", "content": [
+        {"type": "text", "text": f"line\n{token}"},
+        {"type": "tool_use", "id": "TU-token", "name": "shell", "input": payload},
+        {"type": "tool_result", "toolUseID": "TU-token", "run": {"result": payload}},
+    ]}
+
+    async def export(*args, **kwargs):
+        return AmpProcessResult(json.dumps({"id": AMP_SESSION, "messages": [message]}).encode(), b"", 0)
+
+    monkeypatch.setattr("app.worker.state.amp_history.run_amp", export)
+    reader = AmpHistory()
+    for _ in range(2):
+        page = reader.query(HistoryQuery(session_id=AMP_SESSION))
+        assert len(page.items) == 3
+        assert token not in page.model_dump_json()
+        assert page.items[0].content.text == "line\n[REDACTED]"
+        assert page.items[1].content.arguments is not None
+        assert json.loads(page.items[1].content.arguments) == redacted
+        assert json.loads(page.items[2].content.text) == redacted

@@ -8,6 +8,7 @@ import pytest
 
 from app.contracts.protocol import (
     PROTOCOL_VERSION,
+    ExecutionStopped,
     FlowToolRequest,
     InitialTask,
     InitialTaskResult,
@@ -139,6 +140,10 @@ async def test_merged_initial_retry_keeps_execution_facts_without_reopening(
         database=store.database,
     )
     service.cancel(flow)
+    stop = store.stops.pending('worker-a')
+    assert store.stops.confirm('worker-a', ExecutionStopped(
+        **stop.message('epoch').model_dump(exclude={'type'}), execution_nonce='owned',
+    ))
     service.retry(flow)
     # Fresh worker-b starts from seed A, then checks out existing H where H descends A and H != A.
     store.workers.worker_connected("worker-b", PROTOCOL_VERSION, "epoch-b")

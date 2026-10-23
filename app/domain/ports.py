@@ -11,9 +11,9 @@ from app.domain.models import CodingExecutionContext, CodingExecutionResult
 
 
 class CodingAgent(Protocol):
-    """重的代码 agent。MVP adapter：codex（worker/execution/codex.py）。
+    """重的代码 agent；worker 可选择 Codex 或 Amp CLI adapter。
 
-    本地版本控制（branch/commit/push）由 agent 自己在 Flow 独占 repo 内完成。Codex adapter 的
+    本地版本控制（branch/commit/push）由 agent 自己在 Flow 独占 repo 内完成。两个 adapter 的
     trusted-host 模式使用 full access，必须由外部 account/container/VM 隔离 control secret；目录所有权
     与安全隔离是不同约束。
     """

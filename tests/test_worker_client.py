@@ -36,6 +36,9 @@ class RecordingExecutor:
         assert task.repo == "owner/repo"
         return InitialTaskResult(session_id="session-1", last_message="done", exit_code=0)
 
+    async def reclaim_workspace(self) -> None:
+        raise AssertionError("no stop was requested")
+
 
 class ScriptedConnection:
     def __init__(self) -> None:
@@ -148,6 +151,9 @@ class ToolCallingExecutor:
         assert result == PreparedDelivery(head_sha="abc", delivery_version=1)
         return InitialTaskResult(session_id="session-1", last_message="done", exit_code=0)
 
+    async def reclaim_workspace(self) -> None:
+        raise AssertionError("no stop was requested")
+
 
 class ToolConnection:
     def __init__(self) -> None:
@@ -216,6 +222,9 @@ class CancellableExecutor:
         finally:
             self.cancelled.set()
         raise AssertionError("unreachable")
+
+    async def reclaim_workspace(self) -> None:
+        raise AssertionError("no stop was requested")
 
 
 class BrokenHeartbeatConnection:

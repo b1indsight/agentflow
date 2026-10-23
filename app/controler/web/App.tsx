@@ -14,7 +14,15 @@ import {
   PanelLeftOpen,
   RefreshCw,
 } from "lucide-react";
-import { archiveFlow, getFlow, getFlows, getJobs, getRepos } from "./api";
+import {
+  archiveFlow,
+  getFlow,
+  getFlows,
+  getJobs,
+  getRepos,
+  retryFlow,
+  retryFailureMessage,
+} from "./api";
 import {
   ActivityView,
   isToolActivity,
@@ -199,7 +207,7 @@ function Detail({
   counts,
   load,
   refresh,
-  onArchived,
+  onChanged,
   onBack,
 }: {
   id: number;
@@ -208,7 +216,7 @@ function Detail({
   counts: Record<Phase, number>;
   load: (p: Phase) => void;
   refresh: number;
-  onArchived: () => void;
+  onChanged: () => void;
   onBack: () => void;
 }) {
   const [flow, setFlow] = useState<FlowDetail | null>(null),
@@ -217,8 +225,11 @@ function Detail({
       () => positions.get("collapsed") === 1,
     ),
     [nav, setNav] = useState(false);
-  const [archiving, setArchiving] = useState(false);
+  const [pending, setPending] = useState<"archive" | "retry" | null>(null);
+  const writing = useRef(false);
   const [archiveError, setArchiveError] = useState("");
+  const [retryError, setRetryError] = useState("");
+  const [retryNotice, setRetryNotice] = useState("");
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
@@ -226,23 +237,36 @@ function Detail({
       mounted.current = false;
     };
   }, []);
-  const archive = async () => {
-    if (archiving) return;
-    setArchiving(true);
+  const submit = async (action: "archive" | "retry") => {
+    // Fence both writes synchronously, before React renders disabled buttons.
+    if (writing.current) return;
+    writing.current = true;
+    setPending(action);
     setArchiveError("");
+    setRetryError("");
+    setRetryNotice("");
     try {
       // Let the write finish after navigation so the board can refresh its committed outcome.
-      const value = await archiveFlow(id);
-      onArchived();
-      if (mounted.current)
+      const value = await (action === "retry"
+        ? retryFlow(id)
+        : archiveFlow(id));
+      onChanged();
+      if (mounted.current) {
         setFlow((prior) =>
           prior && prior.state_version > value.state_version ? prior : value,
         );
+        if (action === "retry")
+          setRetryNotice("重试请求已受理，请查看当前动作及执行记录。");
+      }
     } catch (error) {
-      if (mounted.current)
-        setArchiveError(error instanceof Error ? error.message : "请求失败");
+      if (mounted.current) {
+        if (action === "retry") setRetryError(retryFailureMessage(error));
+        else
+          setArchiveError(error instanceof Error ? error.message : "请求失败");
+      }
     } finally {
-      if (mounted.current) setArchiving(false);
+      writing.current = false;
+      if (mounted.current) setPending(null);
     }
   };
   const [compactHead, setCompactHead] = useState(false);
@@ -553,7 +577,7 @@ function Detail({
                   PR #{flow.pr_number} ↗
                 </a>
               )}
-              <span className="tag">工作流只读</span>
+              <span className="tag">支持归档与安全重试</span>
             </div>
             <div className="tabs" role="tablist" onKeyDown={tabs}>
               {(
@@ -589,6 +613,16 @@ function Detail({
                     <span>下一步条件</span>
                     <p>{flow.next_condition}</p>
                   </div>
+                  {flow.phase === "blocked" && (
+                    <button
+                      className="btn"
+                      disabled={pending !== null}
+                      onClick={() => void submit("retry")}
+                    >
+                      <RefreshCw />
+                      {pending === "retry" ? "正在提交重试…" : "重试"}
+                    </button>
+                  )}
                   {flow.lifecycle === "cancelled" && flow.phase !== "done" && (
                     <>
                       <p className="muted">
@@ -596,17 +630,19 @@ function Detail({
                       </p>
                       <button
                         className="btn"
-                        disabled={archiving}
-                        onClick={() => void archive()}
+                        disabled={pending !== null}
+                        onClick={() => void submit("archive")}
                       >
                         <Archive />
-                        {archiving ? "正在归档…" : "归档"}
+                        {pending === "archive" ? "正在归档…" : "归档"}
                       </button>
                     </>
                   )}
                   {archiveError && (
                     <p role="alert">归档失败：{archiveError}，请重试。</p>
                   )}
+                  {retryError && <p role="alert">{retryError}</p>}
+                  {retryNotice && <p role="status">{retryNotice}</p>}
                 </section>
                 <h2 className="panel-title">任务信息</h2>
                 <dl className="task-facts">
@@ -969,7 +1005,7 @@ export default function App() {
           counts={counts}
           load={load}
           refresh={refresh}
-          onArchived={() => setBoardRevision((x) => x + 1)}
+          onChanged={() => setBoardRevision((x) => x + 1)}
           onBack={() => (location.hash = "board")}
         />
       ) : (

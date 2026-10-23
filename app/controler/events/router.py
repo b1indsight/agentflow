@@ -61,12 +61,13 @@ class EventRouter:
         issue_number = payload["issue"]["number"]
         actor = (payload.get("sender") or {}).get("login", "")
         installation_id = (payload.get("installation") or {}).get("id")
-        if action == "labeled" and label == self.settings.trigger_label:
+        trigger = isinstance(label, str) and label.casefold() == self.settings.trigger_label.casefold()
+        if action == "labeled" and trigger:
             if actor not in self.settings.allowlist:
                 logger.warning("trigger by non-allowlisted user {} ignored", actor)
                 return
             self.service.on_trigger(repo, issue_number, installation_id)
-        elif action == "unlabeled" and label == self.settings.trigger_label:
+        elif action == "unlabeled" and trigger:
             flow = self.flows.get_active_flow(repo, issue_number)
             if flow:
                 self.service.cancel(flow)

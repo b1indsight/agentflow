@@ -1,12 +1,13 @@
 import asyncio
 import signal
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
 from pydantic import SecretStr
 
-from app.domain.models import CodingExecutionContext, SessionUnavailable
+from app.domain.models import CodingExecutionContext, GitHubCapability, SessionUnavailable
 from app.worker.execution.codex import CodexAgent, _codex_environment, _start_args
 
 
@@ -18,10 +19,14 @@ async def test_adapter_returns_raw_output_without_interpreting_business_schema(m
     raw = '{"caller_owned":"result"}'
 
     class Process:
+        pid = 999999999
         returncode = 0
 
         async def communicate(self):
             return b'{"type":"thread.started","thread_id":"session-1"}\n', b""
+
+        async def wait(self):
+            return self.returncode
 
     async def spawn(*args, **kwargs):
         assert kwargs["cwd"] == tmp_path
@@ -77,7 +82,8 @@ def test_codex_environment_removes_worker_and_github_credentials() -> None:
 
 def test_run_context_injects_only_scoped_push_and_mcp_capabilities() -> None:
     context = CodingExecutionContext(
-        push_token=SecretStr("push-secret"),
+        github=GitHubCapability(SecretStr("push-secret"), "owner/repo",
+                                datetime.now(UTC) + timedelta(minutes=5)),
         mcp_url="http://127.0.0.1:12345/mcp",
         mcp_token=SecretStr("mcp-secret"),
     )
@@ -110,7 +116,7 @@ async def test_resume_also_requires_explicit_trusted_host_mode() -> None:
 
 async def test_resume_uses_current_directory_and_disables_saved_broker(monkeypatch, tmp_path):
     # A recovered session can retain another directory and an expired INITIAL broker.
-    process = AsyncMock(returncode=0)
+    process = AsyncMock(returncode=0, pid=999999999)
     process.communicate.return_value = (b"", b"")
     spawn = AsyncMock(return_value=process)
     monkeypatch.setattr("app.worker.execution.codex.asyncio.create_subprocess_exec", spawn)
@@ -135,10 +141,14 @@ async def test_cli_session_rejection_is_classified_only_before_any_events(
     monkeypatch, tmp_path, events, error, unavailable,
 ):
     class Process:
+        pid = 999999999
         returncode = 1
 
         async def communicate(self):
             return events, error.encode()
+
+        async def wait(self):
+            return self.returncode
 
     async def spawn(*args, **kwargs):
         return Process()
@@ -188,10 +198,14 @@ async def test_revision_deadline_cancels_the_whole_codex_process_group(monkeypat
 
 async def test_mcp_token_is_redacted_before_results_leave_driver(monkeypatch, tmp_path):
     class Process:
+        pid = 999999999
         returncode = 1
 
         async def communicate(self):
             return b"", b"failed with mcp-secret"
+
+        async def wait(self):
+            return self.returncode
 
     async def spawn(*args, **kwargs):
         Path(args[args.index("-o") + 1]).write_text("echoed mcp-secret")

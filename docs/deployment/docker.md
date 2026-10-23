@@ -92,12 +92,39 @@ main 发布使用 `sha-<完整提交 SHA>`，不更新 `latest`，也不会自�
 然后 `docker compose ... pull` 和 `up -d --no-build`。当前文档不宣称包已发布。
 Python 基础镜像固定 digest，依赖锁在 uv.lock；Codex CLI 0.153.4、jj 0.45.1 固定版本，jj 校验
 SHA256。Debian 安全包仍从当前仓库安装，因此源代码相同不等于镜像逐字节相同，部署以 digest 为准。
-worker 仅提供 Python、Node/npm、Git、jj、Codex。项目依赖需在派生 worker 镜像构建时安装并测试。
+worker 提供 Python、Node/npm、Git、gh、jj、Codex 和 Amp；serve 不包含这些编码 CLI。
+Amp 仅在 worker target 安装，固定为 `0.0.1792555249-g702cd1`，不使用 `latest` 或运行期
+安装。构建下载官方发布的 Linux amd64（官方文件名为 x64）压缩产物
+`https://static.ampcode.com/cli/0.0.1792555249-g702cd1/amp-linux-x64.gz`，解压后以同一官方
+目录的 `linux-x64-amp.sha256` 校验 SHA-256
+`41a2e3680c63091d7c0293e2ad702af95772f9f35d977b74c7794fa40e45b5c9`。这是对官方
+[`install.sh`](https://ampcode.com/install.sh/) 安装逻辑的固定化复现；镜像构建不会请求其
+`cli-version.txt`。项目依赖仍须在派生 worker 镜像构建时安装并测试。
 参见 [Codex CLI 安装](https://developers.openai.com/codex/cli)。
+
+### 可选 Amp worker
+
+`FLOWTOOL_CODING_AGENT` 未设置或为 `codex` 时保持 Codex。要让一个**空闲且已 drain** 的
+worker 使用 Amp，在其 worker.env 中设置 `FLOWTOOL_CODING_AGENT=amp`；
+`FLOWTOOL_AMP_RUN_TIMEOUT_SECONDS=1200` 是 Amp 单轮超时。不要为活动或执行状态未知的
+Flow 切换后端，也不要把未知续跑当作可安全重跑的任务。Amp adapter 固定以 `--mode low`
+执行，不提供运行期模式漂移。
+
+Amp 认证只属于该 worker：可进入该 worker 的专用运行身份执行一次原生 `amp login`，或在
+worker.env 提供可选的 `AMP_API_KEY`。后者按 Amp CLI 自己的优先级生效。`worker_home` 是这个
+长期 worker 容器的专用、持久 HOME，原生登录状态保存在其中；不要挂载个人 HOME、Docker
+socket 或 control 的 secret。它不是每个 Flow 创建/自动回收的容器，取消一个任务不会自动
+回收该容器。Git/gh 仍由每轮 assignment 的 GitHub App 凭据配置，使用临时独立配置且不改动
+个人全局 Git/gh 设置；提交作者仍按 worker 的 Git 配置决定。
+
+Amp 历史读取使用 CLI 原生完整 thread 快照，因此可能比正在运行或刚刚外部续跑的 thread
+滞后；快照读取不证明本地离线历史。Docker smoke 只验证两个 CLI 可启动及 serve/worker
+边界，不验证真实模型、登录、Amp 恢复或完整 GitHub 闭环。
 
 ## 数据与升级限制
 
-`worker_root` 保存 checkout/journal；`worker_home` 保存 Codex session；`postgres_data` 保存控制面。
+`worker_root` 保存 checkout/journal；`worker_home` 保存 Codex session 及可选 Amp 原生登录状态；
+`postgres_data` 保存控制面。
 备份需同时协调数据库和 worker 文件。不要用 `down --volumes` 操作正式部署。
 当前升级先停止新触发，等待现有 Flow 收尾，再停止 worker，保留卷并换镜像。持久 drain 由 F6 补齐。
 
