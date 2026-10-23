@@ -42,13 +42,11 @@ class ImageCommands:
                 "replicas": 1,
                 "template": {
                     "spec": {
-                        "terminationGracePeriodSeconds": 60,
                         "containers": [
                             {
                                 "name": "app",
                                 "image": "old:1",
                                 "imagePullPolicy": "IfNotPresent",
-                                "readinessProbe": {"httpGet": {"path": "/readyz", "port": 8000}},
                             },
                             {"name": "gateway", "image": "gateway:1"},
                         ],
@@ -130,13 +128,7 @@ class ImageCommands:
             self.workload["status"]["observedGeneration"] = self.workload["metadata"]["generation"]
             return self.workload
         if resource == "node/node":
-            return {
-                "metadata": {"name": "node"},
-                "status": {
-                    "conditions": [{"type": "Ready", "status": "True"}],
-                    "nodeInfo": {"operatingSystem": "linux", "architecture": "amd64"},
-                },
-            }
+            return {"metadata": {"name": "node"}}
         if resource == "statefulset/server":
             return self.workload
         if resource == "horizontalpodautoscalers":

@@ -28,10 +28,10 @@ Server 更新器在部署主机独立监听端口，接收仓库的 `workflow_ru
 5. 拉取不可变 digest，并在无应用凭据/生产数据卷的临时 Pod 中验证导入、
    镜像身份和数据库删列检查。临时数据库仅使用 emptyDir 与 Unix socket，使用固定 digest
    的 PostgreSQL 17 镜像；不连接业务数据库。只读列元数据由旧实例单独提供。
-   同时核对目标身份、Linux amd64 节点、单副本 StatefulSet、无 HPA、缩容保留 PVC、
-   `/readyz` 探针及至少 45 秒正常退出宽限。检查模式也会创建及清理镜像检查 Pod。
+   同时核对目标身份、节点可调度、单副本 StatefulSet、无 HPA、缩容保留 PVC。
+   检查模式也会创建及清理镜像检查 Pod。
 6. 持久化完整预检结果和停旧意图，将原副本缩到 0，等待旧 Pod 正常退出。
-7. 设置已验证的固定 digest，将副本恢复为 1；确认新 Pod `/readyz` 和运行时 imageID，
+7. 设置已验证的固定 digest，将副本恢复为 1；确认新 Pod Ready 和运行时 imageID，
    清理本操作检查资源，先记录 operation complete，再记录事件 deployed。
 
 Server 更新不设置全局 pause/resume，不等待通信 activity、Worker 更新、任务完成或通信队列清空。

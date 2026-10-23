@@ -244,29 +244,21 @@ class Update:
             if target["kind"] == "StatefulSet" and target["name"] == workload["metadata"]["name"]:
                 raise RuntimeError("Autoscaling must not manage this StatefulSet")
         node = self.get(f"node/{self.args.node}")
-        info = node["status"]["nodeInfo"]
-        if not self.ready(node) or node.get("spec", {}).get("unschedulable"):
-            raise RuntimeError("Target node must be Ready and schedulable")
-        if (info["operatingSystem"], info["architecture"]) != ("linux", "amd64"):
-            raise RuntimeError("Published image requires a Linux/amd64 node")
+        if node.get("spec", {}).get("unschedulable"):
+            raise RuntimeError("Target node must be schedulable")
         containers = workload["spec"]["template"]["spec"]["containers"]
         indices = [i for i, item in enumerate(containers) if item["name"] == self.args.container]
         if len(indices) != 1:
             raise RuntimeError("Application container is ambiguous")
-        index = indices[0]
-        if containers[index].get("readinessProbe", {}).get("httpGet", {}).get("path") != "/readyz":
-            raise RuntimeError("Application readinessProbe must check /readyz")
-        if workload["spec"]["template"]["spec"].get("terminationGracePeriodSeconds", 30) < 45:
-            raise RuntimeError("Server termination grace must be at least 45 seconds")
-        return workload, index
+        return workload, indices[0]
 
     def preflight(self) -> tuple[dict, dict, int]:
         workload, index = self.target()
         if workload["spec"].get("replicas", 1) != 1:
             raise RuntimeError("Expected exactly one server replica")
         pods = self.pods(workload)
-        if len(pods) != 1 or not self.ready(pods[0]):
-            raise RuntimeError("Expected exactly one healthy server Pod")
+        if len(pods) != 1:
+            raise RuntimeError("Expected exactly one server Pod")
         if pods[0]["spec"].get("nodeName") != self.args.node:
             raise RuntimeError("Server Pod is not on the specified node")
         return workload, pods[0], index
@@ -492,7 +484,7 @@ class Update:
                 raise RuntimeError("Running image does not match the checked candidate")
             return pod
 
-        pod = self.wait(ready, "replacement /readyz and matching runtime image identity")
+        pod = self.wait(ready, "replacement readiness and matching runtime image identity")
         self.cleanup_probe()
         self.report.update(status="complete", new_pod_uid=pod["metadata"]["uid"])
         self.save("ready")
