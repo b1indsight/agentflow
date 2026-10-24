@@ -92,14 +92,6 @@ svg {
   font-family: var(--mono);
   font-size: var(--text-control);
 }
-.tag {
-  border: 1px solid var(--line);
-  border-radius: 5px;
-  padding: 3px 7px;
-  font-size: var(--text-small);
-  color: var(--muted);
-  white-space: nowrap;
-}
 .dot {
   display: inline-block;
   width: 7px;
