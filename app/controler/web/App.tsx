@@ -577,7 +577,6 @@ function Detail({
                   PR #{flow.pr_number} ↗
                 </a>
               )}
-              <span className="tag">支持归档与安全重试</span>
             </div>
             <div className="tabs" role="tablist" onKeyDown={tabs}>
               {(
