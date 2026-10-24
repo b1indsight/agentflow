@@ -198,7 +198,13 @@ def test_worker_without_update_still_starts_runtime(tmp_path, monkeypatch):
     runtime.run.assert_awaited_once()
 
 
-def test_update_replaces_body_in_place_and_exits_without_worker_credentials(installation):
+def test_update_replaces_body_in_place_and_exits_without_worker_credentials(
+    installation, monkeypatch
+):
+    # GitHub Actions enables ANSI styling inside the visible --update option.
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.delenv("NO_COLOR", raising=False)
     prefix, site = installation
     result = invoke_installed(installation)
     assert result.returncode == 0, result.stdout + result.stderr

@@ -296,7 +296,8 @@ def update_worker() -> dict[str, str]:
                 ],
                 lock_descriptor,
             )
-            if "--update" not in help_text:
+            # Match displayed flags, not the ANSI styling Typer enables in CI.
+            if "--update" not in re.sub(r"\x1b\[[0-9;]*m", "", help_text):
                 raise UpdateError("installed Worker CLI does not expose --update")
             phase = "dependencies"
             _run(
