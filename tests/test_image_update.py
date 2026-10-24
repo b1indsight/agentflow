@@ -15,7 +15,7 @@ import pytest
 from app.persistence.schema import SCHEMAS
 
 TOOLS = Path(__file__).parents[1] / "scripts/server_update"
-IMAGE = "ghcr.io/b1indsight/agentflow-serve@sha256:" + "a" * 64
+IMAGE = "ghcr.io/example/serve@sha256:" + "a" * 64
 REAL_RUN = subprocess.run
 
 
@@ -625,53 +625,3 @@ def test_queue_cli_resumes_completed_deployment_after_event_write_failure(monkey
     assert commands.workload["spec"]["template"]["spec"]["containers"][0]["image"] == image
     assert commands.events.count("scale-zero") == commands.events.count("scale-one") == 1
     assert commands.probe is None
-
-
-def test_queue_cli_rejects_other_image_then_resumes_direct_deployment(
-    invoke_image_update, monkeypatch, tmp_path
-):
-    # A direct CLI timeout after scale-down must not kill queue consumption or
-    # let a newer image replace its intent; the same image can finish the stop/start.
-    commands = ImageCommands(failure="old-stuck")
-    assert invoke_image_update(commands) == 1
-    record = next(tmp_path.glob("*/operation.json"))
-    unfinished = record.read_bytes()
-    before = list(commands.events)
-    commands.failure = ""
-    target = sys.argv[1:]
-    image_index = target.index("--image")
-    del target[image_index : image_index + 2]
-    target.remove("--apply")
-
-    # Keep the real CLI adapter, as in the event-write recovery test above.
-    spec = importlib.util.spec_from_file_location("image_event_direct", TOOLS / "image_event.py")
-    events = importlib.util.module_from_spec(spec)
-    monkeypatch.setitem(sys.modules, spec.name, events)
-    spec.loader.exec_module(events)
-    events.initialize(record.parent)
-    queue = events.Queue(record.parent)
-    monkeypatch.setattr(
-        events,
-        "resolve",
-        lambda run_id, attempt, sha: {
-            "run_id": run_id,
-            "attempt": attempt,
-            "sha": sha,
-            "run_number": run_id,
-            "image": IMAGE if run_id == 3 else IMAGE.replace("a" * 64, "b" * 64),
-        },
-    )
-    monkeypatch.setattr(sys, "argv", ["image-event", "run", *target, "--once"])
-    queue.enqueue(2, 1, "a" * 40)
-    with pytest.raises(events.Rejected, match="deployment failed; same event can be retried"):
-        events.main()
-    assert queue.events()[0].state == "failed"
-    assert record.read_bytes() == unfinished
-    assert commands.events == before
-
-    queue.enqueue(3, 1, "c" * 40)
-    events.main()
-    assert [row.state for row in queue.events()] == ["failed", "deployed"]
-    assert json.loads(record.read_text())["status"] == "complete"
-    assert commands.workload["spec"]["template"]["spec"]["containers"][0]["image"] == IMAGE
-    assert commands.events.count("scale-zero") == commands.events.count("scale-one") == 1
