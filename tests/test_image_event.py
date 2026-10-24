@@ -136,8 +136,8 @@ def test_interrupted_authorized_event_resumes_before_newer_event_without_reresol
     queue.enqueue(3, 1, "c" * 40)
     monkeypatch.setattr(module, "resolve", lambda *args: pytest.fail("must keep pinned image"))
     called = []
-    consumer = module.Consumer(queue, lambda row, apply: called.append(row.run_id))
-    assert consumer.run(apply=True, once=True)
+    consumer = module.Consumer(queue, lambda row: called.append(row.run_id))
+    assert consumer.run(once=True)
     assert called == [2]
     assert [row.state for row in queue.events()] == ["deployed", "queued"]
 
@@ -146,15 +146,12 @@ def test_failed_delivery_can_retry_without_deleting_history(events, monkeypatch)
     module, queue = events
     queue.enqueue(2, 1, SHA)
     monkeypatch.setattr(module, "resolve", candidate)
-    monkeypatch.setattr(module, "github", lambda _: {"object": {"sha": SHA}})
-    consumer = module.Consumer(
-        queue, lambda row, apply: (_ for _ in ()).throw(RuntimeError("failed"))
-    )
-    assert not consumer.run(apply=True, once=True)
+    consumer = module.Consumer(queue, lambda row: (_ for _ in ()).throw(RuntimeError("failed")))
+    assert not consumer.run(once=True)
     assert queue.events()[0].state == "failed"
     assert post(TestClient(module.create_app(queue, SECRET)), payload()).status_code == 202
-    consumer.deploy = lambda row, apply: None
-    assert consumer.run(apply=True, once=True)
+    consumer.deploy = lambda row: None
+    assert consumer.run(once=True)
     assert queue.events()[0].state == "deployed"
 
 
@@ -179,7 +176,7 @@ def test_consumer_exclusion_is_cross_process(events):
     try:
         assert ready.wait(10)
         with pytest.raises(module.Rejected, match="lock"):
-            module.Consumer(queue, lambda row, apply: None).run(apply=True, once=True)
+            module.Consumer(queue, lambda row: None).run(once=True)
     finally:
         release.set()
         process.join(10)
@@ -199,11 +196,10 @@ def test_listener_consumes_signed_request_while_next_request_remains_responsive(
 ):
     module, queue = events
     monkeypatch.setattr(module, "resolve", candidate)
-    monkeypatch.setattr(module, "github", lambda _: {"object": {"sha": SHA}})
     started, release = threading.Event(), threading.Event()
 
-    def deploy(row, apply):
-        assert apply and row.image == candidate(2, 1, SHA)["image"]
+    def deploy(row):
+        assert row.image == candidate(2, 1, SHA)["image"]
         assert queue.events()[0].image == row.image
         started.set()
         assert release.wait(10)
@@ -229,7 +225,7 @@ def test_pinned_failed_event_cannot_downgrade_a_newer_deployment(events, newer_r
     queue.save(module.Event(**candidate(newer_run, newer_attempt, SHA), state="deployed"))
     queue.enqueue(2, 1, SHA)
     consumer = module.Consumer(queue, lambda *_: pytest.fail("must not downgrade"))
-    assert consumer.run(apply=True, once=True)
+    assert consumer.run(once=True)
     assert [r.state for r in queue.events()] == ["skipped", "deployed"]
 
 
@@ -248,7 +244,7 @@ def test_terminal_event_is_not_automatically_redeployed_from_completed_journal(e
         )
     )
     assert post(TestClient(module.create_app(queue, SECRET)), payload()).status_code == 202
-    assert module.Consumer(queue, lambda *_: pytest.fail("terminal event")).run(True, once=True)
+    assert module.Consumer(queue, lambda *_: pytest.fail("terminal event")).run(once=True)
     assert queue.events()[0].state == "deployed"
 
 
@@ -267,7 +263,7 @@ def test_stop_intent_resumes_failed_image_before_a_newer_queued_image(events):
         )
     )
     called = []
-    assert module.Consumer(queue, lambda row, _: called.append(row.run_id)).run(True, once=True)
+    assert module.Consumer(queue, lambda row: called.append(row.run_id)).run(once=True)
     assert called == [2]
     assert [r.state for r in queue.events()] == ["deployed", "queued"]
 

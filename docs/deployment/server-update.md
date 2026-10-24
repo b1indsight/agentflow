@@ -22,8 +22,9 @@ Server 更新器在部署主机独立监听端口，接收仓库的 `workflow_ru
    存储或锁失败返回 503。202 只代表落盘，不代表部署成功；HTTP 不等待网络核验和部署。
 4. 单消费者先续作固定镜像的未完成操作，再按 run ID/attempt 从新到旧消费 queued。
    发布成功以已验签事件的 completed/success 为准，不再查询运行、job 或 step 是否成功。
-   在队列锁外查询运行身份和 run number，核对当前 main 与 GHCR candidate/SHA manifest，固定
-   digest 和授权。Webhook 的 head_branch/head_sha 只描述该次运行，不表示消费时 main 的最新提交。
+   在队列锁外查询运行身份和 run number，先核对当前 main，再核验 GHCR candidate/SHA manifest，
+   固定 digest 和授权。镜像核验后不再复查 main，不因核验期间的新 push 跳过已核验镜像。
+   Webhook 的 head_branch/head_sha 只描述该次运行，不表示消费时 main 的最新提交。
    旧 run/attempt 不能替换更新的成功部署；已固定的进行中操作不因 main 前移换版本。
 5. 拉取不可变 digest，并在无应用凭据/生产数据卷的临时 Pod 中验证导入、
    镜像身份和数据库删列检查。临时数据库仅使用 emptyDir 与 Unix socket，使用固定 digest
@@ -108,6 +109,7 @@ chmod 700 "$STATE_DIR"
   不支持 NFS、多主机共享目录或磁盘灾难恢复。终态历史用于去重和防回退，首版不自动清理。
 - 损坏事件、丢失目录、冲突 SHA 不静默重建。队列整体损坏或消费者致命退出须修复后重启；
   消费者已退出时部署请求返回 503。日志和事件不保存 secret、原始请求体或数据库连接串。
+  操作授权与队列历史不一致、多个 running 事件或无法解析操作记录，仍会停止消费者。
 
 复用上面的 Python、工具目录和 TARGET，以同一部署用户执行：
 
@@ -115,14 +117,17 @@ chmod 700 "$STATE_DIR"
 "$PYTHON" "$TOOL_DIR/image_event.py" status "${TARGET[@]}"
 "$PYTHON" "$TOOL_DIR/image_event.py" retry "${TARGET[@]}" RUN_ID ATTEMPT
 # 仅监听服务已停时使用独立消费者；失败退出，不与 listen 并发运行。
-"$PYTHON" "$TOOL_DIR/image_event.py" run "${TARGET[@]}" --apply --once
+"$PYTHON" "$TOOL_DIR/image_event.py" run "${TARGET[@]}" --once
 # 手工补录由操作者确认发布成功；工具仍核对运行身份、main 和 manifest，不接受任意镜像。
 "$PYTHON" "$TOOL_DIR/image_event.py" enqueue "${TARGET[@]}" RUN_ID ATTEMPT SHA
 ```
 
-`retry` 只将 failed/running 重新入队，或重投同一个失败 Webhook；deployed 重复不再部署，
-checked/skipped 不自动转为部署。`run` 默认只检查并终结为 checked，**不要用真实待部署事件演练**；
-预检应使用 verify 加直接部署 CLI（不带 `--apply`）。
+`retry` 将 failed 重新入队，running 保持待续作；也可重投同一个失败 Webhook。
+deployed 重复不再部署，skipped 不自动转为部署。`run` 固定执行部署，不提供预检模式或 `--apply` 参数。
+预检使用 verify 加直接部署 CLI（不带 `--apply`），不消费事件。
+
+事件队列已移除 `checked` 状态。若既有队列包含该状态，消费者会拒绝读取；升级前须人工核对
+对应事件和操作记录，不自动转为 queued，也不要删除部署历史来绕过检查。
 
 ## 等待、超时与故障
 
@@ -133,20 +138,26 @@ checked/skipped 不自动转为部署。`run` 默认只检查并终结为 checke
   **同一目标和固定镜像直接重试**，按集群实际状态续作：副本 0 时等旧 Pod 正常删除并补启动；
   目标已启动则只等 Ready/imageID；已经 Ready 则补结果，不再次停启，不依赖旧 Pod 仍存在。
   独立 CLI 重试为上述更新器命令加 `--apply`；无需删 operation.json 或清锁文件。
+- 独立 CLI 留下未完成操作时，队列中的同镜像事件也可续作；不同镜像事件记为 failed，
+  监听继续接收后续发布。这些失败事件不会在原操作完成后自动重排，仍须 retry 或重投。
+  未完成记录关联的事件已是 deployed/skipped 时，不自动重排旧事件，后续事件由部署层核对镜像。
 - Kubernetes 写入响应丢失后先读实际资源；用 workload UID/resourceVersion 条件 patch，
   不覆盖无关配置。操作记录中的配置摘要仅用于检测 Kubernetes 并发配置变化，不是版本兼容门槛。
   检查 Pod 通过固定名称、归属、UID 和输入核验复用，按 UID 条件清理，已删除视为成功。
 - 停旧意图持久化前的失败允许后续新镜像；意图落盘后须先完成原固定镜像。
-  异镜像未完成操作、workload UID 变化、冲突配置或损坏记录明确失败，不自动回滚或强删。
+  异镜像未完成操作、workload UID 变化、冲突配置或损坏的部署身份/意图记录明确失败，不自动回滚或强删。
 - 状态默认位于 `~/.local/state/agentflow-deploy/<目标标识>/operation.json`，记录权限
   0600，保存授权、必要列快照、镜像身份及停旧意图，不保存 token 或环境变量。
+  列快照结构由列检查器校验；对历史快照仅检查 schema 字段存在，仍核对候选 Pod 的检查输入。
   镜像检查失败的临时 Pod 保留诊断；同镜像重试只重建本操作拥有的失败检查资源。
 - 文件复制或手工更新失败时，先核对脚本是否完整及 operation.json，再决定是否恢复消费者。
   不为重试而直接删除操作记录、队列或 Worker journal。
 
-历史 PostgreSQL 更新事件表和 Server 维护表不自动 DROP；不提供旧草稿记录的自动迁移。
-切换前先停旧消费者，由操作者通过集群内路径核对未完成事件和部署历史，明确处置后首次接入；
-不要为重试删除权威状态。停旧后故障可能暂时没有可用 Server，坏镜像不能靠幂等重试变健康。
+仅曾运行过 PR 草稿的主机，需另按[历史实施记录](../plan/server-auto-update.md)核对草稿服务和
+未完成操作；主线首次接入不要求迁移草稿数据库表或消费者。
+停旧后故障可能暂时没有可用 Server，坏镜像不能靠幂等重试变健康。
 
-本地验证覆盖签名 HTTP、文件队列、真实列检查和部署 CLI 的中断续作；Kubernetes、GitHub
-及 GHCR 边界仍使用模拟，尚未配置真实 Webhook、托管进程或执行真实 Pod 停启验收。
+本地[事件测试](../../tests/test_image_event.py)覆盖签名 HTTP 和文件队列，
+[部署测试](../../tests/test_image_update.py)从队列直接验证 CLI 的中断续作。
+普通部署用例使用列检查替身，列兼容场景保留真实 PostgreSQL；Kubernetes、GitHub 和 GHCR
+边界仍使用模拟，尚未配置真实 Webhook、托管进程或执行真实 Pod 停启验收。

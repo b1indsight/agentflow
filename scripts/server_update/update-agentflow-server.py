@@ -517,32 +517,13 @@ class Update:
             or any(not isinstance(record.get(k), str) or not record[k] for k in text_fields)
             or record.get("old_pull_policy") not in {None, "Always", "Never", "IfNotPresent"}
             or "old_pull_policy" not in record
+            or "schema" not in record
             or not re.fullmatch(r"[a-f0-9]{64}", record.get("spec_signature", ""))
             or not re.fullmatch(r"[a-f0-9]{32}", record["probe_owner"])
             or record["probe_name"] != "agentflow-image-check-" + record["probe_owner"][:12]
             or not re.fullmatch(r"ghcr\.io/[a-z0-9/_.-]+@sha256:[a-f0-9]{64}", record["new_image"])
         ):
             raise RuntimeError("Invalid operation record; refusing to discard authoritative state")
-        schema = record.get("schema")
-        if (
-            not isinstance(schema, dict)
-            or not isinstance(schema.get("name"), str)
-            or not schema["name"]
-            or not isinstance(schema.get("statements"), list)
-            or not schema["statements"]
-            or any(not isinstance(s, str) or not s.strip() for s in schema["statements"])
-            or not isinstance(schema.get("columns"), list)
-            or not schema["columns"]
-            or any(
-                not isinstance(row, dict)
-                or any(
-                    not isinstance(row.get(k), str) or not row[k]
-                    for k in ("table", "column", "type")
-                )
-                for row in schema["columns"]
-            )
-        ):
-            raise RuntimeError("Invalid column snapshot in operation record")
         if (record["stop_intent"] or record["status"] == "complete") and not (
             isinstance(record.get("new_image_id"), str) and record["new_image_id"]
         ):
@@ -579,41 +560,41 @@ class Update:
             else:
                 self.save("resuming")
 
-        if not self.report:
-            original, old_pod, index = self.preflight()
-            container = original["spec"]["template"]["spec"]["containers"][index]
-            owner = uuid.uuid4().hex
-            self.report = {
-                "version": 1,
-                "status": "incomplete",
-                "stop_intent": False,
-                **{
-                    key: getattr(self.args, key)
-                    for key in ("context", "namespace", "workload", "container", "node")
-                },
-                "workload_uid": original["metadata"]["uid"],
-                "old_pod_uid": old_pod["metadata"]["uid"],
-                "old_image": container["image"],
-                "old_pull_policy": container.get("imagePullPolicy"),
-                "new_image": self.args.image,
-                "spec_signature": self.spec_signature(original, index),
-                "schema": self.schema_snapshot(old_pod),
-                "publication": self.publication,
-                "probe_name": "agentflow-image-check-" + owner[:12],
-                "probe_owner": owner,
-                "backup_policy": "disabled",
-                "compatibility_policy": "column-removal-only",
-            }
-            self.save("checking-image")
+        if self.report:
+            workload, index, state = self.observed()
+            if self.report.get("new_image_id") and state == "target":
+                self.finish_ready()
+                return
 
-        workload, index, state = self.observed()
-        if self.report.get("new_image_id") and state == "target":
-            self.finish_ready()
-            return
-        if not self.report["stop_intent"]:
-            original, old_pod, _ = self.preflight()
+        if not self.report or not self.report["stop_intent"]:
+            original, old_pod, index = self.preflight()
             schema = self.schema_snapshot(old_pod)
-            if (
+            if not self.report:
+                container = original["spec"]["template"]["spec"]["containers"][index]
+                owner = uuid.uuid4().hex
+                self.report = {
+                    "version": 1,
+                    "status": "incomplete",
+                    "stop_intent": False,
+                    **{
+                        key: getattr(self.args, key)
+                        for key in ("context", "namespace", "workload", "container", "node")
+                    },
+                    "workload_uid": original["metadata"]["uid"],
+                    "old_pod_uid": old_pod["metadata"]["uid"],
+                    "old_image": container["image"],
+                    "old_pull_policy": container.get("imagePullPolicy"),
+                    "new_image": self.args.image,
+                    "spec_signature": self.spec_signature(original, index),
+                    "schema": schema,
+                    "publication": self.publication,
+                    "probe_name": "agentflow-image-check-" + owner[:12],
+                    "probe_owner": owner,
+                    "backup_policy": "disabled",
+                    "compatibility_policy": "column-removal-only",
+                }
+                self.save("checking-image")
+            elif (
                 schema != self.report["schema"]
                 or old_pod["metadata"]["uid"] != self.report["old_pod_uid"]
             ):

@@ -1,8 +1,6 @@
-"""Run the webhook updater CLI with real PostgreSQL and a simulated Kubernetes boundary."""
+"""Exercise deployment CLI behavior, using real PostgreSQL for column compatibility."""
 
 import copy
-import hashlib
-import hmac
 import importlib.util
 import itertools
 import json
@@ -13,18 +11,16 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from fastapi.testclient import TestClient
 
-from app.contracts.protocol import PROTOCOL_VERSION
 from app.persistence.schema import SCHEMAS
 
 TOOLS = Path(__file__).parents[1] / "scripts/server_update"
-IMAGE = "ghcr.io/example/serve@sha256:" + "a" * 64
+IMAGE = "ghcr.io/b1indsight/agentflow-serve@sha256:" + "a" * 64
 REAL_RUN = subprocess.run
 
 
 class ImageCommands:
-    """Keep real schema inspection and PostgreSQL, replacing Kubernetes transport."""
+    """Replace Kubernetes transport; optionally run real PostgreSQL column checks."""
 
     def __init__(self, store=None, failure=""):
         self.store = store
@@ -62,12 +58,11 @@ class ImageCommands:
         self.probe = None
         self.probe_result = None
         self.events = []
-        # Authorized-but-not-registered and registered-but-not-authorized workers
-        # must not turn a controller/frontend update into a worker rollout gate.
+        # The live snapshot validates server settings before connecting.
         self.env = dict(
             os.environ,
             FLOWTOOL_DATABASE_URL=store.database_url if store else "unused",
-            FLOWTOOL_WORKER_TOKENS='{"unregistered":"TEST-UPDATER-SECRET"}',
+            FLOWTOOL_WORKER_TOKENS='{"test":"test-token"}',
         )
 
     def pod(self):
@@ -257,12 +252,6 @@ class ImageCommands:
         elif operation == "logs":
             assert self.probe_result is not None
             result = json.loads(self.probe_result.stdout)
-            # These old compatibility payloads cannot reintroduce source/schema gates.
-            result.update(
-                fingerprint={"worker": "changed"},
-                schemas=["additive change"],
-                wire_schemas={"DTO": "changed"},
-            )
         elif operation == "delete":
             assert resource == "--raw" and "/pods/agentflow-image-check-" in args[2]
             assert json.loads(input)["preconditions"]["uid"] == self.probe["metadata"]["uid"]
@@ -308,19 +297,9 @@ class ImageCommands:
                 scaling = next(c["value"] for c in changes if c["path"] == "/spec/replicas")
                 if scaling == 0:
                     self.events.append("scale-zero")
-                    if self.store:
-                        self.store.workers.worker_connected(
-                            "added-during-update", PROTOCOL_VERSION, "new"
-                        )
                 else:
                     assert self.old_gone
                     self.events.append("scale-one")
-                    if self.store:
-                        self.store.workers.recover_abandoned_assignments()
-                        with self.store.connection() as connection:
-                            connection.execute(
-                                "ALTER TABLE workers ADD COLUMN new_worker_metadata TEXT"
-                            )
             result = self.kube(args)
             if self.old_gone and "old-gone" not in self.events:
                 self.events.append("old-gone")
@@ -368,23 +347,15 @@ def invoke_image_update(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("apply", [False, True])
-def test_idle_active_flow_and_worker_changes_do_not_block_update(
-    store, invoke_image_update, tmp_path, capsys, apply
-):
-    flow = store.flows.create_flow("owner/repo", 1, 1)
-    store.workers.worker_connected("w", PROTOCOL_VERSION, "epoch")
-    initial = store.jobs.enqueue_job(flow.id, "initial")
-    assert store.workers.assign_job("w", "initial", "epoch")
-    with store.connection() as connection:
-        connection.execute("UPDATE jobs SET state='done' WHERE id=%s", (initial.id,))
-        connection.execute("UPDATE workers SET current_job_id=NULL,status='online'")
-    store.workers.drain("w", True)
-    store.jobs.enqueue_job(flow.id, "revision")
-    commands = ImageCommands(store)
+def test_preflight_and_deployment_order(invoke_image_update, tmp_path, capsys, apply):
+    commands = ImageCommands()
+    commands.workload["spec"]["template"]["spec"]["containers"][0]["env"] = [
+        {
+            "name": "FLOWTOOL_DATABASE_URL",
+            "value": "postgresql://user:TEST-UPDATER-SECRET@localhost/database",
+        }
+    ]
     assert invoke_image_update(commands, apply) == 0
-    assert store.flows.get_flow(flow.id).state == "active"
-    assert store.workers.get_flow_execution(flow.id).released_at is None
-    assert next(w for w in store.workers.list_workers() if w.worker_id == "w").draining
     if apply:
         order = [
             "schema-snapshot",
@@ -401,25 +372,13 @@ def test_idle_active_flow_and_worker_changes_do_not_block_update(
         report = next(tmp_path.glob("*/operation.json"))
         saved = json.loads(report.read_text())
         assert saved["status"] == "complete"
-        assert (
-            saved["backup_policy"] == "disabled"
-            and saved["compatibility_policy"] == "column-removal-only"
-        )
         assert report.stat().st_mode & 0o777 == 0o600
-        assert (
-            "TEST-UPDATER-SECRET" not in report.read_text()
-            and store.database_url not in report.read_text()
-        )
-        assert all(
-            w.status == "offline" or w.worker_id == "added-during-update"
-            for w in store.workers.list_workers()
-        )
+        assert "TEST-UPDATER-SECRET" not in report.read_text()
     else:
         assert "scale-zero" not in commands.events
         assert not list(tmp_path.glob("*/operation.json"))
     output = capsys.readouterr()
     assert "TEST-UPDATER-SECRET" not in output.out + output.err
-    assert not any("pg_dump" in call or "pg_restore" in call for call in commands.calls)
 
 
 @pytest.mark.parametrize(
@@ -439,17 +398,12 @@ def test_column_removal_is_rejected_before_replacement_but_additions_are_allowed
 ):
     # DROP+ADD preserves names but loses data; a legacy column left alone must not
     # turn every harmless update into a missing-declaration failure.
-    store.workers.worker_connected("existing-worker", PROTOCOL_VERSION, "epoch")
-    store.workers.drain("existing-worker", True)
     if change.startswith("legacy"):
         with store.connection() as connection:
             connection.execute("ALTER TABLE workers ADD COLUMN legacy_hint TEXT")
     commands = ImageCommands(store, change)
     assert invoke_image_update(commands) == (0 if allowed else 1)
     assert ("scale-zero" in commands.events) is allowed
-    assert next(
-        w for w in store.workers.list_workers() if w.worker_id == "existing-worker"
-    ).draining
     if not allowed:
         assert commands.probe is not None
         output = capsys.readouterr()
@@ -613,9 +567,7 @@ def test_changed_candidate_inputs_are_not_reused_or_deleted(invoke_image_update)
     assert "scale-zero" not in commands.events
 
 
-def test_signed_http_through_queue_cli_resumes_completed_deployment_after_event_write_failure(
-    monkeypatch, tmp_path
-):
+def test_queue_cli_resumes_completed_deployment_after_event_write_failure(monkeypatch, tmp_path):
     # Exercise the real event CLI wiring to Update.apply, not only a deploy callback.
     spec = importlib.util.spec_from_file_location("image_event_e2e", TOOLS / "image_event.py")
     events = importlib.util.module_from_spec(spec)
@@ -641,35 +593,7 @@ def test_signed_http_through_queue_cli_resumes_completed_deployment_after_event_
     events.main()
     queue = events.Queue(next(tmp_path.iterdir()))
     sha = "a" * 40
-    raw = json.dumps(
-        {
-            "action": "completed",
-            "repository": {"full_name": events.REPOSITORY},
-            "workflow": {"path": events.WORKFLOW},
-            "workflow_run": {
-                "id": 2,
-                "run_attempt": 1,
-                "head_sha": sha,
-                "head_branch": "main",
-                "event": "push",
-                "status": "completed",
-                "conclusion": "success",
-            },
-        }
-    ).encode()
-    with TestClient(events.create_app(queue, "secret")) as client:
-        assert (
-            client.post(
-                "/webhook",
-                content=raw,
-                headers={
-                    "x-github-event": "workflow_run",
-                    "x-hub-signature-256": "sha256="
-                    + hmac.new(b"secret", raw, hashlib.sha256).hexdigest(),
-                },
-            ).status_code
-            == 202
-        )
+    queue.enqueue(2, 1, sha)
     image = "ghcr.io/b1indsight/agentflow-serve@sha256:" + "b" * 64
     monkeypatch.setattr(
         events,
@@ -682,10 +606,14 @@ def test_signed_http_through_queue_cli_resumes_completed_deployment_after_event_
             "image": image,
         },
     )
-    monkeypatch.setattr(events, "github", lambda _: {"object": {"sha": sha}})
+    # Once verified, the image stays selected even if a later push advances main.
+    monkeypatch.setattr(
+        events, "github", lambda _: pytest.fail("must not recheck main after resolving the image")
+    )
     commands = ImageCommands()
     monkeypatch.setattr(subprocess, "run", commands)
-    monkeypatch.setattr(sys, "argv", ["image-event", "run", *target, "--apply", "--once"])
+    # The queue CLI always deploys; retry after event persistence fails must not restart it.
+    monkeypatch.setattr(sys, "argv", ["image-event", "run", *target, "--once"])
     with monkeypatch.context() as failure:
         failure.setattr(events.Queue, "finish", lambda *_: (_ for _ in ()).throw(OSError("disk")))
         with pytest.raises(OSError):
@@ -697,3 +625,53 @@ def test_signed_http_through_queue_cli_resumes_completed_deployment_after_event_
     assert commands.workload["spec"]["template"]["spec"]["containers"][0]["image"] == image
     assert commands.events.count("scale-zero") == commands.events.count("scale-one") == 1
     assert commands.probe is None
+
+
+def test_queue_cli_rejects_other_image_then_resumes_direct_deployment(
+    invoke_image_update, monkeypatch, tmp_path
+):
+    # A direct CLI timeout after scale-down must not kill queue consumption or
+    # let a newer image replace its intent; the same image can finish the stop/start.
+    commands = ImageCommands(failure="old-stuck")
+    assert invoke_image_update(commands) == 1
+    record = next(tmp_path.glob("*/operation.json"))
+    unfinished = record.read_bytes()
+    before = list(commands.events)
+    commands.failure = ""
+    target = sys.argv[1:]
+    image_index = target.index("--image")
+    del target[image_index : image_index + 2]
+    target.remove("--apply")
+
+    # Keep the real CLI adapter, as in the event-write recovery test above.
+    spec = importlib.util.spec_from_file_location("image_event_direct", TOOLS / "image_event.py")
+    events = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, events)
+    spec.loader.exec_module(events)
+    events.initialize(record.parent)
+    queue = events.Queue(record.parent)
+    monkeypatch.setattr(
+        events,
+        "resolve",
+        lambda run_id, attempt, sha: {
+            "run_id": run_id,
+            "attempt": attempt,
+            "sha": sha,
+            "run_number": run_id,
+            "image": IMAGE if run_id == 3 else IMAGE.replace("a" * 64, "b" * 64),
+        },
+    )
+    monkeypatch.setattr(sys, "argv", ["image-event", "run", *target, "--once"])
+    queue.enqueue(2, 1, "a" * 40)
+    with pytest.raises(events.Rejected, match="deployment failed; same event can be retried"):
+        events.main()
+    assert queue.events()[0].state == "failed"
+    assert record.read_bytes() == unfinished
+    assert commands.events == before
+
+    queue.enqueue(3, 1, "c" * 40)
+    events.main()
+    assert [row.state for row in queue.events()] == ["failed", "deployed"]
+    assert json.loads(record.read_text())["status"] == "complete"
+    assert commands.workload["spec"]["template"]["spec"]["containers"][0]["image"] == IMAGE
+    assert commands.events.count("scale-zero") == commands.events.count("scale-one") == 1

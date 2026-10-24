@@ -1,25 +1,9 @@
 """Read-only verification of the fixed public Images/main publication contract."""
 
-from typing import Annotated, Literal
-
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 REPOSITORY = "b1indsight/agentflow"
-Sha = Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")]
-
-
-class ReleaseEvent(BaseModel):
-    """Verified publication metadata used locally, never a Worker protocol message."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    version: Literal[1] = 1
-    repository: Literal["b1indsight/agentflow"] = "b1indsight/agentflow"
-    sha: Sha
-    run_id: int = Field(gt=0, le=10**18)
-    attempt: int = Field(gt=0, le=10**9)
-    run_number: int = Field(gt=0, le=10**18)
 
 
 class ReleaseError(RuntimeError):
@@ -31,10 +15,9 @@ class _Repository(BaseModel):
 
 
 class _Run(BaseModel):
-    id: int
-    run_attempt: int
-    run_number: int
-    head_sha: str
+    id: int = Field(gt=0, le=10**18)
+    run_attempt: int = Field(gt=0, le=10**9)
+    head_sha: str = Field(pattern=r"^[0-9a-f]{40}$")
     path: str
     event: str
     head_branch: str
@@ -93,14 +76,15 @@ def _get[T: BaseModel](model: type[T], path: str) -> T:
         raise ReleaseError("public release metadata is unavailable or invalid") from None
 
 
-def verify_release(release: ReleaseEvent) -> ReleaseEvent:
-    """Require the exact successful push attempt, publication steps and current main SHA."""
-    run = _get(_Run, f"actions/runs/{release.run_id}")
+def latest_release() -> str:
+    """Return the latest listed SHA after verifying its fixed attempt, steps and main head."""
+    runs = _get(
+        _Runs, "actions/workflows/images.yml/runs?branch=main&event=push&status=success&per_page=1"
+    )
+    if not runs.workflow_runs:
+        raise ReleaseError("no successful main publication is available")
+    run = runs.workflow_runs[0]
     if (
-        run.id,
-        run.run_attempt,
-        run.run_number,
-        run.head_sha,
         run.path,
         run.event,
         run.head_branch,
@@ -108,10 +92,6 @@ def verify_release(release: ReleaseEvent) -> ReleaseEvent:
         run.conclusion,
         run.repository.full_name,
     ) != (
-        release.run_id,
-        release.attempt,
-        release.run_number,
-        release.sha,
         ".github/workflows/images.yml",
         "push",
         "main",
@@ -120,9 +100,7 @@ def verify_release(release: ReleaseEvent) -> ReleaseEvent:
         REPOSITORY,
     ):
         raise ReleaseError("release does not identify a successful Images/main/push attempt")
-    jobs = _get(
-        _Jobs, f"actions/runs/{release.run_id}/attempts/{release.attempt}/jobs?per_page=100"
-    )
+    jobs = _get(_Jobs, f"actions/runs/{run.id}/attempts/{run.run_attempt}/jobs?per_page=100")
     publish = [job for job in jobs.jobs if job.name == "publish"]
     if jobs.total_count > 100 or len(publish) != 1 or publish[0].conclusion != "success":
         raise ReleaseError("publication did not succeed exactly once")
@@ -135,21 +113,6 @@ def verify_release(release: ReleaseEvent) -> ReleaseEvent:
         steps = [step for step in publish[0].steps if step.name == name]
         if len(steps) != 1 or steps[0].conclusion != "success":
             raise ReleaseError("required publication verification step did not succeed")
-    if _get(_Ref, "git/ref/heads/main").object.sha != release.sha:
+    if _get(_Ref, "git/ref/heads/main").object.sha != run.head_sha:
         raise ReleaseError("release is no longer the main branch head")
-    return release
-
-
-def latest_release() -> ReleaseEvent:
-    """Read the latest verified publication independently of Server deployment state."""
-    runs = _get(
-        _Runs, "actions/workflows/images.yml/runs?branch=main&event=push&status=success&per_page=1"
-    )
-    if not runs.workflow_runs:
-        raise ReleaseError("no successful main publication is available")
-    run = runs.workflow_runs[0]
-    return verify_release(
-        ReleaseEvent(
-            sha=run.head_sha, run_id=run.id, attempt=run.run_attempt, run_number=run.run_number
-        )
-    )
+    return run.head_sha
