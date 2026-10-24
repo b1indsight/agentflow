@@ -1736,6 +1736,176 @@ test("footnote labels cannot collide with repeated-reference suffixes", async ({
   }
 });
 
+test("consecutive actor operations collapse across pages without hiding messages or crossing sources", async ({
+  page,
+}) => {
+  // CI jobs arrive on separate pages; a comment or a different commit must break the actor's group.
+  const check = {
+    ...activity,
+    source: "commit.check_runs:head",
+    kind: "check",
+    author: "GitHub Actions",
+    body: "",
+    body_length: 0,
+    previous_version: null,
+  };
+  const checks = [
+    ["Images", "publish", "skipped"],
+    ["Operations validation", "recovery", "success"],
+    ["Images", "build", "success"],
+    ["Kubernetes templates", "render", "success"],
+    ["CI", "pytest", "failure"],
+    ["CI", "Ruff", "success"],
+    ["CI", "Frontend", "success"],
+    ["CI", "Mypy", "success"],
+    ["CI", "Build", "success"],
+  ].map(([workflow, title, conclusion], index) => {
+    const body = conclusion === "failure" ? "测试失败，请检查日志。" : "";
+    return {
+      ...check,
+      key: `check-${index}`,
+      title,
+      body,
+      body_length: Array.from(body).length,
+      occurred_at: new Date(Date.parse(now) + index * 1000).toISOString(),
+      url: `https://example.test/checks/${index}`,
+      metadata: { workflow_name: workflow, status: "completed", conclusion },
+    };
+  });
+  const event = {
+    ...activity,
+    source: "pr.timeline",
+    kind: "event",
+    author: "b1indsight-bot[bot]",
+    body: "",
+    body_length: 0,
+    previous_version: null,
+  };
+  const items = [
+    ...checks,
+    {
+      ...event,
+      key: "review-request",
+      title: "review_requested",
+      metadata: { event: "review_requested", requested_reviewer: "b1indsight" },
+    },
+    {
+      ...event,
+      key: "label",
+      title: "labeled",
+      metadata: { event: "labeled", label: "flow" },
+    },
+    {
+      ...activity,
+      key: "message",
+      source: check.source,
+      author: check.author,
+      previous_version: null,
+    },
+    { ...checks[0], key: "after-message" },
+    { ...checks[1], key: "other-commit", source: "commit.check_runs:other" },
+  ];
+  await page.route("**/api/flows/42/activity?**", (route) => {
+    const later = new URL(route.request().url()).searchParams.has("cursor");
+    return route.fulfill({
+      json: {
+        items: later ? items.slice(2) : items.slice(0, 2),
+        snapshot: 2,
+        total: items.length,
+        has_more: !later,
+        next_cursor: later ? null : "operations",
+        sources: [],
+        changes: {},
+      },
+    });
+  });
+  await page.goto("/#flow/42/conversation");
+  const group = page.getByRole("button", {
+    name: "操作记录 · 9 条",
+    exact: true,
+  });
+  const events = page.getByRole("button", {
+    name: "操作记录 · 2 条",
+    exact: true,
+  });
+  await expect(group).toHaveAttribute("aria-expanded", "false");
+  await expect(events).toHaveAttribute("aria-expanded", "false");
+  await expect(
+    page.getByText("CI: pytest: failure", { exact: true }),
+  ).not.toBeVisible();
+  await expect(
+    page.getByText(checks[4].body, { exact: true }),
+  ).not.toBeVisible();
+  await expect(page.getByText(activity.body, { exact: true })).toBeVisible();
+  for (const key of ["after-message", "other-commit"]) {
+    const row = page.locator(`article[data-entry='${key}']`);
+    await expect(row.locator(".event-action")).toBeVisible();
+    await expect(row.getByRole("button", { name: /^操作记录/ })).toHaveCount(0);
+  }
+  const capture = async (state: string) => {
+    const viewport = page.viewportSize()!;
+    // Element screenshots cannot capture content clipped by the shared scroll root.
+    await page.setViewportSize({ ...viewport, height: 2000 });
+    await page.locator(".conversation-stream").screenshot({
+      path: `../../../.amp/in/artifacts/activity-operations-${state}.png`,
+    });
+    await page.setViewportSize(viewport);
+  };
+  await capture("desktop-collapsed");
+  await group.focus();
+  await page.keyboard.press("Enter");
+  await expect(group).toHaveAttribute("aria-expanded", "true");
+  await expect(page.getByText(checks[4].body, { exact: true })).toBeVisible();
+  for (const [index, check] of checks.entries()) {
+    const row = page.locator(`article[data-entry='${check.key}']`);
+    await expect(row.locator(".event-action")).toHaveText(
+      `${check.metadata.workflow_name}: ${check.title}: ${check.metadata.conclusion}`,
+    );
+    await expect(row.locator("time:visible")).toHaveText(
+      await page.evaluate(
+        (date) => new Date(date).toLocaleString(),
+        check.occurred_at,
+      ),
+    );
+    await expect(
+      row.getByRole("link", { name: "在 GitHub 中查看" }),
+    ).toHaveAttribute("href", `https://example.test/checks/${index}`);
+  }
+  await expect(
+    page.getByText("请求审核：b1indsight", { exact: true }),
+  ).not.toBeVisible();
+  await events.click();
+  await expect(
+    page.getByText("请求审核：b1indsight", { exact: true }),
+  ).toBeVisible();
+  await expect(page.getByText("添加标签：flow", { exact: true })).toBeVisible();
+  await capture("desktop-expanded");
+  await events.click();
+  await page.getByRole("tab", { name: "概览" }).click();
+  await page.getByRole("tab", { name: "会话" }).click();
+  await expect(group).toHaveAttribute("aria-expanded", "true");
+  await expect(
+    page.getByText("CI: pytest: failure", { exact: true }),
+  ).toBeVisible();
+  await group.click();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await capture("mobile-collapsed");
+  await group.click();
+  await expect(
+    page.getByText("CI: pytest: failure", { exact: true }),
+  ).toBeVisible();
+  await events.click();
+  await expect(
+    page.getByText("请求审核：b1indsight", { exact: true }),
+  ).toBeVisible();
+  await capture("mobile-expanded");
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+  ).toBe(true);
+});
+
 test("assistant tools share one compact activity bar across pages without crossing turns", async ({
   page,
 }) => {

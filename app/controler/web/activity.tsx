@@ -446,6 +446,7 @@ export function sameActivityGroup(
   left: ActivityItem | undefined,
   right: ActivityItem | undefined,
 ): boolean {
+  const operations = isOperationActivity(left) && isOperationActivity(right);
   return Boolean(
     left &&
     right &&
@@ -454,12 +455,13 @@ export function sameActivityGroup(
     !right.deleted &&
     left.prior === right.prior &&
     left.parent_key === right.parent_key &&
-    [left, right].every(
-      (item) =>
-        item.kind !== "event" &&
-        item.kind !== "thread" &&
-        item.kind !== "check",
-    ) &&
+    (operations ||
+      [left, right].every(
+        (item) =>
+          item.kind !== "event" &&
+          item.kind !== "thread" &&
+          item.kind !== "check",
+      )) &&
     ((left.author !== "" && left.author === right.author) ||
       (left.source === "worker" &&
         [left.author, right.author].every(
@@ -472,7 +474,7 @@ export function sameActivityGroup(
             left.metadata[key] !== null &&
             left.metadata[key] === right.metadata[key],
         )
-      : left.kind === right.kind),
+      : operations || left.kind === right.kind),
   );
 }
 
@@ -514,12 +516,19 @@ export function isToolActivity(entry: ActivityItem | undefined): boolean {
   return entry?.kind === "tool_call" || entry?.kind === "tool_result";
 }
 
+/** Checks and bodyless timeline events can share a compact actor disclosure. */
+export function isOperationActivity(entry: ActivityItem | undefined): boolean {
+  return (
+    entry?.kind === "check" ||
+    (entry?.kind === "event" && entry.body_length === 0)
+  );
+}
+
 /** A bounded mounted slice shares one disclosure without merging archive records or DOM rows. */
-export interface ToolActivityGroup {
+export interface ActivityGroup {
   key: string;
   leader: boolean;
-  calls: number;
-  results: number;
+  summary: string;
   partial: boolean;
 }
 
@@ -529,7 +538,7 @@ export function ActivityView({
   flowId = 0,
   snapshot = entry.version,
   continuation = false,
-  toolGroup,
+  activityGroup,
   toolResults = [],
   mergedIntoCall = false,
   provenance,
@@ -538,16 +547,16 @@ export function ActivityView({
   flowId?: number;
   snapshot?: number;
   continuation?: boolean;
-  toolGroup?: ToolActivityGroup;
+  activityGroup?: ActivityGroup;
   toolResults?: ActivityItem[];
   mergedIntoCall?: boolean;
   provenance?: ActivityItem[];
 }) {
   const event = entry.kind === "event" && entry.body_length === 0;
-  const compact = event || entry.kind === "check";
+  const compact = isOperationActivity(entry);
   const tool = isToolActivity(entry);
-  const [toolsOpen, setToolsOpen] = useReadingState(
-    `${flowId}-${toolGroup?.key ?? entry.key}-tools`,
+  const [groupOpen, setGroupOpen] = useReadingState(
+    `${flowId}-${activityGroup?.key ?? entry.key}-activity`,
     0,
   );
   const [metadataOpen, setMetadataOpen] = useReadingState(
@@ -570,7 +579,7 @@ export function ActivityView({
     action = `${typeof workflow === "string" && workflow ? workflow : "未知工作流"}: ${entry.title}: ${typeof status === "string" && status ? status : "unknown"}`;
   }
   const metadata =
-    !continuation &&
+    (!continuation || compact) &&
     (Object.keys(entry.metadata).length > 0 || (provenance?.length ?? 0) > 1);
   const provenanceLabel =
     "来源信息与查询定位" +
@@ -579,10 +588,11 @@ export function ActivityView({
       : "");
   return (
     <article
-      className={`message${entry.deleted ? " deleted" : ""}${compact ? " compact-event" : ""}${continuation ? " continuation" : ""}${toolGroup ? " tool-activity" : ""}`}
+      className={`message${entry.deleted ? " deleted" : ""}${compact ? " compact-event" : ""}${continuation ? " continuation" : ""}${activityGroup ? " grouped-activity" : ""}`}
       data-entry={entry.key}
       hidden={
-        mergedIntoCall || Boolean(toolGroup && !toolGroup.leader && !toolsOpen)
+        mergedIntoCall ||
+        Boolean(activityGroup && !activityGroup.leader && !groupOpen)
       }
       aria-label={
         continuation
@@ -599,7 +609,9 @@ export function ActivityView({
             <span>{entry.author}</span>
             <span className="source-tag">{entry.source}</span>
           </span>
-          {compact && <span className="event-action">{action}</span>}
+          {compact && !activityGroup && (
+            <span className="event-action">{action}</span>
+          )}
           {entry.prior && (
             <span
               className="message-context"
@@ -611,24 +623,33 @@ export function ActivityView({
           {entry.deleted && (
             <span className="message-context">已删除（保留历史版本）</span>
           )}
-          <time>{new Date(entry.occurred_at).toLocaleString()}</time>
+          {(!compact || !activityGroup || !groupOpen) && (
+            <time>{new Date(entry.occurred_at).toLocaleString()}</time>
+          )}
         </div>
         {title && <h3 className="message-title">{title}</h3>}
-        {toolGroup?.leader && (
+        {activityGroup?.leader && (
           <button
             type="button"
-            className="tool-activity-toggle"
-            aria-expanded={Boolean(toolsOpen)}
-            onClick={() => setToolsOpen(toolsOpen ? 0 : 1)}
+            className="activity-toggle"
+            aria-expanded={Boolean(groupOpen)}
+            onClick={() => setGroupOpen(groupOpen ? 0 : 1)}
           >
-            <span aria-hidden="true">{toolsOpen ? "▾" : "▸"}</span> 工具活动
-            {toolGroup.partial ? "（当前片段）" : ""} · {toolGroup.calls} 次调用
-            · {toolGroup.results} 条结果
+            <span aria-hidden="true">{groupOpen ? "▾" : "▸"}</span>{" "}
+            {compact ? "操作记录" : "工具活动"}
+            {activityGroup.partial ? "（当前片段）" : ""} ·{" "}
+            {activityGroup.summary}
           </button>
         )}
-        {toolGroup ? (
+        {compact && activityGroup && Boolean(groupOpen) && (
+          <div className="operation-action">
+            <span className="event-action">{action}</span>
+            <time>{new Date(entry.occurred_at).toLocaleString()}</time>
+          </div>
+        )}
+        {tool && activityGroup ? (
           !mergedIntoCall &&
-          Boolean(toolsOpen) && (
+          Boolean(groupOpen) && (
             <section className="tool-activity-body" aria-label="工具活动详情">
               {entry.kind === "tool_result" ? (
                 <blockquote
@@ -652,7 +673,8 @@ export function ActivityView({
               ))}
             </section>
           )
-        ) : entry.body_length > 0 || tool ? (
+        ) : (!activityGroup || Boolean(groupOpen)) &&
+          (entry.body_length > 0 || tool) ? (
           <ActivityBody
             key={`${entry.key}-${entry.version}`}
             entry={entry}
@@ -660,7 +682,7 @@ export function ActivityView({
           />
         ) : null}
         {!mergedIntoCall &&
-          (!toolGroup || Boolean(toolsOpen)) &&
+          (!activityGroup || Boolean(groupOpen)) &&
           (metadata ||
             entry.url ||
             (entry.previous_version !== null && !entry.deleted)) && (

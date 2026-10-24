@@ -25,9 +25,10 @@ import {
 } from "./api";
 import {
   ActivityView,
+  isOperationActivity,
   isToolActivity,
   sameActivityGroup,
-  type ToolActivityGroup,
+  type ActivityGroup,
 } from "./activity";
 import { ConversationSources, SourceList } from "./ConversationSources";
 import { actionLabel, phases } from "./phases";
@@ -773,29 +774,25 @@ function Conversation({
               ? state.items.get(i - 1)
               : undefined;
             // Keep raw rows virtualized; only their compact activity bar and open state are shared.
-            let toolGroup: ToolActivityGroup | undefined;
+            let activityGroup: ActivityGroup | undefined;
             const toolResults: ActivityItem[] = [];
             let mergedIntoCall = false;
-            if (e?.source === "worker" && isToolActivity(e)) {
+            const tool = e?.source === "worker" && isToolActivity(e);
+            if (tool || isOperationActivity(e)) {
+              const belongs = (item: ActivityItem | undefined) =>
+                (tool ? isToolActivity(item) : isOperationActivity(item)) &&
+                sameActivityGroup(e, item);
               let start = i;
-              while (
-                isToolActivity(state.items.get(start - 1)) &&
-                sameActivityGroup(state.items.get(start - 1), e)
-              )
-                start--;
+              while (belongs(state.items.get(start - 1))) start--;
               let first = i,
                 end = i;
               while (mounted.has(first - 1) && first > start) first--;
-              while (
-                mounted.has(end + 1) &&
-                isToolActivity(state.items.get(end + 1)) &&
-                sameActivityGroup(e, state.items.get(end + 1))
-              )
+              while (mounted.has(end + 1) && belongs(state.items.get(end + 1)))
                 end++;
               let calls = 0,
                 results = 0;
               const callIndexes = new Map<string, number>();
-              for (let index = first; index <= end; index++) {
+              for (let index = first; tool && index <= end; index++) {
                 const item = state.items.get(index);
                 if (!item) continue;
                 const callId = item.metadata.call_id;
@@ -815,16 +812,17 @@ function Conversation({
                   }
                 }
               }
-              toolGroup = {
-                key: state.keys[start],
-                leader: i === first,
-                calls,
-                results,
-                partial:
-                  first > start ||
-                  (isToolActivity(state.items.get(end + 1)) &&
-                    sameActivityGroup(e, state.items.get(end + 1))),
-              };
+              const partial =
+                first > start || belongs(state.items.get(end + 1));
+              if (tool || first < end || partial)
+                activityGroup = {
+                  key: state.keys[start],
+                  leader: i === first,
+                  summary: tool
+                    ? `${calls} 次调用 · ${results} 条结果`
+                    : `${end - first + 1} 条`,
+                  partial,
+                };
             }
             const provenance: ActivityItem[] = [];
             if (e && !sameActivityGroup(previous, e)) {
@@ -842,7 +840,7 @@ function Conversation({
                 flowId={id}
                 snapshot={state.snapshot ?? 0}
                 continuation={sameActivityGroup(previous, e)}
-                toolGroup={toolGroup}
+                activityGroup={activityGroup}
                 toolResults={toolResults}
                 mergedIntoCall={mergedIntoCall}
                 provenance={provenance}
