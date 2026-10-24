@@ -1,7 +1,7 @@
 # Worker 直接前代 journal 升级兼容 — Feature record
 
 **Stage:** Planning，待批准；本 PR 当前只包含计划，不包含实现或测试改动。
-**PR:** 待创建；计划和后续实现使用同一个 PR。
+**PR:** [#115](https://github.com/b1indsight/agentflow/pull/115)；计划和后续实现使用同一个 PR。
 
 ## 1. Initial plan
 
