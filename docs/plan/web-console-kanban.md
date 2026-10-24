@@ -1777,3 +1777,215 @@ Webhook 未覆盖的交互/字段需在明确触发的核对中补齐，不能�
 - **Delivery boundary:** 仍使用原 bookmark 和 PR；不修改共享工作区，不自动处理带链接
   图片嵌套锚点，不合并 PR 或部署。发布前执行一次 review gate，更新 PR 后另核对
   GitHub 合并状态；本地无冲突不代替远端确认。
+
+### [061] — 2026-10-25 — #88：按 owner 与 Flow 保存个人阅读状态（提案，待批准）
+
+#### 动机、范围与批准状态
+
+本项承接 [025]–[027] 中独立后置的 [#88](https://github.com/b1indsight/agentflow/issues/88)。
+目前正文段落和折叠只保存在浏览器内存，跨设备不能恢复，也没有个人已读记录。
+本提案覆盖个人已读/未读、正文进度、跨设备位置、失效回退和回归验证；所有交互规则均为
+**本次待批准的建议**，不把 [025] 的候选建议视作已批准，也不改变 #85/#87 的交付边界。
+实施继续使用 `flow/3`；本次仅提交方案，尚未新增产品代码、数据库表、API 或未读 UI。
+
+预期体验：电脑停在评论 A 的第三段，手机打开同一 Flow 后回到相同正文段；A 的后续段落仍为未读。
+手机直接跳到末尾不会读掉中间活动。随后 A 被编辑或早期评论 B 被补采，两者在当前版本显示
+未读。后台电脑页面可以合并此前实际读过的内容，但不能覆盖手机的主动阅读位置。
+
+#### 已核实的复用点
+
+- [`ActivityStore.append`](../../app/persistence/activity.py) 已锁定 `console_flows`，在同一事务
+  内发布活动及 Flow 本地版本。当前条目选择规则为 `deleted DESC, updated_at DESC, version DESC`；
+  较晚提交的旧观察不一定成为当前版本。继续复用该规则及固定快照，不重建事件时钟。
+- 活动 DTO 已有 `key/version/parent_key/body_length`，正文接口以 Unicode code point 计偏移。
+  GitHub 来源使用远端身份；Worker 使用 attempt、session generation 和原生条目 ID。
+- [`OwnerAccess`](../../app/controler/access.py) 已验签并限制配置的 owner，但目前只返回鉴权结果。
+  [`_require_owner`](../../app/controler/api.py) 尚未向路由提供已验证的 owner 身份。
+- [`ReadingState`](../../app/controler/web/windowing.tsx) 已将正文位置和展开状态与 DOM 分离；
+  [`useConversation`](../../app/controler/web/useConversation.ts) 保留有界正文缓存与固定快照。
+  二者继续负责本地渲染；个人持久化由独立模块负责。
+
+#### 1. 稳定身份与已读语义
+
+条目身份固定为 `(flow_id, key)`。分页索引、事件时间、远端更新时间和自增最大值都不代表
+已读。`version` 继续标识不可变的采集版本；新增 `read_revision` 标识需要重新阅读的有效内容
+修订，它是单个条目的不透明身份，不能用于推断其他条目或较小版本已读。
+
+`read_revision` 在活动发布事务中计算：比较追加前后的**当前展示条目**。正文、标题、作者、
+条目种类、父讨论归属、删除状态或用户可见业务状态变化时，取这次生效的归档 `version`；
+仅 URL 补全、来源同步时间、传输元数据或其他未改变展示内容的观察，继承前一修订。
+业务状态使用按 `kind` 明确列举的字段：讨论 resolved/outdated、检查名称与 status/conclusion、
+reaction 内容与计数，以及事件正文中展示的状态。隐藏的诊断元数据不单独触发未读。
+展示正文复用现有的内部标记剔除规则，不能只比较前 2000 字预览。
+
+| 情况 | 拟议规则 |
+| --- | --- |
+| 首次看到的活动或早期补录 | 新修订未读，与 `occurred_at` 是否早于已读内容无关；保留补录提示 |
+| 旧评论正文、标题或其他展示内容更新 | 新修订从零开始阅读；旧修订的已读范围不转移 |
+| 讨论 resolved → reopened → resolved | 每次实际转换形成新修订；第三次不能复用第一次的已读凭据 |
+| 重复同步同一内容、仅补全传输信息 | 不产生新的阅读修订，不重复提醒 |
+| 延迟返回的旧观察未改变当前展示版本 | 归档仍保存，不让当前条目回退或产生额外未读 |
+| 删除标记成为当前版本 | 删除提示是新的未读修订；旧正文的已读信息不覆盖删除提示 |
+| 折叠讨论、合并工具短栏、同作者分组 | 原始条目分别计读；容器可汇总子条目未读，折叠/合并不代替阅读 |
+
+Flow 未读数统计当前修订仍未读的原始活动，包含尚未加载的讨论回复，排除内部 `source=flow`
+审计记录。同一回复只计一次，父讨论的状态本身可另计一条。历史修订页可浏览旧版，但旧版
+阅读不会读掉新版。首次启用时既有活动默认未读；提供明确的批量标记入口，不隐式迁移为已读。
+
+#### 2. 实际阅读与显式操作
+
+- 建议自动计读条件为：当前 Flow 详情处于前台、文档可见且窗口有焦点，实际展示的标题或正文
+  子段完整进入会话可见区域并连续停留 600ms。失焦、隐藏、移出视窗或内容修订变化即取消计时。
+  这是可见性的产品判定，不宣称能判断用户是否理解内容。
+- 标题与正文范围分别记录。正文范围为不可变全文的 code point 半开区间 `[start,end)`；
+  多设备只合并明确观察的范围。标题已读且范围并集覆盖全文时，整条才成为已读；空正文只需标题。
+- 正文按真实渲染子段观察，不能把“接口已返回一段”视为整段可见。超过视窗的段落/代码需继续
+  划分，并将 Markdown 源位置从 UTF-16 换算为 code point。仅对实际可见子段确认；未展开工具、
+  折叠回复、被遮挡内容、虚拟列表 overscan 和尚未挂载内容均不计读。差异视图不代替正文阅读。
+  Markdown 定界符、空白及链接语法归入对应可见节点的源范围；折叠或截断的实际文字保留未读空洞，
+  不能因解析器没有生成文字节点就把整段源码自动计读。
+- 看板加载、详情 GET、预取、后台同步、刷新、恢复锚点、列表 range 回调和跳到尾部均不直接
+  产生已读写入。恢复完成后，只有符合上述可见条件的具体内容才可以计读。
+- 每条提供“标为已读/未读”。显式已读确认该条**所展示的修订**全部正文，允许用户主动跳过。
+  “将当前快照全部标为已读”需展示包含未加载活动/回复的条目数，并明确不会覆盖后续新内容；
+  服务端按该快照枚举确切修订，不能只保存 `read_through_version`。
+- 显式未读递增该修订的 `generation` 并清空范围；旧 generation 的在途确认被拒绝。当前页面
+  对仍在视窗里的该条暂停自动确认，直到用户离开后重新阅读或主动标读，避免点击后立即变回已读。
+- 网络失败保留待重试的确切范围，显示“阅读状态未同步”。首版只保留当前页面内存中的重试队列；
+  关闭离线页面前未提交的内容可能需要重读，不展示为已在其他设备保存。不增加离线服务或通知推送。
+
+#### 3. 数据、并发和位置规则
+
+已读是集合合并；位置是可向前或向后移动的单一书签，两者独立。不得用最远位置、客户端时间
+或请求到达时间同时解决二者。
+
+新增/扩展的核心数据如下，字段均属于阅读展示元信息：
+
+| 类型/存储 | 字段与含义 |
+| --- | --- |
+| `OwnerPrincipal` | `issuer: str, subject: str`，来自同一次成功验证的 Access claims；服务端编码为 `owner_key: str`，浏览器不能指定 owner |
+| `console_activity.read_revision` | `BIGINT`，当前展示内容的阅读修订别名；内部 Flow 审计不参与。计算与归档事务共用现有 Flow 锁 |
+| `console_read_receipts` | 主键 `owner_key, flow_id, key, read_revision`；`generation: BIGINT`、`header_read: BOOL`、`ranges: INT8MULTIRANGE`、`explicit_read: BOOL`。区间由服务端规范化并集，不按位置补空洞 |
+| `console_reading_state` | 主键 `owner_key, flow_id`；`receipts_version: BIGINT` 标识已读集合变化；`position_revision: BIGINT`、`writer_epoch: BIGINT`、`writer_session: UUID?`、`last_sequence: BIGINT`、`anchor: JSONB?`、`saved_at: TIMESTAMPTZ?` 维护位置 |
+| `ReadingAnchor` | `key: str, version: int, read_revision: int, snapshot: int, parent_key: str?, part: summary\|body, body_offset: int, block_fraction: float, occurred_at: datetime, layout_version: int`；正文偏移按 code point，段内比例为 `[0,1]`，时间只用于失效位置的排序回退 |
+| `ReadObservation` | `key: str, version: int, read_revision: int, generation: int, header: bool, ranges: list[[int,int]]`，服务端校验归档身份、正文长度和区间；不能用客户端长度覆盖服务端事实 |
+| `ReadingState` | `receipts_version: int, snapshot: int, unread_count: int` 及位置字段；条目响应另附 `read_revision/generation/header_read/ranges/explicit_read`，不返回完整历史已读集合 |
+
+`OwnerAccess.authenticate` 返回验证后的 principal，现有 owner dependency 放入 request state；
+issuer/subject 必须是验签通过后的非空字符串，原有调用者可以继续忽略返回值。
+owner 更换或 issuer/subject 变化创建独立命名空间，不按客户端
+email 或设备 ID 自动合并。无凭据、非 owner、重复 assertion、过期 token 继续在数据库访问前拒绝。
+
+普通确认在读取状态事务中锁定 owner+Flow 状态行，再锁定/创建对应 receipt，校验 generation，
+合并标题和正文区间。相同确认重放无副作用；跨设备不相交范围取并集，重复范围只存一次。
+显式标记与范围写入使用同一锁序，批量中任何身份/范围无效则整批回滚。`receipts_version`
+只在有效集合变化时增加，前端丢弃较旧版本的响应，避免乱序响应重新显示已读前的计数。
+GET 不创建阅读状态行；没有记录时按零进度解释。
+
+位置使用服务端写入权和页内单调序号：
+
+1. 每个详情页面实例生成临时 `session_id`。首次明确滚动、键盘阅读或选择“在此继续阅读”时，
+   才以最近获取的 `position_revision` 请求写入权。仅打开/恢复/刷新页面、focus 和 visibility
+   事件均不能取得写入权。服务端以 CAS 更新 writer、增加 epoch 和 position revision。
+2. 保存位置需携带 `session_id, writer_epoch, sequence, anchor`。只接受当前 writer、当前 epoch
+   且 sequence 大于已接受序号的请求；接受后增加 position revision。位置可以向上移动。
+3. 另一设备取得写入权后，旧页面的保存即使延迟到达也返回 `409 position_conflict`，不能覆盖。
+   请求写入权的旧 CAS 同样冲突；页面展示“另一设备已更新位置”，允许用户选择恢复远端位置，
+   或明确“在此继续阅读”后基于新版本重新申请。冲突后禁止自动读新版本再抢占重试。
+4. 后台页面可重试其已读范围；失焦后停止生成位置保存。位置冲突不阻断阅读范围合并，标记
+   已读/未读也不移动位置。响应分别比较 receipts version 与 position revision，旧的位置响应
+   不覆盖较新位置。服务端时间只供展示，不用于决定哪个客户端动作较新。
+
+#### 4. 锚点恢复、版本变化与清理
+
+恢复接口在新的固定活动快照中定位 key，直接返回锚点附近的有界页面及必要的父讨论/回复游标，
+不先从头下载全部历史。现有活动 selector 和排序规则须抽为同一处复用，不能在阅读模块另写
+一套“最新版本”。保存的 snapshot 用于验证原位置，不把旧游标混进新快照。
+
+- key 和 read revision 仍有效时，恢复正文 offset、段内比例和必要的展开状态；语义相同但归档
+  version 更新时可以使用新归档版本的相同正文位置。手机/桌面换行差异只影响比例，不影响正文偏移。
+- 内容已编辑时，定位同一 key 的当前版本开头，明确显示“原位置的内容已更新”，保留原版本链接；
+  不把旧 offset 套入新版，也不转移旧版已读范围。
+- 删除后优先定位仍保留的删除提示；正文位置归零并显示原因。若 key/父讨论已彻底不存在，则在
+  同一父级优先找 `(occurred_at,key)` 之后的条目，再找之前条目，最后回到根时间线首条/空状态。
+  父级消失时转到根时间线，始终显示“原位置已失效”及可恢复入口。
+- 返回 `original_anchor`、`resolved_anchor` 和 `reason: exact|edited|deleted|missing|incompatible`。
+  GET 回退不改写原书签、不生成已读；用户确认继续阅读后才保存新位置。`layout_version` 不兼容
+  时按 key 恢复标题并提示重新定位，不能静默夹取正文 offset 后声称精确恢复。
+- 沿用 [027] 的永久归档策略，本项不增加历史清理任务。旧修订 receipt 保留，供旧快照和并发
+  请求正确判定；显式未读的 generation 墓碑不能因清空范围立即删除，否则旧确认可能复活。
+  删除标记不清除旧修订凭据。未来若明确执行物理历史清理，须在同一维护事务中清掉对应 receipt、
+  重建受影响的修订别名并递增 receipts version；无法可靠映射的剩余内容保守显示未读。书签保留
+  原 key 以便可见回退。整个 Flow 物理删除才级联清除其阅读元信息；归档、终态和重试不清除。
+
+#### 5. 接口与模块
+
+接口继续由现有 owner Access dependency 保护，所有写请求复用 same-origin JSON 校验和
+`Cache-Control: no-store`。请求不接受 owner、执行状态、同步进度或 GitHub 写入参数。
+阅读失败只影响个人进度，不触发 Workflow service、Worker 命令或 GitHub 写操作。
+
+| 接口 | 合同与对应 `ReadingStore` 方法 |
+| --- | --- |
+| `GET /api/flows/{id}/reading` | `state(owner, flow_id) -> ReadingState`，返回快照未读汇总和保存位置，无写副作用 |
+| `POST /api/flows/{id}/reading/observations` | `observe(owner, flow_id, batch) -> ReadingState`，每批最多 100 条确切修订/范围；过期 generation 为 `409 reading_conflict` |
+| `POST /api/flows/{id}/reading/mark` | `mark(owner, flow_id, command) -> ReadingState`；判别联合：`entry_read/entry_unread` 指定修订及 generation，`snapshot_read` 指定固定 snapshot；均带已获取的 receipts version，过期显式操作要求重新确认 |
+| `POST /api/flows/{id}/reading/position/claim` | `claim(owner, flow_id, session_id, position_revision) -> ReadingState`，显式申请写入权 |
+| `PUT /api/flows/{id}/reading/position` | `save_position(owner, flow_id, session_id, writer_epoch, sequence, anchor) -> ReadingState`，只保存当前 writer 的位置 |
+| `GET /api/flows/{id}/reading/resume` | `resume(owner, flow_id) -> ReadingResume`，返回原位置、回退说明和有界上下文；不存在位置时为普通首屏 |
+
+`app/contracts/console.py` 增加严格 DTO；`app/persistence/console_schema.py` 增加幂等迁移；
+`app/persistence/activity.py` 负责修订发布及规范的当前条目选择；新增
+`app/persistence/reading.py` 负责个人元信息事务和锚点定位；`app/controler/console/api.py`
+仅做鉴权、校验与非阻塞调度。看板列表和活动响应在原查询中批量附加 owner 的未读数/条目进度，
+不逐卡发请求，也不依赖打开全部回复后才知道未读数。
+
+浏览器新增 `useReadingProgress.ts` 管理可见范围、合并队列、写入权及请求隔离，接入现有
+`App.tsx/activity.tsx/windowing.tsx/useConversation.ts`。Flow 切换、卸载和修订变化取消计时器；
+响应必须匹配请求的 Flow、修订和页面实例，位置恢复及脚本滚动不能伪造用户输入。
+有界正文缓存、虚拟窗口和工具合并继续保留，读状态元数据不以 DOM 是否存在为准。
+
+#### 6. 取舍、成本、实施与验证
+
+采用“稀疏范围并集 + 显式修订重置 + 位置 CAS”的原因是本项同时要求跳过历史、分段正文、
+旧活动更新和跨设备并发。仅存最大事件时间/版本会吞掉空洞；仅存最后浏览位置无法表达已读；
+仅按正文 hash 会把讨论 A→B→A 当作读过。逐设备私有进度不能实现 owner 合并；按客户端时间
+最后写入会受时钟偏差和后台请求影响。保留当前内存状态的方案成本最低，但不能满足跨设备验收。
+
+主要新增成本是已读区间存储、可见源位置映射和迁移时的历史修订计算。区间合并使用数据库
+multirange，单次请求与正文读取保持有界；不以合并相邻条目来省空间。索引先限于 owner+Flow
+及确切修订查找，只有真实查询计划证明需要时再增加。自动计读偏保守，用户可用显式标读补足。
+历史内容越大，首轮回填越慢，迁移需按 Flow 分批、可重入，并在对应回填完成前显示阅读状态
+暂不可用，不返回虚假的零未读。回填按归档发布次序重放当前选择，不能简单按事件时间分组。
+
+实施顺序：
+
+1. 批准本提案的语义、600ms 可见判定、显式全快照标读、未读重置和位置冲突交互。
+2. 在同一 `flow/3` 分支添加 principal、严格契约、阅读修订回填与幂等 schema；不改工作流协议。
+3. 实现集合并发、批量标记、位置 CAS 和锚点定位，并以真实 PostgreSQL 事务交错验证。
+4. 接入前台可见范围与分段正文，加入看板未读提示、显式操作、恢复/冲突/未同步提示。
+5. 完成浏览器回归、下述简化对照和仓库静态检查，再走代码 review gate；不自动合并或部署。
+
+迁移为新增列/表，不改旧 DTO 字段含义；新 UI 与 API 一起发布。回滚到旧应用会忽略新增元信息，
+保留归档及阅读记录，不因回滚删除数据。若展示规则未来改变，须升级阅读语义版本并明确重新计读，
+不能修改旧 revision 的含义。
+
+验证矩阵（批准后才编写实现与新增回归）：
+
+| 层级 | 必须证明的行为 |
+| --- | --- |
+| 服务端身份/边界 | 非 owner 在 I/O 前拒绝；不同 principal/Flow 隔离；跨域、坏范围、错 key/version、超限批次拒绝且无部分写入；任何 GET/同步不改 receipt 或位置；阅读写入不改工作流/远端 |
+| 版本 | 同步重放、旧评论后半段编辑、讨论 A→B→A、元数据补全、早期补录、延迟旧观察、删除；未提交事务不可见；新旧快照交错时只标确切修订 |
+| 已读并发 | 两设备不相交区间合并、重复/乱序确认幂等；显式未读与旧在途确认交错；显式全快照标读同时发生新编辑/补录时，新修订仍未读；过期汇总响应不覆盖新版 |
+| 位置 | A/B 并发 claim、较旧 claim 延迟到达、旧 epoch/sequence 保存拒绝；后台 A 的读确认仍可合并但不能覆盖 B 的位置；冲突后不自动抢占，主动向上阅读可保存 |
+| 浏览器实际阅读 | 受控时间与可见性；首屏 GET/预取/overscan/隐藏页不计读；只读一段仍部分未读；跨 code point/Markdown/代码段正确；长于视窗的段落、折叠工具、合并工具结果和未展开回复不被整批标读 |
+| 浏览器恢复 | 同 owner 独立上下文跨设备续读；首段直接跳尾后中间仍未读；虚拟条目淘汰回读、手机/桌面切换、刷新与 Flow 切换；编辑、墓碑、物理缺失和布局版本变化均有可见回退；失败可重试 |
+
+简化对照在实现后、代码审查前执行：①将范围集合换成最大 offset，跳过中间段的回归必须失败；
+②移除 generation 校验，显式未读与旧确认交错必须失败；③移除位置 epoch/CAS，后台设备迟到保存
+必须覆盖错误位置并使回归失败；④改为只比较正文 hash，讨论 A→B→A 必须漏报。若某机制移除后
+仍全部通过，先补足实际边界证据或删除该机制，不为既定方案保留无效复杂度。
+
+**待批准事项：** 本节构成完整的建议方案；尤其需确认自动可见判定、修订变化重新计读、首次
+启用默认未读、显式全快照标读及冲突时主动选择。实现期间可根据真实 DOM 源位置映射、迁移耗时
+和查询计划细化内部实现；若需改变上述用户语义，先追加提案。离线持久队列、多 owner 管理、
+远端个人已读同步、通知推送和历史物理清理任务均后置。

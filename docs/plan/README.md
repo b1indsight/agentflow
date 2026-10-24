@@ -5,6 +5,8 @@
 
 ## 当前计划
 
+- [`web-console-kanban.md` [061]](web-console-kanban.md#061--2026-10-25--88按-owner-与-flow-保存个人阅读状态提案待批准) — #88 个人阅读状态提案，待批准：按 owner+Flow 合并确切修订的已读区间，独立保存跨设备位置并提供可见回退；尚未新增产品代码、表、API 或未读 UI，继续使用 `flow/3`。
+
 - [`server-auto-update.md`](server-auto-update.md) — PR #104：独立验签 Webhook、本地文件队列和同镜像幂等部署已实现；Worker `--update` 在原 uv Git 安装中更新并核验后退出。保留删列与普通停启，不新建环境；951 项回归及五项简化对照通过，真实接入待验收，审查及交付状态见 PR。
 
 - [`worker-amp-cli.md`](worker-amp-cli.md) — 可选 Amp CLI 后端已实现：同 thread 修订、原生历史、
