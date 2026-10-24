@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import type { FlowDetail, SourceStatus } from "../types";
+import type { FlowDetail, JobSummary, SourceStatus } from "../types";
 
 const now = "2026-10-17T12:00:00Z";
 const flow = {
@@ -104,6 +104,79 @@ test.beforeEach(async ({ page }) => {
         },
       });
     return route.fulfill({ status: 500, json: { detail: "模拟失败" } });
+  });
+});
+
+test("execution timeline keeps timestamps and metadata when loading older jobs", async ({
+  page,
+}) => {
+  // Retried executions can share kind/attempt; their creation times distinguish them.
+  const jobs: JobSummary[] = ["running", "failed", "done", "queued"].map(
+    (state, i) => ({
+      id: 4 - i,
+      flow_id: flow.id,
+      attempt: 1,
+      kind: "initial",
+      state,
+      worker_id: state === "queued" ? null : "worker-1",
+      created_at: new Date(Date.parse(now) - i * 3_600_000).toISOString(),
+      started_at: state === "queued" ? null : now,
+      updated_at: now,
+      finished_at: state === "failed" || state === "done" ? now : null,
+      error_code: state === "failed" ? "execution_error" : null,
+    }),
+  );
+  await page.route("**/api/flows/42/jobs?**", (route) => {
+    const older = new URL(route.request().url()).searchParams.get("cursor");
+    return route.fulfill({
+      json: {
+        items: older ? jobs.slice(2) : jobs.slice(0, 2),
+        next_cursor: older ? null : "older-jobs",
+        has_more: !older,
+      },
+    });
+  });
+  await page.goto("/#flow/42/jobs");
+  const records = page.getByRole("article");
+  await expect(records).toHaveCount(2);
+  await expect(records.nth(0)).toContainText("running");
+  await expect(records.nth(1)).toContainText("worker-1 · execution_error");
+  await page.getByRole("button", { name: "读取更多执行记录" }).click();
+  await expect(records).toHaveCount(4);
+  await expect(records.locator(".badge")).toHaveText([
+    "running",
+    "failed",
+    "done",
+    "queued",
+  ]);
+  for (const [i, job] of jobs.entries()) {
+    await expect(records.nth(i).locator("time")).toHaveAttribute(
+      "datetime",
+      job.created_at,
+    );
+    await expect(records.nth(i).locator("time")).toHaveText(
+      await page.evaluate(
+        (date) => `创建于 ${new Date(date).toLocaleString()}`,
+        job.created_at,
+      ),
+    );
+  }
+  await expect(records.nth(3)).toContainText("无 Worker");
+  await expect(
+    page.getByRole("button", { name: "读取更多执行记录" }),
+  ).toHaveCount(0);
+  await page.screenshot({
+    path: "../../../.amp/in/artifacts/jobs-timeline-desktop.png",
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(records.nth(3)).toBeVisible();
+  expect(
+    await page
+      .locator(".detail-body")
+      .evaluate((e) => e.scrollWidth <= e.clientWidth),
+  ).toBe(true);
+  await page.screenshot({
+    path: "../../../.amp/in/artifacts/jobs-timeline-mobile.png",
   });
 });
 

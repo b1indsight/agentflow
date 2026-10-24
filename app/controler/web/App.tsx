@@ -679,24 +679,34 @@ function Detail({
               <Conversation key={id} id={id} root={detail} refresh={refresh} />
             ) : (
               <>
-                <WindowList
-                  count={jobs.length}
-                  label="执行记录"
-                  itemKey={(i) => jobs[i].id}
-                >
-                  {(i) => (
-                    <article className="job">
-                      <strong>
-                        {jobs[i].kind} #{jobs[i].attempt}
-                      </strong>
-                      <span className="badge">{jobs[i].state}</span>
-                      <p>
-                        {jobs[i].worker_id ?? "无 Worker"}
-                        {jobs[i].error_code ? ` · ${jobs[i].error_code}` : ""}
-                      </p>
-                    </article>
-                  )}
-                </WindowList>
+                <div className="timeline">
+                  <WindowList
+                    count={jobs.length}
+                    label="执行记录"
+                    itemKey={(i) => jobs[i].id}
+                  >
+                    {(i) => (
+                      <article
+                        className="timeline-item"
+                        data-state={jobs[i].state}
+                      >
+                        <div className="job-top">
+                          <strong>
+                            {jobs[i].kind} #{jobs[i].attempt}
+                          </strong>
+                          <span className="badge">{jobs[i].state}</span>
+                        </div>
+                        <time dateTime={jobs[i].created_at}>
+                          创建于 {new Date(jobs[i].created_at).toLocaleString()}
+                        </time>
+                        <p>
+                          {jobs[i].worker_id ?? "无 Worker"}
+                          {jobs[i].error_code ? ` · ${jobs[i].error_code}` : ""}
+                        </p>
+                      </article>
+                    )}
+                  </WindowList>
+                </div>
                 {jobError && (
                   <button className="btn" onClick={() => moreJobs()}>
                     读取失败：{jobError}（重试）

@@ -1422,50 +1422,55 @@ pre code {
   padding-left: 23px;
 }
 .timeline-item {
+  --job-state: var(--status-gray);
   position: relative;
   list-style: none;
   padding: 0 0 25px;
   font-size: var(--text-body);
+  overflow-wrap: anywhere;
+}
+.timeline-item[data-state="running"] {
+  --job-state: var(--status-blue);
+}
+.timeline-item[data-state="failed"] {
+  --job-state: var(--status-red);
+}
+.timeline-item[data-state="done"] {
+  --job-state: var(--status-green);
 }
 .timeline-item::before {
   content: "";
   position: absolute;
-  left: -28px;
-  top: 4px;
-  width: 8px;
-  height: 8px;
-  background: #8bac94;
-  border: 2px solid white;
+  left: -29px;
+  top: 7px;
+  width: 10px;
+  height: 10px;
+  background: var(--job-state);
+  border: 2px solid var(--paper);
   border-radius: 50%;
 }
-.timeline p {
-  font-size: var(--text-body);
-  color: #98a39b;
-  margin: 7px 0;
+.timeline-item time {
+  display: block;
+  margin-top: 6px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: var(--text-small);
 }
-.job {
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  margin-bottom: 12px;
-  padding: 18px;
+.timeline-item p {
+  font-size: var(--text-control);
+  color: var(--muted);
+  margin: 7px 0 0;
 }
 .job-top {
   display: flex;
+  flex-wrap: wrap;
+  align-items: center;
   justify-content: space-between;
+  gap: 8px 16px;
   font-size: var(--text-body);
 }
-.job-kind strong {
+.job-top strong {
   font-weight: 550;
-}
-.job-kind .mono {
-  font-size: var(--text-small);
-  color: var(--muted);
-  margin-left: 10px;
-}
-.job p {
-  font-size: var(--text-body);
-  color: #929e95;
-  margin: 12px 0 0;
 }
 .mobile-nav {
   display: none;
@@ -1557,14 +1562,12 @@ pre code {
   min-width: 0;
   flex: 1;
 }
-.card-foot,
-.job-top {
+.card-foot {
   flex-wrap: wrap;
 }
 .repo-label,
 .card-note,
-.flow-tab,
-.job-kind {
+.flow-tab {
   overflow-wrap: anywhere;
 }
 @media (min-width: 1600px) {
@@ -1736,6 +1739,9 @@ pre code {
   }
   .content {
     padding: 20px 18px 35px;
+  }
+  .content:has(> .timeline) {
+    padding-inline: 24px;
   }
   .message-label {
     gap: 6px;
