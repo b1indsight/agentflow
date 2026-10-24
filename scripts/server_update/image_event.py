@@ -155,7 +155,7 @@ class Event(BaseModel):
     run_id: int = Field(gt=0, lt=10**18)
     attempt: int = Field(gt=0, lt=10**9)
     sha: str = Field(pattern=r"^[0-9a-f]{40}$")
-    state: Literal["queued", "running", "deployed", "checked", "failed", "skipped"] = "queued"
+    state: Literal["queued", "running", "deployed", "failed", "skipped"] = "queued"
     run_number: int | None = Field(default=None, gt=0)
     image: str | None = Field(
         default=None, pattern=r"^ghcr\.io/b1indsight/agentflow-serve@sha256:[a-f0-9]{64}$"
@@ -282,7 +282,7 @@ class Queue:
 class Consumer:
     """Serialize deployment, pin authorization before execution, resume before new work."""
 
-    def __init__(self, queue: Queue, deploy: Callable[[Event, bool], None]):
+    def __init__(self, queue: Queue, deploy: Callable[[Event], None]):
         self.queue, self.deploy = queue, deploy
 
     def pending(self, rows: list[Event], resume: bool) -> Event | None:
@@ -301,15 +301,8 @@ class Consumer:
                     if len(matches) != 1 or matches[0].image != operation["new_image"]:
                         raise Rejected("operation authorization and queue history differ")
                     row = matches[0]
-                    if row.state in {"checked", "skipped", "deployed"}:
-                        if operation.get("status") != "complete":
-                            raise Rejected("unfinished operation has a terminal queue event")
-                    else:
+                    if row.state not in {"skipped", "deployed"}:
                         return row if row.state != "failed" or resume else None
-                elif operation.get("status") != "complete":
-                    raise Rejected(
-                        "unfinished direct deployment must be resumed with its own command"
-                    )
         running = [r for r in rows if r.state == "running"]
         if len(running) > 1:
             raise Rejected("multiple interrupted events")
@@ -319,7 +312,7 @@ class Consumer:
             else next((r for r in reversed(rows) if r.state == "queued"), None)
         )
 
-    def loop(self, apply: bool, once: bool, stop: threading.Event) -> bool:
+    def loop(self, once: bool, stop: threading.Event) -> bool:
         resume = True
         while not stop.is_set():
             with self.queue.lock("queue"):
@@ -336,8 +329,6 @@ class Consumer:
             try:
                 if row.image is None:
                     publication = resolve(row.run_id, row.attempt, row.sha)
-                    if github("git/ref/heads/main")["object"]["sha"] != row.sha:
-                        raise Stale("main advanced during image validation")
                     row = Event.model_validate({**row.model_dump(), **publication})
                     self.queue.save(row)
                 previous = max(
@@ -346,7 +337,7 @@ class Consumer:
                 )
                 if (row.run_number or 0, row.attempt) < previous:
                     raise Stale("event predates the last deployed workflow run")
-                self.deploy(row, apply)
+                self.deploy(row)
             except Stale as error:
                 self.queue.finish(row, "skipped", str(error))
             except (
@@ -364,14 +355,14 @@ class Consumer:
                 resume = False  # Only restart or explicit redelivery retries a failed operation.
                 continue
             else:
-                self.queue.finish(row, "deployed" if apply else "checked", "updater completed")
+                self.queue.finish(row, "deployed", "updater completed")
             if once:
                 return True
         return True
 
-    def run(self, apply: bool, once: bool = False) -> bool:
+    def run(self, once: bool = False) -> bool:
         with self.queue.lock("consumer", timeout=0):
-            return self.loop(apply, once, threading.Event())
+            return self.loop(once, threading.Event())
 
 
 def create_app(queue: Queue, secret: str, consumer: Consumer | None = None) -> FastAPI:
@@ -392,7 +383,7 @@ def create_app(queue: Queue, secret: str, consumer: Consumer | None = None) -> F
             return
         stop = threading.Event()
         with queue.lock("consumer", timeout=0):
-            task = asyncio.create_task(asyncio.to_thread(consumer.loop, True, False, stop))
+            task = asyncio.create_task(asyncio.to_thread(consumer.loop, False, stop))
             consumer_task = task
             task.add_done_callback(report_failure)
             try:
@@ -494,7 +485,6 @@ def main() -> None:
             ):
                 command.add_argument(field)
         if name == "run":
-            command.add_argument("--apply", action="store_true")
             command.add_argument("--once", action="store_true")
         if name == "listen":
             command.add_argument("--host", default="127.0.0.1")
@@ -515,7 +505,7 @@ def main() -> None:
         )
         return
     updater.validate_target(parser, args)
-    args.image, args.apply = "", getattr(args, "apply", False)
+    args.image = ""
     directory = updater.Update(args).directory
     if args.command == "init":
         initialize(directory)
@@ -523,8 +513,8 @@ def main() -> None:
         return
     queue = Queue(directory)
 
-    def deploy(row: Event, apply: bool) -> None:
-        settings = argparse.Namespace(**{**vars(args), "image": row.image, "apply": apply})
+    def deploy(row: Event) -> None:
+        settings = argparse.Namespace(**{**vars(args), "image": row.image, "apply": True})
         update = updater.Update(settings)
         update.publication = {
             key: value
@@ -546,7 +536,7 @@ def main() -> None:
         for row in queue.events()[-20:]:
             print(row.model_dump_json())
     elif args.command == "run":
-        if not consumer.run(args.apply, args.once):
+        if not consumer.run(args.once):
             raise Rejected("deployment failed; same event can be retried")
     else:
         import uvicorn

@@ -242,7 +242,7 @@ def update_worker() -> dict[str, str]:
             if uv is None:
                 raise UpdateError("uv is required on PATH for the supported installation")
             phase = "publication"
-            target = releases.latest_release().sha
+            target = releases.latest_release()
             if current != target:
                 phase = "ancestry"
                 _require_forward(current, target)
@@ -286,7 +286,7 @@ def update_worker() -> dict[str, str]:
                     "fresh interpreter did not load the target revision at the original path"
                 )
             phase = "cli-verification"
-            help_text = _run(
+            _run(
                 [
                     sys.executable,
                     "-I",
@@ -296,9 +296,6 @@ def update_worker() -> dict[str, str]:
                 ],
                 lock_descriptor,
             )
-            # Match displayed flags, not the ANSI styling Typer enables in CI.
-            if "--update" not in re.sub(r"\x1b\[[0-9;]*m", "", help_text):
-                raise UpdateError("installed Worker CLI does not expose --update")
             phase = "dependencies"
             _run(
                 [

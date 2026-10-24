@@ -114,7 +114,7 @@ if fault == "dependencies":
     path.write_text(path.read_text().replace("\\n\\n", "\\nRequires-Dist: flowtool-test-absent-dependency==1\\n\\n", 1))
     write_record(site)
 def publication():
-    return releases.ReleaseEvent(sha={SHA!r}, run_id=1, attempt=1, run_number=1)
+    return {SHA!r}
 releases.latest_release = publication
 def compare(request):
     assert request.url.path.endswith("/{OLD_SHA}...{SHA}")
@@ -198,13 +198,7 @@ def test_worker_without_update_still_starts_runtime(tmp_path, monkeypatch):
     runtime.run.assert_awaited_once()
 
 
-def test_update_replaces_body_in_place_and_exits_without_worker_credentials(
-    installation, monkeypatch
-):
-    # GitHub Actions enables ANSI styling inside the visible --update option.
-    monkeypatch.setenv("GITHUB_ACTIONS", "true")
-    monkeypatch.setenv("TERM", "xterm-256color")
-    monkeypatch.delenv("NO_COLOR", raising=False)
+def test_update_replaces_body_in_place_and_exits_without_worker_credentials(installation):
     prefix, site = installation
     result = invoke_installed(installation)
     assert result.returncode == 0, result.stdout + result.stderr

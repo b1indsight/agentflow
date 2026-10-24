@@ -76,8 +76,8 @@ FlowTool 的目标是把带 `flow` 标签的 GitHub issue 编排成
   并提供 cancel/retry 命令。已核验修订中被明确拒绝的通知可补发；结果不确定时拒绝直接 retry。
 - **取消与 drain**：cancel 持久化停止意图，worker 取消当前执行并回收其持有的 Codex/VCS
   进程组，清理未提交修改和未跟踪文件后把原 workspace 归还空闲池，保留目录及 ignored 缓存。
-  完成回收才发送停止凭据；停止凭据与已发送 effects 未确认前不释放绑定。沿用 protocol v14，
-  不增加停止字段。drain 停止分配新 Flow，已有绑定继续收尾。未知旧执行保持阻塞，
+  完成回收才发送停止凭据；停止凭据与已发送 effects 未确认前不释放绑定。
+  drain 停止分配新 Flow，已有绑定继续收尾。未知旧执行保持阻塞，
   无强制释放入口，见[取消与停机](docs/operations/cancel-drain.md)。
 - **Server 镜像更新**：独立更新器监听仓库 Webhook，验签后持久写入主机 JSON 队列，后台核验发布、
   候选镜像和删列检查，再缩至零、等旧 Pod 正常退出、以固定 digest 恢复一个副本并核验 Ready/imageID。
@@ -148,6 +148,8 @@ cp env.example .env
 FLOWTOOL_HOST=127.0.0.1 uv run flowtool serve
 ```
 
+这里的 `uv sync` 是源码开发安装，不支持 `worker --update`；该命令仅用于符合[安装要求](docs/deployment/worker-update.md#首版支持的正式安装)的 uv Git 虚拟环境。
+
 另开终端启动本地连接验证用的 worker；下面的 token 必须与 serve 的 `FLOWTOOL_WORKER_TOKENS` 一致。
 该示例未授权 Codex 编码执行：
 
@@ -176,7 +178,7 @@ Git worktree。`FLOWTOOL_WORKER_REPO_WORKSPACE_LIMIT=2` 设置每仓库总上限
 每次 INITIAL、REVISION resume/fallback 都提供本轮 bot `gh` 包装、独立配置和 Git helper，
 不使用个人登录态；token 过期/权限不足即失败，不自动续期或扩权。worker 保持单仓库
 Contents write，PR 通过 MCP `open_pr` 请求 controler 校验后创建。包装不构成 OS 沙箱。
-Amp 接入使用 protocol v15 / journal v4，serve 与 worker 应同时升级；旧 journal 不自动迁移。
+当前 Codex/Amp 接入均使用 protocol v15 / journal v4，serve 与 worker 的协议版本必须匹配；旧 journal 不自动迁移。
 Amp 的临时 settings 不覆盖 managed policy；发现 workspace `.amp/settings.json[c]` 时拒绝执行，
 避免覆盖本轮工具/MCP 设置。完整配置与取消边界见[部署说明](docs/deployment/README.md)。
 
@@ -299,17 +301,19 @@ M3 F3 及审查修复本地验证（2026-09-08）：真实 PostgreSQL 下 **502 
 响应丢失与重启恢复。Ruff、Mypy 与 sdist/wheel 构建通过；真实 GitHub App/worker 验收仍待执行，
 详见 [F3 审查修复记录](docs/plan/m3-archive-status.md#7-审查修复2026-09-08)。
 
-当前仅支持 wire protocol **v13**、worker journal **v3** 与当前完整 PostgreSQL schema。
+当前仅支持 wire protocol **v15**、worker journal **v4** 与当前完整 PostgreSQL schema。
 仓库尚未部署，不提供旧版本数据库、任务、结果或 journal 的迁移；首次运行使用新数据库/schema
 和新 worker root。Server 部署不以所有 Worker 更新为前提；Worker 连接仍按实际 protocol 和
-认证结果处理，不匹配直接拒绝。`flowtool worker update` 只校验发布，原生 Worker 沿用现有
-安装方式手动更新并重启；没有自动更新或切换握手。同版本重启仍保留冻结任务、结果摘要、
-effect ledger 与 journal 恢复能力。
+认证结果处理，不匹配直接拒绝。支持的 uv Git 虚拟环境安装可通过 `flowtool worker --update`
+原地更新本体及必要依赖，核验后退出；操作者须先停止 Worker，再按原方式启动，详见
+[Worker 更新](docs/deployment/worker-update.md)。源码与容器继续按原部署方式更新。
+Worker 没有后台自动更新或切换握手；同版本重启仍保留冻结任务、结果摘要、effect ledger 与 journal 恢复能力。
 
 新 journal 在任务 ACK 后保留上一任务的 Flow 和 root 归属，成功归档 ACK 后才移除。不要更换
-`FLOWTOOL_WORKER_ROOT`、复制 journal 到其他 root 或复用 worker ID 接管工作区。清理仅删除
-`repos/<owner>/<repo>--flow-<id>` 与其 `.partial`，拒绝 symlink 祖先、顶层 symlink、路径逃逸
-和含保留标记 `--flow-` 的 seed 仓库名；保留 seed、其他 Flow、journal 和共享会话。
+`FLOWTOOL_WORKER_ROOT`、复制 journal 到其他 root 或复用 worker ID 接管工作区。清理只处理
+池中登记且归属匹配的 `workspaces/<owner>/<repo>/<slot_id>`：归档时完整副本归还空闲池并保留
+ignored 缓存，临时 worktree 注销并删除；取消时两种工作区均清理未提交修改后保留并归还池。
+拒绝 symlink、路径逃逸和未登记目录，不删除 seed 或其他 Flow 的工作区。
 
 合并后使用 `flow show <id>` 查看等待、清理失败、结果待核验/提交或完成及错误。
 清理失败会保留 ACTIVE Flow 和原 worker binding；修复权限等原因后，原 worker 在线且执行已结束时

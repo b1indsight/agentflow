@@ -5,8 +5,7 @@
 ```
 
 这是一次性命令：自动查询最新已核验发布，在**现有安装位置**更新包本体和所需依赖，核验后退出。
-成功也不会启动 Worker；普通 `flowtool worker` 仍启动执行进程。旧的
-`flowtool worker update --sha ...` 只读入口已删除，无需用户指定 SHA。
+成功也不会启动 Worker；普通 `flowtool worker` 仍启动执行进程。无需用户指定 SHA。
 实现入口见 [Worker CLI](../../app/worker/cli.py) 与 [原地更新模块](../../app/worker/self_update.py)。
 
 更新不读取 Worker 配置或凭据，不连接 Controller、Server 或 PostgreSQL，不要求 Server 在线。
@@ -48,11 +47,13 @@ Server 与 Worker 的更新互不等待；Server 流程见 [Server 更新](serve
    在读取配置、创建 Runtime 前取得同一目录的共享锁并持有至运行结束。因此，不同 root 的多个
    Worker 可以共用安装运行，但任意一个都会阻止更新；更新也会阻止普通启动和另一更新。
    占用时立即非零退出，不排队等锁。帮助不需要锁或 Worker 凭据。
-4. [latest_release()](../../app/releases.py) 取得固定 `b1indsight/agentflow` 的 Images/main/push 成功发布，核验具体运行、
-   发布步骤和当前 main SHA。新目标还须经公开 GitHub compare 核对为已安装提交的后继；
+4. [latest_release()](../../app/releases.py) 读取固定 `b1indsight/agentflow` 的 Images/main/push 成功运行列表，
+   直接核验列表中的运行身份和状态，再检查该固定 attempt 的发布步骤及当前 main SHA，返回已核验的 SHA 字符串。
+   不重复读取运行详情，也不追踪选中后新发起的 attempt。新目标还须经公开 GitHub compare 核对为已安装提交的后继；
    无法证明前进、降级、分叉或 API 失败都拒绝安装。选中后只安装这个固定 SHA，不再次解析 main。
 5. 安装后用新的隔离 Python 进程（`-I`，不继承 PYTHONPATH）核对实际导入路径、RECORD 和目标
    revision，再用新进程执行原 `bin/flowtool worker --help`，最后执行 `uv pip check`。
+   CLI 核验要求进程退出码为 0，不匹配帮助中的参数字样或终端样式。
    相同 SHA 也做完整健康核验，不能因上次安装留下的目标元数据就假报成功。
 6. 全部通过才输出 JSON：`state` 为 `updated` 或 `already-current`，并包含 `previous_sha`、
    `sha`、原 `package_path` 和 `python`，然后以 0 退出。操作者再通过原服务或入口显式启动 Worker，
@@ -97,8 +98,8 @@ HOME 和已有认证文件保持不变。安装超时为 600 秒，各进程核�
 相同 SHA 的 `--update` 不重复安装，依赖损坏时会失败，须人工修复；若入口/依赖已坏到无法执行 CLI，
 也由同一 Python/uv 修复，不删 root、journal 或认证来绕过问题。
 
-此前草稿的独立 updater/launcher 及 `FLOWTOOL_WORKER_UPDATE_ROOT` /
-`FLOWTOOL_WORKER_UPDATE_APPLY` 不提供自动迁移；旧草稿服务须由操作者先退出。
+仅曾运行过 PR 草稿的主机，需另按[历史实施记录](../plan/server-auto-update.md)处理草稿
+updater/launcher；主线安装不需要这类迁移步骤。
 
 [本地 CLI 测试](../../tests/test_worker_cli.py) 使用临时安装、公开发布/安装边界替身、真实新解释器和只读 `uv pip check`；
 不据此宣称真实 GitHub 下载、正式主机原地安装、服务切换或编码任务已经验收。

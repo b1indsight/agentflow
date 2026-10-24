@@ -1,21 +1,18 @@
 """Bind native releases to verified fixed-repository publication attempts."""
 
-import copy
-
+import httpx
 import pytest
 
 from app import releases
-from app.releases import ReleaseEvent
 
 
-@pytest.mark.parametrize("fault", ["", "repository", "attempt", "event", "step", "head"])
+@pytest.mark.parametrize("fault", ["", "repository", "running", "event", "step", "head"])
 def test_native_publication_requires_successful_main_push_and_exact_attempt(monkeypatch, fault):
-    release = ReleaseEvent(run_id=1, attempt=1, run_number=1, sha="2" * 40)
+    sha = "2" * 40
     run = {
-        "id": release.run_id,
-        "run_attempt": release.attempt,
-        "run_number": release.run_number,
-        "head_sha": release.sha,
+        "id": 1,
+        "run_attempt": 2,
+        "head_sha": sha,
         "path": ".github/workflows/images.yml",
         "event": "push",
         "head_branch": "main",
@@ -36,11 +33,11 @@ def test_native_publication_requires_successful_main_push_and_exact_attempt(monk
         "total_count": 1,
         "jobs": [{"name": "publish", "conclusion": "success", "steps": steps}],
     }
-    head = {"object": {"sha": release.sha}}
+    head = {"object": {"sha": sha}}
     if fault == "repository":
         run["repository"] = {"full_name": "other/repository"}
-    elif fault == "attempt":
-        run["run_attempt"] = 2
+    elif fault == "running":
+        run["status"] = "in_progress"
     elif fault == "event":
         run["event"] = "pull_request"
     elif fault == "step":
@@ -48,14 +45,27 @@ def test_native_publication_requires_successful_main_push_and_exact_attempt(monk
     elif fault == "head":
         head["object"]["sha"] = "3" * 40
 
-    def get(model, path):
-        return model.model_validate(
-            copy.deepcopy(jobs if "/jobs?" in path else head if path.startswith("git/") else run)
-        )
+    responses = {
+        "actions/workflows/images.yml/runs?branch=main&event=push&status=success&per_page=1": {
+            "workflow_runs": [run]
+        },
+        "actions/runs/1/attempts/2/jobs?per_page=100": jobs,
+        "git/ref/heads/main": head,
+    }
+    requested = []
 
-    monkeypatch.setattr(releases, "_get", get)
-    if fault:
-        with pytest.raises(releases.ReleaseError):
-            releases.verify_release(release)
-    else:
-        assert releases.verify_release(release) == release
+    def respond(request):
+        path = str(request.url).removeprefix("https://api.github.com/repos/b1indsight/agentflow/")
+        assert path in responses, f"unexpected release request: {path}"
+        requested.append(path)
+        return httpx.Response(200, json=responses[path])
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        monkeypatch.setattr(releases.httpx, "stream", client.stream)
+        if fault:
+            with pytest.raises(releases.ReleaseError):
+                releases.latest_release()
+        else:
+            assert releases.latest_release() == sha
+            # The list already contains the run; pin its attempt without fetching it again.
+            assert requested == list(responses)
