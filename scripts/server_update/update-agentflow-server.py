@@ -66,6 +66,13 @@ class Update:
     def get(self, resource: str) -> dict:
         return json.loads(self.run("get", resource, "-o", "json"))
 
+    def probe_command(self, schema: dict) -> list[str]:
+        """Escape literal dollars against Kubernetes command argument expansion."""
+        return [
+            part.replace("$", "$$")
+            for part in ("python", "-c", self.column_check, json.dumps(schema))
+        ]
+
     def probe(self) -> dict | None:
         raw = self.run(
             "get", f"pod/{self.report['probe_name']}", "-o", "json", "--ignore-not-found"
@@ -85,8 +92,7 @@ class Update:
             pod["spec"].get("nodeName") != self.args.node
             or len(checks) != 1
             or checks[0]["image"] != self.report["new_image"]
-            or checks[0].get("command")
-            != ["python", "-c", self.column_check, json.dumps(self.report["schema"])]
+            or checks[0].get("command") != self.probe_command(self.report["schema"])
         ):
             raise RuntimeError("Candidate Pod inputs differ from recorded validation")
         return pod
@@ -295,7 +301,7 @@ class Update:
                         "name": "check",
                         "image": self.args.image,
                         "imagePullPolicy": "IfNotPresent",
-                        "command": ["python", "-c", self.column_check, json.dumps(schema)],
+                        "command": self.probe_command(schema),
                         "securityContext": {
                             "readOnlyRootFilesystem": True,
                             "allowPrivilegeEscalation": False,
@@ -355,6 +361,9 @@ class Update:
                 self.cleanup_probe()
                 existing = None
             if existing is None:
+                # Persist the observed absence before creating a replacement UID.
+                self.report.pop("probe_uid", None)
+                self.save("checking-image")
                 try:
                     self.run("create", "-f", "-", data=json.dumps(manifest))
                 except (RuntimeError, subprocess.TimeoutExpired):
