@@ -5,6 +5,7 @@ import importlib.util
 import itertools
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -155,7 +156,16 @@ class ImageCommands:
             schemas[0] = schemas[0].replace("  draining BOOLEAN NOT NULL DEFAULT FALSE,\n", "")
         elif self.failure in changes:
             schemas.append(changes[self.failure])
-        check = self.probe["spec"]["containers"][0]["command"]
+        # Kubelet expands commands even without a shell. Model $$ escaping and
+        # unresolved references so the real schema's DO $$ blocks catch corruption.
+        check = [
+            re.sub(
+                r"\$\$|\$\([^)]*\)",
+                lambda match: "$" if match[0] == "$$" else match[0],
+                part,
+            )
+            for part in self.probe["spec"]["containers"][0]["command"]
+        ]
         assert check[2] == (TOOLS / "column-check.py").read_text()
         # Replace only the socket transport. Candidate DDL, isolated databases and
         # the production checker all execute against the real test PostgreSQL.
@@ -532,6 +542,28 @@ def test_candidate_request_response_loss_does_not_leave_duplicate_probe_or_resta
     assert lost and commands.probe is None
     assert commands.events.count("probe-create") == 1
     assert commands.events.count("scale-zero") == 1
+
+
+def test_retry_recreates_deleted_probe_even_if_interrupted_after_creation(invoke_image_update):
+    # An operator may remove a failed probe before upgrading the command format.
+    # Its old UID must be forgotten durably before a replacement can be created.
+    commands = ImageCommands(failure="pull")
+    assert invoke_image_update(commands) == 1
+    commands.probe = None
+    commands.failure = ""
+
+    def interrupted(command, **kwargs):
+        result = commands(command, **kwargs)
+        if command[6] == "create":
+            raise OSError("interrupted after replacement probe creation")
+        return result
+
+    assert invoke_image_update(interrupted) == 1
+    assert "scale-zero" not in commands.events
+    assert invoke_image_update(commands) == 0
+    assert commands.events.count("probe-create") == 2
+    assert commands.events.count("scale-zero") == 1
+    assert commands.probe is None
 
 
 def test_retry_before_stop_refreshes_recreated_old_pod_instead_of_becoming_unrecoverable(
