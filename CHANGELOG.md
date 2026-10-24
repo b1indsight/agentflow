@@ -8,6 +8,17 @@
 
 ## Unreleased
 
+- Server 独立监听仓库 Workflow runs Webhook，验签后原子持久写入主机 JSON 队列，
+  由单消费者核验发布并部署；删除 PostgreSQL 更新事件模块和 schema 注册，不自动删旧表。
+  同镜像可在检查、缩零、删旧、启动和 Ready 结果落盘中断后直接续作，已 Ready 不重复停启；
+  候选 Pod 按固定归属/UID/输入复用，Kubernetes 写入响应丢失按实际状态核对，拒绝冲突与版本回退。
+  保留删列检查、正常停旧启新和普通恢复；无全局暂停、Worker 门槛、备份或自动回滚。
+  三个 Server 脚本集中到 `scripts/server_update/`，直接复制，不提供安装器或工具自升级。
+- `flowtool worker --update` 自动查询最新已核验发布，在原有可信 uv Git 安装中更新包及依赖，
+  新解释器核验 revision、导入路径、CLI 和依赖后退出；移除旧 `worker update --sha` 只读入口。
+  安装级锁保护共享安装的普通 Worker 与更新，不创建新环境、版本目录、源码跳过分支或后台服务；
+  操作者先正常停止旧进程，成功后按原方式启动，保留身份、root、journal 和认证。
+
 - Amp 编码适配层明确命名为 `amp_agent.AmpCodingAgent`，公共进程调用层改为 `amp_process`；
   同步运行时、历史查询与测试引用，不保留旧名称别名，行为及配置不变。
 

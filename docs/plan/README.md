@@ -5,6 +5,8 @@
 
 ## 当前计划
 
+- [`server-auto-update.md`](server-auto-update.md) — PR #104：独立验签 Webhook、本地文件队列和同镜像幂等部署已实现；Worker `--update` 在原 uv Git 安装中更新并核验后退出。保留删列与普通停启，不新建环境；951 项回归及五项简化对照通过，真实接入待验收，审查及交付状态见 PR。
+
 - [`worker-amp-cli.md`](worker-amp-cli.md) — 可选 Amp CLI 后端已实现：同 thread 修订、原生历史、
   protocol v15、取消监督和固定版本镜像；依赖 #109 已合并，#107 目标改为 main。
   当前方案、验证证据及未修问题见精简后的功能记录；尚未部署。

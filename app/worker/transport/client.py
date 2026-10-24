@@ -362,15 +362,18 @@ class WorkerClient:
                         return_when=asyncio.FIRST_COMPLETED,
                     )
                     if incoming in completed:
-                        next_tool.cancel()
-                        await asyncio.gather(next_tool, return_exceptions=True)
+                        await self._requeue_tool_waiter(next_tool)
+                        next_tool = None
                         message = incoming.result()
                         if not isinstance(message, StopExecution):
                             raise WorkerProtocolError("unexpected message during execution")
                         await self._handle_stop(connection, message)
                         return
-                    if next_tool in completed:
+                    if next_tool in completed and not execution.done():
                         pending = next_tool.result()
+                        next_tool = None
+                        if pending.future.done():
+                            continue
                         request = pending.request.model_copy(
                             update={"connection_epoch": assignment.connection_epoch}
                         )
@@ -401,8 +404,8 @@ class WorkerClient:
                         else:
                             pending.future.set_result(response.result)
                         continue
-                    next_tool.cancel()
-                    await asyncio.gather(next_tool, return_exceptions=True)
+                    await self._requeue_tool_waiter(next_tool)
+                    next_tool = None
                 terminal = self._record_completed_execution()
             else:
                 terminal = self.session.replay(assignment.connection_epoch)
@@ -423,9 +426,15 @@ class WorkerClient:
         finally:
             incoming.cancel()
             if next_tool is not None:
-                next_tool.cancel()
-                await asyncio.gather(next_tool, return_exceptions=True)
+                await self._requeue_tool_waiter(next_tool)
             await asyncio.gather(incoming, return_exceptions=True)
+
+    async def _requeue_tool_waiter(self, waiter: asyncio.Task[_PendingTool]) -> None:
+        """Return a dequeued but unconsumed call when disconnect wins the race."""
+        waiter.cancel()
+        await asyncio.gather(waiter, return_exceptions=True)
+        if not waiter.cancelled():
+            self._tool_requests.put_nowait(waiter.result())
 
     async def _handle_stop(self, connection: Connection, request: StopExecution) -> None:
         record = self.session.load()
@@ -483,6 +492,7 @@ class WorkerClient:
             outcome = exc
         terminal = self.session.complete(outcome)
         self._execution = None
+        self._discard_tool_requests()
         return terminal
 
     def stop(self) -> None:

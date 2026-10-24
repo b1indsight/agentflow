@@ -14,6 +14,7 @@ from app.contracts.protocol import (
     InitialTask,
     InitialTaskResult,
     Registered,
+    ReplayResult,
     ResultAccepted,
     ResumeAssignment,
     Started,
@@ -322,6 +323,167 @@ async def test_heartbeat_failure_interrupts_waiting_for_tool_reply(tmp_path) -> 
         pending = client._tool_requests.get_nowait()
         assert pending.request.name == "flow.open_pr"
         assert not pending.future.done()
+    finally:
+        await client._cancel_execution()
+
+
+@pytest.mark.parametrize("finish_before_reconnect", [False, True])
+async def test_cancelled_disconnected_tool_does_not_leak_into_resumed_or_next_assignment(
+    tmp_path, finish_before_reconnect
+):
+    # MCP can cancel a requeued tool during a disconnect. The live executor may
+    # resume, or its terminal may replay before another assignment uses the socket.
+    cancel_tool, cancelled = asyncio.Event(), asyncio.Event()
+    invocations = []
+    outcome = VcsOutcome(backend=VcsKind.GIT, branch="flow/3", commit_sha="abc", remote_sha="abc")
+
+    class Executor:
+        async def execute(self, task, secret=None, *, tool_caller):
+            invocations.append(task)
+            if len(invocations) == 1:
+                call = asyncio.create_task(
+                    tool_caller.call_tool(
+                        "flow.open_pr",
+                        {},
+                        call_id="retired",
+                        vcs_outcome=outcome,
+                    )
+                )
+                try:
+                    await cancel_tool.wait()
+                finally:
+                    call.cancel()
+                    await asyncio.gather(call, return_exceptions=True)
+                    cancelled.set()
+                if finish_before_reconnect:
+                    return InitialTaskResult(
+                        session_id="session-1", last_message="timed out", exit_code=124
+                    )
+            return await ToolCallingExecutor().execute(task, secret, tool_caller=tool_caller)
+
+    class Disconnect(ToolConnection):
+        async def recv(self):
+            if self.step == 2:
+                await self.tool_ready.wait()
+                raise ConnectionError("controller stopped")
+            return await super().recv()
+
+    assignment = _assignment()
+    following = assignment.model_copy(
+        update={"job_id": 6, "assignment_token": "next-token", "connection_epoch": "epoch-2"}
+    )
+
+    class Reconnect:
+        def __init__(self):
+            self.sent = []
+            self.messages = asyncio.Queue()
+            response = ReplayResult if finish_before_reconnect else ResumeAssignment
+            self.messages.put_nowait(
+                response(
+                    job_id=5,
+                    assignment_token="assignment-1",
+                    connection_epoch="epoch-2",
+                    heartbeat_interval=60,
+                )
+            )
+
+        async def send(self, raw):
+            message = parse_worker_message(raw)
+            self.sent.append(message)
+            if isinstance(message, FlowToolRequest):
+                assert message.call_id != "retired"
+                assert message.connection_epoch == "epoch-2"
+                self.messages.put_nowait(
+                    FlowToolResponse(
+                        call_id=message.call_id,
+                        result=PreparedDelivery(head_sha="abc", delivery_version=1),
+                    )
+                )
+            elif isinstance(message, Succeeded):
+                self.messages.put_nowait(
+                    ResultAccepted(
+                        job_id=message.job_id,
+                        assignment_token=message.assignment_token,
+                        connection_epoch="epoch-2",
+                        state=JobState.DONE,
+                    )
+                )
+                self.messages.put_nowait(
+                    following if message.job_id == 5 else ConnectionError("script complete")
+                )
+
+        async def recv(self):
+            message = await self.messages.get()
+            if isinstance(message, Exception):
+                raise message
+            if isinstance(message, Assignment):
+                assert client.session.assignment is None and client.session.load().acknowledged
+            return message.model_dump_json()
+
+    client = WorkerClient(
+        worker_id="worker-1",
+        worker_token="test",
+        serve_ws_url="ws://unused",
+        executor=Executor(),
+        session=WorkerSession(tmp_path),
+    )
+    try:
+        with pytest.raises(ConnectionError, match="controller stopped"):
+            await asyncio.wait_for(client.run_connection(Disconnect()), 2)
+        cancel_tool.set()
+        await asyncio.wait_for(cancelled.wait(), 2)
+        if finish_before_reconnect:
+            await client._execution
+        recovered = Reconnect()
+        with pytest.raises(ConnectionError, match="script complete"):
+            await asyncio.wait_for(client.run_connection(recovered), 2)
+        calls = [message for message in recovered.sent if isinstance(message, FlowToolRequest)]
+        assert [message.job_id for message in calls] == ([6] if finish_before_reconnect else [5, 6])
+        assert len(invocations) == 2
+        assert client.session.load().job_id == 6 and client.session.load().acknowledged
+        assert client.session.assignment is None
+    finally:
+        cancel_tool.set()
+        await client._cancel_execution()
+
+
+async def test_disconnect_with_queued_tool_replays_it_after_controller_restart(tmp_path):
+    # Disconnect and queue.get can complete in the same scheduling turn. The
+    # pending call must survive even when no bytes of its request were sent.
+    assignment = _assignment()
+    session = WorkerSession(tmp_path)
+    session.record_received(assignment)
+    session.record_started()
+    executor = ToolCallingExecutor()
+    client = WorkerClient(worker_id="worker-1", worker_token="test", serve_ws_url="ws://unused",
+                          executor=executor, session=session)
+    client._execution = asyncio.create_task(executor.execute(assignment.task, tool_caller=client))
+    await asyncio.sleep(0)
+
+    class ReconnectedTool(ToolConnection):
+        async def recv(self):
+            if self.step == 0:
+                self.step = 2
+                return ResumeAssignment(job_id=assignment.job_id,
+                                        assignment_token=assignment.assignment_token,
+                                        connection_epoch="epoch-1", heartbeat_interval=60).model_dump_json()
+            return await super().recv()
+
+    class Disconnect(ReconnectedTool):
+        async def recv(self):
+            if self.step == 0:
+                return await super().recv()
+            raise ConnectionError("controller stopped")
+
+    try:
+        with pytest.raises(ConnectionError, match="controller stopped"):
+            await client.run_connection(Disconnect())
+        recovered = ReconnectedTool()
+        with pytest.raises(ConnectionError, match="script complete"):
+            await asyncio.wait_for(client.run_connection(recovered), 1)
+        calls = [parse_worker_message(raw) for raw in recovered.sent]
+        assert len([message for message in calls if isinstance(message, FlowToolRequest)]) == 1
+        assert session.load().acknowledged
     finally:
         await client._cancel_execution()
 

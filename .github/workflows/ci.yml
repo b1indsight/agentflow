@@ -21,7 +21,7 @@ jobs:
   frontend:
     name: Frontend
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: app/controler/web
@@ -42,7 +42,9 @@ jobs:
       - run: npm run format:check
       - run: npm test
       - run: npm run build
-      - run: npx playwright install --with-deps chromium
+      - name: Install Chromium and system dependencies
+        timeout-minutes: 15
+        run: npx playwright install --with-deps chromium
       - run: npm run test:e2e
 
   checks:
