@@ -992,7 +992,6 @@ export default function App() {
           )}
         </div>
         <div className="bar-status">
-          <span>本地档案</span>
           <button
             className="btn ghost"
             aria-label="刷新当前视图"
