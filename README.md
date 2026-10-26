@@ -178,7 +178,8 @@ Git worktree。`FLOWTOOL_WORKER_REPO_WORKSPACE_LIMIT=2` 设置每仓库总上限
 每次 INITIAL、REVISION resume/fallback 都提供本轮 bot `gh` 包装、独立配置和 Git helper，
 不使用个人登录态；token 过期/权限不足即失败，不自动续期或扩权。worker 保持单仓库
 Contents write，PR 通过 MCP `open_pr` 请求 controler 校验后创建。包装不构成 OS 沙箱。
-当前 Codex/Amp 接入均使用 protocol v15 / journal v4，serve 与 worker 的协议版本必须匹配；旧 journal 不自动迁移。
+当前 Codex/Amp 接入均使用 protocol v15 / journal v4，serve 与 worker 的协议版本必须匹配。
+本地 v4 journal 可直接读取上一代协议 v14 的结果和停止回执，无需手工清理，见 [Worker 更新](docs/deployment/worker-update.md#journal-直接前代兼容)。
 Amp 的临时 settings 不覆盖 managed policy；发现 workspace `.amp/settings.json[c]` 时拒绝执行，
 避免覆盖本轮工具/MCP 设置。完整配置与取消边界见[部署说明](docs/deployment/README.md)。
 
@@ -302,8 +303,11 @@ M3 F3 及审查修复本地验证（2026-09-08）：真实 PostgreSQL 下 **502 
 详见 [F3 审查修复记录](docs/plan/m3-archive-status.md#7-审查修复2026-09-08)。
 
 当前仅支持 wire protocol **v15**、worker journal **v4** 与当前完整 PostgreSQL schema。
-仓库尚未部署，不提供旧版本数据库、任务、结果或 journal 的迁移；首次运行使用新数据库/schema
-和新 worker root。Server 部署不以所有 Worker 更新为前提；Worker 连接仍按实际 protocol 和
+合法 v4 journal 中上一代协议 v14 的结果和停止回执在读取时进行内存转换，下次正常保存时写为 v15；
+保留任务身份、摘要、停止证据和工作区归属，不需要手动编辑或删除 journal。
+不支持 v3 / 协议 v13、混合或未知消息版本，也不迁移其他旧数据库、任务或结果格式。
+首次运行使用新数据库/schema 和新 worker root；受支持的升级保留原 root。
+Server 部署不以所有 Worker 更新为前提；Worker 连接仍按实际 protocol 和
 认证结果处理，不匹配直接拒绝。支持的 uv Git 虚拟环境安装可通过 `flowtool worker --update`
 原地更新本体及必要依赖，核验后退出；操作者须先停止 Worker，再按原方式启动，详见
 [Worker 更新](docs/deployment/worker-update.md)。源码与容器继续按原部署方式更新。

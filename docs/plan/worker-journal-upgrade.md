@@ -1,6 +1,6 @@
 # Worker 直接前代 journal 升级兼容 — Feature record
 
-**Stage:** Planning，待批准；本 PR 当前只包含计划，不包含实现或测试改动。
+**Stage:** Implemented；兼容逻辑、回归测试和运行文档已完成，本地验证通过。合并与发布以 PR 状态为准。
 **PR:** [#115](https://github.com/b1indsight/agentflow/pull/115)；计划和后续实现使用同一个 PR。
 
 ## 1. Initial plan
@@ -131,3 +131,47 @@
 ## 2. PR change timeline
 
 <!-- 初始计划发布后，按时间顺序追加实质需求或设计变化；不记录单纯审批和阶段切换。 -->
+
+### [001] — 2026-10-26 — 实现本地直接前代读取与恢复验收
+
+- **背景与决定：** 按初始计划把兼容限制在 `WorkerSession.load()` 的磁盘读取边界。
+  当前格式优先走原解析路径；只有该路径失败时才尝试明确的 v4 / v14 映射。
+  采用内存转换，避免只读诊断在未持 root 锁时写盘；不放宽网络模型、不新增持久字段或依赖。
+- **实际改动：** `app/worker/state/session.py` 增加 `_parse_journal`，只转换两种内嵌消息的版本标记，
+  再使用当前模型校验并核对终态 job/token/摘要、停止回执 job/flow/token/nonce。
+  `load()` 保留 root 校验和 `SessionError` 边界，正常 ACK/状态写入仍复用原有原子保存逻辑。
+  `tests/test_worker_session.py` 使用独立的前代 JSON，覆盖恢复、重放、ACK 以及拒绝后保留原文件。
+  README、Worker 更新说明和 changelog 同步说明准确范围；实现未偏离初始计划。
+- **验证：** 先在未实现转换的代码上复现前代恢复失败，再确认实现后相同用例通过。
+  全量 Python 测试在独立 PostgreSQL 17 UTF8 数据库通过；Ruff、Mypy、Python 包构建和 diff 空白检查通过。
+  首次全量运行因临时数据库误建为 SQL_ASCII 而失败，改为 UTF8 后重新完整通过，未修改产品代码规避错误。
+  检查命令为 `python -m pytest -q`、`ruff check .`、`mypy app tests`、`uv build --out-dir <临时目录>`
+  和 `git diff --check`；在隔离 workspace 使用已安装依赖的 Python，并设置 `PYTHONPATH="$PWD"`。
+  测试数据库由 `FLOWTOOL_TEST_DATABASE_URL` 指向独立实例，不连接运行中的数据库。
+- **传输验证：** 临时脚本以真实 localhost WebSocket 连接运行实际 `WorkerClient`，对端模拟当前 Server。
+  成功/失败结果及附带停止回执分别完成注册恢复、结果/停止回执重放和 ACK；发送的消息通过当前网络解析器。
+  ACK 前文件字节不变，ACK 后保存 v15，身份、摘要及 workspace 绑定不变；执行器禁止重新运行编码。
+  这项验证未接入真实 Controller 或真实工作区回收，相关既有行为由全量回归覆盖。
+- **边界与结果：** 受支持的前代记录无需人工清理；当前网络协议、v3/v13 拒绝行为和更早工作区边界不变。
+  未升级或重启当前 Worker，未触碰其真实 journal，也未修改主 workspace 的前端工作。
+  本地未重跑无改动的前端构建/E2E，远端完整 CI 由同一 PR 运行；Python 打包检查不替代前端构建验收。
+  执行输出见[本次线程的验证记录](https://ampcode.com/threads/T-01a16fa6-1025-72d8-8994-daee36ad87b9)。
+
+### [002] — 2026-10-26 — 单机制消融验证
+
+对同一 `tests/test_worker_session.py` 用例集，分别在独立 Python 子进程内替换解析函数，
+不改写生产源码或真实 journal。完整实现为通过的控制组；每次只撤去下表中的一个机制。
+复现时可在临时副本作对应替换后运行 `python -m pytest -q tests/test_worker_session.py`，
+不要把这些变体用于真实 Worker。临时验证脚本不纳入产品或永久测试。
+
+| 变体 | 具体替换 | 观察结果与保留理由 |
+| --- | --- | --- |
+| 不转换前代记录 | 解析函数直接调用 `SessionState.model_validate_json` | 所有前代恢复用例重新失败；读取边界转换不可省略 |
+| 不转换停止回执 | 循环字段改为仅 `("terminal",)` | 含停止回执的恢复用例失败；两种消息均需转换 |
+| 不校验摘要 | 删除 `terminal_digest(record.terminal) != record.result_digest` 判断 | 摘要缺失或被改动时错误接受；保留摘要检查 |
+| 不校验终态身份 | 删除终态 job/token 与顶层比较 | 跨 job/token 记录错误接受；保留终态归属检查 |
+| 不校验停止身份 | 跳过停止回执与顶层比较 | 不同 flow/nonce 的回执错误接受；保留停止归属检查 |
+| 放宽版本范围 | 允许协议值为 `13, 14, 15, 16, None` 后统一转换 | 更早、未来、缺失值及混合版本错误接受；保留明确 v14 限定 |
+
+结论：每项新增机制均保护已约定的可观察行为；未发现可以删除且不损失合同的机制。
+消融后生产文件保持原实现，控制组已通过；这些失败属于有意构造的变体，不是交付代码的测试失败。

@@ -8,6 +8,8 @@
 
 ## Unreleased
 
+- Worker 可直接读取 journal v4 中上一代协议 v14 的结果和停止回执，保留身份、摘要和工作区归属；
+  读取只在内存转换，正常 ACK/状态保存时写为 v15，无需手工清理。不放宽网络协议，也不兼容 v3/v13。
 - Worker 发布核验复用运行列表返回的成功 attempt，删除重复的运行详情请求与 `ReleaseEvent`
   包装，直接返回已核验 SHA。保留固定 attempt 的发布步骤与当前 main SHA 核验，
   成功路径从 4 次 API 请求减为 3 次。

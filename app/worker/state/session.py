@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
+from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter, ValidationError
 
 from app.contracts.conversation import HistoryPage, HistoryQuery
 from app.contracts.protocol import (
@@ -29,6 +30,7 @@ from app.worker.state.history import CodexHistory
 
 TerminalMessage = Succeeded | Failed
 _TERMINAL: TypeAdapter[TerminalMessage] = TypeAdapter(TerminalMessage)
+_JOURNAL_JSON: TypeAdapter[dict[str, JsonValue]] = TypeAdapter(dict[str, JsonValue])
 
 
 class SessionError(RuntimeError):
@@ -55,6 +57,43 @@ class SessionState(BaseModel):
     workspace: WorkspaceBinding | None = None
     execution_nonce: str | None = None
     stopped: ExecutionStopped | None = None
+
+
+def _parse_journal(payload: str) -> SessionState:
+    """Read v4 journals with v14 receipts without widening the wire protocol or writing files.
+
+    Only receipt version tags changed in v15. Preserve their content and ownership; the next
+    normal state write under the runtime's root lock will persist the current representation.
+    """
+    try:
+        return SessionState.model_validate_json(payload)
+    except ValidationError:
+        pass
+
+    data = _JOURNAL_JSON.validate_json(payload)
+    if data.get("version") != 4:
+        raise ValueError("unsupported worker journal version")
+    for name in ("terminal", "stopped"):
+        message = data.get(name)
+        if message is None:
+            continue
+        if not isinstance(message, dict) or message.get("protocol_version") != 14:
+            raise ValueError("unsupported or mixed journal message versions")
+        message["protocol_version"] = 15
+
+    record = SessionState.model_validate_json(json.dumps(data))
+    if record.terminal is not None and (
+        (record.terminal.job_id, record.terminal.assignment_token)
+        != (record.job_id, record.assignment_token)
+        or terminal_digest(record.terminal) != record.result_digest
+    ):
+        raise ValueError("previous journal result does not match its assignment or digest")
+    if record.stopped is not None and (
+        record.stopped.job_id, record.stopped.flow_id,
+        record.stopped.assignment_token, record.stopped.execution_nonce,
+    ) != (record.job_id, record.flow_id, record.assignment_token, record.execution_nonce):
+        raise ValueError("previous journal stop receipt does not match its execution")
+    return record
 
 
 class WorkerSession:
@@ -135,7 +174,7 @@ class WorkerSession:
         if not self.path.exists():
             return None
         try:
-            record = SessionState.model_validate_json(self.path.read_text())
+            record = _parse_journal(self.path.read_text())
         except (OSError, ValidationError, ValueError) as exc:
             raise SessionError(f"invalid worker journal at {self.path}") from exc
         if record.root_identity != self._root_identity():
