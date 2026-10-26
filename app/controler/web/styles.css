@@ -886,7 +886,8 @@ svg {
   font-size: var(--text-small);
   font-weight: 400;
 }
-.message-label time {
+.message-label time,
+.operation-action time {
   font-weight: 400;
   font-size: var(--text-small);
   color: var(--muted);
@@ -1095,10 +1096,10 @@ svg {
 .message[hidden] {
   display: none;
 }
-.tool-activity {
+.grouped-activity {
   margin-bottom: 8px;
 }
-.tool-activity-toggle {
+.activity-toggle {
   display: block;
   max-width: 100%;
   padding: 4px 0;
@@ -1111,12 +1112,20 @@ svg {
   text-align: left;
   cursor: pointer;
 }
-.tool-activity-toggle:hover {
+.activity-toggle:hover {
   color: var(--ink);
 }
-.tool-activity-toggle:focus-visible {
+.activity-toggle:focus-visible {
   outline: 2px solid var(--green);
   outline-offset: 3px;
+}
+.operation-action {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px 9px;
+  margin-top: 4px;
+  font-size: var(--text-meta);
 }
 .tool-activity-body {
   padding: 4px 0;
