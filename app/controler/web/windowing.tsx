@@ -20,6 +20,10 @@ function readingMemory() {
   return {
     values: new Map<string, number>(),
     listeners: new Map<string, Set<() => void>>(),
+    bookmarks: new Map<
+      string,
+      { key: RowKey | null; offset: number; scrollTop: number }
+    >(),
   };
 }
 const Memory = createContext(readingMemory());
@@ -177,7 +181,8 @@ interface WindowProps {
   estimate?: number;
   onRange?: (indexes: number[]) => void;
   onVisibleRange?: (keys: readonly RowKey[], anchorKey: RowKey | null) => void;
-  preserveReadingAnchor?: boolean;
+  /** Preserve one logical row across layout changes and remounts; resolve hidden rows in the caller. */
+  reading?: { key: string; resolve: (key: RowKey) => RowKey | null };
   label: string;
 }
 
@@ -189,9 +194,11 @@ export function WindowList({
   estimate = 180,
   onRange,
   onVisibleRange,
-  preserveReadingAnchor = false,
+  reading,
   label,
 }: WindowProps) {
+  const memory = useContext(Memory);
+  const preserveReadingAnchor = Boolean(reading);
   const large = count > MAX_ROWS;
   const host = useRef<HTMLDivElement>(null);
   const measured = useRef(new Map<RowKey, number>());
@@ -205,6 +212,7 @@ export function WindowList({
   const [recovery, setRecovery] = useState<RowKey | null>(null);
   const layout = useRef({
     anchor: null as ReadingAnchor | null,
+    restore: reading ? memory.bookmarks.get(reading.key) : undefined,
     geometry: new Map<RowKey, RowGeometry>(),
     keys: [] as RowKey[],
     inputVersion: 0,
@@ -216,6 +224,13 @@ export function WindowList({
   const keyIndexes = new Map(keys.map((key, index) => [key, index]));
   const resolveKey = (key: RowKey | null) => {
     if (key === null || keyIndexes.has(key)) return key;
+    const replacement = reading?.resolve(key);
+    if (
+      replacement !== undefined &&
+      replacement !== null &&
+      keyIndexes.has(replacement)
+    )
+      return replacement;
     const before = layout.current.keys;
     const index = before.indexOf(key);
     if (index < 0) return null;
@@ -228,7 +243,12 @@ export function WindowList({
   const focusedKey = resolveKey(focused);
   const pendingKey = resolveKey(pending?.key ?? null);
   const anchorKey = preserveReadingAnchor
-    ? resolveKey(recovery ?? layout.current.anchor?.key ?? null)
+    ? resolveKey(
+        recovery ??
+          layout.current.restore?.key ??
+          layout.current.anchor?.key ??
+          null,
+      )
     : null;
   const queued = useRef(false);
   const settle = useRef<() => void>(() => {});
@@ -342,6 +362,18 @@ export function WindowList({
         : null;
     };
     let anchor = before.anchor;
+    if (before.restore) {
+      const saved = before.restore;
+      if (saved.key === null) root.scrollTop = saved.scrollTop;
+      else
+        anchor = {
+          key: saved.key,
+          offset: saved.offset,
+          scrollTop: root.scrollTop,
+          rootTop,
+          inputVersion: before.inputVersion,
+        };
+    }
     if (preserveReadingAnchor && anchor) {
       const scrollMoved = Math.abs(root.scrollTop - anchor.scrollTop) > 0.5;
       const max = Math.max(0, root.scrollHeight - root.clientHeight);
@@ -354,7 +386,15 @@ export function WindowList({
       }
       const key = resolveKey(anchor?.key ?? null);
       if (anchor && key !== null) {
-        anchor = { ...anchor, key };
+        anchor = {
+          ...anchor,
+          key,
+          // A short folded summary must not inherit an invisible tall member's negative offset.
+          offset:
+            key === anchor.key
+              ? anchor.offset
+              : Math.max(visibleTop, anchor.offset),
+        };
         const row = geometry.get(key);
         if (!row) {
           before.anchor = anchor;
@@ -366,6 +406,7 @@ export function WindowList({
         if (Math.abs(delta) > 0.5) root.scrollTop += delta;
       }
     }
+    before.restore = undefined;
     if (recovery !== null) setRecovery(null);
     before.anchor = pickAnchor(geometry);
     before.geometry = geometry;
@@ -378,6 +419,12 @@ export function WindowList({
       visible.length > 0 ||
       bounds.bottom <= rootTop + visibleTop ||
       bounds.top >= rootTop + visibleBottom;
+    if (reading && reliable)
+      memory.bookmarks.set(reading.key, {
+        key: before.anchor?.key ?? null,
+        offset: before.anchor?.offset ?? 0,
+        scrollTop: root.scrollTop,
+      });
     if (
       onVisibleRange &&
       reliable &&
@@ -400,9 +447,11 @@ export function WindowList({
     if (!root || (!preserveReadingAnchor && !onVisibleRange)) return;
     const input = () => {
       layout.current.inputVersion++;
+      layout.current.restore = undefined;
     };
     const navigation = () => {
-      input();
+      // Header positioning can finish before the initial bookmark restoration.
+      layout.current.inputVersion++;
       settleLayout();
     };
     root.addEventListener("wheel", input, { passive: true });

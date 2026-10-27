@@ -151,6 +151,7 @@ test("folded long groups have one identity-only summary and stable independent b
     {
       kind: "summary",
       key: "summary:tool-0",
+      expanded: false,
       group: {
         key: "tool-0",
         kind: "tool",
@@ -163,7 +164,7 @@ test("folded long groups have one identity-only summary and stable independent b
   ]);
   const expanded = buildConversationRows(records, new Set(["tool-0"]));
   assert.equal(expanded.length, 301);
-  assert.deepEqual(expanded[0], folded[0]);
+  assert.deepEqual(expanded[0], { ...folded[0], expanded: true });
   assert.equal(new Set(expanded.map((row) => row.key)).size, expanded.length);
   assert.deepEqual(expanded[2], {
     kind: "body",
@@ -172,6 +173,17 @@ test("folded long groups have one identity-only summary and stable independent b
     groupKey: "tool-0",
     pairedCallKey: "tool-0",
   });
+  // A reader can be in the middle of a run when refresh backfills or removes its first member.
+  const earlier = activityIdentity(record("earlier-tool"));
+  for (const refreshed of [
+    records,
+    [earlier, ...records],
+    [earlier, ...records.slice(1)],
+  ]) {
+    const reading = buildConversationRows(refreshed, new Set(["tool-101"]));
+    assert.equal(reading.length, refreshed.length + 1);
+    assert.ok(reading.some((row) => row.key === "body:tool-101"));
+  }
   assert.deepEqual(buildConversationRows(records, new Set()), folded);
   assert.deepEqual(conversationProvenanceRange(records, 0), {
     first: 0,
@@ -317,6 +329,7 @@ test("identity classifiers retain cross-source operations and worker ownership a
     {
       kind: "summary",
       key: "summary:check",
+      expanded: false,
       group: {
         key: "check",
         kind: "operation",

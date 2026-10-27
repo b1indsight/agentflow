@@ -115,7 +115,12 @@ export interface ConversationGroup {
 
 /** Display keys are distinct from raw record keys, which still own body reading state. */
 export type ConversationRow =
-  | { kind: "summary"; key: string; group: ConversationGroup }
+  | {
+      kind: "summary";
+      key: string;
+      group: ConversationGroup;
+      expanded: boolean;
+    }
   | {
       kind: "body";
       key: string;

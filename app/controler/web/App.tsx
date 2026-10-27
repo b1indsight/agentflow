@@ -283,6 +283,11 @@ function Detail({
   useLayoutEffect(() => {
     const node = detail.current;
     if (!node) return;
+    if (tab === "conversation") {
+      // The conversation restores a logical row after its groups remount folded.
+      node.scrollTop = 0;
+      return;
+    }
     const key = `detail:${id}:${tab}`;
     node.scrollTop = positions.get(key) ?? 0;
     // Like header positioning below, explicit navigation supersedes a queued reading anchor.
@@ -735,10 +740,12 @@ function Conversation({
   refresh: number;
 }) {
   const { state, load, onRange, onAnchor, readProvenance, retry } =
-    useConversation(id, root);
+    useConversation(id);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
+  const sentinel = useRef<HTMLDivElement>(null);
+  const automaticBoundary = useRef<string | null>(null);
   const rows = useMemo(
     () => buildConversationRows(state.records, expanded),
     [state.records, expanded],
@@ -760,17 +767,34 @@ function Conversation({
   );
   const visibleRange = useCallback(
     (keys: readonly (string | number)[], anchorKey: string | number | null) => {
-      const groups = new Set<string>();
+      const members = new Map<string, string[]>();
+      const summaries = new Set<string>();
       for (const key of keys) {
         const row = typeof key === "string" ? rowByKey.get(key) : undefined;
         const group = row?.kind === "summary" ? row.group.key : row?.groupKey;
-        if (group) groups.add(group);
+        if (!row || !group) continue;
+        const index = row.kind === "summary" ? row.group.first : row.rawIndex;
+        const visible = members.get(group) ?? [];
+        visible.push(state.records[index].key);
+        members.set(group, visible);
+        if (row.kind === "summary") summaries.add(group);
       }
       setExpanded((before) => {
-        const leaving = [...before].filter((key) => !groups.has(key));
-        if (!leaving.length) return before;
-        const next = new Set(before);
-        leaving.forEach((key) => next.delete(key));
+        const next = new Set<string>();
+        // A late visibility report must not reopen a group the user has just collapsed.
+        for (const key of before) {
+          const row = rowByKey.get(`body:${key}`);
+          const group = row?.kind === "body" ? row.groupKey : null;
+          const visible = group ? members.get(group) : undefined;
+          if (!group || !visible) continue;
+          visible.forEach((member) => next.add(member));
+          if (summaries.has(group)) next.add(key);
+        }
+        if (
+          before.size === next.size &&
+          [...before].every((key) => next.has(key))
+        )
+          return before;
         return next;
       });
       const anchor =
@@ -788,6 +812,36 @@ function Conversation({
       load(true);
     }
   }, [refresh, load]);
+  useEffect(() => {
+    if (state.snapshot === null || state.busy || state.error || !state.has_more)
+      return;
+    const node = sentinel.current;
+    if (!node) return;
+    const boundary = `${state.snapshot}:${rows.length}`;
+    if (automaticBoundary.current === boundary) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        // A folded group can grow forever without moving the sentinel out of view.
+        if (
+          entries.some((entry) => entry.isIntersecting) &&
+          automaticBoundary.current !== boundary &&
+          load()
+        )
+          automaticBoundary.current = boundary;
+      },
+      { root: root.current, rootMargin: "0px 0px 120px 0px" },
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [
+    load,
+    root,
+    state.snapshot,
+    state.busy,
+    state.error,
+    state.has_more,
+    rows.length,
+  ]);
   return (
     <>
       <ConversationSources
@@ -805,75 +859,108 @@ function Conversation({
         </p>
       )}
       <div className="conversation-stream">
-        <WindowList
-          count={rows.length}
-          label="会话活动"
-          itemKey={(i) => rows[i].key}
-          onRange={mountedRange}
-          onVisibleRange={visibleRange}
-          preserveReadingAnchor
-          estimate={220}
-        >
-          {(i) => {
-            const row = rows[i];
-            if (row.kind === "summary") {
-              const entry = state.records[row.group.first];
-              return (
-                <ActivitySummary
-                  entry={entry}
-                  group={row.group}
-                  expanded={expanded.has(row.group.key)}
+        {state.snapshot !== null && (
+          <WindowList
+            count={rows.length}
+            label="会话活动"
+            itemKey={(i) => rows[i].key}
+            onRange={mountedRange}
+            onVisibleRange={visibleRange}
+            reading={{
+              key: `conversation:${id}`,
+              resolve: (key) => {
+                if (typeof key !== "string") return null;
+                if (rowByKey.has(key)) return key;
+                const rawKey = key.slice(key.indexOf(":") + 1);
+                const index = state.records.findIndex(
+                  (entry) => entry.key === rawKey,
+                );
+                return (
+                  rows.find(
+                    (row) =>
+                      row.kind === "summary" &&
+                      row.group.first <= index &&
+                      index <= row.group.last,
+                  )?.key ?? null
+                );
+              },
+            }}
+            estimate={220}
+          >
+            {(i) => {
+              const row = rows[i];
+              if (row.kind === "summary") {
+                const entry = state.records[row.group.first];
+                return (
+                  <ActivitySummary
+                    entry={entry}
+                    group={row.group}
+                    expanded={row.expanded}
+                    continuation={sameActivityGroup(
+                      state.records[row.group.first - 1],
+                      entry,
+                    )}
+                    onToggle={() =>
+                      setExpanded((before) => {
+                        const next = new Set(before);
+                        if (row.expanded)
+                          for (
+                            let index = row.group.first;
+                            index <= row.group.last;
+                            index++
+                          )
+                            next.delete(state.records[index].key);
+                        else next.add(entry.key);
+                        return next;
+                      })
+                    }
+                  />
+                );
+              }
+              const e = state.items.get(row.rawIndex);
+              const identity = state.records[row.rawIndex];
+              const provenance = conversationProvenanceRange(
+                state.records,
+                row.rawIndex,
+              );
+              return e ? (
+                <ActivityView
+                  key={`${e.key}-${e.version}`}
+                  entry={e}
+                  flowId={id}
+                  snapshot={state.snapshot ?? 0}
                   continuation={sameActivityGroup(
-                    state.records[row.group.first - 1],
-                    entry,
+                    state.records[row.rawIndex - 1],
+                    identity,
                   )}
-                  onToggle={() =>
-                    setExpanded((before) => {
-                      const next = new Set(before);
-                      if (!next.delete(row.group.key)) next.add(row.group.key);
-                      return next;
-                    })
+                  groupKey={row.groupKey}
+                  pairedCallKey={row.pairedCallKey}
+                  provenance={
+                    provenance
+                      ? { ...provenance, read: readProvenance }
+                      : undefined
                   }
                 />
+              ) : (
+                <div className="history-placeholder">正在读取历史交互…</div>
               );
-            }
-            const e = state.items.get(row.rawIndex);
-            const identity = state.records[row.rawIndex];
-            const provenance = conversationProvenanceRange(
-              state.records,
-              row.rawIndex,
-            );
-            return e ? (
-              <ActivityView
-                key={`${e.key}-${e.version}`}
-                entry={e}
-                flowId={id}
-                snapshot={state.snapshot ?? 0}
-                continuation={sameActivityGroup(
-                  state.records[row.rawIndex - 1],
-                  identity,
-                )}
-                groupKey={row.groupKey}
-                pairedCallKey={row.pairedCallKey}
-                provenance={
-                  provenance
-                    ? { ...provenance, read: readProvenance }
-                    : undefined
-                }
-              />
-            ) : (
-              <div className="history-placeholder">正在读取历史交互…</div>
-            );
-          }}
-        </WindowList>
+            }}
+          </WindowList>
+        )}
       </div>
       {state.error ? (
         <button className="btn" onClick={retry}>
           读取失败：{state.error.message}（重试）
         </button>
       ) : state.has_more ? (
-        <div className="load-sentinel" role="status">
-          {state.busy ? "正在加载更多交互…" : "向下滚动，继续读取交互"}
+        <div className="load-sentinel" role="status" ref={sentinel}>
+          <button
+            className="btn"
+            aria-disabled={state.busy}
+            onClick={() => load()}
+          >
+            {state.busy ? "正在加载更多交互…" : "读取更多交互"}
+          </button>
         </div>
       ) : (
         <button

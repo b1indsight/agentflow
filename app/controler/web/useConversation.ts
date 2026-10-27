@@ -1,10 +1,4 @@
-import {
-  type RefObject,
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-} from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { getActivity } from "./api";
 import type {
   ActivityIdentity,
@@ -306,10 +300,7 @@ export async function readConversationProvenance(
  * Keep read identities and opaque cursors after body eviction. WindowList owns all pixel restoration;
  * callers report raw mounted indexes with onRange and the latest raw reading key with onAnchor.
  */
-export function useConversation(
-  flowId: number,
-  root: RefObject<HTMLElement | null>,
-) {
+export function useConversation(flowId: number) {
   const [state, setState] = useState(() => cache.get(flowId) ?? empty());
   const current = useRef(state),
     controller = useRef<AbortController | null>(null),
@@ -372,8 +363,9 @@ export function useConversation(
   const load = useCallback(
     (refresh = false) => {
       const s = current.current;
-      if (s.busy || (!refresh && !s.has_more)) return;
+      if (s.busy || (!refresh && !s.has_more)) return false;
       void read(refresh ? null : s.next_cursor, refresh);
+      return true;
     },
     [read],
   );
@@ -416,17 +408,6 @@ export function useConversation(
     if (!current.current.records.length) void read(null);
     return () => controller.current?.abort();
   }, [flowId, read]);
-  useEffect(() => {
-    if (state.busy || state.error || !state.has_more) return;
-    const sentinel = root.current?.querySelector(".load-sentinel");
-    if (!sentinel) return;
-    const o = new IntersectionObserver(
-      (x) => x.some((e) => e.isIntersecting) && load(),
-      { root: root.current, rootMargin: "0px 0px 120px 0px" },
-    );
-    o.observe(sentinel);
-    return () => o.disconnect();
-  }, [load, root, state.busy, state.error, state.has_more]);
   return {
     state,
     load,

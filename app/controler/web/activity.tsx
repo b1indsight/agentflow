@@ -541,6 +541,7 @@ export function isOperationActivity(
 /**
  * Project data-defined groups into independently virtualizable rows. Folded groups contain only a
  * summary; expanded tool results follow their nearest preceding matching call, one body per row.
+ * Expanded keys identify read members, so refreshing a group's first record cannot close it.
  */
 export function buildConversationRows(
   records: readonly ActivityIdentity[],
@@ -594,8 +595,11 @@ export function buildConversationRows(
     const calls = new Map<string, number>();
     const results = new Map<number, number[]>();
     const paired = new Map<number, number>();
-    for (let index = first; kind === "tool" && index <= last; index++) {
+    let open = false;
+    for (let index = first; index <= last; index++) {
       const item = records[index];
+      if (expanded.has(item.key)) open = true;
+      if (kind !== "tool") continue;
       const callId = item.metadata.call_id;
       if (item.kind === "tool_call") {
         group.calls++;
@@ -612,8 +616,13 @@ export function buildConversationRows(
         }
       }
     }
-    rows.push({ kind: "summary", key: `summary:${group.key}`, group });
-    if (expanded.has(group.key))
+    rows.push({
+      kind: "summary",
+      key: `summary:${group.key}`,
+      group,
+      expanded: open,
+    });
+    if (open)
       for (let index = first; index <= last; index++) {
         if (paired.has(index)) continue;
         body(index, group.key);
