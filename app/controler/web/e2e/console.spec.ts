@@ -1,5 +1,11 @@
-import { expect, test } from "@playwright/test";
-import type { FlowDetail, JobSummary, SourceStatus } from "../types";
+import { expect, test, type Locator, type Page } from "@playwright/test";
+import type {
+  ActivityItem,
+  ActivityPage,
+  FlowDetail,
+  JobSummary,
+  SourceStatus,
+} from "../types";
 
 const now = "2026-10-17T12:00:00Z";
 const flow = {
@@ -50,6 +56,89 @@ const activity = {
   previous_version: 1,
   metadata: {},
 };
+
+/** Scenarios own the records and request gates; only the 20-record page bookkeeping is shared. */
+function activityPage(
+  items: ActivityItem[],
+  start: number,
+  total: number,
+  snapshot = 2,
+): ActivityPage {
+  const next = start + 20;
+  return {
+    items,
+    snapshot,
+    total,
+    next_cursor: next < total ? String(next) : null,
+    has_more: next < total,
+    sources: [],
+    changes: {},
+  };
+}
+
+async function scrollToSnapshotEnd(page: Page, continueFolded = false) {
+  const root = page.locator(".detail-body");
+  const more = page.getByRole("button", {
+    name: "读取更多交互",
+    exact: true,
+  });
+  await expect
+    .poll(
+      async () => {
+        await root.evaluate((node) => {
+          node.scrollTop = node.scrollHeight;
+        });
+        if (continueFolded && (await more.isVisible())) await more.click();
+        return page
+          .getByRole("button", {
+            name: "已到当前本地快照末尾 · 点击刷新",
+            exact: true,
+          })
+          .isVisible();
+      },
+      { timeout: 15000 },
+    )
+    .toBe(true);
+}
+
+/** Sample painted geometry without waiting for a missing target to become mounted. */
+function sampleReadingFrames(root: Locator, selector: string) {
+  return root.evaluate(async (node, selector) => {
+    const positions: number[] = [],
+      offsets: number[] = [];
+    let overlap = 0,
+      mounted = 0;
+    for (let frame = 0; frame < 18; frame++) {
+      // rAF precedes ResizeObserver delivery; sample after that paint, without skipping a frame.
+      await new Promise<void>((resolve) =>
+        requestAnimationFrame(() => setTimeout(resolve, 0)),
+      );
+      const viewport = node.getBoundingClientRect();
+      const top =
+        node.querySelector(selector)?.getBoundingClientRect().top ?? Infinity;
+      positions.push(top);
+      offsets.push(top - viewport.top - node.clientTop);
+      const rows = [
+        ...node.querySelectorAll(".conversation-stream [data-window-row]"),
+      ].map((row) => row.getBoundingClientRect());
+      for (let index = 1; index < rows.length; index++)
+        if (
+          rows[index].top < viewport.bottom &&
+          rows[index - 1].bottom > viewport.top
+        )
+          overlap = Math.max(overlap, rows[index - 1].bottom - rows[index].top);
+      mounted = Math.max(mounted, rows.length);
+    }
+    return {
+      positions,
+      offsets,
+      overlap,
+      mounted,
+      scrollTop: node.scrollTop,
+      maxScroll: node.scrollHeight - node.clientHeight,
+    };
+  }, selector);
+}
 
 test.beforeEach(async ({ page }) => {
   await page.route("**/api/**", async (route) => {
@@ -178,6 +267,152 @@ test("execution timeline keeps timestamps and metadata when loading older jobs",
   await page.screenshot({
     path: "../../../.amp/in/artifacts/jobs-timeline-mobile.png",
   });
+});
+
+test("shared virtual lists preserve distant focus, omitted gaps and keyboard order", async ({
+  page,
+}) => {
+  // A focused first row must stay at its old location while the viewport displays a distant range.
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.route("**/api/flows?**", (route) => {
+    const url = new URL(route.request().url());
+    const phase = url.searchParams.get("phase");
+    const start = Number(url.searchParams.get("cursor") ?? 0);
+    const total = phase === "queued" || phase === "running" ? 70 : 0;
+    return route.fulfill({
+      json: {
+        items: Array.from({ length: Math.min(50, total - start) }, (_, i) => ({
+          ...flow,
+          id: (phase === "running" ? 42 : 200) + start + i,
+          phase,
+          title: `${phase} Flow ${start + i}`,
+        })),
+        next_cursor: start + 50 < total ? String(start + 50) : null,
+        has_more: start + 50 < total,
+        counts: { queued: 70, running: 70, review: 0, blocked: 0, done: 0 },
+      },
+    });
+  });
+  await page.route("**/api/flows/111", (route) =>
+    route.fulfill({
+      json: {
+        ...flow,
+        id: 111,
+        title: "running Flow 69",
+        reason: "正在验证",
+        next_condition: "等待验证完成",
+        sources: [],
+      },
+    }),
+  );
+  await page.route("**/api/flows/111/jobs?**", (route) => {
+    const start = Number(
+      new URL(route.request().url()).searchParams.get("cursor") ?? 0,
+    );
+    return route.fulfill({
+      json: {
+        items: Array.from({ length: Math.min(50, 90 - start) }, (_, i) => ({
+          id: 90 - start - i,
+          flow_id: 111,
+          attempt: start + i + 1,
+          kind: "initial",
+          state: "done",
+          worker_id: "worker-1",
+          created_at: new Date(
+            Date.parse(now) - (start + i) * 1000,
+          ).toISOString(),
+          started_at: now,
+          updated_at: now,
+          finished_at: now,
+          error_code: null,
+        })),
+        next_cursor: start + 50 < 90 ? String(start + 50) : null,
+        has_more: start + 50 < 90,
+      },
+    });
+  });
+  const checkPinnedNavigation = async (
+    root: Locator,
+    first: Locator,
+    next: Locator,
+    last: Locator,
+  ) => {
+    await root.evaluate((node) => {
+      node.scrollTop = 0;
+    });
+    await first.focus();
+    await root.evaluate(async (node) => {
+      node.scrollTop = node.scrollHeight;
+      for (let i = 0; i < 4; i++) await new Promise(requestAnimationFrame);
+    });
+    await expect(last).toBeInViewport();
+    await expect(first).toBeFocused();
+    await expect(first).not.toBeInViewport();
+    expect(await root.evaluate((node) => node.scrollTop)).toBeGreaterThan(2000);
+    await page.keyboard.press("Tab");
+    await expect(next).toBeFocused();
+    await expect(next).toBeInViewport();
+    await page.keyboard.press("Shift+Tab");
+    await expect(first).toBeFocused();
+    await expect(first).toBeInViewport();
+  };
+  await page.goto("/#board");
+  for (const phase of ["queued", "running"]) {
+    const root = page.locator(`[data-phase="${phase}"]`);
+    await expect
+      .poll(async () => {
+        await root.evaluate((node) => {
+          node.scrollTop = node.scrollHeight;
+        });
+        return root
+          .locator("[data-window-list]")
+          .getAttribute("data-window-count");
+      })
+      .toBe("70");
+  }
+  const board = page.locator('[data-phase="running"]');
+  await checkPinnedNavigation(
+    board,
+    board.getByRole("button", { name: /running Flow 0 / }),
+    board.getByRole("button", { name: /running Flow 1 / }),
+    board.getByRole("button", { name: /running Flow 69 / }),
+  );
+  await board.evaluate((node) => {
+    node.scrollTop = node.scrollHeight;
+  });
+  await board.getByRole("button", { name: /running Flow 69 / }).click();
+  const rail = page.locator(".rail-scroll");
+  await expect(
+    rail.locator('[data-window-list="侧栏-queued"]'),
+  ).toHaveAttribute("data-window-count", "70");
+  await expect(
+    rail.locator('[data-window-list="侧栏-running"]'),
+  ).toHaveAttribute("data-window-count", "70");
+  await checkPinnedNavigation(
+    rail,
+    rail.getByRole("button", { name: "queued Flow 0", exact: true }),
+    rail.getByRole("button", { name: "queued Flow 1", exact: true }),
+    rail.getByRole("button", { name: "running Flow 69", exact: true }),
+  );
+  await page.getByRole("tab", { name: "执行记录", exact: true }).click();
+  await page.getByRole("button", { name: "读取更多执行记录" }).click();
+  const jobs = page.locator('[data-window-list="执行记录"]');
+  await expect(jobs).toHaveAttribute("data-window-count", "90");
+  const detail = page.locator(".detail-body");
+  await detail.evaluate((node) => {
+    node.scrollTop = node.scrollHeight;
+  });
+  await expect(page.getByText("initial #90", { exact: true })).toBeInViewport();
+  await detail.evaluate((node) => {
+    node.scrollTop = 0;
+  });
+  await expect(page.getByText("initial #1", { exact: true })).toBeInViewport();
+  for (const list of await page.locator("[data-window-list]").all())
+    expect(
+      await list.locator(":scope > [data-window-row]").count(),
+    ).toBeLessThanOrEqual(60);
+  expect(errors).toEqual([]);
 });
 
 test("archived column distinguishes closed unmerged PRs from completed archives", async ({
@@ -1139,31 +1374,47 @@ test("surfaces API failures without replacing existing UI", async ({
 test("large activity stays windowed, re-reads evicted pages, and refreshes explicitly", async ({
   page,
 }) => {
-  let refreshed = false;
+  let refreshed = false,
+    rebuilding = false;
+  let releaseRefresh!: () => void, releasePage!: () => void;
+  const refreshGate = new Promise<void>((resolve) => {
+    releaseRefresh = resolve;
+  });
+  const pageGate = new Promise<void>((resolve) => {
+    releasePage = resolve;
+  });
   const rereads: string[] = [],
     errors: string[] = [];
   page.on("pageerror", (e) => errors.push(e.message));
   await page.route("**/api/flows/42/activity?**", async (route) => {
     const url = new URL(route.request().url());
-    if (url.searchParams.get("refresh") === "true") refreshed = true;
+    const snapshot =
+      url.searchParams.get("refresh") === "true"
+        ? 3
+        : Number(url.searchParams.get("snapshot") ?? 2);
     const start = Number(url.searchParams.get("cursor") ?? 0);
+    if (url.searchParams.get("refresh") === "true") {
+      refreshed = true;
+      await refreshGate;
+    }
+    if (snapshot === 3 && start === 100) {
+      rebuilding = true;
+      await pageGate;
+    }
     rereads.push(`${start}:${url.searchParams.get("snapshot")}`);
     const items = Array.from({ length: Math.min(20, 320 - start) }, (_, i) => ({
       ...activity,
       key: `large-${start + i}`,
-      version: refreshed ? 3 : 2,
+      // Refresh uses the archive's ascending (occurred_at, key) order to detect removed targets.
+      occurred_at: new Date(Date.parse(now) + (start + i) * 1000).toISOString(),
+      version: snapshot,
       body: `归档正文 ${start + i}`,
-      body_length: 20,
+      body_length: `归档正文 ${start + i}`.length,
     }));
     return route.fulfill({
       json: {
-        items,
-        snapshot: refreshed ? 3 : 2,
-        total: 320,
-        next_cursor: start + 20 < 320 ? String(start + 20) : null,
-        has_more: start + 20 < 320,
-        sources: [],
-        changes: refreshed ? { edited: 1 } : {},
+        ...activityPage(items, start, 320, snapshot),
+        changes: snapshot === 3 ? { edited: 1 } : {},
       },
     });
   });
@@ -1198,10 +1449,309 @@ test("large activity stays windowed, re-reads evicted pages, and refreshes expli
   ).toBeLessThanOrEqual(60);
   expect((await page.locator(".detail-head").boundingBox())?.y).toBe(head?.y);
   await page.getByRole("button", { name: "刷新当前视图" }).click();
+  await expect.poll(() => refreshed).toBe(true);
+  // Move after both the first response and a later pinned page begin waiting. Neither may restore old pixels.
+  await root.evaluate(async (node) => {
+    node.scrollTop = node.scrollHeight;
+    for (let i = 0; i < 6; i++) await new Promise(requestAnimationFrame);
+  });
+  releaseRefresh();
+  await expect.poll(() => rebuilding).toBe(true);
+  const bounds = (await root.boundingBox())!;
+  await page.mouse.move(
+    bounds.x + bounds.width / 2,
+    bounds.y + bounds.height / 2,
+  );
+  await page.mouse.wheel(0, -3500);
+  const latest = await root.evaluate(async (node) => {
+    for (let i = 0; i < 6; i++) await new Promise(requestAnimationFrame);
+    const top = node.getBoundingClientRect().top + node.clientTop;
+    const entry = [
+      ...node.querySelectorAll<HTMLElement>("article[data-entry]"),
+    ].find((item) => {
+      const rect = item.parentElement!.getBoundingClientRect();
+      return rect.top >= top && rect.bottom <= top + node.clientHeight;
+    })!;
+    return {
+      key: entry.dataset.entry!,
+      offset: entry.getBoundingClientRect().top - top,
+    };
+  });
+  expect(Number(latest.key.slice("large-".length))).toBeGreaterThan(100);
+  expect(Number(latest.key.slice("large-".length))).toBeLessThan(300);
+  releasePage();
   await expect(
     page.getByRole("status").filter({ hasText: "快照更新" }),
   ).toBeVisible();
-  expect(refreshed).toBe(true);
+  const frames = await sampleReadingFrames(
+    root,
+    `[data-entry="${latest.key}"]`,
+  );
+  expect(
+    Math.max(
+      ...frames.offsets.map((offset) => Math.abs(offset - latest.offset)),
+    ),
+  ).toBeLessThan(2);
+  expect(errors).toEqual([]);
+});
+
+for (const scenario of [
+  "messages",
+  "collapsed tool groups",
+  "expanded tool groups",
+]) {
+  test(`scrolling up from the conversation boundary keeps ${scenario} steady`, async ({
+    page,
+  }) => {
+    test.setTimeout(45000);
+    // Moving the mounted boundary must not change author headers or move results between calls and rows.
+    const tools = scenario !== "messages";
+    const expanded = scenario === "expanded tool groups";
+    const total = tools ? 180 : 320;
+    const errors: string[] = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+    page.on("console", (message) => {
+      if (message.type() === "error") errors.push(message.text());
+    });
+    await page.addInitScript(() => {
+      window.addEventListener("error", (event) => console.error(event.message));
+    });
+    await page.route("**/api/flows/42/activity?**", (route) => {
+      const start = Number(
+        new URL(route.request().url()).searchParams.get("cursor") ?? 0,
+      );
+      return route.fulfill({
+        json: activityPage(
+          Array.from({ length: 20 }, (_, i) => {
+            const n = start + i;
+            const message = expanded ? n === 179 : n % 20 === 19;
+            const body =
+              n % 5 === 0
+                ? `第 ${n} 条消息\n\n\`\`\`text\n${"检查变高会话的阅读位置\n".repeat(3 + (n % 11))}\`\`\``
+                : `第 ${n} 条消息。${"向上滚动时保留正文阅读位置。".repeat(1 + (n % 4))}`;
+            return {
+              ...activity,
+              key: `steady-${n}`,
+              source: tools ? "worker" : activity.source,
+              kind: tools
+                ? message
+                  ? "message"
+                  : n % 2
+                    ? "tool_result"
+                    : "tool_call"
+                : activity.kind,
+              title: tools ? "exec" : activity.title,
+              author: tools && !message && n % 2 ? "tool" : "assistant",
+              body,
+              body_length: body.length,
+              previous_version: null,
+              metadata: tools
+                ? {
+                    attempt_id: 1,
+                    session_id: "steady-tools",
+                    session_generation: 0,
+                    call_id: `call-${Math.floor(n / 2)}`,
+                  }
+                : {},
+            };
+          }),
+          start,
+          total,
+        ),
+      });
+    });
+    await page.goto("/#flow/42/conversation");
+    const root = page.locator(".detail-body");
+    // Expanded setup deliberately reads the complete folded run before opening it.
+    await scrollToSnapshotEnd(page, expanded);
+    if (expanded)
+      await page
+        .getByRole("button", { name: /^工具活动/ })
+        .first()
+        .click();
+    await expect
+      .poll(
+        () =>
+          root.evaluate(async (element, total) => {
+            element.scrollTop = element.scrollHeight;
+            for (let i = 0; i < 4; i++)
+              await new Promise(requestAnimationFrame);
+            const bounds = element
+              .querySelector(`[data-entry="steady-${total - 1}"]`)
+              ?.getBoundingClientRect();
+            const viewport = element.getBoundingClientRect();
+            return Boolean(
+              bounds &&
+              bounds.top < viewport.bottom &&
+              bounds.bottom > viewport.top,
+            );
+          }, total),
+        { timeout: 15000, intervals: [100] },
+      )
+      .toBe(true);
+    const bounds = (await root.boundingBox())!;
+    await page.mouse.move(
+      bounds.x + bounds.width / 2,
+      bounds.y + bounds.height / 2,
+    );
+    for (let step = 0; step < 18; step++) {
+      // Sample during input too: a new body can outgrow its old position before the range settles.
+      const [frames] = await Promise.all([
+        root.evaluate(async (element) => {
+          let overlap = 0,
+            rows = 0,
+            bodies = 0,
+            emptyFrames = 0;
+          for (let frame = 0; frame < 18; frame++) {
+            await new Promise(requestAnimationFrame);
+            const viewport = element.getBoundingClientRect();
+            const mounted = [
+              ...element.querySelectorAll(
+                ".conversation-stream [data-window-row]",
+              ),
+            ];
+            const rectangles = mounted
+              .map((row) => row.getBoundingClientRect())
+              .filter((rectangle) => rectangle.height > 0);
+            // An empty window must not pass merely because there are no overlapping rows.
+            if (
+              !rectangles.some(
+                (row) => row.top < viewport.bottom && row.bottom > viewport.top,
+              )
+            )
+              emptyFrames++;
+            for (let i = 1; i < rectangles.length; i++) {
+              const previous = rectangles[i - 1],
+                current = rectangles[i];
+              if (
+                current.top < viewport.bottom &&
+                previous.bottom > viewport.top
+              )
+                overlap = Math.max(overlap, previous.bottom - current.top);
+            }
+            rows = Math.max(rows, mounted.length);
+            bodies = Math.max(
+              bodies,
+              element.querySelectorAll(
+                '.message-body, pre[aria-label="工具摘要"]',
+              ).length,
+            );
+          }
+          return { overlap, rows, bodies, emptyFrames };
+        }),
+        page.mouse.wheel(0, -240),
+      ]);
+      expect(
+        frames.overlap,
+        `Rows overlapped during wheel step ${step}`,
+      ).toBeLessThan(1);
+      expect(frames.rows).toBeLessThanOrEqual(60);
+      expect(frames.bodies).toBeLessThanOrEqual(60);
+      expect(frames.emptyFrames, `Empty window during wheel step ${step}`).toBe(
+        0,
+      );
+      const movement = await root.evaluate(async (element) => {
+        // Check several painted frames after input, not just the eventual final position.
+        for (let i = 0; i < 6; i++) await new Promise(requestAnimationFrame);
+        const top = element.getBoundingClientRect().top;
+        const anchor = [...element.querySelectorAll("[data-entry]")].find(
+          (row) => row.getBoundingClientRect().bottom > top + 100,
+        )!;
+        const positions: number[] = [];
+        for (let i = 0; i < 12; i++) {
+          await new Promise(requestAnimationFrame);
+          positions.push(anchor.getBoundingClientRect().top);
+        }
+        return Math.max(...positions) - Math.min(...positions);
+      });
+      expect(
+        movement,
+        `Reading anchor oscillated after wheel step ${step}`,
+      ).toBeLessThan(2);
+    }
+    expect(
+      await page.locator(".conversation-stream [data-window-row]").count(),
+    ).toBeLessThanOrEqual(60);
+    expect(errors).toEqual([]);
+  });
+}
+
+test("height changes above, within and below the reading row preserve its top through every frame", async ({
+  page,
+}) => {
+  // Unlike wheel-only checks, asymmetric expansion distinguishes anchoring from shifting by every height delta.
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.route("**/api/flows/42/activity?**", (route) => {
+    const start = Number(
+      new URL(route.request().url()).searchParams.get("cursor") ?? 0,
+    );
+    return route.fulfill({
+      json: activityPage(
+        Array.from({ length: Math.min(20, 100 - start) }, (_, i) => {
+          const n = start + i;
+          const body = `高度校准正文 ${n}。${"保留稳定阅读位置。".repeat(3)}`;
+          return {
+            ...activity,
+            key: `resize-${n}`,
+            author: n % 2 ? "reviewer" : "owner",
+            body,
+            body_length: body.length,
+            previous_version: null,
+            metadata: {
+              diagnostics: Array.from(
+                { length: 12 },
+                (_, i) => `${n}-${i} ${"完整来源信息。".repeat(4)}`,
+              ),
+            },
+          };
+        }),
+        start,
+        100,
+      ),
+    });
+  });
+  await page.goto("/#flow/42/conversation");
+  const root = page.locator(".detail-body");
+  await scrollToSnapshotEnd(page);
+  const key = await root.evaluate(async (node) => {
+    node.scrollTop = node.scrollHeight - 1800;
+    for (let i = 0; i < 6; i++) await new Promise(requestAnimationFrame);
+    const top = node.getBoundingClientRect().top + node.clientTop;
+    const bottom = top + node.clientHeight;
+    return [...node.querySelectorAll<HTMLElement>("article[data-entry]")].find(
+      (entry) => {
+        const rect = entry.parentElement!.getBoundingClientRect();
+        return rect.top >= top && rect.bottom <= bottom;
+      },
+    )!.dataset.entry!;
+  });
+  const index = Number(key.slice("resize-".length));
+  const anchor = page.locator(`article[data-entry="${key}"]`);
+  const before = await anchor.evaluate(
+    (entry) => entry.getBoundingClientRect().top,
+  );
+  for (const relative of [-2, 0, 2]) {
+    const toggle = page
+      .locator(`article[data-entry="resize-${index + relative}"]`)
+      .getByRole("button", { name: "来源信息与查询定位", exact: true });
+    await toggle.evaluate((button) => button.focus({ preventScroll: true }));
+    for (const expanded of ["true", "false"]) {
+      const [frames] = await Promise.all([
+        sampleReadingFrames(root, `article[data-entry="${key}"]`),
+        page.keyboard.press("Enter"),
+      ]);
+      await expect(toggle).toHaveAttribute("aria-expanded", expanded);
+      expect(
+        frames.overlap,
+        `Rows overlapped when row ${relative} changed height`,
+      ).toBeLessThan(1);
+      expect(
+        Math.max(...frames.positions.map((top) => Math.abs(top - before))),
+        `Offset changed when row ${relative} ${expanded === "true" ? "grew" : "shrank"}: ${JSON.stringify(frames.positions)}`,
+      ).toBeLessThan(2);
+    }
+  }
   expect(errors).toEqual([]);
 });
 
@@ -1840,7 +2390,7 @@ test("consecutive actor operations collapse across pages and sources without hid
     exact: true,
   });
   const events = page
-    .locator("article[data-entry='cross-reference']")
+    .locator("article[data-activity-summary='cross-reference']")
     .getByRole("button", { name: "操作记录 · 2 条", exact: true });
   await expect(group).toHaveAttribute("aria-expanded", "false");
   await expect(events).toHaveAttribute("aria-expanded", "false");
@@ -1853,7 +2403,7 @@ test("consecutive actor operations collapse across pages and sources without hid
   await expect(page.getByText(activity.body, { exact: true })).toBeVisible();
   await expect(
     page
-      .locator("article[data-entry='after-message']")
+      .locator("article[data-activity-summary='after-message']")
       .getByRole("button", { name: "操作记录 · 2 条", exact: true }),
   ).toHaveAttribute("aria-expanded", "false");
   for (const key of ["after-message", "other-commit"]) {
@@ -1913,11 +2463,10 @@ test("consecutive actor operations collapse across pages and sources without hid
   await events.click();
   await page.getByRole("tab", { name: "概览" }).click();
   await page.getByRole("tab", { name: "会话" }).click();
-  await expect(group).toHaveAttribute("aria-expanded", "true");
+  await expect(group).toHaveAttribute("aria-expanded", "false");
   await expect(
     page.getByText("CI: pytest: failure", { exact: true }),
-  ).toBeVisible();
-  await group.click();
+  ).not.toBeVisible();
   await page.setViewportSize({ width: 390, height: 844 });
   await capture("mobile-collapsed");
   await group.click();
@@ -2087,17 +2636,14 @@ test("assistant tools share one compact activity bar across pages without crossi
     });
   });
   await page.goto("/#flow/42/conversation");
-  await expect(page.locator("[data-entry='orphan']")).toBeAttached();
+  await expect(page.locator("[data-activity-summary='orphan']")).toBeAttached();
   await expect(page.getByText("添加标签：flow", { exact: true })).toBeVisible();
   await expect(
     page.getByRole("heading", { name: /^(message|tool_result|exec|labeled)$/ }),
   ).toHaveCount(0);
-  await expect(page.locator("[data-entry='call-a']")).toHaveClass(
-    /continuation/,
-  );
-  await expect(page.locator("[data-entry='orphan']")).not.toHaveClass(
-    /continuation/,
-  );
+  await expect(
+    page.locator("[data-activity-summary='orphan']"),
+  ).not.toHaveClass(/continuation/);
   await expect(
     page.getByText("工作目录干净", { exact: true }),
   ).not.toBeVisible();
@@ -2140,18 +2686,21 @@ test("assistant tools share one compact activity bar across pages without crossi
   await expect(
     page.getByText("下一轮的目录", { exact: true }),
   ).not.toBeVisible();
-  await expect(page.locator(".tool-activity-body pre")).toHaveCount(4);
-  const callA = page.locator("article[data-entry='call-a']");
-  const callB = page.locator("article[data-entry='call-b']");
-  await expect(callA.getByText("工作目录干净", { exact: true })).toBeVisible();
-  await expect(callB.getByText("测试通过", { exact: true })).toBeVisible();
-  await expect(callA.locator("pre")).toHaveText([
+  await expect(page.locator(".tool-activity-body pre")).toHaveText([
     "exec git status --short",
     "工作目录干净",
+    "test pytest",
+    "测试通过",
   ]);
-  await expect(callB.locator("pre")).toHaveText(["test pytest", "测试通过"]);
-  await expect(callA.locator("blockquote")).toHaveText("工作目录干净");
-  await expect(callB.locator("blockquote")).toHaveText("测试通过");
+  const callA = page.locator("article[data-entry='call-a']");
+  const callB = page.locator("article[data-entry='call-b']");
+  await expect(callA).toHaveClass(/continuation/);
+  await expect(
+    page.locator("article[data-entry='result-a'] blockquote"),
+  ).toHaveText("工作目录干净");
+  await expect(
+    page.locator("article[data-entry='result-b'] blockquote"),
+  ).toHaveText("测试通过");
   await expect(page.locator(".tool-activity-body small")).toHaveCount(0);
   await expect(callA.locator(".tool-activity-body")).not.toContainText(
     "call-a",
@@ -2159,12 +2708,6 @@ test("assistant tools share one compact activity bar across pages without crossi
   await expect(callB.locator(".tool-activity-body")).not.toContainText(
     "call-b",
   );
-  await expect(
-    page.locator("article[data-entry='result-a']"),
-  ).not.toBeVisible();
-  await expect(
-    page.locator("article[data-entry='result-b']"),
-  ).not.toBeVisible();
   await page.setViewportSize({ width: 1440, height: 1100 });
   await captureOutput("desktop-expanded");
   await page.setViewportSize({ width: 390, height: 844 });
@@ -2183,9 +2726,7 @@ test("assistant tools share one compact activity bar across pages without crossi
   await page.setViewportSize({ width: 1440, height: 1100 });
   await page.getByRole("tab", { name: "概览" }).click();
   await page.getByRole("tab", { name: "会话" }).click();
-  await expect(page.getByText("工作目录干净", { exact: true })).toBeVisible();
-  await expect(page.getByText("测试通过", { exact: true })).toBeVisible();
-  await tools.click();
+  await expect(tools).toHaveAttribute("aria-expanded", "false");
   await expect(
     page.getByText("工作目录干净", { exact: true }),
   ).not.toBeVisible();
@@ -2199,11 +2740,11 @@ test("assistant tools share one compact activity bar across pages without crossi
   await expect(page.getByText("下一轮的目录", { exact: true })).toBeVisible();
   await expect(
     page
-      .locator("article[data-entry='next-call']")
+      .locator("article[data-entry='next-result']")
       .getByText("下一轮的目录", { exact: true }),
   ).toBeVisible();
   await page
-    .locator("[data-entry='orphan']")
+    .locator("[data-activity-summary='orphan']")
     .getByRole("button", { name: /^工具活动/ })
     .click();
   await expect(
@@ -2222,28 +2763,508 @@ test("assistant tools share one compact activity bar across pages without crossi
   expect(errors).toEqual([]);
 });
 
+for (const kind of ["tool", "operation"] as const) {
+  test(`folded ${kind} history stops automatic continuation and reads one page per explicit click`, async ({
+    page,
+  }) => {
+    // A long worker turn or bot-event burst adds no visible rows when another page only extends its summary.
+    const errors: string[] = [],
+      continuations: string[] = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+    let permittedStart = 20;
+    let releaseUnexpected!: () => void;
+    const unexpectedPage = new Promise<void>((resolve) => {
+      releaseUnexpected = resolve;
+    });
+    await page.route("**/api/flows/42/activity?**", async (route) => {
+      const url = new URL(route.request().url());
+      const start = Number(url.searchParams.get("cursor") ?? 0);
+      if (start)
+        continuations.push(`${start}:${url.searchParams.get("snapshot")}`);
+      // Keep an unwanted continuation in flight so a runaway chain cannot hide behind an unchanged summary.
+      if (start > permittedStart) await unexpectedPage;
+      return route.fulfill({
+        json: activityPage(
+          Array.from({ length: Math.min(20, 120 - start) }, (_, i) => {
+            const n = start + i;
+            const body = kind === "tool" ? `折叠工具记录 ${n}` : "";
+            return {
+              ...activity,
+              key: `folded-${n}`,
+              source:
+                kind === "tool"
+                  ? "worker"
+                  : n % 2
+                    ? "pr.timeline"
+                    : "issue.timeline",
+              kind:
+                kind === "tool"
+                  ? n % 2
+                    ? "tool_result"
+                    : "tool_call"
+                  : "event",
+              author:
+                kind === "tool" ? (n % 2 ? "tool" : "assistant") : "bot[bot]",
+              title:
+                kind === "tool" ? (n % 2 ? "tool_result" : "exec") : "labeled",
+              occurred_at: new Date(Date.parse(now) + n * 1000).toISOString(),
+              body,
+              body_length: body.length,
+              previous_version: null,
+              metadata:
+                kind === "tool"
+                  ? {
+                      attempt_id: 1,
+                      session_id: "folded-history",
+                      session_generation: 0,
+                      call_id: `call-${Math.floor(n / 2)}`,
+                    }
+                  : { event: "labeled", label: `archive-${n}` },
+            };
+          }),
+          start,
+          120,
+        ),
+      });
+    });
+    try {
+      await page.goto("/#flow/42/conversation");
+      const summary = page.getByRole("button", {
+        name: kind === "tool" ? /^工具活动/ : /^操作记录/,
+      });
+      const more = page.getByRole("button", {
+        name: "读取更多交互",
+        exact: true,
+      });
+      for (const count of [40, 60, 80]) {
+        if (count > 40) {
+          permittedStart = count - 20;
+          await more.click();
+        }
+        await expect(summary).toHaveAccessibleName(
+          kind === "tool"
+            ? `工具活动 · ${count / 2} 次调用 · ${count / 2} 条结果`
+            : `操作记录 · ${count} 条`,
+        );
+        await expect(summary).toHaveAttribute("aria-expanded", "false");
+        await expect(summary).toBeInViewport();
+        // Let busy-state effects and IntersectionObserver delivery run again before checking the request bound.
+        await page.evaluate(async () => {
+          for (let frame = 0; frame < 18; frame++)
+            await new Promise<void>((resolve) =>
+              requestAnimationFrame(() => setTimeout(resolve, 0)),
+            );
+        });
+        expect(continuations).toEqual(
+          Array.from({ length: count / 20 - 1 }, (_, i) => `${(i + 1) * 20}:2`),
+        );
+        await expect(more).toBeVisible();
+        if (count > 40) await expect(more).toBeFocused();
+        await expect(
+          page.locator('article[data-entry^="folded-"]'),
+        ).toHaveCount(0);
+      }
+      expect(errors).toEqual([]);
+    } finally {
+      releaseUnexpected();
+    }
+  });
+}
+
+for (const change of [
+  "prepending a member",
+  "replacing the old first member",
+] as const) {
+  test(`snapshot refresh preserves visible expanded tool bodies and offsets after ${change}`, async ({
+    page,
+  }) => {
+    // Archive backfills can precede the output being read, and a stale first record can disappear.
+    const errors: string[] = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+    const records = Array.from({ length: 52 }, (_, n) => {
+      const unrelated = n >= 12 && n < 20;
+      const main = n >= 20 && n < 36;
+      const tool = unrelated || main;
+      const member = unrelated ? n - 12 : n - 20;
+      const session = unrelated ? "refresh-unrelated" : "refresh-main";
+      const body = tool
+        ? `${unrelated ? "无关工具正文" : "刷新工具正文"} ${member}\n${"刷新时保留正在阅读的工具输出。\n".repeat(5)}`
+        : `刷新普通正文 ${n}。${"保留本行阅读位置。".repeat(4)}`;
+      return {
+        ...activity,
+        key: tool ? `${session}-${member}` : `refresh-message-${n}`,
+        source: tool ? "worker" : activity.source,
+        kind: tool ? (member % 2 ? "tool_result" : "tool_call") : "comment",
+        author: tool
+          ? member % 2
+            ? "tool"
+            : "assistant"
+          : n % 2
+            ? "reviewer"
+            : "owner",
+        title: tool ? (member % 2 ? "tool_result" : "exec") : "评论",
+        // Numeric key suffixes are not archive ordering; every record has its real ascending time.
+        occurred_at: new Date(Date.parse(now) + n * 1000).toISOString(),
+        body,
+        body_length: body.length,
+        previous_version: null,
+        metadata: tool
+          ? {
+              attempt_id: 1,
+              session_id: session,
+              session_generation: 0,
+              call_id: `${session}-call-${Math.floor(member / 2)}`,
+            }
+          : {},
+      };
+    });
+    const original = records.filter((_, n) => n < 16 || n >= 20);
+    const body = "补采的更早工具调用\n保留后面的可见工具正文。";
+    const earlier = {
+      ...records[20],
+      key: "refresh-earlier",
+      occurred_at: new Date(Date.parse(now) + 19500).toISOString(),
+      body,
+      body_length: body.length,
+      metadata: { ...records[20].metadata, call_id: "backfilled-call" },
+    };
+    const removeFirst = change === "replacing the old first member";
+    // Extra unrelated records occupy the main group's former raw indexes; they must not inherit its expansion.
+    const refreshed = [
+      ...records.slice(0, 20),
+      earlier,
+      ...records.slice(removeFirst ? 21 : 20),
+    ];
+    await page.route("**/api/flows/42/activity?**", (route) => {
+      const url = new URL(route.request().url());
+      const snapshot =
+        url.searchParams.get("refresh") === "true"
+          ? 3
+          : Number(url.searchParams.get("snapshot") ?? 2);
+      const start = Number(url.searchParams.get("cursor") ?? 0);
+      const items = snapshot === 3 ? refreshed : original;
+      return route.fulfill({
+        json: {
+          ...activityPage(
+            items
+              .slice(start, start + 20)
+              .map((entry) => ({ ...entry, version: snapshot })),
+            start,
+            items.length,
+            snapshot,
+          ),
+          changes:
+            snapshot === 3 ? { added: 5, removed: removeFirst ? 1 : 0 } : {},
+        },
+      });
+    });
+    await page.goto("/#flow/42/conversation");
+    const root = page.locator(".detail-body");
+    await scrollToSnapshotEnd(page);
+    const main = page.getByRole("button", {
+      name: "工具活动 · 8 次调用 · 8 条结果",
+      exact: true,
+    });
+    await expect(
+      page.getByRole("button", {
+        name: "工具活动 · 2 次调用 · 2 条结果",
+        exact: true,
+      }),
+    ).toHaveAttribute("aria-expanded", "false");
+    await main.click();
+    const target = page.locator('article[data-entry="refresh-main-8"]');
+    await expect(target.locator("pre")).toContainText("刷新工具正文 8");
+    const before = await target.evaluate(async (entry) => {
+      const node = entry.closest<HTMLElement>("[data-scroll-root]")!;
+      const row = entry.closest("[data-window-row]")!;
+      const previous = node
+        .querySelector('[data-entry="refresh-main-7"]')!
+        .closest("[data-window-row]")!;
+      node.scrollTop +=
+        row.getBoundingClientRect().top -
+        node.getBoundingClientRect().top -
+        node.clientTop -
+        previous.getBoundingClientRect().height / 2;
+      for (let frame = 0; frame < 6; frame++)
+        await new Promise(requestAnimationFrame);
+      const top = node.getBoundingClientRect().top + node.clientTop;
+      const first = [
+        ...node.querySelectorAll(".conversation-stream [data-window-row]"),
+      ].find((item) => {
+        const bounds = item.getBoundingClientRect();
+        return bounds.top >= top && bounds.bottom <= top + node.clientHeight;
+      });
+      return {
+        offset: row.getBoundingClientRect().top - top,
+        first: first?.querySelector<HTMLElement>("article")?.dataset.entry,
+      };
+    });
+    expect(before.first).toBe("refresh-main-8");
+    await expect(
+      page.locator('article[data-entry="refresh-main-0"]'),
+    ).not.toBeInViewport();
+    await page.getByRole("button", { name: "刷新当前视图" }).click();
+    await expect(
+      page.getByRole("status").filter({ hasText: "快照更新" }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", {
+        name: `工具活动 · ${removeFirst ? 8 : 9} 次调用 · 8 条结果`,
+        exact: true,
+      }),
+    ).toHaveAttribute("aria-expanded", "true");
+    await expect(target.locator("pre")).toContainText("刷新工具正文 8");
+    await expect(target).toBeInViewport();
+    await expect
+      .poll(() =>
+        target.evaluate((entry, offset) => {
+          const node = entry.closest<HTMLElement>("[data-scroll-root]")!;
+          return Math.abs(
+            entry.closest("[data-window-row]")!.getBoundingClientRect().top -
+              node.getBoundingClientRect().top -
+              node.clientTop -
+              offset,
+          );
+        }, before.offset),
+      )
+      .toBeLessThan(2);
+    await expect(
+      page.getByRole("button", {
+        name: "工具活动 · 4 次调用 · 4 条结果",
+        exact: true,
+      }),
+    ).toHaveAttribute("aria-expanded", "false");
+    await expect(
+      page.locator('article[data-entry^="refresh-unrelated-"]'),
+    ).toHaveCount(0);
+    if (removeFirst)
+      await expect(
+        page.locator('article[data-entry="refresh-main-0"]'),
+      ).toHaveCount(0);
+    expect(errors).toEqual([]);
+  });
+}
+
+for (const reading of [
+  "tool body",
+  "tall tool body",
+  "following message",
+] as const) {
+  test(`conversation tab re-entry folds groups and restores the ${reading} logical offset in a virtual list`, async ({
+    page,
+  }) => {
+    test.setTimeout(45000);
+    // Leaving a long conversation folds its tools; restoring old pixels would land on unrelated later messages.
+    const errors: string[] = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+    const tall = reading === "tall tool body";
+    const records = Array.from({ length: 200 }, (_, n) => {
+      const tool = n >= 90 && n < 110;
+      const body = tool
+        ? `重返工具正文 ${n}\n${"切换标签页后继续阅读同一位置。\n".repeat(tall && n === 96 ? 100 : 5)}`
+        : `重返普通正文 ${n}。${"前后消息让折叠后的目标偏移仍然可达。".repeat(3)}`;
+      return {
+        ...activity,
+        key: `reentry-${n}`,
+        source: tool ? "worker" : activity.source,
+        kind: tool ? (n % 2 ? "tool_result" : "tool_call") : "comment",
+        author: tool
+          ? n % 2
+            ? "tool"
+            : "assistant"
+          : n % 2
+            ? "reviewer"
+            : "owner",
+        title: tool ? (n % 2 ? "tool_result" : "exec") : "评论",
+        occurred_at: new Date(Date.parse(now) + n * 1000).toISOString(),
+        body,
+        body_length: body.length,
+        previous_version: null,
+        metadata: tool
+          ? {
+              attempt_id: 1,
+              session_id: "tab-reentry",
+              session_generation: 0,
+              call_id: `call-${Math.floor(n / 2)}`,
+            }
+          : {},
+      };
+    });
+    await page.route("**/api/flows/42/activity?**", (route) => {
+      const start = Number(
+        new URL(route.request().url()).searchParams.get("cursor") ?? 0,
+      );
+      return route.fulfill({
+        json: activityPage(
+          records.slice(start, start + 20),
+          start,
+          records.length,
+        ),
+      });
+    });
+    await page.goto("/#flow/42/conversation");
+    const root = page.locator(".detail-body");
+    const list = page.locator('[data-window-list="会话活动"]');
+    await scrollToSnapshotEnd(page);
+    await expect(list).toHaveAttribute("data-window-count", "181");
+    await expect(list).toHaveClass(/virtual-list/);
+    await root.evaluate((node) => {
+      node.scrollTop = 0;
+    });
+    const bar = page.getByRole("button", {
+      name: "工具活动 · 10 次调用 · 10 条结果",
+      exact: true,
+    });
+    // Both targets are known but unmounted, not merely absent because their API pages are unread.
+    await expect(bar).toHaveCount(0);
+    await expect(page.locator('article[data-entry="reentry-110"]')).toHaveCount(
+      0,
+    );
+    expect(
+      await list.locator(":scope > [data-window-row]").count(),
+    ).toBeLessThanOrEqual(60);
+    await expect
+      .poll(
+        async () => {
+          if (!(await bar.count()))
+            await root.evaluate((node) => {
+              node.scrollTop += node.clientHeight;
+            });
+          return bar.count();
+        },
+        { timeout: 15000, intervals: [100] },
+      )
+      .toBe(1);
+    await bar.click();
+    await expect(bar).toHaveAttribute("aria-expanded", "true");
+    await expect(list).toHaveAttribute("data-window-count", "201");
+    const targetIndex = reading === "following message" ? 110 : 96;
+    const target = page.locator(`article[data-entry="reentry-${targetIndex}"]`);
+    await expect
+      .poll(
+        async () => {
+          if (!(await target.count()))
+            await root.evaluate((node) => {
+              node.scrollTop += node.clientHeight / 2;
+            });
+          return target.count();
+        },
+        { timeout: 15000, intervals: [100] },
+      )
+      .toBe(1);
+    const before = await target.evaluate(
+      async (entry, { index, tall }) => {
+        const node = entry.closest<HTMLElement>("[data-scroll-root]")!;
+        const row = entry.closest("[data-window-row]")!;
+        const previous = node
+          .querySelector(`[data-entry="reentry-${index - 1}"]`)!
+          .closest("[data-window-row]")!;
+        // A tall body leaves no complete row; otherwise half the preceding tool remains visible.
+        const offset = tall
+          ? -node.clientHeight / 2
+          : previous.getBoundingClientRect().height / 2;
+        node.scrollTop +=
+          row.getBoundingClientRect().top -
+          node.getBoundingClientRect().top -
+          node.clientTop -
+          offset;
+        for (let frame = 0; frame < 6; frame++)
+          await new Promise(requestAnimationFrame);
+        const top = node.getBoundingClientRect().top + node.clientTop;
+        const rows = [
+          ...node.querySelectorAll(".conversation-stream [data-window-row]"),
+        ];
+        const first =
+          rows.find((item) => {
+            const bounds = item.getBoundingClientRect();
+            return (
+              bounds.top >= top && bounds.bottom <= top + node.clientHeight
+            );
+          }) ??
+          rows.find((item) => {
+            const bounds = item.getBoundingClientRect();
+            return bounds.bottom > top && bounds.top < top + node.clientHeight;
+          });
+        return {
+          offset: row.getBoundingClientRect().top - top,
+          first: first?.querySelector<HTMLElement>("article")?.dataset.entry,
+          previousTop: previous.getBoundingClientRect().top - top,
+          previousBottom: previous.getBoundingClientRect().bottom - top,
+        };
+      },
+      { index: targetIndex, tall },
+    );
+    expect(before.first).toBe(`reentry-${targetIndex}`);
+    expect(before.previousTop).toBeLessThan(0);
+    if (tall) expect(before.previousBottom).toBeLessThanOrEqual(0);
+    else expect(before.previousBottom).toBeGreaterThan(0);
+    await expect(target).toBeInViewport();
+    await expect(bar).toHaveAttribute("aria-expanded", "true");
+    await page.getByRole("tab", { name: "概览" }).click();
+    await expect(page.getByRole("heading", { name: "任务信息" })).toBeVisible();
+    await page.getByRole("tab", { name: "会话" }).click();
+    await expect(list).toHaveAttribute("data-window-count", "181");
+    await expect(bar).toHaveAttribute("aria-expanded", "false");
+    await expect(list.locator(".tool-activity-body")).toHaveCount(0);
+    const restored = reading === "following message" ? target : bar;
+    // A short summary must be visible even when the former body began above the viewport.
+    const expectedOffset = tall ? 0 : before.offset;
+    await expect(restored).toBeInViewport();
+    await expect
+      .poll(() =>
+        restored.evaluate((entry, offset) => {
+          const node = entry.closest<HTMLElement>("[data-scroll-root]")!;
+          return Math.abs(
+            entry.closest("[data-window-row]")!.getBoundingClientRect().top -
+              node.getBoundingClientRect().top -
+              node.clientTop -
+              offset,
+          );
+        }, expectedOffset),
+      )
+      .toBeLessThan(2);
+    const frames = await sampleReadingFrames(
+      root,
+      reading === "following message"
+        ? `[data-window-row]:has([data-entry="reentry-${targetIndex}"])`
+        : '[data-window-row]:has([data-activity-summary="reentry-90"])',
+    );
+    expect(
+      Math.max(
+        ...frames.offsets.map((offset) => Math.abs(offset - expectedOffset)),
+      ),
+    ).toBeLessThan(2);
+    expect(frames.mounted).toBeLessThanOrEqual(60);
+    // Prefix and suffix messages keep the expected offset away from unavoidable boundary clamping.
+    expect(frames.scrollTop).toBeGreaterThan(0);
+    expect(frames.scrollTop).toBeLessThan(frames.maxScroll);
+    expect(errors).toEqual([]);
+  });
+}
+
 test("long tool activity remains bounded and readable across virtual windows", async ({
   page,
 }) => {
-  // A long uninterrupted tool run must not bypass the raw-row mounting budget when opened.
-  const errors: string[] = [];
+  // The group outlives the 240-body cache without changing statistics or fetching bodies while folded.
+  const errors: string[] = [],
+    rereads: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
   await page.route("**/api/flows/42/activity?**", (route) => {
-    const start = Number(
-      new URL(route.request().url()).searchParams.get("cursor") ?? 0,
-    );
+    const url = new URL(route.request().url());
+    const start = Number(url.searchParams.get("cursor") ?? 0);
+    rereads.push(`${start}:${url.searchParams.get("snapshot")}`);
     return route.fulfill({
-      json: {
-        items: Array.from({ length: Math.min(20, 141 - start) }, (_, index) => {
+      json: activityPage(
+        Array.from({ length: Math.min(20, 321 - start) }, (_, index) => {
           const n = start + index;
-          const body = n === 140 ? "本轮全部完成" : `工具记录 ${n}`;
+          const body = n === 320 ? "本轮全部完成" : `工具记录 ${n}`;
           return {
             ...activity,
             key: `tool-run-${n}`,
             source: "worker",
             author: n % 2 ? "tool" : "assistant",
-            kind: n === 140 ? "message" : n % 2 ? "tool_result" : "tool_call",
-            title: n === 140 ? "message" : n % 2 ? "tool_result" : "exec",
+            kind: n === 320 ? "message" : n % 2 ? "tool_result" : "tool_call",
+            title: n === 320 ? "message" : n % 2 ? "tool_result" : "exec",
             body,
             body_length: body.length,
             previous_version: null,
@@ -2252,39 +3273,51 @@ test("long tool activity remains bounded and readable across virtual windows", a
               session_id: "long-tools",
               session_generation: 0,
               call_id: `call-${Math.floor(n / 2)}`,
+              archive_locator: `tool-source-${n}`,
             },
           };
         }),
-        snapshot: 2,
-        total: 141,
-        next_cursor: start + 20 < 141 ? String(start + 20) : null,
-        has_more: start + 20 < 141,
-        sources: [],
-        changes: {},
-      },
+        start,
+        321,
+      ),
     });
   });
   await page.goto("/#flow/42/conversation");
   const root = page.locator(".detail-body");
   const list = page.locator('[data-window-list="会话活动"]');
-  await expect
-    .poll(
-      async () => {
-        await root.evaluate((e) => {
-          e.scrollTop = e.scrollHeight;
-        });
-        return list.getAttribute("data-window-count");
-      },
-      { timeout: 15000 },
-    )
-    .toBe("141");
+  // Reading the entire folded archive here is intentional, unlike automatic filling.
+  await scrollToSnapshotEnd(page, true);
+  await expect(list).toHaveAttribute("data-window-count", "2");
   await root.evaluate((e) => {
     e.scrollTop = 0;
   });
   const bar = page.getByRole("button", { name: /^工具活动/ }).first();
+  await expect(bar).toHaveAccessibleName("工具活动 · 160 次调用 · 160 条结果");
   await expect(bar).toHaveAttribute("aria-expanded", "false");
+  expect(rereads.filter((read) => read === "0:2")).toHaveLength(0);
   await bar.click();
   await expect(page.getByText("工具记录 0", { exact: true })).toBeVisible();
+  expect(rereads.filter((read) => read === "0:2").length).toBeGreaterThan(0);
+  const source = page
+    .locator('article[data-entry="tool-run-0"]')
+    .getByRole("button", {
+      name: "来源信息与查询定位 · 321 条记录",
+      exact: true,
+    });
+  await source.click();
+  await expect(page.getByRole("group", { name: "来源记录分页" })).toContainText(
+    "记录 1–20 / 321",
+  );
+  await page
+    .getByRole("button", { name: "下一页来源记录", exact: true })
+    .click();
+  await expect(page.getByRole("group", { name: "来源记录分页" })).toContainText(
+    "记录 21–40 / 321",
+  );
+  await expect(
+    page.locator('article[data-entry="tool-run-0"] .message-provenance'),
+  ).toContainText('"archive_locator": "tool-source-20"');
+  await source.click();
   await expect
     .poll(async () => {
       await root.evaluate(async (e) => {
@@ -2296,7 +3329,7 @@ test("long tool activity remains bounded and readable across virtual windows", a
       });
       // Measured tool rows can grow after scrolling; reach the final message as well.
       return (
-        (await page.getByText("工具记录 139", { exact: true }).isVisible()) &&
+        (await page.getByText("工具记录 319", { exact: true }).isVisible()) &&
         (await page.getByText("本轮全部完成", { exact: true }).isVisible())
       );
     })
@@ -2307,6 +3340,138 @@ test("long tool activity remains bounded and readable across virtual windows", a
   ).toBeLessThanOrEqual(60);
   expect(errors).toEqual([]);
 });
+
+for (const [expandedRows, width] of [
+  [59, 1440],
+  [60, 1440],
+  [61, 1440],
+  [61, 390],
+]) {
+  test(`whole-group visibility and collapse preserve reading at ${expandedRows} rows, ${width}px`, async ({
+    page,
+  }) => {
+    // A prefix makes the replacement summary's inherited offset reachable after removing the anchor.
+    await page.setViewportSize({ width, height: 900 });
+    const records = Array.from({ length: expandedRows - 1 }, (_, n) => {
+      const tool = n >= 12 && n < 32;
+      const body = tool
+        ? `工具正文 ${n}\n${"保持工具输出可读。\n".repeat(5)}`
+        : `普通正文 ${n}。${"保留本行阅读位置。".repeat(5)}`;
+      return {
+        ...activity,
+        key: `visibility-${n}`,
+        source: tool ? "worker" : activity.source,
+        kind: tool ? (n % 2 ? "tool_result" : "tool_call") : "comment",
+        author: tool ? (n % 2 ? "tool" : "assistant") : "owner",
+        title: tool ? "exec" : "评论",
+        body,
+        body_length: body.length,
+        previous_version: null,
+        metadata: tool
+          ? {
+              attempt_id: 1,
+              session_id: "visibility",
+              session_generation: 0,
+              call_id: `visibility-call-${Math.floor(n / 2)}`,
+            }
+          : {},
+      };
+    });
+    await page.route("**/api/flows/42/activity?**", (route) => {
+      const start = Number(
+        new URL(route.request().url()).searchParams.get("cursor") ?? 0,
+      );
+      return route.fulfill({
+        json: activityPage(
+          records.slice(start, start + 20),
+          start,
+          records.length,
+        ),
+      });
+    });
+    await page.goto("/#flow/42/conversation");
+    const root = page.locator(".detail-body");
+    const list = page.locator('[data-window-list="会话活动"]');
+    await scrollToSnapshotEnd(page);
+    const bar = page.getByRole("button", {
+      name: "工具活动 · 10 次调用 · 10 条结果",
+      exact: true,
+    });
+    await expect(bar).toHaveAttribute("aria-expanded", "false");
+    await bar.click();
+    await expect(list).toHaveAttribute(
+      "data-window-count",
+      String(expandedRows),
+    );
+    await expect(bar).toBeFocused();
+    await expect(page.getByText(/^工具正文 12/)).toBeVisible();
+    await bar.evaluate((button) => {
+      const root = button.closest<HTMLElement>("[data-scroll-root]")!;
+      const row = button.closest("[data-window-row]")!;
+      root.scrollTop +=
+        row.getBoundingClientRect().bottom -
+        root.getBoundingClientRect().top +
+        30;
+    });
+    await expect(bar).not.toBeInViewport();
+    await expect(bar).toHaveAttribute("aria-expanded", "true");
+    const offset = await root.evaluate((node) => {
+      const top = node.getBoundingClientRect().top + node.clientTop;
+      const bottom = Math.min(top + node.clientHeight, innerHeight);
+      const first = [...node.querySelectorAll("[data-window-row]")].find(
+        (row) => {
+          const rect = row.getBoundingClientRect();
+          return rect.height > 0 && rect.top >= top && rect.bottom <= bottom;
+        },
+      )!;
+      return first.getBoundingClientRect().top - top;
+    });
+    // Enter on the still-focused, offscreen summary must not scroll it into view before collapsing.
+    await page.keyboard.press("Enter");
+    await expect(bar).toHaveAttribute("aria-expanded", "false");
+    await expect
+      .poll(() =>
+        bar.evaluate((button, offset) => {
+          const root = button.closest<HTMLElement>("[data-scroll-root]")!;
+          return Math.abs(
+            button.closest("[data-window-row]")!.getBoundingClientRect().top -
+              root.getBoundingClientRect().top -
+              root.clientTop -
+              offset,
+          );
+        }, offset),
+      )
+      .toBeLessThan(2);
+    await bar.click();
+    await expect(bar).toHaveAttribute("aria-expanded", "true");
+    await root.evaluate((node) => {
+      node.scrollTop = node.scrollHeight;
+    });
+    // Focus pins and overscan are not visibility: all member bodies are now above the viewport.
+    await expect(bar).toHaveAttribute("aria-expanded", "false");
+    await expect(
+      page.getByText(new RegExp(`^普通正文 ${records.length - 1}。`)),
+    ).toBeVisible();
+    await bar.scrollIntoViewIfNeeded();
+    await expect(bar).toHaveAttribute("aria-expanded", "false");
+    await bar.click();
+    await expect(bar).toHaveAttribute("aria-expanded", "true");
+    await root.evaluate((node) => {
+      node.scrollTop = 0;
+    });
+    // The same reset applies when the entire group is below the viewport, not only above it.
+    await expect(bar).toHaveAttribute("aria-expanded", "false");
+    await expect(page.getByText(/^普通正文 0。/)).toBeInViewport();
+    await bar.scrollIntoViewIfNeeded();
+    await expect(bar).toHaveAttribute("aria-expanded", "false");
+    expect(
+      await list.locator(":scope > [data-window-row]").count(),
+    ).toBeLessThanOrEqual(60);
+    expect(
+      await list.locator('.message-body, pre[aria-label="工具摘要"]').count(),
+    ).toBeLessThanOrEqual(60);
+  });
+}
 
 test("mobile detail header contracts to one line without losing reading position", async ({
   page,

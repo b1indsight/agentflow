@@ -5,7 +5,18 @@ import Markdown, { defaultUrlTransform, type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { getContent, getDiff, getThread } from "./api";
 import { DiffWindow } from "./DiffWindow";
-import type { ActivityItem, ActivityPage, ContentPage } from "./types";
+import type {
+  ActivityIdentity,
+  ActivityItem,
+  ActivityPage,
+  ActivityProvenancePage,
+  ActivityProvenanceRange,
+  ActivityProvenanceSource,
+  ContentPage,
+  ConversationGroup,
+  ConversationRow,
+} from "./types";
+import { ACTIVITY_PROVENANCE_ROWS } from "./useConversation";
 import {
   CODE_CHARS,
   TEXT_CHARS,
@@ -443,14 +454,15 @@ function ThreadReplies({
 
 /** Adjacent authors share identity; worker records must also have the same explicit session. */
 export function sameActivityGroup(
-  left: ActivityItem | undefined,
-  right: ActivityItem | undefined,
+  left: ActivityIdentity | undefined,
+  right: ActivityIdentity | undefined,
 ): boolean {
   const operations = isOperationActivity(left) && isOperationActivity(right);
+  const worker = left?.source === "worker" || right?.source === "worker";
   return Boolean(
     left &&
     right &&
-    (operations || left.source === right.source) &&
+    ((!worker && operations) || left.source === right.source) &&
     !left.deleted &&
     !right.deleted &&
     left.prior === right.prior &&
@@ -467,8 +479,8 @@ export function sameActivityGroup(
         [left.author, right.author].every(
           (role) => role === "assistant" || role === "tool",
         ))) &&
-    (left.source === "worker"
-      ? ["attempt_id", "session_id", "session_generation"].every(
+    (worker
+      ? (["attempt_id", "session_id", "session_generation"] as const).every(
           (key) =>
             left.metadata[key] !== undefined &&
             left.metadata[key] !== null &&
@@ -512,24 +524,316 @@ function eventSummary(entry: ActivityItem): string {
 }
 
 /** Tool calls and results share the same compact disclosure and text budget. */
-export function isToolActivity(entry: ActivityItem | undefined): boolean {
+export function isToolActivity(entry: ActivityIdentity | undefined): boolean {
   return entry?.kind === "tool_call" || entry?.kind === "tool_result";
 }
 
 /** Checks and bodyless timeline events can share a compact actor disclosure. */
-export function isOperationActivity(entry: ActivityItem | undefined): boolean {
+export function isOperationActivity(
+  entry: ActivityIdentity | undefined,
+): boolean {
   return (
     entry?.kind === "check" ||
     (entry?.kind === "event" && entry.body_length === 0)
   );
 }
 
-/** A bounded mounted slice shares one disclosure without merging archive records or DOM rows. */
-export interface ActivityGroup {
-  key: string;
-  leader: boolean;
-  summary: string;
-  partial: boolean;
+/** Keep display-key formatting here; opaque record keys may themselves contain colons. */
+export function conversationRowKey(
+  kind: ConversationRow["kind"],
+  recordKey: string,
+) {
+  return `${kind}:${recordKey}`;
+}
+
+/** Recover the record key from a key produced by conversationRowKey. */
+export function conversationRecordKey(rowKey: string) {
+  return rowKey.slice(rowKey.indexOf(":") + 1);
+}
+
+/**
+ * Project data-defined groups into independently virtualizable rows. Folded groups contain only a
+ * summary; expanded tool results follow their nearest preceding matching call, one body per row.
+ * Expanded keys identify read members, so refreshing a group's first record cannot close it.
+ */
+export function buildConversationRows(
+  records: readonly ActivityIdentity[],
+  expanded: ReadonlySet<string>,
+): ConversationRow[] {
+  const rows: ConversationRow[] = [];
+  const body = (
+    rawIndex: number,
+    groupKey: string | null,
+    pairedCallKey: string | null = null,
+  ) => {
+    rows.push({
+      kind: "body",
+      key: conversationRowKey("body", records[rawIndex].key),
+      rawIndex,
+      groupKey,
+      pairedCallKey,
+    });
+  };
+  for (let first = 0; first < records.length;) {
+    const entry = records[first];
+    const kind =
+      entry.source === "worker" && isToolActivity(entry)
+        ? "tool"
+        : isOperationActivity(entry)
+          ? "operation"
+          : null;
+    let last = first;
+    if (kind)
+      while (
+        last + 1 < records.length &&
+        (kind === "tool"
+          ? isToolActivity(records[last + 1])
+          : isOperationActivity(records[last + 1])) &&
+        sameActivityGroup(entry, records[last + 1])
+      )
+        last++;
+    if (kind === null || (kind === "operation" && first === last)) {
+      body(first, null);
+      first++;
+      continue;
+    }
+    const group: ConversationGroup = {
+      key: entry.key,
+      kind,
+      first,
+      last,
+      calls: 0,
+      results: 0,
+    };
+    const calls = new Map<string, number>();
+    const results = new Map<number, number[]>();
+    const paired = new Map<number, number>();
+    let open = false;
+    for (let index = first; index <= last; index++) {
+      const item = records[index];
+      if (expanded.has(item.key)) open = true;
+      if (kind !== "tool") continue;
+      const callId = item.metadata.call_id;
+      if (item.kind === "tool_call") {
+        group.calls++;
+        if (typeof callId === "string" && callId) calls.set(callId, index);
+      } else {
+        group.results++;
+        const call =
+          typeof callId === "string" && callId ? calls.get(callId) : undefined;
+        if (call !== undefined) {
+          paired.set(index, call);
+          const matches = results.get(call) ?? [];
+          matches.push(index);
+          results.set(call, matches);
+        }
+      }
+    }
+    rows.push({
+      kind: "summary",
+      key: conversationRowKey("summary", group.key),
+      group,
+      expanded: open,
+    });
+    if (open)
+      for (let index = first; index <= last; index++) {
+        if (paired.has(index)) continue;
+        body(index, group.key);
+        for (const result of results.get(index) ?? [])
+          body(result, group.key, records[index].key);
+      }
+    first = last + 1;
+  }
+  return rows;
+}
+
+/** Return a merged source span only at its first raw record; body eviction cannot change its count. */
+export function conversationProvenanceRange(
+  records: readonly ActivityIdentity[],
+  rawIndex: number,
+): ActivityProvenanceRange | null {
+  const entry = records[rawIndex];
+  if (!entry || sameActivityGroup(records[rawIndex - 1], entry)) return null;
+  let last = rawIndex;
+  while (
+    last + 1 < records.length &&
+    sameActivityGroup(entry, records[last + 1])
+  )
+    last++;
+  return last > rawIndex ? { first: rawIndex, last } : null;
+}
+
+/** A controlled, identity-only disclosure; expansion belongs to the conversation's local Set. */
+export interface ActivitySummaryProps {
+  entry: ActivityIdentity;
+  group: ConversationGroup;
+  expanded: boolean;
+  onToggle: () => void;
+  continuation?: boolean;
+}
+
+export function ActivitySummary({
+  entry,
+  group,
+  expanded,
+  onToggle,
+  continuation = false,
+}: ActivitySummaryProps) {
+  return (
+    <article
+      className={`message grouped-activity${group.kind === "operation" ? " compact-event" : ""}${continuation ? " continuation" : ""}${entry.deleted ? " deleted" : ""}`}
+      data-activity-summary={group.key}
+      data-activity-group={group.key}
+    >
+      <div className="message-avatar" aria-hidden="true">
+        {entry.author.slice(0, 1).toUpperCase()}
+      </div>
+      <div className="message-main">
+        {/* Keep these identity labels aligned with standalone ActivityView records. */}
+        <div className="message-label">
+          <span className="message-identity">
+            <span>{entry.author}</span>
+            <span className="source-tag">{entry.source}</span>
+          </span>
+          {entry.prior && (
+            <span
+              className="message-context"
+              title="发生于此 Flow 创建之前的历史内容"
+            >
+              此前交互
+            </span>
+          )}
+          {entry.deleted && (
+            <span className="message-context">已删除（保留历史版本）</span>
+          )}
+          <time>{new Date(entry.occurred_at).toLocaleString()}</time>
+        </div>
+        <button
+          type="button"
+          className="activity-toggle"
+          aria-expanded={expanded}
+          onClick={onToggle}
+        >
+          <span aria-hidden="true">{expanded ? "▾" : "▸"}</span>{" "}
+          {group.kind === "tool"
+            ? `工具活动 · ${group.calls} 次调用 · ${group.results} 条结果`
+            : `操作记录 · ${group.last - group.first + 1} 条`}
+        </button>
+      </div>
+    </article>
+  );
+}
+
+/** Retain only the selected metadata page, separately from persisted panel/text reading state. */
+function ProvenancePage({
+  source,
+  stateKey,
+}: {
+  source: ActivityProvenanceSource;
+  stateKey: string;
+}) {
+  const [savedOffset, saveOffset] = useReadingState(`${stateKey}-page`, 0);
+  const selected = useRef(savedOffset);
+  const failedOffset = useRef(savedOffset);
+  const [page, setPage] = useState<ActivityProvenancePage | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const request = useRef<AbortController | null>(null);
+  const read = async (offset: number) => {
+    request.current?.abort();
+    const c = new AbortController();
+    request.current = c;
+    failedOffset.current = offset;
+    setBusy(true);
+    setError("");
+    try {
+      const result = await source.read(source, offset, c.signal);
+      if (!c.signal.aborted) {
+        setPage(result);
+        selected.current = result.offset;
+        saveOffset(result.offset);
+      }
+    } catch (e) {
+      if (!c.signal.aborted)
+        setError(e instanceof Error ? e.message : "来源信息读取失败");
+    } finally {
+      if (!c.signal.aborted) setBusy(false);
+    }
+  };
+  useEffect(() => {
+    const lastPage =
+      Math.floor((source.last - source.first) / ACTIVITY_PROVENANCE_ROWS) *
+      ACTIVITY_PROVENANCE_ROWS;
+    void read(Math.min(selected.current, lastPage));
+    return () => request.current?.abort();
+  }, [source.first, source.last, source.read]);
+  return (
+    <div aria-busy={busy}>
+      {busy && !page && <p role="status">正在读取来源信息…</p>}
+      {page && (
+        <>
+          <TextWindow
+            code
+            text={JSON.stringify(page.items, null, 2)}
+            stateKey={`${stateKey}-${page.offset}-text`}
+          />
+          {page.total > ACTIVITY_PROVENANCE_ROWS && (
+            <div
+              className="text-window-controls"
+              role="group"
+              aria-label="来源记录分页"
+            >
+              <button
+                type="button"
+                disabled={busy || page.offset === 0}
+                onClick={() =>
+                  void read(Math.max(0, page.offset - ACTIVITY_PROVENANCE_ROWS))
+                }
+              >
+                上一页来源记录
+              </button>
+              <span>
+                记录 {page.offset + 1}–{page.offset + page.items.length} /{" "}
+                {page.total}
+              </span>
+              <button
+                type="button"
+                disabled={busy || page.next_offset === null}
+                onClick={() =>
+                  page.next_offset !== null && void read(page.next_offset)
+                }
+              >
+                下一页来源记录
+              </button>
+            </div>
+          )}
+        </>
+      )}
+      {error && (
+        <p role="alert">
+          来源信息读取失败：{error}{" "}
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => void read(failedOffset.current)}
+          >
+            重试来源信息
+          </button>
+        </p>
+      )}
+    </div>
+  );
+}
+
+/** Each view owns one raw record only; group disclosure and result ordering are separate rows. */
+export interface ActivityViewProps {
+  entry: ActivityItem;
+  flowId?: number;
+  snapshot?: number;
+  continuation?: boolean;
+  groupKey?: string | null;
+  pairedCallKey?: string | null;
+  provenance?: ActivityProvenanceSource;
 }
 
 /** Markdown produces safe React elements; repository-supplied HTML stays escaped text. */
@@ -538,27 +842,15 @@ export function ActivityView({
   flowId = 0,
   snapshot = entry.version,
   continuation = false,
-  activityGroup,
-  toolResults = [],
-  mergedIntoCall = false,
+  groupKey = null,
+  pairedCallKey = null,
   provenance,
-}: {
-  entry: ActivityItem;
-  flowId?: number;
-  snapshot?: number;
-  continuation?: boolean;
-  activityGroup?: ActivityGroup;
-  toolResults?: ActivityItem[];
-  mergedIntoCall?: boolean;
-  provenance?: ActivityItem[];
-}) {
+}: ActivityViewProps) {
   const event = entry.kind === "event" && entry.body_length === 0;
   const compact = isOperationActivity(entry);
   const tool = isToolActivity(entry);
-  const [groupOpen, setGroupOpen] = useReadingState(
-    `${flowId}-${activityGroup?.key ?? entry.key}-activity`,
-    0,
-  );
+  const grouped = groupKey !== null;
+  const continuing = continuation || grouped;
   const [metadataOpen, setMetadataOpen] = useReadingState(
     `${entry.key}-${entry.version}-metadata`,
     0,
@@ -578,24 +870,22 @@ export function ActivityView({
         : entry.metadata.status;
     action = `${typeof workflow === "string" && workflow ? workflow : "未知工作流"}: ${entry.title}: ${typeof status === "string" && status ? status : "unknown"}`;
   }
+  const provenanceCount = provenance
+    ? provenance.last - provenance.first + 1
+    : 0;
   const metadata =
     (!continuation || compact) &&
-    (Object.keys(entry.metadata).length > 0 || (provenance?.length ?? 0) > 1);
+    (Object.keys(entry.metadata).length > 0 || provenanceCount > 1);
   const provenanceLabel =
     "来源信息与查询定位" +
-    (provenance && provenance.length > 1
-      ? ` · ${provenance.length} 条记录`
-      : "");
+    (provenanceCount > 1 ? ` · ${provenanceCount} 条记录` : "");
   return (
     <article
-      className={`message${entry.deleted ? " deleted" : ""}${compact ? " compact-event" : ""}${continuation ? " continuation" : ""}${activityGroup ? " grouped-activity" : ""}`}
+      className={`message${entry.deleted ? " deleted" : ""}${compact ? " compact-event" : ""}${continuing ? " continuation" : ""}${grouped ? " grouped-activity" : ""}`}
       data-entry={entry.key}
-      hidden={
-        mergedIntoCall ||
-        Boolean(activityGroup && !activityGroup.leader && !groupOpen)
-      }
+      data-activity-group={groupKey ?? undefined}
       aria-label={
-        continuation
+        continuing
           ? `${entry.author} · ${new Date(entry.occurred_at).toLocaleString()}`
           : undefined
       }
@@ -609,7 +899,7 @@ export function ActivityView({
             <span>{entry.author}</span>
             <span className="source-tag">{entry.source}</span>
           </span>
-          {compact && !activityGroup && (
+          {compact && !grouped && (
             <span className="event-action">{action}</span>
           )}
           {entry.prior && (
@@ -623,138 +913,118 @@ export function ActivityView({
           {entry.deleted && (
             <span className="message-context">已删除（保留历史版本）</span>
           )}
-          {(!compact || !activityGroup || !groupOpen) && (
-            <time>{new Date(entry.occurred_at).toLocaleString()}</time>
-          )}
+          <time>{new Date(entry.occurred_at).toLocaleString()}</time>
         </div>
         {title && <h3 className="message-title">{title}</h3>}
-        {activityGroup?.leader && (
-          <button
-            type="button"
-            className="activity-toggle"
-            aria-expanded={Boolean(groupOpen)}
-            onClick={() => setGroupOpen(groupOpen ? 0 : 1)}
-          >
-            <span aria-hidden="true">{groupOpen ? "▾" : "▸"}</span>{" "}
-            {compact ? "操作记录" : "工具活动"}
-            {activityGroup.partial ? "（当前片段）" : ""} ·{" "}
-            {activityGroup.summary}
-          </button>
-        )}
-        {compact && activityGroup && Boolean(groupOpen) && (
+        {compact && grouped && (
           <div className="operation-action">
             <span className="event-action">{action}</span>
             <time>{new Date(entry.occurred_at).toLocaleString()}</time>
           </div>
         )}
-        {tool && activityGroup ? (
-          !mergedIntoCall &&
-          Boolean(groupOpen) && (
-            <section className="tool-activity-body" aria-label="工具活动详情">
-              {entry.kind === "tool_result" ? (
-                <blockquote
-                  className="tool-activity-result"
-                  aria-label="未配对工具结果"
-                >
-                  <ActivityBody entry={entry} flowId={flowId} framed={false} />
-                </blockquote>
-              ) : (
-                <ActivityBody entry={entry} flowId={flowId} framed={false} />
-              )}
-              {toolResults.map((result) => (
-                <blockquote
-                  className="tool-activity-result"
-                  data-entry={result.key}
-                  key={`${result.key}-${result.version}`}
-                >
-                  <ActivityBody entry={result} flowId={flowId} framed={false} />
-                  <EditedDiff entry={result} flowId={flowId} />
-                </blockquote>
-              ))}
-            </section>
-          )
-        ) : (!activityGroup || Boolean(groupOpen)) &&
-          (entry.body_length > 0 || tool) ? (
+        {tool && grouped ? (
+          <section className="tool-activity-body" aria-label="工具活动详情">
+            {entry.kind === "tool_result" ? (
+              <blockquote
+                className="tool-activity-result"
+                aria-label={
+                  pairedCallKey === null ? "未配对工具结果" : "工具结果"
+                }
+                data-paired-call={pairedCallKey ?? undefined}
+              >
+                <ActivityBody
+                  key={`${entry.key}-${entry.version}`}
+                  entry={entry}
+                  flowId={flowId}
+                  framed={false}
+                />
+              </blockquote>
+            ) : (
+              <ActivityBody
+                key={`${entry.key}-${entry.version}`}
+                entry={entry}
+                flowId={flowId}
+                framed={false}
+              />
+            )}
+          </section>
+        ) : entry.body_length > 0 || tool ? (
           <ActivityBody
             key={`${entry.key}-${entry.version}`}
             entry={entry}
             flowId={flowId}
           />
         ) : null}
-        {!mergedIntoCall &&
-          (!activityGroup || Boolean(groupOpen)) &&
-          (metadata ||
-            entry.url ||
-            (entry.previous_version !== null && !entry.deleted)) && (
-            <div className="message-footer">
-              <EditedDiff
-                key={`diff-${entry.key}-${entry.version}`}
-                entry={entry}
-                flowId={flowId}
-              />
-              {(entry.url || metadata) && (
-                <div className="message-actions">
-                  {entry.url && (
-                    <a
-                      className="message-icon"
-                      href={entry.url}
-                      target="_blank"
-                      rel="noreferrer"
-                      aria-label="在 GitHub 中查看"
-                      title="在 GitHub 中查看"
+        {(metadata ||
+          entry.url ||
+          (entry.previous_version !== null && !entry.deleted)) && (
+          <div className="message-footer">
+            <EditedDiff
+              key={`diff-${entry.key}-${entry.version}`}
+              entry={entry}
+              flowId={flowId}
+            />
+            {(entry.url || metadata) && (
+              <div className="message-actions">
+                {entry.url && (
+                  <a
+                    className="message-icon"
+                    href={entry.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    aria-label="在 GitHub 中查看"
+                    title="在 GitHub 中查看"
+                  >
+                    {/* Primer Octicons mark-github-16, padded to match the Info glyph. */}
+                    <svg
+                      className="github-mark"
+                      viewBox="-0.75 -1 17.5 17.5"
+                      aria-hidden="true"
                     >
-                      {/* Primer Octicons mark-github-16, padded to match the Info glyph. */}
-                      <svg
-                        className="github-mark"
-                        viewBox="-0.75 -1 17.5 17.5"
-                        aria-hidden="true"
-                      >
-                        <path d="M6.766 11.328c-2.063-.25-3.516-1.734-3.516-3.656 0-.781.281-1.625.75-2.188-.203-.515-.172-1.609.063-2.062.625-.078 1.468.25 1.968.703.594-.187 1.219-.281 1.985-.281.765 0 1.39.094 1.953.265.484-.437 1.344-.765 1.969-.687.218.422.25 1.515.046 2.047.5.593.766 1.39.766 2.203 0 1.922-1.453 3.375-3.547 3.64.531.344.89 1.094.89 1.954v1.625c0 .468.391.734.86.547C13.781 14.359 16 11.53 16 8.03 16 3.61 12.406 0 7.984 0 3.563 0 0 3.61 0 8.031a7.88 7.88 0 0 0 5.172 7.422c.422.156.828-.125.828-.547v-1.25c-.219.094-.5.156-.75.156-1.031 0-1.64-.562-2.078-1.609-.172-.422-.36-.672-.719-.719-.187-.015-.25-.093-.25-.187 0-.188.313-.328.625-.328.453 0 .844.281 1.25.86.313.452.64.655 1.031.655s.641-.14 1-.5c.266-.265.47-.5.657-.656" />
-                      </svg>
-                    </a>
-                  )}
-                  {metadata && (
-                    <button
-                      type="button"
-                      className="message-icon"
-                      aria-label={provenanceLabel}
-                      title={provenanceLabel}
-                      aria-expanded={Boolean(metadataOpen)}
-                      aria-controls={metadataId}
-                      onClick={() => setMetadataOpen(metadataOpen ? 0 : 1)}
-                    >
-                      <Info aria-hidden="true" />
-                    </button>
-                  )}
-                </div>
-              )}
-              {metadata && (
-                <div
-                  className="message-provenance"
-                  id={metadataId}
-                  hidden={!metadataOpen}
-                >
+                      <path d="M6.766 11.328c-2.063-.25-3.516-1.734-3.516-3.656 0-.781.281-1.625.75-2.188-.203-.515-.172-1.609.063-2.062.625-.078 1.468.25 1.968.703.594-.187 1.219-.281 1.985-.281.765 0 1.39.094 1.953.265.484-.437 1.344-.765 1.969-.687.218.422.25 1.515.046 2.047.5.593.766 1.39.766 2.203 0 1.922-1.453 3.375-3.547 3.64.531.344.89 1.094.89 1.954v1.625c0 .468.391.734.86.547C13.781 14.359 16 11.53 16 8.03 16 3.61 12.406 0 7.984 0 3.563 0 0 3.61 0 8.031a7.88 7.88 0 0 0 5.172 7.422c.422.156.828-.125.828-.547v-1.25c-.219.094-.5.156-.75.156-1.031 0-1.64-.562-2.078-1.609-.172-.422-.36-.672-.719-.719-.187-.015-.25-.093-.25-.187 0-.188.313-.328.625-.328.453 0 .844.281 1.25.86.313.452.64.655 1.031.655s.641-.14 1-.5c.266-.265.47-.5.657-.656" />
+                    </svg>
+                  </a>
+                )}
+                {metadata && (
+                  <button
+                    type="button"
+                    className="message-icon"
+                    aria-label={provenanceLabel}
+                    title={provenanceLabel}
+                    aria-expanded={Boolean(metadataOpen)}
+                    aria-controls={metadataId}
+                    onClick={() => setMetadataOpen(metadataOpen ? 0 : 1)}
+                  >
+                    <Info aria-hidden="true" />
+                  </button>
+                )}
+              </div>
+            )}
+            {metadata && (
+              <div
+                className="message-provenance"
+                id={metadataId}
+                hidden={!metadataOpen}
+              >
+                {provenance && provenanceCount > 1 ? (
+                  Boolean(metadataOpen) && (
+                    <ProvenancePage
+                      key={snapshot}
+                      source={provenance}
+                      stateKey={`${entry.key}-${entry.version}-metadata`}
+                    />
+                  )
+                ) : (
                   <TextWindow
                     code
-                    text={JSON.stringify(
-                      provenance && provenance.length > 1
-                        ? provenance.map((item) => ({
-                            key: item.key,
-                            version: item.version,
-                            author: item.author,
-                            occurred_at: item.occurred_at,
-                            metadata: item.metadata,
-                          }))
-                        : entry.metadata,
-                      null,
-                      2,
-                    )}
+                    text={JSON.stringify(entry.metadata, null, 2)}
                     stateKey={`${entry.key}-${entry.version}-metadata-text`}
                   />
-                </div>
-              )}
-            </div>
-          )}
+                )}
+              </div>
+            )}
+          </div>
+        )}
         {entry.kind === "thread" && (
           <ThreadReplies
             key={`${flowId}-${entry.key}-${snapshot}`}
