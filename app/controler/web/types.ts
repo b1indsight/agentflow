@@ -80,6 +80,80 @@ export interface ActivityItem {
   previous_version: number | null;
   metadata: Record<string, unknown>;
 }
+
+/** Snapshot identity survives body eviction; ownership fields retain the API's values and missingness. */
+export interface ActivityIdentity extends Pick<
+  ActivityItem,
+  | "key"
+  | "version"
+  | "source"
+  | "kind"
+  | "author"
+  | "occurred_at"
+  | "body_length"
+  | "parent_key"
+  | "prior"
+  | "deleted"
+> {
+  metadata: Partial<
+    Pick<
+      ActivityItem["metadata"],
+      "attempt_id" | "session_id" | "session_generation" | "call_id"
+    >
+  >;
+}
+
+/** One continuous data-defined group, with inclusive raw-record bounds. */
+export interface ConversationGroup {
+  key: string;
+  kind: "tool" | "operation";
+  first: number;
+  last: number;
+  calls: number;
+  results: number;
+}
+
+/** Display keys are distinct from raw record keys, which still own body reading state. */
+export type ConversationRow =
+  | { kind: "summary"; key: string; group: ConversationGroup }
+  | {
+      kind: "body";
+      key: string;
+      rawIndex: number;
+      groupKey: string | null;
+      pairedCallKey: string | null;
+    };
+
+/** Inclusive identity-defined source span; fetching it never changes the body cache. */
+export interface ActivityProvenanceRange {
+  first: number;
+  last: number;
+}
+
+/** Full source metadata is retained only for the selected, bounded provenance page. */
+export type ActivityProvenanceItem = Pick<
+  ActivityItem,
+  "key" | "version" | "source" | "author" | "occurred_at" | "url" | "metadata"
+>;
+
+export interface ActivityProvenancePage {
+  items: ActivityProvenanceItem[];
+  offset: number;
+  total: number;
+  next_offset: number | null;
+}
+
+/** Offset is relative to the source span, not the raw activity list. */
+export type ReadActivityProvenance = (
+  range: ActivityProvenanceRange,
+  offset: number,
+  signal: AbortSignal,
+) => Promise<ActivityProvenancePage>;
+
+export interface ActivityProvenanceSource extends ActivityProvenanceRange {
+  read: ReadActivityProvenance;
+}
+
 export interface ActivityPage {
   items: ActivityItem[];
   snapshot: number;
