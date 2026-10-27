@@ -1,5 +1,11 @@
-import { expect, test, type Locator } from "@playwright/test";
-import type { FlowDetail, JobSummary, SourceStatus } from "../types";
+import { expect, test, type Locator, type Page } from "@playwright/test";
+import type {
+  ActivityItem,
+  ActivityPage,
+  FlowDetail,
+  JobSummary,
+  SourceStatus,
+} from "../types";
 
 const now = "2026-10-17T12:00:00Z";
 const flow = {
@@ -50,6 +56,89 @@ const activity = {
   previous_version: 1,
   metadata: {},
 };
+
+/** Scenarios own the records and request gates; only the 20-record page bookkeeping is shared. */
+function activityPage(
+  items: ActivityItem[],
+  start: number,
+  total: number,
+  snapshot = 2,
+): ActivityPage {
+  const next = start + 20;
+  return {
+    items,
+    snapshot,
+    total,
+    next_cursor: next < total ? String(next) : null,
+    has_more: next < total,
+    sources: [],
+    changes: {},
+  };
+}
+
+async function scrollToSnapshotEnd(page: Page, continueFolded = false) {
+  const root = page.locator(".detail-body");
+  const more = page.getByRole("button", {
+    name: "读取更多交互",
+    exact: true,
+  });
+  await expect
+    .poll(
+      async () => {
+        await root.evaluate((node) => {
+          node.scrollTop = node.scrollHeight;
+        });
+        if (continueFolded && (await more.isVisible())) await more.click();
+        return page
+          .getByRole("button", {
+            name: "已到当前本地快照末尾 · 点击刷新",
+            exact: true,
+          })
+          .isVisible();
+      },
+      { timeout: 15000 },
+    )
+    .toBe(true);
+}
+
+/** Sample painted geometry without waiting for a missing target to become mounted. */
+function sampleReadingFrames(root: Locator, selector: string) {
+  return root.evaluate(async (node, selector) => {
+    const positions: number[] = [],
+      offsets: number[] = [];
+    let overlap = 0,
+      mounted = 0;
+    for (let frame = 0; frame < 18; frame++) {
+      // rAF precedes ResizeObserver delivery; sample after that paint, without skipping a frame.
+      await new Promise<void>((resolve) =>
+        requestAnimationFrame(() => setTimeout(resolve, 0)),
+      );
+      const viewport = node.getBoundingClientRect();
+      const top =
+        node.querySelector(selector)?.getBoundingClientRect().top ?? Infinity;
+      positions.push(top);
+      offsets.push(top - viewport.top - node.clientTop);
+      const rows = [
+        ...node.querySelectorAll(".conversation-stream [data-window-row]"),
+      ].map((row) => row.getBoundingClientRect());
+      for (let index = 1; index < rows.length; index++)
+        if (
+          rows[index].top < viewport.bottom &&
+          rows[index - 1].bottom > viewport.top
+        )
+          overlap = Math.max(overlap, rows[index - 1].bottom - rows[index].top);
+      mounted = Math.max(mounted, rows.length);
+    }
+    return {
+      positions,
+      offsets,
+      overlap,
+      mounted,
+      scrollTop: node.scrollTop,
+      maxScroll: node.scrollHeight - node.clientHeight,
+    };
+  }, selector);
+}
 
 test.beforeEach(async ({ page }) => {
   await page.route("**/api/**", async (route) => {
@@ -1324,12 +1413,7 @@ test("large activity stays windowed, re-reads evicted pages, and refreshes expli
     }));
     return route.fulfill({
       json: {
-        items,
-        snapshot,
-        total: 320,
-        next_cursor: start + 20 < 320 ? String(start + 20) : null,
-        has_more: start + 20 < 320,
-        sources: [],
+        ...activityPage(items, start, 320, snapshot),
         changes: snapshot === 3 ? { edited: 1 } : {},
       },
     });
@@ -1399,25 +1483,14 @@ test("large activity stays windowed, re-reads evicted pages, and refreshes expli
   await expect(
     page.getByRole("status").filter({ hasText: "快照更新" }),
   ).toBeVisible();
-  const positions = await root.evaluate(async (node, latest) => {
-    const values: number[] = [];
-    for (let i = 0; i < 18; i++) {
-      await new Promise<void>((resolve) =>
-        requestAnimationFrame(() => setTimeout(resolve, 0)),
-      );
-      const entry = node.querySelector(`[data-entry="${latest.key}"]`);
-      values.push(
-        entry
-          ? entry.getBoundingClientRect().top -
-              node.getBoundingClientRect().top -
-              node.clientTop
-          : Infinity,
-      );
-    }
-    return values;
-  }, latest);
+  const frames = await sampleReadingFrames(
+    root,
+    `[data-entry="${latest.key}"]`,
+  );
   expect(
-    Math.max(...positions.map((offset) => Math.abs(offset - latest.offset))),
+    Math.max(
+      ...frames.offsets.map((offset) => Math.abs(offset - latest.offset)),
+    ),
   ).toBeLessThan(2);
   expect(errors).toEqual([]);
 });
@@ -1448,8 +1521,8 @@ for (const scenario of [
         new URL(route.request().url()).searchParams.get("cursor") ?? 0,
       );
       return route.fulfill({
-        json: {
-          items: Array.from({ length: 20 }, (_, i) => {
+        json: activityPage(
+          Array.from({ length: 20 }, (_, i) => {
             const n = start + i;
             const message = expanded ? n === 179 : n % 20 === 19;
             const body =
@@ -1482,39 +1555,15 @@ for (const scenario of [
                 : {},
             };
           }),
-          snapshot: 2,
+          start,
           total,
-          next_cursor: start + 20 < total ? String(start + 20) : null,
-          has_more: start + 20 < total,
-          sources: [],
-          changes: {},
-        },
+        ),
       });
     });
     await page.goto("/#flow/42/conversation");
     const root = page.locator(".detail-body");
-    const more = page.getByRole("button", {
-      name: "读取更多交互",
-      exact: true,
-    });
-    await expect
-      .poll(
-        async () => {
-          await root.evaluate((element) => {
-            element.scrollTop = element.scrollHeight;
-          });
-          // This setup deliberately reads the complete folded run before expanding it.
-          if (expanded && (await more.isVisible())) await more.click();
-          return page
-            .getByRole("button", {
-              name: "已到当前本地快照末尾 · 点击刷新",
-              exact: true,
-            })
-            .isVisible();
-        },
-        { timeout: 15000 },
-      )
-      .toBe(true);
+    // Expanded setup deliberately reads the complete folded run before opening it.
+    await scrollToSnapshotEnd(page, expanded);
     if (expanded)
       await page
         .getByRole("button", { name: /^工具活动/ })
@@ -1638,8 +1687,8 @@ test("height changes above, within and below the reading row preserve its top th
       new URL(route.request().url()).searchParams.get("cursor") ?? 0,
     );
     return route.fulfill({
-      json: {
-        items: Array.from({ length: Math.min(20, 100 - start) }, (_, i) => {
+      json: activityPage(
+        Array.from({ length: Math.min(20, 100 - start) }, (_, i) => {
           const n = start + i;
           const body = `高度校准正文 ${n}。${"保留稳定阅读位置。".repeat(3)}`;
           return {
@@ -1657,30 +1706,14 @@ test("height changes above, within and below the reading row preserve its top th
             },
           };
         }),
-        snapshot: 2,
-        total: 100,
-        next_cursor: start + 20 < 100 ? String(start + 20) : null,
-        has_more: start + 20 < 100,
-        sources: [],
-        changes: {},
-      },
+        start,
+        100,
+      ),
     });
   });
   await page.goto("/#flow/42/conversation");
   const root = page.locator(".detail-body");
-  await expect
-    .poll(async () => {
-      await root.evaluate((node) => {
-        node.scrollTop = node.scrollHeight;
-      });
-      return page
-        .getByRole("button", {
-          name: "已到当前本地快照末尾 · 点击刷新",
-          exact: true,
-        })
-        .isVisible();
-    })
-    .toBe(true);
+  await scrollToSnapshotEnd(page);
   const key = await root.evaluate(async (node) => {
     node.scrollTop = node.scrollHeight - 1800;
     for (let i = 0; i < 6; i++) await new Promise(requestAnimationFrame);
@@ -1705,34 +1738,7 @@ test("height changes above, within and below the reading row preserve its top th
     await toggle.evaluate((button) => button.focus({ preventScroll: true }));
     for (const expanded of ["true", "false"]) {
       const [frames] = await Promise.all([
-        anchor.evaluate(async (entry) => {
-          const values: number[] = [];
-          let overlap = 0;
-          const root = entry.closest<HTMLElement>("[data-scroll-root]")!;
-          for (let i = 0; i < 18; i++) {
-            // rAF precedes ResizeObserver delivery; sample after that paint, without skipping a frame.
-            await new Promise<void>((resolve) =>
-              requestAnimationFrame(() => setTimeout(resolve, 0)),
-            );
-            values.push(entry.getBoundingClientRect().top);
-            const viewport = root.getBoundingClientRect();
-            const rows = [
-              ...root.querySelectorAll(
-                ".conversation-stream [data-window-row]",
-              ),
-            ].map((row) => row.getBoundingClientRect());
-            for (let index = 1; index < rows.length; index++)
-              if (
-                rows[index].top < viewport.bottom &&
-                rows[index - 1].bottom > viewport.top
-              )
-                overlap = Math.max(
-                  overlap,
-                  rows[index - 1].bottom - rows[index].top,
-                );
-          }
-          return { positions: values, overlap };
-        }),
+        sampleReadingFrames(root, `article[data-entry="${key}"]`),
         page.keyboard.press("Enter"),
       ]);
       await expect(toggle).toHaveAttribute("aria-expanded", expanded);
@@ -2778,8 +2784,8 @@ for (const kind of ["tool", "operation"] as const) {
       // Keep an unwanted continuation in flight so a runaway chain cannot hide behind an unchanged summary.
       if (start > permittedStart) await unexpectedPage;
       return route.fulfill({
-        json: {
-          items: Array.from({ length: Math.min(20, 120 - start) }, (_, i) => {
+        json: activityPage(
+          Array.from({ length: Math.min(20, 120 - start) }, (_, i) => {
             const n = start + i;
             const body = kind === "tool" ? `折叠工具记录 ${n}` : "";
             return {
@@ -2816,13 +2822,9 @@ for (const kind of ["tool", "operation"] as const) {
                   : { event: "labeled", label: `archive-${n}` },
             };
           }),
-          snapshot: 2,
-          total: 120,
-          next_cursor: start + 20 < 120 ? String(start + 20) : null,
-          has_more: start + 20 < 120,
-          sources: [],
-          changes: {},
-        },
+          start,
+          120,
+        ),
       });
     });
     try {
@@ -2943,14 +2945,14 @@ for (const change of [
       const items = snapshot === 3 ? refreshed : original;
       return route.fulfill({
         json: {
-          items: items
-            .slice(start, start + 20)
-            .map((entry) => ({ ...entry, version: snapshot })),
-          snapshot,
-          total: items.length,
-          next_cursor: start + 20 < items.length ? String(start + 20) : null,
-          has_more: start + 20 < items.length,
-          sources: [],
+          ...activityPage(
+            items
+              .slice(start, start + 20)
+              .map((entry) => ({ ...entry, version: snapshot })),
+            start,
+            items.length,
+            snapshot,
+          ),
           changes:
             snapshot === 3 ? { added: 5, removed: removeFirst ? 1 : 0 } : {},
         },
@@ -2958,19 +2960,7 @@ for (const change of [
     });
     await page.goto("/#flow/42/conversation");
     const root = page.locator(".detail-body");
-    await expect
-      .poll(async () => {
-        await root.evaluate((node) => {
-          node.scrollTop = node.scrollHeight;
-        });
-        return page
-          .getByRole("button", {
-            name: "已到当前本地快照末尾 · 点击刷新",
-            exact: true,
-          })
-          .isVisible();
-      })
-      .toBe(true);
+    await scrollToSnapshotEnd(page);
     const main = page.getByRole("button", {
       name: "工具活动 · 8 次调用 · 8 条结果",
       exact: true,
@@ -3105,36 +3095,17 @@ for (const reading of [
         new URL(route.request().url()).searchParams.get("cursor") ?? 0,
       );
       return route.fulfill({
-        json: {
-          items: records.slice(start, start + 20),
-          snapshot: 2,
-          total: records.length,
-          next_cursor: start + 20 < records.length ? String(start + 20) : null,
-          has_more: start + 20 < records.length,
-          sources: [],
-          changes: {},
-        },
+        json: activityPage(
+          records.slice(start, start + 20),
+          start,
+          records.length,
+        ),
       });
     });
     await page.goto("/#flow/42/conversation");
     const root = page.locator(".detail-body");
     const list = page.locator('[data-window-list="会话活动"]');
-    await expect
-      .poll(
-        async () => {
-          await root.evaluate((node) => {
-            node.scrollTop = node.scrollHeight;
-          });
-          return page
-            .getByRole("button", {
-              name: "已到当前本地快照末尾 · 点击刷新",
-              exact: true,
-            })
-            .isVisible();
-        },
-        { timeout: 15000 },
-      )
-      .toBe(true);
+    await scrollToSnapshotEnd(page);
     await expect(list).toHaveAttribute("data-window-count", "181");
     await expect(list).toHaveClass(/virtual-list/);
     await root.evaluate((node) => {
@@ -3252,33 +3223,12 @@ for (const reading of [
         }, expectedOffset),
       )
       .toBeLessThan(2);
-    const frames = await restored.evaluate(async (entry) => {
-      const node = entry.closest<HTMLElement>("[data-scroll-root]")!;
-      const row = entry.closest("[data-window-row]")!;
-      const offsets: number[] = [];
-      let mounted = 0;
-      for (let frame = 0; frame < 18; frame++) {
-        await new Promise<void>((resolve) =>
-          requestAnimationFrame(() => setTimeout(resolve, 0)),
-        );
-        offsets.push(
-          row.getBoundingClientRect().top -
-            node.getBoundingClientRect().top -
-            node.clientTop,
-        );
-        mounted = Math.max(
-          mounted,
-          node.querySelectorAll(".conversation-stream [data-window-row]")
-            .length,
-        );
-      }
-      return {
-        offsets,
-        mounted,
-        scrollTop: node.scrollTop,
-        maxScroll: node.scrollHeight - node.clientHeight,
-      };
-    });
+    const frames = await sampleReadingFrames(
+      root,
+      reading === "following message"
+        ? `[data-window-row]:has([data-entry="reentry-${targetIndex}"])`
+        : '[data-window-row]:has([data-activity-summary="reentry-90"])',
+    );
     expect(
       Math.max(
         ...frames.offsets.map((offset) => Math.abs(offset - expectedOffset)),
@@ -3304,8 +3254,8 @@ test("long tool activity remains bounded and readable across virtual windows", a
     const start = Number(url.searchParams.get("cursor") ?? 0);
     rereads.push(`${start}:${url.searchParams.get("snapshot")}`);
     return route.fulfill({
-      json: {
-        items: Array.from({ length: Math.min(20, 321 - start) }, (_, index) => {
+      json: activityPage(
+        Array.from({ length: Math.min(20, 321 - start) }, (_, index) => {
           const n = start + index;
           const body = n === 320 ? "本轮全部完成" : `工具记录 ${n}`;
           return {
@@ -3327,40 +3277,16 @@ test("long tool activity remains bounded and readable across virtual windows", a
             },
           };
         }),
-        snapshot: 2,
-        total: 321,
-        next_cursor: start + 20 < 321 ? String(start + 20) : null,
-        has_more: start + 20 < 321,
-        sources: [],
-        changes: {},
-      },
+        start,
+        321,
+      ),
     });
   });
   await page.goto("/#flow/42/conversation");
   const root = page.locator(".detail-body");
   const list = page.locator('[data-window-list="会话活动"]');
-  const more = page.getByRole("button", {
-    name: "读取更多交互",
-    exact: true,
-  });
-  await expect
-    .poll(
-      async () => {
-        await root.evaluate((e) => {
-          e.scrollTop = e.scrollHeight;
-        });
-        // Reading the entire folded archive here is intentional, unlike automatic filling.
-        if (await more.isVisible()) await more.click();
-        return page
-          .getByRole("button", {
-            name: "已到当前本地快照末尾 · 点击刷新",
-            exact: true,
-          })
-          .isVisible();
-      },
-      { timeout: 15000 },
-    )
-    .toBe(true);
+  // Reading the entire folded archive here is intentional, unlike automatic filling.
+  await scrollToSnapshotEnd(page, true);
   await expect(list).toHaveAttribute("data-window-count", "2");
   await root.evaluate((e) => {
     e.scrollTop = 0;
@@ -3456,33 +3382,17 @@ for (const [expandedRows, width] of [
         new URL(route.request().url()).searchParams.get("cursor") ?? 0,
       );
       return route.fulfill({
-        json: {
-          items: records.slice(start, start + 20),
-          snapshot: 2,
-          total: records.length,
-          next_cursor: start + 20 < records.length ? String(start + 20) : null,
-          has_more: start + 20 < records.length,
-          sources: [],
-          changes: {},
-        },
+        json: activityPage(
+          records.slice(start, start + 20),
+          start,
+          records.length,
+        ),
       });
     });
     await page.goto("/#flow/42/conversation");
     const root = page.locator(".detail-body");
     const list = page.locator('[data-window-list="会话活动"]');
-    await expect
-      .poll(async () => {
-        await root.evaluate((node) => {
-          node.scrollTop = node.scrollHeight;
-        });
-        return page
-          .getByRole("button", {
-            name: "已到当前本地快照末尾 · 点击刷新",
-            exact: true,
-          })
-          .isVisible();
-      })
-      .toBe(true);
+    await scrollToSnapshotEnd(page);
     const bar = page.getByRole("button", {
       name: "工具活动 · 10 次调用 · 10 条结果",
       exact: true,

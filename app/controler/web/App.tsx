@@ -30,6 +30,8 @@ import {
   ActivityView,
   buildConversationRows,
   conversationProvenanceRange,
+  conversationRecordKey,
+  conversationRowKey,
   sameActivityGroup,
 } from "./activity";
 import { ConversationSources, SourceList } from "./ConversationSources";
@@ -290,8 +292,6 @@ function Detail({
     }
     const key = `detail:${id}:${tab}`;
     node.scrollTop = positions.get(key) ?? 0;
-    // Like header positioning below, explicit navigation supersedes a queued reading anchor.
-    node.dispatchEvent(new Event("window-list-navigation"));
     return () => {
       positions.set(key, node.scrollTop);
     };
@@ -783,7 +783,7 @@ function Conversation({
         const next = new Set<string>();
         // A late visibility report must not reopen a group the user has just collapsed.
         for (const key of before) {
-          const row = rowByKey.get(`body:${key}`);
+          const row = rowByKey.get(conversationRowKey("body", key));
           const group = row?.kind === "body" ? row.groupKey : null;
           const visible = group ? members.get(group) : undefined;
           if (!group || !visible) continue;
@@ -870,8 +870,7 @@ function Conversation({
               key: `conversation:${id}`,
               resolve: (key) => {
                 if (typeof key !== "string") return null;
-                if (rowByKey.has(key)) return key;
-                const rawKey = key.slice(key.indexOf(":") + 1);
+                const rawKey = conversationRecordKey(key);
                 const index = state.records.findIndex(
                   (entry) => entry.key === rawKey,
                 );

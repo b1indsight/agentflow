@@ -538,6 +538,19 @@ export function isOperationActivity(
   );
 }
 
+/** Keep display-key formatting here; opaque record keys may themselves contain colons. */
+export function conversationRowKey(
+  kind: ConversationRow["kind"],
+  recordKey: string,
+) {
+  return `${kind}:${recordKey}`;
+}
+
+/** Recover the record key from a key produced by conversationRowKey. */
+export function conversationRecordKey(rowKey: string) {
+  return rowKey.slice(rowKey.indexOf(":") + 1);
+}
+
 /**
  * Project data-defined groups into independently virtualizable rows. Folded groups contain only a
  * summary; expanded tool results follow their nearest preceding matching call, one body per row.
@@ -555,7 +568,7 @@ export function buildConversationRows(
   ) => {
     rows.push({
       kind: "body",
-      key: `body:${records[rawIndex].key}`,
+      key: conversationRowKey("body", records[rawIndex].key),
       rawIndex,
       groupKey,
       pairedCallKey,
@@ -618,7 +631,7 @@ export function buildConversationRows(
     }
     rows.push({
       kind: "summary",
-      key: `summary:${group.key}`,
+      key: conversationRowKey("summary", group.key),
       group,
       expanded: open,
     });

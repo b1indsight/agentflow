@@ -181,7 +181,7 @@ interface WindowProps {
   estimate?: number;
   onRange?: (indexes: number[]) => void;
   onVisibleRange?: (keys: readonly RowKey[], anchorKey: RowKey | null) => void;
-  /** Preserve one logical row across layout changes and remounts; resolve hidden rows in the caller. */
+  /** Preserve a logical row across layout/remounts; resolve is called only for missing row keys. */
   reading?: { key: string; resolve: (key: RowKey) => RowKey | null };
   label: string;
 }
@@ -210,6 +210,11 @@ export function WindowList({
     reverse: boolean;
   } | null>(null);
   const [recovery, setRecovery] = useState<RowKey | null>(null);
+  // restore applies the mount bookmark before live anchoring; input cancels it, header navigation doesn't.
+  // anchor keeps the first fully visible (or first intersecting) row; recovery pins a target lacking DOM geometry.
+  // Input/navigation/external scroll reselect active anchors against the previous geometry.
+  // Commits, measurements, scroll, resize and navigation settle together after ancestor layout effects.
+  // Wait for a snapshot before mounting: an empty settle would consume and overwrite the bookmark.
   const layout = useRef({
     anchor: null as ReadingAnchor | null,
     restore: reading ? memory.bookmarks.get(reading.key) : undefined,
@@ -231,6 +236,7 @@ export function WindowList({
       keyIndexes.has(replacement)
     )
       return replacement;
+    // Focus, pending Tab and reading anchors share the last settled display-row order.
     const before = layout.current.keys;
     const index = before.indexOf(key);
     if (index < 0) return null;
@@ -330,7 +336,6 @@ export function WindowList({
         top: rect.top - rootTop + root.scrollTop,
         height: rect.height,
       });
-      measured.current.set(key, rect.height);
     }
     const visibleRows = (positions: ReadonlyMap<RowKey, RowGeometry>) =>
       [...positions].filter(([, row]) => {

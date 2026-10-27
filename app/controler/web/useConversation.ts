@@ -215,6 +215,7 @@ export async function refreshConversationSnapshot(
         signal.throwIfAborted();
         continue;
       }
+      // Seed the next refresh with a raw target even when the window cannot report a visible row.
       anchorKey = null;
       for (let index = previousIndex - 1; index >= 0; index--)
         if (present.has(before.records[index].key)) {
