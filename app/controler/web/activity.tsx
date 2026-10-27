@@ -450,7 +450,7 @@ export function sameActivityGroup(
   return Boolean(
     left &&
     right &&
-    left.source === right.source &&
+    (operations || left.source === right.source) &&
     !left.deleted &&
     !right.deleted &&
     left.prior === right.prior &&

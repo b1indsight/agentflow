@@ -1736,10 +1736,10 @@ test("footnote labels cannot collide with repeated-reference suffixes", async ({
   }
 });
 
-test("consecutive actor operations collapse across pages without hiding messages or crossing sources", async ({
+test("consecutive actor operations collapse across pages and sources without hiding messages", async ({
   page,
 }) => {
-  // CI jobs arrive on separate pages; a comment or a different commit must break the actor's group.
+  // A bot's Issue cross-reference and PR label can straddle pages; source changes must not split them.
   const check = {
     ...activity,
     source: "commit.check_runs:head",
@@ -1785,31 +1785,46 @@ test("consecutive actor operations collapse across pages without hiding messages
     ...checks,
     {
       ...event,
-      key: "review-request",
-      title: "review_requested",
-      metadata: { event: "review_requested", requested_reviewer: "b1indsight" },
+      key: "cross-reference",
+      source: "issue.timeline",
+      title: "cross-referenced",
+      occurred_at: "2026-10-24T21:02:30Z",
+      url: "https://github.com/b1indsight/agentflow/issues/88",
+      metadata: { event: "cross-referenced" },
     },
     {
       ...event,
       key: "label",
       title: "labeled",
-      metadata: { event: "labeled", label: "flow" },
+      occurred_at: "2026-10-24T21:02:32Z",
+      url: "https://github.com/b1indsight/agentflow/pull/113",
+      metadata: { event: "labeled", label: "flow:in-review" },
     },
     {
       ...activity,
       key: "message",
       source: check.source,
       author: check.author,
+      occurred_at: "2026-10-24T21:02:33Z",
       previous_version: null,
     },
-    { ...checks[0], key: "after-message" },
-    { ...checks[1], key: "other-commit", source: "commit.check_runs:other" },
+    {
+      ...checks[0],
+      key: "after-message",
+      occurred_at: "2026-10-24T21:02:34Z",
+    },
+    {
+      ...checks[1],
+      key: "other-commit",
+      source: "commit.check_runs:other",
+      occurred_at: "2026-10-24T21:02:35Z",
+    },
   ];
   await page.route("**/api/flows/42/activity?**", (route) => {
     const later = new URL(route.request().url()).searchParams.has("cursor");
     return route.fulfill({
       json: {
-        items: later ? items.slice(2) : items.slice(0, 2),
+        items: later ? items.slice(10) : items.slice(0, 10),
         snapshot: 2,
         total: items.length,
         has_more: !later,
@@ -1824,10 +1839,9 @@ test("consecutive actor operations collapse across pages without hiding messages
     name: "操作记录 · 9 条",
     exact: true,
   });
-  const events = page.getByRole("button", {
-    name: "操作记录 · 2 条",
-    exact: true,
-  });
+  const events = page
+    .locator("article[data-entry='cross-reference']")
+    .getByRole("button", { name: "操作记录 · 2 条", exact: true });
   await expect(group).toHaveAttribute("aria-expanded", "false");
   await expect(events).toHaveAttribute("aria-expanded", "false");
   await expect(
@@ -1837,17 +1851,21 @@ test("consecutive actor operations collapse across pages without hiding messages
     page.getByText(checks[4].body, { exact: true }),
   ).not.toBeVisible();
   await expect(page.getByText(activity.body, { exact: true })).toBeVisible();
+  await expect(
+    page
+      .locator("article[data-entry='after-message']")
+      .getByRole("button", { name: "操作记录 · 2 条", exact: true }),
+  ).toHaveAttribute("aria-expanded", "false");
   for (const key of ["after-message", "other-commit"]) {
     const row = page.locator(`article[data-entry='${key}']`);
-    await expect(row.locator(".event-action")).toBeVisible();
-    await expect(row.getByRole("button", { name: /^操作记录/ })).toHaveCount(0);
+    await expect(row.locator(".event-action")).not.toBeVisible();
   }
   const capture = async (state: string) => {
     const viewport = page.viewportSize()!;
     // Element screenshots cannot capture content clipped by the shared scroll root.
     await page.setViewportSize({ ...viewport, height: 2000 });
     await page.locator(".conversation-stream").screenshot({
-      path: `../../../.amp/in/artifacts/activity-operations-${state}.png`,
+      path: `../../../.amp/in/artifacts/activity-operations-cross-source-${state}.png`,
     });
     await page.setViewportSize(viewport);
   };
@@ -1872,13 +1890,25 @@ test("consecutive actor operations collapse across pages without hiding messages
     ).toHaveAttribute("href", `https://example.test/checks/${index}`);
   }
   await expect(
-    page.getByText("请求审核：b1indsight", { exact: true }),
+    page.getByText("cross-referenced", { exact: true }),
   ).not.toBeVisible();
   await events.click();
   await expect(
-    page.getByText("请求审核：b1indsight", { exact: true }),
+    page.getByText("cross-referenced", { exact: true }),
   ).toBeVisible();
-  await expect(page.getByText("添加标签：flow", { exact: true })).toBeVisible();
+  await expect(
+    page.getByText("添加标签：flow:in-review", { exact: true }),
+  ).toBeVisible();
+  for (const [key, url] of [
+    ["cross-reference", "https://github.com/b1indsight/agentflow/issues/88"],
+    ["label", "https://github.com/b1indsight/agentflow/pull/113"],
+  ]) {
+    await expect(
+      page
+        .locator(`article[data-entry='${key}']`)
+        .getByRole("link", { name: "在 GitHub 中查看" }),
+    ).toHaveAttribute("href", url);
+  }
   await capture("desktop-expanded");
   await events.click();
   await page.getByRole("tab", { name: "概览" }).click();
@@ -1896,7 +1926,7 @@ test("consecutive actor operations collapse across pages without hiding messages
   ).toBeVisible();
   await events.click();
   await expect(
-    page.getByText("请求审核：b1indsight", { exact: true }),
+    page.getByText("cross-referenced", { exact: true }),
   ).toBeVisible();
   await capture("mobile-expanded");
   expect(
