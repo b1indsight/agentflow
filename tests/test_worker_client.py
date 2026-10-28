@@ -4,8 +4,12 @@ from contextlib import asynccontextmanager
 import httpx
 import pytest
 
+from app.communication.session import Session
+from app.contracts.conversation import HistoryPage
 from app.contracts.protocol import (
     Assignment,
+    ConversationQuery,
+    ConversationResult,
     ExecutionResult,
     ExecutionTask,
     Failed,
@@ -30,6 +34,8 @@ from app.worker.execution.lifecycle import WorkerExecution
 from app.worker.state.execution import ExecutionState
 from app.worker.transport.client import WorkerClient
 from app.worker.transport.mcp import FlowToolCaller, WorkerMCP
+from tests.test_conversation_history import SESSION
+from tests.test_remote_e2e import QueueConnection
 from tests.test_worker_session import _assignment
 
 
@@ -87,6 +93,9 @@ class ScriptedConnection:
         if '"type":"result_accepted"' in self.messages[0]:
             await self.result_ready.wait()
         return self.messages.pop(0)
+
+    async def close(self, code: int = 1000) -> None:
+        pass
 
 
 @pytest.mark.asyncio
@@ -320,6 +329,9 @@ class ToolConnection:
             ).model_dump_json()
         raise ConnectionError("script complete")
 
+    async def close(self, code: int = 1000) -> None:
+        pass
+
 
 class CancellableExecutor:
     def __init__(self) -> None:
@@ -357,6 +369,9 @@ class BrokenHeartbeatConnection:
             return message
         await asyncio.Event().wait()
         raise AssertionError("unreachable")
+
+    async def close(self, code: int = 1000) -> None:
+        pass
 
 
 @pytest.mark.asyncio
@@ -412,6 +427,8 @@ async def test_replacing_client_preserves_running_executor_and_renews_lease(tmp_
         heartbeat = asyncio.Event()
         class ResumedConnection:
             first = True
+            async def close(self, code=1000):
+                pass
             async def send(self, data):
                 message = parse_worker_message(data)
                 if isinstance(message, Heartbeat):
@@ -521,9 +538,14 @@ async def test_cancelled_disconnected_tool_does_not_leak_into_resumed_or_next_as
                 )
             )
 
+        async def close(self, code=1000):
+            pass
+
         async def send(self, raw):
             message = parse_worker_message(raw)
             self.sent.append(message)
+            if isinstance(message, Started) and message.job_id == 6:
+                assert state.assignment.job_id == 6 and state.load().state == "received"
             if isinstance(message, FlowToolRequest):
                 assert message.call_id != "retired"
                 assert message.connection_epoch == "epoch-2"
@@ -550,11 +572,16 @@ async def test_cancelled_disconnected_tool_does_not_leak_into_resumed_or_next_as
             message = await self.messages.get()
             if isinstance(message, Exception):
                 raise message
-            if isinstance(message, Assignment):
-                assert state.assignment is None and state.load().acknowledged
             return message.model_dump_json()
 
-    state = ExecutionState(tmp_path)
+    class Journal(ExecutionState):
+        def record_received(self, work):
+            if work.job_id == 6:
+                # Continuous reading may prefetch the next Assignment; application still waits for ACK.
+                assert self.assignment is None and self.load().acknowledged
+            return super().record_received(work)
+
+    state = Journal(tmp_path)
     owner = WorkerExecution(worker_id="worker-1", executor=Executor(), state=state)
     client = WorkerClient(
         worker_id="worker-1",
@@ -720,6 +747,75 @@ async def test_tool_cancelled_after_borrow_is_not_sent_or_blocking_completion(tm
         assert sum(isinstance(message, Succeeded) for message in messages) == 1
         assert state.load().acknowledged
     finally:
+        await owner.shutdown()
+
+
+async def test_tool_cancelled_while_history_holds_write_lock_is_not_sent(tmp_path, monkeypatch):
+    # A query response can hold the shared write lock after the owner lends a tool request.
+    write_started, release, call_ready, borrowed = (asyncio.Event() for _ in range(4))
+    to_server, to_worker = asyncio.Queue(), asyncio.Queue()
+    caller = None
+
+    class Connection(QueueConnection):
+        async def send(self, raw):
+            if isinstance(parse_worker_message(raw), ConversationResult):
+                write_started.set()
+                await release.wait()
+            await super().send(raw)
+
+    class Executor(RecordingExecutor):
+        async def execute(self, task, secret=None, *, tool_caller):
+            nonlocal caller
+            await call_ready.wait()
+            caller = asyncio.create_task(tool_caller.call_tool(
+                "flow.open_pr", {}, call_id="cancel-while-locked",
+                vcs_outcome=VcsOutcome(backend=VcsKind.GIT, branch="flow/3", commit_sha="abc", remote_sha="abc"),
+            ))
+            with pytest.raises(asyncio.CancelledError):
+                await caller
+            return await super().execute(task, secret, tool_caller=tool_caller)
+
+    original_send = Session.send
+
+    async def observe_send(session, message, **kwargs):
+        if isinstance(message, FlowToolRequest):
+            borrowed.set()
+        return await original_send(session, message, **kwargs)
+
+    monkeypatch.setattr(Session, "send", observe_send)
+
+    state = ExecutionState(tmp_path)
+    owner = WorkerExecution(worker_id="worker", executor=Executor(), state=state)
+    work = _assignment()
+    owner.receive(work)
+    owner.start()
+    client = WorkerClient(worker_id="worker", worker_token="test", serve_ws_url="unused", execution=owner,
+                          read_history=lambda query: HistoryPage(session_id=query.session_id))
+    running = asyncio.create_task(client.run_connection(Connection(to_server, to_worker)))
+    try:
+        await to_server.get()
+        await to_worker.put(ResumeAssignment(job_id=work.job_id, assignment_token=work.assignment_token,
+            connection_epoch="new", heartbeat_interval=60).model_dump_json())
+        await to_worker.put(ConversationQuery(request_id="q", connection_epoch="new", session_id=SESSION).model_dump_json())
+        await asyncio.wait_for(write_started.wait(), 1)
+        call_ready.set()
+        await asyncio.wait_for(borrowed.wait(), 1)
+        assert caller is not None
+        caller.cancel()
+        await asyncio.gather(caller, return_exceptions=True)
+        release.set()
+        assert isinstance(parse_worker_message(await asyncio.wait_for(to_server.get(), 1)), ConversationResult)
+        terminal = parse_worker_message(await asyncio.wait_for(to_server.get(), 1))
+        assert isinstance(terminal, Succeeded), "cancelled tool must never reach the transport"
+        await to_worker.put(ResultAccepted(job_id=work.job_id, assignment_token=work.assignment_token,
+            connection_epoch="new", state=JobState.DONE).model_dump_json())
+        async with asyncio.timeout(1):
+            while not state.load().acknowledged:
+                await asyncio.sleep(0)
+    finally:
+        release.set()
+        running.cancel()
+        await asyncio.gather(running, return_exceptions=True)
         await owner.shutdown()
 
 

@@ -1,7 +1,7 @@
 # Worker / server 公共通信 Session（第二阶段）— Feature record
 
-**Stage:** Planning — 待审批；未编写实现或测试
-**PR:** [#122](https://github.com/b1indsight/agentflow/pull/122) — docs-only Draft，尚未批准实现
+**Stage:** Implemented — 实现与验证见下方时间线；发布和审查状态以 PR 为准
+**PR:** [#122](https://github.com/b1indsight/agentflow/pull/122) — 同一计划 PR 承载实现，未合并或部署
 **Bookmark:** `refactor/shared-communication-session`，计划与实现沿用同一 bookmark / PR
 **Workspace:** `.amp/in/shared-session-plan`
 
@@ -471,6 +471,82 @@ finally 完整 join 上述任务；不能先等待底层 close 返回才唤醒�
 ## 2. PR change timeline
 
 <!-- 初始方案分享后，只追加真实的需求变化、实质设计决定和实施结果；不记录单纯审批。 -->
+
+### 2026-10-28 — 公共 Session 与两端接入
+
+**背景与实现：** 以实际 fetch 后的 `main@origin`（含 #120、#123）为实现基线；#123 仅改变
+Web 文件，本批不修改这些文件或既有看板计划。增加 `app/communication`，两端实际实例化
+同一个泛型 Session。唯一 reader 解析一次，显式 reply 分类与有界 handler 绕过执行 FIFO；
+串行发送、临时 request、epoch、关闭均由 Session 持有。FastAPI socket 直接满足接口；
+worker 仅增加 send/recv/bytes 的适配器。
+
+删除 server WorkerConnection、Broker.PendingQuery/accept/pending 表，以及 Client 的
+历史 Task 集合、分流 receive 和私有 epoch。Broker 只保留全局准入、路由、页面验证与错误映射。
+全部执行通信改经 Session；原执行/恢复/结果/停止驱动仍在 Gateway/Client。Runtime 构造
+合同没有变化，因此不作机械编辑；WorkerExecution、ExecutionState、protocol、数据库均未改。
+
+**决策状态：已实现。** 延用 §1.4–1.11 的固定容量、单锁与可 join write，不添加框架、统一
+write timeout 或新配置项。guard 在实际 write Task 内运行，覆盖锁等待和调度两处取消窗口。
+`request` 的预算覆盖写锁、实际写入与回复；提前回复仍须等 send 成功。读断开也会取消未完成
+的 request-send，避免提前回复已完成 Future 后，观察者一直卡在 write 直到超时。
+不确定 write 取消会封闭连接；与已成功 write 的完成回调竞态不会误判为未知发送。
+
+**生命周期边界：** close 先封闭并唤醒查询，再由唯一清理 Task 关闭 transport、join 通信任务。
+外部重复取消 close 仍等待清理完成，不取消业务调用者或执行 owner。普通读失败先 drain 已读
+FIFO；显式 close 丢弃它。server 重叠替换在 await 旧连接关闭之后再次核对 registry 身份，
+避免较旧的注册过程重新覆盖最新 Broker 路由。worker 从合法 StopExecution/ResultAccepted
+及 Registered/Resume/Replay 确认 epoch，查询不能代替注册。
+
+**测试迁移：** 原连接测试移到公共接口，保留 FIFO/取消/溢出断言。旧 fake 的 recv 次数不再代表
+业务应用时点，改以实际 Started、Resume、ExecutionStopped 或 journal.record_received 为屏障；
+保留原 call_id/Future、ACK 落盘、进程退出和 binding 事实断言。新增对称 Session、UTF-8 字节
+上限、写锁等待取消、全局跨连接配额、坏历史页面、重叠替换、早期恢复 ACK 和重复 close 取消
+的行为覆盖。架构文档与 changelog 同步，移除当前文档中已失效的 `_receive_message` 描述。
+
+### 2026-10-28 — 简化对照与最终验证
+
+**实验设置：** 在 `.amp/in/` 临时目录复制当前 app/tests，每个变体只替换一个机制，始终从
+同一基线重建；不修改产品工作树。基线先运行相同选定用例。实验 harness 对所有变体一致地
+缩短未回复查询预算，并为 blocked-write 观察加一秒超时；首轮两个变体被外层 watchdog 截断，
+加观察超时及 fail-fast 后获得下表的明确失败位置，未把 watchdog 本身当作最终证据。
+临时源码随实验删除，脚本和生成 diff/日志仅留本 thread 的本地证据目录，不加入 PR。
+
+复现入口（在独立 workspace 内，使用已有测试解释器和隔离 PostgreSQL 环境）：
+
+```bash
+FLOWTOOL_TEST_DATABASE_URL="$(cat ../shared-session-test-database-url)" \
+  ../../../.venv/bin/python ../shared-session-ablation.py
+```
+
+每个日志含具体 pytest node ID、变体 patch 与异常；证据位置为根目录
+`.amp/in/artifacts/session-ablation/`，另在
+[实施线程](https://ampcode.com/threads/T-01a18268-4062-7317-a519-abd87ee8d147) 展示结果。
+
+| 简化变体 | 同输入实际结果 | 结论 |
+| --- | --- | --- |
+| 仅业务 receive 时允许 reader 前进 | 慢 stop 查询超时；tool/result HTTP 查询由 200 变 504 | 保留持续 reader |
+| 移除 send lock | transport 探针报 concurrent transport writer | 保留串行化 |
+| guard 移到取锁前 | 取消的 FlowToolRequest 实际进入 socket | 保留实际写入前检查 |
+| 直接 await write，移除当前 write Task | close 返回后 blocked send 仍不结束，观察超时；不能独立 join | 保留可取消/join 的 write Task |
+| inline busy 回复 | blocked write 阻止 reader 匹配已有查询回复，查询超时 | 保留独立 busy sender |
+| 每条 busy 新建 Task | 第五条不再报溢出；同一 204 条输入产生 204 个阻塞任务，基线仅 4 个 handler + 4 条缓存后溢出 | 保留有界 busy 缓存 |
+| 移除全局 64 准入 | 第 17 个 Session 查询被写出并最终超时，未即时 query_busy | 保留 Broker 全局计数 |
+| 忽略 epoch 或共用 pending 字典 | 旧 epoch/旧连接的标记 payload 完成当前请求，隔离断言失败 | 保留实例级表与完整键 |
+| 按 request_id 自动识别 reply | StopExecution 被吞，执行清理未开始 | 保留显式类型分类，ACK 留业务驱动 |
+| 等业务 receive 才清失败 pending | 无业务消费者时查询等到 timeout，未立即 worker_unavailable | 保留 reader 失败快路径 |
+
+**验证结果：** 全量 pytest 使用隔离 UTF8 PostgreSQL 实际执行通过，无数据库跳过；通信、
+历史双端 E2E、remote ASGI、owner 替换/工具重放、stop 真实父子进程与 root-lock 回归均执行。
+Ruff 和 Mypy 通过。新增公共包/测试通过格式检查；既有变更文件的整文件格式检查仍报告原有
+排版差异，已逐文件对照父版本确认，不借本批重排旧代码。console 构建及 `uv build --no-sources`
+通过，wheel 含公共 Session/静态资源且不含已删除 connection 模块。导入边界测试使用 AST
+和新解释器，公共层不加载 controller DB、worker executor 或 WebSocket SDK。
+
+**限制与交付边界：** 有既有 Starlette TestClient 弃用提示和 Vite chunk 大小提示；没有新增
+UI 交互/外观，不运行视觉验收。检查在本机 Python 3.13 环境执行，CI 使用仓库定义的 Python
+3.12；未执行生产部署、真实 GitHub 业务操作或跨进程工具恢复。同步历史读取的线程不能被
+Session 强制中止；不宣称拥有进程级历史读取预算。公共 Gateway/envelope/outbox 继续延后。
+发布前须对本实现运行项目 review gate，并把其结果与精确 head 的 CI 单独报告。
 
 ## 源码依据（规划固定基线）
 

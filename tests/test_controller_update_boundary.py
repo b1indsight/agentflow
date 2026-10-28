@@ -22,7 +22,7 @@ from app.domain.models import JobState, VcsKind, VcsOutcome
 from app.worker.execution.lifecycle import WorkerExecution
 from app.worker.state.execution import ExecutionState
 from app.worker.transport.client import WorkerClient
-from tests.test_worker_connection import Socket
+from tests.test_communication_session import Socket
 
 
 class DuplexSocket(Socket):
@@ -30,8 +30,12 @@ class DuplexSocket(Socket):
         super().__init__()
         self.headers = {"x-flowtool-worker-id": "w", "authorization": "Bearer test"}
 
+    async def accept(self):
+        pass
+
     async def close(self, code=1000):
         await super().close(code)
+        await self.incoming.put(ConnectionError(f"worker closed: {code}"))
         await self.sent.put(ConnectionError(f"controller closed: {code}"))
 
     async def send(self, raw):
@@ -41,7 +45,7 @@ class DuplexSocket(Socket):
         message = await self.sent.get()
         if isinstance(message, Exception):
             raise message
-        return message.model_dump_json()
+        return message
 
 
 def scenario(store):

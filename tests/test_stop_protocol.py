@@ -45,10 +45,26 @@ def assignment():
 class AckConnection:
     def __init__(self, request, lost=False):
         self.request, self.lost, self.sent = request, lost, []
-    async def send(self, raw): self.sent.append(parse_worker_message(raw))
+        self.receipt = asyncio.Event()
+        self.step = 0
+    async def close(self, code=1000):
+        pass
+    async def send(self, raw):
+        message = parse_worker_message(raw)
+        self.sent.append(message)
+        if isinstance(message, ExecutionStopped):
+            self.receipt.set()
     async def recv(self):
-        if self.lost: raise ConnectionError('ack lost')
-        return StopAccepted(**self.request.model_dump(exclude={'type'})).model_dump_json()
+        self.step += 1
+        if self.step == 1:
+            return self.request.model_dump_json()
+        if self.step == 2:
+            await self.receipt.wait()
+            if self.lost: raise ConnectionError('ack lost')
+            return StopAccepted(**self.request.model_dump(exclude={'type'})).model_dump_json()
+        if self.step == 3:
+            return Registered(connection_epoch=self.request.connection_epoch, heartbeat_interval=60).model_dump_json()
+        raise ConnectionError("script complete")
 
 
 async def test_stop_kills_owned_process_and_child_then_replays_lost_ack(tmp_path):
@@ -74,9 +90,9 @@ async def test_stop_kills_owned_process_and_child_then_replays_lost_ack(tmp_path
             while not ready.exists(): await asyncio.sleep(0.01)
         client = WorkerClient(worker_id='w', worker_token='secret', serve_ws_url='unused',
                               execution=owner, read_history=journal.read)
-        client._connection_epoch = 'epoch'
         request = StopExecution(job_id=1, flow_id=1, assignment_token='token', connection_epoch='epoch', request_id='stop')
-        with pytest.raises(ConnectionError): await client._handle_stop(AckConnection(request, lost=True), request)
+        with pytest.raises(ConnectionError, match="ack lost"):
+            await client.run_connection(AckConnection(request, lost=True))
         assert journal.load().stopped is not None
         assert not journal.load().acknowledged
         # Both processes must actually be gone, not just absent from the asyncio task table.
@@ -92,10 +108,10 @@ async def test_stop_kills_owned_process_and_child_then_replays_lost_ack(tmp_path
                                      executor=SimpleNamespace(reclaim_workspace=AsyncMock())),
                                  read_history=restarted_state.read)
         request = request.model_copy(update={'connection_epoch': 'new'})
-        restarted._connection_epoch = 'new'
         connection = AckConnection(request)
-        await restarted._handle_stop(connection, request)
-        assert isinstance(connection.sent[0], ExecutionStopped)
+        with pytest.raises(ConnectionError, match="script complete"):
+            await restarted.run_connection(connection)
+        assert any(isinstance(message, ExecutionStopped) for message in connection.sent)
         assert journal.load().acknowledged
     finally:
         await owner.shutdown()
@@ -128,19 +144,6 @@ async def test_replacing_client_during_stop_preserves_cleanup_and_original_recei
                 cleaning.set()
                 await release.wait()
 
-    class Connection(AckConnection):
-        step = 0
-
-        async def recv(self):
-            self.step += 1
-            if self.step == 1:
-                return self.request.model_dump_json()
-            if self.step == 2:
-                return await super().recv()
-            if self.step == 3:
-                return Registered(connection_epoch=self.request.connection_epoch, heartbeat_interval=60).model_dump_json()
-            raise ConnectionError("script complete")
-
     state, executor = ExecutionState(tmp_path), Executor()
     owner = WorkerExecution(worker_id="w", executor=executor, state=state)
     owner.receive(assignment())
@@ -150,7 +153,7 @@ async def test_replacing_client_during_stop_preserves_cleanup_and_original_recei
     def connect(request):
         client = WorkerClient(worker_id="w", worker_token="test", serve_ws_url="unused",
                               execution=owner, read_history=state.read)
-        connection = Connection(request)
+        connection = AckConnection(request)
         return asyncio.create_task(client.run_connection(connection)), connection
 
     first = second = None
@@ -191,10 +194,9 @@ async def test_restarted_worker_does_not_infer_stopped_from_absent_task(tmp_path
     client = WorkerClient(worker_id='w', worker_token='secret', serve_ws_url='unused',
                           execution=WorkerExecution(worker_id='w', executor=SimpleNamespace(), state=journal),
                           read_history=journal.read)
-    client._connection_epoch = 'epoch'
     request = StopExecution(job_id=1, flow_id=1, assignment_token='token', connection_epoch='epoch', request_id='stop')
     with pytest.raises(WorkerProtocolError, match='ownership is unknown'):
-        await client._handle_stop(AckConnection(request), request)
+        await client.run_connection(AckConnection(request))
     assert journal.load().stopped is None
 
 

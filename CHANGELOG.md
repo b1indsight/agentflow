@@ -8,6 +8,11 @@
 
 ## Unreleased
 
+- Worker 与 server 共用连接级 `Session`，统一单 reader、有界执行 FIFO、串行发送与临时查询关联，
+  删除原 WorkerConnection、Broker pending 表及 Client 查询分流任务；慢工具、结果应用和停止清理
+  期间仍能查询历史。保留全局/单连接配额、超时和 epoch 隔离，发送前检查工具是否已取消；
+  关闭只回收通信，不取消执行或释放 binding。wire v15、journal v4、数据库和结果/停止 ACK 不变；
+  公共 Gateway、envelope 和 outbox 留待后续阶段。
 - Worker 执行生命周期移入进程级 `WorkerExecution`，持久状态明确为 `ExecutionState`；
   替换整个 Client 不取消或重复执行，工具调用保留原 call_id 与等待者，离线完成先落盘再重放。
   显式停止清理不受断线取消，Runtime 等已拥有的子进程清理结束后再释放根锁；
