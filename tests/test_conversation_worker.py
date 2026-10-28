@@ -11,7 +11,8 @@ from app.contracts.protocol import (
     Registered,
     parse_worker_message,
 )
-from app.worker.state.session import WorkerSession
+from app.worker.execution.lifecycle import WorkerExecution
+from app.worker.state.execution import ExecutionState
 from app.worker.transport.client import WorkerClient
 from tests.test_conversation_history import SESSION
 
@@ -33,14 +34,16 @@ async def test_query_does_not_block_execution_messages(tmp_path) -> None:
     connection = Connection()
     started, release = threading.Event(), threading.Event()
 
-    class Session(WorkerSession):
+    class State(ExecutionState):
         def read(self, query):
             started.set()
             assert release.wait(timeout=5)
             return HistoryPage(session_id=query.session_id)
 
+    state = State(tmp_path)
     client = WorkerClient(worker_id="worker-1", worker_token="token", serve_ws_url="unused",
-                          executor=SimpleNamespace(), session=Session(tmp_path))
+                          execution=WorkerExecution(worker_id="worker-1", executor=SimpleNamespace(), state=state),
+                          read_history=state.read)
     query = ConversationQuery(request_id="q1", connection_epoch="e1", session_id=SESSION)
     await connection.incoming.put(query.model_dump_json())
     registered = Registered(connection_epoch="e1", heartbeat_interval=10).model_dump_json()
@@ -65,8 +68,10 @@ async def test_query_does_not_block_execution_messages(tmp_path) -> None:
 @pytest.mark.asyncio
 async def test_bad_cursor_returns_correlated_query_error(tmp_path):
     connection = Connection()
+    state = ExecutionState(tmp_path)
     client = WorkerClient(worker_id="worker", worker_token="token", serve_ws_url="unused",
-                          executor=SimpleNamespace(), session=WorkerSession(tmp_path))
+                          execution=WorkerExecution(worker_id="worker", executor=SimpleNamespace(), state=state),
+                          read_history=state.read)
     request = ConversationQuery(request_id="bad-cursor", connection_epoch="epoch",
                                 session_id=SESSION, cursor="invalid-base64")
     await client._answer_history(connection, request)

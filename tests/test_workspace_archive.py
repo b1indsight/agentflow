@@ -18,7 +18,7 @@ from app.domain.models import JobState
 from app.worker.execution.executor import WorkerExecutor
 from app.worker.execution.vcs import VcsVerificationError
 from app.worker.execution.workspaces import RepositoryWorkspaces
-from app.worker.state.session import SessionError, WorkerSession
+from app.worker.state.execution import ExecutionState, ExecutionStateError
 from tests.test_vcs import _git_fixture
 from tests.test_worker_executor import RecordingAgent, RecordingToolCaller
 from tests.test_worker_session import _assignment
@@ -43,7 +43,7 @@ async def workspace(tmp_path: Path, *, start=True, overflow=False):
         await pool.acquire("owner/repo", 999, base_branch="main", remote="origin", push_token=None)
     binding = await pool.acquire("owner/repo", 3, base_branch="main", remote="origin", push_token=None)
     repo = pool.path(binding)
-    journal = WorkerSession(root)
+    journal = ExecutionState(root)
     journal.record_received(_assignment())
     journal.record_started()
     journal.bind_workspace(binding)
@@ -56,7 +56,7 @@ async def workspace(tmp_path: Path, *, start=True, overflow=False):
     journal.record_received(assignment)
     if start:
         journal.record_started()
-    executor = WorkerExecutor(root, RecordingAgent(), worker_id="worker-a", session=journal)
+    executor = WorkerExecutor(root, RecordingAgent(), worker_id="worker-a", state=journal)
     return managed_seed, repo, journal, executor, assignment
 
 
@@ -126,8 +126,8 @@ async def test_copied_journal_cannot_authorize_another_worker_root(tmp_path):
     await executor.execute(assignment.task, tool_caller=RecordingToolCaller())
     another_root = tmp_path / "new-root"
     shutil.copytree(journal.path.parent, another_root)
-    with pytest.raises(SessionError, match="root"):
-        WorkerSession(another_root).load()
+    with pytest.raises(ExecutionStateError, match="root"):
+        ExecutionState(another_root).load()
 
 
 async def test_unstarted_archive_reassignment_retains_original_allocation_proof(tmp_path):
@@ -142,6 +142,6 @@ async def test_unstarted_archive_reassignment_retains_original_allocation_proof(
 async def test_archive_with_lost_journal_does_not_adopt_an_existing_directory(tmp_path):
     seed, repo, journal, _executor, assignment = await workspace(tmp_path)
     journal.path.unlink()
-    with pytest.raises(SessionError, match="original Flow"):
+    with pytest.raises(ExecutionStateError, match="original Flow"):
         journal.record_received(assignment)
     assert seed.is_dir() and repo.is_dir()

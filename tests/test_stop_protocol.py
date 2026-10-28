@@ -10,6 +10,8 @@ from app.contracts.protocol import (
     Assignment,
     ExecutionStopped,
     InitialTask,
+    InitialTaskResult,
+    Registered,
     StopAccepted,
     StopExecution,
     parse_server_message,
@@ -22,9 +24,10 @@ from app.controler.workflow.service import ControlService
 from app.controler.workflow.tools import FlowToolService
 from app.domain.models import JobKind, JobState
 from app.worker.execution.executor import WorkerExecutor
+from app.worker.execution.lifecycle import WorkerExecution, WorkerProtocolError
 from app.worker.execution.vcs import _run
-from app.worker.state.session import WorkerSession
-from app.worker.transport.client import WorkerClient, WorkerProtocolError
+from app.worker.state.execution import ExecutionState
+from app.worker.transport.client import WorkerClient
 from tests.github import RecordingGitHub
 from tests.test_coordinator import coordinator
 from tests.test_remote_e2e import QueueConnection, QueueSocket
@@ -50,23 +53,30 @@ class AckConnection:
 
 async def test_stop_kills_owned_process_and_child_then_replays_lost_ack(tmp_path):
     work = assignment()
-    journal = WorkerSession(tmp_path)
-    journal.record_received(work)
-    journal.record_started()
+    journal = ExecutionState(tmp_path)
     ready = tmp_path / 'pids'
     script = ("import os,subprocess,sys,time; from pathlib import Path; "
               "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)']); "
               "Path(sys.argv[1]).write_text(str(os.getpid())+' '+str(child.pid)); time.sleep(60)")
-    execution = asyncio.create_task(_run(sys.executable, '-c', script, str(ready)))
+    class Executor:
+        async def execute(self, task, secret=None, *, tool_caller):
+            await _run(sys.executable, '-c', script, str(ready))
+            raise AssertionError("process should be cancelled")
+
+        async def reclaim_workspace(self):
+            pass
+
+    owner = WorkerExecution(worker_id='w', executor=Executor(), state=journal)
+    owner.receive(work)
+    owner.start()
     try:
         async with asyncio.timeout(5):
             while not ready.exists(): await asyncio.sleep(0.01)
         client = WorkerClient(worker_id='w', worker_token='secret', serve_ws_url='unused',
-                              executor=SimpleNamespace(reclaim_workspace=AsyncMock()), session=journal)
-        client.session.assignment, client._execution, client._connection_epoch = work, execution, 'epoch'
+                              execution=owner, read_history=journal.read)
+        client._connection_epoch = 'epoch'
         request = StopExecution(job_id=1, flow_id=1, assignment_token='token', connection_epoch='epoch', request_id='stop')
         with pytest.raises(ConnectionError): await client._handle_stop(AckConnection(request, lost=True), request)
-        assert execution.cancelled()
         assert journal.load().stopped is not None
         assert not journal.load().acknowledged
         # Both processes must actually be gone, not just absent from the asyncio task table.
@@ -76,8 +86,11 @@ async def test_stop_kills_owned_process_and_child_then_replays_lost_ack(tmp_path
                     try: os.kill(pid, 0)
                     except ProcessLookupError: break
                     await asyncio.sleep(0.01)
+        restarted_state = ExecutionState(tmp_path)
         restarted = WorkerClient(worker_id='w', worker_token='secret', serve_ws_url='unused',
-                                 executor=SimpleNamespace(reclaim_workspace=AsyncMock()), session=WorkerSession(tmp_path))
+                                 execution=WorkerExecution(worker_id='w', state=restarted_state,
+                                     executor=SimpleNamespace(reclaim_workspace=AsyncMock())),
+                                 read_history=restarted_state.read)
         request = request.model_copy(update={'connection_epoch': 'new'})
         restarted._connection_epoch = 'new'
         connection = AckConnection(request)
@@ -85,17 +98,99 @@ async def test_stop_kills_owned_process_and_child_then_replays_lost_ack(tmp_path
         assert isinstance(connection.sent[0], ExecutionStopped)
         assert journal.load().acknowledged
     finally:
-        execution.cancel()
-        await asyncio.gather(execution, return_exceptions=True)
+        await owner.shutdown()
+
+
+@pytest.mark.parametrize("checkpoint", ["executor", "workspace"])
+async def test_replacing_client_during_stop_preserves_cleanup_and_original_receipt(tmp_path, checkpoint):
+    # Disconnect while cleanup is suspended, then let a new client join the same authorized stop.
+    started, cleaning, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    class Executor:
+        invocations = 0
+        reclaimed = 0
+
+        async def execute(self, task, secret=None, *, tool_caller):
+            self.invocations += 1
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                if checkpoint == "executor":
+                    cleaning.set()
+                    await release.wait()
+            # Returning during cancellation cleanup is not a successful job result.
+            return InitialTaskResult(session_id="session", last_message="cancelled", exit_code=0)
+
+        async def reclaim_workspace(self):
+            self.reclaimed += 1
+            if checkpoint == "workspace":
+                cleaning.set()
+                await release.wait()
+
+    class Connection(AckConnection):
+        step = 0
+
+        async def recv(self):
+            self.step += 1
+            if self.step == 1:
+                return self.request.model_dump_json()
+            if self.step == 2:
+                return await super().recv()
+            if self.step == 3:
+                return Registered(connection_epoch=self.request.connection_epoch, heartbeat_interval=60).model_dump_json()
+            raise ConnectionError("script complete")
+
+    state, executor = ExecutionState(tmp_path), Executor()
+    owner = WorkerExecution(worker_id="w", executor=executor, state=state)
+    owner.receive(assignment())
+    owner.start()
+    request = StopExecution(job_id=1, flow_id=1, assignment_token="token", connection_epoch="epoch", request_id="stop")
+
+    def connect(request):
+        client = WorkerClient(worker_id="w", worker_token="test", serve_ws_url="unused",
+                              execution=owner, read_history=state.read)
+        connection = Connection(request)
+        return asyncio.create_task(client.run_connection(connection)), connection
+
+    first = second = None
+    try:
+        await asyncio.wait_for(started.wait(), 1)
+        first, _ = connect(request)
+        await asyncio.wait_for(cleaning.wait(), 1)
+        first.cancel()
+        await asyncio.gather(first, return_exceptions=True)
+        assert state.load().terminal is None and not state.load().acknowledged
+        for field, wrong in (("job_id", 99), ("flow_id", 99), ("assignment_token", "wrong"), ("request_id", "wrong")):
+            with pytest.raises(WorkerProtocolError):
+                await owner.stop(request.model_copy(update={field: wrong}))
+        second, connection = connect(request.model_copy(update={"connection_epoch": "new"}))
+        release.set()
+        with pytest.raises(ConnectionError, match="script complete"):
+            await asyncio.wait_for(second, 2)
+        receipt = next(message for message in connection.sent if isinstance(message, ExecutionStopped))
+        assert receipt.connection_epoch == "new"
+        assert receipt.execution_nonce == state.load().execution_nonce
+        assert receipt.request_id == request.request_id
+        assert state.load().acknowledged and state.load().terminal is None
+        assert executor.invocations == executor.reclaimed == 1
+    finally:
+        release.set()
+        for task in (first, second):
+            if task is not None:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+        await owner.shutdown()
 
 
 async def test_restarted_worker_does_not_infer_stopped_from_absent_task(tmp_path):
     work = assignment()
-    journal = WorkerSession(tmp_path)
+    journal = ExecutionState(tmp_path)
     journal.record_received(work)
     journal.record_started()
     client = WorkerClient(worker_id='w', worker_token='secret', serve_ws_url='unused',
-                          executor=SimpleNamespace(), session=journal)
+                          execution=WorkerExecution(worker_id='w', executor=SimpleNamespace(), state=journal),
+                          read_history=journal.read)
     client._connection_epoch = 'epoch'
     request = StopExecution(job_id=1, flow_id=1, assignment_token='token', connection_epoch='epoch', request_id='stop')
     with pytest.raises(WorkerProtocolError, match='ownership is unknown'):
@@ -123,7 +218,7 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path, o
     class Executor(WorkerExecutor):
         async def execute(self, task, secret=None, *, tool_caller=None):
             binding = await acquire(self.workspaces, task.flow_id)
-            self.session.bind_workspace(binding)
+            self.state.bind_workspace(binding)
             path = self.workspaces.path(binding)
             (path / 'README.md').write_text('cancelled staged edit')
             _git('add', 'README.md', cwd=path)
@@ -154,11 +249,12 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path, o
         results=Mock(spec=ResultApplication),
         conversations=ConversationBroker(),
     )
-    session = WorkerSession(root)
-    executor = Executor(root, RecordingAgent(), worker_id='worker-1', session=session)
+    session = ExecutionState(root)
+    executor = Executor(root, RecordingAgent(), worker_id='worker-1', state=session)
     unrelated = await acquire(executor.workspaces, 999) if overflow else None
     client = WorkerClient(worker_id='worker-1', worker_token='worker-secret', serve_ws_url='unused',
-                          executor=executor, session=session)
+                          execution=WorkerExecution(worker_id='worker-1', executor=executor, state=session),
+                          read_history=session.read)
     server = asyncio.create_task(gateway.handle(QueueSocket(to_serve, to_worker)))
     worker = asyncio.create_task(client.run_connection(Connection(to_serve, to_worker)))
     allocations = []
@@ -196,7 +292,7 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path, o
     finally:
         server.cancel(); worker.cancel()
         await asyncio.gather(server, worker, return_exceptions=True)
-        await client._cancel_execution()
+        await client.execution.shutdown()
 
 
 @pytest.mark.parametrize("failure", ["cleanup", "lost-ack"])
@@ -241,10 +337,11 @@ async def test_stop_reconnect_reconciles_successor(store, tmp_path, monkeypatch,
                             worker_tokens={"worker-1": "worker-secret"}, heartbeat_interval=.01,
                             poll_interval=.01, tools=subject.tools, results=subject.results,
                             conversations=ConversationBroker())
-    session = WorkerSession(tmp_path)
+    session = ExecutionState(tmp_path)
     executor = Executor()
     client = WorkerClient(worker_id="worker-1", worker_token="worker-secret", serve_ws_url="unused",
-                          executor=executor, session=session)
+                          execution=WorkerExecution(worker_id="worker-1", executor=executor, state=session),
+                          read_history=session.read)
 
     class Socket(QueueSocket):
         async def send_text(self, raw):
@@ -301,4 +398,4 @@ async def test_stop_reconnect_reconciles_successor(store, tmp_path, monkeypatch,
     finally:
         server.cancel(); worker.cancel()
         await asyncio.gather(server, worker, return_exceptions=True)
-        await client._cancel_execution()
+        await client.execution.shutdown()

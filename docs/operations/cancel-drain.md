@@ -15,6 +15,10 @@ worker 必须持有匹配 journal，当前执行只能由持有该 task / 子进
 每次 assignment 在启动前持久化执行 nonce；停止凭据包含 nonce，原 journal 继续保存直到 ACK。
 ACK 丢失后重连重发同一凭据，控制面按 digest 幂等确认；不根据旧 PID 杀进程。
 
+`WorkerExecution` 持有执行与停止清理任务。断开或替换 WorkerClient 只关闭通信，
+已授权的停止继续清理；新连接按同一完整停止身份等待原操作，再发送新 epoch 的回执。
+执行离线自然完成时主动写 journal，重连只重放结果，不重新启动编码。
+
 重放旧 stop 时仍须对账控制面已派发的下一任务。若原 worker 返回的 journal 未记录该任务，
 只有未 dispatch 的准备任务可重排；普通已 dispatch 任务记录明确失败，不自动重新运行。
 CLOSED/MERGED 的缺失 journal 仍保留原绑定，等待人工核验交付事实。
@@ -65,8 +69,11 @@ serve 用 Uvicorn 的 20 秒 graceful shutdown 窗口停止接收并收敛请求
 STOP 请求和有效凭据握手能完成取消。未写出凭据的进程崩溃依然按未知执行处理。
 容器 stop grace / Kubernetes terminationGracePeriod 至少 45 秒，超时 SIGKILL 只靠持久事实恢复。
 
+Runtime 先停止并 join 通信，再等待 execution owner 的停止/执行清理，最后释放根锁。
+重复取消外层运行任务不会提前释放根锁；普通 shutdown 不回收 workspace、不合成结果或停止 ACK。
+
 当前仅支持协议 v15 / journal v4 / workspace manifest v1，serve/worker 必须使用同一版本；版本定义见
-[协议](../../app/contracts/protocol.py)与 [WorkerSession](../../app/worker/state/session.py)。仓库未部署，未保留跨版本
+[协议](../../app/contracts/protocol.py)与 [ExecutionState](../../app/worker/state/execution.py)。仓库未部署，未保留跨版本
 数据库或 journal 迁移。当前版本停机重启仍应先 drain，再保存数据和 worker root/HOME；
 按原身份启动并核对恢复状态后 undrain。不要通过编辑 journal 版本号绕过验证。
 

@@ -1,4 +1,4 @@
-"""Persistent worker session: execution state, recovery evidence and conversation access."""
+"""Execution state and durable recovery evidence, independent of a connection's lifetime."""
 
 from __future__ import annotations
 
@@ -33,11 +33,11 @@ _TERMINAL: TypeAdapter[TerminalMessage] = TypeAdapter(TerminalMessage)
 _JOURNAL_JSON: TypeAdapter[dict[str, JsonValue]] = TypeAdapter(dict[str, JsonValue])
 
 
-class SessionError(RuntimeError):
+class ExecutionStateError(RuntimeError):
     """The persisted assignment journal cannot be safely interpreted."""
 
 
-class SessionState(BaseModel):
+class ExecutionRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     version: Literal[4] = 4
@@ -59,14 +59,14 @@ class SessionState(BaseModel):
     stopped: ExecutionStopped | None = None
 
 
-def _parse_journal(payload: str) -> SessionState:
+def _parse_journal(payload: str) -> ExecutionRecord:
     """Read v4 journals with v14 receipts without widening the wire protocol or writing files.
 
     Only receipt version tags changed in v15. Preserve their content and ownership; the next
     normal state write under the runtime's root lock will persist the current representation.
     """
     try:
-        return SessionState.model_validate_json(payload)
+        return ExecutionRecord.model_validate_json(payload)
     except ValidationError:
         pass
 
@@ -81,7 +81,7 @@ def _parse_journal(payload: str) -> SessionState:
             raise ValueError("unsupported or mixed journal message versions")
         message["protocol_version"] = 15
 
-    record = SessionState.model_validate_json(json.dumps(data))
+    record = ExecutionRecord.model_validate_json(json.dumps(data))
     if record.terminal is not None and (
         (record.terminal.job_id, record.terminal.assignment_token)
         != (record.job_id, record.assignment_token)
@@ -96,7 +96,7 @@ def _parse_journal(payload: str) -> SessionState:
     return record
 
 
-class WorkerSession:
+class ExecutionState:
     """Own local assignment state and its durable evidence across transport reconnects."""
 
     def __init__(self, worker_root: Path) -> None:
@@ -124,14 +124,28 @@ class WorkerSession:
     def validate_recovery(self, job_id: int, token: str) -> None:
         record = self._required()
         if (record.job_id, record.assignment_token) != (job_id, token):
-            raise SessionError("recovery response does not match the worker session")
+            raise ExecutionStateError("recovery response does not match the worker session")
 
     def resume(self, connection_epoch: str, *, executor_active: bool) -> Assignment:
         """Rebind a live execution; only archive cleanup can resume after process loss."""
+        record = self._required()
+        assignment = self.assignment
+        if assignment is not None and (
+            assignment.job_id, assignment.flow_id, assignment.assignment_token
+        ) != (record.job_id, record.flow_id, record.assignment_token):
+            raise ExecutionStateError("recovery response does not match the worker session")
+        # A live task may finish after Register but before ResumeAssignment. Its durable
+        # result can rebind only with the original in-memory assignment, never after restart.
+        if (assignment is not None and record.terminal is not None
+                and record.state in {"succeeded", "failed"}
+                and not record.acknowledged and record.stopped is None
+                and (record.terminal.job_id, record.terminal.assignment_token)
+                == (record.job_id, record.assignment_token)):
+            self.assignment = assignment.model_copy(update={"connection_epoch": connection_epoch})
+            return self.assignment
         if self.assignment is None or not executor_active:
-            record = self._required()
             if record.state != "started" or record.archive_task is None:
-                raise SessionError("serve resumed an assignment without a live executor")
+                raise ExecutionStateError("serve resumed an assignment without a live executor")
             self.assignment = Assignment(
                 job_id=record.job_id, flow_id=record.flow_id,
                 assignment_token=record.assignment_token, connection_epoch=connection_epoch,
@@ -143,14 +157,14 @@ class WorkerSession:
     def replay(self, connection_epoch: str) -> TerminalMessage:
         record = self._required()
         if record.terminal is None:
-            raise SessionError("serve requested a result missing from the session")
+            raise ExecutionStateError("serve requested a result missing from the session")
         return record.terminal.model_copy(update={"connection_epoch": connection_epoch})
 
     def complete(self, outcome: ExecutionResult | Exception) -> TerminalMessage:
         """Redact the ephemeral push capability before persisting any execution outcome."""
         assignment = self.assignment
         if assignment is None:
-            raise SessionError("active assignment is missing")
+            raise ExecutionStateError("active assignment is missing")
         if isinstance(outcome, Exception):
             terminal: TerminalMessage = Failed(
                 job_id=assignment.job_id, assignment_token=assignment.assignment_token,
@@ -170,27 +184,27 @@ class WorkerSession:
         self.record_terminal(terminal)
         return terminal
 
-    def load(self) -> SessionState | None:
+    def load(self) -> ExecutionRecord | None:
         if not self.path.exists():
             return None
         try:
             record = _parse_journal(self.path.read_text())
         except (OSError, ValidationError, ValueError) as exc:
-            raise SessionError(f"invalid worker journal at {self.path}") from exc
+            raise ExecutionStateError(f"invalid worker journal at {self.path}") from exc
         if record.root_identity != self._root_identity():
-            raise SessionError("worker journal belongs to another worker root")
+            raise ExecutionStateError("worker journal belongs to another worker root")
         return record
 
-    def record_received(self, assignment: Assignment) -> SessionState:
+    def record_received(self, assignment: Assignment) -> ExecutionRecord:
         previous = self.load()
         archive = assignment.task if isinstance(assignment.task, ArchiveTask) else None
         if archive is not None and (previous is None or previous.flow_id != archive.flow_id
                                     or not (previous.acknowledged or previous.state == "received")):
-            raise SessionError("archive requires the original Flow's worker journal")
+            raise ExecutionStateError("archive requires the original Flow's worker journal")
         if (previous is not None and previous.archive_task is not None
                 and (previous.state not in {"received", "failed"} or previous.archive_task != archive)):
-            raise SessionError("cannot replace unacknowledged archive cleanup evidence")
-        record = SessionState(
+            raise ExecutionStateError("cannot replace unacknowledged archive cleanup evidence")
+        record = ExecutionRecord(
             job_id=assignment.job_id,
             flow_id=assignment.flow_id,
             assignment_token=assignment.assignment_token,
@@ -212,7 +226,7 @@ class WorkerSession:
         record = self._required()
         if (record.job_id, record.flow_id, record.assignment_token, record.execution_nonce) != (
                 receipt.job_id, receipt.flow_id, receipt.assignment_token, receipt.execution_nonce):
-            raise SessionError("stop receipt does not match owned execution")
+            raise ExecutionStateError("stop receipt does not match owned execution")
         record.stopped = receipt
         record.acknowledged = False
         self._write(record)
@@ -221,7 +235,7 @@ class WorkerSession:
         record = self._required()
         if record.stopped is None or any(getattr(record.stopped, field) != getattr(accepted, field)
                                         for field in ('request_id', 'flow_id', 'job_id', 'assignment_token')):
-            raise SessionError("stop acknowledgement does not match receipt")
+            raise ExecutionStateError("stop acknowledgement does not match receipt")
         record.acknowledged = True
         self._write(record)
         self.assignment = None
@@ -231,7 +245,7 @@ class WorkerSession:
         record = self._required()
         if (record.state != "started" or binding.flow_id != record.flow_id
                 or (record.workspace is not None and record.workspace != binding)):
-            raise SessionError("workspace does not match the journal allocation")
+            raise ExecutionStateError("workspace does not match the journal allocation")
         record.workspace = binding
         self._write(record)
 
@@ -240,7 +254,7 @@ class WorkerSession:
         record = self._required()
         if (record.state != "started" or record.archive_task != task or record.workspace is None
                 or (record.workspace.flow_id, record.workspace.repository) != (task.flow_id, task.repo)):
-            raise SessionError("archive cleanup does not match the journal assignment")
+            raise ExecutionStateError("archive cleanup does not match the journal assignment")
         if not record.cleanup_verified:
             record.cleanup_verified = True
             self._write(record)
@@ -252,10 +266,10 @@ class WorkerSession:
         stat = root.stat()
         return str(root), stat.st_dev, stat.st_ino
 
-    def record_started(self) -> SessionState:
+    def record_started(self) -> ExecutionRecord:
         record = self._required()
         if record.state != "received":
-            raise SessionError(f"cannot start journal in {record.state} state")
+            raise ExecutionStateError(f"cannot start journal in {record.state} state")
         record.state = "started"
         self._write(record)
         return record
@@ -264,9 +278,9 @@ class WorkerSession:
         """Durably consume the single fallback before starting another process."""
         record = self._required()
         if record.state != "started" or record.fallback_consumed:
-            raise SessionError("revision invocation cannot be safely restarted")
+            raise ExecutionStateError("revision invocation cannot be safely restarted")
         if phase == "resume" and record.revision_phase is not None:
-            raise SessionError("resume has already been attempted")
+            raise ExecutionStateError("resume has already been attempted")
         record.revision_phase = phase
         record.fallback_consumed = phase == "fallback"
         self._write(record)
@@ -274,20 +288,20 @@ class WorkerSession:
     def finish_invocation(self, invocation: RevisionExecutionRecord) -> list[RevisionExecutionRecord]:
         record = self._required()
         if record.state != "started" or record.revision_phase != invocation.mode:
-            raise SessionError("invocation does not match durable revision phase")
+            raise ExecutionStateError("invocation does not match durable revision phase")
         record.invocations.append(invocation)
         self._write(record)
         return record.invocations
 
-    def record_terminal(self, terminal: TerminalMessage) -> SessionState:
+    def record_terminal(self, terminal: TerminalMessage) -> ExecutionRecord:
         record = self._required()
         if record.state not in ("started", "succeeded", "failed"):
-            raise SessionError(f"cannot finish journal in {record.state} state")
+            raise ExecutionStateError(f"cannot finish journal in {record.state} state")
         if (terminal.job_id, terminal.assignment_token) != (
             record.job_id,
             record.assignment_token,
         ):
-            raise SessionError("terminal result does not match the journal assignment")
+            raise ExecutionStateError("terminal result does not match the journal assignment")
         payload = terminal.model_dump(mode="json")
         record.state = "succeeded" if isinstance(terminal, Succeeded) else "failed"
         record.result_digest = terminal_digest(terminal)
@@ -298,9 +312,9 @@ class WorkerSession:
     def acknowledge(self, job_id: int, state: JobState) -> None:
         record = self._required()
         if record.job_id != job_id or record.state not in ("succeeded", "failed"):
-            raise SessionError("result acknowledgement does not match terminal journal")
+            raise ExecutionStateError("result acknowledgement does not match terminal journal")
         if state not in (JobState.DONE, JobState.FAILED):
-            raise SessionError("result acknowledgement is not terminal")
+            raise ExecutionStateError("result acknowledgement is not terminal")
         if record.archive_task is None or state is JobState.FAILED:
             # Preserve root/Flow provenance between jobs and cleanup proof after partial failure.
             record.acknowledged = True
@@ -313,21 +327,21 @@ class WorkerSession:
     def clear_rejected(self, job_id: int) -> None:
         record = self._required()
         if record.job_id != job_id:
-            raise SessionError("recovery rejection does not match journal")
+            raise ExecutionStateError("recovery rejection does not match journal")
         if record.state == "received":
             # No executor ran. Keep the root/Flow provenance when merge supersedes this command.
             self.assignment = None
             return
         if record.archive_task is not None:
-            raise SessionError("archive recovery rejected; retain cleanup evidence for reconciliation")
+            raise ExecutionStateError("archive recovery rejected; retain cleanup evidence for reconciliation")
         self.path.unlink()
         self.assignment = None
 
-    def _required(self) -> SessionState:
+    def _required(self) -> ExecutionRecord:
         record = self.load()
         if record is None:
-            raise SessionError("worker journal is missing")
+            raise ExecutionStateError("worker journal is missing")
         return record
 
-    def _write(self, record: SessionState) -> None:
+    def _write(self, record: ExecutionRecord) -> None:
         write_private_record(self.path, record.model_dump_json())

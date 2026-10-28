@@ -54,7 +54,7 @@ from app.worker.execution.vcs import (
     verify_revision_outcome,
 )
 from app.worker.execution.workspaces import RepositoryWorkspaces
-from app.worker.state.session import WorkerSession
+from app.worker.state.execution import ExecutionState
 from tests.github import NATIVE_PULL_REQUEST_REFETCH, RecordingGitHub
 from tests.review_memory import review_context
 from tests.test_coordinator import MemoryStore, apply_result, coordinator, prepare
@@ -98,7 +98,7 @@ async def revision_workspace(tmp_path):
         repository="owner/repo", token=SecretStr("fresh-token"),
         expires_at=datetime.now(UTC) + timedelta(minutes=30),
     ))
-    journal = WorkerSession(root)
+    journal = ExecutionState(root)
     journal.record_received(Assignment(job_id=1, flow_id=1, assignment_token="token",
                                       connection_epoch="epoch", task=task, secret=secret))
     journal.record_started()
@@ -140,7 +140,7 @@ async def test_revision_verifies_real_git_delivery(revision_workspace, behavior,
     # A successful process can leave unpushed or dirty work; neither closes review feedback.
     root, repo, task, secret = revision_workspace
     agent = RevisionAgent(repo, behavior)
-    result = await WorkerExecutor(root, agent, session=WorkerSession(root), worker_id="w").execute(task, secret, tool_caller=RecordingToolCaller())
+    result = await WorkerExecutor(root, agent, state=ExecutionState(root), worker_id="w").execute(task, secret, tool_caller=RecordingToolCaller())
     assert (result.exit_code == 0) is success
     assert agent.calls[0][1].github.token.get_secret_value() == "fresh-token"
     assert "flow.open_pr" not in agent.calls[0][2]
@@ -159,7 +159,7 @@ async def test_fallback_only_when_execution_is_known_not_to_have_started(
     root, repo, task, secret = revision_workspace
     task = task.model_copy(update={"session_id": session})
     agent = RevisionAgent(repo, behavior)
-    result = await WorkerExecutor(root, agent, session=WorkerSession(root), worker_id="w").execute(task, secret, tool_caller=RecordingToolCaller())
+    result = await WorkerExecutor(root, agent, state=ExecutionState(root), worker_id="w").execute(task, secret, tool_caller=RecordingToolCaller())
     assert [call[0] for call in agent.calls] == expected
     assert all(call[1].mcp_url is None and call[1].mcp_token is None for call in agent.calls)
     if expected[-1] == "start":
@@ -177,7 +177,7 @@ async def test_revision_preflight_rejects_before_model_execution(revision_worksp
     else:
         (repo / "uncommitted").write_text("keep me")
     agent = RevisionAgent(repo)
-    result = await WorkerExecutor(root, agent, session=WorkerSession(root), worker_id="w").execute(task, secret, tool_caller=RecordingToolCaller())
+    result = await WorkerExecutor(root, agent, state=ExecutionState(root), worker_id="w").execute(task, secret, tool_caller=RecordingToolCaller())
     assert result.exit_code != 0
     assert agent.calls == []
 
@@ -380,7 +380,7 @@ async def test_dirty_repository_after_session_rejection_does_not_fallback(revisi
             raise SessionUnavailable("rejected")
 
     agent = DirtyRejection(repo)
-    result = await WorkerExecutor(root, agent, session=WorkerSession(root), worker_id="w").execute(task, secret, tool_caller=RecordingToolCaller())
+    result = await WorkerExecutor(root, agent, state=ExecutionState(root), worker_id="w").execute(task, secret, tool_caller=RecordingToolCaller())
     assert result.exit_code != 0
     assert agent.calls == []
     assert (repo / "uncertain-work").read_text() == "preserve"

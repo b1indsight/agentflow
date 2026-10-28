@@ -43,7 +43,7 @@ from app.worker.execution.vcs import (
     verify_vcs_outcome,
 )
 from app.worker.execution.workspaces import RepositoryWorkspaces
-from app.worker.state.session import WorkerSession
+from app.worker.state.execution import ExecutionState
 from app.worker.transport.mcp import FlowToolCaller, WorkerMCP
 
 VCS_VERIFICATION_EXIT_CODE = 65
@@ -62,14 +62,14 @@ class WorkerExecutor:
         code_agent: CodingAgent,
         *,
         worker_id: str,
-        session: WorkerSession,
+        state: ExecutionState,
         revision_timeout: float = 1200.0,
         workspace_limit: int = 2,
     ) -> None:
         self.worker_root = worker_root
         self.code_agent = code_agent
         self.worker_id = worker_id
-        self.session = session
+        self.state = state
         self.revision_timeout = revision_timeout
         self.workspaces = RepositoryWorkspaces(worker_root, worker_id, limit=workspace_limit)
 
@@ -77,7 +77,7 @@ class WorkerExecutor:
         self, task: ExecutionTask, secret: AssignmentSecret | None = None,
         *, tool_caller: FlowToolCaller
     ) -> ExecutionResult:
-        """Use the active assignment caller without retaining a client/executor reference cycle."""
+        """Use the execution owner's tool caller, independent of the current connection."""
         if isinstance(task, InitialTask):
             return await self._initial(task, secret, tool_caller)
         if isinstance(task, RevisionTask):
@@ -90,14 +90,14 @@ class WorkerExecutor:
             if (self.worker_id != task.worker_id
                     or task.repo_identity != f"{self.worker_id}:{task.repo}"):
                 raise ValueError("archive repository identity does not match worker")
-            binding = self.session.verify_cleanup(task)
+            binding = self.state.verify_cleanup(task)
             cleanup = await self.workspaces.release(binding)
             return ArchiveResult(**task.model_dump(), cleanup=cleanup)
         raise TypeError(f"unsupported execution task: {type(task).__name__}")
 
     async def reclaim_workspace(self) -> None:
         """Clean and recycle the stopped session's allocation before reporting it stopped."""
-        record = self.session.load()
+        record = self.state.load()
         if record is None or record.stopped is None:
             raise VcsVerificationError("workspace", "stopped worker session is missing")
         if record.workspace is None:
@@ -118,7 +118,7 @@ class WorkerExecutor:
                 task.repo, task.flow_id, base_branch=task.base_branch, remote=task.remote,
                 push_token=capability.token,
             )
-            self.session.bind_workspace(binding)
+            self.state.bind_workspace(binding)
             workspace = self.workspaces.path(binding)
             vcs_context = replace(
                 await prepare_vcs_context(workspace, task.branch, remote=task.remote),
@@ -221,7 +221,7 @@ class WorkerExecutor:
                 raise VcsVerificationError("binding", "repo identity does not match worker")
             capability = _github_capability(secret, task.repo)
             binding = self.workspaces.lookup(task.repo, task.flow_id)
-            self.session.bind_workspace(binding)
+            self.state.bind_workspace(binding)
             workspace = self.workspaces.path(binding)
             context = CodingExecutionContext(github=capability)
             vcs_context = await prepare_revision_context(
@@ -231,7 +231,7 @@ class WorkerExecutor:
             schema_path = _write_output_schema(RevisionCodingOutput)
             run = None
             if task.session_id:
-                self.session.begin_revision("resume")
+                self.state.begin_revision("resume")
                 try:
                     run = await self.code_agent.resume(
                         task.session_id, prompt, cwd=workspace, output_schema=schema_path, context=context,
@@ -239,7 +239,7 @@ class WorkerExecutor:
                 except SessionUnavailable:
                     invocation = RevisionExecutionRecord(mode="resume", session_id=task.session_id,
                                                     exit_code=1, failure="session_unavailable")
-                    result.invocations = self.session.finish_invocation(invocation)
+                    result.invocations = self.state.finish_invocation(invocation)
                     # A rejection is insufficient if anything changed while resume was attempted.
                     fallback_context = await prepare_revision_context(
                         workspace, task.branch, task.expected_head_sha, capability.token,
@@ -250,13 +250,13 @@ class WorkerExecutor:
             if run is None:
                 result.mode = "fallback"
                 result.session_generation += 1
-                self.session.begin_revision("fallback")
+                self.state.begin_revision("fallback")
                 run = await self.code_agent.start(
                     prompt, workspace, output_schema=schema_path, context=context,
                 )
             invocation = RevisionExecutionRecord(mode=result.mode, session_id=run.session_id,
                                             exit_code=run.exit_code)
-            result.invocations = self.session.finish_invocation(invocation)
+            result.invocations = self.state.finish_invocation(invocation)
             result.session_id = run.session_id
             result.last_message = run.last_message
             if run.exit_code != 0:
