@@ -568,6 +568,25 @@ wire、数据库及 server 实现未改；公共 Session/Gateway、outbox 和历
 中的 `worker-execution-lifecycle` 验证产物。此处记录的是本次实现验证，不引用旧计划的测试基线作为结果。
 不包含真实模型/GitHub 闭环、Kubernetes 部署或任意脱离进程组进程的清理承诺。
 
+### 2026-10-28 — 审查修复：借出后、发送前的工具取消
+
+独立代码审查指出：`next_tool_call()` 借出队头后，Client 恢复发送前，MCP 调用者可能取消原 Future。
+此前只在借出时检查，已取消请求仍可能发送并等待回复，阻塞终态或保存废弃的 delivery 参数。
+用户明确授权修复后，在发送入口补充 `call.future.done()` 检查：结束的请求不发送，重新创建队头
+观察者并继续同时等待执行完成。检查到进入 send 之间没有新增 await；send 已开始的调用仍沿用
+匹配迟到回复的消费规则，不声称可以撤回已发送请求。
+
+Client 只读取 pending 调用是否仍有效，不创建、完成或取消原 Future；队列跳过和等待者清理继续
+归 owner。采用局部检查，不新增 owner 转发方法、请求状态字段或消息类型。
+新增参数化行为回归：在借出后确定性取消调用，分别让执行直接完成、继续下一工具调用；断言
+废弃请求未到 socket、后续调用正常完成且终态获得 ACK。两个场景在未修复实现上均复现失败，
+补检查后通过；该前后对照验证了新增分支的必要性，无额外机制需要消融。
+
+完整 pytest（含隔离 PostgreSQL）、Ruff、Mypy 与包构建通过；既有已发送调用的迟到回复测试保持通过。
+证据保存在实现线程的 `cancel-race-before.log`、`cancel-race-targeted.log`、`cancel-race-full.log`
+及 `cancel-race-build.log`；初始定向运行跳过的 PostgreSQL 用例已在后续全量中实际执行。
+本次修改不变更 wire、journal、server 或执行所有权边界，沿用原 PR 复审和交付。
+
 ## 源码依据（规划时的固定基线）
 
 [S1]: https://github.com/b1indsight/agentflow/blob/fd5c10fbb1eb7b7f988e18ea95e156d3a08fed60/app/worker/transport/client.py#L89-L543

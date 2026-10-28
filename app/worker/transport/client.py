@@ -255,6 +255,10 @@ class WorkerClient:
                     return
                 if next_tool in completed and not terminal.done():
                     call = next_tool.result()
+                    # The caller may cancel after the observer borrows the queue head.
+                    if call.future.done():
+                        next_tool = asyncio.create_task(self.execution.next_tool_call())
+                        continue
                     request = call.request.model_copy(update={"connection_epoch": self._connection_epoch})
                     await connection.send(request.model_dump_json())
                     response = await incoming

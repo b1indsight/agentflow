@@ -672,6 +672,57 @@ async def test_completed_disconnected_executor_is_journaled_before_recovery(tmp_
     assert "[REDACTED]" in journal.path.read_text()
 
 
+@pytest.mark.parametrize("subsequent_call", [False, True])
+async def test_tool_cancelled_after_borrow_is_not_sent_or_blocking_completion(tmp_path, monkeypatch, subsequent_call):
+    # MCP may cancel after the queue observer returns, before the socket driver resumes sending.
+    caller = None
+    outcome = VcsOutcome(backend=VcsKind.GIT, branch="flow/3", commit_sha="abc", remote_sha="abc")
+
+    class Executor(RecordingExecutor):
+        async def execute(self, task, secret=None, *, tool_caller):
+            nonlocal caller
+            caller = asyncio.create_task(tool_caller.call_tool(
+                "flow.open_pr", {}, call_id="cancel-before-send", vcs_outcome=outcome,
+            ))
+            with pytest.raises(asyncio.CancelledError):
+                await caller
+            if subsequent_call:
+                return await ToolCallingExecutor().execute(task, secret, tool_caller=tool_caller)
+            return await super().execute(task, secret, tool_caller=tool_caller)
+
+    class CancelAfterBorrow(WorkerExecution):
+        async def next_tool_call(self):
+            pending = await super().next_tool_call()
+            if pending.request.call_id == "cancel-before-send":
+                assert caller is not None
+                caller.cancel()
+            return pending
+
+    state = ExecutionState(tmp_path)
+    owner = CancelAfterBorrow(worker_id="worker-1", executor=Executor(), state=state)
+    client = WorkerClient(worker_id="worker-1", worker_token="test", serve_ws_url="unused",
+                          execution=owner, read_history=state.read)
+    connection = ToolConnection() if subsequent_call else ScriptedConnection()
+    original_send = connection.send
+
+    async def send(raw):
+        message = parse_worker_message(raw)
+        if isinstance(message, FlowToolRequest):
+            assert message.call_id != "cancel-before-send", "cancelled request reached the socket"
+        await original_send(raw)
+
+    monkeypatch.setattr(connection, "send", send)
+    try:
+        with pytest.raises(ConnectionError, match="script complete"):
+            await asyncio.wait_for(client.run_connection(connection), 2)
+        messages = [parse_worker_message(raw) for raw in connection.sent]
+        assert sum(isinstance(message, FlowToolRequest) for message in messages) == int(subsequent_call)
+        assert sum(isinstance(message, Succeeded) for message in messages) == 1
+        assert state.load().acknowledged
+    finally:
+        await owner.shutdown()
+
+
 async def test_mcp_shutdown_consumes_late_tool_response_before_delivering_result(tmp_path, monkeypatch):
     # Codex exits while open_pr waits on control. HTTP shutdown cancels the waiter,
     # but the original socket still needs to consume control's reply and deliver the job result.
