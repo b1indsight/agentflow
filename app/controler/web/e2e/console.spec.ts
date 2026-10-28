@@ -1371,6 +1371,110 @@ test("surfaces API failures without replacing existing UI", async ({
   });
 });
 
+for (const width of [1440, 390]) {
+  test(`conversation prefetches before the page boundary without moving the reading position at ${width}px`, async ({
+    page,
+  }) => {
+    // A delayed next page must start while more than a viewport of unread messages remains.
+    await page.setViewportSize({ width, height: 900 });
+    const cursors: string[] = [];
+    let releasePage!: () => void;
+    const pageGate = new Promise<void>((resolve) => {
+      releasePage = resolve;
+    });
+    await page.route("**/api/flows/42/activity?**", async (route) => {
+      const url = new URL(route.request().url());
+      expect(url.searchParams.has("refresh")).toBe(false);
+      const cursor = url.searchParams.get("cursor");
+      if (cursor) {
+        cursors.push(`${cursor}:${url.searchParams.get("snapshot")}`);
+        await pageGate;
+      }
+      const start = cursor ? 20 : 0;
+      return route.fulfill({
+        json: {
+          items: Array.from({ length: 20 }, (_, i) => {
+            const n = start + i;
+            const body = [
+              `会话正文 ${n}`,
+              ...Array.from(
+                { length: 3 + (n % 3) },
+                () => "下滑阅读时，后续消息会提前读取，当前内容保持稳定。",
+              ),
+            ].join("\n\n");
+            return {
+              ...activity,
+              key: `prefetch-${n}`,
+              author: n % 2 ? "assistant" : "owner",
+              body,
+              body_length: body.length,
+              previous_version: null,
+            };
+          }),
+          snapshot: 2,
+          total: 40,
+          next_cursor: cursor ? null : "page-2",
+          has_more: !cursor,
+          sources: [],
+          changes: {},
+        },
+      });
+    });
+    await page.goto("/#flow/42/conversation");
+    const root = page.locator(".detail-body");
+    const list = page.locator('[data-window-list="会话活动"]');
+    await expect(list).toHaveAttribute("data-window-count", "20");
+    expect(cursors).toEqual([]);
+    const reading = await root.evaluate(async (node) => {
+      // The mobile header changes the viewport height after the first scroll.
+      for (let step = 0; step < 2; step++) {
+        node.scrollTop = node.scrollHeight - node.clientHeight * 2.5;
+        for (let i = 0; i < 6; i++) await new Promise(requestAnimationFrame);
+      }
+      const bounds = node.getBoundingClientRect();
+      const entry = [
+        ...node.querySelectorAll<HTMLElement>("[data-entry]"),
+      ].find((item) => {
+        const rect = item.getBoundingClientRect();
+        return rect.top >= bounds.top && rect.bottom <= bounds.bottom;
+      })!;
+      return {
+        key: entry.dataset.entry!,
+        top: entry.getBoundingClientRect().top,
+        remaining:
+          node.querySelector(".load-sentinel")!.getBoundingClientRect().top -
+          bounds.bottom,
+        viewport: node.clientHeight,
+      };
+    });
+    expect(reading.remaining).toBeGreaterThan(reading.viewport);
+    await expect.poll(() => cursors).toEqual(["page-2:2"]);
+    await expect(list).toHaveAttribute("data-window-count", "20");
+    const positions = root.evaluate(async (node, key) => {
+      const values: number[] = [];
+      for (let i = 0; i < 18; i++) {
+        await new Promise<void>((resolve) =>
+          requestAnimationFrame(() => setTimeout(resolve, 0)),
+        );
+        values.push(
+          node.querySelector(`[data-entry="${key}"]`)!.getBoundingClientRect()
+            .top,
+        );
+      }
+      return values;
+    }, reading.key);
+    releasePage();
+    await expect(list).toHaveAttribute("data-window-count", "40");
+    expect(
+      Math.max(...(await positions).map((top) => Math.abs(top - reading.top))),
+    ).toBeLessThan(2);
+    expect(cursors).toEqual(["page-2:2"]);
+    await page.screenshot({
+      path: `../../../.amp/in/artifacts/conversation-prefetch-${width}.png`,
+    });
+  });
+}
+
 test("large activity stays windowed, re-reads evicted pages, and refreshes explicitly", async ({
   page,
 }) => {

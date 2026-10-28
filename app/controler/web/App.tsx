@@ -816,23 +816,36 @@ function Conversation({
     if (state.snapshot === null || state.busy || state.error || !state.has_more)
       return;
     const node = sentinel.current;
-    if (!node) return;
+    const viewport = root.current;
+    if (!node || !viewport) return;
     const boundary = `${state.snapshot}:${rows.length}`;
     if (automaticBoundary.current === boundary) return;
-    const observer = new IntersectionObserver(
-      (entries) => {
-        // A folded group can grow forever without moving the sentinel out of view.
-        if (
-          entries.some((entry) => entry.isIntersecting) &&
-          automaticBoundary.current !== boundary &&
-          load()
-        )
-          automaticBoundary.current = boundary;
-      },
-      { root: root.current, rootMargin: "0px 0px 120px 0px" },
-    );
-    observer.observe(node);
-    return () => observer.disconnect();
+    let observer: IntersectionObserver | undefined;
+    // Keep two screens ready, including when the mobile header changes the reading viewport.
+    const resize = new ResizeObserver(() => {
+      observer?.disconnect();
+      observer = new IntersectionObserver(
+        (entries) => {
+          // A folded group can grow forever without moving the sentinel out of view.
+          if (
+            entries.some((entry) => entry.isIntersecting) &&
+            automaticBoundary.current !== boundary &&
+            load()
+          )
+            automaticBoundary.current = boundary;
+        },
+        {
+          root: viewport,
+          rootMargin: `0px 0px ${viewport.clientHeight * 2}px 0px`,
+        },
+      );
+      observer.observe(node);
+    });
+    resize.observe(viewport);
+    return () => {
+      resize.disconnect();
+      observer?.disconnect();
+    };
   }, [
     load,
     root,
