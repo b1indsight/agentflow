@@ -11,7 +11,8 @@ from app.controler.workers.conversation import ConversationService
 from app.controler.workers.gateway import WorkerGateway
 from app.domain.models import Attempt, Flow, FlowExecution, FlowState
 from app.worker.execution.amp_process import AmpProcessResult
-from app.worker.state.session import WorkerSession
+from app.worker.execution.lifecycle import WorkerExecution
+from app.worker.state.execution import ExecutionState
 from app.worker.transport.client import WorkerClient
 from tests.access import AccessIssuer
 from tests.test_conversation_history import SESSION, message, rollout
@@ -117,8 +118,10 @@ async def test_http_query_while_worker_or_control_busy_and_idle(tmp_path, phase,
     to_worker: asyncio.Queue[str] = asyncio.Queue()
     to_control: asyncio.Queue[str] = asyncio.Queue()
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex"))
+    state = ExecutionState(tmp_path / "worker")
     worker = WorkerClient(worker_id="worker-1", worker_token="worker-secret", serve_ws_url="unused",
-                          executor=Executor(), session=WorkerSession(tmp_path / "worker"))
+                          execution=WorkerExecution(worker_id="worker-1", executor=Executor(), state=state),
+                          read_history=state.read)
     server = asyncio.create_task(gateway.handle(QueueSocket(to_control, to_worker)))
     client = asyncio.create_task(worker.run_connection(QueueConnection(to_control, to_worker)))
     try:

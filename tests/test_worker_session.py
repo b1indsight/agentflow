@@ -18,7 +18,7 @@ from app.contracts.protocol import (
     terminal_digest,
 )
 from app.domain.models import JobState
-from app.worker.state.session import SessionError, WorkerSession
+from app.worker.state.execution import ExecutionState, ExecutionStateError
 
 
 def _assignment() -> Assignment:
@@ -47,7 +47,7 @@ def _assignment() -> Assignment:
 
 
 def test_journal_persists_terminal_result_until_ack(tmp_path: Path) -> None:
-    journal = WorkerSession(tmp_path)
+    journal = ExecutionState(tmp_path)
     assignment = _assignment()
     journal.record_received(assignment)
     assert "push-secret" not in journal.path.read_text()
@@ -60,7 +60,7 @@ def test_journal_persists_terminal_result_until_ack(tmp_path: Path) -> None:
     )
     journal.record_terminal(terminal)
 
-    recovered = WorkerSession(tmp_path).load()
+    recovered = ExecutionState(tmp_path).load()
     assert recovered is not None
     assert recovered.state == "succeeded"
     assert recovered.result_digest
@@ -75,8 +75,8 @@ def test_corrupt_journal_is_preserved_for_diagnosis(tmp_path: Path) -> None:
     path = tmp_path / "assignment-journal.json"
     path.write_text("not-json")
 
-    with pytest.raises(SessionError, match="invalid worker journal"):
-        WorkerSession(tmp_path).load()
+    with pytest.raises(ExecutionStateError, match="invalid worker journal"):
+        ExecutionState(tmp_path).load()
 
     assert path.read_text() == "not-json"
 
@@ -118,7 +118,7 @@ def test_predecessor_journal_recovers_and_upgrades_on_ack(
     # An ordinary package upgrade leaves v14 results/stop receipts inside a still-v4 journal.
     data = _previous_journal(tmp_path, success=success, stopped=stopped)
     original = json.dumps(data)
-    session = WorkerSession(tmp_path)
+    session = ExecutionState(tmp_path)
     session.path.write_text(original)
 
     recovery = session.recovery(executor_active=False)
@@ -175,10 +175,10 @@ def test_invalid_predecessor_journal_is_preserved(
         target = child
     target[key] = value
     original = json.dumps(data)
-    session = WorkerSession(tmp_path)
+    session = ExecutionState(tmp_path)
     session.path.write_text(original)
 
-    with pytest.raises(SessionError):
+    with pytest.raises(ExecutionStateError):
         session.load()
 
     assert session.path.read_text() == original

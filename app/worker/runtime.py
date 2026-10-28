@@ -15,8 +15,9 @@ from app.worker.config import WorkerSettings
 from app.worker.execution.amp_agent import AmpCodingAgent
 from app.worker.execution.codex import CodexAgent
 from app.worker.execution.executor import WorkerExecutor
+from app.worker.execution.lifecycle import WorkerExecution
 from app.worker.health import HealthFile
-from app.worker.state.session import WorkerSession
+from app.worker.state.execution import ExecutionState
 from app.worker.transport.client import WorkerClient
 
 _CONTROL_ENVIRONMENT_KEYS = frozenset(
@@ -90,14 +91,14 @@ class WorkerRootLock:
 
 
 class WorkerRuntime:
-    """Own the execution adapters without importing control-plane dependencies."""
+    """Compose worker dependencies and join their cleanup before releasing the process root."""
 
     def __init__(self, settings: WorkerSettings) -> None:
         self._shutdown_requested = False
         self.settings = settings
         configure_logging("worker", self.settings.log_format)
         self.root_lock = WorkerRootLock(self.settings.worker_root, self.settings.worker_id)
-        session = WorkerSession(self.settings.worker_root)
+        state = ExecutionState(self.settings.worker_root)
         timeout = (self.settings.amp_run_timeout_seconds if self.settings.coding_agent == "amp"
                    else self.settings.codex_run_timeout_seconds)
         agent_type = AmpCodingAgent if self.settings.coding_agent == "amp" else CodexAgent
@@ -108,16 +109,17 @@ class WorkerRuntime:
                 timeout=timeout,
             ),
             worker_id=self.settings.worker_id,
-            session=session,
+            state=state,
             revision_timeout=timeout,
             workspace_limit=self.settings.worker_repo_workspace_limit,
         )
+        self.execution = WorkerExecution(worker_id=self.settings.worker_id, executor=executor, state=state)
         self.client = WorkerClient(
             worker_id=self.settings.worker_id,
             worker_token=self.settings.worker_token.get_secret_value(),
             serve_ws_url=self.settings.serve_ws_url,
-            executor=executor,
-            session=session,
+            execution=self.execution,
+            read_history=state.read,
             reconnect_min_backoff=self.settings.reconnect_min_backoff,
             reconnect_max_backoff=self.settings.reconnect_max_backoff,
             reconnect_jitter=self.settings.reconnect_jitter,
@@ -129,17 +131,41 @@ class WorkerRuntime:
         health_task = asyncio.create_task(self._report_health()) if self.settings.worker_status_path else None
         loop = asyncio.get_running_loop()
         loop.add_signal_handler(signal.SIGTERM, self.stop)
+        communication = asyncio.create_task(self.client.run())
+        cancelled = False
         try:
-            await self.client.run()
+            await asyncio.shield(communication)
         except asyncio.CancelledError:
-            if not self._shutdown_requested:
-                raise
+            cancelled = True
         finally:
-            loop.remove_signal_handler(signal.SIGTERM)
-            if health_task is not None:
-                health_task.cancel()
-                await asyncio.gather(health_task, return_exceptions=True)
-            self.root_lock.release()
+            self.client.stop()
+            if not communication.done():
+                communication.cancel()
+            try:
+                # Join communication before execution cleanup; repeated process cancellation
+                # must not interrupt either join and release the root while children are alive.
+                while not communication.done():
+                    try:
+                        await asyncio.shield(communication)
+                    except asyncio.CancelledError:
+                        cancelled = True
+                if not communication.cancelled():
+                    communication.result()
+            finally:
+                try:
+                    await self.execution.shutdown()
+                except asyncio.CancelledError:
+                    cancelled = True
+                finally:
+                    loop.remove_signal_handler(signal.SIGTERM)
+                    try:
+                        if health_task is not None:
+                            health_task.cancel()
+                            await asyncio.gather(health_task, return_exceptions=True)
+                    finally:
+                        self.root_lock.release()
+        if cancelled and not self._shutdown_requested:
+            raise asyncio.CancelledError
 
     async def _report_health(self) -> None:
         assert self.settings.worker_status_path is not None

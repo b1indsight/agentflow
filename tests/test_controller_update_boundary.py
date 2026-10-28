@@ -19,7 +19,8 @@ from app.controler.workflow.results import ResultApplication
 from app.controler.workflow.tools import FlowToolService
 from app.domain.delivery_models import PreparedDelivery
 from app.domain.models import JobState, VcsKind, VcsOutcome
-from app.worker.state.session import WorkerSession
+from app.worker.execution.lifecycle import WorkerExecution
+from app.worker.state.execution import ExecutionState
 from app.worker.transport.client import WorkerClient
 from tests.test_worker_connection import Socket
 
@@ -119,13 +120,14 @@ async def test_running_worker_reconnects_to_new_controller_and_finishes_once(sto
             )
             return InitialTaskResult(session_id="same-session", last_message="done", exit_code=0)
 
-    session = WorkerSession(tmp_path)
+    session = ExecutionState(tmp_path)
+    owner = WorkerExecution(worker_id="w", executor=Executor(), state=session)
     client = WorkerClient(
         worker_id="w",
         worker_token="test",
         serve_ws_url="ws://unused",
-        executor=Executor(),
-        session=session,
+        execution=owner,
+        read_history=session.read,
     )
     tasks = []
     try:
@@ -137,12 +139,11 @@ async def test_running_worker_reconnects_to_new_controller_and_finishes_once(sto
         async with asyncio.timeout(2):
             while not invocations:
                 await asyncio.sleep(0)
-        execution = client._execution
         await old.close(code=1001)
         with pytest.raises(ConnectionError, match="1001"):
             await asyncio.wait_for(worker, 2)
         await asyncio.wait_for(server, 2)
-        assert execution is not None and not execution.done()
+        assert owner.lease() is not None
         assert case.tools.execute.await_count == case.results.apply.await_count == 0
         assert store.jobs.get_job(case.job.id).state == "running"
 
@@ -159,7 +160,7 @@ async def test_running_worker_reconnects_to_new_controller_and_finishes_once(sto
             while not session.load().acknowledged:
                 await asyncio.sleep(0)
         assert len(invocations) == 1
-        assert execution.done() and not execution.cancelled()
+        assert owner.lease() is None
         assert store.jobs.get_job(case.job.id).state == "done"
         assert case.results.apply.await_count == 1
         assert case.tools.execute.await_count == 1
@@ -168,4 +169,4 @@ async def test_running_worker_reconnects_to_new_controller_and_finishes_once(sto
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        await client._cancel_execution()
+        await owner.shutdown()

@@ -1,7 +1,7 @@
 # Worker 执行生命周期解耦（第一阶段）— Feature record
 
-**Stage:** Planning — 待用户批准；未编写实现或测试
-**PR:** [#120](https://github.com/b1indsight/agentflow/pull/120) — docs-only draft；实现未获批
+**Stage:** Implementation — 已实现并完成本地验证；代码审查与发布状态见 PR
+**PR:** [#120](https://github.com/b1indsight/agentflow/pull/120) — 沿用计划 PR 交付第一阶段实现
 **Bookmark:** `refactor/worker-execution-lifecycle`（计划与实现沿用同一个 PR）
 
 ## 1. Initial plan
@@ -510,6 +510,63 @@ Client 发送 request 的 epoch 副本，不改原请求身份、参数、VCS �
 实施验收继续覆盖原矩阵，并明确检查：构造/加载不启动执行；Resume 前完成且首次落盘失败时不伪报
 active、不新建 Task；取消观察者不取消原工具等待者；取消的旧调用不重放；迟到回复不完成后继调用。
 此次仅复核源码并运行既有测试建立新基线，尚未验证新 owner，也未编写实现或测试。
+
+### 2026-10-28 — 实现执行所有权边界
+
+按获批方案与上述命名修订，在独立 jj workspace 实现；实施前再次 fetch，远端 main 仍为
+[`59a99d3`](https://github.com/b1indsight/agentflow/commit/59a99d368d85d099b108bcad9a94a9736016208b)，
+本 PR 已基于该提交。共享原目录保持原 detached HEAD 和 Web 未提交修改，未移动其工作 change。
+
+- 新增 `execution/lifecycle.py` 的 `WorkerExecution`，统一拥有执行 Task、完成落盘、工具等待者及
+  stop/shutdown；`WorkerSession` 迁移为 `state/execution.py` 的 `ExecutionState`，不保留旧入口。
+- Client 保留连接、消息分流、epoch、心跳与 ACK 检查；移除执行取消、结果收集和工具 Future 操作。
+  Runtime 只装配依赖、join 通信及 owner、最后释放根锁；`WorkerExecutor` 继续编排编码与 workspace。
+- 完成回调在无 Client 时落盘；写入失败保留原 Task 结果，恢复时重试。补齐 Register 与 Resume 之间
+  完成的同进程分支，普通重启无 Task 时不重新执行。取消来源标记防止 stop cleanup 的返回值成为终态。
+- `wait_terminal` 用 `asyncio.wait` 观察执行，取消观察者不取消执行；执行异常统一由完成收集路径处理，
+  不额外捕获并忽略异常。工具队头借用至匹配回复，删除断线后归还队列的分支。
+- stop Task 按完整停止身份复用并 shield；回执持久化先于退休 Task 和回收 workspace。
+  Runtime 与 owner 都保护 join，反复取消外层仍等清理完成。错误保留证据并报告，未增加超时配置。
+
+沿用既有测试的 wire、journal、调用次数、真实进程和 Flow binding 断言；将断线存活测试改为真实
+`Client.run()` 退出并替换实例，在旧实现上先观察到执行被取消，再在新 owner 上通过。
+补充 Started 发送/持久化失败不启动、Register/Resume 完成与落盘故障、停止清理两阶段替换 Client、
+Runtime 关闭时真实父子进程及根锁的回归。当前架构/停机说明、运维脚本与 changelog 已同步。
+wire、数据库及 server 实现未改；公共 Session/Gateway、outbox 和历史 facade 仍延后。
+
+### 2026-10-28 — 验证与简化对照
+
+验证在隔离 workspace 及本机临时 PostgreSQL 上进行。首次测试库使用 ASCII 编码，后改为 UTF8；
+全量中的 recovery bundle 校验要求 TCP loopback，Unix socket 不满足，随后改用独立端口的
+`127.0.0.1` 连接，完整重跑通过。未修改产品代码绕过环境问题，未访问生产数据库或真实 GitHub 副作用。
+
+- `PYTHONPATH="$PWD" FLOWTOOL_TEST_DATABASE_URL=<隔离 UTF8 PostgreSQL TCP DSN> python -m pytest -q` 全量通过，
+  PostgreSQL 用例实际执行；既有 Starlette TestClient 弃用警告保留。
+- `ruff check app tests scripts/smoke/recovery.py`、`mypy app tests`、`bash -n scripts/smoke/kubernetes.sh`
+  和 `uv build --no-sources` 通过；wheel 包含新 lifecycle/state 模块，不再含旧 session 模块。
+- 临时对比脚本读取计划提交的原 `WorkerSession`，同 root、固定 nonce 执行 received/started、workspace、
+  revision/fallback、成功/失败、stop ACK、archive cleanup/ACK；实际 journal/wire JSON 逐字一致，
+  包含 digest、null/default、脱敏及文件权限，归档 ACK 后同样移除 journal。
+- 临时故障注入验证 receipt 写入失败、workspace 清理失败、停止超时后重试、拒绝恢复时观察者消失、
+  自然完成与停止并存、结果 ACK 不退休 stop，以及重启无 Task 拒绝普通 resume；均通过。
+  临时验证脚本不加入仓库测试套件。
+
+简化对照使用临时 pytest plugin 逐进程替换一个方法，不修改生产文件；同一组输入运行
+`pytest -p lifecycle_ablation -q tests/test_worker_client.py tests/test_stop_protocol.py
+-k 'replacing_client or completed_disconnected'`。由 `LIFE_VARIANT` 选择以下单一变体：
+
+| 变体 | 实际观察 | 决定 |
+| --- | --- | --- |
+| `control`：当前实现 | 所有选中场景通过 | 保留为控制组。 |
+| `client-cancels`：Client.run finally 再 shutdown owner | 完整替换 Client 时原 executor 被取消 | 执行关闭只归进程 owner。 |
+| `no-callback`：移除完成回调 | 离线成功/失败均不能在 recovery 前落盘 | 保留主动收集与注册后完成分支。 |
+| `take-head`：next_tool_call 返回时出队 | 未发送及已发送重连场景都不能完成原 waiter | 保留借出队头，不恢复归还机制。 |
+| `unshield-stop`：通信方直接 await stop Task | 执行退出等待和 workspace 回收两个断点都被通信取消中断 | 保留 owner-held shielded stop。 |
+
+对照初跑发现工具丢失变体会一直等待发送，给该连接步骤加测试超时后重跑，以明确失败代替悬挂。
+报告和复现材料见[实现线程](https://ampcode.com/threads/T-01a17c72-87bc-7645-b1c9-44ba1c5b61b7)
+中的 `worker-execution-lifecycle` 验证产物。此处记录的是本次实现验证，不引用旧计划的测试基线作为结果。
+不包含真实模型/GitHub 闭环、Kubernetes 部署或任意脱离进程组进程的清理承诺。
 
 ## 源码依据（规划时的固定基线）
 

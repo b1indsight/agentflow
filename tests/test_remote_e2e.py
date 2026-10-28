@@ -21,7 +21,8 @@ from app.domain.delivery_models import OpenedDelivery
 from app.domain.models import FlowDelivery, Job, JobKind, JobState, VcsKind, VcsOutcome
 from app.persistence.stops import StopStore
 from app.persistence.store import Store
-from app.worker.state.session import WorkerSession
+from app.worker.execution.lifecycle import WorkerExecution
+from app.worker.state.execution import ExecutionState
 from app.worker.transport.client import WorkerClient
 from app.worker.transport.mcp import FlowToolCaller
 from tests.persistence_fakes import RepositoryViews
@@ -267,11 +268,12 @@ async def test_control_gateway_and_worker_client_complete_one_remote_job(tmp_pat
         conversations=ConversationBroker(),
     )
     executor = FakeExecutor()
-    client = WorkerClient(session=WorkerSession(tmp_path),
+    state = ExecutionState(tmp_path)
+    client = WorkerClient(read_history=state.read,
         worker_id="worker-1",
         worker_token="worker-secret",
         serve_ws_url="ws://unused",
-        executor=executor,
+        execution=WorkerExecution(worker_id="worker-1", executor=executor, state=state),
     )
 
     tasks = [

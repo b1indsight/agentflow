@@ -24,9 +24,10 @@ from app.controler.workflow.archive import archive_progress
 from app.controler.workflow.service import ControlService
 from app.domain.models import FlowState, JobKind, JobState
 from app.worker.execution.executor import WorkerExecutor
+from app.worker.execution.lifecycle import WorkerExecution
 from app.worker.execution.workspaces import RepositoryWorkspaces
 from app.worker.runtime import WorkerRootLock
-from app.worker.state.session import WorkerSession
+from app.worker.state.execution import ExecutionState
 from app.worker.transport.client import WorkerClient
 from tests.github import RecordingGitHub
 from tests.test_archive_recovery import ready_archive, receive
@@ -56,19 +57,19 @@ class AckConnection(QueueConnection):
         return raw
 
 
-class ObservedClient(WorkerClient):
+class ObservedExecution(WorkerExecution):
     def __init__(self, archive_id, **kwargs):
         super().__init__(**kwargs)
         self.archive_id = archive_id
         self.acked = asyncio.Event()
 
-    def _acknowledge(self, accepted):
-        super()._acknowledge(accepted)
+    def on_result_accepted(self, accepted):
+        super().on_result_accepted(accepted)
         if accepted.job_id == self.archive_id:
             self.acked.set()
 
 
-async def connect_once(store, subject, executor, journal, *, drop_ack=False, client=None):
+async def connect_once(store, subject, executor, journal, *, drop_ack=False, owner=None):
     outgoing, incoming = asyncio.Queue(), asyncio.Queue()
     gateway = WorkerGateway(
         subject, database=store.database,
@@ -80,10 +81,10 @@ async def connect_once(store, subject, executor, journal, *, drop_ack=False, cli
     )
     archive_id = next(job.id for job in store.jobs.list_jobs(journal.load().flow_id)
                       if job.kind is JobKind.ARCHIVE)
-    if client is None:
-        client = ObservedClient(archive_id=archive_id,
-                                worker_id="worker-a", worker_token="secret", serve_ws_url="ws://test",
-                                executor=executor, session=journal)
+    if owner is None:
+        owner = ObservedExecution(archive_id=archive_id, worker_id="worker-a", executor=executor, state=journal)
+    client = WorkerClient(worker_id="worker-a", worker_token="secret", serve_ws_url="ws://test",
+                          execution=owner, read_history=journal.read)
     server = asyncio.create_task(gateway.handle(ArchiveSocket(outgoing, incoming)))
     worker = asyncio.create_task(client.run_connection(AckConnection(outgoing, incoming,
                                                                      drop_ack=drop_ack)))
@@ -92,12 +93,12 @@ async def connect_once(store, subject, executor, journal, *, drop_ack=False, cli
             with pytest.raises(ConnectionError, match="ACK lost"):
                 await asyncio.wait_for(worker, 5)
         else:
-            await asyncio.wait_for(client.acked.wait(), 5)
+            await asyncio.wait_for(owner.acked.wait(), 5)
     finally:
         server.cancel()
         worker.cancel()
         await asyncio.gather(server, worker, return_exceptions=True)
-        await client._cancel_execution()
+        await owner.shutdown()
     return gateway
 
 
@@ -124,7 +125,7 @@ async def test_original_worker_recovers_cleanup_and_replays_without_redeleting(
         "owner/repo", 999, base_branch="main", remote="origin", push_token=None,
     ))
     other_repo = pool.path(other)
-    journal = WorkerSession(root)
+    journal = ExecutionState(root)
     prior = store.jobs.list_jobs(flow.id)[-2]
     # Preserve the preceding acknowledged job, as a real worker does between assignments.
     journal.record_received(Assignment(
@@ -143,7 +144,7 @@ async def test_original_worker_recovers_cleanup_and_replays_without_redeleting(
             assignment_token="archive-token", connection_epoch="epoch-a", task=task))
         journal.record_started()
     agent = RecordingAgent()
-    executor = WorkerExecutor(root, agent, worker_id="worker-a", session=journal)
+    executor = WorkerExecutor(root, agent, worker_id="worker-a", state=journal)
     lock = WorkerRootLock(root, "worker-a")
     lock.acquire()
     try:
@@ -171,10 +172,10 @@ async def test_original_worker_recovers_cleanup_and_replays_without_redeleting(
             store._db._clock = lambda: now + timedelta(hours=1)
             store.workers.sweep_expired_assignments()
             assert store.jobs.get_job(job.id).assignment_token == "archive-token"
-        await connect_once(store, subject, executor, WorkerSession(root), drop_ack=window == "ack")
+        await connect_once(store, subject, executor, ExecutionState(root), drop_ack=window == "ack")
         if window == "ack":
             assert journal.load() is not None
-            await connect_once(store, subject, executor, WorkerSession(root))
+            await connect_once(store, subject, executor, ExecutionState(root))
     finally:
         lock.release()
     assert repo.exists() is not overflow
@@ -212,7 +213,7 @@ async def test_merge_recovery_preserves_coding_completion_and_root_provenance(
     pool = RepositoryWorkspaces(root, "worker-a", limit=2)
     binding = await pool.acquire("owner/repo", flow.id, base_branch="main", remote="origin", push_token=None)
     repo = pool.path(binding)
-    journal = WorkerSession(root)
+    journal = ExecutionState(root)
     # The rejected revision has not started, but its preceding INITIAL owns this allocation.
     journal.record_received(Assignment(job_id=old.id - 1, flow_id=flow.id,
         assignment_token="previous", connection_epoch="epoch-a",
@@ -226,19 +227,22 @@ async def test_merge_recovery_preserves_coding_completion_and_root_provenance(
     assignment = Assignment(job_id=old.id, flow_id=flow.id, assignment_token=old.assignment_token,
         connection_epoch="epoch-a", task=RevisionTask.model_validate(old.payload["revision"]))
     journal.record_received(assignment)
-    executor = WorkerExecutor(root, RecordingAgent(), worker_id="worker-a",
-                              session=journal)
-    client = ObservedClient(archive_id=archive_id, worker_id="worker-a", worker_token="secret",
-                            serve_ws_url="ws://test", executor=executor, session=journal)
+
+    class Executor(WorkerExecutor):
+        async def execute(self, task, secret=None, *, tool_caller):
+            if isinstance(task, RevisionTask):
+                return result
+            return await super().execute(task, secret, tool_caller=tool_caller)
+
+    executor = Executor(root, RecordingAgent(), worker_id="worker-a", state=journal)
+    owner = ObservedExecution(archive_id=archive_id, worker_id="worker-a", executor=executor, state=journal)
     if window == "completed-disconnected":
-        journal.record_started()
-        client.session.assignment = assignment
-        client._execution = asyncio.create_task(asyncio.sleep(0, result=result))
-        await client._execution
+        owner.start()
+        await owner.wait_terminal("epoch-a")
     lock = WorkerRootLock(root, "worker-a")
     lock.acquire()
     try:
-        await connect_once(store, coordinator(store, RecordingGitHub()), executor, journal, client=client)
+        await connect_once(store, coordinator(store, RecordingGitHub()), executor, journal, owner=owner)
     finally:
         lock.release()
     assert store.flows.get_flow(flow.id).state is FlowState.SUCCEEDED

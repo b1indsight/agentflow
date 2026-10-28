@@ -32,7 +32,7 @@ from app.contracts.protocol import (
 )
 from app.domain.models import JobKind
 from app.persistence.store import Store
-from app.worker.state.session import SessionError, WorkerSession
+from app.worker.state.execution import ExecutionState, ExecutionStateError
 
 FILES = {'database.dump', 'worker.tar.gz'}
 
@@ -146,7 +146,7 @@ def drill(work: Path, postgres_bin: Path, revision: str) -> dict:
         if not store.workers.start_assignment(job.id, attempt.id, 'fixture-worker', 'fixture-token', 'fixture-epoch'):
             raise RuntimeError('fixture start failed')
         store.webhooks.receive('fixture-delivery', 'ping', {}, 'a' * 64)
-        journal = WorkerSession(root)
+        journal = ExecutionState(root)
         journal.record_received(Assignment(
             job_id=job.id, flow_id=flow.id, assignment_token='fixture-token',
             connection_epoch='fixture-epoch', secret=AssignmentSecret(push=PushSecret(
@@ -203,11 +203,11 @@ def drill(work: Path, postgres_bin: Path, revision: str) -> dict:
         archive.extractall(destination, filter='data')
     if (destination / 'home/fake-session').read_text() != 'fixture-only-no-auth':
         raise RuntimeError('HOME restore mismatch')
-    if WorkerSession(root).load() != original:
+    if ExecutionState(root).load() != original:
         raise RuntimeError('original journal changed')
     try:
-        WorkerSession(destination / 'root').load()
-    except SessionError as exc:
+        ExecutionState(destination / 'root').load()
+    except ExecutionStateError as exc:
         if str(exc) != 'worker journal belongs to another worker root':
             raise
     else:

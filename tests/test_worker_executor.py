@@ -20,7 +20,7 @@ from app.domain.models import (
     VcsOutcome,
 )
 from app.worker.execution.executor import WorkerExecutor
-from app.worker.state.session import WorkerSession
+from app.worker.state.execution import ExecutionState
 from tests.test_vcs import _git, _git_fixture
 from tests.test_worker_session import _assignment
 
@@ -93,7 +93,7 @@ def initial_workspace(tmp_path):
     (target / "AGENTS.md").write_text("Run tests.")
     _git("add", "AGENTS.md", cwd=target)
     _git("commit", "-m", "conventions", cwd=target)
-    journal = WorkerSession(tmp_path)
+    journal = ExecutionState(tmp_path)
     journal.record_received(_assignment())
     journal.record_started()
     return journal
@@ -120,7 +120,7 @@ async def test_executor_runs_agent_without_store(
     )
     agent = RecordingAgent()
     executor = WorkerExecutor(
-        tmp_path, agent, worker_id="worker-1", session=WorkerSession(tmp_path)
+        tmp_path, agent, worker_id="worker-1", state=ExecutionState(tmp_path)
     )
 
     initial = await executor.execute(
@@ -148,7 +148,7 @@ async def test_executor_runs_agent_without_store(
 async def test_initial_exit_zero_without_a_declared_backend_is_a_failure(
     monkeypatch, tmp_path: Path, initial_workspace,
 ) -> None:
-    executor = WorkerExecutor(tmp_path, BackendlessAgent(), worker_id="worker-1", session=WorkerSession(tmp_path))
+    executor = WorkerExecutor(tmp_path, BackendlessAgent(), worker_id="worker-1", state=ExecutionState(tmp_path))
 
     result = await executor.execute(
         InitialTask(
@@ -189,10 +189,10 @@ async def test_initial_preparation_failure_does_not_start_agent_or_expose_token(
     agent = RecordingAgent()
     assignment = _assignment()
     task = assignment.task.model_copy(update={"repo_identity": "worker-1:owner/repo"})
-    journal = WorkerSession(tmp_path)
+    journal = ExecutionState(tmp_path)
     journal.record_received(assignment)
     journal.record_started()
-    result = await WorkerExecutor(tmp_path, agent, worker_id="worker-1", session=journal).execute(
+    result = await WorkerExecutor(tmp_path, agent, worker_id="worker-1", state=journal).execute(
         task, secret, tool_caller=RecordingToolCaller(),
     )
     assert result.exit_code != 0 and not agent.started
@@ -236,10 +236,10 @@ async def test_initial_bootstrap_push_mcp_and_final_verification_share_current_c
     monkeypatch.setattr(vcs, "_run", offline)
     assignment = _assignment()
     task = assignment.task.model_copy(update={"repo_identity": "worker-1:owner/repo"})
-    journal = WorkerSession(root)
+    journal = ExecutionState(root)
     journal.record_received(assignment)
     journal.record_started()
-    result = await WorkerExecutor(root, Agent(), worker_id="worker-1", session=journal).execute(
+    result = await WorkerExecutor(root, Agent(), worker_id="worker-1", state=journal).execute(
         task, assignment_secret(), tool_caller=Caller(),
     )
     assert result.exit_code == 0 and result.pushed and result.open_pr_call_id

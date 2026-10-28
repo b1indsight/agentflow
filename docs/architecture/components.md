@@ -169,7 +169,7 @@ worker socket 与 executor 解耦，root 内原子 journal 在 ack 前保存进�
   最终文本原样交给 executor，Schema 只作提示，不修复 JSON 或自动重跑未知执行。
 - `amp_process.run_amp` 供编码与历史导出共用，并行有界读取两条管道；取消/超时先 SIGTERM，升级时包含事前捕获的独立
   shell 进程组。该快照无法保证回收任意脱离进程树的进程；仍依赖外部隔离。
-- `WorkerSession` 按 ID 格式选择历史来源。Amp 原生 export 经公开块映射与脱敏后短时缓存，
+- `ExecutionState` 按 ID 格式选择历史来源。Amp 原生 export 经公开块映射与脱敏后短时缓存，
   支持外部追加、块内分页、前缀编辑失效；不保存第二套捕获历史，不显示 thinking。
   记录 ID 保留 session 前缀，满足 control 的来源校验；两端使用 protocol v15。
 - workspace Amp 设置可能覆盖临时设置，因此执行前发现设置即拒绝。managed policy/账户插件仍由
@@ -317,7 +317,8 @@ lease 到期 requeue、started grace/deadline、epoch fencing、result inbox 去
 不能确认是否成功的非幂等请求保持 uncertain，不盲目重复 POST；`flow show` 显示待处理操作，retry 不能绕过它们。
 因此不宣称跨 PostgreSQL/GitHub 的通用 exactly-once。跨 worker session 迁移和多 serve HA 仍未实现。
 当前只初始化完整 schema，不执行历史迁移、数据回填或跨版本结果转换。serve/worker 使用同一
-版本，wire protocol v13 / journal v3；持久结果的重放保障适用于当前版本的重启恢复。
+版本，wire protocol v15 / journal v4；持久结果的重放保障适用于当前版本的重启恢复。
+journal v4 内的旧 v14 回执沿用既有内存规范化；读取不写文件，正常 ACK/状态保存时写为 v15。
 
 ## 4.8 GitHub 交互面
 
@@ -370,23 +371,33 @@ context digest、reason/open_points；answer 使用同一个答案，由反馈�
 adapter/控制流已通过自动化，真实 provider 的语义准确性仍待 smoke 验收。
 
 
-### WorkerSession
+### Worker 执行生命周期
 
-`app/worker/state/session.py` 统一 worker 本地会话状态：当前 assignment、持久化执行阶段、
-修订调用记录、终态脱敏/归档、恢复描述、停止/清理凭据及历史查询入口。
-Runtime 创建一个实例供 Client/Executor 共用；Client 保留连接和执行 Task，Executor 保留任务编排。
-会话状态继续写入 `assignment-journal.json`（version=3），历史正文继续从 Codex JSONL 读取。
-历史解析与限流由 `state/history.py` 处理，查询允许读取 control 明确指定的既往会话，不局限于当前 assignment。
+`WorkerRuntime` 装配一个进程级 `WorkerExecution`，拥有根锁、信号、健康任务与关闭顺序。
+`execution/lifecycle.py` 中的 owner 持有唯一执行 Task、工具请求和原 Future、停止清理 Task。
+`WorkerExecutor` 继续编排 initial/revision/archive、agent、MCP、VCS 和 workspace，不管理连接。
+Client 只借用 owner；替换前必须关闭并 join 旧 Client，同一 owner 不支持并行通信消费者。
 
+`state/execution.py` 的 `ExecutionState` 保存当前 assignment、持久化阶段、修订调用记录、
+终态脱敏/归档、恢复描述及停止/清理凭据。`ExecutionRecord` 保留 `assignment-journal.json`
+的原 v4 JSON 结构与 digest。执行自然结束时 owner 主动落盘，无需等待重连；落盘失败保留
+完成 Task 的结果，恢复时重试，不能重新执行。Register 后完成的任务可接收原 ResumeAssignment，
+然后重放终态；普通 started 任务在进程重启后没有 Task 时仍不能推断已停止或重新运行。
+
+首次派发保持 `record_received → 发送 Started → record_started → 创建 Task` 的顺序。
+工具调用由 MCP 交给 owner，Client 借用队头并发送当前 epoch 的副本，收到响应后交回 owner
+完成原 Future。断线不出队、不换 call_id；原 socket 仍消费已取消调用的匹配迟到回复。
+`on_result_accepted` / `on_stop_accepted` 只处理收到的确认，不发送 ACK。
 
 WorkerClient 在 `_receive_message()` 统一解析 WebSocket 消息，历史查询并发执行并在原连接回复；
 其他任务消息继续进入执行/恢复流程。每条连接最多 4 个历史查询，连接结束时取消并回收查询任务。
-`state/history.py` 继续提供历史解析、分页和读取限制，由 WorkerSession 提供查询入口；无额外连接包装层。
+历史读取经注入的 `read_history` 调用 `ExecutionState.read()`，再选择 Codex/Amp 读取器，
+允许查询 control 指定的既往会话；无额外历史 facade。公共 Session/Gateway 留待下一阶段提取。
 
 WorkerMCP 随首次编码启动与关闭，复用现有 HTTP 依赖，仅暴露 open_pr；无 STDIO 桥接进程。
 修订恢复覆盖为禁用的 flow MCP 配置，避免重新连接旧任务端口。MCP 服务不接管 worker 信号。
 
 
-Worker 目录分为 `execution/`（executor、Codex、prompts、VCS、credentials）、
-`transport/`（control client、MCP）和 `state/`（session、history）。
+Worker 目录分为 `execution/`（lifecycle、executor、Codex/Amp、prompts、VCS、credentials）、
+`transport/`（control client、MCP）和 `state/`（execution、history）。
 根目录保留 runtime/config/health，分别负责组装、配置和探针入口；各子包不提供转发导出。
