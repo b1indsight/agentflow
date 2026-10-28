@@ -389,10 +389,24 @@ Client 只借用 owner；替换前必须关闭并 join 旧 Client，同一 owner
 完成原 Future。断线不出队、不换 call_id；原 socket 仍消费已取消调用的匹配迟到回复。
 `on_result_accepted` / `on_stop_accepted` 只处理收到的确认，不发送 ACK。
 
-WorkerClient 在 `_receive_message()` 统一解析 WebSocket 消息，历史查询并发执行并在原连接回复；
-其他任务消息继续进入执行/恢复流程。每条连接最多 4 个历史查询，连接结束时取消并回收查询任务。
+WorkerClient 与 server WorkerGateway 共用 `app/communication/session.py` 的 `Session`。
+一个 Session 对应单个对端的一次连接 epoch，唯一 reader 解析并分流消息；其余业务消息进入
+32 条 / 16 MiB FIFO。查询及其回复不等待执行、工具、结果应用或 stop 清理；执行业务仍串行消费。
+所有消息经 Session 串行写入，`send` 等实际写完成；工具 guard 在拿到锁后的实际写入前检查。
+不确定的写失败/取消封闭连接，无自动重试。FastAPI socket 直接满足 Transport；websockets client
+只用本地适配器转换 send/recv/bytes，不增加消息包装或 wire 字段。
+
+Session 关联至多 4 个临时请求；Broker 保留全局 64 准入、30 秒总预算、worker 路由和历史页校验。
+只有显式分类的 ConversationResult 是临时 reply；工具响应、结果和停止 ACK 仍交业务验证。
+worker 每连接最多 4 个历史 handler，满额时由单独 sender 写入最多 4 条 busy 回复（含在发项），
+持续超限断连。epoch 由合法握手/恢复响应确认一次；StopExecution、ResultAccepted 可早于 Registered。
+
+关闭先失败临时查询、清连接缓存，再完整取消并 join 通信任务；不取消执行 Task、原工具 Future、
+shielded stop，也不释放 Flow binding。读失败立即失败临时查询，已读业务 FIFO 仍按序消费；
+显式关闭则丢弃旧 FIFO。旧连接/epoch 回复不能完成新请求，不跨连接重放查询。
 历史读取经注入的 `read_history` 调用 `ExecutionState.read()`，再选择 Codex/Amp 读取器，
-允许查询 control 指定的既往会话；无额外历史 facade。公共 Session/Gateway 留待下一阶段提取。
+允许查询 control 指定的既往会话；无额外历史 facade。取消 to_thread 的等待不保证同步读取立即停止；
+其结果只属于旧 Session。公共 Gateway 注册/路由、统一 envelope 和 outbox 留待后续阶段。
 
 WorkerMCP 随首次编码启动与关闭，复用现有 HTTP 依赖，仅暴露 open_pr；无 STDIO 桥接进程。
 修订恢复覆盖为禁用的 flow MCP 配置，避免重新连接旧任务端口。MCP 服务不接管 worker 信号。

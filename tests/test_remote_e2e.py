@@ -66,6 +66,9 @@ class QueueConnection:
     async def recv(self) -> str:
         return await self._incoming.get()
 
+    async def close(self, code: int = 1000) -> None:
+        pass
+
 
 class RemoteStore(RepositoryViews, Store):
     @property

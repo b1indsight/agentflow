@@ -153,7 +153,7 @@ async def test_http_query_while_worker_or_control_busy_and_idle(tmp_path, phase,
             assert third.json()["sessions"][0]["starts_at_beginning"]
             assert third.json()["sessions"][0]["reached_end"]
             assert (await http.get("/api/flows/99/conversation")).status_code == 404
-            assert not gateway.conversations.pending
+            assert gateway.conversations._inflight == 0
     finally:
         release.set()
         server.cancel()

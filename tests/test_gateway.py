@@ -7,6 +7,7 @@ import pytest
 from fastapi import WebSocketDisconnect
 from pydantic import SecretStr
 
+from app.contracts.conversation import ConversationFailure, HistoryQuery
 from app.contracts.protocol import (
     Assignment,
     AssignmentSecret,
@@ -19,6 +20,7 @@ from app.contracts.protocol import (
     PushSecret,
     RecoveryDescriptor,
     Register,
+    Registered,
     ResultAccepted,
     ResumeAssignment,
     Started,
@@ -44,6 +46,8 @@ from app.domain.models import (
 from app.persistence.stops import StopStore
 from app.persistence.store import Store
 from tests.persistence_fakes import RepositoryViews
+from tests.test_communication_session import Socket
+from tests.test_conversation_history import SESSION
 from tests.worker_fakes import NoPendingStops, connected_worker, result_application
 
 
@@ -596,6 +600,58 @@ async def test_gateway_accepts_different_worker_identities_concurrently() -> Non
         await asyncio.gather(*sessions, return_exceptions=True)
 
 
+async def test_overlapping_replacements_do_not_republish_old_route():
+    # B waits for A's close while C supersedes B. Finishing A must not publish B again.
+    closing, release = asyncio.Event(), asyncio.Event()
+
+    class ClosingSocket(Socket):
+        def __init__(self, slow=False):
+            super().__init__()
+            self.slow = slow
+            self.headers = {"x-flowtool-worker-id": "worker-1", "authorization": "Bearer worker-secret"}
+            self.incoming.put_nowait(Register(worker_id="worker-1").model_dump_json())
+
+        async def accept(self):
+            pass
+
+        async def close(self, code=1000):
+            if self.slow:
+                closing.set()
+                await release.wait()
+
+    store = RecordingStore()
+    store.job.state = JobState.DONE
+    coordinator = RecordingCoordinator(store)
+    broker = ConversationBroker()
+    gateway = WorkerGateway(coordinator, database=store.database, conversations=broker,
+        tools=coordinator.tools, results=coordinator.results, worker_tokens={"worker-1": "worker-secret"})
+    first, second, third = ClosingSocket(True), ClosingSocket(), ClosingSocket()
+    tasks = [asyncio.create_task(gateway.handle(first))]
+    try:
+        assert isinstance(parse_server_message(await asyncio.wait_for(first.sent.get(), 1)), Registered)
+        query = asyncio.create_task(broker.query("worker-1", HistoryQuery(session_id=SESSION)))
+        await first.sent.get()
+        tasks.append(asyncio.create_task(gateway.handle(second)))
+        await asyncio.wait_for(closing.wait(), 1)
+        with pytest.raises(ConversationFailure, match="worker_unavailable"):
+            await asyncio.wait_for(query, 1)
+        assert second.sent.empty()  # No new registration/route before the old close joins.
+        tasks.append(asyncio.create_task(gateway.handle(third)))
+        registered = parse_server_message(await asyncio.wait_for(third.sent.get(), 1))
+        assert isinstance(registered, Registered)
+        newest = broker.connections["worker-1"]
+        release.set()
+        await asyncio.wait_for(asyncio.gather(*tasks[:2]), 1)
+        assert broker.connections["worker-1"] is newest
+        assert newest.epoch == registered.connection_epoch
+        assert second.sent.empty()
+    finally:
+        release.set()
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
 class DisconnectingSocket(ScriptedSocket):
     def __init__(self, *, disconnect_after_start: bool) -> None:
         super().__init__()
@@ -632,6 +688,15 @@ async def test_gateway_disconnect_policy(disconnect_after_start: bool) -> None:
 
 
 class RecoveringSocket(ScriptedSocket):
+    def __init__(self):
+        super().__init__()
+        self.resumed = asyncio.Event()
+
+    async def send_text(self, raw):
+        await super().send_text(raw)
+        if isinstance(parse_server_message(raw), ResumeAssignment):
+            self.resumed.set()
+
     async def receive_text(self) -> str:
         self._step += 1
         if self._step == 1:
@@ -645,6 +710,7 @@ class RecoveringSocket(ScriptedSocket):
                 ),
             ).model_dump_json()
         if self._step == 2:
+            await self.resumed.wait()
             resumed = next(
                 message
                 for raw in self.sent

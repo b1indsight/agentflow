@@ -6,12 +6,11 @@ import asyncio
 import base64
 import hashlib
 import json
-from dataclasses import dataclass
-from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from pydantic import ValidationError
 
+from app.communication.session import ReplyKey, Session, SessionBusy, SessionClosed
 from app.contracts.conversation import (
     ConversationFailure,
     ConversationItem,
@@ -20,101 +19,84 @@ from app.contracts.conversation import (
     HistoryQuery,
     SessionHistory,
 )
-from app.contracts.protocol import ConversationQuery, ConversationResult, WorkerMessage
+from app.contracts.protocol import (
+    ConversationQuery,
+    ConversationResult,
+    ServerMessage,
+    WorkerMessage,
+)
 from app.domain.models import Attempt
 from app.persistence.database import Database
 from app.persistence.flows import FlowStore
 from app.persistence.workers import WorkerStore
 
-if TYPE_CHECKING:
-    from app.controler.workers.connection import WorkerConnection
 
-
-@dataclass
-class PendingQuery:
-    connection: WorkerConnection
-    request: ConversationQuery
-    future: asyncio.Future[HistoryPage]
+def conversation_result_key(message: WorkerMessage) -> ReplyKey | None:
+    if isinstance(message, ConversationResult):
+        return message.request_id, message.connection_epoch
+    return None
 
 
 class ConversationBroker:
-    """Correlate bounded live requests; no queue, retries, or transcript storage."""
+    """Route and validate live history queries with a process-wide admission limit."""
 
     def __init__(self) -> None:
         # Amp export allows 20s, followed by up to 9s of descendant/process cleanup.
         self.timeout = 30.0
-        self.connections: dict[str, tuple[str, WorkerConnection]] = {}
-        self.pending: dict[str, PendingQuery] = {}
+        self.connections: dict[str, Session[WorkerMessage, ServerMessage]] = {}
+        self._inflight = 0
 
-    def connect(self, worker_id: str, epoch: str, connection: WorkerConnection) -> None:
-        previous = self.connections.get(worker_id)
-        if previous is not None:
-            self.disconnect(previous[1])
-        self.connections[worker_id] = (epoch, connection)
+    def attach(self, worker_id: str, session: Session[WorkerMessage, ServerMessage]) -> None:
+        if session.epoch is None or session.closed:
+            raise ValueError("history route requires a confirmed live session")
+        self.connections[worker_id] = session
 
-    def disconnect(self, connection: WorkerConnection) -> None:
-        for worker_id, (_, current) in list(self.connections.items()):
-            if current is connection:
-                del self.connections[worker_id]
-        for pending in self.pending.values():
-            if pending.connection is connection and not pending.future.done():
-                pending.future.set_exception(ConversationFailure("worker_unavailable"))
+    def detach(self, worker_id: str, session: Session[WorkerMessage, ServerMessage]) -> None:
+        if self.connections.get(worker_id) is session:
+            del self.connections[worker_id]
 
     async def query(
         self, worker_id: str, query: HistoryQuery,
     ) -> HistoryPage:
         session = self.connections.get(worker_id)
-        if session is None:
+        if session is None or session.epoch is None:
             raise ConversationFailure("worker_unavailable")
-        epoch, connection = session
-        if len(self.pending) >= 64 or sum(p.connection is connection for p in self.pending.values()) >= 4:
+        if self._inflight >= 64:
             raise ConversationFailure("query_busy")
-        request = ConversationQuery(request_id=uuid4().hex, connection_epoch=epoch,
-                                    **query.model_dump())
-        future: asyncio.Future[HistoryPage] = asyncio.get_running_loop().create_future()
-        self.pending[request.request_id] = PendingQuery(connection, request, future)
+        self._inflight += 1
         try:
-            async with asyncio.timeout(self.timeout):
-                await connection.send_text(request.model_dump_json())
-                return await future
+            request = ConversationQuery(request_id=uuid4().hex, connection_epoch=session.epoch,
+                                        **query.model_dump())
+            response = await session.request(request, key=(request.request_id, request.connection_epoch),
+                                             timeout=self.timeout)
+            if not isinstance(response, ConversationResult):
+                raise ConversationFailure("invalid_response")
+            return self._validated(request, response)
+        except SessionBusy as exc:
+            raise ConversationFailure("query_busy") from exc
         except TimeoutError as exc:
             raise ConversationFailure("query_timeout") from exc
-        except (ConnectionError, RuntimeError, OSError) as exc:
+        except SessionClosed as exc:
             raise ConversationFailure("worker_unavailable") from exc
         finally:
-            self.pending.pop(request.request_id, None)
-            if not future.done():
-                future.cancel()
-            elif not future.cancelled():
-                future.exception()
+            self._inflight -= 1
 
-    def accept(self, connection: WorkerConnection, message: WorkerMessage) -> bool:
-        """Consume query responses in every execution state, ignoring stale replies."""
-
-        if not isinstance(message, ConversationResult):
-            return False
-        pending = self.pending.get(message.request_id)
-        if (pending is None or pending.connection is not connection or pending.future.done()
-                or message.connection_epoch != pending.request.connection_epoch):
-            return True
-        if message.error is not None:
-            pending.future.set_exception(ConversationFailure(message.error))
-        else:
-            page = message.page
-            assert page is not None
-            if (page.session_id != pending.request.session_id or len(page.items) > pending.request.limit
-                    or len(message.model_dump_json().encode()) > 512 * 1024
-                    or (page.has_more and page.next_cursor is None)
-                    or any(not item.id.startswith(f"{page.session_id}:") for item in page.items)):
-                pending.future.set_exception(ConversationFailure("invalid_response"))
-            else:
-                try:
-                    HistoryQuery(session_id=page.session_id, cursor=page.next_cursor)
-                except (ConversationFailure, ValidationError):
-                    pending.future.set_exception(ConversationFailure("invalid_response"))
-                else:
-                    pending.future.set_result(page)
-        return True
+    def _validated(self, request: ConversationQuery, response: ConversationResult) -> HistoryPage:
+        """Correlation alone does not make a worker's history page safe to expose."""
+        if response.error is not None:
+            raise ConversationFailure(response.error)
+        page = response.page
+        assert page is not None
+        if (page.session_id != request.session_id or len(page.items) > request.limit
+                or len(response.model_dump_json().encode()) > 512 * 1024
+                or (page.has_more and page.next_cursor is None)
+                or any(not item.id.startswith(f"{page.session_id}:") for item in page.items)):
+            raise ConversationFailure("invalid_response")
+        try:
+            HistoryQuery(session_id=page.session_id, cursor=page.next_cursor)
+        except (ConversationFailure, ValidationError) as exc:
+            raise ConversationFailure("invalid_response") from exc
+        return page
 
 
 class ConversationService:
