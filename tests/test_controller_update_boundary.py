@@ -6,14 +6,15 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from app.communication.gateway import Gateway
 from app.contracts.protocol import (
     Assignment,
     FlowToolResponse,
     InitialTask,
     InitialTaskResult,
 )
-from app.controler.workers.conversation import ConversationBroker
-from app.controler.workers.gateway import WorkerGateway
+from app.controler.workers.handler import WorkerHandler
+from app.controler.workers.transport import serve_worker
 from app.controler.workflow.coordinator import JobCoordinator
 from app.controler.workflow.results import ResultApplication
 from app.controler.workflow.tools import FlowToolService
@@ -88,19 +89,18 @@ def scenario(store):
     tools = Mock(spec=FlowToolService, execute=AsyncMock(side_effect=tool))
     results = Mock(spec=ResultApplication, apply=AsyncMock(side_effect=apply))
 
-    def gateway():
-        return WorkerGateway(
+    def handler():
+        return WorkerHandler(
             coordinator,
             database=store.database,
-            worker_tokens={"w": "test"},
+            peers=Gateway(),
             heartbeat_interval=60,
             poll_interval=0.01,
             tools=tools,
             results=results,
-            conversations=ConversationBroker(),
         )
 
-    return SimpleNamespace(job=job, started=started, gateway=gateway, tools=tools, results=results)
+    return SimpleNamespace(job=job, started=started, handler=handler, tools=tools, results=results)
 
 
 async def test_running_worker_reconnects_to_new_controller_and_finishes_once(store, tmp_path):
@@ -136,7 +136,9 @@ async def test_running_worker_reconnects_to_new_controller_and_finishes_once(sto
     tasks = []
     try:
         old = DuplexSocket()
-        server = asyncio.create_task(case.gateway().handle(old))
+        server = asyncio.create_task(
+            serve_worker(old, worker_tokens={"w": "test"}, handler=case.handler())
+        )
         worker = asyncio.create_task(client.run_connection(old))
         tasks.extend([server, worker])
         await asyncio.wait_for(case.started.wait(), 2)
@@ -156,7 +158,9 @@ async def test_running_worker_reconnects_to_new_controller_and_finishes_once(sto
         new = DuplexSocket()
         tasks.extend(
             [
-                asyncio.create_task(case.gateway().handle(new)),
+                asyncio.create_task(
+                    serve_worker(new, worker_tokens={"w": "test"}, handler=case.handler())
+                ),
                 asyncio.create_task(client.run_connection(new)),
             ]
         )

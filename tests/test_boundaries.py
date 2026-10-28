@@ -11,6 +11,7 @@ import pytest
 
 @pytest.mark.parametrize("operation", [
     "import app.communication.session",
+    "import app.communication.gateway",
     "import app.worker.runtime",
     "import app.cli",
     """
@@ -36,7 +37,7 @@ original = ('{"repository":{"full_name":"octo/repo"},"issue":{"number":7},'
             '"options":{"todo":"T","in_progress":"W","in_review":"R","blocked":"B","done":"D"}}}')
 assert Document.model_validate_json(original).model_dump_json() == original
 """,
-], ids=["communication", "worker-startup", "cli-entrypoint", "resource-json-restoration"])
+], ids=["session", "gateway", "worker-startup", "cli-entrypoint", "resource-json-restoration"])
 def test_worker_data_paths_do_not_load_control_plane_dependencies(operation: str) -> None:
     # Shared logging previously pulled SQL stores into worker startup transitively.
     # A fresh interpreter observes real imports without pytest's loaded modules.
@@ -48,7 +49,7 @@ def test_worker_data_paths_do_not_load_control_plane_dependencies(operation: str
     modules = set(json.loads(result.stdout))
     # The public entry point includes binding types; restoring facts needs no SDK or authentication.
     forbidden = {"app.controler", "app.persistence", "psycopg", "githubkit", "bub"}
-    if operation == "import app.communication.session":
+    if operation.startswith("import app.communication."):
         forbidden |= {"app.worker", "fastapi", "starlette", "websockets"}
     assert not contains_forbidden(modules, forbidden), sorted(
         module for module in modules if contains_forbidden({module}, forbidden)

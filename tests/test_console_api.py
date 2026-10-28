@@ -34,7 +34,7 @@ def console_runtime(store):
         shutdown=issuer.auth.close,
         console=ConsoleSynchronizer(SimpleNamespace(), SimpleNamespace(), database=store._db),
         conversations=SimpleNamespace(read=AsyncMock()),
-        gateway=SimpleNamespace(notify_jobs=Mock()),
+        worker_handler=SimpleNamespace(notify_jobs=Mock()),
     )
 
 
@@ -194,7 +194,7 @@ def test_retry_commits_before_waking_workers_on_the_event_loop(console_runtime, 
             (get_ident(), store.flows.get_flow(flow.id).state, len(store.jobs.list_jobs(flow.id)))
         )
 
-    console_runtime.gateway.notify_jobs = notified
+    console_runtime.worker_handler.notify_jobs = notified
     with TestClient(create_app(console_runtime)) as client:
         loop_thread = client.portal.call(get_ident)
         response = client.post(
@@ -232,7 +232,7 @@ def test_concurrent_browser_retries_enqueue_only_once(console_runtime, store):
         client.portal.call(lambda: None)
     assert sorted(response.status_code for response in responses) == [200, 409]
     assert len(store.jobs.list_jobs(flow.id)) == 1
-    console_runtime.gateway.notify_jobs.assert_called_once_with()
+    console_runtime.worker_handler.notify_jobs.assert_called_once_with()
 
 
 def test_browser_retry_reports_business_refusal_without_changes(console_runtime, store):
@@ -251,7 +251,7 @@ def test_browser_retry_reports_business_refusal_without_changes(console_runtime,
     assert response.json() == {"detail": "retry_delivery_closed"}
     assert console.detail(flow.id) == before
     assert store.jobs.list_jobs(flow.id) == []
-    console_runtime.gateway.notify_jobs.assert_not_called()
+    console_runtime.worker_handler.notify_jobs.assert_not_called()
 
 
 @pytest.mark.parametrize(

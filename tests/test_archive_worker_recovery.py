@@ -7,6 +7,7 @@ from datetime import timedelta
 
 import pytest
 
+from app.communication.gateway import Gateway
 from app.contracts.protocol import (
     PROTOCOL_VERSION,
     Assignment,
@@ -18,8 +19,8 @@ from app.contracts.protocol import (
     parse_server_message,
     parse_worker_message,
 )
-from app.controler.workers.conversation import ConversationBroker
-from app.controler.workers.gateway import WorkerGateway
+from app.controler.workers.handler import WorkerHandler
+from app.controler.workers.transport import serve_worker
 from app.controler.workflow.archive import archive_progress
 from app.controler.workflow.service import ControlService
 from app.domain.models import FlowState, JobKind, JobState
@@ -71,13 +72,12 @@ class ObservedExecution(WorkerExecution):
 
 async def connect_once(store, subject, executor, journal, *, drop_ack=False, owner=None):
     outgoing, incoming = asyncio.Queue(), asyncio.Queue()
-    gateway = WorkerGateway(
+    handler = WorkerHandler(
         subject, database=store.database,
-        worker_tokens={"worker-a": "secret"},
+        peers=Gateway(),
         poll_interval=60,
         tools=subject.tools,
         results=subject.results,
-        conversations=ConversationBroker(),
     )
     archive_id = next(job.id for job in store.jobs.list_jobs(journal.load().flow_id)
                       if job.kind is JobKind.ARCHIVE)
@@ -85,7 +85,8 @@ async def connect_once(store, subject, executor, journal, *, drop_ack=False, own
         owner = ObservedExecution(archive_id=archive_id, worker_id="worker-a", executor=executor, state=journal)
     client = WorkerClient(worker_id="worker-a", worker_token="secret", serve_ws_url="ws://test",
                           execution=owner, read_history=journal.read)
-    server = asyncio.create_task(gateway.handle(ArchiveSocket(outgoing, incoming)))
+    server = asyncio.create_task(serve_worker(ArchiveSocket(outgoing, incoming),
+                                             worker_tokens={"worker-a": "secret"}, handler=handler))
     worker = asyncio.create_task(client.run_connection(AckConnection(outgoing, incoming,
                                                                      drop_ack=drop_ack)))
     try:
@@ -99,7 +100,6 @@ async def connect_once(store, subject, executor, journal, *, drop_ack=False, own
         worker.cancel()
         await asyncio.gather(server, worker, return_exceptions=True)
         await owner.shutdown()
-    return gateway
 
 
 @pytest.mark.parametrize("window", ["before-received", "before-delete", "after-delete",

@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, Mock
 from pydantic import SecretStr
 from starlette.testclient import TestClient
 
+from app.communication.gateway import Gateway
 from app.contracts.protocol import (
     Assignment,
     ExecutionTask,
@@ -23,7 +24,7 @@ from app.controler.api import create_app
 from app.controler.config import ServerSettings
 from app.controler.runtime import ServerRuntime
 from app.controler.workers.conversation import ConversationBroker, ConversationService
-from app.controler.workers.gateway import WorkerGateway
+from app.controler.workers.handler import WorkerHandler
 from app.controler.workflow.coordinator import JobCoordinator
 from app.controler.workflow.tools import FlowToolService
 from app.domain.models import Job, JobKind, JobState
@@ -83,16 +84,17 @@ class AsgiRuntime(ServerRuntime):
                                       metrics_token=None, host="test", port=0)
         self.metrics = Metrics()
         gateway_coordinator = AsgiCoordinator(attempt_id, store)
-        self.gateway = WorkerGateway(
+        self.gateway = Gateway()
+        self.worker_tokens = {"worker-1": "worker-secret"}
+        self.worker_handler = WorkerHandler(
             gateway_coordinator, database=store.database,
-            worker_tokens={"worker-1": "worker-secret"},
+            peers=self.gateway,
             poll_interval=0.01,
             tools=gateway_coordinator.tools,
             results=gateway_coordinator.results,
-            conversations=ConversationBroker(),
         )
         self.conversations = ConversationService(
-            self.gateway.conversations, database=store.database,
+            ConversationBroker(self.gateway), database=store.database,
         )
 
     async def ready(self) -> bool:
@@ -110,13 +112,13 @@ class AsgiRuntime(ServerRuntime):
 
 def test_real_asgi_websocket_completes_a_postgresql_job(store: Store, monkeypatch) -> None:
     disconnected = Event()
-    handle = WorkerGateway.handle
+    handle = WorkerHandler.handle
 
-    async def handle_until_disconnected(self, socket):
-        await handle(self, socket)
+    async def handle_until_disconnected(self, worker_id, register, connection):
+        await handle(self, worker_id, register, connection)
         disconnected.set()
 
-    monkeypatch.setattr(WorkerGateway, "handle", handle_until_disconnected)
+    monkeypatch.setattr(WorkerHandler, "handle", handle_until_disconnected)
     flow = store.flows.create_flow("owner/repo", 8, installation_id=42)
     attempt = store.flows.create_attempt(flow.id)
     flow.current_attempt_id = attempt.id

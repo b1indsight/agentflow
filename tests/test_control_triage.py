@@ -28,7 +28,7 @@ def triage_runtime(store, review_flow, recording_resources):  # noqa: F811
     runtime.coordinator = coordinator(store, RecordingGitHub())
     runtime.judge = SimpleNamespace(triage=AsyncMock(side_effect=lambda context: judge_decision(
         TriageVerdict(verdict=Verdict.REVISE, confidence=1, instruction="Fix the bound"), context)))
-    runtime.gateway = Mock()
+    runtime.worker_handler = Mock()
     runtime._triage_task = None
     return runtime, batch
 

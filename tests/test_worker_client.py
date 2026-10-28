@@ -1,5 +1,6 @@
 import asyncio
 from contextlib import asynccontextmanager
+from unittest.mock import Mock
 
 import httpx
 import pytest
@@ -96,6 +97,62 @@ class ScriptedConnection:
 
     async def close(self, code: int = 1000) -> None:
         pass
+
+
+async def test_stop_during_dial_never_registers_or_borrows_execution(monkeypatch):
+    # stop() may run while connect.__aenter__ is still waiting for the server.
+    dialing, release = asyncio.Event(), asyncio.Event()
+    connection = ScriptedConnection()
+    owner = Mock(spec=WorkerExecution, recovery=Mock(return_value=None))
+
+    @asynccontextmanager
+    async def connect(*args, **kwargs):
+        dialing.set()
+        await release.wait()
+        yield connection
+
+    monkeypatch.setattr("app.worker.transport.client.connect", connect)
+    client = WorkerClient(worker_id="w", worker_token="test", serve_ws_url="unused",
+                          execution=owner, read_history=Mock())
+    running = asyncio.create_task(client.run())
+    await dialing.wait()
+    client.stop()
+    release.set()
+    await asyncio.wait_for(running, 1)
+    assert connection.sent == []
+    owner.recovery.assert_not_called()
+    owner.shutdown.assert_not_called()
+
+
+async def test_overlapping_connection_cannot_borrow_owner_or_change_online_state():
+    # A rejected second socket must not reset the first connection's readiness.
+    class IdleConnection(ScriptedConnection):
+        async def recv(self):
+            if self.messages:
+                first = self.messages[0]
+                self.messages.clear()
+                return first
+            await asyncio.Event().wait()
+
+    owner = Mock(spec=WorkerExecution,
+                 recovery=Mock(side_effect=[None, AssertionError("second connection borrowed owner")]))
+    client = WorkerClient(worker_id="w", worker_token="test", serve_ws_url="unused",
+                          execution=owner, read_history=Mock())
+    first = asyncio.create_task(client.run_connection(IdleConnection()))
+    try:
+        async with asyncio.timeout(1):
+            while not client.connected:
+                await asyncio.sleep(0)
+        second = ScriptedConnection()
+        with pytest.raises(RuntimeError, match="peer already registered"):
+            await client.run_connection(second)
+        assert second.sent == []
+        assert client.connected
+        owner.recovery.assert_called_once_with()
+    finally:
+        first.cancel()
+        await asyncio.gather(first, return_exceptions=True)
+    owner.shutdown.assert_not_called()
 
 
 @pytest.mark.asyncio

@@ -1,18 +1,17 @@
-"""Authenticated multi-worker WebSocket registry and single-slot scheduler."""
+"""Server-owned worker scheduling, recovery and durable protocol effects."""
 
 from __future__ import annotations
 
 import asyncio
 import hmac
-from collections.abc import Mapping
-from typing import Protocol
 from uuid import uuid4
 
 from fastapi import WebSocketDisconnect
 from loguru import logger
 from pydantic import ValidationError
 
-from app.communication.session import Session, SessionClosed, SessionOverflow, Transport
+from app.communication.gateway import Gateway, Registration
+from app.communication.session import Session, SessionOverflow
 from app.contracts.protocol import (
     Assignment,
     ExecutionStopped,
@@ -33,11 +32,9 @@ from app.contracts.protocol import (
     StopAccepted,
     Succeeded,
     WorkerMessage,
-    parse_worker_message,
     terminal_digest,
 )
 from app.contracts.result_models import ResultPending
-from app.controler.workers.conversation import ConversationBroker, conversation_result_key
 from app.controler.workflow.coordinator import JobCoordinator
 from app.controler.workflow.preparation import PreparationStale, PreparationState
 from app.controler.workflow.results import ResultApplication
@@ -56,25 +53,18 @@ from app.persistence.workers import WorkerStore
 from app.telemetry.metrics import Metrics
 
 
-class WorkerSocket(Transport, Protocol):
-    @property
-    def headers(self) -> Mapping[str, str]: ...
-
-    async def accept(self) -> None: ...
-
-
 class ProtocolViolation(RuntimeError):
     pass
 
 
-class WorkerGateway:
-    """Serve one single-slot session per configured worker identity."""
+class WorkerHandler:
+    """Drive business on authenticated sessions; delegate communication to Gateway."""
 
     def __init__(
         self,
         coordinator: JobCoordinator,
         *,
-        worker_tokens: Mapping[str, str],
+        peers: Gateway[WorkerMessage, ServerMessage],
         heartbeat_interval: float = 15.0,
         heartbeat_timeout: float = 45.0,
         poll_interval: float = 2.0,
@@ -82,7 +72,6 @@ class WorkerGateway:
         database: Database,
         tools: FlowToolService,
         results: ResultApplication,
-        conversations: ConversationBroker,
     ) -> None:
         self.deliveries = DeliveryStore(database)
         self.jobs = JobStore(database)
@@ -92,13 +81,11 @@ class WorkerGateway:
         self.coordinator = coordinator
         self.tools = tools
         self.results = results
-        self.worker_tokens = dict(worker_tokens)
         self.heartbeat_interval = heartbeat_interval
         self.heartbeat_timeout = heartbeat_timeout
         self.poll_interval = poll_interval
-        self._sessions: dict[str, tuple[asyncio.Event, Session[WorkerMessage, ServerMessage]]] = {}
-        self._registry_lock = asyncio.Lock()
-        self.conversations = conversations
+        self._peers = peers
+        self._wakes: dict[Registration[WorkerMessage, ServerMessage], asyncio.Event] = {}
 
     async def _prepare_assignment(
         self, job: Job, worker_id: str, token: str, epoch: str,
@@ -122,28 +109,23 @@ class WorkerGateway:
             preparing.cancel()
             await asyncio.gather(preparing, return_exceptions=True)
 
-    async def handle(self, socket: WorkerSocket) -> None:
-        worker_id = self._authenticated_identity(socket.headers)
-        if worker_id is None:
-            await socket.close(code=1008)
-            return
-
+    async def handle(
+        self, worker_id: str, register: Register,
+        connection: Session[WorkerMessage, ServerMessage],
+    ) -> None:
+        """Take ownership immediately, including cleanup if admission never succeeds."""
         current: tuple[Job, str, ExecutionTask | None] | None = None
         connected = False
         close_code = 1000
-        connection_epoch = uuid4().hex
-        wake: asyncio.Event | None = None
+        connection_epoch = connection.epoch
+        registration: Registration[WorkerMessage, ServerMessage] | None = None
         disconnect_reason: str | None = None
-        connection: Session[WorkerMessage, ServerMessage] | None = None
         try:
-            await socket.accept()
-            register = parse_worker_message(await socket.receive_text())
-            if not isinstance(register, Register) or register.worker_id != worker_id:
-                raise ProtocolViolation("worker registration does not match authenticated identity")
-            connection = Session(socket, parse=parse_worker_message, reply_key=conversation_result_key,
-                                 epoch=connection_epoch)
-            connection.start()
-            wake = await self._register_session(worker_id, connection)
+            if connection_epoch is None:
+                raise RuntimeError("server session requires a connection epoch")
+            registration = await self._peers.register(worker_id, connection, replace=True)
+            wake = self._wakes[registration] = asyncio.Event()
+            # No await after publication: a superseded candidate cannot update DB presence.
             worker = self.workers.worker_connected(
                 worker_id, register.protocol_version, connection_epoch
             )
@@ -187,7 +169,6 @@ class WorkerGateway:
 
             while True:
                 if current is None:
-                    assert wake is not None
                     wake.clear()
                     stop = self.stops.pending(worker_id)
                     if stop is not None:
@@ -323,25 +304,22 @@ class WorkerGateway:
                     code="invalid_message" if invalid else "protocol_violation",
                     detail=disconnect_reason,
                 )
-                if connection is None:
-                    await socket.send_text(error.model_dump_json())
-                else:
-                    await connection.send(error)
+                await connection.send(error)
             except (WebSocketDisconnect, ConnectionError):
                 pass
         finally:
             try:
-                if connection is not None:
-                    await connection.close(close_code)
+                if registration is not None:
+                    self._wakes.pop(registration, None)
+                    await self._peers.unregister(registration, close_code)
                 else:
-                    await socket.close(close_code)
+                    await connection.close(close_code)
             finally:
                 if connected:
+                    assert connection_epoch is not None
                     self.workers.worker_disconnected(
                         worker_id, disconnect_reason, connection_epoch=connection_epoch,
                     )
-                if connection is not None:
-                    await self._unregister_session(worker_id, connection)
 
     async def _stop_worker(self, connection: Session[WorkerMessage, ServerMessage], worker_id: str, epoch: str, stop: StopIntent) -> None:
         await connection.send(stop.message(epoch))
@@ -391,44 +369,11 @@ class WorkerGateway:
     async def _receive(self, connection: Session[WorkerMessage, ServerMessage]) -> WorkerMessage:
         return await asyncio.wait_for(connection.receive(), timeout=self.heartbeat_timeout)
 
-    def _authenticated_identity(self, headers: Mapping[str, str]) -> str | None:
-        identity = headers.get("x-flowtool-worker-id", "")
-        authorization = headers.get("authorization", "")
-        token = self.worker_tokens.get(identity)
-        if token is None:
-            return None
-        expected_authorization = f"Bearer {token}"
-        return identity if hmac.compare_digest(authorization, expected_authorization) else None
-
-    async def _register_session(self, worker_id: str, connection: Session[WorkerMessage, ServerMessage]) -> asyncio.Event:
-        async with self._registry_lock:
-            previous = self._sessions.get(worker_id)
-            wake = asyncio.Event()
-            self._sessions[worker_id] = (wake, connection)
-        if previous is not None:
-            _, previous_connection = previous
-            try:
-                await previous_connection.close(code=1012)
-            except (WebSocketDisconnect, ConnectionError):
-                pass
-        async with self._registry_lock:
-            current = self._sessions.get(worker_id)
-            if current is None or current[1] is not connection or connection.closed:
-                raise SessionClosed("worker connection replaced during registration")
-            self.conversations.attach(worker_id, connection)
-        return wake
-
-    async def _unregister_session(self, worker_id: str, connection: Session[WorkerMessage, ServerMessage]) -> None:
-        self.conversations.detach(worker_id, connection)
-        async with self._registry_lock:
-            current = self._sessions.get(worker_id)
-            if current is not None and current[1] is connection:
-                self._sessions.pop(worker_id, None)
-
     def notify_jobs(self) -> None:
         """Wake all idle sessions after an enqueue or slot-state transition."""
-        for wake, _ in self._sessions.values():
-            wake.set()
+        for registration, wake in self._wakes.items():
+            if self._peers.get(registration.peer_id) is registration.session:
+                wake.set()
 
     @staticmethod
     def _validate_assignment_message(

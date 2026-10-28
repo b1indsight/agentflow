@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from app.communication.gateway import Gateway
 from app.contracts.protocol import (
     Assignment,
     ExecutionStopped,
@@ -17,8 +18,8 @@ from app.contracts.protocol import (
     parse_server_message,
     parse_worker_message,
 )
-from app.controler.workers.conversation import ConversationBroker
-from app.controler.workers.gateway import WorkerGateway
+from app.controler.workers.handler import WorkerHandler
+from app.controler.workers.transport import serve_worker
 from app.controler.workflow.results import ResultApplication
 from app.controler.workflow.service import ControlService
 from app.controler.workflow.tools import FlowToolService
@@ -242,14 +243,13 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path, o
         def worker_disconnected(self, *args): pass
 
     gateway_coordinator = Coordinator()
-    gateway = WorkerGateway(
+    handler = WorkerHandler(
         gateway_coordinator, database=store.database,
-        worker_tokens={"worker-1": "worker-secret"},
+        peers=Gateway(),
         heartbeat_interval=0.01,
         poll_interval=0.01,
         tools=Mock(spec=FlowToolService),
         results=Mock(spec=ResultApplication),
-        conversations=ConversationBroker(),
     )
     session = ExecutionState(root)
     executor = Executor(root, RecordingAgent(), worker_id='worker-1', state=session)
@@ -257,7 +257,8 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path, o
     client = WorkerClient(worker_id='worker-1', worker_token='worker-secret', serve_ws_url='unused',
                           execution=WorkerExecution(worker_id='worker-1', executor=executor, state=session),
                           read_history=session.read)
-    server = asyncio.create_task(gateway.handle(QueueSocket(to_serve, to_worker)))
+    server = asyncio.create_task(serve_worker(QueueSocket(to_serve, to_worker),
+                                             worker_tokens={"worker-1": "worker-secret"}, handler=handler))
     worker = asyncio.create_task(client.run_connection(Connection(to_serve, to_worker)))
     allocations = []
     try:
@@ -269,7 +270,7 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path, o
                 store.flows.update_flow(flow)
                 store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
                 started.clear()
-                gateway.notify_jobs()
+                handler.notify_jobs()
                 while not started.is_set():
                     if server.done(): server.result()
                     if worker.done(): worker.result()
@@ -277,7 +278,7 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path, o
                 binding = session.load().workspace
                 path = executor.workspaces.path(binding)
                 allocations.append((binding, path.stat().st_ino))
-                ControlService(jobs_available=gateway.notify_jobs, database=store.database).cancel(flow)
+                ControlService(jobs_available=handler.notify_jobs, database=store.database).cancel(flow)
                 while not session.load().acknowledged:
                     if server.done(): server.result()
                     if worker.done(): worker.result()
@@ -335,10 +336,9 @@ async def test_stop_reconnect_reconciles_successor(store, tmp_path, monkeypatch,
             if failure == "cleanup" and self.cleanups == 1:
                 raise OSError("temporary cleanup failure")
 
-    gateway = WorkerGateway(subject, database=store.database,
-                            worker_tokens={"worker-1": "worker-secret"}, heartbeat_interval=.01,
-                            poll_interval=.01, tools=subject.tools, results=subject.results,
-                            conversations=ConversationBroker())
+    handler = WorkerHandler(subject, database=store.database,
+                            peers=Gateway(), heartbeat_interval=.01,
+                            poll_interval=.01, tools=subject.tools, results=subject.results)
     session = ExecutionState(tmp_path)
     executor = Executor()
     client = WorkerClient(worker_id="worker-1", worker_token="worker-secret", serve_ws_url="unused",
@@ -362,14 +362,15 @@ async def test_stop_reconnect_reconciles_successor(store, tmp_path, monkeypatch,
 
     def connect(connection_type):
         incoming, outgoing = asyncio.Queue(), asyncio.Queue()
-        return (asyncio.create_task(gateway.handle(Socket(incoming, outgoing))),
+        return (asyncio.create_task(serve_worker(Socket(incoming, outgoing),
+                                                worker_tokens={"worker-1": "worker-secret"}, handler=handler)),
                 asyncio.create_task(client.run_connection(connection_type(incoming, outgoing))))
 
     server, worker = connect(LostAckConnection if failure == "lost-ack" else QueueConnection)
     try:
         async with asyncio.timeout(5):
             await started.wait()
-            ControlService(database=store.database, jobs_available=gateway.notify_jobs).cancel(flows[0])
+            ControlService(database=store.database, jobs_available=handler.notify_jobs).cancel(flows[0])
             with pytest.raises((OSError, ConnectionError), match="cleanup failure|ACK lost"):
                 await worker
         assert not session.load().acknowledged

@@ -108,12 +108,12 @@ Runtime 创建并共享的 `ResultApplication` 按 job ID 读取并校验已持�
 PR 依赖操作与 INITIAL 提交复用 `contracts.result_models.unique_pull_request_receipt`，
 只消费已读取的唯一创建回执；退休恢复缺少唯一回执时继续等待，不提交本地完成状态。
 `ResultApplication` 同时拥有逐 job 锁、有界分页和固定并发恢复；Runtime 调度其恢复方法，
-Gateway 持久接收后直接调用 `self.results.apply`，核验提交完成后才发送 ACK；
-工具请求直接调用 `gateway.tools.execute`。内部配置、数据库、仓储与服务依赖使用具体类型。
+WorkerHandler 持久接收后直接调用 `self.results.apply`，核验提交完成后才发送 ACK；
+工具请求直接调用 `handler.tools.execute`。内部配置、数据库、仓储与服务依赖使用具体类型。
 网络请求不占用数据库事务；plugin hook 在提交后调用，不具备持久化投递保证。worker 不能直接更新这些状态。
 `JobCoordinator.prepare_for_assignment` 完成任务构造、push capability 签发和 I/O 后业务复查，
 直接返回 wire `Assignment` 或 QUEUED/DONE/FAILED。读取故障使用持久重试预算，签发故障直接失败。
-`WorkerGateway` 在准备期间维持租约心跳，连接结束时取消并等待准备协程；发送前仍独立调用
+`WorkerHandler` 在准备期间维持租约心跳，连接结束时取消并等待准备协程；发送前仍独立调用
 `self.stops.authorize_dispatch`，再发送 coordinator 构造的消息。
 非零 Codex exit 会转 FAILED。revision 成功后仅消费明确 addressed 的 item/version，deferred/遗漏项/
 clarification 保持 waiting；不把 addressed 当作远端 resolved。有未决问题时不重新请求审核。
@@ -131,12 +131,25 @@ M2 已接入有界 Issue/PR/patch/讨论快照、线程/comment 映射与原线�
 
 因此状态转换代码存在不等于目标闭环可用。
 
-### 4.3.1 远程 Worker Gateway / Client / Executor
+### 4.3.1 公共 Gateway / Session 与角色驱动
 
-serve 的 `WorkerGateway` 校验每个 identity 的 bearer token，维护多会话 registry，并用随机 connection epoch 与
-assignment token 对 Started、Heartbeat 和结果做四元组 fencing。每个 worker 是单槽，PostgreSQL 按 FIFO、
-worker `last_assigned_at` 和 Flow execution binding 事务化领取任务。worker 的 `WorkerClient` 主动连接并指数退避；
+两端使用同一个 `app/communication/gateway.py` 的 `Gateway`，统一登记、查找、替换和通信关闭。
+ServerRuntime 创建多 worker Gateway，供 WorkerHandler 和 ConversationBroker 共用；WorkerClient
+内部创建同类 Gateway，以固定 `server` key 拒绝重叠连接。Runtime 装配暂不要求两端完全对称。
+
+serve 的 `workers/transport.py:serve_worker` 校验 bearer token、accept 与实际首帧 Register，
+再创建带随机 epoch 的 Session，交给 `WorkerHandler.handle`。handler 委托 Gateway 登记，
+保留调度、恢复、持久化和 assignment fencing；业务局部状态留在这一协程中，无 Endpoint/Run 对象。
+每个 worker 是单槽，PostgreSQL 按 FIFO、worker `last_assigned_at` 和 Flow execution binding
+事务化领取任务。worker 的 `WorkerClient` 主动连接并指数退避；
 `WorkerExecutor` 只依赖 CodingAgent 和 Flow repo/VCS helpers，不导入 Store、FastAPI 或 GitHub。
+
+Gateway 仅发布当前登记，另保留尚未退休的 Session 以便进程关闭全部通信。A→B→C 重叠替换时，
+C 可越过慢 A；B 等待结束后必须复核身份，不能重新发布或覆盖在线 DB。旧 finally 只退休自己。
+handler 退出先撤回路由并 join Session，再以原 epoch 写 DB 断连；关闭错误也不跳过 DB 清理。
+进程关闭先 seal，拒绝新登记和查找，再 join 全部通信；不接管 ASGI 或执行任务。正常 ASGI drain
+仍负责业务退出，强制超时退出没有新增业务 join 保证。FastAPI 正常断连后再次 close 可能抛
+WebSocketDisconnect 的已知限制本阶段未修改，见[第三阶段记录](../plan/shared-communication-gateway.md)。
 
 不同 identity 可并发在线；同 identity 新连接取得新 epoch 并关闭旧 socket，数据库条件保证旧连接最终失效。
 未授权派发的任务断线后可在 lease 到期 requeue；已授权派发但缺少 Started 的未知执行不当作
@@ -389,14 +402,15 @@ Client 只借用 owner；替换前必须关闭并 join 旧 Client，同一 owner
 完成原 Future。断线不出队、不换 call_id；原 socket 仍消费已取消调用的匹配迟到回复。
 `on_result_accepted` / `on_stop_accepted` 只处理收到的确认，不发送 ACK。
 
-WorkerClient 与 server WorkerGateway 共用 `app/communication/session.py` 的 `Session`。
+WorkerClient 与 server WorkerHandler 使用公共 Gateway 管理 `app/communication/session.py` 中的 Session 实例。
 一个 Session 对应单个对端的一次连接 epoch，唯一 reader 解析并分流消息；其余业务消息进入
 32 条 / 16 MiB FIFO。查询及其回复不等待执行、工具、结果应用或 stop 清理；执行业务仍串行消费。
 所有消息经 Session 串行写入，`send` 等实际写完成；工具 guard 在拿到锁后的实际写入前检查。
 不确定的写失败/取消封闭连接，无自动重试。FastAPI socket 直接满足 Transport；websockets client
 只用本地适配器转换 send/recv/bytes，不增加消息包装或 wire 字段。
 
-Session 关联至多 4 个临时请求；Broker 保留全局 64 准入、30 秒总预算、worker 路由和历史页校验。
+Session 关联至多 4 个临时请求；Broker 保留全局 64 准入、30 秒总预算和历史页校验，
+通过 Gateway.get 选择一次原 Session，不保存第二张 peer 表、不重投后继连接。
 只有显式分类的 ConversationResult 是临时 reply；工具响应、结果和停止 ACK 仍交业务验证。
 worker 每连接最多 4 个历史 handler，满额时由单独 sender 写入最多 4 条 busy 回复（含在发项），
 持续超限断连。epoch 由合法握手/恢复响应确认一次；StopExecution、ResultAccepted 可早于 Registered。
@@ -406,7 +420,7 @@ shielded stop，也不释放 Flow binding。读失败立即失败临时查询，
 显式关闭则丢弃旧 FIFO。旧连接/epoch 回复不能完成新请求，不跨连接重放查询。
 历史读取经注入的 `read_history` 调用 `ExecutionState.read()`，再选择 Codex/Amp 读取器，
 允许查询 control 指定的既往会话；无额外历史 facade。取消 to_thread 的等待不保证同步读取立即停止；
-其结果只属于旧 Session。公共 Gateway 注册/路由、统一 envelope 和 outbox 留待后续阶段。
+其结果只属于旧 Session。统一 envelope 和 outbox 留待后续阶段。
 
 WorkerMCP 随首次编码启动与关闭，复用现有 HTTP 依赖，仅暴露 open_pr；无 STDIO 桥接进程。
 修订恢复覆盖为禁用的 flow MCP 配置，避免重新连接旧任务端口。MCP 服务不接管 worker 信号。

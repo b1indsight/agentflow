@@ -7,12 +7,13 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from pydantic import ValidationError
 
+from app.communication.gateway import Gateway
 from app.contracts.protocol import InitialTaskResult, Succeeded
 from app.contracts.result_models import ResultPending
 from app.controler.config import ServerSettings
 from app.controler.runtime import ServerRuntime
 from app.domain.models import JobKind, JobState
-from tests.test_gateway import RecordingCoordinator, RecordingStore
+from tests.test_worker_handler import RecordingCoordinator, RecordingStore
 from tests.worker_fakes import result_application
 
 
@@ -183,7 +184,8 @@ async def test_runtime_sweeps_continue_while_result_recovery_waits():
     runtime.database = SimpleNamespace(close=Mock())
     runtime.access = SimpleNamespace(close=AsyncMock())
     runtime.results = SimpleNamespace(recover_pending_results=AsyncMock(side_effect=recover))
-    runtime.gateway = SimpleNamespace(notify_jobs=Mock())
+    runtime.gateway = Gateway()
+    runtime.worker_handler = SimpleNamespace(notify_jobs=Mock())
     runtime.reconciler = SimpleNamespace(stop=Mock())
     loops = [runtime._sweep_results, runtime._sweep_assignments, runtime._sweep_reviews]
     runtime._tasks = [asyncio.create_task(loop()) for loop in loops]
@@ -197,6 +199,34 @@ async def test_runtime_sweeps_continue_while_result_recovery_waits():
     assert exited.is_set() and all(task.done() for task in runtime._tasks)
     runtime.access.close.assert_awaited_once()
     runtime.database.close.assert_called_once()
+
+
+@pytest.mark.parametrize("failure", ["communication", "access"])
+async def test_shutdown_releases_resources_even_when_connection_cleanup_fails(failure):
+    # Transport failure cannot skip access cleanup or leave the DB pool open.
+    runtime = ServerRuntime.__new__(ServerRuntime)
+    runtime._tasks, runtime._triage_task = [], None
+    order = []
+
+    async def close_communication(code):
+        assert code == 1012
+        order.append("communication")
+        if failure == "communication":
+            raise OSError("communication failed")
+
+    async def close_access():
+        order.append("access")
+        if failure == "access":
+            raise OSError("access failed")
+
+    runtime.gateway = Mock(spec=Gateway, seal=Mock(side_effect=lambda: order.append("seal")),
+                           close=AsyncMock(side_effect=close_communication))
+    runtime.reconciler = SimpleNamespace(stop=lambda: order.append("sweeps"))
+    runtime.access = SimpleNamespace(close=close_access)
+    runtime.database = SimpleNamespace(close=lambda: order.append("database"))
+    with pytest.raises(OSError, match=failure):
+        await runtime.shutdown()
+    assert order == ["seal", "sweeps", "communication", "access", "database"]
 
 
 def test_store_pages_only_unapplied_results_in_stable_job_order(store):

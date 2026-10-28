@@ -5,10 +5,13 @@ from unittest.mock import Mock
 import httpx
 import pytest
 
+from app.communication.gateway import Gateway
+from app.contracts.protocol import ServerMessage, WorkerMessage
 from app.controler.api import create_app
 from app.controler.runtime import ServerRuntime
 from app.controler.workers.conversation import ConversationService
-from app.controler.workers.gateway import WorkerGateway
+from app.controler.workers.handler import WorkerHandler
+from app.controler.workers.transport import serve_worker
 from app.domain.models import Attempt, Flow, FlowExecution, FlowState
 from app.worker.execution.amp_process import AmpProcessResult
 from app.worker.execution.lifecycle import WorkerExecution
@@ -98,19 +101,20 @@ async def test_http_query_while_worker_or_control_busy_and_idle(tmp_path, phase,
         monkeypatch.setattr("app.worker.state.amp_history.run_amp", export)
     store = HistoryStore(session, other_session)
     gateway_coordinator = Coordinator(store)
-    gateway = WorkerGateway(
+    peers = Gateway[WorkerMessage, ServerMessage]()
+    broker = ConversationBroker(peers)
+    handler = WorkerHandler(
         gateway_coordinator, database=store.database,
-        worker_tokens={"worker-1": "worker-secret"},
+        peers=peers,
         poll_interval=0.01,
         tools=gateway_coordinator.tools,
         results=gateway_coordinator.results,
-        conversations=ConversationBroker(),
     )
     if phase == "slow_export":
-        gateway.conversations.timeout /= 10
+        broker.timeout /= 10
     else:
-        gateway.conversations.timeout = 1
-    service = ConversationService(gateway.conversations, database=store.database, )
+        broker.timeout = 1
+    service = ConversationService(broker, database=store.database, )
     issuer = AccessIssuer()
     runtime = Mock(spec=ServerRuntime, settings=issuer.settings, access=issuer.auth, conversations=service)
     app = create_app(runtime)
@@ -122,7 +126,8 @@ async def test_http_query_while_worker_or_control_busy_and_idle(tmp_path, phase,
     worker = WorkerClient(worker_id="worker-1", worker_token="worker-secret", serve_ws_url="unused",
                           execution=WorkerExecution(worker_id="worker-1", executor=Executor(), state=state),
                           read_history=state.read)
-    server = asyncio.create_task(gateway.handle(QueueSocket(to_control, to_worker)))
+    server = asyncio.create_task(serve_worker(QueueSocket(to_control, to_worker),
+                                             worker_tokens={"worker-1": "worker-secret"}, handler=handler))
     client = asyncio.create_task(worker.run_connection(QueueConnection(to_control, to_worker)))
     try:
         await asyncio.wait_for(started.wait(), 2)
@@ -153,7 +158,7 @@ async def test_http_query_while_worker_or_control_busy_and_idle(tmp_path, phase,
             assert third.json()["sessions"][0]["starts_at_beginning"]
             assert third.json()["sessions"][0]["reached_end"]
             assert (await http.get("/api/flows/99/conversation")).status_code == 404
-            assert gateway.conversations._inflight == 0
+            assert broker._inflight == 0
     finally:
         release.set()
         server.cancel()

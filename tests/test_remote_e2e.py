@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from app.communication.gateway import Gateway
 from app.contracts.protocol import (
     Assignment,
     ExecutionResult,
@@ -13,8 +14,8 @@ from app.contracts.protocol import (
     InitialTaskResult,
     Succeeded,
 )
-from app.controler.workers.conversation import ConversationBroker
-from app.controler.workers.gateway import WorkerGateway
+from app.controler.workers.handler import WorkerHandler
+from app.controler.workers.transport import serve_worker
 from app.controler.workflow.coordinator import JobCoordinator
 from app.controler.workflow.tools import FlowToolService
 from app.domain.delivery_models import OpenedDelivery
@@ -262,13 +263,12 @@ async def test_control_gateway_and_worker_client_complete_one_remote_job(tmp_pat
     serve_to_worker: asyncio.Queue[str] = asyncio.Queue()
     store = RemoteStore()
     coordinator = RemoteCoordinator(store)
-    gateway = WorkerGateway(
+    handler = WorkerHandler(
         coordinator, database=store.database,
-        worker_tokens={"worker-1": "worker-secret"},
+        peers=Gateway(),
         poll_interval=0.01,
         tools=coordinator.tools,
         results=coordinator.results,
-        conversations=ConversationBroker(),
     )
     executor = FakeExecutor()
     state = ExecutionState(tmp_path)
@@ -280,7 +280,8 @@ async def test_control_gateway_and_worker_client_complete_one_remote_job(tmp_pat
     )
 
     tasks = [
-        asyncio.create_task(gateway.handle(QueueSocket(worker_to_serve, serve_to_worker))),
+        asyncio.create_task(serve_worker(QueueSocket(worker_to_serve, serve_to_worker),
+                                        worker_tokens={"worker-1": "worker-secret"}, handler=handler)),
         asyncio.create_task(
             client.run_connection(QueueConnection(worker_to_serve, serve_to_worker))
         ),
