@@ -1,8 +1,8 @@
 # Worker / server 公共通信 Session（第二阶段）— Feature record
 
 **Stage:** Planning — 待审批；未编写实现或测试
-**PR:** 尚未发布；docs-only Draft PR 发布权限待确认
-**Bookmark:** 拟用 `refactor/shared-communication-session`，计划与实现沿用同一 bookmark / PR
+**PR:** [#122](https://github.com/b1indsight/agentflow/pull/122) — docs-only Draft，尚未批准实现
+**Bookmark:** `refactor/shared-communication-session`，计划与实现沿用同一 bookmark / PR
 **Workspace:** `.amp/in/shared-session-plan`
 
 ## 1. Initial plan
