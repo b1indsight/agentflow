@@ -910,6 +910,42 @@ PYTHONPATH="$PWD" uv run --no-sync pytest -q -s -c pyproject.toml -p tests.conft
 **交付边界：** 本地实现、行为验证及自查完成；根 checkout 的其他线程工作未改动，未提交、
 移动 bookmark、推送、开 PR 或部署。发布前 review gate 仍待后续运行，当前结果不代替该门禁。
 
+### 2.6 PR 测试精简与关闭回归补强（2026-10-29，UTC+08）
+
+**触发与范围：** 用户指出 PR #124 中仍有无效测试。本轮只整理该阶段新增、迁移的测试及
+相关测试辅助代码，不改 Gateway、Session、两端业务实现、协议或持久化。
+
+**删减决定：** 删除 Gateway 中重复 Session 双向请求分派的混合 smoke test；worker 准入由
+现有 stop-during-dial / overlapping-connection 回归保护。删除仅等 accept 的多 worker 用例，
+保留 ConversationBroker 跨多个 peer 的并发查询与全局准入测试。健康连接替换由 server 的
+A→B→C 用例覆盖，独立替换测试只保留已断连 predecessor；公共 Gateway 只保留 C 先退出后
+B 仍不得复活的额外边界。Gateway 导入已传递导入 Session，移除重复的新解释器导入实例。
+
+清理用例合并重复成功、普通关闭异常及取消参数，保留正常断连、RuntimeError、DB 失败、取消、
+sealed 拒绝以及通信先 join、DB 后离线的合同。unregister 用例只检查 predecessor 屏障，
+Session 的重复取消保护继续由其自身测试覆盖。移除 `_wakes`、socket close 次数等内部断言；
+server 替换直接核对存储中的 epoch，不再依赖 worker_connected spy 的次数与参数。
+这些调整收窄 §2.3–§2.5 的永久测试矩阵，不改变其实现决定。
+
+**发现并修正漏检：** 运行时把 Gateway._close_owned 改为只遍历 current 后，原 Gateway 测试
+仍全部通过。旧断言在 socket 刚进入 close 时立即检查 task.done()，未等其他关闭完成，漏掉了
+被替换旧连接尚未退出、Gateway.close 已提前结束的错误。现有回归改为保持旧连接的事件屏障，
+有界等待 shield 后的关闭任务，验证其在放行之前不能完成；同一场景覆盖重复取消和关闭异常
+的保留。不新增临时探针到永久测试中。正确实现与 current-only 变体的重复对照结果一致。
+
+**验证与证据：** 精简后的永久测试通过控制组；latest、publication、owned、identity、
+worker-seal、worker-overlap、presence-order、handshake-scope、close-adapter、shutdown-cancel
+运行时故障变体均触发对应回归。真实 PostgreSQL 全量无失败、无跳过，Ruff、Gateway 测试格式
+及 app/tests 的 Mypy 通过；保留原 Starlette/httpx 弃用警告。没有改生产代码，未重做构建或
+真实网络探针，不把 §2.5 的结果当作本轮新执行的验证。
+
+产物位于本 thread 的 `.amp/in/artifacts/unified-gateway/`：`test-cleanup-before-*.log`、
+`test-cleanup-focused.log`、`test-cleanup-ablation-*.log`、`test-cleanup-close-repeat.log`、
+`test-cleanup-full.log`、`test-cleanup-static.log`。本轮运行时变体源码保存为
+`test-cleanup-ablation-plugin.txt`，复现方式同 §2.4，输入为 Gateway、handler、client 的永久测试；
+临时可执行 plugin 在验收后删除。清理在独立 workspace 完成，根工作区及其他线程变更未动。
+发布沿用 PR #124 和既有 bookmark，并执行针对本轮清理的 review gate。
+
 ## 源码依据（规划固定基线）
 
 [S1]: https://github.com/b1indsight/agentflow/blob/cc796c62a5b3c93711314263ba0a77688c4b3f86/app/controler/workers/gateway.py#L403-L431

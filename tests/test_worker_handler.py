@@ -522,14 +522,6 @@ async def test_gateway_closes_messages_with_an_incompatible_protocol_version() -
 
 
 class WaitingSocket(ScriptedSocket):
-    def __init__(self, *, worker_id: str = "worker-1", token: str = "worker-secret") -> None:
-        super().__init__(worker_id=worker_id, token=token)
-        self.accepted_event = asyncio.Event()
-
-    async def accept(self) -> None:
-        await super().accept()
-        self.accepted_event.set()
-
     async def receive_text(self) -> str:
         if self._step == 0:
             self._step = 1
@@ -539,10 +531,7 @@ class WaitingSocket(ScriptedSocket):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("predecessor_disconnected", [False, True])
-async def test_gateway_new_epoch_takes_over_a_duplicate_worker_connection(
-    predecessor_disconnected: bool,
-) -> None:
+async def test_disconnected_predecessor_does_not_reject_replacement() -> None:
     # The peer may already be gone when replacement closes its still-registered Session.
     class ObservedSocket(WaitingSocket):
         def __init__(self) -> None:
@@ -556,7 +545,7 @@ async def test_gateway_new_epoch_takes_over_a_duplicate_worker_connection(
 
         async def close(self, code: int = 1000) -> None:
             await super().close(code)
-            if self is first and predecessor_disconnected:
+            if self is first:
                 raise WebSocketDisconnect(1006)
 
     store = RecordingStore()
@@ -608,37 +597,6 @@ async def test_gateway_new_epoch_takes_over_a_duplicate_worker_connection(
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
-@pytest.mark.asyncio
-async def test_gateway_accepts_different_worker_identities_concurrently() -> None:
-    store = RecordingStore()
-    store.job.state = JobState.DONE
-    store.job.result_applied_at = store.job.updated_at
-    gateway_coordinator = RecordingCoordinator(store)
-    handler = WorkerHandler(
-        gateway_coordinator, database=store.database,
-        peers=Gateway(),
-        poll_interval=60,
-        tools=gateway_coordinator.tools,
-        results=gateway_coordinator.results,
-    )
-    tokens = {"worker-1": "secret-1", "worker-2": "secret-2"}
-    first = WaitingSocket(worker_id="worker-1", token="secret-1")
-    second = WaitingSocket(worker_id="worker-2", token="secret-2")
-    sessions = [
-        asyncio.create_task(serve_worker(first, handler=handler, worker_tokens=tokens)),
-        asyncio.create_task(serve_worker(second, handler=handler, worker_tokens=tokens)),
-    ]
-    await asyncio.gather(first.accepted_event.wait(), second.accepted_event.wait())
-    try:
-        assert first.accepted is True
-        assert second.accepted is True
-        assert store.presence == {"worker-1": "online", "worker-2": "online"}
-    finally:
-        for session in sessions:
-            session.cancel()
-        await asyncio.gather(*sessions, return_exceptions=True)
-
-
 async def test_overlapping_replacements_do_not_republish_old_route():
     # B waits for A's close while C supersedes B. Finishing A must not publish B again.
     closing, release = asyncio.Event(), asyncio.Event()
@@ -660,8 +618,6 @@ async def test_overlapping_replacements_do_not_republish_old_route():
 
     store = RecordingStore()
     store.job.state = JobState.DONE
-    connected = Mock(wraps=store.worker_connected)
-    store.worker_connected = connected
     coordinator = RecordingCoordinator(store)
     gateway = Gateway()
     broker = ConversationBroker(gateway)
@@ -689,8 +645,7 @@ async def test_overlapping_replacements_do_not_republish_old_route():
         assert gateway.get("worker-1") is newest
         assert newest.epoch == registered.connection_epoch
         assert second.sent.empty()
-        assert connected.call_count == 2
-        assert connected.call_args.args[2] == newest.epoch
+        assert store.connection_epoch == newest.epoch
     finally:
         release.set()
         for task in tasks:
@@ -818,15 +773,13 @@ async def test_transport_checks_actual_first_frame_before_session_dispatch(first
 
 
 @pytest.mark.parametrize(
-    "failure", ["none", "disconnected", "close", "runtime", "database", "cancel", "sealed"]
+    "failure", ["disconnected", "runtime", "database", "cancel", "sealed"]
 )
 async def test_handler_cleanup_joins_communication_before_presence_and_propagates_errors(failure):
     # Cleanup errors must not re-enter handshake error mapping or strand DB presence.
     closing, release, joined, registered, disconnect = (asyncio.Event() for _ in range(5))
 
     class ClosingSocket(WaitingSocket):
-        close_calls = 0
-
         async def receive_text(self):
             if self._step == 0:
                 return await super().receive_text()
@@ -838,14 +791,11 @@ async def test_handler_cleanup_joins_communication_before_presence_and_propagate
             registered.set()
 
         async def close(self, code=1000):
-            self.close_calls += 1
             closing.set()
             await release.wait()
             joined.set()
             if failure == "disconnected":
                 raise WebSocketDisconnect(1006)
-            if failure == "close":
-                raise OSError("transport close failed")
             if failure == "runtime":
                 raise RuntimeError("invalid socket close state")
             await super().close(code)
@@ -892,18 +842,18 @@ async def test_handler_cleanup_joins_communication_before_presence_and_propagate
                 await asyncio.sleep(0)
                 assert not running.done()
         release.set()
-        if failure in {"close", "runtime", "database", "cancel"}:
-            error = {"cancel": asyncio.CancelledError, "runtime": RuntimeError}.get(
-                failure, OSError
-            )
+        if failure in {"runtime", "database", "cancel"}:
+            error = {
+                "cancel": asyncio.CancelledError,
+                "runtime": RuntimeError,
+                "database": ConnectionError,
+            }[failure]
             with pytest.raises(error):
                 await asyncio.wait_for(running, 1)
         else:
             await asyncio.wait_for(running, 1)
         assert store.disconnected == ([] if failure == "sealed" else [store.connection_epoch])
         assert peers.get("worker-1") is None
-        assert not handler._wakes
-        assert socket.close_calls == 1
         assert all(isinstance(parse_server_message(raw), Registered) for raw in socket.sent)
     finally:
         release.set()
