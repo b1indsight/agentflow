@@ -1,7 +1,7 @@
 # Worker / server 公共 Gateway（第三阶段）— Feature record
 
-**Stage:** Implementation — 实现与本地验证完成，发布评审中
-**PR:** 待创建；本轮已获发布授权，仍使用同一 feature PR
+**Stage:** PR review — 实现与本地验证完成，独立代码评审门禁通过
+**PR:** [#124](https://github.com/b1indsight/agentflow/pull/124)
 **Bookmark:** `refactor/shared-communication-gateway`
 **Workspace:** `.amp/in/workspaces/unified-gateway-plan`（独立 jj workspace）
 
@@ -9,7 +9,7 @@
 > WorkerGateway 已删除，不引入 WorkerEndpoint、WorkerRun 或 enter/run/finish；
 > 两端使用同类 Gateway / Session，Runtime 装配完全对称后置。
 > §1、R1、R2 保留历史。§1.8 关闭适配已获准并实现，§2.5 记录回归及真实 Uvicorn 验收，
-> 取代 §2.3 的阻塞状态。所有改动均来自独立 workspace，发布须通过代码评审门禁。
+> 取代 §2.3 的阻塞状态。所有改动均来自独立 workspace，已提交 PR；尚未合并或部署。
 
 ## 1. Initial plan
 
