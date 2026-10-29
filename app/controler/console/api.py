@@ -97,7 +97,7 @@ async def retry(request: Request, flow_id: FlowId, body: RetryRequest) -> FlowDe
 
     def notify_jobs() -> None:
         # Schedule on the ASGI loop after commit, including after client disconnect.
-        loop.call_soon_threadsafe(runtime.gateway.notify_jobs)
+        loop.call_soon_threadsafe(runtime.worker_handler.notify_jobs)
 
     def command() -> FlowDetail:
         flow = FlowStore(runtime.database).get_flow(flow_id)

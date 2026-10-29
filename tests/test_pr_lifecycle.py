@@ -5,12 +5,12 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.communication.gateway import Gateway
 from app.contracts.protocol import PROTOCOL_VERSION, InitialTaskResult, Succeeded, terminal_digest
 from app.contracts.result_models import ResultPending
 from app.controler.events.router import EventRouter
 from app.controler.reconciliation.pull_requests import Reconciler
-from app.controler.workers.conversation import ConversationBroker
-from app.controler.workers.gateway import ProtocolViolation, WorkerGateway
+from app.controler.workers.handler import ProtocolViolation, WorkerHandler
 from app.controler.workflow.lifecycle import pause_delivery
 from app.controler.workflow.service import ControlService
 from app.domain.delivery_models import PreparedDelivery
@@ -116,16 +116,15 @@ async def test_closed_missing_journal_preserves_late_result_and_reopen(store, pe
         pause_delivery(tx.deliveries.get_delivery(flow.id), deliveries=tx.deliveries, jobs=tx.jobs)
     store.workers.worker_disconnected("worker-a", "disconnected during closed PR", "epoch")
     store.workers.worker_connected("worker-a", PROTOCOL_VERSION, "restart")
-    gateway = WorkerGateway(
+    handler = WorkerHandler(
         subject, database=store.database,
-        worker_tokens={},
+        peers=Gateway(),
         tools=subject.tools,
         results=subject.results,
-        conversations=ConversationBroker(),
     )
     # Missing journal is not proof of execution failure: its original result may still arrive.
     with pytest.raises(ProtocolViolation, match="journal is missing"):
-        await gateway._reject_missing_journal("worker-a", "restart", job.id)
+        await handler._reject_missing_journal("worker-a", "restart", job.id)
     assert store.jobs.get_job(job.id).result_received_at is None
     assert store.jobs.get_job(job.id).state is JobState.RUNNING
     assert store.workers.get_flow_execution(flow.id).released_at is None
@@ -337,14 +336,13 @@ async def test_close_during_capability_preparation_never_dispatches(store, pendi
         return secret
 
     monkeypatch.setattr(Repository, "create_push_capability", close_before_return)
-    gateway = WorkerGateway(
+    handler = WorkerHandler(
         subject, database=store.database,
-        worker_tokens={},
+        peers=Gateway(),
         tools=subject.tools,
         results=subject.results,
-        conversations=ConversationBroker(),
     )
-    prepared = await gateway._prepare_assignment(job, "worker-a", "token", "epoch")
+    prepared = await handler._prepare_assignment(job, "worker-a", "token", "epoch")
     assert prepared is JobState.DONE
     assert store.jobs.get_job(job.id).started_at is None
     assert store.workers.get_flow_execution(flow.id).released_at is None

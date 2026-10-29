@@ -104,6 +104,8 @@ worker 使用执行 Codex 时相同的 `CODEX_HOME`（默认 `~/.codex`），读
 50000 个条目；先查 sessions，再查 archived_sessions，找到即返回。两处均有副本时优先使用
 活动目录；候选文件的符号链接和普通文件检查统一在打开时执行。control 全局最多 64 个
 待响应查询、每连接 4 个；worker 每连接最多 4 个历史处理任务，Codex 读取器最多同时读取 2 个。
+Broker 通过共享 Gateway 选择一次当前 Session；替换期间未发布的候选不可查询，旧连接查询
+失败后不自动改投新连接。Gateway 不保存查询 Future，也不持有执行或历史业务状态。
 两端共用 Session 的单一持续接收器，在准备任务、处理工具、应用结果和 worker 停止清理期间
 仍分流查询与回复。执行消息按原顺序消费，连接内临时缓冲最多 32 条/16 MiB；busy 回复另有
 4 条有界缓存（含在发项），超限使连接失败。查询的 30 秒预算包括等待发送锁、写入和等回复；
@@ -112,5 +114,5 @@ worker 使用执行 Codex 时相同的 `CODEX_HOME`（默认 `~/.codex`），读
 已知环境凭据及常见 token 文本会脱敏，但不保证自动识别任意源码或文本中的所有秘密。
 
 本功能最初使用 wire protocol v11；当前整体协议为 v15，查询字段沿用 v13，journal 为 v4。
-公共 Session 抽取不改变这些格式。control 和 worker 必须同步升级，已有 journal 的恢复规则不变；
+公共 Session / Gateway 抽取不改变这些格式。control 和 worker 必须同步升级，已有 journal 的恢复规则不变；
 不能把网络协议版本不兼容当成可恢复的会话查询失败。

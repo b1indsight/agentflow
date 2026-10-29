@@ -11,6 +11,7 @@ import pytest_asyncio
 from psycopg import OperationalError
 from pydantic import SecretStr
 
+from app.communication.gateway import Gateway
 from app.contracts.protocol import PROTOCOL_VERSION
 from app.controler.api import create_app
 from app.controler.config import ServerSettings
@@ -18,7 +19,7 @@ from app.controler.events.router import EventRouter
 from app.controler.events.webhooks import WebhookConsumer
 from app.controler.runtime import ServerRuntime
 from app.controler.workers.conversation import ConversationService
-from app.controler.workers.gateway import WorkerGateway
+from app.controler.workers.handler import WorkerHandler
 from app.controler.workflow.service import ControlService
 from app.domain.models import Flow, FlowState, JobKind
 from app.persistence.store import Store
@@ -38,7 +39,9 @@ class WebhookRuntime(ServerRuntime):
         self.settings.host, self.settings.port = "test", 0
         self.metrics = Metrics()
         self.router = router
-        self.gateway = Mock(spec=WorkerGateway)
+        self.gateway = Mock(spec=Gateway)
+        self.worker_handler = Mock(spec=WorkerHandler)
+        self.worker_tokens = {"worker-1": "worker-secret"}
         self.conversations = Mock(spec=ConversationService)
         self.tasks: list[asyncio.Task[None]] = []
         self.webhooks = Mock(spec=WebhookConsumer)

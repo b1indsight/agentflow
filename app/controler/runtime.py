@@ -7,6 +7,8 @@ from datetime import timedelta
 
 from loguru import logger
 
+from app.communication.gateway import Gateway
+from app.contracts.protocol import ServerMessage, WorkerMessage
 from app.controler.access import OwnerAccess
 from app.controler.config import ServerSettings
 from app.controler.console.sync import ConsoleSynchronizer
@@ -17,7 +19,7 @@ from app.controler.reconciliation.projects import ProjectSync
 from app.controler.reconciliation.pull_requests import Reconciler
 from app.controler.review.judge import BubJudge
 from app.controler.workers.conversation import ConversationBroker, ConversationService
-from app.controler.workers.gateway import WorkerGateway
+from app.controler.workers.handler import WorkerHandler
 from app.controler.workflow.coordinator import JobCoordinator
 from app.controler.workflow.effects import ResultEffects
 from app.controler.workflow.results import ResultApplication
@@ -61,7 +63,12 @@ class ServerRuntime:
             database=database,
         )
         tools = FlowToolService(github, database=database)
-        conversations = ConversationBroker()
+        self.gateway = Gateway[WorkerMessage, ServerMessage]()
+        conversations = ConversationBroker(self.gateway)
+        self.worker_tokens = {
+            worker_id: token.get_secret_value()
+            for worker_id, token in self.settings.worker_tokens.items()
+        }
         self.coordinator = JobCoordinator(
             github,
             self.settings,
@@ -69,16 +76,12 @@ class ServerRuntime:
             database=database,
             results=self.results,
         )
-        self.gateway = WorkerGateway(
+        self.worker_handler = WorkerHandler(
             self.coordinator,
+            peers=self.gateway,
             database=database,
             tools=tools,
             results=self.results,
-            conversations=conversations,
-            worker_tokens={
-                worker_id: token.get_secret_value()
-                for worker_id, token in self.settings.worker_tokens.items()
-            },
             heartbeat_interval=self.settings.worker_heartbeat_interval,
             heartbeat_timeout=self.settings.worker_heartbeat_timeout,
             poll_interval=self.settings.worker_poll_interval,
@@ -89,7 +92,7 @@ class ServerRuntime:
         self._triage_task: asyncio.Task[None] | None = None
         self.service = ControlService(
             plugins,
-            self.gateway.notify_jobs,
+            self.worker_handler.notify_jobs,
             database=database,
         )
         self.conversations = ConversationService(conversations, database=database)
@@ -98,7 +101,7 @@ class ServerRuntime:
             self.settings,
             database=database,
             plugins=plugins,
-            jobs_available=self.gateway.notify_jobs,
+            jobs_available=self.worker_handler.notify_jobs,
         )
         self.reconciler = Reconciler(
             github,
@@ -176,7 +179,7 @@ class ServerRuntime:
                         requeued,
                         failed,
                     )
-                    self.gateway.notify_jobs()
+                    self.worker_handler.notify_jobs()
             except Exception:  # noqa: BLE001 -- keep periodic recovery alive after operational errors
                 logger.exception("assignment recovery sweep failed; retrying next sweep")
 
@@ -188,14 +191,14 @@ class ServerRuntime:
                     concurrency=self.settings.result_recovery_concurrency,
                     batch_size=self.settings.result_recovery_batch_size,
                 )
-                self.gateway.notify_jobs()
+                self.worker_handler.notify_jobs()
             except Exception:  # noqa: BLE001 -- a failed inbox query is retried next sweep
                 logger.exception("result recovery sweep failed; retrying next sweep")
             await asyncio.sleep(self.settings.worker_sweep_interval)
 
     def _settle_reviews(self) -> None:
         if self.reviews.claim_due():
-            self.gateway.notify_jobs()
+            self.worker_handler.notify_jobs()
 
         if self._triage_task is None or self._triage_task.done():
             self._triage_task = asyncio.create_task(self._run_triage())
@@ -211,7 +214,7 @@ class ServerRuntime:
                 await self.coordinator.triage(batch, self.judge)
             except Exception:  # noqa: BLE001 -- isolate unavailable providers/feedback batches
                 logger.exception("review prerequisite interrupted; unfinished batch will be retried")
-        self.gateway.notify_jobs()
+        self.worker_handler.notify_jobs()
 
     async def _sweep_reviews(self) -> None:
         """Keep settle independent of both lease errors and slow remote receipt checks."""
@@ -228,13 +231,21 @@ class ServerRuntime:
 
     async def shutdown(self) -> None:
         self._ready = False
-        self.reconciler.stop()
-        tasks = list(self._tasks)
-        if self._triage_task is not None:
-            tasks.append(self._triage_task)
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-        await self.access.close()
-        self.database.close()
+        self.gateway.seal()
+        try:
+            self.reconciler.stop()
+            tasks = list(self._tasks)
+            if self._triage_task is not None:
+                tasks.append(self._triage_task)
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            try:
+                await self.gateway.close(1012)
+            finally:
+                try:
+                    await self.access.close()
+                finally:
+                    self.database.close()

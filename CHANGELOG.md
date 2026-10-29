@@ -8,6 +8,12 @@
 
 ## Unreleased
 
+- Worker 与 server 共用进程级 `Gateway`，统一 peer/session 登记、替换、路由与通信关闭；
+  server 多 worker，worker 至多一个 server。删除 WorkerGateway 和 Broker 的独立连接表，
+  接入函数负责认证/首帧，WorkerHandler 保留业务；无 Endpoint/Run 中间对象。
+  重叠替换只发布最新连接，进程退出等待所有已持有的 Session，停止期间的迟到拨号不能借用执行。
+  server 关闭已断开的 socket 视为正常完成，不再因此拒绝后继连接；其他关闭错误继续传播。
+  保留 WorkerExecution、journal 与 Flow binding 的所有权、wire v15/journal v4 和结果/停止提交语义。
 - Worker 与 server 共用连接级 `Session`，统一单 reader、有界执行 FIFO、串行发送与临时查询关联，
   删除原 WorkerConnection、Broker pending 表及 Client 查询分流任务；慢工具、结果应用和停止清理
   期间仍能查询历史。保留全局/单连接配额、超时和 epoch 隔离，发送前检查工具是否已取消；

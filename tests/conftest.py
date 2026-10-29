@@ -26,7 +26,7 @@ def memory_repository_construction() -> Iterator[None]:
     PostgreSQL scenarios still construct real repositories. This keeps test doubles at
     the repository creation boundary without adding injection parameters to services.
     """
-    from app.controler.workers import conversation, gateway
+    from app.controler.workers import conversation, handler
     from app.controler.workflow import coordinator, effects, results, service, tools
     from app.persistence.deliveries import DeliveryStore
     from app.persistence.flows import FlowStore
@@ -48,7 +48,7 @@ def memory_repository_construction() -> Iterator[None]:
     # Keep these constructor patches independent of each test's monkeypatch fixture;
     # SQL observers must be restored before the PostgreSQL fixture drops its schema.
     with pytest.MonkeyPatch.context() as patch:
-        for module in (coordinator, effects, results, service, tools, conversation, gateway):
+        for module in (coordinator, effects, results, service, tools, conversation, handler):
             for repository in repositories:
                 if getattr(module, repository.__name__, None) is repository:
                     patch.setattr(module, repository.__name__, partial(construct, repository))

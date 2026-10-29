@@ -5,9 +5,9 @@ from datetime import timedelta
 
 import pytest
 
+from app.communication.gateway import Gateway
 from app.contracts.protocol import PROTOCOL_VERSION, Assignment, RevisionTask
-from app.controler.workers.conversation import ConversationBroker
-from app.controler.workers.gateway import WorkerGateway
+from app.controler.workers.handler import WorkerHandler
 from app.controler.workflow.lifecycle import pause_delivery
 from app.controler.workflow.preparation import PreparationStale
 from app.domain.models import JobKind, JobState
@@ -22,12 +22,11 @@ from tests.test_revision_recovery import revision_resources as revision_resource
 
 
 def gateway(store, subject):
-    return WorkerGateway(
+    return WorkerHandler(
         subject, database=store.database,
-        worker_tokens={},
+        peers=Gateway(),
         tools=subject.tools,
         results=subject.results,
-        conversations=ConversationBroker(),
     )
 
 

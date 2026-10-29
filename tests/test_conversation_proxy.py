@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from app.communication.gateway import Gateway
 from app.communication.session import Session
 from app.contracts.conversation import ConversationFailure, HistoryPage, HistoryQuery
 from app.contracts.protocol import (
@@ -26,19 +27,19 @@ from tests.test_conversation_history import SESSION
 
 @pytest.fixture
 async def history_connection():
-    sessions = []
+    registrations = []
 
-    def create(broker, worker="worker", epoch="epoch"):
+    async def create(peers, worker="worker", epoch="epoch"):
         socket = Socket()
         session = Session[WorkerMessage, ServerMessage](socket, parse=parse_worker_message,
                     reply_key=conversation_result_key, epoch=epoch)
         session.start()
-        broker.attach(worker, session)
-        sessions.append(session)
-        return session, socket
+        registration = await peers.register(worker, session, replace=True)
+        registrations.append((peers, registration))
+        return registration, socket
 
     yield create
-    await asyncio.gather(*(session.close() for session in sessions))
+    await asyncio.gather(*(peers.unregister(registration) for peers, registration in registrations))
 
 
 async def answer(socket, page=None, error=None):
@@ -53,8 +54,9 @@ async def answer(socket, page=None, error=None):
 
 @pytest.mark.asyncio
 async def test_query_correlates_response(history_connection) -> None:
-    broker = ConversationBroker()
-    _, socket = history_connection(broker)
+    peers = Gateway[WorkerMessage, ServerMessage]()
+    broker = ConversationBroker(peers)
+    _, socket = await history_connection(peers)
     query = asyncio.create_task(broker.query("worker", HistoryQuery(session_id=SESSION)))
     await answer(socket)
     assert (await query).session_id == SESSION
@@ -63,14 +65,15 @@ async def test_query_correlates_response(history_connection) -> None:
 
 @pytest.mark.parametrize("failure", ["disconnect", "timeout", "cancel"])
 async def test_disconnect_timeout_and_cancellation_cleanup(history_connection, failure) -> None:
-    broker = ConversationBroker()
-    connection, socket = history_connection(broker)
+    peers = Gateway[WorkerMessage, ServerMessage]()
+    broker = ConversationBroker(peers)
+    registration, socket = await history_connection(peers)
     if failure == "timeout":
         broker.timeout = 0.01
     query = asyncio.create_task(broker.query("worker", HistoryQuery(session_id=SESSION)))
     await socket.sent.get()
     if failure == "disconnect":
-        await connection.close()
+        await peers.unregister(registration)
     elif failure == "cancel":
         query.cancel()
     code = "query_timeout" if failure == "timeout" else "worker_unavailable"
@@ -79,7 +82,7 @@ async def test_disconnect_timeout_and_cancellation_cleanup(history_connection, f
         await query
     assert broker._inflight == 0
     if failure == "disconnect":
-        _, socket = history_connection(broker, epoch="new")
+        _, socket = await history_connection(peers, epoch="new")
     broker.timeout = 1
     again = asyncio.create_task(broker.query("worker", HistoryQuery(session_id=SESSION)))
     await answer(socket)
@@ -88,12 +91,12 @@ async def test_disconnect_timeout_and_cancellation_cleanup(history_connection, f
 
 @pytest.mark.asyncio
 async def test_replacement_connection_and_busy_limit(history_connection) -> None:
-    broker = ConversationBroker()
-    old, old_socket = history_connection(broker, epoch="old")
+    peers = Gateway[WorkerMessage, ServerMessage]()
+    broker = ConversationBroker(peers)
+    old, old_socket = await history_connection(peers, epoch="old")
     first = asyncio.create_task(broker.query("worker", HistoryQuery(session_id=SESSION)))
     await old_socket.sent.get()
-    await old.close()
-    new, socket = history_connection(broker, epoch="new")
+    new, socket = await history_connection(peers, epoch="new")
     with pytest.raises(ConversationFailure, match="worker_unavailable"):
         await first
     queries = [asyncio.create_task(broker.query("worker", HistoryQuery(session_id=SESSION))) for _ in range(4)]
@@ -102,8 +105,8 @@ async def test_replacement_connection_and_busy_limit(history_connection) -> None
         await asyncio.sleep(0)
         with pytest.raises(ConversationFailure, match="query_busy"):
             await broker.query("worker", HistoryQuery(session_id=SESSION))
-        broker.detach("worker", old)
-        assert broker.connections["worker"] is new
+        await peers.unregister(old)
+        assert peers.get("worker") is new.session
         for _ in queries:
             await answer(socket)
         assert all(page.session_id == SESSION for page in await asyncio.gather(*queries))
@@ -114,8 +117,9 @@ async def test_replacement_connection_and_busy_limit(history_connection) -> None
 
 
 async def test_global_admission_spans_sessions_and_is_reusable(history_connection):
-    broker = ConversationBroker()
-    sockets = [history_connection(broker, worker=str(i))[1] for i in range(17)]
+    peers = Gateway()
+    broker = ConversationBroker(peers)
+    sockets = [(await history_connection(peers, worker=str(i)))[1] for i in range(17)]
     queries = [asyncio.create_task(broker.query(str(i), HistoryQuery(session_id=SESSION)))
                for i in range(16) for _ in range(4)]
     try:
@@ -141,8 +145,9 @@ async def test_global_admission_spans_sessions_and_is_reusable(history_connectio
 async def test_worker_pages_are_validated_after_correlation(history_connection, defect):
     from app.contracts.conversation import ConversationContent, HistoryItem
 
-    broker = ConversationBroker()
-    _, socket = history_connection(broker)
+    peers = Gateway()
+    broker = ConversationBroker(peers)
+    _, socket = await history_connection(peers)
     query = asyncio.create_task(broker.query("worker", HistoryQuery(session_id=SESSION, limit=100 if defect == "bytes" else 1)))
     page = HistoryPage(session_id=SESSION)
     if defect == "session":
@@ -168,7 +173,7 @@ async def test_worker_pages_are_validated_after_correlation(history_connection, 
 @pytest.mark.asyncio
 async def test_service_resolves_existing_database_metadata_and_released_binding(store, monkeypatch) -> None:
     flow = store.flows.create_flow("owner/repo", 8, installation_id=42)
-    broker = ConversationBroker()
+    broker = ConversationBroker(Gateway())
     service = ConversationService(broker, database=store.database, )
     assert (await service.read(flow.id, None, 100)).unavailable_reason == "no_worker"
     attempt = store.flows.create_attempt(flow.id)

@@ -10,6 +10,7 @@ from typing import Protocol
 from loguru import logger
 from websockets.asyncio.client import connect
 
+from app.communication.gateway import Gateway, Registration
 from app.communication.session import Responder, Session
 from app.contracts.conversation import ConversationFailure, HistoryPage, HistoryQuery
 from app.contracts.protocol import (
@@ -102,6 +103,7 @@ class WorkerClient:
         self.reconnect_max_backoff = reconnect_max_backoff
         self.reconnect_jitter = reconnect_jitter
         self._stop = asyncio.Event()
+        self._peers = Gateway[ServerMessage, WorkerMessage]()
         self._connection_task: asyncio.Task[None] | None = None
 
     async def run(self) -> None:
@@ -136,21 +138,31 @@ class WorkerClient:
                         delay = min(delay * 2, self.reconnect_max_backoff)
         finally:
             self.connected = False
-            if self._connection_task is not None:
-                self._connection_task.cancel()
-                await asyncio.gather(self._connection_task, return_exceptions=True)
-                self._connection_task = None
+            self._peers.seal()
+            try:
+                if self._connection_task is not None:
+                    self._connection_task.cancel()
+                    await asyncio.gather(self._connection_task, return_exceptions=True)
+                    self._connection_task = None
+            finally:
+                await self._peers.close()
 
     async def run_connection(self, connection: Connection) -> None:
         session = Session[ServerMessage, WorkerMessage](
             _WebSocketTransport(connection), parse=parse_server_message,
             responder=Responder(matches=_is_history_query, handle=self._answer_history, busy=_history_busy),
         )
+        registration: Registration[ServerMessage, WorkerMessage] | None = None
         try:
+            # Admission precedes Register and every borrow of the execution owner.
+            registration = await self._peers.register("server", session, replace=False)
             await self._run_connection(session)
         finally:
-            self.connected = False
-            await session.close()
+            if registration is not None:
+                self.connected = False
+                await self._peers.unregister(registration)
+            else:
+                await session.close()
 
     async def _answer_history(self, query: ServerMessage) -> WorkerMessage:
         assert isinstance(query, ConversationQuery)
@@ -321,6 +333,7 @@ class WorkerClient:
         """Close communication only; the runtime separately shuts down its execution owner."""
         self.connected = False
         self._stop.set()
+        self._peers.seal()
         if self._connection_task is not None:
             self._connection_task.cancel()
 

@@ -4,6 +4,7 @@ from datetime import timedelta
 
 import pytest
 
+from app.communication.gateway import Gateway
 from app.contracts.protocol import (
     PROTOCOL_VERSION,
     ArchiveResult,
@@ -14,18 +15,17 @@ from app.contracts.protocol import (
     Succeeded,
     terminal_digest,
 )
-from app.controler.workers.conversation import ConversationBroker
-from app.controler.workers.gateway import ProtocolViolation, WorkerGateway
+from app.controler.workers.handler import ProtocolViolation, WorkerHandler
 from app.controler.workflow.service import ControlService
 from app.domain.models import DeliveryState, FlowState, JobKind, JobState
 from app.persistence.jobs import JobStore
 from tests.github import RecordingGitHub
 from tests.test_coordinator import coordinator
-from tests.test_gateway import ScriptedSocket
 from tests.test_merge import route_merge
 from tests.test_result_recovery import (
     completed_open_initial as completed_open_initial,  # noqa: PLC0414
 )
+from tests.test_worker_handler import ScriptedSocket
 from tests.test_workflow_transactions import accepted_coding
 
 
@@ -163,19 +163,18 @@ async def test_merged_coding_process_without_exit_proof_cannot_unlock_archive(st
     flow = store.flows.get_flow(old.flow_id)
     await route_merge(store, flow)
     subject = coordinator(store, RecordingGitHub())
-    gateway = WorkerGateway(
+    handler = WorkerHandler(
         subject, database=store.database,
-        worker_tokens={"worker-a": "secret"},
+        peers=Gateway(),
         tools=subject.tools,
         results=subject.results,
-        conversations=ConversationBroker(),
     )
     store.workers.worker_connected("worker-a", PROTOCOL_VERSION, "restart")
     with pytest.raises(ProtocolViolation, match="archive blocked"):
         if journal == "missing":
-            await gateway._reject_missing_journal("worker-a", "restart", old.id)
+            await handler._reject_missing_journal("worker-a", "restart", old.id)
         else:
-            await gateway._recover(ScriptedSocket(), "worker-a", "restart", RecoveryDescriptor(
+            await handler._recover(ScriptedSocket(), "worker-a", "restart", RecoveryDescriptor(
                 job_id=old.id, assignment_token=old.assignment_token,
                 state="started", executor_active=False,
             ))

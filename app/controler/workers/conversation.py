@@ -10,7 +10,8 @@ from uuid import uuid4
 
 from pydantic import ValidationError
 
-from app.communication.session import ReplyKey, Session, SessionBusy, SessionClosed
+from app.communication.gateway import Gateway
+from app.communication.session import ReplyKey, SessionBusy, SessionClosed
 from app.contracts.conversation import (
     ConversationFailure,
     ConversationItem,
@@ -40,25 +41,16 @@ def conversation_result_key(message: WorkerMessage) -> ReplyKey | None:
 class ConversationBroker:
     """Route and validate live history queries with a process-wide admission limit."""
 
-    def __init__(self) -> None:
+    def __init__(self, peers: Gateway[WorkerMessage, ServerMessage]) -> None:
         # Amp export allows 20s, followed by up to 9s of descendant/process cleanup.
         self.timeout = 30.0
-        self.connections: dict[str, Session[WorkerMessage, ServerMessage]] = {}
+        self._peers = peers
         self._inflight = 0
-
-    def attach(self, worker_id: str, session: Session[WorkerMessage, ServerMessage]) -> None:
-        if session.epoch is None or session.closed:
-            raise ValueError("history route requires a confirmed live session")
-        self.connections[worker_id] = session
-
-    def detach(self, worker_id: str, session: Session[WorkerMessage, ServerMessage]) -> None:
-        if self.connections.get(worker_id) is session:
-            del self.connections[worker_id]
 
     async def query(
         self, worker_id: str, query: HistoryQuery,
     ) -> HistoryPage:
-        session = self.connections.get(worker_id)
+        session = self._peers.get(worker_id)
         if session is None or session.epoch is None:
             raise ConversationFailure("worker_unavailable")
         if self._inflight >= 64:
