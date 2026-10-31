@@ -1,144 +1,346 @@
-from datetime import UTC, datetime
+"""Public wire contracts, independent of connection and application scheduling."""
+
+import json
+from collections.abc import Sequence
 
 import pytest
-from pydantic.types import SecretStr
+from pydantic import JsonValue, ValidationError
 
 from app.contracts.protocol import (
     PROTOCOL_VERSION,
+    AcceptResult,
     Assignment,
-    AssignmentSecret,
-    ConversationQuery,
-    FlowToolErrorKind,
+    ExecuteResult,
+    Failed,
     FlowToolRequest,
-    FlowToolResponse,
-    InitialTask,
-    InitialTaskResult,
-    PushSecret,
-    RecoveryDescriptor,
-    Register,
-    ResumeAssignment,
-    Succeeded,
+    Registered,
+    accept_result_id,
+    execution_call_id,
     parse_server_message,
     parse_worker_message,
+    terminal_id,
 )
-from app.domain.delivery_models import PreparedDelivery
-from app.domain.models import VcsKind
 
 
-def test_assignment_and_result_round_trip_with_discriminated_payloads() -> None:
-    assert PROTOCOL_VERSION == 15
-    assignment = Assignment(
-        job_id=41,
-        flow_id=7,
-        assignment_token="assignment-1",
-        connection_epoch="epoch-1",
-        task=InitialTask(
-            flow_id=7,
-            attempt_id=13,
-            repo="owner/repo",
-            issue_number=9,
-            issue_title="Add a bound",
-            issue_body="Keep retries finite.",
-            branch="flow/7",
-            base_branch="trunk",
-            remote="origin",
-            repo_identity="worker-1:owner/repo",
+def frame(payload: Sequence[JsonValue], **fields: JsonValue) -> dict[str, JsonValue]:
+    return {
+        "protocol_version": 16,
+        "message_id": "1" * 32,
+        "connection_epoch": "epoch",
+        "control": None,
+        "ack": False,
+        "ack_id": None,
+        "payload": list(payload),
+        **fields,
+    }
+
+
+def call(method: str, arguments: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    return {
+        "type": "tool_call",
+        "message_id": "a" * 32,
+        "reply_to": None,
+        "method": method,
+        "arguments": arguments,
+    }
+
+
+def result(method: str, **outcome: JsonValue) -> dict[str, JsonValue]:
+    return {
+        "type": "tool_result",
+        "message_id": "b" * 32,
+        "reply_to": "a" * 32,
+        "method": method,
+        **outcome,
+    }
+
+
+IDENTITY: dict[str, JsonValue] = {"job_id": 5, "assignment_token": "assignment-1"}
+FENCE: dict[str, JsonValue] = {**IDENTITY, "flow_id": 3, "request_id": "stop-1"}
+TASK: dict[str, JsonValue] = {
+    "kind": "initial",
+    "flow_id": 3,
+    "attempt_id": 7,
+    "repo": "owner/repo",
+    "issue_number": 1,
+    "issue_title": "test",
+    "issue_body": "",
+    "branch": "flow/3",
+}
+FLOW: dict[str, JsonValue] = {
+    **IDENTITY,
+    "flow_id": 3,
+    "attempt_id": 7,
+    "call_id": "call-1",
+    "arguments": {"title": "Fix it"},
+    "vcs_backend": "git",
+    "branch": "flow/3",
+    "commit_sha": "abc",
+    "remote_sha": "abc",
+}
+SESSION = "T-019eac3b-a60c-7a93-a442-3718f660fc8c"
+
+
+@pytest.mark.parametrize(
+    ("direction", "item"),
+    [
+        ("server", call("worker.execute", {**IDENTITY, "flow_id": 3, "task": TASK})),
+        ("server", call("worker.stop", FENCE)),
+        ("server", call("worker.history", {"session_id": SESSION, "cursor": "bad-cursor"})),
+        (
+            "server",
+            call(
+                "worker.reject_recovery",
+                {"job_id": 5, "reason": "stale", "register_message_id": "c" * 32},
+            ),
         ),
-        secret=AssignmentSecret(
-            push=PushSecret(
-                token=SecretStr("push-token"),
-                repository="owner/repo",
-                expires_at=datetime(2026, 9, 5, 1, tzinfo=UTC),
-            )
+        ("worker", call("server.execution_started", IDENTITY)),
+        ("worker", call("server.accept_result", {**IDENTITY, "result_id": "c" * 32})),
+        ("worker", call("server.accept_stop", {**FENCE, "receipt_id": "c" * 32})),
+        ("worker", call("flow.open_pr", FLOW)),
+        ("worker", result("worker.execute", **IDENTITY, error="failed")),
+        (
+            "worker",
+            result(
+                "worker.execute",
+                **IDENTITY,
+                result={
+                    "kind": "initial",
+                    "session_id": None,
+                    "last_message": "done",
+                    "exit_code": 0,
+                },
+            ),
         ),
+        ("worker", result("worker.stop", result={**FENCE, "execution_nonce": "execution-1"})),
+        ("worker", result("worker.history", error="cursor_invalid")),
+        ("server", result("server.accept_result", result={**IDENTITY, "state": "failed"})),
+        ("server", result("server.accept_stop", result=FENCE)),
+        (
+            "server",
+            result(
+                "flow.open_pr", call_id="call-1", error="bad request", error_kind="invalid_request"
+            ),
+        ),
+        (
+            "server",
+            result(
+                "flow.open_pr",
+                call_id="call-1",
+                result={"status": "prepared", "head_sha": "abc", "delivery_version": 1},
+            ),
+        ),
+        (
+            "server",
+            result(
+                "flow.open_pr",
+                call_id="call-1",
+                error="throttled",
+                error_kind="rate_limited",
+                retryable=True,
+                retry_after="30",
+            ),
+        ),
+    ],
+)
+def test_method_contract_round_trip_and_direction(
+    direction: str, item: dict[str, JsonValue]
+) -> None:
+    parse, other = (
+        (parse_server_message, parse_worker_message)
+        if direction == "server"
+        else (parse_worker_message, parse_server_message)
     )
+    parsed = parse(json.dumps(frame([item])))
+    assert parse(parsed.model_dump_json()) == parsed
+    assert parsed.payload[0].method == item["method"]
+    with pytest.raises(ValidationError):
+        other(parsed.model_dump_json())
 
-    parsed = parse_server_message(assignment.model_dump_json())
 
-    assert isinstance(parsed, Assignment)
-    assert isinstance(parsed.task, InitialTask)
-    assert parsed.task.branch == "flow/7"
-    assert parsed.task.base_branch == "trunk"
-    assert parsed.secret is not None
-    assert parsed.secret.push.token.get_secret_value() == "push-token"
+def test_assignment_secret_remains_wire_only_and_flow_identity_is_checked() -> None:
+    arguments: dict[str, JsonValue] = {
+        **IDENTITY,
+        "flow_id": 3,
+        "task": TASK,
+        "secret": {
+            "push": {
+                "token": "push-token",
+                "repository": "owner/repo",
+                "expires_at": "2026-09-05T01:00:00Z",
+            }
+        },
+    }
+    parsed = parse_server_message(json.dumps(frame([call("worker.execute", arguments)])))
+    item = parsed.payload[0]
+    assert isinstance(item, Assignment) and item.arguments.secret is not None
+    assert item.arguments.secret.push.token.get_secret_value() == "push-token"
     assert "push-token" not in repr(parsed)
+    assert "push-token" in parsed.model_dump_json()
+    arguments["flow_id"] = 4
+    with pytest.raises(ValidationError):
+        parse_server_message(json.dumps(frame([call("worker.execute", arguments)])))
 
-    succeeded = Succeeded(
-        job_id=41,
-        assignment_token="assignment-1",
-        connection_epoch="epoch-1",
-        result=InitialTaskResult(session_id="session-1", last_message="failed", exit_code=1),
+
+@pytest.mark.parametrize("method", ["flow.future_tool", "worker.unknown", "custom"])
+def test_unknown_flow_methods_keep_the_typed_error_path(method: str) -> None:
+    parsed = parse_worker_message(json.dumps(frame([call(method, FLOW)])))
+    assert isinstance(parsed.payload[0], FlowToolRequest)
+    assert parsed.payload[0].method == method
+    # An unknown lifecycle shape must not enter the Flow fallback; known methods cannot either.
+    for malformed in (call(method, IDENTITY), call("server.accept_result", FLOW)):
+        with pytest.raises(ValidationError):
+            parse_worker_message(json.dumps(frame([malformed])))
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["protocol_version", "message_id", "connection_epoch", "ack", "ack_id", "control", "payload"],
+)
+def test_frame_metadata_is_required_on_the_wire(key: str) -> None:
+    data = frame([call("server.execution_started", IDENTITY)])
+    del data[key]
+    with pytest.raises(ValidationError):
+        parse_worker_message(json.dumps(data))
+
+
+@pytest.mark.parametrize("key", ["type", "method", "message_id", "reply_to"])
+def test_item_metadata_is_required_on_the_wire(key: str) -> None:
+    item = call("server.execution_started", IDENTITY)
+    del item[key]
+    with pytest.raises(ValidationError):
+        parse_worker_message(json.dumps(frame([item])))
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"protocol_version": 15},
+        {"protocol_version": 16.0},
+        {"message_id": "A" * 32},
+        {"ack": 1},
+        {"ack": "true"},
+        {"ack": True},
+        {"ack_id": "a" * 32},
+        {"connection_epoch": None},
+        {"connection_epoch": ""},
+        {"connection_epoch": "x" * 65},
+        {"unexpected": True},
+    ],
+)
+def test_invalid_frame_headers_are_rejected(fields: dict[str, JsonValue]) -> None:
+    with pytest.raises(ValidationError):
+        parse_worker_message(
+            json.dumps(frame([call("server.execution_started", IDENTITY)], **fields))
+        )
+
+
+def test_mixed_control_ack_and_business_have_independent_identities() -> None:
+    terminal = Failed(job_id=5, assignment_token="assignment-1", error="executor exited 1")
+    E, T = execution_call_id(5, "assignment-1"), terminal_id(terminal)
+    A = accept_result_id(T)
+    assert (E, T, A) == (
+        "ee3eaa171e5652b8bff155694215e29b",
+        "7eecf358047357e3904fae12781b482c",
+        "b7723aac9a2f534e822941852084c2f2",
     )
-    worker_message = parse_worker_message(succeeded.model_dump_json())
-    assert isinstance(worker_message, Succeeded)
-    assert isinstance(worker_message.result, InitialTaskResult)
-
-
-def test_conversation_query_accepts_amp_thread_ids_only_in_the_shared_session_type() -> None:
-    query = ConversationQuery(request_id="request", connection_epoch="epoch",
-                              session_id="T-019eac3b-a60c-7a93-a442-3718f660fc8c")
-    assert parse_server_message(query.model_dump_json()) == query
-    with pytest.raises(ValueError):
-        ConversationQuery(request_id="request", connection_epoch="epoch", session_id="https://ampcode.com/T-x")
-
-
-def test_flow_tool_messages_are_strict_and_fenced() -> None:
-    request = FlowToolRequest(
-        job_id=5,
-        flow_id=3,
-        attempt_id=7,
-        assignment_token="assignment-1",
-        connection_epoch="epoch-1",
-        call_id="call-1",
-        name="flow.open_pr",
-        arguments={"title": "Fix it", "body": "Implemented."},
-        vcs_backend=VcsKind.GIT,
-        branch="flow/3",
-        commit_sha="abc",
-        remote_sha="abc",
+    terminal_item = {
+        **result("worker.execute", **IDENTITY, error=terminal.error),
+        "message_id": T,
+        "reply_to": E,
+    }
+    accept = {**call("server.accept_result", {**IDENTITY, "result_id": T}), "message_id": A}
+    data = frame(
+        [terminal_item, accept], control="heartbeat", **IDENTITY, ack=True, ack_id="c" * 32
     )
-    parsed = parse_worker_message(request.model_dump_json())
+    parsed = parse_worker_message(json.dumps(data))
+    assert PROTOCOL_VERSION == 16
+    assert isinstance(parsed.payload[0], ExecuteResult)
+    assert parsed.payload[0].terminal() == terminal
+    assert isinstance(parsed.payload[1], AcceptResult)
+    assert parsed.ack_id == "c" * 32
+    data["assignment_token"] = "other"
+    with pytest.raises(ValidationError):
+        parse_worker_message(json.dumps(data))
 
-    assert isinstance(parsed, FlowToolRequest)
-    response = FlowToolResponse(
-        call_id="call-1",
-        result=PreparedDelivery(head_sha="abc", delivery_version=1),
+
+def test_register_recovery_and_registered_decisions_are_control_fields() -> None:
+    terminal = Failed(job_id=5, assignment_token="assignment-1", error="executor exited 1")
+    from app.contracts.protocol import terminal_digest
+
+    T = terminal_id(terminal)
+    accept = {
+        **call("server.accept_result", {**IDENTITY, "result_id": T}),
+        "message_id": accept_result_id(T),
+    }
+    data = frame(
+        [accept],
+        control="register",
+        connection_epoch=None,
+        worker_id="w",
+        recovery={**IDENTITY, "state": "failed", "result_digest": terminal_digest(terminal)},
     )
-    assert isinstance(parse_server_message(response.model_dump_json()), FlowToolResponse)
+    assert parse_worker_message(json.dumps(data)).payload[0].message_id == accept_result_id(T)
+    data["payload"] = [call("flow.open_pr", FLOW)]
+    with pytest.raises(ValidationError):
+        parse_worker_message(json.dumps(data))
+    for action in ("resume", "replay"):
+        registered = frame(
+            [], control="registered", heartbeat_interval=10, recovery={"action": action, **IDENTITY}
+        )
+        parsed = parse_server_message(json.dumps(registered))
+        assert isinstance(parsed, Registered) and parsed.recovery is not None
+        assert parsed.recovery.action == action
+        registered["payload"] = [call("worker.history", {"session_id": SESSION})]
+        with pytest.raises(ValidationError):
+            parse_server_message(json.dumps(registered))
 
-    failure = FlowToolResponse(
-        call_id="call-2",
-        error="GitHub throttled the request",
-        error_kind=FlowToolErrorKind.RATE_LIMITED,
-        retryable=True,
-        retry_after="30",
+
+def test_batch_static_validation_and_pure_ack_boundaries() -> None:
+    ack = frame([], ack=True, ack_id="c" * 32, connection_epoch=None)
+    for parse in (parse_worker_message, parse_server_message):
+        assert parse(json.dumps(ack)).payload == []
+        with pytest.raises(ValidationError):
+            parse(json.dumps(frame([], connection_epoch=None)))
+        with pytest.raises(ValidationError):
+            parse(json.dumps({**ack, "connection_epoch": "epoch"}))
+    item = call("server.execution_started", IDENTITY)
+    for payload in (
+        [item, item],
+        [{**item, "reply_to": "d" * 32}],
+        [result("worker.history", error="cursor_invalid", page={"session_id": SESSION})],
+        [{**result("worker.execute", **IDENTITY, error="failure"), "reply_to": "b" * 32}],
+    ):
+        with pytest.raises(ValidationError):
+            parse_worker_message(json.dumps(frame(payload)))
+    batch: list[JsonValue] = [{**item, "message_id": f"{i:032x}"} for i in range(32)]
+    assert len(parse_worker_message(json.dumps(frame(batch))).payload) == 32
+    batch.append({**item, "message_id": "f" * 32})
+    with pytest.raises(ValidationError):
+        parse_worker_message(json.dumps(frame(batch)))
+    error = frame([], control="error", connection_epoch=None, code="version", detail="unsupported")
+    assert parse_server_message(json.dumps(error)).payload == []
+    error["payload"] = [call("worker.history", {"session_id": SESSION})]
+    with pytest.raises(ValidationError):
+        parse_server_message(json.dumps(error))
+
+
+def test_registered_and_heartbeat_can_carry_independent_queries() -> None:
+    query = call("worker.history", {"session_id": SESSION})
+    registered = frame(
+        [query],
+        control="registered",
+        recovery=None,
+        heartbeat_interval=10,
+        ack=True,
+        ack_id="c" * 32,
     )
-    assert parse_server_message(failure.model_dump_json()) == failure
-
-
-def test_recovery_descriptor_and_resume_message_round_trip() -> None:
-    register = Register(
-        worker_id="worker-1",
-        recovery=RecoveryDescriptor(
-            job_id=41,
-            assignment_token="assignment-1",
-            state="started",
-            executor_active=True,
-        ),
-    )
-
-    parsed_register = parse_worker_message(register.model_dump_json())
-    assert isinstance(parsed_register, Register)
-    assert parsed_register.recovery is not None
-    assert parsed_register.recovery.executor_active is True
-
-    resumed = parse_server_message(
-        ResumeAssignment(
-            job_id=41,
-            assignment_token="assignment-1",
-            connection_epoch="epoch-2",
-            heartbeat_interval=10,
-        ).model_dump_json()
-    )
-    assert isinstance(resumed, ResumeAssignment)
-    assert resumed.connection_epoch == "epoch-2"
+    assert parse_server_message(json.dumps(registered)).payload[0].method == "worker.history"
+    history = result("worker.history", error="history_unreadable")
+    heartbeat = frame([history], control="heartbeat", **IDENTITY)
+    assert parse_worker_message(json.dumps(heartbeat)).payload[0].method == "worker.history"
+    register = frame([], control="register", connection_epoch=None, worker_id="w", recovery=None)
+    assert parse_worker_message(json.dumps(register)).payload == []
+    query["arguments"] = {"session_id": "https://ampcode.com/T-x"}
+    with pytest.raises(ValidationError):
+        parse_server_message(json.dumps(registered))

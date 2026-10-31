@@ -8,6 +8,10 @@
 
 ## Unreleased
 
+- 统一 worker/server 协议第一步：wire16 结构采用顶层控制与 typed call/result 列表，
+  区分帧 ACK、reply_to 与稳定业务身份；定义 journal5、ResultInbox v1 及严格旧格式只读 decoder，
+  保持 terminal/stop 摘要和既有持久证据。运行时、存储 IO 和调用方迁移留在第二步；
+  当前为不可独立运行、合并或部署的 draft 中间态，不以结构测试代替全链路验收。
 - Worker 与 server 共用进程级 `Gateway`，统一 peer/session 登记、替换、路由与通信关闭；
   server 多 worker，worker 至多一个 server。删除 WorkerGateway 和 Broker 的独立连接表，
   接入函数负责认证/首帧，WorkerHandler 保留业务；无 Endpoint/Run 中间对象。

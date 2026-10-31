@@ -6,62 +6,40 @@ import hashlib
 import json
 from datetime import datetime
 from enum import StrEnum
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Self
+from uuid import UUID, uuid5
 
 from pydantic import (
     BaseModel,
     ConfigDict,
+    Discriminator,
     Field,
     SecretStr,
+    StrictBool,
+    Tag,
     TypeAdapter,
     field_serializer,
+    field_validator,
     model_validator,
 )
 
 from app.contracts.conversation import ConversationError, HistoryPage, SessionId
 from app.domain.context_models import ReviewContext
 from app.domain.delivery_models import DeliveryReceipt
-from app.domain.models import FeedbackRef, JobState, RevisionCodingOutput, VcsKind
+from app.domain.models import FeedbackRef, RevisionCodingOutput, VcsKind
 from app.domain.review_models import ReviewFeedback
 
-PROTOCOL_VERSION: Literal[15] = 15
+PROTOCOL_VERSION: Literal[16] = 16
+MAX_PAYLOAD_ITEMS = 32
+MessageId = Annotated[str, Field(strict=True, pattern=r"^[0-9a-f]{32}$")]
+ConnectionEpoch = Annotated[str, Field(strict=True, min_length=1, max_length=64)]
+_ID_NAMESPACE = UUID("46ebd500-2f34-463f-b746-f5c03b53b0ac")
 
 
 class ProtocolModel(BaseModel):
     """Strict protocol base so malformed remote input fails at the trust boundary."""
 
     model_config = ConfigDict(extra="forbid")
-
-
-class Message(ProtocolModel):
-    protocol_version: Literal[15] = PROTOCOL_VERSION
-
-
-class ConversationQuery(Message):
-    """Read-only request, independent of the worker's current assignment."""
-
-    # HistoryQuery checks cursor semantics inside the task, so a bad cursor returns
-    # a query error rather than aborting WebSocket message parsing and reconnecting.
-    type: Literal["conversation_query"] = "conversation_query"
-    session_id: SessionId
-    cursor: str | None = Field(default=None, min_length=1, max_length=1024)
-    limit: int = Field(default=100, ge=1, le=500)
-    request_id: str = Field(min_length=1, max_length=64)
-    connection_epoch: str = Field(min_length=1, max_length=64)
-
-
-class ConversationResult(Message):
-    type: Literal["conversation_result"] = "conversation_result"
-    request_id: str = Field(min_length=1, max_length=64)
-    connection_epoch: str = Field(min_length=1, max_length=64)
-    page: HistoryPage | None = None
-    error: ConversationError | None = None
-
-    @model_validator(mode="after")
-    def _one_outcome(self) -> ConversationResult:
-        if (self.page is None) == (self.error is None):
-            raise ValueError("conversation result requires exactly one of page or error")
-        return self
 
 
 class InitialTask(ProtocolModel):
@@ -204,88 +182,46 @@ class RecoveryDescriptor(ProtocolModel):
     archive_resume: bool = False
 
 
-class Register(Message):
-    type: Literal["register"] = "register"
-    worker_id: str
-    recovery: RecoveryDescriptor | None = None
+class ExecutionIdentity(ProtocolModel):
+    """Assignment authority, independent of a connection or message identity."""
 
-
-class Started(Message):
-    type: Literal["started"] = "started"
     job_id: int
     assignment_token: str
-    connection_epoch: str
 
 
-class Heartbeat(Message):
-    type: Literal["heartbeat"] = "heartbeat"
-    job_id: int
-    assignment_token: str
-    connection_epoch: str
+class RecoveryDecision(ExecutionIdentity):
+    action: Literal["resume", "replay"]
 
 
-class Succeeded(Message):
+class Succeeded(ExecutionIdentity):
+    """Durable terminal data; never a standalone wire message."""
+
     type: Literal["succeeded"] = "succeeded"
-    job_id: int
-    assignment_token: str
-    connection_epoch: str
     result: ExecutionResult
 
 
-class Failed(Message):
+class Failed(ExecutionIdentity):
     type: Literal["failed"] = "failed"
-    job_id: int
-    assignment_token: str
-    connection_epoch: str
     error: str
 
 
-class FlowToolRequest(Message):
-    type: Literal["flow_tool_request"] = "flow_tool_request"
-    job_id: int
-    flow_id: int
-    attempt_id: int
-    assignment_token: str
-    connection_epoch: str
-    call_id: str
-    name: str
-    arguments: dict[str, object]
-    vcs_backend: VcsKind
-    branch: str
-    commit_sha: str
-    remote_sha: str
-
-
-class StopFence(Message):
+class StopFence(ProtocolModel):
     request_id: str
     flow_id: int
     job_id: int
     assignment_token: str
-    connection_epoch: str
-
-
-class StopExecution(StopFence):
-    type: Literal["stop_execution"] = "stop_execution"
 
 
 class ExecutionStopped(StopFence):
-    type: Literal["execution_stopped"] = "execution_stopped"
+    """Durable evidence of stopped execution, without delivery metadata."""
+
     execution_nonce: str = Field(min_length=1, max_length=128)
 
 
-class StopAccepted(StopFence):
-    type: Literal["stop_accepted"] = "stop_accepted"
+TerminalPayload = Annotated[Succeeded | Failed, Field(discriminator="type")]
 
 
-WorkerMessage = Annotated[
-    Register | Started | Heartbeat | Succeeded | Failed | FlowToolRequest | ExecutionStopped | ConversationResult,
-    Field(discriminator="type"),
-]
-
-TerminalMessage = Succeeded | Failed
-
-
-def terminal_digest(message: TerminalMessage) -> str:
+def terminal_digest(message: TerminalPayload) -> str:
     """Hash only terminal content so a replay may use a freshly fenced epoch."""
 
     if isinstance(message, Succeeded):
@@ -299,62 +235,165 @@ def terminal_digest(message: TerminalMessage) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
-class Registered(Message):
-    type: Literal["registered"] = "registered"
-    heartbeat_interval: float
-    connection_epoch: str
-
-
-class Assignment(Message):
-    type: Literal["assignment"] = "assignment"
-    job_id: int
+class AssignmentArguments(ExecutionIdentity):
     flow_id: int
-    assignment_token: str
-    connection_epoch: str
     task: ExecutionTask
     secret: AssignmentSecret | None = None
 
     @model_validator(mode="after")
-    def _flow_identity(self) -> Assignment:
+    def _flow_identity(self) -> Self:
         if self.task.flow_id != self.flow_id:
             raise ValueError("assignment and task belong to different Flows")
         return self
 
 
-class ResumeAssignment(Message):
-    type: Literal["resume_assignment"] = "resume_assignment"
-    job_id: int
-    assignment_token: str
-    connection_epoch: str
-    heartbeat_interval: float
+class HistoryArguments(ProtocolModel):
+    # Cursor semantics stay in HistoryQuery, yielding a query error, not a disconnect.
+    session_id: SessionId
+    cursor: str | None = Field(default=None, min_length=1, max_length=1024)
+    limit: int = Field(default=100, ge=1, le=500)
 
 
-class ReplayResult(Message):
-    type: Literal["replay_result"] = "replay_result"
-    job_id: int
-    assignment_token: str
-    connection_epoch: str
-    heartbeat_interval: float
-
-
-class RecoveryRejected(Message):
-    type: Literal["recovery_rejected"] = "recovery_rejected"
+class RecoveryRejectedArguments(ProtocolModel):
     job_id: int
     reason: str
+    register_message_id: MessageId
 
 
-class ResultAccepted(Message):
-    type: Literal["result_accepted"] = "result_accepted"
+class AcceptResultArguments(ExecutionIdentity):
+    result_id: MessageId
+
+
+class AcceptStopArguments(StopFence):
+    receipt_id: MessageId
+
+
+class AcceptedResult(ExecutionIdentity):
+    state: Literal["done", "failed"]
+
+
+class FlowToolArguments(ExecutionIdentity):
+    flow_id: int
+    attempt_id: int
+    call_id: str
+    arguments: dict[str, object]
+    vcs_backend: VcsKind
+    branch: str
+    commit_sha: str
+    remote_sha: str
+
+
+class ToolCall(ProtocolModel):
+    """One typed invocation; its identity survives transport repackaging when replayed."""
+
+    type: Literal["tool_call"]
+    message_id: MessageId
+    reply_to: None
+    method: str
+
+
+class ToolResult(ProtocolModel):
+    """A method-specific result correlated to one invocation, not its containing frame."""
+
+    type: Literal["tool_result"]
+    message_id: MessageId
+    reply_to: MessageId
+    method: str
+
+    @model_validator(mode="after")
+    def _reply_identity(self) -> Self:
+        if self.reply_to == self.message_id:
+            raise ValueError("a result cannot reply to itself")
+        return self
+
+
+class Assignment(ToolCall):
+    method: Literal["worker.execute"]
+    arguments: AssignmentArguments
+
+
+class StopExecution(ToolCall):
+    method: Literal["worker.stop"]
+    arguments: StopFence
+
+
+class ConversationQuery(ToolCall):
+    method: Literal["worker.history"]
+    arguments: HistoryArguments
+
+
+class RecoveryRejected(ToolCall):
+    method: Literal["worker.reject_recovery"]
+    arguments: RecoveryRejectedArguments
+
+
+class Started(ToolCall):
+    method: Literal["server.execution_started"]
+    arguments: ExecutionIdentity
+
+
+class AcceptResult(ToolCall):
+    method: Literal["server.accept_result"]
+    arguments: AcceptResultArguments
+
+
+class AcceptStop(ToolCall):
+    method: Literal["server.accept_stop"]
+    arguments: AcceptStopArguments
+
+
+class FlowToolRequest(ToolCall):
+    arguments: FlowToolArguments
+
+
+class ExecuteResult(ToolResult):
+    method: Literal["worker.execute"]
     job_id: int
-    state: JobState
     assignment_token: str
-    connection_epoch: str
+    result: ExecutionResult | None = None
+    error: str | None = None
+
+    @model_validator(mode="after")
+    def _one_outcome(self) -> Self:
+        if (self.result is None) == (self.error is None):
+            raise ValueError("execution result requires exactly one of result or error")
+        return self
+
+    def terminal(self) -> TerminalPayload:
+        """Project only durable fields; frame and invocation metadata never enter the journal."""
+        if self.result is not None:
+            return Succeeded(
+                job_id=self.job_id, assignment_token=self.assignment_token, result=self.result
+            )
+        assert self.error is not None
+        return Failed(job_id=self.job_id, assignment_token=self.assignment_token, error=self.error)
 
 
-class ProtocolError(Message):
-    type: Literal["error"] = "error"
-    code: str
-    detail: str
+class StopResult(ToolResult):
+    method: Literal["worker.stop"]
+    result: ExecutionStopped
+
+
+class ConversationResult(ToolResult):
+    method: Literal["worker.history"]
+    page: HistoryPage | None = None
+    error: ConversationError | None = None
+
+    @model_validator(mode="after")
+    def _one_outcome(self) -> Self:
+        if (self.page is None) == (self.error is None):
+            raise ValueError("conversation result requires exactly one of page or error")
+        return self
+
+
+class ResultAccepted(ToolResult):
+    method: Literal["server.accept_result"]
+    result: AcceptedResult
+
+
+class StopAccepted(ToolResult):
+    method: Literal["server.accept_stop"]
+    result: StopFence
 
 
 class FlowToolErrorKind(StrEnum):
@@ -370,8 +409,7 @@ class FlowToolErrorKind(StrEnum):
     UPSTREAM = "upstream"
 
 
-class FlowToolResponse(Message):
-    type: Literal["flow_tool_response"] = "flow_tool_response"
+class FlowToolResponse(ToolResult):
     call_id: str
     result: DeliveryReceipt | None = None
     error: str | None = None
@@ -394,32 +432,244 @@ class FlowToolResponse(Message):
         return self
 
 
-ServerMessage = Annotated[
-    Registered
-    | Assignment
-    | ResumeAssignment
-    | ReplayResult
-    | RecoveryRejected
-    | ResultAccepted
-    | ProtocolError
-    | FlowToolResponse
-    | StopExecution
-    | StopAccepted
-    | ConversationQuery,
-    Field(discriminator="type"),
+_FIXED_METHODS = frozenset(
+    {
+        "worker.execute",
+        "worker.stop",
+        "worker.history",
+        "worker.reject_recovery",
+        "server.execution_started",
+        "server.accept_result",
+        "server.accept_stop",
+    }
+)
+
+
+def _method_tag(value: object) -> str | None:
+    """Unknown names retain the existing typed Flow INVALID_REQUEST path.
+
+    Known methods never fall back after malformed arguments. This discriminator selects
+    a schema only; it neither registers handlers nor invokes code named by remote input.
+    """
+    if isinstance(value, (ToolCall, ToolResult)):
+        method: object = value.method
+    elif isinstance(value, dict):
+        method = value.get("method")
+    else:
+        return None
+    if not isinstance(method, str):
+        return None
+    return method if method in _FIXED_METHODS else "flow_tool"
+
+
+WorkerCall = Annotated[
+    Annotated[Started, Tag("server.execution_started")]
+    | Annotated[AcceptResult, Tag("server.accept_result")]
+    | Annotated[AcceptStop, Tag("server.accept_stop")]
+    | Annotated[FlowToolRequest, Tag("flow_tool")],
+    Discriminator(_method_tag),
 ]
+WorkerResult = Annotated[
+    ExecuteResult | StopResult | ConversationResult, Field(discriminator="method")
+]
+WorkerPayload = Annotated[WorkerCall | WorkerResult, Field(discriminator="type")]
+ServerCall = Annotated[
+    Assignment | StopExecution | ConversationQuery | RecoveryRejected,
+    Field(discriminator="method"),
+]
+ServerResult = Annotated[
+    Annotated[ResultAccepted, Tag("server.accept_result")]
+    | Annotated[StopAccepted, Tag("server.accept_stop")]
+    | Annotated[FlowToolResponse, Tag("flow_tool")],
+    Discriminator(_method_tag),
+]
+ServerPayload = Annotated[ServerCall | ServerResult, Field(discriminator="type")]
+
+
+class Message[Payload: ToolCall | ToolResult](ProtocolModel):
+    """Common frame fields. Every field is required, including explicit nulls and [].
+
+    Use a concrete control or directional frame and its directional parser. This model
+    performs static checks only; receipt ACKs confer no business completion or authority.
+    """
+
+    protocol_version: Literal[16]
+    message_id: MessageId
+    connection_epoch: ConnectionEpoch | None
+    ack: StrictBool
+    ack_id: MessageId | None
+    control: Literal["register", "registered", "heartbeat", "error"] | None
+    payload: list[Payload] = Field(max_length=MAX_PAYLOAD_ITEMS)
+
+    @field_validator("protocol_version", mode="before")
+    @classmethod
+    def _version_type(cls, value: object) -> object:
+        if type(value) is not int:
+            raise ValueError("protocol_version must be an integer")
+        return value
+
+    @model_validator(mode="after")
+    def _frame_contract(self) -> Self:
+        if self.ack != (self.ack_id is not None):
+            raise ValueError("ack and ack_id must occur together")
+        ids = [item.message_id for item in self.payload]
+        if len(ids) != len(set(ids)):
+            raise ValueError("duplicate payload message_id")
+        if self.control is None and not self.payload:
+            if not self.ack or self.connection_epoch is not None:
+                raise ValueError("empty payload without control requires a null-epoch ACK")
+        elif self.control == "register":
+            if self.connection_epoch is not None or self.ack:
+                raise ValueError("Register has no epoch or prior control to acknowledge")
+        elif self.control != "error" and self.connection_epoch is None:
+            raise ValueError("established-connection messages require an epoch")
+        return self
+
+
+class WorkerFrame(Message[WorkerPayload]):
+    control: Literal[None]  # noqa: PYI061 - Pydantic's discriminator requires Literal for null.
+
+
+class ServerFrame(Message[ServerPayload]):
+    control: Literal[None]  # noqa: PYI061 - Pydantic's discriminator requires Literal for null.
+
+
+class Register(Message[WorkerPayload]):
+    control: Literal["register"]
+    worker_id: str
+    recovery: RecoveryDescriptor | None
+
+    @model_validator(mode="after")
+    def _recovery_payload(self) -> Self:
+        if not self.payload:
+            return self
+        recovery = self.recovery
+        if len(self.payload) != 1 or not isinstance(self.payload[0], AcceptResult):
+            raise ValueError("Register may only carry one result-acceptance call")
+        call = self.payload[0]
+        if (
+            recovery is None
+            or recovery.state not in {"succeeded", "failed"}
+            or recovery.stop_request_id is not None
+            or recovery.result_digest is None
+            or (call.arguments.job_id, call.arguments.assignment_token)
+            != (recovery.job_id, recovery.assignment_token)
+        ):
+            raise ValueError("Register acceptance does not match terminal recovery")
+        result_id = _terminal_id(recovery.job_id, recovery.assignment_token, recovery.result_digest)
+        if call.arguments.result_id != result_id or call.message_id != accept_result_id(result_id):
+            raise ValueError("Register acceptance identity does not match recovery digest")
+        return self
+
+
+class Registered(Message[ServerPayload]):
+    control: Literal["registered"]
+    heartbeat_interval: float
+    recovery: RecoveryDecision | None
+
+    @model_validator(mode="after")
+    def _recovery_payload(self) -> Self:
+        if self.recovery is not None and self.payload:
+            raise ValueError("resume/replay decisions cannot carry business payload")
+        return self
+
+
+class Heartbeat(Message[WorkerPayload]):
+    control: Literal["heartbeat"]
+    job_id: int
+    assignment_token: str
+
+    @model_validator(mode="after")
+    def _execution_payload(self) -> Self:
+        for item in self.payload:
+            if isinstance(item, ConversationResult):
+                continue
+            if isinstance(item, (Started, AcceptResult, AcceptStop, FlowToolRequest)):
+                identity = (item.arguments.job_id, item.arguments.assignment_token)
+            elif isinstance(item, ExecuteResult):
+                identity = (item.job_id, item.assignment_token)
+            else:
+                identity = (item.result.job_id, item.result.assignment_token)
+            if identity != (self.job_id, self.assignment_token):
+                raise ValueError("heartbeat and payload belong to different executions")
+        return self
+
+
+class ProtocolError(Message[ServerPayload]):
+    control: Literal["error"]
+    code: str
+    detail: str
+
+    @model_validator(mode="after")
+    def _no_payload(self) -> Self:
+        if self.payload:
+            raise ValueError("ProtocolError cannot carry business payload")
+        return self
+
+
+WorkerMessage = Annotated[Register | Heartbeat | WorkerFrame, Field(discriminator="control")]
+ServerMessage = Annotated[Registered | ProtocolError | ServerFrame, Field(discriminator="control")]
 
 _WORKER_MESSAGES: TypeAdapter[WorkerMessage] = TypeAdapter(WorkerMessage)
 _SERVER_MESSAGES: TypeAdapter[ServerMessage] = TypeAdapter(ServerMessage)
 
 
 def parse_worker_message(raw: str) -> WorkerMessage:
-    """Validate a worker-to-serve JSON message."""
+    """Validate the complete worker frame before any control or payload has effects."""
 
     return _WORKER_MESSAGES.validate_json(raw)
 
 
 def parse_server_message(raw: str) -> ServerMessage:
-    """Validate a serve-to-worker JSON message."""
+    """Validate the complete server frame; historical records use durable decoders instead."""
 
     return _SERVER_MESSAGES.validate_json(raw)
+
+
+def _stable_id(parts: list[str | int]) -> MessageId:
+    return uuid5(_ID_NAMESPACE, json.dumps(parts, ensure_ascii=False, separators=(",", ":"))).hex
+
+
+def execution_call_id(job_id: int, assignment_token: str) -> MessageId:
+    """E: stable assignment invocation, without a connection epoch."""
+    return _stable_id(["worker.execute", job_id, assignment_token])
+
+
+def _terminal_id(job_id: int, assignment_token: str, digest: str) -> MessageId:
+    return _stable_id(["terminal", job_id, assignment_token, digest])
+
+
+def terminal_id(terminal: TerminalPayload) -> MessageId:
+    """T: identity of the already-redacted durable execution outcome."""
+    return _terminal_id(terminal.job_id, terminal.assignment_token, terminal_digest(terminal))
+
+
+def accept_result_id(result_id: MessageId) -> MessageId:
+    """A: request to acknowledge business application of one terminal result."""
+    return _stable_id(["server.accept_result", result_id])
+
+
+def stop_call_id(fence: StopFence) -> MessageId:
+    """C: the same stop invocation across reconnects."""
+    return _stable_id(
+        ["stop_execution", fence.request_id, fence.flow_id, fence.job_id, fence.assignment_token]
+    )
+
+
+def stop_receipt_id(receipt: ExecutionStopped) -> MessageId:
+    """R: evidence from one actual execution, including its nonce."""
+    return _stable_id(
+        [
+            "execution_stopped",
+            receipt.request_id,
+            receipt.flow_id,
+            receipt.job_id,
+            receipt.assignment_token,
+            receipt.execution_nonce,
+        ]
+    )
+
+
+def accept_stop_id(receipt_id: MessageId) -> MessageId:
+    """B: request to acknowledge one fenced stop receipt."""
+    return _stable_id(["server.accept_stop", receipt_id])
