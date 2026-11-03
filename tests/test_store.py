@@ -1,3 +1,5 @@
+import hashlib
+import json
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
@@ -6,8 +8,17 @@ from threading import Event
 import psycopg
 import pytest
 from psycopg.errors import UniqueViolation
+from psycopg.types.json import Jsonb
 
-from app.contracts.protocol import PROTOCOL_VERSION, InitialTaskResult, Succeeded, terminal_digest
+from app.contracts.protocol import (
+    PROTOCOL_VERSION,
+    ExecutionStopped,
+    Failed,
+    InitialTaskResult,
+    Succeeded,
+    terminal_digest,
+)
+from app.contracts.receipts import ResultInbox, decode_result_inbox, stop_receipt_digest
 from app.controler.workflow.service import ControlService
 from app.domain.delivery_models import OpenedDelivery
 from app.domain.models import DeliveryState, FlowState, JobKind, JobState
@@ -205,23 +216,55 @@ def test_result_inbox_deduplicates_and_rejects_conflicting_payloads(store: Store
         job.id, attempt.id, "worker-1", "token-1", "epoch-1"
     )
     terminal = Succeeded(
-        job_id=job.id, assignment_token="token-1", connection_epoch="epoch-1",
+        job_id=job.id,
+        assignment_token="token-1",
         result=InitialTaskResult(session_id=None, last_message="completed", exit_code=0),
     )
-    payload = terminal.model_dump(mode="json")
-    digest = terminal_digest(terminal)
 
-    assert store.workers.record_assignment_result(
-        job.id, "worker-1", "token-1", "epoch-1", payload, digest
-    ) == "pending"
-    assert store.workers.record_assignment_result(
-        job.id, "worker-1", "token-1", "epoch-1", payload, digest
-    ) == "pending"
+    assert (
+        store.workers.record_assignment_result(job.id, "worker-1", "token-1", "epoch-1", terminal)
+        == "pending"
+    )
+    assert (
+        store.workers.record_assignment_result(job.id, "worker-1", "token-1", "epoch-1", terminal)
+        == "pending"
+    )
+    persisted = store.jobs.get_job(job.id)
+    assert persisted is not None
+    assert persisted.result_payload == ResultInbox(source="worker", terminal=terminal).model_dump(
+        mode="json"
+    )
+    assert persisted.result_digest == terminal_digest(terminal)
+    conflict = Failed(job_id=job.id, assignment_token="token-1", error="different outcome")
+    assert (
+        store.workers.record_assignment_result(
+            job.id,
+            "worker-1",
+            "token-1",
+            "epoch-1",
+            conflict,
+        )
+        == "conflict"
+    )
+    with pytest.raises(ValueError, match="assignment"):
+        store.workers.record_assignment_result(
+            job.id,
+            "worker-1",
+            "token-1",
+            "epoch-1",
+            terminal.model_copy(update={"job_id": job.id + 1}),
+        )
     assert [pending.id for pending in store.jobs.list_unapplied_results()] == [job.id]
     assert store.jobs.complete_persisted_result(job.id, JobState.DONE)
-    assert store.workers.record_assignment_result(
-        job.id, "worker-1", "token-1", "epoch-1", payload, digest
-    ) == "applied"
+    store.workers.worker_connected("worker-1", PROTOCOL_VERSION, "epoch-2")
+    assert (
+        store.workers.record_assignment_result(job.id, "worker-1", "token-1", "epoch-1", terminal)
+        == "rejected"
+    )
+    assert (
+        store.workers.record_assignment_result(job.id, "worker-1", "token-1", "epoch-2", terminal)
+        == "applied"
+    )
 
 
 def test_startup_preserves_assignments_for_lease_recovery(store: Store) -> None:
@@ -537,3 +580,140 @@ def test_concurrent_stores_reserve_a_delivery_once(
 
     assert sorted(recorded) == [False, True]
     assert store.webhooks.event_seen("shared-delivery") is True
+
+
+@pytest.mark.parametrize("token", [None, "assignment"])
+def test_control_inbox_validates_ownership_and_keeps_only_business_data(store, token):
+    flow = store.flows.create_flow("owner/control", 1, None)
+    job = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
+    with store.connection() as connection:
+        connection.execute(
+            "UPDATE jobs SET state='running',assignment_token=%s WHERE id=%s", (token, job.id)
+        )
+    terminal = Failed(
+        job_id=job.id, assignment_token=token or "control", error="preparation failed"
+    )
+    with store.transaction() as tx:
+        tx.lock_workflow(flow.id)
+        tx.lock_job(job.id)
+        with pytest.raises(ValueError, match="assignment"):
+            tx.jobs.record_control_result(
+                job.id, terminal.model_copy(update={"assignment_token": "wrong"}), terminal.error
+            )
+        tx.jobs.record_control_result(job.id, terminal, terminal.error)
+    persisted = store.jobs.get_job(job.id)
+    inbox = decode_result_inbox(
+        persisted.result_payload,
+        job_id=job.id,
+        assignment_token=token,
+        result_digest=persisted.result_digest,
+    )
+    assert inbox == ResultInbox(source="control", terminal=terminal)
+    assert persisted.result_payload == inbox.model_dump(mode="json")
+    assert persisted.last_error == terminal.error
+
+
+@pytest.mark.parametrize(
+    "payload,started,selected",
+    [
+        (None, False, True),
+        ({"version": 1, "source": "worker"}, False, True),
+        ({"version": 1, "source": "control"}, False, False),
+        ({"version": 1, "source": "control"}, True, True),
+        ({"protocol_version": 14, "connection_epoch": "control"}, False, False),
+        ({"protocol_version": 15, "connection_epoch": "control"}, False, False),
+        ({"protocol_version": 15, "connection_epoch": "control"}, True, True),
+        ({"protocol_version": 14, "connection_epoch": "worker"}, False, True),
+        ({"protocol_version": 15, "connection_epoch": "worker"}, False, True),
+        ({"version": 1}, False, True),
+        ({"protocol_version": 15}, False, True),
+        ({"connection_epoch": "control"}, False, True),
+        ({"protocol_version": 16, "connection_epoch": "control"}, False, True),
+        ({"protocol_version": "15", "connection_epoch": "control"}, False, True),
+        ({"protocol_version": 15.0, "connection_epoch": "control"}, False, True),
+        ({"version": "1", "source": "control"}, False, True),
+        ({"version": 1.0, "source": "control"}, False, True),
+        ({"version": 2, "source": "control"}, False, True),
+        ({"version": None, "protocol_version": 15, "connection_epoch": "control"}, False, True),
+    ],
+)
+def test_lifecycle_source_filter_requires_known_versions_and_preserves_nulls(
+    store, payload, started, selected
+):
+    # SQL only classifies known origins; unknown/corrupt payloads must reach the durable decoder.
+    flow = store.flows.create_flow("owner/lifecycle", 1, None)
+    job = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
+    with store.connection() as connection:
+        connection.execute(
+            "UPDATE jobs SET state='running',started_at=%s,result_payload=%s WHERE id=%s",
+            (
+                store.now() if started else None,
+                Jsonb(payload) if payload is not None else None,
+                job.id,
+            ),
+        )
+    found = store.jobs.lifecycle_job(flow.id)
+    assert (found is not None) is selected
+    if found is not None:
+        assert found.id == job.id
+
+
+@pytest.mark.parametrize("historical_version", [None, 14, 15])
+def test_stop_confirmation_replays_real_receipt_without_rewriting_known_digest(
+    store, historical_version
+):
+    # Reconnect changes the transport fence, never the already persisted cleanup evidence.
+    flow = store.flows.create_flow("owner/stop", 1, None)
+    attempt = store.flows.create_attempt(flow.id)
+    store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
+    store.workers.worker_connected("worker", PROTOCOL_VERSION, "epoch-1")
+    job = store.workers.assign_job("worker", "token", "epoch-1")
+    assert store.workers.start_assignment(job.id, attempt.id, "worker", "token", "epoch-1")
+    with store.transaction() as tx:
+        tx.lock_workflow(flow.id)
+        tx.stops.request(flow.id)
+    intent = store.stops.pending("worker")
+    receipt = ExecutionStopped(**intent.fence().model_dump(), execution_nonce="real-cleanup")
+    expected = stop_receipt_digest(receipt)
+    if historical_version is not None:
+        projection = {
+            "protocol_version": historical_version,
+            "request_id": receipt.request_id,
+            "flow_id": receipt.flow_id,
+            "job_id": receipt.job_id,
+            "assignment_token": receipt.assignment_token,
+            "type": "execution_stopped",
+            "execution_nonce": receipt.execution_nonce,
+        }
+        expected = hashlib.sha256(
+            json.dumps(projection, separators=(",", ":")).encode()
+        ).hexdigest()
+        with store.connection() as connection:
+            connection.execute(
+                "UPDATE execution_stops SET receipt_digest=%s WHERE request_id=%s",
+                (expected, intent.request_id),
+            )
+        assert not store.stops.confirm(
+            "worker", receipt.model_copy(update={"execution_nonce": "wrong"}), "epoch-1"
+        )
+    terminal = Failed(job_id=job.id, assignment_token="token", error="stopped")
+    assert (
+        store.workers.record_assignment_result(job.id, "worker", "token", "epoch-1", terminal)
+        == "pending"
+    )
+    assert not store.stops.confirm("worker", receipt, "epoch-1")
+    assert store.stops.receipt_request("worker", intent.request_id).receipt_digest == expected
+    assert store.workers.get_flow_execution(flow.id).released_at is None
+    assert store.jobs.complete_persisted_result(job.id, JobState.FAILED)
+    store.workers.worker_connected("worker", PROTOCOL_VERSION, "epoch-2")
+    assert not store.stops.confirm("worker", receipt, "epoch-1")
+    assert store.stops.confirm("worker", receipt, "epoch-2")
+    assert store.workers.get_flow_execution(flow.id).released_at is not None
+    assert store.stops.confirm("worker", receipt, "epoch-2")
+    assert not store.stops.confirm(
+        "worker", receipt.model_copy(update={"execution_nonce": "wrong"}), "epoch-2"
+    )
+    assert not store.stops.confirm(
+        "worker", receipt.model_copy(update={"assignment_token": "wrong"}), "epoch-2"
+    )
+    assert store.stops.receipt_request("worker", intent.request_id).receipt_digest == expected

@@ -6,14 +6,18 @@ import pytest
 
 from app.communication.gateway import Gateway
 from app.contracts.protocol import (
-    Assignment,
+    AssignmentArguments,
     ExecutionResult,
     ExecutionTask,
     FlowToolResponse,
     InitialTask,
     InitialTaskResult,
     Succeeded,
+    TerminalPayload,
+    result_header,
+    terminal_digest,
 )
+from app.contracts.receipts import ResultInbox, decode_result_inbox
 from app.controler.workers.handler import WorkerHandler
 from app.controler.workers.transport import serve_worker
 from app.controler.workflow.coordinator import JobCoordinator
@@ -134,12 +138,25 @@ class RemoteStore(RepositoryViews, Store):
         worker_id: str,
         token: str,
         connection_epoch: str,
-        payload: Mapping[str, object],
-        digest: str,
+        terminal: TerminalPayload,
     ) -> str:
+        digest = terminal_digest(terminal)
+        if (
+            self.job.id != job_id
+            or self.job.assigned_worker_id != worker_id
+            or self.job.assignment_token != token
+        ):
+            return "rejected"
+        if self.job.result_digest is not None:
+            if self.job.result_digest != digest:
+                return "conflict"
+            return "applied" if self.job.result_applied_at is not None else "pending"
         if not self.assignment_active(job_id, worker_id, token):
             return "rejected"
-        self.job.result_payload = dict(payload)
+        assert (terminal.job_id, terminal.assignment_token) == (job_id, token)
+        self.job.result_payload = ResultInbox(source="worker", terminal=terminal).model_dump(
+            mode="json"
+        )
         self.job.result_digest = digest
         return "pending"
 
@@ -147,7 +164,11 @@ class RemoteStore(RepositoryViews, Store):
         return 0
 
     def list_unapplied_results(
-        self, *, after_id: int = 0, through_id: int | None = None, limit: int = 64,
+        self,
+        *,
+        after_id: int = 0,
+        through_id: int | None = None,
+        limit: int = 64,
     ) -> list[Job]:
         return []
 
@@ -157,7 +178,9 @@ class RemoteStore(RepositoryViews, Store):
         self.done.set()
         return True
 
-    def assignment_active(self, job_id: int, worker_id: str, token: str, connection_epoch: str = "") -> bool:
+    def assignment_active(
+        self, job_id: int, worker_id: str, token: str, connection_epoch: str = ""
+    ) -> bool:
         return (
             self.job.state is JobState.RUNNING
             and self.job.id == job_id
@@ -191,8 +214,9 @@ class RemoteCoordinator(JobCoordinator):
         task = await self.prepare(job)
         if isinstance(task, JobState):
             return task
-        return Assignment(job_id=job.id, flow_id=job.flow_id, assignment_token=token,
-                          connection_epoch=epoch, task=task)
+        return AssignmentArguments(
+            job_id=job.id, flow_id=job.flow_id, assignment_token=token, task=task
+        )
 
     def __init__(self, store: RemoteStore) -> None:
         self.jobs = store.jobs
@@ -212,11 +236,18 @@ class RemoteCoordinator(JobCoordinator):
             branch="flow/issue-8",
         )
 
-    async def _tool_response(self, request, *, worker_id: str):
+    async def _tool_response(self, request, *, worker_id: str, connection_epoch: str):
         self.tool_calls += 1
         return FlowToolResponse(
-            call_id=request.call_id,
-            result=OpenedDelivery(pr_number=17, head_sha="abc123", url="https://github.com/owner/repo/pull/17", delivery_version=1),
+            **result_header(request.message_id),
+            method=request.method,
+            call_id=request.arguments.call_id,
+            result=OpenedDelivery(
+                pr_number=17,
+                head_sha="abc123",
+                url="https://github.com/owner/repo/pull/17",
+                delivery_version=1,
+            ),
         )
 
     def mark_started(self, job: Job, task: ExecutionTask, worker_id: str) -> None:
@@ -224,8 +255,15 @@ class RemoteCoordinator(JobCoordinator):
 
     async def _commit_result(self, job_id: int) -> JobState:
         job = self.jobs.get_job(job_id)
-        assert job is not None and job.result_payload is not None
-        result = Succeeded.model_validate(job.result_payload).result
+        assert job is not None and job.result_payload is not None and job.result_digest is not None
+        inbox = decode_result_inbox(
+            job.result_payload,
+            job_id=job.id,
+            assignment_token=job.assignment_token,
+            result_digest=job.result_digest,
+        )
+        assert isinstance(inbox.terminal, Succeeded)
+        result = inbox.terminal.result
         assert isinstance(result, InitialTaskResult)
         self.result = result
         self.jobs.complete_persisted_result(job.id, JobState.DONE)
@@ -264,7 +302,8 @@ async def test_control_gateway_and_worker_client_complete_one_remote_job(tmp_pat
     store = RemoteStore()
     coordinator = RemoteCoordinator(store)
     handler = WorkerHandler(
-        coordinator, database=store.database,
+        coordinator,
+        database=store.database,
         peers=Gateway(),
         poll_interval=0.01,
         tools=coordinator.tools,
@@ -272,7 +311,8 @@ async def test_control_gateway_and_worker_client_complete_one_remote_job(tmp_pat
     )
     executor = FakeExecutor()
     state = ExecutionState(tmp_path)
-    client = WorkerClient(read_history=state.read,
+    client = WorkerClient(
+        read_history=state.read,
         worker_id="worker-1",
         worker_token="worker-secret",
         serve_ws_url="ws://unused",
@@ -280,17 +320,32 @@ async def test_control_gateway_and_worker_client_complete_one_remote_job(tmp_pat
     )
 
     tasks = [
-        asyncio.create_task(serve_worker(QueueSocket(worker_to_serve, serve_to_worker),
-                                        worker_tokens={"worker-1": "worker-secret"}, handler=handler)),
+        asyncio.create_task(
+            serve_worker(
+                QueueSocket(worker_to_serve, serve_to_worker),
+                worker_tokens={"worker-1": "worker-secret"},
+                handler=handler,
+            )
+        ),
         asyncio.create_task(
             client.run_connection(QueueConnection(worker_to_serve, serve_to_worker))
         ),
     ]
-    await asyncio.wait_for(store.done.wait(), timeout=1)
-    await asyncio.sleep(0)
-    for task in tasks:
-        task.cancel()
-    await asyncio.gather(*tasks, return_exceptions=True)
+    try:
+        await asyncio.wait_for(store.done.wait(), timeout=1)
+        # A server commit alone is not end-to-end completion: the worker must consume
+        # the correlated A result before its journal can retire the assignment.
+        async with asyncio.timeout(1):
+            while True:
+                journal = state.load()
+                if journal is not None and journal.acknowledged:
+                    break
+                await asyncio.sleep(0)
+        assert state.assignment is None
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     assert store.job.state is JobState.DONE
     assert coordinator.result is not None

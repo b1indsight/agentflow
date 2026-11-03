@@ -11,23 +11,23 @@ from uuid import uuid4
 from loguru import logger
 
 from app.contracts.protocol import (
-    Assignment,
+    AcceptedResult,
+    AssignmentArguments,
     AssignmentSecret,
     ExecutionResult,
     ExecutionStopped,
     ExecutionTask,
+    FlowToolArguments,
     FlowToolErrorKind,
     FlowToolRequest,
     FlowToolResponse,
+    RecoveryDecision,
     RecoveryDescriptor,
-    ResultAccepted,
-    ResumeAssignment,
-    StopAccepted,
-    StopExecution,
-    TerminalMessage,
+    StopFence,
+    TerminalPayload,
 )
 from app.domain.delivery_models import DeliveryReceipt
-from app.domain.models import VcsOutcome
+from app.domain.models import JobState, VcsOutcome
 from app.worker.state.execution import ExecutionState
 from app.worker.transport.mcp import FlowToolCaller
 
@@ -36,7 +36,11 @@ class TaskExecutor(Protocol):
     """Execute an assignment and reclaim its workspace after a confirmed stop."""
 
     async def execute(
-        self, task: ExecutionTask, secret: AssignmentSecret | None = None, *, tool_caller: FlowToolCaller
+        self,
+        task: ExecutionTask,
+        secret: AssignmentSecret | None = None,
+        *,
+        tool_caller: FlowToolCaller,
     ) -> ExecutionResult: ...
 
     async def reclaim_workspace(self) -> None: ...
@@ -86,13 +90,17 @@ class WorkerExecution:
         self._tool_calls: deque[PendingToolCall] = deque()
         self._tool_ready = asyncio.Event()
         self._stop_task: asyncio.Task[ExecutionStopped] | None = None
-        self._stop_request: StopExecution | None = None
+        self._stop_request: StopFence | None = None
         self._shutdown_task: asyncio.Task[None] | None = None
 
-    def receive(self, assignment: Assignment) -> None:
+    def receive(self, assignment: AssignmentArguments) -> None:
         """Persist received before the connection sends Started; do not start any work."""
-        if (self.state.assignment is not None or self._execution is not None
-                or self._stop_task is not None or self._shutdown_task is not None):
+        if (
+            self.state.assignment is not None
+            or self._execution is not None
+            or self._stop_task is not None
+            or self._shutdown_task is not None
+        ):
             raise WorkerProtocolError("received a second assignment while busy")
         record = self.state.load()
         if record is not None and record.stopped is not None and not record.acknowledged:
@@ -102,16 +110,21 @@ class WorkerExecution:
     def start(self) -> None:
         """After Started was sent, persist started and launch without an intervening await."""
         assignment = self.state.assignment
-        if (assignment is None or self._execution is not None
-                or self._stop_task is not None or self._shutdown_task is not None):
+        if (
+            assignment is None
+            or self._execution is not None
+            or self._stop_task is not None
+            or self._shutdown_task is not None
+        ):
             raise WorkerProtocolError("active assignment is missing or already executing")
         self.state.record_started()
         self._launch(assignment)
 
-    def _launch(self, assignment: Assignment) -> None:
+    def _launch(self, assignment: AssignmentArguments) -> None:
         self._cancel_requested = False
-        with logger.contextualize(flow_id=assignment.flow_id, job_id=assignment.job_id,
-                                  worker_id=self.worker_id, epoch=assignment.connection_epoch):
+        with logger.contextualize(
+            flow_id=assignment.flow_id, job_id=assignment.job_id, worker_id=self.worker_id
+        ):
             logger.bind(event="job_started", reason_code="ok").info("")
             self._execution = asyncio.create_task(
                 self.executor.execute(assignment.task, assignment.secret, tool_caller=self)
@@ -127,14 +140,20 @@ class WorkerExecution:
         if self._cancel_requested:
             # Recovery rejection removes the assignment before joining. Its observer may have
             # disconnected, so retire the rejected task here, but retain stop/shutdown evidence.
-            if self.state.assignment is None and self._stop_task is None and self._shutdown_task is None:
+            if (
+                self.state.assignment is None
+                and self._stop_task is None
+                and self._shutdown_task is None
+            ):
                 self._execution = None
                 self._discard_tool_calls()
             return
         try:
             self._collect_finished()
         except Exception:  # noqa: BLE001
-            logger.exception("worker execution result could not be persisted; retaining it for recovery")
+            logger.exception(
+                "worker execution result could not be persisted; retaining it for recovery"
+            )
 
     def _collect_finished(self) -> None:
         execution = self._execution
@@ -146,9 +165,13 @@ class WorkerExecution:
         try:
             outcome: ExecutionResult | Exception = execution.result()
         except Exception as exc:  # noqa: BLE001
-            logger.bind(event="job_failed", reason_code="execution_failed",
-                        job_id=assignment.job_id, flow_id=assignment.flow_id,
-                        worker_id=self.worker_id).opt(exception=exc).error("")
+            logger.bind(
+                event="job_failed",
+                reason_code="execution_failed",
+                job_id=assignment.job_id,
+                flow_id=assignment.flow_id,
+                worker_id=self.worker_id,
+            ).opt(exception=exc).error("")
             outcome = exc
         self.state.complete(outcome)
         self._execution = None
@@ -159,16 +182,34 @@ class WorkerExecution:
         self._collect_finished()
         return self.state.recovery(executor_active=self.lease() is not None)
 
-    def resume(self, message: ResumeAssignment) -> None:
+    def result_for_registration(self) -> TerminalPayload | None:
+        """Expose only unacknowledged, non-stopping completion for the Register acceptance call."""
+        if self._cancel_requested or self._stop_task is not None or self._shutdown_task is not None:
+            return None
+        self._collect_finished()
+        record = self.state.load()
+        if record is None or record.acknowledged or record.stopped is not None:
+            return None
+        return record.terminal
+
+    def resume(self, message: RecoveryDecision) -> None:
         """Rebind the original work, or restart only the existing frozen archive exception."""
+        if message.action != "resume":
+            raise WorkerProtocolError("expected a resume recovery decision")
         self.state.validate_recovery(message.job_id, message.assignment_token)
         self._collect_finished()
         record = self.state.load()
-        if (self._cancel_requested or self._stop_task is not None or self._shutdown_task is not None
-                or record is None or record.stopped is not None or record.acknowledged):
+        if (
+            self._cancel_requested
+            or self._stop_task is not None
+            or self._shutdown_task is not None
+            or record is None
+            or record.stopped is not None
+            or record.acknowledged
+        ):
             raise WorkerProtocolError("serve resumed an assignment without a live executor")
         active = self.lease() is not None
-        assignment = self.state.resume(message.connection_epoch, executor_active=active)
+        assignment = self.state.resume(executor_active=active)
         if not active and record.terminal is None:
             self._launch(assignment)
 
@@ -187,14 +228,19 @@ class WorkerExecution:
                 if execution.done():
                     self._execution_finished(execution)
 
-    def lease(self) -> Assignment | None:
+    def lease(self) -> AssignmentArguments | None:
         """Return the assignment only while an uncancelled execution is still running."""
-        if (self._execution is None or self._execution.done() or self._cancel_requested
-                or self._stop_task is not None or self._shutdown_task is not None):
+        if (
+            self._execution is None
+            or self._execution.done()
+            or self._cancel_requested
+            or self._stop_task is not None
+            or self._shutdown_task is not None
+        ):
             return None
         return self.state.assignment
 
-    async def wait_terminal(self, connection_epoch: str) -> TerminalMessage:
+    async def wait_terminal(self) -> TerminalPayload:
         """Observe completion without owning the task; return only a persisted terminal."""
         execution = self._execution
         if execution is not None:
@@ -202,21 +248,28 @@ class WorkerExecution:
             # The collector below retrieves failures and persists them through the same path.
             await asyncio.wait({execution})
         self._collect_finished()
-        return self.state.replay(connection_epoch)
+        return self.state.replay()
 
-    def on_result_accepted(self, accepted: ResultAccepted) -> None:
+    def on_result_accepted(self, accepted: AcceptedResult) -> None:
         """Apply the server's result acceptance without retiring an active execution or stop."""
         self.state.validate_recovery(accepted.job_id, accepted.assignment_token)
         self._collect_finished()
         record = self.state.load()
-        if (self._execution is not None or self._stop_task is not None
-                or (record is not None and record.stopped is not None and not record.acknowledged)):
+        if (
+            self._execution is not None
+            or self._stop_task is not None
+            or (record is not None and record.stopped is not None and not record.acknowledged)
+        ):
             raise WorkerProtocolError("result acknowledgement does not match terminal journal")
-        self.state.acknowledge(accepted.job_id, accepted.state)
+        self.state.acknowledge(accepted.job_id, JobState(accepted.state))
 
     async def call_tool(
-        self, name: str, arguments: dict[str, object], *,
-        call_id: str | None = None, vcs_outcome: VcsOutcome,
+        self,
+        name: str,
+        arguments: dict[str, object],
+        *,
+        call_id: str | None = None,
+        vcs_outcome: VcsOutcome,
     ) -> DeliveryReceipt:
         """Queue one execution-local call and await its original future across connections."""
         assignment = self.lease()
@@ -224,12 +277,22 @@ class WorkerExecution:
             raise WorkerProtocolError("Flow tool call has no active assignment")
         future: asyncio.Future[DeliveryReceipt] = asyncio.get_running_loop().create_future()
         request = FlowToolRequest(
-            job_id=assignment.job_id, flow_id=assignment.flow_id,
-            attempt_id=assignment.task.attempt_id, assignment_token=assignment.assignment_token,
-            connection_epoch=assignment.connection_epoch, call_id=call_id or uuid4().hex,
-            name=name, arguments=arguments, vcs_backend=vcs_outcome.backend,
-            branch=vcs_outcome.branch, commit_sha=vcs_outcome.commit_sha,
-            remote_sha=vcs_outcome.remote_sha,
+            type="tool_call",
+            message_id=uuid4().hex,
+            reply_to=None,
+            method=name,
+            arguments=FlowToolArguments(
+                job_id=assignment.job_id,
+                flow_id=assignment.flow_id,
+                attempt_id=assignment.task.attempt_id,
+                assignment_token=assignment.assignment_token,
+                call_id=call_id or uuid4().hex,
+                arguments=arguments,
+                vcs_backend=vcs_outcome.backend,
+                branch=vcs_outcome.branch,
+                commit_sha=vcs_outcome.commit_sha,
+                remote_sha=vcs_outcome.remote_sha,
+            ),
         )
         self._tool_calls.append(PendingToolCall(request, future))
         self._tool_ready.set()
@@ -248,7 +311,11 @@ class WorkerExecution:
 
     def finish_tool_call(self, call: PendingToolCall, response: FlowToolResponse) -> None:
         """Consume a matching reply, including a late reply to an already discarded call."""
-        if response.call_id != call.request.call_id:
+        if (response.method, response.reply_to, response.call_id) != (
+            call.request.method,
+            call.request.message_id,
+            call.request.arguments.call_id,
+        ):
             raise WorkerProtocolError("Flow tool response does not match its request")
         if self._tool_calls and self._tool_calls[0] is call:
             self._tool_calls.popleft()
@@ -277,27 +344,30 @@ class WorkerExecution:
                 execution.cancel()
         return execution
 
-    async def stop(self, request: StopExecution) -> ExecutionStopped:
+    async def stop(self, request: StopFence) -> ExecutionStopped:
         """Join a fenced, owner-held stop operation; a connection only observes its outcome."""
         record = self.state.load()
         if record is None or (record.job_id, record.flow_id, record.assignment_token) != (
-                request.job_id, request.flow_id, request.assignment_token):
+            request.job_id,
+            request.flow_id,
+            request.assignment_token,
+        ):
             raise WorkerProtocolError("stop blocked: original session is missing")
-        if ((record.stopped is not None and record.stopped.request_id != request.request_id)
-                or (self._stop_request is not None
-                    and self._stop_request.model_dump(exclude={"connection_epoch"})
-                    != request.model_dump(exclude={"connection_epoch"}))):
+        if (record.stopped is not None and record.stopped.request_id != request.request_id) or (
+            self._stop_request is not None and self._stop_request != request
+        ):
             raise WorkerProtocolError("stop request conflicts with durable receipt")
         if self._shutdown_task is not None:
             raise WorkerProtocolError("stop blocked: worker is shutting down")
-        if self._stop_task is None or (self._stop_task.done() and self._stop_task.exception() is not None):
+        if self._stop_task is None or (
+            self._stop_task.done() and self._stop_task.exception() is not None
+        ):
             self._stop_request = request
             self._stop_task = asyncio.create_task(self._stop_execution(request))
             self._stop_task.add_done_callback(self._stop_finished)
-        receipt = await asyncio.shield(self._stop_task)
-        return receipt.model_copy(update={"connection_epoch": request.connection_epoch})
+        return await asyncio.shield(self._stop_task)
 
-    async def _stop_execution(self, request: StopExecution) -> ExecutionStopped:
+    async def _stop_execution(self, request: StopFence) -> ExecutionStopped:
         self._collect_finished()
         record = self.state.load()
         assert record is not None
@@ -315,9 +385,16 @@ class WorkerExecution:
                     if not execution.cancelled():
                         raise
                 except Exception as exc:
-                    raise WorkerProtocolError("stop blocked: executor cleanup was not confirmed") from exc
-            receipt = ExecutionStopped(**request.model_dump(exclude={"type"}),
-                                       execution_nonce=record.execution_nonce)
+                    raise WorkerProtocolError(
+                        "stop blocked: executor cleanup was not confirmed"
+                    ) from exc
+            receipt = ExecutionStopped(
+                request_id=request.request_id,
+                flow_id=request.flow_id,
+                job_id=request.job_id,
+                assignment_token=request.assignment_token,
+                execution_nonce=record.execution_nonce,
+            )
             self.state.record_stopped(receipt)
         self._execution = None
         self._discard_tool_calls()
@@ -330,7 +407,7 @@ class WorkerExecution:
         if not task.cancelled() and task.exception() is not None:
             logger.opt(exception=task.exception()).error("worker stop remains blocked")
 
-    def on_stop_accepted(self, accepted: StopAccepted) -> None:
+    def on_stop_accepted(self, accepted: StopFence) -> None:
         """Retire stop state only after the server accepts the durable receipt."""
         self.state.acknowledge_stop(accepted)
         self._stop_task = None

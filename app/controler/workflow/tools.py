@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import asyncio
 
-from app.contracts.protocol import FlowToolErrorKind, FlowToolRequest, FlowToolResponse
+from app.contracts.protocol import (
+    FlowToolErrorKind,
+    FlowToolRequest,
+    FlowToolResponse,
+    result_header,
+)
 from app.domain.delivery_models import DeliveryReceipt, OpenedDelivery, PreparedDelivery
 from app.domain.models import TERMINAL_STATES, DeliveryState, FlowDelivery
 from app.github import GitHubApp, GitHubError, GitHubErrorKind
@@ -38,36 +43,55 @@ class FlowToolService:
         self.github = github
         self._locks: dict[int, asyncio.Lock] = {}
 
-    async def execute(self, request: FlowToolRequest, *, worker_id: str) -> FlowToolResponse:
-        if request.name != "flow.open_pr":
+    async def execute(
+        self,
+        request: FlowToolRequest,
+        *,
+        worker_id: str,
+        connection_epoch: str,
+    ) -> FlowToolResponse:
+        """Execute a typed call against the original connection's assignment fences."""
+        if request.method != "flow.open_pr":
             return self._error(
                 request,
                 FlowToolErrorKind.INVALID_REQUEST,
-                f"unknown Flow tool: {request.name}",
+                f"unknown Flow tool: {request.method}",
             )
-        async with self._locks.setdefault(request.flow_id, asyncio.Lock()):
+        async with self._locks.setdefault(request.arguments.flow_id, asyncio.Lock()):
             try:
-                return await self._open_pr(request, worker_id)
+                result = await self._open_pr(request, worker_id, connection_epoch)
             except FlowToolRejected as exc:
                 return self._error(request, exc.kind, str(exc))
             except GitHubError as exc:
                 return self._github_error(request, exc)
+            return FlowToolResponse(
+                **result_header(request.message_id),
+                method=request.method,
+                call_id=request.arguments.call_id,
+                result=result,
+            )
 
-    async def _open_pr(self, request: FlowToolRequest, worker_id: str) -> FlowToolResponse:
+    async def _open_pr(
+        self,
+        request: FlowToolRequest,
+        worker_id: str,
+        connection_epoch: str,
+    ) -> DeliveryReceipt:
+        arguments = request.arguments
         if not self.workers.assignment_active(
-            request.job_id,
+            arguments.job_id,
             worker_id,
-            request.assignment_token,
-            request.connection_epoch,
+            arguments.assignment_token,
+            connection_epoch,
         ):
             raise FlowToolRejected(
                 FlowToolErrorKind.STALE_ASSIGNMENT,
                 "Flow tool assignment fence expired",
             )
-        flow = self.flows.get_flow(request.flow_id)
-        attempt = self.flows.get_attempt(request.attempt_id)
-        execution = self.workers.get_flow_execution(request.flow_id)
-        delivery = self.deliveries.get_delivery(request.flow_id)
+        flow = self.flows.get_flow(arguments.flow_id)
+        attempt = self.flows.get_attempt(arguments.attempt_id)
+        execution = self.workers.get_flow_execution(arguments.flow_id)
+        delivery = self.deliveries.get_delivery(arguments.flow_id)
         if flow is None or flow.state in TERMINAL_STATES:
             raise FlowToolRejected(FlowToolErrorKind.CONFLICT, "Flow is not active")
         if attempt is None or attempt.flow_id != flow.id or flow.current_attempt_id != attempt.id:
@@ -91,18 +115,18 @@ class FlowToolService:
             )
         if delivery.state in {DeliveryState.CLOSED, DeliveryState.MERGED}:
             raise FlowToolRejected(FlowToolErrorKind.CONFLICT, "PR closed or merged; flow.open_pr is retired")
-        if request.branch != delivery.branch:
+        if arguments.branch != delivery.branch:
             raise FlowToolRejected(
                 FlowToolErrorKind.CONFLICT,
                 "worker-verified branch does not match the Flow delivery",
             )
-        if request.commit_sha != request.remote_sha:
+        if arguments.commit_sha != arguments.remote_sha:
             raise FlowToolRejected(
                 FlowToolErrorKind.CONFLICT,
                 "worker did not verify the pushed commit",
             )
-        title = request.arguments.get("title")
-        body = request.arguments.get("body")
+        title = arguments.arguments.get("title")
+        body = arguments.arguments.get("body")
         if not isinstance(title, str) or not title.strip():
             raise FlowToolRejected(
                 FlowToolErrorKind.INVALID_REQUEST,
@@ -124,17 +148,17 @@ class FlowToolService:
             )
         try:
             call, _ = self.deliveries.reserve_tool_call(
-                call_id=request.call_id,
+                call_id=arguments.call_id,
                 flow_id=flow.id,
                 attempt_id=attempt.id,
-                job_id=request.job_id,
-                name=request.name,
-                arguments=request.arguments,
+                job_id=arguments.job_id,
+                name=request.method,
+                arguments=arguments.arguments,
             )
         except ValueError as exc:
             raise FlowToolRejected(FlowToolErrorKind.CONFLICT, str(exc)) from exc
         if call.response is not None:
-            return FlowToolResponse(call_id=request.call_id, result=call.response)
+            return call.response
 
         installation_id = flow.installation_id
         if installation_id is None:
@@ -149,7 +173,7 @@ class FlowToolService:
                 FlowToolErrorKind.UPSTREAM,
                 "GitHub remote returned an unexpected branch",
             )
-        if remote.sha != request.commit_sha:
+        if remote.sha != arguments.commit_sha:
             raise FlowToolRejected(
                 FlowToolErrorKind.CONFLICT,
                 "remote branch SHA does not match the worker-verified commit",
@@ -163,12 +187,12 @@ class FlowToolService:
             if (
                 current_flow is None
                 or current_flow.state in TERMINAL_STATES
-                or current_flow.current_attempt_id != request.attempt_id
+                or current_flow.current_attempt_id != arguments.attempt_id
                 or not workers_tx.assignment_active(
-                    request.job_id,
+                    arguments.job_id,
                     worker_id,
-                    request.assignment_token,
-                    request.connection_epoch,
+                    arguments.assignment_token,
+                    connection_epoch,
                 )
             ):
                 raise FlowToolRejected(
@@ -197,8 +221,8 @@ class FlowToolService:
                 prepared_response = PreparedDelivery(
                     status="prepared", head_sha=remote.sha, delivery_version=delivery.version,
                 )
-            deliveries_tx.complete_tool_call(request.call_id, prepared_response)
-        return FlowToolResponse(call_id=request.call_id, result=prepared_response)
+            deliveries_tx.complete_tool_call(arguments.call_id, prepared_response)
+        return prepared_response
 
     @staticmethod
     def _delivery_response(delivery: FlowDelivery) -> OpenedDelivery:
@@ -242,7 +266,9 @@ class FlowToolService:
         retry_after: str | None = None,
     ) -> FlowToolResponse:
         return FlowToolResponse(
-            call_id=request.call_id,
+            **result_header(request.message_id),
+            method=request.method,
+            call_id=request.arguments.call_id,
             error=detail,
             error_kind=kind,
             retryable=retryable,

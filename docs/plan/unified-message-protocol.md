@@ -1,13 +1,16 @@
 # Worker / server 统一消息协议（第四阶段）— Feature record
 
-**Stage:** Implementation — 第一步协议/数据结构已交付；第二步实现迁移待明确授权
-**PR:** [Draft #125](https://github.com/b1indsight/agentflow/pull/125)，当前不可独立运行、合并或部署
+**Stage:** Implementation — 两步代码已整合；本地整体验收通过，精确 head gate / CI 状态见下列记录
+**PR:** [#125](https://github.com/b1indsight/agentflow/pull/125)，继续同一 PR；合并和部署未获授权
 **Bookmark:** `refactor/unified-message-protocol`，两步沿用同一文档 / bookmark / PR
 **Workspace:** `.amp/in/workspaces/unified-message-protocol`（独立 jj workspace）
 **结构实施基线:** [`b99c8e39`](https://github.com/b1indsight/agentflow/commit/b99c8e39f6d391b5685a91a8d6c428c51810bb11)
-**已推送结构 head:** [`90bc9167`](https://github.com/b1indsight/agentflow/commit/90bc9167ad57016e22c09482ca5665a40f893ba1)，不含本次文档重写
+**已推送结构 head:** [`90bc9167`](https://github.com/b1indsight/agentflow/commit/90bc9167ad57016e22c09482ca5665a40f893ba1)，仅第一步结构；第二步见末尾实施记录
 **现行依据:** 下文是完整的当前方案；历史初案/R1–R6 通过文末固定提交保留，不作为候选方案
-**第二步审批入口:** K 的接入清单与 L 的验收落点；本次只补充并推送计划，不启动实现或测试返工
+**第二步实施依据:** 已批准 K 的接入清单与 L 的验收（含 LOW 返工）；详见末尾第二步实施记录和[验收证据](https://ampcode.com/artifacts/b697e409-3521-4003-9151-54edb09779bc)
+
+A–M 保留批准时的技术合同和当时状态，不回写第一步历史。其中“待授权 / 未实施 / CI 失败”
+描述的是批准前中间态；第二步实际进展、设计落实与验证以末尾时间线及验收证据为准。
 
 ## 当前方案（2026-11-03）
 
@@ -676,6 +679,64 @@ recovery/Images smoke 的完成条件。一起迁移控制失败写入、后台�
 未采纳草稿中仅凭缺少 version 就识别旧来源的 SQL，保持 J 的受限版本和 NULL 合同。
 本次仅文档；实现及 LOW 测试返工待第二步明确批准。既有失败与未执行项仍保留，咨询和
 文档检查不替代产品验收；不改变合并、部署与持久数据处理的授权边界。
+
+### 2026-11-03：第二步运行时与持久化接入
+
+**触发与实际修改：** 在 K/L 已批准范围内，接续线程独占独立 workspace 完成第二步；开始时
+重新 fetch，`main@origin` 仍为结构实施基线。第一步结构和现行方法/身份合同不变，不新增第三步。
+
+- Session 新增有界控制 ACK FIFO/sender、整帧容量预检与单项 history 分流；混合帧先由控制
+  owner 授权，再进入同一分派入口。`dispatch.py` 只负责 typed 路由，授权与相关性仍归业务。
+- WorkerClient 将 incoming/terminal/tool 观察收敛到单一业务循环；Started 的实际发送、
+  同步 record_started/launch 顺序保留。原 Task、工具条目/Future、离线完成和 shielded stop
+  仍归 WorkerExecution；断线不会重放整帧或历史查询，不把 epoch 写回业务记录。
+- WorkerHandler 接入 Registered 恢复、Register+A、T/A、真实 R/B；stop 优先，T/R 后继续
+  处理同帧 A/B，当前 A 回复实际写成功才退休 assignment。stopping 不回 A、不产生新 Flow
+  effects；StopStore 保留完整确认条件，已有摘要只能由真实 receipt 核验，不能凭 hash 回 B。
+- ExecutionState 删除旧内联模型/parser，接入唯一 `state/record.py`；typed persistence 内部
+  生成 inbox/digest，四个结果 reader 共用 durable decoder，来源 SQL 显式限制新旧版本并
+  保留 NULL。Coordinator 与 FlowToolService 继续用原 Session epoch 做准备和双重 DB fence。
+- 调用方、fixtures、recovery smoke 和当前 README/架构/运维说明同步迁移；脚本区分原始
+  conninfo 参数与已解析连接参数，继续只处理自己的隔离 fixture。旧成功回执 LOW 已补永久
+  Initial/Revision/Archive 的受限版本回归，保留原黄金 digest、输入和新格式往返。
+
+**关键取舍与结果：**
+
+| 背景 / 备选 | 已落实决定 | 影响与证据 |
+| --- | --- | --- |
+| history 只返回所选条目时，重建头会漏计真实 ACK 字段 | Session.request 返回所选条目及原收到帧，Broker 按原共享头 + 单项计量 | 不改变 wire，也不引入 Context；ACK 阈值回归在修复前失败、修复后通过 |
+| T 已提交、A 尚在途时合法 Heartbeat 可能到达 | 保留连接局部 assignment，核验 durable 提交事实，但不续已完成 lease | 不提前派发下一任务；回归先复现再通过 |
+| 生命周期回调嵌套 receive 会阻塞自身需要的工具/接纳回复 | 回调完成当前转换后返回，由唯一业务循环推进后续条目 | 保持原业务所有权，无通用 RPC 执行框架或自动重试 |
+| 旧记录转换可能损坏摘要或让 unknown 被静默排除 | 读时严格 decoder + 行身份/digest，正常状态写才升级；SQL 处理 NULL | 保留 terminal/stop 摘要及 tool ledger；未知或矛盾记录拒绝且保留 |
+
+**本地整体验收：** Python 3.12 / 3.13 均在本轮新建的真实 PostgreSQL 17 上跑完整 pytest，
+无 skipped；真实 ASGI/Uvicorn/websockets、离线/替换/结果恢复、archive/revision/reopen 包含
+在全量中。Ruff、Mypy、变更范围格式、console、sdist/wheel 与包内资源检查通过。
+恢复演练使用匹配版本 pg_dump/restore，数据库和 HOME 恢复、原 journal 不变及复制 root
+拒绝均通过；其范围仍是隔离 fixture，不宣称生产活跃 Flow 或真实 GitHub effects 已验证。
+架构 HTML 仅更新协议卡片，已实际渲染检查；产品 Web UI 未改。具体命令、日志、结果与限制
+见[第二步集成验收记录](https://ampcode.com/artifacts/b697e409-3521-4003-9151-54edb09779bc)。
+
+### 2026-11-03：第二步故障消融与交付边界
+
+**实验设置：** `.amp/in/run_protocol_ablation.py` 对相同公开合同分别运行原实现与单机制
+进程内故障变体；产品源文件不作消融修改。运行时带独立 PostgreSQL 测试 URL，证据保留于
+`.amp/in/artifacts/ablation-results.json` 和 `ablations/`，不进入产品测试或仓库。
+
+**观察与决定：** L 列出的提前 A、ACK 赋权/循环/写前出队、T/R 丢尾项、query/Heartbeat
+吞帧、帧 ID 关联/整帧重放、移除 reply_to/epoch/stopping、阻塞 execute、随机稳定 ID、wire
+入摘要、去掉 journal/inbox decoder、绕过认证/stop、hash-only B、SQL 无 COALESCE 和宽泛
+close 吞错均被公开合同捕获。query 吞帧和阻塞 execute 表现为有界实验内不能完成，单列为
+死锁型失败，不冒充普通断言。其余变体由断言/异常捕获，原实现对照通过，保留这些机制。
+首次 stop 优先级变体存活，定位为验证缺少 Stop/Registered 顺序断言；补上外部帧顺序后
+对照通过、变体失败。LOW 的拒绝全部旧成功 inbox/journal 变体分别被新增永久回归捕获。
+
+**发布边界：** 本轮使用原 bookmark/PR，code-bearing push 经独立 review gate；精确提交、
+全部 findings 与新 head CI 结果记录在上述验收证据中。critical 阻止发布，其他 findings
+完整报告；findings 驱动的后续返工仍需用户新请求。必须等本次整合 head 的 CI（含 recovery
+与 Images/build）通过才标 ready；本机没有 Docker/podman，不将本地包构建替代容器 smoke。
+未修改 CI、加 skip/兼容别名或放宽 schema。生产版本盘点、维护窗口、镜像发布、合并和部署
+没有执行；wire16 协调升级及 journal5/inbox1 不可直接降级的 M 节边界继续适用。
 
 ## 源码依据（固定实施前基线）
 

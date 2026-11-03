@@ -6,7 +6,6 @@ import asyncio
 import base64
 import hashlib
 import json
-from uuid import uuid4
 
 from pydantic import ValidationError
 
@@ -23,8 +22,14 @@ from app.contracts.conversation import (
 from app.contracts.protocol import (
     ConversationQuery,
     ConversationResult,
+    HistoryArguments,
+    ServerFrame,
     ServerMessage,
+    ToolCall,
+    ToolResult,
     WorkerMessage,
+    call_header,
+    frame_header,
 )
 from app.domain.models import Attempt
 from app.persistence.database import Database
@@ -32,9 +37,9 @@ from app.persistence.flows import FlowStore
 from app.persistence.workers import WorkerStore
 
 
-def conversation_result_key(message: WorkerMessage) -> ReplyKey | None:
+def conversation_result_key(message: ToolCall | ToolResult, epoch: str) -> ReplyKey | None:
     if isinstance(message, ConversationResult):
-        return message.request_id, message.connection_epoch
+        return message.reply_to, epoch
     return None
 
 
@@ -48,7 +53,9 @@ class ConversationBroker:
         self._inflight = 0
 
     async def query(
-        self, worker_id: str, query: HistoryQuery,
+        self,
+        worker_id: str,
+        query: HistoryQuery,
     ) -> HistoryPage:
         session = self._peers.get(worker_id)
         if session is None or session.epoch is None:
@@ -57,13 +64,20 @@ class ConversationBroker:
             raise ConversationFailure("query_busy")
         self._inflight += 1
         try:
-            request = ConversationQuery(request_id=uuid4().hex, connection_epoch=session.epoch,
-                                        **query.model_dump())
-            response = await session.request(request, key=(request.request_id, request.connection_epoch),
-                                             timeout=self.timeout)
+            request = ConversationQuery(
+                **call_header(),
+                method="worker.history",
+                arguments=HistoryArguments(**query.model_dump()),
+            )
+            response, frame = await session.request(
+                ServerFrame(**frame_header(session.epoch), control=None, payload=[request]),
+                call=request,
+                key=(request.message_id, session.epoch),
+                timeout=self.timeout,
+            )
             if not isinstance(response, ConversationResult):
                 raise ConversationFailure("invalid_response")
-            return self._validated(request, response)
+            return self._validated(request, response, frame)
         except SessionBusy as exc:
             raise ConversationFailure("query_busy") from exc
         except TimeoutError as exc:
@@ -73,16 +87,28 @@ class ConversationBroker:
         finally:
             self._inflight -= 1
 
-    def _validated(self, request: ConversationQuery, response: ConversationResult) -> HistoryPage:
+    def _validated(
+        self,
+        request: ConversationQuery,
+        response: ConversationResult,
+        frame: WorkerMessage,
+    ) -> HistoryPage:
         """Correlation alone does not make a worker's history page safe to expose."""
+        if response.reply_to != request.message_id:
+            raise ConversationFailure("invalid_response")
         if response.error is not None:
             raise ConversationFailure(response.error)
         page = response.page
         assert page is not None
-        if (page.session_id != request.session_id or len(page.items) > request.limit
-                or len(response.model_dump_json().encode()) > 512 * 1024
-                or (page.has_more and page.next_cursor is None)
-                or any(not item.id.startswith(f"{page.session_id}:") for item in page.items)):
+        # Other results sharing the delivery do not consume this page's byte allowance.
+        selected = frame.model_copy(update={"payload": [response]})
+        if (
+            page.session_id != request.arguments.session_id
+            or len(page.items) > request.arguments.limit
+            or len(selected.model_dump_json().encode()) > 512 * 1024
+            or (page.has_more and page.next_cursor is None)
+            or any(not item.id.startswith(f"{page.session_id}:") for item in page.items)
+        ):
             raise ConversationFailure("invalid_response")
         try:
             HistoryQuery(session_id=page.session_id, cursor=page.next_cursor)
@@ -94,9 +120,7 @@ class ConversationBroker:
 class ConversationService:
     """Resolve trusted flow/session metadata before sending a worker query."""
 
-    def __init__(
-        self, broker: ConversationBroker, *, database: Database
-    ) -> None:
+    def __init__(self, broker: ConversationBroker, *, database: Database) -> None:
         self.flows = FlowStore(database)
         self.workers = WorkerStore(database)
         self.broker = broker
@@ -125,11 +149,15 @@ class ConversationService:
         if worker_id is None or not attempts:
             if cursor:
                 raise ConversationFailure("cursor_invalid")
-            return ConversationPage(flow_id=flow_id,
-                                    unavailable_reason="no_worker" if worker_id is None else "no_session")
-        fingerprint = hashlib.sha256(json.dumps([flow_id, [
-            [a.id, a.codex_session_id, a.session_generation] for a in attempts
-        ]]).encode()).hexdigest()
+            return ConversationPage(
+                flow_id=flow_id,
+                unavailable_reason="no_worker" if worker_id is None else "no_session",
+            )
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                [flow_id, [[a.id, a.codex_session_id, a.session_generation] for a in attempts]]
+            ).encode()
+        ).hexdigest()
         # The outer cursor binds session order/generation; worker sees only its inner cursor.
         index, inner_cursor = 0, None
         if cursor is not None:
@@ -138,29 +166,40 @@ class ConversationService:
                 if not isinstance(data, list) or len(data) != 3:
                     raise ValueError("invalid flow cursor")
                 scope, index, inner_cursor = data
-                if (scope != fingerprint or type(index) is not int or not 0 <= index < len(attempts)
-                        or (inner_cursor is not None and not isinstance(inner_cursor, str))):
+                if (
+                    scope != fingerprint
+                    or type(index) is not int
+                    or not 0 <= index < len(attempts)
+                    or (inner_cursor is not None and not isinstance(inner_cursor, str))
+                ):
                     raise ValueError("invalid flow cursor scope")
             except (ValueError, TypeError) as exc:
                 raise ConversationFailure("cursor_invalid") from exc
         attempt = attempts[index]
         assert attempt.codex_session_id is not None
         try:
-            query = HistoryQuery(session_id=attempt.codex_session_id, cursor=inner_cursor, limit=limit)
+            query = HistoryQuery(
+                session_id=attempt.codex_session_id, cursor=inner_cursor, limit=limit
+            )
         except ValidationError as exc:
             raise ConversationFailure("cursor_invalid") from exc
         page = await self.broker.query(worker_id, query)
         # Only control attaches trusted Flow/Attempt attribution to worker records.
-        attribution = {"attempt_id": attempt.id, "session_id": attempt.codex_session_id,
-                       "session_generation": attempt.session_generation}
+        attribution = {
+            "attempt_id": attempt.id,
+            "session_id": attempt.codex_session_id,
+            "session_generation": attempt.session_generation,
+        }
         next_index, next_inner = index, page.next_cursor
         has_more = page.has_more
         if not has_more and index + 1 < len(attempts):
             next_index, next_inner, has_more = index + 1, None, True
         # At the final session, retain its EOF cursor so later polls see appended records.
-        next_cursor = base64.urlsafe_b64encode(json.dumps(
-            [fingerprint, next_index, next_inner],
-        ).encode()).decode()
+        next_cursor = base64.urlsafe_b64encode(
+            json.dumps(
+                [fingerprint, next_index, next_inner],
+            ).encode()
+        ).decode()
         return ConversationPage(
             flow_id=flow_id,
             items=[

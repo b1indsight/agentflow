@@ -7,7 +7,7 @@ from threading import Event
 import psycopg
 import pytest
 
-from app.contracts.protocol import PROTOCOL_VERSION, ExecutionStopped
+from app.contracts.protocol import PROTOCOL_VERSION, ExecutionStopped, Failed
 from app.domain.models import FlowState, JobKind, JobState, WorkerStatus
 
 NOW = datetime(2026, 9, 29, tzinfo=UTC)
@@ -25,10 +25,13 @@ def expiring(store, *, started=False):
     if started:
         assert store.workers.start_assignment(job.id, attempt.id, "w", "token", "epoch")
     with store.connection() as connection:
-        connection.execute("UPDATE jobs SET lease_expires_at=%s,recovery_deadline=%s WHERE id=%s",
-                           (NOW, NOW, job.id))
-        connection.execute("UPDATE flow_executions SET recovery_deadline=%s WHERE flow_id=%s",
-                           (NOW, flow.id))
+        connection.execute(
+            "UPDATE jobs SET lease_expires_at=%s,recovery_deadline=%s WHERE id=%s",
+            (NOW, NOW, job.id),
+        )
+        connection.execute(
+            "UPDATE flow_executions SET recovery_deadline=%s WHERE flow_id=%s", (NOW, flow.id)
+        )
     return flow, job
 
 
@@ -57,13 +60,24 @@ def test_sweep_waiting_on_worker_reads_committed_receipt(store, monkeypatch, rec
             assert waiting.wait(5)
             assert not sweep.done()
             if receipt == "result":
-                assert tx.workers.record_assignment_result(job.id, "w", "token", "epoch", {}, "receipt") == "pending"
+                terminal = Failed(job_id=job.id, assignment_token="token", error="executor failed")
+                assert (
+                    tx.workers.record_assignment_result(job.id, "w", "token", "epoch", terminal)
+                    == "pending"
+                )
             else:
                 stop = tx.stops.pending("w")
-                assert tx.stops.confirm("w", ExecutionStopped(
-                    request_id=stop.request_id, flow_id=flow.id, job_id=job.id,
-                    assignment_token="token", connection_epoch="epoch", execution_nonce="executor",
-                ))
+                assert tx.stops.confirm(
+                    "w",
+                    ExecutionStopped(
+                        request_id=stop.request_id,
+                        flow_id=flow.id,
+                        job_id=job.id,
+                        assignment_token="token",
+                        execution_nonce="executor",
+                    ),
+                    "epoch",
+                )
         assert sweep.result(timeout=5) == (0, 0)
     assert store.flows.get_flow(flow.id).state is FlowState.ACTIVE
     if receipt == "result":

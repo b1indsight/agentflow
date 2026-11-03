@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import SecretStr, ValidationError
 
-from app.contracts.protocol import ArchiveResult, ArchiveTask, Succeeded, terminal_digest
+from app.contracts.protocol import ArchiveResult, ArchiveTask, Succeeded
 from app.controler.config import ServerSettings
 from app.controler.events.router import EventRouter
 from app.controler.workflow.service import ControlService
@@ -160,11 +160,10 @@ async def test_merge_retires_review_but_waits_for_running_result(store, recordin
     assert isinstance(task, ArchiveTask)
     assert store.workers.start_assignment(archive.id, task.attempt_id, "worker-a", "archive-token", "epoch-a")
     message = Succeeded(job_id=archive.id, assignment_token="archive-token",
-                        connection_epoch="epoch-a",
                         result=ArchiveResult(**task.model_dump(), cleanup="removed"))
     assert store.workers.record_assignment_result(
         archive.id, "worker-a", "archive-token", "epoch-a",
-        message.model_dump(mode="json"), terminal_digest(message),
+        message,
     ) == "pending"
     assert await subject.results.apply(archive.id) is JobState.DONE
     assert store.flows.get_flow(flow.id).state is FlowState.SUCCEEDED

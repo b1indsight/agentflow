@@ -6,8 +6,8 @@ import hashlib
 import json
 from datetime import datetime
 from enum import StrEnum
-from typing import Annotated, Literal, Self
-from uuid import UUID, uuid5
+from typing import Annotated, Literal, Self, TypedDict
+from uuid import UUID, uuid4, uuid5
 
 from pydantic import (
     BaseModel,
@@ -673,3 +673,48 @@ def stop_receipt_id(receipt: ExecutionStopped) -> MessageId:
 def accept_stop_id(receipt_id: MessageId) -> MessageId:
     """B: request to acknowledge one fenced stop receipt."""
     return _stable_id(["server.accept_stop", receipt_id])
+
+
+class FrameHeader(TypedDict):
+    protocol_version: Literal[16]
+    message_id: MessageId
+    connection_epoch: str | None
+    ack: bool
+    ack_id: MessageId | None
+
+
+def frame_header(connection_epoch: str | None) -> FrameHeader:
+    """Construct fresh delivery metadata without supplying defaults to the wire parser."""
+    return {
+        "protocol_version": PROTOCOL_VERSION,
+        "message_id": uuid4().hex,
+        "connection_epoch": connection_epoch,
+        "ack": False,
+        "ack_id": None,
+    }
+
+
+class CallHeader(TypedDict):
+    type: Literal["tool_call"]
+    message_id: MessageId
+    reply_to: None
+
+
+def call_header(message_id: MessageId | None = None) -> CallHeader:
+    """Construct an invocation header, retaining a stable identity when replaying."""
+    return {"type": "tool_call", "message_id": message_id or uuid4().hex, "reply_to": None}
+
+
+class ResultHeader(TypedDict):
+    type: Literal["tool_result"]
+    message_id: MessageId
+    reply_to: MessageId
+
+
+def result_header(reply_to: MessageId, message_id: MessageId | None = None) -> ResultHeader:
+    """Correlate a result to its invocation rather than the containing frame."""
+    return {
+        "type": "tool_result",
+        "message_id": message_id or uuid4().hex,
+        "reply_to": reply_to,
+    }

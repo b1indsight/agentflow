@@ -8,7 +8,8 @@ import pytest
 from pydantic import ValidationError
 
 from app.communication.gateway import Gateway
-from app.contracts.protocol import InitialTaskResult, Succeeded
+from app.contracts.protocol import InitialTaskResult, Succeeded, terminal_digest
+from app.contracts.receipts import ResultInbox
 from app.contracts.result_models import ResultPending
 from app.controler.config import ServerSettings
 from app.controler.runtime import ServerRuntime
@@ -23,24 +24,41 @@ class Inbox(RecordingStore):
         self.job_records = {}
         self.pages = []
         for i in range(1, count + 1):
-            message = Succeeded(job_id=i, assignment_token="token", connection_epoch="epoch",
-                result=InitialTaskResult(session_id="session", last_message="done", exit_code=0))
-            self.job_records[i] = self.job.model_copy(update={
-                "id": i, "flow_id": i, "state": JobState.RUNNING,
-                "result_payload": message.model_dump(mode="json"),
-            })
+            message = Succeeded(
+                job_id=i,
+                assignment_token="token",
+                result=InitialTaskResult(session_id="session", last_message="done", exit_code=0),
+            )
+            self.job_records[i] = self.job.model_copy(
+                update={
+                    "id": i,
+                    "flow_id": i,
+                    "state": JobState.RUNNING,
+                    "assignment_token": "token",
+                    "result_digest": terminal_digest(message),
+                    "result_payload": ResultInbox(source="worker", terminal=message).model_dump(
+                        mode="json"
+                    ),
+                }
+            )
 
     def get_job(self, job_id):
         return self.job_records.get(job_id)
 
     def unapplied_result_ceiling(self):
-        return max((j.id for j in self.job_records.values() if j.result_applied_at is None), default=0)
+        return max(
+            (j.id for j in self.job_records.values() if j.result_applied_at is None), default=0
+        )
 
     def list_unapplied_results(self, *, after_id=0, through_id=None, limit=64):
         self.pages.append((after_id, limit))
-        return [j for j in self.job_records.values()
-                if j.id > after_id and (through_id is None or j.id <= through_id)
-                and j.result_applied_at is None][:limit]
+        return [
+            j
+            for j in self.job_records.values()
+            if j.id > after_id
+            and (through_id is None or j.id <= through_id)
+            and j.result_applied_at is None
+        ][:limit]
 
 
 async def test_slow_result_does_not_block_another_flow():
@@ -177,10 +195,16 @@ async def test_runtime_sweeps_continue_while_result_recovery_waits():
     runtime._triage_task = None
     runtime.coordinator = SimpleNamespace(triage=AsyncMock())
     runtime.judge = Mock()
-    runtime.settings = SimpleNamespace(worker_sweep_interval=0, result_recovery_concurrency=4, result_recovery_batch_size=64)
-    runtime.reviews = SimpleNamespace(claim_due=Mock(side_effect=lambda: (settled.set() or True)),
-                                     pending_triage=Mock(return_value=[]))
-    runtime.workers = SimpleNamespace(sweep_expired_assignments=Mock(side_effect=lambda: (lease.set() or 0, 0)))
+    runtime.settings = SimpleNamespace(
+        worker_sweep_interval=0, result_recovery_concurrency=4, result_recovery_batch_size=64
+    )
+    runtime.reviews = SimpleNamespace(
+        claim_due=Mock(side_effect=lambda: settled.set() or True),
+        pending_triage=Mock(return_value=[]),
+    )
+    runtime.workers = SimpleNamespace(
+        sweep_expired_assignments=Mock(side_effect=lambda: (lease.set() or 0, 0))
+    )
     runtime.database = SimpleNamespace(close=Mock())
     runtime.access = SimpleNamespace(close=AsyncMock())
     runtime.results = SimpleNamespace(recover_pending_results=AsyncMock(side_effect=recover))
@@ -219,8 +243,11 @@ async def test_shutdown_releases_resources_even_when_connection_cleanup_fails(fa
         if failure == "access":
             raise OSError("access failed")
 
-    runtime.gateway = Mock(spec=Gateway, seal=Mock(side_effect=lambda: order.append("seal")),
-                           close=AsyncMock(side_effect=close_communication))
+    runtime.gateway = Mock(
+        spec=Gateway,
+        seal=Mock(side_effect=lambda: order.append("seal")),
+        close=AsyncMock(side_effect=close_communication),
+    )
     runtime.reconciler = SimpleNamespace(stop=lambda: order.append("sweeps"))
     runtime.access = SimpleNamespace(close=close_access)
     runtime.database = SimpleNamespace(close=lambda: order.append("database"))
@@ -236,8 +263,10 @@ def test_store_pages_only_unapplied_results_in_stable_job_order(store):
         job = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
         jobs.append(job)
         with store.connection() as conn:
-            conn.execute("UPDATE jobs SET state='running', result_received_at=%s WHERE id=%s",
-                         (store.now(), job.id))
+            conn.execute(
+                "UPDATE jobs SET state='running', result_received_at=%s WHERE id=%s",
+                (store.now(), job.id),
+            )
     first = store.jobs.list_unapplied_results(limit=2)
     assert store.jobs.unapplied_result_ceiling() == jobs[-1].id
     assert [j.id for j in store.jobs.list_unapplied_results(through_id=jobs[1].id)] == [
@@ -246,11 +275,16 @@ def test_store_pages_only_unapplied_results_in_stable_job_order(store):
     assert [j.id for j in first] == [j.id for j in jobs[:2]]
     store.jobs.complete_persisted_result(jobs[2].id, JobState.DONE)
     assert [j.id for j in store.jobs.list_unapplied_results(after_id=first[-1].id, limit=2)] == [
-        jobs[3].id, jobs[4].id,
+        jobs[3].id,
+        jobs[4].id,
     ]
 
 
 def test_recovery_limits_are_validated():
     with pytest.raises(ValidationError):
-        ServerSettings(_env_file=None, database_url="postgresql://localhost/test",
-                      worker_tokens={"worker": "secret"}, result_recovery_concurrency=0)
+        ServerSettings(
+            _env_file=None,
+            database_url="postgresql://localhost/test",
+            worker_tokens={"worker": "secret"},
+            result_recovery_concurrency=0,
+        )

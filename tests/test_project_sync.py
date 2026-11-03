@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, PrivateAttr
 from typer.testing import CliRunner
 
 from app import cli
-from app.contracts.protocol import PROTOCOL_VERSION, ArchiveResult, Failed, terminal_digest
+from app.contracts.protocol import PROTOCOL_VERSION, ArchiveResult, Failed
 from app.contracts.result_models import ResultPending
 from app.controler.reconciliation.projects import ProjectSync
 from app.controler.workflow.service import ControlService
@@ -506,10 +506,10 @@ async def test_explicit_job_failure_blocks_but_pending_retry_does_not(store, rem
     await converge(sync)
     assert state(store).desired_status is ProjectStatus.IN_PROGRESS
     # Cleanup can fail while the merged Flow remains active and keeps its worker ownership.
-    message = Failed(job_id=job.id, assignment_token="archive-token", connection_epoch="epoch-a",
+    message = Failed(job_id=job.id, assignment_token="archive-token",
                      error="Cleanup failed")
     assert store.workers.record_assignment_result(job.id, "worker-a", "archive-token", "epoch-a",
-        message.model_dump(mode="json"), terminal_digest(message)) == "pending"
+        message) == "pending"
     assert await subject.results.apply(job.id) is JobState.FAILED
     assert store.flows.get_flow(flow.id).state is FlowState.ACTIVE
     assert store.deliveries.get_delivery(flow.id).state is DeliveryState.MERGED

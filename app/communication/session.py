@@ -15,13 +15,15 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Protocol
 
-from app.contracts.protocol import Message
+from app.contracts.protocol import Message, ToolCall, ToolResult
 
 ReplyKey = tuple[str, str]
 _MAX_PENDING = 4
 _MAX_HANDLERS = 4
 _MAX_BUSY = 4
 _MAX_MESSAGES = 32
+_MAX_ITEMS = 32
+_MAX_ACKS = 32
 _MAX_BYTES = 16 * 1024 * 1024
 logger = logging.getLogger(__name__)
 
@@ -47,12 +49,12 @@ class SessionOverflow(RuntimeError):
 
 
 @dataclass(frozen=True)
-class Responder[Incoming: Message, Outgoing: Message]:
+class Responder[Outgoing: Message]:
     """One query classifier and its business-owned success/busy response builders."""
 
-    matches: Callable[[Incoming], bool]
-    handle: Callable[[Incoming], Awaitable[Outgoing]]
-    busy: Callable[[Incoming], Outgoing]
+    matches: Callable[[ToolCall | ToolResult], bool]
+    handle: Callable[[ToolCall | ToolResult, str], Awaitable[Outgoing]]
+    busy: Callable[[ToolCall | ToolResult, str], Outgoing]
 
 
 class Session[Incoming: Message, Outgoing: Message]:
@@ -61,12 +63,14 @@ class Session[Incoming: Message, Outgoing: Message]:
         transport: Transport,
         *,
         parse: Callable[[str], Incoming],
-        reply_key: Callable[[Incoming], ReplyKey | None] | None = None,
-        responder: Responder[Incoming, Outgoing] | None = None,
+        make_ack: Callable[[str], Outgoing],
+        reply_key: Callable[[ToolCall | ToolResult, str], ReplyKey | None] | None = None,
+        responder: Responder[Outgoing] | None = None,
         epoch: str | None = None,
     ) -> None:
         self._transport = transport
         self._parse = parse
+        self._make_ack = make_ack
         self._reply_key = reply_key
         self._responder = responder
         self._epoch: str | None = None
@@ -75,10 +79,11 @@ class Session[Incoming: Message, Outgoing: Message]:
         self._reader: asyncio.Task[None] | None = None
         self._inbox: deque[tuple[Incoming, int]] = deque()
         self._inbox_bytes = 0
+        self._inbox_items = 0
         self._ready = asyncio.Event()
         self._receiving = False
         self._read_error: Exception | None = None
-        self._pending: dict[ReplyKey, asyncio.Future[Incoming]] = {}
+        self._pending: dict[ReplyKey, asyncio.Future[tuple[ToolCall | ToolResult, Incoming]]] = {}
         self._request_sends: set[asyncio.Task[bool]] = set()
         self._send_lock = asyncio.Lock()
         self._write: asyncio.Task[bool] | None = None
@@ -86,6 +91,9 @@ class Session[Incoming: Message, Outgoing: Message]:
         self._handlers: set[asyncio.Task[None]] = set()
         self._busy: deque[Outgoing] = deque()
         self._busy_sender: asyncio.Task[None] | None = None
+        self._acks: deque[str] = deque()
+        self._ack_ready = asyncio.Event()
+        self._ack_sender: asyncio.Task[None] | None = None
         self._closed = False
         self._close_task: asyncio.Task[None] | None = None
 
@@ -109,6 +117,16 @@ class Session[Incoming: Message, Outgoing: Message]:
         if self._reader is not None:
             raise RuntimeError("session reader already started")
         self._reader = asyncio.create_task(self._read())
+        self._ack_sender = asyncio.create_task(self._send_acks())
+
+    def register_control(self, message: Incoming) -> None:
+        """Record receipt only; the authenticated first Register calls this before start()."""
+        if message.control not in {"register", "registered", "heartbeat"}:
+            return
+        if len(self._acks) >= _MAX_ACKS:
+            raise SessionOverflow("control acknowledgement buffer exceeded")
+        self._acks.append(message.message_id)
+        self._ack_ready.set()
 
     async def receive(self) -> Incoming:
         """Drain parsed business messages in order; cancellation leaves the reader alone."""
@@ -124,6 +142,7 @@ class Session[Incoming: Message, Outgoing: Message]:
                 if self._inbox:
                     message, size = self._inbox.popleft()
                     self._inbox_bytes -= size
+                    self._inbox_items -= len(message.payload)
                     return message
                 if self._read_error is not None:
                     raise self._read_error
@@ -140,11 +159,10 @@ class Session[Incoming: Message, Outgoing: Message]:
         A cancelled lock waiter is harmless. A cancelled/failed write has an unknown
         delivery outcome, so it seals the connection rather than allowing more writes.
         """
-        raw = message.model_dump_json()
         async with self._send_lock:
             if self._closed:
                 raise self._write_error or SessionClosed("session closed")
-            write = asyncio.create_task(self._write_message(raw, is_current))
+            write = asyncio.create_task(self._write_message(message, is_current))
             self._write = write
             try:
                 return await asyncio.shield(write)
@@ -168,33 +186,61 @@ class Session[Incoming: Message, Outgoing: Message]:
             finally:
                 self._write = None
 
-    async def _write_message(self, raw: str, is_current: Callable[[], bool] | None) -> bool:
+    async def _write_message(
+        self, message: Outgoing, is_current: Callable[[], bool] | None
+    ) -> bool:
         if self._closed:
             raise SessionClosed("session closed")
         # No await between this check and transport entry: covers lock AND task scheduling.
         if is_current is not None and not is_current():
             return False
-        await self._transport.send_text(raw)
+        ack_id = None
+        if self._acks and message.control != "register":
+            ack_id = self._acks[0]
+            message = message.model_copy(update={"ack": True, "ack_id": ack_id})
+        await self._transport.send_text(message.model_dump_json())
+        if ack_id is not None and not self._closed:
+            self._acks.popleft()
+            if not self._acks:
+                self._ack_ready.clear()
         return True
 
-    async def request(self, message: Outgoing, *, key: ReplyKey, timeout: float) -> Incoming:
-        """Correlate a fresh temporary key within a total lock/write/reply time budget."""
+    async def request(
+        self, message: Outgoing, *, call: ToolCall, key: ReplyKey, timeout: float
+    ) -> tuple[ToolCall | ToolResult, Incoming]:
+        """Return the selected reply and its original frame within one total time budget.
+
+        The business owner can validate the actual header without counting unrelated items.
+        Correlation still consumes only the selected item, not its containing frame.
+        """
         if self._closed or self._read_error is not None:
             raise SessionClosed("session unavailable") from self._read_error
         if self._reader is None or self._reply_key is None or self._epoch is None:
             raise RuntimeError("requests require a started, epoch-bound reply reader")
-        if key[1] != self._epoch or key in self._pending:
+        if (
+            key != (call.message_id, self._epoch)
+            or call not in message.payload
+            or message.connection_epoch != self._epoch
+            or key in self._pending
+        ):
             raise ValueError("request key is stale or already pending")
         if len(self._pending) >= _MAX_PENDING:
             raise SessionBusy("session request limit exceeded")
-        future: asyncio.Future[Incoming] = asyncio.get_running_loop().create_future()
+        future: asyncio.Future[tuple[ToolCall | ToolResult, Incoming]] = (
+            asyncio.get_running_loop().create_future()
+        )
         self._pending[key] = future
         sending = asyncio.create_task(self.send(message))
         self._request_sends.add(sending)
         try:
             async with asyncio.timeout(timeout):
                 # A failed reader must unblock a query even while send is waiting for the lock.
-                waiting: set[asyncio.Task[bool] | asyncio.Future[Incoming]] = {sending, future}
+                waiting: set[
+                    asyncio.Task[bool] | asyncio.Future[tuple[ToolCall | ToolResult, Incoming]]
+                ] = {
+                    sending,
+                    future,
+                }
                 await asyncio.wait(waiting, return_when=asyncio.FIRST_COMPLETED)
                 if future.done():
                     response = future.result()
@@ -225,29 +271,35 @@ class Session[Incoming: Message, Outgoing: Message]:
             while True:
                 raw = await self._transport.receive_text()
                 message = self._parse(raw)
-                key = self._reply_key(message) if self._reply_key is not None else None
-                if key is not None:
-                    future = self._pending.get(key)
-                    if future is not None and not future.done():
-                        future.set_result(message)
-                    continue
-                if self._responder is not None and self._responder.matches(message):
-                    if len(self._handlers) < _MAX_HANDLERS:
-                        task = asyncio.create_task(self._respond(message))
-                        self._handlers.add(task)
-                        task.add_done_callback(self._handlers.discard)
-                    else:
-                        if len(self._busy) >= _MAX_BUSY:
-                            raise SessionOverflow("query busy response buffer exceeded")
-                        self._busy.append(self._responder.busy(message))
-                        if self._busy_sender is None or self._busy_sender.done():
-                            self._busy_sender = asyncio.create_task(self._send_busy())
-                    continue
+                # Validate capacity for the entire frame before ACK registration or bypass effects.
                 size = len(raw.encode())
-                if len(self._inbox) >= _MAX_MESSAGES or self._inbox_bytes + size > _MAX_BYTES:
+                queries = (
+                    sum(self._responder.matches(item) for item in message.payload)
+                    if self._responder is not None
+                    else 0
+                )
+                busy_needed = max(0, queries - (_MAX_HANDLERS - len(self._handlers)))
+                if (
+                    size + self._inbox_bytes > _MAX_BYTES
+                    or len(self._inbox) >= _MAX_MESSAGES
+                    or self._inbox_items + len(message.payload) > _MAX_ITEMS
+                    or len(self._busy) + busy_needed > _MAX_BUSY
+                ):
                     raise SessionOverflow("execution message buffer exceeded")
+                self.register_control(message)
+                if message.control is None and not message.payload:
+                    continue
+                if message.control is None:
+                    assert message.connection_epoch is not None
+                    remaining = [
+                        item for item in message.payload if not self.dispatch_item(item, message)
+                    ]
+                    if not remaining:
+                        continue
+                    message = message.model_copy(update={"payload": remaining})
                 self._inbox.append((message, size))
                 self._inbox_bytes += size
+                self._inbox_items += len(message.payload)
                 self._ready.set()
         except Exception as exc:  # noqa: BLE001 — receive re-raises after buffered messages drain.
             self._read_error = exc
@@ -261,10 +313,38 @@ class Session[Incoming: Message, Outgoing: Message]:
         finally:
             self._ready.set()
 
-    async def _respond(self, message: Incoming) -> None:
+    def dispatch_item(self, item: ToolCall | ToolResult, frame: Incoming) -> bool:
+        """Consume one temporary reply/query, never the rest of its containing frame.
+
+        The reader invokes this only without new control. A control owner invokes it after
+        authorizing control, so a mixed Registered/history cannot bypass its handshake.
+        """
+        epoch = frame.connection_epoch
+        assert epoch is not None
+        key = self._reply_key(item, epoch) if self._reply_key is not None else None
+        if key is not None:
+            future = self._pending.get(key)
+            if future is not None and not future.done():
+                future.set_result((item, frame))
+            return True
+        if self._responder is None or not self._responder.matches(item):
+            return False
+        if len(self._handlers) < _MAX_HANDLERS:
+            task = asyncio.create_task(self._respond(item, epoch))
+            self._handlers.add(task)
+            task.add_done_callback(self._handlers.discard)
+        else:
+            if len(self._busy) >= _MAX_BUSY:
+                raise SessionOverflow("query busy response buffer exceeded")
+            self._busy.append(self._responder.busy(item, epoch))
+            if self._busy_sender is None or self._busy_sender.done():
+                self._busy_sender = asyncio.create_task(self._send_busy())
+        return True
+
+    async def _respond(self, item: ToolCall | ToolResult, epoch: str) -> None:
         assert self._responder is not None
         try:
-            await self.send(await self._responder.handle(message))
+            await self.send(await self._responder.handle(item, epoch))
         except Exception:
             logger.warning("session query response failed", exc_info=True)
 
@@ -275,6 +355,18 @@ class Session[Incoming: Message, Outgoing: Message]:
                 self._busy.popleft()
         except SessionClosed:
             pass  # send has already sealed the session and failed its pending requests.
+
+    async def _send_acks(self) -> None:
+        try:
+            while True:
+                await self._ack_ready.wait()
+                if self._acks:
+                    # Another queued writer may piggyback this ACK before our lock is acquired.
+                    await self.send(
+                        self._make_ack(self._acks[0]), is_current=lambda: bool(self._acks)
+                    )
+        except SessionClosed:
+            pass  # A failed write already seals communication; receipt ACKs never retry.
 
     def _fail_pending(self, error: SessionClosed) -> None:
         for future in self._pending.values():
@@ -288,13 +380,19 @@ class Session[Incoming: Message, Outgoing: Message]:
             self._fail_pending(self._write_error or SessionClosed("session closed"))
             self._inbox.clear()
             self._inbox_bytes = 0
+            self._inbox_items = 0
             self._busy.clear()
+            self._acks.clear()
             self._ready.set()
             tasks: list[asyncio.Task[None] | asyncio.Task[bool]] = [
                 *self._handlers,
                 *self._request_sends,
             ]
-            tasks.extend(t for t in (self._reader, self._busy_sender, self._write) if t is not None)
+            tasks.extend(
+                t
+                for t in (self._reader, self._busy_sender, self._ack_sender, self._write)
+                if t is not None
+            )
             # A send failure may initiate close inside one of these very tasks.
             tasks = [task for task in tasks if task is not asyncio.current_task()]
             for task in tasks:

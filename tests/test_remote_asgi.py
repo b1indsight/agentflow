@@ -6,7 +6,12 @@ from starlette.testclient import TestClient
 
 from app.communication.gateway import Gateway
 from app.contracts.protocol import (
+    AcceptResult,
+    AcceptResultArguments,
     Assignment,
+    AssignmentArguments,
+    ExecuteResult,
+    ExecutionIdentity,
     ExecutionTask,
     FlowToolErrorKind,
     FlowToolRequest,
@@ -18,7 +23,13 @@ from app.contracts.protocol import (
     ResultAccepted,
     Started,
     Succeeded,
+    accept_result_id,
+    call_header,
+    execution_call_id,
+    frame_header,
     parse_server_message,
+    result_header,
+    terminal_id,
 )
 from app.controler.api import create_app
 from app.controler.config import ServerSettings
@@ -30,6 +41,7 @@ from app.controler.workflow.tools import FlowToolService
 from app.domain.models import Job, JobKind, JobState
 from app.persistence.store import Store
 from app.telemetry.metrics import Metrics
+from tests.wire import worker_frame
 from tests.worker_fakes import result_application
 
 
@@ -38,8 +50,9 @@ class AsgiCoordinator(JobCoordinator):
         task = await self.prepare(job)
         if isinstance(task, JobState):
             return task
-        return Assignment(job_id=job.id, flow_id=job.flow_id, assignment_token=token,
-                          connection_epoch=epoch, task=task)
+        return AssignmentArguments(
+            job_id=job.id, flow_id=job.flow_id, assignment_token=token, task=task
+        )
 
     def __init__(self, attempt_id: int, store: Store) -> None:
         self.attempt_id = attempt_id
@@ -58,9 +71,13 @@ class AsgiCoordinator(JobCoordinator):
             branch="flow/issue-8",
         )
 
-    async def _tool_response(self, request: FlowToolRequest, *, worker_id: str) -> FlowToolResponse:
+    async def _tool_response(
+        self, request: FlowToolRequest, *, worker_id: str, connection_epoch: str
+    ) -> FlowToolResponse:
         return FlowToolResponse(
-            call_id=request.call_id,
+            **result_header(request.message_id),
+            method=request.method,
+            call_id=request.arguments.call_id,
             error="unused",
             error_kind=FlowToolErrorKind.INVALID_REQUEST,
         )
@@ -78,23 +95,30 @@ class AsgiCoordinator(JobCoordinator):
 
 class AsgiRuntime(ServerRuntime):
     def __init__(self, store: Store, attempt_id: int) -> None:
-        self.settings = ServerSettings.model_construct(database_url=store.database_url,
-                                      worker_tokens={"worker-1": SecretStr("worker-secret")},
-                                      github_webhook_secret="unused", webhook_max_body_bytes=1024,
-                                      metrics_token=None, host="test", port=0)
+        self.settings = ServerSettings.model_construct(
+            database_url=store.database_url,
+            worker_tokens={"worker-1": SecretStr("worker-secret")},
+            github_webhook_secret="unused",
+            webhook_max_body_bytes=1024,
+            metrics_token=None,
+            host="test",
+            port=0,
+        )
         self.metrics = Metrics()
         gateway_coordinator = AsgiCoordinator(attempt_id, store)
         self.gateway = Gateway()
         self.worker_tokens = {"worker-1": "worker-secret"}
         self.worker_handler = WorkerHandler(
-            gateway_coordinator, database=store.database,
+            gateway_coordinator,
+            database=store.database,
             peers=self.gateway,
             poll_interval=0.01,
             tools=gateway_coordinator.tools,
             results=gateway_coordinator.results,
         )
         self.conversations = ConversationService(
-            ConversationBroker(self.gateway), database=store.database,
+            ConversationBroker(self.gateway),
+            database=store.database,
         )
 
     async def ready(self) -> bool:
@@ -136,29 +160,69 @@ def test_real_asgi_websocket_completes_a_postgresql_job(store: Store, monkeypatc
             },
         ) as socket,
     ):
-        socket.send_text(Register(worker_id="worker-1").model_dump_json())
-        assert isinstance(parse_server_message(socket.receive_text()), Registered)
-        assignment = parse_server_message(socket.receive_text())
-        assert isinstance(assignment, Assignment)
-
         socket.send_text(
-            Started(
-                job_id=assignment.job_id,
-                assignment_token=assignment.assignment_token,
-                connection_epoch=assignment.connection_epoch,
+            Register(
+                **frame_header(None),
+                control="register",
+                payload=[],
+                worker_id="worker-1",
+                recovery=None,
             ).model_dump_json()
         )
-        socket.send_text(
-            Succeeded(
-                job_id=assignment.job_id,
-                assignment_token=assignment.assignment_token,
-                connection_epoch=assignment.connection_epoch,
-                result=InitialTaskResult(session_id="session-1", last_message="done", exit_code=0),
-            ).model_dump_json()
+        ready = False
+        assignment = None
+        epoch = None
+        while assignment is None:
+            frame = parse_server_message(socket.receive_text())
+            if isinstance(frame, Registered):
+                ready = True
+            for item in frame.payload:
+                assert isinstance(item, Assignment) and ready
+                assignment, epoch = item, frame.connection_epoch
+        assert epoch is not None
+        work = assignment.arguments
+        assert assignment.message_id == execution_call_id(work.job_id, work.assignment_token)
+        started = Started(
+            **call_header(),
+            method="server.execution_started",
+            arguments=ExecutionIdentity(job_id=work.job_id, assignment_token=work.assignment_token),
         )
-        accepted = parse_server_message(socket.receive_text())
-        assert isinstance(accepted, ResultAccepted)
-        assert accepted.state is JobState.DONE
+        socket.send_text(worker_frame(started, epoch=epoch).model_dump_json())
+        terminal = Succeeded(
+            job_id=work.job_id,
+            assignment_token=work.assignment_token,
+            result=InitialTaskResult(session_id="session-1", last_message="done", exit_code=0),
+        )
+        outcome = ExecuteResult(
+            **result_header(assignment.message_id, terminal_id(terminal)),
+            method="worker.execute",
+            job_id=work.job_id,
+            assignment_token=work.assignment_token,
+            result=terminal.result,
+        )
+        acceptance = AcceptResult(
+            **call_header(accept_result_id(outcome.message_id)),
+            method="server.accept_result",
+            arguments=AcceptResultArguments(
+                job_id=work.job_id,
+                assignment_token=work.assignment_token,
+                result_id=outcome.message_id,
+            ),
+        )
+        socket.send_text(worker_frame(outcome, acceptance, epoch=epoch).model_dump_json())
+        while True:
+            frame = parse_server_message(socket.receive_text())
+            if frame.payload:
+                assert len(frame.payload) == 1 and frame.connection_epoch == epoch
+                accepted = frame.payload[0]
+                assert isinstance(accepted, ResultAccepted)
+                assert accepted.reply_to == acceptance.message_id
+                assert accepted.result.state == "done"
+                assert (accepted.result.job_id, accepted.result.assignment_token) == (
+                    work.job_id,
+                    work.assignment_token,
+                )
+                break
 
         # Wait for the peer to finish disconnecting before TestClient cancels its ASGI task.
         socket.close()

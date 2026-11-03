@@ -9,14 +9,13 @@ from datetime import timedelta
 from pluggy import PluginManager
 
 from app.contracts.protocol import (
-    Assignment,
+    AssignmentArguments,
     AssignmentSecret,
     ExecutionTask,
     Failed,
     InitialTask,
     PushSecret,
     RevisionTask,
-    terminal_digest,
 )
 from app.controler.config import ServerSettings
 from app.controler.review.context import build_review_context
@@ -192,8 +191,12 @@ class JobCoordinator:
         return authorized
 
     async def prepare_for_assignment(
-        self, job: Job, worker: str, token: str, epoch: str,
-    ) -> Assignment | PreparationState:
+        self,
+        job: Job,
+        worker: str,
+        token: str,
+        epoch: str,
+    ) -> AssignmentArguments | PreparationState:
         """Build an unstarted assignment, keeping read retries separate from signing failures."""
         prepared = await self._prepare_task(job, worker, token, epoch)
         if isinstance(prepared, JobState):
@@ -214,8 +217,9 @@ class JobCoordinator:
                 return JobState.DONE
             await self.fail(job, "PR merged before task dispatch")
             return JobState.FAILED
-        return Assignment(job_id=job.id, flow_id=job.flow_id, assignment_token=token,
-                          connection_epoch=epoch, task=prepared, secret=secret)
+        return AssignmentArguments(
+            job_id=job.id, flow_id=job.flow_id, assignment_token=token, task=prepared, secret=secret
+        )
 
     async def _prepare_task(
         self, job: Job, worker: str, token: str, epoch: str,
@@ -510,15 +514,9 @@ class JobCoordinator:
                 message = Failed(
                     job_id=job.id,
                     assignment_token=current.assignment_token or "control",
-                    connection_epoch="control",
                     error=reason,
                 )
-                jobs_tx.record_control_result(
-                    job.id,
-                    message.model_dump(mode="json"),
-                    terminal_digest(message),
-                    reason,
-                )
+                jobs_tx.record_control_result(job.id, message, reason)
         await self.results.apply(job.id)
 
     def _delivery(self, flow: Flow) -> FlowDelivery:

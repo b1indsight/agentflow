@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from datetime import timedelta
 
 from psycopg.rows import class_row
 from psycopg.types.json import Jsonb
 
-from app.contracts.protocol import Failed, terminal_digest
+from app.contracts.protocol import Failed, TerminalPayload, terminal_digest
+from app.contracts.receipts import ResultInbox
 from app.domain.models import (
     FlowExecution,
     FlowState,
@@ -444,11 +444,14 @@ class WorkerStore(Repository):
         worker_id: str,
         token: str,
         connection_epoch: str,
-        payload: Mapping[str, object],
-        digest: str,
+        terminal: TerminalPayload,
     ) -> str:
-        """Persist a fenced terminal message before domain-side result application."""
+        """Persist a fenced business outcome before domain-side result application."""
 
+        if terminal.job_id != job_id or terminal.assignment_token != token:
+            raise ValueError("terminal does not match its assignment")
+        inbox = ResultInbox(source="worker", terminal=terminal)
+        digest = terminal_digest(inbox.terminal)
         now = self._db.now()
         with self._db.connection() as connection, connection.transaction():
             self._db._lock_worker(connection, worker_id)
@@ -469,7 +472,7 @@ class WorkerStore(Repository):
                 "UPDATE jobs SET result_payload=%s, result_digest=%s,"
                 " result_received_at=%s, updated_at=%s"
                 " WHERE id=%s AND state=%s",
-                (Jsonb(dict(payload)), digest, now, now, job_id, JobState.RUNNING),
+                (Jsonb(inbox.model_dump(mode="json")), digest, now, now, job_id, JobState.RUNNING),
             )
             return "pending" if stored.rowcount == 1 else "rejected"
 
@@ -570,8 +573,8 @@ class WorkerStore(Repository):
                     (failures, first, None if exhausted else next_at, cause, reason, job_id),
                 )
             if exhausted:
-                message = Failed(job_id=job_id, assignment_token=token, connection_epoch="control", error=reason)
-                JobStore(tx).record_control_result(job_id, message.model_dump(mode="json"), terminal_digest(message), reason)
+                terminal = Failed(job_id=job_id, assignment_token=token, error=reason)
+                JobStore(tx).record_control_result(job_id, terminal, reason)
                 return JobState.FAILED
             if not WorkerStore(tx).requeue_assignment(job_id, worker, token, epoch):
                 raise ValueError("locked preparation could not be requeued")
