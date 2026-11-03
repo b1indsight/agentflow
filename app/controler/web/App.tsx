@@ -365,13 +365,16 @@ function Detail({
     const c = new AbortController();
     setError("");
     void getFlow(id, c.signal)
-      .then(
-        (value) =>
-          !c.signal.aborted &&
-          setFlow((prior) =>
-            prior && prior.state_version > value.state_version ? prior : value,
-          ),
-      )
+      .then((value) => {
+        if (c.signal.aborted) return;
+        setFlow((prior) =>
+          prior && prior.state_version > value.state_version ? prior : value,
+        );
+        // Revalidate changed summaries without resetting unchanged list pages.
+        const summary = all.find((item) => item.id === value.id);
+        if (!summary || summary.state_version < value.state_version)
+          onChanged();
+      })
       .catch((e) => !c.signal.aborted && setError(e.message));
     return () => c.abort();
   }, [id, refresh]);
