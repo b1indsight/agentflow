@@ -7,6 +7,7 @@
 **结构实施基线:** [`b99c8e39`](https://github.com/b1indsight/agentflow/commit/b99c8e39f6d391b5685a91a8d6c428c51810bb11)
 **已推送结构 head:** [`90bc9167`](https://github.com/b1indsight/agentflow/commit/90bc9167ad57016e22c09482ca5665a40f893ba1)，不含本次文档重写
 **现行依据:** 下文是完整的当前方案；历史初案/R1–R6 通过文末固定提交保留，不作为候选方案
+**第二步审批入口:** K 的接入清单与 L 的验收落点；本次只补充并推送计划，不启动实现或测试返工
 
 ## 当前方案（2026-11-03）
 
@@ -28,7 +29,8 @@ J 的实际存储读写、SQL 与恢复接入。整体覆盖全部 19 种原消�
 这是同一 feature 内的两步，不拆成独立发布；第一步是未集成中间态，第二步完成前不能作为
 可运行或可部署版本。不为第一步单独运行增加旧 wire 兼容层、别名或过渡包装。
 
-结构实施使用上列远端基线。本次文档重写未重新 fetch，不声称它仍是远端最新 main。
+结构实施使用上列远端基线。补充第二步计划前已在独立 workspace 执行 `jj git fetch --remote origin`，
+当次核对 `main@origin` 仍为上述基线；迁移开始时须再次 fetch 并检查差异。
 不以根 checkout 或本地 main 为基线；嵌套 workspace 无独立 `.git`，git 可能误读根仓库。
 继续在独立 jj workspace 开展，保留根工作区的 Web 变更及其他线程工作。
 
@@ -444,6 +446,37 @@ worker 结果及已 started 的 control。新旧来源判断须有版本约束�
 停止也使用 `[R,B]`，不另设单向 stop_accepted 备用形状。结果字段按领域严格定型，不引入
 all-optional Result 大模型。消息形状统一不改变领域错误、重试权限、存储或 Future 的所有者。
 
+#### 第二步接入清单（待审批）
+
+本次把第二步具体落实到以下改动面，**表中各行没有先后阶段含义**。以当前 PR 的结构和
+现行 A–M 为合同；以下全部是拟实施项，未接入。实施在同一 bookmark/PR 上继续，不新增
+迁移 feature record，也不为当前红灯临时恢复旧 wire。私有函数位置和类型签名随实现确定。
+
+| 改动位置 / 入口 | 拟接入方式 | 移除或必须保留的边界 |
+| --- | --- | --- |
+| `communication/session.py`：Responder、receive/request、_read、send/close；新增 `communication/dispatch.py`；Gateway 必要类型 | 整帧验证/容量预检，控制与 payload 分开消费；按 F/G 登记 typed 回调、逐项分派、history pending/responder、ACK FIFO/sender；原帧和未消费下标保留 FIFO/字节归属 | 删除 reply/query 命中后吞整帧的路径。只为选定 history 调用建 Session Future；控制 owner 与 reader 不双分派。保留实际写、guard、未知投递封闭连接、限额和 close/join；Gateway 不接管执行状态 [S2][S9] |
+| `worker/transport/client.py`：_run_connection、_serve_assignments、_execute_assignment、_drive_assignment、_handle_stop、_replay_result | 将 incoming/terminal/next_tool 收敛为一个业务消费循环。回调推进当前状态后返回；终态发 `[T,A]`，完成原 shielded stop 后发 `[R,B]`；后续条目驱动接纳 | 删除生命周期回调里等待后续工具/接纳回复的嵌套 receive。Registered 前合法恢复/停止和 Register→resume 离线完成仍可推进；Started 实际写成功后连续 record_started/launch [S3] |
+| `worker/execution/lifecycle.py`：PendingToolCall、resume/wait_terminal、call_tool/finish_tool_call、stop/on_*_accepted | owner 接收 typed 业务参数或调用条目，产出业务结果；PendingToolCall 只存一次调用条目及原 Future；接纳前核对实际 A/B，工具结果匹配原调用 | Task/Future/离线收集/shielded cleanup 保持原 owner。停止复用比较完整业务 fence，不比较帧/回复元数据；不把网络等待移入 owner [S5] |
+| `worker/state/execution.py`：load、resume/replay、complete/record_terminal、record_stopped、acknowledge/_write | 删除内联 ExecutionRecord/_parse_journal，唯一接入 `state/record.py` 的 decode_journal 与 v5 模型；读旧记录只作内存转换，正常写才升级；终态/停止只存业务数据 | 删除给业务数据回填 epoch 的 model_copy。保留 root 校验、锁、私有权限、原子替换/fsync、secret 脱敏、archive/revision 与 ACK 清理条件 [S12] |
+| `controler/workers/transport.py`：serve_worker；`handler.py`：handle、_recover、_stop_worker、_wait_while_idle | 首 Register 在 reader 前认证/全帧校验并登记一次 ACK；Handler 将控制与条目逐项处理，保留连接局部 current。用 registered.recovery 和 reject_recovery 替代旧恢复 wire；按 H/I 接入 T/A、真实 R/B 与 stopping 准入 | T/R 后不提前退出吞掉 A/B；当前 A 回复实际写成功才退当前 assignment；无 A 不回无人请求的接纳结果。保留 Gateway 替换/join、原业务超时与异常映射；transport.close 仍只处理 WebSocketDisconnect [S4][S10] |
+| `controler/workers/conversation.py`：conversation_result_key、query/_validated；worker history 回调 | 关联改为调用条目 ID/reply_to 与原 Session epoch；查询只选择一个条目，返回固定原连接；页大小按所选条目加共享头计算 | 保留进程/连接并发限额、总超时、坏 cursor 的领域错误；迟到历史结果只消费该项，断线不跨连接重放 [S6] |
+| `controler/workflow/coordinator.py`：prepare_for_assignment/fail；`tools.py`：execute/_open_pr 及回复构造 | 准备 typed 执行参数，连接层组装 E/帧；原 epoch 显式传给准备 fence 与 FlowToolService 的两次 DB fence。工具结果以当前调用 ID/method 构造，ledger 只复用领域结果 | 不从新连接取 epoch，不把 epoch 塞回业务参数；保留 call_id/归属/参数冲突、未知工具 INVALID_REQUEST、既有锁和重试规则 [S7][S11] |
+| `persistence/workers.py`：record_assignment_result/defer_preparation；`jobs.py`：record_control_result/lifecycle_job；`stops.py`：StopIntent.message/confirm | typed 持久边界内部生成 inbox v1 与 digest；Coordinator.fail 和准备重试耗尽都写 source=control。StopIntent 提供业务 fence，confirm 接收真实 receipt 与显式原 epoch，接入固定摘要/历史匹配；来源 SQL 按 J 更新 | 删除分开传任意 JSON/摘要、伪造 control epoch、整 wire 求 stop 摘要的调用。保留事务/锁、返回状态、binding/effects 条件；已有匹配摘要不重写，confirmed 分支也核验真实 receipt [S8][S15][S16][S17] |
+| `controler/workflow/results.py`：_check_revision/_prepare/_retired_plan；`lifecycle.py`：prove_reopen | 四个持久读取入口统一 decode_result_inbox，并用行 job/token/digest 核验；live apply 与 recover_pending_results 共用同一业务路径 | 删除 result_payload 经 parse_worker_message 读取；不为缺失摘要补默认值，不重算历史摘要/plan/effect 关联，不吞未知或矛盾记录 [S13][S14] |
+| `scripts/smoke/recovery.py`、受影响 tests/fixtures 与当前协议/运维说明 | 更新旧构造器、收发断言和 fixture；recovery drill 接入业务参数/v5 IO；当前说明对齐 v16 和 M 的协调升级边界 | 不改历史 feature record 伪造实施历史；不删测试、放宽 CI 或扩大 drill 范围，不触碰真实部署/生产数据 [S18] |
+
+**跨模块接入约束：**
+
+- Session/帧保存本次连接元数据；ExecutionState 和持久库保存业务事实。重放时由连接层以
+  新帧/epoch 包装原 E/T/A/C/R/B，不能将整帧缓存到 journal、inbox 或 tool ledger。
+- server 传递收到调用的原 Session/epoch；操作完成时不向 Gateway 重新借连接。WorkerExecution
+  保持原工具 Future；Session 临时 pending 不能接管 Flow 工具、执行终态或停止接纳。
+- 来源 SQL 对新整数 version=1 与受限旧 protocol_version=14/15 分支显式判断并处理 NULL；
+  不把任意“没有 version”的 JSON 都认作旧 control。无法解释的数据交 durable 边界拒绝并保留。
+- 收尾搜索全部旧 wire 构造/导入、业务 connection_epoch 访问、result_payload 解析及内联
+  journal 定义，结合实际调用点逐项消除；Succeeded/Failed/ExecutionStopped 等合法业务类型和
+  专用历史 decoder 仍保留。只修 Mypy 报错不能证明迁移完整。
+
 ### L. 验收与故障消融
 
 本节列出两步验收标准；实际完成项见“第一步交付与验证”。不引用前三阶段或早期规划基线
@@ -484,6 +517,35 @@ query/Heartbeat 整帧 continue；用帧 ID 关联或整帧重放；去掉 reply
 合同捕获，未触发不算证明；若机制可安全删除，先简化或修正验证。
 永久测试只保留用户依赖的收发/恢复/提交边界；类型探针、穷举、消融留 scratch，不一函数一测试。
 
+#### 第二步验收落点（待审批）
+
+以下为拟迁移/补齐的既有测试入口，不声称现有文件已覆盖全部新行为；执行后记录实际用例与
+同一精确 head 的证据。这张表落实上面的合同，不增加实施阶段。
+
+| 合同组 | 优先迁移的现有测试文件（均在 tests/，后缀 .py） |
+| --- | --- |
+| 逐项分派、控制 ACK、批量限额与原连接关闭/替换 | test_protocol、test_communication_session、test_communication_gateway |
+| 单业务循环、Started 实际写、工具 Future 与 shutdown/stop 所有权 | test_worker_client、test_worker_session、test_worker_runtime、test_cancel_drain、test_worker_handler |
+| history pending、同帧页大小、超时/迟到；Flow 两次 epoch fence 与 ledger | test_conversation_worker、test_conversation_proxy、test_conversation_e2e、test_flow_tools、test_flow_tool_ref_retry |
+| T/A 提交窗口、真实 R/B、stopping、Register 恢复竞态 | test_worker_handler、test_stop_protocol、test_recovery_decisions、test_recovery_concurrency、test_result_recovery |
+| durable 读写/摘要/source SQL、后台应用/reopen、archive/revision | test_receipts、test_coordinator、test_preparation_retry、test_store、test_workflow_transactions、test_pr_lifecycle、test_reopen_triage、test_revision_recovery、test_archive_worker_recovery |
+| 真实 socket/进程恢复、备份恢复演练 | test_remote_asgi、test_remote_e2e、test_live_smoke、test_recovery_bundle，以及现有 recovery/Docker smoke |
+
+**纳入第二步审批的 LOW 返工：** 在 test_receipts 补一组参数化公开 decoder 回归，覆盖成功
+Initial/Revision/Archive 的 v14/v15 历史 inbox 与 v4 journal，使用未改动基线黄金样本。
+断言 typed 终态内容、原 digest、输入不变及新格式往返；样本入库前检查无凭据。
+“拒绝全部旧成功回执”的 scratch 消融必须被永久测试捕获。这项仍未实施；批准第二步计划
+时一并授权该已报告缺口的针对性测试返工，本次文档推送不构成返工授权。
+
+除上述完整 pytest（真实 PostgreSQL、0 skipped）、静态检查、构建、真实连接和故障消融外，
+同一集成 head 还须通过现有 Operations recovery 与 Images/Docker smoke：前者使用独立测试库
+和匹配的 pg_dump/pg_restore 工具，后者使用新建的临时 compose project，不能指向已有部署。
+沿用 `.github/workflows/operations.yml` 与 `images.yml` 的运行方式，不在计划中放凭据。
+若 Docker smoke 失败，检查容器日志定位原因，不能把本地 ImportError 当作容器内部证据。
+PR 必需 CI（包括 pytest/Mypy、recovery、Images build）及精确 code-bearing head review gate
+通过才达到整体验收；PR 条件跳过的镜像 publish 不要求执行，不为验收触发镜像发布。
+缺安全测试库、工具或真实链路证据时明确阻塞；咨询、定向绿色和前阶段结果均不能替代。
+
 ### M. 升级、回退与交接授权
 
 第一步的中间 head 不独立合并或部署；部署另需授权。wire16 与 v15 不在线互通，认证后首帧
@@ -499,6 +561,10 @@ server/worker 协调升级且考虑 recovery grace，不新增 timeout 配置。
 K–L 整体验收；获批后不另加逐模块审批。已发布 PR、咨询通过或文档核验均不构成第二步授权。
 若迁移需要改变字段/方法/身份或业务语义、放宽历史格式、增加存储列或框架，先修订方案再审批。
 私有函数位置、测试屏障与类型签名在第二步落实；合并和部署未获授权。
+
+本次“继续在这个 PR 基础上推送下一步 plan”只授权本文补充和发布；K 的调用方迁移、L 的
+测试/fixture/smoke 调整及 LOW 返工一起等待第二步审批。获批后沿用同一 PR 实施与验证，
+不将此次 docs-only 推送、CI 通知或接续线程的只读记录当作实施许可。
 
 [接续线程](https://ampcode.com/threads/T-01a1a199-8e0a-7690-9c0e-3b4a4bf22852)负责第二步，
 目前只读记录，未启动实现。它取得授权及唯一写入权后，核对精确 head、基线、黄金样本、
@@ -600,6 +666,17 @@ C–E/J 结构落地；纯 record 模块与 IO 分离，使结构可验证而不
 未采用草稿把多轮候选混称为“初案决定”的历史归纳；以原文链接保留决策来由。
 本次仅重写文档，不修改实现/测试，不启动迁移；咨询和文档检查不计为产品验证。
 
+### 2026-11-03：细化第二步调用方迁移计划
+
+用户要求在现有 PR 上推送下一步 plan。保留两步划分和已确定的 C–J 合同，在 K 补充实际
+文件/入口、接入方式与旧路径删除清单，在 L 补充测试落点、成功旧回执 LOW 返工及现有
+recovery/Images smoke 的完成条件。一起迁移控制失败写入、后台结果读取和 reopen，避免
+只修收发路径或类型错误后留下旧持久格式解析。改动面按职责列出，不恢复七阶段顺序。
+再次使用本机 Opus 5.5 只读咨询，核验初始化与响应模型、空 tools/MCP、success/exit 0；
+未采纳草稿中仅凭缺少 version 就识别旧来源的 SQL，保持 J 的受限版本和 NULL 合同。
+本次仅文档；实现及 LOW 测试返工待第二步明确批准。既有失败与未执行项仍保留，咨询和
+文档检查不替代产品验收；不改变合并、部署与持久数据处理的授权边界。
+
 ## 源码依据（固定实施前基线）
 
 [S1]: https://github.com/b1indsight/agentflow/blob/b99c8e39f6d391b5685a91a8d6c428c51810bb11/app/contracts/protocol.py#L27-L425
@@ -617,3 +694,6 @@ C–E/J 结构落地；纯 record 模块与 IO 分离，使结构可验证而不
 [S13]: https://github.com/b1indsight/agentflow/blob/b99c8e39f6d391b5685a91a8d6c428c51810bb11/app/controler/workflow/results.py#L227-L488
 [S14]: https://github.com/b1indsight/agentflow/blob/b99c8e39f6d391b5685a91a8d6c428c51810bb11/app/controler/workflow/lifecycle.py#L137-L175
 [S15]: https://github.com/b1indsight/agentflow/blob/b99c8e39f6d391b5685a91a8d6c428c51810bb11/app/persistence/jobs.py#L47-L55
+[S16]: https://github.com/b1indsight/agentflow/blob/b99c8e39f6d391b5685a91a8d6c428c51810bb11/app/persistence/workers.py#L441-L577
+[S17]: https://github.com/b1indsight/agentflow/blob/b99c8e39f6d391b5685a91a8d6c428c51810bb11/app/persistence/jobs.py#L234-L248
+[S18]: https://github.com/b1indsight/agentflow/blob/b99c8e39f6d391b5685a91a8d6c428c51810bb11/scripts/smoke/recovery.py#L137-L157
