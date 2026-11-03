@@ -498,6 +498,110 @@ test("archived column distinguishes closed unmerged PRs from completed archives"
   });
 });
 
+test("detail reads synchronize sidebar and board without reloading the page", async ({
+  page,
+}) => {
+  // A worker can fail a Flow after the board loaded, before its detail is opened.
+  let current: FlowDetail = {
+    ...flow,
+    phase: "running",
+    reason: "正在执行",
+    next_condition: "等待执行结果",
+    sources: [],
+  };
+  const other = { ...flow, id: 43, title: "仍在执行的 Flow" };
+  await page.route("**/api/flows?**", (route) =>
+    route.fulfill({
+      json: {
+        items: [current, other].filter(
+          (item) =>
+            item.phase ===
+            new URL(route.request().url()).searchParams.get("phase"),
+        ),
+        counts: {
+          queued: 0,
+          running: current.phase === "running" ? 2 : 1,
+          review: current.phase === "review" ? 1 : 0,
+          blocked: current.phase === "blocked" ? 1 : 0,
+          done: 0,
+        },
+        next_cursor: null,
+        has_more: false,
+      },
+    }),
+  );
+  await page.route("**/api/flows/42", (route) =>
+    route.fulfill({ json: current }),
+  );
+  await page.goto("/#board");
+  await expect(page.locator(".column.phase-running .card")).toHaveCount(2);
+  current = {
+    ...current,
+    lifecycle: "failed",
+    phase: "blocked",
+    action: "failed",
+    state_version: 3,
+    reason: "Flow 已失败",
+  };
+  await page.locator('.card[data-flow="42"]').click();
+  await expect(page.locator(".detail-head .badge")).toHaveText("failed");
+  await expect(page.locator(".rail-group.phase-running .count")).toHaveText(
+    "1",
+  );
+  await expect(page.locator(".rail-group.phase-blocked .flow-tab")).toHaveText(
+    flow.title,
+  );
+  await expect(page.locator(".rail-group.phase-blocked .count")).toHaveText(
+    "1",
+  );
+  await page.getByRole("tab", { name: "概览", exact: true }).click();
+  await expect(page.locator(".task-facts")).toContainText("failed / 受阻");
+  await page.screenshot({
+    path: "../../../.amp/in/artifacts/detail-board-sync-failed.png",
+  });
+
+  current = {
+    ...current,
+    lifecycle: "active",
+    phase: "review",
+    action: "awaiting_review",
+    state_version: 4,
+    reason: "PR 已打开，当前没有待执行任务",
+    next_condition: "等待审核或人工合并",
+  };
+  await page.getByRole("button", { name: "刷新当前视图" }).click();
+  await expect(page.locator(".detail-head .badge")).toHaveText(
+    "awaiting_review",
+  );
+  await expect(page.locator(".rail-group.phase-blocked .flow-tab")).toHaveCount(
+    0,
+  );
+  await expect(page.locator(".rail-group.phase-blocked .count")).toHaveText(
+    "0",
+  );
+  await expect(page.locator(".rail-group.phase-review .count")).toHaveText("1");
+
+  // Same-phase updates must also replace cached card titles.
+  const updatedTitle = "更新后的任务标题";
+  current = { ...current, title: updatedTitle, state_version: 5 };
+  await page.getByRole("button", { name: "刷新当前视图" }).click();
+  await expect(page.locator(".detail-head h1")).toHaveText(updatedTitle);
+  await expect(page.locator(".rail-group.phase-review .flow-tab")).toHaveText(
+    updatedTitle,
+  );
+  await page.screenshot({
+    path: "../../../.amp/in/artifacts/detail-board-sync-review.png",
+  });
+  await page.getByRole("button", { name: "返回看板", exact: true }).click();
+  await expect(page.locator(".column.phase-review .card")).toContainText(
+    updatedTitle,
+  );
+  await expect(page.locator(".column.phase-running .card")).toHaveText(
+    /仍在执行的 Flow/,
+  );
+  await expect(page.locator(".column.phase-blocked .card")).toHaveCount(0);
+});
+
 test("retry disables both commands until commit, then refreshes detail and board", async ({
   page,
 }) => {
