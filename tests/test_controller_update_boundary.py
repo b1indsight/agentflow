@@ -8,10 +8,11 @@ import pytest
 
 from app.communication.gateway import Gateway
 from app.contracts.protocol import (
-    Assignment,
+    AssignmentArguments,
     FlowToolResponse,
     InitialTask,
     InitialTaskResult,
+    result_header,
 )
 from app.controler.workers.handler import WorkerHandler
 from app.controler.workers.transport import serve_worker
@@ -56,11 +57,10 @@ def scenario(store):
     started = asyncio.Event()
 
     async def prepare(job, worker, token, epoch):
-        return Assignment(
+        return AssignmentArguments(
             job_id=job.id,
             flow_id=flow.id,
             assignment_token=token,
-            connection_epoch=epoch,
             task=InitialTask(
                 flow_id=flow.id,
                 attempt_id=attempt.id,
@@ -76,9 +76,12 @@ def scenario(store):
         assert store.jobs.complete_persisted_result(job_id, JobState.DONE)
         return JobState.DONE
 
-    async def tool(message, *, worker_id):
+    async def tool(message, *, worker_id, connection_epoch):
         return FlowToolResponse(
-            call_id=message.call_id, result=PreparedDelivery(head_sha="abc", delivery_version=1)
+            **result_header(message.message_id),
+            method=message.method,
+            call_id=message.arguments.call_id,
+            result=PreparedDelivery(head_sha="abc", delivery_version=1),
         )
 
     coordinator = Mock(

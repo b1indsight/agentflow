@@ -2,24 +2,24 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter, ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from app.contracts.conversation import HistoryPage, HistoryQuery
 from app.contracts.protocol import (
     ArchiveTask,
-    Assignment,
+    AssignmentArguments,
     ExecutionResult,
     ExecutionStopped,
     Failed,
     RecoveryDescriptor,
     RevisionExecutionRecord,
-    StopAccepted,
+    StopFence,
     Succeeded,
+    TerminalPayload,
     terminal_digest,
 )
 from app.domain.models import JobState
@@ -27,73 +27,13 @@ from app.worker.execution.workspaces import WorkspaceBinding
 from app.worker.state.amp_history import AmpHistory
 from app.worker.state.files import write_private_record
 from app.worker.state.history import CodexHistory
+from app.worker.state.record import ExecutionRecord, decode_journal
 
-TerminalMessage = Succeeded | Failed
-_TERMINAL: TypeAdapter[TerminalMessage] = TypeAdapter(TerminalMessage)
-_JOURNAL_JSON: TypeAdapter[dict[str, JsonValue]] = TypeAdapter(dict[str, JsonValue])
+_TERMINAL: TypeAdapter[TerminalPayload] = TypeAdapter(TerminalPayload)
 
 
 class ExecutionStateError(RuntimeError):
     """The persisted assignment journal cannot be safely interpreted."""
-
-
-class ExecutionRecord(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    version: Literal[4] = 4
-    job_id: int
-    flow_id: int
-    assignment_token: str
-    state: Literal["received", "started", "succeeded", "failed"]
-    result_digest: str | None = None
-    terminal: TerminalMessage | None = None
-    revision_phase: Literal["resume", "fallback"] | None = None
-    fallback_consumed: bool = False
-    invocations: list[RevisionExecutionRecord] = []
-    archive_task: ArchiveTask | None = None
-    root_identity: tuple[str, int, int]
-    acknowledged: bool = False
-    cleanup_verified: bool = False
-    workspace: WorkspaceBinding | None = None
-    execution_nonce: str | None = None
-    stopped: ExecutionStopped | None = None
-
-
-def _parse_journal(payload: str) -> ExecutionRecord:
-    """Read v4 journals with v14 receipts without widening the wire protocol or writing files.
-
-    Only receipt version tags changed in v15. Preserve their content and ownership; the next
-    normal state write under the runtime's root lock will persist the current representation.
-    """
-    try:
-        return ExecutionRecord.model_validate_json(payload)
-    except ValidationError:
-        pass
-
-    data = _JOURNAL_JSON.validate_json(payload)
-    if data.get("version") != 4:
-        raise ValueError("unsupported worker journal version")
-    for name in ("terminal", "stopped"):
-        message = data.get(name)
-        if message is None:
-            continue
-        if not isinstance(message, dict) or message.get("protocol_version") != 14:
-            raise ValueError("unsupported or mixed journal message versions")
-        message["protocol_version"] = 15
-
-    record = ExecutionRecord.model_validate_json(json.dumps(data))
-    if record.terminal is not None and (
-        (record.terminal.job_id, record.terminal.assignment_token)
-        != (record.job_id, record.assignment_token)
-        or terminal_digest(record.terminal) != record.result_digest
-    ):
-        raise ValueError("previous journal result does not match its assignment or digest")
-    if record.stopped is not None and (
-        record.stopped.job_id, record.stopped.flow_id,
-        record.stopped.assignment_token, record.stopped.execution_nonce,
-    ) != (record.job_id, record.flow_id, record.assignment_token, record.execution_nonce):
-        raise ValueError("previous journal stop receipt does not match its execution")
-    return record
 
 
 class ExecutionState:
@@ -101,21 +41,25 @@ class ExecutionState:
 
     def __init__(self, worker_root: Path) -> None:
         self.path = worker_root / "assignment-journal.json"
-        self.assignment: Assignment | None = None
+        self.assignment: AssignmentArguments | None = None
         self._history = CodexHistory()
         self._amp_history = AmpHistory()
 
     def read(self, query: HistoryQuery) -> HistoryPage:
         """Read the session selected by control, independent of the active assignment."""
-        return (self._amp_history if query.session_id.startswith("T-") else self._history).query(query)
+        return (self._amp_history if query.session_id.startswith("T-") else self._history).query(
+            query
+        )
 
     def recovery(self, *, executor_active: bool) -> RecoveryDescriptor | None:
         record = self.load()
         if record is None:
             return None
         return RecoveryDescriptor(
-            job_id=record.job_id, assignment_token=record.assignment_token,
-            state=record.state, result_digest=record.result_digest,
+            job_id=record.job_id,
+            assignment_token=record.assignment_token,
+            state=record.state,
+            result_digest=record.result_digest,
             stop_request_id=record.stopped.request_id if record.stopped else None,
             archive_resume=record.archive_task is not None and record.state == "started",
             executor_active=record.state == "started" and executor_active,
@@ -126,59 +70,67 @@ class ExecutionState:
         if (record.job_id, record.assignment_token) != (job_id, token):
             raise ExecutionStateError("recovery response does not match the worker session")
 
-    def resume(self, connection_epoch: str, *, executor_active: bool) -> Assignment:
+    def resume(self, *, executor_active: bool) -> AssignmentArguments:
         """Rebind a live execution; only archive cleanup can resume after process loss."""
         record = self._required()
         assignment = self.assignment
         if assignment is not None and (
-            assignment.job_id, assignment.flow_id, assignment.assignment_token
+            assignment.job_id,
+            assignment.flow_id,
+            assignment.assignment_token,
         ) != (record.job_id, record.flow_id, record.assignment_token):
             raise ExecutionStateError("recovery response does not match the worker session")
-        # A live task may finish after Register but before ResumeAssignment. Its durable
+        # A live task may finish after Register but before the resume decision. Its durable
         # result can rebind only with the original in-memory assignment, never after restart.
-        if (assignment is not None and record.terminal is not None
-                and record.state in {"succeeded", "failed"}
-                and not record.acknowledged and record.stopped is None
-                and (record.terminal.job_id, record.terminal.assignment_token)
-                == (record.job_id, record.assignment_token)):
-            self.assignment = assignment.model_copy(update={"connection_epoch": connection_epoch})
-            return self.assignment
+        if (
+            assignment is not None
+            and record.terminal is not None
+            and record.state in {"succeeded", "failed"}
+            and not record.acknowledged
+            and record.stopped is None
+            and (record.terminal.job_id, record.terminal.assignment_token)
+            == (record.job_id, record.assignment_token)
+        ):
+            return assignment
         if self.assignment is None or not executor_active:
             if record.state != "started" or record.archive_task is None:
                 raise ExecutionStateError("serve resumed an assignment without a live executor")
-            self.assignment = Assignment(
-                job_id=record.job_id, flow_id=record.flow_id,
-                assignment_token=record.assignment_token, connection_epoch=connection_epoch,
+            self.assignment = AssignmentArguments(
+                job_id=record.job_id,
+                flow_id=record.flow_id,
+                assignment_token=record.assignment_token,
                 task=record.archive_task,
             )
-        self.assignment = self.assignment.model_copy(update={"connection_epoch": connection_epoch})
         return self.assignment
 
-    def replay(self, connection_epoch: str) -> TerminalMessage:
+    def replay(self) -> TerminalPayload:
         record = self._required()
         if record.terminal is None:
             raise ExecutionStateError("serve requested a result missing from the session")
-        return record.terminal.model_copy(update={"connection_epoch": connection_epoch})
+        return record.terminal
 
-    def complete(self, outcome: ExecutionResult | Exception) -> TerminalMessage:
+    def complete(self, outcome: ExecutionResult | Exception) -> TerminalPayload:
         """Redact the ephemeral push capability before persisting any execution outcome."""
         assignment = self.assignment
         if assignment is None:
             raise ExecutionStateError("active assignment is missing")
         if isinstance(outcome, Exception):
-            terminal: TerminalMessage = Failed(
-                job_id=assignment.job_id, assignment_token=assignment.assignment_token,
-                connection_epoch=assignment.connection_epoch, error=str(outcome),
+            terminal: TerminalPayload = Failed(
+                job_id=assignment.job_id,
+                assignment_token=assignment.assignment_token,
+                error=str(outcome),
             )
         else:
             terminal = Succeeded(
-                job_id=assignment.job_id, assignment_token=assignment.assignment_token,
-                connection_epoch=assignment.connection_epoch, result=outcome,
+                job_id=assignment.job_id,
+                assignment_token=assignment.assignment_token,
+                result=outcome,
             )
         if assignment.secret is not None:
             terminal = type(terminal).model_validate_json(
                 terminal.model_dump_json().replace(
-                    assignment.secret.push.token.get_secret_value(), "[REDACTED]",
+                    assignment.secret.push.token.get_secret_value(),
+                    "[REDACTED]",
                 )
             )
         self.record_terminal(terminal)
@@ -188,21 +140,24 @@ class ExecutionState:
         if not self.path.exists():
             return None
         try:
-            record = _parse_journal(self.path.read_text())
+            return decode_journal(self.path.read_text(), root_identity=self._root_identity())
         except (OSError, ValidationError, ValueError) as exc:
             raise ExecutionStateError(f"invalid worker journal at {self.path}") from exc
-        if record.root_identity != self._root_identity():
-            raise ExecutionStateError("worker journal belongs to another worker root")
-        return record
 
-    def record_received(self, assignment: Assignment) -> ExecutionRecord:
+    def record_received(self, assignment: AssignmentArguments) -> ExecutionRecord:
         previous = self.load()
         archive = assignment.task if isinstance(assignment.task, ArchiveTask) else None
-        if archive is not None and (previous is None or previous.flow_id != archive.flow_id
-                                    or not (previous.acknowledged or previous.state == "received")):
+        if archive is not None and (
+            previous is None
+            or previous.flow_id != archive.flow_id
+            or not (previous.acknowledged or previous.state == "received")
+        ):
             raise ExecutionStateError("archive requires the original Flow's worker journal")
-        if (previous is not None and previous.archive_task is not None
-                and (previous.state not in {"received", "failed"} or previous.archive_task != archive)):
+        if (
+            previous is not None
+            and previous.archive_task is not None
+            and (previous.state not in {"received", "failed"} or previous.archive_task != archive)
+        ):
             raise ExecutionStateError("cannot replace unacknowledged archive cleanup evidence")
         record = ExecutionRecord(
             job_id=assignment.job_id,
@@ -212,11 +167,16 @@ class ExecutionState:
             execution_nonce=uuid4().hex,
             archive_task=archive,
             root_identity=self._root_identity(),
-            workspace=(previous.workspace if previous and previous.flow_id == assignment.flow_id
-                       and (previous.stopped is None or archive is not None)
-                       else None),
-            cleanup_verified=bool(previous and previous.flow_id == assignment.flow_id
-                                  and previous.cleanup_verified),
+            workspace=(
+                previous.workspace
+                if previous
+                and previous.flow_id == assignment.flow_id
+                and (previous.stopped is None or archive is not None)
+                else None
+            ),
+            cleanup_verified=bool(
+                previous and previous.flow_id == assignment.flow_id and previous.cleanup_verified
+            ),
         )
         self._write(record)
         self.assignment = assignment
@@ -225,16 +185,24 @@ class ExecutionState:
     def record_stopped(self, receipt: ExecutionStopped) -> None:
         record = self._required()
         if (record.job_id, record.flow_id, record.assignment_token, record.execution_nonce) != (
-                receipt.job_id, receipt.flow_id, receipt.assignment_token, receipt.execution_nonce):
+            receipt.job_id,
+            receipt.flow_id,
+            receipt.assignment_token,
+            receipt.execution_nonce,
+        ):
             raise ExecutionStateError("stop receipt does not match owned execution")
         record.stopped = receipt
         record.acknowledged = False
         self._write(record)
 
-    def acknowledge_stop(self, accepted: StopAccepted) -> None:
+    def acknowledge_stop(self, accepted: StopFence) -> None:
         record = self._required()
-        if record.stopped is None or any(getattr(record.stopped, field) != getattr(accepted, field)
-                                        for field in ('request_id', 'flow_id', 'job_id', 'assignment_token')):
+        if record.stopped is None or (
+            record.stopped.request_id,
+            record.stopped.flow_id,
+            record.stopped.job_id,
+            record.stopped.assignment_token,
+        ) != (accepted.request_id, accepted.flow_id, accepted.job_id, accepted.assignment_token):
             raise ExecutionStateError("stop acknowledgement does not match receipt")
         record.acknowledged = True
         self._write(record)
@@ -243,8 +211,11 @@ class ExecutionState:
     def bind_workspace(self, binding: WorkspaceBinding) -> None:
         """Fix the allocation fence before coding; the same Flow may not silently move."""
         record = self._required()
-        if (record.state != "started" or binding.flow_id != record.flow_id
-                or (record.workspace is not None and record.workspace != binding)):
+        if (
+            record.state != "started"
+            or binding.flow_id != record.flow_id
+            or (record.workspace is not None and record.workspace != binding)
+        ):
             raise ExecutionStateError("workspace does not match the journal allocation")
         record.workspace = binding
         self._write(record)
@@ -252,8 +223,12 @@ class ExecutionState:
     def verify_cleanup(self, task: ArchiveTask) -> WorkspaceBinding:
         """Persist the exact release fence; the pool separately proves filesystem safety."""
         record = self._required()
-        if (record.state != "started" or record.archive_task != task or record.workspace is None
-                or (record.workspace.flow_id, record.workspace.repository) != (task.flow_id, task.repo)):
+        if (
+            record.state != "started"
+            or record.archive_task != task
+            or record.workspace is None
+            or (record.workspace.flow_id, record.workspace.repository) != (task.flow_id, task.repo)
+        ):
             raise ExecutionStateError("archive cleanup does not match the journal assignment")
         if not record.cleanup_verified:
             record.cleanup_verified = True
@@ -285,7 +260,9 @@ class ExecutionState:
         record.fallback_consumed = phase == "fallback"
         self._write(record)
 
-    def finish_invocation(self, invocation: RevisionExecutionRecord) -> list[RevisionExecutionRecord]:
+    def finish_invocation(
+        self, invocation: RevisionExecutionRecord
+    ) -> list[RevisionExecutionRecord]:
         record = self._required()
         if record.state != "started" or record.revision_phase != invocation.mode:
             raise ExecutionStateError("invocation does not match durable revision phase")
@@ -293,7 +270,7 @@ class ExecutionState:
         self._write(record)
         return record.invocations
 
-    def record_terminal(self, terminal: TerminalMessage) -> ExecutionRecord:
+    def record_terminal(self, terminal: TerminalPayload) -> ExecutionRecord:
         record = self._required()
         if record.state not in ("started", "succeeded", "failed"):
             raise ExecutionStateError(f"cannot finish journal in {record.state} state")
@@ -333,7 +310,9 @@ class ExecutionState:
             self.assignment = None
             return
         if record.archive_task is not None:
-            raise ExecutionStateError("archive recovery rejected; retain cleanup evidence for reconciliation")
+            raise ExecutionStateError(
+                "archive recovery rejected; retain cleanup evidence for reconciliation"
+            )
         self.path.unlink()
         self.assignment = None
 

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.communication.gateway import Gateway
-from app.contracts.protocol import PROTOCOL_VERSION, InitialTaskResult, Succeeded, terminal_digest
+from app.contracts.protocol import PROTOCOL_VERSION, InitialTaskResult, Succeeded
 from app.contracts.result_models import ResultPending
 from app.controler.events.router import EventRouter
 from app.controler.reconciliation.pull_requests import Reconciler
@@ -130,10 +130,11 @@ async def test_closed_missing_journal_preserves_late_result_and_reopen(store, pe
     assert store.workers.get_flow_execution(flow.id).released_at is None
 
     assert store.workers.resume_assignment(job.id, "worker-a", "token", "restart")
-    message = Succeeded(job_id=job.id, assignment_token="token", connection_epoch="restart",
-                        result=verified_result(task))
-    assert store.workers.record_assignment_result(job.id, "worker-a", "token", "restart",
-        message.model_dump(mode="json"), terminal_digest(message)) == "pending"
+    message = Succeeded(job_id=job.id, assignment_token="token", result=verified_result(task))
+    assert (
+        store.workers.record_assignment_result(job.id, "worker-a", "token", "restart", message)
+        == "pending"
+    )
     assert await subject.results.apply(job.id) is JobState.DONE
     remote = GitHub(flow, "open", head_branch=task.branch, head_sha=task.expected_head_sha)
     async def reopened(pr):
@@ -430,9 +431,11 @@ async def test_initial_close_before_final_commit_keeps_verified_identity_and_can
     result = InitialTaskResult(session_id="session-1", last_message="done", exit_code=0,
         vcs_backend=VcsKind.GIT, branch=delivery.branch, commit_sha="abc123", remote_sha="abc123",
         pushed=True, open_pr_call_id="initial", delivery_receipt=prepared)
-    terminal = Succeeded(job_id=job.id, assignment_token="token", connection_epoch="epoch", result=result)
-    assert store.workers.record_assignment_result(job.id, "worker", "token", "epoch",
-        terminal.model_dump(mode="json"), terminal_digest(terminal)) == "pending"
+    terminal = Succeeded(job_id=job.id, assignment_token="token", result=result)
+    assert (
+        store.workers.record_assignment_result(job.id, "worker", "token", "epoch", terminal)
+        == "pending"
+    )
     github = RecordingGitHub()
     github.pull_request = PullRequest(number=17, state="closed", head_branch=delivery.branch,
                                               head_sha="abc123", base_branch="trunk")

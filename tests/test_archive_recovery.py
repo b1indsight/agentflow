@@ -13,7 +13,6 @@ from app.contracts.protocol import (
     Failed,
     RecoveryDescriptor,
     Succeeded,
-    terminal_digest,
 )
 from app.controler.workers.handler import ProtocolViolation, WorkerHandler
 from app.controler.workflow.service import ControlService
@@ -25,7 +24,7 @@ from tests.test_merge import route_merge
 from tests.test_result_recovery import (
     completed_open_initial as completed_open_initial,  # noqa: PLC0414
 )
-from tests.test_worker_handler import ScriptedSocket
+from tests.test_worker_handler import ScriptedSocket, register_frame
 from tests.test_workflow_transactions import accepted_coding
 
 
@@ -44,9 +43,8 @@ async def ready_archive(store, *, start=True):
 
 
 def receive(store, job, result, *, worker="worker-a", token="archive-token", epoch="epoch-a"):
-    message = Succeeded(job_id=job.id, assignment_token=token, connection_epoch=epoch, result=result)
-    return store.workers.record_assignment_result(job.id, worker, token, epoch,
-                                          message.model_dump(mode="json"), terminal_digest(message))
+    message = Succeeded(job_id=job.id, assignment_token=token, result=result)
+    return store.workers.record_assignment_result(job.id, worker, token, epoch, message)
 
 
 async def test_archive_release_rolls_back_and_replays_atomically(store, monkeypatch, recording_resources):
@@ -97,9 +95,14 @@ async def test_archive_after_initial_retry_cannot_adopt_a_released_binding(store
     )
     service.cancel(flow)
     stop = store.stops.pending('worker-a')
-    assert store.stops.confirm('worker-a', ExecutionStopped(
-        **stop.message('epoch').model_dump(exclude={'type'}), execution_nonce='owned',
-    ))
+    assert store.stops.confirm(
+        "worker-a",
+        ExecutionStopped(
+            **stop.fence().model_dump(),
+            execution_nonce="owned",
+        ),
+        "epoch",
+    )
     service.retry(flow)
     await route_merge(store, flow)
     assert store.flows.get_flow(flow.id).state is FlowState.ACTIVE
@@ -114,10 +117,10 @@ async def test_archive_after_initial_retry_cannot_adopt_a_released_binding(store
 
 async def test_failed_archive_retry_keeps_attempt_and_original_worker(store, recording_resources):
     flow, job, task, subject = await ready_archive(store)
-    message = Failed(job_id=job.id, assignment_token="archive-token", connection_epoch="epoch-a",
+    message = Failed(job_id=job.id, assignment_token="archive-token",
                      error="Permission denied")
     assert store.workers.record_assignment_result(job.id, "worker-a", "archive-token", "epoch-a",
-                                          message.model_dump(mode="json"), terminal_digest(message)) == "pending"
+                                          message) == "pending"
     assert await subject.results.apply(job.id) is JobState.FAILED
     assert store.flows.get_flow(flow.id).state is FlowState.ACTIVE
     assert store.workers.get_flow_execution(flow.id).released_at is None
@@ -174,10 +177,10 @@ async def test_merged_coding_process_without_exit_proof_cannot_unlock_archive(st
         if journal == "missing":
             await handler._reject_missing_journal("worker-a", "restart", old.id)
         else:
-            await handler._recover(ScriptedSocket(), "worker-a", "restart", RecoveryDescriptor(
+            await handler._recover(ScriptedSocket(), "worker-a", "restart", register_frame("worker-a", RecoveryDescriptor(
                 job_id=old.id, assignment_token=old.assignment_token,
                 state="started", executor_active=False,
-            ))
+            )))
     assert store.jobs.get_job(old.id).state is JobState.RUNNING
     assert store.jobs.get_job(old.id).result_received_at is None
     assert store.workers.get_flow_execution(flow.id).released_at is None

@@ -67,9 +67,11 @@ async def test_http_query_while_worker_or_control_busy_and_idle(tmp_path, phase,
             await block("preparation")
             return await super().prepare_for_assignment(job, worker, token, epoch)
 
-        async def _tool_response(self, request, *, worker_id):
+        async def _tool_response(self, request, *, worker_id, connection_epoch):
             await block("tool")
-            return await super()._tool_response(request, worker_id=worker_id)
+            return await super()._tool_response(
+                request, worker_id=worker_id, connection_epoch=connection_epoch
+            )
 
         async def _commit_result(self, job_id):
             await block("result")

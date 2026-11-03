@@ -15,8 +15,10 @@ from app.communication.session import Session, SessionOverflow, Transport
 from app.contracts.protocol import (
     ProtocolError,
     Register,
+    ServerFrame,
     ServerMessage,
     WorkerMessage,
+    frame_header,
     parse_worker_message,
 )
 from app.controler.workers.conversation import conversation_result_key
@@ -62,6 +64,15 @@ def _authenticated_identity(
     return identity if hmac.compare_digest(authorization, expected_authorization) else None
 
 
+def control_ack(message_id: str) -> ServerFrame:
+    """Build a receipt-only frame; it grants no connection or assignment authority."""
+    return ServerFrame(
+        **(frame_header(None) | {"ack": True, "ack_id": message_id}),
+        control=None,
+        payload=[],
+    )
+
+
 async def serve_worker(
     socket: WorkerSocket,
     *,
@@ -87,8 +98,10 @@ async def serve_worker(
                 _SocketTransport(socket),
                 parse=parse_worker_message,
                 reply_key=conversation_result_key,
+                make_ack=control_ack,
                 epoch=uuid4().hex,
             )
+            session.register_control(register)
             session.start()
         except (WebSocketDisconnect, ConnectionError, TimeoutError) as exc:
             logger.bind(
@@ -102,6 +115,9 @@ async def serve_worker(
             logger.warning("worker protocol violation: {}", reason)
             try:
                 error = ProtocolError(
+                    **frame_header(None),
+                    control="error",
+                    payload=[],
                     code="invalid_message" if invalid else "protocol_violation",
                     detail=reason,
                 )

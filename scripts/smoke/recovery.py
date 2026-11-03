@@ -25,7 +25,7 @@ from pydantic import SecretStr
 
 from app.contracts.protocol import (
     PROTOCOL_VERSION,
-    Assignment,
+    AssignmentArguments,
     AssignmentSecret,
     InitialTask,
     PushSecret,
@@ -106,10 +106,14 @@ def verify_bundle(path: Path) -> dict:
 def drill(work: Path, postgres_bin: Path, revision: str) -> dict:
     """Create a synthetic active assignment, cold-copy, restore and prove blocking."""
     base = os.environ.get('FLOWTOOL_TEST_DATABASE_URL', '')
-    options = conninfo_to_dict(base)
-    if (options.get('host') not in {'127.0.0.1', '::1', 'localhost'}
-            or not options.get('dbname') or options.get('service') or options.get('options')
-            or options.get('hostaddr')):
+    requested = conninfo_to_dict(base)
+    if (
+        requested.get("host") not in {"127.0.0.1", "::1", "localhost"}
+        or not requested.get("dbname")
+        or requested.get("service")
+        or requested.get("options")
+        or requested.get("hostaddr")
+    ):
         raise ValueError('explicit loopback test database URL without overrides required')
     # Fail before creating data when the operator supplied unavailable/mismatched tools.
     versions = {}
@@ -147,9 +151,9 @@ def drill(work: Path, postgres_bin: Path, revision: str) -> dict:
             raise RuntimeError('fixture start failed')
         store.webhooks.receive('fixture-delivery', 'ping', {}, 'a' * 64)
         journal = ExecutionState(root)
-        journal.record_received(Assignment(
+        journal.record_received(AssignmentArguments(
             job_id=job.id, flow_id=flow.id, assignment_token='fixture-token',
-            connection_epoch='fixture-epoch', secret=AssignmentSecret(push=PushSecret(
+            secret=AssignmentSecret(push=PushSecret(
                 token=SecretStr('fixture-not-a-credential'), repository=flow.repo,
                 expires_at=datetime.now(UTC))),
             task=InitialTask(flow_id=flow.id, attempt_id=attempt.id, repo=flow.repo,
@@ -208,7 +212,7 @@ def drill(work: Path, postgres_bin: Path, revision: str) -> dict:
     try:
         ExecutionState(destination / 'root').load()
     except ExecutionStateError as exc:
-        if str(exc) != 'worker journal belongs to another worker root':
+        if str(exc.__cause__) != "worker journal belongs to another worker root":
             raise
     else:
         raise RuntimeError('copied root incorrectly accepted execution identity')

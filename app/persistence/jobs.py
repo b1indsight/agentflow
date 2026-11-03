@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-
 from psycopg.rows import class_row
 from psycopg.types.json import Jsonb
 
-from app.contracts.protocol import ArchiveTask
+from app.contracts.protocol import ArchiveTask, Failed, terminal_digest
+from app.contracts.receipts import ResultInbox
 from app.domain.models import (
     Job,
     JobKind,
@@ -47,12 +46,23 @@ class JobStore(Repository):
     def lifecycle_job(self, flow_id: int) -> Job | None:
         """Latest coding execution, excluding jobs cancelled before they could run."""
         with self._db.connection() as connection:
-            return connection.cursor(row_factory=class_row(Job)).execute(
-                "SELECT * FROM jobs WHERE flow_id=%s AND kind IN ('initial','revision')"
-                " AND (state='running' OR started_at IS NOT NULL OR result_received_at IS NOT NULL)"
-                " AND NOT (started_at IS NULL AND COALESCE(result_payload->>'connection_epoch','')='control')"
-                " ORDER BY id DESC LIMIT 1", (flow_id,),
-            ).fetchone()
+            return (
+                connection.cursor(row_factory=class_row(Job))
+                .execute(
+                    "SELECT * FROM jobs WHERE flow_id=%s AND kind IN ('initial','revision')"
+                    " AND (state='running' OR started_at IS NOT NULL OR result_received_at IS NOT NULL)"
+                    " AND NOT (started_at IS NULL AND COALESCE("
+                    " (jsonb_typeof(result_payload->'version')='number'"
+                    " AND result_payload->>'version'='1' AND result_payload->>'source'='control')"
+                    " OR (NOT (result_payload ? 'version')"
+                    " AND jsonb_typeof(result_payload->'protocol_version')='number'"
+                    " AND result_payload->>'protocol_version' IN ('14','15')"
+                    " AND result_payload->>'connection_epoch'='control'),false))"
+                    " ORDER BY id DESC LIMIT 1",
+                    (flow_id,),
+                )
+                .fetchone()
+            )
 
     def reopen_blocked(self, flow_id: int) -> bool:
         """A timeout cannot prove that an executor exited or a dispatched effect settled."""
@@ -234,17 +244,33 @@ class JobStore(Repository):
     def record_control_result(
         self,
         job_id: int,
-        payload: Mapping[str, object],
-        digest: str,
+        terminal: Failed,
         reason: str,
     ) -> None:
         """Record a control-generated terminal outcome while holding the workflow/job locks."""
+        job = self.get_job(job_id)
+        if (
+            job is None
+            or terminal.job_id != job_id
+            or terminal.assignment_token
+            != (job.assignment_token if job.assignment_token is not None else "control")
+        ):
+            raise ValueError("control terminal does not match its assignment")
+        inbox = ResultInbox(source="control", terminal=terminal)
+        digest = terminal_digest(inbox.terminal)
         with self._db.connection() as connection:
             connection.execute(
                 "UPDATE jobs SET result_payload=%s,result_digest=%s,result_received_at=%s,"
                 " last_error=%s WHERE id=%s AND state=%s"
                 " AND result_received_at IS NULL",
-                (Jsonb(dict(payload)), digest, self._db.now(), reason, job_id, JobState.RUNNING),
+                (
+                    Jsonb(inbox.model_dump(mode="json")),
+                    digest,
+                    self._db.now(),
+                    reason,
+                    job_id,
+                    JobState.RUNNING,
+                ),
             )
 
     def set_job_error(self, job_id: int, reason: str) -> None:

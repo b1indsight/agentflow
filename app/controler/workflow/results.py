@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from typing import Literal
 
 from loguru import logger
@@ -15,8 +14,8 @@ from app.contracts.protocol import (
     InitialTaskResult,
     RevisionTaskResult,
     Succeeded,
-    parse_worker_message,
 )
+from app.contracts.receipts import decode_result_inbox
 from app.contracts.result_models import (
     CommentEffect,
     Effect,
@@ -235,7 +234,14 @@ class ResultApplication:
         delivery = self.deliveries.get_delivery(flow.id)
         if delivery is not None and delivery.supersedes(job.kind):
             return None
-        message = parse_worker_message(json.dumps(job.result_payload))
+        if job.result_digest is None:
+            raise ValueError("result inbox is missing its digest")
+        message = decode_result_inbox(
+            job.result_payload,
+            job_id=job.id,
+            assignment_token=job.assignment_token,
+            result_digest=job.result_digest,
+        ).terminal
         if not isinstance(message, Succeeded) or not isinstance(message.result, RevisionTaskResult):
             return None
         result = message.result
@@ -269,8 +275,14 @@ class ResultApplication:
         jobs_tx = self.jobs.using(tx)
         reviews_tx = self.reviews.using(tx)
         workers_tx = self.workers.using(tx)
-        message = parse_worker_message(json.dumps(job.result_payload))
-        assert job.result_digest is not None
+        if job.result_payload is None or job.result_digest is None:
+            raise ValueError("result application requires a persisted terminal and digest")
+        message = decode_result_inbox(
+            job.result_payload,
+            job_id=job.id,
+            assignment_token=job.assignment_token,
+            result_digest=job.result_digest,
+        ).terminal
         attempt = flows_tx.get_current_attempt(flow)
         base = ResultPlan(
             job_id=job.id,
@@ -466,7 +478,14 @@ class ResultApplication:
     @staticmethod
     def _retired_plan(job: Job, attempt_id: int | None) -> ResultPlan:
         """A merge supersedes the result's domain intent, but not its immutable execution record."""
-        message = parse_worker_message(json.dumps(job.result_payload))
+        if job.result_payload is None or job.result_digest is None:
+            raise ValueError("retired result requires a persisted terminal and digest")
+        message = decode_result_inbox(
+            job.result_payload,
+            job_id=job.id,
+            assignment_token=job.assignment_token,
+            result_digest=job.result_digest,
+        ).terminal
         run = None
         state = JobState.DONE
         reason = "PR closed or merged; late result retained without applying coding/review changes"
@@ -483,7 +502,6 @@ class ResultApplication:
                     state = JobState.FAILED
         else:
             raise TypeError("persisted inbox message is not terminal")
-        assert job.result_digest is not None
         return ResultPlan(job_id=job.id, flow_id=job.flow_id, digest=job.result_digest,
                           attempt_id=attempt_id, state=state, error=reason, run=run)
 

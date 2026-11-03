@@ -7,7 +7,7 @@ from threading import Barrier
 
 import pytest
 
-from app.contracts.protocol import PROTOCOL_VERSION, RevisionTask, Succeeded, terminal_digest
+from app.contracts.protocol import PROTOCOL_VERSION, RevisionTask, Succeeded
 from app.controler.workflow.service import ControlService
 from app.domain.models import (
     DeliveryState,
@@ -183,10 +183,13 @@ def accepted_coding(store: Store, *, receive: bool = True, started: bool = True)
     result = verified_result(task)
     if receive:
         assert started
-        message = Succeeded(job_id=job.id, assignment_token=job.assignment_token,
-                            connection_epoch="epoch-a", result=result)
-        assert store.workers.record_assignment_result(job.id, "worker-a", job.assignment_token, "epoch-a",
-            message.model_dump(mode="json"), terminal_digest(message)) == "pending"
+        message = Succeeded(job_id=job.id, assignment_token=job.assignment_token, result=result)
+        assert (
+            store.workers.record_assignment_result(
+                job.id, "worker-a", job.assignment_token, "epoch-a", message
+            )
+            == "pending"
+        )
     return store.jobs.get_job(job.id), result
 
 

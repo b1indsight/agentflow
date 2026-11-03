@@ -115,10 +115,10 @@ def test_repeated_snapshots_do_not_count_execution_receipt_twice(store, postgres
     job = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
     store.workers.worker_connected('w', PROTOCOL_VERSION, 'epoch')
     assert store.workers.assign_job('w', 'token', 'epoch')
-    result = Succeeded(job_id=job.id, assignment_token='token', connection_epoch='epoch',
+    result = Succeeded(job_id=job.id, assignment_token='token',
                        result=InitialTaskResult(session_id='session', last_message='', exit_code=1))
     assert store.workers.record_assignment_result(job.id, 'w', 'token', 'epoch',
-                                          result.model_dump(mode='json'), 'digest') == 'pending'
+                                          result) == 'pending'
     with store.connection() as connection:
         connection.execute("UPDATE jobs SET started_at=result_received_at-interval '3 seconds' WHERE id=%s", (job.id,))
     metrics = Metrics()

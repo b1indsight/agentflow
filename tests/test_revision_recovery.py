@@ -7,6 +7,7 @@ from tests.test_review_batches import settle
 from datetime import UTC, datetime
 
 import pytest
+from psycopg.types.json import Jsonb
 
 from app.contracts.protocol import (
     PROTOCOL_VERSION,
@@ -15,7 +16,9 @@ from app.contracts.protocol import (
     Succeeded,
     terminal_digest,
 )
+from app.contracts.receipts import decode_result_inbox
 from app.contracts.result_models import EffectState, ResultPending
+from app.controler.workflow.lifecycle import prove_reopen
 from app.controler.workflow.service import ControlService
 from app.domain.models import (
     AddressedComment,
@@ -91,9 +94,8 @@ async def pending_revision(store, revision_resources):
 
 
 def accept(store, job, result):
-    terminal = Succeeded(job_id=job.id, assignment_token="token", connection_epoch="epoch", result=result)
-    return store.workers.record_assignment_result(job.id, "worker-a", "token", "epoch",
-                                           terminal.model_dump(mode="json"), terminal_digest(terminal))
+    terminal = Succeeded(job_id=job.id, assignment_token="token", result=result)
+    return store.workers.record_assignment_result(job.id, "worker-a", "token", "epoch", terminal)
 
 
 def test_started_and_revision_budget_commit_atomically(store, pending_revision):
@@ -162,7 +164,13 @@ async def test_result_commit_failure_replays_facts_without_new_execution(store, 
     assert persisted.result_digest == accepted.result_digest
     assert persisted.result_received_at == accepted.result_received_at
     assert persisted.result_applied_at >= persisted.result_received_at
-    terminal = Succeeded.model_validate(persisted.result_payload)
+    terminal = decode_result_inbox(
+        persisted.result_payload,
+        job_id=job.id,
+        assignment_token=persisted.assignment_token,
+        result_digest=persisted.result_digest,
+    ).terminal
+    assert isinstance(terminal, Succeeded)
     assert terminal.result.model_dump(mode="json") == result.model_dump(mode="json")
     assert terminal_digest(terminal) == persisted.result_digest
 
@@ -400,3 +408,107 @@ async def test_uncertain_revision_notification_cannot_be_explicitly_resent(
             database=store.database,
         ).retry(flow)
     assert store.jobs.get_job(job.id).result_applied_at is None
+
+
+@pytest.mark.parametrize("version", [1, 14, 15])
+@pytest.mark.parametrize("retired", [False, True])
+async def test_durable_revision_recovery_and_reopen_keep_original_inbox(
+    store, pending_revision, version, retired
+):
+    # Both ordinary recovery and a closed PR's late result must read old stored wire receipts,
+    # while retaining the exact payload/digest that existing plans and effects reference.
+    flow, job, task, github, subject = pending_revision
+    assert store.workers.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
+    subject.mark_started(job, task, "worker-a")
+    terminal = Succeeded(job_id=job.id, assignment_token="token", result=verified_result(task))
+    assert (
+        store.workers.record_assignment_result(job.id, "worker-a", "token", "epoch", terminal)
+        == "pending"
+    )
+    if version != 1:
+        payload = {
+            "protocol_version": version,
+            "connection_epoch": "epoch",
+            **terminal.model_dump(mode="json"),
+        }
+        with store.connection() as connection:
+            connection.execute(
+                "UPDATE jobs SET result_payload=%s WHERE id=%s", (Jsonb(payload), job.id)
+            )
+    if retired:
+        delivery = store.deliveries.get_delivery(flow.id)
+        delivery.state = DeliveryState.CLOSED
+        store.deliveries.update_delivery(delivery)
+    accepted = store.jobs.get_job(job.id)
+    await subject.results.recover_pending_results()
+    persisted = store.jobs.get_job(job.id)
+    assert persisted.state is JobState.DONE and persisted.result_applied_at is not None
+    repo = github.installation(flow.installation_id).repository(flow.repo)
+    remote = await repo.fetch_pull_request(task.pr_number)
+    proof, error = await prove_reopen(
+        repo,
+        flow,
+        store.deliveries.get_delivery(flow.id),
+        remote,
+        persisted,
+        deliveries=store.deliveries,
+        flows=store.flows,
+    )
+    assert error is None and proof is not None and proof.head_sha == task.expected_head_sha
+    assert persisted.result_payload == accepted.result_payload
+    assert persisted.result_digest == accepted.result_digest == terminal_digest(terminal)
+    assert store.results.get_plan(job.id).digest == accepted.result_digest
+
+
+@pytest.mark.parametrize("reader", ["revision", "prepare", "retired", "reopen"])
+@pytest.mark.parametrize("corruption", ["missing_digest", "job", "token", "version"])
+async def test_durable_result_readers_reject_corrupt_evidence_without_rewriting(
+    store,
+    pending_revision,
+    reader,
+    corruption,
+):
+    # Never use a result under a different row's authority or repair a missing digest on read.
+    flow, job, task, github, subject = pending_revision
+    assert accept(store, job, verified_result(task)) == "pending"
+    persisted = store.jobs.get_job(job.id)
+    payload = persisted.result_payload
+    digest = persisted.result_digest
+    if corruption == "missing_digest":
+        digest = None
+    elif corruption == "version":
+        payload["version"] = 2
+    else:
+        payload["terminal"]["job_id" if corruption == "job" else "assignment_token"] = (
+            job.id + 1 if corruption == "job" else "wrong"
+        )
+    with store.connection() as connection:
+        connection.execute(
+            "UPDATE jobs SET result_payload=%s,result_digest=%s WHERE id=%s",
+            (Jsonb(payload), digest, job.id),
+        )
+    persisted = store.jobs.get_job(job.id)
+    with pytest.raises(ValueError):
+        if reader == "revision":
+            await subject.results._check_revision(persisted)
+        elif reader == "prepare":
+            with store.transaction() as tx:
+                locked = tx.lock_workflow(flow.id)
+                subject.results._prepare(tx.database, locked, persisted)
+        elif reader == "retired":
+            subject.results._retired_plan(persisted, task.attempt_id)
+        else:
+            repo = github.installation(flow.installation_id).repository(flow.repo)
+            remote = await repo.fetch_pull_request(task.pr_number)
+            await prove_reopen(
+                repo,
+                flow,
+                store.deliveries.get_delivery(flow.id),
+                remote,
+                persisted.model_copy(update={"result_applied_at": store.now()}),
+                deliveries=store.deliveries,
+                flows=store.flows,
+            )
+    after = store.jobs.get_job(job.id)
+    assert after.result_payload == payload and after.result_digest == digest
+    assert after.result_applied_at is None and store.results.get_plan(job.id) is None

@@ -9,7 +9,7 @@ import pytest
 from app.contracts.protocol import (
     ArchiveResult,
     ArchiveTask,
-    Assignment,
+    AssignmentArguments,
     Failed,
     InitialTaskResult,
     Succeeded,
@@ -24,11 +24,19 @@ from tests.test_worker_executor import RecordingAgent, RecordingToolCaller
 from tests.test_worker_session import _assignment
 
 
-def archive_assignment(job_id: int = 10) -> Assignment:
-    return Assignment(
-        job_id=job_id, flow_id=3, assignment_token=f"token-{job_id}", connection_epoch="epoch",
-        task=ArchiveTask(flow_id=3, attempt_id=7, repo="owner/repo", worker_id="worker-a",
-                         repo_identity="worker-a:owner/repo", delivery_version=2),
+def archive_assignment(job_id: int = 10) -> AssignmentArguments:
+    return AssignmentArguments(
+        job_id=job_id,
+        flow_id=3,
+        assignment_token=f"token-{job_id}",
+        task=ArchiveTask(
+            flow_id=3,
+            attempt_id=7,
+            repo="owner/repo",
+            worker_id="worker-a",
+            repo_identity="worker-a:owner/repo",
+            delivery_version=2,
+        ),
     )
 
 
@@ -48,7 +56,7 @@ async def workspace(tmp_path: Path, *, start=True, overflow=False):
     journal.record_started()
     journal.bind_workspace(binding)
     journal.record_terminal(Succeeded(
-        job_id=5, assignment_token="assignment-1", connection_epoch="epoch-1",
+        job_id=5, assignment_token="assignment-1",
         result=InitialTaskResult(session_id="session", last_message="done", exit_code=0),
     ))
     journal.acknowledge(5, JobState.DONE)
@@ -111,7 +119,7 @@ async def test_worktree_removal_crash_keeps_proof_through_ack_and_explicit_retry
         await executor.execute(assignment.task, tool_caller=RecordingToolCaller())
     assert not repo.exists() and journal.load().cleanup_verified
     journal.record_terminal(Failed(job_id=10, assignment_token="token-10",
-                                   connection_epoch="epoch", error="release commit failed"))
+                                   error="release commit failed"))
     journal.acknowledge(10, JobState.FAILED)
     retry = archive_assignment(11)
     journal.record_received(retry)

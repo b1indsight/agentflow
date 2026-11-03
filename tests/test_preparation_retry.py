@@ -6,7 +6,8 @@ from datetime import timedelta
 import pytest
 
 from app.communication.gateway import Gateway
-from app.contracts.protocol import PROTOCOL_VERSION, Assignment, RevisionTask
+from app.contracts.protocol import PROTOCOL_VERSION, AssignmentArguments, Failed, RevisionTask
+from app.contracts.receipts import decode_result_inbox
 from app.controler.workers.handler import WorkerHandler
 from app.controler.workflow.lifecycle import pause_delivery
 from app.controler.workflow.preparation import PreparationStale
@@ -117,8 +118,13 @@ async def test_transient_read_requeues_and_recovers_without_a_revision_cycle(sto
     monkeypatch.setattr(Repository, "fetch_ref", original)
     retry = store.workers.assign_job("worker-a", "retry", "epoch")
     prepared = await gateway(store, subject)._prepare_assignment(retry, "worker-a", "retry", "epoch")
-    assert isinstance(prepared, Assignment) and isinstance(prepared.task, RevisionTask) and prepared.secret is not None
+    assert (
+        isinstance(prepared, AssignmentArguments)
+        and isinstance(prepared.task, RevisionTask)
+        and prepared.secret is not None
+    )
     assert prepared.secret.push.repository == prepared.task.repo
+    assert "connection_epoch" not in prepared.model_dump()
     assert store.jobs.get_job(job.id).prepare_failures == 0
     assert store.jobs.get_job(job.id).prepare_first_failed_at is None
 
@@ -162,6 +168,14 @@ async def test_failure_or_time_budget_stops_without_early_retry(store, pending_r
     assert "budget" in failed.last_error or "window" in failed.last_error
     assert "get_ref" in failed.prepare_last_error and "rate_limited" in failed.prepare_last_error
     assert failed.prepare_last_error in failed.last_error
+    inbox = decode_result_inbox(
+        failed.result_payload,
+        job_id=job.id,
+        assignment_token=failed.assignment_token,
+        result_digest=failed.result_digest,
+    )
+    assert inbox.source == "control" and isinstance(inbox.terminal, Failed)
+    assert failed.result_payload == inbox.model_dump(mode="json")
 
 
 @pytest.mark.parametrize("change", ["epoch", "token"])

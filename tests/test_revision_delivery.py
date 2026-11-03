@@ -13,7 +13,7 @@ import pytest
 from pydantic import SecretStr, ValidationError
 
 from app.contracts.protocol import (
-    Assignment,
+    AssignmentArguments,
     AssignmentSecret,
     PushSecret,
     RevisionExecutionRecord,
@@ -99,8 +99,9 @@ async def revision_workspace(tmp_path):
         expires_at=datetime.now(UTC) + timedelta(minutes=30),
     ))
     journal = ExecutionState(root)
-    journal.record_received(Assignment(job_id=1, flow_id=1, assignment_token="token",
-                                      connection_epoch="epoch", task=task, secret=secret))
+    journal.record_received(
+        AssignmentArguments(job_id=1, flow_id=1, assignment_token="token", task=task, secret=secret)
+    )
     journal.record_started()
     return root, target, task, secret
 

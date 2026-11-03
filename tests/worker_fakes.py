@@ -25,7 +25,7 @@ class NoPendingStops(StopStore):
     def authorize_dispatch(self, job_id: int, worker_id: str, token: str, epoch: str) -> bool:
         return True
 
-    def confirm(self, worker_id: str, receipt: ExecutionStopped) -> bool:
+    def confirm(self, worker_id: str, receipt: ExecutionStopped, connection_epoch: str) -> bool:
         raise AssertionError("no stop was requested")
 
 

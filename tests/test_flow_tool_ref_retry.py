@@ -46,10 +46,20 @@ async def test_open_pr_ref_recovers_within_the_same_tool_call(tmp_path, monkeypa
         cast(GitHubApp, github),
         database=cast(Store, memory).database,
     )
-    invocation = request().model_copy(update={"commit_sha": "a" * 40, "remote_sha": "a" * 40})
-    response = await service.execute(invocation, worker_id="worker-a")
+    invocation = request()
+    invocation = invocation.model_copy(
+        update={
+            "arguments": invocation.arguments.model_copy(
+                update={"commit_sha": "a" * 40, "remote_sha": "a" * 40},
+            )
+        }
+    )
+    response = await service.execute(invocation, worker_id="worker-a", connection_epoch="epoch-a")
     assert response.error_kind is None and response.result is not None
     assert len(calls) == 2 and len(sleeps) == 1
     # Retrying the tool delivery after recovery uses its existing receipt, with no new network read.
-    assert await service.execute(invocation, worker_id="worker-a") == response
+    replay = await service.execute(invocation, worker_id="worker-a", connection_epoch="epoch-a")
+    assert replay.result == response.result
+    assert replay.reply_to == response.reply_to == invocation.message_id
+    assert replay.message_id != response.message_id
     assert len(calls) == 2

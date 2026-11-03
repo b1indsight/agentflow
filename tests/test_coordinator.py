@@ -4,18 +4,23 @@ from contextlib import contextmanager
 from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Any, cast
+from uuid import uuid4
 
 import pytest
+from psycopg.types.json import Jsonb
 from pydantic import SecretStr
 
 from app.contracts.protocol import (
     ExecutionResult,
+    Failed,
+    FlowToolArguments,
     FlowToolRequest,
     InitialTask,
     InitialTaskResult,
     Succeeded,
     terminal_digest,
 )
+from app.contracts.receipts import ResultInbox
 from app.controler.config import ServerSettings
 from app.controler.workflow.coordinator import JobCoordinator
 from app.controler.workflow.effects import ResultEffects
@@ -118,14 +123,17 @@ class MemoryStore(RepositoryViews):
         return job.model_copy(deep=True) if job else None
 
     def accept(self, job: Job, result: ExecutionResult) -> None:
-        message = Succeeded(job_id=job.id, assignment_token="test-token",
-                            connection_epoch="test-epoch", result=result)
         current = self.job_records.setdefault(job.id, job.model_copy(deep=True))
+        if current.assignment_token is None:
+            current.assignment_token = "test-token"
+        message = Succeeded(job_id=job.id, assignment_token=current.assignment_token, result=result)
         digest = terminal_digest(message)
         if current.result_digest is not None:
             assert current.result_digest == digest
             return
-        current.result_payload = message.model_dump(mode="json")
+        current.result_payload = ResultInbox(source="worker", terminal=message).model_dump(
+            mode="json"
+        )
         current.result_digest = digest
         current.result_received_at = self.now()
 
@@ -136,9 +144,14 @@ class MemoryStore(RepositoryViews):
         job.state, job.result_applied_at = state, self.now()
         return True
 
-    def record_control_result(self, job_id: int, payload: dict, digest: str, reason: str) -> None:
+    def record_control_result(self, job_id: int, terminal: Failed, reason: str) -> None:
         job = self.job_records[job_id]
-        job.result_payload, job.result_digest = payload, digest
+        assert terminal.job_id == job_id
+        assert terminal.assignment_token == (job.assignment_token or "control")
+        job.result_payload = ResultInbox(source="control", terminal=terminal).model_dump(
+            mode="json"
+        )
+        job.result_digest = terminal_digest(terminal)
         job.result_received_at, job.last_error = self.now(), reason
 
     def set_job_error(self, job_id: int, reason: str) -> None:
@@ -304,20 +317,25 @@ async def test_initial_job_crosses_worker_boundary_and_opens_pr() -> None:
     subject.mark_started(job, task, "worker-1")
     tool = await subject.tools.execute(
         FlowToolRequest(
-            job_id=job.id,
-            flow_id=store.flow.id,
-            attempt_id=task.attempt_id,
-            assignment_token="token-1",
-            connection_epoch="epoch-1",
-            call_id="call-1",
-            name="flow.open_pr",
-            arguments={"title": "Implement", "body": "done"},
-            vcs_backend=VcsKind.GIT,
-            branch="flow/1",
-            commit_sha="abc123",
-            remote_sha="abc123",
+            message_id=uuid4().hex,
+            type="tool_call",
+            reply_to=None,
+            method="flow.open_pr",
+            arguments=FlowToolArguments(
+                job_id=job.id,
+                flow_id=store.flow.id,
+                attempt_id=task.attempt_id,
+                assignment_token="token-1",
+                call_id="call-1",
+                arguments={"title": "Implement", "body": "done"},
+                vcs_backend=VcsKind.GIT,
+                branch="flow/1",
+                commit_sha="abc123",
+                remote_sha="abc123",
+            ),
         ),
         worker_id="worker-1",
+        connection_epoch="epoch-1",
     )
     assert tool.result is not None
     assert github.opened == []
@@ -369,20 +387,25 @@ async def test_initial_failure_after_open_pr_request_has_no_github_pr_side_effec
     subject.mark_started(job, task, "worker-1")
     tool = await subject.tools.execute(
         FlowToolRequest(
-            job_id=job.id,
-            flow_id=store.flow.id,
-            attempt_id=task.attempt_id,
-            assignment_token="token-1",
-            connection_epoch="epoch-1",
-            call_id="call-1",
-            name="flow.open_pr",
-            arguments={"title": "Implement", "body": "done"},
-            vcs_backend=VcsKind.GIT,
-            branch="flow/1",
-            commit_sha="abc123",
-            remote_sha="abc123",
+            message_id=uuid4().hex,
+            type="tool_call",
+            reply_to=None,
+            method="flow.open_pr",
+            arguments=FlowToolArguments(
+                job_id=job.id,
+                flow_id=store.flow.id,
+                attempt_id=task.attempt_id,
+                assignment_token="token-1",
+                call_id="call-1",
+                arguments={"title": "Implement", "body": "done"},
+                vcs_backend=VcsKind.GIT,
+                branch="flow/1",
+                commit_sha="abc123",
+                remote_sha="abc123",
+            ),
         ),
         worker_id="worker-1",
+        connection_epoch="epoch-1",
     )
     assert tool.result is not None
 
@@ -424,3 +447,36 @@ async def test_initial_vcs_failure_is_reported_with_sanitized_stage_and_detail()
     assert github.comments == [
         "⚠️ 编码失败（codex exit=65）；VCS push: remote branch is missing。未开 PR。"
     ]
+
+
+@pytest.mark.parametrize("version", [1, 14, 15])
+async def test_recovery_applies_unassigned_control_failure_without_rewriting_inbox(store, version):
+    # Preparation can fail before assignment; only a control failure may use the sentinel token.
+    flow = store.flows.create_flow("owner/control", 1, None)
+    job = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
+    terminal = Failed(job_id=job.id, assignment_token="control", error="preparation failed")
+    with store.transaction() as tx:
+        tx.lock_workflow(flow.id)
+        tx.lock_job(job.id)
+        with tx.connection() as connection:
+            connection.execute("UPDATE jobs SET state='running' WHERE id=%s", (job.id,))
+        tx.jobs.record_control_result(job.id, terminal, terminal.error)
+        if version != 1:
+            payload = {
+                "protocol_version": version,
+                "connection_epoch": "control",
+                **terminal.model_dump(mode="json"),
+            }
+            with tx.connection() as connection:
+                connection.execute(
+                    "UPDATE jobs SET result_payload=%s WHERE id=%s", (Jsonb(payload), job.id)
+                )
+    accepted = store.jobs.get_job(job.id)
+    subject = coordinator(store, RecordingGitHub())
+    await subject.results.recover_pending_results()
+    persisted = store.jobs.get_job(job.id)
+    assert persisted.state is JobState.FAILED and persisted.result_applied_at is not None
+    assert persisted.result_payload == accepted.result_payload
+    assert persisted.result_digest == accepted.result_digest == terminal_digest(terminal)
+    assert store.flows.get_flow(flow.id).state is FlowState.FAILED
+    assert store.jobs.lifecycle_job(flow.id) is None

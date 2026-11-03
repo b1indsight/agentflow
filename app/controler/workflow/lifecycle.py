@@ -1,14 +1,13 @@
 """Own delivery identity, PR creation adoption, close/reopen and merge transitions."""
 
-import json
 from dataclasses import dataclass
 
 from app.contracts.protocol import (
     InitialTaskResult,
     RevisionTaskResult,
     Succeeded,
-    parse_worker_message,
 )
+from app.contracts.receipts import decode_result_inbox
 from app.contracts.result_models import ResultPending
 from app.controler.workflow.initial import initial_delivery_mismatch
 from app.controler.workflow.revisions import (
@@ -153,7 +152,14 @@ async def prove_reopen(
     if job is not None:
         if job.result_payload is None or job.result_applied_at is None:
             return None, "old executor or result is not settled"
-        message = parse_worker_message(json.dumps(job.result_payload))
+        if job.result_digest is None:
+            raise ValueError("reopen result inbox is missing its digest")
+        message = decode_result_inbox(
+            job.result_payload,
+            job_id=job.id,
+            assignment_token=job.assignment_token,
+            result_digest=job.result_digest,
+        ).terminal
         if not isinstance(message, Succeeded):
             return None, "old coding execution failed; repository requires manual reconciliation"
         result = message.result

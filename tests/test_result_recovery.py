@@ -9,14 +9,17 @@ import pytest
 from app.contracts.protocol import (
     PROTOCOL_VERSION,
     ExecutionStopped,
+    FlowToolArguments,
     FlowToolRequest,
     InitialTask,
     InitialTaskResult,
     RevisionExecutionRecord,
     RevisionTaskResult,
     Succeeded,
+    call_header,
     terminal_digest,
 )
+from app.contracts.receipts import ResultInbox
 from app.contracts.result_models import EffectState, ResultPending
 from app.controler.workflow.coordinator import JobCoordinator
 from app.controler.workflow.service import ControlService
@@ -43,11 +46,19 @@ from tests.test_revision_delivery import revision_control as revision_control  #
 def scenario(revision_control):
     store, github, job, _subject, task = revision_control
     result = RevisionTaskResult(
-        flow_id=task.flow_id, attempt_id=task.attempt_id, batch_id=task.batch_id,
-        feedback_refs=list(task.feedback), previous_session_id=task.session_id,
-        session_id=task.session_id, session_generation=task.session_generation,
-        mode="resume", last_message="failed", exit_code=1,
-        invocations=[RevisionExecutionRecord(mode="resume", session_id=task.session_id, exit_code=1)],
+        flow_id=task.flow_id,
+        attempt_id=task.attempt_id,
+        batch_id=task.batch_id,
+        feedback_refs=list(task.feedback),
+        previous_session_id=task.session_id,
+        session_id=task.session_id,
+        session_generation=task.session_generation,
+        mode="resume",
+        last_message="failed",
+        exit_code=1,
+        invocations=[
+            RevisionExecutionRecord(mode="resume", session_id=task.session_id, exit_code=1)
+        ],
     )
     return store, github, job, result
 
@@ -94,7 +105,8 @@ def initial_scenario(scenario):
 
 @pytest.fixture
 async def completed_open_initial(
-    store: Store, recording_resources: None,
+    store: Store,
+    recording_resources: None,
 ) -> tuple[Flow, JobCoordinator, RecordingGitHub, FlowToolRequest, InitialTaskResult]:
     """Complete a real INITIAL assignment before testing retries of its existing PR."""
     flow = ControlService(
@@ -110,20 +122,39 @@ async def completed_open_initial(
     assert isinstance(task, InitialTask)
     assert store.workers.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
     request = FlowToolRequest(
-        job_id=job.id, flow_id=flow.id, attempt_id=task.attempt_id,
-        assignment_token="token", connection_epoch="epoch", call_id="initial-open",
-        name="flow.open_pr", arguments={"title": "Title", "body": "Body"},
-        vcs_backend=VcsKind.GIT, branch=task.branch, commit_sha="abc123", remote_sha="abc123",
+        **call_header(),
+        method="flow.open_pr",
+        arguments=FlowToolArguments(
+            job_id=job.id,
+            flow_id=flow.id,
+            attempt_id=task.attempt_id,
+            assignment_token="token",
+            call_id="initial-open",
+            arguments={"title": "Title", "body": "Body"},
+            vcs_backend=VcsKind.GIT,
+            branch=task.branch,
+            commit_sha="abc123",
+            remote_sha="abc123",
+        ),
     )
-    tool = await subject.tools.execute(request, worker_id="worker-a")
+    tool = await subject.tools.execute(request, worker_id="worker-a", connection_epoch="epoch")
     result = InitialTaskResult(
-        session_id="initial-session", last_message="done", exit_code=0,
-        vcs_backend=VcsKind.GIT, branch=task.branch, commit_sha="abc123", remote_sha="abc123",
-        pushed=True, open_pr_call_id="initial-open", delivery_receipt=tool.result,
+        session_id="initial-session",
+        last_message="done",
+        exit_code=0,
+        vcs_backend=VcsKind.GIT,
+        branch=task.branch,
+        commit_sha="abc123",
+        remote_sha="abc123",
+        pushed=True,
+        open_pr_call_id="initial-open",
+        delivery_receipt=tool.result,
     )
-    terminal = Succeeded(job_id=job.id, assignment_token="token", connection_epoch="epoch", result=result)
-    assert store.workers.record_assignment_result(job.id, "worker-a", "token", "epoch",
-        terminal.model_dump(mode="json"), terminal_digest(terminal)) == "pending"
+    terminal = Succeeded(job_id=job.id, assignment_token="token", result=result)
+    assert (
+        store.workers.record_assignment_result(job.id, "worker-a", "token", "epoch", terminal)
+        == "pending"
+    )
     assert await subject.results.apply(job.id) is JobState.DONE
     completed = store.flows.get_flow(flow.id)
     assert completed is not None
@@ -132,7 +163,9 @@ async def completed_open_initial(
 
 @pytest.mark.parametrize("exit_code", [0, 1])
 async def test_merged_initial_retry_keeps_execution_facts_without_reopening(
-    store, completed_open_initial, exit_code,
+    store,
+    completed_open_initial,
+    exit_code,
 ):
     # A cancelled completed INITIAL can retry against its still-open PR, which a human can merge.
     flow, subject, github, initial_request, initial_result = completed_open_initial
@@ -140,10 +173,15 @@ async def test_merged_initial_retry_keeps_execution_facts_without_reopening(
         database=store.database,
     )
     service.cancel(flow)
-    stop = store.stops.pending('worker-a')
-    assert store.stops.confirm('worker-a', ExecutionStopped(
-        **stop.message('epoch').model_dump(exclude={'type'}), execution_nonce='owned',
-    ))
+    stop = store.stops.pending("worker-a")
+    assert store.stops.confirm(
+        "worker-a",
+        ExecutionStopped(
+            **stop.fence().model_dump(),
+            execution_nonce="owned",
+        ),
+        "epoch",
+    )
     service.retry(flow)
     # Fresh worker-b starts from seed A, then checks out existing H where H descends A and H != A.
     store.workers.worker_connected("worker-b", PROTOCOL_VERSION, "epoch-b")
@@ -151,13 +189,23 @@ async def test_merged_initial_retry_keeps_execution_facts_without_reopening(
     assert job is not None and job.kind is JobKind.INITIAL
     task = await subject.prepare(job)
     assert isinstance(task, InitialTask) and task.attempt_id == flow.current_attempt_id
-    assert task.branch == initial_request.branch
+    assert task.branch == initial_request.arguments.branch
     assert task.repo_identity == "worker-b:owner/repo"
-    assert store.workers.start_assignment(job.id, task.attempt_id, "worker-b", "retry-token", "epoch-b")
-    tool = await subject.tools.execute(initial_request.model_copy(update={
-        "job_id": job.id, "assignment_token": "retry-token", "connection_epoch": "epoch-b",
-        "call_id": "retry-open",
-    }), worker_id="worker-b")
+    assert store.workers.start_assignment(
+        job.id, task.attempt_id, "worker-b", "retry-token", "epoch-b"
+    )
+    retry = FlowToolRequest(
+        **call_header(),
+        method=initial_request.method,
+        arguments=initial_request.arguments.model_copy(
+            update={
+                "job_id": job.id,
+                "assignment_token": "retry-token",
+                "call_id": "retry-open",
+            }
+        ),
+    )
+    tool = await subject.tools.execute(retry, worker_id="worker-b", connection_epoch="epoch-b")
     assert isinstance(tool.result, OpenedDelivery)
     call = store.deliveries.get_tool_call("retry-open")
     assert call is not None and call.job_id == job.id and call.response == tool.result
@@ -165,15 +213,25 @@ async def test_merged_initial_retry_keeps_execution_facts_without_reopening(
     merged = store.deliveries.get_delivery(flow.id)
     assert merged is not None and merged.state is DeliveryState.MERGED
     if exit_code == 0:
-        result = initial_result.model_copy(update={
-            "session_id": "retry-session", "open_pr_call_id": "retry-open", "delivery_receipt": tool.result,
-        })
+        result = initial_result.model_copy(
+            update={
+                "session_id": "retry-session",
+                "open_pr_call_id": "retry-open",
+                "delivery_receipt": tool.result,
+            }
+        )
     else:
-        result = InitialTaskResult(session_id="retry-session", last_message="failed", exit_code=exit_code)
-    terminal = Succeeded(job_id=job.id, assignment_token="retry-token", connection_epoch="epoch-b", result=result)
+        result = InitialTaskResult(
+            session_id="retry-session", last_message="failed", exit_code=exit_code
+        )
+    terminal = Succeeded(job_id=job.id, assignment_token="retry-token", result=result)
     digest = terminal_digest(terminal)
-    assert store.workers.record_assignment_result(job.id, "worker-b", "retry-token", "epoch-b",
-        terminal.model_dump(mode="json"), digest) == "pending"
+    assert (
+        store.workers.record_assignment_result(
+            job.id, "worker-b", "retry-token", "epoch-b", terminal
+        )
+        == "pending"
+    )
     expected = JobState.DONE if exit_code == 0 else JobState.FAILED
     assert await subject.results.apply(job.id) is expected
     assert store.deliveries.get_delivery(flow.id) == merged
@@ -181,7 +239,9 @@ async def test_merged_initial_retry_keeps_execution_facts_without_reopening(
     assert store.flows.get_attempt(task.attempt_id).codex_session_id == "initial-session"
     accepted = store.jobs.get_job(job.id)
     assert accepted.result_digest == digest and accepted.result_applied_at is not None
-    assert accepted.result_payload == terminal.model_dump(mode="json")
+    assert accepted.result_payload == ResultInbox(source="worker", terminal=terminal).model_dump(
+        mode="json"
+    )
     assert github.opened == [task.branch]
 
 
@@ -208,10 +268,14 @@ async def test_review_label_preserves_user_labels_on_delivery_and_replay(initial
     await apply_result(subject, job, result)
     assert github.labels[-1] == ["bug", "user-owned", "flow:in-review"]
     assert len(github.labels) == 2
-    assert [call for call in github.resource_calls if call["operation"] == "add_label"] == [{
-        "operation": "add_label", "installation_id": store.flow.installation_id,
-        "repo": store.flow.repo, "number": 17,
-    }]
+    assert [call for call in github.resource_calls if call["operation"] == "add_label"] == [
+        {
+            "operation": "add_label",
+            "installation_id": store.flow.installation_id,
+            "repo": store.flow.repo,
+            "number": 17,
+        }
+    ]
 
 
 async def test_initial_delivery_commits_only_after_all_required_effects(
@@ -224,8 +288,9 @@ async def test_initial_delivery_commits_only_after_all_required_effects(
     async def add_label(issue, label):
         if limited:
             limited.pop()
-            raise GitHubError(GitHubErrorKind.RATE_LIMITED, "add_label", status_code=429,
-                              request_rejected=True)
+            raise GitHubError(
+                GitHubErrorKind.RATE_LIMITED, "add_label", status_code=429, request_rejected=True
+            )
         await original(issue, label)
 
     monkeypatch.setattr(Issue, "add_label", add_label)
@@ -289,9 +354,13 @@ async def test_remote_comment_is_recovered_after_response_loss(scenario, monkeyp
     assert state is JobState.FAILED
     assert len(github.comments) == 1 and store.enqueued == []
     assert store.job_records[job.id].result_applied_at is not None
-    assert [(call["operation"], call["installation_id"], call["repo"], call["number"])
-            for call in github.resource_calls if call["operation"] in {"comment", "find_comment"}] == [
-        ("find_comment", 42, "owner/repo", 17), ("comment", 42, "owner/repo", 17),
+    assert [
+        (call["operation"], call["installation_id"], call["repo"], call["number"])
+        for call in github.resource_calls
+        if call["operation"] in {"comment", "find_comment"}
+    ] == [
+        ("find_comment", 42, "owner/repo", 17),
+        ("comment", 42, "owner/repo", 17),
         ("find_comment", 42, "owner/repo", 17),
     ]
 
@@ -323,7 +392,10 @@ async def test_merge_during_comment_lookup_prevents_dispatch(scenario, monkeypat
 @pytest.mark.parametrize("remote_receipt", [True, False])
 @pytest.mark.parametrize("transition", ["merge", "cancel"])
 async def test_retired_result_reconciles_dispatched_comment_without_resending(
-    scenario, monkeypatch, remote_receipt, transition,
+    scenario,
+    monkeypatch,
+    remote_receipt,
+    transition,
 ):
     # Merge must not discard an uncertain POST or let its recovered result enqueue REVISION.
     store, github, job, result = scenario

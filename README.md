@@ -57,7 +57,7 @@ FlowTool 的目标是把带 `flow` 标签的 GitHub issue 编排成
   已修复失败 Flow 重试后的执行绑定复用和提前开 PR；创建后已关闭的 PR 保留身份并暂挂，
   INITIAL 结果只收尾执行事实，不回开 PR。
 - **原子提交与操作恢复**：trigger/retry/merge/cancel 的状态和任务变更在共享事务内提交；
-  终态结果先持久接收，再执行带回执的 GitHub 操作，最后原子提交本地结果并发送 `ResultAccepted`。
+  终态结果先持久接收，再执行带回执的 GitHub 操作，最后原子提交本地结果并回复 `server.accept_result`。
   恢复时核对远端状态，避免重复派生 job 或重复发送评论；无法确认的远端结果保留待核对状态。
 - **合并与归档**：人工合并后由原 worker 核验并清理工作区；对关联 Issue/PR 增加完成标签、
   移除 in-review 标签并各发布一条固定归档说明。全部回写完成后，原子提交成功、释放 worker 并 ACK。
@@ -178,8 +178,9 @@ Git worktree。`FLOWTOOL_WORKER_REPO_WORKSPACE_LIMIT=2` 设置每仓库总上限
 每次 INITIAL、REVISION resume/fallback 都提供本轮 bot `gh` 包装、独立配置和 Git helper，
 不使用个人登录态；token 过期/权限不足即失败，不自动续期或扩权。worker 保持单仓库
 Contents write，PR 通过 MCP `open_pr` 请求 controler 校验后创建。包装不构成 OS 沙箱。
-当前 Codex/Amp 接入均使用 protocol v15 / journal v4，serve 与 worker 的协议版本必须匹配。
-本地 v4 journal 可直接读取上一代协议 v14 的结果和停止回执，无需手工清理，见 [Worker 更新](docs/deployment/worker-update.md#journal-直接前代兼容)。
+当前 Codex/Amp 接入均使用 wire16 / journal5 / ResultInbox v1，serve 与 worker 的协议版本必须匹配。
+通信统一为顶层控制和 typed call/result 列表；控制 ACK 仅确认接收，不表示业务提交。
+支持只读加载受限 v4 journal（内嵌 v14/v15 回执），正常保存时才升级，见 [Worker 更新](docs/deployment/worker-update.md#journal-直接前代兼容)。
 Amp 的临时 settings 不覆盖 managed policy；发现 workspace `.amp/settings.json[c]` 时拒绝执行，
 避免覆盖本轮工具/MCP 设置。完整配置与取消边界见[部署说明](docs/deployment/README.md)。
 
@@ -302,13 +303,14 @@ M3 F3 及审查修复本地验证（2026-09-08）：真实 PostgreSQL 下 **502 
 响应丢失与重启恢复。Ruff、Mypy 与 sdist/wheel 构建通过；真实 GitHub App/worker 验收仍待执行，
 详见 [F3 审查修复记录](docs/plan/m3-archive-status.md#7-审查修复2026-09-08)。
 
-当前仅支持 wire protocol **v15**、worker journal **v4** 与当前完整 PostgreSQL schema。
-合法 v4 journal 中上一代协议 v14 的结果和停止回执在读取时进行内存转换，下次正常保存时写为 v15；
-保留任务身份、摘要、停止证据和工作区归属，不需要手动编辑或删除 journal。
-不支持 v3 / 协议 v13、混合或未知消息版本，也不迁移其他旧数据库、任务或结果格式。
+当前在线协议仅支持 **v16**，正常写入 worker journal **v5**、ResultInbox **v1**，数据库仍使用当前完整 schema。
+合法 v4 journal 的 v14/v15 回执与已知旧 inbox 只读转换；下次原本需要的状态写入才写 v5。
+保留任务身份、原摘要、停止证据与工作区归属；未知、混合或损坏记录拒绝并保留，不自动清理。
+不支持 v3 / 协议 v13 或任意旧数据库转换；wire v15 不与 v16 在线互通。
 首次运行使用新数据库/schema 和新 worker root；受支持的升级保留原 root。
-Server 部署不以所有 Worker 更新为前提；Worker 连接仍按实际 protocol 和
-认证结果处理，不匹配直接拒绝。支持的 uv Git 虚拟环境安装可通过 `flowtool worker --update`
+本次协议切换需要协调 serve/worker 的维护窗口：停止新分配、等待活跃执行和外部 effects 收敛，
+备份并核对实际持久版本后再升级。写入新格式后不能直接降级旧二进制，详见[升级边界](docs/operations/upgrade.md)。
+Worker 连接按实际 protocol 和认证结果处理，不匹配直接拒绝。支持的 uv Git 虚拟环境安装可通过 `flowtool worker --update`
 原地更新本体及必要依赖，核验后退出；操作者须先停止 Worker，再按原方式启动，详见
 [Worker 更新](docs/deployment/worker-update.md)。源码与容器继续按原部署方式更新。
 Worker 没有后台自动更新或切换握手；同版本重启仍保留冻结任务、结果摘要、effect ledger 与 journal 恢复能力。

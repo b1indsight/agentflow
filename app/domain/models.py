@@ -11,7 +11,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, SecretStr, model_validator
 
 from app.domain.delivery_models import DeliveryReceipt
 
@@ -172,7 +172,7 @@ class Job(BaseModel):
     started_at: datetime | None = None
     lease_expires_at: datetime | None = None
     recovery_deadline: datetime | None = None
-    result_payload: dict | None = None
+    result_payload: dict[str, JsonValue] | None = None
     result_digest: str | None = None
     result_received_at: datetime | None = None
     result_applied_at: datetime | None = None

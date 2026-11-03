@@ -8,6 +8,15 @@
 
 ## Unreleased
 
+- 统一 worker/server 协议第二步：Session 接入逐项分派、有界控制 ACK 与原连接 history 关联，
+  worker 使用单一业务消费循环；终态 `[T,A]` 在应用提交后接纳，停止 `[R,B]` 仍需真实凭据与 effects 收敛。
+  接入 journal5 / inbox1 持久读写、已知旧格式只读转换和来源 SQL，移除旧 wire 调用与内联 journal 模型；
+  保留原执行 Task/Future、binding、摘要和 tool ledger。v15/v16 需协调升级，新格式写入后不可直接降级；
+  Runtime 对称装配、可靠领域事件/outbox 与部署不在本次范围。
+- 统一 worker/server 协议第一步：wire16 结构采用顶层控制与 typed call/result 列表，
+  区分帧 ACK、reply_to 与稳定业务身份；定义 journal5、ResultInbox v1 及严格旧格式只读 decoder，
+  保持 terminal/stop 摘要和既有持久证据。运行时、存储 IO 和调用方迁移留在第二步；
+  当前为不可独立运行、合并或部署的 draft 中间态，不以结构测试代替全链路验收。
 - Worker 与 server 共用进程级 `Gateway`，统一 peer/session 登记、替换、路由与通信关闭；
   server 多 worker，worker 至多一个 server。删除 WorkerGateway 和 Broker 的独立连接表，
   接入函数负责认证/首帧，WorkerHandler 保留业务；无 Endpoint/Run 中间对象。
