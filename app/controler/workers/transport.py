@@ -22,8 +22,8 @@ from app.contracts.protocol import (
     parse_worker_message,
 )
 from app.contracts.validation import parse_worker_input
-from app.controler.workers.callbacks import ProtocolViolation
 from app.controler.workers.conversation import conversation_result_key
+from app.controler.workers.errors import ProtocolViolation
 
 
 class WorkerSocket(Transport, Protocol):

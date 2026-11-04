@@ -10,7 +10,13 @@
 
 - Worker/server 两端 Runtime 统一持有 Gateway，以同一个 Session 事件入口驱动每连接的
   WorkerCallbacks / ServerCallbacks；移除旧 Client/Handler 消费循环，按 `package.method`
-  精确注册模型与回调。通信关闭不取消执行，控制/提交/停止证据与 history 有界旁路保持独立。
+  精确注册请求模型与回调；回复按 `reply_to` 关联原调用，worker 不再注册工具名来接收结果。
+  通信关闭不取消执行，控制/提交/停止证据与 history 有界旁路保持独立。
+  Dispatcher 统一把验证错误交给连接业务对象的 `on_error`，请求回调只接收注册模型；
+  删除逐方法重复错误转发，保留处理顺序与业务关联校验。
+  Flow 工具关联与请求处理独立到 WorkerFlowCallbacks / ServerFlowCallbacks；
+  server 保留 Flow 请求路由，历史任务结果仍可通过持久 assignment 身份核对后接纳。
+  工具 Future 仍归执行 owner，Flow 权限和停止检查保持原顺序，未注册工具不会触发业务执行。
   wire 升级为 v17：可关联的 payload 校验失败整批拒收，返回固定两字段 `tool_result.error`，
   无诊断详情；普通 Future 失败后连接继续，关键协议失败保留证据并恢复关闭。
   Assignment 拒绝经 SQL 预启动围栏写入 control 结果并提交后收尾；journal5/inbox1 不变。

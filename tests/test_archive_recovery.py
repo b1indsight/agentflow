@@ -14,7 +14,7 @@ from app.contracts.protocol import (
     RecoveryDescriptor,
     Succeeded,
 )
-from app.controler.workers.callbacks import ProtocolViolation
+from app.controler.workers.errors import ProtocolViolation
 from app.controler.workflow.service import ControlService
 from app.domain.models import DeliveryState, FlowState, JobKind, JobState
 from app.persistence.jobs import JobStore

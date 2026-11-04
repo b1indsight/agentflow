@@ -8,13 +8,19 @@
 **当前修订：**可关联的 payload 校验失败返回 `tool_result`，沿用原 method，`reply_to` 指向被拒项，
 `error` 仅含固定 `code` 和 `message`，不含 details、truncated 或任何诊断内容
 （[修订 005](#005-错误响应不暴露校验详情)）；不新增错误通知路由。该 wire 合同已实现为 v17，持久格式不变
-（[修订 004](#004-用-tool_result-返回消息验证错误)）。消息方法按 `包名.方法名` 精确路由，所有业务回调对象统一用
-`register(route, model, callback)` 注册（[修订 003](#003-统一包名方法名路由与注册)）。
+（[修订 004](#004-用-tool_result-返回消息验证错误)）。请求按 `包名.方法名` 精确路由，统一用
+`register(route, model, callback)` 注册；回复进入 `configure(result=self.on_reply, ...)`，
+按 `reply_to` 关联原调用后校验模型及业务证据（[修订 013](#013-分离请求路由与回复关联)）。
+请求回调只接收注册的模型，验证错误由 `configure(validation_error=self.on_error, ...)` 统一交给
+连接业务对象（[修订 009](#009-集中验证错误分派收窄业务回调类型)）；wire method/reply_to 不变。
 两端业务回调统一命名为 `WorkerCallbacks` / `ServerCallbacks`，模块均用 `callbacks.py`
-（[修订 002](#002-两端业务回调对称命名)）。用户已要求去掉 `Delivery`；Session 直接交付既有 msg，接口为
-`next_event(...) -> Incoming | Ready | None`。字节计数与剩余 payload 留在 Session 内部。
+（[修订 002](#002-两端业务回调对称命名)）；Flow 工具分别由相邻 `flow.py` 中的
+`WorkerFlowCallbacks` / `ServerFlowCallbacks` 处理，只有 server 注册工具请求路由
+（[修订 012](#012-分离-flow-路由与工具回调)）。用户已要求去掉 `Delivery`；Session 直接交付既有 msg，接口为
+`next_event(...) -> Incoming | Ready | None`。字节记账与剩余 payload 留在 Session 内部，
+不再保存派生的队列总计字段（[修订 011](#011-删除-session-的派生队列计数)）。
 [修订 001](#001-去掉-delivery直接交付-msg) 撤销初稿中的 Delivery 类型、队列结构及相关流程。
-下方 Initial plan 保留为历史基线，其中被后续修订替代的内容不再适用。实际实现与验证见时间线 006–008。
+下方 Initial plan 保留为历史基线，其中被后续修订替代的内容不再适用。实际实现与验证见时间线 006–013。
 
 ## 1. Initial plan
 
@@ -847,6 +853,178 @@ workspace 内，已有 VCS 检测会错误读到父 jj remote；改用 pytest �
 `ablation-<机制>-baseline/simplified.log`、`history-eof-before/after.log`、`smoke.log` 与全量日志。
 [本线程的验收摘要与日志链接](https://ampcode.com/artifacts/session-70d95eae-bb58-4554-8799-467c6b88ec5c)
 记录精确结果及交付状态；代码 review gate 结果不以消融结果替代。未进行部署或生产外部副作用验证。
+
+### 009 集中验证错误分派，收窄业务回调类型
+
+**日期与触发：**2026-11-04。独立 review 报告 LOW：普通回调的 `Item | ValidationErrorResult`
+签名使两端重复转发错误。用户随后要求“修复”，本条按该要求实施；不扩展到其他 review 建议或功能。
+
+**决策与实现：**选择在 Dispatcher 中统一分派验证错误，删除逐方法错误分支和错误专用路由注册，
+不另建错误路由表。`register(route, model, callback)` 的 callback 收窄为
+`Callable[[Item, Incoming], Awaitable[None]]`；`configure` 必须提供一次
+`validation_error: Callable[[ValidationErrorResult, Incoming], Awaitable[None]]`。
+`WorkerCallbacks` / `ServerCallbacks` 均绑定已有的 `on_error`，普通处理方法只接收各自模型。
+未注册方法和仅反向失败的方法仍交由同一 owner 检查 method/reply_to、epoch 和业务身份，
+不以普通路由是否存在代替错误关联校验。
+
+本条替代[修订 004](#004-用-tool_result-返回消息验证错误)中的联合类型回调和以
+`ValidationErrorResult` 注册错误专用方法的内部 API 要求；原 wire 合同和失败处理职责保留。
+Gateway 仍先执行控制 owner、`before_item`，再调用 Dispatcher，最后执行 `frame_done`；
+`on_error` 的关联、预启动围栏、普通 Future 收尾及关键证据恢复代码未改。Session 的同步
+`on_rejected` 准备阶段、history 有界旁路和固定两字段 error 也未改。
+
+**验证与复杂度：**这是删除重复分支的行为保持重构，没有增加持久状态、任务或调度机制，
+不新增消融变体或永久测试。已有测试仅更新必需钩子的装配；定向协议、Session、双端入口、停止、
+history 和 Assignment 拒绝回归通过，Python 3.12 / PostgreSQL 全量、Ruff/Mypy 与变更文件格式检查通过。
+临时内联探针通过真实 Gateway/Session 驱动检查控制帧、`before_item`、普通/错误回调、`frame_done`
+及 EOF 清理顺序，覆盖已注册、单向和未知方法错误，并确认普通路由仍拒绝错误模型；未保留探针源码。
+日志位于本 workspace `.amp/in/artifacts/error-routing-{focused,full,lint,mypy,contract}.log`。
+全量仍出现此前的 Starlette 弃用和 subprocess transport 关闭警告；本次没有修改其来源。
+本地修复已验证；随后的一次复审及交付状态见验收摘要。本条本身不表示已推送、合并或部署。
+
+### 010 原地减少 serve 的异常与上下文嵌套
+
+**日期与要求：**2026-11-05。用户要求降低 `Gateway.serve()` 嵌套，随后明确“不用拆分方法”，
+重点处理嵌套的 `try` 和 `with`。本次保持单个方法，不增加私有辅助方法、包装对象或业务状态类型。
+
+**实现与边界：**合并外内两层异常处理为一个 `try/except/finally`。仅在 bind、freeze 和
+拒收回调装配成功后启用局部 `failed` 回调，因此配置错误继续直接传播，准入和业务错误继续交给
+业务 owner 映射。以标准库 `ExitStack` 保存成功发布后才注册的 `closed` 钩子，替代 `entered`
+标志及清理阶段嵌套的 `try/finally`；注销或关闭抛错时仍执行该钩子，配置/发布失败不会误调用。
+
+`None` 唤醒判断提前到 `handling()` 外；`driving()` 仍覆盖整个消费循环，`handling()` 仍覆盖
+opened、poll、Ready 和消息处理，等待 `next_event()` 始终在业务处理范围外。保留控制优先、
+逐项串行、异常关闭码、取消传播、原 Session 回复及旧连接退出的身份安全。
+
+**验证：**重构前后以同一临时探针调用真实 Gateway/Session，逐阶段注入配置、准入、发布、
+回调、关闭故障及取消，比较回调顺序、异常类型和关闭码；普通消息、Ready、唤醒和 EOF 也逐项
+对照，日志完全一致。已有 Gateway/Session、双端入口、验证错误、停止、history 和数据库拒绝
+回归，以及 Ruff/Mypy、格式检查通过。临时探针已删除，保留 `serve-lifecycle-before/after.log`、
+`serve-focused.log`、`serve-lint.log`、`serve-mypy.log` 和 `serve-structure.log` 于本 workspace
+的 `.amp/in/artifacts/`。没有引入新的调度或持久机制，不新增消融变体或永久测试。
+最新全量与交付状态见验收摘要；修订 009 的独立 review 不覆盖本次改动，发布前需评审当前版本。
+
+### 011 删除 Session 的派生队列计数
+
+**日期与要求：**2026-11-05。用户确认去掉 `_inbox_bytes`、`_inbox_items`；本次只精简这两个
+字段，不调整其他通信状态，也不增加包装类、属性或辅助方法。
+
+**实现与取舍：**普通输入与验证失败输入的容量检查，均直接对 `_inbox` 已保存的字节数和
+payload 数量求和。删除构造、入队、出队及关闭时的计数维护。队列上限不变，求和最多遍历
+32 项；用有界的计算替代重复状态。仍在 ACK 和查询旁路副作用前检查整个输入，入队后仍按
+实际剩余 payload 计数，原始字节占用、拒收顺序及 EOF 排空规则不变。
+
+**验证：**修改前的 Session、事件和验证错误回归通过；修改后扩展到 Gateway、双端入口、
+history、停止与 Assignment 拒绝回归，全部通过。Ruff/Mypy 与变更文件格式检查通过，未新增
+永久测试。日志为 `.amp/in/artifacts/session-counters-{focused,lint,format,mypy}.log`。
+本次未重跑全量或发布 review gate；仅为本地修改，未推送，不以修订 010 的全量结果替代本次检查。
+
+### 012 分离 Flow 路由与工具回调
+
+**日期与要求：**2026-11-05。用户要求“把flow下的路由分离出去”，并询问为何 worker 注册
+`flow.open_pr`。该 method 来自现有 MCP `open_pr` 工具；worker 注册回复，server 注册请求。
+协议方法表示同一操作，不表示当前执行端；本次保留名称、请求/回复模型及关联身份。
+当前工具服务校验远端 SHA 并保存 PR 意图，或返回既有 PR；实际创建 PR 仍由结果 effects 执行。
+
+**决策与实现：**两端分别组合独立的 `WorkerFlowCallbacks` / `ServerFlowCallbacks`，模块均为
+相邻的 `flow.py`。各自通过 `bind(routes)` 在原 Dispatcher 精确注册 `flow.open_pr`，连接回调
+只调用该注册入口，并将未注册工具处理委托给 Flow 对象。不增加第二张路由表、通配注册、
+动态扫描、pluggy 或 Gateway/Session 包装；本次不修改公共通信层与 Runtime 的装配接口。
+
+- worker Flow 对象保存连接借出的 pending 调用，负责观察工具队头、发送和完成匹配回复。
+  原工具 Future、队列与执行 Task 仍属于 WorkerExecution，断线不取消它们；回复仍使用
+  `(method, reply_to, call_id)` 关联。连接回调继续处理 epoch、整批拒收和关键协议错误，
+  先完成整批校验，再调用 Flow 对象拒绝普通工具 Future，不在扫描中提前改变状态。
+- server Flow 对象检查 Flow/job 归属并调用原工具服务，通过绑定的 `_validate_active` 和
+  `is_stopping` 回调读取连接 owner 的实时状态，不复制 assignment/stopping。仍先检查身份与
+  Flow，再执行停止限制；stopping 不调用工具也不回复。正常回复固定原 Session。
+- 未注册的类型化工具请求保留关联错误处理；即使漏注册 `flow.open_pr` 也不得补执行。
+  未知命名空间仍按原类型化规则处理，不额外按 `flow.` 前缀过滤。worker 的未知工具回复
+  仍只能完成原 pending；其他类型继续报协议错误。
+- `ProtocolViolation` 移至 `workers/errors.py`，避免两个 server 回调模块循环导入。
+  transport 和现有测试更新导入，不保留旧位置别名。Started、T/A、R/B、history、
+  控制优先与持久证据格式未改。架构文档和 changelog 同步更新。
+
+本条替代修订 002/003 中由单个连接回调直接持有 Flow 注册和处理方法的组织方式；统一注册
+格式、角色命名与生命周期合同不变。已按 consulting-claude-oracle 使用受限本地 Claude
+Opus 5.5 核对边界，确认初始化与响应模型、无工具/MCP、成功退出；主线程采用上述拆分，
+未采用额外发送/清空包装方法。顾问意见不作为运行验证。
+
+**验证与复杂度：**相同的双端入口、Flow、MCP、停止和验证错误定向回归在拆分前后均通过；
+Python 3.12 / PostgreSQL 全量、Ruff/Mypy 与变更文件格式检查通过。临时探针使用真实
+Dispatcher/Session 与模拟仓储/工具服务，检查正常注册、漏注册、未知方法、实时 stopping、
+错误 Flow 和原 Session 回复关联；没有调用外部 GitHub。测试仅调整已有异常导入，未新增永久
+测试或调度/持久机制；此行为保持的职责拆分不另做机制消融。
+日志为 `.amp/in/artifacts/flow-callbacks-{before,after,full,lint,mypy,format,boundaries}.log`。
+全量仍有此前的 Starlette 弃用和 subprocess transport 回收警告，后者来源未确认。
+最新精确结果见[验收摘要](https://ampcode.com/artifacts/session-70d95eae-bb58-4554-8799-467c6b88ec5c)。
+当前修改仅在独立 workspace，未重新运行发布 review gate、移动 bookmark、推送、合并或部署；
+此前的独立审查与 CI 不覆盖这些新增修改。
+
+### 013 分离请求路由与回复关联
+
+**日期与要求：**2026-11-05。用户指出 worker 只需处理返回的 tool_result，无需注册
+`flow.open_pr`，随后明确要求“按这个规则修改”：tool_call 按方法路由，tool_result 按
+reply_to 关联原调用。本次应用到双端所有普通结果，包括工具、执行终态和停止/结果确认，
+不只删除 worker 的一条 Flow 路由。该要求已批准实施。
+
+**实现与替代范围：**
+
+- `Dispatcher.register` 的泛型约束和运行时检查均只接受 ToolCall；路由表与 unrouted
+  也收窄为请求。新增必需的 `configure(result=self.on_reply, ...)`，普通 ToolResult
+  在查方法表之前交给连接 owner；ValidationErrorResult 仍先进入独立 validation_error
+  钩子，因为它也可拒绝先前发送的结果。不会为回复新增方法表、Future 或 pending registry。
+- worker 删除 `server.accept_result`、`server.accept_stop` 的回复注册，以及 Flow 对象的
+  bind/未命中回复处理。`WorkerCallbacks.on_reply` 按 expected 调用的 message_id 选择结果或
+  停止确认；工具回复交 `WorkerFlowCallbacks.on_reply`，先匹配 pending 的请求 ID，再检查
+  FlowToolResponse 模型及原 method/call_id，交 WorkerExecution 完成原 Future。
+  工具名无需预注册，未知请求继续直接拒绝。
+- server 删除 `worker.execute`、`worker.stop` 的结果注册。`ServerCallbacks.on_reply`
+  先匹配当前 stop/execution 的稳定调用 ID，再校验对应结果模型。旧任务终态可在重连后或
+  新任务开始后到达；若未命中当前调用，仅将 ExecuteResult.job_id 作为数据库查找线索，
+  必须用持久 job 的 worker/token 计算出匹配的 reply_to，才进入原 on_result 校验。
+  持久来源分支不缓存数据；额外读取只用于不属于当前调用的重放，原结果 owner 仍复核
+  payload token、digest、旧结果证据与 SQL 围栏。不能凭 payload 自报的身份接纳结果。
+- server 的验证错误同样先定位原 message_id，再核对 method；保留固定大小的已发送关键
+  消息记录及原错误策略。不匹配的错误不会改变业务状态或续租。
+- 不修改 Gateway/Session、Runtime、wire v17、journal5/inbox1 或业务服务。history 已有的
+  reply_to/epoch 临时关联和有界旁路保持不变；普通业务回复仍经控制、before_item 和串行驱动。
+  Started 写后启动、T/A 提交后接纳、真实 R/完整 confirm、stopping 无新 effects、原 Session
+  回复以及跨重连的原 Task/Future/stop 所有权不变。
+
+本条替代修订 003/012 中“请求和回复都按 method 注册”的要求，以及 worker Flow 对象必须
+提供 bind 的组织方式；对称命名不要求两端拥有相同的入站业务方法。模型解析仍可使用 method
+选择严格 schema，这与注册业务处理路由不同。主线程核对所有调用点、history 旁路、稳定 ID
+和旧任务重放回归后采用上述实现；受限本地 Claude Opus 5.5 提供实施草案，初始化/响应模型、
+无工具/MCP 和成功退出均已核验，顾问意见不作为运行证据。
+
+**验证：**增加一个公开 Dispatcher 合同回归，覆盖有/无同名请求路由时回复均进入原调用
+结果入口；现有注册测试增加拒绝 ToolResult 模型的检查。测试在改实现前失败、修改后通过。
+其余长期测试复用现有的重连、旧任务重复终态、停止凭据、校验失败、history、真实双端入口
+及 PostgreSQL 场景。定向与完整测试、Ruff/Mypy、变更文件格式检查通过。临时探针另检查任意
+工具名回复、错误 reply_to/method/call_id/model/epoch、原 Future 保留，以及当前/历史任务
+的错误 owner/token/调用 ID 和缺少持久结果时零写入；使用真实 worker Runtime/Session 和
+Dispatcher，外部执行/仓储使用测试替身，不声称真实 GitHub 或模型联调。探针源码验证后删除。
+
+**消融与取舍：**以相同输入分别在独立进程中替换一个分支，不改 tracked 文件：
+
+| 简化变体 | 实测结果与决定 |
+| --- | --- |
+| 删除 Dispatcher 的普通 ToolResult 分支，恢复按方法查请求表 | 同名回复触发请求模型不匹配，未注册回复落入未命中策略；保留独立结果入口 |
+| server 只匹配当前调用，删除持久调用关联 | 旧任务结果重放导致连接报协议错误，同帧新任务结果也未接纳；保留持久身份关联 |
+
+基线执行 `python -m pytest --noconftest -p tests.conftest -q`，用例为
+`test_session_events.py::test_reply_reaches_its_owner_without_a_method_route` 和
+`test_worker_handler.py::test_duplicate_prior_job_result_does_not_retire_current_assignment`；
+变体通过 inspect 读取方法、只删除表中分支，在子进程内重新编译替换该方法，再运行同一用例。
+完整测试使用 `FLOWTOOL_TEST_DATABASE_URL=<本地测试库> python -m pytest -q`。
+日志位于 `.amp/in/artifacts/request-reply-{before,red,focused,full,boundaries,lint,mypy,format}.log`
+及 `request-reply-ablation-{baseline,method_dispatch,current_only}.log`。
+全量仍有既有的 Starlette 弃用及 subprocess transport 回收警告，后者来源未确认。
+
+**实际状态：**实现、文档和本地验证完成；沿用同一 feature record、bookmark 和 PR。
+本轮未运行发布 review gate、移动 bookmark、推送、合并或部署；精确结果与当前状态见
+[验收摘要](https://ampcode.com/artifacts/session-70d95eae-bb58-4554-8799-467c6b88ec5c)。
 
 ## 3. 源码依据
 

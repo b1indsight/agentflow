@@ -26,7 +26,8 @@ PR、反馈与 Projects。事件、Worker 管理和对账调用工作流，工�
 各子包直接引用已有领域类型、协议、具体仓储/GitHub 及配置，不反向依赖 API 或运行时。
 Runtime 统一初始化工具、effects、结果应用和 conversation broker；各服务仅接收实际
 使用的数据库与服务，自行创建需要的具体仓储。Runtime 管理共享 Database 的初始化和关闭，
-向服务提供同一 Database。ServerCallbacks 直接使用工具和结果应用，结果应用的锁由 Runtime、coordinator
+向服务提供同一 Database。ServerCallbacks 直接使用结果应用，ServerFlowCallbacks 调用 Flow 工具服务；
+结果应用的锁由 Runtime、coordinator
 与回调对象共享；Gateway 只驱动通信事件。Webhook 消费器接收配置、插件、通知回调和 Database，在每次 receipt
 事务内直接创建 ControlService 与 EventRouter，构造函数以事务上下文创建仓储；通知和 hook
 排到外层提交后执行。API 和对账使用独立的常驻控制服务。
@@ -136,7 +137,17 @@ M2 已接入有界 Issue/PR/patch/讨论快照、线程/comment 映射与原线�
 两端 Runtime 直接创建同类 `Gateway`，统一登记、查找、替换、通信关闭和串行事件驱动。
 ServerRuntime 为每条连接创建 `ServerCallbacks`；WorkerRuntime 创建 `WorkerCallbacks`，
 以固定 `server` key 拒绝重叠连接。两个业务模块均命名为 `callbacks.py`，没有第二套接收循环。
-Gateway 在准入前调用 `bind(routes)`，冻结 `register("包名.方法名", model, callback)` 的精确路由；
+两端分别组合 `ServerFlowCallbacks` / `WorkerFlowCallbacks`，模块均为相邻的 `flow.py`；
+ServerFlowCallbacks 通过 `bind(routes)` 注册 `flow.open_pr` 请求，并拒绝未注册工具请求。
+WorkerFlowCallbacks 不注册工具名；主回调的 `on_reply` 将工具回复交给它，按原调用 ID 关联。
+ServerFlowCallbacks 校验 Flow/job 归属，通过连接 owner 的实时检查获得 assignment 与 stopping 状态；
+WorkerFlowCallbacks 只保存当前连接借出的工具调用，原 Future 继续由 WorkerExecution 持有。
+握手、逐项授权、整批验证错误和关键证据恢复仍由连接回调统一处理。
+Gateway 在准入前调用 `bind(routes)`，冻结 `register("包名.方法名", model, callback)` 的精确请求路由；
+该接口只接受 ToolCall 模型。普通 ToolResult 统一进入 `configure(result=self.on_reply, ...)`，
+由业务 owner 按 `reply_to` 关联原调用，再校验模型、method、call_id 和业务证据。
+server 对跨重连或旧任务终态，用持久 job 的原 assignment 身份核对调用 ID，不依赖当前任务或新增内存表。
+ValidationErrorResult 先进入原 `validation_error` 钩子，未匹配错误不会触发新业务效果。
 不使用通配、反射或 pluggy hook 分发。Session 交付既有 msg、类型化 Ready 回调或无数据 wake，
 不增加 Delivery；观察任务只借用执行结果，业务处理始终在共同驱动中串行进行。
 
@@ -402,14 +413,15 @@ Client 只借用 owner；替换前必须关闭并 join 旧 Client，同一 owner
 然后重放终态；普通 started 任务在进程重启后没有 Task 时仍不能推断已停止或重新运行。
 
 首次派发保持 `record_received → 发送 Started → record_started → 创建 Task` 的顺序。
-工具调用由 MCP 交给 owner，WorkerCallbacks 借用队头、以当前 epoch 的新帧发送原条目，收到响应后交回 owner
+工具调用由 MCP 交给 owner，WorkerFlowCallbacks 借用队头、以当前 epoch 的新帧发送原条目，收到响应后交回 owner
 完成原 Future。断线不出队、不换 call_id 或调用条目 ID；原 socket 仍消费已取消调用的匹配迟到回复。
 `on_result_accepted` / `on_stop_accepted` 只处理收到的确认，不发送 ACK。
 
 双端 Runtime 使用公共 Gateway 管理 `app/communication/session.py` 中的 Session 实例。
 一个 Session 对应单个对端的一次连接 epoch，唯一 reader 严格解析整帧；其余业务消息进入
 32 帧 / 32 条业务 / 16 MiB FIFO。独立 history 查询及回复旁路执行业务；与控制同帧时先由控制 owner
-通过控制，再逐项分派。`Dispatcher` 按 `package.method` 注册具体模型与绑定回调，无反射或广播。
+通过控制，再逐项分派。`Dispatcher` 只按 `package.method` 注册请求模型与绑定回调；
+回复交原调用 owner 按 `reply_to` 关联，无反射或广播，不把普通回复移到 reader 旁路。
 Session 对 terminal/tool 做有界一次性观察；Gateway 公平交替网络输入与就绪回调，禁止嵌套消费。
 Session 的 stop 硬截止覆盖回调内部 await；通信心跳独立运行，慢业务不阻塞心跳发送。
 所有消息经 Session 串行写入，`send` 等实际写完成；工具 guard 在拿到锁后的实际写入前检查。

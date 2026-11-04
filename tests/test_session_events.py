@@ -6,7 +6,17 @@ import pytest
 
 from app.communication.dispatch import Dispatcher
 from app.communication.gateway import Gateway
-from tests.test_communication_session import Call, Packet, Socket, event, make_session, packet
+from tests.test_communication_session import (
+    Call,
+    Packet,
+    Reply,
+    Socket,
+    event,
+    make_session,
+    packet,
+    query,
+    reply,
+)
 
 
 async def test_ready_fairness_rearm_and_read_failure_drain():
@@ -59,13 +69,22 @@ async def test_gateway_deadline_covers_callback_and_cleanup():
     class Callbacks:
         def bind(self, routes):
             routes.register("test.event", Call, self.on_event)
-            routes.configure(opened=self.opened, frame=self.frame, closed=self.closed)
+            routes.configure(
+                opened=self.opened,
+                frame=self.frame,
+                result=self.on_error,
+                validation_error=self.on_error,
+                closed=self.closed,
+            )
 
         async def opened(self):
             seen.append("opened")
 
         async def frame(self, message):
             seen.append("frame")
+
+        async def on_error(self, error, message):
+            pytest.fail("unexpected validation error")
 
         async def on_event(self, item, message):
             with pytest.raises(RuntimeError, match="nested"):
@@ -97,7 +116,43 @@ def test_registration_is_exact_frozen_and_direction_local():
     routes.register("test.event", Call, callback)
     with pytest.raises(ValueError, match="duplicate"):
         routes.register("test.event", Call, callback)
-    routes.configure(opened=lambda: callback(None, None), frame=lambda msg: callback(None, msg))
+    with pytest.raises(TypeError, match="request"):
+        routes.register("test.query", Reply, callback)
+    routes.configure(
+        opened=lambda: callback(None, None),
+        frame=lambda msg: callback(None, msg),
+        result=callback,
+        validation_error=callback,
+    )
     routes.freeze()
     with pytest.raises(RuntimeError):
         routes.register("test.query", Call, callback)
+
+
+@pytest.mark.parametrize("registered", [False, True])
+async def test_reply_reaches_its_owner_without_a_method_route(registered):
+    # Bidirectional calls can share a method; replies must not invoke its request handler.
+    request = query()
+    response = reply(request)
+    received = []
+
+    async def unexpected(*args):
+        pytest.fail("a reply entered request routing or error handling")
+
+    async def on_result(item, message):
+        assert item.reply_to == request.message_id
+        received.append(item)
+
+    routes = Dispatcher[Packet]()
+    if registered:
+        routes.register(request.method, Call, unexpected)
+    routes.configure(
+        opened=unexpected,
+        frame=unexpected,
+        result=on_result,
+        validation_error=unexpected,
+        unrouted=unexpected,
+    )
+    routes.freeze()
+    await routes.dispatch(response, packet(response))
+    assert received == [response]

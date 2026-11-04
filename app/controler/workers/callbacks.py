@@ -19,9 +19,6 @@ from app.contracts.protocol import (
     AssignmentArguments,
     ExecuteResult,
     ExecutionTask,
-    FlowToolErrorKind,
-    FlowToolRequest,
-    FlowToolResponse,
     Heartbeat,
     PayloadValidationError,
     ProtocolError,
@@ -56,6 +53,8 @@ from app.contracts.protocol import (
 from app.contracts.receipts import decode_result_inbox
 from app.contracts.result_models import ResultPending
 from app.contracts.validation import HeartbeatHeaders, RejectedMessage
+from app.controler.workers.errors import ProtocolViolation
+from app.controler.workers.flow import ServerFlowCallbacks
 from app.controler.workflow.coordinator import JobCoordinator
 from app.controler.workflow.preparation import PreparationStale, PreparationState
 from app.controler.workflow.results import ResultApplication
@@ -67,10 +66,6 @@ from app.persistence.jobs import JobStore
 from app.persistence.stops import StopIntent, StopStore
 from app.persistence.workers import WorkerStore
 from app.telemetry.metrics import Metrics
-
-
-class ProtocolViolation(RuntimeError):
-    pass
 
 
 class ServerCallbacks:
@@ -95,7 +90,7 @@ class ServerCallbacks:
         self.worker_id, self.register, self.session = worker_id, register, session
         self.deliveries, self.jobs = DeliveryStore(database), JobStore(database)
         self.stops, self.workers = StopStore(database), WorkerStore(database)
-        self.coordinator, self.tools, self.results = coordinator, tools, results
+        self.coordinator, self.results = coordinator, results
         self.notify_jobs, self.metrics = notify_jobs, metrics
         self.heartbeat_interval, self.heartbeat_timeout = heartbeat_interval, heartbeat_timeout
         self.poll_interval = poll_interval
@@ -113,6 +108,14 @@ class ServerCallbacks:
         self._unmatched_error_logged = False
         self._recovery_required = False
         self._refresh_receive = False
+        self.flow = ServerFlowCallbacks(
+            worker_id=worker_id,
+            session=session,
+            jobs=self.jobs,
+            tools=tools,
+            validate_active=self._validate_active,
+            is_stopping=lambda: self.stopping is not None,
+        )
 
     @property
     def epoch(self) -> str:
@@ -123,24 +126,51 @@ class ServerCallbacks:
 
     def bind(self, routes: Dispatcher[WorkerMessage]) -> None:
         routes.register("server.execution_started", Started, self.on_started)
-        routes.register("flow.open_pr", FlowToolRequest, self.on_tool)
-        routes.register("worker.execute", ExecuteResult, self.on_result)
+        self.flow.bind(routes)
         routes.register("server.accept_result", AcceptResult, self.on_accept_result)
-        routes.register("worker.stop", StopResult, self.on_stopped)
         routes.register("server.accept_stop", AcceptStop, self.on_accept_stop)
-        routes.register("worker.reject_recovery", ValidationErrorResult, self.on_error)
         routes.configure(
             opened=self.on_opened,
             frame=self.on_frame,
+            result=self.on_reply,
+            validation_error=self.on_error,
             published=self.on_published,
             poll=self.poll,
             before_item=self.before_item,
             frame_done=self.on_frame_done,
             failed=self.on_failed,
             closed=self.on_closed,
-            unrouted=self.on_unrouted,
+            unrouted=self.flow.on_unrouted,
             rejected=self.on_rejected,
         )
+
+    async def on_reply(self, reply: ToolResult, message: WorkerMessage) -> None:
+        """Associate replies with live calls or durable execution identity after reconnect."""
+        if self.stopping is not None and reply.reply_to == stop_call_id(self.stopping.fence()):
+            if not isinstance(reply, StopResult):
+                raise ProtocolViolation("stop call has the wrong reply model")
+            await self.on_stopped(reply, message)
+            return
+        if self.current is not None and reply.reply_to == execution_call_id(
+            self.current[0].id, self.current[1]
+        ):
+            if not isinstance(reply, ExecuteResult):
+                raise ProtocolViolation("execution call has the wrong reply model")
+            await self.on_result(reply, message)
+            return
+        # Old results can replay after another assignment starts. The payload's job_id
+        # is only a lookup hint; the original call ID must match persisted credentials.
+        if isinstance(reply, ExecuteResult):
+            job = self.jobs.get_job(reply.job_id)
+            if (
+                job is not None
+                and job.assigned_worker_id == self.worker_id
+                and job.assignment_token is not None
+                and reply.reply_to == execution_call_id(job.id, job.assignment_token)
+            ):
+                await self.on_result(reply, message)
+                return
+        raise ProtocolViolation("reply has no matching invocation")
 
     def on_published(self) -> None:
         self.worker = self.workers.worker_connected(
@@ -290,7 +320,7 @@ class ServerCallbacks:
 
     async def before_item(self, item: ToolCall | ToolResult, message: WorkerMessage) -> None:
         if isinstance(item, ValidationErrorResult):
-            return  # Failure callbacks enforce their own correlation and pre-start fence.
+            return  # The error hook enforces correlation and the pre-start fence.
         if self._recovery_required:
             raise ProtocolViolation("critical protocol payload rejected; recovery required")
         if self.starting and not isinstance(item, Started):
@@ -306,12 +336,7 @@ class ServerCallbacks:
         if self._refresh_receive:
             self.receive_deadline = asyncio.get_running_loop().time() + self.heartbeat_timeout
 
-    async def on_started(
-        self, item: Started | ValidationErrorResult, message: WorkerMessage
-    ) -> None:
-        if isinstance(item, ValidationErrorResult):
-            await self.on_error(item, message)
-            return
+    async def on_started(self, item: Started, message: WorkerMessage) -> None:
         if not self.starting or self.current is None or self.stopping is not None:
             raise ProtocolViolation("unexpected Started")
         self._validate_active(item.arguments.job_id, item.arguments.assignment_token)
@@ -324,51 +349,7 @@ class ServerCallbacks:
         self.coordinator.mark_started(job, task, self.worker_id)
         self.starting = False
 
-    def _validate_tool(self, item: FlowToolRequest) -> None:
-        args = item.arguments
-        self._validate_active(args.job_id, args.assignment_token)
-        job = self.jobs.get_job(args.job_id)
-        if job is None or args.flow_id != job.flow_id:
-            raise ProtocolViolation("Flow tool call belongs to another Flow")
-
-    async def on_tool(
-        self, item: FlowToolRequest | ValidationErrorResult, message: WorkerMessage
-    ) -> None:
-        if isinstance(item, ValidationErrorResult):
-            await self.on_error(item, message)
-            return
-        self._validate_tool(item)
-        if self.stopping is None:
-            await self._send(
-                await self.tools.execute(
-                    item, worker_id=self.worker_id, connection_epoch=self.epoch
-                )
-            )
-
-    async def on_unrouted(self, item: ToolCall | ToolResult, message: WorkerMessage) -> None:
-        if isinstance(item, ValidationErrorResult):
-            await self.on_error(item, message)
-        elif isinstance(item, FlowToolRequest):
-            self._validate_tool(item)
-            if self.stopping is None:
-                await self._send(
-                    FlowToolResponse(
-                        **result_header(item.message_id),
-                        method=item.method,
-                        call_id=item.arguments.call_id,
-                        error="unregistered Flow tool",
-                        error_kind=FlowToolErrorKind.INVALID_REQUEST,
-                    )
-                )
-        else:
-            raise ProtocolViolation("unregistered message route")
-
-    async def on_result(
-        self, item: ExecuteResult | ValidationErrorResult, message: WorkerMessage
-    ) -> None:
-        if isinstance(item, ValidationErrorResult):
-            await self.on_error(item, message)
-            return
+    async def on_result(self, item: ExecuteResult, message: WorkerMessage) -> None:
         if self.stopping is not None:
             self._validate_active(item.job_id, item.assignment_token)
         terminal = item.terminal()
@@ -395,12 +376,7 @@ class ServerCallbacks:
             raise ProtocolViolation("result conflicts with persisted assignment facts")
         await self.results.apply(job.id)
 
-    async def on_accept_result(
-        self, item: AcceptResult | ValidationErrorResult, message: WorkerMessage
-    ) -> None:
-        if isinstance(item, ValidationErrorResult):
-            await self.on_error(item, message)
-            return
+    async def on_accept_result(self, item: AcceptResult, message: WorkerMessage) -> None:
         if self.stopping is not None:
             self._validate_active(item.arguments.job_id, item.arguments.assignment_token)
         job = self._validate_result_call(item)
@@ -415,12 +391,7 @@ class ServerCallbacks:
                 self.current = None
             self.notify_jobs()
 
-    async def on_stopped(
-        self, item: StopResult | ValidationErrorResult, message: WorkerMessage
-    ) -> None:
-        if isinstance(item, ValidationErrorResult):
-            await self.on_error(item, message)
-            return
+    async def on_stopped(self, item: StopResult, message: WorkerMessage) -> None:
         receipt = item.result
         if self.stopping is None:
             raise ProtocolViolation("unexpected stop receipt")
@@ -435,12 +406,7 @@ class ServerCallbacks:
             raise ProtocolViolation("stop blocked: receipt or external effects not converged")
         self.stopped = item
 
-    async def on_accept_stop(
-        self, item: AcceptStop | ValidationErrorResult, message: WorkerMessage
-    ) -> None:
-        if isinstance(item, ValidationErrorResult):
-            await self.on_error(item, message)
-            return
+    async def on_accept_stop(self, item: AcceptStop, message: WorkerMessage) -> None:
         args = item.arguments
         if self.stopping is None or self.stopped is None:
             raise ProtocolViolation("stop acceptance requires an actual validated receipt")
@@ -466,9 +432,13 @@ class ServerCallbacks:
 
     async def on_error(self, error: ValidationErrorResult, message: WorkerMessage) -> None:
         if message.connection_epoch == self.epoch:
-            if self.current is not None and error.method == "worker.execute":
+            if self.current is not None:
                 job, token, _ = self.current
-                if error.reply_to == execution_call_id(job.id, token) and self.starting:
+                if (
+                    error.reply_to == execution_call_id(job.id, token)
+                    and error.method == "worker.execute"
+                    and self.starting
+                ):
                     if self.stopping is not None:
                         return  # No journal exists to supply R; preserve the safe blocked stop.
                     if not self.workers.reject_assignment(
@@ -498,11 +468,13 @@ class ServerCallbacks:
                     self.current, self.starting = None, False
                     self.notify_jobs()
                     return
-            sent = self._sent.get(error.method)
-            if (sent is not None and error.reply_to == sent.message_id) or (
+            sent = next(
+                (item for item in self._sent.values() if item.message_id == error.reply_to), None
+            )
+            if (sent is not None and error.method == sent.method) or (
                 self.stopping is not None
-                and error.method == "worker.stop"
                 and error.reply_to == stop_call_id(self.stopping.fence())
+                and error.method == "worker.stop"
             ):
                 self._recovery_required = True
                 return

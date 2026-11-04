@@ -8,6 +8,8 @@ All methods run on one event loop; closing never owns business or execution task
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 
 from app.communication.dispatch import Dispatcher, SessionCallbacks
@@ -43,53 +45,54 @@ class Gateway[Incoming: Message, Outgoing: Message]:
     ) -> None:
         """Own admission, one serial event driver, and cleanup even for rejected candidates."""
         registration = None
-        entered = False
         code = 1000
         routes = Dispatcher[Incoming]()
+        failed: Callable[[Exception], Awaitable[int]] | None = None
+        cleanup = ExitStack()
         try:
             callbacks.bind(routes)
             routes.freeze()
             session.reject_with(routes.rejected)
-            try:
-                registration = await self.register(peer_id, session, replace=replace)
-                if routes.published is not None:
-                    routes.published()
-                entered = True
-                async with session.driving():
+            # Configuration errors propagate without entering business failure handling.
+            failed = routes.failed
+            registration = await self.register(peer_id, session, replace=replace)
+            if routes.published is not None:
+                routes.published()
+            if routes.closed is not None:
+                cleanup.callback(routes.closed)
+            async with session.driving():
+                with session.handling():
+                    await routes.opened()
+                while True:
                     with session.handling():
-                        await routes.opened()
-                    while True:
-                        with session.handling():
-                            until = await routes.poll() if routes.poll is not None else None
-                        event = await session.next_event(until=until)
-                        with session.handling():
-                            if event is None:
+                        until = await routes.poll() if routes.poll is not None else None
+                    event = await session.next_event(until=until)
+                    if event is None:
+                        continue
+                    with session.handling():
+                        if callable(event):
+                            await event()
+                            continue
+                        await routes.frame(event)
+                        for item in event.payload:
+                            if event.control is not None and session.dispatch_item(item, event):
                                 continue
-                            if callable(event):
-                                await event()
-                                continue
-                            await routes.frame(event)
-                            for item in event.payload:
-                                if event.control is not None and session.dispatch_item(item, event):
-                                    continue
-                                if routes.before_item is not None:
-                                    await routes.before_item(item, event)
-                                await routes.dispatch(item, event)
-                            if routes.frame_done is not None:
-                                routes.frame_done()
-            except Exception as error:
-                if routes.failed is None:
-                    raise
-                code = await routes.failed(error)
+                            if routes.before_item is not None:
+                                await routes.before_item(item, event)
+                            await routes.dispatch(item, event)
+                        if routes.frame_done is not None:
+                            routes.frame_done()
+        except Exception as error:
+            if failed is None:
+                raise
+            code = await failed(error)
         finally:
-            try:
+            # Run the business close hook after transport cleanup, even if cleanup fails.
+            with cleanup:
                 if registration is not None:
                     await self.unregister(registration, code)
                 else:
                     await session.close(code)
-            finally:
-                if entered and routes.closed is not None:
-                    routes.closed()
 
     def wake_all(self) -> None:
         for registration in self._current.values():

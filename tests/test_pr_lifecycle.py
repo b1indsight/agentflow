@@ -10,7 +10,7 @@ from app.contracts.protocol import PROTOCOL_VERSION, InitialTaskResult, Succeede
 from app.contracts.result_models import ResultPending
 from app.controler.events.router import EventRouter
 from app.controler.reconciliation.pull_requests import Reconciler
-from app.controler.workers.callbacks import ProtocolViolation
+from app.controler.workers.errors import ProtocolViolation
 from app.controler.workflow.lifecycle import pause_delivery
 from app.controler.workflow.service import ControlService
 from app.domain.delivery_models import PreparedDelivery

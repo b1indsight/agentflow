@@ -83,8 +83,6 @@ class Session[Incoming: Message, Outgoing: Message]:
         self._reader: asyncio.Task[None] | None = None
         self._inbox: deque[tuple[Incoming | Ready, int, int]] = deque()
         self._reject: Callable[[RejectedMessage], Ready] | None = None
-        self._inbox_bytes = 0
-        self._inbox_items = 0
         self._ready = asyncio.Event()
         self._receiving = False
         self._watches: dict[str, asyncio.Task[Ready]] = {}
@@ -293,9 +291,7 @@ class Session[Incoming: Message, Outgoing: Message]:
                         self._last_was_message = False
                         return task.result()
                 if self._inbox:
-                    message, size, count = self._inbox.popleft()
-                    self._inbox_bytes -= size
-                    self._inbox_items -= count
+                    message, _, _ = self._inbox.popleft()
                     self._last_was_message = True
                     return message
                 if self._woken:
@@ -443,9 +439,9 @@ class Session[Incoming: Message, Outgoing: Message]:
                 )
                 busy_needed = max(0, queries - (_MAX_HANDLERS - len(self._handlers)))
                 if (
-                    size + self._inbox_bytes > _MAX_BYTES
+                    size + sum(buffered_size for _, buffered_size, _ in self._inbox) > _MAX_BYTES
                     or len(self._inbox) >= _MAX_MESSAGES
-                    or self._inbox_items + len(message.payload) > _MAX_ITEMS
+                    or sum(items for _, _, items in self._inbox) + len(message.payload) > _MAX_ITEMS
                     or len(self._busy) + busy_needed > _MAX_BUSY
                 ):
                     raise SessionOverflow("execution message buffer exceeded")
@@ -461,8 +457,6 @@ class Session[Incoming: Message, Outgoing: Message]:
                         continue
                     message = message.model_copy(update={"payload": remaining})
                 self._inbox.append((message, size, len(message.payload)))
-                self._inbox_bytes += size
-                self._inbox_items += len(message.payload)
                 self._ready.set()
         except Exception as exc:  # noqa: BLE001 — next_event re-raises after the FIFO drains.
             self._read_error = exc
@@ -479,9 +473,9 @@ class Session[Incoming: Message, Outgoing: Message]:
     def _queue_rejection(self, message: RejectedMessage, size: int) -> None:
         count = len(message.payload)
         if (
-            size + self._inbox_bytes > _MAX_BYTES
+            size + sum(buffered_size for _, buffered_size, _ in self._inbox) > _MAX_BYTES
             or len(self._inbox) >= _MAX_MESSAGES
-            or self._inbox_items + count > _MAX_ITEMS
+            or sum(items for _, _, items in self._inbox) + count > _MAX_ITEMS
         ):
             raise SessionOverflow("execution message buffer exceeded")
         if self._reject is None:
@@ -524,8 +518,6 @@ class Session[Incoming: Message, Outgoing: Message]:
             return
         # Network rejection belongs at its arrival position, including EOF drain.
         self._inbox.append((reject, size, count))
-        self._inbox_bytes += size
-        self._inbox_items += count
         self._ready.set()
 
     def dispatch_item(self, item: ToolCall | ToolResult, frame: Incoming) -> bool:
@@ -598,8 +590,6 @@ class Session[Incoming: Message, Outgoing: Message]:
             self._closed = True
             self._fail_pending(self._write_error or SessionClosed("session closed"))
             self._inbox.clear()
-            self._inbox_bytes = 0
-            self._inbox_items = 0
             self._busy.clear()
             self._acks.clear()
             self._ready.set()

@@ -18,7 +18,6 @@ from app.contracts.protocol import (
     ConversationResult,
     ExecuteResult,
     ExecutionIdentity,
-    FlowToolResponse,
     Heartbeat,
     PayloadValidationError,
     ProtocolError,
@@ -49,7 +48,8 @@ from app.contracts.protocol import (
     terminal_id,
 )
 from app.contracts.validation import RejectedMessage
-from app.worker.execution.lifecycle import PendingToolCall, WorkerExecution, WorkerProtocolError
+from app.worker.execution.lifecycle import WorkerExecution, WorkerProtocolError
+from app.worker.transport.flow import WorkerFlowCallbacks
 
 
 def history_responder(read: Callable[[HistoryQuery], HistoryPage]) -> Responder[WorkerMessage]:
@@ -130,7 +130,7 @@ class WorkerCallbacks:
         self.ready = False
         self.expected_result: AcceptResult | None = None
         self.expected_stop: AcceptStop | None = None
-        self.pending_tool: PendingToolCall | None = None
+        self.flow = WorkerFlowCallbacks(session=session, execution=execution)
         self._started: Started | None = None
         self._terminal: ExecuteResult | None = None
         self._stopped: StopResult | None = None
@@ -141,19 +141,33 @@ class WorkerCallbacks:
         routes.register("worker.execute", Assignment, self.on_execute)
         routes.register("worker.stop", StopExecution, self.on_stop)
         routes.register("worker.reject_recovery", RecoveryRejected, self.on_reject)
-        routes.register("server.accept_result", ResultAccepted, self.on_accept_result)
-        routes.register("server.accept_stop", StopAccepted, self.on_accept_stop)
-        routes.register("server.execution_started", ValidationErrorResult, self.on_error)
-        routes.register("flow.open_pr", FlowToolResponse, self.on_tool)
         routes.configure(
             opened=self.on_opened,
             frame=self.on_frame,
+            result=self.on_reply,
+            validation_error=self.on_error,
             before_item=self.before_item,
             frame_done=self.on_frame_done,
             closed=self.on_closed,
             unrouted=self.on_unrouted,
             rejected=self.on_rejected,
         )
+
+    async def on_reply(self, reply: ToolResult, message: ServerMessage) -> None:
+        """Select the original call by reply_to before checking its result model."""
+        if self.expected_result is not None and reply.reply_to == self.expected_result.message_id:
+            if not isinstance(reply, ResultAccepted):
+                raise WorkerProtocolError("result acceptance has the wrong reply model")
+            await self.on_accept_result(reply, message)
+        elif self.expected_stop is not None and reply.reply_to == self.expected_stop.message_id:
+            if not isinstance(reply, StopAccepted):
+                raise WorkerProtocolError("stop acceptance has the wrong reply model")
+            await self.on_accept_stop(reply, message)
+        else:
+            await self.flow.on_reply(reply, message)
+
+    async def on_unrouted(self, item: ToolCall, message: ServerMessage) -> None:
+        raise WorkerProtocolError("unregistered message route")
 
     async def before_item(self, item: ToolCall | ToolResult, message: ServerMessage) -> None:
         if self._recovery_required and not isinstance(item, ValidationErrorResult):
@@ -192,7 +206,7 @@ class WorkerCallbacks:
             if message.control is None and all(
                 isinstance(i, ValidationErrorResult) for i in message.payload
             ):
-                return  # Individual error callbacks check the epoch before using correlations.
+                return  # The error hook checks the epoch before using correlations.
             raise WorkerProtocolError("message belongs to another connection epoch")
         if isinstance(message, Registered):
             if self.ready or self.expected_stop is not None:
@@ -218,7 +232,7 @@ class WorkerCallbacks:
 
     def _observe_execution(self) -> None:
         self.session.watch("terminal", self.execution.wait_terminal, self.send_terminal)
-        self.session.watch("tool", self.execution.next_tool_call, self.send_tool)
+        self.flow.observe()
 
     def heartbeat(self) -> WorkerMessage | None:
         assignment = self.execution.lease()
@@ -232,12 +246,7 @@ class WorkerCallbacks:
             assignment_token=assignment.assignment_token,
         )
 
-    async def on_execute(
-        self, call: Assignment | ValidationErrorResult, message: ServerMessage
-    ) -> None:
-        if isinstance(call, ValidationErrorResult):
-            await self.on_error(call, message)
-            return
+    async def on_execute(self, call: Assignment, message: ServerMessage) -> None:
         arguments = call.arguments
         if not self.ready or call.message_id != execution_call_id(
             arguments.job_id, arguments.assignment_token
@@ -266,24 +275,14 @@ class WorkerCallbacks:
         self.execution.start()
         self._observe_execution()
 
-    async def on_reject(
-        self, call: RecoveryRejected | ValidationErrorResult, message: ServerMessage
-    ) -> None:
-        if isinstance(call, ValidationErrorResult):
-            await self.on_error(call, message)
-            return
+    async def on_reject(self, call: RecoveryRejected, message: ServerMessage) -> None:
         assert self.register is not None
         if self.ready or call.arguments.register_message_id != self.register.message_id:
             raise WorkerProtocolError("recovery rejection belongs to another registration")
         await self.execution.reject_recovery(call.arguments.job_id)
         self.expected_result = None
 
-    async def on_accept_result(
-        self, reply: ResultAccepted | ValidationErrorResult, message: ServerMessage
-    ) -> None:
-        if isinstance(reply, ValidationErrorResult):
-            await self.on_error(reply, message)
-            return
+    async def on_accept_result(self, reply: ResultAccepted, message: ServerMessage) -> None:
         expected = self.expected_result
         if (
             expected is None
@@ -298,19 +297,14 @@ class WorkerCallbacks:
             self.execution.on_result_accepted(reply.result)
         self.expected_result = self._terminal = self._started = None
 
-    async def on_stop(
-        self, call: StopExecution | ValidationErrorResult, message: ServerMessage
-    ) -> None:
-        if isinstance(call, ValidationErrorResult):
-            await self.on_error(call, message)
-            return
+    async def on_stop(self, call: StopExecution, message: ServerMessage) -> None:
         if call.message_id != stop_call_id(call.arguments):
             raise WorkerProtocolError("stop invocation identity does not match its fence")
         assert message.connection_epoch is not None
         self._bind_epoch(message.connection_epoch)
         await self.session.unwatch("terminal", "tool")
         receipt = await self.execution.stop(call.arguments)
-        self.pending_tool = None
+        self.flow.pending = None
         identity = stop_receipt_id(receipt)
         self.expected_stop = AcceptStop(
             **call_header(accept_stop_id(identity)),
@@ -334,12 +328,7 @@ class WorkerCallbacks:
             self.expected_stop = self._stopped = None
             raise
 
-    async def on_accept_stop(
-        self, reply: StopAccepted | ValidationErrorResult, message: ServerMessage
-    ) -> None:
-        if isinstance(reply, ValidationErrorResult):
-            await self.on_error(reply, message)
-            return
+    async def on_accept_stop(self, reply: StopAccepted, message: ServerMessage) -> None:
         expected = self.expected_stop
         if (
             expected is None
@@ -351,28 +340,6 @@ class WorkerCallbacks:
         self.expected_stop = self.expected_result = self._started = self._terminal = (
             self._stopped
         ) = None
-
-    async def on_tool(
-        self, reply: FlowToolResponse | ValidationErrorResult, message: ServerMessage
-    ) -> None:
-        if isinstance(reply, ValidationErrorResult):
-            await self.on_error(reply, message)
-            return
-        if self.pending_tool is None:
-            raise WorkerProtocolError("Flow tool result has no pending invocation")
-        self.execution.finish_tool_call(self.pending_tool, reply)
-        self._tool_finished()
-
-    def _tool_finished(self) -> None:
-        self.pending_tool = None
-        if self.execution.lease() is not None:
-            self.session.watch("tool", self.execution.next_tool_call, self.send_tool)
-
-    async def on_unrouted(self, item: ToolCall | ToolResult, message: ServerMessage) -> None:
-        if isinstance(item, (FlowToolResponse, ValidationErrorResult)):
-            await self.on_tool(item, message)
-            return
-        raise WorkerProtocolError("unregistered message route")
 
     async def send_terminal(self, terminal: TerminalPayload) -> None:
         await self.session.unwatch("terminal", "tool")
@@ -399,30 +366,10 @@ class WorkerCallbacks:
             self.expected_result = self._terminal = None
             raise
 
-    async def send_tool(self, call: PendingToolCall) -> None:
-        self.pending_tool = call
-        try:
-            written = await self.session.send(
-                WorkerFrame(
-                    **frame_header(self.session.epoch), control=None, payload=[call.request]
-                ),
-                is_current=lambda: not call.future.done(),
-            )
-        except BaseException:
-            self.pending_tool = None
-            raise
-        if not written:
-            self._tool_finished()
-
     async def on_error(self, error: ValidationErrorResult, message: ServerMessage) -> None:
         if message.connection_epoch == self.session.epoch:
-            call = self.pending_tool
-            if call is not None and (error.method, error.reply_to) == (
-                call.request.method,
-                call.request.message_id,
-            ):
-                self.execution.reject_tool_call(call, "message payload failed validation")
-                self._tool_finished()
+            if self.flow.matches(error):
+                self.flow.reject("message payload failed validation")
                 return
             for sent in (
                 self._started,
@@ -454,11 +401,7 @@ class WorkerCallbacks:
         failed_tool = False
         for item in message.payload:
             if isinstance(item, ToolResult):
-                call = self.pending_tool
-                if call is not None and (item.method, item.reply_to) == (
-                    call.request.method,
-                    call.request.message_id,
-                ):
+                if self.flow.matches(item):
                     failed_tool = True
                 elif any(
                     sent is not None
@@ -471,11 +414,7 @@ class WorkerCallbacks:
             elif item.method in {"worker.stop", "worker.reject_recovery"}:
                 critical = True
         if failed_tool:
-            assert self.pending_tool is not None
-            self.execution.reject_tool_call(
-                self.pending_tool, "invalid tool response; remote effect outcome unknown"
-            )
-            self._tool_finished()
+            self.flow.reject("invalid tool response; remote effect outcome unknown")
 
         async def respond() -> None:
             await self.session.send(
