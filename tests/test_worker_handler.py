@@ -51,8 +51,8 @@ from app.contracts.protocol import (
 )
 from app.contracts.receipts import ResultInbox, decode_result_inbox
 from app.contracts.result_models import ResultPending
+from app.controler.runtime import ServerRuntime
 from app.controler.workers.conversation import ConversationBroker
-from app.controler.workers.handler import WorkerHandler
 from app.controler.workers.transport import serve_worker
 from app.controler.workflow.coordinator import JobCoordinator
 from app.controler.workflow.tools import FlowToolService
@@ -71,7 +71,7 @@ from app.persistence.store import Store
 from tests.persistence_fakes import RepositoryViews
 from tests.test_communication_session import Socket
 from tests.test_conversation_history import SESSION
-from tests.worker_fakes import NoPendingStops, connected_worker, result_application
+from tests.worker_fakes import NoPendingStops, connected_worker, result_application, server_runtime
 
 
 def register_frame(
@@ -482,7 +482,7 @@ async def test_gateway_runs_one_remote_assignment_to_ack() -> None:
     store = RecordingStore()
     coordinator = RecordingCoordinator(store)
     socket = ScriptedSocket()
-    handler = WorkerHandler(
+    handler = server_runtime(
         coordinator,
         database=store.database,
         peers=Gateway(),
@@ -493,7 +493,7 @@ async def test_gateway_runs_one_remote_assignment_to_ack() -> None:
         results=coordinator.results,
     )
 
-    await serve_worker(socket, handler=handler, worker_tokens={"worker-1": "worker-secret"})
+    await serve_worker(socket, serve=handler.serve_worker_session, worker_tokens={"worker-1": "worker-secret"})
 
     messages = sent_items(socket.sent)
     assert any(isinstance(message, Assignment) for message in messages)
@@ -524,14 +524,14 @@ async def test_gateway_authorizes_dispatch_after_preparation(monkeypatch):
 
     socket = ScriptedSocket()
     gateway_coordinator = ChangedCoordinator(store)
-    handler = WorkerHandler(
+    handler = server_runtime(
         gateway_coordinator,
         database=store.database,
         peers=Gateway(),
         tools=gateway_coordinator.tools,
         results=gateway_coordinator.results,
     )
-    await serve_worker(socket, handler=handler, worker_tokens={"worker-1": "worker-secret"})
+    await serve_worker(socket, serve=handler.serve_worker_session, worker_tokens={"worker-1": "worker-secret"})
     assert not any(isinstance(item, Assignment) for item in sent_items(socket.sent))
     assert not store.started
 
@@ -541,7 +541,7 @@ async def test_gateway_multiplexes_flow_tool_calls_during_execution() -> None:
     socket = ToolSocket()
     store = RecordingStore()
     gateway_coordinator = RecordingCoordinator(store)
-    handler = WorkerHandler(
+    handler = server_runtime(
         gateway_coordinator,
         database=store.database,
         peers=Gateway(),
@@ -550,7 +550,7 @@ async def test_gateway_multiplexes_flow_tool_calls_during_execution() -> None:
         results=gateway_coordinator.results,
     )
 
-    await serve_worker(socket, handler=handler, worker_tokens={"worker-1": "worker-secret"})
+    await serve_worker(socket, serve=handler.serve_worker_session, worker_tokens={"worker-1": "worker-secret"})
 
     responses = sent_items(socket.sent)
     assert any(isinstance(message, FlowToolResponse) for message in responses)
@@ -567,14 +567,14 @@ async def test_gateway_never_acknowledges_an_uncommitted_result(monkeypatch):
         raise ResultPending("GitHub outcome requires reconciliation")
 
     monkeypatch.setattr(coordinator.results, "_apply", unfinished)
-    handler = WorkerHandler(
+    handler = server_runtime(
         coordinator,
         database=store.database,
         peers=Gateway(),
         tools=coordinator.tools,
         results=coordinator.results,
     )
-    await serve_worker(socket, handler=handler, worker_tokens={"worker-1": "worker-secret"})
+    await serve_worker(socket, serve=handler.serve_worker_session, worker_tokens={"worker-1": "worker-secret"})
     assert store.job.result_payload is not None
     assert store.job.result_applied_at is None
     assert not any(isinstance(item, ResultAccepted) for item in sent_items(socket.sent))
@@ -651,7 +651,7 @@ async def test_gateway_rejects_bad_credentials_before_accepting(
     monkeypatch.setattr(socket, "receive_text", receive)
     store = RecordingStore()
     gateway_coordinator = RecordingCoordinator(store)
-    handler = WorkerHandler(
+    handler = server_runtime(
         gateway_coordinator,
         database=store.database,
         peers=Gateway(),
@@ -659,7 +659,7 @@ async def test_gateway_rejects_bad_credentials_before_accepting(
         results=gateway_coordinator.results,
     )
 
-    await serve_worker(socket, handler=handler, worker_tokens={"worker-1": "worker-secret"})
+    await serve_worker(socket, serve=handler.serve_worker_session, worker_tokens={"worker-1": "worker-secret"})
 
     assert socket.accepted is False
     assert socket.closed == 1008
@@ -676,7 +676,7 @@ async def test_gateway_closes_messages_with_an_incompatible_protocol_version() -
     socket = InvalidRegisterSocket()
     store = RecordingStore()
     gateway_coordinator = RecordingCoordinator(store)
-    handler = WorkerHandler(
+    handler = server_runtime(
         gateway_coordinator,
         database=store.database,
         peers=Gateway(),
@@ -684,7 +684,7 @@ async def test_gateway_closes_messages_with_an_incompatible_protocol_version() -
         results=gateway_coordinator.results,
     )
 
-    await serve_worker(socket, handler=handler, worker_tokens={"worker-1": "worker-secret"})
+    await serve_worker(socket, serve=handler.serve_worker_session, worker_tokens={"worker-1": "worker-secret"})
 
     assert socket.accepted is True
     assert socket.closed == 1008
@@ -723,7 +723,7 @@ async def test_disconnected_predecessor_does_not_reject_replacement() -> None:
     store.job.result_applied_at = store.job.updated_at
     gateway_coordinator = RecordingCoordinator(store)
     peers = Gateway[WorkerMessage, ServerMessage]()
-    handler = WorkerHandler(
+    handler = server_runtime(
         gateway_coordinator,
         database=store.database,
         peers=peers,
@@ -735,7 +735,7 @@ async def test_disconnected_predecessor_does_not_reject_replacement() -> None:
     first_session = asyncio.create_task(
         serve_worker(
             first,
-            handler=handler,
+            serve=handler.serve_worker_session,
             worker_tokens={"worker-1": "worker-secret"},
         )
     )
@@ -748,7 +748,7 @@ async def test_disconnected_predecessor_does_not_reject_replacement() -> None:
             asyncio.create_task(
                 serve_worker(
                     second,
-                    handler=handler,
+                    serve=handler.serve_worker_session,
                     worker_tokens={"worker-1": "worker-secret"},
                 )
             )
@@ -794,7 +794,7 @@ async def test_overlapping_replacements_do_not_republish_old_route():
     coordinator = RecordingCoordinator(store)
     gateway = Gateway()
     broker = ConversationBroker(gateway)
-    handler = WorkerHandler(
+    handler = server_runtime(
         coordinator,
         database=store.database,
         peers=gateway,
@@ -803,7 +803,7 @@ async def test_overlapping_replacements_do_not_republish_old_route():
     )
     tokens = {"worker-1": "worker-secret"}
     first, second, third = ClosingSocket(True), ClosingSocket(), ClosingSocket()
-    tasks = [asyncio.create_task(serve_worker(first, handler=handler, worker_tokens=tokens))]
+    tasks = [asyncio.create_task(serve_worker(first, serve=handler.serve_worker_session, worker_tokens=tokens))]
 
     async def next_business(socket):
         while True:
@@ -821,14 +821,14 @@ async def test_overlapping_replacements_do_not_republish_old_route():
         query = asyncio.create_task(broker.query("worker-1", HistoryQuery(session_id=SESSION)))
         await next_business(first)
         tasks.append(
-            asyncio.create_task(serve_worker(second, handler=handler, worker_tokens=tokens))
+            asyncio.create_task(serve_worker(second, serve=handler.serve_worker_session, worker_tokens=tokens))
         )
         await asyncio.wait_for(closing.wait(), 1)
         with pytest.raises(ConversationFailure, match="worker_unavailable"):
             await asyncio.wait_for(query, 1)
         only_receipt_acks(second)  # Receipt ACK does not publish a business route.
         tasks.append(
-            asyncio.create_task(serve_worker(third, handler=handler, worker_tokens=tokens))
+            asyncio.create_task(serve_worker(third, serve=handler.serve_worker_session, worker_tokens=tokens))
         )
         registered = await next_business(third)
         assert isinstance(registered, Registered)
@@ -865,7 +865,7 @@ class DisconnectingSocket(ScriptedSocket):
 async def test_gateway_disconnect_policy(disconnect_after_start: bool) -> None:
     store = RecordingStore()
     coordinator = RecordingCoordinator(store)
-    handler = WorkerHandler(
+    handler = server_runtime(
         coordinator,
         database=store.database,
         peers=Gateway(),
@@ -876,7 +876,7 @@ async def test_gateway_disconnect_policy(disconnect_after_start: bool) -> None:
 
     await serve_worker(
         DisconnectingSocket(disconnect_after_start=disconnect_after_start),
-        handler=handler,
+        serve=handler.serve_worker_session,
         worker_tokens={"worker-1": "worker-secret"},
     )
 
@@ -937,7 +937,7 @@ async def test_gateway_resumes_started_assignment_under_a_new_epoch() -> None:
     store.job.started_at = store.job.created_at
     socket = RecoveringSocket()
     gateway_coordinator = RecordingCoordinator(store)
-    handler = WorkerHandler(
+    handler = server_runtime(
         gateway_coordinator,
         database=store.database,
         peers=Gateway(),
@@ -945,7 +945,7 @@ async def test_gateway_resumes_started_assignment_under_a_new_epoch() -> None:
         results=gateway_coordinator.results,
     )
 
-    await serve_worker(socket, handler=handler, worker_tokens={"worker-1": "worker-secret"})
+    await serve_worker(socket, serve=handler.serve_worker_session, worker_tokens={"worker-1": "worker-secret"})
 
     messages = [parse_server_message(raw) for raw in socket.sent]
     resumed = next(
@@ -981,9 +981,9 @@ async def test_transport_checks_actual_first_frame_before_session_dispatch(first
             return register_frame(self.worker_id).model_dump_json()
 
     socket = BadFirstSocket()
-    handler = Mock(spec=WorkerHandler)
-    await serve_worker(socket, worker_tokens={"worker-1": "worker-secret"}, handler=handler)
-    handler.handle.assert_not_called()
+    serve = AsyncMock()
+    await serve_worker(socket, worker_tokens={"worker-1": "worker-secret"}, serve=serve)
+    serve.assert_not_called()
     assert socket.closed == 1008
     assert len(socket.sent) == 1
     assert isinstance(parse_server_message(socket.sent[0]), ProtocolError)
@@ -1032,7 +1032,7 @@ async def test_handler_cleanup_joins_communication_before_presence_and_propagate
     store.job.state = JobState.DONE
     coordinator = RecordingCoordinator(store)
     peers = Gateway()
-    handler = WorkerHandler(
+    handler = server_runtime(
         coordinator,
         database=store.database,
         peers=peers,
@@ -1043,7 +1043,7 @@ async def test_handler_cleanup_joins_communication_before_presence_and_propagate
     if failure == "sealed":
         peers.seal()
     running = asyncio.create_task(
-        serve_worker(socket, worker_tokens={"worker-1": "worker-secret"}, handler=handler)
+        serve_worker(socket, worker_tokens={"worker-1": "worker-secret"}, serve=handler.serve_worker_session)
     )
     try:
         if failure != "sealed":
@@ -1080,9 +1080,9 @@ async def test_handler_cleanup_joins_communication_before_presence_and_propagate
         await asyncio.gather(running, peers.close(), return_exceptions=True)
 
 
-def handler_for(store: RecordingStore) -> WorkerHandler:
+def handler_for(store: RecordingStore) -> ServerRuntime:
     coordinator = RecordingCoordinator(store)
-    return WorkerHandler(
+    return server_runtime(
         coordinator,
         database=store.database,
         peers=Gateway(),
@@ -1143,7 +1143,7 @@ async def test_control_and_payload_keep_order_and_trailing_acceptance(batch):
 
     store, socket = RecordingStore(), BatchedSocket()
     await serve_worker(
-        socket, handler=handler_for(store), worker_tokens={"worker-1": "worker-secret"}
+        socket, serve=handler_for(store).serve_worker_session, worker_tokens={"worker-1": "worker-secret"}
     )
     responses = [item for item in sent_items(socket.sent) if isinstance(item, ResultAccepted)]
     if batch in {"reversed", "wrong_epoch"}:
@@ -1223,7 +1223,7 @@ async def test_terminal_waits_for_actual_acceptance_write_before_next_assignment
         return state
 
     handler.results._apply = commit
-    await serve_worker(socket, handler=handler, worker_tokens={"worker-1": "worker-secret"})
+    await serve_worker(socket, serve=handler.serve_worker_session, worker_tokens={"worker-1": "worker-secret"})
     assert store.job.result_applied_at is not None
     assert (store.assignments > 1) == (acceptance in {"later", "heartbeat"})
 
@@ -1257,7 +1257,7 @@ async def test_result_identities_and_durable_inbox_are_required(defect):
 
     store, socket = RecordingStore(), InvalidResultSocket()
     await serve_worker(
-        socket, handler=handler_for(store), worker_tokens={"worker-1": "worker-secret"}
+        socket, serve=handler_for(store).serve_worker_session, worker_tokens={"worker-1": "worker-secret"}
     )
     assert socket.closed == 1008
     assert not any(isinstance(item, ResultAccepted) for item in sent_items(socket.sent))
@@ -1308,7 +1308,7 @@ async def test_registration_only_answers_actual_committed_acceptance(committed, 
     socket, handler = RegistrationSocket(), handler_for(store)
     apply = AsyncMock(side_effect=AssertionError("registration must not apply a pending inbox"))
     handler.results._apply = apply
-    await serve_worker(socket, handler=handler, worker_tokens={"worker-1": "worker-secret"})
+    await serve_worker(socket, serve=handler.serve_worker_session, worker_tokens={"worker-1": "worker-secret"})
     apply.assert_not_awaited()
     responses = [item for item in sent_items(socket.sent) if isinstance(item, ResultAccepted)]
     assert len(responses) == int(committed and with_accept)
@@ -1377,7 +1377,7 @@ async def test_duplicate_prior_job_result_does_not_retire_current_assignment():
 
     store, socket = PriorStore(), DuplicateSocket()
     await serve_worker(
-        socket, handler=handler_for(store), worker_tokens={"worker-1": "worker-secret"}
+        socket, serve=handler_for(store).serve_worker_session, worker_tokens={"worker-1": "worker-secret"}
     )
     responses = [item for item in sent_items(socket.sent) if isinstance(item, ResultAccepted)]
     assert [item.result.job_id for item in responses] == [4, 5]
@@ -1401,7 +1401,7 @@ async def test_recovery_rejection_is_correlated_to_register_before_registered():
     store, socket = RecordingStore(), RejectedSocket()
     store.job.state = JobState.DONE
     await serve_worker(
-        socket, handler=handler_for(store), worker_tokens={"worker-1": "worker-secret"}
+        socket, serve=handler_for(store).serve_worker_session, worker_tokens={"worker-1": "worker-secret"}
     )
     business = [
         frame for frame in map(parse_server_message, socket.sent) if frame.control or frame.payload

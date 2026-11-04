@@ -31,6 +31,7 @@ from app.contracts.protocol import (
     call_header,
     frame_header,
 )
+from app.contracts.validation import PayloadRejected
 from app.domain.models import Attempt
 from app.persistence.database import Database
 from app.persistence.flows import FlowStore
@@ -38,7 +39,7 @@ from app.persistence.workers import WorkerStore
 
 
 def conversation_result_key(message: ToolCall | ToolResult, epoch: str) -> ReplyKey | None:
-    if isinstance(message, ConversationResult):
+    if isinstance(message, ToolResult) and message.method == "worker.history":
         return message.reply_to, epoch
     return None
 
@@ -80,6 +81,8 @@ class ConversationBroker:
             return self._validated(request, response, frame)
         except SessionBusy as exc:
             raise ConversationFailure("query_busy") from exc
+        except PayloadRejected as exc:
+            raise ConversationFailure("invalid_response") from exc
         except TimeoutError as exc:
             raise ConversationFailure("query_timeout") from exc
         except SessionClosed as exc:

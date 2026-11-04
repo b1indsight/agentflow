@@ -24,7 +24,7 @@ from app.contracts.protocol import (
 
 def frame(payload: Sequence[JsonValue], **fields: JsonValue) -> dict[str, JsonValue]:
     return {
-        "protocol_version": 16,
+        "protocol_version": PROTOCOL_VERSION,
         "message_id": "1" * 32,
         "connection_epoch": "epoch",
         "control": None,
@@ -216,7 +216,8 @@ def test_item_metadata_is_required_on_the_wire(key: str) -> None:
     "fields",
     [
         {"protocol_version": 15},
-        {"protocol_version": 16.0},
+        {"protocol_version": 16},
+        {"protocol_version": 17.0},
         {"message_id": "A" * 32},
         {"ack": 1},
         {"ack": "true"},
@@ -254,7 +255,7 @@ def test_mixed_control_ack_and_business_have_independent_identities() -> None:
         [terminal_item, accept], control="heartbeat", **IDENTITY, ack=True, ack_id="c" * 32
     )
     parsed = parse_worker_message(json.dumps(data))
-    assert PROTOCOL_VERSION == 16
+    assert PROTOCOL_VERSION == 17
     assert isinstance(parsed.payload[0], ExecuteResult)
     assert parsed.payload[0].terminal() == terminal
     assert isinstance(parsed.payload[1], AcceptResult)

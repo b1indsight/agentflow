@@ -114,8 +114,11 @@ Broker 通过共享 Gateway 选择一次当前 Session；替换期间未发布�
 页面/session 校验及 Flow/Attempt 归属留在业务层，通信匹配不表示执行结果已应用或授权释放 slot。
 已知环境凭据及常见 token 文本会脱敏，但不保证自动识别任意源码或文本中的所有秘密。
 
-本功能最初使用 wire protocol v11；当前整体协议为 v16，journal 为 v5。
+本功能最初使用 wire protocol v11；当前整体协议为 v17，journal 为 v5。
 `worker.history` call/result 保留查询内容，以条目 message_id/reply_to 与原 Session epoch 关联。
 Session.request 只为选定的调用建立临时 Future；历史页 512 KiB 限额按所选条目加共享头计算，
 不把同帧无关业务算入页大小。控制 ACK 不表示查询或执行业务成功。
+已完成握手且关联头有效的坏 payload 返回同方法的 `tool_result.error`，仅含固定
+`code=validation_error` 与 `message=message payload failed validation`。坏回复也失败原查询为
+`invalid_response`；不等待超时、不重放查询。整批失败不执行合法兄弟项，不对畸形 error 再回 error。
 control 和 worker 必须协调升级；不能把网络协议版本不兼容当成可恢复的会话查询失败。

@@ -26,8 +26,8 @@ PR、反馈与 Projects。事件、Worker 管理和对账调用工作流，工�
 各子包直接引用已有领域类型、协议、具体仓储/GitHub 及配置，不反向依赖 API 或运行时。
 Runtime 统一初始化工具、effects、结果应用和 conversation broker；各服务仅接收实际
 使用的数据库与服务，自行创建需要的具体仓储。Runtime 管理共享 Database 的初始化和关闭，
-向服务提供同一 Database。Gateway 直接使用工具和结果应用，结果应用的锁由 Runtime、coordinator
-与 Gateway 共享。Webhook 消费器接收配置、插件、通知回调和 Database，在每次 receipt
+向服务提供同一 Database。ServerCallbacks 直接使用工具和结果应用，结果应用的锁由 Runtime、coordinator
+与回调对象共享；Gateway 只驱动通信事件。Webhook 消费器接收配置、插件、通知回调和 Database，在每次 receipt
 事务内直接创建 ControlService 与 EventRouter，构造函数以事务上下文创建仓储；通知和 hook
 排到外层提交后执行。API 和对账使用独立的常驻控制服务。
 各包入口只说明职责，调用者直接导入具体模块。
@@ -108,12 +108,12 @@ Runtime 创建并共享的 `ResultApplication` 按 job ID 读取并校验已持�
 PR 依赖操作与 INITIAL 提交复用 `contracts.result_models.unique_pull_request_receipt`，
 只消费已读取的唯一创建回执；退休恢复缺少唯一回执时继续等待，不提交本地完成状态。
 `ResultApplication` 同时拥有逐 job 锁、有界分页和固定并发恢复；Runtime 调度其恢复方法，
-WorkerHandler 持久接收终态 T 后直接调用 `self.results.apply`，核验提交完成后才回复接纳调用 A；
-工具请求直接调用 `handler.tools.execute`。内部配置、数据库、仓储与服务依赖使用具体类型。
+ServerCallbacks 持久接收终态 T 后直接调用 `self.results.apply`，核验提交完成后才回复接纳调用 A；
+工具请求直接调用 `self.tools.execute`。内部配置、数据库、仓储与服务依赖使用具体类型。
 网络请求不占用数据库事务；plugin hook 在提交后调用，不具备持久化投递保证。worker 不能直接更新这些状态。
 `JobCoordinator.prepare_for_assignment` 完成任务构造、push capability 签发和 I/O 后业务复查，
 直接返回 typed `AssignmentArguments` 或 QUEUED/DONE/FAILED。读取故障使用持久重试预算，签发故障直接失败。
-`WorkerHandler` 在准备期间维持租约心跳，连接结束时取消并等待准备协程；发送前仍独立调用
+`ServerCallbacks` 在准备期间维持租约心跳，连接结束时取消并等待准备协程；发送前仍独立调用
 `self.stops.authorize_dispatch`，再以稳定执行 ID 和当前连接头构造 `worker.execute` 调用。
 非零 Codex exit 会转 FAILED。revision 成功后仅消费明确 addressed 的 item/version，deferred/遗漏项/
 clarification 保持 waiting；不把 addressed 当作远端 resolved。有未决问题时不重新请求审核。
@@ -133,20 +133,23 @@ M2 已接入有界 Issue/PR/patch/讨论快照、线程/comment 映射与原线�
 
 ### 4.3.1 公共 Gateway / Session 与角色驱动
 
-两端使用同一个 `app/communication/gateway.py` 的 `Gateway`，统一登记、查找、替换和通信关闭。
-ServerRuntime 创建多 worker Gateway，供 WorkerHandler 和 ConversationBroker 共用；WorkerClient
-内部创建同类 Gateway，以固定 `server` key 拒绝重叠连接。Runtime 装配暂不要求两端完全对称。
+两端 Runtime 直接创建同类 `Gateway`，统一登记、查找、替换、通信关闭和串行事件驱动。
+ServerRuntime 为每条连接创建 `ServerCallbacks`；WorkerRuntime 创建 `WorkerCallbacks`，
+以固定 `server` key 拒绝重叠连接。两个业务模块均命名为 `callbacks.py`，没有第二套接收循环。
+Gateway 在准入前调用 `bind(routes)`，冻结 `register("包名.方法名", model, callback)` 的精确路由；
+不使用通配、反射或 pluggy hook 分发。Session 交付既有 msg、类型化 Ready 回调或无数据 wake，
+不增加 Delivery；观察任务只借用执行结果，业务处理始终在共同驱动中串行进行。
 
 serve 的 `workers/transport.py:serve_worker` 校验 bearer token、accept 与实际首帧 Register，
-再创建带随机 epoch 的 Session，交给 `WorkerHandler.handle`。handler 委托 Gateway 登记，
-保留调度、恢复、持久化和 assignment fencing；业务局部状态留在这一协程中，无 Endpoint/Run 对象。
+再创建带随机 epoch 的 Session，交给 Runtime 装配回调并调用 `Gateway.serve`。
+回调保存调度、恢复、持久化和 assignment fencing 的连接局部状态，无 Endpoint/Run/Context 对象。
 每个 worker 是单槽，PostgreSQL 按 FIFO、worker `last_assigned_at` 和 Flow execution binding
-事务化领取任务。worker 的 `WorkerClient` 主动连接并指数退避；
+事务化领取任务。worker 的 `WorkerClient` 只主动拨号、认证并指数退避，不持有 Gateway 或执行 owner；
 `WorkerExecutor` 只依赖 CodingAgent 和 Flow repo/VCS helpers，不导入 Store、FastAPI 或 GitHub。
 
 Gateway 仅发布当前登记，另保留尚未退休的 Session 以便进程关闭全部通信。A→B→C 重叠替换时，
 C 可越过慢 A；B 等待结束后必须复核身份，不能重新发布或覆盖在线 DB。旧 finally 只退休自己。
-handler 退出先撤回路由并 join Session，再以原 epoch 写 DB 断连；关闭错误也不跳过 DB 清理。
+Gateway 退出先撤回路由并 join Session，再调用角色 closed 钩子以原 epoch 写 DB 断连；关闭错误也不跳过 DB 清理。
 进程关闭先 seal，拒绝新登记和查找，再 join 全部通信；不接管 ASGI 或执行任务。正常 ASGI drain
 仍负责业务退出，强制超时退出没有新增业务 join 保证。FastAPI transport.close 仅吸收正常断连的
 WebSocketDisconnect，其他错误与取消继续传播，见[第三阶段记录](../plan/shared-communication-gateway.md)。
@@ -184,7 +187,7 @@ worker socket 与 executor 解耦，root 内原子 journal 在 ack 前保存进�
   shell 进程组。该快照无法保证回收任意脱离进程树的进程；仍依赖外部隔离。
 - `ExecutionState` 按 ID 格式选择历史来源。Amp 原生 export 经公开块映射与脱敏后短时缓存，
   支持外部追加、块内分页、前缀编辑失效；不保存第二套捕获历史，不显示 thinking。
-  记录 ID 保留 session 前缀，满足 control 的来源校验；两端使用 protocol v16。
+  记录 ID 保留 session 前缀，满足 control 的来源校验；两端使用 protocol v17。
 - workspace Amp 设置可能覆盖临时设置，因此执行前发现设置即拒绝。managed policy/账户插件仍由
   运维核查；有效工具列表检查只影响结果接收，不能替代权限或 OS 隔离。
 
@@ -329,7 +332,7 @@ lease 到期 requeue、started grace/deadline、epoch fencing、result inbox 去
 评论使用稳定隐藏 marker 并分页核对本 bot 作者，PR 使用固定 head 查询，labels/reviewers 则核对目标状态。
 不能确认是否成功的非幂等请求保持 uncertain，不盲目重复 POST；`flow show` 显示待处理操作，retry 不能绕过它们。
 因此不宣称跨 PostgreSQL/GitHub 的通用 exactly-once。跨 worker session 迁移和多 serve HA 仍未实现。
-当前只初始化完整 schema，不执行 DDL 迁移或批量回填。serve/worker 在线使用 wire16，
+当前只初始化完整 schema，不执行 DDL 迁移或批量回填。serve/worker 在线使用 wire17，
 正常写 journal5 / ResultInbox v1；journal/inbox 只存业务事实，不存帧、条目身份、ACK 或 epoch。
 受限 v4 journal（内嵌 v14/v15 回执）与已知旧 inbox 只读转换；保持摘要，正常状态保存才写 v5。
 未知、混合或损坏记录保留并拒绝；切换和降级边界见[升级说明](../operations/upgrade.md)。
@@ -399,15 +402,16 @@ Client 只借用 owner；替换前必须关闭并 join 旧 Client，同一 owner
 然后重放终态；普通 started 任务在进程重启后没有 Task 时仍不能推断已停止或重新运行。
 
 首次派发保持 `record_received → 发送 Started → record_started → 创建 Task` 的顺序。
-工具调用由 MCP 交给 owner，Client 借用队头、以当前 epoch 的新帧发送原条目，收到响应后交回 owner
+工具调用由 MCP 交给 owner，WorkerCallbacks 借用队头、以当前 epoch 的新帧发送原条目，收到响应后交回 owner
 完成原 Future。断线不出队、不换 call_id 或调用条目 ID；原 socket 仍消费已取消调用的匹配迟到回复。
 `on_result_accepted` / `on_stop_accepted` 只处理收到的确认，不发送 ACK。
 
-WorkerClient 与 server WorkerHandler 使用公共 Gateway 管理 `app/communication/session.py` 中的 Session 实例。
+双端 Runtime 使用公共 Gateway 管理 `app/communication/session.py` 中的 Session 实例。
 一个 Session 对应单个对端的一次连接 epoch，唯一 reader 严格解析整帧；其余业务消息进入
 32 帧 / 32 条业务 / 16 MiB FIFO。独立 history 查询及回复旁路执行业务；与控制同帧时先由控制 owner
-通过控制，再逐项分派。`Dispatcher` 按 `(type, method)` 注册现有实例回调，无反射或广播。
-WorkerClient 单一业务循环复用 incoming/terminal/tool 观察任务，回调完成当前转换后返回。
+通过控制，再逐项分派。`Dispatcher` 按 `package.method` 注册具体模型与绑定回调，无反射或广播。
+Session 对 terminal/tool 做有界一次性观察；Gateway 公平交替网络输入与就绪回调，禁止嵌套消费。
+Session 的 stop 硬截止覆盖回调内部 await；通信心跳独立运行，慢业务不阻塞心跳发送。
 所有消息经 Session 串行写入，`send` 等实际写完成；工具 guard 在拿到锁后的实际写入前检查。
 不确定的写失败/取消封闭连接，无自动重试。FastAPI socket 直接满足 Transport；websockets client
 只用本地适配器转换 send/recv/bytes。帧携带共同连接头及 typed call/result 列表，
@@ -415,7 +419,7 @@ WorkerClient 单一业务循环复用 incoming/terminal/tool 观察任务，回�
 
 Session 关联至多 4 个临时请求；Broker 保留全局 64 准入、30 秒总预算和历史页校验，
 通过 Gateway.get 选择一次原 Session，不保存第二张 peer 表、不重投后继连接。
-只有显式分类的 ConversationResult 是临时 reply；工具响应、结果和停止 ACK 仍交业务验证。
+只有 `worker.history` 结果（含校验失败）是临时 reply；工具响应、结果和停止 ACK 仍交业务验证。
 worker 每连接最多 4 个历史 handler，满额时由单独 sender 写入最多 4 条 busy 回复（含在发项），
 持续超限断连。epoch 由合法握手/恢复响应确认一次；`worker.stop` 与已提交 Register+A 的接纳回复可早于 Registered。
 终态发 `[T,A]`，停止发 `[R,B]`；每项各自关联。T 后不丢 A，R 后不丢 B；停止阶段不回复 A、不创建新 Flow effects。
@@ -425,7 +429,15 @@ shielded stop，也不释放 Flow binding。读失败立即失败临时查询，
 显式关闭则丢弃旧 FIFO。旧连接/epoch 回复不能完成新请求，不跨连接重放查询。
 历史读取经注入的 `read_history` 调用 `ExecutionState.read()`，再选择 Codex/Amp 读取器，
 允许查询 control 指定的既往会话；无额外历史 facade。取消 to_thread 的等待不保证同步读取立即停止；
-其结果只属于旧 Session。Runtime 对称装配、可靠领域事件/outbox 与 HA 留待后续阶段。
+其结果只属于旧 Session。可靠领域事件/outbox 与 HA 不在当前通信架构范围。
+
+wire v17 的可关联 payload 校验失败整批拒收；合法兄弟项也不执行。每项收到同 method、
+`reply_to=原条目ID` 的 `tool_result`，error 严格只有固定 `code=validation_error` 与
+`message=message payload failed validation`，不暴露详情。坏头、握手、epoch、容量或畸形 error
+仍关闭连接，不对 error 回 error；混合控制拒收不续租、不登记 ACK。
+普通工具/history 失败原 Future，保持连接；Started、T/A、R/B 或 stop 失败保留证据并恢复关闭。
+Assignment 拒绝只在 SQL 预启动围栏成立后写 control-source Failed，应用提交后才退出派发等待；
+与 stop 竞争时保留 binding/intent，缺 journal 不能伪造停止证据。双端协调升级，journal5/inbox1 不变。
 
 WorkerMCP 随首次编码启动与关闭，复用现有 HTTP 依赖，仅暴露 open_pr；无 STDIO 桥接进程。
 修订恢复覆盖为禁用的 flow MCP 配置，避免重新连接旧任务端口。MCP 服务不接管 worker 信号。

@@ -35,10 +35,10 @@ from app.contracts.protocol import (
 )
 from app.worker.execution.lifecycle import WorkerExecution, WorkerProtocolError
 from app.worker.state.execution import ExecutionState
-from app.worker.transport.client import WorkerClient
 from tests.test_conversation_history import SESSION
 from tests.test_worker_session import _assignment
 from tests.wire import registered, server_frame
+from tests.worker_fakes import run_worker, worker_runtime
 
 
 class Connection:
@@ -77,7 +77,7 @@ async def test_query_does_not_block_execution_messages(tmp_path, batched) -> Non
             return HistoryPage(session_id=query.session_id)
 
     state = State(tmp_path)
-    client = WorkerClient(
+    client = worker_runtime(
         worker_id="worker-1",
         worker_token="token",
         serve_ws_url="unused",
@@ -92,11 +92,11 @@ async def test_query_does_not_block_execution_messages(tmp_path, batched) -> Non
     else:
         await connection.incoming.put(server_frame(query, epoch="e1").model_dump_json())
         await connection.incoming.put(registered(epoch="e1").model_dump_json())
-    running = asyncio.create_task(client.run_connection(connection))
+    running = asyncio.create_task(run_worker(client, connection))
     try:
         await connection.outgoing.get()  # Registration request.
         assert await asyncio.to_thread(started.wait, 5)
-        assert client.connected
+        assert client._connected
         release.set()
         frame = await connection.receive_frame()
         assert len(frame.payload) == 1 and frame.connection_epoch == "e1"
@@ -115,7 +115,7 @@ async def test_query_does_not_block_execution_messages(tmp_path, batched) -> Non
 async def test_bad_cursor_returns_correlated_query_error(tmp_path):
     connection = Connection()
     state = ExecutionState(tmp_path)
-    client = WorkerClient(
+    client = worker_runtime(
         worker_id="worker",
         worker_token="token",
         serve_ws_url="unused",
@@ -127,7 +127,7 @@ async def test_bad_cursor_returns_correlated_query_error(tmp_path):
         method="worker.history",
         arguments=HistoryArguments(session_id=SESSION, cursor="invalid-base64"),
     )
-    running = asyncio.create_task(client.run_connection(connection))
+    running = asyncio.create_task(run_worker(client, connection))
     try:
         await connection.outgoing.get()  # Register must be the first outbound frame.
         await connection.incoming.put(server_frame(request, epoch="epoch").model_dump_json())
@@ -136,7 +136,7 @@ async def test_bad_cursor_returns_correlated_query_error(tmp_path):
         result = frame.payload[0]
         assert isinstance(result, ConversationResult)
         assert result.reply_to == request.message_id and result.error == "cursor_invalid"
-        assert not client.connected  # A query cannot confirm registration or the epoch.
+        assert not client._connected  # A query cannot confirm registration or the epoch.
     finally:
         running.cancel()
         await asyncio.gather(running, return_exceptions=True)
@@ -165,7 +165,7 @@ async def test_query_completes_during_handshake_cleanup_before_registered(tmp_pa
     owner.receive(work)
     owner.start()
     connection = Connection()
-    client = WorkerClient(
+    client = worker_runtime(
         worker_id="worker",
         worker_token="test",
         serve_ws_url="unused",
@@ -181,7 +181,7 @@ async def test_query_completes_during_handshake_cleanup_before_registered(tmp_pa
     request = StopExecution(
         **call_header(stop_call_id(fence)), method="worker.stop", arguments=fence
     )
-    running = asyncio.create_task(client.run_connection(connection))
+    running = asyncio.create_task(run_worker(client, connection))
     try:
         await started.wait()
         register = await connection.receive_frame()
@@ -208,7 +208,7 @@ async def test_query_completes_during_handshake_cleanup_before_registered(tmp_pa
         result = frame.payload[0]
         assert isinstance(result, ConversationResult) and result.page is not None
         assert result.reply_to == query.message_id
-        assert not client.connected and not release.is_set()
+        assert not client._connected and not release.is_set()
         release.set()
         if operation == "stop":
             stopped = await connection.receive_frame()
@@ -227,7 +227,7 @@ async def test_query_completes_during_handshake_cleanup_before_registered(tmp_pa
             await connection.incoming.put(server_frame(accepted, epoch="new").model_dump_json())
         await connection.incoming.put(registered(epoch="new").model_dump_json())
         async with asyncio.timeout(1):
-            while not client.connected:
+            while not client._connected:
                 await asyncio.sleep(0)
         if operation == "stop":
             journal = state.load()
@@ -250,7 +250,7 @@ async def test_recovery_result_ack_before_registered_confirms_epoch(tmp_path, co
     state.record_started()
     state.complete(InitialTaskResult(session_id=SESSION, last_message="done", exit_code=0))
     owner = WorkerExecution(worker_id="worker", executor=SimpleNamespace(), state=state)
-    client = WorkerClient(
+    client = worker_runtime(
         worker_id="worker",
         worker_token="test",
         serve_ws_url="unused",
@@ -258,7 +258,7 @@ async def test_recovery_result_ack_before_registered_confirms_epoch(tmp_path, co
         read_history=state.read,
     )
     connection = Connection()
-    running = asyncio.create_task(client.run_connection(connection))
+    running = asyncio.create_task(run_worker(client, connection))
     try:
         register = await connection.receive_frame()
         assert isinstance(register, Register) and len(register.payload) == 1
@@ -281,7 +281,7 @@ async def test_recovery_result_ack_before_registered_confirms_epoch(tmp_path, co
         assert len(response.payload) == 1 and isinstance(response.payload[0], ConversationResult)
         assert response.payload[0].reply_to == barrier.message_id
         journal = state.load()
-        assert journal is not None and not journal.acknowledged and not client.connected
+        assert journal is not None and not journal.acknowledged and not client._connected
         accepted = ResultAccepted(
             **result_header(acceptance.message_id),
             method="server.accept_result",
@@ -298,7 +298,7 @@ async def test_recovery_result_ack_before_registered_confirms_epoch(tmp_path, co
                 await asyncio.wait_for(running, 1)
         else:
             async with asyncio.timeout(1):
-                while not client.connected:
+                while not client._connected:
                     await asyncio.sleep(0)
         journal = state.load()
         assert journal is not None and journal.acknowledged and state.assignment is None

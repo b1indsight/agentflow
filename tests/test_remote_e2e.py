@@ -18,7 +18,6 @@ from app.contracts.protocol import (
     terminal_digest,
 )
 from app.contracts.receipts import ResultInbox, decode_result_inbox
-from app.controler.workers.handler import WorkerHandler
 from app.controler.workers.transport import serve_worker
 from app.controler.workflow.coordinator import JobCoordinator
 from app.controler.workflow.tools import FlowToolService
@@ -28,10 +27,16 @@ from app.persistence.stops import StopStore
 from app.persistence.store import Store
 from app.worker.execution.lifecycle import WorkerExecution
 from app.worker.state.execution import ExecutionState
-from app.worker.transport.client import WorkerClient
 from app.worker.transport.mcp import FlowToolCaller
 from tests.persistence_fakes import RepositoryViews
-from tests.worker_fakes import NoPendingStops, connected_worker, result_application
+from tests.worker_fakes import (
+    NoPendingStops,
+    connected_worker,
+    result_application,
+    run_worker,
+    server_runtime,
+    worker_runtime,
+)
 
 
 class QueueSocket:
@@ -301,7 +306,7 @@ async def test_control_gateway_and_worker_client_complete_one_remote_job(tmp_pat
     serve_to_worker: asyncio.Queue[str] = asyncio.Queue()
     store = RemoteStore()
     coordinator = RemoteCoordinator(store)
-    handler = WorkerHandler(
+    handler = server_runtime(
         coordinator,
         database=store.database,
         peers=Gateway(),
@@ -311,7 +316,7 @@ async def test_control_gateway_and_worker_client_complete_one_remote_job(tmp_pat
     )
     executor = FakeExecutor()
     state = ExecutionState(tmp_path)
-    client = WorkerClient(
+    client = worker_runtime(
         read_history=state.read,
         worker_id="worker-1",
         worker_token="worker-secret",
@@ -324,11 +329,11 @@ async def test_control_gateway_and_worker_client_complete_one_remote_job(tmp_pat
             serve_worker(
                 QueueSocket(worker_to_serve, serve_to_worker),
                 worker_tokens={"worker-1": "worker-secret"},
-                handler=handler,
+                serve=handler.serve_worker_session,
             )
         ),
         asyncio.create_task(
-            client.run_connection(QueueConnection(worker_to_serve, serve_to_worker))
+            run_worker(client, QueueConnection(worker_to_serve, serve_to_worker))
         ),
     ]
     try:

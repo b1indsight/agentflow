@@ -10,6 +10,7 @@ from psycopg.types.json import Jsonb
 from app.contracts.protocol import Failed, TerminalPayload, terminal_digest
 from app.contracts.receipts import ResultInbox
 from app.domain.models import (
+    DeliveryState,
     FlowExecution,
     FlowState,
     Job,
@@ -525,6 +526,61 @@ class WorkerStore(Repository):
                 or not self.assignment_active(job_id, worker, token, epoch)):
             return None
         return current
+
+    def reject_assignment(self, job_id: int, worker: str, token: str, epoch: str) -> bool:
+        """Persist a control failure only for a current, dispatched but unstarted assignment.
+
+        A peer's error supplies correlation, not a terminal result or stop proof. Lock in
+        the same worker/workflow/job order as start, cancel, reconnect and result writers.
+        Result application alone may commit this outcome and release its slot afterwards.
+        """
+        with self._db.transaction() as tx:
+            workers = WorkerStore(tx)
+            current = workers._lock_preparation(job_id, worker, token, epoch)
+            if (
+                current is None
+                or current.result_payload is not None
+                or current.result_digest is not None
+                or current.result_applied_at is not None
+            ):
+                return False
+            flow = FlowStore(tx).get_flow(current.flow_id)
+            binding = workers.get_flow_execution(current.flow_id)
+            delivery = DeliveryStore(tx).get_delivery(current.flow_id)
+            if (
+                flow is None
+                or flow.state is not FlowState.ACTIVE
+                or binding is None
+                or binding.worker_id != worker
+                or binding.released_at is not None
+                or (
+                    delivery is not None
+                    and (
+                        delivery.state is DeliveryState.CLOSED or delivery.supersedes(current.kind)
+                    )
+                )
+            ):
+                return False
+            with tx.connection() as connection:
+                if (
+                    connection.execute(
+                        "SELECT 1 FROM workers WHERE worker_id=%s AND connection_epoch=%s"
+                        " AND current_job_id=%s AND EXISTS (SELECT 1 FROM jobs WHERE id=%s"
+                        " AND dispatch_authorized_at>=%s)"
+                        " AND NOT EXISTS (SELECT 1 FROM execution_stops"
+                        " WHERE flow_id=%s AND state!='confirmed')",
+                        (worker, epoch, job_id, job_id, binding.bound_at, current.flow_id),
+                    ).fetchone()
+                    is None
+                ):
+                    return False
+            reason = "assignment payload failed validation"
+            JobStore(tx).record_control_result(
+                job_id,
+                Failed(job_id=job_id, assignment_token=token, error=reason),
+                reason,
+            )
+            return True
 
     def clear_preparation(self, job_id: int, worker: str, token: str, epoch: str) -> bool:
         """Clear the read budget only for the same successful, un-dispatched preparation."""

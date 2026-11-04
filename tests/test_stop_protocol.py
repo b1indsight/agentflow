@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from app.communication.gateway import Gateway
+from app.communication.session import Session
 from app.contracts.protocol import (
     AcceptStop,
     AcceptStopArguments,
@@ -37,7 +38,6 @@ from app.contracts.protocol import (
     stop_receipt_id,
     terminal_digest,
 )
-from app.controler.workers.handler import WorkerHandler
 from app.controler.workers.transport import serve_worker
 from app.controler.workflow.results import ResultApplication
 from app.controler.workflow.service import ControlService
@@ -48,7 +48,6 @@ from app.worker.execution.executor import WorkerExecutor
 from app.worker.execution.lifecycle import WorkerExecution, WorkerProtocolError
 from app.worker.execution.vcs import _run
 from app.worker.state.execution import ExecutionState
-from app.worker.transport.client import WorkerClient
 from tests.github import RecordingGitHub
 from tests.test_coordinator import coordinator
 from tests.test_remote_e2e import QueueConnection, QueueSocket
@@ -64,7 +63,7 @@ from tests.test_worker_handler import (
     worker_frame,
 )
 from tests.test_worker_workspaces import acquire, managed_seed
-from tests.worker_fakes import NoPendingStops
+from tests.worker_fakes import NoPendingStops, run_worker, server_runtime, worker_runtime
 
 
 def assignment():
@@ -159,7 +158,7 @@ async def test_stop_kills_owned_process_and_child_then_replays_lost_ack(tmp_path
         async with asyncio.timeout(5):
             while not ready.exists():
                 await asyncio.sleep(0.01)
-        client = WorkerClient(
+        client = worker_runtime(
             worker_id="w",
             worker_token="secret",
             serve_ws_url="unused",
@@ -168,7 +167,7 @@ async def test_stop_kills_owned_process_and_child_then_replays_lost_ack(tmp_path
         )
         request = StopFence(job_id=1, flow_id=1, assignment_token="token", request_id="stop")
         with pytest.raises(ConnectionError, match="ack lost"):
-            await client.run_connection(AckConnection(request, lost=True))
+            await run_worker(client, AckConnection(request, lost=True))
         assert journal.load().stopped is not None
         assert not journal.load().acknowledged
         # Both processes must actually be gone, not just absent from the asyncio task table.
@@ -181,7 +180,7 @@ async def test_stop_kills_owned_process_and_child_then_replays_lost_ack(tmp_path
                         break
                     await asyncio.sleep(0.01)
         restarted_state = ExecutionState(tmp_path)
-        restarted = WorkerClient(
+        restarted = worker_runtime(
             worker_id="w",
             worker_token="secret",
             serve_ws_url="unused",
@@ -194,7 +193,7 @@ async def test_stop_kills_owned_process_and_child_then_replays_lost_ack(tmp_path
         )
         connection = AckConnection(request, epoch="new")
         with pytest.raises(ConnectionError, match="script complete"):
-            await restarted.run_connection(connection)
+            await run_worker(restarted, connection)
         assert any(isinstance(message, StopResult) for message in connection.sent)
         assert journal.load().acknowledged
     finally:
@@ -237,7 +236,7 @@ async def test_replacing_client_during_stop_preserves_cleanup_and_original_recei
     request = StopFence(job_id=1, flow_id=1, assignment_token="token", request_id="stop")
 
     def connect(request, epoch="epoch"):
-        client = WorkerClient(
+        client = worker_runtime(
             worker_id="w",
             worker_token="test",
             serve_ws_url="unused",
@@ -245,7 +244,7 @@ async def test_replacing_client_during_stop_preserves_cleanup_and_original_recei
             read_history=state.read,
         )
         connection = AckConnection(request, epoch=epoch)
-        return asyncio.create_task(client.run_connection(connection)), connection
+        return asyncio.create_task(run_worker(client, connection)), connection
 
     first = second = None
     try:
@@ -293,7 +292,7 @@ async def test_restarted_worker_does_not_infer_stopped_from_absent_task(tmp_path
     journal = ExecutionState(tmp_path)
     journal.record_received(work)
     journal.record_started()
-    client = WorkerClient(
+    client = worker_runtime(
         worker_id="w",
         worker_token="secret",
         serve_ws_url="unused",
@@ -302,7 +301,7 @@ async def test_restarted_worker_does_not_infer_stopped_from_absent_task(tmp_path
     )
     request = StopFence(job_id=1, flow_id=1, assignment_token="token", request_id="stop")
     with pytest.raises(WorkerProtocolError, match="ownership is unknown"):
-        await client.run_connection(AckConnection(request))
+        await run_worker(client, AckConnection(request))
     assert journal.load().stopped is None
 
 
@@ -362,7 +361,7 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path, o
             pass
 
     gateway_coordinator = Coordinator()
-    handler = WorkerHandler(
+    handler = server_runtime(
         gateway_coordinator,
         database=store.database,
         peers=Gateway(),
@@ -374,7 +373,7 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path, o
     session = ExecutionState(root)
     executor = Executor(root, RecordingAgent(), worker_id="worker-1", state=session)
     unrelated = await acquire(executor.workspaces, 999) if overflow else None
-    client = WorkerClient(
+    client = worker_runtime(
         worker_id="worker-1",
         worker_token="worker-secret",
         serve_ws_url="unused",
@@ -385,10 +384,10 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path, o
         serve_worker(
             QueueSocket(to_serve, to_worker),
             worker_tokens={"worker-1": "worker-secret"},
-            handler=handler,
+            serve=handler.serve_worker_session,
         )
     )
-    worker = asyncio.create_task(client.run_connection(Connection(to_serve, to_worker)))
+    worker = asyncio.create_task(run_worker(client, Connection(to_serve, to_worker)))
     allocations = []
     try:
         async with asyncio.timeout(10):
@@ -399,7 +398,7 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path, o
                 store.flows.update_flow(flow)
                 store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
                 started.clear()
-                handler.notify_jobs()
+                handler.gateway.wake_all()
                 while not started.is_set():
                     if server.done():
                         server.result()
@@ -409,7 +408,7 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path, o
                 binding = session.load().workspace
                 path = executor.workspaces.path(binding)
                 allocations.append((binding, path.stat().st_ino))
-                ControlService(jobs_available=handler.notify_jobs, database=store.database).cancel(
+                ControlService(jobs_available=handler.gateway.wake_all, database=store.database).cancel(
                     flow
                 )
                 while not session.load().acknowledged:
@@ -559,7 +558,7 @@ async def test_stopping_consumes_a_and_requires_real_r_before_b(delivery):
         "token",
     )
     handler = handler_for(store)
-    await serve_worker(socket, handler=handler, worker_tokens={"worker-1": "worker-secret"})
+    await serve_worker(socket, serve=handler.serve_worker_session, worker_tokens={"worker-1": "worker-secret"})
     frames = list(map(parse_server_message, socket.sent))
     stop_index = next(
         i
@@ -628,7 +627,7 @@ async def test_stop_reconnect_reconciles_successor(
             if failure == "cleanup" and self.cleanups == 1:
                 raise OSError("temporary cleanup failure")
 
-    handler = WorkerHandler(
+    handler = server_runtime(
         subject,
         database=store.database,
         peers=Gateway(),
@@ -639,7 +638,7 @@ async def test_stop_reconnect_reconciles_successor(
     )
     session = ExecutionState(tmp_path)
     executor = Executor()
-    client = WorkerClient(
+    client = worker_runtime(
         worker_id="worker-1",
         worker_token="worker-secret",
         serve_ws_url="unused",
@@ -672,17 +671,17 @@ async def test_stop_reconnect_reconciles_successor(
                 serve_worker(
                     Socket(incoming, outgoing),
                     worker_tokens={"worker-1": "worker-secret"},
-                    handler=handler,
+                    serve=handler.serve_worker_session,
                 )
             ),
-            asyncio.create_task(client.run_connection(connection_type(incoming, outgoing))),
+            asyncio.create_task(run_worker(client, connection_type(incoming, outgoing))),
         )
 
     server, worker = connect(LostAckConnection if failure == "lost-ack" else QueueConnection)
     try:
         async with asyncio.timeout(5):
             await started.wait()
-            ControlService(database=store.database, jobs_available=handler.notify_jobs).cancel(
+            ControlService(database=store.database, jobs_available=handler.gateway.wake_all).cancel(
                 flows[0]
             )
             with pytest.raises((OSError, ConnectionError), match="cleanup failure|ACK lost"):
@@ -769,7 +768,7 @@ async def test_stop_wakes_assignment_waiting_for_missing_a(monkeypatch):
                 return worker_frame(epoch, result).model_dump_json()
             await waiting.wait()
             requested = True
-            handler.notify_jobs()
+            handler.gateway.wake_all()
             await asyncio.wait_for(command.wait(), 1)
             raise ConnectionError("stop delivered while A was absent")
 
@@ -780,14 +779,14 @@ async def test_stop_wakes_assignment_waiting_for_missing_a(monkeypatch):
 
     store, socket = StoppingStore(), MissingAcceptSocket()
     handler = handler_for(store)
-    receive = handler._wait_for_message
+    receive = Session.next_event
 
-    async def observed(connection, wake, timeout):
+    async def observed(connection, *, until=None):
         if store.job.result_applied_at is not None:
             waiting.set()
-        return await receive(connection, wake, timeout)
+        return await receive(connection, until=until)
 
-    monkeypatch.setattr(handler, "_wait_for_message", observed)
-    await serve_worker(socket, handler=handler, worker_tokens={"worker-1": "worker-secret"})
+    monkeypatch.setattr(Session, "next_event", observed)
+    await serve_worker(socket, serve=handler.serve_worker_session, worker_tokens={"worker-1": "worker-secret"})
     assert command.is_set()
     assert not any(isinstance(item, ResultAccepted) for item in sent_items(socket.sent))

@@ -42,12 +42,12 @@ M0 已验收基础设施切片；M1–M4 功能及 M5 部署、接收、运维�
 │ 独立循环：租约 / 结果恢复 / 反馈合批 / PR与反馈对账    │
 │           Projects 同步 / 指标采集                    │
 │ 各服务自建仓储，共享 Database                        │
-│ WorkerHandler / Broker + Gateway / Session × worker  │
+│ ServerCallbacks / Broker + Gateway / Session × worker│
 └──────────────┬───────────────────┬───────────────────┘
                │                   │ 认证 WebSocket
                ▼                   ▼
 ┌────────────────────┐  ┌──────────────────────────────┐
-│ PostgreSQL         │  │ Client + Gateway + Session   │
+│ PostgreSQL         │  │ Runtime + Gateway + Session  │
 │ 状态、结果、回执   │  │ journal / 历史查询 / 停止握手 │
 │ 批次、对账进度     │  │ Executor → Codex / repo / VCS │
 └────────────────────┘  └──────────────────────────────┘
@@ -63,8 +63,10 @@ M0 已验收基础设施切片；M1–M4 功能及 M5 部署、接收、运维�
   Git/jj，worker 只验证事实。
 
 Runtime 创建并关闭共享 Database，装配共享的结果应用、effects、工具和 conversation broker。
-两端使用相同的 Gateway / Session：server Gateway 管多 worker，worker Gateway 至多登记一个 server。
-server 接入函数负责认证与首帧，WorkerHandler 负责业务；WorkerClient 保留主动连接与重连。
+两端 Runtime 持有相同的 Gateway / Session：server 管多 worker，worker 至多登记一个 server。
+Gateway 驱动统一的 Session 事件入口与精确 `package.method` 路由；每连接挂载
+ServerCallbacks / WorkerCallbacks，角色业务和连接局部状态由回调对象负责。
+server 接入函数只负责认证与首帧，WorkerClient 只负责主动拨号与重连；wire v17 双端协调升级。
 执行 Task、durable 工具 Future 和停止清理由 WorkerExecution 长期持有，journal 由 ExecutionState 保存。
 服务自行创建所需仓储；Webhook 每条 receipt 在事务内创建 ControlService/EventRouter，
 事务外执行提交后通知。聚合 Store 只用于 CLI 运维、live smoke 和测试。

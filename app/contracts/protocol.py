@@ -29,7 +29,7 @@ from app.domain.delivery_models import DeliveryReceipt
 from app.domain.models import FeedbackRef, RevisionCodingOutput, VcsKind
 from app.domain.review_models import ReviewFeedback
 
-PROTOCOL_VERSION: Literal[16] = 16
+PROTOCOL_VERSION: Literal[17] = 17
 MAX_PAYLOAD_ITEMS = 32
 MessageId = Annotated[str, Field(strict=True, pattern=r"^[0-9a-f]{32}$")]
 ConnectionEpoch = Annotated[str, Field(strict=True, min_length=1, max_length=64)]
@@ -307,6 +307,19 @@ class ToolResult(ProtocolModel):
         return self
 
 
+class PayloadValidationError(ProtocolModel):
+    """Fixed public failure; never carry input, field names or validator diagnostics."""
+
+    code: Literal["validation_error"]
+    message: Literal["message payload failed validation"]
+
+
+class ValidationErrorResult(ToolResult):
+    """Reject one item by its original ID, without claiming any business acceptance."""
+
+    error: PayloadValidationError
+
+
 class Assignment(ToolCall):
     method: Literal["worker.execute"]
     arguments: AssignmentArguments
@@ -469,8 +482,23 @@ WorkerCall = Annotated[
     | Annotated[FlowToolRequest, Tag("flow_tool")],
     Discriminator(_method_tag),
 ]
+
+
+def _result_tag(value: object) -> str | None:
+    if isinstance(value, ValidationErrorResult):
+        return "validation_error"
+    if isinstance(value, dict) and isinstance(value.get("error"), dict):
+        # An error object is never retried as a success/domain-error schema.
+        return "validation_error"
+    return _method_tag(value)
+
+
 WorkerResult = Annotated[
-    ExecuteResult | StopResult | ConversationResult, Field(discriminator="method")
+    Annotated[ExecuteResult, Tag("worker.execute")]
+    | Annotated[StopResult, Tag("worker.stop")]
+    | Annotated[ConversationResult, Tag("worker.history")]
+    | Annotated[ValidationErrorResult, Tag("validation_error")],
+    Discriminator(_result_tag),
 ]
 WorkerPayload = Annotated[WorkerCall | WorkerResult, Field(discriminator="type")]
 ServerCall = Annotated[
@@ -480,8 +508,9 @@ ServerCall = Annotated[
 ServerResult = Annotated[
     Annotated[ResultAccepted, Tag("server.accept_result")]
     | Annotated[StopAccepted, Tag("server.accept_stop")]
-    | Annotated[FlowToolResponse, Tag("flow_tool")],
-    Discriminator(_method_tag),
+    | Annotated[FlowToolResponse, Tag("flow_tool")]
+    | Annotated[ValidationErrorResult, Tag("validation_error")],
+    Discriminator(_result_tag),
 ]
 ServerPayload = Annotated[ServerCall | ServerResult, Field(discriminator="type")]
 
@@ -493,7 +522,7 @@ class Message[Payload: ToolCall | ToolResult](ProtocolModel):
     performs static checks only; receipt ACKs confer no business completion or authority.
     """
 
-    protocol_version: Literal[16]
+    protocol_version: Literal[17]
     message_id: MessageId
     connection_epoch: ConnectionEpoch | None
     ack: StrictBool
@@ -582,7 +611,7 @@ class Heartbeat(Message[WorkerPayload]):
     @model_validator(mode="after")
     def _execution_payload(self) -> Self:
         for item in self.payload:
-            if isinstance(item, ConversationResult):
+            if isinstance(item, (ConversationResult, ValidationErrorResult)):
                 continue
             if isinstance(item, (Started, AcceptResult, AcceptStop, FlowToolRequest)):
                 identity = (item.arguments.job_id, item.arguments.assignment_token)
@@ -676,7 +705,7 @@ def accept_stop_id(receipt_id: MessageId) -> MessageId:
 
 
 class FrameHeader(TypedDict):
-    protocol_version: Literal[16]
+    protocol_version: Literal[17]
     message_id: MessageId
     connection_epoch: str | None
     ack: bool

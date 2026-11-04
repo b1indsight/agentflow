@@ -14,7 +14,6 @@ from app.contracts.protocol import (
     InitialTaskResult,
     result_header,
 )
-from app.controler.workers.handler import WorkerHandler
 from app.controler.workers.transport import serve_worker
 from app.controler.workflow.coordinator import JobCoordinator
 from app.controler.workflow.results import ResultApplication
@@ -23,8 +22,8 @@ from app.domain.delivery_models import PreparedDelivery
 from app.domain.models import JobState, VcsKind, VcsOutcome
 from app.worker.execution.lifecycle import WorkerExecution
 from app.worker.state.execution import ExecutionState
-from app.worker.transport.client import WorkerClient
 from tests.test_communication_session import Socket
+from tests.worker_fakes import run_worker, server_runtime, worker_runtime
 
 
 class DuplexSocket(Socket):
@@ -93,7 +92,7 @@ def scenario(store):
     results = Mock(spec=ResultApplication, apply=AsyncMock(side_effect=apply))
 
     def handler():
-        return WorkerHandler(
+        return server_runtime(
             coordinator,
             database=store.database,
             peers=Gateway(),
@@ -129,7 +128,7 @@ async def test_running_worker_reconnects_to_new_controller_and_finishes_once(sto
 
     session = ExecutionState(tmp_path)
     owner = WorkerExecution(worker_id="w", executor=Executor(), state=session)
-    client = WorkerClient(
+    client = worker_runtime(
         worker_id="w",
         worker_token="test",
         serve_ws_url="ws://unused",
@@ -140,9 +139,9 @@ async def test_running_worker_reconnects_to_new_controller_and_finishes_once(sto
     try:
         old = DuplexSocket()
         server = asyncio.create_task(
-            serve_worker(old, worker_tokens={"w": "test"}, handler=case.handler())
+            serve_worker(old, worker_tokens={"w": "test"}, serve=case.handler().serve_worker_session)
         )
-        worker = asyncio.create_task(client.run_connection(old))
+        worker = asyncio.create_task(run_worker(client, old))
         tasks.extend([server, worker])
         await asyncio.wait_for(case.started.wait(), 2)
         async with asyncio.timeout(2):
@@ -162,9 +161,9 @@ async def test_running_worker_reconnects_to_new_controller_and_finishes_once(sto
         tasks.extend(
             [
                 asyncio.create_task(
-                    serve_worker(new, worker_tokens={"w": "test"}, handler=case.handler())
+                    serve_worker(new, worker_tokens={"w": "test"}, serve=case.handler().serve_worker_session)
                 ),
-                asyncio.create_task(client.run_connection(new)),
+                asyncio.create_task(run_worker(client, new)),
             ]
         )
         async with asyncio.timeout(2):

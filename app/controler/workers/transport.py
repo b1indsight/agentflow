@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hmac
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Protocol
 from uuid import uuid4
 
@@ -21,8 +21,9 @@ from app.contracts.protocol import (
     frame_header,
     parse_worker_message,
 )
+from app.contracts.validation import parse_worker_input
+from app.controler.workers.callbacks import ProtocolViolation
 from app.controler.workers.conversation import conversation_result_key
-from app.controler.workers.handler import ProtocolViolation, WorkerHandler
 
 
 class WorkerSocket(Transport, Protocol):
@@ -77,9 +78,9 @@ async def serve_worker(
     socket: WorkerSocket,
     *,
     worker_tokens: Mapping[str, str],
-    handler: WorkerHandler,
+    serve: Callable[[str, Register, Session[WorkerMessage, ServerMessage]], Awaitable[None]],
 ) -> None:
-    """Validate the actual first frame, then transfer all Session cleanup to handle()."""
+    """Validate the actual first frame, then transfer cleanup to the Runtime's driver."""
     worker_id = _authenticated_identity(socket.headers, worker_tokens)
     if worker_id is None:
         await socket.close(code=1008)
@@ -96,7 +97,7 @@ async def serve_worker(
                 raise ProtocolViolation("worker registration does not match authenticated identity")
             session = Session(
                 _SocketTransport(socket),
-                parse=parse_worker_message,
+                parse=parse_worker_input,
                 reply_key=conversation_result_key,
                 make_ack=control_ack,
                 epoch=uuid4().hex,
@@ -108,7 +109,7 @@ async def serve_worker(
                 event="worker_disconnected", reason_code="connection_lost", worker_id=worker_id
             ).opt(exception=exc).info("")
         except (ProtocolViolation, SessionOverflow, ValidationError) as exc:
-            # Keep handshake mapping aligned with WorkerHandler's business error mapping.
+            # Keep handshake mapping aligned with ServerCallbacks' business error mapping.
             invalid = isinstance(exc, ValidationError)
             reason = "message failed protocol validation" if invalid else str(exc)
             close_code = 1008
@@ -128,9 +129,9 @@ async def serve_worker(
             except (WebSocketDisconnect, ConnectionError):
                 pass
         else:
-            # No await between transfer and handle entering its own try/finally.
+            # No await between transfer and the Runtime entering its own cleanup scope.
             handed_off = True
-            await handler.handle(worker_id, register, session)
+            await serve(worker_id, register, session)
     finally:
         if not handed_off:
             if session is not None:

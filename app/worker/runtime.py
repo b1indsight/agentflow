@@ -10,6 +10,10 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import IO
 
+from app.communication.gateway import Gateway
+from app.communication.session import Session, Transport
+from app.contracts.protocol import ServerMessage, WorkerMessage
+from app.contracts.validation import parse_server_input
 from app.telemetry.logging import configure_logging
 from app.worker.config import WorkerSettings
 from app.worker.execution.amp_agent import AmpCodingAgent
@@ -18,6 +22,7 @@ from app.worker.execution.executor import WorkerExecutor
 from app.worker.execution.lifecycle import WorkerExecution
 from app.worker.health import HealthFile
 from app.worker.state.execution import ExecutionState
+from app.worker.transport.callbacks import WorkerCallbacks, control_ack, history_responder
 from app.worker.transport.client import WorkerClient
 
 _CONTROL_ENVIRONMENT_KEYS = frozenset(
@@ -114,16 +119,39 @@ class WorkerRuntime:
             workspace_limit=self.settings.worker_repo_workspace_limit,
         )
         self.execution = WorkerExecution(worker_id=self.settings.worker_id, executor=executor, state=state)
+        self.gateway = Gateway[ServerMessage, WorkerMessage]()
+        self._connected = False
         self.client = WorkerClient(
             worker_id=self.settings.worker_id,
             worker_token=self.settings.worker_token.get_secret_value(),
             serve_ws_url=self.settings.serve_ws_url,
-            execution=self.execution,
-            read_history=state.read,
+            serve=self._serve_connection,
             reconnect_min_backoff=self.settings.reconnect_min_backoff,
             reconnect_max_backoff=self.settings.reconnect_max_backoff,
             reconnect_jitter=self.settings.reconnect_jitter,
         )
+
+    async def _serve_connection(self, transport: Transport) -> None:
+        session = Session[ServerMessage, WorkerMessage](
+            transport,
+            parse=parse_server_input,
+            make_ack=control_ack,
+            responder=history_responder(self.execution.state.read),
+        )
+        try:
+            callbacks = WorkerCallbacks(
+                worker_id=self.settings.worker_id,
+                session=session,
+                execution=self.execution,
+                on_ready=self._set_connected,
+            )
+        except BaseException:
+            await session.close()
+            raise
+        await self.gateway.serve("server", session, callbacks, replace=False)
+
+    def _set_connected(self, connected: bool) -> None:
+        self._connected = connected
 
     async def run(self) -> None:
         validate_worker_environment(self.settings)
@@ -138,6 +166,7 @@ class WorkerRuntime:
         except asyncio.CancelledError:
             cancelled = True
         finally:
+            self.gateway.seal()
             self.client.stop()
             if not communication.done():
                 communication.cancel()
@@ -153,7 +182,10 @@ class WorkerRuntime:
                     communication.result()
             finally:
                 try:
-                    await self.execution.shutdown()
+                    try:
+                        await self.gateway.close()
+                    finally:
+                        await self.execution.shutdown()
                 except asyncio.CancelledError:
                     cancelled = True
                 finally:
@@ -172,11 +204,13 @@ class WorkerRuntime:
         marker = HealthFile(self.settings.worker_status_path)
         try:
             while True:
-                marker.write(self.client.connected)
+                marker.write(self._connected)
                 await asyncio.sleep(5)
         finally:
             marker.write(False)
 
     def stop(self) -> None:
         self._shutdown_requested = True
+        self._connected = False
+        self.gateway.seal()
         self.client.stop()

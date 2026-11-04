@@ -8,6 +8,13 @@
 
 ## Unreleased
 
+- Worker/server 两端 Runtime 统一持有 Gateway，以同一个 Session 事件入口驱动每连接的
+  WorkerCallbacks / ServerCallbacks；移除旧 Client/Handler 消费循环，按 `package.method`
+  精确注册模型与回调。通信关闭不取消执行，控制/提交/停止证据与 history 有界旁路保持独立。
+  wire 升级为 v17：可关联的 payload 校验失败整批拒收，返回固定两字段 `tool_result.error`，
+  无诊断详情；普通 Future 失败后连接继续，关键协议失败保留证据并恢复关闭。
+  Assignment 拒绝经 SQL 预启动围栏写入 control 结果并提交后收尾；journal5/inbox1 不变。
+  双端需协调升级，无 v16 wire fallback；本次不包含部署、事务 outbox 或 HA。
 - 统一 worker/server 协议第二步：Session 接入逐项分派、有界控制 ACK 与原连接 history 关联，
   worker 使用单一业务消费循环；终态 `[T,A]` 在应用提交后接纳，停止 `[R,B]` 仍需真实凭据与 effects 收敛。
   接入 journal5 / inbox1 持久读写、已知旧格式只读转换和来源 SQL，移除旧 wire 调用与内联 journal 模型；

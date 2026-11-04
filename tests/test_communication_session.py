@@ -31,7 +31,7 @@ class Reply(ToolResult):
 
 
 class Packet(Message[Call | Reply]):
-    """Symmetric test frames use the same strict headers and item identities as wire16."""
+    """Symmetric test frames use the current strict headers and item identities."""
 
 
 def query(value="") -> Call:
@@ -145,7 +145,7 @@ async def test_duplex_queries_bypass_fifo_and_consumer_cancellation():
     responder = Responder(matches=is_query, handle=respond, busy=busy)
     left, right = make_session(left_socket, responder), make_session(right_socket, responder)
     try:
-        waiting = asyncio.create_task(left.receive())
+        waiting = asyncio.create_task(left.next_event())
         await asyncio.sleep(0)
         waiting.cancel()
         await asyncio.gather(waiting, return_exceptions=True)
@@ -159,14 +159,14 @@ async def test_duplex_queries_bypass_fifo_and_consumer_cancellation():
         assert [result.value for result in replies] == ["0", "1"]
         for session in (left, right):
             assert [
-                (await session.receive()).payload[0].value,
-                (await session.receive()).payload[0].value,
+                (await session.next_event()).payload[0].value,
+                (await session.next_event()).payload[0].value,
             ] == ["one", "two"]
     finally:
         await asyncio.gather(left.close(), right.close())
     assert not left_socket.reading and not right_socket.reading
     with pytest.raises(SessionClosed):
-        await left.receive()
+        await left.next_event()
 
 
 @pytest.mark.parametrize("failure", ["disconnect", "count", "bytes"])
@@ -186,9 +186,9 @@ async def test_read_failure_fails_pending_immediately_but_drains_fifo(failure):
             await asyncio.wait_for(pending, 2)
         buffered = 32 if failure == "count" else 1
         for _ in range(buffered):
-            assert await session.receive() == Packet.model_validate_json(raw)
+            assert await session.next_event() == Packet.model_validate_json(raw)
         with pytest.raises(ConnectionError if failure == "disconnect" else SessionOverflow):
-            await session.receive()
+            await session.next_event()
     finally:
         await session.close()
 
@@ -225,7 +225,7 @@ async def test_serialized_send_checks_guard_at_actual_write_and_close_joins_with
         assert not task.cancelled()
     assert not socket.writing and not socket.reading
     with pytest.raises(SessionClosed):
-        await session.receive()
+        await session.next_event()
 
 
 @pytest.mark.parametrize("phase", ["lock", "write", "reply"])
@@ -271,7 +271,7 @@ async def test_request_cleanup_at_each_await(phase, failure):
             again = asyncio.create_task(request(session, next_call))
             await socket.sent.get()
             await socket.incoming.put(packet(reply(call), event("barrier")).model_dump_json())
-            assert (await session.receive()).payload[0].value == "barrier"
+            assert (await session.next_event()).payload[0].value == "barrier"
             assert not again.done()
             await socket.incoming.put(packet(reply(next_call)).model_dump_json())
             assert (await again).reply_to == next_call.message_id
@@ -294,7 +294,7 @@ async def test_early_reply_still_requires_successful_send_and_disconnect_fails_r
     try:
         await socket.write_started.wait()
         await socket.incoming.put(packet(reply(call), event("barrier")).model_dump_json())
-        await session.receive()
+        await session.next_event()
         assert not pending.done()
         if failure == "close":
             await session.close()
@@ -325,7 +325,7 @@ async def test_reply_isolation_and_four_request_limit(epoch):
         )
         for s, transport in ((old, old_socket), (current, socket)):
             await transport.incoming.put(packet(event("barrier")).model_dump_json())
-            await s.receive()
+            await s.next_event()
         assert all(not pending.done() for pending in queries)
         # Same method, reverse arrival order, one batch: only reply_to chooses a Future.
         await socket.incoming.put(
@@ -362,7 +362,7 @@ async def test_busy_sender_is_bounded_and_never_blocks_reply_reader(overflow):
         await socket.incoming.put(
             packet(*(query(str(i)) for i in range(4)), event("barrier")).model_dump_json()
         )
-        await session.receive()
+        await session.next_event()
         calls = [query(f"busy-{i}") for i in range(4)]
         await socket.incoming.put(packet(*calls).model_dump_json())
         await socket.write_started.wait()
@@ -372,7 +372,7 @@ async def test_busy_sender_is_bounded_and_never_blocks_reply_reader(overflow):
         if overflow:
             await socket.incoming.put(packet(query("overflow")).model_dump_json())
             with pytest.raises(SessionOverflow):
-                await asyncio.wait_for(session.receive(), 1)
+                await asyncio.wait_for(session.next_event(), 1)
         else:
             socket.release_write.set()
             replies = [
@@ -462,7 +462,7 @@ async def test_mixed_payload_bypasses_only_matching_items_and_keeps_business_ord
         mixed = mixed.model_copy(update={"ack": True, "ack_id": "a" * 32})
         await socket.incoming.put(mixed.model_dump_json())
         assert (await pending).reply_to == local.message_id
-        business = await session.receive()
+        business = await session.next_event()
         assert [item.value for item in business.payload] == ["first", "second"]
         assert business.message_id == mixed.message_id
         answer = Packet.model_validate_json(await asyncio.wait_for(socket.sent.get(), 1))
@@ -472,7 +472,7 @@ async def test_mixed_payload_bypasses_only_matching_items_and_keeps_business_ord
         assert result.value == "remote"
         assert not answer.ack  # Unknown receipt ACKs and business do not generate ACKs.
         await socket.incoming.put(packet(event("next frame")).model_dump_json())
-        assert (await session.receive()).payload[0].value == "next frame"
+        assert (await session.next_event()).payload[0].value == "next frame"
         assert socket.sent.empty()
     finally:
         await session.close()
@@ -497,7 +497,7 @@ async def test_request_selects_one_call_from_batch_not_its_frame_or_neighbor():
         await socket.incoming.put(
             packet(reply(neighbor), frame_reply, event("barrier")).model_dump_json()
         )
-        assert (await session.receive()).payload[0].value == "barrier"
+        assert (await session.next_event()).payload[0].value == "barrier"
         assert not pending.done()
         response = reply(selected)
         delivery = packet(response)
@@ -529,7 +529,7 @@ async def test_control_payload_waits_for_owner_before_query_dispatch(control):
     incoming = packet(call, event("business"), control=control)
     try:
         await socket.incoming.put(incoming.model_dump_json())
-        received = await session.receive()
+        received = await session.next_event()
         assert received == incoming and handled == []
         # Receipt ACK may precede authorization, but cannot run the history callback.
         receipt = Packet.model_validate_json(await asyncio.wait_for(socket.sent.get(), 1))
@@ -559,7 +559,7 @@ async def test_control_ack_fifo_piggyback_is_guarded_and_does_not_mutate_caller(
     try:
         for incoming in controls:
             await socket.incoming.put(incoming.model_dump_json())
-            assert await session.receive() == incoming
+            assert await session.next_event() == incoming
         socket.release_write.set()
         assert await first and not await rejected and await sent
         delivered = [
@@ -574,7 +574,7 @@ async def test_control_ack_fifo_piggyback_is_guarded_and_does_not_mutate_caller(
         # A pure ACK must not queue, bind an epoch, or produce a receipt loop.
         await socket.incoming.put(ack(delivered[2].message_id).model_dump_json())
         await socket.incoming.put(packet(event("barrier")).model_dump_json())
-        assert (await session.receive()).payload[0].value == "barrier"
+        assert (await session.next_event()).payload[0].value == "barrier"
         outbound_barrier = packet(event("outbound-barrier"))
         await session.send(outbound_barrier)
         assert Packet.model_validate_json(await socket.sent.get()) == outbound_barrier
@@ -597,13 +597,13 @@ async def test_ack_fifo_counts_inflight_write_until_success_and_reader_keeps_pro
         for _ in range(32):
             incoming = packet(control="heartbeat")
             await socket.incoming.put(incoming.model_dump_json())
-            assert await asyncio.wait_for(session.receive(), 1) == incoming
+            assert await asyncio.wait_for(session.next_event(), 1) == incoming
         await socket.write_started.wait()
         await socket.incoming.put(packet(reply(call)).model_dump_json())
         assert (await asyncio.wait_for(pending, 1)).reply_to == call.message_id
         await socket.incoming.put(packet(control="heartbeat").model_dump_json())
         with pytest.raises(SessionOverflow):
-            await asyncio.wait_for(session.receive(), 1)
+            await asyncio.wait_for(session.next_event(), 1)
         assert socket.sent.empty()
     finally:
         await session.close()
@@ -628,9 +628,9 @@ async def test_batch_item_capacity_is_preflighted_before_any_reply_or_control_ef
         )
         with pytest.raises(SessionClosed):
             await asyncio.wait_for(pending, 1)
-        assert await session.receive() == buffered
+        assert await session.next_event() == buffered
         with pytest.raises(SessionOverflow):
-            await session.receive()
+            await session.next_event()
         assert socket.sent.empty()  # The rejected control must not be acknowledged.
     finally:
         await session.close()
@@ -648,7 +648,7 @@ async def test_authenticated_initial_control_ack_and_pure_ack_do_not_bind_epoch(
         assert response.payload == [] and response.connection_epoch is None
         await socket.incoming.put(ack(response.message_id).model_dump_json())
         await socket.incoming.put(packet(event("barrier")).model_dump_json())
-        assert (await session.receive()).payload[0].value == "barrier"
+        assert (await session.next_event()).payload[0].value == "barrier"
         outbound_barrier = packet(event("outbound-barrier"))
         await session.send(outbound_barrier)
         assert Packet.model_validate_json(await socket.sent.get()) == outbound_barrier
@@ -672,8 +672,8 @@ async def test_control_only_frames_still_have_a_bounded_business_inbox():
         # Wait for the reader to process the extra frame without draining its inbox.
         await socket.incoming.put(ConnectionError("reader barrier"))
         await asyncio.sleep(0)
-        assert [await session.receive() for _ in controls] == controls
+        assert [await session.next_event() for _ in controls] == controls
         with pytest.raises(SessionOverflow):
-            await asyncio.wait_for(session.receive(), 1)
+            await asyncio.wait_for(session.next_event(), 1)
     finally:
         await session.close()

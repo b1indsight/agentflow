@@ -216,7 +216,7 @@ def create_app(runtime: ServerRuntime | None = None) -> FastAPI:
     async def worker_connect(socket: WebSocket) -> None:
         runtime: ServerRuntime = socket.app.state.runtime
         await serve_worker(
-            socket, worker_tokens=runtime.worker_tokens, handler=runtime.worker_handler,
+            socket, worker_tokens=runtime.worker_tokens, serve=runtime.serve_worker_session,
         )
 
     return application

@@ -274,7 +274,7 @@ async def test_history_size_ignores_other_items_and_preserves_their_delivery(his
         ).model_dump_json()
     )
     assert (await asyncio.wait_for(query, 1)).session_id == SESSION
-    remaining = await asyncio.wait_for(registration.session.receive(), 1)
+    remaining = await asyncio.wait_for(registration.session.next_event(), 1)
     assert remaining.payload == [terminal]
 
 
@@ -351,7 +351,7 @@ async def test_same_method_wrong_reply_or_epoch_cannot_finish_query(history_conn
             **frame_header("epoch"), control=None, payload=[wrong, marker]
         ).model_dump_json()
     )
-    assert (await registration.session.receive()).payload == [marker]
+    assert (await registration.session.next_event()).payload == [marker]
     assert not query.done()
     await socket.incoming.put(
         WorkerFrame(**frame_header("epoch"), control=None, payload=[right]).model_dump_json()

@@ -10,13 +10,11 @@ from app.contracts.protocol import ServerMessage, WorkerMessage
 from app.controler.api import create_app
 from app.controler.runtime import ServerRuntime
 from app.controler.workers.conversation import ConversationService
-from app.controler.workers.handler import WorkerHandler
 from app.controler.workers.transport import serve_worker
 from app.domain.models import Attempt, Flow, FlowExecution, FlowState
 from app.worker.execution.amp_process import AmpProcessResult
 from app.worker.execution.lifecycle import WorkerExecution
 from app.worker.state.execution import ExecutionState
-from app.worker.transport.client import WorkerClient
 from tests.access import AccessIssuer
 from tests.test_conversation_history import SESSION, message, rollout
 from tests.test_remote_e2e import (
@@ -26,6 +24,7 @@ from tests.test_remote_e2e import (
     RemoteCoordinator,
     RemoteStore,
 )
+from tests.worker_fakes import run_worker, server_runtime, worker_runtime
 
 OTHER_SESSION = "019eac3b-a60c-7a93-a442-3718f660fc8d"
 
@@ -105,7 +104,7 @@ async def test_http_query_while_worker_or_control_busy_and_idle(tmp_path, phase,
     gateway_coordinator = Coordinator(store)
     peers = Gateway[WorkerMessage, ServerMessage]()
     broker = ConversationBroker(peers)
-    handler = WorkerHandler(
+    handler = server_runtime(
         gateway_coordinator, database=store.database,
         peers=peers,
         poll_interval=0.01,
@@ -125,12 +124,12 @@ async def test_http_query_while_worker_or_control_busy_and_idle(tmp_path, phase,
     to_control: asyncio.Queue[str] = asyncio.Queue()
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex"))
     state = ExecutionState(tmp_path / "worker")
-    worker = WorkerClient(worker_id="worker-1", worker_token="worker-secret", serve_ws_url="unused",
+    worker = worker_runtime(worker_id="worker-1", worker_token="worker-secret", serve_ws_url="unused",
                           execution=WorkerExecution(worker_id="worker-1", executor=Executor(), state=state),
                           read_history=state.read)
     server = asyncio.create_task(serve_worker(QueueSocket(to_control, to_worker),
-                                             worker_tokens={"worker-1": "worker-secret"}, handler=handler))
-    client = asyncio.create_task(worker.run_connection(QueueConnection(to_control, to_worker)))
+                                             worker_tokens={"worker-1": "worker-secret"}, serve=handler.serve_worker_session))
+    client = asyncio.create_task(run_worker(worker, QueueConnection(to_control, to_worker)))
     try:
         await asyncio.wait_for(started.wait(), 2)
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test",

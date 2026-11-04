@@ -43,11 +43,11 @@ from app.domain.delivery_models import PreparedDelivery
 from app.domain.models import VcsExecutionContext, VcsKind, VcsOutcome
 from app.worker.execution.lifecycle import WorkerExecution
 from app.worker.state.execution import ExecutionState
-from app.worker.transport.client import WorkerClient
 from app.worker.transport.mcp import FlowToolCaller, WorkerMCP
 from tests.test_conversation_history import SESSION
 from tests.test_remote_e2e import QueueConnection
 from tests.test_worker_session import _assignment
+from tests.worker_fakes import run_worker, worker_runtime
 
 
 def assignment_frame(work: AssignmentArguments, epoch: str = "epoch-1") -> ServerFrame:
@@ -167,16 +167,16 @@ async def test_stop_during_dial_never_registers_or_borrows_execution(monkeypatch
         yield connection
 
     monkeypatch.setattr("app.worker.transport.client.connect", connect)
-    client = WorkerClient(
+    client = worker_runtime(
         worker_id="w",
         worker_token="test",
         serve_ws_url="unused",
         execution=owner,
         read_history=Mock(),
     )
-    running = asyncio.create_task(client.run())
+    running = asyncio.create_task(client.client.run())
     await dialing.wait()
-    client.stop()
+    client.client.stop()
     release.set()
     await asyncio.wait_for(running, 1)
     assert connection.sent == []
@@ -200,23 +200,23 @@ async def test_overlapping_connection_cannot_borrow_owner_or_change_online_state
         recovery=Mock(side_effect=[None, AssertionError("second connection borrowed owner")]),
         result_for_registration=Mock(return_value=None),
     )
-    client = WorkerClient(
+    client = worker_runtime(
         worker_id="w",
         worker_token="test",
         serve_ws_url="unused",
         execution=owner,
         read_history=Mock(),
     )
-    first = asyncio.create_task(client.run_connection(IdleConnection()))
+    first = asyncio.create_task(run_worker(client, IdleConnection()))
     try:
         async with asyncio.timeout(1):
-            while not client.connected:
+            while not client._connected:
                 await asyncio.sleep(0)
         second = ScriptedConnection()
         with pytest.raises(RuntimeError, match="peer already registered"):
-            await client.run_connection(second)
+            await run_worker(client, second)
         assert second.sent == []
-        assert client.connected
+        assert client._connected
         owner.recovery.assert_called_once_with()
         owner.result_for_registration.assert_called_once_with()
     finally:
@@ -229,7 +229,7 @@ async def test_overlapping_connection_cannot_borrow_owner_or_change_online_state
 async def test_client_acknowledges_and_executes_one_assignment(tmp_path) -> None:
     connection = ScriptedConnection()
     state = ExecutionState(tmp_path)
-    client = WorkerClient(
+    client = worker_runtime(
         read_history=state.read,
         worker_id="worker-1",
         worker_token="worker-secret",
@@ -238,7 +238,7 @@ async def test_client_acknowledges_and_executes_one_assignment(tmp_path) -> None
     )
 
     with pytest.raises(ConnectionError, match="script complete"):
-        await client.run_connection(connection)
+        await run_worker(client, connection)
 
     assert isinstance(parse_worker_message(connection.sent[0]), Register)
     messages = sent_items(connection.sent)
@@ -282,7 +282,7 @@ async def test_assignment_never_launches_before_started_is_sent_and_persisted(tm
 
     state, executor, connection = Journal(tmp_path), Executor(), Connection()
     owner = WorkerExecution(worker_id="worker-1", executor=executor, state=state)
-    client = WorkerClient(
+    client = worker_runtime(
         worker_id="worker-1",
         worker_token="test",
         serve_ws_url="unused",
@@ -291,7 +291,7 @@ async def test_assignment_never_launches_before_started_is_sent_and_persisted(tm
     )
     error = asyncio.CancelledError if failure == "cancel" else OSError
     with pytest.raises(error):
-        await client.run_connection(connection)
+        await run_worker(client, connection)
     await owner.shutdown()
     assert state.load().state == "received"
     assert executor.invocations == 0
@@ -351,14 +351,14 @@ async def test_completion_between_register_and_resume_is_persisted_without_reexe
                 ),
             ).model_dump_json()
         ]
-        client = WorkerClient(
+        client = worker_runtime(
             worker_id="worker-1",
             worker_token="test",
             serve_ws_url="unused",
             execution=owner,
             read_history=state.read,
         )
-        await asyncio.wait_for(client.run_connection(connection), 2)
+        await asyncio.wait_for(run_worker(client, connection), 2)
 
     try:
         if journal_unavailable:
@@ -397,7 +397,7 @@ async def test_worker_redacts_echoed_push_capability_before_journal_and_wire(tmp
     assignment.arguments.secret = _assignment().secret
     connection.messages[1] = frame.model_dump_json()
     state = InspectJournal(tmp_path)
-    client = WorkerClient(
+    client = worker_runtime(
         worker_id="worker-1",
         worker_token="worker-secret",
         serve_ws_url="ws://serve/internal/workers/connect",
@@ -405,7 +405,7 @@ async def test_worker_redacts_echoed_push_capability_before_journal_and_wire(tmp
         read_history=state.read,
     )
     with pytest.raises(ConnectionError, match="script complete"):
-        await client.run_connection(connection)
+        await run_worker(client, connection)
     terminals = [item for item in sent_items(connection.sent) if isinstance(item, ExecuteResult)]
     assert len(terminals) == 1
     terminal = terminals[0]
@@ -523,7 +523,7 @@ async def test_replacing_client_preserves_running_executor_and_renews_lease(
     executor = CancellableExecutor()
     session = ExecutionState(tmp_path)
     owner = WorkerExecution(worker_id="worker-1", executor=executor, state=session)
-    client = WorkerClient(
+    client = worker_runtime(
         worker_id="worker-1",
         worker_token="worker-secret",
         serve_ws_url="ws://unused",
@@ -542,14 +542,14 @@ async def test_replacing_client_preserves_running_executor_and_renews_lease(
             disconnected.set()
 
     monkeypatch.setattr("app.worker.transport.client.connect", connect)
-    execution = asyncio.create_task(client.run())
+    execution = asyncio.create_task(client.client.run())
     await executor.started.wait()
     try:
         await asyncio.wait_for(disconnected.wait(), 1)
-        client.stop()
+        client.client.stop()
         await execution
         assert executor.cancelled.is_set() is False
-        client = WorkerClient(
+        client = worker_runtime(
             worker_id="worker-1",
             worker_token="worker-secret",
             serve_ws_url="ws://unused",
@@ -586,10 +586,10 @@ async def test_replacing_client_preserves_running_executor_and_renews_lease(
                     ).model_dump_json()
                 await asyncio.Event().wait()
 
-        resumed = asyncio.create_task(client.run_connection(ResumedConnection()))
+        resumed = asyncio.create_task(run_worker(client, ResumedConnection()))
         try:
             await asyncio.wait_for(heartbeat.wait(), 1)
-            assert client.connected  # Recovery succeeded even though the executor is still busy.
+            assert client._connected  # Recovery succeeded even though the executor is still busy.
             assert executor.invocations == 1
             assert not executor.cancelled.is_set()
         finally:
@@ -606,7 +606,7 @@ async def test_heartbeat_failure_interrupts_waiting_for_tool_reply(tmp_path) -> 
     assignment = _assignment()
     state = ExecutionState(tmp_path)
     owner = WorkerExecution(worker_id="worker-1", executor=ToolCallingExecutor(), state=state)
-    client = WorkerClient(
+    client = worker_runtime(
         worker_id="worker-1",
         worker_token="worker-secret",
         serve_ws_url="ws://unused",
@@ -616,7 +616,7 @@ async def test_heartbeat_failure_interrupts_waiting_for_tool_reply(tmp_path) -> 
     connection = BrokenHeartbeatConnection(assignment)
     try:
         with pytest.raises(ConnectionError, match="connection lost"):
-            await asyncio.wait_for(client.run_connection(connection), timeout=1)
+            await asyncio.wait_for(run_worker(client, connection), timeout=1)
         assert owner.lease() == assignment
         pending = await asyncio.wait_for(owner.next_tool_call(), 1)
         assert pending.request.method == "flow.open_pr"
@@ -737,7 +737,7 @@ async def test_cancelled_disconnected_tool_does_not_leak_into_resumed_or_next_as
 
     state = Journal(tmp_path)
     owner = WorkerExecution(worker_id="worker-1", executor=Executor(), state=state)
-    client = WorkerClient(
+    client = worker_runtime(
         worker_id="worker-1",
         worker_token="test",
         serve_ws_url="ws://unused",
@@ -746,14 +746,14 @@ async def test_cancelled_disconnected_tool_does_not_leak_into_resumed_or_next_as
     )
     try:
         with pytest.raises(ConnectionError, match="controller stopped"):
-            await asyncio.wait_for(client.run_connection(Disconnect()), 2)
+            await asyncio.wait_for(run_worker(client, Disconnect()), 2)
         cancel_tool.set()
         await asyncio.wait_for(cancelled.wait(), 2)
         if finish_before_reconnect:
             await owner.wait_terminal()
         recovered = Reconnect()
         with pytest.raises(ConnectionError, match="script complete"):
-            await asyncio.wait_for(client.run_connection(recovered), 2)
+            await asyncio.wait_for(run_worker(client, recovered), 2)
         calls = [item for item in sent_items(recovered.sent) if isinstance(item, FlowToolRequest)]
         assert [item.arguments.job_id for item in calls] == (
             [6] if finish_before_reconnect else [5, 6]
@@ -775,7 +775,7 @@ async def test_replacing_client_replays_original_tool_call(tmp_path, sent_before
     owner = WorkerExecution(worker_id="worker-1", executor=executor, state=session)
     owner.receive(assignment)
     owner.start()
-    client = WorkerClient(
+    client = worker_runtime(
         worker_id="worker-1",
         worker_token="test",
         serve_ws_url="ws://unused",
@@ -812,9 +812,9 @@ async def test_replacing_client_replays_original_tool_call(tmp_path, sent_before
 
     try:
         with pytest.raises(ConnectionError, match="controller stopped"):
-            await asyncio.wait_for(client.run_connection(Disconnect("epoch-1")), 1)
+            await asyncio.wait_for(run_worker(client, Disconnect("epoch-1")), 1)
         assert not pending.future.done()
-        replacement = WorkerClient(
+        replacement = worker_runtime(
             worker_id="worker-1",
             worker_token="test",
             serve_ws_url="ws://unused",
@@ -823,7 +823,7 @@ async def test_replacing_client_replays_original_tool_call(tmp_path, sent_before
         )
         recovered = ReconnectedTool("epoch-2")
         with pytest.raises(ConnectionError, match="script complete"):
-            await asyncio.wait_for(replacement.run_connection(recovered), 1)
+            await asyncio.wait_for(run_worker(replacement, recovered), 1)
         requests = [
             item for item in sent_items(recovered.sent) if isinstance(item, FlowToolRequest)
         ]
@@ -907,7 +907,7 @@ async def test_tool_cancelled_after_borrow_is_not_sent_or_blocking_completion(
 
     state = ExecutionState(tmp_path)
     owner = CancelAfterBorrow(worker_id="worker-1", executor=Executor(), state=state)
-    client = WorkerClient(
+    client = worker_runtime(
         worker_id="worker-1",
         worker_token="test",
         serve_ws_url="unused",
@@ -929,7 +929,7 @@ async def test_tool_cancelled_after_borrow_is_not_sent_or_blocking_completion(
     monkeypatch.setattr(connection, "send", send)
     try:
         with pytest.raises(ConnectionError, match="script complete"):
-            await asyncio.wait_for(client.run_connection(connection), 2)
+            await asyncio.wait_for(run_worker(client, connection), 2)
         messages = sent_items(connection.sent)
         assert sum(isinstance(message, FlowToolRequest) for message in messages) == int(
             subsequent_call
@@ -987,14 +987,14 @@ async def test_tool_cancelled_while_history_holds_write_lock_is_not_sent(tmp_pat
     work = _assignment()
     owner.receive(work)
     owner.start()
-    client = WorkerClient(
+    client = worker_runtime(
         worker_id="worker",
         worker_token="test",
         serve_ws_url="unused",
         execution=owner,
         read_history=lambda query: HistoryPage(session_id=query.session_id),
     )
-    running = asyncio.create_task(client.run_connection(Connection(to_server, to_worker)))
+    running = asyncio.create_task(run_worker(client, Connection(to_server, to_worker)))
     try:
         await to_server.get()
         await to_worker.put(
@@ -1098,7 +1098,7 @@ async def test_mcp_shutdown_consumes_late_tool_response_before_delivering_result
             )
 
     session = ExecutionState(tmp_path)
-    client = WorkerClient(
+    client = worker_runtime(
         worker_id="worker-1",
         worker_token="token",
         serve_ws_url="unused",
@@ -1106,7 +1106,7 @@ async def test_mcp_shutdown_consumes_late_tool_response_before_delivering_result
         read_history=session.read,
     )
     with pytest.raises(ConnectionError, match="script complete"):
-        await asyncio.wait_for(client.run_connection(connection), 5)
+        await asyncio.wait_for(run_worker(client, connection), 5)
     messages = sent_items(connection.sent)
     assert sum(isinstance(message, FlowToolRequest) for message in messages) == 1
     terminals = [message for message in messages if isinstance(message, ExecuteResult)]

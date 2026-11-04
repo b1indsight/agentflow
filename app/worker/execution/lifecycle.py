@@ -25,6 +25,7 @@ from app.contracts.protocol import (
     RecoveryDescriptor,
     StopFence,
     TerminalPayload,
+    result_header,
 )
 from app.domain.delivery_models import DeliveryReceipt
 from app.domain.models import JobState, VcsOutcome
@@ -329,6 +330,19 @@ class WorkerExecution:
             call.future.set_exception(WorkerProtocolError("Flow tool returned no result"))
         else:
             call.future.set_result(response.result)
+
+    def reject_tool_call(self, call: PendingToolCall, reason: str) -> None:
+        """Retire exactly the borrowed call; invalid responses never authorize automatic retry."""
+        self.finish_tool_call(
+            call,
+            FlowToolResponse(
+                **result_header(call.request.message_id),
+                method=call.request.method,
+                call_id=call.request.arguments.call_id,
+                error=reason,
+                error_kind=FlowToolErrorKind.INVALID_REQUEST,
+            ),
+        )
 
     def _discard_tool_calls(self) -> None:
         while self._tool_calls:

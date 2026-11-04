@@ -35,7 +35,6 @@ from app.controler.api import create_app
 from app.controler.config import ServerSettings
 from app.controler.runtime import ServerRuntime
 from app.controler.workers.conversation import ConversationBroker, ConversationService
-from app.controler.workers.handler import WorkerHandler
 from app.controler.workflow.coordinator import JobCoordinator
 from app.controler.workflow.tools import FlowToolService
 from app.domain.models import Job, JobKind, JobState
@@ -108,14 +107,11 @@ class AsgiRuntime(ServerRuntime):
         gateway_coordinator = AsgiCoordinator(attempt_id, store)
         self.gateway = Gateway()
         self.worker_tokens = {"worker-1": "worker-secret"}
-        self.worker_handler = WorkerHandler(
-            gateway_coordinator,
-            database=store.database,
-            peers=self.gateway,
-            poll_interval=0.01,
-            tools=gateway_coordinator.tools,
-            results=gateway_coordinator.results,
-        )
+        self.coordinator = gateway_coordinator
+        self.database = store.database
+        self.tools = gateway_coordinator.tools
+        self.results = gateway_coordinator.results
+        self.settings.worker_poll_interval = 0.01
         self.conversations = ConversationService(
             ConversationBroker(self.gateway),
             database=store.database,
@@ -136,13 +132,13 @@ class AsgiRuntime(ServerRuntime):
 
 def test_real_asgi_websocket_completes_a_postgresql_job(store: Store, monkeypatch) -> None:
     disconnected = Event()
-    handle = WorkerHandler.handle
+    serve = ServerRuntime.serve_worker_session
 
     async def handle_until_disconnected(self, worker_id, register, connection):
-        await handle(self, worker_id, register, connection)
+        await serve(self, worker_id, register, connection)
         disconnected.set()
 
-    monkeypatch.setattr(WorkerHandler, "handle", handle_until_disconnected)
+    monkeypatch.setattr(ServerRuntime, "serve_worker_session", handle_until_disconnected)
     flow = store.flows.create_flow("owner/repo", 8, installation_id=42)
     attempt = store.flows.create_attempt(flow.id)
     flow.current_attempt_id = attempt.id

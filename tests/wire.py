@@ -1,4 +1,4 @@
-"""Explicit wire16 frame builders for runtime peers; business items remain typed."""
+"""Explicit current-wire frame builders for runtime peers; business items remain typed."""
 
 from app.contracts.protocol import (
     Registered,
