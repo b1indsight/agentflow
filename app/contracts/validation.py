@@ -1,4 +1,4 @@
-"""Separate recoverable payload rejection from invalid framing and handshakes.
+"""Separate recoverable payload rejection from invalid message headers and handshakes.
 
 Strict directional parsers remain the source of truth. Only a failed payload with
 fully validated envelope and correlation headers may reach the rejection path.
@@ -12,10 +12,10 @@ from pydantic import Field, JsonValue, TypeAdapter, ValidationError
 
 from app.contracts.protocol import (
     Message,
-    ServerMessage,
+    ServerMessageUnion,
     ToolCall,
     ToolResult,
-    WorkerMessage,
+    WorkerMessageUnion,
     parse_server_message,
     parse_worker_message,
 )
@@ -74,11 +74,11 @@ def _parse[Incoming: Message](raw: str, parse: Callable[[str], Incoming]) -> Inc
         raise PayloadRejected(message) from None
 
 
-def parse_worker_input(raw: str) -> WorkerMessage:
+def parse_worker_input(raw: str) -> WorkerMessageUnion:
     """Established-session input; Register still uses the strict handshake parser."""
     return _parse(raw, parse_worker_message)
 
 
-def parse_server_input(raw: str) -> ServerMessage:
+def parse_server_input(raw: str) -> ServerMessageUnion:
     """Registered/recovery control failures remain fatal rather than partial handshakes."""
     return _parse(raw, parse_server_message)

@@ -1,6 +1,6 @@
 # Session 事件驱动的双端统一 — Feature record
 
-**Stage:** Review — 实现、本地全量与消融验证完成；review gate 与发布的最新结果见 PR 和验收摘要。
+**Stage:** Implementation validated — 修订 014–019 已实现并通过本地验证；精确 head 的发布 review、推送及 CI 状态见下方 PR 和验收摘要，历史 CI 不替代新 head 验收。
 **PR:** [#127 — 沿用同一方案/实施 PR](https://github.com/b1indsight/agentflow/pull/127)
 **Bookmark:** `refactor/session-event-architecture`
 **Baseline:** [main / PR #125 合并版本](https://github.com/b1indsight/agentflow/commit/086e68efe55403e2c7c66b23771e2db3cf78bcbd)
@@ -9,18 +9,31 @@
 `error` 仅含固定 `code` 和 `message`，不含 details、truncated 或任何诊断内容
 （[修订 005](#005-错误响应不暴露校验详情)）；不新增错误通知路由。该 wire 合同已实现为 v17，持久格式不变
 （[修订 004](#004-用-tool_result-返回消息验证错误)）。请求按 `包名.方法名` 精确路由，统一用
-`register(route, model, callback)` 注册；回复进入 `configure(result=self.on_reply, ...)`，
-按 `reply_to` 关联原调用后校验模型及业务证据（[修订 013](#013-分离请求路由与回复关联)）。
+`register(route, model, callback)` 注册；普通回复由 Dispatcher 关联原调用，匹配后执行可选
+`on_reply`，成功后再交付给调用方（[修订 017](#017-dispatcher-关联回复on_reply-在交付前执行)）。
 请求回调只接收注册的模型，验证错误由 `configure(validation_error=self.on_error, ...)` 统一交给
 连接业务对象（[修订 009](#009-集中验证错误分派收窄业务回调类型)）；wire method/reply_to 不变。
-两端业务回调统一命名为 `WorkerCallbacks` / `ServerCallbacks`，模块均用 `callbacks.py`
-（[修订 002](#002-两端业务回调对称命名)）；Flow 工具分别由相邻 `flow.py` 中的
-`WorkerFlowCallbacks` / `ServerFlowCallbacks` 处理，只有 server 注册工具请求路由
-（[修订 012](#012-分离-flow-路由与工具回调)）。用户已要求去掉 `Delivery`；Session 直接交付既有 msg，接口为
+worker 按状态协议与业务分类，分别为 `transport/state.py` 中的 `WorkerStateCallbacks` 和
+`transport/business.py` 中的 `WorkerBusinessCallbacks`；server 仍为 `ServerCallbacks` 组合
+`ServerFlowCallbacks`，只有 server 注册 Flow 工具请求路由。该分类替代
+[修订 002](#002-两端业务回调对称命名) 与 [修订 012](#012-分离-flow-路由与工具回调) 的 worker 名称。
+用户已要求去掉 `Delivery`；Session 直接交付既有 message，接口为
 `next_event(...) -> Incoming | Ready | None`。字节记账与剩余 payload 留在 Session 内部，
 不再保存派生的队列总计字段（[修订 011](#011-删除-session-的派生队列计数)）。
 [修订 001](#001-去掉-delivery直接交付-msg) 撤销初稿中的 Delivery 类型、队列结构及相关流程。
-下方 Initial plan 保留为历史基线，其中被后续修订替代的内容不再适用。实际实现与验证见时间线 006–013。
+通信代码沿用 `Message` / `message` 命名，完整消息钩子为 `on_message` / `on_message_done`，
+无控制变体为 `WorkerMessage` / `ServerMessage`；含控制变体的方向联合为
+`WorkerMessageUnion` / `ServerMessageUnion`，不保留 frame 或 PayloadMsg 旧名别名
+（[修订 015](#015-沿用-message-命名并同步调整联合类型)）。
+`WorkerClient` 已删除，拨号、认证、重连退避与连接任务回收直接归 `WorkerRuntime`；
+Session 和执行 owner 的边界不变（[修订 016](#016-移除-workerclient由-runtime-直接管理连接)）。
+WorkerRuntime 独立创建并平级挂载状态、业务两对象，两者互不持有或调用，沿用
+[修订 018](#018-worker-协议与-flow-回调独立挂载) 的独立挂载。业务类自行管理工具观察并注册
+worker.history；所有 payload 与验证拒收统一 FIFO，慢 history 与其他慢回调互相等待。
+Broker 持有临时查询 Future、配额和发送加等待预算，Dispatcher 是唯一回复关联表；Session
+不再有查询表、Responder 或 handler/busy 旁路。具体职责、关闭/EOF 合同及验证见
+[修订 019](#019-worker-状态与业务分类删除-history-旁路)。
+下方 Initial plan 保留为历史基线，其中被后续修订替代的内容不再适用。实际实现与验证见时间线 006–019。
 
 ## 1. Initial plan
 
@@ -1025,6 +1038,297 @@ Dispatcher，外部执行/仓储使用测试替身，不声称真实 GitHub 或�
 **实际状态：**实现、文档和本地验证完成；沿用同一 feature record、bookmark 和 PR。
 本轮未运行发布 review gate、移动 bookmark、推送、合并或部署；精确结果与当前状态见
 [验收摘要](https://ampcode.com/artifacts/session-70d95eae-bb58-4554-8799-467c6b88ec5c)。
+
+### 014 通信命名统一为 msg
+
+**日期与要求：**2026-11-05。用户要求“都统一成msg相关的命名，把frame相关概念删掉”。
+本次清除应用通信代码、测试及当前架构文档中的 frame 术语；不更改连接建立、重连策略、
+Session 生命周期或事件语义。此前修订 013 已随
+[请求/回复分离提交](https://github.com/b1indsight/agentflow/commit/186dcbbe8f8dc83337e28ec3448d0a817d8c2809)
+推送，本轮从该版本新建本地 change，未纳入其他 workspace 的工作。
+
+**命名与取舍：**
+
+- `WorkerFrame` / `ServerFrame` 改为 `WorkerPayloadMsg` / `ServerPayloadMsg`；
+  `FrameHeader` / `frame_header` 改为 `MsgHeader` / `msg_header`，内部校验方法同步改名。
+  两个具体变体仍表示 `control=None` 的 msg，包括空 payload 的纯收件 ACK。
+  保留既有共同模型 `Message` 和方向联合 `WorkerMessage` / `ServerMessage`，用 PayloadMsg
+  明确具体变体，避免与整个方向联合混淆；不新增包装层或兼容别名。
+- `Dispatcher.configure` 的 `frame` / `frame_done` 改为 `msg` / `msg_done`；
+  两端回调统一为 `on_msg` / `on_msg_done`，Gateway 及全部注册、调用点同步修改。
+  完整 msg 仍先经过控制和 epoch 授权，再逐项处理 payload，全部成功后才执行 msg_done。
+- 相关局部变量、测试构造器、用例名、注释、当前架构文档及类级数据流图同步更新。
+  保留 Python 栈 `FrameType`、浏览器动画、CSS/CSP 等无关用法；历史方案记录保持原文，
+  本条替代其中的通信命名，不追溯修改原决策。
+- wire 字段、版本、验证约束及序列化内容不变。生成的 JSON Schema 类型标题和定义引用会
+  随 Python 类名改变，但数据约束不变。Started 写后启动、T/A、R/B、history 旁路、原
+  Session 回包、旧 finally 身份检查、执行 Task/Future 及持久证据所有权均保持原合同。
+
+本轮按 consulting-claude-oracle 使用受限本地 Claude Opus 5.5 核对命名边界，已确认
+初始化/响应模型、无工具/MCP、成功退出；采纳具体变体包含 ACK 和 schema 名称变化的提示。
+顾问不作为运行验证或发布 review gate；最终命名与范围由主线程依据现有调用和模型确定。
+
+**验证：**同一组协议、Session、双端入口、停止、history 和验证错误回归在修改前后通过；
+Python 3.12 / PostgreSQL 全量、Ruff 与 Mypy 通过。核心变更文件格式检查通过；未整体重排
+本来不符合当前 formatter 的旧持久化与测试文件。所有变更 Python 文件的 AST 与基线比较，
+除预期改名、docstring 和导入排序外相同；原 wire 样例序列化逐字节一致，方向 JSON Schema
+在归一化新类型引用和说明文字后约束一致。未增加永久测试或新的协议机制。
+日志为 `.amp/in/artifacts/msg-naming-{before,after,full,lint,mypy,format,contract}.log`；
+全量仍报告既有的 Starlette 弃用与 subprocess transport 回收警告。当前架构卡片和更新后的
+类级图已用本地 Chromium 渲染检查；图的源码链接仍固定在已推送基线，并注明本地名称尚未推送。
+
+**实际状态：**本地实现与验证完成；沿用同一记录、bookmark 和 PR。本轮未运行发布 review
+gate、移动 bookmark、推送、合并或部署。前次 CI 不覆盖本地命名修订，精确结果见
+[验收摘要](https://ampcode.com/artifacts/session-70d95eae-bb58-4554-8799-467c6b88ec5c)。
+
+### 015 沿用 Message 命名并同步调整联合类型
+
+**日期与要求：**2026-11-05。用户指出 msg 与 message 应按已有风格自动适配，随后要求
+“调整”。修订 014 把概念统一机械地做成 Msg 缩写，并用 PayloadMsg 回避既有联合类型名称；
+本条撤销该命名选择，保留去掉通信 frame 术语的要求和所有原行为合同。
+
+**实现：**具体消息类直接使用 `WorkerMessage` / `ServerMessage`；原方向联合类型同步改名为
+`WorkerMessageUnion` / `ServerMessageUnion`，仍是带 control 判别的 `Annotated` 联合类型，
+没有新增类或包装。共同模型仍为 `Message`。连接头使用 `MessageHeader` / `message_header`，
+Dispatcher 使用 `message` / `message_done`，双端回调使用 `on_message` / `on_message_done`。
+类型注解、解析器、Runtime 装配、所有调用点、局部变量和测试构造器同步调整，不保留旧名。
+外部 Codex 数据格式中的 `event_msg`、Python 栈帧与浏览器术语不属于此次内部命名修改。
+
+当前架构文档和类级图同步，历史记录保持原文。协议字段、JSON 内容、验证规则、Session
+生命周期、请求/回复路径及业务安全边界均不变；生成 schema 中的类型名称随具体类改名。
+只调整已有测试，不新增永久测试。通过现有协议/双端回归、静态检查、wire 样例与 AST 对比
+验证纯命名性质；精确运行结果和警告见验收摘要，日志使用 `message-naming-*.log`。
+本轮沿用原本地 change，未重新运行发布 review gate、移动 bookmark、推送、合并或部署。
+
+### 016 移除 WorkerClient，由 Runtime 直接管理连接
+
+**要求与决定：**2026-11-05，用户要求“移除 workerClient 类，先把职责交给 Runtime”。
+本条取代初稿及修订 002、006 中保留独立 WorkerClient 拨号器的决定；按明确要求直接收回
+Runtime，不另建拨号器包装，也不在此阶段把建连策略下放到 Session。
+
+**实现：**删除 WorkerClient 类和 runtime.client。WorkerRuntime._run_connections 直接读取
+settings，负责 URL、认证头、指数退避/jitter、连接成功后的退避重置，以及连接任务的取消与等待。
+原 shutdown 标记改为可等待 Event，兼供退避唤醒；仅显式 stop 设置，调用方取消仍按原规则传播。
+进程 run 的 finally 取消并等待连接循环，后者等待当前连接清理。transport/client.py 只保留
+Connection Protocol 与 WebSocketTransport，职责是 IO 适配，没有连接策略或业务回调注入层。
+
+**保留边界：**迟到拨号在停止后不得创建 Session 或借用执行；普通断线只结束通信。
+WorkerExecution 继续跨重连持有执行 Task、工具 Future 和 shielded stop。进程退出仍先 join
+通信，再完成 execution.shutdown，最后释放 root lock；外部重复取消不能提前释放根锁。
+Gateway、Session、双端业务回调、协议及持久化格式不变。
+
+**验证与影响：**更新已有测试入口及 connect mock 的归属；不新增永久测试。复用拨号期间停止、
+执行跨连接恢复、重复取消和子进程清理的回归；临时场景从 Runtime.run 验证认证头、退避增长/
+上限/jitter/成功后重置、退避中停止，以及拨号中 stop 与 cancel。执行 PostgreSQL 全量、
+Ruff/Mypy 与变更范围格式检查；精确结果见验收摘要及 runtime-dialing-*.log。
+本次删除对象层，未引入需独立消融的新机制。当前架构文档与类级图同步，历史记录保留。
+沿用同一记录、bookmark、PR 和本地 change；未运行新的发布 review gate，未推送、合并或部署。
+
+### 017 Dispatcher 关联回复，on_reply 在交付前执行
+
+**要求与决定：**2026-11-05，用户要求“把关联回复的转发给对应toolcall的逻辑上移到dispatcher，
+on_reply设计成路由之后，转发给调用方之间的回调”。本条替代修订 013 中由连接 owner 选择普通
+回复接收方的实现；请求仍按 `package.method` 注册，不恢复逐工具回复方法表。
+
+**实现：**Dispatcher 提供 `expect_reply(call, model, deliver, *, on_reply=None)`，调用方在发送
+请求前登记原 payload 的 message_id、method、结果模型及接收函数。收到普通 ToolResult 后，先
+按 reply_to 查找，再校验 method/模型；随后 await 可选 on_reply，成功返回才 await deliver。
+hook 抛错则不交付。请求表与生命周期配置仍在准入前冻结；回复关联随当前调用增减。
+
+- WorkerFlowCallbacks 在 send_tool 登记绑定原 PendingToolCall 的 deliver；on_reply 只核对
+  Flow call_id，deliver 才调用 WorkerExecution.finish_tool_call。删除 WorkerCallbacks.on_reply
+  的二次选择与 Flow 转发，WorkerFlowCallbacks 不再自行匹配 reply_to 或结果模型。
+- 执行、停止、结果接纳和停止接纳调用也在 Dispatcher 登记。server 的恢复仅恢复原调用头身份，
+  不重造/重发 Assignment；旧任务结果在无当前关联时仍经 on_unmatched_reply 核对持久 worker/token
+  与 execution_call_id，再进入原结果证据/提交流程。worker 的未匹配回复仍为协议错误。
+- forget_reply 用于完成、弃用、guard 跳过、发送失败及停止收尾；Gateway finally 清空本连接关联。
+  表只保存通信接收函数，不接管 Future 生命周期。WorkerExecution 的队列、Task、工具 Future、
+  shielded stop 均不迁移，重连按原调用 ID 重新登记。已取消 caller 的匹配迟到回复仍可消费。
+- T/R 的接收函数保留至 A/B 业务接纳，因此重复凭据仍按原规则核验；不在 Dispatcher 收到第一条
+  回复时自动删除。Register 携带 A 后需要重放 T/A 时，owner 明确撤销旧 A 关联再登记，避免重复键。
+- 验证错误仍首先进入 owner 的 on_error；整批拒收先完成控制/epoch 授权，用 reply_model 做
+  非消费查询。拒绝已发送结果、Started 等无需普通回复的条目仍以原证据记录判断。
+- Session.request/history 保留独立的有界查询旁路、timeout、原 Session/epoch 和断线失败语义。
+  本次统一普通业务回复的分派，未把临时查询塞入串行业务 FIFO，也未合并两种 Future 生命周期。
+
+**顾问与取舍：**按 consulting-claude-oracle 使用受限本地 Claude Opus 5.5 生成修订建议；已核对
+初始化和响应模型、空 tools/MCP、成功退出。采纳每调用 hook、发送前登记、持久重放与临时查询
+边界。没有采用建议中的“一次性出表”及把 on_reply 与交付合成同一函数：前者改变重复停止凭据
+语义，后者不能表达用户要求的交付前拦截。本实现明确区分 hook 与 deliver，未新增包装类。
+
+**验证：**已有定向回归先通过；更新公开 Dispatcher 用例并新增“同方法不同调用、逆序回复、
+hook 拒绝不交付”的合同测试，旧实现失败后新实现通过。Python 3.12/PostgreSQL 全量、Ruff、
+Mypy 和变更 Python 文件格式检查通过；沿用既有两类全量警告。临时场景验证 ID/method/model、
+重复登记、错误不消费关联、撤销/关闭、真实 WorkerExecution Future、发送失败/guard、取消迟到
+回复和重连。首次临时脚手架误用了空非 ACK 消息和未启动执行 owner，修正后才取得有效结果。
+
+**消融：**同一输入下分别省略 on_reply、首次回复即删除关联、不撤销关联、去掉持久重放入口；
+四个变体均触发对应合同失败，基线通过。内存替换单个方法、不改 tracked 源码。可用
+`test_reply_hook_runs_after_correlation_before_original_caller` 重现 hook 顺序检查，用
+`test_duplicate_prior_job_result_does_not_retire_current_assignment` 重现持久重放检查；其余
+临时场景与日志说明见[验收摘要](https://ampcode.com/artifacts/session-70d95eae-bb58-4554-8799-467c6b88ec5c)。
+日志位于 `.amp/in/artifacts/dispatcher-replies-*.log`；临时测试和消融脚本不进入提交。
+
+**实际状态：**本地实现与验证完成；同一记录、bookmark、PR。没有新一轮发布 review gate，
+未推送、合并或部署。历史 head 的 CI 不覆盖这次修改。
+
+### 018 Worker 协议与 Flow 回调独立挂载
+
+**要求与决定：**2026-11-05，用户要求“把worker独有的和WorkerFlow的两个对象调整成并行独立的挂载”。
+本条替代修订 012/017 中 WorkerCallbacks 创建并协调 WorkerFlowCallbacks 的部分；平级挂载仍使用
+同一串行 driver，不增加并发业务消费或协调器包装，也不扩大为 server Flow 装配重构。
+
+**实现：**WorkerRuntime 分别创建两个对象，传给 `Gateway.serve(..., *callbacks, replace=...)`。
+Gateway 对所有对象调用同一 `bind(routes)`，再统一 freeze；连接协议仍只有一个 configure owner，
+重复配置或路由冲突在准入前失败。WorkerCallbacks 不再导入、持有或调用 Flow 对象，也不管理
+tool watch 或判断 FlowToolResponse；自身只管理连接协议、terminal 观察与关键持久证据。
+
+- Dispatcher 增加冻结前注册的 `before_wait(callback)`；共同 driver 在处理完整事件后、下次
+  next_event 前 await prepare，仍受 handling 与绝对截止保护，不插入消息批次中间。
+- WorkerFlowCallbacks.bind 登记自身 prepare，按已绑定 epoch、原执行 lease、assignment 和 stopping
+  事实管理 tool watch、借用槽及关联退休。WorkerExecution 仅新增只读 stopping 投影，不迁移任务
+  或增加共享状态；Flow 的 watching 标志防止重复注册和重复借用队首。
+- 正常完成保留原调用，允许消费已取消 caller 的迟到回复；停止或 assignment 退休/更换时撤销。
+  不采用“lease 消失就立即删表”，也不无限保留旧 receiver。检查/拒收/交付均绑定原 PendingToolCall，
+  清理只清对应调用；发送前及实际写入 guard 复查 lease，避免 executor 已结束但 collector 尚未运行
+  时发送工具。Flow 自行重挂观察，不经 WorkerCallbacks 转发生命周期。
+- expect_reply 可登记同步 on_rejected；WorkerCallbacks 在 epoch 与整批关联头授权后调用通用
+  reject_reply，Dispatcher 按 ID/method 通知原调用。畸形结果不按结果模型验证；关键执行/停止错误
+  仍按已有证据策略处理，错误回包保持固定两字段。未知后续 header 不得让前面的工具 Future 提前失败。
+- Registered 缺少恢复决定而执行仍存活时拒绝绑定 epoch；server 的正常恢复路径发送明确 resume/replay，
+  拒绝恢复则先撤销旧执行。不得把“收到某个新 epoch”当作旧执行获得授权。
+
+**顾问与核对：**受限本地 Claude Opus 5.5 咨询完成，实际模型、空 tools/MCP 和成功退出已核验。
+采纳事件间协调点、每调用身份及迟到回复风险；没有采用顾问的“停止也保留 receiver”建议。
+进一步读取 Session._queue_rejection 确认 worker 业务拒收整体位于 FIFO driver；不采纳其关于这里
+必在 reader 执行业务的推测，不引入额外 TOCTOU 分支。独立 history 保留原同步授权旁路。
+
+**验证与取舍：**修改前定向基线通过。扩展既有 Gateway 截止/清理合同用例，以正反挂载顺序验证
+独立 bind、hook 冻结、单 driver 与 deadline；旧实现因不接受多个回调失败，修改后通过。
+更新一个 idle execution mock，使 lease 明确为 None；首次定向失败源于该 mock 默认返回对象，
+未绕过生产授权检查。扩大的通信/执行/停止定向回归、PostgreSQL 全量、Ruff/Mypy 及变更范围格式
+检查通过，全量仍有既有 Starlette 弃用和 subprocess transport 清理警告。
+临时真实执行 owner 场景覆盖挂载顺序、未授权重放、未知整批 header、错误 epoch/method、停止后
+下一任务、迟到回复及 executor 完成与 collector 之间的写入窗口；无真实远端副作用。
+
+**消融：**各变体独立进程、仅内存替换，基线通过；移除 before_wait、拒收分派、epoch 检查、
+stopping 区分或正常终态关联保留，分别触发预期合同失败。因此保留这五个机制，不引入
+执行状态事件总线或额外包装类。公开回归入口为 `test_gateway_deadline_covers_callback_and_cleanup`、
+`test_mcp_shutdown_consumes_late_tool_response_before_delivering_result` 和既有 payload validation 用例；
+临时场景及消融证据见[验收摘要](https://ampcode.com/artifacts/session-70d95eae-bb58-4554-8799-467c6b88ec5c)，
+日志为 `.amp/in/artifacts/independent-mount-*.log`，临时脚本不保留为永久测试。
+
+**实际状态：**仅本地独立 workspace；沿用同一记录、bookmark 与 PR，未运行本轮发布 review gate，
+未推送、合并或部署；此前 CI 不覆盖本轮。Started、T/A、R/B、Session 生命周期、持久格式和 history
+旁路不变。当前架构文档和类级图同步，旧时间线保留。
+
+### 019 Worker 状态与业务分类，删除 history 旁路
+
+**要求与状态：**2026-11-05，用户要求“将worker 的状态相关的回调和业务相关的回调分离成2个独立的处理类，
+把 worker.history 也加入到分类里，彻底清理掉旁路逻辑”。按批准方案完成本地实现与验证。
+本条替代初稿 §1.2/1.3 以及修订 017/018 中保留独立 history 旁路的决定；旧记录保留为历史。
+
+**职责划分：**这里的“状态”包括连接与执行状态协议，不限于连接是否在线。
+
+| 独立挂载对象 | 处理内容 | 注册方式 |
+| --- | --- | --- |
+| `WorkerStateCallbacks`，`transport/state.py` | Register/Registered、epoch、heartbeat；execute/stop/reject_recovery；Started、terminal 观察、结果/停止接纳；连接级授权、验证错误及清理 | `bind(routes)`；唯一 `configure` owner；注册 `worker.execute`、`worker.stop`、`worker.reject_recovery` |
+| `WorkerBusinessCallbacks`，`transport/business.py` | Flow 工具发送、回复 hook、原调用交付及退休；`worker.history` 的读取与回复 | `bind(routes)`；注册 `before_wait(prepare)` 及 `register("worker.history", ConversationQuery, self.on_history)` |
+
+Runtime 分别构造并平级挂载这两个对象；互不导入、持有或调用。现有 WorkerCallbacks 和
+WorkerFlowCallbacks 迁入这两个文件，不保留别名、旧文件或第三个转发对象。真实执行、工具 Future、
+shielded stop 继续归 WorkerExecution，持久证据继续归 ExecutionState。server 只调整查询接入和授权，
+不扩大为 server 回调分类重构。
+
+**统一处理与删除范围：**
+
+- 所有入站 payload 均保留在 Session FIFO，经 Gateway 的连接/控制授权、逐项检查和 Dispatcher 处理。
+  history 请求、回复与验证错误不再提前消费；畸形消息的拒收也在 FIFO 原位置完成整批授权后处理。
+- 删除 `Responder`、`ReplyKey`、Session 的 `responder/reply_key` 注入、`request`、`reject_queries`、
+  `dispatch_item`、临时查询关联表、handler/busy 任务和队列；删除 reader 中的独立分流、
+  Gateway 的混合消息 shortcut、worker 的 `history_responder` 和 server 的 `conversation_result_key`。
+- history 回调内直接 await 线程中的只读操作，再通过原 Session 回复请求 epoch；不创建独立 handler Task、
+  优先队列或另一条消费循环。现有 FIFO 容量限制保留，超限仍结束连接；删除 worker 侧并行 responder 的 busy 机制。
+- 传输收件 ACK 和出站周期 heartbeat 保留，不处理业务 payload。HTTP 发起查询仍用选定 Session 的发送锁；
+  回包统一经过 driver，不能在 driver 内等待排在自己后面的回复。
+
+**查询关联与生命周期：**
+
+1. 复用 Gateway 现有 `Registration`，增加本连接 Dispatcher 引用；`get` 一次返回已发布的 Registration，
+   调用方从中取得配对的 Session/Dispatcher。`wake_all` 与直接 register 的测试同步适配。
+   不新增 Endpoint/Context，不另建 peer 表，不在请求中重新选择后继连接；latest-wins 与旧 finally 身份检查不变。
+2. 将临时查询 Future 和每连接配额从 Session 迁至 ConversationBroker；Broker 继续管理进程配额及查询总预算。
+   发送前使用既有 `expect_reply` 登记 ConversationResult、交付函数和拒收函数；成功、失败、timeout、
+   caller cancel 均撤销本次关联。配额按原 Session 统计，不承担入站回复匹配；唯一匹配表仍在 Dispatcher。
+   不增加 `Gateway.request` / `Dispatcher.request` 或新异常包装层。
+3. 给每调用接收登记增加可选的关闭通知；Session 的实际关闭通知 Gateway 所挂的 Dispatcher，连接清表时
+   只通知显式登记该通知的临时调用。没有关闭通知的持久接收者只释放连接引用，不取消 Task/工具 Future。
+   明确关闭、替换和写失败及时失败查询；EOF 先按 FIFO 处理已经收到的回复/拒收，再失败剩余查询。
+4. 保留每连接 4、进程 64 的查询额度、30 秒总预算及页内容/大小校验。发送与等待的关闭/取消竞争仍需覆盖：
+   取消锁等待时不发送；已经进入实际写入时若结果不确定，沿用 Session 的封闭连接策略。
+   沿用 Session 现有 driver 身份做等待守卫，不复制 driver Task 字段；明确禁止回调内阻塞等待查询结果。
+5. 同 epoch 的迟到 history 回复在普通 unmatched_reply 策略中丢弃，不能关闭健康连接或匹配下一查询；
+   不增加 tombstone 缓存。错误 epoch 先按连接授权规则处理。其他未匹配业务回复及持久重放的既有策略不变。
+   畸形回复和 ValidationErrorResult 经过 owner 授权后由 `reject_reply` 通知原调用，映射为 invalid_response；
+   错误回包仍只有固定 code/message，不附诊断内容，不对错误再次回错误。
+
+**权限与行为取舍：**
+
+- 保留 Registered 前的合法只读 history 查询，但也必须经过状态 owner，再进入业务路由；查询只借用请求 epoch
+  回复，不绑定 Session epoch、不设 ready、不授权执行恢复。混合控制/payload 必须先接受控制决定。
+  无效控制、错误 epoch、关键恢复围栏和整批拒收检查不得因 history 被跳过。
+- server 将只读查询回复与执行状态消息分类：history 回复不要求先收到 Started，也不能代替 Started、
+  触发 Flow effects 或刷新执行存活期限。检查发生在正常 driver 中，不恢复 reader 旁路。
+- 慢 stop、preparation、工具/结果回调会延迟 history；history 读取也会延迟后续 stop 或工具回复。
+  超过查询预算返回 query_timeout；超时不重放。ACK/已启用的周期 heartbeat 仍可运行，但不能据此保证业务回调及时完成。
+- 只读操作使用 `to_thread` 避免阻塞事件循环；取消 await 不能强制终止已运行线程。
+  预期 ConversationFailure 保留原错误码；未预期异常交给现有连接失败处理，不继续吞掉并留下悬挂查询。
+
+**实施顺序与验收合同：**先更新串行及查询生命周期合同用例，再迁移回调分类和 Broker/Dispatcher 关联，
+删除 Session/接入器/Gateway 旁路，最后同步当前架构文档、类级图和 changelog。永久测试聚焦公共合同，
+其他边界用临时验证，禁止靠保留隐藏分流满足旧旁路用例。
+
+- 更新 `test_conversation_worker` / `test_conversation_e2e` 中“慢回调期间 history 仍可完成”的断言，
+  验证双向等待顺序、混合消息控制优先、握手前只读及 ACK/heartbeat。
+- 复用查询 proxy、payload validation 和 Session/Gateway 用例，验证原连接/epoch、不同 ID、迟到回复、
+  配额释放、send+wait timeout/cancel、实际关闭/替换、reply 或错误后 EOF，以及 pre-Started 合法 history 回复。
+- 回归 Started 写后 launch、T/A、R/B、stopping、执行跨重连与旧持久格式；运行 PostgreSQL 全量、
+  Ruff/Mypy、变更范围格式检查和剩余符号搜索。当前历史测试结果不作为此修订的验收。
+- 对新增的关闭通知和 caller 生命周期适配做小范围消融：去掉通知应暴露慢 driver 下等待者不及时失败；
+  去掉关联撤销/发送取消应暴露迟到回复或取消后发送问题。只保留有合同证据支持的机制。
+
+**顾问与核对：**本地受限 Claude Opus 5.5 已生成修订建议；初始化与响应模型一致、tools/MCP 为空，
+最终 result 成功且进程退出码为 0。采纳状态协议/业务分类、统一 FIFO、关闭通知和迟到回复风险。
+未采用顾问建议的两层 request API、新异常，以及 Registration 上重复的 opened/driver 字段；
+临时 Future 由 Broker 持有，关联复用 Dispatcher，选择复用原 Registration。也不采纳 history 刷新执行
+接收期限的建议，避免只读查询被误当作执行存活证据。顾问报告把 ExitStack 的关闭 hook 顺序读反，
+源码实际是 transport 清理后执行 hook；本修订不改变这一顺序。咨询不是实现验收或发布 review。
+
+**实现与验证：**旧类和 history 旁路均已移除，当前架构文档、类级图及 changelog 已同步。
+迁移现有测试以验证统一 FIFO，并在 ConversationBroker 的公开 query 接口覆盖发送锁等待、实际写入、
+等待回复三个阶段的取消、超时、断连与配额归还，以及慢 driver 中的显式关闭。
+回复紧跟 EOF 的回归先失败后通过：关闭通知曾取消已写完但尚未返回的 send Task；现仅通知临时 Future，
+Session 关闭未完成的实际写入，Broker 仍要求 send 成功后才返回已收到的回复。未写完的请求仍失败。
+首次全量暴露一个旧测试仍假定 history 阻塞时工具可绕过 driver 发出；改为验证 history 结束前
+被取消的工具不会发出，没有保留旧分流。修改后的定向回归、PostgreSQL 全量、Ruff/Mypy 及变更范围
+格式检查通过；全量仍有既有 Starlette 弃用与 subprocess transport 回收警告。
+
+临时场景验证 driver 自等守卫、迟到回复、pre-Started history 不刷新接收期限，以及拒收紧跟 EOF
+仍按 FIFO 顺序处理。类级图用 Chromium 检查交互、源码符号、360/720px 溢出和连线，并检查渲染截图。
+可复现命令为 `FLOWTOOL_TEST_DATABASE_URL=postgresql://127.0.0.1:55617/agentflow_test .amp/in/venv312/bin/python -m pytest -q`、
+`.amp/in/venv312/bin/ruff check app tests` 与 `.amp/in/venv312/bin/mypy app tests`；查询生命周期入口为
+`tests/test_conversation_proxy.py`，FIFO 入口为 `tests/test_conversation_worker.py` 与 `tests/test_communication_session.py`。
+
+**消融与取舍：**同一临时探针内独立运行基线与逐项内存替换，不改生产文件。移除实际关闭通知后，
+慢 driver 中的查询仍悬挂；移除 forget_reply 后保留已取消接收者；移除发送任务回收后取消查询仍遗留
+等待发送锁的任务。三项简化均未满足生命周期合同，因此保留关闭通知、关联撤销和发送取消/join；
+不恢复 Session 请求表或独立业务消费者。探针与消融脚本不保留为永久测试，证据保留在
+`.amp/in/artifacts/state-business-*.log` 和[验收摘要](https://ampcode.com/artifacts/session-70d95eae-bb58-4554-8799-467c6b88ec5c)。
+
+**交付范围：**修改仅来自本独立 workspace，保留此前修订；沿用同一记录、bookmark、PR，
+不包含源 workspace 的测试精简。发布仅使用 review gate 返回的精确提交；结果与 CI 状态见
+[PR #127](https://github.com/b1indsight/agentflow/pull/127) 和验收摘要，不沿用旧 head 结论。
+跨重连执行与持久证据合同不变；本轮不包含合并或部署。
 
 ## 3. 源码依据
 

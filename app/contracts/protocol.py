@@ -293,7 +293,7 @@ class ToolCall(ProtocolModel):
 
 
 class ToolResult(ProtocolModel):
-    """A method-specific result correlated to one invocation, not its containing frame."""
+    """A method-specific result correlated to one invocation, not its containing message."""
 
     type: Literal["tool_result"]
     message_id: MessageId
@@ -373,7 +373,7 @@ class ExecuteResult(ToolResult):
         return self
 
     def terminal(self) -> TerminalPayload:
-        """Project only durable fields; frame and invocation metadata never enter the journal."""
+        """Project only durable fields; message and invocation metadata never enter the journal."""
         if self.result is not None:
             return Succeeded(
                 job_id=self.job_id, assignment_token=self.assignment_token, result=self.result
@@ -516,9 +516,9 @@ ServerPayload = Annotated[ServerCall | ServerResult, Field(discriminator="type")
 
 
 class Message[Payload: ToolCall | ToolResult](ProtocolModel):
-    """Common frame fields. Every field is required, including explicit nulls and [].
+    """Common message fields. Every field is required, including explicit nulls and [].
 
-    Use a concrete control or directional frame and its directional parser. This model
+    Use a concrete control or directional message and its directional parser. This model
     performs static checks only; receipt ACKs confer no business completion or authority.
     """
 
@@ -538,7 +538,7 @@ class Message[Payload: ToolCall | ToolResult](ProtocolModel):
         return value
 
     @model_validator(mode="after")
-    def _frame_contract(self) -> Self:
+    def _message_contract(self) -> Self:
         if self.ack != (self.ack_id is not None):
             raise ValueError("ack and ack_id must occur together")
         ids = [item.message_id for item in self.payload]
@@ -555,11 +555,15 @@ class Message[Payload: ToolCall | ToolResult](ProtocolModel):
         return self
 
 
-class WorkerFrame(Message[WorkerPayload]):
+class WorkerMessage(Message[WorkerPayload]):
+    """Worker message with control=None; empty payload is allowed only for a receipt ACK."""
+
     control: Literal[None]  # noqa: PYI061 - Pydantic's discriminator requires Literal for null.
 
 
-class ServerFrame(Message[ServerPayload]):
+class ServerMessage(Message[ServerPayload]):
+    """Server message with control=None; empty payload is allowed only for a receipt ACK."""
+
     control: Literal[None]  # noqa: PYI061 - Pydantic's discriminator requires Literal for null.
 
 
@@ -636,21 +640,23 @@ class ProtocolError(Message[ServerPayload]):
         return self
 
 
-WorkerMessage = Annotated[Register | Heartbeat | WorkerFrame, Field(discriminator="control")]
-ServerMessage = Annotated[Registered | ProtocolError | ServerFrame, Field(discriminator="control")]
+WorkerMessageUnion = Annotated[Register | Heartbeat | WorkerMessage, Field(discriminator="control")]
+ServerMessageUnion = Annotated[
+    Registered | ProtocolError | ServerMessage, Field(discriminator="control")
+]
 
-_WORKER_MESSAGES: TypeAdapter[WorkerMessage] = TypeAdapter(WorkerMessage)
-_SERVER_MESSAGES: TypeAdapter[ServerMessage] = TypeAdapter(ServerMessage)
+_WORKER_MESSAGES: TypeAdapter[WorkerMessageUnion] = TypeAdapter(WorkerMessageUnion)
+_SERVER_MESSAGES: TypeAdapter[ServerMessageUnion] = TypeAdapter(ServerMessageUnion)
 
 
-def parse_worker_message(raw: str) -> WorkerMessage:
-    """Validate the complete worker frame before any control or payload has effects."""
+def parse_worker_message(raw: str) -> WorkerMessageUnion:
+    """Validate the complete worker message before any control or payload has effects."""
 
     return _WORKER_MESSAGES.validate_json(raw)
 
 
-def parse_server_message(raw: str) -> ServerMessage:
-    """Validate the complete server frame; historical records use durable decoders instead."""
+def parse_server_message(raw: str) -> ServerMessageUnion:
+    """Validate the complete server message; historical records use durable decoders instead."""
 
     return _SERVER_MESSAGES.validate_json(raw)
 
@@ -704,7 +710,7 @@ def accept_stop_id(receipt_id: MessageId) -> MessageId:
     return _stable_id(["server.accept_stop", receipt_id])
 
 
-class FrameHeader(TypedDict):
+class MessageHeader(TypedDict):
     protocol_version: Literal[17]
     message_id: MessageId
     connection_epoch: str | None
@@ -712,7 +718,7 @@ class FrameHeader(TypedDict):
     ack_id: MessageId | None
 
 
-def frame_header(connection_epoch: str | None) -> FrameHeader:
+def message_header(connection_epoch: str | None) -> MessageHeader:
     """Construct fresh delivery metadata without supplying defaults to the wire parser."""
     return {
         "protocol_version": PROTOCOL_VERSION,
@@ -741,7 +747,7 @@ class ResultHeader(TypedDict):
 
 
 def result_header(reply_to: MessageId, message_id: MessageId | None = None) -> ResultHeader:
-    """Correlate a result to its invocation rather than the containing frame."""
+    """Correlate a result to its invocation rather than the containing message."""
     return {
         "type": "tool_result",
         "message_id": message_id or uuid4().hex,

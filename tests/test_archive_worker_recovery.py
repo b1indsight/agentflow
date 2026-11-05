@@ -230,7 +230,7 @@ async def test_original_worker_recovers_cleanup_and_replays_without_redeleting(
     try:
         store.workers.recover_abandoned_assignments()
         if window in {"started-lost", "result-started-lost"}:
-            # The original frozen token must survive a lost Started frame and expired grace.
+            # The original frozen token must survive a lost Started message and expired grace.
             now = store.now()
             store._db._clock = lambda: now + timedelta(hours=1)
             store.workers.sweep_expired_assignments()

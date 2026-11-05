@@ -8,11 +8,11 @@ from app.contracts.protocol import (
     FlowToolErrorKind,
     FlowToolRequest,
     FlowToolResponse,
-    ServerFrame,
     ServerMessage,
+    ServerMessageUnion,
     ToolCall,
-    WorkerMessage,
-    frame_header,
+    WorkerMessageUnion,
+    message_header,
     result_header,
 )
 from app.controler.workers.errors import ProtocolViolation
@@ -27,7 +27,7 @@ class ServerFlowCallbacks:
         self,
         *,
         worker_id: str,
-        session: Session[WorkerMessage, ServerMessage],
+        session: Session[WorkerMessageUnion, ServerMessageUnion],
         jobs: JobStore,
         tools: FlowToolService,
         validate_active: Callable[[int, str], None],
@@ -44,7 +44,7 @@ class ServerFlowCallbacks:
             raise RuntimeError("server session requires a connection epoch")
         return epoch
 
-    def bind(self, routes: Dispatcher[WorkerMessage]) -> None:
+    def bind(self, routes: Dispatcher[WorkerMessageUnion]) -> None:
         routes.register("flow.open_pr", FlowToolRequest, self.on_tool)
 
     def _validate_tool(self, item: FlowToolRequest) -> None:
@@ -54,7 +54,7 @@ class ServerFlowCallbacks:
         if job is None or args.flow_id != job.flow_id:
             raise ProtocolViolation("Flow tool call belongs to another Flow")
 
-    async def on_tool(self, item: FlowToolRequest, message: WorkerMessage) -> None:
+    async def on_tool(self, item: FlowToolRequest, message: WorkerMessageUnion) -> None:
         self._validate_tool(item)
         if self.is_stopping():
             return
@@ -62,10 +62,10 @@ class ServerFlowCallbacks:
             item, worker_id=self.worker_id, connection_epoch=self.epoch
         )
         await self.session.send(
-            ServerFrame(**frame_header(self.epoch), control=None, payload=[result])
+            ServerMessage(**message_header(self.epoch), control=None, payload=[result])
         )
 
-    async def on_unrouted(self, item: ToolCall, message: WorkerMessage) -> None:
+    async def on_unrouted(self, item: ToolCall, message: WorkerMessageUnion) -> None:
         if not isinstance(item, FlowToolRequest):
             raise ProtocolViolation("unregistered message route")
         self._validate_tool(item)
@@ -79,5 +79,5 @@ class ServerFlowCallbacks:
             error_kind=FlowToolErrorKind.INVALID_REQUEST,
         )
         await self.session.send(
-            ServerFrame(**frame_header(self.epoch), control=None, payload=[result])
+            ServerMessage(**message_header(self.epoch), control=None, payload=[result])
         )

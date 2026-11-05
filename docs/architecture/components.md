@@ -135,27 +135,48 @@ M2 已接入有界 Issue/PR/patch/讨论快照、线程/comment 映射与原线�
 ### 4.3.1 公共 Gateway / Session 与角色驱动
 
 两端 Runtime 直接创建同类 `Gateway`，统一登记、查找、替换、通信关闭和串行事件驱动。
-ServerRuntime 为每条连接创建 `ServerCallbacks`；WorkerRuntime 创建 `WorkerCallbacks`，
-以固定 `server` key 拒绝重叠连接。两个业务模块均命名为 `callbacks.py`，没有第二套接收循环。
-两端分别组合 `ServerFlowCallbacks` / `WorkerFlowCallbacks`，模块均为相邻的 `flow.py`；
+ServerRuntime 为每条连接创建 `ServerCallbacks`；WorkerRuntime 分别创建 `WorkerStateCallbacks` 和
+`WorkerBusinessCallbacks`，以 `Gateway.serve(..., state_callbacks, business_callbacks, replace=False)` 平级挂载，
+以固定 `server` key 拒绝重叠连接。worker 两类分别位于 `transport/state.py` 与 `transport/business.py`。
+server 仍由 ServerCallbacks 组合 ServerFlowCallbacks；本轮不扩展 server 的装配重构。
 ServerFlowCallbacks 通过 `bind(routes)` 注册 `flow.open_pr` 请求，并拒绝未注册工具请求。
-WorkerFlowCallbacks 不注册工具名；主回调的 `on_reply` 将工具回复交给它，按原调用 ID 关联。
+WorkerBusinessCallbacks.bind 注册 `worker.history` 和 `before_wait(self.prepare)`，在同一 driver
+中读取历史、管理工具观察。它与 WorkerStateCallbacks 互不引用或调用；状态类是唯一 configure owner，
+负责连接与执行状态协议、terminal 观察和授权。握手缺少恢复决定时，不授权仍在运行的旧执行发送工具。
+Flow 只在 epoch 已绑定且执行 lease 有效时观察队首，发送时再次检查 lease 与 Future；正常完成
+保留原调用关联以消费迟到回复，停止或 assignment 退休/更换后撤销。只读的 WorkerExecution.stopping
+区分正常完成与 fenced stop，不增加共享业务状态容器。
+WorkerBusinessCallbacks 不注册 Flow 工具名；发送前用 `expect_reply(call, model, deliver, on_reply=..., on_rejected=...)`
+登记原调用的接收函数。Dispatcher 匹配 reply_to、method 和模型后，直接调用它的 `on_reply`，
+成功返回才调用 deliver，将回复交给 WorkerExecution 完成原 Future，不经 WorkerStateCallbacks 转发。
 ServerFlowCallbacks 校验 Flow/job 归属，通过连接 owner 的实时检查获得 assignment 与 stopping 状态；
-WorkerFlowCallbacks 只保存当前连接借出的工具调用，原 Future 继续由 WorkerExecution 持有。
+WorkerBusinessCallbacks 只保存当前连接借出的工具调用，原 Future 继续由 WorkerExecution 持有。
 握手、逐项授权、整批验证错误和关键证据恢复仍由连接回调统一处理。
 Gateway 在准入前调用 `bind(routes)`，冻结 `register("包名.方法名", model, callback)` 的精确请求路由；
-该接口只接受 ToolCall 模型。普通 ToolResult 统一进入 `configure(result=self.on_reply, ...)`，
-由业务 owner 按 `reply_to` 关联原调用，再校验模型、method、call_id 和业务证据。
-server 对跨重连或旧任务终态，用持久 job 的原 assignment 身份核对调用 ID，不依赖当前任务或新增内存表。
+该接口只接受 ToolCall 模型。普通 ToolResult 由 Dispatcher 的连接局部关联表按原 payload ID 分派；
+执行/停止调用及其接纳调用也在发送前登记。`on_reply` 是每次调用可选的交付前钩子，抛错阻止交付；
+call_id、job/token、持久结果和停止证据继续由业务 owner 校验。调用完成、弃用或发送失败时撤销关联，
+Gateway 退出时清空；表不接管执行 Future 的生命周期。server 的 T/R 接收函数保留至 A/B 接纳，允许重复凭据。
+无法匹配的回复交给 `configure(unmatched_reply=...)`：worker 拒绝；server 对跨重连或旧任务终态，
+用持久 job 的原 assignment 身份核对调用 ID，再执行原结果处理，不依赖旧连接的关联表。
 ValidationErrorResult 先进入原 `validation_error` 钩子，未匹配错误不会触发新业务效果。
-不使用通配、反射或 pluggy hook 分发。Session 交付既有 msg、类型化 Ready 回调或无数据 wake，
+worker 验证 epoch 与整批关联头后，通过 Dispatcher.reject_reply 通知原调用登记的 on_rejected；
+核心协议回调不再判断 FlowToolResponse 或直接调用 Flow 对象，关键协议错误仍由自身证据策略处理。
+不使用通配、反射或 pluggy hook 分发。Session 交付既有 message、类型化 Ready 回调或无数据 wake，
 不增加 Delivery；观察任务只借用执行结果，业务处理始终在共同驱动中串行进行。
 
-serve 的 `workers/transport.py:serve_worker` 校验 bearer token、accept 与实际首帧 Register，
+`configure(message=self.on_message, message_done=self.on_message_done, ...)` 处理完整 message：先校验控制与 epoch，
+再逐项处理 payload，全部成功后执行 message_done。`Message` 是共同消息模型，
+`WorkerMessageUnion` / `ServerMessageUnion` 是含控制变体的方向联合；`WorkerMessage` /
+`ServerMessage` 是 `control=None` 的具体变体，也包含空 payload 的纯收件 ACK。
+它们使用相同的 `message_header`，不增加另一层消息包装。
+
+serve 的 `workers/transport.py:serve_worker` 校验 bearer token、accept 与实际首条 message Register，
 再创建带随机 epoch 的 Session，交给 Runtime 装配回调并调用 `Gateway.serve`。
 回调保存调度、恢复、持久化和 assignment fencing 的连接局部状态，无 Endpoint/Run/Context 对象。
 每个 worker 是单槽，PostgreSQL 按 FIFO、worker `last_assigned_at` 和 Flow execution binding
-事务化领取任务。worker 的 `WorkerClient` 只主动拨号、认证并指数退避，不持有 Gateway 或执行 owner；
+事务化领取任务。`WorkerRuntime` 直接负责主动拨号、认证、指数退避和连接任务的关闭等待，
+不再创建 WorkerClient。`WebSocketTransport` 只适配底层 WebSocket IO，不负责连接生命周期；
 `WorkerExecutor` 只依赖 CodingAgent 和 Flow repo/VCS helpers，不导入 Store、FastAPI 或 GitHub。
 
 Gateway 仅发布当前登记，另保留尚未退休的 Session 以便进程关闭全部通信。A→B→C 重叠替换时，
@@ -344,7 +365,7 @@ lease 到期 requeue、started grace/deadline、epoch fencing、result inbox 去
 不能确认是否成功的非幂等请求保持 uncertain，不盲目重复 POST；`flow show` 显示待处理操作，retry 不能绕过它们。
 因此不宣称跨 PostgreSQL/GitHub 的通用 exactly-once。跨 worker session 迁移和多 serve HA 仍未实现。
 当前只初始化完整 schema，不执行 DDL 迁移或批量回填。serve/worker 在线使用 wire17，
-正常写 journal5 / ResultInbox v1；journal/inbox 只存业务事实，不存帧、条目身份、ACK 或 epoch。
+正常写 journal5 / ResultInbox v1；journal/inbox 只存业务事实，不存 message、条目身份、ACK 或 epoch。
 受限 v4 journal（内嵌 v14/v15 回执）与已知旧 inbox 只读转换；保持摘要，正常状态保存才写 v5。
 未知、混合或损坏记录保留并拒绝；切换和降级边界见[升级说明](../operations/upgrade.md)。
 
@@ -404,7 +425,7 @@ adapter/控制流已通过自动化，真实 provider 的语义准确性仍待 s
 `WorkerRuntime` 装配一个进程级 `WorkerExecution`，拥有根锁、信号、健康任务与关闭顺序。
 `execution/lifecycle.py` 中的 owner 持有唯一执行 Task、工具请求和原 Future、停止清理 Task。
 `WorkerExecutor` 继续编排 initial/revision/archive、agent、MCP、VCS 和 workspace，不管理连接。
-Client 只借用 owner；替换前必须关闭并 join 旧 Client，同一 owner 不支持并行通信消费者。
+连接回调只借用 owner；重新连接前必须关闭并 join 旧 Session，同一 owner 不支持并行通信消费者。
 
 `state/execution.py` 的 `ExecutionState` 保存当前 assignment、持久化阶段、修订调用记录、
 终态脱敏/归档、恢复描述及停止/清理凭据。唯一 `state/record.py:ExecutionRecord` 保存 v5
@@ -413,35 +434,37 @@ Client 只借用 owner；替换前必须关闭并 join 旧 Client，同一 owner
 然后重放终态；普通 started 任务在进程重启后没有 Task 时仍不能推断已停止或重新运行。
 
 首次派发保持 `record_received → 发送 Started → record_started → 创建 Task` 的顺序。
-工具调用由 MCP 交给 owner，WorkerFlowCallbacks 借用队头、以当前 epoch 的新帧发送原条目，收到响应后交回 owner
+工具调用由 MCP 交给 owner，WorkerBusinessCallbacks 借用队头、以当前 epoch 的新 message 发送原条目，收到响应后交回 owner
 完成原 Future。断线不出队、不换 call_id 或调用条目 ID；原 socket 仍消费已取消调用的匹配迟到回复。
 `on_result_accepted` / `on_stop_accepted` 只处理收到的确认，不发送 ACK。
 
 双端 Runtime 使用公共 Gateway 管理 `app/communication/session.py` 中的 Session 实例。
-一个 Session 对应单个对端的一次连接 epoch，唯一 reader 严格解析整帧；其余业务消息进入
-32 帧 / 32 条业务 / 16 MiB FIFO。独立 history 查询及回复旁路执行业务；与控制同帧时先由控制 owner
-通过控制，再逐项分派。`Dispatcher` 只按 `package.method` 注册请求模型与绑定回调；
-回复交原调用 owner 按 `reply_to` 关联，无反射或广播，不把普通回复移到 reader 旁路。
+一个 Session 对应单个对端的一次连接 epoch，唯一 reader 严格解析完整 message；所有 payload 和拒收进入
+32 条 message / 32 个业务条目 / 16 MiB FIFO。history 请求、回复和错误都经过相同 driver，
+先由控制 owner 授权，再逐项分派。`Dispatcher` 只按 `package.method` 注册请求模型与绑定回调；
+普通回复按 `reply_to` 由 Dispatcher 关联，经过可选 `on_reply` 后交给原调用接收函数；
+无反射或广播，Session 不再持有查询表或 responder；临时 history 同样使用 Dispatcher 的关联表。
 Session 对 terminal/tool 做有界一次性观察；Gateway 公平交替网络输入与就绪回调，禁止嵌套消费。
 Session 的 stop 硬截止覆盖回调内部 await；通信心跳独立运行，慢业务不阻塞心跳发送。
 所有消息经 Session 串行写入，`send` 等实际写完成；工具 guard 在拿到锁后的实际写入前检查。
 不确定的写失败/取消封闭连接，无自动重试。FastAPI socket 直接满足 Transport；websockets client
-只用本地适配器转换 send/recv/bytes。帧携带共同连接头及 typed call/result 列表，
+只用本地适配器转换 send/recv/bytes。message 携带共同连接头及 typed call/result 列表，
 控制 ACK 用独立的 32 项 FIFO 和 sender，实际写成功才出队，可顺带附加到业务写；不确认业务成功或续 lease。
 
-Session 关联至多 4 个临时请求；Broker 保留全局 64 准入、30 秒总预算和历史页校验，
-通过 Gateway.get 选择一次原 Session，不保存第二张 peer 表、不重投后继连接。
-只有 `worker.history` 结果（含校验失败）是临时 reply；工具响应、结果和停止 ACK 仍交业务验证。
-worker 每连接最多 4 个历史 handler，满额时由单独 sender 写入最多 4 条 busy 回复（含在发项），
-持续超限断连。epoch 由合法握手/恢复响应确认一次；`worker.stop` 与已提交 Register+A 的接纳回复可早于 Registered。
+Broker 持有临时查询 Future，按 Session 限额 4 个、全局 64 个，保留 30 秒发送加等待总预算和历史页校验。
+Gateway.get 一次选定 Registration 中配对的 Session/Dispatcher，不保存第二张 peer 表、不重投后继连接。
+worker.history 由业务类串行处理；慢 history 与其他慢回调互相等待。无独立 handler、busy 队列或查询 sender。
+临时请求使用 expect_reply 的 on_closed 通知；持久接收者不登记它，关闭连接不取消真实执行。
+epoch 由合法握手/恢复响应确认一次；`worker.stop` 与已提交 Register+A 的接纳回复可早于 Registered。
 终态发 `[T,A]`，停止发 `[R,B]`；每项各自关联。T 后不丢 A，R 后不丢 B；停止阶段不回复 A、不创建新 Flow effects。
 
 关闭先失败临时查询、清连接缓存，再完整取消并 join 通信任务；不取消执行 Task、原工具 Future、
-shielded stop，也不释放 Flow binding。读失败立即失败临时查询，已读业务 FIFO 仍按序消费；
+shielded stop，也不释放 Flow binding。读失败先按序排空已读 FIFO，交付已收到的回复/拒收，再失败剩余查询；
 显式关闭则丢弃旧 FIFO。旧连接/epoch 回复不能完成新请求，不跨连接重放查询。
-历史读取经注入的 `read_history` 调用 `ExecutionState.read()`，再选择 Codex/Amp 读取器，
+WorkerBusinessCallbacks.on_history 内 await to_thread 调用 `ExecutionState.read()`，再选择 Codex/Amp 读取器，
 允许查询 control 指定的既往会话；无额外历史 facade。取消 to_thread 的等待不保证同步读取立即停止；
-其结果只属于旧 Session。可靠领域事件/outbox 与 HA 不在当前通信架构范围。
+其结果只属于旧 Session。Registered 前的合法 history 不绑定 epoch 或 ready；server 的 history 回复
+不要求 Started，也不替代 Started 或刷新执行存活期限。可靠领域事件/outbox 与 HA 不在当前通信架构范围。
 
 wire v17 的可关联 payload 校验失败整批拒收；合法兄弟项也不执行。每项收到同 method、
 `reply_to=原条目ID` 的 `tool_result`，error 严格只有固定 `code=validation_error` 与
@@ -456,5 +479,5 @@ WorkerMCP 随首次编码启动与关闭，复用现有 HTTP 依赖，仅暴露 
 
 
 Worker 目录分为 `execution/`（lifecycle、executor、Codex/Amp、prompts、VCS、credentials）、
-`transport/`（control client、MCP）和 `state/`（execution、history）。
+`transport/`（IO 适配器、状态/业务回调、MCP）和 `state/`（execution、history）。
 根目录保留 runtime/config/health，分别负责组装、配置和探针入口；各子包不提供转发导出。

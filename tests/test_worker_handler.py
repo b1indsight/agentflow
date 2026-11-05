@@ -32,18 +32,18 @@ from app.contracts.protocol import (
     Register,
     Registered,
     ResultAccepted,
-    ServerMessage,
+    ServerMessageUnion,
     ServerPayload,
     Started,
     Succeeded,
     TerminalPayload,
-    WorkerFrame,
     WorkerMessage,
+    WorkerMessageUnion,
     WorkerPayload,
     accept_result_id,
     call_header,
     execution_call_id,
-    frame_header,
+    message_header,
     parse_server_message,
     result_header,
     terminal_digest,
@@ -74,13 +74,13 @@ from tests.test_conversation_history import SESSION
 from tests.worker_fakes import NoPendingStops, connected_worker, result_application, server_runtime
 
 
-def register_frame(
+def register_message(
     worker_id: str = "worker-1",
     recovery: RecoveryDescriptor | None = None,
     payload: list[WorkerPayload] | None = None,
 ) -> Register:
     return Register(
-        **frame_header(None),
+        **message_header(None),
         control="register",
         worker_id=worker_id,
         recovery=recovery,
@@ -88,8 +88,8 @@ def register_frame(
     )
 
 
-def worker_frame(epoch: str, *items: WorkerPayload) -> WorkerFrame:
-    return WorkerFrame(**frame_header(epoch), control=None, payload=list(items))
+def worker_message(epoch: str, *items: WorkerPayload) -> WorkerMessage:
+    return WorkerMessage(**message_header(epoch), control=None, payload=list(items))
 
 
 def terminal_items(terminal: TerminalPayload) -> tuple[ExecuteResult, AcceptResult]:
@@ -369,21 +369,21 @@ class ScriptedSocket:
 
     def assignment(self) -> tuple[AssignmentArguments, str]:
         for raw in self.sent:
-            frame = parse_server_message(raw)
-            for item in frame.payload:
+            message = parse_server_message(raw)
+            for item in message.payload:
                 if isinstance(item, Assignment):
-                    assert frame.connection_epoch is not None
-                    return item.arguments, frame.connection_epoch
+                    assert message.connection_epoch is not None
+                    return item.arguments, message.connection_epoch
         raise AssertionError("assignment not sent")
 
     async def receive_text(self) -> str:
         self._step += 1
         if self._step == 1:
-            return register_frame(self.worker_id).model_dump_json()
+            return register_message(self.worker_id).model_dump_json()
         await self.assignment_sent.wait()
         assignment, epoch = self.assignment()
         if self._step == 2:
-            return worker_frame(
+            return worker_message(
                 epoch,
                 Started(
                     **call_header(),
@@ -394,7 +394,7 @@ class ScriptedSocket:
                 ),
             ).model_dump_json()
         if self._step == 3:
-            return worker_frame(
+            return worker_message(
                 epoch,
                 *terminal_items(
                     Succeeded(
@@ -413,12 +413,12 @@ class ToolSocket(ScriptedSocket):
     async def receive_text(self) -> str:
         self._step += 1
         if self._step == 1:
-            return register_frame(self.worker_id).model_dump_json()
+            return register_message(self.worker_id).model_dump_json()
         await self.assignment_sent.wait()
         assignment, epoch = self.assignment()
         assert isinstance(assignment.task, InitialTask)
         if self._step == 2:
-            return worker_frame(
+            return worker_message(
                 epoch,
                 Started(
                     **call_header(),
@@ -429,7 +429,7 @@ class ToolSocket(ScriptedSocket):
                 ),
             ).model_dump_json()
         if self._step == 3:
-            return worker_frame(
+            return worker_message(
                 epoch,
                 FlowToolRequest(
                     **call_header(),
@@ -450,7 +450,7 @@ class ToolSocket(ScriptedSocket):
             ).model_dump_json()
         if self._step == 4:
             await self.tool_responded.wait()
-            return worker_frame(
+            return worker_message(
                 epoch,
                 *terminal_items(
                     Succeeded(
@@ -636,7 +636,7 @@ async def test_gateway_rejects_bad_credentials_before_accepting(
     socket = ScriptedSocket(token="wrong")
     terminal = Failed(job_id=5, assignment_token="token", error="offline")
     _, accept = terminal_items(terminal)
-    initial = register_frame(
+    initial = register_message(
         recovery=RecoveryDescriptor(
             job_id=5,
             assignment_token="token",
@@ -695,7 +695,7 @@ class WaitingSocket(ScriptedSocket):
     async def receive_text(self) -> str:
         if self._step == 0:
             self._step = 1
-            return register_frame(self.worker_id).model_dump_json()
+            return register_message(self.worker_id).model_dump_json()
         await asyncio.Event().wait()
         raise AssertionError("unreachable")
 
@@ -722,7 +722,7 @@ async def test_disconnected_predecessor_does_not_reject_replacement() -> None:
     store.job.state = JobState.DONE
     store.job.result_applied_at = store.job.updated_at
     gateway_coordinator = RecordingCoordinator(store)
-    peers = Gateway[WorkerMessage, ServerMessage]()
+    peers = Gateway[WorkerMessageUnion, ServerMessageUnion]()
     handler = server_runtime(
         gateway_coordinator,
         database=store.database,
@@ -757,9 +757,9 @@ async def test_disconnected_predecessor_does_not_reject_replacement() -> None:
         await asyncio.wait_for(second.registered.wait(), 1)
         current = peers.get("worker-1")
         assert current is not None and current is not previous
-        assert current.epoch != previous.epoch
-        assert store.connection_epoch == current.epoch
-        assert previous.closed
+        assert current.session.epoch != previous.session.epoch
+        assert store.connection_epoch == current.session.epoch
+        assert previous.session.closed
         assert first.closed == 1012
     finally:
         for task in tasks:
@@ -779,7 +779,7 @@ async def test_overlapping_replacements_do_not_republish_old_route():
                 "x-flowtool-worker-id": "worker-1",
                 "authorization": "Bearer worker-secret",
             }
-            self.incoming.put_nowait(register_frame().model_dump_json())
+            self.incoming.put_nowait(register_message().model_dump_json())
 
         async def accept(self):
             pass
@@ -807,14 +807,14 @@ async def test_overlapping_replacements_do_not_republish_old_route():
 
     async def next_business(socket):
         while True:
-            frame = parse_server_message(await asyncio.wait_for(socket.sent.get(), 1))
-            if frame.control is not None or frame.payload:
-                return frame
+            message = parse_server_message(await asyncio.wait_for(socket.sent.get(), 1))
+            if message.control is not None or message.payload:
+                return message
 
     def only_receipt_acks(socket):
         while not socket.sent.empty():
-            frame = parse_server_message(socket.sent.get_nowait())
-            assert frame.control is None and frame.payload == [] and frame.ack
+            message = parse_server_message(socket.sent.get_nowait())
+            assert message.control is None and message.payload == [] and message.ack
 
     try:
         assert isinstance(await next_business(first), Registered)
@@ -837,9 +837,9 @@ async def test_overlapping_replacements_do_not_republish_old_route():
         release.set()
         await asyncio.wait_for(asyncio.gather(*tasks[:2]), 1)
         assert gateway.get("worker-1") is newest
-        assert newest.epoch == registered.connection_epoch
+        assert newest.session.epoch == registered.connection_epoch
         only_receipt_acks(second)
-        assert store.connection_epoch == newest.epoch
+        assert store.connection_epoch == newest.session.epoch
     finally:
         release.set()
         for task in tasks:
@@ -893,14 +893,14 @@ class RecoveringSocket(ScriptedSocket):
 
     async def send_text(self, raw):
         await super().send_text(raw)
-        frame = parse_server_message(raw)
-        if isinstance(frame, Registered) and frame.recovery is not None:
+        message = parse_server_message(raw)
+        if isinstance(message, Registered) and message.recovery is not None:
             self.resumed.set()
 
     async def receive_text(self) -> str:
         self._step += 1
         if self._step == 1:
-            return register_frame(
+            return register_message(
                 worker_id=self.worker_id,
                 recovery=RecoveryDescriptor(
                     job_id=5,
@@ -919,7 +919,7 @@ class RecoveringSocket(ScriptedSocket):
             )
             assert resumed.recovery is not None
             return Heartbeat(
-                **frame_header(resumed.connection_epoch),
+                **message_header(resumed.connection_epoch),
                 control="heartbeat",
                 payload=[],
                 job_id=resumed.recovery.job_id,
@@ -962,23 +962,23 @@ async def test_gateway_resumes_started_assignment_under_a_new_epoch() -> None:
 @pytest.mark.parametrize(
     "first",
     [
-        worker_frame(
+        worker_message(
             "old",
             ConversationResult(
                 **result_header("1" * 32), method="worker.history", error="query_busy"
             ),
         ),
-        register_frame(worker_id="other-worker"),
+        register_message(worker_id="other-worker"),
     ],
 )
-async def test_transport_checks_actual_first_frame_before_session_dispatch(first):
+async def test_transport_checks_actual_first_message_before_session_dispatch(first):
     # Session's reply dispatcher would hide an unsolicited result before a later Register.
     class BadFirstSocket(ScriptedSocket):
         async def receive_text(self):
             if self._step == 0:
                 self._step += 1
                 return first.model_dump_json()
-            return register_frame(self.worker_id).model_dump_json()
+            return register_message(self.worker_id).model_dump_json()
 
     socket = BadFirstSocket()
     serve = AsyncMock()
@@ -1071,8 +1071,8 @@ async def test_handler_cleanup_joins_communication_before_presence_and_propagate
         assert store.disconnected == ([] if failure == "sealed" else [store.connection_epoch])
         assert peers.get("worker-1") is None
         assert all(
-            isinstance(frame, Registered) or (frame.ack and not frame.payload)
-            for frame in map(parse_server_message, socket.sent)
+            isinstance(message, Registered) or (message.ack and not message.payload)
+            for message in map(parse_server_message, socket.sent)
         )
     finally:
         release.set()
@@ -1124,22 +1124,22 @@ async def test_control_and_payload_keep_order_and_trailing_acceptance(batch):
                     **result_header("1" * 32), method="worker.history", error="query_busy"
                 )
                 return Heartbeat(
-                    **frame_header("old" if batch == "wrong_epoch" else epoch),
+                    **message_header("old" if batch == "wrong_epoch" else epoch),
                     control="heartbeat",
                     job_id=args.job_id,
                     assignment_token=args.assignment_token,
                     payload=[history, terminal, accept],
                 ).model_dump_json()
             if batch == "ack":
-                header = frame_header(epoch)
+                header = message_header(epoch)
                 header["ack"], header["ack_id"] = True, "1" * 32
-                return WorkerFrame(
+                return WorkerMessage(
                     **header, control=None, payload=[terminal, accept]
                 ).model_dump_json()
             items = (
                 [terminal, started, accept] if batch == "reversed" else [started, terminal, accept]
             )
-            return worker_frame(epoch, *items).model_dump_json()
+            return worker_message(epoch, *items).model_dump_json()
 
     store, socket = RecordingStore(), BatchedSocket()
     await serve_worker(
@@ -1186,7 +1186,7 @@ async def test_terminal_waits_for_actual_acceptance_write_before_next_assignment
                 )
             )
             if self._step == 3:
-                return worker_frame(epoch, terminal).model_dump_json()
+                return worker_message(epoch, terminal).model_dump_json()
             if self._step == 4:
                 await applied.wait()
                 assert store.assignments == 1
@@ -1194,16 +1194,16 @@ async def test_terminal_waits_for_actual_acceptance_write_before_next_assignment
                 if acceptance == "heartbeat":
                     # A heartbeat already in flight can arrive after commit but before A.
                     return Heartbeat(
-                        **frame_header(epoch),
+                        **message_header(epoch),
                         control="heartbeat",
                         job_id=args.job_id,
                         assignment_token=args.assignment_token,
                         payload=[],
                     ).model_dump_json()
                 if acceptance != "absent":
-                    return worker_frame(epoch, accept).model_dump_json()
+                    return worker_message(epoch, accept).model_dump_json()
             if self._step == 5 and acceptance == "heartbeat":
-                return worker_frame(epoch, accept).model_dump_json()
+                return worker_message(epoch, accept).model_dump_json()
             raise WebSocketDisconnect()
 
         async def send_text(self, raw):
@@ -1251,7 +1251,7 @@ async def test_result_identities_and_durable_inbox_are_required(defect):
                 accept.message_id = "1" * 32
             elif defect == "result_id":
                 accept.arguments.result_id = "1" * 32
-            return worker_frame(
+            return worker_message(
                 epoch, *([accept] if defect == "missing" else [terminal, accept])
             ).model_dump_json()
 
@@ -1278,7 +1278,7 @@ async def test_registration_only_answers_actual_committed_acceptance(committed, 
     if committed:
         store.job.result_applied_at = store.job.updated_at
     _, accept = terminal_items(terminal)
-    initial = register_frame(
+    initial = register_message(
         recovery=RecoveryDescriptor(
             job_id=store.job.id,
             assignment_token="token",
@@ -1315,7 +1315,7 @@ async def test_registration_only_answers_actual_committed_acceptance(committed, 
     if responses:
         assert responses[0].reply_to == accept.message_id
     registered = next(
-        frame for frame in map(parse_server_message, socket.sent) if isinstance(frame, Registered)
+        message for message in map(parse_server_message, socket.sent) if isinstance(message, Registered)
     )
     assert (registered.recovery is None) == committed
     if registered.recovery is not None:
@@ -1372,7 +1372,7 @@ async def test_duplicate_prior_job_result_does_not_retire_current_assignment():
                         error="new failure",
                     )
                 )
-                return worker_frame(epoch, old_t, old_a, new_t, new_a).model_dump_json()
+                return worker_message(epoch, old_t, old_a, new_t, new_a).model_dump_json()
             return await super().receive_text()
 
     store, socket = PriorStore(), DuplicateSocket()
@@ -1385,7 +1385,7 @@ async def test_duplicate_prior_job_result_does_not_retire_current_assignment():
 
 
 async def test_recovery_rejection_is_correlated_to_register_before_registered():
-    initial = register_frame(
+    initial = register_message(
         recovery=RecoveryDescriptor(
             job_id=5, assignment_token="stale", state="started", executor_active=True
         )
@@ -1404,7 +1404,7 @@ async def test_recovery_rejection_is_correlated_to_register_before_registered():
         socket, serve=handler_for(store).serve_worker_session, worker_tokens={"worker-1": "worker-secret"}
     )
     business = [
-        frame for frame in map(parse_server_message, socket.sent) if frame.control or frame.payload
+        message for message in map(parse_server_message, socket.sent) if message.control or message.payload
     ]
     rejected = business[0].payload[0]
     assert isinstance(rejected, RecoveryRejected)

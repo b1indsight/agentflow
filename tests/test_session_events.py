@@ -59,8 +59,10 @@ async def test_ready_fairness_rearm_and_read_failure_drain():
         await session.close()
 
 
-async def test_gateway_deadline_covers_callback_and_cleanup():
+@pytest.mark.parametrize("reverse", [False, True])
+async def test_gateway_deadline_covers_callback_and_cleanup(reverse):
     # A slow business callback must not defeat the stop deadline or nest its own receive.
+    # Independently mounted providers share the same driver regardless of bind order.
     socket = Socket()
     session = make_session(socket)
     gateway = Gateway[Packet, Packet]()
@@ -68,11 +70,10 @@ async def test_gateway_deadline_covers_callback_and_cleanup():
 
     class Callbacks:
         def bind(self, routes):
-            routes.register("test.event", Call, self.on_event)
             routes.configure(
                 opened=self.opened,
-                frame=self.frame,
-                result=self.on_error,
+                message=self.message,
+                unmatched_reply=self.on_error,
                 validation_error=self.on_error,
                 closed=self.closed,
             )
@@ -80,11 +81,27 @@ async def test_gateway_deadline_covers_callback_and_cleanup():
         async def opened(self):
             seen.append("opened")
 
-        async def frame(self, message):
-            seen.append("frame")
+        async def message(self, message):
+            seen.append("message")
 
         async def on_error(self, error, message):
             pytest.fail("unexpected validation error")
+
+        def closed(self):
+            seen.append("closed")
+
+    class Events:
+        def bind(self, routes):
+            self.routes = routes
+            routes.register("test.event", Call, self.on_event)
+            routes.before_wait(self.prepare)
+
+        async def prepare(self):
+            with pytest.raises(RuntimeError, match="frozen"):
+                self.routes.before_wait(self.prepare)
+            with pytest.raises(RuntimeError, match="nested"):
+                await session.next_event()
+            seen.append("prepare")
 
         async def on_event(self, item, message):
             with pytest.raises(RuntimeError, match="nested"):
@@ -95,13 +112,13 @@ async def test_gateway_deadline_covers_callback_and_cleanup():
             session.set_deadline(asyncio.get_running_loop().time())
             await asyncio.Event().wait()
 
-        def closed(self):
-            seen.append("closed")
-
     await socket.incoming.put(packet(event()).model_dump_json())
+    callbacks = (Callbacks(), Events())
     with pytest.raises(TimeoutError):
-        await gateway.serve("peer", session, Callbacks(), replace=False)
-    assert seen == ["opened", "frame", "closed"]
+        await gateway.serve(
+            "peer", session, *(reversed(callbacks) if reverse else callbacks), replace=False
+        )
+    assert seen == ["opened", "prepare", "message", "closed"]
     assert session.closed and gateway.get("peer") is None
 
 
@@ -120,8 +137,8 @@ def test_registration_is_exact_frozen_and_direction_local():
         routes.register("test.query", Reply, callback)
     routes.configure(
         opened=lambda: callback(None, None),
-        frame=lambda msg: callback(None, msg),
-        result=callback,
+        message=lambda message: callback(None, message),
+        unmatched_reply=callback,
         validation_error=callback,
     )
     routes.freeze()
@@ -148,11 +165,67 @@ async def test_reply_reaches_its_owner_without_a_method_route(registered):
         routes.register(request.method, Call, unexpected)
     routes.configure(
         opened=unexpected,
-        frame=unexpected,
-        result=on_result,
+        message=unexpected,
+        unmatched_reply=unexpected,
         validation_error=unexpected,
         unrouted=unexpected,
     )
     routes.freeze()
+    routes.expect_reply(request, Reply, on_result)
     await routes.dispatch(response, packet(response))
     assert received == [response]
+
+
+async def test_reply_hook_runs_after_correlation_before_original_caller():
+    # Two simultaneous calls of the same method must reach different callers. A hook
+    # may reject a correlated reply without either Future receiving an unvalidated result.
+    first, second = query("first"), query("second")
+    seen = []
+    routes = Dispatcher[Packet]()
+
+    async def unexpected(*args):
+        pytest.fail("unexpected request or lifecycle dispatch")
+
+    async def unmatched(item, message):
+        seen.append("unmatched")
+
+    async def hook(item, message):
+        seen.append("hook:" + item.value)
+        if item.value == "invalid":
+            raise ValueError("invalid reply")
+
+    async def deliver_first(item, message):
+        seen.append("first:" + item.value)
+        routes.forget_reply(first.message_id)
+
+    async def deliver_second(item, message):
+        seen.append("second:" + item.value)
+        routes.forget_reply(second.message_id)
+
+    routes.configure(
+        opened=unexpected,
+        message=unexpected,
+        unmatched_reply=unmatched,
+        validation_error=unexpected,
+    )
+    routes.freeze()
+    routes.expect_reply(first, Reply, deliver_first, on_reply=hook)
+    routes.expect_reply(second, Reply, deliver_second, on_reply=hook)
+
+    unrelated = reply(query())
+    await routes.dispatch(unrelated, packet(unrelated))
+    invalid = reply(first, "invalid")
+    with pytest.raises(ValueError, match="invalid reply"):
+        await routes.dispatch(invalid, packet(invalid))
+    for request in (second, first, first):
+        response = reply(request)
+        await routes.dispatch(response, packet(response))
+    assert seen == [
+        "unmatched",
+        "hook:invalid",
+        "hook:second",
+        "second:second",
+        "hook:first",
+        "first:first",
+        "unmatched",
+    ]

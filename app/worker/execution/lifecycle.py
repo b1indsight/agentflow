@@ -241,6 +241,11 @@ class WorkerExecution:
             return None
         return self.state.assignment
 
+    @property
+    def stopping(self) -> bool:
+        """Distinguish fenced stop from normal completion while retiring borrowed calls."""
+        return self._stop_request is not None
+
     async def wait_terminal(self) -> TerminalPayload:
         """Observe completion without owning the task; return only a persisted terminal."""
         execution = self._execution

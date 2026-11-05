@@ -35,7 +35,7 @@ from app.persistence.jobs import JobStore
 from app.persistence.records import required
 from app.persistence.repository import Repository
 
-# A frozen archive may have started deleting before its Started frame reached serve.
+# A frozen archive may have started deleting before its Started message reached serve.
 _MAY_HAVE_EXECUTED = (
     "(started_at IS NOT NULL OR dispatch_authorized_at IS NOT NULL OR (kind='archive' AND payload->'archive' IS NOT NULL))"
 )
@@ -376,7 +376,7 @@ class WorkerStore(Repository):
     def resume_assignment(
         self, job_id: int, worker_id: str, token: str, connection_epoch: str
     ) -> bool:
-        """Resume started work, including a frozen archive whose Started frame was lost."""
+        """Resume started work, including a frozen archive whose Started message was lost."""
 
         now = self._db.now()
         with self._db.connection() as connection, connection.transaction():

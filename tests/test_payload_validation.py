@@ -17,18 +17,18 @@ from app.contracts.protocol import (
     FlowToolRequest,
     Heartbeat,
     PayloadValidationError,
-    ServerFrame,
     ServerMessage,
+    ServerMessageUnion,
     Started,
     ValidationErrorResult,
-    WorkerMessage,
+    WorkerMessageUnion,
     call_header,
-    frame_header,
+    message_header,
     parse_server_message,
     result_header,
 )
 from app.contracts.validation import parse_worker_input
-from app.controler.workers.conversation import ConversationBroker, conversation_result_key
+from app.controler.workers.conversation import ConversationBroker
 from app.controler.workers.transport import control_ack
 from app.domain.models import VcsKind, VcsOutcome
 from app.worker.execution.lifecycle import FlowToolCallError, WorkerExecution, WorkerProtocolError
@@ -36,8 +36,8 @@ from app.worker.state.execution import ExecutionState
 from tests.test_communication_session import Socket
 from tests.test_conversation_history import SESSION
 from tests.test_conversation_worker import Connection
-from tests.test_worker_client import RecordingExecutor, assignment_frame, registered_frame
-from tests.test_worker_handler import RecordingStore, handler_for, register_frame, worker_frame
+from tests.test_worker_client import RecordingExecutor, assignment_message, registered_message
+from tests.test_worker_handler import RecordingStore, handler_for, register_message, worker_message
 from tests.test_worker_session import _assignment
 from tests.worker_fakes import run_worker, worker_runtime
 
@@ -49,16 +49,15 @@ async def server_connection():
     store = RecordingStore()
     runtime = handler_for(store)
     socket = Socket()
-    session = Session[WorkerMessage, ServerMessage](
+    session = Session[WorkerMessageUnion, ServerMessageUnion](
         socket,
         parse=parse_worker_input,
-        reply_key=conversation_result_key,
         make_ack=control_ack,
         epoch="epoch",
     )
     session.start()
     serving = asyncio.create_task(
-        runtime.serve_worker_session("worker-1", register_frame(), session)
+        runtime.serve_worker_session("worker-1", register_message(), session)
     )
     try:
         yield runtime, store, socket, serving
@@ -70,9 +69,9 @@ async def server_connection():
 async def receive(socket):
     async with asyncio.timeout(2):
         while True:
-            frame = parse_server_message(await socket.sent.get())
-            if frame.payload:
-                return frame
+            message = parse_server_message(await socket.sent.get())
+            if message.payload:
+                return message
 
 
 async def test_bad_assignment_rejects_every_sibling_without_recording_then_continues(tmp_path):
@@ -90,14 +89,14 @@ async def test_bad_assignment_rejects_every_sibling_without_recording_then_conti
     running = asyncio.create_task(run_worker(runtime, connection))
     try:
         await connection.outgoing.get()
-        await connection.incoming.put(registered_frame().model_dump_json())
-        valid = assignment_frame(_assignment())
-        invalid = assignment_frame(_assignment()).model_dump(mode="json")
+        await connection.incoming.put(registered_message().model_dump_json())
+        valid = assignment_message(_assignment())
+        invalid = assignment_message(_assignment()).model_dump(mode="json")
         invalid["payload"][0]["message_id"] = call_header()["message_id"]
         invalid["payload"][0]["arguments"] = {"private-token": "secret-input"}
         invalid["payload"].insert(0, valid.payload[0].model_dump(mode="json"))
         await connection.incoming.put(json.dumps(invalid))
-        response = await connection.receive_frame()
+        response = await connection.receive_message()
         assert [item.reply_to for item in response.payload] == [
             item["message_id"] for item in invalid["payload"]
         ]
@@ -108,8 +107,8 @@ async def test_bad_assignment_rejects_every_sibling_without_recording_then_conti
         assert "secret-input" not in response.model_dump_json()
         assert state.load() is None
         await connection.incoming.put(valid.model_dump_json())
-        assert isinstance((await connection.receive_frame()).payload[0], Started)
-        terminal = await connection.receive_frame()
+        assert isinstance((await connection.receive_message()).payload[0], Started)
+        terminal = await connection.receive_message()
         assert terminal.payload[0].result.exit_code == 0
         assert runtime._connected
     finally:
@@ -154,10 +153,10 @@ async def test_tool_failure_retires_original_waiter_before_critical_recovery(tmp
     running = asyncio.create_task(run_worker(runtime, connection))
     try:
         await connection.outgoing.get()
-        await connection.incoming.put(registered_frame().model_dump_json())
-        await connection.incoming.put(assignment_frame(_assignment()).model_dump_json())
-        started = (await connection.receive_frame()).payload[0]
-        tool = (await connection.receive_frame()).payload[0]
+        await connection.incoming.put(registered_message().model_dump_json())
+        await connection.incoming.put(assignment_message(_assignment()).model_dump_json())
+        started = (await connection.receive_message()).payload[0]
+        tool = (await connection.receive_message()).payload[0]
         items = [
             ValidationErrorResult(
                 **result_header(tool.message_id),
@@ -175,13 +174,13 @@ async def test_tool_failure_retires_original_waiter_before_critical_recovery(tmp
                     error=PayloadValidationError(**ERROR),
                 ),
             )
-        frame = ServerFrame(**frame_header("epoch-1"), control=None, payload=items).model_dump(
-            mode="json"
-        )
+        message = ServerMessage(
+            **message_header("epoch-1"), control=None, payload=items
+        ).model_dump(mode="json")
         if kind == "malformed":
-            frame["payload"][0].pop("error")
-            frame["payload"][0]["result"] = {"secret": "invalid-response"}
-        await connection.incoming.put(json.dumps(frame))
+            message["payload"][0].pop("error")
+            message["payload"][0]["result"] = {"secret": "invalid-response"}
+        await connection.incoming.put(json.dumps(message))
         await asyncio.wait_for(failed.wait(), 2)
         if kind == "critical_batch":
             with pytest.raises(WorkerProtocolError, match="recovery required"):
@@ -206,7 +205,7 @@ async def test_bad_heartbeat_tool_batch_has_no_ack_lease_or_tool_effect_then_con
             assignment_token=assignment.arguments.assignment_token,
         )
         await socket.incoming.put(
-            worker_frame(
+            worker_message(
                 "epoch",
                 Started(
                     **call_header(),
@@ -231,7 +230,7 @@ async def test_bad_heartbeat_tool_batch_has_no_ack_lease_or_tool_effect_then_con
             ),
         )
         heartbeat = Heartbeat(
-            **frame_header("epoch"), control="heartbeat", payload=[tool], **identity.model_dump()
+            **message_header("epoch"), control="heartbeat", payload=[tool], **identity.model_dump()
         )
         store.heartbeat_assignment = Mock(wraps=store.heartbeat_assignment)
         bad = heartbeat.model_dump(mode="json")
@@ -243,7 +242,7 @@ async def test_bad_heartbeat_tool_batch_has_no_ack_lease_or_tool_effect_then_con
         assert response.payload[0].reply_to == tool.message_id
         store.heartbeat_assignment.assert_not_called()
         runtime.tools.execute.assert_not_awaited()
-        await socket.incoming.put(worker_frame("epoch", tool).model_dump_json())
+        await socket.incoming.put(worker_message("epoch", tool).model_dump_json())
         assert (await receive(socket)).payload[0].call_id == "open"
         runtime.tools.execute.assert_awaited_once()
         assert not serving.done()
@@ -252,7 +251,7 @@ async def test_bad_heartbeat_tool_batch_has_no_ack_lease_or_tool_effect_then_con
 @pytest.mark.parametrize("kind", ["malformed", "repeated_reply", "rejection", "eof"])
 async def test_history_invalid_response_finishes_original_query_and_allows_next(kind):
     async with server_connection() as (runtime, _store, socket, serving):
-        await receive(socket)  # Assignment remains starting; independent history still works.
+        await receive(socket)  # Read-only replies do not need the execution's Started.
         broker = ConversationBroker(runtime.gateway)
         query = asyncio.create_task(broker.query("worker-1", HistoryQuery(session_id=SESSION)))
         request = (await receive(socket)).payload[0]
@@ -261,16 +260,16 @@ async def test_history_invalid_response_finishes_original_query_and_allows_next(
             method="worker.history",
             error=PayloadValidationError(**ERROR),
         )
-        frame = worker_frame("epoch", reply).model_dump(mode="json")
+        message = worker_message("epoch", reply).model_dump(mode="json")
         if kind != "rejection":
-            frame["payload"][0].pop("error")
-            frame["payload"][0]["page"] = {"session_id": 123}
+            message["payload"][0].pop("error")
+            message["payload"][0]["page"] = {"session_id": 123}
         if kind == "repeated_reply":
             # Distinct reply items may share one call; reject its Future exactly once.
-            frame["payload"].append(
-                dict(frame["payload"][0], message_id=call_header()["message_id"])
+            message["payload"].append(
+                dict(message["payload"][0], message_id=call_header()["message_id"])
             )
-        await socket.incoming.put(json.dumps(frame))
+        await socket.incoming.put(json.dumps(message))
         if kind == "eof":
             # A disconnect immediately after the malformed reply cannot replace its error.
             socket.incoming.put_nowait(ConnectionError("EOF"))
@@ -282,13 +281,13 @@ async def test_history_invalid_response_finishes_original_query_and_allows_next(
         if kind != "rejection":
             errors = (await receive(socket)).payload
             assert [item.reply_to for item in errors] == [
-                item["message_id"] for item in frame["payload"]
+                item["message_id"] for item in message["payload"]
             ]
             assert all(item.error.model_dump() == ERROR for item in errors)
         again = asyncio.create_task(broker.query("worker-1", HistoryQuery(session_id=SESSION)))
         request = (await receive(socket)).payload[0]
         await socket.incoming.put(
-            worker_frame(
+            worker_message(
                 "epoch",
                 ConversationResult(
                     **result_header(request.message_id),
@@ -299,7 +298,7 @@ async def test_history_invalid_response_finishes_original_query_and_allows_next(
         )
         with pytest.raises(ConversationFailure, match="history_unreadable"):
             await again
-        assert not serving.done() and broker._inflight == 0
+        assert not serving.done() and not broker._inflight
 
 
 @pytest.mark.parametrize("change", ["extra", "missing", "wrong"])

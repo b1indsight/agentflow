@@ -22,7 +22,7 @@ from app.contracts.protocol import (
 )
 
 
-def frame(payload: Sequence[JsonValue], **fields: JsonValue) -> dict[str, JsonValue]:
+def message(payload: Sequence[JsonValue], **fields: JsonValue) -> dict[str, JsonValue]:
     return {
         "protocol_version": PROTOCOL_VERSION,
         "message_id": "1" * 32,
@@ -151,7 +151,7 @@ def test_method_contract_round_trip_and_direction(
         if direction == "server"
         else (parse_worker_message, parse_server_message)
     )
-    parsed = parse(json.dumps(frame([item])))
+    parsed = parse(json.dumps(message([item])))
     assert parse(parsed.model_dump_json()) == parsed
     assert parsed.payload[0].method == item["method"]
     with pytest.raises(ValidationError):
@@ -171,7 +171,7 @@ def test_assignment_secret_remains_wire_only_and_flow_identity_is_checked() -> N
             }
         },
     }
-    parsed = parse_server_message(json.dumps(frame([call("worker.execute", arguments)])))
+    parsed = parse_server_message(json.dumps(message([call("worker.execute", arguments)])))
     item = parsed.payload[0]
     assert isinstance(item, Assignment) and item.arguments.secret is not None
     assert item.arguments.secret.push.token.get_secret_value() == "push-token"
@@ -179,26 +179,26 @@ def test_assignment_secret_remains_wire_only_and_flow_identity_is_checked() -> N
     assert "push-token" in parsed.model_dump_json()
     arguments["flow_id"] = 4
     with pytest.raises(ValidationError):
-        parse_server_message(json.dumps(frame([call("worker.execute", arguments)])))
+        parse_server_message(json.dumps(message([call("worker.execute", arguments)])))
 
 
 @pytest.mark.parametrize("method", ["flow.future_tool", "worker.unknown", "custom"])
 def test_unknown_flow_methods_keep_the_typed_error_path(method: str) -> None:
-    parsed = parse_worker_message(json.dumps(frame([call(method, FLOW)])))
+    parsed = parse_worker_message(json.dumps(message([call(method, FLOW)])))
     assert isinstance(parsed.payload[0], FlowToolRequest)
     assert parsed.payload[0].method == method
     # An unknown lifecycle shape must not enter the Flow fallback; known methods cannot either.
     for malformed in (call(method, IDENTITY), call("server.accept_result", FLOW)):
         with pytest.raises(ValidationError):
-            parse_worker_message(json.dumps(frame([malformed])))
+            parse_worker_message(json.dumps(message([malformed])))
 
 
 @pytest.mark.parametrize(
     "key",
     ["protocol_version", "message_id", "connection_epoch", "ack", "ack_id", "control", "payload"],
 )
-def test_frame_metadata_is_required_on_the_wire(key: str) -> None:
-    data = frame([call("server.execution_started", IDENTITY)])
+def test_message_metadata_is_required_on_the_wire(key: str) -> None:
+    data = message([call("server.execution_started", IDENTITY)])
     del data[key]
     with pytest.raises(ValidationError):
         parse_worker_message(json.dumps(data))
@@ -209,7 +209,7 @@ def test_item_metadata_is_required_on_the_wire(key: str) -> None:
     item = call("server.execution_started", IDENTITY)
     del item[key]
     with pytest.raises(ValidationError):
-        parse_worker_message(json.dumps(frame([item])))
+        parse_worker_message(json.dumps(message([item])))
 
 
 @pytest.mark.parametrize(
@@ -229,10 +229,10 @@ def test_item_metadata_is_required_on_the_wire(key: str) -> None:
         {"unexpected": True},
     ],
 )
-def test_invalid_frame_headers_are_rejected(fields: dict[str, JsonValue]) -> None:
+def test_invalid_message_headers_are_rejected(fields: dict[str, JsonValue]) -> None:
     with pytest.raises(ValidationError):
         parse_worker_message(
-            json.dumps(frame([call("server.execution_started", IDENTITY)], **fields))
+            json.dumps(message([call("server.execution_started", IDENTITY)], **fields))
         )
 
 
@@ -251,7 +251,7 @@ def test_mixed_control_ack_and_business_have_independent_identities() -> None:
         "reply_to": E,
     }
     accept = {**call("server.accept_result", {**IDENTITY, "result_id": T}), "message_id": A}
-    data = frame(
+    data = message(
         [terminal_item, accept], control="heartbeat", **IDENTITY, ack=True, ack_id="c" * 32
     )
     parsed = parse_worker_message(json.dumps(data))
@@ -274,7 +274,7 @@ def test_register_recovery_and_registered_decisions_are_control_fields() -> None
         **call("server.accept_result", {**IDENTITY, "result_id": T}),
         "message_id": accept_result_id(T),
     }
-    data = frame(
+    data = message(
         [accept],
         control="register",
         connection_epoch=None,
@@ -286,7 +286,7 @@ def test_register_recovery_and_registered_decisions_are_control_fields() -> None
     with pytest.raises(ValidationError):
         parse_worker_message(json.dumps(data))
     for action in ("resume", "replay"):
-        registered = frame(
+        registered = message(
             [], control="registered", heartbeat_interval=10, recovery={"action": action, **IDENTITY}
         )
         parsed = parse_server_message(json.dumps(registered))
@@ -298,11 +298,11 @@ def test_register_recovery_and_registered_decisions_are_control_fields() -> None
 
 
 def test_batch_static_validation_and_pure_ack_boundaries() -> None:
-    ack = frame([], ack=True, ack_id="c" * 32, connection_epoch=None)
+    ack = message([], ack=True, ack_id="c" * 32, connection_epoch=None)
     for parse in (parse_worker_message, parse_server_message):
         assert parse(json.dumps(ack)).payload == []
         with pytest.raises(ValidationError):
-            parse(json.dumps(frame([], connection_epoch=None)))
+            parse(json.dumps(message([], connection_epoch=None)))
         with pytest.raises(ValidationError):
             parse(json.dumps({**ack, "connection_epoch": "epoch"}))
     item = call("server.execution_started", IDENTITY)
@@ -313,13 +313,15 @@ def test_batch_static_validation_and_pure_ack_boundaries() -> None:
         [{**result("worker.execute", **IDENTITY, error="failure"), "reply_to": "b" * 32}],
     ):
         with pytest.raises(ValidationError):
-            parse_worker_message(json.dumps(frame(payload)))
+            parse_worker_message(json.dumps(message(payload)))
     batch: list[JsonValue] = [{**item, "message_id": f"{i:032x}"} for i in range(32)]
-    assert len(parse_worker_message(json.dumps(frame(batch))).payload) == 32
+    assert len(parse_worker_message(json.dumps(message(batch))).payload) == 32
     batch.append({**item, "message_id": "f" * 32})
     with pytest.raises(ValidationError):
-        parse_worker_message(json.dumps(frame(batch)))
-    error = frame([], control="error", connection_epoch=None, code="version", detail="unsupported")
+        parse_worker_message(json.dumps(message(batch)))
+    error = message(
+        [], control="error", connection_epoch=None, code="version", detail="unsupported"
+    )
     assert parse_server_message(json.dumps(error)).payload == []
     error["payload"] = [call("worker.history", {"session_id": SESSION})]
     with pytest.raises(ValidationError):
@@ -328,7 +330,7 @@ def test_batch_static_validation_and_pure_ack_boundaries() -> None:
 
 def test_registered_and_heartbeat_can_carry_independent_queries() -> None:
     query = call("worker.history", {"session_id": SESSION})
-    registered = frame(
+    registered = message(
         [query],
         control="registered",
         recovery=None,
@@ -338,9 +340,9 @@ def test_registered_and_heartbeat_can_carry_independent_queries() -> None:
     )
     assert parse_server_message(json.dumps(registered)).payload[0].method == "worker.history"
     history = result("worker.history", error="history_unreadable")
-    heartbeat = frame([history], control="heartbeat", **IDENTITY)
+    heartbeat = message([history], control="heartbeat", **IDENTITY)
     assert parse_worker_message(json.dumps(heartbeat)).payload[0].method == "worker.history"
-    register = frame([], control="register", connection_epoch=None, worker_id="w", recovery=None)
+    register = message([], control="register", connection_epoch=None, worker_id="w", recovery=None)
     assert parse_worker_message(json.dumps(register)).payload == []
     query["arguments"] = {"session_id": "https://ampcode.com/T-x"}
     with pytest.raises(ValidationError):

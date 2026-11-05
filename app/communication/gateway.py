@@ -19,10 +19,11 @@ from app.contracts.protocol import Message
 
 @dataclass(eq=False)
 class Registration[Incoming: Message, Outgoing: Message]:
-    """Identity of one registration; callers only read peer_id and session."""
+    """One routing identity binds the transport and reply dispatcher for external callers."""
 
     peer_id: str
     session: Session[Incoming, Outgoing]
+    routes: Dispatcher[Incoming]
     _published: bool = field(default=False, init=False)
 
 
@@ -39,23 +40,23 @@ class Gateway[Incoming: Message, Outgoing: Message]:
         self,
         peer_id: str,
         session: Session[Incoming, Outgoing],
-        callbacks: SessionCallbacks[Incoming],
-        *,
+        *callbacks: SessionCallbacks[Incoming],
         replace: bool,
     ) -> None:
-        """Own admission, one serial event driver, and cleanup even for rejected candidates."""
+        """Mount peer callbacks on one serial driver; exactly one configures the connection."""
         registration = None
         code = 1000
         routes = Dispatcher[Incoming]()
         failed: Callable[[Exception], Awaitable[int]] | None = None
         cleanup = ExitStack()
         try:
-            callbacks.bind(routes)
+            for callback in callbacks:
+                callback.bind(routes)
             routes.freeze()
             session.reject_with(routes.rejected)
             # Configuration errors propagate without entering business failure handling.
             failed = routes.failed
-            registration = await self.register(peer_id, session, replace=replace)
+            registration = await self.register(peer_id, session, routes, replace=replace)
             if routes.published is not None:
                 routes.published()
             if routes.closed is not None:
@@ -65,6 +66,7 @@ class Gateway[Incoming: Message, Outgoing: Message]:
                     await routes.opened()
                 while True:
                     with session.handling():
+                        await routes.prepare()
                         until = await routes.poll() if routes.poll is not None else None
                     event = await session.next_event(until=until)
                     if event is None:
@@ -73,20 +75,19 @@ class Gateway[Incoming: Message, Outgoing: Message]:
                         if callable(event):
                             await event()
                             continue
-                        await routes.frame(event)
+                        await routes.message(event)
                         for item in event.payload:
-                            if event.control is not None and session.dispatch_item(item, event):
-                                continue
                             if routes.before_item is not None:
                                 await routes.before_item(item, event)
                             await routes.dispatch(item, event)
-                        if routes.frame_done is not None:
-                            routes.frame_done()
+                        if routes.message_done is not None:
+                            routes.message_done()
         except Exception as error:
             if failed is None:
                 raise
             code = await failed(error)
         finally:
+            routes.clear_replies()
             # Run the business close hook after transport cleanup, even if cleanup fails.
             with cleanup:
                 if registration is not None:
@@ -96,13 +97,14 @@ class Gateway[Incoming: Message, Outgoing: Message]:
 
     def wake_all(self) -> None:
         for registration in self._current.values():
-            if self.get(registration.peer_id) is registration.session:
+            if self.get(registration.peer_id) is registration:
                 registration.session.wake()
 
     async def register(
         self,
         peer_id: str,
         session: Session[Incoming, Outgoing],
+        routes: Dispatcher[Incoming],
         *,
         replace: bool,
     ) -> Registration[Incoming, Outgoing]:
@@ -117,8 +119,9 @@ class Gateway[Incoming: Message, Outgoing: Message]:
             raise ValueError("session already registered")
         if not replace and any(registration.peer_id == peer_id for registration in self._owned):
             raise RuntimeError("peer already registered")
+        session.close_with(routes.clear_replies)
         previous = self._current.get(peer_id)
-        registration = Registration(peer_id, session)
+        registration = Registration(peer_id, session, routes)
         self._current[peer_id] = registration
         self._owned.add(registration)
         try:
@@ -135,8 +138,8 @@ class Gateway[Incoming: Message, Outgoing: Message]:
             await self.unregister(registration)
             raise
 
-    def get(self, peer_id: str) -> Session[Incoming, Outgoing] | None:
-        """Return the current published connection, independently of business readiness."""
+    def get(self, peer_id: str) -> Registration[Incoming, Outgoing] | None:
+        """Select a published Session and its Dispatcher together, without claiming readiness."""
         registration = self._current.get(peer_id)
         if (
             self._sealed
@@ -145,7 +148,7 @@ class Gateway[Incoming: Message, Outgoing: Message]:
             or registration.session.closed
         ):
             return None
-        return registration.session
+        return registration
 
     async def unregister(
         self,

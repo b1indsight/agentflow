@@ -15,14 +15,13 @@ from app.communication.session import Session, SessionOverflow, Transport
 from app.contracts.protocol import (
     ProtocolError,
     Register,
-    ServerFrame,
     ServerMessage,
-    WorkerMessage,
-    frame_header,
+    ServerMessageUnion,
+    WorkerMessageUnion,
+    message_header,
     parse_worker_message,
 )
 from app.contracts.validation import parse_worker_input
-from app.controler.workers.conversation import conversation_result_key
 from app.controler.workers.errors import ProtocolViolation
 
 
@@ -65,10 +64,10 @@ def _authenticated_identity(
     return identity if hmac.compare_digest(authorization, expected_authorization) else None
 
 
-def control_ack(message_id: str) -> ServerFrame:
-    """Build a receipt-only frame; it grants no connection or assignment authority."""
-    return ServerFrame(
-        **(frame_header(None) | {"ack": True, "ack_id": message_id}),
+def control_ack(message_id: str) -> ServerMessage:
+    """Build a receipt-only message; it grants no connection or assignment authority."""
+    return ServerMessage(
+        **(message_header(None) | {"ack": True, "ack_id": message_id}),
         control=None,
         payload=[],
     )
@@ -78,27 +77,28 @@ async def serve_worker(
     socket: WorkerSocket,
     *,
     worker_tokens: Mapping[str, str],
-    serve: Callable[[str, Register, Session[WorkerMessage, ServerMessage]], Awaitable[None]],
+    serve: Callable[
+        [str, Register, Session[WorkerMessageUnion, ServerMessageUnion]], Awaitable[None]
+    ],
 ) -> None:
-    """Validate the actual first frame, then transfer cleanup to the Runtime's driver."""
+    """Validate the actual first message, then transfer cleanup to the Runtime's driver."""
     worker_id = _authenticated_identity(socket.headers, worker_tokens)
     if worker_id is None:
         await socket.close(code=1008)
         return
-    session: Session[WorkerMessage, ServerMessage] | None = None
+    session: Session[WorkerMessageUnion, ServerMessageUnion] | None = None
     close_code = 1000
     handed_off = False
     try:
         try:
             await socket.accept()
-            # A dispatching Session would discard unsolicited replies before this check.
+            # Authenticate the first protocol message before publishing a Session.
             register = parse_worker_message(await socket.receive_text())
             if not isinstance(register, Register) or register.worker_id != worker_id:
                 raise ProtocolViolation("worker registration does not match authenticated identity")
             session = Session(
                 _SocketTransport(socket),
                 parse=parse_worker_input,
-                reply_key=conversation_result_key,
                 make_ack=control_ack,
                 epoch=uuid4().hex,
             )
@@ -116,7 +116,7 @@ async def serve_worker(
             logger.warning("worker protocol violation: {}", reason)
             try:
                 error = ProtocolError(
-                    **frame_header(None),
+                    **message_header(None),
                     control="error",
                     payload=[],
                     code="invalid_message" if invalid else "protocol_violation",

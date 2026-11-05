@@ -9,7 +9,7 @@ from loguru import logger
 
 from app.communication.gateway import Gateway
 from app.communication.session import Session
-from app.contracts.protocol import Register, ServerMessage, WorkerMessage
+from app.contracts.protocol import Register, ServerMessageUnion, WorkerMessageUnion
 from app.controler.access import OwnerAccess
 from app.controler.config import ServerSettings
 from app.controler.console.sync import ConsoleSynchronizer
@@ -64,7 +64,7 @@ class ServerRuntime:
             database=database,
         )
         self.tools = FlowToolService(github, database=database)
-        self.gateway = Gateway[WorkerMessage, ServerMessage]()
+        self.gateway = Gateway[WorkerMessageUnion, ServerMessageUnion]()
         conversations = ConversationBroker(self.gateway)
         self.worker_tokens = {
             worker_id: token.get_secret_value()
@@ -131,7 +131,7 @@ class ServerRuntime:
         self,
         worker_id: str,
         register: Register,
-        session: Session[WorkerMessage, ServerMessage],
+        session: Session[WorkerMessageUnion, ServerMessageUnion],
     ) -> None:
         """Mount server business callbacks, transferring connection cleanup to Gateway."""
         try:

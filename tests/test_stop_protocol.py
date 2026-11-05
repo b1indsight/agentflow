@@ -23,14 +23,14 @@ from app.contracts.protocol import (
     RecoveryDescriptor,
     Registered,
     ResultAccepted,
-    ServerFrame,
+    ServerMessage,
     StopAccepted,
     StopExecution,
     StopFence,
     StopResult,
     accept_stop_id,
     call_header,
-    frame_header,
+    message_header,
     parse_server_message,
     parse_worker_message,
     result_header,
@@ -57,10 +57,10 @@ from tests.test_worker_handler import (
     RecordingStore,
     ScriptedSocket,
     handler_for,
-    register_frame,
+    register_message,
     sent_items,
     terminal_items,
-    worker_frame,
+    worker_message,
 )
 from tests.test_worker_workspaces import acquire, managed_seed
 from tests.worker_fakes import NoPendingStops, run_worker, server_runtime, worker_runtime
@@ -86,7 +86,7 @@ def assignment():
 class AckConnection:
     def __init__(self, request, lost=False, epoch="epoch"):
         self.request, self.lost, self.sent = request, lost, []
-        self.epoch, self.frames = epoch, []
+        self.epoch, self.messages = epoch, []
         self.receipt = asyncio.Event()
         self.step = 0
 
@@ -95,7 +95,7 @@ class AckConnection:
 
     async def send(self, raw):
         message = parse_worker_message(raw)
-        self.frames.append(message)
+        self.messages.append(message)
         self.sent.extend(message.payload)
         if any(isinstance(item, StopResult) for item in message.payload):
             self.receipt.set()
@@ -108,8 +108,8 @@ class AckConnection:
                 method="worker.stop",
                 arguments=self.request,
             )
-            return ServerFrame(
-                **frame_header(self.epoch), control=None, payload=[call]
+            return ServerMessage(
+                **message_header(self.epoch), control=None, payload=[call]
             ).model_dump_json()
         if self.step == 2:
             await self.receipt.wait()
@@ -119,12 +119,12 @@ class AckConnection:
             result = StopAccepted(
                 **result_header(call.message_id), method="server.accept_stop", result=self.request
             )
-            return ServerFrame(
-                **frame_header(self.epoch), control=None, payload=[result]
+            return ServerMessage(
+                **message_header(self.epoch), control=None, payload=[result]
             ).model_dump_json()
         if self.step == 3:
             return Registered(
-                **frame_header(self.epoch),
+                **message_header(self.epoch),
                 control="registered",
                 payload=[],
                 recovery=None,
@@ -270,9 +270,9 @@ async def test_replacing_client_during_stop_preserves_cleanup_and_original_recei
             message.result for message in connection.sent if isinstance(message, StopResult)
         )
         assert all(
-            frame.connection_epoch == "new"
-            for frame in connection.frames
-            if any(isinstance(item, StopResult) for item in frame.payload)
+            message.connection_epoch == "new"
+            for message in connection.messages
+            if any(isinstance(item, StopResult) for item in message.payload)
         )
         assert receipt.execution_nonce == state.load().execution_nonce
         assert receipt.request_id == request.request_id
@@ -500,7 +500,7 @@ async def test_stopping_consumes_a_and_requires_real_r_before_b(delivery):
         async def receive_text(self):
             self._step += 1
             if self._step == 1:
-                return register_frame(
+                return register_message(
                     recovery=RecoveryDescriptor(
                         job_id=5,
                         assignment_token="token",
@@ -510,16 +510,16 @@ async def test_stopping_consumes_a_and_requires_real_r_before_b(delivery):
                     payload=[terminal_accept],
                 ).model_dump_json()
             await self.command.wait()
-            frame = next(
-                frame
-                for frame in map(parse_server_message, self.sent)
-                if any(isinstance(item, StopExecution) for item in frame.payload)
+            message = next(
+                message
+                for message in map(parse_server_message, self.sent)
+                if any(isinstance(item, StopExecution) for item in message.payload)
             )
-            epoch = frame.connection_epoch
+            epoch = message.connection_epoch
             assert epoch is not None
             if self._step == 2:
                 if delivery == "B_only":
-                    return worker_frame(epoch, accept).model_dump_json()
+                    return worker_message(epoch, accept).model_dump_json()
                 tool = FlowToolRequest(
                     **call_header(),
                     method="flow.open_pr",
@@ -540,14 +540,14 @@ async def test_stopping_consumes_a_and_requires_real_r_before_b(delivery):
                 if delivery != "split":
                     items.append(accept)
                 return Heartbeat(
-                    **frame_header(epoch),
+                    **message_header(epoch),
                     control="heartbeat",
                     job_id=5,
                     assignment_token="token",
                     payload=items,
                 ).model_dump_json()
             if self._step == 3 and delivery == "split":
-                return worker_frame(epoch, accept).model_dump_json()
+                return worker_message(epoch, accept).model_dump_json()
             raise ConnectionError("script complete")
 
     stops = Stops()
@@ -559,13 +559,13 @@ async def test_stopping_consumes_a_and_requires_real_r_before_b(delivery):
     )
     handler = handler_for(store)
     await serve_worker(socket, serve=handler.serve_worker_session, worker_tokens={"worker-1": "worker-secret"})
-    frames = list(map(parse_server_message, socket.sent))
+    messages = list(map(parse_server_message, socket.sent))
     stop_index = next(
         i
-        for i, frame in enumerate(frames)
-        if any(isinstance(item, StopExecution) for item in frame.payload)
+        for i, message in enumerate(messages)
+        if any(isinstance(item, StopExecution) for item in message.payload)
     )
-    assert not any(isinstance(frame, Registered) for frame in frames[:stop_index])
+    assert not any(isinstance(message, Registered) for message in messages[:stop_index])
     assert not any(isinstance(item, ResultAccepted) for item in sent_items(socket.sent))
     handler.tools.execute.assert_not_called()
     accepted = [item for item in sent_items(socket.sent) if isinstance(item, StopAccepted)]
@@ -765,7 +765,7 @@ async def test_stop_wakes_assignment_waiting_for_missing_a(monkeypatch):
                         error="terminal without acceptance",
                     )
                 )
-                return worker_frame(epoch, result).model_dump_json()
+                return worker_message(epoch, result).model_dump_json()
             await waiting.wait()
             requested = True
             handler.gateway.wake_all()

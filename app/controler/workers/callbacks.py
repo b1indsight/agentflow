@@ -17,6 +17,7 @@ from app.contracts.protocol import (
     AcceptStop,
     Assignment,
     AssignmentArguments,
+    ConversationResult,
     ExecuteResult,
     ExecutionTask,
     Heartbeat,
@@ -28,8 +29,8 @@ from app.contracts.protocol import (
     Register,
     Registered,
     ResultAccepted,
-    ServerFrame,
     ServerMessage,
+    ServerMessageUnion,
     ServerPayload,
     Started,
     StopAccepted,
@@ -39,12 +40,12 @@ from app.contracts.protocol import (
     ToolCall,
     ToolResult,
     ValidationErrorResult,
-    WorkerMessage,
+    WorkerMessageUnion,
     accept_result_id,
     accept_stop_id,
     call_header,
     execution_call_id,
-    frame_header,
+    message_header,
     result_header,
     stop_call_id,
     stop_receipt_id,
@@ -77,7 +78,7 @@ class ServerCallbacks:
         *,
         worker_id: str,
         register: Register,
-        session: Session[WorkerMessage, ServerMessage],
+        session: Session[WorkerMessageUnion, ServerMessageUnion],
         database: Database,
         tools: FlowToolService,
         results: ResultApplication,
@@ -124,40 +125,31 @@ class ServerCallbacks:
             raise RuntimeError("server session requires a connection epoch")
         return epoch
 
-    def bind(self, routes: Dispatcher[WorkerMessage]) -> None:
+    def bind(self, routes: Dispatcher[WorkerMessageUnion]) -> None:
+        self.routes = routes
         routes.register("server.execution_started", Started, self.on_started)
         self.flow.bind(routes)
         routes.register("server.accept_result", AcceptResult, self.on_accept_result)
         routes.register("server.accept_stop", AcceptStop, self.on_accept_stop)
         routes.configure(
             opened=self.on_opened,
-            frame=self.on_frame,
-            result=self.on_reply,
+            message=self.on_message,
+            unmatched_reply=self.on_unmatched_reply,
             validation_error=self.on_error,
             published=self.on_published,
             poll=self.poll,
             before_item=self.before_item,
-            frame_done=self.on_frame_done,
+            message_done=self.on_message_done,
             failed=self.on_failed,
             closed=self.on_closed,
             unrouted=self.flow.on_unrouted,
             rejected=self.on_rejected,
         )
 
-    async def on_reply(self, reply: ToolResult, message: WorkerMessage) -> None:
-        """Associate replies with live calls or durable execution identity after reconnect."""
-        if self.stopping is not None and reply.reply_to == stop_call_id(self.stopping.fence()):
-            if not isinstance(reply, StopResult):
-                raise ProtocolViolation("stop call has the wrong reply model")
-            await self.on_stopped(reply, message)
-            return
-        if self.current is not None and reply.reply_to == execution_call_id(
-            self.current[0].id, self.current[1]
-        ):
-            if not isinstance(reply, ExecuteResult):
-                raise ProtocolViolation("execution call has the wrong reply model")
-            await self.on_result(reply, message)
-            return
+    async def on_unmatched_reply(self, reply: ToolResult, message: WorkerMessageUnion) -> None:
+        """Authorize durable replay when the original connection's receiver is gone."""
+        if isinstance(reply, ConversationResult):
+            return  # A timed-out query is never replayed or evidence of execution progress.
         # Old results can replay after another assignment starts. The payload's job_id
         # is only a lookup hint; the original call ID must match persisted credentials.
         if isinstance(reply, ExecuteResult):
@@ -191,6 +183,16 @@ class ServerCallbacks:
             await self._begin_stop(self.initial_stop)
         elif recovery is not None:
             self.current = await self._recover()
+            if self.current is not None:
+                job, token, _ = self.current
+                # Recovery restores only the original routing identity, not a new Assignment.
+                self.routes.expect_reply(
+                    ToolCall(
+                        **call_header(execution_call_id(job.id, token)), method="worker.execute"
+                    ),
+                    ExecuteResult,
+                    self.on_result,
+                )
         self.registered = self.current is not None
 
     def _matches_current(self, job_id: int, token: str) -> bool:
@@ -236,7 +238,7 @@ class ServerCallbacks:
                     raise ProtocolViolation("archive blocked: original worker journal is missing")
             await self.session.send(
                 Registered(
-                    **frame_header(self.epoch),
+                    **message_header(self.epoch),
                     control="registered",
                     payload=[],
                     recovery=None,
@@ -280,7 +282,7 @@ class ServerCallbacks:
             raise TimeoutError("worker heartbeat timeout")
         return self.receive_deadline
 
-    def _validate_control(self, message: WorkerMessage | RejectedMessage) -> None:
+    def _validate_control(self, message: WorkerMessageUnion | RejectedMessage) -> None:
         if message.connection_epoch != self.epoch or isinstance(message, Register):
             raise ProtocolViolation("message does not match the connection epoch")
         if isinstance(message, (Heartbeat, HeartbeatHeaders)):
@@ -288,11 +290,14 @@ class ServerCallbacks:
                 raise ProtocolViolation("assignment must be acknowledged with Started")
             self._validate_active(message.job_id, message.assignment_token)
 
-    async def on_frame(self, message: WorkerMessage) -> None:
-        # Replayed or unmatched errors cannot extend an execution's receive deadline.
+    async def on_message(self, message: WorkerMessageUnion) -> None:
+        # Neither read-only history nor validation errors prove execution progress.
         self._refresh_receive = message.connection_epoch == self.epoch and (
             message.control is not None
-            or any(not isinstance(item, ValidationErrorResult) for item in message.payload)
+            or any(
+                not isinstance(item, (ValidationErrorResult, ConversationResult))
+                for item in message.payload
+            )
         )
         if (
             message.control is None
@@ -318,11 +323,13 @@ class ServerCallbacks:
             }:
                 raise ProtocolViolation("heartbeat belongs to an inactive assignment")
 
-    async def before_item(self, item: ToolCall | ToolResult, message: WorkerMessage) -> None:
+    async def before_item(self, item: ToolCall | ToolResult, message: WorkerMessageUnion) -> None:
         if isinstance(item, ValidationErrorResult):
             return  # The error hook enforces correlation and the pre-start fence.
         if self._recovery_required:
             raise ProtocolViolation("critical protocol payload rejected; recovery required")
+        if isinstance(item, ConversationResult):
+            return  # Read-only replies need no Started and cannot initiate execution effects.
         if self.starting and not isinstance(item, Started):
             raise ProtocolViolation("assignment must be acknowledged with Started")
         if not self.starting and self.stopping is None:
@@ -330,13 +337,13 @@ class ServerCallbacks:
             if stop is not None:
                 await self._begin_stop(stop)
 
-    def on_frame_done(self) -> None:
+    def on_message_done(self) -> None:
         if self._recovery_required:
             raise ProtocolViolation("critical protocol payload rejected; recovery required")
         if self._refresh_receive:
             self.receive_deadline = asyncio.get_running_loop().time() + self.heartbeat_timeout
 
-    async def on_started(self, item: Started, message: WorkerMessage) -> None:
+    async def on_started(self, item: Started, message: WorkerMessageUnion) -> None:
         if not self.starting or self.current is None or self.stopping is not None:
             raise ProtocolViolation("unexpected Started")
         self._validate_active(item.arguments.job_id, item.arguments.assignment_token)
@@ -349,7 +356,7 @@ class ServerCallbacks:
         self.coordinator.mark_started(job, task, self.worker_id)
         self.starting = False
 
-    async def on_result(self, item: ExecuteResult, message: WorkerMessage) -> None:
+    async def on_result(self, item: ExecuteResult, message: WorkerMessageUnion) -> None:
         if self.stopping is not None:
             self._validate_active(item.job_id, item.assignment_token)
         terminal = item.terminal()
@@ -376,7 +383,7 @@ class ServerCallbacks:
             raise ProtocolViolation("result conflicts with persisted assignment facts")
         await self.results.apply(job.id)
 
-    async def on_accept_result(self, item: AcceptResult, message: WorkerMessage) -> None:
+    async def on_accept_result(self, item: AcceptResult, message: WorkerMessageUnion) -> None:
         if self.stopping is not None:
             self._validate_active(item.arguments.job_id, item.arguments.assignment_token)
         job = self._validate_result_call(item)
@@ -388,10 +395,11 @@ class ServerCallbacks:
             await self.results.apply(job.id)
         if await self._accept_result(item):
             if self._matches_current(job.id, item.arguments.assignment_token):
+                self.routes.forget_reply(execution_call_id(job.id, item.arguments.assignment_token))
                 self.current = None
             self.notify_jobs()
 
-    async def on_stopped(self, item: StopResult, message: WorkerMessage) -> None:
+    async def on_stopped(self, item: StopResult, message: WorkerMessageUnion) -> None:
         receipt = item.result
         if self.stopping is None:
             raise ProtocolViolation("unexpected stop receipt")
@@ -406,7 +414,7 @@ class ServerCallbacks:
             raise ProtocolViolation("stop blocked: receipt or external effects not converged")
         self.stopped = item
 
-    async def on_accept_stop(self, item: AcceptStop, message: WorkerMessage) -> None:
+    async def on_accept_stop(self, item: AcceptStop, message: WorkerMessageUnion) -> None:
         args = item.arguments
         if self.stopping is None or self.stopped is None:
             raise ProtocolViolation("stop acceptance requires an actual validated receipt")
@@ -425,12 +433,14 @@ class ServerCallbacks:
             )
         ):
             if self._matches_current(fence.job_id, fence.assignment_token):
+                self.routes.forget_reply(execution_call_id(fence.job_id, fence.assignment_token))
                 self.current = None
+            self.routes.forget_reply(stop_call_id(fence))
             self.stopping, self.stopped, self.starting = None, None, False
             self.session.set_deadline(None)
             self.notify_jobs()
 
-    async def on_error(self, error: ValidationErrorResult, message: WorkerMessage) -> None:
+    async def on_error(self, error: ValidationErrorResult, message: WorkerMessageUnion) -> None:
         if message.connection_epoch == self.epoch:
             if self.current is not None:
                 job, token, _ = self.current
@@ -465,6 +475,7 @@ class ServerCallbacks:
                         or current.assignment_token != token
                     ):
                         raise ProtocolViolation("assignment rejection lost its connection fence")
+                    self.routes.forget_reply(execution_call_id(job.id, token))
                     self.current, self.starting = None, False
                     self.notify_jobs()
                     return
@@ -478,6 +489,8 @@ class ServerCallbacks:
             ):
                 self._recovery_required = True
                 return
+            if self.routes.reject_reply(error, "message payload failed validation"):
+                return
         if not self._unmatched_error_logged:
             logger.warning("ignored unmatched validation error on server connection")
             self._unmatched_error_logged = True
@@ -487,8 +500,10 @@ class ServerCallbacks:
             raise ProtocolViolation("invalid payload before registration")
         self._validate_control(message)
         critical = False
+        replies: list[ToolResult] = []
         for item in message.payload:
-            if item.method == "worker.history":
+            if isinstance(item, ToolResult) and item.method == "worker.history":
+                replies.append(item)
                 continue
             if self.starting and item.method != "server.execution_started":
                 raise ProtocolViolation("assignment must be acknowledged with Started")
@@ -502,15 +517,14 @@ class ServerCallbacks:
                 critical = True
             elif isinstance(item, ToolResult):
                 raise ProtocolViolation("invalid reply has no pending invocation")
-        try:
-            self.session.reject_queries(message)
-        except ValueError as error:
-            raise ProtocolViolation(str(error)) from error
+        # Do not notify any caller until every header in the batch is authorized.
+        for item in replies:
+            self.routes.reject_reply(item, "message payload failed validation")
 
         async def respond() -> None:
             await self.session.send(
-                ServerFrame(
-                    **frame_header(self.epoch),
+                ServerMessage(
+                    **message_header(self.epoch),
                     control=None,
                     payload=[
                         ValidationErrorResult(
@@ -546,7 +560,7 @@ class ServerCallbacks:
             try:
                 await self.session.send(
                     ProtocolError(
-                        **frame_header(self.epoch),
+                        **message_header(self.epoch),
                         control="error",
                         payload=[],
                         code="invalid_message" if invalid else "protocol_violation",
@@ -568,11 +582,17 @@ class ServerCallbacks:
         tracked = isinstance(item, (ResultAccepted, StopAccepted, RecoveryRejected))
         if isinstance(item, (ResultAccepted, StopAccepted, RecoveryRejected)):
             self._sent[item.method] = item
+        if isinstance(item, Assignment):
+            self.routes.expect_reply(item, ExecuteResult, self.on_result)
+        elif isinstance(item, StopExecution):
+            self.routes.expect_reply(item, StopResult, self.on_stopped)
         try:
             return await self.session.send(
-                ServerFrame(**frame_header(self.epoch), control=None, payload=[item])
+                ServerMessage(**message_header(self.epoch), control=None, payload=[item])
             )
         except BaseException:
+            if isinstance(item, (Assignment, StopExecution)):
+                self.routes.forget_reply(item.message_id)
             if tracked:
                 if previous is None:
                     self._sent.pop(item.method, None)
@@ -748,7 +768,7 @@ class ServerCallbacks:
             return None
         await self.session.send(
             Registered(
-                **frame_header(self.epoch),
+                **message_header(self.epoch),
                 control="registered",
                 payload=[],
                 heartbeat_interval=self.heartbeat_interval,

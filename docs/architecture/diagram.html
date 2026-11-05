@@ -343,7 +343,7 @@
         </article>
         <article class="node" data-status="done">
           <div class="node__top"><span class="node__name">共享 Gateway + Session</span><span class="pill">通信层</span></div>
-          <p class="node__role">两端 Runtime 持有 · Gateway 统一事件驱动与 package.method 路由 · Session 交付 msg / Ready / wake，管理单 reader / FIFO / 写入 / 查询 / 时限</p>
+          <p class="node__role">两端 Runtime 持有 · Gateway 统一事件驱动与 package.method 路由 · Session 交付 message / Ready / wake，管理单 reader / FIFO / 写入 / 查询 / 时限</p>
           <code class="node__file">app/communication/gateway.py · session.py</code>
         </article>
         <article class="node" data-status="partial">
@@ -357,7 +357,7 @@
       <div class="grid">
         <article class="node" data-status="done">
           <div class="node__top"><span class="node__name">ServerCallbacks</span><span class="pill">每连接业务</span></div>
-          <p class="node__role">接入函数认证与首帧校验 · Runtime 挂载回调 · 调度 / 恢复 / 工具 / 结果与停止提交 · 无独立接收循环</p>
+          <p class="node__role">接入函数认证与首条 message 校验 · Runtime 挂载回调 · 调度 / 恢复 / 工具 / 结果与停止提交 · 无独立接收循环</p>
           <code class="node__file">app/controler/workers/callbacks.py · transport.py</code>
         </article>
         <article class="node" data-status="done">
@@ -400,9 +400,9 @@
           <code class="node__file">app/worker/execution/vcs.py · V8</code>
         </article>
         <article class="node" data-status="artifact">
-          <div class="node__top"><span class="node__name">WorkerCallbacks + WorkerExecution</span></div>
-          <p class="node__role">Client 只拨号/重连 · 每连接回调借用执行 owner · Execution 长期持有 Task / 工具 Future / shielded stop · ExecutionState 持久 journal · 断线不取消执行</p>
-          <code class="node__file">app/worker/transport/callbacks.py · execution/lifecycle.py · state/execution.py</code>
+          <div class="node__top"><span class="node__name">WorkerStateCallbacks + WorkerBusinessCallbacks</span></div>
+          <p class="node__role">Runtime 平级挂载状态协议与业务回调 · worker.history 与 Flow 工具走统一 FIFO，无查询旁路 · WorkerExecution 长期持有 Task / 工具 Future / shielded stop · ExecutionState 持久 journal · 断线不取消执行</p>
+          <code class="node__file">app/worker/runtime.py · transport/state.py · transport/business.py · execution/lifecycle.py · state/execution.py</code>
         </article>
       </div>
     </div>

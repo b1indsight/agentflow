@@ -17,10 +17,10 @@ from app.contracts.protocol import (
     ConversationQuery,
     ConversationResult,
     ExecuteResult,
-    ServerMessage,
-    WorkerFrame,
+    ServerMessageUnion,
     WorkerMessage,
-    frame_header,
+    WorkerMessageUnion,
+    message_header,
     parse_server_message,
     parse_worker_message,
     result_header,
@@ -28,7 +28,6 @@ from app.contracts.protocol import (
 from app.controler.workers.conversation import (
     ConversationBroker,
     ConversationService,
-    conversation_result_key,
 )
 from app.controler.workers.transport import control_ack
 from app.domain.models import JobKind
@@ -38,29 +37,62 @@ from tests.test_conversation_history import SESSION
 
 @pytest.fixture
 async def history_connection():
-    registrations = []
+    serving = []
 
-    async def create(peers, worker="worker", epoch="epoch"):
-        socket = Socket()
-        session = Session[WorkerMessage, ServerMessage](
+    async def create(peers, worker="worker", epoch="epoch", *, socket=None, before_message=None):
+        if socket is None:
+            socket = Socket()
+        socket.delivered = asyncio.Queue()
+        opened = asyncio.Event()
+        session = Session[WorkerMessageUnion, ServerMessageUnion](
             socket,
             parse=parse_worker_message,
-            reply_key=conversation_result_key,
             epoch=epoch,
             make_ack=control_ack,
         )
         session.start()
-        registration = await peers.register(worker, session, replace=True)
-        registrations.append((peers, registration))
+
+        class Callbacks:
+            def bind(self, routes):
+                self.routes = routes
+                routes.configure(
+                    opened=self.opened,
+                    message=self.message,
+                    unmatched_reply=self.unmatched,
+                    validation_error=self.error,
+                )
+
+            async def opened(self):
+                opened.set()
+
+            async def message(self, message):
+                if message.connection_epoch != epoch:
+                    raise ConnectionError("wrong epoch")
+                if before_message is not None:
+                    await before_message(message)
+
+            async def unmatched(self, item, message):
+                if not isinstance(item, ConversationResult):
+                    socket.delivered.put_nowait(item)
+
+            async def error(self, item, message):
+                self.routes.reject_reply(item, "invalid response")
+
+        serving.append(asyncio.create_task(peers.serve(worker, session, Callbacks(), replace=True)))
+        await asyncio.wait_for(opened.wait(), 1)
+        registration = peers.get(worker)
+        assert registration is not None
         return registration, socket
 
     yield create
-    await asyncio.gather(*(peers.unregister(registration) for peers, registration in registrations))
+    for task in serving:
+        task.cancel()
+    await asyncio.gather(*serving, return_exceptions=True)
 
 
 async def answer(socket, page=None, error=None):
-    frame = parse_server_message(await asyncio.wait_for(socket.sent.get(), 1))
-    request = frame.payload[0]
+    message = parse_server_message(await asyncio.wait_for(socket.sent.get(), 1))
+    request = message.payload[0]
     assert isinstance(request, ConversationQuery)
     response = ConversationResult(
         **result_header(request.message_id),
@@ -69,32 +101,48 @@ async def answer(socket, page=None, error=None):
         error=error,
     )
     await socket.incoming.put(
-        WorkerFrame(
-            **frame_header(frame.connection_epoch), control=None, payload=[response]
+        WorkerMessage(
+            **message_header(message.connection_epoch), control=None, payload=[response]
         ).model_dump_json()
     )
 
 
 @pytest.mark.asyncio
 async def test_query_correlates_response(history_connection) -> None:
-    peers = Gateway[WorkerMessage, ServerMessage]()
+    peers = Gateway[WorkerMessageUnion, ServerMessageUnion]()
     broker = ConversationBroker(peers)
     _, socket = await history_connection(peers)
     query = asyncio.create_task(broker.query("worker", HistoryQuery(session_id=SESSION)))
     await answer(socket)
     assert (await query).session_id == SESSION
-    assert broker._inflight == 0
+    assert not broker._inflight
 
 
+@pytest.mark.parametrize("phase", ["lock", "write", "reply"])
 @pytest.mark.parametrize("failure", ["disconnect", "timeout", "cancel"])
-async def test_disconnect_timeout_and_cancellation_cleanup(history_connection, failure) -> None:
-    peers = Gateway[WorkerMessage, ServerMessage]()
+async def test_disconnect_timeout_and_cancellation_cleanup(
+    history_connection, failure, phase
+) -> None:
+    # A query's budget includes acquiring the send lock and the actual transport write.
+    # Abandoning an uncertain write seals the connection; a queued writer must never leak out.
+    peers = Gateway[WorkerMessageUnion, ServerMessageUnion]()
     broker = ConversationBroker(peers)
     registration, socket = await history_connection(peers)
+    blocker = None
+    if phase != "reply":
+        socket.release_write.clear()
+    if phase == "lock":
+        blocker = asyncio.create_task(registration.session.send(control_ack("a" * 32)))
+        await socket.write_started.wait()
     if failure == "timeout":
-        broker.timeout = 0.01
+        broker.timeout = 0.02
     query = asyncio.create_task(broker.query("worker", HistoryQuery(session_id=SESSION)))
-    await socket.sent.get()
+    if phase == "reply":
+        await socket.sent.get()
+    elif phase == "write":
+        await socket.write_started.wait()
+    else:
+        await asyncio.sleep(0)
     if failure == "disconnect":
         await peers.unregister(registration)
     elif failure == "cancel":
@@ -104,9 +152,18 @@ async def test_disconnect_timeout_and_cancellation_cleanup(history_connection, f
         asyncio.CancelledError if failure == "cancel" else ConversationFailure,
         match=None if failure == "cancel" else code,
     ):
-        await query
-    assert broker._inflight == 0
-    if failure == "disconnect":
+        await asyncio.wait_for(query, 1)
+    assert not broker._inflight
+    if phase != "reply":
+        assert socket.sent.empty()
+        socket.release_write.set()
+        if blocker is not None:
+            await asyncio.gather(blocker, return_exceptions=True)
+            if failure != "disconnect":
+                await socket.sent.get()  # Only the pre-existing ACK writer may finish.
+        assert socket.sent.empty()
+    if failure == "disconnect" or phase == "write":
+        assert registration.session.closed
         _, socket = await history_connection(peers, epoch="new")
     broker.timeout = 1
     again = asyncio.create_task(broker.query("worker", HistoryQuery(session_id=SESSION)))
@@ -114,9 +171,66 @@ async def test_disconnect_timeout_and_cancellation_cleanup(history_connection, f
     assert (await again).session_id == SESSION
 
 
+@pytest.mark.parametrize("write_complete", [False, True])
+async def test_reply_then_eof_requires_a_completed_write(history_connection, write_complete):
+    # EOF must drain a received reply, but a reply cannot make a blocked write successful.
+    class ReplyingSocket(Socket):
+        async def send_text(self, raw):
+            request = parse_server_message(raw).payload[0]
+            response = ConversationResult(
+                **result_header(request.message_id),
+                method="worker.history",
+                page=HistoryPage(session_id=SESSION),
+            )
+            self.incoming.put_nowait(
+                WorkerMessage(
+                    **message_header("epoch"), control=None, payload=[response]
+                ).model_dump_json()
+            )
+            self.incoming.put_nowait(ConnectionError("EOF"))
+            if not write_complete:
+                await asyncio.Event().wait()
+
+    peers = Gateway()
+    broker = ConversationBroker(peers)
+    await history_connection(peers, socket=ReplyingSocket())
+    if write_complete:
+        assert (
+            await asyncio.wait_for(broker.query("worker", HistoryQuery(session_id=SESSION)), 1)
+        ).session_id == SESSION
+    else:
+        with pytest.raises(ConversationFailure, match="worker_unavailable"):
+            await asyncio.wait_for(broker.query("worker", HistoryQuery(session_id=SESSION)), 1)
+    assert not broker._inflight
+
+
+async def test_explicit_close_fails_waiter_while_serial_driver_is_busy(history_connection):
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def block(message):
+        entered.set()
+        await release.wait()
+
+    peers = Gateway()
+    broker = ConversationBroker(peers)
+    registration, socket = await history_connection(peers, before_message=block)
+    query = asyncio.create_task(broker.query("worker", HistoryQuery(session_id=SESSION)))
+    try:
+        await answer(socket)
+        await entered.wait()
+        await peers.unregister(registration)
+        with pytest.raises(ConversationFailure, match="worker_unavailable"):
+            await asyncio.wait_for(query, 1)
+        assert not broker._inflight
+    finally:
+        release.set()
+        query.cancel()
+        await asyncio.gather(query, return_exceptions=True)
+
+
 @pytest.mark.asyncio
 async def test_replacement_connection_and_busy_limit(history_connection) -> None:
-    peers = Gateway[WorkerMessage, ServerMessage]()
+    peers = Gateway[WorkerMessageUnion, ServerMessageUnion]()
     broker = ConversationBroker(peers)
     old, old_socket = await history_connection(peers, epoch="old")
     first = asyncio.create_task(broker.query("worker", HistoryQuery(session_id=SESSION)))
@@ -134,7 +248,7 @@ async def test_replacement_connection_and_busy_limit(history_connection) -> None
         with pytest.raises(ConversationFailure, match="query_busy"):
             await broker.query("worker", HistoryQuery(session_id=SESSION))
         await peers.unregister(old)
-        assert peers.get("worker") is new.session
+        assert peers.get("worker") is new
         for _ in queries:
             await answer(socket)
         assert all(page.session_id == SESSION for page in await asyncio.gather(*queries))
@@ -165,7 +279,7 @@ async def test_global_admission_spans_sessions_and_is_reusable(history_connectio
         last = asyncio.create_task(broker.query("16", HistoryQuery(session_id=SESSION)))
         await answer(sockets[16])
         assert (await last).session_id == SESSION
-        assert broker._inflight == 0
+        assert not broker._inflight
     finally:
         for query in queries:
             query.cancel()
@@ -215,7 +329,7 @@ async def test_worker_pages_are_validated_after_correlation(history_connection, 
         ConversationFailure, match="history_unreadable" if defect == "error" else "invalid_response"
     ):
         await query
-    assert broker._inflight == 0
+    assert not broker._inflight
 
 
 @pytest.mark.asyncio
@@ -252,10 +366,10 @@ async def test_history_size_ignores_other_items_and_preserves_their_delivery(his
     # nor disappear when the pending query consumes its own item.
     peers = Gateway()
     broker = ConversationBroker(peers)
-    registration, socket = await history_connection(peers)
+    _, socket = await history_connection(peers)
     query = asyncio.create_task(broker.query("worker", HistoryQuery(session_id=SESSION)))
-    frame = parse_server_message(await socket.sent.get())
-    request = frame.payload[0]
+    message = parse_server_message(await socket.sent.get())
+    request = message.payload[0]
     response = ConversationResult(
         **result_header(request.message_id),
         method="worker.history",
@@ -269,13 +383,12 @@ async def test_history_size_ignores_other_items_and_preserves_their_delivery(his
         error="x" * (600 * 1024),
     )
     await socket.incoming.put(
-        WorkerFrame(
-            **frame_header("epoch"), control=None, payload=[response, terminal]
+        WorkerMessage(
+            **message_header("epoch"), control=None, payload=[response, terminal]
         ).model_dump_json()
     )
     assert (await asyncio.wait_for(query, 1)).session_id == SESSION
-    remaining = await asyncio.wait_for(registration.session.next_event(), 1)
-    assert remaining.payload == [terminal]
+    assert await asyncio.wait_for(socket.delivered.get(), 1) == terminal
 
 
 @pytest.mark.parametrize("ack_header", [False, True])
@@ -284,9 +397,9 @@ async def test_history_size_includes_shared_header(history_connection, ack_heade
     broker = ConversationBroker(peers)
     _, socket = await history_connection(peers)
     query = asyncio.create_task(broker.query("worker", HistoryQuery(session_id=SESSION)))
-    frame = parse_server_message(await socket.sent.get())
+    message = parse_server_message(await socket.sent.get())
     response = ConversationResult(
-        **result_header(frame.payload[0].message_id),
+        **result_header(message.payload[0].message_id),
         method="worker.history",
         page=HistoryPage(
             session_id=SESSION,
@@ -302,7 +415,7 @@ async def test_history_size_includes_shared_header(history_connection, ack_heade
         ),
     )
     assert response.page is not None
-    delivery = WorkerFrame(**frame_header("epoch"), control=None, payload=[response])
+    delivery = WorkerMessage(**message_header("epoch"), control=None, payload=[response])
     # A receipt ACK increases the actual shared header; a reconstructed empty header
     # would accept this over-budget page even though its selected item remains valid.
     measured = delivery if ack_header else response
@@ -321,24 +434,31 @@ async def test_history_size_includes_shared_header(history_connection, ack_heade
         await query
 
 
-async def test_same_method_wrong_reply_or_epoch_cannot_finish_query(history_connection):
+@pytest.mark.parametrize("wrong_epoch", [False, True])
+async def test_same_method_wrong_reply_or_epoch_cannot_finish_query(
+    history_connection, wrong_epoch
+):
     peers = Gateway()
     broker = ConversationBroker(peers)
-    registration, socket = await history_connection(peers)
+    _, socket = await history_connection(peers)
     query = asyncio.create_task(broker.query("worker", HistoryQuery(session_id=SESSION)))
-    frame = parse_server_message(await socket.sent.get())
-    request = frame.payload[0]
+    message = parse_server_message(await socket.sent.get())
+    request = message.payload[0]
     right = ConversationResult(
         **result_header(request.message_id),
         method="worker.history",
         page=HistoryPage(session_id=SESSION),
     )
     wrong = ConversationResult(
-        **result_header(frame.message_id), method="worker.history", error="query_busy"
+        **result_header(message.message_id), method="worker.history", error="query_busy"
     )
-    await socket.incoming.put(
-        WorkerFrame(**frame_header("old"), control=None, payload=[right]).model_dump_json()
-    )
+    if wrong_epoch:
+        await socket.incoming.put(
+            WorkerMessage(**message_header("old"), control=None, payload=[right]).model_dump_json()
+        )
+        with pytest.raises(ConversationFailure, match="worker_unavailable"):
+            await query
+        return
     marker = ExecuteResult(
         **result_header("1" * 32),
         method="worker.execute",
@@ -347,13 +467,13 @@ async def test_same_method_wrong_reply_or_epoch_cannot_finish_query(history_conn
         error="marker",
     )
     await socket.incoming.put(
-        WorkerFrame(
-            **frame_header("epoch"), control=None, payload=[wrong, marker]
+        WorkerMessage(
+            **message_header("epoch"), control=None, payload=[wrong, marker]
         ).model_dump_json()
     )
-    assert (await registration.session.next_event()).payload == [marker]
+    assert await socket.delivered.get() == marker
     assert not query.done()
     await socket.incoming.put(
-        WorkerFrame(**frame_header("epoch"), control=None, payload=[right]).model_dump_json()
+        WorkerMessage(**message_header("epoch"), control=None, payload=[right]).model_dump_json()
     )
     assert (await query).session_id == SESSION

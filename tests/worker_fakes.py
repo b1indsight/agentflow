@@ -1,10 +1,13 @@
 """Explicit worker dependencies for in-memory protocol tests."""
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from unittest.mock import Mock
 
+from pydantic import SecretStr
+
 from app.communication.gateway import Gateway
-from app.contracts.protocol import ExecutionStopped, Register, frame_header
+from app.contracts.protocol import ExecutionStopped, Register, message_header
 from app.controler.config import ServerSettings
 from app.controler.runtime import ServerRuntime
 from app.controler.workers.callbacks import ServerCallbacks
@@ -15,13 +18,17 @@ from app.persistence.stops import StopIntent, StopStore
 from app.persistence.store import Store
 from app.worker.config import WorkerSettings
 from app.worker.runtime import WorkerRuntime
-from app.worker.transport.client import WebSocketTransport, WorkerClient
+from app.worker.transport.client import WebSocketTransport
 
 
 def worker_runtime(*, worker_id, worker_token, serve_ws_url, execution, read_history):
     """Use the real Runtime connection path with test-owned execution and history IO."""
     runtime = WorkerRuntime.__new__(WorkerRuntime)
-    runtime.settings = WorkerSettings.model_construct(worker_id=worker_id)
+    runtime.settings = WorkerSettings.model_construct(
+        worker_id=worker_id,
+        worker_token=SecretStr(worker_token),
+        serve_ws_url=serve_ws_url,
+    )
     runtime.execution = execution
     if isinstance(execution, Mock):
         execution.state = Mock(read=read_history)
@@ -29,8 +36,8 @@ def worker_runtime(*, worker_id, worker_token, serve_ws_url, execution, read_his
         execution.state.read = read_history
     runtime.gateway = Gateway()
     runtime._connected = False
-    runtime.client = WorkerClient(worker_id=worker_id, worker_token=worker_token,
-                                 serve_ws_url=serve_ws_url, serve=runtime._serve_connection)
+    runtime._shutdown_requested = asyncio.Event()
+    runtime._connection_task = None
     return runtime
 
 
@@ -56,7 +63,7 @@ def server_callbacks(runtime, worker_id, epoch):
     """Construct per-connection callbacks for focused preparation/evidence checks."""
     return ServerCallbacks(
         runtime.coordinator, worker_id=worker_id,
-        register=Register(**frame_header(None), control="register", payload=[],
+        register=Register(**message_header(None), control="register", payload=[],
                           worker_id=worker_id, recovery=None),
         session=Mock(epoch=epoch), database=runtime.database, tools=runtime.tools,
         results=runtime.results, notify_jobs=runtime.gateway.wake_all,

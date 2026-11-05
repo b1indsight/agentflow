@@ -5,14 +5,18 @@ from __future__ import annotations
 import asyncio
 import fcntl
 import os
+import random
 import signal
 from collections.abc import Mapping
 from pathlib import Path
 from typing import IO
 
+from loguru import logger
+from websockets.asyncio.client import connect
+
 from app.communication.gateway import Gateway
 from app.communication.session import Session, Transport
-from app.contracts.protocol import ServerMessage, WorkerMessage
+from app.contracts.protocol import ServerMessageUnion, WorkerMessageUnion
 from app.contracts.validation import parse_server_input
 from app.telemetry.logging import configure_logging
 from app.worker.config import WorkerSettings
@@ -22,8 +26,9 @@ from app.worker.execution.executor import WorkerExecutor
 from app.worker.execution.lifecycle import WorkerExecution
 from app.worker.health import HealthFile
 from app.worker.state.execution import ExecutionState
-from app.worker.transport.callbacks import WorkerCallbacks, control_ack, history_responder
-from app.worker.transport.client import WorkerClient
+from app.worker.transport.business import WorkerBusinessCallbacks
+from app.worker.transport.client import WebSocketTransport
+from app.worker.transport.state import WorkerStateCallbacks, control_ack
 
 _CONTROL_ENVIRONMENT_KEYS = frozenset(
     {
@@ -99,7 +104,8 @@ class WorkerRuntime:
     """Compose worker dependencies and join their cleanup before releasing the process root."""
 
     def __init__(self, settings: WorkerSettings) -> None:
-        self._shutdown_requested = False
+        self._shutdown_requested = asyncio.Event()
+        self._connection_task: asyncio.Task[None] | None = None
         self.settings = settings
         configure_logging("worker", self.settings.log_format)
         self.root_lock = WorkerRootLock(self.settings.worker_root, self.settings.worker_id)
@@ -119,36 +125,68 @@ class WorkerRuntime:
             workspace_limit=self.settings.worker_repo_workspace_limit,
         )
         self.execution = WorkerExecution(worker_id=self.settings.worker_id, executor=executor, state=state)
-        self.gateway = Gateway[ServerMessage, WorkerMessage]()
+        self.gateway = Gateway[ServerMessageUnion, WorkerMessageUnion]()
         self._connected = False
-        self.client = WorkerClient(
-            worker_id=self.settings.worker_id,
-            worker_token=self.settings.worker_token.get_secret_value(),
-            serve_ws_url=self.settings.serve_ws_url,
-            serve=self._serve_connection,
-            reconnect_min_backoff=self.settings.reconnect_min_backoff,
-            reconnect_max_backoff=self.settings.reconnect_max_backoff,
-            reconnect_jitter=self.settings.reconnect_jitter,
-        )
+
+    async def _run_connections(self) -> None:
+        """Authenticate and reconnect; join connection cleanup without stopping execution."""
+        settings = self.settings
+        delay = settings.reconnect_min_backoff
+        try:
+            while not self._shutdown_requested.is_set():
+                try:
+                    async with connect(
+                        settings.serve_ws_url,
+                        additional_headers={
+                            "Authorization": f"Bearer {settings.worker_token.get_secret_value()}",
+                            "X-FlowTool-Worker-ID": settings.worker_id,
+                        },
+                    ) as connection:
+                        if self._shutdown_requested.is_set():
+                            break
+                        delay = settings.reconnect_min_backoff
+                        self._connection_task = asyncio.create_task(
+                            self._serve_connection(WebSocketTransport(connection))
+                        )
+                        await self._connection_task
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:  # noqa: BLE001 — reconnect after protocol/transport loss.
+                    jitter = random.uniform(
+                        1 - settings.reconnect_jitter, 1 + settings.reconnect_jitter
+                    )
+                    wait = delay * jitter
+                    logger.warning("worker connection lost; retrying in {:.2f}s: {}", wait, error)
+                    try:
+                        await asyncio.wait_for(self._shutdown_requested.wait(), timeout=wait)
+                    except TimeoutError:
+                        delay = min(delay * 2, settings.reconnect_max_backoff)
+        finally:
+            if self._connection_task is not None:
+                self._connection_task.cancel()
+                await asyncio.gather(self._connection_task, return_exceptions=True)
+                self._connection_task = None
 
     async def _serve_connection(self, transport: Transport) -> None:
-        session = Session[ServerMessage, WorkerMessage](
+        session = Session[ServerMessageUnion, WorkerMessageUnion](
             transport,
             parse=parse_server_input,
             make_ack=control_ack,
-            responder=history_responder(self.execution.state.read),
         )
         try:
-            callbacks = WorkerCallbacks(
+            state_callbacks = WorkerStateCallbacks(
                 worker_id=self.settings.worker_id,
                 session=session,
                 execution=self.execution,
                 on_ready=self._set_connected,
             )
+            business_callbacks = WorkerBusinessCallbacks(session=session, execution=self.execution)
         except BaseException:
             await session.close()
             raise
-        await self.gateway.serve("server", session, callbacks, replace=False)
+        await self.gateway.serve(
+            "server", session, state_callbacks, business_callbacks, replace=False
+        )
 
     def _set_connected(self, connected: bool) -> None:
         self._connected = connected
@@ -159,7 +197,7 @@ class WorkerRuntime:
         health_task = asyncio.create_task(self._report_health()) if self.settings.worker_status_path else None
         loop = asyncio.get_running_loop()
         loop.add_signal_handler(signal.SIGTERM, self.stop)
-        communication = asyncio.create_task(self.client.run())
+        communication = asyncio.create_task(self._run_connections())
         cancelled = False
         try:
             await asyncio.shield(communication)
@@ -167,7 +205,6 @@ class WorkerRuntime:
             cancelled = True
         finally:
             self.gateway.seal()
-            self.client.stop()
             if not communication.done():
                 communication.cancel()
             try:
@@ -196,7 +233,7 @@ class WorkerRuntime:
                             await asyncio.gather(health_task, return_exceptions=True)
                     finally:
                         self.root_lock.release()
-        if cancelled and not self._shutdown_requested:
+        if cancelled and not self._shutdown_requested.is_set():
             raise asyncio.CancelledError
 
     async def _report_health(self) -> None:
@@ -210,7 +247,8 @@ class WorkerRuntime:
             marker.write(False)
 
     def stop(self) -> None:
-        self._shutdown_requested = True
+        self._shutdown_requested.set()
         self._connected = False
         self.gateway.seal()
-        self.client.stop()
+        if self._connection_task is not None:
+            self._connection_task.cancel()

@@ -47,7 +47,7 @@
 回写失败保留 ACTIVE Flow 和原 binding，成功后才原子完成并 ACK。真实 M3 闭环待验收，见
 [F3 实施与验收](../plan/m3-archive-status.md)。
 
-## 6. 对账、取消与旁路查询
+## 6. 对账、取消与会话查询
 
 - **PR / 反馈对账**：独立循环读取已追踪 PR 的 merge/close/reopen，以及 Issue/PR 普通评论、
   review 正文和行内线程；持久化分页进度和退避。close 保留绑定并暂挂，reopen 核验基线后
@@ -59,6 +59,8 @@
 - **Projects**：独立投影循环把本地业务状态同步到可选组织看板，失败不改变 Flow。
 - **会话历史**：HTTP 请求经 control 验证 Flow/session 身份，通过现有 WS 查询原 worker，
   control 负责跨 session 游标与可信归属，不把全文存入 PostgreSQL。
+  worker.history 由 WorkerBusinessCallbacks 注册，请求、回复和验证拒收均走共同 FIFO；
+  慢业务回调与 history 互相等待，不另设查询旁路。
 
 依据：[PR 对账](../../app/controler/reconciliation/pull_requests.py)、
 [反馈对账](../../app/controler/reconciliation/feedback.py)、

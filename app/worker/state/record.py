@@ -68,7 +68,7 @@ class _RecordFields(ProtocolModel):
 
 
 class ExecutionRecord(_RecordFields):
-    """Current durable business data; no frame, epoch or message identity is persisted."""
+    """Current durable business data; no message, epoch or message identity is persisted."""
 
     version: Annotated[Literal[5], BeforeValidator(_INTEGER.validate_python)] = 5
 

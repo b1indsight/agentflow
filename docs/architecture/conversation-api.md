@@ -103,21 +103,25 @@ worker 使用执行 Codex 时相同的 `CODEX_HOME`（默认 `~/.codex`），读
 每个 HTTP 请求仅发起一次 worker 查询。目录发现最多
 50000 个条目；先查 sessions，再查 archived_sessions，找到即返回。两处均有副本时优先使用
 活动目录；候选文件的符号链接和普通文件检查统一在打开时执行。control 全局最多 64 个
-待响应查询、每连接 4 个；worker 每连接最多 4 个历史处理任务，Codex 读取器最多同时读取 2 个。
-Broker 通过共享 Gateway 选择一次当前 Session；替换期间未发布的候选不可查询，旧连接查询
+待响应查询、每连接 4 个，由 Broker 计数；worker 在唯一 driver 串行处理 history，Codex 读取器仍有并发上限。
+Broker 通过共享 Gateway 选择一次配对的 Session/Dispatcher；替换期间未发布的候选不可查询，旧连接查询
 失败后不自动改投新连接。Gateway 不保存查询 Future，也不持有执行或历史业务状态。
-两端共用 Session 的单一持续接收器，在准备任务、处理工具、应用结果和 worker 停止清理期间
-仍分流独立查询与回复；控制与 history 同帧时先由控制 owner 校验，再逐项分派。
-执行消息按原顺序消费，连接内最多缓冲 32 帧、32 个业务条目与 16 MiB；busy 回复另有
-4 条有界缓存（含在发项），超限使连接失败。查询的 30 秒预算包括等待发送锁、写入和等回复；
+两端共用 Session 的单一持续接收器，所有请求、回复和验证拒收按 FIFO 进入共同 driver；
+控制与 history 同属一条 message 时先由控制 owner 校验，再逐项分派。
+准备任务、工具、结果应用及停止清理等慢回调会延迟 history，history 读取也会延迟后续业务；
+独立执行 Task、传输 ACK 与周期 heartbeat 可继续运行。连接内最多缓冲 32 条 message、32 个业务条目与
+16 MiB；超限使连接失败。无 history handler/busy 旁路。查询的 30 秒预算包括等待发送锁、写入和等回复；
 取消/超时/断连立即归还临时配额，旧连接或旧 epoch 回复不能完成新请求，不持久化或跨连接重放。
+实际关闭及时失败查询；EOF 先排空已收到的 FIFO 回复或拒收，再失败其余等待者。
+Registered 前合法 history 只借用请求 epoch 回包，不设置 ready；server 收 history 不刷新执行存活期限。
 页面/session 校验及 Flow/Attempt 归属留在业务层，通信匹配不表示执行结果已应用或授权释放 slot。
 已知环境凭据及常见 token 文本会脱敏，但不保证自动识别任意源码或文本中的所有秘密。
 
 本功能最初使用 wire protocol v11；当前整体协议为 v17，journal 为 v5。
 `worker.history` call/result 保留查询内容，以条目 message_id/reply_to 与原 Session epoch 关联。
-Session.request 只为选定的调用建立临时 Future；历史页 512 KiB 限额按所选条目加共享头计算，
-不把同帧无关业务算入页大小。控制 ACK 不表示查询或执行业务成功。
+Broker 创建临时 Future，发送前经 Dispatcher.expect_reply 登记原调用；WorkerBusinessCallbacks
+按统一 register 格式注册 worker.history。历史页 512 KiB 限额按所选条目加共享头计算，
+不把同一 message 中的无关业务算入页大小。控制 ACK 不表示查询或执行业务成功。
 已完成握手且关联头有效的坏 payload 返回同方法的 `tool_result.error`，仅含固定
 `code=validation_error` 与 `message=message payload failed validation`。坏回复也失败原查询为
 `invalid_response`；不等待超时、不重放查询。整批失败不执行合法兄弟项，不对畸形 error 再回 error。
