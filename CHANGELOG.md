@@ -13,9 +13,12 @@
   精确注册请求模型与回调；回复按 `reply_to` 关联原调用，worker 不再注册工具名来接收结果。
   通信关闭不取消执行，控制收件与提交/停止证据保持独立；history 与其他 payload 统一 FIFO。
   删除 WorkerClient，主动拨号、认证、退避重连与连接任务关闭等待直接归 WorkerRuntime；
-  保留 WebSocket IO 适配器，进程停机仍等待执行清理后释放 root lock。
+  Connection 接口与 WebSocketTransport 一并归入 worker/runtime.py，删除 transport/client.py；
+  WebSocket IO 适配行为不变，进程停机仍等待执行清理后释放 root lock。
   通信层统一使用 message 命名：非控制变体为 WorkerMessage / ServerMessage，共用 message_header；
   完整消息钩子为 on_message / on_message_done，不再引入 frame 术语或保留旧名别名，wire 字段不变。
+  结果接纳类型明确分为 AcceptResultRequest、AcceptResultResponse 与 ResultAcceptance，
+  分别表示请求、回复及回复数据；不保留旧类型名，server.accept_result 路由与 wire 格式不变。
   Dispatcher 统一把验证错误交给连接业务对象的 `on_error`，请求回调只接收注册模型；
   删除逐方法重复错误转发，保留处理顺序与业务关联校验。
   普通回复由 Dispatcher 按原调用 ID、method 和结果模型关联，匹配后先执行可选 on_reply，

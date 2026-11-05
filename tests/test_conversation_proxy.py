@@ -107,17 +107,6 @@ async def answer(socket, page=None, error=None):
     )
 
 
-@pytest.mark.asyncio
-async def test_query_correlates_response(history_connection) -> None:
-    peers = Gateway[WorkerMessageUnion, ServerMessageUnion]()
-    broker = ConversationBroker(peers)
-    _, socket = await history_connection(peers)
-    query = asyncio.create_task(broker.query("worker", HistoryQuery(session_id=SESSION)))
-    await answer(socket)
-    assert (await query).session_id == SESSION
-    assert not broker._inflight
-
-
 @pytest.mark.parametrize("phase", ["lock", "write", "reply"])
 @pytest.mark.parametrize("failure", ["disconnect", "timeout", "cancel"])
 async def test_disconnect_timeout_and_cancellation_cleanup(

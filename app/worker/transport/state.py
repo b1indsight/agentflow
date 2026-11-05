@@ -7,8 +7,9 @@ from loguru import logger
 from app.communication.dispatch import Dispatcher
 from app.communication.session import Ready, Session
 from app.contracts.protocol import (
-    AcceptResult,
     AcceptResultArguments,
+    AcceptResultRequest,
+    AcceptResultResponse,
     AcceptStop,
     AcceptStopArguments,
     Assignment,
@@ -20,7 +21,6 @@ from app.contracts.protocol import (
     RecoveryRejected,
     Register,
     Registered,
-    ResultAccepted,
     ServerMessageUnion,
     Started,
     StopAccepted,
@@ -55,9 +55,9 @@ def control_ack(ack_id: str) -> WorkerMessageUnion:
     )
 
 
-def _accept_result(terminal: TerminalPayload) -> AcceptResult:
+def _accept_result(terminal: TerminalPayload) -> AcceptResultRequest:
     identity = terminal_id(terminal)
-    return AcceptResult(
+    return AcceptResultRequest(
         **call_header(accept_result_id(identity)),
         method="server.accept_result",
         arguments=AcceptResultArguments(
@@ -83,7 +83,7 @@ class WorkerStateCallbacks:
         self.on_ready = on_ready
         self.register: Register | None = None
         self.ready = False
-        self.expected_result: AcceptResult | None = None
+        self.expected_result: AcceptResultRequest | None = None
         self.expected_stop: AcceptStop | None = None
         self._started: Started | None = None
         self._terminal: ExecuteResult | None = None
@@ -127,7 +127,7 @@ class WorkerStateCallbacks:
         terminal = self.execution.result_for_registration()
         self.expected_result = _accept_result(terminal) if terminal is not None else None
         if self.expected_result is not None:
-            self.routes.expect_reply(self.expected_result, ResultAccepted, self.on_accept_result)
+            self.routes.expect_reply(self.expected_result, AcceptResultResponse, self.on_accept_result)
         self.register = Register(
             **message_header(None),
             control="register",
@@ -232,7 +232,7 @@ class WorkerStateCallbacks:
             self.routes.forget_reply(self.expected_result.message_id)
         self.expected_result = None
 
-    async def on_accept_result(self, reply: ResultAccepted, message: ServerMessageUnion) -> None:
+    async def on_accept_result(self, reply: AcceptResultResponse, message: ServerMessageUnion) -> None:
         expected = self.expected_result
         if (
             expected is None
@@ -303,7 +303,7 @@ class WorkerStateCallbacks:
         if self.expected_result is not None:
             self.routes.forget_reply(self.expected_result.message_id)
         self.expected_result = _accept_result(terminal)
-        self.routes.expect_reply(self.expected_result, ResultAccepted, self.on_accept_result)
+        self.routes.expect_reply(self.expected_result, AcceptResultResponse, self.on_accept_result)
         self._terminal = ExecuteResult(
             **result_header(
                 execution_call_id(terminal.job_id, terminal.assignment_token), terminal_id(terminal)
@@ -364,7 +364,7 @@ class WorkerStateCallbacks:
                 model = self.routes.reply_model(item)
                 if model is None:
                     raise WorkerProtocolError("invalid reply has no pending invocation")
-                if model in (ResultAccepted, StopAccepted):
+                if model in (AcceptResultResponse, StopAccepted):
                     critical = True
                 else:
                     replies.append(item)

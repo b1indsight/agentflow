@@ -9,10 +9,10 @@ import pytest
 from app.communication.gateway import Gateway
 from app.contracts.protocol import (
     PROTOCOL_VERSION,
+    AcceptResultResponse,
     AssignmentArguments,
     InitialTask,
     InitialTaskResult,
-    ResultAccepted,
     RevisionTask,
     Succeeded,
     parse_server_message,
@@ -52,7 +52,7 @@ class AckConnection(QueueConnection):
     async def recv(self):
         raw = await super().recv()
         if self.drop_ack and any(
-            isinstance(item, ResultAccepted) for item in parse_server_message(raw).payload
+            isinstance(item, AcceptResultResponse) for item in parse_server_message(raw).payload
         ):
             raise ConnectionError("ACK lost")
         return raw

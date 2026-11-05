@@ -1,6 +1,6 @@
 # Session 事件驱动的双端统一 — Feature record
 
-**Stage:** Implementation validated — 修订 014–019 已实现并通过本地验证；精确 head 的发布 review、推送及 CI 状态见下方 PR 和验收摘要，历史 CI 不替代新 head 验收。
+**Stage:** Implementation verified — 修订 021–023 的 client 模块搬迁、结果接纳类型命名与测试精简已实现并通过本地验收；修订 020 的类型归属拆分仍待审批，未实施。发布、独立 review 和精确 head CI 状态见下方 PR 与验收摘要，不沿用旧 head 结论。
 **PR:** [#127 — 沿用同一方案/实施 PR](https://github.com/b1indsight/agentflow/pull/127)
 **Bookmark:** `refactor/session-event-architecture`
 **Baseline:** [main / PR #125 合并版本](https://github.com/b1indsight/agentflow/commit/086e68efe55403e2c7c66b23771e2db3cf78bcbd)
@@ -13,6 +13,9 @@
 `on_reply`，成功后再交付给调用方（[修订 017](#017-dispatcher-关联回复on_reply-在交付前执行)）。
 请求回调只接收注册的模型，验证错误由 `configure(validation_error=self.on_error, ...)` 统一交给
 连接业务对象（[修订 009](#009-集中验证错误分派收窄业务回调类型)）；wire method/reply_to 不变。
+结果接纳类型现为 `AcceptResultRequest`、`AcceptResultResponse`、`ResultAcceptance`，
+分别表示请求、回复和回复数据；替代历史记录中的 `AcceptResult`、`ResultAccepted`、
+`AcceptedResult`（[修订 022](#022-区分结果接纳请求回复与回复数据的类型命名)）。
 worker 按状态协议与业务分类，分别为 `transport/state.py` 中的 `WorkerStateCallbacks` 和
 `transport/business.py` 中的 `WorkerBusinessCallbacks`；server 仍为 `ServerCallbacks` 组合
 `ServerFlowCallbacks`，只有 server 注册 Flow 工具请求路由。该分类替代
@@ -27,13 +30,15 @@ worker 按状态协议与业务分类，分别为 `transport/state.py` 中的 `W
 （[修订 015](#015-沿用-message-命名并同步调整联合类型)）。
 `WorkerClient` 已删除，拨号、认证、重连退避与连接任务回收直接归 `WorkerRuntime`；
 Session 和执行 owner 的边界不变（[修订 016](#016-移除-workerclient由-runtime-直接管理连接)）。
+`Connection` 和 `WebSocketTransport` 也已归入 `worker/runtime.py`，删除残留的
+`transport/client.py`（[修订 021](#021-删除-client-模块将连接接口与适配器移入-runtime)）。
 WorkerRuntime 独立创建并平级挂载状态、业务两对象，两者互不持有或调用，沿用
 [修订 018](#018-worker-协议与-flow-回调独立挂载) 的独立挂载。业务类自行管理工具观察并注册
 worker.history；所有 payload 与验证拒收统一 FIFO，慢 history 与其他慢回调互相等待。
 Broker 持有临时查询 Future、配额和发送加等待预算，Dispatcher 是唯一回复关联表；Session
 不再有查询表、Responder 或 handler/busy 旁路。具体职责、关闭/EOF 合同及验证见
 [修订 019](#019-worker-状态与业务分类删除-history-旁路)。
-下方 Initial plan 保留为历史基线，其中被后续修订替代的内容不再适用。实际实现与验证见时间线 006–019。
+下方 Initial plan 保留为历史基线，其中被后续修订替代的内容不再适用。实际实现与验证见时间线 006–019、021–023；020 仍为提案。
 
 ## 1. Initial plan
 
@@ -1329,6 +1334,161 @@ Session 关闭未完成的实际写入，Broker 仍要求 send 成功后才返�
 不包含源 workspace 的测试精简。发布仅使用 review gate 返回的精确提交；结果与 CI 状态见
 [PR #127](https://github.com/b1indsight/agentflow/pull/127) 和验收摘要，不沿用旧 head 结论。
 跨重连执行与持久证据合同不变；本轮不包含合并或部署。
+
+### 020 按职责拆分 protocol 的类型归属
+
+**要求与状态：**用户要求将 `app.contracts.protocol` 中属于其他职责的类移至对应文件。
+本节为待审批的迁移方案；尚未修改实现或测试。沿用本 feature record、bookmark 和 PR，
+不另开工作线程或 PR，不把本地方案自动推送。核对基线为已推送的
+[df9b5f19](https://github.com/b1indsight/agentflow/commit/df9b5f190098f9001c5a79240cac12910bf901c4)。
+本修订只改变定义与导入位置，不替代 019 的运行时、FIFO、权限或生命周期决定。
+
+**归属原则：**保留 `contracts` 对双端共享消息、执行任务和冻结结果的所有权；不因消费者是 worker
+就把共享类型放入 worker 实现包，也不让 worker 导入 controler。已经属于 domain 的类型仍从其
+定义模块导入，不借本次搬迁改造领域模型或继承体系。`protocol.py` 收敛为双端协议的方向联合、
+握手/控制消息及解析入口；业务方法的 payload 不再集中定义在那里。
+
+**完整类迁移表：**目标路径均位于 `app/contracts/`；未标新建的文件复用现有模块。
+
+| 目标文件 | 从 protocol 迁入或保留的类 | 职责 |
+| --- | --- | --- |
+| `message.py`（新建） | `ProtocolModel`、`ToolCall`、`ToolResult`、`PayloadValidationError`、`ValidationErrorResult`、`Message`、`MessageHeader`、`CallHeader`、`ResultHeader` | 公共消息合同、调用/回复头与固定校验错误；不含具体业务方法 |
+| `tasks.py`（新建） | `InitialTask`、`RevisionTask`、`RevisionExecutionRecord`、`ArchiveIdentity`、`ArchiveTask`、`InitialTaskResult`、`RevisionTaskResult`、`ArchiveResult`、`ExecutionIdentity`、`StopFence` | 跨进程执行任务、结果与派发/停止授权身份 |
+| `receipts.py` | `Succeeded`、`Failed`、`ExecutionStopped` | 持久终态及停止证据，与已有旧格式读取器和摘要校验归在一起 |
+| `execution.py`（新建） | `PushSecret`、`AssignmentSecret`、`AssignmentArguments`、`RecoveryRejectedArguments`、`AcceptResultArguments`、`AcceptStopArguments`、`AcceptedResult`、`Assignment`、`StopExecution`、`RecoveryRejected`、`Started`、`AcceptResult`、`AcceptStop`、`ExecuteResult`、`StopResult`、`ResultAccepted`、`StopAccepted` | 两个方向的执行控制请求/回复；凭据只随指派消息传递，不进入持久 task/receipt |
+| `conversation.py` | `HistoryArguments`、`ConversationQuery`、`ConversationResult` | 与现有 history 页、游标和查询错误合同同处一处 |
+| `flow_tools.py`（新建） | `FlowToolArguments`、`FlowToolRequest`、`FlowToolErrorKind`、`FlowToolResponse` | Flow 工具调用合同；不拥有 Flow 生命周期或服务实现 |
+| `protocol.py`（保留） | `RecoveryDescriptor`、`RecoveryDecision`、`WorkerMessage`、`ServerMessage`、`Register`、`Registered`、`Heartbeat`、`ProtocolError` | 注册/恢复控制、方向消息和跨 payload 约束 |
+
+类型关联定义一起归位：`PROTOCOL_VERSION`、`MAX_PAYLOAD_ITEMS`、`MessageId`、`ConnectionEpoch`
+以及 `message_header` / `call_header` / `result_header` 随公共类型移至 `message.py`；
+`ExecutionTask` / `ExecutionResult` 移至 `tasks.py`；`TerminalPayload` 与 `terminal_digest`
+移至 `receipts.py`。全部类名、字段、默认值、字段顺序、基类与校验函数保持不变，不新增业务类。
+
+`protocol.py` 保留 `_FIXED_METHODS`、两个 discriminator、Worker/Server 的 Call/Result/Payload
+及 MessageUnion、两个 TypeAdapter 和方向解析函数。E/T/A/C/R/B 六个稳定 ID 函数及
+`_ID_NAMESPACE` / `_stable_id` / `_terminal_id` 也整体保留：它们定义协议重放/接纳身份，
+Register 校验仍在这里使用它们；下层数据模型无需反向导入这些函数。此次不新建 ID 工具模块。
+
+**依赖与导入边界：**
+
+- `message` 不导入其他应用业务模块；`tasks` 只引用公共消息基类与已有 domain 类型。
+- `receipts` 引用 `message` / `tasks`，彻底删除对 `protocol` 的反向导入。
+- `execution` 引用 `message` / `tasks` / `receipts`；`conversation` 引用 `message`；
+  `flow_tools` 引用 `message` / `tasks` / domain。上述模块均不引用 `protocol`，不存在方向联合循环。
+- `protocol` 聚合这些合同；内部以模块限定引用使用移出的类，避免保留同名隐式转导出。
+  不添加旧路径别名、`__getattr__`、包入口导出或兼容 facade。
+- 全部应用和测试调用方直接从定义文件导入。通信核心的 `Message` / `ToolCall` / `ToolResult`
+  改从 `message` 导入；方向类型和解析器仍从 `protocol` 导入。现有 `validation` 仍消费方向解析器，
+  本次不声称或扩展为删除它的全部传递依赖。
+- 修正 `worker/execution/prompts.py` 从 protocol 间接导入 `ReviewFeedback` 的用法，直接引用
+  `domain/review_models.py`。不搬动这些已有 domain 定义，不新增导入聚合层。
+
+**保留合同与风险：**wire 仍为 v17，journal5 / inbox1 不变；JSON 字段、顺序、别名、
+discriminator、extra 禁止规则和固定校验错误保持一致。`HistoryArguments` 不合并为
+`HistoryQuery`，游标解码错误继续由后者转换为查询错误；`HistoryArguments` 的基类不变。
+`PushSecret` 保持 repr 脱敏和 JSON 显式序列化行为，不能意外进入 journal。
+终态/停止摘要和稳定 ID 的输入投影、编码与 namespace 不改。Pydantic 字段类型必须保持运行时
+可见，不用 TYPE_CHECKING 或延迟 model_rebuild 掩盖循环。导入 protocol 会新增加载 receipts
+及其只读 legacy adapters，需检查独立解释器的导入边界；不引入 SQL、SDK 或运行时初始化。
+
+**实施与验收（批准后执行）：**
+
+1. 先在未改实现上运行协议/收据/验证错误/边界的现有用例，并保存临时差分基线：方向 JSON schema、
+   迁移模型的字段顺序/config、代表性消息及 journal/inbox 序列化、终态/停止摘要与 E/T/A/C/R/B，
+   包括凭据脱敏、payload 拒收和 history 游标错误分类。样例用固定 ID，不记录真实凭据。
+2. 先移公共消息与任务，再移持久证据，再移执行/history/Flow payload，最后收敛方向协议并更新
+   全部调用方导入。纯迁移不新增永久测试；现有测试只调整所属模块的导入和必要的 patch 路径。
+3. 用同一临时脚本复跑，要求结构、JSON、错误分类、摘要和 ID 一致。仅允许 Python 模块路径及
+   预期导入集合变化；用 AST 清单核对每个原类只定义一次、调用方直接导入真实 owner，检查旧符号
+   不再经 protocol 暴露。独立解释器验证 message/tasks/receipts 等没有反向加载 protocol。
+4. 运行 protocol、payload validation、receipts、delivery receipts、stop、Session/Gateway、
+   history 和 import boundaries 相关用例，再运行 PostgreSQL 全量、Ruff、Mypy 与变更范围格式检查。
+   历史 CI 不作为这次搬迁验收；同步架构说明、当前类级图源码链接、changelog 与本记录。
+5. 这是类型定义归位，没有新增运行时机制，消融不适用；以行为差分和依赖检查验证迁移。
+   后续推送仍需新请求和精确提交 review gate；本次不改远端 PR 状态、不合并或部署。
+
+**取舍与咨询：**受限 Claude Opus 5.5 已生成方案并按职责拆分补充材料复核；两次初始化/响应
+模型一致，tools/MCP 为空，result 成功且进程退出码为 0。未采用首稿将 `ProtocolModel`
+放入执行任务模块、为避循环而保留 history/Flow 类型集中的建议；公共消息模块已有完整实际职责，
+无需空的 base 文件。采用 `flow_tools.py` 的明确命名、持久证据归 receipts、ID 函数集中保留及
+模块限定引用。未采用大范围领域迁移、重复全量基线测试和为文件位置新增永久测试。
+主线程已静态核对原类清单无遗漏/重复；咨询与清单核对均不代表实现或行为验证已经完成。
+
+**源码依据：**[原类型与协议](https://github.com/b1indsight/agentflow/blob/df9b5f190098f9001c5a79240cac12910bf901c4/app/contracts/protocol.py)、
+[持久读取器](https://github.com/b1indsight/agentflow/blob/df9b5f190098f9001c5a79240cac12910bf901c4/app/contracts/receipts.py)、
+[history 合同](https://github.com/b1indsight/agentflow/blob/df9b5f190098f9001c5a79240cac12910bf901c4/app/contracts/conversation.py)、
+[包边界](https://github.com/b1indsight/agentflow/blob/df9b5f190098f9001c5a79240cac12910bf901c4/tests/test_boundaries.py)。
+
+### 021. 删除 client 模块，将连接接口与适配器移入 Runtime
+
+**要求与状态：**用户要求删除 `app/worker/transport/client.py`，将其中类移入 runtime。
+按小改动路径完成本地实现与验证，未推送；本次不实施仍待审批的修订 020。
+
+**实现：**将 `Connection(Protocol)` 和 `WebSocketTransport` 原样移到
+`app/worker/runtime.py` 的模块级定义，删除 client 文件，不保留兼容别名或转导出。
+更新测试辅助对象导入、review 路径夹具及架构说明、changelog。拨号、认证和重连仍归
+WorkerRuntime；适配器的文本/字节收取、发送、关闭 code 与 I/O 异常传播均不变，
+Session、Dispatcher 和执行生命周期未修改。
+
+**验证：**PostgreSQL 下的 worker runtime/client、包边界、conversation worker、payload
+validation 和 router 现有用例通过；`ruff check app tests`、`mypy app tests` 与 Runtime
+变更范围格式检查通过。临时 AST 对比确认迁移的两类及原有 Runtime 类均保持不变，旧模块
+已不可导入，新路径类型注解可解析；直接执行适配器收发、关闭和异常传播检查通过。
+纯位置调整不增加永久测试；本次未重跑全量测试，历史 CI 不作为此次验收。
+类级图仍标记为上次已推送版本，本地源码以本节及当前 Runtime 文件为准。
+
+### 022. 区分结果接纳请求、回复与回复数据的类型命名
+
+**要求与状态：**用户要求区分 `AcceptResult`、`ResultAccepted`、`AcceptedResult` 的命名。
+按小改动路径完成重命名和本地验证，尚未推送。
+
+**命名：**`AcceptResult` 改为 `AcceptResultRequest`，`ResultAccepted` 改为
+`AcceptResultResponse`，`AcceptedResult` 改为 `ResultAcceptance`。请求/回复用一致后缀区分，
+数据体直接表达接纳事实，避免仅靠交换 Result/Accepted 单词顺序区别层级。
+双端构造、分派、回复关联、执行状态消费及现有测试统一使用新类型，不保留旧名别名。
+`AcceptResultArguments` 和回调函数名不变；不扩大到停止等其他操作的重命名。
+
+**合同：**`server.accept_result`、tool_call/tool_result、字段、稳定 ID 和结果提交条件不变，
+wire 版本不变；JSON schema 中的类名标题与对应引用随重命名更新。原初方案和历史修订保留
+原名，按本节映射理解；修订 020 中对应类型也采用此映射，其包归属拆分仍待审批、未实施。
+
+**验证：**相关 PostgreSQL 用例覆盖协议解析、校验拒收、双方回调、执行生命周期、停止、
+断线/归档恢复、history、ASGI、Session/Gateway 和包边界，全部通过。Ruff、Mypy 与变更范围
+格式检查通过；临时对比确认源码/测试 AST 仅有这三个标识符及导入排序变化，请求与 done/failed
+回复的 wire JSON、错误分类和归一化 schema 一致，旧名已不可导入。未新增永久测试，
+未重跑全量测试；TestClient 依赖有弃用警告，未在本次调整依赖。历史 CI 不覆盖此次修改。
+
+### 023. 精简重复测试，保留公开行为与故障边界
+
+**要求与状态：**用户要求清理多余测试。本次仅调整本 workspace 的测试与本记录，不改应用
+实现，不引入新设计，不实施待审批的修订 020，也不纳入其他 workspace 的测试精简；尚未推送。
+
+**取舍与实现：**
+
+- 删除 worker、server 的重复执行/工具调用成功路径及专用 `ToolSocket`。保留
+  `test_remote_e2e.py::test_control_gateway_and_worker_client_complete_one_remote_job`，
+  它连接真实双方 Runtime/Session，覆盖工具回复、结果提交直到 worker journal 确认；
+  保留真实 ASGI/PostgreSQL 接入测试，以及 Started 写入、未提交结果、停止、重连、旧任务重放回归。
+- 删除 history 单次成功查询测试；其关联结果与配额回收已由同文件的错误关联、取消/超时/断连后
+  再查询、配额复用场景覆盖，不删各个实际 I/O 阶段的生命周期检查。
+- 将修订 013 的独立请求/回复路由测试并入
+  `test_session_events.py::test_reply_hook_runs_after_correlation_before_original_caller`，
+  参数化有/无同名请求路由，继续检查按调用关联、hook 拒绝、先 hook 后交付、撤销后的迟到回复。
+- 认证失败发生在读取第一条消息之前，删除永远不会被读取的 Register payload 参数组合及
+  无关 Runtime 构造，保留不 accept、不读取、不调用业务入口的断言。版本拒收并入实际首消息
+  验证用例，只改变版本号，避免旧样例同时缺少多个必填字段而掩盖版本检查；同步检查错误分类。
+- 清除失去使用者的测试状态、事件和导入；仍被恢复并发测试使用的记录字段不删除。
+
+**验证：**修改前相关测试通过；修改后相同范围、PostgreSQL 全量、`ruff check app tests`、
+`mypy app tests` 与新增/修改代码范围的 Ruff 格式检查通过。临时在独立解释器中分别让回复
+按请求方法路由、跳过 `on_reply`、跳过 worker 的结果确认，保留的对应测试全部按预期失败；
+正常代码复跑通过。实验仅修改进程内对象，不修改应用文件，不保留新的永久探针。
+逐项审查清理 diff，并与清理前快照比较，确认此前的应用修改完整保留。
+日志为 `.amp/in/artifacts/test-cleanup-{before,after,full,ruff,mypy,format}.log` 和
+`test-cleanup-mutation-{method_route,skip_reply_hook,skip_worker_ack}.log`。
+全量仍报告既有 Starlette 弃用和 subprocess transport 回收警告，本轮未调整依赖或进程清理。
+未运行发布 review gate、推送、合并或部署。
 
 ## 3. 源码依据
 

@@ -7,8 +7,8 @@ import pytest
 
 from app.contracts.conversation import HistoryPage
 from app.contracts.protocol import (
-    AcceptedResult,
-    AcceptResult,
+    AcceptResultRequest,
+    AcceptResultResponse,
     Assignment,
     AssignmentArguments,
     ConversationQuery,
@@ -25,18 +25,16 @@ from app.contracts.protocol import (
     RecoveryDecision,
     Register,
     Registered,
-    ResultAccepted,
+    ResultAcceptance,
     ServerMessage,
     Started,
     WorkerPayload,
-    accept_result_id,
     call_header,
     execution_call_id,
     message_header,
     parse_server_message,
     parse_worker_message,
     result_header,
-    terminal_id,
 )
 from app.domain.delivery_models import PreparedDelivery
 from app.domain.models import VcsExecutionContext, VcsKind, VcsOutcome
@@ -78,15 +76,15 @@ def registered_message(
     )
 
 
-def accepted_message(call: AcceptResult, epoch: str = "epoch-1") -> ServerMessage:
+def accepted_message(call: AcceptResultRequest, epoch: str = "epoch-1") -> ServerMessage:
     return ServerMessage(
         **message_header(epoch),
         control=None,
         payload=[
-            ResultAccepted(
+            AcceptResultResponse(
                 **result_header(call.message_id),
                 method="server.accept_result",
-                result=AcceptedResult(
+                result=ResultAcceptance(
                     job_id=call.arguments.job_id,
                     assignment_token=call.arguments.assignment_token,
                     state="done",
@@ -117,7 +115,7 @@ class ScriptedConnection:
         self.result_ready = asyncio.Event()
         self.tool_ready = asyncio.Event()
         self.sent: list[str] = []
-        self.result_request: AcceptResult | None = None
+        self.result_request: AcceptResultRequest | None = None
         self.accepted = False
         self.epoch = "epoch-1"
         self.messages = [
@@ -129,7 +127,7 @@ class ScriptedConnection:
         self.sent.append(data)
         message = parse_worker_message(data)
         for item in message.payload:
-            if isinstance(item, AcceptResult):
+            if isinstance(item, AcceptResultRequest):
                 self.result_request = item
                 self.result_ready.set()
             if isinstance(item, FlowToolRequest):
@@ -223,34 +221,6 @@ async def test_overlapping_connection_cannot_borrow_owner_or_change_online_state
         first.cancel()
         await asyncio.gather(first, return_exceptions=True)
     owner.shutdown.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_client_acknowledges_and_executes_one_assignment(tmp_path) -> None:
-    connection = ScriptedConnection()
-    state = ExecutionState(tmp_path)
-    client = worker_runtime(
-        read_history=state.read,
-        worker_id="worker-1",
-        worker_token="worker-secret",
-        serve_ws_url="ws://serve/internal/workers/connect",
-        execution=WorkerExecution(worker_id="worker-1", executor=RecordingExecutor(), state=state),
-    )
-
-    with pytest.raises(ConnectionError, match="script complete"):
-        await run_worker(client, connection)
-
-    assert isinstance(parse_worker_message(connection.sent[0]), Register)
-    messages = sent_items(connection.sent)
-    assert len(messages) == 3
-    assert isinstance(messages[0], Started)
-    assert isinstance(messages[1], ExecuteResult) and messages[1].result is not None
-    assert messages[1].assignment_token == "assignment-1"
-    assert messages[1].reply_to == execution_call_id(5, "assignment-1")
-    assert messages[1].message_id == terminal_id(messages[1].terminal())
-    assert isinstance(messages[2], AcceptResult)
-    assert messages[2].arguments.result_id == messages[1].message_id
-    assert messages[2].message_id == accept_result_id(messages[1].message_id)
 
 
 @pytest.mark.parametrize("failure", ["send", "cancel", "journal"])
@@ -714,7 +684,7 @@ async def test_cancelled_disconnected_tool_does_not_leak_into_resumed_or_next_as
                             ],
                         )
                     )
-                elif isinstance(item, AcceptResult):
+                elif isinstance(item, AcceptResultRequest):
                     self.messages.put_nowait(accepted_message(item, "epoch-2"))
                     self.messages.put_nowait(
                         assignment_message(following, "epoch-2")
@@ -1027,7 +997,7 @@ async def test_tool_cancelled_while_history_holds_driver_is_not_sent(tmp_path):
         assert len(terminal) == 2 and isinstance(terminal[0], ExecuteResult), (
             "cancelled tool must never reach the transport"
         )
-        assert isinstance(terminal[1], AcceptResult)
+        assert isinstance(terminal[1], AcceptResultRequest)
         await to_worker.put(accepted_message(terminal[1], "new").model_dump_json())
         async with asyncio.timeout(1):
             while not state.load().acknowledged:

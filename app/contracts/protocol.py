@@ -268,7 +268,7 @@ class AcceptStopArguments(StopFence):
     receipt_id: MessageId
 
 
-class AcceptedResult(ExecutionIdentity):
+class ResultAcceptance(ExecutionIdentity):
     state: Literal["done", "failed"]
 
 
@@ -345,7 +345,7 @@ class Started(ToolCall):
     arguments: ExecutionIdentity
 
 
-class AcceptResult(ToolCall):
+class AcceptResultRequest(ToolCall):
     method: Literal["server.accept_result"]
     arguments: AcceptResultArguments
 
@@ -399,9 +399,9 @@ class ConversationResult(ToolResult):
         return self
 
 
-class ResultAccepted(ToolResult):
+class AcceptResultResponse(ToolResult):
     method: Literal["server.accept_result"]
-    result: AcceptedResult
+    result: ResultAcceptance
 
 
 class StopAccepted(ToolResult):
@@ -477,7 +477,7 @@ def _method_tag(value: object) -> str | None:
 
 WorkerCall = Annotated[
     Annotated[Started, Tag("server.execution_started")]
-    | Annotated[AcceptResult, Tag("server.accept_result")]
+    | Annotated[AcceptResultRequest, Tag("server.accept_result")]
     | Annotated[AcceptStop, Tag("server.accept_stop")]
     | Annotated[FlowToolRequest, Tag("flow_tool")],
     Discriminator(_method_tag),
@@ -506,7 +506,7 @@ ServerCall = Annotated[
     Field(discriminator="method"),
 ]
 ServerResult = Annotated[
-    Annotated[ResultAccepted, Tag("server.accept_result")]
+    Annotated[AcceptResultResponse, Tag("server.accept_result")]
     | Annotated[StopAccepted, Tag("server.accept_stop")]
     | Annotated[FlowToolResponse, Tag("flow_tool")]
     | Annotated[ValidationErrorResult, Tag("validation_error")],
@@ -577,7 +577,7 @@ class Register(Message[WorkerPayload]):
         if not self.payload:
             return self
         recovery = self.recovery
-        if len(self.payload) != 1 or not isinstance(self.payload[0], AcceptResult):
+        if len(self.payload) != 1 or not isinstance(self.payload[0], AcceptResultRequest):
             raise ValueError("Register may only carry one result-acceptance call")
         call = self.payload[0]
         if (
@@ -617,7 +617,7 @@ class Heartbeat(Message[WorkerPayload]):
         for item in self.payload:
             if isinstance(item, (ConversationResult, ValidationErrorResult)):
                 continue
-            if isinstance(item, (Started, AcceptResult, AcceptStop, FlowToolRequest)):
+            if isinstance(item, (Started, AcceptResultRequest, AcceptStop, FlowToolRequest)):
                 identity = (item.arguments.job_id, item.arguments.assignment_token)
             elif isinstance(item, ExecuteResult):
                 identity = (item.job_id, item.assignment_token)

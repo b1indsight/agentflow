@@ -17,8 +17,7 @@ from app.domain.models import JobState, WorkerRecord, WorkerStatus, utcnow
 from app.persistence.stops import StopIntent, StopStore
 from app.persistence.store import Store
 from app.worker.config import WorkerSettings
-from app.worker.runtime import WorkerRuntime
-from app.worker.transport.client import WebSocketTransport
+from app.worker.runtime import WebSocketTransport, WorkerRuntime
 
 
 def worker_runtime(*, worker_id, worker_token, serve_ws_url, execution, read_history):

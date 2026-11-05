@@ -9,7 +9,7 @@ import random
 import signal
 from collections.abc import Mapping
 from pathlib import Path
-from typing import IO
+from typing import IO, Protocol
 
 from loguru import logger
 from websockets.asyncio.client import connect
@@ -27,7 +27,6 @@ from app.worker.execution.lifecycle import WorkerExecution
 from app.worker.health import HealthFile
 from app.worker.state.execution import ExecutionState
 from app.worker.transport.business import WorkerBusinessCallbacks
-from app.worker.transport.client import WebSocketTransport
 from app.worker.transport.state import WorkerStateCallbacks, control_ack
 
 _CONTROL_ENVIRONMENT_KEYS = frozenset(
@@ -41,6 +40,29 @@ _CONTROL_ENVIRONMENT_KEYS = frozenset(
         "GITHUB_TOKEN",
     }
 )
+
+
+class Connection(Protocol):
+    async def send(self, data: str) -> None: ...
+    async def recv(self) -> str | bytes: ...
+    async def close(self, code: int = 1000) -> None: ...
+
+
+class WebSocketTransport:
+    """Map outbound WebSocket IO to the transport shared with the server."""
+
+    def __init__(self, connection: Connection) -> None:
+        self.connection = connection
+
+    async def send_text(self, data: str) -> None:
+        await self.connection.send(data)
+
+    async def receive_text(self) -> str:
+        raw = await self.connection.recv()
+        return raw.decode() if isinstance(raw, bytes) else raw
+
+    async def close(self, code: int = 1000) -> None:
+        await self.connection.close(code)
 
 
 def validate_worker_environment(

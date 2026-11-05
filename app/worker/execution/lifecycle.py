@@ -11,7 +11,6 @@ from uuid import uuid4
 from loguru import logger
 
 from app.contracts.protocol import (
-    AcceptedResult,
     AssignmentArguments,
     AssignmentSecret,
     ExecutionResult,
@@ -23,6 +22,7 @@ from app.contracts.protocol import (
     FlowToolResponse,
     RecoveryDecision,
     RecoveryDescriptor,
+    ResultAcceptance,
     StopFence,
     TerminalPayload,
     result_header,
@@ -256,7 +256,7 @@ class WorkerExecution:
         self._collect_finished()
         return self.state.replay()
 
-    def on_result_accepted(self, accepted: AcceptedResult) -> None:
+    def on_result_accepted(self, accepted: ResultAcceptance) -> None:
         """Apply the server's result acceptance without retiring an active execution or stop."""
         self.state.validate_recovery(accepted.job_id, accepted.assignment_token)
         self._collect_finished()

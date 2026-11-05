@@ -176,7 +176,8 @@ serve 的 `workers/transport.py:serve_worker` 校验 bearer token、accept 与�
 回调保存调度、恢复、持久化和 assignment fencing 的连接局部状态，无 Endpoint/Run/Context 对象。
 每个 worker 是单槽，PostgreSQL 按 FIFO、worker `last_assigned_at` 和 Flow execution binding
 事务化领取任务。`WorkerRuntime` 直接负责主动拨号、认证、指数退避和连接任务的关闭等待，
-不再创建 WorkerClient。`WebSocketTransport` 只适配底层 WebSocket IO，不负责连接生命周期；
+不再创建 WorkerClient。`Connection` 接口与 `WebSocketTransport` 均位于 `worker/runtime.py`；
+后者只适配底层 WebSocket IO，不负责连接生命周期，不保留独立 client 模块。
 `WorkerExecutor` 只依赖 CodingAgent 和 Flow repo/VCS helpers，不导入 Store、FastAPI 或 GitHub。
 
 Gateway 仅发布当前登记，另保留尚未退休的 Session 以便进程关闭全部通信。A→B→C 重叠替换时，

@@ -9,6 +9,7 @@ import pytest
 from app.communication.gateway import Gateway
 from app.communication.session import Session
 from app.contracts.protocol import (
+    AcceptResultResponse,
     AcceptStop,
     AcceptStopArguments,
     Assignment,
@@ -22,7 +23,6 @@ from app.contracts.protocol import (
     InitialTaskResult,
     RecoveryDescriptor,
     Registered,
-    ResultAccepted,
     ServerMessage,
     StopAccepted,
     StopExecution,
@@ -566,7 +566,7 @@ async def test_stopping_consumes_a_and_requires_real_r_before_b(delivery):
         if any(isinstance(item, StopExecution) for item in message.payload)
     )
     assert not any(isinstance(message, Registered) for message in messages[:stop_index])
-    assert not any(isinstance(item, ResultAccepted) for item in sent_items(socket.sent))
+    assert not any(isinstance(item, AcceptResultResponse) for item in sent_items(socket.sent))
     handler.tools.execute.assert_not_called()
     accepted = [item for item in sent_items(socket.sent) if isinstance(item, StopAccepted)]
     if delivery in {"combined", "split"}:
@@ -789,4 +789,4 @@ async def test_stop_wakes_assignment_waiting_for_missing_a(monkeypatch):
     monkeypatch.setattr(Session, "next_event", observed)
     await serve_worker(socket, serve=handler.serve_worker_session, worker_tokens={"worker-1": "worker-secret"})
     assert command.is_set()
-    assert not any(isinstance(item, ResultAccepted) for item in sent_items(socket.sent))
+    assert not any(isinstance(item, AcceptResultResponse) for item in sent_items(socket.sent))

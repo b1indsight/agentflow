@@ -8,7 +8,7 @@ from pydantic import JsonValue, ValidationError
 
 from app.contracts.protocol import (
     PROTOCOL_VERSION,
-    AcceptResult,
+    AcceptResultRequest,
     Assignment,
     ExecuteResult,
     Failed,
@@ -258,7 +258,7 @@ def test_mixed_control_ack_and_business_have_independent_identities() -> None:
     assert PROTOCOL_VERSION == 17
     assert isinstance(parsed.payload[0], ExecuteResult)
     assert parsed.payload[0].terminal() == terminal
-    assert isinstance(parsed.payload[1], AcceptResult)
+    assert isinstance(parsed.payload[1], AcceptResultRequest)
     assert parsed.ack_id == "c" * 32
     data["assignment_token"] = "other"
     with pytest.raises(ValidationError):

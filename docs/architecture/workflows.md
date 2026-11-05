@@ -12,7 +12,7 @@
   → Started / Heartbeat；INITIAL 获得临发 scoped push capability
   → Codex commit/push → worker-local flow.open_pr MCP → control tool ledger
   → worker 核验本地 VCS/remote；Result 与持久 tool outcome 核对
-  → control 再核对 GitHub ref → find-or-open 唯一 PR → ResultAccepted；保留 ACTIVE 与 binding
+  → control 再核对 GitHub ref → find-or-open 唯一 PR → AcceptResultResponse；保留 ACTIVE 与 binding
   → review/comment → 持久反馈与 settle → 冻结下一批
   → control 本地 Judge 判定 revise/answer/wait/ignore；授权 Request Changes 经 grace 直达 revise
   → revise：同 repo/branch/PR resume 或一次性 session 兜底 → 双端交付核验

@@ -12,8 +12,8 @@ from pydantic import ValidationError
 from app.communication.dispatch import Dispatcher
 from app.communication.session import Ready, Session, SessionOverflow
 from app.contracts.protocol import (
-    AcceptedResult,
-    AcceptResult,
+    AcceptResultRequest,
+    AcceptResultResponse,
     AcceptStop,
     Assignment,
     AssignmentArguments,
@@ -28,7 +28,7 @@ from app.contracts.protocol import (
     RecoveryRejectedArguments,
     Register,
     Registered,
-    ResultAccepted,
+    ResultAcceptance,
     ServerMessage,
     ServerMessageUnion,
     ServerPayload,
@@ -105,7 +105,7 @@ class ServerCallbacks:
         self.receive_deadline = 0.0
         self.disconnect_reason: str | None = None
         # Only the last critical reply of each fixed operation can require recovery.
-        self._sent: dict[str, ResultAccepted | StopAccepted | RecoveryRejected] = {}
+        self._sent: dict[str, AcceptResultResponse | StopAccepted | RecoveryRejected] = {}
         self._unmatched_error_logged = False
         self._recovery_required = False
         self._refresh_receive = False
@@ -129,7 +129,7 @@ class ServerCallbacks:
         self.routes = routes
         routes.register("server.execution_started", Started, self.on_started)
         self.flow.bind(routes)
-        routes.register("server.accept_result", AcceptResult, self.on_accept_result)
+        routes.register("server.accept_result", AcceptResultRequest, self.on_accept_result)
         routes.register("server.accept_stop", AcceptStop, self.on_accept_stop)
         routes.configure(
             opened=self.on_opened,
@@ -383,7 +383,7 @@ class ServerCallbacks:
             raise ProtocolViolation("result conflicts with persisted assignment facts")
         await self.results.apply(job.id)
 
-    async def on_accept_result(self, item: AcceptResult, message: WorkerMessageUnion) -> None:
+    async def on_accept_result(self, item: AcceptResultRequest, message: WorkerMessageUnion) -> None:
         if self.stopping is not None:
             self._validate_active(item.arguments.job_id, item.arguments.assignment_token)
         job = self._validate_result_call(item)
@@ -579,8 +579,8 @@ class ServerCallbacks:
 
     async def _send(self, item: ServerPayload) -> bool:
         previous = self._sent.get(item.method)
-        tracked = isinstance(item, (ResultAccepted, StopAccepted, RecoveryRejected))
-        if isinstance(item, (ResultAccepted, StopAccepted, RecoveryRejected)):
+        tracked = isinstance(item, (AcceptResultResponse, StopAccepted, RecoveryRejected))
+        if isinstance(item, (AcceptResultResponse, StopAccepted, RecoveryRejected)):
             self._sent[item.method] = item
         if isinstance(item, Assignment):
             self.routes.expect_reply(item, ExecuteResult, self.on_result)
@@ -652,7 +652,7 @@ class ServerCallbacks:
             raise ProtocolViolation("result acceptance has invalid assignment/result identity")
         return job, inbox.terminal
 
-    def _validate_result_call(self, call: AcceptResult) -> Job:
+    def _validate_result_call(self, call: AcceptResultRequest) -> Job:
         args = call.arguments
         job, terminal = self._stored_result(args.job_id, args.assignment_token)
         identity = terminal_id(terminal)
@@ -660,7 +660,7 @@ class ServerCallbacks:
             raise ProtocolViolation("result acceptance has invalid result identity")
         return job
 
-    async def _accept_result(self, call: AcceptResult) -> bool:
+    async def _accept_result(self, call: AcceptResultRequest) -> bool:
         job = self.jobs.get_job(call.arguments.job_id)
         if (
             job is None
@@ -669,10 +669,10 @@ class ServerCallbacks:
         ):
             raise ProtocolViolation("result application has not committed")
         return await self._send(
-            ResultAccepted(
+            AcceptResultResponse(
                 **result_header(call.message_id),
                 method="server.accept_result",
-                result=AcceptedResult(
+                result=ResultAcceptance(
                     job_id=job.id,
                     assignment_token=call.arguments.assignment_token,
                     state="done" if job.state is JobState.DONE else "failed",
@@ -730,7 +730,7 @@ class ServerCallbacks:
             ).info("")
             if self.register.payload:
                 call = self.register.payload[0]
-                assert isinstance(call, AcceptResult)
+                assert isinstance(call, AcceptResultRequest)
                 self._validate_result_call(call)
                 await self._accept_result(call)
             else:

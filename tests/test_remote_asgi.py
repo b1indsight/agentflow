@@ -6,8 +6,9 @@ from starlette.testclient import TestClient
 
 from app.communication.gateway import Gateway
 from app.contracts.protocol import (
-    AcceptResult,
     AcceptResultArguments,
+    AcceptResultRequest,
+    AcceptResultResponse,
     Assignment,
     AssignmentArguments,
     ExecuteResult,
@@ -20,7 +21,6 @@ from app.contracts.protocol import (
     InitialTaskResult,
     Register,
     Registered,
-    ResultAccepted,
     Started,
     Succeeded,
     accept_result_id,
@@ -196,7 +196,7 @@ def test_real_asgi_websocket_completes_a_postgresql_job(store: Store, monkeypatc
             assignment_token=work.assignment_token,
             result=terminal.result,
         )
-        acceptance = AcceptResult(
+        acceptance = AcceptResultRequest(
             **call_header(accept_result_id(outcome.message_id)),
             method="server.accept_result",
             arguments=AcceptResultArguments(
@@ -211,7 +211,7 @@ def test_real_asgi_websocket_completes_a_postgresql_job(store: Store, monkeypatc
             if message.payload:
                 assert len(message.payload) == 1 and message.connection_epoch == epoch
                 accepted = message.payload[0]
-                assert isinstance(accepted, ResultAccepted)
+                assert isinstance(accepted, AcceptResultResponse)
                 assert accepted.reply_to == acceptance.message_id
                 assert accepted.result.state == "done"
                 assert (accepted.result.job_id, accepted.result.assignment_token) == (

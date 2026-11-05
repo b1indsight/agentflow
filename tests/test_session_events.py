@@ -147,38 +147,10 @@ def test_registration_is_exact_frozen_and_direction_local():
 
 
 @pytest.mark.parametrize("registered", [False, True])
-async def test_reply_reaches_its_owner_without_a_method_route(registered):
-    # Bidirectional calls can share a method; replies must not invoke its request handler.
-    request = query()
-    response = reply(request)
-    received = []
-
-    async def unexpected(*args):
-        pytest.fail("a reply entered request routing or error handling")
-
-    async def on_result(item, message):
-        assert item.reply_to == request.message_id
-        received.append(item)
-
-    routes = Dispatcher[Packet]()
-    if registered:
-        routes.register(request.method, Call, unexpected)
-    routes.configure(
-        opened=unexpected,
-        message=unexpected,
-        unmatched_reply=unexpected,
-        validation_error=unexpected,
-        unrouted=unexpected,
-    )
-    routes.freeze()
-    routes.expect_reply(request, Reply, on_result)
-    await routes.dispatch(response, packet(response))
-    assert received == [response]
-
-
-async def test_reply_hook_runs_after_correlation_before_original_caller():
+async def test_reply_hook_runs_after_correlation_before_original_caller(registered):
     # Two simultaneous calls of the same method must reach different callers. A hook
     # may reject a correlated reply without either Future receiving an unvalidated result.
+    # A same-method request route must not intercept either reply.
     first, second = query("first"), query("second")
     seen = []
     routes = Dispatcher[Packet]()
@@ -202,11 +174,14 @@ async def test_reply_hook_runs_after_correlation_before_original_caller():
         seen.append("second:" + item.value)
         routes.forget_reply(second.message_id)
 
+    if registered:
+        routes.register(first.method, Call, unexpected)
     routes.configure(
         opened=unexpected,
         message=unexpected,
         unmatched_reply=unmatched,
         validation_error=unexpected,
+        unrouted=unexpected,
     )
     routes.freeze()
     routes.expect_reply(first, Reply, deliver_first, on_reply=hook)

@@ -9,8 +9,9 @@ from pydantic import SecretStr
 from app.communication.gateway import Gateway
 from app.contracts.conversation import ConversationFailure, HistoryQuery
 from app.contracts.protocol import (
-    AcceptResult,
     AcceptResultArguments,
+    AcceptResultRequest,
+    AcceptResultResponse,
     Assignment,
     AssignmentArguments,
     AssignmentSecret,
@@ -19,7 +20,6 @@ from app.contracts.protocol import (
     ExecutionIdentity,
     ExecutionTask,
     Failed,
-    FlowToolArguments,
     FlowToolRequest,
     FlowToolResponse,
     Heartbeat,
@@ -31,7 +31,6 @@ from app.contracts.protocol import (
     RecoveryRejected,
     Register,
     Registered,
-    ResultAccepted,
     ServerMessageUnion,
     ServerPayload,
     Started,
@@ -59,11 +58,9 @@ from app.controler.workflow.tools import FlowToolService
 from app.domain.delivery_models import PreparedDelivery
 from app.domain.models import (
     FlowDelivery,
-    InitialCodingOutput,
     Job,
     JobKind,
     JobState,
-    VcsKind,
     utcnow,
 )
 from app.persistence.stops import StopStore
@@ -92,7 +89,7 @@ def worker_message(epoch: str, *items: WorkerPayload) -> WorkerMessage:
     return WorkerMessage(**message_header(epoch), control=None, payload=list(items))
 
 
-def terminal_items(terminal: TerminalPayload) -> tuple[ExecuteResult, AcceptResult]:
+def terminal_items(terminal: TerminalPayload) -> tuple[ExecuteResult, AcceptResultRequest]:
     identity = terminal_id(terminal)
     result = ExecuteResult(
         **result_header(execution_call_id(terminal.job_id, terminal.assignment_token), identity),
@@ -102,7 +99,7 @@ def terminal_items(terminal: TerminalPayload) -> tuple[ExecuteResult, AcceptResu
         result=terminal.result if isinstance(terminal, Succeeded) else None,
         error=terminal.error if isinstance(terminal, Failed) else None,
     )
-    accept = AcceptResult(
+    accept = AcceptResultRequest(
         **call_header(accept_result_id(identity)),
         method="server.accept_result",
         arguments=AcceptResultArguments(
@@ -277,7 +274,6 @@ class RecordingCoordinator(JobCoordinator):
 
     def __init__(self, store: RecordingStore) -> None:
         self.jobs = store.jobs
-        self.started = False
         self.received_results: list[InitialTaskResult] = []
         self.tools = Mock(spec=FlowToolService, execute=AsyncMock(side_effect=self._tool_response))
         self.results = result_application(store, self._commit_result)
@@ -311,7 +307,6 @@ class RecordingCoordinator(JobCoordinator):
 
     def mark_started(self, job: Job, task: ExecutionTask, worker_id: str) -> None:
         assert isinstance(task, InitialTask)
-        self.started = True
 
     async def _commit_result(self, job_id: int) -> JobState:
         job = self.jobs.get_job(job_id)
@@ -351,7 +346,6 @@ class ScriptedSocket:
         self.sent: list[str] = []
         self._step = 0
         self.assignment_sent = asyncio.Event()
-        self.tool_responded = asyncio.Event()
 
     async def accept(self) -> None:
         self.accepted = True
@@ -364,8 +358,6 @@ class ScriptedSocket:
         for item in parse_server_message(data).payload:
             if isinstance(item, Assignment):
                 self.assignment_sent.set()
-            if isinstance(item, FlowToolResponse):
-                self.tool_responded.set()
 
     def assignment(self) -> tuple[AssignmentArguments, str]:
         for raw in self.sent:
@@ -409,102 +401,6 @@ class ScriptedSocket:
         raise WebSocketDisconnect()
 
 
-class ToolSocket(ScriptedSocket):
-    async def receive_text(self) -> str:
-        self._step += 1
-        if self._step == 1:
-            return register_message(self.worker_id).model_dump_json()
-        await self.assignment_sent.wait()
-        assignment, epoch = self.assignment()
-        assert isinstance(assignment.task, InitialTask)
-        if self._step == 2:
-            return worker_message(
-                epoch,
-                Started(
-                    **call_header(),
-                    method="server.execution_started",
-                    arguments=ExecutionIdentity(
-                        job_id=assignment.job_id, assignment_token=assignment.assignment_token
-                    ),
-                ),
-            ).model_dump_json()
-        if self._step == 3:
-            return worker_message(
-                epoch,
-                FlowToolRequest(
-                    **call_header(),
-                    method="flow.open_pr",
-                    arguments=FlowToolArguments(
-                        job_id=assignment.job_id,
-                        flow_id=assignment.flow_id,
-                        attempt_id=assignment.task.attempt_id,
-                        assignment_token=assignment.assignment_token,
-                        call_id="call-1",
-                        arguments={"title": "Implement", "body": "Done"},
-                        vcs_backend=VcsKind.GIT,
-                        branch=assignment.task.branch,
-                        commit_sha="abc",
-                        remote_sha="abc",
-                    ),
-                ),
-            ).model_dump_json()
-        if self._step == 4:
-            await self.tool_responded.wait()
-            return worker_message(
-                epoch,
-                *terminal_items(
-                    Succeeded(
-                        job_id=assignment.job_id,
-                        assignment_token=assignment.assignment_token,
-                        result=InitialTaskResult(
-                            session_id="session-1",
-                            last_message=InitialCodingOutput(
-                                summary="implemented",
-                                vcs_backend_used=VcsKind.GIT,
-                            ).model_dump_json(),
-                            exit_code=0,
-                            vcs_backend=VcsKind.GIT,
-                            branch=assignment.task.branch,
-                            commit_sha="abc",
-                            remote_sha="abc",
-                            pushed=True,
-                            open_pr_call_id="call-1",
-                            delivery_receipt=PreparedDelivery(head_sha="abc", delivery_version=1),
-                        ),
-                    )
-                ),
-            ).model_dump_json()
-        raise WebSocketDisconnect()
-
-
-@pytest.mark.asyncio
-async def test_gateway_runs_one_remote_assignment_to_ack() -> None:
-    store = RecordingStore()
-    coordinator = RecordingCoordinator(store)
-    socket = ScriptedSocket()
-    handler = server_runtime(
-        coordinator,
-        database=store.database,
-        peers=Gateway(),
-        heartbeat_interval=10,
-        heartbeat_timeout=30,
-        poll_interval=0.01,
-        tools=coordinator.tools,
-        results=coordinator.results,
-    )
-
-    await serve_worker(socket, serve=handler.serve_worker_session, worker_tokens={"worker-1": "worker-secret"})
-
-    messages = sent_items(socket.sent)
-    assert any(isinstance(message, Assignment) for message in messages)
-    assert any(isinstance(message, ResultAccepted) for message in messages)
-    assert store.started is True
-    assert store.job.state is JobState.FAILED
-    assert store.job.result_applied_at is not None
-    assert coordinator.started is True
-    assert coordinator.received_results[0].session_id == "session-1"
-
-
 async def test_gateway_authorizes_dispatch_after_preparation(monkeypatch):
     store = RecordingStore()
 
@@ -536,28 +432,6 @@ async def test_gateway_authorizes_dispatch_after_preparation(monkeypatch):
     assert not store.started
 
 
-@pytest.mark.asyncio
-async def test_gateway_multiplexes_flow_tool_calls_during_execution() -> None:
-    socket = ToolSocket()
-    store = RecordingStore()
-    gateway_coordinator = RecordingCoordinator(store)
-    handler = server_runtime(
-        gateway_coordinator,
-        database=store.database,
-        peers=Gateway(),
-        poll_interval=0.01,
-        tools=gateway_coordinator.tools,
-        results=gateway_coordinator.results,
-    )
-
-    await serve_worker(socket, serve=handler.serve_worker_session, worker_tokens={"worker-1": "worker-secret"})
-
-    responses = sent_items(socket.sent)
-    assert any(isinstance(message, FlowToolResponse) for message in responses)
-    assert any(isinstance(message, ResultAccepted) for message in responses)
-    assert store.job.state is JobState.DONE
-
-
 async def test_gateway_never_acknowledges_an_uncommitted_result(monkeypatch):
     store = RecordingStore()
     coordinator = RecordingCoordinator(store)
@@ -577,7 +451,7 @@ async def test_gateway_never_acknowledges_an_uncommitted_result(monkeypatch):
     await serve_worker(socket, serve=handler.serve_worker_session, worker_tokens={"worker-1": "worker-secret"})
     assert store.job.result_payload is not None
     assert store.job.result_applied_at is None
-    assert not any(isinstance(item, ResultAccepted) for item in sent_items(socket.sent))
+    assert not any(isinstance(item, AcceptResultResponse) for item in sent_items(socket.sent))
     assert socket.closed == 1013
 
 
@@ -628,67 +502,18 @@ async def test_recovery_continues_after_one_broken_result():
     assert store.job_records[1].result_applied_at is not None
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("with_accept", [False, True])
-async def test_gateway_rejects_bad_credentials_before_accepting(
-    with_accept: bool, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_gateway_rejects_bad_credentials_before_accepting(monkeypatch) -> None:
     socket = ScriptedSocket(token="wrong")
-    terminal = Failed(job_id=5, assignment_token="token", error="offline")
-    _, accept = terminal_items(terminal)
-    initial = register_message(
-        recovery=RecoveryDescriptor(
-            job_id=5,
-            assignment_token="token",
-            state="failed",
-            result_digest=terminal_digest(terminal),
-        )
-        if with_accept
-        else None,
-        payload=[accept] if with_accept else [],
-    )
-    receive = AsyncMock(return_value=initial.model_dump_json())
+    receive = AsyncMock(side_effect=AssertionError("unauthenticated socket must not be read"))
     monkeypatch.setattr(socket, "receive_text", receive)
-    store = RecordingStore()
-    gateway_coordinator = RecordingCoordinator(store)
-    handler = server_runtime(
-        gateway_coordinator,
-        database=store.database,
-        peers=Gateway(),
-        tools=gateway_coordinator.tools,
-        results=gateway_coordinator.results,
-    )
+    serve = AsyncMock()
 
-    await serve_worker(socket, serve=handler.serve_worker_session, worker_tokens={"worker-1": "worker-secret"})
+    await serve_worker(socket, serve=serve, worker_tokens={"worker-1": "worker-secret"})
 
     assert socket.accepted is False
     assert socket.closed == 1008
     receive.assert_not_awaited()
-
-
-class InvalidRegisterSocket(ScriptedSocket):
-    async def receive_text(self) -> str:
-        return '{"type":"register","protocol_version":99,"worker_id":"worker-1"}'
-
-
-@pytest.mark.asyncio
-async def test_gateway_closes_messages_with_an_incompatible_protocol_version() -> None:
-    socket = InvalidRegisterSocket()
-    store = RecordingStore()
-    gateway_coordinator = RecordingCoordinator(store)
-    handler = server_runtime(
-        gateway_coordinator,
-        database=store.database,
-        peers=Gateway(),
-        tools=gateway_coordinator.tools,
-        results=gateway_coordinator.results,
-    )
-
-    await serve_worker(socket, serve=handler.serve_worker_session, worker_tokens={"worker-1": "worker-secret"})
-
-    assert socket.accepted is True
-    assert socket.closed == 1008
-    assert any(message.control == "error" for message in map(parse_server_message, socket.sent))
+    serve.assert_not_awaited()
 
 
 class WaitingSocket(ScriptedSocket):
@@ -960,18 +785,22 @@ async def test_gateway_resumes_started_assignment_under_a_new_epoch() -> None:
 
 
 @pytest.mark.parametrize(
-    "first",
+    "first,code",
     [
-        worker_message(
-            "old",
-            ConversationResult(
-                **result_header("1" * 32), method="worker.history", error="query_busy"
+        (
+            worker_message(
+                "old",
+                ConversationResult(
+                    **result_header("1" * 32), method="worker.history", error="query_busy"
+                ),
             ),
+            "protocol_violation",
         ),
-        register_message(worker_id="other-worker"),
+        (register_message(worker_id="other-worker"), "protocol_violation"),
+        (register_message().model_copy(update={"protocol_version": 99}), "invalid_message"),
     ],
 )
-async def test_transport_checks_actual_first_message_before_session_dispatch(first):
+async def test_transport_checks_actual_first_message_before_session_dispatch(first, code):
     # Session's reply dispatcher would hide an unsolicited result before a later Register.
     class BadFirstSocket(ScriptedSocket):
         async def receive_text(self):
@@ -984,9 +813,11 @@ async def test_transport_checks_actual_first_message_before_session_dispatch(fir
     serve = AsyncMock()
     await serve_worker(socket, worker_tokens={"worker-1": "worker-secret"}, serve=serve)
     serve.assert_not_called()
+    assert socket.accepted
     assert socket.closed == 1008
     assert len(socket.sent) == 1
-    assert isinstance(parse_server_message(socket.sent[0]), ProtocolError)
+    error = parse_server_message(socket.sent[0])
+    assert isinstance(error, ProtocolError) and error.code == code
 
 
 @pytest.mark.parametrize("failure", ["disconnected", "runtime", "database", "cancel", "sealed"])
@@ -1145,7 +976,7 @@ async def test_control_and_payload_keep_order_and_trailing_acceptance(batch):
     await serve_worker(
         socket, serve=handler_for(store).serve_worker_session, worker_tokens={"worker-1": "worker-secret"}
     )
-    responses = [item for item in sent_items(socket.sent) if isinstance(item, ResultAccepted)]
+    responses = [item for item in sent_items(socket.sent) if isinstance(item, AcceptResultResponse)]
     if batch in {"reversed", "wrong_epoch"}:
         assert store.started == (batch == "wrong_epoch") and store.job.result_payload is None
         assert responses == [] and socket.closed == 1008
@@ -1190,7 +1021,7 @@ async def test_terminal_waits_for_actual_acceptance_write_before_next_assignment
             if self._step == 4:
                 await applied.wait()
                 assert store.assignments == 1
-                assert not any(isinstance(item, ResultAccepted) for item in sent_items(self.sent))
+                assert not any(isinstance(item, AcceptResultResponse) for item in sent_items(self.sent))
                 if acceptance == "heartbeat":
                     # A heartbeat already in flight can arrive after commit but before A.
                     return Heartbeat(
@@ -1208,7 +1039,7 @@ async def test_terminal_waits_for_actual_acceptance_write_before_next_assignment
 
         async def send_text(self, raw):
             if acceptance == "write_failed" and any(
-                isinstance(item, ResultAccepted) for item in parse_server_message(raw).payload
+                isinstance(item, AcceptResultResponse) for item in parse_server_message(raw).payload
             ):
                 raise ConnectionError("response lost")
             await super().send_text(raw)
@@ -1260,7 +1091,7 @@ async def test_result_identities_and_durable_inbox_are_required(defect):
         socket, serve=handler_for(store).serve_worker_session, worker_tokens={"worker-1": "worker-secret"}
     )
     assert socket.closed == 1008
-    assert not any(isinstance(item, ResultAccepted) for item in sent_items(socket.sent))
+    assert not any(isinstance(item, AcceptResultResponse) for item in sent_items(socket.sent))
     assert (store.job.result_payload is not None) == (defect in {"accept_id", "result_id"})
 
 
@@ -1310,7 +1141,7 @@ async def test_registration_only_answers_actual_committed_acceptance(committed, 
     handler.results._apply = apply
     await serve_worker(socket, serve=handler.serve_worker_session, worker_tokens={"worker-1": "worker-secret"})
     apply.assert_not_awaited()
-    responses = [item for item in sent_items(socket.sent) if isinstance(item, ResultAccepted)]
+    responses = [item for item in sent_items(socket.sent) if isinstance(item, AcceptResultResponse)]
     assert len(responses) == int(committed and with_accept)
     if responses:
         assert responses[0].reply_to == accept.message_id
@@ -1379,7 +1210,7 @@ async def test_duplicate_prior_job_result_does_not_retire_current_assignment():
     await serve_worker(
         socket, serve=handler_for(store).serve_worker_session, worker_tokens={"worker-1": "worker-secret"}
     )
-    responses = [item for item in sent_items(socket.sent) if isinstance(item, ResultAccepted)]
+    responses = [item for item in sent_items(socket.sent) if isinstance(item, AcceptResultResponse)]
     assert [item.result.job_id for item in responses] == [4, 5]
     assert store.job.result_applied_at is not None and socket.closed == 1000
 

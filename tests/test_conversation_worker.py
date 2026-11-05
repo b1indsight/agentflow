@@ -6,8 +6,8 @@ import pytest
 
 from app.contracts.conversation import HistoryPage
 from app.contracts.protocol import (
-    AcceptedResult,
-    AcceptResult,
+    AcceptResultRequest,
+    AcceptResultResponse,
     AcceptStop,
     ConversationQuery,
     ConversationResult,
@@ -16,7 +16,7 @@ from app.contracts.protocol import (
     RecoveryRejected,
     RecoveryRejectedArguments,
     Register,
-    ResultAccepted,
+    ResultAcceptance,
     ServerMessage,
     StopAccepted,
     StopExecution,
@@ -268,7 +268,7 @@ async def test_recovery_result_ack_before_registered_confirms_epoch(tmp_path, co
         register = await connection.receive_message()
         assert isinstance(register, Register) and len(register.payload) == 1
         acceptance = register.payload[0]
-        assert isinstance(acceptance, AcceptResult)
+        assert isinstance(acceptance, AcceptResultRequest)
         terminal = state.replay()
         assert acceptance.arguments.result_id == terminal_id(terminal)
         assert acceptance.message_id == accept_result_id(terminal_id(terminal))
@@ -287,10 +287,10 @@ async def test_recovery_result_ack_before_registered_confirms_epoch(tmp_path, co
         assert response.payload[0].reply_to == barrier.message_id
         journal = state.load()
         assert journal is not None and not journal.acknowledged and not client._connected
-        accepted = ResultAccepted(
+        accepted = AcceptResultResponse(
             **result_header(acceptance.message_id),
             method="server.accept_result",
-            result=AcceptedResult(
+            result=ResultAcceptance(
                 job_id=work.job_id, assignment_token=work.assignment_token, state="done"
             ),
         )
