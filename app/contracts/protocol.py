@@ -29,7 +29,7 @@ from app.domain.delivery_models import DeliveryReceipt
 from app.domain.models import FeedbackRef, RevisionCodingOutput, VcsKind
 from app.domain.review_models import ReviewFeedback
 
-PROTOCOL_VERSION: Literal[16] = 16
+PROTOCOL_VERSION: Literal[17] = 17
 MAX_PAYLOAD_ITEMS = 32
 MessageId = Annotated[str, Field(strict=True, pattern=r"^[0-9a-f]{32}$")]
 ConnectionEpoch = Annotated[str, Field(strict=True, min_length=1, max_length=64)]
@@ -268,7 +268,7 @@ class AcceptStopArguments(StopFence):
     receipt_id: MessageId
 
 
-class AcceptedResult(ExecutionIdentity):
+class ResultAcceptance(ExecutionIdentity):
     state: Literal["done", "failed"]
 
 
@@ -293,7 +293,7 @@ class ToolCall(ProtocolModel):
 
 
 class ToolResult(ProtocolModel):
-    """A method-specific result correlated to one invocation, not its containing frame."""
+    """A method-specific result correlated to one invocation, not its containing message."""
 
     type: Literal["tool_result"]
     message_id: MessageId
@@ -305,6 +305,19 @@ class ToolResult(ProtocolModel):
         if self.reply_to == self.message_id:
             raise ValueError("a result cannot reply to itself")
         return self
+
+
+class PayloadValidationError(ProtocolModel):
+    """Fixed public failure; never carry input, field names or validator diagnostics."""
+
+    code: Literal["validation_error"]
+    message: Literal["message payload failed validation"]
+
+
+class ValidationErrorResult(ToolResult):
+    """Reject one item by its original ID, without claiming any business acceptance."""
+
+    error: PayloadValidationError
 
 
 class Assignment(ToolCall):
@@ -332,7 +345,7 @@ class Started(ToolCall):
     arguments: ExecutionIdentity
 
 
-class AcceptResult(ToolCall):
+class AcceptResultRequest(ToolCall):
     method: Literal["server.accept_result"]
     arguments: AcceptResultArguments
 
@@ -360,7 +373,7 @@ class ExecuteResult(ToolResult):
         return self
 
     def terminal(self) -> TerminalPayload:
-        """Project only durable fields; frame and invocation metadata never enter the journal."""
+        """Project only durable fields; message and invocation metadata never enter the journal."""
         if self.result is not None:
             return Succeeded(
                 job_id=self.job_id, assignment_token=self.assignment_token, result=self.result
@@ -386,9 +399,9 @@ class ConversationResult(ToolResult):
         return self
 
 
-class ResultAccepted(ToolResult):
+class AcceptResultResponse(ToolResult):
     method: Literal["server.accept_result"]
-    result: AcceptedResult
+    result: ResultAcceptance
 
 
 class StopAccepted(ToolResult):
@@ -464,13 +477,28 @@ def _method_tag(value: object) -> str | None:
 
 WorkerCall = Annotated[
     Annotated[Started, Tag("server.execution_started")]
-    | Annotated[AcceptResult, Tag("server.accept_result")]
+    | Annotated[AcceptResultRequest, Tag("server.accept_result")]
     | Annotated[AcceptStop, Tag("server.accept_stop")]
     | Annotated[FlowToolRequest, Tag("flow_tool")],
     Discriminator(_method_tag),
 ]
+
+
+def _result_tag(value: object) -> str | None:
+    if isinstance(value, ValidationErrorResult):
+        return "validation_error"
+    if isinstance(value, dict) and isinstance(value.get("error"), dict):
+        # An error object is never retried as a success/domain-error schema.
+        return "validation_error"
+    return _method_tag(value)
+
+
 WorkerResult = Annotated[
-    ExecuteResult | StopResult | ConversationResult, Field(discriminator="method")
+    Annotated[ExecuteResult, Tag("worker.execute")]
+    | Annotated[StopResult, Tag("worker.stop")]
+    | Annotated[ConversationResult, Tag("worker.history")]
+    | Annotated[ValidationErrorResult, Tag("validation_error")],
+    Discriminator(_result_tag),
 ]
 WorkerPayload = Annotated[WorkerCall | WorkerResult, Field(discriminator="type")]
 ServerCall = Annotated[
@@ -478,22 +506,23 @@ ServerCall = Annotated[
     Field(discriminator="method"),
 ]
 ServerResult = Annotated[
-    Annotated[ResultAccepted, Tag("server.accept_result")]
+    Annotated[AcceptResultResponse, Tag("server.accept_result")]
     | Annotated[StopAccepted, Tag("server.accept_stop")]
-    | Annotated[FlowToolResponse, Tag("flow_tool")],
-    Discriminator(_method_tag),
+    | Annotated[FlowToolResponse, Tag("flow_tool")]
+    | Annotated[ValidationErrorResult, Tag("validation_error")],
+    Discriminator(_result_tag),
 ]
 ServerPayload = Annotated[ServerCall | ServerResult, Field(discriminator="type")]
 
 
 class Message[Payload: ToolCall | ToolResult](ProtocolModel):
-    """Common frame fields. Every field is required, including explicit nulls and [].
+    """Common message fields. Every field is required, including explicit nulls and [].
 
-    Use a concrete control or directional frame and its directional parser. This model
+    Use a concrete control or directional message and its directional parser. This model
     performs static checks only; receipt ACKs confer no business completion or authority.
     """
 
-    protocol_version: Literal[16]
+    protocol_version: Literal[17]
     message_id: MessageId
     connection_epoch: ConnectionEpoch | None
     ack: StrictBool
@@ -509,7 +538,7 @@ class Message[Payload: ToolCall | ToolResult](ProtocolModel):
         return value
 
     @model_validator(mode="after")
-    def _frame_contract(self) -> Self:
+    def _message_contract(self) -> Self:
         if self.ack != (self.ack_id is not None):
             raise ValueError("ack and ack_id must occur together")
         ids = [item.message_id for item in self.payload]
@@ -526,11 +555,15 @@ class Message[Payload: ToolCall | ToolResult](ProtocolModel):
         return self
 
 
-class WorkerFrame(Message[WorkerPayload]):
+class WorkerMessage(Message[WorkerPayload]):
+    """Worker message with control=None; empty payload is allowed only for a receipt ACK."""
+
     control: Literal[None]  # noqa: PYI061 - Pydantic's discriminator requires Literal for null.
 
 
-class ServerFrame(Message[ServerPayload]):
+class ServerMessage(Message[ServerPayload]):
+    """Server message with control=None; empty payload is allowed only for a receipt ACK."""
+
     control: Literal[None]  # noqa: PYI061 - Pydantic's discriminator requires Literal for null.
 
 
@@ -544,7 +577,7 @@ class Register(Message[WorkerPayload]):
         if not self.payload:
             return self
         recovery = self.recovery
-        if len(self.payload) != 1 or not isinstance(self.payload[0], AcceptResult):
+        if len(self.payload) != 1 or not isinstance(self.payload[0], AcceptResultRequest):
             raise ValueError("Register may only carry one result-acceptance call")
         call = self.payload[0]
         if (
@@ -582,9 +615,9 @@ class Heartbeat(Message[WorkerPayload]):
     @model_validator(mode="after")
     def _execution_payload(self) -> Self:
         for item in self.payload:
-            if isinstance(item, ConversationResult):
+            if isinstance(item, (ConversationResult, ValidationErrorResult)):
                 continue
-            if isinstance(item, (Started, AcceptResult, AcceptStop, FlowToolRequest)):
+            if isinstance(item, (Started, AcceptResultRequest, AcceptStop, FlowToolRequest)):
                 identity = (item.arguments.job_id, item.arguments.assignment_token)
             elif isinstance(item, ExecuteResult):
                 identity = (item.job_id, item.assignment_token)
@@ -607,21 +640,23 @@ class ProtocolError(Message[ServerPayload]):
         return self
 
 
-WorkerMessage = Annotated[Register | Heartbeat | WorkerFrame, Field(discriminator="control")]
-ServerMessage = Annotated[Registered | ProtocolError | ServerFrame, Field(discriminator="control")]
+WorkerMessageUnion = Annotated[Register | Heartbeat | WorkerMessage, Field(discriminator="control")]
+ServerMessageUnion = Annotated[
+    Registered | ProtocolError | ServerMessage, Field(discriminator="control")
+]
 
-_WORKER_MESSAGES: TypeAdapter[WorkerMessage] = TypeAdapter(WorkerMessage)
-_SERVER_MESSAGES: TypeAdapter[ServerMessage] = TypeAdapter(ServerMessage)
+_WORKER_MESSAGES: TypeAdapter[WorkerMessageUnion] = TypeAdapter(WorkerMessageUnion)
+_SERVER_MESSAGES: TypeAdapter[ServerMessageUnion] = TypeAdapter(ServerMessageUnion)
 
 
-def parse_worker_message(raw: str) -> WorkerMessage:
-    """Validate the complete worker frame before any control or payload has effects."""
+def parse_worker_message(raw: str) -> WorkerMessageUnion:
+    """Validate the complete worker message before any control or payload has effects."""
 
     return _WORKER_MESSAGES.validate_json(raw)
 
 
-def parse_server_message(raw: str) -> ServerMessage:
-    """Validate the complete server frame; historical records use durable decoders instead."""
+def parse_server_message(raw: str) -> ServerMessageUnion:
+    """Validate the complete server message; historical records use durable decoders instead."""
 
     return _SERVER_MESSAGES.validate_json(raw)
 
@@ -675,15 +710,15 @@ def accept_stop_id(receipt_id: MessageId) -> MessageId:
     return _stable_id(["server.accept_stop", receipt_id])
 
 
-class FrameHeader(TypedDict):
-    protocol_version: Literal[16]
+class MessageHeader(TypedDict):
+    protocol_version: Literal[17]
     message_id: MessageId
     connection_epoch: str | None
     ack: bool
     ack_id: MessageId | None
 
 
-def frame_header(connection_epoch: str | None) -> FrameHeader:
+def message_header(connection_epoch: str | None) -> MessageHeader:
     """Construct fresh delivery metadata without supplying defaults to the wire parser."""
     return {
         "protocol_version": PROTOCOL_VERSION,
@@ -712,7 +747,7 @@ class ResultHeader(TypedDict):
 
 
 def result_header(reply_to: MessageId, message_id: MessageId | None = None) -> ResultHeader:
-    """Correlate a result to its invocation rather than the containing frame."""
+    """Correlate a result to its invocation rather than the containing message."""
     return {
         "type": "tool_result",
         "message_id": message_id or uuid4().hex,

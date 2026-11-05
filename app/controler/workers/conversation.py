@@ -10,7 +10,7 @@ import json
 from pydantic import ValidationError
 
 from app.communication.gateway import Gateway
-from app.communication.session import ReplyKey, SessionBusy, SessionClosed
+from app.communication.session import Session, SessionClosed
 from app.contracts.conversation import (
     ConversationFailure,
     ConversationItem,
@@ -23,13 +23,11 @@ from app.contracts.protocol import (
     ConversationQuery,
     ConversationResult,
     HistoryArguments,
-    ServerFrame,
     ServerMessage,
-    ToolCall,
-    ToolResult,
-    WorkerMessage,
+    ServerMessageUnion,
+    WorkerMessageUnion,
     call_header,
-    frame_header,
+    message_header,
 )
 from app.domain.models import Attempt
 from app.persistence.database import Database
@@ -37,61 +35,96 @@ from app.persistence.flows import FlowStore
 from app.persistence.workers import WorkerStore
 
 
-def conversation_result_key(message: ToolCall | ToolResult, epoch: str) -> ReplyKey | None:
-    if isinstance(message, ConversationResult):
-        return message.reply_to, epoch
-    return None
-
-
 class ConversationBroker:
-    """Route and validate live history queries with a process-wide admission limit."""
+    """Own bounded HTTP query waiters; Dispatcher correlates replies on the serial driver."""
 
-    def __init__(self, peers: Gateway[WorkerMessage, ServerMessage]) -> None:
+    def __init__(self, peers: Gateway[WorkerMessageUnion, ServerMessageUnion]) -> None:
         # Amp export allows 20s, followed by up to 9s of descendant/process cleanup.
         self.timeout = 30.0
         self._peers = peers
-        self._inflight = 0
+        self._inflight: dict[Session[WorkerMessageUnion, ServerMessageUnion], int] = {}
 
     async def query(
         self,
         worker_id: str,
         query: HistoryQuery,
     ) -> HistoryPage:
-        session = self._peers.get(worker_id)
-        if session is None or session.epoch is None:
+        registration = self._peers.get(worker_id)
+        if registration is None or registration.session.epoch is None:
             raise ConversationFailure("worker_unavailable")
-        if self._inflight >= 64:
+        session, routes = registration.session, registration.routes
+        if sum(self._inflight.values()) >= 64 or self._inflight.get(session, 0) >= 4:
             raise ConversationFailure("query_busy")
-        self._inflight += 1
+        request = ConversationQuery(
+            **call_header(),
+            method="worker.history",
+            arguments=HistoryArguments(**query.model_dump()),
+        )
+        future: asyncio.Future[tuple[ConversationResult, WorkerMessageUnion]] = (
+            asyncio.get_running_loop().create_future()
+        )
+        sending: asyncio.Task[bool] | None = None
+
+        async def deliver(reply: ConversationResult, message: WorkerMessageUnion) -> None:
+            if not future.done():
+                future.set_result((reply, message))
+
+        def rejected(reason: str) -> None:
+            if not future.done():
+                future.set_exception(ConversationFailure("invalid_response"))
+
+        def closed() -> None:
+            if not future.done():
+                future.set_exception(SessionClosed("query connection closed"))
+            # Session closes any unfinished write. Do not cancel a completed write's
+            # still-resuming send task: a reply drained before EOF remains valid.
+
+        self._inflight[session] = self._inflight.get(session, 0) + 1
         try:
-            request = ConversationQuery(
-                **call_header(),
-                method="worker.history",
-                arguments=HistoryArguments(**query.model_dump()),
+            session.check_request()
+            routes.expect_reply(
+                request, ConversationResult, deliver, on_rejected=rejected, on_closed=closed
             )
-            response, frame = await session.request(
-                ServerFrame(**frame_header(session.epoch), control=None, payload=[request]),
-                call=request,
-                key=(request.message_id, session.epoch),
-                timeout=self.timeout,
-            )
-            if not isinstance(response, ConversationResult):
-                raise ConversationFailure("invalid_response")
-            return self._validated(request, response, frame)
-        except SessionBusy as exc:
-            raise ConversationFailure("query_busy") from exc
+            async with asyncio.timeout(self.timeout):
+                sending = asyncio.create_task(
+                    session.send(
+                        ServerMessage(
+                            **message_header(session.epoch), control=None, payload=[request]
+                        ),
+                        is_current=lambda: not future.done(),
+                    )
+                )
+                await asyncio.wait((sending, future), return_when=asyncio.FIRST_COMPLETED)
+                if future.done():
+                    future.result()  # Rejection/closure wins even while the send lock is held.
+                if not await sending:
+                    raise SessionClosed("query not written")
+                response, message = await future
+            return self._validated(request, response, message)
         except TimeoutError as exc:
             raise ConversationFailure("query_timeout") from exc
         except SessionClosed as exc:
             raise ConversationFailure("worker_unavailable") from exc
         finally:
-            self._inflight -= 1
+            routes.forget_reply(request.message_id)
+            try:
+                if sending is not None:
+                    sending.cancel()
+                    await asyncio.gather(sending, return_exceptions=True)
+            finally:
+                self._inflight[session] -= 1
+                if not self._inflight[session]:
+                    del self._inflight[session]
+                if not future.done():
+                    future.cancel()
+                elif not future.cancelled():
+                    future.exception()
 
     def _validated(
         self,
         request: ConversationQuery,
         response: ConversationResult,
-        frame: WorkerMessage,
+        message: WorkerMessageUnion,
     ) -> HistoryPage:
         """Correlation alone does not make a worker's history page safe to expose."""
         if response.reply_to != request.message_id:
@@ -101,7 +134,7 @@ class ConversationBroker:
         page = response.page
         assert page is not None
         # Other results sharing the delivery do not consume this page's byte allowance.
-        selected = frame.model_copy(update={"payload": [response]})
+        selected = message.model_copy(update={"payload": [response]})
         if (
             page.session_id != request.arguments.session_id
             or len(page.items) > request.arguments.limit

@@ -2,6 +2,7 @@ import asyncio
 
 import pytest
 
+from app.communication.dispatch import Dispatcher
 from app.communication.gateway import Gateway
 from app.communication.session import SessionClosed
 from tests.test_communication_session import Packet, Socket, make_session
@@ -30,13 +31,13 @@ async def test_superseded_candidate_stays_rejected_after_newest_connection_exits
     gateway = Gateway[Packet, Packet]()
     a_socket, b_socket, c_socket = ClosingSocket(blocked=True), ClosingSocket(), ClosingSocket()
     a, b, c = (make_session(socket) for socket in (a_socket, b_socket, c_socket))
-    first = await gateway.register("peer", a, replace=True)
-    replacing = asyncio.create_task(gateway.register("peer", b, replace=True))
+    first = await gateway.register("peer", a, Dispatcher(), replace=True)
+    replacing = asyncio.create_task(gateway.register("peer", b, Dispatcher(), replace=True))
     try:
         await asyncio.wait_for(a_socket.closing.wait(), 1)
         assert gateway.get("peer") is None
-        newest = await asyncio.wait_for(gateway.register("peer", c, replace=True), 1)
-        assert gateway.get("peer") is c
+        newest = await asyncio.wait_for(gateway.register("peer", c, Dispatcher(), replace=True), 1)
+        assert gateway.get("peer") is newest
         await gateway.unregister(newest)
         a_socket.release_close.set()
         with pytest.raises(SessionClosed):
@@ -54,19 +55,19 @@ async def test_unregister_keeps_predecessor_barrier_until_close_joins():
     gateway = Gateway[Packet, Packet]()
     old_socket = ClosingSocket(blocked=True)
     old, new = make_session(old_socket), make_session(ClosingSocket())
-    registration = await gateway.register("peer", old, replace=False)
+    registration = await gateway.register("peer", old, Dispatcher(), replace=False)
     retiring = asyncio.create_task(gateway.unregister(registration))
     replacement = None
     try:
         await asyncio.wait_for(old_socket.closing.wait(), 1)
         assert gateway.get("peer") is None
         with pytest.raises(RuntimeError):
-            await gateway.register("peer", new, replace=False)
+            await gateway.register("peer", new, Dispatcher(), replace=False)
         entered = asyncio.Event()
 
         async def replace():
             entered.set()
-            return await gateway.register("peer", new, replace=True)
+            return await gateway.register("peer", new, Dispatcher(), replace=True)
 
         replacement = asyncio.create_task(replace())
         await entered.wait()
@@ -74,7 +75,7 @@ async def test_unregister_keeps_predecessor_barrier_until_close_joins():
         old_socket.release_close.set()
         await retiring
         newest = await asyncio.wait_for(replacement, 1)
-        assert gateway.get("peer") is new
+        assert gateway.get("peer") is newest
         await gateway.unregister(registration)
         assert not new.closed
         await gateway.unregister(newest)
@@ -94,9 +95,9 @@ async def test_process_close_joins_hidden_sessions_despite_cancellation_and_erro
     a, b = make_session(a_socket), make_session(ClosingSocket())
     broken_socket = ClosingSocket(error=ValueError("close failed"))
     broken = make_session(broken_socket)
-    await gateway.register("peer", a, replace=True)
-    await gateway.register("other", broken, replace=True)
-    replacing = asyncio.create_task(gateway.register("peer", b, replace=True))
+    await gateway.register("peer", a, Dispatcher(), replace=True)
+    await gateway.register("other", broken, Dispatcher(), replace=True)
+    replacing = asyncio.create_task(gateway.register("peer", b, Dispatcher(), replace=True))
     await asyncio.wait_for(a_socket.closing.wait(), 1)
     closing = asyncio.create_task(gateway.close(1012))
     try:
@@ -131,8 +132,10 @@ async def test_failed_registration_closes_candidate_without_restoring_old_route(
         blocked=True, error=ValueError("old close failed") if failure == "close-error" else None
     )
     old, candidate = make_session(old_socket), make_session(ClosingSocket())
-    await gateway.register("peer", old, replace=True)
-    registering = asyncio.create_task(gateway.register("peer", candidate, replace=True))
+    await gateway.register("peer", old, Dispatcher(), replace=True)
+    registering = asyncio.create_task(
+        gateway.register("peer", candidate, Dispatcher(), replace=True)
+    )
     try:
         await asyncio.wait_for(old_socket.closing.wait(), 1)
         if failure == "cancel":
@@ -143,8 +146,8 @@ async def test_failed_registration_closes_candidate_without_restoring_old_route(
         assert candidate.closed
         assert gateway.get("peer") is None
         replacement = make_session(ClosingSocket())
-        newest = await gateway.register("peer", replacement, replace=True)
-        assert gateway.get("peer") is replacement
+        newest = await gateway.register("peer", replacement, Dispatcher(), replace=True)
+        assert gateway.get("peer") is newest
         await gateway.unregister(newest)
     finally:
         old_socket.release_close.set()

@@ -6,8 +6,8 @@ import pytest
 
 from app.contracts.conversation import HistoryPage
 from app.contracts.protocol import (
-    AcceptedResult,
-    AcceptResult,
+    AcceptResultRequest,
+    AcceptResultResponse,
     AcceptStop,
     ConversationQuery,
     ConversationResult,
@@ -16,17 +16,17 @@ from app.contracts.protocol import (
     RecoveryRejected,
     RecoveryRejectedArguments,
     Register,
-    ResultAccepted,
-    ServerFrame,
+    ResultAcceptance,
+    ServerMessage,
     StopAccepted,
     StopExecution,
     StopFence,
     StopResult,
-    WorkerMessage,
+    WorkerMessageUnion,
     accept_result_id,
     accept_stop_id,
     call_header,
-    frame_header,
+    message_header,
     parse_worker_message,
     result_header,
     stop_call_id,
@@ -35,10 +35,10 @@ from app.contracts.protocol import (
 )
 from app.worker.execution.lifecycle import WorkerExecution, WorkerProtocolError
 from app.worker.state.execution import ExecutionState
-from app.worker.transport.client import WorkerClient
 from tests.test_conversation_history import SESSION
 from tests.test_worker_session import _assignment
-from tests.wire import registered, server_frame
+from tests.wire import registered, server_message
+from tests.worker_fakes import run_worker, worker_runtime
 
 
 class Connection:
@@ -55,18 +55,20 @@ class Connection:
     async def close(self, code=1000):
         pass
 
-    async def receive_frame(self) -> WorkerMessage:
-        """Ignore transport receipts, never ACK them or drop a business-bearing frame."""
+    async def receive_message(self) -> WorkerMessageUnion:
+        """Ignore transport receipts, never ACK them or drop a business-bearing message."""
         async with asyncio.timeout(5):
             while True:
-                frame = parse_worker_message(await self.outgoing.get())
-                if frame.control is not None or frame.payload:
-                    return frame
+                message = parse_worker_message(await self.outgoing.get())
+                if message.control is not None or message.payload:
+                    return message
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("batched", [False, True])
-async def test_query_does_not_block_execution_messages(tmp_path, batched) -> None:
+async def test_history_uses_fifo_and_control_precedes_batched_payload(tmp_path, batched) -> None:
+    # A standalone read holds the driver; control in its own message waits behind it.
+    # Registered in the same message must instead authorize the payload first.
     connection = Connection()
     started, release = threading.Event(), threading.Event()
 
@@ -77,7 +79,7 @@ async def test_query_does_not_block_execution_messages(tmp_path, batched) -> Non
             return HistoryPage(session_id=query.session_id)
 
     state = State(tmp_path)
-    client = WorkerClient(
+    client = worker_runtime(
         worker_id="worker-1",
         worker_token="token",
         serve_ws_url="unused",
@@ -90,17 +92,17 @@ async def test_query_does_not_block_execution_messages(tmp_path, batched) -> Non
     if batched:
         await connection.incoming.put(registered(query, epoch="e1").model_dump_json())
     else:
-        await connection.incoming.put(server_frame(query, epoch="e1").model_dump_json())
+        await connection.incoming.put(server_message(query, epoch="e1").model_dump_json())
         await connection.incoming.put(registered(epoch="e1").model_dump_json())
-    running = asyncio.create_task(client.run_connection(connection))
+    running = asyncio.create_task(run_worker(client, connection))
     try:
         await connection.outgoing.get()  # Registration request.
         assert await asyncio.to_thread(started.wait, 5)
-        assert client.connected
+        assert client._connected is batched
         release.set()
-        frame = await connection.receive_frame()
-        assert len(frame.payload) == 1 and frame.connection_epoch == "e1"
-        result = frame.payload[0]
+        message = await connection.receive_message()
+        assert len(message.payload) == 1 and message.connection_epoch == "e1"
+        result = message.payload[0]
         assert isinstance(result, ConversationResult)
         assert result.reply_to == query.message_id
         assert result.page is not None
@@ -115,7 +117,7 @@ async def test_query_does_not_block_execution_messages(tmp_path, batched) -> Non
 async def test_bad_cursor_returns_correlated_query_error(tmp_path):
     connection = Connection()
     state = ExecutionState(tmp_path)
-    client = WorkerClient(
+    client = worker_runtime(
         worker_id="worker",
         worker_token="token",
         serve_ws_url="unused",
@@ -127,23 +129,23 @@ async def test_bad_cursor_returns_correlated_query_error(tmp_path):
         method="worker.history",
         arguments=HistoryArguments(session_id=SESSION, cursor="invalid-base64"),
     )
-    running = asyncio.create_task(client.run_connection(connection))
+    running = asyncio.create_task(run_worker(client, connection))
     try:
-        await connection.outgoing.get()  # Register must be the first outbound frame.
-        await connection.incoming.put(server_frame(request, epoch="epoch").model_dump_json())
-        frame = await connection.receive_frame()
-        assert frame.connection_epoch == "epoch" and len(frame.payload) == 1
-        result = frame.payload[0]
+        await connection.outgoing.get()  # Register must be the first outbound message.
+        await connection.incoming.put(server_message(request, epoch="epoch").model_dump_json())
+        message = await connection.receive_message()
+        assert message.connection_epoch == "epoch" and len(message.payload) == 1
+        result = message.payload[0]
         assert isinstance(result, ConversationResult)
         assert result.reply_to == request.message_id and result.error == "cursor_invalid"
-        assert not client.connected  # A query cannot confirm registration or the epoch.
+        assert not client._connected  # A query cannot confirm registration or the epoch.
     finally:
         running.cancel()
         await asyncio.gather(running, return_exceptions=True)
 
 
 @pytest.mark.parametrize("operation", ["stop", "reject"])
-async def test_query_completes_during_handshake_cleanup_before_registered(tmp_path, operation):
+async def test_query_waits_for_handshake_cleanup_before_registered(tmp_path, operation):
     # Recovery/stop may spend a long time joining a process before Registered is legal.
     started, cleaning, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
@@ -165,7 +167,7 @@ async def test_query_completes_during_handshake_cleanup_before_registered(tmp_pa
     owner.receive(work)
     owner.start()
     connection = Connection()
-    client = WorkerClient(
+    client = worker_runtime(
         worker_id="worker",
         worker_token="test",
         serve_ws_url="unused",
@@ -181,10 +183,10 @@ async def test_query_completes_during_handshake_cleanup_before_registered(tmp_pa
     request = StopExecution(
         **call_header(stop_call_id(fence)), method="worker.stop", arguments=fence
     )
-    running = asyncio.create_task(client.run_connection(connection))
+    running = asyncio.create_task(run_worker(client, connection))
     try:
         await started.wait()
-        register = await connection.receive_frame()
+        register = await connection.receive_message()
         assert isinstance(register, Register)
         first = (
             request
@@ -197,21 +199,18 @@ async def test_query_completes_during_handshake_cleanup_before_registered(tmp_pa
                 ),
             )
         )
-        await connection.incoming.put(server_frame(first, epoch="new").model_dump_json())
+        await connection.incoming.put(server_message(first, epoch="new").model_dump_json())
         await asyncio.wait_for(cleaning.wait(), 1)
         query = ConversationQuery(
             **call_header(), method="worker.history", arguments=HistoryArguments(session_id=SESSION)
         )
-        await connection.incoming.put(server_frame(query, epoch="query-only").model_dump_json())
-        frame = await connection.receive_frame()
-        assert frame.connection_epoch == "query-only" and len(frame.payload) == 1
-        result = frame.payload[0]
-        assert isinstance(result, ConversationResult) and result.page is not None
-        assert result.reply_to == query.message_id
-        assert not client.connected and not release.is_set()
+        await connection.incoming.put(server_message(query, epoch="new").model_dump_json())
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(connection.outgoing.get(), 0.02)
+        assert not client._connected
         release.set()
         if operation == "stop":
-            stopped = await connection.receive_frame()
+            stopped = await connection.receive_message()
             assert stopped.connection_epoch == "new" and len(stopped.payload) == 2
             receipt, acceptance = stopped.payload
             assert isinstance(receipt, StopResult) and isinstance(acceptance, AcceptStop)
@@ -224,10 +223,16 @@ async def test_query_completes_during_handshake_cleanup_before_registered(tmp_pa
             accepted = StopAccepted(
                 **result_header(acceptance.message_id), method="server.accept_stop", result=fence
             )
-            await connection.incoming.put(server_frame(accepted, epoch="new").model_dump_json())
+            await connection.incoming.put(server_message(accepted, epoch="new").model_dump_json())
+        message = await connection.receive_message()
+        assert message.connection_epoch == "new" and len(message.payload) == 1
+        result = message.payload[0]
+        assert isinstance(result, ConversationResult) and result.page is not None
+        assert result.reply_to == query.message_id
+        assert not client._connected
         await connection.incoming.put(registered(epoch="new").model_dump_json())
         async with asyncio.timeout(1):
-            while not client.connected:
+            while not client._connected:
                 await asyncio.sleep(0)
         if operation == "stop":
             journal = state.load()
@@ -250,7 +255,7 @@ async def test_recovery_result_ack_before_registered_confirms_epoch(tmp_path, co
     state.record_started()
     state.complete(InitialTaskResult(session_id=SESSION, last_message="done", exit_code=0))
     owner = WorkerExecution(worker_id="worker", executor=SimpleNamespace(), state=state)
-    client = WorkerClient(
+    client = worker_runtime(
         worker_id="worker",
         worker_token="test",
         serve_ws_url="unused",
@@ -258,38 +263,38 @@ async def test_recovery_result_ack_before_registered_confirms_epoch(tmp_path, co
         read_history=state.read,
     )
     connection = Connection()
-    running = asyncio.create_task(client.run_connection(connection))
+    running = asyncio.create_task(run_worker(client, connection))
     try:
-        register = await connection.receive_frame()
+        register = await connection.receive_message()
         assert isinstance(register, Register) and len(register.payload) == 1
         acceptance = register.payload[0]
-        assert isinstance(acceptance, AcceptResult)
+        assert isinstance(acceptance, AcceptResultRequest)
         terminal = state.replay()
         assert acceptance.arguments.result_id == terminal_id(terminal)
         assert acceptance.message_id == accept_result_id(terminal_id(terminal))
-        receipt_header = frame_header(None)
+        receipt_header = message_header(None)
         receipt_header["ack"] = True
         receipt_header["ack_id"] = register.message_id
         await connection.incoming.put(
-            ServerFrame(**receipt_header, control=None, payload=[]).model_dump_json()
+            ServerMessage(**receipt_header, control=None, payload=[]).model_dump_json()
         )
         barrier = ConversationQuery(
             **call_header(), method="worker.history", arguments=HistoryArguments(session_id=SESSION)
         )
-        await connection.incoming.put(server_frame(barrier, epoch="query-only").model_dump_json())
-        response = await connection.receive_frame()
+        await connection.incoming.put(server_message(barrier, epoch="query-only").model_dump_json())
+        response = await connection.receive_message()
         assert len(response.payload) == 1 and isinstance(response.payload[0], ConversationResult)
         assert response.payload[0].reply_to == barrier.message_id
         journal = state.load()
-        assert journal is not None and not journal.acknowledged and not client.connected
-        accepted = ResultAccepted(
+        assert journal is not None and not journal.acknowledged and not client._connected
+        accepted = AcceptResultResponse(
             **result_header(acceptance.message_id),
             method="server.accept_result",
-            result=AcceptedResult(
+            result=ResultAcceptance(
                 job_id=work.job_id, assignment_token=work.assignment_token, state="done"
             ),
         )
-        await connection.incoming.put(server_frame(accepted, epoch="new").model_dump_json())
+        await connection.incoming.put(server_message(accepted, epoch="new").model_dump_json())
         await connection.incoming.put(
             registered(epoch="conflict" if conflict else "new").model_dump_json()
         )
@@ -298,7 +303,7 @@ async def test_recovery_result_ack_before_registered_confirms_epoch(tmp_path, co
                 await asyncio.wait_for(running, 1)
         else:
             async with asyncio.timeout(1):
-                while not client.connected:
+                while not client._connected:
                     await asyncio.sleep(0)
         journal = state.load()
         assert journal is not None and journal.acknowledged and state.assignment is None

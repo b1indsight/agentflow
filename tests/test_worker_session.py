@@ -10,7 +10,6 @@ import pytest
 from pydantic import JsonValue, SecretStr, ValidationError
 
 from app.contracts.protocol import (
-    AcceptedResult,
     AssignmentArguments,
     AssignmentSecret,
     ExecutionResult,
@@ -20,6 +19,7 @@ from app.contracts.protocol import (
     InitialTaskResult,
     PushSecret,
     RecoveryDecision,
+    ResultAcceptance,
     StopFence,
     Succeeded,
     TerminalPayload,
@@ -324,7 +324,7 @@ async def test_owner_collects_late_completion_without_restarting(
         assert executor.invocations == 1
         assert "push-secret" not in state.path.read_text()
         owner.on_result_accepted(
-            AcceptedResult(job_id=5, assignment_token="assignment-1", state="done")
+            ResultAcceptance(job_id=5, assignment_token="assignment-1", state="done")
         )
         assert owner.result_for_registration() is None
         assert owner.recovery() is not None
@@ -427,7 +427,7 @@ async def test_registration_result_is_withheld_during_stop_and_shutdown(tmp_path
         assert owner.result_for_registration() is None
         with pytest.raises(WorkerProtocolError, match="does not match"):
             owner.on_result_accepted(
-                AcceptedResult(job_id=5, assignment_token="assignment-1", state="failed")
+                ResultAcceptance(job_id=5, assignment_token="assignment-1", state="failed")
             )
         with pytest.raises(WorkerProtocolError, match="conflicts"):
             await owner.stop(fence.model_copy(update={"request_id": "other"}))

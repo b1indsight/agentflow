@@ -12,7 +12,7 @@ from app.contracts.protocol import (
     result_header,
     terminal_id,
 )
-from tests.wire import server_frame, worker_frame
+from tests.wire import server_message, worker_message
 
 
 @pytest.mark.parametrize("receipt", [
@@ -31,7 +31,7 @@ def test_current_receipts_round_trip_through_tool_and_terminal_messages(receipt)
     )
     assert response.model_dump(mode="json")["result"] == receipt
     assert parse_server_message(
-        server_frame(response, epoch="epoch").model_dump_json()
+        server_message(response, epoch="epoch").model_dump_json()
     ).payload == [response]
     terminal = Succeeded.model_validate(
         {
@@ -53,6 +53,6 @@ def test_current_receipts_round_trip_through_tool_and_terminal_messages(receipt)
         assignment_token="token",
         result=terminal.result,
     )
-    restored = parse_worker_message(worker_frame(message, epoch="epoch").model_dump_json())
+    restored = parse_worker_message(worker_message(message, epoch="epoch").model_dump_json())
     assert restored.payload == [message]
     assert restored.payload[0].result.delivery_receipt == response.result

@@ -97,7 +97,7 @@ async def test_runtime_keeps_root_locked_until_owned_process_cleanup_finishes(tm
     async def connect(*args, **kwargs):
         yield ScriptedConnection()
 
-    monkeypatch.setattr("app.worker.transport.client.connect", connect)
+    monkeypatch.setattr("app.worker.runtime.connect", connect)
     runtime = WorkerRuntime(WorkerSettings(worker_id="worker", worker_token=SecretStr("secret"),
         worker_root=tmp_path, serve_ws_url="wss://control.example/connect"))
     runtime.execution.executor = Executor()

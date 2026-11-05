@@ -116,7 +116,7 @@ def decode_result_inbox(
 
 def _stop_digest(receipt: ExecutionStopped, version: Literal[14, 15]) -> str:
     # The v15 field order and Pydantic JSON encoding are a persisted hash contract,
-    # independent of the current wire version. Do not hash a frame or tool_result.
+    # independent of the current wire version. Do not hash a message or tool_result.
     projection: dict[str, JsonValue] = {
         "protocol_version": version,
         "request_id": receipt.request_id,

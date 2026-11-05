@@ -9,14 +9,14 @@
 
 ## 停止确认
 
-同一鉴权 WebSocket 使用 v16 的 `worker.stop` 调用及 `[停止结果 R, server.accept_stop 调用 B]`。
+同一鉴权 WebSocket 使用 v17 的 `worker.stop` 调用及 `[停止结果 R, server.accept_stop 调用 B]`。
 请求绑定 flow、worker、job、assignment token、binding 创建时间、当前 epoch 和独立 request ID。
 worker 必须持有匹配 journal，当前执行只能由持有该 task / 子进程对象的进程取消。
 每次 assignment 在启动前持久化执行 nonce；停止凭据包含 nonce，原 journal 继续保存直到 ACK。
 这里的 ACK 指业务接纳回复；顶层控制接收 ACK 不确认停止。业务回复丢失后重连重发同一真实
 凭据与 B，控制面核验原 digest 和完整提交条件才回复 B，不能仅凭 DB hash 接纳；不根据旧 PID 杀进程。
 
-`WorkerExecution` 持有执行与停止清理任务。断开或替换 WorkerClient 只关闭通信，
+`WorkerExecution` 持有执行与停止清理任务。关闭或替换 Session 只关闭通信，
 已授权的停止继续清理；新连接按同一完整停止身份等待原操作，再发送新 epoch 的回执。
 执行离线自然完成时主动写 journal，重连只重放结果，不重新启动编码。
 
@@ -73,10 +73,10 @@ STOP 请求和有效凭据握手能完成取消。未写出凭据的进程崩溃
 Runtime 先停止并 join 通信，再等待 execution owner 的停止/执行清理，最后释放根锁。
 重复取消外层运行任务不会提前释放根锁；普通 shutdown 不回收 workspace、不合成结果或停止 ACK。
 
-当前在线协议 v16 / journal v5 / ResultInbox v1 / workspace manifest v1，serve/worker 必须使用匹配版本；
+当前在线协议 v17 / journal v5 / ResultInbox v1 / workspace manifest v1，serve/worker 必须使用匹配版本；
 定义见[协议](../../app/contracts/protocol.py)与 [ExecutionRecord](../../app/worker/state/record.py)。
 受限历史 v4/v14–v15 journal 与旧 inbox 只读转换，正常写入才升级；未知数据保留并拒绝。
-协议切换须先收敛活跃执行和 effects，再协调升级；新格式写入后不能直接运行旧二进制，见
+协议切换须先收敛活跃执行和 effects，再协调升级；v17 沿用 v16 的持久格式，旧格式降级限制见
 [升级边界](upgrade.md)。同版本重启先 drain、保存数据和 root/HOME，按原身份核对恢复后再 undrain。
 不要通过编辑 journal 版本号绕过验证。
 

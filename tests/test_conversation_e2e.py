@@ -6,17 +6,15 @@ import httpx
 import pytest
 
 from app.communication.gateway import Gateway
-from app.contracts.protocol import ServerMessage, WorkerMessage
+from app.contracts.protocol import ServerMessageUnion, WorkerMessageUnion
 from app.controler.api import create_app
 from app.controler.runtime import ServerRuntime
 from app.controler.workers.conversation import ConversationService
-from app.controler.workers.handler import WorkerHandler
 from app.controler.workers.transport import serve_worker
 from app.domain.models import Attempt, Flow, FlowExecution, FlowState
 from app.worker.execution.amp_process import AmpProcessResult
 from app.worker.execution.lifecycle import WorkerExecution
 from app.worker.state.execution import ExecutionState
-from app.worker.transport.client import WorkerClient
 from tests.access import AccessIssuer
 from tests.test_conversation_history import SESSION, message, rollout
 from tests.test_remote_e2e import (
@@ -26,6 +24,7 @@ from tests.test_remote_e2e import (
     RemoteCoordinator,
     RemoteStore,
 )
+from tests.worker_fakes import run_worker, server_runtime, worker_runtime
 
 OTHER_SESSION = "019eac3b-a60c-7a93-a442-3718f660fc8d"
 
@@ -53,7 +52,9 @@ class HistoryStore(RemoteStore):
     (backend, phase) for backend in ("codex", "amp")
     for phase in ("worker", "preparation", "tool", "result")
 ] + [("amp", "slow_export")])
-async def test_http_query_while_worker_or_control_busy_and_idle(tmp_path, phase, monkeypatch, backend) -> None:
+async def test_http_history_queues_behind_callbacks_but_not_execution(
+    tmp_path, phase, monkeypatch, backend
+) -> None:
     started, release = asyncio.Event(), asyncio.Event()
     blocked_phase = "worker" if phase == "slow_export" else phase
 
@@ -103,9 +104,9 @@ async def test_http_query_while_worker_or_control_busy_and_idle(tmp_path, phase,
         monkeypatch.setattr("app.worker.state.amp_history.run_amp", export)
     store = HistoryStore(session, other_session)
     gateway_coordinator = Coordinator(store)
-    peers = Gateway[WorkerMessage, ServerMessage]()
+    peers = Gateway[WorkerMessageUnion, ServerMessageUnion]()
     broker = ConversationBroker(peers)
-    handler = WorkerHandler(
+    handler = server_runtime(
         gateway_coordinator, database=store.database,
         peers=peers,
         poll_interval=0.01,
@@ -125,18 +126,25 @@ async def test_http_query_while_worker_or_control_busy_and_idle(tmp_path, phase,
     to_control: asyncio.Queue[str] = asyncio.Queue()
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex"))
     state = ExecutionState(tmp_path / "worker")
-    worker = WorkerClient(worker_id="worker-1", worker_token="worker-secret", serve_ws_url="unused",
+    worker = worker_runtime(worker_id="worker-1", worker_token="worker-secret", serve_ws_url="unused",
                           execution=WorkerExecution(worker_id="worker-1", executor=Executor(), state=state),
                           read_history=state.read)
     server = asyncio.create_task(serve_worker(QueueSocket(to_control, to_worker),
-                                             worker_tokens={"worker-1": "worker-secret"}, handler=handler))
-    client = asyncio.create_task(worker.run_connection(QueueConnection(to_control, to_worker)))
+                                             worker_tokens={"worker-1": "worker-secret"}, serve=handler.serve_worker_session))
+    client = asyncio.create_task(run_worker(worker, QueueConnection(to_control, to_worker)))
     try:
         await asyncio.wait_for(started.wait(), 2)
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test",
                                     headers=issuer.headers()) as http:
-            # GitHub I/O can hold preparation/tools/result application longer than the
-            # query timeout. The query must complete before that operation is released.
+            # Execution runs independently; slow serial callbacks hold history replies.
+            if phase in {"preparation", "tool", "result"}:
+                broker.timeout = 0.02
+                blocked = await http.get("/api/flows/3/conversation?limit=1")
+                assert blocked.status_code == 504, blocked.text
+                assert not release.is_set()
+                release.set()
+                await asyncio.wait_for(store.done.wait(), 2)
+                broker.timeout = 1
             first = await http.get("/api/flows/3/conversation?limit=1")
             assert first.status_code == 200, first.text
             assert first.json()["items"][0]["role"] == "user"
@@ -160,7 +168,7 @@ async def test_http_query_while_worker_or_control_busy_and_idle(tmp_path, phase,
             assert third.json()["sessions"][0]["starts_at_beginning"]
             assert third.json()["sessions"][0]["reached_end"]
             assert (await http.get("/api/flows/99/conversation")).status_code == 404
-            assert broker._inflight == 0
+            assert not broker._inflight
     finally:
         release.set()
         server.cancel()

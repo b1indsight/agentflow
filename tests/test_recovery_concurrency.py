@@ -209,7 +209,6 @@ async def test_runtime_sweeps_continue_while_result_recovery_waits():
     runtime.access = SimpleNamespace(close=AsyncMock())
     runtime.results = SimpleNamespace(recover_pending_results=AsyncMock(side_effect=recover))
     runtime.gateway = Gateway()
-    runtime.worker_handler = SimpleNamespace(notify_jobs=Mock())
     runtime.reconciler = SimpleNamespace(stop=Mock())
     loops = [runtime._sweep_results, runtime._sweep_assignments, runtime._sweep_reviews]
     runtime._tasks = [asyncio.create_task(loop()) for loop in loops]

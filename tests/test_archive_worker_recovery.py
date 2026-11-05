@@ -9,16 +9,15 @@ import pytest
 from app.communication.gateway import Gateway
 from app.contracts.protocol import (
     PROTOCOL_VERSION,
+    AcceptResultResponse,
     AssignmentArguments,
     InitialTask,
     InitialTaskResult,
-    ResultAccepted,
     RevisionTask,
     Succeeded,
     parse_server_message,
 )
 from app.contracts.receipts import decode_result_inbox
-from app.controler.workers.handler import WorkerHandler
 from app.controler.workers.transport import serve_worker
 from app.controler.workflow.archive import archive_progress
 from app.controler.workflow.service import ControlService
@@ -28,7 +27,6 @@ from app.worker.execution.lifecycle import WorkerExecution
 from app.worker.execution.workspaces import RepositoryWorkspaces
 from app.worker.runtime import WorkerRootLock
 from app.worker.state.execution import ExecutionState
-from app.worker.transport.client import WorkerClient
 from tests.github import RecordingGitHub
 from tests.test_archive_recovery import ready_archive, receive
 from tests.test_coordinator import coordinator
@@ -37,6 +35,7 @@ from tests.test_remote_e2e import QueueConnection, QueueSocket
 from tests.test_vcs import _git_fixture
 from tests.test_worker_executor import RecordingAgent, RecordingToolCaller
 from tests.test_workflow_transactions import accepted_coding
+from tests.worker_fakes import run_worker, server_runtime, worker_runtime
 
 
 class ArchiveSocket(QueueSocket):
@@ -53,7 +52,7 @@ class AckConnection(QueueConnection):
     async def recv(self):
         raw = await super().recv()
         if self.drop_ack and any(
-            isinstance(item, ResultAccepted) for item in parse_server_message(raw).payload
+            isinstance(item, AcceptResultResponse) for item in parse_server_message(raw).payload
         ):
             raise ConnectionError("ACK lost")
         return raw
@@ -73,7 +72,7 @@ class ObservedExecution(WorkerExecution):
 
 async def connect_once(store, subject, executor, journal, *, drop_ack=False, owner=None):
     outgoing, incoming = asyncio.Queue(), asyncio.Queue()
-    handler = WorkerHandler(
+    handler = server_runtime(
         subject,
         database=store.database,
         peers=Gateway(),
@@ -90,7 +89,7 @@ async def connect_once(store, subject, executor, journal, *, drop_ack=False, own
         owner = ObservedExecution(
             archive_id=archive_id, worker_id="worker-a", executor=executor, state=journal
         )
-    client = WorkerClient(
+    client = worker_runtime(
         worker_id="worker-a",
         worker_token="secret",
         serve_ws_url="ws://test",
@@ -99,11 +98,11 @@ async def connect_once(store, subject, executor, journal, *, drop_ack=False, own
     )
     server = asyncio.create_task(
         serve_worker(
-            ArchiveSocket(outgoing, incoming), worker_tokens={"worker-a": "secret"}, handler=handler
+            ArchiveSocket(outgoing, incoming), worker_tokens={"worker-a": "secret"}, serve=handler.serve_worker_session
         )
     )
     worker = asyncio.create_task(
-        client.run_connection(AckConnection(outgoing, incoming, drop_ack=drop_ack))
+        run_worker(client, AckConnection(outgoing, incoming, drop_ack=drop_ack))
     )
     try:
         if drop_ack:
@@ -231,7 +230,7 @@ async def test_original_worker_recovers_cleanup_and_replays_without_redeleting(
     try:
         store.workers.recover_abandoned_assignments()
         if window in {"started-lost", "result-started-lost"}:
-            # The original frozen token must survive a lost Started frame and expired grace.
+            # The original frozen token must survive a lost Started message and expired grace.
             now = store.now()
             store._db._clock = lambda: now + timedelta(hours=1)
             store.workers.sweep_expired_assignments()

@@ -8,7 +8,8 @@ from datetime import timedelta
 from loguru import logger
 
 from app.communication.gateway import Gateway
-from app.contracts.protocol import ServerMessage, WorkerMessage
+from app.communication.session import Session
+from app.contracts.protocol import Register, ServerMessageUnion, WorkerMessageUnion
 from app.controler.access import OwnerAccess
 from app.controler.config import ServerSettings
 from app.controler.console.sync import ConsoleSynchronizer
@@ -18,8 +19,8 @@ from app.controler.reconciliation.labels import LabelSynchronizer
 from app.controler.reconciliation.projects import ProjectSync
 from app.controler.reconciliation.pull_requests import Reconciler
 from app.controler.review.judge import BubJudge
+from app.controler.workers.callbacks import ServerCallbacks
 from app.controler.workers.conversation import ConversationBroker, ConversationService
-from app.controler.workers.handler import WorkerHandler
 from app.controler.workflow.coordinator import JobCoordinator
 from app.controler.workflow.effects import ResultEffects
 from app.controler.workflow.results import ResultApplication
@@ -62,8 +63,8 @@ class ServerRuntime:
             effects=effects,
             database=database,
         )
-        tools = FlowToolService(github, database=database)
-        self.gateway = Gateway[WorkerMessage, ServerMessage]()
+        self.tools = FlowToolService(github, database=database)
+        self.gateway = Gateway[WorkerMessageUnion, ServerMessageUnion]()
         conversations = ConversationBroker(self.gateway)
         self.worker_tokens = {
             worker_id: token.get_secret_value()
@@ -76,23 +77,12 @@ class ServerRuntime:
             database=database,
             results=self.results,
         )
-        self.worker_handler = WorkerHandler(
-            self.coordinator,
-            peers=self.gateway,
-            database=database,
-            tools=tools,
-            results=self.results,
-            heartbeat_interval=self.settings.worker_heartbeat_interval,
-            heartbeat_timeout=self.settings.worker_heartbeat_timeout,
-            poll_interval=self.settings.worker_poll_interval,
-            metrics=self.metrics,
-        )
         self.judge = BubJudge(model=settings.judge_model, api_key=settings.judge_api_key,
                          api_base=settings.judge_api_base, timeout=settings.judge_timeout_seconds)
         self._triage_task: asyncio.Task[None] | None = None
         self.service = ControlService(
             plugins,
-            self.worker_handler.notify_jobs,
+            self.gateway.wake_all,
             database=database,
         )
         self.conversations = ConversationService(conversations, database=database)
@@ -101,7 +91,7 @@ class ServerRuntime:
             self.settings,
             database=database,
             plugins=plugins,
-            jobs_available=self.worker_handler.notify_jobs,
+            jobs_available=self.gateway.wake_all,
         )
         self.reconciler = Reconciler(
             github,
@@ -136,6 +126,33 @@ class ServerRuntime:
         self.result_store = ResultStore(database)
         self.webhook_store = WebhookStore(database)
         self._tasks: list[asyncio.Task[None]] = []
+
+    async def serve_worker_session(
+        self,
+        worker_id: str,
+        register: Register,
+        session: Session[WorkerMessageUnion, ServerMessageUnion],
+    ) -> None:
+        """Mount server business callbacks, transferring connection cleanup to Gateway."""
+        try:
+            callbacks = ServerCallbacks(
+                self.coordinator,
+                worker_id=worker_id,
+                register=register,
+                session=session,
+                database=self.database,
+                tools=self.tools,
+                results=self.results,
+                notify_jobs=self.gateway.wake_all,
+                heartbeat_interval=self.settings.worker_heartbeat_interval,
+                heartbeat_timeout=self.settings.worker_heartbeat_timeout,
+                poll_interval=self.settings.worker_poll_interval,
+                metrics=self.metrics,
+            )
+        except BaseException:
+            await session.close()
+            raise
+        await self.gateway.serve(worker_id, session, callbacks, replace=True)
 
     def startup(self) -> None:
         self.database.init_db()
@@ -179,7 +196,7 @@ class ServerRuntime:
                         requeued,
                         failed,
                     )
-                    self.worker_handler.notify_jobs()
+                    self.gateway.wake_all()
             except Exception:  # noqa: BLE001 -- keep periodic recovery alive after operational errors
                 logger.exception("assignment recovery sweep failed; retrying next sweep")
 
@@ -191,14 +208,14 @@ class ServerRuntime:
                     concurrency=self.settings.result_recovery_concurrency,
                     batch_size=self.settings.result_recovery_batch_size,
                 )
-                self.worker_handler.notify_jobs()
+                self.gateway.wake_all()
             except Exception:  # noqa: BLE001 -- a failed inbox query is retried next sweep
                 logger.exception("result recovery sweep failed; retrying next sweep")
             await asyncio.sleep(self.settings.worker_sweep_interval)
 
     def _settle_reviews(self) -> None:
         if self.reviews.claim_due():
-            self.worker_handler.notify_jobs()
+            self.gateway.wake_all()
 
         if self._triage_task is None or self._triage_task.done():
             self._triage_task = asyncio.create_task(self._run_triage())
@@ -214,7 +231,7 @@ class ServerRuntime:
                 await self.coordinator.triage(batch, self.judge)
             except Exception:  # noqa: BLE001 -- isolate unavailable providers/feedback batches
                 logger.exception("review prerequisite interrupted; unfinished batch will be retried")
-        self.worker_handler.notify_jobs()
+        self.gateway.wake_all()
 
     async def _sweep_reviews(self) -> None:
         """Keep settle independent of both lease errors and slow remote receipt checks."""

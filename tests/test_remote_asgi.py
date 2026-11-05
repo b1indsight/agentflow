@@ -6,8 +6,9 @@ from starlette.testclient import TestClient
 
 from app.communication.gateway import Gateway
 from app.contracts.protocol import (
-    AcceptResult,
     AcceptResultArguments,
+    AcceptResultRequest,
+    AcceptResultResponse,
     Assignment,
     AssignmentArguments,
     ExecuteResult,
@@ -20,13 +21,12 @@ from app.contracts.protocol import (
     InitialTaskResult,
     Register,
     Registered,
-    ResultAccepted,
     Started,
     Succeeded,
     accept_result_id,
     call_header,
     execution_call_id,
-    frame_header,
+    message_header,
     parse_server_message,
     result_header,
     terminal_id,
@@ -35,13 +35,12 @@ from app.controler.api import create_app
 from app.controler.config import ServerSettings
 from app.controler.runtime import ServerRuntime
 from app.controler.workers.conversation import ConversationBroker, ConversationService
-from app.controler.workers.handler import WorkerHandler
 from app.controler.workflow.coordinator import JobCoordinator
 from app.controler.workflow.tools import FlowToolService
 from app.domain.models import Job, JobKind, JobState
 from app.persistence.store import Store
 from app.telemetry.metrics import Metrics
-from tests.wire import worker_frame
+from tests.wire import worker_message
 from tests.worker_fakes import result_application
 
 
@@ -108,14 +107,11 @@ class AsgiRuntime(ServerRuntime):
         gateway_coordinator = AsgiCoordinator(attempt_id, store)
         self.gateway = Gateway()
         self.worker_tokens = {"worker-1": "worker-secret"}
-        self.worker_handler = WorkerHandler(
-            gateway_coordinator,
-            database=store.database,
-            peers=self.gateway,
-            poll_interval=0.01,
-            tools=gateway_coordinator.tools,
-            results=gateway_coordinator.results,
-        )
+        self.coordinator = gateway_coordinator
+        self.database = store.database
+        self.tools = gateway_coordinator.tools
+        self.results = gateway_coordinator.results
+        self.settings.worker_poll_interval = 0.01
         self.conversations = ConversationService(
             ConversationBroker(self.gateway),
             database=store.database,
@@ -136,13 +132,13 @@ class AsgiRuntime(ServerRuntime):
 
 def test_real_asgi_websocket_completes_a_postgresql_job(store: Store, monkeypatch) -> None:
     disconnected = Event()
-    handle = WorkerHandler.handle
+    serve = ServerRuntime.serve_worker_session
 
     async def handle_until_disconnected(self, worker_id, register, connection):
-        await handle(self, worker_id, register, connection)
+        await serve(self, worker_id, register, connection)
         disconnected.set()
 
-    monkeypatch.setattr(WorkerHandler, "handle", handle_until_disconnected)
+    monkeypatch.setattr(ServerRuntime, "serve_worker_session", handle_until_disconnected)
     flow = store.flows.create_flow("owner/repo", 8, installation_id=42)
     attempt = store.flows.create_attempt(flow.id)
     flow.current_attempt_id = attempt.id
@@ -162,7 +158,7 @@ def test_real_asgi_websocket_completes_a_postgresql_job(store: Store, monkeypatc
     ):
         socket.send_text(
             Register(
-                **frame_header(None),
+                **message_header(None),
                 control="register",
                 payload=[],
                 worker_id="worker-1",
@@ -173,12 +169,12 @@ def test_real_asgi_websocket_completes_a_postgresql_job(store: Store, monkeypatc
         assignment = None
         epoch = None
         while assignment is None:
-            frame = parse_server_message(socket.receive_text())
-            if isinstance(frame, Registered):
+            message = parse_server_message(socket.receive_text())
+            if isinstance(message, Registered):
                 ready = True
-            for item in frame.payload:
+            for item in message.payload:
                 assert isinstance(item, Assignment) and ready
-                assignment, epoch = item, frame.connection_epoch
+                assignment, epoch = item, message.connection_epoch
         assert epoch is not None
         work = assignment.arguments
         assert assignment.message_id == execution_call_id(work.job_id, work.assignment_token)
@@ -187,7 +183,7 @@ def test_real_asgi_websocket_completes_a_postgresql_job(store: Store, monkeypatc
             method="server.execution_started",
             arguments=ExecutionIdentity(job_id=work.job_id, assignment_token=work.assignment_token),
         )
-        socket.send_text(worker_frame(started, epoch=epoch).model_dump_json())
+        socket.send_text(worker_message(started, epoch=epoch).model_dump_json())
         terminal = Succeeded(
             job_id=work.job_id,
             assignment_token=work.assignment_token,
@@ -200,7 +196,7 @@ def test_real_asgi_websocket_completes_a_postgresql_job(store: Store, monkeypatc
             assignment_token=work.assignment_token,
             result=terminal.result,
         )
-        acceptance = AcceptResult(
+        acceptance = AcceptResultRequest(
             **call_header(accept_result_id(outcome.message_id)),
             method="server.accept_result",
             arguments=AcceptResultArguments(
@@ -209,13 +205,13 @@ def test_real_asgi_websocket_completes_a_postgresql_job(store: Store, monkeypatc
                 result_id=outcome.message_id,
             ),
         )
-        socket.send_text(worker_frame(outcome, acceptance, epoch=epoch).model_dump_json())
+        socket.send_text(worker_message(outcome, acceptance, epoch=epoch).model_dump_json())
         while True:
-            frame = parse_server_message(socket.receive_text())
-            if frame.payload:
-                assert len(frame.payload) == 1 and frame.connection_epoch == epoch
-                accepted = frame.payload[0]
-                assert isinstance(accepted, ResultAccepted)
+            message = parse_server_message(socket.receive_text())
+            if message.payload:
+                assert len(message.payload) == 1 and message.connection_epoch == epoch
+                accepted = message.payload[0]
+                assert isinstance(accepted, AcceptResultResponse)
                 assert accepted.reply_to == acceptance.message_id
                 assert accepted.result.state == "done"
                 assert (accepted.result.job_id, accepted.result.assignment_token) == (

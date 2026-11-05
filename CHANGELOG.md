@@ -8,6 +8,34 @@
 
 ## Unreleased
 
+- Worker/server 两端 Runtime 统一持有 Gateway，以同一个 Session 事件入口驱动每连接的
+  worker 状态/业务回调与 ServerCallbacks；移除旧 Client/Handler 消费循环，按 `package.method`
+  精确注册请求模型与回调；回复按 `reply_to` 关联原调用，worker 不再注册工具名来接收结果。
+  通信关闭不取消执行，控制收件与提交/停止证据保持独立；history 与其他 payload 统一 FIFO。
+  删除 WorkerClient，主动拨号、认证、退避重连与连接任务关闭等待直接归 WorkerRuntime；
+  Connection 接口与 WebSocketTransport 一并归入 worker/runtime.py，删除 transport/client.py；
+  WebSocket IO 适配行为不变，进程停机仍等待执行清理后释放 root lock。
+  通信层统一使用 message 命名：非控制变体为 WorkerMessage / ServerMessage，共用 message_header；
+  完整消息钩子为 on_message / on_message_done，不再引入 frame 术语或保留旧名别名，wire 字段不变。
+  结果接纳类型明确分为 AcceptResultRequest、AcceptResultResponse 与 ResultAcceptance，
+  分别表示请求、回复及回复数据；不保留旧类型名，server.accept_result 路由与 wire 格式不变。
+  Dispatcher 统一把验证错误交给连接业务对象的 `on_error`，请求回调只接收注册模型；
+  删除逐方法重复错误转发，保留处理顺序与业务关联校验。
+  普通回复由 Dispatcher 按原调用 ID、method 和结果模型关联，匹配后先执行可选 on_reply，
+  再交付给该调用的接收函数；删除 worker 状态类的工具回复中转，连接退出只清关联、不取消执行。
+  WorkerRuntime 平级挂载 WorkerStateCallbacks 与 WorkerBusinessCallbacks，两者互不持有或调用；
+  状态类处理连接与执行状态协议，业务类处理 Flow 工具发送/回复和 worker.history，server 保留 ServerFlowCallbacks。
+  删除 Session 查询表、Responder、history handler/busy 队列及混合消息 shortcut；history 与慢回调互相等待。
+  Broker 通过配对 Session/Dispatcher 登记临时回复，管理查询 Future、4/64 限额及发送加等待总预算；
+  实际关闭及时失败查询，EOF 先排空已收到的回复/拒收；history 不刷新执行存活期限。
+  Flow 通过共同 driver 的 before_wait 自行管理观察与退休，授权后的拒收由 Dispatcher 路由回原调用。
+  正常终态仍可消费已发工具的迟到回复，stop 撤销关联，旧执行缺少恢复决定时禁止工具重放。
+  server 保留 Flow 请求路由，历史任务结果仍可通过持久 assignment 身份核对后接纳。
+  工具 Future 仍归执行 owner，Flow 权限和停止检查保持原顺序，未注册工具不会触发业务执行。
+  wire 升级为 v17：可关联的 payload 校验失败整批拒收，返回固定两字段 `tool_result.error`，
+  无诊断详情；普通 Future 失败后连接继续，关键协议失败保留证据并恢复关闭。
+  Assignment 拒绝经 SQL 预启动围栏写入 control 结果并提交后收尾；journal5/inbox1 不变。
+  双端需协调升级，无 v16 wire fallback；本次不包含部署、事务 outbox 或 HA。
 - 统一 worker/server 协议第二步：Session 接入逐项分派、有界控制 ACK 与原连接 history 关联，
   worker 使用单一业务消费循环；终态 `[T,A]` 在应用提交后接纳，停止 `[R,B]` 仍需真实凭据与 effects 收敛。
   接入 journal5 / inbox1 持久读写、已知旧格式只读转换和来源 SQL，移除旧 wire 调用与内联 journal 模型；

@@ -7,7 +7,9 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from app.communication.gateway import Gateway
+from app.communication.session import Session
 from app.contracts.protocol import (
+    AcceptResultResponse,
     AcceptStop,
     AcceptStopArguments,
     Assignment,
@@ -21,15 +23,14 @@ from app.contracts.protocol import (
     InitialTaskResult,
     RecoveryDescriptor,
     Registered,
-    ResultAccepted,
-    ServerFrame,
+    ServerMessage,
     StopAccepted,
     StopExecution,
     StopFence,
     StopResult,
     accept_stop_id,
     call_header,
-    frame_header,
+    message_header,
     parse_server_message,
     parse_worker_message,
     result_header,
@@ -37,7 +38,6 @@ from app.contracts.protocol import (
     stop_receipt_id,
     terminal_digest,
 )
-from app.controler.workers.handler import WorkerHandler
 from app.controler.workers.transport import serve_worker
 from app.controler.workflow.results import ResultApplication
 from app.controler.workflow.service import ControlService
@@ -48,7 +48,6 @@ from app.worker.execution.executor import WorkerExecutor
 from app.worker.execution.lifecycle import WorkerExecution, WorkerProtocolError
 from app.worker.execution.vcs import _run
 from app.worker.state.execution import ExecutionState
-from app.worker.transport.client import WorkerClient
 from tests.github import RecordingGitHub
 from tests.test_coordinator import coordinator
 from tests.test_remote_e2e import QueueConnection, QueueSocket
@@ -58,13 +57,13 @@ from tests.test_worker_handler import (
     RecordingStore,
     ScriptedSocket,
     handler_for,
-    register_frame,
+    register_message,
     sent_items,
     terminal_items,
-    worker_frame,
+    worker_message,
 )
 from tests.test_worker_workspaces import acquire, managed_seed
-from tests.worker_fakes import NoPendingStops
+from tests.worker_fakes import NoPendingStops, run_worker, server_runtime, worker_runtime
 
 
 def assignment():
@@ -87,7 +86,7 @@ def assignment():
 class AckConnection:
     def __init__(self, request, lost=False, epoch="epoch"):
         self.request, self.lost, self.sent = request, lost, []
-        self.epoch, self.frames = epoch, []
+        self.epoch, self.messages = epoch, []
         self.receipt = asyncio.Event()
         self.step = 0
 
@@ -96,7 +95,7 @@ class AckConnection:
 
     async def send(self, raw):
         message = parse_worker_message(raw)
-        self.frames.append(message)
+        self.messages.append(message)
         self.sent.extend(message.payload)
         if any(isinstance(item, StopResult) for item in message.payload):
             self.receipt.set()
@@ -109,8 +108,8 @@ class AckConnection:
                 method="worker.stop",
                 arguments=self.request,
             )
-            return ServerFrame(
-                **frame_header(self.epoch), control=None, payload=[call]
+            return ServerMessage(
+                **message_header(self.epoch), control=None, payload=[call]
             ).model_dump_json()
         if self.step == 2:
             await self.receipt.wait()
@@ -120,12 +119,12 @@ class AckConnection:
             result = StopAccepted(
                 **result_header(call.message_id), method="server.accept_stop", result=self.request
             )
-            return ServerFrame(
-                **frame_header(self.epoch), control=None, payload=[result]
+            return ServerMessage(
+                **message_header(self.epoch), control=None, payload=[result]
             ).model_dump_json()
         if self.step == 3:
             return Registered(
-                **frame_header(self.epoch),
+                **message_header(self.epoch),
                 control="registered",
                 payload=[],
                 recovery=None,
@@ -159,7 +158,7 @@ async def test_stop_kills_owned_process_and_child_then_replays_lost_ack(tmp_path
         async with asyncio.timeout(5):
             while not ready.exists():
                 await asyncio.sleep(0.01)
-        client = WorkerClient(
+        client = worker_runtime(
             worker_id="w",
             worker_token="secret",
             serve_ws_url="unused",
@@ -168,7 +167,7 @@ async def test_stop_kills_owned_process_and_child_then_replays_lost_ack(tmp_path
         )
         request = StopFence(job_id=1, flow_id=1, assignment_token="token", request_id="stop")
         with pytest.raises(ConnectionError, match="ack lost"):
-            await client.run_connection(AckConnection(request, lost=True))
+            await run_worker(client, AckConnection(request, lost=True))
         assert journal.load().stopped is not None
         assert not journal.load().acknowledged
         # Both processes must actually be gone, not just absent from the asyncio task table.
@@ -181,7 +180,7 @@ async def test_stop_kills_owned_process_and_child_then_replays_lost_ack(tmp_path
                         break
                     await asyncio.sleep(0.01)
         restarted_state = ExecutionState(tmp_path)
-        restarted = WorkerClient(
+        restarted = worker_runtime(
             worker_id="w",
             worker_token="secret",
             serve_ws_url="unused",
@@ -194,7 +193,7 @@ async def test_stop_kills_owned_process_and_child_then_replays_lost_ack(tmp_path
         )
         connection = AckConnection(request, epoch="new")
         with pytest.raises(ConnectionError, match="script complete"):
-            await restarted.run_connection(connection)
+            await run_worker(restarted, connection)
         assert any(isinstance(message, StopResult) for message in connection.sent)
         assert journal.load().acknowledged
     finally:
@@ -237,7 +236,7 @@ async def test_replacing_client_during_stop_preserves_cleanup_and_original_recei
     request = StopFence(job_id=1, flow_id=1, assignment_token="token", request_id="stop")
 
     def connect(request, epoch="epoch"):
-        client = WorkerClient(
+        client = worker_runtime(
             worker_id="w",
             worker_token="test",
             serve_ws_url="unused",
@@ -245,7 +244,7 @@ async def test_replacing_client_during_stop_preserves_cleanup_and_original_recei
             read_history=state.read,
         )
         connection = AckConnection(request, epoch=epoch)
-        return asyncio.create_task(client.run_connection(connection)), connection
+        return asyncio.create_task(run_worker(client, connection)), connection
 
     first = second = None
     try:
@@ -271,9 +270,9 @@ async def test_replacing_client_during_stop_preserves_cleanup_and_original_recei
             message.result for message in connection.sent if isinstance(message, StopResult)
         )
         assert all(
-            frame.connection_epoch == "new"
-            for frame in connection.frames
-            if any(isinstance(item, StopResult) for item in frame.payload)
+            message.connection_epoch == "new"
+            for message in connection.messages
+            if any(isinstance(item, StopResult) for item in message.payload)
         )
         assert receipt.execution_nonce == state.load().execution_nonce
         assert receipt.request_id == request.request_id
@@ -293,7 +292,7 @@ async def test_restarted_worker_does_not_infer_stopped_from_absent_task(tmp_path
     journal = ExecutionState(tmp_path)
     journal.record_received(work)
     journal.record_started()
-    client = WorkerClient(
+    client = worker_runtime(
         worker_id="w",
         worker_token="secret",
         serve_ws_url="unused",
@@ -302,7 +301,7 @@ async def test_restarted_worker_does_not_infer_stopped_from_absent_task(tmp_path
     )
     request = StopFence(job_id=1, flow_id=1, assignment_token="token", request_id="stop")
     with pytest.raises(WorkerProtocolError, match="ownership is unknown"):
-        await client.run_connection(AckConnection(request))
+        await run_worker(client, AckConnection(request))
     assert journal.load().stopped is None
 
 
@@ -362,7 +361,7 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path, o
             pass
 
     gateway_coordinator = Coordinator()
-    handler = WorkerHandler(
+    handler = server_runtime(
         gateway_coordinator,
         database=store.database,
         peers=Gateway(),
@@ -374,7 +373,7 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path, o
     session = ExecutionState(root)
     executor = Executor(root, RecordingAgent(), worker_id="worker-1", state=session)
     unrelated = await acquire(executor.workspaces, 999) if overflow else None
-    client = WorkerClient(
+    client = worker_runtime(
         worker_id="worker-1",
         worker_token="worker-secret",
         serve_ws_url="unused",
@@ -385,10 +384,10 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path, o
         serve_worker(
             QueueSocket(to_serve, to_worker),
             worker_tokens={"worker-1": "worker-secret"},
-            handler=handler,
+            serve=handler.serve_worker_session,
         )
     )
-    worker = asyncio.create_task(client.run_connection(Connection(to_serve, to_worker)))
+    worker = asyncio.create_task(run_worker(client, Connection(to_serve, to_worker)))
     allocations = []
     try:
         async with asyncio.timeout(10):
@@ -399,7 +398,7 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path, o
                 store.flows.update_flow(flow)
                 store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
                 started.clear()
-                handler.notify_jobs()
+                handler.gateway.wake_all()
                 while not started.is_set():
                     if server.done():
                         server.result()
@@ -409,7 +408,7 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path, o
                 binding = session.load().workspace
                 path = executor.workspaces.path(binding)
                 allocations.append((binding, path.stat().st_ino))
-                ControlService(jobs_available=handler.notify_jobs, database=store.database).cancel(
+                ControlService(jobs_available=handler.gateway.wake_all, database=store.database).cancel(
                     flow
                 )
                 while not session.load().acknowledged:
@@ -501,7 +500,7 @@ async def test_stopping_consumes_a_and_requires_real_r_before_b(delivery):
         async def receive_text(self):
             self._step += 1
             if self._step == 1:
-                return register_frame(
+                return register_message(
                     recovery=RecoveryDescriptor(
                         job_id=5,
                         assignment_token="token",
@@ -511,16 +510,16 @@ async def test_stopping_consumes_a_and_requires_real_r_before_b(delivery):
                     payload=[terminal_accept],
                 ).model_dump_json()
             await self.command.wait()
-            frame = next(
-                frame
-                for frame in map(parse_server_message, self.sent)
-                if any(isinstance(item, StopExecution) for item in frame.payload)
+            message = next(
+                message
+                for message in map(parse_server_message, self.sent)
+                if any(isinstance(item, StopExecution) for item in message.payload)
             )
-            epoch = frame.connection_epoch
+            epoch = message.connection_epoch
             assert epoch is not None
             if self._step == 2:
                 if delivery == "B_only":
-                    return worker_frame(epoch, accept).model_dump_json()
+                    return worker_message(epoch, accept).model_dump_json()
                 tool = FlowToolRequest(
                     **call_header(),
                     method="flow.open_pr",
@@ -541,14 +540,14 @@ async def test_stopping_consumes_a_and_requires_real_r_before_b(delivery):
                 if delivery != "split":
                     items.append(accept)
                 return Heartbeat(
-                    **frame_header(epoch),
+                    **message_header(epoch),
                     control="heartbeat",
                     job_id=5,
                     assignment_token="token",
                     payload=items,
                 ).model_dump_json()
             if self._step == 3 and delivery == "split":
-                return worker_frame(epoch, accept).model_dump_json()
+                return worker_message(epoch, accept).model_dump_json()
             raise ConnectionError("script complete")
 
     stops = Stops()
@@ -559,15 +558,15 @@ async def test_stopping_consumes_a_and_requires_real_r_before_b(delivery):
         "token",
     )
     handler = handler_for(store)
-    await serve_worker(socket, handler=handler, worker_tokens={"worker-1": "worker-secret"})
-    frames = list(map(parse_server_message, socket.sent))
+    await serve_worker(socket, serve=handler.serve_worker_session, worker_tokens={"worker-1": "worker-secret"})
+    messages = list(map(parse_server_message, socket.sent))
     stop_index = next(
         i
-        for i, frame in enumerate(frames)
-        if any(isinstance(item, StopExecution) for item in frame.payload)
+        for i, message in enumerate(messages)
+        if any(isinstance(item, StopExecution) for item in message.payload)
     )
-    assert not any(isinstance(frame, Registered) for frame in frames[:stop_index])
-    assert not any(isinstance(item, ResultAccepted) for item in sent_items(socket.sent))
+    assert not any(isinstance(message, Registered) for message in messages[:stop_index])
+    assert not any(isinstance(item, AcceptResultResponse) for item in sent_items(socket.sent))
     handler.tools.execute.assert_not_called()
     accepted = [item for item in sent_items(socket.sent) if isinstance(item, StopAccepted)]
     if delivery in {"combined", "split"}:
@@ -628,7 +627,7 @@ async def test_stop_reconnect_reconciles_successor(
             if failure == "cleanup" and self.cleanups == 1:
                 raise OSError("temporary cleanup failure")
 
-    handler = WorkerHandler(
+    handler = server_runtime(
         subject,
         database=store.database,
         peers=Gateway(),
@@ -639,7 +638,7 @@ async def test_stop_reconnect_reconciles_successor(
     )
     session = ExecutionState(tmp_path)
     executor = Executor()
-    client = WorkerClient(
+    client = worker_runtime(
         worker_id="worker-1",
         worker_token="worker-secret",
         serve_ws_url="unused",
@@ -672,17 +671,17 @@ async def test_stop_reconnect_reconciles_successor(
                 serve_worker(
                     Socket(incoming, outgoing),
                     worker_tokens={"worker-1": "worker-secret"},
-                    handler=handler,
+                    serve=handler.serve_worker_session,
                 )
             ),
-            asyncio.create_task(client.run_connection(connection_type(incoming, outgoing))),
+            asyncio.create_task(run_worker(client, connection_type(incoming, outgoing))),
         )
 
     server, worker = connect(LostAckConnection if failure == "lost-ack" else QueueConnection)
     try:
         async with asyncio.timeout(5):
             await started.wait()
-            ControlService(database=store.database, jobs_available=handler.notify_jobs).cancel(
+            ControlService(database=store.database, jobs_available=handler.gateway.wake_all).cancel(
                 flows[0]
             )
             with pytest.raises((OSError, ConnectionError), match="cleanup failure|ACK lost"):
@@ -766,10 +765,10 @@ async def test_stop_wakes_assignment_waiting_for_missing_a(monkeypatch):
                         error="terminal without acceptance",
                     )
                 )
-                return worker_frame(epoch, result).model_dump_json()
+                return worker_message(epoch, result).model_dump_json()
             await waiting.wait()
             requested = True
-            handler.notify_jobs()
+            handler.gateway.wake_all()
             await asyncio.wait_for(command.wait(), 1)
             raise ConnectionError("stop delivered while A was absent")
 
@@ -780,14 +779,14 @@ async def test_stop_wakes_assignment_waiting_for_missing_a(monkeypatch):
 
     store, socket = StoppingStore(), MissingAcceptSocket()
     handler = handler_for(store)
-    receive = handler._wait_for_message
+    receive = Session.next_event
 
-    async def observed(connection, wake, timeout):
+    async def observed(connection, *, until=None):
         if store.job.result_applied_at is not None:
             waiting.set()
-        return await receive(connection, wake, timeout)
+        return await receive(connection, until=until)
 
-    monkeypatch.setattr(handler, "_wait_for_message", observed)
-    await serve_worker(socket, handler=handler, worker_tokens={"worker-1": "worker-secret"})
+    monkeypatch.setattr(Session, "next_event", observed)
+    await serve_worker(socket, serve=handler.serve_worker_session, worker_tokens={"worker-1": "worker-secret"})
     assert command.is_set()
-    assert not any(isinstance(item, ResultAccepted) for item in sent_items(socket.sent))
+    assert not any(isinstance(item, AcceptResultResponse) for item in sent_items(socket.sent))

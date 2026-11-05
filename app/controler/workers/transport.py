@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hmac
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Protocol
 from uuid import uuid4
 
@@ -15,14 +15,14 @@ from app.communication.session import Session, SessionOverflow, Transport
 from app.contracts.protocol import (
     ProtocolError,
     Register,
-    ServerFrame,
     ServerMessage,
-    WorkerMessage,
-    frame_header,
+    ServerMessageUnion,
+    WorkerMessageUnion,
+    message_header,
     parse_worker_message,
 )
-from app.controler.workers.conversation import conversation_result_key
-from app.controler.workers.handler import ProtocolViolation, WorkerHandler
+from app.contracts.validation import parse_worker_input
+from app.controler.workers.errors import ProtocolViolation
 
 
 class WorkerSocket(Transport, Protocol):
@@ -64,10 +64,10 @@ def _authenticated_identity(
     return identity if hmac.compare_digest(authorization, expected_authorization) else None
 
 
-def control_ack(message_id: str) -> ServerFrame:
-    """Build a receipt-only frame; it grants no connection or assignment authority."""
-    return ServerFrame(
-        **(frame_header(None) | {"ack": True, "ack_id": message_id}),
+def control_ack(message_id: str) -> ServerMessage:
+    """Build a receipt-only message; it grants no connection or assignment authority."""
+    return ServerMessage(
+        **(message_header(None) | {"ack": True, "ack_id": message_id}),
         control=None,
         payload=[],
     )
@@ -77,27 +77,28 @@ async def serve_worker(
     socket: WorkerSocket,
     *,
     worker_tokens: Mapping[str, str],
-    handler: WorkerHandler,
+    serve: Callable[
+        [str, Register, Session[WorkerMessageUnion, ServerMessageUnion]], Awaitable[None]
+    ],
 ) -> None:
-    """Validate the actual first frame, then transfer all Session cleanup to handle()."""
+    """Validate the actual first message, then transfer cleanup to the Runtime's driver."""
     worker_id = _authenticated_identity(socket.headers, worker_tokens)
     if worker_id is None:
         await socket.close(code=1008)
         return
-    session: Session[WorkerMessage, ServerMessage] | None = None
+    session: Session[WorkerMessageUnion, ServerMessageUnion] | None = None
     close_code = 1000
     handed_off = False
     try:
         try:
             await socket.accept()
-            # A dispatching Session would discard unsolicited replies before this check.
+            # Authenticate the first protocol message before publishing a Session.
             register = parse_worker_message(await socket.receive_text())
             if not isinstance(register, Register) or register.worker_id != worker_id:
                 raise ProtocolViolation("worker registration does not match authenticated identity")
             session = Session(
                 _SocketTransport(socket),
-                parse=parse_worker_message,
-                reply_key=conversation_result_key,
+                parse=parse_worker_input,
                 make_ack=control_ack,
                 epoch=uuid4().hex,
             )
@@ -108,14 +109,14 @@ async def serve_worker(
                 event="worker_disconnected", reason_code="connection_lost", worker_id=worker_id
             ).opt(exception=exc).info("")
         except (ProtocolViolation, SessionOverflow, ValidationError) as exc:
-            # Keep handshake mapping aligned with WorkerHandler's business error mapping.
+            # Keep handshake mapping aligned with ServerCallbacks' business error mapping.
             invalid = isinstance(exc, ValidationError)
             reason = "message failed protocol validation" if invalid else str(exc)
             close_code = 1008
             logger.warning("worker protocol violation: {}", reason)
             try:
                 error = ProtocolError(
-                    **frame_header(None),
+                    **message_header(None),
                     control="error",
                     payload=[],
                     code="invalid_message" if invalid else "protocol_violation",
@@ -128,9 +129,9 @@ async def serve_worker(
             except (WebSocketDisconnect, ConnectionError):
                 pass
         else:
-            # No await between transfer and handle entering its own try/finally.
+            # No await between transfer and the Runtime entering its own cleanup scope.
             handed_off = True
-            await handler.handle(worker_id, register, session)
+            await serve(worker_id, register, session)
     finally:
         if not handed_off:
             if session is not None:

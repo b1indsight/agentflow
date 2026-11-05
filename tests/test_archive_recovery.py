@@ -14,7 +14,7 @@ from app.contracts.protocol import (
     RecoveryDescriptor,
     Succeeded,
 )
-from app.controler.workers.handler import ProtocolViolation, WorkerHandler
+from app.controler.workers.errors import ProtocolViolation
 from app.controler.workflow.service import ControlService
 from app.domain.models import DeliveryState, FlowState, JobKind, JobState
 from app.persistence.jobs import JobStore
@@ -24,8 +24,8 @@ from tests.test_merge import route_merge
 from tests.test_result_recovery import (
     completed_open_initial as completed_open_initial,  # noqa: PLC0414
 )
-from tests.test_worker_handler import ScriptedSocket, register_frame
 from tests.test_workflow_transactions import accepted_coding
+from tests.worker_fakes import server_callbacks, server_runtime
 
 
 async def ready_archive(store, *, start=True):
@@ -166,21 +166,23 @@ async def test_merged_coding_process_without_exit_proof_cannot_unlock_archive(st
     flow = store.flows.get_flow(old.flow_id)
     await route_merge(store, flow)
     subject = coordinator(store, RecordingGitHub())
-    handler = WorkerHandler(
+    runtime = server_runtime(
         subject, database=store.database,
         peers=Gateway(),
         tools=subject.tools,
         results=subject.results,
     )
+    handler = server_callbacks(runtime, "worker-a", "restart")
     store.workers.worker_connected("worker-a", PROTOCOL_VERSION, "restart")
     with pytest.raises(ProtocolViolation, match="archive blocked"):
         if journal == "missing":
-            await handler._reject_missing_journal("worker-a", "restart", old.id)
+            await handler._reject_missing_journal(old.id)
         else:
-            await handler._recover(ScriptedSocket(), "worker-a", "restart", register_frame("worker-a", RecoveryDescriptor(
+            handler.register.recovery = RecoveryDescriptor(
                 job_id=old.id, assignment_token=old.assignment_token,
                 state="started", executor_active=False,
-            )))
+            )
+            await handler._recover()
     assert store.jobs.get_job(old.id).state is JobState.RUNNING
     assert store.jobs.get_job(old.id).result_received_at is None
     assert store.workers.get_flow_execution(flow.id).released_at is None
