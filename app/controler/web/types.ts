@@ -81,7 +81,8 @@ export interface InferenceNotice {
     | "configuration"
     | "invalid_response"
     | "output_limit"
-    | "backend_error";
+    | "backend_error"
+    | "cancelled";
   last_worker_id: string | null;
   backend: string | null;
   stop_reason: "max_attempts" | "deadline" | "non_retryable" | "unavailable";

@@ -65,26 +65,44 @@ def test_git_parent_or_symlink_cannot_be_an_inference_root(monkeypatch, tmp_path
 
 
 @pytest.mark.parametrize("backend", ["codex", "amp"])
-async def test_total_inference_budget_reaps_active_cli_before_deleting_workspace(monkeypatch, tmp_path, backend):
+@pytest.mark.parametrize("stop", ["timeout", "cancel"])
+async def test_total_inference_budget_reaps_active_cli_before_deleting_workspace(
+    monkeypatch, tmp_path, backend, stop,
+):
     # Continuous CLI activity renews coding's idle timer, but cannot extend inference's total budget.
     spawn = asyncio.create_subprocess_exec
     children = []
     directories = []
+    entered = asyncio.Event()
 
     async def cli(*args, **kwargs):
         directories.append(Path(kwargs["cwd"]))
         child = await spawn(sys.executable, "-c",
                             "import os,time\nwhile True: os.write(2,b'.'); time.sleep(.01)", **kwargs)
         children.append(child)
+        entered.set()
         return child
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", cli)
     monkeypatch.setattr("app.worker.execution.inference.shutil.which", lambda _: "/controlled-cli")
     agent = (CodexAgent if backend == "codex" else AmpCodingAgent)(trusted_host=True, timeout=10)
     inference = NativeAgentInference(agent, root=tmp_path, backend=backend, timeout=10, enabled=True)
-    with pytest.raises(InferenceError, match="execution_timeout"):
-        await inference.infer(InferenceTask(messages=[InferenceMessage(role="user", content="Answer")],
-                                             timeout_seconds=.15))
+    running = asyncio.create_task(inference.infer(InferenceTask(
+        messages=[InferenceMessage(role="user", content="Answer")],
+        timeout_seconds=.15 if stop == "timeout" else 10,
+    )))
+    try:
+        if stop == "cancel":
+            await asyncio.wait_for(entered.wait(), 1)
+            running.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await running
+        else:
+            with pytest.raises(InferenceError, match="execution_timeout"):
+                await running
+    finally:
+        running.cancel()
+        await asyncio.gather(running, return_exceptions=True)
     assert children and children[0].returncode is not None
     assert not directories[0].exists()
     with pytest.raises(ProcessLookupError):

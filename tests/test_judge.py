@@ -4,22 +4,19 @@ import asyncio
 import json
 import sys
 from contextlib import asynccontextmanager
-from unittest.mock import Mock
 
 import pytest
 from pydantic import SecretStr, ValidationError
 
 from app.controler.review.judge import ReviewJudge
-from app.domain.inference_models import InferenceCallFailed
+from app.domain.inference_models import InferenceError
 from app.domain.models import TriageVerdict
 from app.inference.bub import BubInference
-from app.inference.router import InferenceRouter
 from tests.review_memory import review_context as context
 
 
 def judge_for(*, timeout=60, **configuration):
-    return ReviewJudge(InferenceRouter(local=BubInference(**configuration), workers=Mock()),
-                       timeout=timeout)
+    return ReviewJudge(BubInference(**configuration), timeout=timeout)
 
 
 @asynccontextmanager
@@ -123,14 +120,14 @@ async def test_missing_configuration_never_starts_a_process(monkeypatch):
     assert decision.failure == "configuration"
 
 
-async def test_temporary_model_error_retries_three_times_and_is_sanitized():
+async def test_provider_returns_one_sanitized_failure_without_owning_retries():
     async with model_endpoint(status=500, output="secret-diagnostic") as (url, calls):
-        with pytest.raises(InferenceCallFailed) as caught:
+        with pytest.raises(InferenceError) as caught:
             await judge_for(model="openai:test", api_key=SecretStr("fake"),
                             api_base=url).triage(context())
     assert caught.value.failure.code == "backend_unavailable"
-    assert len(calls) == 3
-    assert "secret-diagnostic" not in caught.value.summary.model_dump_json()
+    assert len(calls) == 1
+    assert "secret-diagnostic" not in caught.value.failure.model_dump_json()
 
 
 async def test_incomplete_context_waits_without_model_call():
@@ -208,7 +205,7 @@ async def test_timeout_and_cancellation_kill_and_reap_child(monkeypatch, error, 
     monkeypatch.setattr("app.inference.bub._exchange", exchange)
     judge = judge_for(model="openai:test", api_key=SecretStr("fake"))
     if failure:
-        with pytest.raises(InferenceCallFailed) as caught:
+        with pytest.raises(InferenceError) as caught:
             await judge.triage(context())
         assert caught.value.failure.code == failure
     else:

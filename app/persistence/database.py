@@ -17,6 +17,10 @@ from app.persistence.records import Row
 from app.persistence.schema import SCHEMAS
 
 
+class _WorkflowOwnershipChanged(Exception):
+    """Retry discovery after rolling back just the locks taken by lock_workflow."""
+
+
 class Database:
     """Own database resources independently of the services and repositories using them.
 
@@ -86,21 +90,33 @@ class Database:
         )
 
     def lock_workflow(self, flow_id: int) -> Flow | None:
-        """Lock the worker before the Flow, then read fresh lifecycle state for a command."""
+        """Lock both slots' owners before the Flow, rediscovering ownership after waits."""
         if self._bound_connection is None:
             raise RuntimeError("workflow lock requires a transaction")
         connection = self._bound_connection
-        connection.execute(
+        owners = (
             "SELECT worker_id FROM workers WHERE worker_id IN"
             " (SELECT worker_id FROM flow_executions WHERE flow_id=%s)"
             " OR current_job_id IN (SELECT id FROM jobs WHERE flow_id=%s)"
-            " ORDER BY worker_id FOR UPDATE",
-            (flow_id, flow_id),
-        ).fetchall()
-        with connection.cursor(row_factory=class_row(Flow)) as cursor:
-            return cursor.execute(
-                "SELECT * FROM flows WHERE id=%s FOR NO KEY UPDATE", (flow_id,)
-            ).fetchone()
+            " OR current_inference_job_id IN (SELECT id FROM jobs WHERE flow_id=%s)"
+        )
+        while True:
+            try:
+                with connection.transaction():
+                    locked = connection.execute(owners + " ORDER BY worker_id FOR UPDATE",
+                                                (flow_id, flow_id, flow_id)).fetchall()
+                    with connection.cursor(row_factory=class_row(Flow)) as cursor:
+                        flow = cursor.execute("SELECT * FROM flows WHERE id=%s FOR NO KEY UPDATE",
+                                              (flow_id,)).fetchone()
+                    current = connection.execute(owners, (flow_id, flow_id, flow_id)).fetchall()
+                    if not {row["worker_id"] for row in current} <= {row["worker_id"] for row in locked}:
+                        # A claim can publish a new slot while this statement waits for
+                        # the Flow. Release this savepoint's locks instead of taking the
+                        # newly discovered worker after the Flow (a lock-order inversion).
+                        raise _WorkflowOwnershipChanged
+                    return flow
+            except _WorkflowOwnershipChanged:
+                continue
 
     def lock_job(self, job_id: int) -> Job | None:
         """Lock a job after its workflow has been locked in the same transaction."""
@@ -116,6 +132,15 @@ class Database:
             "SELECT worker_id FROM workers WHERE worker_id=%s FOR UPDATE",
             (worker_id,),
         ).fetchone()
+
+    @staticmethod
+    def _lock_workers(connection: Connection[Row]) -> None:
+        """Fence cross-slot selection/recovery before taking any Flow or job lock.
+
+        Inference's local preference compares slots across workers. Lock in the same
+        deterministic order as workflow locking, never skip a locked local candidate.
+        """
+        connection.execute("SELECT worker_id FROM workers ORDER BY worker_id FOR UPDATE").fetchall()
 
     def init_db(self) -> None:
         """Initialize the complete schema in its foreign-key dependency order."""

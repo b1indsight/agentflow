@@ -34,7 +34,7 @@ class BubInference:
 
     @property
     def configured(self) -> bool:
-        """Partial configuration must be diagnosed locally, not silently routed elsewhere."""
+        """Any supplied setting enables preflight; only a complete configuration can register."""
         return bool(self.model or (self.api_key and self.api_key.get_secret_value().strip())
                     or (self.api_base and self.api_base.strip()))
 

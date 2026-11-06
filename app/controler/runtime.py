@@ -21,18 +21,17 @@ from app.controler.reconciliation.pull_requests import Reconciler
 from app.controler.review.judge import ReviewJudge
 from app.controler.workers.callbacks import ServerCallbacks
 from app.controler.workers.conversation import ConversationBroker, ConversationService
-from app.controler.workers.inference import InferencePool
 from app.controler.workflow.coordinator import JobCoordinator
 from app.controler.workflow.effects import ResultEffects
+from app.controler.workflow.inference import InferencePending, JobInference
 from app.controler.workflow.results import ResultApplication
 from app.controler.workflow.service import ControlService
 from app.controler.workflow.tools import FlowToolService
 from app.domain.inference_models import InferenceError
 from app.github import GitHubApp
 from app.inference.bub import BubInference
-from app.inference.router import InferenceRouter
+from app.inference.local import serve_local_inference
 from app.persistence.database import Database
-from app.persistence.inference_notices import InferenceNoticeStore
 from app.persistence.readiness import database_ready
 from app.persistence.results import ResultStore
 from app.persistence.reviews import ReviewStore
@@ -82,12 +81,9 @@ class ServerRuntime:
             database=database,
             results=self.results,
         )
-        self.inference_pool = InferencePool(self.gateway, database=database)
-        local = BubInference(model=settings.judge_model, api_key=settings.judge_api_key,
-                             api_base=settings.judge_api_base)
-        self.inference = InferenceRouter(local=local if local.configured else None,
-                                         workers=self.inference_pool)
-        self.inference_notices = InferenceNoticeStore(database)
+        self.local_bub = BubInference(model=settings.judge_model, api_key=settings.judge_api_key,
+                                      api_base=settings.judge_api_base)
+        self.inference = JobInference(database, self.gateway.wake_all)
         self._triage_task: asyncio.Task[None] | None = None
         self.service = ControlService(
             plugins,
@@ -152,7 +148,6 @@ class ServerRuntime:
                 database=self.database,
                 tools=self.tools,
                 results=self.results,
-                inference=self.inference_pool,
                 notify_jobs=self.gateway.wake_all,
                 heartbeat_interval=self.settings.worker_heartbeat_interval,
                 heartbeat_timeout=self.settings.worker_heartbeat_timeout,
@@ -179,12 +174,26 @@ class ServerRuntime:
             asyncio.create_task(self._sweep_results()),
             asyncio.create_task(self._sweep_reviews()),
         ]
+        if self.local_bub.configured:
+            if self.local_bub.configuration_failure() is None:
+                self._tasks.append(asyncio.create_task(self._serve_bub()))
+            else:
+                logger.warning("local bub worker unavailable: configuration preflight failed")
         if self.settings.metrics_token and self.settings.metrics_token.get_secret_value():
             self._tasks.append(asyncio.create_task(self.metrics.run(
                 self.settings.database_url, self.settings.metrics_interval_seconds,
             )))
         self._settle_reviews()
         self._ready = True
+
+    async def _serve_bub(self) -> None:
+        """Supervise the infer-only peer using the same Session and job driver as remote workers."""
+        while True:
+            try:
+                await serve_local_inference(self.serve_worker_session, self.local_bub)
+            except Exception:  # noqa: BLE001 -- restart the local connection, not a model attempt
+                logger.exception("local bub worker disconnected; reconnecting")
+            await asyncio.sleep(self.settings.worker_poll_interval)
 
     async def ready(self) -> bool:
         if not self._ready or self._readiness_lock.locked():
@@ -237,20 +246,18 @@ class ServerRuntime:
             logger.exception("could not read pending review batches")
             return
         for batch in batches:
-            judge = ReviewJudge(self.inference, timeout=self.settings.judge_timeout_seconds)
+            judge = ReviewJudge(JobInference(
+                self.database, self.gateway.wake_all, flow_id=batch.flow_id, batch_id=batch.id,
+            ), timeout=self.settings.judge_timeout_seconds)
             try:
                 await self.coordinator.triage(batch, judge)
+            except InferencePending:
+                continue  # Other batches can enqueue while this job waits for a worker or result.
             except InferenceError as error:
                 logger.warning("review inference interrupted for batch {}: {}",
                                batch.id, error.failure.code)
             except Exception:  # noqa: BLE001 -- isolate unavailable providers/feedback batches
                 logger.exception("review prerequisite interrupted; unfinished batch will be retried")
-            if judge.failure_summary is not None and judge.failure_summary.notify:
-                try:
-                    await asyncio.to_thread(self.inference_notices.append, batch.flow_id,
-                                            batch.id, judge.failure_summary)
-                except Exception:  # noqa: BLE001 -- notification failure must not retry inference
-                    logger.exception("inference notice was not persisted for batch {}", batch.id)
         self.gateway.wake_all()
 
     async def _sweep_reviews(self) -> None:

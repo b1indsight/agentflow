@@ -211,14 +211,14 @@ class JobCoordinator:
         # Signing may outlive the lease or race a webhook; validate even without a gateway.
         if not self.workers.clear_preparation(job.id, worker, token, epoch):
             raise PreparationStale("assignment changed before dispatch")
-        delivery = self.deliveries.get_delivery(job.flow_id)
+        delivery = self.deliveries.get_delivery(job.required_flow_id)
         if delivery is not None and delivery.supersedes(job.kind):
             if delivery.state is DeliveryState.CLOSED:
                 return JobState.DONE
             await self.fail(job, "PR merged before task dispatch")
             return JobState.FAILED
         return AssignmentArguments(
-            job_id=job.id, flow_id=job.flow_id, assignment_token=token, task=prepared, secret=secret
+            job_id=job.id, flow_id=job.required_flow_id, assignment_token=token, task=prepared, secret=secret
         )
 
     async def _prepare_task(
@@ -278,7 +278,7 @@ class JobCoordinator:
         invalid internal state raises ValueError. Failure handling may itself raise
         ResultPending while durable failure effects await recovery.
         """
-        flow = self.flows.get_flow(job.flow_id)
+        flow = self.flows.get_flow(job.required_flow_id)
         if flow is None:
             return JobState.FAILED
         if self._retired(flow, job, deliveries=self.deliveries):
@@ -462,7 +462,7 @@ class JobCoordinator:
     async def _assignment_secret(self, job: Job, task: ExecutionTask) -> AssignmentSecret | None:
         if not isinstance(task, (InitialTask, RevisionTask)):
             return None
-        flow = self.flows.get_flow(job.flow_id)
+        flow = self.flows.get_flow(job.required_flow_id)
         if flow is None or flow.installation_id is None:
             raise ValueError("coding assignment has no GitHub installation")
         capability = await self.github.installation(flow.installation_id).repository(flow.repo).create_push_capability()
@@ -475,7 +475,7 @@ class JobCoordinator:
         )
 
     def mark_started(self, job: Job, task: ExecutionTask, worker_id: str) -> None:
-        flow = self.flows.get_flow(job.flow_id)
+        flow = self.flows.get_flow(job.required_flow_id)
         if flow is None:
             raise ValueError(f"flow {job.flow_id} disappeared")
         if self._retired(flow, job, deliveries=self.deliveries):
@@ -506,7 +506,7 @@ class JobCoordinator:
         """Persist control failures too, so recovery and live failures use the same atomic finish."""
         with self.database.transaction() as tx:
             jobs_tx = self.jobs.using(tx)
-            tx.lock_workflow(job.flow_id)
+            tx.lock_workflow(job.required_flow_id)
             current = tx.lock_job(job.id)
             if current is None or current.state is not JobState.RUNNING:
                 return

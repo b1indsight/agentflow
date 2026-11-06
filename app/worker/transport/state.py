@@ -13,6 +13,7 @@ from app.contracts.protocol import (
     AcceptStop,
     AcceptStopArguments,
     Assignment,
+    CancelJob,
     ExecuteResult,
     ExecutionIdentity,
     Heartbeat,
@@ -45,6 +46,7 @@ from app.contracts.protocol import (
 )
 from app.contracts.validation import RejectedMessage
 from app.domain.inference_models import InferenceCapability
+from app.inference.transport import WorkerInferenceCallbacks
 from app.worker.execution.lifecycle import WorkerExecution, WorkerProtocolError
 
 
@@ -80,10 +82,12 @@ class WorkerStateCallbacks:
         execution: WorkerExecution,
         on_ready: Callable[[bool], None],
         inference: InferenceCapability | None,
+        inference_callbacks: WorkerInferenceCallbacks,
     ) -> None:
         self.worker_id, self.session, self.execution = worker_id, session, execution
         self.on_ready = on_ready
         self.inference = inference
+        self.inference_callbacks = inference_callbacks
         self.register: Register | None = None
         self.ready = False
         self.expected_result: AcceptResultRequest | None = None
@@ -135,6 +139,7 @@ class WorkerStateCallbacks:
             **message_header(None),
             control="register",
             worker_id=self.worker_id,
+            execute=True,
             recovery=recovery,
             inference=self.inference,
             payload=[self.expected_result] if self.expected_result is not None else [],
@@ -159,6 +164,10 @@ class WorkerStateCallbacks:
             ):
                 return  # The error hook checks the epoch before using correlations.
             raise WorkerProtocolError("message belongs to another connection epoch")
+        if isinstance(message, CancelJob):
+            if not self.ready:
+                raise WorkerProtocolError("job cancellation requires completed registration")
+            self.inference_callbacks.cancel_job(message)
         if isinstance(message, Registered):
             if self.ready or self.expected_stop is not None:
                 raise WorkerProtocolError("unexpected registration decision")
@@ -181,6 +190,7 @@ class WorkerStateCallbacks:
             )
 
     def on_closed(self) -> None:
+        self.ready = False
         self.on_ready(False)
 
     def _observe_execution(self) -> None:
@@ -189,7 +199,7 @@ class WorkerStateCallbacks:
     def heartbeat(self) -> WorkerMessageUnion | None:
         assignment = self.execution.lease()
         if assignment is None:
-            return None
+            return self.inference_callbacks.heartbeat()
         return Heartbeat(
             **message_header(self.session.epoch),
             control="heartbeat",

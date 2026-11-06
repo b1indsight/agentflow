@@ -137,10 +137,11 @@ class RecordingStore(RepositoryViews, Store):
     def get_worker_execution(self, worker_id: str):
         return None
 
-    def worker_connected(self, worker_id: str, protocol_version: int, connection_epoch: str = ""):
+    def worker_connected(self, worker_id: str, protocol_version: int, connection_epoch: str = "",
+                         *, execute: bool = True):
         self.presence[worker_id] = "online"
         self.connection_epoch = connection_epoch
-        return connected_worker(worker_id, protocol_version, connection_epoch)
+        return connected_worker(worker_id, protocol_version, connection_epoch, execute=execute)
 
     def worker_disconnected(
         self,
@@ -281,6 +282,7 @@ class RecordingCoordinator(JobCoordinator):
         self.failures: list[str] = []
 
     async def prepare(self, job: Job) -> ExecutionTask | JobState:
+        assert job.flow_id is not None
         return InitialTask(
             flow_id=job.flow_id,
             attempt_id=11,

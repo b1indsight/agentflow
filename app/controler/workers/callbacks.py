@@ -17,10 +17,12 @@ from app.contracts.protocol import (
     AcceptStop,
     Assignment,
     AssignmentArguments,
+    CancelJob,
     ConversationResult,
     ExecuteResult,
     ExecutionTask,
     Heartbeat,
+    InferenceRequest,
     InferenceResult,
     PayloadValidationError,
     ProtocolError,
@@ -57,11 +59,11 @@ from app.contracts.result_models import ResultPending
 from app.contracts.validation import HeartbeatHeaders, RejectedMessage
 from app.controler.workers.errors import ProtocolViolation
 from app.controler.workers.flow import ServerFlowCallbacks
-from app.controler.workers.inference import InferencePool
 from app.controler.workflow.coordinator import JobCoordinator
 from app.controler.workflow.preparation import PreparationStale, PreparationState
 from app.controler.workflow.results import ResultApplication
 from app.controler.workflow.tools import FlowToolService
+from app.domain.inference_models import InferenceFailure
 from app.domain.models import DeliveryState, Job, JobKind, JobState, WorkerRecord
 from app.persistence.database import Database
 from app.persistence.deliveries import DeliveryStore
@@ -85,7 +87,6 @@ class ServerCallbacks:
         tools: FlowToolService,
         results: ResultApplication,
         notify_jobs: Callable[[], None],
-        inference: InferencePool,
         heartbeat_interval: float = 15.0,
         heartbeat_timeout: float = 45.0,
         poll_interval: float = 2.0,
@@ -96,11 +97,12 @@ class ServerCallbacks:
         self.stops, self.workers = StopStore(database), WorkerStore(database)
         self.coordinator, self.results = coordinator, results
         self.notify_jobs, self.metrics = notify_jobs, metrics
-        self.inference = inference
         self.heartbeat_interval, self.heartbeat_timeout = heartbeat_interval, heartbeat_timeout
         self.poll_interval = poll_interval
         self.worker: WorkerRecord | None = None
         self.current: tuple[Job, str, ExecutionTask | None] | None = None
+        self.inference_current: Job | None = None
+        self.inference_cancelling = False
         self.starting = False
         self.stopping: StopIntent | None = None
         self.stopped: StopResult | None = None
@@ -170,7 +172,7 @@ class ServerCallbacks:
 
     def on_published(self) -> None:
         self.worker = self.workers.worker_connected(
-            self.worker_id, self.register.protocol_version, self.epoch
+            self.worker_id, self.register.protocol_version, self.epoch, execute=self.register.execute,
         )
 
     async def on_opened(self) -> None:
@@ -198,8 +200,8 @@ class ServerCallbacks:
                     self.on_result,
                 )
         self.registered = self.current is not None
-        if self.registered:
-            self.inference.ready(self.worker_id, self.session, self.register.inference)
+        if self.registered and self.register.inference is not None:
+            self.workers.worker_ready(self.worker_id, self.epoch, self.register.inference)
 
     def _matches_current(self, job_id: int, token: str) -> bool:
         return (
@@ -252,12 +254,14 @@ class ServerCallbacks:
                 )
             )
             self.registered = True
-            self.inference.ready(self.worker_id, self.session, self.register.inference)
+            if self.register.inference is not None:
+                self.workers.worker_ready(self.worker_id, self.epoch, self.register.inference)
+                self.notify_jobs()
         if self.stopping is None and not self.starting:
             stop = self.stops.pending(self.worker_id)
             if stop is not None:
                 await self._begin_stop(stop)
-        if self.current is None and self.stopping is None:
+        if self.register.execute and self.current is None and self.stopping is None:
             token = uuid4().hex
             job = self.workers.assign_job(self.worker_id, token, self.epoch)
             if job is not None:
@@ -282,24 +286,64 @@ class ServerCallbacks:
                     )
                 )
                 self.receive_deadline = asyncio.get_running_loop().time() + self.heartbeat_timeout
+        await self._poll_inference()
         now = asyncio.get_running_loop().time()
-        if self.current is None and self.stopping is None:
+        if self.current is None and self.inference_current is None and self.stopping is None:
             return now + self.poll_interval
         if now >= self.receive_deadline:
             raise TimeoutError("worker heartbeat timeout")
-        return self.receive_deadline
+        return min(self.receive_deadline, now + self.poll_interval)
+
+    async def _poll_inference(self) -> None:
+        """The same driver claims a second slot; provider work never runs in this callback."""
+        current = self.inference_current
+        if current is not None:
+            stored = self.jobs.get_job(current.id)
+            if stored is not None and stored.state is not JobState.RUNNING:
+                assert current.inference is not None and current.inference.current_task is not None
+                self.routes.forget_reply(current.inference.current_task.request_id)
+                self.inference_current, self.inference_cancelling = None, False
+            elif not self.inference_cancelling and self.workers.inference_needs_cancel(current.id):
+                assert current.assignment_token is not None
+                await self.session.send(CancelJob(
+                    **message_header(self.epoch), control="cancel_job", payload=[],
+                    job_id=current.id, assignment_token=current.assignment_token,
+                ))
+                self.inference_cancelling = True
+        if self.inference_current is None and self.register.inference is not None:
+            token = uuid4().hex
+            job = self.workers.assign_job(self.worker_id, token, self.epoch, slot="infer")
+            if job is not None:
+                assert job.inference is not None and job.inference.current_task is not None
+                task = job.inference.current_task
+                self.inference_current = job
+                await self._send(InferenceRequest(
+                    **call_header(task.request_id), method="worker.infer", arguments=task,
+                    job_id=job.id, assignment_token=token,
+                ))
+                if self.current is None and self.stopping is None:
+                    self.receive_deadline = asyncio.get_running_loop().time() + self.heartbeat_timeout
+
+    def _inference_heartbeat(self, message: WorkerMessageUnion | RejectedMessage) -> bool:
+        current = self.inference_current
+        return (isinstance(message, (Heartbeat, HeartbeatHeaders)) and current is not None
+                and message.job_id == current.id
+                and message.assignment_token == current.assignment_token)
 
     def _validate_control(self, message: WorkerMessageUnion | RejectedMessage) -> None:
         if message.connection_epoch != self.epoch or isinstance(message, Register):
             raise ProtocolViolation("message does not match the connection epoch")
         if isinstance(message, (Heartbeat, HeartbeatHeaders)):
+            if self._inference_heartbeat(message):
+                return
             if self.starting:
                 raise ProtocolViolation("assignment must be acknowledged with Started")
             self._validate_active(message.job_id, message.assignment_token)
 
     async def on_message(self, message: WorkerMessageUnion) -> None:
         # Independent inference/history and validation errors do not prove coding progress.
-        self._refresh_receive = message.connection_epoch == self.epoch and (
+        liveness = not self._inference_heartbeat(message) or (self.current is None and self.stopping is None)
+        self._refresh_receive = liveness and message.connection_epoch == self.epoch and (
             message.control is not None
             or any(
                 not isinstance(item, (ValidationErrorResult, ConversationResult, InferenceResult))
@@ -313,6 +357,11 @@ class ServerCallbacks:
         ):
             return
         self._validate_control(message)
+        if isinstance(message, Heartbeat) and self._inference_heartbeat(message):
+            self.workers.heartbeat_assignment(
+                message.job_id, self.worker_id, message.assignment_token, self.epoch,
+            )
+            return
         if (
             isinstance(message, Heartbeat)
             and self.stopping is None
@@ -390,6 +439,24 @@ class ServerCallbacks:
             raise ProtocolViolation("result conflicts with persisted assignment facts")
         await self.results.apply(job.id)
 
+    async def on_inference_result(self, item: InferenceResult,
+                                  message: WorkerMessageUnion | RejectedMessage) -> None:
+        current = self.inference_current
+        if (current is None or current.id != item.job_id
+                or current.assignment_token != item.assignment_token
+                or current.inference is None or current.inference.current_task is None
+                or current.inference.current_task.request_id != item.reply_to):
+            return  # A late or foreign result cannot complete or release another slot.
+        receipt = self.workers.record_assignment_result(
+            item.job_id, self.worker_id, item.assignment_token, self.epoch, item,
+        )
+        if receipt in {"conflict", "rejected"}:
+            return
+        await self.results.apply(item.job_id)
+        self.routes.forget_reply(item.reply_to)
+        self.inference_current, self.inference_cancelling = None, False
+        self.notify_jobs()
+
     async def on_accept_result(self, item: AcceptResultRequest, message: WorkerMessageUnion) -> None:
         if self.stopping is not None:
             self._validate_active(item.arguments.job_id, item.arguments.assignment_token)
@@ -447,8 +514,21 @@ class ServerCallbacks:
             self.session.set_deadline(None)
             self.notify_jobs()
 
-    async def on_error(self, error: ValidationErrorResult, message: WorkerMessageUnion) -> None:
+    async def on_error(self, error: ValidationErrorResult,
+                       message: WorkerMessageUnion | RejectedMessage) -> None:
         if message.connection_epoch == self.epoch:
+            inference = self.inference_current
+            if (inference is not None and inference.inference is not None
+                    and inference.inference.current_task is not None
+                    and error.method == "worker.infer"
+                    and error.reply_to == inference.inference.current_task.request_id):
+                assert inference.assignment_token is not None
+                await self.on_inference_result(InferenceResult(
+                    **result_header(error.reply_to), method="worker.infer",
+                    job_id=inference.id, assignment_token=inference.assignment_token,
+                    failure=InferenceFailure(code="invalid_response"),
+                ), message)
+                return
             if self.current is not None:
                 job, token, _ = self.current
                 if (
@@ -529,6 +609,16 @@ class ServerCallbacks:
             self.routes.reject_reply(item, "message payload failed validation")
 
         async def respond() -> None:
+            # Job replies have no temporary Future to reject. Persist the authorized
+            # failure now so malformed answers cannot turn into retryable timeouts.
+            for item in replies:
+                if item.method == "worker.infer":
+                    await self.on_error(ValidationErrorResult(
+                        **result_header(item.reply_to), method=item.method,
+                        error=PayloadValidationError(
+                            code="validation_error", message="message payload failed validation",
+                        ),
+                    ), message)
             await self.session.send(
                 ServerMessage(
                     **message_header(self.epoch),
@@ -580,7 +670,6 @@ class ServerCallbacks:
         raise error
 
     def on_closed(self) -> None:
-        self.inference.closed(self.worker_id, self.session)
         self.workers.worker_disconnected(
             self.worker_id, self.disconnect_reason, connection_epoch=self.epoch
         )
@@ -594,12 +683,14 @@ class ServerCallbacks:
             self.routes.expect_reply(item, ExecuteResult, self.on_result)
         elif isinstance(item, StopExecution):
             self.routes.expect_reply(item, StopResult, self.on_stopped)
+        elif isinstance(item, InferenceRequest):
+            self.routes.expect_reply(item, InferenceResult, self.on_inference_result)
         try:
             return await self.session.send(
                 ServerMessage(**message_header(self.epoch), control=None, payload=[item])
             )
         except BaseException:
-            if isinstance(item, (Assignment, StopExecution)):
+            if isinstance(item, (Assignment, StopExecution, InferenceRequest)):
                 self.routes.forget_reply(item.message_id)
             if tracked:
                 if previous is None:
@@ -761,7 +852,7 @@ class ServerCallbacks:
             and not (job.kind is JobKind.ARCHIVE and recovery.archive_resume)
         ):
             reason = "worker restarted after remote execution started"
-            delivery = self.deliveries.get_delivery(job.flow_id)
+            delivery = self.deliveries.get_delivery(job.required_flow_id)
             if delivery is not None and delivery.supersedes(job.kind):
                 raise ProtocolViolation(
                     "archive blocked: original executor exit cannot be confirmed"
@@ -798,7 +889,7 @@ class ServerCallbacks:
         ):
             self.notify_jobs()
             return
-        delivery = self.deliveries.get_delivery(job.flow_id)
+        delivery = self.deliveries.get_delivery(job.required_flow_id)
         if delivery is not None and delivery.state in {DeliveryState.CLOSED, DeliveryState.MERGED}:
             action = "reopen" if delivery.state is DeliveryState.CLOSED else "archive"
             raise ProtocolViolation(

@@ -16,6 +16,7 @@ const failureLabels: Record<InferenceNotice["last_failure_code"], string> = {
   invalid_response: "推理响应无效",
   output_limit: "推理输出超限",
   backend_error: "推理后端错误",
+  cancelled: "推理任务已取消",
 };
 const stopLabels: Record<InferenceNotice["stop_reason"], string> = {
   max_attempts: "已达尝试上限",
@@ -83,7 +84,10 @@ export function InferenceNotices({ id }: { id: number }) {
       <h2 className="panel-title" id="inference-notices-heading">
         推理通知
       </h2>
-      <p className="panel-note">记录未成功的推理轮次，不代表整个 Flow 失败。</p>
+      <p className="panel-note">
+        记录未成功的推理轮次，不代表整个 Flow
+        失败。尝试次数包含已授权派发但结果未知的任务。
+      </p>
       <WindowList
         count={items.length}
         label="推理通知"

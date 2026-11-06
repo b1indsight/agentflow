@@ -14,6 +14,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, SecretStr, model_validator
 
 from app.domain.delivery_models import DeliveryReceipt
+from app.domain.inference_models import InferenceCapability, InferenceJob
 
 
 def utcnow() -> datetime:
@@ -48,6 +49,7 @@ class JobKind(StrEnum):
     INITIAL = "initial"  # 首轮编码
     REVISION = "revision"  # 修订
     ARCHIVE = "archive"  # 收尾归档
+    INFERENCE = "inference"
 
 
 class JobState(StrEnum):
@@ -162,14 +164,16 @@ class FlowToolCall(BaseModel):
 
 class Job(BaseModel):
     id: int
-    flow_id: int
+    flow_id: int | None
     kind: JobKind
     state: JobState
+    inference: InferenceJob | None = None
     attempt: int = 0
     heartbeat_at: datetime | None = None
     assigned_worker_id: str | None = None
     assignment_token: str | None = None
     started_at: datetime | None = None
+    dispatch_authorized_at: datetime | None = None
     lease_expires_at: datetime | None = None
     recovery_deadline: datetime | None = None
     result_payload: dict[str, JsonValue] | None = None
@@ -190,12 +194,32 @@ class Job(BaseModel):
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
 
+    @model_validator(mode="after")
+    def _kind_fields(self) -> Job:
+        if self.kind is JobKind.INFERENCE:
+            if self.inference is None:
+                raise ValueError("inference jobs require a frozen inference call")
+        elif self.flow_id is None or self.inference is not None:
+            raise ValueError("coding jobs require a Flow and cannot contain inference")
+        return self
+
+    @property
+    def required_flow_id(self) -> int:
+        """Narrow the coding-only boundary; inference provenance grants no Flow authority."""
+        if self.kind is JobKind.INFERENCE or self.flow_id is None:
+            raise ValueError("inference jobs have no coding Flow authority")
+        return self.flow_id
+
 
 class WorkerRecord(BaseModel):
     draining: bool = False
     worker_id: str
     protocol_version: int
     status: WorkerStatus
+    execute: bool = True
+    inference: InferenceCapability | None = None
+    current_inference_job_id: int | None = None
+    last_inference_assigned_at: datetime | None = None
     connection_epoch: str | None = None
     current_job_id: int | None = None
     first_connected_at: datetime

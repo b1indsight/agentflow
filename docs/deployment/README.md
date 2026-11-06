@@ -46,10 +46,11 @@ App 需有 Issues write 权限，程序不会自动申请权限或扩大仓库�
 Judge 配置只提供给 control，在 serve 的 `.env` 配置 `FLOWTOOL_JUDGE_MODEL`、
 `FLOWTOOL_JUDGE_API_KEY`，可选 `FLOWTOOL_JUDGE_API_BASE` 和 `FLOWTOOL_JUDGE_TIMEOUT_SECONDS`。
 
-希望使用 worker 推理时，移除或清空 control 的 model/key/base 三项；不能保留示例中的占位值。
-只配置其中一部分会在本地诊断，不会自动切换 worker。总预算沿用
-`FLOWTOOL_JUDGE_TIMEOUT_SECONDS`（默认 60 秒），包含最多 3 次尝试、通信与退避；清理可有有界余量，
-但超过预算的答案不再接纳。worker 无需 bub key，使用 `FLOWTOOL_CODING_AGENT=codex|amp`
+完整配置且依赖预检通过时，control 自动管理一个仅提供 infer 的 bub mini worker，无需额外部署。
+其就绪、推理槽空闲且能力匹配时优先领取；未配置、半配、忙或其他条件不满足时选普通 worker。
+若只希望使用 Codex/Amp，清空 control 的 model/key/base 三项。预检失败只记录安全分类，不注册 bub。
+总预算沿用 `FLOWTOOL_JUDGE_TIMEOUT_SECONDS`（默认 60 秒），包含排队、最多 3 次授权派发、通信与退避，
+截止和次数持久化；清理可有有界余量，但超过预算的答案不再接纳。worker 无需 bub key，使用 `FLOWTOOL_CODING_AGENT=codex|amp`
 及对应专用账号的原生认证、trusted-host 和隔离配置。能力登记只检查本机可执行文件和目录，
 不证明 provider 登录、额度或外部服务可用。
 
@@ -57,10 +58,13 @@ Judge 配置只提供给 control，在 serve 的 `.env` 配置 `FLOWTOOL_JUDGE_M
 会话，结束、超时和取消时清理目录；不向 agent 注入 Flow/GitHub capability，也不记录推理 journal。
 空目录与“只生成答案”的指令不能禁止原生工具或自定义凭据产生副作用；仍须遵守本页隔离要求。
 每台 worker 一个独立推理槽，编码忙仍可推理，draining/recovering/failed 的 worker 不选用。
+普通 worker 同时提供 execute/infer，无需已有 Flow/repo 绑定；推理取消不会停止编码任务。
+本地 bub 使用每次独立的临时空目录，不创建编码 workspace 或 journal。
 断线重试可能与旧计算重叠并重复计费，不保证模型调用恰好一次。
 
-serve 和 worker 需协调升级到 wire18，journal5 / inbox1 不变，无旧 wire fallback。
-耗尽通知只写应用内执行记录；READY 后续扫描可再尝试，WAITING 仍需新的有效反馈等原有触发。
+serve 和 worker 需协调升级到 wire19，journal5 / inbox1 不变，无旧 wire fallback。
+启动时幂等升级 jobs/worker 的推理字段，保留编码数据；不要并行运行新旧 serve。
+耗尽通知只写应用内执行记录；READY 后续扫描可创建新一轮 Job，WAITING 仍需新的有效反馈等原有触发。
 页面进入执行记录或显式刷新时读取通知，不轮询、不增加推理重试按钮。
 
 PostgreSQL 已存在时直接配置连接串。需要临时开发数据库时，可在仓库执行：

@@ -11,6 +11,7 @@ from pluggy import PluginManager
 from app.contracts.protocol import (
     ArchiveResult,
     Failed,
+    InferenceResult,
     InitialTaskResult,
     RevisionTaskResult,
     Succeeded,
@@ -38,6 +39,8 @@ from app.controler.workflow.revisions import (
     revision_mismatch,
     verify_revision_remote,
 )
+from app.domain.inference_models import InferenceError, InferenceFailure
+from app.domain.json import strict_json
 from app.domain.models import (
     TERMINAL_STATES,
     AddressedComment,
@@ -51,6 +54,7 @@ from app.domain.models import (
     JobKind,
     JobState,
     ReviewItemKind,
+    TriageVerdict,
 )
 from app.domain.review_models import BatchState
 from app.github import GitHubApp, GitHubError
@@ -109,7 +113,30 @@ class ResultApplication:
             job = self.jobs.get_job(job_id)
             if job is not None and job.result_applied_at is not None:
                 return job.state
+            if job is not None and job.kind is JobKind.INFERENCE:
+                return self._apply_inference(job)
             return await self._apply(job_id)
+
+    def _apply_inference(self, job: Job) -> JobState:
+        """Validate saved answers before DONE; no Flow effects or live provider are needed."""
+        inference = job.inference
+        if inference is None or inference.current_task is None or job.result_payload is None:
+            raise ValueError("inference application requires a persisted assignment and result")
+        failure = None
+        try:
+            result = InferenceResult.model_validate(job.result_payload)
+            if result.output is not None:
+                result.output.validate_for(inference.current_task)
+                if inference.validation == "review":
+                    TriageVerdict.model_validate(strict_json(result.output.text))
+        except InferenceError as error:
+            failure = error.failure
+        except ValueError:
+            failure = InferenceFailure(code="invalid_response")
+        self.workers.complete_inference_result(job.id, failure=failure)
+        current = self.jobs.get_job(job.id)
+        assert current is not None
+        return current.state
 
     async def recover_pending_results(self, *, concurrency: int = 4, batch_size: int = 64) -> None:
         """Advance bounded pages past uncertain results, with a fixed ceiling and worker pool."""
@@ -149,7 +176,7 @@ class ResultApplication:
         revision_error = await self._check_revision(job)
         with self.database.transaction() as tx:
             result_store_tx = self.result_store.using(tx)
-            flow = tx.lock_workflow(job.flow_id)
+            flow = tx.lock_workflow(job.required_flow_id)
             current = tx.lock_job(job_id)
             if current is None or flow is None:
                 raise ValueError("result workflow disappeared")
@@ -228,7 +255,7 @@ class ResultApplication:
         if (job.kind is not JobKind.REVISION or job.result_applied_at is not None
                 or job.result_payload is None or self.result_store.get_plan(job.id) is not None):
             return None
-        flow = self.flows.get_flow(job.flow_id)
+        flow = self.flows.get_flow(job.required_flow_id)
         if flow is None or flow.state in TERMINAL_STATES:
             return None
         delivery = self.deliveries.get_delivery(flow.id)
@@ -500,7 +527,7 @@ class ResultApplication:
                     state = JobState.FAILED
         else:
             raise TypeError("persisted inbox message is not terminal")
-        return ResultPlan(job_id=job.id, flow_id=job.flow_id, digest=job.result_digest,
+        return ResultPlan(job_id=job.id, flow_id=job.required_flow_id, digest=job.result_digest,
                           attempt_id=attempt_id, state=state, error=reason, run=run)
 
     def _commit(

@@ -11,7 +11,6 @@ from app.contracts.protocol import ExecutionStopped, Register, message_header
 from app.controler.config import ServerSettings
 from app.controler.runtime import ServerRuntime
 from app.controler.workers.callbacks import ServerCallbacks
-from app.controler.workers.inference import InferencePool
 from app.controler.workflow.effects import ResultEffects
 from app.controler.workflow.results import ResultApplication
 from app.domain.models import JobState, WorkerRecord, WorkerStatus, utcnow
@@ -56,7 +55,6 @@ def server_runtime(coordinator, *, database, peers, tools, results,
     )
     runtime.database, runtime.gateway = database, peers
     runtime.coordinator, runtime.tools, runtime.results = coordinator, tools, results
-    runtime.inference_pool = InferencePool(peers, database=database)
     runtime.metrics = metrics
     return runtime
 
@@ -68,7 +66,7 @@ def server_callbacks(runtime, worker_id, epoch):
         register=Register(**message_header(None), control="register", payload=[],
                           worker_id=worker_id, recovery=None, inference=None),
         session=Mock(epoch=epoch), database=runtime.database, tools=runtime.tools,
-        results=runtime.results, notify_jobs=runtime.gateway.wake_all, inference=runtime.inference_pool,
+        results=runtime.results, notify_jobs=runtime.gateway.wake_all,
     )
 
 
@@ -90,9 +88,11 @@ class NoPendingStops(StopStore):
         raise AssertionError("no stop was requested")
 
 
-def connected_worker(worker_id: str, protocol_version: int, connection_epoch: str) -> WorkerRecord:
+def connected_worker(worker_id: str, protocol_version: int, connection_epoch: str,
+                     *, execute: bool = True) -> WorkerRecord:
     now = utcnow()
     return WorkerRecord(worker_id=worker_id, protocol_version=protocol_version,
+                        execute=execute,
                         connection_epoch=connection_epoch, status=WorkerStatus.ONLINE,
                         first_connected_at=now, last_connected_at=now, last_seen_at=now)
 

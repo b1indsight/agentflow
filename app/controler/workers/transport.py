@@ -23,6 +23,7 @@ from app.contracts.protocol import (
 )
 from app.contracts.validation import parse_worker_input
 from app.controler.workers.errors import ProtocolViolation
+from app.domain.inference_models import LOCAL_BUB_WORKER_ID
 
 
 class WorkerSocket(Transport, Protocol):
@@ -57,6 +58,8 @@ def _authenticated_identity(
 ) -> str | None:
     identity = headers.get("x-flowtool-worker-id", "")
     authorization = headers.get("authorization", "")
+    if identity == LOCAL_BUB_WORKER_ID:
+        return None  # Local priority is reserved for the controller-owned in-process peer.
     token = worker_tokens.get(identity)
     if token is None:
         return None

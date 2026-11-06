@@ -27,7 +27,7 @@ class ResultStore(Repository):
     def defer_verification(self, job: Job, error: GitHubError) -> None:
         """Retain a server deadline only while this accepted result still needs verification."""
         with self._db.transaction() as tx:
-            tx.lock_workflow(job.flow_id)
+            tx.lock_workflow(job.required_flow_id)
             current = tx.lock_job(job.id)
             if (current is None or current.result_digest != job.result_digest
                     or current.result_applied_at is not None or ResultStore(tx).get_plan(job.id) is not None):
@@ -185,7 +185,7 @@ class ResultStore(Repository):
         with self._db.connection() as connection:
             jobs = connection.execute(
                 "SELECT id FROM jobs WHERE flow_id=%s AND result_received_at IS NOT NULL"
-                " AND result_applied_at IS NULL FOR UPDATE",
+                " AND kind<>'inference' AND result_applied_at IS NULL FOR UPDATE",
                 (flow_id,),
             ).fetchall()
             return self.get_plan(jobs[0]["id"]) if len(jobs) == 1 else None

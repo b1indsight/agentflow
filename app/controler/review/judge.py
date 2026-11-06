@@ -6,16 +6,14 @@ from pydantic import ValidationError
 
 from app.domain.context_models import MAX_CONTEXT_BYTES, ReviewContext
 from app.domain.inference_models import (
-    InferenceCallFailed,
     InferenceError,
     InferenceMessage,
-    InferenceSummary,
     InferenceTask,
 )
 from app.domain.json import strict_json
 from app.domain.judge_models import JudgeDecision, JudgeRequest, waiting
 from app.domain.models import TriageVerdict
-from app.inference.router import InferenceRouter
+from app.domain.ports import Inference
 
 SYSTEM_PROMPT = """You judge a GitHub pull request feedback batch. Return exactly one JSON object:
 {"verdict":"revise|wait|answer|ignore","confidence":0.0,"reason":"...",
@@ -35,18 +33,16 @@ confidence must be a finite number in [0,1]. Use the participants' language for 
 
 
 class ReviewJudge:
-    """One batch's interpreter; the caller may persist its failed-call summary.
+    """One batch's interpreter; jobs own execution, retries and failure notices.
 
     Recoverable transport/provider failures escape without a semantic WAIT. Permanent
     failures retain conservative WAIT handling. Neither path applies GitHub effects.
     """
 
-    def __init__(self, inference: InferenceRouter, *, timeout: float = 60.0) -> None:
+    def __init__(self, inference: Inference, *, timeout: float = 60.0) -> None:
         self.inference, self.timeout = inference, timeout
-        self.failure_summary: InferenceSummary | None = None
 
     async def triage(self, context: ReviewContext) -> JudgeDecision:
-        self.failure_summary = None
         request = JudgeRequest(session_id=uuid4().hex, context=context)
         if (context.limitations or len(context.model_dump_json().encode()) > MAX_CONTEXT_BYTES
                 or context.pull_request is None or context.pull_request.state != "open"
@@ -62,17 +58,16 @@ class ReviewJudge:
         except ValidationError:
             return waiting(request, None, "incomplete-context")
         try:
-            output = await self.inference.infer(
-                task, validate=lambda result: TriageVerdict.model_validate(strict_json(result.text)),
-            )
+            output = await self.inference.infer(task)
         except InferenceError as error:
-            if isinstance(error, InferenceCallFailed):
-                self.failure_summary = error.summary
             if error.failure.recoverable or error.failure.code == "unavailable":
                 raise
             return waiting(request, None, error.failure.code,
                            adapter_version=error.backend or "review/v1")
-        verdict = TriageVerdict.model_validate(strict_json(output.text))
+        try:
+            verdict = TriageVerdict.model_validate(strict_json(output.text))
+        except ValueError:
+            return waiting(request, None, "invalid_response", adapter_version=output.adapter_version)
         return JudgeDecision(
             context_digest=context.digest, session_id=output.request_id,
             model=output.model, adapter_version=output.adapter_version, verdict=verdict,

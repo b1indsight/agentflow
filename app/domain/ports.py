@@ -35,7 +35,7 @@ class CodingAgent(Protocol):
 
 
 class Judge(Protocol):
-    """Review interpretation; execution location belongs to the inference router."""
+    """Review interpretation; worker placement belongs to job assignment."""
 
     async def triage(self, context: ReviewContext) -> JudgeDecision: ...
 

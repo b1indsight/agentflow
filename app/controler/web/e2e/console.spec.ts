@@ -284,7 +284,64 @@ const inferenceNotice: InferenceNotice = {
 };
 
 for (const width of [1440, 390]) {
-  test(`inference notices keep actual attempts, history and independent snapshot paging at ${width}px`, async ({
+  test(`unified inference jobs show dispatched attempts and queued zero at ${width}px`, async ({
+    page,
+  }, testInfo) => {
+    await page.setViewportSize({ width, height: 1200 });
+    await page.route("**/api/flows/42/jobs?**", (route) =>
+      route.fulfill({
+        json: {
+          items: ["queued", "running", "failed", "done"].map((state, i) => ({
+            id: 10 - i,
+            flow_id: 42,
+            attempt: state === "queued" ? 0 : state === "failed" ? 3 : 1,
+            kind: "inference",
+            state,
+            worker_id: state === "queued" ? null : "__local_bub__",
+            started_at: null,
+            updated_at: now,
+            created_at: now,
+            finished_at: null,
+            error_code: state === "failed" ? "execution_error" : null,
+          })),
+          next_cursor: null,
+          has_more: false,
+        },
+      }),
+    );
+    await page.goto("/#flow/42/jobs");
+    const jobs = page.locator(".timeline-item");
+    await expect(jobs).toHaveCount(4);
+    await expect(jobs.locator("strong")).toHaveText([
+      "推理 · 派发次数 0",
+      "推理 · 派发次数 1",
+      "推理 · 派发次数 3",
+      "推理 · 派发次数 1",
+    ]);
+    await expect(jobs.locator(".badge")).toHaveText([
+      "queued",
+      "running",
+      "failed",
+      "done",
+    ]);
+    await expect(
+      page.getByText("尝试次数包含已授权派发但结果未知的任务。", {
+        exact: false,
+      }),
+    ).toBeVisible();
+    expect(
+      await page
+        .locator(".detail-body")
+        .evaluate((node) => node.scrollWidth <= node.clientWidth),
+    ).toBe(true);
+    await page.screenshot({
+      path: testInfo.outputPath(`inference-jobs-${width}.png`),
+    });
+  });
+}
+
+for (const width of [1440, 390]) {
+  test(`inference notices keep authorized attempts, history and independent snapshot paging at ${width}px`, async ({
     page,
   }, testInfo) => {
     // Budget exhaustion and a final authentication failure must not imply three retries or Flow failure.

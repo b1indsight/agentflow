@@ -12,12 +12,13 @@ from app.domain.json import strict_json
 
 MAX_INPUT_BYTES = 128_000
 MAX_OUTPUT_BYTES = 64_000
+LOCAL_BUB_WORKER_ID = "__local_bub__"
 RequestId = Annotated[str, Field(strict=True, pattern=r"^[0-9a-f]{32}$")]
 AdapterVersion = Annotated[str, Field(strict=True, pattern=r"^[a-zA-Z0-9._/-]{1,64}$")]
 FailureCode = Literal[
     "unavailable", "busy", "connection_closed", "rpc_timeout", "execution_timeout",
     "rate_limited", "backend_unavailable", "authentication", "configuration",
-    "invalid_response", "output_limit", "backend_error",
+    "invalid_response", "output_limit", "backend_error", "cancelled",
 ]
 StopReason = Literal["max_attempts", "deadline", "non_retryable", "unavailable"]
 _RECOVERABLE = frozenset({
@@ -132,9 +133,35 @@ class InferenceSummary(InferenceModel):
 
     @property
     def notify(self) -> bool:
-        return self.attempts == self.max_attempts or (
+        return self.last_failure_code != "cancelled" and (self.attempts == self.max_attempts or (
             self.attempts > 0 and self.stop_reason == "deadline"
-        )
+        ))
+
+
+class InferenceJob(InferenceModel):
+    """One durable logical call; only authorized dispatches consume its three attempts.
+
+    ``task`` never changes. ``current_task`` and its epoch identify one dispatch, even
+    across controller restarts. Excluded workers cannot be reused for unknown outcomes;
+    other failed workers are merely deprioritized after confirmed cleanup.
+    """
+
+    task: InferenceTask
+    current_task: InferenceTask | None = None
+    deadline_at: datetime
+    validation: Literal["text", "review"] = "text"
+    batch_id: int | None = None
+    summary: InferenceSummary | None = None
+    consumed: bool = False
+    cancel_failure: InferenceFailure | None = None
+    failures: list[InferenceFailure] = Field(default_factory=list, max_length=3)
+    avoid_workers: frozenset[str] = frozenset()
+    excluded_workers: frozenset[str] = frozenset()
+    next_attempt_at: datetime | None = None
+    assignment_epoch: str | None = None
+    backend: AdapterVersion | None = None
+    source_attempt_id: int | None = None
+    context_digest: str | None = None
 
 
 class InferenceError(Exception):

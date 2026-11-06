@@ -703,7 +703,9 @@ function Detail({
                       >
                         <div className="job-top">
                           <strong>
-                            {jobs[i].kind} #{jobs[i].attempt}
+                            {jobs[i].kind === "inference"
+                              ? `推理 · 派发次数 ${jobs[i].attempt}`
+                              : `${jobs[i].kind} #${jobs[i].attempt}`}
                           </strong>
                           <span className="badge">{jobs[i].state}</span>
                         </div>

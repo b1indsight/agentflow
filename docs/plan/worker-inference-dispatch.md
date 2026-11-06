@@ -1,7 +1,7 @@
 # Worker 推理任务下发 — Feature record
 
-**Stage:** Implemented — 已实现并完成本地验证，最终验证见变更 007；待 PR 审查与 CI
-**PR:** 同名分支的 PR；发布链接与审查结果记录于[交付记录](https://ampcode.com/artifacts/33bac7f9-fd27-4934-9ad6-2e5dabc2b422)
+**Stage:** 变更 009–010 已按批准方案实现并通过本地验证；实施与验证见变更 011–012
+**PR:** [#133](https://github.com/b1indsight/agentflow/pull/133)；当前发布提交、审查及 CI 状态以 PR 为准
 **Bookmark:** `feat/worker-inference-dispatch`（计划和实现沿用同一个 PR）
 
 **当前阅读入口：** [变更 001](#001--2026-11-06--通用推理合同与-bub-缺配置时自动下发)
@@ -10,9 +10,13 @@
 [变更 003](#003--2026-11-06--可恢复失败允许同次调用直接重试) 取代此前延后重试的限制；
 [变更 004](#004--2026-11-06--执行记录中的推理失败通知) 增加重试失败后的详情通知。
 初稿和先前变更保留为历史；冲突处以较新的变更为准。
-当前要求：controller 未配置 bub 时，自动选择可推理 worker，复用其 Codex/Amp；
-每项请求在不关联 GitHub 的本地工作区启动新会话，只返回答案；可恢复失败允许有界直接重试。
-3 次尝试均失败时，在详情的执行记录中显示持久通知。实现及验证记录见变更 005–007。
+**最新要求见变更 009–010：** 推理进入现有 Job 队列和统一分配入口，优先选择本地 bub 微型 worker，
+不符合条件时选其他可推理 worker；本地 bub 单推理槽已确认。变更 008 仅合并 Router/Pool、
+有 bub 配置就禁止回退、不持久化推理 Job 的提议被本次取代。
+手动部署的普通 worker 同时提供 execute/infer；infer 不要求绑定 repo，使用独立的空 workspace。
+bub 是 controller 管理、只提供 infer、只有空 workspace 的 mini worker。
+保留 Codex/Amp 非 Git 本地工作区、新会话、只生成答案，以及有界重试和详情执行记录通知。
+变更 005–007 保留为旧实现记录；本次重构的证据单独记录，不用旧 CI 代替验收。
 
 ## 1. Initial plan
 
@@ -846,3 +850,293 @@ serve/worker 需一起升级 wire18，journal5/inbox1 不变；部署和回退�
 **交付状态：** 实现、文档和验证已完成，按用户发布指令进入代码审查门禁与 PR 发布流程。
 发布前已对齐包含折叠活动续读修复的远端 main；同名分支 PR 与交付记录保存最终发布、审查及 CI 状态。
 本记录不代表已合并或部署，也不替代相应授权。
+
+### 008 — 2026-11-06 — bub 改为只提供 infer 的附属 worker（提议）
+
+**需求：** 用户要求降低复杂度，将 bub 抽为附属微型 worker，仅注册 infer 方法。
+**状态：** 以下是待确认的替代设计；当前 PR 的实现与测试未改变。本条拟取代变更 005 中
+controller 直接调用 bub、Router/Pool 两层组合的结构，保留其余已确定的功能和失败规则。
+
+#### 统一调用路径与明确删除项
+
+- controller 只保留一个推理调用入口；合并现有 Router 与 Pool 的选择、尝试计数和结果校验，
+  删除 `InferenceRouter.local`、本地/远程调用分支及只用于连接两层的 `WorkerInference` 接口。
+  通用推理请求统一经过 `worker.infer`，不通过给直接函数调用改名来伪装 worker。
+- bub 的适配器及短命 SDK runner 归入 worker 侧；附属 worker 与普通 Codex/Amp worker
+  复用 `WorkerInferenceCallbacks`。附属 worker 只注册 `worker.infer`，不注册编码、历史或 Flow 工具。
+- 保留 `request_reply`：它已经由 history/inference 共用，负责发送锁、关联、断线、超时和清理，
+  删除它只会把同一套通信代码复制回业务层。选路之外的重试分类、总截止、业务校验和失败摘要也保留。
+
+#### 附属方式与边界
+
+- 建议默认由 controller 托管一个轻量本地 endpoint，通过有界进程内 Transport 对接两端
+  Session/Dispatcher，使用同一请求/回复模型；不新增监听端口、外部服务或部署单元。
+  SDK 仍在每次调用独立的 bub 子进程执行，显式环境和临时目录规则不变。
+- 不套用完整 `WorkerRuntime`、`WorkerStateCallbacks` 或 `ServerCallbacks`，不建立虚假的
+  编码 worker 数据库记录，不运行 assignment/recovery/journal/Flow workspace。
+  当前 `ServerCallbacks.poll` 会给空闲连接分配编码任务，不能直接复用它接入 infer-only worker。[B1]
+- 本地两端由宿主创建相同的新 epoch；Session 构造器已支持显式 epoch，无须伪造编码恢复握手。[B2]
+  两端 driver 就绪后才接受请求；宿主负责关闭、取消和 join，Transport 关闭需唤醒受阻读写。
+  本地身份不能被外部连接抢占。异常连接重建前必须完成旧执行清理，重连本身不得重跑推理任务。
+
+#### 维持的行为与本次建议默认值
+
+- bub model/key/base 全空：不挂载 bub worker，选择可推理的普通 worker。
+- bub 任一配置存在：只使用附属 bub worker；半配/错误配置按原规则报错，不偷偷回退到其他 worker。
+  配置检查可在适配器执行前失败，不能把失败检查说成已经启动了 SDK 子进程。[B3]
+- 建议附属 bub 与其他 worker 一样只有一个推理槽，无等待队列；当前 review 扫描本就串行，
+  但这会收紧未来并发直接调用 bub 的行为，随本方案一起确认。
+- 保持最多三次总尝试及一个总截止、READY/WAITING 区分、既有通知和已保存答案恢复。
+  已回传的执行超时与通信结果未知必须继续区分；不能为了重试附属 worker 放松未知结果的排除规则。
+- 业务 schema 仍由 ReviewJudge 提供，在统一入口的一次尝试内校验；通知 API/UI 不改，
+  编码能力和原生非 Git 独立会话的约束不变。
+
+#### 验收与取舍
+
+1. 同样的通用任务分别经过 bub 和 Codex/Amp 的 `worker.infer`，controller 不再直接调用模型适配器。
+2. 空配置、半配、完整配置、槽忙及附属 worker 异常的选路与失败分类有明确结果；不增加隐式回退。
+3. infer-only worker 不接编码任务，不生成编码 worker/journal/workspace 记录；外部不能抢占本地身份。
+4. 断线、取消、超时与 shutdown 不遗留调用或子进程；晚到结果不改变已结束调用。
+5. 复用现有重试、第三次业务输出非法、通知幂等和保存决定恢复测试；既有 history/编码协议回归通过。
+
+不采用完整外部 worker：它会引入额外部署以及与推理无关的编码生命周期。
+单纯把 bub 包装为另一个 `Inference` 对象也不满足统一通信路径的目标。
+不能预先承诺总行数下降：本地连接管理会增加代码；验收重点是删除重复执行路径和多余调度层，
+不再叠加新的通用方法发现框架、持久队列或重试机制。
+
+本次使用 Claude Opus 5.5 只读咨询，已验证初始化与响应模型，tools/MCP 为空且调用成功；
+建议经源码复核。咨询建议保留 Router/Pool 两层，本提议进一步合并它们以落实用户的简化目标。
+以上均未实施或执行新验收；只更新同一功能记录，未更新远端 PR。
+
+- [B1 — 编码调度入口](https://github.com/b1indsight/agentflow/blob/371ad514c88c73fe0787f483f5fdab3e4c7dc9cb/app/controler/workers/callbacks.py#L226-L280)
+- [B2 — Session 的 epoch 与 Transport 边界](https://github.com/b1indsight/agentflow/blob/371ad514c88c73fe0787f483f5fdab3e4c7dc9cb/app/communication/session.py#L28-L61)
+- [B3 — bub 配置检查与子进程](https://github.com/b1indsight/agentflow/blob/371ad514c88c73fe0787f483f5fdab3e4c7dc9cb/app/inference/bub.py#L35-L80)
+
+### 009 — 2026-11-06 — 统一 Job 分配，本地 bub 合条件时优先（修订方案）
+
+**用户决定：** “走统一的 job 分配流程，只是优先分配到本地 bub worker，不合条件再分配到其他
+worker”；此前已确认 bub 使用单推理槽。
+**状态：** 调度方向已明确；以下实现方案待确认，未修改产品代码、测试或远端 PR。
+本条取代变更 008 的独立推理调度入口、禁止回退、不建立 worker 记录和不持久化推理 Job。
+更早记录中的“不增加推理 Job”和“通知不可能关联推理 Job”等限制也不再适用。
+
+#### 统一范围与保留的业务区别
+
+- 推理成为真实的 `JobKind.INFERENCE`，进入现有 `jobs` 表。入队、领取、身份校验、结果持久化、
+  重试与过期回收均接入现有 Job 流程；不增加第二套推理队列、候选池或轮询调度器。
+- 扩展 `WorkerStore.assign_job` 的能力与槽位筛选，在同一个领取入口按 Job 类型分配；
+  本地 bub 与外部 worker 使用同一入口。只把另一个 `assign_inference_job` 搬进同一文件，
+  或只复用 `jobs` 表、仍由 Pool 选 worker，都不满足本次要求。[J1][J2]
+- 编码 Job 保持现有 Flow 与 worker 的绑定、公平分配、租约和停止安全规则。
+  推理 Job 可关联 Flow/batch 作为来源，但不创建或改变 `flow_executions`，不签发 GitHub 凭据。
+  无 Flow 的通用推理也能入队；允许仅推理 Job 的 `flow_id` 为空，不创建虚假 Flow 或仓库。[J1][J3]
+- 普通 worker 保留编码槽与独立推理槽，本地 bub 只有一个推理槽。两个槽由同一持久分配状态管理，
+  一个槽的领取/完成/失败不能清空另一个槽；连接在线状态与槽占用分别判断。
+  不为本次泛化任意数量资源槽或引入可插拔调度框架。
+- 删除 `InferenceRouter`、`InferencePool` 和两层之间的 `WorkerInference` 接口；其必要的失败分类、
+  尝试上限和验证迁入现有 Job 路径。保留 Session/Dispatcher 和其他调用仍使用的 `request_reply`。
+
+#### 本地优先及“不合条件”的拟定含义
+
+优先级在领取事务中应用，避免外部 worker 先轮询就抢走应分给本地 bub 的任务。
+本地身份及优先级由 controller 授予，网络 worker 不能通过自报字段或同名注册取得该身份。
+
+| 分配时的情况 | 拟定行为 |
+| --- | --- |
+| bub 配置预检通过、会话就绪、推理槽空闲，支持请求 | 优先分给 bub。 |
+| bub 未配置、半配或依赖预检失败 | 记录安全的不可用原因，不把 bub 作为候选，选择其他 worker。 |
+| bub 推理槽忙、离线、未就绪、draining、能力不匹配或已被本 Job 排除 | 选择其他合条件 worker，不专门排队等 bub。 |
+| 有多个合条件普通 worker | 使用统一分配入口的公平策略；重试保留避让已失败 worker 的规则。 |
+| 所有 worker 都不合条件 | Job 保持 QUEUED，在总截止前等待；排队和预检跳过不消耗尝试。 |
+| 总截止已到 | 结束本次 Job，不再下发到任何 worker；零次尝试不能通知成“三次失败”。 |
+
+配置预检不付费调用模型，也不能证明凭据、配额和远端服务实时可用。[J4]
+“不合条件回退”发生在调度阶段；实际调用后的错误仍按已有分类处理。可恢复失败重新进入同一
+分配入口，遵守剩余次数、剩余时间和 worker 排除规则；鉴权、非法输出等永久错误不会因切换
+provider 被自动改成可重试。保留 provider 的 `retry_after_seconds` 和既有小退避，不增加熔断器。
+
+#### Job 生命周期、恢复和通知
+
+- 冻结通用请求、逻辑调用键、首次入队时间和总截止；同一正在进行的逻辑调用重复入队，返回同一
+  Job，不能重置次数、改写请求或延长预算。排队等待计入总预算；跨重启使用可持久化截止时间。
+  编码派生 Job 原有 `source_job_id/source_key` 的语义保持，不拿推理 batch 冒充 source Job。[J3]
+- 一个推理 Job 对应原先的一次逻辑调用，最多三次总尝试（含首次）。统一 Job 状态机是唯一重试
+  所有者；业务调用方不再嵌套重试。领取后进入授权派发阶段记录本次尝试，发送结果未知也计入，
+  UI 不把已授权派发次数描述成已证实完成的模型调用次数。
+- 请求和结果携带 Job、分配 token、连接 epoch 与单次请求身份。旧 epoch/token、取消或已终结
+  Job 的迟到结果不得应用。失联不证明执行已停；未知结果保留排除规则，可能重复计算/计费。
+- 统一结果受理先保存有类型的推理结果，并在 controller 的结果处理阶段完成现有输出和业务验证；
+  review 使用现有 `TriageVerdict`，非法业务结果计入本次尝试。未经验证不能把 Job 标成成功。
+  不持久化 Python 回调，也不把推理输出伪装成编码结果或建立通用插件式验证器框架。
+- review 入队在 batch 当前性检查下幂等完成；轮询只恢复/观察正在进行的 Job。保留
+  `review_batches.job_id` 关联修订 Job 的原语义，推理另有显式关联；避免填入推理 Job 后
+  `pending_triage/current` 永远看不到批次。业务等待不得阻塞 Session driver 或后续批次入队。[J5]
+- **保留既有下一轮行为：** 三次可恢复失败后，本 Job 失败、批次仍为 READY，后续 sweep 可按原规则
+  开启新的逻辑调用和新的 Job；这不是重开已失败 Job 或在同一次调用中执行第四次。新一轮身份和
+  代次要持久化且并发幂等；不因普通轮询/重启为未完成调用额外生成 Job。三次上限不代表一个批次
+  永远最多调用三次。永久错误仍进入 WAITING，新有效反馈仍走原批次规则。[J6]
+- 耗尽摘要持久保存并复用现有通知 key/version 更新规则，后续轮次更新同批次通知，不每轮新增
+  相同卡片。通知写入失败只补写通知，不能因此生成新推理 Job。已保存答案无 worker 也能恢复。
+- 推理超时、失败或取消不能触发编码恢复中“Flow 失败、释放仓库绑定、清空编码槽”的副作用；
+  共同结果/恢复入口按 Job 类型执行必要的业务处理，不另设推理 sweeper。[J7]
+- 通用 Job 控制消息负责受理、完成和取消；infer-only 指只提供 infer 业务执行能力，不免除控制协议。
+  推理取消不能断开还在编码的共享会话，也不能借用绑定 Flow 仓库的 stop 身份。执行槽在确认清理后
+  才重新可用；断线/重启隔离旧身份，取消本地进程后 join，再清理临时目录。
+
+#### 附属 worker 和实施顺序
+
+1. **数据与合同：** 更新 `domain/models.py`、`contracts/protocol.py`、结果收据及 `persistence/schema.py`。
+   增加推理 Job、可选来源、固定双槽/能力状态、幂等键、截止和失败摘要；添加对既有数据库可重复
+   执行的升级，保持已有编码数据和收据可读。通信版本同步升级，拒绝混用不兼容版本。
+2. **共同调度与生命周期：** 修改 `persistence/jobs.py`、`workers.py`、`database.py` 的领取/锁序/完成，
+   及 `domain/recovery_policy.py`、`controler/workers/callbacks.py`、`workflow/results.py` 的控制入口。
+   抽出必要的共用 Job 控制职责，编码专属 preparation、GitHub effects、Flow tools 只在编码路径挂载。
+3. **bub 接入：** runtime 托管一对有界进程内 Transport 与 Session/Dispatcher；本地 worker 有真实
+   worker 记录和受控身份，通过共同注册与 Job 分配，只挂 infer 业务处理。bub 适配器和 SDK runner
+   放在 worker 侧，不调用完整编码 Runtime、不建立 Flow 仓库、也不新增端口或部署单元。
+   SDK 仍用短命子进程；凭据留在执行侧配置，不进入 Job、协议、通知或日志。
+4. **调用方与记录页：** review 的 prompt/判定逻辑继续由 controller 持有，改为提交/恢复推理 Job。
+   执行记录能区分推理 Job 的排队、尝试和结果，继续展示失败通知；审计 latest-job、Flow 阶段、
+   编码重试、PR reopen/archive、取消及分页查询，防止推理 Job 被误当成最后一次编码执行。
+5. **删除旧路径并验证：** 删除直接 bub 调用、Router/Pool 和失效测试/文档引用；不保留旧独立调度
+   作为 fallback。原生 Codex/Amp 的新会话、非 Git 工作区和只生成答案的边界不变。
+
+#### 验收标准（尚未执行）
+
+- 使用真实数据库及双方通信驱动，证明本地 bub、Codex、Amp 都由同一 Job 领取入口下发；
+  bub 合条件时优先，半配/忙/离线/能力不符时其他 worker 可领取；bub 永远拿不到编码 Job。
+- 并发领取同一 Job 只有一个有效分配；重复扫描/重启不改活动 Job 的预算、次数和冻结请求。
+  无 Flow 推理可执行，review 推理可归属其 Flow 详情；不创建或窃取编码仓库绑定。
+- 同一 worker 的编码与推理并行，单推理槽不超额；推理超时、取消、重连不干扰编码心跳、停止、
+  结果确认或现存 workspace。测试代码结果未知与纯推理结果未知的恢复区别。
+- 同一 Job 连续失败最多三次，无第四次；成功、永久失败、预算耗尽和零候选分开验证。
+  READY 后下一轮使用新 Job 且幂等；第三次非法业务结果、摘要补写、同 key 通知更新不丢失。
+- 保存结果但未保存决定、保存决定但未应用业务效果等崩溃点恢复，不重算已保存且有效的答案，
+  不重复 GitHub 效果；旧 token/epoch、取消和旧上下文结果被拒绝。
+- 既有数据库升级及编码 assignment/recovery/stop/history/Flow retry 回归；后端测试、Ruff、mypy、
+  前端单测/类型/构建和浏览器回归。实际渲染桌面/手机的推理 Job、排队与失败通知，检查截图。
+
+**取舍与咨询复核：** 这是核心 Job 调度改造，范围大于只合并 Router/Pool；不预先承诺总行数下降。
+Claude Opus 5.5 的只读计划咨询已完成，初始化和响应模型一致、tools/MCP 为空、退出成功。
+未采纳其另设领取/结果通道、所有推理强制无 Flow、耗尽后停放等建议：分别违反统一入口、详情
+归属或既有 READY 后继续扫描的要求；也未采用“凭据仅存在子进程”的不准确表述。
+本记录经过源码核对，但未执行本修订的产品测试；旧 PR 的通过结果只适用于旧实现。
+
+#### 本次源码依据
+
+- [J1 — 原有 Job 领取与 Flow 绑定](https://github.com/b1indsight/agentflow/blob/371ad514c88c73fe0787f483f5fdab3e4c7dc9cb/app/persistence/workers.py#L178-L283)
+- [J2 — 现有调度与编码下发](https://github.com/b1indsight/agentflow/blob/371ad514c88c73fe0787f483f5fdab3e4c7dc9cb/app/controler/workers/callbacks.py#L226-L290)
+- [J3 — Job 入队与数据结构](https://github.com/b1indsight/agentflow/blob/371ad514c88c73fe0787f483f5fdab3e4c7dc9cb/app/persistence/jobs.py#L103-L147)、[schema](https://github.com/b1indsight/agentflow/blob/371ad514c88c73fe0787f483f5fdab3e4c7dc9cb/app/persistence/schema.py#L41-L103)
+- [J4 — bub 配置预检](https://github.com/b1indsight/agentflow/blob/371ad514c88c73fe0787f483f5fdab3e4c7dc9cb/app/inference/bub.py#L28-L80)
+- [J5 — Review 当前性与 job_id](https://github.com/b1indsight/agentflow/blob/371ad514c88c73fe0787f483f5fdab3e4c7dc9cb/app/persistence/reviews.py#L382-L403)
+- [J6 — 后续批次扫描](https://github.com/b1indsight/agentflow/blob/371ad514c88c73fe0787f483f5fdab3e4c7dc9cb/app/controler/runtime.py#L226-L256)；本记录变更 003–004 的 READY 与通知约定
+- [J7 — 编码过期回收副作用](https://github.com/b1indsight/agentflow/blob/371ad514c88c73fe0787f483f5fdab3e4c7dc9cb/app/persistence/workers.py#L695-L810)
+
+### 010 — 2026-11-06 — 普通 worker 与 controller 管理的 bub mini worker
+
+**用户澄清：** 手动部署的普通 worker 同时提供 `worker.execute` 和 `worker.infer`，允许不绑定
+任何 repo，在执行 infer 时使用空 workspace；bub 是由 controller 管理、只有空 workspace、
+只提供 `worker.infer` 的 mini worker。
+本条明确变更 009 的角色与 workspace 边界，不另生成一套调度方案；实施仍待确认。
+
+| 角色 | 管理方式 | 业务方法 | 工作目录 |
+| --- | --- | --- | --- |
+| 普通 worker | 用户手动部署，使用已有 Codex/Amp | `worker.execute`、`worker.infer` | execute 使用编码任务对应仓库；infer 使用该次独立的空 workspace。 |
+| bub mini worker | controller 创建、注册、管理和关闭 | 仅 `worker.infer` | 只使用该次独立的空 workspace，不准备编码仓库。 |
+
+- repo 绑定不是普通 worker 上线或接收 infer 的前提。普通 worker 没有任何 Flow/仓库绑定时也能
+  接推理 Job；已有编码仓库时，infer 仍不能复用该仓库或编码会话。
+- 两种 worker 的每次 infer 都在初始为空、非 Git、互不复用的任务目录中运行。执行期间可写入
+  必要的临时输入/输出文件，结束后清理；不 clone/checkout repo，不带入前次任务内容。
+  “空 workspace”不表示 OS 沙箱，也不改变既有 trusted-host 安全边界。
+- “其他可推理 worker”指上述普通 worker 中当前满足推理准入条件的实例，不是另一批专用部署。
+  方法已提供与当前可分配是两个条件；仍需会话就绪、后端可用、能力匹配和推理槽空闲。
+- 仍走统一 Job 分配：infer 优先合条件的 bub，不合条件时选普通 worker；execute 只分给普通
+  worker。既定双槽、重试、通知和 READY/WAITING 规则不变。
+- 验收补充：普通 worker 零 repo 绑定即可执行 infer；其 execute 与 infer 使用不同目录/会话；
+  bub 不创建仓库 workspace、不接 execute，且生命周期由 controller 完整回收。
+
+**交付状态：** 本轮仅同步用户定义到本地功能记录及说明图，未修改产品代码或测试、未提交或推送。
+
+### 011 — 2026-11-06 — 统一 Job、双槽与受托管 mini worker 落地
+
+**需求与实际实施：** 按已批准的变更 009–010 重构，取代变更 005 的 Router/Pool 调度。
+没有新增独立推理队列、调度循环、部署端口或旧路径 fallback；普通 worker 的编码绑定保持原规则。
+
+- `domain` / `persistence`：新增 `JobKind.INFERENCE`、冻结 `InferenceJob`、可选 Flow 来源、
+  `review_batches.inference_job_id` 和 worker 的独立推理槽。只有推理允许无 Flow；普通编码
+  入口用 `required_flow_id` 明确检查权限。schema 幂等升级，不改写既有编码收据。
+- `WorkerStore.assign_job` 统一领取两个固定槽，复用 `_claim_job` 写入分配身份与尝试计数；
+  推理不建立 `flow_executions`。先避让已失败候选，再优先合条件的 bub；未知结果排除原 worker。
+  领取事务按 worker ID 锁定状态，确保外部先 poll 也不能抢走应给 bub 的任务。该锁会串行化
+  跨 worker 领取，是一致性与吞吐的取舍；不引入调度框架，也不宣称已验证大规模 worker 吞吐。
+- `Database.lock_workflow` 在 worker → Flow → job 锁序中核对双槽归属；并发新领取改变 owner 时
+  回滚当前 savepoint 后重新发现，避免持有 Flow 锁再补锁新 worker。共同 sweep 区分编码和推理，
+  不把推理超时写成 Flow 失败或释放编码绑定。
+- `workflow/JobInference` 只负责提交和读取；pending 让出 review 扫描，不阻塞后续批次。
+  原 task、总截止、派发次数、结果与通知摘要持久化；三次总尝试包括已授权但结果未知的派发。
+  generic 同 request_id 改变输入、验证或来源会拒绝；review 重建 prompt 时仍恢复原活动 Job。
+- 共同 `record_assignment_result` / `ResultApplication` 接受推理结果，先保存，再验证身份、
+  字节限制、JSON 与 `TriageVerdict`，最后提交 DONE 或失败/重试。业务验证不放在成功之后。
+  通知和终结共用事务，补写失败保留 inbox；已保存答案不依赖 worker 在线。
+- `app.inference.local` 管理仅 infer 的 mini endpoint，`app.inference.transport` 在两类 worker
+  之间共享后台推理、心跳和取消。mini 通过有界进程内 Transport 和实际 Session/Dispatcher
+  注册，host 使用同一 ServerCallbacks；不实例化编码 WorkerRuntime。controller 不导入 worker
+  包，两个旧推理模块已移除，无 shim。bub 凭据仅在本地适配器配置和短命 SDK 子进程间传递。
+- wire19 注册增加 execute 能力，infer 请求/回复携带 job/token；取消按相同身份确认，cleanup
+  完成后才能复用槽位。推理-only 心跳维持连接，不延长任务总预算；编码同时运行时不能代替编码
+  心跳。纯推理连接无响应会回收未知尝试，不能长期占槽；关闭与重复取消仍等待 provider 回收。
+- 控制台显示推理 Job 和派发次数，通知明确次数包含结果未知的派发。Flow 阶段、最新编码诊断、
+  archive/reopen/stop 查询排除推理任务，NULL Flow 的通用任务不会触发无效 console 投影。
+  README、组件职责、部署和 wire 说明同步更新。
+
+**联调中修正的边界：** malformed 回复从暂态 RPC 改为 Job 后不能只拒绝已不存在的 Future；
+现在通过已授权的 request_id 保存 `invalid_response`，不会等待截止再错误地重试。
+超大 `Retry-After` 先和剩余预算比较，避免 datetime 溢出卡住 inbox。
+上述问题均使用失败用例复现后修复；没有放宽包边界测试或类型检查。
+
+**当前交付：** 修改仅在本功能独立 jj workspace，本轮未提交、推送、更新远端 PR、合并或部署。
+原生工具权限仍依赖部署隔离；空 workspace 不构成沙箱，断线重算可能重复计算和计费。
+
+### 012 — 2026-11-06 — 统一调度的集成回归与消融
+
+**实际验证：** 在独立工作区使用专用 PostgreSQL，完成以下检查；不沿用旧发布版本的结论。
+
+- `FLOWTOOL_TEST_DATABASE_URL=… uv run pytest -q` 全量通过、无跳过，包括实际双端 Session 与
+  PostgreSQL 的 mini 优先/忙时转派、无 repo 推理、编码并发和取消、心跳/静默断线、持久结果恢复、
+  三次上限、READY 新一轮、永久 WAIT、通知补写、schema 重复升级及编码 stop/history 回归。
+- `uv run ruff check app tests`、`uv run mypy app tests` 通过。
+- Web 目录 `npm test`、`npm run typecheck`、`npm run build`、`npm run format:check`、
+  `npm run test:e2e -- --workers=1` 全部通过。沿用单 worker 避免变更 007 已确认的既有并发偶发问题。
+- `uv run python scripts/build_console.py` 后执行 `uv build --no-sources` 成功；核对 wheel 包含新
+  mini/shared callback 模块、没有已删除模块，console_static 与本轮前端 dist 逐文件一致。
+- 桌面和手机的推理四状态、派发次数和失败通知截图均已查看，无遮挡或横向溢出；协议文档卡片
+  的 DOM 和截图确认 wire19。浏览器用 API 响应夹具；数据库、通知 API 和分配集成由 pytest 验证。
+
+**验证期间的失败及处理：** 首轮架构检查暴露 controller 导入 worker，已将共享推理与 mini
+生命周期移到 `app.inference`，边界测试未放宽。最初同时运行 pytest 和 Playwright 导致 CLI 安装
+测试拷贝源码时碰到 test-results 删除；之后顺序运行完整两套测试，通过。静态包核对最初使用了
+错误的归档路径，进一步发现缺少正式 console 拷贝步骤；执行仓库原有构建脚本后重新核对通过。
+保留既有 Vite 大 chunk 提示及 TestClient 弃用提示，未为消除提示更换依赖。
+
+**消融方式：** `.amp/in/ablate_unified_inference.py` 通过 `inspect.getsource` 在独立 Python
+进程中替换单个方法的一项机制，再运行同一个行为用例；产品文件不修改，不留测试开关。
+基线通过，以下变体都使对应断言失败：
+
+| 移除或简化 | 观察结果与决定 |
+| --- | --- |
+| 删除 bub 优先排序，只按公平等待顺序 | 已就绪空闲的 bub 被刚上线的普通 worker 抢先；保留事务内本地优先。 |
+| 重启恢复时重置尝试数 | 第二次授权又被记为首次，无法遵守同 Job 的三次总上限；保留持久预算。 |
+| 跳过结果应用中的 review 校验 | 空答案等非法业务结果被标成 DONE；保留成功前校验。 |
+| 取消不核对 job/token | 外来取消中断当前 provider；保留精确身份校验与 cleanup 占槽。 |
+| 推理沿用编码槽的空闲要求 | 正在编码的普通 worker 不能接推理；保留固定双槽。 |
+
+复现：恢复[验证附件](https://ampcode.com/artifacts/33bac7f9-fd27-4934-9ad6-2e5dabc2b422)
+中的脚本源码到上述路径，设置测试数据库后运行 `uv run python .amp/in/ablate_unified_inference.py baseline`；
+分别以 `priority`、`budget`、`review`、`cancel`、`slots` 替换 baseline。基线退出 0，变体退出 1。
+执行后删除临时脚本，仅在附件保留源码和日志。带锁 owner 重发现由受控并发 PostgreSQL 用例验证；
+尚未测量大规模 worker 吞吐，不以此证明锁成本为零。
+
+**限制与交付：** 没有使用真实付费模型、GitHub 写入或生产部署做 smoke；bub SDK 的假端点
+集成和原生进程清理通过自动化。新架构需 serve/worker 一同升级 wire19。本轮未提交或推送，
+旧 PR 的代码与 CI 不代表本轮重构已发布；新审查门禁与 PR 更新留待发布授权。

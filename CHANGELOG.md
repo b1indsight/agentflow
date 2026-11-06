@@ -8,12 +8,15 @@
 
 ## Unreleased
 
-- 新增通用 `worker.infer` 文本/JSON 推理路由（wire18）：bub 完全未配置时，选择当前已就绪的
-  可推理 worker，复用 Codex/Amp 在无 Git 关联的临时目录启动独立答案会话；编码与推理各有独立槽。
-  control 保留 review 校验、决定持久化与 GitHub 操作；完整或部分 bub 配置不会因失败转派。
-  可恢复失败共用总预算，最多 3 次尝试；三次未成功或预算提前耗尽，在详情执行记录保存推理通知。
-  通知复用活动账本幂等和快照分页，区分当前 READY/WAITING 与历史状态，不新增 Job、轮询或 GitHub 通知。
-  保留本地原生配置与外部隔离前提；目录分离不构成工具沙箱。超时/溢出保持类型化分类，取消等待进程回收。
+- 新增通用 `worker.infer` 文本/JSON 推理 Job（wire19），复用现有 Job 分配、结果受理及恢复流程，
+  删除独立 Router/Pool。controller 托管仅 infer 的 bub mini worker，合条件时优先；未配置、
+  半配、忙或能力不符时选普通 worker。普通 worker 同时提供 execute/infer，无 repo 绑定也可推理，
+  复用 Codex/Amp 在初始为空的非 Git 临时目录启动新答案会话；编码与推理各有独立持久槽。
+  control 保留 review 校验、决定持久化与 GitHub 操作；推理不改变 Flow 仓库绑定。
+  总截止及最多 3 次授权派发跨重启保存，可恢复失败按剩余预算重试，永久错误保守 WAIT。
+  耗尽通知与结果终结原子保存，补写失败不重跑模型；可恢复失败的 READY 批次后续扫描可开启新 Job。
+  执行记录显示推理 Job 与派发次数，通知继续使用活动账本幂等和快照分页，无新轮询或 GitHub 通知。
+  按 Job/token 取消推理并等待回收，不中断同 worker 编码；目录分离不构成原生工具沙箱。
 - Amp/Codex 编码改为连续无新 stdout/stderr 输出才超时，默认仍为 1200 秒；半行、工具
   调用/结果和进度续期，移除 REVISION 外层总时限，保留历史导出和单条 VCS 命令的总时限。
   两后端空闲秒数均要求正有限值。INITIAL 保留安全失败详情和 execution 阶段，controler

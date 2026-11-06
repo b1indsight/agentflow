@@ -19,17 +19,17 @@ from app.communication.session import Session, Transport
 from app.contracts.protocol import ServerMessageUnion, WorkerMessageUnion
 from app.contracts.validation import parse_server_input
 from app.domain.inference_models import MAX_OUTPUT_BYTES
+from app.inference.transport import InferenceProtocolError, WorkerInferenceCallbacks
 from app.telemetry.logging import configure_logging
 from app.worker.config import WorkerSettings
 from app.worker.execution.amp_agent import AmpCodingAgent
 from app.worker.execution.codex import CodexAgent
 from app.worker.execution.executor import WorkerExecutor
 from app.worker.execution.inference import NativeAgentInference
-from app.worker.execution.lifecycle import WorkerExecution
+from app.worker.execution.lifecycle import WorkerExecution, WorkerProtocolError
 from app.worker.health import HealthFile
 from app.worker.state.execution import ExecutionState
 from app.worker.transport.business import WorkerBusinessCallbacks
-from app.worker.transport.inference import WorkerInferenceCallbacks
 from app.worker.transport.state import WorkerStateCallbacks, control_ack
 
 _CONTROL_ENVIRONMENT_KEYS = frozenset(
@@ -204,17 +204,18 @@ class WorkerRuntime:
             make_ack=control_ack,
         )
         try:
+            inference_callbacks = WorkerInferenceCallbacks(
+                session=session, inference=self.inference, ready=lambda: state_callbacks.ready,
+            )
             state_callbacks = WorkerStateCallbacks(
                 worker_id=self.settings.worker_id,
                 session=session,
                 execution=self.execution,
                 on_ready=self._set_connected,
                 inference=await asyncio.to_thread(self.inference.capability),
+                inference_callbacks=inference_callbacks,
             )
             business_callbacks = WorkerBusinessCallbacks(session=session, execution=self.execution)
-            inference_callbacks = WorkerInferenceCallbacks(
-                session=session, inference=self.inference, ready=lambda: state_callbacks.ready,
-            )
         except BaseException:
             await session.close()
             raise
@@ -222,6 +223,8 @@ class WorkerRuntime:
             await self.gateway.serve(
                 "server", session, state_callbacks, business_callbacks, inference_callbacks, replace=False,
             )
+        except InferenceProtocolError as error:
+            raise WorkerProtocolError(str(error)) from error
         finally:
             await inference_callbacks.aclose()
 
