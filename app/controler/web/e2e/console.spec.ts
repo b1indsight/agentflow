@@ -76,19 +76,14 @@ function activityPage(
   };
 }
 
-async function scrollToSnapshotEnd(page: Page, continueFolded = false) {
+async function scrollToSnapshotEnd(page: Page) {
   const root = page.locator(".detail-body");
-  const more = page.getByRole("button", {
-    name: "读取更多交互",
-    exact: true,
-  });
   await expect
     .poll(
       async () => {
         await root.evaluate((node) => {
           node.scrollTop = node.scrollHeight;
         });
-        if (continueFolded && (await more.isVisible())) await more.click();
         return page
           .getByRole("button", {
             name: "已到当前本地快照末尾 · 点击刷新",
@@ -1640,6 +1635,62 @@ for (const width of [1440, 390]) {
   });
 }
 
+test("conversation keeps loading when fast pages extend the same collapsed tool group", async ({
+  page,
+}) => {
+  // Fast responses can batch busy=true/false into one render. Folded tools leave the sentinel in place.
+  const items: ActivityItem[] = Array.from({ length: 61 }, (_, index) => {
+    const body = index === 60 ? "工具活动之后的正文" : `工具记录 ${index}`;
+    return {
+      ...activity,
+      key: `fast-tool-${index}`,
+      source: "worker",
+      kind: index === 60 ? "message" : index % 2 ? "tool_result" : "tool_call",
+      author: index % 2 ? "tool" : "assistant",
+      title: "exec",
+      body,
+      body_length: body.length,
+      previous_version: null,
+      metadata: {
+        attempt_id: 1,
+        session_id: "fast-tools",
+        session_generation: 0,
+        call_id: `call-${Math.floor(index / 2)}`,
+      },
+    };
+  });
+  const pages = Array.from({ length: 4 }, (_, index) =>
+    activityPage(
+      items.slice(index * 20, (index + 1) * 20),
+      index * 20,
+      items.length,
+    ),
+  );
+  await page.addInitScript((pages) => {
+    const fetch = window.fetch;
+    window.fetch = async (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : input);
+      if (url.pathname !== "/api/flows/42/activity") return fetch(input, init);
+      const start = Number(url.searchParams.get("cursor") ?? 0);
+      const result = pages[start / 20];
+      const response = Response.json(result);
+      response.json = async () => result;
+      return response;
+    };
+  }, pages);
+  await page.goto("/#flow/42/conversation");
+  // Do not scroll, expand the group or click a load control to make pagination advance.
+  await expect(
+    page.getByText("工具活动之后的正文", { exact: true }),
+  ).toBeVisible();
+  const group = page.getByRole("button", { name: /^工具活动/ });
+  await expect(group).toHaveAccessibleName("工具活动 · 30 次调用 · 30 条结果");
+  await expect(group).toHaveAttribute("aria-expanded", "false");
+  await expect(
+    page.getByRole("button", { name: "已到当前本地快照末尾 · 点击刷新" }),
+  ).toBeVisible();
+});
+
 test("large activity stays windowed, re-reads evicted pages, and refreshes explicitly", async ({
   page,
 }) => {
@@ -1831,8 +1882,7 @@ for (const scenario of [
     });
     await page.goto("/#flow/42/conversation");
     const root = page.locator(".detail-body");
-    // Expanded setup deliberately reads the complete folded run before opening it.
-    await scrollToSnapshotEnd(page, expanded);
+    await scrollToSnapshotEnd(page);
     if (expanded)
       await page
         .getByRole("button", { name: /^工具活动/ })
@@ -3033,29 +3083,32 @@ test("assistant tools share one compact activity bar across pages without crossi
 });
 
 for (const kind of ["tool", "operation"] as const) {
-  test(`folded ${kind} history stops automatic continuation and reads one page per explicit click`, async ({
+  test(`folded ${kind} history automatically continues through unchanged display rows`, async ({
     page,
   }) => {
     // A long worker turn or bot-event burst adds no visible rows when another page only extends its summary.
     const errors: string[] = [],
       continuations: string[] = [];
     page.on("pageerror", (error) => errors.push(error.message));
-    let permittedStart = 20;
-    let releaseUnexpected!: () => void;
-    const unexpectedPage = new Promise<void>((resolve) => {
-      releaseUnexpected = resolve;
-    });
     await page.route("**/api/flows/42/activity?**", async (route) => {
       const url = new URL(route.request().url());
       const start = Number(url.searchParams.get("cursor") ?? 0);
       if (start)
         continuations.push(`${start}:${url.searchParams.get("snapshot")}`);
-      // Keep an unwanted continuation in flight so a runaway chain cannot hide behind an unchanged summary.
-      if (start > permittedStart) await unexpectedPage;
       return route.fulfill({
         json: activityPage(
-          Array.from({ length: Math.min(20, 120 - start) }, (_, i) => {
+          Array.from({ length: Math.min(20, 121 - start) }, (_, i) => {
             const n = start + i;
+            if (n === 120) {
+              const body = "折叠记录之后的正文";
+              return {
+                ...activity,
+                key: "after-folded",
+                body,
+                body_length: body.length,
+                previous_version: null,
+              };
+            }
             const body = kind === "tool" ? `折叠工具记录 ${n}` : "";
             return {
               ...activity,
@@ -3092,51 +3145,33 @@ for (const kind of ["tool", "operation"] as const) {
             };
           }),
           start,
-          120,
+          121,
         ),
       });
     });
-    try {
-      await page.goto("/#flow/42/conversation");
-      const summary = page.getByRole("button", {
-        name: kind === "tool" ? /^工具活动/ : /^操作记录/,
-      });
-      const more = page.getByRole("button", {
-        name: "读取更多交互",
-        exact: true,
-      });
-      for (const count of [40, 60, 80]) {
-        if (count > 40) {
-          permittedStart = count - 20;
-          await more.click();
-        }
-        await expect(summary).toHaveAccessibleName(
-          kind === "tool"
-            ? `工具活动 · ${count / 2} 次调用 · ${count / 2} 条结果`
-            : `操作记录 · ${count} 条`,
-        );
-        await expect(summary).toHaveAttribute("aria-expanded", "false");
-        await expect(summary).toBeInViewport();
-        // Let busy-state effects and IntersectionObserver delivery run again before checking the request bound.
-        await page.evaluate(async () => {
-          for (let frame = 0; frame < 18; frame++)
-            await new Promise<void>((resolve) =>
-              requestAnimationFrame(() => setTimeout(resolve, 0)),
-            );
-        });
-        expect(continuations).toEqual(
-          Array.from({ length: count / 20 - 1 }, (_, i) => `${(i + 1) * 20}:2`),
-        );
-        await expect(more).toBeVisible();
-        if (count > 40) await expect(more).toBeFocused();
-        await expect(
-          page.locator('article[data-entry^="folded-"]'),
-        ).toHaveCount(0);
-      }
-      expect(errors).toEqual([]);
-    } finally {
-      releaseUnexpected();
-    }
+    await page.goto("/#flow/42/conversation");
+    // No scroll, expansion or manual load is needed to reach the message after the folded run.
+    await expect(
+      page.getByText("折叠记录之后的正文", { exact: true }),
+    ).toBeVisible();
+    const summary = page.getByRole("button", {
+      name: kind === "tool" ? /^工具活动/ : /^操作记录/,
+    });
+    await expect(summary).toHaveAccessibleName(
+      kind === "tool"
+        ? "工具活动 · 60 次调用 · 60 条结果"
+        : "操作记录 · 120 条",
+    );
+    await expect(summary).toHaveAttribute("aria-expanded", "false");
+    await expect(summary).toBeInViewport();
+    expect(continuations).toEqual(
+      Array.from({ length: 6 }, (_, i) => `${(i + 1) * 20}:2`),
+    );
+    await expect(page.locator('article[data-entry^="folded-"]')).toHaveCount(0);
+    await expect(
+      page.getByRole("button", { name: "已到当前本地快照末尾 · 点击刷新" }),
+    ).toBeVisible();
+    expect(errors).toEqual([]);
   });
 }
 
@@ -3554,8 +3589,7 @@ test("long tool activity remains bounded and readable across virtual windows", a
   await page.goto("/#flow/42/conversation");
   const root = page.locator(".detail-body");
   const list = page.locator('[data-window-list="会话活动"]');
-  // Reading the entire folded archive here is intentional, unlike automatic filling.
-  await scrollToSnapshotEnd(page, true);
+  await scrollToSnapshotEnd(page);
   await expect(list).toHaveAttribute("data-window-count", "2");
   await root.evaluate((e) => {
     e.scrollTop = 0;
