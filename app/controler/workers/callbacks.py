@@ -21,6 +21,7 @@ from app.contracts.protocol import (
     ExecuteResult,
     ExecutionTask,
     Heartbeat,
+    InferenceResult,
     PayloadValidationError,
     ProtocolError,
     RecoveryDecision,
@@ -56,6 +57,7 @@ from app.contracts.result_models import ResultPending
 from app.contracts.validation import HeartbeatHeaders, RejectedMessage
 from app.controler.workers.errors import ProtocolViolation
 from app.controler.workers.flow import ServerFlowCallbacks
+from app.controler.workers.inference import InferencePool
 from app.controler.workflow.coordinator import JobCoordinator
 from app.controler.workflow.preparation import PreparationStale, PreparationState
 from app.controler.workflow.results import ResultApplication
@@ -83,6 +85,7 @@ class ServerCallbacks:
         tools: FlowToolService,
         results: ResultApplication,
         notify_jobs: Callable[[], None],
+        inference: InferencePool,
         heartbeat_interval: float = 15.0,
         heartbeat_timeout: float = 45.0,
         poll_interval: float = 2.0,
@@ -93,6 +96,7 @@ class ServerCallbacks:
         self.stops, self.workers = StopStore(database), WorkerStore(database)
         self.coordinator, self.results = coordinator, results
         self.notify_jobs, self.metrics = notify_jobs, metrics
+        self.inference = inference
         self.heartbeat_interval, self.heartbeat_timeout = heartbeat_interval, heartbeat_timeout
         self.poll_interval = poll_interval
         self.worker: WorkerRecord | None = None
@@ -148,7 +152,7 @@ class ServerCallbacks:
 
     async def on_unmatched_reply(self, reply: ToolResult, message: WorkerMessageUnion) -> None:
         """Authorize durable replay when the original connection's receiver is gone."""
-        if isinstance(reply, ConversationResult):
+        if isinstance(reply, (ConversationResult, InferenceResult)):
             return  # A timed-out query is never replayed or evidence of execution progress.
         # Old results can replay after another assignment starts. The payload's job_id
         # is only a lookup hint; the original call ID must match persisted credentials.
@@ -194,6 +198,8 @@ class ServerCallbacks:
                     self.on_result,
                 )
         self.registered = self.current is not None
+        if self.registered:
+            self.inference.ready(self.worker_id, self.session, self.register.inference)
 
     def _matches_current(self, job_id: int, token: str) -> bool:
         return (
@@ -246,6 +252,7 @@ class ServerCallbacks:
                 )
             )
             self.registered = True
+            self.inference.ready(self.worker_id, self.session, self.register.inference)
         if self.stopping is None and not self.starting:
             stop = self.stops.pending(self.worker_id)
             if stop is not None:
@@ -291,11 +298,11 @@ class ServerCallbacks:
             self._validate_active(message.job_id, message.assignment_token)
 
     async def on_message(self, message: WorkerMessageUnion) -> None:
-        # Neither read-only history nor validation errors prove execution progress.
+        # Independent inference/history and validation errors do not prove coding progress.
         self._refresh_receive = message.connection_epoch == self.epoch and (
             message.control is not None
             or any(
-                not isinstance(item, (ValidationErrorResult, ConversationResult))
+                not isinstance(item, (ValidationErrorResult, ConversationResult, InferenceResult))
                 for item in message.payload
             )
         )
@@ -328,7 +335,7 @@ class ServerCallbacks:
             return  # The error hook enforces correlation and the pre-start fence.
         if self._recovery_required:
             raise ProtocolViolation("critical protocol payload rejected; recovery required")
-        if isinstance(item, ConversationResult):
+        if isinstance(item, (ConversationResult, InferenceResult)):
             return  # Read-only replies need no Started and cannot initiate execution effects.
         if self.starting and not isinstance(item, Started):
             raise ProtocolViolation("assignment must be acknowledged with Started")
@@ -502,7 +509,7 @@ class ServerCallbacks:
         critical = False
         replies: list[ToolResult] = []
         for item in message.payload:
-            if isinstance(item, ToolResult) and item.method == "worker.history":
+            if isinstance(item, ToolResult) and item.method in {"worker.history", "worker.infer"}:
                 replies.append(item)
                 continue
             if self.starting and item.method != "server.execution_started":
@@ -573,6 +580,7 @@ class ServerCallbacks:
         raise error
 
     def on_closed(self) -> None:
+        self.inference.closed(self.worker_id, self.session)
         self.workers.worker_disconnected(
             self.worker_id, self.disconnect_reason, connection_epoch=self.epoch
         )

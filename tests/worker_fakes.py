@@ -11,6 +11,7 @@ from app.contracts.protocol import ExecutionStopped, Register, message_header
 from app.controler.config import ServerSettings
 from app.controler.runtime import ServerRuntime
 from app.controler.workers.callbacks import ServerCallbacks
+from app.controler.workers.inference import InferencePool
 from app.controler.workflow.effects import ResultEffects
 from app.controler.workflow.results import ResultApplication
 from app.domain.models import JobState, WorkerRecord, WorkerStatus, utcnow
@@ -29,6 +30,7 @@ def worker_runtime(*, worker_id, worker_token, serve_ws_url, execution, read_his
         serve_ws_url=serve_ws_url,
     )
     runtime.execution = execution
+    runtime.inference = Mock(capability=Mock(return_value=None))
     if isinstance(execution, Mock):
         execution.state = Mock(read=read_history)
     else:
@@ -54,6 +56,7 @@ def server_runtime(coordinator, *, database, peers, tools, results,
     )
     runtime.database, runtime.gateway = database, peers
     runtime.coordinator, runtime.tools, runtime.results = coordinator, tools, results
+    runtime.inference_pool = InferencePool(peers, database=database)
     runtime.metrics = metrics
     return runtime
 
@@ -63,9 +66,9 @@ def server_callbacks(runtime, worker_id, epoch):
     return ServerCallbacks(
         runtime.coordinator, worker_id=worker_id,
         register=Register(**message_header(None), control="register", payload=[],
-                          worker_id=worker_id, recovery=None),
+                          worker_id=worker_id, recovery=None, inference=None),
         session=Mock(epoch=epoch), database=runtime.database, tools=runtime.tools,
-        results=runtime.results, notify_jobs=runtime.gateway.wake_all,
+        results=runtime.results, notify_jobs=runtime.gateway.wake_all, inference=runtime.inference_pool,
     )
 
 

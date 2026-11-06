@@ -159,12 +159,16 @@ GitHub 没有条件式 resolve 事务，刷新与 mutation 之间的竞态仍可
 | `FLOWTOOL_SUBMIT_GRACE_SECONDS` | 15 | review submitted/强信号窗口 |
 | `FLOWTOOL_WORKER_SWEEP_INTERVAL` | 5 | 持久 deadline 与结果恢复扫描间隔 |
 | `FLOWTOOL_CONFIDENCE_THRESHOLD` | 0.6 | revise 最低置信度 |
-| `FLOWTOOL_JUDGE_MODEL` / `FLOWTOOL_JUDGE_API_KEY` | 未配置 | control 专用 provider:model 与凭据；未配置时 wait |
+| `FLOWTOOL_JUDGE_MODEL` / `FLOWTOOL_JUDGE_API_KEY` | 未配置 | control 专用 provider:model 与凭据；model/key/base 均未配置时路由到可推理 worker，部分配置不转派 |
 | `FLOWTOOL_JUDGE_API_BASE` | provider 默认 | 可选模型 API 地址 |
-| `FLOWTOOL_JUDGE_TIMEOUT_SECONDS` | 60 | 包含启动和模型调用的父进程时限 |
+| `FLOWTOOL_JUDGE_TIMEOUT_SECONDS` | 60 | 一轮推理总预算，包含通信、启动、最多 3 次尝试及退避；不因编码进度续期 |
 | `FLOWTOOL_CODEX_RUN_TIMEOUT_SECONDS` | 1200 | Codex 连续无新 stdout/stderr 输出的空闲秒数，正有限值 |
 | `FLOWTOOL_AMP_RUN_TIMEOUT_SECONDS` | 1200 | Amp 连续无新 stdout/stderr 输出的空闲秒数，正有限值 |
 | `FLOWTOOL_MAX_REVISION_CYCLES` | 20 | 每 attempt 的修订次数限制 |
+
+worker 推理复用 Codex/Amp 的独立新会话，仅生成答案。可恢复失败耗尽保留 READY；配置/鉴权、
+非法输出等不可恢复错误仍保守 WAIT。三次失败或提前耗尽预算在执行记录生成持久通知，
+不消费反馈，也不发送 GitHub 通知。WAITING 后新的有效评论仍按原 ingest/settle 规则形成新批次。
 
 PostgreSQL 自动化覆盖入口回滚、并发领取、重启、批次内外版本、删除、wait 接续、强信号授权、
 结果重放和 retry，以及快照冻结前重启、准备期续租与过期隔离、无效结果恢复、直接答案丢失回执恢复、

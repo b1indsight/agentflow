@@ -35,6 +35,7 @@ import {
   sameActivityGroup,
 } from "./activity";
 import { ConversationSources, SourceList } from "./ConversationSources";
+import { InferenceNotices } from "./InferenceNotices";
 import { actionLabel, phases } from "./phases";
 import { SearchBox } from "./SearchBox";
 import type { FlowDetail, FlowSummary, JobSummary, Phase, Tab } from "./types";
@@ -687,6 +688,8 @@ function Detail({
               <Conversation key={id} id={id} root={detail} refresh={refresh} />
             ) : (
               <>
+                <InferenceNotices key={`${id}:${refresh}`} id={id} />
+                <h2 className="panel-title">任务执行</h2>
                 <div className="timeline">
                   <WindowList
                     count={jobs.length}

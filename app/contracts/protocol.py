@@ -26,10 +26,16 @@ from pydantic import (
 from app.contracts.conversation import ConversationError, HistoryPage, SessionId
 from app.domain.context_models import ReviewContext
 from app.domain.delivery_models import DeliveryReceipt
+from app.domain.inference_models import (
+    InferenceCapability,
+    InferenceFailure,
+    InferenceOutput,
+    InferenceTask,
+)
 from app.domain.models import FeedbackRef, RevisionCodingOutput, VcsKind
 from app.domain.review_models import ReviewFeedback
 
-PROTOCOL_VERSION: Literal[17] = 17
+PROTOCOL_VERSION: Literal[18] = 18
 MAX_PAYLOAD_ITEMS = 32
 MessageId = Annotated[str, Field(strict=True, pattern=r"^[0-9a-f]{32}$")]
 ConnectionEpoch = Annotated[str, Field(strict=True, min_length=1, max_length=64)]
@@ -335,6 +341,17 @@ class ConversationQuery(ToolCall):
     arguments: HistoryArguments
 
 
+class InferenceRequest(ToolCall):
+    method: Literal["worker.infer"]
+    arguments: InferenceTask
+
+    @model_validator(mode="after")
+    def _request_identity(self) -> Self:
+        if self.message_id != self.arguments.request_id:
+            raise ValueError("inference request identity mismatch")
+        return self
+
+
 class RecoveryRejected(ToolCall):
     method: Literal["worker.reject_recovery"]
     arguments: RecoveryRejectedArguments
@@ -399,6 +416,18 @@ class ConversationResult(ToolResult):
         return self
 
 
+class InferenceResult(ToolResult):
+    method: Literal["worker.infer"]
+    output: InferenceOutput | None = None
+    failure: InferenceFailure | None = None
+
+    @model_validator(mode="after")
+    def _one_outcome(self) -> Self:
+        if (self.output is None) == (self.failure is None):
+            raise ValueError("inference result requires exactly one outcome")
+        return self
+
+
 class AcceptResultResponse(ToolResult):
     method: Literal["server.accept_result"]
     result: ResultAcceptance
@@ -450,6 +479,7 @@ _FIXED_METHODS = frozenset(
         "worker.execute",
         "worker.stop",
         "worker.history",
+        "worker.infer",
         "worker.reject_recovery",
         "server.execution_started",
         "server.accept_result",
@@ -497,12 +527,13 @@ WorkerResult = Annotated[
     Annotated[ExecuteResult, Tag("worker.execute")]
     | Annotated[StopResult, Tag("worker.stop")]
     | Annotated[ConversationResult, Tag("worker.history")]
+    | Annotated[InferenceResult, Tag("worker.infer")]
     | Annotated[ValidationErrorResult, Tag("validation_error")],
     Discriminator(_result_tag),
 ]
 WorkerPayload = Annotated[WorkerCall | WorkerResult, Field(discriminator="type")]
 ServerCall = Annotated[
-    Assignment | StopExecution | ConversationQuery | RecoveryRejected,
+    Assignment | StopExecution | ConversationQuery | InferenceRequest | RecoveryRejected,
     Field(discriminator="method"),
 ]
 ServerResult = Annotated[
@@ -522,7 +553,7 @@ class Message[Payload: ToolCall | ToolResult](ProtocolModel):
     performs static checks only; receipt ACKs confer no business completion or authority.
     """
 
-    protocol_version: Literal[17]
+    protocol_version: Literal[18]
     message_id: MessageId
     connection_epoch: ConnectionEpoch | None
     ack: StrictBool
@@ -571,6 +602,7 @@ class Register(Message[WorkerPayload]):
     control: Literal["register"]
     worker_id: str
     recovery: RecoveryDescriptor | None
+    inference: InferenceCapability | None
 
     @model_validator(mode="after")
     def _recovery_payload(self) -> Self:
@@ -615,7 +647,7 @@ class Heartbeat(Message[WorkerPayload]):
     @model_validator(mode="after")
     def _execution_payload(self) -> Self:
         for item in self.payload:
-            if isinstance(item, (ConversationResult, ValidationErrorResult)):
+            if isinstance(item, (ConversationResult, InferenceResult, ValidationErrorResult)):
                 continue
             if isinstance(item, (Started, AcceptResultRequest, AcceptStop, FlowToolRequest)):
                 identity = (item.arguments.job_id, item.arguments.assignment_token)
@@ -711,7 +743,7 @@ def accept_stop_id(receipt_id: MessageId) -> MessageId:
 
 
 class MessageHeader(TypedDict):
-    protocol_version: Literal[17]
+    protocol_version: Literal[18]
     message_id: MessageId
     connection_epoch: str | None
     ack: bool

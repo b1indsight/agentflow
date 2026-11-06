@@ -10,6 +10,7 @@ import json
 from pydantic import ValidationError
 
 from app.communication.gateway import Gateway
+from app.communication.requests import ReplyRejected, request_reply
 from app.communication.session import Session, SessionClosed
 from app.contracts.conversation import (
     ConversationFailure,
@@ -52,7 +53,7 @@ class ConversationBroker:
         registration = self._peers.get(worker_id)
         if registration is None or registration.session.epoch is None:
             raise ConversationFailure("worker_unavailable")
-        session, routes = registration.session, registration.routes
+        session = registration.session
         if sum(self._inflight.values()) >= 64 or self._inflight.get(session, 0) >= 4:
             raise ConversationFailure("query_busy")
         request = ConversationQuery(
@@ -60,65 +61,24 @@ class ConversationBroker:
             method="worker.history",
             arguments=HistoryArguments(**query.model_dump()),
         )
-        future: asyncio.Future[tuple[ConversationResult, WorkerMessageUnion]] = (
-            asyncio.get_running_loop().create_future()
-        )
-        sending: asyncio.Task[bool] | None = None
-
-        async def deliver(reply: ConversationResult, message: WorkerMessageUnion) -> None:
-            if not future.done():
-                future.set_result((reply, message))
-
-        def rejected(reason: str) -> None:
-            if not future.done():
-                future.set_exception(ConversationFailure("invalid_response"))
-
-        def closed() -> None:
-            if not future.done():
-                future.set_exception(SessionClosed("query connection closed"))
-            # Session closes any unfinished write. Do not cancel a completed write's
-            # still-resuming send task: a reply drained before EOF remains valid.
-
         self._inflight[session] = self._inflight.get(session, 0) + 1
         try:
-            session.check_request()
-            routes.expect_reply(
-                request, ConversationResult, deliver, on_rejected=rejected, on_closed=closed
+            response, message = await request_reply(
+                registration, request, ConversationResult,
+                ServerMessage(**message_header(session.epoch), control=None, payload=[request]),
+                timeout=self.timeout,
             )
-            async with asyncio.timeout(self.timeout):
-                sending = asyncio.create_task(
-                    session.send(
-                        ServerMessage(
-                            **message_header(session.epoch), control=None, payload=[request]
-                        ),
-                        is_current=lambda: not future.done(),
-                    )
-                )
-                await asyncio.wait((sending, future), return_when=asyncio.FIRST_COMPLETED)
-                if future.done():
-                    future.result()  # Rejection/closure wins even while the send lock is held.
-                if not await sending:
-                    raise SessionClosed("query not written")
-                response, message = await future
             return self._validated(request, response, message)
         except TimeoutError as exc:
             raise ConversationFailure("query_timeout") from exc
         except SessionClosed as exc:
             raise ConversationFailure("worker_unavailable") from exc
+        except ReplyRejected as exc:
+            raise ConversationFailure("invalid_response") from exc
         finally:
-            routes.forget_reply(request.message_id)
-            try:
-                if sending is not None:
-                    sending.cancel()
-                    await asyncio.gather(sending, return_exceptions=True)
-            finally:
-                self._inflight[session] -= 1
-                if not self._inflight[session]:
-                    del self._inflight[session]
-                if not future.done():
-                    future.cancel()
-                elif not future.cancelled():
-                    future.exception()
+            self._inflight[session] -= 1
+            if not self._inflight[session]:
+                del self._inflight[session]
 
     def _validated(
         self,

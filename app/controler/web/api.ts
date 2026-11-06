@@ -3,6 +3,7 @@ import type {
   ContentPage,
   FlowDetail,
   FlowPage,
+  InferenceNoticePage,
   JobPage,
   RepositoryPage,
 } from "./types";
@@ -104,6 +105,16 @@ export const getJobs = (
   cursor: string | null,
   signal?: AbortSignal,
 ) => api<JobPage>(`/api/flows/${id}/jobs`, { cursor, limit: 50 }, signal);
+export const getInferenceNotices = (
+  id: number,
+  params: { cursor?: string | null; snapshot?: number },
+  signal: AbortSignal,
+) =>
+  api<InferenceNoticePage>(
+    `/api/flows/${id}/inference-notices`,
+    { ...params, limit: 20 },
+    signal,
+  );
 export const getActivity = (
   id: number,
   params: {

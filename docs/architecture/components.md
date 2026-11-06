@@ -34,7 +34,7 @@ Runtime 统一初始化工具、effects、结果应用和 conversation broker；
 各包入口只说明职责，调用者直接导入具体模块。
 
 目录列表见[当前目录](roadmap.md#8-当前目录与里程碑)。ASGI Python 入口为
-`app.controler.api`，Judge 内部子进程入口为 `app.controler.review.runner`；
+`app.controler.api`，本地 bub 推理子进程入口为 `app.inference.runner`；
 CLI 命令为 `flowtool serve` / `flowtool worker`，真实验收入口为 `app.live_smoke`。
 
 ## 4.1 Webhook Ingress（FastAPI + uvicorn）
@@ -227,7 +227,7 @@ HOME、原生配置入口及自定义 MCP 变量保留；不增加配置解析�
   shell 进程组。该快照无法保证回收任意脱离进程树的进程；仍依赖外部隔离。
 - `ExecutionState` 按 ID 格式选择历史来源。Amp 原生 export 经公开块映射与脱敏后短时缓存，
   支持外部追加、块内分页、前缀编辑失效；不保存第二套捕获历史，不显示 thinking。
-  记录 ID 保留 session 前缀，满足 control 的来源校验；两端使用 protocol v17。
+  记录 ID 保留 session 前缀，满足 control 的来源校验；两端使用 protocol v18。
 - 不再拒绝 workspace Amp 设置或因额外工具拒收结果；保留必要的原生 shell 与完整终态检查。
   用户禁用与 workspace MCP 审批由原生 CLI 执行，不自动批准；managed policy/账户插件仍由
   运维核查，CLI 工具列表不能替代权限或 OS 隔离。
@@ -373,7 +373,7 @@ lease 到期 requeue、started grace/deadline、epoch fencing、result inbox 去
 评论使用稳定隐藏 marker 并分页核对本 bot 作者，PR 使用固定 head 查询，labels/reviewers 则核对目标状态。
 不能确认是否成功的非幂等请求保持 uncertain，不盲目重复 POST；`flow show` 显示待处理操作，retry 不能绕过它们。
 因此不宣称跨 PostgreSQL/GitHub 的通用 exactly-once。跨 worker session 迁移和多 serve HA 仍未实现。
-当前只初始化完整 schema，不执行 DDL 迁移或批量回填。serve/worker 在线使用 wire17，
+当前只初始化完整 schema，不执行 DDL 迁移或批量回填。serve/worker 在线使用 wire18，
 正常写 journal5 / ResultInbox v1；journal/inbox 只存业务事实，不存 message、条目身份、ACK 或 epoch。
 受限 v4 journal（内嵌 v14/v15 回执）与已知旧 inbox 只读转换；保持摘要，正常状态保存才写 v5。
 未知、混合或损坏记录保留并拒绝；切换和降级边界见[升级说明](../operations/upgrade.md)。
@@ -419,9 +419,24 @@ REVISE 在工作流事务中创建 revision job 并关联批次；ANSWER/IGNORE/
 coordinator 不直接更新业务表。批次答案与结果评论保留各自的事务授权和 marker 恢复，
 共享 `GitHubError.definitely_rejected` 的拒绝判定；线程回复与普通结果评论共用一个执行分支。
 
-control 的 `BubJudge` 启动独立 `app.controler.review.runner` 子进程，显式配置 bub 0.4.1 `ModelRunner.completion_response`，
-不创建 framework、加载插件、读写 tape 或执行工具。每批次独立请求与会话 ID；凭据仅通过允许的
-子进程环境传入。单次调用无 fallback/SDK retry，父进程限制时长和 stdout/stderr，取消时回收子进程。
+control 的 `ReviewJudge` 负责 prompt 和业务校验，`InferenceRouter` 接收通用 messages、可选 schema、
+字节限制及总预算，不含 Flow/review 类型。bub 完整或部分配置时走本地 `BubInference`，只有
+model/key/base 均未配置才走 `InferencePool`；本地失败不切换执行位置。
+`app.inference.runner` 子进程显式配置 bub 0.4.1 `ModelRunner.completion_response`，不创建 framework、
+加载插件、读写 tape 或执行工具，SDK retries 为零。父进程限制时长和管道，取消时回收子进程。
+
+worker 在鉴权和 Registered 完成后登记可选推理能力；pool 核对当前 Session/epoch、状态和能力，
+轮转候选，每 worker 一个独立推理槽，编码忙不排除，draining/recovering/failed 排除。
+`worker.infer` 沿用 call/result 关联，临时 RPC helper 同时服务 history/inference，不持久化任务。
+worker 通过 Session.watch 观察异步答案任务，模型等待不占用串行消息 driver；断线取消并 join 推理。
+原生 Codex/Amp 每次调用 start，在 `worker_root/inference/answer-*` 下使用新会话，不授予 Flow capability。
+目录须不在 Git 仓库或 worktree 内；原生工具/用户配置仍受外部专用账号、container 或 VM 约束。
+
+只有 router 重试可恢复错误，最多 3 次且共用总预算；每次换 request_id，未知远端结果排除原 worker。
+不可恢复错误保守 WAIT，可恢复耗尽保留 READY；已保存决定的应用不需要 worker 在线。
+三次未成功或提前耗尽预算的安全摘要由 runtime 绑定真实 batch/flow，再写入活动账本；写入失败不重跑模型。
+`InferenceNoticeStore` 按快照、keyset 分页读取每个批次的最新通知，并从当前批次/Flow 状态生成后续说明。
+控制台执行记录独立读取通知，不改变 jobs 分页，不轮询，也不向 GitHub 发送失败通知。
 
 严格校验四类 verdict、有限 confidence、动作字段和 envelope 身份。结果持久保存模型/adapter 版本、
 context digest、reason/open_points；answer 使用同一个答案，由反馈批次持久化发送授权并通过
@@ -475,7 +490,7 @@ WorkerBusinessCallbacks.on_history 内 await to_thread 调用 `ExecutionState.re
 其结果只属于旧 Session。Registered 前的合法 history 不绑定 epoch 或 ready；server 的 history 回复
 不要求 Started，也不替代 Started 或刷新执行存活期限。可靠领域事件/outbox 与 HA 不在当前通信架构范围。
 
-wire v17 的可关联 payload 校验失败整批拒收；合法兄弟项也不执行。每项收到同 method、
+wire v18 的可关联 payload 校验失败整批拒收；合法兄弟项也不执行。每项收到同 method、
 `reply_to=原条目ID` 的 `tool_result`，error 严格只有固定 `code=validation_error` 与
 `message=message payload failed validation`，不暴露详情。坏头、握手、epoch、容量或畸形 error
 仍关闭连接，不对 error 回 error；混合控制拒收不续租、不登记 ACK。

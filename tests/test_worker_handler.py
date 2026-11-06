@@ -81,6 +81,7 @@ def register_message(
         control="register",
         worker_id=worker_id,
         recovery=recovery,
+        inference=None,
         payload=payload or [],
     )
 

@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, SecretStr, model_validator
 
@@ -256,6 +256,7 @@ class CodingExecutionResult:
     last_message: str
     exit_code: int
     failure_detail: str | None = None
+    failure_kind: Literal["timeout", "output_limit"] | None = None
 
 
 class SessionUnavailable(RuntimeError):

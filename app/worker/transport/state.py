@@ -44,6 +44,7 @@ from app.contracts.protocol import (
     terminal_id,
 )
 from app.contracts.validation import RejectedMessage
+from app.domain.inference_models import InferenceCapability
 from app.worker.execution.lifecycle import WorkerExecution, WorkerProtocolError
 
 
@@ -78,9 +79,11 @@ class WorkerStateCallbacks:
         session: Session[ServerMessageUnion, WorkerMessageUnion],
         execution: WorkerExecution,
         on_ready: Callable[[bool], None],
+        inference: InferenceCapability | None,
     ) -> None:
         self.worker_id, self.session, self.execution = worker_id, session, execution
         self.on_ready = on_ready
+        self.inference = inference
         self.register: Register | None = None
         self.ready = False
         self.expected_result: AcceptResultRequest | None = None
@@ -133,6 +136,7 @@ class WorkerStateCallbacks:
             control="register",
             worker_id=self.worker_id,
             recovery=recovery,
+            inference=self.inference,
             payload=[self.expected_result] if self.expected_result is not None else [],
         )
         await self.session.send(self.register)

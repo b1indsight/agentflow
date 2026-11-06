@@ -61,6 +61,40 @@ export interface JobPage {
   next_cursor: string | null;
   has_more: boolean;
 }
+/** A failed inference round, separate from coding jobs and the Flow lifecycle. */
+export interface InferenceNotice {
+  key: string;
+  batch_id: number;
+  occurred_at: string;
+  updated_at: string;
+  attempts: number;
+  max_attempts: number;
+  last_failure_code:
+    | "unavailable"
+    | "busy"
+    | "connection_closed"
+    | "rpc_timeout"
+    | "execution_timeout"
+    | "rate_limited"
+    | "backend_unavailable"
+    | "authentication"
+    | "configuration"
+    | "invalid_response"
+    | "output_limit"
+    | "backend_error";
+  last_worker_id: string | null;
+  backend: string | null;
+  stop_reason: "max_attempts" | "deadline" | "non_retryable" | "unavailable";
+  elapsed_ms: number;
+  historical: boolean;
+  next_condition: string;
+}
+export interface InferenceNoticePage {
+  items: InferenceNotice[];
+  snapshot: number;
+  next_cursor: string | null;
+  has_more: boolean;
+}
 export interface ActivityItem {
   key: string;
   version: number;

@@ -35,6 +35,7 @@ from app.controler.api import create_app
 from app.controler.config import ServerSettings
 from app.controler.runtime import ServerRuntime
 from app.controler.workers.conversation import ConversationBroker, ConversationService
+from app.controler.workers.inference import InferencePool
 from app.controler.workflow.coordinator import JobCoordinator
 from app.controler.workflow.tools import FlowToolService
 from app.domain.models import Job, JobKind, JobState
@@ -109,6 +110,7 @@ class AsgiRuntime(ServerRuntime):
         self.worker_tokens = {"worker-1": "worker-secret"}
         self.coordinator = gateway_coordinator
         self.database = store.database
+        self.inference_pool = InferencePool(self.gateway, database=store.database)
         self.tools = gateway_coordinator.tools
         self.results = gateway_coordinator.results
         self.settings.worker_poll_interval = 0.01
@@ -163,6 +165,7 @@ def test_real_asgi_websocket_completes_a_postgresql_job(store: Store, monkeypatc
                 payload=[],
                 worker_id="worker-1",
                 recovery=None,
+                inference=None,
             ).model_dump_json()
         )
         ready = False

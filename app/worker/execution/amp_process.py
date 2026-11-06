@@ -188,6 +188,31 @@ async def run_amp(
              asyncio.create_task(feed()), asyncio.create_task(proc.wait())]
     io = asyncio.gather(*tasks)
     timed_out = overflow = False
+
+    async def cleanup() -> None:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.gather(io, return_exceptions=True)
+
+        async def discard(stream: asyncio.StreamReader | None) -> None:
+            assert stream is not None
+            while await stream.read(8192):
+                pass
+
+        # Like CodexAgent.cleanup, drain after overflow without retaining any more bytes.
+        draining = asyncio.gather(discard(proc.stdout), discard(proc.stderr))
+        try:
+            await _stop_amp(proc)
+            try:
+                await asyncio.wait_for(draining, timeout=5)
+            except TimeoutError:
+                logger.warning("Amp cleanup exceeded its pipe-drain limit after termination")
+        finally:
+            draining.cancel()
+            await asyncio.gather(draining, return_exceptions=True)
+
     try:
         if timeout_kind == "idle":
             await wait_for_inactivity(io, timeout=timeout, last_activity=lambda: last_activity)
@@ -198,16 +223,14 @@ async def run_amp(
     except _OutputLimit:
         overflow = True
     finally:
-        cleanup = asyncio.create_task(_stop_amp(proc))
-        try:
-            await asyncio.shield(cleanup)
-        except asyncio.CancelledError:
-            await cleanup
-            raise
-        finally:
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            await asyncio.gather(io, return_exceptions=True)
+        stopping = asyncio.create_task(cleanup())
+        cancelled = False
+        while not stopping.done():
+            try:
+                await asyncio.shield(stopping)
+            except asyncio.CancelledError:
+                cancelled = True
+        stopping.result()
+        if cancelled:
+            raise asyncio.CancelledError
     return AmpProcessResult(bytes(stdout), bytes(stderr), proc.returncode or 0, timed_out, overflow)

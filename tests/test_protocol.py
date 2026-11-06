@@ -255,7 +255,7 @@ def test_mixed_control_ack_and_business_have_independent_identities() -> None:
         [terminal_item, accept], control="heartbeat", **IDENTITY, ack=True, ack_id="c" * 32
     )
     parsed = parse_worker_message(json.dumps(data))
-    assert PROTOCOL_VERSION == 17
+    assert PROTOCOL_VERSION == 18
     assert isinstance(parsed.payload[0], ExecuteResult)
     assert parsed.payload[0].terminal() == terminal
     assert isinstance(parsed.payload[1], AcceptResultRequest)
@@ -280,6 +280,7 @@ def test_register_recovery_and_registered_decisions_are_control_fields() -> None
         connection_epoch=None,
         worker_id="w",
         recovery={**IDENTITY, "state": "failed", "result_digest": terminal_digest(terminal)},
+        inference=None,
     )
     assert parse_worker_message(json.dumps(data)).payload[0].message_id == accept_result_id(T)
     data["payload"] = [call("flow.open_pr", FLOW)]
@@ -342,7 +343,8 @@ def test_registered_and_heartbeat_can_carry_independent_queries() -> None:
     history = result("worker.history", error="history_unreadable")
     heartbeat = message([history], control="heartbeat", **IDENTITY)
     assert parse_worker_message(json.dumps(heartbeat)).payload[0].method == "worker.history"
-    register = message([], control="register", connection_epoch=None, worker_id="w", recovery=None)
+    register = message([], control="register", connection_epoch=None, worker_id="w", recovery=None,
+                       inference=None)
     assert parse_worker_message(json.dumps(register)).payload == []
     query["arguments"] = {"session_id": "https://ampcode.com/T-x"}
     with pytest.raises(ValidationError):

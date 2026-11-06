@@ -18,15 +18,18 @@ from app.communication.gateway import Gateway
 from app.communication.session import Session, Transport
 from app.contracts.protocol import ServerMessageUnion, WorkerMessageUnion
 from app.contracts.validation import parse_server_input
+from app.domain.inference_models import MAX_OUTPUT_BYTES
 from app.telemetry.logging import configure_logging
 from app.worker.config import WorkerSettings
 from app.worker.execution.amp_agent import AmpCodingAgent
 from app.worker.execution.codex import CodexAgent
 from app.worker.execution.executor import WorkerExecutor
+from app.worker.execution.inference import NativeAgentInference
 from app.worker.execution.lifecycle import WorkerExecution
 from app.worker.health import HealthFile
 from app.worker.state.execution import ExecutionState
 from app.worker.transport.business import WorkerBusinessCallbacks
+from app.worker.transport.inference import WorkerInferenceCallbacks
 from app.worker.transport.state import WorkerStateCallbacks, control_ack
 
 _CONTROL_ENVIRONMENT_KEYS = frozenset(
@@ -146,6 +149,12 @@ class WorkerRuntime:
             workspace_limit=self.settings.worker_repo_workspace_limit,
         )
         self.execution = WorkerExecution(worker_id=self.settings.worker_id, executor=executor, state=state)
+        self.inference = NativeAgentInference(
+            agent_type(trusted_host=self.settings.trusted_host_execution, timeout=timeout,
+                       max_output_bytes=MAX_OUTPUT_BYTES),
+            root=self.settings.worker_root, backend=self.settings.coding_agent, timeout=timeout,
+            enabled=self.settings.trusted_host_execution,
+        )
         self.gateway = Gateway[ServerMessageUnion, WorkerMessageUnion]()
         self._connected = False
 
@@ -200,14 +209,21 @@ class WorkerRuntime:
                 session=session,
                 execution=self.execution,
                 on_ready=self._set_connected,
+                inference=await asyncio.to_thread(self.inference.capability),
             )
             business_callbacks = WorkerBusinessCallbacks(session=session, execution=self.execution)
+            inference_callbacks = WorkerInferenceCallbacks(
+                session=session, inference=self.inference, ready=lambda: state_callbacks.ready,
+            )
         except BaseException:
             await session.close()
             raise
-        await self.gateway.serve(
-            "server", session, state_callbacks, business_callbacks, replace=False
-        )
+        try:
+            await self.gateway.serve(
+                "server", session, state_callbacks, business_callbacks, inference_callbacks, replace=False,
+            )
+        finally:
+            await inference_callbacks.aclose()
 
     def _set_connected(self, connected: bool) -> None:
         self._connected = connected
