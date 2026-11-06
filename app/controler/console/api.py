@@ -13,6 +13,7 @@ from app.contracts.console import (
     ContentPage,
     FlowDetail,
     FlowPage,
+    InferenceNoticePage,
     JobPage,
     Phase,
     RepositoryPage,
@@ -23,6 +24,7 @@ from app.controler.workflow.service import ControlService, RetryRejected
 from app.persistence.activity import ActivityStore
 from app.persistence.console import ConsoleStore
 from app.persistence.flows import FlowStore
+from app.persistence.inference_notices import InferenceNoticeStore
 
 router = APIRouter(prefix="/api")
 FlowId = Annotated[int, Path(gt=0)]
@@ -131,6 +133,21 @@ async def jobs(
     return await runtime.console.db(
         partial(ConsoleStore(runtime.database).jobs, flow_id, cursor=cursor, limit=limit)
     )
+
+
+@router.get("/flows/{flow_id}/inference-notices", response_model=InferenceNoticePage)
+async def inference_notices(
+    request: Request,
+    flow_id: FlowId,
+    cursor: Cursor = None,
+    snapshot: int | None = Query(default=None, ge=0),
+    limit: int = Query(default=20, ge=1, le=100),
+) -> InferenceNoticePage:
+    runtime: ServerRuntime = request.app.state.runtime
+    return await runtime.console.db(partial(
+        InferenceNoticeStore(runtime.database).page, flow_id,
+        cursor=cursor, snapshot=snapshot, limit=limit,
+    ))
 
 
 @router.get("/flows/{flow_id}/activity", response_model=ActivityPage)

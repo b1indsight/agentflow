@@ -29,6 +29,7 @@ def worker_runtime(*, worker_id, worker_token, serve_ws_url, execution, read_his
         serve_ws_url=serve_ws_url,
     )
     runtime.execution = execution
+    runtime.inference = Mock(capability=Mock(return_value=None))
     if isinstance(execution, Mock):
         execution.state = Mock(read=read_history)
     else:
@@ -63,7 +64,7 @@ def server_callbacks(runtime, worker_id, epoch):
     return ServerCallbacks(
         runtime.coordinator, worker_id=worker_id,
         register=Register(**message_header(None), control="register", payload=[],
-                          worker_id=worker_id, recovery=None),
+                          worker_id=worker_id, recovery=None, inference=None),
         session=Mock(epoch=epoch), database=runtime.database, tools=runtime.tools,
         results=runtime.results, notify_jobs=runtime.gateway.wake_all,
     )
@@ -87,9 +88,11 @@ class NoPendingStops(StopStore):
         raise AssertionError("no stop was requested")
 
 
-def connected_worker(worker_id: str, protocol_version: int, connection_epoch: str) -> WorkerRecord:
+def connected_worker(worker_id: str, protocol_version: int, connection_epoch: str,
+                     *, execute: bool = True) -> WorkerRecord:
     now = utcnow()
     return WorkerRecord(worker_id=worker_id, protocol_version=protocol_version,
+                        execute=execute,
                         connection_epoch=connection_epoch, status=WorkerStatus.ONLINE,
                         first_connected_at=now, last_connected_at=now, last_seen_at=now)
 

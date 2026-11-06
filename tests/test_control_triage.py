@@ -18,7 +18,7 @@ from tests.test_review_batches import claim, feedback, ingest, review_flow  # no
 
 
 @pytest.fixture
-def triage_runtime(store, review_flow, recording_resources):  # noqa: F811
+def triage_runtime(store, review_flow, recording_resources, monkeypatch):  # noqa: F811
     flow, clock = review_flow
     ingest(store, flow, feedback(clock))
     batch = claim(store, clock)[0]
@@ -28,6 +28,10 @@ def triage_runtime(store, review_flow, recording_resources):  # noqa: F811
     runtime.coordinator = coordinator(store, RecordingGitHub())
     runtime.judge = SimpleNamespace(triage=AsyncMock(side_effect=lambda context: judge_decision(
         TriageVerdict(verdict=Verdict.REVISE, confidence=1, instruction="Fix the bound"), context)))
+    runtime.judge.failure_summary = None
+    runtime.inference = Mock()
+    runtime.settings = SimpleNamespace(judge_timeout_seconds=60)
+    monkeypatch.setattr("app.controler.runtime.ReviewJudge", lambda *args, **kwargs: runtime.judge)
     runtime.gateway = Mock()
     runtime._triage_task = None
     return runtime, batch

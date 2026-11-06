@@ -320,6 +320,27 @@ CREATE TABLE IF NOT EXISTS project_projections (
 CREATE INDEX IF NOT EXISTS ix_projects_due ON project_projections(next_at,id) WHERE NOT blocked;
 """
 
+INFERENCE_SCHEMA = """
+-- Additive and repeatable for deployed databases; historical result receipts are untouched.
+ALTER TABLE jobs ALTER COLUMN flow_id DROP NOT NULL;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS inference JSONB;
+ALTER TABLE workers ADD COLUMN IF NOT EXISTS execute BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE workers ADD COLUMN IF NOT EXISTS inference JSONB;
+ALTER TABLE workers ADD COLUMN IF NOT EXISTS current_inference_job_id BIGINT REFERENCES jobs(id);
+ALTER TABLE workers ADD COLUMN IF NOT EXISTS last_inference_assigned_at TIMESTAMPTZ;
+ALTER TABLE review_batches ADD COLUMN IF NOT EXISTS inference_job_id BIGINT REFERENCES jobs(id);
+DO $$
+BEGIN
+  ALTER TABLE jobs ADD CONSTRAINT ck_jobs_kind_fields CHECK (
+    (kind='inference' AND inference IS NOT NULL)
+    OR (kind<>'inference' AND flow_id IS NOT NULL AND inference IS NULL)
+  );
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+CREATE UNIQUE INDEX IF NOT EXISTS ux_jobs_inference_request
+  ON jobs ((inference->'task'->>'request_id')) WHERE kind='inference';
+"""
+
 SCHEMAS = (
     SCHEMA,
     WEBHOOK_SCHEMA,
@@ -329,4 +350,5 @@ SCHEMAS = (
     RECONCILE_SCHEMA,
     PROJECT_SCHEMA,
     CONSOLE_SCHEMA,
+    INFERENCE_SCHEMA,
 )

@@ -5,6 +5,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
+from app.domain.inference_models import AdapterVersion, FailureCode, StopReason
+
 Phase = Literal["queued", "running", "review", "blocked", "done"]
 
 
@@ -84,6 +86,31 @@ class JobSummary(ConsoleModel):
 
 class JobPage(ConsoleModel):
     items: list[JobSummary]
+    next_cursor: str | None
+    has_more: bool
+
+
+class InferenceNotice(ConsoleModel):
+    """Safe execution-record facts with a current, rather than historical, recovery explanation."""
+
+    key: str
+    batch_id: int = Field(gt=0)
+    occurred_at: datetime
+    updated_at: datetime
+    attempts: int = Field(strict=True, ge=1, le=3)
+    max_attempts: Literal[3]
+    last_failure_code: FailureCode
+    last_worker_id: str | None
+    backend: AdapterVersion | None
+    stop_reason: StopReason
+    elapsed_ms: int = Field(strict=True, ge=0)
+    historical: bool
+    next_condition: str
+
+
+class InferenceNoticePage(ConsoleModel):
+    items: list[InferenceNotice]
+    snapshot: int = Field(ge=0)
     next_cursor: str | None
     has_more: bool
 

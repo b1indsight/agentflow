@@ -68,10 +68,16 @@ FlowTool 的目标是把带 `flow` 标签的 GitHub issue 编排成
   运行中新评论/编辑进入下一批。仅 allowlist 作者提交的 Request Changes 经 grace 合批直达修订；
   包含 `@bot` 的评论也进入 Judge。wait 等待新信息，
   answer/ignore/明确 addressed 只消费本批次精确版本，未决问题保留。
-- **语义决策与直接答复**：control 冻结 Issue/PR、有限 patch 和讨论，control 用 bub 0.4.1 无工具入口
-  判定；超时、非法输出和不完整快照保守 wait。决定保存在反馈批次，只有 revise 创建 worker job；答案引用来源反馈并以批次 marker 核对回执。
-  `FLOWTOOL_JUDGE_MODEL` / `FLOWTOOL_JUDGE_API_KEY` 只配置在 control；可选 API 地址和 60 秒超时见
-  [env.example](env.example)。未配置时 Judge 等待，不在健康检查中调用模型。
+- **语义决策与直接答复**：control 冻结 Issue/PR、有限 patch 和讨论，通用推理路由生成答案，
+  推理作为 `INFERENCE` Job 进入统一分配流程；review 输出校验后才成功，只有 revise 创建编码 Job。
+  GitHub 回复仍由 control 应用并按批次 marker 对账。control 在 bub 配置及依赖预检通过后管理
+  一个仅提供 `worker.infer` 的 mini worker；其就绪、空闲且能力匹配时优先领取推理 Job。
+  bub 未配置、半配、忙或不合条件时，选择普通 worker 的独立推理槽，复用其 Codex/Amp。
+  健康检查不调用模型；实际调用失败按分类处理，永久错误不会因换 provider 而自动重试。
+  总预算包含排队、通信与退避，最多授权派发 3 次（含首次、结果未知的派发），次数和截止跨重启保留。
+  可恢复错误耗尽后保留 READY，后续扫描可创建新一轮 Job；
+  非可恢复错误及不完整快照保守 WAIT，新有效反馈仍按原规则触发新批次。
+  三次均失败或提前耗尽预算，在详情“执行记录 → 推理通知”保留安全摘要，不发送 GitHub 通知。
 - **运维入口**：CLI 可查看 Flow、交付分支/PR、worker、任务恢复状态和未完成的 GitHub 操作，
   并提供 cancel/retry 命令。已核验修订中被明确拒绝的通知可补发；结果不确定时拒绝直接 retry。
 - **取消与 drain**：cancel 持久化停止意图，worker 取消当前执行并回收其持有的 Codex/VCS
@@ -183,13 +189,20 @@ Git worktree。`FLOWTOOL_WORKER_REPO_WORKSPACE_LIMIT=2` 设置每仓库总上限
 每次 INITIAL、REVISION resume/fallback 都提供本轮 bot `gh` 包装、独立配置和 Git helper，
 不使用个人登录态；token 过期/权限不足即失败，不自动续期或扩权。worker 保持单仓库
 Contents write，PR 通过 MCP `open_pr` 请求 controler 校验后创建。包装不构成 OS 沙箱。
-当前 Codex/Amp 接入均使用 wire17 / journal5 / ResultInbox v1，serve 与 worker 的协议版本必须匹配。
+当前 Codex/Amp 接入均使用 wire19 / journal5 / ResultInbox v1，serve 与 worker 的协议版本必须匹配。
 通信统一为顶层控制和 typed call/result 列表；控制 ACK 仅确认接收，不表示业务提交。
 支持只读加载受限 v4 journal（内嵌 v14/v15 回执），正常保存时才升级，见 [Worker 更新](docs/deployment/worker-update.md#journal-直接前代兼容)。
 两个后端继承 worker 专用账号及任务仓库中原生 CLI 可发现的 skills/MCP，以及其自定义环境变量；
 不复制当前对话或其他机器的配置。Amp 保留用户/workspace 设置与原生审批，仅覆盖保留名称 `flow`，
 首次执行使用当前 broker，修订时阻断旧 broker。control/worker、Git/GitHub 认证及父 agent 身份
 仍先过滤，再注入本轮能力。自定义秘密不保证全面脱敏；配置和隔离边界见[部署说明](docs/deployment/README.md#skills-与-mcp-继承)。
+
+推理使用 `worker_root/inference/answer-*` 下的新目录和新会话，不关联 GitHub、不 resume 编码会话，
+也不授予 Flow MCP 或 GitHub capability。普通 worker 同时提供 execute/infer，无需绑定任何 repo
+即可接推理 Job。每个 worker 有一个独立推理槽，可以与编码同时运行；推理取消不停止编码。
+controller 托管的 bub mini worker 仅提供 infer，每次使用独立临时空目录，不创建仓库或编码 journal。
+worker root 位于 Git 仓库、worktree 或其符号链接内时不提供推理能力。仅分开 cwd 不构成沙箱：
+原生工具、用户配置和自定义凭据仍受下述专用账号/container/VM 隔离前提约束。
 
 `WorkerSettings` 不读取当前目录的 `.env`，worker 配置通过进程环境提供；默认要求 `wss://`，示例中的
 `FLOWTOOL_ALLOW_INSECURE_WORKER_WS=true` 仅用于开发。要运行 `danger-full-access` CodingAgent，必须在专用 OS account、

@@ -2,13 +2,24 @@
 
 from __future__ import annotations
 
+import hashlib
 from datetime import timedelta
+from typing import Literal
+from uuid import uuid4
 
 from psycopg.rows import class_row
 from psycopg.types.json import Jsonb
 
-from app.contracts.protocol import Failed, TerminalPayload, terminal_digest
+from app.contracts.protocol import Failed, InferenceResult, TerminalPayload, terminal_digest
 from app.contracts.receipts import ResultInbox
+from app.domain.inference_models import (
+    LOCAL_BUB_WORKER_ID,
+    InferenceCapability,
+    InferenceFailure,
+    InferenceSummary,
+    InferenceTask,
+    StopReason,
+)
 from app.domain.models import (
     DeliveryState,
     FlowExecution,
@@ -31,6 +42,7 @@ from app.domain.recovery_policy import (
 from app.github import GitHubError, retry_delay
 from app.persistence.deliveries import DeliveryStore
 from app.persistence.flows import FlowStore
+from app.persistence.inference_notices import InferenceNoticeStore
 from app.persistence.jobs import JobStore
 from app.persistence.records import required
 from app.persistence.repository import Repository
@@ -73,7 +85,7 @@ class WorkerStore(Repository):
                 " AND s.binding_at=flow_executions.bound_at AND s.state!='confirmed')"
                 " AND NOT EXISTS (SELECT 1 FROM jobs j JOIN flows f ON f.id=j.flow_id"
                 " WHERE j.flow_id=flow_executions.flow_id AND f.state='cancelled'"
-                " AND j.result_received_at IS NOT NULL AND j.result_applied_at IS NULL)"
+                " AND j.kind<>'inference' AND j.result_received_at IS NOT NULL AND j.result_applied_at IS NULL)"
                 " AND NOT EXISTS (SELECT 1 FROM result_effects e JOIN jobs j ON j.id=e.job_id"
                 " JOIN flows f ON f.id=j.flow_id WHERE j.flow_id=flow_executions.flow_id"
                 " AND f.state='cancelled' AND e.dispatched_at IS NOT NULL AND e.receipt IS NULL)",
@@ -86,19 +98,26 @@ class WorkerStore(Repository):
         worker_id: str,
         protocol_version: int,
         connection_epoch: str = "",
+        *, execute: bool = True,
     ) -> WorkerRecord:
         now = self._db.now()
         with (
-            self._db.connection() as connection,
+            self._db.transaction() as tx,
+            tx.connection() as connection,
             connection.cursor(row_factory=class_row(WorkerRecord)) as cursor,
         ):
+            tx._lock_workers(connection)
+            previous = cursor.execute("SELECT * FROM workers WHERE worker_id=%s", (worker_id,)).fetchone()
+            if previous is not None and previous.connection_epoch != connection_epoch:
+                WorkerStore(tx)._recover_inference(worker_id)
             row = cursor.execute(
                 "INSERT INTO workers(worker_id, protocol_version, status, connection_epoch,"
                 " current_job_id, first_connected_at, last_connected_at, last_seen_at,"
-                " last_error, last_disconnect_reason)"
-                " VALUES (%s,%s,%s,%s,NULL,%s,%s,%s,NULL,NULL)"
+                " last_error, last_disconnect_reason,execute)"
+                " VALUES (%s,%s,%s,%s,NULL,%s,%s,%s,NULL,NULL,%s)"
                 " ON CONFLICT(worker_id) DO UPDATE SET protocol_version=excluded.protocol_version,"
-                " status=excluded.status, connection_epoch=excluded.connection_epoch,"
+                " status=CASE WHEN workers.current_job_id IS NOT NULL THEN 'busy' ELSE 'online' END,"
+                " connection_epoch=excluded.connection_epoch,execute=excluded.execute,inference=NULL,"
                 " last_connected_at=excluded.last_connected_at,"
                 " last_seen_at=excluded.last_seen_at, last_error=NULL RETURNING *",
                 (
@@ -109,6 +128,7 @@ class WorkerStore(Repository):
                     now,
                     now,
                     now,
+                    execute,
                 ),
             ).fetchone()
             connection.execute(
@@ -118,6 +138,17 @@ class WorkerStore(Repository):
             )
         return required(row)
 
+    def worker_ready(self, worker_id: str, connection_epoch: str,
+                     capability: InferenceCapability | None) -> bool:
+        """Publish inference readiness for this authenticated, fully registered session only."""
+        with self._db.connection() as connection:
+            result = connection.execute(
+                "UPDATE workers SET inference=%s WHERE worker_id=%s AND connection_epoch=%s"
+                " AND status IN ('online','busy')",
+                (Jsonb(capability.model_dump(mode="json")) if capability else None, worker_id, connection_epoch),
+            )
+            return result.rowcount == 1
+
     def worker_disconnected(
         self,
         worker_id: str,
@@ -125,8 +156,12 @@ class WorkerStore(Repository):
         connection_epoch: str = "",
     ) -> None:
         now = self._db.now()
-        with self._db.connection() as connection, connection.transaction():
-            self._db._lock_worker(connection, worker_id)
+        with self._db.transaction() as tx, tx.connection() as connection:
+            tx._lock_workers(connection)
+            if connection.execute("SELECT 1 FROM workers WHERE worker_id=%s AND connection_epoch=%s",
+                                  (worker_id, connection_epoch)).fetchone() is None:
+                return
+            WorkerStore(tx)._recover_inference(worker_id)
             connection.execute(
                 "UPDATE flow_executions SET recovery_deadline=COALESCE(recovery_deadline,%s)"
                 " WHERE worker_id=%s AND released_at IS NULL"
@@ -137,6 +172,7 @@ class WorkerStore(Repository):
             connection.execute(
                 "UPDATE jobs SET recovery_deadline=COALESCE(recovery_deadline,%s), updated_at=%s"
                 " WHERE state=%s AND " + _MAY_HAVE_EXECUTED + " AND assigned_worker_id=%s"
+                " AND kind<>'inference'"
                 " AND EXISTS (SELECT 1 FROM workers WHERE worker_id=%s"
                 " AND connection_epoch=%s)",
                 (
@@ -154,7 +190,7 @@ class WorkerStore(Repository):
                 " AND jobs.started_at IS NOT NULL) OR EXISTS (SELECT 1"
                 " FROM flow_executions e WHERE e.worker_id=workers.worker_id"
                 " AND e.released_at IS NULL) THEN %s ELSE %s END,"
-                " last_seen_at=%s, last_error=%s, last_disconnect_reason=%s"
+                " inference=NULL,last_seen_at=%s, last_error=%s, last_disconnect_reason=%s"
                 " WHERE worker_id=%s AND connection_epoch=%s",
                 (
                     JobState.RUNNING,
@@ -175,12 +211,20 @@ class WorkerStore(Repository):
         ):
             return cursor.execute("SELECT * FROM workers ORDER BY worker_id").fetchall()
 
-    def assign_job(self, worker_id: str, token: str, connection_epoch: str = "") -> Job | None:
-        """Claim work while retaining a Flow's worker slot between individual jobs."""
+    def assign_job(self, worker_id: str, token: str, connection_epoch: str = "", *,
+                   slot: Literal["execute", "infer"] = "execute") -> Job | None:
+        """The sole allocator: one ownership fence and claim transition for both fixed slots.
 
+        Execute retains Flow affinity; infer compares ready capabilities without claiming
+        a repository. Worker-first locks make local preference independent of poll order.
+        """
+
+        if slot not in {"execute", "infer"}:
+            raise ValueError("unknown worker slot")
         now = self._db.now()
         # Share this predicate across fair-worker selection and both binding paths.
         eligible = (
+            " AND j.kind<>'inference'"
             " AND (j.prepare_next_at IS NULL OR j.prepare_next_at<=%s)"
             " AND NOT EXISTS (SELECT 1 FROM flow_deliveries paused"
             " WHERE paused.flow_id=j.flow_id AND paused.state='closed')"
@@ -189,14 +233,53 @@ class WorkerStore(Repository):
             " AND (j.kind<>'archive' OR EXISTS (SELECT 1 FROM flow_executions e"
             " WHERE e.flow_id=j.flow_id AND e.released_at IS NULL))"
             " AND (j.kind<>'archive' OR NOT EXISTS (SELECT 1 FROM jobs prior"
-            " WHERE prior.flow_id=j.flow_id AND prior.id<>j.id"
+            " WHERE prior.flow_id=j.flow_id AND prior.id<>j.id AND prior.kind<>'inference'"
             " AND (prior.state='running' OR (prior.result_received_at IS NOT NULL"
             " AND prior.result_applied_at IS NULL))))"
         )
-        with self._db.connection() as connection, connection.transaction():
+        with self._db.transaction() as tx, tx.connection() as connection:
+            workers = WorkerStore(tx)
+            if slot == "infer":
+                tx._lock_workers(connection)
+                available = connection.cursor(row_factory=class_row(WorkerRecord)).execute(
+                    "SELECT * FROM workers WHERE status IN ('online','busy') AND NOT draining"
+                    " AND inference IS NOT NULL AND current_inference_job_id IS NULL"
+                    " ORDER BY last_inference_assigned_at NULLS FIRST,worker_id",
+                ).fetchall()
+                caller = next((w for w in available if w.worker_id == worker_id
+                               and w.connection_epoch == connection_epoch), None)
+                if caller is None:
+                    return None
+                pending = connection.cursor(row_factory=class_row(Job)).execute(
+                    "SELECT * FROM jobs WHERE state='queued' AND kind='inference' ORDER BY created_at,id",
+                ).fetchall()
+                for job in pending:
+                    assert job.inference is not None
+                    call = job.inference
+                    if workers.inference_needs_cancel(job.id):
+                        continue
+                    now = tx.now()
+                    if call.next_attempt_at is not None and call.next_attempt_at > now:
+                        continue
+                    if call.deadline_at <= now:
+                        workers._settle_inference(job, InferenceFailure(code="execution_timeout"))
+                        continue
+                    current_task = call.task.model_copy(update={
+                        "request_id": uuid4().hex,
+                        "timeout_seconds": (call.deadline_at - now).total_seconds(),
+                    })
+                    candidates = [w for w in available if w.worker_id not in call.excluded_workers
+                                  and w.inference is not None and w.inference.supports(current_task)]
+                    # Avoid confirmed failures when another worker is ready. Within that
+                    # tier bub wins; unknown/busy workers are excluded, not just avoided.
+                    candidates.sort(key=lambda w: (w.worker_id in call.avoid_workers,
+                                                   w.worker_id != LOCAL_BUB_WORKER_ID))
+                    if candidates and candidates[0].worker_id == worker_id:
+                        return workers._claim_job(job.id, worker_id, token, connection_epoch, current_task)
+                return None
             candidate = connection.execute(
                 "SELECT w.worker_id FROM workers w WHERE w.status=%s"
-                " AND w.current_job_id IS NULL AND EXISTS (SELECT 1 FROM jobs j"
+                " AND w.execute AND w.current_job_id IS NULL AND EXISTS (SELECT 1 FROM jobs j"
                 " JOIN flows f ON f.id=j.flow_id"
                 " LEFT JOIN flow_executions own ON own.worker_id=w.worker_id"
                 " AND own.released_at IS NULL"
@@ -215,7 +298,7 @@ class WorkerStore(Repository):
             if (
                 connection.execute(
                     "SELECT 1 FROM workers WHERE worker_id=%s AND connection_epoch=%s"
-                    " AND status=%s AND current_job_id IS NULL"
+                    " AND execute AND status=%s AND current_job_id IS NULL"
                     " AND (NOT draining OR EXISTS (SELECT 1 FROM flow_executions e"
                     " WHERE e.worker_id=workers.worker_id AND e.released_at IS NULL))"
                     " FOR UPDATE OF workers SKIP LOCKED",
@@ -257,30 +340,50 @@ class WorkerStore(Repository):
                 ).fetchone()
                 if row is None:
                     return None
-            with connection.cursor(row_factory=class_row(Job)) as cursor:
-                assigned = cursor.execute(
-                    "UPDATE jobs SET state=%s, assigned_worker_id=%s,"
-                    " assignment_token=%s, started_at=NULL, last_error=NULL,"
-                    " attempt=attempt+1, heartbeat_at=%s, lease_expires_at=%s,"
-                    " recovery_deadline=NULL, result_payload=NULL, result_digest=NULL,"
-                    " result_received_at=NULL, result_applied_at=NULL, updated_at=%s"
-                    " WHERE id=%s RETURNING *",
-                    (
-                        JobState.RUNNING,
-                        worker_id,
-                        token,
-                        now,
-                        now + self._db.lease_duration,
-                        now,
-                        row["id"],
-                    ),
+            return workers._claim_job(row["id"], worker_id, token, connection_epoch, None)
+
+    def _claim_job(self, job_id: int, worker_id: str, token: str, epoch: str,
+                   current_task: InferenceTask | None) -> Job | None:
+        """Commit ownership and the authorized-attempt count under the allocator's locks."""
+        now = self._db.now()
+        job = required(self._db.lock_job(job_id))
+        inference = job.inference
+        with self._db.connection() as connection:
+            if inference is not None:
+                if inference.deadline_at <= now:
+                    self._settle_inference(job, InferenceFailure(code="execution_timeout"))
+                    return None
+                assert current_task is not None and job.attempt < 3
+                worker = connection.cursor(row_factory=class_row(WorkerRecord)).execute(
+                    "SELECT * FROM workers WHERE worker_id=%s", (worker_id,),
                 ).fetchone()
-            connection.execute(
-                "UPDATE workers SET status=%s, current_job_id=%s, last_assigned_at=%s,"
-                " last_seen_at=%s WHERE worker_id=%s",
-                (WorkerStatus.BUSY, row["id"], now, now, worker_id),
-            )
-            return assigned
+                assert worker is not None and worker.inference is not None
+                inference = inference.model_copy(update={
+                    "current_task": current_task,
+                    "assignment_epoch": epoch, "backend": worker.inference.adapter_version,
+                    "next_attempt_at": None,
+                })
+            assigned = connection.cursor(row_factory=class_row(Job)).execute(
+                "UPDATE jobs SET state='running',assigned_worker_id=%s,assignment_token=%s,"
+                " started_at=NULL,dispatch_authorized_at=%s,last_error=NULL,attempt=attempt+1,"
+                " heartbeat_at=%s,lease_expires_at=%s,recovery_deadline=NULL,result_payload=NULL,"
+                " result_digest=NULL,result_received_at=NULL,result_applied_at=NULL,updated_at=%s,inference=%s"
+                " WHERE id=%s AND state='queued' RETURNING *",
+                (worker_id, token, now if inference else None, now,
+                 inference.deadline_at if inference else now + self._db.lease_duration, now,
+                 Jsonb(inference.model_dump(mode="json")) if inference else None, job.id),
+            ).fetchone()
+            if inference is not None:
+                connection.execute(
+                    "UPDATE workers SET current_inference_job_id=%s,last_inference_assigned_at=%s,"
+                    " last_seen_at=%s WHERE worker_id=%s", (job.id, now, now, worker_id),
+                )
+            else:
+                connection.execute(
+                    "UPDATE workers SET status='busy',current_job_id=%s,last_assigned_at=%s,"
+                    " last_seen_at=%s WHERE worker_id=%s", (job.id, now, now, worker_id),
+                )
+            return required(assigned)
 
     def start_assignment(
         self,
@@ -295,7 +398,7 @@ class WorkerStore(Repository):
             self._db._lock_worker(connection, worker_id)
             job = connection.execute(
                 "SELECT flow_id,kind FROM jobs WHERE id=%s AND state=%s"
-                " AND assigned_worker_id=%s AND assignment_token=%s"
+                " AND kind<>'inference' AND assigned_worker_id=%s AND assignment_token=%s"
                 " AND started_at IS NULL AND EXISTS (SELECT 1 FROM workers"
                 " WHERE worker_id=%s AND connection_epoch=%s) FOR UPDATE",
                 (job_id, JobState.RUNNING, worker_id, token, worker_id, connection_epoch),
@@ -342,17 +445,21 @@ class WorkerStore(Repository):
         token: str,
         connection_epoch: str = "",
     ) -> bool:
+        """Refresh liveness for either slot; inference's absolute budget never renews."""
         now = self._db.now()
         with self._db.connection() as connection:
             self._db._lock_worker(connection, worker_id)
             result = connection.execute(
-                "UPDATE jobs SET heartbeat_at=%s, lease_expires_at=%s, updated_at=%s"
+                "UPDATE jobs SET heartbeat_at=%s,"
+                " lease_expires_at=CASE WHEN kind='inference' THEN lease_expires_at ELSE %s END,updated_at=%s"
                 " WHERE id=%s AND state=%s AND assigned_worker_id=%s"
                 " AND assignment_token=%s"
-                " AND (started_at IS NOT NULL OR (lease_expires_at>%s AND EXISTS"
-                " (SELECT 1 FROM flows f WHERE f.id=jobs.flow_id AND f.state='active')))"
+                " AND ((kind='inference' AND inference->>'assignment_epoch'=%s) OR"
+                " (kind<>'inference' AND (started_at IS NOT NULL OR (lease_expires_at>%s AND EXISTS"
+                " (SELECT 1 FROM flows f WHERE f.id=jobs.flow_id AND f.state='active')))))"
                 " AND EXISTS (SELECT 1 FROM workers"
-                " WHERE worker_id=%s AND connection_epoch=%s)",
+                " WHERE worker_id=%s AND connection_epoch=%s"
+                " AND (jobs.kind<>'inference' OR current_inference_job_id=jobs.id))",
                 (
                     now,
                     now + self._db.lease_duration,
@@ -361,6 +468,7 @@ class WorkerStore(Repository):
                     JobState.RUNNING,
                     worker_id,
                     token,
+                    connection_epoch,
                     now,
                     worker_id,
                     connection_epoch,
@@ -385,7 +493,7 @@ class WorkerStore(Repository):
             resumed = connection.execute(
                 "UPDATE jobs SET recovery_deadline=NULL, heartbeat_at=%s,"
                 " lease_expires_at=%s, updated_at=%s, started_at=COALESCE(started_at,%s)"
-                " WHERE id=%s AND state=%s"
+                " WHERE id=%s AND state=%s AND kind<>'inference'"
                 " AND (started_at IS NOT NULL OR (kind='archive' AND EXISTS"
                 " (SELECT 1 FROM flows f JOIN flow_deliveries d ON d.flow_id=f.id"
                 " JOIN flow_executions e ON e.flow_id=f.id WHERE f.id=jobs.flow_id"
@@ -433,9 +541,10 @@ class WorkerStore(Repository):
         with self._db.connection() as connection:
             row = connection.execute(
                 "SELECT 1 FROM jobs WHERE id=%s AND state=%s AND assigned_worker_id=%s"
+                " AND (kind<>'inference' OR inference->>'assignment_epoch'=%s)"
                 " AND assignment_token=%s AND EXISTS (SELECT 1 FROM workers"
                 " WHERE worker_id=%s AND connection_epoch=%s)",
-                (job_id, JobState.RUNNING, worker_id, token, worker_id, connection_epoch),
+                (job_id, JobState.RUNNING, worker_id, connection_epoch, token, worker_id, connection_epoch),
             ).fetchone()
         return row is not None
 
@@ -445,19 +554,26 @@ class WorkerStore(Repository):
         worker_id: str,
         token: str,
         connection_epoch: str,
-        terminal: TerminalPayload,
+        terminal: TerminalPayload | InferenceResult,
     ) -> str:
         """Persist a fenced business outcome before domain-side result application."""
 
         if terminal.job_id != job_id or terminal.assignment_token != token:
+            if isinstance(terminal, InferenceResult):
+                return "rejected"
             raise ValueError("terminal does not match its assignment")
-        inbox = ResultInbox(source="worker", terminal=terminal)
-        digest = terminal_digest(inbox.terminal)
+        if isinstance(terminal, InferenceResult):
+            payload = terminal.model_dump(mode="json")
+            digest = hashlib.sha256(terminal.model_dump_json().encode()).hexdigest()
+        else:
+            inbox = ResultInbox(source="worker", terminal=terminal)
+            payload = inbox.model_dump(mode="json")
+            digest = terminal_digest(inbox.terminal)
         now = self._db.now()
         with self._db.connection() as connection, connection.transaction():
             self._db._lock_worker(connection, worker_id)
-            row = connection.execute(
-                "SELECT result_digest, result_applied_at FROM jobs WHERE id=%s"
+            row = connection.cursor(row_factory=class_row(Job)).execute(
+                "SELECT * FROM jobs WHERE id=%s"
                 " AND assigned_worker_id=%s AND assignment_token=%s"
                 " AND EXISTS (SELECT 1 FROM workers WHERE worker_id=%s"
                 " AND connection_epoch=%s) FOR UPDATE",
@@ -465,17 +581,188 @@ class WorkerStore(Repository):
             ).fetchone()
             if row is None:
                 return "rejected"
-            if row["result_digest"] is not None:
-                if row["result_digest"] != digest:
+            if isinstance(terminal, InferenceResult):
+                if (row.state is not JobState.RUNNING or row.inference is None
+                        or row.inference.assignment_epoch != connection_epoch
+                        or row.inference.current_task is None
+                        or terminal.reply_to != row.inference.current_task.request_id):
+                    return "rejected"
+            elif row.kind is JobKind.INFERENCE:
+                return "rejected"
+            if row.result_digest is not None:
+                if row.result_digest != digest:
                     return "conflict"
-                return "applied" if row["result_applied_at"] is not None else "pending"
+                return "applied" if row.result_applied_at is not None else "pending"
             stored = connection.execute(
                 "UPDATE jobs SET result_payload=%s, result_digest=%s,"
                 " result_received_at=%s, updated_at=%s"
                 " WHERE id=%s AND state=%s",
-                (Jsonb(inbox.model_dump(mode="json")), digest, now, now, job_id, JobState.RUNNING),
+                (Jsonb(payload), digest, now, now, job_id, JobState.RUNNING),
             )
             return "pending" if stored.rowcount == 1 else "rejected"
+
+    def _lock_inference(self, job_id: int) -> Job | None:
+        """Use the same worker -> Flow -> job order, with no fabricated generic Flow."""
+        job = JobStore(self._db).get_job(job_id)
+        if job is None or job.kind is not JobKind.INFERENCE:
+            return None
+        if job.flow_id is not None:
+            self._db.lock_workflow(job.flow_id)
+        elif job.assigned_worker_id is not None:
+            with self._db.connection() as connection:
+                self._db._lock_worker(connection, job.assigned_worker_id)
+        current = self._db.lock_job(job_id)
+        # A queued generic call can be claimed between the initial read and worker
+        # lock. Never acquire its new worker after the job lock; let the caller retry.
+        if current is not None and (current.assigned_worker_id, current.assignment_token) != (
+            job.assigned_worker_id, job.assignment_token,
+        ):
+            return None
+        return current
+
+    def _inference_cancellation(self, job: Job) -> InferenceFailure | None:
+        """Only source currentness and the original deadline can retire an active call."""
+        from app.persistence.reviews import ReviewStore
+
+        call = job.inference
+        assert call is not None
+        if call.cancel_failure is not None:
+            return call.cancel_failure
+        if job.flow_id is not None:
+            flow = FlowStore(self._db).get_flow(job.flow_id)
+            if (flow is None or flow.state is not FlowState.ACTIVE
+                    or flow.current_attempt_id != call.source_attempt_id):
+                return InferenceFailure(code="cancelled")
+        if call.batch_id is not None:
+            batch = ReviewStore(self._db).get_batch(call.batch_id)
+            if (batch.inference_job_id != job.id or not ReviewStore(self._db).current(batch)
+                    or batch.decision is not None
+                    or (call.context_digest is not None
+                        and (batch.context is None or batch.context.digest != call.context_digest))):
+                return InferenceFailure(code="cancelled")
+        # An on-time durable answer stays valid when application resumes after restart.
+        received = job.result_received_at if job.state is JobState.RUNNING and job.result_applied_at is None else None
+        if (received or self._db.now()) >= call.deadline_at:
+            return InferenceFailure(code="execution_timeout")
+        return None
+
+    def inference_needs_cancel(self, job_id: int) -> bool:
+        """Retire expired queued work, or persist a running cancellation until cleanup.
+
+        True means this call must not dispatch/continue. A running slot is deliberately
+        retained until its matching cleanup result or connection-loss recovery arrives.
+        """
+        with self._db.transaction() as tx, tx.connection() as connection:
+            workers = WorkerStore(tx)
+            job = workers._lock_inference(job_id)
+            if job is None or job.state not in {JobState.QUEUED, JobState.RUNNING}:
+                return False
+            failure = workers._inference_cancellation(job)
+            if failure is None:
+                return False
+            assert job.inference is not None
+            job.inference = job.inference.model_copy(update={"cancel_failure": failure})
+            connection.execute("UPDATE jobs SET inference=%s WHERE id=%s",
+                               (Jsonb(job.inference.model_dump(mode="json")), job.id))
+            if job.state is JobState.QUEUED:
+                workers._settle_inference(job, failure)
+            return True
+
+    def complete_inference_result(self, job_id: int, *, failure: InferenceFailure | None = None) -> bool:
+        """Apply caller validation to a durable result after worker cleanup, never before it.
+
+        The original InferenceResult JSON is retained for restart/replay. Validation
+        failures override worker success; cancellation overrides either outcome. Retry
+        budgeting, backoff, summary and batch notice publication share this transaction.
+        """
+        with self._db.transaction() as tx:
+            workers = WorkerStore(tx)
+            job = workers._lock_inference(job_id)
+            if (job is None or job.state is not JobState.RUNNING or job.result_payload is None
+                    or job.result_received_at is None or job.result_applied_at is not None):
+                return False
+            result = InferenceResult.model_validate(job.result_payload)
+            assert job.inference is not None
+            current_task = job.inference.current_task
+            if (result.job_id != job.id or result.assignment_token != job.assignment_token
+                    or current_task is None or result.reply_to != current_task.request_id
+                    # Same immutable-result hash as record_assignment_result, independent of JSONB key order.
+                    or hashlib.sha256(result.model_dump_json().encode()).hexdigest() != job.result_digest
+                    or (result.output is not None and result.output.adapter_version != job.inference.backend)):
+                failure = InferenceFailure(code="invalid_response")
+            workers._settle_inference(job, failure or result.failure)
+            return True
+
+    def _settle_inference(self, job: Job, failure: InferenceFailure | None) -> None:
+        """Transition a locked, cleaned-up (or disconnected) call without coding effects."""
+        call = job.inference
+        assert call is not None
+        now = self._db.now()
+        cancellation = self._inference_cancellation(job)
+        failure = cancellation or failure
+        state = JobState.DONE
+        if failure is not None:
+            delay = failure.retry_after_seconds
+            if delay is None:
+                delay = 0.25 * job.attempt if failure.code in {"rate_limited", "backend_unavailable"} else 0
+            # A provider may suggest any finite delay; compare before constructing a
+            # datetime so a huge Retry-After cannot strand the durable inbox forever.
+            next_at = (call.deadline_at if delay >= (call.deadline_at - now).total_seconds()
+                       else now + timedelta(seconds=delay))
+            state = JobState.FAILED
+            reason: StopReason = "non_retryable"
+            if failure.recoverable:
+                if cancellation is not None or next_at >= call.deadline_at:
+                    reason = "deadline"
+                elif job.attempt >= 3:
+                    reason = "max_attempts"
+                else:
+                    state = JobState.QUEUED
+            worker_ids = frozenset({job.assigned_worker_id}) if job.assigned_worker_id else frozenset()
+            call = call.model_copy(update={
+                "failures": [*call.failures, failure] if job.state is JobState.RUNNING else call.failures,
+                "avoid_workers": call.avoid_workers | worker_ids,
+                "excluded_workers": call.excluded_workers | (
+                    worker_ids if failure.code in {"busy", "connection_closed", "rpc_timeout"} else frozenset()),
+                "next_attempt_at": next_at if state is JobState.QUEUED else None,
+                "cancel_failure": cancellation,
+            })
+            if state is JobState.FAILED:
+                call = call.model_copy(update={"summary": InferenceSummary(
+                    logical_call_id=call.task.request_id, attempts=job.attempt,
+                    stop_reason=reason, last_failure_code=failure.code,
+                    last_worker_id=job.assigned_worker_id, backend=call.backend,
+                    finished_at=now, elapsed_ms=max(0, int((now - job.created_at).total_seconds() * 1000)),
+                )})
+        with self._db.connection() as connection:
+            connection.execute(
+                "UPDATE jobs SET state=%s,inference=%s,last_error=%s,updated_at=%s,"
+                " lease_expires_at=NULL,recovery_deadline=NULL,"
+                " result_applied_at=CASE WHEN result_received_at IS NOT NULL THEN %s ELSE NULL END WHERE id=%s",
+                (state, Jsonb(call.model_dump(mode="json")), failure.code if failure else None, now, now, job.id),
+            )
+            connection.execute(
+                "UPDATE workers SET current_inference_job_id=NULL WHERE worker_id=%s AND current_inference_job_id=%s",
+                (job.assigned_worker_id, job.id),
+            )
+        if call.summary is not None and call.batch_id is not None and job.flow_id is not None:
+            InferenceNoticeStore(self._db).append(job.flow_id, call.batch_id, call.summary)
+
+    def _recover_inference(self, worker_id: str | None = None) -> None:
+        """Classify unknown authorized attempts; a durable inbox always wins over recovery.
+
+        Callers already hold the ordered worker locks (startup, disconnect or replacement).
+        No execution is resumed: each later claim gets a new request and retains its budget.
+        """
+        with self._db.connection() as connection:
+            rows = connection.execute(
+                "SELECT id FROM jobs WHERE kind='inference' AND state='running' AND result_received_at IS NULL"
+                " AND (%s::text IS NULL OR assigned_worker_id=%s) ORDER BY id", (worker_id, worker_id),
+            ).fetchall()
+            for row in rows:
+                job = self._lock_inference(row["id"])
+                assert job is not None
+                self._settle_inference(job, InferenceFailure(code="connection_closed"))
 
     def finish_assignment(
         self,
@@ -493,6 +780,7 @@ class WorkerStore(Repository):
                 "UPDATE jobs SET state=%s, result_applied_at=COALESCE(result_applied_at,%s),"
                 " updated_at=%s"
                 " WHERE id=%s AND state=%s AND assigned_worker_id=%s"
+                " AND kind<>'inference'"
                 " AND assignment_token=%s AND EXISTS (SELECT 1 FROM workers"
                 " WHERE worker_id=%s AND connection_epoch=%s)",
                 (
@@ -517,9 +805,9 @@ class WorkerStore(Repository):
 
     def _lock_preparation(self, job_id: int, worker: str, token: str, epoch: str) -> Job | None:
         job = JobStore(self._db).get_job(job_id)
-        if job is None:
+        if job is None or job.kind is JobKind.INFERENCE:
             return None
-        self._db.lock_workflow(job.flow_id)
+        self._db.lock_workflow(job.required_flow_id)
         current = self._db.lock_job(job_id)
         if (current is None or current.started_at is not None or current.result_received_at is not None
                 or current.lease_expires_at is None or current.lease_expires_at <= self._db.now()
@@ -544,9 +832,9 @@ class WorkerStore(Repository):
                 or current.result_applied_at is not None
             ):
                 return False
-            flow = FlowStore(tx).get_flow(current.flow_id)
-            binding = workers.get_flow_execution(current.flow_id)
-            delivery = DeliveryStore(tx).get_delivery(current.flow_id)
+            flow = FlowStore(tx).get_flow(current.required_flow_id)
+            binding = workers.get_flow_execution(current.required_flow_id)
+            delivery = DeliveryStore(tx).get_delivery(current.required_flow_id)
             if (
                 flow is None
                 or flow.state is not FlowState.ACTIVE
@@ -608,7 +896,8 @@ class WorkerStore(Repository):
             current = WorkerStore(tx)._lock_preparation(job_id, worker, token, epoch)
             if current is None:
                 return None
-            flow, delivery = FlowStore(tx).get_flow(current.flow_id), DeliveryStore(tx).get_delivery(current.flow_id)
+            flow = FlowStore(tx).get_flow(current.required_flow_id)
+            delivery = DeliveryStore(tx).get_delivery(current.required_flow_id)
             if (flow is None or flow.state is not FlowState.ACTIVE
                     or (delivery is not None and delivery.supersedes(current.kind))):
                 return JobState.DONE
@@ -673,17 +962,19 @@ class WorkerStore(Repository):
         return result.rowcount == 1
 
     def recover_abandoned_assignments(self) -> None:
-        """Mark persisted work recoverable without replaying or failing it at startup."""
+        """Fence startup: preserve coding recovery and retry unknown inference attempts."""
 
         now = self._db.now()
-        with self._db.connection() as connection:
+        with self._db.transaction() as tx, tx.connection() as connection:
+            tx._lock_workers(connection)
             connection.execute(
-                "UPDATE workers SET status=%s",
+                "UPDATE workers SET status=%s,inference=NULL",
                 (WorkerStatus.OFFLINE,),
             )
+            WorkerStore(tx)._recover_inference()
             connection.execute(
                 "UPDATE jobs SET recovery_deadline=COALESCE(recovery_deadline,%s),"
-                " updated_at=%s WHERE state=%s AND " + _MAY_HAVE_EXECUTED,
+                " updated_at=%s WHERE kind<>'inference' AND state=%s AND " + _MAY_HAVE_EXECUTED,
                 (now + self._db.recovery_grace, now, JobState.RUNNING),
             )
             connection.execute(
@@ -696,10 +987,29 @@ class WorkerStore(Repository):
         """Apply pure recovery decisions under the existing worker-first transaction fence."""
 
         now = self._db.now()
-        with self._db.connection() as connection, connection.transaction():
-            connection.execute(
-                "SELECT worker_id FROM workers ORDER BY worker_id FOR UPDATE"
+        inference_requeued = inference_failed = 0
+        with self._db.transaction() as tx, tx.connection() as connection:
+            tx._lock_workers(connection)
+            workers = WorkerStore(tx)
+            pending = connection.execute(
+                "SELECT id FROM jobs WHERE kind='inference' AND state IN ('queued','running') ORDER BY id",
             ).fetchall()
+            for item in pending:
+                job = workers._lock_inference(item["id"])
+                assert job is not None and job.inference is not None
+                if job.result_received_at is not None and job.result_applied_at is None:
+                    continue
+                if job.state is JobState.RUNNING and connection.execute(
+                    "SELECT 1 FROM workers WHERE worker_id=%s AND connection_epoch=%s"
+                    " AND status IN ('online','busy')",
+                    (job.assigned_worker_id, job.inference.assignment_epoch),
+                ).fetchone() is None:
+                    workers._settle_inference(job, InferenceFailure(code="connection_closed"))
+                else:
+                    workers.inference_needs_cancel(job.id)
+                updated = required(JobStore(tx).get_job(job.id))
+                inference_failed += updated.state is JobState.FAILED
+                inference_requeued += updated.state is JobState.QUEUED and job.state is JobState.RUNNING
             # Assignment/result/stop writers acquire these worker locks too. Keep
             # facts and updates in this transaction, and lock selected jobs before
             # deciding so a received result cannot be overwritten by a stale read.
@@ -712,7 +1022,7 @@ class WorkerStore(Repository):
                 " AND s.state!='confirmed') AS has_pending_stop"
                 " FROM jobs j JOIN flows f ON f.id=j.flow_id"
                 " LEFT JOIN flow_deliveries d ON d.flow_id=j.flow_id"
-                " WHERE j.state='running' AND (j.lease_expires_at<=%s OR j.recovery_deadline<=%s)"
+                " WHERE j.kind<>'inference' AND j.state='running' AND (j.lease_expires_at<=%s OR j.recovery_deadline<=%s)"
                 " ORDER BY j.id FOR UPDATE OF j",
                 (now, now),
             ).fetchall()
@@ -778,9 +1088,11 @@ class WorkerStore(Repository):
                 " EXISTS (SELECT 1 FROM execution_stops s WHERE s.flow_id=e.flow_id"
                 " AND s.state!='confirmed') AS has_pending_stop,"
                 " EXISTS (SELECT 1 FROM jobs unknown WHERE unknown.flow_id=e.flow_id"
+                " AND unknown.kind<>'inference'"
                 " AND unknown.dispatch_authorized_at IS NOT NULL AND unknown.started_at IS NULL"
                 " AND unknown.result_received_at IS NULL) AS has_unstarted_dispatch,"
                 " EXISTS (SELECT 1 FROM jobs j WHERE j.flow_id=e.flow_id"
+                " AND j.kind<>'inference'"
                 " AND j.result_received_at IS NOT NULL AND j.result_applied_at IS NULL) AS has_unapplied_result"
                 " FROM flow_executions e JOIN flows f ON f.id=e.flow_id"
                 " LEFT JOIN flow_deliveries d ON d.flow_id=e.flow_id"
@@ -807,7 +1119,7 @@ class WorkerStore(Repository):
                         [row["worker_id"] for row in expired_executions],
                     ),
                 )
-        return len(requeued_rows), len(failed_rows) + len(expired_executions)
+        return len(requeued_rows) + inference_requeued, len(failed_rows) + len(expired_executions) + inference_failed
 
     def drain(self, worker_id: str, enabled: bool) -> None:
         with self._db.connection() as conn:

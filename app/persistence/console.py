@@ -300,7 +300,7 @@ class ConsoleStore(Repository):
                 " (j.result_received_at IS NOT NULL AND j.result_applied_at IS NULL) AS result_pending,"
                 " EXISTS (SELECT 1 FROM result_effects e WHERE e.job_id=j.id"
                 " AND j.result_applied_at IS NULL AND e.state='failed') AS effect_failed"
-                " FROM jobs j WHERE j.flow_id=c.flow_id"
+                " FROM jobs j WHERE j.flow_id=c.flow_id AND j.kind<>'inference'"
                 " ORDER BY effect_failed DESC,result_pending DESC,(j.state='running') DESC,"
                 " (j.state='queued') DESC,j.id DESC LIMIT 1"
                 ") diagnostic ON TRUE WHERE c.flow_id=%s",
