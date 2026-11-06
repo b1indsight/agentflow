@@ -179,6 +179,7 @@ async def test_cli_session_rejection_is_classified_only_before_any_events(
 
 
 async def test_cancellation_reaps_codex_group_before_removing_config(monkeypatch, tmp_path):
+    existing = asyncio.all_tasks()
     entered = asyncio.Event()
     stopped = []
     files = []
@@ -212,6 +213,7 @@ async def test_cancellation_reaps_codex_group_before_removing_config(monkeypatch
         await running
     assert stopped[-2:] == [(12345, signal.SIGKILL), "waited"]
     assert not files[0].exists()
+    assert not asyncio.all_tasks() - existing
 
 
 async def test_mcp_token_is_redacted_before_results_leave_driver(monkeypatch, tmp_path):

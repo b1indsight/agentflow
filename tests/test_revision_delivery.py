@@ -137,10 +137,24 @@ class RevisionAgent:
 @pytest.mark.parametrize("behavior,success", [
     ("noop", True), ("push", True), ("unpushed", False), ("dirty", False), ("empty", False),
 ])
-async def test_revision_verifies_real_git_delivery(revision_workspace, behavior, success):
+async def test_revision_verifies_real_git_delivery(revision_workspace, monkeypatch, behavior, success):
     # A successful process can leave unpushed or dirty work; neither closes review feedback.
     root, repo, task, secret = revision_workspace
     agent = RevisionAgent(repo, behavior)
+    if behavior == "noop":
+        resume = agent.resume
+
+        async def long_resume(*args, **kwargs):
+            # An active agent owns its deadline; an executor-level 1200s timer would cancel it.
+            loop = asyncio.get_running_loop()
+            real_time = loop.time
+            with monkeypatch.context() as clock:
+                clock.setattr(loop, "time", lambda: real_time() + 2400)
+                # An overdue outer timer fires before this later timer, without scheduler spins.
+                await asyncio.sleep(0.01)
+            return await resume(*args, **kwargs)
+
+        monkeypatch.setattr(agent, "resume", long_resume)
     result = await WorkerExecutor(root, agent, state=ExecutionState(root), worker_id="w").execute(task, secret, tool_caller=RecordingToolCaller())
     assert (result.exit_code == 0) is success
     assert agent.calls[0][1].github.token.get_secret_value() == "fresh-token"

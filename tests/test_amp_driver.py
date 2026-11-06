@@ -200,6 +200,7 @@ async def test_process_supervisor_drains_both_pipes_and_bounds_output(monkeypatc
 @pytest.mark.parametrize("cancel", [False, True])
 async def test_supervisor_cleans_separate_child_group_before_returning(monkeypatch, tmp_path, cancel):
     # Native Amp shells use their own PGID; killing just the CLI group leaks them.
+    existing = asyncio.all_tasks()
     monkeypatch.setattr("app.worker.execution.amp_process.AMP_BIN", sys.executable)
     monkeypatch.setattr("app.worker.execution.amp_process.TERMINATION_GRACE", 0.1)
     pidfile = tmp_path / "child.pid"
@@ -233,6 +234,7 @@ time.sleep(60)
             await asyncio.sleep(0.01)
         else:
             pytest.fail("separate child group survived supervisor")
+        assert not asyncio.all_tasks() - existing
     finally:
         try:
             os.killpg(child, 9)
