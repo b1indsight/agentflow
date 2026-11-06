@@ -8,6 +8,12 @@
 
 ## Unreleased
 
+- Amp/Codex worker 继承专用运行环境的原生 skills/MCP 和自定义变量，先过滤 ambient
+  Flow、Git/GitHub/SSH 认证与父会话身份，再注入当前 assignment 能力。Amp 删除临时全量
+  settings、workspace 设置拒绝和固定工具集合上限，仅用原生 `--mcp-config` 覆盖 `flow`；
+  修订时以不可连接的 loopback 端口零替换旧 broker（固定 CLI 不支持 `disabled`，会有连接警告）。
+  用户权限和 workspace 审批不自动放行，Schema/VCS、Git/gh 凭据与进程监督不变；
+  历史导出沿用原生配置。部署文档说明继承范围、自定义秘密脱敏限制及旧 thread 验收边界。
 - Worker/server 两端 Runtime 统一持有 Gateway，以同一个 Session 事件入口驱动每连接的
   worker 状态/业务回调与 ServerCallbacks；移除旧 Client/Handler 消费循环，按 `package.method`
   精确注册请求模型与回调；回复按 `reply_to` 关联原调用，worker 不再注册工具名来接收结果。

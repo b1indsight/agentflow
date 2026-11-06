@@ -1,4 +1,4 @@
-"""Shared Amp process supervision, invocation settings and output redaction."""
+"""Shared Amp process supervision, environment and output redaction."""
 
 from __future__ import annotations
 
@@ -16,21 +16,10 @@ from loguru import logger
 from pydantic import JsonValue
 
 from app.domain.models import CodingExecutionContext
-from app.worker.execution.credentials import git_credential_environment
+from app.worker.execution.credentials import git_credential_environment, inherited_agent_environment
 
 AMP_BIN = "amp"
 TERMINATION_GRACE = 3.0
-AMP_TOOLS = frozenset({
-    "apply_patch", "create_file", "edit_file", "Read", "shell_command",
-    "shell_command_kill", "shell_command_status", "read_web_page", "web_search", "view_media",
-})
-_ENVIRONMENT_KEYS = frozenset({
-    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TMPDIR",
-    "AMP_API_KEY", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy",
-    "https_proxy", "all_proxy", "no_proxy", "SSL_CERT_FILE", "SSL_CERT_DIR",
-    "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "NODE_EXTRA_CA_CERTS",
-    "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
-})
 _SECRET_PATTERN = re.compile(
     r"\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|sgamp_[A-Za-z0-9_-]+|sk-[A-Za-z0-9_-]{16,})"
 )
@@ -82,55 +71,14 @@ def amp_environment(
     source: Mapping[str, str] | None = None,
     context: CodingExecutionContext | None = None,
 ) -> dict[str, str]:
-    """Keep native login/HOME, never inherit control or ambient GitHub credentials."""
-    values = os.environ if source is None else source
-    environment = {key: value for key, value in values.items() if key in _ENVIRONMENT_KEYS}
+    """Inherit native CLI/MCP configuration, then inject only current task capabilities."""
+    environment = inherited_agent_environment(os.environ if source is None else source)
     environment["AMP_SKIP_UPDATE_CHECK"] = "1"
     if context is not None:
         environment.update(git_credential_environment(context.github.token if context.github else None))
         if context.mcp_token is not None:
             environment["FLOWTOOL_MCP_TOKEN"] = context.mcp_token.get_secret_value()
     return environment
-
-
-def write_amp_settings(directory: Path, *, mcp_url: str | None = None) -> Path:
-    """Write temporary settings with this round's broker only; these are not a sandbox.
-
-    Keep the native tool policy identical at creation and resume: Amp threads can
-    retain their creation-time tool set. The shell executor also requires its
-    internal async alias (calibrated against the pinned CLI).
-    """
-    tools = sorted(AMP_TOOLS | ({"mcp__flow__open_pr"} if mcp_url else set()))
-    rules = ([{"matches": {"url": mcp_url}, "action": "allow"}] if mcp_url else [])
-    rules.extend([
-        {"matches": {"command": "*"}, "action": "reject"},
-        {"matches": {"url": "*"}, "action": "reject"},
-    ])
-    settings = {
-        "amp.updates.mode": "disabled",
-        "amp.notifications.enabled": False,
-        "amp.remoteThreadCreation.enabled": False,
-        "amp.runner.env.enabled": False,
-        "amp.skills.disableClaudeCodeSkills": True,
-        "amp.skills.disableGlobalAgentsSkills": True,
-        "amp.tools.enable": tools + ["async_shell_command"],
-        "amp.tools.disable": [
-            "ask_user_choice", "create_thread", "find_thread", "finder", "get_thread_status",
-            "librarian", "list_agent_modes", "oracle", "painter", "read_mcp_resource", "read_thread",
-            "send_thread_message", "skill", "Task", "wait_for_threads", "tool_search", "code_exec",
-            "load_plugin", "reload_mcp", "reload_plugins", "reload_skills",
-            "download_thread_changes", "download_thread_file", "upload_thread_file",
-        ],
-        "amp.mcpPermissions": rules,
-        "amp.mcpServers": {"flow": ({
-            "url": mcp_url,
-            "headers": {"Authorization": "Bearer ${FLOWTOOL_MCP_TOKEN}"},
-        } if mcp_url else {"url": "http://127.0.0.1:1/mcp", "disabled": True})},
-    }
-    path = directory / "amp-settings.json"
-    with open(path, "x", opener=lambda name, flags: os.open(name, flags, 0o600)) as handle:
-        json.dump(settings, handle)
-    return path
 
 
 @dataclass(frozen=True)

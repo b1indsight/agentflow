@@ -207,13 +207,20 @@ worker socket 与 executor 解耦，root 内原子 journal 在 ack 前保存进�
 单轮超时，并将所选超时用于 revision deadline。INITIAL/REVISION 的业务 Schema、VCS 核验、
 交付回执和 ARCHIVE 的 workspace 释放由共用 executor 负责。
 
+两个后端通过 `credentials.inherited_agent_environment` 继承原生 CLI/skills/MCP 环境，
+先清除 ambient Flow、Git/GitHub/SSH 认证与父会话状态，再注入当前 assignment 能力。
+HOME、原生配置入口及自定义 MCP 变量保留；不增加配置解析、skills 复制或通用密钥识别。
+独立 VCS 核验仍使用自己的最小环境；自定义秘密及磁盘文件依赖专用 worker 身份隔离。
+
 ### Amp
 
 - `amp_agent.AmpCodingAgent` 适配 worker 的编码请求，使用私有 local execute thread；
   prompt 经 stdin，恢复显式指定同一 `T-UUID`，
   固定 `--mode low`，不运行 orb、runner 或 SDK。原生登录或 `AMP_API_KEY` 归专用 worker 账户。
-- 临时 settings、Git helper 和 `gh` 环境在每轮重建，复用本轮 GitHub capability；INITIAL 配置
-  当前 WorkerMCP，REVISION 禁用旧 `flow` broker。进程环境不继承 control/worker 或个人 GH token。
+- 使用原生 user/workspace settings；每轮仅通过 `--mcp-config` 覆盖保留名称 `flow`。
+  INITIAL 配置当前 WorkerMCP，REVISION 用不可连接的 loopback 端口零替换旧 broker，不带旧 token；
+  固定 CLI 不支持 `disabled`，该项会报告连接错误，其他 MCP 保留。Git helper 和 `gh` 临时环境
+  继续按本轮 GitHub capability 重建。
 - 成功必须具有完整、同 session 的 init/result、进程退出 0、`is_error=false` 和 `subtype=success`。
   最终文本原样交给 executor，Schema 只作提示，不修复 JSON 或自动重跑未知执行。
 - `amp_process.run_amp` 供编码与历史导出共用，并行有界读取两条管道；取消/超时先 SIGTERM，升级时包含事前捕获的独立
@@ -221,8 +228,9 @@ worker socket 与 executor 解耦，root 内原子 journal 在 ack 前保存进�
 - `ExecutionState` 按 ID 格式选择历史来源。Amp 原生 export 经公开块映射与脱敏后短时缓存，
   支持外部追加、块内分页、前缀编辑失效；不保存第二套捕获历史，不显示 thinking。
   记录 ID 保留 session 前缀，满足 control 的来源校验；两端使用 protocol v17。
-- workspace Amp 设置可能覆盖临时设置，因此执行前发现设置即拒绝。managed policy/账户插件仍由
-  运维核查；有效工具列表检查只影响结果接收，不能替代权限或 OS 隔离。
+- 不再拒绝 workspace Amp 设置或因额外工具拒收结果；保留必要的原生 shell 与完整终态检查。
+  用户禁用与 workspace MCP 审批由原生 CLI 执行，不自动批准；managed policy/账户插件仍由
+  运维核查，CLI 工具列表不能替代权限或 OS 隔离。
 
 配置、历史预算和取消限制见[部署说明](../deployment/README.md)；实现与实测记录见
 [Amp feature record](../plan/worker-amp-cli.md)。
@@ -244,7 +252,7 @@ worker socket 与 executor 解耦，root 内原子 journal 在 ack 前保存进�
   worker binding 仍由 executor 校验；
 - `-o` 读取原始最终消息，`--output-schema` 约束 CLI 输出；`WorkerExecutor` 按 INITIAL/revision
   严格解析各自结果模型，adapter 不解释业务 schema；
-- 子进程只继承 Codex 认证、代理/CA 和基础运行环境；INITIAL 额外获得单次短时 push credential helper 与
+- 子进程保留原生配置、skills/MCP 和自定义环境变量；INITIAL 额外获得单次短时 push credential helper 与
   指向 worker 进程内 loopback HTTP 服务的 `flow.open_pr` MCP 配置及单次 Bearer 凭据，不获得 control/worker credential；
 - 单次运行使用配置的 timeout，超时 kill 子进程并返回 exit 124。
 

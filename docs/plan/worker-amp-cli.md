@@ -6,8 +6,9 @@
 [#109](https://github.com/b1indsight/agentflow/pull/109) 均已合并。
 **Bookmark：** `feat/worker-amp-cli`。
 
-**后续提案：** [worker 继承现有 skills 与 MCP](#后续变更记录)，
-尚未实施；上面的状态及下文既有证据属于原 Amp 适配，不代表本次变更已完成。
+**后续变更：** [worker 继承现有 skills 与 MCP](#后续变更记录) 已实现并完成本地验证，
+沿用 [#128](https://github.com/b1indsight/agentflow/pull/128)，未部署；具体证据和验收限制见 [002]。
+上面的 PR 及下文既有证据属于原 Amp 适配；[001] 保留为后续变更的初始方案。
 
 ## 目标与范围
 
@@ -211,3 +212,47 @@ skill manifest、配置解析器或兼容层。trusted-host、进程监督、Sch
   表现，以及历史 export 去掉临时 settings 后仍只读的行为。证据不满足时报告限制，不造兼容层。
 - **交付状态：** 本条仅为方案；尚未改实现或测试，尚未部署。配置分发、跨机器 skills 同步、
   通用 secret 检测和第三方 MCP 的授权管理不在本次范围内。
+
+### [002] — 2026-11-06 — 原生配置继承实现与 CLI 校准
+
+**触发与范围：** 实施 [001]，替代原有全量 settings、workspace 拒绝及环境白名单；
+保留 trusted-host、Schema/VCS、逐轮 Git/gh 能力、进程监督与已有脱敏。修改仅在独立
+`worker-environment-inheritance` workspace，原检出的 console 工作未动。
+
+**实际实现：** `credentials.inherited_agent_environment` 统一两个后端的受控变量过滤；
+`amp_agent` 仅用 `--mcp-config` 覆盖 `flow`，接受原生 skill/MCP 等额外工具；
+`amp_process` 删除全量 settings helper，`AmpHistory` 直接使用原生只读 export。
+Codex 的 flow 覆盖和禁用参数不变；两个后端都保留自定义 MCP 变量。同步更新 README、
+架构、部署说明及 changelog；无配置开关、JSONC 解析器、依赖或协议变更。
+
+**决定与取舍（已实现）：** 固定 Amp `0.0.1792555249-g702cd1` 与本机
+`0.0.1793937652-gdc5d48` 都接受平铺的 `{"flow": {...}}` overlay，并整项替换同名
+server。`mcp list --json` 会忽略未知字段，不能证明运行期 schema 有效；实际 `mcp doctor`
+在设置 `disabled: true` 后仍连接 fixture server（`disabled-schema.log`）。因此用
+`http://127.0.0.1:0/mcp` 和无旧 token 实现修订轮旧 broker
+不可用，取代 [001] 尚待校准的“显式禁用”形式。选择端口零避免复用旧 endpoint，且不引入
+假 MCP 子进程或配置合并器；代价是 CLI 会重试并显示连接错误，不宣称原生 disabled 状态。
+
+**验证与消融：** 证据汇总见[本次验证记录](https://ampcode.com/artifacts/worker-skills-mcp-57f5fb2b-f3cd-413e-9434-e3dc3ee86d83)。
+本地原始日志保存在 `.amp/in/artifacts/worker-environment-inheritance/`，不随代码发布。
+
+| 检查 | 实际结果与复现条件 |
+| --- | --- |
+| 回归先失败后通过 | `pytest tests/test_amp_driver.py tests/test_codex_driver.py -q`：旧实现拒绝 workspace 设置并丢弃自定义变量；新实现通过。随后加入已有 history 回归一同通过。日志 `before-tests.log`、`targeted-tests.log` |
+| 原生 CLI 校准 | 两个版本分别使用 fixture HOME/XDG、`AMP_SETTINGS_FILE` JSONC、任务仓库 JSONC、全局/Claude/repo skills、本地 stdio MCP 与真实 WorkerMCP。执行 `skills list`、`mcp list --json`、`mcp doctor`、`tools list`；skill 可发现、ambient MCP 收到测试变量、当前 flow 的 Bearer 环境替换认证成功。仅协议发现，未调用业务工具 |
+| 原生权限 | `mcp doctor` 保留 user `amp.mcpPermissions` 的 reject；workspace server 仍 awaiting approval，未启动其子进程；未写个人配置或批准任何 server |
+| 去掉 flow overlay | 同一 fixture 下带 overlay 不启动旧 flow；去掉 overlay 后旧 flow 的 stdio 服务被启动。两版本结果一致，保留单项覆盖。日志 `cli-calibration.log` |
+| 恢复旧 settings | 用父提交的真实 `write_amp_settings` helper 与同一 fixture 执行 `mcp list --json`：恢复 `--settings-file` 后 ambient server 消失；原生配置保留它，故删除替换策略 |
+| 去掉环境过滤 | 在临时进程中将两处共享 helper 替换为 `dict`，运行既有环境回归；两个后端都暴露受控变量并失败，故保留共享过滤。无产品文件改动，日志 `ablation.log` |
+| 本地验收 | 临时 PostgreSQL 17 上全量 `pytest -q --tb=short` 通过，无跳过；`ruff check app tests`、`mypy app tests` 通过。`python scripts/build_console.py`、`uv build --no-sources` 及 wheel 内静态入口检查通过 |
+
+**证据边界：** 全量测试使用本机 Python 3.13，打包使用本机 Node 25，CI 分别使用 Python
+3.12、Node 24；本机无 Docker，未验证 Linux 运行。本次没有启动真实模型或调用真实 GitHub
+业务工具，没有验证旧 Amp thread 的创建期工具集是否刷新。`tools list` 在设置
+`amp.tools.disable` 后仍显示该工具，不能作为运行期禁用生效的证据；worker 不覆写这些设置，
+仍由原生 CLI 执行。虚拟 Amp key 对账户 MCP/export 返回预期 401；export 失败路径没有启动
+fixture MCP，但成功导出及账户端 MCP 未在本次重新实测。历史投影/分页/脱敏由既有回归覆盖。
+上述限制已写入部署说明；不增加兼容或权限绕过机制。
+
+**交付边界：** 实现和本地检查完成，review/CI 状态以同一 [PR #128](https://github.com/b1indsight/agentflow/pull/128)
+为准；未合并、未部署、未修改运行中的 worker。更新并重启空闲 worker 后使用新行为。

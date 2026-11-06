@@ -14,6 +14,7 @@ from app.worker.execution.codex import CodexAgent, _codex_environment, _start_ar
 async def test_adapter_returns_raw_output_without_interpreting_business_schema(monkeypatch, tmp_path):
     # A caller-owned schema need not contain INITIAL/REVISION fields. The adapter
     # must forward the CLI output; only the task executor knows its business type.
+    monkeypatch.setenv("EXAMPLE_MCP_TOKEN", "custom-mcp-token")
     schema = tmp_path / "schema.json"
     schema.write_text('{"type":"object"}')
     raw = '{"caller_owned":"result"}'
@@ -30,6 +31,7 @@ async def test_adapter_returns_raw_output_without_interpreting_business_schema(m
 
     async def spawn(*args, **kwargs):
         assert kwargs["cwd"] == tmp_path
+        assert kwargs["env"]["EXAMPLE_MCP_TOKEN"] == "custom-mcp-token"
         assert args[args.index("--output-schema") + 1] == str(schema)
         Path(args[args.index("-o") + 1]).write_text(raw)
         return Process()
@@ -67,6 +69,13 @@ def test_codex_environment_removes_worker_and_github_credentials() -> None:
             "FLOWTOOL_DATABASE_URL": "database-secret",
             "GH_TOKEN": "github-secret",
             "GITHUB_TOKEN": "github-secret",
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "credential.helper",
+            "GIT_CONFIG_VALUE_0": "personal-helper",
+            "GIT_DIR": "/parent/repo/.git",
+            "SSH_ASKPASS": "/personal/askpass",
+            "CODEX_THREAD_ID": "parent-thread",
+            "EXAMPLE_MCP_TOKEN": "custom-mcp-token",
         }
     )
 
@@ -77,6 +86,7 @@ def test_codex_environment_removes_worker_and_github_credentials() -> None:
         "OPENAI_API_KEY": "codex-secret",
         "HTTPS_PROXY": "https://proxy.example",
         "SSL_CERT_FILE": "/etc/ssl/corp.pem",
+        "EXAMPLE_MCP_TOKEN": "custom-mcp-token",
     }
 
 
