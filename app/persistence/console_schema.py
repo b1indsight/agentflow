@@ -10,13 +10,9 @@ SELECT f.id, f.repo, f.issue_number, f.state AS lifecycle, f.created_at,
  GREATEST(f.updated_at,COALESCE(d.updated_at,f.updated_at),
           COALESCE(j.updated_at,f.updated_at),COALESCE(a.updated_at,f.updated_at)) AS updated_at,
  CASE
- WHEN f.state='succeeded' OR d.state='closed' THEN 'done'
+ WHEN f.state='succeeded' OR d.state IN ('closed','merged') THEN 'done'
  WHEN f.state IN ('failed','cancelled') THEN 'blocked'
- WHEN j.state='failed' OR (j.kind='archive'
- AND j.recovery_deadline IS NOT NULL AND j.result_received_at IS NULL) OR EXISTS (
- SELECT 1 FROM result_effects e JOIN jobs ej ON ej.id=e.job_id
- WHERE ej.flow_id=f.id AND ej.result_applied_at IS NULL AND e.state='failed') THEN 'blocked'
- WHEN d.state='merged' THEN 'running'
+ WHEN j.blocked THEN 'blocked'
  WHEN d.pr_number IS NULL AND (x.worker_id IS NULL OR x.released_at IS NOT NULL) THEN 'queued'
  WHEN EXISTS (SELECT 1 FROM jobs pending WHERE pending.flow_id=f.id
  AND (pending.state IN ('queued','running') OR (pending.result_received_at IS NOT NULL
@@ -24,7 +20,9 @@ SELECT f.id, f.repo, f.issue_number, f.state AS lifecycle, f.created_at,
  WHEN d.state='open' THEN 'review' ELSE 'running' END AS phase,
  CASE WHEN f.state='succeeded' THEN 'archived'
  WHEN d.state='closed' THEN 'delivery_closed'
+ WHEN d.state='merged' AND f.state IN ('failed','cancelled') THEN 'delivery_merged'
  WHEN f.state IN ('failed','cancelled') THEN f.state
+ WHEN d.state='merged' AND j.blocked THEN 'archive_blocked'
  WHEN j.result_received_at IS NOT NULL AND j.result_applied_at IS NULL THEN 'applying_result'
  WHEN j.state='running' AND j.recovery_deadline IS NOT NULL THEN 'recovering'
  WHEN j.state IN ('queued','running') THEN j.kind || ':' || j.state
@@ -46,7 +44,13 @@ SELECT f.id, f.repo, f.issue_number, f.state AS lifecycle, f.created_at,
 FROM flows f LEFT JOIN flow_deliveries d ON d.flow_id=f.id
 LEFT JOIN flow_executions x ON x.flow_id=f.id
 LEFT JOIN attempts a ON a.id=f.current_attempt_id
-LEFT JOIN LATERAL (SELECT * FROM jobs WHERE flow_id=f.id ORDER BY id DESC LIMIT 1) j ON TRUE;
+-- Merged cards stay archived; the same blockers still expose cleanup diagnostics and retry.
+LEFT JOIN LATERAL (SELECT candidate.*,
+ (candidate.state='failed' OR (candidate.kind='archive'
+ AND candidate.recovery_deadline IS NOT NULL AND candidate.result_received_at IS NULL) OR EXISTS (
+ SELECT 1 FROM result_effects e JOIN jobs ej ON ej.id=e.job_id
+ WHERE ej.flow_id=f.id AND ej.result_applied_at IS NULL AND e.state='failed')) AS blocked
+ FROM jobs candidate WHERE flow_id=f.id ORDER BY id DESC LIMIT 1) j ON TRUE;
 
 CREATE TABLE IF NOT EXISTS console_flows (
  flow_id BIGINT PRIMARY KEY REFERENCES flows(id),
@@ -172,10 +176,11 @@ CREATE OR REPLACE TRIGGER console_worker_changed AFTER INSERT OR UPDATE ON worke
 -- Only missing projections are seeded; ordinary restarts never rescan archived source bodies.
 SELECT console_refresh(id,TRUE) FROM flows
  WHERE NOT EXISTS (SELECT 1 FROM console_flows c WHERE c.flow_id=flows.id);
--- Reclassify existing cards once when a display-phase rule changes.
+-- Reclassify existing cards once when a display phase or action rule changes.
 SELECT console_refresh(c.flow_id) FROM console_flows c
  JOIN console_facts f ON f.id=c.flow_id
  WHERE c.facts->>'phase' IS DISTINCT FROM
  CASE WHEN c.archived_at IS NOT NULL AND f.lifecycle='cancelled' THEN 'done' ELSE f.phase END
+ OR c.facts->>'action' IS DISTINCT FROM f.action
  ORDER BY c.flow_id;
 """

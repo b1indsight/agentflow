@@ -498,6 +498,67 @@ test("archived column distinguishes closed unmerged PRs from completed archives"
   });
 });
 
+for (const lifecycle of ["failed", "cancelled", "active"]) {
+  test(`merged PR stays archived with ${lifecycle} execution history`, async ({
+    page,
+  }) => {
+    // Merge supersedes the card's failure, but active cleanup must keep its safe retry entry.
+    const cleanupBlocked = lifecycle === "active";
+    const label = cleanupBlocked ? "已合并 · 清理受阻" : "已合并 · 已归档";
+    const merged: FlowDetail = {
+      ...flow,
+      lifecycle,
+      phase: "done",
+      action: cleanupBlocked ? "archive_blocked" : "delivery_merged",
+      reason: cleanupBlocked
+        ? "任务 #9（归档）：归档失败"
+        : `PR 已合并，已自动归档；保留此前的${lifecycle === "failed" ? "失败" : "取消"}记录`,
+      next_condition: cleanupBlocked
+        ? "检查执行记录；归档只能在原 Worker 与执行状态确认安全后由运维重试"
+        : "无需重新执行编码或评审；工作区清理未确认完成，如有需要请人工核验",
+      sources: [],
+    };
+    await page.route("**/api/flows?**", (route) =>
+      route.fulfill({
+        json: {
+          items:
+            new URL(route.request().url()).searchParams.get("phase") === "done"
+              ? [merged]
+              : [],
+          counts: { queued: 0, running: 0, review: 0, blocked: 0, done: 1 },
+          next_cursor: null,
+          has_more: false,
+        },
+      }),
+    );
+    await page.route("**/api/flows/42", (route) =>
+      route.fulfill({ json: merged }),
+    );
+    await page.goto("/#board");
+    const column = page.locator(".column.phase-done");
+    await expect(column.locator(".col-header")).toHaveText("已归档1");
+    await expect(column.getByText(label, { exact: true })).toBeVisible();
+    await column.locator('.card[data-flow="42"]').click();
+    await page.getByRole("tab", { name: "概览" }).click();
+    const summary = page.locator(".execution-summary");
+    await expect(summary.getByRole("heading")).toHaveText(label);
+    await expect(
+      summary.getByRole("button", { name: "重试", exact: true }),
+    ).toHaveCount(cleanupBlocked ? 1 : 0);
+    await expect(
+      page.getByRole("button", { name: "归档", exact: true }),
+    ).toHaveCount(0);
+    await summary.screenshot({
+      path: `../../../.amp/in/artifacts/merge-archive-${lifecycle}-desktop.png`,
+    });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(summary.getByRole("heading")).toBeVisible();
+    await summary.screenshot({
+      path: `../../../.amp/in/artifacts/merge-archive-${lifecycle}-mobile.png`,
+    });
+  });
+}
+
 test("detail reads synchronize sidebar and board without reloading the page", async ({
   page,
 }) => {

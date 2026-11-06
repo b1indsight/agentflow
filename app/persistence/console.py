@@ -137,6 +137,12 @@ def _explanation(row: Row) -> tuple[str, str]:
     facts = row["facts"]
     if facts["lifecycle"] == "succeeded":
         return "Flow 已归档完成", "无需后续动作"
+    if facts["delivery_state"] == "merged" and facts["lifecycle"] in {"failed", "cancelled"}:
+        outcome = "失败" if facts["lifecycle"] == "failed" else "取消"
+        return (
+            f"PR 已合并，已自动归档；保留此前的{outcome}记录",
+            "无需重新执行编码或评审；工作区清理未确认完成，如有需要请人工核验",
+        )
     if facts["lifecycle"] == "cancelled":
         reason = "Flow 已取消"
         if row["archived_at"] is not None:
@@ -200,7 +206,7 @@ def _explanation(row: Row) -> tuple[str, str]:
             return f"{job}等待分配 Worker", "等待可用 Worker 接收任务"
         return f"{job}等待绑定的 Worker 接收", "等待该 Worker 可接收任务并完成派发"
     if facts["delivery_state"] == "merged":
-        return "PR 已合并，尚未完成归档", "检查归档执行记录与原 Worker 绑定，等待归档完成"
+        return "PR 已合并，已归档展示；工作区清理尚未完成", "检查归档执行记录与原 Worker 绑定，等待清理完成"
     if facts["phase"] == "review":
         return (
             "PR 已打开，当前没有待执行任务",

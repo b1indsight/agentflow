@@ -11,6 +11,7 @@ from app.github.console import Observation
 from app.persistence.activity import ActivityStore
 from app.persistence.console import ConsoleStore
 from tests.test_cancel_drain import running
+from tests.test_merge import merge_payload
 
 
 def test_archive_versions_snapshots_and_prior_interactions(store):
@@ -142,6 +143,52 @@ def test_closed_pr_archive_filters_reopen_and_existing_projection_refresh(store)
     assert console.detail(flow.id).phase == "review"
     assert not console.flows(q="is:done").items
     assert [item.id for item in console.flows(q="is:active").items] == [flow.id]
+
+
+@pytest.mark.parametrize("state,manual", [
+    (FlowState.ACTIVE, False), (FlowState.FAILED, False),
+    (FlowState.CANCELLED, False), (FlowState.CANCELLED, True),
+    (FlowState.SUCCEEDED, False),
+])
+def test_merged_pr_archives_card_without_rewriting_execution_history(store, state, manual):
+    # A maintainer can merge after a failed/cancelled execution; retry cannot revive that Flow.
+    flow = store.flows.create_flow("octo/repo", 7, 1)
+    flow.state = state
+    store.flows.update_flow(flow)
+    delivery = store.deliveries.get_or_create_delivery(flow.id, "flow/7")
+    delivery.pr_number, delivery.state = 17, DeliveryState.OPEN
+    store.deliveries.update_delivery(delivery)
+    console = ConsoleStore(store.database)
+    if manual:
+        console.archive(flow.id)
+    before = console.detail(flow.id)
+    ControlService(database=store.database).on_merged(flow, "merge-1", merge_payload(flow))
+    detail = console.detail(flow.id)
+    assert detail.phase == "done"
+    assert detail.lifecycle == state
+    assert detail.archived_at == before.archived_at
+    assert [item.id for item in console.flows(q="is:done").items] == [flow.id]
+    assert [item.id for item in console.flows(q="status:done").items] == [flow.id]
+    assert not console.flows(q="is:active").items
+    assert console.flows().counts == {"queued": 0, "running": 0, "review": 0, "blocked": 0, "done": 1}
+    if state in {FlowState.FAILED, FlowState.CANCELLED}:
+        assert detail.action == "delivery_merged"
+        assert "PR 已合并" in detail.reason
+        assert "清理" in detail.next_condition and "重试" not in detail.next_condition
+        assert store.jobs.list_jobs(flow.id) == []
+    assert store.flows.get_flow(flow.id).state is state
+    # Upgrade existing cards too, including a manual archive whose phase was already done.
+    with store.connection() as connection:
+        connection.execute(
+            "UPDATE console_flows SET facts=facts || "
+            "jsonb_build_object('phase',%s::text,'action',%s::text) WHERE flow_id=%s",
+            (before.phase, before.action, flow.id),
+        )
+    store.init_db()
+    refreshed = console.detail(flow.id)
+    assert refreshed.phase == detail.phase and refreshed.action == detail.action
+    store.init_db()
+    assert console.detail(flow.id) == refreshed
 
 
 def test_cancelled_manual_archive_survives_refresh_and_retry_clears_it(store):
