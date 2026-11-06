@@ -79,6 +79,19 @@ test.beforeEach(async ({ page }) => {
       });
     if (url.pathname.endsWith("/jobs"))
       return route.fulfill({ json: pageOf([]) });
+    if (url.pathname.endsWith("/reading"))
+      return route.fulfill({
+        json: {
+          receipts_version: 0,
+          snapshot: 2,
+          total_count: 1,
+          unread_count: 1,
+          position_revision: 0,
+          writer_epoch: 0,
+          anchor: null,
+          saved_at: null,
+        },
+      });
     if (url.pathname.endsWith("/activity"))
       return route.fulfill({
         json: {

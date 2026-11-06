@@ -6,7 +6,7 @@ import {
   useState,
 } from "react";
 import { getActivity } from "./api";
-import type { ActivityItem, SourceStatus } from "./types";
+import type { ActivityItem, SourceStatus, ReadingResume } from "./types";
 
 export const ACTIVITY_CACHE_ROWS = 240;
 export const CONVERSATION_CACHE_FLOWS = 4;
@@ -23,6 +23,9 @@ type State = {
   changes: Record<string, number>;
   busy: boolean;
   error: { message: string; cursor: string | null; refresh: boolean } | null;
+  parent: string | null;
+  resumed: boolean;
+  resumeToken: number;
 };
 const empty = (): State => ({
   items: new Map(),
@@ -36,6 +39,9 @@ const empty = (): State => ({
   changes: {},
   busy: false,
   error: null,
+  parent: null,
+  resumed: false,
+  resumeToken: 0,
 });
 const cache = new Map<number, State>();
 function remember(id: number, s: State) {
@@ -82,8 +88,16 @@ export function useConversation(
         const p = await getActivity(
           flowId,
           refresh
-            ? { refresh: true, since: before.snapshot ?? undefined }
-            : { cursor, snapshot: before.snapshot ?? undefined },
+            ? {
+                refresh: true,
+                since: before.snapshot ?? undefined,
+                parent: before.parent ?? undefined,
+              }
+            : {
+                cursor,
+                snapshot: before.snapshot ?? undefined,
+                parent: before.parent ?? undefined,
+              },
           c.signal,
         );
         if (c.signal.aborted) return;
@@ -110,7 +124,11 @@ export function useConversation(
             const cursor = last.next_cursor;
             last = await getActivity(
               flowId,
-              { cursor, snapshot: p.snapshot },
+              {
+                cursor,
+                snapshot: p.snapshot,
+                parent: before.parent ?? undefined,
+              },
               c.signal,
             );
             if (c.signal.aborted) return;
@@ -127,6 +145,7 @@ export function useConversation(
               items.delete(items.keys().next().value!);
           }
           put({
+            ...before,
             items,
             keys,
             pages,
@@ -248,10 +267,50 @@ export function useConversation(
     o.observe(sentinel);
     return () => o.disconnect();
   }, [load, root, state.busy, state.error, state.has_more]);
+  const restore = useCallback(
+    (resume: ReadingResume) => {
+      controller.current?.abort();
+      const page = resume.page;
+      put({
+        ...empty(),
+        keys: page.items.map((e) => e.key),
+        items: new Map(page.items.map((e, i) => [i, e])),
+        pages: [
+          { cursor: resume.start_cursor, indexes: page.items.map((_, i) => i) },
+        ],
+        snapshot: page.snapshot,
+        total: page.total,
+        next_cursor: page.next_cursor,
+        has_more: page.has_more,
+        sources: page.sources,
+        parent: resume.parent_key,
+        resumed: true,
+        resumeToken: current.current.resumeToken + 1,
+      });
+      // Body restoration waits for its segment to load and preserves the in-block
+      // fraction. A second scroll to the article would overwrite that position.
+      if (resume.resolved_anchor?.part === "body") return;
+      requestAnimationFrame(() => {
+        const element = [
+          ...(root.current?.querySelectorAll<HTMLElement>("[data-entry]") ??
+            []),
+        ].find(
+          (e) => e.dataset.entry === resume.resolved_anchor?.key && !e.hidden,
+        );
+        element?.scrollIntoView({ block: "start" });
+      });
+    },
+    [flowId, root],
+  );
   return {
     state,
     load,
     onRange,
+    restore,
+    fromStart: () => {
+      put({ ...empty(), resumeToken: current.current.resumeToken + 1 });
+      void read(null);
+    },
     retry: () => {
       const { error, busy } = current.current;
       if (error && !busy) void read(error.cursor, error.refresh);

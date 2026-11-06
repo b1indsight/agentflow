@@ -122,6 +122,15 @@ class Database:
         with self.connection() as connection:
             for schema in SCHEMAS:
                 connection.execute(schema)
+        # Old archives migrate one Flow per transaction, before exposing reading UI.
+        from app.persistence.activity import ActivityStore
+
+        with self.connection() as connection:
+            flows = connection.execute(
+                "SELECT DISTINCT flow_id FROM console_activity WHERE read_revision IS NULL"
+            ).fetchall()
+        for flow in flows:
+            ActivityStore(self).ensure_read_revisions(flow["flow_id"])
 
     def now(self) -> datetime:
         return self._clock()

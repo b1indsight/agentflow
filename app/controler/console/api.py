@@ -18,15 +18,30 @@ from app.contracts.console import (
     RepositoryPage,
     RetryRequest,
 )
+from app.contracts.reading import (
+    MarkReading,
+    PositionClaim,
+    PositionSave,
+    ReadBatch,
+    ReadingResume,
+    ReadingState,
+)
+from app.controler.access import OwnerPrincipal
 from app.controler.runtime import ServerRuntime
 from app.controler.workflow.service import ControlService, RetryRejected
 from app.persistence.activity import ActivityStore
 from app.persistence.console import ConsoleStore
 from app.persistence.flows import FlowStore
+from app.persistence.reading import ReadingStore
 
 router = APIRouter(prefix="/api")
 FlowId = Annotated[int, Path(gt=0)]
 Cursor = Annotated[str | None, Query(min_length=1, max_length=4096)]
+
+
+def _owner(request: Request) -> str:
+    principal: OwnerPrincipal = request.state.owner
+    return principal.owner_key
 
 
 @router.get("/flows", response_model=FlowPage)
@@ -38,9 +53,12 @@ async def flows(
     limit: int = Query(default=50, ge=1, le=100),
 ) -> FlowPage:
     runtime: ServerRuntime = request.app.state.runtime
-    return await runtime.console.db(
-        partial(ConsoleStore(runtime.database).flows, q=q, phase=phase, cursor=cursor, limit=limit)
-    )
+    def read() -> FlowPage:
+        page = ConsoleStore(runtime.database).flows(q=q, phase=phase, cursor=cursor, limit=limit)
+        ReadingStore(runtime.database).annotate_flows(_owner(request), page.items)
+        return page
+
+    return await runtime.console.db(read)
 
 
 @router.get("/repos", response_model=RepositoryPage)
@@ -58,7 +76,12 @@ async def detail(request: Request, flow_id: FlowId) -> FlowDetail:
     runtime: ServerRuntime = request.app.state.runtime
     store = ConsoleStore(runtime.database)
     await runtime.console.db(partial(store.request_sync, flow_id))
-    return await runtime.console.db(partial(store.detail, flow_id))
+    def read() -> FlowDetail:
+        item = store.detail(flow_id)
+        ReadingStore(runtime.database).annotate_flows(_owner(request), [item])
+        return item
+
+    return await runtime.console.db(read)
 
 
 def _require_same_origin_json(request: Request) -> None:
@@ -149,7 +172,7 @@ async def activity(
         await runtime.console.db(
             partial(ConsoleStore(runtime.database).request_sync, flow_id, active_only=False)
         )
-    return await runtime.console.db(
+    page = await runtime.console.db(
         partial(
             ActivityStore(runtime.database).page,
             flow_id,
@@ -159,6 +182,9 @@ async def activity(
             parent=parent,
             limit=limit,
         )
+    )
+    return await runtime.console.db(
+        partial(ReadingStore(runtime.database).annotate_page, _owner(request), flow_id, page)
     )
 
 
@@ -172,7 +198,7 @@ async def versions(
     limit: int = Query(default=20, ge=1, le=50),
 ) -> ActivityPage:
     runtime: ServerRuntime = request.app.state.runtime
-    return await runtime.console.db(
+    page = await runtime.console.db(
         partial(
             ActivityStore(runtime.database).versions,
             flow_id,
@@ -181,6 +207,9 @@ async def versions(
             snapshot=snapshot,
             limit=limit,
         )
+    )
+    return await runtime.console.db(
+        partial(ReadingStore(runtime.database).annotate_page, _owner(request), flow_id, page)
     )
 
 
@@ -207,3 +236,43 @@ async def content(
             compare=compare,
         )
     )
+
+
+@router.get("/flows/{flow_id}/reading", response_model=ReadingState)
+async def reading_state(request: Request, flow_id: FlowId, snapshot: int | None = Query(default=None, ge=0)) -> ReadingState:
+    runtime: ServerRuntime = request.app.state.runtime
+    return await runtime.console.db(partial(ReadingStore(runtime.database).state, _owner(request), flow_id, snapshot=snapshot))
+
+
+@router.get("/flows/{flow_id}/reading/resume", response_model=ReadingResume)
+async def reading_resume(request: Request, flow_id: FlowId) -> ReadingResume:
+    runtime: ServerRuntime = request.app.state.runtime
+    return await runtime.console.db(partial(ReadingStore(runtime.database).resume, _owner(request), flow_id))
+
+
+@router.post("/flows/{flow_id}/reading/observations", response_model=ReadingState)
+async def reading_observe(request: Request, flow_id: FlowId, command: ReadBatch) -> ReadingState:
+    _require_same_origin_json(request)
+    runtime: ServerRuntime = request.app.state.runtime
+    return await runtime.console.db(partial(ReadingStore(runtime.database).observe, _owner(request), flow_id, command))
+
+
+@router.post("/flows/{flow_id}/reading/mark", response_model=ReadingState)
+async def reading_mark(request: Request, flow_id: FlowId, command: MarkReading) -> ReadingState:
+    _require_same_origin_json(request)
+    runtime: ServerRuntime = request.app.state.runtime
+    return await runtime.console.db(partial(ReadingStore(runtime.database).mark, _owner(request), flow_id, command))
+
+
+@router.post("/flows/{flow_id}/reading/position/claim", response_model=ReadingState)
+async def reading_claim(request: Request, flow_id: FlowId, command: PositionClaim) -> ReadingState:
+    _require_same_origin_json(request)
+    runtime: ServerRuntime = request.app.state.runtime
+    return await runtime.console.db(partial(ReadingStore(runtime.database).claim, _owner(request), flow_id, command))
+
+
+@router.put("/flows/{flow_id}/reading/position", response_model=ReadingState)
+async def reading_position(request: Request, flow_id: FlowId, command: PositionSave) -> ReadingState:
+    _require_same_origin_json(request)
+    runtime: ServerRuntime = request.app.state.runtime
+    return await runtime.console.db(partial(ReadingStore(runtime.database).save_position, _owner(request), flow_id, command))

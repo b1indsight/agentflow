@@ -38,6 +38,42 @@ def console_runtime(store):
     )
 
 
+def test_personal_reading_access_origin_validation_and_side_effect_boundaries(console_runtime, store):
+    flow = store.flows.create_flow("owner/repo", 7, 42)
+    ActivityStore(store._db).append(flow.id, Observation(
+        key="comment", source="issue.comments", kind="comment", author="owner", body="hello",
+        occurred_at=flow.created_at, updated_at=flow.created_at,
+    ))
+    with TestClient(create_app(console_runtime)) as client:
+        base = f"/api/flows/{flow.id}"
+        for path in ("reading", "reading/resume"):
+            assert client.get(f"{base}/{path}").status_code == 401
+        for method, path in (("POST", "observations"), ("POST", "mark"),
+                             ("POST", "position/claim"), ("PUT", "position")):
+            assert client.request(method, f"{base}/reading/{path}", json={}).status_code == 401
+        headers = console_runtime.issuer.headers()
+        entry = client.get(f"{base}/activity", headers=headers).json()["items"][0]
+        for path in (base, f"{base}/activity?refresh=true", f"{base}/reading", f"{base}/reading/resume", "/api/flows"):
+            assert client.get(path, headers=headers).status_code == 200
+        with store.connection() as connection:
+            assert connection.execute("SELECT count(*) AS n FROM console_reading_state").fetchone()["n"] == 0
+        observation = {"items": [{"key": entry["key"], "version": entry["version"],
+                        "read_revision": entry["read_revision"], "generation": 0,
+                        "header": True, "ranges": [[0, 5]]}]}
+        assert client.post(f"{base}/reading/observations", json=observation,
+                           headers={**headers, "Origin": "https://evil.test"}).status_code == 403
+        assert client.post(f"{base}/reading/observations", json={**observation, "owner": "other"},
+                           headers=headers).status_code == 422
+        bad = {"items": [{**observation["items"][0], "version": True}]}
+        assert client.post(f"{base}/reading/observations", json=bad, headers=headers).status_code == 422
+        response = client.post(f"{base}/reading/observations", json=observation, headers=headers)
+        assert response.status_code == 200 and response.json()["unread_count"] == 0
+        assert client.get("/api/flows", headers=headers).json()["items"][0]["unread_count"] == 0
+        assert not client.get(f"{base}/activity", headers=headers).json()["items"][0]["reading"]["unread"]
+        assert store.flows.get_flow(flow.id).state == FlowState.ACTIVE
+        console_runtime.gateway.notify_jobs.assert_not_called()
+
+
 def test_console_and_every_public_read_require_owner_before_io(console_runtime, store):
     flow = store.flows.create_flow("owner/repo", 7, 42)
     ActivityStore(store._db).append(

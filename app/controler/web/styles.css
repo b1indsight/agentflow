@@ -1869,3 +1869,43 @@ pre code {
   background: #ddf4ff;
   color: #0550ae;
 }
+/* Personal progress remains separate from lifecycle and source freshness. */
+.reading-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding: 0.5rem 0;
+  font-size: 0.8rem;
+}
+.reading-alerts {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--paper);
+  display: flow-root;
+}
+.reading-notice {
+  padding: 0.65rem;
+  border: 1px solid var(--line);
+  border-radius: 0.4rem;
+  font-size: 0.8rem;
+}
+.reading-notice button {
+  margin-inline-start: 0.5rem;
+}
+.reading-entry {
+  border: 0;
+  background: transparent;
+  color: var(--green);
+  padding: 0.2rem 0;
+  font-size: var(--text-small);
+  cursor: pointer;
+}
+.reading-entry:hover {
+  text-decoration: underline;
+}
+.unread-count {
+  font-size: 0.7rem;
+  color: var(--green);
+}

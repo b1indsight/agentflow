@@ -119,7 +119,23 @@ GitHub 末尾 effect 标记在展示读取时移除，原始归档不变；预�
 脚注标签先映射为内部数字标识，避免 `a` 的重复引用与 `a-2` 标签生成相同引用 ID；
 显示编号、脚注正文及每次引用的回链不变。仅脚注定义添加程序化焦点入口，回链保留原引用的
 Tab / Shift+Tab 顺序。
-个人阅读状态未落库，另见 [#88](https://github.com/b1indsight/agentflow/issues/88)。
+
+## 个人阅读状态与跨设备续读
+
+个人进度按验签后的 Access issuer/subject 与 Flow 保存，写入只影响 UI 元信息。
+看板、后台同步、刷新与位置恢复不直接标读；前台有焦点时，实际完整可见的标题和正文子段
+停留 600ms 才确认对应内容。正文使用 Unicode code-point 范围并集，跳到尾部、折叠回复或
+跨过未加载历史不会补齐已读空洞。内容编辑、讨论状态变化和早期补录保留未读提示。
+
+每条可显式标为已读/未读；标记当前快照全部已读前会确认包含未加载历史和回复的数量，
+不会覆盖后续新内容。多设备合并确切已读范围；显式未读会拒绝旧版本的在途确认。
+阅读位置独立保存条目、正文偏移和段内比例；主动阅读才申请位置写入权，旧设备迟到保存
+不能覆盖新设备。慢请求期间的后续阅读会在成功后补存最后位置，失焦后不补发。
+冲突时可恢复远端位置或选择在此继续阅读；编辑、删除、缺失及布局变化均显示回退原因。
+
+网络失败显示未同步提示；已读范围重试队列仅保留在当前页面内存中，离线关闭页面可能丢失
+尚未提交的进度。已有历史首次默认未读；历史及旧修订凭据永久保留，本项不添加清理任务。
+完整规则与清理边界见[设计记录 [061]–[063]](../../../docs/plan/web-console-kanban.md)。
 
 ## 字号与渲染上限
 
@@ -148,20 +164,21 @@ Tab / Shift+Tab 顺序。
 
 ## 文件职责
 
-| 文件                                 | 职责                                               |
-| ------------------------------------ | -------------------------------------------------- |
-| `main.tsx` / `App.tsx`               | React 入口、URL、服务端筛选/分页、看板、侧栏与详情 |
-| `api.ts` / `types.ts`                | 同源可取消请求、错误与控制台 DTO；不回退到 fixture |
-| `activity.tsx`                       | 作者分组、结构化活动、安全 Markdown 与原文工具输出 |
-| `DiffWindow.tsx`                     | 编辑 patch 的有界窗口、行号与行内高亮              |
-| `useConversation.ts`                 | 快照分页缓存、请求取消/隔离、回读、显式刷新与重试  |
-| `search.ts` / `SearchBox.tsx`        | 查询语法、匹配、输入法安全提交和有界筛选建议       |
-| `windowing.tsx`                      | 有界变高列表、焦点遍历、文本分段和阅读状态         |
-| `focus.ts` / `phases.ts`             | 可见可聚焦控件规则、共享状态名称与颜色目录         |
-| `components/ui/` / `lib/utils.ts`    | shadcn/ui 组件源码与类名合并工具                   |
-| `theme.css` / `styles.css`           | Tailwind 主题、已确认的布局与 GitHub 风格代码块    |
-| `components.json` / `vite.config.ts` | shadcn 配置、Vite 开发/构建和本地别名              |
-| `e2e/` / `playwright.config.ts`      | 浏览器回归；仅测试通过路由拦截提供 API DTO         |
+| 文件                                              | 职责                                               |
+| ------------------------------------------------- | -------------------------------------------------- |
+| `main.tsx` / `App.tsx`                            | React 入口、URL、服务端筛选/分页、看板、侧栏与详情 |
+| `api.ts` / `types.ts`                             | 同源可取消请求、错误与控制台 DTO；不回退到 fixture |
+| `activity.tsx`                                    | 作者分组、结构化活动、安全 Markdown 与原文工具输出 |
+| `DiffWindow.tsx`                                  | 编辑 patch 的有界窗口、行号与行内高亮              |
+| `useConversation.ts`                              | 快照分页缓存、请求取消/隔离、回读、显式刷新与重试  |
+| `useReadingProgress.tsx` / `readingVisibility.ts` | 个人已读范围、可见内容计读、位置写入权与跨设备恢复 |
+| `search.ts` / `SearchBox.tsx`                     | 查询语法、匹配、输入法安全提交和有界筛选建议       |
+| `windowing.tsx`                                   | 有界变高列表、焦点遍历、文本分段和阅读状态         |
+| `focus.ts` / `phases.ts`                          | 可见可聚焦控件规则、共享状态名称与颜色目录         |
+| `components/ui/` / `lib/utils.ts`                 | shadcn/ui 组件源码与类名合并工具                   |
+| `theme.css` / `styles.css`                        | Tailwind 主题、已确认的布局与 GitHub 风格代码块    |
+| `components.json` / `vite.config.ts`              | shadcn 配置、Vite 开发/构建和本地别名              |
+| `e2e/` / `playwright.config.ts`                   | 浏览器回归；仅测试通过路由拦截提供 API DTO         |
 
 后端合同见 [`app/contracts/console.py`](../../contracts/console.py)，
 接口、同步与快照仓储见[控制台功能记录](../../../docs/plan/web-console-kanban.md)。

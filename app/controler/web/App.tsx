@@ -41,6 +41,7 @@ import type {
   Tab,
 } from "./types";
 import { useConversation } from "./useConversation";
+import { ReadingProvider, useReadingProgress } from "./useReadingProgress";
 import { SavedDetails, WindowList } from "./windowing";
 import { focusableControls } from "./focus";
 
@@ -168,6 +169,11 @@ function Board({
                       >
                         <div className="card-top">
                           <span>{ref(f)}</span>
+                          {Boolean(f.unread_count) && (
+                            <span className="unread-count">
+                              {f.unread_count} 条未读
+                            </span>
+                          )}
                         </div>
                         <h2>{name(f)}</h2>
                         <div className="repo-label">{f.repo}</div>
@@ -726,7 +732,11 @@ function Conversation({
   root: React.RefObject<HTMLElement | null>;
   refresh: number;
 }) {
-  const { state, load, onRange, retry } = useConversation(id, root);
+  const { state, load, onRange, retry, restore, fromStart } = useConversation(
+    id,
+    root,
+  );
+  const reading = useReadingProgress(id, root, state.snapshot, restore);
   const previousRefresh = useRef(refresh);
   useEffect(() => {
     if (previousRefresh.current !== refresh) {
@@ -735,7 +745,110 @@ function Conversation({
     }
   }, [refresh, load]);
   return (
-    <>
+    <ReadingProvider value={reading.context}>
+      <div className="reading-toolbar" aria-label="个人阅读进度">
+        {reading.state && (
+          <span role="status">{reading.state.unread_count} 条未读</span>
+        )}
+        <button
+          type="button"
+          className="btn ghost"
+          onClick={() => void reading.prepareSnapshot()}
+        >
+          标记当前快照为已读
+        </button>
+        <button
+          type="button"
+          className="btn ghost"
+          onClick={reading.continueHere}
+        >
+          在此继续阅读
+        </button>
+      </div>
+      {reading.preview && (
+        <div role="dialog" aria-label="确认标记已读" className="reading-notice">
+          <p>
+            将当前快照的 {reading.preview.total_count}{" "}
+            条活动标为已读，包含未加载的历史和回复；后续新内容仍保留未读。
+          </p>
+          <button
+            type="button"
+            className="btn"
+            onClick={() => void reading.markSnapshot()}
+          >
+            确认标记
+          </button>
+          <button
+            type="button"
+            className="btn ghost"
+            onClick={reading.cancelPreview}
+          >
+            取消
+          </button>
+        </div>
+      )}
+      <div className="reading-alerts" data-reading-overlay>
+        {reading.error && (
+          <p role="alert" className="reading-notice">
+            {reading.error}{" "}
+            <button type="button" onClick={reading.retry}>
+              重试同步
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                reading.retry();
+                load(true);
+              }}
+            >
+              刷新阅读状态
+            </button>
+          </p>
+        )}
+        {reading.positionConflict && (
+          <p role="status" className="reading-notice">
+            另一设备已更新位置。
+            <button type="button" onClick={reading.restoreRemote}>
+              恢复远端位置
+            </button>
+            <button type="button" onClick={reading.continueHere}>
+              在此继续阅读
+            </button>
+          </p>
+        )}
+      </div>
+      {reading.resume && reading.resume.reason !== "exact" && (
+        <p role="status" className="reading-notice">
+          {
+            (
+              {
+                edited: "原位置的内容已更新，已定位到该条开头。",
+                deleted: "原位置的内容已删除，已定位到删除提示。",
+                missing: "原位置已失效，已定位到附近活动。",
+                incompatible: "原位置的布局已变化，请重新定位。",
+              } as const
+            )[reading.resume.reason]
+          }
+          <button type="button" onClick={reading.continueHere}>
+            保存此处为新位置
+          </button>
+        </p>
+      )}
+      {state.resumed && (
+        <p className="reading-notice">
+          已恢复阅读位置{state.parent ? "（讨论回复）" : ""}
+          ；此前历史可能尚未加载。
+          <button
+            type="button"
+            onClick={() => {
+              reading.clearResume();
+              fromStart();
+            }}
+          >
+            从时间线开头浏览
+          </button>
+        </p>
+      )}
       <ConversationSources
         sources={state.sources}
         busy={state.busy}
@@ -828,7 +941,7 @@ function Conversation({
             }
             return e ? (
               <ActivityView
-                key={`${e.key}-${e.version}`}
+                key={`${e.key}-${e.version}-${state.resumeToken}`}
                 entry={e}
                 flowId={id}
                 snapshot={state.snapshot ?? 0}
@@ -861,7 +974,7 @@ function Conversation({
           {state.busy ? "正在检查更新…" : "已到当前本地快照末尾 · 点击刷新"}
         </button>
       )}
-    </>
+    </ReadingProvider>
   );
 }
 

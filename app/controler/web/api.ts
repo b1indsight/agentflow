@@ -5,6 +5,10 @@ import type {
   FlowPage,
   JobPage,
   RepositoryPage,
+  ReadingProgress,
+  ReadingResume,
+  ReadObservation,
+  ReadingAnchor,
 } from "./types";
 
 export class ApiError extends Error {
@@ -54,6 +58,43 @@ export const getRepos = (cursor: string | null, signal?: AbortSignal) =>
   api<RepositoryPage>("/api/repos", { cursor, limit: 100 }, signal);
 export const getFlow = (id: number, signal?: AbortSignal) =>
   api<FlowDetail>(`/api/flows/${id}`, {}, signal);
+
+export const getReading = (
+  id: number,
+  signal?: AbortSignal,
+  snapshot?: number,
+) => api<ReadingProgress>(`/api/flows/${id}/reading`, { snapshot }, signal);
+export const getReadingResume = (id: number, signal?: AbortSignal) =>
+  api<ReadingResume>(`/api/flows/${id}/reading/resume`, {}, signal);
+export type ReadingCommand =
+  | { items: ReadObservation[] }
+  | { session_id: string; position_revision: number }
+  | {
+      session_id: string;
+      writer_epoch: number;
+      sequence: number;
+      anchor: ReadingAnchor;
+    }
+  | { action: "snapshot_read"; receipts_version: number; snapshot: number }
+  | {
+      action: "entry_read" | "entry_unread";
+      receipts_version: number;
+      key: string;
+      version: number;
+      read_revision: number;
+      generation: number;
+    };
+export const writeReading = (
+  id: number,
+  path: string,
+  command: ReadingCommand,
+  signal?: AbortSignal,
+) =>
+  api<ReadingProgress>(`/api/flows/${id}/reading/${path}`, {}, signal, {
+    method: path === "position" ? "PUT" : "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(command),
+  });
 export const archiveFlow = (id: number) =>
   api<FlowDetail>(`/api/flows/${id}/archive`, {}, undefined, {
     method: "POST",

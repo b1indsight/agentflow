@@ -4,6 +4,8 @@ Triggers cover canonical writers (including recovery), rather than relying on ev
 service remembering an outbox call. Only explicit display facts enter this archive.
 """
 
+from app.persistence.reading_schema import READING_SCHEMA
+
 CONSOLE_SCHEMA = """
 CREATE OR REPLACE VIEW console_facts AS
 SELECT f.id, f.repo, f.issue_number, f.state AS lifecycle, f.created_at,
@@ -179,3 +181,5 @@ SELECT console_refresh(c.flow_id) FROM console_flows c
  CASE WHEN c.archived_at IS NOT NULL AND f.lifecycle='cancelled' THEN 'done' ELSE f.phase END
  ORDER BY c.flow_id;
 """
+
+CONSOLE_SCHEMA += READING_SCHEMA

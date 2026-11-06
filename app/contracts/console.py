@@ -39,6 +39,7 @@ class FlowSummary(ConsoleModel):
     updated_at: datetime
     archived_at: datetime | None
     state_version: int
+    unread_count: int = 0
 
 
 class SourceStatus(ConsoleModel):
@@ -88,6 +89,16 @@ class JobPage(ConsoleModel):
     has_more: bool
 
 
+class EntryReading(ConsoleModel):
+    """Progress for precisely one display revision, including reset fencing."""
+
+    generation: int = 0
+    header_read: bool = False
+    ranges: list[list[int]] = Field(default_factory=list)
+    explicit_read: bool = False
+    unread: bool = True
+
+
 class ActivityItem(ConsoleModel):
     key: str
     version: int
@@ -106,6 +117,8 @@ class ActivityItem(ConsoleModel):
     prior: bool
     previous_version: int | None = None
     metadata: dict[str, JsonValue]
+    read_revision: int = 0
+    reading: EntryReading = Field(default_factory=EntryReading)
 
 
 class ActivityPage(ConsoleModel):

@@ -1989,3 +1989,80 @@ multirange，单次请求与正文读取保持有界；不以合并相邻条目�
 启用默认未读、显式全快照标读及冲突时主动选择。实现期间可根据真实 DOM 源位置映射、迁移耗时
 和查询计划细化内部实现；若需改变上述用户语义，先追加提案。离线持久队列、多 owner 管理、
 远端个人已读同步、通知推送和历史物理清理任务均后置。
+
+### [062] — 2026-11-06 — #88：个人阅读状态与跨设备恢复实现
+
+**触发与范围：** 本次任务要求在 `flow/3` 实现、验证并推送个人阅读功能，延续已有 [061]
+提案及工作区实现。此前 [025] 的候选讨论和 [061] 的提案状态保留为历史记录；本节记录实际
+采用的规则，不追认此前讨论已获批准。#85/#87 的执行状态、阶段、同步检查点不参与已读判定。
+
+**已实现的规则与模块：**
+
+- `OwnerAccess.authenticate` 返回同次验签的 issuer/subject principal；服务端生成 owner key。
+  新增严格 reading contracts 和 owner 保护的同源 JSON 接口，拒绝客户端指定 owner 或工作流字段。
+- `reading_schema.py` 在归档发布事务中为展示内容计算 `read_revision`，复用原有当前版本
+  选择规则与正文内部标记剔除规则。正文、标题、作者、父级、删除提示及显式业务状态变化重新
+  计读；重复同步、URL/传输信息补全不重复提醒。讨论 A→B→A 保留三个修订。
+- `ReadingStore` 对确切修订合并 Unicode code-point 区间，按 owner+Flow 串行化写入；
+  显式未读保留 generation 墓碑，延迟旧确认不能复活。全快照标读枚举该快照的确切条目，
+  包括未加载回复，但不覆盖随后提交的编辑或早期补录。读取、看板和刷新不创建 receipt。
+- 位置独立使用 CAS、writer epoch 和页内 sequence；后台页面不能覆盖新 writer，冲突后
+  只允许用户恢复远端位置或主动选择继续阅读，不自动抢占。书签包含正文 offset 和段内比例，
+  恢复直接查询有界上下文；编辑、删除、物理缺失和布局不兼容均返回可见原因，GET 不改原书签。
+- 浏览器采用前台、有焦点、完整可见子段连续停留 600ms 的规则。Markdown 源位置按 code point
+  映射到短文本片段；代码块使用 code 节点的源码范围，避免其生成文本没有 position 导致漏计。
+  同作者隐藏标题的续行使用可见阅读控件确认摘要；折叠工具与未展开回复仍保留未读。
+  分段加载和跳过历史不填补已读空洞。恢复工具结果时展开所在分组，不申请位置写入权。
+- 看板未读汇总包含尚未加载的回复；每条可显式标读/未读，批量操作先确认范围。失败保留当前
+  页内重试范围，旧响应不能回退较新状态。冲突及未同步提示固定在阅读区域顶部，提示遮挡的
+  正文不计为可见。阅读按钮使用现有主题色和小号正文尺寸。
+
+**迁移与清理边界：** 新增 schema 幂等；旧归档按 Flow、发布顺序回填，使用与 append 相同的
+Flow 锁，每个 Flow 独立提交，可中断重入。初始化完成前不暴露尚未回填的阅读汇总。
+保留永久归档及旧修订凭据；终态、归档、重试均不删除个人记录。未来物理清理必须在维护事务中
+处理对应 receipt/修订别名及计数版本，保留失效书签以显示回退；删除归档 Flow 时个人表级联清除。
+未新增历史清理任务、离线持久队列、通知服务或 GitHub 写入。
+
+**执行验证：**
+
+- PostgreSQL 17：`FLOWTOOL_TEST_DATABASE_URL=<本地隔离实例> uv run pytest tests/test_console_reading.py tests/test_console_api.py -q`。
+  覆盖并发不相交范围、generation fencing、全快照与延迟提交、A→B→A、旧观察、迁移重入、
+  owner 隔离、同源校验、正文锚点和回复上下文、删除/缺失/布局变化回退。
+- Chromium：`npm run test:e2e -- --workers=2 --output=../../../.amp/in/browser-results`。
+  覆盖受控可见时间、长段落/Unicode/Markdown/代码块、跳过未加载内容、折叠工具、同作者续行、
+  显式未读暂停、确认对话框、网络重试、乱序响应、独立桌面/手机上下文恢复及 writer 冲突。
+  桌面、手机、确认、未同步、冲突和四类回退均捕获截图并检查。
+- 静态及构建检查：`uv run ruff check app tests`、`uv run mypy app tests`、
+  `npm run format:check`、`npm test`、`npm run build`。
+- 全量 pytest 与浏览器输出曾并发导致现有 Worker 安装 fixture 复制临时 trace 时文件消失；
+  同代码单独重跑该 Worker 用例通过。后续浏览器产物移至 `.amp/in/`，避免进入 fixture 的 app 副本。
+  未扩大本项去修改 Worker 测试。
+
+**简化对照（已执行）：** 在独立 Python 进程中临时替换对应方法/SQL，产品文件不变；每次只
+替换一个机制，使用同一 `tests/test_console_reading.py` 回归及真实 PostgreSQL。对照日志保存在
+本次本地 `.amp/in/ablation-*.log`，不进入发布包。
+
+| 简化版本 | 运行的回归 | 观察结果 |
+| --- | --- | --- |
+| 范围并集改成从 0 到最大已见 offset | `test_ranges_merge_without_filling_unseen_holes_and_owner_isolation` | 跳过中段后被误判已读，失败 |
+| 忽略 receipt generation | `test_mark_unread_fences_delayed_observations_and_batch_rolls_back` | 旧确认未被拒绝，失败 |
+| 保存位置忽略 writer session/epoch | `test_position_cas_fences_old_devices_and_accepts_upward_reading` | 旧设备保存未被拒绝，失败 |
+| 相同内容复用任意历史 revision | `test_thread_state_returning_to_same_value_is_a_new_revision` | A→B→A 复用了第一次已读身份，失败 |
+
+恢复原实现后上述回归全部通过，保留这四个机制。未验证大规模历史回填耗时或生产部署；
+浏览器交互测试使用 API fixture，持久化与鉴权由真实 PostgreSQL/API 测试覆盖。
+
+### [063] — 2026-11-12 — 慢保存期间的最后阅读位置与父讨论缺失回退
+
+- **发现与修复：** 继续验证 [062] 时，浏览器在前一次位置保存未返回期间会丢弃新的主动阅读。
+  受控延迟回归在原实现中只保存首段；现在合并期间的新动作，在成功响应后补存最后可见位置。
+  不建立并行位置写入，不自动重试失败/CAS 冲突；失焦或页面隐藏会取消待补存动作，
+  后台页面不能借迟到的成功响应恢复写入。
+- **锚点边界：** 原实现仅在回复本身不存在时检查父讨论。历史清理若只移除父讨论，
+  会返回指向失效父级的回复位置。现在对保留回复也检查父级；缺失时返回根时间线附近活动及
+  `missing` 原因，保留原书签，不把 GET 回退写入个人位置。
+- **验证：** `e2e/reading.spec.ts` 的慢响应场景修复前失败、修复后通过，并覆盖期间失焦不补发。
+  `test_reply_resume_and_incompatible_layout_preserve_original_anchor` 补充删除父讨论但保留回复的
+  真实 PostgreSQL 场景，修复前返回错误原因、修复后通过。重跑阅读浏览器回归及持久化回归通过。
+- **文档：** 更新控制台 README 中仍称“个人阅读状态未落库”的说明，补充实际交互与离线边界。
+  本轮没有改变 [062] 的已读语义、引入历史清理任务或调整 #85/#87 范围。

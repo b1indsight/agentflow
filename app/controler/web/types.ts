@@ -19,6 +19,7 @@ export interface FlowSummary {
   updated_at: string;
   archived_at: string | null;
   state_version: number;
+  unread_count?: number;
 }
 export interface SourceStatus {
   source: string;
@@ -79,6 +80,55 @@ export interface ActivityItem {
   prior: boolean;
   previous_version: number | null;
   metadata: Record<string, unknown>;
+  read_revision?: number;
+  reading?: EntryReading;
+}
+
+export interface EntryReading {
+  generation: number;
+  header_read: boolean;
+  ranges: number[][];
+  explicit_read: boolean;
+  unread: boolean;
+}
+export interface ReadingAnchor {
+  key: string;
+  version: number;
+  read_revision: number;
+  snapshot: number;
+  parent_key: string | null;
+  part: "summary" | "body";
+  body_offset: number;
+  block_fraction: number;
+  occurred_at: string;
+  layout_version: number;
+}
+export interface ReadingProgress {
+  receipts_version: number;
+  snapshot: number;
+  unread_count: number;
+  total_count: number;
+  position_revision: number;
+  writer_epoch: number;
+  anchor: ReadingAnchor | null;
+  saved_at: string | null;
+}
+export interface ReadingResume {
+  state: ReadingProgress;
+  original_anchor: ReadingAnchor | null;
+  resolved_anchor: ReadingAnchor | null;
+  reason: "exact" | "edited" | "deleted" | "missing" | "incompatible";
+  page: ActivityPage;
+  start_cursor: string | null;
+  parent_key: string | null;
+}
+export interface ReadObservation {
+  key: string;
+  version: number;
+  read_revision: number;
+  generation: number;
+  header: boolean;
+  ranges: number[][];
 }
 export interface ActivityPage {
   items: ActivityItem[];

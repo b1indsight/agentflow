@@ -5,6 +5,13 @@ import Markdown, { defaultUrlTransform, type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { getContent, getDiff, getThread } from "./api";
 import { DiffWindow } from "./DiffWindow";
+import { readingSource } from "./readingVisibility";
+import {
+  PlainReadingText,
+  ReadingHeader,
+  readingAttributes,
+  useReadingAnchor,
+} from "./useReadingProgress";
 import type { ActivityItem, ActivityPage, ContentPage } from "./types";
 import {
   CODE_CHARS,
@@ -54,13 +61,19 @@ function numberFootnoteIdentifiers() {
 function ActivityMarkdown({
   text,
   url: sourceUrl,
+  offset,
 }: {
   text: string;
   url: string | null;
+  offset: number;
 }) {
   const id = useId();
   const body = useRef<HTMLDivElement>(null);
   const footnoteLabel = `${id}-footnote-label`;
+  const sourcePlugin = useMemo(
+    () => readingSource(text, offset),
+    [text, offset],
+  );
   // Focusing a row rerenders WindowList; keep anchors mounted so click and keyboard focus survive.
   const components = useMemo<Components>(
     () => ({
@@ -105,6 +118,7 @@ function ActivityMarkdown({
   return (
     <div ref={body} className="message-body markdown-body">
       <Markdown
+        rehypePlugins={[sourcePlugin]}
         remarkPlugins={[remarkGfm, numberFootnoteIdentifiers]}
         remarkRehypeOptions={{ clobberPrefix: `${id}-` }}
         urlTransform={(url, _key, node) => {
@@ -145,12 +159,21 @@ function ActivityBody({
   framed?: boolean;
 }) {
   const tool = isToolActivity(entry);
+  const resumeAnchor = useReadingAnchor();
+  const restoreBody =
+    resumeAnchor?.key === entry.key &&
+    resumeAnchor.read_revision === entry.read_revision &&
+    resumeAnchor.part === "body"
+      ? resumeAnchor
+      : null;
+  const bodyHost = useRef<HTMLDivElement>(null);
+  const restored = useRef(false);
   const budget = tool ? CODE_CHARS : TEXT_CHARS;
   const [savedStart, saveStart] = useReadingState(
     `${flowId}-${entry.key}-${entry.version}-body-offset`,
     0,
   );
-  const initialStart = useRef(savedStart).current;
+  const initialStart = useRef(restoreBody?.body_offset ?? savedStart).current;
   const [segment, setSegment] = useState(() => ({
     text: entry.body.slice(0, textEnd(entry.body, 0, tool)),
     start: 0,
@@ -209,21 +232,52 @@ function ActivityBody({
     return () => request.current?.abort();
   }, [initialStart]);
   const end = segment.start + Array.from(segment.text).length;
+  useEffect(() => {
+    if (
+      !restoreBody ||
+      restored.current ||
+      segment.start !== restoreBody.body_offset
+    )
+      return;
+    const node =
+      bodyHost.current?.querySelector<HTMLElement>("[data-read-start]");
+    const viewport =
+      bodyHost.current?.closest<HTMLElement>("[data-scroll-root]");
+    if (!node || !viewport) return;
+    const rect = node.getBoundingClientRect();
+    viewport.scrollTop +=
+      rect.top -
+      viewport.getBoundingClientRect().top +
+      rect.height * restoreBody.block_fraction;
+    restored.current = true;
+  }, [segment.start, restoreBody]);
   const body = tool ? (
     <pre tabIndex={0} aria-label="工具摘要">
       <code>
         {!framed && entry.kind === "tool_call" && (
           <span className="tool-call-name">{entry.title || "调用"} </span>
         )}
-        <span>{segment.text}</span>
+        <PlainReadingText text={segment.text} offset={segment.start} />
       </code>
     </pre>
   ) : (
-    <ActivityMarkdown text={segment.text} url={entry.url} />
+    <ActivityMarkdown
+      text={segment.text}
+      url={entry.url}
+      offset={segment.start}
+    />
   );
   const content = (
     <>
-      {body}
+      <div
+        ref={bodyHost}
+        {...readingAttributes(entry)}
+        data-reading-pending={
+          initialStart > 0 && segment.start === 0 ? "true" : undefined
+        }
+      >
+        {body}
+      </div>
       {(segment.start > 0 || end < entry.body_length) && (
         <div
           className="text-window-controls"
@@ -233,6 +287,7 @@ function ActivityBody({
         >
           <button
             type="button"
+            data-reading-navigation
             disabled={busy || segment.start === 0}
             onClick={() =>
               void read(Math.max(0, segment.start - budget), segment.start)
@@ -245,6 +300,7 @@ function ActivityBody({
           </span>
           <button
             type="button"
+            data-reading-navigation
             disabled={busy || end >= entry.body_length}
             onClick={() => void read(end)}
           >
@@ -416,10 +472,12 @@ function ThreadReplies({
       {error && <p role="alert">{error}（点击上方按钮重试）</p>}
       {page?.items.map((item) => (
         <div key={`${item.key}-${item.version}`}>
-          <p>
-            {item.author}
-            {item.deleted ? " · 已删除" : ""}
-          </p>
+          <ReadingHeader entry={item}>
+            <p>
+              {item.author}
+              {item.deleted ? " · 已删除" : ""}
+            </p>
+          </ReadingHeader>
           <ActivityBody
             key={`${item.key}-${item.version}`}
             entry={item}
@@ -550,6 +608,15 @@ export function ActivityView({
     `${flowId}-${toolGroup?.key ?? entry.key}-tools`,
     0,
   );
+  const anchor = useReadingAnchor();
+  useEffect(() => {
+    if (
+      toolGroup &&
+      anchor &&
+      [entry, ...toolResults].some((item) => item.key === anchor.key)
+    )
+      setToolsOpen(1);
+  }, [anchor]);
   const [metadataOpen, setMetadataOpen] = useReadingState(
     `${entry.key}-${entry.version}-metadata`,
     0,
@@ -594,26 +661,34 @@ export function ActivityView({
         {entry.author.slice(0, 1).toUpperCase()}
       </div>
       <div className="message-main">
-        <div className="message-label">
-          <span className="message-identity">
-            <span>{entry.author}</span>
-            <span className="source-tag">{entry.source}</span>
-          </span>
-          {compact && <span className="event-action">{action}</span>}
-          {entry.prior && (
-            <span
-              className="message-context"
-              title="发生于此 Flow 创建之前的历史内容"
-            >
-              此前交互
+        <ReadingHeader entry={entry} headerOnControl={continuation && !title}>
+          <div className="message-label">
+            <span className="message-identity">
+              <span>{entry.author}</span>
+              <span className="source-tag">{entry.source}</span>
             </span>
-          )}
-          {entry.deleted && (
-            <span className="message-context">已删除（保留历史版本）</span>
-          )}
-          <time>{new Date(entry.occurred_at).toLocaleString()}</time>
-        </div>
-        {title && <h3 className="message-title">{title}</h3>}
+            {compact && <span className="event-action">{action}</span>}
+            {entry.prior && (
+              <span
+                className="message-context"
+                title="发生于此 Flow 创建之前的历史内容"
+              >
+                此前交互
+              </span>
+            )}
+            {entry.deleted && (
+              <span className="message-context">已删除（保留历史版本）</span>
+            )}
+            {entry.kind === "thread" && (
+              <span className="message-context">
+                {entry.metadata.resolved ? "已解决" : "待解决"}
+                {entry.metadata.outdated ? " · 已过时" : ""}
+              </span>
+            )}
+            <time>{new Date(entry.occurred_at).toLocaleString()}</time>
+          </div>
+          {title && <h3 className="message-title">{title}</h3>}
+        </ReadingHeader>
         {toolGroup?.leader && (
           <button
             type="button"
@@ -646,6 +721,7 @@ export function ActivityView({
                   data-entry={result.key}
                   key={`${result.key}-${result.version}`}
                 >
+                  <ReadingHeader entry={result}>{null}</ReadingHeader>
                   <ActivityBody entry={result} flowId={flowId} framed={false} />
                   <EditedDiff entry={result} flowId={flowId} />
                 </blockquote>

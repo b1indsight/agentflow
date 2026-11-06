@@ -11,6 +11,8 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from app.contracts.console import ActivityItem, ActivityPage, ConsoleFailure, ContentPage
 from app.github.console import Observation
+from app.persistence.activity_selection import LATEST_ACTIVITY
+from app.persistence.activity_selection import display_body as _display_body
 from app.persistence.console import ConsoleStore
 from app.persistence.records import Row
 from app.persistence.repository import Repository
@@ -37,15 +39,6 @@ class ActivityCursor(BaseModel):
             raise ConsoleFailure("cursor_invalid") from error
 
 
-# GitHub effect receipts are transport metadata, not conversation text. This expression
-# stays in PostgreSQL so projections and paged reads never transfer an unbounded body.
-def _display_body(body: str, source: str) -> str:
-    return (
-        f"CASE WHEN {source}='worker' THEN {body} ELSE "
-        f"regexp_replace({body}, E'\\n\\n<!-- flowtool:effect:[0-9a-f]{{64}} -->$', '') END"
-    )
-
-
 _CURRENT_DISPLAY_BODY = _display_body("current.body", "current.source")
 _PREVIOUS_DISPLAY_BODY = _display_body("p.body", "p.source")
 
@@ -61,7 +54,7 @@ _PREVIOUS = (
     " ORDER BY p.updated_at DESC,p.version DESC LIMIT 1) END AS previous_version"
 )
 _SELECT = (
-    "key,version,source,kind,occurred_at,updated_at,observed_at,author,title,"
+    "key,version,read_revision,source,kind,occurred_at,updated_at,observed_at,author,title,"
     f"left({_CURRENT_DISPLAY_BODY},2000) AS body,length({_CURRENT_DISPLAY_BODY}) AS body_length,"
     "url,parent_key,deleted,metadata,"
     "(source!='flow' AND source!='worker' AND occurred_at<%s) AS prior," + _PREVIOUS
@@ -166,7 +159,33 @@ class ActivityStore(Repository):
                 )
         return True
 
+    def ensure_read_revisions(self, flow_id: int) -> None:
+        """Replay an old Flow's publication order once, under the same lock as append.
+
+        Each Flow commits independently. A failed or interrupted migration can resume;
+        callers wait for this Flow rather than receiving a fabricated zero unread count.
+        """
+        with self._db.connection() as connection:
+            missing = connection.execute(
+                "SELECT 1 FROM console_activity WHERE flow_id=%s AND read_revision IS NULL LIMIT 1",
+                (flow_id,),
+            ).fetchone()
+        if not missing:
+            return
+        with self._db.transaction() as tx, tx.connection() as connection:
+            connection.execute("SELECT 1 FROM console_flows WHERE flow_id=%s FOR UPDATE", (flow_id,))
+            versions = connection.execute(
+                "SELECT version FROM console_activity WHERE flow_id=%s AND read_revision IS NULL"
+                " ORDER BY version", (flow_id,),
+            ).fetchall()
+            for row in versions:
+                connection.execute(
+                    "UPDATE console_activity SET read_revision=console_read_revision(console_activity)"
+                    " WHERE flow_id=%s AND version=%s", (flow_id, row["version"]),
+                )
+
     def _head(self, flow_id: int) -> Row:
+        self.ensure_read_revisions(flow_id)
         with self._db.connection() as connection:
             row = connection.execute(
                 "SELECT activity_version,(facts->>'created_at')::timestamptz AS created_at"
@@ -208,11 +227,7 @@ class ActivityStore(Repository):
             and not 0 <= since <= snapshot
         ):
             raise ConsoleFailure("snapshot_invalid")
-        prefix = (
-            "WITH latest AS (SELECT DISTINCT ON (key) * FROM console_activity"
-            " WHERE flow_id=%s AND version<=%s AND source!='flow'"
-            " ORDER BY key,deleted DESC,updated_at DESC,version DESC) "
-        )
+        prefix = LATEST_ACTIVITY
         with self._db.connection() as connection:
             count = connection.execute(
                 prefix

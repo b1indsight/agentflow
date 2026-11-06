@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import time
 
 import httpx
@@ -16,6 +18,17 @@ from app.controler.config import ServerSettings
 
 class _PublicKeys(BaseModel):
     keys: list[dict[str, JsonValue]] = Field(min_length=1, max_length=16)
+
+
+class OwnerPrincipal(BaseModel):
+    """Stable namespace from verified Access claims, independent of email/devices."""
+
+    issuer: str
+    subject: str
+
+    @property
+    def owner_key(self) -> str:
+        return hashlib.sha256(json.dumps([self.issuer, self.subject]).encode()).hexdigest()
 
 
 class OwnerAccess:
@@ -39,7 +52,7 @@ class OwnerAccess:
     async def close(self) -> None:
         await self.client.aclose()
 
-    async def authenticate(self, token: str | None) -> None:
+    async def authenticate(self, token: str | None) -> OwnerPrincipal:
         """Reject before business I/O; only the signed assertion header is accepted."""
         headers = {"Cache-Control": "no-store"}
         settings = self.settings
@@ -62,11 +75,14 @@ class OwnerAccess:
         except (jwt.InvalidTokenError, TypeError, ValueError, OverflowError) as exc:
             raise HTTPException(401, "unauthorized", headers=headers) from exc
         email = claims.get("email")
-        if (claims.get("type") != "app" or not claims.get("sub")
+        subject, issuer = claims.get("sub"), claims.get("iss")
+        if (claims.get("type") != "app" or not isinstance(subject, str) or not subject.strip()
+                or not isinstance(issuer, str) or not issuer.strip()
                 or not isinstance(email, str)
                 or email.casefold() != settings.access_owner_email.casefold()
                 or "common_name" in claims):
             raise HTTPException(403, "forbidden", headers=headers)
+        return OwnerPrincipal(issuer=issuer, subject=subject)
 
     async def _key(self, kid: str) -> jwt.PyJWK:
         async with self._lock:
