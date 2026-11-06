@@ -822,7 +822,8 @@ function Conversation({
     const node = sentinel.current;
     const viewport = root.current;
     if (!node || !viewport) return;
-    const boundary = `${state.snapshot}:${rows.length}`;
+    // Folded groups can absorb a whole page without adding display rows or moving the sentinel.
+    const boundary = `${state.snapshot}:${state.next_cursor}`;
     if (automaticBoundary.current === boundary) return;
     let observer: IntersectionObserver | undefined;
     // Keep two screens ready, including when the mobile header changes the reading viewport.
@@ -830,7 +831,6 @@ function Conversation({
       observer?.disconnect();
       observer = new IntersectionObserver(
         (entries) => {
-          // A folded group can grow forever without moving the sentinel out of view.
           if (
             entries.some((entry) => entry.isIntersecting) &&
             automaticBoundary.current !== boundary &&
@@ -857,7 +857,7 @@ function Conversation({
     state.busy,
     state.error,
     state.has_more,
-    rows.length,
+    state.next_cursor,
   ]);
   return (
     <>
