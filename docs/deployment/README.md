@@ -111,11 +111,6 @@ Amp 的最终业务 JSON 通过 Schema 提示与现有 Pydantic/VCS 核验接收
 没有 session 时，沿用 executor 的一次性 start fallback。ARCHIVE 继续使用既有 workspace
 释放流程，不会远程删除或归档 Amp thread。
 
-临时 `--settings-file` 限制工具与本轮 MCP，但 workspace 设置优先级更高，因此 adapter 在执行前
-拒绝发现的 `.amp/settings.json` / `.amp/settings.jsonc`，不修改这些文件。机器或 workspace 的
-[managed settings](https://ampcode.com/docs/cli/settings#managed-settings) 仍可能覆盖/合并本地策略；
-运维必须核查专用 Amp 账户的插件、服务端 MCP 与 managed policy，不将 CLI 工具列表当作隔离边界。
-有效工具列表检查用于拒收不符合策略的执行结果，不保证在额外工具运行前阻止其副作用。
 执行期间不要从其他客户端并发继续同一 worker thread；手工续跑的公开历史在后续快照刷新后可见。
 
 历史导出单次最多 20 秒、2 MiB，最多两个并发；只缓存已脱敏的公开块，缓存至多 16 个 thread，
@@ -148,6 +143,37 @@ Compose 和 Kubernetes Worker 继续使用各自部署方式换镜像，没有�
 Kubernetes Server 的自动部署入口是部署主机独立端口上的仓库 Workflow runs Webhook，
 事件保存本地文件，不要求主机访问集群 PostgreSQL，详见 [Server 更新](server-update.md)。
 它与下文业务 GitHub App Webhook 的端口、secret 和持久化路径分开配置。
+
+### Skills 与 MCP 继承
+
+Amp/Codex 的 INITIAL、REVISION resume 和无 session 的 start fallback 都沿用 worker 专用
+账号、HOME、原生配置位置和任务 cwd。skills/MCP 由各 CLI 按原生规则发现；不复制 controler、
+当前对话或其他主机的配置，不分发 skills，也不挂载个人 HOME。所需配置和文件须事先放在
+worker 身份可访问的位置。Amp 不再提供替代用户配置的 `--settings-file`，保留
+`AMP_SETTINGS_FILE` 和 `.amp/settings.json[c]`；Codex 保留原有 HOME/CODEX_HOME 配置入口。
+恢复原生配置也会恢复其中的工具和插件策略，不能再依赖旧 worker 的固定工具白名单。
+
+两个后端继承自定义环境变量（如 `EXAMPLE_MCP_TOKEN`），但先清除 `FLOWTOOL_*`、`GH_*`、
+`GITHUB_*`、`GIT_*`、`SSH_*`，仅保留 Git 作者/提交者的 NAME、EMAIL；清除
+`AMP_CURRENT_THREAD_ID`、`AMP_THREAD_ID`、`CODEX_THREAD_ID`、`CLAUDECODE` 等父会话状态。
+随后注入本轮 assignment 的 Git/gh/MCP 能力；这些保留名称不能用作自定义 MCP 凭据。
+需要 GitHub 认证的自定义 MCP 应使用专用凭据配置，不能依赖原样继承个人 `GH_TOKEN`。
+环境过滤不改变独立 VCS 核验的最小环境，也不能阻止 full-access agent 读取磁盘或启动其他程序。
+
+`flow` 是 worker 保留的 MCP 名称。Amp 通过 `--mcp-config` 整项覆盖它，其他 server 不变：
+INITIAL 使用当前 endpoint 和 token 引用；无当前 broker 的 REVISION/fallback 使用
+`http://127.0.0.1:0/mcp` 替换旧 endpoint，并移除旧 token。固定 Amp 版本不支持 MCP 的
+`disabled` 字段，因此这不是原生“禁用”状态：CLI 会重试并显示 `flow` 连接错误，其他 MCP
+仍可连接。Codex 沿用 `enabled=false`。不要把已有自定义 server 命名为 `flow`。
+
+用户的工具禁用、MCP 权限与 workspace 审批继续交给原生 CLI；worker 不自动批准或覆写
+这些规则。配置损坏、缺凭据或必要工具被禁止时，不扩大权限或重放未知执行。
+运维仍须核查 [managed settings](https://ampcode.com/docs/cli/settings#managed-settings)、
+账户插件及服务端 MCP。CLI 列表不是运行期权限证明，旧 Amp thread 是否保留创建时工具限制
+尚未完成模型执行验收；升级不会主动重写旧 thread。
+自定义变量、配置文件和第三方工具输出中的秘密不保证被现有脱敏识别；只注入所需凭据，
+不要记录整份环境或 MCP headers，仍须专用账号、容器或 VM 隔离。
+更新并重启空闲 worker 后生效，无数据迁移；回退仅恢复原启动策略，不改写原生配置。
 
 ### 仓库准备与执行位置
 

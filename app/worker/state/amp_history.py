@@ -6,12 +6,10 @@ import asyncio
 import hashlib
 import json
 import os
-import tempfile
 import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 from app.contracts.conversation import (
@@ -26,7 +24,6 @@ from app.worker.execution.amp_process import (
     redact_amp_json,
     redact_amp_text,
     run_amp,
-    write_amp_settings,
 )
 
 MAX_EXPORT = 2 * 1024 * 1024
@@ -76,13 +73,10 @@ class AmpHistory:
             if cached is not None and time.monotonic() - cached.fetched_at < CACHE_SECONDS:
                 self._cache.move_to_end(session_id)
                 return cached
-        with tempfile.TemporaryDirectory(prefix="flowtool-amp-export-") as directory:
-            settings = write_amp_settings(Path(directory))
-            result = asyncio.run(run_amp(
-                ["threads", "export", session_id, "--settings-file", str(settings),
-                 "--log-file", os.devnull],
-                env=amp_environment(), timeout=EXPORT_TIMEOUT, max_stdout=MAX_EXPORT,
-            ))
+        result = asyncio.run(run_amp(
+            ["threads", "export", session_id, "--log-file", os.devnull],
+            env=amp_environment(), timeout=EXPORT_TIMEOUT, max_stdout=MAX_EXPORT,
+        ))
         if result.timed_out:
             raise ConversationFailure("query_timeout")
         if result.overflow:

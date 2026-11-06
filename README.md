@@ -181,8 +181,10 @@ Contents write，PR 通过 MCP `open_pr` 请求 controler 校验后创建。包�
 当前 Codex/Amp 接入均使用 wire17 / journal5 / ResultInbox v1，serve 与 worker 的协议版本必须匹配。
 通信统一为顶层控制和 typed call/result 列表；控制 ACK 仅确认接收，不表示业务提交。
 支持只读加载受限 v4 journal（内嵌 v14/v15 回执），正常保存时才升级，见 [Worker 更新](docs/deployment/worker-update.md#journal-直接前代兼容)。
-Amp 的临时 settings 不覆盖 managed policy；发现 workspace `.amp/settings.json[c]` 时拒绝执行，
-避免覆盖本轮工具/MCP 设置。完整配置与取消边界见[部署说明](docs/deployment/README.md)。
+两个后端继承 worker 专用账号及任务仓库中原生 CLI 可发现的 skills/MCP，以及其自定义环境变量；
+不复制当前对话或其他机器的配置。Amp 保留用户/workspace 设置与原生审批，仅覆盖保留名称 `flow`，
+首次执行使用当前 broker，修订时阻断旧 broker。control/worker、Git/GitHub 认证及父 agent 身份
+仍先过滤，再注入本轮能力。自定义秘密不保证全面脱敏；配置和隔离边界见[部署说明](docs/deployment/README.md#skills-与-mcp-继承)。
 
 `WorkerSettings` 不读取当前目录的 `.env`，worker 配置通过进程环境提供；默认要求 `wss://`，示例中的
 `FLOWTOOL_ALLOW_INSECURE_WORKER_WS=true` 仅用于开发。要运行 `danger-full-access` CodingAgent，必须在专用 OS account、

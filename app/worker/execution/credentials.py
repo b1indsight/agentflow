@@ -1,6 +1,23 @@
-"""Ephemeral Git credential environment shared by CodingAgent and remote-ref verification."""
+"""Agent environment inheritance and assignment-scoped Git credentials."""
+
+from collections.abc import Mapping
 
 from pydantic import SecretStr
+
+
+def inherited_agent_environment(source: Mapping[str, str]) -> dict[str, str]:
+    """Keep native CLI/MCP configuration without ambient task or Git authentication state.
+
+    Custom credentials deliberately remain available to skills and MCP servers. This
+    filtering does not isolate a full-access agent from the worker account's files.
+    """
+    identity = {"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"}
+    parent_agent = {"AMP_CURRENT_THREAD_ID", "AMP_THREAD_ID", "CODEX_THREAD_ID", "CLAUDECODE"}
+    return {
+        key: value for key, value in source.items()
+        if key not in parent_agent
+        and (key in identity or not key.startswith(("FLOWTOOL_", "GIT_", "GH_", "GITHUB_", "SSH_")))
+    }
 
 
 def git_credential_environment(push_token: SecretStr | None) -> dict[str, str]:

@@ -17,54 +17,19 @@ from app.domain.models import (
     CodingExecutionResult,
     SessionUnavailable,
 )
-from app.worker.execution.credentials import git_credential_environment
+from app.worker.execution.credentials import git_credential_environment, inherited_agent_environment
 from app.worker.execution.gh import github_environment
 
 CODEX_BIN = "codex"
-
-
-_CODEX_ENVIRONMENT_KEYS = frozenset(
-    {
-        "PATH",
-        "HOME",
-        "USER",
-        "LOGNAME",
-        "SHELL",
-        "LANG",
-        "LC_ALL",
-        "LC_CTYPE",
-        "TERM",
-        "TMPDIR",
-        "CODEX_HOME",
-        "OPENAI_API_KEY",
-        "CODEX_API_KEY",
-        "CODEX_ACCESS_TOKEN",
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "ALL_PROXY",
-        "NO_PROXY",
-        "http_proxy",
-        "https_proxy",
-        "all_proxy",
-        "no_proxy",
-        "SSL_CERT_FILE",
-        "SSL_CERT_DIR",
-        "REQUESTS_CA_BUNDLE",
-        "CURL_CA_BUNDLE",
-    }
-)
 
 
 def _codex_environment(
     source: Mapping[str, str] | None = None,
     context: CodingExecutionContext | None = None,
 ) -> dict[str, str]:
-    """Build a minimal environment with only the optional scoped push credential."""
+    """Inherit native CLI/MCP configuration, then inject only current task capabilities."""
 
-    values = os.environ if source is None else source
-    environment = {
-        key: value for key, value in values.items() if key in _CODEX_ENVIRONMENT_KEYS
-    }
+    environment = inherited_agent_environment(os.environ if source is None else source)
     if context is not None:
         environment.update(git_credential_environment(context.github.token if context.github else None))
         if context.mcp_token is not None:

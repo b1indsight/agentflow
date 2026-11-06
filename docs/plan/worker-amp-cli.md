@@ -6,6 +6,10 @@
 [#109](https://github.com/b1indsight/agentflow/pull/109) 均已合并。
 **Bookmark：** `feat/worker-amp-cli`。
 
+**后续变更：** [worker 继承现有 skills 与 MCP](#后续变更记录) 已实现并完成本地验证，
+沿用 [#128](https://github.com/b1indsight/agentflow/pull/128)，未部署；具体证据和验收限制见 [002]。
+上面的 PR 及下文既有证据属于原 Amp 适配；[001] 保留为后续变更的初始方案。
+
 ## 目标与范围
 
 为 worker 增加可选 Amp CLI 后端，沿用现有 `CodingAgent.start/resume` 和
@@ -96,3 +100,159 @@ INITIAL → REVISION → ARCHIVE 流程。默认仍为 Codex；一个 worker 固
   收窄脱敏职责和重复校验，明确模块/类名，删除容器配置文本断言。
 - 2026-10-22：#109 合并后对齐 main；按用户要求将本文件收敛为当前方案、证据和未修项，
   完整调研、初始计划和逐轮变更保留在[精简前记录](https://github.com/b1indsight/agentflow/blob/b14da113d1d64551b00f0dbdcc96b5ff0f20c706/docs/plan/worker-amp-cli.md)。
+
+## 后续变更记录
+
+### [001] — 2026-11-06 — worker 继承现有 skills 与 MCP（待批准）
+
+**阶段：** 方案待确认，尚未修改产品代码或测试。
+**Bookmark：** `feat/worker-environment-inheritance`，目标 `main`。
+**请求：** 用户要求“修改成继承现有环境的skill和mcp”，见
+[本次讨论](https://ampcode.com/threads/T-01a1af9f-e151-71e0-b63c-4f11d7aed73b)。
+本提案将替代前文“INITIAL 仅开放本轮 MCP、拒绝 workspace Amp 设置”的限制；原文保留为历史。
+
+#### 目标、范围与当前问题
+
+“现有环境”指启动 worker 的专用账号、HOME、原生 CLI 配置及任务仓库可访问的文件，
+不复制 controler 或当前对话的配置，不把个人 HOME 挂载到 worker。
+两个后端的 INITIAL、REVISION resume/fallback 都应保留该环境原有的 skills/MCP；
+用户原本禁用的工具、MCP 和原生审批规则继续生效。
+
+当前 Amp 每轮 `--settings-file` 替换用户配置，又禁用 skill、MCP 发现/调用工具并拒绝
+workspace 设置；仅删除 skill 开关不足以恢复继承。Codex 已保留 HOME/CODEX_HOME，
+但两个后端的环境白名单都会丢弃 `EXAMPLE_MCP_TOKEN` 一类自定义变量，造成配置可见、认证不可用。
+依据为 [`amp_process.py`](../../app/worker/execution/amp_process.py)、
+[`amp_agent.py`](../../app/worker/execution/amp_agent.py)、
+[`codex.py`](../../app/worker/execution/codex.py)，以及 Amp 的
+[配置文件规则](https://ampcode.com/docs/cli/settings)和
+[MCP 配置、环境替换及优先级](https://ampcode.com/docs/customize/mcp)。
+
+不改后端选择、模型、调度、UI、数据库、wire/journal 格式或交付权威；不新增依赖、继承开关、
+skill manifest、配置解析器或兼容层。trusted-host、进程监督、Schema/VCS 核验和失败不重放不变。
+
+#### 拟采用行为与实现位置
+
+1. **Amp 使用原生配置。** `AmpCodingAgent._run()` 不再传替代用户配置的临时
+   `--settings-file`；保留 `AMP_SETTINGS_FILE` 等原生配置入口。删除 `_workspace_settings()`
+   的一律拒绝及 `_outcome()` 的固定工具集合上限，保留同 session 完整终态、退出码和原生 shell
+   检查。不强制开启用户自己禁用的 skill、MCP 或工具，不自动批准 workspace MCP。
+2. **只覆盖保留名称 `flow`。** 通过原生 `--mcp-config` 合并当前 assignment 的 `flow`，
+   其他 server 保持原状；INITIAL 使用当前 endpoint/token，REVISION/fallback 显式禁用旧 broker。
+   配置只含环境变量引用，token 不进入 argv 或配置文件。CLI 同名 MCP 优先级高于 workspace、
+   user 和 skill；具体 JSON 形状、禁用和整项覆盖语义在实现前校准。
+   Codex 保留现有 `_mcp_args()` 的同名覆盖方式。
+3. **环境改为继承后过滤受控项。** 在现有
+   [`credentials.py`](../../app/worker/execution/credentials.py) 内增加一个共享函数
+   `inherited_agent_environment(source: Mapping[str, str]) -> dict[str, str]`，供
+   `amp_environment()` 和 `_codex_environment()` 使用，避免两套规则漂移：
+   - 保留 HOME、PATH、原生配置位置、CLI 登录变量，以及 MCP/skill 所需的自定义变量；
+     Amp 的更新检查仍由 `AMP_SKIP_UPDATE_CHECK=1` 关闭。
+   - 先移除全部 ambient `FLOWTOOL_*`、`GH_*`、`GITHUB_*`，以及 Git 凭据/配置/仓库重定向、
+     askpass、SSH 认证入口；保留既有 Git 作者/提交者 NAME、EMAIL 语义。
+   - 移除父 agent 的运行时 thread 身份变量，例如 `AMP_CURRENT_THREAD_ID`，不继承父会话身份。
+     不按整个 vendor 前缀一律删除，否则会误删原生配置入口或合法 MCP 变量。
+   - 最后沿用 context 注入本轮 push/MCP token、Git helper 和独立 `gh` 配置；无 context 时
+     不带回上轮能力。上述保留名称不能用作用户自定义 MCP 凭据变量。
+4. **去掉旧策略残留。** 删除编码路径的临时全量 settings 和 `AMP_TOOLS` 固定集合，
+   同步处理 `AmpHistory._refresh()` 对旧 settings helper 的引用；历史仍只调用原生 export，
+   不执行模型请求，不改变并发、缓存、预算与公开块投影。更新 README、部署说明和架构说明。
+5. **凭据和日志边界。** 保持已有受控凭据脱敏，不记录整份环境、用户配置或 MCP headers；
+   不为任意变量名新增启发式密钥识别框架。现有脱敏不保证识别自定义变量、配置文件或第三方
+   MCP 输出里的所有秘密，这一限制必须写入部署说明，不能把继承功能宣传为隔离或全面防泄漏。
+
+不增加新的数据类型、持久化字段或公共 API；除共享环境函数外，优先修改/删除现有函数。
+环境过滤只用于 agent 子进程，不放宽独立 VCS 核验进程的最小环境。
+
+#### 取舍、风险与错误处理
+
+- **选择原生配置 + 单项 MCP 覆盖。** 自行读取 JSON/JSONC、复制 skills 或模拟配置优先级会
+  重复 CLI 的职责；继续使用临时全量 settings 会漏掉用户配置。只删除禁用项仍不能保留自定义
+  MCP 环境变量；完全不做环境过滤又会带入 control/worker 凭据和旧 assignment 能力。
+- **继承范围明确扩大。** Amp 原生工具/插件策略也随配置生效，可能比旧白名单开放更多工具；
+  自定义 MCP 和 skill 能看到继承的变量。过滤表无法识别任意名字的控制密钥，不能保护磁盘上
+  的密钥或阻止 full-access agent 另行启动程序，仍须专用账号或容器/VM。
+- **GitHub 例外保留。** `GH_TOKEN`/`GITHUB_*` 不原样继承；依赖这些变量的 MCP 必须使用
+  专用凭据配置。Git/gh 的受控执行继续使用 assignment capability，不回退个人登录。
+- **原生限制不绕过。** 用户或 managed policy 禁止 `flow`/shell、workspace MCP 未批准、
+  原生配置损坏、MCP 凭据失效时，保留 CLI 的失败或待审批行为；不改全局配置、不自动批准、
+  不换账号、不扩大权限、不静默重跑。对旧 Amp thread 是否保留创建时工具限制进行单独校准，
+  不承诺仅更新 worker 就会改写既有 thread 的工具集。
+
+#### 实施顺序与验收
+
+1. 用户确认本方案及上述继承/凭据边界后，先用只读 CLI 和临时环境校准配置合并；
+   本机 CLI 与 Dockerfile 固定版本分开记录，不能用新版本结果代替发布版本。
+2. 更新现有 Amp start/resume 测试与 Codex 环境测试，证明自定义 MCP 变量可达、原生配置
+   不被替换、workspace 配置不被拒绝、额外工具不导致结果失败；同场景旧实现应失败。
+3. 实现共享过滤、Amp 原生配置和当前 `flow` 覆盖，清理 history helper 耦合及过时文档。
+4. 验证首次启用及修订禁用 `flow`、保留其他 MCP、保留用户禁用/审批策略；使用隔离的
+   fixture HOME、user/workspace JSONC、可发现的测试 skill 和无外部副作用的本地 MCP。
+   用真实 CLI 的 skill/MCP 列表及必要的协议发现检查实际加载与变量替换，不调用真实外部工具，
+   不通过 `amp -x` 或 `threads continue` 启动 agent 作为测试捷径。
+5. 运行相关 driver/history/worker 执行回归、`uv run ruff check app tests`、
+   `uv run mypy app tests`，并按 CI 构建步骤检查打包。没有 UI 改动，不增加浏览器验收。
+   推送产品代码前执行仓库 review gate。
+
+消融只针对必要边界：恢复临时 settings 应使继承用例失败；去掉环境过滤应被受控凭据回归捕获；
+去掉 revision 的 `flow` 禁用应暴露旧 broker。验证通过后只保留公共执行合同的代表性测试，
+不为简单字典过滤逐项增加永久测试。无数据迁移；更新并重启空闲 worker 后生效，存量 Flow
+不跨后端迁移。回退此变更恢复原启动策略，不删除或重写原生配置。
+
+#### 当前证据、待确认与未实施项
+
+- 已 fetch 并核对最新 `origin/main`；与本需求有关的 Amp/Codex 源码和原 feature record
+  与当前检出一致。原工作区的 console 改动未动，方案放在独立 jj workspace。
+- 已核对本机 Amp CLI help 和官方文档；没有执行 worker 编码任务、修改个人配置或调用 MCP 业务工具。
+  真实合并、disabled 行为、skill 加载和认证环境验收均在实施阶段完成，目前不算已验证。
+- 初稿咨询实际使用 `claude-opus-5-5`，初始化及响应模型一致，tools/MCP 均为空，进程成功；
+  主代理核对并删去 vendor 前缀白名单、启发式 secret helper 和新增事后 flow 工具检查等额外机制。
+- **批准前需确认：** 是否接受原生 skills/MCP/工具策略及自定义环境变量继承，同时保留上述
+  flow、control/worker、Git/GitHub 凭据例外；现有信息不需要新增产品选项。
+- **实现中待校准：** 固定 CLI 的 MCP overlay 形状与替换规则、旧 thread 工具集、原生审批
+  表现，以及历史 export 去掉临时 settings 后仍只读的行为。证据不满足时报告限制，不造兼容层。
+- **交付状态：** 本条仅为方案；尚未改实现或测试，尚未部署。配置分发、跨机器 skills 同步、
+  通用 secret 检测和第三方 MCP 的授权管理不在本次范围内。
+
+### [002] — 2026-11-06 — 原生配置继承实现与 CLI 校准
+
+**触发与范围：** 实施 [001]，替代原有全量 settings、workspace 拒绝及环境白名单；
+保留 trusted-host、Schema/VCS、逐轮 Git/gh 能力、进程监督与已有脱敏。修改仅在独立
+`worker-environment-inheritance` workspace，原检出的 console 工作未动。
+
+**实际实现：** `credentials.inherited_agent_environment` 统一两个后端的受控变量过滤；
+`amp_agent` 仅用 `--mcp-config` 覆盖 `flow`，接受原生 skill/MCP 等额外工具；
+`amp_process` 删除全量 settings helper，`AmpHistory` 直接使用原生只读 export。
+Codex 的 flow 覆盖和禁用参数不变；两个后端都保留自定义 MCP 变量。同步更新 README、
+架构、部署说明及 changelog；无配置开关、JSONC 解析器、依赖或协议变更。
+
+**决定与取舍（已实现）：** 固定 Amp `0.0.1792555249-g702cd1` 与本机
+`0.0.1793937652-gdc5d48` 都接受平铺的 `{"flow": {...}}` overlay，并整项替换同名
+server。`mcp list --json` 会忽略未知字段，不能证明运行期 schema 有效；实际 `mcp doctor`
+在设置 `disabled: true` 后仍连接 fixture server（`disabled-schema.log`）。因此用
+`http://127.0.0.1:0/mcp` 和无旧 token 实现修订轮旧 broker
+不可用，取代 [001] 尚待校准的“显式禁用”形式。选择端口零避免复用旧 endpoint，且不引入
+假 MCP 子进程或配置合并器；代价是 CLI 会重试并显示连接错误，不宣称原生 disabled 状态。
+
+**验证与消融：** 证据汇总见[本次验证记录](https://ampcode.com/artifacts/worker-skills-mcp-57f5fb2b-f3cd-413e-9434-e3dc3ee86d83)。
+本地原始日志保存在 `.amp/in/artifacts/worker-environment-inheritance/`，不随代码发布。
+
+| 检查 | 实际结果与复现条件 |
+| --- | --- |
+| 回归先失败后通过 | `pytest tests/test_amp_driver.py tests/test_codex_driver.py -q`：旧实现拒绝 workspace 设置并丢弃自定义变量；新实现通过。随后加入已有 history 回归一同通过。日志 `before-tests.log`、`targeted-tests.log` |
+| 原生 CLI 校准 | 两个版本分别使用 fixture HOME/XDG、`AMP_SETTINGS_FILE` JSONC、任务仓库 JSONC、全局/Claude/repo skills、本地 stdio MCP 与真实 WorkerMCP。执行 `skills list`、`mcp list --json`、`mcp doctor`、`tools list`；skill 可发现、ambient MCP 收到测试变量、当前 flow 的 Bearer 环境替换认证成功。仅协议发现，未调用业务工具 |
+| 原生权限 | `mcp doctor` 保留 user `amp.mcpPermissions` 的 reject；workspace server 仍 awaiting approval，未启动其子进程；未写个人配置或批准任何 server |
+| 去掉 flow overlay | 同一 fixture 下带 overlay 不启动旧 flow；去掉 overlay 后旧 flow 的 stdio 服务被启动。两版本结果一致，保留单项覆盖。日志 `cli-calibration.log` |
+| 恢复旧 settings | 用父提交的真实 `write_amp_settings` helper 与同一 fixture 执行 `mcp list --json`：恢复 `--settings-file` 后 ambient server 消失；原生配置保留它，故删除替换策略 |
+| 去掉环境过滤 | 在临时进程中将两处共享 helper 替换为 `dict`，运行既有环境回归；两个后端都暴露受控变量并失败，故保留共享过滤。无产品文件改动，日志 `ablation.log` |
+| 本地验收 | 临时 PostgreSQL 17 上全量 `pytest -q --tb=short` 通过，无跳过；`ruff check app tests`、`mypy app tests` 通过。`python scripts/build_console.py`、`uv build --no-sources` 及 wheel 内静态入口检查通过 |
+
+**证据边界：** 全量测试使用本机 Python 3.13，打包使用本机 Node 25，CI 分别使用 Python
+3.12、Node 24；本机无 Docker，未验证 Linux 运行。本次没有启动真实模型或调用真实 GitHub
+业务工具，没有验证旧 Amp thread 的创建期工具集是否刷新。`tools list` 在设置
+`amp.tools.disable` 后仍显示该工具，不能作为运行期禁用生效的证据；worker 不覆写这些设置，
+仍由原生 CLI 执行。虚拟 Amp key 对账户 MCP/export 返回预期 401；export 失败路径没有启动
+fixture MCP，但成功导出及账户端 MCP 未在本次重新实测。历史投影/分页/脱敏由既有回归覆盖。
+上述限制已写入部署说明；不增加兼容或权限绕过机制。
+
+**交付边界：** 实现和本地检查完成，review/CI 状态以同一 [PR #128](https://github.com/b1indsight/agentflow/pull/128)
+为准；未合并、未部署、未修改运行中的 worker。更新并重启空闲 worker 后使用新行为。

@@ -12,12 +12,10 @@ from pydantic import BaseModel, ConfigDict, StrictBool, StrictStr, TypeAdapter, 
 from app.contracts.conversation import SessionId
 from app.domain.models import CodingExecutionContext, CodingExecutionResult
 from app.worker.execution.amp_process import (
-    AMP_TOOLS,
     AmpProcessResult,
     amp_environment,
     redact_amp_text,
     run_amp,
-    write_amp_settings,
 )
 from app.worker.execution.gh import github_environment
 
@@ -37,20 +35,6 @@ class _Result(BaseModel):
     is_error: StrictBool
     result: StrictStr | None = None
     error: StrictStr = ""
-
-
-def _workspace_settings(cwd: Path) -> None:
-    """Refuse repository settings that take precedence over our invocation policy.
-
-    Managed Amp policy still belongs to the operator. CLI settings/tool lists do
-    not isolate a full-access agent from its account, filesystem or network.
-    """
-    for directory in (cwd, *cwd.parents):
-        if any((directory / ".amp" / name).exists() or (directory / ".amp" / name).is_symlink()
-               for name in ("settings.json", "settings.jsonc")):
-            raise ValueError("workspace Amp settings override worker policy; use an isolated worker workspace")
-        if (directory / ".git").exists():
-            break
 
 
 def _outcome(process: AmpProcessResult, expected: str | None) -> CodingExecutionResult:
@@ -75,8 +59,6 @@ def _outcome(process: AmpProcessResult, expected: str | None) -> CodingExecution
                 if not init.session_id.startswith("T-") or (expected and init.session_id != expected):
                     raise ValueError("Amp returned a different thread")
                 session_id = init.session_id
-                if not set(init.tools) <= AMP_TOOLS | {"mcp__flow__open_pr"}:
-                    raise ValueError("Amp effective tool set exceeds worker policy")
                 if "shell_command" not in init.tools:
                     raise ValueError("Amp thread has no native shell; cannot execute coding tasks")
             elif kind == "result":
@@ -142,22 +124,24 @@ class AmpCodingAgent:
     ) -> CodingExecutionResult:
         if not self.trusted_host:
             raise RuntimeError("Amp trusted-host execution requires FLOWTOOL_TRUSTED_HOST_EXECUTION=true")
-        _workspace_settings(cwd)
         url = context.mcp_url if context else None
         token = context.mcp_token if context else None
         if (url is None) != (token is None):
             raise ValueError("worker MCP requires an endpoint and scoped token together")
+        # The pinned CLI has no per-server disabled flag. Port zero replaces any
+        # saved/user flow endpoint without exposing an old broker or its token.
+        mcp = {"flow": ({"url": url, "headers": {"Authorization": "Bearer ${FLOWTOOL_MCP_TOKEN}"}}
+                        if url is not None else {"url": "http://127.0.0.1:0/mcp"})}
         if output_schema is not None:
             prompt += ("\n\nReturn exactly one JSON value matching this JSON Schema as your final answer. "
                        "Do not wrap it in Markdown or add explanatory text.\n" + output_schema.read_text())
         with tempfile.TemporaryDirectory(prefix="flowtool-amp-") as directory:
             run_directory = Path(directory)
-            settings = write_amp_settings(run_directory, mcp_url=url)
             environment = amp_environment(context=context)
             if context and context.github:
                 environment.update(github_environment(context.github, run_directory, environment))
             args = (["threads", "continue", session_id] if session_id else []) + [
-                "--settings-file", str(settings), "--executor", "local", "--mode", "low",
+                "--mcp-config", json.dumps(mcp), "--executor", "local", "--mode", "low",
                 "--visibility", "private", "--no-ide", "--no-notifications",
                 "--execute", "--stream-json", "--no-archive-after-execute", "--log-file", os.devnull,
             ]
