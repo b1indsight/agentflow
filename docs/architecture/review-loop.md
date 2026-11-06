@@ -95,7 +95,12 @@ note/reason；control 拒绝未知、重复、跨版本或互相冲突的引用�
 重新核验 repo/ref 后最多 start 一次；其他错误和不确定结果保留反馈并暂停。journal 在进程启动前记录
 resume/fallback 阶段、一次性兜底消耗和 invocation 结果。重启时没有 terminal 的 started job 不自动重跑。
 `Started` 与 revision_cycles 同事务提交，fallback/重放不增额度；新的显式 retry job 消耗新额度，保留原 worker binding。
-成功接受新 session 后才更新 generation。全过程受 CodingAgent 总时限约束，超时回收并等待 CLI/VCS 进程组退出。
+成功接受新 session 后才更新 generation。每次 Amp/Codex 调用按 stdout/stderr 非空新读入
+刷新空闲期限（包括半行、工具调用/结果和进度）；连续无输出达到配置值才超时，没有修订外层总时限。
+心跳、历史查询和 EOF 不续期；静默工具仍可能超时，持续诊断也算活动。历史导出仍有 20 秒
+总时限，VCS 单命令仍有 30 秒总时限；取消和超时保留各自的进程回收。长任务可能超过
+GitHub capability 有效期，不自动续签凭据。INITIAL 失败保留 adapter 的安全详情与
+`execution` 阶段，controler 使用实际阶段和详情，不猜测后端或把执行错误一律标作 VCS。
 真实 GitHub/Codex 两轮 resume 和 start 兜底 smoke 尚未执行，完整 M2 仍待验收。
 
 ### 原线程回复与 resolve（F4）
@@ -157,7 +162,8 @@ GitHub 没有条件式 resolve 事务，刷新与 mutation 之间的竞态仍可
 | `FLOWTOOL_JUDGE_MODEL` / `FLOWTOOL_JUDGE_API_KEY` | 未配置 | control 专用 provider:model 与凭据；未配置时 wait |
 | `FLOWTOOL_JUDGE_API_BASE` | provider 默认 | 可选模型 API 地址 |
 | `FLOWTOOL_JUDGE_TIMEOUT_SECONDS` | 60 | 包含启动和模型调用的父进程时限 |
-| `FLOWTOOL_CODEX_RUN_TIMEOUT_SECONDS` | 1200 | 单次 Codex timeout |
+| `FLOWTOOL_CODEX_RUN_TIMEOUT_SECONDS` | 1200 | Codex 连续无新 stdout/stderr 输出的空闲秒数，正有限值 |
+| `FLOWTOOL_AMP_RUN_TIMEOUT_SECONDS` | 1200 | Amp 连续无新 stdout/stderr 输出的空闲秒数，正有限值 |
 | `FLOWTOOL_MAX_REVISION_CYCLES` | 20 | 每 attempt 的修订次数限制 |
 
 PostgreSQL 自动化覆盖入口回滚、并发领取、重启、批次内外版本、删除、wait 接续、强信号授权、

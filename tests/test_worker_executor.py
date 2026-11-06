@@ -1,6 +1,7 @@
 import shutil
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -167,6 +168,22 @@ async def test_initial_exit_zero_without_a_declared_backend_is_a_failure(
     assert result.failure_stage == "result"
     assert result.failure_detail == "missing VCS backend"
     assert "missing VCS backend" in result.last_message
+
+
+@pytest.mark.parametrize("detail", ["Amp: no new stdout/stderr for 1200s; execution timed out", None])
+async def test_initial_preserves_execution_failure_details(tmp_path, initial_workspace, detail):
+    # INITIAL previously discarded the adapter's safe diagnostic before terminal persistence.
+    agent = RecordingAgent()
+    agent.start = AsyncMock(return_value=CodingExecutionResult("session-1", "", 124, detail))
+    task = _assignment().task.model_copy(update={"repo_identity": "worker-1:owner/repo"})
+    result = await WorkerExecutor(
+        tmp_path, agent, worker_id="worker-1", state=initial_workspace,
+    ).execute(task, assignment_secret(), tool_caller=RecordingToolCaller())
+    assert result.exit_code == 124
+    assert result.failure_stage == "execution"
+    assert result.failure_detail == (
+        detail or "CodingAgent exited unsuccessfully; execution may have occurred"
+    )
 
 
 @pytest.mark.parametrize("problem", ["missing-gh", "expired", "mismatch", "clone-failure", "capacity"])

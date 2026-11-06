@@ -1,11 +1,12 @@
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
 
 from app.contracts.conversation import ConversationFailure, HistoryQuery
-from app.worker.execution.amp_process import AmpProcessResult
+from app.worker.execution.amp_process import AmpProcessResult, run_amp
 from app.worker.state import history
 from app.worker.state.amp_history import AmpHistory
 from app.worker.state.history import CodexHistory
@@ -164,6 +165,22 @@ def test_history_refuses_special_files_and_racing_directory_symlink(tmp_path: Pa
     (root / "link").symlink_to(outside, target_is_directory=True)
     with pytest.raises(OSError):
         reader._open(root / "link" / "data")
+
+
+def test_amp_export_keeps_total_deadline_despite_continuous_progress(monkeypatch):
+    # A slow export must not consume an unlimited history request budget.
+    monkeypatch.setattr("app.worker.execution.amp_process.AMP_BIN", sys.executable)
+    monkeypatch.setattr("app.worker.state.amp_history.EXPORT_TIMEOUT", 0.4)
+    payload = json.dumps({"id": AMP_SESSION, "messages": []})
+    script = ("import os,time\nfor _ in range(14):\n os.write(2,b'progress'); time.sleep(.05)\n"
+              f"print({payload!r})")
+
+    async def export(*args, **kwargs):
+        return await run_amp(["-c", script], **kwargs)
+
+    monkeypatch.setattr("app.worker.state.amp_history.run_amp", export)
+    with pytest.raises(ConversationFailure, match="query_timeout"):
+        AmpHistory().query(HistoryQuery(session_id=AMP_SESSION))
 
 
 def test_amp_history_maps_public_blocks_and_invalidates_edited_prefix(monkeypatch) -> None:

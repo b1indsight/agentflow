@@ -37,7 +37,10 @@ worker 也没有 App/DB/Cloudflare Secret。基础 NetworkPolicy 禁止 worker �
 它不是域名级模型执行隔离，实际策略行为须在目标 CNI 验证。
 
 worker 模板显式保持 `FLOWTOOL_CODING_AGENT=codex`，并为可选 Amp 设置
-`FLOWTOOL_AMP_RUN_TIMEOUT_SECONDS=1200`。只在 worker 已 drain、没有活跃或未知执行时，才在
+`FLOWTOOL_AMP_RUN_TIMEOUT_SECONDS=1200`，表示连续无新 stdout/stderr 输出的空闲上限；
+Codex 使用 `FLOWTOOL_CODEX_RUN_TIMEOUT_SECONDS`，同样默认 1200，两者均要求正有限值。
+持续输出可超过 20 分钟，心跳和历史查询不续期；静默工具及凭据到期等限制见
+[本机部署说明](README.md)。只在 worker 已 drain、没有活跃或未知执行时，才在
 自己的受控 overlay 中切换为 `amp`；不会为未知续跑自动重跑。Amp adapter 固定使用 `--mode low`。
 Amp CLI 只在 worker
 镜像中，固定版本和校验依据见 [Docker 镜像](docker.md#镜像发布与版本)。`/home/flowtool` 是

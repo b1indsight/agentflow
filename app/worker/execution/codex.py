@@ -19,6 +19,7 @@ from app.domain.models import (
 )
 from app.worker.execution.credentials import git_credential_environment, inherited_agent_environment
 from app.worker.execution.gh import github_environment
+from app.worker.execution.idle import wait_for_inactivity
 
 CODEX_BIN = "codex"
 
@@ -166,19 +167,52 @@ class CodexAgent:
                 cwd=cwd,
                 start_new_session=True,
             )
-            try:
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self.timeout)
-            except TimeoutError:
-                logger.error("codex run timed out after {}s", self.timeout)
-                return CodingExecutionResult(session_id=session_id, last_message="", exit_code=124)
-            finally:
-                # Reap the group before removing its wrapper/config, including surviving children
-                # after a successful CLI exit. Cancellation must propagate only after this step.
+            stdout, stderr = bytearray(), bytearray()
+            loop = asyncio.get_running_loop()
+            last_activity = loop.time()
+
+            async def read(stream: asyncio.StreamReader | None, buffer: bytearray) -> None:
+                nonlocal last_activity
+                assert stream is not None
+                while chunk := await stream.read(65536):
+                    last_activity = loop.time()
+                    buffer.extend(chunk)
+
+            tasks = [asyncio.create_task(read(proc.stdout, stdout)),
+                     asyncio.create_task(read(proc.stderr, stderr)),
+                     asyncio.create_task(proc.wait())]
+            io = asyncio.gather(*tasks)
+
+            async def cleanup() -> None:
+                # Reap the group before removing its wrapper/config, including surviving children.
                 try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                await proc.wait()
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    # Detached descendants may hold the pipes open even after the CLI exits.
+                    await asyncio.wait_for(proc.wait(), timeout=5)
+                finally:
+                    for task in tasks:
+                        if not task.done():
+                            task.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                    await asyncio.gather(io, return_exceptions=True)
+
+            try:
+                await wait_for_inactivity(io, timeout=self.timeout, last_activity=lambda: last_activity)
+            except TimeoutError:
+                timeout_detail = f"Codex: no new stdout/stderr for {self.timeout:g}s; execution timed out"
+                logger.error(timeout_detail)
+                return CodingExecutionResult(session_id=session_id, last_message="", exit_code=124,
+                                             failure_detail=timeout_detail)
+            finally:
+                stopping = asyncio.create_task(cleanup())
+                try:
+                    await asyncio.shield(stopping)
+                except asyncio.CancelledError:
+                    await stopping
+                    raise
 
             jsonl = stdout.decode(errors="replace")
             sid = _parse_thread_id(jsonl)

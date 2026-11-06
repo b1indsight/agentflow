@@ -92,7 +92,16 @@ FLOWTOOL_EXECUTION_ISOLATION=dedicated-account
 # 默认 codex；仅在该空闲 worker 明确采用 Amp 时改为 amp。
 FLOWTOOL_CODING_AGENT=codex
 FLOWTOOL_AMP_RUN_TIMEOUT_SECONDS=1200
+FLOWTOOL_CODEX_RUN_TIMEOUT_SECONDS=1200
 ```
+
+两个 `*_RUN_TIMEOUT_SECONDS` 均为编码的**空闲**秒数，默认 1200，必须为正有限值。
+直接 CLI stdout/stderr 读到非空新数据即续期（包括半行、工具调用/结果和进度）；连续
+20 分钟无新输出才终止，持续输出没有编码总时限。worker 心跳、历史查询、EOF 和进程存活
+不续期；静默工具仍可能超时，持续诊断输出也算活动。历史导出 20 秒、VCS 单命令 30 秒
+的总时限不变。活跃任务可能超过 GitHub capability 有效期；本功能不自动续签凭据。
+更新 worker 并在空闲时重启后生效；controler 也需更新才能显示准确的执行阶段和失败原因。
+推荐先更新 controler，或同步更新两端；无需数据迁移，不自动重试已失败的 Flow。
 
 本文的明文 WS 只用于同机 loopback 联调；跨主机连接需要 WSS，不通过公开的 webhook 域名连接 worker。
 `dedicated-account` 必须对应已建立的真实账号边界。Codex 所需认证在该 worker 账号下独立准备，

@@ -10,6 +10,10 @@
 沿用 [#128](https://github.com/b1indsight/agentflow/pull/128)，未部署；具体证据和验收限制见 [002]。
 上面的 PR 及下文既有证据属于原 Amp 适配；[001] 保留为后续变更的初始方案。
 
+**当前变更：** [003] 的空闲超时与失败诊断方案已按 [004] 实现，沿用
+[#131](https://github.com/b1indsight/agentflow/pull/131)，尚未部署。原提案保留为历史，
+实际实现、验证和限制见 [004]。
+
 ## 目标与范围
 
 为 worker 增加可选 Amp CLI 后端，沿用现有 `CodingAgent.start/resume` 和
@@ -256,3 +260,241 @@ fixture MCP，但成功导出及账户端 MCP 未在本次重新实测。历史�
 
 **交付边界：** 实现和本地检查完成，review/CI 状态以同一 [PR #128](https://github.com/b1indsight/agentflow/pull/128)
 为准；未合并、未部署、未修改运行中的 worker。更新并重启空闲 worker 后使用新行为。
+
+### [003] — 2026-11-06 — 编码空闲超时与失败诊断（待批准）
+
+**阶段：** 方案待确认，尚未修改产品代码或测试。
+**Bookmark：** `fix/worker-idle-timeout`，目标 `main`。
+**PR：** [#131](https://github.com/b1indsight/agentflow/pull/131)；本次计划与后续实现使用同一个 PR。
+**需求：** 用户要求修复错误提示，并将 20 分钟上限改为“最后一次活动之后，连续
+20 分钟没有任何新活动才触发”，见[本次讨论](https://ampcode.com/threads/T-01a1af9f-e151-71e0-b63c-4f11d7aed73b)。
+本条提案替代原方案的编码总时限约定，并处理“已知问题”第 2 项；其他隔离、继承和交付边界不变。
+
+#### 动机、目标与范围
+
+Flow 3 / job 14 达到默认 1200 秒时被终止，退出码为 124；当时已有本地实现提交，
+正在等待审查，尚未完成 push 和 `flow.open_pr`。
+[运行证据与排查](https://ampcode.com/artifacts/worker-skills-mcp-57f5fb2b-f3cd-413e-9434-e3dc3ee86d83)。
+当前 Amp、Codex 各有绝对运行时限，REVISION 还套有相同长度的外层 deadline。
+INITIAL 丢弃 adapter 的 `failure_detail`，controler 又把后端名称写死为 `codex`、
+将所有失败阶段标作 VCS，导致实际失败原因不清楚。
+
+本次覆盖两个 CodingAgent 后端的 INITIAL、REVISION resume/fallback：持续有新活动即可
+继续执行，连续静默达到配置值才超时。默认仍为 1200 秒，不通过提高默认值解决问题。
+不改模型、任务调度、skills/MCP 继承、wire/journal/数据库格式或 GitHub 操作权威；
+不新增依赖、自动重试、活动持久化、CPU/文件变化探测或通用进程管理框架。
+
+#### 可观察活动与用户行为
+
+- **活动来源：** 直接 CLI 的 stdout 或 stderr 读到非空新数据；包括 CLI 传出的模型消息、
+  工具调用、工具结果和进度输出。半行或分块数据同样计入，不等待完整 JSON/换行。
+- **计时起点：** CLI 成功启动时使用单调时钟开始计时，每次读到新数据刷新期限。
+  进程首次始终无输出，也在一个空闲窗口后终止。
+- **不续期：** stdin 写入、EOF、worker WebSocket 心跳、历史查询、轮询、进程仅仅存活，
+  以及未被 CLI 转发的 broker/文件活动。不会注入合成心跳使卡住的代理永久存活。
+- **例子：** 第 19 分钟有新工具结果，再等连续 20 分钟无输出才超时；持续有输出的任务
+  即使运行 50 分钟也不会因本次编码时限被终止。先持续活动、后静默时，从最后一次输出计时。
+- **明确限制：** stdout/stderr 是可观察活跃度，不等于任务取得有效进展；持续诊断/重试日志
+  也会续期。反之，子工具若 20 分钟没有任何输出被 CLI 转发，仍会触发空闲超时。
+  本次不解析各 vendor 的私有日志或推断静默工具是否仍在做有效工作。
+- **失败结果：** 空闲超时仍返回 124，并明确说明后端、连续无新输出及配置时长。
+  初始失败显示准确的 `execution` 阶段和安全详情，不再误标 Codex 或 VCS；
+  没有 adapter 详情时保留中性失败提示，不将异常退出误判为成功。
+
+#### 最小实现与接口
+
+1. **共享空闲等待，不共享整套进程监督。** 在
+   `app/worker/execution/idle.py` 增加一个供两个 adapter 使用的内部函数：
+
+   ```python
+   async def wait_for_inactivity[T](
+       io: asyncio.Future[T], *, timeout: float, last_activity: Callable[[], float],
+   ) -> T:
+       ...
+   ```
+
+   `io` 是调用方拥有的 stdout/stderr/进程等待组合 future；`timeout` 是正有限空闲秒数；
+   `last_activity` 返回与事件循环时钟同源的最近读到数据时间。函数使用剩余空闲时间等待，
+   每次唤醒重新计算；io 完成时返回结果或传播原异常，只有 io 未完成且窗口耗尽才抛
+   `TimeoutError`。它不拥有进程或取消 io，清理由原调用方负责。无需新类或持久化字段。
+
+2. **Amp 编码与历史导出显式区分。** `run_amp` 保持已有参数和结果类型，新增一个关键字参数：
+
+   ```python
+   async def run_amp(
+       args: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None,
+       input_text: str | None = None, timeout: float = 1200,
+       max_stdout: int = 8 * 1024 * 1024,
+       timeout_kind: Literal["total", "idle"] = "total",
+   ) -> AmpProcessResult:
+       ...
+   ```
+
+   `AmpCodingAgent._run()` 显式选择 `idle`；两个 reader 更新同一个最近活动时间。
+   `AmpHistory._refresh()` 继续选择总时限，保持现有 20 秒 export 上限及查询预算，
+   持续输出也不能使历史请求无限延长。保留 Amp 字节上限、完整终态检查、脱敏与回收链；
+   超时原因含 `self.timeout`，不靠解析错误文案决定业务分支。
+
+3. **Codex 按流读取。** `CodexAgent._run()` 用两个 reader 和进程等待替代一次性
+   `communicate()`，复用上述空闲等待函数，保留当前 stdout/stderr 解析、最终答案文件、
+   session 校验和已证明的执行前拒绝 fallback。超时返回明确的空闲诊断；所有退出路径
+   都回收进程并取消/等待 reader，不能因后代持有管道而无限等待。保留现有进程组清理策略，
+   不借此重构两个后端的退出机制或给 Codex 增加另一套输出政策。
+
+4. **移除会提前截断活跃编码的外层总时限。** 从 `WorkerExecutor.__init__` 删除
+   `revision_timeout` 参数和属性，`execute()` 的 REVISION 分支直接等待 `_revision()`；
+   `WorkerRuntime.__init__` 不再传入该参数。每次编码调用由 adapter 管理空闲期限，
+   既有 VCS 单命令总时限（当前 30 秒）及取消/回收边界保留。
+   不承诺整个 Flow 的总耗时有界，也不把其他阶段的独立请求超时改成空闲时限。
+
+5. **完整传递失败原因。** `WorkerExecutor._initial()` 的非零退出分支设置
+   `failure_stage="execution"`，复制已脱敏的 `run.failure_detail`，缺失时使用与 REVISION
+   一致的中性执行失败说明。不新增协议字段或把超时当作可自动重放的执行前拒绝。
+   `app/controler/workflow/results.py` 的初始失败文案移除硬编码 `codex` 和一律 `VCS`
+   前缀，显示实际 stage 与 detail；没有 stage 但有 detail 时也不丢弃已有原因。
+   示例：`编码失败（exit=124，阶段=execution）：Amp 连续 1200 秒无新输出，执行超时。`
+   `result`、`delivery`、`push` 等既有阶段继续准确显示。
+
+6. **配置与文档同步。** 保留 `FLOWTOOL_AMP_RUN_TIMEOUT_SECONDS` 与
+   `FLOWTOOL_CODEX_RUN_TIMEOUT_SECONDS` 名称及 1200 默认值，将它们明确为编码空闲秒数；
+   两者均要求正且有限。更新 README、部署说明、架构中的单轮/修订总时限描述和 changelog，
+   保留历史查询、VCS 命令、恢复/租约的独立时限说明。现有配置在新 worker 上按新语义解释，
+   不保留旧编码绝对时限作为 fallback。
+
+#### 取舍、风险与安全边界
+
+- 单纯改大总时限仍会终止更长的活跃任务；只改 Amp reader 会漏掉 Codex 和 REVISION
+  外层 deadline；把 `run_amp` 全部改为空闲计时会破坏历史查询的有限请求预算。
+- 一个短小等待函数复用两个后端的单调时钟、完成优先与静默判定；不合并两套已有进程监督。
+  `timeout_kind` 的两个值对应真实的编码和只读导出调用者，不增加更多策略选项。
+- 已完成 io 或已观察到的输出超限应优先于空闲判定；进入超时清理后不因晚到数据改回成功。
+  活动时间以 reader 实际读取为准，不承诺精确获知内核管道中尚未调度读取的数据时间。
+- 取消必须穿透等待函数，由已有 finally 路径先回收进程/reader 再返回；EOF 后进程不退出、
+  进程退出而后代仍持有管道等场景也不能永久占槽。仅“进程仍活着”不触发续期。
+- 失败详情沿用 adapter 和终态写入的现有脱敏，不输出原始 stream、环境、MCP headers 或
+  token；自定义秘密的识别限制不因本次修复消失。
+- 持续活跃执行可能长于现有 GitHub capability 有效期；到期后的 push/交付仍可能失败。
+  本次不隐式刷新凭据、不换认证来源、不另设编码总时长限制。
+
+#### 实施顺序、验证与消融
+
+批准后先在现有 driver/executor/controler 测试入口复现旧行为，再实现空闲等待、
+两个 adapter 接线、外层 deadline 移除与诊断透传，最后同步文档和发布说明。
+永久测试只覆盖调用方依赖的行为；时间判定优先使用可控时钟与受控流，避免真实等待 20 分钟。
+真实 Python 假 CLI 仅用于确认管道/进程组集成，不调用真实模型或 GitHub 业务工具。
+
+| 场景 | 验收标准 |
+| --- | --- |
+| 持续 stdout 或仅 stderr 活动，累计跨越多个空闲窗口 | Amp/Codex 正常完成，不因总时长失败 |
+| 首次无输出；有活动后停止；半行/分块输出；EOF 后仍不退出 | 仅非空新读入续期，达到完整静默窗口才返回 124 |
+| 取消、进程退出与截止同时发生、输出上限 | 保持取消传播、已完成结果及异常权威，完成既有回收，不把超限改判为超时 |
+| REVISION resume 与 fallback 的公共执行路径 | 持续活动可跨越旧总时限；静默失败不触发 fallback，既有执行前拒绝规则不变 |
+| AmpHistory 持续输出但超过 export 预算 | 仍按总时限返回 query_timeout，不因编码改动续期 |
+| INITIAL → 终态 → controler 失败结果 | 保留 execution 与实际安全诊断，文案不误写 Codex/VCS；其他阶段与无详情情况仍清楚 |
+| 安全与默认值 | 两后端默认仍为 1200；已知能力 token 不随错误信息泄露 |
+
+消融对照：临时移除续期、恢复 REVISION 外层 deadline、误将 history 切为 idle、去掉
+INITIAL 详情透传，分别必须被对应行为回归捕获；临时对照改动不保留。
+运行相关 driver/history/executor/runtime/controler 回归，随后 PostgreSQL 全量测试、
+`uv run ruff check app tests`、`uv run mypy app tests` 和现有打包检查。
+没有 UI 布局改动，错误文本通过实际 controler 结果断言验证；不新增无关浏览器截图测试。
+代码推送前执行仓库 review gate，继续使用本次草稿 PR，不另开实现 PR。
+
+#### 发布、待确认与当前状态
+
+- 无数据迁移；worker 更新并在空闲时重启后使用新语义。controler 也需更新才能修复显示；
+  现有字段兼容，先更新 controler 或同步更新两端，避免旧 controler 把新 execution 详情误标为 VCS。
+- 不热补丁正在运行的 worker，不自动重试 Flow 3，不清空 journal/工作区或处理已有未推送提交。
+  失败 Flow 是否重试在实现和发布验证后另行确认。
+- 需要批准的是上述活动边界与实现范围。真实 CLI 在长工具运行期间转发进度的频率需在
+  实施时校准；即使不转发，也按已明确的静默语义处理，不隐式改为“子进程存活即活跃”。
+- 初稿咨询实际使用 `claude-opus-5-5`，初始化和响应模型一致，tools/MCP 为空且成功返回；
+  主代理核对源码后收窄为一个泛型等待函数、显式超时模式，并确认 VCS 单命令默认值为 30 秒。
+  方案位于独立 jj workspace，开发检出的其他改动保持不动。本条只记录提案，不表示已实现。
+
+### [004] — 2026-11-06 — 编码空闲超时与安全失败详情实现
+
+**需求与状态：** 按 [003] 实现持续输出续期和准确失败提示；继续使用
+`fix/worker-idle-timeout` / [#131](https://github.com/b1indsight/agentflow/pull/131)。
+在独立 jj workspace 中基于最新 main 实施，未修改开发检出的其他工作、运行中的 worker、
+Flow 3 journal 或其未推送成果；尚未部署，不自动重试。
+
+#### 实际改动与取舍
+
+- `execution/idle.py` 只负责等待调用方拥有的 I/O future，使用事件循环单调时钟重新计算
+  剩余空闲窗口，完成结果或异常优先于静默判定；取消和进程/reader 回收归 adapter。
+  没有新增时钟任务、活动持久化或通用进程框架。
+- Amp 两路 reader 和 Codex 新增的分块 reader 在读到非空字节后续期，不等换行。
+  `AmpCodingAgent` 显式选择 idle；`run_amp` 默认仍为 total，因此历史 export 保持原预算。
+  Codex 去掉整轮 `communicate` 总时限，以受保护的 cleanup 回收进程组并 join reader；
+  cleanup 的 `proc.wait` 有独立 5 秒上限，避免后代持有管道时无限等待。
+- 删除 executor 的 `revision_timeout` 参数、属性和外层 deadline，runtime 只向 adapter
+  传入对应空闲秒数。VCS 命令和历史查询的独立总时限不变；两后端配置都验证为正有限值。
+- 两后端超时仍返回 124，安全诊断包含后端、`no new stdout/stderr` 与配置秒数。
+  Amp 超时不再追加任意长度的启动 stderr，避免尾部裁剪把核心超时原因挤掉。
+  INITIAL 设置 `execution` 并透传安全详情，缺失详情时沿用 REVISION 的中性提示；
+  controler 的通知与持久错误保留实际 stage/detail，无 stage 的详情也不会丢失。
+- README、部署与 review-loop 文档同步新语义和发布要求。没有修改协议、数据库、
+  凭据来源、Schema/VCS 交付权威或保守 fallback；既有成功、失败、脱敏与取消回归保留。
+
+#### 验证与机制消融
+
+先在旧实现上运行新回归，复现持续输出仍被总时限终止、超时详情不完整和 INITIAL 丢失
+execution/detail。修改后，受控单调时钟和真实 `StreamReader` 验证两后端 start/resume：
+持续活动跨越多个 1200 秒窗口、仅 stderr、半行、首次静默、最后活动后的完整静默窗口、
+晚到 EOF、进程已退出但管道未关闭、完成/截止竞争、取消及 reader 回收。
+公共 REVISION 路径带真实本地 Git 核验，resume 与 fallback 均可跨越旧外层 deadline。
+Python 假 CLI 子进程另行确认真实管道续期、Amp 输出上限与进程组清理；不调用模型。
+
+四项进程内消融分别执行同一组输入，不改写产品源码；下列简化均被对应行为回归捕获：
+
+| 对照 | 观察 | 决定 |
+| --- | --- | --- |
+| 用固定总等待替代活动续期 | 持续 stdout/stderr 的两后端 start/resume 提前结束 | 保留共享空闲等待和双 reader 续期 |
+| 恢复 1200 秒 REVISION 外层 deadline | 活跃修订的 resume/fallback 被取消 | 保持外层总时限删除 |
+| 历史 export 也选择 idle | 持续输出的导出越过请求预算，未返回 query_timeout | 保留显式 total/idle 区分 |
+| INITIAL 丢弃 stage/detail | worker 公共执行结果丢失安全诊断 | 保留详情透传和中性 fallback |
+
+针对性测试、Ruff、Mypy、控制台 TypeScript/Vite 构建、wheel/sdist 打包与 wheel 中静态入口、
+空闲 helper 检查通过。构建保留既有大 chunk 提示。首次全量运行遇到旧凭据回收测试仍只模拟
+`communicate`、等待启动信号不返回；已将该测试改为 reader 模拟，并单独验证凭据临时目录
+保留到进程回收结束。消融脚本是一次性本地验证，不进入仓库。
+最终通过 `FLOWTOOL_TEST_DATABASE_URL` 指向独立本机 PostgreSQL 实例运行全量 pytest，
+全部通过、无跳过，仅有既有 Starlette/httpx 弃用警告。全量日志保存在 `full-pytest.log`。
+
+可复现入口：`python -m pytest -q tests/test_worker_idle.py tests/test_amp_driver.py
+tests/test_codex_driver.py tests/test_worker_executor.py tests/test_worker_runtime.py
+tests/test_worker_github_environment.py tests/test_coordinator.py tests/test_revision_delivery.py
+tests/test_conversation_history.py tests/test_config.py`；静态检查使用 `python -m ruff check app tests`
+及 `python -m mypy app tests`，打包使用 `python scripts/build_console.py`、`uv build`。
+本地使用已有 Python 3.13 开发环境，但从独立 workspace 导入代码；未改共享虚拟环境。
+证据存于 `.amp/in/artifacts/worker-idle-timeout/`，汇总见
+[本线程验证记录](https://ampcode.com/artifacts/worker-skills-mcp-57f5fb2b-f3cd-413e-9434-e3dc3ee86d83)。
+
+#### 活动来源与验收边界
+
+复核既有真实 Amp CLI 捕获：原生 shell 与 MCP 工具调用出现在 stdout 的 assistant 事件中，
+shell 结果出现在 user 事件中；本机 `codex-cli 0.162.1` 的 exec 与 resume 帮助均声明
+`--json` 将事件输出为 stdout JSONL。此次没有重新执行真实模型或 GitHub 业务工具，
+也没有宣称长工具一定实时转发中间进度。
+静默工具仍可能超时，持续诊断也能续期；GitHub capability 可能先于活跃任务到期且不续签。
+这些限制与 [003] 一致，不使用进程存活或合成心跳规避空闲超时。
+
+### [005] — 2026-11-06 — 精简空闲超时回归测试
+
+**需求与决定：** 用户指出新增测试支撑代码偏重，要求精简。本条替代 [004] 的永久测试
+组织方式，不改运行逻辑、超时语义或发布状态；原始验证结果保留为历史证据。
+
+- 删除多用途假进程/可推进时钟 fixture、固定次数的调度让步及后端/入口/管道全排列。
+  每个后端复用一个真实 Python 管道场景，依次仅向 stderr、stdout 输出半行；每阶段均
+  跨过空闲期限，既验证总时长可超过限制，也防止漏监控任一输出流。
+- 静默诊断用最小进程替身覆盖进程已退出但管道未关闭；完成优先与调用方 I/O 所有权
+  改为无需时钟模拟的等待函数边界测试。取消与 reader 回收断言并入现有 driver 测试。
+- REVISION 外层总时限回归并入已有无改动交付场景，用代理替身跨过原 deadline，
+  不再为每个后端另建 Git 工作区。恢复/回退分发仍由现有测试覆盖。
+- 历史查询总预算、INITIAL 详情透传及 controler 文案回归不变。重复运行真实管道与
+  REVISION 场景通过；相关 driver/executor/history/runtime/controler/config 测试在临时
+  PostgreSQL 下全部通过、无跳过，Ruff/Mypy 通过。本次未重跑全仓测试或打包。
+- 进程内临时恢复总时限、分别移除 stdout/stderr 续期、恢复 REVISION 外层 deadline、
+  将 history 改为 idle、丢弃诊断、让超时覆盖已完成结果，均被保留测试捕获。
+  未改写产品源码，临时变体脚本不保留。证据为前述目录的 `simplified-*.log`。

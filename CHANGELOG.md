@@ -8,6 +8,10 @@
 
 ## Unreleased
 
+- Amp/Codex 编码改为连续无新 stdout/stderr 输出才超时，默认仍为 1200 秒；半行、工具
+  调用/结果和进度续期，移除 REVISION 外层总时限，保留历史导出和单条 VCS 命令的总时限。
+  两后端空闲秒数均要求正有限值。INITIAL 保留安全失败详情和 execution 阶段，controler
+  不再误标 Codex/VCS；超时说明具体后端、静默时长与原因，不自动重放未知执行。
 - Amp/Codex worker 继承专用运行环境的原生 skills/MCP 和自定义变量，先过滤 ambient
   Flow、Git/GitHub/SSH 认证与父会话身份，再注入当前 assignment 能力。Amp 删除临时全量
   settings、workspace 设置拒绝和固定工具集合上限，仅用原生 `--mcp-config` 覆盖 `flow`；

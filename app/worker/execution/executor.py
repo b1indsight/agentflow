@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import tempfile
 from dataclasses import replace
@@ -63,14 +62,12 @@ class WorkerExecutor:
         *,
         worker_id: str,
         state: ExecutionState,
-        revision_timeout: float = 1200.0,
         workspace_limit: int = 2,
     ) -> None:
         self.worker_root = worker_root
         self.code_agent = code_agent
         self.worker_id = worker_id
         self.state = state
-        self.revision_timeout = revision_timeout
         self.workspaces = RepositoryWorkspaces(worker_root, worker_id, limit=workspace_limit)
 
     async def execute(
@@ -81,11 +78,7 @@ class WorkerExecutor:
         if isinstance(task, InitialTask):
             return await self._initial(task, secret, tool_caller)
         if isinstance(task, RevisionTask):
-            try:
-                async with asyncio.timeout(self.revision_timeout):
-                    return await self._revision(task, secret)
-            except TimeoutError as error:
-                raise TimeoutError("revision deadline expired; edits or a push may have occurred") from error
+            return await self._revision(task, secret)
         if isinstance(task, ArchiveTask):
             if (self.worker_id != task.worker_id
                     or task.repo_identity != f"{self.worker_id}:{task.repo}"):
@@ -162,6 +155,9 @@ class WorkerExecutor:
                 session_id=run.session_id,
                 last_message=run.last_message,
                 exit_code=run.exit_code,
+                failure_stage="execution",
+                failure_detail=(run.failure_detail
+                                or "CodingAgent exited unsuccessfully; execution may have occurred"),
             )
         try:
             output = InitialCodingOutput.model_validate_json(run.last_message)

@@ -160,7 +160,12 @@ FLOWTOOL_ALLOW_INSECURE_WORKER_WS=true uv run flowtool worker
 ```
 
 实际编码需安装 `git`、`gh` 和所选的 Codex 或 Amp CLI（使用 jj 时另装 jj）。默认 `FLOWTOOL_CODING_AGENT=codex`；
-专用 worker 可改为 `amp`，并设置 `FLOWTOOL_AMP_RUN_TIMEOUT_SECONDS=1200`。Amp 使用该 worker
+专用 worker 可改为 `amp`。`FLOWTOOL_AMP_RUN_TIMEOUT_SECONDS` 和
+`FLOWTOOL_CODEX_RUN_TIMEOUT_SECONDS` 都是编码空闲超时秒数，默认 1200，必须为正有限值。
+直接 CLI 的 stdout/stderr 每读到非空新数据就重新计时，半行、工具调用/结果和进度也算；
+持续有输出可以超过 20 分钟。心跳、历史查询、EOF 和进程存活不续期；静默工具仍可能超时，
+持续诊断日志也会续期。长任务可能超过 GitHub capability 有效期，凭据不自动刷新。
+Amp 使用该 worker
 专用 HOME 的原生 `amp login`，或可选 `AMP_API_KEY`；不要复制个人 HOME、Docker socket 或
 control secret。Git/gh 每轮只使用 GitHub App 下发的 assignment 凭据和临时配置，不改个人全局
 Git/gh 设置，提交作者仍由 worker Git 配置决定。Amp 历史读取是完整原生 thread 快照，可能滞后；
@@ -334,7 +339,8 @@ ignored 缓存，临时 worktree 注销并删除；取消时两种工作区均�
 
 修订失败保留原 worker binding；处理脏工作区或远端偏移后可显式 retry，不自动 reset/rebase/force push。
 修订准备阶段的 GitHub 错误会持久记录为失败；恢复后显式 retry，未 Started 的准备失败不消耗修订轮数。
-CodingAgent 总时限覆盖 resume、fallback 和 VCS 核验，超时回收并等待对应进程组退出；
+INITIAL、REVISION resume/fallback 的每次编码调用由 adapter 管理空闲期限，没有编码总时限。
+历史导出仍有 20 秒总时限，单条 VCS 命令仍有 30 秒总时限，超时回收并等待对应进程组退出；
 用户 cancel 通过持久停止握手取消执行，未确认停止或远端结果不明时继续保留绑定。
 
 可选组织 Projects v2 的配置及只读 `flowtool project check <repo>` 见 [GitHub App 接入](docs/architecture/github-app.md#a4-可选的组织-projects-v2)。

@@ -109,12 +109,14 @@ async def test_expired_wrapper_refuses_to_exec_and_cancel_reaps_before_cleanup(t
     entered = asyncio.Event()
     seen = []
 
-    class Process:
-        pid = 12345
-
-        async def communicate(self):
+    class Stream:
+        async def read(self, _size):
             entered.set()
             await asyncio.Future()
+
+    class Process:
+        pid = 12345
+        stdout, stderr = Stream(), Stream()
 
         async def wait(self):
             assert seen[0].exists()  # Private files survive until the process group is reaped.

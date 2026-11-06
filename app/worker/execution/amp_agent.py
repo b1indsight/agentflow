@@ -37,9 +37,10 @@ class _Result(BaseModel):
     error: StrictStr = ""
 
 
-def _outcome(process: AmpProcessResult, expected: str | None) -> CodingExecutionResult:
+def _outcome(process: AmpProcessResult, expected: str | None, timeout: float) -> CodingExecutionResult:
     """Only an intact matching init/final pair can carry a successful final answer."""
     session_id = expected
+    timeout_detail = f"Amp: no new stdout/stderr for {timeout:g}s; execution timed out"
     try:
         init: _Init | None = None
         final: _Result | None = None
@@ -68,7 +69,7 @@ def _outcome(process: AmpProcessResult, expected: str | None) -> CodingExecution
         if init is None or final is None or final.session_id != session_id:
             raise ValueError("incomplete or mismatched Amp result")
         if process.timed_out:
-            raise ValueError("Amp execution timed out")
+            raise ValueError(timeout_detail)
         if process.overflow:
             raise ValueError("Amp execution output exceeded byte limit")
         if process.exit_code or final.is_error or final.subtype != "success":
@@ -81,10 +82,10 @@ def _outcome(process: AmpProcessResult, expected: str | None) -> CodingExecution
         return CodingExecutionResult(session_id=session_id, last_message=final.result, exit_code=0)
     except (ValueError, ValidationError, UnicodeDecodeError) as error:
         # Do not expose validation inputs or raw JSON: they may contain thinking or credentials.
-        detail = ("Amp execution timed out" if process.timed_out else
+        detail = (timeout_detail if process.timed_out else
                   "Amp execution output exceeded byte limit" if process.overflow else
                   str(error) if type(error) is ValueError else "invalid Amp event stream")
-        if init is None and process.stderr.strip():
+        if init is None and not process.timed_out and process.stderr.strip():
             detail += ": " + process.stderr.decode(errors="replace").strip()
         return CodingExecutionResult(
             session_id=session_id, last_message="", exit_code=124 if process.timed_out else process.exit_code or 1,
@@ -145,8 +146,9 @@ class AmpCodingAgent:
                 "--visibility", "private", "--no-ide", "--no-notifications",
                 "--execute", "--stream-json", "--no-archive-after-execute", "--log-file", os.devnull,
             ]
-            process = await run_amp(args, cwd=cwd, env=environment, input_text=prompt, timeout=self.timeout)
-            result = _outcome(process, session_id)
+            process = await run_amp(args, cwd=cwd, env=environment, input_text=prompt,
+                                    timeout=self.timeout, timeout_kind="idle")
+            result = _outcome(process, session_id, self.timeout)
             # No SessionUnavailable fallback: the observed CLI stderr alone has not
             # proven that every missing-thread rejection precedes all execution.
             secrets = [value for key, value in environment.items()
