@@ -143,7 +143,6 @@ class WorkerRuntime:
             ),
             worker_id=self.settings.worker_id,
             state=state,
-            revision_timeout=timeout,
             workspace_limit=self.settings.worker_repo_workspace_limit,
         )
         self.execution = WorkerExecution(worker_id=self.settings.worker_id, executor=executor, state=state)

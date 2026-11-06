@@ -421,8 +421,14 @@ async def test_initial_failure_after_open_pr_request_has_no_github_pr_side_effec
     assert store.delivery.state is DeliveryState.OPENING
 
 
-@pytest.mark.asyncio
-async def test_initial_vcs_failure_is_reported_with_sanitized_stage_and_detail() -> None:
+@pytest.mark.parametrize("stage,detail,reason", [
+    ("push", "remote branch is missing", "（exit=65，阶段=push）：remote branch is missing"),
+    ("execution", "Amp: no new stdout/stderr for 1200s; execution timed out",
+     "（exit=65，阶段=execution）：Amp: no new stdout/stderr for 1200s; execution timed out"),
+    (None, "safe diagnostic [REDACTED]", "（exit=65）：safe diagnostic [REDACTED]"),
+    (None, None, "（exit=65）"),
+])
+async def test_initial_failure_reports_stage_and_detail_without_guessing_backend(stage, detail, reason):
     store = MemoryStore()
     github = RecordingGitHub()
     subject = coordinator(store, github)
@@ -438,15 +444,14 @@ async def test_initial_vcs_failure_is_reported_with_sanitized_stage_and_detail()
             session_id="session-1",
             last_message="ignored raw message",
             exit_code=65,
-            failure_stage="push",
-            failure_detail="remote branch is missing",
+            failure_stage=stage,
+            failure_detail=detail,
         ),
     )
 
     assert state is JobState.FAILED
-    assert github.comments == [
-        "⚠️ 编码失败（codex exit=65）；VCS push: remote branch is missing。未开 PR。"
-    ]
+    assert github.comments == [f"⚠️ 编码失败{reason}。未开 PR。"]
+    assert store.get_job(job.id).last_error == f"编码失败{reason}。未开 PR。"
 
 
 @pytest.mark.parametrize("version", [1, 14, 15])

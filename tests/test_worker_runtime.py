@@ -57,7 +57,7 @@ def test_worker_root_rejects_sequential_identity_reuse(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("backend,expected,timeout", [(None, CodexAgent, 23), ("amp", AmpCodingAgent, 47)])
-def test_runtime_selects_agent_and_its_revision_deadline(tmp_path, monkeypatch, backend, expected, timeout):
+def test_runtime_selects_agent_and_its_idle_timeout(tmp_path, monkeypatch, backend, expected, timeout):
     monkeypatch.setattr("app.worker.runtime.configure_logging", lambda *args: None)
     if backend is None:
         monkeypatch.delenv("FLOWTOOL_CODING_AGENT", raising=False)
@@ -69,7 +69,6 @@ def test_runtime_selects_agent_and_its_revision_deadline(tmp_path, monkeypatch, 
     runtime = WorkerRuntime(settings)
     assert isinstance(runtime.execution.executor.code_agent, expected)
     assert runtime.execution.executor.code_agent.timeout == timeout
-    assert runtime.execution.executor.revision_timeout == timeout
 
 
 @pytest.mark.parametrize("shutdown", ["stop", "cancel"])

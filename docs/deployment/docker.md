@@ -106,7 +106,10 @@ Amp 仅在 worker target 安装，固定为 `0.0.1792555249-g702cd1`，不使用
 
 `FLOWTOOL_CODING_AGENT` 未设置或为 `codex` 时保持 Codex。要让一个**空闲且已 drain** 的
 worker 使用 Amp，在其 worker.env 中设置 `FLOWTOOL_CODING_AGENT=amp`；
-`FLOWTOOL_AMP_RUN_TIMEOUT_SECONDS=1200` 是 Amp 单轮超时。不要为活动或执行状态未知的
+`FLOWTOOL_AMP_RUN_TIMEOUT_SECONDS=1200` 是 Amp 连续无新 stdout/stderr 输出的空闲上限，
+Codex 对应 `FLOWTOOL_CODEX_RUN_TIMEOUT_SECONDS`，同样默认 1200；两者必须为正有限值。
+持续输出不会因累计运行时长而终止；静默工具仍可能超时，worker 心跳和历史查询不续期。
+活动定义、独立请求时限与凭据到期限制见[本机部署说明](README.md)。不要为活动或执行状态未知的
 Flow 切换后端，也不要把未知续跑当作可安全重跑的任务。Amp adapter 固定以 `--mode low`
 执行，不提供运行期模式漂移。
 

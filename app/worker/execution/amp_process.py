@@ -11,12 +11,14 @@ import subprocess
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from loguru import logger
 from pydantic import JsonValue
 
 from app.domain.models import CodingExecutionContext
 from app.worker.execution.credentials import git_credential_environment, inherited_agent_environment
+from app.worker.execution.idle import wait_for_inactivity
 
 AMP_BIN = "amp"
 TERMINATION_GRACE = 3.0
@@ -143,12 +145,14 @@ async def run_amp(
     args: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None,
     input_text: str | None = None, timeout: float = 1200,
     max_stdout: int = 8 * 1024 * 1024,
+    timeout_kind: Literal["total", "idle"] = "total",
 ) -> AmpProcessResult:
     """Run Amp with bounded concurrent pipes and TERM-first cancellation/timeout cleanup.
 
     ``args`` excludes the executable. Prompts travel on stdin, never argv. Both
     streams have the byte bound; an overflow fails the invocation, never truncates
-    it into an apparent success. The same supervisor serves read-only exports.
+    it into an apparent success. Coding selects idle time since the last nonempty
+    stdout/stderr read; read-only exports retain the default total request limit.
     """
     proc = await asyncio.create_subprocess_exec(
         AMP_BIN, *args, cwd=cwd, env=env if env is not None else amp_environment(),
@@ -156,10 +160,14 @@ async def run_amp(
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, start_new_session=True,
     )
     stdout, stderr = bytearray(), bytearray()
+    loop = asyncio.get_running_loop()
+    last_activity = loop.time()
 
     async def read(stream: asyncio.StreamReader | None, buffer: bytearray) -> None:
+        nonlocal last_activity
         assert stream is not None
         while chunk := await stream.read(65536):
+            last_activity = loop.time()
             available = max_stdout - len(buffer)
             buffer.extend(chunk[:available])
             if len(chunk) > available:
@@ -181,7 +189,10 @@ async def run_amp(
     io = asyncio.gather(*tasks)
     timed_out = overflow = False
     try:
-        await asyncio.wait_for(asyncio.shield(io), timeout=timeout)
+        if timeout_kind == "idle":
+            await wait_for_inactivity(io, timeout=timeout, last_activity=lambda: last_activity)
+        else:
+            await asyncio.wait_for(asyncio.shield(io), timeout=timeout)
     except TimeoutError:
         timed_out = True
     except _OutputLimit:

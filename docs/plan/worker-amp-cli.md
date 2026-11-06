@@ -10,8 +10,9 @@
 沿用 [#128](https://github.com/b1indsight/agentflow/pull/128)，未部署；具体证据和验收限制见 [002]。
 上面的 PR 及下文既有证据属于原 Amp 适配；[001] 保留为后续变更的初始方案。
 
-**当前提案：** [003] 将编码总时限改为连续无活动超时，并修复失败详情丢失及后端名称误标；
-方案待批准，尚未修改产品代码或测试。原方案与已完成变更保留为历史。
+**当前变更：** [003] 的空闲超时与失败诊断方案已按 [004] 实现，沿用
+[#131](https://github.com/b1indsight/agentflow/pull/131)，尚未部署。原提案保留为历史，
+实际实现、验证和限制见 [004]。
 
 ## 目标与范围
 
@@ -410,3 +411,71 @@ INITIAL 详情透传，分别必须被对应行为回归捕获；临时对照改
 - 初稿咨询实际使用 `claude-opus-5-5`，初始化和响应模型一致，tools/MCP 为空且成功返回；
   主代理核对源码后收窄为一个泛型等待函数、显式超时模式，并确认 VCS 单命令默认值为 30 秒。
   方案位于独立 jj workspace，开发检出的其他改动保持不动。本条只记录提案，不表示已实现。
+
+### [004] — 2026-11-06 — 编码空闲超时与安全失败详情实现
+
+**需求与状态：** 按 [003] 实现持续输出续期和准确失败提示；继续使用
+`fix/worker-idle-timeout` / [#131](https://github.com/b1indsight/agentflow/pull/131)。
+在独立 jj workspace 中基于最新 main 实施，未修改开发检出的其他工作、运行中的 worker、
+Flow 3 journal 或其未推送成果；尚未部署，不自动重试。
+
+#### 实际改动与取舍
+
+- `execution/idle.py` 只负责等待调用方拥有的 I/O future，使用事件循环单调时钟重新计算
+  剩余空闲窗口，完成结果或异常优先于静默判定；取消和进程/reader 回收归 adapter。
+  没有新增时钟任务、活动持久化或通用进程框架。
+- Amp 两路 reader 和 Codex 新增的分块 reader 在读到非空字节后续期，不等换行。
+  `AmpCodingAgent` 显式选择 idle；`run_amp` 默认仍为 total，因此历史 export 保持原预算。
+  Codex 去掉整轮 `communicate` 总时限，以受保护的 cleanup 回收进程组并 join reader；
+  cleanup 的 `proc.wait` 有独立 5 秒上限，避免后代持有管道时无限等待。
+- 删除 executor 的 `revision_timeout` 参数、属性和外层 deadline，runtime 只向 adapter
+  传入对应空闲秒数。VCS 命令和历史查询的独立总时限不变；两后端配置都验证为正有限值。
+- 两后端超时仍返回 124，安全诊断包含后端、`no new stdout/stderr` 与配置秒数。
+  Amp 超时不再追加任意长度的启动 stderr，避免尾部裁剪把核心超时原因挤掉。
+  INITIAL 设置 `execution` 并透传安全详情，缺失详情时沿用 REVISION 的中性提示；
+  controler 的通知与持久错误保留实际 stage/detail，无 stage 的详情也不会丢失。
+- README、部署与 review-loop 文档同步新语义和发布要求。没有修改协议、数据库、
+  凭据来源、Schema/VCS 交付权威或保守 fallback；既有成功、失败、脱敏与取消回归保留。
+
+#### 验证与机制消融
+
+先在旧实现上运行新回归，复现持续输出仍被总时限终止、超时详情不完整和 INITIAL 丢失
+execution/detail。修改后，受控单调时钟和真实 `StreamReader` 验证两后端 start/resume：
+持续活动跨越多个 1200 秒窗口、仅 stderr、半行、首次静默、最后活动后的完整静默窗口、
+晚到 EOF、进程已退出但管道未关闭、完成/截止竞争、取消及 reader 回收。
+公共 REVISION 路径带真实本地 Git 核验，resume 与 fallback 均可跨越旧外层 deadline。
+Python 假 CLI 子进程另行确认真实管道续期、Amp 输出上限与进程组清理；不调用模型。
+
+四项进程内消融分别执行同一组输入，不改写产品源码；下列简化均被对应行为回归捕获：
+
+| 对照 | 观察 | 决定 |
+| --- | --- | --- |
+| 用固定总等待替代活动续期 | 持续 stdout/stderr 的两后端 start/resume 提前结束 | 保留共享空闲等待和双 reader 续期 |
+| 恢复 1200 秒 REVISION 外层 deadline | 活跃修订的 resume/fallback 被取消 | 保持外层总时限删除 |
+| 历史 export 也选择 idle | 持续输出的导出越过请求预算，未返回 query_timeout | 保留显式 total/idle 区分 |
+| INITIAL 丢弃 stage/detail | worker 公共执行结果丢失安全诊断 | 保留详情透传和中性 fallback |
+
+针对性测试、Ruff、Mypy、控制台 TypeScript/Vite 构建、wheel/sdist 打包与 wheel 中静态入口、
+空闲 helper 检查通过。构建保留既有大 chunk 提示。首次全量运行遇到旧凭据回收测试仍只模拟
+`communicate`、等待启动信号不返回；已将该测试改为 reader 模拟，并单独验证凭据临时目录
+保留到进程回收结束。消融脚本是一次性本地验证，不进入仓库。
+最终通过 `FLOWTOOL_TEST_DATABASE_URL` 指向独立本机 PostgreSQL 实例运行全量 pytest，
+全部通过、无跳过，仅有既有 Starlette/httpx 弃用警告。全量日志保存在 `full-pytest.log`。
+
+可复现入口：`python -m pytest -q tests/test_worker_idle.py tests/test_amp_driver.py
+tests/test_codex_driver.py tests/test_worker_executor.py tests/test_worker_runtime.py
+tests/test_worker_github_environment.py tests/test_coordinator.py tests/test_revision_delivery.py
+tests/test_conversation_history.py tests/test_config.py`；静态检查使用 `python -m ruff check app tests`
+及 `python -m mypy app tests`，打包使用 `python scripts/build_console.py`、`uv build`。
+本地使用已有 Python 3.13 开发环境，但从独立 workspace 导入代码；未改共享虚拟环境。
+证据存于 `.amp/in/artifacts/worker-idle-timeout/`，汇总见
+[本线程验证记录](https://ampcode.com/artifacts/worker-skills-mcp-57f5fb2b-f3cd-413e-9434-e3dc3ee86d83)。
+
+#### 活动来源与验收边界
+
+复核既有真实 Amp CLI 捕获：原生 shell 与 MCP 工具调用出现在 stdout 的 assistant 事件中，
+shell 结果出现在 user 事件中；本机 `codex-cli 0.162.1` 的 exec 与 resume 帮助均声明
+`--json` 将事件输出为 stdout JSONL。此次没有重新执行真实模型或 GitHub 业务工具，
+也没有宣称长工具一定实时转发中间进度。
+静默工具仍可能超时，持续诊断也能续期；GitHub capability 可能先于活跃任务到期且不续签。
+这些限制与 [003] 一致，不使用进程存活或合成心跳规避空闲超时。

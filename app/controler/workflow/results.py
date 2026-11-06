@@ -333,13 +333,11 @@ class ResultApplication:
                 }
             )
             if result.exit_code != 0 or not result.session_id:
-                reason = f"编码失败（codex exit={result.exit_code}），未开 PR。"
-                if result.failure_stage and result.failure_detail:
-                    reason = (
-                        f"编码失败（codex exit={result.exit_code}）；VCS {result.failure_stage}: "
-                        f"{result.failure_detail}。未开 PR。"
-                    )
-                return self._failure(tx, flow, base, reason)
+                stage = f"，阶段={result.failure_stage}" if result.failure_stage else ""
+                reason = f"编码失败（exit={result.exit_code}{stage}）"
+                if result.failure_detail:
+                    reason += f"：{result.failure_detail}"
+                return self._failure(tx, flow, base, f"{reason}。未开 PR。")
             delivery = deliveries_tx.get_delivery(flow.id)
             call = deliveries_tx.get_tool_call(result.open_pr_call_id) if result.open_pr_call_id else None
             mismatch = initial_delivery_mismatch(job, attempt, result, delivery, call)
