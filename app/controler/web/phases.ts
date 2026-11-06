@@ -16,6 +16,8 @@ export function actionLabel({
 }: Pick<FlowSummary, "action" | "archived_at">) {
   if (action === "cancelled") return archived_at ? "已取消 · 已归档" : "已取消";
   if (action === "delivery_closed") return "已关闭 · 未合并";
+  if (action === "delivery_merged") return "已合并 · 已归档";
+  if (action === "archive_blocked") return "已合并 · 清理受阻";
   if (action === "archived") return "归档完成";
   return action;
 }

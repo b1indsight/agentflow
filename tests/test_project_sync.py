@@ -214,7 +214,9 @@ async def converge(sync, times=3):
 @pytest.mark.parametrize("flow_state,delivery,expected", [
     (FlowState.SUCCEEDED, DeliveryState.MERGED, ProjectStatus.DONE),
     (FlowState.FAILED, DeliveryState.OPEN, ProjectStatus.BLOCKED),
+    (FlowState.FAILED, DeliveryState.MERGED, ProjectStatus.BLOCKED),
     (FlowState.CANCELLED, DeliveryState.OPEN, ProjectStatus.BLOCKED),
+    (FlowState.CANCELLED, DeliveryState.MERGED, ProjectStatus.BLOCKED),
     (FlowState.ACTIVE, DeliveryState.CLOSED, ProjectStatus.BLOCKED),
     (FlowState.ACTIVE, DeliveryState.MERGED, ProjectStatus.IN_PROGRESS),
     (FlowState.ACTIVE, DeliveryState.OPEN, ProjectStatus.IN_REVIEW),

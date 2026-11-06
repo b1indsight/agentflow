@@ -271,6 +271,7 @@ def test_browser_retry_reports_business_refusal_without_changes(console_runtime,
         ("closed", "PR 已关闭", "重新打开 PR"),
         ("archive_recovery", "归档执行状态待确认", "不能强制释放"),
         ("archive_failed", "归档失败", "原 Worker"),
+        ("archive_effect_failed", "GitHub 写入失败", "核对远端写入结果"),
         ("archive_running", "归档正在执行", "执行结果"),
         ("archive_queued", "等待原 Worker 接收", "原 Worker"),
         ("review", "PR 已打开", "审核或人工合并"),
@@ -304,6 +305,7 @@ def test_detail_explains_execution_facts_without_exposing_internal_errors(
         "verifying",
         "applying",
         "effect_failed",
+        "archive_effect_failed",
         "older_result",
         "closed",
     }
@@ -332,7 +334,7 @@ def test_detail_explains_execution_facts_without_exposing_internal_errors(
                 job.id,
             ),
         )
-        if scenario in {"effect_failed", "older_result", "closed"}:
+        if scenario in {"effect_failed", "archive_effect_failed", "older_result", "closed"}:
             connection.execute(
                 "INSERT INTO result_applications(job_id,digest,plan,created_at) VALUES (%s,'d','{}',%s)",
                 (job.id, now),
@@ -361,6 +363,11 @@ def test_detail_explains_execution_facts_without_exposing_internal_errors(
     if scenario == "closed":
         assert body["phase"] == "done" and body["action"] == "delivery_closed"
         assert body["lifecycle"] == "active"
+    if scenario.startswith("archive_"):
+        assert body["phase"] == "done" and body["lifecycle"] == "active"
+        assert (body["action"] == "archive_blocked") is (
+            scenario in {"archive_failed", "archive_recovery", "archive_effect_failed"}
+        )
     if scenario in {"effect_failed", "older_result", "running", "preparing"}:
         assert f"#{job.id}" in body["reason"]
 

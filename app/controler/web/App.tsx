@@ -619,7 +619,8 @@ function Detail({
                     <span>下一步条件</span>
                     <p>{flow.next_condition}</p>
                   </div>
-                  {flow.phase === "blocked" && (
+                  {(flow.phase === "blocked" ||
+                    flow.action === "archive_blocked") && (
                     <button
                       className="btn"
                       disabled={pending !== null}

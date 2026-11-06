@@ -112,10 +112,13 @@ class ProjectStore(Repository):
                 "SELECT * FROM project_projections WHERE id=%s FOR UPDATE", (identity,),
             ).fetchone()
             assert row is not None
-            # Console archives also include closed unmerged PRs; Projects Done still means success.
+            # Console archives reflect PR closure/merge; Projects Done still requires successful cleanup.
             fact = connection.execute(
                 "SELECT f.id,f.installation_id,CASE"
-                " WHEN c.delivery_state='closed' AND f.state<>'succeeded' THEN 'blocked'"
+                " WHEN f.state='succeeded' THEN 'done'"
+                " WHEN f.state IN ('failed','cancelled') OR c.delivery_state='closed'"
+                " OR c.action='archive_blocked' THEN 'blocked'"
+                " WHEN c.delivery_state='merged' THEN 'in_progress'"
                 " WHEN c.phase='queued' THEN 'todo' WHEN c.phase='running' THEN 'in_progress'"
                 " WHEN c.phase='review' THEN 'in_review' ELSE c.phase END AS status"
                 " FROM flows f JOIN console_facts c ON c.id=f.id"
