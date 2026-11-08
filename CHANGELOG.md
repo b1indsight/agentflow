@@ -8,6 +8,8 @@
 
 ## Unreleased
 
+- CI 的 Prometheus 与 worker 镜像工具下载增加有限重试和超时，容忍临时 HTTP 504；保留固定
+  版本和 SHA256 校验，永久 HTTP 错误及校验失败仍阻止构建。
 - 新增通用 `worker.infer` 文本/JSON 推理 Job（wire19），复用现有 Job 分配、结果受理及恢复流程，
   删除独立 Router/Pool。controller 托管仅 infer 的 bub mini worker，合条件时优先；未配置、
   半配、忙或能力不符时选普通 worker。普通 worker 同时提供 execute/infer，无 repo 绑定也可推理，
