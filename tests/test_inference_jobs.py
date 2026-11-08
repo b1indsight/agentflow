@@ -23,6 +23,7 @@ from app.persistence.database import Database
 from app.persistence.inference_notices import InferenceNoticeStore
 from app.persistence.jobs import JobStore
 from app.persistence.schema import SCHEMAS
+from tests.review_memory import review_context
 from tests.test_review_batches import claim, feedback, ingest
 from tests.test_review_batches import review_flow as review_flow  # noqa: PLC0414
 
@@ -223,6 +224,33 @@ def test_review_round_identity_and_notice_are_durable_and_deduplicated(store, re
     updated = notices.page(flow.id)
     assert updated.snapshot > snapshot and len(updated.items) == 1
     assert updated.items[0].key == notice.key
+
+
+def test_review_replay_rejects_saved_job_from_another_context(store, review_flow):
+    flow, clock = review_flow
+    ingest(store, flow, feedback(clock))
+    batch = claim(store, clock)[0]
+    context = review_context(batch.id)
+    with store.transaction() as tx:
+        tx.lock_workflow(flow.id)
+        tx.reviews.freeze_context(batch, context)
+    original = store.jobs.enqueue_inference(task(), flow_id=flow.id, batch_id=batch.id)
+    ready(store)
+    finish(store, store.workers.assign_job("worker", "original", "epoch", slot="infer"))
+    replacement = context.model_copy(update={
+        "pull_request": context.pull_request.model_copy(update={"head_sha": "changed"}),
+    })
+    # The pre-fix invalidation could persist a new snapshot with the old job link.
+    # Replaying that durable state must never return its already-completed answer.
+    with store.database.connection() as connection:
+        connection.execute("UPDATE review_batches SET context=%s WHERE id=%s",
+                           (Jsonb(replacement.model_dump(mode="json")), batch.id))
+    current = store.jobs.enqueue_inference(task(), flow_id=flow.id, batch_id=batch.id)
+    assert current.id != original.id and current.state is JobState.QUEUED
+    assert current.inference.context_digest == replacement.digest
+    assert store.reviews.get_batch(batch.id).inference_job_id == current.id
+    assert store.jobs.get_job(original.id).state is JobState.DONE
+    assert store.jobs.enqueue_inference(task(), flow_id=flow.id, batch_id=batch.id).id == current.id
 
 
 def test_cancel_retains_running_slot_and_does_not_block_archive_or_reopen(store):

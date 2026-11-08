@@ -1,4 +1,4 @@
-"""Inference exhaustion notices in the existing activity ledger, independent of Jobs."""
+"""Inference Job exhaustion notices with independent activity-ledger snapshot paging."""
 
 import base64
 from datetime import datetime

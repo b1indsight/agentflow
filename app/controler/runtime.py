@@ -83,7 +83,6 @@ class ServerRuntime:
         )
         self.local_bub = BubInference(model=settings.judge_model, api_key=settings.judge_api_key,
                                       api_base=settings.judge_api_base)
-        self.inference = JobInference(database, self.gateway.wake_all)
         self._triage_task: asyncio.Task[None] | None = None
         self.service = ControlService(
             plugins,

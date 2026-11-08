@@ -156,8 +156,9 @@ class JobStore(Repository):
 
         Polling/restarts never replenish the existing job's attempts or deadline. The
         batch link is independent of its revision job, and is serialized with workflow
-        currentness and the batch row before any new round is created. A generic request
-        ID may only replay the same frozen input, validation contract and attribution.
+        currentness and the batch row before any new round is created. Review jobs are
+        reusable only for their frozen context. A generic request ID may only replay the
+        same frozen input, validation contract and attribution.
         """
         from app.persistence.reviews import ReviewStore
 
@@ -182,7 +183,10 @@ class JobStore(Repository):
                         or summary.last_failure_code == "unavailable"
                         or (summary.attempts == 0 and summary.stop_reason == "deadline")
                     )
-                    if (previous.state is not JobState.FAILED or not previous.inference.consumed
+                    same_context = previous.inference.context_digest == (
+                        batch.context.digest if batch.context else None
+                    )
+                    if same_context and (previous.state is not JobState.FAILED or not previous.inference.consumed
                             or not repeatable or (previous.inference.cancel_failure is not None
                                                   and previous.inference.cancel_failure.code == "cancelled")
                             or not ReviewStore(tx).current(batch)):

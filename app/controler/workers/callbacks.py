@@ -3,6 +3,7 @@
 import asyncio
 import hmac
 from collections.abc import Callable
+from functools import partial
 from uuid import uuid4
 
 from fastapi import WebSocketDisconnect
@@ -101,6 +102,7 @@ class ServerCallbacks:
         self.poll_interval = poll_interval
         self.worker: WorkerRecord | None = None
         self.current: tuple[Job, str, ExecutionTask | None] | None = None
+        self.preparing: tuple[Job, str] | None = None
         self.inference_current: Job | None = None
         self.inference_cancelling = False
         self.starting = False
@@ -219,6 +221,13 @@ class ServerCallbacks:
 
     async def _begin_stop(self, intent: StopIntent) -> None:
         self.stopping, self.stopped = intent, None
+        if self.preparing is not None:
+            job, token = self.preparing
+            await self.session.unwatch("preparation")
+            self.preparing = None
+            # A stop can target the previous execution while its unsent successor prepares.
+            self.workers.requeue_assignment(job.id, self.worker_id, token, self.epoch)
+            self.notify_jobs()
         fence = intent.fence()
         await self._send(
             StopExecution(**call_header(stop_call_id(fence)), method="worker.stop", arguments=fence)
@@ -261,31 +270,15 @@ class ServerCallbacks:
             stop = self.stops.pending(self.worker_id)
             if stop is not None:
                 await self._begin_stop(stop)
-        if self.register.execute and self.current is None and self.stopping is None:
+        if (self.register.execute and self.current is None
+                and self.preparing is None and self.stopping is None):
             token = uuid4().hex
             job = self.workers.assign_job(self.worker_id, token, self.epoch)
             if job is not None:
-                prepared = await self._prepare_assignment(job, token)
-                if isinstance(prepared, JobState):
-                    if prepared is JobState.QUEUED:
-                        self.workers.requeue_assignment(job.id, self.worker_id, token, self.epoch)
-                    else:
-                        self.workers.finish_assignment(
-                            job.id, self.worker_id, token, prepared, self.epoch
-                        )
-                    self.notify_jobs()
-                    return asyncio.get_running_loop().time()
-                if not self.stops.authorize_dispatch(job.id, self.worker_id, token, self.epoch):
-                    raise ProtocolViolation("assignment changed before dispatch authorization")
-                self.current, self.starting = (job, token, prepared.task), True
-                await self._send(
-                    Assignment(
-                        **call_header(execution_call_id(job.id, token)),
-                        method="worker.execute",
-                        arguments=prepared,
-                    )
+                self.session.watch(
+                    "preparation", partial(self._prepare_assignment, job, token), self._on_prepared,
                 )
-                self.receive_deadline = asyncio.get_running_loop().time() + self.heartbeat_timeout
+                self.preparing = job, token
         await self._poll_inference()
         now = asyncio.get_running_loop().time()
         if self.current is None and self.inference_current is None and self.stopping is None:
@@ -330,15 +323,24 @@ class ServerCallbacks:
                 and message.job_id == current.id
                 and message.assignment_token == current.assignment_token)
 
-    def _validate_control(self, message: WorkerMessageUnion | RejectedMessage) -> None:
+    def _validate_control(self, message: WorkerMessageUnion | RejectedMessage) -> bool:
+        """Authorize control; True identifies a completed assignment needing no renewal."""
         if message.connection_epoch != self.epoch or isinstance(message, Register):
             raise ProtocolViolation("message does not match the connection epoch")
         if isinstance(message, (Heartbeat, HeartbeatHeaders)):
+            job = self.jobs.get_job(message.job_id)
+            if (job is not None and job.state in {JobState.DONE, JobState.FAILED}
+                    and job.result_applied_at is not None
+                    and job.assigned_worker_id == self.worker_id
+                    and job.assignment_token == message.assignment_token
+                    and (job.inference is None or job.inference.assignment_epoch == self.epoch)):
+                return True  # A queued heartbeat may arrive after its assignment's result.
             if self._inference_heartbeat(message):
-                return
+                return False
             if self.starting:
                 raise ProtocolViolation("assignment must be acknowledged with Started")
             self._validate_active(message.job_id, message.assignment_token)
+        return False
 
     async def on_message(self, message: WorkerMessageUnion) -> None:
         # Independent inference/history and validation errors do not prove coding progress.
@@ -356,7 +358,9 @@ class ServerCallbacks:
             and all(isinstance(item, ValidationErrorResult) for item in message.payload)
         ):
             return
-        self._validate_control(message)
+        if self._validate_control(message):
+            self._refresh_receive = False  # Old work cannot keep another assignment alive.
+            return  # Gateway still validates and dispatches every payload item.
         if isinstance(message, Heartbeat) and self._inference_heartbeat(message):
             self.workers.heartbeat_assignment(
                 message.job_id, self.worker_id, message.assignment_token, self.epoch,
@@ -698,6 +702,30 @@ class ServerCallbacks:
                 else:
                     self._sent[item.method] = previous
             raise
+
+    async def _on_prepared(self, prepared: AssignmentArguments | PreparationState) -> None:
+        """Resume on the serial driver; preparing never authorizes worker execution."""
+        assert self.preparing is not None
+        job, token = self.preparing
+        self.preparing = None
+        if isinstance(prepared, JobState):
+            if prepared is JobState.QUEUED:
+                self.workers.requeue_assignment(job.id, self.worker_id, token, self.epoch)
+            else:
+                self.workers.finish_assignment(job.id, self.worker_id, token, prepared, self.epoch)
+            self.notify_jobs()
+            return
+        if not self.stops.authorize_dispatch(job.id, self.worker_id, token, self.epoch):
+            raise ProtocolViolation("assignment changed before dispatch authorization")
+        self.current, self.starting = (job, token, prepared.task), True
+        await self._send(
+            Assignment(
+                **call_header(execution_call_id(job.id, token)),
+                method="worker.execute",
+                arguments=prepared,
+            )
+        )
+        self.receive_deadline = asyncio.get_running_loop().time() + self.heartbeat_timeout
 
     async def _prepare_assignment(
         self, job: Job, token: str

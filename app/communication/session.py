@@ -62,6 +62,7 @@ class Session[Incoming: Message, Outgoing: Message]:
         self._ready = asyncio.Event()
         self._receiving = False
         self._watches: dict[str, asyncio.Task[Ready]] = {}
+        self._retiring_watches: set[asyncio.Task[Ready]] = set()
         self._done: deque[tuple[str, asyncio.Task[Ready]]] = deque()
         self._woken = False
         self._last_was_message = False
@@ -176,12 +177,12 @@ class Session[Incoming: Message, Outgoing: Message]:
         source: Callable[[], Awaitable[T]],
         callback: Callable[[T], Awaitable[None]],
     ) -> None:
-        """Observe once without owning the source's execution or running business in a task."""
+        """Await a source and queue its completion; only the serial driver runs the callback."""
         if self._closed:
             raise SessionClosed("session closed")
         if name in self._watches:
             raise RuntimeError("observer already registered")
-        if len(self._watches) >= _MAX_WATCHES:
+        if len(self._watches) + len(self._retiring_watches) >= _MAX_WATCHES:
             raise SessionOverflow("observer limit exceeded")
 
         async def observe() -> Ready:
@@ -207,9 +208,12 @@ class Session[Incoming: Message, Outgoing: Message]:
         """Invalidate before joining; no stale completion survives cancellation or rearming."""
         tasks = [task for name in names if (task := self._watches.pop(name, None)) is not None]
         self._done = deque((name, task) for name, task in self._done if name not in names)
+        self._retiring_watches.update(tasks)
         for task in tasks:
+            task.add_done_callback(self._retiring_watches.discard)
             task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        # A cancelled waiter cannot interrupt cleanup or hide it from a concurrent close.
+        await asyncio.shield(asyncio.gather(*tasks, return_exceptions=True))
 
     def periodic(self, interval: float, build: Callable[[], Outgoing | None]) -> None:
         """Send communication heartbeats independently of slow business handlers."""
@@ -415,6 +419,8 @@ class Session[Incoming: Message, Outgoing: Message]:
             tasks = [task for task in tasks if task is not asyncio.current_task()]
             for task in tasks:
                 task.cancel()
+            # These observers are already cancelled; a second cancel would abort cleanup.
+            tasks.extend(self._retiring_watches)
             self._close_task = asyncio.create_task(self._finish_close(code, tasks))
             if self._on_close is not None:
                 self._on_close()

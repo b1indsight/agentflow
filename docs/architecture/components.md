@@ -114,8 +114,11 @@ ServerCallbacks 持久接收终态 T 后直接调用 `self.results.apply`，核�
 网络请求不占用数据库事务；plugin hook 在提交后调用，不具备持久化投递保证。worker 不能直接更新这些状态。
 `JobCoordinator.prepare_for_assignment` 完成任务构造、push capability 签发和 I/O 后业务复查，
 直接返回 typed `AssignmentArguments` 或 QUEUED/DONE/FAILED。读取故障使用持久重试预算，签发故障直接失败。
-`ServerCallbacks` 在准备期间维持租约心跳，连接结束时取消并等待准备协程；发送前仍独立调用
-`self.stops.authorize_dispatch`，再以稳定执行 ID 和当前连接头构造 `worker.execute` 调用。
+`ServerCallbacks` 通过现有 `Session.watch` 观察编码准备，期间维持准备租约，同连接继续派发推理和
+处理消息。完成通知回到串行 driver，发送前仍独立调用 `self.stops.authorize_dispatch`，再以稳定执行 ID
+和当前连接头构造 `worker.execute` 调用；准备状态不授权 worker 提前报 Started 或结果。
+停止时撤销未下发准备，连接结束或替换时等待其取消清理。`Session.unwatch` 立即撤销完成通知，
+清理中的观察仍计入容量并由 Session 持有；关闭时一并等待，不重复取消已在清理的观察。
 非零 Codex exit 会转 FAILED。revision 成功后仅消费明确 addressed 的 item/version，deferred/遗漏项/
 clarification 保持 waiting；不把 addressed 当作远端 resolved。有未决问题时不重新请求审核。
 
@@ -174,8 +177,9 @@ worker 验证 epoch 与整批关联头后，通过 Dispatcher.reject_reply 通�
 serve 的 `workers/transport.py:serve_worker` 校验 bearer token、accept 与实际首条 message Register，
 再创建带随机 epoch 的 Session，交给 Runtime 装配回调并调用 `Gateway.serve`。
 回调保存调度、恢复、持久化和 assignment fencing 的连接局部状态，无 Endpoint/Run/Context 对象。
-每个 worker 是单槽，PostgreSQL 按 FIFO、worker `last_assigned_at` 和 Flow execution binding
-事务化领取任务。`WorkerRuntime` 直接负责主动拨号、认证、指数退避和连接任务的关闭等待，
+普通 worker 各有一个编码槽和独立推理槽，本地 bub 仅有推理槽。编码任务按 FIFO、worker
+`last_assigned_at` 和 Flow execution binding 在 PostgreSQL 中事务化领取；推理选择规则见下文。
+`WorkerRuntime` 直接负责主动拨号、认证、指数退避和连接任务的关闭等待，
 不再创建 WorkerClient。`Connection` 接口与 `WebSocketTransport` 均位于 `worker/runtime.py`；
 后者只适配底层 WebSocket IO，不负责连接生命周期，不保留独立 client 模块。
 `WorkerExecutor` 只依赖 CodingAgent 和 Flow repo/VCS helpers，不导入 Store、FastAPI 或 GitHub。

@@ -1,4 +1,4 @@
-"""Judge is a batch prerequisite; only coding work enters the worker queue."""
+"""Review decisions gate coding work; these tests stub inference."""
 
 import asyncio
 from types import SimpleNamespace
@@ -28,8 +28,6 @@ def triage_runtime(store, review_flow, recording_resources, monkeypatch):  # noq
     runtime.coordinator = coordinator(store, RecordingGitHub())
     runtime.judge = SimpleNamespace(triage=AsyncMock(side_effect=lambda context: judge_decision(
         TriageVerdict(verdict=Verdict.REVISE, confidence=1, instruction="Fix the bound"), context)))
-    runtime.judge.failure_summary = None
-    runtime.inference = Mock()
     runtime.settings = SimpleNamespace(judge_timeout_seconds=60)
     monkeypatch.setattr("app.controler.runtime.ReviewJudge", lambda *args, **kwargs: runtime.judge)
     runtime.gateway = Mock()

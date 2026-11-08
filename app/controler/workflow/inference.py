@@ -4,7 +4,6 @@ from collections.abc import Callable
 
 from app.contracts.protocol import InferenceResult
 from app.domain.inference_models import (
-    InferenceCallFailed,
     InferenceError,
     InferenceFailure,
     InferenceOutput,
@@ -50,10 +49,9 @@ class JobInference:
             if summary is None:
                 raise InferenceError(InferenceFailure(code="cancelled"))
             self.jobs.consume_inference(job.id)
-            raise InferenceCallFailed(InferenceError(
-                InferenceFailure(code=summary.last_failure_code),
-                worker_id=summary.last_worker_id, backend=summary.backend,
-            ), summary)
+            raise InferenceError(
+                InferenceFailure(code=summary.last_failure_code), backend=summary.backend,
+            )
         result = InferenceResult.model_validate(job.result_payload)
         assert result.output is not None
         return result.output

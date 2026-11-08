@@ -165,17 +165,8 @@ class InferenceJob(InferenceModel):
 
 
 class InferenceError(Exception):
-    """One failed attempt, without raw provider output or credentials."""
+    """A failed inference, without raw provider output or credentials."""
 
-    def __init__(self, failure: InferenceFailure, *, worker_id: str | None = None,
-                 backend: str | None = None) -> None:
+    def __init__(self, failure: InferenceFailure, *, backend: str | None = None) -> None:
         super().__init__(failure.code)
-        self.failure, self.worker_id, self.backend = failure, worker_id, backend
-
-
-class InferenceCallFailed(InferenceError):
-    """A logical call ended; its summary must not cause another model invocation."""
-
-    def __init__(self, error: InferenceError, summary: InferenceSummary) -> None:
-        super().__init__(error.failure, worker_id=error.worker_id, backend=error.backend)
-        self.summary = summary
+        self.failure, self.backend = failure, backend

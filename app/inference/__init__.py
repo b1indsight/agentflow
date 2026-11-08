@@ -1,1 +1,1 @@
-"""Business-independent inference adapters and bounded routing."""
+"""Business-independent inference adapters and worker endpoints."""
