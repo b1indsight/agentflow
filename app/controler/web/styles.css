@@ -1425,6 +1425,62 @@ pre code {
   font-size: var(--text-small);
   flex-shrink: 0;
 }
+.inference-notices {
+  margin-bottom: 30px;
+}
+.inference-notice {
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--status-yellow);
+  border-radius: 8px;
+  padding: 18px;
+  margin-bottom: 16px;
+  background: #fffdf8;
+  overflow-wrap: anywhere;
+}
+.inference-notice[data-historical="true"] {
+  border-left-color: var(--status-gray);
+  background: #fafcfb;
+}
+.inference-notice-top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.inference-notice h3 {
+  margin: 0;
+  font-size: var(--text-body);
+  font-weight: 550;
+}
+.inference-notice time {
+  display: block;
+  margin-top: 8px;
+  font-size: var(--text-small);
+  color: var(--muted);
+}
+.inference-attempts {
+  font-size: var(--text-control);
+  margin: 12px 0;
+}
+.inference-notice dl {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 6px 16px;
+  font-size: var(--text-control);
+  margin: 0;
+}
+.inference-notice dt {
+  color: var(--muted);
+}
+.inference-notice dd {
+  margin: 0;
+}
+.inference-notice .next-step p {
+  margin: 0;
+  font-size: var(--text-body);
+  line-height: 1.8;
+}
 .timeline {
   border-left: 1px solid var(--line);
   margin-left: 6px;

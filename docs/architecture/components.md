@@ -34,7 +34,7 @@ Runtime 统一初始化工具、effects、结果应用和 conversation broker；
 各包入口只说明职责，调用者直接导入具体模块。
 
 目录列表见[当前目录](roadmap.md#8-当前目录与里程碑)。ASGI Python 入口为
-`app.controler.api`，Judge 内部子进程入口为 `app.controler.review.runner`；
+`app.controler.api`，本地 bub 推理子进程入口为 `app.inference.runner`；
 CLI 命令为 `flowtool serve` / `flowtool worker`，真实验收入口为 `app.live_smoke`。
 
 ## 4.1 Webhook Ingress（FastAPI + uvicorn）
@@ -114,8 +114,11 @@ ServerCallbacks 持久接收终态 T 后直接调用 `self.results.apply`，核�
 网络请求不占用数据库事务；plugin hook 在提交后调用，不具备持久化投递保证。worker 不能直接更新这些状态。
 `JobCoordinator.prepare_for_assignment` 完成任务构造、push capability 签发和 I/O 后业务复查，
 直接返回 typed `AssignmentArguments` 或 QUEUED/DONE/FAILED。读取故障使用持久重试预算，签发故障直接失败。
-`ServerCallbacks` 在准备期间维持租约心跳，连接结束时取消并等待准备协程；发送前仍独立调用
-`self.stops.authorize_dispatch`，再以稳定执行 ID 和当前连接头构造 `worker.execute` 调用。
+`ServerCallbacks` 通过现有 `Session.watch` 观察编码准备，期间维持准备租约，同连接继续派发推理和
+处理消息。完成通知回到串行 driver，发送前仍独立调用 `self.stops.authorize_dispatch`，再以稳定执行 ID
+和当前连接头构造 `worker.execute` 调用；准备状态不授权 worker 提前报 Started 或结果。
+停止时撤销未下发准备，连接结束或替换时等待其取消清理。`Session.unwatch` 立即撤销完成通知，
+清理中的观察仍计入容量并由 Session 持有；关闭时一并等待，不重复取消已在清理的观察。
 非零 Codex exit 会转 FAILED。revision 成功后仅消费明确 addressed 的 item/version，deferred/遗漏项/
 clarification 保持 waiting；不把 addressed 当作远端 resolved。有未决问题时不重新请求审核。
 
@@ -174,8 +177,9 @@ worker 验证 epoch 与整批关联头后，通过 Dispatcher.reject_reply 通�
 serve 的 `workers/transport.py:serve_worker` 校验 bearer token、accept 与实际首条 message Register，
 再创建带随机 epoch 的 Session，交给 Runtime 装配回调并调用 `Gateway.serve`。
 回调保存调度、恢复、持久化和 assignment fencing 的连接局部状态，无 Endpoint/Run/Context 对象。
-每个 worker 是单槽，PostgreSQL 按 FIFO、worker `last_assigned_at` 和 Flow execution binding
-事务化领取任务。`WorkerRuntime` 直接负责主动拨号、认证、指数退避和连接任务的关闭等待，
+普通 worker 各有一个编码槽和独立推理槽，本地 bub 仅有推理槽。编码任务按 FIFO、worker
+`last_assigned_at` 和 Flow execution binding 在 PostgreSQL 中事务化领取；推理选择规则见下文。
+`WorkerRuntime` 直接负责主动拨号、认证、指数退避和连接任务的关闭等待，
 不再创建 WorkerClient。`Connection` 接口与 `WebSocketTransport` 均位于 `worker/runtime.py`；
 后者只适配底层 WebSocket IO，不负责连接生命周期，不保留独立 client 模块。
 `WorkerExecutor` 只依赖 CodingAgent 和 Flow repo/VCS helpers，不导入 Store、FastAPI 或 GitHub。
@@ -227,7 +231,7 @@ HOME、原生配置入口及自定义 MCP 变量保留；不增加配置解析�
   shell 进程组。该快照无法保证回收任意脱离进程树的进程；仍依赖外部隔离。
 - `ExecutionState` 按 ID 格式选择历史来源。Amp 原生 export 经公开块映射与脱敏后短时缓存，
   支持外部追加、块内分页、前缀编辑失效；不保存第二套捕获历史，不显示 thinking。
-  记录 ID 保留 session 前缀，满足 control 的来源校验；两端使用 protocol v17。
+  记录 ID 保留 session 前缀，满足 control 的来源校验；两端使用 protocol v18。
 - 不再拒绝 workspace Amp 设置或因额外工具拒收结果；保留必要的原生 shell 与完整终态检查。
   用户禁用与 workspace MCP 审批由原生 CLI 执行，不自动批准；managed policy/账户插件仍由
   运维核查，CLI 工具列表不能替代权限或 OS 隔离。
@@ -359,11 +363,13 @@ cursor 上使用 Psycopg `class_row(Model)`，由模型统一校验枚举、时�
 
 自动化覆盖 active 唯一约束、flow/attempt/job 往返、review upsert、assignment start/heartbeat/fencing、
 lease 到期 requeue、started grace/deadline、epoch fencing、result inbox 去重、跨 Store 可见性、delivery 去重和并发 assign。
-`WorkerStore.assign_job()` 使用事务内的 `FOR UPDATE SKIP LOCKED`，gateway 接受多个独立配置 worker。
+`WorkerStore.assign_job()` 是编码与推理的共同领取入口，gateway 接受多个独立配置 worker。
 
-仓储继续使用同步接口。assignment claim 无锁读取公平候选，只有请求方就是候选时才锁定自身 worker，
+仓储继续使用同步接口。编码 claim 无锁读取公平候选，只有请求方就是候选时才锁定自身 worker，
 重新检查 epoch、在线状态、空闲槽位及 drain/binding；随后锁定最早 eligible Flow job，并原子创建
-或复用 lifecycle binding。`with database.transaction() as tx` 提供绑定连接的数据库上下文；
+或复用 lifecycle binding。推理 claim 按 worker ID 顺序锁定候选状态，再比较本地优先、能力和空闲
+推理槽；它不创建 lifecycle binding。该选择串行化领取事务，代价随 worker 数量增长，不承诺大规模吞吐。
+`with database.transaction() as tx` 提供绑定连接的数据库上下文；
 服务用 `self.flows.using(tx)`、`self.jobs.using(tx)` 绑定自己持有的仓储。
 所有步骤共用该连接，异常一起回滚，事务退出后这些视图拒绝继续使用。
 结果的最终事务同时写入 flow/delivery/attempt、带源 job 唯一键的派生 job、`result_applied_at` 和 worker slot；
@@ -373,7 +379,7 @@ lease 到期 requeue、started grace/deadline、epoch fencing、result inbox 去
 评论使用稳定隐藏 marker 并分页核对本 bot 作者，PR 使用固定 head 查询，labels/reviewers 则核对目标状态。
 不能确认是否成功的非幂等请求保持 uncertain，不盲目重复 POST；`flow show` 显示待处理操作，retry 不能绕过它们。
 因此不宣称跨 PostgreSQL/GitHub 的通用 exactly-once。跨 worker session 迁移和多 serve HA 仍未实现。
-当前只初始化完整 schema，不执行 DDL 迁移或批量回填。serve/worker 在线使用 wire17，
+启动初始化 schema，并幂等升级推理 Job、双槽和批次关联字段；已有编码记录保留。serve/worker 在线使用 wire19，
 正常写 journal5 / ResultInbox v1；journal/inbox 只存业务事实，不存 message、条目身份、ACK 或 epoch。
 受限 v4 journal（内嵌 v14/v15 回执）与已知旧 inbox 只读转换；保持摘要，正常状态保存才写 v5。
 未知、混合或损坏记录保留并拒绝；切换和降级边界见[升级说明](../operations/upgrade.md)。
@@ -411,17 +417,40 @@ F4 的完整线程映射由 control 持有，遵循当前 worker v13 契约。is
 语义见 [Review 修订循环](review-loop.md)。`review/context.py` 在 control 读取 Issue、PR 与分页文件/
 讨论，冻结有界 JSON 快照；先后读取 PR 防止 head/base 在取数期间变化，未完成批次复用入库快照。
 
-triage 是 worker 请求之前的批次判断，由 control 的 review sweep 顺序处理 ready 且无 job 的批次。
+triage 由 control 的 review sweep 处理 ready 且无修订 job 的批次；需要模型时提交推理 Job，
+立即让出扫描，后续批次可继续入队。`review_batches.inference_job_id` 与修订 `job_id` 分开保存。
 REVISE 在工作流事务中创建 revision job 并关联批次；ANSWER/IGNORE/WAIT 直接处理批次。
-没有独立 job、assignment token 或本地任务恢复；中断后重新读取未完成批次。有效性检查与原子
-关联避免迟到决定或重复下发，过程不更改 worker 状态或 Flow binding。答案已发送但回执不明时，
+推理使用真实 Job/token/epoch、总截止和持久结果；重新扫描不能重置活动 Job 的请求和尝试预算。
+当前性检查与原子关联避免迟到决定或重复下发，推理不更改 Flow binding。答案已发送但回执不明时，
 只查询批次 marker，不重复 POST。`ReviewStore` 拥有上下文失效、答案发送授权和确定拒绝后的复位；
 coordinator 不直接更新业务表。批次答案与结果评论保留各自的事务授权和 marker 恢复，
 共享 `GitHubError.definitely_rejected` 的拒绝判定；线程回复与普通结果评论共用一个执行分支。
 
-control 的 `BubJudge` 启动独立 `app.controler.review.runner` 子进程，显式配置 bub 0.4.1 `ModelRunner.completion_response`，
-不创建 framework、加载插件、读写 tape 或执行工具。每批次独立请求与会话 ID；凭据仅通过允许的
-子进程环境传入。单次调用无 fallback/SDK retry，父进程限制时长和 stdout/stderr，取消时回收子进程。
+control 的 `ReviewJudge` 负责 prompt 和业务判定，`JobInference` 提交/读取通用 messages、可选 schema、
+字节限制及总预算。`WorkerStore.assign_job` 统一选择固定 execute/infer 槽，结果经共同受理和
+`ResultApplication` 保存、校验和应用；review 的 `TriageVerdict` 校验必须在推理 Job 成功前完成。
+无 Flow 的通用推理也能执行。旧 `InferenceRouter`、`InferencePool` 已删除，不保留另一套调度循环。
+controller 只在 bub 配置和依赖预检通过时托管 mini worker；会话就绪、空闲且能力合条件时优先。
+未配置、半配、忙或不符合条件则选普通 worker；永久调用错误不能通过更换 provider 绕过。
+`app.inference.runner` 子进程显式配置 bub 0.4.1 `ModelRunner.completion_response`，不创建 framework、
+加载插件、读写 tape 或执行工具，SDK retries 为零。父进程限制时长和管道，取消时回收子进程。
+
+普通 worker 在鉴权和 Registered 完成后登记推理能力，拥有 execute 和 infer 两个独立持久槽。
+编码忙不排除推理，draining/recovering/failed 排除；无需 Flow/repo 绑定即可接推理。
+bub mini worker 仅挂 infer 回调，通过有界进程内 Transport 和相同 Session/Dispatcher 注册及领取，
+不实例化编码 Runtime、不创建仓库或编码 journal。宿主负责连接重建、取消和 join，网络连接不能冒用本地身份。
+共享 `app.inference.transport` 负责异步执行与按 Job/token 取消，`app.inference.local` 管理 mini 生命周期；
+controller 不依赖 `app.worker`。临时 RPC helper 继续服务 history，推理通过持久 Job 回复关联恢复。
+worker 通过 Session.watch 观察异步答案任务，模型等待不占用串行消息 driver；断线取消并 join 推理。
+原生 Codex/Amp 每次调用 start，在 `worker_root/inference/answer-*` 下使用新会话，不授予 Flow capability。
+两类 worker 每次推理使用初始为空、不复用的非 Git 目录；原生工具/用户配置仍受外部专用账号、container 或 VM 约束。
+
+只有 Job 状态机重试可恢复错误，最多 3 次授权派发，排队、通信和退避计入同一总预算并跨重启保存；
+每次换 request_id，未知结果排除原 worker。不可恢复错误保守 WAIT，可恢复耗尽保留 READY，
+后续扫描允许新一轮 Job；已保存结果/决定的应用不需要 worker 在线，也不再次调用模型。
+三次未成功或提前耗尽预算的安全摘要与 Job 终结在同一事务写入活动账本；写入失败保留 inbox，仅重试应用。
+`InferenceNoticeStore` 按快照、keyset 分页读取每个批次的最新通知，并从当前批次/Flow 状态生成后续说明。
+控制台执行记录展示推理 Job、状态和派发次数；独立读取通知，不改变 jobs 分页，不轮询，也不向 GitHub 发送失败通知。
 
 严格校验四类 verdict、有限 confidence、动作字段和 envelope 身份。结果持久保存模型/adapter 版本、
 context digest、reason/open_points；answer 使用同一个答案，由反馈批次持久化发送授权并通过
@@ -475,7 +504,7 @@ WorkerBusinessCallbacks.on_history 内 await to_thread 调用 `ExecutionState.re
 其结果只属于旧 Session。Registered 前的合法 history 不绑定 epoch 或 ready；server 的 history 回复
 不要求 Started，也不替代 Started 或刷新执行存活期限。可靠领域事件/outbox 与 HA 不在当前通信架构范围。
 
-wire v17 的可关联 payload 校验失败整批拒收；合法兄弟项也不执行。每项收到同 method、
+wire v18 的可关联 payload 校验失败整批拒收；合法兄弟项也不执行。每项收到同 method、
 `reply_to=原条目ID` 的 `tool_result`，error 严格只有固定 `code=validation_error` 与
 `message=message payload failed validation`，不暴露详情。坏头、握手、epoch、容量或畸形 error
 仍关闭连接，不对 error 回 error；混合控制拒收不续租、不登记 ACK。

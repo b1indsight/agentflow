@@ -90,15 +90,18 @@ def _outcome(process: AmpProcessResult, expected: str | None, timeout: float) ->
         return CodingExecutionResult(
             session_id=session_id, last_message="", exit_code=124 if process.timed_out else process.exit_code or 1,
             failure_detail=detail,
+            failure_kind="timeout" if process.timed_out else "output_limit" if process.overflow else None,
         )
 
 
 class AmpCodingAgent:
     """Adapt coding requests to Amp threads; executor retains schema and VCS authority."""
 
-    def __init__(self, *, trusted_host: bool = False, timeout: float = 1200.0):
+    def __init__(self, *, trusted_host: bool = False, timeout: float = 1200.0,
+                 max_output_bytes: int = 8 * 1024 * 1024):
         self.trusted_host = trusted_host
         self.timeout = timeout
+        self.max_output_bytes = max_output_bytes
 
     async def start(
         self, task: str, cwd: Path, *, output_schema: Path | None = None,
@@ -149,6 +152,9 @@ class AmpCodingAgent:
             process = await run_amp(args, cwd=cwd, env=environment, input_text=prompt,
                                     timeout=self.timeout, timeout_kind="idle")
             result = _outcome(process, session_id, self.timeout)
+            if len(result.last_message.encode()) > self.max_output_bytes:
+                return CodingExecutionResult(session_id=result.session_id, last_message="", exit_code=1,
+                    failure_detail="Amp final answer exceeded byte limit", failure_kind="output_limit")
             # No SessionUnavailable fallback: the observed CLI stderr alone has not
             # proven that every missing-thread rejection precedes all execution.
             secrets = [value for key, value in environment.items()

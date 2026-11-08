@@ -36,7 +36,7 @@
 | Control Service / Job Coordinator | 部分 | Issue/default branch prepare、tool fencing、INITIAL 成功后创建 PR、原线程回复/保守 resolve 与持久恢复已接线；冲突自动处理与真实副作用 E2E 未完成 |
 | Codex / Context / Sandbox / VCS | 部分 | Flow repo、临时凭据、首轮 MCP、修订 resume/一次性 fallback、Git/jj clean/remote/lineage 双端核验有自动化；GitHub-only egress 与真实多轮 run 未验证 |
 | GitHub Client | 部分 | githubkit 0.16 App/installation 认证、Issue/repository/ref/PR、单仓库 Contents capability 与错误映射有隔离测试；M2 线程分页、回复、resolve 及竞态恢复有自动化；真实 App smoke 待验证 |
-| Judge | 已验证（adapter 自动化） | control 本地 bub 0.4.1 无工具子进程调用；批次冻结上下文、严格判定、直接答复及持久恢复已覆盖；仅 revise 创建 worker job，真实 provider smoke 待执行 |
+| Judge / 通用推理 | 已验证（adapter / Job 自动化） | wire19 推理 Job 复用统一领取/结果/恢复；优先合条件的 controller 托管 bub mini worker，否则使用普通 worker 的独立 Codex/Amp 空 workspace 会话；双槽、持久预算/重试及执行记录通知；业务决定和 GitHub 操作仍归 control，真实 provider smoke 待执行 |
 | PR / 反馈对账 | 已实现、有自动化覆盖 | 独立有界循环读取已追踪 PR 的 merge/close/reopen 及 Issue/PR/review/线程反馈；cursor、退避和诊断持久化，不补建漏失的新 Flow trigger |
 | Projects v2 | 已实现、有自动化覆盖 | 可选组织看板配置、资源 API、独立投影同步及 check/status/retry；远端失败不改写 Flow，真实看板待验收 |
 | 取消 / drain / 停机 | 已实现、有自动化覆盖 | 持久 stop intent、执行 nonce、进程组取消与停止凭据握手；未知执行/未决 effects 保留占用；drain 不派新 Flow，已有绑定继续收尾 |

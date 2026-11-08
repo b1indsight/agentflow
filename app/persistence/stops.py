@@ -49,6 +49,7 @@ class StopStore(Repository):
         with self._db.connection() as conn:
             job = conn.execute(
                 "SELECT id,assignment_token FROM jobs WHERE flow_id=%s AND assigned_worker_id=%s"
+                " AND kind<>'inference'"
                 " AND (started_at IS NOT NULL OR dispatch_authorized_at IS NOT NULL)"
                 " AND assignment_token IS NOT NULL"
                 " AND (started_at>=%s OR dispatch_authorized_at>=%s)"
@@ -70,10 +71,10 @@ class StopStore(Repository):
         if job is None:
             return False
         with self._db.transaction() as tx:
-            flow = tx.lock_workflow(job.flow_id)
+            flow = tx.lock_workflow(job.required_flow_id)
             if flow is None or flow.state is not FlowState.ACTIVE:
                 return False
-            delivery = DeliveryStore(tx).get_delivery(job.flow_id)
+            delivery = DeliveryStore(tx).get_delivery(flow.id)
             if delivery is not None and (delivery.state is DeliveryState.CLOSED or delivery.supersedes(job.kind)):
                 return False
             if not WorkerStore(tx).assignment_active(job_id, worker_id, token, epoch):

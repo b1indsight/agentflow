@@ -98,8 +98,9 @@ class RemoteStore(RepositoryViews, Store):
     def get_worker_execution(self, worker_id: str):
         return None
 
-    def worker_connected(self, worker_id: str, protocol_version: int, connection_epoch: str = ""):
-        return connected_worker(worker_id, protocol_version, connection_epoch)
+    def worker_connected(self, worker_id: str, protocol_version: int, connection_epoch: str = "",
+                         *, execute: bool = True):
+        return connected_worker(worker_id, protocol_version, connection_epoch, execute=execute)
 
     def worker_disconnected(
         self,
@@ -231,6 +232,7 @@ class RemoteCoordinator(JobCoordinator):
         self.tool_calls = 0
 
     async def prepare(self, job: Job) -> ExecutionTask | JobState:
+        assert job.flow_id is not None
         return InitialTask(
             flow_id=job.flow_id,
             attempt_id=7,

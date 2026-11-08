@@ -136,8 +136,8 @@ async def test_http_history_queues_behind_callbacks_but_not_execution(
         await asyncio.wait_for(started.wait(), 2)
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test",
                                     headers=issuer.headers()) as http:
-            # Execution runs independently; slow serial callbacks hold history replies.
-            if phase in {"preparation", "tool", "result"}:
+            # Execution and preparation run independently; serial callbacks still hold replies.
+            if phase in {"tool", "result"}:
                 broker.timeout = 0.02
                 blocked = await http.get("/api/flows/3/conversation?limit=1")
                 assert blocked.status_code == 504, blocked.text
@@ -147,6 +147,8 @@ async def test_http_history_queues_behind_callbacks_but_not_execution(
                 broker.timeout = 1
             first = await http.get("/api/flows/3/conversation?limit=1")
             assert first.status_code == 200, first.text
+            if phase == "preparation":
+                assert not release.is_set()
             assert first.json()["items"][0]["role"] == "user"
             assert first.json()["sessions"][0]["starts_at_beginning"]
             assert not first.json()["sessions"][0]["reached_end"]

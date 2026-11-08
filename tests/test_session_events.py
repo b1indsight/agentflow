@@ -59,6 +59,48 @@ async def test_ready_fairness_rearm_and_read_failure_drain():
         await session.close()
 
 
+@pytest.mark.parametrize("cancel_waiter", [False, True])
+async def test_close_joins_an_observer_already_being_unwatched(cancel_waiter):
+    # A stop may cancel preparation just before a replacement closes this session.
+    # Removing its callback must not release ownership of unfinished cleanup.
+    entered, cleaning, release, ended = (asyncio.Event() for _ in range(4))
+    session = make_session(Socket())
+
+    async def source():
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleaning.set()
+            await release.wait()
+            ended.set()
+
+    async def consume(value):
+        pytest.fail("cancelled observer delivered a completion")
+
+    session.watch("preparation", source, consume)
+    await asyncio.wait_for(entered.wait(), 1)
+    unwatch = asyncio.create_task(session.unwatch("preparation"))
+    close = None
+    try:
+        await asyncio.wait_for(cleaning.wait(), 1)
+        if cancel_waiter:
+            unwatch.cancel()
+            await asyncio.gather(unwatch, return_exceptions=True)
+        close = asyncio.create_task(session.close())
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(asyncio.shield(close), .05)
+        assert not ended.is_set()
+        release.set()
+        await asyncio.wait_for(close, 1)
+        await asyncio.gather(unwatch, return_exceptions=True)
+        assert ended.is_set()
+    finally:
+        release.set()
+        await session.close()
+        await asyncio.gather(unwatch, *([close] if close is not None else []), return_exceptions=True)
+
+
 @pytest.mark.parametrize("reverse", [False, True])
 async def test_gateway_deadline_covers_callback_and_cleanup(reverse):
     # A slow business callback must not defeat the stop deadline or nest its own receive.

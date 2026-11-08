@@ -60,6 +60,7 @@ class AsgiCoordinator(JobCoordinator):
         self.results = result_application(store, self._commit_result)
 
     async def prepare(self, job: Job) -> ExecutionTask | JobState:
+        assert job.flow_id is not None
         return InitialTask(
             flow_id=job.flow_id,
             attempt_id=self.attempt_id,
@@ -163,6 +164,7 @@ def test_real_asgi_websocket_completes_a_postgresql_job(store: Store, monkeypatc
                 payload=[],
                 worker_id="worker-1",
                 recovery=None,
+                inference=None,
             ).model_dump_json()
         )
         ready = False

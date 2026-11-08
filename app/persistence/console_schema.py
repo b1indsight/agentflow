@@ -15,6 +15,7 @@ SELECT f.id, f.repo, f.issue_number, f.state AS lifecycle, f.created_at,
  WHEN j.blocked THEN 'blocked'
  WHEN d.pr_number IS NULL AND (x.worker_id IS NULL OR x.released_at IS NOT NULL) THEN 'queued'
  WHEN EXISTS (SELECT 1 FROM jobs pending WHERE pending.flow_id=f.id
+ AND pending.kind<>'inference'
  AND (pending.state IN ('queued','running') OR (pending.result_received_at IS NOT NULL
  AND pending.result_applied_at IS NULL))) THEN 'running'
  WHEN d.state='open' THEN 'review' ELSE 'running' END AS phase,
@@ -50,7 +51,7 @@ LEFT JOIN LATERAL (SELECT candidate.*,
  AND candidate.recovery_deadline IS NOT NULL AND candidate.result_received_at IS NULL) OR EXISTS (
  SELECT 1 FROM result_effects e JOIN jobs ej ON ej.id=e.job_id
  WHERE ej.flow_id=f.id AND ej.result_applied_at IS NULL AND e.state='failed')) AS blocked
- FROM jobs candidate WHERE flow_id=f.id ORDER BY id DESC LIMIT 1) j ON TRUE;
+ FROM jobs candidate WHERE flow_id=f.id AND kind<>'inference' ORDER BY id DESC LIMIT 1) j ON TRUE;
 
 CREATE TABLE IF NOT EXISTS console_flows (
  flow_id BIGINT PRIMARY KEY REFERENCES flows(id),
@@ -152,7 +153,7 @@ BEGIN
  SELECT flow_id INTO identity FROM jobs WHERE id=NEW.job_id;
  ELSE identity=NEW.flow_id;
  END IF;
- PERFORM console_refresh(identity);
+ IF identity IS NOT NULL THEN PERFORM console_refresh(identity); END IF;
  RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;

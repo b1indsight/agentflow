@@ -565,7 +565,7 @@ class ReviewStore(Repository):
         """Discard only this snapshot, retaining uncertain answer evidence under the workflow lock."""
         with self._db.connection() as connection:
             connection.execute(
-                "UPDATE review_batches SET context=NULL,decision=NULL WHERE id=%s"
+                "UPDATE review_batches SET context=NULL,decision=NULL,inference_job_id=NULL WHERE id=%s"
                 " AND context=%s AND NOT answer_dispatched",
                 (batch.id, Jsonb(context.model_dump(mode="json"))),
             )

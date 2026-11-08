@@ -1,10 +1,22 @@
 # 当前版本部署与重启
 
-当前格式为 wire protocol v17、worker journal v5、ResultInbox v1、workspace manifest v1。
+当前格式为 wire protocol v18、worker journal v5、ResultInbox v1、workspace manifest v1。
 首次部署选择新数据库/schema 与新 worker root，serve/worker 固定到同一 commit/镜像 digest；
 schema 初始化只创建当前结构。本次协议迁移不增加 DDL、批量数据改写或部署自动化。
 
-## v16 → v17 协调升级
+## v17 → v18 协调升级
+
+v18 增加通用 `worker.infer` 和注册中的必填可空推理能力，网络不兼容 v17；持久格式不变。
+在受控维护窗口暂停新入口与分配，等待编码执行及已派发 effects 收敛，再协调更新 serve/worker。
+推理无 journal，连接关闭会取消本连接的推理；未保存决定的 READY 批次可在后续扫描重新计算。
+升级或分区可能重复计算和计费，不能假定旧原生进程已经退出。保留并核查 worker root/HOME。
+
+首次启动前核对 controller 的 bub model/key/base：三项均空会启用 worker 路由，半配不会转派。
+worker root 须在 Git 仓库/worktree 外，原生登录态和隔离要求见[部署说明](../deployment/README.md)。
+回退 v17 同样需要两端协调；先核验当前业务状态并准备本地 bub 配置，旧版没有此 worker 推理路由。
+不清空 journal/inbox，不伪造确认；持久格式相同不代表可以无损滚动回退。
+
+## 历史：v16 → v17 协调升级
 
 v17 引入仅含固定 code/message 的 `tool_result.error` 验证错误，持久格式与 v16 相同。
 网络只接受 v17，不兼容 v16 或更早版本，也不自动降级。安排受控维护窗口，停止新分配，等待活跃执行结束与
