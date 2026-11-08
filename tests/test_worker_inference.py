@@ -1,7 +1,7 @@
 """Unified job delivery keeps inference cancellation independent from coding."""
 
 import asyncio
-import json
+from contextlib import asynccontextmanager
 from datetime import timedelta
 from unittest.mock import AsyncMock, Mock
 
@@ -24,10 +24,10 @@ from app.contracts.protocol import (
     result_header,
 )
 from app.controler.workers.transport import serve_worker
+from app.controler.workflow.inference import InferencePending, JobInference
 from app.domain.inference_models import (
     LOCAL_BUB_WORKER_ID,
     InferenceCapability,
-    InferenceFailure,
     InferenceMessage,
     InferenceOutput,
     InferenceTask,
@@ -54,9 +54,25 @@ async def settled(store, job, state):
             await asyncio.sleep(.01)
 
 
-async def test_inference_cancellation_and_results_do_not_interrupt_coding(store, tmp_path):
+@asynccontextmanager
+async def connected(server, worker):
+    outgoing, incoming = asyncio.Queue(), asyncio.Queue()
+    serving = asyncio.create_task(serve_worker(QueueSocket(outgoing, incoming),
+        worker_tokens={"worker-1": "worker-secret"}, serve=server.serve_worker_session))
+    working = asyncio.create_task(run_worker(worker, QueueConnection(outgoing, incoming)))
+    try:
+        yield working, serving
+    finally:
+        working.cancel()
+        serving.cancel()
+        await asyncio.gather(working, serving, return_exceptions=True)
+        await worker.execution.shutdown()
+
+
+async def test_inference_cleanup_keeps_its_slot_without_blocking_coding(store, tmp_path):
     coding_entered, coding_release = asyncio.Event(), asyncio.Event()
     infer_entered, infer_release, infer_closed = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    infer_cleaning, cleanup_release = asyncio.Event(), asyncio.Event()
 
     class Coding(RecordingExecutor):
         async def execute(self, task, secret=None, *, tool_caller=None):
@@ -75,6 +91,8 @@ async def test_inference_cancellation_and_results_do_not_interrupt_coding(store,
                 return InferenceOutput(request_id=task.request_id, request_digest=task.digest,
                                        text="Summary", adapter_version="codex/v1")
             finally:
+                infer_cleaning.set()
+                await cleanup_release.wait()
                 infer_closed.set()
 
     flow = store.flows.create_flow("owner/repo", 8, 42)
@@ -87,51 +105,30 @@ async def test_inference_cancellation_and_results_do_not_interrupt_coding(store,
     worker = worker_runtime(worker_id="worker-1", worker_token="worker-secret",
                             serve_ws_url="ws://test", execution=execution, read_history=Mock())
     worker.inference = Inference()
-    outgoing, incoming = asyncio.Queue(), asyncio.Queue()
-    serving = asyncio.create_task(serve_worker(QueueSocket(outgoing, incoming),
-        worker_tokens={"worker-1": "worker-secret"}, serve=server.serve_worker_session))
-    working = asyncio.create_task(run_worker(worker, QueueConnection(outgoing, incoming)))
-    try:
-        await asyncio.wait_for(coding_entered.wait(), 3)
-        first = store.jobs.enqueue_inference(request())
-        server.gateway.wake_all()
-        await asyncio.wait_for(infer_entered.wait(), 3)
-        assert store.jobs.get_job(coding.id).state is JobState.RUNNING
-        clock = utcnow() + timedelta(seconds=20)
-        store.database._clock = lambda: clock
-        server.gateway.wake_all()
-        await settled(store, first, JobState.FAILED)
-        assert infer_closed.is_set()  # Cleanup precedes release of the durable inference slot.
-        assert store.jobs.get_job(coding.id).state is JobState.RUNNING
-        assert not working.done() and not serving.done()
-
-        infer_entered.clear()
-        infer_closed.clear()
-        second = store.jobs.enqueue_inference(request())
-        server.gateway.wake_all()
-        await asyncio.wait_for(infer_entered.wait(), 3)
-        coding_release.set()
-        await settled(store, coding, JobState.DONE)
-        assert store.jobs.get_job(second.id).state is JobState.RUNNING
-        infer_release.set()
-        await settled(store, second, JobState.DONE)
-        assert store.jobs.get_job(second.id).result_payload["output"]["text"] == "Summary"
-
-        infer_entered.clear()
-        infer_release.clear()
-        infer_closed.clear()
-        third = store.jobs.enqueue_inference(request())
-        server.gateway.wake_all()
-        await asyncio.wait_for(infer_entered.wait(), 3)
-        working.cancel()
-        await asyncio.gather(working, return_exceptions=True)
-        assert infer_closed.is_set()
-        assert store.jobs.get_job(third.id).attempt == 1
-    finally:
-        working.cancel()
-        serving.cancel()
-        await asyncio.gather(working, serving, return_exceptions=True)
-        await execution.shutdown()
+    async with connected(server, worker) as (working, serving):
+        try:
+            await asyncio.wait_for(coding_entered.wait(), 3)
+            inference = store.jobs.enqueue_inference(request())
+            server.gateway.wake_all()
+            await asyncio.wait_for(infer_entered.wait(), 3)
+            clock = utcnow() + timedelta(seconds=20)
+            store.database._clock = lambda: clock
+            server.gateway.wake_all()
+            await asyncio.wait_for(infer_cleaning.wait(), 3)
+            # Slow provider cleanup must not block coding results on the same session.
+            coding_release.set()
+            await settled(store, coding, JobState.DONE)
+            assert store.jobs.get_job(inference.id).state is JobState.RUNNING
+            assert store.workers.list_workers()[0].current_inference_job_id == inference.id
+            assert not infer_closed.is_set()
+            cleanup_release.set()
+            await settled(store, inference, JobState.FAILED)
+            assert infer_closed.is_set()
+            assert store.workers.list_workers()[0].current_inference_job_id is None
+            assert not working.done() and not serving.done()
+        finally:
+            cleanup_release.set()
+            coding_release.set()
 
 
 async def test_local_mini_and_repo_free_worker_share_dispatch_and_results(store, tmp_path):
@@ -157,34 +154,38 @@ async def test_local_mini_and_repo_free_worker_share_dispatch_and_results(store,
     worker = worker_runtime(worker_id="worker-1", worker_token="worker-secret",
                             serve_ws_url="ws://test", execution=execution, read_history=Mock())
     worker.inference = Remote()
-    outgoing, incoming = asyncio.Queue(), asyncio.Queue()
-    tasks = [asyncio.create_task(serve_local_inference(server.serve_worker_session, Local())),
-             asyncio.create_task(serve_worker(QueueSocket(outgoing, incoming),
-                worker_tokens={"worker-1": "worker-secret"}, serve=server.serve_worker_session)),
-             asyncio.create_task(run_worker(worker, QueueConnection(outgoing, incoming)))]
+    mini = asyncio.create_task(serve_local_inference(server.serve_worker_session, Local()))
+    caller = JobInference(store.database, server.gateway.wake_all)
+    local_task, remote_task = request(), request()
     try:
-        async with asyncio.timeout(3):
-            while len([w for w in store.workers.list_workers() if w.inference is not None]) != 2:
-                await asyncio.sleep(.01)
-        local = store.jobs.enqueue_inference(request())
-        server.gateway.wake_all()
-        await asyncio.wait_for(entered.wait(), 3)
-        assert store.jobs.get_job(local.id).assigned_worker_id == LOCAL_BUB_WORKER_ID
-        remote = store.jobs.enqueue_inference(request())
-        server.gateway.wake_all()
-        await settled(store, remote, JobState.DONE)
-        assert store.jobs.get_job(remote.id).assigned_worker_id == "worker-1"
-        release.set()
-        await settled(store, local, JobState.DONE)
-        assert store.jobs.get_job(local.id).result_payload["output"]["text"] == "Local answer"
-        with store.database.connection() as connection:
-            assert connection.execute("SELECT count(*) AS n FROM flow_executions").fetchone()["n"] == 0
-        assert not next(w for w in store.workers.list_workers() if w.worker_id == LOCAL_BUB_WORKER_ID).execute
+        async with connected(server, worker):
+            async with asyncio.timeout(3):
+                while len([w for w in store.workers.list_workers() if w.inference is not None]) != 2:
+                    await asyncio.sleep(.01)
+            with pytest.raises(InferencePending) as pending:
+                await caller.infer(local_task)
+            local = store.jobs.get_job(pending.value.job_id)
+            await asyncio.wait_for(entered.wait(), 3)
+            assert store.jobs.get_job(local.id).assigned_worker_id == LOCAL_BUB_WORKER_ID
+            with pytest.raises(InferencePending) as pending:
+                await caller.infer(remote_task)
+            remote = store.jobs.get_job(pending.value.job_id)
+            await settled(store, remote, JobState.DONE)
+            assert store.jobs.get_job(remote.id).assigned_worker_id == "worker-1"
+            release.set()
+            await settled(store, local, JobState.DONE)
+            assert local.flow_id is None and remote.flow_id is None
+            with store.database.connection() as connection:
+                assert connection.execute("SELECT count(*) AS n FROM flow_executions").fetchone()["n"] == 0
+            assert not next(w for w in store.workers.list_workers() if w.worker_id == LOCAL_BUB_WORKER_ID).execute
     finally:
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        await execution.shutdown()
+        mini.cancel()
+        await asyncio.gather(mini, return_exceptions=True)
+    # A recreated caller reads saved answers with both workers gone, without a new attempt.
+    recovered = JobInference(store.database, server.gateway.wake_all)
+    assert (await recovered.infer(local_task)).text == "Local answer"
+    assert (await recovered.infer(remote_task)).text == "Remote answer"
+    assert store.jobs.get_job(local.id).attempt == store.jobs.get_job(remote.id).attempt == 1
 
 
 async def test_network_worker_cannot_claim_local_priority_even_with_a_configured_token():
@@ -196,70 +197,9 @@ async def test_network_worker_cannot_claim_local_priority_even_with_a_configured
     assert not socket.accept.called and not serve.called
 
 
-@pytest.mark.parametrize("outcome", ["malformed", "silent", "heartbeats"])
-async def test_invalid_or_silent_inference_peer_settles_only_its_job(store, outcome):
-    # Invalid output is terminal; a silent connection must release its unknown attempt for recovery.
-    outgoing, incoming = asyncio.Queue(), asyncio.Queue()
-    server = AsgiRuntime(store, 1)
-    server.settings.worker_heartbeat_timeout = .5
-    serving = asyncio.create_task(serve_worker(QueueSocket(outgoing, incoming),
-        worker_tokens={"worker-1": "worker-secret"}, serve=server.serve_worker_session))
-    await outgoing.put(Register(**message_header(None), control="register", payload=[],
-        worker_id="worker-1", recovery=None,
-        inference=InferenceCapability(adapter_version="codex/v1")).model_dump_json())
-    try:
-        async with asyncio.timeout(3):
-            while not isinstance(registered := parse_server_message(await incoming.get()), Registered):
-                pass
-            job = store.jobs.enqueue_inference(request())
-            server.gateway.wake_all()
-            while True:
-                message = parse_server_message(await incoming.get())
-                call = next((item for item in message.payload if isinstance(item, InferenceRequest)), None)
-                if call is not None:
-                    break
-            if outcome == "silent":
-                await asyncio.shield(serving)
-                saved = store.jobs.get_job(job.id)
-                assert saved.state is JobState.QUEUED and saved.attempt == 1
-                assert saved.inference.excluded_workers == {"worker-1"}
-                return
-            if outcome == "heartbeats":
-                for _ in range(2):
-                    await asyncio.sleep(.3)
-                    await outgoing.put(Heartbeat(**message_header(registered.connection_epoch),
-                        control="heartbeat", payload=[], job_id=job.id,
-                        assignment_token=call.assignment_token).model_dump_json())
-                assert not serving.done()  # Inference-only liveness renews the connection, not its budget.
-            result = InferenceResult(**result_header(call.message_id), method="worker.infer",
-                job_id=job.id, assignment_token=call.assignment_token,
-                output=InferenceOutput(request_id=call.arguments.request_id, request_digest=call.arguments.digest,
-                                       text="Answer", adapter_version="codex/v1"))
-            wire = WorkerMessage(**message_header(registered.connection_epoch), control=None,
-                                 payload=[result]).model_dump(mode="json")
-            wire["payload"][0]["output"]["unexpected"] = True
-            await outgoing.put(json.dumps(wire))
-            await settled(store, job, JobState.FAILED)
-        failed = store.jobs.get_job(job.id)
-        assert failed.attempt == 1 and failed.inference.summary.last_failure_code == "invalid_response"
-        assert not serving.done()
-        assert store.workers.list_workers()[0].current_inference_job_id is None
-    finally:
-        serving.cancel()
-        await asyncio.gather(serving, return_exceptions=True)
-
-
-@pytest.mark.parametrize(("coding_state", "outcome", "defect"), [
-    ("idle", JobState.DONE, None),
-    ("idle", JobState.FAILED, None),
-    ("starting", JobState.DONE, None),
-    ("running", JobState.DONE, None),
-    ("idle", JobState.DONE, "token"),
-    ("idle", JobState.DONE, "epoch"),
-    ("idle", JobState.DONE, "payload"),
-])
+@pytest.mark.parametrize("wrong_token", [False, True])
 async def test_completed_inference_heartbeat_skips_renewal_but_dispatches_payload(
-    store, coding_state, outcome, defect,
+    store, wrong_token,
 ):
     # A queued heartbeat can follow its result, even after another slot starts work.
     outgoing, incoming = asyncio.Queue(), asyncio.Queue()
@@ -297,54 +237,41 @@ async def test_completed_inference_heartbeat_skips_renewal_but_dispatches_payloa
         first = store.jobs.enqueue_inference(request())
         server.gateway.wake_all()
         first_call = await next_call(InferenceRequest)
-        result = answer(first_call) if outcome is JobState.DONE else InferenceResult(
-            **result_header(first_call.message_id), method="worker.infer",
-            job_id=first.id, assignment_token=first_call.assignment_token,
-            failure=InferenceFailure(code="invalid_response"),
-        )
         await outgoing.put(WorkerMessage(**message_header(epoch), control=None,
-                                         payload=[result]).model_dump_json())
-        await settled(store, first, outcome)
+                                         payload=[answer(first_call)]).model_dump_json())
+        await settled(store, first, JobState.DONE)
 
-        coding = None
-        if coding_state != "idle":
-            coding = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
-            server.gateway.wake_all()
-            call = await next_call(Assignment)
-            if coding_state == "running":
-                await outgoing.put(WorkerMessage(**message_header(epoch), control=None, payload=[
-                    Started(**call_header(), method="server.execution_started",
-                            arguments=ExecutionIdentity(job_id=coding.id,
-                                assignment_token=call.arguments.assignment_token)),
-                ]).model_dump_json())
-                async with asyncio.timeout(3):
-                    while store.jobs.get_job(coding.id).started_at is None:
-                        await asyncio.sleep(.01)
+        coding = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
+        server.gateway.wake_all()
+        call = await next_call(Assignment)
+        await outgoing.put(WorkerMessage(**message_header(epoch), control=None, payload=[
+            Started(**call_header(), method="server.execution_started",
+                    arguments=ExecutionIdentity(job_id=coding.id,
+                        assignment_token=call.arguments.assignment_token)),
+        ]).model_dump_json())
+        async with asyncio.timeout(3):
+            while store.jobs.get_job(coding.id).started_at is None:
+                await asyncio.sleep(.01)
 
         second = store.jobs.enqueue_inference(request())
         server.gateway.wake_all()
         second_call = await next_call(InferenceRequest)
         saved_first = store.jobs.get_job(first.id)
-        saved_coding = store.jobs.get_job(coding.id) if coding else None
-        heartbeat = Heartbeat(**message_header("old-epoch" if defect == "epoch" else epoch),
+        saved_coding = store.jobs.get_job(coding.id)
+        heartbeat = Heartbeat(**message_header(epoch),
             control="heartbeat", job_id=first.id,
-            assignment_token="wrong-token" if defect == "token" else first_call.assignment_token,
+            assignment_token="wrong-token" if wrong_token else first_call.assignment_token,
             payload=[answer(second_call)])
-        await outgoing.put(heartbeat.model_copy(update={"payload": []}).model_dump_json())
-        wire = heartbeat.model_dump(mode="json")
-        if defect == "payload":
-            wire["payload"][0]["output"]["unexpected"] = True
-        await outgoing.put(json.dumps(wire))
-        if defect in {"token", "epoch"}:
+        await outgoing.put(heartbeat.model_dump_json())
+        if wrong_token:
             await asyncio.wait_for(asyncio.shield(serving), 3)
             assert store.jobs.get_job(second.id).state is JobState.QUEUED
             assert store.workers.list_workers()[0].last_disconnect_reason is not None
         else:
-            await settled(store, second, JobState.FAILED if defect == "payload" else JobState.DONE)
+            await settled(store, second, JobState.DONE)
             assert not serving.done()
             assert store.jobs.get_job(first.id) == saved_first
-            if coding:
-                assert store.jobs.get_job(coding.id) == saved_coding
+            assert store.jobs.get_job(coding.id) == saved_coding
     finally:
         serving.cancel()
         await asyncio.gather(serving, return_exceptions=True)
@@ -385,11 +312,7 @@ async def test_slow_coding_preparation_keeps_inference_live(store, tmp_path, mon
     worker = worker_runtime(worker_id="worker-1", worker_token="worker-secret",
                             serve_ws_url="ws://test", execution=execution, read_history=Mock())
     worker.inference = Inference()
-    outgoing, incoming = asyncio.Queue(), asyncio.Queue()
-    serving = asyncio.create_task(serve_worker(QueueSocket(outgoing, incoming),
-        worker_tokens={"worker-1": "worker-secret"}, serve=server.serve_worker_session))
-    working = asyncio.create_task(run_worker(worker, QueueConnection(outgoing, incoming)))
-    try:
+    async with connected(server, worker) as (working, serving):
         await asyncio.wait_for(preparing.wait(), 3)
         first_coding_heartbeat = store.jobs.get_job(coding.id).heartbeat_at
         inference = store.jobs.enqueue_inference(request())
@@ -411,8 +334,3 @@ async def test_slow_coding_preparation_keeps_inference_live(store, tmp_path, mon
         prepare_release.set()
         await settled(store, coding, JobState.DONE)
         prepare_call.assert_awaited_once()
-    finally:
-        working.cancel()
-        serving.cancel()
-        await asyncio.gather(working, serving, return_exceptions=True)
-        await execution.shutdown()

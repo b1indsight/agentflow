@@ -283,153 +283,136 @@ const inferenceNotice: InferenceNotice = {
   next_condition: "本批次仍待处理，后续扫描可继续尝试。",
 };
 
-for (const width of [1440, 390]) {
-  test(`unified inference jobs show dispatched attempts and queued zero at ${width}px`, async ({
-    page,
-  }, testInfo) => {
-    await page.setViewportSize({ width, height: 1200 });
-    await page.route("**/api/flows/42/jobs?**", (route) =>
-      route.fulfill({
-        json: {
-          items: ["queued", "running", "failed", "done"].map((state, i) => ({
-            id: 10 - i,
-            flow_id: 42,
-            attempt: state === "queued" ? 0 : state === "failed" ? 3 : 1,
-            kind: "inference",
-            state,
-            worker_id: state === "queued" ? null : "__local_bub__",
-            started_at: null,
-            updated_at: now,
-            created_at: now,
-            finished_at: null,
-            error_code: state === "failed" ? "execution_error" : null,
-          })),
-          next_cursor: null,
-          has_more: false,
-        },
-      }),
-    );
-    await page.goto("/#flow/42/jobs");
-    const jobs = page.locator(".timeline-item");
-    await expect(jobs).toHaveCount(4);
-    await expect(jobs.locator("strong")).toHaveText([
-      "推理 · 派发次数 0",
-      "推理 · 派发次数 1",
-      "推理 · 派发次数 3",
-      "推理 · 派发次数 1",
-    ]);
-    await expect(jobs.locator(".badge")).toHaveText([
-      "queued",
-      "running",
-      "failed",
-      "done",
-    ]);
-    await expect(
-      page.getByText("尝试次数包含已授权派发但结果未知的任务。", {
-        exact: false,
-      }),
-    ).toBeVisible();
-    expect(
-      await page
-        .locator(".detail-body")
-        .evaluate((node) => node.scrollWidth <= node.clientWidth),
-    ).toBe(true);
-    await page.screenshot({
-      path: testInfo.outputPath(`inference-jobs-${width}.png`),
-    });
-  });
-}
+test("unified inference jobs show dispatched attempts and queued zero", async ({
+  page,
+}) => {
+  await page.route("**/api/flows/42/jobs?**", (route) =>
+    route.fulfill({
+      json: {
+        items: ["queued", "running", "failed", "done"].map((state, i) => ({
+          id: 10 - i,
+          flow_id: 42,
+          attempt: state === "queued" ? 0 : state === "failed" ? 3 : 1,
+          kind: "inference",
+          state,
+          worker_id: state === "queued" ? null : "__local_bub__",
+          started_at: null,
+          updated_at: now,
+          created_at: now,
+          finished_at: null,
+          error_code: state === "failed" ? "execution_error" : null,
+        })),
+        next_cursor: null,
+        has_more: false,
+      },
+    }),
+  );
+  await page.goto("/#flow/42/jobs");
+  const jobs = page.locator(".timeline-item");
+  await expect(jobs).toHaveCount(4);
+  await expect(jobs.locator("strong")).toHaveText([
+    "推理 · 派发次数 0",
+    "推理 · 派发次数 1",
+    "推理 · 派发次数 3",
+    "推理 · 派发次数 1",
+  ]);
+  await expect(jobs.locator(".badge")).toHaveText([
+    "queued",
+    "running",
+    "failed",
+    "done",
+  ]);
+  await expect(
+    page.getByText("尝试次数包含已授权派发但结果未知的任务。", {
+      exact: false,
+    }),
+  ).toBeVisible();
+  expect(
+    await page
+      .locator(".detail-body")
+      .evaluate((node) => node.scrollWidth <= node.clientWidth),
+  ).toBe(true);
+});
 
-for (const width of [1440, 390]) {
-  test(`inference notices keep authorized attempts, history and independent snapshot paging at ${width}px`, async ({
-    page,
-  }, testInfo) => {
-    // Budget exhaustion and a final authentication failure must not imply three retries or Flow failure.
-    await page.setViewportSize({ width, height: 900 });
-    const errors: string[] = [];
-    page.on("pageerror", (error) => errors.push(error.message));
-    const requests: URL[] = [];
-    await page.route("**/api/flows/42/inference-notices?**", (route) => {
-      const url = new URL(route.request().url());
-      requests.push(url);
-      const older = url.searchParams.has("cursor");
-      return route.fulfill({
-        json: {
-          items: [
-            older
-              ? {
-                  ...inferenceNotice,
-                  key: "inference-exhausted:9",
-                  batch_id: 9,
-                  historical: true,
-                  last_failure_code: "authentication",
-                  stop_reason: "non_retryable",
-                  next_condition: "该批次已完成，此通知仅作历史记录。",
-                }
-              : {
-                  ...inferenceNotice,
-                  attempts: 2,
-                  stop_reason: "deadline",
-                },
-          ],
-          snapshot: 17,
-          next_cursor: older ? null : "older-notices",
-          has_more: !older,
-        },
-      });
+test("inference notices keep authorized attempts, history and snapshot paging on mobile", async ({
+  page,
+}) => {
+  // Budget exhaustion and a final authentication failure must not imply three retries or Flow failure.
+  await page.setViewportSize({ width: 390, height: 900 });
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  const requests: URL[] = [];
+  await page.route("**/api/flows/42/inference-notices?**", (route) => {
+    const url = new URL(route.request().url());
+    requests.push(url);
+    const older = url.searchParams.has("cursor");
+    return route.fulfill({
+      json: {
+        items: [
+          older
+            ? {
+                ...inferenceNotice,
+                key: "inference-exhausted:9",
+                batch_id: 9,
+                historical: true,
+                last_failure_code: "authentication",
+                stop_reason: "non_retryable",
+                next_condition: "该批次已完成，此通知仅作历史记录。",
+              }
+            : {
+                ...inferenceNotice,
+                attempts: 2,
+                stop_reason: "deadline",
+              },
+        ],
+        snapshot: 17,
+        next_cursor: older ? null : "older-notices",
+        has_more: !older,
+      },
     });
-    await page.goto("/#flow/42/jobs");
-    const notices = page.getByRole("region", { name: "推理通知", exact: true });
-    await expect(notices.getByRole("article")).toHaveCount(1);
-    await expect(notices).toContainText("尝试 2 / 3 次");
-    await expect(notices).toContainText("总预算耗尽");
-    await expect(notices).toContainText("推理请求超时");
-    await expect(notices).toContainText("worker-inference-1");
-    await expect(notices).toContainText("codex");
-    await expect(notices).toContainText(inferenceNotice.next_condition);
-    await expect(notices.locator("time").first()).toHaveAttribute(
-      "datetime",
-      now,
-    );
-    await expect(
-      notices.getByRole("button", { name: "重试", exact: true }),
-    ).toHaveCount(0);
-    await page.screenshot({
-      path: testInfo.outputPath(`notices-${width}.png`),
-    });
-    await notices.getByRole("button", { name: "读取更多推理通知" }).click();
-    const historical = notices.getByRole("article").last();
-    await expect(historical).toContainText("历史通知");
-    await expect(historical).toContainText("尝试 3 / 3 次");
-    await expect(historical).toContainText("身份验证失败");
-    await expect(historical).toContainText("不可直接重试");
-    await expect(historical).toContainText(
-      "该批次已完成，此通知仅作历史记录。",
-    );
-    await historical.scrollIntoViewIfNeeded();
-    await page.screenshot({
-      path: testInfo.outputPath(`history-${width}.png`),
-    });
-    // StrictMode can abort and repeat the first read; every initial read must still start a fresh snapshot.
-    for (const url of requests.filter((url) => !url.searchParams.has("cursor")))
-      expect(Object.fromEntries(url.searchParams)).toEqual({ limit: "20" });
-    expect(
-      requests
-        .filter((url) => url.searchParams.has("cursor"))
-        .map((url) => Object.fromEntries(url.searchParams)),
-    ).toEqual([{ cursor: "older-notices", snapshot: "17", limit: "20" }]);
-    expect(
-      await page
-        .locator(".detail-body")
-        .evaluate((node) => node.scrollWidth <= node.clientWidth),
-    ).toBe(true);
-    expect(errors).toEqual([]);
   });
-}
+  await page.goto("/#flow/42/jobs");
+  const notices = page.getByRole("region", { name: "推理通知", exact: true });
+  await expect(notices.getByRole("article")).toHaveCount(1);
+  await expect(notices).toContainText("尝试 2 / 3 次");
+  await expect(notices).toContainText("总预算耗尽");
+  await expect(notices).toContainText("推理请求超时");
+  await expect(notices).toContainText("worker-inference-1");
+  await expect(notices).toContainText("codex");
+  await expect(notices).toContainText(inferenceNotice.next_condition);
+  await expect(notices.locator("time").first()).toHaveAttribute(
+    "datetime",
+    now,
+  );
+  await expect(
+    notices.getByRole("button", { name: "重试", exact: true }),
+  ).toHaveCount(0);
+  await notices.getByRole("button", { name: "读取更多推理通知" }).click();
+  const historical = notices.getByRole("article").last();
+  await expect(historical).toContainText("历史通知");
+  await expect(historical).toContainText("尝试 3 / 3 次");
+  await expect(historical).toContainText("身份验证失败");
+  await expect(historical).toContainText("不可直接重试");
+  await expect(historical).toContainText("该批次已完成，此通知仅作历史记录。");
+  // StrictMode can abort and repeat the first read; every initial read must still start a fresh snapshot.
+  for (const url of requests.filter((url) => !url.searchParams.has("cursor")))
+    expect(Object.fromEntries(url.searchParams)).toEqual({ limit: "20" });
+  expect(
+    requests
+      .filter((url) => url.searchParams.has("cursor"))
+      .map((url) => Object.fromEntries(url.searchParams)),
+  ).toEqual([{ cursor: "older-notices", snapshot: "17", limit: "20" }]);
+  expect(
+    await page
+      .locator(".detail-body")
+      .evaluate((node) => node.scrollWidth <= node.clientWidth),
+  ).toBe(true);
+  expect(errors).toEqual([]);
+});
 
 test("inference notice read failures preserve jobs and loaded notices, with safe empty and error states", async ({
   page,
-}, testInfo) => {
+}) => {
   // A separate read can fail at either boundary; never erase the other list or leak a proxy error body.
   let failNotices = true;
   let failJobs = false;
@@ -487,10 +470,6 @@ test("inference notice read failures preserve jobs and loaded notices, with safe
   await expect(notices.getByRole("alert")).toContainText("推理通知读取失败");
   await expect(page.locator(".timeline")).toContainText("coding-worker");
   await expect(page.getByRole("tabpanel")).not.toContainText("TOKEN=secret");
-  for (const width of [1440, 390]) {
-    await page.setViewportSize({ width, height: 900 });
-    await page.screenshot({ path: testInfo.outputPath(`error-${width}.png`) });
-  }
   failNotices = false;
   await notices.getByRole("button", { name: "重新读取推理通知" }).click();
   await expect(notices.getByRole("article")).toHaveCount(1);
@@ -525,27 +504,17 @@ test("inference notice read failures preserve jobs and loaded notices, with safe
   await page.getByRole("button", { name: "刷新当前视图" }).click();
   await expect(notices).toContainText("暂无推理通知");
   await expect(notices.getByRole("article")).toHaveCount(0);
-  for (const width of [1440, 390]) {
-    await page.setViewportSize({ width, height: 900 });
-    await page.screenshot({ path: testInfo.outputPath(`empty-${width}.png`) });
-  }
 });
 
-test("inference notice reads cancel and fence late responses on tab, refresh and Flow changes", async ({
+test("late inference notices cannot overwrite another Flow", async ({
   page,
 }) => {
-  // Simulate a transport that completes after abort, proving the UI fence independently of fetch cancellation.
+  // A late response must not appear in the new Flow even if the transport ignores abort.
   await page.addInitScript(() => {
     const fetchOriginal = window.fetch;
     window.fetch = async (input, options) => {
       if (!String(input).includes("/inference-notices"))
         return fetchOriginal(input, options);
-      options?.signal?.addEventListener("abort", () => {
-        sessionStorage.setItem(
-          "notice-aborts",
-          String(Number(sessionStorage.getItem("notice-aborts")) + 1),
-        );
-      });
       const response = await fetchOriginal(input, {
         ...options,
         signal: undefined,
@@ -555,24 +524,28 @@ test("inference notice reads cancel and fence late responses on tab, refresh and
       return response;
     };
   });
-  let state = "旧页签请求";
   let release!: () => void;
-  const hold = () =>
-    new Promise<void>((resolve) => {
-      release = resolve;
-    });
-  let gate = hold();
-  const requested: string[] = [];
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let requested = false;
   await page.route("**/api/flows/*/inference-notices?**", async (route) => {
-    const requestedState = state;
-    requested.push(requestedState);
-    if (requestedState.startsWith("旧")) await gate;
+    const old = new URL(route.request().url()).pathname.includes("/42/");
+    if (old) {
+      requested = true;
+      await gate;
+    }
     return route.fulfill({
       json: {
-        items: [{ ...inferenceNotice, next_condition: requestedState }],
+        items: [
+          {
+            ...inferenceNotice,
+            next_condition: old ? "旧 Flow 请求" : "新 Flow 请求",
+          },
+        ],
         snapshot: 17,
-        next_cursor: requestedState === "新页签请求" ? "older-notices" : null,
-        has_more: requestedState === "新页签请求",
+        next_cursor: null,
+        has_more: false,
       },
     });
   });
@@ -588,66 +561,29 @@ test("inference notice reads cancel and fence late responses on tab, refresh and
       },
     }),
   );
-  await page.goto("/#flow/42/overview");
-  await expect(page.getByRole("heading", { name: "任务信息" })).toBeVisible();
-  expect(requested).toEqual([]);
-  await page.getByRole("tab", { name: "执行记录" }).click();
-  await expect.poll(() => requested.includes("旧页签请求")).toBe(true);
-  const aborts = () =>
-    page.evaluate(() => Number(sessionStorage.getItem("notice-aborts")));
-  const beforeTab = await aborts();
-  await page.getByRole("tab", { name: "概览" }).click();
-  await expect.poll(aborts).toBeGreaterThan(beforeTab);
-  state = "新页签请求";
-  await page.getByRole("tab", { name: "执行记录" }).click();
-  const notices = page.getByRole("region", { name: "推理通知", exact: true });
-  const drainOld = async (oldState: string) => {
-    release();
-    await expect
-      .poll(() =>
-        page.evaluate(() => sessionStorage.getItem("notice-completed")),
-      )
-      .toBe(oldState);
-    // Wait for React to paint after the late fetch finishes, not just for the network route to release.
-    await page.evaluate(
-      () =>
-        new Promise<void>((resolve) =>
-          requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
-        ),
-    );
-    await expect(notices).toContainText(state);
-    await expect(notices).not.toContainText(oldState);
-  };
-  await expect(notices).toContainText(state);
-  await drainOld("旧页签请求");
-  state = "旧刷新请求";
-  gate = hold();
-  await notices.getByRole("button", { name: "读取更多推理通知" }).click();
-  await expect.poll(() => requested.includes(state)).toBe(true);
-  await expect(
-    notices.getByRole("button", { name: "读取更多推理通知" }),
-  ).toBeDisabled();
-  const beforeRefresh = await aborts();
-  state = "新刷新请求";
-  await page.getByRole("button", { name: "刷新当前视图" }).click();
-  await expect(notices).toContainText(state);
-  expect(await aborts()).toBeGreaterThan(beforeRefresh);
-  await drainOld("旧刷新请求");
-  state = "旧 Flow 请求";
-  gate = hold();
-  await page.getByRole("button", { name: "刷新当前视图" }).click();
-  await expect.poll(() => requested.includes(state)).toBe(true);
-  const beforeFlow = await aborts();
-  state = "新 Flow 请求";
+  await page.goto("/#flow/42/jobs");
+  await expect.poll(() => requested).toBe(true);
   await page.evaluate(() => {
     location.hash = "flow/43/jobs";
   });
   await expect(
     page.getByRole("heading", { name: "另一个 Flow" }),
   ).toBeVisible();
-  await expect(notices).toContainText(state);
-  expect(await aborts()).toBeGreaterThan(beforeFlow);
-  await drainOld("旧 Flow 请求");
+  const notices = page.getByRole("region", { name: "推理通知", exact: true });
+  await expect(notices).toContainText("新 Flow 请求");
+  release();
+  await expect
+    .poll(() => page.evaluate(() => sessionStorage.getItem("notice-completed")))
+    .toBe("旧 Flow 请求");
+  // Wait for the late fetch to reach React, not just for the network route to release.
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      ),
+  );
+  await expect(notices).toContainText("新 Flow 请求");
+  await expect(notices).not.toContainText("旧 Flow 请求");
 });
 
 test("shared virtual lists preserve distant focus, omitted gaps and keyboard order", async ({

@@ -1,24 +1,34 @@
-"""Review decisions gate coding work; these tests stub inference."""
+"""Review decisions gate coding work, including durable inference failure and replay."""
 
 import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from starlette.testclient import TestClient
 
+from app.contracts.protocol import PROTOCOL_VERSION, InferenceResult, result_header
+from app.controler.api import create_app
+from app.controler.review.judge import ReviewJudge
 from app.controler.runtime import ServerRuntime
+from app.controler.workflow.inference import InferencePending, JobInference
 from app.controler.workflow.service import ControlService
-from app.domain.models import JobKind, TriageVerdict, Verdict
+from app.domain.inference_models import InferenceCapability, InferenceFailure, InferenceOutput
+from app.domain.models import JobKind, JobState, TriageVerdict, Verdict
+from app.domain.review_models import BatchState
 from app.github import GitHubError, GitHubErrorKind, PullRequest
+from app.persistence.inference_notices import InferenceNoticeStore
 from tests.github import RecordingGitHub
 from tests.review_memory import judge_decision
+from tests.test_console_api import console_runtime as console_runtime  # noqa: PLC0414
 from tests.test_coordinator import coordinator
 from tests.test_merge import route_merge
-from tests.test_review_batches import claim, feedback, ingest, review_flow  # noqa: F401
+from tests.test_review_batches import claim, feedback, ingest
+from tests.test_review_batches import review_flow as review_flow  # noqa: PLC0414
 
 
 @pytest.fixture
-def triage_runtime(store, review_flow, recording_resources, monkeypatch):  # noqa: F811
+def triage_runtime(store, review_flow, recording_resources, monkeypatch):
     flow, clock = review_flow
     ingest(store, flow, feedback(clock))
     batch = claim(store, clock)[0]
@@ -121,3 +131,103 @@ async def test_slow_judge_keeps_settle_available_without_a_second_execution(tria
         release.set()
         await runtime._triage_task
     assert runtime.judge.triage.await_count == 1
+
+
+async def finish_inference(store, subject, reply: str | InferenceFailure):
+    job = store.workers.assign_job("plain", "token", "epoch", slot="infer")
+    task = job.inference.current_task
+    response = InferenceResult(
+        **result_header(task.request_id), method="worker.infer",
+        job_id=job.id, assignment_token=job.assignment_token,
+        output=InferenceOutput(request_id=task.request_id, request_digest=task.digest,
+            text=reply, adapter_version="codex/v1") if isinstance(reply, str) else None,
+        failure=reply if isinstance(reply, InferenceFailure) else None,
+    )
+    assert store.workers.record_assignment_result(
+        job.id, "plain", job.assignment_token, "epoch", response,
+    ) == "pending"
+    await subject.results.apply(job.id)
+
+
+async def test_review_recomputes_after_pr_push_without_replaying_old_answer(
+    store, review_flow, recording_resources,
+):
+    # A push between inference completion and comment delivery makes the saved answer stale.
+    flow, clock = review_flow
+    ingest(store, flow, feedback(clock))
+    batch = claim(store, clock)[0]
+    github = RecordingGitHub()
+    subject = coordinator(store, github)
+    judge = ReviewJudge(JobInference(store.database, Mock(), flow_id=flow.id, batch_id=batch.id))
+    store.workers.worker_connected("plain", PROTOCOL_VERSION, "epoch")
+    store.workers.worker_ready("plain", "epoch", InferenceCapability(adapter_version="codex/v1"))
+
+    with pytest.raises(InferencePending) as first:
+        await subject.triage(batch, judge)
+    old_context = store.reviews.get_batch(batch.id).context
+    await finish_inference(store, subject, '{"verdict":"answer","answer":"Old snapshot result"}')
+    github.pull_request = old_context.pull_request.model_copy(update={"head_sha": "changed"})
+    await subject.triage(store.reviews.get_batch(batch.id), judge)
+    assert store.reviews.get_batch(batch.id).context is None
+    assert github.comments == []
+
+    with pytest.raises(InferencePending) as replacement:
+        await subject.triage(store.reviews.get_batch(batch.id), judge)
+    assert replacement.value.job_id != first.value.job_id
+    fresh = store.reviews.get_batch(batch.id)
+    job = store.jobs.get_job(replacement.value.job_id)
+    assert job.inference.context_digest == fresh.context.digest != old_context.digest
+    assert job.attempt == 0
+    assert github.comments == []
+
+    await finish_inference(store, subject, '{"verdict":"answer","answer":"New snapshot result"}')
+    await subject.triage(store.reviews.get_batch(batch.id), judge)
+    assert len(github.comments) == 1 and github.comments[0].startswith("New snapshot result\n")
+    assert all(job.kind is JobKind.INFERENCE for job in store.jobs.list_jobs(flow.id))
+    assert store.jobs.get_job(first.value.job_id).state is JobState.DONE
+
+
+async def test_exhausted_inference_recovers_notice_without_a_fourth_attempt(
+    store, review_flow, recording_resources, console_runtime, monkeypatch,
+):
+    flow, clock = review_flow
+    ingest(store, flow, feedback(clock))
+    batch = claim(store, clock)[0]
+    runtime = ServerRuntime.__new__(ServerRuntime)
+    runtime.settings = SimpleNamespace(judge_timeout_seconds=5)
+    runtime.database, runtime.reviews = store.database, store.reviews
+    runtime.coordinator = coordinator(store, RecordingGitHub())
+    runtime.results = runtime.coordinator.results
+    runtime.gateway = Mock()
+    store.workers.worker_connected("plain", PROTOCOL_VERSION, "epoch")
+    store.workers.worker_ready("plain", "epoch", InferenceCapability(adapter_version="codex/v1"))
+    await runtime._run_triage()
+    timeout = InferenceFailure(code="execution_timeout")
+    for _ in range(2):
+        await finish_inference(store, runtime.coordinator, timeout)
+
+    # A crash after the last receipt must recover that receipt, not call the provider again.
+    with monkeypatch.context() as patch:
+        patch.setattr(InferenceNoticeStore, "append", Mock(side_effect=RuntimeError("database unavailable")))
+        with pytest.raises(RuntimeError, match="database unavailable"):
+            await finish_inference(store, runtime.coordinator, timeout)
+        await runtime._run_triage()
+        job, = store.jobs.list_jobs(flow.id)
+        assert job.attempt == 3 and job.state is JobState.RUNNING
+        assert job.result_received_at is not None and job.result_applied_at is None
+
+    runtime.results = coordinator(store, runtime.coordinator.github).results
+    await runtime.results.recover_pending_results()
+    await runtime.results.recover_pending_results()
+    await runtime._run_triage()
+    job, = store.jobs.list_jobs(flow.id)
+    assert job.kind is JobKind.INFERENCE and job.state is JobState.FAILED and job.attempt == 3
+    assert store.reviews.get_batch(batch.id).state is BatchState.READY
+    assert not runtime.coordinator.github.comments
+    with TestClient(create_app(console_runtime)) as client:
+        response = client.get(f"/api/flows/{flow.id}/inference-notices",
+                              headers=console_runtime.issuer.headers())
+        assert response.status_code == 200
+        notice, = response.json()["items"]
+        assert notice["key"] == f"inference-exhausted:{batch.id}"
+        assert notice["attempts"] == 3 and notice["last_failure_code"] == "execution_timeout"
