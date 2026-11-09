@@ -1,22 +1,17 @@
 """Round ownership survives delayed observations and resumed Flows on PostgreSQL."""
 
 from datetime import timedelta
-from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from app.contracts.conversation import ConversationContent, ConversationItem, ConversationPage
-from app.controler.console.sync import ConsoleSynchronizer
 from app.controler.workflow.service import ControlService
 from app.domain.inference_models import InferenceMessage, InferenceSummary, InferenceTask
 from app.domain.models import ArchiveReason, DeliveryState, Flow, FlowState
 from app.github.console import Observation
 from app.persistence.activity import ActivityStore
-from app.persistence.console import ConsoleStore
 from app.persistence.console_sync import ConsoleSyncStore
 from app.persistence.inference_notices import InferenceNoticeStore
 from app.persistence.store import Store
-from tests.test_console_sync import only_worker
 from tests.test_review_batches import claim, feedback, ingest
 from tests.test_review_batches import review_flow as review_flow  # noqa: PLC0414
 
@@ -35,42 +30,6 @@ def archive(store: Store, flow: Flow) -> Flow:
     archived = store.flows.get_flow(flow.id)
     assert archived is not None and archived.state is FlowState.ARCHIVED
     return archived
-
-
-async def test_delayed_worker_page_uses_its_attempt_after_resume(store):
-    flow = store.flows.create_flow("owner/repo", 7, 42)
-    attempt = store.flows.create_attempt(flow.id)
-    only_worker(store.database)
-    conversations = Mock()
-    sync = ConsoleSynchronizer(Mock(), conversations, database=store.database)
-    pending = sync.store.claim()
-    assert pending is not None and pending.round_no == 1
-    resumed = ControlService(database=store.database).resume(archive(store, flow), expected_round_no=1)
-    assert resumed.current_round_no == 2
-    # History can arrive after resume, even with a late timestamp; the source Attempt owns it.
-    item = ConversationItem(
-        id="late-record", attempt_id=attempt.id,
-        session_id="12345678-1234-1234-1234-123456789abc", session_generation=0,
-        timestamp=(resumed.updated_at + timedelta(days=1)).isoformat(), role="assistant",
-        kind="message", content=ConversationContent(text="Old round output"),
-    )
-    conversations.read = AsyncMock(return_value=ConversationPage(flow_id=flow.id, items=[item]))
-    await sync.sync(pending)
-    activity = ActivityStore(store.database)
-    entry, = activity.page(flow.id).items
-    assert entry.key == f"worker:{attempt.id}:0:late-record" and entry.round_no == 1
-    assert entry.model_dump()["round_no"] == 1
-    assert activity.versions(flow.id, entry.key).items[0].round_no == 1
-
-    ConsoleStore(store.database).request_sync(flow.id)
-    only_worker(store.database)
-    with store.connection() as connection:
-        connection.execute("UPDATE console_sync SET next_at=now()")
-    current = sync.store.claim()
-    assert current is not None and current.round_no == 2
-    snapshot = activity.page(flow.id).snapshot
-    await sync.sync(current)
-    assert activity.page(flow.id).snapshot == snapshot
 
 
 def test_foreign_worker_attempt_cannot_publish_or_advance_checkpoint(store):

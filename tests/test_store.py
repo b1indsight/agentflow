@@ -21,7 +21,7 @@ from app.contracts.protocol import (
 from app.contracts.receipts import ResultInbox, decode_result_inbox, stop_receipt_digest
 from app.controler.workflow.service import ControlService
 from app.domain.delivery_models import OpenedDelivery
-from app.domain.models import DeliveryState, FlowState, JobKind, JobState
+from app.domain.models import ArchiveReason, DeliveryState, FlowState, JobKind, JobState
 from app.persistence.store import Store
 
 
@@ -72,17 +72,27 @@ def test_unsettled_jobs_distinguishes_executors_and_pending_results(
     assert store.jobs.has_unsettled_jobs(flow.id, excluding_job_id=archive.id) is blocked
 
 
-def test_only_one_active_flow_exists_per_issue(store: Store) -> None:
+@pytest.mark.parametrize("state", [FlowState.QUEUED, FlowState.BLOCKED])
+def test_only_one_active_flow_exists_per_issue(store: Store, state: FlowState) -> None:
     flow = store.flows.create_flow("owner/repo", 7, installation_id=11)
+    flow.state = state
+    store.flows.update_flow(flow)
+    service = ControlService(database=store.database)
 
     with pytest.raises(UniqueViolation):
         store.flows.create_flow("owner/repo", 7, installation_id=11)
+    assert service.on_trigger(flow.repo, flow.issue_number, 11) is None
 
-    ControlService(database=store.database).cancel(flow)
-    replacement = store.flows.create_flow("owner/repo", 7, installation_id=11)
+    service.cancel(flow)
+    archived = store.flows.get_flow(flow.id)
+    assert archived is not None and archived.archive_reason is ArchiveReason.ABANDONED
+    replacement = service.on_trigger(flow.repo, flow.issue_number, 11)
 
+    assert replacement is not None
     assert replacement.id != flow.id
     assert store.flows.get_active_flow("owner/repo", 7) == replacement
+    with pytest.raises(ValueError, match="already active"):
+        service.resume(flow, expected_round_no=1)
 
 
 def test_attempt_and_job_lifecycle_round_trip(store: Store) -> None:

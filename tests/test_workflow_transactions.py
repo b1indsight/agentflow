@@ -76,23 +76,54 @@ def test_assignment_skips_a_flow_locked_for_cancellation(store: Store):
     assert store.workers.get_flow_execution(flow.id) is None
 
 
-def test_retry_rolls_back_with_real_database(store: Store, monkeypatch) -> None:
+@pytest.mark.parametrize("command", ["retry", "resume"])
+def test_retry_rolls_back_with_real_database(store: Store, monkeypatch, command) -> None:
     flow = store.flows.create_flow("owner/repo", 702, 42)
     flow.state = FlowState.BLOCKED
     store.flows.update_flow(flow)
+    service = ControlService(database=store.database)
+    if command == "resume":
+        store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
+        delivery = store.deliveries.get_or_create_delivery(flow.id, flow.initial_branch)
+        delivery.state, delivery.pr_number = DeliveryState.OPEN, 17
+        store.deliveries.update_delivery(delivery)
+        store.reconcile.feedback_seed(10)
+        store.reconcile.hint(flow.id)
+        service.cancel(flow)
+
+    def snapshot():
+        with store.connection() as connection:
+            return {
+                table: connection.execute(
+                    f"SELECT * FROM {table} ORDER BY to_jsonb({table})::text"
+                ).fetchall()
+                for table in (
+                    "flows",
+                    "flow_deliveries",
+                    "console_activity",
+                    "feedback_reconcile",
+                    "flow_reconcile",
+                    "console_sync",
+                    "console_flows",
+                    "issue_flow_owners",
+                    "jobs",
+                )
+            }
+
+    before = snapshot()
 
     def fail_enqueue(self: JobStore, flow_id: int, kind: JobKind, **kwargs: object) -> Job:
         assert kind is JobKind.INITIAL
         raise RuntimeError("enqueue interrupted")
 
+    # A failed enqueue must roll back both retry and every repository reset by resume.
     monkeypatch.setattr(JobStore, "enqueue_job", fail_enqueue)
     with pytest.raises(RuntimeError, match="enqueue interrupted"):
-        ControlService(
-            database=store.database,
-        ).retry(flow)
-    persisted = store.flows.get_flow(flow.id)
-    assert persisted is not None and persisted.state is FlowState.BLOCKED
-    assert store.jobs.list_jobs(flow.id) == []
+        if command == "resume":
+            service.resume(flow, expected_round_no=1)
+        else:
+            service.retry(flow)
+    assert snapshot() == before
 
 
 def test_trigger_and_operator_resume_share_issue_reservation(store: Store, postgresql_url: str):

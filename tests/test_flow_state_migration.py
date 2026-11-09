@@ -656,14 +656,37 @@ def test_all_six_states_backups_history_and_restart(legacy, postgresql_url):
         flow(legacy, "blocked", issue=5)
 
 
-@pytest.mark.parametrize("cleanup", ["removed", "already_absent"])
-def test_verified_workspace_deletion_can_migrate(legacy, postgresql_url, cleanup):
+@pytest.mark.parametrize("cleanup", ["released", "removed", "already_absent"])
+def test_verified_archive_preserves_receipt_and_effects(legacy, postgresql_url, cleanup):
     # A worker crash after deletion can produce already_absent on replay; its
     # digest-verified receipt proves the same archive boundary as removed.
     identity, job_id = succeeded(legacy, cleanup=cleanup)
     original = legacy.execute("SELECT result_payload FROM jobs WHERE id=%s", (job_id,)).fetchone()[
         "result_payload"
     ]
+    # Old _commit releases the binding before marking the inbox applied, atomically.
+    legacy.execute(
+        "UPDATE flow_executions SET released_at=%s WHERE flow_id=%s",
+        (NOW + timedelta(seconds=15), identity),
+    )
+    effect = {
+        "kind": "comment",
+        "key": "archived",
+        "installation_id": 42,
+        "repo": "owner/repo",
+        "number": 1,
+        "body": "Archive complete",
+    }
+    legacy.execute(
+        "UPDATE result_applications SET plan=jsonb_set(plan,'{effects}',%s) WHERE job_id=%s",
+        (Jsonb([effect]), job_id),
+    )
+    legacy.execute(
+        "INSERT INTO result_effects(job_id,effect_key,position,payload,state,receipt,dispatched_at,next_attempt_at) "
+        "VALUES (%s,'archived',0,%s,'succeeded',%s,%s,%s)",
+        (job_id, Jsonb(effect), Jsonb({"comment_id": 17}), NOW + timedelta(seconds=12), NOW),
+    )
+    effects = legacy.execute("SELECT * FROM result_effects WHERE job_id=%s", (job_id,)).fetchall()
     apply_reviewed(legacy, postgresql_url)
     assert (
         legacy.execute("SELECT state FROM flows WHERE id=%s", (identity,)).fetchone()["state"]
@@ -674,6 +697,10 @@ def test_verified_workspace_deletion_can_migrate(legacy, postgresql_url, cleanup
             "result_payload"
         ]
         == original
+    )
+    assert (
+        legacy.execute("SELECT * FROM result_effects WHERE job_id=%s", (job_id,)).fetchall()
+        == effects
     )
 
 
@@ -787,7 +814,7 @@ def test_issue_conflicts_report_all_ids_and_abort_entire_batch(legacy, postgresq
     )
 
 
-def test_cancelled_confirmed_stop_and_released_workspace_can_archive(legacy, postgresql_url):
+def test_cancelled_archive_requires_confirmed_stop_not_display_state(legacy, postgresql_url):
     identity, _ = flow(legacy, "cancelled")
     worker = binding(legacy, identity, released=True)
     job_id = job(legacy, identity, state="failed")
@@ -796,6 +823,12 @@ def test_cancelled_confirmed_stop_and_released_workspace_can_archive(legacy, pos
         "WHERE id=%s",
         (worker, NOW, job_id),
     )
+    # A display-only archive cannot replace the missing executor stop evidence.
+    legacy.execute("UPDATE console_flows SET archived_at=%s WHERE flow_id=%s", (NOW, identity))
+    legacy.execute("SELECT console_refresh(%s)", (identity,))
+    report = refuse_unchanged(legacy, postgresql_url)
+    assert any("neither applied result nor confirmed stop" in p["message"] for p in report.problems)
+    # Supplying that receipt alone makes the same data eligible for migration.
     legacy.execute(
         "INSERT INTO execution_stops(request_id,flow_id,job_id,worker_id,assignment_token,binding_at,"
         "requested_at,state,confirmed_at,receipt_digest) VALUES ('stop',%s,%s,%s,'token',%s,%s,'confirmed',%s,%s)",
@@ -808,21 +841,6 @@ def test_cancelled_confirmed_stop_and_released_workspace_can_archive(legacy, pos
         "state": "archived",
         "archive_reason": "abandoned",
     }
-
-
-def test_display_only_archive_does_not_supply_missing_stop_evidence(legacy, postgresql_url):
-    identity, _ = flow(legacy, "cancelled")
-    worker = binding(legacy, identity, released=True)
-    job_id = job(legacy, identity, state="failed")
-    legacy.execute(
-        "UPDATE jobs SET assigned_worker_id=%s,assignment_token='token',dispatch_authorized_at=%s "
-        "WHERE id=%s",
-        (worker, NOW, job_id),
-    )
-    legacy.execute("UPDATE console_flows SET archived_at=%s WHERE flow_id=%s", (NOW, identity))
-    legacy.execute("SELECT console_refresh(%s)", (identity,))
-    report = refuse_unchanged(legacy, postgresql_url)
-    assert any("neither applied result nor confirmed stop" in p["message"] for p in report.problems)
 
 
 def test_ambiguous_active_closed_delivery_is_not_silently_finalized(legacy, postgresql_url):
@@ -899,39 +917,6 @@ def test_cli_reports_dry_run_then_requires_explicit_apply(legacy, postgresql_url
     assert snapshot(legacy) == before
     assert main([*args, "--apply", "--expect-report", report["fingerprint"]]) == 0
     assert json.loads(capsys.readouterr().out)["status"] == "applied"
-
-
-def test_success_accepts_old_atomic_release_before_application_marker(legacy, postgresql_url):
-    identity, job_id = succeeded(legacy)
-    # Old results._commit releases the binding, then completes the inbox in the
-    # SAME transaction. Their local clock timestamps need not be equal.
-    legacy.execute(
-        "UPDATE flow_executions SET released_at=%s WHERE flow_id=%s",
-        (NOW + timedelta(seconds=15), identity),
-    )
-    effect = {
-        "kind": "comment",
-        "key": "archived",
-        "installation_id": 42,
-        "repo": "owner/repo",
-        "number": 1,
-        "body": "Archive complete",
-    }
-    legacy.execute(
-        "UPDATE result_applications SET plan=jsonb_set(plan,'{effects}',%s) WHERE job_id=%s",
-        (Jsonb([effect]), job_id),
-    )
-    legacy.execute(
-        "INSERT INTO result_effects(job_id,effect_key,position,payload,state,receipt,dispatched_at,next_attempt_at) "
-        "VALUES (%s,'archived',0,%s,'succeeded',%s,%s,%s)",
-        (job_id, Jsonb(effect), Jsonb({"comment_id": 17}), NOW + timedelta(seconds=12), NOW),
-    )
-    before = legacy.execute("SELECT * FROM result_effects WHERE job_id=%s", (job_id,)).fetchall()
-    apply_reviewed(legacy, postgresql_url)
-    assert (
-        legacy.execute("SELECT * FROM result_effects WHERE job_id=%s", (job_id,)).fetchall()
-        == before
-    )
 
 
 @pytest.mark.parametrize("state", ["active", "unknown", ["failed"]])

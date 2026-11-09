@@ -5,52 +5,8 @@ from datetime import timedelta
 import pytest
 
 from app.controler.workflow.service import ControlService
-from app.domain.models import ArchiveReason, DeliveryState, FlowState, ReviewItemKind
+from app.domain.models import DeliveryState, FlowState, ReviewItemKind
 from app.domain.review_models import FeedbackUpdate
-from app.persistence.activity import ActivityStore
-from app.persistence.console import ConsoleStore
-
-
-def test_investigation_archive_and_explicit_new_round(store):
-    service = ControlService(database=store.database)
-    flow = service.on_trigger("owner/repo", 7, 42)
-    assert flow.state is FlowState.QUEUED
-    with pytest.raises(ValueError, match="conclusion"):
-        service.finish(flow, reason=ArchiveReason.SUCCEEDED, summary="", expected_round_no=1)
-    service.finish(
-        flow,
-        reason=ArchiveReason.SUCCEEDED,
-        summary="Investigation complete: no change needed.",
-        expected_round_no=1,
-    )
-    archived = store.flows.get_flow(flow.id)
-    assert archived.state is FlowState.ARCHIVED
-    assert archived.archive_reason is ArchiveReason.SUCCEEDED
-    assert store.deliveries.get_delivery(flow.id) is None
-    assert ConsoleStore(store.database).detail(flow.id).phase == "archived"
-    resumed = service.resume(archived, expected_round_no=1)
-    assert resumed.id == flow.id and resumed.current_round_no == 2
-    assert resumed.state is FlowState.QUEUED and resumed.archived_at is None
-    archive = ActivityStore(store.database).archived(flow.id, 1)
-    assert archive is not None
-    assert archive.metadata["archive_summary"] == archived.archive_summary
-    assert archive.occurred_at == archived.archived_at
-    with pytest.raises(ValueError):
-        service.resume(archived, expected_round_no=1)
-
-
-def test_blocked_still_owns_issue_and_archive_releases_it(store):
-    service = ControlService(database=store.database)
-    flow = service.on_trigger("owner/repo", 7, 42)
-    flow.state = FlowState.BLOCKED
-    store.flows.update_flow(flow)
-    assert service.on_trigger("owner/repo", 7, 42) is None
-    service.cancel(flow)
-    assert store.flows.get_flow(flow.id).archive_reason is ArchiveReason.ABANDONED
-    newer = service.on_trigger("owner/repo", 7, 42)
-    assert newer is not None
-    with pytest.raises(ValueError, match="already active"):
-        service.resume(flow, expected_round_no=1)
 
 
 def test_resume_does_not_replay_prior_round_feedback_or_cursors(store):
@@ -209,44 +165,3 @@ async def test_failed_initial_round_stops_workspace_before_resume(
     _git("push", "origin", next_task.branch, cwd=workspace)
     _git("show-ref", "--verify", f"refs/heads/{task.branch}", cwd=remote)
     _git("show-ref", "--verify", f"refs/heads/{next_task.branch}", cwd=remote)
-
-
-def test_resume_rolls_back_all_owned_resets_if_initial_enqueue_fails(store, monkeypatch):
-    from app.persistence.jobs import JobStore
-
-    # Splitting persistence ownership must retain the all-or-nothing resume boundary.
-    service = ControlService(database=store.database)
-    flow = service.on_trigger("owner/repo", 7, 42)
-    delivery = store.deliveries.get_or_create_delivery(flow.id, flow.initial_branch)
-    delivery.state, delivery.pr_number = DeliveryState.OPEN, 17
-    store.deliveries.update_delivery(delivery)
-    store.reconcile.feedback_seed(10)
-    store.reconcile.hint(flow.id)
-    service.cancel(flow)
-
-    def snapshot():
-        with store.connection() as connection:
-            return {
-                table: connection.execute(f"SELECT * FROM {table}").fetchall()
-                for table in (
-                    "flows",
-                    "flow_deliveries",
-                    "console_activity",
-                    "feedback_reconcile",
-                    "flow_reconcile",
-                    "console_sync",
-                    "console_flows",
-                    "issue_flow_owners",
-                    "jobs",
-                )
-            }
-
-    before = snapshot()
-
-    def fail_enqueue(*args, **kwargs):
-        raise RuntimeError("enqueue interrupted")
-
-    monkeypatch.setattr(JobStore, "enqueue_job", fail_enqueue)
-    with pytest.raises(RuntimeError, match="enqueue interrupted"):
-        service.resume(flow, expected_round_no=1)
-    assert snapshot() == before

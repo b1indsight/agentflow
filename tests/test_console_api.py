@@ -7,8 +7,10 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from pydantic import ValidationError
 from starlette.testclient import TestClient
 
+from app.contracts.console import ArchiveRequest, ResumeRequest
 from app.contracts.protocol import PROTOCOL_VERSION
 from app.controler.api import create_app
 from app.controler.console.sync import ConsoleSynchronizer
@@ -179,6 +181,8 @@ def test_console_commands_require_owner_json_and_same_origin(
         )
         assert client.post(path, json=payload | {"force": True}, headers=headers).status_code == 422
         assert console.detail(flow.id) == before
+        assert store.jobs.list_jobs(flow.id) == []
+        console_runtime.gateway.wake_all.assert_not_called()
         response = client.post(path, json=payload, headers=headers | origin_headers)
         assert response.status_code == 200
         assert response.headers["cache-control"] == "no-store"
@@ -210,6 +214,9 @@ def test_archive_is_idempotent_and_resume_opens_a_new_round(console_runtime, sto
         activity = ActivityStore(store.database)
         first_archive = activity.archived(flow.id, 1)
         assert first_archive is not None and first_archive.metadata["archive_reason"] == reason
+        assert first_archive.metadata["archive_summary"] == payload["summary"]
+        assert first_archive.occurred_at == store.flows.get_flow(flow.id).archived_at
+        assert store.deliveries.get_delivery(flow.id) is None
         refused = client.post(f"/api/flows/{flow.id}/retry", json={}, headers=headers)
         assert refused.status_code == 409 and refused.json() == {"detail": "retry_archived"}
         assert ConsoleStore(store.database).detail(flow.id).current_round_no == 1
@@ -237,39 +244,39 @@ def test_archive_is_idempotent_and_resume_opens_a_new_round(console_runtime, sto
 
 
 @pytest.mark.parametrize(
-    "command,payload",
+    "model,payload,field,error",
     [
-        ("archive", {}),
-        ("archive", {"reason": "cancelled", "summary": "结论", "expected_round_no": 1}),
-        ("archive", {"reason": "succeeded", "expected_round_no": 1}),
-        ("archive", {"reason": "succeeded", "summary": "结论", "expected_round_no": True}),
-        ("resume", {}),
-        ("resume", {"expected_round_no": 0}),
-        ("resume", {"expected_round_no": "1"}),
+        (ArchiveRequest, {}, "reason", "missing"),
+        (
+            ArchiveRequest,
+            {"reason": "cancelled", "summary": "结论", "expected_round_no": 1},
+            "reason",
+            "enum",
+        ),
+        (ArchiveRequest, {"reason": "succeeded", "expected_round_no": 1}, "summary", "missing"),
+        (
+            ArchiveRequest,
+            {"reason": "succeeded", "summary": "结论", "expected_round_no": True},
+            "expected_round_no",
+            "int_type",
+        ),
+        (ResumeRequest, {}, "expected_round_no", "missing"),
+        (ResumeRequest, {"expected_round_no": 0}, "expected_round_no", "greater_than"),
+        (ResumeRequest, {"expected_round_no": "1"}, "expected_round_no", "int_type"),
     ],
 )
-def test_round_command_schema_rejection_never_changes_flow(
-    console_runtime, store, command, payload
-):
-    flow = store.flows.create_flow("owner/repo", 7, 42)
-    before = ConsoleStore(store.database).detail(flow.id)
-    with TestClient(create_app(console_runtime)) as client:
-        response = client.post(
-            f"/api/flows/{flow.id}/{command}",
-            json=payload,
-            headers=console_runtime.issuer.headers(),
-        )
-    assert response.status_code == 422
-    assert ConsoleStore(store.database).detail(flow.id) == before
-    assert store.jobs.list_jobs(flow.id) == []
-    console_runtime.gateway.wake_all.assert_not_called()
+def test_round_command_schema_rejects_invalid_fields(model, payload, field, error):
+    # Field validation needs only the request DTO; HTTP rejection is covered above.
+    with pytest.raises(ValidationError) as failure:
+        model.model_validate(payload)
+    assert ((field,), error) in [(e["loc"], e["type"]) for e in failure.value.errors()]
 
 
 def test_archive_refuses_empty_success_or_unmerged_pr_without_changes(console_runtime, store):
     flow = store.flows.create_flow("owner/repo", 7, 42)
     console = ConsoleStore(store.database)
     with TestClient(create_app(console_runtime)) as client:
-        for summary in ("   ", "PR has not merged"):
+        for summary in ("", "   ", "PR has not merged"):
             if summary.strip():
                 delivery = store.deliveries.get_or_create_delivery(flow.id, "flow/7")
                 delivery.state, delivery.pr_number = DeliveryState.OPEN, 17
