@@ -5,7 +5,7 @@ from datetime import timedelta
 import pytest
 
 from app.domain.context_models import MAX_DISCUSSIONS
-from app.domain.models import FlowState, JobKind
+from app.domain.models import FlowState
 from app.domain.review_models import BatchState, FeedbackRef
 from app.persistence.activity import ActivityStore
 from app.persistence.store import Store
@@ -99,16 +99,3 @@ async def test_empty_reopen_batch_does_not_restore_retired_review_authorization(
     clock.now += timedelta(seconds=76)
     assert settle(store) == []
     assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
-
-
-def test_reopen_authorization_retirement_rolls_back_with_the_workflow(store, review_flow):
-    flow, clock = review_flow
-    ingest(store, flow, feedback(clock, signal="request_changes", submitted=True))
-    # Failure to commit reopening must not silently revoke still-valid review authority.
-    with pytest.raises(RuntimeError, match="reopen interrupted"), store.transaction() as tx:
-        tx.lock_workflow(flow.id)
-        tx.reviews.reopened(flow.id, 0)
-        raise RuntimeError("reopen interrupted")
-    assert store.reviews._has_unused_signal(flow.id)
-    clock.now += timedelta(seconds=76)
-    assert settle(store)[0].kind is JobKind.REVISION

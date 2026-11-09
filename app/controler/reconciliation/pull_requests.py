@@ -159,7 +159,6 @@ class Reconciler:
                         deliveries=deliveries_tx,
                         flows=flows_tx,
                         jobs=jobs_tx,
-                        stops=stops_tx,
                         workers=workers_tx,
                         origin="reconciliation",
                     )

@@ -105,7 +105,6 @@ def adopt_created_pull_request(
                 deliveries=deliveries_tx,
                 flows=flows_tx,
                 jobs=jobs_tx,
-                stops=stops_tx,
                 workers=workers_tx,
                 origin="delivery_recovery",
             )
@@ -258,7 +257,6 @@ def record_merge(
     deliveries: DeliveryStore,
     flows: FlowStore,
     jobs: JobStore,
-    stops: StopStore,
     workers: WorkerStore,
     origin: str,
 ) -> bool:

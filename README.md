@@ -273,11 +273,9 @@ App 需有 Issues write 权限；初始化失败不阻塞服务 readiness，日�
 已核验 webhook 与补偿查询共用自动更正规则：只有实际合并时间加一秒仍早于原归档时间，
 才将 abandoned 的有效结果改为 succeeded。原始归档、合并证据与更正分别作为不可变 activity 保存；
 没有人工更正入口，不改变原归档时间、新轮次、Issue owner 或执行绑定。归档后才合并或顺序不明时只记事实。
-旧库启动会拒绝旧状态：先停止消费者与派发、备份数据库，再用 `scripts/migrate_flow_states.py`
+旧四态库启动会拒绝旧状态：先停止消费者与派发、备份数据库，再用 `scripts/migrate_flow_states.py`
 预检与显式迁移；存在未知执行、旧未完成计划或归属冲突时必须先核验，不能强制猜测归档。
-已使用六态且仍有旧 round 表的库，预检和应用都须加 `--convert-round-history`；
-应用另需 `--apply --expect-report <预检指纹>`。转换会备份原始快照、保留已有 activity 与更正，
-核对后才删除旧表，不自动改判存量归档结果。数据或 schema 变化后须重新预检。
+应用需 `--apply --expect-report <预检指纹>`；数据或 schema 变化后须重新预检。
 
 ## Web 控制台
 

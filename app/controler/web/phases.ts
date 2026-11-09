@@ -30,8 +30,6 @@ export function actionLabel(flow: FlowSummary): string {
   if (flow.lifecycle === "archived") return flowLabel(flow);
   if (flow.lifecycle === "finalizing") return "正在收尾（finalizing）";
   const { action } = flow;
-  if (action === "delivery_closed") return "PR 已关闭 · 未合并";
-  if (action === "delivery_merged") return "PR 已合并，等待收尾";
   if (action === "archive_blocked") return "收尾受阻";
   return action;
 }

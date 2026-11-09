@@ -218,7 +218,6 @@ class ControlService:
             deliveries_tx = self.deliveries.using(tx)
             flows_tx = self.flows.using(tx)
             jobs_tx = self.jobs.using(tx)
-            stops_tx = self.stops.using(tx)
             webhook_store_tx = self.webhook_store.using(tx)
             workers_tx = self.workers.using(tx)
             fresh = tx.lock_workflow(flow.id)
@@ -250,7 +249,6 @@ class ControlService:
                 deliveries=deliveries_tx,
                 flows=flows_tx,
                 jobs=jobs_tx,
-                stops=stops_tx,
                 workers=workers_tx,
                 origin="webhook",
             )

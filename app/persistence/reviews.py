@@ -715,21 +715,6 @@ class ReviewStore(Repository):
             if unseen:
                 self._touch(batch.flow_id, 0)
 
-    def reopened(self, flow_id: int, settle_seconds: float) -> None:
-        """Refreeze retained feedback through Judge without claiming it was previously relayed."""
-        self._touch(flow_id, settle_seconds)
-        with self._db.connection() as connection:
-            # The first bounded batch cannot retire authorization for the entire backlog.
-            # Retire each existing version under the caller's Flow lock; new versions still
-            # follow normal authorization rules, and duplicates cannot revive old signals.
-            connection.execute(
-                "UPDATE review_versions v SET signal_retired=TRUE FROM review_items i"
-                " WHERE v.item_id=i.id AND i.flow_id=%s AND NOT v.signal_retired"
-                " AND v.content->>'signal'='request_changes'",
-                (flow_id,),
-            )
-            connection.execute("UPDATE review_buffers SET force_triage=TRUE WHERE flow_id=%s", (flow_id,))
-
     def cancel(self, flow_id: int) -> None:
         """Retire pending discussion atomically with the Flow's terminal transition."""
         with self._db.connection() as connection:

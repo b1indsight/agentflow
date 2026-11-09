@@ -1,13 +1,11 @@
 """Business-state contracts through the existing service and PostgreSQL transactions."""
 
 from datetime import timedelta
-from types import SimpleNamespace
 
 import pytest
 
-from app.controler.events.router import EventRouter
 from app.controler.workflow.service import ControlService
-from app.domain.models import ArchiveReason, DeliveryState, FlowState, JobKind, ReviewItemKind
+from app.domain.models import ArchiveReason, DeliveryState, FlowState, ReviewItemKind
 from app.domain.review_models import FeedbackUpdate
 from app.persistence.activity import ActivityStore
 from app.persistence.console import ConsoleStore
@@ -53,48 +51,6 @@ def test_blocked_still_owns_issue_and_archive_releases_it(store):
     assert newer is not None
     with pytest.raises(ValueError, match="already active"):
         service.resume(flow, expected_round_no=1)
-
-
-def test_old_pr_merge_records_evidence_without_affecting_resumed_round(store):
-    # A delayed merge webhook still names the previous PR after a new delivery starts.
-    service = ControlService(database=store.database)
-    flow = service.on_trigger("owner/repo", 7, 42)
-    delivery = store.deliveries.get_or_create_delivery(flow.id, f"flow/{flow.id}")
-    delivery.state, delivery.pr_number = DeliveryState.OPEN, 17
-    store.deliveries.update_delivery(delivery)
-    service.cancel(flow)
-    activity = ActivityStore(store.database)
-    archived = activity.archived(flow.id, 1)
-    assert archived is not None and archived.metadata["archive_reason"] == "abandoned"
-    resumed = service.resume(flow, expected_round_no=1)
-    router = EventRouter(service, SimpleNamespace(), database=store.database)
-    payload = {
-        "action": "closed",
-        "repository": {"full_name": flow.repo},
-        "installation": {"id": 99},
-        "pull_request": {
-            "number": 17,
-            "merged": True,
-            "merged_at": (archived.occurred_at - timedelta(seconds=5)).isoformat(),
-            "merge_commit_sha": "a" * 40,
-        },
-    }
-    router.dispatch("pull_request", "late-merge", payload)
-    assert not store.webhooks.event_seen("late-merge")
-    payload["installation"]["id"] = 42
-    router.dispatch("pull_request", "late-merge", payload)
-    router.dispatch("pull_request", "late-merge", payload)
-    assert store.flows.get_flow(flow.id) == resumed
-    assert activity.archived(flow.id, 1) == archived
-    assert activity.archived_pr(flow.repo, 17) == (flow.id, 1)
-    history = activity.history(flow.id, 1)
-    merges = [item for item in history if item.kind == "merge"]
-    assert len(merges) == 1
-    assert merges[0].metadata["merge_commit_sha"] == "a" * 40
-    assert len([item for item in history if item.kind == "archive_correction"]) == 1
-    assert activity.archived(flow.id, 2) is None
-    assert [job.kind for job in store.jobs.list_jobs(flow.id)] == [JobKind.INITIAL, JobKind.INITIAL]
-    assert store.deliveries.get_delivery(flow.id).pr_number is None
 
 
 def test_resume_does_not_replay_prior_round_feedback_or_cursors(store):

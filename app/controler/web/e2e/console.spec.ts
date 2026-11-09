@@ -940,30 +940,8 @@ test("detail reads synchronize sidebar and board without reloading the page", as
     next_condition: "等待执行结果",
     sources: [],
   };
-  const other = { ...flow, id: 43, title: "仍在执行的 Flow" };
-  await page.route("**/api/flows?**", (route) =>
-    route.fulfill({
-      json: {
-        items: [current, other].filter(
-          (item) =>
-            item.phase ===
-            new URL(route.request().url()).searchParams.get("phase"),
-        ),
-        counts: {
-          queued: 0,
-          running: current.phase === "running" ? 2 : 1,
-          review: current.phase === "review" ? 1 : 0,
-          blocked: current.phase === "blocked" ? 1 : 0,
-          archived: 0,
-        },
-        next_cursor: null,
-        has_more: false,
-      },
-    }),
-  );
-  await page.route("**/api/flows/42", (route) =>
-    route.fulfill({ json: current }),
-  );
+  const other = { ...current, id: 43, title: "仍在执行的 Flow" };
+  await mockFlows(page, () => [current, other]);
   await page.goto("/#board");
   await expect(page.locator(".column.phase-running .card")).toHaveCount(2);
   current = {
@@ -1035,29 +1013,7 @@ test("retry disables both commands until commit, then refreshes detail and board
   page,
 }) => {
   let current = blockedFlow;
-  await page.route("**/api/flows?**", (route) =>
-    route.fulfill({
-      json: {
-        items:
-          new URL(route.request().url()).searchParams.get("phase") ===
-          current.phase
-            ? [current]
-            : [],
-        counts: {
-          queued: current.phase === "queued" ? 1 : 0,
-          running: 0,
-          review: 0,
-          blocked: current.phase === "blocked" ? 1 : 0,
-          archived: 0,
-        },
-        next_cursor: null,
-        has_more: false,
-      },
-    }),
-  );
-  await page.route("**/api/flows/42", (route) =>
-    route.fulfill({ json: current }),
-  );
+  await mockFlows(page, () => [current]);
   let finish = () => {};
   const committed = new Promise<void>((resolve) => {
     finish = resolve;

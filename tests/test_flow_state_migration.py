@@ -610,8 +610,6 @@ def test_all_six_states_backups_history_and_restart(legacy, postgresql_url):
         cancelled,
         archived,
     }
-    assert "flow_rounds" not in changed["rows"]
-    assert "flow_round_corrections" not in changed["rows"]
     archives = {
         r["data"]["flow_id"]: r["data"]
         for r in changed["rows"]["console_activity"]

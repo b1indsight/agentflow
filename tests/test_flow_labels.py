@@ -28,7 +28,7 @@ from app.github import (
     Repository,
 )
 from app.persistence.activity import ActivityStore
-from app.persistence.flow_labels import FLOW_LABEL_SCHEMA, FlowLabelStore
+from app.persistence.flow_labels import FlowLabelStore
 from app.persistence.store import Store
 from tests.test_github_client import settings
 from tests.test_repository_labels import remote_inventory
@@ -95,10 +95,6 @@ def store(postgresql_url, clock):
     instance = Store(postgresql_url, clock=lambda: clock.now)
     try:
         instance.init_db()
-        with instance.connection() as connection:
-            # Runtime/schema wiring is delivered separately; repeat initialization is safe.
-            connection.execute(FLOW_LABEL_SCHEMA)
-            connection.execute(FLOW_LABEL_SCHEMA)
         yield instance
     finally:
         instance.close()
@@ -138,15 +134,6 @@ def target(store, number=7):
             (number,),
         ).fetchone()["id"]
     return FlowLabelStore(store.database).get(identity)
-
-
-def test_bootstrap_creates_trigger_and_six_states_not_legacy_definitions(tmp_path):
-    configured = settings(tmp_path)
-    sync = LabelSynchronizer(GitHubApp(configured), configured)
-    assert [label.name for label in sync.definitions] == [
-        configured.trigger_label,
-        *(f"flow:{state.value}" for state in FlowState),
-    ]
 
 
 @pytest.mark.parametrize("field", ["trigger_label", "in_review_label", "done_label"])

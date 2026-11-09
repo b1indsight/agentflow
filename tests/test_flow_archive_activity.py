@@ -1,13 +1,15 @@
 """Archive history and automatic correction never authorize another execution."""
 
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 from psycopg.errors import CheckViolation, LockNotAvailable
 
 from app.contracts.protocol import PROTOCOL_VERSION
+from app.controler.events.router import EventRouter
 from app.controler.workflow.service import ControlService
-from app.domain.models import ArchiveReason, DeliveryState, FlowState
+from app.domain.models import ArchiveReason, DeliveryState, FlowState, JobKind
 from app.github import PullRequestMerge
 from app.github.console import Observation
 from app.persistence.activity import ActivityStore
@@ -87,16 +89,34 @@ def test_delayed_merge_automatically_corrects_without_resuming(store, archived, 
 
 
 def test_delayed_old_round_merge_does_not_change_resumed_flow(store, archived):
+    # A delayed webhook still names the previous PR after a new delivery starts.
     service = ControlService(database=store.database)
+    activity = ActivityStore(store.database)
+    original = activity.archived(archived.id, 1)
+    assert original is not None and original.metadata["archive_reason"] == "abandoned"
     resumed = service.resume(archived, expected_round_no=1)
     before = authority(store, archived.id)
-    service.on_merged(resumed, "old-round", merge_payload(resumed))
+    router = EventRouter(service, SimpleNamespace(), database=store.database)
+    payload = merge_payload(resumed)
+    payload["installation"]["id"] = 99
+    router.dispatch("pull_request", "late-merge", payload)
+    assert not store.webhooks.event_seen("late-merge")
+    payload["installation"]["id"] = 42
+    router.dispatch("pull_request", "late-merge", payload)
+    router.dispatch("pull_request", "late-merge", payload)
     assert store.flows.get_flow(resumed.id) == resumed
     assert authority(store, resumed.id) == before
-    activity = ActivityStore(store.database)
+    assert activity.archived(resumed.id, 1) == original
     assert activity.archived_pr(resumed.repo, MERGE.number) == (resumed.id, 1)
-    assert any(e.kind == "archive_correction" for e in activity.history(resumed.id, 1))
+    history = activity.history(resumed.id, 1)
+    merges = [item for item in history if item.kind == "merge"]
+    assert len(merges) == 1
+    assert merges[0].metadata["merge_commit_sha"] == MERGE.merge_commit_sha
+    assert len([item for item in history if item.kind == "archive_correction"]) == 1
+    assert activity.archived(resumed.id, 2) is None
     assert not any(e.kind == "archive_correction" for e in activity.history(resumed.id, 2))
+    assert [job.kind for job in store.jobs.list_jobs(resumed.id)] == [JobKind.INITIAL, JobKind.INITIAL]
+    assert store.deliveries.get_delivery(resumed.id).pr_number is None
 
 
 @pytest.mark.parametrize("seconds_before", [2, 1.000001, 1, 0.999999, 0, -1])
