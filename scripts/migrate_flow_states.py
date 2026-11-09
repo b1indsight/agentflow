@@ -13,6 +13,11 @@ facts, any ambiguous owner, incomplete disposition, and EVERY unapplied ResultPl
 There is no force option. Resolve evidence with the old deployment/operator runbook,
 then stop it and repeat the dry-run. This tool performs no GitHub or worker operations.
 
+Reconcile pending results/effects from original receipts, without inventing acknowledgements.
+Verify stop fences, worker slots and workspace disposition. Resolve conflicting Issue/PR
+owners explicitly; failed Flows remain blocked owners. A closed PR is not abandonment
+consent, and a display-only console archive does not prove workspace disposition.
+
 Original rows are retained in flow_state_migration_backup, independently readable as
 JSONB without runtime enums. Only applied plans' top-level flow_state is translated;
 inboxes, digests, effects, events and existing console activity are never rewritten.
@@ -27,7 +32,7 @@ import hashlib
 import json
 from collections import defaultdict
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
@@ -62,22 +67,6 @@ NEW_TABLES = {
     "issue_flow_owners",
     "flow_state_migration_backup",
 }
-OPERATOR_CHECKS = [
-    "Keep all controllers, workers, webhook and console writers stopped until migration completes.",
-    (
-        "Reconcile pending results/plans and dispatched effects using their original receipts; "
-        "never manufacture acknowledgements or discard history."
-    ),
-    "Verify stop fences, worker slots and workspace cleanup/retention/release evidence.",
-    (
-        "Resolve conflicting Issue owners and PR identities explicitly in the old operational "
-        "workflow; failed Flows remain owners (blocked), not archived."
-    ),
-    (
-        "An old closed PR is not abandonment consent; an old display-only console archive "
-        "is not workspace disposition evidence. Review business intent separately."
-    ),
-]
 
 
 @dataclass
@@ -96,9 +85,6 @@ class Report:
         self.problems.append(
             {"flow_ids": sorted(flows), "job_ids": sorted(jobs), "message": message}
         )
-
-    def as_dict(self) -> Row:
-        return {**vars(self), "operator_checks": OPERATOR_CHECKS}
 
 
 def _time(value: str) -> datetime:
@@ -697,9 +683,10 @@ def _apply(tx: Database, report: Report, converted: dict[int, Row], tables: Sequ
             connection.execute(
                 "UPDATE result_applications SET plan=%s WHERE job_id=%s", (Jsonb(plan), job_id)
             )
-        # Uses the bound transaction; failure here also restores the old view, index,
-        # triggers, states and plans. init_db's refresh appends, never erases activity.
-        tx.init_db()
+        # The core SCHEMA was installed above. Restore the remaining schemas in
+        # canonical order, including projection refresh, within this same transaction.
+        for schema in SCHEMAS[1:]:
+            connection.execute(schema)
         archives = connection.execute(
             "SELECT f.id,f.repo,f.archive_reason,f.archive_summary,f.archived_at,"
             "d.pr_number,d.merged_at,d.merge_commit_sha FROM flows f "
@@ -862,11 +849,7 @@ def main(argv: list[str] | None = None) -> int:
             expected_fingerprint=args.expect_report,
         )
     except ValueError as error:
-        print(
-            json.dumps(
-                {"status": "refused", "message": str(error), "operator_checks": OPERATOR_CHECKS}
-            )
-        )
+        print(json.dumps({"status": "refused", "message": str(error)}))
         return 2
     except psycopg.Error as error:
         # SQL failures roll back, but a lost connection during COMMIT has an unknown
@@ -879,12 +862,11 @@ def main(argv: list[str] | None = None) -> int:
                     "message": "Database operation failed. SQL errors roll back atomically; "
                     "a connection failure during commit can have an unknown outcome. Inspect "
                     "the schema and migration backup before retrying; keep producers stopped.",
-                    "operator_checks": OPERATOR_CHECKS,
                 }
             )
         )
         return 2
-    print(json.dumps(report.as_dict(), ensure_ascii=False, indent=2))
+    print(json.dumps(asdict(report), ensure_ascii=False, indent=2))
     return 2 if report.status == "refused" else 0
 
 

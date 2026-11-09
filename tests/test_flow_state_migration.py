@@ -420,27 +420,33 @@ def snapshot(connection):
     }
 
 
-def apply_reviewed(url):
+def apply_reviewed(connection, url):
+    before = snapshot(connection)
     report = migrate(url)
-    assert report.status == "ready", report.as_dict()
+    assert report.status == "ready", report
+    assert snapshot(connection) == before
     applied = migrate(url, apply=True, expected_fingerprint=report.fingerprint)
-    assert applied.status == "applied", applied.as_dict()
+    assert applied.status == "applied", applied
     return applied
+
+
+def refuse_unchanged(connection, url):
+    before = snapshot(connection)
+    report = migrate(url)
+    assert report.status == "refused", report
+    assert snapshot(connection) == before
+    applied = migrate(url, apply=True, expected_fingerprint=report.fingerprint)
+    assert applied.status == "refused", applied
+    assert snapshot(connection) == before
+    return report
 
 
 def test_fresh_queued_initial_without_attempt_can_migrate(legacy, postgresql_url):
     # Legacy on_trigger enqueues INITIAL before preparation creates its Attempt.
     identity, _ = flow(legacy, with_attempt=False)
     job_id = job(legacy, identity)
-    before = snapshot(legacy)
-    report = migrate(postgresql_url)
-    assert report.status == "ready", report.as_dict()
+    report = apply_reviewed(legacy, postgresql_url)
     assert report.flows[0]["new_state"] == "queued"
-    assert snapshot(legacy) == before
-    assert (
-        migrate(postgresql_url, apply=True, expected_fingerprint=report.fingerprint).status
-        == "applied"
-    )
     assert legacy.execute(
         "SELECT state,current_attempt_id,current_round_no FROM flows WHERE id=%s", (identity,)
     ).fetchone() == {"state": "queued", "current_attempt_id": None, "current_round_no": 1}
@@ -503,15 +509,8 @@ def test_missing_attempt_requires_fresh_queued_initial(legacy, postgresql_url, h
             "INSERT INTO attempts(flow_id,created_at,updated_at) VALUES (%s,%s,%s)",
             (identity, NOW, NOW),
         )
-    before = snapshot(legacy)
-    report = migrate(postgresql_url)
-    assert report.status == "refused", report.as_dict()
+    report = refuse_unchanged(legacy, postgresql_url)
     assert any(p["flow_ids"] == [identity] for p in report.problems)
-    assert (
-        migrate(postgresql_url, apply=True, expected_fingerprint=report.fingerprint).status
-        == "refused"
-    )
-    assert snapshot(legacy) == before
 
 
 @pytest.mark.parametrize("reference", ["foreign", "missing"])
@@ -525,17 +524,10 @@ def test_fresh_queued_initial_rejects_invalid_attempt_reference(legacy, postgres
         legacy.execute("ALTER TABLE flows DROP CONSTRAINT fk_flows_current_attempt")
         attempt = 999
     legacy.execute("UPDATE flows SET current_attempt_id=%s WHERE id=%s", (attempt, identity))
-    before = snapshot(legacy)
-    report = migrate(postgresql_url)
-    assert report.status == "refused", report.as_dict()
+    report = refuse_unchanged(legacy, postgresql_url)
     assert any(
         p["flow_ids"] == [identity] and "Current attempt" in p["message"] for p in report.problems
     )
-    assert (
-        migrate(postgresql_url, apply=True, expected_fingerprint=report.fingerprint).status
-        == "refused"
-    )
-    assert snapshot(legacy) == before
 
 
 def test_all_six_states_backups_history_and_restart(legacy, postgresql_url):
@@ -569,7 +561,7 @@ def test_all_six_states_backups_history_and_restart(legacy, postgresql_url):
     )
     original = snapshot(legacy)
     dry = migrate(postgresql_url)
-    assert dry.status == "ready", dry.as_dict()
+    assert dry.status == "ready", dry
     assert snapshot(legacy) == original
     assert {f["id"]: f["new_state"] for f in dry.flows} == {
         queued: "queued",
@@ -672,7 +664,7 @@ def test_verified_workspace_deletion_can_migrate(legacy, postgresql_url, cleanup
     original = legacy.execute("SELECT result_payload FROM jobs WHERE id=%s", (job_id,)).fetchone()[
         "result_payload"
     ]
-    apply_reviewed(postgresql_url)
+    apply_reviewed(legacy, postgresql_url)
     assert (
         legacy.execute("SELECT state FROM flows WHERE id=%s", (identity,)).fetchone()["state"]
         == "archived"
@@ -756,15 +748,8 @@ def test_terminal_label_never_substitutes_for_disposition(
     elif hazard == "frozen-identity":
         # A released row cannot prove disposition of an assignment to another worker.
         legacy.execute("UPDATE jobs SET assigned_worker_id='other' WHERE id=%s", (job_id,))
-    before = snapshot(legacy)
-    report = migrate(postgresql_url)
-    assert report.status == "refused", report.as_dict()
+    report = refuse_unchanged(legacy, postgresql_url)
     assert any(identity in p["flow_ids"] for p in report.problems)
-    assert (
-        migrate(postgresql_url, apply=True, expected_fingerprint=report.fingerprint).status
-        == "refused"
-    )
-    assert snapshot(legacy) == before
 
 
 @pytest.mark.parametrize("old_state", ["active", "failed", "cancelled", "succeeded", None])
@@ -776,12 +761,10 @@ def test_unapplied_old_plans_rejected_even_without_result_marker(legacy, postgre
         "UPDATE jobs SET result_applied_at=NULL,result_received_at=NULL,result_payload=NULL WHERE id=%s",
         (job_id,),
     )
-    before = snapshot(legacy)
-    report = migrate(postgresql_url)
+    report = refuse_unchanged(legacy, postgresql_url)
     assert any(
         "Unapplied ResultPlan" in p["message"] and p["job_ids"] == [job_id] for p in report.problems
     )
-    assert snapshot(legacy) == before
 
 
 @pytest.mark.parametrize(
@@ -794,16 +777,10 @@ def test_issue_conflicts_report_all_ids_and_abort_entire_batch(legacy, postgresq
     second, _ = flow(legacy, states[1], created=NOW + timedelta(seconds=1))
     job(legacy, second)
     unrelated, _ = flow(legacy, "failed", issue=2)
-    before = snapshot(legacy)
-    report = migrate(postgresql_url)
+    report = refuse_unchanged(legacy, postgresql_url)
     assert any(
         p["flow_ids"] == [first, second] and "no winner" in p["message"] for p in report.problems
     )
-    assert (
-        migrate(postgresql_url, apply=True, expected_fingerprint=report.fingerprint).status
-        == "refused"
-    )
-    assert snapshot(legacy) == before
     assert (
         legacy.execute("SELECT state FROM flows WHERE id=%s", (unrelated,)).fetchone()["state"]
         == "failed"
@@ -824,7 +801,7 @@ def test_cancelled_confirmed_stop_and_released_workspace_can_archive(legacy, pos
         "requested_at,state,confirmed_at,receipt_digest) VALUES ('stop',%s,%s,%s,'token',%s,%s,'confirmed',%s,%s)",
         (identity, job_id, worker, NOW, NOW, NOW + timedelta(seconds=30), "a" * 64),
     )
-    apply_reviewed(postgresql_url)
+    apply_reviewed(legacy, postgresql_url)
     assert legacy.execute(
         "SELECT state,archive_reason FROM flows WHERE id=%s", (identity,)
     ).fetchone() == {
@@ -844,16 +821,14 @@ def test_display_only_archive_does_not_supply_missing_stop_evidence(legacy, post
     )
     legacy.execute("UPDATE console_flows SET archived_at=%s WHERE flow_id=%s", (NOW, identity))
     legacy.execute("SELECT console_refresh(%s)", (identity,))
-    report = migrate(postgresql_url)
-    assert report.status == "refused"
+    report = refuse_unchanged(legacy, postgresql_url)
     assert any("neither applied result nor confirmed stop" in p["message"] for p in report.problems)
 
 
 def test_ambiguous_active_closed_delivery_is_not_silently_finalized(legacy, postgresql_url):
     identity, _ = flow(legacy)
     delivery(legacy, identity, state="closed")
-    report = migrate(postgresql_url)
-    assert report.status == "refused"
+    report = refuse_unchanged(legacy, postgresql_url)
     assert any("abandonment consent" in p["message"] for p in report.problems)
 
 
@@ -882,7 +857,7 @@ def test_every_write_rolls_back_if_new_console_publication_fails(legacy, postgre
     )
     before = snapshot(legacy)
     report = migrate(postgresql_url)
-    assert report.status == "ready", report.as_dict()
+    assert report.status == "ready", report
     with pytest.raises(CheckViolation, match="reject_new_publication"):
         migrate(postgresql_url, apply=True, expected_fingerprint=report.fingerprint)
     assert snapshot(legacy) == before
@@ -952,7 +927,7 @@ def test_success_accepts_old_atomic_release_before_application_marker(legacy, po
         (job_id, Jsonb(effect), Jsonb({"comment_id": 17}), NOW + timedelta(seconds=12), NOW),
     )
     before = legacy.execute("SELECT * FROM result_effects WHERE job_id=%s", (job_id,)).fetchall()
-    apply_reviewed(postgresql_url)
+    apply_reviewed(legacy, postgresql_url)
     assert (
         legacy.execute("SELECT * FROM result_effects WHERE job_id=%s", (job_id,)).fetchall()
         == before
@@ -970,11 +945,8 @@ def test_applied_uninterpretable_plan_reports_ids_without_current_state_guess(
         "UPDATE result_applications SET plan=jsonb_set(plan,'{flow_state}',%s) WHERE job_id=%s",
         (Jsonb(state), job_id),
     )
-    before = snapshot(legacy)
-    report = migrate(postgresql_url)
-    assert report.status == "refused"
+    report = refuse_unchanged(legacy, postgresql_url)
     assert any(p["flow_ids"] == [identity] and p["job_ids"] == [job_id] for p in report.problems)
-    assert snapshot(legacy) == before
 
 
 def test_applied_cancelled_plan_is_audited_not_left_unreadable(legacy, postgresql_url):
@@ -982,7 +954,7 @@ def test_applied_cancelled_plan_is_audited_not_left_unreadable(legacy, postgresq
     binding(legacy, identity, released=True)
     job_id = job(legacy, identity)
     original = applied_plan(legacy, identity, attempt, job_id, old_state="cancelled")
-    apply_reviewed(postgresql_url)
+    apply_reviewed(legacy, postgresql_url)
     plan = legacy.execute(
         "SELECT plan FROM result_applications WHERE job_id=%s", (job_id,)
     ).fetchone()["plan"]
@@ -998,14 +970,12 @@ def test_applied_cancelled_plan_is_audited_not_left_unreadable(legacy, postgresq
 def test_archived_issue_owner_requires_unique_creation_order(legacy, postgresql_url, same_time):
     first, _ = flow(legacy, "cancelled")
     second, _ = flow(legacy, "cancelled", created=NOW if same_time else NOW + timedelta(seconds=1))
-    report = migrate(postgresql_url)
     if same_time:
-        assert report.status == "refused"
+        report = refuse_unchanged(legacy, postgresql_url)
         assert any(p["flow_ids"] == [first, second] for p in report.problems)
     else:
-        assert report.status == "ready"
+        report = apply_reviewed(legacy, postgresql_url)
         assert report.owners == [{"repo": "owner/repo", "issue_number": 1, "flow_id": second}]
-        apply_reviewed(postgresql_url)
 
 
 def test_duplicate_pr_and_partial_schema_are_preflight_refusals(legacy, postgresql_url):
@@ -1013,17 +983,14 @@ def test_duplicate_pr_and_partial_schema_are_preflight_refusals(legacy, postgres
     second, _ = flow(legacy, "failed", issue=2)
     delivery(legacy, first, number=17)
     delivery(legacy, second, number=17)
-    report = migrate(postgresql_url)
-    assert report.status == "refused"
+    report = refuse_unchanged(legacy, postgresql_url)
     assert any(
         p["flow_ids"] == [first, second] and "Duplicate delivery" in p["message"]
         for p in report.problems
     )
     legacy.execute("ALTER TABLE jobs ADD COLUMN round_no INTEGER NOT NULL DEFAULT 1")
-    before = snapshot(legacy)
-    report = migrate(postgresql_url)
-    assert report.status == "refused" and any("partial" in p["message"] for p in report.problems)
-    assert snapshot(legacy) == before
+    report = refuse_unchanged(legacy, postgresql_url)
+    assert any("partial" in p["message"] for p in report.problems)
 
 
 @pytest.mark.parametrize(
@@ -1048,8 +1015,5 @@ def test_uncertain_active_stage_is_a_batch_refusal(legacy, postgresql_url, hazar
             "binding_at,requested_at) VALUES ('stop',%s,%s,%s,'token',%s,%s)",
             (identity, job_id, worker, NOW, NOW),
         )
-    before = snapshot(legacy)
-    report = migrate(postgresql_url)
-    assert report.status == "refused"
+    report = refuse_unchanged(legacy, postgresql_url)
     assert any(p["flow_ids"] == [identity] for p in report.problems)
-    assert snapshot(legacy) == before

@@ -444,18 +444,17 @@ async def test_archive_rate_limit_waits_until_reset_without_retry_after(store, t
     [
         ("fetch_labels", GitHubErrorKind.PERMISSION, 403),
         ("add_label", GitHubErrorKind.NOT_FOUND, 404),
-        ("add_label", GitHubErrorKind.RATE_LIMITED, 429),
-        ("remove_label", GitHubErrorKind.TRANSIENT, 503),
     ],
 )
 async def test_archive_label_errors_do_not_block_completion(
     store, monkeypatch, operation, kind, status, archive_resources
 ):
     # Display failures must not retain a workspace whose cleanup is already confirmed.
+    # The full error-kind matrix is covered by INITIAL in test_result_recovery.
     flow, job, _, github, subject = await pending_archive(store)
 
     async def unavailable(*args):
-        raise GitHubError(kind, operation, status_code=status, request_rejected=status < 500)
+        raise GitHubError(kind, operation, status_code=status, request_rejected=True)
 
     monkeypatch.setattr(Issue, operation, unavailable)
     assert await subject.results.apply(job.id) is JobState.DONE
