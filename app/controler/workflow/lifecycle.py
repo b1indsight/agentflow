@@ -16,7 +16,7 @@ from app.controler.workflow.revisions import (
     verify_revision_remote,
 )
 from app.domain.models import (
-    TERMINAL_STATES,
+    ArchiveReason,
     DeliveryState,
     Flow,
     FlowDelivery,
@@ -29,7 +29,7 @@ from app.persistence.database import Database
 from app.persistence.deliveries import DeliveryStore
 from app.persistence.flows import FlowStore
 from app.persistence.jobs import JobStore
-from app.persistence.reviews import ReviewStore
+from app.persistence.rounds import RoundStore
 from app.persistence.stops import StopStore
 from app.persistence.workers import WorkerStore
 
@@ -90,7 +90,7 @@ def adopt_created_pull_request(
                 or current.version != expected.version or current.head_sha != expected.head_sha
                 or current.pr_number not in {None, remote.number}):
             raise ResultPending("INITIAL delivery changed during PR verification")
-        cancelled = flow.state is FlowState.CANCELLED
+        cancelled = flow.archive_reason is not None
         if cancelled and (current.state is not DeliveryState.OPENING or current.pr_number is not None
                           or current.branch != expected.branch):
             raise ResultPending("cancelled delivery changed during recovery")
@@ -108,13 +108,21 @@ def adopt_created_pull_request(
                 jobs=jobs_tx,
                 stops=stops_tx,
                 workers=workers_tx,
+                rounds=RoundStore(tx),
             )
         elif cancelled:
             current.state = DeliveryState.CLOSED if remote.state == "closed" else DeliveryState.OPEN
             current.version += 1
             deliveries_tx.update_delivery(current)
         else:
-            pause_delivery(current, deliveries=deliveries_tx, jobs=jobs_tx)
+            close_delivery(
+                flow,
+                current,
+                deliveries=deliveries_tx,
+                flows=flows_tx,
+                jobs=jobs_tx,
+                stops=stops_tx,
+            )
 
 
 def _merge_observation(remote: PullRequest) -> PullRequestMerge:
@@ -131,6 +139,29 @@ def pause_delivery(delivery: FlowDelivery, *, deliveries: DeliveryStore, jobs: J
     delivery.version += 1
     deliveries.update_delivery(delivery)
     jobs.cancel_jobs(delivery.flow_id, reason="PR closed or baseline changed; queued work retired")
+
+
+def close_delivery(
+    flow: Flow,
+    delivery: FlowDelivery,
+    *,
+    deliveries: DeliveryStore,
+    flows: FlowStore,
+    jobs: JobStore,
+    stops: StopStore,
+) -> None:
+    """An unmerged close ends this round; a later reopen grants no new work."""
+    if flow.state is FlowState.ARCHIVED or delivery.state is DeliveryState.MERGED:
+        return
+    pause_delivery(delivery, deliveries=deliveries, jobs=jobs)
+    if flow.archive_reason is None:
+        flow.archive_reason = ArchiveReason.ABANDONED
+        flow.archive_summary = "Current PR closed without merge"
+        flow.state = FlowState.FINALIZING
+        flows.update_flow(flow)
+    stops.request(flow.id)
+    jobs.cancel_jobs(flow.id)
+    flows.try_archive(flow.id)
 
 
 async def prove_reopen(
@@ -198,20 +229,15 @@ async def prove_reopen(
     return proof, None
 
 
-def resume_delivery(
+def record_reopen(
     flow: Flow,
     delivery: FlowDelivery,
     proof: ReopenProof,
-    settle_seconds: float,
     *,
     deliveries: DeliveryStore,
     flows: FlowStore,
-    jobs: JobStore,
-    reviews: ReviewStore,
 ) -> None:
-    """Apply a freshly fenced proof; old batches stay cancelled and feedback is refrozen."""
-    # Lease/reconnect recovery may have requeued an unstarted job after the initial pause.
-    jobs.cancel_jobs(flow.id, reason="PR reopened; stale unstarted work retired before refreezing")
+    """Record verified baseline facts only; reopen never resumes business work."""
     delivery.state, delivery.head_sha = DeliveryState.OPEN, proof.head_sha
     delivery.version += 1
     deliveries.update_delivery(delivery)
@@ -223,7 +249,6 @@ def resume_delivery(
         if proof.session_generation is not None:
             attempt.session_generation = proof.session_generation
         flows.update_attempt(attempt)
-    reviews.reopened(flow.id, settle_seconds)
 
 
 def record_merge(
@@ -236,6 +261,7 @@ def record_merge(
     jobs: JobStore,
     stops: StopStore,
     workers: WorkerStore,
+    rounds: RoundStore,
 ) -> bool:
     """Apply verified merge facts under the caller's workflow lock, for webhook or poll."""
     if delivery.flow_id != flow.id or delivery.pr_number != merge.number:
@@ -244,6 +270,9 @@ def record_merge(
             or (delivery.merge_commit_sha is not None
                 and delivery.merge_commit_sha != merge.merge_commit_sha)):
         raise ValueError("merge event conflicts with recorded merge facts")
+    if flow.state is FlowState.ARCHIVED:
+        rounds.observe_merge(flow.id, flow.current_round_no, merge)
+        return False
     first_merge = delivery.state is not DeliveryState.MERGED
     if first_merge or delivery.merged_at is None or delivery.merge_commit_sha is None:
         delivery.state = DeliveryState.MERGED
@@ -252,13 +281,13 @@ def record_merge(
         delivery.version += 1
         deliveries.update_delivery(delivery)
     binding = workers.get_flow_execution(flow.id)
-    if (first_merge and flow.state is FlowState.CANCELLED and binding is not None
-            and binding.released_at is None and stops.has_pending(flow.id)
-            and flows.get_active_flow(flow.repo, flow.issue_number) is None):
-        # Merge facts supersede cancellation only for archive on the retained original binding.
-        flow.state = FlowState.ACTIVE
+    if first_merge:
+        flow.archive_reason = ArchiveReason.SUCCEEDED
+        if binding is None or binding.released_at is not None:
+            flow.state = FlowState.BLOCKED
+        elif flow.state is not FlowState.BLOCKED:
+            flow.state = FlowState.FINALIZING
         flows.update_flow(flow)
-    if first_merge and flow.state not in TERMINAL_STATES:
         jobs.cancel_jobs(flow.id, reason="PR merged; queued work retired")
         jobs.enqueue_job(flow.id, JobKind.ARCHIVE)
     return first_merge

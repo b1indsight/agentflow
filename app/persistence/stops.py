@@ -12,6 +12,7 @@ from app.contracts.protocol import ExecutionStopped, StopFence
 from app.contracts.receipts import matches_stop_receipt, stop_receipt_digest
 from app.domain.models import DeliveryState, FlowState
 from app.persistence.deliveries import DeliveryStore
+from app.persistence.flows import FlowStore
 from app.persistence.jobs import JobStore
 from app.persistence.repository import Repository
 from app.persistence.workers import WorkerStore
@@ -72,7 +73,7 @@ class StopStore(Repository):
             return False
         with self._db.transaction() as tx:
             flow = tx.lock_workflow(job.required_flow_id)
-            if flow is None or flow.state is not FlowState.ACTIVE:
+            if flow is None or not flow.accepts(job.kind) or flow.current_round_no != job.round_no:
                 return False
             delivery = DeliveryStore(tx).get_delivery(flow.id)
             if delivery is not None and (delivery.state is DeliveryState.CLOSED or delivery.supersedes(job.kind)):
@@ -144,16 +145,19 @@ class StopStore(Repository):
                 ).fetchone() is not None:
                     return False
                 delivery = DeliveryStore(tx).get_delivery(intent.flow_id)
-                if (delivery is not None and delivery.state is DeliveryState.MERGED
-                        and flow.state not in {FlowState.ACTIVE, FlowState.SUCCEEDED}):
+                if (
+                    delivery is not None
+                    and delivery.state is DeliveryState.MERGED
+                    and flow.state
+                    not in {FlowState.FINALIZING, FlowState.BLOCKED, FlowState.ARCHIVED}
+                ):
                     return False
                 # Any previously dispatched effect must converge through the existing result engine.
                 conn.execute("UPDATE execution_stops SET state='confirmed',confirmed_at=%s WHERE request_id=%s",
                              (tx.now(), intent.request_id))
                 conn.execute("UPDATE jobs SET state='failed',last_error='execution stopped',updated_at=%s"
                              " WHERE id=%s AND result_received_at IS NULL", (tx.now(), intent.job_id))
-                if delivery is None or delivery.state is not DeliveryState.MERGED:
-                    WorkerStore(tx).release_flow_execution(intent.flow_id)
                 conn.execute("UPDATE workers SET current_job_id=NULL,status='online' WHERE worker_id=%s"
                              " AND (current_job_id=%s OR current_job_id IS NULL)", (worker_id, intent.job_id))
+                FlowStore(tx).try_archive(intent.flow_id)
                 return True

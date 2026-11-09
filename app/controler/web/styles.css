@@ -112,7 +112,7 @@ svg {
 .phase-blocked {
   --phase: var(--status-red);
 }
-.phase-done {
+.phase-archived {
   --phase: var(--status-green);
 }
 .badge {
@@ -1366,6 +1366,60 @@ pre code {
   line-height: 1.8;
   margin: 0;
   color: #697b6e;
+}
+.round-actions,
+.round-buttons,
+.round-reasons {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-top: 16px;
+}
+.round-actions > p,
+.round-form {
+  flex-basis: 100%;
+  min-width: 0;
+}
+.round-form fieldset {
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+}
+.round-form legend {
+  padding: 0 6px;
+  font-size: var(--text-control);
+  font-weight: 600;
+}
+.round-reasons {
+  margin-bottom: 16px;
+}
+.round-form label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--text-control);
+}
+.round-form label[for="archive-summary"] {
+  margin-bottom: 8px;
+}
+.round-form .round-choice {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--green);
+  box-shadow: none;
+}
+.round-summary {
+  white-space: pre-wrap;
+}
+.execution-summary [role="alert"],
+.execution-summary [role="status"] {
+  margin-top: 16px;
+  overflow-wrap: anywhere;
+}
+.execution-summary [role="alert"] {
+  color: #b42318;
 }
 .next-step {
   border-top: 1px solid var(--line);

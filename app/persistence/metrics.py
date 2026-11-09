@@ -29,7 +29,7 @@ UNION ALL SELECT 'archive_pending_age_seconds', '', '',
  COALESCE(GREATEST(0,extract(epoch FROM now()-min(j.created_at))),0)
  FROM jobs j JOIN flows f ON f.id=j.flow_id
  JOIN flow_executions e ON e.flow_id=f.id AND e.released_at IS NULL
- WHERE f.state='active' AND j.kind='archive' AND j.state IN ('queued','running','failed')
+ WHERE f.state IN ('finalizing','blocked') AND j.kind='archive' AND j.state IN ('queued','running','failed')
  AND NOT EXISTS (SELECT 1 FROM jobs newer WHERE newer.flow_id=j.flow_id
                  AND newer.kind='archive' AND newer.id>j.id)
 UNION ALL SELECT 'recovery_pending', '', '', count(*) FROM jobs

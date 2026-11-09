@@ -108,15 +108,13 @@ def archive_adapter(tmp_path, monkeypatch, transport, *, invalid_key=False):
 async def test_archive_publishes_stable_status_and_replay_does_not_backfill(store, archive_resources):
     flow, job, result, github, subject = await pending_archive(store)
     assert await subject.results.apply(job.id) is JobState.DONE
-    assert set(github.targets) == {flow.issue_number, 17}
-    for labels in github.targets.values():
-        assert labels == {"flow", "user-label", "concurrent-user-label", "flow:done"}
+    assert github.targets == {}  # State labels are projected separately after settlement.
     assert {number for number, _ in github.notifications} == {flow.issue_number, 17}
     for _, body in github.notifications:
         assert f"Flow {flow.id}" in body
         assert f"#{flow.issue_number}" in body and "#17" in body
         assert "a" * 40 in body and "2026-09-08T08:00:00" in body
-        assert "工作区清理已确认" in body
+        assert "工作区处置已确认" in body
         assert "worker-a:" not in body and "archive-token" not in body
     plan = store.results.get_plan(job.id)
     assert plan.archive == result
@@ -129,7 +127,7 @@ async def test_archive_publishes_stable_status_and_replay_does_not_backfill(stor
     await route_merge(store, flow, "duplicate-merge")
     assert await subject.results.apply(job.id) is JobState.DONE
     assert len(github.notifications) == 2
-    assert store.flows.get_flow(flow.id).state is FlowState.SUCCEEDED
+    assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
     assert store.workers.get_flow_execution(flow.id).released_at is not None
 
 
@@ -148,7 +146,7 @@ async def test_permanent_archive_write_failure_retries_only_frozen_missing_effec
         await subject.results.apply(job.id)
     plan = store.results.get_plan(job.id)
     assert plan.archive == result
-    assert store.flows.get_flow(flow.id).state is FlowState.ACTIVE
+    assert store.flows.get_flow(flow.id).state is FlowState.BLOCKED
     assert store.workers.get_flow_execution(flow.id).released_at is None
     assert store.jobs.get_job(job.id).result_applied_at is None
     assert "comment" in store.jobs.get_job(job.id).last_error
@@ -168,28 +166,29 @@ async def test_permanent_archive_write_failure_retries_only_frozen_missing_effec
     assert await restarted.results.apply(job.id) is JobState.DONE
     assert store.results.get_plan(job.id) == plan
     assert len(github.notifications) == 2
-    assert len(github.writes) == 6
+    assert len(github.writes) == 2
     assert [item.id for item in store.jobs.list_jobs(flow.id)] == [item.id for item in jobs]
 
 
-@pytest.mark.parametrize("operation", ["add_label", "remove_label", "comment"])
-async def test_archive_recovers_remote_write_before_receipt_after_restart(store, monkeypatch, operation, archive_resources):
+async def test_archive_recovers_remote_write_before_receipt_after_restart(
+    store, monkeypatch, archive_resources
+):
     flow, job, _, github, subject = await pending_archive(store)
-    original = getattr(Issue, operation)
+    original = Issue.comment
 
     async def lost_response(*args):
         await original(*args)
-        raise GitHubError(GitHubErrorKind.TRANSIENT, operation)
+        raise GitHubError(GitHubErrorKind.TRANSIENT, "comment")
 
-    monkeypatch.setattr(Issue, operation, lost_response)
+    monkeypatch.setattr(Issue, "comment", lost_response)
     with pytest.raises(ResultPending):
         await subject.results.apply(job.id)
     assert store.workers.get_flow_execution(flow.id).released_at is None
-    monkeypatch.setattr(Issue, operation, original)
+    monkeypatch.setattr(Issue, "comment", original)
     store.results.recover_claims()
     due(store, job.id)
     assert await coordinator(store, github).results.apply(job.id) is JobState.DONE
-    assert len(github.writes) == 6
+    assert len(github.writes) == 2
     assert len(github.notifications) == 2
 
 
@@ -210,7 +209,7 @@ async def test_unknown_archive_comment_stays_pending_without_resending_or_reclea
             database=store.database,
         ).retry(flow)
     assert store.results.get_plan(job.id).archive == result
-    assert store.flows.get_flow(flow.id).state is FlowState.ACTIVE
+    assert store.flows.get_flow(flow.id).state is FlowState.FINALIZING
     assert not github.notifications
 
 
@@ -250,7 +249,7 @@ async def test_archive_auth_failure_preserves_whether_comment_was_sent(
                                              else "authentication")):
         await subject.results.apply(job.id)
     assert bool(requests) is (failure != "invalid_key")
-    effect = store.results.list_effects(job.id)[2]
+    effect = store.results.list_effects(job.id)[0]
     expected = (EffectState.RETRY if failure == "token_unavailable" else EffectState.FAILED)
     assert effect.state is (EffectState.UNCERTAIN if already_dispatched else expected)
     assert (effect.dispatched_at is not None) is already_dispatched
@@ -302,7 +301,7 @@ async def test_archive_keeps_dispatch_evidence_when_token_expires_after_post(sto
         NATIVE_ISSUE_COMMENT(Issue(adapter.installation(issue.repository.installation.installation_id).repository(issue.repository.full_name), issue.number), body))
     with pytest.raises(ResultPending):
         await subject.results.apply(job.id)
-    effect = store.results.list_effects(job.id)[2]
+    effect = store.results.list_effects(job.id)[0]
     assert effect.state is EffectState.UNCERTAIN
     assert effect.dispatched_at is not None
     assert requests == ["/app/installations/42/access_tokens",
@@ -414,7 +413,7 @@ async def test_archive_rate_limit_waits_until_reset_without_retry_after(store, t
         NATIVE_ISSUE_COMMENT(Issue(adapter.installation(issue.repository.installation.installation_id).repository(issue.repository.full_name), issue.number), body))
     with pytest.raises(ResultPending):
         await subject.results.apply(job.id)
-    effect = store.results.list_effects(job.id)[2]
+    effect = store.results.list_effects(job.id)[0]
     assert effect.state is EffectState.RETRY
     assert effect.next_attempt_at >= reset
     assert effect.dispatched_at is None
@@ -425,20 +424,23 @@ async def test_archive_rate_limit_waits_until_reset_without_retry_after(store, t
 
 @pytest.mark.parametrize("status,kind", [(429, GitHubErrorKind.RATE_LIMITED),
                                        (503, GitHubErrorKind.TRANSIENT)])
-async def test_archive_transient_label_errors_resume_automatically(store, monkeypatch, status, kind, archive_resources):
+async def test_archive_rejected_comment_errors_resume_automatically(
+    store, monkeypatch, status, kind, archive_resources
+):
     flow, job, _, _github, subject = await pending_archive(store)
-    original = Issue.add_label
+    original = Issue.comment
 
-    async def unavailable(issue, label):
-        raise GitHubError(kind, "add_label", status_code=status, request_rejected=status == 429)
+    async def unavailable(issue, body):
+        raise GitHubError(kind, "comment", status_code=status, request_rejected=True)
 
-    monkeypatch.setattr(Issue, "add_label", unavailable)
+    monkeypatch.setattr(Issue, "comment", unavailable)
     with pytest.raises(ResultPending):
         await subject.results.apply(job.id)
     record = store.results.list_effects(job.id)[0]
-    assert record.state in {EffectState.RETRY, EffectState.UNCERTAIN}
+    assert record.state is EffectState.RETRY
+    assert record.dispatched_at is None
     assert store.workers.get_flow_execution(flow.id).released_at is None
-    monkeypatch.setattr(Issue, "add_label", original)
+    monkeypatch.setattr(Issue, "comment", original)
     due(store, job.id)
     assert await subject.results.apply(job.id) is JobState.DONE
 
@@ -483,5 +485,5 @@ async def test_restart_recovers_comment_before_receipt_and_isolates_plugin_failu
         reopened.close()
     assert len(github.notifications) == 2
     assert store.jobs.get_job(job.id).result_applied_at is not None
-    assert store.flows.get_flow(flow.id).state is FlowState.SUCCEEDED
+    assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
     assert store.workers.get_flow_execution(flow.id).released_at is not None

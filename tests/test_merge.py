@@ -11,7 +11,7 @@ from app.contracts.protocol import ArchiveResult, ArchiveTask, Succeeded
 from app.controler.config import ServerSettings
 from app.controler.events.router import EventRouter
 from app.controler.workflow.service import ControlService
-from app.domain.models import DeliveryState, Flow, FlowState, JobKind, JobState
+from app.domain.models import ArchiveReason, DeliveryState, Flow, FlowState, JobKind, JobState
 from app.domain.review_models import BatchState
 from app.persistence.jobs import JobStore
 from app.persistence.store import Store
@@ -118,13 +118,15 @@ async def test_merge_routing_uses_pr_identity_not_feedback_authorization(store, 
     assert bool(store.jobs.list_jobs(merge_flow.id)) is (case == "bot")
 
 
-@pytest.mark.parametrize("state", [FlowState.FAILED, FlowState.CANCELLED])
-async def test_terminal_flow_keeps_merge_fact_without_reactivation(store, merge_flow, state):
-    merge_flow.state = state
-    store.flows.update_flow(merge_flow)
+async def test_archived_flow_keeps_merge_fact_without_reactivation(store, merge_flow):
+    ControlService(database=store.database).cancel(merge_flow)
+    archived = store.flows.get_round(merge_flow.id, 1)
+    assert archived is not None and archived.archive_reason is ArchiveReason.ABANDONED
     await route_merge(store, merge_flow)
-    assert store.deliveries.get_delivery(merge_flow.id).state is DeliveryState.MERGED
-    assert store.flows.get_flow(merge_flow.id).state is state
+    assert store.deliveries.get_delivery(merge_flow.id) == archived.delivery
+    assert store.flows.get_round(merge_flow.id, 1).merge_commit_sha == "a" * 40
+    assert store.flows.get_flow(merge_flow.id).state is FlowState.ARCHIVED
+    assert store.flows.get_flow(merge_flow.id).archive_reason is ArchiveReason.ABANDONED
     assert store.jobs.list_jobs(merge_flow.id) == []
 
 
@@ -150,7 +152,7 @@ async def test_merge_retires_review_but_waits_for_running_result(store, recordin
     assert await subject.results.apply(job.id) is JobState.DONE
     assert await subject.results.apply(job.id) is JobState.DONE
     assert github.comments == []
-    assert store.flows.get_flow(flow.id).state is FlowState.ACTIVE
+    assert store.flows.get_flow(flow.id).state is FlowState.FINALIZING
     assert store.deliveries.get_delivery(flow.id).state is DeliveryState.MERGED
     archive = store.workers.assign_job("worker-a", "archive-token", "epoch-a")
     assert archive is not None and archive.kind is JobKind.ARCHIVE
@@ -166,4 +168,5 @@ async def test_merge_retires_review_but_waits_for_running_result(store, recordin
         message,
     ) == "pending"
     assert await subject.results.apply(archive.id) is JobState.DONE
-    assert store.flows.get_flow(flow.id).state is FlowState.SUCCEEDED
+    assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
+    assert store.flows.get_flow(flow.id).archive_reason is ArchiveReason.SUCCEEDED

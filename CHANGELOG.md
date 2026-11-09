@@ -8,6 +8,12 @@
 
 ## Unreleased
 
+- Flow 采用 queued/running/review/blocked/finalizing/archived 六态，保留现有处理器、事务、ResultPlan
+  和 activity 触发器。看板隐藏 finalizing 独立列，Issue/PR 标签与 Projects 统一从 Flow 投影。
+  未合并关闭进入废弃收尾；归档结果仅 succeeded/abandoned，无 PR 调查可凭结论成功结束。
+  收尾等待停止、结果、副作用和工作区处置后才释放绑定并归档；失败与未知执行进入 blocked。
+  显式恢复开启同一 Flow 新轮次，隔离旧交付/任务/反馈；历史误判仅经证据、版本和确认审计更正，
+  不自动恢复。旧库需离线预检迁移，启动不猜测旧状态。
 - CI 的 Prometheus 与 worker 镜像工具下载增加有限重试和超时，容忍临时 HTTP 504；保留固定
   版本和 SHA256 校验，永久 HTTP 错误及校验失败仍阻止构建。
 - 新增通用 `worker.infer` 文本/JSON 推理 Job（wire19），复用现有 Job 分配、结果受理及恢复流程，

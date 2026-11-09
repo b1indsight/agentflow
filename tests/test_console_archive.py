@@ -5,13 +5,13 @@ from datetime import timedelta
 import pytest
 
 from app.contracts.console import ConsoleFailure
+from app.contracts.protocol import ExecutionStopped
 from app.controler.workflow.service import ControlService
-from app.domain.models import DeliveryState, FlowState
+from app.domain.models import ArchiveReason, DeliveryState, FlowState, JobKind, JobState
 from app.github.console import Observation
 from app.persistence.activity import ActivityStore
 from app.persistence.console import ConsoleStore
 from tests.test_cancel_drain import running
-from tests.test_merge import merge_payload
 
 
 def test_archive_versions_snapshots_and_prior_interactions(store):
@@ -81,28 +81,27 @@ def test_current_projection_and_history_rollback_with_facts(store):
     before = console.detail(flow.id)
     with pytest.raises(RuntimeError), store.transaction() as tx:
         row = tx.flows.get_flow(flow.id)
-        row.state = "failed"
+        row.state = FlowState.BLOCKED
         tx.flows.update_flow(row)
         raise RuntimeError("rollback")
     assert console.detail(flow.id) == before
-    flow.state = "failed"
+    flow.state = FlowState.BLOCKED
     store.flows.update_flow(flow)
     assert console.detail(flow.id).phase == "blocked"
     with store._db.connection() as connection:
         connection.execute("UPDATE console_flows SET facts='{}' WHERE flow_id=%s", (flow.id,))
     console.rebuild(flow.id)
-    assert console.detail(flow.id).lifecycle == "failed"
+    assert console.detail(flow.id).lifecycle is FlowState.BLOCKED
 
 
 def test_filter_counts_precede_column_pagination_and_payloads_are_private(store):
     for index in range(7):
         flow = store.flows.create_flow("octo/repo" if index < 6 else "other/repo", index + 1, 1)
         if index % 2:
-            flow.state = "succeeded"
-            store.flows.update_flow(flow)
+            ControlService(database=store.database).cancel(flow)
     console = ConsoleStore(store._db)
     first = console.flows(q="repo:octo/repo", phase="queued", limit=2)
-    assert first.counts["queued"] == 3 and first.counts["done"] == 3
+    assert first.counts["queued"] == 3 and first.counts["archived"] == 3
     assert first.has_more
     second = console.flows(q="repo:octo/repo", phase="queued", limit=2, cursor=first.next_cursor)
     assert len(second.items) == 1 and not second.has_more
@@ -113,129 +112,144 @@ def test_filter_counts_precede_column_pagination_and_payloads_are_private(store)
     assert "installation_id" not in first.model_dump_json()
 
 
-def test_closed_pr_archive_filters_reopen_and_existing_projection_refresh(store):
-    # Closing a PR archives its card, while preserving the lifecycle needed for a verified reopen.
+@pytest.mark.parametrize("delivery_state", [DeliveryState.CLOSED, DeliveryState.MERGED])
+@pytest.mark.parametrize(
+    "state,phase",
+    [
+        (FlowState.QUEUED, "queued"),
+        (FlowState.RUNNING, "running"),
+        (FlowState.REVIEW, "review"),
+        (FlowState.BLOCKED, "blocked"),
+        (FlowState.FINALIZING, "running"),
+    ],
+)
+def test_delivery_facts_cannot_override_flow_phase_or_issue_ownership(
+    store,
+    delivery_state,
+    state,
+    phase,
+):
+    # Remote observations are facts, not permission to bypass lifecycle/cleanup transitions.
     flow = store.flows.create_flow("octo/repo", 7, 1)
-    delivery = store.deliveries.get_or_create_delivery(flow.id, "flow/7")
-    delivery.pr_number, delivery.state = 17, DeliveryState.CLOSED
-    store.deliveries.update_delivery(delivery)
+    flow.state = state
+    if state is FlowState.FINALIZING:
+        flow.archive_reason = ArchiveReason.SUCCEEDED
+        flow.archive_summary = "Awaiting cleanup"
+    store.flows.update_flow(flow)
     console = ConsoleStore(store._db)
-    archived = console.flows(q="is:done", phase="done")
-    assert [item.id for item in archived.items] == [flow.id]
-    assert archived.counts["done"] == 1 and archived.counts["blocked"] == 0
-    assert not console.flows(q="is:active").items
-    assert [item.id for item in console.flows(q="status:done").items] == [flow.id]
-    assert store.flows.get_flow(flow.id).state is FlowState.ACTIVE
-    assert "未合并" in console.detail(flow.id).reason
-    # An upgrade must also move a previously projected blocked card, once, without a GitHub event.
+    before = console.detail(flow.id)
+    delivery = store.deliveries.get_or_create_delivery(flow.id, "flow/7")
+    delivery.pr_number, delivery.state = 17, delivery_state
+    store.deliveries.update_delivery(delivery)
+    detail = console.detail(flow.id)
+    assert detail.phase == before.phase == phase and detail.lifecycle is state
+    assert detail.archived_at is None
+    assert not console.flows(q="is:archived").items
+    assert [item.id for item in console.flows(q="is:active").items] == [flow.id]
+    assert [item.id for item in console.flows(q=f"status:{phase}").items] == [flow.id]
+    assert store.flows.get_active_flow(flow.repo, flow.issue_number).id == flow.id
+    assert ControlService(database=store.database).on_trigger(flow.repo, 7, 1) is None
+    # Upgrade a stale display-only archived card once, without requiring a GitHub event.
     with store.connection() as connection:
         connection.execute(
-            "UPDATE console_flows SET facts=jsonb_set(facts,'{phase}','\"blocked\"') WHERE flow_id=%s",
+            "UPDATE console_flows SET facts=jsonb_set(facts,'{phase}','\"archived\"') WHERE flow_id=%s",
             (flow.id,),
         )
     store.init_db()
     refreshed = console.detail(flow.id)
-    assert refreshed.phase == "done"
+    assert refreshed.phase == phase and refreshed.lifecycle is state
     store.init_db()
     assert console.detail(flow.id) == refreshed
     delivery.state = DeliveryState.OPEN
     store.deliveries.update_delivery(delivery)
-    assert console.detail(flow.id).phase == "review"
-    assert not console.flows(q="is:done").items
-    assert [item.id for item in console.flows(q="is:active").items] == [flow.id]
+    assert console.detail(flow.id).phase == phase
 
 
-@pytest.mark.parametrize("state,manual", [
-    (FlowState.ACTIVE, False), (FlowState.FAILED, False),
-    (FlowState.CANCELLED, False), (FlowState.CANCELLED, True),
-    (FlowState.SUCCEEDED, False),
-])
-def test_merged_pr_archives_card_without_rewriting_execution_history(store, state, manual):
-    # A maintainer can merge after a failed/cancelled execution; retry cannot revive that Flow.
+@pytest.mark.parametrize("reason", list(ArchiveReason))
+def test_real_archive_filters_and_rebuild_preserve_business_outcome(store, reason):
     flow = store.flows.create_flow("octo/repo", 7, 1)
-    flow.state = state
-    store.flows.update_flow(flow)
-    delivery = store.deliveries.get_or_create_delivery(flow.id, "flow/7")
-    delivery.pr_number, delivery.state = 17, DeliveryState.OPEN
-    store.deliveries.update_delivery(delivery)
+    service = ControlService(database=store.database)
+    service.finish(flow, reason=reason, summary="本轮调查结论", expected_round_no=1)
     console = ConsoleStore(store.database)
-    if manual:
-        console.archive(flow.id)
-    before = console.detail(flow.id)
-    ControlService(database=store.database).on_merged(flow, "merge-1", merge_payload(flow))
     detail = console.detail(flow.id)
-    assert detail.phase == "done"
-    assert detail.lifecycle == state
-    assert detail.archived_at == before.archived_at
-    assert [item.id for item in console.flows(q="is:done").items] == [flow.id]
-    assert [item.id for item in console.flows(q="status:done").items] == [flow.id]
+    assert detail.phase == "archived" and detail.lifecycle is FlowState.ARCHIVED
+    assert detail.current_round_no == 1
+    assert detail.archive_reason is reason and detail.archive_summary == "本轮调查结论"
+    assert detail.archived_at == store.flows.get_flow(flow.id).archived_at is not None
+    assert ("成功" if reason is ArchiveReason.SUCCEEDED else "废弃") in detail.reason
+    assert [item.id for item in console.flows(q="is:archived").items] == [flow.id]
+    assert [item.id for item in console.flows(q="status:archived").items] == [flow.id]
     assert not console.flows(q="is:active").items
-    assert console.flows().counts == {"queued": 0, "running": 0, "review": 0, "blocked": 0, "done": 1}
-    if state in {FlowState.FAILED, FlowState.CANCELLED}:
-        assert detail.action == "delivery_merged"
-        assert "PR 已合并" in detail.reason
-        assert "清理" in detail.next_condition and "重试" not in detail.next_condition
-        assert store.jobs.list_jobs(flow.id) == []
-    assert store.flows.get_flow(flow.id).state is state
-    # Upgrade existing cards too, including a manual archive whose phase was already done.
-    with store.connection() as connection:
-        connection.execute(
-            "UPDATE console_flows SET facts=facts || "
-            "jsonb_build_object('phase',%s::text,'action',%s::text) WHERE flow_id=%s",
-            (before.phase, before.action, flow.id),
-        )
+    assert console.flows().counts == {
+        "queued": 0,
+        "running": 0,
+        "review": 0,
+        "blocked": 0,
+        "archived": 1,
+    }
+    for query in ("is:done", "status:done"):
+        with pytest.raises(ConsoleFailure, match="search_invalid"):
+            console.flows(q=query)
+    service.finish(flow, reason=reason, summary="重复请求不能覆盖结论", expected_round_no=1)
+    assert console.detail(flow.id) == detail
+    console.rebuild(flow.id)
     store.init_db()
-    refreshed = console.detail(flow.id)
-    assert refreshed.phase == detail.phase and refreshed.action == detail.action
     store.init_db()
-    assert console.detail(flow.id) == refreshed
+    assert console.detail(flow.id) == detail
 
 
-def test_cancelled_manual_archive_survives_refresh_and_retry_clears_it(store):
-    # A display archive must survive projection rebuilds without turning cancellation into success.
+def test_resume_starts_new_round_without_overwriting_archive_or_conversation(store):
     flow = store.flows.create_flow("octo/repo", 7, 1)
+    original_job = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
+    delivery = store.deliveries.get_or_create_delivery(flow.id, "flow/7")
+    delivery.pr_number, delivery.state = 17, DeliveryState.CLOSED
+    store.deliveries.update_delivery(delivery)
     control = ControlService(database=store.database)
     control.cancel(flow)
     console = ConsoleStore(store.database)
     history = ActivityStore(store.database)
     observation = Observation(
-        key="comment:7", source="issue.comments", kind="comment", author="owner",
-        body="归档后仍可阅读", occurred_at=flow.created_at, updated_at=flow.created_at,
+        key="comment:7",
+        source="issue.comments",
+        kind="comment",
+        author="owner",
+        body="归档后仍可阅读",
+        occurred_at=flow.created_at,
+        updated_at=flow.created_at,
     )
     history.append(flow.id, observation)
-    before = console.detail(flow.id)
-    archived = console.archive(flow.id)
-    assert archived.phase == "done" and archived.lifecycle == "cancelled"
-    assert archived.action == "cancelled" and archived.archived_at is not None
-    assert archived.state_version == before.state_version + 1
-    assert "停止确认" in archived.next_condition
-    assert console.archive(flow.id) == archived
-    assert [item.id for item in console.flows(q="is:done").items] == [flow.id]
-    assert [item.id for item in console.flows(q="status:done").items] == [flow.id]
-    assert not console.flows(q="status:blocked").items
-    assert console.flows().counts == {"queued": 0, "running": 0, "review": 0, "blocked": 0, "done": 1}
-    assert history.page(flow.id).items[0].body == observation.body
-    assert store.flows.get_flow(flow.id).state is FlowState.CANCELLED
-    assert not store.jobs.list_jobs(flow.id)
-
+    archived = console.detail(flow.id)
+    round_one = store.flows.get_round(flow.id, 1)
+    assert round_one.pr_number == 17 and round_one.archive_reason is ArchiveReason.ABANDONED
+    assert round_one.archived_at == archived.archived_at is not None
+    retired_job = store.jobs.get_job(original_job.id)
+    assert retired_job.state is JobState.FAILED and retired_job.round_no == 1
     console.rebuild(flow.id)
     store.init_db()
-    store.init_db()
     assert console.detail(flow.id) == archived
-    delivery = store.deliveries.get_or_create_delivery(flow.id, "flow/7")
-    assert console.detail(flow.id).archived_at == archived.archived_at
-    assert console.detail(flow.id).phase == "done"
-    control.retry(store.flows.get_flow(flow.id))
-    assert console.detail(flow.id).archived_at is None
-    assert console.detail(flow.id).phase == "queued"
-    assert console.detail(flow.id).lifecycle == "active"
-    control.cancel(store.flows.get_flow(flow.id))
-    assert console.detail(flow.id).phase == "blocked"
-    assert console.detail(flow.id).archived_at is None
-    assert store.deliveries.get_delivery(flow.id) == delivery
+    resumed = control.resume(store.flows.get_flow(flow.id), expected_round_no=1)
+    detail = console.detail(flow.id)
+    assert resumed.id == flow.id and detail.current_round_no == 2
+    assert detail.phase == "queued" and detail.lifecycle is FlowState.QUEUED
+    assert detail.archived_at is detail.archive_reason is detail.archive_summary is None
+    assert detail.pr_number is None and detail.branch == f"flow/{flow.id}/round-2"
+    assert store.flows.get_round(flow.id, 1) == round_one
+    jobs = store.jobs.list_jobs(flow.id)
+    assert [(job.round_no, job.state) for job in jobs] == [
+        (1, JobState.FAILED),
+        (2, JobState.QUEUED),
+    ]
+    assert store.jobs.get_job(original_job.id) == retired_job
+    assert {job.id for job in console.jobs(flow.id).items} == {job.id for job in jobs}
+    assert "等待分配 Worker" in detail.reason
+    assert history.page(flow.id).items[0].body == observation.body
+    control.cancel(resumed)
+    assert console.detail(flow.id).phase == "archived"
+    assert store.flows.get_round(flow.id, 1) == round_one
+    assert store.flows.get_round(flow.id, 2).archive_reason is ArchiveReason.ABANDONED
 
 
-def test_manual_archive_leaves_pending_stop_and_original_execution_untouched(store):
+def test_finalizing_waits_for_stop_receipt_before_archiving_and_releasing_issue(store):
     # Cancelling an in-flight executor retains its slot until a real stop receipt arrives.
     flow, job = running(store)
     control = ControlService(database=store.database)
@@ -243,12 +257,26 @@ def test_manual_archive_leaves_pending_stop_and_original_execution_untouched(sto
     stop = store.stops.pending("w")
     binding = store.workers.get_flow_execution(flow.id)
     job_before = store.jobs.get_job(job.id)
-    ConsoleStore(store.database).archive(flow.id)
+    console = ConsoleStore(store.database)
+    detail = console.detail(flow.id)
+    assert detail.lifecycle is FlowState.FINALIZING and detail.phase == "running"
+    assert detail.archived_at is None and store.flows.get_round(flow.id, 1) is None
+    assert store.flows.get_active_flow(flow.repo, flow.issue_number).id == flow.id
+    assert [item.id for item in console.flows(q="is:active").items] == [flow.id]
+    control.cancel(store.flows.get_flow(flow.id))
     assert store.stops.pending("w") == stop
     assert store.workers.get_flow_execution(flow.id) == binding
     assert store.jobs.get_job(job.id) == job_before
     with pytest.raises(ValueError, match="awaiting confirmed stop"):
         control.retry(store.flows.get_flow(flow.id))
+    receipt = ExecutionStopped(**stop.fence().model_dump(), execution_nonce="owned")
+    assert store.stops.confirm("w", receipt, "epoch")
+    archived = console.detail(flow.id)
+    assert archived.phase == "archived" and archived.lifecycle is FlowState.ARCHIVED
+    assert archived.archive_reason is ArchiveReason.ABANDONED and archived.worker_historical
+    assert archived.archived_at == store.flows.get_flow(flow.id).archived_at is not None
+    assert store.workers.get_flow_execution(flow.id).released_at is not None
+    assert store.flows.get_active_flow(flow.repo, flow.issue_number) is None
 
 
 def test_late_description_cannot_regress_current_title_after_unchanged_newer_observation(store):

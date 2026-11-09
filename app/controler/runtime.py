@@ -15,6 +15,7 @@ from app.controler.config import ServerSettings
 from app.controler.console.sync import ConsoleSynchronizer
 from app.controler.events.webhooks import WebhookConsumer
 from app.controler.reconciliation.feedback import FeedbackReconciler
+from app.controler.reconciliation.flow_labels import FlowLabelSync
 from app.controler.reconciliation.labels import LabelSynchronizer
 from app.controler.reconciliation.projects import ProjectSync
 from app.controler.reconciliation.pull_requests import Reconciler
@@ -100,7 +101,6 @@ class ServerRuntime:
         self.reconciler = Reconciler(
             github,
             self.service,
-            settle_seconds=self.settings.settle_seconds,
             interval=self.settings.reconcile_interval_seconds,
             batch_size=self.settings.reconcile_batch_size,
             concurrency=self.settings.reconcile_concurrency,
@@ -124,6 +124,14 @@ class ServerRuntime:
             database=database,
         )
         self.label_sync = LabelSynchronizer(github, self.settings)
+        self.flow_label_sync = FlowLabelSync(
+            github,
+            self.settings,
+            database=database,
+            interval=self.settings.reconcile_interval_seconds,
+            batch_size=self.settings.reconcile_batch_size,
+            concurrency=self.settings.reconcile_concurrency,
+        )
         self.database = database
         self.workers = WorkerStore(database)
         self.reviews = ReviewStore(database)
@@ -169,6 +177,7 @@ class ServerRuntime:
             asyncio.create_task(self.reconciler.run()),
             asyncio.create_task(self.feedback_reconciler.run()),
             asyncio.create_task(self.label_sync.run()),
+            asyncio.create_task(self.flow_label_sync.run()),
             asyncio.create_task(self._sweep_assignments()),
             asyncio.create_task(self._sweep_results()),
             asyncio.create_task(self._sweep_reviews()),

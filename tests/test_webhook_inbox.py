@@ -297,7 +297,7 @@ def test_all_business_routes_rollback_with_receipt(store, monkeypatch, event, ac
         patch.setattr(WebhookStore, "complete", unavailable)
         worker.sweep()
     assert not store.webhooks.event_seen("route")
-    assert store.flows.get_flow(flow.id).state == FlowState.ACTIVE
+    assert store.flows.get_flow(flow.id).state == FlowState.QUEUED
     assert store.deliveries.get_delivery(flow.id).state == DeliveryState.OPEN
     assert not store.reviews.pending(flow.id)
     assert observed == []

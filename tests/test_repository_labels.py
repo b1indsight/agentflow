@@ -127,7 +127,9 @@ def remote_inventory(monkeypatch, github, names):
 
 
 async def test_scan_cadence_retries_failures_and_rescans_after_restart(tmp_path, monkeypatch):
-    configured = settings(tmp_path).model_copy(update={"done_label": "custom:done"})
+    configured = settings(tmp_path).model_copy(
+        update={"trigger_label": "custom:flow", "done_label": "custom:done"}
+    )
     github = GitHubApp(configured)
     remote_inventory(monkeypatch, github, ["owner/pending", "owner/ready"])
     now = 0.0
@@ -135,7 +137,15 @@ async def test_scan_cadence_retries_failures_and_rescans_after_restart(tmp_path,
     calls, failed = [], {"owner/pending"}
 
     async def ensure(self, definitions):
-        assert definitions[-1].name == "custom:done"
+        assert [definition.name for definition in definitions] == [
+            "custom:flow",
+            "flow:queued",
+            "flow:running",
+            "flow:review",
+            "flow:blocked",
+            "flow:finalizing",
+            "flow:archived",
+        ]
         calls.append(self.full_name)
         if self.full_name in failed:
             raise GitHubError(GitHubErrorKind.PERMISSION, "create_label", status_code=403)

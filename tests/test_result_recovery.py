@@ -8,7 +8,6 @@ import pytest
 
 from app.contracts.protocol import (
     PROTOCOL_VERSION,
-    ExecutionStopped,
     FlowToolArguments,
     FlowToolRequest,
     InitialTask,
@@ -25,6 +24,7 @@ from app.controler.workflow.coordinator import JobCoordinator
 from app.controler.workflow.service import ControlService
 from app.domain.delivery_models import OpenedDelivery
 from app.domain.models import (
+    ArchiveReason,
     DeliveryState,
     Flow,
     FlowDelivery,
@@ -34,7 +34,7 @@ from app.domain.models import (
     JobState,
     VcsKind,
 )
-from app.github import GitHubError, GitHubErrorKind, Issue, Repository
+from app.github import GitHubError, GitHubErrorKind, Issue, PullRequest, Repository
 from app.persistence.store import Store
 from tests.github import RecordingGitHub
 from tests.test_coordinator import MemoryStore, apply_result, coordinator
@@ -167,21 +167,14 @@ async def test_merged_initial_retry_keeps_execution_facts_without_reopening(
     completed_open_initial,
     exit_code,
 ):
-    # A cancelled completed INITIAL can retry against its still-open PR, which a human can merge.
+    # Worker loss can block a completed INITIAL in the same round while its PR stays open.
     flow, subject, github, initial_request, initial_result = completed_open_initial
     service = ControlService(
         database=store.database,
     )
-    service.cancel(flow)
-    stop = store.stops.pending("worker-a")
-    assert store.stops.confirm(
-        "worker-a",
-        ExecutionStopped(
-            **stop.fence().model_dump(),
-            execution_nonce="owned",
-        ),
-        "epoch",
-    )
+    flow.state = FlowState.BLOCKED
+    store.flows.update_flow(flow)
+    assert store.workers.release_flow_execution(flow.id)
     service.retry(flow)
     # Fresh worker-b starts from seed A, then checks out existing H where H descends A and H != A.
     store.workers.worker_connected("worker-b", PROTOCOL_VERSION, "epoch-b")
@@ -235,7 +228,7 @@ async def test_merged_initial_retry_keeps_execution_facts_without_reopening(
     expected = JobState.DONE if exit_code == 0 else JobState.FAILED
     assert await subject.results.apply(job.id) is expected
     assert store.deliveries.get_delivery(flow.id) == merged
-    assert store.flows.get_flow(flow.id).state is FlowState.ACTIVE
+    assert store.flows.get_flow(flow.id).state is FlowState.FINALIZING
     assert store.flows.get_attempt(task.attempt_id).codex_session_id == "initial-session"
     accepted = store.jobs.get_job(job.id)
     assert accepted.result_digest == digest and accepted.result_applied_at is not None
@@ -253,47 +246,42 @@ async def test_cancel_before_terminal_keeps_executor_slot_until_result_ack(scena
         database=cast(Store, store).database,
     ).cancel(store.flow)
     assert store.job_records[job.id].state is JobState.RUNNING
-    assert await apply_result(coordinator(store, github), job, result) is JobState.DONE
-    assert store.flow.state is FlowState.CANCELLED
+    assert await apply_result(coordinator(store, github), job, result) is JobState.FAILED
+    assert store.flow.state is FlowState.FINALIZING
     assert store.job_records[job.id].result_applied_at is not None
     assert not github.comments and not store.enqueued
 
 
-async def test_review_label_preserves_user_labels_on_delivery_and_replay(initial_scenario):
-    # Human labels may predate delivery; replaying a frozen status intent must not erase them.
+async def test_delivery_and_replay_leave_state_labels_to_the_projection(initial_scenario):
+    # Result replay must neither overwrite human labels nor race the state projector.
     store, github, job, result = initial_scenario
     github.labels = [["bug", "user-owned"]]
     subject = coordinator(store, github)
     await apply_result(subject, job, result)
     await apply_result(subject, job, result)
-    assert github.labels[-1] == ["bug", "user-owned", "flow:in-review"]
-    assert len(github.labels) == 2
-    assert [call for call in github.resource_calls if call["operation"] == "add_label"] == [
-        {
-            "operation": "add_label",
-            "installation_id": store.flow.installation_id,
-            "repo": store.flow.repo,
-            "number": 17,
-        }
-    ]
+    assert github.labels == [["bug", "user-owned"]]
+    assert [call for call in github.resource_calls if call["operation"] == "add_label"] == []
 
 
 async def test_initial_delivery_commits_only_after_all_required_effects(
     initial_scenario, monkeypatch
 ) -> None:
     store, github, job, result = initial_scenario
-    original = Issue.add_label
+    original = PullRequest.request_reviewers
     limited = [True]
 
-    async def add_label(issue, label):
+    async def request_reviewers(pr, reviewers):
         if limited:
             limited.pop()
             raise GitHubError(
-                GitHubErrorKind.RATE_LIMITED, "add_label", status_code=429, request_rejected=True
+                GitHubErrorKind.RATE_LIMITED,
+                "request_reviewers",
+                status_code=429,
+                request_rejected=True,
             )
-        await original(issue, label)
+        await original(pr, reviewers)
 
-    monkeypatch.setattr(Issue, "add_label", add_label)
+    monkeypatch.setattr(PullRequest, "request_reviewers", request_reviewers)
     with pytest.raises(ResultPending):
         await apply_result(coordinator(store, github), job, result)
     assert store.delivery.state is DeliveryState.OPENING
@@ -373,6 +361,8 @@ async def test_merge_during_comment_lookup_prevents_dispatch(scenario, monkeypat
     async def merge_during_lookup(issue, marker):
         store.delivery.state = DeliveryState.MERGED
         store.delivery.version += 1
+        store.flow.state = FlowState.FINALIZING
+        store.flow.archive_reason = ArchiveReason.SUCCEEDED
         store.reviews.cancel(store.flow.id)
         return await original(issue, marker)
 
@@ -384,7 +374,7 @@ async def test_merge_during_comment_lookup_prevents_dispatch(scenario, monkeypat
         store.results.clock += timedelta(seconds=30)
         await apply_result(subject, job, result)
     assert store.job_records[job.id].result_applied_at is not None
-    assert store.flow.state is FlowState.ACTIVE
+    assert store.flow.state is FlowState.FINALIZING
     assert github.comments == []
     assert store.enqueued == []
 
@@ -415,6 +405,8 @@ async def test_retired_result_reconciles_dispatched_comment_without_resending(
     if transition == "merge":
         store.delivery.state = DeliveryState.MERGED
         store.delivery.version += 1
+        store.flow.state = FlowState.FINALIZING
+        store.flow.archive_reason = ArchiveReason.SUCCEEDED
         store.reviews.cancel(store.flow.id)
     else:
         ControlService(
@@ -430,7 +422,7 @@ async def test_retired_result_reconciles_dispatched_comment_without_resending(
         assert store.job_records[job.id].result_applied_at is None
     assert len(calls) == 1
     assert store.enqueued == []
-    assert store.flow.state is (FlowState.ACTIVE if transition == "merge" else FlowState.CANCELLED)
+    assert store.flow.state is FlowState.FINALIZING
 
 
 async def test_unknown_comment_is_not_resubmitted_and_blocks_retry(scenario, monkeypatch) -> None:
@@ -494,7 +486,7 @@ async def test_cancel_during_remote_lookup_does_not_authorize_a_comment(
     with pytest.raises(ResultPending):
         await apply_result(coordinator(store, github), job, result)
     await apply_result(coordinator(store, github), job, result)
-    assert store.flow.state is FlowState.CANCELLED
+    assert store.flow.state is FlowState.FINALIZING
     assert github.comments == store.enqueued == []
     assert store.job_records[job.id].result_applied_at is not None
 

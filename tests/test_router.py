@@ -6,27 +6,18 @@ from app.contracts.protocol import PROTOCOL_VERSION
 from app.controler.config import ServerSettings
 from app.controler.events.router import EventRouter
 from app.controler.workflow.service import ControlService
-from app.domain.models import DeliveryState, Flow, FlowState, JobKind
+from app.domain.models import ArchiveReason, DeliveryState, Flow, FlowState, JobKind
 from app.persistence.store import Store
 
 
 class RecordingService(ControlService):
     def __init__(self, store: Store) -> None:
-        self.flows = store.flows
-        self.jobs = store.jobs
+        super().__init__(database=store.database)
 
     def on_trigger(self, repo: str, issue_number: int, installation_id: int | None) -> Flow:
         flow = self.flows.create_flow(repo, issue_number, installation_id)
         self.jobs.enqueue_job(flow.id, JobKind.INITIAL)
         return flow
-
-    def cancel(self, flow: Flow) -> None:
-        flow.state = FlowState.CANCELLED
-        self.flows.update_flow(flow)
-
-    def on_merged(self, flow: Flow, delivery_id: str, payload: dict) -> None:
-        flow.state = FlowState.SUCCEEDED
-        self.flows.update_flow(flow)
 
     def notify_jobs(self) -> None:
         pass
@@ -75,7 +66,7 @@ async def test_allowed_label_creates_one_flow_and_job(
 
     flow = store.flows.get_active_flow("owner/repo", 7)
     assert flow is not None
-    assert flow.state is FlowState.ACTIVE
+    assert flow.state is FlowState.QUEUED
     store.workers.worker_connected("worker-1", protocol_version=PROTOCOL_VERSION)
     assert store.workers.assign_job("worker-1", "assignment-1") is not None
     assert store.workers.assign_job("worker-1", "assignment-2") is None
@@ -103,7 +94,8 @@ async def test_unlabel_and_stop_comment_cancel_active_flow(
     unlabel["label"]["name"] = label
     router.dispatch("issues", "cancel-1", unlabel)
     cancelled = store.flows.list_flows()[0]
-    assert cancelled.state is FlowState.CANCELLED
+    assert cancelled.state is FlowState.ARCHIVED
+    assert cancelled.archive_reason is ArchiveReason.ABANDONED
 
     replacement = store.flows.create_flow("owner/repo", 7, installation_id=42)
     stop_payload = {
@@ -117,7 +109,8 @@ async def test_unlabel_and_stop_comment_cancel_active_flow(
 
     stopped = store.flows.get_flow(replacement.id)
     assert stopped is not None
-    assert stopped.state is FlowState.CANCELLED
+    assert stopped.state is FlowState.ARCHIVED
+    assert stopped.archive_reason is ArchiveReason.ABANDONED
 
 
 @pytest.mark.asyncio

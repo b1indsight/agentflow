@@ -23,7 +23,6 @@ from app.domain.inference_models import (
 from app.domain.models import (
     DeliveryState,
     FlowExecution,
-    FlowState,
     Job,
     JobKind,
     JobState,
@@ -32,7 +31,6 @@ from app.domain.models import (
 )
 from app.domain.recovery_policy import (
     RECOVERY_BLOCKED,
-    RECOVERY_EXPIRED,
     BindingRecoveryFacts,
     JobRecoveryFacts,
     RecoveryAction,
@@ -84,11 +82,16 @@ class WorkerStore(Repository):
                 " AND NOT EXISTS (SELECT 1 FROM execution_stops s WHERE s.flow_id=flow_executions.flow_id"
                 " AND s.binding_at=flow_executions.bound_at AND s.state!='confirmed')"
                 " AND NOT EXISTS (SELECT 1 FROM jobs j JOIN flows f ON f.id=j.flow_id"
-                " WHERE j.flow_id=flow_executions.flow_id AND f.state='cancelled'"
-                " AND j.kind<>'inference' AND j.result_received_at IS NOT NULL AND j.result_applied_at IS NULL)"
+                " WHERE j.flow_id=flow_executions.flow_id"
+                " AND j.round_no=f.current_round_no AND j.kind<>'inference' AND (j.state='running'"
+                " OR (j.result_received_at IS NOT NULL AND j.result_applied_at IS NULL)"
+                " OR ((j.started_at IS NOT NULL OR j.dispatch_authorized_at IS NOT NULL"
+                " OR (j.kind='archive' AND j.payload->'archive' IS NOT NULL))"
+                " AND j.result_received_at IS NULL AND NOT EXISTS (SELECT 1 FROM execution_stops s"
+                " WHERE s.job_id=j.id AND s.assignment_token=j.assignment_token AND s.state='confirmed'))))"
                 " AND NOT EXISTS (SELECT 1 FROM result_effects e JOIN jobs j ON j.id=e.job_id"
                 " JOIN flows f ON f.id=j.flow_id WHERE j.flow_id=flow_executions.flow_id"
-                " AND f.state='cancelled' AND e.dispatched_at IS NOT NULL AND e.receipt IS NULL)",
+                " AND j.round_no=f.current_round_no AND e.dispatched_at IS NOT NULL AND e.receipt IS NULL)",
                 (now, flow_id),
             )
         return result.rowcount == 1
@@ -225,7 +228,11 @@ class WorkerStore(Repository):
         # Share this predicate across fair-worker selection and both binding paths.
         eligible = (
             " AND j.kind<>'inference'"
+            " AND j.round_no=f.current_round_no"
+            " AND ((j.kind='archive' AND f.state='finalizing') OR (j.kind<>'archive'"
+            " AND f.state IN ('queued','running','review') AND f.archive_reason IS NULL))"
             " AND (j.prepare_next_at IS NULL OR j.prepare_next_at<=%s)"
+            " AND NOT EXISTS (SELECT 1 FROM execution_stops s WHERE s.flow_id=f.id AND s.state<>'confirmed')"
             " AND NOT EXISTS (SELECT 1 FROM flow_deliveries paused"
             " WHERE paused.flow_id=j.flow_id AND paused.state='closed')"
             " AND ((j.kind='archive') = EXISTS (SELECT 1 FROM flow_deliveries d"
@@ -285,10 +292,12 @@ class WorkerStore(Repository):
                 " AND own.released_at IS NULL"
                 " LEFT JOIN flow_executions bound ON bound.flow_id=f.id"
                 " AND bound.released_at IS NULL WHERE j.state=%s"
-                " AND f.state=%s AND ((own.flow_id=j.flow_id) OR"
-                " (own.flow_id IS NULL AND bound.flow_id IS NULL AND NOT w.draining))" + eligible + ")"
+                " AND ((own.flow_id=j.flow_id) OR"
+                " (own.flow_id IS NULL AND bound.flow_id IS NULL AND NOT w.draining))"
+                + eligible
+                + ")"
                 " ORDER BY w.last_assigned_at NULLS FIRST, w.worker_id LIMIT 1",
-                (WorkerStatus.ONLINE, JobState.QUEUED, FlowState.ACTIVE, now),
+                (WorkerStatus.ONLINE, JobState.QUEUED, now),
             ).fetchone()
             if candidate is None or candidate["worker_id"] != worker_id:
                 return None
@@ -315,9 +324,10 @@ class WorkerStore(Repository):
                 row = connection.execute(
                     "SELECT j.id, j.flow_id, f.repo FROM jobs j JOIN flows f ON f.id=j.flow_id"
                     " LEFT JOIN flow_executions e ON e.flow_id=f.id AND e.released_at IS NULL"
-                    " WHERE j.state=%s AND f.state=%s AND e.flow_id IS NULL" + eligible +
-                    " ORDER BY j.created_at, j.id FOR NO KEY UPDATE OF f,j SKIP LOCKED LIMIT 1",
-                    (JobState.QUEUED, FlowState.ACTIVE, now),
+                    " WHERE j.state=%s AND e.flow_id IS NULL"
+                    + eligible
+                    + " ORDER BY j.created_at, j.id FOR NO KEY UPDATE OF f,j SKIP LOCKED LIMIT 1",
+                    (JobState.QUEUED, now),
                 ).fetchone()
                 if row is None:
                     return None
@@ -334,9 +344,10 @@ class WorkerStore(Repository):
             else:
                 row = connection.execute(
                     "SELECT j.id, j.flow_id, f.repo FROM jobs j JOIN flows f ON f.id=j.flow_id"
-                    " WHERE j.state=%s AND f.state=%s AND j.flow_id=%s" + eligible +
-                    " ORDER BY j.created_at, j.id FOR NO KEY UPDATE OF f,j SKIP LOCKED LIMIT 1",
-                    (JobState.QUEUED, FlowState.ACTIVE, execution["flow_id"], now),
+                    " WHERE j.state=%s AND j.flow_id=%s"
+                    + eligible
+                    + " ORDER BY j.created_at, j.id FOR NO KEY UPDATE OF f,j SKIP LOCKED LIMIT 1",
+                    (JobState.QUEUED, execution["flow_id"], now),
                 ).fetchone()
                 if row is None:
                     return None
@@ -382,6 +393,11 @@ class WorkerStore(Repository):
                 connection.execute(
                     "UPDATE workers SET status='busy',current_job_id=%s,last_assigned_at=%s,"
                     " last_seen_at=%s WHERE worker_id=%s", (job.id, now, now, worker_id),
+                )
+                connection.execute(
+                    "UPDATE flows SET state='running',updated_at=%s WHERE id=%s"
+                    " AND state IN ('queued','review') AND archive_reason IS NULL",
+                    (now, job.flow_id),
                 )
             return required(assigned)
 
@@ -456,7 +472,7 @@ class WorkerStore(Repository):
                 " AND assignment_token=%s"
                 " AND ((kind='inference' AND inference->>'assignment_epoch'=%s) OR"
                 " (kind<>'inference' AND (started_at IS NOT NULL OR (lease_expires_at>%s AND EXISTS"
-                " (SELECT 1 FROM flows f WHERE f.id=jobs.flow_id AND f.state='active')))))"
+                " (SELECT 1 FROM flows f WHERE f.id=jobs.flow_id AND f.state<>'archived')))))"
                 " AND EXISTS (SELECT 1 FROM workers"
                 " WHERE worker_id=%s AND connection_epoch=%s"
                 " AND (jobs.kind<>'inference' OR current_inference_job_id=jobs.id))",
@@ -497,7 +513,7 @@ class WorkerStore(Repository):
                 " AND (started_at IS NOT NULL OR (kind='archive' AND EXISTS"
                 " (SELECT 1 FROM flows f JOIN flow_deliveries d ON d.flow_id=f.id"
                 " JOIN flow_executions e ON e.flow_id=f.id WHERE f.id=jobs.flow_id"
-                " AND f.state='active' AND d.state='merged' AND e.released_at IS NULL"
+                " AND f.state IN ('finalizing','blocked') AND d.state='merged' AND e.released_at IS NULL"
                 " AND e.worker_id=jobs.assigned_worker_id AND jobs.payload->'archive'=jsonb_build_object("
                 " 'kind','archive','flow_id',f.id,'attempt_id',f.current_attempt_id,'repo',f.repo,"
                 " 'worker_id',e.worker_id,'repo_identity',e.repo_identity,'delivery_version',d.version))))"
@@ -505,7 +521,7 @@ class WorkerStore(Repository):
                 " AND assignment_token=%s AND (recovery_deadline IS NULL"
                 " OR recovery_deadline>%s OR EXISTS (SELECT 1 FROM flow_deliveries d"
                 " JOIN flows f ON f.id=d.flow_id JOIN flow_executions e ON e.flow_id=f.id"
-                " WHERE f.id=jobs.flow_id AND f.state='active' AND d.state IN ('closed','merged')"
+                " WHERE f.id=jobs.flow_id AND f.state<>'archived'"
                 " AND e.released_at IS NULL AND e.worker_id=jobs.assigned_worker_id))"
                 " AND EXISTS (SELECT 1 FROM workers"
                 " WHERE worker_id=%s AND connection_epoch=%s)",
@@ -630,8 +646,11 @@ class WorkerStore(Repository):
             return call.cancel_failure
         if job.flow_id is not None:
             flow = FlowStore(self._db).get_flow(job.flow_id)
-            if (flow is None or flow.state is not FlowState.ACTIVE
-                    or flow.current_attempt_id != call.source_attempt_id):
+            if (
+                flow is None
+                or not flow.accepts(JobKind.INFERENCE)
+                or flow.current_attempt_id != call.source_attempt_id
+            ):
                 return InferenceFailure(code="cancelled")
         if call.batch_id is not None:
             batch = ReviewStore(self._db).get_batch(call.batch_id)
@@ -747,6 +766,10 @@ class WorkerStore(Repository):
             )
         if call.summary is not None and call.batch_id is not None and job.flow_id is not None:
             InferenceNoticeStore(self._db).append(job.flow_id, call.batch_id, call.summary)
+        if job.flow_id is not None:
+            flow = FlowStore(self._db).get_flow(job.flow_id)
+            if flow is not None and job.round_no == flow.current_round_no:
+                FlowStore(self._db).try_archive(job.flow_id)
 
     def _recover_inference(self, worker_id: str | None = None) -> None:
         """Classify unknown authorized attempts; a durable inbox always wins over recovery.
@@ -837,7 +860,8 @@ class WorkerStore(Repository):
             delivery = DeliveryStore(tx).get_delivery(current.required_flow_id)
             if (
                 flow is None
-                or flow.state is not FlowState.ACTIVE
+                or not flow.accepts(current.kind)
+                or flow.current_round_no != current.round_no
                 or binding is None
                 or binding.worker_id != worker
                 or binding.released_at is not None
@@ -898,8 +922,12 @@ class WorkerStore(Repository):
                 return None
             flow = FlowStore(tx).get_flow(current.required_flow_id)
             delivery = DeliveryStore(tx).get_delivery(current.required_flow_id)
-            if (flow is None or flow.state is not FlowState.ACTIVE
-                    or (delivery is not None and delivery.supersedes(current.kind))):
+            if (
+                flow is None
+                or not flow.accepts(current.kind)
+                or flow.current_round_no != current.round_no
+                or (delivery is not None and delivery.supersedes(current.kind))
+            ):
                 return JobState.DONE
             now = tx.now()
             failures = current.prepare_failures + (error is not None)
@@ -932,8 +960,12 @@ class WorkerStore(Repository):
         token: str,
         connection_epoch: str = "",
     ) -> bool:
-        with self._db.connection() as connection:
-            self._db._lock_worker(connection, worker_id)
+        candidate = JobStore(self._db).get_job(job_id)
+        if candidate is None:
+            return False
+        with self._db.transaction() as tx, tx.connection() as connection:
+            tx._lock_worker(connection, worker_id)
+            tx.lock_workflow(candidate.required_flow_id)
             result = connection.execute(
                 "UPDATE jobs SET state=%s, assigned_worker_id=NULL, assignment_token=NULL,"
                 " heartbeat_at=NULL, updated_at=%s WHERE id=%s AND state=%s"
@@ -954,6 +986,11 @@ class WorkerStore(Repository):
                 ),
             )
             if result.rowcount == 1:
+                connection.execute(
+                    "UPDATE flows SET state='queued',updated_at=%s WHERE id=%s AND state='running'"
+                    " AND archive_reason IS NULL AND current_round_no=%s",
+                    (tx.now(), candidate.flow_id, candidate.round_no),
+                )
                 connection.execute(
                     "UPDATE workers SET status=%s, current_job_id=NULL, last_seen_at=%s"
                     " WHERE worker_id=%s AND current_job_id=%s",
@@ -990,6 +1027,12 @@ class WorkerStore(Repository):
         inference_requeued = inference_failed = 0
         with self._db.transaction() as tx, tx.connection() as connection:
             tx._lock_workers(connection)
+            # Worker -> Flow -> Job, also for recovery. Never wait for a Flow
+            # after locking its job while a result writer holds the opposite order.
+            connection.execute(
+                "SELECT id FROM flows WHERE id IN (SELECT flow_id FROM jobs WHERE state IN ('queued','running')"
+                " UNION SELECT flow_id FROM flow_executions WHERE released_at IS NULL) ORDER BY id FOR NO KEY UPDATE"
+            ).fetchall()
             workers = WorkerStore(tx)
             pending = connection.execute(
                 "SELECT id FROM jobs WHERE kind='inference' AND state IN ('queued','running') ORDER BY id",
@@ -1037,23 +1080,20 @@ class WorkerStore(Repository):
                 " RETURNING id",
                 (JobState.QUEUED, now, actions[RecoveryAction.REQUEUE], JobState.RUNNING),
             ).fetchall()
-            failed_rows = connection.execute(
-                "UPDATE jobs SET state=%s, last_error=%s, updated_at=%s"
-                " WHERE id=ANY(%s) AND state=%s"
-                " AND result_received_at IS NULL"
-                " RETURNING id, flow_id",
-                (
-                    JobState.FAILED,
-                    RECOVERY_EXPIRED,
-                    now,
-                    actions[RecoveryAction.FAIL],
-                    JobState.RUNNING,
-                ),
-            ).fetchall()
+            connection.execute(
+                "UPDATE flows SET state='queued',updated_at=%s WHERE state='running'"
+                " AND archive_reason IS NULL AND id IN (SELECT flow_id FROM jobs WHERE id=ANY(%s))",
+                (now, actions[RecoveryAction.REQUEUE]),
+            )
             connection.execute(
                 "UPDATE jobs SET last_error=%s WHERE id=ANY(%s) AND state='running'"
                 " AND result_received_at IS NULL",
                 (RECOVERY_BLOCKED, actions[RecoveryAction.BLOCKED]),
+            )
+            connection.execute(
+                "UPDATE flows SET state='blocked',updated_at=%s WHERE id IN"
+                " (SELECT flow_id FROM jobs WHERE id=ANY(%s)) AND state<>'archived'",
+                (now, actions[RecoveryAction.BLOCKED]),
             )
             requeued_ids = [row["id"] for row in requeued_rows]
             if requeued_ids:
@@ -1062,44 +1102,33 @@ class WorkerStore(Repository):
                     " WHERE current_job_id=ANY(%s)",
                     (WorkerStatus.OFFLINE, requeued_ids),
                 )
-            failed_ids = [row["id"] for row in failed_rows]
-            if failed_ids:
-                connection.execute(
-                    "UPDATE workers SET status=%s, current_job_id=NULL"
-                    " WHERE current_job_id=ANY(%s)",
-                    (WorkerStatus.FAILED, failed_ids),
-                )
-            flow_ids = [row["flow_id"] for row in failed_rows]
-            if flow_ids:
-                connection.execute(
-                    "UPDATE flows SET state=%s, updated_at=%s WHERE id=ANY(%s) AND state=%s",
-                    (FlowState.FAILED, now, flow_ids, FlowState.ACTIVE),
-                )
-                connection.execute(
-                    "UPDATE flow_executions SET released_at=%s"
-                    " WHERE flow_id=ANY(%s) AND released_at IS NULL",
-                    (now, flow_ids),
-                )
             # Binding eligibility observes the preceding job/Flow writes, as the
             # old sequential UPDATEs did; it must not use the pre-transition facts.
-            bindings = connection.cursor(row_factory=class_row(BindingRecoveryFacts)).execute(
-                "SELECT e.flow_id,e.worker_id,e.recovery_deadline,"
-                " f.state AS flow_state,d.state AS delivery_state,"
-                " EXISTS (SELECT 1 FROM execution_stops s WHERE s.flow_id=e.flow_id"
-                " AND s.state!='confirmed') AS has_pending_stop,"
-                " EXISTS (SELECT 1 FROM jobs unknown WHERE unknown.flow_id=e.flow_id"
-                " AND unknown.kind<>'inference'"
-                " AND unknown.dispatch_authorized_at IS NOT NULL AND unknown.started_at IS NULL"
-                " AND unknown.result_received_at IS NULL) AS has_unstarted_dispatch,"
-                " EXISTS (SELECT 1 FROM jobs j WHERE j.flow_id=e.flow_id"
-                " AND j.kind<>'inference'"
-                " AND j.result_received_at IS NOT NULL AND j.result_applied_at IS NULL) AS has_unapplied_result"
-                " FROM flow_executions e JOIN flows f ON f.id=e.flow_id"
-                " LEFT JOIN flow_deliveries d ON d.flow_id=e.flow_id"
-                " WHERE e.released_at IS NULL AND e.recovery_deadline<=%s"
-                " ORDER BY e.flow_id FOR UPDATE OF e",
-                (now,),
-            ).fetchall()
+            bindings = (
+                connection.cursor(row_factory=class_row(BindingRecoveryFacts))
+                .execute(
+                    "SELECT e.flow_id,e.worker_id,e.recovery_deadline,"
+                    " f.state AS flow_state,d.state AS delivery_state,"
+                    " EXISTS (SELECT 1 FROM execution_stops s WHERE s.flow_id=e.flow_id"
+                    " AND s.state!='confirmed') AS has_pending_stop,"
+                    " EXISTS (SELECT 1 FROM jobs unknown WHERE unknown.flow_id=e.flow_id"
+                    " AND unknown.kind<>'inference'"
+                    " AND (unknown.dispatch_authorized_at IS NOT NULL OR unknown.started_at IS NOT NULL"
+                    " OR (unknown.kind='archive' AND unknown.payload->'archive' IS NOT NULL))"
+                    " AND unknown.result_received_at IS NULL AND NOT EXISTS (SELECT 1 FROM execution_stops s"
+                    " WHERE s.job_id=unknown.id AND s.assignment_token=unknown.assignment_token"
+                    " AND s.state='confirmed')) AS has_unstarted_dispatch,"
+                    " EXISTS (SELECT 1 FROM jobs j WHERE j.flow_id=e.flow_id"
+                    " AND j.kind<>'inference'"
+                    " AND j.result_received_at IS NOT NULL AND j.result_applied_at IS NULL) AS has_unapplied_result"
+                    " FROM flow_executions e JOIN flows f ON f.id=e.flow_id"
+                    " LEFT JOIN flow_deliveries d ON d.flow_id=e.flow_id"
+                    " WHERE e.released_at IS NULL AND e.recovery_deadline<=%s"
+                    " ORDER BY e.flow_id FOR UPDATE OF e",
+                    (now,),
+                )
+                .fetchall()
+            )
             release_ids = [binding.flow_id for binding in bindings if should_release_binding(binding, now)]
             expired_executions = connection.execute(
                 "UPDATE flow_executions SET released_at=%s WHERE flow_id=ANY(%s)"
@@ -1109,8 +1138,8 @@ class WorkerStore(Repository):
             expired_flow_ids = [row["flow_id"] for row in expired_executions]
             if expired_flow_ids:
                 connection.execute(
-                    "UPDATE flows SET state=%s, updated_at=%s WHERE id=ANY(%s) AND state=%s",
-                    (FlowState.FAILED, now, expired_flow_ids, FlowState.ACTIVE),
+                    "UPDATE flows SET state='blocked', updated_at=%s WHERE id=ANY(%s) AND state<>'archived'",
+                    (now, expired_flow_ids),
                 )
                 connection.execute(
                     "UPDATE workers SET status=%s, current_job_id=NULL WHERE worker_id=ANY(%s)",
@@ -1119,7 +1148,7 @@ class WorkerStore(Repository):
                         [row["worker_id"] for row in expired_executions],
                     ),
                 )
-        return len(requeued_rows) + inference_requeued, len(failed_rows) + len(expired_executions) + inference_failed
+        return len(requeued_rows) + inference_requeued, len(expired_executions) + inference_failed
 
     def drain(self, worker_id: str, enabled: bool) -> None:
         with self._db.connection() as conn:

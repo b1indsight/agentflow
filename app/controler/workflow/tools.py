@@ -11,7 +11,7 @@ from app.contracts.protocol import (
     result_header,
 )
 from app.domain.delivery_models import DeliveryReceipt, OpenedDelivery, PreparedDelivery
-from app.domain.models import TERMINAL_STATES, DeliveryState, FlowDelivery
+from app.domain.models import DeliveryState, FlowDelivery, JobKind
 from app.github import GitHubApp, GitHubError, GitHubErrorKind
 from app.persistence.database import Database
 from app.persistence.deliveries import DeliveryStore
@@ -92,9 +92,14 @@ class FlowToolService:
         attempt = self.flows.get_attempt(arguments.attempt_id)
         execution = self.workers.get_flow_execution(arguments.flow_id)
         delivery = self.deliveries.get_delivery(arguments.flow_id)
-        if flow is None or flow.state in TERMINAL_STATES:
+        if flow is None or not flow.accepts(JobKind.INITIAL):
             raise FlowToolRejected(FlowToolErrorKind.CONFLICT, "Flow is not active")
-        if attempt is None or attempt.flow_id != flow.id or flow.current_attempt_id != attempt.id:
+        if (
+            attempt is None
+            or attempt.flow_id != flow.id
+            or flow.current_attempt_id != attempt.id
+            or attempt.round_no != flow.current_round_no
+        ):
             raise FlowToolRejected(
                 FlowToolErrorKind.STALE_ASSIGNMENT,
                 "Flow tool attempt is not current",
@@ -186,7 +191,7 @@ class FlowToolService:
             current_flow = tx.lock_workflow(flow.id)
             if (
                 current_flow is None
-                or current_flow.state in TERMINAL_STATES
+                or not current_flow.accepts(JobKind.INITIAL)
                 or current_flow.current_attempt_id != arguments.attempt_id
                 or not workers_tx.assignment_active(
                     arguments.job_id,

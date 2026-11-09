@@ -31,7 +31,6 @@ from app.controler.workflow.revisions import verify_revision_remote
 from app.domain.context_models import ReviewContext
 from app.domain.judge_models import JudgeDecision
 from app.domain.models import (
-    TERMINAL_STATES,
     DeliveryState,
     Flow,
     FlowDelivery,
@@ -80,8 +79,11 @@ class JobCoordinator:
     @staticmethod
     def _retired(flow: Flow, job: Job, *, deliveries: DeliveryStore) -> bool:
         delivery = deliveries.get_delivery(flow.id)
-        return (flow.state in TERMINAL_STATES
-                or (delivery is not None and delivery.supersedes(job.kind)))
+        return (
+            not flow.accepts(job.kind)
+            or job.round_no != flow.current_round_no
+            or (delivery is not None and delivery.supersedes(job.kind))
+        )
 
     async def triage(self, batch: ReviewBatch, judge: Judge) -> None:
         """Resolve a feedback prerequisite, enqueueing a worker job only for revision."""
@@ -307,7 +309,12 @@ class JobCoordinator:
                     attempt = flows_tx.create_attempt(fresh.id)
                     fresh.current_attempt_id = attempt.id
                     flows_tx.update_flow(fresh)
-                delivery = deliveries_tx.get_or_create_delivery(fresh.id, f"flow/{fresh.id}")
+                branch = (
+                    f"flow/{fresh.id}"
+                    if fresh.current_round_no == 1
+                    else f"flow/{fresh.id}/round-{fresh.current_round_no}"
+                )
+                delivery = deliveries_tx.get_or_create_delivery(fresh.id, branch)
                 flow = fresh
             try:
                 repo = self.github.installation(installation_id).repository(flow.repo)

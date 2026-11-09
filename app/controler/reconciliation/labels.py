@@ -21,6 +21,18 @@ from app.github.repositories import LabelDefinition
 PENDING_INTERVAL = 300
 CONFIRMED_INTERVAL = 86400
 
+FLOW_LABEL_DEFINITIONS = (
+    LabelDefinition(name="flow:queued", color="d4c5f9", description="FlowTool task queued"),
+    LabelDefinition(name="flow:running", color="1d76db", description="FlowTool task running"),
+    LabelDefinition(
+        name="flow:review", color="fbca04", description="FlowTool task awaiting review"
+    ),
+    LabelDefinition(name="flow:blocked", color="b60205", description="FlowTool task blocked"),
+    LabelDefinition(name="flow:finalizing", color="0052cc", description="FlowTool task finalizing"),
+    LabelDefinition(name="flow:archived", color="0e8a16", description="FlowTool task archived"),
+)
+FLOW_LABEL_NAMES = frozenset(label.name for label in FLOW_LABEL_DEFINITIONS)
+
 
 class LabelSynchronizer:
     """Cache successful checks in memory; restart or uncertainty simply causes a fresh read."""
@@ -29,12 +41,10 @@ class LabelSynchronizer:
         self.github = github
         self._confirmed: dict[tuple[int, str], float] = {}
         self.definitions = (
-            LabelDefinition(name=settings.trigger_label, color="5319e7",
-                            description="Start a FlowTool task"),
-            LabelDefinition(name=settings.in_review_label, color="fbca04",
-                            description="FlowTool delivery awaiting review"),
-            LabelDefinition(name=settings.done_label, color="0e8a16",
-                            description="FlowTool task merged and archived"),
+            LabelDefinition(
+                name=settings.trigger_label, color="5319e7", description="Start a FlowTool task"
+            ),
+            *FLOW_LABEL_DEFINITIONS,
         )
 
     async def run(self) -> None:

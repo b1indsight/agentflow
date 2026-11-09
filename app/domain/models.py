@@ -25,16 +25,23 @@ def utcnow() -> datetime:
 
 
 class FlowState(StrEnum):
-    """Flow lifecycle only; UI phases are derived from jobs and delivery."""
+    """Authoritative business stage; finalizing shares running's board group."""
 
-    ACTIVE = "active"
+    QUEUED = "queued"
+    RUNNING = "running"
+    REVIEW = "review"
+    BLOCKED = "blocked"
+    FINALIZING = "finalizing"
+    ARCHIVED = "archived"
+
+
+TERMINAL_STATES = frozenset({FlowState.ARCHIVED})
+WORKING_STATES = frozenset({FlowState.QUEUED, FlowState.RUNNING, FlowState.REVIEW})
+
+
+class ArchiveReason(StrEnum):
     SUCCEEDED = "succeeded"
-    CANCELLED = "cancelled"
-    FAILED = "failed"
-
-
-# 处于这些状态的 flow 算「已终结」，(repo, issue) 唯一约束只作用于非终结态。
-TERMINAL_STATES = frozenset({FlowState.SUCCEEDED, FlowState.CANCELLED, FlowState.FAILED})
+    ABANDONED = "abandoned"
 
 
 class DeliveryState(StrEnum):
@@ -97,8 +104,18 @@ class Flow(BaseModel):
     state: FlowState
     installation_id: int | None = None
     current_attempt_id: int | None = None
+    current_round_no: int = 1
+    archive_reason: ArchiveReason | None = None
+    archive_summary: str | None = None
+    archived_at: datetime | None = None
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
+
+    def accepts(self, kind: JobKind) -> bool:
+        """Finalization never authorizes more coding, even if its PR is reopened."""
+        if kind is JobKind.ARCHIVE:
+            return self.state is FlowState.FINALIZING
+        return self.state in WORKING_STATES and self.archive_reason is None
 
 
 class Attempt(BaseModel):
@@ -106,6 +123,7 @@ class Attempt(BaseModel):
 
     id: int
     flow_id: int
+    round_no: int = 1
     codex_session_id: str | None = None
     session_generation: int = 0
     last_revision_summary: str = ""
@@ -162,9 +180,28 @@ class FlowToolCall(BaseModel):
     updated_at: datetime = Field(default_factory=utcnow)
 
 
+class FlowRound(BaseModel):
+    """Archived round snapshot; evidence and corrections do not authorize execution."""
+
+    flow_id: int
+    round_no: int
+    repo: str
+    pr_number: int | None
+    original_reason: ArchiveReason
+    archive_reason: ArchiveReason
+    archive_summary: str | None
+    archived_at: datetime
+    delivery: FlowDelivery | None
+    execution: FlowExecution | None
+    merged_at: datetime | None = None
+    merge_commit_sha: str | None = None
+    version: int = 0
+
+
 class Job(BaseModel):
     id: int
     flow_id: int | None
+    round_no: int = 1
     kind: JobKind
     state: JobState
     inference: InferenceJob | None = None

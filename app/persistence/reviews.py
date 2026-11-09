@@ -57,6 +57,7 @@ class ReviewStore(Repository):
             if (
                 flow is None
                 or flow.state in TERMINAL_STATES
+                or flow.archive_reason is not None
                 or flow.current_attempt_id is None
                 or delivery is None
                 or delivery.state not in {DeliveryState.OPEN, DeliveryState.CLOSED}
@@ -266,6 +267,8 @@ class ReviewStore(Repository):
                 connection.execute(
                     "SELECT 1 FROM review_items i JOIN review_versions v"
                     " ON v.item_id=i.id AND v.version=i.version WHERE i.flow_id=%s"
+                    " AND v.attempt_id IN (SELECT a.id FROM attempts a JOIN flows f ON f.id=a.flow_id"
+                    " WHERE f.id=i.flow_id AND a.round_no=f.current_round_no)"
                     " AND v.consumed_at IS NULL AND v.relayed_at IS NULL"
                     " AND NOT v.signal_retired"
                     " AND NOT (v.content->>'deleted')::boolean"
@@ -291,6 +294,8 @@ class ReviewStore(Repository):
             rows = connection.execute(
                 "WITH pending AS (SELECT i.id,i.version,v.content,v.relayed_at FROM review_items i JOIN review_versions v"
                 " ON v.item_id=i.id AND v.version=i.version WHERE i.flow_id=%s"
+                " AND v.attempt_id IN (SELECT a.id FROM attempts a JOIN flows f ON f.id=a.flow_id"
+                " WHERE f.id=i.flow_id AND a.round_no=f.current_round_no)"
                 " AND v.consumed_at IS NULL AND NOT (v.content->>'deleted')::boolean"
                 " AND NOT COALESCE((v.content->>'inert')::boolean,FALSE)), first_text AS ("
                 " SELECT id FROM pending WHERE content->>'body' !~ '^[[:space:]]*$'"
@@ -308,7 +313,7 @@ class ReviewStore(Repository):
             candidates = connection.execute(
                 "SELECT flow_id FROM review_buffers WHERE due_at<=%s"
                 " UNION SELECT b.flow_id FROM review_batches b JOIN flows f ON f.id=b.flow_id"
-                " WHERE b.state IN ('ready','processing','waiting') AND f.state<>'active'"
+                " WHERE b.state IN ('ready','processing','waiting') AND f.state IN ('finalizing','archived')"
                 " ORDER BY flow_id",
                 (self._db.now(),),
             ).fetchall()
@@ -318,8 +323,11 @@ class ReviewStore(Repository):
                 flow = tx.lock_workflow(candidate["flow_id"])
                 if flow is None:
                     continue
-                if flow.state in TERMINAL_STATES:
-                    JobStore(tx).cancel_jobs(flow.id)
+                if not flow.accepts(JobKind.REVISION):
+                    # A blocked result may still need its frozen review batch to repair
+                    # effects. Finalizing retires reviews, never its archive job.
+                    if flow.state in {FlowState.FINALIZING, FlowState.ARCHIVED}:
+                        ReviewStore(tx).cancel(flow.id)
                     continue
                 job = ReviewStore(tx)._claim(flow.id, flow.current_attempt_id)
                 if job is not None:
@@ -382,22 +390,32 @@ class ReviewStore(Repository):
     def pending_triage(self) -> list[ReviewBatch]:
         """Read unfinished prerequisites; they have no job or execution ownership."""
         with self._db.connection() as connection:
-            return connection.cursor(row_factory=class_row(ReviewBatch)).execute(
-                "SELECT b.* FROM review_batches b JOIN flows f ON f.id=b.flow_id"
-                " JOIN flow_deliveries d ON d.flow_id=f.id"
-                " WHERE b.state='ready' AND b.job_id IS NULL AND f.state='active'"
-                " AND b.attempt_id=f.current_attempt_id AND d.state='open' ORDER BY b.id"
-            ).fetchall()
+            return (
+                connection.cursor(row_factory=class_row(ReviewBatch))
+                .execute(
+                    "SELECT b.* FROM review_batches b JOIN flows f ON f.id=b.flow_id"
+                    " JOIN flow_deliveries d ON d.flow_id=f.id"
+                    " WHERE b.state='ready' AND b.job_id IS NULL AND f.state IN ('queued','running','review')"
+                    " AND f.archive_reason IS NULL"
+                    " AND b.attempt_id=f.current_attempt_id AND d.state='open' ORDER BY b.id"
+                )
+                .fetchall()
+            )
 
     def current(self, batch: ReviewBatch) -> bool:
         """Check under the workflow lock before accepting a batch prerequisite."""
         flow = FlowStore(self._db).get_flow(batch.flow_id)
         delivery = DeliveryStore(self._db).get_delivery(batch.flow_id)
         fresh = self.get_batch(batch.id)
-        return (flow is not None and flow.state is FlowState.ACTIVE
-                and flow.current_attempt_id == batch.attempt_id
-                and delivery is not None and delivery.state is DeliveryState.OPEN
-                and fresh.state is BatchState.READY and fresh.job_id is None)
+        return (
+            flow is not None
+            and flow.accepts(JobKind.REVISION)
+            and flow.current_attempt_id == batch.attempt_id
+            and delivery is not None
+            and delivery.state is DeliveryState.OPEN
+            and fresh.state is BatchState.READY
+            and fresh.job_id is None
+        )
 
     def get_batch(self, batch_id: int) -> ReviewBatch:
         """Load persisted input content, never the live item projection."""

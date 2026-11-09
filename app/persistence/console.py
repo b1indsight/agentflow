@@ -19,11 +19,10 @@ from app.contracts.console import (
     RepositoryPage,
     SourceStatus,
 )
-from app.domain.models import FlowState
 from app.persistence.records import Row
 from app.persistence.repository import Repository
 
-PHASES: tuple[Phase, ...] = ("queued", "running", "review", "blocked", "done")
+PHASES: tuple[Phase, ...] = ("queued", "running", "review", "blocked", "archived")
 _REPO = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
 
@@ -81,10 +80,11 @@ def _filters(q: str) -> tuple[str, list[object]]:
             if name == "repo" and _REPO.fullmatch(value):
                 clauses.append("lower(facts->>'repo')=%s")
                 values.append(value.lower())
-            elif name == "is" and value in ("active", "done"):
+            elif name == "is" and value in ("active", "archived"):
                 clauses.append(
-                    "facts->>'lifecycle'='active' AND facts->>'phase'<>'done'"
-                    if value == "active" else "facts->>'phase'='done'"
+                    "facts->>'lifecycle'<>'archived'"
+                    if value == "active"
+                    else "facts->>'phase'='archived'"
                 )
             elif name == "status" and value in PHASES:
                 clauses.append("facts->>'phase'=%s")
@@ -119,6 +119,9 @@ def _summary(row: Row) -> FlowSummary:
         pr_number=pr,
         pr_url=f"https://github.com/{repo}/pull/{pr}" if pr else None,
         lifecycle=facts["lifecycle"],
+        current_round_no=facts["current_round_no"],
+        archive_reason=facts["archive_reason"],
+        archive_summary=facts["archive_summary"],
         phase=facts["phase"],
         action=facts["action"],
         worker_id=facts["worker_id"],
@@ -127,7 +130,7 @@ def _summary(row: Row) -> FlowSummary:
         branch=facts["branch"],
         created_at=facts["created_at"],
         updated_at=facts["updated_at"],
-        archived_at=row["archived_at"],
+        archived_at=facts["archived_at"],
         state_version=row["state_version"],
     )
 
@@ -135,27 +138,11 @@ def _summary(row: Row) -> FlowSummary:
 def _explanation(row: Row) -> tuple[str, str]:
     """Explain persisted blockers, without exposing errors or promising retry eligibility."""
     facts = row["facts"]
-    if facts["lifecycle"] == "succeeded":
-        return "Flow 已归档完成", "无需后续动作"
-    if facts["delivery_state"] == "merged" and facts["lifecycle"] in {"failed", "cancelled"}:
-        outcome = "失败" if facts["lifecycle"] == "failed" else "取消"
-        return (
-            f"PR 已合并，已自动归档；保留此前的{outcome}记录",
-            "无需重新执行编码或评审；工作区清理未确认完成，如有需要请人工核验",
-        )
-    if facts["lifecycle"] == "cancelled":
-        reason = "Flow 已取消"
-        if row["archived_at"] is not None:
-            reason += "并归档；归档仅改变展示分组"
-        return reason, "确认在途任务的停止确认与结果对账完成后，再评估是否重试"
-    if facts["lifecycle"] == "failed":
-        return "Flow 已失败", "检查执行记录与恢复状态，排除故障后由运维核验是否允许重试"
-    # A closed delivery is a hold: retry must not bypass reopen/baseline reconciliation.
-    if facts["delivery_state"] == "closed":
-        return (
-            "PR 已关闭（未合并），编码与修订已暂停",
-            "重新打开 PR 并完成执行状态及 head/base 对账后才能继续",
-        )
+    if facts["lifecycle"] == "archived":
+        outcome = "成功" if facts["archive_reason"] == "succeeded" else "废弃"
+        return f"本轮已归档 · {outcome}", "需要继续时显式恢复推进，开启新轮次；不会重开历史 PR"
+    if facts["lifecycle"] == "finalizing":
+        return "正在结束本轮，尚未归档", "等待停止确认、结果对账和工作区处置完成；不会继续编码"
     label = {"initial": "首轮编码", "revision": "修订", "archive": "归档"}.get(
         row["diagnostic_kind"], "任务"
     )
@@ -206,7 +193,7 @@ def _explanation(row: Row) -> tuple[str, str]:
             return f"{job}等待分配 Worker", "等待可用 Worker 接收任务"
         return f"{job}等待绑定的 Worker 接收", "等待该 Worker 可接收任务并完成派发"
     if facts["delivery_state"] == "merged":
-        return "PR 已合并，已归档展示；工作区清理尚未完成", "检查归档执行记录与原 Worker 绑定，等待清理完成"
+        return "PR 已合并，收尾尚未完成", "检查归档执行记录与原 Worker 绑定，排除阻碍后重试收尾"
     if facts["phase"] == "review":
         return (
             "PR 已打开，当前没有待执行任务",
@@ -219,21 +206,6 @@ def _explanation(row: Row) -> tuple[str, str]:
 
 class ConsoleStore(Repository):
     """Own console display state without changing execution or making network calls."""
-
-    def archive(self, flow_id: int) -> FlowDetail:
-        """Idempotently archive a cancelled card, serialized with lifecycle commands."""
-        with self._db.transaction() as tx, tx.connection() as connection:
-            flow = tx.lock_workflow(flow_id)
-            if flow is None:
-                raise ConsoleFailure("flow_not_found", 404)
-            if flow.state is not FlowState.CANCELLED:
-                raise ConsoleFailure("archive_requires_cancelled_flow")
-            connection.execute(
-                "UPDATE console_flows SET archived_at=%s WHERE flow_id=%s AND archived_at IS NULL",
-                (tx.now(), flow_id),
-            )
-            connection.execute("SELECT console_refresh(%s)", (flow_id,))
-            return self.using(tx).detail(flow_id)
 
     def flows(
         self, *, q: str = "", phase: Phase | None = None, cursor: str | None = None, limit: int = 50
@@ -261,7 +233,7 @@ class ConsoleStore(Repository):
             column = " AND facts->>'phase'=%s" if phase else ""
             rows = connection.execute(
                 "SELECT flow_id,facts-'delivery_body'-'delivery_title' AS facts,"
-                "coalesce(title,facts->>'delivery_title') AS title,state_version,archived_at"
+                "coalesce(title,facts->>'delivery_title') AS title,state_version"
                 " FROM console_flows WHERE "
                 + where
                 + column
@@ -290,7 +262,7 @@ class ConsoleStore(Repository):
         with self._db.connection() as connection:
             row = connection.execute(
                 "SELECT c.flow_id,c.facts-'delivery_body'-'delivery_title' AS facts,"
-                "coalesce(c.title,c.facts->>'delivery_title') AS title,c.state_version,c.archived_at,diagnostic.*"
+                "coalesce(c.title,c.facts->>'delivery_title') AS title,c.state_version,diagnostic.*"
                 " FROM console_flows c LEFT JOIN LATERAL ("
                 " SELECT j.id AS diagnostic_job_id,j.kind AS diagnostic_kind,"
                 " j.state AS diagnostic_state,j.started_at IS NOT NULL AS execution_started,"
@@ -301,6 +273,7 @@ class ConsoleStore(Repository):
                 " EXISTS (SELECT 1 FROM result_effects e WHERE e.job_id=j.id"
                 " AND j.result_applied_at IS NULL AND e.state='failed') AS effect_failed"
                 " FROM jobs j WHERE j.flow_id=c.flow_id AND j.kind<>'inference'"
+                " AND j.round_no=(c.facts->>'current_round_no')::int"
                 " ORDER BY effect_failed DESC,result_pending DESC,(j.state='running') DESC,"
                 " (j.state='queued') DESC,j.id DESC LIMIT 1"
                 ") diagnostic ON TRUE WHERE c.flow_id=%s",
@@ -409,7 +382,7 @@ class ConsoleStore(Repository):
         with self._db.connection() as connection:
             connection.execute(
                 "SELECT console_enqueue(flow_id) FROM console_flows WHERE flow_id=%s"
-                + (" AND facts->>'lifecycle'='active'" if active_only else ""),
+                + (" AND facts->>'lifecycle'<>'archived'" if active_only else ""),
                 (flow_id,),
             )
 

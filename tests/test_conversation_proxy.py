@@ -30,6 +30,7 @@ from app.controler.workers.conversation import (
     ConversationService,
 )
 from app.controler.workers.transport import control_ack
+from app.controler.workflow.service import ControlService
 from app.domain.models import JobKind
 from tests.test_communication_session import Socket
 from tests.test_conversation_history import SESSION
@@ -341,7 +342,8 @@ async def test_service_resolves_existing_database_metadata_and_released_binding(
     assert (await service.read(flow.id, None, 100)).unavailable_reason == "no_session"
     attempt.codex_session_id = SESSION
     store.flows.update_attempt(attempt)
-    assert store.workers.release_flow_execution(flow.id)
+    ControlService(database=store.database).cancel(flow)
+    assert store.workers.get_flow_execution(flow.id).released_at is not None
     query = AsyncMock(return_value=HistoryPage(session_id=SESSION))
     monkeypatch.setattr(broker, "query", query)
     await service.read(flow.id, None, 100)

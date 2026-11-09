@@ -21,7 +21,6 @@ from app.github import (
     Batch,
     GitHubError,
     GitHubErrorKind,
-    Issue,
     PullRequest,
     Repository,
     ReviewComment,
@@ -241,7 +240,7 @@ async def test_racing_input_survives_ack_and_prevents_rereview(store, thread_rev
         pending = store.reviews.pending(flow.id)
         assert len(pending) == 1
         assert pending[0].github_id == (1 if change == "edited" else 2)
-    assert store.flows.get_flow(flow.id).state is FlowState.ACTIVE
+    assert store.flows.get_flow(flow.id).state is FlowState.REVIEW
 
 
 @pytest.mark.parametrize("operation", ["reply_review_thread", "resolve_review_thread"])
@@ -362,13 +361,13 @@ async def test_remote_predecessor_releases_the_queued_webhook_edit(store, thread
     assert batch_for(store, queued[0]).feedback[0].body == "Latest"
 
 
-@pytest.mark.parametrize("query,write", [("fetch_labels", "labels"), ("fetch_reviewers", "review_requests")])
 async def test_new_feedback_during_notification_query_fences_dispatch(
-    store, thread_revision, monkeypatch, query, write,
+    store,
+    thread_revision,
+    monkeypatch,
 ):
     flow, job, github, subject = thread_revision
-    owner = Issue if query == "fetch_labels" else PullRequest
-    original = getattr(owner, query)
+    original = PullRequest.fetch_reviewers
 
     async def with_feedback(*args, **kwargs):
         # The old batch has already resolved its thread; a new question arrives during the last read.
@@ -378,14 +377,14 @@ async def test_new_feedback_during_notification_query_fences_dispatch(
         ), settle_seconds=0, submit_grace_seconds=0)
         return await original(*args, **kwargs)
 
-    monkeypatch.setattr(owner, query, with_feedback)
+    monkeypatch.setattr(PullRequest, "fetch_reviewers", with_feedback)
     assert await subject.results.apply(job.id) is JobState.DONE
-    assert getattr(github, write) == [] and github.review_requests == []
+    assert github.labels == [] and github.review_requests == []
     batch = batch_for(store, store.jobs.get_job(job.id))
     assert batch.state.value == "waiting" and batch.open_points
     assert [f.github_id for f in store.reviews.pending(flow.id)] == [2]
     assert await coordinator(store, github).results.apply(job.id) is JobState.DONE
-    assert getattr(github, write) == []
+    assert github.review_requests == []
 
 
 async def test_dispatch_rechecks_input_arriving_during_head_read(store, thread_revision, monkeypatch):

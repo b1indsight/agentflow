@@ -192,7 +192,7 @@ async def test_cancel_during_remote_verification_prevents_effects_and_commit(
 
     monkeypatch.setattr(Repository, "fetch_ref", cancel)
     await subject.results.apply(job.id)
-    assert store.flows.get_flow(flow.id).state is FlowState.CANCELLED
+    assert store.flows.get_flow(flow.id).state is FlowState.FINALIZING
     assert github.comments == [] and github.review_requests == []
     assert store.deliveries.get_delivery(flow.id).head_sha == "baseline"
 
@@ -229,7 +229,7 @@ async def test_failed_revision_retry_retains_repo_and_consumes_a_new_cycle(store
     assert store.workers.get_flow_execution(flow.id).worker_id == binding.worker_id
 
 
-async def test_failed_revision_retry_after_merge_keeps_flow_terminal(store, pending_revision):
+async def test_failed_revision_retry_after_merge_only_authorizes_archive(store, pending_revision):
     flow, job, task, _, subject = pending_revision
     assert store.workers.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
     subject.mark_started(job, task, "worker-a")
@@ -242,13 +242,10 @@ async def test_failed_revision_retry_after_merge_keeps_flow_terminal(store, pend
     delivery = store.deliveries.get_delivery(flow.id)
     assert delivery.state is DeliveryState.MERGED
 
-    with pytest.raises(ValueError, match="merged PR"):
-        ControlService(
-            database=store.database,
-        ).retry(flow)
-
-    assert store.flows.get_flow(flow.id).state is FlowState.FAILED
-    assert store.flows.get_active_flow(flow.repo, flow.issue_number) is None
+    assert store.flows.get_flow(flow.id).state is FlowState.BLOCKED
+    assert ControlService(database=store.database).retry(flow)
+    assert store.flows.get_flow(flow.id).state is FlowState.FINALIZING
+    assert store.flows.get_active_flow(flow.repo, flow.issue_number).id == flow.id
     assert store.jobs.list_jobs(flow.id) == jobs
     assert store.workers.get_flow_execution(flow.id) == binding
     assert store.deliveries.get_delivery(flow.id) == delivery
@@ -286,7 +283,7 @@ async def test_rejected_revision_notification_keeps_verified_result_recoverable(
             await subject.results.apply(job.id)
     assert store.jobs.get_job(job.id).result_applied_at is None
     assert "422" in store.jobs.get_job(job.id).last_error
-    assert store.flows.get_flow(flow.id).state is FlowState.ACTIVE
+    assert store.flows.get_flow(flow.id).state is FlowState.BLOCKED
     assert store.results.get_plan(job.id).revision.model_dump() == result.model_dump()
     assert store.results.list_effects(job.id)[-1].state is EffectState.FAILED
     comments, reads = list(github.comments), github.reads
@@ -304,7 +301,9 @@ async def test_rejected_revision_notification_keeps_verified_result_recoverable(
         assert github.comments == comments and github.review_requests == []
         assert store.deliveries.get_delivery(flow.id).state is DeliveryState.MERGED
         assert store.deliveries.get_delivery(flow.id).head_sha == "baseline"
-        assert store.flows.get_flow(flow.id).state is FlowState.ACTIVE
+        assert store.flows.get_flow(flow.id).state is FlowState.BLOCKED
+        assert service.retry(flow)
+        assert store.flows.get_flow(flow.id).state is FlowState.FINALIZING
         assert store.flows.get_attempt(task.attempt_id).codex_session_id == "old-session"
         return
     if transition == "cancel":
@@ -378,7 +377,7 @@ async def test_revision_preparation_failure_is_persisted_and_explicitly_retryabl
     failed = store.jobs.get_job(job.id)
     assert failed.state is JobState.FAILED and failed.result_applied_at is not None
     assert "fetch_ref" in failed.last_error
-    assert store.flows.get_flow(flow.id).state is FlowState.FAILED
+    assert store.flows.get_flow(flow.id).state is FlowState.BLOCKED
     assert store.flows.get_attempt(task.attempt_id).revision_cycles == 0
     ControlService(
         database=store.database,

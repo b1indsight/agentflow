@@ -7,7 +7,7 @@ import asyncio
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, model_validator
 
-from app.domain.models import DeliveryState, FlowState, ReviewItemKind
+from app.domain.models import DeliveryState, JobKind, ReviewItemKind
 from app.domain.review_models import FeedbackUpdate
 from app.github import (
     Batch,
@@ -109,9 +109,14 @@ class FeedbackReconciler:
                 reviews_tx = self.reviews.using(tx)
                 flow = tx.lock_workflow(check.flow_id)
                 delivery = deliveries_tx.get_delivery(check.flow_id)
-                if (flow is None or flow.state is not FlowState.ACTIVE or flow.current_attempt_id is None
-                        or delivery is None or delivery.state is not DeliveryState.OPEN
-                        or delivery.pr_number is None):
+                if (
+                    flow is None
+                    or not flow.accepts(JobKind.REVISION)
+                    or flow.current_attempt_id is None
+                    or delivery is None
+                    or delivery.state is not DeliveryState.OPEN
+                    or delivery.pr_number is None
+                ):
                     return
                 if flow.installation_id is None:
                     raise ValueError("missing installation")
@@ -147,10 +152,14 @@ class FeedbackReconciler:
                 reviews_tx = self.reviews.using(tx)
                 fresh = tx.lock_workflow(flow.id)
                 current = deliveries_tx.get_delivery(flow.id)
-                if (fresh is None or current is None or fresh.state is not FlowState.ACTIVE
-                        or fresh.current_attempt_id != flow.current_attempt_id
-                        or fresh.installation_id != flow.installation_id
-                        or current != delivery):
+                if (
+                    fresh is None
+                    or current is None
+                    or not fresh.accepts(JobKind.REVISION)
+                    or fresh.current_attempt_id != flow.current_attempt_id
+                    or fresh.installation_id != flow.installation_id
+                    or current != delivery
+                ):
                     reconcile_store_tx.feedback_failed(check, 5, "Flow changed during observation")
                     return
                 if threads is None:

@@ -37,7 +37,11 @@ class HistoryStore(RemoteStore):
         self.session, self.other_session = session, other_session
 
     def get_flow(self, flow_id):
-        return Flow(id=3, repo="owner/repo", issue_number=8, state=FlowState.ACTIVE) if flow_id == 3 else None
+        return (
+            Flow(id=3, repo="owner/repo", issue_number=8, state=FlowState.RUNNING)
+            if flow_id == 3
+            else None
+        )
 
     def get_flow_execution(self, flow_id):
         return FlowExecution(flow_id=flow_id, worker_id="worker-1", repo_identity="repo")

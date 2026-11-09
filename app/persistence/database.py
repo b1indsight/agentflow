@@ -145,6 +145,16 @@ class Database:
     def init_db(self) -> None:
         """Initialize the complete schema in its foreign-key dependency order."""
         with self.connection() as connection:
+            existing = connection.execute("SELECT to_regclass('flows') AS name").fetchone()
+            if existing is not None and existing["name"]:
+                columns = connection.execute(
+                    "SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema()"
+                    " AND table_name='flows' AND column_name='current_round_no'"
+                ).fetchone()
+                if columns is None:
+                    raise ValueError(
+                        "legacy Flow schema: stop consumers and run scripts/migrate_flow_states.py"
+                    )
             for schema in SCHEMAS:
                 connection.execute(schema)
 

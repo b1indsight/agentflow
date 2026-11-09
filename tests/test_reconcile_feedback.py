@@ -190,7 +190,7 @@ async def test_old_commands_and_bots_never_wake_or_control(store, review_flow, f
     github.pages["reviews", None] = Batch(items=[item])
     await poller(store, github)._sweep()
     assert store.reviews.pending(flow.id) == []
-    assert store.flows.get_flow(flow.id).state is FlowState.ACTIVE
+    assert store.flows.get_flow(flow.id).state is FlowState.REVIEW
 
 
 async def test_page_absence_never_infers_deletion(store, review_flow, feedback_resources):
@@ -265,7 +265,7 @@ async def test_edit_to_command_supersedes_feedback_and_later_edit_recovers(store
     github.pages["issue_comments", None] = Batch(items=[page(clock).items[0].model_copy(update={"body": "/flow stop"})])
     await poller(store, github)._sweep()
     assert store.reviews.pending(flow.id) == []
-    assert store.flows.get_flow(flow.id).state is FlowState.ACTIVE
+    assert store.flows.get_flow(flow.id).state is FlowState.REVIEW
     clock.now += timedelta(seconds=301)
     github.pages["issue_comments", None] = page(clock)
     await poller(store, github)._sweep()
@@ -282,7 +282,7 @@ async def test_poll_marks_same_webhook_command_body_inert(store, review_flow, fe
     # An edited command can reach storage before polling identifies it as inert.
     await poller(store, github)._sweep()
     assert store.reviews.pending(flow.id) == []
-    assert store.flows.get_flow(flow.id).state is FlowState.ACTIVE
+    assert store.flows.get_flow(flow.id).state is FlowState.REVIEW
     clock.now += timedelta(seconds=301)
     github.pages["issue_comments", None] = page(clock)
     await poller(store, github)._sweep()

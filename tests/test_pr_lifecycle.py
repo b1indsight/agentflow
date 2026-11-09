@@ -1,4 +1,4 @@
-"""Closing a PR pauses its original binding and retires intent, not execution evidence."""
+"""Closing a PR ends its round without discarding outstanding execution evidence."""
 
 from datetime import timedelta
 from types import SimpleNamespace
@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.communication.gateway import Gateway
-from app.contracts.protocol import PROTOCOL_VERSION, InitialTaskResult, Succeeded
+from app.contracts.protocol import PROTOCOL_VERSION, ExecutionStopped, InitialTaskResult, Succeeded
 from app.contracts.result_models import ResultPending
 from app.controler.events.router import EventRouter
 from app.controler.reconciliation.pull_requests import Reconciler
@@ -14,7 +14,7 @@ from app.controler.workers.errors import ProtocolViolation
 from app.controler.workflow.lifecycle import pause_delivery
 from app.controler.workflow.service import ControlService
 from app.domain.delivery_models import PreparedDelivery
-from app.domain.models import DeliveryState, FlowState, JobKind, JobState, VcsKind
+from app.domain.models import ArchiveReason, DeliveryState, FlowState, JobKind, JobState, VcsKind
 from app.domain.review_models import BatchState
 from app.github import GitHubError, GitHubErrorKind, Issue, PullRequest, RemoteRef, Repository
 from app.persistence.jobs import JobStore
@@ -79,13 +79,14 @@ async def check(store, flow, github):
         ControlService(
             database=store.database,
         ),
-        settle_seconds=0,
         database=store.database,
     )._sweep()
 
 
 @pytest.mark.parametrize("started", [False, True])
-async def test_closed_binding_survives_expiry_and_original_started_job_can_resume(store, lifecycle_flow, started, lifecycle_resources):
+async def test_closed_binding_waits_for_started_executor_stop_before_archive(
+    store, lifecycle_flow, started, lifecycle_resources
+):
     flow, clock = lifecycle_flow
     store.workers.worker_connected("worker", PROTOCOL_VERSION, "old-epoch")
     store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
@@ -98,15 +99,27 @@ async def test_closed_binding_survives_expiry_and_original_started_job_can_resum
     store.workers.worker_disconnected("worker", "offline while PR paused", "old-epoch")
     clock.now += timedelta(seconds=601)
     store.workers.sweep_expired_assignments()
-    assert store.flows.get_flow(flow.id).state is FlowState.ACTIVE
-    assert store.workers.get_flow_execution(flow.id).released_at is None
+    assert store.flows.get_flow(flow.id).state is (
+        FlowState.BLOCKED if started else FlowState.ARCHIVED
+    )
+    assert store.flows.get_flow(flow.id).archive_reason is ArchiveReason.ABANDONED
     store.workers.worker_connected("worker", PROTOCOL_VERSION, "new-epoch")
     if started:
-        assert store.workers.resume_assignment(job.id, "worker", "token", "new-epoch")
-        assert store.jobs.get_job(job.id).state is JobState.RUNNING
-    else:
-        await check(store, flow, GitHub(flow, "open"))
-        assert store.deliveries.get_delivery(flow.id).state is DeliveryState.OPEN
+        assert store.workers.get_flow_execution(flow.id).released_at is None
+        stop = store.stops.pending("worker")
+        assert store.stops.confirm(
+            "worker",
+            ExecutionStopped(
+                **stop.fence().model_dump(),
+                execution_nonce="owned",
+            ),
+            "new-epoch",
+        )
+        assert ControlService(database=store.database).retry(flow)
+    assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
+    assert store.workers.get_flow_execution(flow.id).released_at is not None
+    await check(store, flow, GitHub(flow, "open"))
+    assert store.deliveries.get_delivery(flow.id).state is DeliveryState.CLOSED
 
 
 async def test_closed_missing_journal_preserves_late_result_and_reopen(store, pending_revision, monkeypatch):
@@ -168,13 +181,13 @@ async def test_reopen_retires_unstarted_jobs_requeued_after_pause(store, lifecyc
         store.workers.recover_abandoned_assignments()
         clock.now += timedelta(seconds=61)
         store.workers.sweep_expired_assignments()
-    assert store.jobs.get_job(old.id).state is JobState.QUEUED
-    await check(store, flow, GitHub(flow, "open"))
-    assert store.deliveries.get_delivery(flow.id).state is DeliveryState.OPEN
     assert store.jobs.get_job(old.id).state is JobState.FAILED
-    fresh = settle(store)[0]
+    await check(store, flow, GitHub(flow, "open"))
+    assert store.deliveries.get_delivery(flow.id).state is DeliveryState.CLOSED
+    assert store.jobs.get_job(old.id).state is JobState.FAILED
+    assert settle(store) == []
     store.workers.worker_connected("worker", PROTOCOL_VERSION, "new")
-    assert store.reviews.pending_triage()[0].id == fresh.id
+    assert store.reviews.pending_triage() == []
 
 
 async def test_lifecycle_hint_during_query_schedules_a_fresh_observation(store, lifecycle_flow, lifecycle_resources):
@@ -190,10 +203,12 @@ async def test_lifecycle_hint_during_query_schedules_a_fresh_observation(store, 
         ControlService(
             database=store.database,
         ),
-        settle_seconds=0,
         database=store.database,
     )._sweep()
-    assert github.calls == 2 and store.deliveries.get_delivery(flow.id).state is DeliveryState.OPEN
+    assert (
+        github.calls == 2 and store.deliveries.get_delivery(flow.id).state is DeliveryState.CLOSED
+    )
+    assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
 
 
 async def test_close_retires_queued_work_and_keeps_running_executor_slot(store, lifecycle_flow, lifecycle_resources):
@@ -201,6 +216,9 @@ async def test_close_retires_queued_work_and_keeps_running_executor_slot(store, 
     store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
     store.workers.worker_connected("worker", PROTOCOL_VERSION, "epoch")
     running = store.workers.assign_job("worker", "token", "epoch")
+    assert store.workers.start_assignment(
+        running.id, flow.current_attempt_id, "worker", "token", "epoch"
+    )
     queued = store.jobs.enqueue_job(flow.id, JobKind.REVISION)
     github = GitHub(flow)
     await check(store, flow, github)
@@ -208,13 +226,13 @@ async def test_close_retires_queued_work_and_keeps_running_executor_slot(store, 
     await check(store, flow, github)
     assert store.deliveries.get_delivery(flow.id).state is DeliveryState.CLOSED
     assert store.deliveries.get_delivery(flow.id).version == version
-    assert store.flows.get_flow(flow.id).state is FlowState.ACTIVE
+    assert store.flows.get_flow(flow.id).state is FlowState.FINALIZING
     assert store.workers.get_flow_execution(flow.id).released_at is None
     assert store.jobs.get_job(running.id).state is JobState.RUNNING
     assert store.jobs.get_job(queued.id).state is JobState.FAILED
     assert await coordinator(store, github).prepare(queued) is JobState.DONE
     assert all(job.kind is not JobKind.ARCHIVE for job in store.jobs.list_jobs(flow.id))
-    with pytest.raises(ValueError, match="closed|CLOSED"):
+    with pytest.raises(ValueError, match="closed|CLOSED|stop"):
         ControlService(
             database=store.database,
         ).retry(flow)
@@ -246,13 +264,16 @@ async def test_closed_pr_http_observation_replaces_awaiting_review_in_console(st
     assert store.reconcile.get(flow.id).failures == 0
     assert store.deliveries.get_delivery(flow.id).state is DeliveryState.CLOSED
     detail = console.detail(flow.id)
-    assert detail.action == "delivery_closed" and detail.phase == "done"
-    assert "PR 已关闭" in detail.reason
-    assert store.flows.get_flow(flow.id).state is FlowState.ACTIVE
+    assert (
+        detail.lifecycle is FlowState.ARCHIVED and detail.archive_reason is ArchiveReason.ABANDONED
+    )
+    assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
     assert not store.jobs.list_jobs(flow.id)
 
 
-async def test_reopen_refreezes_feedback_through_judge_and_keeps_binding(store, lifecycle_flow, lifecycle_resources):
+async def test_reopen_does_not_refreeze_feedback_from_an_abandoned_round(
+    store, lifecycle_flow, lifecycle_resources
+):
     flow, clock = lifecycle_flow
     ingest(store, flow, feedback(clock, signal="request_changes", submitted=True))
     clock.now += timedelta(seconds=76)
@@ -264,23 +285,25 @@ async def test_reopen_refreezes_feedback_through_judge_and_keeps_binding(store, 
     ingest(store, flow, feedback(clock, body="Edited while closed"), "closed-edit")
     assert settle(store) == []
     await check(store, flow, GitHub(flow, "open"))
-    assert store.deliveries.get_delivery(flow.id).state is DeliveryState.OPEN
-    new = settle(store)[0]
-    assert new.id != old.id and new.job_id is None
-    batch = batch_for(store, new)
-    assert batch.context is None and batch.decision is None
-    assert batch.feedback[0].body == "Edited while closed"
+    assert store.deliveries.get_delivery(flow.id).state is DeliveryState.CLOSED
+    assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
+    assert settle(store) == []
+    assert batch_for(store, old).state is BatchState.CANCELLED
 
 
 async def test_reopen_waits_for_old_executor_and_pending_result(store, lifecycle_flow, lifecycle_resources):
     flow, _ = lifecycle_flow
     store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
     store.workers.worker_connected("worker", PROTOCOL_VERSION, "epoch")
-    store.workers.assign_job("worker", "token", "epoch")
+    job = store.workers.assign_job("worker", "token", "epoch")
+    assert store.workers.start_assignment(
+        job.id, flow.current_attempt_id, "worker", "token", "epoch"
+    )
     await check(store, flow, GitHub(flow))
     await check(store, flow, GitHub(flow, "open"))
     assert store.deliveries.get_delivery(flow.id).state is DeliveryState.CLOSED
-    assert "executor" in store.reconcile.get(flow.id).last_error
+    assert store.flows.get_flow(flow.id).state is FlowState.FINALIZING
+    assert "resume" in store.reconcile.get(flow.id).last_error
 
 
 @pytest.mark.parametrize("changed", [{"head_sha": "c" * 40}, {"base_branch": "other"}])
@@ -295,19 +318,31 @@ async def test_human_drift_pauses_without_adopting_a_new_baseline(store, lifecyc
     assert "head/base" in store.reconcile.get(flow.id).last_error
 
 
-@pytest.mark.parametrize("state", [FlowState.FAILED, FlowState.CANCELLED])
-async def test_reopen_never_reactivates_terminal_flow(store, lifecycle_flow, state, lifecycle_resources):
+@pytest.mark.parametrize("state", [FlowState.BLOCKED, FlowState.ARCHIVED])
+async def test_reopen_never_reactivates_blocked_or_archived_flow(
+    store, lifecycle_flow, state, lifecycle_resources
+):
     flow, _ = lifecycle_flow
-    await check(store, flow, GitHub(flow))
-    flow.state = state
-    store.flows.update_flow(flow)
+    if state is FlowState.ARCHIVED:
+        await check(store, flow, GitHub(flow))
+        assert store.flows.get_round(flow.id, 1) is not None
+    else:
+        flow.state = state
+        store.flows.update_flow(flow)
+        delivery = store.deliveries.get_delivery(flow.id)
+        pause_delivery(delivery, deliveries=store.deliveries, jobs=store.jobs)
     await check(store, flow, GitHub(flow, "open"))
     assert store.flows.get_flow(flow.id).state is state
-    assert store.deliveries.get_delivery(flow.id).state is DeliveryState.CLOSED
+    assert store.deliveries.get_delivery(flow.id).state is (
+        DeliveryState.OPEN if state is FlowState.BLOCKED else DeliveryState.CLOSED
+    )
+    assert settle(store) == []
 
 
 @pytest.mark.parametrize("action", ["closed", "reopened", "synchronize"])
-async def test_lifecycle_webhooks_are_durable_query_hints(store, lifecycle_flow, action):
+async def test_close_webhook_ends_round_while_other_lifecycle_events_are_hints(
+    store, lifecycle_flow, action
+):
     flow, _ = lifecycle_flow
     router = EventRouter(
         ControlService(
@@ -316,13 +351,22 @@ async def test_lifecycle_webhooks_are_durable_query_hints(store, lifecycle_flow,
         SimpleNamespace(),
         database=store.database,
     )
-    payload = {"action": action, "repository": {"full_name": flow.repo},
-               "pull_request": {"number": 17, "merged": False}}
+    payload = {
+        "action": action,
+        "repository": {"full_name": flow.repo},
+        "installation": {"id": flow.installation_id},
+        "pull_request": {"number": 17, "merged": False},
+    }
     router.dispatch("pull_request", "hint", payload)
     router.dispatch("pull_request", "hint", payload)
     assert store.webhooks.event_seen("hint")
-    assert store.reconcile.get(flow.id) is not None
-    assert store.deliveries.get_delivery(flow.id).state is DeliveryState.OPEN
+    assert (store.reconcile.get(flow.id) is not None) is (action != "closed")
+    assert store.deliveries.get_delivery(flow.id).state is (
+        DeliveryState.CLOSED if action == "closed" else DeliveryState.OPEN
+    )
+    assert store.flows.get_flow(flow.id).state is (
+        FlowState.ARCHIVED if action == "closed" else FlowState.REVIEW
+    )
 
 
 async def test_close_during_capability_preparation_never_dispatches(store, pending_revision, monkeypatch):
@@ -352,7 +396,9 @@ async def test_close_during_capability_preparation_never_dispatches(store, pendi
     assert store.workers.get_flow_execution(flow.id).released_at is None
 
 
-async def test_inflight_revision_is_acknowledged_then_verified_before_reopen(store, pending_revision, monkeypatch):
+async def test_inflight_revision_is_acknowledged_without_reopening_abandoned_round(
+    store, pending_revision, monkeypatch
+):
     flow, job, task, github, subject = pending_revision
     assert store.workers.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
     subject.mark_started(job, task, "worker-a")
@@ -375,11 +421,11 @@ async def test_inflight_revision_is_acknowledged_then_verified_before_reopen(sto
     remote.remote = remote.remote.model_copy(update={"state": "open"})
     monkeypatch.setattr(PullRequest, "refetch", observe_remote)
     await check(store, flow, github)
-    assert store.deliveries.get_delivery(flow.id).state is DeliveryState.OPEN
-    assert store.deliveries.get_delivery(flow.id).head_sha == "revision"
+    assert store.deliveries.get_delivery(flow.id).state is DeliveryState.CLOSED
+    assert store.deliveries.get_delivery(flow.id).head_sha == "baseline"
+    assert store.flows.get_flow(flow.id).state is FlowState.FINALIZING
     assert store.workers.get_flow_execution(flow.id).released_at is None
-    queued = settle(store)[0]
-    assert queued.job_id is None
+    assert settle(store) == []
 
 
 async def test_close_after_comment_dispatch_recovers_only_the_existing_marker(store, monkeypatch, recording_resources):
@@ -413,7 +459,9 @@ async def test_close_after_comment_dispatch_recovers_only_the_existing_marker(st
     assert [j.id for j in store.jobs.list_jobs(job.flow_id) if j.kind is JobKind.REVISION] == [job.id]
 
 
-async def test_initial_close_before_final_commit_keeps_verified_identity_and_can_reopen(store, recording_resources):
+async def test_initial_close_before_final_commit_keeps_identity_without_authorizing_reopen(
+    store, recording_resources
+):
     flow = ControlService(
         database=store.database,
     ).on_trigger("owner/repo", 8, 42)
@@ -446,13 +494,14 @@ async def test_initial_close_before_final_commit_keeps_verified_identity_and_can
     assert await subject.results.apply(job.id) is JobState.DONE
     assert store.deliveries.get_delivery(flow.id).state is DeliveryState.CLOSED
     assert store.deliveries.get_delivery(flow.id).pr_number == 17
-    assert store.flows.get_flow(flow.id).state is FlowState.ACTIVE
+    assert store.flows.get_flow(flow.id).state is FlowState.FINALIZING
     assert store.workers.get_flow_execution(flow.id).released_at is None
     assert github.opened == github.labels == github.review_requests == []
     github.pull_request = github.pull_request.model_copy(update={"state": "open"})
     await check(store, flow, github)
-    assert store.deliveries.get_delivery(flow.id).state is DeliveryState.OPEN
-    assert store.flows.get_current_attempt(flow).codex_session_id == "session-1"
+    assert store.deliveries.get_delivery(flow.id).state is DeliveryState.CLOSED
+    assert store.flows.get_flow(flow.id).archive_reason is ArchiveReason.ABANDONED
+    assert store.flows.get_current_attempt(flow).codex_session_id is None
 
 
 def test_close_and_queued_retirement_roll_back_together(store, lifecycle_flow, monkeypatch):

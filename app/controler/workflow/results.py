@@ -20,7 +20,6 @@ from app.contracts.receipts import decode_result_inbox
 from app.contracts.result_models import (
     CommentEffect,
     Effect,
-    LabelEffect,
     PullRequestEffect,
     ResultPending,
     ResultPlan,
@@ -211,6 +210,9 @@ class ResultApplication:
                 )
                 if pending:
                     jobs_tx.set_job_error(job_id, failure)
+                    assert flow is not None
+                    flow.state = FlowState.BLOCKED
+                    self.flows.using(tx).update_flow(flow)
             if pending:
                 raise ResultPending(failure)
         with self.database.transaction() as tx:
@@ -227,13 +229,17 @@ class ResultApplication:
             if current.result_digest != plan.digest:
                 raise ValueError("result digest changed before commit")
             delivery = deliveries_tx.get_delivery(flow.id)
-            retired = delivery is not None and delivery.supersedes(current.kind)
+            retired = (
+                (flow.archive_reason is not None and current.kind is not JobKind.ARCHIVE)
+                or current.round_no != flow.current_round_no
+                or (delivery is not None and delivery.supersedes(current.kind))
+            )
             if retired:
                 # Preserve the frozen plan/receipts as history; only execution facts survive merge.
                 plan = self._retired_plan(current, plan.attempt_id)
                 failure = None
             state = JobState.FAILED if failure else plan.state
-            if flow.state not in TERMINAL_STATES:
+            if flow.state not in TERMINAL_STATES and not retired:
                 if flow.current_attempt_id != plan.attempt_id:
                     failure = "result attempt is no longer current"
                     state = JobState.FAILED
@@ -244,8 +250,18 @@ class ResultApplication:
                 result_store_tx.skip_remaining(job_id, failure or plan.error or "result failed")
             if not jobs_tx.complete_persisted_result(job_id, state):
                 raise ResultPending("result has not reached its atomic completion boundary")
-            if flow.state is FlowState.CANCELLED:
-                workers_tx.release_flow_execution(flow.id)
+            if current.round_no == flow.current_round_no:
+                # A revision retry/merge still owns the original repository. Only
+                # an initial failure without a delivered PR may relinquish the slot.
+                if (
+                    flow.state is FlowState.BLOCKED
+                    and flow.archive_reason is None
+                    and current.kind is JobKind.INITIAL
+                    and (delivery is None or delivery.pr_number is None)
+                ):
+                    workers_tx.release_flow_execution(flow.id)
+                self.flows.using(tx).try_archive(flow.id)
+            flow = self.flows.using(tx).get_flow(flow.id) or flow
         if not retired:
             self._after_commit(flow, current, plan, state)
         return state
@@ -256,7 +272,12 @@ class ResultApplication:
                 or job.result_payload is None or self.result_store.get_plan(job.id) is not None):
             return None
         flow = self.flows.get_flow(job.required_flow_id)
-        if flow is None or flow.state in TERMINAL_STATES:
+        if (
+            flow is None
+            or flow.state in TERMINAL_STATES
+            or flow.archive_reason is not None
+            or job.round_no != flow.current_round_no
+        ):
             return None
         delivery = self.deliveries.get_delivery(flow.id)
         if delivery is not None and delivery.supersedes(job.kind):
@@ -318,7 +339,7 @@ class ResultApplication:
             attempt_id=flow.current_attempt_id,
             state=JobState.DONE,
         )
-        if flow.state in TERMINAL_STATES:
+        if flow.state in TERMINAL_STATES or job.round_no != flow.current_round_no:
             return (
                 base.model_copy(update={"state": JobState.FAILED})
                 if isinstance(message, Failed)
@@ -328,7 +349,9 @@ class ResultApplication:
         if batch is not None:
             base = base.model_copy(update={"attempt_id": batch.attempt_id, "batch_id": batch.id})
         delivery = deliveries_tx.get_delivery(flow.id)
-        if delivery is not None and delivery.supersedes(job.kind):
+        if (flow.archive_reason is not None and job.kind is not JobKind.ARCHIVE) or (
+            delivery is not None and delivery.supersedes(job.kind)
+        ):
             return self._retired_plan(job, base.attempt_id)
         if batch is not None and (batch.attempt_id != flow.current_attempt_id
                 or batch.state not in {BatchState.READY, BatchState.PROCESSING}):
@@ -347,8 +370,13 @@ class ResultApplication:
             expected = [(f.item_id, f.version) for f in batch.feedback]
             received = [(f.item_id, f.version) for f in result.feedback_refs]
             if result.batch_id != batch.id or received != expected:
-                return base.model_copy(update={"state": JobState.FAILED, "flow_state": FlowState.FAILED,
-                    "error": "result does not match its frozen review batch"})
+                return base.model_copy(
+                    update={
+                        "state": JobState.FAILED,
+                        "flow_state": FlowState.BLOCKED,
+                        "error": "result does not match its frozen review batch",
+                    }
+                )
         if isinstance(result, InitialTaskResult):
             base = base.model_copy(
                 update={
@@ -493,11 +521,13 @@ class ResultApplication:
                 return self._failure(tx, flow, base, str(error))
             delivery = deliveries_tx.get_delivery(flow.id)
             assert delivery is not None
-            return base.model_copy(update={
-                "flow_state": FlowState.SUCCEEDED, "archive": result,
-                "effects": archive_effects(flow, delivery, done_label=self.settings.done_label,
-                                           in_review_label=self.settings.in_review_label),
-            })
+            return base.model_copy(
+                update={
+                    "flow_state": FlowState.ARCHIVED,
+                    "archive": result,
+                    "effects": archive_effects(flow, delivery),
+                }
+            )
         raise TypeError(f"unsupported result: {type(result).__name__}")
 
     @staticmethod
@@ -564,6 +594,8 @@ class ResultApplication:
             return
         if job.kind is JobKind.ARCHIVE:
             if failure or plan.state is JobState.FAILED:
+                flow.state = FlowState.BLOCKED
+                flows_tx.update_flow(flow)
                 return
             assert plan.archive is not None
             try:
@@ -577,12 +609,15 @@ class ResultApplication:
                 )
             except ValueError as error:
                 raise ResultPending(str(error)) from error
-        state = FlowState.FAILED if failure else plan.flow_state
-        if state is not None:
+        state = FlowState.BLOCKED if failure else plan.flow_state
+        if state is FlowState.ARCHIVED:
+            # Archive and ownership release happen after this result's completion
+            # marker, in the same transaction, through the settled-round guard.
+            flow.state = FlowState.FINALIZING
+            flows_tx.update_flow(flow)
+        elif state is not None:
             flow.state = state
             flows_tx.update_flow(flow)
-            if job.kind is not JobKind.REVISION:
-                workers_tx.release_flow_execution(flow.id)
         if failure or plan.state is JobState.FAILED:
             return
         if plan.delivery is not None:
@@ -597,6 +632,8 @@ class ResultApplication:
                 self._commit_initial_delivery(
                     job, current, flow, deliveries=deliveries_tx, result_store=result_store_tx
                 )
+            flow.state = FlowState.REVIEW
+            flows_tx.update_flow(flow)
         if plan.batch_id is not None and plan.batch_state is not None:
             consumed = plan.consumed
             batch_state, open_points = plan.batch_state, list(plan.open_points)
@@ -635,12 +672,14 @@ class ResultApplication:
         deliveries_tx = self.deliveries.using(tx)
         delivery = deliveries_tx.get_delivery(flow.id)
         if delivery is not None and delivery.state is DeliveryState.MERGED:
-            return base.model_copy(update={"state": JobState.FAILED, "error": reason})
+            return base.model_copy(
+                update={"state": JobState.FAILED, "flow_state": FlowState.BLOCKED, "error": reason}
+            )
         number = delivery.pr_number if delivery and delivery.pr_number else flow.issue_number
         return base.model_copy(
             update={
                 "state": JobState.FAILED,
-                "flow_state": FlowState.FAILED,
+                "flow_state": FlowState.BLOCKED,
                 "error": reason,
                 "effects": (
                     [self._comment(flow, number, "failure", f"⚠️ {reason}")]
@@ -651,16 +690,7 @@ class ResultApplication:
         )
 
     def _review_effects(self, flow: Flow, number: int | Literal["created_pr"]) -> list[Effect]:
-        effects: list[Effect] = [
-            LabelEffect(
-                key="labels",
-                installation_id=self._installation(flow),
-                repo=flow.repo,
-                number=number,
-                label=self.settings.in_review_label,
-                present=True,
-            )
-        ]
+        effects: list[Effect] = []
         if self.settings.reviewers:
             effects.append(
                 ReviewersEffect(
@@ -696,9 +726,9 @@ class ResultApplication:
         return delivery.pr_number
 
     def _after_commit(self, flow: Flow, job: Job, plan: ResultPlan, state: JobState) -> None:
-        if state is not JobState.DONE or flow.state in {FlowState.FAILED, FlowState.CANCELLED}:
+        if state is not JobState.DONE or flow.state is FlowState.BLOCKED:
             return
-        if flow.state is FlowState.SUCCEEDED and job.kind is not JobKind.ARCHIVE:
+        if flow.state is FlowState.ARCHIVED and job.kind is not JobKind.ARCHIVE:
             return
         if job.kind is JobKind.ARCHIVE:
             emit_hook(self.plugins, "on_archived", flow=flow)

@@ -10,7 +10,7 @@ from githubkit import GitHub as SDK
 
 from app.controler.reconciliation.pull_requests import Reconciler
 from app.controler.workflow.service import ControlService
-from app.domain.models import DeliveryState, FlowState, JobKind
+from app.domain.models import ArchiveReason, DeliveryState, FlowState, JobKind
 from app.github import (
     GitHubApp,
     GitHubError,
@@ -179,13 +179,17 @@ async def test_late_query_cannot_overwrite_a_changed_workflow(store, merge_flow,
     assert store.deliveries.get_delivery(merge_flow.id).state is expected
 
 
-@pytest.mark.parametrize("state", [FlowState.FAILED, FlowState.CANCELLED])
-async def test_historical_terminal_flow_only_records_merge_facts(store, merge_flow, state, polling_resources):
-    merge_flow.state = state
-    store.flows.update_flow(merge_flow)
+async def test_historical_archived_flow_only_records_merge_facts(
+    store, merge_flow, polling_resources
+):
+    ControlService(database=store.database).cancel(merge_flow)
+    archived = store.flows.get_round(merge_flow.id, 1)
+    assert archived is not None and archived.archive_reason is ArchiveReason.ABANDONED
     await subject(store, GitHub(status(merge_flow)))._sweep()
-    assert store.flows.get_flow(merge_flow.id).state is state
-    assert store.deliveries.get_delivery(merge_flow.id).state is DeliveryState.MERGED
+    assert store.flows.get_flow(merge_flow.id).state is FlowState.ARCHIVED
+    assert store.flows.get_flow(merge_flow.id).archive_reason is ArchiveReason.ABANDONED
+    assert store.deliveries.get_delivery(merge_flow.id) == archived.delivery
+    assert store.flows.get_round(merge_flow.id, 1).merge_commit_sha == "a" * 40
     assert store.jobs.list_jobs(merge_flow.id) == []
 
 

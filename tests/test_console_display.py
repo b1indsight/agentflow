@@ -5,6 +5,8 @@ from datetime import timedelta
 import pytest
 
 from app.contracts.console import ConsoleFailure
+from app.controler.workflow.service import ControlService
+from app.domain.models import ArchiveReason
 from app.github.console import Observation
 from app.persistence.activity import ActivityStore
 
@@ -90,6 +92,14 @@ def test_effect_markers_are_hidden_from_preview_content_and_diffs(store):
     )
     deleted_snapshot = archive.page(flow.id).snapshot
     assert archive.page(flow.id, since=deleted_snapshot - 1).changes == {"deleted": 1}
+    assert archive.page(flow.id, since=deleted_snapshot).changes == {}
+
+    # Opening another round must not rewrite prior reading versions or expose receipt markers.
+    service = ControlService(database=store.database)
+    service.finish(flow, reason=ArchiveReason.SUCCEEDED, summary="调查完成", expected_round_no=1)
+    service.resume(store.flows.get_flow(flow.id), expected_round_no=1)
+    assert store.flows.get_flow(flow.id).current_round_no == 2
+    assert archive.content(flow.id, changed.key, changed.version, 0, compare=True) == diff
     assert archive.page(flow.id, since=deleted_snapshot).changes == {}
 
 

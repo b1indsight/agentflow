@@ -10,6 +10,7 @@ import pytest
 from app.contracts.protocol import PROTOCOL_VERSION, RevisionTask, Succeeded
 from app.controler.workflow.service import ControlService
 from app.domain.models import (
+    ArchiveReason,
     DeliveryState,
     FlowState,
     Job,
@@ -77,7 +78,7 @@ def test_assignment_skips_a_flow_locked_for_cancellation(store: Store):
 
 def test_retry_rolls_back_with_real_database(store: Store, monkeypatch) -> None:
     flow = store.flows.create_flow("owner/repo", 702, 42)
-    flow.state = FlowState.FAILED
+    flow.state = FlowState.BLOCKED
     store.flows.update_flow(flow)
 
     def fail_enqueue(self: JobStore, flow_id: int, kind: JobKind, **kwargs: object) -> Job:
@@ -90,12 +91,12 @@ def test_retry_rolls_back_with_real_database(store: Store, monkeypatch) -> None:
             database=store.database,
         ).retry(flow)
     persisted = store.flows.get_flow(flow.id)
-    assert persisted is not None and persisted.state is FlowState.FAILED
+    assert persisted is not None and persisted.state is FlowState.BLOCKED
     assert store.jobs.list_jobs(flow.id) == []
 
 
-def test_trigger_and_operator_retry_share_issue_reservation(store: Store, postgresql_url: str):
-    # CLI retry uses its own Store and can race the webhook consumer on the same issue.
+def test_trigger_and_operator_resume_share_issue_reservation(store: Store, postgresql_url: str):
+    # Explicit resume uses its own Store and can race a new webhook-triggered Flow.
     flow = ControlService(
         database=store.database,
     ).on_trigger("owner/repo", 706, 42)
@@ -112,29 +113,29 @@ def test_trigger_and_operator_retry_share_issue_reservation(store: Store, postgr
                 database=store.database,
             ).on_trigger(flow.repo, flow.issue_number, 42)
 
-        def retry():
+        def resume():
             barrier.wait(timeout=5)
             try:
                 ControlService(
                     database=operator.database,
-                ).retry(flow)
+                ).resume(flow, expected_round_no=flow.current_round_no)
             except ValueError as error:
                 assert "already active" in str(error)
                 return False
             return True
 
         triggered = pool.submit(trigger)
-        retried = pool.submit(retry)
-        created, retry_won = triggered.result(timeout=5), retried.result(timeout=5)
+        resumed = pool.submit(resume)
+        created, resume_won = triggered.result(timeout=5), resumed.result(timeout=5)
 
     active = store.flows.get_active_flow(flow.repo, flow.issue_number)
     assert active is not None and active.id == (created.id if created else flow.id)
-    assert retry_won is (created is None)
+    assert resume_won is (created is None)
     assert len([job for job in store.jobs.list_jobs(active.id) if job.state is JobState.QUEUED]) == 1
 
 
 def bound_review_flow(store: Store):
-    """Keep the worker ownership left by a finished initial assignment."""
+    """Bind a review-ready fixture without inventing evidence of remote execution."""
     store.workers.worker_connected("worker-a", PROTOCOL_VERSION, "epoch-a")
     flow = store.flows.create_flow("owner/repo", 703, 42)
     attempt = store.flows.create_attempt(flow.id)
@@ -148,10 +149,13 @@ def bound_review_flow(store: Store):
     store.deliveries.update_delivery(delivery)
     initial = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
     assert store.workers.assign_job("worker-a", "initial-token", "epoch-a") is not None
-    assert store.workers.start_assignment(initial.id, attempt.id, "worker-a", "initial-token", "epoch-a")
+    # The fixture supplies the delivery directly; no INITIAL process was dispatched.
+    # Starting this job would require a real terminal receipt before any later archive.
     assert store.workers.finish_assignment(
         initial.id, "worker-a", "initial-token", JobState.DONE, "epoch-a"
     )
+    flow.state = FlowState.REVIEW
+    store.flows.update_flow(flow)
     return flow
 
 
@@ -209,9 +213,8 @@ def test_expired_cancelled_executor_does_not_overwrite_cancelled_flow(store: Sto
     execution = store.workers.get_flow_execution(flow.id)
     assert execution is not None and execution.released_at is None
     cancelled = store.flows.get_flow(job.flow_id)
-    assert cancelled is not None and cancelled.state is FlowState.CANCELLED
-
-
+    assert cancelled is not None and cancelled.state is FlowState.BLOCKED
+    assert cancelled.archive_reason is ArchiveReason.ABANDONED
 
 
 async def test_accepted_result_survives_expired_worker_recovery(
@@ -224,7 +227,7 @@ async def test_accepted_result_survives_expired_worker_recovery(
     monkeypatch.setattr(store._db, "_clock", lambda: later)
     assert store.workers.sweep_expired_assignments() == (0, 0)
     flow = store.flows.get_flow(job.flow_id)
-    assert flow is not None and flow.state is FlowState.ACTIVE
+    assert flow is not None and flow.state is FlowState.RUNNING
     github = RecordingGitHub()
     pull_request = review_context().pull_request
     assert pull_request is not None

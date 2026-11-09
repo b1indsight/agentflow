@@ -78,8 +78,7 @@ def test_only_one_active_flow_exists_per_issue(store: Store) -> None:
     with pytest.raises(UniqueViolation):
         store.flows.create_flow("owner/repo", 7, installation_id=11)
 
-    flow.state = FlowState.CANCELLED
-    store.flows.update_flow(flow)
+    ControlService(database=store.database).cancel(flow)
     replacement = store.flows.create_flow("owner/repo", 7, installation_id=11)
 
     assert replacement.id != flow.id
@@ -295,7 +294,7 @@ def test_startup_preserves_assignments_for_lease_recovery(store: Store) -> None:
     assert recovered_started.state is JobState.RUNNING
     assert recovered_started.recovery_deadline is not None
     assert recovered_flow is not None
-    assert recovered_flow.state is FlowState.ACTIVE
+    assert recovered_flow.state is FlowState.RUNNING
 
 
 def test_epoch_fencing_and_started_recovery_grace(postgresql_url: str) -> None:
@@ -349,9 +348,10 @@ def test_epoch_fencing_and_started_recovery_grace(postgresql_url: str) -> None:
             "worker-1", "network lost again", connection_epoch="epoch-2"
         )
         now += timedelta(seconds=91)
-        assert store.workers.sweep_expired_assignments() == (0, 1)
-        assert store.jobs.get_job(queued.id).state is JobState.FAILED  # type: ignore[union-attr]
-        assert store.flows.get_flow(flow.id).state is FlowState.FAILED  # type: ignore[union-attr]
+        assert store.workers.sweep_expired_assignments() == (0, 0)
+        assert store.jobs.get_job(queued.id).state is JobState.RUNNING  # type: ignore[union-attr]
+        assert store.flows.get_flow(flow.id).state is FlowState.BLOCKED  # type: ignore[union-attr]
+        assert store.workers.get_flow_execution(flow.id).released_at is None  # type: ignore[union-attr]
     finally:
         store.close()
 
@@ -382,7 +382,7 @@ def test_idle_flow_binding_fails_after_same_worker_recovery_grace(
 
         now += timedelta(seconds=31)
         assert store.workers.sweep_expired_assignments() == (0, 1)
-        assert store.flows.get_flow(flow.id).state is FlowState.FAILED  # type: ignore[union-attr]
+        assert store.flows.get_flow(flow.id).state is FlowState.BLOCKED  # type: ignore[union-attr]
         assert store.workers.get_flow_execution(flow.id).released_at is not None  # type: ignore[union-attr]
     finally:
         store.close()
@@ -530,7 +530,7 @@ def test_failed_flow_retry_reactivates_its_released_execution(store: Store) -> N
     failed = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
     assert store.workers.assign_job("worker-a", "token-a") is not None
     assert store.workers.finish_assignment(failed.id, "worker-a", "token-a", JobState.FAILED)
-    flow.state = FlowState.FAILED
+    flow.state = FlowState.BLOCKED
     store.flows.update_flow(flow)
     assert store.workers.release_flow_execution(flow.id)
 
@@ -669,9 +669,7 @@ def test_stop_confirmation_replays_real_receipt_without_rewriting_known_digest(
     store.workers.worker_connected("worker", PROTOCOL_VERSION, "epoch-1")
     job = store.workers.assign_job("worker", "token", "epoch-1")
     assert store.workers.start_assignment(job.id, attempt.id, "worker", "token", "epoch-1")
-    with store.transaction() as tx:
-        tx.lock_workflow(flow.id)
-        tx.stops.request(flow.id)
+    ControlService(database=store.database).cancel(flow)
     intent = store.stops.pending("worker")
     receipt = ExecutionStopped(**intent.fence().model_dump(), execution_nonce="real-cleanup")
     expected = stop_receipt_digest(receipt)

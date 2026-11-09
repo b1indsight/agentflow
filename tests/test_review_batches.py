@@ -34,6 +34,7 @@ def review_flow(store, monkeypatch):
     flow = store.flows.create_flow("owner/repo", 7, 42)
     attempt = store.flows.create_attempt(flow.id)
     flow.current_attempt_id = attempt.id
+    flow.state = FlowState.REVIEW
     store.flows.update_flow(flow)
     delivery = store.deliveries.get_or_create_delivery(flow.id, f"flow/{flow.id}")
     delivery.pr_number, delivery.state = 17, DeliveryState.OPEN
@@ -346,16 +347,18 @@ async def test_review_actions_have_explicit_dispatch_semantics(
     assert [j.trigger if isinstance(j, ReviewBatch) else j.kind for j in jobs] == ([] if expected is None else [expected])
 
 
-def test_failed_batch_retry_restores_ownership_and_cancel_fences_old_work(store, review_flow):
+def test_blocked_batch_retry_preserves_frozen_feedback_without_dispatching(store, review_flow):
     flow, clock = review_flow
     ingest(store, flow, feedback(clock, signal="request_changes"))
     job = claim(store, clock)[0]
     with store.transaction() as tx:
         tx.lock_workflow(flow.id)
-        flow.state = FlowState.FAILED
+        flow.state = FlowState.BLOCKED
         tx.flows.update_flow(flow)
+        assert tx.reviews.get_batch(batch_for(tx, job).id).state is BatchState.READY
         tx.jobs.cancel_jobs(flow.id)
     assert store.reviews.get_batch(batch_for(store, job).id).state is BatchState.CANCELLED
+    assert settle(store) == []
     ControlService(
         database=store.database,
     ).retry(flow)
@@ -528,7 +531,9 @@ def test_retry_after_successful_replacement_does_not_select_historical_failure(
     service = ControlService(
         database=store.database,
     )
-    service.cancel(flow)
+    flow.state = FlowState.BLOCKED
+    store.flows.update_flow(flow)
+    store.jobs.cancel_jobs(flow.id)
     service.retry(flow)
     replacement = store.jobs.list_jobs(flow.id)[-1]
     batch = batch_for(store, replacement)
@@ -536,12 +541,15 @@ def test_retry_after_successful_replacement_does_not_select_historical_failure(
     with store.connection() as connection:
         connection.execute("UPDATE jobs SET state='done' WHERE id=%s", (replacement.id,))
 
-    # A later idle cancellation must not resurrect the old failure whose owner was replaced.
+    # A new round must not resurrect the old failure whose owner was replaced.
     service.cancel(flow)
-    service.retry(flow)
+    with pytest.raises(ValueError, match="archived"):
+        service.retry(flow)
+    resumed = service.resume(flow, expected_round_no=flow.current_round_no)
     assert store.jobs.get_job(original.id).state is JobState.FAILED
     assert store.jobs.list_jobs(flow.id)[-1].kind is JobKind.INITIAL
-    assert store.flows.get_flow(flow.id).state is FlowState.ACTIVE
+    assert resumed.state is FlowState.QUEUED
+    assert resumed.current_round_no == flow.current_round_no + 1
 
 
 async def test_answer_uses_frozen_decision_once_and_consumes_after_comment(store, review_flow, recording_resources):
