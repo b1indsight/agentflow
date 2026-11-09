@@ -29,6 +29,7 @@ from tests.test_archive_recovery import ready_archive, receive
 from tests.test_coordinator import coordinator
 from tests.test_github_client import settings
 from tests.test_merge import route_merge
+from tests.workspace_fixtures import report_settled
 
 
 class ArchiveGitHub(RecordingGitHub):
@@ -129,6 +130,7 @@ async def test_archive_publishes_stable_status_and_replay_does_not_backfill(stor
     await route_merge(store, flow, "duplicate-merge")
     assert await subject.results.apply(job.id) is JobState.DONE
     assert len(github.notifications) == 2
+    report_settled(store, job.id, epoch="epoch-a")
     assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
     assert store.workers.get_flow_execution(flow.id).released_at is not None
 
@@ -199,6 +201,7 @@ async def test_archive_recovers_remote_write_before_receipt_after_restart(
             and r.last_error
             for r in skipped
         )
+        report_settled(store, job.id, epoch="epoch-a")
         assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
         assert store.workers.get_flow_execution(flow.id).released_at is not None
     monkeypatch.setattr(Issue, operation, original)
@@ -288,6 +291,7 @@ async def test_archive_auth_failure_preserves_whether_comment_was_sent(
             database=store.database,
         ).retry(flow)
     assert await coordinator(store, github).results.apply(job.id) is JobState.DONE
+    report_settled(store, job.id, epoch="epoch-a")
     assert len(github.notifications) == 2
     assert store.flows.get_flow(flow.id).current_attempt_id == result.attempt_id
     assert store.workers.get_flow_execution(flow.id).released_at is not None
@@ -467,6 +471,7 @@ async def test_archive_label_errors_do_not_block_completion(
         and str(status) in r.last_error
         for r in skipped
     )
+    report_settled(store, job.id, epoch="epoch-a")
     assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
     assert store.workers.get_flow_execution(flow.id).released_at is not None
     assert len(github.notifications) == 2
@@ -512,5 +517,6 @@ async def test_restart_recovers_comment_before_receipt_and_isolates_plugin_failu
         reopened.close()
     assert len(github.notifications) == 2
     assert store.jobs.get_job(job.id).result_applied_at is not None
+    report_settled(store, job.id, epoch="epoch-a")
     assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
     assert store.workers.get_flow_execution(flow.id).released_at is not None

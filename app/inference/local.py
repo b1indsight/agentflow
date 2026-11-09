@@ -2,6 +2,7 @@
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from uuid import uuid4
 
 from loguru import logger
@@ -29,6 +30,7 @@ from app.contracts.protocol import (
 )
 from app.contracts.validation import RejectedMessage, parse_server_input, parse_worker_input
 from app.domain.inference_models import LOCAL_BUB_WORKER_ID, InferenceCapability
+from app.domain.models import WorkspaceInventory
 from app.domain.ports import Inference
 from app.inference.bub import ADAPTER_VERSION
 from app.inference.transport import InferenceProtocolError, WorkerInferenceCallbacks
@@ -73,7 +75,11 @@ class _LocalConnection:
     async def on_opened(self) -> None:
         await self.session.send(Register(
             **message_header(None), control="register", payload=[],
-            worker_id=LOCAL_BUB_WORKER_ID, execute=False, recovery=None,
+            worker_id=LOCAL_BUB_WORKER_ID, execute=False,
+            workspace="0" * 32, repo_workspace_limit=1,
+            inventory=[WorkspaceInventory(workspace="0" * 32, repository=None,
+                                          generation=1, state="idle", flow_id=None)],
+            recoveries=[], inventory_complete=True,
             inference=InferenceCapability(adapter_version=ADAPTER_VERSION),
         ))
         self.session.start()
@@ -88,7 +94,7 @@ class _LocalConnection:
                 return  # Like an ordinary worker, stale validation errors grant no authority.
             raise InferenceProtocolError("message belongs to another connection epoch")
         if isinstance(message, Registered):
-            if self.ready or message.recovery is not None:
+            if self.ready or message.recoveries or not message.ready:
                 raise InferenceProtocolError("unexpected local inference registration decision")
             assert message.connection_epoch is not None
             self.session.bind_epoch(message.connection_epoch)
@@ -139,6 +145,7 @@ async def serve_local_inference(
         [str, Register, Session[WorkerMessageUnion, ServerMessageUnion]], Awaitable[None]
     ],
     inference: Inference,
+    workspace: Path,
 ) -> None:
     """Serve a preflighted bub provider until disconnect or controller task cancellation.
 
@@ -147,6 +154,8 @@ async def serve_local_inference(
     repository runtime or Flow routes are created. Cancellation joins both endpoints and
     the provider before returning, including repeated cancellation during child cleanup.
     """
+    if workspace.is_symlink() or not workspace.is_dir():
+        raise InferenceProtocolError("local inference workspace must exist before registration")
     host_transport, worker_transport = in_process_transport_pair()
     host = Session[WorkerMessageUnion, ServerMessageUnion](
         host_transport, parse=parse_worker_input, make_ack=_server_ack, epoch=uuid4().hex,

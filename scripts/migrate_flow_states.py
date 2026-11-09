@@ -19,8 +19,11 @@ owners explicitly; failed Flows remain blocked owners. A closed PR is not abando
 consent, and a display-only console archive does not prove workspace disposition.
 
 Original rows are retained in flow_state_migration_backup, independently readable as
-JSONB without runtime enums. Only applied plans' top-level flow_state is translated;
-inboxes, digests, effects, events and existing console activity are never rewritten.
+JSONB without runtime enums. Applied plans' top-level flow_state is translated. Validated
+applied v13 worker/control outcomes (excluding inference) have only their protocol_version
+changed to 14; v14 introduced no outcome changes except archive cleanup='released', which
+is not accepted for v13. Result bodies, digests, effects, events and existing console
+activity are never rewritten. Dry-run lists every proposed inbox conversion.
 Archive timestamps denote this migration's proven archive boundary, not an invented
 historical completion time. No execution binding is released by the migration.
 """
@@ -40,12 +43,12 @@ import psycopg
 from psycopg import sql
 from psycopg.types.json import Jsonb
 
-from app.contracts.protocol import ArchiveResult, ArchiveTask, Succeeded
+from app.contracts.protocol import ArchiveResult, ArchiveTask, Succeeded, TerminalPayload
 from app.contracts.receipts import decode_result_inbox
 from app.contracts.result_models import EffectRecord, ResultPlan
 from app.persistence.activity import ActivityStore
+from app.persistence.console_schema import CONSOLE_SCHEMA
 from app.persistence.database import Database
-from app.persistence.schema import SCHEMA, SCHEMAS
 
 Row = dict[str, Any]
 REQUIRED_TABLES = {
@@ -68,6 +71,17 @@ NEW_TABLES = {
     "flow_state_migration_backup",
 }
 
+# Freeze this migration's authority DDL rather than running startup schemas: the
+# latter also change execution storage, whose physical workspace IDs are unknown.
+FLOW_STATE_SCHEMA = """
+CREATE UNIQUE INDEX ux_flows_active ON flows(repo, issue_number) WHERE state <> 'archived';
+CREATE TABLE issue_flow_owners (
+ repo TEXT NOT NULL, issue_number INTEGER NOT NULL,
+ flow_id BIGINT NOT NULL REFERENCES flows(id), version BIGINT NOT NULL DEFAULT 1,
+ PRIMARY KEY(repo,issue_number)
+);
+"""
+
 
 @dataclass
 class Report:
@@ -78,6 +92,7 @@ class Report:
     flows: list[Row] = field(default_factory=list)
     owners: list[Row] = field(default_factory=list)
     plan_conversions: list[Row] = field(default_factory=list)
+    inbox_conversions: list[Row] = field(default_factory=list)
     problems: list[Row] = field(default_factory=list)
 
     def refuse(self, message: str, *, flows: Sequence[int] = (), jobs: Sequence[int] = ()) -> None:
@@ -91,13 +106,30 @@ def _time(value: str) -> datetime:
     return datetime.fromisoformat(value)
 
 
-def _terminal(job: Row):
-    return decode_result_inbox(
-        job["result_payload"],
+def _terminal(job: Row) -> TerminalPayload:
+    """Validate a v13 candidate through the v14 reader without changing original evidence."""
+    payload = job["result_payload"]
+    if not isinstance(payload, dict):
+        raise TypeError("result inbox is not an object")
+    v13 = (
+        "version" not in payload
+        and type(payload.get("protocol_version")) is int
+        and payload["protocol_version"] == 13
+    )
+    terminal = decode_result_inbox(
+        {**payload, "protocol_version": 14} if v13 else payload,
         job_id=job["id"],
         assignment_token=job["assignment_token"],
         result_digest=job["result_digest"],
     ).terminal
+    if (
+        v13
+        and isinstance(terminal, Succeeded)
+        and isinstance(terminal.result, ArchiveResult)
+        and terminal.result.cleanup not in {"removed", "already_absent"}
+    ):
+        raise ValueError("archive cleanup is not valid in v13")
+    return terminal
 
 
 def _archive_proof(
@@ -394,6 +426,8 @@ def _preflight(data: dict[str, list[Row]], report: Report) -> dict[int, Row]:
                             raise ValueError("applied result kind differs from job")
                     elif job["state"] == "done":
                         raise ValueError("failed terminal cannot prove a done job")
+                    if job["result_payload"].get("protocol_version") == 13:
+                        report.inbox_conversions.append({"job_id": job["id"], "from": 13, "to": 14})
             except (ValueError, TypeError):
                 report.refuse(
                     "Applied result has invalid/missing inbox identity or digest.",
@@ -656,9 +690,8 @@ def _apply(tx: Database, report: Report, converted: dict[int, Row], tables: Sequ
                 " archived_at=CASE WHEN %s='archived' THEN now() END WHERE id=%s",
                 (change["new_state"], change["archive_reason"], change["new_state"], change["id"]),
             )
-        # Canonical table definitions (including owner tables and the new unique
-        # index), after state conversion and before restoring projection triggers.
-        connection.execute(SCHEMA)
+        # Only Flow authority changes here; legacy execution tables remain untouched.
+        connection.execute(FLOW_STATE_SCHEMA)
         connection.execute("""
             DO $$ BEGIN
               IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='flows'::regclass
@@ -683,10 +716,14 @@ def _apply(tx: Database, report: Report, converted: dict[int, Row], tables: Sequ
             connection.execute(
                 "UPDATE result_applications SET plan=%s WHERE job_id=%s", (Jsonb(plan), job_id)
             )
-        # The core SCHEMA was installed above. Restore the remaining schemas in
-        # canonical order, including projection refresh, within this same transaction.
-        for schema in SCHEMAS[1:]:
-            connection.execute(schema)
+        for change in report.inbox_conversions:
+            connection.execute(
+                "UPDATE jobs SET result_payload=jsonb_set(result_payload,'{protocol_version}','14'::jsonb,false) "
+                "WHERE id=%s",
+                (change["job_id"],),
+            )
+        # Restore the Flow projection and its triggers, not unrelated startup DDL.
+        connection.execute(CONSOLE_SCHEMA)
         archives = connection.execute(
             "SELECT f.id,f.repo,f.archive_reason,f.archive_summary,f.archived_at,"
             "d.pr_number,d.merged_at,d.merge_commit_sha FROM flows f "
@@ -799,13 +836,15 @@ def migrate(
                 "WHERE n.nspname=%s AND NOT t.tgisinternal ORDER BY kind,name,definition",
                 (schema,) * 5,
             ).fetchall()
+            converted = _preflight(data, report)
             fingerprint_input = {
-                "version": 2,
-                "target_schemas": SCHEMAS,
+                "version": 4,
+                "target_schemas": (FLOW_STATE_SCHEMA, CONSOLE_SCHEMA),
                 "schema": schema,
                 "columns": columns,
                 "definitions": definitions,
                 "data": data,
+                "inbox_conversions": report.inbox_conversions,
             }
             report.fingerprint = hashlib.sha256(
                 json.dumps(
@@ -815,7 +854,6 @@ def migrate(
                     ensure_ascii=False,
                 ).encode()
             ).hexdigest()
-            converted = _preflight(data, report)
             if apply and expected_fingerprint != report.fingerprint:
                 report.refuse(
                     "--apply requires --expect-report from an unchanged, reviewed dry-run. "

@@ -26,6 +26,12 @@ _JSON = TypeAdapter(dict[str, JsonValue])
 _INTEGER = TypeAdapter(StrictInt)
 
 
+class JournalSelection(ProtocolModel):
+    """Legacy selection evidence, validated only during locked layout migration."""
+
+    flow_id: StrictInt = Field(gt=0)
+
+
 class _RecordFields(ProtocolModel):
     job_id: int
     flow_id: int
@@ -39,13 +45,39 @@ class _RecordFields(ProtocolModel):
     archive_task: ArchiveTask | None = None
     root_identity: tuple[str, int, int]
     acknowledged: bool = False
+    pool_acknowledged: bool = False
+    retire_after_ack: bool = False
     cleanup_verified: bool = False
     workspace: WorkspaceBinding | None = None
+    selected_repository: str | None = None
+    selected_workspace: str | None = Field(default=None, pattern=r"^[0-9a-f]{32}$")
+    selected_generation: int | None = Field(default=None, strict=True, gt=0)
     execution_nonce: str | None = None
     stopped: ExecutionStopped | None = None
 
     @model_validator(mode="after")
     def _evidence(self) -> Self:
+        if self.pool_acknowledged and not self.acknowledged:
+            raise ValueError("pool settlement has no controller acknowledgement")
+        if self.retire_after_ack and (not self.acknowledged or self.archive_task is None):
+            raise ValueError("journal retirement has no acknowledged archive")
+        if (self.selected_workspace is None) != (self.selected_generation is None):
+            raise ValueError("incomplete selected workspace identity")
+        if self.workspace is not None:
+            if self.workspace.flow_id != self.flow_id:
+                raise ValueError("workspace belongs to another Flow")
+            if self.selected_repository is None:
+                self.selected_repository = self.workspace.repository
+            if self.selected_repository != self.workspace.repository:
+                raise ValueError("workspace belongs to another selected repository")
+            if self.selected_workspace is None:
+                # Old v4/v5 records carry the same target in their established binding.
+                self.selected_workspace = self.workspace.slot_id
+                self.selected_generation = self.workspace.generation
+            if (self.selected_workspace, self.selected_generation) != (
+                self.workspace.slot_id, self.workspace.generation
+            ):
+                raise ValueError("workspace differs from the selected assignment target")
         if self.terminal is not None and (
             (self.terminal.job_id, self.terminal.assignment_token)
             != (self.job_id, self.assignment_token)
@@ -104,8 +136,13 @@ class _LegacyRecord(_RecordFields):
             archive_task=self.archive_task,
             root_identity=self.root_identity,
             acknowledged=self.acknowledged,
+            pool_acknowledged=self.pool_acknowledged,
+            retire_after_ack=self.retire_after_ack,
             cleanup_verified=self.cleanup_verified,
             workspace=self.workspace,
+            selected_repository=self.selected_repository,
+            selected_workspace=self.selected_workspace,
+            selected_generation=self.selected_generation,
             execution_nonce=self.execution_nonce,
             stopped=self.stopped.receipt() if self.stopped is not None else None,
         )

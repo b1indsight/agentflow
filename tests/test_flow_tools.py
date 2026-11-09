@@ -6,7 +6,6 @@ from uuid import UUID, uuid4
 import pytest
 
 from app.contracts.protocol import (
-    PROTOCOL_VERSION,
     FlowToolArguments,
     FlowToolErrorKind,
     FlowToolRequest,
@@ -38,6 +37,7 @@ from app.github import (
 from app.persistence.store import Store
 from tests.github import RecordingGitHub, record_call
 from tests.persistence_fakes import RepositoryViews
+from tests.workspace_fixtures import register_worker, report_settled
 
 
 class ToolStore(RepositoryViews):
@@ -54,6 +54,8 @@ class ToolStore(RepositoryViews):
         self.execution = FlowExecution(
             flow_id=3,
             worker_id="worker-a",
+            workspace="1" * 32,
+            generation=1,
             repo_identity="worker-a:owner/repo",
         )
         self.delivery = FlowDelivery(
@@ -404,7 +406,7 @@ async def test_tool_ledger_keeps_business_arguments_and_rejects_call_id_reuse_by
     delivery.base_branch = "trunk"
     store.deliveries.update_delivery(delivery)
     store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
-    store.workers.worker_connected("worker-a", PROTOCOL_VERSION, "epoch-a")
+    register_worker(store, "worker-a", repo=flow.repo, epoch="epoch-a")
     job = store.workers.assign_job("worker-a", "token-a", "epoch-a")
     invocation = request()
     invocation = invocation.model_copy(
@@ -432,6 +434,7 @@ async def test_tool_ledger_keeps_business_arguments_and_rejects_call_id_reuse_by
     assert call.arguments == invocation.arguments.arguments
     assert call.response == response.result
     assert store.workers.finish_assignment(job.id, "worker-a", "token-a", JobState.DONE, "epoch-a")
+    report_settled(store, job.id, epoch="epoch-a")
     store.jobs.enqueue_job(flow.id, JobKind.REVISION)
     replacement = store.workers.assign_job("worker-a", "token-b", "epoch-a")
     # Even with the same Flow and PR arguments, a later execution cannot claim an old call_id.

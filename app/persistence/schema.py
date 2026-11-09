@@ -61,6 +61,8 @@ CREATE TABLE IF NOT EXISTS jobs (
   attempt INTEGER NOT NULL DEFAULT 0,
   heartbeat_at TIMESTAMPTZ,
   assigned_worker_id TEXT,
+  workspace TEXT,
+  generation BIGINT CHECK (generation>0),
   assignment_token TEXT,
   started_at TIMESTAMPTZ,
   dispatch_authorized_at TIMESTAMPTZ,
@@ -87,7 +89,15 @@ CREATE TABLE IF NOT EXISTS jobs (
 CREATE INDEX IF NOT EXISTS ix_jobs_state ON jobs(state);
 
 CREATE TABLE IF NOT EXISTS workers (
-  worker_id TEXT PRIMARY KEY,
+  worker_id TEXT NOT NULL,
+  workspace TEXT NOT NULL CHECK (workspace ~ '^[0-9a-f]{32}$'),
+  repository TEXT,
+  generation BIGINT NOT NULL DEFAULT 1 CHECK (generation>0),
+  retired_generation BIGINT,
+  workspace_state TEXT NOT NULL DEFAULT 'idle' CHECK
+    (workspace_state IN ('idle','preparing','occupied','releasing','absent','quarantined')),
+  inventory_epoch TEXT,
+  repo_workspace_limit INTEGER NOT NULL DEFAULT 2 CHECK (repo_workspace_limit>0),
   protocol_version INTEGER NOT NULL,
   status TEXT NOT NULL,
   connection_epoch TEXT,
@@ -98,21 +108,23 @@ CREATE TABLE IF NOT EXISTS workers (
   last_seen_at TIMESTAMPTZ NOT NULL,
   last_assigned_at TIMESTAMPTZ,
   last_error TEXT,
-  last_disconnect_reason TEXT
+  last_disconnect_reason TEXT,
+  PRIMARY KEY(worker_id,workspace)
 );
+CREATE UNIQUE INDEX IF NOT EXISTS ux_workers_default ON workers(worker_id) WHERE repository IS NULL;
 
 CREATE TABLE IF NOT EXISTS flow_executions (
   flow_id BIGINT PRIMARY KEY REFERENCES flows(id),
-  worker_id TEXT NOT NULL REFERENCES workers(worker_id),
+  worker_id TEXT NOT NULL,
+  workspace TEXT NOT NULL,
+  generation BIGINT NOT NULL CHECK (generation>0),
   repo_identity TEXT NOT NULL,
   bound_at TIMESTAMPTZ NOT NULL,
   recovery_deadline TIMESTAMPTZ,
   released_at TIMESTAMPTZ
 );
-CREATE UNIQUE INDEX IF NOT EXISTS ux_flow_executions_worker_active
-  ON flow_executions(worker_id) WHERE released_at IS NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS ux_flow_executions_repo_active
-  ON flow_executions(repo_identity) WHERE released_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS ux_flow_executions_workspace_active
+  ON flow_executions(worker_id,workspace) WHERE released_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS flow_deliveries (
   flow_id BIGINT PRIMARY KEY REFERENCES flows(id),
@@ -186,11 +198,12 @@ CREATE INDEX IF NOT EXISTS ix_webhook_order ON webhook_inbox
 STOP_SCHEMA = """
 CREATE TABLE IF NOT EXISTS execution_stops (
  request_id TEXT PRIMARY KEY, flow_id BIGINT NOT NULL REFERENCES flows(id),
- job_id BIGINT NOT NULL REFERENCES jobs(id), worker_id TEXT NOT NULL REFERENCES workers(worker_id),
+ job_id BIGINT NOT NULL REFERENCES jobs(id), worker_id TEXT NOT NULL,
+ workspace TEXT NOT NULL, generation BIGINT NOT NULL CHECK (generation>0),
  assignment_token TEXT NOT NULL, binding_at TIMESTAMPTZ NOT NULL,
  reason TEXT NOT NULL DEFAULT 'cancelled', requested_at TIMESTAMPTZ NOT NULL,
  state TEXT NOT NULL DEFAULT 'pending', confirmed_at TIMESTAMPTZ, receipt_digest TEXT,
- UNIQUE(flow_id,binding_at)
+ UNIQUE(flow_id,workspace,generation)
 );
 CREATE INDEX IF NOT EXISTS ix_stops_worker ON execution_stops(worker_id) WHERE state!='confirmed';
 """

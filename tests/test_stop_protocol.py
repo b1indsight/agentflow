@@ -9,6 +9,7 @@ import pytest
 from app.communication.gateway import Gateway
 from app.communication.session import Session
 from app.contracts.protocol import (
+    PROTOCOL_VERSION,
     AcceptResultResponse,
     AcceptStop,
     AcceptStopArguments,
@@ -47,6 +48,7 @@ from app.persistence.stops import StopIntent
 from app.worker.execution.executor import WorkerExecutor
 from app.worker.execution.lifecycle import WorkerExecution, WorkerProtocolError
 from app.worker.execution.vcs import _run
+from app.worker.execution.workspaces import RepositoryWorkspaces
 from app.worker.state.execution import ExecutionState
 from tests.github import RecordingGitHub
 from tests.test_coordinator import coordinator
@@ -71,6 +73,8 @@ def assignment():
         job_id=1,
         flow_id=1,
         assignment_token="token",
+        workspace="a" * 32,
+        generation=1,
         task=InitialTask(
             flow_id=1,
             attempt_id=1,
@@ -127,7 +131,8 @@ class AckConnection:
                 **message_header(self.epoch),
                 control="registered",
                 payload=[],
-                recovery=None,
+                recoveries=[],
+                ready=True,
                 heartbeat_interval=60,
             ).model_dump_json()
         raise ConnectionError("script complete")
@@ -135,7 +140,7 @@ class AckConnection:
 
 async def test_stop_kills_owned_process_and_child_then_replays_lost_ack(tmp_path):
     work = assignment()
-    journal = ExecutionState(tmp_path)
+    journal = ExecutionState(tmp_path, 1)
     ready = tmp_path / "pids"
     script = (
         "import os,subprocess,sys,time; from pathlib import Path; "
@@ -179,7 +184,7 @@ async def test_stop_kills_owned_process_and_child_then_replays_lost_ack(tmp_path
                     except ProcessLookupError:
                         break
                     await asyncio.sleep(0.01)
-        restarted_state = ExecutionState(tmp_path)
+        restarted_state = ExecutionState(tmp_path, 1)
         restarted = worker_runtime(
             worker_id="w",
             worker_token="secret",
@@ -229,7 +234,7 @@ async def test_replacing_client_during_stop_preserves_cleanup_and_original_recei
                 cleaning.set()
                 await release.wait()
 
-    state, executor = ExecutionState(tmp_path), Executor()
+    state, executor = ExecutionState(tmp_path, 1), Executor()
     owner = WorkerExecution(worker_id="w", executor=executor, state=state)
     owner.receive(assignment())
     owner.start()
@@ -289,7 +294,7 @@ async def test_replacing_client_during_stop_preserves_cleanup_and_original_recei
 
 async def test_restarted_worker_does_not_infer_stopped_from_absent_task(tmp_path):
     work = assignment()
-    journal = ExecutionState(tmp_path)
+    journal = ExecutionState(tmp_path, 1)
     journal.record_received(work)
     journal.record_started()
     client = worker_runtime(
@@ -324,7 +329,11 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path, o
 
     class Executor(WorkerExecutor):
         async def execute(self, task, secret=None, *, tool_caller=None):
-            binding = await acquire(self.workspaces, task.flow_id)
+            selected = self.state.assignment
+            binding = await self.workspaces.claim(
+                task.repo, task.flow_id, selected.workspace, selected.generation,
+                base_branch="main", remote="origin", push_token=None,
+            )
             self.state.bind_workspace(binding)
             path = self.workspaces.path(binding)
             (path / "README.md").write_text("cancelled staged edit")
@@ -348,7 +357,8 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path, o
                 branch="flow/1",
             )
             return AssignmentArguments(
-                job_id=job.id, flow_id=job.flow_id, assignment_token=token, task=task
+                job_id=job.id, flow_id=job.flow_id, assignment_token=token, task=task,
+                workspace=job.workspace, generation=job.generation,
             )
 
         def mark_started(self, job, task, worker_id):
@@ -370,9 +380,25 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path, o
         tools=Mock(spec=FlowToolService),
         results=Mock(spec=ResultApplication),
     )
-    session = ExecutionState(root)
-    executor = Executor(root, RecordingAgent(), worker_id="worker-1", state=session)
-    unrelated = await acquire(executor.workspaces, 999) if overflow else None
+    pool = RepositoryWorkspaces(root, "worker-1", limit=2 if overflow else 1)
+    default = pool.initialize()
+    await pool.provision("owner/repo")
+    unrelated = None
+    if overflow:
+        store.workers.worker_connected("worker-1", PROTOCOL_VERSION, "setup",
+                                       workspace=default.workspace, repo_workspace_limit=2)
+        for item in pool.inventory():
+            assert store.workers.report_workspace("worker-1", "setup", item)
+        other = store.flows.create_flow("owner/repo", 999, 1)
+        other_job = store.jobs.enqueue_job(other.id, JobKind.INITIAL)
+        claimed = store.workers.assign_job("worker-1", "unrelated", "setup")
+        assert claimed.id == other_job.id
+        unrelated = await pool.claim("owner/repo", other.id, claimed.workspace, claimed.generation,
+                                     base_branch="main", remote="origin", push_token=None)
+        assert store.workers.finish_assignment(other_job.id, "worker-1", "unrelated", JobState.DONE, "setup")
+        pool.acknowledge(unrelated, other_job.id, "unrelated")
+    session = ExecutionState(root, 1)
+    executor = Executor(root, RecordingAgent(), worker_id="worker-1", state=session, workspaces=pool)
     client = worker_runtime(
         worker_id="worker-1",
         worker_token="worker-secret",
@@ -380,6 +406,7 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path, o
         execution=WorkerExecution(worker_id="worker-1", executor=executor, state=session),
         read_history=session.read,
     )
+    client.settings.worker_repo_workspace_limit = pool.limit
     server = asyncio.create_task(
         serve_worker(
             QueueSocket(to_serve, to_worker),
@@ -396,6 +423,12 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path, o
                 attempt = store.flows.create_attempt(flow.id)
                 flow.current_attempt_id = attempt.id
                 store.flows.update_flow(flow)
+                session = ExecutionState(root, flow.id)
+                executor = Executor(root, RecordingAgent(), worker_id="worker-1", state=session, workspaces=pool)
+                client.executions[flow.id] = WorkerExecution(
+                    worker_id="worker-1", executor=executor, state=session, on_change=client.notify,
+                )
+                client._create_execution = dict(client.executions).__getitem__
                 store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
                 started.clear()
                 handler.gateway.wake_all()
@@ -418,8 +451,8 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path, o
                         worker.result()
                     await asyncio.sleep(0.01)
                 assert (path / ".venv/cache").read_text() == "cancelled ignored cache"
-                assert store.stops.pending("worker-1") is None
-        replacement = await acquire(executor.workspaces, 3)
+                assert store.stops.pending_for_worker("worker-1") == []
+        replacement = await acquire(pool, flow.id + 1)
         assert replacement.slot_id == allocations[0][0].slot_id == allocations[1][0].slot_id
         assert replacement.generation > allocations[1][0].generation > allocations[0][0].generation
         assert (
@@ -429,17 +462,17 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path, o
         )
         assert (root / "repos/owner/repo/README.md").read_text() == "base\n"
         if unrelated is not None:
-            assert executor.workspaces.lookup("owner/repo", 999) == unrelated
+            assert pool.lookup("owner/repo", other.id) == unrelated
     finally:
         server.cancel()
         worker.cancel()
         await asyncio.gather(server, worker, return_exceptions=True)
-        await client.execution.shutdown()
+        await asyncio.gather(*(execution.shutdown() for execution in client.executions.values()))
 
 
 @pytest.mark.parametrize("delivery", ["combined", "split", "B_only", "effects_pending"])
 async def test_stopping_consumes_a_and_requires_real_r_before_b(delivery):
-    # Register+A cannot bypass a pending stop. In-flight T/A and Flow calls may arrive
+    # Registration cannot bypass a pending stop. In-flight T/A and Flow calls may arrive
     # before R/B, but only the real stopped receipt can release the stopping phase.
     now = utcnow()
     intent = StopIntent(
@@ -447,6 +480,8 @@ async def test_stopping_consumes_a_and_requires_real_r_before_b(delivery):
         flow_id=3,
         job_id=5,
         worker_id="worker-1",
+        workspace="a" * 32,
+        generation=1,
         assignment_token="token",
         binding_at=now,
         reason="cancel",
@@ -473,8 +508,8 @@ async def test_stopping_consumes_a_and_requires_real_r_before_b(delivery):
     class Stops(NoPendingStops):
         confirmed = False
 
-        def pending(self, worker_id):
-            return None if self.confirmed else intent
+        def pending_for_worker(self, worker_id):
+            return [] if self.confirmed else [intent]
 
         def confirm(self, worker_id, evidence, connection_epoch):
             confirms.append((worker_id, evidence, connection_epoch))
@@ -507,7 +542,6 @@ async def test_stopping_consumes_a_and_requires_real_r_before_b(delivery):
                         state="failed",
                         result_digest=terminal_digest(terminal),
                     ),
-                    payload=[terminal_accept],
                 ).model_dump_json()
             await self.command.wait()
             message = next(
@@ -579,10 +613,12 @@ async def test_stopping_consumes_a_and_requires_real_r_before_b(delivery):
 
 
 @pytest.mark.parametrize("failure", ["cleanup", "lost-ack"])
-async def test_stop_reconnect_reconciles_successor(
+async def test_stop_reconnect_retains_successor_until_settlement(
     store, tmp_path, monkeypatch, recording_resources, failure
 ):
-    # A lost stop ACK can leave an older journal behind a newer authorized dispatch.
+    # A cleaned directory cannot be reassigned until the worker consumes its stop ACK.
+    root, _ = managed_seed(tmp_path)
+    pool = RepositoryWorkspaces(root, "worker-1", limit=1)
     flows, attempts, jobs = [], {}, []
     for issue in (1, 2):
         flow = store.flows.create_flow("owner/repo", issue, 1)
@@ -600,6 +636,8 @@ async def test_stop_reconnect_reconciles_successor(
             job_id=job.id,
             flow_id=job.flow_id,
             assignment_token=token,
+            workspace=job.workspace,
+            generation=job.generation,
             task=InitialTask(
                 flow_id=job.flow_id,
                 attempt_id=attempts[job.flow_id].id,
@@ -613,19 +651,25 @@ async def test_stop_reconnect_reconciles_successor(
 
     monkeypatch.setattr(subject, "prepare_for_assignment", prepare)
 
-    class Executor:
-        def __init__(self):
-            self.executed, self.cleanups = [], 0
+    executed, cleanups = [], []
 
+    class Executor(WorkerExecutor):
         async def execute(self, task, secret=None, *, tool_caller=None):
-            self.executed.append(task.flow_id)
+            selected = self.state.assignment
+            binding = await self.workspaces.claim(
+                task.repo, task.flow_id, selected.workspace, selected.generation,
+                base_branch="main", remote="origin", push_token=None,
+            )
+            self.state.bind_workspace(binding)
+            executed.append(task.flow_id)
             started.set()
             await asyncio.Event().wait()
 
         async def reclaim_workspace(self):
-            self.cleanups += 1
-            if failure == "cleanup" and self.cleanups == 1:
+            cleanups.append(self.state.flow_id)
+            if failure == "cleanup" and len(cleanups) == 1:
                 raise OSError("temporary cleanup failure")
+            await super().reclaim_workspace()
 
     handler = server_runtime(
         subject,
@@ -636,8 +680,8 @@ async def test_stop_reconnect_reconciles_successor(
         tools=subject.tools,
         results=subject.results,
     )
-    session = ExecutionState(tmp_path)
-    executor = Executor()
+    session = ExecutionState(root, flows[0].id)
+    executor = Executor(root, RecordingAgent(), worker_id="worker-1", state=session, workspaces=pool)
     client = worker_runtime(
         worker_id="worker-1",
         worker_token="worker-secret",
@@ -645,6 +689,13 @@ async def test_stop_reconnect_reconciles_successor(
         execution=WorkerExecution(worker_id="worker-1", executor=executor, state=session),
         read_history=session.read,
     )
+    client.settings.worker_repo_workspace_limit = 1
+    next_state = ExecutionState(root, flows[1].id)
+    client.executions[flows[1].id] = WorkerExecution(
+        worker_id="worker-1", state=next_state, on_change=client.notify,
+        executor=Executor(root, RecordingAgent(), worker_id="worker-1", state=next_state, workspaces=pool),
+    )
+    client._create_execution = dict(client.executions).__getitem__
 
     class Socket(QueueSocket):
         async def send_text(self, raw):
@@ -660,8 +711,8 @@ async def test_stop_reconnect_reconciles_successor(
         async def recv(self):
             raw = await super().recv()
             if any(isinstance(item, StopAccepted) for item in parse_server_message(raw).payload):
-                await successor_dispatched.wait()
-                raise ConnectionError("stop ACK lost after successor dispatch")
+                assert not successor_dispatched.is_set()
+                raise ConnectionError("stop ACK lost before settlement")
             return raw
 
     def connect(connection_type):
@@ -688,7 +739,9 @@ async def test_stop_reconnect_reconciles_successor(
                 await worker
         assert not session.load().acknowledged
         assert store.jobs.get_job(jobs[1].id).started_at is None
-        assert (store.stops.pending("worker-1") is not None) == (failure == "cleanup")
+        assert store.jobs.get_job(jobs[1].id).state is JobState.QUEUED
+        assert not successor_dispatched.is_set()
+        assert bool(store.stops.pending_for_worker("worker-1")) == (failure == "cleanup")
     finally:
         server.cancel()
         worker.cancel()
@@ -697,29 +750,23 @@ async def test_stop_reconnect_reconciles_successor(
     server, worker = connect(QueueConnection)
     try:
         async with asyncio.timeout(5):
-            while not (
-                store.jobs.get_job(jobs[1].id).state is JobState.FAILED
-                if failure == "lost-ack"
-                else started.is_set()
-            ):
+            while not started.is_set():
                 if server.done():
                     server.result()
                 if worker.done():
                     worker.result()
                 await asyncio.sleep(0.01)
         successor = store.jobs.get_job(jobs[1].id)
-        if failure == "cleanup":
-            assert successor.started_at is not None and executor.executed == [f.id for f in flows]
-        else:
-            assert session.load().acknowledged
-            assert successor.result_applied_at is not None and successor.started_at is None
-            assert "journal" in successor.last_error
-            assert executor.executed == [flows[0].id]  # Unknown dispatch is failed, never rerun.
+        assert successor.started_at is not None and executed == [f.id for f in flows]
+        assert session.load().acknowledged and successor_dispatched.is_set()
+        assert next_state.load().selected_workspace == session.load().selected_workspace
+        assert next_state.load().selected_generation > session.load().selected_generation
+        assert len(cleanups) == (2 if failure == "cleanup" else 1)
     finally:
         server.cancel()
         worker.cancel()
         await asyncio.gather(server, worker, return_exceptions=True)
-        await client.execution.shutdown()
+        await asyncio.gather(*(execution.shutdown() for execution in client.executions.values()))
 
 
 async def test_stop_wakes_assignment_waiting_for_missing_a(monkeypatch):
@@ -727,15 +774,17 @@ async def test_stop_wakes_assignment_waiting_for_missing_a(monkeypatch):
     requested = False
 
     class Stops(NoPendingStops):
-        def pending(self, worker_id):
+        def pending_for_worker(self, worker_id):
             if not requested:
-                return None
+                return []
             now = utcnow()
-            return StopIntent(
+            return [StopIntent(
                 request_id="stop",
                 flow_id=3,
                 job_id=5,
                 worker_id=worker_id,
+                workspace="a" * 32,
+                generation=1,
                 assignment_token=store.job.assignment_token,
                 binding_at=now,
                 reason="cancel",
@@ -743,7 +792,7 @@ async def test_stop_wakes_assignment_waiting_for_missing_a(monkeypatch):
                 state="requested",
                 confirmed_at=None,
                 receipt_digest=None,
-            )
+            )]
 
     class StoppingStore(RecordingStore):
         @property

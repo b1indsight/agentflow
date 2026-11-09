@@ -21,6 +21,7 @@ from app.domain.models import (
     VcsOutcome,
 )
 from app.worker.execution.executor import WorkerExecutor
+from app.worker.execution.workspaces import RepositoryWorkspaces
 from app.worker.state.execution import ExecutionState
 from tests.test_vcs import _git, _git_fixture
 from tests.test_worker_session import _assignment
@@ -85,8 +86,21 @@ def assignment_secret() -> AssignmentSecret:
     )
 
 
+async def assigned_workspace(root: Path) -> tuple[ExecutionState, RepositoryWorkspaces]:
+    pool = RepositoryWorkspaces(root, "worker-1")
+    target = (await pool.provision("owner/repo"))[1]
+    received = _assignment(workspace=target.workspace, generation=target.generation)
+    received.task = received.task.model_copy(update={
+        "repo_identity": "worker-1:owner/repo", "attempt_id": 1,
+    })
+    journal = ExecutionState(root, received.flow_id)
+    journal.record_received(received)
+    journal.record_started()
+    return journal, pool
+
+
 @pytest.fixture
-def initial_workspace(tmp_path):
+async def initial_workspace(tmp_path):
     seed, _ = _git_fixture(tmp_path)
     target = tmp_path / "repos/owner/repo"
     target.parent.mkdir(parents=True)
@@ -94,10 +108,7 @@ def initial_workspace(tmp_path):
     (target / "AGENTS.md").write_text("Run tests.")
     _git("add", "AGENTS.md", cwd=target)
     _git("commit", "-m", "conventions", cwd=target)
-    journal = ExecutionState(tmp_path)
-    journal.record_received(_assignment())
-    journal.record_started()
-    return journal
+    return await assigned_workspace(tmp_path)
 
 
 @pytest.mark.asyncio
@@ -120,8 +131,9 @@ async def test_executor_runs_agent_without_store(
         lambda context: fake_verify(context, VcsKind.GIT),
     )
     agent = RecordingAgent()
+    journal, pool = initial_workspace
     executor = WorkerExecutor(
-        tmp_path, agent, worker_id="worker-1", state=ExecutionState(tmp_path)
+        tmp_path, agent, worker_id="worker-1", state=journal, workspaces=pool,
     )
 
     initial = await executor.execute(
@@ -149,7 +161,9 @@ async def test_executor_runs_agent_without_store(
 async def test_initial_exit_zero_without_a_declared_backend_is_a_failure(
     monkeypatch, tmp_path: Path, initial_workspace,
 ) -> None:
-    executor = WorkerExecutor(tmp_path, BackendlessAgent(), worker_id="worker-1", state=ExecutionState(tmp_path))
+    journal, pool = initial_workspace
+    executor = WorkerExecutor(tmp_path, BackendlessAgent(), worker_id="worker-1", state=journal,
+                              workspaces=pool)
 
     result = await executor.execute(
         InitialTask(
@@ -175,9 +189,10 @@ async def test_initial_preserves_execution_failure_details(tmp_path, initial_wor
     # INITIAL previously discarded the adapter's safe diagnostic before terminal persistence.
     agent = RecordingAgent()
     agent.start = AsyncMock(return_value=CodingExecutionResult("session-1", "", 124, detail))
-    task = _assignment().task.model_copy(update={"repo_identity": "worker-1:owner/repo"})
+    journal, pool = initial_workspace
+    task = journal.assignment.task
     result = await WorkerExecutor(
-        tmp_path, agent, worker_id="worker-1", state=initial_workspace,
+        tmp_path, agent, worker_id="worker-1", state=journal, workspaces=pool,
     ).execute(task, assignment_secret(), tool_caller=RecordingToolCaller())
     assert result.exit_code == 124
     assert result.failure_stage == "execution"
@@ -202,15 +217,12 @@ async def test_initial_preparation_failure_does_not_start_agent_or_expose_token(
             from app.worker.execution.vcs import VcsVerificationError
             raise VcsVerificationError("bootstrap", problem)
 
-        monkeypatch.setattr("app.worker.execution.executor.RepositoryWorkspaces.acquire", failed_prepare)
+        monkeypatch.setattr("app.worker.execution.executor.RepositoryWorkspaces.claim", failed_prepare)
     agent = RecordingAgent()
-    assignment = _assignment()
-    task = assignment.task.model_copy(update={"repo_identity": "worker-1:owner/repo"})
-    journal = ExecutionState(tmp_path)
-    journal.record_received(assignment)
-    journal.record_started()
-    result = await WorkerExecutor(tmp_path, agent, worker_id="worker-1", state=journal).execute(
-        task, secret, tool_caller=RecordingToolCaller(),
+    journal, pool = await assigned_workspace(tmp_path)
+    result = await WorkerExecutor(tmp_path, agent, worker_id="worker-1", state=journal,
+                                   workspaces=pool).execute(
+        journal.assignment.task, secret, tool_caller=RecordingToolCaller(),
     )
     assert result.exit_code != 0 and not agent.started
     assert "push-token" not in result.model_dump_json()
@@ -251,13 +263,10 @@ async def test_initial_bootstrap_push_mcp_and_final_verification_share_current_c
             return PreparedDelivery(head_sha=vcs_outcome.commit_sha, delivery_version=1)
 
     monkeypatch.setattr(vcs, "_run", offline)
-    assignment = _assignment()
-    task = assignment.task.model_copy(update={"repo_identity": "worker-1:owner/repo"})
-    journal = ExecutionState(root)
-    journal.record_received(assignment)
-    journal.record_started()
-    result = await WorkerExecutor(root, Agent(), worker_id="worker-1", state=journal).execute(
-        task, assignment_secret(), tool_caller=Caller(),
+    journal, pool = await assigned_workspace(root)
+    result = await WorkerExecutor(root, Agent(), worker_id="worker-1", state=journal,
+                                   workspaces=pool).execute(
+        journal.assignment.task, assignment_secret(), tool_caller=Caller(),
     )
     assert result.exit_code == 0 and result.pushed and result.open_pr_call_id
     assert result.delivery_receipt.status == "prepared"

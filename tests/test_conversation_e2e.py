@@ -44,7 +44,8 @@ class HistoryStore(RemoteStore):
         )
 
     def get_flow_execution(self, flow_id):
-        return FlowExecution(flow_id=flow_id, worker_id="worker-1", repo_identity="repo")
+        return FlowExecution(flow_id=flow_id, worker_id="worker-1", repo_identity="repo",
+                             workspace="a" * 32, generation=1)
 
     def list_attempts(self, flow_id):
         return [Attempt(id=7, flow_id=flow_id, codex_session_id=self.session),
@@ -129,7 +130,7 @@ async def test_http_history_queues_behind_callbacks_but_not_execution(
     to_worker: asyncio.Queue[str] = asyncio.Queue()
     to_control: asyncio.Queue[str] = asyncio.Queue()
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex"))
-    state = ExecutionState(tmp_path / "worker")
+    state = ExecutionState(tmp_path / "worker", 3)
     worker = worker_runtime(worker_id="worker-1", worker_token="worker-secret", serve_ws_url="unused",
                           execution=WorkerExecution(worker_id="worker-1", executor=Executor(), state=state),
                           read_history=state.read)

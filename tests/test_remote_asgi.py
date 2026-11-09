@@ -19,8 +19,10 @@ from app.contracts.protocol import (
     FlowToolResponse,
     InitialTask,
     InitialTaskResult,
+    Inventory,
     Register,
     Registered,
+    RepositoryDemand,
     Started,
     Succeeded,
     accept_result_id,
@@ -41,7 +43,7 @@ from app.domain.models import Job, JobKind, JobState
 from app.persistence.store import Store
 from app.telemetry.metrics import Metrics
 from tests.wire import worker_message
-from tests.worker_fakes import result_application
+from tests.worker_fakes import inventory, result_application
 
 
 class AsgiCoordinator(JobCoordinator):
@@ -50,7 +52,8 @@ class AsgiCoordinator(JobCoordinator):
         if isinstance(task, JobState):
             return task
         return AssignmentArguments(
-            job_id=job.id, flow_id=job.flow_id, assignment_token=token, task=task
+            job_id=job.id, flow_id=job.flow_id, assignment_token=token, task=task,
+            workspace=job.workspace, generation=job.generation,
         )
 
     def __init__(self, attempt_id: int, store: Store) -> None:
@@ -163,7 +166,11 @@ def test_real_asgi_websocket_completes_a_postgresql_job(store: Store, monkeypatc
                 control="register",
                 payload=[],
                 worker_id="worker-1",
-                recovery=None,
+                workspace="b" * 32,
+                repo_workspace_limit=2,
+                inventory=inventory(),
+                recoveries=[],
+                inventory_complete=True,
                 inference=None,
             ).model_dump_json()
         )
@@ -175,6 +182,13 @@ def test_real_asgi_websocket_completes_a_postgresql_job(store: Store, monkeypatc
             if isinstance(message, Registered):
                 ready = True
             for item in message.payload:
+                if isinstance(item, RepositoryDemand):
+                    assert ready and item.repository == "owner/repo"
+                    socket.send_text(Inventory(
+                        **message_header(message.connection_epoch), control="inventory", payload=[],
+                        inventory=inventory(), recoveries=[], inventory_complete=True,
+                    ).model_dump_json())
+                    continue
                 assert isinstance(item, Assignment) and ready
                 assignment, epoch = item, message.connection_epoch
         assert epoch is not None

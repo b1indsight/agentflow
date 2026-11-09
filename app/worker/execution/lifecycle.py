@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
 from uuid import uuid4
@@ -82,10 +83,12 @@ class WorkerExecution:
     replacing it; cancelling its observers never cancels the execution or an authorized stop.
     """
 
-    def __init__(self, *, worker_id: str, executor: TaskExecutor, state: ExecutionState) -> None:
+    def __init__(self, *, worker_id: str, executor: TaskExecutor, state: ExecutionState,
+                 on_change: Callable[[], None] | None = None) -> None:
         self.worker_id = worker_id
         self.executor = executor
         self.state = state
+        self._on_change = on_change
         self._execution: asyncio.Task[ExecutionResult] | None = None
         self._cancel_requested = False
         self._tool_calls: deque[PendingToolCall] = deque()
@@ -155,6 +158,9 @@ class WorkerExecution:
             logger.exception(
                 "worker execution result could not be persisted; retaining it for recovery"
             )
+        finally:
+            if self._on_change is not None:
+                self._on_change()
 
     def _collect_finished(self) -> None:
         execution = self._execution
@@ -302,7 +308,15 @@ class WorkerExecution:
         )
         self._tool_calls.append(PendingToolCall(request, future))
         self._tool_ready.set()
+        if self._on_change is not None:
+            self._on_change()
         return await future
+
+    def pending_tool_call(self) -> PendingToolCall | None:
+        """Borrow ready work for the runtime's single aggregated observer."""
+        while self._tool_calls and self._tool_calls[0].future.done():
+            self._tool_calls.popleft()
+        return self._tool_calls[0] if self._tool_calls else None
 
     async def next_tool_call(self) -> PendingToolCall:
         """Borrow the queue head without removing it, so a disconnected observer loses nothing."""

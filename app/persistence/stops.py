@@ -24,6 +24,8 @@ class StopIntent(BaseModel):
     flow_id: int
     job_id: int
     worker_id: str
+    workspace: str
+    generation: int
     assignment_token: str
     binding_at: datetime
     reason: str
@@ -51,21 +53,38 @@ class StopStore(Repository):
         with self._db.connection() as conn:
             job = conn.execute(
                 "SELECT id,assignment_token FROM jobs WHERE flow_id=%s AND assigned_worker_id=%s"
+                " AND workspace=%s AND generation=%s"
                 " AND kind<>'inference'"
                 " AND (started_at IS NOT NULL OR dispatch_authorized_at IS NOT NULL)"
+                " AND (started_at IS NOT NULL OR result_payload->>'source' IS DISTINCT FROM 'control')"
                 " AND assignment_token IS NOT NULL"
                 " AND (started_at>=%s OR dispatch_authorized_at>=%s)"
                 " ORDER BY id DESC LIMIT 1 FOR UPDATE",
-                (flow_id, binding.worker_id, binding.bound_at, binding.bound_at),
+                (flow_id, binding.worker_id, binding.workspace, binding.generation, binding.bound_at, binding.bound_at),
             ).fetchone()
             if job is not None:
-                conn.execute(
-                    "INSERT INTO execution_stops(request_id,flow_id,job_id,worker_id,assignment_token,"
-                    " binding_at,requested_at) VALUES(%s,%s,%s,%s,%s,%s,%s)"
-                    " ON CONFLICT(flow_id,binding_at) DO NOTHING",
-                    (uuid4().hex, flow_id, job['id'], binding.worker_id, job['assignment_token'],
+                inserted = conn.execute(
+                    "INSERT INTO execution_stops(request_id,flow_id,job_id,worker_id,workspace,generation,assignment_token,"
+                    " binding_at,requested_at) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)"
+                    " ON CONFLICT(flow_id,workspace,generation) DO NOTHING RETURNING request_id",
+                    (uuid4().hex, flow_id, job['id'], binding.worker_id, binding.workspace, binding.generation, job['assignment_token'],
                      binding.bound_at, self._db.now()),
-                )
+                ).fetchone()
+                if inserted is not None:
+                    # Review has no running job, but stopping its retained binding
+                    # still needs an ACK witness before that position can be retired.
+                    # A successor still in control-only preparation has no journal;
+                    # cancellation retires it after fencing the last actual execution.
+                    held = conn.execute(
+                        "UPDATE workers SET current_job_id=%s WHERE worker_id=%s AND workspace=%s"
+                        " AND generation=%s AND (current_job_id IS NULL OR current_job_id=%s"
+                        " OR EXISTS (SELECT 1 FROM jobs prep WHERE prep.id=workers.current_job_id"
+                        " AND prep.flow_id=%s AND prep.started_at IS NULL AND prep.dispatch_authorized_at IS NULL"
+                        " AND prep.result_received_at IS NULL))",
+                        (job["id"], binding.worker_id, binding.workspace, binding.generation, job["id"], flow_id),
+                    )
+                    if held.rowcount != 1:
+                        raise ValueError("stop requires its exact workspace generation and claim")
 
     def authorize_dispatch(self, job_id: int, worker_id: str, token: str, epoch: str) -> bool:
         """Persist the point after which a lost Started ACK cannot mean 'never sent'."""
@@ -92,11 +111,17 @@ class StopStore(Repository):
                                 (flow_id,)).fetchone() is not None
 
     def pending(self, worker_id: str) -> StopIntent | None:
+        """Return one intent for legacy single-message callers, never use for recovery scans."""
+        pending = self.pending_for_worker(worker_id)
+        return pending[0] if pending else None
+
+    def pending_for_worker(self, worker_id: str) -> list[StopIntent]:
+        """Enumerate every independent stop; omission is never cleanup evidence."""
         with self._db.connection() as conn:
             return conn.cursor(row_factory=class_row(StopIntent)).execute(
                 "SELECT * FROM execution_stops WHERE worker_id=%s AND state!='confirmed'"
-                " ORDER BY requested_at LIMIT 1", (worker_id,),
-            ).fetchone()
+                " ORDER BY requested_at,request_id", (worker_id,),
+            ).fetchall()
 
     def receipt_request(self, worker_id: str, request_id: str) -> StopIntent | None:
         with self._db.connection() as conn:
@@ -116,7 +141,9 @@ class StopStore(Repository):
                     "SELECT * FROM execution_stops WHERE request_id=%s FOR UPDATE", (receipt.request_id,),
                 ).fetchone()
                 binding = WorkerStore(tx).get_flow_execution(receipt.flow_id)
-                worker = conn.execute("SELECT connection_epoch FROM workers WHERE worker_id=%s", (worker_id,)).fetchone()
+                worker = conn.execute(
+                    "SELECT connection_epoch FROM workers WHERE worker_id=%s AND repository IS NULL", (worker_id,),
+                ).fetchone()
                 if (
                     intent is None
                     or worker is None
@@ -132,8 +159,19 @@ class StopStore(Repository):
                 ):
                     return False
                 if intent.state == 'confirmed':
+                    # Re-ACK immutable evidence without touching a newer allocation.
+                    # The current generation is required only for a first confirmation.
                     return intent.receipt_digest is not None
-                if binding is None or binding.worker_id != worker_id or binding.bound_at != intent.binding_at:
+                if conn.execute(
+                    "SELECT 1 FROM workers w JOIN jobs j ON j.assigned_worker_id=w.worker_id"
+                    " AND j.workspace=w.workspace AND j.generation=w.generation"
+                    " WHERE w.worker_id=%s AND w.workspace=%s AND w.generation=%s"
+                    " AND j.id=%s AND j.assignment_token=%s",
+                    (worker_id, intent.workspace, intent.generation, intent.job_id, intent.assignment_token),
+                ).fetchone() is None:
+                    return False
+                if (binding is None or binding.worker_id != worker_id or binding.bound_at != intent.binding_at
+                        or binding.workspace != intent.workspace or binding.generation != intent.generation):
                     return False
                 # A valid historical hash remains the durable identity of this receipt.
                 digest = intent.receipt_digest or stop_receipt_digest(receipt)
@@ -158,7 +196,7 @@ class StopStore(Repository):
                              (tx.now(), intent.request_id))
                 conn.execute("UPDATE jobs SET state='failed',last_error='execution stopped',updated_at=%s"
                              " WHERE id=%s AND result_received_at IS NULL", (tx.now(), intent.job_id))
-                conn.execute("UPDATE workers SET current_job_id=NULL,status='online' WHERE worker_id=%s"
-                             " AND (current_job_id=%s OR current_job_id IS NULL)", (worker_id, intent.job_id))
+                # Receipt commit only permits sending ACK. Inventory's exact settlement
+                # witness releases this claim, never any sibling workspace on the worker.
                 FlowStore(tx).try_archive(intent.flow_id)
                 return True

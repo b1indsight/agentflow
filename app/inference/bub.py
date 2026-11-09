@@ -4,6 +4,7 @@ import asyncio
 import os
 import sys
 from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from loguru import logger
@@ -31,6 +32,7 @@ class BubInference:
     def __init__(self, *, model: str = "", api_key: SecretStr | None = None,
                  api_base: str | None = None) -> None:
         self.model, self.api_key, self.api_base = model.strip(), api_key, api_base
+        self.root: Path | None = None
 
     @property
     def configured(self) -> bool:
@@ -67,7 +69,7 @@ class BubInference:
         }
         if self.api_base:
             env["FLOWTOOL_JUDGE_API_BASE"] = self.api_base
-        with TemporaryDirectory(prefix="flowtool-inference-") as directory:
+        with TemporaryDirectory(prefix="flowtool-inference-", dir=self.root) as directory:
             env["BUB_HOME"] = directory
             proc = None
             try:

@@ -6,7 +6,7 @@ from datetime import timedelta
 import pytest
 
 from app.communication.gateway import Gateway
-from app.contracts.protocol import PROTOCOL_VERSION, AssignmentArguments, Failed, RevisionTask
+from app.contracts.protocol import AssignmentArguments, Failed, RevisionTask
 from app.contracts.receipts import decode_result_inbox
 from app.controler.workflow.lifecycle import pause_delivery
 from app.controler.workflow.preparation import PreparationStale
@@ -20,6 +20,7 @@ from tests.test_revision_recovery import (
 )
 from tests.test_revision_recovery import revision_resources as revision_resources  # noqa: PLC0414
 from tests.worker_fakes import server_callbacks, server_runtime
+from tests.workspace_fixtures import register_worker
 
 
 def gateway(store, subject):
@@ -53,7 +54,7 @@ async def test_coordinator_rechecks_after_capability_io(store, pending_revision,
             with store.connection() as connection:
                 connection.execute("UPDATE flow_deliveries SET state='merged' WHERE flow_id=%s", (flow.id,))
         else:
-            store.workers.worker_connected("worker-a", PROTOCOL_VERSION, "new-epoch")
+            register_worker(store, "worker-a", repo=flow.repo, epoch="new-epoch")
         if signing_fails:
             raise GitHubError(GitHubErrorKind.TRANSIENT, "create_push_capability")
         return capability
@@ -183,7 +184,7 @@ async def test_failure_or_time_budget_stops_without_early_retry(store, pending_r
 def test_defer_requires_the_exact_unstarted_assignment(store, pending_revision, change):
     flow, job, _task, _, _ = pending_revision
     if change == "epoch":
-        store.workers.worker_connected("worker-a", PROTOCOL_VERSION, "new-epoch")
+        register_worker(store, "worker-a", repo=flow.repo, epoch="new-epoch")
     else:
         assert store.workers.requeue_assignment(job.id, "worker-a", "token", "epoch")
         assert store.workers.assign_job("worker-a", "new-token", "epoch") is not None
@@ -252,7 +253,7 @@ def test_another_worker_can_progress_while_original_binding_waits(store, pending
         GitHubError(GitHubErrorKind.TRANSIENT, "get_ref"), max_failures=5, window_seconds=900) is JobState.QUEUED
     other = store.flows.create_flow("owner/other", 8, 42)
     store.jobs.enqueue_job(other.id, JobKind.INITIAL)
-    store.workers.worker_connected("worker-b", PROTOCOL_VERSION, "other-epoch")
+    register_worker(store, "worker-b", repo=other.repo, epoch="other-epoch")
     assigned = store.workers.assign_job("worker-b", "other-token", "other-epoch")
     assert assigned.flow_id == other.id
     assert store.workers.get_flow_execution(flow.id).worker_id == "worker-a"

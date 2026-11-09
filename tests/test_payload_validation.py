@@ -77,7 +77,7 @@ async def receive(socket):
 async def test_bad_assignment_rejects_every_sibling_without_recording_then_continues(tmp_path):
     # A valid first sibling must not launch before a later sibling fails schema validation.
     connection = Connection()
-    state = ExecutionState(tmp_path)
+    state = ExecutionState(tmp_path, 3)
     execution = WorkerExecution(worker_id="worker", executor=RecordingExecutor(), state=state)
     runtime = worker_runtime(
         worker_id="worker",
@@ -141,7 +141,7 @@ async def test_tool_failure_retires_original_waiter_before_critical_recovery(tmp
             await asyncio.Event().wait()
 
     connection = Connection()
-    state = ExecutionState(tmp_path)
+    state = ExecutionState(tmp_path, 3)
     execution = WorkerExecution(worker_id="worker", executor=Executor(), state=state)
     runtime = worker_runtime(
         worker_id="worker",

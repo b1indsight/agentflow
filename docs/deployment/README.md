@@ -54,16 +54,17 @@ Judge 配置只提供给 control，在 serve 的 `.env` 配置 `FLOWTOOL_JUDGE_M
 及对应专用账号的原生认证、trusted-host 和隔离配置。能力登记只检查本机可执行文件和目录，
 不证明 provider 登录、额度或外部服务可用。
 
-将 worker root 放在任何 Git 仓库/worktree 之外。推理在其 `inference/answer-*` 临时目录启动独立
+将 worker root 放在任何 Git 仓库/worktree 之外。推理在其 `inference/<workspace>/answer-*` 临时目录启动独立
 会话，结束、超时和取消时清理目录；不向 agent 注入 Flow/GitHub capability，也不记录推理 journal。
 空目录与“只生成答案”的指令不能禁止原生工具或自定义凭据产生副作用；仍须遵守本页隔离要求。
 每台 worker 一个独立推理槽，编码忙仍可推理，draining/recovering/failed 的 worker 不选用。
 普通 worker 同时提供 execute/infer，无需已有 Flow/repo 绑定；推理取消不会停止编码任务。
-本地 bub 使用每次独立的临时空目录，不创建编码 workspace 或 journal。
+每个 worker 初始化一个无仓库默认 workspace，不占仓库配额。本地 bub 的默认目录在 controller
+进程内创建，跨连接重试保留，请求使用独立临时子目录；退出清除，不创建编码 workspace 或 journal。
 断线重试可能与旧计算重叠并重复计费，不保证模型调用恰好一次。
 
-serve 和 worker 需协调升级到 wire19，journal5 / inbox1 不变，无旧 wire fallback。
-启动时幂等升级 jobs/worker 的推理字段，保留编码数据；不要并行运行新旧 serve。
+serve 和 worker 需协调升级到 wire20，journal5 / inbox1 不变，无旧 wire fallback。
+workers 现为 `(worker_id, workspace)` 复合主键；旧 schema 须显式迁移，不能直接启动新版本。
 耗尽通知只写应用内执行记录；READY 后续扫描可创建新一轮 Job，WAITING 仍需新的有效反馈等原有触发。
 页面进入执行记录或显式刷新时读取通知，不轮询、不增加推理重试按钮。
 
@@ -216,13 +217,19 @@ INITIAL 使用当前 endpoint 和 token 引用；无当前 broker 的 REVISION/f
   空远端、缺分支、非空非仓库目录、symlink、缺 gh 或过期能力均在编码前失败。SSH remote
   不在当前核验范围内，使用不含凭据的 HTTPS URL。项目依赖、LFS/submodule 另行准备。
 - 执行目录位于 `<worker_root>/workspaces/<owner>/<repo>/<slot_id>`；
-  `workspace-pool.json` 与 `assignment-journal.json` 一起保存所有权、分配代次和恢复证据。
+  `workspace-pool.json` 与 `journals/flow-<flow_id>.json` 一起保存所有权、分配代次和恢复证据，
+  runtime 管理多个 Flow，扫描全部 journal，不再用 `current.json` 选择唯一执行。
+  旧 `assignment-journal.json` 和选择指针在启动持有 worker root 锁时核对并迁移；
+  root 身份、结果和停止证据不因目录层级改变。迁移后不能直接降级到只识别旧路径的程序。
   不要编辑、删除清单后让程序重新接管现有目录。准备中断、未知内容和损坏清单需要人工核查；
   没有实际 checkout 的失败 clone 可安全重试，已执行或未知状态不会自动重放。
 - `FLOWTOOL_WORKER_REPO_WORKSPACE_LIMIT` 默认 2、最小 1，启动时读取；完整副本、临时
   worktree、准备/清理中和隔离位置共同计数，seed 不计入，各仓库独立计数。降低上限不会删除
   既有位置；原 Flow 可继续，数量回落前不扩容。完整副本归档返回 `released` 并保留目录和
   ignored 依赖/构建缓存；worktree 返回 `removed`，经 Git 注销后删除。`flow show` 会注明目录保留。
+- controller 按等待任务发送仓库库存需求，worker 先创建并登记受管目录；没有库存时 job 排队。
+  派发直接选择 `(worker_id, workspace)`，同一 worker 可在不同位置同时执行多个 job。
+  配置为 3 时，同仓库最多三个 Flow 绑定；review 保留位置，同 Flow 的后续 job 串行。
 - Git worktree 共享对象库，不共享可写依赖目录。tracked 修改、未知非 ignored 文件、进行中的
   VCS 操作或基线会覆盖缓存时拒绝复用，不使用 reset/clean 丢弃内容。jj 完整副本可复用；
   溢出要求独立 Git seed，只准备 Git worktree，不复制 `.jj`。本策略不提供总字节配额或后台 GC。
@@ -231,17 +238,19 @@ INITIAL 使用当前 endpoint 和 token 引用；无当前 broker 的 REVISION/f
   回退个人凭据或自动重放写操作。仍须专用账户/容器/VM 隔离。
 
 取消时先持久保存停止证据，再清理受管 workspace 的未提交修改和未跟踪文件；原 copy/worktree、
-已推送 commit 和 ignored 缓存保留，位置归还空闲池。成功后才发送 `ExecutionStopped`，
+已推送 commit 和 ignored 缓存保留。成功后才发送 `ExecutionStopped`，
 清理或 manifest 提交失败时保留控制面绑定并重连重试，不增加 ACK 字段或清理完成回执。
+收到业务 ACK 后将 job/token 结清凭据写入 pool，并上报下一代库存，位置才允许交给其他 Flow。
 旧停止重放仍核对下一任务；已 dispatch 却缺 journal 的普通任务明确失败，不自动重跑。
-停止 ACK 保留原位置证明，供取消期间已知合并后的 ARCHIVE 使用；详见[取消说明](../operations/cancel-drain.md)。
-当前 #109 仍有取消 REVISION 后显式重试无法重新占用 idle 位置的 medium，尚不建议合并部署。
+取消期间确认合并时，数据库将原 Flow 的独占预留交接到同位置的新 generation；ARCHIVE 核对
+原 journal 和清理凭据后使用该目录。不能改用其他目录，也不能让新 Flow 抢占此交接。
 
-当前协议为 v17，使用 journal v5 / ResultInbox v1 / workspace manifest v1，数据库 schema 不变。
-v17 的共享 Session 事件驱动及验证错误 payload 需要双端协调升级，持久格式沿用 v16。
+当前协议为 v20，使用 journal v5 / ResultInbox v1 / workspace manifest v2。
+升级前停写并备份数据库和 worker root，核对真实 workspace 身份；旧 workers 单列主键会被启动
+检查拒绝，不猜造位置、不自动迁移。Flow 四态迁移工具只处理 Flow 状态，不能替代 workspace 迁移。
 涉及协议或 journal 格式变更时，由操作者协调
 serve/worker 使用同一 commit 或对应镜像升级；更新器不检查或等待 Worker 升级。
-不混跑 v16 或更早版本。受限 journal v4 / 内嵌回执 v14–v15 只读转换，正常保存才写 v5；
+不混跑旧协议。受限 journal v4 / 内嵌回执 v14–v15 只读转换，正常保存才写 v5；
 在没有活跃/未知执行且归档与停止 ACK 完成后升级两端。
 保留旧数据作人工核查，不将旧 per-Flow 目录迁入池，详见[升级说明](../operations/upgrade.md)。
 

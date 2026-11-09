@@ -7,7 +7,7 @@ from threading import Barrier
 
 import pytest
 
-from app.contracts.protocol import PROTOCOL_VERSION, RevisionTask, Succeeded
+from app.contracts.protocol import RevisionTask, Succeeded
 from app.controler.workflow.service import ControlService
 from app.domain.models import (
     ArchiveReason,
@@ -25,6 +25,7 @@ from tests.github import RecordingGitHub
 from tests.review_memory import review_context
 from tests.test_coordinator import coordinator
 from tests.test_revision_delivery import verified_result
+from tests.workspace_fixtures import register_worker, report_settled
 
 
 def test_functional_store_cannot_escape_its_transaction(store):
@@ -62,7 +63,7 @@ def test_trigger_rolls_back_flow_and_job_on_failure(store: Store, monkeypatch) -
 
 def test_assignment_skips_a_flow_locked_for_cancellation(store: Store):
     # The first assignment has no binding yet, so lifecycle serialization must include the Flow row.
-    store.workers.worker_connected("worker-a", PROTOCOL_VERSION, "epoch-a")
+    register_worker(store, "worker-a", repo="owner/repo", epoch="epoch-a")
     flow = ControlService(
         database=store.database,
     ).on_trigger("owner/repo", 705, 42)
@@ -167,7 +168,7 @@ def test_trigger_and_operator_resume_share_issue_reservation(store: Store, postg
 
 def bound_review_flow(store: Store):
     """Bind a review-ready fixture without inventing evidence of remote execution."""
-    store.workers.worker_connected("worker-a", PROTOCOL_VERSION, "epoch-a")
+    register_worker(store, "worker-a", repo="owner/repo", epoch="epoch-a")
     flow = store.flows.create_flow("owner/repo", 703, 42)
     attempt = store.flows.create_attempt(flow.id)
     attempt.codex_session_id = "session"
@@ -185,6 +186,7 @@ def bound_review_flow(store: Store):
     assert store.workers.finish_assignment(
         initial.id, "worker-a", "initial-token", JobState.DONE, "epoch-a"
     )
+    report_settled(store, initial.id, epoch="epoch-a")
     flow.state = FlowState.REVIEW
     store.flows.update_flow(flow)
     return flow

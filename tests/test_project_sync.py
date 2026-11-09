@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, PrivateAttr
 from typer.testing import CliRunner
 
 from app import cli
-from app.contracts.protocol import PROTOCOL_VERSION, ArchiveResult, Failed
+from app.contracts.protocol import ArchiveResult, Failed
 from app.contracts.result_models import ResultPending
 from app.controler.reconciliation.projects import ProjectSync
 from app.controler.workflow.service import ControlService
@@ -37,6 +37,7 @@ from tests.test_archive_recovery import ready_archive, receive
 from tests.test_github_client import settings
 from tests.test_github_projects import config, item, page
 from tests.test_review_batches import review_flow as review_flow  # noqa: PLC0414
+from tests.workspace_fixtures import register_worker, report_settled
 
 
 class RemoteProject(Project):
@@ -283,7 +284,7 @@ async def test_unbound_initial_is_todo_then_bound_work_is_in_progress(store, pro
     store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
     await converge(sync)
     assert state(store).desired_status is ProjectStatus.TODO
-    store.workers.worker_connected("project-worker", PROTOCOL_VERSION, "epoch")
+    register_worker(store, "project-worker", repo=flow.repo, epoch="epoch")
     assert store.workers.assign_job("project-worker", "token", "epoch") is not None
     clock.now += timedelta(seconds=31)
     await sync.sweep()
@@ -593,6 +594,7 @@ async def test_explicit_job_failure_blocks_but_pending_retry_does_not(
     assert store.deliveries.get_delivery(flow.id).state is DeliveryState.MERGED
     await sync.sweep()
     assert state(store).desired_status is ProjectStatus.BLOCKED
+    report_settled(store, job.id, epoch="epoch-a")
     ControlService(
         database=store.database,
     ).retry(flow)
@@ -619,6 +621,7 @@ async def test_archive_ack_and_worker_release_succeed_while_projects_are_offline
     assert state(store).failures == 1
     assert receive(store, job, ArchiveResult(**task.model_dump(), cleanup="removed")) == "pending"
     assert await subject.results.apply(job.id) is JobState.DONE
+    report_settled(store, job.id, epoch="epoch-a")
     assert store.workers.get_flow_execution(flow.id).released_at is not None
     assert store.jobs.get_job(job.id).result_applied_at is not None
     archived = store.flows.get_flow(flow.id)
