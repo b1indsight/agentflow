@@ -106,6 +106,7 @@ export interface ActivityItem {
   version: number;
   source: string;
   kind: string;
+  round_no: number | null;
   occurred_at: string;
   updated_at: string;
   observed_at: string;
@@ -128,6 +129,7 @@ export interface ActivityIdentity extends Pick<
   | "version"
   | "source"
   | "kind"
+  | "round_no"
   | "author"
   | "occurred_at"
   | "body_length"

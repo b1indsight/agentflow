@@ -14,6 +14,7 @@ from app.github import (
     GitHubError,
     GitHubErrorKind,
     Installation,
+    Repository,
     retry_delay,
 )
 from app.github.repositories import LabelDefinition
@@ -35,17 +36,42 @@ FLOW_LABEL_NAMES = frozenset(label.name for label in FLOW_LABEL_DEFINITIONS)
 
 
 class LabelSynchronizer:
-    """Cache successful checks in memory; restart or uncertainty simply causes a fresh read."""
+    """Share expiring repository confirmations between discovery and target reconciliation."""
 
     def __init__(self, github: GitHubApp, settings: ServerSettings) -> None:
         self.github = github
         self._confirmed: dict[tuple[int, str], float] = {}
+        self._pending: dict[tuple[int, str], asyncio.Task[tuple[str, ...]]] = {}
         self.definitions = (
             LabelDefinition(
                 name=settings.trigger_label, color="5319e7", description="Start a FlowTool task"
             ),
             *FLOW_LABEL_DEFINITIONS,
         )
+
+    async def ensure(self, repository: Repository) -> None:
+        """Provision once per repository, sharing in-flight success or failure with waiters.
+
+        The initiating caller owns the request's lifetime; cancelling a waiter must not
+        cancel it. Only success is cached, and cancellation/failure allows a fresh attempt.
+        """
+        identity = (repository.installation.installation_id, repository.full_name.casefold())
+        if self._confirmed.get(identity, 0) > monotonic():
+            return
+        self._confirmed.pop(identity, None)
+        pending = self._pending.get(identity)
+        if pending is not None:
+            await asyncio.shield(pending)
+            return
+        pending = asyncio.create_task(repository.ensure_labels(self.definitions))
+        self._pending[identity] = pending
+        try:
+            created = await pending
+            self._confirmed[identity] = monotonic() + CONFIRMED_INTERVAL
+            logger.info("repository labels confirmed: repo={} created={}",
+                        repository.full_name, created)
+        finally:
+            self._pending.pop(identity, None)
 
     async def run(self) -> None:
         """Scan in the background without gating readiness; the runtime owns cancellation."""
@@ -84,20 +110,12 @@ class LabelSynchronizer:
         while True:
             repositories = await installation.fetch_repositories(page=page)
             for repo in repositories.items:
-                identity = (installation.installation_id, repo.full_name.casefold())
-                if self._confirmed.get(identity, 0) > monotonic():
-                    continue
-                self._confirmed.pop(identity, None)
                 try:
-                    created = await repo.ensure_labels(self.definitions)
+                    await self.ensure(repo)
                 except GitHubError as error:
                     if error.kind is GitHubErrorKind.RATE_LIMITED or error.retry_after:
                         raise
                     logger.warning("repository labels pending: repo={} {}", repo.full_name, error)
-                else:
-                    self._confirmed[identity] = monotonic() + CONFIRMED_INTERVAL
-                    logger.info("repository labels confirmed: repo={} created={}",
-                                repo.full_name, created)
             if repositories.next_cursor is None:
                 return
             page = int(repositories.next_cursor)

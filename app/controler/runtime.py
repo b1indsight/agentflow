@@ -128,6 +128,7 @@ class ServerRuntime:
             github,
             self.settings,
             database=database,
+            repository_labels=self.label_sync,
             interval=self.settings.reconcile_interval_seconds,
             batch_size=self.settings.reconcile_batch_size,
             concurrency=self.settings.reconcile_concurrency,

@@ -62,12 +62,15 @@ Flow 持久化 `queued/running/review/blocked/finalizing/archived`，所有看�
 这个字段；finalizing 合并到进行中。失败为 blocked，继续占用 Issue；归档结果只有 succeeded/abandoned。
 `POST /api/flows/{id}/archive` 接受 `{reason,summary,expected_round_no}`，复用单 owner Access
 验签及同源检查，通过现有 ControlService 请求收尾。无 PR 的成功调查必须提供非空结论。
-停止、结果、已派发副作用与工作区处置均确认后，事务内释放绑定、保存 flow_rounds 快照并写 archived。
+停止、结果、已派发副作用与工作区处置均确认后，事务内释放绑定、追加归档 activity 并写 archived。
 弃置/调查保留工作区；合并交付继续要求原 worker 的 ArchiveResult。
 `POST /api/flows/{id}/resume` 接受 `{expected_round_no}`，检查 Issue 冲突并开启同一 Flow 的新轮次。
 旧 PR、Job、Attempt 与反馈不授权新轮工作；旧分页游标重新开始，activity 历史保留。
-独立 RoundStore 允许确认后的 abandoned→succeeded 历史纠错，须有归档前合并证据和版本校验；
-更正与审计同事务，不改变原归档时间、当前轮次、owner 或执行。activity 继续由数据库触发器产生。
+轮次由 Flow/Job/Attempt/activity 的字段表达，无独立 Round 实体。归档 activity 保留原始结果、时间和 PR 身份。
+已核验 webhook 与补偿查询自动更正归档前已合并的 abandoned 结果；严格要求 merged_at 加一秒早于 archived_at。
+合并证据、更正 activity 与当前归档结果同事务提交，重复消息幂等，不改变原归档时间、当前轮次、owner 或执行。
+状态 activity 继续由数据库触发器产生；归档、合并证据和更正由内部事务写入，不能覆盖或作为缓存清理。
+Worker 内容按 Attempt 归属，PR 内容按交付身份归属，Issue 共享/未知归属内容的 round_no 为 NULL。
 详见[控制台说明](../../app/controler/web/README.md)；原展示归档记录保留在历史规划中。
 
 ## 4.2 Event Router

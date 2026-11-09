@@ -2,17 +2,19 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
+
 from psycopg.rows import class_row
-from psycopg.types.json import Jsonb
 
 from app.domain.models import (
     ArchiveReason,
     Attempt,
     DeliveryState,
     Flow,
-    FlowRound,
     FlowState,
 )
+from app.github import PullRequestMerge
+from app.persistence.activity import ActivityStore
 from app.persistence.records import required
 from app.persistence.repository import Repository
 
@@ -73,9 +75,9 @@ class FlowStore(Repository):
         with self._db.transaction() as tx, tx.connection() as connection:
             if (
                 flow.state is FlowState.ARCHIVED
-                and FlowStore(tx).get_round(flow.id, flow.current_round_no) is None
+                and ActivityStore(tx).archived(flow.id, flow.current_round_no) is None
             ):
-                raise ValueError("archive requires settled round evidence")
+                raise ValueError("archive requires settled activity evidence")
             changed = connection.execute(
                 "UPDATE flows SET installation_id=%s, state=%s, current_attempt_id=%s,"
                 " archive_reason=%s,archive_summary=%s,archived_at=%s,updated_at=%s"
@@ -96,6 +98,24 @@ class FlowStore(Repository):
                 raise ValueError("Flow round is no longer current")
             if flow.state in {FlowState.FINALIZING, FlowState.ARCHIVED}:
                 ReviewStore(tx).cancel(flow.id)
+
+    def start_round(self, flow: Flow) -> Flow:
+        """Advance the archived round under the caller's Issue/workflow reservation."""
+        with self._db.connection() as connection:
+            row = (
+                connection.cursor(row_factory=class_row(Flow))
+                .execute(
+                    "UPDATE flows SET state='queued',current_round_no=current_round_no+1,"
+                    " current_attempt_id=NULL,archive_reason=NULL,archive_summary=NULL,"
+                    " archived_at=NULL,updated_at=%s"
+                    " WHERE id=%s AND state='archived' AND current_round_no=%s RETURNING *",
+                    (self._db.now(), flow.id, flow.current_round_no),
+                )
+                .fetchone()
+            )
+        if row is None:
+            raise ValueError("archived Flow round is no longer current")
+        return row
 
     def list_flows(self, *, active_only: bool = False) -> list[Flow]:
         query = "SELECT * FROM flows"
@@ -167,17 +187,6 @@ class FlowStore(Repository):
                 (flow.repo, flow.issue_number, flow.id),
             )
 
-    def get_round(self, flow_id: int, round_no: int) -> FlowRound | None:
-        with self._db.connection() as connection:
-            return (
-                connection.cursor(row_factory=class_row(FlowRound))
-                .execute(
-                    "SELECT * FROM flow_rounds WHERE flow_id=%s AND round_no=%s",
-                    (flow_id, round_no),
-                )
-                .fetchone()
-            )
-
     def try_archive(self, flow_id: int) -> bool:
         """Finish a requested round only after stops, results and disposition settle.
 
@@ -236,30 +245,100 @@ class FlowStore(Repository):
                 return False
             workers = WorkerStore(tx)
             execution = workers.get_flow_execution(flow_id)
-            if execution is not None and execution.released_at is None:
-                if not workers.release_flow_execution(flow_id):
-                    return False
-                execution = workers.get_flow_execution(flow_id)
+            if (
+                execution is not None
+                and execution.released_at is None
+                and not workers.release_flow_execution(flow_id)
+            ):
+                return False
             flow.archived_at = tx.now()
-            connection.execute(
-                "INSERT INTO flow_rounds(flow_id,round_no,repo,pr_number,original_reason,archive_reason,"
-                " archive_summary,archived_at,delivery,execution,merged_at,merge_commit_sha)"
-                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-                (
-                    flow.id,
-                    flow.current_round_no,
-                    flow.repo,
-                    delivery.pr_number if delivery else None,
-                    flow.archive_reason,
-                    flow.archive_reason,
-                    flow.archive_summary,
-                    flow.archived_at,
-                    Jsonb(delivery.model_dump(mode="json")) if delivery else None,
-                    Jsonb(execution.model_dump(mode="json")) if execution else None,
-                    delivery.merged_at if delivery else None,
-                    delivery.merge_commit_sha if delivery else None,
-                ),
+            ActivityStore(tx).append_flow(
+                flow.id,
+                flow.current_round_no,
+                "archive",
+                occurred_at=flow.archived_at,
+                metadata={
+                    "repo": flow.repo,
+                    "pr_number": delivery.pr_number if delivery else None,
+                    "archive_reason": flow.archive_reason.value,
+                    "archive_summary": flow.archive_summary,
+                    "merged_at": delivery.merged_at.isoformat()
+                    if delivery and delivery.merged_at
+                    else None,
+                    "merge_commit_sha": delivery.merge_commit_sha if delivery else None,
+                },
             )
             flow.state = FlowState.ARCHIVED
             FlowStore(tx).update_flow(flow)
             return True
+
+    def observe_archived_merge(
+        self, flow_id: int, round_no: int, merge: PullRequestMerge, *, origin: str
+    ) -> bool:
+        """Correct a proven pre-archive merge without authorizing work, even after resume.
+
+        Both webhook and reconciliation use the original archive event for identity
+        and time. Existing evidence is still checked when its delivery is repeated;
+        recording evidence and correcting its outcome commit as one transaction.
+        """
+        with self._db.transaction() as tx, tx.connection() as connection:
+            flow = tx.lock_workflow(flow_id)
+            activity = ActivityStore(tx)
+            archive = activity.archived(flow_id, round_no)
+            if flow is None or archive is None or round_no > flow.current_round_no:
+                raise ValueError("archived activity does not exist")
+            if (
+                archive.metadata.get("repo") != flow.repo
+                or archive.metadata.get("pr_number") != merge.number
+            ):
+                raise ValueError("merge does not belong to archived PR")
+            previous = activity.flow_event(flow_id, round_no, "merge")
+            for record in (archive, previous):
+                if record is None:
+                    continue
+                saved_at = record.metadata.get("merged_at")
+                saved_sha = record.metadata.get("merge_commit_sha")
+                if (
+                    saved_at is not None
+                    and (
+                        not isinstance(saved_at, str)
+                        or merge.merged_at != datetime.fromisoformat(saved_at)
+                    )
+                ) or (saved_sha is not None and saved_sha != merge.merge_commit_sha):
+                    raise ValueError("merge conflicts with recorded archive evidence")
+            metadata: dict[str, str | int | bool | None] = {
+                "repo": flow.repo,
+                "pr_number": merge.number,
+                "merged_at": merge.merged_at.isoformat(),
+                "merge_commit_sha": merge.merge_commit_sha,
+                "origin": origin,
+            }
+            added = False
+            if previous is None:
+                added = activity.append_flow(
+                    flow_id, round_no, "merge", occurred_at=merge.merged_at, metadata=metadata
+                )
+            if (
+                archive.metadata.get("archive_reason") == ArchiveReason.ABANDONED.value
+                and merge.merged_at + timedelta(seconds=1) < archive.occurred_at
+                and activity.flow_event(flow_id, round_no, "archive_correction") is None
+            ):
+                activity.append_flow(
+                    flow_id,
+                    round_no,
+                    "archive_correction",
+                    occurred_at=tx.now(),
+                    metadata={
+                        **metadata,
+                        "before": ArchiveReason.ABANDONED.value,
+                        "after": ArchiveReason.SUCCEEDED.value,
+                        "archived_at": archive.occurred_at.isoformat(),
+                    },
+                )
+                if flow.current_round_no == round_no and flow.state is FlowState.ARCHIVED:
+                    # Do not advance updated_at, mutate owner, or re-enter merge cleanup.
+                    connection.execute(
+                        "UPDATE flows SET archive_reason='succeeded' WHERE id=%s", (flow_id,)
+                    )
+                added = True
+            return added

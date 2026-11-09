@@ -309,12 +309,7 @@ class JobCoordinator:
                     attempt = flows_tx.create_attempt(fresh.id)
                     fresh.current_attempt_id = attempt.id
                     flows_tx.update_flow(fresh)
-                branch = (
-                    f"flow/{fresh.id}"
-                    if fresh.current_round_no == 1
-                    else f"flow/{fresh.id}/round-{fresh.current_round_no}"
-                )
-                delivery = deliveries_tx.get_or_create_delivery(fresh.id, branch)
+                delivery = deliveries_tx.get_or_create_delivery(fresh.id, fresh.initial_branch)
                 flow = fresh
             try:
                 repo = self.github.installation(installation_id).repository(flow.repo)

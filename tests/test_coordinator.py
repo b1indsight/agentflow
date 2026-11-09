@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime
 from typing import Any, cast
+from unittest.mock import Mock
 from uuid import uuid4
 
 import pytest
@@ -21,7 +22,6 @@ from app.contracts.protocol import (
     terminal_digest,
 )
 from app.contracts.receipts import ResultInbox
-from app.contracts.result_models import EffectState
 from app.controler.config import ServerSettings
 from app.controler.workflow.coordinator import JobCoordinator
 from app.controler.workflow.effects import ResultEffects
@@ -29,13 +29,11 @@ from app.controler.workflow.results import ResultApplication
 from app.controler.workflow.tools import FlowToolService
 from app.domain.delivery_models import DeliveryReceipt
 from app.domain.models import (
-    ArchiveReason,
     Attempt,
     DeliveryState,
     Flow,
     FlowDelivery,
     FlowExecution,
-    FlowRound,
     FlowState,
     FlowToolCall,
     Job,
@@ -69,7 +67,9 @@ class MemoryStore(RepositoryViews):
             installation_id=42,
             state=FlowState.RUNNING,
         )
-        self.rounds: dict[tuple[int, int], FlowRound] = {}
+        # Active flows do not archive. Finalizing scenarios script this boundary explicitly;
+        # settlement, release and archive activity are tested against PostgreSQL.
+        self.try_archive = Mock(name="try_archive", return_value=False)
         self.attempt: Attempt | None = None
         self.execution = FlowExecution(
             flow_id=1,
@@ -82,7 +82,8 @@ class MemoryStore(RepositoryViews):
 
     @contextmanager
     def transaction(self):
-        snapshot = deepcopy(self.__dict__)
+        # Scripted responses and observed calls are not transactional persistence state.
+        snapshot = deepcopy(self.__dict__, {id(self.try_archive): self.try_archive})
         try:
             yield self
         except Exception:
@@ -178,85 +179,8 @@ class MemoryStore(RepositoryViews):
         self.attempt = attempt
 
     def update_flow(self, flow: Flow) -> None:
-        if flow.state is FlowState.ARCHIVED:
-            assert (flow.id, flow.current_round_no) in self.rounds
+        assert flow.state is not FlowState.ARCHIVED, "only persistence finalization may archive"
         self.flow = flow
-
-    def get_round(self, flow_id: int, round_no: int) -> FlowRound | None:
-        return self.rounds.get((flow_id, round_no))
-
-    def try_archive(self, flow_id: int) -> bool:
-        """Mirror settlement guards; an outstanding fake stop is not an archive receipt."""
-        flow = self.get_flow(flow_id)
-        if flow is None or flow.state is not FlowState.FINALIZING or flow.archive_reason is None:
-            return False
-        jobs = [
-            job
-            for job in self.job_records.values()
-            if job.flow_id == flow_id and job.round_no == flow.current_round_no
-        ]
-        if self.stops.has_pending(flow_id) or any(
-            job.state in {JobState.QUEUED, JobState.RUNNING}
-            or (job.result_received_at is not None and job.result_applied_at is None)
-            or (
-                job.kind is not JobKind.INFERENCE
-                and job.result_received_at is None
-                and (
-                    job.started_at is not None
-                    or job.dispatch_authorized_at is not None
-                    or (
-                        job.kind is JobKind.ARCHIVE
-                        and (job.payload or {}).get("archive") is not None
-                    )
-                )
-            )
-            for job in jobs
-        ):
-            return False
-        if any(
-            (
-                effect.state not in {EffectState.SUCCEEDED, EffectState.SKIPPED}
-                and not (effect.state is EffectState.FAILED and effect.dispatched_at is None)
-            )
-            or (effect.dispatched_at is not None and effect.receipt is None)
-            for job in jobs
-            for effect in self.results.list_effects(job.id)
-        ):
-            return False
-        if self.delivery is not None and self.delivery.state is DeliveryState.MERGED:
-            if flow.archive_reason is not ArchiveReason.SUCCEEDED or not any(
-                job.kind is JobKind.ARCHIVE
-                and job.state is JobState.DONE
-                and job.result_applied_at is not None
-                and (plan := self.results.get_plan(job.id)) is not None
-                and plan.archive is not None
-                and plan.archive.cleanup in {"removed", "released", "already_absent"}
-                for job in jobs
-            ):
-                return False
-        elif flow.archive_reason is ArchiveReason.SUCCEEDED and (
-            not (flow.archive_summary or "").strip()
-            or (self.delivery is not None and self.delivery.pr_number is not None)
-        ):
-            return False
-        if self.execution.released_at is None and not self.release_flow_execution(flow_id):
-            return False
-        flow.archived_at = self.now()
-        self.rounds[flow_id, flow.current_round_no] = FlowRound(
-            flow_id=flow_id,
-            round_no=flow.current_round_no,
-            repo=flow.repo,
-            pr_number=self.delivery.pr_number if self.delivery else None,
-            original_reason=flow.archive_reason,
-            archive_reason=flow.archive_reason,
-            archive_summary=flow.archive_summary,
-            archived_at=flow.archived_at,
-            delivery=self.delivery.model_copy(deep=True) if self.delivery else None,
-            execution=self.execution.model_copy(deep=True),
-        )
-        flow.state = FlowState.ARCHIVED
-        self.update_flow(flow)
-        return True
 
     def get_flow_execution(self, flow_id: int) -> FlowExecution | None:
         return self.execution if flow_id == self.flow.id else None
@@ -380,6 +304,7 @@ def coordinator(store: Store | MemoryStore, github: GitHubApp) -> CoordinatorFix
 @pytest.mark.asyncio
 async def test_initial_job_crosses_worker_boundary_and_opens_pr() -> None:
     store = MemoryStore()
+    store.try_archive.side_effect = [False]  # Delivery enters review, not finalization.
     github = RecordingGitHub()
     subject = coordinator(store, github)
     job = Job(
@@ -440,6 +365,7 @@ async def test_initial_job_crosses_worker_boundary_and_opens_pr() -> None:
     assert state is JobState.DONE
     assert replayed_state is JobState.DONE
     assert store.flow.state is FlowState.REVIEW
+    store.try_archive.assert_called_once_with(store.flow.id)
     assert store.attempt is not None
     assert store.attempt.codex_session_id == "session-1"
     assert store.delivery is not None

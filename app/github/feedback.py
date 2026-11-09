@@ -17,6 +17,7 @@ class RemoteFeedback(BaseModel):
     author: str | None
     body: str
     updated_at: AwareDatetime
+    created_at: AwareDatetime | None = None
     is_bot: bool = False
     state: Literal["commented", "changes_requested", "approved", "dismissed", "pending"] = "commented"
 
@@ -34,6 +35,7 @@ def decode_feedback(connection: dict[str, Any], cursor: str | None, limit: int) 
         author=row["author"]["login"] if row["author"] is not None else None,
         is_bot=row["author"]["__typename"] == "Bot" if row["author"] is not None else False,
         body=row["body"],
+        created_at=row.get("createdAt"),
         updated_at=row["updatedAt"], state=row.get("state", "COMMENTED").lower(),
     ) for row in rows)
     if len({item.github_id for item in items}) != len(items):

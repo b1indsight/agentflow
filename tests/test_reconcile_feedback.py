@@ -388,3 +388,64 @@ async def test_source_pool_is_bounded_and_cancellation_joins_reads(store, review
     with pytest.raises(asyncio.CancelledError):
         await task
     assert github.maximum == 2 and github.active == 0
+
+
+@pytest.mark.parametrize("source", ["poll", "webhook"])
+async def test_resumed_round_rejects_old_issue_comments_even_if_first_seen_or_edited(
+    store, review_flow, feedback_resources, source,
+):
+    # Cursor reset must not attach unseen historical Issue comments to the new Attempt.
+    from types import SimpleNamespace
+
+    from app.controler.events.router import EventRouter
+    from app.controler.workflow.service import ControlService
+
+    flow, clock = review_flow
+    service = ControlService(database=store.database)
+    service.cancel(flow)
+    clock.now += timedelta(seconds=10, microseconds=500_000)
+    started = clock.now
+    resumed = service.resume(flow, expected_round_no=1)
+    # An INITIAL retry / late preparation must not move the round's feedback boundary.
+    clock.now += timedelta(seconds=10)
+    store.jobs.cancel_jobs(flow.id)
+    resumed.current_attempt_id = store.flows.create_attempt(flow.id).id
+    resumed.state = FlowState.REVIEW
+    store.flows.update_flow(resumed)
+    delivery = store.deliveries.get_delivery(flow.id)
+    if delivery is None:
+        delivery = store.deliveries.get_or_create_delivery(flow.id, f"flow/{flow.id}-round-2")
+    delivery.state, delivery.pr_number = DeliveryState.OPEN, 18
+    store.deliveries.update_delivery(delivery)
+    created = [
+        started - timedelta(days=1),  # Old, never ingested; updated after resume below.
+        started.replace(microsecond=0),  # GitHub cannot disambiguate this second.
+        None,  # Missing creation evidence must not fall back to updated_at.
+        started.replace(microsecond=0) + timedelta(seconds=1),
+    ]
+    if source == "poll":
+        github = GitHub(clock)
+        github.pages["issue_comments", None] = Batch(items=[
+            RemoteFeedback(github_id=101 + i, author="alice", body="newly observed",
+                           updated_at=clock.now, created_at=timestamp)
+            for i, timestamp in enumerate(created)
+        ])
+        await poller(store, github)._sweep()
+        assert store.reconcile.feedback_get(flow.id, "issue_comments").last_success_at is not None
+    else:
+        router = EventRouter(service, SimpleNamespace(
+            bot_login="flowtool[bot]", allowlist={"alice"}, settle_seconds=75, submit_grace_seconds=15,
+        ), database=store.database)
+        for i, timestamp in enumerate(created):
+            router.dispatch("issue_comment", f"round-comment-{i}", {
+                "repository": {"full_name": flow.repo}, "issue": {"number": flow.issue_number},
+                "sender": {"login": "alice"}, "action": "edited",
+                "comment": {"id": 101 + i, "user": {"login": "alice"}, "body": "newly observed",
+                            "created_at": timestamp.isoformat() if timestamp else None,
+                            "updated_at": clock.now.isoformat()},
+            })
+            assert store.webhooks.event_seen(f"round-comment-{i}")
+    assert [item.github_id for item in store.reviews.pending(flow.id)] == [104]
+    clock.now += timedelta(seconds=76)
+    batch = store.reviews.claim_due()[0]
+    assert [item.github_id for item in batch.feedback] == [104]

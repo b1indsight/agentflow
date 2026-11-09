@@ -24,6 +24,7 @@ from app.contracts.protocol import (
 )
 from app.contracts.receipts import ResultInbox
 from app.domain.models import FlowState
+from app.persistence.activity import ActivityStore
 from app.persistence.database import Database
 from app.persistence.results import ResultStore
 from app.persistence.schema import (
@@ -241,13 +242,15 @@ def legacy(postgresql_url):
         yield connection
 
 
-def flow(connection, state="active", issue=1, created=NOW):
+def flow(connection, state="active", issue=1, created=NOW, *, with_attempt=True):
     row = connection.execute(
         "INSERT INTO flows(repo,issue_number,installation_id,state,created_at,updated_at) "
         "VALUES ('owner/repo',%s,42,%s,%s,%s) RETURNING id",
         (issue, state, created, created),
     ).fetchone()
     identity = row["id"]
+    if not with_attempt:
+        return identity, None
     attempt = connection.execute(
         "INSERT INTO attempts(flow_id,created_at,updated_at) VALUES (%s,%s,%s) RETURNING id",
         (identity, created, created),
@@ -404,6 +407,16 @@ def snapshot(connection):
             "JOIN pg_namespace n ON n.oid=c.connamespace WHERE n.nspname=current_schema() "
             "ORDER BY conname,definition"
         ).fetchall(),
+        "functions": connection.execute(
+            "SELECT p.proname,pg_get_functiondef(p.oid) AS definition FROM pg_proc p "
+            "JOIN pg_namespace n ON n.oid=p.pronamespace "
+            "WHERE n.nspname=current_schema() AND p.prokind='f' ORDER BY p.proname,definition"
+        ).fetchall(),
+        "triggers": connection.execute(
+            "SELECT c.relname,t.tgname,pg_get_triggerdef(t.oid) AS definition FROM pg_trigger t "
+            "JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace n ON n.oid=c.relnamespace "
+            "WHERE n.nspname=current_schema() AND NOT t.tgisinternal ORDER BY c.relname,t.tgname"
+        ).fetchall(),
     }
 
 
@@ -413,6 +426,116 @@ def apply_reviewed(url):
     applied = migrate(url, apply=True, expected_fingerprint=report.fingerprint)
     assert applied.status == "applied", applied.as_dict()
     return applied
+
+
+def test_fresh_queued_initial_without_attempt_can_migrate(legacy, postgresql_url):
+    # Legacy on_trigger enqueues INITIAL before preparation creates its Attempt.
+    identity, _ = flow(legacy, with_attempt=False)
+    job_id = job(legacy, identity)
+    before = snapshot(legacy)
+    report = migrate(postgresql_url)
+    assert report.status == "ready", report.as_dict()
+    assert report.flows[0]["new_state"] == "queued"
+    assert snapshot(legacy) == before
+    assert (
+        migrate(postgresql_url, apply=True, expected_fingerprint=report.fingerprint).status
+        == "applied"
+    )
+    assert legacy.execute(
+        "SELECT state,current_attempt_id,current_round_no FROM flows WHERE id=%s", (identity,)
+    ).fetchone() == {"state": "queued", "current_attempt_id": None, "current_round_no": 1}
+    assert legacy.execute("SELECT * FROM attempts").fetchall() == []
+    assert legacy.execute("SELECT state,round_no FROM jobs WHERE id=%s", (job_id,)).fetchone() == {
+        "state": "queued",
+        "round_no": 1,
+    }
+    assert legacy.execute(
+        "SELECT flow_id FROM issue_flow_owners WHERE repo='owner/repo' AND issue_number=1"
+    ).fetchone() == {"flow_id": identity}
+
+
+@pytest.mark.parametrize(
+    "hazard",
+    [
+        "revision",
+        "dispatch_authorized_at",
+        "started_at",
+        "running",
+        "review",
+        "finalizing",
+        "queued-delivery",
+        "queued-binding",
+        "earlier-job",
+        "unreferenced-attempt",
+    ],
+)
+def test_missing_attempt_requires_fresh_queued_initial(legacy, postgresql_url, hazard):
+    # Missing execution identity must not be mistaken for a not-yet-prepared trigger.
+    identity, _ = flow(legacy, with_attempt=False)
+    job_id = job(legacy, identity)
+    if hazard == "revision":
+        legacy.execute("UPDATE jobs SET kind='revision' WHERE id=%s", (job_id,))
+    elif hazard in {"dispatch_authorized_at", "started_at"}:
+        legacy.execute(
+            sql.SQL("UPDATE jobs SET {}=%s WHERE id=%s").format(sql.Identifier(hazard)),
+            (NOW, job_id),
+        )
+    elif hazard in {"running", "review", "finalizing", "queued-binding"}:
+        worker = binding(legacy, identity)
+        if hazard == "running":
+            legacy.execute(
+                "UPDATE jobs SET state='running',assigned_worker_id=%s,assignment_token='token' "
+                "WHERE id=%s",
+                (worker, job_id),
+            )
+        elif hazard == "review":
+            delivery(legacy, identity)
+            applied_plan(legacy, identity, None, job_id)
+        elif hazard == "finalizing":
+            delivery(legacy, identity, state="merged")
+            legacy.execute("UPDATE jobs SET kind='archive' WHERE id=%s", (job_id,))
+    elif hazard == "queued-delivery":
+        delivery(legacy, identity)
+    elif hazard == "earlier-job":
+        job(legacy, identity, state="failed")
+    elif hazard == "unreferenced-attempt":
+        legacy.execute(
+            "INSERT INTO attempts(flow_id,created_at,updated_at) VALUES (%s,%s,%s)",
+            (identity, NOW, NOW),
+        )
+    before = snapshot(legacy)
+    report = migrate(postgresql_url)
+    assert report.status == "refused", report.as_dict()
+    assert any(p["flow_ids"] == [identity] for p in report.problems)
+    assert (
+        migrate(postgresql_url, apply=True, expected_fingerprint=report.fingerprint).status
+        == "refused"
+    )
+    assert snapshot(legacy) == before
+
+
+@pytest.mark.parametrize("reference", ["foreign", "missing"])
+def test_fresh_queued_initial_rejects_invalid_attempt_reference(legacy, postgresql_url, reference):
+    identity, _ = flow(legacy, with_attempt=False)
+    job(legacy, identity)
+    if reference == "foreign":
+        _, attempt = flow(legacy, "failed", issue=2)
+    else:
+        # Model a damaged legacy reference, rather than treating it as absent intent.
+        legacy.execute("ALTER TABLE flows DROP CONSTRAINT fk_flows_current_attempt")
+        attempt = 999
+    legacy.execute("UPDATE flows SET current_attempt_id=%s WHERE id=%s", (attempt, identity))
+    before = snapshot(legacy)
+    report = migrate(postgresql_url)
+    assert report.status == "refused", report.as_dict()
+    assert any(
+        p["flow_ids"] == [identity] and "Current attempt" in p["message"] for p in report.problems
+    )
+    assert (
+        migrate(postgresql_url, apply=True, expected_fingerprint=report.fingerprint).status
+        == "refused"
+    )
+    assert snapshot(legacy) == before
 
 
 def test_all_six_states_backups_history_and_restart(legacy, postgresql_url):
@@ -472,7 +595,8 @@ def test_all_six_states_backups_history_and_restart(legacy, postgresql_url):
     ):
         assert changed["rows"][table] == original["rows"][table]
     assert all(
-        row in changed["rows"]["console_activity"] for row in original["rows"]["console_activity"]
+        {"data": {**row["data"], "round_no": None}} in changed["rows"]["console_activity"]
+        for row in original["rows"]["console_activity"]
     )
     for table in ("flows", "attempts", "jobs"):
         column = "current_round_no" if table == "flows" else "round_no"
@@ -486,12 +610,31 @@ def test_all_six_states_backups_history_and_restart(legacy, postgresql_url):
         cancelled,
         archived,
     }
-    rounds = {r["data"]["flow_id"]: r["data"] for r in changed["rows"]["flow_rounds"]}
-    assert set(rounds) == {cancelled, archived}
-    assert rounds[cancelled]["archive_reason"] == "abandoned"
-    assert rounds[archived]["archive_reason"] == "succeeded"
-    assert rounds[archived]["execution"]["released_at"] is not None
-    assert rounds[archived]["delivery"]["state"] == "merged"
+    assert "flow_rounds" not in changed["rows"]
+    assert "flow_round_corrections" not in changed["rows"]
+    archives = {
+        r["data"]["flow_id"]: r["data"]
+        for r in changed["rows"]["console_activity"]
+        if r["data"]["kind"] == "archive"
+    }
+    assert set(archives) == {cancelled, archived}
+    assert archives[cancelled]["metadata"]["archive_reason"] == "abandoned"
+    assert archives[archived]["metadata"] == {
+        "repo": "owner/repo",
+        "pr_number": 100 + archived,
+        "archive_reason": "succeeded",
+        "archive_summary": None,
+        "merged_at": NOW.isoformat(),
+        "merge_commit_sha": "b" * 40,
+    }
+    for identity, archive in archives.items():
+        archived_at = next(
+            r["data"]["archived_at"]
+            for r in changed["rows"]["flows"]
+            if r["data"]["id"] == identity
+        )
+        assert archive["occurred_at"] == archive["updated_at"] == archived_at
+        assert archive["round_no"] == 1 and archive["author"] == "FlowTool"
     backup = legacy.execute(
         "SELECT row_data FROM flow_state_migration_backup WHERE table_name='result_applications' "
         "AND (row_data->>'job_id')::bigint=%s",
@@ -508,7 +651,10 @@ def test_all_six_states_backups_history_and_restart(legacy, postgresql_url):
         assert ResultStore(store.database).get_plan(blocked_job).flow_state is FlowState.BLOCKED
         assert ResultStore(store.database).get_plan(archive_job).flow_state is FlowState.ARCHIVED
         assert store.flows.get_flow(blocked).state is FlowState.BLOCKED
-        assert store.flows.get_round(archived, 1).execution.released_at is not None
+        assert ActivityStore(store.database).archived_pr("OWNER/Repo", 100 + archived) == (
+            archived,
+            1,
+        )
         store.init_db()
         assert snapshot(legacy) == changed
     finally:

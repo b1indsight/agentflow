@@ -10,7 +10,11 @@ from pydantic import ValidationError
 
 from app.controler.config import ServerSettings
 from app.controler.reconciliation.flow_labels import FlowLabelSync
-from app.controler.reconciliation.labels import FLOW_LABEL_NAMES, LabelSynchronizer
+from app.controler.reconciliation.labels import (
+    CONFIRMED_INTERVAL,
+    FLOW_LABEL_NAMES,
+    LabelSynchronizer,
+)
 from app.controler.workflow.service import ControlService
 from app.domain.models import ArchiveReason, DeliveryState, FlowState
 from app.github import (
@@ -20,11 +24,14 @@ from app.github import (
     Installation,
     Issue,
     PullRequest,
+    PullRequestMerge,
     Repository,
 )
+from app.persistence.activity import ActivityStore
 from app.persistence.flow_labels import FLOW_LABEL_SCHEMA, FlowLabelStore
 from app.persistence.store import Store
 from tests.test_github_client import settings
+from tests.test_repository_labels import remote_inventory
 
 
 class RemoteLabels:
@@ -33,6 +40,7 @@ class RemoteLabels:
     def __init__(self, monkeypatch):
         self.values = defaultdict(set)
         self.calls = []
+        self.provisions = []
         self.failures = {}
         self.lost = set()
         self.after = None
@@ -41,7 +49,8 @@ class RemoteLabels:
             raise AssertionError("unmocked GitHub request; real network is forbidden")
 
         async def ensure(repository, definitions):
-            assert {label.name for label in definitions} == FLOW_LABEL_NAMES
+            assert FLOW_LABEL_NAMES <= {label.name for label in definitions}
+            self.provisions.append(repository.full_name)
             return ()
 
         async def fetch(target):
@@ -106,7 +115,10 @@ def scenario(store, tmp_path, monkeypatch):
     github = GitHubApp(configured)
     remote = RemoteLabels(monkeypatch)
     flow = store.flows.create_flow("owner/repo", 7, 42)
-    sync = FlowLabelSync(github, configured, database=store.database, interval=30, concurrency=1)
+    sync = FlowLabelSync(
+        github, configured, database=store.database,
+        repository_labels=LabelSynchronizer(github, configured), interval=30, concurrency=1,
+    )
     return SimpleNamespace(flow=flow, sync=sync, remote=remote, settings=configured)
 
 
@@ -154,9 +166,98 @@ async def test_custom_trigger_that_was_a_legacy_default_is_preserved(store, scen
         }
     )
     scenario.remote.values[7] = {"Flow:Done", "flow:in-review", "custom:review", "custom:done"}
-    sync = FlowLabelSync(scenario.sync.github, configured, database=store.database)
+    sync = FlowLabelSync(
+        scenario.sync.github, configured, database=store.database,
+        repository_labels=LabelSynchronizer(scenario.sync.github, configured),
+    )
     await sync.sweep()
     assert scenario.remote.values[7] == {"Flow:Done", "flow:queued"}
+
+
+async def test_bootstrap_and_multiple_targets_share_expiring_repository_confirmation(
+    store, scenario, clock, monkeypatch,
+):
+    # Each due Issue/PR used to scan every repository-label page, in addition to bootstrap.
+    sync, remote = scenario.sync, scenario.remote
+    sync.concurrency = 4
+    bind_pr(store, scenario.flow)
+    for number in (8, 9):
+        store.flows.create_flow("owner/repo", number, 42)
+    remote_inventory(monkeypatch, sync.github, ["owner/repo"])
+    now = 0.0
+    monkeypatch.setattr("app.controler.reconciliation.labels.monotonic", lambda: now)
+
+    await asyncio.gather(sync.sweep(), sync.repository_labels.sweep())
+    assert remote.provisions == ["owner/repo"]
+    assert all(remote.values[number] == {"flow:queued"} for number in (7, 8, 9, 17))
+    remote.values[7] = {"flow:done", "user"}
+    clock.now += timedelta(seconds=31)
+    await sync.sweep()
+    assert remote.values[7] == {"flow:queued", "user"}
+    assert len(remote.provisions) == 1
+    now = CONFIRMED_INTERVAL
+    clock.now += timedelta(seconds=31)
+    await asyncio.gather(sync.sweep(), sync.repository_labels.sweep())
+    assert remote.provisions == ["owner/repo", "owner/repo"]
+
+
+async def test_repository_provisioning_failure_defers_target_and_can_retry(
+    store, scenario, clock, monkeypatch,
+):
+    # Repository provisioning errors must not authorize target writes or become a success hint.
+    sync, remote = scenario.sync, scenario.remote
+    failed = True
+    ensure = Repository.ensure_labels
+
+    async def provision(repository, definitions):
+        created = await ensure(repository, definitions)
+        if failed:
+            raise GitHubError(GitHubErrorKind.PERMISSION, "create_label", status_code=403)
+        return created
+
+    monkeypatch.setattr(Repository, "ensure_labels", provision)
+    await sync.sweep()
+    assert remote.calls == []
+    assert target(store).failures == 1
+    assert target(store).next_at == clock.now + timedelta(seconds=300)
+    failed = False
+    await sync.sweep()
+    assert len(remote.provisions) == 1
+    clock.now += timedelta(seconds=300)
+    await sync.sweep()
+    assert len(remote.provisions) == 2
+    assert remote.values[7] == {"flow:queued"}
+    assert target(store).failures == 0
+
+
+async def test_authority_change_during_repository_provisioning_prevents_target_io(
+    store, scenario, monkeypatch,
+):
+    # Provisioning may wait behind bootstrap; workflow writers must remain free to change state.
+    sync, remote, flow = scenario.sync, scenario.remote, scenario.flow
+    entered, release = asyncio.Event(), asyncio.Event()
+    ensure = Repository.ensure_labels
+
+    async def provision(repository, definitions):
+        entered.set()
+        await release.wait()
+        return await ensure(repository, definitions)
+
+    monkeypatch.setattr(Repository, "ensure_labels", provision)
+    task = asyncio.create_task(sync.sweep())
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        with store.connection() as connection:
+            connection.execute("SET LOCAL lock_timeout = '1s'")
+            connection.execute("UPDATE flows SET state='running' WHERE id=%s", (flow.id,))
+    finally:
+        release.set()
+        await task
+    assert remote.calls == []
+    assert target(store).next_at <= store.now()
+    await sync.sweep()
+    assert remote.values[7] == {"flow:running"}
+    assert len(remote.provisions) == 1
 
 
 @pytest.mark.parametrize("state", list(FlowState))
@@ -196,19 +297,31 @@ async def test_owner_selection_is_not_latest_flow_or_late_round_activity(store, 
     service = ControlService(database=store.database)
     bind_pr(store, flow)
     service.cancel(flow)
+    activity = ActivityStore(store.database)
+    archived = activity.archived(flow.id, 1)
+    assert archived is not None
     newer = store.flows.create_flow(flow.repo, flow.issue_number, 42)
     await sync.sweep()
     assert remote.values[7] == {"flow:queued"}
     assert remote.values[17] == {"flow:archived"}
-    # A delayed historical observation changes the old Flow's timestamps, not its ownership.
+    # Late evidence and a newer timestamp must not steal the explicitly selected owner.
     with store.connection() as connection:
         connection.execute(
             "UPDATE flows SET updated_at=%s WHERE id=%s", (clock.now + timedelta(days=1), flow.id)
         )
-        connection.execute(
-            "UPDATE flow_rounds SET merged_at=%s,merge_commit_sha='abc' WHERE flow_id=%s",
-            (clock.now, flow.id),
-        )
+    store.flows.observe_archived_merge(
+        flow.id,
+        1,
+        PullRequestMerge(
+            number=17,
+            merged=True,
+            merged_at=archived.occurred_at - timedelta(seconds=5),
+            merge_commit_sha="a" * 40,
+        ),
+        origin="reconciliation",
+    )
+    assert activity.archived(flow.id, 1) == archived
+    assert store.flows.get_flow(flow.id).archive_reason is ArchiveReason.SUCCEEDED
     clock.now += timedelta(seconds=31)
     await sync.sweep()
     assert remote.values[7] == {"flow:queued"}
@@ -228,6 +341,9 @@ async def test_resumed_round_has_new_pr_while_old_pr_stays_archived(store, scena
     service = ControlService(database=store.database)
     bind_pr(store, flow)
     service.cancel(flow)
+    activity = ActivityStore(store.database)
+    archived = activity.archived(flow.id, 1)
+    assert archived is not None
     resumed = service.resume(store.flows.get_flow(flow.id), expected_round_no=1)
     bind_pr(store, resumed, 18)
     resumed.state = FlowState.REVIEW
@@ -238,11 +354,19 @@ async def test_resumed_round_has_new_pr_while_old_pr_stays_archived(store, scena
     assert remote.values[17] == {"flow:archived", "user"}
     assert sync.labels.desired(target(store, 17)).round_no == 1
     assert sync.labels.desired(target(store, 18)).round_no == 2
-    with store.connection() as connection:
-        connection.execute(
-            "UPDATE flow_rounds SET merged_at=%s WHERE flow_id=%s AND round_no=1",
-            (clock.now, flow.id),
-        )
+    store.flows.observe_archived_merge(
+        flow.id,
+        1,
+        PullRequestMerge(
+            number=17,
+            merged=True,
+            merged_at=archived.occurred_at - timedelta(seconds=5),
+            merge_commit_sha="a" * 40,
+        ),
+        origin="reconciliation",
+    )
+    assert activity.archived(flow.id, 1) == archived
+    assert store.flows.get_flow(flow.id) == resumed
     clock.now += timedelta(seconds=31)
     await sync.sweep()
     assert remote.values[7] == remote.values[18] == {"flow:review"}
@@ -326,7 +450,10 @@ async def test_lost_write_restart_rereads_desired_and_remote(
         store.flows.update_flow(flow)
     reopened = Store(store.database_url, clock=lambda: clock.now)
     try:
-        restarted = FlowLabelSync(sync.github, scenario.settings, database=reopened.database)
+        restarted = FlowLabelSync(
+            sync.github, scenario.settings, database=reopened.database,
+            repository_labels=LabelSynchronizer(sync.github, scenario.settings),
+        )
         calls = remote.calls.copy()
         await restarted.sweep()
         assert remote.calls == calls  # Durable Retry-After/backoff survives restart.
@@ -362,7 +489,10 @@ async def test_failure_is_independent_durable_and_never_permanently_blocked(
     assert [store.flows.get_flow(flow.id), store.flows.get_flow(other.id)] == before
     remote.failures.clear()
     clock.now += timedelta(seconds=delay)
-    await FlowLabelSync(sync.github, scenario.settings, database=store.database).sweep()
+    await FlowLabelSync(
+        sync.github, scenario.settings, database=store.database,
+        repository_labels=LabelSynchronizer(sync.github, scenario.settings),
+    ).sweep()
     assert remote.values[7] == {"flow:queued"}
     assert target(store).failures == 0
 
@@ -376,7 +506,10 @@ async def test_success_is_not_permanent_confirmation_and_missing_owner_has_no_fa
     await sync.sweep()
     remote.values[7] = {"flow:done", "user"}
     clock.now += timedelta(seconds=31)
-    await FlowLabelSync(sync.github, scenario.settings, database=store.database).sweep()
+    await FlowLabelSync(
+        sync.github, scenario.settings, database=store.database,
+        repository_labels=LabelSynchronizer(sync.github, scenario.settings),
+    ).sweep()
     assert remote.values[7] == {"flow:queued", "user"}
     with store.connection() as connection:
         connection.execute("DELETE FROM issue_flow_owners")
@@ -418,7 +551,10 @@ async def test_two_controllers_serialize_and_cancellation_releases_claim(store, 
     task = asyncio.create_task(sync.sweep())
     try:
         await asyncio.wait_for(entered.wait(), 3)
-        competing = FlowLabelSync(sync.github, scenario.settings, database=store.database)
+        competing = FlowLabelSync(
+            sync.github, scenario.settings, database=store.database,
+            repository_labels=LabelSynchronizer(sync.github, scenario.settings),
+        )
         calls = remote.calls.copy()
         await competing.sweep()
         assert remote.calls == calls
@@ -438,6 +574,7 @@ async def test_bounded_batches_eventually_discover_every_target(store, scenario)
         scenario.sync.github,
         scenario.settings,
         database=store.database,
+        repository_labels=scenario.sync.repository_labels,
         batch_size=2,
         concurrency=2,
     )

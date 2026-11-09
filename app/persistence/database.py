@@ -147,6 +147,15 @@ class Database:
         with self.connection() as connection:
             existing = connection.execute("SELECT to_regclass('flows') AS name").fetchone()
             if existing is not None and existing["name"]:
+                old_history = connection.execute(
+                    "SELECT to_regclass('flow_rounds') AS rounds,"
+                    " to_regclass('flow_round_corrections') AS corrections"
+                ).fetchone()
+                if old_history and (old_history["rounds"] or old_history["corrections"]):
+                    raise ValueError(
+                        "legacy round history: stop consumers and run scripts/migrate_flow_states.py"
+                        " --convert-round-history"
+                    )
                 columns = connection.execute(
                     "SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema()"
                     " AND table_name='flows' AND column_name='current_round_no'"

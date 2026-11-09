@@ -132,6 +132,7 @@ class ActivityItem(ConsoleModel):
     version: int
     source: str
     kind: str
+    round_no: int | None = Field(strict=True, gt=0)
     occurred_at: datetime
     updated_at: datetime
     observed_at: datetime

@@ -1,8 +1,8 @@
 """Independent Issue/PR label convergence from Flow.state, never the reverse.
 
-The runtime starts ``FlowLabelSync(github, settings, database=database).run()`` as
-a cancellable background task after schema initialization. ``sweep()`` runs one
-bounded pass; no workflow callbacks or result effects are required.
+The runtime shares its repository LabelSynchronizer with this cancellable background
+task after schema initialization. ``sweep()`` runs one bounded pass; no workflow
+callbacks or result effects are required.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from functools import partial
 from loguru import logger
 
 from app.controler.config import ServerSettings
-from app.controler.reconciliation.labels import FLOW_LABEL_DEFINITIONS, FLOW_LABEL_NAMES
+from app.controler.reconciliation.labels import FLOW_LABEL_NAMES, LabelSynchronizer
 from app.github import GitHubApp, GitHubError, GitHubErrorKind, Issue, PullRequest
 from app.persistence.database import Database
 from app.persistence.flow_labels import FlowLabelStore, LabelDesired, LabelTarget
@@ -33,6 +33,7 @@ class FlowLabelSync:
         settings: ServerSettings,
         *,
         database: Database,
+        repository_labels: LabelSynchronizer,
         interval: float = 300,
         batch_size: int = 64,
         concurrency: int = 4,
@@ -42,6 +43,7 @@ class FlowLabelSync:
         if interval <= 0 or batch_size <= 0 or concurrency <= 0:
             raise ValueError("label sync interval, batch size and concurrency must be positive")
         self.github, self.database = github, database
+        self.repository_labels = repository_labels
         self.labels = FlowLabelStore(database)
         self.interval, self.batch_size, self.concurrency = interval, batch_size, concurrency
         # Retire both the legacy defaults and configured names, but never the trigger.
@@ -119,7 +121,7 @@ class FlowLabelSync:
                     else PullRequest(repository, row.number)
                 )
                 await self._call(
-                    row, desired, lambda: repository.ensure_labels(FLOW_LABEL_DEFINITIONS)
+                    row, desired, lambda: self.repository_labels.ensure(repository)
                 )
                 observed = await self._call(row, desired, target.fetch_labels)
                 wanted = f"flow:{desired.state.value}"

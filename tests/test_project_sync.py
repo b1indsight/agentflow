@@ -31,6 +31,7 @@ from app.github import (
     ProjectTarget,
     Repository,
 )
+from app.persistence.activity import ActivityStore
 from app.persistence.store import Store
 from tests.test_archive_recovery import ready_archive, receive
 from tests.test_github_client import settings
@@ -341,15 +342,17 @@ async def test_resuming_older_flow_selects_owner_even_after_both_flows_are_archi
     clock.now += timedelta(seconds=31)
     await converge(sync)
     assert state(store).flow_id == newer.id
-    round_one = store.flows.get_round(flow.id, 1)
+    activity = ActivityStore(store.database)
+    first_archive = activity.archived(flow.id, 1)
+    assert first_archive is not None
     resumed = service.resume(store.flows.get_flow(flow.id), expected_round_no=1)
     await converge(sync)
     assert state(store).flow_id == flow.id and state(store).desired_status is ProjectStatus.TODO
     service.cancel(resumed)
     await converge(sync)
     assert state(store).flow_id == flow.id and state(store).desired_status is ProjectStatus.DONE
-    assert store.flows.get_round(flow.id, 1) == round_one
-    assert store.flows.get_round(flow.id, 2) is not None
+    assert activity.archived(flow.id, 1) == first_archive
+    assert activity.archived(flow.id, 2) is not None
     assert remote.calls.count("add") == 1 and remote.item.option_id == "done"
 
 
@@ -622,7 +625,8 @@ async def test_archive_ack_and_worker_release_succeed_while_projects_are_offline
     assert (
         archived.state is FlowState.ARCHIVED and archived.archive_reason is ArchiveReason.SUCCEEDED
     )
-    assert store.flows.get_round(flow.id, 1).archived_at == archived.archived_at is not None
+    archive = ActivityStore(store.database).archived(flow.id, 1)
+    assert archive is not None and archive.occurred_at == archived.archived_at is not None
     await sync.sweep()
     assert state(store).desired_status is ProjectStatus.DONE and remote.calls == ["validate"]
 

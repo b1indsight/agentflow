@@ -32,12 +32,11 @@ SELECT f.id, f.repo, f.issue_number, f.state AS lifecycle, f.created_at,
  CASE WHEN j.last_error IS NOT NULL OR j.prepare_last_error IS NOT NULL
  OR j.verify_last_error IS NOT NULL THEN 'execution_error' ELSE NULL END AS error_code,
  a.id AS attempt_id,a.codex_session_id,a.session_generation,a.last_revision_summary,
- f.current_round_no,COALESCE(r.archive_reason,f.archive_reason) AS archive_reason,
+ f.current_round_no,f.archive_reason,
  f.archive_summary,f.archived_at
 FROM flows f LEFT JOIN flow_deliveries d ON d.flow_id=f.id
 LEFT JOIN flow_executions x ON x.flow_id=f.id
 LEFT JOIN attempts a ON a.id=f.current_attempt_id
-LEFT JOIN flow_rounds r ON r.flow_id=f.id AND r.round_no=f.current_round_no
 LEFT JOIN LATERAL (SELECT candidate.*
  FROM jobs candidate WHERE flow_id=f.id AND round_no=f.current_round_no
  AND kind<>'inference' ORDER BY id DESC LIMIT 1) j ON TRUE;
@@ -62,6 +61,24 @@ CREATE TABLE IF NOT EXISTS console_activity (
  metadata JSONB NOT NULL DEFAULT '{}', digest TEXT NOT NULL,
  PRIMARY KEY(flow_id,version)
 );
+ALTER TABLE console_activity ADD COLUMN IF NOT EXISTS round_no INTEGER CHECK(round_no>0);
+CREATE INDEX IF NOT EXISTS ix_console_activity_round ON console_activity(flow_id,round_no,version);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_console_flow_evidence ON console_activity(flow_id,round_no,kind)
+ WHERE source='flow' AND kind IN ('archive','merge','archive_correction');
+CREATE UNIQUE INDEX IF NOT EXISTS ux_console_archived_pr ON console_activity
+ (lower(metadata->>'repo'),((metadata->>'pr_number')::integer))
+ WHERE source='flow' AND kind='archive' AND metadata->>'pr_number' IS NOT NULL;
+CREATE OR REPLACE FUNCTION console_preserve_evidence() RETURNS TRIGGER AS $$
+BEGIN
+ IF OLD.source='flow' AND OLD.kind IN ('archive','merge','archive_correction') THEN
+   RAISE EXCEPTION 'Flow activity evidence is immutable' USING ERRCODE='23514';
+ END IF;
+ IF TG_OP='UPDATE' THEN RETURN NEW; END IF;
+ RETURN OLD;
+END;
+$$ LANGUAGE plpgsql;
+CREATE OR REPLACE TRIGGER console_preserve_evidence BEFORE UPDATE OR DELETE ON console_activity
+ FOR EACH ROW EXECUTE FUNCTION console_preserve_evidence();
 CREATE INDEX IF NOT EXISTS ix_console_object ON console_activity
  (flow_id,key,deleted DESC,updated_at DESC,version DESC);
 CREATE INDEX IF NOT EXISTS ix_console_digest ON console_activity(flow_id,key,digest);
@@ -111,8 +128,9 @@ BEGIN
  UPDATE console_flows SET facts=next_facts,state_version=state_version+1,
  activity_version=activity_version+1 WHERE flow_id=identity
  RETURNING activity_version,state_version INTO next_version,state_revision;
- INSERT INTO console_activity(flow_id,version,key,source,kind,occurred_at,updated_at,
+ INSERT INTO console_activity(flow_id,version,round_no,key,source,kind,occurred_at,updated_at,
  author,title,body,metadata,digest) VALUES(identity,next_version,
+ (next_facts->>'current_round_no')::integer,
  'flow:'||identity||':'||state_revision,'flow',CASE WHEN baseline THEN 'baseline' ELSE 'state' END,
  clock_timestamp(),clock_timestamp(),'FlowTool',
  CASE WHEN baseline THEN '迁移基线：此前业务历史不可还原' ELSE 'Flow 状态变更' END,

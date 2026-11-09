@@ -38,11 +38,12 @@ def only_worker(database):
 
 async def test_worker_is_actively_queried_and_eof_checkpoint_survives_refresh(store):
     flow = store.flows.create_flow("owner/repo", 7, 42)
+    attempt = store.flows.create_attempt(flow.id)
     only_worker(store._db)
     conversations = Mock(spec=ConversationService)
     item = ConversationItem(
         id="record-1",
-        attempt_id=1,
+        attempt_id=attempt.id,
         session_id="12345678-1234-1234-1234-123456789abc",
         session_generation=0,
         timestamp=flow.created_at.isoformat(),
@@ -71,6 +72,7 @@ async def test_worker_is_actively_queried_and_eof_checkpoint_survives_refresh(st
     archive = ActivityStore(store._db)
     first = archive.page(flow.id)
     message = next(i for i in first.items if i.source == "worker" and i.kind == "message")
+    assert message.round_no == attempt.round_no
     assert message.body == "worker display body\\u0000"
     assert message.metadata["unsupported_characters_escaped"] is True
     summary = next(i for i in first.items if i.kind == "tool_call")

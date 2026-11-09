@@ -124,6 +124,7 @@ class FeedbackReconciler:
             number = flow.issue_number if check.source == "issue_comments" else delivery.pr_number
             repo = self.github.installation(flow.installation_id).repository(flow.repo)
             threads, diagnostic = None, None
+            page: Batch[RemoteFeedback] | None = None
             updates: list[FeedbackUpdate] = []
             if check.source == "threads":
                 threads, following = await self._scan_threads(PullRequest(repo, number), check.cursor)
@@ -162,6 +163,17 @@ class FeedbackReconciler:
                 ):
                     reconcile_store_tx.feedback_failed(check, 5, "Flow changed during observation")
                     return
+                if check.source == "issue_comments":
+                    assert page is not None
+                    cutoff = reviews_tx.issue_comment_cutoff(fresh)
+                    if cutoff is not None:
+                        current_ids = {
+                            item.github_id for item in page.items
+                            if item.created_at is not None and item.created_at >= cutoff
+                        }
+                        if len(current_ids) < len(page.items):
+                            diagnostic = "historical or undated Issue comments ignored"
+                        updates = [item for item in updates if item.github_id in current_ids]
                 if threads is None:
                     reviews_tx.observe_feedback(flow.id, flow.current_attempt_id, updates, boundary, self.settle_seconds)
                 else:

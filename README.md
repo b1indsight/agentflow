@@ -28,10 +28,16 @@ Flow 使用 `queued/running/review/blocked/finalizing/archived` 六态；看板�
   放弃/调查保留工作区，合并交付仍须原 worker 的清理凭据。PR/Issue 重开不自动恢复。
   失败与未知执行进入 blocked，仍占用该 Issue；`flow retry` 不绕过执行、结果和停止门槛。
   只有 `flow resume` 开启新轮次、新分支与新交付，旧 PR 和旧反馈不能授权新工作。
+  INITIAL 无 PR 失败也保留执行绑定，结束时须由原 worker 确认停止并清理后归还工作区；
+  原 worker 离线时继续等待，不提前归档。恢复分支使用 `flow/<id>-round-N`，保留首轮 `flow/<id>`。
 
 - **反馈对账**：原 Issue、PR 普通评论和 Review 正文分别保存分页进度，默认每 300 秒复扫；
   每个来源每次至多读取 50 条完整正文，未完成的页 5 秒后继续。重启保留 cursor/退避，
   `flow show` 展示各来源诊断。旧命令不追溯执行，列表缺席不推断删除。
+  恢复后的原 Issue 评论按创建时间隔离，补拉和 webhook 使用相同边界；编辑旧评论不转入新轮。
+  新轮开始同秒及缺少创建时间的评论不进入反馈批次，可在下一秒重新发新评论；历史仍可阅读。
+  边界取本轮首个 INITIAL 的持久创建时间，不随 retry 改变；controller 必须保持时钟同步，
+  此规则不补偿与 GitHub 的时钟偏差。新 PR 评论与 Review 不受原 Issue 的时间边界限制。
   行内线程同样持续对账，包括人工 resolved/unresolved/outdated 事实；每次读取一个线程的
   至多 20 条评论，嵌套分页可恢复。跨页片段不作为完整 resolve 依据，poll 不执行远端写操作。
 
@@ -61,8 +67,10 @@ Flow 使用 `queued/running/review/blocked/finalizing/archived` 六态；看板�
   终态结果先持久接收，再执行带回执的 GitHub 操作，最后原子提交本地结果并回复 `server.accept_result`。
   恢复时核对远端状态，避免重复派生 job 或重复发送评论；无法确认的远端结果保留待核对状态。
 - **合并与归档**：人工合并后由原 worker 核验并清理工作区，对关联 Issue/PR 发布工作区处置凭据。
-  业务副作用结清后原子保存轮次快照、释放 worker 并进入 archived；六态标签独立收敛，失败不回写 Flow。
-  归档前合并优先于废弃，但不解除 blocked。迟到的历史合并只记证据，经显式确认后才能审计更正，永不恢复执行。
+  业务副作用结清后原子写入带轮次的归档 activity、释放 worker 并进入 archived；六态标签独立收敛，失败不回写 Flow。
+  归档前合并优先于废弃，但不解除 blocked。迟到证据能证明归档前已合并时自动更正为成功，永不恢复执行。
+  标签定义初始化按 installation/仓库共享并发请求与每日确认缓存，Issue/PR 状态仍分别校验和同步；
+  初始化失败不缓存成功，多 controller 之间不共享该内存缓存。
 - **GitHub 请求超时**：App 和 installation 客户端的连接、读写及连接池等待默认各为 30 秒，
   可通过 `FLOWTOOL_GITHUB_REQUEST_TIMEOUT_SECONDS` 调整；这不是整批结果恢复的总时限。
 - **持久反馈批次**：反馈版本与 settle deadline 入库，重启后恢复；同 Flow 串行处理冻结批次，
@@ -235,7 +243,7 @@ uv run flowtool flow cancel <FLOW_ID>
 uv run flowtool flow retry <FLOW_ID>
 uv run flowtool flow finish <FLOW_ID> succeeded --summary '调查结论' --expected-round 1
 uv run flowtool flow resume <FLOW_ID> --expected-round 1
-uv run flowtool flow round <FLOW_ID> 1
+uv run flowtool flow history <FLOW_ID> --round 1
 ```
 
 运维命令在可访问数据库的 control 环境运行。`flow show` 会列出未完成 GitHub 操作的状态、
@@ -261,11 +269,15 @@ App 需有 Issues write 权限；初始化失败不阻塞服务 readiness，日�
 永久失败进入 blocked，原 worker 仍被保留。配置变更不改写已经冻结的通知。
 `on_archived` 是提交后的尽力插件回调，异常不破坏完成，不承诺跨崩溃仅调用一次。
 
-历史误判更正使用 `flow correct-archive <FLOW_ID> <ROUND_NO> --expected-version <VERSION>`，
-必须同时提供 `--actor`、`--reason` 和 `--confirm`。只允许已保存且可证明早于归档的合并证据
-将 abandoned 更正为 succeeded；保留原结论、原归档时间及审计，不改变新轮次、Issue owner 或执行绑定。
+轮次只保留在 Flow、Job、Attempt 和 activity 字段中，不再单独保存 Round 实体。
+已核验 webhook 与补偿查询共用自动更正规则：只有实际合并时间加一秒仍早于原归档时间，
+才将 abandoned 的有效结果改为 succeeded。原始归档、合并证据与更正分别作为不可变 activity 保存；
+没有人工更正入口，不改变原归档时间、新轮次、Issue owner 或执行绑定。归档后才合并或顺序不明时只记事实。
 旧库启动会拒绝旧状态：先停止消费者与派发、备份数据库，再用 `scripts/migrate_flow_states.py`
 预检与显式迁移；存在未知执行、旧未完成计划或归属冲突时必须先核验，不能强制猜测归档。
+已使用六态且仍有旧 round 表的库，预检和应用都须加 `--convert-round-history`；
+应用另需 `--apply --expect-report <预检指纹>`。转换会备份原始快照、保留已有 activity 与更正，
+核对后才删除旧表，不自动改判存量归档结果。数据或 schema 变化后须重新预检。
 
 ## Web 控制台
 
@@ -275,6 +287,7 @@ Tunnel/Access 必须将 `/console*` 与 `/api/*` 交给同一服务并应用相�
 不要为静态资源增加公开旁路。Webhook 与 Worker 端点继续使用各自原有鉴权。
 
 时间线永久保存已观察版本和删除标记；本次阅读绑定本地快照，末尾分界线显式刷新。
+活动轮次按实际 Job/Attempt 或 PR 身份确定，迟到内容不借用当前轮；Issue 共享内容及无法确认归属的旧内容为 NULL。
 活跃 Flow 打开详情或刷新会排队后台同步，未完成的来源明确显示 pending/partial/unavailable，
 不将尚未同步或权限错误当成“没有更新”。Worker 会话复用主动分页查询，心跳不触发全量抓取。
 首次采集前的历史编辑/删除、远端已过期内容无法还原；个人阅读状态另见 #88。

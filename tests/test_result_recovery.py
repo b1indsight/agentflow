@@ -3,6 +3,7 @@
 import asyncio
 from datetime import timedelta
 from typing import cast
+from unittest.mock import call
 
 import pytest
 
@@ -37,7 +38,7 @@ from app.domain.models import (
 from app.github import GitHubError, GitHubErrorKind, Issue, PullRequest, Repository
 from app.persistence.store import Store
 from tests.github import RecordingGitHub
-from tests.test_coordinator import MemoryStore, apply_result, coordinator
+from tests.test_coordinator import apply_result, coordinator
 from tests.test_merge import route_merge
 from tests.test_revision_delivery import revision_control as revision_control  # noqa: PLC0414
 
@@ -241,14 +242,18 @@ async def test_merged_initial_retry_keeps_execution_facts_without_reopening(
 async def test_cancel_before_terminal_keeps_executor_slot_until_result_ack(scenario):
     # Cancel is not a remote kill: leave the running assignment receivable until its result arrives.
     store, github, job, result = scenario
+    store.try_archive.side_effect = [False, False]  # Stop confirmation is still outstanding.
     store.job_records[job.id] = job
     ControlService(
         database=cast(Store, store).database,
     ).cancel(store.flow)
     assert store.job_records[job.id].state is JobState.RUNNING
+    store.try_archive.assert_called_once_with(store.flow.id)
     assert await apply_result(coordinator(store, github), job, result) is JobState.FAILED
     assert store.flow.state is FlowState.FINALIZING
     assert store.job_records[job.id].result_applied_at is not None
+    assert store.try_archive.call_args_list == [call(store.flow.id), call(store.flow.id)]
+    assert store.execution.released_at is None
     assert not github.comments and not store.enqueued
 
 
@@ -303,6 +308,7 @@ async def test_closed_pr_after_lost_creation_response_finishes_without_new_write
     initial_scenario, monkeypatch
 ):
     store, github, job, result = initial_scenario
+    store.try_archive.side_effect = [False, False]  # Closing the PR still awaits a worker stop.
     create = Repository.open_pull_request
 
     async def create_then_lose_response(repo, head, base, title, body):
@@ -313,12 +319,15 @@ async def test_closed_pr_after_lost_creation_response_finishes_without_new_write
     subject = coordinator(store, github)
     with pytest.raises(ResultPending):
         await apply_result(subject, job, result)
+    store.try_archive.assert_not_called()
     assert github.pull_request is not None
     github.pull_request = github.pull_request.model_copy(update={"state": "closed"})
     store.results.clock += timedelta(seconds=10)
     assert await apply_result(subject, job, result) is JobState.DONE
     assert store.delivery.state is DeliveryState.CLOSED
     assert store.job_records[job.id].result_applied_at is not None
+    assert store.try_archive.call_args_list == [call(store.flow.id), call(store.flow.id)]
+    assert store.flow.state is FlowState.FINALIZING
     assert len(github.opened) == 1
     assert github.labels == github.review_requests == []
 
@@ -356,6 +365,7 @@ async def test_remote_comment_is_recovered_after_response_loss(scenario, monkeyp
 async def test_merge_during_comment_lookup_prevents_dispatch(scenario, monkeypatch):
     # The merge commits while an old result is awaiting a GitHub read, just before POST.
     store, github, job, result = scenario
+    store.try_archive.side_effect = [False]  # The merged PR still needs archive cleanup.
     original = Issue.find_comment
 
     async def merge_during_lookup(issue, marker):
@@ -375,6 +385,7 @@ async def test_merge_during_comment_lookup_prevents_dispatch(scenario, monkeypat
         await apply_result(subject, job, result)
     assert store.job_records[job.id].result_applied_at is not None
     assert store.flow.state is FlowState.FINALIZING
+    store.try_archive.assert_called_once_with(store.flow.id)
     assert github.comments == []
     assert store.enqueued == []
 
@@ -402,6 +413,7 @@ async def test_retired_result_reconciles_dispatched_comment_without_resending(
     subject = coordinator(store, github)
     with pytest.raises(ResultPending):
         await apply_result(subject, job, result)
+    store.try_archive.assert_not_called()
     if transition == "merge":
         store.delivery.state = DeliveryState.MERGED
         store.delivery.version += 1
@@ -409,17 +421,24 @@ async def test_retired_result_reconciles_dispatched_comment_without_resending(
         store.flow.archive_reason = ArchiveReason.SUCCEEDED
         store.reviews.cancel(store.flow.id)
     else:
+        store.try_archive.side_effect = [False]  # Cancellation has not settled this result.
         ControlService(
             database=cast(Store, store).database,
         ).cancel(store.flow)
+        store.try_archive.assert_called_once_with(store.flow.id)
+        store.try_archive.reset_mock()
+    # Result recovery may finish, but the stop or merged cleanup remains outstanding.
+    store.try_archive.side_effect = [False]
     store.results.clock += timedelta(seconds=30)
     if remote_receipt:
         assert await apply_result(subject, job, result) is JobState.FAILED
         assert store.results.list_effects(job.id)[0].state is EffectState.SUCCEEDED
+        store.try_archive.assert_called_once_with(store.flow.id)
     else:
         with pytest.raises(ResultPending):
             await apply_result(subject, job, result)
         assert store.job_records[job.id].result_applied_at is None
+        store.try_archive.assert_not_called()
     assert len(calls) == 1
     assert store.enqueued == []
     assert store.flow.state is FlowState.FINALIZING
@@ -448,27 +467,25 @@ async def test_unknown_comment_is_not_resubmitted_and_blocks_retry(scenario, mon
 
 async def test_final_commit_failure_rolls_back_completion_but_keeps_effect_receipt(
     scenario,
-    monkeypatch,
 ) -> None:
     # Even a failure after setting the result marker must roll back the whole database unit.
     store, github, job, result = scenario
-    complete = MemoryStore.complete_persisted_result
-    failures = [True]
 
-    def fail_once(self, job_id, state):
-        applied = complete(self, job_id, state)
-        if failures:
-            failures.pop()
-            raise RuntimeError("commit interrupted")
-        return applied
+    def interrupted_finalization(flow_id):
+        assert store.job_records[job.id].result_applied_at is not None
+        raise RuntimeError("commit interrupted")
 
-    monkeypatch.setattr(MemoryStore, "complete_persisted_result", fail_once)
+    store.try_archive.side_effect = interrupted_finalization
     with pytest.raises(RuntimeError, match="commit interrupted"):
         await apply_result(coordinator(store, github), job, result)
+    store.try_archive.assert_called_once_with(store.flow.id)
     assert store.enqueued == []
     assert store.job_records[job.id].result_applied_at is None
     assert store.results.list_effects(job.id)[0].state is EffectState.SUCCEEDED
+    store.try_archive.side_effect = [False]  # This failed revision is blocked, not finalizing.
     await apply_result(coordinator(store, github), job, result)
+    assert store.try_archive.call_args_list == [call(store.flow.id), call(store.flow.id)]
+    assert store.job_records[job.id].result_applied_at is not None
     assert len(github.comments) == 1 and store.enqueued == []
 
 
@@ -476,6 +493,7 @@ async def test_cancel_during_remote_lookup_does_not_authorize_a_comment(
     scenario, monkeypatch
 ) -> None:
     store, github, job, result = scenario
+    store.try_archive.side_effect = [False, False]  # No worker stop confirmation yet.
 
     async def cancel_during_lookup(issue, marker):
         ControlService(
@@ -485,10 +503,12 @@ async def test_cancel_during_remote_lookup_does_not_authorize_a_comment(
     monkeypatch.setattr(Issue, "find_comment", cancel_during_lookup)
     with pytest.raises(ResultPending):
         await apply_result(coordinator(store, github), job, result)
+    store.try_archive.assert_called_once_with(store.flow.id)
     await apply_result(coordinator(store, github), job, result)
     assert store.flow.state is FlowState.FINALIZING
     assert github.comments == store.enqueued == []
     assert store.job_records[job.id].result_applied_at is not None
+    assert store.try_archive.call_args_list == [call(store.flow.id), call(store.flow.id)]
 
 
 async def test_concurrent_application_has_one_remote_sender(scenario, monkeypatch) -> None:

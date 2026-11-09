@@ -29,7 +29,6 @@ from app.persistence.database import Database
 from app.persistence.deliveries import DeliveryStore
 from app.persistence.flows import FlowStore
 from app.persistence.jobs import JobStore
-from app.persistence.rounds import RoundStore
 from app.persistence.stops import StopStore
 from app.persistence.workers import WorkerStore
 
@@ -108,7 +107,7 @@ def adopt_created_pull_request(
                 jobs=jobs_tx,
                 stops=stops_tx,
                 workers=workers_tx,
-                rounds=RoundStore(tx),
+                origin="delivery_recovery",
             )
         elif cancelled:
             current.state = DeliveryState.CLOSED if remote.state == "closed" else DeliveryState.OPEN
@@ -261,7 +260,7 @@ def record_merge(
     jobs: JobStore,
     stops: StopStore,
     workers: WorkerStore,
-    rounds: RoundStore,
+    origin: str,
 ) -> bool:
     """Apply verified merge facts under the caller's workflow lock, for webhook or poll."""
     if delivery.flow_id != flow.id or delivery.pr_number != merge.number:
@@ -271,7 +270,7 @@ def record_merge(
                 and delivery.merge_commit_sha != merge.merge_commit_sha)):
         raise ValueError("merge event conflicts with recorded merge facts")
     if flow.state is FlowState.ARCHIVED:
-        rounds.observe_merge(flow.id, flow.current_round_no, merge)
+        flows.observe_archived_merge(flow.id, flow.current_round_no, merge, origin=origin)
         return False
     first_merge = delivery.state is not DeliveryState.MERGED
     if first_merge or delivery.merged_at is None or delivery.merge_commit_sha is None:

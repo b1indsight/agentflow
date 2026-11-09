@@ -2,7 +2,6 @@
 
 from app.persistence.console_schema import CONSOLE_SCHEMA
 from app.persistence.flow_labels import FLOW_LABEL_SCHEMA
-from app.persistence.rounds_schema import ROUND_AUDIT_SCHEMA
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS flows (
@@ -29,23 +28,6 @@ CREATE TABLE IF NOT EXISTS issue_flow_owners (
  repo TEXT NOT NULL, issue_number INTEGER NOT NULL,
  flow_id BIGINT NOT NULL REFERENCES flows(id), version BIGINT NOT NULL DEFAULT 1,
  PRIMARY KEY(repo,issue_number)
-);
-CREATE TABLE IF NOT EXISTS flow_rounds (
- flow_id BIGINT NOT NULL REFERENCES flows(id), round_no INTEGER NOT NULL,
- repo TEXT NOT NULL, pr_number INTEGER,
- original_reason TEXT NOT NULL CHECK(original_reason IN ('succeeded','abandoned')),
- archive_reason TEXT NOT NULL CHECK(archive_reason IN ('succeeded','abandoned')),
- archive_summary TEXT, archived_at TIMESTAMPTZ NOT NULL,
- delivery JSONB, execution JSONB, merged_at TIMESTAMPTZ, merge_commit_sha TEXT,
- version BIGINT NOT NULL DEFAULT 0, PRIMARY KEY(flow_id,round_no)
-);
-CREATE UNIQUE INDEX IF NOT EXISTS ux_flow_round_pr ON flow_rounds(repo,pr_number)
- WHERE pr_number IS NOT NULL;
-CREATE TABLE IF NOT EXISTS flow_round_corrections (
- flow_id BIGINT NOT NULL, round_no INTEGER NOT NULL, version BIGINT NOT NULL,
- actor TEXT NOT NULL, reason TEXT NOT NULL, evidence JSONB NOT NULL,
- corrected_at TIMESTAMPTZ NOT NULL, PRIMARY KEY(flow_id,round_no,version),
- FOREIGN KEY(flow_id,round_no) REFERENCES flow_rounds(flow_id,round_no)
 );
 
 -- 一条 flow 挂多个候选 attempt（§9-2 多方案分支）；MVP 恰好一个。
@@ -384,7 +366,6 @@ SCHEMAS = (
     RECONCILE_SCHEMA,
     PROJECT_SCHEMA,
     CONSOLE_SCHEMA,
-    ROUND_AUDIT_SCHEMA,
     FLOW_LABEL_SCHEMA,
     INFERENCE_SCHEMA,
 )

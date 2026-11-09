@@ -22,6 +22,7 @@ from app.controler.config import ServerSettings
 from app.controler.workflow.service import ControlService
 from app.domain.models import ArchiveReason, DeliveryState, FlowState, JobKind, JobState, utcnow
 from app.persistence import metrics as database_metrics
+from app.persistence.activity import ActivityStore
 from app.persistence.metrics import read_snapshot
 from app.telemetry.logging import configure_logging
 from app.telemetry.metrics import Metrics
@@ -207,7 +208,7 @@ def test_reconcile_metrics_match_scheduler_eligibility(store, postgresql_url):
         store.deliveries.update_delivery(delivery)
         if state is FlowState.ARCHIVED:
             ControlService(database=store.database).cancel(flow)
-            assert store.flows.get_round(flow.id, 1) is not None
+            assert ActivityStore(store.database).archived(flow.id, 1) is not None
         else:
             flow.state = state
             if state is FlowState.FINALIZING:

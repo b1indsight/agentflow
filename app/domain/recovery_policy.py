@@ -46,7 +46,7 @@ class BindingRecoveryFacts(BaseModel):
     delivery_state: DeliveryState | None
     recovery_deadline: datetime | None
     has_pending_stop: bool = False
-    has_unstarted_dispatch: bool = False
+    has_unreclaimed_execution: bool = False
     has_unapplied_result: bool = False
 
 
@@ -77,13 +77,13 @@ def decide_job_recovery(job: JobRecoveryFacts, now: datetime) -> RecoveryAction:
 
 
 def should_release_binding(binding: BindingRecoveryFacts, now: datetime) -> bool:
-    """Release expired idle ownership only after stop, dispatch and result fences converge."""
+    """An applied result does not reclaim its workspace; retain it until explicit cleanup."""
     return (
         binding.recovery_deadline is not None
         and binding.recovery_deadline <= now
         and binding.flow_state is not FlowState.FINALIZING
         and not _preserve_delivery(binding.flow_state, binding.delivery_state)
         and not binding.has_pending_stop
-        and not binding.has_unstarted_dispatch
+        and not binding.has_unreclaimed_execution
         and not binding.has_unapplied_result
     )

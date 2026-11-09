@@ -23,13 +23,15 @@ from app.domain.models import (
     WorkerView,
 )
 from app.github import PullRequestMerge
+from app.persistence.activity import ActivityStore
+from app.persistence.console_sync import ConsoleSyncStore
 from app.persistence.database import Database
 from app.persistence.deliveries import DeliveryStore
 from app.persistence.flows import FlowStore
 from app.persistence.jobs import JobStore
+from app.persistence.reconciliation import ReconcileStore
 from app.persistence.results import ResultStore
 from app.persistence.reviews import ReviewStore
-from app.persistence.rounds import RoundStore
 from app.persistence.stops import StopStore
 from app.persistence.webhooks import WebhookStore
 from app.persistence.workers import WorkerStore
@@ -148,7 +150,7 @@ class ControlService:
 
     def resume(self, flow: Flow, *, expected_round_no: int) -> Flow:
         """Explicitly open one new round; stale/repeated requests cannot revive old work."""
-        with self.database.transaction() as tx, tx.connection() as connection:
+        with self.database.transaction() as tx:
             tx.serialize_issue(flow.repo, flow.issue_number)
             fresh = tx.lock_workflow(flow.id)
             flows = self.flows.using(tx)
@@ -159,39 +161,16 @@ class ControlService:
                 raise ValueError(f"flow {active.id} is already active for this Issue")
             if (
                 fresh.state is not FlowState.ARCHIVED
-                or flows.get_round(fresh.id, expected_round_no) is None
+                or ActivityStore(tx).archived(fresh.id, expected_round_no) is None
             ):
                 raise ValueError("only an archived round can be resumed")
             binding = self.workers.using(tx).get_flow_execution(fresh.id)
             if binding is not None and binding.released_at is None:
                 raise ValueError("archived execution is not released")
-            next_round = expected_round_no + 1
-            # Cursors and in-flight source claims belong to the old delivery. Keep
-            # append-only activity, but restart observation of the new PR from page one.
-            connection.execute(
-                "SELECT flow_id FROM console_flows WHERE flow_id=%s FOR UPDATE", (fresh.id,)
-            )
-            connection.execute("DELETE FROM feedback_reconcile WHERE flow_id=%s", (fresh.id,))
-            connection.execute("DELETE FROM flow_reconcile WHERE flow_id=%s", (fresh.id,))
-            connection.execute(
-                "DELETE FROM console_sync WHERE flow_id=%s AND source<>'worker' AND source NOT LIKE 'worker:%%'",
-                (fresh.id,),
-            )
-            # Keep the delivery version monotonic, and the released execution available
-            # to existing readers; the archived round owns their historical snapshots.
-            connection.execute(
-                "UPDATE flow_deliveries SET branch=%s,base_branch=NULL,state='none',pr_number=NULL,"
-                " url=NULL,head_sha=NULL,title=NULL,body=NULL,merged_at=NULL,merge_commit_sha=NULL,"
-                " version=version+1,created_at=%s,updated_at=%s WHERE flow_id=%s",
-                (f"flow/{fresh.id}/round-{next_round}", tx.now(), tx.now(), fresh.id),
-            )
-            connection.execute(
-                "UPDATE flows SET state='queued',current_round_no=%s,current_attempt_id=NULL,"
-                " archive_reason=NULL,archive_summary=NULL,archived_at=NULL,updated_at=%s WHERE id=%s",
-                (next_round, tx.now(), fresh.id),
-            )
-            resumed = flows.get_flow(fresh.id)
-            assert resumed is not None
+            ConsoleSyncStore(tx).reset_round(fresh.id)
+            ReconcileStore(tx).reset_round(fresh.id)
+            resumed = flows.start_round(fresh)
+            self.deliveries.using(tx).reset_round(resumed.id, resumed.initial_branch)
             flows.select_owner(resumed)
             self.jobs.using(tx).enqueue_job(
                 resumed.id, JobKind.INITIAL, payload={"issue_number": resumed.issue_number}
@@ -253,11 +232,12 @@ class ControlService:
             ):
                 logger.warning("merge identity does not match flow {}", flow.id)
                 return
-            rounds = RoundStore(tx)
-            historical = rounds.by_pr(fresh.repo, merge.number)
-            if historical is not None and historical.flow_id == fresh.id:
+            historical = ActivityStore(tx).archived_pr(fresh.repo, merge.number)
+            if historical is not None and historical[0] == fresh.id:
                 if webhook_store_tx.record_event(delivery_id, "pull_request", fresh.id, payload):
-                    rounds.observe_merge(fresh.id, historical.round_no, merge)
+                    flows_tx.observe_archived_merge(
+                        fresh.id, historical[1], merge, origin="webhook"
+                    )
                 return
             if delivery is None or delivery.pr_number != merge.number:
                 return
@@ -272,7 +252,7 @@ class ControlService:
                 jobs=jobs_tx,
                 stops=stops_tx,
                 workers=workers_tx,
-                rounds=rounds,
+                origin="webhook",
             )
         if first_merge:
             self.notify_merge(fresh)

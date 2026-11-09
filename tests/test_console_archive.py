@@ -78,13 +78,16 @@ def test_check_workflow_name_recovers_after_temporary_lookup_failure(store):
 def test_current_projection_and_history_rollback_with_facts(store):
     flow = store.flows.create_flow("octo/repo", 7, 1)
     console = ConsoleStore(store._db)
+    activity = ActivityStore(store.database)
     before = console.detail(flow.id)
+    history_before = activity.history(flow.id, 1)
     with pytest.raises(RuntimeError), store.transaction() as tx:
         row = tx.flows.get_flow(flow.id)
         row.state = FlowState.BLOCKED
         tx.flows.update_flow(row)
         raise RuntimeError("rollback")
     assert console.detail(flow.id) == before
+    assert activity.history(flow.id, 1) == history_before
     flow.state = FlowState.BLOCKED
     store.flows.update_flow(flow)
     assert console.detail(flow.id).phase == "blocked"
@@ -219,9 +222,11 @@ def test_resume_starts_new_round_without_overwriting_archive_or_conversation(sto
     )
     history.append(flow.id, observation)
     archived = console.detail(flow.id)
-    round_one = store.flows.get_round(flow.id, 1)
-    assert round_one.pr_number == 17 and round_one.archive_reason is ArchiveReason.ABANDONED
-    assert round_one.archived_at == archived.archived_at is not None
+    first_archive = history.archived(flow.id, 1)
+    assert first_archive is not None
+    assert first_archive.metadata["pr_number"] == 17
+    assert first_archive.metadata["archive_reason"] == "abandoned"
+    assert first_archive.occurred_at == archived.archived_at is not None
     retired_job = store.jobs.get_job(original_job.id)
     assert retired_job.state is JobState.FAILED and retired_job.round_no == 1
     console.rebuild(flow.id)
@@ -232,8 +237,8 @@ def test_resume_starts_new_round_without_overwriting_archive_or_conversation(sto
     assert resumed.id == flow.id and detail.current_round_no == 2
     assert detail.phase == "queued" and detail.lifecycle is FlowState.QUEUED
     assert detail.archived_at is detail.archive_reason is detail.archive_summary is None
-    assert detail.pr_number is None and detail.branch == f"flow/{flow.id}/round-2"
-    assert store.flows.get_round(flow.id, 1) == round_one
+    assert detail.pr_number is None and detail.branch == f"flow/{flow.id}-round-2"
+    assert history.archived(flow.id, 1) == first_archive
     jobs = store.jobs.list_jobs(flow.id)
     assert [(job.round_no, job.state) for job in jobs] == [
         (1, JobState.FAILED),
@@ -245,8 +250,9 @@ def test_resume_starts_new_round_without_overwriting_archive_or_conversation(sto
     assert history.page(flow.id).items[0].body == observation.body
     control.cancel(resumed)
     assert console.detail(flow.id).phase == "archived"
-    assert store.flows.get_round(flow.id, 1) == round_one
-    assert store.flows.get_round(flow.id, 2).archive_reason is ArchiveReason.ABANDONED
+    assert history.archived(flow.id, 1) == first_archive
+    second_archive = history.archived(flow.id, 2)
+    assert second_archive is not None and second_archive.metadata["archive_reason"] == "abandoned"
 
 
 def test_finalizing_waits_for_stop_receipt_before_archiving_and_releasing_issue(store):
@@ -260,7 +266,8 @@ def test_finalizing_waits_for_stop_receipt_before_archiving_and_releasing_issue(
     console = ConsoleStore(store.database)
     detail = console.detail(flow.id)
     assert detail.lifecycle is FlowState.FINALIZING and detail.phase == "running"
-    assert detail.archived_at is None and store.flows.get_round(flow.id, 1) is None
+    assert detail.archived_at is None
+    assert ActivityStore(store.database).archived(flow.id, 1) is None
     assert store.flows.get_active_flow(flow.repo, flow.issue_number).id == flow.id
     assert [item.id for item in console.flows(q="is:active").items] == [flow.id]
     control.cancel(store.flows.get_flow(flow.id))

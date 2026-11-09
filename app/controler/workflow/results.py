@@ -219,7 +219,6 @@ class ResultApplication:
             deliveries_tx = self.deliveries.using(tx)
             jobs_tx = self.jobs.using(tx)
             result_store_tx = self.result_store.using(tx)
-            workers_tx = self.workers.using(tx)
             flow = tx.lock_workflow(plan.flow_id)
             current = tx.lock_job(job_id)
             if flow is None or current is None:
@@ -251,15 +250,8 @@ class ResultApplication:
             if not jobs_tx.complete_persisted_result(job_id, state):
                 raise ResultPending("result has not reached its atomic completion boundary")
             if current.round_no == flow.current_round_no:
-                # A revision retry/merge still owns the original repository. Only
-                # an initial failure without a delivered PR may relinquish the slot.
-                if (
-                    flow.state is FlowState.BLOCKED
-                    and flow.archive_reason is None
-                    and current.kind is JobKind.INITIAL
-                    and (delivery is None or delivery.pr_number is None)
-                ):
-                    workers_tx.release_flow_execution(flow.id)
+                # Even a failed INITIAL retains its checkout. Explicit finalization
+                # must confirm stop/reclamation before releasing this round's binding.
                 self.flows.using(tx).try_archive(flow.id)
             flow = self.flows.using(tx).get_flow(flow.id) or flow
         if not retired:

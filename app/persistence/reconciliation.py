@@ -34,6 +34,12 @@ class FeedbackCheck(ReconcileState):
 class ReconcileStore(Repository):
     """Use the database connection, including the caller's workflow transaction."""
 
+    def reset_round(self, flow_id: int) -> None:
+        """A new delivery starts fresh PR/feedback observations in the resume transaction."""
+        with self._db.connection() as connection:
+            connection.execute("DELETE FROM feedback_reconcile WHERE flow_id=%s", (flow_id,))
+            connection.execute("DELETE FROM flow_reconcile WHERE flow_id=%s", (flow_id,))
+
     def feedback_seed(self, limit: int) -> None:
         with self._db.connection() as connection:
             connection.execute(

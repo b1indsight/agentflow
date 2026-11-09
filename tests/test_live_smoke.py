@@ -15,6 +15,7 @@ from app.contracts.protocol import PROTOCOL_VERSION, ArchiveResult, Succeeded
 from app.controler.workflow.service import ControlService
 from app.domain.models import ArchiveReason, DeliveryState, FlowState, JobKind, JobState, utcnow
 from app.live_smoke import GitHubProbe, Pull, SmokeError, SmokeSession
+from app.persistence.activity import ActivityStore
 from tests.github import RecordingGitHub
 from tests.test_coordinator import coordinator
 
@@ -220,7 +221,7 @@ async def test_core_pass_requires_three_verified_heads_and_matching_merge(
                 )
                 assert await subject.results.apply(archive.id) is JobState.DONE
                 assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
-                assert store.flows.get_round(flow.id, 1) is not None
+                assert ActivityStore(store.database).archived(flow.id, 1) is not None
             result = smoke.observe(
                 probe,
                 "actual-revision",

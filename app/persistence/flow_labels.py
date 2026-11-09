@@ -1,6 +1,6 @@
 """Durable label retry timing; desired labels are always read from authoritative facts.
 
-Install ``FLOW_LABEL_SCHEMA`` after the Flow/owner/round/delivery tables. No workflow
+Install ``FLOW_LABEL_SCHEMA`` after the Flow/owner/delivery/activity tables. No workflow
 writer needs to enqueue an event: seeding rediscovers targets after any restart.
 """
 
@@ -39,12 +39,14 @@ CREATE OR REPLACE VIEW flow_label_desired AS
         f.installation_id,f.state
  FROM flows f JOIN flow_deliveries d ON d.flow_id=f.id
  WHERE d.pr_number IS NOT NULL AND NOT EXISTS (
-   SELECT 1 FROM flow_rounds r
-   WHERE lower(r.repo)=lower(f.repo) AND r.pr_number=d.pr_number)
+   SELECT 1 FROM console_activity a WHERE a.source='flow' AND a.kind='archive'
+   AND lower(a.metadata->>'repo')=lower(f.repo)
+   AND (a.metadata->>'pr_number')::integer=d.pr_number)
  UNION ALL
- SELECT lower(r.repo),r.pr_number,'pr',f.id,r.round_no,0,
+ SELECT lower(a.metadata->>'repo'),(a.metadata->>'pr_number')::integer,'pr',f.id,a.round_no,0,
         f.installation_id,'archived'
- FROM flow_rounds r JOIN flows f ON f.id=r.flow_id WHERE r.pr_number IS NOT NULL;
+ FROM console_activity a JOIN flows f ON f.id=a.flow_id
+ WHERE a.source='flow' AND a.kind='archive' AND a.metadata->>'pr_number' IS NOT NULL;
 """
 
 

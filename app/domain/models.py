@@ -111,6 +111,12 @@ class Flow(BaseModel):
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
 
+    @property
+    def initial_branch(self) -> str:
+        """Sibling refs preserve first-round branches without Git file/directory conflicts."""
+        suffix = f"-round-{self.current_round_no}" if self.current_round_no > 1 else ""
+        return f"flow/{self.id}{suffix}"
+
     def accepts(self, kind: JobKind) -> bool:
         """Finalization never authorizes more coding, even if its PR is reopened."""
         if kind is JobKind.ARCHIVE:
@@ -178,24 +184,6 @@ class FlowToolCall(BaseModel):
     response: DeliveryReceipt | None = None
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
-
-
-class FlowRound(BaseModel):
-    """Archived round snapshot; evidence and corrections do not authorize execution."""
-
-    flow_id: int
-    round_no: int
-    repo: str
-    pr_number: int | None
-    original_reason: ArchiveReason
-    archive_reason: ArchiveReason
-    archive_summary: str | None
-    archived_at: datetime
-    delivery: FlowDelivery | None
-    execution: FlowExecution | None
-    merged_at: datetime | None = None
-    merge_commit_sha: str | None = None
-    version: int = 0
 
 
 class Job(BaseModel):

@@ -17,6 +17,7 @@ from app.domain.delivery_models import PreparedDelivery
 from app.domain.models import ArchiveReason, DeliveryState, FlowState, JobKind, JobState, VcsKind
 from app.domain.review_models import BatchState
 from app.github import GitHubError, GitHubErrorKind, Issue, PullRequest, RemoteRef, Repository
+from app.persistence.activity import ActivityStore
 from app.persistence.jobs import JobStore
 from tests.github import RecordingGitHub, record_call
 from tests.test_coordinator import coordinator
@@ -325,7 +326,7 @@ async def test_reopen_never_reactivates_blocked_or_archived_flow(
     flow, _ = lifecycle_flow
     if state is FlowState.ARCHIVED:
         await check(store, flow, GitHub(flow))
-        assert store.flows.get_round(flow.id, 1) is not None
+        assert ActivityStore(store.database).archived(flow.id, 1) is not None
     else:
         flow.state = state
         store.flows.update_flow(flow)

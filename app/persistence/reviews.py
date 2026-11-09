@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from psycopg.rows import class_row
 from psycopg.types.json import Jsonb
@@ -13,6 +13,7 @@ from app.domain.judge_models import JudgeDecision
 from app.domain.models import (
     TERMINAL_STATES,
     DeliveryState,
+    Flow,
     FlowState,
     Job,
     JobKind,
@@ -63,6 +64,22 @@ class ReviewStore(Repository):
                 or delivery.state not in {DeliveryState.OPEN, DeliveryState.CLOSED}
             ):
                 return False
+            number = (payload.get("issue" if event_type == "issue_comment" else "pull_request") or {}).get("number")
+            # Routing happened before this lock; resume may have replaced that PR meanwhile.
+            if number is not None and number not in {flow.issue_number, delivery.pr_number}:
+                return False
+            if event_type == "issue_comment" and number == flow.issue_number:
+                cutoff = ReviewStore(tx).issue_comment_cutoff(flow)
+                if cutoff is not None:
+                    timestamp = (payload.get("comment") or {}).get("created_at")
+                    if not isinstance(timestamp, str):
+                        return False
+                    try:
+                        created_at = datetime.fromisoformat(timestamp)
+                    except ValueError:
+                        return False
+                    if created_at.tzinfo is None or created_at < cutoff:
+                        return False
             previous_body = ((payload.get("changes") or {}).get("body") or {}).get("from")
             if not ReviewStore(tx)._append_version(
                 flow_id,
@@ -80,6 +97,25 @@ class ReviewStore(Repository):
             delay = submit_grace_seconds if strong or update.submitted else settle_seconds
             ReviewStore(tx)._touch(flow_id, delay)
             return True
+
+    def issue_comment_cutoff(self, flow: Flow) -> datetime | None:
+        """Read under the workflow lock; original Issue history stays out of resumed rounds.
+
+        The first INITIAL is inserted atomically with resume and survives retries. GitHub
+        has second precision, so the entire ambiguous start second is excluded. Clocks
+        must be synchronized; this boundary does not compensate for remote clock skew.
+        """
+        if flow.current_round_no == 1:
+            return None
+        with self._db.connection() as connection:
+            row = connection.execute(
+                "SELECT MIN(created_at) AS started_at FROM jobs"
+                " WHERE flow_id=%s AND round_no=%s AND kind='initial'",
+                (flow.id, flow.current_round_no),
+            ).fetchone()
+        if row is None or row["started_at"] is None:
+            raise ValueError("current round has no durable start boundary")
+        return row["started_at"].replace(microsecond=0) + timedelta(seconds=1)
 
     def _append_version(
         self,

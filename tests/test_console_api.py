@@ -207,7 +207,9 @@ def test_archive_is_idempotent_and_resume_opens_a_new_round(console_runtime, sto
         )
         assert archived["archived_at"] is not None
         assert client.post(path, json=payload, headers=headers).json() == archived
-        round_one = store.flows.get_round(flow.id, 1)
+        activity = ActivityStore(store.database)
+        first_archive = activity.archived(flow.id, 1)
+        assert first_archive is not None and first_archive.metadata["archive_reason"] == reason
         refused = client.post(f"/api/flows/{flow.id}/retry", json={}, headers=headers)
         assert refused.status_code == 409 and refused.json() == {"detail": "retry_archived"}
         assert ConsoleStore(store.database).detail(flow.id).current_round_no == 1
@@ -228,8 +230,8 @@ def test_archive_is_idempotent_and_resume_opens_a_new_round(console_runtime, sto
         ):
             rejected = client.post(f"/api/flows/{flow.id}/{command}", json=stale, headers=headers)
             assert rejected.status_code == 409 and rejected.json() == {"detail": code}
-        assert store.flows.get_round(flow.id, 1) == round_one
-        assert store.flows.get_round(flow.id, 2) is None
+        assert activity.archived(flow.id, 1) == first_archive
+        assert activity.archived(flow.id, 2) is None
         jobs = store.jobs.list_jobs(flow.id)
         assert len(jobs) == 1 and jobs[0].round_no == 2
 

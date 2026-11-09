@@ -91,6 +91,7 @@ async function mockFlows(page: Page, current: () => FlowDetail[]) {
 const activity = {
   key: "comment-1",
   version: 2,
+  round_no: null,
   source: "github",
   kind: "comment",
   occurred_at: now,

@@ -17,10 +17,11 @@ from app.contracts.protocol import (
 from app.controler.workers.errors import ProtocolViolation
 from app.controler.workflow.service import ControlService
 from app.domain.models import ArchiveReason, FlowState, JobKind, JobState
+from app.persistence.activity import ActivityStore
 from app.persistence.jobs import JobStore
 from tests.github import RecordingGitHub
 from tests.test_coordinator import coordinator
-from tests.test_merge import route_merge
+from tests.test_merge import merge_payload, route_merge
 from tests.test_result_recovery import (
     completed_open_initial as completed_open_initial,  # noqa: PLC0414
 )
@@ -64,6 +65,7 @@ async def test_archive_release_rolls_back_and_replays_atomically(store, monkeypa
     assert store.workers.get_flow_execution(flow.id).released_at is None
     assert store.jobs.get_job(job.id).result_applied_at is None
     assert store.results.get_plan(job.id).archive == result
+    assert ActivityStore(store.database).archived(flow.id, 1) is None
     other = ControlService(
         database=store.database,
     ).on_trigger("owner/repo", 999, 42)
@@ -74,6 +76,9 @@ async def test_archive_release_rolls_back_and_replays_atomically(store, monkeypa
     assert await subject.results.apply(job.id) is JobState.DONE
     assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
     assert store.flows.get_flow(flow.id).archive_reason is ArchiveReason.SUCCEEDED
+    archived = ActivityStore(store.database).archived(flow.id, 1)
+    assert archived is not None and archived.metadata["archive_reason"] == "succeeded"
+    assert archived.occurred_at == store.flows.get_flow(flow.id).archived_at
     assert store.workers.get_flow_execution(flow.id).released_at is not None
     assert flow.id not in [item.id for item in store.flows.list_flows(active_only=True)]
     assert store.workers.assign_job("worker-a", "next", "epoch-a").flow_id == other.id
@@ -108,10 +113,22 @@ async def test_merge_after_abandonment_cannot_adopt_a_released_binding(
     )
     with pytest.raises(ValueError, match="archived"):
         service.retry(flow)
-    await route_merge(store, flow)
+    activity = ActivityStore(store.database)
+    archived = activity.archived(flow.id, 1)
+    assert archived is not None and archived.metadata["archive_reason"] == "abandoned"
+    payload = merge_payload(flow)
+    payload["pull_request"]["merged_at"] = (
+        archived.occurred_at - timedelta(seconds=5)
+    ).isoformat()
+    await route_merge(store, flow, payload=payload)
     assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
-    assert store.flows.get_flow(flow.id).archive_reason is ArchiveReason.ABANDONED
-    assert store.flows.get_round(flow.id, 1).merge_commit_sha == "a" * 40
+    assert store.flows.get_flow(flow.id).archive_reason is ArchiveReason.SUCCEEDED
+    assert activity.archived(flow.id, 1) == archived
+    history = activity.history(flow.id, 1)
+    merges = [item for item in history if item.kind == "merge"]
+    assert len(merges) == 1
+    assert merges[0].metadata["merge_commit_sha"] == "a" * 40
+    assert len([item for item in history if item.kind == "archive_correction"]) == 1
     assert store.workers.get_flow_execution(flow.id).released_at is not None
     assert [job for job in store.jobs.list_jobs(flow.id) if job.kind is JobKind.ARCHIVE] == []
     store.workers.worker_connected("worker-b", PROTOCOL_VERSION, "epoch-b")

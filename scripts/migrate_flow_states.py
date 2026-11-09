@@ -1,4 +1,4 @@
-"""One-shot, offline migration of the pre-round Flow schema (never a startup hook).
+"""Offline conversion of legacy Flow state/history schemas (never a startup hook).
 
 Stop ALL controllers, workers, webhook consumers and console writers first; a database
 lock cannot fence a worker already making an external call. Take a database backup.
@@ -8,6 +8,10 @@ Run from the checkout using the new application environment::
     uv run python -m scripts.migrate_flow_states --database-url "$DATABASE_URL" --schema public \
         --apply --expect-report <fingerprint-from-the-reviewed-dry-run>
 
+For a six-state deployment that still has flow_rounds/flow_round_corrections, add
+--convert-round-history to BOTH commands. This preserves original archive conclusions,
+saved merge evidence and existing corrections; it does not authorize new corrections.
+
 Both invocations lock and inspect the whole selected schema. The second refuses changed
 facts, any ambiguous owner, incomplete disposition, and EVERY unapplied ResultPlan.
 There is no force option. Resolve evidence with the old deployment/operator runbook,
@@ -16,8 +20,11 @@ then stop it and repeat the dry-run. This tool performs no GitHub or worker oper
 Original rows are retained in flow_state_migration_backup, independently readable as
 JSONB without runtime enums. Only applied plans' top-level flow_state is translated;
 inboxes, digests, effects, events and existing console activity are never rewritten.
-Archive timestamps denote this migration's proven archive boundary, not an invented
-historical completion time. No execution binding is released by the migration.
+For four-state inputs, archive timestamps denote this migration's proven boundary,
+not an invented historical completion time. Six-state inputs retain their original
+archive timestamps. Complete original snapshots, including delivery/execution JSON,
+are retained in the backup before removing the obsolete tables. No execution binding
+is released by either conversion.
 """
 
 from __future__ import annotations
@@ -28,7 +35,7 @@ import json
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import psycopg
@@ -38,8 +45,9 @@ from psycopg.types.json import Jsonb
 from app.contracts.protocol import ArchiveResult, ArchiveTask, Succeeded
 from app.contracts.receipts import decode_result_inbox
 from app.contracts.result_models import EffectRecord, ResultPlan
+from app.persistence.activity import ActivityStore
 from app.persistence.database import Database
-from app.persistence.schema import SCHEMA
+from app.persistence.schema import SCHEMA, SCHEMAS
 
 Row = dict[str, Any]
 REQUIRED_TABLES = {
@@ -57,7 +65,7 @@ REQUIRED_TABLES = {
     "console_activity",
     "review_batches",
 }
-BACKUP_TABLES = REQUIRED_TABLES - {"events", "console_activity"}
+ROUND_TABLES = {"flow_rounds", "flow_round_corrections"}
 NEW_TABLES = {
     "flow_rounds",
     "flow_round_corrections",
@@ -91,6 +99,7 @@ class Report:
     flows: list[Row] = field(default_factory=list)
     owners: list[Row] = field(default_factory=list)
     plan_conversions: list[Row] = field(default_factory=list)
+    history: list[Row] = field(default_factory=list)
     problems: list[Row] = field(default_factory=list)
 
     def refuse(self, message: str, *, flows: Sequence[int] = (), jobs: Sequence[int] = ()) -> None:
@@ -450,10 +459,6 @@ def _preflight(data: dict[str, list[Row]], report: Report) -> dict[int, Row]:
             )
         elif flow["state"] == "active":
             try:
-                if not attempt:
-                    raise ValueError(
-                        "Active Flow lacks a current attempt; verify execution identity"
-                    )
                 if not _merged(delivery) and any(
                     s["flow_id"] == identity and s["state"] != "confirmed"
                     for s in data["execution_stops"]
@@ -462,6 +467,20 @@ def _preflight(data: dict[str, list[Row]], report: Report) -> dict[int, Row]:
                         "Active coding stage conflicts with an unconfirmed stop; verify intent"
                     )
                 state, reason, evidence = _active_state(flow, flow_jobs, delivery, execution)
+                # Legacy on_trigger creates INITIAL before preparation creates its
+                # Attempt. Only that fresh, undispatched stage can lack identity.
+                if not attempt and not (
+                    flow["current_attempt_id"] is None
+                    and state == "queued"
+                    and len(flow_jobs) == 1
+                    and flow_jobs[0]["kind"] == "initial"
+                    and delivery is None
+                    and execution is None
+                    and not any(a["flow_id"] == identity for a in attempts.values())
+                ):
+                    raise ValueError(
+                        "Active Flow lacks a current attempt; verify execution identity"
+                    )
                 decision.update(new_state=state, archive_reason=reason, evidence=evidence)
             except ValueError as error:
                 report.refuse(str(error), flows=[identity], jobs=[j["id"] for j in flow_jobs])
@@ -490,7 +509,7 @@ def _preflight(data: dict[str, list[Row]], report: Report) -> dict[int, Row]:
         issues[flow["repo"], flow["issue_number"]].append(flow)
         delivery = deliveries.get(flow["id"])
         if delivery and delivery["pr_number"] is not None:
-            prs[flow["repo"], delivery["pr_number"]].append(flow["id"])
+            prs[flow["repo"].lower(), delivery["pr_number"]].append(flow["id"])
     for (repo, number), members in issues.items():
         outstanding = [f for f in members if decisions[f["id"]]["new_state"] != "archived"]
         newest_time = max(_time(f["created_at"]) for f in members)
@@ -613,16 +632,321 @@ def _preflight(data: dict[str, list[Row]], report: Report) -> dict[int, Row]:
     return converted
 
 
-def _apply(tx: Database, report: Report, converted: dict[int, Row]) -> None:
-    """Commit evidence backups, authority, DDL and console replacement on one connection."""
+def _merge_metadata(row: Row) -> Row:
+    """Reject partial evidence rather than publishing a misleading historical merge."""
+    merged_at, sha = row.get("merged_at"), row.get("merge_commit_sha")
+    if merged_at is None and sha is None:
+        return {"merged_at": None, "merge_commit_sha": None}
+    if not isinstance(sha, str) or not sha.strip() or not isinstance(merged_at, str):
+        raise ValueError("Incomplete saved merge evidence")
+    timestamp = _time(merged_at)
+    if timestamp.tzinfo is None:
+        raise ValueError("Merge evidence lacks a timezone")
+    return {"merged_at": timestamp.astimezone(UTC).isoformat(), "merge_commit_sha": sha}
+
+
+def _round_history(row: Row, corrections: list[Row]) -> list[Row]:
+    """Translate one proven snapshot; later evidence never changes its original archive."""
+    delivery, execution = row["delivery"], row["execution"]
+    if delivery is not None and (
+        not isinstance(delivery, dict)
+        or delivery.get("flow_id") != row["flow_id"]
+        or delivery.get("pr_number") != row["pr_number"]
+    ):
+        raise ValueError("Saved delivery does not identify the archived Flow/PR")
+    if row["pr_number"] is not None and (
+        type(row["pr_number"]) is not int or row["pr_number"] <= 0 or delivery is None
+    ):
+        raise ValueError("Archived PR lacks its original delivery snapshot")
+    if execution is not None and (
+        not isinstance(execution, dict)
+        or execution.get("flow_id") != row["flow_id"]
+        or not execution.get("released_at")
+        or execution.get("repo_identity") != f"{execution.get('worker_id')}:{row['repo']}"
+    ):
+        raise ValueError("Saved execution lacks its original released workspace identity")
+    archived_at = _time(row["archived_at"])
+    if archived_at.tzinfo is None or row["original_reason"] not in {"abandoned", "succeeded"}:
+        raise ValueError("Invalid original archive conclusion/time")
+    if row["archive_summary"] is not None and not isinstance(row["archive_summary"], str):
+        raise ValueError("Invalid original archive summary")
+    original_merge = _merge_metadata(delivery or {})
+    saved_merge = _merge_metadata(row)
+    if original_merge["merged_at"] is not None and original_merge != saved_merge:
+        raise ValueError("Saved merge conflicts with original delivery evidence")
+    if saved_merge["merged_at"] is not None and row["pr_number"] is None:
+        raise ValueError("Saved merge has no archived PR identity")
+    if row["original_reason"] == "succeeded" and not (
+        (row["pr_number"] is None and (row["archive_summary"] or "").strip())
+        or (delivery and original_merge["merged_at"] is not None and delivery["state"] == "merged")
+    ):
+        raise ValueError("Original success lacks its merge evidence or no-PR investigation summary")
+    archive = {
+        "repo": row["repo"],
+        "pr_number": row["pr_number"],
+        "archive_reason": row["original_reason"],
+        "archive_summary": row["archive_summary"],
+        **original_merge,
+    }
+    events = [{"kind": "archive", "occurred_at": archived_at.isoformat(), "metadata": archive}]
+    evidence = {
+        "repo": row["repo"],
+        "pr_number": row["pr_number"],
+        **saved_merge,
+        "archived_at": archived_at.isoformat(),
+    }
+    if saved_merge["merged_at"] is not None:
+        events.append(
+            {
+                "kind": "merge",
+                "occurred_at": saved_merge["merged_at"],
+                "metadata": {**evidence, "origin": "migration:flow_rounds"},
+            }
+        )
+    if not corrections:
+        if row["version"] != 0 or row["archive_reason"] != row["original_reason"]:
+            raise ValueError("Changed archive conclusion lacks its original correction audit")
+    else:
+        if (
+            len(corrections) != 1
+            or row["version"] != 1
+            or row["original_reason"] != "abandoned"
+            or row["archive_reason"] != "succeeded"
+        ):
+            raise ValueError("Unsupported or ambiguous archive correction chain")
+        correction = corrections[0]
+        proof = correction["evidence"]
+        if (
+            correction["version"] != 1
+            or not correction["actor"].strip()
+            or not correction["reason"].strip()
+            or not isinstance(proof, dict)
+            or proof.get("repo") != row["repo"]
+            or proof.get("pr_number") != row["pr_number"]
+            or proof.get("original_reason") != "abandoned"
+            or proof.get("before") != {"archive_reason": "abandoned", "version": 0}
+            or proof.get("after") != {"archive_reason": "succeeded", "version": 1}
+            or proof.get("merge_time_precision_seconds") != 1
+            or _merge_metadata(proof) != saved_merge
+            or saved_merge["merged_at"] is None
+            or _time(proof["archived_at"]) != archived_at
+            or _time(saved_merge["merged_at"]) + timedelta(seconds=1) >= archived_at
+            or _time(correction["corrected_at"]) < archived_at
+        ):
+            raise ValueError(
+                "Correction does not prove its original authorized before/after evidence"
+            )
+        events.append(
+            {
+                "kind": "archive_correction",
+                "occurred_at": _time(correction["corrected_at"]).isoformat(),
+                "metadata": {
+                    **evidence,
+                    "before": "abandoned",
+                    "after": "succeeded",
+                    "origin": "migration:flow_round_corrections",
+                    "actor": correction["actor"],
+                    "reason": correction["reason"],
+                },
+            }
+        )
+    return [{"flow_id": row["flow_id"], "round_no": row["round_no"], **e} for e in events]
+
+
+def _preflight_round_history(data: dict[str, list[Row]], report: Report) -> None:
+    """Refuse ambiguous attribution/corrections before dropping any historical authority."""
+    flows = {f["id"]: f for f in data["flows"]}
+    rounds = {(r["flow_id"], r["round_no"]): r for r in data["flow_rounds"]}
+    corrections: dict[tuple[int, int], list[Row]] = defaultdict(list)
+    prs: dict[tuple[str, int], list[tuple[int, int]]] = defaultdict(list)
+    for correction in data["flow_round_corrections"]:
+        key = (correction["flow_id"], correction["round_no"])
+        corrections[key].append(correction)
+        if key not in rounds:
+            report.refuse(f"Correction has no archived round {key[1]}.", flows=[key[0]])
+    for key, row in rounds.items():
+        identity, number = key
+        flow = flows.get(identity)
+        try:
+            if (
+                not flow
+                or type(number) is not int
+                or not 0 < number <= flow["current_round_no"]
+                or row["repo"].lower() != flow["repo"].lower()
+            ):
+                raise ValueError("Archived round has a foreign/missing Flow or repository identity")
+            report.history.extend(_round_history(row, corrections[key]))
+            if row["pr_number"] is not None:
+                prs[row["repo"].lower(), row["pr_number"]].append(key)
+        except (ValueError, TypeError, KeyError, AttributeError) as error:
+            report.refuse(f"Round {number}: {error}", flows=[identity])
+    for flow in flows.values():
+        identity, current = flow["id"], flow["current_round_no"]
+        actual = sorted(number for owner, number in rounds if owner == identity)
+        end = current if flow["state"] == "archived" else current - 1
+        if (
+            flow["state"]
+            not in {"queued", "running", "review", "blocked", "finalizing", "archived"}
+            or current <= 0
+            or len(actual) != end
+            or any(number != index for index, number in enumerate(actual, 1))
+        ):
+            report.refuse(
+                "Incomplete archived round sequence or unsupported Flow state.", flows=[identity]
+            )
+        if flow["state"] == "archived":
+            saved = rounds.get((identity, current))
+            if saved is None or any(
+                saved[k] != flow[k] for k in ("archive_reason", "archive_summary", "archived_at")
+            ):
+                report.refuse("Current archive disagrees with its saved round.", flows=[identity])
+        attempt = next((a for a in data["attempts"] if a["id"] == flow["current_attempt_id"]), None)
+        if flow["current_attempt_id"] is not None and (
+            not attempt or (attempt["flow_id"], attempt["round_no"]) != (identity, current)
+        ):
+            report.refuse("Current attempt has a foreign Flow/round identity.", flows=[identity])
+    issue_owners: dict[tuple[str, int], list[int]] = defaultdict(list)
+    for owner in data["issue_flow_owners"]:
+        identity = owner["flow_id"]
+        key = (owner["repo"].lower(), owner["issue_number"])
+        issue_owners[key].append(identity)
+        flow = flows.get(identity)
+        if not flow or key != (flow["repo"].lower(), flow["issue_number"]):
+            report.refuse("Issue owner has a foreign Flow identity.", flows=[identity])
+    for flow in flows.values():
+        identities = issue_owners[flow["repo"].lower(), flow["issue_number"]]
+        if len(identities) != 1 or (flow["state"] != "archived" and identities != [flow["id"]]):
+            report.refuse(
+                "Missing or conflicting Issue owner.", flows=sorted({flow["id"], *identities})
+            )
+    for table in ("jobs", "attempts"):
+        for row in data[table]:
+            identity = row["flow_id"]
+            if identity is not None and (
+                identity not in flows
+                or not 0 < row["round_no"] <= flows[identity]["current_round_no"]
+            ):
+                report.refuse(
+                    f"{table} row {row['id']} has an invalid Flow/round identity.",
+                    flows=[identity],
+                    jobs=[row["id"]] if table == "jobs" else [],
+                )
+    for delivery in data["flow_deliveries"]:
+        flow = flows[delivery["flow_id"]]
+        if delivery["pr_number"] is not None:
+            key = (flow["repo"].lower(), delivery["pr_number"])
+            delivery_owner = (flow["id"], flow["current_round_no"])
+            if prs[key] and delivery_owner not in prs[key]:
+                report.refuse(
+                    f"Current delivery reuses archived PR {key[0]}#{key[1]} from rounds {prs[key]}.",
+                    flows=sorted({flow["id"], *(f for f, _ in prs[key])}),
+                )
+    for (repo, number), owners in prs.items():
+        if len(owners) > 1:
+            report.refuse(
+                f"Duplicate archived PR {repo}#{number} in rounds {owners}.",
+                flows=sorted({f for f, _ in owners}),
+            )
+    jobs = {j["id"]: j for j in data["jobs"]}
+    for application in data["result_applications"]:
+        job = jobs[application["job_id"]]
+        if not job["result_applied_at"]:
+            report.refuse(
+                "Unapplied ResultPlan must settle under the old deployment before conversion.",
+                flows=[job["flow_id"]] if job["flow_id"] is not None else [],
+                jobs=[job["id"]],
+            )
+    for job in jobs.values():
+        if (job["result_received_at"] or job["result_payload"] is not None) and not job[
+            "result_applied_at"
+        ]:
+            report.refuse(
+                "Pending result must settle under the old deployment before conversion.",
+                flows=[job["flow_id"]] if job["flow_id"] is not None else [],
+                jobs=[job["id"]],
+            )
+    audit_heads: dict[tuple[int, int], Row] = {}
+    for activity in sorted(data["console_activity"], key=lambda a: (a["flow_id"], a["version"])):
+        if activity["source"] != "flow":
+            continue
+        if activity["kind"] in {"archive", "merge", "archive_correction"}:
+            report.refuse(
+                "Canonical history already exists; refuse a partial conversion.",
+                flows=[activity["flow_id"]],
+            )
+        if activity["kind"] != "round":
+            continue
+        # The old publisher stored complete before/after snapshots in body. Keep
+        # them untouched, but reject disagreements with the supposedly immutable fields.
+        try:
+            event = json.loads(activity["body"])
+            after = event["after"]
+            key = (activity["flow_id"], after["round_no"])
+            row = rounds[key]
+            if (
+                activity["digest"] != hashlib.sha256(activity["body"].encode()).hexdigest()
+                or activity["deleted"]
+                or activity["metadata"].get("round_no") != key[1]
+                or (key in audit_heads and event["before"] != audit_heads[key])
+            ):
+                raise ValueError("invalid or discontinuous round activity")
+            initial = event["before"] if event["before"] is not None else after
+            if key not in audit_heads and (
+                initial["version"] != 0
+                or initial["archive_reason"] != row["original_reason"]
+                or _merge_metadata(initial) != _merge_metadata(row["delivery"] or {})
+            ):
+                raise ValueError("original archive differs from its saved delivery")
+            for saved in (event["before"], after):
+                if saved is None:
+                    continue
+                if any(
+                    saved[k] != row[k]
+                    for k in (
+                        "flow_id",
+                        "round_no",
+                        "repo",
+                        "pr_number",
+                        "original_reason",
+                        "archive_summary",
+                        "archived_at",
+                        "delivery",
+                        "execution",
+                    )
+                ):
+                    raise ValueError("immutable snapshot differs")
+                merge = _merge_metadata(saved)
+                if merge["merged_at"] is not None and merge != _merge_metadata(row):
+                    raise ValueError("merge evidence differs")
+                _round_history(saved, corrections[key] if saved["version"] else [])
+            if (
+                event["correction"] is not None
+                and event["correction"] not in corrections[activity["flow_id"], after["round_no"]]
+            ):
+                raise ValueError("correction audit differs")
+            audit_heads[key] = after
+        except (ValueError, TypeError, KeyError) as error:
+            report.refuse(
+                f"Activity version {activity['version']} cannot prove its round snapshot: {error}",
+                flows=[activity["flow_id"]],
+            )
+    for key, saved in audit_heads.items():
+        if saved != rounds[key]:
+            report.refuse(f"Round {key[1]} differs from its last published audit.", flows=[key[0]])
+
+
+def _backup(tx: Database, report: Report, tables: Sequence[str]) -> None:
+    """Retain every original row/field, including opaque historical JSON and earlier backups."""
     with tx.connection() as connection:
         connection.execute("""
-            CREATE TABLE flow_state_migration_backup (
+            CREATE TABLE IF NOT EXISTS flow_state_migration_backup (
               table_name TEXT NOT NULL, row_data JSONB NOT NULL,
               report_fingerprint TEXT NOT NULL, captured_at TIMESTAMPTZ NOT NULL DEFAULT now()
             )
         """)
-        for table in sorted(BACKUP_TABLES):
+        for table in tables:
+            if table == "flow_state_migration_backup":
+                continue
             connection.execute(
                 sql.SQL(
                     "INSERT INTO flow_state_migration_backup(table_name,row_data,report_fingerprint) "
@@ -630,6 +954,86 @@ def _apply(tx: Database, report: Report, converted: dict[int, Row]) -> None:
                 ).format(sql.Identifier(table)),
                 (table, report.fingerprint),
             )
+
+
+def _publish_history(tx: Database, history: list[Row]) -> None:
+    """Publish and read back each immutable record inside the conversion transaction."""
+    activity = ActivityStore(tx)
+    with tx.connection() as connection:
+        for event in history:
+            identity, number, kind = event["flow_id"], event["round_no"], event["kind"]
+            timestamp = _time(event["occurred_at"])
+            activity.append_flow(
+                identity,
+                number,
+                kind,
+                occurred_at=timestamp,
+                metadata=event["metadata"],
+            )
+            saved = connection.execute(
+                "SELECT metadata,occurred_at,updated_at,author,deleted FROM console_activity "
+                "WHERE flow_id=%s AND round_no=%s AND source='flow' AND kind=%s",
+                (identity, number, kind),
+            ).fetchall()
+            if saved != [
+                {
+                    "metadata": event["metadata"],
+                    "occurred_at": timestamp,
+                    "updated_at": timestamp,
+                    "author": "FlowTool",
+                    "deleted": False,
+                }
+            ]:
+                raise ValueError(
+                    f"Flow {identity} round {number}: {kind} publication verification failed"
+                )
+
+
+def _apply_round_history(tx: Database, report: Report, tables: Sequence[str]) -> None:
+    """Verify conversion and full backups before removing obsolete authority, without CASCADE."""
+    _backup(tx, report, tables)
+    with tx.connection() as connection:
+        connection.execute(
+            "ALTER TABLE console_activity ADD COLUMN round_no INTEGER CHECK(round_no>0)"
+        )
+        # Explicit offline install bypasses the startup refusal only inside this locked
+        # transaction. Projections must exist before canonical activity is published.
+        for definition in SCHEMAS:
+            connection.execute(definition)
+        _publish_history(tx, report.history)
+        changed_activity = connection.execute(
+            "SELECT row_data->>'flow_id' AS flow_id,row_data->>'version' AS version "
+            "FROM flow_state_migration_backup b WHERE table_name='console_activity' "
+            "AND report_fingerprint=%s AND NOT EXISTS (SELECT 1 FROM console_activity a "
+            "WHERE a.round_no IS NULL AND to_jsonb(a)-'round_no'=b.row_data)",
+            (report.fingerprint,),
+        ).fetchall()
+        if changed_activity:
+            raise ValueError(f"Original activity preservation failed: {changed_activity}")
+        for table in sorted(ROUND_TABLES):
+            missing = connection.execute(
+                sql.SQL(
+                    "SELECT flow_id,round_no FROM {} t WHERE NOT EXISTS "
+                    "(SELECT 1 FROM flow_state_migration_backup b WHERE b.table_name=%s "
+                    "AND b.report_fingerprint=%s AND b.row_data=to_jsonb(t))"
+                ).format(sql.Identifier(table)),
+                (table, report.fingerprint),
+            ).fetchall()
+            if missing:
+                raise ValueError(f"Unverified {table} backups: {missing}")
+        connection.execute("""
+            DROP TRIGGER IF EXISTS console_round_changed ON flow_rounds;
+            DROP FUNCTION IF EXISTS console_round_changed();
+            DROP TABLE flow_round_corrections;
+            DROP TABLE flow_rounds;
+        """)
+        tx.init_db()
+
+
+def _apply(tx: Database, report: Report, converted: dict[int, Row], tables: Sequence[str]) -> None:
+    """Commit evidence backups, authority, DDL and console replacement on one connection."""
+    _backup(tx, report, tables)
+    with tx.connection() as connection:
         # Never DROP ... CASCADE or rebuild console tables: activity is append-only.
         for table in (
             "flows",
@@ -654,6 +1058,7 @@ def _apply(tx: Database, report: Report, converted: dict[int, Row]) -> None:
               ADD COLUMN archived_at TIMESTAMPTZ;
             ALTER TABLE attempts ADD COLUMN round_no INTEGER NOT NULL DEFAULT 1;
             ALTER TABLE jobs ADD COLUMN round_no INTEGER NOT NULL DEFAULT 1;
+            ALTER TABLE console_activity ADD COLUMN round_no INTEGER CHECK(round_no>0);
         """)
         for change in report.flows:
             connection.execute(
@@ -661,7 +1066,7 @@ def _apply(tx: Database, report: Report, converted: dict[int, Row]) -> None:
                 " archived_at=CASE WHEN %s='archived' THEN now() END WHERE id=%s",
                 (change["new_state"], change["archive_reason"], change["new_state"], change["id"]),
             )
-        # Canonical table definitions (including round/owner tables and the new unique
+        # Canonical table definitions (including owner tables and the new unique
         # index), after state conversion and before restoring projection triggers.
         connection.execute(SCHEMA)
         connection.execute("""
@@ -678,12 +1083,6 @@ def _apply(tx: Database, report: Report, converted: dict[int, Row]) -> None:
                 (state NOT IN ('finalizing','archived') OR archive_reason IS NOT NULL),
               ADD CONSTRAINT ck_flows_archive_stage CHECK
                 (archive_reason IS NULL OR state IN ('blocked','finalizing','archived'));
-            INSERT INTO flow_rounds(flow_id,round_no,repo,pr_number,original_reason,archive_reason,
-                                   archive_summary,archived_at,delivery,execution,merged_at,merge_commit_sha)
-              SELECT f.id,1,f.repo,d.pr_number,f.archive_reason,f.archive_reason,
-                     f.archive_summary,f.archived_at,to_jsonb(d),to_jsonb(x),d.merged_at,d.merge_commit_sha
-              FROM flows f LEFT JOIN flow_deliveries d ON d.flow_id=f.id
-              LEFT JOIN flow_executions x ON x.flow_id=f.id WHERE f.state='archived';
         """)
         for owner in report.owners:
             connection.execute(
@@ -697,6 +1096,33 @@ def _apply(tx: Database, report: Report, converted: dict[int, Row]) -> None:
         # Uses the bound transaction; failure here also restores the old view, index,
         # triggers, states and plans. init_db's refresh appends, never erases activity.
         tx.init_db()
+        archives = connection.execute(
+            "SELECT f.id,f.repo,f.archive_reason,f.archive_summary,f.archived_at,"
+            "d.pr_number,d.merged_at,d.merge_commit_sha FROM flows f "
+            "LEFT JOIN flow_deliveries d ON d.flow_id=f.id WHERE f.state='archived' ORDER BY f.id"
+        ).fetchall()
+        _publish_history(
+            tx,
+            [
+                {
+                    "flow_id": row["id"],
+                    "round_no": 1,
+                    "kind": "archive",
+                    "occurred_at": row["archived_at"].isoformat(),
+                    "metadata": {
+                        "repo": row["repo"],
+                        "pr_number": row["pr_number"],
+                        "archive_reason": row["archive_reason"],
+                        "archive_summary": row["archive_summary"],
+                        "merged_at": row["merged_at"].astimezone(UTC).isoformat()
+                        if row["merged_at"]
+                        else None,
+                        "merge_commit_sha": row["merge_commit_sha"],
+                    },
+                }
+                for row in archives
+            ],
+        )
 
 
 def migrate(
@@ -705,6 +1131,7 @@ def migrate(
     schema: str | None = None,
     apply: bool = False,
     expected_fingerprint: str | None = None,
+    convert_round_history: bool = False,
 ) -> Report:
     """Dry-run by default; --apply requires the unchanged, previously reviewed report."""
     report = Report()
@@ -737,11 +1164,17 @@ def migrate(
                     (schema,),
                 ).fetchall()
             ]
-            if not REQUIRED_TABLES <= set(tables) or NEW_TABLES & set(tables):
+            required = REQUIRED_TABLES | (
+                ROUND_TABLES | {"issue_flow_owners"} if convert_round_history else set()
+            )
+            if not required <= set(tables) or (
+                not convert_round_history and NEW_TABLES & set(tables)
+            ):
                 report.refuse(
-                    "Expected the complete legacy schema, without new/partially migrated tables. "
-                    f"Missing: {sorted(REQUIRED_TABLES - set(tables))}; "
-                    f"already present: {sorted(NEW_TABLES & set(tables))}"
+                    "Expected a complete legacy schema, not new/partially migrated tables. "
+                    "Six-state round tables require explicit --convert-round-history. "
+                    f"Missing: {sorted(required - set(tables))}; "
+                    f"present migration tables: {sorted(NEW_TABLES & set(tables))}"
                 )
                 return report
             # NOWAIT refuses live database activity rather than queueing behind it.
@@ -755,20 +1188,19 @@ def migrate(
                 "FROM information_schema.columns WHERE table_schema=%s ORDER BY table_name,ordinal_position",
                 (schema,),
             ).fetchall()
-            if any(
-                c["table_name"] == "flows"
-                and c["column_name"]
-                in {
-                    "current_round_no",
-                    "archive_reason",
-                    "archive_summary",
-                    "archived_at",
-                }
-                or c["table_name"] in {"jobs", "attempts"}
-                and c["column_name"] == "round_no"
-                for c in columns
+            present_columns = {(c["table_name"], c["column_name"]) for c in columns}
+            round_columns = {
+                ("flows", c)
+                for c in ("current_round_no", "archive_reason", "archive_summary", "archived_at")
+            } | {("jobs", "round_no"), ("attempts", "round_no")}
+            if (
+                ("console_activity", "round_no") in present_columns
+                or (convert_round_history and not round_columns <= present_columns)
+                or (not convert_round_history and round_columns & present_columns)
             ):
-                report.refuse("New columns already exist; refuse partial/unknown schema migration.")
+                report.refuse(
+                    "Unexpected new/missing columns; refuse partial/unknown schema migration."
+                )
                 return report
             data = {
                 table: [
@@ -794,7 +1226,9 @@ def migrate(
                 (schema,) * 5,
             ).fetchall()
             fingerprint_input = {
-                "version": 1,
+                "version": 2,
+                "convert_round_history": convert_round_history,
+                "target_schemas": SCHEMAS,
                 "schema": schema,
                 "columns": columns,
                 "definitions": definitions,
@@ -808,14 +1242,21 @@ def migrate(
                     ensure_ascii=False,
                 ).encode()
             ).hexdigest()
-            converted = _preflight(data, report)
+            converted = {}
+            if convert_round_history:
+                _preflight_round_history(data, report)
+            else:
+                converted = _preflight(data, report)
             if apply and expected_fingerprint != report.fingerprint:
                 report.refuse(
                     "--apply requires --expect-report from an unchanged, reviewed dry-run. "
                     "Run dry-run again; do not reuse a stale report."
                 )
             if apply and report.status == "ready":
-                _apply(tx, report, converted)
+                if convert_round_history:
+                    _apply_round_history(tx, report, tables)
+                else:
+                    _apply(tx, report, converted, tables)
                 report.status = "applied"
         return report
     finally:
@@ -833,6 +1274,11 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--dry-run", action="store_true", help="default; no persistent changes")
     mode.add_argument("--apply", action="store_true", help="all producers must remain stopped")
     parser.add_argument("--expect-report", help="fingerprint from the previously reviewed dry-run")
+    parser.add_argument(
+        "--convert-round-history",
+        action="store_true",
+        help="explicit offline conversion of six-state round tables to immutable activity",
+    )
     args = parser.parse_args(argv)
     try:
         report = migrate(
@@ -840,7 +1286,15 @@ def main(argv: list[str] | None = None) -> int:
             schema=args.schema,
             apply=args.apply,
             expected_fingerprint=args.expect_report,
+            convert_round_history=args.convert_round_history,
         )
+    except ValueError as error:
+        print(
+            json.dumps(
+                {"status": "refused", "message": str(error), "operator_checks": OPERATOR_CHECKS}
+            )
+        )
+        return 2
     except psycopg.Error as error:
         # SQL failures roll back, but a lost connection during COMMIT has an unknown
         # outcome. Never encourage blind retry or print connection credentials.

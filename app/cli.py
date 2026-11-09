@@ -330,50 +330,17 @@ def flow_resume(flow_id: int, expected_round: int = typer.Option(..., min=1)) ->
     typer.echo(f"flow {flow_id} round {resumed.current_round_no}: queued")
 
 
-@flow_app.command("round")
-def flow_round(flow_id: int, round_no: int) -> None:
-    """显示历史快照、原始/有效结论、合并证据及更正审计。"""
+@flow_app.command("history")
+def flow_history(flow_id: int, round_no: int = typer.Option(..., "--round", min=1)) -> None:
+    """按轮次显示状态、归档、合并证据与自动更正的原始活动记录。"""
+    from app.persistence.activity import ActivityStore
+
     with _store() as store:
-        snapshot = store.flows.get_round(flow_id, round_no)
-        if snapshot is None:
+        flow = store.flows.get_flow(flow_id)
+        if flow is None or round_no > flow.current_round_no:
             raise typer.Exit(1)
-        typer.echo(snapshot.model_dump_json(indent=2))
-        with store.connection() as connection:
-            rows = connection.execute(
-                "SELECT row_to_json(c)::text AS audit FROM flow_round_corrections c"
-                " WHERE flow_id=%s AND round_no=%s ORDER BY version",
-                (flow_id, round_no),
-            ).fetchall()
-        for row in rows:
-            typer.echo(row["audit"])
-
-
-@flow_app.command("correct-archive")
-def flow_correct_archive(
-    flow_id: int,
-    round_no: int,
-    expected_version: int = typer.Option(..., min=0),
-    actor: str = typer.Option(...),
-    reason: str = typer.Option(...),
-    confirm: bool = typer.Option(False, "--confirm"),
-) -> None:
-    """确认归档前已合并的证据，更正废弃结论；永不恢复执行。"""
-    from app.persistence.rounds import RoundStore
-
-    with _store() as store:
-        try:
-            result = RoundStore(store.database).correct_archive(
-                flow_id,
-                round_no,
-                expected_version=expected_version,
-                actor=actor,
-                reason=reason,
-                confirmed=confirm,
-            )
-        except ValueError as error:
-            typer.echo(str(error), err=True)
-            raise typer.Exit(1) from None
-        typer.echo(result.model_dump_json(indent=2))
+        for item in ActivityStore(store.database).history(flow_id, round_no):
+            typer.echo(item.model_dump_json())
 
 
 if __name__ == "__main__":

@@ -5,8 +5,9 @@ from datetime import timedelta
 import pytest
 
 from app.domain.context_models import MAX_DISCUSSIONS
-from app.domain.models import ArchiveReason, FlowState, JobKind
+from app.domain.models import FlowState, JobKind
 from app.domain.review_models import BatchState, FeedbackRef
+from app.persistence.activity import ActivityStore
 from app.persistence.store import Store
 from tests.test_pr_lifecycle import GitHub, check
 from tests.test_pr_lifecycle import lifecycle_flow as lifecycle_flow  # noqa: PLC0414
@@ -37,15 +38,15 @@ async def test_reopen_retained_signals_stay_retired_across_batches_and_restart(
         tx.reviews.complete(batch.id, outcome, consumed, [])
     await check(store, flow, GitHub(flow))
     await check(store, flow, GitHub(flow, "open"))
-    archived = store.flows.get_round(flow.id, 1)
-    assert archived is not None and archived.archive_reason is ArchiveReason.ABANDONED
+    archived = ActivityStore(store.database).archived(flow.id, 1)
+    assert archived is not None and archived.metadata["archive_reason"] == "abandoned"
     assert settle(store) == []
 
     restarted = Store(store.database_url, clock=lambda: clock.now)
     try:
         assert settle(restarted) == []
         assert restarted.jobs.list_jobs(flow.id) == []
-        assert restarted.flows.get_round(flow.id, 1) == archived
+        assert ActivityStore(restarted.database).archived(flow.id, 1) == archived
     finally:
         restarted.close()
 

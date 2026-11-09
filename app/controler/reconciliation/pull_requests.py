@@ -21,7 +21,6 @@ from app.persistence.deliveries import DeliveryStore
 from app.persistence.flows import FlowStore
 from app.persistence.jobs import JobStore
 from app.persistence.reconciliation import ReconcileState, ReconcileStore
-from app.persistence.rounds import RoundStore
 from app.persistence.stops import StopStore
 from app.persistence.workers import WorkerStore
 
@@ -162,7 +161,7 @@ class Reconciler:
                         jobs=jobs_tx,
                         stops=stops_tx,
                         workers=workers_tx,
-                        rounds=RoundStore(tx),
+                        origin="reconciliation",
                     )
                 elif fresh.state is not FlowState.ARCHIVED:
                     if remote.state == "closed":
