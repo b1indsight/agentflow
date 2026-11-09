@@ -14,7 +14,6 @@ from app.github import (
     GitHubError,
     GitHubErrorKind,
     Installation,
-    Repository,
     retry_delay,
 )
 from app.github.repositories import LabelDefinition
@@ -22,56 +21,21 @@ from app.github.repositories import LabelDefinition
 PENDING_INTERVAL = 300
 CONFIRMED_INTERVAL = 86400
 
-FLOW_LABEL_DEFINITIONS = (
-    LabelDefinition(name="flow:queued", color="d4c5f9", description="FlowTool task queued"),
-    LabelDefinition(name="flow:running", color="1d76db", description="FlowTool task running"),
-    LabelDefinition(
-        name="flow:review", color="fbca04", description="FlowTool task awaiting review"
-    ),
-    LabelDefinition(name="flow:blocked", color="b60205", description="FlowTool task blocked"),
-    LabelDefinition(name="flow:finalizing", color="0052cc", description="FlowTool task finalizing"),
-    LabelDefinition(name="flow:archived", color="0e8a16", description="FlowTool task archived"),
-)
-FLOW_LABEL_NAMES = frozenset(label.name for label in FLOW_LABEL_DEFINITIONS)
-
 
 class LabelSynchronizer:
-    """Share expiring repository confirmations between discovery and target reconciliation."""
+    """Cache successful checks in memory; restart or uncertainty simply causes a fresh read."""
 
     def __init__(self, github: GitHubApp, settings: ServerSettings) -> None:
         self.github = github
         self._confirmed: dict[tuple[int, str], float] = {}
-        self._pending: dict[tuple[int, str], asyncio.Task[tuple[str, ...]]] = {}
         self.definitions = (
-            LabelDefinition(
-                name=settings.trigger_label, color="5319e7", description="Start a FlowTool task"
-            ),
-            *FLOW_LABEL_DEFINITIONS,
+            LabelDefinition(name=settings.trigger_label, color="5319e7",
+                            description="Start a FlowTool task"),
+            LabelDefinition(name=settings.in_review_label, color="fbca04",
+                            description="FlowTool delivery awaiting review"),
+            LabelDefinition(name=settings.done_label, color="0e8a16",
+                            description="FlowTool task merged and archived"),
         )
-
-    async def ensure(self, repository: Repository) -> None:
-        """Provision once per repository, sharing in-flight success or failure with waiters.
-
-        The initiating caller owns the request's lifetime; cancelling a waiter must not
-        cancel it. Only success is cached, and cancellation/failure allows a fresh attempt.
-        """
-        identity = (repository.installation.installation_id, repository.full_name.casefold())
-        if self._confirmed.get(identity, 0) > monotonic():
-            return
-        self._confirmed.pop(identity, None)
-        pending = self._pending.get(identity)
-        if pending is not None:
-            await asyncio.shield(pending)
-            return
-        pending = asyncio.create_task(repository.ensure_labels(self.definitions))
-        self._pending[identity] = pending
-        try:
-            created = await pending
-            self._confirmed[identity] = monotonic() + CONFIRMED_INTERVAL
-            logger.info("repository labels confirmed: repo={} created={}",
-                        repository.full_name, created)
-        finally:
-            self._pending.pop(identity, None)
 
     async def run(self) -> None:
         """Scan in the background without gating readiness; the runtime owns cancellation."""
@@ -110,12 +74,20 @@ class LabelSynchronizer:
         while True:
             repositories = await installation.fetch_repositories(page=page)
             for repo in repositories.items:
+                identity = (installation.installation_id, repo.full_name.casefold())
+                if self._confirmed.get(identity, 0) > monotonic():
+                    continue
+                self._confirmed.pop(identity, None)
                 try:
-                    await self.ensure(repo)
+                    created = await repo.ensure_labels(self.definitions)
                 except GitHubError as error:
                     if error.kind is GitHubErrorKind.RATE_LIMITED or error.retry_after:
                         raise
                     logger.warning("repository labels pending: repo={} {}", repo.full_name, error)
+                else:
+                    self._confirmed[identity] = monotonic() + CONFIRMED_INTERVAL
+                    logger.info("repository labels confirmed: repo={} created={}",
+                                repo.full_name, created)
             if repositories.next_cursor is None:
                 return
             page = int(repositories.next_cursor)

@@ -35,7 +35,7 @@ from app.domain.models import (
     JobState,
     VcsKind,
 )
-from app.github import GitHubError, GitHubErrorKind, Issue, PullRequest, Repository
+from app.github import GitHubError, GitHubErrorKind, Issue, Repository
 from app.persistence.store import Store
 from tests.github import RecordingGitHub
 from tests.test_coordinator import apply_result, coordinator
@@ -257,36 +257,41 @@ async def test_cancel_before_terminal_keeps_executor_slot_until_result_ack(scena
     assert not github.comments and not store.enqueued
 
 
-async def test_delivery_and_replay_leave_state_labels_to_the_projection(initial_scenario):
-    # Result replay must neither overwrite human labels nor race the state projector.
+async def test_review_label_preserves_user_labels_on_delivery_and_replay(initial_scenario):
+    # Human labels may predate delivery; replaying a frozen status intent must not erase them.
     store, github, job, result = initial_scenario
     github.labels = [["bug", "user-owned"]]
     subject = coordinator(store, github)
     await apply_result(subject, job, result)
     await apply_result(subject, job, result)
-    assert github.labels == [["bug", "user-owned"]]
-    assert [call for call in github.resource_calls if call["operation"] == "add_label"] == []
+    assert github.labels[-1] == ["bug", "user-owned", "flow:in-review"]
+    assert len(github.labels) == 2
+    assert [call for call in github.resource_calls if call["operation"] == "add_label"] == [
+        {
+            "operation": "add_label",
+            "installation_id": store.flow.installation_id,
+            "repo": store.flow.repo,
+            "number": 17,
+        }
+    ]
 
 
 async def test_initial_delivery_commits_only_after_all_required_effects(
     initial_scenario, monkeypatch
 ) -> None:
     store, github, job, result = initial_scenario
-    original = PullRequest.request_reviewers
+    original = Issue.add_label
     limited = [True]
 
-    async def request_reviewers(pr, reviewers):
+    async def add_label(issue, label):
         if limited:
             limited.pop()
             raise GitHubError(
-                GitHubErrorKind.RATE_LIMITED,
-                "request_reviewers",
-                status_code=429,
-                request_rejected=True,
+                GitHubErrorKind.RATE_LIMITED, "add_label", status_code=429, request_rejected=True
             )
-        await original(pr, reviewers)
+        await original(issue, label)
 
-    monkeypatch.setattr(PullRequest, "request_reviewers", request_reviewers)
+    monkeypatch.setattr(Issue, "add_label", add_label)
     with pytest.raises(ResultPending):
         await apply_result(coordinator(store, github), job, result)
     assert store.delivery.state is DeliveryState.OPENING

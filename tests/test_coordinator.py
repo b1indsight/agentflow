@@ -373,7 +373,7 @@ async def test_initial_job_crosses_worker_boundary_and_opens_pr() -> None:
     assert store.delivery.pr_number == 17
     assert github.opened == ["flow/1"]
     assert github.review_requests == [["carol"]]
-    assert github.labels == []  # State labels belong to the independent projection.
+    assert github.labels == [["flow:in-review"]]
 
 
 @pytest.mark.asyncio

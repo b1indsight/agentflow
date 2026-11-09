@@ -139,12 +139,8 @@ async def test_scan_cadence_retries_failures_and_rescans_after_restart(tmp_path,
     async def ensure(self, definitions):
         assert [definition.name for definition in definitions] == [
             "custom:flow",
-            "flow:queued",
-            "flow:running",
-            "flow:review",
-            "flow:blocked",
-            "flow:finalizing",
-            "flow:archived",
+            "flow:in-review",
+            "custom:done",
         ]
         calls.append(self.full_name)
         if self.full_name in failed:
@@ -173,101 +169,6 @@ async def test_scan_cadence_retries_failures_and_rescans_after_restart(tmp_path,
     # A restart discards timing hints, so both repositories are read again.
     await LabelSynchronizer(github, configured).sweep()
     assert len(calls) == 8
-
-
-@pytest.mark.parametrize("fails", [False, True])
-async def test_repository_confirmation_shares_inflight_result_but_not_failed_cache(
-    tmp_path, monkeypatch, fails,
-):
-    # Bootstrap and multiple targets can reach the same repository before its full scan finishes.
-    configured = settings(tmp_path)
-    github = GitHubApp(configured)
-    sync = LabelSynchronizer(github, configured)
-    entered, joined, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
-    calls = []
-    error = GitHubError(GitHubErrorKind.TRANSIENT, "list_repository_labels")
-
-    async def provision(repository, definitions):
-        identity = repository.installation.installation_id, repository.full_name.casefold()
-        calls.append(identity)
-        if identity == (42, "owner/repo"):
-            entered.set()
-            await release.wait()
-            if fails:
-                raise error
-        return ()
-
-    monkeypatch.setattr(Repository, "ensure_labels", provision)
-    repository = github.installation(42).repository("owner/repo")
-    initiator = asyncio.create_task(sync.ensure(github.installation(42).repository("Owner/Repo")))
-
-    async def wait_for_confirmation():
-        joined.set()
-        await sync.ensure(repository)
-
-    waiter = asyncio.create_task(wait_for_confirmation())
-    try:
-        await asyncio.wait_for(entered.wait(), 3)
-        await asyncio.wait_for(joined.wait(), 3)
-        # An unrelated repository or installation must not wait for this request.
-        await asyncio.wait_for(sync.ensure(github.installation(42).repository("owner/other")), 3)
-        await asyncio.wait_for(sync.ensure(github.installation(43).repository("owner/repo")), 3)
-        assert calls == [(42, "owner/repo"), (42, "owner/other"), (43, "owner/repo")]
-    finally:
-        release.set()
-        results = await asyncio.gather(initiator, waiter, return_exceptions=True)
-    assert results == ([error, error] if fails else [None, None])
-    expected_calls = len(calls) + int(fails)
-    fails = False
-    await sync.ensure(repository)
-    await sync.ensure(repository)
-    assert len(calls) == expected_calls
-
-
-@pytest.mark.parametrize("cancel_initiator", [False, True])
-async def test_repository_confirmation_cancellation_does_not_leave_stuck_requests(
-    tmp_path, monkeypatch, cancel_initiator,
-):
-    # A cancelled target must not cancel bootstrap's request; runtime cancellation must drain it.
-    configured = settings(tmp_path)
-    github = GitHubApp(configured)
-    sync = LabelSynchronizer(github, configured)
-    entered, joined, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
-    calls = 0
-
-    async def provision(repository, definitions):
-        nonlocal calls
-        calls += 1
-        entered.set()
-        await release.wait()
-        return ()
-
-    monkeypatch.setattr(Repository, "ensure_labels", provision)
-    repository = github.installation(42).repository("owner/repo")
-    initiator = asyncio.create_task(sync.ensure(repository))
-
-    async def wait_for_confirmation():
-        joined.set()
-        await sync.ensure(repository)
-
-    waiter = asyncio.create_task(wait_for_confirmation())
-    try:
-        await asyncio.wait_for(entered.wait(), 3)
-        await asyncio.wait_for(joined.wait(), 3)
-        cancelled = initiator if cancel_initiator else waiter
-        cancelled.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await cancelled
-        if cancel_initiator:
-            with pytest.raises(asyncio.CancelledError):
-                await waiter
-        else:
-            assert not initiator.done()
-    finally:
-        release.set()
-        await asyncio.gather(initiator, waiter, return_exceptions=True)
-    await sync.ensure(repository)
-    assert calls == (2 if cancel_initiator else 1)
 
 
 async def test_lost_creation_response_is_recovered_by_listing_without_repeating_write(
@@ -337,9 +238,7 @@ async def test_background_label_discovery_does_not_block_readiness_and_stops_wit
 
     monkeypatch.setattr(GitHubApp, "fetch_installations", installations)
     configured = settings(tmp_path).model_copy(update={"database_url": postgresql_url})
-    runtime = ServerRuntime(configured)
-    assert runtime.flow_label_sync.repository_labels is runtime.label_sync
-    application = create_app(runtime)
+    application = create_app(ServerRuntime(configured))
     async with application.router.lifespan_context(application):
         await asyncio.wait_for(entered.wait(), 3)
         async with httpx.AsyncClient(

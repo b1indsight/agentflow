@@ -3,7 +3,7 @@
 from datetime import UTC
 
 from app.contracts.protocol import ArchiveResult, ArchiveTask
-from app.contracts.result_models import CommentEffect, Effect, EffectState
+from app.contracts.result_models import CommentEffect, Effect, EffectState, LabelEffect
 from app.domain.models import DeliveryState, Flow, FlowDelivery, FlowState, Job, JobKind, JobState
 from app.persistence.deliveries import DeliveryStore
 from app.persistence.jobs import JobStore
@@ -60,8 +60,10 @@ def verify_archive(
         raise ValueError("archive receipt does not match its frozen command")
 
 
-def archive_effects(flow: Flow, delivery: FlowDelivery) -> list[Effect]:
-    """Freeze workspace receipts; business-state labels follow the committed Flow."""
+def archive_effects(
+    flow: Flow, delivery: FlowDelivery, *, done_label: str, in_review_label: str,
+) -> list[Effect]:
+    """Freeze deterministic completion messages and incremental labels for both targets."""
     if (flow.installation_id is None or delivery.pr_number is None
             or delivery.merge_commit_sha is None or delivery.merged_at is None):
         raise ValueError("archive notification requires installation and persisted merge facts")
@@ -76,15 +78,14 @@ def archive_effects(flow: Flow, delivery: FlowDelivery) -> list[Effect]:
     effects: list[Effect] = []
     for number in (flow.issue_number, delivery.pr_number):
         key = f"archive:{delivery.pr_number}:{number}"
-        effects.append(
-            CommentEffect(
-                key=f"{key}:comment",
-                installation_id=flow.installation_id,
-                repo=flow.repo,
-                number=number,
-                body=body,
-            ),
-        )
+        effects.extend([
+            LabelEffect(key=f"{key}:done", installation_id=flow.installation_id,
+                        repo=flow.repo, number=number, label=done_label, present=True),
+            LabelEffect(key=f"{key}:in-review", installation_id=flow.installation_id,
+                        repo=flow.repo, number=number, label=in_review_label, present=False),
+            CommentEffect(key=f"{key}:comment", installation_id=flow.installation_id,
+                          repo=flow.repo, number=number, body=body),
+        ])
     return effects
 
 

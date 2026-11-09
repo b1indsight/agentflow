@@ -10,7 +10,6 @@ from typing import Annotated, Literal
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
-from app.domain.models import FlowState
 from app.github import ProjectConfig
 
 
@@ -118,12 +117,6 @@ class ServerSettings(BaseSettings):
                   (self.trigger_label, self.in_review_label, self.done_label)}
         if len(labels) != 3:
             raise ValueError("trigger, in_review and done labels must be distinct")
-        # Legacy names are cleanup-only. Reject aliases so a state projection can
-        # neither retrigger a Flow nor turn migration cleanup into a state mutation.
-        if labels & {f"flow:{state.value}" for state in FlowState}:
-            raise ValueError(
-                "trigger, in_review and done labels must not overlap managed Flow state labels"
-            )
         return self
 
     @model_validator(mode="after")

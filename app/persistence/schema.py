@@ -1,7 +1,6 @@
 """Complete PostgreSQL schema in dependency order; no historical migrations."""
 
 from app.persistence.console_schema import CONSOLE_SCHEMA
-from app.persistence.flow_labels import FLOW_LABEL_SCHEMA
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS flows (
@@ -366,6 +365,5 @@ SCHEMAS = (
     RECONCILE_SCHEMA,
     PROJECT_SCHEMA,
     CONSOLE_SCHEMA,
-    FLOW_LABEL_SCHEMA,
     INFERENCE_SCHEMA,
 )

@@ -20,6 +20,7 @@ from app.contracts.receipts import decode_result_inbox
 from app.contracts.result_models import (
     CommentEffect,
     Effect,
+    LabelEffect,
     PullRequestEffect,
     ResultPending,
     ResultPlan,
@@ -517,7 +518,10 @@ class ResultApplication:
                 update={
                     "flow_state": FlowState.ARCHIVED,
                     "archive": result,
-                    "effects": archive_effects(flow, delivery),
+                    "effects": archive_effects(
+                        flow, delivery, done_label=self.settings.done_label,
+                        in_review_label=self.settings.in_review_label,
+                    ),
                 }
             )
         raise TypeError(f"unsupported result: {type(result).__name__}")
@@ -682,7 +686,16 @@ class ResultApplication:
         )
 
     def _review_effects(self, flow: Flow, number: int | Literal["created_pr"]) -> list[Effect]:
-        effects: list[Effect] = []
+        effects: list[Effect] = [
+            LabelEffect(
+                key="labels",
+                installation_id=self._installation(flow),
+                repo=flow.repo,
+                number=number,
+                label=self.settings.in_review_label,
+                present=True,
+            )
+        ]
         if self.settings.reviewers:
             effects.append(
                 ReviewersEffect(

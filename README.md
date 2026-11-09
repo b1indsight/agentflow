@@ -67,10 +67,9 @@ Flow 使用 `queued/running/review/blocked/finalizing/archived` 六态；看板�
   终态结果先持久接收，再执行带回执的 GitHub 操作，最后原子提交本地结果并回复 `server.accept_result`。
   恢复时核对远端状态，避免重复派生 job 或重复发送评论；无法确认的远端结果保留待核对状态。
 - **合并与归档**：人工合并后由原 worker 核验并清理工作区，对关联 Issue/PR 发布工作区处置凭据。
-  业务副作用结清后原子写入带轮次的归档 activity、释放 worker 并进入 archived；六态标签独立收敛，失败不回写 Flow。
+  沿用结果副作用为 Issue/PR 添加完成标签、移除待审标签；业务副作用结清后原子写入带轮次的归档
+  activity、释放 worker 并进入 archived。标签失败沿用结果恢复与重试，不另建同步任务。
   归档前合并优先于废弃，但不解除 blocked。迟到证据能证明归档前已合并时自动更正为成功，永不恢复执行。
-  标签定义初始化按 installation/仓库共享并发请求与每日确认缓存，Issue/PR 状态仍分别校验和同步；
-  初始化失败不缓存成功，多 controller 之间不共享该内存缓存。
 - **GitHub 请求超时**：App 和 installation 客户端的连接、读写及连接池等待默认各为 30 秒，
   可通过 `FLOWTOOL_GITHUB_REQUEST_TIMEOUT_SECONDS` 调整；这不是整批结果恢复的总时限。
 - **持久反馈批次**：反馈版本与 settle deadline 入库，重启后恢复；同 Flow 串行处理冻结批次，
@@ -251,15 +250,16 @@ uv run flowtool flow history <FLOW_ID> --round 1
 明确拒绝通知（例如 reviewer 请求 422），结果和回执保持待完成；修正 GitHub 端原因后使用同一命令
 只重试失败通知，成功后原子提交交付/session/反馈，不重新运行修订。状态不明的操作仍须先核对。
 
-serve 后台补齐触发标签和六个 `flow:<state>` 标签。Issue 依据明确的 owner Flow，当前 PR 依据当前轮次，
-历史 PR 固定映射 archived；Projects 和看板均只映射 Flow.state，finalizing 映射进行中。
-`FLOWTOOL_DONE_LABEL`、`FLOWTOOL_IN_REVIEW_LABEL` 仅保留用于清理旧托管标签；不得与新六态标签或触发标签重名。
+serve 后台补齐三个配置标签：`FLOWTOOL_TRIGGER_LABEL`（默认 `flow`）、
+`FLOWTOOL_IN_REVIEW_LABEL`（默认 `flow:in-review`）、`FLOWTOOL_DONE_LABEL`（默认 `flow:done`）。
+名称不得为空或重名（忽略大小写）。Projects 和看板仍映射 Flow.state，finalizing 映射进行中。
 未建齐或检查失败的仓库每 **300 秒**检查；确认标签齐全后每 **24 小时**复查并补回缺失项，
 人工预建的也计入，已有名称、颜色和描述不变。检查时间只保存在内存，重启后重新扫描确认。
 新安装与新增授权仓库每 300 秒发现；暂停的 installation 和归档仓库跳过。
 App 需有 Issues write 权限；初始化失败不阻塞服务 readiness，日志记录待重试原因，限流可延长等待。
-标签定义初始化不添加触发标签。独立标签投影持续增量核对（默认每 300 秒），保留用户标签；
-失权、失败或重启后继续重试，远端标签可能短暂滞后，不影响已经提交的业务状态。
+标签定义初始化不向 Issue/PR 添加标签。首次交付及满足重新送审条件的修订为 PR 添加待审标签；
+合并清理确认后为 Issue/PR 添加完成标签、移除待审标签，增量操作保留用户和触发标签。
+这些操作沿用 `LabelEffect` 的持久化结果恢复；不持续同步六态，也不自动修复结果完成后被人工改动的标签。
 `flow show` 区分清理与 GitHub 回写进度；清理已确认但回写被明确拒绝时，修正远端原因后
 执行 `flow retry <id>`，只重置原 job 的失败 effects，保留已完成回执、attempt 和 worker journal。
 评论发送前的本地认证失败也可在修复凭据后按此方式重试；后续查询失败不会清除已有不确定发送记录。
