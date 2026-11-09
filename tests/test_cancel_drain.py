@@ -138,9 +138,10 @@ async def test_merge_during_cancel_retains_binding_for_original_archive(store):
     assert archive is not None and archive.kind is JobKind.ARCHIVE
 
 
-def test_unresolved_dispatched_effect_blocks_stop_even_if_result_was_marked_applied(store):
+@pytest.mark.parametrize("kind", ["comment", "label", None])
+def test_unresolved_dispatched_effect_blocks_stop_except_skipped_status_labels(store, kind):
     flow, job = running(store)
-    # Older code could mark a cancelled effect skipped without reconciling a dispatched write.
+    # Only skipped display updates can settle without a remote receipt, not other writes.
     with store.connection() as conn:
         conn.execute(
             "INSERT INTO result_applications(job_id,digest,plan,created_at) VALUES(%s,'digest','{}',now())",
@@ -148,19 +149,22 @@ def test_unresolved_dispatched_effect_blocks_stop_even_if_result_was_marked_appl
         )
         conn.execute(
             "INSERT INTO result_effects(job_id,effect_key,position,payload,state,dispatched_at,next_attempt_at)"
-            " VALUES(%s,'comment',0,'{}','skipped',now(),now())",
-            (job.id,),
+            " VALUES(%s,'effect',0,jsonb_build_object('kind',%s::text),'skipped',now(),now())",
+            (job.id, kind),
         )
     ControlService(
         database=store.database,
     ).cancel(flow)
     stop = store.stops.pending("w")
     receipt = ExecutionStopped(**stop.fence().model_dump(), execution_nonce="owned")
-    assert not store.stops.confirm("w", receipt, "epoch")
-    assert store.workers.get_flow_execution(flow.id).released_at is None
-    with store.connection() as conn:
-        conn.execute("UPDATE result_effects SET receipt='{}' WHERE job_id=%s", (job.id,))
+    if kind != "label":
+        assert not store.stops.confirm("w", receipt, "epoch")
+        assert store.workers.get_flow_execution(flow.id).released_at is None
+        with store.connection() as conn:
+            conn.execute("UPDATE result_effects SET receipt='{}' WHERE job_id=%s", (job.id,))
     assert store.stops.confirm("w", receipt, "epoch")
+    assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
+    assert store.workers.get_flow_execution(flow.id).released_at is not None
 
 
 async def test_finalizing_flow_reserves_issue_until_late_merge_cleanup_settles(store):

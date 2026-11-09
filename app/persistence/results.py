@@ -12,6 +12,13 @@ from app.domain.models import Job
 from app.github import GitHubError, retry_delay
 from app.persistence.repository import Repository
 
+# Settlement predicate for result_effects AS e, shared by archive, stop, and binding release.
+# Skipped display labels retain uncertain-write evidence without blocking business settlement.
+UNCONFIRMED_EFFECT_SQL = (
+    "e.dispatched_at IS NOT NULL AND e.receipt IS NULL"
+    " AND (e.state<>'skipped' OR e.payload->>'kind' IS DISTINCT FROM 'label')"
+)
+
 
 class ResultStore(Repository):
     """Share the database context's connection, including its explicit transaction when preparing."""

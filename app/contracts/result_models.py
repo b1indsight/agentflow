@@ -45,7 +45,7 @@ class ReviewersEffect(EffectSpec):
 
 
 class LabelEffect(EffectSpec):
-    """Own one label's presence; unrelated labels never participate in reconciliation."""
+    """Best-effort status display; failures never gate delivery or archive settlement."""
 
     kind: Literal["label"] = "label"
     number: int | Literal["created_pr"]

@@ -44,6 +44,7 @@ from app.persistence.inference_notices import InferenceNoticeStore
 from app.persistence.jobs import JobStore
 from app.persistence.records import required
 from app.persistence.repository import Repository
+from app.persistence.results import UNCONFIRMED_EFFECT_SQL
 
 # A frozen archive may have started deleting before its Started message reached serve.
 _MAY_HAVE_EXECUTED = (
@@ -91,7 +92,7 @@ class WorkerStore(Repository):
                 " WHERE s.job_id=j.id AND s.assignment_token=j.assignment_token AND s.state='confirmed'))))"
                 " AND NOT EXISTS (SELECT 1 FROM result_effects e JOIN jobs j ON j.id=e.job_id"
                 " JOIN flows f ON f.id=j.flow_id WHERE j.flow_id=flow_executions.flow_id"
-                " AND j.round_no=f.current_round_no AND e.dispatched_at IS NOT NULL AND e.receipt IS NULL)",
+                f" AND j.round_no=f.current_round_no AND {UNCONFIRMED_EFFECT_SQL})",
                 (now, flow_id),
             )
         return result.rowcount == 1

@@ -11,8 +11,9 @@
 - Flow 采用 queued/running/review/blocked/finalizing/archived 六态，保留现有处理器、事务、ResultPlan
   和 activity 触发器。看板隐藏 finalizing 独立列，Projects 从 Flow 投影。
   Issue/PR 标签沿用原有初始化和 LabelEffect，仅在交付、合并清理节点更新，不新增六态标签同步或重试表。
+  状态标签失败保存错误后跳过，不阻塞 PR 关联、交付或归档，也不单独重试；触发标签职责不变。
   未合并关闭进入废弃收尾；归档结果仅 succeeded/abandoned，无 PR 调查可凭结论成功结束。
-  收尾等待停止、结果、副作用和工作区处置后才释放绑定并归档；失败与未知执行进入 blocked。
+  收尾等待停止、结果、必要副作用和工作区处置后才释放绑定并归档；失败与未知执行进入 blocked。
   显式恢复开启同一 Flow 新轮次，隔离旧交付/任务/反馈；核验归档前合并的迟到证据后自动更正成功，
   不自动恢复。轮次与归档历史统一写入 activity，删除独立 Round 表及人工更正入口。
   旧 PR、Worker 活动按真实身份标记轮次，未知/共享内容留空；旧四态库需离线预检迁移，启动不猜测旧状态。

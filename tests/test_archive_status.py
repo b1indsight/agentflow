@@ -1,4 +1,4 @@
-"""Archive notifications retain cleanup receipts until every GitHub effect is durable."""
+"""Archive notifications retain cleanup receipts; status labels never gate settlement."""
 
 from datetime import UTC, datetime, timedelta
 
@@ -10,7 +10,7 @@ from githubkit import GitHub
 from githubkit.cache.mem_cache import MemCacheStrategy
 
 from app.contracts.protocol import ArchiveResult
-from app.contracts.result_models import CommentEffect, EffectState, ResultPending
+from app.contracts.result_models import CommentEffect, EffectState, LabelEffect, ResultPending
 from app.controler.workflow.archive import archive_progress
 from app.controler.workflow.effects import ResultEffects
 from app.controler.workflow.service import ControlService
@@ -184,9 +184,23 @@ async def test_archive_recovers_remote_write_before_receipt_after_restart(
         raise GitHubError(GitHubErrorKind.TRANSIENT, operation)
 
     monkeypatch.setattr(Issue, operation, lost_response)
-    with pytest.raises(ResultPending):
-        await subject.results.apply(job.id)
-    assert store.workers.get_flow_execution(flow.id).released_at is None
+    if operation == "comment":
+        with pytest.raises(ResultPending):
+            await subject.results.apply(job.id)
+        assert store.workers.get_flow_execution(flow.id).released_at is None
+    else:
+        assert await subject.results.apply(job.id) is JobState.DONE
+        skipped = [r for r in store.results.list_effects(job.id) if r.state is EffectState.SKIPPED]
+        assert len(skipped) == 2
+        assert all(
+            isinstance(r.payload, LabelEffect)
+            and r.receipt is None
+            and r.dispatched_at is not None
+            and r.last_error
+            for r in skipped
+        )
+        assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
+        assert store.workers.get_flow_execution(flow.id).released_at is not None
     monkeypatch.setattr(Issue, operation, original)
     store.results.recover_claims()
     due(store, job.id)
@@ -425,26 +439,38 @@ async def test_archive_rate_limit_waits_until_reset_without_retry_after(store, t
     assert len(requests) == 2
 
 
-@pytest.mark.parametrize("status,kind", [(429, GitHubErrorKind.RATE_LIMITED),
-                                       (503, GitHubErrorKind.TRANSIENT)])
-async def test_archive_transient_label_errors_resume_automatically(
-    store, monkeypatch, status, kind, archive_resources
+@pytest.mark.parametrize(
+    "operation,kind,status",
+    [
+        ("fetch_labels", GitHubErrorKind.PERMISSION, 403),
+        ("add_label", GitHubErrorKind.NOT_FOUND, 404),
+        ("add_label", GitHubErrorKind.RATE_LIMITED, 429),
+        ("remove_label", GitHubErrorKind.TRANSIENT, 503),
+    ],
+)
+async def test_archive_label_errors_do_not_block_completion(
+    store, monkeypatch, operation, kind, status, archive_resources
 ):
-    flow, job, _, _github, subject = await pending_archive(store)
-    original = Issue.add_label
+    # Display failures must not retain a workspace whose cleanup is already confirmed.
+    flow, job, _, github, subject = await pending_archive(store)
 
-    async def unavailable(issue, label):
-        raise GitHubError(kind, "add_label", status_code=status, request_rejected=status == 429)
+    async def unavailable(*args):
+        raise GitHubError(kind, operation, status_code=status, request_rejected=status < 500)
 
-    monkeypatch.setattr(Issue, "add_label", unavailable)
-    with pytest.raises(ResultPending):
-        await subject.results.apply(job.id)
-    record = store.results.list_effects(job.id)[0]
-    assert record.state in {EffectState.RETRY, EffectState.UNCERTAIN}
-    assert store.workers.get_flow_execution(flow.id).released_at is None
-    monkeypatch.setattr(Issue, "add_label", original)
-    due(store, job.id)
+    monkeypatch.setattr(Issue, operation, unavailable)
     assert await subject.results.apply(job.id) is JobState.DONE
+    skipped = [r for r in store.results.list_effects(job.id) if r.state is EffectState.SKIPPED]
+    assert skipped
+    assert all(
+        isinstance(r.payload, LabelEffect)
+        and r.receipt is None
+        and r.last_error
+        and str(status) in r.last_error
+        for r in skipped
+    )
+    assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
+    assert store.workers.get_flow_execution(flow.id).released_at is not None
+    assert len(github.notifications) == 2
 
 
 async def test_existing_status_labels_need_no_mutation(store, archive_resources):

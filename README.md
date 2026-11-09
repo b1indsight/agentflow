@@ -68,7 +68,7 @@ Flow 使用 `queued/running/review/blocked/finalizing/archived` 六态；看板�
   恢复时核对远端状态，避免重复派生 job 或重复发送评论；无法确认的远端结果保留待核对状态。
 - **合并与归档**：人工合并后由原 worker 核验并清理工作区，对关联 Issue/PR 发布工作区处置凭据。
   沿用结果副作用为 Issue/PR 添加完成标签、移除待审标签；业务副作用结清后原子写入带轮次的归档
-  activity、释放 worker 并进入 archived。标签失败沿用结果恢复与重试，不另建同步任务。
+  activity、释放 worker 并进入 archived。状态标签更新失败记入日志后跳过，不阻塞 PR 关联、交付或归档。
   归档前合并优先于废弃，但不解除 blocked。迟到证据能证明归档前已合并时自动更正为成功，永不恢复执行。
 - **GitHub 请求超时**：App 和 installation 客户端的连接、读写及连接池等待默认各为 30 秒，
   可通过 `FLOWTOOL_GITHUB_REQUEST_TIMEOUT_SECONDS` 调整；这不是整批结果恢复的总时限。
@@ -259,13 +259,15 @@ serve 后台补齐三个配置标签：`FLOWTOOL_TRIGGER_LABEL`（默认 `flow`�
 App 需有 Issues write 权限；初始化失败不阻塞服务 readiness，日志记录待重试原因，限流可延长等待。
 标签定义初始化不向 Issue/PR 添加标签。首次交付及满足重新送审条件的修订为 PR 添加待审标签；
 合并清理确认后为 Issue/PR 添加完成标签、移除待审标签，增量操作保留用户和触发标签。
-这些操作沿用 `LabelEffect` 的持久化结果恢复；不持续同步六态，也不自动修复结果完成后被人工改动的标签。
-`flow show` 区分清理与 GitHub 回写进度；清理已确认但回写被明确拒绝时，修正远端原因后
+这些展示操作沿用 `LabelEffect`，GitHub 读取或写入失败时保存错误并标记 skipped，不再等待或重试该操作，
+也不阻塞 PR 关联、交付、停止确认或归档。响应不明时保留发送记录，不伪造成功回执。
+不持续同步六态、不保证标签最终一致，也不自动修复结果完成后被人工改动的标签；trigger 标签的触发职责不变。
+`flow show` 区分清理与 GitHub 回写进度；清理已确认但评论等必要回写被明确拒绝时，修正远端原因后
 执行 `flow retry <id>`，只重置原 job 的失败 effects，保留已完成回执、attempt 和 worker journal。
 评论发送前的本地认证失败也可在修复凭据后按此方式重试；后续查询失败不会清除已有不确定发送记录。
 状态写入由持久恢复逻辑处理，避免 SDK 内部重试掩盖此前已发送的请求；读取（含只读 GraphQL）
-与 push token 签发保留有限重试。确认查询失败仍等待恢复，并遵守 Retry-After 或限流重置时间。
-429/5xx 由恢复循环继续处理；评论结果不明时先查 marker，不盲目补发。收尾期间 Flow 保持 finalizing，
+与 push token 签发保留有限重试。必要操作的确认查询失败仍等待恢复，并遵守 Retry-After 或限流重置时间。
+必要操作的 429/5xx 由恢复循环继续处理；评论结果不明时先查 marker，不盲目补发。收尾期间 Flow 保持 finalizing，
 永久失败进入 blocked，原 worker 仍被保留。配置变更不改写已经冻结的通知。
 `on_archived` 是提交后的尽力插件回调，异常不破坏完成，不承诺跨崩溃仅调用一次。
 

@@ -17,6 +17,7 @@ from app.github import PullRequestMerge
 from app.persistence.activity import ActivityStore
 from app.persistence.records import required
 from app.persistence.repository import Repository
+from app.persistence.results import UNCONFIRMED_EFFECT_SQL
 
 
 class FlowStore(Repository):
@@ -218,7 +219,7 @@ class FlowStore(Repository):
                     " UNION ALL SELECT 1 FROM result_effects e JOIN jobs j ON j.id=e.job_id"
                     " WHERE j.flow_id=%s AND j.round_no=%s AND ((e.state NOT IN ('succeeded','skipped')"
                     " AND NOT (e.state='failed' AND e.dispatched_at IS NULL))"
-                    " OR (e.dispatched_at IS NOT NULL AND e.receipt IS NULL)) LIMIT 1",
+                    f" OR ({UNCONFIRMED_EFFECT_SQL})) LIMIT 1",
                     (flow_id, flow.current_round_no, flow_id, flow_id, flow.current_round_no),
                 ).fetchone()
                 is not None

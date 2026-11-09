@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 from uuid import uuid4
 
+from loguru import logger
+
 from app.contracts.result_models import (
     CommentEffect,
     EffectReceipt,
@@ -160,8 +162,26 @@ class ResultEffects:
                     uncertain or (record.dispatched_at is not None and not definite_rejection)
                 )
                 retryable = isinstance(exc, GitHubError) and exc.retryable
-                if (isinstance(record.payload, (ThreadReplyEffect, ResolveEffect))
-                        and not ambiguous and not retryable):
+                if isinstance(exc, GitHubError) and isinstance(record.payload, LabelEffect):
+                    # Display failures do not invalidate delivery or require a remote receipt.
+                    self.result_store.finish(
+                        record,
+                        EffectState.SKIPPED,
+                        error=str(exc),
+                        definitely_unsent=definite_rejection and not uncertain,
+                    )
+                    logger.warning(
+                        "status label skipped: job={} effect={} {}",
+                        plan.job_id,
+                        record.effect_key,
+                        exc,
+                    )
+                    continue
+                if (
+                    isinstance(record.payload, (ThreadReplyEffect, ResolveEffect))
+                    and not ambiguous
+                    and not retryable
+                ):
                     # A definite permission/deletion failure leaves a diagnostic and pending input;
                     # already delivered code must not trigger another Codex run to repair GitHub.
                     self.result_store.finish(record, EffectState.SUCCEEDED, receipt=EffectReceipt(

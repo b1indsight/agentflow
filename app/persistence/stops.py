@@ -15,6 +15,7 @@ from app.persistence.deliveries import DeliveryStore
 from app.persistence.flows import FlowStore
 from app.persistence.jobs import JobStore
 from app.persistence.repository import Repository
+from app.persistence.results import UNCONFIRMED_EFFECT_SQL
 from app.persistence.workers import WorkerStore
 
 
@@ -140,7 +141,7 @@ class StopStore(Repository):
                              (digest, intent.request_id))
                 if JobStore(tx).has_pending_result(receipt.flow_id) or conn.execute(
                         "SELECT 1 FROM result_effects e JOIN jobs j ON j.id=e.job_id"
-                        " WHERE j.flow_id=%s AND e.dispatched_at IS NOT NULL AND e.receipt IS NULL LIMIT 1",
+                        f" WHERE j.flow_id=%s AND {UNCONFIRMED_EFFECT_SQL} LIMIT 1",
                         (receipt.flow_id,),
                 ).fetchone() is not None:
                     return False
@@ -152,7 +153,7 @@ class StopStore(Repository):
                     not in {FlowState.FINALIZING, FlowState.BLOCKED, FlowState.ARCHIVED}
                 ):
                     return False
-                # Any previously dispatched effect must converge through the existing result engine.
+                # Required dispatched effects must converge through the existing result engine.
                 conn.execute("UPDATE execution_stops SET state='confirmed',confirmed_at=%s WHERE request_id=%s",
                              (tx.now(), intent.request_id))
                 conn.execute("UPDATE jobs SET state='failed',last_error='execution stopped',updated_at=%s"

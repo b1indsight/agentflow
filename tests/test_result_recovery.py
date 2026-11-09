@@ -20,7 +20,7 @@ from app.contracts.protocol import (
     terminal_digest,
 )
 from app.contracts.receipts import ResultInbox
-from app.contracts.result_models import EffectState, ResultPending
+from app.contracts.result_models import EffectState, LabelEffect, ResultPending
 from app.controler.workflow.coordinator import JobCoordinator
 from app.controler.workflow.service import ControlService
 from app.domain.delivery_models import OpenedDelivery
@@ -35,7 +35,7 @@ from app.domain.models import (
     JobState,
     VcsKind,
 )
-from app.github import GitHubError, GitHubErrorKind, Issue, Repository
+from app.github import GitHubError, GitHubErrorKind, Issue, PullRequest, Repository
 from app.persistence.store import Store
 from tests.github import RecordingGitHub
 from tests.test_coordinator import apply_result, coordinator
@@ -280,18 +280,21 @@ async def test_initial_delivery_commits_only_after_all_required_effects(
     initial_scenario, monkeypatch
 ) -> None:
     store, github, job, result = initial_scenario
-    original = Issue.add_label
+    original = PullRequest.request_reviewers
     limited = [True]
 
-    async def add_label(issue, label):
+    async def request_reviewers(pr, reviewers):
         if limited:
             limited.pop()
             raise GitHubError(
-                GitHubErrorKind.RATE_LIMITED, "add_label", status_code=429, request_rejected=True
+                GitHubErrorKind.RATE_LIMITED,
+                "request_reviewers",
+                status_code=429,
+                request_rejected=True,
             )
-        await original(issue, label)
+        await original(pr, reviewers)
 
-    monkeypatch.setattr(Issue, "add_label", add_label)
+    monkeypatch.setattr(PullRequest, "request_reviewers", request_reviewers)
     with pytest.raises(ResultPending):
         await apply_result(coordinator(store, github), job, result)
     assert store.delivery.state is DeliveryState.OPENING
@@ -307,6 +310,49 @@ async def test_initial_delivery_commits_only_after_all_required_effects(
     assert persisted.result_digest == accepted.result_digest
     assert persisted.result_received_at == accepted.result_received_at
     assert store.job_records[job.id].result_applied_at is not None
+
+
+@pytest.mark.parametrize(
+    "operation,kind,status",
+    [
+        ("fetch_labels", GitHubErrorKind.PERMISSION, 403),
+        ("add_label", GitHubErrorKind.NOT_FOUND, 404),
+        ("add_label", GitHubErrorKind.RATE_LIMITED, 429),
+        ("add_label", GitHubErrorKind.TRANSIENT, 503),
+    ],
+)
+async def test_status_label_failure_does_not_block_initial_delivery(
+    initial_scenario,
+    monkeypatch,
+    operation,
+    kind,
+    status,
+):
+    # The PR already exists when its display label fails; do not lose its association.
+    store, github, job, result = initial_scenario
+    calls = []
+
+    async def unavailable(*args):
+        calls.append(operation)
+        raise GitHubError(kind, operation, status_code=status, request_rejected=status < 500)
+
+    monkeypatch.setattr(Issue, operation, unavailable)
+    assert await apply_result(coordinator(store, github), job, result) is JobState.DONE
+    assert store.flow.state is FlowState.REVIEW
+    assert store.delivery.state is DeliveryState.OPEN
+    assert store.delivery.pr_number == 17
+    assert store.job_records[job.id].result_applied_at is not None
+    record = next(
+        r for r in store.results.list_effects(job.id) if isinstance(r.payload, LabelEffect)
+    )
+    assert record.state is EffectState.SKIPPED
+    assert record.receipt is None
+    assert record.last_error and str(status) in record.last_error
+    assert (record.dispatched_at is not None) is (status == 503)
+    assert github.review_requests == [["carol"]]
+    assert await apply_result(coordinator(store, github), job, result) is JobState.DONE
+    assert len(github.opened) == 1 and calls == [operation]
+    assert not store.enqueued
 
 
 async def test_closed_pr_after_lost_creation_response_finishes_without_new_writes(
