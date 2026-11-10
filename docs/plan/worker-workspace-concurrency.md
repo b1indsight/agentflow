@@ -133,3 +133,13 @@ Session 保持有界 FIFO。有效消息突发填满队列时暂停 reader，由
 旧 journal/manifest 能证明身份的部分保留并转换；缺少目标或结清凭据的历史记录保留且拒绝不安全接单，需要核对实际部署数据。多绑定运行后不能直接回退到只理解单执行的版本。
 
 本次已获提交、推送和创建 PR 的授权；真实数据迁移及部署仍需单独授权。PR 交付不代表已部署。
+
+## 9. 后续适配：恢复演练
+
+[PR #135](https://github.com/b1indsight/agentflow/pull/135) 的 Operations validation 在 worker 注册处失败：独立恢复演练仍使用旧单执行接口，未传 workspace 和仓库限额。全量 pytest 不执行该独立演练入口，因此此前回归没有覆盖到；使用相同 PostgreSQL 主版本在本地复现了该参数错误。
+
+恢复 fixture 改为在根锁内初始化真实推理目录、按仓库补充空目录并登记完整库存，再领取具体位置；不为通过演练而猜造 workspace 身份。assignment 和按 Flow 的 journal 保存领取返回的位置与代际，恢复后同时比较 workers 库存、Flow 绑定和 job 快照。备份仍不执行 Git、agent 或 GitHub 操作，也不将复制后的物理目录视为原目录。
+
+同批适配 Kubernetes smoke 的旧调用：只读逐 Flow journal，不在运行中的 worker 根目录调用带迁移行为的 scan；可选重建操作检查该 worker 的全部 workspace，任何编码/推理 job、保留 Flow、清理状态或缺失库存都拒绝重建。
+
+验证：真实 PostgreSQL dump/restore 演练通过，原 journal 保持不变，复制根目录仍被拒绝；恢复包回归、Ruff、Mypy 和 shell 语法检查通过。执行脚本中的真实 journal 读取片段及 idle guard，覆盖空库存、多 journal、复制目录、其他 worker 干扰和占用状态。未连接 Kubernetes 集群，未执行 Pod 重建。保留现有 CI 演练作为独立入口回归，不增加重复的 pytest 包装测试。此前门禁报告的四项产品问题未在此批修改。
