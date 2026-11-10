@@ -61,17 +61,32 @@ class InferenceNoticeStore(Repository):
     def append(self, flow_id: int, batch_id: int, summary: InferenceSummary) -> bool:
         if not summary.notify:
             return False
-        return ActivityStore(self._db).append(flow_id, Observation(
-            key=f"inference-exhausted:{batch_id}", source="flow", kind="inference_exhausted",
-            author="controller", occurred_at=summary.finished_at, updated_at=summary.finished_at,
-            title="推理尝试未成功", metadata={
-                "batch_id": batch_id, "logical_call_id": summary.logical_call_id,
-                "attempts": summary.attempts, "max_attempts": summary.max_attempts,
-                "stop_reason": summary.stop_reason, "last_failure_code": summary.last_failure_code,
-                "last_worker_id": summary.last_worker_id, "backend": summary.backend,
-                "elapsed_ms": summary.elapsed_ms,
-            },
-        ))
+        with self._db.transaction() as tx, tx.connection() as connection:
+            # A delayed result still belongs to its frozen Job/Attempt, even after
+            # the batch's current inference job or the Flow's round has changed.
+            job = connection.execute(
+                "SELECT j.round_no FROM jobs j JOIN review_batches b ON b.id=%s AND b.flow_id=j.flow_id"
+                " JOIN attempts a ON a.id=b.attempt_id AND a.flow_id=b.flow_id AND a.round_no=j.round_no"
+                " WHERE j.flow_id=%s AND j.kind='inference'"
+                " AND j.inference->'task'->>'request_id'=%s"
+                " AND (j.inference->>'batch_id')::bigint=b.id",
+                (batch_id, flow_id, summary.logical_call_id),
+            ).fetchone()
+            if job is None:
+                raise ValueError("inference notice does not belong to Flow/batch")
+            # This validated internal notice is not an external conversation observation.
+            return ActivityStore(tx)._append(flow_id, Observation(
+                key=f"inference-exhausted:{batch_id}", source="flow", kind="inference_exhausted",
+                round_no=job["round_no"],
+                author="controller", occurred_at=summary.finished_at, updated_at=summary.finished_at,
+                title="推理尝试未成功", metadata={
+                    "batch_id": batch_id, "logical_call_id": summary.logical_call_id,
+                    "attempts": summary.attempts, "max_attempts": summary.max_attempts,
+                    "stop_reason": summary.stop_reason, "last_failure_code": summary.last_failure_code,
+                    "last_worker_id": summary.last_worker_id, "backend": summary.backend,
+                    "elapsed_ms": summary.elapsed_ms,
+                },
+            ))
 
     def page(self, flow_id: int, *, cursor: str | None = None, snapshot: int | None = None,
              limit: int = 20) -> InferenceNoticePage:
@@ -102,12 +117,15 @@ class InferenceNoticeStore(Repository):
                 " FROM console_activity WHERE flow_id=%s AND version<=%s"
                 " AND source='flow' AND kind='inference_exhausted' ORDER BY key,version DESC)"
                 " SELECT current.*,b.state AS batch_state,b.decision IS NOT NULL AS has_decision,"
-                " coalesce(f.state='active' AND d.state='open' AND f.current_attempt_id=b.attempt_id,FALSE) AS live"
+                " coalesce(f.state IN ('queued','running','review') AND f.archive_reason IS NULL"
+                " AND d.state='open' AND f.current_attempt_id=b.attempt_id,FALSE) AS live"
                 " FROM current JOIN flows f ON f.id=current.flow_id"
                 " LEFT JOIN flow_deliveries d ON d.flow_id=current.flow_id"
                 " LEFT JOIN review_batches b ON b.id=(current.metadata->>'batch_id')::bigint"
-                " AND b.flow_id=current.flow_id WHERE TRUE" + after +
-                " ORDER BY current.updated_at DESC,current.key DESC LIMIT %s", parameters,
+                " AND b.flow_id=current.flow_id WHERE TRUE"
+                + after
+                + " ORDER BY current.updated_at DESC,current.key DESC LIMIT %s",
+                parameters,
             ).fetchall()
         more = len(rows) > limit
         items = [_notice(row) for row in rows[:limit]]

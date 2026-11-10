@@ -7,10 +7,11 @@ import asyncio
 from loguru import logger
 
 from app.controler.workflow.lifecycle import (
+    close_delivery,
     pause_delivery,
     prove_reopen,
     record_merge,
-    resume_delivery,
+    record_reopen,
 )
 from app.controler.workflow.service import ControlService
 from app.domain.models import TERMINAL_STATES, DeliveryState, FlowState
@@ -20,7 +21,6 @@ from app.persistence.deliveries import DeliveryStore
 from app.persistence.flows import FlowStore
 from app.persistence.jobs import JobStore
 from app.persistence.reconciliation import ReconcileState, ReconcileStore
-from app.persistence.reviews import ReviewStore
 from app.persistence.stops import StopStore
 from app.persistence.workers import WorkerStore
 
@@ -36,7 +36,6 @@ class Reconciler:
         interval: float = 300.0,
         batch_size: int = 64,
         concurrency: int = 4,
-        settle_seconds: float = 75,
         database: Database,
     ) -> None:
         self.database = database
@@ -44,13 +43,11 @@ class Reconciler:
         self.flows = FlowStore(database)
         self.jobs = JobStore(database)
         self.reconcile_store = ReconcileStore(database)
-        self.reviews = ReviewStore(database)
         self.stops = StopStore(database)
         self.workers = WorkerStore(database)
         self.github = github
         self.service = service
         self.interval, self.batch_size, self.concurrency = interval, batch_size, concurrency
-        self.settle_seconds = settle_seconds
         self._stop = asyncio.Event()
         self._sweep_lock = asyncio.Lock()
 
@@ -91,8 +88,12 @@ class Reconciler:
                 jobs_tx = self.jobs.using(tx)
                 flow = tx.lock_workflow(check.flow_id)
                 delivery = deliveries_tx.get_delivery(check.flow_id)
-                if (flow is None or delivery is None or delivery.pr_number is None
-                        or flow.state is FlowState.SUCCEEDED or delivery.state is DeliveryState.MERGED):
+                if (
+                    flow is None
+                    or delivery is None
+                    or delivery.pr_number is None
+                    or delivery.state is DeliveryState.MERGED
+                ):
                     return
                 if flow.installation_id is None:
                     raise ValueError("missing installation")
@@ -104,8 +105,12 @@ class Reconciler:
                     or remote.head_repository != flow.repo):
                 raise ValueError("PR observation identity mismatch")
             proof, diagnostic = None, None
-            if (flow.state is FlowState.ACTIVE and delivery.state is DeliveryState.CLOSED
-                    and remote.state == "open" and not remote.merged):
+            if (
+                flow.archive_reason is None
+                and delivery.state is DeliveryState.CLOSED
+                and remote.state == "open"
+                and not remote.merged
+            ):
                 if blocked:
                     diagnostic = "old executor or result must settle before reopening"
                 else:
@@ -124,15 +129,20 @@ class Reconciler:
                 flows_tx = self.flows.using(tx)
                 jobs_tx = self.jobs.using(tx)
                 reconcile_store_tx = self.reconcile_store.using(tx)
-                reviews_tx = self.reviews.using(tx)
                 stops_tx = self.stops.using(tx)
                 workers_tx = self.workers.using(tx)
                 fresh = tx.lock_workflow(flow.id)
                 current = deliveries_tx.get_delivery(flow.id)
-                if (fresh is None or current is None
-                        or fresh.current_attempt_id != flow.current_attempt_id
-                        or fresh.state != flow.state or fresh.installation_id != flow.installation_id
-                        or current.version != delivery.version or current.pr_number != delivery.pr_number):
+                if (
+                    fresh is None
+                    or current is None
+                    or fresh.current_round_no != flow.current_round_no
+                    or fresh.current_attempt_id != flow.current_attempt_id
+                    or fresh.state != flow.state
+                    or fresh.installation_id != flow.installation_id
+                    or current.version != delivery.version
+                    or current.pr_number != delivery.pr_number
+                ):
                     reconcile_store_tx.defer(flow.id)
                     return
                 if remote.merged:
@@ -149,25 +159,31 @@ class Reconciler:
                         deliveries=deliveries_tx,
                         flows=flows_tx,
                         jobs=jobs_tx,
-                        stops=stops_tx,
                         workers=workers_tx,
+                        origin="reconciliation",
                     )
-                elif fresh.state is FlowState.ACTIVE:
+                elif fresh.state is not FlowState.ARCHIVED:
                     if remote.state == "closed":
-                        pause_delivery(current, deliveries=deliveries_tx, jobs=jobs_tx)
-                        diagnostic = "PR closed; binding retained until a verified reopen"
+                        close_delivery(
+                            fresh,
+                            current,
+                            deliveries=deliveries_tx,
+                            flows=flows_tx,
+                            jobs=jobs_tx,
+                            stops=stops_tx,
+                        )
+                        diagnostic = "PR closed; round finalization requested"
+                    elif fresh.archive_reason is not None:
+                        diagnostic = "PR reopened; explicit resume after archive is required"
                     elif current.state is DeliveryState.CLOSED:
                         if (proof is not None and not jobs_tx.reopen_blocked(flow.id)
                                 and jobs_tx.lifecycle_job(flow.id) == coding):
-                            resume_delivery(
+                            record_reopen(
                                 fresh,
                                 current,
                                 proof,
-                                self.settle_seconds,
                                 deliveries=deliveries_tx,
                                 flows=flows_tx,
-                                jobs=jobs_tx,
-                                reviews=reviews_tx,
                             )
                         elif diagnostic is None:
                             diagnostic = "old executor or result changed during reopen verification"
@@ -178,6 +194,8 @@ class Reconciler:
                             diagnostic = "in-flight coding delivery awaits its original result verification"
                         else:
                             pause_delivery(current, deliveries=deliveries_tx, jobs=jobs_tx)
+                            fresh.state = FlowState.BLOCKED
+                            flows_tx.update_flow(fresh)
                             diagnostic = "PR head/base changed; verified delivery is unchanged"
                 delay = max(1800.0, self.interval) if fresh.state in TERMINAL_STATES else self.interval
                 reconcile_store_tx.succeeded(flow.id, delay, diagnostic, hint_version=check.hint_version)

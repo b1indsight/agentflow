@@ -3,8 +3,9 @@
 FlowTool 的目标是把带 `flow` 标签的 GitHub issue 编排成
 `code agent 编码 → PR → 人工审核 → 自动回喂修订 → 人工合并 → 归档` 的 headless 闭环。
 工作流交互面是 GitHub issue 和 PR；另提供 [Web 控制台](app/controler/web/README.md)，通过同源 API
-展示真实 Flow、执行记录和持久时间线，支持 cancelled Flow 的手动展示归档，
-由 Cloudflare Access 限制单 owner 访问；归档保留取消状态，不触发交付清理或 GitHub 写入。
+展示真实 Flow、执行记录和持久时间线，由 Cloudflare Access 限制单 owner 访问。
+Flow 使用 `queued/running/review/blocked/finalizing/archived` 六态；看板将 finalizing 合入进行中。
+归档结果为 `succeeded/abandoned`，无 PR 的调查可凭非空结论成功结束；显式恢复开启同一 Flow 的新轮次。
 
 代码按职责分为 `domain`、`contracts`、`persistence`、`github`、`controler`、`worker`、
 `telemetry` 与 `plugins`。`controler` 是控制服务端，内部按事件、Worker 管理、工作流、审核
@@ -23,14 +24,20 @@ FlowTool 的目标是把带 `flow` 标签的 GitHub issue 编排成
   默认 900 秒，遵守 Retry-After，重启保留次数与时间。`flow show` 展示准备失败、下次时间和原因。
   超出预算或永久 API 错误走现有失败/显式 retry 路径；凭据签发和 worker 执行不在此重试范围。
 
-- **关闭与重开**：未合并 PR 关闭后保留原 worker/仓库 slot，停止新派发与 GitHub 写操作；
-  已发操作按原账本收尾。重开同一 PR 后重新核验 head/base 与已完成的 worker 交付，再重新
-  triage 未消费反馈。人工漂移、未知执行或未决 effects 保持暂挂；`flow show` 显示恢复条件，
-  `flow retry` 不能绕过此状态。关闭期间收到的真实反馈编辑仍保留。
+- **关闭与重开**：当前未合并 PR 关闭进入废弃收尾；停止、结果和已发操作结清后归档，
+  放弃/调查保留工作区，合并交付仍须原 worker 的清理凭据。PR/Issue 重开不自动恢复。
+  失败与未知执行进入 blocked，仍占用该 Issue；`flow retry` 不绕过执行、结果和停止门槛。
+  只有 `flow resume` 开启新轮次、新分支与新交付，旧 PR 和旧反馈不能授权新工作。
+  INITIAL 无 PR 失败也保留执行绑定，结束时须由原 worker 确认停止并清理后归还工作区；
+  原 worker 离线时继续等待，不提前归档。恢复分支使用 `flow/<id>-round-N`，保留首轮 `flow/<id>`。
 
 - **反馈对账**：原 Issue、PR 普通评论和 Review 正文分别保存分页进度，默认每 300 秒复扫；
   每个来源每次至多读取 50 条完整正文，未完成的页 5 秒后继续。重启保留 cursor/退避，
   `flow show` 展示各来源诊断。旧命令不追溯执行，列表缺席不推断删除。
+  恢复后的原 Issue 评论按创建时间隔离，补拉和 webhook 使用相同边界；编辑旧评论不转入新轮。
+  新轮开始同秒及缺少创建时间的评论不进入反馈批次，可在下一秒重新发新评论；历史仍可阅读。
+  边界取本轮首个 INITIAL 的持久创建时间，不随 retry 改变；controller 必须保持时钟同步，
+  此规则不补偿与 GitHub 的时钟偏差。新 PR 评论与 Review 不受原 Issue 的时间边界限制。
   行内线程同样持续对账，包括人工 resolved/unresolved/outdated 事实；每次读取一个线程的
   至多 20 条评论，嵌套分页可恢复。跨页片段不作为完整 resolve 依据，poll 不执行远端写操作。
 
@@ -59,9 +66,10 @@ FlowTool 的目标是把带 `flow` 标签的 GitHub issue 编排成
 - **原子提交与操作恢复**：trigger/retry/merge/cancel 的状态和任务变更在共享事务内提交；
   终态结果先持久接收，再执行带回执的 GitHub 操作，最后原子提交本地结果并回复 `server.accept_result`。
   恢复时核对远端状态，避免重复派生 job 或重复发送评论；无法确认的远端结果保留待核对状态。
-- **合并与归档**：人工合并后由原 worker 核验并清理工作区；对关联 Issue/PR 增加完成标签、
-  移除 in-review 标签并各发布一条固定归档说明。全部回写完成后，原子提交成功、释放 worker 并 ACK。
-  部分回写或响应丢失只恢复未完成操作，保留清理凭据和用户标签。
+- **合并与归档**：人工合并后由原 worker 核验并清理工作区，对关联 Issue/PR 发布工作区处置凭据。
+  沿用结果副作用为 Issue/PR 添加完成标签、移除待审标签；业务副作用结清后原子写入带轮次的归档
+  activity、释放 worker 并进入 archived。状态标签更新失败记入日志后跳过，不阻塞 PR 关联、交付或归档。
+  归档前合并优先于废弃，但不解除 blocked。迟到证据能证明归档前已合并时自动更正为成功，永不恢复执行。
 - **GitHub 请求超时**：App 和 installation 客户端的连接、读写及连接池等待默认各为 30 秒，
   可通过 `FLOWTOOL_GITHUB_REQUEST_TIMEOUT_SECONDS` 调整；这不是整批结果恢复的总时限。
 - **持久反馈批次**：反馈版本与 settle deadline 入库，重启后恢复；同 Flow 串行处理冻结批次，
@@ -232,6 +240,9 @@ uv run flowtool workers
 uv run flowtool flow show <FLOW_ID>
 uv run flowtool flow cancel <FLOW_ID>
 uv run flowtool flow retry <FLOW_ID>
+uv run flowtool flow finish <FLOW_ID> succeeded --summary '调查结论' --expected-round 1
+uv run flowtool flow resume <FLOW_ID> --expected-round 1
+uv run flowtool flow history <FLOW_ID> --round 1
 ```
 
 运维命令在可访问数据库的 control 环境运行。`flow show` 会列出未完成 GitHub 操作的状态、
@@ -239,22 +250,34 @@ uv run flowtool flow retry <FLOW_ID>
 明确拒绝通知（例如 reviewer 请求 422），结果和回执保持待完成；修正 GitHub 端原因后使用同一命令
 只重试失败通知，成功后原子提交交付/session/反馈，不重新运行修订。状态不明的操作仍须先核对。
 
-归档使用 `FLOWTOOL_DONE_LABEL`（默认 `flow:done`）与 `FLOWTOOL_IN_REVIEW_LABEL`。
-serve 启动后在后台发现 GitHub App 已授权的仓库，自动补齐 `flow`、`flow:in-review`、
-`flow:done`；自定义名称使用对应配置，三个名称必须非空且互不相同（忽略大小写）。
-未建齐或检查失败的仓库每 **300 秒**检查；确认三个标签齐全后每 **24 小时**复查并补回缺失项，
+serve 后台补齐三个配置标签：`FLOWTOOL_TRIGGER_LABEL`（默认 `flow`）、
+`FLOWTOOL_IN_REVIEW_LABEL`（默认 `flow:in-review`）、`FLOWTOOL_DONE_LABEL`（默认 `flow:done`）。
+名称不得为空或重名（忽略大小写）。Projects 和看板仍映射 Flow.state，finalizing 映射进行中。
+未建齐或检查失败的仓库每 **300 秒**检查；确认标签齐全后每 **24 小时**复查并补回缺失项，
 人工预建的也计入，已有名称、颜色和描述不变。检查时间只保存在内存，重启后重新扫描确认。
 新安装与新增授权仓库每 300 秒发现；暂停的 installation 和归档仓库跳过。
 App 需有 Issues write 权限；初始化失败不阻塞服务 readiness，日志记录待重试原因，限流可延长等待。
-这只创建仓库标签定义，不给 Issue/PR 自动添加触发标签。缺少标签或权限仍可能保留待处理结果。
-`flow show` 区分清理与 GitHub 回写进度；清理已确认但回写被明确拒绝时，修正远端原因后
+标签定义初始化不向 Issue/PR 添加标签。首次交付及满足重新送审条件的修订为 PR 添加待审标签；
+合并清理确认后为 Issue/PR 添加完成标签、移除待审标签，增量操作保留用户和触发标签。
+这些展示操作沿用 `LabelEffect`，GitHub 读取或写入失败时保存错误并标记 skipped，不再等待或重试该操作，
+也不阻塞 PR 关联、交付、停止确认或归档。响应不明时保留发送记录，不伪造成功回执。
+不持续同步六态、不保证标签最终一致，也不自动修复结果完成后被人工改动的标签；trigger 标签的触发职责不变。
+`flow show` 区分清理与 GitHub 回写进度；清理已确认但评论等必要回写被明确拒绝时，修正远端原因后
 执行 `flow retry <id>`，只重置原 job 的失败 effects，保留已完成回执、attempt 和 worker journal。
 评论发送前的本地认证失败也可在修复凭据后按此方式重试；后续查询失败不会清除已有不确定发送记录。
 状态写入由持久恢复逻辑处理，避免 SDK 内部重试掩盖此前已发送的请求；读取（含只读 GraphQL）
-与 push token 签发保留有限重试。确认查询失败仍等待恢复，并遵守 Retry-After 或限流重置时间。
-429/5xx 由恢复循环继续处理；评论结果不明时先查 marker，不盲目补发。等待期间 Flow 保持 ACTIVE
-并占用原 worker。配置变更不改写已经冻结的通知；历史 SUCCEEDED Flow 和升级前冻结的空 effects
-归档计划不补通知。`on_archived` 是提交后的尽力插件回调，异常不破坏完成，不承诺跨崩溃仅调用一次。
+与 push token 签发保留有限重试。必要操作的确认查询失败仍等待恢复，并遵守 Retry-After 或限流重置时间。
+必要操作的 429/5xx 由恢复循环继续处理；评论结果不明时先查 marker，不盲目补发。收尾期间 Flow 保持 finalizing，
+永久失败进入 blocked，原 worker 仍被保留。配置变更不改写已经冻结的通知。
+`on_archived` 是提交后的尽力插件回调，异常不破坏完成，不承诺跨崩溃仅调用一次。
+
+轮次只保留在 Flow、Job、Attempt 和 activity 字段中，不再单独保存 Round 实体。
+已核验 webhook 与补偿查询共用自动更正规则：只有实际合并时间加一秒仍早于原归档时间，
+才将 abandoned 的有效结果改为 succeeded。原始归档、合并证据与更正分别作为不可变 activity 保存；
+没有人工更正入口，不改变原归档时间、新轮次、Issue owner 或执行绑定。归档后才合并或顺序不明时只记事实。
+旧四态库启动会拒绝旧状态：先停止消费者与派发、备份数据库，再用 `scripts/migrate_flow_states.py`
+预检与显式迁移；存在未知执行、旧未完成计划或归属冲突时必须先核验，不能强制猜测归档。
+应用需 `--apply --expect-report <预检指纹>`；数据或 schema 变化后须重新预检。
 
 ## Web 控制台
 
@@ -264,6 +287,7 @@ Tunnel/Access 必须将 `/console*` 与 `/api/*` 交给同一服务并应用相�
 不要为静态资源增加公开旁路。Webhook 与 Worker 端点继续使用各自原有鉴权。
 
 时间线永久保存已观察版本和删除标记；本次阅读绑定本地快照，末尾分界线显式刷新。
+活动轮次按实际 Job/Attempt 或 PR 身份确定，迟到内容不借用当前轮；Issue 共享内容及无法确认归属的旧内容为 NULL。
 活跃 Flow 打开详情或刷新会排队后台同步，未完成的来源明确显示 pending/partial/unavailable，
 不将尚未同步或权限错误当成“没有更新”。Worker 会话复用主动分页查询，心跳不触发全量抓取。
 首次采集前的历史编辑/删除、远端已过期内容无法还原；个人阅读状态另见 #88。
@@ -342,10 +366,10 @@ ignored 缓存，临时 worktree 注销并删除；取消时两种工作区均�
 拒绝 symlink、路径逃逸和未登记目录，不删除 seed 或其他 Flow 的工作区。
 
 合并后使用 `flow show <id>` 查看等待、清理失败、结果待核验/提交或完成及错误。
-清理失败会保留 ACTIVE Flow 和原 worker binding；修复权限等原因后，原 worker 在线且执行已结束时
+清理失败进入 blocked 并保留原 worker binding；修复权限等原因后，原 worker 在线且执行已结束时
 使用 `flow retry <id>`，只重试 ARCHIVE，保留当前 attempt。已有清理凭据时仅按上述方式恢复 GitHub
-回写，不要重复删除。合并后的 cancel 被拒绝；旧 executor 状态未知、journal 丢失、原 worker 长期离线、
-历史 FAILED/CANCELLED Flow 或已释放的绑定均不会自动接管、清理或释放，需人工核验。
+回写，不要重复删除。合并后的 cancel 不降低成功目标；旧 executor 状态未知、journal 丢失、原 worker 长期离线
+或绑定已释放时，不会自动接管、清理或释放，需人工核验。
 
 线程快照、处理依据和远端回执均按当前契约持久化；本地 resolved 标记不替代 GitHub 确认。
 线程权限失败可完成已验证代码交付，但相关反馈/诊断仍待处理。

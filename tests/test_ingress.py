@@ -73,21 +73,12 @@ class WebhookRuntime(ServerRuntime):
 
 class RoutingService(ControlService):
     def __init__(self, store: Store) -> None:
-        self.flows = store.flows
-        self.jobs = store.jobs
+        super().__init__(database=store.database)
 
     def on_trigger(self, repo: str, issue_number: int, installation_id: int | None) -> Flow:
         flow = self.flows.create_flow(repo, issue_number, installation_id)
         self.jobs.enqueue_job(flow.id, JobKind.INITIAL)
         return flow
-
-    def cancel(self, flow: Flow) -> None:
-        flow.state = FlowState.CANCELLED
-        self.flows.update_flow(flow)
-
-    def on_merged(self, flow: Flow, delivery_id: str, payload: dict) -> None:
-        flow.state = FlowState.SUCCEEDED
-        self.flows.update_flow(flow)
 
     def notify_jobs(self) -> None:
         pass
@@ -176,7 +167,7 @@ async def test_valid_signature_dispatches_webhook(
     assert response.status_code == 202
     flow = store.flows.get_active_flow("owner/repo", 7)
     assert flow is not None
-    assert flow.state is FlowState.ACTIVE
+    assert flow.state is FlowState.QUEUED
     store.workers.worker_connected("worker-1", protocol_version=PROTOCOL_VERSION)
     assert store.workers.assign_job("worker-1", "assignment-1") is not None
 

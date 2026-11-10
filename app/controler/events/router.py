@@ -11,6 +11,7 @@ from app.controler.config import ServerSettings
 from app.controler.workflow.service import ControlService
 from app.domain.models import ReviewItemKind
 from app.domain.review_models import FeedbackUpdate
+from app.persistence.activity import ActivityStore
 from app.persistence.database import Database
 from app.persistence.flows import FlowStore
 from app.persistence.reconciliation import ReconcileStore
@@ -143,9 +144,16 @@ class EventRouter:
         pull_request = payload.get("pull_request") or {}
         if payload.get("action") not in {"closed", "reopened", "synchronize"}:
             return
-        flow = self.flows.get_flow_by_pr(payload["repository"]["full_name"], pull_request["number"])
+        repo = payload["repository"]["full_name"]
+        flow = self.flows.get_flow_by_pr(repo, pull_request["number"])
+        if flow is None and pull_request.get("merged") is True:
+            historical = ActivityStore(self.database).archived_pr(repo, pull_request["number"])
+            if historical is not None:
+                flow = self.flows.get_flow(historical[0])
         if flow and payload.get("action") == "closed" and pull_request.get("merged") is True:
             self.service.on_merged(flow, delivery_id, payload)
+        elif flow and payload.get("action") == "closed":
+            self.service.on_closed(flow, delivery_id, payload)
         elif flow:
             with self.database.transaction() as tx:
                 reconcile_store_tx = self.reconcile_store.using(tx)

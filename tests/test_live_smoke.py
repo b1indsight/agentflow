@@ -11,9 +11,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.contracts.protocol import PROTOCOL_VERSION
-from app.domain.models import DeliveryState, FlowState, JobKind, JobState
+from app.contracts.protocol import PROTOCOL_VERSION, ArchiveResult, Succeeded
+from app.controler.workflow.service import ControlService
+from app.domain.models import ArchiveReason, DeliveryState, FlowState, JobKind, JobState, utcnow
 from app.live_smoke import GitHubProbe, Pull, SmokeError, SmokeSession
+from app.persistence.activity import ActivityStore
+from tests.github import RecordingGitHub
+from tests.test_coordinator import coordinator
 
 
 class FakeGitHub:
@@ -156,7 +160,9 @@ def test_deadline_prevents_even_read_requests(monkeypatch):
         GitHubProbe(deadline=1).find_issue("owner/smoke", "marker")
 
 
-def test_core_pass_requires_three_verified_heads_and_matching_merge(store, tmp_path, monkeypatch):
+async def test_core_pass_requires_three_verified_heads_and_matching_merge(
+    store, tmp_path, monkeypatch, recording_resources
+):
     gh = FakeGitHub()
     gh.issue = 7
     flow = store.flows.create_flow("owner/smoke", 7, 42)
@@ -184,15 +190,38 @@ def test_core_pass_requires_three_verified_heads_and_matching_merge(store, tmp_p
             if letter == "c":
                 delivery.state = DeliveryState.MERGED
                 delivery.merge_commit_sha = remote.merge_commit_sha = "d"*40
+                delivery.merged_at = utcnow()
                 remote.merged = True
             store.deliveries.update_delivery(delivery)
             if letter == "c":
-                archive = store.jobs.enqueue_job(flow.id, JobKind.ARCHIVE)
-                assert store.workers.assign_job("worker-1", "archive").id == archive.id
-                assert store.workers.finish_assignment(archive.id, "worker-1", "archive", JobState.DONE)
-                flow.state = FlowState.SUCCEEDED
-                store.flows.update_flow(flow)
-                assert store.workers.release_flow_execution(flow.id)
+                ControlService(database=store.database).finish(
+                    flow,
+                    reason=ArchiveReason.SUCCEEDED,
+                    summary="Merged",
+                    expected_round_no=flow.current_round_no,
+                )
+                archive = store.workers.assign_job("worker-1", "archive")
+                subject = coordinator(store, RecordingGitHub())
+                task = await subject.prepare(archive)
+                assert store.workers.start_assignment(archive.id, attempt.id, "worker-1", "archive")
+                terminal = Succeeded(
+                    job_id=archive.id,
+                    assignment_token="archive",
+                    result=ArchiveResult(**task.model_dump(), cleanup="released"),
+                )
+                assert (
+                    store.workers.record_assignment_result(
+                        archive.id,
+                        "worker-1",
+                        "archive",
+                        "",
+                        terminal,
+                    )
+                    == "pending"
+                )
+                assert await subject.results.apply(archive.id) is JobState.DONE
+                assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
+                assert ActivityStore(store.database).archived(flow.id, 1) is not None
             result = smoke.observe(
                 probe,
                 "actual-revision",

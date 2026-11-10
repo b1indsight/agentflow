@@ -9,21 +9,11 @@ CREATE OR REPLACE VIEW console_facts AS
 SELECT f.id, f.repo, f.issue_number, f.state AS lifecycle, f.created_at,
  GREATEST(f.updated_at,COALESCE(d.updated_at,f.updated_at),
           COALESCE(j.updated_at,f.updated_at),COALESCE(a.updated_at,f.updated_at)) AS updated_at,
- CASE
- WHEN f.state='succeeded' OR d.state IN ('closed','merged') THEN 'done'
- WHEN f.state IN ('failed','cancelled') THEN 'blocked'
- WHEN j.blocked THEN 'blocked'
- WHEN d.pr_number IS NULL AND (x.worker_id IS NULL OR x.released_at IS NOT NULL) THEN 'queued'
- WHEN EXISTS (SELECT 1 FROM jobs pending WHERE pending.flow_id=f.id
- AND pending.kind<>'inference'
- AND (pending.state IN ('queued','running') OR (pending.result_received_at IS NOT NULL
- AND pending.result_applied_at IS NULL))) THEN 'running'
- WHEN d.state='open' THEN 'review' ELSE 'running' END AS phase,
- CASE WHEN f.state='succeeded' THEN 'archived'
- WHEN d.state='closed' THEN 'delivery_closed'
- WHEN d.state='merged' AND f.state IN ('failed','cancelled') THEN 'delivery_merged'
- WHEN f.state IN ('failed','cancelled') THEN f.state
- WHEN d.state='merged' AND j.blocked THEN 'archive_blocked'
+ CASE WHEN f.state='finalizing' THEN 'running' ELSE f.state END AS phase,
+ CASE WHEN f.state='archived' THEN 'archived'
+ WHEN f.state='blocked' AND f.archive_reason IS NOT NULL THEN 'archive_blocked'
+ WHEN f.state='blocked' THEN 'execution_failed'
+ WHEN f.state='finalizing' THEN 'finalizing'
  WHEN j.result_received_at IS NOT NULL AND j.result_applied_at IS NULL THEN 'applying_result'
  WHEN j.state='running' AND j.recovery_deadline IS NOT NULL THEN 'recovering'
  WHEN j.state IN ('queued','running') THEN j.kind || ':' || j.state
@@ -32,7 +22,7 @@ SELECT f.id, f.repo, f.issue_number, f.state AS lifecycle, f.created_at,
  WHEN d.state='open' THEN 'awaiting_review'
  ELSE 'unknown' END AS action,
  COALESCE(x.worker_id,j.assigned_worker_id) AS worker_id,
- (f.state IN ('failed','cancelled','succeeded') OR x.released_at IS NOT NULL)
+ (f.state='archived' OR x.released_at IS NOT NULL)
  AS worker_historical,
  COALESCE(a.revision_cycles,0) AS revision_cycles,
  d.pr_number,d.branch,d.state AS delivery_state,d.head_sha,
@@ -41,17 +31,15 @@ SELECT f.id, f.repo, f.issue_number, f.state AS lifecycle, f.created_at,
  j.started_at,j.result_applied_at,
  CASE WHEN j.last_error IS NOT NULL OR j.prepare_last_error IS NOT NULL
  OR j.verify_last_error IS NOT NULL THEN 'execution_error' ELSE NULL END AS error_code,
- a.id AS attempt_id,a.codex_session_id,a.session_generation,a.last_revision_summary
+ a.id AS attempt_id,a.codex_session_id,a.session_generation,a.last_revision_summary,
+ f.current_round_no,f.archive_reason,
+ f.archive_summary,f.archived_at
 FROM flows f LEFT JOIN flow_deliveries d ON d.flow_id=f.id
 LEFT JOIN flow_executions x ON x.flow_id=f.id
 LEFT JOIN attempts a ON a.id=f.current_attempt_id
--- Merged cards stay archived; the same blockers still expose cleanup diagnostics and retry.
-LEFT JOIN LATERAL (SELECT candidate.*,
- (candidate.state='failed' OR (candidate.kind='archive'
- AND candidate.recovery_deadline IS NOT NULL AND candidate.result_received_at IS NULL) OR EXISTS (
- SELECT 1 FROM result_effects e JOIN jobs ej ON ej.id=e.job_id
- WHERE ej.flow_id=f.id AND ej.result_applied_at IS NULL AND e.state='failed')) AS blocked
- FROM jobs candidate WHERE flow_id=f.id AND kind<>'inference' ORDER BY id DESC LIMIT 1) j ON TRUE;
+LEFT JOIN LATERAL (SELECT candidate.*
+ FROM jobs candidate WHERE flow_id=f.id AND round_no=f.current_round_no
+ AND kind<>'inference' ORDER BY id DESC LIMIT 1) j ON TRUE;
 
 CREATE TABLE IF NOT EXISTS console_flows (
  flow_id BIGINT PRIMARY KEY REFERENCES flows(id),
@@ -59,7 +47,6 @@ CREATE TABLE IF NOT EXISTS console_flows (
  state_version BIGINT NOT NULL DEFAULT 0,
  activity_version BIGINT NOT NULL DEFAULT 0
 );
-ALTER TABLE console_flows ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS ix_console_phase ON console_flows ((facts->>'phase'),flow_id DESC);
 CREATE INDEX IF NOT EXISTS ix_console_repo ON console_flows ((lower(facts->>'repo')),flow_id DESC);
 CREATE INDEX IF NOT EXISTS ix_console_flow_issue ON flows (lower(repo),issue_number);
@@ -74,6 +61,24 @@ CREATE TABLE IF NOT EXISTS console_activity (
  metadata JSONB NOT NULL DEFAULT '{}', digest TEXT NOT NULL,
  PRIMARY KEY(flow_id,version)
 );
+ALTER TABLE console_activity ADD COLUMN IF NOT EXISTS round_no INTEGER CHECK(round_no>0);
+CREATE INDEX IF NOT EXISTS ix_console_activity_round ON console_activity(flow_id,round_no,version);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_console_flow_evidence ON console_activity(flow_id,round_no,kind)
+ WHERE source='flow' AND kind IN ('archive','merge','archive_correction');
+CREATE UNIQUE INDEX IF NOT EXISTS ux_console_archived_pr ON console_activity
+ (lower(metadata->>'repo'),((metadata->>'pr_number')::integer))
+ WHERE source='flow' AND kind='archive' AND metadata->>'pr_number' IS NOT NULL;
+CREATE OR REPLACE FUNCTION console_preserve_evidence() RETURNS TRIGGER AS $$
+BEGIN
+ IF OLD.source='flow' AND OLD.kind IN ('archive','merge','archive_correction') THEN
+   RAISE EXCEPTION 'Flow activity evidence is immutable' USING ERRCODE='23514';
+ END IF;
+ IF TG_OP='UPDATE' THEN RETURN NEW; END IF;
+ RETURN OLD;
+END;
+$$ LANGUAGE plpgsql;
+CREATE OR REPLACE TRIGGER console_preserve_evidence BEFORE UPDATE OR DELETE ON console_activity
+ FOR EACH ROW EXECUTE FUNCTION console_preserve_evidence();
 CREATE INDEX IF NOT EXISTS ix_console_object ON console_activity
  (flow_id,key,deleted DESC,updated_at DESC,version DESC);
 CREATE INDEX IF NOT EXISTS ix_console_digest ON console_activity(flow_id,key,digest);
@@ -112,29 +117,20 @@ $$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION console_refresh(identity BIGINT, baseline BOOLEAN DEFAULT FALSE)
 RETURNS VOID AS $$
 DECLARE next_facts JSONB; previous_facts JSONB; next_version BIGINT; state_revision BIGINT;
- manual_archived_at TIMESTAMPTZ;
 BEGIN
  -- This per-Flow row is also the publication fence: allocation and archive commit together.
  INSERT INTO console_flows(flow_id,facts) VALUES(identity,'{}') ON CONFLICT DO NOTHING;
- SELECT facts,archived_at INTO previous_facts,manual_archived_at
+ SELECT facts INTO previous_facts
  FROM console_flows WHERE flow_id=identity FOR UPDATE;
  SELECT to_jsonb(f) INTO next_facts FROM console_facts f WHERE id=identity;
  IF next_facts IS NULL THEN RETURN; END IF;
- -- Display-only archival survives rebuilds, but never hides a resumed lifecycle.
- IF manual_archived_at IS NOT NULL AND next_facts->>'lifecycle'<>'cancelled' THEN
- UPDATE console_flows SET archived_at=NULL WHERE flow_id=identity;
- manual_archived_at := NULL;
- END IF;
- IF manual_archived_at IS NOT NULL THEN
- next_facts := next_facts || jsonb_build_object('phase','done','archived_at',manual_archived_at,
- 'updated_at',GREATEST((next_facts->>'updated_at')::timestamptz,manual_archived_at));
- END IF;
  IF previous_facts-'updated_at'=next_facts-'updated_at' THEN RETURN; END IF;
  UPDATE console_flows SET facts=next_facts,state_version=state_version+1,
  activity_version=activity_version+1 WHERE flow_id=identity
  RETURNING activity_version,state_version INTO next_version,state_revision;
- INSERT INTO console_activity(flow_id,version,key,source,kind,occurred_at,updated_at,
+ INSERT INTO console_activity(flow_id,version,round_no,key,source,kind,occurred_at,updated_at,
  author,title,body,metadata,digest) VALUES(identity,next_version,
+ (next_facts->>'current_round_no')::integer,
  'flow:'||identity||':'||state_revision,'flow',CASE WHEN baseline THEN 'baseline' ELSE 'state' END,
  clock_timestamp(),clock_timestamp(),'FlowTool',
  CASE WHEN baseline THEN '迁移基线：此前业务历史不可还原' ELSE 'Flow 状态变更' END,
@@ -180,8 +176,6 @@ SELECT console_refresh(id,TRUE) FROM flows
 -- Reclassify existing cards once when a display phase or action rule changes.
 SELECT console_refresh(c.flow_id) FROM console_flows c
  JOIN console_facts f ON f.id=c.flow_id
- WHERE c.facts->>'phase' IS DISTINCT FROM
- CASE WHEN c.archived_at IS NOT NULL AND f.lifecycle='cancelled' THEN 'done' ELSE f.phase END
- OR c.facts->>'action' IS DISTINCT FROM f.action
+ WHERE c.facts-'updated_at' IS DISTINCT FROM to_jsonb(f)-'updated_at'
  ORDER BY c.flow_id;
 """

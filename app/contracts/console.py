@@ -6,8 +6,9 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from app.domain.inference_models import AdapterVersion, FailureCode, StopReason
+from app.domain.models import ArchiveReason, FlowState
 
-Phase = Literal["queued", "running", "review", "blocked", "done"]
+Phase = Literal["queued", "running", "review", "blocked", "archived"]
 
 
 class ConsoleModel(BaseModel):
@@ -15,7 +16,15 @@ class ConsoleModel(BaseModel):
 
 
 class ArchiveRequest(ConsoleModel):
-    """An explicit empty JSON command, with no workflow fields writable by clients."""
+    """Request round completion, never a direct state override."""
+
+    reason: ArchiveReason
+    summary: str = Field(max_length=10000)
+    expected_round_no: int = Field(strict=True, gt=0)
+
+
+class ResumeRequest(ConsoleModel):
+    expected_round_no: int = Field(strict=True, gt=0)
 
 
 class RetryRequest(ConsoleModel):
@@ -30,7 +39,10 @@ class FlowSummary(ConsoleModel):
     title: str | None
     pr_number: int | None
     pr_url: str | None
-    lifecycle: str
+    lifecycle: FlowState
+    current_round_no: int
+    archive_reason: ArchiveReason | None
+    archive_summary: str | None
     phase: Phase
     action: str
     worker_id: str | None
@@ -120,6 +132,7 @@ class ActivityItem(ConsoleModel):
     version: int
     source: str
     kind: str
+    round_no: int | None = Field(strict=True, gt=0)
     occurred_at: datetime
     updated_at: datetime
     observed_at: datetime

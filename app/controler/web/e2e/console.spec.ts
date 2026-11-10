@@ -3,13 +3,14 @@ import type {
   ActivityItem,
   ActivityPage,
   FlowDetail,
+  FlowSummary,
   InferenceNotice,
   JobSummary,
   SourceStatus,
 } from "../types";
 
 const now = "2026-10-17T12:00:00Z";
-const flow = {
+const flow: FlowSummary = {
   id: 42,
   repo: "owner/agentflow",
   issue_number: 85,
@@ -17,7 +18,7 @@ const flow = {
   title: "真实 DTO Flow",
   pr_number: 87,
   pr_url: "https://example.test/pulls/87",
-  lifecycle: "active",
+  lifecycle: "running",
   phase: "running",
   action: "正在验证",
   worker_id: "worker-1",
@@ -26,21 +27,71 @@ const flow = {
   branch: "flow/85",
   created_at: now,
   updated_at: now,
+  current_round_no: 1,
+  archive_reason: null,
+  archive_summary: null,
   archived_at: null,
   state_version: 2,
 };
 const blockedFlow: FlowDetail = {
   ...flow,
-  lifecycle: "cancelled",
+  lifecycle: "blocked",
   phase: "blocked",
-  action: "cancelled",
-  reason: "Flow 已取消",
+  action: "execution_failed",
+  reason: "执行受阻",
   next_condition: "修复受阻原因后重试",
   sources: [],
 };
+const archivedFlow: FlowDetail = {
+  ...blockedFlow,
+  lifecycle: "archived",
+  phase: "archived",
+  action: "archived",
+  archive_reason: "succeeded",
+  archive_summary: "本轮实现与验证已完成。",
+  archived_at: now,
+  reason: "本轮已完成归档",
+  next_condition: "如需继续，请显式恢复推进",
+};
+
+/** Preview real components against mutable DTOs, including post-write board refreshes. */
+async function mockFlows(page: Page, current: () => FlowDetail[]) {
+  await page.route("**/api/flows?**", (route) => {
+    const items = current();
+    return route.fulfill({
+      json: {
+        items: items.filter(
+          (item) =>
+            item.phase ===
+            new URL(route.request().url()).searchParams.get("phase"),
+        ),
+        counts: Object.fromEntries(
+          ["queued", "running", "review", "blocked", "archived"].map(
+            (phase) => [
+              phase,
+              items.filter((item) => item.phase === phase).length,
+            ],
+          ),
+        ),
+        next_cursor: null,
+        has_more: false,
+      },
+    });
+  });
+  await page.route(/\/api\/flows\/\d+$/, (route) => {
+    const id = Number(
+      new URL(route.request().url()).pathname.split("/").at(-1),
+    );
+    const item = current().find((item) => item.id === id);
+    return item
+      ? route.fulfill({ json: item })
+      : route.fulfill({ status: 404, json: { detail: "flow_not_found" } });
+  });
+}
 const activity = {
   key: "comment-1",
   version: 2,
+  round_no: null,
   source: "github",
   kind: "comment",
   occurred_at: now,
@@ -150,7 +201,7 @@ test.beforeEach(async ({ page }) => {
       return route.fulfill({
         json: {
           ...pageOf(url.searchParams.get("phase") === "running" ? [flow] : []),
-          counts: { queued: 0, running: 1, review: 0, blocked: 0, done: 0 },
+          counts: { queued: 0, running: 1, review: 0, blocked: 0, archived: 0 },
         },
       });
     if (url.pathname === "/api/flows/42")
@@ -602,12 +653,13 @@ test("shared virtual lists preserve distant focus, omitted gaps and keyboard ord
         items: Array.from({ length: Math.min(50, total - start) }, (_, i) => ({
           ...flow,
           id: (phase === "running" ? 42 : 200) + start + i,
+          lifecycle: phase,
           phase,
           title: `${phase} Flow ${start + i}`,
         })),
         next_cursor: start + 50 < total ? String(start + 50) : null,
         has_more: start + 50 < total,
-        counts: { queued: 70, running: 70, review: 0, blocked: 0, done: 0 },
+        counts: { queued: 70, running: 70, review: 0, blocked: 0, archived: 0 },
       },
     });
   });
@@ -732,147 +784,148 @@ test("shared virtual lists preserve distant focus, omitted gaps and keyboard ord
   expect(errors).toEqual([]);
 });
 
-test("archived column distinguishes closed unmerged PRs from completed archives", async ({
-  page,
-}) => {
-  const closed = {
-    ...flow,
-    title: "已关闭的 PR",
-    phase: "done",
-    action: "delivery_closed",
-  };
-  const archived = {
-    ...closed,
-    id: 43,
-    title: "正常归档的 PR",
-    lifecycle: "succeeded",
-    action: "archived",
-  };
-  await page.route("**/api/flows?**", (route) =>
-    route.fulfill({
-      json: {
-        items:
-          new URL(route.request().url()).searchParams.get("phase") === "done"
-            ? [closed, archived]
-            : [],
-        counts: { queued: 0, running: 0, review: 0, blocked: 0, done: 2 },
-        next_cursor: null,
-        has_more: false,
-      },
-    }),
-  );
-  await page.route("**/api/flows/42", (route) =>
-    route.fulfill({
-      json: {
-        ...closed,
-        reason: "PR 已关闭（未合并），编码与修订已暂停",
-        next_condition: "重新打开 PR 并完成执行状态及 head/base 对账后才能继续",
-        sources: [],
-      },
-    }),
-  );
-  await page.goto("/#board");
-  const column = page.locator(".column.phase-done");
-  await expect(column.locator(".col-header")).toHaveText("已归档2");
-  await expect(
-    column.getByText("已关闭 · 未合并", { exact: true }),
-  ).toBeVisible();
-  await expect(column.getByText("归档完成", { exact: true })).toBeVisible();
-  await expect(page.getByText("已完成", { exact: true })).toHaveCount(0);
-  await page.screenshot({
-    path: "../../../.amp/in/artifacts/archived-board-desktop.png",
-  });
-  const search = page.getByRole("combobox", { name: "搜索任务与筛选条件" });
-  await search.fill("is:d");
-  await expect(page.getByRole("option", { name: /已归档/ })).toBeVisible();
-  await search.fill("");
-  await search.press("Escape");
-  await page.setViewportSize({ width: 390, height: 844 });
-  await page
-    .locator(".mobile-stages")
-    .getByRole("button", { name: /已归档/ })
-    .click();
-  await expect(
-    column.getByText("已关闭 · 未合并", { exact: true }),
-  ).toBeVisible();
-  await page.screenshot({
-    path: "../../../.amp/in/artifacts/archived-board-mobile.png",
-  });
-  await column.locator('.card[data-flow="42"]').click();
-  await expect(page.locator(".detail-head .badge")).toHaveText(
-    "已关闭 · 未合并",
-  );
-  await page.getByRole("tab", { name: "概览" }).click();
-  await expect(
-    page.getByText("active / 已归档", { exact: true }),
-  ).toBeVisible();
-  await page.screenshot({
-    path: "../../../.amp/in/artifacts/archived-detail-mobile.png",
-  });
-  await page.setViewportSize({ width: 1440, height: 900 });
-  await page.screenshot({
-    path: "../../../.amp/in/artifacts/archived-detail-desktop.png",
-  });
-});
-
-for (const lifecycle of ["failed", "cancelled", "active"]) {
-  test(`merged PR stays archived with ${lifecycle} execution history`, async ({
+for (const width of [1440, 390]) {
+  test(`six-state preview keeps finalizing in running and only business archives in archived at ${width}px`, async ({
     page,
   }) => {
-    // Merge supersedes the card's failure, but active cleanup must keep its safe retry entry.
-    const cleanupBlocked = lifecycle === "active";
-    const label = cleanupBlocked ? "已合并 · 清理受阻" : "已合并 · 已归档";
-    const merged: FlowDetail = {
-      ...flow,
-      lifecycle,
-      phase: "done",
-      action: cleanupBlocked ? "archive_blocked" : "delivery_merged",
-      reason: cleanupBlocked
-        ? "任务 #9（归档）：归档失败"
-        : `PR 已合并，已自动归档；保留此前的${lifecycle === "failed" ? "失败" : "取消"}记录`,
-      next_condition: cleanupBlocked
-        ? "检查执行记录；归档只能在原 Worker 与执行状态确认安全后由运维重试"
-        : "无需重新执行编码或评审；工作区清理未确认完成，如有需要请人工核验",
-      sources: [],
-    };
-    await page.route("**/api/flows?**", (route) =>
-      route.fulfill({
-        json: {
-          items:
-            new URL(route.request().url()).searchParams.get("phase") === "done"
-              ? [merged]
-              : [],
-          counts: { queued: 0, running: 0, review: 0, blocked: 0, done: 1 },
-          next_cursor: null,
-          has_more: false,
-        },
-      }),
-    );
-    await page.route("**/api/flows/42", (route) =>
-      route.fulfill({ json: merged }),
-    );
+    await page.setViewportSize({ width, height: 900 });
+    const errors: string[] = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+    const items: FlowDetail[] = [
+      { ...blockedFlow, ...flow, title: "实现与验证进行中" },
+      {
+        ...blockedFlow,
+        id: 43,
+        lifecycle: "queued",
+        phase: "queued",
+        title: "等待开始的新任务",
+      },
+      {
+        ...blockedFlow,
+        id: 44,
+        lifecycle: "review",
+        phase: "review",
+        title: "等待审核的变更",
+      },
+      {
+        ...blockedFlow,
+        id: 45,
+        title: "PR 关闭，等待处理",
+      },
+      {
+        ...blockedFlow,
+        id: 46,
+        lifecycle: "finalizing",
+        phase: "running",
+        action: "finalizing",
+        archive_reason: "succeeded",
+        archive_summary: "PR 已合并，等待收尾。",
+        title: "PR 合并，正在安全收尾",
+        reason: "PR 已合并，清理尚未完成",
+        next_condition: "等待原 Worker 收尾完成",
+      },
+      { ...archivedFlow, id: 47, title: "本轮已成功归档" },
+      {
+        ...archivedFlow,
+        id: 48,
+        archive_reason: "abandoned",
+        title: "本轮已废弃归档",
+        archive_summary: "需求调整，结束本轮。",
+      },
+    ];
+    await mockFlows(page, () => items);
     await page.goto("/#board");
-    const column = page.locator(".column.phase-done");
-    await expect(column.locator(".col-header")).toHaveText("已归档1");
-    await expect(column.getByText(label, { exact: true })).toBeVisible();
-    await column.locator('.card[data-flow="42"]').click();
+    await expect(page.locator(".col-header")).toHaveText([
+      "待处理1",
+      "进行中2",
+      "待审核1",
+      "受阻1",
+      "已归档2",
+    ]);
+    await expect(
+      page.locator('.column.phase-running [data-flow="46"] .current-action'),
+    ).toHaveText("进行中");
+    await expect(
+      page.locator('.column.phase-blocked [data-flow="45"] .current-action'),
+    ).toHaveText("受阻");
+    await expect(
+      page.locator(".column.phase-archived .current-action"),
+    ).toHaveText(["已归档 · 成功", "已归档 · 废弃"]);
+    await expect(page.locator(".column.phase-finalizing")).toHaveCount(0);
+    await page.screenshot({
+      path: `../../../.amp/in/artifacts/flow-default-${width}.png`,
+    });
+    const search = page.getByRole("combobox", { name: "搜索任务与筛选条件" });
+    await search.fill("status:arch");
+    await expect(page.getByRole("option", { name: /已归档/ })).toContainText(
+      "status:archived",
+    );
+    await search.fill("is:arch");
+    const archivedOption = page.getByRole("option", { name: /已归档/ });
+    await expect(archivedOption).toContainText("is:archived");
+    await archivedOption.click();
+    await expect(search).toHaveValue("is:archived ");
+    const query = page.waitForRequest((request) => {
+      const url = new URL(request.url());
+      return (
+        url.pathname === "/api/flows" &&
+        url.searchParams.get("q") === "is:archived"
+      );
+    });
+    await search.press("Enter");
+    await query;
+    await search.fill("is:done");
+    await search.press("Enter");
+    await expect(page.getByRole("alert")).toContainText(
+      "is: 支持 active（活跃）或 archived（已归档）。",
+    );
+    expect(new URL(page.url()).searchParams.get("q")).toBe("is:archived");
+    await search.fill("");
+    await search.press("Enter");
+    await search.press("Escape");
+    await page.locator('.card[data-flow="46"]').click();
     await page.getByRole("tab", { name: "概览" }).click();
-    const summary = page.locator(".execution-summary");
-    await expect(summary.getByRole("heading")).toHaveText(label);
+    await expect(page.locator(".detail-head .badge")).toHaveText("进行中");
+    await expect(page.locator(".task-facts")).toContainText(
+      "finalizing / 进行中",
+    );
     await expect(
-      summary.getByRole("button", { name: "重试", exact: true }),
-    ).toHaveCount(cleanupBlocked ? 1 : 0);
+      page.getByRole("heading", { name: "正在收尾（finalizing）" }),
+    ).toBeVisible();
     await expect(
-      page.getByRole("button", { name: "归档", exact: true }),
+      page.getByRole("button", { name: /^(重试|恢复推进|结束本轮)$/ }),
     ).toHaveCount(0);
-    await summary.screenshot({
-      path: `../../../.amp/in/artifacts/merge-archive-${lifecycle}-desktop.png`,
+    await page.screenshot({
+      path: `../../../.amp/in/artifacts/flow-finalizing-${width}.png`,
     });
-    await page.setViewportSize({ width: 390, height: 844 });
-    await expect(summary.getByRole("heading")).toBeVisible();
-    await summary.screenshot({
-      path: `../../../.amp/in/artifacts/merge-archive-${lifecycle}-mobile.png`,
+    await page.evaluate(() => {
+      location.hash = "flow/47/overview";
     });
+    await expect(page.locator(".detail-head .badge")).toHaveText(
+      "已归档 · 成功",
+    );
+    await expect(
+      page.getByRole("button", { name: "恢复推进", exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "重试", exact: true }),
+    ).toHaveCount(0);
+    await expect(page.locator(".task-facts")).toContainText("归档时间");
+    await page.screenshot({
+      path: `../../../.amp/in/artifacts/flow-archived-${width}.png`,
+    });
+    const archivedAt = page.getByText("归档时间", { exact: true });
+    await archivedAt.scrollIntoViewIfNeeded();
+    await expect(archivedAt).toBeVisible();
+    await page.screenshot({
+      path: `../../../.amp/in/artifacts/flow-archived-facts-${width}.png`,
+    });
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBe(true);
+    expect(errors).toEqual([]);
   });
 }
 
@@ -887,60 +940,38 @@ test("detail reads synchronize sidebar and board without reloading the page", as
     next_condition: "等待执行结果",
     sources: [],
   };
-  const other = { ...flow, id: 43, title: "仍在执行的 Flow" };
-  await page.route("**/api/flows?**", (route) =>
-    route.fulfill({
-      json: {
-        items: [current, other].filter(
-          (item) =>
-            item.phase ===
-            new URL(route.request().url()).searchParams.get("phase"),
-        ),
-        counts: {
-          queued: 0,
-          running: current.phase === "running" ? 2 : 1,
-          review: current.phase === "review" ? 1 : 0,
-          blocked: current.phase === "blocked" ? 1 : 0,
-          done: 0,
-        },
-        next_cursor: null,
-        has_more: false,
-      },
-    }),
-  );
-  await page.route("**/api/flows/42", (route) =>
-    route.fulfill({ json: current }),
-  );
+  const other = { ...current, id: 43, title: "仍在执行的 Flow" };
+  await mockFlows(page, () => [current, other]);
   await page.goto("/#board");
   await expect(page.locator(".column.phase-running .card")).toHaveCount(2);
   current = {
     ...current,
-    lifecycle: "failed",
+    lifecycle: "blocked",
     phase: "blocked",
     action: "failed",
     state_version: 3,
     reason: "Flow 已失败",
   };
   await page.locator('.card[data-flow="42"]').click();
-  await expect(page.locator(".detail-head .badge")).toHaveText("failed");
+  await expect(page.locator(".detail-head .badge")).toHaveText("受阻");
   await expect(page.locator(".rail-group.phase-running .count")).toHaveText(
     "1",
   );
   await expect(page.locator(".rail-group.phase-blocked .flow-tab")).toHaveText(
-    flow.title,
+    flow.title!,
   );
   await expect(page.locator(".rail-group.phase-blocked .count")).toHaveText(
     "1",
   );
   await page.getByRole("tab", { name: "概览", exact: true }).click();
-  await expect(page.locator(".task-facts")).toContainText("failed / 受阻");
+  await expect(page.locator(".task-facts")).toContainText("blocked / 受阻");
   await page.screenshot({
     path: "../../../.amp/in/artifacts/detail-board-sync-failed.png",
   });
 
   current = {
     ...current,
-    lifecycle: "active",
+    lifecycle: "review",
     phase: "review",
     action: "awaiting_review",
     state_version: 4,
@@ -948,9 +979,7 @@ test("detail reads synchronize sidebar and board without reloading the page", as
     next_condition: "等待审核或人工合并",
   };
   await page.getByRole("button", { name: "刷新当前视图" }).click();
-  await expect(page.locator(".detail-head .badge")).toHaveText(
-    "awaiting_review",
-  );
+  await expect(page.locator(".detail-head .badge")).toHaveText("待审核");
   await expect(page.locator(".rail-group.phase-blocked .flow-tab")).toHaveCount(
     0,
   );
@@ -984,29 +1013,7 @@ test("retry disables both commands until commit, then refreshes detail and board
   page,
 }) => {
   let current = blockedFlow;
-  await page.route("**/api/flows?**", (route) =>
-    route.fulfill({
-      json: {
-        items:
-          new URL(route.request().url()).searchParams.get("phase") ===
-          current.phase
-            ? [current]
-            : [],
-        counts: {
-          queued: current.phase === "queued" ? 1 : 0,
-          running: 0,
-          review: 0,
-          blocked: current.phase === "blocked" ? 1 : 0,
-          done: 0,
-        },
-        next_cursor: null,
-        has_more: false,
-      },
-    }),
-  );
-  await page.route("**/api/flows/42", (route) =>
-    route.fulfill({ json: current }),
-  );
+  await mockFlows(page, () => [current]);
   let finish = () => {};
   const committed = new Promise<void>((resolve) => {
     finish = resolve;
@@ -1018,7 +1025,7 @@ test("retry disables both commands until commit, then refreshes detail and board
     await committed;
     current = {
       ...current,
-      lifecycle: "active",
+      lifecycle: "queued",
       phase: "queued",
       action: "initial:queued",
       state_version: 3,
@@ -1033,16 +1040,14 @@ test("retry disables both commands until commit, then refreshes detail and board
     page.getByRole("button", { name: "正在提交重试…" }),
   ).toBeDisabled();
   await expect(
-    page.getByRole("button", { name: "归档", exact: true }),
+    page.getByRole("button", { name: "结束本轮", exact: true }),
   ).toBeDisabled();
   await expect(page.locator(".rail-group.phase-blocked .count")).toHaveText(
     "1",
   );
   finish();
   await expect(page.getByRole("status")).toContainText("重试请求已受理");
-  await expect(page.locator(".detail-head .badge")).toHaveText(
-    "initial:queued",
-  );
+  await expect(page.locator(".detail-head .badge")).toHaveText("待处理");
   await expect(page.locator(".rail-group.phase-blocked .count")).toHaveText(
     "0",
   );
@@ -1052,7 +1057,7 @@ test("retry disables both commands until commit, then refreshes detail and board
     location.hash = "board";
   });
   await expect(page.locator(".column.phase-queued .card")).toContainText(
-    flow.title,
+    flow.title!,
   );
   await expect(page.locator(".column.phase-blocked .card")).toHaveCount(0);
 });
@@ -1085,148 +1090,231 @@ for (const [code, message] of [
   });
 }
 
-for (const width of [1440, 390]) {
-  test(`cancelled flow manual archive persists and refreshes groups at ${width}px`, async ({
+for (const [width, reason, label] of [
+  [1440, "succeeded", "成功"],
+  [390, "abandoned", "废弃"],
+] as const) {
+  test(`round archive ${reason} waits for finalization then resumes a new round at ${width}px`, async ({
     page,
   }) => {
     await page.setViewportSize({ width, height: 900 });
     let current: FlowDetail = {
-      ...flow,
-      lifecycle: "cancelled",
-      phase: "blocked",
-      action: "cancelled",
-      title: "已取消的 Flow",
-      worker_historical: true,
-      reason: "Flow 已取消",
-      next_condition: "确认在途任务的停止确认与结果对账完成后，再评估是否重试",
-      sources: [],
+      ...blockedFlow,
+      pr_number: null,
+      pr_url: null,
+      title: "结束本轮并保留全部历史",
     };
-    const detail = () => ({ ...current });
-    await page.route("**/api/flows?**", (route) =>
-      route.fulfill({
-        json: {
-          items:
-            new URL(route.request().url()).searchParams.get("phase") ===
-            current.phase
-              ? [current]
-              : [],
-          counts: {
-            queued: 0,
-            running: 0,
-            review: 0,
-            blocked: current.archived_at ? 0 : 1,
-            done: current.archived_at ? 1 : 0,
-          },
-          next_cursor: null,
-          has_more: false,
-        },
-      }),
-    );
-    await page.route("**/api/flows/42", (route) =>
-      route.fulfill({ json: detail() }),
-    );
-    let attempts = 0;
+    await mockFlows(page, () => [current]);
+    let requests = 0;
     let finish: () => void = () => {};
     const committed = new Promise<void>((resolve) => {
       finish = resolve;
     });
     await page.route("**/api/flows/42/archive", async (route) => {
+      requests++;
       expect(route.request().method()).toBe("POST");
       expect(route.request().headers()["content-type"]).toBe(
         "application/json",
       );
-      expect(route.request().postDataJSON()).toEqual({});
-      if (++attempts === 1)
-        return route.fulfill({
-          status: 503,
-          json: { detail: "database_unavailable" },
-        });
+      expect(route.request().postDataJSON()).toEqual({
+        reason,
+        summary: "本轮结论",
+        expected_round_no: 1,
+      });
       await committed;
       current = {
         ...current,
-        phase: "done",
-        archived_at: now,
+        lifecycle: "finalizing",
+        phase: "running",
+        archive_reason: reason,
+        archive_summary: "本轮结论",
         state_version: 3,
-        reason: "Flow 已取消并归档；归档仅改变展示分组",
+        reason: "已受理结束请求，正在停止和收尾",
+        next_condition: "等待停止确认、结果对账及收尾完成",
       };
-      return route.fulfill({ json: detail() });
+      return route.fulfill({ json: current });
     });
     await page.goto("/?q=repo%3Aowner%2Fagentflow#flow/42/overview");
-    const archive = page.getByRole("button", { name: "归档", exact: true });
-    await expect(archive).toBeVisible();
-    await expect(
-      page.getByRole("button", { name: "重试", exact: true }),
-    ).toBeVisible();
-    await page.screenshot({
-      path: `../../../.amp/in/artifacts/cancelled-archive-before-${width}.png`,
+    await page.getByRole("button", { name: "结束本轮", exact: true }).click();
+    const archive = page.getByRole("button", {
+      name: "确认结束本轮",
+      exact: true,
     });
-    await archive.click();
-    await expect(page.getByRole("alert")).toContainText("归档失败");
+    await expect(archive).toBeDisabled();
+    await page.getByLabel("本轮结论（必填）").fill("   ");
+    await expect(archive).toBeDisabled();
+    expect(requests).toBe(0);
+    await page.getByRole("radio", { name: label, exact: true }).check();
+    await page.getByLabel("本轮结论（必填）").fill("  本轮结论  ");
     await expect(archive).toBeEnabled();
-    await expect(page.locator(".detail-head .badge")).toHaveText("已取消");
-    if (width === 1440)
-      await page.screenshot({
-        path: "../../../.amp/in/artifacts/cancelled-archive-error.png",
-      });
+    await page.screenshot({
+      path: `../../../.amp/in/artifacts/flow-end-round-${width}.png`,
+      animations: "disabled",
+    });
     await archive.click();
     await expect(
-      page.getByRole("button", { name: "正在归档…" }),
+      page.getByRole("button", { name: "正在提交结束请求…" }),
     ).toBeDisabled();
     await expect(
       page.getByRole("button", { name: "重试", exact: true }),
     ).toBeDisabled();
+    await expect(page.getByLabel("本轮结论（必填）")).toBeDisabled();
+    await expect(page.locator(".detail-head .badge")).toHaveText("受阻");
     finish();
-    await expect(page.locator(".detail-head .badge")).toHaveText(
-      "已取消 · 已归档",
+    await expect(page.getByRole("status")).toContainText("结束本轮请求已受理");
+    await expect(page.locator(".detail-head .badge")).toHaveText("进行中");
+    await expect(page.locator(".task-facts")).toContainText(
+      "finalizing / 进行中",
     );
-    await expect(page.getByRole("alert")).toHaveCount(0);
-    await expect(archive).toHaveCount(0);
+    await expect(page.getByText("归档时间", { exact: true })).toHaveCount(0);
     await expect(
-      page.getByText("已取消 / 已归档", { exact: true }),
-    ).toBeVisible();
-    await expect(page.getByText("手动归档", { exact: true })).toBeVisible();
-    if (width === 1440) {
-      await expect(page.locator(".rail-group.phase-blocked .count")).toHaveText(
-        "0",
-      );
-      await expect(page.locator(".rail-group.phase-done .count")).toHaveText(
-        "1",
-      );
-      await expect(page.locator(".rail-group.phase-done .flow-tab")).toHaveText(
-        current.title!,
-      );
-    }
-    await page.screenshot({
-      path: `../../../.amp/in/artifacts/cancelled-archive-after-${width}.png`,
-    });
+      page.getByRole("button", { name: "恢复推进", exact: true }),
+    ).toHaveCount(0);
+    await expect(page.locator(".rail-group.phase-archived .count")).toHaveText(
+      "0",
+    );
+    current = {
+      ...current,
+      lifecycle: "archived",
+      phase: "archived",
+      archived_at: now,
+      state_version: 4,
+      reason: "本轮已归档",
+      next_condition: "可显式恢复推进",
+    };
+    await page.getByRole("button", { name: "刷新当前视图" }).click();
+    await expect(page.locator(".detail-head .badge")).toHaveText(
+      `已归档 · ${label}`,
+    );
+    await expect(page.locator(".task-facts")).toContainText("归档时间");
+    await expect(page.locator(".task-facts")).toContainText("本轮结论");
     await page.reload();
     await expect(page.locator(".detail-head .badge")).toHaveText(
-      "已取消 · 已归档",
-    );
-    await expect(page).toHaveURL(
-      /q=repo%3Aowner%2Fagentflow#flow\/42\/overview/,
+      `已归档 · ${label}`,
     );
     await page.getByRole("tab", { name: "会话" }).click();
     await expect(page.getByText("真实活动正文", { exact: true })).toBeVisible();
+    await page.getByRole("tab", { name: "概览" }).click();
+    await expect(
+      page.getByRole("button", { name: "重试", exact: true }),
+    ).toHaveCount(0);
+    await expect(page.getByText(/同一 Flow 开启新轮次/)).toContainText("新 PR");
+    let resumeRequests = 0;
+    let resume = () => {};
+    const resumed = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    await page.route("**/api/flows/42/resume", async (route) => {
+      resumeRequests++;
+      expect(route.request().method()).toBe("POST");
+      expect(route.request().headers()["content-type"]).toBe(
+        "application/json",
+      );
+      expect(route.request().postDataJSON()).toEqual({ expected_round_no: 1 });
+      await resumed;
+      current = {
+        ...current,
+        lifecycle: "queued",
+        phase: "queued",
+        current_round_no: 2,
+        archived_at: null,
+        archive_reason: null,
+        archive_summary: null,
+        state_version: 5,
+        reason: "新轮次待处理",
+      };
+      return route.fulfill({ json: current });
+    });
+    await page.getByRole("button", { name: "恢复推进", exact: true }).click();
+    await expect(
+      page.getByRole("button", { name: "正在恢复推进…" }),
+    ).toBeDisabled();
+    await expect(page.locator(".detail-head .badge")).toHaveText(
+      `已归档 · ${label}`,
+    );
+    resume();
+    await expect(page.getByRole("status")).toContainText("恢复推进请求已受理");
+    await expect(page.locator(".detail-head .badge")).toHaveText("待处理");
+    await expect(page.locator(".task-facts")).toContainText("第 2 轮");
+    await expect(page).toHaveURL(
+      /q=repo%3Aowner%2Fagentflow#flow\/42\/overview/,
+    );
+    await expect(page.getByText("归档时间", { exact: true })).toHaveCount(0);
     await page.evaluate(() => {
       location.hash = "board";
     });
     if (width === 390)
       await page
         .locator(".mobile-stages")
-        .getByRole("button", { name: /已归档/ })
+        .getByRole("button", { name: /待处理/ })
         .click();
-    await expect(page.locator(".column.phase-done .card")).toContainText(
-      "已取消 · 已归档",
-    );
-    await expect(page.locator(".column.phase-blocked .card")).toHaveCount(0);
-    expect(
-      await page.evaluate(
-        () => document.documentElement.scrollWidth <= innerWidth,
-      ),
-    ).toBe(true);
+    await expect(
+      page.locator('.column.phase-queued [data-flow="42"]'),
+    ).toContainText("待处理");
+    await expect(page.locator(".column.phase-archived .card")).toHaveCount(0);
+    expect(requests).toBe(1);
+    expect(resumeRequests).toBe(1);
   });
 }
+
+for (const action of ["archive", "resume"] as const) {
+  for (const failure of ["conflict", "network"] as const) {
+    test(`round commands ${action} ${failure} preserve state without success or automatic resubmission`, async ({
+      page,
+    }) => {
+      // A stale tab can target an old round; a lost response can follow a committed write.
+      const current = action === "archive" ? blockedFlow : archivedFlow;
+      await mockFlows(page, () => [current]);
+      let requests = 0;
+      await page.route(`**/api/flows/42/${action}`, (route) => {
+        requests++;
+        return failure === "network"
+          ? route.abort("failed")
+          : route.fulfill({ status: 409, json: { detail: "round_conflict" } });
+      });
+      await page.goto("/#flow/42/overview");
+      if (action === "archive") {
+        await page
+          .getByRole("button", { name: "结束本轮", exact: true })
+          .click();
+        await page.getByLabel("本轮结论（必填）").fill("保留这份结论");
+        await page.getByRole("button", { name: "确认结束本轮" }).click();
+      } else
+        await page
+          .getByRole("button", { name: "恢复推进", exact: true })
+          .click();
+      await expect(page.getByRole("alert")).toContainText(
+        failure === "conflict" ? "未受理" : "无法确认",
+      );
+      await expect(page.getByRole("alert")).toContainText("刷新核对");
+      await expect(page.getByRole("status")).toHaveCount(0);
+      await expect(page.locator(".detail-head .badge")).toHaveText(
+        action === "archive" ? "受阻" : "已归档 · 成功",
+      );
+      if (action === "archive")
+        await expect(page.getByLabel("本轮结论（必填）")).toHaveValue(
+          "保留这份结论",
+        );
+      expect(requests).toBe(1);
+    });
+  }
+}
+
+test("round form cannot silently retarget a newer round after refresh", async ({
+  page,
+}) => {
+  let current = blockedFlow;
+  await mockFlows(page, () => [current]);
+  await page.goto("/#flow/42/overview");
+  await page.getByRole("button", { name: "结束本轮", exact: true }).click();
+  await page.getByLabel("本轮结论（必填）").fill("旧轮次结论");
+  current = { ...current, current_round_no: 2, state_version: 3 };
+  await page.getByRole("button", { name: "刷新当前视图" }).click();
+  await expect(page.getByRole("alert")).toContainText("轮次已变化");
+  await expect(
+    page.getByRole("button", { name: "确认结束本轮" }),
+  ).toBeDisabled();
+});
 
 test("a retry finishing after navigation cannot overwrite another flow", async ({
   page,
@@ -1255,6 +1343,7 @@ test("a retry finishing after navigation cannot overwrite another flow", async (
     return route.fulfill({
       json: {
         ...flow,
+        lifecycle: "queued",
         phase: "queued",
         state_version: 3,
         reason: "已重排",

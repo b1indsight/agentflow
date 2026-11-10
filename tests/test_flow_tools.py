@@ -14,6 +14,7 @@ from app.contracts.protocol import (
 from app.controler.workflow.tools import FlowToolService
 from app.domain.delivery_models import DeliveryReceipt, PreparedDelivery
 from app.domain.models import (
+    ArchiveReason,
     Attempt,
     DeliveryState,
     Flow,
@@ -46,7 +47,7 @@ class ToolStore(RepositoryViews):
             repo="owner/repo",
             issue_number=9,
             installation_id=42,
-            state=FlowState.ACTIVE,
+            state=FlowState.RUNNING,
             current_attempt_id=7,
         )
         self.attempt = Attempt(id=7, flow_id=3)
@@ -239,7 +240,8 @@ async def test_cancel_during_remote_verification_cannot_prepare_delivery(monkeyp
     github = ToolGitHub()
 
     async def cancel_and_read(*args, **kwargs):
-        store.flow.state = FlowState.CANCELLED
+        store.flow.state = FlowState.FINALIZING
+        store.flow.archive_reason = ArchiveReason.ABANDONED
         return RemoteRef(branch="flow/3", sha="abc123")
 
     monkeypatch.setattr(Repository, "fetch_ref", cancel_and_read)

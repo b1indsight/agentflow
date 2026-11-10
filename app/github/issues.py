@@ -58,10 +58,10 @@ _COMMENTS = """
 query($owner:String!,$name:String!,$number:Int!,$cursor:String,$limit:Int!){
   repository(owner:$owner,name:$name){issueOrPullRequest(number:$number){
     ... on Issue { comments(first:$limit,after:$cursor) { nodes {
-      fullDatabaseId body updatedAt author {login __typename}
+      fullDatabaseId body createdAt updatedAt author {login __typename}
     } pageInfo {hasNextPage endCursor} } }
     ... on PullRequest { comments(first:$limit,after:$cursor) { nodes {
-      fullDatabaseId body updatedAt author {login __typename}
+      fullDatabaseId body createdAt updatedAt author {login __typename}
     } pageInfo {hasNextPage endCursor} } }
   }}
 }

@@ -35,6 +35,7 @@ function record(
     version: 1,
     source: "worker",
     kind: "tool_call",
+    round_no: 1,
     author: "assistant",
     occurred_at: "2026-10-27T00:00:00Z",
     updated_at: "2026-10-27T00:00:00Z",
@@ -639,6 +640,7 @@ test("GitHub and Agent content cannot inject HTML, unsafe links or remote images
           {
             key: payload,
             version: 1,
+            round_no: null,
             author: payload,
             occurred_at: "2026-10-17T00:00:00Z",
             updated_at: "2026-10-17T00:00:00Z",
@@ -689,6 +691,7 @@ test("Markdown destinations use the message source, never the console origin", (
   const entry: ActivityItem = {
     key: "source-links",
     version: 1,
+    round_no: 1,
     author: "owner",
     occurred_at: "2026-10-20T00:00:00Z",
     updated_at: "2026-10-20T00:00:00Z",
@@ -734,6 +737,7 @@ test("CI checks show workflow, job and status beside the app without hiding summ
   const check: ActivityItem = {
     key: "check-1",
     version: 1,
+    round_no: null,
     source: "commit.check_runs:head",
     kind: "check",
     author: "GitHub Actions",

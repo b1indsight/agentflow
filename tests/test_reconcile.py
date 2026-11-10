@@ -10,7 +10,7 @@ from githubkit import GitHub as SDK
 
 from app.controler.reconciliation.pull_requests import Reconciler
 from app.controler.workflow.service import ControlService
-from app.domain.models import DeliveryState, FlowState, JobKind
+from app.domain.models import ArchiveReason, DeliveryState, FlowState, JobKind
 from app.github import (
     GitHubApp,
     GitHubError,
@@ -19,6 +19,7 @@ from app.github import (
     PullRequest,
     retry_delay,
 )
+from app.persistence.activity import ActivityStore
 from app.persistence.jobs import JobStore
 from app.persistence.store import Store
 from tests.github import RecordingGitHub, record_call
@@ -179,13 +180,25 @@ async def test_late_query_cannot_overwrite_a_changed_workflow(store, merge_flow,
     assert store.deliveries.get_delivery(merge_flow.id).state is expected
 
 
-@pytest.mark.parametrize("state", [FlowState.FAILED, FlowState.CANCELLED])
-async def test_historical_terminal_flow_only_records_merge_facts(store, merge_flow, state, polling_resources):
-    merge_flow.state = state
-    store.flows.update_flow(merge_flow)
-    await subject(store, GitHub(status(merge_flow)))._sweep()
-    assert store.flows.get_flow(merge_flow.id).state is state
-    assert store.deliveries.get_delivery(merge_flow.id).state is DeliveryState.MERGED
+async def test_historical_archived_flow_corrects_prearchive_merge_without_reactivation(
+    store, merge_flow, polling_resources
+):
+    ControlService(database=store.database).cancel(merge_flow)
+    activity = ActivityStore(store.database)
+    archived = activity.archived(merge_flow.id, 1)
+    assert archived is not None and archived.metadata["archive_reason"] == "abandoned"
+    delivery = store.deliveries.get_delivery(merge_flow.id)
+    remote = status(merge_flow, merged_at=archived.occurred_at - timedelta(seconds=5))
+    await subject(store, GitHub(remote))._sweep()
+    assert store.flows.get_flow(merge_flow.id).state is FlowState.ARCHIVED
+    assert store.flows.get_flow(merge_flow.id).archive_reason is ArchiveReason.SUCCEEDED
+    assert store.deliveries.get_delivery(merge_flow.id) == delivery
+    assert activity.archived(merge_flow.id, 1) == archived
+    history = activity.history(merge_flow.id, 1)
+    merges = [item for item in history if item.kind == "merge"]
+    assert len(merges) == 1
+    assert merges[0].metadata["merge_commit_sha"] == "a" * 40
+    assert len([item for item in history if item.kind == "archive_correction"]) == 1
     assert store.jobs.list_jobs(merge_flow.id) == []
 
 

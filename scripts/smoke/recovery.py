@@ -30,7 +30,7 @@ from app.contracts.protocol import (
     InitialTask,
     PushSecret,
 )
-from app.domain.models import JobKind
+from app.domain.models import FlowState, JobKind
 from app.persistence.store import Store
 from app.worker.state.execution import ExecutionState, ExecutionStateError
 
@@ -149,6 +149,9 @@ def drill(work: Path, postgres_bin: Path, revision: str) -> dict:
             raise RuntimeError('fixture assignment failed')
         if not store.workers.start_assignment(job.id, attempt.id, 'fixture-worker', 'fixture-token', 'fixture-epoch'):
             raise RuntimeError('fixture start failed')
+        expected_flow = store.flows.get_flow(flow.id)
+        if expected_flow is None or expected_flow.state is not FlowState.RUNNING:
+            raise RuntimeError('fixture flow did not enter running')
         store.webhooks.receive('fixture-delivery', 'ping', {}, 'a' * 64)
         journal = ExecutionState(root)
         journal.record_received(AssignmentArguments(
@@ -194,7 +197,7 @@ def drill(work: Path, postgres_bin: Path, revision: str) -> dict:
     try:
         restored_job = restored.jobs.get_job(job.id)
         binding = restored.workers.get_flow_execution(flow.id)
-        if (restored.flows.get_flow(flow.id) != flow or not restored_job
+        if (restored.flows.get_flow(flow.id) != expected_flow or not restored_job
                 or restored_job.assignment_token != 'fixture-token'
                 or not binding or binding.released_at is not None
                 or len(restored.webhooks.list()) != 1):

@@ -4,7 +4,7 @@ from datetime import timedelta
 
 import pytest
 
-from app.contracts.protocol import PROTOCOL_VERSION, Failed
+from app.contracts.protocol import PROTOCOL_VERSION, ExecutionStopped, Failed
 from app.contracts.receipts import decode_result_inbox
 from app.controler.workflow.service import ControlService
 from app.domain.models import JobKind
@@ -37,7 +37,17 @@ def test_assignment_rejection_preserves_competing_evidence(store, race):
     elif race == "lease":
         store._db._clock = lambda: job.created_at + timedelta(days=1)
     elif race == "binding":
-        store.workers.release_flow_execution(flow.id)
+        ControlService(database=store.database).cancel(flow)
+        stop = store.stops.pending("worker")
+        assert store.stops.confirm(
+            "worker",
+            ExecutionStopped(
+                **stop.fence().model_dump(),
+                execution_nonce="owned",
+            ),
+            "epoch",
+        )
+        assert store.workers.get_flow_execution(flow.id).released_at is not None
     before = store.jobs.get_job(job.id)
     rejected = store.workers.reject_assignment(job.id, "worker", "token", "epoch")
     after = store.jobs.get_job(job.id)

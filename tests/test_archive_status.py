@@ -1,4 +1,4 @@
-"""Archive notifications retain cleanup receipts until every GitHub effect is durable."""
+"""Archive notifications retain cleanup receipts; status labels never gate settlement."""
 
 from datetime import UTC, datetime, timedelta
 
@@ -10,7 +10,7 @@ from githubkit import GitHub
 from githubkit.cache.mem_cache import MemCacheStrategy
 
 from app.contracts.protocol import ArchiveResult
-from app.contracts.result_models import CommentEffect, EffectState, ResultPending
+from app.contracts.result_models import CommentEffect, EffectState, LabelEffect, ResultPending
 from app.controler.workflow.archive import archive_progress
 from app.controler.workflow.effects import ResultEffects
 from app.controler.workflow.service import ControlService
@@ -116,7 +116,7 @@ async def test_archive_publishes_stable_status_and_replay_does_not_backfill(stor
         assert f"Flow {flow.id}" in body
         assert f"#{flow.issue_number}" in body and "#17" in body
         assert "a" * 40 in body and "2026-09-08T08:00:00" in body
-        assert "工作区清理已确认" in body
+        assert "工作区处置已确认" in body
         assert "worker-a:" not in body and "archive-token" not in body
     plan = store.results.get_plan(job.id)
     assert plan.archive == result
@@ -129,7 +129,7 @@ async def test_archive_publishes_stable_status_and_replay_does_not_backfill(stor
     await route_merge(store, flow, "duplicate-merge")
     assert await subject.results.apply(job.id) is JobState.DONE
     assert len(github.notifications) == 2
-    assert store.flows.get_flow(flow.id).state is FlowState.SUCCEEDED
+    assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
     assert store.workers.get_flow_execution(flow.id).released_at is not None
 
 
@@ -148,7 +148,7 @@ async def test_permanent_archive_write_failure_retries_only_frozen_missing_effec
         await subject.results.apply(job.id)
     plan = store.results.get_plan(job.id)
     assert plan.archive == result
-    assert store.flows.get_flow(flow.id).state is FlowState.ACTIVE
+    assert store.flows.get_flow(flow.id).state is FlowState.BLOCKED
     assert store.workers.get_flow_execution(flow.id).released_at is None
     assert store.jobs.get_job(job.id).result_applied_at is None
     assert "comment" in store.jobs.get_job(job.id).last_error
@@ -173,7 +173,9 @@ async def test_permanent_archive_write_failure_retries_only_frozen_missing_effec
 
 
 @pytest.mark.parametrize("operation", ["add_label", "remove_label", "comment"])
-async def test_archive_recovers_remote_write_before_receipt_after_restart(store, monkeypatch, operation, archive_resources):
+async def test_archive_recovers_remote_write_before_receipt_after_restart(
+    store, monkeypatch, operation, archive_resources
+):
     flow, job, _, github, subject = await pending_archive(store)
     original = getattr(Issue, operation)
 
@@ -182,9 +184,23 @@ async def test_archive_recovers_remote_write_before_receipt_after_restart(store,
         raise GitHubError(GitHubErrorKind.TRANSIENT, operation)
 
     monkeypatch.setattr(Issue, operation, lost_response)
-    with pytest.raises(ResultPending):
-        await subject.results.apply(job.id)
-    assert store.workers.get_flow_execution(flow.id).released_at is None
+    if operation == "comment":
+        with pytest.raises(ResultPending):
+            await subject.results.apply(job.id)
+        assert store.workers.get_flow_execution(flow.id).released_at is None
+    else:
+        assert await subject.results.apply(job.id) is JobState.DONE
+        skipped = [r for r in store.results.list_effects(job.id) if r.state is EffectState.SKIPPED]
+        assert len(skipped) == 2
+        assert all(
+            isinstance(r.payload, LabelEffect)
+            and r.receipt is None
+            and r.dispatched_at is not None
+            and r.last_error
+            for r in skipped
+        )
+        assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
+        assert store.workers.get_flow_execution(flow.id).released_at is not None
     monkeypatch.setattr(Issue, operation, original)
     store.results.recover_claims()
     due(store, job.id)
@@ -210,7 +226,7 @@ async def test_unknown_archive_comment_stays_pending_without_resending_or_reclea
             database=store.database,
         ).retry(flow)
     assert store.results.get_plan(job.id).archive == result
-    assert store.flows.get_flow(flow.id).state is FlowState.ACTIVE
+    assert store.flows.get_flow(flow.id).state is FlowState.FINALIZING
     assert not github.notifications
 
 
@@ -423,24 +439,37 @@ async def test_archive_rate_limit_waits_until_reset_without_retry_after(store, t
     assert len(requests) == 2
 
 
-@pytest.mark.parametrize("status,kind", [(429, GitHubErrorKind.RATE_LIMITED),
-                                       (503, GitHubErrorKind.TRANSIENT)])
-async def test_archive_transient_label_errors_resume_automatically(store, monkeypatch, status, kind, archive_resources):
-    flow, job, _, _github, subject = await pending_archive(store)
-    original = Issue.add_label
+@pytest.mark.parametrize(
+    "operation,kind,status",
+    [
+        ("fetch_labels", GitHubErrorKind.PERMISSION, 403),
+        ("add_label", GitHubErrorKind.NOT_FOUND, 404),
+    ],
+)
+async def test_archive_label_errors_do_not_block_completion(
+    store, monkeypatch, operation, kind, status, archive_resources
+):
+    # Display failures must not retain a workspace whose cleanup is already confirmed.
+    # The full error-kind matrix is covered by INITIAL in test_result_recovery.
+    flow, job, _, github, subject = await pending_archive(store)
 
-    async def unavailable(issue, label):
-        raise GitHubError(kind, "add_label", status_code=status, request_rejected=status == 429)
+    async def unavailable(*args):
+        raise GitHubError(kind, operation, status_code=status, request_rejected=True)
 
-    monkeypatch.setattr(Issue, "add_label", unavailable)
-    with pytest.raises(ResultPending):
-        await subject.results.apply(job.id)
-    record = store.results.list_effects(job.id)[0]
-    assert record.state in {EffectState.RETRY, EffectState.UNCERTAIN}
-    assert store.workers.get_flow_execution(flow.id).released_at is None
-    monkeypatch.setattr(Issue, "add_label", original)
-    due(store, job.id)
+    monkeypatch.setattr(Issue, operation, unavailable)
     assert await subject.results.apply(job.id) is JobState.DONE
+    skipped = [r for r in store.results.list_effects(job.id) if r.state is EffectState.SKIPPED]
+    assert skipped
+    assert all(
+        isinstance(r.payload, LabelEffect)
+        and r.receipt is None
+        and r.last_error
+        and str(status) in r.last_error
+        for r in skipped
+    )
+    assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
+    assert store.workers.get_flow_execution(flow.id).released_at is not None
+    assert len(github.notifications) == 2
 
 
 async def test_existing_status_labels_need_no_mutation(store, archive_resources):
@@ -483,5 +512,5 @@ async def test_restart_recovers_comment_before_receipt_and_isolates_plugin_failu
         reopened.close()
     assert len(github.notifications) == 2
     assert store.jobs.get_job(job.id).result_applied_at is not None
-    assert store.flows.get_flow(flow.id).state is FlowState.SUCCEEDED
+    assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
     assert store.workers.get_flow_execution(flow.id).released_at is not None

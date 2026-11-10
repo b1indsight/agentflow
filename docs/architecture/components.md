@@ -56,15 +56,22 @@ Codex 等长任务占用 GitHub 的 Webhook 请求。
 边界：202 表示事件已持久化到 webhook inbox；后台消费者在事务内调用 Event Router，失败后可重试。
 202 不表示业务处理已经完成。
 
-### 4.1.1 Web 控制台展示归档
+### 4.1.1 Flow 六态、归档与恢复
 
-控制台的 `POST /api/flows/{id}/archive` 接受空 JSON 对象，复用单 owner Access 验签，
-拒绝明确跨站请求；工作流业务命令仍由 GitHub 与 CLI 发起。
-它在 workflow/publication 锁内重新校验 cancelled，持久保存 `console_flows.archived_at`，
-将卡片移到 done 并保留取消状态、停止确认与结果对账要求；重复请求幂等，任务和会话历史仍可阅读。
-投影刷新和重建保留该标记；重试或合并对账恢复生命周期后清除。
-此入口不创建 ARCHIVE job，不修改 Worker、交付或 GitHub，不将取消当作成功。
-见[功能记录](../plan/cancelled-flow-archive.md)与[控制台说明](../../app/controler/web/README.md)。
+Flow 持久化 `queued/running/review/blocked/finalizing/archived`，所有看板与 Projects 只映射
+这个字段；finalizing 合并到进行中。失败为 blocked，继续占用 Issue；归档结果只有 succeeded/abandoned。
+`POST /api/flows/{id}/archive` 接受 `{reason,summary,expected_round_no}`，复用单 owner Access
+验签及同源检查，通过现有 ControlService 请求收尾。无 PR 的成功调查必须提供非空结论。
+停止、结果、已派发副作用与工作区处置均确认后，事务内释放绑定、追加归档 activity 并写 archived。
+弃置/调查保留工作区；合并交付继续要求原 worker 的 ArchiveResult。
+`POST /api/flows/{id}/resume` 接受 `{expected_round_no}`，检查 Issue 冲突并开启同一 Flow 的新轮次。
+旧 PR、Job、Attempt 与反馈不授权新轮工作；旧分页游标重新开始，activity 历史保留。
+轮次由 Flow/Job/Attempt/activity 的字段表达，无独立 Round 实体。归档 activity 保留原始结果、时间和 PR 身份。
+已核验 webhook 与补偿查询自动更正归档前已合并的 abandoned 结果；严格要求 merged_at 加一秒早于 archived_at。
+合并证据、更正 activity 与当前归档结果同事务提交，重复消息幂等，不改变原归档时间、当前轮次、owner 或执行。
+状态 activity 继续由数据库触发器产生；归档、合并证据和更正由内部事务写入，不能覆盖或作为缓存清理。
+Worker 内容按 Attempt 归属，PR 内容按交付身份归属，Issue 共享/未知归属内容的 round_no 为 NULL。
+详见[控制台说明](../../app/controler/web/README.md)；原展示归档记录保留在历史规划中。
 
 ## 4.2 Event Router
 
@@ -72,8 +79,8 @@ Codex 等长任务占用 GitHub 的 Webhook 请求。
 
 - 触发/反馈忽略配置 bot login 及 GitHub `type=Bot` 的事件；合法关联 PR 的合并事实不受此过滤；
 - 以 `X-GitHub-Delivery` 原子占有并持久化去重，只有成功插入的 handler 才继续处理，同时记录原始 payload；
-- 仅允许 allowlist 用户通过 `issues.labeled(flow)` 创建 active flow 与 initial job；
-- `issues.unlabeled(flow)` 或严格等于 `/flow stop` 的评论取消 active flow；
+- 仅允许 allowlist 用户通过 `issues.labeled(flow)` 创建 queued Flow 与 initial job；
+- `issues.unlabeled(flow)` 或严格等于 `/flow stop` 的评论请求废弃收尾；
 - review body、inline comment 和 conversation 按 Flow/kind/GitHub ID 保存不可变版本，保留来源 attempt；
 - 反馈 delivery、版本和 deadline 共用事务，持久 settle 后冻结批次；仅 allowlist 作者提交的 Request Changes 经 grace 直达 REVISION；
 - `pull_request.closed (merged=true)` 原子保存事件去重、合并时间/SHA、delivery version，停止
@@ -83,22 +90,21 @@ Codex 等长任务占用 GitHub 的 Webhook 请求。
 
 M2 F1 自动化覆盖反馈工作流锁、同 Flow 批次串行、重启恢复和精确版本消费。
 WebhookConsumer 已持久化失败退避和重放；PR 对账处理已追踪 PR 的 merge/close/reopen，
-反馈对账补充 Issue/PR/review/线程漏投。未合并 close 暂挂而不取消 Flow，保留原绑定，
-重开后核验基线再恢复；漏失的新 Flow trigger 不由对账补建。真实 GitHub payload 兼容性
+反馈对账补充 Issue/PR/review/线程漏投。未合并 close 请求废弃收尾，reopen 不恢复执行，
+恢复只通过显式新轮次操作；漏失的新 Flow trigger 不由对账补建。真实 GitHub payload 兼容性
 仍需服务验收。依据：[消费者](../../app/controler/events/webhooks.py)、
 [PR 对账](../../app/controler/reconciliation/pull_requests.py)、
 [反馈对账](../../app/controler/reconciliation/feedback.py)。
 
 ## 4.3 Control Service / Job Coordinator（状态机核心）
 
-当前持久状态分轴保存；编码、审核和修订阶段由 job、反馈批次与 delivery 推导：
+业务阶段由 Flow 持久化；Job、反馈批次与 delivery 保留各自技术事实：
 
-```text
-Flow:     ACTIVE → SUCCEEDED / CANCELLED / FAILED
-Delivery: NONE → OPENING → OPEN → CLOSED / MERGED
-Review:   settle → READY → PROCESSING → COMPLETED / WAITING
-          新反馈进入后续批次；终态取消活动批次
-```
+| 记录 | 状态 | 约束 |
+| --- | --- | --- |
+| Flow | queued、running、review、blocked、finalizing、archived | 非 archived 继续占用 Issue；新轮次仅显式恢复 |
+| Delivery | none、opening、open、closed、merged | 原生 PR 事实不替代 Flow；关闭/合并经业务处理器更新 Flow |
+| Review | ready、processing、completed、waiting、cancelled | blocked 暂停；finalizing/archived 退休活动批次 |
 
 `ControlService` 在显式事务中负责触发、取消和 retry，并由 `lifecycle` 提交合并事实；
 `lifecycle` 也拥有创建 PR 的身份核验、绑定及 close/reopen。`JobCoordinator` 把 INITIAL、REVISION、ARCHIVE
@@ -119,7 +125,7 @@ ServerCallbacks 持久接收终态 T 后直接调用 `self.results.apply`，核�
 和当前连接头构造 `worker.execute` 调用；准备状态不授权 worker 提前报 Started 或结果。
 停止时撤销未下发准备，连接结束或替换时等待其取消清理。`Session.unwatch` 立即撤销完成通知，
 清理中的观察仍计入容量并由 Session 持有；关闭时一并等待，不重复取消已在清理的观察。
-非零 Codex exit 会转 FAILED。revision 成功后仅消费明确 addressed 的 item/version，deferred/遗漏项/
+非零 Codex exit 将 Job 置为 failed、Flow 置为 blocked。revision 成功后仅消费明确 addressed 的 item/version，deferred/遗漏项/
 clarification 保持 waiting；不把 addressed 当作远端 resolved。有未决问题时不重新请求审核。
 
 M2 已接入有界 Issue/PR/patch/讨论快照、线程/comment 映射与原线程回复/保守 resolve。
@@ -129,8 +135,8 @@ M2 已接入有界 Issue/PR/patch/讨论快照、线程/comment 映射与原线�
 - 同秒已出现的编辑转换保留待核对，不重复回放；新鲜观察可推进，见 [M4 F1](../plan/m4-feedback-replay.md)；
 - 冻结上下文尚不包含 CI 状态；
 - cancel 持久化停止意图，worker 取消执行并回收持有的进程组；未知旧执行和未决 effects
-  保留绑定，无强制释放。cancel 不撤销已发生的 push/PR/评论，也不执行归档清理；
-- 未合并 close 暂挂，reopen 核验 head/base 和旧执行后恢复；修订拒绝远端 head 漂移，
+  保留绑定，无强制释放。cancel 不撤销已发生的 push/PR/评论；确认停止后保留工作区并归档；
+- 未合并 close 结束本轮，reopen 只记事实；显式 resume 创建新轮次。修订拒绝远端 head 漂移，
   人工 push 的自动接纳、rebase/冲突处理尚未实现。
 
 因此状态转换代码存在不等于目标闭环可用。

@@ -1,6 +1,7 @@
 from datetime import timedelta
 
 import pytest
+from psycopg.errors import UniqueViolation
 
 from app.contracts.protocol import PROTOCOL_VERSION, ExecutionStopped, Failed
 from app.contracts.result_models import EffectState, PullRequestEffect, ResultPlan
@@ -96,7 +97,12 @@ def test_drain_survives_reconnect_and_allows_bound_followup(store):
         connection.execute(
             "UPDATE workers SET current_job_id=NULL,status='online' WHERE worker_id='w'"
         )
-    store.workers.release_flow_execution(flow.id)
+    ControlService(database=store.database).cancel(flow)
+    stop = store.stops.pending("w")
+    assert store.stops.confirm(
+        "w", ExecutionStopped(**stop.fence().model_dump(), execution_nonce="owned"), "next"
+    )
+    assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
     another = store.flows.create_flow("owner/another", 2, 1)
     store.jobs.enqueue_job(another.id, JobKind.INITIAL)
     assert store.workers.assign_job("w", "new", "next") is None
@@ -122,7 +128,7 @@ async def test_merge_during_cancel_retains_binding_for_original_archive(store):
         database=store.database,
     ).cancel(flow)
     await route_merge(store, flow)
-    assert store.flows.get_flow(flow.id).state is FlowState.ACTIVE
+    assert store.flows.get_flow(flow.id).state is FlowState.FINALIZING
     stop = store.stops.pending("w")
     assert store.stops.confirm(
         "w", ExecutionStopped(**stop.fence().model_dump(), execution_nonce="owned"), "epoch"
@@ -132,9 +138,10 @@ async def test_merge_during_cancel_retains_binding_for_original_archive(store):
     assert archive is not None and archive.kind is JobKind.ARCHIVE
 
 
-def test_unresolved_dispatched_effect_blocks_stop_even_if_result_was_marked_applied(store):
+@pytest.mark.parametrize("kind", ["comment", "label", None])
+def test_unresolved_dispatched_effect_blocks_stop_except_skipped_status_labels(store, kind):
     flow, job = running(store)
-    # Older code could mark a cancelled effect skipped without reconciling a dispatched write.
+    # Only skipped display updates can settle without a remote receipt, not other writes.
     with store.connection() as conn:
         conn.execute(
             "INSERT INTO result_applications(job_id,digest,plan,created_at) VALUES(%s,'digest','{}',now())",
@@ -142,22 +149,25 @@ def test_unresolved_dispatched_effect_blocks_stop_even_if_result_was_marked_appl
         )
         conn.execute(
             "INSERT INTO result_effects(job_id,effect_key,position,payload,state,dispatched_at,next_attempt_at)"
-            " VALUES(%s,'comment',0,'{}','skipped',now(),now())",
-            (job.id,),
+            " VALUES(%s,'effect',0,jsonb_build_object('kind',%s::text),'skipped',now(),now())",
+            (job.id, kind),
         )
     ControlService(
         database=store.database,
     ).cancel(flow)
     stop = store.stops.pending("w")
     receipt = ExecutionStopped(**stop.fence().model_dump(), execution_nonce="owned")
-    assert not store.stops.confirm("w", receipt, "epoch")
-    assert store.workers.get_flow_execution(flow.id).released_at is None
-    with store.connection() as conn:
-        conn.execute("UPDATE result_effects SET receipt='{}' WHERE job_id=%s", (job.id,))
+    if kind != "label":
+        assert not store.stops.confirm("w", receipt, "epoch")
+        assert store.workers.get_flow_execution(flow.id).released_at is None
+        with store.connection() as conn:
+            conn.execute("UPDATE result_effects SET receipt='{}' WHERE job_id=%s", (job.id,))
     assert store.stops.confirm("w", receipt, "epoch")
+    assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
+    assert store.workers.get_flow_execution(flow.id).released_at is not None
 
 
-async def test_late_merge_with_replacement_flow_keeps_stop_blocked(store):
+async def test_finalizing_flow_reserves_issue_until_late_merge_cleanup_settles(store):
     flow, _job = running(store)
     delivery = store.deliveries.get_or_create_delivery(flow.id, "flow/1")
     delivery.state, delivery.pr_number = DeliveryState.OPEN, 17
@@ -165,10 +175,11 @@ async def test_late_merge_with_replacement_flow_keeps_stop_blocked(store):
     ControlService(
         database=store.database,
     ).cancel(flow)
-    store.flows.create_flow(flow.repo, flow.issue_number, flow.installation_id)
+    with pytest.raises(UniqueViolation):
+        store.flows.create_flow(flow.repo, flow.issue_number, flow.installation_id)
     await route_merge(store, flow)
     stop = store.stops.pending("w")
-    assert not store.stops.confirm(
+    assert store.stops.confirm(
         "w", ExecutionStopped(**stop.fence().model_dump(), execution_nonce="owned"), "epoch"
     )
     store._db._clock = lambda: flow.created_at + timedelta(days=1)
@@ -226,7 +237,7 @@ def test_confirmed_stop_can_be_reacknowledged_after_flow_rebind(store):
     assert store.stops.confirm("w", receipt, "epoch")
     ControlService(
         database=store.database,
-    ).retry(store.flows.get_flow(flow.id))
+    ).resume(store.flows.get_flow(flow.id), expected_round_no=flow.current_round_no)
     store.workers.worker_connected("new-worker", PROTOCOL_VERSION, "new-epoch")
     replacement = store.workers.assign_job("new-worker", "new-token", "new-epoch")
     assert replacement is not None
@@ -305,9 +316,7 @@ async def test_cancelled_creation_persists_pr_identity_and_merge_before_stop(
     assert recovered.pr_number == 17 and recovered.state is DeliveryState(remote_state)
     assert recovered.merge_commit_sha == remote.merge_commit_sha
     assert store.flows.get_flow_by_pr(flow.repo, 17).id == flow.id
-    assert store.flows.get_flow(flow.id).state is (
-        FlowState.ACTIVE if remote_state == "merged" else FlowState.CANCELLED
-    )
+    assert store.flows.get_flow(flow.id).state is FlowState.FINALIZING
     stop = store.stops.pending("w")
     assert store.stops.confirm(
         "w", ExecutionStopped(**stop.fence().model_dump(), execution_nonce="owned"), "epoch"

@@ -15,7 +15,7 @@ import typer
 import uvicorn
 
 from app import github
-from app.domain.models import DeliveryState
+from app.domain.models import ArchiveReason, DeliveryState
 from app.worker.cli import app as worker_app
 
 if TYPE_CHECKING:
@@ -190,7 +190,11 @@ def flow_show(flow_id: int) -> None:
         f = store.flows.get_flow(flow_id)
         if not f:
             raise typer.Exit(1)
-        typer.echo(f"flow {f.id}\n  repo={f.repo} issue=#{f.issue_number} state={f.state}")
+        typer.echo(
+            f"flow {f.id}\n  repo={f.repo} issue=#{f.issue_number} state={f.state}"
+            f" round={f.current_round_no} outcome={f.archive_reason or '-'}"
+            f" archived_at={f.archived_at or '-'}"
+        )
         execution = store.workers.get_flow_execution(f.id)
         delivery = store.deliveries.get_delivery(f.id)
         if execution is not None:
@@ -204,8 +208,10 @@ def flow_show(flow_id: int) -> None:
                 f" pr={delivery.pr_number or '-'} head={delivery.head_sha or '-'}"
             )
             if delivery.state is DeliveryState.CLOSED:
-                typer.echo("  paused: original worker/repo retained; reopen requires settled execution"
-                           " and verified head/base; flow retry cannot bypass this hold")
+                typer.echo(
+                    "  closed: finalization or baseline reconciliation required;"
+                    " reopening does not authorize work"
+                )
         check = store.reconcile.get(f.id)
         if check is not None:
             typer.echo(f"  reconcile: last={check.last_success_at or '-'} next={check.next_at}"
@@ -279,6 +285,62 @@ def flow_retry(flow_id: int) -> None:
             database=store.database,
         ).retry(f)
     typer.echo(f"retry requested for flow {flow_id}")
+
+
+@flow_app.command("finish")
+def flow_finish(
+    flow_id: int,
+    reason: ArchiveReason,
+    summary: str = typer.Option(""),
+    expected_round: int = typer.Option(..., min=1),
+) -> None:
+    """结束指定轮次；无 PR 的成功调查必须提供结论。"""
+    from app.controler.workflow.service import ControlService
+
+    with _store() as store:
+        flow = store.flows.get_flow(flow_id)
+        if flow is None:
+            raise typer.Exit(1)
+        try:
+            ControlService(database=store.database).finish(
+                flow, reason=reason, summary=summary, expected_round_no=expected_round
+            )
+        except ValueError as error:
+            typer.echo(str(error), err=True)
+            raise typer.Exit(1) from None
+    typer.echo(f"finalization requested for flow {flow_id} round {expected_round}")
+
+
+@flow_app.command("resume")
+def flow_resume(flow_id: int, expected_round: int = typer.Option(..., min=1)) -> None:
+    """显式恢复已归档 Flow，开启新轮次和新交付。"""
+    from app.controler.workflow.service import ControlService
+
+    with _store() as store:
+        flow = store.flows.get_flow(flow_id)
+        if flow is None:
+            raise typer.Exit(1)
+        try:
+            resumed = ControlService(database=store.database).resume(
+                flow, expected_round_no=expected_round
+            )
+        except ValueError as error:
+            typer.echo(str(error), err=True)
+            raise typer.Exit(1) from None
+    typer.echo(f"flow {flow_id} round {resumed.current_round_no}: queued")
+
+
+@flow_app.command("history")
+def flow_history(flow_id: int, round_no: int = typer.Option(..., "--round", min=1)) -> None:
+    """按轮次显示状态、归档、合并证据与自动更正的原始活动记录。"""
+    from app.persistence.activity import ActivityStore
+
+    with _store() as store:
+        flow = store.flows.get_flow(flow_id)
+        if flow is None or round_no > flow.current_round_no:
+            raise typer.Exit(1)
+        for item in ActivityStore(store.database).history(flow_id, round_no):
+            typer.echo(item.model_dump_json())
 
 
 if __name__ == "__main__":

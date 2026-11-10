@@ -2,7 +2,7 @@
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from pydantic import SecretStr, ValidationError
@@ -11,8 +11,9 @@ from app.contracts.protocol import ArchiveResult, ArchiveTask, Succeeded
 from app.controler.config import ServerSettings
 from app.controler.events.router import EventRouter
 from app.controler.workflow.service import ControlService
-from app.domain.models import DeliveryState, Flow, FlowState, JobKind, JobState
+from app.domain.models import ArchiveReason, DeliveryState, Flow, FlowState, JobKind, JobState
 from app.domain.review_models import BatchState
+from app.persistence.activity import ActivityStore
 from app.persistence.jobs import JobStore
 from app.persistence.store import Store
 from tests.github import RecordingGitHub
@@ -118,13 +119,26 @@ async def test_merge_routing_uses_pr_identity_not_feedback_authorization(store, 
     assert bool(store.jobs.list_jobs(merge_flow.id)) is (case == "bot")
 
 
-@pytest.mark.parametrize("state", [FlowState.FAILED, FlowState.CANCELLED])
-async def test_terminal_flow_keeps_merge_fact_without_reactivation(store, merge_flow, state):
-    merge_flow.state = state
-    store.flows.update_flow(merge_flow)
-    await route_merge(store, merge_flow)
-    assert store.deliveries.get_delivery(merge_flow.id).state is DeliveryState.MERGED
-    assert store.flows.get_flow(merge_flow.id).state is state
+async def test_archived_flow_corrects_prearchive_merge_without_reactivation(store, merge_flow):
+    ControlService(database=store.database).cancel(merge_flow)
+    activity = ActivityStore(store.database)
+    archived = activity.archived(merge_flow.id, 1)
+    assert archived is not None and archived.metadata["archive_reason"] == "abandoned"
+    delivery = store.deliveries.get_delivery(merge_flow.id)
+    payload = merge_payload(merge_flow)
+    payload["pull_request"]["merged_at"] = (
+        archived.occurred_at - timedelta(seconds=5)
+    ).isoformat()
+    await route_merge(store, merge_flow, payload=payload)
+    assert store.deliveries.get_delivery(merge_flow.id) == delivery
+    assert activity.archived(merge_flow.id, 1) == archived
+    history = activity.history(merge_flow.id, 1)
+    merges = [item for item in history if item.kind == "merge"]
+    assert len(merges) == 1
+    assert merges[0].metadata["merge_commit_sha"] == "a" * 40
+    assert len([item for item in history if item.kind == "archive_correction"]) == 1
+    assert store.flows.get_flow(merge_flow.id).state is FlowState.ARCHIVED
+    assert store.flows.get_flow(merge_flow.id).archive_reason is ArchiveReason.SUCCEEDED
     assert store.jobs.list_jobs(merge_flow.id) == []
 
 
@@ -150,7 +164,7 @@ async def test_merge_retires_review_but_waits_for_running_result(store, recordin
     assert await subject.results.apply(job.id) is JobState.DONE
     assert await subject.results.apply(job.id) is JobState.DONE
     assert github.comments == []
-    assert store.flows.get_flow(flow.id).state is FlowState.ACTIVE
+    assert store.flows.get_flow(flow.id).state is FlowState.FINALIZING
     assert store.deliveries.get_delivery(flow.id).state is DeliveryState.MERGED
     archive = store.workers.assign_job("worker-a", "archive-token", "epoch-a")
     assert archive is not None and archive.kind is JobKind.ARCHIVE
@@ -166,4 +180,5 @@ async def test_merge_retires_review_but_waits_for_running_result(store, recordin
         message,
     ) == "pending"
     assert await subject.results.apply(archive.id) is JobState.DONE
-    assert store.flows.get_flow(flow.id).state is FlowState.SUCCEEDED
+    assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
+    assert store.flows.get_flow(flow.id).archive_reason is ArchiveReason.SUCCEEDED

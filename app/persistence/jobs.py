@@ -38,7 +38,7 @@ class JobStore(Repository):
                 "WITH retired AS (UPDATE jobs SET state=%s, last_error=%s, updated_at=%s WHERE flow_id=%s"
                 " AND kind<>'inference'"
                 " AND (state=%s OR (state='running' AND started_at IS NULL AND dispatch_authorized_at IS NULL"
-                " AND EXISTS (SELECT 1 FROM flows f WHERE f.id=jobs.flow_id AND f.state='cancelled')))"
+                " AND EXISTS (SELECT 1 FROM flows f WHERE f.id=jobs.flow_id AND f.archive_reason IS NOT NULL)))"
                 " AND result_received_at IS NULL RETURNING id)"
                 " UPDATE workers SET current_job_id=NULL,status=CASE WHEN status='busy' THEN 'online' ELSE status END"
                 " WHERE current_job_id IN (SELECT id FROM retired)",
@@ -128,13 +128,14 @@ class JobStore(Repository):
             connection.cursor(row_factory=class_row(Job)) as cursor,
         ):
             row = cursor.execute(
-                "INSERT INTO jobs(flow_id, kind, state, attempt, payload, created_at,"
-                " updated_at,source_job_id,source_key) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)"
+                "INSERT INTO jobs(flow_id,round_no,kind,state,attempt,payload,created_at,"
+                " updated_at,source_job_id,source_key) VALUES (%s,(SELECT current_round_no FROM flows WHERE id=%s),%s,%s,%s,%s,%s,%s,%s,%s)"
                 " ON CONFLICT(source_job_id,source_key) WHERE source_job_id IS NOT NULL"
                 " DO UPDATE SET source_key=excluded.source_key"
                 " WHERE jobs.flow_id=excluded.flow_id AND jobs.kind=excluded.kind"
                 " AND jobs.payload IS NOT DISTINCT FROM excluded.payload RETURNING *",
                 (
+                    flow_id,
                     flow_id,
                     kind,
                     JobState.QUEUED,
@@ -146,6 +147,12 @@ class JobStore(Repository):
                     source_key,
                 ),
             ).fetchone()
+            if kind is not JobKind.ARCHIVE:
+                connection.execute(
+                    "UPDATE flows SET state='queued',updated_at=%s WHERE id=%s AND state='review'"
+                    " AND archive_reason IS NULL",
+                    (now, flow_id),
+                )
         return required(row)
 
     def enqueue_inference(
@@ -216,11 +223,21 @@ class JobStore(Repository):
                 source_attempt_id=flow.current_attempt_id if flow else None,
                 context_digest=batch.context.digest if batch and batch.context else None,
             )
-            job = connection.cursor(row_factory=class_row(Job)).execute(
-                "INSERT INTO jobs(flow_id,kind,state,inference,created_at,updated_at)"
-                " VALUES (%s,'inference','queued',%s,%s,%s) RETURNING *",
-                (flow_id, Jsonb(inference.model_dump(mode="json")), now, now),
-            ).fetchone()
+            job = (
+                connection.cursor(row_factory=class_row(Job))
+                .execute(
+                    "INSERT INTO jobs(flow_id,round_no,kind,state,inference,created_at,updated_at)"
+                    " VALUES (%s,%s,'inference','queued',%s,%s,%s) RETURNING *",
+                    (
+                        flow_id,
+                        flow.current_round_no if flow else 1,
+                        Jsonb(inference.model_dump(mode="json")),
+                        now,
+                        now,
+                    ),
+                )
+                .fetchone()
+            )
             assert job is not None
             if batch is not None:
                 connection.execute("UPDATE review_batches SET inference_job_id=%s WHERE id=%s", (job.id, batch.id))

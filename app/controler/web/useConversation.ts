@@ -63,6 +63,7 @@ export function activityIdentity(entry: ActivityItem): ActivityIdentity {
   return {
     key: entry.key,
     version: entry.version,
+    round_no: entry.round_no,
     source: entry.source,
     kind: entry.kind,
     author: entry.author,

@@ -47,6 +47,17 @@ class DeliveryStore(Repository):
                 "SELECT * FROM flow_deliveries WHERE flow_id=%s", (flow_id,)
             ).fetchone()
 
+    def reset_round(self, flow_id: int, branch: str) -> None:
+        """Clear current delivery after its archive activity, preserving the version fence."""
+        now = self._db.now()
+        with self._db.connection() as connection:
+            connection.execute(
+                "UPDATE flow_deliveries SET branch=%s,base_branch=NULL,state='none',pr_number=NULL,"
+                " url=NULL,head_sha=NULL,title=NULL,body=NULL,merged_at=NULL,merge_commit_sha=NULL,"
+                " version=version+1,created_at=%s,updated_at=%s WHERE flow_id=%s",
+                (branch, now, now, flow_id),
+            )
+
     def update_delivery(self, delivery: FlowDelivery) -> None:
         delivery.updated_at = self._db.now()
         with self._db.connection() as connection:

@@ -7,7 +7,7 @@ def test_current_schema_initialization_is_idempotent(store):
     flow = store.flows.create_flow("owner/repo", 8, 42)
     store.init_db()
     current = store.flows.get_flow(flow.id)
-    assert current is not None and current.state is FlowState.ACTIVE
+    assert current is not None and current.state is FlowState.QUEUED
     with store.connection() as connection:
         assert connection.execute("SELECT to_regclass('review_threads') AS name").fetchone()["name"] is None
         assert connection.execute("SELECT to_regclass('review_migrations') AS name").fetchone()["name"] is None

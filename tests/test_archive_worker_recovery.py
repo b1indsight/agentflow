@@ -245,7 +245,7 @@ async def test_original_worker_recovers_cleanup_and_replays_without_redeleting(
     assert managed_seed.exists() and other_repo.exists()
     assert not agent.started
     assert journal.load() is None
-    assert store.flows.get_flow(flow.id).state is FlowState.SUCCEEDED
+    assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
     assert store.workers.get_flow_execution(flow.id).released_at is not None
     assert store.jobs.get_job(job.id).state is JobState.DONE
     progress = archive_progress(
@@ -339,6 +339,6 @@ async def test_merge_recovery_preserves_coding_completion_and_root_provenance(
         )
     finally:
         lock.release()
-    assert store.flows.get_flow(flow.id).state is FlowState.SUCCEEDED
+    assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
     assert store.workers.get_flow_execution(flow.id).released_at is not None
     assert repo.exists() and managed_seed.exists()

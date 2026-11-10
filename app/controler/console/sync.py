@@ -101,6 +101,8 @@ class ConsoleSynchronizer:
                     )
                 elif claim.source == "worker":
                     page = await self.conversations.read(claim.flow_id, claim.cursor, 50)
+                    if page.flow_id != claim.flow_id:
+                        raise ConversationFailure("invalid_response")
                     limitations: list[str] = []
                     items = [self._worker(item, claim) for item in page.items]
                     if any(item.truncated for item in page.items):

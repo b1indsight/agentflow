@@ -1,4 +1,6 @@
-export type Phase = "queued" | "running" | "review" | "blocked" | "done";
+export type Phase = "queued" | "running" | "review" | "blocked" | "archived";
+export type FlowLifecycle = Phase | "finalizing";
+export type ArchiveReason = "succeeded" | "abandoned";
 export type Tab = "overview" | "conversation" | "jobs";
 export interface FlowSummary {
   id: number;
@@ -8,7 +10,7 @@ export interface FlowSummary {
   title: string | null;
   pr_number: number | null;
   pr_url: string | null;
-  lifecycle: string;
+  lifecycle: FlowLifecycle;
   phase: Phase;
   action: string;
   worker_id: string | null;
@@ -17,6 +19,9 @@ export interface FlowSummary {
   branch: string | null;
   created_at: string;
   updated_at: string;
+  current_round_no: number;
+  archive_reason: ArchiveReason | null;
+  archive_summary: string | null;
   archived_at: string | null;
   state_version: number;
 }
@@ -101,6 +106,7 @@ export interface ActivityItem {
   version: number;
   source: string;
   kind: string;
+  round_no: number | null;
   occurred_at: string;
   updated_at: string;
   observed_at: string;
@@ -123,6 +129,7 @@ export interface ActivityIdentity extends Pick<
   | "version"
   | "source"
   | "kind"
+  | "round_no"
   | "author"
   | "occurred_at"
   | "body_length"

@@ -8,6 +8,7 @@ import psycopg
 import pytest
 
 from app.contracts.protocol import PROTOCOL_VERSION, ExecutionStopped, Failed
+from app.controler.workflow.service import ControlService
 from app.domain.models import FlowState, JobKind, JobState, WorkerStatus
 
 NOW = datetime(2026, 9, 29, tzinfo=UTC)
@@ -41,9 +42,7 @@ def test_sweep_waiting_on_worker_reads_committed_receipt(store, monkeypatch, rec
     # worker lock. Decisions must see the receipt, not the earlier timeout facts.
     flow, job = expiring(store, started=True)
     if receipt == "stop":
-        with store.transaction() as tx:
-            tx.lock_workflow(flow.id)
-            tx.stops.request(flow.id)
+        ControlService(database=store.database).cancel(flow)
     waiting = Event()
     execute = psycopg.Connection.execute
 
@@ -79,7 +78,9 @@ def test_sweep_waiting_on_worker_reads_committed_receipt(store, monkeypatch, rec
                     "epoch",
                 )
         assert sweep.result(timeout=5) == (0, 0)
-    assert store.flows.get_flow(flow.id).state is FlowState.ACTIVE
+    assert store.flows.get_flow(flow.id).state is (
+        FlowState.RUNNING if receipt == "result" else FlowState.ARCHIVED
+    )
     if receipt == "result":
         assert store.jobs.get_job(job.id).result_received_at == NOW
         assert store.workers.get_flow_execution(flow.id).released_at is None
@@ -101,6 +102,6 @@ def test_binding_decision_failure_rolls_back_prior_job_updates(store, monkeypatc
         store.workers.sweep_expired_assignments()
     assert store.jobs.get_job(job.id).state is JobState.RUNNING
     assert store.jobs.get_job(job.id).assignment_token == "token"
-    assert store.flows.get_flow(flow.id).state is FlowState.ACTIVE
+    assert store.flows.get_flow(flow.id).state is FlowState.RUNNING
     assert store.workers.list_workers()[0].status is WorkerStatus.BUSY
     assert store.workers.get_flow_execution(flow.id).released_at is None

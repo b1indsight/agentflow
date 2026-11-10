@@ -17,6 +17,7 @@ from app.contracts.console import (
     JobPage,
     Phase,
     RepositoryPage,
+    ResumeRequest,
     RetryRequest,
 )
 from app.controler.runtime import ServerRuntime
@@ -84,10 +85,55 @@ def _require_same_origin_json(request: Request) -> None:
 
 @router.post("/flows/{flow_id}/archive", response_model=FlowDetail)
 async def archive(request: Request, flow_id: FlowId, body: ArchiveRequest) -> FlowDetail:
-    """Archive only local display state; JSON and origin checks prevent form-based CSRF."""
+    """Request business finalization; a card cannot bypass stop or cleanup guards."""
     _require_same_origin_json(request)
     runtime: ServerRuntime = request.app.state.runtime
-    return await runtime.console.db(partial(ConsoleStore(runtime.database).archive, flow_id))
+    loop = asyncio.get_running_loop()
+
+    def notify_jobs() -> None:
+        loop.call_soon_threadsafe(runtime.gateway.wake_all)
+
+    def command() -> FlowDetail:
+        flow = FlowStore(runtime.database).get_flow(flow_id)
+        if flow is None:
+            raise ConsoleFailure("flow_not_found", 404)
+        try:
+            ControlService(database=runtime.database, jobs_available=notify_jobs).finish(
+                flow,
+                reason=body.reason,
+                summary=body.summary,
+                expected_round_no=body.expected_round_no,
+            )
+        except ValueError as error:
+            raise ConsoleFailure("archive_rejected") from error
+        return ConsoleStore(runtime.database).detail(flow_id)
+
+    return await runtime.console.db(command)
+
+
+@router.post("/flows/{flow_id}/resume", response_model=FlowDetail)
+async def resume(request: Request, flow_id: FlowId, body: ResumeRequest) -> FlowDetail:
+    """Explicit restoration is separate from retry and historical correction."""
+    _require_same_origin_json(request)
+    runtime: ServerRuntime = request.app.state.runtime
+    loop = asyncio.get_running_loop()
+
+    def notify_jobs() -> None:
+        loop.call_soon_threadsafe(runtime.gateway.wake_all)
+
+    def command() -> FlowDetail:
+        flow = FlowStore(runtime.database).get_flow(flow_id)
+        if flow is None:
+            raise ConsoleFailure("flow_not_found", 404)
+        try:
+            ControlService(database=runtime.database, jobs_available=notify_jobs).resume(
+                flow, expected_round_no=body.expected_round_no
+            )
+        except ValueError as error:
+            raise ConsoleFailure("resume_rejected") from error
+        return ConsoleStore(runtime.database).detail(flow_id)
+
+    return await runtime.console.db(command)
 
 
 @router.post("/flows/{flow_id}/retry", response_model=FlowDetail)

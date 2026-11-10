@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from copy import deepcopy
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any, cast
+from unittest.mock import Mock
 from uuid import uuid4
 
 import pytest
@@ -64,8 +65,11 @@ class MemoryStore(RepositoryViews):
             repo="owner/repo",
             issue_number=8,
             installation_id=42,
-            state=FlowState.ACTIVE,
+            state=FlowState.RUNNING,
         )
+        # Active flows do not archive. Finalizing scenarios script this boundary explicitly;
+        # settlement, release and archive activity are tested against PostgreSQL.
+        self.try_archive = Mock(name="try_archive", return_value=False)
         self.attempt: Attempt | None = None
         self.execution = FlowExecution(
             flow_id=1,
@@ -78,7 +82,8 @@ class MemoryStore(RepositoryViews):
 
     @contextmanager
     def transaction(self):
-        snapshot = deepcopy(self.__dict__)
+        # Scripted responses and observed calls are not transactional persistence state.
+        snapshot = deepcopy(self.__dict__, {id(self.try_archive): self.try_archive})
         try:
             yield self
         except Exception:
@@ -174,6 +179,7 @@ class MemoryStore(RepositoryViews):
         self.attempt = attempt
 
     def update_flow(self, flow: Flow) -> None:
+        assert flow.state is not FlowState.ARCHIVED, "only persistence finalization may archive"
         self.flow = flow
 
     def get_flow_execution(self, flow_id: int) -> FlowExecution | None:
@@ -182,7 +188,7 @@ class MemoryStore(RepositoryViews):
     def release_flow_execution(self, flow_id: int) -> bool:
         if self.stops.has_pending(flow_id):
             return False
-        self.execution.released_at = datetime.now(UTC)
+        self.execution.released_at = self.now()
         return True
 
     def get_or_create_delivery(self, flow_id: int, branch: str) -> FlowDelivery:
@@ -231,6 +237,7 @@ class MemoryStore(RepositoryViews):
                 return existing
         self.enqueued.append((kind, payload))
         job = Job(id=len(self.enqueued) + 10, flow_id=flow_id, kind=kind, state=JobState.QUEUED)
+        self.job_records[job.id] = job
         if source_job_id is not None and source_key is not None:
             self.sources[source_job_id, source_key] = job
         return job
@@ -297,6 +304,7 @@ def coordinator(store: Store | MemoryStore, github: GitHubApp) -> CoordinatorFix
 @pytest.mark.asyncio
 async def test_initial_job_crosses_worker_boundary_and_opens_pr() -> None:
     store = MemoryStore()
+    store.try_archive.side_effect = [False]  # Delivery enters review, not finalization.
     github = RecordingGitHub()
     subject = coordinator(store, github)
     job = Job(
@@ -356,7 +364,8 @@ async def test_initial_job_crosses_worker_boundary_and_opens_pr() -> None:
 
     assert state is JobState.DONE
     assert replayed_state is JobState.DONE
-    assert store.flow.state is FlowState.ACTIVE
+    assert store.flow.state is FlowState.REVIEW
+    store.try_archive.assert_called_once_with(store.flow.id)
     assert store.attempt is not None
     assert store.attempt.codex_session_id == "session-1"
     assert store.delivery is not None
@@ -483,5 +492,5 @@ async def test_recovery_applies_unassigned_control_failure_without_rewriting_inb
     assert persisted.state is JobState.FAILED and persisted.result_applied_at is not None
     assert persisted.result_payload == accepted.result_payload
     assert persisted.result_digest == accepted.result_digest == terminal_digest(terminal)
-    assert store.flows.get_flow(flow.id).state is FlowState.FAILED
+    assert store.flows.get_flow(flow.id).state is FlowState.BLOCKED
     assert store.jobs.lifecycle_job(flow.id) is None

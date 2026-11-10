@@ -17,9 +17,15 @@ def archive_task(
     """Check current ownership and quiescence before freezing or accepting cleanup."""
     execution = workers.get_flow_execution(flow.id)
     delivery = deliveries.get_delivery(flow.id)
-    if (flow.state is not FlowState.ACTIVE or flow.current_attempt_id is None
-            or job.kind is not JobKind.ARCHIVE or job.state is not JobState.RUNNING
-            or delivery is None or delivery.state is not DeliveryState.MERGED):
+    if (
+        flow.state not in {FlowState.FINALIZING, FlowState.BLOCKED}
+        or flow.current_attempt_id is None
+        or job.round_no != flow.current_round_no
+        or job.kind is not JobKind.ARCHIVE
+        or job.state is not JobState.RUNNING
+        or delivery is None
+        or delivery.state is not DeliveryState.MERGED
+    ):
         raise ValueError("archive requires an active Flow with a merged delivery")
     if (execution is None or execution.released_at is not None
             or execution.worker_id != job.assigned_worker_id
@@ -62,12 +68,12 @@ def archive_effects(
             or delivery.merge_commit_sha is None or delivery.merged_at is None):
         raise ValueError("archive notification requires installation and persisted merge facts")
     body = (
-        f"✅ Flow {flow.id} 已归档\n\n"
+        f"✅ Flow {flow.id} 合并后工作区处置已确认\n\n"
         f"关联 Issue：{flow.repo}#{flow.issue_number}\n"
         f"关联 PR：{flow.repo}#{delivery.pr_number}\n"
         f"合并 SHA：`{delivery.merge_commit_sha}`\n"
         f"合并时间：{delivery.merged_at.astimezone(UTC).isoformat()}\n\n"
-        "工作区清理已确认。"
+        "业务结果结清并释放执行归属后，本轮进入已归档。"
     )
     effects: list[Effect] = []
     for number in (flow.issue_number, delivery.pr_number):

@@ -6,7 +6,7 @@ import httpx
 import pytest
 
 from app.contracts.protocol import PROTOCOL_VERSION, RevisionTask
-from app.contracts.result_models import EffectState, ResolveEffect, ResultPending
+from app.contracts.result_models import EffectState, LabelEffect, ResolveEffect, ResultPending
 from app.controler.workflow.service import ControlService
 from app.domain.models import (
     AddressedComment,
@@ -241,7 +241,7 @@ async def test_racing_input_survives_ack_and_prevents_rereview(store, thread_rev
         pending = store.reviews.pending(flow.id)
         assert len(pending) == 1
         assert pending[0].github_id == (1 if change == "edited" else 2)
-    assert store.flows.get_flow(flow.id).state is FlowState.ACTIVE
+    assert store.flows.get_flow(flow.id).state is FlowState.REVIEW
 
 
 @pytest.mark.parametrize("operation", ["reply_review_thread", "resolve_review_thread"])
@@ -360,6 +360,33 @@ async def test_remote_predecessor_releases_the_queued_webhook_edit(store, thread
     queued = settle(store)
     assert len(queued) == 1
     assert batch_for(store, queued[0]).feedback[0].body == "Latest"
+
+
+async def test_missing_status_label_does_not_suppress_revision_or_reviewers(
+    store,
+    thread_revision,
+    monkeypatch,
+):
+    # A display failure is not unresolved review feedback and must not suppress re-review.
+    flow, job, github, subject = thread_revision
+
+    async def missing(issue, label):
+        raise GitHubError(
+            GitHubErrorKind.NOT_FOUND, "add_label", status_code=404, request_rejected=True
+        )
+
+    monkeypatch.setattr(Issue, "add_label", missing)
+    assert await subject.results.apply(job.id) is JobState.DONE
+    assert store.flows.get_flow(flow.id).state is FlowState.REVIEW
+    assert store.deliveries.get_delivery(flow.id).head_sha == "revision"
+    assert store.reviews.pending(flow.id) == []
+    record = next(
+        r for r in store.results.list_effects(job.id) if isinstance(r.payload, LabelEffect)
+    )
+    assert record.state is EffectState.SKIPPED and record.receipt is None
+    assert github.review_requests == [["carol"]]
+    assert await coordinator(store, github).results.apply(job.id) is JobState.DONE
+    assert github.review_requests == [["carol"]]
 
 
 @pytest.mark.parametrize("query,write", [("fetch_labels", "labels"), ("fetch_reviewers", "review_requests")])

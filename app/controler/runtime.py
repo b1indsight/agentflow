@@ -100,7 +100,6 @@ class ServerRuntime:
         self.reconciler = Reconciler(
             github,
             self.service,
-            settle_seconds=self.settings.settle_seconds,
             interval=self.settings.reconcile_interval_seconds,
             batch_size=self.settings.reconcile_batch_size,
             concurrency=self.settings.reconcile_concurrency,

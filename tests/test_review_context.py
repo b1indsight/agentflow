@@ -52,7 +52,9 @@ def feedback_response(source, rows=(), *, following=None):
 
 def review_store():
     return SimpleNamespace(
-        flow=Flow(id=1, repo="owner/repo", issue_number=8, installation_id=42, state=FlowState.ACTIVE),
+        flow=Flow(
+            id=1, repo="owner/repo", issue_number=8, installation_id=42, state=FlowState.REVIEW
+        ),
         reviews=MemoryReviews(),
     )
 

@@ -23,6 +23,7 @@ from app.contracts.conversation import (
 from app.contracts.protocol import PROTOCOL_VERSION
 from app.controler.console.sync import ConsoleSynchronizer
 from app.controler.workers.conversation import ConversationService
+from app.controler.workflow.service import ControlService
 from app.domain.models import JobKind
 from app.github import GitHubApp
 from app.persistence.activity import ActivityStore
@@ -36,16 +37,20 @@ def only_worker(database):
         connection.execute("UPDATE console_sync SET pending=(source='worker')")
 
 
-async def test_worker_is_actively_queried_and_eof_checkpoint_survives_refresh(store):
+@pytest.mark.parametrize("resume_during_read", [False, True])
+async def test_worker_is_actively_queried_and_eof_checkpoint_survives_refresh(
+    store, resume_during_read, monkeypatch
+):
     flow = store.flows.create_flow("owner/repo", 7, 42)
+    attempt = store.flows.create_attempt(flow.id)
     only_worker(store._db)
     conversations = Mock(spec=ConversationService)
     item = ConversationItem(
         id="record-1",
-        attempt_id=1,
+        attempt_id=attempt.id,
         session_id="12345678-1234-1234-1234-123456789abc",
         session_generation=0,
-        timestamp=flow.created_at.isoformat(),
+        timestamp=(flow.created_at + timedelta(days=1)).isoformat(),
         role="assistant",
         kind="message",
         # A binary/tool-derived character must not poison this page's checkpoint.
@@ -65,12 +70,21 @@ async def test_worker_is_actively_queried_and_eof_checkpoint_survives_refresh(st
     )
     sync = ConsoleSynchronizer(Mock(spec=GitHubApp), conversations, database=store._db)
     claim = sync.store.claim()
-    assert claim and claim.source == "worker"
+    assert claim and claim.source == "worker" and claim.round_no == 1
+    if resume_during_read:
+        # A late page belongs to its Attempt, even when its timestamp is in the new round.
+        control = ControlService(database=store.database)
+        control.cancel(flow)
+        flow = control.resume(flow, expected_round_no=1)
+        assert flow.current_round_no == 2
     await sync.sync(claim)
     conversations.read.assert_awaited_once_with(flow.id, None, 50)
     archive = ActivityStore(store._db)
     first = archive.page(flow.id)
     message = next(i for i in first.items if i.source == "worker" and i.kind == "message")
+    assert message.key == f"worker:{attempt.id}:0:record-1"
+    assert message.round_no == message.model_dump()["round_no"] == attempt.round_no == 1
+    assert archive.versions(flow.id, message.key).items[0].round_no == 1
     assert message.body == "worker display body\\u0000"
     assert message.metadata["unsupported_characters_escaped"] is True
     summary = next(i for i in first.items if i.kind == "tool_call")
@@ -79,8 +93,13 @@ async def test_worker_is_actively_queried_and_eof_checkpoint_survives_refresh(st
     assert summary.metadata["summary_truncated"] and summary.metadata["query"] == "conversation"
     ConsoleStore(store._db).request_sync(flow.id)
     only_worker(store._db)
+    if resume_during_read:
+        # Resume dirtied the in-flight source; its repeat retains the 100ms backoff.
+        due = store.now() + timedelta(milliseconds=100)
+        monkeypatch.setattr(store.database, "_clock", lambda: due)
     again = sync.store.claim()
     assert again and again.cursor == "eof-checkpoint"
+    assert again.round_no == flow.current_round_no
     await sync.sync(again)
     assert archive.page(flow.id).snapshot == first.snapshot
 

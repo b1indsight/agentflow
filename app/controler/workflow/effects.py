@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 from uuid import uuid4
 
+from loguru import logger
+
 from app.contracts.result_models import (
     CommentEffect,
     EffectReceipt,
@@ -31,7 +33,7 @@ from app.controler.workflow.thread_effects import (
     resolve_thread,
     revision_current,
 )
-from app.domain.models import TERMINAL_STATES, DeliveryState, FlowState
+from app.domain.models import TERMINAL_STATES, DeliveryState
 from app.domain.review_models import BatchState
 from app.github import (
     GitHubApp,
@@ -89,8 +91,10 @@ class ResultEffects:
                 result_store_tx = self.result_store.using(tx)
                 workers_tx = self.workers.using(tx)
                 flow = tx.lock_workflow(plan.flow_id)
-                cancelled = flow is not None and flow.state is FlowState.CANCELLED
-                if flow is None or (flow.state in TERMINAL_STATES and not cancelled):
+                cancelled = (
+                    flow is not None and flow.archive_reason is not None and plan.archive is None
+                )
+                if flow is None or flow.state in TERMINAL_STATES:
                     result_store_tx.skip_remaining(plan.job_id, "Flow is terminal")
                     return None
                 if flow.current_attempt_id != plan.attempt_id:
@@ -99,6 +103,9 @@ class ResultEffects:
                 job = jobs_tx.get_job(plan.job_id)
                 if job is None:
                     raise ValueError("result job disappeared")
+                if job.round_no != flow.current_round_no:
+                    result_store_tx.skip_remaining(plan.job_id, "historical round")
+                    return "result round is no longer current"
                 if plan.archive is not None:
                     try:
                         verify_archive(
@@ -155,8 +162,26 @@ class ResultEffects:
                     uncertain or (record.dispatched_at is not None and not definite_rejection)
                 )
                 retryable = isinstance(exc, GitHubError) and exc.retryable
-                if (isinstance(record.payload, (ThreadReplyEffect, ResolveEffect))
-                        and not ambiguous and not retryable):
+                if isinstance(exc, GitHubError) and isinstance(record.payload, LabelEffect):
+                    # Display failures do not invalidate delivery or require a remote receipt.
+                    self.result_store.finish(
+                        record,
+                        EffectState.SKIPPED,
+                        error=str(exc),
+                        definitely_unsent=definite_rejection and not uncertain,
+                    )
+                    logger.warning(
+                        "status label skipped: job={} effect={} {}",
+                        plan.job_id,
+                        record.effect_key,
+                        exc,
+                    )
+                    continue
+                if (
+                    isinstance(record.payload, (ThreadReplyEffect, ResolveEffect))
+                    and not ambiguous
+                    and not retryable
+                ):
                     # A definite permission/deletion failure leaves a diagnostic and pending input;
                     # already delivered code must not trigger another Codex run to repair GitHub.
                     self.result_store.finish(record, EffectState.SUCCEEDED, receipt=EffectReceipt(
@@ -200,6 +225,8 @@ class ResultEffects:
                 or job.result_applied_at is not None
                 or job.result_digest != plan.digest
                 or flow.current_attempt_id != plan.attempt_id
+                or job.round_no != flow.current_round_no
+                or (flow.archive_reason is not None and plan.archive is None)
             ):
                 raise ResultPending("Flow changed before GitHub dispatch")
             delivery = deliveries_tx.get_delivery(flow.id)
@@ -259,9 +286,13 @@ class ResultEffects:
             found = await repository.find_pull_request_by_head(effect.branch)
             delivery = self.deliveries.get_delivery(plan.flow_id)
             flow = self.flows.get_flow(plan.flow_id)
-            cancelled_opening = (flow is not None and flow.state is FlowState.CANCELLED
-                                 and delivery is not None and delivery.state is DeliveryState.OPENING
-                                 and delivery.pr_number is None)
+            cancelled_opening = (
+                flow is not None
+                and flow.archive_reason is not None
+                and delivery is not None
+                and delivery.state is DeliveryState.OPENING
+                and delivery.pr_number is None
+            )
             if (found is None or delivery is None or (not cancelled_opening and found.number != delivery.pr_number)
                     or found.head_branch != effect.branch or found.base_branch != effect.base_branch):
                 raise ResultPending("retired PR creation awaits its remote identity")

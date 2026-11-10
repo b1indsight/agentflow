@@ -16,14 +16,18 @@ import app.controler.config as server_config
 import app.controler.runtime as server_runtime
 import app.telemetry.metrics as metrics_module
 from app import cli
-from app.contracts.protocol import PROTOCOL_VERSION, InitialTaskResult, Succeeded
+from app.contracts.protocol import PROTOCOL_VERSION, ArchiveResult, InitialTaskResult, Succeeded
 from app.controler.api import create_app
 from app.controler.config import ServerSettings
-from app.domain.models import DeliveryState, FlowState, JobKind, JobState, utcnow
+from app.controler.workflow.service import ControlService
+from app.domain.models import ArchiveReason, DeliveryState, FlowState, JobKind, JobState, utcnow
 from app.persistence import metrics as database_metrics
+from app.persistence.activity import ActivityStore
 from app.persistence.metrics import read_snapshot
 from app.telemetry.logging import configure_logging
 from app.telemetry.metrics import Metrics
+from tests.github import RecordingGitHub
+from tests.test_coordinator import coordinator
 
 
 async def test_logs_isolate_concurrent_context_and_never_render_exception_payload():
@@ -193,31 +197,42 @@ def test_serve_preserves_sanitized_uvicorn_logging(monkeypatch, capsys):
 
 def test_reconcile_metrics_match_scheduler_eligibility(store, postgresql_url):
     for number, state, delivery_state, pr in [
-        (1, FlowState.ACTIVE, DeliveryState.OPEN, 11),
-        (2, FlowState.CANCELLED, DeliveryState.OPEN, 12),
-        (4, FlowState.ACTIVE, DeliveryState.MERGED, 14),
-        (5, FlowState.ACTIVE, DeliveryState.NONE, None),
+        (1, FlowState.REVIEW, DeliveryState.OPEN, 11),
+        (2, FlowState.ARCHIVED, DeliveryState.OPEN, 12),
+        (4, FlowState.FINALIZING, DeliveryState.MERGED, 14),
+        (5, FlowState.QUEUED, DeliveryState.NONE, None),
     ]:
         flow = store.flows.create_flow('fixture/repo', number, 1)
-        flow.state = state
-        store.flows.update_flow(flow)
         delivery = store.deliveries.get_or_create_delivery(flow.id, f'flow/{number}')
         delivery.state, delivery.pr_number = delivery_state, pr
         store.deliveries.update_delivery(delivery)
+        if state is FlowState.ARCHIVED:
+            ControlService(database=store.database).cancel(flow)
+            assert ActivityStore(store.database).archived(flow.id, 1) is not None
+        else:
+            flow.state = state
+            if state is FlowState.FINALIZING:
+                flow.archive_reason = ArchiveReason.SUCCEEDED
+            store.flows.update_flow(flow)
         store.reconcile.hint(flow.id)
         with store.connection() as conn:
             conn.execute("UPDATE flow_reconcile SET next_at=now()-(%s * interval '1 second') WHERE flow_id=%s",
                          (60 if number <= 2 else 3600, flow.id))
     due = store.reconcile.due(100)
-    assert len(due) == 2  # Cancelled PRs still need reconciliation; merged/no-PR do not.
+    assert len(due) == 2  # Archived PRs still need evidence; merged/no-PR do not.
     metrics = read_snapshot(postgresql_url)
     assert next(s.value for s in metrics.samples if s.family == 'reconcile_due') == len(due)
     age = next(s.value for s in metrics.samples if s.family == 'oldest_age_seconds' and s.labels == ['reconcile'])
     assert 60 <= age < 120
 
 
-def test_archive_alert_age_uses_latest_job_of_active_bound_flow(store, postgresql_url):
+async def test_archive_alert_age_uses_latest_job_of_active_bound_flow(
+    store, postgresql_url, recording_resources
+):
     flow = store.flows.create_flow('fixture/recovery', 1, 1)
+    attempt = store.flows.create_attempt(flow.id)
+    flow.current_attempt_id = attempt.id
+    store.flows.update_flow(flow)
     store.workers.worker_connected('w', PROTOCOL_VERSION, 'epoch')
     initial = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
     assert store.workers.assign_job('w', 'token', 'epoch')
@@ -226,7 +241,13 @@ def test_archive_alert_age_uses_latest_job_of_active_bound_flow(store, postgresq
     delivery.state, delivery.pr_number = DeliveryState.MERGED, 17
     delivery.head_sha, delivery.merge_commit_sha, delivery.merged_at = 'head', 'merge', utcnow()
     store.deliveries.update_delivery(delivery)
-    job = store.jobs.enqueue_job(flow.id, JobKind.ARCHIVE)
+    ControlService(database=store.database).finish(
+        flow,
+        reason=ArchiveReason.SUCCEEDED,
+        summary="Merged",
+        expected_round_no=1,
+    )
+    job = store.jobs.list_jobs(flow.id)[-1]
     with store.connection() as conn:
         conn.execute("UPDATE jobs SET created_at=now()-interval '20 minutes' WHERE id=%s", (job.id,))
     def age():
@@ -239,9 +260,28 @@ def test_archive_alert_age_uses_latest_job_of_active_bound_flow(store, postgresq
     retry = store.jobs.enqueue_job(flow.id, JobKind.ARCHIVE)
     assert age() < 10
     # Successful archive application also terminates the Flow and releases its binding.
-    assert store.workers.assign_job('w', 'retry-token', 'epoch')
-    assert store.workers.finish_assignment(retry.id, 'w', 'retry-token', JobState.DONE, 'epoch')
-    flow.state = FlowState.SUCCEEDED
-    store.flows.update_flow(flow)
-    assert store.workers.release_flow_execution(flow.id)
+    assigned = store.workers.assign_job("w", "retry-token", "epoch")
+    assert assigned.id == retry.id
+    # As in the smoke fixture, use a verified worker receipt, not an invented archived row.
+    subject = coordinator(store, RecordingGitHub())
+    task = await subject.prepare(assigned)
+    assert store.workers.start_assignment(retry.id, attempt.id, "w", "retry-token", "epoch")
+    terminal = Succeeded(
+        job_id=retry.id,
+        assignment_token="retry-token",
+        result=ArchiveResult(**task.model_dump(), cleanup="released"),
+    )
+    assert (
+        store.workers.record_assignment_result(
+            retry.id,
+            "w",
+            "retry-token",
+            "epoch",
+            terminal,
+        )
+        == "pending"
+    )
+    assert await subject.results.apply(retry.id) is JobState.DONE
+    assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
+    assert store.workers.get_flow_execution(flow.id).released_at is not None
     assert age() == 0

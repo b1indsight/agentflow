@@ -28,6 +28,7 @@ class Observation(BaseModel):
     key: str
     source: str
     kind: str
+    round_no: int | None = Field(default=None, strict=True, gt=0)
     occurred_at: AwareDatetime
     updated_at: AwareDatetime
     author: str

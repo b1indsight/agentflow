@@ -16,11 +16,12 @@ from app.contracts.protocol import (
 )
 from app.controler.workers.errors import ProtocolViolation
 from app.controler.workflow.service import ControlService
-from app.domain.models import DeliveryState, FlowState, JobKind, JobState
+from app.domain.models import ArchiveReason, FlowState, JobKind, JobState
+from app.persistence.activity import ActivityStore
 from app.persistence.jobs import JobStore
 from tests.github import RecordingGitHub
 from tests.test_coordinator import coordinator
-from tests.test_merge import route_merge
+from tests.test_merge import merge_payload, route_merge
 from tests.test_result_recovery import (
     completed_open_initial as completed_open_initial,  # noqa: PLC0414
 )
@@ -60,10 +61,11 @@ async def test_archive_release_rolls_back_and_replays_atomically(store, monkeypa
     monkeypatch.setattr(JobStore, "complete_persisted_result", interrupted)
     with pytest.raises(RuntimeError, match="commit interrupted"):
         await subject.results.apply(job.id)
-    assert store.flows.get_flow(flow.id).state is FlowState.ACTIVE
+    assert store.flows.get_flow(flow.id).state is FlowState.FINALIZING
     assert store.workers.get_flow_execution(flow.id).released_at is None
     assert store.jobs.get_job(job.id).result_applied_at is None
     assert store.results.get_plan(job.id).archive == result
+    assert ActivityStore(store.database).archived(flow.id, 1) is None
     other = ControlService(
         database=store.database,
     ).on_trigger("owner/repo", 999, 42)
@@ -72,7 +74,11 @@ async def test_archive_release_rolls_back_and_replays_atomically(store, monkeypa
     monkeypatch.setattr(JobStore, "complete_persisted_result", original)
     assert await subject.results.apply(job.id) is JobState.DONE
     assert await subject.results.apply(job.id) is JobState.DONE
-    assert store.flows.get_flow(flow.id).state is FlowState.SUCCEEDED
+    assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
+    assert store.flows.get_flow(flow.id).archive_reason is ArchiveReason.SUCCEEDED
+    archived = ActivityStore(store.database).archived(flow.id, 1)
+    assert archived is not None and archived.metadata["archive_reason"] == "succeeded"
+    assert archived.occurred_at == store.flows.get_flow(flow.id).archived_at
     assert store.workers.get_flow_execution(flow.id).released_at is not None
     assert flow.id not in [item.id for item in store.flows.list_flows(active_only=True)]
     assert store.workers.assign_job("worker-a", "next", "epoch-a").flow_id == other.id
@@ -87,8 +93,10 @@ async def test_archive_fences_do_not_release_binding(store, recording_resources)
     assert store.workers.get_flow_execution(flow.id).released_at is None
 
 
-async def test_archive_after_initial_retry_cannot_adopt_a_released_binding(store, completed_open_initial):
-    # Merge can arrive after retry commits ACTIVE but before a new worker reacquires ownership.
+async def test_merge_after_abandonment_cannot_adopt_a_released_binding(
+    store, completed_open_initial
+):
+    # A historical merge observation cannot resurrect the archived round's workspace.
     flow, _subject, _github, _request, _result = completed_open_initial
     service = ControlService(
         database=store.database,
@@ -103,16 +111,29 @@ async def test_archive_after_initial_retry_cannot_adopt_a_released_binding(store
         ),
         "epoch",
     )
-    service.retry(flow)
-    await route_merge(store, flow)
-    assert store.flows.get_flow(flow.id).state is FlowState.ACTIVE
-    assert store.deliveries.get_delivery(flow.id).state is DeliveryState.MERGED
+    with pytest.raises(ValueError, match="archived"):
+        service.retry(flow)
+    activity = ActivityStore(store.database)
+    archived = activity.archived(flow.id, 1)
+    assert archived is not None and archived.metadata["archive_reason"] == "abandoned"
+    payload = merge_payload(flow)
+    payload["pull_request"]["merged_at"] = (
+        archived.occurred_at - timedelta(seconds=5)
+    ).isoformat()
+    await route_merge(store, flow, payload=payload)
+    assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
+    assert store.flows.get_flow(flow.id).archive_reason is ArchiveReason.SUCCEEDED
+    assert activity.archived(flow.id, 1) == archived
+    history = activity.history(flow.id, 1)
+    merges = [item for item in history if item.kind == "merge"]
+    assert len(merges) == 1
+    assert merges[0].metadata["merge_commit_sha"] == "a" * 40
+    assert len([item for item in history if item.kind == "archive_correction"]) == 1
     assert store.workers.get_flow_execution(flow.id).released_at is not None
-    archive, = [job for job in store.jobs.list_jobs(flow.id) if job.kind is JobKind.ARCHIVE]
+    assert [job for job in store.jobs.list_jobs(flow.id) if job.kind is JobKind.ARCHIVE] == []
     store.workers.worker_connected("worker-b", PROTOCOL_VERSION, "epoch-b")
     assert store.workers.assign_job("worker-b", "adopt", "epoch-b") is None
     assert store.workers.assign_job("worker-a", "archive", "epoch") is None
-    assert store.jobs.get_job(archive.id).state is JobState.QUEUED
 
 
 async def test_failed_archive_retry_keeps_attempt_and_original_worker(store, recording_resources):
@@ -122,13 +143,14 @@ async def test_failed_archive_retry_keeps_attempt_and_original_worker(store, rec
     assert store.workers.record_assignment_result(job.id, "worker-a", "archive-token", "epoch-a",
                                           message) == "pending"
     assert await subject.results.apply(job.id) is JobState.FAILED
-    assert store.flows.get_flow(flow.id).state is FlowState.ACTIVE
+    assert store.flows.get_flow(flow.id).state is FlowState.BLOCKED
     assert store.workers.get_flow_execution(flow.id).released_at is None
     service = ControlService(
         database=store.database,
     )
-    with pytest.raises(ValueError, match="merged.*archive|archive.*merged"):
-        service.cancel(flow)
+    service.cancel(flow)
+    assert store.flows.get_flow(flow.id).state is FlowState.BLOCKED
+    assert store.flows.get_flow(flow.id).archive_reason is ArchiveReason.SUCCEEDED
     service.retry(flow)
     store.workers.worker_connected("worker-b", PROTOCOL_VERSION, "epoch-b")
     assert store.workers.assign_job("worker-b", "other", "epoch-b") is None
@@ -146,7 +168,8 @@ async def test_expired_merged_executor_is_pinned_until_original_worker_returns(s
     now = store.now()
     store._db._clock = lambda: now + timedelta(hours=1)
     store.workers.sweep_expired_assignments()
-    assert store.flows.get_flow(flow.id).state is FlowState.ACTIVE
+    assert store.flows.get_flow(flow.id).state is FlowState.BLOCKED
+    assert store.flows.get_flow(flow.id).archive_reason is ArchiveReason.SUCCEEDED
     assert store.workers.get_flow_execution(flow.id).released_at is None
     assert store.jobs.get_job(old.id).state is JobState.RUNNING
     assert "executor" in store.jobs.get_job(old.id).last_error

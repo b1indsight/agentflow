@@ -1,7 +1,7 @@
 # Web 控制台
 
 当前由 `flowtool serve` 在 `/console/` 提供，使用真实同源 `/api/`，**没有生产示例数据或 mock 回退**。
-提供 cancelled Flow 的手动展示归档，以及受阻 Flow 的安全重试；其余工作流管理操作不在页面提供。
+提供 Flow「结束本轮」、已归档 Flow「恢复推进」及受阻 Flow 的安全重试。
 页面、静态资源和 API 均要求 Cloudflare Access 的单 owner 身份；数据库、GitHub 与 Worker
 读取由 control 负责。真实 Access 登录/MFA、GitHub App 全来源回填和目标部署仍待验收。
 架构与持久化边界见[控制台功能记录](../../../docs/plan/web-console-kanban.md)。
@@ -61,29 +61,41 @@ npm run preview -- --port 8767
 Flow 编号必须来自当前数据库；没有固定可用的样例 ID。GitHub 链接指向真实记录。
 API 错误显式显示，已有内容不会被示例数据替换；Worker 离线仍可读已归档内容，未采集历史无法凭空恢复。
 
-顶栏只有一个查询框，支持普通关键词、双引号短语、`repo:`、`is:active|done`、
-`status:queued|running|review|blocked|done`、`issue:`、`pr:`；词和条件之间为 AND。
-`done` 的展示名称为“已归档”，包含 PR 已合并、成功归档、PR 关闭未合并与取消后的手动归档；`is:done` / `status:done`
-查询该分组，`is:active` 排除已归档卡片，不改变 Flow 的真实生命周期。
+顶栏只有一个查询框，支持普通关键词、双引号短语、`repo:`、`is:active|archived`、
+`status:queued|running|review|blocked|archived`、`issue:`、`pr:`；词和条件之间为 AND。
+五列依次为待处理、进行中、待审核、受阻、已归档。Flow 生命周期为
+`queued/running/review/blocked/finalizing/archived`，其中 `finalizing` 映射到 `running` 列，
+卡片及主徽标以 `phase` 为准，详情可查看真实生命周期与当前动作。
+`is:archived` 与 `status:archived` 查询真实业务归档；`is:active` 排除已归档 Flow，包含受阻与收尾中的 Flow。
+PR 合并、关闭或停止执行都不等于业务归档，只有生命周期为 `archived` 才进入已归档列，
+结果标记为成功或废弃。`is:done` 和 `status:done` 均无兼容别名，提交会提示无效查询。
 Enter 提交；聚焦或输入字段显示统一建议，方向键 / 点击选择，Enter 补入后再次 Enter 提交。
 中文组合输入不提交；Escape 关闭建议，清空恢复全部结果，浏览器前进/后退恢复已提交查询。
 无效、重复或未知条件提示错误，保留上一有效结果；不实现 GitHub 全套搜索语法。
 
-cancelled 且仍在「受阻」列的 Flow 可在「概览」点击「归档」，持久移入「已归档」并注明
-「已取消 · 已归档」及归档时间；生命周期仍为 cancelled，任务和会话历史不变。
-此操作不创建清理任务、不修改 GitHub 或 Worker、不确认停止，也不绕过未决结果对账；
-恢复执行仍须经过现有安全重试，恢复后自动清除展示归档。失败可重试，不提前移动卡片。
-归档接口 `POST /api/flows/{id}/archive` 仅接受 owner 的同源 JSON 请求（空对象），
-不存在返回 404，非 cancelled 返回 409，重复请求不重复记录；未授权和明确跨站请求拒绝。
+未归档且不在收尾中的 Flow 可在「概览 → 当前动作」点击「结束本轮」，在内联表单选择
+成功（`succeeded`）或废弃（`abandoned`），并填写非空结论。UI 统一要求结论，
+包括无 PR 的成功结束；不会使用浏览器确认框或输入框。
+`POST /api/flows/{id}/archive` 提交同源 JSON
+`{reason, summary, expected_round_no}`，轮次取自当前详情。
+表单打开后若刷新发现轮次变化，必须关闭并重新核对，不能把旧表单提交到新轮次。
+受理只表示发起结束本轮，不承诺立即归档；停止确认、结果对账及收尾未完成前不会归档。
+收尾中仍显示「进行中」，详情注明 `finalizing`，不提供重复结束或重试入口。
+`archive_reason`、`archive_summary` 展示本轮结束目标/归档结果和结论；
+`archived_at` 是真实业务归档时间，不再存在 cancelled-only 展示归档。
 
-受阻 Flow（包括尚未展示归档的 cancelled Flow）可在「概览 → 当前动作」点击「重试」。
+已归档 Flow 只提供显式「恢复推进」，通过 `POST /api/flows/{id}/resume`
+提交 `{expected_round_no}`。页面明确提示：同一 Flow 开启新轮次、从待处理开始，后续使用新 PR，
+保留历史；不复用 `/retry` 恢复归档轮次，也不提前移动卡片。
+
+只有 `blocked` Flow 可在「概览 → 当前动作」点击「重试」。
 `POST /api/flows/{id}/retry` 同样只接受 owner 的同源空 JSON，复用 `ControlService.retry`；
 仍需满足停止确认、结果对账、PR 状态、活跃 Flow 冲突及原 Worker 归档绑定等检查。
 没有可重试工作或安全检查未通过时返回 409，并在页面解释原因；不存在返回 404。
-提交期间重试与归档互斥，受理后按已提交详情刷新分组，不提前移动卡片，也不承诺任务已运行。
+提交期间三个操作互斥，受理后按返回详情刷新分组，不提前移动卡片，也不承诺任务已运行。
+结束/恢复的 409 会显示未受理及后端错误码，保留当前详情和表单，不显示成功通知。
 网络异常可能发生在提交之后，页面会提示先刷新核对，不自动重发；切换 Flow 不受旧响应覆盖。
-已合并且仍活跃的 Flow 清理受阻时，在“已归档”分组保留安全重试入口；
-其他已归档的 Flow 不额外提供恢复按钮。范围与验证见[重试功能记录](../../../docs/plan/console-flow-retry.md)。
+清理受阻仍属于「受阻」，不会因 PR 合并显示为已归档。Job 的 `done` 状态与 Flow 阶段独立，保持不变。
 
 本次阅读固定本地已提交快照，编辑和补录在末尾显式刷新后才进入新快照；线程回复使用同一快照。
 下滑阅读在距已加载内容末尾约两屏时预取下一页，预取距离随阅读区高度变化，追加内容保留当前阅读位置。
@@ -92,10 +104,6 @@ pending/syncing/partial/unavailable，“没有新增”只描述当前已归档
 已观察版本和删除标记永久保存，首次采集前的历史编辑/删除及远端已过期内容无法还原。
 来源明细保留 GitHub 提交列表 250 条上限、线程缺少远端变更时间等固定限制；这些限制
 不会因重试消失，不单独触发同步告警。真实的同步异常仍提示并提供重试。
-PR 关闭且未合并后，经对账进入“已归档”列，卡片与详情注明“已关闭 · 未合并”；
-Flow 保留活跃状态及交付绑定，重新打开并成功对账后回到相应列，不将关闭当作任务成功。
-PR 合并经 webhook 或对账确认后立即进入“已归档”列，包括此前失败或取消的 Flow；
-保留真实生命周期、执行历史和原 Worker 清理约束，不将合并当作清理成功。
 GitHub Projects 的状态同步保持原语义，只有 Flow 成功完成清理后才标记 Done。
 启动时更新阶段或动作规则已变化的既有投影，不需要等待下一次 GitHub 事件；重复启动不重复发布。
 “已编辑”按需展示相对前一正文版本的红删绿增 diff；元信息变化和删除不误报正文编辑。
@@ -203,6 +211,17 @@ npm run test:e2e
 ```
 
 Playwright 自动启动并关闭端口 5174 的隔离测试服务器，无需手工运行 Vite。
+六态预览及本轮操作回归可单独复现（同时生成桌面/手机截图）：
+
+```sh
+npm run test:e2e -- --workers=2 --grep 'six-state preview|round archive|round commands|round form'
+```
+
+预览在 `e2e/console.spec.ts` 使用带类型的六态 DTO，覆盖五列默认看板、finalizing 详情、
+成功/废弃归档、结束表单、恢复新轮次及 409/网络异常；没有接入生产数据。
+截图保存到仓库根目录 `.amp/in/artifacts/flow-{default,finalizing,archived}-{1440,390}.png`，
+结束表单截图为 `flow-end-round-{1440,390}.png`。在本地运行前应确保 `/.amp/in/` 已加入
+仓库本地 exclude；截图不进入提交。
 浏览器回归覆盖 DTO 展示与 API 故障、快照分页与缓存回读、会话分组与阅读恢复、窗口上限与键盘焦点，
 以及 Markdown/编辑 diff、归档和桌面/手机交互；具体读取和渲染规则见前文。
 测试拦截 `/api/` 网络响应，组件、分页 hook 与窗口化均用正式实现；

@@ -5,6 +5,7 @@ import hashlib
 import json
 from datetime import datetime
 from difflib import unified_diff
+from typing import Literal
 
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -61,7 +62,7 @@ _PREVIOUS = (
     " ORDER BY p.updated_at DESC,p.version DESC LIMIT 1) END AS previous_version"
 )
 _SELECT = (
-    "key,version,source,kind,occurred_at,updated_at,observed_at,author,title,"
+    "key,version,round_no,source,kind,occurred_at,updated_at,observed_at,author,title,"
     f"left({_CURRENT_DISPLAY_BODY},2000) AS body,length({_CURRENT_DISPLAY_BODY}) AS body_length,"
     "url,parent_key,deleted,metadata,"
     "(source!='flow' AND source!='worker' AND occurred_at<%s) AS prior," + _PREVIOUS
@@ -72,6 +73,90 @@ class ActivityStore(Repository):
     """Serialize publication with its archive rows, without sequence/commit visibility gaps."""
 
     def append(self, flow_id: int, item: Observation) -> bool:
+        """Collect external versions without allowing them to impersonate workflow evidence."""
+        if item.source == "flow" or item.key.startswith("flow:"):
+            raise ValueError("Flow evidence requires the internal activity writer")
+        return self._append(flow_id, item)
+
+    def append_flow(
+        self,
+        flow_id: int,
+        round_no: int,
+        kind: Literal["archive", "merge", "archive_correction"],
+        *,
+        occurred_at: datetime,
+        metadata: dict[str, str | int | bool | None],
+    ) -> bool:
+        """Append one immutable workflow fact, sharing the ordinary publication fence.
+
+        Call from the workflow transaction after validating the fact. These records
+        are durable evidence, not mutable display-object versions or a round entity.
+        """
+        if round_no < 1 or kind not in {"archive", "merge", "archive_correction"}:
+            raise ValueError("invalid Flow activity identity")
+        item = Observation(
+            key=f"flow:{flow_id}:round:{round_no}:{kind}",
+            round_no=round_no,
+            source="flow",
+            kind=kind,
+            occurred_at=occurred_at,
+            updated_at=occurred_at,
+            author="FlowTool",
+            title={
+                "archive": "Flow 归档",
+                "merge": "已确认合并",
+                "archive_correction": "归档结果自动更正",
+            }[kind],
+            metadata=metadata,
+        )
+        with self._db.transaction() as tx, tx.connection() as connection:
+            connection.execute(
+                "SELECT flow_id FROM console_flows WHERE flow_id=%s FOR UPDATE", (flow_id,)
+            )
+            previous = ActivityStore(tx).flow_event(flow_id, round_no, kind)
+            if previous is not None:
+                if previous != item:
+                    raise ValueError("conflicting immutable Flow activity")
+                return False
+            return ActivityStore(tx)._append(flow_id, item)
+
+    def flow_event(self, flow_id: int, round_no: int, kind: str) -> Observation | None:
+        """Read original workflow evidence, never the folded conversation projection."""
+        with self._db.connection() as connection:
+            row = connection.execute(
+                "SELECT key,round_no,source,kind,occurred_at,updated_at,author,title,body,"
+                " url,parent_key,deleted,metadata FROM console_activity"
+                " WHERE flow_id=%s AND round_no=%s AND source='flow' AND kind=%s",
+                (flow_id, round_no, kind),
+            ).fetchone()
+        return Observation.model_validate(row) if row else None
+
+    def archived(self, flow_id: int, round_no: int) -> Observation | None:
+        return self.flow_event(flow_id, round_no, "archive")
+
+    def archived_pr(self, repo: str, pr_number: int) -> tuple[int, int] | None:
+        with self._db.connection() as connection:
+            row = connection.execute(
+                "SELECT flow_id,round_no FROM console_activity"
+                " WHERE source='flow' AND kind='archive'"
+                " AND lower(metadata->>'repo')=lower(%s) AND (metadata->>'pr_number')::integer=%s",
+                (repo, pr_number),
+            ).fetchone()
+        return (row["flow_id"], row["round_no"]) if row else None
+
+    def history(self, flow_id: int, round_no: int) -> list[ActivityItem]:
+        """Read the ordered internal audit for a round, without hiding earlier facts."""
+        with self._db.connection() as connection:
+            rows = connection.execute(
+                "SELECT key,version,round_no,source,kind,occurred_at,updated_at,observed_at,author,"
+                "title,body,length(body) AS body_length,url,parent_key,deleted,metadata,"
+                "FALSE AS prior FROM console_activity WHERE flow_id=%s AND round_no=%s"
+                " AND source='flow' ORDER BY version",
+                (flow_id, round_no),
+            ).fetchall()
+        return [ActivityItem.model_validate(row) for row in rows]
+
+    def _append(self, flow_id: int, item: Observation) -> bool:
         # PostgreSQL TEXT/JSONB cannot store NUL. Keep its visible escape and disclose
         # the encoding; hash the original so a literal escape is a different version.
         content = item.model_dump(mode="json", exclude={"source"})
@@ -109,10 +194,15 @@ class ActivityStore(Repository):
             if row is None:
                 raise ConsoleFailure("flow_not_found", 404)
             previous = connection.execute(
-                "SELECT parent_key,digest FROM console_activity WHERE flow_id=%s"
+                "SELECT parent_key,digest,round_no FROM console_activity WHERE flow_id=%s"
                 " AND key=%s ORDER BY version DESC LIMIT 1",
                 (flow_id, item.key),
             ).fetchone()
+            if previous and previous["round_no"] is not None:
+                if item.round_no is not None and item.round_no != previous["round_no"]:
+                    raise ValueError("activity object cannot move to another round")
+                item = item.model_copy(update={"round_no": previous["round_no"]})
+                content["round_no"] = previous["round_no"]
             if previous and previous["parent_key"] and item.parent_key is None:
                 item = item.model_copy(update={"parent_key": previous["parent_key"]})
                 content["parent_key"] = previous["parent_key"]
@@ -133,12 +223,13 @@ class ActivityStore(Repository):
                 return False
             version = row["activity_version"] + 1
             connection.execute(
-                "INSERT INTO console_activity(flow_id,version,key,source,kind,occurred_at,updated_at,"
+                "INSERT INTO console_activity(flow_id,version,round_no,key,source,kind,occurred_at,updated_at,"
                 "author,title,body,url,parent_key,deleted,metadata,digest)"
-                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                 (
                     flow_id,
                     version,
+                    item.round_no,
                     item.key,
                     item.source,
                     item.kind,
