@@ -93,9 +93,6 @@ CREATE TABLE IF NOT EXISTS workers (
   workspace TEXT NOT NULL CHECK (workspace ~ '^[0-9a-f]{32}$'),
   repository TEXT,
   generation BIGINT NOT NULL DEFAULT 1 CHECK (generation>0),
-  retired_generation BIGINT,
-  workspace_state TEXT NOT NULL DEFAULT 'idle' CHECK
-    (workspace_state IN ('idle','preparing','occupied','releasing','absent','quarantined')),
   inventory_epoch TEXT,
   repo_workspace_limit INTEGER NOT NULL DEFAULT 2 CHECK (repo_workspace_limit>0),
   protocol_version INTEGER NOT NULL,
@@ -203,7 +200,7 @@ CREATE TABLE IF NOT EXISTS execution_stops (
  assignment_token TEXT NOT NULL, binding_at TIMESTAMPTZ NOT NULL,
  reason TEXT NOT NULL DEFAULT 'cancelled', requested_at TIMESTAMPTZ NOT NULL,
  state TEXT NOT NULL DEFAULT 'pending', confirmed_at TIMESTAMPTZ, receipt_digest TEXT,
- UNIQUE(flow_id,workspace,generation)
+ UNIQUE(job_id,assignment_token)
 );
 CREATE INDEX IF NOT EXISTS ix_stops_worker ON execution_stops(worker_id) WHERE state!='confirmed';
 """

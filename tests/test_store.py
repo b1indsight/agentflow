@@ -527,17 +527,11 @@ def test_failed_flow_retry_reactivates_its_released_execution(store: Store) -> N
     failed = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
     assert store.workers.assign_job("worker-a", "token-a") is not None
     assert store.workers.finish_assignment(failed.id, "worker-a", "token-a", JobState.FAILED)
-    report_settled(store, failed.id)
     flow.state = FlowState.BLOCKED
     store.flows.update_flow(flow)
     assert store.workers.release_flow_execution(flow.id)
     original = store.workers.get_flow_execution(flow.id)
     assert original is not None
-    from app.domain.models import WorkspaceInventory
-    assert store.workers.report_workspace("worker-a", "", WorkspaceInventory(
-        workspace=original.workspace, repository=flow.repo, generation=original.generation + 1,
-        state="idle", flow_id=None,
-    ))
 
     ControlService(
         database=store.database,
@@ -711,8 +705,6 @@ def test_stop_confirmation_replays_real_receipt_without_rewriting_known_digest(
     register_worker(store, "worker", repo=flow.repo, epoch="epoch-2")
     assert not store.stops.confirm("worker", receipt, "epoch-1")
     assert store.stops.confirm("worker", receipt, "epoch-2")
-    assert store.workers.get_flow_execution(flow.id).released_at is None
-    report_settled(store, job.id, epoch="epoch-2", stopped=True)
     assert store.workers.get_flow_execution(flow.id).released_at is not None
     assert store.stops.confirm("worker", receipt, "epoch-2")
     assert not store.stops.confirm(

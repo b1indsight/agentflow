@@ -32,13 +32,13 @@ from app.worker.runtime import WebSocketTransport, WorkerRuntime
 def inventory() -> list[WorkspaceInventory]:
     """Concrete locations used by transport-only peers without filesystem execution."""
     return [
-        WorkspaceInventory(workspace="b" * 32, repository=None, generation=1, state="idle", flow_id=None),
-        WorkspaceInventory(workspace="a" * 32, repository="owner/repo", generation=1, state="idle", flow_id=None),
+        WorkspaceInventory(workspace="b" * 32, repository=None, generation=1, flow_id=None),
+        WorkspaceInventory(workspace="a" * 32, repository="owner/repo", generation=1, flow_id=None),
     ]
 
 
 class SimulatedWorkspaces:
-    """Model explicit inventory and settlement without creating repositories on disk."""
+    """Report concrete inventory without creating repositories on disk."""
 
     def __init__(self):
         self.items = inventory()
@@ -49,12 +49,6 @@ class SimulatedWorkspaces:
     async def provision(self, repository):
         assert repository == "owner/repo"
 
-    def acknowledge_target(self, repository, flow_id, workspace, generation, job_id, token):
-        previous = next(item for item in self.items if item.workspace == workspace)
-        assert (previous.repository, previous.generation) == (repository, generation)
-        self.items[self.items.index(previous)] = previous.model_copy(update={
-            "settled_job_id": job_id, "settled_assignment_token": token,
-        })
 
 class InventoryStore:
     """Explicit controller repository methods for protocol-only Store simulations."""

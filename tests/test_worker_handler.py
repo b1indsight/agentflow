@@ -6,9 +6,11 @@ import pytest
 from fastapi import WebSocketDisconnect
 from pydantic import SecretStr
 
+from app.communication.dispatch import Dispatcher
 from app.communication.gateway import Gateway
 from app.contracts.conversation import ConversationFailure, HistoryQuery
 from app.contracts.protocol import (
+    MAX_PAYLOAD_ITEMS,
     AcceptResultArguments,
     AcceptResultRequest,
     AcceptResultResponse,
@@ -31,6 +33,7 @@ from app.contracts.protocol import (
     RecoveryRejected,
     Register,
     Registered,
+    ResultAcceptance,
     ServerMessageUnion,
     ServerPayload,
     Started,
@@ -75,6 +78,7 @@ from tests.worker_fakes import (
     connected_worker,
     inventory,
     result_application,
+    server_callbacks,
     server_runtime,
 )
 
@@ -1237,6 +1241,54 @@ async def test_duplicate_prior_job_result_does_not_retire_current_assignment():
     responses = [item for item in sent_items(socket.sent) if isinstance(item, AcceptResultResponse)]
     assert [item.result.job_id for item in responses] == [4, 5]
     assert store.job.result_applied_at is not None and socket.closed == 1000
+
+
+async def test_split_result_acceptance_orders_same_flow_successor_after_ack():
+    # Result commit clears the DB claim before A arrives. Preparation may finish, but
+    # dispatch must remain behind the ACK that makes this Flow's journal replaceable.
+    store = RecordingStore()
+    callbacks = server_callbacks(handler_for(store), "worker-1", "epoch")
+    callbacks.session.send = AsyncMock(return_value=True)
+    routes = Dispatcher[WorkerMessageUnion]()
+    callbacks.bind(routes)
+    routes.freeze()
+    callbacks.on_published()
+    await callbacks.on_opened()
+    job = store.assign_job("worker-1", "token", "epoch")
+    arguments = await callbacks.coordinator.prepare_for_assignment(job, "worker-1", "token", "epoch")
+    await callbacks._on_prepared(job, "token", arguments)
+    started = Started(**call_header(), method="server.execution_started",
+                      arguments=ExecutionIdentity(job_id=job.id, assignment_token="token"))
+    await callbacks.on_started(started, worker_message("epoch", started))
+    terminal, accept = terminal_items(Failed(job_id=job.id, assignment_token="token", error="failed"))
+    await callbacks.on_result(terminal, worker_message("epoch", terminal))
+    following = job.model_copy(update={"id": 6, "assignment_token": "next", "state": JobState.RUNNING})
+    prepared = arguments.model_copy(update={"job_id": 6, "assignment_token": "next"})
+    preparation = asyncio.create_task(AsyncMock(return_value=prepared)())
+    await preparation
+    callbacks.preparing[following.id] = following, "next", preparation
+    await callbacks.poll()
+    assert following.id in callbacks.preparing and following.id not in callbacks.current
+    await callbacks.on_accept_result(accept, worker_message("epoch", accept))
+    await callbacks.poll()
+    sent = [item for call in callbacks.session.send.call_args_list for item in call.args[0].payload]
+    assert [type(item) for item in sent] == [Assignment, AcceptResultResponse, Assignment]
+    assert set(callbacks.current) == {following.id} and not callbacks.preparing
+
+
+async def test_result_response_cache_is_bounded_and_idempotent_without_inventory_ack():
+    callbacks = server_callbacks(handler_for(RecordingStore()), "worker-1", "epoch")
+    callbacks.session.send = AsyncMock(return_value=True)
+    for job_id in range(1, MAX_PAYLOAD_ITEMS * 3):
+        reply = AcceptResultResponse(
+            **result_header(call_header()["message_id"]), method="server.accept_result",
+            result=ResultAcceptance(job_id=job_id, assignment_token="token", state="done"),
+        )
+        await callbacks._send(reply)
+        await callbacks._send(reply.model_copy(update={"message_id": call_header()["message_id"]}))
+        last = callbacks.session.send.call_args_list[-2:]
+        assert last[0].args[0].payload == last[1].args[0].payload
+    assert len(callbacks._sent) == MAX_PAYLOAD_ITEMS * 2
 
 
 async def test_recovery_rejection_is_correlated_to_register_before_registered():

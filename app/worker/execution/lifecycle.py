@@ -35,7 +35,7 @@ from app.worker.transport.mcp import FlowToolCaller
 
 
 class TaskExecutor(Protocol):
-    """Execute an assignment and reclaim its workspace after a confirmed stop."""
+    """Execute an assignment, joining its subprocesses before returning or cancelling."""
 
     async def execute(
         self,
@@ -44,9 +44,6 @@ class TaskExecutor(Protocol):
         *,
         tool_caller: FlowToolCaller,
     ) -> ExecutionResult: ...
-
-    async def reclaim_workspace(self) -> None: ...
-
 
 class WorkerProtocolError(RuntimeError):
     """A worker message cannot be applied to the owned execution."""
@@ -247,6 +244,15 @@ class WorkerExecution:
             return None
         return self.state.assignment
 
+    def may_modify_workspace(self) -> bool:
+        """A terminal/stop journal proves quiescence; cancellation or a lost lease does not."""
+        if any(task is not None and not task.done()
+               for task in (self._execution, self._stop_task, self._shutdown_task)):
+            return True
+        record = self.state.load()
+        return bool(record is not None and record.terminal is None and record.stopped is None
+                    and not (record.state == "received" and record.acknowledged))
+
     @property
     def stopping(self) -> bool:
         """Distinguish fenced stop from normal completion while retiring borrowed calls."""
@@ -431,9 +437,6 @@ class WorkerExecution:
             self.state.record_stopped(receipt)
         self._execution = None
         self._discard_tool_calls()
-        # Stop evidence precedes workspace reuse; only successful reclamation permits a reply.
-        if record.stopped is None or not record.acknowledged:
-            await self.executor.reclaim_workspace()
         return receipt
 
     def _stop_finished(self, task: asyncio.Task[ExecutionStopped]) -> None:

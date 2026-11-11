@@ -692,6 +692,9 @@ async def test_cancelled_disconnected_tool_does_not_leak_into_resumed_or_next_as
                         if item.arguments.job_id == 5
                         else ConnectionError("script complete")
                     )
+                    if item.arguments.job_id == 5:
+                        # A duplicate old ACK can arrive after the next job replaced this journal.
+                        self.messages.put_nowait(accepted_message(item, "epoch-2"))
 
         async def recv(self):
             message = await self.messages.get()

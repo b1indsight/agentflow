@@ -55,7 +55,9 @@ async def test_provision_obeys_each_worker_quota_without_binding_or_credentials(
         inventory = pool.inventory()
         slots = [item for item in inventory if item.repository == "owner/repo"]
         assert len(slots) == pool.limit
-        assert all(item.state == "idle" and item.flow_id is None for item in slots)
+        assert all(item.flow_id is None and item.generation == 1 for item in slots)
+        assert all(set(item.model_dump()) == {"workspace", "repository", "generation", "flow_id"}
+                   for item in inventory)
         for item in slots:
             path = pool.root / "workspaces/owner/repo" / item.workspace
             assert path.is_dir() and not list(path.iterdir())
@@ -66,57 +68,59 @@ async def test_provision_obeys_each_worker_quota_without_binding_or_credentials(
         assert len([i for i in pool.inventory() if i.repository == "other/repo"]) == pool.limit
 
 
-async def test_exact_claim_rejects_unregistered_generation_and_double_binding(tmp_path):
+async def test_exact_claim_accepts_assigned_generation_and_rejects_stale_or_conflicting_binding(tmp_path):
     root, _ = managed_seed(tmp_path)
     pool = RepositoryWorkspaces(root, "worker-a")
     first, second = (await pool.provision("owner/repo"))[1:]
-    for target in (first.model_copy(update={"workspace": "f" * 32}),
-                   first.model_copy(update={"generation": 2})):
-        with pytest.raises(VcsVerificationError, match="identity or generation"):
-            await claim(pool, 1, target)
+    with pytest.raises(VcsVerificationError, match="identity or generation"):
+        await claim(pool, 1, first.model_copy(update={"workspace": "f" * 32}))
     assert all(i.flow_id is None for i in pool.inventory())
+    second = second.model_copy(update={"generation": 3})
     bound = await claim(pool, 1, second)
     assert bound.slot_id == second.workspace and bound.generation == second.generation
-    with pytest.raises(VcsVerificationError, match="another workspace"):
-        await claim(pool, 1, first)
+    with pytest.raises(VcsVerificationError, match="identity or generation"):
+        await claim(pool, 1, second.model_copy(update={"generation": 2}))
     with pytest.raises(VcsVerificationError, match="bound"):
         await claim(pool, 2, second)
     assert await claim(pool, 1, second) == bound
+    # After runtime proves quiescence, a controller-selected slot replaces the Flow's old fence.
+    moved = await claim(pool, 1, first)
+    inventory = pool.inventory()
+    assert [item.workspace for item in inventory if item.flow_id == 1] == [first.workspace]
+    previous = next(item for item in inventory if item.workspace == second.workspace)
+    assert previous.flow_id is None and previous.generation == second.generation
+    assert pool.lookup("owner/repo", 1) == moved
 
 
 @pytest.mark.parametrize("overflow", [False, True])
-async def test_cleanup_requires_matching_ack_before_reuse_and_fences_late_messages(tmp_path, overflow):
+async def test_cleanup_retains_fence_until_newer_claim_without_ack(tmp_path, overflow):
     root, _ = managed_seed(tmp_path)
     pool = RepositoryWorkspaces(root, "worker-a")
     targets = (await pool.provision("owner/repo"))[1:]
     target = targets[int(overflow)]
     binding = await claim(pool, 1, target)
-    pool.acknowledge(binding, 1, "initial")
     await pool.release(binding, job_id=2, token="archive")
     restarted = RepositoryWorkspaces(root, "worker-a")
     reported = next(i for i in restarted.inventory() if i.workspace == target.workspace)
-    assert reported.state == "releasing" and reported.flow_id == 1
+    assert reported.flow_id == 1
     assert reported.generation == binding.generation
     with pytest.raises(VcsVerificationError, match="bound"):
         await claim(restarted, 2, target)
-    with pytest.raises(VcsVerificationError, match="release receipt"):
-        restarted.acknowledge(binding, 1, "initial")
-    restarted.acknowledge(binding, 2, "archive")
-    restarted.acknowledge(binding, 2, "archive")  # A repeated receipt is harmless before reuse.
-    targets = await restarted.provision("owner/repo")
-    fresh = next(i for i in targets if i.workspace == target.workspace)
-    assert fresh.state == "idle" and fresh.generation == binding.generation + 1
+    assert next(i for i in await restarted.provision("owner/repo")
+                if i.workspace == target.workspace) == reported
+    fresh = reported.model_copy(update={"generation": binding.generation + 1})
     newer = await claim(restarted, 2, fresh)
     before = restarted.manifest_path.read_bytes()
     with pytest.raises(VcsVerificationError, match="ownership"):
         await restarted.release(binding, job_id=2, token="archive")
-    with pytest.raises(VcsVerificationError, match="ownership"):
-        restarted.acknowledge(binding, 2, "archive")
+    with pytest.raises(VcsVerificationError, match="identity or generation"):
+        await claim(restarted, 1, target)
     assert restarted.manifest_path.read_bytes() == before
     assert restarted.lookup("owner/repo", 2) == newer
     # A queued job can be older than the previous Flow's archive: order is generation-local.
-    restarted.acknowledge(newer, 1, "queued-before-archive")
-    assert restarted.lookup("owner/repo", 2) == newer
+    await restarted.release(newer, job_id=1, token="queued-before-archive")
+    item = next(i for i in restarted.inventory() if i.workspace == target.workspace)
+    assert item.flow_id == 2 and item.generation == newer.generation
 
 
 async def test_slow_preparation_does_not_overwrite_other_repository_inventory(tmp_path, monkeypatch):
@@ -201,7 +205,7 @@ async def test_flow_journals_isolate_unacknowledged_received_and_archive_resume(
     first.record_started()
     first.complete(RuntimeError("never bound"))
     first.acknowledge(1, JobState.FAILED)
-    first.reconcile_acknowledgement(pool)
+    first.reconcile_acknowledgement()
     with pytest.raises(ExecutionStateError, match="settled assignment"):
         first.record_received(received)
     archive = received.model_copy(update={
@@ -295,11 +299,17 @@ async def test_legacy_pool_migration_preserves_real_flow_binding(tmp_path, state
     pool.initialize()
     item = pool.inventory()[1]
     assert item.flow_id == 1 and item.generation == 7
-    assert item.state == ("occupied" if state == "occupied" else "releasing")
     assert len(await pool.provision("owner/repo")) == 2
     with pytest.raises(VcsVerificationError, match="bound"):
         await claim(pool, 2, item)
-    assert json.loads(manifest_path.read_text())["slots"][0]["binding"] == binding.model_dump()
+    with pytest.raises(VcsVerificationError, match="identity"):
+        pool.lookup("owner/repo", 1)
+    with pytest.raises(VcsVerificationError, match="identity"):
+        await pool.release(binding, job_id=1, token="archive")
+    slot = json.loads(manifest_path.read_text())["slots"][0]
+    assert slot["binding"] == binding.model_dump() and slot["directory_identity"] is None
+    assert "state" not in slot
+    assert (root / relative / "README.md").read_text() == "base\n"
 
 
 async def test_cleanup_completion_cannot_rewrite_a_changed_allocation(tmp_path, monkeypatch):
@@ -313,8 +323,8 @@ async def test_cleanup_completion_cannot_rewrite_a_changed_allocation(tmp_path, 
         entered.set()
         await finish.wait()
 
-    monkeypatch.setattr("app.worker.execution.workspaces.clean_repository", delayed)
-    pending = asyncio.create_task(pool.release(binding, job_id=1, token="stop", recycle=True))
+    monkeypatch.setattr("app.worker.execution.workspaces.require_idle_repository", delayed)
+    pending = asyncio.create_task(pool.release(binding, job_id=1, token="archive"))
     await asyncio.wait_for(entered.wait(), 2)
     # Simulate external reconciliation while the stale cleanup is suspended at an await.
     data = json.loads(pool.manifest_path.read_text())
@@ -322,7 +332,6 @@ async def test_cleanup_completion_cannot_rewrite_a_changed_allocation(tmp_path, 
     slot["generation"] += 1
     slot["binding"]["generation"] += 1
     slot["binding"]["flow_id"] = 2
-    slot["state"] = "occupied"
     pool.manifest_path.write_text(json.dumps(data))
     before = pool.manifest_path.read_bytes()
     finish.set()
@@ -332,7 +341,7 @@ async def test_cleanup_completion_cannot_rewrite_a_changed_allocation(tmp_path, 
 
 
 @pytest.mark.parametrize("during_claim", [False, True])
-async def test_ack_reconciles_selected_target_without_completed_journal_binding(
+async def test_failed_preparation_ack_does_not_mutate_selected_target(
     tmp_path, monkeypatch, during_claim,
 ):
     root, _ = managed_seed(tmp_path)
@@ -356,24 +365,34 @@ async def test_ack_reconciles_selected_target_without_completed_journal_binding(
     assert result.exit_code != 0 and state.load().workspace is None
     assert not agent.started
     state.complete(result)
+    before = pool.manifest_path.read_bytes()
     state.acknowledge(1, JobState.FAILED)
-    with pytest.raises(ExecutionStateError, match="pending reconciliation"):
-        state.record_received(received.model_copy(update={"job_id": 2, "assignment_token": "next"}))
     restarted = ExecutionState(root, 1)
-    restarted.reconcile_acknowledgement(RepositoryWorkspaces(root, "worker-a"))
+    restarted.reconcile_acknowledgement()
+    assert pool.manifest_path.read_bytes() == before
     item = next(i for i in pool.inventory() if i.workspace == target.workspace)
-    assert (item.settled_job_id, item.settled_assignment_token) == (1, "token-1")
-    assert item.state == ("quarantined" if during_claim else "idle")
+    assert item.generation == target.generation
     assert item.flow_id == (1 if during_claim else None)
-    assert restarted.load().pool_acknowledged
+    assert restarted.load().acknowledged
+    assert "pool_acknowledged" not in json.loads(restarted.path.read_text())
+    restarted.record_received(received.model_copy(update={"job_id": 2, "assignment_token": "next"}))
+    assert restarted.load().job_id == 2
 
 
-async def test_selected_target_ack_never_settles_someone_elses_binding(tmp_path):
+async def test_late_result_ack_never_mutates_newer_binding(tmp_path):
     root, _ = managed_seed(tmp_path)
     pool = RepositoryWorkspaces(root, "worker-a")
     target = (await pool.provision("owner/repo"))[1]
-    await claim(pool, 2, target)
+    binding = await claim(pool, 1, target)
+    state = ExecutionState(root, 1)
+    state.record_received(assignment(1, target.workspace))
+    state.record_started()
+    state.bind_workspace(binding)
+    state.complete(RuntimeError("finished before the next allocation"))
+    newer = await claim(pool, 2, target.model_copy(update={"generation": target.generation + 1}))
     before = pool.manifest_path.read_bytes()
-    with pytest.raises(VcsVerificationError, match="ownership"):
-        pool.acknowledge_target("owner/repo", 1, target.workspace, target.generation, 1, "stale")
+    state.acknowledge(1, JobState.FAILED)
+    state.reconcile_acknowledgement()
     assert pool.manifest_path.read_bytes() == before
+    assert pool.lookup("owner/repo", 2) == newer
+    assert state.load().workspace == binding

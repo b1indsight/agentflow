@@ -44,7 +44,7 @@ if [ "${FLOWTOOL_K8S_RECREATE_IDLE_WORKER:-no}" = yes ]; then
     }
     selected {
       slots++
-      if ($4 != "state=idle" || $5 != "job=-" || $6 != "flow=-") bad = 1
+      if (NF != 5 || $4 != "job=-" || $5 != "flow=-") bad = 1
     }
     END { exit (found != 1 || slots < 1 || bad) }
   '

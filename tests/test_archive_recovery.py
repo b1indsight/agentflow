@@ -14,7 +14,7 @@ from app.contracts.protocol import (
     Succeeded,
 )
 from app.controler.workflow.service import ControlService
-from app.domain.models import ArchiveReason, FlowState, JobKind, JobState, WorkspaceInventory
+from app.domain.models import ArchiveReason, FlowState, JobKind, JobState
 from app.persistence.activity import ActivityStore
 from app.persistence.jobs import JobStore
 from tests.github import RecordingGitHub
@@ -25,7 +25,7 @@ from tests.test_result_recovery import (
 )
 from tests.test_workflow_transactions import accepted_coding
 from tests.worker_fakes import server_callbacks, server_runtime
-from tests.workspace_fixtures import register_worker, report_settled
+from tests.workspace_fixtures import register_worker
 
 
 async def ready_archive(store, *, start=True):
@@ -34,7 +34,6 @@ async def ready_archive(store, *, start=True):
     await route_merge(store, flow)
     subject = coordinator(store, RecordingGitHub())
     await subject.results.apply(old.id)
-    report_settled(store, old.id, epoch="epoch-a")
     job = store.workers.assign_job("worker-a", "archive-token", "epoch-a")
     task = await subject.prepare(job)
     assert isinstance(task, ArchiveTask)
@@ -74,10 +73,6 @@ async def test_archive_release_rolls_back_and_replays_atomically(store, monkeypa
     monkeypatch.setattr(JobStore, "complete_persisted_result", original)
     assert await subject.results.apply(job.id) is JobState.DONE
     assert await subject.results.apply(job.id) is JobState.DONE
-    assert store.workers.report_workspace("worker-a", "epoch-a", WorkspaceInventory(
-        workspace=job.workspace, repository=flow.repo, generation=job.generation + 1,
-        state="idle", flow_id=None, settled_job_id=job.id, settled_assignment_token="archive-token",
-    ))
     assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
     assert store.flows.get_flow(flow.id).archive_reason is ArchiveReason.SUCCEEDED
     archived = ActivityStore(store.database).archived(flow.id, 1)
@@ -115,7 +110,6 @@ async def test_merge_after_abandonment_cannot_adopt_a_released_binding(
         ),
         "epoch",
     )
-    report_settled(store, stop.job_id, epoch="epoch", stopped=True)
     with pytest.raises(ValueError, match="archived"):
         service.retry(flow)
     activity = ActivityStore(store.database)
@@ -148,7 +142,6 @@ async def test_failed_archive_retry_keeps_attempt_and_original_worker(store, rec
     assert store.workers.record_assignment_result(job.id, "worker-a", "archive-token", "epoch-a",
                                           message) == "pending"
     assert await subject.results.apply(job.id) is JobState.FAILED
-    report_settled(store, job.id, epoch="epoch-a")
     assert store.flows.get_flow(flow.id).state is FlowState.BLOCKED
     assert store.workers.get_flow_execution(flow.id).released_at is None
     service = ControlService(
@@ -162,33 +155,9 @@ async def test_failed_archive_retry_keeps_attempt_and_original_worker(store, rec
     assert store.workers.assign_job("worker-b", "other", "epoch-b") is None
     retried = store.workers.assign_job("worker-a", "retry", "epoch-a")
     assert retried.kind is JobKind.ARCHIVE
+    assert (retried.workspace, retried.generation) == (job.workspace, job.generation)
     assert await subject.prepare(retried) == task
     assert store.flows.get_flow(flow.id).current_attempt_id == task.attempt_id
-
-
-@pytest.mark.parametrize("state", ["releasing", "absent", "quarantined"])
-async def test_cleanup_retry_requires_verified_original_allocation(store, recording_resources, state):
-    # A failed cleanup retains its original target. Unknown roots never become
-    # eligible just because the terminal result was applied and acknowledged.
-    flow, job, _task, subject = await ready_archive(store)
-    message = Failed(job_id=job.id, assignment_token="archive-token", error="cleanup interrupted")
-    assert store.workers.record_assignment_result(
-        job.id, "worker-a", "archive-token", "epoch-a", message,
-    ) == "pending"
-    assert await subject.results.apply(job.id) is JobState.FAILED
-    item = WorkspaceInventory(
-        workspace=job.workspace, repository=flow.repo, generation=job.generation,
-        flow_id=flow.id, state=state,
-        settled_job_id=job.id, settled_assignment_token="archive-token",
-    )
-    assert store.workers.report_workspace("worker-a", "epoch-a", item)
-    ControlService(database=store.database).retry(flow)
-    retry = store.workers.assign_job("worker-a", "retry", "epoch-a")
-    if state == "releasing":
-        assert retry is not None and retry.kind is JobKind.ARCHIVE
-        assert (retry.workspace, retry.generation) == (job.workspace, job.generation)
-    else:
-        assert retry is None
 
 
 async def test_expired_merged_executor_is_pinned_until_original_worker_returns(store):
@@ -247,7 +216,6 @@ async def test_restart_between_archive_claim_and_freeze_requeues_safely(store, r
     await route_merge(store, flow)
     subject = coordinator(store, RecordingGitHub())
     await subject.results.apply(old.id)
-    report_settled(store, old.id, epoch="epoch-a")
     job = store.workers.assign_job("worker-a", "archive-token", "epoch-a")
     assert job.payload is None and job.started_at is None
     store.workers.recover_abandoned_assignments()
@@ -266,8 +234,11 @@ async def test_superseded_queued_coding_does_not_block_archive_retry(store, reco
     # Lease recovery can requeue coding work after merge already retired its initial queue.
     flow, job, _task, subject = await ready_archive(store)
     stale = store.jobs.enqueue_job(flow.id, JobKind.REVISION)
-    await subject.fail(job, "cleanup permission denied")
-    report_settled(store, job.id, epoch="epoch-a")
+    assert store.workers.record_assignment_result(
+        job.id, "worker-a", "archive-token", "epoch-a",
+        Failed(job_id=job.id, assignment_token="archive-token", error="cleanup permission denied"),
+    ) == "pending"
+    assert await subject.results.apply(job.id) is JobState.FAILED
     ControlService(
         database=store.database,
     ).retry(flow)

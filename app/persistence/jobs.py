@@ -316,7 +316,7 @@ class JobStore(Repository):
             ).fetchall()
 
     def complete_persisted_result(self, job_id: int, state: JobState) -> bool:
-        """Commit an inbox item, retaining remote ownership until the worker ACK witness."""
+        """Commit an inbox item and clear only claims with durable writer-exit evidence."""
 
         if state not in (JobState.DONE, JobState.FAILED):
             raise ValueError("persisted results can only complete terminal jobs")
@@ -332,20 +332,23 @@ class JobStore(Repository):
                 " AND kind<>'inference' AND result_applied_at IS NULL"
                 " AND (assigned_worker_id IS NULL OR EXISTS (SELECT 1 FROM workers w"
                 " WHERE w.worker_id=jobs.assigned_worker_id AND w.workspace=jobs.workspace"
-                " AND w.generation=jobs.generation AND w.current_job_id=jobs.id))"
+                " AND w.generation=jobs.generation AND (w.current_job_id=jobs.id"
+                " OR (w.current_job_id IS NULL AND EXISTS (SELECT 1 FROM execution_stops s"
+                " WHERE s.job_id=jobs.id AND s.assignment_token=jobs.assignment_token"
+                " AND s.state IN ('stopped','confirmed'))))))"
                 " RETURNING assigned_worker_id",
                 (state, now, now, job_id, JobState.RUNNING),
             ).fetchone()
             if completed is not None:
                 # Unstarted control outcomes are preparation failures or explicit
                 # request-validation refusals, neither of which has a worker journal.
-                # Started control failures and all remote results still require ACK.
+                # A worker terminal proves exit; a started control failure does not.
                 connection.execute(
                     "UPDATE workers w SET current_job_id=NULL FROM jobs j WHERE j.id=%s"
                     " AND w.worker_id=j.assigned_worker_id AND w.workspace=j.workspace"
                     " AND w.generation=j.generation AND w.current_job_id=j.id"
-                    " AND j.started_at IS NULL"
-                    " AND j.result_payload->>'source'='control'", (job_id,),
+                    " AND (j.result_payload->>'source'='worker' OR (j.started_at IS NULL"
+                    " AND j.result_payload->>'source'='control'))", (job_id,),
                 )
                 connection.execute(
                     "UPDATE flow_executions SET recovery_deadline=CASE WHEN EXISTS"

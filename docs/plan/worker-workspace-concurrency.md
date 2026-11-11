@@ -1,8 +1,8 @@
 # Worker 按 workspace 并行执行
 
-**状态：** 并发派发、按需求补充库存、独立 journal 与 ACK 恢复已在本地实现并通过全量回归。
-**交付：** 按用户要求通过代码审查门禁后交付独立 PR，发布与 CI 状态见本线程；未部署，只操作临时测试数据库。
-**需求来源：** [本线程](https://ampcode.com/threads/T-01a1bbca-99b5-70d6-a109-76d3a414c93e)。本文只保留当前方案。
+**状态：** 并发实现已推送 PR #135；失败回报与删除 workspace 状态的后续修改在本地，当前方案见第 11 节。
+**交付：** 后续修改尚未推送或部署，验证与审查结果见本线程实施记录；仅操作临时测试数据库。
+**需求来源：** [本线程](https://ampcode.com/threads/T-01a1bbca-99b5-70d6-a109-76d3a414c93e)。第 1–9 节保留已交付基线，后续章节按时间记录变更；发生冲突时以最新决策为准。
 
 ## 1. 行为要求
 
@@ -143,3 +143,40 @@ Session 保持有界 FIFO。有效消息突发填满队列时暂停 reader，由
 同批适配 Kubernetes smoke 的旧调用：只读逐 Flow journal，不在运行中的 worker 根目录调用带迁移行为的 scan；可选重建操作检查该 worker 的全部 workspace，任何编码/推理 job、保留 Flow、清理状态或缺失库存都拒绝重建。
 
 验证：真实 PostgreSQL dump/restore 演练通过，原 journal 保持不变，复制根目录仍被拒绝；恢复包回归、Ruff、Mypy 和 shell 语法检查通过。执行脚本中的真实 journal 读取片段及 idle guard，覆盖空库存、多 journal、复制目录、其他 worker 干扰和占用状态。未连接 Kubernetes 集群，未执行 Pod 重建。保留现有 CI 演练作为独立入口回归，不增加重复的 pytest 包装测试。此前门禁报告的四项产品问题未在此批修改。
+
+## 10. 2026-11-11：补充请求的失败回报与结果处理
+
+用户要求补齐 `worker.provision` 失败回报与 controller 结果处理。本批针对首轮审查的 provisioning 断线问题；其余停止结清、清理锁范围和查询效率问题不在本批范围内。此前只有库存上报，没有关联请求的业务结果；本地真实 Session 回归确认，非法仓库名、未登记目录和创建目录失败均会退出共享连接。
+
+沿用未发布的 wire20，新增 `ProvisionResult`，以 `reply_to` 对应原需求，携带 repository 和固定错误码；成功时 error 明确为空。worker 在成功或仓库局部失败后先报告真实库存（包括部分成功），再回复结果。controller 验证当前连接、请求身份和仓库；结果仅结清需求，不创建 worker 行、不绑定 Flow、不改变 job 状态。可派发位置仍只由库存和领取事务决定。
+
+- `invalid_repository`、`workspace_conflict` 和无效协议回复：停止该连接上该仓库的自动补充，修复后重连重新核对需求。其他仓库和既有 job 不受此请求状态影响。
+- `filesystem_error` 或等待回复超过现有 heartbeat timeout：清除原等待，至少间隔 30 秒后按仍存在的需求重试。迟到或重复结果不结清新请求。每仓库最多一个在途需求，每连接最多一个消息页数量的在途需求；先筛除阻塞仓库，后应用上限，避免前一页失败饿死后续仓库。
+- 目录创建失败时，确认路径不存在才回到 absent，并复用原 slot 重试；路径已存在或无法确认时隔离。仓库局部库存检查的文件系统错误同样隔离该位置，未确认位置不派发。共享根、推理默认身份、manifest 读写错误和程序错误仍向上传播并关闭连接，不将全局损坏包装为可继续执行的仓库失败。
+- controller 记录可检索的 `workspace_provision_failed`、worker、repository 和固定 reason code；日志和线上结果不包含本地异常路径、原始异常文本或凭据。
+
+实现集中在协议、双端现有 callbacks、本地 pool 和日志白名单；没有新表、Registry、配置项或通用重试层。需求状态只属于当前连接，重连基于真实库存重新计算，避免把过时补充状态变成持久调度权威。
+
+验证入口：[真实 Session 隔离与部分库存](../../tests/test_workspace_dispatch.py)、[关联、重试与全局损坏边界](../../tests/test_workspace_provision.py)。专项验证通过，覆盖成功/失败回报顺序、健康 job 结清、在途上限、超时与延迟重试、重复及旧 epoch 回复、发送失败、协议拒绝、重连恢复和日志脱敏；全仓 Ruff、Mypy 和 diff 检查通过。完整回归及本批审查结果另见[本线程实施记录](https://ampcode.com/artifacts/worker-workspace-206bc2d8-54dd-48f9-934a-52242e13f040)。本批尚未推送或部署。
+
+简化对照在独立进程内运行 `.amp/in/provision-ablation.py <variant>`，不修改产品源码；同一组输入下原实现通过。`no-result` 仅吞异常并报库存，缺少成功/失败回复；`no-cooldown` 在下次 poll 立即重发；`no-inflight` 重复发送尚未结束的请求；`no-timeout` 在缺失回复时无法继续补充；`quarantine-all` 将确认未建成的目录也隔离，使临时故障永久消耗配额。五种变体分别触发对应合同回归，因此保留业务回复、在途关联、超时/冷却和 absent/隔离区分。对照日志留在本地 `.amp/in/provision-ablation-*.log`。
+
+## 11. 2026-11-11：删除 workspace 状态，以绑定和执行事实判断占用
+
+用户要求 controller 只查询绑定判断占用，并明确 workspace 复用只需原执行不再修改目录。本次决策替代上文第 1–4、10 节的 workspace 六态、永久隔离及 pool ACK 复用门槛；这些段落保留为此前设计的记录，不再描述当前实现。
+
+- 删除库存协议的 state/settled 字段、workers 的 workspace_state/retired_generation，以及本地 manifest 的状态字段。不用新表、Registry 或另一套状态枚举替代。
+- controller 以活跃 Flow 绑定和具体 job 占用进行领取；收到可信 worker 结束/停止证据后清除对应 job，业务收尾满足后释放 Flow 绑定并原子推进 generation。库存只登记位置和当前连接的确认，不修改绑定、job 或已有 generation。worker 尚未收到新分配时上报旧 generation 是正常情况，不能把数据库退回旧代。
+- runtime 在接受新代 INITIAL 前检查原 journal 与实际 task。终态或已停止且没有正在退出的 task 可以接替，不等待 ACK；received/started 且没有退出证据的执行继续阻止并发写入。发出 cancel 或失去 heartbeat 不等于执行已退出。
+- 停止只等待执行及其子进程退出，持久化 stop 回执，不做 Git 清理。下一 INITIAL 在获得独占后整理旧工作副本；目录异常以操作失败上报，故障修复后可再验证，不永久写入 quarantine。当前 Flow 的正常结果仍保留绑定供 review/revision 使用。
+- generation 由 controller 在释放 Flow 时推进。worker 的上次绑定作为旧分配凭据保留到新代领取；停止期间合并的 Flow 仍在原代、原位置完成 archive，删除原先 stop ACK 推进一代再交回 archive 的分支。
+- ACK 只确认和退休 journal，不再写 pool。历史 ACK 即使晚于新代执行也不触碰其目录。成功 archive 的业务处置合同保持不变：保留完整副本、移除 overflow worktree；只保留带 job/token 的破坏性操作意图供崩溃重放，不能据此授予新执行。
+- 同 Flow 后续任务可以提前准备，但当前连接按顺序发送前一 journal 的 ACK 后才派发，避免覆盖未确认执行记录。stop 按 `(job_id, assignment_token)` 唯一，允许同一代内编码和归档分别停止；已完成握手的缓存有界且不参与 workspace 占用判断。
+- INITIAL 的 seed 访问或副本复制失败后，原位置仍可重试：根据已验证的空目录或已删除的部分副本重新准备，不要求改变 generation。已有完整仓库的重复 claim 保留当前 Flow 的修改。创建目录后尚未持久化物理身份即崩溃等无法证明所有权的情况仍拒绝收编，不能等同普通可重试 I/O 故障。
+- manifest 版本改为 3，未发布的六态版本 2 不静默转换；已知 v1 绑定及历史 v4/v5 journal 的可验证证据仍可读。旧数据库和试验版 schema 需显式核对后升级，不自动改动实际部署数据。
+
+影响范围为领域模型/schema、领取与结果/停止事务、双端 callbacks、本地 pool/runtime/journal、推理注册、CLI 与 Kubernetes smoke 的占用检查；不改变 UI 外观或增加依赖。补充请求的关联成功/失败回报、在途上限和冷却仍保留，之前的缺报问题不回退。
+
+验证以[交接与原执行退出](../../tests/test_workspace_handoff.py)、[数据库绑定](../../tests/test_workspace_claims.py)、[真实连接派发](../../tests/test_workspace_dispatch.py)及已有 archive、journal、Git/jj 回归为入口。seed/复制故障先复现修复后仍无法重试，再验证相同位置、代际能够完成准备。真实 PostgreSQL 17 dump/restore、原 journal 不变和复制根拒绝检查通过；Kubernetes 脚本的占用检查用实际 awk 片段验证，未连接集群或重建 Pod。最终完整检查和一次后续审查结果记录在[线程实施记录](https://ampcode.com/artifacts/worker-workspace-206bc2d8-54dd-48f9-934a-52242e13f040)，未推送或部署。
+
+简化对照执行 `uv run python .amp/in/handoff-ablation.py <variant>`，在独立进程替换方法，不修改产品文件。`control` 通过相同输入；`lease-only` 误放行未知 started journal 和 cancel 后尚未退出的任务；`ack-gate` 阻止已结束或已停止、但 ACK 尚未送达的合法接替。由此保留实际 task/journal 退出检查，删除 ACK 占用门槛。日志位于 `.amp/in/artifacts/handoff-ablation-{control,lease-only,ack-gate}.log`；这些对照失败不是最终实现的测试失败。

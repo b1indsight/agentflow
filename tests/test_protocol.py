@@ -60,7 +60,7 @@ def result(method: str, **outcome: JsonValue) -> dict[str, JsonValue]:
 IDENTITY: dict[str, JsonValue] = {"job_id": 5, "assignment_token": "assignment-1"}
 LOCATION: dict[str, JsonValue] = {"workspace": "a" * 32, "generation": 1}
 INVENTORY: list[JsonValue] = [{
-    "workspace": "b" * 32, "generation": 1, "repository": None, "state": "idle", "flow_id": None,
+    "workspace": "b" * 32, "generation": 1, "repository": None, "flow_id": None,
 }]
 FENCE: dict[str, JsonValue] = {**IDENTITY, "flow_id": 3, "request_id": "stop-1"}
 TASK: dict[str, JsonValue] = {

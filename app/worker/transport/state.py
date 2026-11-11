@@ -28,6 +28,7 @@ from app.contracts.protocol import (
     InventoryPage,
     PayloadValidationError,
     ProtocolError,
+    ProvisionResult,
     RecoveryRejected,
     Register,
     Registered,
@@ -58,6 +59,7 @@ from app.contracts.validation import RejectedMessage
 from app.domain.inference_models import InferenceCapability
 from app.inference.transport import WorkerInferenceCallbacks
 from app.worker.execution.lifecycle import WorkerProtocolError
+from app.worker.execution.workspaces import RepositoryProvisionError
 
 if TYPE_CHECKING:
     from app.worker.runtime import WorkerRuntime
@@ -105,6 +107,7 @@ class WorkerStateCallbacks:
         self.ready = False
         self.expected_result: dict[int, AcceptResultRequest] = {}
         self.expected_stop: dict[int, AcceptStop] = {}
+        self._accepted: dict[str, AcceptResultResponse | StopAccepted] = {}
         self._started: dict[int, Started] = {}
         self._terminal: dict[int, ExecuteResult] = {}
         self._stopped: dict[int, StopResult] = {}
@@ -136,6 +139,11 @@ class WorkerStateCallbacks:
         )
 
     async def on_unmatched_reply(self, reply: ToolResult, message: ServerMessageUnion) -> None:
+        previous = self._accepted.get(reply.reply_to)
+        if isinstance(reply, (AcceptResultResponse, StopAccepted)) and (
+            type(reply) is type(previous) and previous is not None and reply.result == previous.result
+        ):
+            return  # A duplicate ACK must never look up a retired/replaced Flow journal.
         raise WorkerProtocolError("reply has no matching invocation")
 
     async def on_unrouted(self, item: ToolCall, message: ServerMessageUnion) -> None:
@@ -151,7 +159,7 @@ class WorkerStateCallbacks:
 
     async def on_opened(self) -> None:
         for flow_id, execution in list(self.runtime.executions.items()):
-            execution.state.reconcile_acknowledgement(self.runtime.workspaces)
+            execution.state.reconcile_acknowledgement()
             if execution.state.load() is None:
                 self.runtime.executions.pop(flow_id)
         inventory = self.runtime.workspaces.inventory()
@@ -363,7 +371,7 @@ class WorkerStateCallbacks:
         assert record is not None
         if reply.result.job_id not in self._stops:
             execution.on_result_accepted(reply.result)
-            execution.state.reconcile_acknowledgement(self.runtime.workspaces)
+            execution.state.reconcile_acknowledgement()
             if execution.state.load() is None:
                 self.runtime.executions.pop(record.flow_id)
         self.routes.forget_reply(expected.message_id)
@@ -371,7 +379,7 @@ class WorkerStateCallbacks:
         self._terminal.pop(record.job_id, None)
         self._started.pop(record.job_id, None)
         self._authorized.discard(record.job_id)
-        await self.report_inventory()
+        self._remember_acceptance(reply)
 
     async def on_stop(self, call: StopExecution, message: ServerMessageUnion) -> None:
         if call.message_id != stop_call_id(call.arguments):
@@ -407,7 +415,7 @@ class WorkerStateCallbacks:
         record = execution.state.load()
         assert record is not None
         execution.on_stop_accepted(reply.result)
-        execution.state.reconcile_acknowledgement(self.runtime.workspaces)
+        execution.state.reconcile_acknowledgement()
         self.routes.forget_reply(expected.message_id)
         result = self.expected_result.pop(record.job_id, None)
         if result is not None:
@@ -418,13 +426,32 @@ class WorkerStateCallbacks:
         self._stopped.pop(record.job_id, None)
         self._stops.pop(record.job_id, None)
         self._authorized.discard(record.job_id)
-        await self.report_inventory()
+        self._remember_acceptance(reply)
+
+    def _remember_acceptance(self, reply: AcceptResultResponse | StopAccepted) -> None:
+        """Bound completed correlations independently of durable journals and workspace reuse."""
+        self._accepted[reply.reply_to] = reply
+        if len(self._accepted) > MAX_PAYLOAD_ITEMS * 2:
+            self._accepted.pop(next(iter(self._accepted)))
 
     async def on_provision(self, call: RepositoryDemand, message: ServerMessageUnion) -> None:
         if not self.ready:
             raise WorkerProtocolError("inventory demand requires completed registration")
-        await self.runtime.workspaces.provision(call.repository)
+        error = None
+        try:
+            await self.runtime.workspaces.provision(call.repository)
+        except RepositoryProvisionError as failure:
+            error = failure.code
+        # Publish partial progress before completing the request. The result grants no
+        # capacity, and must not trigger another demand before inventory is applied.
         await self.report_inventory()
+        await self.session.send(WorkerMessage(
+            **message_header(self.session.epoch), control=None,
+            payload=[ProvisionResult(
+                **result_header(call.message_id), method=call.method,
+                repository=call.repository, error=error,
+            )],
+        ))
 
     async def report_inventory(self) -> None:
         if not self.ready:

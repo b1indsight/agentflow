@@ -143,6 +143,8 @@ class RevisionAgent:
 async def test_revision_verifies_real_git_delivery(revision_workspace, monkeypatch, behavior, success):
     # A successful process can leave unpushed or dirty work; neither closes review feedback.
     root, repo, task, secret, pool = revision_workspace
+    binding = pool.lookup(task.repo, task.flow_id)
+    before = pool.manifest_path.read_bytes()
     agent = RevisionAgent(repo, behavior)
     if behavior == "noop":
         resume = agent.resume
@@ -161,6 +163,8 @@ async def test_revision_verifies_real_git_delivery(revision_workspace, monkeypat
     result = await WorkerExecutor(root, agent, state=ExecutionState(root, 1), worker_id="w",
                                    workspaces=pool).execute(task, secret, tool_caller=RecordingToolCaller())
     assert (result.exit_code == 0) is success
+    assert pool.manifest_path.read_bytes() == before
+    assert ExecutionState(root, 1).load().workspace == binding
     assert agent.calls[0][1].github.token.get_secret_value() == "fresh-token"
     assert "flow.open_pr" not in agent.calls[0][2]
     if success:

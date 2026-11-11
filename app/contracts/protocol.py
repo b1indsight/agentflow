@@ -368,6 +368,22 @@ class RepositoryDemand(ToolCall):
     repository: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
 
+class ProvisionError(StrEnum):
+    """Public repository-local failures; only filesystem errors retry automatically."""
+
+    INVALID_REPOSITORY = "invalid_repository"
+    WORKSPACE_CONFLICT = "workspace_conflict"
+    FILESYSTEM_ERROR = "filesystem_error"
+
+
+class ProvisionResult(ToolResult):
+    """Finish one capacity request; only separately reported inventory grants capacity."""
+
+    method: Literal["worker.provision"]
+    repository: str
+    error: ProvisionError | None
+
+
 class Started(ToolCall):
     method: Literal["server.execution_started"]
     arguments: ExecutionIdentity
@@ -542,6 +558,7 @@ WorkerResult = Annotated[
     | Annotated[StopResult, Tag("worker.stop")]
     | Annotated[ConversationResult, Tag("worker.history")]
     | Annotated[InferenceResult, Tag("worker.infer")]
+    | Annotated[ProvisionResult, Tag("worker.provision")]
     | Annotated[ValidationErrorResult, Tag("validation_error")],
     Discriminator(_result_tag),
 ]
@@ -668,7 +685,7 @@ class Heartbeat(Message[WorkerPayload]):
     @model_validator(mode="after")
     def _execution_payload(self) -> Self:
         for item in self.payload:
-            if isinstance(item, (ConversationResult, InferenceResult, ValidationErrorResult)):
+            if isinstance(item, (ConversationResult, InferenceResult, ProvisionResult, ValidationErrorResult)):
                 continue
             if isinstance(item, (Started, AcceptResultRequest, AcceptStop, FlowToolRequest)):
                 identity = (item.arguments.job_id, item.arguments.assignment_token)

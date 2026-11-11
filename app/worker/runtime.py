@@ -18,8 +18,8 @@ from app.communication.gateway import Gateway
 from app.communication.session import Session, Transport
 from app.contracts.conversation import HistoryPage, HistoryQuery
 from app.contracts.protocol import (
-    ArchiveTask,
     AssignmentArguments,
+    InitialTask,
     ServerMessageUnion,
     WorkerMessageUnion,
 )
@@ -172,7 +172,7 @@ class WorkerRuntime:
         self.inference.root = self.workspaces.inference_path
         for flow_id in ExecutionState.scan(self.settings.worker_root):
             execution = self._create_execution(flow_id)
-            execution.state.reconcile_acknowledgement(self.workspaces)
+            execution.state.reconcile_acknowledgement()
             if execution.state.load() is not None:
                 self.executions[flow_id] = execution
         self._initialized = True
@@ -217,23 +217,22 @@ class WorkerRuntime:
                 return execution
         slot = next((item for item in self.workspaces.inventory()
                      if item.workspace == assignment.workspace), None)
-        retrying_archive = (slot is not None and slot.state == "releasing"
-                            and slot.flow_id == assignment.flow_id
-                            and isinstance(assignment.task, ArchiveTask))
+        superseding = (slot is not None and assignment.generation > slot.generation
+                       and isinstance(assignment.task, InitialTask))
         if (slot is None or slot.repository != assignment.task.repo
-                or slot.generation != assignment.generation
-                or (slot.state not in {"idle", "occupied"} and not retrying_archive)
-                or slot.flow_id not in {None, assignment.flow_id}):
+                or (not superseding and (slot.generation != assignment.generation
+                                        or slot.flow_id not in {None, assignment.flow_id}))):
             raise WorkerProtocolError("assignment workspace is unavailable or has a stale generation")
-        if execution is None:
-            execution = self._create_execution(assignment.flow_id)
-            self.executions[assignment.flow_id] = execution
         for other in self.executions.values():
             record = other.state.load()
-            if (other is not execution and record is not None and not record.acknowledged
-                    and record.selected_workspace == assignment.workspace):
-                raise WorkerProtocolError("workspace has another unsettled execution")
+            if (other is not execution and record is not None
+                    and record.selected_workspace == assignment.workspace
+                    and other.may_modify_workspace()):
+                raise WorkerProtocolError("workspace has another live or unknown execution")
+        if execution is None:
+            execution = self._create_execution(assignment.flow_id)
         execution.receive(assignment)
+        self.executions[assignment.flow_id] = execution
         return execution
 
     def read_history(self, query: HistoryQuery) -> HistoryPage:

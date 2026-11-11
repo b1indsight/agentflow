@@ -45,7 +45,6 @@ class _RecordFields(ProtocolModel):
     archive_task: ArchiveTask | None = None
     root_identity: tuple[str, int, int]
     acknowledged: bool = False
-    pool_acknowledged: bool = False
     retire_after_ack: bool = False
     cleanup_verified: bool = False
     workspace: WorkspaceBinding | None = None
@@ -57,8 +56,6 @@ class _RecordFields(ProtocolModel):
 
     @model_validator(mode="after")
     def _evidence(self) -> Self:
-        if self.pool_acknowledged and not self.acknowledged:
-            raise ValueError("pool settlement has no controller acknowledgement")
         if self.retire_after_ack and (not self.acknowledged or self.archive_task is None):
             raise ValueError("journal retirement has no acknowledged archive")
         if (self.selected_workspace is None) != (self.selected_generation is None):
@@ -136,7 +133,6 @@ class _LegacyRecord(_RecordFields):
             archive_task=self.archive_task,
             root_identity=self.root_identity,
             acknowledged=self.acknowledged,
-            pool_acknowledged=self.pool_acknowledged,
             retire_after_ack=self.retire_after_ack,
             cleanup_verified=self.cleanup_verified,
             workspace=self.workspace,

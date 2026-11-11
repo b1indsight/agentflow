@@ -12,6 +12,7 @@ from app.contracts.protocol import (
     InitialTask,
     InitialTaskResult,
     PushSecret,
+    StopFence,
 )
 from app.domain.delivery_models import PreparedDelivery
 from app.domain.models import (
@@ -21,6 +22,7 @@ from app.domain.models import (
     VcsOutcome,
 )
 from app.worker.execution.executor import WorkerExecutor
+from app.worker.execution.lifecycle import WorkerExecution
 from app.worker.execution.workspaces import RepositoryWorkspaces
 from app.worker.state.execution import ExecutionState
 from tests.test_vcs import _git, _git_fixture
@@ -271,3 +273,42 @@ async def test_initial_bootstrap_push_mcp_and_final_verification_share_current_c
     assert result.exit_code == 0 and result.pushed and result.open_pr_call_id
     assert result.delivery_receipt.status == "prepared"
     assert authenticated == ["clone", "verify", "verify"]
+
+
+async def test_stop_preserves_edits_until_next_initial_prepares_new_generation(
+    tmp_path, initial_workspace,
+):
+    # A completed agent may leave edits; stop records quiescence without cleaning the repository.
+    journal, pool = initial_workspace
+
+    class Agent(RecordingAgent):
+        async def start(self, task, cwd, **kwargs):
+            (cwd / "README.md").write_text("stopped tracked edit")
+            (cwd / "untracked").write_text("stopped untracked edit")
+            return CodingExecutionResult("session", "stopped", 1)
+
+    executor = WorkerExecutor(tmp_path, Agent(), worker_id="worker-1", state=journal,
+                              workspaces=pool)
+    received = journal.assignment
+    result = await executor.execute(received.task, assignment_secret(), tool_caller=RecordingToolCaller())
+    journal.complete(result)
+    binding = journal.load().workspace
+    repo = pool.path(binding)
+    before = pool.manifest_path.read_bytes()
+    owner = WorkerExecution(worker_id="worker-1", executor=executor, state=journal)
+    fence = StopFence(request_id="stop", flow_id=received.flow_id, job_id=received.job_id,
+                     assignment_token=received.assignment_token)
+    receipt = await owner.stop(fence)
+    assert journal.load().stopped == receipt
+    owner.on_stop_accepted(fence)
+    journal.reconcile_acknowledgement()
+    assert pool.manifest_path.read_bytes() == before
+    assert pool.lookup("owner/repo", received.flow_id) == binding
+    assert (repo / "README.md").read_text() == "stopped tracked edit"
+    assert (repo / "untracked").read_text() == "stopped untracked edit"
+
+    newer = await pool.claim("owner/repo", received.flow_id, binding.slot_id, binding.generation + 1,
+                             base_branch="main", remote="origin", push_token=None)
+    assert newer.generation == binding.generation + 1 and pool.path(newer) == repo
+    assert (repo / "README.md").read_text() == "base\n"
+    assert not (repo / "untracked").exists()

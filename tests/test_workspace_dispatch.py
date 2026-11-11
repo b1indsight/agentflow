@@ -17,6 +17,8 @@ from app.contracts.protocol import (
     AssignmentArguments,
     ExecutionTask,
     InitialTask,
+    Inventory,
+    ProvisionResult,
     Register,
     ServerMessageUnion,
     WorkerMessageUnion,
@@ -70,11 +72,7 @@ class ControlledWorker(WorkerRuntime):
                 raise RuntimeError("controlled coding outcome")
 
             async def reclaim_workspace(self):
-                record = required(state.load())
-                assert record.workspace is not None
-                await worker.workspaces.release(
-                    record.workspace, job_id=record.job_id, token=record.assignment_token, recycle=True,
-                )
+                raise AssertionError("stop must not clean or call the workspace pool")
 
         return WorkerExecution(worker_id="worker-a", executor=Executor(), state=state,
                                on_change=self.notify)
@@ -175,7 +173,7 @@ async def test_demand_concurrent_dispatch_stop_and_result_isolate_workspaces(sto
         assert binding.released_at is None  # Completion retains review affinity.
         assert set(worker.running) == initial - {finished}
 
-        # Stopping one Flow must not stop its siblings; its cleaned slot is reusable only after ACK.
+        # Stopping one Flow must not stop its siblings; writer exit permits higher-generation reuse.
         stopped_job = required(store.jobs.get_job(stopped))
         with store.transaction() as tx:
             flow = required(tx.lock_workflow(stopped_job.required_flow_id))
@@ -199,3 +197,97 @@ async def test_demand_concurrent_dispatch_stop_and_result_isolate_workspaces(sto
         for outcome in outcomes:
             if isinstance(outcome, Exception) and not isinstance(outcome, ConnectionError):
                 raise outcome
+
+
+@pytest.mark.parametrize("failure", ["invalid_repository", "workspace_conflict", "filesystem_error"])
+async def test_provision_failure_does_not_disconnect_other_workspaces(store, tmp_path, monkeypatch, failure):
+    # Capacity requests share the job connection. One bad repository must not interrupt
+    # healthy jobs, and a partially created pool must still publish its actual inventory.
+    root, _ = managed_seed(tmp_path)
+    bad_repo = "owner/bad--flow-name" if failure == "invalid_repository" else "owner/bad"
+    bad_job = queued(store, 1, bad_repo)
+    good_job = queued(store, 2, "owner/repo")
+    if failure == "filesystem_error":
+        mkdir = Path.mkdir
+        attempts = 0
+
+        def fail_second_directory(path, *args, **kwargs):
+            nonlocal attempts
+            if path.parent == root / "workspaces" / bad_repo and len(path.name) == 32:
+                attempts += 1
+                if attempts == 2:
+                    raise OSError("private local path must not reach the controller")
+            return mkdir(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "mkdir", fail_second_directory)
+        # Keep this Flow queued so only inventory, not an executor, exercises the partial pool.
+        with store.database.connection() as conn:
+            conn.execute("UPDATE jobs SET prepare_next_at=now()+interval '1 hour' WHERE id=%s", (bad_job.id,))
+
+    worker = ControlledWorker(root, 3)
+    worker.root_lock.acquire()
+    worker.initialize()
+    if failure == "workspace_conflict":
+        (root / "workspaces" / bad_repo / "unregistered").mkdir(parents=True)
+    elif failure == "filesystem_error":
+        (root / "workspaces" / bad_repo).mkdir(parents=True)
+    peers = Gateway[WorkerMessageUnion, ServerMessageUnion]()
+    host_transport, worker_transport = in_process_transport_pair()
+    messages: list[WorkerMessageUnion] = []
+    send = worker_transport.send_text
+
+    async def record_message(raw):
+        messages.append(parse_worker_message(raw))
+        await send(raw)
+
+    monkeypatch.setattr(worker_transport, "send_text", record_message)
+    results = AppliedResults(Mock(), Mock(), Mock(), database=store.database, effects=Mock())
+    callbacks = None
+
+    async def host():
+        nonlocal callbacks
+        register = parse_worker_message(await host_transport.receive_text())
+        assert isinstance(register, Register)
+        session = Session(host_transport, parse=parse_worker_input, make_ack=control_ack, epoch=uuid4().hex)
+        session.register_control(register)
+        session.start()
+        callbacks = ServerCallbacks(
+            ControlledCoordinator(store), worker_id="worker-a", register=register, session=session,
+            database=store.database, tools=Mock(), results=results, notify_jobs=peers.wake_all,
+            heartbeat_interval=0.05, heartbeat_timeout=10, poll_interval=0.02,
+        )
+        if failure == "filesystem_error":
+            demand = callbacks.workers.workspace_demand
+            monkeypatch.setattr(callbacks.workers, "workspace_demand",
+                                lambda *args: [bad_repo, *demand(*args)])
+        try:
+            await peers.serve("worker-a", session, callbacks, replace=True)
+        finally:
+            await callbacks.aclose()
+
+    host_task = asyncio.create_task(host())
+    worker_task = asyncio.create_task(worker._serve_connection(worker_transport))
+    try:
+        await wait_until(lambda: good_job.id in worker.running or worker_task.done() or host_task.done())
+        assert not worker_task.done() and not host_task.done()
+        assert good_job.id in worker.running
+        assert required(store.jobs.get_job(bad_job.id)).state is JobState.QUEUED
+        worker.finish[good_job.id].set()
+        await wait_until(lambda: worker.executions[good_job.required_flow_id].state.load().acknowledged)
+        assert worker._connected
+        replies = [(index, item) for index, message in enumerate(messages)
+                   for item in message.payload if isinstance(item, ProvisionResult)]
+        assert [(item.repository, item.error) for _, item in replies] == [
+            (bad_repo, failure), ("owner/repo", None),
+        ]
+        assert all(isinstance(messages[index - 1], Inventory) for index, _ in replies)
+        assert "private local path" not in "".join(message.model_dump_json() for message in messages)
+        if failure == "filesystem_error":
+            slots = [w for w in store.workers.list_workspaces("worker-a") if w.repository == bad_repo]
+            assert len(slots) == 1  # Publish only the directory whose creation completed.
+            assert (root / "workspaces" / bad_repo / slots[0].workspace).is_dir()
+    finally:
+        await host_transport.close()
+        await asyncio.gather(host_task, worker_task, return_exceptions=True)
+        await asyncio.gather(*(execution.shutdown() for execution in worker.executions.values()))
+        worker.root_lock.release()

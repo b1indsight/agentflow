@@ -64,7 +64,6 @@ async def matching_pool(store, root, flow, monkeypatch, *, overflow=False, retai
     other_binding = await pool.claim(flow.repo, other.id, claimed.workspace, claimed.generation,
                                      base_branch="main", remote="origin", push_token=None)
     assert store.workers.finish_assignment(queued.id, "worker-a", "other-token", JobState.DONE, "epoch-a")
-    pool.acknowledge(other_binding, queued.id, "other-token")
     return pool, binding, other_binding
 
 
@@ -220,7 +219,7 @@ async def test_original_worker_recovers_cleanup_and_replays_without_redeleting(
     assert isinstance(terminal, Succeeded)
     journal.record_terminal(terminal)
     journal.acknowledge(prior.id, JobState.DONE)
-    journal.reconcile_acknowledgement(pool)
+    journal.reconcile_acknowledgement()
     if window != "before-received":
         journal.record_received(
             AssignmentArguments(
@@ -286,14 +285,13 @@ async def test_original_worker_recovers_cleanup_and_replays_without_redeleting(
                                    workspace=default.workspace, repo_workspace_limit=2)
     for item in pool.inventory():
         assert store.workers.report_workspace("worker-a", "next", item)
-    if overflow:
-        # A removed worktree must be provisioned and reported before it can receive work.
-        assert store.workers.assign_job("worker-a", "before-provision", "next") is None
-        assert store.workers.workspace_demand("worker-a", "next") == [flow.repo]
-        for item in await pool.provision(flow.repo):
-            assert store.workers.report_workspace("worker-a", "next", item)
+    # The next INITIAL materializes a removed worktree under the higher controller generation.
     next_job = store.workers.assign_job("worker-a", "next-token", "next")
     assert next_job.flow_id == next_flow.id and next_job.kind is JobKind.INITIAL
+    next_binding = await pool.claim(flow.repo, next_flow.id, next_job.workspace, next_job.generation,
+                                    base_branch="main", remote="origin", push_token=None)
+    assert next_binding.slot_id == binding.slot_id and next_binding.generation > binding.generation
+    assert pool.path(next_binding).is_dir()
 
 
 @pytest.mark.parametrize("window", ["completed-disconnected", "unstarted-rejected"])
@@ -349,7 +347,7 @@ async def test_merge_recovery_preserves_coding_completion_and_root_provenance(
         )
     )
     journal.acknowledge(old.id - 1, JobState.DONE)
-    journal.reconcile_acknowledgement(pool)
+    journal.reconcile_acknowledgement()
     assignment = AssignmentArguments(
         job_id=old.id,
         flow_id=flow.id,

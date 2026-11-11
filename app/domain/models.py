@@ -241,23 +241,14 @@ class Job(BaseModel):
 
 
 class WorkspaceInventory(BaseModel):
-    """Worker-owned physical inventory; settlement proves receipt of a terminal ACK."""
+    """Concrete identity and freshness, never authority to release a controller claim."""
 
     model_config = ConfigDict(extra="forbid")
 
     workspace: str = Field(pattern=r"^[0-9a-f]{32}$")
     repository: str | None
     generation: int = Field(gt=0, strict=True)
-    state: Literal["idle", "preparing", "occupied", "releasing", "absent", "quarantined"]
     flow_id: int | None
-    settled_job_id: int | None = None
-    settled_assignment_token: str | None = None
-
-    @model_validator(mode="after")
-    def _settlement_pair(self) -> WorkspaceInventory:
-        if (self.settled_job_id is None) != (self.settled_assignment_token is None):
-            raise ValueError("workspace settlement requires both job ID and assignment token")
-        return self
 
 
 class WorkerRecord(BaseModel):
@@ -266,8 +257,6 @@ class WorkerRecord(BaseModel):
     workspace: str
     repository: str | None = None
     generation: int = 1
-    retired_generation: int | None = None
-    workspace_state: str = "idle"
     inventory_epoch: str | None = None
     repo_workspace_limit: int = 2
     protocol_version: int

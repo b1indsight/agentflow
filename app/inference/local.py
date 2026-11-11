@@ -78,7 +78,7 @@ class _LocalConnection:
             worker_id=LOCAL_BUB_WORKER_ID, execute=False,
             workspace="0" * 32, repo_workspace_limit=1,
             inventory=[WorkspaceInventory(workspace="0" * 32, repository=None,
-                                          generation=1, state="idle", flow_id=None)],
+                                          generation=1, flow_id=None)],
             recoveries=[], inventory_complete=True,
             inference=InferenceCapability(adapter_version=ADAPTER_VERSION),
         ))

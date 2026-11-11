@@ -16,6 +16,7 @@ from app.contracts.protocol import (
     ExecutionResult,
     ExecutionStopped,
     Failed,
+    InitialTask,
     RecoveryDescriptor,
     RevisionExecutionRecord,
     StopFence,
@@ -24,7 +25,7 @@ from app.contracts.protocol import (
     terminal_digest,
 )
 from app.domain.models import JobState
-from app.worker.execution.workspaces import RepositoryWorkspaces, WorkspaceBinding
+from app.worker.execution.workspaces import WorkspaceBinding
 from app.worker.state.amp_history import AmpHistory
 from app.worker.state.files import sync_directory, write_private_record
 from app.worker.state.history import CodexHistory
@@ -270,8 +271,6 @@ class ExecutionState:
                 self.assignment = assignment
                 return previous
             raise ExecutionStateError("cannot replace unacknowledged execution evidence")
-        if previous is not None and not previous.pool_acknowledged:
-            raise ExecutionStateError("workspace acknowledgement is still pending reconciliation")
         if previous is not None and previous.job_id == assignment.job_id and (
             previous.assignment_token == assignment.assignment_token
             or previous.state != "received"
@@ -289,13 +288,7 @@ class ExecutionState:
         ):
             raise ExecutionStateError("cannot replace unacknowledged archive cleanup evidence")
         binding = (previous.workspace if previous is not None
-                   and (previous.stopped is None or archive is not None) else None)
-        if (binding is not None and archive is not None and previous is not None
-                and previous.stopped is not None and assignment.workspace == binding.slot_id
-                and assignment.generation == binding.generation + 1):
-            # Stop ACK already recycled this directory. The merged Flow keeps its
-            # original location; the pool must independently verify the cleanup witness.
-            binding = binding.model_copy(update={"generation": assignment.generation})
+                   and not isinstance(assignment.task, InitialTask) else None)
         if binding is not None and (binding.slot_id, binding.generation) != (
             assignment.workspace, assignment.generation
         ):
@@ -331,7 +324,6 @@ class ExecutionState:
             raise ExecutionStateError("stop receipt does not match owned execution")
         record.stopped = receipt
         record.acknowledged = False
-        record.pool_acknowledged = False
         record.retire_after_ack = False
         self._write(record)
 
@@ -348,7 +340,6 @@ class ExecutionState:
             self.assignment = None
             return
         record.acknowledged = True
-        record.pool_acknowledged = False
         self._write(record)
         self.assignment = None
 
@@ -444,38 +435,16 @@ class ExecutionState:
         if record.acknowledged:
             self.assignment = None
             return
-        # Keep even successful archives until the pool receipt is durable. Deleting here would
-        # strand a cleaned allocation if the process died before the following manifest write.
         record.acknowledged = True
-        record.pool_acknowledged = False
         record.retire_after_ack = record.archive_task is not None and state is JobState.DONE
         self._write(record)
         self.assignment = None
 
-    def reconcile_acknowledgement(self, workspaces: RepositoryWorkspaces) -> None:
-        """Finish ACK publication after receipt and at startup, before accepting more work.
-
-        Call after on_result_accepted/on_stop_accepted, and for every scanned Flow at startup.
-        This is idempotent across crashes before/after either durable write. Archive deletion
-        occurs last; a failed publication preserves the acknowledged journal for another try.
-        """
+    def reconcile_acknowledgement(self) -> None:
+        """Retire acknowledged archive evidence; ACKs never mutate a reusable workspace."""
         record = self.load()
         if record is None or not record.acknowledged:
             return
-        if not record.pool_acknowledged:
-            if record.state == "received" and record.stopped is None:
-                # Explicit rejection of an unstarted command has no pool execution to settle.
-                record.pool_acknowledged = True
-            else:
-                if (record.selected_repository is None or record.selected_workspace is None
-                        or record.selected_generation is None):
-                    raise ExecutionStateError("acknowledged legacy journal has no workspace target")
-                workspaces.acknowledge_target(
-                    record.selected_repository, record.flow_id, record.selected_workspace,
-                    record.selected_generation, record.job_id, record.assignment_token,
-                )
-                record.pool_acknowledged = True
-            self._write(record)
         if record.retire_after_ack:
             self.path.unlink()
             sync_directory(self.directory)
@@ -487,7 +456,6 @@ class ExecutionState:
         if record.state == "received":
             # Explicit controller rejection, not mere receipt, permits a later token to replace it.
             record.acknowledged = True
-            record.pool_acknowledged = True
             self._write(record)
             self.assignment = None
             return

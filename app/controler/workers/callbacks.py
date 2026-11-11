@@ -30,6 +30,8 @@ from app.contracts.protocol import (
     InventoryPage,
     PayloadValidationError,
     ProtocolError,
+    ProvisionError,
+    ProvisionResult,
     RecoveryDecision,
     RecoveryDescriptor,
     RecoveryRejected,
@@ -78,6 +80,8 @@ from app.persistence.stops import StopIntent, StopStore
 from app.persistence.workers import WorkerStore
 from app.telemetry.metrics import Metrics
 
+PROVISION_RETRY_SECONDS = 30.0
+
 
 class ServerCallbacks:
     """Connection-local scheduling and evidence checks; Gateway alone drives events."""
@@ -113,12 +117,14 @@ class ServerCallbacks:
         self.starting: set[int] = set()
         self.stopping: dict[int, StopIntent] = {}
         self.stopped: dict[int, StopResult] = {}
+        self.provisioning: dict[str, tuple[RepositoryDemand, float]] = {}
+        self._provision_retry_at: dict[str, float] = {}
         self._seen_workspaces: set[str] = set()
         self._seen_recoveries: set[int] = set()
         self.registered = False
         self.receive_deadline = 0.0
         self.disconnect_reason: str | None = None
-        # Critical replies are retained per invocation until the worker reports settlement.
+        # Keep recent critical replies for retries and validation errors, not occupancy.
         self._sent: dict[str, AcceptResultResponse | StopAccepted | RecoveryRejected] = {}
         self._unmatched_error_logged = False
         self._recovery_required = False
@@ -162,8 +168,13 @@ class ServerCallbacks:
 
     async def on_unmatched_reply(self, reply: ToolResult, message: WorkerMessageUnion) -> None:
         """Authorize durable replay when the original connection's receiver is gone."""
+        if isinstance(reply, ProvisionResult):
+            return  # Late/duplicate capacity results cannot complete a newer request.
         if isinstance(reply, (ConversationResult, InferenceResult)):
             return  # A timed-out query is never replayed or evidence of execution progress.
+        if isinstance(reply, StopResult):
+            await self.on_stopped(reply, message)
+            return
         # Old results can replay after another assignment starts. The payload's job_id
         # is only a lookup hint; the original call ID must match persisted credentials.
         if isinstance(reply, ExecuteResult):
@@ -200,16 +211,6 @@ class ServerCallbacks:
                 self._seen_workspaces.add(item.workspace)
             if not self.workers.report_workspace(self.worker_id, self.epoch, item):
                 raise ProtocolViolation("inventory conflicts with workspace ownership")
-            if item.settled_job_id is not None:
-                for identity, reply in list(self._sent.items()):
-                    if isinstance(reply, StopAccepted) and item.flow_id is not None:
-                        # A retained result witness cannot acknowledge a later stop
-                        # for the same job/token; stop cleanup must relinquish ownership.
-                        continue
-                    if isinstance(reply, (AcceptResultResponse, StopAccepted)) and (
-                        reply.result.job_id, reply.result.assignment_token,
-                    ) == (item.settled_job_id, item.settled_assignment_token):
-                        self._sent.pop(identity)
         if not registering:
             self.notify_jobs()
             return
@@ -281,14 +282,15 @@ class ServerCallbacks:
             if stop.job_id not in self.starting:
                 await self._begin_stop(stop)
         for job_id, (job, token, task) in list(self.preparing.items()):
-            if task.done():
+            # Claim release precedes the journal ACK. Keep same-Flow dispatch behind
+            # that ACK on this connection's ordered writer, without holding a workspace.
+            awaiting_ack = any(current.flow_id == job.flow_id for current, _, _ in self.current.values())
+            awaiting_stop = any(stop.flow_id == job.flow_id for stop in self.stopping.values())
+            if task.done() and not awaiting_ack and not awaiting_stop:
                 self.preparing.pop(job_id)
                 await self._on_prepared(job, token, task.result())
         if self.register.execute:
-            for repository in self.workers.workspace_demand(self.worker_id, self.epoch)[:MAX_PAYLOAD_ITEMS]:
-                await self._send(RepositoryDemand(
-                    **call_header(), method="worker.provision", repository=repository,
-                ))
+            await self._poll_provision()
             for _ in range(MAX_PAYLOAD_ITEMS):
                 token = uuid4().hex
                 claimed = self.workers.assign_job(self.worker_id, token, self.epoch)
@@ -306,6 +308,47 @@ class ServerCallbacks:
         if now >= self.receive_deadline:
             raise TimeoutError("worker heartbeat timeout")
         return min(self.receive_deadline, now + self.poll_interval)
+
+    async def _poll_provision(self) -> None:
+        """Bound in-flight capacity requests independently of jobs and other repositories."""
+        now = asyncio.get_running_loop().time()
+        for call, deadline in list(self.provisioning.values()):
+            if now >= deadline:
+                self._finish_provision(call, "timeout", retryable=True)
+        for repository in self.workers.workspace_demand(self.worker_id, self.epoch):
+            if len(self.provisioning) >= MAX_PAYLOAD_ITEMS:
+                break
+            if repository in self.provisioning or now < self._provision_retry_at.get(repository, 0):
+                continue
+            call = RepositoryDemand(**call_header(), method="worker.provision", repository=repository)
+            self.provisioning[repository] = call, now + self.heartbeat_timeout
+            try:
+                await self._send(call)
+            except BaseException:
+                self.provisioning.pop(repository, None)
+                raise
+
+    def _finish_provision(self, call: RepositoryDemand, error: str | None, *, retryable: bool) -> None:
+        self.routes.forget_reply(call.message_id)
+        self.provisioning.pop(call.repository, None)
+        if error is None:
+            self._provision_retry_at.pop(call.repository, None)
+        else:
+            self._provision_retry_at[call.repository] = (
+                asyncio.get_running_loop().time() + PROVISION_RETRY_SECONDS if retryable else float("inf")
+            )
+            logger.bind(event="workspace_provision_failed", worker_id=self.worker_id,
+                        repository=call.repository, reason_code=error).warning("")
+        self.session.wake()
+
+    async def on_provisioned(self, reply: ProvisionResult, message: WorkerMessageUnion) -> None:
+        call = next((call for call, _ in self.provisioning.values()
+                     if call.message_id == reply.reply_to), None)
+        if call is None:
+            return
+        if reply.repository != call.repository:
+            raise ProtocolViolation("provision result belongs to another repository")
+        self._finish_provision(call, reply.error, retryable=reply.error is ProvisionError.FILESYSTEM_ERROR)
 
     def _preparation_ready(self, task: asyncio.Task) -> None:
         if not task.cancelled():
@@ -359,6 +402,13 @@ class ServerCallbacks:
         if message.connection_epoch != self.epoch or isinstance(message, Register):
             raise ProtocolViolation("message does not match the connection epoch")
         if isinstance(message, (Heartbeat, HeartbeatHeaders)):
+            if any(
+                isinstance(reply, StopAccepted)
+                and (reply.result.job_id, reply.result.assignment_token)
+                == (message.job_id, message.assignment_token)
+                for reply in self._sent.values()
+            ):
+                return True  # An already-built heartbeat batch may outlive its confirmed stop.
             job = self.jobs.get_job(message.job_id)
             if (job is not None and job.state in {JobState.DONE, JobState.FAILED}
                     and job.result_applied_at is not None
@@ -526,7 +576,9 @@ class ServerCallbacks:
         receipt = item.result
         stop = self.stopping.get(receipt.job_id)
         if stop is None:
-            raise ProtocolViolation("unexpected stop receipt")
+            stop = self.stops.receipt_request(self.worker_id, receipt.request_id)
+            if stop is None or stop.state != "confirmed":
+                raise ProtocolViolation("unexpected stop receipt")
         fence = stop.fence()
         if (
             item.reply_to != stop_call_id(fence)
@@ -536,12 +588,21 @@ class ServerCallbacks:
             or not self.stops.confirm(self.worker_id, receipt, self.epoch)
         ):
             raise ProtocolViolation("stop blocked: receipt or external effects not converged")
+        self.stopping[receipt.job_id] = stop
         self.stopped[receipt.job_id] = item
 
     async def on_accept_stop(self, item: AcceptStop, message: WorkerMessageUnion) -> None:
         args = item.arguments
         stop, stopped = self.stopping.get(args.job_id), self.stopped.get(args.job_id)
         if stop is None or stopped is None:
+            previous = self._sent.get(item.message_id)
+            if (
+                isinstance(previous, StopAccepted)
+                and item.message_id == accept_stop_id(args.receipt_id)
+                and previous.result.model_dump() == args.model_dump(exclude={"receipt_id"})
+            ):
+                await self._send(previous)
+                return
             raise ProtocolViolation("stop acceptance requires an actual validated receipt")
         fence = stop.fence()
         if (
@@ -641,7 +702,7 @@ class ServerCallbacks:
         critical = False
         replies: list[ToolResult] = []
         for item in message.payload:
-            if isinstance(item, ToolResult) and item.method in {"worker.history", "worker.infer"}:
+            if isinstance(item, ToolResult) and item.method in {"worker.history", "worker.infer", "worker.provision"}:
                 replies.append(item)
                 continue
             if item.method in {
@@ -725,28 +786,40 @@ class ServerCallbacks:
         )
 
     async def _send(self, item: ServerPayload) -> bool:
-        previous = self._sent.get(item.message_id)
+        identity = item.reply_to if isinstance(item, ToolResult) else item.message_id
+        previous = self._sent.get(identity)
         tracked = isinstance(item, (AcceptResultResponse, StopAccepted, RecoveryRejected))
-        if isinstance(item, (AcceptResultResponse, StopAccepted, RecoveryRejected)):
-            self._sent[item.message_id] = item
+        if tracked:
+            if previous is not None:
+                item = previous
+            else:
+                assert isinstance(item, (AcceptResultResponse, StopAccepted, RecoveryRejected))
+                self._sent[identity] = item
+                if len(self._sent) > MAX_PAYLOAD_ITEMS * 2:
+                    self._sent.pop(next(iter(self._sent)))
         if isinstance(item, Assignment):
             self.routes.expect_reply(item, ExecuteResult, self.on_result)
         elif isinstance(item, StopExecution):
             self.routes.expect_reply(item, StopResult, self.on_stopped)
         elif isinstance(item, InferenceRequest):
             self.routes.expect_reply(item, InferenceResult, self.on_inference_result)
+        elif isinstance(item, RepositoryDemand):
+            self.routes.expect_reply(
+                item, ProvisionResult, self.on_provisioned,
+                on_rejected=lambda _: self._finish_provision(item, "invalid_response", retryable=False),
+            )
         try:
             return await self.session.send(
                 ServerMessage(**message_header(self.epoch), control=None, payload=[item])
             )
         except BaseException:
-            if isinstance(item, (Assignment, StopExecution, InferenceRequest)):
+            if isinstance(item, (Assignment, StopExecution, InferenceRequest, RepositoryDemand)):
                 self.routes.forget_reply(item.message_id)
             if tracked:
                 if previous is None:
-                    self._sent.pop(item.message_id, None)
+                    self._sent.pop(identity, None)
                 else:
-                    self._sent[item.message_id] = previous
+                    self._sent[identity] = previous
             raise
 
     async def _on_prepared(self, job: Job, token: str,

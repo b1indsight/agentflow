@@ -167,7 +167,7 @@ def workers() -> None:
                 binding = bindings.get(workspace.workspace)
                 typer.echo(
                     f"  {workspace.workspace}\tgeneration={workspace.generation}"
-                    f"\trepo={workspace.repository or '-'}\tstate={workspace.workspace_state}"
+                    f"\trepo={workspace.repository or '-'}"
                     f"\tjob={workspace.current_job_id or workspace.current_inference_job_id or '-'}"
                     f"\tflow={binding.flow_id if binding else '-'}"
                 )

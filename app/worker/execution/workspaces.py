@@ -1,7 +1,7 @@
-"""Worker-local bounded repository locations with durable ownership and release fencing.
+"""Worker-owned directories; the controller assigns generations and the runtime fences writers.
 
-The runtime holds WorkerRootLock for this component's entire lifetime. An assignment ending
-does not free a location: archive or a stopped execution must present the journaled binding.
+The runtime holds WorkerRootLock and proves the previous executor has stopped before accepting
+a newer allocation. Filesystem failures are operation results, never persistent slot states.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, model_validator
 
+from app.contracts.protocol import ProvisionError
 from app.domain.models import WorkspaceInventory
 from app.worker.execution.vcs import (
     VcsVerificationError,
@@ -30,6 +31,14 @@ from app.worker.execution.vcs import (
 from app.worker.state.files import sync_directory, write_private_record
 
 Cleanup = Literal["released", "removed", "already_absent"]
+
+
+class RepositoryProvisionError(VcsVerificationError):
+    """A local capacity refusal that does not invalidate the shared worker manifest."""
+
+    def __init__(self, code: ProvisionError, message: str) -> None:
+        super().__init__("workspace", message)
+        self.code = code
 
 
 class WorkspaceBinding(BaseModel):
@@ -52,15 +61,10 @@ class WorkspaceSlot(BaseModel):
     binding: WorkspaceBinding | None = None
     relative_path: str
     kind: Literal["copy", "worktree"]
-    state: Literal["preparing", "occupied", "idle", "releasing", "absent", "quarantined"]
     directory_identity: tuple[int, int] | None = None
+    # Exact destructive-operation intent, persisted only after physical ownership checks.
     release_job_id: int | None = None
     release_assignment_token: str | None = None
-    release_recycle: bool | None = None
-    settled_job_id: int | None = None
-    settled_assignment_token: str | None = None
-    settled_generation: int | None = None
-    settled_flow_id: int | None = None
 
     @model_validator(mode="after")
     def _fences(self) -> Self:
@@ -68,12 +72,8 @@ class WorkspaceSlot(BaseModel):
             self.binding.slot_id, self.binding.repository, self.binding.generation
         ) != (self.slot_id, self.repository, self.generation):
             raise ValueError("workspace binding does not match inventory")
-        if self.state in {"occupied", "releasing"} and self.binding is None:
-            raise ValueError("active workspace has no Flow binding")
         if (self.release_job_id is None) != (self.release_assignment_token is None):
             raise ValueError("incomplete release receipt fence")
-        if (self.settled_job_id is None) != (self.settled_assignment_token is None):
-            raise ValueError("incomplete settled receipt")
         return self
 
 
@@ -85,7 +85,7 @@ class InferenceWorkspace(BaseModel):
 
 class WorkspaceManifest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    version: Literal[2] = 2
+    version: Literal[3] = 3
     worker_id: str
     root_identity: tuple[str, int, int]
     inference: InferenceWorkspace | None = None
@@ -124,7 +124,7 @@ class RepositoryWorkspaces:
 
     Provisioning needs no credentials or Flow. Claiming never selects a replacement location.
     Manifest transactions contain no awaits; only seed/worktree operations share a repository
-    lock. Cleanup and its ACK are separate durable facts, fenced by allocation and execution.
+    lock. Business acknowledgements never modify directories or allocation fences.
     """
 
     def __init__(self, root: Path, worker_id: str, *, limit: int = 2):
@@ -174,7 +174,7 @@ class RepositoryWorkspaces:
                     slots=[WorkspaceSlot(
                         slot_id=s.binding.slot_id, repository=s.binding.repository,
                         generation=s.binding.generation, binding=s.binding,
-                        relative_path=s.relative_path, kind=s.kind, state=s.state,
+                        relative_path=s.relative_path, kind=s.kind,
                     ) for s in old.slots],
                 )
         except (OSError, ValueError, ValidationError) as error:
@@ -224,7 +224,7 @@ class RepositoryWorkspaces:
             self._write(manifest)
         self._verify_inference(manifest)
         return WorkspaceInventory(workspace=inference.slot_id, repository=None,
-                                  generation=1, state="idle", flow_id=None)
+                                  generation=1, flow_id=None)
 
     def _verify_inference(self, manifest: WorkspaceManifest) -> Path:
         inference = manifest.inference
@@ -243,77 +243,87 @@ class RepositoryWorkspaces:
         path = self._managed(Path(slot.relative_path))
         if not path.exists():
             raise VcsVerificationError("workspace", "repository workspace is missing")
-        if (slot.directory_identity is not None
-                and self._directory_identity(path) != slot.directory_identity):
+        if (slot.directory_identity is None
+                or self._directory_identity(path) != slot.directory_identity):
             raise VcsVerificationError("workspace", "workspace directory identity changed")
         return path
 
     def inventory(self) -> list[WorkspaceInventory]:
-        """Report all evidence; cleaned but unacknowledged locations remain unavailable."""
+        """Report registered identities without turning transient IO failures into pool state.
+
+        A removed archive still has an allocation record. Only an unfinished provisioning
+        attempt with no binding or proven directory is omitted; it is retried in place.
+        """
         manifest = self._load()
         self._verify_inference(manifest)
         assert manifest.inference is not None
         items = [WorkspaceInventory(workspace=manifest.inference.slot_id, repository=None,
-                                    generation=1, state="idle", flow_id=None)]
-        changed = False
+                                    generation=1, flow_id=None)]
         for slot in manifest.slots:
-            if slot.state not in {"quarantined", "preparing", "releasing"}:
-                try:
-                    if slot.state == "absent":
-                        if self._managed(Path(slot.relative_path)).exists():
-                            raise VcsVerificationError("workspace", "absent workspace unexpectedly exists")
-                    else:
-                        self._verify_slot(slot)
-                except VcsVerificationError:
-                    slot.state = "quarantined"
-                    changed = True
-            state = slot.state
-            if slot.binding is not None and state in {"idle", "absent"}:
-                state = "releasing"
+            if slot.directory_identity is None and slot.binding is None:
+                continue
             items.append(WorkspaceInventory(
                 workspace=slot.slot_id, repository=slot.repository, generation=slot.generation,
-                state=state, flow_id=slot.binding.flow_id if slot.binding is not None else None,
-                settled_job_id=slot.settled_job_id,
-                settled_assignment_token=slot.settled_assignment_token,
+                flow_id=slot.binding.flow_id if slot.binding is not None else None,
             ))
-        if changed:
-            self._write(manifest)
         return items
+
+    def _materialize(self, slot: WorkspaceSlot) -> Path:
+        """Create only an explicitly unmaterialized location, never adopt existing contents."""
+        if slot.directory_identity is not None:
+            return self._verify_slot(slot)
+        path = self._managed(Path(slot.relative_path))
+        if path.exists():
+            raise VcsVerificationError("workspace", "unregistered workspace unexpectedly exists")
+        path.mkdir(parents=True, mode=0o700)
+        slot.directory_identity = self._directory_identity(path)
+        sync_directory(path.parent)
+        return path
 
     async def provision(self, repository: str) -> list[WorkspaceInventory]:
         """Register empty concrete directories up to this repository's configured quota."""
-        owner, name = validate_repository(repository)
+        try:
+            owner, name = validate_repository(repository)
+        except VcsVerificationError as error:
+            raise RepositoryProvisionError(ProvisionError.INVALID_REPOSITORY, str(error)) from error
         self.initialize()
         manifest = self._load()
+        # Shared root/manifest failures remain fatal. Only this repository's operations
+        # below may become an ordinary capacity result on the shared connection.
+        self._managed(Path("workspaces"))
         slots = [s for s in manifest.slots if s.repository == repository]
-        directory = self._managed(Path("workspaces", owner, name))
         known = {s.slot_id for s in slots}
-        if directory.exists() and any(p.name not in known for p in directory.iterdir()):
-            raise VcsVerificationError("workspace", "unregistered repository workspace; refusing adoption")
-        # No awaits in this transaction: concurrent demand cannot over-provision the quota.
-        while sum(s.state != "absent" for s in slots) < self.limit:
-            slot = next((s for s in slots if s.state == "absent" and s.binding is None), None)
-            if slot is None:
+        try:
+            directory = self._managed(Path("workspaces", owner, name))
+            if directory.exists() and any(p.name not in known for p in directory.iterdir()):
+                raise VcsVerificationError("workspace", "unregistered repository workspace; refusing adoption")
+        except VcsVerificationError as error:
+            raise RepositoryProvisionError(ProvisionError.WORKSPACE_CONFLICT, str(error)) from error
+        except OSError as error:
+            raise RepositoryProvisionError(ProvisionError.FILESYSTEM_ERROR, "repository directory unavailable") from error
+        # Failed creation reserves its ID, not a permanent failure state or an extra slot.
+        # No awaits in this transaction: concurrent demands cannot over-provision.
+        for index in range(max(len(slots), self.limit)):
+            if index == len(slots):
                 slot_id = uuid4().hex
                 slot = WorkspaceSlot(
                     slot_id=slot_id, repository=repository, generation=1,
                     relative_path=str(Path("workspaces", owner, name, slot_id)),
                     kind="worktree" if any(s.kind == "copy" for s in slots) else "copy",
-                    state="preparing",
                 )
                 slots.append(slot)
                 manifest.slots.append(slot)
-            path = self._managed(Path(slot.relative_path))
-            if path.exists():
-                slot.state = "quarantined"
                 self._write(manifest)
-                raise VcsVerificationError("workspace", "absent workspace unexpectedly exists")
-            slot.state = "preparing"
-            self._write(manifest)
-            path.mkdir(parents=True, mode=0o700)
-            sync_directory(path.parent)
-            slot.directory_identity = self._directory_identity(path)
-            slot.state = "idle"
+            else:
+                slot = slots[index]
+            if slot.binding is not None:
+                continue
+            try:
+                self._materialize(slot)
+            except VcsVerificationError as error:
+                raise RepositoryProvisionError(ProvisionError.WORKSPACE_CONFLICT, str(error)) from error
+            except OSError as error:
+                raise RepositoryProvisionError(ProvisionError.FILESYSTEM_ERROR, "workspace creation failed") from error
             self._write(manifest)
         return self.inventory()
 
@@ -332,17 +342,11 @@ class RepositoryWorkspaces:
         slots = [slot for slot in self._load().slots
                  if slot.binding is not None
                  and (slot.repository, slot.binding.flow_id) == (repository, flow_id)]
-        if len(slots) != 1 or slots[0].state != "occupied":
-            raise VcsVerificationError("workspace", "original workspace binding is missing or unsettled")
+        if len(slots) != 1:
+            raise VcsVerificationError("workspace", "original workspace binding is missing")
         require_repository(self._verify_slot(slots[0]))
         assert slots[0].binding is not None
         return slots[0].binding
-
-    def assert_unallocated(self, flow_id: int) -> None:
-        """A missing journal binding must not hide an unfinished pool allocation."""
-        if any(slot.binding is not None and slot.binding.flow_id == flow_id
-               for slot in self._load().slots):
-            raise VcsVerificationError("workspace", "unjournaled workspace requires manual recovery")
 
     def _repository_lock(self, repository: str) -> asyncio.Lock:
         return self._repository_locks.setdefault(repository, asyncio.Lock())
@@ -360,40 +364,35 @@ class RepositoryWorkspaces:
             raise VcsVerificationError("bootstrap", "invalid task remote")
         manifest = self._load()
         slot = next((s for s in manifest.slots if s.slot_id == workspace), None)
-        if slot is None or (slot.repository, slot.generation) != (repository, generation):
+        if slot is None or slot.repository != repository or generation < slot.generation:
             raise VcsVerificationError("workspace", "assigned workspace identity or generation mismatch")
         binding = WorkspaceBinding(repository=repository, slot_id=workspace,
                                    flow_id=flow_id, generation=generation)
-        if slot.binding == binding and slot.state == "occupied":
-            require_repository(self._verify_slot(slot))
-            return binding
-        if slot.binding is not None or slot.state != "idle":
-            raise VcsVerificationError("workspace", f"assigned workspace is {slot.state} or still bound")
-        if any(s.binding is not None and s.binding.flow_id == flow_id for s in manifest.slots):
-            raise VcsVerificationError("workspace", "Flow already owns another workspace")
-        path = self._verify_slot(slot)
-        slot.binding, slot.state = binding, "preparing"
+        if slot.binding is not None and slot.binding != binding and generation == slot.generation:
+            raise VcsVerificationError("workspace", "assigned workspace is still bound")
+        if slot.binding == binding and slot.directory_identity is not None:
+            path = self._verify_slot(slot)
+            if any(path.iterdir()):
+                require_repository(path)
+                return binding
+        # A failed bootstrap can leave an owned empty directory or a removed partial copy.
+        # Retry preparation in place; a populated existing repository keeps its Flow's edits.
+        for previous in manifest.slots:
+            if previous.slot_id != workspace and previous.binding is not None and previous.binding.flow_id == flow_id:
+                # Runtime has joined/validated this Flow before accepting its new INITIAL.
+                previous.binding = None
+        if generation > slot.generation:
+            slot.release_job_id = slot.release_assignment_token = None
+        slot.binding, slot.generation = binding, generation
+        self._write(manifest)
+        path = self._materialize(slot)
         self._write(manifest)
         # The seed and its worktree registry are shared; the manifest and independent repos are not.
-        try:
-            async with self._repository_lock(repository):
-                await self._prepare(binding, slot.kind, path, owner, name,
-                                    base_branch, remote, push_token)
-            manifest = self._load()
-            slot = self._owned(manifest, binding)
-            if slot.state != "preparing":
-                raise VcsVerificationError("workspace", "workspace preparation fence changed")
-            slot.directory_identity = self._directory_identity(self.path(binding))
-            slot.state = "occupied"
-            self._write(manifest)
-            return binding
-        except BaseException:
-            manifest = self._load()
-            slot = self._owned(manifest, binding)
-            if slot.state == "preparing":
-                slot.state = "quarantined"
-                self._write(manifest)
-            raise
+        async with self._repository_lock(repository):
+            await self._prepare(binding, slot.kind, path, owner, name,
+                                base_branch, remote, push_token)
+        self._verify_slot(self._owned(self._load(), binding))
+        return binding
 
     async def _prepare(
         self, binding: WorkspaceBinding, kind: Literal["copy", "worktree"], path: Path,
@@ -418,12 +417,15 @@ class RepositoryWorkspaces:
                     copying = False
                 if (path / ".git").is_file():
                     raise VcsVerificationError("workspace", "full copy has external Git metadata")
+                await clean_repository(path)
                 await align_repository(path, seed, base_branch)
             except BaseException:
                 if copying:
                     self._verify_slot(self._owned(self._load(), binding))
                     await filesystem_operation(shutil.rmtree, path)
-                # Failed/unknown preparation stays quarantined, even if no checkout remains.
+                    manifest = self._load()
+                    self._owned(manifest, binding).directory_identity = None
+                    self._write(manifest)
                 raise
         else:
             if not (seed / ".git").is_dir():
@@ -432,105 +434,60 @@ class RepositoryWorkspaces:
                 await _required_stdout("workspace", "git", "worktree", "add", "--detach",
                                        str(path), f"refs/heads/{base_branch}", cwd=seed)
             else:
-                await require_idle_repository(path)
+                await self._verify_worktree(path, seed)
+                await clean_repository(path)
                 await _required_stdout("workspace", "git", "checkout", "--no-overwrite-ignore",
                                        "--detach", f"refs/heads/{base_branch}", cwd=path)
 
-    async def release(
-        self, binding: WorkspaceBinding, *, job_id: int, token: str, recycle: bool = False,
-    ) -> Cleanup:
-        """Clean only this execution's allocation; its matching ACK later enables reuse.
+    async def release(self, binding: WorkspaceBinding, *, job_id: int, token: str) -> Cleanup:
+        """Perform the archive's cleanup without changing controller-owned allocation.
 
-        The receipt fence is required because an earlier job's ACK can have the same binding.
-        A retry after a failed archive may replace it only after that failure was acknowledged.
+        The operation intent authorizes replay after worktree removal, including a crash
+        before the result was journaled. It never authorizes reuse or clears a binding.
         """
         if job_id <= 0 or not token:
             raise ValueError("release requires a job and assignment token")
-        async with self._release_locks.setdefault(binding.slot_id, asyncio.Lock()):
-            manifest = self._load()
-            cleaned = next((s for s in manifest.slots if s.slot_id == binding.slot_id), None)
-            if (not recycle and cleaned is not None and cleaned.binding is None
-                    and cleaned.state == "idle" and cleaned.repository == binding.repository
-                    and cleaned.generation == binding.generation
-                    and cleaned.settled_generation == binding.generation - 1
-                    and cleaned.settled_flow_id == binding.flow_id
-                    and cleaned.settled_job_id is not None and job_id > cleaned.settled_job_id):
-                # A merge may arrive during stop settlement. Only the same Flow's
-                # acknowledged, physically unchanged directory can resume archive cleanup.
-                require_repository(self._verify_slot(cleaned))
-                cleaned.binding, cleaned.state = binding, "occupied"
-                self._write(manifest)
-            slot = self._owned(manifest, binding)
-            if ((slot.settled_generation, slot.settled_flow_id) == (binding.generation, binding.flow_id)
-                    and slot.settled_job_id is not None
-                    and job_id < slot.settled_job_id):
-                raise VcsVerificationError("workspace", "stale cleanup execution")
-            previous_release = (slot.release_job_id, slot.release_assignment_token)
-            if previous_release not in {(None, None), (job_id, token)} and previous_release != (
-                slot.settled_job_id, slot.settled_assignment_token
-            ):
-                raise VcsVerificationError("workspace", "release receipt does not match pending cleanup")
-            if slot.release_recycle is not None and slot.release_recycle != recycle:
-                raise VcsVerificationError("workspace", "release mode does not match pending cleanup")
-            if slot.state not in {"occupied", "releasing", "idle", "absent"}:
-                raise VcsVerificationError("workspace", f"workspace is {slot.state}; manual recovery required")
-            was_releasing = slot.state == "releasing"
-            slot.release_job_id, slot.release_assignment_token = job_id, token
-            slot.release_recycle = recycle
-            self._write(manifest)
-            if slot.state in {"idle", "absent"}:
-                if slot.state == "idle":
-                    require_repository(self._verify_slot(slot))
-                    return "released"
-                if self.path(binding).exists():
-                    raise VcsVerificationError("workspace", "released workspace unexpectedly exists")
-                return "already_absent"
-            try:
-                async with self._repository_lock(binding.repository):
-                    return await self._clean(binding, recycle=recycle, was_releasing=was_releasing)
-            except VcsVerificationError:
-                manifest = self._load()
-                slot = self._owned(manifest, binding)
-                if slot.state != "releasing":
-                    slot.state = "quarantined"
-                    self._write(manifest)
-                raise
+        async with (
+            self._release_locks.setdefault(binding.slot_id, asyncio.Lock()),
+            self._repository_lock(binding.repository),
+        ):
+            return await self._clean(binding, job_id, token)
 
-    async def _clean(
-        self, binding: WorkspaceBinding, *, recycle: bool, was_releasing: bool,
-    ) -> Cleanup:
+    async def _verify_worktree(self, path: Path, seed: Path) -> None:
+        common = await _required_stdout(
+            "workspace", "git", "rev-parse", "--path-format=absolute", "--git-common-dir", cwd=path,
+        )
+        if Path(common) != seed / ".git" or not await worktree_registered(seed, path):
+            raise VcsVerificationError("workspace", "worktree ownership does not match seed")
+
+    async def _clean(self, binding: WorkspaceBinding, job_id: int, token: str) -> Cleanup:
         slot = self._owned(self._load(), binding)
+        if slot.release_job_id is not None and (
+            job_id < slot.release_job_id
+            or (job_id == slot.release_job_id and token != slot.release_assignment_token)
+        ):
+            raise VcsVerificationError("workspace", "stale cleanup execution")
         path = self.path(binding)
         seed = self._managed(Path("repos", *validate_repository(binding.repository)))
         cleanup: Cleanup
         if not path.exists():
-            if (recycle or not was_releasing or slot.kind != "worktree"
+            if (slot.release_job_id is None or slot.kind != "worktree"
                     or await worktree_registered(seed, path)):
                 raise VcsVerificationError("workspace", "repository missing without release evidence")
             cleanup = "already_absent"
         else:
             self._verify_slot(slot)
-            if recycle:
-                require_repository(path)
-            else:
-                await require_idle_repository(path)
+            await require_idle_repository(path)
             if slot.kind == "copy" and (path / ".git").is_file():
                 raise VcsVerificationError("workspace", "full copy has external Git metadata")
             if slot.kind == "worktree":
-                common = await _required_stdout(
-                    "workspace", "git", "rev-parse", "--path-format=absolute", "--git-common-dir",
-                    cwd=path,
-                )
-                if Path(common) != seed / ".git" or not await worktree_registered(seed, path):
-                    raise VcsVerificationError("workspace", "worktree ownership does not match seed")
+                await self._verify_worktree(path, seed)
             manifest = self._load()
             slot = self._owned(manifest, binding)
             self._verify_slot(slot)
-            slot.state = "releasing"
+            slot.release_job_id, slot.release_assignment_token = job_id, token
             self._write(manifest)
-            if recycle:
-                await clean_repository(path)
-            if slot.kind == "copy" or recycle:
+            if slot.kind == "copy":
                 cleanup = "released"
             else:
                 # Cleanliness was checked separately; --force permits deleting ignored caches.
@@ -539,76 +496,8 @@ class RepositoryWorkspaces:
                 cleanup = "removed"
         manifest = self._load()
         slot = self._owned(manifest, binding)
-        if slot.state != "releasing":
-            raise VcsVerificationError("workspace", "workspace release fence changed")
-        slot.state = "idle" if cleanup == "released" else "absent"
+        slot.release_job_id, slot.release_assignment_token = job_id, token
+        if cleanup != "released":
+            slot.directory_identity = None
         self._write(manifest)
         return cleanup
-
-    @staticmethod
-    def _settle(slot: WorkspaceSlot, binding: WorkspaceBinding, job_id: int, token: str) -> None:
-        if job_id <= 0 or not token:
-            raise ValueError("acknowledgement requires a job and assignment token")
-        if ((slot.settled_generation, slot.settled_flow_id) == (binding.generation, binding.flow_id)
-                and slot.settled_job_id is not None and (
-                    job_id < slot.settled_job_id
-                    or (job_id == slot.settled_job_id and token != slot.settled_assignment_token)
-                )):
-            raise VcsVerificationError("workspace", "stale execution acknowledgement")
-        slot.settled_job_id, slot.settled_assignment_token = job_id, token
-        slot.settled_generation, slot.settled_flow_id = binding.generation, binding.flow_id
-
-    def acknowledge_target(
-        self, repository: str, flow_id: int, workspace: str, generation: int, job_id: int, token: str,
-    ) -> None:
-        """Settle a journal's exact target, including failure before claim/bind completed.
-
-        An unbound location may record a receipt, never acquire a Flow or advance a generation.
-        If claim did establish ownership, use the identical binding fence, including quarantine.
-        A location owned by another Flow or generation is never changed by this reconciliation.
-        """
-        validate_repository(repository)
-        binding = WorkspaceBinding(repository=repository, flow_id=flow_id,
-                                   slot_id=workspace, generation=generation)
-        manifest = self._load()
-        slot = next((s for s in manifest.slots if s.slot_id == workspace), None)
-        if slot is None or slot.repository != repository:
-            raise VcsVerificationError("workspace", "acknowledged workspace identity mismatch")
-        if slot.binding is not None or slot.generation != generation:
-            self.acknowledge(binding, job_id, token)
-            return
-        if slot.state not in {"idle", "absent", "quarantined"}:
-            raise VcsVerificationError("workspace", "unbound workspace is not settled")
-        self._settle(slot, binding, job_id, token)
-        self._write(manifest)
-
-    def acknowledge(self, binding: WorkspaceBinding, job_id: int, token: str) -> None:
-        """Record a journal-validated ACK; retire only successfully cleaned allocations."""
-        if job_id <= 0 or not token:
-            raise ValueError("acknowledgement requires a job and assignment token")
-        manifest = self._load()
-        slot = next((s for s in manifest.slots if s.slot_id == binding.slot_id), None)
-        if (slot is not None and slot.binding is None
-                and slot.repository == binding.repository
-                and slot.generation == binding.generation + 1
-                and slot.settled_flow_id == binding.flow_id
-                and (slot.settled_job_id, slot.settled_assignment_token) == (job_id, token)):
-            return  # Replayed ACK after an interrupted caller-side retirement.
-        slot = self._owned(manifest, binding)
-        if slot.release_job_id is not None and (
-            slot.release_job_id, slot.release_assignment_token
-        ) != (job_id, token):
-            raise VcsVerificationError("workspace", "acknowledgement does not match release receipt")
-        self._settle(slot, binding, job_id, token)
-        if slot.state in {"idle", "absent"}:
-            if slot.release_job_id is None:
-                raise VcsVerificationError("workspace", "cleanup has no execution receipt fence")
-            if slot.state == "idle":
-                self._verify_slot(slot)
-            elif self.path(binding).exists():
-                raise VcsVerificationError("workspace", "released workspace unexpectedly exists")
-            slot.generation += 1
-            slot.binding = None
-            slot.release_job_id = slot.release_assignment_token = None
-            slot.release_recycle = None
-        self._write(manifest)

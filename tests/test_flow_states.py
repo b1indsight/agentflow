@@ -55,8 +55,8 @@ async def test_failed_initial_round_stops_workspace_before_resume(
     recording_resources,
     monkeypatch,
 ):
-    # A failed INITIAL has an acknowledged journal but can still own a dirty checkout.
-    # Exercise the real stop/recycle path, then create and push both retained round refs.
+    # A failed INITIAL retains dirty files. Stop proves writer exit, while the next
+    # controller generation prepares the checkout and preserves both round refs.
     from app.contracts.protocol import (
         PROTOCOL_VERSION,
         AssignmentArguments,
@@ -128,7 +128,7 @@ async def test_failed_initial_round_stops_workspace_before_resume(
     )
     assert await subject.results.apply(job.id) is JobState.FAILED
     state.acknowledge(job.id, JobState.FAILED)
-    state.reconcile_acknowledgement(pool)
+    state.reconcile_acknowledgement()
     for item in pool.inventory():
         assert store.workers.report_workspace("worker-a", "epoch", item)
     assert store.workers.get_flow_execution(flow.id).released_at is None
@@ -149,8 +149,14 @@ async def test_failed_initial_round_stops_workspace_before_resume(
     owner = WorkerExecution(worker_id="worker-a", executor=executor, state=state)
     receipt = await owner.stop(stop.fence())
     assert store.stops.confirm("worker-a", receipt, "epoch")
+    assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
+    assert (workspace / "README.md").read_text() == "unfinished old-round changes"
+    assert (workspace / "unfinished.txt").exists()
+    assert pool.lookup(flow.repo, flow.id) == binding
+    assert next(w for w in store.workers.list_workspaces("worker-a")
+                if w.workspace == job.workspace).generation == binding.generation + 1
     owner.on_stop_accepted(stop.fence())
-    state.reconcile_acknowledgement(pool)
+    state.reconcile_acknowledgement()
     for item in pool.inventory():
         assert store.workers.report_workspace("worker-a", "epoch", item)
     assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED

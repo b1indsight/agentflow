@@ -467,9 +467,6 @@ async def test_owner_collects_late_completion_without_restarting(
                 session_id="session-1", last_message="push-secret", exit_code=0
             )
 
-        async def reclaim_workspace(self) -> None:
-            raise AssertionError("no stop requested")
-
     state, executor = Journal(tmp_path, 3), Executor()
     owner = WorkerExecution(worker_id="worker", executor=executor, state=state)
     assignment = _assignment()
@@ -573,25 +570,30 @@ async def test_owner_reuses_tool_future_and_matches_original_item(tmp_path: Path
 
 
 async def test_registration_result_is_withheld_during_stop_and_shutdown(tmp_path: Path) -> None:
-    # A late result acceptance must not retire a durable stop or its still-running cleanup.
+    # A disconnected stop observer cannot abandon the join or accept a late result during it.
     state = ExecutionState(tmp_path, 3)
     executor = Mock(spec=TaskExecutor)
-    cleaning, release = asyncio.Event(), asyncio.Event()
+    entered, joining, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
-    async def reclaim() -> None:
-        cleaning.set()
-        await release.wait()
+    async def execute(*args, **kwargs):
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            joining.set()
+            await release.wait()
 
-    executor.reclaim_workspace.side_effect = reclaim
-    state.record_received(_assignment())
-    state.record_started()
-    terminal = state.complete(RuntimeError("failed offline"))
+    executor.execute.side_effect = execute
     owner = WorkerExecution(worker_id="worker", executor=executor, state=state)
-    assert owner.result_for_registration() == terminal
+    owner.receive(_assignment())
+    owner.start()
+    await asyncio.wait_for(entered.wait(), 1)
     fence = StopFence(request_id="stop", flow_id=3, job_id=5, assignment_token="assignment-1")
     observer = asyncio.create_task(owner.stop(fence))
     try:
-        await asyncio.wait_for(cleaning.wait(), 1)
+        await asyncio.wait_for(joining.wait(), 1)
+        record = state.load()
+        assert record is not None and record.stopped is None and owner.may_modify_workspace()
         observer.cancel()
         with pytest.raises(asyncio.CancelledError):
             await observer
@@ -605,7 +607,9 @@ async def test_registration_result_is_withheld_during_stop_and_shutdown(tmp_path
         release.set()
         receipt = await owner.stop(StopFence.model_validate(fence.model_dump()))
         assert await owner.stop(fence) is receipt
-        executor.reclaim_workspace.assert_awaited_once()
+        executor.execute.assert_awaited_once()
+        record = state.load()
+        assert record is not None and record.stopped == receipt and not owner.may_modify_workspace()
         restarted = WorkerExecution(
             worker_id="worker", executor=executor, state=ExecutionState(tmp_path, 3)
         )

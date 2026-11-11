@@ -19,7 +19,6 @@ from app.persistence.store import Store
 from tests.github import RecordingGitHub
 from tests.test_coordinator import coordinator
 from tests.test_workflow_transactions import accepted_coding
-from tests.workspace_fixtures import report_settled
 
 
 def merge_payload(flow: Flow) -> dict:
@@ -167,8 +166,6 @@ async def test_merge_retires_review_but_waits_for_running_result(store, recordin
     assert github.comments == []
     assert store.flows.get_flow(flow.id).state is FlowState.FINALIZING
     assert store.deliveries.get_delivery(flow.id).state is DeliveryState.MERGED
-    assert store.workers.assign_job("worker-a", "before-ack", "epoch-a") is None
-    report_settled(store, job.id, epoch="epoch-a")
     archive = store.workers.assign_job("worker-a", "archive-token", "epoch-a")
     assert archive is not None and archive.kind is JobKind.ARCHIVE
     assert [j.id for j in store.jobs.list_jobs(flow.id) if j.kind is JobKind.REVISION] == [job.id]
@@ -183,6 +180,5 @@ async def test_merge_retires_review_but_waits_for_running_result(store, recordin
         message,
     ) == "pending"
     assert await subject.results.apply(archive.id) is JobState.DONE
-    report_settled(store, archive.id, epoch="epoch-a")
     assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
     assert store.flows.get_flow(flow.id).archive_reason is ArchiveReason.SUCCEEDED

@@ -163,6 +163,15 @@ class Database:
                         "legacy worker schema: explicit workspace migration required; stop consumers"
                         " and reconcile real worker-root workspace identities before upgrading"
                     )
+                obsolete = connection.execute(
+                    "SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema()"
+                    " AND table_name='workers' AND column_name IN ('workspace_state','retired_generation')"
+                ).fetchone()
+                if obsolete is not None:
+                    raise ValueError(
+                        "obsolete workspace state schema: this unreleased schema requires explicit"
+                        " reconciliation before upgrading; automatic migration is not supported"
+                    )
             existing = connection.execute("SELECT to_regclass('flows') AS name").fetchone()
             if existing is not None and existing["name"]:
                 columns = connection.execute(

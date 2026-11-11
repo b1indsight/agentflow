@@ -1,9 +1,8 @@
-"""Concrete inventory ownership, concurrency, and terminal ACK fences on PostgreSQL."""
+"""Concrete inventory, controller generations, and writer fences on PostgreSQL."""
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from threading import Barrier
-from typing import Literal
 from uuid import NAMESPACE_URL, uuid5
 
 import psycopg
@@ -31,14 +30,14 @@ def connect(store: Store, worker: str, limit: int = 2, epoch: str = "epoch") -> 
         worker, PROTOCOL_VERSION, epoch, workspace=identity(worker + ":default"), repo_workspace_limit=limit,
     )
     assert store.workers.report_workspace(worker, epoch, WorkspaceInventory(
-        workspace=identity(worker + ":default"), repository=None, generation=1, state="idle", flow_id=None,
+        workspace=identity(worker + ":default"), repository=None, generation=1, flow_id=None,
     ))
 
 
 def inventory(worker: str, index: int = 0, repo: str = "owner/repo", **changes) -> WorkspaceInventory:
     return WorkspaceInventory.model_validate({
         "workspace": identity(f"{worker}:{repo}:{index}"), "repository": repo,
-        "generation": 1, "state": "idle", "flow_id": None, **changes,
+        "generation": 1, "flow_id": None, **changes,
     })
 
 
@@ -60,15 +59,6 @@ def claim(store: Store, worker: str = "a", token: str = "token", epoch: str = "e
     job = store.workers.assign_job(worker, token, epoch)
     assert job is not None
     return job
-
-
-def settle(store: Store, job: Job, *, state: Literal["idle", "releasing"] = "idle") -> bool:
-    assert job.workspace is not None and job.generation is not None and job.assigned_worker_id is not None
-    return store.workers.report_workspace(job.assigned_worker_id, "epoch", WorkspaceInventory(
-        workspace=job.workspace, repository="owner/repo", generation=job.generation,
-        state=state, flow_id=job.flow_id if state == "idle" else None,
-        settled_job_id=job.id, settled_assignment_token=job.assignment_token,
-    ))
 
 
 def finish(store: Store, job: Job) -> None:
@@ -139,7 +129,6 @@ def test_lowered_limit_retains_bound_work_without_filling_old_idle_slots(store: 
         queued(store, issue)
     first = claim(store)
     finish(store, first)
-    assert settle(store, first)
     revision = store.jobs.enqueue_job(first.required_flow_id, JobKind.REVISION)
     connect(store, "a", 1, epoch="new")
     for item in items:
@@ -176,10 +165,9 @@ def test_late_inventory_and_reconnect_cannot_erase_claim(store: Store) -> None:
     job = claim(store)
     assert store.workers.report_workspace("a", "epoch", item)
     current = next(w for w in store.workers.list_workspaces("a") if w.workspace == item.workspace)
-    assert current.current_job_id == job.id and current.workspace_state == "occupied"
+    assert current.current_job_id == job.id
     assert not store.workers.report_workspace("a", "epoch", item.model_copy(update={"generation": 2}))
     finish(store, job)
-    assert settle(store, job)
     revision = store.jobs.enqueue_job(job.required_flow_id, JobKind.REVISION)
     connect(store, "a", epoch="new")
     assert not store.workers.report_workspace("a", "epoch", item)
@@ -209,31 +197,24 @@ def test_recovery_before_inventory_page_uses_existing_durable_fence(store: Store
     assert store.workers.assign_job("a", "another", "new") is None
 
 
-def test_ack_gate_and_review_affinity_survive_drain(store: Store) -> None:
+def test_terminal_commit_reuses_binding_without_ack_and_preserves_drain(store: Store) -> None:
     connect(store, "a")
     item = provision(store, "a")
     queued(store)
     job = claim(store)
     next_job = store.jobs.enqueue_job(job.required_flow_id, JobKind.REVISION)
-    assert not settle(store, job)
-    finish(store, job)
     assert store.workers.assign_job("a", "too-soon", "epoch") is None
+    finish(store, job)
     queued(store, 2)
-    assert settle(store, job)
-    assert store.workers.report_workspace("a", "epoch", item.model_copy(update={
-        "state": "releasing", "flow_id": job.flow_id,
-    }))
-    assert store.workers.assign_job("a", "coding-during-cleanup", "epoch") is None
-    assert store.workers.report_workspace("a", "epoch", item.model_copy(update={"flow_id": job.flow_id}))
     store.workers.drain("a", True)
     revision = claim(store, "a", "revision")
     assert revision.id == next_job.id
     assert (revision.workspace, revision.generation) == (job.workspace, job.generation)
-    assert settle(store, job)  # valid previous ACK is retained in inventory, not reapplied
+    assert store.workers.report_workspace("a", "epoch", item)
     assert next(w for w in store.workers.list_workspaces("a") if w.workspace == job.workspace).current_job_id == revision.id
 
 
-def test_stop_receipt_keeps_claim_until_exact_ack_and_does_not_clear_siblings(store: Store) -> None:
+def test_stop_receipt_clears_exact_claim_before_cleanup_without_touching_siblings(store: Store) -> None:
     connect(store, "a")
     for index in range(2):
         provision(store, "a", index)
@@ -251,95 +232,76 @@ def test_stop_receipt_keeps_claim_until_exact_ack_and_does_not_clear_siblings(st
     receipt = ExecutionStopped(**intent.fence().model_dump(), execution_nonce="stopped")
     assert store.stops.confirm("a", receipt, "epoch")
     assert len(store.stops.pending_for_worker("a")) == 1
-    assert len([w for w in store.workers.list_workspaces("a") if w.current_job_id is not None]) == 2
-    stopped = next(job for job in jobs if job.id == intent.job_id)
-    assert settle(store, stopped, state="releasing")
     remaining = [w.current_job_id for w in store.workers.list_workspaces("a") if w.current_job_id is not None]
     assert remaining == [next(job.id for job in jobs if job.id != intent.job_id)]
 
 
-def test_retained_result_witness_cannot_ack_a_later_stop(store: Store) -> None:
+def test_stop_and_terminal_replays_after_reuse_cannot_clear_successor(store: Store) -> None:
     connect(store, "a")
     item = provision(store, "a")
     queued(store)
     job = claim(store)
     assert store.stops.authorize_dispatch(job.id, "a", "token", "epoch")
     finish(store, job)
-    assert settle(store, job)
     ControlService(database=store.database).cancel(required(store.flows.get_flow(job.required_flow_id)))
     intent = store.stops.pending_for_worker("a")[0]
-    prior = item.model_copy(update={
-        "flow_id": job.flow_id, "state": "occupied", "settled_job_id": job.id,
-        "settled_assignment_token": job.assignment_token,
-    })
-    # This previous ACK is part of ordinary polling and reconnect inventory even
-    # while cancellation requests a second acknowledgement for the same journal.
-    connect(store, "a", epoch="new")
-    assert store.workers.report_workspace("a", "new", prior)
     receipt = ExecutionStopped(**intent.fence().model_dump(), execution_nonce="stopped")
-    assert store.stops.confirm("a", receipt, "new")
-    assert store.workers.report_workspace("a", "new", prior)
-    row = next(w for w in store.workers.list_workspaces("a") if w.workspace == job.workspace)
-    assert row.current_job_id == job.id
-    assert required(store.workers.get_flow_execution(job.required_flow_id)).released_at is None
-    assert store.workers.report_workspace("a", "new", prior.model_copy(update={
-        "flow_id": None, "state": "idle", "generation": 2,
-    }))
+    assert store.stops.confirm("a", receipt, "epoch")
     assert required(store.flows.get_flow(job.required_flow_id)).state is FlowState.ARCHIVED
-
-
-def test_retired_generation_and_absence_never_reopen_an_old_binding(store: Store) -> None:
-    connect(store, "a")
-    item = provision(store, "a")
-    queued(store)
-    job = claim(store)
-    assert store.workers.report_workspace("a", "epoch", item.model_copy(update={"state": "absent"}))
-    assert required(store.workers.get_flow_execution(job.required_flow_id)).released_at is None
-    finish(store, job)
-    assert not store.workers.release_flow_execution(job.required_flow_id)
-    assert settle(store, job)
-    assert store.workers.release_flow_execution(job.required_flow_id)
-    queued(store, 2)
-    assert store.workers.report_workspace("a", "epoch", item)
-    assert store.workers.assign_job("a", "old-generation", "epoch") is None
-    assert store.workers.report_workspace("a", "epoch", item.model_copy(update={"generation": 2}))
-    assert claim(store, token="new-generation").generation == 2
-
-
-def test_cleanup_ack_can_atomically_retire_binding_and_publish_next_generation(store: Store) -> None:
-    connect(store, "a")
-    item = provision(store, "a")
-    queued(store)
-    job = claim(store)
-    assert store.stops.authorize_dispatch(job.id, "a", "token", "epoch")
-    ControlService(database=store.database).cancel(required(store.flows.get_flow(job.required_flow_id)))
-    intent = store.stops.pending_for_worker("a")[0]
-    ready = item.model_copy(update={
-        "generation": 2, "settled_job_id": job.id, "settled_assignment_token": job.assignment_token,
-    })
-    assert not store.workers.report_workspace("a", "epoch", ready)
-    assert store.stops.confirm("a", ExecutionStopped(**intent.fence().model_dump(), execution_nonce="cleaned"), "epoch")
-    assert store.workers.report_workspace("a", "epoch", ready)
-    assert required(store.flows.get_flow(job.required_flow_id)).state is FlowState.ARCHIVED
-    assert store.workers.report_workspace("a", "epoch", ready)  # reconnect/replay is idempotent
     queued(store, 2)
     successor = claim(store, token="successor")
     assert successor.generation == 2
-    assert store.workers.report_workspace("a", "epoch", ready)
+    assert store.stops.confirm("a", receipt, "epoch")
+    assert not store.stops.confirm("a", receipt.model_copy(update={"execution_nonce": "changed"}), "epoch")
+    assert store.workers.record_assignment_result(
+        job.id, "a", "token", "epoch", Failed(job_id=job.id, assignment_token="token", error="test outcome"),
+    ) == "applied"
+    assert store.workers.record_assignment_result(
+        job.id, "a", "token", "epoch", Failed(job_id=job.id, assignment_token="token", error="changed"),
+    ) == "conflict"
+    assert store.workers.report_workspace("a", "epoch", item.model_copy(update={"flow_id": job.flow_id}))
     assert next(w for w in store.workers.list_workspaces("a") if w.workspace == job.workspace).current_job_id == successor.id
 
 
-def test_premature_generation_advance_rolls_back_ack_clear(store: Store) -> None:
+def test_release_advances_once_and_reconnect_accepts_lower_inventory_without_reviving_binding(store: Store) -> None:
     connect(store, "a")
     item = provision(store, "a")
     queued(store)
     job = claim(store)
     finish(store, job)
-    # Ordinary completion keeps the Flow's directory through review. Claim clearing
-    # and generation publication must roll back together if it cannot be archived.
-    assert not store.workers.report_workspace("a", "epoch", item.model_copy(update={
-        "generation": 2, "settled_job_id": job.id, "settled_assignment_token": job.assignment_token,
-    }))
+    # A business transaction can fail after release; neither ownership nor its
+    # generation may escape the rollback and advertise a reusable successor.
+    with pytest.raises(RuntimeError, match="interrupted"), store.transaction() as tx:
+        assert tx.workers.release_flow_execution(job.required_flow_id)
+        raise RuntimeError("interrupted")
+    assert required(store.workers.get_flow_execution(job.required_flow_id)).released_at is None
+    assert next(w for w in store.workers.list_workspaces("a") if w.workspace == item.workspace).generation == 1
+    assert store.workers.release_flow_execution(job.required_flow_id)
+    assert not store.workers.release_flow_execution(job.required_flow_id)
+    connect(store, "a", epoch="new")
+    assert store.workers.report_workspace("a", "new", item.model_copy(update={"flow_id": job.flow_id}))
+    row = next(w for w in store.workers.list_workspaces("a") if w.workspace == item.workspace)
+    assert row.generation == 2 and row.current_job_id is None and row.inventory_epoch == "new"
+    assert required(store.workers.get_flow_execution(job.required_flow_id)).released_at is not None
+    assert not store.workers.report_workspace("a", "new", item.model_copy(update={"generation": 3}))
+    assert not store.workers.report_workspace("a", "new", item.model_copy(update={"repository": "owner/other"}))
+    queued(store, 2)
+    assert claim(store, token="new-generation", epoch="new").generation == 2
+
+
+def test_started_control_failure_retains_unknown_writer_claim(store: Store) -> None:
+    connect(store, "a")
+    provision(store, "a")
+    queued(store)
+    job = claim(store)
+    attempt = required(store.flows.get_flow(job.required_flow_id)).current_attempt_id
+    assert attempt is not None
+    assert store.workers.start_assignment(job.id, attempt, "a", "token", "epoch")
+    store.jobs.record_control_result(job.id, Failed(job_id=job.id, assignment_token="token", error="lost"), "lost")
+    assert store.jobs.complete_persisted_result(job.id, JobState.FAILED)
+    store.jobs.enqueue_job(job.required_flow_id, JobKind.REVISION)
+    assert not store.workers.release_flow_execution(job.required_flow_id)
+    assert store.workers.assign_job("a", "unsafe", "epoch") is None
     assert next(w for w in store.workers.list_workspaces("a") if w.workspace == job.workspace).current_job_id == job.id
 
 
@@ -393,6 +355,18 @@ def test_legacy_worker_schema_requires_explicit_physical_identity_migration(post
     store = Store(postgresql_url)
     try:
         with pytest.raises(ValueError, match="explicit workspace migration required"):
+            store.init_db()
+    finally:
+        store.close()
+
+
+def test_obsolete_workspace_state_schema_is_explicitly_rejected(postgresql_url: str) -> None:
+    with psycopg.connect(postgresql_url) as conn:
+        conn.execute("CREATE TABLE workers(worker_id TEXT, workspace TEXT, workspace_state TEXT,"
+                     " PRIMARY KEY(worker_id,workspace))")
+    store = Store(postgresql_url)
+    try:
+        with pytest.raises(ValueError, match="obsolete workspace state schema"):
             store.init_db()
     finally:
         store.close()

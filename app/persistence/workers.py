@@ -7,7 +7,6 @@ from datetime import timedelta
 from typing import Literal
 from uuid import uuid4
 
-from psycopg import Rollback
 from psycopg.rows import class_row
 from psycopg.types.json import Jsonb
 
@@ -22,10 +21,8 @@ from app.domain.inference_models import (
     StopReason,
 )
 from app.domain.models import (
-    ArchiveReason,
     DeliveryState,
     FlowExecution,
-    FlowState,
     Job,
     JobKind,
     JobState,
@@ -53,14 +50,8 @@ _MAY_HAVE_EXECUTED = (
     "(started_at IS NOT NULL OR dispatch_authorized_at IS NOT NULL OR (kind='archive' AND payload->'archive' IS NOT NULL))"
 )
 
-# Every assignment API resolves the immutable job snapshot, not a worker's latest
-# binding. Terminal replay may outlive current_job_id, but not its physical generation.
-_ASSIGNMENT_WORKSPACE = (
-    " EXISTS (SELECT 1 FROM workers slot WHERE slot.worker_id=jobs.assigned_worker_id"
-    " AND slot.workspace=jobs.workspace AND slot.generation=jobs.generation"
-    " AND ((jobs.kind='inference' AND slot.repository IS NULL)"
-    " OR (jobs.kind<>'inference' AND slot.repository IS NOT NULL)))"
-)
+# New live operations require the immutable assignment's exact current claim.
+# Historical terminal receipt replays are validated against their stored digest instead.
 _CURRENT_WORKSPACE = (
     " EXISTS (SELECT 1 FROM workers slot WHERE slot.worker_id=jobs.assigned_worker_id"
     " AND slot.workspace=jobs.workspace AND slot.generation=jobs.generation"
@@ -117,6 +108,7 @@ class WorkerStore(Repository):
         return executions[0] if executions else None
 
     def release_flow_execution(self, flow_id: int) -> bool:
+        """Release a settled Flow and advance the controller-owned generation atomically."""
         now = self._db.now()
         with self._db.transaction() as tx, tx.connection() as connection:
             tx.lock_workflow(flow_id)
@@ -142,24 +134,14 @@ class WorkerStore(Repository):
                 (now, flow_id),
             )
             if result.rowcount == 1:
-                used = required(connection.execute(
-                    "SELECT EXISTS (SELECT 1 FROM jobs j JOIN flow_executions e ON e.flow_id=j.flow_id"
-                    " WHERE e.flow_id=%s AND j.assigned_worker_id=e.worker_id AND j.workspace=e.workspace"
-                    " AND j.generation=e.generation AND (j.started_at IS NOT NULL"
-                    " OR j.dispatch_authorized_at IS NOT NULL OR j.result_payload->>'source'='worker'"
-                    " OR (j.kind='archive' AND j.payload->'archive' IS NOT NULL))"
-                    " AND (j.started_at IS NOT NULL OR j.result_payload->>'source' IS DISTINCT FROM 'control')) AS executed",
-                    (flow_id,),
-                ).fetchone())["executed"]
-                # A control-only preparation never sent to the worker has no local
-                # binding to clean. Every possibly-used generation stays retired.
-                connection.execute(
-                    "UPDATE workers w SET workspace_state=%s,inventory_epoch=CASE WHEN %s THEN NULL ELSE inventory_epoch END,"
-                    " retired_generation=CASE WHEN %s THEN w.generation ELSE retired_generation END"
+                advanced = connection.execute(
+                    "UPDATE workers w SET generation=w.generation+1"
                     " FROM flow_executions e WHERE e.flow_id=%s AND w.worker_id=e.worker_id"
                     " AND w.workspace=e.workspace AND w.generation=e.generation",
-                    ("releasing" if used else "idle", used, used, flow_id),
+                    (flow_id,),
                 )
+                if advanced.rowcount != 1:
+                    raise ValueError("Flow release lost its locked workspace generation")
         return result.rowcount == 1
 
     def worker_connected(
@@ -169,7 +151,7 @@ class WorkerStore(Repository):
         connection_epoch: str = "",
         *, workspace: str, repo_workspace_limit: int, execute: bool = True,
     ) -> WorkerRecord:
-        WorkspaceInventory(workspace=workspace, repository=None, generation=1, state="idle", flow_id=None)
+        WorkspaceInventory(workspace=workspace, repository=None, generation=1, flow_id=None)
         if repo_workspace_limit <= 0:
             raise ValueError("repo workspace limit must be positive")
         now = self._db.now()
@@ -221,10 +203,11 @@ class WorkerStore(Repository):
         return required(row)
 
     def report_workspace(self, worker_id: str, epoch: str, item: WorkspaceInventory) -> bool:
-        """Reconcile one inventory item without treating missing/late reports as releases.
+        """Register concrete identity and freshness without changing ownership.
 
-        Only a matching terminal ACK witness clears a claim. Released generations
-        stay retired even if an old idle report arrives after archive or cancellation.
+        The worker can retain a previous local binding until its next assignment.
+        Lower reported generations are therefore expected after controller release;
+        neither that generation nor the advisory flow_id overwrites controller facts.
         """
         with self._db.transaction() as tx, tx.connection() as conn:
             tx._lock_workers(conn)
@@ -237,141 +220,28 @@ class WorkerStore(Repository):
             row = conn.execute(
                 "SELECT * FROM workers WHERE worker_id=%s AND workspace=%s", (worker_id, item.workspace),
             ).fetchone()
-            binding = WorkerStore(tx).get_worker_execution(worker_id, item.workspace)
-            if binding is not None and row is None:
-                return False
-            if binding is not None:
-                tx.lock_workflow(binding.flow_id)
-            if row is not None and (row["repository"] != item.repository or item.generation < row["generation"]):
+            if row is not None and (row["repository"] != item.repository or item.generation > row["generation"]):
                 return False
             if item.repository is None and (row is None or item.workspace != owner["workspace"] or item.flow_id is not None):
                 return False
-            advancing = row is not None and item.generation > row["generation"]
-            if advancing and row is not None and (item.generation != row["generation"] + 1 or item.flow_id is not None
-                              or item.state not in {"idle", "absent"} or item.repository is None):
-                return False
-            settled_flow: int | None = None
-            cleanup_handoff = False
-            if item.settled_job_id is not None:
-                job = JobStore(tx).get_job(item.settled_job_id)
-                if (job is None or job.assigned_worker_id != worker_id or job.workspace != item.workspace
-                        or job.generation is None or job.assignment_token != item.settled_assignment_token
-                        or row is None or job.generation not in {row["generation"], row["generation"] - 1}
-                        or item.generation not in {job.generation, job.generation + 1}):
+            if row is None:
+                if item.generation != 1:
                     return False
-                if job.flow_id is not None:
-                    tx.lock_workflow(job.flow_id)
-                job = required(tx.lock_job(job.id))
-                stopped = conn.execute(
-                    "SELECT state FROM execution_stops WHERE job_id=%s AND assignment_token=%s"
-                    " AND workspace=%s AND generation=%s",
-                    (job.id, job.assignment_token, item.workspace, job.generation),
-                ).fetchone()
-                # The same journal may first ACK its result and later be stopped.
-                # Its retained result witness must neither break reconnect nor
-                # masquerade as receipt of the newer stop ACK.
-                prior_result = (stopped is not None and job.result_applied_at is not None
-                                and not advancing and item.flow_id == job.flow_id)
-                if stopped is not None and stopped["state"] != "confirmed" and not prior_result:
-                    return False
-                if job.result_applied_at is None and stopped is None:
-                    return False
-                cleanup_handoff = (stopped is not None and stopped["state"] == "confirmed"
-                                   and binding is not None and job.flow_id == binding.flow_id
-                                   and job.generation is not None and item.generation == job.generation + 1
-                                   and item.flow_id is None and item.state == "idle")
-                if row["current_job_id"] == job.id and job.generation != row["generation"]:
-                    return False
-                if row["current_job_id"] == job.id and not prior_result:
-                    if stopped is not None and (item.flow_id is not None or (
-                        not advancing and item.state not in {"releasing", "absent", "quarantined"}
-                    )):
-                        return False
-                    row["current_job_id"] = None
-                    settled_flow = job.flow_id
-                # Inventory retains the previous ACK while the next job runs.
-                # Its witness is valid history, not permission to clear that new claim.
-            if advancing and row is not None and (row["current_job_id"] is not None or row["current_inference_job_id"] is not None
-                              or (binding is not None and settled_flow != binding.flow_id)):
-                return False
-            if row is None or (row["workspace_state"] == "absent" and item.state != "absent"):
                 count = conn.execute(
-                    "SELECT count(*) AS n FROM workers WHERE worker_id=%s AND repository=%s"
-                    " AND workspace_state<>'absent'", (worker_id, item.repository),
+                    "SELECT count(*) AS n FROM workers WHERE worker_id=%s AND repository=%s",
+                    (worker_id, item.repository),
                 ).fetchone()
                 if item.repository is not None and required(count)["n"] >= owner["repo_workspace_limit"]:
                     return False
-            if binding is None and item.flow_id is not None:
-                return False
-            if binding is not None and (row is None or binding.generation != row["generation"]
-                                        or item.flow_id not in (None, binding.flow_id)):
-                return False
-            retired = row is not None and row["retired_generation"] is not None and item.generation <= row["retired_generation"]
-            accepted = False
-            with conn.transaction() as settlement:
-                if settled_flow is not None:
-                    assert row is not None
-                    cleared = conn.execute(
-                        "UPDATE workers SET current_job_id=NULL WHERE worker_id=%s AND workspace=%s"
-                        " AND generation=%s AND current_job_id=%s",
-                        (worker_id, item.workspace, row["generation"], item.settled_job_id),
-                    )
-                    if cleared.rowcount != 1:
-                        raise ValueError("workspace settlement lost its locked claim")
-                if advancing and binding is not None:
-                    if FlowStore(tx).try_archive(binding.flow_id):
-                        binding = None
-                    else:
-                        # A merge racing stop cleanup still needs archive on this exact
-                        # directory. Carry its exclusive reservation to the cleaned generation.
-                        flow = required(FlowStore(tx).get_flow(binding.flow_id))
-                        delivery = DeliveryStore(tx).get_delivery(binding.flow_id)
-                        if (not cleanup_handoff or flow.state is not FlowState.FINALIZING
-                                or flow.archive_reason is not ArchiveReason.SUCCEEDED
-                                or delivery is None or delivery.state is not DeliveryState.MERGED
-                                or JobStore(tx).has_pending_result(flow.id)
-                                or conn.execute(
-                                    "SELECT 1 FROM execution_stops WHERE flow_id=%s AND state<>'confirmed'"
-                                    " UNION ALL SELECT 1 FROM result_effects e JOIN jobs j ON j.id=e.job_id"
-                                    f" WHERE j.flow_id=%s AND {UNCONFIRMED_EFFECT_SQL} LIMIT 1",
-                                    (flow.id, flow.id),
-                                ).fetchone() is not None):
-                            raise Rollback(settlement)
-                        updated = conn.execute(
-                            "UPDATE flow_executions SET generation=%s WHERE flow_id=%s"
-                            " AND worker_id=%s AND workspace=%s AND generation=%s AND released_at IS NULL",
-                            (item.generation, flow.id, worker_id, item.workspace, binding.generation),
-                        )
-                        if updated.rowcount != 1:
-                            raise ValueError("cleanup handoff lost its locked Flow binding")
-                        binding.generation = item.generation
-                held = row is not None and row["current_job_id"] is not None
-                state = "occupied" if held or binding is not None else "releasing" if retired else item.state
-                # A late pre-claim report cannot revoke already-confirmed eligibility,
-                # but cannot confirm a recovered binding in a new connection epoch.
-                confirmed = epoch if binding is None or item.flow_id == binding.flow_id or cleanup_handoff else (
-                    row["inventory_epoch"] if row is not None else None
-                )
-                if item.state == "releasing" and binding is not None and item.flow_id == binding.flow_id:
-                    # Verified cleanup may fail midway. Only that original Flow's
-                    # archive can retry a retained release; coding cannot use it.
-                    state, confirmed = "releasing", epoch
-                elif item.state in {"absent", "quarantined", "releasing"}:
-                    state = item.state if not held and binding is None else "quarantined"
-                    confirmed = None
-                conn.execute(
-                    "INSERT INTO workers(worker_id,workspace,repository,generation,workspace_state,inventory_epoch,"
-                    " protocol_version,status,first_connected_at,last_connected_at,last_seen_at,execute)"
-                    " VALUES (%s,%s,%s,%s,%s,%s,%s,'online',%s,%s,%s,FALSE)"
-                    " ON CONFLICT(worker_id,workspace) DO UPDATE SET generation=EXCLUDED.generation,"
-                    " workspace_state=EXCLUDED.workspace_state,inventory_epoch=EXCLUDED.inventory_epoch",
-                    (worker_id, item.workspace, item.repository, item.generation, state, confirmed,
-                     owner["protocol_version"], tx.now(), tx.now(), tx.now()),
-                )
-                if settled_flow is not None and not advancing:
-                    FlowStore(tx).try_archive(settled_flow)
-                accepted = True
-            return accepted
+            conn.execute(
+                "INSERT INTO workers(worker_id,workspace,repository,generation,inventory_epoch,"
+                " protocol_version,status,first_connected_at,last_connected_at,last_seen_at,execute)"
+                " VALUES (%s,%s,%s,%s,%s,%s,'online',%s,%s,%s,FALSE)"
+                " ON CONFLICT(worker_id,workspace) DO UPDATE SET inventory_epoch=EXCLUDED.inventory_epoch",
+                (worker_id, item.workspace, item.repository, item.generation, epoch,
+                 owner["protocol_version"], tx.now(), tx.now(), tx.now()),
+            )
+            return True
 
     def workspace_demand(self, worker_id: str, epoch: str) -> list[str]:
         """Return unbound queued repositories with room to provision, without claiming jobs."""
@@ -383,7 +253,7 @@ class WorkerStore(Repository):
                 " AND j.state='queued' AND j.kind='initial'"
                 " AND NOT EXISTS (SELECT 1 FROM flow_executions e WHERE e.flow_id=f.id AND e.released_at IS NULL)"
                 " AND (SELECT count(*) FROM workers slot WHERE slot.worker_id=w.worker_id"
-                " AND slot.repository=f.repo AND slot.workspace_state<>'absent') < w.repo_workspace_limit"
+                " AND slot.repository=f.repo) < w.repo_workspace_limit"
                 + _ELIGIBLE_JOB + " ORDER BY f.repo", (worker_id, epoch, self._db.now()),
             ).fetchall()]
 
@@ -488,7 +358,7 @@ class WorkerStore(Repository):
                 tx._lock_workers(connection)
                 available = connection.cursor(row_factory=class_row(WorkerRecord)).execute(
                     "SELECT * FROM workers WHERE repository IS NULL AND status IN ('online','busy') AND NOT draining"
-                    " AND inventory_epoch=connection_epoch AND workspace_state='idle'"
+                    " AND inventory_epoch=connection_epoch"
                     " AND inference IS NOT NULL AND current_inference_job_id IS NULL"
                     " ORDER BY last_inference_assigned_at NULLS FIRST,worker_id",
                 ).fetchall()
@@ -537,10 +407,9 @@ class WorkerStore(Repository):
                 " WHERE owner.connection_epoch=%s AND owner.execute AND owner.status IN ('online','busy')"
                 " AND slot.inventory_epoch=owner.connection_epoch AND slot.current_job_id IS NULL"
                 " AND j.state='queued' AND ((bound.worker_id=owner.worker_id AND bound.workspace=slot.workspace"
-                " AND bound.generation=slot.generation AND (slot.workspace_state IN ('idle','occupied')"
-                " OR (j.kind='archive' AND slot.workspace_state='releasing')))"
+                " AND bound.generation=slot.generation)"
                 " OR (bound.flow_id IS NULL AND occupied.flow_id IS NULL AND j.kind='initial'"
-                " AND slot.workspace_state='idle' AND NOT owner.draining"
+                " AND NOT owner.draining"
                 " AND (SELECT count(*) FROM flow_executions active JOIN flows owned ON owned.id=active.flow_id"
                 " WHERE active.worker_id=owner.worker_id AND active.released_at IS NULL"
                 " AND owned.repo=f.repo)<owner.repo_workspace_limit))" + _ELIGIBLE_JOB
@@ -626,7 +495,7 @@ class WorkerStore(Repository):
                 )
             else:
                 claimed = connection.execute(
-                    "UPDATE workers SET workspace_state='occupied',current_job_id=%s,last_assigned_at=%s"
+                    "UPDATE workers SET current_job_id=%s,last_assigned_at=%s"
                     " WHERE worker_id=%s AND workspace=%s AND generation=%s AND current_job_id IS NULL",
                     (job.id, now, worker_id, workspace, generation),
                 )
@@ -840,8 +709,7 @@ class WorkerStore(Repository):
                 "SELECT * FROM jobs WHERE id=%s"
                 " AND assigned_worker_id=%s AND assignment_token=%s"
                 " AND EXISTS (SELECT 1 FROM workers WHERE worker_id=%s"
-                " AND repository IS NULL AND connection_epoch=%s) AND "
-                + _ASSIGNMENT_WORKSPACE + " FOR UPDATE",
+                " AND repository IS NULL AND connection_epoch=%s) FOR UPDATE",
                 (job_id, worker_id, token, worker_id, connection_epoch),
             ).fetchone()
             if row is None:
@@ -1082,8 +950,12 @@ class WorkerStore(Repository):
                     connection_epoch,
                 ),
             )
-            # Result commit is not proof the worker received its ACK. The concrete
-            # claim stays occupied until report_workspace supplies the matching witness.
+            if result.rowcount == 1:
+                connection.execute(
+                    "UPDATE workers w SET current_job_id=NULL FROM jobs j WHERE j.id=%s"
+                    " AND w.worker_id=j.assigned_worker_id AND w.workspace=j.workspace"
+                    " AND w.generation=j.generation AND w.current_job_id=j.id", (job_id,),
+                )
         return result.rowcount == 1
 
     def _lock_preparation(self, job_id: int, worker: str, token: str, epoch: str) -> Job | None:
@@ -1364,7 +1236,7 @@ class WorkerStore(Repository):
                     " WHERE current_job_id=ANY(%s)",
                     (requeued_ids,),
                 )
-            # A recovery timeout says nothing about physical cleanup or local ACKs.
+            # A recovery timeout says nothing about whether a writer has stopped.
             # Keep every binding until explicit settlement and release; never clear
             # sibling workspace claims when one Flow's recovery window expires.
         return len(requeued_rows) + inference_requeued, inference_failed

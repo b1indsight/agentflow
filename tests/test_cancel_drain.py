@@ -12,7 +12,7 @@ from app.github import PullRequest
 from tests.github import RecordingGitHub
 from tests.test_coordinator import coordinator
 from tests.test_merge import route_merge
-from tests.workspace_fixtures import register_worker, report_settled
+from tests.workspace_fixtures import register_worker
 
 
 def running(store):
@@ -60,7 +60,6 @@ def test_confirmation_requires_current_epoch_and_exact_request(store):
     assert not stops.confirm("w", receipt, "old")
     assert stops.confirm("w", receipt, "epoch")
     assert stops.confirm("w", receipt, "epoch")
-    report_settled(store, job.id, epoch="epoch", stopped=True)
     assert store.workers.get_flow_execution(flow.id).released_at is not None
 
 
@@ -70,7 +69,6 @@ def test_cancel_during_followup_preparation_stops_last_dispatched_job(store):
     assert store.workers.finish_assignment(job.id, "w", "token", JobState.DONE, "epoch")
     with store.connection() as conn:
         conn.execute("UPDATE jobs SET result_received_at=now() WHERE id=%s", (job.id,))
-    report_settled(store, job.id, epoch="epoch")
     followup = store.jobs.enqueue_job(flow.id, JobKind.REVISION)
     assert store.workers.assign_job("w", "preparing", "epoch").id == followup.id
     ControlService(database=store.database).cancel(flow)
@@ -86,17 +84,14 @@ def test_drain_survives_reconnect_and_allows_bound_followup(store):
     assert store.workers.list_workers()[0].draining
     # The existing flow still owns the worker; only new Flow allocation is disabled.
     assert store.workers.finish_assignment(job.id, "w", "token", JobState.DONE, "next")
-    report_settled(store, job.id, epoch="next")
     next_job = store.jobs.enqueue_job(flow.id, JobKind.REVISION)
     assert store.workers.assign_job("w", "revision", "next").id == next_job.id
     assert store.workers.finish_assignment(next_job.id, "w", "revision", JobState.DONE, "next")
-    report_settled(store, next_job.id, epoch="next")
     ControlService(database=store.database).cancel(flow)
     stop = store.stops.pending("w")
     assert store.stops.confirm(
         "w", ExecutionStopped(**stop.fence().model_dump(), execution_nonce="owned"), "next"
     )
-    report_settled(store, stop.job_id, epoch="next", stopped=True)
     assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
     another = store.flows.create_flow("owner/another", 2, 1)
     register_worker(store, "w", repo=another.repo, epoch="next")
@@ -131,19 +126,16 @@ async def test_merge_during_cancel_retains_binding_for_original_archive(store, r
         "w", ExecutionStopped(**stop.fence().model_dump(), execution_nonce="owned"), "epoch"
     )
     assert store.workers.get_flow_execution(flow.id).released_at is None
-    assert store.workers.assign_job("w", "before-ack", "epoch") is None
-    report_settled(store, job.id, epoch="epoch", stopped=True)
     epoch = "reconnected" if reconnect else "epoch"
     if reconnect:
-        register_worker(store, "w", epoch=epoch)
-    report_settled(store, job.id, epoch=epoch, stopped=True)
+        register_worker(store, "w", repo=flow.repo, epoch=epoch)
     archive = store.workers.assign_job("w", "archive", epoch)
     assert archive is not None and archive.kind is JobKind.ARCHIVE
     job = store.jobs.get_job(job.id)
-    assert archive.workspace == job.workspace and archive.generation == job.generation + 1
+    assert archive.workspace == job.workspace and archive.generation == job.generation
     assert store.workers.get_flow_execution(flow.id).bound_at == stop.binding_at
-    # The same Flow may stop its archive in the next generation. A timestamp-only
-    # uniqueness key would silently reuse the preceding coding job's confirmed stop.
+    # A retained merged Flow can stop coding then archive in the same generation.
+    # Stop identity must follow the assignment, not the Flow generation.
     assert store.stops.authorize_dispatch(archive.id, "w", "archive", epoch)
     with store.transaction() as tx:
         tx.lock_workflow(flow.id)
@@ -174,12 +166,31 @@ def test_unresolved_dispatched_effect_blocks_stop_except_skipped_status_labels(s
     if kind != "label":
         assert not store.stops.confirm("w", receipt, "epoch")
         assert store.workers.get_flow_execution(flow.id).released_at is None
+        assert store.stops.pending("w").state == "stopped"
+        assert all(w.current_job_id is None for w in store.workers.list_workspaces("w"))
         with store.connection() as conn:
             conn.execute("UPDATE result_effects SET receipt='{}' WHERE job_id=%s", (job.id,))
     assert store.stops.confirm("w", receipt, "epoch")
-    report_settled(store, job.id, epoch="epoch", stopped=True)
     assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
     assert store.workers.get_flow_execution(flow.id).released_at is not None
+
+
+def test_stopped_writer_does_not_block_its_pending_terminal_application(store):
+    # Stop may arrive while a worker terminal is durable but still awaiting effects.
+    # Its exact claim can clear without stranding the result application behind it.
+    flow, job = running(store)
+    terminal = Failed(job_id=job.id, assignment_token="token", error="worker stopped")
+    assert store.workers.record_assignment_result(job.id, "w", "token", "epoch", terminal) == "pending"
+    ControlService(database=store.database).cancel(flow)
+    stop = store.stops.pending("w")
+    receipt = ExecutionStopped(**stop.fence().model_dump(), execution_nonce="owned")
+    assert not store.stops.confirm("w", receipt, "epoch")
+    assert store.stops.pending("w").state == "stopped"
+    assert all(w.current_job_id is None for w in store.workers.list_workspaces("w"))
+    assert store.workers.get_flow_execution(flow.id).released_at is None
+    assert store.jobs.complete_persisted_result(job.id, JobState.FAILED)
+    assert store.stops.confirm("w", receipt, "epoch")
+    assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
 
 
 async def test_finalizing_flow_reserves_issue_until_late_merge_cleanup_settles(store):
@@ -250,7 +261,6 @@ def test_confirmed_stop_can_be_reacknowledged_after_flow_rebind(store):
     stop = store.stops.pending("w")
     receipt = ExecutionStopped(**stop.fence().model_dump(), execution_nonce="old-owned")
     assert store.stops.confirm("w", receipt, "epoch")
-    report_settled(store, stop.job_id, epoch="epoch", stopped=True)
     ControlService(
         database=store.database,
     ).resume(store.flows.get_flow(flow.id), expected_round_no=flow.current_round_no)
@@ -339,11 +349,8 @@ async def test_cancelled_creation_persists_pr_identity_and_merge_before_stop(
     )
     if remote_state == "merged":
         assert store.workers.get_flow_execution(flow.id).released_at is None
-        assert store.workers.assign_job("w", "before-ack", "epoch") is None
-        report_settled(store, job.id, epoch="epoch", stopped=True)
         assert store.workers.assign_job("w", "archive", "epoch").kind is JobKind.ARCHIVE
     else:
-        report_settled(store, job.id, epoch="epoch", stopped=True)
         assert store.workers.get_flow_execution(flow.id).released_at is not None
 
 

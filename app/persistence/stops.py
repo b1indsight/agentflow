@@ -63,28 +63,13 @@ class StopStore(Repository):
                 (flow_id, binding.worker_id, binding.workspace, binding.generation, binding.bound_at, binding.bound_at),
             ).fetchone()
             if job is not None:
-                inserted = conn.execute(
+                conn.execute(
                     "INSERT INTO execution_stops(request_id,flow_id,job_id,worker_id,workspace,generation,assignment_token,"
                     " binding_at,requested_at) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)"
-                    " ON CONFLICT(flow_id,workspace,generation) DO NOTHING RETURNING request_id",
+                    " ON CONFLICT(job_id,assignment_token) DO NOTHING",
                     (uuid4().hex, flow_id, job['id'], binding.worker_id, binding.workspace, binding.generation, job['assignment_token'],
                      binding.bound_at, self._db.now()),
-                ).fetchone()
-                if inserted is not None:
-                    # Review has no running job, but stopping its retained binding
-                    # still needs an ACK witness before that position can be retired.
-                    # A successor still in control-only preparation has no journal;
-                    # cancellation retires it after fencing the last actual execution.
-                    held = conn.execute(
-                        "UPDATE workers SET current_job_id=%s WHERE worker_id=%s AND workspace=%s"
-                        " AND generation=%s AND (current_job_id IS NULL OR current_job_id=%s"
-                        " OR EXISTS (SELECT 1 FROM jobs prep WHERE prep.id=workers.current_job_id"
-                        " AND prep.flow_id=%s AND prep.started_at IS NULL AND prep.dispatch_authorized_at IS NULL"
-                        " AND prep.result_received_at IS NULL))",
-                        (job["id"], binding.worker_id, binding.workspace, binding.generation, job["id"], flow_id),
-                    )
-                    if held.rowcount != 1:
-                        raise ValueError("stop requires its exact workspace generation and claim")
+                )
 
     def authorize_dispatch(self, job_id: int, worker_id: str, token: str, epoch: str) -> bool:
         """Persist the point after which a lost Started ACK cannot mean 'never sent'."""
@@ -131,7 +116,7 @@ class StopStore(Repository):
             ).fetchone()
 
     def confirm(self, worker_id: str, receipt: ExecutionStopped, connection_epoch: str) -> bool:
-        """A stopped executor alone cannot release a binding with unapplied external facts."""
+        """Record writer exit immediately; confirm business completion only after effects settle."""
         with self._db.transaction() as tx:
             flow = tx.lock_workflow(receipt.flow_id)
             if flow is None:
@@ -177,6 +162,13 @@ class StopStore(Repository):
                 digest = intent.receipt_digest or stop_receipt_digest(receipt)
                 conn.execute("UPDATE execution_stops SET state='stopped',receipt_digest=%s WHERE request_id=%s",
                              (digest, intent.request_id))
+                conn.execute(
+                    "UPDATE workers SET current_job_id=NULL WHERE worker_id=%s AND workspace=%s"
+                    " AND generation=%s AND current_job_id=%s",
+                    (worker_id, intent.workspace, intent.generation, intent.job_id),
+                )
+                conn.execute("UPDATE jobs SET state='failed',last_error='execution stopped',updated_at=%s"
+                             " WHERE id=%s AND result_received_at IS NULL", (tx.now(), intent.job_id))
                 if JobStore(tx).has_pending_result(receipt.flow_id) or conn.execute(
                         "SELECT 1 FROM result_effects e JOIN jobs j ON j.id=e.job_id"
                         f" WHERE j.flow_id=%s AND {UNCONFIRMED_EFFECT_SQL} LIMIT 1",
@@ -194,9 +186,7 @@ class StopStore(Repository):
                 # Required dispatched effects must converge through the existing result engine.
                 conn.execute("UPDATE execution_stops SET state='confirmed',confirmed_at=%s WHERE request_id=%s",
                              (tx.now(), intent.request_id))
-                conn.execute("UPDATE jobs SET state='failed',last_error='execution stopped',updated_at=%s"
-                             " WHERE id=%s AND result_received_at IS NULL", (tx.now(), intent.job_id))
-                # Receipt commit only permits sending ACK. Inventory's exact settlement
-                # witness releases this claim, never any sibling workspace on the worker.
+                # Merged finalization retains this generation for its archive command.
+                # Only actual Flow release advances the controller's generation.
                 FlowStore(tx).try_archive(intent.flow_id)
                 return True
