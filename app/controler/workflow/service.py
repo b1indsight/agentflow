@@ -428,7 +428,8 @@ class ControlService:
                 "archive retry is blocked by a running or unknown executor",
             )
         worker = next(
-            (w for w in workers.list_workers() if w.worker_id == execution.worker_id), None
+            (w for w in workers.list_workspaces(execution.worker_id)
+             if w.workspace == execution.workspace and w.generation == execution.generation), None
         )
         if (
             worker is None
@@ -463,36 +464,18 @@ class ControlService:
     def list_workers(self) -> list[WorkerView]:
         views: list[WorkerView] = []
         for worker in self.workers.list_workers():
-            execution = self.workers.get_worker_execution(worker.worker_id)
-            job = (
-                self.jobs.get_job(worker.current_job_id)
-                if worker.current_job_id is not None
-                else None
-            )
+            executions = self.workers.get_worker_executions(worker.worker_id)
+            workspaces = self.workers.list_workspaces(worker.worker_id)
             views.append(
                 WorkerView(
                     worker_id=worker.worker_id,
                     draining=worker.draining,
                     status=worker.status,
-                    current_job_id=worker.current_job_id,
-                    current_flow_id=(
-                        execution.flow_id
-                        if execution is not None
-                        else job.flow_id
-                        if job is not None
-                        else None
-                    ),
+                    workspaces=workspaces,
+                    executions=executions,
                     last_seen_at=worker.last_seen_at,
                     last_error=worker.last_error,
                     connection_epoch=worker.connection_epoch,
-                    lease_expires_at=job.lease_expires_at if job is not None else None,
-                    recovery_deadline=(
-                        job.recovery_deadline
-                        if job is not None and job.recovery_deadline is not None
-                        else execution.recovery_deadline
-                        if execution is not None
-                        else None
-                    ),
                     last_disconnect_reason=worker.last_disconnect_reason,
                 )
             )

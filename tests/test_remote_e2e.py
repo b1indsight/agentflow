@@ -30,6 +30,7 @@ from app.worker.state.execution import ExecutionState
 from app.worker.transport.mcp import FlowToolCaller
 from tests.persistence_fakes import RepositoryViews
 from tests.worker_fakes import (
+    InventoryStore,
     NoPendingStops,
     connected_worker,
     result_application,
@@ -80,13 +81,16 @@ class QueueConnection:
         pass
 
 
-class RemoteStore(RepositoryViews, Store):
+class RemoteStore(InventoryStore, RepositoryViews, Store):
     @property
     def stops(self) -> StopStore:
         return NoPendingStops()
 
     def __init__(self) -> None:
-        self.job = Job(id=5, flow_id=3, kind=JobKind.INITIAL, state=JobState.QUEUED)
+        self.job = Job(id=5, flow_id=3, kind=JobKind.INITIAL, state=JobState.QUEUED,
+                       workspace="a" * 32, generation=1)
+        self.inventory_items = {}
+        self.connection_epoch = ""
         self.done = asyncio.Event()
 
     def get_job(self, job_id: int) -> Job | None:
@@ -95,12 +99,14 @@ class RemoteStore(RepositoryViews, Store):
     def get_delivery(self, flow_id: int) -> FlowDelivery | None:
         return None
 
-    def get_worker_execution(self, worker_id: str):
+    def get_worker_execution(self, worker_id: str, workspace: str):
         return None
 
     def worker_connected(self, worker_id: str, protocol_version: int, connection_epoch: str = "",
-                         *, execute: bool = True):
-        return connected_worker(worker_id, protocol_version, connection_epoch, execute=execute)
+                         *, execute: bool = True, workspace: str, repo_workspace_limit: int):
+        self.connection_epoch = connection_epoch
+        return connected_worker(worker_id, protocol_version, connection_epoch, execute=execute,
+                                workspace=workspace, repo_workspace_limit=repo_workspace_limit)
 
     def worker_disconnected(
         self,
@@ -221,7 +227,8 @@ class RemoteCoordinator(JobCoordinator):
         if isinstance(task, JobState):
             return task
         return AssignmentArguments(
-            job_id=job.id, flow_id=job.flow_id, assignment_token=token, task=task
+            job_id=job.id, flow_id=job.flow_id, assignment_token=token, task=task,
+            workspace=job.workspace, generation=job.generation,
         )
 
     def __init__(self, store: RemoteStore) -> None:
@@ -317,7 +324,7 @@ async def test_control_gateway_and_worker_client_complete_one_remote_job(tmp_pat
         results=coordinator.results,
     )
     executor = FakeExecutor()
-    state = ExecutionState(tmp_path)
+    state = ExecutionState(tmp_path, 3)
     client = worker_runtime(
         read_history=state.read,
         worker_id="worker-1",

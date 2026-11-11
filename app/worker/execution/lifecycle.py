@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
 from uuid import uuid4
@@ -34,7 +35,7 @@ from app.worker.transport.mcp import FlowToolCaller
 
 
 class TaskExecutor(Protocol):
-    """Execute an assignment and reclaim its workspace after a confirmed stop."""
+    """Execute an assignment, joining its subprocesses before returning or cancelling."""
 
     async def execute(
         self,
@@ -43,9 +44,6 @@ class TaskExecutor(Protocol):
         *,
         tool_caller: FlowToolCaller,
     ) -> ExecutionResult: ...
-
-    async def reclaim_workspace(self) -> None: ...
-
 
 class WorkerProtocolError(RuntimeError):
     """A worker message cannot be applied to the owned execution."""
@@ -82,10 +80,12 @@ class WorkerExecution:
     replacing it; cancelling its observers never cancels the execution or an authorized stop.
     """
 
-    def __init__(self, *, worker_id: str, executor: TaskExecutor, state: ExecutionState) -> None:
+    def __init__(self, *, worker_id: str, executor: TaskExecutor, state: ExecutionState,
+                 on_change: Callable[[], None] | None = None) -> None:
         self.worker_id = worker_id
         self.executor = executor
         self.state = state
+        self._on_change = on_change
         self._execution: asyncio.Task[ExecutionResult] | None = None
         self._cancel_requested = False
         self._tool_calls: deque[PendingToolCall] = deque()
@@ -155,6 +155,9 @@ class WorkerExecution:
             logger.exception(
                 "worker execution result could not be persisted; retaining it for recovery"
             )
+        finally:
+            if self._on_change is not None:
+                self._on_change()
 
     def _collect_finished(self) -> None:
         execution = self._execution
@@ -241,6 +244,15 @@ class WorkerExecution:
             return None
         return self.state.assignment
 
+    def may_modify_workspace(self) -> bool:
+        """A terminal/stop journal proves quiescence; cancellation or a lost lease does not."""
+        if any(task is not None and not task.done()
+               for task in (self._execution, self._stop_task, self._shutdown_task)):
+            return True
+        record = self.state.load()
+        return bool(record is not None and record.terminal is None and record.stopped is None
+                    and not (record.state == "received" and record.acknowledged))
+
     @property
     def stopping(self) -> bool:
         """Distinguish fenced stop from normal completion while retiring borrowed calls."""
@@ -302,7 +314,15 @@ class WorkerExecution:
         )
         self._tool_calls.append(PendingToolCall(request, future))
         self._tool_ready.set()
+        if self._on_change is not None:
+            self._on_change()
         return await future
+
+    def pending_tool_call(self) -> PendingToolCall | None:
+        """Borrow ready work for the runtime's single aggregated observer."""
+        while self._tool_calls and self._tool_calls[0].future.done():
+            self._tool_calls.popleft()
+        return self._tool_calls[0] if self._tool_calls else None
 
     async def next_tool_call(self) -> PendingToolCall:
         """Borrow the queue head without removing it, so a disconnected observer loses nothing."""
@@ -417,9 +437,6 @@ class WorkerExecution:
             self.state.record_stopped(receipt)
         self._execution = None
         self._discard_tool_calls()
-        # Stop evidence precedes workspace reuse; only successful reclamation permits a reply.
-        if record.stopped is None or not record.acknowledged:
-            await self.executor.reclaim_workspace()
         return receipt
 
     def _stop_finished(self, task: asyncio.Task[ExecutionStopped]) -> None:

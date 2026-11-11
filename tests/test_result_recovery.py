@@ -8,7 +8,6 @@ from unittest.mock import call
 import pytest
 
 from app.contracts.protocol import (
-    PROTOCOL_VERSION,
     FlowToolArguments,
     FlowToolRequest,
     InitialTask,
@@ -41,6 +40,7 @@ from tests.github import RecordingGitHub
 from tests.test_coordinator import apply_result, coordinator
 from tests.test_merge import route_merge
 from tests.test_revision_delivery import revision_control as revision_control  # noqa: PLC0414
+from tests.workspace_fixtures import register_worker, report_settled
 
 
 @pytest.fixture
@@ -114,7 +114,7 @@ async def completed_open_initial(
         database=store.database,
     ).on_trigger("owner/repo", 8, 42)
     assert flow is not None
-    store.workers.worker_connected("worker-a", PROTOCOL_VERSION, "epoch")
+    register_worker(store, "worker-a", repo=flow.repo, epoch="epoch")
     job = store.workers.assign_job("worker-a", "token", "epoch")
     assert job is not None
     github = RecordingGitHub()
@@ -157,6 +157,7 @@ async def completed_open_initial(
         == "pending"
     )
     assert await subject.results.apply(job.id) is JobState.DONE
+    report_settled(store, job.id, epoch="epoch")
     completed = store.flows.get_flow(flow.id)
     assert completed is not None
     return completed, subject, github, request, result
@@ -178,7 +179,7 @@ async def test_merged_initial_retry_keeps_execution_facts_without_reopening(
     assert store.workers.release_flow_execution(flow.id)
     service.retry(flow)
     # Fresh worker-b starts from seed A, then checks out existing H where H descends A and H != A.
-    store.workers.worker_connected("worker-b", PROTOCOL_VERSION, "epoch-b")
+    register_worker(store, "worker-b", repo=flow.repo, epoch="epoch-b")
     job = store.workers.assign_job("worker-b", "retry-token", "epoch-b")
     assert job is not None and job.kind is JobKind.INITIAL
     task = await subject.prepare(job)

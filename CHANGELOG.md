@@ -8,6 +8,17 @@
 
 ## Unreleased
 
+- Worker 支持不同 workspace 上并行执行多个 job；Flow 与 workspace 双向独占，同 Flow 串行。
+  扩充 workers 为 `(worker_id, workspace)` 复合主键，不新增 workspace 表或 Registry；
+  默认无仓库 workspace 供推理，仓库库存按 worker 上报限额及排队需求自动补充，配置 3 可正常派发。
+  wire20 按具体位置和 generation 派发，分页登记库存与恢复，逐 job 心跳和停止；有界 Session
+  队列对有效突发施加背压。journal 按 `journals/flow-<flow_id>.json` 独立保存，不使用 current 指针。
+  workspace 不另设状态；占用由 Flow 绑定与 job 决定，停止等待原执行退出，不依赖目录清理或 ACK。
+  controller 释放绑定时推进 generation；worker 在接替前核对旧执行，ACK 只结清 journal。
+  旧 workers schema 须核对物理身份后显式迁移；旧 Flow 状态迁移只更新其目标结构，不改执行表。
+- workspace 补充请求返回关联的成功/失败结果，单仓库目录故障不再关闭共享 worker 连接。
+  controller 限制在途请求、按错误分类阻止或延迟重试；真实库存先于结果上报，目录故障修复后重新核验，
+  不持久化隔离状态。未知目录仍不收编；临时创建失败重用原位置，不反复消耗额度。
 - Flow 采用 queued/running/review/blocked/finalizing/archived 六态，保留现有处理器、事务、ResultPlan
   和 activity 触发器。看板隐藏 finalizing 独立列，Projects 从 Flow 投影。
   Issue/PR 标签沿用原有初始化和 LabelEffect，仅在交付、合并清理节点更新，不新增六态标签同步或重试表。

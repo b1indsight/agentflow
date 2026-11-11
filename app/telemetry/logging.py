@@ -14,8 +14,10 @@ if TYPE_CHECKING:
     from loguru import Message, Record
 
 EVENTS = {'job_failed', 'job_started', 'job_result', 'webhook_received', 'webhook_applied',
-          'worker_connected', 'worker_disconnected', 'snapshot_failed', 'application_log'}
-REASONS = {'ok', 'execution_failed', 'database_unavailable', 'connection_lost', 'unspecified'}
+          'worker_connected', 'worker_disconnected', 'snapshot_failed', 'application_log',
+          'workspace_provision_failed'}
+REASONS = {'ok', 'execution_failed', 'database_unavailable', 'connection_lost', 'unspecified',
+           'invalid_repository', 'workspace_conflict', 'filesystem_error', 'timeout', 'invalid_response'}
 
 
 def configure_logging(role: str, output_format: str, output: TextIO | None = None) -> None:
@@ -40,6 +42,11 @@ def configure_logging(role: str, output_format: str, output: TextIO | None = Non
             value = extra.get(key)
             if isinstance(value, str) and re.fullmatch(r'[A-Za-z0-9_.:-]{1,200}', value):
                 row[key] = value
+        repository = extra.get('repository')
+        if isinstance(repository, str) and re.fullmatch(
+            r'[A-Za-z0-9][A-Za-z0-9_.-]{0,199}/[A-Za-z0-9][A-Za-z0-9_.-]{0,199}', repository
+        ):
+            row['repository'] = repository
         exception = record['exception']
         if exception and exception.type:
             row['exception_type'] = exception.type.__name__

@@ -219,8 +219,11 @@ class JobCoordinator:
                 return JobState.DONE
             await self.fail(job, "PR merged before task dispatch")
             return JobState.FAILED
+        if job.workspace is None or job.generation is None:
+            raise PreparationStale("assignment has no claimed workspace")
         return AssignmentArguments(
-            job_id=job.id, flow_id=job.required_flow_id, assignment_token=token, task=prepared, secret=secret
+            job_id=job.id, flow_id=job.required_flow_id, assignment_token=token,
+            workspace=job.workspace, generation=job.generation, task=prepared, secret=secret,
         )
 
     async def _prepare_task(

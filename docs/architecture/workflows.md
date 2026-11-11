@@ -7,8 +7,8 @@
   → FastAPI 持久化 webhook inbox 并返回 202
   → 后台消费者 → Event Router 去重 / 授权 / 写 PostgreSQL
   → flow + queued job
-  → serve 通过认证 WebSocket 向公平选中的空闲 worker assign
-  → FlowExecution 固定单槽 worker/repo，prepare 读取真实 Issue/default branch
+  → worker 按仓库需求补充并登记 workspace，serve 领取具体 (worker_id, workspace)
+  → FlowExecution 独占该位置与 generation，prepare 读取真实 Issue/default branch
   → Started / Heartbeat；INITIAL 获得临发 scoped push capability
   → Codex commit/push → worker-local flow.open_pr MCP → control tool ledger
   → worker 核验本地 VCS/remote；Result 与持久 tool outcome 核对

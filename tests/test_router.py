@@ -2,12 +2,12 @@
 import pytest
 from pydantic import SecretStr
 
-from app.contracts.protocol import PROTOCOL_VERSION
 from app.controler.config import ServerSettings
 from app.controler.events.router import EventRouter
 from app.controler.workflow.service import ControlService
 from app.domain.models import ArchiveReason, DeliveryState, Flow, FlowState, JobKind
 from app.persistence.store import Store
+from tests.workspace_fixtures import register_worker
 
 
 class RecordingService(ControlService):
@@ -67,7 +67,7 @@ async def test_allowed_label_creates_one_flow_and_job(
     flow = store.flows.get_active_flow("owner/repo", 7)
     assert flow is not None
     assert flow.state is FlowState.QUEUED
-    store.workers.worker_connected("worker-1", protocol_version=PROTOCOL_VERSION)
+    register_worker(store, "worker-1", repo=flow.repo)
     assert store.workers.assign_job("worker-1", "assignment-1") is not None
     assert store.workers.assign_job("worker-1", "assignment-2") is None
 

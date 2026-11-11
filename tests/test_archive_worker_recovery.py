@@ -3,6 +3,7 @@
 import asyncio
 import shutil
 from datetime import timedelta
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -36,6 +37,34 @@ from tests.test_vcs import _git_fixture
 from tests.test_worker_executor import RecordingAgent, RecordingToolCaller
 from tests.test_workflow_transactions import accepted_coding
 from tests.worker_fakes import run_worker, server_runtime, worker_runtime
+
+
+async def matching_pool(store, root, flow, monkeypatch, *, overflow=False, retain_other=True):
+    """Create real directories with the controller fixture's original allocation IDs."""
+    worker = store.workers.list_workers()[0]
+    original = store.workers.get_flow_execution(flow.id)
+    other_id = uuid4().hex
+    locations = [other_id, original.workspace] if overflow else [original.workspace, other_id]
+    ids = iter([worker.workspace, *locations])
+    pool = RepositoryWorkspaces(root, "worker-a", limit=2)
+    with monkeypatch.context() as patch:
+        patch.setattr("app.worker.execution.workspaces.uuid4", lambda: UUID(next(ids)))
+        await pool.provision(flow.repo)
+    binding = await pool.claim(flow.repo, flow.id, original.workspace, original.generation,
+                               base_branch="main", remote="origin", push_token=None)
+    # Retain another real Flow on the other location, not an unreported synthetic owner.
+    for item in pool.inventory():
+        assert store.workers.report_workspace("worker-a", "epoch-a", item)
+    if not retain_other:
+        return pool, binding, None
+    other = store.flows.create_flow(flow.repo, 9000, 42)
+    queued = store.jobs.enqueue_job(other.id, JobKind.INITIAL)
+    claimed = store.workers.assign_job("worker-a", "other-token", "epoch-a")
+    assert claimed.id == queued.id and claimed.workspace == other_id
+    other_binding = await pool.claim(flow.repo, other.id, claimed.workspace, claimed.generation,
+                                     base_branch="main", remote="origin", push_token=None)
+    assert store.workers.finish_assignment(queued.id, "worker-a", "other-token", JobState.DONE, "epoch-a")
+    return pool, binding, other_binding
 
 
 class ArchiveSocket(QueueSocket):
@@ -109,7 +138,14 @@ async def connect_once(store, subject, executor, journal, *, drop_ack=False, own
             with pytest.raises(ConnectionError, match="ACK lost"):
                 await asyncio.wait_for(worker, 5)
         else:
-            await asyncio.wait_for(owner.acked.wait(), 5)
+            async with asyncio.timeout(5):
+                while not (owner.acked.is_set() and journal.load() is None
+                           and store.flows.get_flow(executor.state.flow_id).state is FlowState.ARCHIVED):
+                    for task in (server, worker):
+                        if task.done():
+                            task.result()
+                            raise AssertionError("connection ended before archive settlement")
+                    await asyncio.sleep(0.01)
     finally:
         server.cancel()
         worker.cancel()
@@ -148,26 +184,10 @@ async def test_original_worker_recovers_cleanup_and_replays_without_redeleting(
     managed_seed = root / "repos/owner/repo"
     managed_seed.parent.mkdir(parents=True)
     shutil.move(seed, managed_seed)
-    pool = RepositoryWorkspaces(root, "worker-a", limit=2)
-    if overflow:
-        await pool.acquire("owner/repo", 999, base_branch="main", remote="origin", push_token=None)
-    binding = await pool.acquire(
-        "owner/repo", flow.id, base_branch="main", remote="origin", push_token=None
-    )
+    pool, binding, other = await matching_pool(store, root, flow, monkeypatch, overflow=overflow)
     repo = pool.path(binding)
-    other = (
-        pool.lookup("owner/repo", 999)
-        if overflow
-        else await pool.acquire(
-            "owner/repo",
-            999,
-            base_branch="main",
-            remote="origin",
-            push_token=None,
-        )
-    )
     other_repo = pool.path(other)
-    journal = ExecutionState(root)
+    journal = ExecutionState(root, flow.id)
     prior = store.jobs.list_jobs(flow.id)[-2]
     # Preserve the preceding acknowledged job, as a real worker does between assignments.
     journal.record_received(
@@ -175,6 +195,8 @@ async def test_original_worker_recovers_cleanup_and_replays_without_redeleting(
             job_id=prior.id,
             flow_id=flow.id,
             assignment_token=prior.assignment_token,
+            workspace=binding.slot_id,
+            generation=binding.generation,
             task=InitialTask(
                 flow_id=flow.id,
                 attempt_id=task.attempt_id,
@@ -197,15 +219,17 @@ async def test_original_worker_recovers_cleanup_and_replays_without_redeleting(
     assert isinstance(terminal, Succeeded)
     journal.record_terminal(terminal)
     journal.acknowledge(prior.id, JobState.DONE)
+    journal.reconcile_acknowledgement()
     if window != "before-received":
         journal.record_received(
             AssignmentArguments(
-                job_id=job.id, flow_id=flow.id, assignment_token="archive-token", task=task
+                job_id=job.id, flow_id=flow.id, assignment_token="archive-token", task=task,
+                workspace=binding.slot_id, generation=binding.generation,
             )
         )
         journal.record_started()
     agent = RecordingAgent()
-    executor = WorkerExecutor(root, agent, worker_id="worker-a", state=journal)
+    executor = WorkerExecutor(root, agent, worker_id="worker-a", state=journal, workspaces=pool)
     lock = WorkerRootLock(root, "worker-a")
     lock.acquire()
     try:
@@ -235,10 +259,10 @@ async def test_original_worker_recovers_cleanup_and_replays_without_redeleting(
             store._db._clock = lambda: now + timedelta(hours=1)
             store.workers.sweep_expired_assignments()
             assert store.jobs.get_job(job.id).assignment_token == "archive-token"
-        await connect_once(store, subject, executor, ExecutionState(root), drop_ack=window == "ack")
+        await connect_once(store, subject, executor, ExecutionState(root, flow.id), drop_ack=window == "ack")
         if window == "ack":
             assert journal.load() is not None
-            await connect_once(store, subject, executor, ExecutionState(root))
+            await connect_once(store, subject, executor, ExecutionState(root, flow.id))
     finally:
         lock.release()
     assert repo.exists() is not overflow
@@ -256,9 +280,18 @@ async def test_original_worker_recovers_cleanup_and_replays_without_redeleting(
     next_flow = ControlService(
         database=store.database,
     ).on_trigger("owner/repo", 999, 42)
-    store.workers.worker_connected("worker-a", PROTOCOL_VERSION, "next")
+    default = next(item for item in pool.inventory() if item.repository is None)
+    store.workers.worker_connected("worker-a", PROTOCOL_VERSION, "next",
+                                   workspace=default.workspace, repo_workspace_limit=2)
+    for item in pool.inventory():
+        assert store.workers.report_workspace("worker-a", "next", item)
+    # The next INITIAL materializes a removed worktree under the higher controller generation.
     next_job = store.workers.assign_job("worker-a", "next-token", "next")
     assert next_job.flow_id == next_flow.id and next_job.kind is JobKind.INITIAL
+    next_binding = await pool.claim(flow.repo, next_flow.id, next_job.workspace, next_job.generation,
+                                    base_branch="main", remote="origin", push_token=None)
+    assert next_binding.slot_id == binding.slot_id and next_binding.generation > binding.generation
+    assert pool.path(next_binding).is_dir()
 
 
 @pytest.mark.parametrize("window", ["completed-disconnected", "unstarted-rejected"])
@@ -267,28 +300,32 @@ async def test_merge_recovery_preserves_coding_completion_and_root_provenance(
     tmp_path,
     window,
     recording_resources,
+    monkeypatch,
 ):
     old, result = accepted_coding(store, receive=False, started=window != "unstarted-rejected")
     flow = store.flows.get_flow(old.flow_id)
     await route_merge(store, flow)
+    if window == "unstarted-rejected":
+        retired = store.jobs.get_job(old.id)
+        assert retired.state is JobState.FAILED
+        assert retired.started_at is None and retired.dispatch_authorized_at is None
     archive_id = store.jobs.list_jobs(flow.id)[-1].id
     seed, _ = _git_fixture(tmp_path)
     root = tmp_path / "worker"
     managed_seed = root / "repos/owner/repo"
     managed_seed.parent.mkdir(parents=True)
     shutil.move(seed, managed_seed)
-    pool = RepositoryWorkspaces(root, "worker-a", limit=2)
-    binding = await pool.acquire(
-        "owner/repo", flow.id, base_branch="main", remote="origin", push_token=None
-    )
+    pool, binding, _ = await matching_pool(store, root, flow, monkeypatch, retain_other=False)
     repo = pool.path(binding)
-    journal = ExecutionState(root)
+    journal = ExecutionState(root, flow.id)
     # The rejected revision has not started, but its preceding INITIAL owns this allocation.
     journal.record_received(
         AssignmentArguments(
             job_id=old.id - 1,
             flow_id=flow.id,
-            assignment_token="previous",
+            assignment_token="initial-token",
+            workspace=binding.slot_id,
+            generation=binding.generation,
             task=InitialTask(
                 flow_id=flow.id,
                 attempt_id=1,
@@ -305,15 +342,18 @@ async def test_merge_recovery_preserves_coding_completion_and_root_provenance(
     journal.record_terminal(
         Succeeded(
             job_id=old.id - 1,
-            assignment_token="previous",
+            assignment_token="initial-token",
             result=InitialTaskResult(session_id="session", last_message="", exit_code=0),
         )
     )
     journal.acknowledge(old.id - 1, JobState.DONE)
+    journal.reconcile_acknowledgement()
     assignment = AssignmentArguments(
         job_id=old.id,
         flow_id=flow.id,
         assignment_token=old.assignment_token,
+        workspace=binding.slot_id,
+        generation=binding.generation,
         task=RevisionTask.model_validate(old.payload["revision"]),
     )
     journal.record_received(assignment)
@@ -324,7 +364,7 @@ async def test_merge_recovery_preserves_coding_completion_and_root_provenance(
                 return result
             return await super().execute(task, secret, tool_caller=tool_caller)
 
-    executor = Executor(root, RecordingAgent(), worker_id="worker-a", state=journal)
+    executor = Executor(root, RecordingAgent(), worker_id="worker-a", state=journal, workspaces=pool)
     owner = ObservedExecution(
         archive_id=archive_id, worker_id="worker-a", executor=executor, state=journal
     )

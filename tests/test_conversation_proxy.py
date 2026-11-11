@@ -13,7 +13,6 @@ from app.contracts.conversation import (
     HistoryQuery,
 )
 from app.contracts.protocol import (
-    PROTOCOL_VERSION,
     ConversationQuery,
     ConversationResult,
     ExecuteResult,
@@ -34,6 +33,7 @@ from app.controler.workflow.service import ControlService
 from app.domain.models import JobKind
 from tests.test_communication_session import Socket
 from tests.test_conversation_history import SESSION
+from tests.workspace_fixtures import register_worker
 
 
 @pytest.fixture
@@ -336,7 +336,7 @@ async def test_service_resolves_existing_database_metadata_and_released_binding(
     attempt = store.flows.create_attempt(flow.id)
     flow.current_attempt_id = attempt.id
     store.flows.update_flow(flow)
-    store.workers.worker_connected("worker-1", PROTOCOL_VERSION, "epoch")
+    register_worker(store, "worker-1", repo=flow.repo, epoch="epoch")
     store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
     assert store.workers.assign_job("worker-1", "assignment", "epoch") is not None
     assert (await service.read(flow.id, None, 100)).unavailable_reason == "no_session"

@@ -58,6 +58,10 @@ def result(method: str, **outcome: JsonValue) -> dict[str, JsonValue]:
 
 
 IDENTITY: dict[str, JsonValue] = {"job_id": 5, "assignment_token": "assignment-1"}
+LOCATION: dict[str, JsonValue] = {"workspace": "a" * 32, "generation": 1}
+INVENTORY: list[JsonValue] = [{
+    "workspace": "b" * 32, "generation": 1, "repository": None, "flow_id": None,
+}]
 FENCE: dict[str, JsonValue] = {**IDENTITY, "flow_id": 3, "request_id": "stop-1"}
 TASK: dict[str, JsonValue] = {
     "kind": "initial",
@@ -86,7 +90,7 @@ SESSION = "T-019eac3b-a60c-7a93-a442-3718f660fc8c"
 @pytest.mark.parametrize(
     ("direction", "item"),
     [
-        ("server", call("worker.execute", {**IDENTITY, "flow_id": 3, "task": TASK})),
+        ("server", call("worker.execute", {**IDENTITY, **LOCATION, "flow_id": 3, "task": TASK})),
         ("server", call("worker.stop", FENCE)),
         ("server", call("worker.history", {"session_id": SESSION, "cursor": "bad-cursor"})),
         (
@@ -163,6 +167,7 @@ def test_method_contract_round_trip_and_direction(
 def test_assignment_secret_remains_wire_only_and_flow_identity_is_checked() -> None:
     arguments: dict[str, JsonValue] = {
         **IDENTITY,
+        **LOCATION,
         "flow_id": 3,
         "task": TASK,
         "secret": {
@@ -221,6 +226,7 @@ def test_item_metadata_is_required_on_the_wire(key: str) -> None:
         {"protocol_version": 16},
         {"protocol_version": 17.0},
         {"protocol_version": 18},
+        {"protocol_version": 19},
         {"message_id": "A" * 32},
         {"ack": 1},
         {"ack": "true"},
@@ -258,7 +264,7 @@ def test_mixed_control_ack_and_business_have_independent_identities() -> None:
         [terminal_item, accept], control="heartbeat", **IDENTITY, ack=True, ack_id="c" * 32
     )
     parsed = parse_worker_message(json.dumps(data))
-    assert PROTOCOL_VERSION == 19
+    assert PROTOCOL_VERSION == 20
     assert isinstance(parsed.payload[0], ExecuteResult)
     assert parsed.payload[0].terminal() == terminal
     assert isinstance(parsed.payload[1], AcceptResultRequest)
@@ -278,24 +284,31 @@ def test_register_recovery_and_registered_decisions_are_control_fields() -> None
         "message_id": accept_result_id(T),
     }
     data = message(
-        [accept],
+        [],
         control="register",
         connection_epoch=None,
         worker_id="w",
-        recovery={**IDENTITY, "state": "failed", "result_digest": terminal_digest(terminal)},
+        workspace="b" * 32,
+        repo_workspace_limit=2,
+        inventory=INVENTORY,
+        inventory_complete=True,
+        recoveries=[{**IDENTITY, "state": "failed", "result_digest": terminal_digest(terminal)}],
         inference=None,
     )
-    assert parse_worker_message(json.dumps(data)).payload[0].message_id == accept_result_id(T)
-    data["payload"] = [call("flow.open_pr", FLOW)]
-    with pytest.raises(ValidationError):
-        parse_worker_message(json.dumps(data))
+    parsed = parse_worker_message(json.dumps(data))
+    assert isinstance(parsed, Register) and len(parsed.recoveries) == 1
+    assert parsed.payload == [] and parsed.inventory_complete
+    for payload in ([accept], [call("flow.open_pr", FLOW)]):
+        with pytest.raises(ValidationError):
+            parse_worker_message(json.dumps({**data, "payload": payload}))
     for action in ("resume", "replay"):
         registered = message(
-            [], control="registered", heartbeat_interval=10, recovery={"action": action, **IDENTITY}
+            [], control="registered", heartbeat_interval=10,
+            recoveries=[{"action": action, **IDENTITY}], ready=True,
         )
-        parsed = parse_server_message(json.dumps(registered))
-        assert isinstance(parsed, Registered) and parsed.recovery is not None
-        assert parsed.recovery.action == action
+        decision = parse_server_message(json.dumps(registered))
+        assert isinstance(decision, Registered) and len(decision.recoveries) == 1
+        assert decision.recoveries[0].action == action and decision.ready
         registered["payload"] = [call("worker.history", {"session_id": SESSION})]
         with pytest.raises(ValidationError):
             parse_server_message(json.dumps(registered))
@@ -332,26 +345,29 @@ def test_batch_static_validation_and_pure_ack_boundaries() -> None:
         parse_server_message(json.dumps(error))
 
 
-def test_registered_and_heartbeat_can_carry_independent_queries() -> None:
+def test_registration_rejects_business_but_heartbeat_can_carry_independent_queries() -> None:
     query = call("worker.history", {"session_id": SESSION})
     registered = message(
         [query],
         control="registered",
-        recovery=None,
+        recoveries=[],
+        ready=True,
         heartbeat_interval=10,
         ack=True,
         ack_id="c" * 32,
     )
-    assert parse_server_message(json.dumps(registered)).payload[0].method == "worker.history"
+    with pytest.raises(ValidationError):
+        parse_server_message(json.dumps(registered))
     history = result("worker.history", error="history_unreadable")
     heartbeat = message([history], control="heartbeat", **IDENTITY)
     assert parse_worker_message(json.dumps(heartbeat)).payload[0].method == "worker.history"
-    register = message([], control="register", connection_epoch=None, worker_id="w", recovery=None,
-                       inference=None)
+    register = message([], control="register", connection_epoch=None, worker_id="w", recoveries=[],
+                       inference=None, workspace="b" * 32, repo_workspace_limit=2,
+                       inventory=INVENTORY, inventory_complete=True)
     assert parse_worker_message(json.dumps(register)).payload == []
     query["arguments"] = {"session_id": "https://ampcode.com/T-x"}
     with pytest.raises(ValidationError):
-        parse_server_message(json.dumps(registered))
+        parse_server_message(json.dumps(message([query])))
 
 
 def test_inference_fences_and_cancel_control_are_required_and_directional() -> None:
@@ -379,12 +395,14 @@ def test_inference_fences_and_cancel_control_are_required_and_directional() -> N
 
 def test_infer_only_registration_cannot_claim_coding_recovery() -> None:
     data = message([], control="register", connection_epoch=None, worker_id="mini",
-                   recovery=None, inference={"adapter_version": "bub/0.4.1"})
+                   recoveries=[], inference={"adapter_version": "bub/0.4.1"},
+                   workspace="b" * 32, repo_workspace_limit=2,
+                   inventory=INVENTORY, inventory_complete=True)
     ordinary = parse_worker_message(json.dumps(data))
     assert isinstance(ordinary, Register) and ordinary.execute
     mini = parse_worker_message(json.dumps({**data, "execute": False}))
     assert isinstance(mini, Register) and not mini.execute
-    for fields in ({"recovery": {**IDENTITY, "state": "started"}}, {"execute": "false"},
+    for fields in ({"recoveries": [{**IDENTITY, "state": "started"}]}, {"execute": "false"},
                    {"payload": [call("server.execution_started", IDENTITY)]}):
         with pytest.raises(ValidationError):
             parse_worker_message(json.dumps({**data, "execute": False, **fields}))

@@ -55,8 +55,8 @@ async def test_failed_initial_round_stops_workspace_before_resume(
     recording_resources,
     monkeypatch,
 ):
-    # A failed INITIAL has an acknowledged journal but can still own a dirty checkout.
-    # Exercise the real stop/recycle path, then create and push both retained round refs.
+    # A failed INITIAL retains dirty files. Stop proves writer exit, while the next
+    # controller generation prepares the checkout and preserves both round refs.
     from app.contracts.protocol import (
         PROTOCOL_VERSION,
         AssignmentArguments,
@@ -66,6 +66,7 @@ async def test_failed_initial_round_stops_workspace_before_resume(
     from app.domain.models import JobState
     from app.worker.execution.executor import WorkerExecutor
     from app.worker.execution.lifecycle import WorkerExecution
+    from app.worker.execution.workspaces import RepositoryWorkspaces
     from app.worker.state.execution import ExecutionState
     from tests.github import RecordingGitHub
     from tests.test_coordinator import coordinator
@@ -79,26 +80,35 @@ async def test_failed_initial_round_stops_workspace_before_resume(
     _git("push", "origin", "trunk", cwd=seed)
     service = ControlService(database=store.database)
     flow = service.on_trigger("owner/repo", 8, 42)
-    store.workers.worker_connected("worker-a", PROTOCOL_VERSION, "epoch")
+    pool = RepositoryWorkspaces(root, "worker-a", limit=1)
+    default = pool.initialize()
+    store.workers.worker_connected("worker-a", PROTOCOL_VERSION, "epoch",
+                                   workspace=default.workspace, repo_workspace_limit=1)
+    for item in await pool.provision(flow.repo):
+        assert store.workers.report_workspace("worker-a", "epoch", item)
     job = store.workers.assign_job("worker-a", "first", "epoch")
     subject = coordinator(store, RecordingGitHub())
     task = await subject.prepare(job)
     assert isinstance(task, InitialTask)
     assert store.workers.start_assignment(job.id, task.attempt_id, "worker-a", "first", "epoch")
-    state = ExecutionState(root)
-    executor = WorkerExecutor(root, RecordingAgent(), worker_id="worker-a", state=state)
+    state = ExecutionState(root, flow.id)
+    executor = WorkerExecutor(root, RecordingAgent(), worker_id="worker-a", state=state, workspaces=pool)
     state.record_received(
         AssignmentArguments(
             flow_id=flow.id,
             job_id=job.id,
             assignment_token="first",
+            workspace=job.workspace,
+            generation=job.generation,
             task=task,
         )
     )
     state.record_started()
-    binding = await executor.workspaces.acquire(
+    binding = await pool.claim(
         flow.repo,
         flow.id,
+        job.workspace,
+        job.generation,
         base_branch=task.base_branch,
         remote="origin",
         push_token=assignment_secret().push.token,
@@ -118,13 +128,19 @@ async def test_failed_initial_round_stops_workspace_before_resume(
     )
     assert await subject.results.apply(job.id) is JobState.FAILED
     state.acknowledge(job.id, JobState.FAILED)
+    state.reconcile_acknowledgement()
+    for item in pool.inventory():
+        assert store.workers.report_workspace("worker-a", "epoch", item)
     assert store.workers.get_flow_execution(flow.id).released_at is None
     store.workers.worker_disconnected("worker-a", connection_epoch="epoch")
     later = store.now() + timedelta(days=1)
     monkeypatch.setattr(store._db, "_clock", lambda: later)
     store.workers.sweep_expired_assignments()
     assert store.workers.get_flow_execution(flow.id).released_at is None
-    store.workers.worker_connected("worker-a", PROTOCOL_VERSION, "epoch")
+    store.workers.worker_connected("worker-a", PROTOCOL_VERSION, "epoch",
+                                   workspace=default.workspace, repo_workspace_limit=1)
+    for item in pool.inventory():
+        assert store.workers.report_workspace("worker-a", "epoch", item)
     service.cancel(store.flows.get_flow(flow.id))
     assert store.flows.get_flow(flow.id).state is FlowState.FINALIZING
     with pytest.raises(ValueError, match="archived"):
@@ -133,7 +149,16 @@ async def test_failed_initial_round_stops_workspace_before_resume(
     owner = WorkerExecution(worker_id="worker-a", executor=executor, state=state)
     receipt = await owner.stop(stop.fence())
     assert store.stops.confirm("worker-a", receipt, "epoch")
+    assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
+    assert (workspace / "README.md").read_text() == "unfinished old-round changes"
+    assert (workspace / "unfinished.txt").exists()
+    assert pool.lookup(flow.repo, flow.id) == binding
+    assert next(w for w in store.workers.list_workspaces("worker-a")
+                if w.workspace == job.workspace).generation == binding.generation + 1
     owner.on_stop_accepted(stop.fence())
+    state.reconcile_acknowledgement()
+    for item in pool.inventory():
+        assert store.workers.report_workspace("worker-a", "epoch", item)
     assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
     service.resume(flow, expected_round_no=1)
     next_job = store.workers.assign_job("worker-a", "second", "epoch")
@@ -145,14 +170,18 @@ async def test_failed_initial_round_stops_workspace_before_resume(
             flow_id=flow.id,
             job_id=next_job.id,
             assignment_token="second",
+            workspace=next_job.workspace,
+            generation=next_job.generation,
             task=next_task,
         )
     )
     assert state.load().workspace is None
     state.record_started()
-    next_binding = await executor.workspaces.acquire(
+    next_binding = await pool.claim(
         flow.repo,
         flow.id,
+        next_job.workspace,
+        next_job.generation,
         base_branch=next_task.base_branch,
         remote="origin",
         push_token=assignment_secret().push.token,

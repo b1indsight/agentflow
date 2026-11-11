@@ -53,9 +53,11 @@ Flow 使用 `queued/running/review/blocked/finalizing/archived` 六态；看板�
   触发、取消和 review 入库；PostgreSQL 是唯一运行时数据库，启动时初始化 schema。
 - **远程执行**：`flowtool serve` 管理状态、数据库和 GitHub 操作；`flowtool worker` 主动通过认证
   WebSocket 连接，执行 INITIAL、REVISION、ARCHIVE 任务；Judge 在 control 本地运行。
-  支持多 worker 公平调度，每个 worker 同时执行一个 job。
-- **执行环境与恢复**：Flow 生命周期独占 worker/repo，Attempt 保存本次运行和 session；
-  assignment 使用 worker/epoch/job/token 校验。未授权派发的任务可在租约到期后重排，已授权
+  支持多 worker 公平调度，一个 worker 可在不同 workspace 同时执行多个 job。
+  每 worker、每仓库的 workspace 上限默认 2，可配置为 3；按等待任务自动补充并登记具体目录。
+- **执行环境与恢复**：Flow 独占一个 worker 上的具体 workspace，Attempt 保存本次运行和 session；
+  assignment 使用 worker/workspace/generation/epoch/job/token 校验，逐 Flow journal 独立恢复。
+  未授权派发的任务可在租约到期后重排，已授权
   派发但缺少 Started 的未知执行不按未发送重排；Started 任务在
   recovery grace 内等待原 worker；worker journal 支持忙碌重连、serve 重启恢复与终态结果重放。
 - **Issue→PR 交付**：读取真实 Issue 和仓库默认分支，为 Codex 提供单仓库、短时 Contents write
@@ -90,7 +92,8 @@ Flow 使用 `queued/running/review/blocked/finalizing/archived` 六态；看板�
   并提供 cancel/retry 命令。已核验修订中被明确拒绝的通知可补发；结果不确定时拒绝直接 retry。
 - **取消与 drain**：cancel 持久化停止意图，worker 取消当前执行并回收其持有的 Codex/VCS
   进程组，清理未提交修改和未跟踪文件后把原 workspace 归还空闲池，保留目录及 ignored 缓存。
-  完成回收才发送停止凭据；停止凭据与已发送 effects 未确认前不释放绑定。
+  完成回收才发送停止凭据；停止凭据、已发送 effects 及本地 ACK 库存未结清前不释放绑定。
+  停止只影响目标 job；与合并同时发生时，原位置的下一代仍留给原 Flow 完成归档。
   drain 停止分配新 Flow，已有绑定继续收尾。未知旧执行保持阻塞，
   无强制释放入口，见[取消与停机](docs/operations/cancel-drain.md)。
 - **Server 镜像更新**：独立更新器监听仓库 Webhook，验签后持久写入主机 JSON 队列，后台核验发布、
@@ -188,16 +191,18 @@ Git/gh 设置，提交作者仍由 worker Git 配置决定。Amp 历史读取是
 原子 clone；已有 seed 保持原状，不自动 fetch/reset 或安装依赖。seed 必须有任务基线分支，
 不自动处理空远端、submodule 或 LFS。
 
-每个 worker 按仓库维护执行位置池：优先复用原 Flow 绑定和空闲完整副本，全部占用时增加临时
-Git worktree。`FLOWTOOL_WORKER_REPO_WORKSPACE_LIMIT=2` 设置每仓库总上限（正整数、最小 1，
-重启生效），seed 不计入。归档后完整副本归还池并保留 ignored 缓存；临时 worktree 注销并删除。
-达到上限、目录异常或所有权不明时拒绝执行，不自动清掉未知文件；旧未登记目录不迁移或接管。
-位置数量上限不限制单个缓存的字节数，也不改变 Flow 生命周期独占 worker 的调度。
+每个 worker 按仓库维护执行位置池。controller 按排队需求请求补充，worker 先创建并登记真实
+目录，调度再直接选择 `(worker_id, workspace)`。`FLOWTOOL_WORKER_REPO_WORKSPACE_LIMIT=2`
+设置每仓库上限（正整数、最小 1，重启生效）；设为 3 可同时绑定三个 Flow。不同仓库独立计数，
+seed 和默认推理 workspace 不计入。每个 Flow 独占一个 workspace，同一 worker 可在不同目录
+并行执行多个 job；review 保留原绑定，同一 Flow 的 job 串行。容量不足时新 Flow 排队。
+归档后完整副本保留 ignored 缓存，临时 worktree 注销删除；清理及业务 ACK 结清后才可复用。
+目录异常或所有权不明时保留证据，不自动清掉未知文件或接管未登记目录。数量上限不限制缓存字节数。
 
 每次 INITIAL、REVISION resume/fallback 都提供本轮 bot `gh` 包装、独立配置和 Git helper，
 不使用个人登录态；token 过期/权限不足即失败，不自动续期或扩权。worker 保持单仓库
 Contents write，PR 通过 MCP `open_pr` 请求 controler 校验后创建。包装不构成 OS 沙箱。
-当前 Codex/Amp 接入均使用 wire19 / journal5 / ResultInbox v1，serve 与 worker 的协议版本必须匹配。
+当前 Codex/Amp 接入均使用 wire20 / journal5 / ResultInbox v1，serve 与 worker 的协议版本必须匹配。
 通信统一为顶层控制和 typed call/result 列表；控制 ACK 仅确认接收，不表示业务提交。
 支持只读加载受限 v4 journal（内嵌 v14/v15 回执），正常保存时才升级，见 [Worker 更新](docs/deployment/worker-update.md#journal-直接前代兼容)。
 两个后端继承 worker 专用账号及任务仓库中原生 CLI 可发现的 skills/MCP，以及其自定义环境变量；
@@ -205,10 +210,11 @@ Contents write，PR 通过 MCP `open_pr` 请求 controler 校验后创建。包�
 首次执行使用当前 broker，修订时阻断旧 broker。control/worker、Git/GitHub 认证及父 agent 身份
 仍先过滤，再注入本轮能力。自定义秘密不保证全面脱敏；配置和隔离边界见[部署说明](docs/deployment/README.md#skills-与-mcp-继承)。
 
-推理使用 `worker_root/inference/answer-*` 下的新目录和新会话，不关联 GitHub、不 resume 编码会话，
+推理使用 `worker_root/inference/<workspace>/answer-*` 下的新目录和新会话，不关联 GitHub、不 resume 编码会话，
 也不授予 Flow MCP 或 GitHub capability。普通 worker 同时提供 execute/infer，无需绑定任何 repo
 即可接推理 Job。每个 worker 有一个独立推理槽，可以与编码同时运行；推理取消不停止编码。
-controller 托管的 bub mini worker 仅提供 infer，每次使用独立临时空目录，不创建仓库或编码 journal。
+controller 托管的 bub mini worker 仅提供 infer，启动时创建无仓库默认目录，每次请求使用其独立
+临时子目录；重连保留父目录，退出时清除，不创建仓库或编码 journal。
 worker root 位于 Git 仓库、worktree 或其符号链接内时不提供推理能力。仅分开 cwd 不构成沙箱：
 原生工具、用户配置和自定义凭据仍受下述专用账号/container/VM 隔离前提约束。
 
@@ -277,7 +283,10 @@ App 需有 Issues write 权限；初始化失败不阻塞服务 readiness，日�
 没有人工更正入口，不改变原归档时间、新轮次、Issue owner 或执行绑定。归档后才合并或顺序不明时只记事实。
 旧四态库启动会拒绝旧状态：先停止消费者与派发、备份数据库，再用 `scripts/migrate_flow_states.py`
 预检与显式迁移；存在未知执行、旧未完成计划或归属冲突时必须先核验，不能强制猜测归档。
-应用需 `--apply --expect-report <预检指纹>`；数据或 schema 变化后须重新预检。
+其中已应用且通过格式、身份与摘要校验的 v13 结果（不含 inference），会列入预检的 `inbox_conversions`，
+备份原行后仅把 `result_payload.protocol_version` 改为 14，正文和 digest 不变，与六态转换同事务提交。
+v14/v15 和 ResultInbox v1 不改；未应用或损坏的结果仍拒绝，不转换 worker journal 或在线协议。
+应用需 `--apply --expect-report <预检指纹>`；数据、schema 或迁移规则变化后须重新预检，旧脚本指纹不能复用。
 
 ## Web 控制台
 
@@ -347,10 +356,14 @@ M3 F3 及审查修复本地验证（2026-09-08）：真实 PostgreSQL 下 **502 
 响应丢失与重启恢复。Ruff、Mypy 与 sdist/wheel 构建通过；真实 GitHub App/worker 验收仍待执行，
 详见 [F3 审查修复记录](docs/plan/m3-archive-status.md#7-审查修复2026-09-08)。
 
-当前在线协议仅支持 **v16**，正常写入 worker journal **v5**、ResultInbox **v1**，数据库仍使用当前完整 schema。
+当前在线协议仅支持 **v20**，正常写入 worker journal **v5**、ResultInbox **v1**、workspace manifest **v2**。
+`workers` 使用 `(worker_id, workspace)` 复合主键；旧单行 worker schema 启动时明确拒绝，
+须在停写、备份后核对真实 worker-root 身份并显式迁移，不自动生成或猜造 workspace。
 合法 v4 journal 的 v14/v15 回执与已知旧 inbox 只读转换；下次原本需要的状态写入才写 v5。
 保留任务身份、原摘要、停止证据与工作区归属；未知、混合或损坏记录拒绝并保留，不自动清理。
-不支持 v3 / 协议 v13 或任意旧数据库转换；wire v15 不与 v16 在线互通。
+运行时不支持 v3 journal / 协议 v13，也不支持任意旧数据库转换；新旧 wire 不在线互通。
+四态离线迁移仅为已校验、已应用的 v13 数据库结果提供 v14 转换，不扩大 journal 或在线协议兼容范围。
+该迁移只转换 Flow 状态，保留旧执行表；完成后仍需单独解决 workspace schema 迁移。
 首次运行使用新数据库/schema 和新 worker root；受支持的升级保留原 root。
 本次协议切换需要协调 serve/worker 的维护窗口：停止新分配、等待活跃执行和外部 effects 收敛，
 备份并核对实际持久版本后再升级。写入新格式后不能直接降级旧二进制，详见[升级边界](docs/operations/upgrade.md)。
@@ -359,7 +372,8 @@ Worker 连接按实际 protocol 和认证结果处理，不匹配直接拒绝。
 [Worker 更新](docs/deployment/worker-update.md)。源码与容器继续按原部署方式更新。
 Worker 没有后台自动更新或切换握手；同版本重启仍保留冻结任务、结果摘要、effect ledger 与 journal 恢复能力。
 
-新 journal 在任务 ACK 后保留上一任务的 Flow 和 root 归属，成功归档 ACK 后才移除。不要更换
+每个 Flow 的 journal 独立存于 `journals/flow-<flow_id>.json`，runtime 扫描全部文件，不再使用
+`current.json` 路由。任务 ACK 后保留上一任务的 Flow 和 root 归属，成功归档 ACK 已写入 pool 后才移除。不要更换
 `FLOWTOOL_WORKER_ROOT`、复制 journal 到其他 root 或复用 worker ID 接管工作区。清理只处理
 池中登记且归属匹配的 `workspaces/<owner>/<repo>/<slot_id>`：归档时完整副本归还空闲池并保留
 ignored 缓存，临时 worktree 注销并删除；取消时两种工作区均清理未提交修改后保留并归还池。

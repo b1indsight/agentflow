@@ -18,11 +18,12 @@ def worker_message(*items: WorkerPayload, epoch: str) -> WorkerMessage:
     return WorkerMessage(**message_header(epoch), control=None, payload=list(items))
 
 
-def registered(*items: ServerPayload, epoch: str) -> Registered:
+def registered(*, epoch: str) -> Registered:
     return Registered(
         **message_header(epoch),
         control="registered",
-        payload=list(items),
+        payload=[],
         heartbeat_interval=60,
-        recovery=None,
+        recoveries=[],
+        ready=True,
     )

@@ -11,7 +11,6 @@ from pydantic import ValidationError
 from starlette.testclient import TestClient
 
 from app.contracts.console import ArchiveRequest, ResumeRequest
-from app.contracts.protocol import PROTOCOL_VERSION
 from app.controler.api import create_app
 from app.controler.console.sync import ConsoleSynchronizer
 from app.controler.workflow.service import ControlService
@@ -23,6 +22,7 @@ from app.persistence.console_sync import ConsoleSyncStore
 from app.telemetry.metrics import Metrics
 from tests.access import AccessIssuer
 from tests.test_cancel_drain import running
+from tests.workspace_fixtures import register_worker
 
 
 @pytest.fixture
@@ -434,9 +434,7 @@ def test_detail_explains_execution_facts_without_exposing_internal_errors(
         kind = JobKind.REVISION
     job = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
     if scenario != "queued":
-        store.workers.worker_connected(
-            "worker-safe", protocol_version=PROTOCOL_VERSION, connection_epoch="epoch-safe"
-        )
+        register_worker(store, "worker-safe", repo=flow.repo, epoch="epoch-safe")
         assert store.workers.assign_job("worker-safe", "private-assignment", "epoch-safe")
     delivery = store.deliveries.get_or_create_delivery(flow.id, "flow/7")
     delivery.pr_number = 17

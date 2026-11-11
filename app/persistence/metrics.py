@@ -23,7 +23,7 @@ WITH due_reconcile AS (
 )
 SELECT 'inbox' AS family, state AS a, '' AS b, count(*)::float8 AS value FROM webhook_inbox GROUP BY state
 UNION ALL SELECT 'jobs', kind, state, count(*) FROM jobs GROUP BY kind,state
-UNION ALL SELECT 'workers', status, '', count(*) FROM workers GROUP BY status
+UNION ALL SELECT 'workers', status, '', count(*) FROM workers WHERE repository IS NULL GROUP BY status
 UNION ALL SELECT 'bindings_active', '', '', count(*) FROM flow_executions WHERE released_at IS NULL
 UNION ALL SELECT 'archive_pending_age_seconds', '', '',
  COALESCE(GREATEST(0,extract(epoch FROM now()-min(j.created_at))),0)

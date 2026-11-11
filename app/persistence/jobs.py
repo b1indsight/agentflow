@@ -40,7 +40,7 @@ class JobStore(Repository):
                 " AND (state=%s OR (state='running' AND started_at IS NULL AND dispatch_authorized_at IS NULL"
                 " AND EXISTS (SELECT 1 FROM flows f WHERE f.id=jobs.flow_id AND f.archive_reason IS NOT NULL)))"
                 " AND result_received_at IS NULL RETURNING id)"
-                " UPDATE workers SET current_job_id=NULL,status=CASE WHEN status='busy' THEN 'online' ELSE status END"
+                " UPDATE workers SET current_job_id=NULL"
                 " WHERE current_job_id IN (SELECT id FROM retired)",
                 (
                     JobState.FAILED,
@@ -105,7 +105,8 @@ class JobStore(Repository):
             return connection.execute(
                 "SELECT 1 FROM jobs WHERE flow_id=%s AND id<>%s AND kind<>'inference'"
                 " AND (state=%s OR (result_received_at IS NOT NULL"
-                " AND result_applied_at IS NULL)) LIMIT 1",
+                " AND result_applied_at IS NULL) OR EXISTS (SELECT 1 FROM workers w"
+                " WHERE w.current_job_id=jobs.id)) LIMIT 1",
                 (flow_id, excluding_job_id, JobState.RUNNING),
             ).fetchone() is not None
 
@@ -315,42 +316,43 @@ class JobStore(Repository):
             ).fetchall()
 
     def complete_persisted_result(self, job_id: int, state: JobState) -> bool:
-        """Complete an inbox item after recovery applies its stored domain result."""
+        """Commit an inbox item and clear only claims with durable writer-exit evidence."""
 
         if state not in (JobState.DONE, JobState.FAILED):
             raise ValueError("persisted results can only complete terminal jobs")
         now = self._db.now()
-        with self._db.connection() as connection, connection.transaction():
-            owner = connection.execute(
-                "SELECT assigned_worker_id FROM jobs WHERE id=%s",
-                (job_id,),
-            ).fetchone()
-            if owner and owner["assigned_worker_id"]:
-                self._db._lock_worker(connection, owner["assigned_worker_id"])
+        candidate = self.get_job(job_id)
+        if candidate is None or candidate.kind is JobKind.INFERENCE:
+            return False
+        with self._db.transaction() as tx, tx.connection() as connection:
+            tx.lock_workflow(candidate.required_flow_id)
             completed = connection.execute(
                 "UPDATE jobs SET state=%s, result_applied_at=%s, updated_at=%s"
                 " WHERE id=%s AND state=%s AND result_received_at IS NOT NULL"
-                " AND kind<>'inference' AND result_applied_at IS NULL RETURNING assigned_worker_id",
+                " AND kind<>'inference' AND result_applied_at IS NULL"
+                " AND (assigned_worker_id IS NULL OR EXISTS (SELECT 1 FROM workers w"
+                " WHERE w.worker_id=jobs.assigned_worker_id AND w.workspace=jobs.workspace"
+                " AND w.generation=jobs.generation AND (w.current_job_id=jobs.id"
+                " OR (w.current_job_id IS NULL AND EXISTS (SELECT 1 FROM execution_stops s"
+                " WHERE s.job_id=jobs.id AND s.assignment_token=jobs.assignment_token"
+                " AND s.state IN ('stopped','confirmed'))))))"
+                " RETURNING assigned_worker_id",
                 (state, now, now, job_id, JobState.RUNNING),
             ).fetchone()
             if completed is not None:
+                # Unstarted control outcomes are preparation failures or explicit
+                # request-validation refusals, neither of which has a worker journal.
+                # A worker terminal proves exit; a started control failure does not.
                 connection.execute(
-                    "UPDATE workers SET status=CASE WHEN status IN (%s,%s) THEN %s"
-                    " ELSE %s END, current_job_id=NULL, last_seen_at=%s"
-                    " WHERE worker_id=%s AND current_job_id=%s",
-                    (
-                        WorkerStatus.OFFLINE,
-                        WorkerStatus.RECOVERING,
-                        WorkerStatus.OFFLINE,
-                        WorkerStatus.ONLINE,
-                        now,
-                        completed["assigned_worker_id"],
-                        job_id,
-                    ),
+                    "UPDATE workers w SET current_job_id=NULL FROM jobs j WHERE j.id=%s"
+                    " AND w.worker_id=j.assigned_worker_id AND w.workspace=j.workspace"
+                    " AND w.generation=j.generation AND w.current_job_id=j.id"
+                    " AND (j.result_payload->>'source'='worker' OR (j.started_at IS NULL"
+                    " AND j.result_payload->>'source'='control'))", (job_id,),
                 )
                 connection.execute(
                     "UPDATE flow_executions SET recovery_deadline=CASE WHEN EXISTS"
-                    " (SELECT 1 FROM workers WHERE worker_id=%s AND status=%s) THEN NULL ELSE %s END"
+                    " (SELECT 1 FROM workers WHERE repository IS NULL AND worker_id=%s AND status=%s) THEN NULL ELSE %s END"
                     " WHERE flow_id=(SELECT flow_id FROM jobs WHERE id=%s) AND released_at IS NULL",
                     (
                         completed["assigned_worker_id"],

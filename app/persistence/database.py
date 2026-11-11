@@ -95,7 +95,7 @@ class Database:
             raise RuntimeError("workflow lock requires a transaction")
         connection = self._bound_connection
         owners = (
-            "SELECT worker_id FROM workers WHERE worker_id IN"
+            "SELECT worker_id,workspace FROM workers WHERE worker_id IN"
             " (SELECT worker_id FROM flow_executions WHERE flow_id=%s)"
             " OR current_job_id IN (SELECT id FROM jobs WHERE flow_id=%s)"
             " OR current_inference_job_id IN (SELECT id FROM jobs WHERE flow_id=%s)"
@@ -103,13 +103,15 @@ class Database:
         while True:
             try:
                 with connection.transaction():
-                    locked = connection.execute(owners + " ORDER BY worker_id FOR UPDATE",
+                    locked = connection.execute(owners + " ORDER BY worker_id,workspace FOR UPDATE",
                                                 (flow_id, flow_id, flow_id)).fetchall()
                     with connection.cursor(row_factory=class_row(Flow)) as cursor:
                         flow = cursor.execute("SELECT * FROM flows WHERE id=%s FOR NO KEY UPDATE",
                                               (flow_id,)).fetchone()
                     current = connection.execute(owners, (flow_id, flow_id, flow_id)).fetchall()
-                    if not {row["worker_id"] for row in current} <= {row["worker_id"] for row in locked}:
+                    if not {(row["worker_id"], row["workspace"]) for row in current} <= {
+                        (row["worker_id"], row["workspace"]) for row in locked
+                    }:
                         # A claim can publish a new slot while this statement waits for
                         # the Flow. Release this savepoint's locks instead of taking the
                         # newly discovered worker after the Flow (a lock-order inversion).
@@ -129,9 +131,9 @@ class Database:
     def _lock_worker(connection: Connection[Row], worker_id: str) -> None:
         """Keep assignment writers ordered worker -> job/binding, like workflow completion."""
         connection.execute(
-            "SELECT worker_id FROM workers WHERE worker_id=%s FOR UPDATE",
+            "SELECT worker_id,workspace FROM workers WHERE worker_id=%s ORDER BY workspace FOR UPDATE",
             (worker_id,),
-        ).fetchone()
+        ).fetchall()
 
     @staticmethod
     def _lock_workers(connection: Connection[Row]) -> None:
@@ -140,11 +142,36 @@ class Database:
         Inference's local preference compares slots across workers. Lock in the same
         deterministic order as workflow locking, never skip a locked local candidate.
         """
-        connection.execute("SELECT worker_id FROM workers ORDER BY worker_id FOR UPDATE").fetchall()
+        connection.execute(
+            "SELECT worker_id,workspace FROM workers ORDER BY worker_id,workspace FOR UPDATE"
+        ).fetchall()
 
     def init_db(self) -> None:
         """Initialize the complete schema in its foreign-key dependency order."""
         with self.connection() as connection:
+            workers = connection.execute("SELECT to_regclass('workers') AS name").fetchone()
+            if workers is not None and workers["name"]:
+                primary = connection.execute(
+                    "SELECT array_agg(a.attname::text ORDER BY k.ordinality) AS columns"
+                    " FROM pg_constraint c CROSS JOIN LATERAL unnest(c.conkey)"
+                    " WITH ORDINALITY k(attnum,ordinality)"
+                    " JOIN pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=k.attnum"
+                    " WHERE c.conrelid='workers'::regclass AND c.contype='p'"
+                ).fetchone()
+                if primary is None or primary["columns"] != ["worker_id", "workspace"]:
+                    raise ValueError(
+                        "legacy worker schema: explicit workspace migration required; stop consumers"
+                        " and reconcile real worker-root workspace identities before upgrading"
+                    )
+                obsolete = connection.execute(
+                    "SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema()"
+                    " AND table_name='workers' AND column_name IN ('workspace_state','retired_generation')"
+                ).fetchone()
+                if obsolete is not None:
+                    raise ValueError(
+                        "obsolete workspace state schema: this unreleased schema requires explicit"
+                        " reconciliation before upgrading; automatic migration is not supported"
+                    )
             existing = connection.execute("SELECT to_regclass('flows') AS name").fetchone()
             if existing is not None and existing["name"]:
                 columns = connection.execute(

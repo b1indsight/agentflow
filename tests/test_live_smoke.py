@@ -11,13 +11,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.contracts.protocol import PROTOCOL_VERSION, ArchiveResult, Succeeded
+from app.contracts.protocol import ArchiveResult, Succeeded
 from app.controler.workflow.service import ControlService
 from app.domain.models import ArchiveReason, DeliveryState, FlowState, JobKind, JobState, utcnow
 from app.live_smoke import GitHubProbe, Pull, SmokeError, SmokeSession
 from app.persistence.activity import ActivityStore
 from tests.github import RecordingGitHub
 from tests.test_coordinator import coordinator
+from tests.workspace_fixtures import register_worker, report_settled
 
 
 class FakeGitHub:
@@ -172,10 +173,11 @@ async def test_core_pass_requires_three_verified_heads_and_matching_merge(
     delivery = store.deliveries.get_or_create_delivery(flow.id, "flow/7")
     delivery.state, delivery.pr_number = DeliveryState.OPEN, 8
     store.deliveries.update_delivery(delivery)
-    store.workers.worker_connected("worker-1", protocol_version=PROTOCOL_VERSION)
+    register_worker(store, "worker-1", repo=flow.repo)
     initial = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
     assert store.workers.assign_job("worker-1", "initial").id == initial.id
     assert store.workers.finish_assignment(initial.id, "worker-1", "initial", JobState.DONE)
+    report_settled(store, initial.id)
     remote = Pull(number=8, merged=False,
                   head={"sha": "a"*40, "ref": "flow/7", "repo": {"full_name": "owner/smoke"}},
                   base={"sha": "b"*40, "ref": "main", "repo": {"full_name": "owner/smoke"}})
@@ -220,6 +222,7 @@ async def test_core_pass_requires_three_verified_heads_and_matching_merge(
                     == "pending"
                 )
                 assert await subject.results.apply(archive.id) is JobState.DONE
+                report_settled(store, archive.id)
                 assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
                 assert ActivityStore(store.database).archived(flow.id, 1) is not None
             result = smoke.observe(

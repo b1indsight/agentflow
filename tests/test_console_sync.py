@@ -20,7 +20,6 @@ from app.contracts.conversation import (
     ConversationPage,
     SessionHistory,
 )
-from app.contracts.protocol import PROTOCOL_VERSION
 from app.controler.console.sync import ConsoleSynchronizer
 from app.controler.workers.conversation import ConversationService
 from app.controler.workflow.service import ControlService
@@ -30,6 +29,7 @@ from app.persistence.activity import ActivityStore
 from app.persistence.console import ConsoleStore
 from app.persistence.console_sync import ConsoleSyncStore, SyncClaim
 from app.persistence.store import Store
+from tests.workspace_fixtures import register_worker
 
 
 def only_worker(database):
@@ -108,7 +108,7 @@ def test_reconnect_and_publication_use_the_same_lock_order(store):
     # Reconnecting a bound worker enqueues sources before refreshing its execution.
     # Hold publication first, then finish while the reconnect waits on that lock.
     flow = store.flows.create_flow("owner/repo", 7, 42)
-    store.workers.worker_connected("w", PROTOCOL_VERSION, "old")
+    register_worker(store, "w", repo=flow.repo, epoch="old")
     store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
     assert store.workers.assign_job("w", "token", "old") is not None
     only_worker(store._db)
@@ -121,7 +121,7 @@ def test_reconnect_and_publication_use_the_same_lock_order(store):
         with store.transaction() as tx, tx.connection() as connection:
             connection.execute("SET LOCAL statement_timeout='5s'")
             backend.put(connection.info.backend_pid)
-            tx.workers.worker_connected("w", PROTOCOL_VERSION, "new")
+            register_worker(tx, "w", repo=flow.repo, epoch="new")
 
     with ThreadPoolExecutor(max_workers=1) as pool:
         with store._db.transaction() as tx, tx.connection() as connection:

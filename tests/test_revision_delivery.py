@@ -80,7 +80,9 @@ async def revision_workspace(tmp_path):
     managed_seed.parent.mkdir(parents=True)
     shutil.move(seed, managed_seed)
     pool = RepositoryWorkspaces(root, "w", limit=2)
-    binding = await pool.acquire("owner/repo", 1, base_branch="main", remote="origin", push_token=None)
+    location = (await pool.provision("owner/repo"))[1]
+    binding = await pool.claim("owner/repo", 1, location.workspace, location.generation,
+                               base_branch="main", remote="origin", push_token=None)
     target = pool.path(binding)
     _git("checkout", "-b", "flow/1", cwd=target)
     _git("push", "origin", "flow/1", cwd=target)
@@ -98,12 +100,13 @@ async def revision_workspace(tmp_path):
         repository="owner/repo", token=SecretStr("fresh-token"),
         expires_at=datetime.now(UTC) + timedelta(minutes=30),
     ))
-    journal = ExecutionState(root)
+    journal = ExecutionState(root, 1)
     journal.record_received(
-        AssignmentArguments(job_id=1, flow_id=1, assignment_token="token", task=task, secret=secret)
+        AssignmentArguments(job_id=1, flow_id=1, assignment_token="token", task=task, secret=secret,
+                            workspace=binding.slot_id, generation=binding.generation)
     )
     journal.record_started()
-    return root, target, task, secret
+    return root, target, task, secret, pool
 
 
 class RevisionAgent:
@@ -139,7 +142,9 @@ class RevisionAgent:
 ])
 async def test_revision_verifies_real_git_delivery(revision_workspace, monkeypatch, behavior, success):
     # A successful process can leave unpushed or dirty work; neither closes review feedback.
-    root, repo, task, secret = revision_workspace
+    root, repo, task, secret, pool = revision_workspace
+    binding = pool.lookup(task.repo, task.flow_id)
+    before = pool.manifest_path.read_bytes()
     agent = RevisionAgent(repo, behavior)
     if behavior == "noop":
         resume = agent.resume
@@ -155,8 +160,11 @@ async def test_revision_verifies_real_git_delivery(revision_workspace, monkeypat
             return await resume(*args, **kwargs)
 
         monkeypatch.setattr(agent, "resume", long_resume)
-    result = await WorkerExecutor(root, agent, state=ExecutionState(root), worker_id="w").execute(task, secret, tool_caller=RecordingToolCaller())
+    result = await WorkerExecutor(root, agent, state=ExecutionState(root, 1), worker_id="w",
+                                   workspaces=pool).execute(task, secret, tool_caller=RecordingToolCaller())
     assert (result.exit_code == 0) is success
+    assert pool.manifest_path.read_bytes() == before
+    assert ExecutionState(root, 1).load().workspace == binding
     assert agent.calls[0][1].github.token.get_secret_value() == "fresh-token"
     assert "flow.open_pr" not in agent.calls[0][2]
     if success:
@@ -171,10 +179,11 @@ async def test_revision_verifies_real_git_delivery(revision_workspace, monkeypat
 async def test_fallback_only_when_execution_is_known_not_to_have_started(
     revision_workspace, session, behavior, expected,
 ):
-    root, repo, task, secret = revision_workspace
+    root, repo, task, secret, pool = revision_workspace
     task = task.model_copy(update={"session_id": session})
     agent = RevisionAgent(repo, behavior)
-    result = await WorkerExecutor(root, agent, state=ExecutionState(root), worker_id="w").execute(task, secret, tool_caller=RecordingToolCaller())
+    result = await WorkerExecutor(root, agent, state=ExecutionState(root, 1), worker_id="w",
+                                   workspaces=pool).execute(task, secret, tool_caller=RecordingToolCaller())
     assert [call[0] for call in agent.calls] == expected
     assert all(call[1].mcp_url is None and call[1].mcp_token is None for call in agent.calls)
     if expected[-1] == "start":
@@ -185,14 +194,15 @@ async def test_fallback_only_when_execution_is_known_not_to_have_started(
 
 @pytest.mark.parametrize("problem", ["baseline", "dirty"])
 async def test_revision_preflight_rejects_before_model_execution(revision_workspace, problem):
-    root, repo, task, secret = revision_workspace
+    root, repo, task, secret, pool = revision_workspace
     if problem == "baseline":
         _git("commit", "--allow-empty", "-m", "Concurrent change", cwd=repo)
         _git("push", "origin", task.branch, cwd=repo)
     else:
         (repo / "uncommitted").write_text("keep me")
     agent = RevisionAgent(repo)
-    result = await WorkerExecutor(root, agent, state=ExecutionState(root), worker_id="w").execute(task, secret, tool_caller=RecordingToolCaller())
+    result = await WorkerExecutor(root, agent, state=ExecutionState(root, 1), worker_id="w",
+                                   workspaces=pool).execute(task, secret, tool_caller=RecordingToolCaller())
     assert result.exit_code != 0
     assert agent.calls == []
 
@@ -363,7 +373,7 @@ async def test_revision_rejects_fabricated_or_conflicting_feedback(revision_cont
 async def test_revision_checks_real_jj_repository(revision_workspace, behavior):
     if shutil.which("jj") is None:
         pytest.skip("jj is not installed")
-    _, repo, task, _ = revision_workspace
+    _, repo, task, _, _ = revision_workspace
     env = os.environ | {"JJ_USER": "FlowTool Test", "JJ_EMAIL": "flowtool@example.test"}
     await _jj("git", "init", "--colocate", cwd=repo, env=env)
     await _jj("bookmark", "track", task.branch, "--remote=origin", cwd=repo, env=env)
@@ -387,7 +397,7 @@ async def test_revision_checks_real_jj_repository(revision_workspace, behavior):
 
 
 async def test_dirty_repository_after_session_rejection_does_not_fallback(revision_workspace):
-    root, repo, task, secret = revision_workspace
+    root, repo, task, secret, pool = revision_workspace
 
     class DirtyRejection(RevisionAgent):
         async def resume(self, *args, **kwargs):
@@ -395,7 +405,8 @@ async def test_dirty_repository_after_session_rejection_does_not_fallback(revisi
             raise SessionUnavailable("rejected")
 
     agent = DirtyRejection(repo)
-    result = await WorkerExecutor(root, agent, state=ExecutionState(root), worker_id="w").execute(task, secret, tool_caller=RecordingToolCaller())
+    result = await WorkerExecutor(root, agent, state=ExecutionState(root, 1), worker_id="w",
+                                   workspaces=pool).execute(task, secret, tool_caller=RecordingToolCaller())
     assert result.exit_code != 0
     assert agent.calls == []
     assert (repo / "uncertain-work").read_text() == "preserve"

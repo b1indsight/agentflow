@@ -6,9 +6,11 @@ import pytest
 from fastapi import WebSocketDisconnect
 from pydantic import SecretStr
 
+from app.communication.dispatch import Dispatcher
 from app.communication.gateway import Gateway
 from app.contracts.conversation import ConversationFailure, HistoryQuery
 from app.contracts.protocol import (
+    MAX_PAYLOAD_ITEMS,
     AcceptResultArguments,
     AcceptResultRequest,
     AcceptResultResponse,
@@ -31,6 +33,7 @@ from app.contracts.protocol import (
     RecoveryRejected,
     Register,
     Registered,
+    ResultAcceptance,
     ServerMessageUnion,
     ServerPayload,
     Started,
@@ -51,6 +54,7 @@ from app.contracts.protocol import (
 from app.contracts.receipts import ResultInbox, decode_result_inbox
 from app.contracts.result_models import ResultPending
 from app.controler.runtime import ServerRuntime
+from app.controler.workers.callbacks import ServerCallbacks
 from app.controler.workers.conversation import ConversationBroker
 from app.controler.workers.transport import serve_worker
 from app.controler.workflow.coordinator import JobCoordinator
@@ -68,21 +72,32 @@ from app.persistence.store import Store
 from tests.persistence_fakes import RepositoryViews
 from tests.test_communication_session import Socket
 from tests.test_conversation_history import SESSION
-from tests.worker_fakes import NoPendingStops, connected_worker, result_application, server_runtime
+from tests.worker_fakes import (
+    InventoryStore,
+    NoPendingStops,
+    connected_worker,
+    inventory,
+    result_application,
+    server_callbacks,
+    server_runtime,
+)
 
 
 def register_message(
     worker_id: str = "worker-1",
     recovery: RecoveryDescriptor | None = None,
-    payload: list[WorkerPayload] | None = None,
 ) -> Register:
     return Register(
         **message_header(None),
         control="register",
         worker_id=worker_id,
-        recovery=recovery,
+        workspace="b" * 32,
+        repo_workspace_limit=2,
+        inventory=inventory(),
+        recoveries=[recovery] if recovery is not None else [],
+        inventory_complete=True,
         inference=None,
-        payload=payload or [],
+        payload=[],
     )
 
 
@@ -114,13 +129,15 @@ def sent_items(raws: list[str]) -> list[ServerPayload]:
     return [item for raw in raws for item in parse_server_message(raw).payload]
 
 
-class RecordingStore(RepositoryViews, Store):
+class RecordingStore(InventoryStore, RepositoryViews, Store):
     @property
     def stops(self) -> StopStore:
         return NoPendingStops()
 
     def __init__(self) -> None:
-        self.job = Job(id=5, flow_id=3, kind=JobKind.INITIAL, state=JobState.QUEUED)
+        self.job = Job(id=5, flow_id=3, kind=JobKind.INITIAL, state=JobState.QUEUED,
+                       workspace="a" * 32, generation=1)
+        self.inventory_items = {}
         self.started = False
         self.finished: JobState | None = None
         self.requeued = False
@@ -134,14 +151,15 @@ class RecordingStore(RepositoryViews, Store):
     def get_delivery(self, flow_id: int) -> FlowDelivery | None:
         return None
 
-    def get_worker_execution(self, worker_id: str):
+    def get_worker_execution(self, worker_id: str, workspace: str):
         return None
 
     def worker_connected(self, worker_id: str, protocol_version: int, connection_epoch: str = "",
-                         *, execute: bool = True):
+                         *, execute: bool = True, workspace: str, repo_workspace_limit: int):
         self.presence[worker_id] = "online"
         self.connection_epoch = connection_epoch
-        return connected_worker(worker_id, protocol_version, connection_epoch, execute=execute)
+        return connected_worker(worker_id, protocol_version, connection_epoch, execute=execute,
+                                workspace=workspace, repo_workspace_limit=repo_workspace_limit)
 
     def worker_disconnected(
         self,
@@ -264,6 +282,8 @@ class RecordingCoordinator(JobCoordinator):
             job_id=job.id,
             flow_id=job.flow_id,
             assignment_token=token,
+            workspace=job.workspace,
+            generation=job.generation,
             task=task,
             secret=AssignmentSecret(
                 push=PushSecret(
@@ -722,7 +742,7 @@ class RecoveringSocket(ScriptedSocket):
     async def send_text(self, raw):
         await super().send_text(raw)
         message = parse_server_message(raw)
-        if isinstance(message, Registered) and message.recovery is not None:
+        if isinstance(message, Registered) and message.recoveries:
             self.resumed.set()
 
     async def receive_text(self) -> str:
@@ -743,15 +763,15 @@ class RecoveringSocket(ScriptedSocket):
                 message
                 for raw in self.sent
                 if isinstance((message := parse_server_message(raw)), Registered)
-                and message.recovery is not None
+                and message.recoveries
             )
-            assert resumed.recovery is not None
+            assert len(resumed.recoveries) == 1
             return Heartbeat(
                 **message_header(resumed.connection_epoch),
                 control="heartbeat",
                 payload=[],
-                job_id=resumed.recovery.job_id,
-                assignment_token=resumed.recovery.assignment_token,
+                job_id=resumed.recoveries[0].job_id,
+                assignment_token=resumed.recoveries[0].assignment_token,
             ).model_dump_json()
         raise WebSocketDisconnect()
 
@@ -779,9 +799,9 @@ async def test_gateway_resumes_started_assignment_under_a_new_epoch() -> None:
     resumed = next(
         message
         for message in messages
-        if isinstance(message, Registered) and message.recovery is not None
+        if isinstance(message, Registered) and message.recoveries
     )
-    assert resumed.recovery is not None and resumed.recovery.action == "resume"
+    assert len(resumed.recoveries) == 1 and resumed.recoveries[0].action == "resume"
     assert store.resumed is True
     assert resumed.connection_epoch == store.connection_epoch
     assert store.job.state is JobState.RUNNING
@@ -990,16 +1010,18 @@ async def test_control_and_payload_keep_order_and_trailing_acceptance(batch):
 
 
 @pytest.mark.parametrize("acceptance", ["later", "heartbeat", "absent", "write_failed"])
-async def test_terminal_waits_for_actual_acceptance_write_before_next_assignment(acceptance):
+async def test_terminal_waits_for_actual_acceptance_write_before_retiring_assignment(acceptance, monkeypatch):
     applied = asyncio.Event()
+    callbacks = []
+
+    class ObservedCallbacks(ServerCallbacks):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            callbacks.append(self)
+
+    monkeypatch.setattr("app.controler.runtime.ServerCallbacks", ObservedCallbacks)
 
     class ObservedStore(RecordingStore):
-        assignments = 0
-
-        def assign_job(self, worker_id, token, connection_epoch=""):
-            self.assignments += 1
-            return super().assign_job(worker_id, token, connection_epoch)
-
         def heartbeat_assignment(self, job_id, worker_id, token, connection_epoch=""):
             # The real repository only extends leases while the job is RUNNING.
             return self.job.state is JobState.RUNNING and super().heartbeat_assignment(
@@ -1023,7 +1045,7 @@ async def test_terminal_waits_for_actual_acceptance_write_before_next_assignment
                 return worker_message(epoch, terminal).model_dump_json()
             if self._step == 4:
                 await applied.wait()
-                assert store.assignments == 1
+                assert set(callbacks[0].current) == {args.job_id}
                 assert not any(isinstance(item, AcceptResultResponse) for item in sent_items(self.sent))
                 if acceptance == "heartbeat":
                     # A heartbeat already in flight can arrive after commit but before A.
@@ -1059,7 +1081,7 @@ async def test_terminal_waits_for_actual_acceptance_write_before_next_assignment
     handler.results._apply = commit
     await serve_worker(socket, serve=handler.serve_worker_session, worker_tokens={"worker-1": "worker-secret"})
     assert store.job.result_applied_at is not None
-    assert (store.assignments > 1) == (acceptance in {"later", "heartbeat"})
+    assert (store.job.id not in callbacks[0].current) == (acceptance in {"later", "heartbeat"})
 
 
 @pytest.mark.parametrize(
@@ -1119,7 +1141,6 @@ async def test_registration_only_answers_actual_committed_acceptance(committed, 
             state="failed",
             result_digest=terminal_digest(terminal),
         ),
-        payload=[accept] if with_accept else [],
     )
 
     class RegistrationSocket(WaitingSocket):
@@ -1132,18 +1153,23 @@ async def test_registration_only_answers_actual_committed_acceptance(committed, 
                 self._step += 1
                 return initial.model_dump_json()
             await self.registered.wait()
+            if self._step == 1 and with_accept:
+                self._step += 1
+                assert not any(isinstance(item, AcceptResultResponse) for item in sent_items(self.sent))
+                return worker_message(store.connection_epoch, accept).model_dump_json()
             raise WebSocketDisconnect()
 
         async def send_text(self, raw):
             await super().send_text(raw)
             if isinstance(parse_server_message(raw), Registered):
+                apply.assert_not_awaited()
                 self.registered.set()
 
     socket, handler = RegistrationSocket(), handler_for(store)
-    apply = AsyncMock(side_effect=AssertionError("registration must not apply a pending inbox"))
+    apply = AsyncMock(side_effect=ResultPending("result application is not committed"))
     handler.results._apply = apply
     await serve_worker(socket, serve=handler.serve_worker_session, worker_tokens={"worker-1": "worker-secret"})
-    apply.assert_not_awaited()
+    assert apply.await_count == int(with_accept and not committed)
     responses = [item for item in sent_items(socket.sent) if isinstance(item, AcceptResultResponse)]
     assert len(responses) == int(committed and with_accept)
     if responses:
@@ -1151,9 +1177,8 @@ async def test_registration_only_answers_actual_committed_acceptance(committed, 
     registered = next(
         message for message in map(parse_server_message, socket.sent) if isinstance(message, Registered)
     )
-    assert (registered.recovery is None) == committed
-    if registered.recovery is not None:
-        assert registered.recovery.action == "replay"
+    assert len(registered.recoveries) == 1
+    assert registered.recoveries[0].action == "replay" and registered.ready
 
 
 async def test_duplicate_prior_job_result_does_not_retire_current_assignment():
@@ -1216,6 +1241,54 @@ async def test_duplicate_prior_job_result_does_not_retire_current_assignment():
     responses = [item for item in sent_items(socket.sent) if isinstance(item, AcceptResultResponse)]
     assert [item.result.job_id for item in responses] == [4, 5]
     assert store.job.result_applied_at is not None and socket.closed == 1000
+
+
+async def test_split_result_acceptance_orders_same_flow_successor_after_ack():
+    # Result commit clears the DB claim before A arrives. Preparation may finish, but
+    # dispatch must remain behind the ACK that makes this Flow's journal replaceable.
+    store = RecordingStore()
+    callbacks = server_callbacks(handler_for(store), "worker-1", "epoch")
+    callbacks.session.send = AsyncMock(return_value=True)
+    routes = Dispatcher[WorkerMessageUnion]()
+    callbacks.bind(routes)
+    routes.freeze()
+    callbacks.on_published()
+    await callbacks.on_opened()
+    job = store.assign_job("worker-1", "token", "epoch")
+    arguments = await callbacks.coordinator.prepare_for_assignment(job, "worker-1", "token", "epoch")
+    await callbacks._on_prepared(job, "token", arguments)
+    started = Started(**call_header(), method="server.execution_started",
+                      arguments=ExecutionIdentity(job_id=job.id, assignment_token="token"))
+    await callbacks.on_started(started, worker_message("epoch", started))
+    terminal, accept = terminal_items(Failed(job_id=job.id, assignment_token="token", error="failed"))
+    await callbacks.on_result(terminal, worker_message("epoch", terminal))
+    following = job.model_copy(update={"id": 6, "assignment_token": "next", "state": JobState.RUNNING})
+    prepared = arguments.model_copy(update={"job_id": 6, "assignment_token": "next"})
+    preparation = asyncio.create_task(AsyncMock(return_value=prepared)())
+    await preparation
+    callbacks.preparing[following.id] = following, "next", preparation
+    await callbacks.poll()
+    assert following.id in callbacks.preparing and following.id not in callbacks.current
+    await callbacks.on_accept_result(accept, worker_message("epoch", accept))
+    await callbacks.poll()
+    sent = [item for call in callbacks.session.send.call_args_list for item in call.args[0].payload]
+    assert [type(item) for item in sent] == [Assignment, AcceptResultResponse, Assignment]
+    assert set(callbacks.current) == {following.id} and not callbacks.preparing
+
+
+async def test_result_response_cache_is_bounded_and_idempotent_without_inventory_ack():
+    callbacks = server_callbacks(handler_for(RecordingStore()), "worker-1", "epoch")
+    callbacks.session.send = AsyncMock(return_value=True)
+    for job_id in range(1, MAX_PAYLOAD_ITEMS * 3):
+        reply = AcceptResultResponse(
+            **result_header(call_header()["message_id"]), method="server.accept_result",
+            result=ResultAcceptance(job_id=job_id, assignment_token="token", state="done"),
+        )
+        await callbacks._send(reply)
+        await callbacks._send(reply.model_copy(update={"message_id": call_header()["message_id"]}))
+        last = callbacks.session.send.call_args_list[-2:]
+        assert last[0].args[0].payload == last[1].args[0].payload
+    assert len(callbacks._sent) == MAX_PAYLOAD_ITEMS * 2
 
 
 async def test_recovery_rejection_is_correlated_to_register_before_registered():
