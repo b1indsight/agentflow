@@ -23,11 +23,13 @@ from app.persistence.activity import ActivityStore
 from app.persistence.jobs import JobStore
 from app.persistence.store import Store
 from tests.github import RecordingGitHub, record_call
+from tests.test_archive_recovery import legacy_merge
 from tests.test_github_client import AsyncEndpoint, settings
 from tests.test_merge import (
     merge_flow as merge_flow,  # noqa: PLC0414 - fixture re-export
 )
 from tests.test_merge import merge_payload
+from tests.test_workflow_transactions import accepted_coding
 
 
 def status(flow, **updates):
@@ -86,6 +88,51 @@ async def test_missing_merge_webhook_enters_the_existing_archive_path(store, mer
     # Polling does not manufacture webhook delivery IDs.
     with store.connection() as connection:
         assert connection.execute("SELECT COUNT(*) AS n FROM events").fetchone()["n"] == 0
+
+
+async def test_persisted_merged_backlog_archives_without_new_webhook_or_binding(
+    store, merge_flow, polling_resources,
+):
+    # Flow-4-like records are excluded from ordinary PR polling. Recover only complete
+    # current merge facts; an open execution failure and incomplete merge stay unchanged.
+    merge_flow.state = FlowState.BLOCKED
+    store.flows.update_flow(merge_flow)
+    running, _ = accepted_coding(store, receive=False)
+    released = store.flows.get_flow(running.flow_id)
+    legacy_merge(store, released)
+    with store.connection() as connection:
+        connection.execute("UPDATE flow_executions SET released_at=%s WHERE flow_id=%s",
+                           (store.now(), released.id))
+    binding = store.workers.get_flow_execution(released.id)
+    missing = store.flows.create_flow("owner/repo", 501, 42)
+    incomplete = store.flows.create_flow("owner/repo", 502, 42)
+    for flow in (missing, incomplete):
+        flow.state, flow.archive_reason = FlowState.BLOCKED, ArchiveReason.SUCCEEDED
+        store.flows.update_flow(flow)
+        delivery = store.deliveries.get_or_create_delivery(flow.id, flow.initial_branch)
+        delivery.pr_number, delivery.state = flow.issue_number, DeliveryState.MERGED
+        delivery.merged_at = datetime(2026, 9, 8, 8, tzinfo=UTC)
+        delivery.merge_commit_sha = "a" * 40 if flow.id == missing.id else None
+        store.deliveries.update_delivery(delivery)
+    github = GitHub(status(merge_flow, state="open", merged=False))
+    poller = subject(store, github, batch_size=1)
+    await poller._sweep()
+    assert store.flows.get_flow(released.id).state is FlowState.ARCHIVED
+    assert store.flows.get_flow(missing.id).state is FlowState.BLOCKED
+    await poller._sweep()
+    await poller._sweep()
+    for flow in (released, missing):
+        current = store.flows.get_flow(flow.id)
+        assert (current.state, current.archive_reason) == (FlowState.ARCHIVED, ArchiveReason.SUCCEEDED)
+        assert len([event for event in ActivityStore(store.database).history(flow.id, 1)
+                    if event.kind == "archive"]) == 1
+        notices = [job for job in store.jobs.list_jobs(flow.id)
+                   if job.result_payload and job.result_payload.get("version") == 2]
+        assert len(notices) == 1 and notices[0].assigned_worker_id is None
+    assert store.workers.get_flow_execution(released.id) == binding
+    assert store.workers.get_flow_execution(missing.id) is None
+    assert store.flows.get_flow(merge_flow.id) == merge_flow
+    assert store.flows.get_flow(incomplete.id) == incomplete
 
 
 async def test_merge_and_archive_roll_back_before_a_later_poll_can_retry(

@@ -12,6 +12,7 @@ from app.github.console import Observation
 from app.persistence.activity import ActivityStore
 from app.persistence.console import ConsoleStore
 from tests.test_cancel_drain import running
+from tests.workspace_fixtures import report_settled
 
 
 def test_archive_versions_snapshots_and_prior_interactions(store):
@@ -278,6 +279,8 @@ def test_finalizing_waits_for_stop_receipt_before_archiving_and_releasing_issue(
         control.retry(store.flows.get_flow(flow.id))
     receipt = ExecutionStopped(**stop.fence().model_dump(), execution_nonce="owned")
     assert store.stops.confirm("w", receipt, "epoch")
+    assert console.detail(flow.id).lifecycle is FlowState.FINALIZING
+    report_settled(store, job.id, epoch="epoch", stopped=True)
     archived = console.detail(flow.id)
     assert archived.phase == "archived" and archived.lifecycle is FlowState.ARCHIVED
     assert archived.archive_reason is ArchiveReason.ABANDONED and archived.worker_historical

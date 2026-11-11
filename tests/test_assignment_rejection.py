@@ -4,10 +4,11 @@ from datetime import timedelta
 
 import pytest
 
-from app.contracts.protocol import PROTOCOL_VERSION, ExecutionStopped, Failed
+from app.contracts.protocol import ExecutionStopped, Failed
 from app.contracts.receipts import decode_result_inbox
 from app.controler.workflow.service import ControlService
-from app.domain.models import JobKind
+from app.domain.models import FlowState, JobKind, JobState
+from tests.workspace_fixtures import register_worker, report_settled
 
 
 @pytest.mark.parametrize("race", [None, "started", "result", "stop", "epoch", "lease", "binding"])
@@ -16,7 +17,7 @@ def test_assignment_rejection_preserves_competing_evidence(store, race):
     attempt = store.flows.create_attempt(flow.id)
     flow.current_attempt_id = attempt.id
     store.flows.update_flow(flow)
-    store.workers.worker_connected("worker", PROTOCOL_VERSION, "epoch")
+    register_worker(store, "worker", repo=flow.repo, epoch="epoch")
     job = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
     assert store.workers.assign_job("worker", "token", "epoch")
     assert store.stops.authorize_dispatch(job.id, "worker", "token", "epoch")
@@ -33,7 +34,7 @@ def test_assignment_rejection_preserves_competing_evidence(store, race):
     elif race == "stop":
         ControlService(database=store.database).cancel(flow)
     elif race == "epoch":
-        store.workers.worker_connected("worker", PROTOCOL_VERSION, "replacement")
+        register_worker(store, "worker", repo=flow.repo, epoch="replacement")
     elif race == "lease":
         store._db._clock = lambda: job.created_at + timedelta(days=1)
     elif race == "binding":
@@ -47,6 +48,7 @@ def test_assignment_rejection_preserves_competing_evidence(store, race):
             ),
             "epoch",
         )
+        report_settled(store, job.id, epoch="epoch", stopped=True)
         assert store.workers.get_flow_execution(flow.id).released_at is not None
     before = store.jobs.get_job(job.id)
     rejected = store.workers.reject_assignment(job.id, "worker", "token", "epoch")
@@ -65,3 +67,9 @@ def test_assignment_rejection_preserves_competing_evidence(store, race):
         assert inbox.terminal.error == "assignment payload failed validation"
         assert after.started_at is None and after.result_applied_at is None
         assert not store.workers.reject_assignment(job.id, "worker", "token", "epoch")
+        # Explicit validation refusal created no local journal to ACK or stop.
+        assert store.jobs.complete_persisted_result(job.id, JobState.FAILED)
+        assert all(w.current_job_id is None for w in store.workers.list_workspaces("worker"))
+        ControlService(database=store.database).cancel(flow)
+        assert store.stops.pending_for_worker("worker") == []
+        assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED

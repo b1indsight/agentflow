@@ -122,22 +122,34 @@ async def test_every_payload_keeps_fifo_position_after_consumer_cancellation(con
         await session.close()
 
 
-@pytest.mark.parametrize("failure", ["disconnect", "count", "bytes"])
-async def test_read_failure_drains_buffered_messages_before_reporting_error(failure):
+@pytest.mark.parametrize("capacity", ["count", "bytes"])
+async def test_bounded_fifo_backpressures_bursts_then_drains_before_disconnect(capacity):
     socket = Socket()
     session = make_session(socket)
-    raw = packet(event("中" * 3_000_000 if failure == "bytes" else "event")).model_dump_json()
-    count = 1 if failure == "disconnect" else 2 if failure == "bytes" else 33
+    raw = packet(event("中" * 3_000_000 if capacity == "bytes" else "event")).model_dump_json()
+    count = 2 if capacity == "bytes" else 33
     try:
         for _ in range(count):
             socket.incoming.put_nowait(raw)
-        if failure == "disconnect":
-            socket.incoming.put_nowait(ConnectionError("lost"))
+        socket.incoming.put_nowait(ConnectionError("lost"))
         await asyncio.sleep(0)  # Reader fills the bounded FIFO before the consumer resumes.
-        for _ in range(32 if failure == "count" else 1):
+        assert len(session._inbox) == (1 if capacity == "bytes" else 32)
+        for _ in range(count):
             assert await session.next_event() == Packet.model_validate_json(raw)
-        with pytest.raises(ConnectionError if failure == "disconnect" else SessionOverflow):
+        with pytest.raises(ConnectionError, match="lost"):
             await session.next_event()
+    finally:
+        await session.close()
+
+
+async def test_single_oversized_message_is_rejected_without_delivery():
+    socket = Socket()
+    session = make_session(socket)
+    try:
+        socket.incoming.put_nowait(packet(event("中" * 6_000_000)).model_dump_json())
+        with pytest.raises(SessionOverflow):
+            await session.next_event()
+        assert socket.sent.empty()
     finally:
         await session.close()
 
@@ -295,20 +307,18 @@ async def test_ack_fifo_counts_inflight_write_until_success_and_reader_keeps_pro
 
 
 @pytest.mark.parametrize("control", [None, "heartbeat"])
-async def test_batch_item_capacity_is_preflighted_before_any_reply_or_control_effect(control):
+async def test_batch_waits_for_item_capacity_before_any_reply_or_control_effect(control):
     socket = Socket()
     session = make_session(socket)
     buffered = packet(*(event(str(i)) for i in range(31)))
+    following = packet(reply(query()), event("next"), control=control)
     try:
         socket.incoming.put_nowait(buffered.model_dump_json())
-        socket.incoming.put_nowait(
-            packet(reply(query()), event("overflow"), control=control).model_dump_json()
-        )
+        socket.incoming.put_nowait(following.model_dump_json())
         await asyncio.sleep(0)
+        assert socket.sent.empty()  # A not-yet-buffered control has no receipt ACK.
         assert await session.next_event() == buffered
-        with pytest.raises(SessionOverflow):
-            await session.next_event()
-        assert socket.sent.empty()  # The rejected control must not be acknowledged.
+        assert await session.next_event() == following
     finally:
         await session.close()
 
@@ -345,12 +355,15 @@ async def test_control_only_messages_still_have_a_bounded_business_inbox():
             # must account for this backlog of unprocessed lease decisions.
             receipt = Packet.model_validate_json(await asyncio.wait_for(socket.sent.get(), 1))
             assert receipt.ack_id == control.message_id
-        await socket.incoming.put(packet(control="heartbeat").model_dump_json())
+        following = packet(control="heartbeat")
+        await socket.incoming.put(following.model_dump_json())
         # Wait for the reader to process the extra message without draining its inbox.
         await socket.incoming.put(ConnectionError("reader barrier"))
         await asyncio.sleep(0)
+        assert len(session._inbox) == 32 and socket.sent.empty()
         assert [await session.next_event() for _ in controls] == controls
-        with pytest.raises(SessionOverflow):
+        assert await session.next_event() == following
+        with pytest.raises(ConnectionError, match="reader barrier"):
             await asyncio.wait_for(session.next_event(), 1)
     finally:
         await session.close()

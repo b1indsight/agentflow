@@ -239,3 +239,64 @@ PostgreSQL 验证冻结身份/围栏拒绝，真实 worker/control 往返验证�
 无异常时，合并后立即请求原 Worker 停止和回收；结果、ACK 与精确 inventory 到达后直接推进资源释放与重新分配，不增加固定等待，不等待恢复宽限期到期。保留“归档已完成、资源暂不可复用”的状态，只用于真实收尾窗口或 Worker 离线、进程退出未知、清理失败等异常情况；这些等待始终不影响业务归档。
 
 目前没有这条路径的生产耗时测量，不承诺具体秒数。实施验收记录停止、清理、ACK、库存确认和再次可分配的时间点，检查正常路径不依赖恢复定时器触发；异常路径继续验证目录隔离及业务状态不回退。
+
+### [003] — 2026-11-11 — 合并业务归档与资源结清已分离
+
+**决定已接受，代码已在本地实现并验证，尚未发布。** 按用户在[本次讨论](https://ampcode.com/threads/T-01a1c6c5-ea85-70e7-baf4-76ca5604a43b)的“实现”要求落实 [001]、[002]；保留前文作为历史基线。实现使用原计划 bookmark/PR，并整合[多工作区并发前置 PR #135](https://github.com/b1indsight/agentflow/pull/135)的库存、generation 与逐 Flow journal 契约；没有修改其余工作区。
+
+#### 已完成的行为与边界
+
+- [`record_merge`](../../app/controler/workflow/lifecycle.py) 在同一事务提交合并事实、必要停止请求、本地通知收件、唯一 archive activity 与 ARCHIVED/SUCCEEDED。缺失或已释放的绑定、原 Worker 离线和后续通知失败均不再阻塞业务归档。webhook、PR 对账、显式结束、merged retry 与已有合并积压共用这一入口。
+- [`MergeArchiveNotice`](../../app/contracts/receipts.py) 只允许 v2/control 持久收件，不加入 Worker wire；真实执行继续写 v1。保留已知历史 reader 和摘要，通知没有 Worker/token/workspace/generation。[`ResultApplication`](../../app/controler/workflow/results.py) 与 [`ResultEffects`](../../app/controler/workflow/effects.py) 验证不可变归档活动后发送，权限失败保留冻结缺项，显式 retry 不派发编码或再次清理。旧未知评论先核对共享 marker；已恢复轮次及新 Issue owner 的标签不被旧通知覆盖。
+- [`WorkerStore`](../../app/persistence/workers.py)、[`StopStore`](../../app/persistence/stops.py) 继续用原 job/token/epoch/workspace/generation/binding 时间与持久回执保护资源。精确停止 ACK 与库存结清才允许复用；释放失败连同 claim 清空一起回滚。只有明确未分配的本地通知可不参与资源阻塞，远端或畸形相似记录继续阻塞。
+- 旧已授权 ARCHIVE 保持唯一清理拥有者，按原冻结身份恢复；只领取/冻结但未授权派发的准备退役并保留原停止责任。归档后的编码不能开始或恢复，迟到执行结果保留事实及回执但不能改写交付、会话或业务结论。
+- [`merged_backlog`](../../app/persistence/reconciliation.py) 有界恢复当前轮次的完整 merge 事实，包含已释放/缺失绑定历史；仍 open 的执行失败与证据不全记录不变。`flow show` 分开显示业务归档、执行绑定释放与通知状态，不把绑定释放表述成物理清理确认。同 Flow 的 resume 仍等待旧绑定释放。
+- README、CHANGELOG 与[升级说明](../operations/upgrade.md#合并归档与资源回收分离)已更新。本次不增加 DDL，不改变 wire20/journal v5/manifest v2；新通知收件写入后禁止直接降级到旧 reader。
+
+#### 已执行的验收
+
+真实临时 PostgreSQL 下的完整 pytest、Ruff、Mypy、console 构建和前端测试均通过；`uv build --no-sources` 及包内 console assets 已核对。console API 覆盖“已归档且资源仍占用”和 resume 拒绝，未修改页面布局或样式。
+
+[`test_modern_merge_stops_original_worker_before_reusing_only_its_generation`](../../tests/test_archive_worker_recovery.py) 使用真实 Worker/control 会话与 Git checkout：合并提交时执行仍运行，随后停止并还原 tracked 文件、删除 untracked 输出；扣住停止 ACK 时 binding/claim 保留；送达 ACK 与精确 inventory 后，下一 Flow 直接取得同位置 generation+1。过程中没有推进测试时钟或调用 recovery sweep，相邻 checkout、job、binding、inventory 与 journal 字节保持不变，本地通知仍可处于 pending。该证据验证无固定宽限等待；没有测量生产清理耗时。
+
+其他回归覆盖事务回滚、并发重复 merge、离线/释放绑定、权限失败、重启与丢 ACK、历史 ARCHIVE、错误 token/epoch/generation、迟到结果及新轮次隔离。完整检查的复现入口如下；`FLOWTOOL_TEST_DATABASE_URL` 必须指向可销毁的测试 PostgreSQL：
+
+```bash
+python -m pytest -q --tb=short
+python -m ruff check app tests
+python -m mypy app tests
+python scripts/build_console.py
+npm --prefix app/controler/web test
+uv build --no-sources
+```
+
+#### 简化对照与保留理由
+
+在相同临时 PostgreSQL 与 fixture 下，使用进程内 pytest monkeypatch 插件逐项替换机制，产品文件不变。原实现的三个场景通过，以下简化版本分别触发预期失败；临时插件及仅用于实验的测试已移除。
+
+| 对照 | 复现设置与检查 | 实际结果及决定 |
+|---|---|---|
+| 归档时直接释放资源 | 将 `WorkerStore.release_flow_execution` 替换为无条件设置 `released_at`、清空该位置 `current_job_id` 并置 idle；用 `accepted_coding(receive=False)` 建立正在执行的 Flow，合并后再给另一 Flow 排 INITIAL 并领取。 | 第二 Flow 获得未清理的原 generation；保留停止/ACK/inventory 门槛和原子 claim 回滚。 |
+| 去掉已合并积压恢复 | 将 `ReconcileStore.merged_backlog` 替换为返回空列表；运行 `python -m pytest -q tests/test_reconcile.py::test_persisted_merged_backlog_archives_without_new_webhook_or_binding`。 | 已释放绑定的历史记录仍为 FINALIZING；保留有界扫描。 |
+| 依赖 Worker ARCHIVE 作为通知入口 | 将 `JobStore.record_merge_notice` 替换为仅 `enqueue_job(flow.id, JobKind.ARCHIVE)`；运行 `python -m pytest -q tests/test_archive_status.py::test_merge_notice_survives_permission_failure_without_worker`。 | 无 Worker 时没有持久 terminal，通知无法应用；保留独立 v2/control 收件，不伪造 Worker 清理成功。 |
+
+#### 交付限制
+
+实现及验收只针对本地临时数据库、受管临时目录和模拟 GitHub 传输。没有运行生产 Kubernetes、发布镜像、升级服务、修复生产积压或清理生产目录；没有查明 Flow 4 原绑定最初释放的历史原因。代码审查与后续发布分别进行，生产恢复仍需单独授权。
+
+### [004] — 2026-11-11 — 移除本次新增的旧 ARCHIVE 任务兼容
+
+**决定已接受，删除已在本地完成并通过回归，尚未发布。** 用户在[本次讨论](https://ampcode.com/threads/T-01a1c6c5-ea85-70e7-baf4-76ca5604a43b)明确说明“不存在这种任务”，并要求“删除这次新增的旧任务兼容逻辑”。不存在遗留任务的环境前提来自用户澄清，本次未查询生产 jobs。本条取代 [001]、[003] 中为旧 Worker ARCHIVE 新增恢复、清理交接及共享通知 marker 的决定；保留前文作为当时的记录。
+
+#### 实际删除及保留的边界
+
+- [`record_merge`](../../app/controler/workflow/lifecycle.py) 不再扫描旧 ARCHIVE 来抑制停止请求，合并统一持久化原 Worker 的 stop。删除 [`WorkerStore`](../../app/persistence/workers.py) 中已归档 Flow 的冻结 ARCHIVE 恢复、心跳与替代清理凭据例外；所有任务在已归档 Flow 上都不能开始或恢复。
+- 删除 [`archive_task`](../../app/controler/workflow/archive.py) 接受已归档 Flow 的例外、[`ResultApplication`](../../app/controler/workflow/results.py) 的归档后旧 ArchiveResult 特殊应用、[`JobStore`](../../app/persistence/jobs.py) 的旧准备 payload 改写，以及 [`ResultEffects`](../../app/controler/workflow/effects.py) / [`ResultStore`](../../app/persistence/results.py) 为旧评论添加的等待与跨任务 marker 兼容。新通知按其原 job/digest 冻结身份恢复。
+- 删除专为上述新分支增加的测试和 fixture。通知的权限、未知结果、认证故障与发送后重启回归改用真实合并入口产生的本地通知，不再构造新旧任务交接。既有历史格式 reader、原始摘要和本次改动前的非归档 ARCHIVE 协议测试保留，不扩展其适用范围。
+- “合并立即 ARCHIVED/SUCCEEDED、原 Worker 独立停止清理、精确 ACK/inventory 后立即复用”保持不变。原 token、epoch、generation、绑定时间核对与原子释放回滚仍保留。README、CHANGELOG 与升级说明同步移除本次新增的旧任务恢复承诺。
+
+#### 已执行验证与取舍
+
+真实临时 PostgreSQL 的相关归档、停止、库存和 merge 定向测试及完整 pytest 通过；Ruff、Mypy、console 构建、前端测试、`uv build --no-sources` 均通过，wheel/sdist 内 console index、JS、CSS 与排除项已核对。完整测试仍只有既有 Starlette/httpx 弃用告警，console 构建保留既有 bundle 大小提示。命令沿用 [003]，本轮原始日志存于验收记录的 `remove-legacy-*` 文件。
+
+本条只删除无当前任务依据的兼容机制，没有增加需要消融对照的新机制；[003] 的资源隔离、有界积压恢复与独立通知对照仍适用于保留的主路径。真实 Worker 清理/丢 ACK/下一代立即复用回归再次通过。没有发布实现、部署或修改生产数据；若升级盘点发现与“没有遗留 Worker ARCHIVE”前提不符的任务，须停止升级并单独核验，不自动接管或补造清理证据。

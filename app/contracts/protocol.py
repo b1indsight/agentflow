@@ -32,10 +32,10 @@ from app.domain.inference_models import (
     InferenceOutput,
     InferenceTask,
 )
-from app.domain.models import FeedbackRef, RevisionCodingOutput, VcsKind
+from app.domain.models import FeedbackRef, RevisionCodingOutput, VcsKind, WorkspaceInventory
 from app.domain.review_models import ReviewFeedback
 
-PROTOCOL_VERSION: Literal[19] = 19
+PROTOCOL_VERSION: Literal[20] = 20
 MAX_PAYLOAD_ITEMS = 32
 MessageId = Annotated[str, Field(strict=True, pattern=r"^[0-9a-f]{32}$")]
 ConnectionEpoch = Annotated[str, Field(strict=True, min_length=1, max_length=64)]
@@ -243,6 +243,8 @@ def terminal_digest(message: TerminalPayload) -> str:
 
 class AssignmentArguments(ExecutionIdentity):
     flow_id: int
+    workspace: str = Field(pattern=r"^[0-9a-f]{32}$")
+    generation: int = Field(strict=True, gt=0)
     task: ExecutionTask
     secret: AssignmentSecret | None = None
 
@@ -357,6 +359,13 @@ class InferenceRequest(ToolCall):
 class RecoveryRejected(ToolCall):
     method: Literal["worker.reject_recovery"]
     arguments: RecoveryRejectedArguments
+
+
+class RepositoryDemand(ToolCall):
+    """Level-triggered capacity request; it grants no job or Flow ownership."""
+
+    method: Literal["worker.provision"]
+    repository: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
 
 class Started(ToolCall):
@@ -484,6 +493,7 @@ _FIXED_METHODS = frozenset(
         "worker.stop",
         "worker.history",
         "worker.infer",
+        "worker.provision",
         "worker.reject_recovery",
         "server.execution_started",
         "server.accept_result",
@@ -537,7 +547,7 @@ WorkerResult = Annotated[
 ]
 WorkerPayload = Annotated[WorkerCall | WorkerResult, Field(discriminator="type")]
 ServerCall = Annotated[
-    Assignment | StopExecution | ConversationQuery | InferenceRequest | RecoveryRejected,
+    Assignment | StopExecution | ConversationQuery | InferenceRequest | RecoveryRejected | RepositoryDemand,
     Field(discriminator="method"),
 ]
 ServerResult = Annotated[
@@ -557,12 +567,12 @@ class Message[Payload: ToolCall | ToolResult](ProtocolModel):
     performs static checks only; receipt ACKs confer no business completion or authority.
     """
 
-    protocol_version: Literal[19]
+    protocol_version: Literal[20]
     message_id: MessageId
     connection_epoch: ConnectionEpoch | None
     ack: StrictBool
     ack_id: MessageId | None
-    control: Literal["register", "registered", "heartbeat", "cancel_job", "error"] | None
+    control: Literal["register", "registered", "inventory", "heartbeat", "cancel_job", "error"] | None
     payload: list[Payload] = Field(max_length=MAX_PAYLOAD_ITEMS)
 
     @field_validator("protocol_version", mode="before")
@@ -602,47 +612,51 @@ class ServerMessage(Message[ServerPayload]):
     control: Literal[None]  # noqa: PYI061 - Pydantic's discriminator requires Literal for null.
 
 
-class Register(Message[WorkerPayload]):
+class InventoryPage(ProtocolModel):
+    """A bounded snapshot page. The receiver explicitly requests each subsequent page."""
+
+    inventory: list[WorkspaceInventory] = Field(max_length=MAX_PAYLOAD_ITEMS)
+    recoveries: list[RecoveryDescriptor] = Field(max_length=MAX_PAYLOAD_ITEMS)
+    inventory_complete: StrictBool
+
+
+class Register(Message[WorkerPayload], InventoryPage):
     control: Literal["register"]
     worker_id: str
+    workspace: str = Field(pattern=r"^[0-9a-f]{32}$")
+    repo_workspace_limit: int = Field(strict=True, gt=0)
     execute: StrictBool = True
-    recovery: RecoveryDescriptor | None
     inference: InferenceCapability | None
 
     @model_validator(mode="after")
     def _recovery_payload(self) -> Self:
-        if not self.execute and self.recovery is not None:
+        if not self.execute and self.recoveries:
             raise ValueError("infer-only workers cannot recover coding execution")
-        if not self.payload:
-            return self
-        recovery = self.recovery
-        if len(self.payload) != 1 or not isinstance(self.payload[0], AcceptResultRequest):
-            raise ValueError("Register may only carry one result-acceptance call")
-        call = self.payload[0]
-        if (
-            recovery is None
-            or recovery.state not in {"succeeded", "failed"}
-            or recovery.stop_request_id is not None
-            or recovery.result_digest is None
-            or (call.arguments.job_id, call.arguments.assignment_token)
-            != (recovery.job_id, recovery.assignment_token)
-        ):
-            raise ValueError("Register acceptance does not match terminal recovery")
-        result_id = _terminal_id(recovery.job_id, recovery.assignment_token, recovery.result_digest)
-        if call.arguments.result_id != result_id or call.message_id != accept_result_id(result_id):
-            raise ValueError("Register acceptance identity does not match recovery digest")
+        if self.payload:
+            raise ValueError("registration acceptances follow recovery decisions")
+        return self
+
+
+class Inventory(Message[WorkerPayload], InventoryPage):
+    control: Literal["inventory"]
+
+    @model_validator(mode="after")
+    def _no_payload(self) -> Self:
+        if self.payload:
+            raise ValueError("inventory cannot carry business payload")
         return self
 
 
 class Registered(Message[ServerPayload]):
     control: Literal["registered"]
     heartbeat_interval: float
-    recovery: RecoveryDecision | None
+    recoveries: list[RecoveryDecision] = Field(max_length=MAX_PAYLOAD_ITEMS)
+    ready: StrictBool
 
     @model_validator(mode="after")
     def _recovery_payload(self) -> Self:
-        if self.recovery is not None and self.payload:
-            raise ValueError("resume/replay decisions cannot carry business payload")
+        if self.payload:
+            raise ValueError("registration decisions cannot carry business payload")
         return self
 
 
@@ -693,7 +707,7 @@ class ProtocolError(Message[ServerPayload]):
         return self
 
 
-WorkerMessageUnion = Annotated[Register | Heartbeat | WorkerMessage, Field(discriminator="control")]
+WorkerMessageUnion = Annotated[Register | Inventory | Heartbeat | WorkerMessage, Field(discriminator="control")]
 ServerMessageUnion = Annotated[
     Registered | CancelJob | ProtocolError | ServerMessage, Field(discriminator="control")
 ]
@@ -764,7 +778,7 @@ def accept_stop_id(receipt_id: MessageId) -> MessageId:
 
 
 class MessageHeader(TypedDict):
-    protocol_version: Literal[19]
+    protocol_version: Literal[20]
     message_id: MessageId
     connection_epoch: str | None
     ack: bool

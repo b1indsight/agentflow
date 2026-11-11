@@ -62,13 +62,15 @@ class WorkerExecutor:
         *,
         worker_id: str,
         state: ExecutionState,
-        workspace_limit: int = 2,
+        workspaces: RepositoryWorkspaces,
     ) -> None:
         self.worker_root = worker_root
         self.code_agent = code_agent
         self.worker_id = worker_id
         self.state = state
-        self.workspaces = RepositoryWorkspaces(worker_root, worker_id, limit=workspace_limit)
+        if workspaces.root != worker_root.absolute() or workspaces.worker_id != worker_id:
+            raise ValueError("shared workspace pool belongs to another worker/root")
+        self.workspaces = workspaces
 
     async def execute(
         self, task: ExecutionTask, secret: AssignmentSecret | None = None,
@@ -84,7 +86,11 @@ class WorkerExecutor:
                     or task.repo_identity != f"{self.worker_id}:{task.repo}"):
                 raise ValueError("archive repository identity does not match worker")
             binding = self.state.verify_cleanup(task)
-            cleanup = await self.workspaces.release(binding)
+            record = self.state.load()
+            assert record is not None
+            cleanup = await self.workspaces.release(
+                binding, job_id=record.job_id, token=record.assignment_token,
+            )
             return ArchiveResult(**task.model_dump(), cleanup=cleanup)
         raise TypeError(f"unsupported execution task: {type(task).__name__}")
 
@@ -98,7 +104,8 @@ class WorkerExecutor:
             return
         if record.workspace.flow_id != record.flow_id:
             raise VcsVerificationError("workspace", "cancelled workspace belongs to another Flow")
-        await self.workspaces.release(record.workspace, recycle=True)
+        await self.workspaces.release(record.workspace, job_id=record.job_id,
+                                      token=record.assignment_token, recycle=True)
 
     async def _initial(
         self, task: InitialTask, secret: AssignmentSecret | None, tool_caller: FlowToolCaller
@@ -106,9 +113,13 @@ class WorkerExecutor:
         if task.repo_identity != f"{self.worker_id}:{task.repo}":
             return _vcs_failure(None, "", "binding", "repo identity does not match worker")
         try:
+            assignment = self.state.assignment
+            if assignment is None or assignment.task != task:
+                raise VcsVerificationError("binding", "initial assignment target is missing")
             capability = _github_capability(secret, task.repo)
-            binding = await self.workspaces.acquire(
-                task.repo, task.flow_id, base_branch=task.base_branch, remote=task.remote,
+            binding = await self.workspaces.claim(
+                task.repo, task.flow_id, assignment.workspace, assignment.generation,
+                base_branch=task.base_branch, remote=task.remote,
                 push_token=capability.token,
             )
             self.state.bind_workspace(binding)

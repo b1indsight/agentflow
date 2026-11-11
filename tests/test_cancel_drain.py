@@ -3,15 +3,18 @@ from datetime import timedelta
 import pytest
 from psycopg.errors import UniqueViolation
 
-from app.contracts.protocol import PROTOCOL_VERSION, ExecutionStopped, Failed
+from app.contracts.protocol import ExecutionStopped, Failed
 from app.contracts.result_models import EffectState, PullRequestEffect, ResultPlan
 from app.controler.workflow.effects import ResultEffects
 from app.controler.workflow.service import ControlService
-from app.domain.models import DeliveryState, FlowState, JobKind, JobState
+from app.domain.models import ArchiveReason, DeliveryState, FlowState, JobKind, JobState
 from app.github import PullRequest
+from app.plugins import get_plugin_manager
+from app.plugins.hookspecs import hookimpl
 from tests.github import RecordingGitHub
 from tests.test_coordinator import coordinator
 from tests.test_merge import route_merge
+from tests.workspace_fixtures import register_worker, report_settled
 
 
 def running(store):
@@ -19,7 +22,7 @@ def running(store):
     attempt = store.flows.create_attempt(flow.id)
     flow.current_attempt_id = attempt.id
     store.flows.update_flow(flow)
-    store.workers.worker_connected("w", PROTOCOL_VERSION, "epoch")
+    register_worker(store, "w", repo=flow.repo, epoch="epoch")
     job = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
     assert store.workers.assign_job("w", "token", "epoch")
     assert store.workers.start_assignment(job.id, attempt.id, "w", "token", "epoch")
@@ -59,18 +62,17 @@ def test_confirmation_requires_current_epoch_and_exact_request(store):
     assert not stops.confirm("w", receipt, "old")
     assert stops.confirm("w", receipt, "epoch")
     assert stops.confirm("w", receipt, "epoch")
+    report_settled(store, job.id, epoch="epoch", stopped=True)
     assert store.workers.get_flow_execution(flow.id).released_at is not None
 
 
 def test_cancel_during_followup_preparation_stops_last_dispatched_job(store):
     # A review-waiting Flow still owns its checkout; an unsent followup has no worker journal.
     flow, job = running(store)
+    assert store.workers.finish_assignment(job.id, "w", "token", JobState.DONE, "epoch")
     with store.connection() as conn:
-        conn.execute(
-            "UPDATE jobs SET state='done',result_received_at=now(),result_applied_at=now() WHERE id=%s",
-            (job.id,),
-        )
-        conn.execute("UPDATE workers SET current_job_id=NULL,status='online' WHERE worker_id='w'")
+        conn.execute("UPDATE jobs SET result_received_at=now() WHERE id=%s", (job.id,))
+    report_settled(store, job.id, epoch="epoch")
     followup = store.jobs.enqueue_job(flow.id, JobKind.REVISION)
     assert store.workers.assign_job("w", "preparing", "epoch").id == followup.id
     ControlService(database=store.database).cancel(flow)
@@ -82,28 +84,24 @@ def test_cancel_during_followup_preparation_stops_last_dispatched_job(store):
 def test_drain_survives_reconnect_and_allows_bound_followup(store):
     flow, job = running(store)
     store.workers.drain("w", True)
-    store.workers.worker_connected("w", PROTOCOL_VERSION, "next")
+    register_worker(store, "w", repo=flow.repo, epoch="next")
     assert store.workers.list_workers()[0].draining
     # The existing flow still owns the worker; only new Flow allocation is disabled.
-    with store.connection() as connection:
-        connection.execute("UPDATE jobs SET state='done' WHERE id=%s", (job.id,))
-        connection.execute(
-            "UPDATE workers SET current_job_id=NULL,status='online' WHERE worker_id='w'"
-        )
+    assert store.workers.finish_assignment(job.id, "w", "token", JobState.DONE, "next")
+    report_settled(store, job.id, epoch="next")
     next_job = store.jobs.enqueue_job(flow.id, JobKind.REVISION)
     assert store.workers.assign_job("w", "revision", "next").id == next_job.id
-    with store.connection() as connection:
-        connection.execute("UPDATE jobs SET state='done' WHERE id=%s", (next_job.id,))
-        connection.execute(
-            "UPDATE workers SET current_job_id=NULL,status='online' WHERE worker_id='w'"
-        )
+    assert store.workers.finish_assignment(next_job.id, "w", "revision", JobState.DONE, "next")
+    report_settled(store, next_job.id, epoch="next")
     ControlService(database=store.database).cancel(flow)
     stop = store.stops.pending("w")
     assert store.stops.confirm(
         "w", ExecutionStopped(**stop.fence().model_dump(), execution_nonce="owned"), "next"
     )
+    report_settled(store, stop.job_id, epoch="next", stopped=True)
     assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
     another = store.flows.create_flow("owner/another", 2, 1)
+    register_worker(store, "w", repo=another.repo, epoch="next")
     store.jobs.enqueue_job(another.id, JobKind.INITIAL)
     assert store.workers.assign_job("w", "new", "next") is None
     store.workers.drain("w", False)
@@ -119,23 +117,47 @@ def test_never_dispatched_cancel_needs_no_stop(store):
     assert store.stops.pending("w") is None
 
 
-async def test_merge_during_cancel_retains_binding_for_original_archive(store):
-    flow, _job = running(store)
+@pytest.mark.parametrize("reconnect", [False, True])
+async def test_merge_during_cancel_retains_binding_until_original_stop_settles(store, reconnect):
+    flow, job = running(store)
     delivery = store.deliveries.get_or_create_delivery(flow.id, "flow/1")
     delivery.state, delivery.pr_number, delivery.head_sha = DeliveryState.OPEN, 17, "b" * 40
     store.deliveries.update_delivery(delivery)
     ControlService(
         database=store.database,
     ).cancel(flow)
-    await route_merge(store, flow)
-    assert store.flows.get_flow(flow.id).state is FlowState.FINALIZING
     stop = store.stops.pending("w")
+    binding = store.workers.get_flow_execution(flow.id)
+    await route_merge(store, flow)
+    archived = store.flows.get_flow(flow.id)
+    assert (archived.state, archived.archive_reason) == (FlowState.ARCHIVED, ArchiveReason.SUCCEEDED)
+    assert store.stops.pending("w") == stop
+    assert store.workers.get_flow_execution(flow.id) == binding
+    notice = store.jobs.list_jobs(flow.id)[-1]
+    assert notice.kind is JobKind.ARCHIVE and notice.state is JobState.RUNNING
+    assert notice.assigned_worker_id is None and notice.assignment_token is None
+    assert notice.result_payload["terminal"]["type"] == "merge_archive"
+    successor = store.flows.create_flow(flow.repo, 2, 1)
+    queued = store.jobs.enqueue_job(successor.id, JobKind.INITIAL)
+    assert store.workers.assign_job("w", "before-stop", "epoch") is None
     assert store.stops.confirm(
         "w", ExecutionStopped(**stop.fence().model_dump(), execution_nonce="owned"), "epoch"
     )
     assert store.workers.get_flow_execution(flow.id).released_at is None
-    archive = store.workers.assign_job("w", "archive", "epoch")
-    assert archive is not None and archive.kind is JobKind.ARCHIVE
+    assert store.workers.assign_job("w", "before-ack", "epoch") is None
+    epoch = "reconnected" if reconnect else "epoch"
+    if reconnect:
+        register_worker(store, "w", epoch=epoch)
+        assert store.workers.assign_job("w", "reconnected-before-ack", epoch) is None
+    report_settled(store, job.id, epoch=epoch, stopped=True)
+    assert store.workers.get_flow_execution(flow.id).released_at is not None
+    replacement = store.workers.assign_job("w", "replacement", epoch)
+    assert replacement is not None and replacement.id == queued.id
+    job = store.jobs.get_job(job.id)
+    assert replacement.workspace == job.workspace and replacement.generation == job.generation + 1
+    # Notification delivery never owns this slot or gates the next generation.
+    assert store.jobs.get_job(notice.id) == notice
+    assert store.flows.get_flow(flow.id) == archived
 
 
 @pytest.mark.parametrize("kind", ["comment", "label", None])
@@ -163,6 +185,7 @@ def test_unresolved_dispatched_effect_blocks_stop_except_skipped_status_labels(s
         with store.connection() as conn:
             conn.execute("UPDATE result_effects SET receipt='{}' WHERE job_id=%s", (job.id,))
     assert store.stops.confirm("w", receipt, "epoch")
+    report_settled(store, job.id, epoch="epoch", stopped=True)
     assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
     assert store.workers.get_flow_execution(flow.id).released_at is not None
 
@@ -191,7 +214,7 @@ async def test_finalizing_flow_reserves_issue_until_late_merge_cleanup_settles(s
 
 def test_lost_started_ack_cannot_requeue_then_cancel_as_unsent(store):
     flow = store.flows.create_flow("owner/repo", 1, 1)
-    store.workers.worker_connected("w", PROTOCOL_VERSION, "epoch")
+    register_worker(store, "w", repo=flow.repo, epoch="epoch")
     job = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
     assert store.workers.assign_job("w", "token", "epoch")
     assert store.stops.authorize_dispatch(job.id, "w", "token", "epoch")
@@ -209,7 +232,7 @@ def test_lost_started_ack_cannot_requeue_then_cancel_as_unsent(store):
 
 def test_cancel_during_preparation_releases_slot_without_nonexistent_journal(store):
     flow = store.flows.create_flow("owner/repo", 1, 1)
-    store.workers.worker_connected("w", PROTOCOL_VERSION, "epoch")
+    register_worker(store, "w", repo=flow.repo, epoch="epoch")
     job = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
     assert store.workers.assign_job("w", "preparing", "epoch")
     ControlService(
@@ -224,7 +247,7 @@ def test_cancel_during_preparation_releases_slot_without_nonexistent_journal(sto
     next_job = store.jobs.enqueue_job(replacement.id, JobKind.INITIAL)
     assert store.workers.assign_job("w", "replacement", "epoch").id == next_job.id
     assert not store.workers.clear_preparation(job.id, "w", "preparing", "epoch")
-    assert store.workers.list_workers()[0].current_job_id == next_job.id
+    assert any(w.current_job_id == next_job.id for w in store.workers.list_workspaces("w"))
 
 
 def test_confirmed_stop_can_be_reacknowledged_after_flow_rebind(store):
@@ -235,14 +258,15 @@ def test_confirmed_stop_can_be_reacknowledged_after_flow_rebind(store):
     stop = store.stops.pending("w")
     receipt = ExecutionStopped(**stop.fence().model_dump(), execution_nonce="old-owned")
     assert store.stops.confirm("w", receipt, "epoch")
+    report_settled(store, stop.job_id, epoch="epoch", stopped=True)
     ControlService(
         database=store.database,
     ).resume(store.flows.get_flow(flow.id), expected_round_no=flow.current_round_no)
-    store.workers.worker_connected("new-worker", PROTOCOL_VERSION, "new-epoch")
+    register_worker(store, "new-worker", repo=flow.repo, epoch="new-epoch")
     replacement = store.workers.assign_job("new-worker", "new-token", "new-epoch")
     assert replacement is not None
     before = store.workers.get_flow_execution(flow.id)
-    store.workers.worker_connected("w", PROTOCOL_VERSION, "reconnect")
+    register_worker(store, "w", epoch="reconnect")
     assert store.stops.confirm("w", receipt, "reconnect")
     assert store.workers.get_flow_execution(flow.id) == before
     assert store.jobs.get_job(replacement.id).assignment_token == "new-token"
@@ -305,34 +329,54 @@ async def test_cancelled_creation_persists_pr_identity_and_merge_before_stop(
     )
     github = RecordingGitHub()
     github.pull_request = remote
+    observed: list[FlowState] = []
+
+    class ArchivedPlugin:
+        @hookimpl
+        def on_archived(self, flow):
+            observed.append(store.flows.get_flow(flow.id).state)
+
+    plugins = get_plugin_manager()
+    plugins.register(ArchivedPlugin())
     assert (
         await ResultEffects(
             github,
             database=store.database,
+            plugins=plugins,
         ).run(plan)
         is None
     )
+    assert observed == ([FlowState.ARCHIVED] if remote_state == "merged" else [])
     recovered = store.deliveries.get_delivery(flow.id)
     assert recovered.pr_number == 17 and recovered.state is DeliveryState(remote_state)
     assert recovered.merge_commit_sha == remote.merge_commit_sha
     assert store.flows.get_flow_by_pr(flow.repo, 17).id == flow.id
-    assert store.flows.get_flow(flow.id).state is FlowState.FINALIZING
+    current = store.flows.get_flow(flow.id)
+    assert current.state is (
+        FlowState.ARCHIVED if remote_state == "merged" else FlowState.FINALIZING
+    )
     stop = store.stops.pending("w")
     assert store.stops.confirm(
         "w", ExecutionStopped(**stop.fence().model_dump(), execution_nonce="owned"), "epoch"
     )
     if remote_state == "merged":
+        assert current.archive_reason is ArchiveReason.SUCCEEDED
+        notice = store.jobs.list_jobs(flow.id)[-1]
+        assert notice.kind is JobKind.ARCHIVE and notice.assigned_worker_id is None
+        assert notice.assignment_token is None
+        assert notice.result_payload["terminal"]["type"] == "merge_archive"
         assert store.workers.get_flow_execution(flow.id).released_at is None
-        assert store.workers.assign_job("w", "archive", "epoch").kind is JobKind.ARCHIVE
-    else:
-        assert store.workers.get_flow_execution(flow.id).released_at is not None
+        assert store.workers.assign_job("w", "before-ack", "epoch") is None
+    report_settled(store, job.id, epoch="epoch", stopped=True)
+    assert store.workers.get_flow_execution(flow.id).released_at is not None
+    assert store.workers.assign_job("w", "archive", "epoch") is None
 
 
 async def test_preparation_result_releases_cancelled_binding_after_application(
     store, recording_resources
 ):
     flow = store.flows.create_flow("owner/repo", 1, 1)
-    store.workers.worker_connected("w", PROTOCOL_VERSION, "epoch")
+    register_worker(store, "w", repo=flow.repo, epoch="epoch")
     job = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
     assert store.workers.assign_job("w", "preparing", "epoch")
     message = Failed(job_id=job.id, assignment_token="preparing", error="prepare failed")

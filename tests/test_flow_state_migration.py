@@ -22,21 +22,19 @@ from app.contracts.protocol import (
     Succeeded,
     terminal_digest,
 )
-from app.contracts.receipts import ResultInbox
+from app.contracts.receipts import ResultInbox, decode_result_inbox
+from app.contracts.result_models import ResultPlan
 from app.domain.models import FlowState
-from app.persistence.activity import ActivityStore
 from app.persistence.database import Database
-from app.persistence.results import ResultStore
 from app.persistence.schema import (
     INFERENCE_SCHEMA,
     PROJECT_SCHEMA,
     RECONCILE_SCHEMA,
     RESULT_SCHEMA,
     REVIEW_SCHEMA,
-    STOP_SCHEMA,
     WEBHOOK_SCHEMA,
 )
-from app.persistence.store import Store
+from scripts import migrate_flow_states
 from scripts.migrate_flow_states import main, migrate
 
 NOW = datetime(2026, 11, 1, tzinfo=UTC)
@@ -107,6 +105,18 @@ CREATE TABLE events (
  delivery_id TEXT PRIMARY KEY, event_type TEXT NOT NULL, flow_id BIGINT REFERENCES flows(id),
  payload JSONB, processed_at TIMESTAMPTZ NOT NULL
 );
+"""
+
+LEGACY_STOP_SCHEMA = """
+CREATE TABLE execution_stops (
+ request_id TEXT PRIMARY KEY, flow_id BIGINT NOT NULL REFERENCES flows(id),
+ job_id BIGINT NOT NULL REFERENCES jobs(id), worker_id TEXT NOT NULL REFERENCES workers(worker_id),
+ assignment_token TEXT NOT NULL, binding_at TIMESTAMPTZ NOT NULL,
+ reason TEXT NOT NULL DEFAULT 'cancelled', requested_at TIMESTAMPTZ NOT NULL,
+ state TEXT NOT NULL DEFAULT 'pending', confirmed_at TIMESTAMPTZ, receipt_digest TEXT,
+ UNIQUE(flow_id,binding_at)
+);
+CREATE INDEX ix_stops_worker ON execution_stops(worker_id) WHERE state!='confirmed';
 """
 
 LEGACY_CONSOLE = """
@@ -230,7 +240,7 @@ def legacy(postgresql_url):
         for schema in (
             LEGACY_SCHEMA,
             WEBHOOK_SCHEMA,
-            STOP_SCHEMA,
+            LEGACY_STOP_SCHEMA,
             RESULT_SCHEMA,
             REVIEW_SCHEMA,
             RECONCILE_SCHEMA,
@@ -304,7 +314,9 @@ def delivery(connection, identity, *, state="open", number=None):
     )
 
 
-def applied_plan(connection, identity, attempt, job_id, *, old_state=None, archive=None):
+def applied_plan(
+    connection, identity, attempt, job_id, *, old_state=None, archive=None, protocol_version=None
+):
     """Real inbox digests and serialized plans, including fields untouched by conversion."""
     terminal = (
         Failed(job_id=job_id, assignment_token="token", error="failed")
@@ -321,12 +333,21 @@ def applied_plan(connection, identity, attempt, job_id, *, old_state=None, archi
         )
     )
     digest = terminal_digest(terminal)
+    payload = (
+        {
+            "protocol_version": protocol_version,
+            "connection_epoch": "old-epoch",
+            **terminal.model_dump(mode="json"),
+        }
+        if protocol_version is not None
+        else ResultInbox(source="worker", terminal=terminal).model_dump(mode="json")
+    )
     connection.execute(
         "UPDATE jobs SET state=%s,assignment_token='token',result_payload=%s,result_digest=%s,"
         " result_received_at=%s,result_applied_at=%s WHERE id=%s",
         (
             "failed" if old_state == "failed" else "done",
-            Jsonb(ResultInbox(source="worker", terminal=terminal).model_dump(mode="json")),
+            Jsonb(payload),
             digest,
             NOW + timedelta(seconds=10),
             NOW + timedelta(seconds=20),
@@ -351,7 +372,7 @@ def applied_plan(connection, identity, attempt, job_id, *, old_state=None, archi
     return plan
 
 
-def succeeded(connection, issue=1, *, cleanup="released"):
+def succeeded(connection, issue=1, *, cleanup="released", protocol_version=None):
     identity, attempt = flow(connection, "succeeded", issue)
     worker = binding(connection, identity, released=True)
     delivery(connection, identity, state="merged")
@@ -369,7 +390,15 @@ def succeeded(connection, issue=1, *, cleanup="released"):
         "UPDATE jobs SET assigned_worker_id=%s,started_at=%s,payload=%s WHERE id=%s",
         (worker, NOW, Jsonb({"archive": receipt.model_dump(exclude={"cleanup"})}), job_id),
     )
-    applied_plan(connection, identity, attempt, job_id, old_state="succeeded", archive=receipt)
+    applied_plan(
+        connection,
+        identity,
+        attempt,
+        job_id,
+        old_state="succeeded",
+        archive=receipt,
+        protocol_version=protocol_version,
+    )
     return identity, job_id
 
 
@@ -391,11 +420,13 @@ def snapshot(connection):
             for t in tables
         },
         "columns": connection.execute(
-            "SELECT table_name,column_name,column_default FROM information_schema.columns "
+            "SELECT table_name,column_name,data_type,is_nullable,column_default "
+            "FROM information_schema.columns "
             "WHERE table_schema=current_schema() ORDER BY table_name,ordinal_position"
         ).fetchall(),
         "indexes": connection.execute(
-            "SELECT indexname,indexdef FROM pg_indexes WHERE schemaname=current_schema() "
+            "SELECT tablename AS table_name,indexname,indexdef FROM pg_indexes "
+            "WHERE schemaname=current_schema() "
             "ORDER BY indexname"
         ).fetchall(),
         "views": connection.execute(
@@ -403,7 +434,8 @@ def snapshot(connection):
             "ORDER BY viewname"
         ).fetchall(),
         "constraints": connection.execute(
-            "SELECT conname,pg_get_constraintdef(c.oid) AS definition FROM pg_constraint c "
+            "SELECT t.relname AS table_name,conname,pg_get_constraintdef(c.oid) AS definition "
+            "FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid "
             "JOIN pg_namespace n ON n.oid=c.connamespace WHERE n.nspname=current_schema() "
             "ORDER BY conname,definition"
         ).fetchall(),
@@ -530,7 +562,7 @@ def test_fresh_queued_initial_rejects_invalid_attempt_reference(legacy, postgres
     )
 
 
-def test_all_six_states_backups_history_and_restart(legacy, postgresql_url):
+def test_all_six_states_backups_history_and_restart_gate(legacy, postgresql_url):
     queued, _ = flow(legacy, issue=1)
     job(legacy, queued)
     running, _ = flow(legacy, issue=2)
@@ -543,7 +575,8 @@ def test_all_six_states_backups_history_and_restart(legacy, postgresql_url):
     review, review_attempt = flow(legacy, issue=3)
     binding(legacy, review)
     delivery(legacy, review)
-    applied_plan(legacy, review, review_attempt, job(legacy, review))
+    review_job = job(legacy, review)
+    applied_plan(legacy, review, review_attempt, review_job, protocol_version=13)
     finalizing, _ = flow(legacy, issue=4)
     binding(legacy, finalizing)
     delivery(legacy, finalizing, state="merged")
@@ -551,10 +584,13 @@ def test_all_six_states_backups_history_and_restart(legacy, postgresql_url):
     blocked, blocked_attempt = flow(legacy, "failed", issue=5)
     binding(legacy, blocked)
     blocked_job = job(legacy, blocked, state="failed")
-    old_failed = applied_plan(legacy, blocked, blocked_attempt, blocked_job, old_state="failed")
+    # Old applied receipts survive deployment upgrades and must remain readable after migration.
+    old_failed = applied_plan(
+        legacy, blocked, blocked_attempt, blocked_job, old_state="failed", protocol_version=13
+    )
     cancelled, _ = flow(legacy, "cancelled", issue=6)
     job(legacy, cancelled, state="failed")  # Never dispatched: no invented stop receipt needed.
-    archived, archive_job = succeeded(legacy, issue=7)
+    archived, archive_job = succeeded(legacy, issue=7, cleanup="removed", protocol_version=13)
     legacy.execute(
         "INSERT INTO events VALUES ('legacy-event','test',%s,%s,%s)",
         (blocked, Jsonb({"state": "failed", "nested": {"flow_state": "active"}}), NOW),
@@ -563,6 +599,10 @@ def test_all_six_states_backups_history_and_restart(legacy, postgresql_url):
     dry = migrate(postgresql_url)
     assert dry.status == "ready", dry
     assert snapshot(legacy) == original
+    converted_jobs = {review_job, blocked_job, archive_job}
+    assert sorted(dry.inbox_conversions, key=lambda c: c["job_id"]) == [
+        {"job_id": job_id, "from": 13, "to": 14} for job_id in sorted(converted_jobs)
+    ]
     assert {f["id"]: f["new_state"] for f in dry.flows} == {
         queued: "queued",
         running: "running",
@@ -586,6 +626,13 @@ def test_all_six_states_backups_history_and_restart(legacy, postgresql_url):
         "workers",
     ):
         assert changed["rows"][table] == original["rows"][table]
+    # Flow migration must not silently upgrade execution tables, remove worker FKs,
+    # or invent concrete workspace identities for the later deployment migration.
+    execution_tables = {"workers", "flow_executions", "execution_stops"}
+    for section in ("columns", "indexes", "constraints"):
+        assert [r for r in changed[section] if r["table_name"] in execution_tables] == [
+            r for r in original[section] if r["table_name"] in execution_tables
+        ]
     assert all(
         {"data": {**row["data"], "round_no": None}} in changed["rows"]["console_activity"]
         for row in original["rows"]["console_activity"]
@@ -593,6 +640,25 @@ def test_all_six_states_backups_history_and_restart(legacy, postgresql_url):
     for table in ("flows", "attempts", "jobs"):
         column = "current_round_no" if table == "flows" else "round_no"
         assert all(row["data"][column] == 1 for row in changed["rows"][table])
+    for row in original["rows"]["jobs"]:
+        expected = {**row["data"], "round_no": 1}
+        if expected["id"] in converted_jobs:
+            expected["result_payload"] = {**expected["result_payload"], "protocol_version": 14}
+        assert {"data": expected} in changed["rows"]["jobs"]
+        if expected["result_payload"]:
+            decode_result_inbox(
+                expected["result_payload"],
+                job_id=expected["id"],
+                assignment_token=expected["assignment_token"],
+                result_digest=expected["result_digest"],
+            )
+    assert (
+        legacy.execute(
+            "SELECT row_data AS data FROM flow_state_migration_backup WHERE table_name='jobs' "
+            "ORDER BY row_data::text"
+        ).fetchall()
+        == original["rows"]["jobs"]
+    )
     assert {r["data"]["flow_id"] for r in changed["rows"]["issue_flow_owners"]} == {
         queued,
         running,
@@ -635,20 +701,20 @@ def test_all_six_states_backups_history_and_restart(legacy, postgresql_url):
         "SELECT plan FROM result_applications WHERE job_id=%s", (blocked_job,)
     ).fetchone()["plan"]
     assert saved == {**old_failed, "flow_state": "blocked"}
-    store = Store(postgresql_url)
+    assert ResultPlan.model_validate(saved).flow_state is FlowState.BLOCKED
+    archive_plan = legacy.execute(
+        "SELECT plan FROM result_applications WHERE job_id=%s", (archive_job,)
+    ).fetchone()["plan"]
+    assert ResultPlan.model_validate(archive_plan).flow_state is FlowState.ARCHIVED
+    # Converted history is readable offline, but the new deployment cannot start
+    # until an explicit workspace migration reconciles real worker-root identities.
+    database = Database(postgresql_url)
     try:
-        store.init_db()
-        assert ResultStore(store.database).get_plan(blocked_job).flow_state is FlowState.BLOCKED
-        assert ResultStore(store.database).get_plan(archive_job).flow_state is FlowState.ARCHIVED
-        assert store.flows.get_flow(blocked).state is FlowState.BLOCKED
-        assert ActivityStore(store.database).archived_pr("OWNER/Repo", 100 + archived) == (
-            archived,
-            1,
-        )
-        store.init_db()
+        with pytest.raises(ValueError, match="legacy worker schema: explicit workspace migration"):
+            database.init_db()
         assert snapshot(legacy) == changed
     finally:
-        store.close()
+        database.close()
     assert migrate(postgresql_url).status == "refused"  # One shot, not another archive round.
     with pytest.raises(CheckViolation):
         legacy.execute("UPDATE flows SET state='active' WHERE id=%s", (queued,))
@@ -656,11 +722,21 @@ def test_all_six_states_backups_history_and_restart(legacy, postgresql_url):
         flow(legacy, "blocked", issue=5)
 
 
-@pytest.mark.parametrize("cleanup", ["released", "removed", "already_absent"])
-def test_verified_archive_preserves_receipt_and_effects(legacy, postgresql_url, cleanup):
+@pytest.mark.parametrize(
+    ("protocol_version", "cleanup"),
+    [(None, "released"), (13, "removed"), (13, "already_absent"), (13, "released")],
+)
+def test_verified_archive_preserves_receipt_and_effects(
+    legacy, postgresql_url, protocol_version, cleanup
+):
     # A worker crash after deletion can produce already_absent on replay; its
     # digest-verified receipt proves the same archive boundary as removed.
-    identity, job_id = succeeded(legacy, cleanup=cleanup)
+    identity, job_id = succeeded(legacy, cleanup=cleanup, protocol_version=protocol_version)
+    if protocol_version == 13 and cleanup == "released":
+        # released did not exist in v13; changing the header must not legitimize it.
+        report = refuse_unchanged(legacy, postgresql_url)
+        assert any(p["job_ids"] == [job_id] and "inbox" in p["message"] for p in report.problems)
+        return
     original = legacy.execute("SELECT result_payload FROM jobs WHERE id=%s", (job_id,)).fetchone()[
         "result_payload"
     ]
@@ -692,12 +768,9 @@ def test_verified_archive_preserves_receipt_and_effects(legacy, postgresql_url, 
         legacy.execute("SELECT state FROM flows WHERE id=%s", (identity,)).fetchone()["state"]
         == "archived"
     )
-    assert (
-        legacy.execute("SELECT result_payload FROM jobs WHERE id=%s", (job_id,)).fetchone()[
-            "result_payload"
-        ]
-        == original
-    )
+    assert legacy.execute("SELECT result_payload FROM jobs WHERE id=%s", (job_id,)).fetchone()[
+        "result_payload"
+    ] == ({**original, "protocol_version": 14} if protocol_version == 13 else original)
     assert (
         legacy.execute("SELECT * FROM result_effects WHERE job_id=%s", (job_id,)).fetchall()
         == effects
@@ -723,7 +796,7 @@ def test_verified_archive_preserves_receipt_and_effects(legacy, postgresql_url, 
 def test_terminal_label_never_substitutes_for_disposition(
     legacy, postgresql_url, old_state, hazard
 ):
-    identity, job_id = succeeded(legacy)
+    identity, job_id = succeeded(legacy, cleanup="removed", protocol_version=13)
     if old_state == "cancelled":
         legacy.execute("UPDATE flows SET state='cancelled' WHERE id=%s", (identity,))
         legacy.execute("UPDATE flow_deliveries SET state='closed' WHERE flow_id=%s", (identity,))
@@ -834,7 +907,9 @@ def test_cancelled_archive_requires_confirmed_stop_not_display_state(legacy, pos
         "requested_at,state,confirmed_at,receipt_digest) VALUES ('stop',%s,%s,%s,'token',%s,%s,'confirmed',%s,%s)",
         (identity, job_id, worker, NOW, NOW, NOW + timedelta(seconds=30), "a" * 64),
     )
+    stops = legacy.execute("SELECT * FROM execution_stops").fetchall()
     apply_reviewed(legacy, postgresql_url)
+    assert legacy.execute("SELECT * FROM execution_stops").fetchall() == stops
     assert legacy.execute(
         "SELECT state,archive_reason FROM flows WHERE id=%s", (identity,)
     ).fetchone() == {
@@ -851,12 +926,18 @@ def test_ambiguous_active_closed_delivery_is_not_silently_finalized(legacy, post
 
 
 def test_report_token_rejects_missing_or_changed_facts(legacy, postgresql_url):
-    identity, _ = flow(legacy, "failed")
+    identity, attempt = flow(legacy, "failed")
+    job_id = job(legacy, identity, state="failed")
+    applied_plan(legacy, identity, attempt, job_id, old_state="failed", protocol_version=13)
     before = snapshot(legacy)
     assert migrate(postgresql_url, apply=True).status == "refused"
     assert snapshot(legacy) == before
     report = migrate(postgresql_url)
-    legacy.execute("UPDATE flows SET installation_id=43 WHERE id=%s", (identity,))
+    assert report.status == "ready", report
+    legacy.execute(
+        "UPDATE jobs SET result_payload=jsonb_set(result_payload,'{protocol_version}','15') WHERE id=%s",
+        (job_id,),
+    )
     before = snapshot(legacy)
     assert (
         migrate(postgresql_url, apply=True, expected_fingerprint=report.fingerprint).status
@@ -865,9 +946,28 @@ def test_report_token_rejects_missing_or_changed_facts(legacy, postgresql_url):
     assert snapshot(legacy) == before
 
 
+@pytest.mark.parametrize("target", ["FLOW_STATE_SCHEMA", "CONSOLE_SCHEMA"])
+def test_report_token_covers_only_the_executed_target_schemas(
+    legacy, postgresql_url, monkeypatch, target
+):
+    flow(legacy, "failed")
+    before = snapshot(legacy)
+    report = migrate(postgresql_url)
+    assert report.status == "ready", report
+    monkeypatch.setattr(
+        migrate_flow_states, target, getattr(migrate_flow_states, target) + "\n-- revised target\n"
+    )
+    assert migrate(postgresql_url).fingerprint != report.fingerprint
+    assert (
+        migrate(postgresql_url, apply=True, expected_fingerprint=report.fingerprint).status
+        == "refused"
+    )
+    assert snapshot(legacy) == before
+
+
 def test_every_write_rolls_back_if_new_console_publication_fails(legacy, postgresql_url):
-    identity, job_id = succeeded(legacy)
-    # A failure after DDL, state/plan conversion and snapshot creation must restore
+    identity, job_id = succeeded(legacy, cleanup="removed", protocol_version=13)
+    # A failure after DDL, state/plan/inbox conversion and snapshot creation must restore
     # the old view/index/trigger as well as every original event and payload.
     legacy.execute(
         "ALTER TABLE console_activity ADD CONSTRAINT reject_new_publication "
@@ -899,7 +999,7 @@ def test_live_writes_and_normal_startup_cannot_migrate_legacy(legacy, postgresql
         other.rollback()
     database = Database(postgresql_url)
     try:
-        with pytest.raises((psycopg.Error, RuntimeError, ValueError)):
+        with pytest.raises(ValueError, match="legacy worker schema: explicit workspace migration"):
             database.init_db()
     finally:
         database.close()

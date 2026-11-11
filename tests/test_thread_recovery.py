@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 import httpx
 import pytest
 
-from app.contracts.protocol import PROTOCOL_VERSION, RevisionTask
+from app.contracts.protocol import RevisionTask
 from app.contracts.result_models import EffectState, LabelEffect, ResolveEffect, ResultPending
 from app.controler.workflow.service import ControlService
 from app.domain.models import (
@@ -13,6 +13,7 @@ from app.domain.models import (
     DeferredComment,
     DeliveryState,
     FlowState,
+    JobKind,
     JobState,
     ReviewItemKind,
 )
@@ -37,6 +38,7 @@ from tests.test_review_resolution import human, snapshot
 from tests.test_revision_delivery import revision_output, verified_result
 from tests.test_revision_recovery import RevisionGitHub, accept
 from tests.test_revision_recovery import revision_resources as revision_resources  # noqa: PLC0414
+from tests.workspace_fixtures import register_worker, report_settled
 
 
 class ThreadGitHub(RevisionGitHub):
@@ -112,6 +114,11 @@ async def thread_revision(store, request, thread_resources):
     store.flows.update_attempt(attempt)
     flow.current_attempt_id = attempt.id
     store.flows.update_flow(flow)
+    register_worker(store, "worker-a", repo=flow.repo, epoch="epoch")
+    initial = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
+    assert store.workers.assign_job("worker-a", "initial", "epoch") is not None
+    assert store.workers.finish_assignment(initial.id, "worker-a", "initial", JobState.DONE, "epoch")
+    report_settled(store, initial.id, epoch="epoch")
     delivery = store.deliveries.get_or_create_delivery(flow.id, "flow/1")
     delivery.pr_number, delivery.state = 17, DeliveryState.OPEN
     delivery.head_sha, delivery.base_branch = "baseline", "main"
@@ -131,7 +138,6 @@ async def thread_revision(store, request, thread_resources):
     if mode == "incomplete":
         github.thread = github.thread.model_copy(update={"complete": False})
     settle(store)
-    store.workers.worker_connected("worker-a", PROTOCOL_VERSION, "epoch")
     job = store.workers.assign_job("worker-a", "token", "epoch")
     subject = coordinator(store, github)
     task = await subject.prepare(job)
@@ -456,6 +462,7 @@ async def test_next_revision_combines_valid_historical_coverage_on_the_same_pr(
 ):
     flow, first, github, subject = thread_revision
     await subject.results.apply(first.id)
+    report_settled(store, first.id, epoch="epoch")
     assert github.resolves == []
     new = human(3, reply_to_id=1, body="Decision made; finish the remaining change")
     github.thread = github.thread.model_copy(update={"comments": Batch[ReviewComment](items=(*github.thread.comments.items, new))})

@@ -11,7 +11,6 @@ from pydantic import ValidationError
 from starlette.testclient import TestClient
 
 from app.contracts.console import ArchiveRequest, ResumeRequest
-from app.contracts.protocol import PROTOCOL_VERSION
 from app.controler.api import create_app
 from app.controler.console.sync import ConsoleSynchronizer
 from app.controler.workflow.service import ControlService
@@ -23,6 +22,9 @@ from app.persistence.console_sync import ConsoleSyncStore
 from app.telemetry.metrics import Metrics
 from tests.access import AccessIssuer
 from tests.test_cancel_drain import running
+from tests.test_merge import route_merge
+from tests.test_workflow_transactions import accepted_coding
+from tests.workspace_fixtures import register_worker
 
 
 @pytest.fixture
@@ -190,6 +192,26 @@ def test_console_commands_require_owner_json_and_same_origin(
             client.post(f"/api/flows/99999/{command}", json=payload, headers=headers).status_code
             == 404
         )
+
+
+async def test_merged_console_is_archived_while_original_cleanup_is_pending(console_runtime, store):
+    job, _ = accepted_coding(store, receive=False)
+    flow = store.flows.get_flow(job.flow_id)
+    await route_merge(store, flow)
+    with TestClient(create_app(console_runtime)) as client:
+        headers = console_runtime.issuer.headers()
+        response = client.get(f"/api/flows/{flow.id}", headers=headers)
+        assert response.status_code == 200
+        archived = response.json()
+        assert archived["phase"] == archived["lifecycle"] == "archived"
+        assert archived["archive_reason"] == "succeeded" and archived["archived_at"] is not None
+        active = client.get("/api/flows", params={"q": "is:active"}, headers=headers).json()
+        assert not active["items"]
+        refused = client.post(f"/api/flows/{flow.id}/resume",
+                              json={"expected_round_no": 1}, headers=headers)
+        assert refused.status_code == 409 and refused.json() == {"detail": "resume_rejected"}
+    assert store.workers.get_flow_execution(flow.id).released_at is None
+    assert store.stops.has_pending(flow.id)
 
 
 @pytest.mark.parametrize("reason", ["succeeded", "abandoned"])
@@ -434,9 +456,7 @@ def test_detail_explains_execution_facts_without_exposing_internal_errors(
         kind = JobKind.REVISION
     job = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
     if scenario != "queued":
-        store.workers.worker_connected(
-            "worker-safe", protocol_version=PROTOCOL_VERSION, connection_epoch="epoch-safe"
-        )
+        register_worker(store, "worker-safe", repo=flow.repo, epoch="epoch-safe")
         assert store.workers.assign_job("worker-safe", "private-assignment", "epoch-safe")
     delivery = store.deliveries.get_or_create_delivery(flow.id, "flow/7")
     delivery.pr_number = 17

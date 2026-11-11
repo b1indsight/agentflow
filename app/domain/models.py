@@ -143,6 +143,8 @@ class FlowExecution(BaseModel):
 
     flow_id: int
     worker_id: str
+    workspace: str
+    generation: int = Field(gt=0)
     repo_identity: str
     bound_at: datetime = Field(default_factory=utcnow)
     recovery_deadline: datetime | None = None
@@ -196,6 +198,8 @@ class Job(BaseModel):
     attempt: int = 0
     heartbeat_at: datetime | None = None
     assigned_worker_id: str | None = None
+    workspace: str | None = None
+    generation: int | None = None
     assignment_token: str | None = None
     started_at: datetime | None = None
     dispatch_authorized_at: datetime | None = None
@@ -236,9 +240,36 @@ class Job(BaseModel):
         return self.flow_id
 
 
+class WorkspaceInventory(BaseModel):
+    """Worker-owned physical inventory; settlement proves receipt of a terminal ACK."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    workspace: str = Field(pattern=r"^[0-9a-f]{32}$")
+    repository: str | None
+    generation: int = Field(gt=0, strict=True)
+    state: Literal["idle", "preparing", "occupied", "releasing", "absent", "quarantined"]
+    flow_id: int | None
+    settled_job_id: int | None = None
+    settled_assignment_token: str | None = None
+
+    @model_validator(mode="after")
+    def _settlement_pair(self) -> WorkspaceInventory:
+        if (self.settled_job_id is None) != (self.settled_assignment_token is None):
+            raise ValueError("workspace settlement requires both job ID and assignment token")
+        return self
+
+
 class WorkerRecord(BaseModel):
     draining: bool = False
     worker_id: str
+    workspace: str
+    repository: str | None = None
+    generation: int = 1
+    retired_generation: int | None = None
+    workspace_state: str = "idle"
+    inventory_epoch: str | None = None
+    repo_workspace_limit: int = 2
     protocol_version: int
     status: WorkerStatus
     execute: bool = True
@@ -259,6 +290,8 @@ class WorkerView(BaseModel):
     draining: bool = False
     worker_id: str
     status: WorkerStatus
+    workspaces: list[WorkerRecord] = Field(default_factory=list)
+    executions: list[FlowExecution] = Field(default_factory=list)
     current_job_id: int | None = None
     current_flow_id: int | None = None
     last_seen_at: datetime

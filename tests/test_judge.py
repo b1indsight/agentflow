@@ -4,6 +4,7 @@ import asyncio
 import json
 import sys
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import pytest
 from pydantic import SecretStr, ValidationError
@@ -174,21 +175,27 @@ class ChildProcess:
         return self.returncode
 
 
-async def test_child_output_and_exit_contract(monkeypatch):
+async def test_child_output_and_exit_contract(monkeypatch, tmp_path):
     child = ChildProcess(err=b"secret", code=1)
+    provider = BubInference(model="openai:test", api_key=SecretStr("fake"))
+    provider.root = tmp_path / "default-workspace"
+    provider.root.mkdir()
 
     async def start(*args, **kwargs):
         assert args[1:4] == ("-I", "-m", "app.inference.runner")
+        assert Path(kwargs["cwd"]).parent == provider.root
+        assert Path(kwargs["cwd"]).is_dir()
         assert set(kwargs["env"]) == {
             "PATH", "LANG", "FLOWTOOL_JUDGE_MODEL", "FLOWTOOL_JUDGE_API_KEY", "BUB_HOME",
         }
         return child
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", start)
-    result = await judge_for(model="openai:test", api_key=SecretStr("fake")).triage(context())
+    result = await ReviewJudge(provider).triage(context())
     assert result.failure == "backend_error"
     assert child.waited
     assert not child.killed
+    assert provider.root.is_dir() and not list(provider.root.iterdir())
 
 
 @pytest.mark.parametrize("error,failure", [(TimeoutError, "execution_timeout"), (asyncio.CancelledError, None)])

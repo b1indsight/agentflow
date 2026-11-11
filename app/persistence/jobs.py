@@ -10,9 +10,11 @@ from psycopg.rows import class_row
 from psycopg.types.json import Jsonb
 
 from app.contracts.protocol import ArchiveTask, Failed, terminal_digest
-from app.contracts.receipts import ResultInbox
+from app.contracts.receipts import MergeArchiveNotice, ResultInbox, merge_notice_digest
 from app.domain.inference_models import InferenceFailure, InferenceJob, InferenceTask
 from app.domain.models import (
+    Flow,
+    FlowDelivery,
     Job,
     JobKind,
     JobState,
@@ -20,6 +22,7 @@ from app.domain.models import (
 )
 from app.persistence.records import required
 from app.persistence.repository import Repository
+from app.persistence.results import RESOURCE_JOB_SQL
 
 
 class JobStore(Repository):
@@ -40,7 +43,7 @@ class JobStore(Repository):
                 " AND (state=%s OR (state='running' AND started_at IS NULL AND dispatch_authorized_at IS NULL"
                 " AND EXISTS (SELECT 1 FROM flows f WHERE f.id=jobs.flow_id AND f.archive_reason IS NOT NULL)))"
                 " AND result_received_at IS NULL RETURNING id)"
-                " UPDATE workers SET current_job_id=NULL,status=CASE WHEN status='busy' THEN 'online' ELSE status END"
+                " UPDATE workers SET current_job_id=NULL"
                 " WHERE current_job_id IN (SELECT id FROM retired)",
                 (
                     JobState.FAILED,
@@ -92,8 +95,9 @@ class JobStore(Repository):
         with self._db.connection() as connection:
             return (
                 connection.execute(
-                    "SELECT 1 FROM jobs WHERE flow_id=%s AND kind<>'inference' AND result_received_at IS NOT NULL"
-                    " AND result_applied_at IS NULL LIMIT 1",
+                    "SELECT 1 FROM jobs j WHERE flow_id=%s AND kind<>'inference' AND result_received_at IS NOT NULL"
+                    " AND result_applied_at IS NULL"
+                    f" AND {RESOURCE_JOB_SQL} LIMIT 1",
                     (flow_id,),
                 ).fetchone()
                 is not None
@@ -103,9 +107,11 @@ class JobStore(Repository):
         """Check for another executor or unapplied result without loading job payloads."""
         with self._db.connection() as connection:
             return connection.execute(
-                "SELECT 1 FROM jobs WHERE flow_id=%s AND id<>%s AND kind<>'inference'"
+                "SELECT 1 FROM jobs j WHERE flow_id=%s AND id<>%s AND kind<>'inference'"
+                f" AND {RESOURCE_JOB_SQL}"
                 " AND (state=%s OR (result_received_at IS NOT NULL"
-                " AND result_applied_at IS NULL)) LIMIT 1",
+                " AND result_applied_at IS NULL) OR EXISTS (SELECT 1 FROM workers w"
+                " WHERE w.current_job_id=j.id)) LIMIT 1",
                 (flow_id, excluding_job_id, JobState.RUNNING),
             ).fetchone() is not None
 
@@ -154,6 +160,27 @@ class JobStore(Repository):
                     (now, flow_id),
                 )
         return required(row)
+
+    def record_merge_notice(self, flow: Flow, delivery: FlowDelivery) -> Job:
+        """Persist local notification intent in the merge transaction, never the dispatch queue."""
+        if (delivery.flow_id != flow.id or delivery.pr_number is None
+                or delivery.merged_at is None or delivery.merge_commit_sha is None):
+            raise ValueError("merge notice requires the current delivery's complete merge facts")
+        job = self.enqueue_job(flow.id, JobKind.ARCHIVE)
+        notice = MergeArchiveNotice(
+            job_id=job.id, flow_id=flow.id, round_no=flow.current_round_no, repo=flow.repo,
+            pr_number=delivery.pr_number, merged_at=delivery.merged_at,
+            merge_commit_sha=delivery.merge_commit_sha,
+        )
+        inbox = ResultInbox(version=2, source="control", terminal=notice)
+        with self._db.connection() as connection:
+            connection.execute(
+                "UPDATE jobs SET state='running',result_payload=%s,result_digest=%s,"
+                " result_received_at=%s WHERE id=%s",
+                (Jsonb(inbox.model_dump(mode="json")), merge_notice_digest(notice),
+                 self._db.now(), job.id),
+            )
+        return required(self.get_job(job.id))
 
     def enqueue_inference(
         self, task: InferenceTask, *, flow_id: int | None = None,
@@ -315,50 +342,49 @@ class JobStore(Repository):
             ).fetchall()
 
     def complete_persisted_result(self, job_id: int, state: JobState) -> bool:
-        """Complete an inbox item after recovery applies its stored domain result."""
+        """Commit an inbox item, retaining remote ownership until the worker ACK witness."""
 
         if state not in (JobState.DONE, JobState.FAILED):
             raise ValueError("persisted results can only complete terminal jobs")
         now = self._db.now()
-        with self._db.connection() as connection, connection.transaction():
-            owner = connection.execute(
-                "SELECT assigned_worker_id FROM jobs WHERE id=%s",
-                (job_id,),
-            ).fetchone()
-            if owner and owner["assigned_worker_id"]:
-                self._db._lock_worker(connection, owner["assigned_worker_id"])
+        candidate = self.get_job(job_id)
+        if candidate is None or candidate.kind is JobKind.INFERENCE:
+            return False
+        with self._db.transaction() as tx, tx.connection() as connection:
+            tx.lock_workflow(candidate.required_flow_id)
             completed = connection.execute(
                 "UPDATE jobs SET state=%s, result_applied_at=%s, updated_at=%s"
                 " WHERE id=%s AND state=%s AND result_received_at IS NOT NULL"
-                " AND kind<>'inference' AND result_applied_at IS NULL RETURNING assigned_worker_id",
+                " AND kind<>'inference' AND result_applied_at IS NULL"
+                " AND (assigned_worker_id IS NULL OR EXISTS (SELECT 1 FROM workers w"
+                " WHERE w.worker_id=jobs.assigned_worker_id AND w.workspace=jobs.workspace"
+                " AND w.generation=jobs.generation AND w.current_job_id=jobs.id))"
+                " RETURNING assigned_worker_id",
                 (state, now, now, job_id, JobState.RUNNING),
             ).fetchone()
             if completed is not None:
+                # Unstarted control outcomes are preparation failures or explicit
+                # request-validation refusals, neither of which has a worker journal.
+                # Started control failures and all remote results still require ACK.
                 connection.execute(
-                    "UPDATE workers SET status=CASE WHEN status IN (%s,%s) THEN %s"
-                    " ELSE %s END, current_job_id=NULL, last_seen_at=%s"
-                    " WHERE worker_id=%s AND current_job_id=%s",
-                    (
-                        WorkerStatus.OFFLINE,
-                        WorkerStatus.RECOVERING,
-                        WorkerStatus.OFFLINE,
-                        WorkerStatus.ONLINE,
-                        now,
-                        completed["assigned_worker_id"],
-                        job_id,
-                    ),
+                    "UPDATE workers w SET current_job_id=NULL FROM jobs j WHERE j.id=%s"
+                    " AND w.worker_id=j.assigned_worker_id AND w.workspace=j.workspace"
+                    " AND w.generation=j.generation AND w.current_job_id=j.id"
+                    " AND j.started_at IS NULL"
+                    " AND j.result_payload->>'source'='control'", (job_id,),
                 )
-                connection.execute(
-                    "UPDATE flow_executions SET recovery_deadline=CASE WHEN EXISTS"
-                    " (SELECT 1 FROM workers WHERE worker_id=%s AND status=%s) THEN NULL ELSE %s END"
-                    " WHERE flow_id=(SELECT flow_id FROM jobs WHERE id=%s) AND released_at IS NULL",
-                    (
-                        completed["assigned_worker_id"],
-                        WorkerStatus.ONLINE,
-                        now + self._db.recovery_grace,
-                        job_id,
-                    ),
-                )
+                if completed["assigned_worker_id"] is not None:
+                    connection.execute(
+                        "UPDATE flow_executions SET recovery_deadline=CASE WHEN EXISTS"
+                        " (SELECT 1 FROM workers WHERE repository IS NULL AND worker_id=%s AND status=%s) THEN NULL ELSE %s END"
+                        " WHERE flow_id=(SELECT flow_id FROM jobs WHERE id=%s) AND released_at IS NULL",
+                        (
+                            completed["assigned_worker_id"],
+                            WorkerStatus.ONLINE,
+                            now + self._db.recovery_grace,
+                            job_id,
+                        ),
+                    )
         return completed is not None
 
     def record_control_result(
@@ -378,7 +404,7 @@ class JobStore(Repository):
         ):
             raise ValueError("control terminal does not match its assignment")
         inbox = ResultInbox(source="control", terminal=terminal)
-        digest = terminal_digest(inbox.terminal)
+        digest = terminal_digest(terminal)
         with self._db.connection() as connection:
             connection.execute(
                 "UPDATE jobs SET result_payload=%s,result_digest=%s,result_received_at=%s,"

@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from starlette.testclient import TestClient
 
-from app.contracts.protocol import PROTOCOL_VERSION, InferenceResult, result_header
+from app.contracts.protocol import InferenceResult, result_header
 from app.controler.api import create_app
 from app.controler.review.judge import ReviewJudge
 from app.controler.runtime import ServerRuntime
@@ -25,6 +25,7 @@ from tests.test_coordinator import coordinator
 from tests.test_merge import route_merge
 from tests.test_review_batches import claim, feedback, ingest
 from tests.test_review_batches import review_flow as review_flow  # noqa: PLC0414
+from tests.workspace_fixtures import register_worker
 
 
 @pytest.fixture
@@ -159,7 +160,7 @@ async def test_review_recomputes_after_pr_push_without_replaying_old_answer(
     github = RecordingGitHub()
     subject = coordinator(store, github)
     judge = ReviewJudge(JobInference(store.database, Mock(), flow_id=flow.id, batch_id=batch.id))
-    store.workers.worker_connected("plain", PROTOCOL_VERSION, "epoch")
+    register_worker(store, "plain", epoch="epoch")
     store.workers.worker_ready("plain", "epoch", InferenceCapability(adapter_version="codex/v1"))
 
     with pytest.raises(InferencePending) as first:
@@ -199,7 +200,7 @@ async def test_exhausted_inference_recovers_notice_without_a_fourth_attempt(
     runtime.coordinator = coordinator(store, RecordingGitHub())
     runtime.results = runtime.coordinator.results
     runtime.gateway = Mock()
-    store.workers.worker_connected("plain", PROTOCOL_VERSION, "epoch")
+    register_worker(store, "plain", epoch="epoch")
     store.workers.worker_ready("plain", "epoch", InferenceCapability(adapter_version="codex/v1"))
     await runtime._run_triage()
     timeout = InferenceFailure(code="execution_timeout")

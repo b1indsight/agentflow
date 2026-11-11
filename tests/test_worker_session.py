@@ -13,6 +13,7 @@ from app.contracts.protocol import (
     AssignmentArguments,
     AssignmentSecret,
     ExecutionResult,
+    ExecutionStopped,
     ExecutionTask,
     FlowToolResponse,
     InitialTask,
@@ -34,13 +35,17 @@ from app.worker.state.record import ExecutionRecord
 from app.worker.transport.mcp import FlowToolCaller
 
 
-def _assignment() -> AssignmentArguments:
+def _assignment(
+    *, job_id: int = 5, flow_id: int = 3, workspace: str = "a" * 32, generation: int = 1,
+) -> AssignmentArguments:
     return AssignmentArguments(
-        job_id=5,
-        flow_id=3,
+        job_id=job_id,
+        flow_id=flow_id,
         assignment_token="assignment-1",
+        workspace=workspace,
+        generation=generation,
         task=InitialTask(
-            flow_id=3,
+            flow_id=flow_id,
             attempt_id=7,
             repo="owner/repo",
             issue_number=8,
@@ -59,7 +64,7 @@ def _assignment() -> AssignmentArguments:
 
 
 def test_journal_persists_terminal_result_until_ack(tmp_path: Path) -> None:
-    journal = ExecutionState(tmp_path)
+    journal = ExecutionState(tmp_path, 3)
     assignment = _assignment()
     journal.record_received(assignment)
     assert "push-secret" not in journal.path.read_text()
@@ -71,7 +76,7 @@ def test_journal_persists_terminal_result_until_ack(tmp_path: Path) -> None:
     )
     journal.record_terminal(terminal)
 
-    recovered = ExecutionState(tmp_path).load()
+    recovered = ExecutionState(tmp_path, 3).load()
     assert recovered is not None
     assert recovered.state == "succeeded"
     assert recovered.result_digest
@@ -82,12 +87,122 @@ def test_journal_persists_terminal_result_until_ack(tmp_path: Path) -> None:
     assert retained is not None and retained.acknowledged
 
 
+def test_flow_journals_preserve_previous_evidence_and_recover_current(tmp_path: Path) -> None:
+    # Restart enumerates each Flow explicitly, regardless of job ordering or file timestamps.
+    journal = ExecutionState(tmp_path, 3)
+    journal.record_received(_assignment())
+    journal.record_started()
+    journal.complete(RuntimeError("first result"))
+    journal.acknowledge(5, JobState.FAILED)
+    first_path, first_bytes = journal.path, journal.path.read_bytes()
+    assert first_path == tmp_path / "journals/flow-3.json"
+    assert not (tmp_path / "assignment-journal.json").exists()
+
+    journal = ExecutionState(tmp_path, 4)
+    journal.record_received(_assignment(job_id=4, flow_id=4))
+    journal.record_started()
+    journal.complete(RuntimeError("second result"))
+    journal.acknowledge(4, JobState.FAILED)
+    assert first_path.read_bytes() == first_bytes
+    first_path.write_bytes(first_bytes)  # Neither higher job ID nor newer mtime selects the owner.
+
+    assert ExecutionState.scan(tmp_path) == [3, 4]
+    restarted = ExecutionState(tmp_path, 4)
+    recovery = restarted.recovery(executor_active=False)
+    assert recovery is not None and recovery.job_id == 4
+    assert restarted.path == tmp_path / "journals/flow-4.json"
+    current = restarted.path.read_bytes()
+    with pytest.raises(ExecutionStateError, match="acknowledgement"):
+        restarted.acknowledge(5, JobState.FAILED)
+    assert restarted.path.read_bytes() == current
+    assert first_path.read_bytes() == first_bytes
+    record = restarted.load()
+    assert record is not None and record.root_identity[0] == str(tmp_path.resolve())
+
+
+@pytest.mark.parametrize("phase", ["received", "started", "terminal", "stopped"])
+@pytest.mark.parametrize("flow_id", [3, 4])
+def test_pending_journal_cannot_be_replaced(tmp_path: Path, phase: str, flow_id: int) -> None:
+    journal = ExecutionState(tmp_path, 3)
+    record = journal.record_received(_assignment())
+    if phase != "received":
+        record = journal.record_started()
+    if phase == "terminal":
+        journal.complete(RuntimeError("result awaiting ACK"))
+    elif phase == "stopped":
+        assert record.execution_nonce is not None
+        journal.record_stopped(ExecutionStopped(
+            request_id="stop-1", job_id=5, flow_id=3, assignment_token="assignment-1",
+            execution_nonce=record.execution_nonce,
+        ))
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*.json")}
+    with pytest.raises(ExecutionStateError, match="unacknowledged" if flow_id == 3 else "Flow"):
+        journal.record_received(_assignment(job_id=6, flow_id=flow_id))
+    assert {p: p.read_bytes() for p in tmp_path.rglob("*.json")} == before
+
+
+@pytest.mark.parametrize("has_previous", [False, True])
+def test_interrupted_flow_write_does_not_change_other_flow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, has_previous: bool,
+) -> None:
+    from app.worker.state import execution
+
+    journal = ExecutionState(tmp_path, 3)
+    if has_previous:
+        journal.record_received(_assignment())
+        journal.record_started()
+        journal.complete(RuntimeError("previous result"))
+        journal.acknowledge(5, JobState.FAILED)
+    write = execution.write_private_record
+
+    def fail_write(path: Path, payload: str) -> None:
+        if path.name == "flow-4.json":
+            raise OSError("journal write interrupted")
+        write(path, payload)
+
+    monkeypatch.setattr(execution, "write_private_record", fail_write)
+    with pytest.raises(OSError, match="journal write interrupted"):
+        ExecutionState(tmp_path, 4).record_received(_assignment(job_id=6, flow_id=4))
+    restarted = ExecutionState(tmp_path, 3)
+    recovery = restarted.recovery(executor_active=False)
+    assert (recovery.job_id if recovery else None) == (5 if has_previous else None)
+    monkeypatch.setattr(execution, "write_private_record", write)
+    restarted = ExecutionState(tmp_path, 4)
+    restarted.record_received(_assignment(job_id=6, flow_id=4))
+    restarted.record_started()
+    recovery = ExecutionState(tmp_path, 4).recovery(executor_active=False)
+    assert recovery is not None and recovery.job_id == 6
+
+
+@pytest.mark.parametrize("damage", ["corrupt", "filename", "pointer"])
+def test_recovery_preserves_conflicting_journal_files(tmp_path: Path, damage: str) -> None:
+    journal = ExecutionState(tmp_path, 3)
+    journal.record_received(_assignment())
+    journal.record_started()
+    journal.complete(RuntimeError("first result"))
+    journal.acknowledge(5, JobState.FAILED)
+    first = journal.path
+    journal = ExecutionState(tmp_path, 4)
+    journal.record_received(_assignment(job_id=6, flow_id=4))
+    journal.record_started()
+    if damage == "corrupt":
+        first.write_text("not-json")
+    elif damage == "filename":
+        first.rename(first.with_name("flow-03.json"))
+    elif damage == "pointer":
+        (tmp_path / "journals/current.json").write_text('{"flow_id": true}')
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*.json")}
+    with pytest.raises(ExecutionStateError):
+        ExecutionState.scan(tmp_path)
+    assert {p: p.read_bytes() for p in tmp_path.rglob("*.json")} == before
+
+
 def test_corrupt_journal_is_preserved_for_diagnosis(tmp_path: Path) -> None:
     path = tmp_path / "assignment-journal.json"
     path.write_text("not-json")
 
     with pytest.raises(ExecutionStateError, match="invalid worker journal"):
-        ExecutionState(tmp_path).load()
+        ExecutionState(tmp_path, 3).load()
 
     assert path.read_text() == "not-json"
 
@@ -158,6 +273,60 @@ def _previous_journal(
     }
 
 
+def test_legacy_layout_migration_preserves_previous_flow_bytes(tmp_path: Path) -> None:
+    data = _previous_journal(tmp_path)
+    data["acknowledged"] = True
+    original = json.dumps(data)
+    legacy = tmp_path / "assignment-journal.json"
+    legacy.write_text(original)
+    journal = ExecutionState(tmp_path, 3)
+    assert journal.load() is not None
+    assert legacy.read_text() == original and not (tmp_path / "journals").exists()
+
+    journal = ExecutionState(tmp_path, 4)
+    journal.record_received(_assignment(job_id=6, flow_id=4))
+    assert not legacy.exists()
+    assert (tmp_path / "journals/flow-3.json").read_text() == original
+    assert journal.path == tmp_path / "journals/flow-4.json"
+    recovery = ExecutionState(tmp_path, 4).recovery(executor_active=False)
+    assert recovery is not None and recovery.job_id == 6
+
+
+@pytest.mark.parametrize("conflict", [False, True])
+def test_interrupted_legacy_move_can_resume_without_overwriting_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, conflict: bool,
+) -> None:
+    # Migration may be interrupted before rename; a pre-existing destination is never replaced.
+    original = json.dumps(_previous_journal(tmp_path))
+    legacy = tmp_path / "assignment-journal.json"
+    legacy.write_text(original)
+    rename = Path.rename
+
+    def interrupt(source: Path, target: Path) -> Path:
+        if source == legacy:
+            raise OSError("migration interrupted")
+        return rename(source, target)
+
+    monkeypatch.setattr(Path, "rename", interrupt)
+    with pytest.raises(OSError, match="migration interrupted"):
+        ExecutionState(tmp_path, 3).acknowledge(5, JobState.FAILED)
+    assert legacy.read_text() == original
+    monkeypatch.setattr(Path, "rename", rename)
+    resumed = ExecutionState(tmp_path, 3)
+    if conflict:
+        destination = tmp_path / "journals/flow-3.json"
+        destination.write_text(original)
+        with pytest.raises(ExecutionStateError, match="conflicts"):
+            resumed.acknowledge(5, JobState.FAILED)
+        assert legacy.read_text() == destination.read_text() == original
+    else:
+        assert resumed.load() is not None and legacy.read_text() == original
+        resumed.acknowledge(5, JobState.FAILED)
+        saved = resumed.load()
+        assert saved is not None and saved.acknowledged and saved.version == 5
+        assert not legacy.exists()
+
+
 @pytest.mark.parametrize("success", [False, True])
 @pytest.mark.parametrize("stopped", [False, True])
 def test_predecessor_journal_recovers_and_upgrades_on_ack(
@@ -168,8 +337,9 @@ def test_predecessor_journal_recovers_and_upgrades_on_ack(
     # An ordinary package upgrade leaves v14 results/stop receipts inside a still-v4 journal.
     data = _previous_journal(tmp_path, success=success, stopped=stopped)
     original = json.dumps(data)
-    session = ExecutionState(tmp_path)
-    session.path.write_text(original)
+    session = ExecutionState(tmp_path, 3)
+    legacy = tmp_path / "assignment-journal.json"
+    legacy.write_text(original)
 
     recovery = session.recovery(executor_active=False)
     assert recovery is not None
@@ -182,7 +352,7 @@ def test_predecessor_journal_recovers_and_upgrades_on_ack(
     replay = session.replay()
     assert "connection_epoch" not in replay.model_dump()
     assert terminal_digest(replay) == data["result_digest"]
-    assert session.path.read_text() == original
+    assert legacy.read_text() == original
     with pytest.raises(ValidationError):
         parse_worker_message(json.dumps(data["terminal"]))
 
@@ -254,13 +424,14 @@ def test_invalid_predecessor_journal_is_preserved(
         target = child
     target[key] = value
     original = json.dumps(data)
-    session = ExecutionState(tmp_path)
-    session.path.write_text(original)
+    session = ExecutionState(tmp_path, 3)
+    legacy = tmp_path / "assignment-journal.json"
+    legacy.write_text(original)
 
     with pytest.raises(ExecutionStateError):
         session.load()
 
-    assert session.path.read_text() == original
+    assert legacy.read_text() == original
 
 
 @pytest.mark.parametrize("journal_unavailable", [False, True])
@@ -299,7 +470,7 @@ async def test_owner_collects_late_completion_without_restarting(
         async def reclaim_workspace(self) -> None:
             raise AssertionError("no stop requested")
 
-    state, executor = Journal(tmp_path), Executor()
+    state, executor = Journal(tmp_path, 3), Executor()
     owner = WorkerExecution(worker_id="worker", executor=executor, state=state)
     assignment = _assignment()
     owner.receive(assignment)
@@ -334,7 +505,7 @@ async def test_owner_collects_late_completion_without_restarting(
 
 async def test_owner_reuses_tool_future_and_matches_original_item(tmp_path: Path) -> None:
     # A reconnect borrows the same item; an MCP retry may reuse call_id but not the item ID.
-    state = ExecutionState(tmp_path)
+    state = ExecutionState(tmp_path, 3)
     executor = Mock(spec=TaskExecutor)
     blocked = asyncio.Event()
 
@@ -403,7 +574,7 @@ async def test_owner_reuses_tool_future_and_matches_original_item(tmp_path: Path
 
 async def test_registration_result_is_withheld_during_stop_and_shutdown(tmp_path: Path) -> None:
     # A late result acceptance must not retire a durable stop or its still-running cleanup.
-    state = ExecutionState(tmp_path)
+    state = ExecutionState(tmp_path, 3)
     executor = Mock(spec=TaskExecutor)
     cleaning, release = asyncio.Event(), asyncio.Event()
 
@@ -436,7 +607,7 @@ async def test_registration_result_is_withheld_during_stop_and_shutdown(tmp_path
         assert await owner.stop(fence) is receipt
         executor.reclaim_workspace.assert_awaited_once()
         restarted = WorkerExecution(
-            worker_id="worker", executor=executor, state=ExecutionState(tmp_path)
+            worker_id="worker", executor=executor, state=ExecutionState(tmp_path, 3)
         )
         assert restarted.result_for_registration() is None
         owner.on_stop_accepted(fence)
@@ -445,7 +616,7 @@ async def test_registration_result_is_withheld_during_stop_and_shutdown(tmp_path
         release.set()
         await asyncio.gather(observer, return_exceptions=True)
         await owner.shutdown()
-    other = ExecutionState(tmp_path / "shutdown")
+    other = ExecutionState(tmp_path / "shutdown", 3)
     other.record_received(_assignment())
     other.record_started()
     other.complete(RuntimeError("finished"))

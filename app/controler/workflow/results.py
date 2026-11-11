@@ -16,7 +16,7 @@ from app.contracts.protocol import (
     RevisionTaskResult,
     Succeeded,
 )
-from app.contracts.receipts import decode_result_inbox
+from app.contracts.receipts import MergeArchiveNotice, decode_result_inbox
 from app.contracts.result_models import (
     CommentEffect,
     Effect,
@@ -31,7 +31,7 @@ from app.contracts.result_models import (
 )
 from app.controler.config import ServerSettings
 from app.controler.review.resolution import plan_resolution
-from app.controler.workflow.archive import archive_effects, verify_archive
+from app.controler.workflow.archive import archive_effects, verify_archive, verify_merge_notice
 from app.controler.workflow.effects import ResultEffects
 from app.controler.workflow.initial import initial_delivery_mismatch
 from app.controler.workflow.revisions import (
@@ -58,6 +58,7 @@ from app.domain.models import (
 )
 from app.domain.review_models import BatchState
 from app.github import GitHubApp, GitHubError
+from app.persistence.activity import ActivityStore
 from app.persistence.database import Database
 from app.persistence.deliveries import DeliveryStore
 from app.persistence.flows import FlowStore
@@ -191,6 +192,11 @@ class ResultApplication:
             if plan.digest != current.result_digest:
                 raise ValueError("result plan digest conflicts with inbox")
         failure = await self.effects.run(plan)
+        if failure and plan.archive_notice is not None:
+            # A permission failure is retryable notification work, never a reversal
+            # of the immutable merge conclusion or a reason to retain a Worker.
+            self.jobs.set_job_error(job_id, failure)
+            raise ResultPending(failure)
         if failure and (plan.revision is not None or plan.archive is not None):
             # Code delivery or cleanup already happened. Preserve its receipts so
             # explicit retry repairs only GitHub without another worker run.
@@ -236,7 +242,8 @@ class ResultApplication:
             )
             if retired:
                 # Preserve the frozen plan/receipts as history; only execution facts survive merge.
-                plan = self._retired_plan(current, plan.attempt_id)
+                if plan.archive_notice is None:
+                    plan = self._retired_plan(current, plan.attempt_id)
                 failure = None
             state = JobState.FAILED if failure else plan.state
             if flow.state not in TERMINAL_STATES and not retired:
@@ -254,6 +261,8 @@ class ResultApplication:
                 # Even a failed INITIAL retains its checkout. Explicit finalization
                 # must confirm stop/reclamation before releasing this round's binding.
                 self.flows.using(tx).try_archive(flow.id)
+                if flow.state is FlowState.ARCHIVED and plan.archive_notice is None:
+                    self.workers.using(tx).release_flow_execution(flow.id)
             flow = self.flows.using(tx).get_flow(flow.id) or flow
         if not retired:
             self._after_commit(flow, current, plan, state)
@@ -332,12 +341,17 @@ class ResultApplication:
             attempt_id=flow.current_attempt_id,
             state=JobState.DONE,
         )
+        if isinstance(message, MergeArchiveNotice):
+            verify_merge_notice(flow, job, message, activity=ActivityStore(tx))
+            return base.model_copy(update={
+                "archive_notice": message,
+                "effects": archive_effects(
+                    flow, message, done_label=self.settings.done_label,
+                    in_review_label=self.settings.in_review_label,
+                ) if flow.installation_id is not None else [],
+            })
         if flow.state in TERMINAL_STATES or job.round_no != flow.current_round_no:
-            return (
-                base.model_copy(update={"state": JobState.FAILED})
-                if isinstance(message, Failed)
-                else base
-            )
+            return self._retired_plan(job, base.attempt_id)
         batch = reviews_tx.for_job(job) if job.kind in {JobKind.REVISION} else None
         if batch is not None:
             base = base.model_copy(update={"attempt_id": batch.attempt_id, "batch_id": batch.id})
@@ -735,9 +749,7 @@ class ResultApplication:
             return
         if flow.state is FlowState.ARCHIVED and job.kind is not JobKind.ARCHIVE:
             return
-        if job.kind is JobKind.ARCHIVE:
-            emit_hook(self.plugins, "on_archived", flow=flow)
-        elif job.kind is JobKind.INITIAL and plan.delivery is not None:
+        if job.kind is JobKind.INITIAL and plan.delivery is not None:
             emit_hook(
                 self.plugins,
                 "on_pr_opened",

@@ -31,7 +31,7 @@ class ServerFlowCallbacks:
         jobs: JobStore,
         tools: FlowToolService,
         validate_active: Callable[[int, str], None],
-        is_stopping: Callable[[], bool],
+        is_stopping: Callable[[int], bool],
     ) -> None:
         self.worker_id, self.session = worker_id, session
         self.jobs, self.tools = jobs, tools
@@ -56,7 +56,7 @@ class ServerFlowCallbacks:
 
     async def on_tool(self, item: FlowToolRequest, message: WorkerMessageUnion) -> None:
         self._validate_tool(item)
-        if self.is_stopping():
+        if self.is_stopping(item.arguments.job_id):
             return
         result = await self.tools.execute(
             item, worker_id=self.worker_id, connection_epoch=self.epoch
@@ -69,7 +69,7 @@ class ServerFlowCallbacks:
         if not isinstance(item, FlowToolRequest):
             raise ProtocolViolation("unregistered message route")
         self._validate_tool(item)
-        if self.is_stopping():
+        if self.is_stopping(item.arguments.job_id):
             return
         result = FlowToolResponse(
             **result_header(item.message_id),

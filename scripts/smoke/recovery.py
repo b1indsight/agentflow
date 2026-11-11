@@ -6,6 +6,7 @@ only its own random PostgreSQL schema and leaves evidence/resources for inspecti
 from __future__ import annotations
 
 import argparse
+import asyncio
 import hashlib
 import ipaddress
 import json
@@ -32,6 +33,8 @@ from app.contracts.protocol import (
 )
 from app.domain.models import FlowState, JobKind
 from app.persistence.store import Store
+from app.worker.execution.workspaces import RepositoryWorkspaces
+from app.worker.runtime import WorkerRootLock
 from app.worker.state.execution import ExecutionState, ExecutionStateError
 
 FILES = {'database.dump', 'worker.tar.gz'}
@@ -137,25 +140,42 @@ def drill(work: Path, postgres_bin: Path, revision: str) -> dict:
         path.mkdir(mode=0o700, parents=True)
     (home / 'fake-session').write_text('fixture-only-no-auth')
     store = Store(scoped)
+    root_lock = WorkerRootLock(root, 'fixture-worker')
     try:
+        root_lock.acquire()
         store.init_db()
         flow = store.flows.create_flow('fixture/no-network', 1, 1)
         attempt = store.flows.create_attempt(flow.id)
         flow.current_attempt_id = attempt.id
         store.flows.update_flow(flow)
-        store.workers.worker_connected('fixture-worker', PROTOCOL_VERSION, 'fixture-epoch')
-        job = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
-        if not store.workers.assign_job('fixture-worker', 'fixture-token', 'fixture-epoch'):
+        pool = RepositoryWorkspaces(root, 'fixture-worker')
+        default = pool.initialize()
+        store.workers.worker_connected(
+            'fixture-worker', PROTOCOL_VERSION, 'fixture-epoch',
+            workspace=default.workspace, repo_workspace_limit=pool.limit,
+        )
+        # Provision real empty directories without Git/network access before claiming one.
+        for item in asyncio.run(pool.provision(flow.repo)):
+            if not store.workers.report_workspace('fixture-worker', 'fixture-epoch', item):
+                raise RuntimeError('fixture inventory rejected')
+        store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
+        job = store.workers.assign_job('fixture-worker', 'fixture-token', 'fixture-epoch')
+        if job is None or job.workspace is None or job.generation is None:
             raise RuntimeError('fixture assignment failed')
         if not store.workers.start_assignment(job.id, attempt.id, 'fixture-worker', 'fixture-token', 'fixture-epoch'):
             raise RuntimeError('fixture start failed')
         expected_flow = store.flows.get_flow(flow.id)
         if expected_flow is None or expected_flow.state is not FlowState.RUNNING:
             raise RuntimeError('fixture flow did not enter running')
+        expected_workspaces = store.workers.list_workspaces('fixture-worker')
+        expected_binding = store.workers.get_flow_execution(flow.id)
+        if expected_binding is None or expected_binding.released_at is not None:
+            raise RuntimeError('fixture workspace binding missing')
         store.webhooks.receive('fixture-delivery', 'ping', {}, 'a' * 64)
-        journal = ExecutionState(root)
+        journal = ExecutionState(root, flow.id)
         journal.record_received(AssignmentArguments(
             job_id=job.id, flow_id=flow.id, assignment_token='fixture-token',
+            workspace=job.workspace, generation=job.generation,
             secret=AssignmentSecret(push=PushSecret(
                 token=SecretStr('fixture-not-a-credential'), repository=flow.repo,
                 expires_at=datetime.now(UTC))),
@@ -164,6 +184,7 @@ def drill(work: Path, postgres_bin: Path, revision: str) -> dict:
         ))
         original = journal.record_started()
     finally:
+        root_lock.release()
         store.close()
     # No serve, worker, executor or GitHub client is started by this fixture.
 
@@ -199,7 +220,9 @@ def drill(work: Path, postgres_bin: Path, revision: str) -> dict:
         binding = restored.workers.get_flow_execution(flow.id)
         if (restored.flows.get_flow(flow.id) != expected_flow or not restored_job
                 or restored_job.assignment_token != 'fixture-token'
-                or not binding or binding.released_at is not None
+                or (restored_job.workspace, restored_job.generation) != (job.workspace, job.generation)
+                or binding != expected_binding
+                or restored.workers.list_workspaces('fixture-worker') != expected_workspaces
                 or len(restored.webhooks.list()) != 1):
             raise RuntimeError('restored database facts differ from fixture')
     finally:
@@ -210,10 +233,10 @@ def drill(work: Path, postgres_bin: Path, revision: str) -> dict:
         archive.extractall(destination, filter='data')
     if (destination / 'home/fake-session').read_text() != 'fixture-only-no-auth':
         raise RuntimeError('HOME restore mismatch')
-    if ExecutionState(root).load() != original:
+    if ExecutionState(root, flow.id).load() != original:
         raise RuntimeError('original journal changed')
     try:
-        ExecutionState(destination / 'root').load()
+        ExecutionState(destination / 'root', flow.id).load()
     except ExecutionStateError as exc:
         if str(exc.__cause__) != "worker journal belongs to another worker root":
             raise

@@ -16,7 +16,7 @@ import app.controler.config as server_config
 import app.controler.runtime as server_runtime
 import app.telemetry.metrics as metrics_module
 from app import cli
-from app.contracts.protocol import PROTOCOL_VERSION, ArchiveResult, InitialTaskResult, Succeeded
+from app.contracts.protocol import ArchiveResult, InitialTaskResult, Succeeded
 from app.controler.api import create_app
 from app.controler.config import ServerSettings
 from app.controler.workflow.service import ControlService
@@ -27,7 +27,9 @@ from app.persistence.metrics import read_snapshot
 from app.telemetry.logging import configure_logging
 from app.telemetry.metrics import Metrics
 from tests.github import RecordingGitHub
+from tests.test_archive_recovery import legacy_merge
 from tests.test_coordinator import coordinator
+from tests.workspace_fixtures import register_worker, report_settled
 
 
 async def test_logs_isolate_concurrent_context_and_never_render_exception_payload():
@@ -117,7 +119,7 @@ async def test_snapshot_runs_off_event_loop_and_scrape_never_reads_database(monk
 def test_repeated_snapshots_do_not_count_execution_receipt_twice(store, postgresql_url):
     flow = store.flows.create_flow('private/repository', 1, 1)
     job = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
-    store.workers.worker_connected('w', PROTOCOL_VERSION, 'epoch')
+    register_worker(store, 'w', repo=flow.repo, epoch='epoch')
     assert store.workers.assign_job('w', 'token', 'epoch')
     result = Succeeded(job_id=job.id, assignment_token='token',
                        result=InitialTaskResult(session_id='session', last_message='', exit_code=1))
@@ -233,20 +235,17 @@ async def test_archive_alert_age_uses_latest_job_of_active_bound_flow(
     attempt = store.flows.create_attempt(flow.id)
     flow.current_attempt_id = attempt.id
     store.flows.update_flow(flow)
-    store.workers.worker_connected('w', PROTOCOL_VERSION, 'epoch')
+    register_worker(store, 'w', repo=flow.repo, epoch='epoch')
     initial = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
     assert store.workers.assign_job('w', 'token', 'epoch')
     assert store.workers.finish_assignment(initial.id, 'w', 'token', JobState.DONE, 'epoch')
+    report_settled(store, initial.id, epoch='epoch')
     delivery = store.deliveries.get_or_create_delivery(flow.id, 'flow/1')
     delivery.state, delivery.pr_number = DeliveryState.MERGED, 17
     delivery.head_sha, delivery.merge_commit_sha, delivery.merged_at = 'head', 'merge', utcnow()
     store.deliveries.update_delivery(delivery)
-    ControlService(database=store.database).finish(
-        flow,
-        reason=ArchiveReason.SUCCEEDED,
-        summary="Merged",
-        expected_round_no=1,
-    )
+    # This alert tracks pre-upgrade Worker ARCHIVE failures on still-active flows.
+    legacy_merge(store, flow)
     job = store.jobs.list_jobs(flow.id)[-1]
     with store.connection() as conn:
         conn.execute("UPDATE jobs SET created_at=now()-interval '20 minutes' WHERE id=%s", (job.id,))
@@ -256,6 +255,7 @@ async def test_archive_alert_age_uses_latest_job_of_active_bound_flow(
     assert age() >= 1200
     assert store.workers.assign_job('w', 'archive-token', 'epoch')
     assert store.workers.finish_assignment(job.id, 'w', 'archive-token', JobState.FAILED, 'epoch')
+    report_settled(store, job.id, epoch='epoch')
     # A newer queued retry replaces the age of the failed attempt.
     retry = store.jobs.enqueue_job(flow.id, JobKind.ARCHIVE)
     assert age() < 10
@@ -282,6 +282,7 @@ async def test_archive_alert_age_uses_latest_job_of_active_bound_flow(
         == "pending"
     )
     assert await subject.results.apply(retry.id) is JobState.DONE
+    report_settled(store, retry.id, epoch='epoch')
     assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
     assert store.workers.get_flow_execution(flow.id).released_at is not None
     assert age() == 0

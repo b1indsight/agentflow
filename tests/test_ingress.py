@@ -12,7 +12,6 @@ from psycopg import OperationalError
 from pydantic import SecretStr
 
 from app.communication.gateway import Gateway
-from app.contracts.protocol import PROTOCOL_VERSION
 from app.controler.api import create_app
 from app.controler.config import ServerSettings
 from app.controler.events.router import EventRouter
@@ -24,6 +23,7 @@ from app.domain.models import Flow, FlowState, JobKind
 from app.persistence.store import Store
 from app.plugins import get_plugin_manager
 from app.telemetry.metrics import Metrics
+from tests.workspace_fixtures import register_worker
 
 
 class WebhookRuntime(ServerRuntime):
@@ -168,7 +168,7 @@ async def test_valid_signature_dispatches_webhook(
     flow = store.flows.get_active_flow("owner/repo", 7)
     assert flow is not None
     assert flow.state is FlowState.QUEUED
-    store.workers.worker_connected("worker-1", protocol_version=PROTOCOL_VERSION)
+    register_worker(store, "worker-1", repo=flow.repo)
     assert store.workers.assign_job("worker-1", "assignment-1") is not None
 
 

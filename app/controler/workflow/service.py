@@ -9,7 +9,7 @@ from typing import Literal
 from loguru import logger
 from pluggy import PluginManager
 
-from app.controler.workflow.archive import verify_archive
+from app.controler.workflow.archive import verify_archive, verify_merge_notice
 from app.controler.workflow.lifecycle import close_delivery, record_merge
 from app.domain.models import (
     WORKING_STATES,
@@ -19,7 +19,6 @@ from app.domain.models import (
     FlowState,
     JobKind,
     JobState,
-    WorkerStatus,
     WorkerView,
 )
 from app.github import PullRequestMerge
@@ -44,11 +43,7 @@ type RetryFailureCode = Literal[
     "retry_result_pending",
     "retry_flow_conflict",
     "retry_delivery_merged",
-    "retry_archive_inactive",
-    "retry_archive_binding_missing",
     "retry_execution_unsettled",
-    "retry_archive_worker_unavailable",
-    "retry_archive_missing",
     "retry_archived",
 ]
 
@@ -128,24 +123,34 @@ class ControlService:
                 return
             delivery = deliveries_tx.get_delivery(fresh.id)
             merged = delivery is not None and delivery.state is DeliveryState.MERGED
-            if reason is ArchiveReason.SUCCEEDED and not merged:
-                if not summary.strip():
-                    raise ValueError("successful completion requires a conclusion")
-                if delivery is not None and delivery.pr_number is not None:
-                    raise ValueError("a delivered PR must be merged before successful completion")
-            # A repeated end request must not clear an archive failure or downgrade success.
-            if fresh.archive_reason is not None:
-                return
-            fresh.archive_reason = ArchiveReason.SUCCEEDED if merged else reason
-            fresh.archive_summary = summary.strip() or None
-            fresh.state = FlowState.FINALIZING
-            flows_tx.update_flow(fresh)
-            stops_tx.request(fresh.id)
-            jobs_tx.cancel_jobs(fresh.id)
             if merged:
-                jobs_tx.enqueue_job(fresh.id, JobKind.ARCHIVE)
-            flows_tx.try_archive(fresh.id)
-        self._jobs_available()
+                assert delivery is not None
+                record_merge(
+                    fresh, delivery, PullRequestMerge.model_validate({
+                        "number": delivery.pr_number, "merged": True,
+                        "merged_at": delivery.merged_at, "merge_commit_sha": delivery.merge_commit_sha,
+                    }), deliveries=deliveries_tx, flows=flows_tx, jobs=jobs_tx,
+                    stops=stops_tx, workers=self.workers.using(tx), origin="finish",
+                )
+            else:
+                if reason is ArchiveReason.SUCCEEDED:
+                    if not summary.strip():
+                        raise ValueError("successful completion requires a conclusion")
+                    if delivery is not None and delivery.pr_number is not None:
+                        raise ValueError("a delivered PR must be merged before successful completion")
+                if fresh.archive_reason is not None:
+                    return
+                fresh.archive_reason = reason
+                fresh.archive_summary = summary.strip() or None
+                fresh.state = FlowState.FINALIZING
+                flows_tx.update_flow(fresh)
+                stops_tx.request(fresh.id)
+                jobs_tx.cancel_jobs(fresh.id)
+                flows_tx.try_archive(fresh.id)
+        if merged:
+            self.notify_merge(fresh)
+        else:
+            self._jobs_available()
         logger.info("flow {} finalization requested", flow.id)
 
     def resume(self, flow: Flow, *, expected_round_no: int) -> Flow:
@@ -219,7 +224,6 @@ class ControlService:
             flows_tx = self.flows.using(tx)
             jobs_tx = self.jobs.using(tx)
             webhook_store_tx = self.webhook_store.using(tx)
-            workers_tx = self.workers.using(tx)
             fresh = tx.lock_workflow(flow.id)
             delivery = deliveries_tx.get_delivery(flow.id)
             if (
@@ -249,7 +253,8 @@ class ControlService:
                 deliveries=deliveries_tx,
                 flows=flows_tx,
                 jobs=jobs_tx,
-                workers=workers_tx,
+                stops=self.stops.using(tx),
+                workers=self.workers.using(tx),
                 origin="webhook",
             )
         if first_merge:
@@ -258,6 +263,8 @@ class ControlService:
     def notify_merge(self, flow: Flow) -> None:
         """Notify plugins and workers only after merge facts and archive work have committed."""
         self._fire("on_merged", flow=flow)
+        if flow.state is FlowState.ARCHIVED:
+            self._fire("on_archived", flow=flow)
         self._jobs_available()
 
     def retry(self, flow: Flow) -> bool:
@@ -275,13 +282,27 @@ class ControlService:
             if fresh is None:
                 raise RetryRejected("flow_not_found", f"flow {flow.id} disappeared")
             if fresh.state is FlowState.ARCHIVED:
-                raise RetryRejected("retry_archived", "use explicit resume for an archived Flow")
-            if stops_tx.has_pending(fresh.id):
+                notices = [result_store_tx.get_plan(job.id) for job in jobs_tx.list_jobs(fresh.id)
+                           if job.round_no == fresh.current_round_no
+                           and job.result_applied_at is None and job.assigned_worker_id is None
+                           and job.kind is JobKind.ARCHIVE]
+                plan = next((item for item in notices
+                             if item is not None and item.archive_notice is not None), None)
+                if plan is None or plan.archive_notice is None:
+                    raise RetryRejected("retry_archived", "use explicit resume for an archived Flow")
+                job = tx.lock_job(plan.job_id)
+                assert job is not None
+                verify_merge_notice(fresh, job, plan.archive_notice, activity=ActivityStore(tx))
+                if result_store_tx.retry_failed_effects(job.id):
+                    return True
+                raise RetryRejected("retry_result_pending", "archive notification is awaiting reconciliation")
+            delivery = deliveries_tx.get_delivery(fresh.id)
+            if (stops_tx.has_pending(fresh.id)
+                    and (delivery is None or delivery.state is not DeliveryState.MERGED)):
                 raise RetryRejected(
                     "retry_stop_pending",
                     "cancellation is awaiting confirmed stop or pending result reconciliation",
                 )
-            delivery = deliveries_tx.get_delivery(fresh.id)
             if (
                 delivery is not None
                 and delivery.state is DeliveryState.CLOSED
@@ -292,13 +313,13 @@ class ControlService:
                     "PR is closed or paused; reopen and reconcile its baseline before retry",
                 )
             if delivery is not None and delivery.state is DeliveryState.MERGED:
-                self._retry_archive(
-                    fresh,
-                    database=tx,
-                    deliveries=deliveries_tx,
-                    jobs=jobs_tx,
-                    result_store=result_store_tx,
-                    workers=workers_tx,
+                record_merge(
+                    fresh, delivery, PullRequestMerge.model_validate({
+                        "number": delivery.pr_number, "merged": True,
+                        "merged_at": delivery.merged_at,
+                        "merge_commit_sha": delivery.merge_commit_sha,
+                    }), deliveries=deliveries_tx, flows=flows_tx, jobs=jobs_tx,
+                    stops=stops_tx, workers=workers_tx, origin="retry",
                 )
             elif jobs_tx.has_pending_result(flow.id):
                 if not self._retry_delivery_effects(
@@ -351,7 +372,10 @@ class ControlService:
                 )
                 if failed_job is not None and kind is JobKind.REVISION:
                     reviews_tx.retry(failed_job, replacement)
-        self._jobs_available()
+        if fresh.state is FlowState.ARCHIVED:
+            self.notify_merge(fresh)
+        else:
+            self._jobs_available()
         return True
 
     @staticmethod
@@ -385,114 +409,24 @@ class ControlService:
                 return False
         return result_store.retry_failed_effects(plan.job_id)
 
-    @staticmethod
-    def _retry_archive(
-        flow: Flow,
-        *,
-        database: Database,
-        deliveries: DeliveryStore,
-        jobs: JobStore,
-        result_store: ResultStore,
-        workers: WorkerStore,
-    ) -> None:
-        """Retry only a settled archive on its original binding and current Attempt."""
-        if flow.state not in {FlowState.FINALIZING, FlowState.BLOCKED}:
-            raise RetryRejected(
-                "retry_archive_inactive",
-                "a merged PR cannot retry coding or review jobs or terminal Flows",
-            )
-        execution = workers.get_flow_execution(flow.id)
-        if execution is None or execution.released_at is not None:
-            raise RetryRejected(
-                "retry_archive_binding_missing",
-                "archive retry requires the original active binding",
-            )
-        if jobs.has_pending_result(flow.id):
-            if ControlService._retry_delivery_effects(
-                flow,
-                database=database,
-                deliveries=deliveries,
-                jobs=jobs,
-                result_store=result_store,
-                workers=workers,
-            ):
-                return
-            raise RetryRejected(
-                "retry_result_pending",
-                "archive has a pending result; wait for result reconciliation",
-            )
-        job_records = jobs.list_jobs(flow.id)
-        if any(job.state is JobState.RUNNING for job in job_records):
-            raise RetryRejected(
-                "retry_execution_unsettled",
-                "archive retry is blocked by a running or unknown executor",
-            )
-        worker = next(
-            (w for w in workers.list_workers() if w.worker_id == execution.worker_id), None
-        )
-        if (
-            worker is None
-            or worker.status is not WorkerStatus.ONLINE
-            or worker.current_job_id is not None
-        ):
-            raise RetryRejected(
-                "retry_archive_worker_unavailable",
-                "archive retry requires the original worker online with no executor",
-            )
-        if any(job.kind is JobKind.ARCHIVE and job.state is JobState.QUEUED for job in job_records):
-            flow.state = FlowState.FINALIZING
-            FlowStore(database).update_flow(flow)
-            return
-        failed = next(
-            (
-                job
-                for job in reversed(job_records)
-                if job.kind is JobKind.ARCHIVE and job.state is JobState.FAILED
-            ),
-            None,
-        )
-        if failed is None:
-            raise RetryRejected("retry_archive_missing", "Flow has no failed archive to retry")
-        flow.state = FlowState.FINALIZING
-        FlowStore(database).update_flow(flow)
-        jobs.enqueue_job(flow.id, JobKind.ARCHIVE, payload=failed.payload)
-
     def notify_jobs(self) -> None:
         self._jobs_available()
 
     def list_workers(self) -> list[WorkerView]:
         views: list[WorkerView] = []
         for worker in self.workers.list_workers():
-            execution = self.workers.get_worker_execution(worker.worker_id)
-            job = (
-                self.jobs.get_job(worker.current_job_id)
-                if worker.current_job_id is not None
-                else None
-            )
+            executions = self.workers.get_worker_executions(worker.worker_id)
+            workspaces = self.workers.list_workspaces(worker.worker_id)
             views.append(
                 WorkerView(
                     worker_id=worker.worker_id,
                     draining=worker.draining,
                     status=worker.status,
-                    current_job_id=worker.current_job_id,
-                    current_flow_id=(
-                        execution.flow_id
-                        if execution is not None
-                        else job.flow_id
-                        if job is not None
-                        else None
-                    ),
+                    workspaces=workspaces,
+                    executions=executions,
                     last_seen_at=worker.last_seen_at,
                     last_error=worker.last_error,
                     connection_epoch=worker.connection_epoch,
-                    lease_expires_at=job.lease_expires_at if job is not None else None,
-                    recovery_deadline=(
-                        job.recovery_deadline
-                        if job is not None and job.recovery_deadline is not None
-                        else execution.recovery_deadline
-                        if execution is not None
-                        else None
-                    ),
                     last_disconnect_reason=worker.last_disconnect_reason,
                 )
             )

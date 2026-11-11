@@ -72,7 +72,8 @@ def registered_message(
         control="registered",
         payload=[],
         heartbeat_interval=interval,
-        recovery=recovery,
+        recoveries=[recovery] if recovery is not None else [],
+        ready=True,
     )
 
 
@@ -250,7 +251,7 @@ async def test_assignment_never_launches_before_started_is_sent_and_persisted(tm
             self.invocations += 1
             return await super().execute(*args, **kwargs)
 
-    state, executor, connection = Journal(tmp_path), Executor(), Connection()
+    state, executor, connection = Journal(tmp_path, 3), Executor(), Connection()
     owner = WorkerExecution(worker_id="worker-1", executor=executor, state=state)
     client = worker_runtime(
         worker_id="worker-1",
@@ -294,8 +295,9 @@ async def test_completion_between_register_and_resume_is_persisted_without_reexe
     class Connection(ScriptedConnection):
         async def send(self, raw):
             message = parse_worker_message(raw)
-            if isinstance(message, Register) and not collected.is_set():
-                assert message.recovery.state == "started" and message.recovery.executor_active
+            if isinstance(message, Register) and message.recoveries and not collected.is_set():
+                assert len(message.recoveries) == 1
+                assert message.recoveries[0].state == "started" and message.recoveries[0].executor_active
                 finish.set()
                 await collected.wait()
             for item in message.payload:
@@ -303,7 +305,7 @@ async def test_completion_between_register_and_resume_is_persisted_without_reexe
                     assert state.load().terminal.result == item.result
             await super().send(raw)
 
-    state, executor = Journal(tmp_path), Executor()
+    state, executor = Journal(tmp_path, 3), Executor()
     owner = WorkerExecution(worker_id="worker-1", executor=executor, state=state)
     owner.receive(_assignment())
     owner.start()
@@ -366,7 +368,7 @@ async def test_worker_redacts_echoed_push_capability_before_journal_and_wire(tmp
     assert isinstance(assignment, Assignment)
     assignment.arguments.secret = _assignment().secret
     connection.messages[1] = message.model_dump_json()
-    state = InspectJournal(tmp_path)
+    state = InspectJournal(tmp_path, 3)
     client = worker_runtime(
         worker_id="worker-1",
         worker_token="worker-secret",
@@ -491,7 +493,7 @@ async def test_replacing_connection_preserves_running_executor_and_renews_lease(
 ) -> None:
     # Join Runtime's connection driver, not just one Session; execution outlives either.
     executor = CancellableExecutor()
-    session = ExecutionState(tmp_path)
+    session = ExecutionState(tmp_path, 3)
     owner = WorkerExecution(worker_id="worker-1", executor=executor, state=session)
     client = worker_runtime(
         worker_id="worker-1",
@@ -574,7 +576,7 @@ async def test_replacing_connection_preserves_running_executor_and_renews_lease(
 async def test_heartbeat_failure_interrupts_waiting_for_tool_reply(tmp_path) -> None:
     # A stalled control-side tool reply must not prevent a failed heartbeat from reconnecting.
     assignment = _assignment()
-    state = ExecutionState(tmp_path)
+    state = ExecutionState(tmp_path, 3)
     owner = WorkerExecution(worker_id="worker-1", executor=ToolCallingExecutor(), state=state)
     client = worker_runtime(
         worker_id="worker-1",
@@ -660,8 +662,7 @@ async def test_cancelled_disconnected_tool_does_not_leak_into_resumed_or_next_as
         async def send(self, raw):
             message = parse_worker_message(raw)
             self.sent.append(raw)
-            # This peer has not committed the offline result: Register+A receives replay,
-            # and only the subsequent T/A batch can be accepted.
+            # This peer authorizes recovery first; only the subsequent T/A batch is accepted.
             if isinstance(message, Register):
                 return
             for item in message.payload:
@@ -705,7 +706,7 @@ async def test_cancelled_disconnected_tool_does_not_leak_into_resumed_or_next_as
                 assert self.assignment is None and self.load().acknowledged
             return super().record_received(work)
 
-    state = Journal(tmp_path)
+    state = Journal(tmp_path, 3)
     owner = WorkerExecution(worker_id="worker-1", executor=Executor(), state=state)
     client = worker_runtime(
         worker_id="worker-1",
@@ -740,7 +741,7 @@ async def test_cancelled_disconnected_tool_does_not_leak_into_resumed_or_next_as
 async def test_replacing_client_replays_original_tool_call(tmp_path, sent_before_disconnect):
     # Both a ready-but-unsent call and a lost reply must retain the original caller across clients.
     assignment = _assignment()
-    session = ExecutionState(tmp_path)
+    session = ExecutionState(tmp_path, 3)
     executor = ToolCallingExecutor()
     owner = WorkerExecution(worker_id="worker-1", executor=executor, state=session)
     owner.receive(assignment)
@@ -826,7 +827,7 @@ async def test_completed_disconnected_executor_is_journaled_before_recovery(tmp_
             written.set()
             return record
 
-    journal = Journal(tmp_path)
+    journal = Journal(tmp_path, 3)
     assignment = _assignment()
     executor = CompletedExecutor()
     owner = WorkerExecution(worker_id="worker-a", executor=executor, state=journal)
@@ -868,14 +869,14 @@ async def test_tool_cancelled_after_borrow_is_not_sent_or_blocking_completion(
             return await super().execute(task, secret, tool_caller=tool_caller)
 
     class CancelAfterBorrow(WorkerExecution):
-        async def next_tool_call(self):
-            pending = await super().next_tool_call()
-            if pending.request.arguments.call_id == "cancel-before-send":
+        def pending_tool_call(self):
+            pending = super().pending_tool_call()
+            if pending is not None and pending.request.arguments.call_id == "cancel-before-send":
                 assert caller is not None
                 caller.cancel()
             return pending
 
-    state = ExecutionState(tmp_path)
+    state = ExecutionState(tmp_path, 3)
     owner = CancelAfterBorrow(worker_id="worker-1", executor=Executor(), state=state)
     client = worker_runtime(
         worker_id="worker-1",
@@ -946,7 +947,7 @@ async def test_tool_cancelled_while_history_holds_driver_is_not_sent(tmp_path):
                 await caller
             return await super().execute(task, secret, tool_caller=tool_caller)
 
-    state = ExecutionState(tmp_path)
+    state = ExecutionState(tmp_path, 3)
     owner = WorkerExecution(worker_id="worker", executor=Executor(), state=state)
     work = _assignment()
     owner.receive(work)
@@ -1061,7 +1062,7 @@ async def test_mcp_shutdown_consumes_late_tool_response_before_delivering_result
                 session_id="session-1", last_message="Codex timed out", exit_code=124
             )
 
-    session = ExecutionState(tmp_path)
+    session = ExecutionState(tmp_path, 3)
     client = worker_runtime(
         worker_id="worker-1",
         worker_token="token",

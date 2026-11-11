@@ -74,6 +74,8 @@ class MemoryStore(RepositoryViews):
         self.execution = FlowExecution(
             flow_id=1,
             worker_id="worker-1",
+            workspace="1" * 32,
+            generation=1,
             repo_identity="worker-1:owner/repo",
         )
         self.delivery: FlowDelivery | None = None
@@ -278,6 +280,7 @@ def coordinator(store: Store | MemoryStore, github: GitHubApp) -> CoordinatorFix
     effects = ResultEffects(
         github,
         database=repositories.database,
+        plugins=plugins,
     )
     results = ResultApplication(
         github,

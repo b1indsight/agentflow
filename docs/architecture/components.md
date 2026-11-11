@@ -183,10 +183,12 @@ worker 验证 epoch 与整批关联头后，通过 Dispatcher.reject_reply 通�
 serve 的 `workers/transport.py:serve_worker` 校验 bearer token、accept 与实际首条 message Register，
 再创建带随机 epoch 的 Session，交给 Runtime 装配回调并调用 `Gateway.serve`。
 回调保存调度、恢复、持久化和 assignment fencing 的连接局部状态，无 Endpoint/Run/Context 对象。
-普通 worker 各有一个编码槽和独立推理槽，本地 bub 仅有推理槽。编码任务按 FIFO、worker
-`last_assigned_at` 和 Flow execution binding 在 PostgreSQL 中事务化领取；推理选择规则见下文。
+普通 worker 按仓库维护多个编码 workspace，另有一个无仓库默认 workspace 和独立推理槽；
+本地 bub 仅有推理槽。worker 按排队需求补充并登记具体目录，编码任务按 FIFO、worker
+`last_assigned_at` 和 Flow execution binding 在 PostgreSQL 中事务化领取具体 `(worker_id, workspace)`。
+每仓库限额使用该 worker 上报的配置；不同 workspace 的 job 并行，同 Flow 串行，推理选择规则见下文。
 `WorkerRuntime` 直接负责主动拨号、认证、指数退避和连接任务的关闭等待，
-不再创建 WorkerClient。`Connection` 接口与 `WebSocketTransport` 均位于 `worker/runtime.py`；
+并直接持有按 Flow 分开的执行集合，不增加 Registry。`Connection` 接口与 `WebSocketTransport` 均位于 `worker/runtime.py`；
 后者只适配底层 WebSocket IO，不负责连接生命周期，不保留独立 client 模块。
 `WorkerExecutor` 只依赖 CodingAgent 和 Flow repo/VCS helpers，不导入 Store、FastAPI 或 GitHub。
 
@@ -206,8 +208,9 @@ WebSocketDisconnect，其他错误与取消继续传播，见[第三阶段记录
 详见[取消、drain 与停机](../operations/cancel-drain.md)。
 已持久接收的终态结果由 control 接管，不因 worker 的 recovery deadline 到期重新执行或失败；
 后台循环持续恢复未应用结果。必要的 GitHub 操作未完成时不回复 `server.accept_result`，worker 保留 journal 重连。
-Flow 非终态时，即使暂时没有 running job，binding 也继续独占该 worker/repo。
-worker socket 与 executor 解耦，root 内原子 journal 在 ack 前保存进度和终态结果；
+Flow 未释放时，即使暂时没有 running job，binding 也继续独占该具体 workspace。
+worker socket 与 executor 解耦，root 内 `journals/flow-<id>.json` 分别保存进度和终态结果；
+结果或停止提交后仍等待精确 ACK 库存凭据，不凭漏报或旧代际消息释放执行。
 进程重启可重放终态，但不会猜测恢复已经消失的 executor。同一 attempt 的后续任务仍只回到首次 Started 的 worker，
 不支持跨 worker session 迁移。同机默认 root 按 identity 派生，并用持久 identity 标记与独占锁拒绝并发或顺序复用。
 
@@ -346,17 +349,17 @@ cursor 上使用 Psycopg `class_row(Model)`，由模型统一校验枚举、时�
 事务边界与共用锁由 Database 提供，没有引入 ORM。
 
 - `flows`：issue 级状态，`(repo, issue)` 仅允许一个非终态 flow；
-- `flow_executions`：Flow 到单槽 worker/repo identity 的生命周期 binding 与 recovery deadline；
+- `flow_executions`：Flow 到具体 worker/workspace/generation 的生命周期 binding 与 recovery deadline，活跃位置唯一；
 - `flow_deliveries`：每 Flow 唯一 branch/base/PR、交付状态和版本；
 - `flow_tool_calls`：fenced command 的参数与成功交付回执 response，支持同 call id 重放；
 - `attempts`：一次运行/恢复尝试的 session 与 revision cycles，不拥有 worker、branch 或 PR；
-- `jobs`：queued/running/done/failed、worker/token/start、lease/recovery deadline、result inbox/digest 与尝试次数；
+- `jobs`：queued/running/done/failed、worker/workspace/generation/token/start、lease/recovery deadline、result inbox/digest 与尝试次数；
 - `result_applications`：按源 job 唯一保存冻结的结果计划；
 - `result_effects`：有序 GitHub 操作、claim/fencing、远端回执、退避时间和最后错误；
-- `workers`：identity、协议版本、epoch、online/busy/recovering/offline/failed、当前 job、连接/心跳与断线原因；
+- `workers`：以 `(worker_id, workspace)` 为复合主键，一位置一行；默认无仓库行保存连接/epoch/限额/推理槽，各仓库行保存代际、库存状态和当前编码 job；
 - `events`：delivery 去重和 payload 审计；
 - `webhook_inbox`：202 前持久接收的原始事件、消费 claim、重试与保留状态；
-- `execution_stops`：绑定到具体执行的停止意图、凭据 digest 与确认状态；
+- `execution_stops`：绑定到具体执行与 workspace/generation 的停止意图、凭据 digest 与确认状态；
 - `review_items` / `review_versions`：Flow 内稳定反馈身份、不可变版本、独立 relay/consume 时间和已核验 addressed 依据；
 - `review_pending_edits`：同秒乱序编辑的前序正文与原始来源；只有未在历史表示且后继无歧义时原子回放，其余保留待核对；
 - `review_buffers` / `review_batches`：持久 deadline/generation、冻结反馈/上下文/线程快照、批次所有者 job 和未决问题；

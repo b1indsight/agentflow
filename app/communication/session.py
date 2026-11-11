@@ -60,6 +60,7 @@ class Session[Incoming: Message, Outgoing: Message]:
         self._inbox: deque[tuple[Incoming | Ready, int, int]] = deque()
         self._reject: Callable[[RejectedMessage], Ready] | None = None
         self._ready = asyncio.Event()
+        self._space_available = asyncio.Event()
         self._receiving = False
         self._watches: dict[str, asyncio.Task[Ready]] = {}
         self._retiring_watches: set[asyncio.Task[Ready]] = set()
@@ -215,7 +216,7 @@ class Session[Incoming: Message, Outgoing: Message]:
         # A cancelled waiter cannot interrupt cleanup or hide it from a concurrent close.
         await asyncio.shield(asyncio.gather(*tasks, return_exceptions=True))
 
-    def periodic(self, interval: float, build: Callable[[], Outgoing | None]) -> None:
+    def periodic(self, interval: float, build: Callable[[], Outgoing | list[Outgoing] | None]) -> None:
         """Send communication heartbeats independently of slow business handlers."""
         if self._periodic is not None or interval <= 0:
             raise ValueError("periodic sender already configured or invalid interval")
@@ -225,7 +226,10 @@ class Session[Incoming: Message, Outgoing: Message]:
                 while True:
                     await asyncio.sleep(interval)
                     message = build()
-                    if message is not None:
+                    if isinstance(message, list):
+                        for item in message:
+                            await self.send(item)
+                    elif message is not None:
                         await self.send(message)
             except Exception as error:  # noqa: BLE001 — relay the original fault to the driver.
                 self._fault = error
@@ -268,6 +272,7 @@ class Session[Incoming: Message, Outgoing: Message]:
                         return task.result()
                 if self._inbox:
                     message, _, _ = self._inbox.popleft()
+                    self._space_available.set()
                     self._last_was_message = True
                     return message
                 if self._woken:
@@ -343,16 +348,12 @@ class Session[Incoming: Message, Outgoing: Message]:
                 try:
                     message = self._parse(raw)
                 except PayloadRejected as rejection:
+                    await self._wait_for_capacity(len(raw.encode()), len(rejection.message.payload))
                     self._queue_rejection(rejection.message, len(raw.encode()))
                     continue
                 # Validate the entire message before recording a receipt or delivering payloads.
                 size = len(raw.encode())
-                if (
-                    size + sum(buffered_size for _, buffered_size, _ in self._inbox) > _MAX_BYTES
-                    or len(self._inbox) >= _MAX_MESSAGES
-                    or sum(items for _, _, items in self._inbox) + len(message.payload) > _MAX_ITEMS
-                ):
-                    raise SessionOverflow("execution message buffer exceeded")
+                await self._wait_for_capacity(size, len(message.payload))
                 self.register_control(message)
                 if message.control is None and not message.payload:
                     continue
@@ -363,14 +364,24 @@ class Session[Incoming: Message, Outgoing: Message]:
         finally:
             self._ready.set()
 
-    def _queue_rejection(self, message: RejectedMessage, size: int) -> None:
-        count = len(message.payload)
-        if (
+    async def _wait_for_capacity(self, size: int, count: int) -> None:
+        """Bound memory while applying transport backpressure to valid multi-job bursts.
+
+        A single oversized message still fails. A full FIFO pauses the reader, so the
+        queue limit does not become a limit on concurrent jobs or registration pages.
+        """
+        if size > _MAX_BYTES or count > _MAX_ITEMS:
+            raise SessionOverflow("execution message buffer exceeded")
+        while (
             size + sum(buffered_size for _, buffered_size, _ in self._inbox) > _MAX_BYTES
             or len(self._inbox) >= _MAX_MESSAGES
             or sum(items for _, _, items in self._inbox) + count > _MAX_ITEMS
         ):
-            raise SessionOverflow("execution message buffer exceeded")
+            self._space_available.clear()
+            await self._space_available.wait()
+
+    def _queue_rejection(self, message: RejectedMessage, size: int) -> None:
+        count = len(message.payload)
         if self._reject is None:
             raise PayloadRejected(message)
         prepare = self._reject

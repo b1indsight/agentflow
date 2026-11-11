@@ -8,7 +8,6 @@ from unittest.mock import call
 import pytest
 
 from app.contracts.protocol import (
-    PROTOCOL_VERSION,
     FlowToolArguments,
     FlowToolRequest,
     InitialTask,
@@ -41,6 +40,7 @@ from tests.github import RecordingGitHub
 from tests.test_coordinator import apply_result, coordinator
 from tests.test_merge import route_merge
 from tests.test_revision_delivery import revision_control as revision_control  # noqa: PLC0414
+from tests.workspace_fixtures import register_worker, report_settled
 
 
 @pytest.fixture
@@ -114,7 +114,7 @@ async def completed_open_initial(
         database=store.database,
     ).on_trigger("owner/repo", 8, 42)
     assert flow is not None
-    store.workers.worker_connected("worker-a", PROTOCOL_VERSION, "epoch")
+    register_worker(store, "worker-a", repo=flow.repo, epoch="epoch")
     job = store.workers.assign_job("worker-a", "token", "epoch")
     assert job is not None
     github = RecordingGitHub()
@@ -157,6 +157,7 @@ async def completed_open_initial(
         == "pending"
     )
     assert await subject.results.apply(job.id) is JobState.DONE
+    report_settled(store, job.id, epoch="epoch")
     completed = store.flows.get_flow(flow.id)
     assert completed is not None
     return completed, subject, github, request, result
@@ -178,7 +179,7 @@ async def test_merged_initial_retry_keeps_execution_facts_without_reopening(
     assert store.workers.release_flow_execution(flow.id)
     service.retry(flow)
     # Fresh worker-b starts from seed A, then checks out existing H where H descends A and H != A.
-    store.workers.worker_connected("worker-b", PROTOCOL_VERSION, "epoch-b")
+    register_worker(store, "worker-b", repo=flow.repo, epoch="epoch-b")
     job = store.workers.assign_job("worker-b", "retry-token", "epoch-b")
     assert job is not None and job.kind is JobKind.INITIAL
     task = await subject.prepare(job)
@@ -206,6 +207,10 @@ async def test_merged_initial_retry_keeps_execution_facts_without_reopening(
     await route_merge(store, flow)
     merged = store.deliveries.get_delivery(flow.id)
     assert merged is not None and merged.state is DeliveryState.MERGED
+    archived = store.flows.get_flow(flow.id)
+    assert (archived.state, archived.archive_reason) == (FlowState.ARCHIVED, ArchiveReason.SUCCEEDED)
+    stop = store.stops.pending("worker-b")
+    binding = store.workers.get_flow_execution(flow.id)
     if exit_code == 0:
         result = initial_result.model_copy(
             update={
@@ -229,7 +234,12 @@ async def test_merged_initial_retry_keeps_execution_facts_without_reopening(
     expected = JobState.DONE if exit_code == 0 else JobState.FAILED
     assert await subject.results.apply(job.id) is expected
     assert store.deliveries.get_delivery(flow.id) == merged
-    assert store.flows.get_flow(flow.id).state is FlowState.FINALIZING
+    assert store.flows.get_flow(flow.id) == archived
+    assert store.stops.pending("worker-b") == stop and stop.job_id == job.id
+    assert store.workers.get_flow_execution(flow.id) == binding
+    report_settled(store, job.id, epoch="epoch-b")
+    assert store.workers.get_flow_execution(flow.id).released_at is None
+    assert store.workers.assign_job("worker-b", "late-coding", "epoch-b") is None
     assert store.flows.get_attempt(task.attempt_id).codex_session_id == "initial-session"
     accepted = store.jobs.get_job(job.id)
     assert accepted.result_digest == digest and accepted.result_applied_at is not None
@@ -416,13 +426,13 @@ async def test_remote_comment_is_recovered_after_response_loss(scenario, monkeyp
 async def test_merge_during_comment_lookup_prevents_dispatch(scenario, monkeypatch):
     # The merge commits while an old result is awaiting a GitHub read, just before POST.
     store, github, job, result = scenario
-    store.try_archive.side_effect = [False]  # The merged PR still needs archive cleanup.
+    store.try_archive.side_effect = [False]  # Business archival does not prove resource cleanup.
     original = Issue.find_comment
 
     async def merge_during_lookup(issue, marker):
         store.delivery.state = DeliveryState.MERGED
         store.delivery.version += 1
-        store.flow.state = FlowState.FINALIZING
+        store.flow.state = FlowState.ARCHIVED
         store.flow.archive_reason = ArchiveReason.SUCCEEDED
         store.reviews.cancel(store.flow.id)
         return await original(issue, marker)
@@ -435,7 +445,7 @@ async def test_merge_during_comment_lookup_prevents_dispatch(scenario, monkeypat
         store.results.clock += timedelta(seconds=30)
         await apply_result(subject, job, result)
     assert store.job_records[job.id].result_applied_at is not None
-    assert store.flow.state is FlowState.FINALIZING
+    assert store.flow.state is FlowState.ARCHIVED
     store.try_archive.assert_called_once_with(store.flow.id)
     assert github.comments == []
     assert store.enqueued == []
@@ -468,7 +478,7 @@ async def test_retired_result_reconciles_dispatched_comment_without_resending(
     if transition == "merge":
         store.delivery.state = DeliveryState.MERGED
         store.delivery.version += 1
-        store.flow.state = FlowState.FINALIZING
+        store.flow.state = FlowState.ARCHIVED
         store.flow.archive_reason = ArchiveReason.SUCCEEDED
         store.reviews.cancel(store.flow.id)
     else:
@@ -492,7 +502,9 @@ async def test_retired_result_reconciles_dispatched_comment_without_resending(
         store.try_archive.assert_not_called()
     assert len(calls) == 1
     assert store.enqueued == []
-    assert store.flow.state is FlowState.FINALIZING
+    assert store.flow.state is (
+        FlowState.ARCHIVED if transition == "merge" else FlowState.FINALIZING
+    )
 
 
 async def test_unknown_comment_is_not_resubmitted_and_blocks_retry(scenario, monkeypatch) -> None:

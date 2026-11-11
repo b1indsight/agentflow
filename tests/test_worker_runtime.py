@@ -12,7 +12,8 @@ from app.worker.execution.amp_agent import AmpCodingAgent
 from app.worker.execution.codex import CodexAgent
 from app.worker.execution.vcs import _run
 from app.worker.runtime import WorkerRootLock, WorkerRuntime
-from tests.test_worker_client import ScriptedConnection
+from tests.test_worker_client import ScriptedConnection, assignment_message
+from tests.test_worker_session import _assignment
 
 
 def test_worker_root_lock_prevents_a_second_process_root_owner(tmp_path: Path) -> None:
@@ -67,8 +68,12 @@ def test_runtime_selects_agent_and_its_idle_timeout(tmp_path, monkeypatch, backe
                               worker_root=tmp_path, serve_ws_url="wss://control.example/connect",
                               codex_run_timeout_seconds=23, amp_run_timeout_seconds=47)
     runtime = WorkerRuntime(settings)
-    assert isinstance(runtime.execution.executor.code_agent, expected)
-    assert runtime.execution.executor.code_agent.timeout == timeout
+    execution = runtime._create_execution(3)
+    assert runtime.executions == {}
+    assert execution.state.flow_id == 3
+    assert execution.executor.workspaces is runtime.workspaces
+    assert isinstance(execution.executor.code_agent, expected)
+    assert execution.executor.code_agent.timeout == timeout
 
 
 @pytest.mark.parametrize("shutdown", ["stop", "cancel"])
@@ -94,12 +99,25 @@ async def test_runtime_keeps_root_locked_until_owned_process_cleanup_finishes(tm
 
     @asynccontextmanager
     async def connect(*args, **kwargs):
-        yield ScriptedConnection()
+        inventory = await runtime.workspaces.provision("owner/repo")
+        slot = next(item for item in inventory if item.repository == "owner/repo")
+        connection = ScriptedConnection()
+        connection.messages[1] = assignment_message(_assignment(
+            workspace=slot.workspace, generation=slot.generation,
+        )).model_dump_json()
+        yield connection
 
     monkeypatch.setattr("app.worker.runtime.connect", connect)
     runtime = WorkerRuntime(WorkerSettings(worker_id="worker", worker_token=SecretStr("secret"),
         worker_root=tmp_path, serve_ws_url="wss://control.example/connect"))
-    runtime.execution.executor = Executor()
+    create_execution = runtime._create_execution
+
+    def owned_execution(flow_id):
+        execution = create_execution(flow_id)
+        execution.executor = Executor()
+        return execution
+
+    monkeypatch.setattr(runtime, "_create_execution", owned_execution)
     running = asyncio.create_task(runtime.run())
     second = WorkerRootLock(tmp_path)
     try:
@@ -134,7 +152,8 @@ async def test_runtime_keeps_root_locked_until_owned_process_cleanup_finishes(tm
                     except ProcessLookupError:
                         break
                     await asyncio.sleep(0.01)
-        record = runtime.execution.state.load()
+        assert set(runtime.executions) == {3}
+        record = runtime.executions[3].state.load()
         assert record.state == "started" and record.stopped is None and record.terminal is None
         assert not record.acknowledged
         second.acquire()

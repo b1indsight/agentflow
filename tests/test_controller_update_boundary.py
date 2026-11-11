@@ -60,6 +60,8 @@ def scenario(store):
             job_id=job.id,
             flow_id=flow.id,
             assignment_token=token,
+            workspace=job.workspace,
+            generation=job.generation,
             task=InitialTask(
                 flow_id=flow.id,
                 attempt_id=attempt.id,
@@ -126,7 +128,7 @@ async def test_running_worker_reconnects_to_new_controller_and_finishes_once(sto
             )
             return InitialTaskResult(session_id="same-session", last_message="done", exit_code=0)
 
-    session = ExecutionState(tmp_path)
+    session = ExecutionState(tmp_path, case.job.flow_id)
     owner = WorkerExecution(worker_id="w", executor=Executor(), state=session)
     client = worker_runtime(
         worker_id="w",

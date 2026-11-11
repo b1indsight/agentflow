@@ -5,6 +5,11 @@
 
 ## 当前计划
 
+- [`worker-workspace-concurrency.md`](worker-workspace-concurrency.md) — 已在本地实现，全量 PostgreSQL 回归、静态检查与构建通过。
+  workers 使用 worker/workspace 复合主键；worker 管理目录并按需求登记库存，调度直接选择位置，
+  runtime 持有执行集合，默认无仓库 workspace 供推理。限额 2/3/17 的真实 Session 并发及五项简化对照通过；
+  旧数据库物理身份迁移仍是部署前置条件。按要求通过审查门禁后交付独立 PR，未部署。
+
 - [`server-auto-update.md`](server-auto-update.md) — PR #104：独立验签 Webhook、本地文件队列和同镜像幂等部署已实现；Worker `--update` 在原 uv Git 安装中更新并核验后退出。保留删列与普通停启，不新建环境；951 项回归及五项简化对照通过，真实接入待验收，审查及交付状态见 PR。
 
 - [`worker-amp-cli.md`](worker-amp-cli.md) — 可选 Amp CLI 后端已实现：同 thread 修订、原生历史、

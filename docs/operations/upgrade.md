@@ -1,8 +1,22 @@
 # 当前版本部署与重启
 
-当前格式为 wire protocol v18、worker journal v5、ResultInbox v1、workspace manifest v1。
+当前格式为 wire protocol v20、worker journal v5、执行 ResultInbox v1、Control 合并通知 inbox v2、workspace manifest v2。
 首次部署选择新数据库/schema 与新 worker root，serve/worker 固定到同一 commit/镜像 digest；
-schema 初始化只创建当前结构。本次协议迁移不增加 DDL、批量数据改写或部署自动化。
+schema 初始化只创建当前结构。合并归档调整不增加 DDL；前置的[多工作区并发版本](../plan/worker-workspace-concurrency.md)仍须独立核验 workers 结构及物理位置迁移。
+
+## 合并归档与资源回收分离
+
+Control 核验 PR 合并后先提交业务归档，原 Worker 的停止/清理、ACK/inventory 与 GitHub 通知独立收尾。新合并不再派发 Worker ARCHIVE；仅新的 Control 通知写 inbox v2。Worker 执行仍写 v1，wire20、journal v5 和 manifest v2 不因这项调整再次升级。
+
+在维护窗口暂停入口和新分配，备份数据库及原 worker root/HOME，盘点冻结任务、dispatch authorization、终态回执、effect ledger、停止请求和各位置 generation。当前环境已由用户确认不存在遗留 Worker ARCHIVE 任务，本次不新增该类任务的恢复或交接逻辑；既有历史格式读取、原回执与 digest 保持不变。若盘点发现不符合此前提的任务，停止升级并单独核验。
+
+新版本的有界积压扫描会归档当前轮次已有完整合并时间/SHA 的记录，包括原绑定缺失或已释放的记录；不补造合并证据、不复活绑定、不改变仍 open 的执行失败。启动该恢复属于生产状态写入，必须单独取得部署与生产恢复授权，计划或本地实现审批不包含该授权。
+
+业务归档不证明目录清理完成。原 Worker 的停止、精确 ACK 和库存结清后立即允许位置复用，不等待固定宽限期；原 root/journal 或 generation 证据丢失时继续隔离并人工核验。相邻工作区可独立运行，同一 Flow 的 resume 仍等待旧绑定释放。
+
+通知权限失败只保留冻结的失败 effects，可通过 `flow retry` 补发；发送结果不确定时先查询原 marker，不重发，也不恢复编码。轮次已 resume 或 Issue 已换 owner 时不让旧通知覆盖新的标签。
+
+**写入 inbox v2 后不能直接换回旧二进制。** 旧 reader 不认识 Control 通知，旧业务规则也不能安全解释“已归档但仍持有资源”。先核对并收敛 v2 通知、未决 effects 和真实工作区，另行制定回退方案；不得删除收件、清空 journal、伪造 ACK，或仅凭备份覆盖升级后的外部事实。本次没有执行部署、生产积压修复或生产目录清理。
 
 ## v17 → v18 协调升级
 

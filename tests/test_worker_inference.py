@@ -40,7 +40,7 @@ from app.worker.state.execution import ExecutionState
 from tests.test_remote_asgi import AsgiRuntime
 from tests.test_remote_e2e import QueueConnection, QueueSocket
 from tests.test_worker_client import RecordingExecutor
-from tests.worker_fakes import run_worker, worker_runtime
+from tests.worker_fakes import inventory, run_worker, worker_runtime
 
 
 def request():
@@ -66,7 +66,7 @@ async def connected(server, worker):
         working.cancel()
         serving.cancel()
         await asyncio.gather(working, serving, return_exceptions=True)
-        await worker.execution.shutdown()
+        await asyncio.gather(*(execution.shutdown() for execution in worker.executions.values()))
 
 
 async def test_inference_cleanup_keeps_its_slot_without_blocking_coding(store, tmp_path):
@@ -101,7 +101,7 @@ async def test_inference_cleanup_keeps_its_slot_without_blocking_coding(store, t
     store.flows.update_flow(flow)
     coding = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
     server = AsgiRuntime(store, attempt.id)
-    execution = WorkerExecution(worker_id="worker-1", executor=Coding(), state=ExecutionState(tmp_path))
+    execution = WorkerExecution(worker_id="worker-1", executor=Coding(), state=ExecutionState(tmp_path, flow.id))
     worker = worker_runtime(worker_id="worker-1", worker_token="worker-secret",
                             serve_ws_url="ws://test", execution=execution, read_history=Mock())
     worker.inference = Inference()
@@ -150,11 +150,13 @@ async def test_local_mini_and_repo_free_worker_share_dispatch_and_results(store,
                                    text="Remote answer", adapter_version="codex/v1")
 
     server = AsgiRuntime(store, 1)
-    execution = WorkerExecution(worker_id="worker-1", executor=RecordingExecutor(), state=ExecutionState(tmp_path))
+    execution = WorkerExecution(worker_id="worker-1", executor=RecordingExecutor(), state=ExecutionState(tmp_path, 1))
     worker = worker_runtime(worker_id="worker-1", worker_token="worker-secret",
                             serve_ws_url="ws://test", execution=execution, read_history=Mock())
     worker.inference = Remote()
-    mini = asyncio.create_task(serve_local_inference(server.serve_worker_session, Local()))
+    workspace = tmp_path / "local-default"
+    workspace.mkdir()
+    mini = asyncio.create_task(serve_local_inference(server.serve_worker_session, Local(), workspace))
     caller = JobInference(store.database, server.gateway.wake_all)
     local_task, remote_task = request(), request()
     try:
@@ -227,7 +229,8 @@ async def test_completed_inference_heartbeat_skips_renewal_but_dispatches_payloa
                 request_digest=call.arguments.digest, text="Answer", adapter_version="codex/v1"))
 
     await outgoing.put(Register(**message_header(None), control="register", payload=[],
-        worker_id="worker-1", recovery=None,
+        worker_id="worker-1", recoveries=[], workspace="b" * 32, repo_workspace_limit=2,
+        inventory=inventory(), inventory_complete=True,
         inference=InferenceCapability(adapter_version="codex/v1")).model_dump_json())
     try:
         async with asyncio.timeout(3):
@@ -308,7 +311,7 @@ async def test_slow_coding_preparation_keeps_inference_live(store, tmp_path, mon
             return InferenceOutput(request_id=task.request_id, request_digest=task.digest,
                                    text="Answer during preparation", adapter_version="codex/v1")
 
-    execution = WorkerExecution(worker_id="worker-1", executor=RecordingExecutor(), state=ExecutionState(tmp_path))
+    execution = WorkerExecution(worker_id="worker-1", executor=RecordingExecutor(), state=ExecutionState(tmp_path, flow.id))
     worker = worker_runtime(worker_id="worker-1", worker_token="worker-secret",
                             serve_ws_url="ws://test", execution=execution, read_history=Mock())
     worker.inference = Inference()

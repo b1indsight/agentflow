@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 from datetime import timedelta
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from loguru import logger
 
@@ -59,7 +61,7 @@ class ServerRuntime:
         )
         plugins = get_plugin_manager()
         github = GitHubApp(self.settings)
-        effects = ResultEffects(github, database=database)
+        effects = ResultEffects(github, database=database, plugins=plugins)
         self.results = ResultApplication(
             github,
             self.settings,
@@ -155,7 +157,10 @@ class ServerRuntime:
         except BaseException:
             await session.close()
             raise
-        await self.gateway.serve(worker_id, session, callbacks, replace=True)
+        try:
+            await self.gateway.serve(worker_id, session, callbacks, replace=True)
+        finally:
+            await callbacks.aclose()
 
     def startup(self) -> None:
         self.database.init_db()
@@ -186,12 +191,19 @@ class ServerRuntime:
 
     async def _serve_bub(self) -> None:
         """Supervise the infer-only peer using the same Session and job driver as remote workers."""
-        while True:
+        # The default directory survives connection retries. Each request gets its own
+        # child; shutdown joins providers before removing this repository-free root.
+        with TemporaryDirectory(prefix="flowtool-local-bub-") as directory:
+            self.local_bub.root = Path(directory)
             try:
-                await serve_local_inference(self.serve_worker_session, self.local_bub)
-            except Exception:  # noqa: BLE001 -- restart the local connection, not a model attempt
-                logger.exception("local bub worker disconnected; reconnecting")
-            await asyncio.sleep(self.settings.worker_poll_interval)
+                while True:
+                    try:
+                        await serve_local_inference(self.serve_worker_session, self.local_bub, self.local_bub.root)
+                    except Exception:  # noqa: BLE001 -- restart the local connection, not a model attempt
+                        logger.exception("local bub worker disconnected; reconnecting")
+                    await asyncio.sleep(self.settings.worker_poll_interval)
+            finally:
+                self.local_bub.root = None
 
     async def ready(self) -> bool:
         if not self._ready or self._readiness_lock.locked():

@@ -152,19 +152,25 @@ def workers() -> None:
     from app.controler.workflow.service import ControlService
 
     with _store() as store:
-        typer.echo("WORKER\tSTATUS\tDRAINING\tJOB\tFLOW\tEPOCH\tLEASE\tRECOVERY\tLAST_SEEN\tREASON")
+        typer.echo("WORKER\tSTATUS\tDRAINING\tEPOCH\tLAST_SEEN\tREASON")
         for worker in ControlService(
             database=store.database,
         ).list_workers():
             typer.echo(
                 f"{worker.worker_id}\t{worker.status.value}\t{worker.draining}\t"
-                f"{worker.current_job_id or '-'}\t{worker.current_flow_id or '-'}\t"
                 f"{(worker.connection_epoch or '-')[:8]}\t"
-                f"{_remaining(worker.lease_expires_at)}\t"
-                f"{_remaining(worker.recovery_deadline)}\t"
                 f"{_age(worker.last_seen_at)}\t"
                 f"{worker.last_disconnect_reason or '-'}"
             )
+            bindings = {item.workspace: item for item in worker.executions}
+            for workspace in worker.workspaces:
+                binding = bindings.get(workspace.workspace)
+                typer.echo(
+                    f"  {workspace.workspace}\tgeneration={workspace.generation}"
+                    f"\trepo={workspace.repository or '-'}\tstate={workspace.workspace_state}"
+                    f"\tjob={workspace.current_job_id or workspace.current_inference_job_id or '-'}"
+                    f"\tflow={binding.flow_id if binding else '-'}"
+                )
 
 
 def _age(value: datetime) -> str:
@@ -200,6 +206,7 @@ def flow_show(flow_id: int) -> None:
         if execution is not None:
             typer.echo(
                 f"  execution: worker={execution.worker_id} repo={execution.repo_identity}"
+                f" workspace={execution.workspace} generation={execution.generation}"
                 f" active={execution.released_at is None}"
             )
         if delivery is not None:

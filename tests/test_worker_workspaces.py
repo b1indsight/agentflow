@@ -29,8 +29,23 @@ def managed_seed(tmp_path: Path) -> tuple[Path, Path]:
 
 
 async def acquire(pool: RepositoryWorkspaces, flow_id: int):
-    return await pool.acquire("owner/repo", flow_id, base_branch="main", remote="origin",
-                              push_token=assignment_secret().push.token)
+    inventory = await pool.provision("owner/repo")
+    target = next((item for item in inventory if item.flow_id == flow_id), None)
+    if target is None:
+        target = next((item for item in inventory if item.repository == "owner/repo"
+                       and item.state == "idle" and item.flow_id is None), None)
+    if target is None:
+        raise VcsVerificationError("workspace", "repository workspace capacity exhausted")
+    return await pool.claim("owner/repo", flow_id, target.workspace, target.generation,
+                            base_branch="main", remote="origin",
+                            push_token=assignment_secret().push.token)
+
+
+async def release(pool, binding, *, recycle=False):
+    result = await pool.release(binding, job_id=100 + binding.flow_id,
+                                token=f"release-{binding.flow_id}", recycle=recycle)
+    pool.acknowledge(binding, 100 + binding.flow_id, f"release-{binding.flow_id}")
+    return result
 
 
 async def test_pool_reuses_warm_copy_bounds_overflow_and_fences_late_archive(tmp_path):
@@ -51,14 +66,14 @@ async def test_pool_reuses_warm_copy_bounds_overflow_and_fences_late_archive(tmp
     # Lowering the startup limit must not evict a previously occupied location.
     smaller = RepositoryWorkspaces(root, "worker-a", limit=1)
     assert await acquire(smaller, 2) == overflow
-    assert await pool.release(first) == "released"
+    assert await release(pool, first) == "released"
     reused = await acquire(pool, 3)
     assert pool.path(reused) == repo and reused.generation > first.generation
     assert (repo / ".venv/keep").read_text() == "warm"
     with pytest.raises(VcsVerificationError, match="ownership"):
-        await pool.release(first)
+        await release(pool, first)
     assert pool.lookup("owner/repo", 3) == reused
-    assert await pool.release(overflow) == "removed"
+    assert await release(pool, overflow) == "removed"
     assert not worktree.exists()
     registry = await asyncio.to_thread(subprocess.check_output,
         ["git", "worktree", "list", "--porcelain"], cwd=root / "repos/owner/repo", text=True,
@@ -67,7 +82,7 @@ async def test_pool_reuses_warm_copy_bounds_overflow_and_fences_late_archive(tmp
     replacement = await acquire(pool, 2)
     assert replacement.slot_id == overflow.slot_id and replacement.generation > overflow.generation
     with pytest.raises(VcsVerificationError, match="ownership"):
-        await pool.release(overflow)
+        await release(pool, overflow)
     assert pool.lookup("owner/repo", 2) == replacement and worktree.exists()
 
 
@@ -88,7 +103,7 @@ async def test_pool_quarantines_unsafe_release_without_discarding_contents(tmp_p
         repo.rename(saved)
         repo.symlink_to(saved, target_is_directory=True)
     with pytest.raises(VcsVerificationError):
-        await pool.release(binding)
+        await release(pool, binding)
     with pytest.raises(VcsVerificationError, match="capacity"):
         await acquire(pool, 2)
     assert repo.exists()
@@ -100,7 +115,7 @@ async def test_pool_rejects_corrupt_manifest_and_unproven_missing_workspace(tmp_
     binding = await acquire(pool, 1)
     shutil.rmtree(pool.path(binding))
     with pytest.raises(VcsVerificationError, match="missing"):
-        await pool.release(binding)
+        await release(pool, binding)
     manifest = root / "workspace-pool.json"
     manifest.write_text("corrupt")
     with pytest.raises(VcsVerificationError, match="manifest"):
@@ -115,7 +130,7 @@ async def test_pool_does_not_adopt_a_replacement_at_a_previously_removed_locatio
     await acquire(pool, 1)
     removed = await acquire(pool, 2)
     path = pool.path(removed)
-    assert await pool.release(removed) == "removed"
+    assert await release(pool, removed) == "removed"
     shutil.copytree(root / "repos/owner/repo", path)
     with pytest.raises(VcsVerificationError, match="unexpectedly exists"):
         await acquire(pool, 3)
@@ -149,8 +164,10 @@ async def test_bootstrap_clones_atomically_with_current_token_and_task_baseline(
 
     monkeypatch.setattr(vcs, "_run", local_remote)
     pool = RepositoryWorkspaces(root, "worker-a", limit=2)
-    binding = await pool.acquire("owner/repo", 1, base_branch="trunk", remote="upstream",
-                                 push_token=assignment_secret().push.token)
+    location = (await pool.provision("owner/repo"))[1]
+    binding = await pool.claim("owner/repo", 1, location.workspace, location.generation,
+                               base_branch="trunk", remote="upstream",
+                               push_token=assignment_secret().push.token)
     assert len(clones) == 1 and (target / ".git").is_dir()
     repo = pool.path(binding)
     assert (await asyncio.to_thread(subprocess.check_output, ["git", "remote"], cwd=repo,
@@ -185,7 +202,7 @@ async def test_failed_clone_never_publishes_seed_or_leaves_owned_temporary_data(
 async def test_repository_identity_cannot_escape_managed_paths(tmp_path, repository):
     pool = RepositoryWorkspaces(tmp_path, "worker-a", limit=2)
     with pytest.raises(VcsVerificationError):
-        await pool.acquire(repository, 1, base_branch="main", remote="origin", push_token=None)
+        await pool.provision(repository)
     assert not (tmp_path / "workspace-pool.json").exists()
 
 
@@ -209,7 +226,7 @@ async def test_reuse_refuses_baseline_that_would_overwrite_ignored_cache(tmp_pat
     repo = pool.path(binding)
     (repo / ".venv").mkdir()
     (repo / ".venv/keep").write_text("cache must survive")
-    await pool.release(binding)
+    await release(pool, binding)
     seed = root / "repos/owner/repo"
     (seed / ".venv").mkdir()
     (seed / ".venv/keep").write_text("new tracked source")
@@ -247,7 +264,7 @@ async def test_jj_reuse_preserves_cache_with_unusual_paths_or_blocking_ancestors
         (repo / ".venv").mkdir()
         preserved = repo / ".venv" / name
         preserved.write_text("cache must survive")
-    await pool.release(binding)
+    await release(pool, binding)
     (seed / ".venv").mkdir()
     (seed / ".venv" / name).write_text("new tracked source")
     _git("add", "-f", f".venv/{name}", cwd=seed)
@@ -274,7 +291,7 @@ async def test_jj_copy_can_return_to_pool_and_reuse_committed_baseline(tmp_path,
     pool = RepositoryWorkspaces(root, "worker-a", limit=2)
     binding = await acquire(pool, 1)
     assert (pool.path(binding) / ".jj").is_dir()
-    assert await pool.release(binding) == "released"
+    assert await release(pool, binding) == "released"
     (seed / "README.md").write_text("updated committed baseline\n")
     await _jj("describe", "-m", "advance the seed baseline", cwd=seed, env=environment)
     await _jj("bookmark", "set", "main", "-r", "@", cwd=seed, env=environment)
@@ -304,7 +321,7 @@ async def test_cancel_cleans_jj_edits_before_reusing_directory(tmp_path, colocat
     await _jj("commit", "-m", "agent commit", cwd=repo, env=environment)
     (repo / "README.md").write_text("cancelled edit")
     (repo / "untracked").write_text("cancelled file")
-    assert await pool.release(binding, recycle=True) == "released"
+    assert await release(pool, binding, recycle=True) == "released"
     assert (repo / "README.md").read_text() == "committed agent work\n"
     assert not (repo / "untracked").exists()
     reused = await acquire(pool, 1)
@@ -342,6 +359,7 @@ async def test_cancelled_copy_waits_for_thread_and_cleans_only_owned_partial(
             await task
     manifest = json.loads((root / "workspace-pool.json").read_text())
     slot = manifest["slots"][0]
-    assert slot["state"] == "absent"
+    assert slot["state"] == "quarantined"
+    assert slot["binding"]["flow_id"] == 1
     assert not (root / slot["relative_path"]).exists()
     assert (root / "repos/owner/repo/README.md").exists()

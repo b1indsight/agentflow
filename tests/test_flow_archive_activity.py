@@ -6,7 +6,6 @@ from types import SimpleNamespace
 import pytest
 from psycopg.errors import CheckViolation, LockNotAvailable
 
-from app.contracts.protocol import PROTOCOL_VERSION
 from app.controler.events.router import EventRouter
 from app.controler.workflow.service import ControlService
 from app.domain.models import ArchiveReason, DeliveryState, FlowState, JobKind
@@ -14,6 +13,7 @@ from app.github import PullRequestMerge
 from app.github.console import Observation
 from app.persistence.activity import ActivityStore
 from app.persistence.store import Store
+from tests.workspace_fixtures import register_worker
 
 NOW = datetime(2026, 11, 9, 12, 0, 5, 500000, tzinfo=UTC)
 MERGE = PullRequestMerge(
@@ -183,7 +183,7 @@ def test_unsettled_archive_cannot_be_written_through_general_update(store):
 def test_archive_activity_failure_rolls_back_release_and_cancellation(store, monkeypatch):
     service = ControlService(database=store.database)
     flow = service.on_trigger("owner/repo", 8, 42)
-    store.workers.worker_connected("worker", PROTOCOL_VERSION)
+    register_worker(store, "worker", repo=flow.repo)
     store.workers.assign_job("worker", "undispatched")
     before = authority(store, flow.id)
     original_flow = store.flows.get_flow(flow.id)
