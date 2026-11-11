@@ -300,3 +300,11 @@ uv build --no-sources
 真实临时 PostgreSQL 的相关归档、停止、库存和 merge 定向测试及完整 pytest 通过；Ruff、Mypy、console 构建、前端测试、`uv build --no-sources` 均通过，wheel/sdist 内 console index、JS、CSS 与排除项已核对。完整测试仍只有既有 Starlette/httpx 弃用告警，console 构建保留既有 bundle 大小提示。命令沿用 [003]，本轮原始日志存于验收记录的 `remove-legacy-*` 文件。
 
 本条只删除无当前任务依据的兼容机制，没有增加需要消融对照的新机制；[003] 的资源隔离、有界积压恢复与独立通知对照仍适用于保留的主路径。真实 Worker 清理/丢 ACK/下一代立即复用回归再次通过。没有发布实现、部署或修改生产数据；若升级盘点发现与“没有遗留 Worker ARCHIVE”前提不符的任务，须停止升级并单独核验，不自动接管或补造清理证据。
+
+### [005] — 2026-11-11 — 本地归档通知不阻塞 resume 后的任务调度
+
+用户在[本次讨论](https://ampcode.com/threads/T-01a1c6c5-ea85-70e7-baf4-76ca5604a43b)要求修复审查发现的 resume 调度问题，并明确不新增回归测试，推送到原 PR。旧轮通知的评论发送结果长期不确定时，通知可保持 running/unapplied；旧绑定虽已释放，调度器仍将该通知视为未结清执行，阻塞新轮 INITIAL。
+
+[`WorkerStore`](../../app/persistence/workers.py) 的共享调度条件复用资源结清已有的严格本地通知识别式，只排除未分配、未派发的 v2/control merge 通知。workspace demand 与实际分配使用同一条件；真实执行、未结清结果、远端及畸形相似记录仍保留阻塞，不以忽略所有旧轮任务放宽保护。没有修改通知恢复、停止 ACK 或工作区释放协议，也不新增兼容路径。
+
+本轮不新增或修改测试，验证复用现有 PostgreSQL 用例及静态检查；审查和推送仍沿用同一 bookmark/PR。生产部署及生产状态修复不在范围内。

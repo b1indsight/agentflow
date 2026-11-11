@@ -13,6 +13,7 @@
   ACK 与库存结清后立即允许位置复用，不增加固定等待；同 Flow 的 resume 仍等待旧绑定释放。
   本地 Control 通知复用 jobs/result/effects，仅写 inbox v2，不新增表或 Worker wire 类型；
   权限失败只重试冻结缺项，旧轮/新 Issue owner 的标签受保护，未知通知先查询原 marker。
+  修复旧轮本地通知未完成时阻塞 resume 后 INITIAL 调度的问题，保留真实执行和未结清结果的保护。
   完整合并事实的旧积压有界恢复，open 的失败 Flow 不变；不新增旧 Worker ARCHIVE 任务兼容，
   既有历史格式读取及 digest 保持不变。未合并的放弃/调查结束规则保持不变。
   此项替代下文早期“合并后等待清理归档/下一代交回原 Flow”的规则；升级与 v2 回退边界见部署文档。

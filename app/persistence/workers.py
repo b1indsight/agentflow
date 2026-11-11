@@ -85,6 +85,7 @@ _ELIGIBLE_JOB = (
     " AND ((j.kind='archive') = EXISTS (SELECT 1 FROM flow_deliveries d"
     " WHERE d.flow_id=f.id AND d.state='merged'))"
     " AND NOT EXISTS (SELECT 1 FROM jobs prior WHERE prior.flow_id=f.id AND prior.id<>j.id"
+    f" AND {RESOURCE_JOB_SQL.replace('j.', 'prior.')}"
     " AND prior.kind<>'inference' AND (prior.state='running' OR (prior.result_received_at IS NOT NULL"
     " AND prior.result_applied_at IS NULL) OR EXISTS (SELECT 1 FROM workers held"
     " WHERE held.current_job_id=prior.id)))"
