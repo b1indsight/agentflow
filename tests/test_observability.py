@@ -16,19 +16,17 @@ import app.controler.config as server_config
 import app.controler.runtime as server_runtime
 import app.telemetry.metrics as metrics_module
 from app import cli
-from app.contracts.protocol import ArchiveResult, InitialTaskResult, Succeeded
+from app.contracts.protocol import InitialTaskResult, Succeeded
 from app.controler.api import create_app
 from app.controler.config import ServerSettings
 from app.controler.workflow.service import ControlService
-from app.domain.models import ArchiveReason, DeliveryState, FlowState, JobKind, JobState, utcnow
+from app.domain.models import ArchiveReason, DeliveryState, FlowState, JobKind
 from app.persistence import metrics as database_metrics
 from app.persistence.activity import ActivityStore
 from app.persistence.metrics import read_snapshot
 from app.telemetry.logging import configure_logging
 from app.telemetry.metrics import Metrics
-from tests.github import RecordingGitHub
-from tests.test_coordinator import coordinator
-from tests.workspace_fixtures import register_worker, report_settled
+from tests.workspace_fixtures import register_worker
 
 
 async def test_logs_isolate_concurrent_context_and_never_render_exception_payload():
@@ -225,67 +223,3 @@ def test_reconcile_metrics_match_scheduler_eligibility(store, postgresql_url):
     assert next(s.value for s in metrics.samples if s.family == 'reconcile_due') == len(due)
     age = next(s.value for s in metrics.samples if s.family == 'oldest_age_seconds' and s.labels == ['reconcile'])
     assert 60 <= age < 120
-
-
-async def test_archive_alert_age_uses_latest_job_of_active_bound_flow(
-    store, postgresql_url, recording_resources
-):
-    flow = store.flows.create_flow('fixture/recovery', 1, 1)
-    attempt = store.flows.create_attempt(flow.id)
-    flow.current_attempt_id = attempt.id
-    store.flows.update_flow(flow)
-    register_worker(store, 'w', repo=flow.repo, epoch='epoch')
-    initial = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
-    assert store.workers.assign_job('w', 'token', 'epoch')
-    assert store.workers.finish_assignment(initial.id, 'w', 'token', JobState.DONE, 'epoch')
-    report_settled(store, initial.id, epoch='epoch')
-    delivery = store.deliveries.get_or_create_delivery(flow.id, 'flow/1')
-    delivery.state, delivery.pr_number = DeliveryState.MERGED, 17
-    delivery.head_sha, delivery.merge_commit_sha, delivery.merged_at = 'head', 'merge', utcnow()
-    store.deliveries.update_delivery(delivery)
-    ControlService(database=store.database).finish(
-        flow,
-        reason=ArchiveReason.SUCCEEDED,
-        summary="Merged",
-        expected_round_no=1,
-    )
-    job = store.jobs.list_jobs(flow.id)[-1]
-    with store.connection() as conn:
-        conn.execute("UPDATE jobs SET created_at=now()-interval '20 minutes' WHERE id=%s", (job.id,))
-    def age():
-        return next(s.value for s in read_snapshot(postgresql_url).samples
-                    if s.family == 'archive_pending_age_seconds')
-    assert age() >= 1200
-    assert store.workers.assign_job('w', 'archive-token', 'epoch')
-    assert store.workers.finish_assignment(job.id, 'w', 'archive-token', JobState.FAILED, 'epoch')
-    report_settled(store, job.id, epoch='epoch')
-    # A newer queued retry replaces the age of the failed attempt.
-    retry = store.jobs.enqueue_job(flow.id, JobKind.ARCHIVE)
-    assert age() < 10
-    # Successful archive application also terminates the Flow and releases its binding.
-    assigned = store.workers.assign_job("w", "retry-token", "epoch")
-    assert assigned.id == retry.id
-    # As in the smoke fixture, use a verified worker receipt, not an invented archived row.
-    subject = coordinator(store, RecordingGitHub())
-    task = await subject.prepare(assigned)
-    assert store.workers.start_assignment(retry.id, attempt.id, "w", "retry-token", "epoch")
-    terminal = Succeeded(
-        job_id=retry.id,
-        assignment_token="retry-token",
-        result=ArchiveResult(**task.model_dump(), cleanup="released"),
-    )
-    assert (
-        store.workers.record_assignment_result(
-            retry.id,
-            "w",
-            "retry-token",
-            "epoch",
-            terminal,
-        )
-        == "pending"
-    )
-    assert await subject.results.apply(retry.id) is JobState.DONE
-    report_settled(store, retry.id, epoch='epoch')
-    assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
-    assert store.workers.get_flow_execution(flow.id).released_at is not None
-    assert age() == 0

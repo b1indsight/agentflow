@@ -1,4 +1,4 @@
-"""Archive notifications retain cleanup receipts; status labels never gate settlement."""
+"""Merge notifications recover independently of Worker cleanup and business archival."""
 
 from datetime import UTC, datetime, timedelta
 
@@ -8,11 +8,12 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from githubkit import GitHub
 from githubkit.cache.mem_cache import MemCacheStrategy
+from psycopg.types.json import Jsonb
 
-from app.contracts.protocol import ArchiveResult
+from app.contracts.protocol import ExecutionStopped
+from app.contracts.receipts import MergeArchiveNotice, ResultInbox, merge_notice_digest
 from app.contracts.result_models import CommentEffect, EffectState, LabelEffect, ResultPending
 from app.controler.workflow.archive import archive_progress
-from app.controler.workflow.effects import ResultEffects
 from app.controler.workflow.service import ControlService
 from app.domain.models import FlowState, JobState
 from app.github import GitHubApp, GitHubError, GitHubErrorKind, Issue, PullRequest
@@ -25,10 +26,13 @@ from tests.github import (
     RecordingGitHub,
     record_call,
 )
-from tests.test_archive_recovery import ready_archive, receive
 from tests.test_coordinator import coordinator
 from tests.test_github_client import settings
-from tests.test_merge import route_merge
+from tests.test_merge import (
+    merge_flow as merge_flow,  # noqa: PLC0414 - fixture re-export
+)
+from tests.test_merge import merge_payload, route_merge
+from tests.test_workflow_transactions import accepted_coding
 
 
 class ArchiveGitHub(RecordingGitHub):
@@ -71,12 +75,22 @@ def archive_resources(recording_resources, monkeypatch):
 
 
 async def pending_archive(store):
-    flow, job, task, _ = await ready_archive(store)
+    execution, _ = accepted_coding(store, receive=False)
+    flow = store.flows.get_flow(execution.flow_id)
+    await route_merge(store, flow)
+    flow = store.flows.get_flow(flow.id)
+    job = store.jobs.list_jobs(flow.id)[-1]
     github = ArchiveGitHub()
     subject = coordinator(store, github)
-    result = ArchiveResult(**task.model_dump(), cleanup="removed")
-    assert receive(store, job, result) == "pending"
+    result = MergeArchiveNotice.model_validate(job.result_payload["terminal"])
     return flow, job, result, github, subject
+
+
+def settle_cleanup(store):
+    stop = store.stops.pending("worker-a")
+    assert store.stops.confirm("worker-a", ExecutionStopped(
+        **stop.fence().model_dump(), execution_nonce="original-coding-executor",
+    ), "epoch-a")
 
 
 def due(store, job_id):
@@ -105,6 +119,122 @@ def archive_adapter(tmp_path, monkeypatch, transport, *, invalid_key=False):
     return GitHubApp(config), cache
 
 
+async def test_merge_notice_survives_permission_failure_without_worker(
+    store, merge_flow, monkeypatch, archive_resources,
+):
+    # GitHub permission failures must not reverse an already merged business result.
+    observed = []
+
+    class BrokenPlugin:
+        @hookimpl
+        def on_archived(self, flow):
+            observed.append(store.flows.get_flow(flow.id).state)
+            raise RuntimeError("optional plugin failed")
+
+    service = ControlService(database=store.database)
+    service.plugins.register(BrokenPlugin())
+    service.on_merged(merge_flow, "merge", merge_payload(merge_flow))
+    service.on_merged(merge_flow, "merge", merge_payload(merge_flow))
+    assert observed == [FlowState.ARCHIVED]
+    job = store.jobs.list_jobs(merge_flow.id)[-1]
+    github = ArchiveGitHub()
+    subject = coordinator(store, github)
+    comment = Issue.comment
+
+    async def forbidden(issue, body):
+        if issue.number == 17:
+            raise GitHubError(GitHubErrorKind.PERMISSION, "comment", status_code=403,
+                              request_rejected=True)
+        return await comment(issue, body)
+
+    monkeypatch.setattr(Issue, "comment", forbidden)
+    with pytest.raises(ResultPending):
+        await subject.results.apply(job.id)
+    archived = store.flows.get_flow(merge_flow.id)
+    assert archived.state is FlowState.ARCHIVED
+    assert store.workers.get_flow_execution(archived.id) is None
+    assert store.jobs.get_job(job.id).assigned_worker_id is None
+    plan = store.results.get_plan(job.id)
+    assert plan.archive is None and plan.archive_notice is not None
+    assert [number for number, _ in github.notifications] == [archived.issue_number]
+    assert "notification failed" in archive_progress(
+        archived, store.jobs.list_jobs(archived.id), result_store=store.results, workers=store.workers,
+    )
+    monkeypatch.setattr(Issue, "comment", comment)
+    subject.results.settings.done_label = "changed-after-freeze"
+    assert ControlService(database=store.database).retry(archived)
+    assert await subject.results.apply(job.id) is JobState.DONE
+    assert await coordinator(store, github).results.apply(job.id) is JobState.DONE
+    assert store.results.get_plan(job.id) == plan
+    assert len(github.notifications) == 2
+    assert len(github.writes) == 6
+    assert all("本轮已归档" in body and "工作区处置已确认" not in body
+               for _, body in github.notifications)
+    assert store.flows.get_flow(archived.id) == archived
+
+
+async def test_merge_notice_restart_after_resume_only_observes_old_write(
+    store, merge_flow, monkeypatch, archive_resources,
+):
+    await route_merge(store, merge_flow)
+    job = store.jobs.list_jobs(merge_flow.id)[-1]
+    github = ArchiveGitHub()
+    subject = coordinator(store, github)
+    finish = ResultStore.finish
+
+    def interrupted(self, record, state, **kwargs):
+        if isinstance(record.payload, CommentEffect):
+            raise RuntimeError("receipt interrupted")  # noqa: TRY004 -- simulate a crash after POST
+        return finish(self, record, state, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ResultStore, "finish", interrupted)
+        with pytest.raises(RuntimeError, match="receipt interrupted"):
+            await subject.results.apply(job.id)
+    resumed = ControlService(database=store.database).resume(merge_flow, expected_round_no=1)
+    before = list(github.writes)
+    github.targets[merge_flow.issue_number] = {"Flow:In-Review", "user-label"}
+    store.results.recover_claims()
+    assert await coordinator(store, github).results.apply(job.id) is JobState.DONE
+    assert github.writes == before
+    assert github.targets[merge_flow.issue_number] == {"Flow:In-Review", "user-label"}
+    assert len(github.notifications) == 1
+    assert store.flows.get_flow(merge_flow.id) == resumed
+
+
+async def test_old_merge_notice_cannot_change_new_issue_owner_labels(
+    store, merge_flow, archive_resources,
+):
+    await route_merge(store, merge_flow)
+    job = store.jobs.list_jobs(merge_flow.id)[-1]
+    newer = ControlService(database=store.database).on_trigger(merge_flow.repo, merge_flow.issue_number, 42)
+    github = ArchiveGitHub()
+    github.targets[merge_flow.issue_number] = {"Flow:In-Review", "user-label"}
+    assert await coordinator(store, github).results.apply(job.id) is JobState.DONE
+    assert github.targets[merge_flow.issue_number] == {"Flow:In-Review", "user-label"}
+    assert "flow:done" in github.targets[17]
+    assert store.flows.get_flow(newer.id) == newer
+
+
+@pytest.mark.parametrize("changed", [{"pr_number": 99}, {"round_no": 2}])
+async def test_notice_cannot_replace_immutable_archive_facts(
+    store, merge_flow, changed, archive_resources,
+):
+    await route_merge(store, merge_flow)
+    job = store.jobs.list_jobs(merge_flow.id)[-1]
+    notice = MergeArchiveNotice.model_validate(job.result_payload["terminal"]).model_copy(update=changed)
+    forged = ResultInbox(version=2, source="control", terminal=notice)
+    with store.connection() as connection:
+        connection.execute("UPDATE jobs SET result_payload=%s,result_digest=%s WHERE id=%s",
+                           (Jsonb(forged.model_dump(mode="json")), merge_notice_digest(notice), job.id))
+    github = ArchiveGitHub()
+    with pytest.raises(ValueError, match="archived round"):
+        await coordinator(store, github).results.apply(job.id)
+    assert not github.writes and not github.notifications
+    assert store.jobs.get_job(job.id).result_applied_at is None
+    assert store.flows.get_flow(merge_flow.id).state is FlowState.ARCHIVED
+
+
 async def test_archive_publishes_stable_status_and_replay_does_not_backfill(store, archive_resources):
     flow, job, result, github, subject = await pending_archive(store)
     assert await subject.results.apply(job.id) is JobState.DONE
@@ -116,19 +246,14 @@ async def test_archive_publishes_stable_status_and_replay_does_not_backfill(stor
         assert f"Flow {flow.id}" in body
         assert f"#{flow.issue_number}" in body and "#17" in body
         assert "a" * 40 in body and "2026-09-08T08:00:00" in body
-        assert "工作区处置已确认" in body
+        assert "本轮已归档" in body and "工作区处置已确认" not in body
         assert "worker-a:" not in body and "archive-token" not in body
     plan = store.results.get_plan(job.id)
-    assert plan.archive == result
-    for effect in plan.effects:
-        if isinstance(effect, CommentEffect):
-            # A cleanup retry must not create a new notification identity.
-            assert ResultEffects._comment_marker(plan, effect) == ResultEffects._comment_marker(
-                plan.model_copy(update={"job_id": job.id + 100, "digest": "other"}), effect,
-            )
+    assert plan.archive_notice == result and plan.archive is None
     await route_merge(store, flow, "duplicate-merge")
     assert await subject.results.apply(job.id) is JobState.DONE
     assert len(github.notifications) == 2
+    settle_cleanup(store)
     assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
     assert store.workers.get_flow_execution(flow.id).released_at is not None
 
@@ -147,8 +272,8 @@ async def test_permanent_archive_write_failure_retries_only_frozen_missing_effec
     with pytest.raises(ResultPending):
         await subject.results.apply(job.id)
     plan = store.results.get_plan(job.id)
-    assert plan.archive == result
-    assert store.flows.get_flow(flow.id).state is FlowState.BLOCKED
+    assert plan.archive_notice == result and plan.archive is None
+    assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
     assert store.workers.get_flow_execution(flow.id).released_at is None
     assert store.jobs.get_job(job.id).result_applied_at is None
     assert "comment" in store.jobs.get_job(job.id).last_error
@@ -162,6 +287,7 @@ async def test_permanent_archive_write_failure_retries_only_frozen_missing_effec
         database=store.database,
     ).retry(flow)
     assert len(store.jobs.list_jobs(flow.id)) == len(jobs)
+    assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
     assert store.flows.get_flow(flow.id).current_attempt_id == flow.current_attempt_id
     restarted = coordinator(store, github)
     restarted.results.settings.done_label = "new-config"
@@ -199,6 +325,7 @@ async def test_archive_recovers_remote_write_before_receipt_after_restart(
             and r.last_error
             for r in skipped
         )
+        settle_cleanup(store)
         assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
         assert store.workers.get_flow_execution(flow.id).released_at is not None
     monkeypatch.setattr(Issue, operation, original)
@@ -221,12 +348,11 @@ async def test_unknown_archive_comment_stays_pending_without_resending_or_reclea
     due(store, job.id)
     with pytest.raises(ResultPending, match="outcome is unknown"):
         await coordinator(store, github).results.apply(job.id)
-    with pytest.raises(ValueError, match="pending result"):
-        ControlService(
-            database=store.database,
-        ).retry(flow)
-    assert store.results.get_plan(job.id).archive == result
-    assert store.flows.get_flow(flow.id).state is FlowState.FINALIZING
+    with pytest.raises(ValueError, match="awaiting reconciliation"):
+        ControlService(database=store.database).retry(flow)
+    assert store.results.get_plan(job.id).archive_notice == result
+    assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
+    assert store.workers.get_flow_execution(flow.id).released_at is None
     assert not github.notifications
 
 
@@ -234,7 +360,8 @@ async def test_unknown_archive_comment_stays_pending_without_resending_or_reclea
 @pytest.mark.parametrize("already_dispatched", [False, True])
 async def test_archive_auth_failure_preserves_whether_comment_was_sent(
     store, tmp_path, monkeypatch, failure, already_dispatched, archive_resources):
-    flow, job, result, github, subject = await pending_archive(store)
+    flow, job, notice, github, subject = await pending_archive(store)
+    attempt_id = flow.current_attempt_id
     comment, find_comment = Issue.comment, Issue.find_comment
     requests = []
 
@@ -270,26 +397,19 @@ async def test_archive_auth_failure_preserves_whether_comment_was_sent(
     expected = (EffectState.RETRY if failure == "token_unavailable" else EffectState.FAILED)
     assert effect.state is (EffectState.UNCERTAIN if already_dispatched else expected)
     assert (effect.dispatched_at is not None) is already_dispatched
-    assert store.results.get_plan(job.id).archive == result
+    assert store.results.get_plan(job.id).archive_notice == notice
     assert store.workers.get_flow_execution(flow.id).released_at is None
 
     monkeypatch.setattr(Issue, "comment", comment)
     monkeypatch.setattr(Issue, "find_comment", find_comment)
-    if already_dispatched:
-        with pytest.raises(ValueError, match="pending result"):
-            ControlService(
-                database=store.database,
-            ).retry(flow)
-        due(store, job.id)
-    elif failure == "token_unavailable":
-        due(store, job.id)
-    else:
-        ControlService(
-            database=store.database,
-        ).retry(flow)
+    if not already_dispatched and failure != "token_unavailable":
+        assert ControlService(database=store.database).retry(flow)
+    assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
+    due(store, job.id)
     assert await coordinator(store, github).results.apply(job.id) is JobState.DONE
+    settle_cleanup(store)
     assert len(github.notifications) == 2
-    assert store.flows.get_flow(flow.id).current_attempt_id == result.attempt_id
+    assert store.flows.get_flow(flow.id).current_attempt_id == attempt_id
     assert store.workers.get_flow_execution(flow.id).released_at is not None
 
 
@@ -449,7 +569,7 @@ async def test_archive_rate_limit_waits_until_reset_without_retry_after(store, t
 async def test_archive_label_errors_do_not_block_completion(
     store, monkeypatch, operation, kind, status, archive_resources
 ):
-    # Display failures must not retain a workspace whose cleanup is already confirmed.
+    # Display failures cannot reverse archival or prevent independent cleanup settlement.
     # The full error-kind matrix is covered by INITIAL in test_result_recovery.
     flow, job, _, github, subject = await pending_archive(store)
 
@@ -467,6 +587,7 @@ async def test_archive_label_errors_do_not_block_completion(
         and str(status) in r.last_error
         for r in skipped
     )
+    settle_cleanup(store)
     assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
     assert store.workers.get_flow_execution(flow.id).released_at is not None
     assert len(github.notifications) == 2
@@ -480,7 +601,7 @@ async def test_existing_status_labels_need_no_mutation(store, archive_resources)
     assert github.writes == [("comment", flow.issue_number), ("comment", 17)]
 
 
-async def test_restart_recovers_comment_before_receipt_and_isolates_plugin_failure(store, monkeypatch, archive_resources):
+async def test_restart_recovers_comment_before_receipt(store, monkeypatch, archive_resources):
     flow, job, _, github, subject = await pending_archive(store)
     finish = ResultStore.finish
 
@@ -496,21 +617,16 @@ async def test_restart_recovers_comment_before_receipt_and_isolates_plugin_failu
             await subject.results.apply(job.id)
     assert len(github.notifications) == 1
 
-    class BrokenPlugin:
-        @hookimpl
-        def on_archived(self, flow):
-            raise RuntimeError("optional plugin failed")
-
     # Use a new connection pool, then replay the same inbox just as serve startup does.
     reopened = Store(store.database_url)
     try:
         reopened.results.recover_claims()
         restarted = coordinator(reopened, github)
-        restarted.results.plugins.register(BrokenPlugin())
         assert await restarted.results.apply(job.id) is JobState.DONE
     finally:
         reopened.close()
     assert len(github.notifications) == 2
     assert store.jobs.get_job(job.id).result_applied_at is not None
+    settle_cleanup(store)
     assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
     assert store.workers.get_flow_execution(flow.id).released_at is not None

@@ -2,6 +2,7 @@
 
 import json
 from copy import deepcopy
+from datetime import UTC, datetime
 from typing import Literal
 
 import pytest
@@ -22,8 +23,11 @@ from app.contracts.protocol import (
     terminal_id,
 )
 from app.contracts.receipts import (
+    MergeArchiveNotice,
+    ResultInbox,
     decode_result_inbox,
     matches_stop_receipt,
+    merge_notice_digest,
     stop_receipt_digest,
 )
 from app.worker.state.record import decode_journal
@@ -47,6 +51,35 @@ def previous_terminal(version: int = 15) -> dict[str, JsonValue]:
         "connection_epoch": "old-epoch",
         "error": '故障："引用"\n\u0000 🧪',
     }
+
+
+def test_merge_notice_is_local_evidence_not_a_worker_result() -> None:
+    notice = MergeArchiveNotice(
+        job_id=5, flow_id=3, round_no=2, repo="owner/repo", pr_number=17,
+        merged_at=datetime(2026, 11, 6, 8, tzinfo=UTC), merge_commit_sha="a" * 40,
+    )
+    inbox = ResultInbox(version=2, source="control", terminal=notice)
+    saved = inbox.model_dump(mode="json")
+    before = deepcopy(saved)
+    digest = merge_notice_digest(notice)
+    assert decode_result_inbox(saved, job_id=5, assignment_token=None,
+                               result_digest=digest) == inbox
+    assert saved == before
+    for changes in ({"source": "worker"}, {"version": 1}):
+        with pytest.raises(ValueError):
+            ResultInbox.model_validate({**saved, **changes})
+    conflicts: list[tuple[int, str | None, str]] = [
+        (6, None, digest), (5, "real-worker-token", digest), (5, None, "f" * 64),
+    ]
+    for job_id, token, result_digest in conflicts:
+        with pytest.raises(ValueError):
+            decode_result_inbox(saved, job_id=job_id, assignment_token=token,
+                                result_digest=result_digest)
+    with pytest.raises(ValueError):
+        parse_worker_message(notice.model_dump_json())
+    with pytest.raises(ValueError):
+        Succeeded.model_validate({"job_id": 5, "assignment_token": "real-worker-token",
+                                  "result": notice.model_dump(mode="json")})
 
 
 def previous_journal(version: int) -> dict[str, JsonValue]:
@@ -298,6 +331,7 @@ def test_result_inbox_preserves_digest_and_origin(version: int, source: str) -> 
     digest = "7d5ffce4a80c24063e4b20afae27f1eb2b9b2ff35c2e4457ce28ba5371199e8e"
     inbox = decode_result_inbox(data, job_id=5, assignment_token=token, result_digest=digest)
     assert inbox.source == source and inbox.version == 1
+    assert isinstance(inbox.terminal, Failed)
     assert inbox.terminal.assignment_token == (token or "control")
     assert data == original
     assert (

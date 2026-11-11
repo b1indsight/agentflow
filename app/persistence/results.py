@@ -19,6 +19,18 @@ UNCONFIRMED_EFFECT_SQL = (
     " AND (e.state<>'skipped' OR e.payload->>'kind' IS DISTINCT FROM 'label')"
 )
 
+# Only an unassigned v2 Control notice owns no executor or directory. Keep
+# unknown/corrupt inboxes resource-blocking; terminal.type alone grants nothing.
+# Shared settlement queries use jobs AS j.
+RESOURCE_JOB_SQL = (
+    "NOT COALESCE(j.kind='archive' AND j.assigned_worker_id IS NULL"
+    " AND j.assignment_token IS NULL AND j.workspace IS NULL AND j.generation IS NULL"
+    " AND j.started_at IS NULL AND j.dispatch_authorized_at IS NULL"
+    " AND jsonb_typeof(j.result_payload->'version')='number'"
+    " AND j.result_payload->>'version'='2' AND j.result_payload->>'source'='control'"
+    " AND j.result_payload->'terminal'->>'type'='merge_archive',FALSE)"
+)
+
 
 class ResultStore(Repository):
     """Share the database context's connection, including its explicit transaction when preparing."""

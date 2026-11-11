@@ -6,6 +6,7 @@ import hashlib
 from uuid import uuid4
 
 from loguru import logger
+from pluggy import PluginManager
 
 from app.contracts.result_models import (
     CommentEffect,
@@ -21,7 +22,7 @@ from app.contracts.result_models import (
     ThreadReplyEffect,
     unique_pull_request_receipt,
 )
-from app.controler.workflow.archive import verify_archive
+from app.controler.workflow.archive import verify_archive, verify_merge_notice
 from app.controler.workflow.lifecycle import (
     DeliveryConflict,
     adopt_created_pull_request,
@@ -44,6 +45,7 @@ from app.github import (
     ReviewThread,
     retry_delay,
 )
+from app.persistence.activity import ActivityStore
 from app.persistence.database import Database
 from app.persistence.deliveries import DeliveryStore
 from app.persistence.flows import FlowStore
@@ -71,8 +73,10 @@ class ResultEffects:
         github: GitHubApp,
         *,
         database: Database,
+        plugins: PluginManager,
     ) -> None:
         self.database = database
+        self.plugins = plugins
         self.deliveries = DeliveryStore(database)
         self.flows = FlowStore(database)
         self.jobs = JobStore(database)
@@ -92,21 +96,25 @@ class ResultEffects:
                 workers_tx = self.workers.using(tx)
                 flow = tx.lock_workflow(plan.flow_id)
                 cancelled = (
-                    flow is not None and flow.archive_reason is not None and plan.archive is None
+                    flow is not None and flow.archive_reason is not None
+                    and plan.archive is None and plan.archive_notice is None
                 )
-                if flow is None or flow.state in TERMINAL_STATES:
-                    result_store_tx.skip_remaining(plan.job_id, "Flow is terminal")
+                if flow is None:
+                    result_store_tx.skip_remaining(plan.job_id, "Flow disappeared")
                     return None
-                if flow.current_attempt_id != plan.attempt_id:
-                    result_store_tx.skip_remaining(plan.job_id, "result attempt is no longer current")
-                    return "result attempt is no longer current"
                 job = jobs_tx.get_job(plan.job_id)
                 if job is None:
                     raise ValueError("result job disappeared")
-                if job.round_no != flow.current_round_no:
-                    result_store_tx.skip_remaining(plan.job_id, "historical round")
-                    return "result round is no longer current"
-                if plan.archive is not None:
+                delivery = deliveries_tx.get_delivery(plan.flow_id)
+                retired = (
+                    cancelled or job.round_no != flow.current_round_no
+                    or flow.current_attempt_id != plan.attempt_id
+                    or (flow.state in TERMINAL_STATES and plan.archive_notice is None)
+                    or (delivery is not None and delivery.supersedes(job.kind))
+                )
+                if plan.archive_notice is not None:
+                    verify_merge_notice(flow, job, plan.archive_notice, activity=ActivityStore(tx))
+                if plan.archive is not None and not retired:
                     try:
                         verify_archive(
                             flow,
@@ -118,8 +126,6 @@ class ResultEffects:
                         )
                     except ValueError as error:
                         raise ResultPending(str(error)) from error
-                delivery = deliveries_tx.get_delivery(plan.flow_id)
-                retired = cancelled or (delivery is not None and delivery.supersedes(job.kind))
                 if retired:
                     result_store_tx.retire_for_merge(plan.job_id)
             records = self.result_store.list_effects(plan.job_id)
@@ -220,16 +226,23 @@ class ResultEffects:
             job = tx.lock_job(plan.job_id)
             if (
                 flow is None
-                or flow.state in TERMINAL_STATES
+                or (flow.state in TERMINAL_STATES and plan.archive_notice is None)
                 or job is None
                 or job.result_applied_at is not None
                 or job.result_digest != plan.digest
                 or flow.current_attempt_id != plan.attempt_id
                 or job.round_no != flow.current_round_no
-                or (flow.archive_reason is not None and plan.archive is None)
+                or (flow.archive_reason is not None
+                    and plan.archive is None and plan.archive_notice is None)
             ):
                 raise ResultPending("Flow changed before GitHub dispatch")
             delivery = deliveries_tx.get_delivery(flow.id)
+            if plan.archive_notice is not None:
+                verify_merge_notice(flow, job, plan.archive_notice, activity=ActivityStore(tx))
+                if (isinstance(record.payload, LabelEffect)
+                        and record.payload.number == flow.issue_number
+                        and not self.flows.using(tx).is_issue_owner(flow)):
+                    raise _PendingReviewFeedback("Issue display belongs to a newer Flow")
             if plan.archive is not None:
                 try:
                     verify_archive(
@@ -314,6 +327,7 @@ class ResultEffects:
                     jobs=self.jobs,
                     stops=self.stops,
                     workers=self.workers,
+                    plugins=self.plugins,
                 )
                 found = remote
             return EffectReceipt(pull_request=found)
@@ -400,6 +414,7 @@ class ResultEffects:
                         jobs=self.jobs,
                         stops=self.stops,
                         workers=self.workers,
+                        plugins=self.plugins,
                     )
                     return EffectReceipt(pull_request=remote)
                 pull_request = remote
@@ -423,6 +438,11 @@ class ResultEffects:
             if number == "created_pr":
                 number = unique_pull_request_receipt(records).number
             if isinstance(effect, LabelEffect):
+                if plan.archive_notice is not None:
+                    flow = self.flows.get_flow(plan.flow_id)
+                    if (flow is not None and effect.number == flow.issue_number
+                            and not self.flows.is_issue_owner(flow)):
+                        return EffectReceipt(pending_reason="Issue display belongs to a newer Flow")
                 issue = Issue(repository, number)
                 labels = {label.casefold() for label in await issue.fetch_labels()}
                 if (effect.label.casefold() in labels) != effect.present:

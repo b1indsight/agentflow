@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, PrivateAttr
 from typer.testing import CliRunner
 
 from app import cli
-from app.contracts.protocol import ArchiveResult, Failed
+from app.contracts.protocol import ExecutionStopped
 from app.contracts.result_models import ResultPending
 from app.controler.reconciliation.projects import ProjectSync
 from app.controler.workflow.service import ControlService
@@ -33,11 +33,14 @@ from app.github import (
 )
 from app.persistence.activity import ActivityStore
 from app.persistence.store import Store
-from tests.test_archive_recovery import ready_archive, receive
+from tests.github import RecordingGitHub
+from tests.test_coordinator import coordinator
 from tests.test_github_client import settings
 from tests.test_github_projects import config, item, page
+from tests.test_merge import route_merge
 from tests.test_review_batches import review_flow as review_flow  # noqa: PLC0414
-from tests.workspace_fixtures import register_worker, report_settled
+from tests.test_workflow_transactions import accepted_coding
+from tests.workspace_fixtures import register_worker
 
 
 class RemoteProject(Project):
@@ -568,48 +571,17 @@ async def test_project_error_does_not_block_control_cancellation_or_worker_relea
     assert state(store).failures == 1
 
 
-async def test_explicit_job_failure_blocks_but_pending_retry_does_not(
-    store, remote_app, recording_resources
-):
-    flow, job, _, subject = await ready_archive(store)
-    sync = ProjectSync(
-        {flow.repo: config()},
-        remote_app(RemoteProject()),
-        database=store.database,
-    )
-    await converge(sync)
-    assert state(store).desired_status is ProjectStatus.IN_PROGRESS
-    # A cleanup failure blocks the Flow while retaining its Issue and original worker.
-    message = Failed(job_id=job.id, assignment_token="archive-token", error="Cleanup failed")
-    assert (
-        store.workers.record_assignment_result(
-            job.id, "worker-a", "archive-token", "epoch-a", message
-        )
-        == "pending"
-    )
-    assert await subject.results.apply(job.id) is JobState.FAILED
-    assert store.flows.get_flow(flow.id).state is FlowState.BLOCKED
-    assert store.flows.get_active_flow(flow.repo, flow.issue_number).id == flow.id
-    assert store.workers.get_flow_execution(flow.id).released_at is None
-    assert store.deliveries.get_delivery(flow.id).state is DeliveryState.MERGED
-    await sync.sweep()
-    assert state(store).desired_status is ProjectStatus.BLOCKED
-    report_settled(store, job.id, epoch="epoch-a")
-    ControlService(
-        database=store.database,
-    ).retry(flow)
-    assert store.jobs.list_jobs(flow.id)[-1].state is JobState.QUEUED
-    assert store.flows.get_flow(flow.id).state is FlowState.FINALIZING
-    await sync.sweep()
-    assert state(store).desired_status is ProjectStatus.IN_PROGRESS
-
-
 async def test_archive_ack_and_worker_release_succeed_while_projects_are_offline(
     store,
     remote_app,
     recording_resources,
 ):
-    flow, job, task, subject = await ready_archive(store)
+    execution, _ = accepted_coding(store, receive=False)
+    flow = store.flows.get_flow(execution.flow_id)
+    store.projects.seed(flow.repo, config(), 100)
+    await route_merge(store, flow)
+    job = store.jobs.list_jobs(flow.id)[-1]
+    subject = coordinator(store, RecordingGitHub())
     remote = RemoteProject()
     remote.failure = "offline"
     sync = ProjectSync(
@@ -619,9 +591,11 @@ async def test_archive_ack_and_worker_release_succeed_while_projects_are_offline
     )
     await sync.sweep()
     assert state(store).failures == 1
-    assert receive(store, job, ArchiveResult(**task.model_dump(), cleanup="removed")) == "pending"
+    stop = store.stops.pending("worker-a")
+    assert store.stops.confirm(
+        "worker-a", ExecutionStopped(**stop.fence().model_dump(), execution_nonce="owned"), "epoch-a",
+    )
     assert await subject.results.apply(job.id) is JobState.DONE
-    report_settled(store, job.id, epoch="epoch-a")
     assert store.workers.get_flow_execution(flow.id).released_at is not None
     assert store.jobs.get_job(job.id).result_applied_at is not None
     archived = store.flows.get_flow(flow.id)
@@ -705,13 +679,16 @@ async def test_slow_item_does_not_block_another_issue(store, projection, remote_
         await task
 
 
-async def test_archive_executor_recovery_blocks_only_after_flow_transition(
+async def test_merged_executor_recovery_preserves_done_projection(
     store,
     monkeypatch,
     remote_app,
     recording_resources,
 ):
-    flow, _, _, _ = await ready_archive(store)
+    job, _ = accepted_coding(store, receive=False)
+    flow = store.flows.get_flow(job.flow_id)
+    store.projects.seed(flow.repo, config(), 100)
+    await route_merge(store, flow)
     store.workers.worker_disconnected("worker-a", connection_epoch="epoch-a")
     sync = ProjectSync(
         {flow.repo: config()},
@@ -719,25 +696,29 @@ async def test_archive_executor_recovery_blocks_only_after_flow_transition(
         database=store.database,
     )
     await sync.sweep()
-    assert store.flows.get_flow(flow.id).state is FlowState.FINALIZING
-    assert state(store).desired_status is ProjectStatus.IN_PROGRESS
-    # A disconnect deadline alone cannot move the card; recovery owns the blocked transition.
+    assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
+    assert state(store).desired_status is ProjectStatus.DONE
+    # Executor recovery cannot replace the committed business conclusion.
     later = store.now() + timedelta(hours=1)
     monkeypatch.setattr(store._db, "_clock", lambda: later)
     store.workers.sweep_expired_assignments()
-    assert store.flows.get_flow(flow.id).state is FlowState.BLOCKED
+    assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
     await sync.sweep()
-    assert state(store).desired_status is ProjectStatus.BLOCKED
+    assert state(store).desired_status is ProjectStatus.DONE
 
 
-async def test_received_archive_result_is_in_progress_despite_old_recovery_deadline(
+async def test_pending_archive_notice_is_done_despite_old_recovery_deadline(
     store, monkeypatch, remote_app, recording_resources,
 ):
-    flow, job, task, subject = await ready_archive(store)
-    # The retained deadline describes a past disconnect; a persisted receipt now proves the outcome.
+    execution, _ = accepted_coding(store, receive=False)
+    flow = store.flows.get_flow(execution.flow_id)
+    store.projects.seed(flow.repo, config(), 100)
+    await route_merge(store, flow)
+    job = store.jobs.list_jobs(flow.id)[-1]
+    subject = coordinator(store, RecordingGitHub())
+    # The retained deadline cannot change archival while its local notice is pending.
     with store.connection() as connection:
         connection.execute("UPDATE jobs SET recovery_deadline=%s WHERE id=%s", (store.now(), job.id))
-    assert receive(store, job, ArchiveResult(**task.model_dump(), cleanup="removed")) == "pending"
 
     async def delayed(plan):
         raise ResultPending("notification backoff")
@@ -750,7 +731,7 @@ async def test_received_archive_result_is_in_progress_despite_old_recovery_deadl
         {flow.repo: config()}, remote_app(remote), database=store.database,
     )
     await sync.sweep()
-    assert state(store).desired_status is ProjectStatus.IN_PROGRESS
+    assert state(store).desired_status is ProjectStatus.DONE
     assert store.jobs.get_job(job.id).result_applied_at is None
 
 

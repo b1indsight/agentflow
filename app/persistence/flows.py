@@ -11,6 +11,7 @@ from app.domain.models import (
     Attempt,
     DeliveryState,
     Flow,
+    FlowDelivery,
     FlowState,
 )
 from app.github import PullRequestMerge
@@ -178,6 +179,14 @@ class FlowStore(Repository):
                 ),
             )
 
+    def is_issue_owner(self, flow: Flow) -> bool:
+        """Only the selected Flow may change the Issue's status labels."""
+        with self._db.connection() as connection:
+            return connection.execute(
+                "SELECT 1 FROM issue_flow_owners WHERE repo=%s AND issue_number=%s AND flow_id=%s",
+                (flow.repo, flow.issue_number, flow.id),
+            ).fetchone() is not None
+
     def select_owner(self, flow: Flow) -> None:
         """Creation/resume alone select the Issue's display owner, including after archive."""
         with self._db.connection() as connection:
@@ -189,17 +198,19 @@ class FlowStore(Repository):
             )
 
     def try_archive(self, flow_id: int) -> bool:
-        """Finish a requested round only after stops, results and disposition settle.
+        """Finish a requested round or settle an already-archived round's resources.
 
-        Abandonment/investigation retain the workspace after confirmed stop; merged
-        deliveries additionally require the original worker's verified archive receipt.
-        Call after result/stop markers in their transaction, never before them.
+        Merged business archival is independent of the original Worker's cleanup.
+        Its stop/result callbacks still release that binding through the controller's
+        fenced generation update. Call after result/stop markers, never before them.
         """
         from app.persistence.deliveries import DeliveryStore
         from app.persistence.workers import WorkerStore
 
         with self._db.transaction() as tx, tx.connection() as connection:
             flow = tx.lock_workflow(flow_id)
+            if flow is not None and flow.state is FlowState.ARCHIVED:
+                return WorkerStore(tx).release_flow_execution(flow_id)
             if (
                 flow is None
                 or flow.state is not FlowState.FINALIZING
@@ -252,26 +263,32 @@ class FlowStore(Repository):
                 and not workers.release_flow_execution(flow_id)
             ):
                 return False
-            flow.archived_at = tx.now()
-            ActivityStore(tx).append_flow(
-                flow.id,
-                flow.current_round_no,
-                "archive",
-                occurred_at=flow.archived_at,
-                metadata={
-                    "repo": flow.repo,
-                    "pr_number": delivery.pr_number if delivery else None,
-                    "archive_reason": flow.archive_reason.value,
-                    "archive_summary": flow.archive_summary,
-                    "merged_at": delivery.merged_at.isoformat()
-                    if delivery and delivery.merged_at
-                    else None,
-                    "merge_commit_sha": delivery.merge_commit_sha if delivery else None,
-                },
-            )
-            flow.state = FlowState.ARCHIVED
-            FlowStore(tx).update_flow(flow)
+            FlowStore(tx).archive_round(flow, delivery)
             return True
+
+    def archive_round(self, flow: Flow, delivery: FlowDelivery | None) -> None:
+        """Commit an already-proved business conclusion under the caller's workflow lock.
+
+        The immutable activity and terminal projection share the transaction. The
+        caller decides eligibility; this write does not claim that cleanup finished.
+        """
+        if flow.archive_reason is None:
+            raise ValueError("archive requires a business conclusion")
+        flow.archived_at = self._db.now()
+        ActivityStore(self._db).append_flow(
+            flow.id, flow.current_round_no, "archive", occurred_at=flow.archived_at,
+            metadata={
+                "repo": flow.repo,
+                "pr_number": delivery.pr_number if delivery else None,
+                "archive_reason": flow.archive_reason.value,
+                "archive_summary": flow.archive_summary,
+                "merged_at": delivery.merged_at.isoformat()
+                if delivery and delivery.merged_at else None,
+                "merge_commit_sha": delivery.merge_commit_sha if delivery else None,
+            },
+        )
+        flow.state = FlowState.ARCHIVED
+        self.update_flow(flow)
 
     def observe_archived_merge(
         self, flow_id: int, round_no: int, merge: PullRequestMerge, *, origin: str

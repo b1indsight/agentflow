@@ -34,6 +34,16 @@ class FeedbackCheck(ReconcileState):
 class ReconcileStore(Repository):
     """Use the database connection, including the caller's workflow transaction."""
 
+    def merged_backlog(self, limit: int) -> list[int]:
+        """Recover persisted current merges that the ordinary PR poller intentionally excludes."""
+        with self._db.connection() as connection:
+            return [row["id"] for row in connection.execute(
+                "SELECT f.id FROM flows f JOIN flow_deliveries d ON d.flow_id=f.id"
+                " WHERE f.state<>'archived' AND d.state='merged' AND d.pr_number IS NOT NULL"
+                " AND d.merged_at IS NOT NULL AND length(d.merge_commit_sha)>0"
+                " ORDER BY f.id LIMIT %s", (limit,),
+            ).fetchall()]
+
     def reset_round(self, flow_id: int) -> None:
         """A new delivery starts fresh PR/feedback observations in the resume transaction."""
         with self._db.connection() as connection:

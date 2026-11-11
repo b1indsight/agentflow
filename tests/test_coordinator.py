@@ -280,6 +280,7 @@ def coordinator(store: Store | MemoryStore, github: GitHubApp) -> CoordinatorFix
     effects = ResultEffects(
         github,
         database=repositories.database,
+        plugins=plugins,
     )
     results = ResultApplication(
         github,

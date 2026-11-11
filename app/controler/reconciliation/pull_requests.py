@@ -65,6 +65,29 @@ class Reconciler:
 
     async def _sweep(self) -> None:
         async with self._sweep_lock:
+            for flow_id in self.reconcile_store.merged_backlog(self.batch_size):
+                try:
+                    with self.database.transaction() as tx:
+                        flow = tx.lock_workflow(flow_id)
+                        delivery = self.deliveries.using(tx).get_delivery(flow_id)
+                        if (flow is None or flow.state is FlowState.ARCHIVED
+                                or delivery is None or delivery.state is not DeliveryState.MERGED):
+                            continue
+                        merge = PullRequestMerge.model_validate({
+                            "number": delivery.pr_number, "merged": True,
+                            "merged_at": delivery.merged_at,
+                            "merge_commit_sha": delivery.merge_commit_sha,
+                        })
+                        archived = record_merge(
+                            flow, delivery, merge, deliveries=self.deliveries.using(tx),
+                            flows=self.flows.using(tx), jobs=self.jobs.using(tx),
+                            stops=self.stops.using(tx), workers=self.workers.using(tx),
+                            origin="merged_backlog",
+                        )
+                    if archived:
+                        self.service.notify_merge(flow)
+                except Exception:  # noqa: BLE001 -- retain corrupt historical facts without starving the sweep
+                    logger.exception("merged backlog recovery failed for flow {}", flow_id)
             self.reconcile_store.seed(self.batch_size)
             checks = self.reconcile_store.due(self.batch_size)
             pending = iter(checks)
@@ -130,7 +153,6 @@ class Reconciler:
                 jobs_tx = self.jobs.using(tx)
                 reconcile_store_tx = self.reconcile_store.using(tx)
                 stops_tx = self.stops.using(tx)
-                workers_tx = self.workers.using(tx)
                 fresh = tx.lock_workflow(flow.id)
                 current = deliveries_tx.get_delivery(flow.id)
                 if (
@@ -159,7 +181,8 @@ class Reconciler:
                         deliveries=deliveries_tx,
                         flows=flows_tx,
                         jobs=jobs_tx,
-                        workers=workers_tx,
+                        stops=stops_tx,
+                        workers=self.workers.using(tx),
                         origin="reconciliation",
                     )
                 elif fresh.state is not FlowState.ARCHIVED:

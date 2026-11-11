@@ -8,6 +8,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.contracts.protocol import ArchiveResult, RevisionTaskResult
+from app.contracts.receipts import MergeArchiveNotice
 from app.domain.models import FeedbackRef, FlowDelivery, FlowState, JobState
 from app.domain.review_models import BatchState, ReviewFeedback
 from app.github import PullRequest, ReviewThread
@@ -106,6 +107,7 @@ class ResultPlan(FrozenModel):
     delivery: FlowDelivery | None = None
     revision: RevisionTaskResult | None = None
     archive: ArchiveResult | None = None
+    archive_notice: MergeArchiveNotice | None = None
     batch_id: int | None = None
     batch_state: BatchState | None = None
     consumed: list[FeedbackRef] = Field(default_factory=list)
