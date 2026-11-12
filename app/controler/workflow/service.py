@@ -19,6 +19,7 @@ from app.domain.models import (
     FlowState,
     JobKind,
     JobState,
+    TaskContent,
     WorkerView,
 )
 from app.github import PullRequestMerge
@@ -84,7 +85,11 @@ class ControlService:
         else:
             emit_hook(self.plugins, hook, **kwargs)
 
-    def on_trigger(self, repo: str, issue_number: int, installation_id: int | None) -> Flow | None:
+    def create_flow(
+        self, repo: str, issue_number: int | None, installation_id: int | None,
+        *, task_content: TaskContent | None = None,
+    ) -> Flow | None:
+        """Atomically queue a task; only Issue identities deduplicate active Flows."""
         with self.database.transaction() as tx:
             flows_tx = self.flows.using(tx)
             jobs_tx = self.jobs.using(tx)
@@ -92,10 +97,13 @@ class ControlService:
             if flows_tx.get_active_flow(repo, issue_number):
                 logger.info("flow already active for {}#{}", repo, issue_number)
                 return None
-            flow = flows_tx.create_flow(repo, issue_number, installation_id)
-            jobs_tx.enqueue_job(flow.id, JobKind.INITIAL, payload={"issue_number": issue_number})
+            flow = flows_tx.create_flow(repo, issue_number, installation_id, task_content=task_content)
+            jobs_tx.enqueue_job(
+                flow.id, JobKind.INITIAL,
+                payload={"issue_number": issue_number} if issue_number is not None else {},
+            )
         self._jobs_available()
-        logger.info("flow {} created (queued) for {}#{}", flow.id, repo, issue_number)
+        logger.info("flow {} created (queued) for {}", flow.id, repo)
         return flow
 
     def cancel(self, flow: Flow) -> None:
@@ -178,7 +186,9 @@ class ControlService:
             self.deliveries.using(tx).reset_round(resumed.id, resumed.initial_branch)
             flows.select_owner(resumed)
             self.jobs.using(tx).enqueue_job(
-                resumed.id, JobKind.INITIAL, payload={"issue_number": resumed.issue_number}
+                resumed.id, JobKind.INITIAL,
+                payload={"issue_number": resumed.issue_number}
+                if resumed.issue_number is not None else {},
             )
         self._jobs_available()
         return resumed
@@ -368,7 +378,8 @@ class ControlService:
                     kind,
                     payload=failed_job.payload
                     if failed_job
-                    else {"issue_number": fresh.issue_number},
+                    else ({"issue_number": fresh.issue_number}
+                          if fresh.issue_number is not None else {}),
                 )
                 if failed_job is not None and kind is JobKind.REVISION:
                     reviews_tx.retry(failed_job, replacement)

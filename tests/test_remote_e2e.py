@@ -69,7 +69,7 @@ def remote_flow(store, tmp_path, monkeypatch, recording_resources, server_runtim
     """Use the normal coordinator/executor; only GitHub and the coding agent are scripted."""
     from tests.test_vcs import _git
 
-    flow = required(ControlService(database=store.database).on_trigger("owner/repo", 8, 42))
+    flow = required(ControlService(database=store.database).create_flow("owner/repo", 8, 42))
     github = RecordingGitHub()
     server = server_runtime(github=github)
     root, remote = managed_seed(tmp_path)

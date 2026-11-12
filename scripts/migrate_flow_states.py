@@ -74,6 +74,8 @@ NEW_TABLES = {
 # Freeze this migration's authority DDL rather than running startup schemas: the
 # latter also change execution storage, whose physical workspace IDs are unknown.
 FLOW_STATE_SCHEMA = """
+-- The current console view reads task_content; legacy Issue rows keep a NULL value.
+ALTER TABLE flows ADD COLUMN task_content JSONB;
 CREATE UNIQUE INDEX ux_flows_active ON flows(repo, issue_number) WHERE state <> 'archived';
 CREATE TABLE issue_flow_owners (
  repo TEXT NOT NULL, issue_number INTEGER NOT NULL,

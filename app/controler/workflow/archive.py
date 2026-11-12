@@ -86,13 +86,14 @@ def verify_merge_notice(
 def archive_effects(
     flow: Flow, delivery: FlowDelivery | MergeArchiveNotice, *, done_label: str, in_review_label: str,
 ) -> list[Effect]:
-    """Freeze deterministic completion messages and incremental labels for both targets."""
+    """Freeze deterministic completion messages and labels for the PR and any linked Issue."""
     if (flow.installation_id is None or delivery.pr_number is None
             or delivery.merge_commit_sha is None or delivery.merged_at is None):
         raise ValueError("archive notification requires installation and persisted merge facts")
+    issue_line = f"关联 Issue：{flow.repo}#{flow.issue_number}\n" if flow.issue_number is not None else ""
     body = (
         f"✅ Flow {flow.id} 的 PR 已合并，本轮已归档\n\n"
-        f"关联 Issue：{flow.repo}#{flow.issue_number}\n"
+        f"{issue_line}"
         f"关联 PR：{flow.repo}#{delivery.pr_number}\n"
         f"合并 SHA：`{delivery.merge_commit_sha}`\n"
         f"合并时间：{delivery.merged_at.astimezone(UTC).isoformat()}\n\n"
@@ -100,6 +101,8 @@ def archive_effects(
     )
     effects: list[Effect] = []
     for number in (flow.issue_number, delivery.pr_number):
+        if number is None:
+            continue
         key = f"archive:{delivery.pr_number}:{number}"
         effects.extend([
             LabelEffect(key=f"{key}:done", installation_id=flow.installation_id,

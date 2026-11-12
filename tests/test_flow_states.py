@@ -11,7 +11,7 @@ from app.domain.review_models import FeedbackUpdate
 
 def test_resume_does_not_replay_prior_round_feedback_or_cursors(store):
     service = ControlService(database=store.database)
-    flow = service.on_trigger("owner/repo", 7, 42)
+    flow = service.create_flow("owner/repo", 7, 42)
     attempt = store.flows.create_attempt(flow.id)
     flow.current_attempt_id = attempt.id
     store.flows.update_flow(flow)
@@ -79,7 +79,7 @@ async def test_failed_initial_round_stops_workspace_before_resume(
     _git("branch", "trunk", cwd=seed)
     _git("push", "origin", "trunk", cwd=seed)
     service = ControlService(database=store.database)
-    flow = service.on_trigger("owner/repo", 8, 42)
+    flow = service.create_flow("owner/repo", 8, 42)
     pool = RepositoryWorkspaces(root, "worker-a", limit=1)
     default = pool.initialize()
     store.workers.worker_connected("worker-a", PROTOCOL_VERSION, "epoch",

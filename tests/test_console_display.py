@@ -7,11 +7,37 @@ import pytest
 
 from app.contracts.console import ConsoleFailure
 from app.controler.workflow.service import ControlService
-from app.domain.models import ArchiveReason
+from app.domain.models import ArchiveReason, TaskContent
 from app.github.console import Observation
 from app.persistence.activity import ActivityStore
+from app.persistence.console import ConsoleStore
 
 MARKER = "<!-- flowtool:effect:" + "a" * 64 + " -->"
+
+
+def test_direct_task_title_overrides_remote_cache_and_body_is_only_loaded_in_detail(store):
+    # Cached remote titles must not overwrite the direct task or make its original input unsearchable.
+    task = TaskContent(title="直接任务标题", body="Private original requirements 😀")
+    flow = store.flows.create_flow("octo/repo", None, 1, task_content=task)
+    console = ConsoleStore(store.database)
+    with store.connection() as connection:
+        connection.execute("UPDATE console_flows SET title='Stale remote title' WHERE flow_id=%s", (flow.id,))
+        facts = connection.execute("SELECT facts FROM console_flows WHERE flow_id=%s", (flow.id,)).fetchone()["facts"]
+        history = connection.execute("SELECT body FROM console_activity WHERE flow_id=%s", (flow.id,)).fetchall()
+    assert facts["task_title"] == task.title
+    assert "task_content" not in facts and task.body not in json.dumps(facts, ensure_ascii=False)
+    assert all(task.body not in row["body"] for row in history)
+    page = console.flows(q=task.title)
+    assert [item.id for item in page.items] == [flow.id]
+    assert page.items[0].title == task.title
+    assert page.items[0].issue_number is page.items[0].issue_url is None
+    assert not console.flows(q="Stale remote title").items
+    assert "task_content" not in page.model_dump_json()
+    detail = console.detail(flow.id)
+    assert detail.task_content == task and detail.issue_url is None
+    issue = store.flows.create_flow("octo/repo", 7, 1)
+    assert console.detail(issue.id).task_content is None
+    assert console.detail(issue.id).issue_url == "https://github.com/octo/repo/issues/7"
 
 
 def test_effect_markers_are_hidden_from_preview_content_and_diffs(store):

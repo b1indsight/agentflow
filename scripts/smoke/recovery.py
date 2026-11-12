@@ -31,7 +31,7 @@ from app.contracts.protocol import (
     InitialTask,
     PushSecret,
 )
-from app.domain.models import FlowState, JobKind
+from app.domain.models import FlowState, JobKind, TaskContent
 from app.persistence.store import Store
 from app.worker.execution.workspaces import RepositoryWorkspaces
 from app.worker.runtime import WorkerRootLock
@@ -180,7 +180,7 @@ def drill(work: Path, postgres_bin: Path, revision: str) -> dict:
                 token=SecretStr('fixture-not-a-credential'), repository=flow.repo,
                 expires_at=datetime.now(UTC))),
             task=InitialTask(flow_id=flow.id, attempt_id=attempt.id, repo=flow.repo,
-                             issue_number=1, issue_title='fixture', issue_body='', branch='fixture'),
+                             issue_number=1, task_content=TaskContent(title='fixture'), branch='fixture'),
         ))
         original = journal.record_started()
     finally:

@@ -1,5 +1,6 @@
 """Durable feedback must survive crashes without consuming a newer discussion version."""
 
+import hashlib
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -8,6 +9,8 @@ import pytest
 
 from app.controler.events.router import EventRouter
 from app.controler.workflow.service import ControlService
+from app.domain.context_models import ReviewContext
+from app.domain.judge_models import JudgeDecision
 from app.domain.models import (
     DeliveryState,
     FlowState,
@@ -23,7 +26,7 @@ from app.persistence.jobs import JobStore
 from app.persistence.reviews import ReviewStore
 from app.persistence.store import Store
 from tests.github import RecordingGitHub
-from tests.review_memory import judge_decision
+from tests.review_memory import judge_decision, review_context
 from tests.test_coordinator import coordinator
 
 
@@ -75,6 +78,41 @@ def settle(store):
 def claim(store, clock):
     clock.now += timedelta(seconds=76)
     return settle(store)
+
+
+def test_legacy_frozen_context_keeps_digest_decision_and_answer_authorization(store, review_flow):
+    # Old snapshots lack task_content. Adding a serialized null would invalidate saved decisions.
+    flow, clock = review_flow
+    ingest(store, flow, feedback(clock))
+    batch = batch_for(store, claim(store, clock)[0])
+    legacy = review_context(batch.id).model_dump_json(exclude={"task_content"})
+    digest = hashlib.sha256(legacy.encode()).hexdigest()
+    snapshot = ReviewContext.model_validate_json(legacy)
+    assert snapshot.task_content is None
+    assert snapshot.model_dump_json() == legacy and snapshot.digest == digest
+    decision = JudgeDecision(
+        context_digest=digest, session_id="legacy", model="fake",
+        verdict=TriageVerdict(verdict=Verdict.ANSWER, confidence=1, reason="Known", answer="Ten"),
+    )
+    with store.transaction() as tx:
+        tx.lock_workflow(flow.id)
+        assert tx.reviews.freeze_context(batch, snapshot) == snapshot
+        tx.reviews.record_decision(batch, decision)
+    with store.connection() as connection:
+        stored = connection.execute(
+            "SELECT context FROM review_batches WHERE id=%s", (batch.id,),
+        ).fetchone()["context"]
+        assert "task_content" not in stored
+    restarted = Store(store.database_url, clock=lambda: clock.now)
+    try:
+        fresh = restarted.reviews.get_batch(batch.id)
+        assert fresh.context.digest == digest and fresh.decision == decision
+        with restarted.transaction() as tx:
+            tx.lock_workflow(flow.id)
+            assert tx.reviews.authorize_answer(fresh, digest)
+            assert not tx.reviews.authorize_answer(fresh, digest)
+    finally:
+        restarted.close()
 
 
 def test_delivery_and_feedback_are_one_transaction(store, review_flow, monkeypatch):

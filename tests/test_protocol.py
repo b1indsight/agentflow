@@ -69,8 +69,7 @@ TASK: dict[str, JsonValue] = {
     "attempt_id": 7,
     "repo": "owner/repo",
     "issue_number": 1,
-    "issue_title": "test",
-    "issue_body": "",
+    "task_content": {"title": "test", "body": ""},
     "branch": "flow/3",
 }
 FLOW: dict[str, JsonValue] = {
@@ -91,6 +90,28 @@ SESSION = "T-019eac3b-a60c-7a93-a442-3718f660fc8c"
     ("direction", "item", "valid"),
     [
         ("server", call("worker.execute", {**IDENTITY, **LOCATION, "flow_id": 3, "task": TASK}), True),
+        (
+            "server",
+            call("worker.execute", {
+                **IDENTITY, **LOCATION, "flow_id": 3, "task": {**TASK, "issue_number": None},
+            }),
+            True,
+        ),
+        (
+            "server",
+            call("worker.execute", {
+                **IDENTITY, **LOCATION, "flow_id": 3,
+                "task": {
+                    "kind": "revision", "flow_id": 3, "attempt_id": 7, "batch_id": 1,
+                    "repo": "owner/repo", "repo_identity": "w:owner/repo", "branch": "flow/3",
+                    "base_branch": "main", "pr_number": 17, "expected_head_sha": "abc",
+                    "session_id": None, "session_generation": 0, "instruction": "Fix feedback",
+                    "task_content": {"title": "test", "body": "Original requirements"},
+                    "previous_summary": "", "open_points": [], "feedback": [],
+                },
+            }),
+            True,
+        ),
         ("server", call("worker.stop", FENCE), True),
         ("server", call("worker.history", {"session_id": SESSION, "cursor": "bad-cursor"}), True),
         ("server", call("worker.history", {"session_id": "https://ampcode.com/T-x"}), False),
@@ -237,6 +258,7 @@ def test_item_metadata_is_required_on_the_wire(key: str) -> None:
         {"protocol_version": 17.0},
         {"protocol_version": 18},
         {"protocol_version": 19},
+        {"protocol_version": 20},
         {"message_id": "A" * 32},
         {"ack": 1},
         {"ack": "true"},
@@ -275,7 +297,7 @@ def test_mixed_control_ack_and_business_have_independent_identities() -> None:
         [terminal_item, accept, history], control="heartbeat", **IDENTITY, ack=True, ack_id="c" * 32
     )
     parsed = parse_worker_message(json.dumps(data))
-    assert PROTOCOL_VERSION == 20
+    assert PROTOCOL_VERSION == 21
     assert isinstance(parsed.payload[0], ExecuteResult)
     assert parsed.payload[0].terminal() == terminal
     assert isinstance(parsed.payload[1], AcceptResultRequest)

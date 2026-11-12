@@ -15,7 +15,7 @@ from app.contracts.protocol import (
     parse_server_message,
 )
 from app.controler.workers.transport import serve_worker
-from app.domain.models import ArchiveReason, FlowState, JobKind, JobState
+from app.domain.models import ArchiveReason, FlowState, JobKind, JobState, TaskContent
 from app.worker.execution.executor import WorkerExecutor
 from app.worker.execution.lifecycle import WorkerExecution
 from app.worker.execution.workspaces import RepositoryWorkspaces
@@ -94,7 +94,7 @@ async def test_modern_merge_stops_original_worker_before_reusing_only_its_genera
             workspace=other.slot_id, generation=other.generation,
             task=InitialTask(
                 flow_id=other.flow_id, attempt_id=1, repo=flow.repo, issue_number=9000,
-                issue_title="Sibling", issue_body="", branch="flow/sibling",
+                task_content=TaskContent(title="Sibling", body=""), branch="flow/sibling",
             ),
         ))
         sibling.record_started()

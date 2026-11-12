@@ -33,6 +33,7 @@ from app.domain.models import (
     ReviewItemKind,
     RevisionCodingOutput,
     SessionUnavailable,
+    TaskContent,
     VcsKind,
 )
 from app.domain.review_models import FeedbackUpdate
@@ -90,8 +91,8 @@ async def revision_workspace(tmp_path):
         flow_id=1, attempt_id=1, batch_id=1, repo="owner/repo", repo_identity="w:owner/repo",
         branch="flow/1", base_branch="main", pr_number=17, expected_head_sha=sha,
         session_id="session-1", session_generation=0, instruction="Fix the feedback", feedback=[],
-        issue_title="Original task", issue_body="Original requirements", previous_summary="",
-        open_points=[],
+        task_content=TaskContent(title="Original task", body="Original requirements"),
+        previous_summary="", open_points=[],
     )
     secret = AssignmentSecret(push=PushSecret(
         repository="owner/repo", token=SecretStr("fresh-token"),
@@ -183,6 +184,8 @@ async def test_fallback_only_when_execution_is_known_not_to_have_started(
                                    workspaces=pool).execute(task, secret, tool_caller=RecordingToolCaller())
     assert [call[0] for call in agent.calls] == expected
     assert all(call[1].mcp_url is None and call[1].mcp_token is None for call in agent.calls)
+    assert all("# Original task\nOriginal task\nOriginal requirements\n" in call[2]
+               for call in agent.calls)
     if expected[-1] == "start":
         assert result.session_id == "new-session"
         assert result.session_generation == 1

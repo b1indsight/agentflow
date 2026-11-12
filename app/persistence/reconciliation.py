@@ -58,6 +58,7 @@ class ReconcileStore(Repository):
                 " CROSS JOIN (VALUES ('issue_comments'),('pr_comments'),('reviews'),('threads')) s(source)"
                 " WHERE f.state IN ('queued','running','review') AND f.archive_reason IS NULL"
                 " AND d.state='open' AND d.pr_number IS NOT NULL"
+                " AND (s.source<>'issue_comments' OR f.issue_number IS NOT NULL)"
                 " AND NOT EXISTS (SELECT 1 FROM feedback_reconcile r"
                 " WHERE r.flow_id=f.id AND r.source=s.source) ORDER BY f.id,s.source"
                 " LIMIT %s ON CONFLICT DO NOTHING",
@@ -73,6 +74,7 @@ class ReconcileStore(Repository):
                     " JOIN flow_deliveries d ON d.flow_id=f.id WHERE r.next_at<=%s"
                     " AND f.state IN ('queued','running','review') AND f.archive_reason IS NULL"
                     " AND d.state='open' AND d.pr_number IS NOT NULL"
+                    " AND (r.source<>'issue_comments' OR f.issue_number IS NOT NULL)"
                     " ORDER BY r.next_at,r.flow_id,r.source LIMIT %s",
                     (self._db.now(), limit),
                 )

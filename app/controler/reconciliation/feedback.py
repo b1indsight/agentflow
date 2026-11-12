@@ -118,10 +118,13 @@ class FeedbackReconciler:
                     or delivery.pr_number is None
                 ):
                     return
+                if check.source == "issue_comments" and flow.issue_number is None:
+                    return
                 if flow.installation_id is None:
                     raise ValueError("missing installation")
                 boundary = reviews_tx.observation_boundary()
             number = flow.issue_number if check.source == "issue_comments" else delivery.pr_number
+            assert number is not None
             repo = self.github.installation(flow.installation_id).repository(flow.repo)
             threads, diagnostic = None, None
             page: Batch[RemoteFeedback] | None = None

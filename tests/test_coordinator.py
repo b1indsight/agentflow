@@ -17,7 +17,7 @@ from app.controler.workflow.coordinator import JobCoordinator
 from app.controler.workflow.effects import ResultEffects
 from app.controler.workflow.results import ResultApplication
 from app.controler.workflow.tools import FlowToolService
-from app.domain.models import DeliveryState, FlowState, Job, JobKind, JobState
+from app.domain.models import DeliveryState, FlowState, Job, JobKind, JobState, TaskContent
 from app.github import GitHubApp
 from app.persistence.store import Store
 from app.plugins import get_plugin_manager
@@ -69,13 +69,16 @@ def coordinator(store: Store, github: GitHubApp) -> CoordinatorFixture:
     return subject
 
 
+@pytest.mark.parametrize("prepared_initial", [None, TaskContent(title="直接任务 α", body="完整需求 β\n")], indirect=True)
 async def test_initial_job_crosses_worker_boundary_and_opens_pr(store, prepared_initial):
     flow, subject, github, request, result = prepared_initial
     job = store.jobs.get_job(request.arguments.job_id)
     task = await subject.prepare(job)
     assert isinstance(task, InitialTask)
     assert task.flow_id == flow.id
-    assert task.issue_title == "Real issue" and task.issue_body == "Real body"
+    assert task.task_content == (flow.task_content or TaskContent(title="Real issue", body="Real body"))
+    if flow.issue_number is None:
+        assert not any(call["operation"] == "fetch_issue" for call in github.resource_calls)
     assert task.base_branch == "trunk" and task.branch == flow.initial_branch
     # A tool receipt reserves delivery intent; only an accepted terminal may open a PR.
     assert github.opened == []
@@ -85,6 +88,8 @@ async def test_initial_job_crosses_worker_boundary_and_opens_pr(store, prepared_
     assert store.flows.get_current_attempt(store.flows.get_flow(flow.id)).codex_session_id == result.session_id
     delivery = store.deliveries.get_delivery(flow.id)
     assert delivery.state is DeliveryState.OPEN and delivery.pr_number == 17
+    if flow.issue_number is None:
+        assert delivery.body == "Body"
     assert github.opened == [task.branch]
     assert github.review_requests == [["carol"]]
     assert github.labels == [["flow:in-review"]]

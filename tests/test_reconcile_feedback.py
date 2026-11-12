@@ -2,6 +2,7 @@
 
 import asyncio
 from datetime import timedelta
+from types import SimpleNamespace
 
 import pytest
 
@@ -11,6 +12,7 @@ from app.domain.models import (
     FlowState,
     JobKind,
     ReviewItemKind,
+    TaskContent,
     TriageVerdict,
     Verdict,
 )
@@ -98,6 +100,36 @@ async def test_three_missing_sources_are_ingested_once_without_webhook_or_strong
     with store.connection() as connection:
         assert connection.execute("SELECT count(*) n FROM events").fetchone()["n"] == 0
         assert connection.execute("SELECT generation FROM review_buffers").fetchone()["generation"] == 3
+
+
+async def test_direct_feedback_skips_issue_seed_and_stale_issue_check_but_keeps_pr_sources(store, feedback_resources):
+    # A stale or manually inserted Issue scan must also be inert, not just absent from new seeds.
+    flow = store.flows.create_flow("owner/repo", None, 42, task_content=TaskContent(title="Direct"))
+    attempt = store.flows.create_attempt(flow.id)
+    flow.current_attempt_id, flow.state = attempt.id, FlowState.REVIEW
+    store.flows.update_flow(flow)
+    delivery = store.deliveries.get_or_create_delivery(flow.id, flow.initial_branch)
+    delivery.pr_number, delivery.state = 17, DeliveryState.OPEN
+    store.deliveries.update_delivery(delivery)
+    clock = SimpleNamespace(now=store.now())
+    github = GitHub(clock)
+    for i, source in enumerate(("pr_comments", "reviews")):
+        github.pages[source, None] = page(clock, 101 + i)
+    reconciler = poller(store, github)
+    reconciler.reconcile_store.feedback_seed(64)
+    checks = reconciler.reconcile_store.feedback_due(64)
+    assert {check.source for check in checks} == {"pr_comments", "reviews", "threads"}
+    with store.connection() as connection:
+        connection.execute("INSERT INTO feedback_reconcile(flow_id,source,next_at) VALUES(%s,'issue_comments',%s)",
+                           (flow.id, store.now()))
+    stale = reconciler.reconcile_store.feedback_get(flow.id, "issue_comments")
+    await reconciler._check(stale)
+    assert github.calls == []
+    assert "issue_comments" not in {check.source for check in reconciler.reconcile_store.feedback_due(64)}
+    await reconciler._sweep()
+    assert {(number, source) for number, source, _ in github.calls} == {(17, "pr_comments"), (17, "reviews")}
+    assert {item.github_id for item in store.reviews.pending(flow.id)} == {101, 102}
+    assert any(call["operation"] == "fetch_threads" for call in github.resource_calls)
 
 
 async def test_continuation_survives_failure_and_restart(store, review_flow, feedback_resources):

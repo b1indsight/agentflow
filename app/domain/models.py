@@ -11,7 +11,15 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, SecretStr, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    SecretStr,
+    field_validator,
+    model_validator,
+)
 
 from app.domain.delivery_models import DeliveryReceipt
 from app.domain.inference_models import InferenceCapability, InferenceJob
@@ -95,12 +103,28 @@ class VcsKind(StrEnum):
 # --------------------------------------------------------------------- 持久化模型
 
 
+class TaskContent(BaseModel):
+    """Coding requirements, independent of the resource that supplied them."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    title: str
+    body: str = ""
+
+    @field_validator("title")
+    @classmethod
+    def _nonblank_title(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("task title must not be blank")
+        return value
+
+
 class Flow(BaseModel):
-    """Stable issue-level lifecycle and delivery identity."""
+    """Stable task lifecycle with either live Issue input or persisted direct content."""
 
     id: int
     repo: str  # "owner/name"
-    issue_number: int
+    issue_number: int | None
+    task_content: TaskContent | None = None
     state: FlowState
     installation_id: int | None = None
     current_attempt_id: int | None = None
@@ -110,6 +134,12 @@ class Flow(BaseModel):
     archived_at: datetime | None = None
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
+
+    @model_validator(mode="after")
+    def _one_input(self) -> Flow:
+        if (self.issue_number is None) == (self.task_content is None):
+            raise ValueError("provide exactly one of issue_number and task_content")
+        return self
 
     @property
     def initial_branch(self) -> str:

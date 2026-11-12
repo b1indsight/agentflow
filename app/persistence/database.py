@@ -80,10 +80,12 @@ class Database:
             finally:
                 bound._transaction_closed = True
 
-    def serialize_issue(self, repo: str, issue_number: int) -> None:
+    def serialize_issue(self, repo: str, issue_number: int | None) -> None:
         """Serialize trigger/retry of the same issue, including creation before a Flow row exists."""
         if self._bound_connection is None:
             raise RuntimeError("issue lock requires a workflow transaction")
+        if issue_number is None:
+            return
         self._bound_connection.execute(
             "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
             (f"flowtool:{repo}#{issue_number}",),

@@ -28,6 +28,7 @@ import {
   roundFailureMessage,
 } from "./api";
 import {
+  ActivityMarkdown,
   ActivitySummary,
   ActivityView,
   buildConversationRows,
@@ -37,6 +38,7 @@ import {
   sameActivityGroup,
 } from "./activity";
 import { ConversationSources, SourceList } from "./ConversationSources";
+import { CreateFlow } from "./CreateFlow";
 import { InferenceNotices } from "./InferenceNotices";
 import { actionLabel, archiveReasonLabels, flowLabel, phases } from "./phases";
 import { SearchBox } from "./SearchBox";
@@ -92,9 +94,19 @@ const route = () => {
     tab: tab?.value ?? "conversation",
   };
 };
-const name = (f: FlowSummary) => f.title ?? `Issue #${f.issue_number}`;
+const name = (f: FlowSummary) =>
+  f.title ??
+  (f.issue_number !== null
+    ? `Issue #${f.issue_number}`
+    : f.pr_number
+      ? `PR #${f.pr_number}`
+      : `Flow #${f.id}`);
 const ref = (f: FlowSummary) =>
-  f.pr_number ? `PR #${f.pr_number}` : `Issue #${f.issue_number}`;
+  f.pr_number
+    ? `PR #${f.pr_number}`
+    : f.issue_number !== null
+      ? `Issue #${f.issue_number}`
+      : `Flow #${f.id}`;
 
 function Board({
   columns,
@@ -621,9 +633,14 @@ function Detail({
               </div>
               <div className="links">
                 <span>{flow.repo}</span>
-                <a href={flow.issue_url} target="_blank" rel="noreferrer">
-                  Issue #{flow.issue_number} ↗
-                </a>
+                {flow.issue_number !== null && flow.issue_url && (
+                  <a href={flow.issue_url} target="_blank" rel="noreferrer">
+                    Issue #{flow.issue_number} ↗
+                  </a>
+                )}
+                {flow.issue_number === null && !flow.pr_number && (
+                  <span>Flow #{flow.id}</span>
+                )}
                 {flow.pr_url && (
                   <a href={flow.pr_url} target="_blank" rel="noreferrer">
                     PR #{flow.pr_number} ↗
@@ -793,6 +810,19 @@ function Detail({
                             {writeError && <p role="alert">{writeError}</p>}
                             {writeNotice && <p role="status">{writeNotice}</p>}
                           </section>
+                          {flow.task_content && (
+                            <section
+                              className="task-content"
+                              aria-label="原始任务内容"
+                            >
+                              <h2 className="panel-title">原始任务内容</h2>
+                              <h3>{flow.task_content.title}</h3>
+                              <ActivityMarkdown
+                                text={flow.task_content.body}
+                                url={null}
+                              />
+                            </section>
+                          )}
                           <h2 className="panel-title">任务信息</h2>
                           <dl className="task-facts">
                             <dt>生命周期 / 阶段</dt>
@@ -1302,6 +1332,17 @@ export default function App() {
           )}
         </div>
         <div className="bar-status">
+          <CreateFlow
+            onCreated={(id) => {
+              setBoardRevision((x) => x + 1);
+              location.hash = `flow/${id}/overview`;
+            }}
+            onVerify={() => {
+              setQuery("");
+              setBoardRevision((x) => x + 1);
+              location.hash = "board";
+            }}
+          />
           <button
             className="btn ghost"
             aria-label="刷新当前视图"

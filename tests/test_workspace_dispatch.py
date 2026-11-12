@@ -83,7 +83,7 @@ async def test_demand_concurrent_dispatch_stop_and_result_isolate_workspaces(
     root, _ = managed_seed(tmp_path)
     shutil.copytree(root / "repos/owner/repo", root / "repos/owner/other")
     control = ControlService(database=store.database)
-    flows = [required(control.on_trigger(repo, issue, 42)) for repo in ("owner/repo", "owner/other")
+    flows = [required(control.create_flow(repo, issue, 42)) for repo in ("owner/repo", "owner/other")
              for issue in range(1, limit + 2)]
     jobs = [job for flow in flows for job in store.jobs.list_jobs(flow.id)]
     worker = ControlledWorker(root, limit)
@@ -177,8 +177,8 @@ async def test_provision_failure_does_not_disconnect_other_workspaces(
     root, _ = managed_seed(tmp_path)
     bad_repo = "owner/bad--flow-name" if failure == "invalid_repository" else "owner/bad"
     control = ControlService(database=store.database)
-    bad_flow = required(control.on_trigger(bad_repo, 1, 42))
-    good_flow = required(control.on_trigger("owner/repo", 2, 42))
+    bad_flow = required(control.create_flow(bad_repo, 1, 42))
+    good_flow = required(control.create_flow("owner/repo", 2, 42))
     bad_job, = store.jobs.list_jobs(bad_flow.id)
     good_job, = store.jobs.list_jobs(good_flow.id)
     if failure == "filesystem_error":

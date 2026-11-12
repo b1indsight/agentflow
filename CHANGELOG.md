@@ -8,6 +8,11 @@
 
 ## Unreleased
 
+- Issue 成为可选输入：看板顶栏“新建 Flow”选择授权代码仓库并输入内容，无需 GitHub 事件；
+  同时提供 owner-only 创建 API、分页目标清单与管理 CLI。原始任务持久保存并用于首轮、修订和审核，
+  无 Issue 时跳过专属来源/关闭指令/归档目标，PR 闭环与停止恢复规则保持不变。
+  wire21 用 TaskContent 替换 Issue 命名字段，server/worker 须成组升级；journal/inbox 版本不变。
+  六态库幂等增加输入列和 XOR 约束；首次创建 NULL Issue 任务后不能直接降级旧程序。
 - 控制台详情页使用标准 Tabs 组件，统一标签声明、路由校验与内容类型检查；保留现有外观和按需加载，
   支持键盘导航、面板无障碍关联及多标签横向滚动。
 - 测试复用真实 PostgreSQL、Worker 执行、Git/MCP 和双端通信流程，合并重复场景并保留独有断言。

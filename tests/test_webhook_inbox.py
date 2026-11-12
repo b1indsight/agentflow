@@ -66,18 +66,18 @@ def test_received_delivery_survives_new_consumer_and_duplicate(store):
 def test_failure_after_event_reservation_rolls_back_business_and_replays(store, monkeypatch):
     inbox = store.webhooks
     receive(inbox)
-    trigger = ControlService.on_trigger
+    trigger = ControlService.create_flow
 
     def fail_after_trigger(self, *args):
         trigger(self, *args)
         raise RuntimeError("sensitive error must not persist")
 
-    monkeypatch.setattr(ControlService, "on_trigger", fail_after_trigger)
+    monkeypatch.setattr(ControlService, "create_flow", fail_after_trigger)
     consumer(store).sweep()
     assert not store.webhooks.event_seen("one")
     assert store.flows.get_active_flow("owner/repo", 7) is None
     assert inbox.list()[0].error_code == "RuntimeError"
-    monkeypatch.setattr(ControlService, "on_trigger", trigger)
+    monkeypatch.setattr(ControlService, "create_flow", trigger)
     with store.connection() as conn:
         conn.execute("UPDATE webhook_inbox SET next_at=%s", (store.now(),))
     consumer(store).sweep()
@@ -111,14 +111,14 @@ def test_expired_claim_is_replayed_but_old_ack_cannot_complete_it(store, monkeyp
 
 
 def test_poison_delivery_does_not_block_following_event_and_can_retry(store, monkeypatch):
-    trigger = ControlService.on_trigger
+    trigger = ControlService.create_flow
 
     def unavailable(self, repo, number, installation):
         if repo == "owner/repo":
             raise OperationalError("write unavailable")
         return trigger(self, repo, number, installation)
 
-    monkeypatch.setattr(ControlService, "on_trigger", unavailable)
+    monkeypatch.setattr(ControlService, "create_flow", unavailable)
     inbox = store.webhooks
     receive(inbox, "bad")
     receive(inbox, "later", payload(9))
@@ -135,7 +135,7 @@ def test_poison_delivery_does_not_block_following_event_and_can_retry(store, mon
     assert rows["good"].state == "done"
     assert store.flows.get_active_flow("owner/other", 8) is not None
     assert store.flows.get_active_flow("owner/repo", 9) is None
-    monkeypatch.setattr(ControlService, "on_trigger", trigger)
+    monkeypatch.setattr(ControlService, "create_flow", trigger)
     assert inbox.retry("bad")
     assert not inbox.retry("good")
     assert consumer(store).sweep() == 2
@@ -183,7 +183,7 @@ def test_webhook_transaction_does_not_rebind_the_root_service(store):
     receive(store.webhooks)
     assert worker.sweep() == 1
     assert notifications == [True]
-    flow = service.on_trigger("owner/repo", 8, 42)
+    flow = service.create_flow("owner/repo", 8, 42)
     assert flow is not None and store.flows.get_flow(flow.id) is not None
     assert notifications == [True, True]
 
@@ -331,18 +331,18 @@ async def test_consumer_shutdown_waits_for_db_transaction_without_blocking_loop(
 
 def test_retry_cannot_be_overtaken_by_cancellation(store, monkeypatch):
     inbox = store.webhooks
-    trigger = ControlService.on_trigger
+    trigger = ControlService.create_flow
     receive(inbox, 'trigger')
     def fail(*args):
         raise RuntimeError('transient failure')
-    monkeypatch.setattr(ControlService, 'on_trigger', fail)
+    monkeypatch.setattr(ControlService, 'create_flow', fail)
     consumer(store).sweep()
     cancelled = payload()
     cancelled['action'] = 'unlabeled'
     receive(inbox, 'cancel', cancelled)
     # Cancellation must wait for the older accepted trigger, including its backoff.
     assert consumer(store).sweep() == 0
-    monkeypatch.setattr(ControlService, 'on_trigger', trigger)
+    monkeypatch.setattr(ControlService, 'create_flow', trigger)
     with store.connection() as conn:
         conn.execute("UPDATE webhook_inbox SET next_at=%s", (store.now(),))
     assert consumer(store).sweep() == 2

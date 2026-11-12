@@ -23,7 +23,7 @@ from app.contracts.conversation import (
 from app.controler.console.sync import ConsoleSynchronizer
 from app.controler.workers.conversation import ConversationService
 from app.controler.workflow.service import ControlService
-from app.domain.models import JobKind
+from app.domain.models import DeliveryState, JobKind, TaskContent
 from app.github import GitHubApp
 from app.persistence.activity import ActivityStore
 from app.persistence.console import ConsoleStore
@@ -35,6 +35,39 @@ from tests.workspace_fixtures import register_worker
 def only_worker(database):
     with database.connection() as connection:
         connection.execute("UPDATE console_sync SET pending=(source='worker')")
+
+
+async def test_direct_task_registers_only_real_remote_sources_and_still_reads_worker(store):
+    # Before PR creation there is no GitHub target; local state and worker history are independent.
+    flow = store.flows.create_flow("owner/repo", None, 42, task_content=TaskContent(title="Direct"))
+    conversations = Mock(spec=ConversationService)
+    conversations.read = AsyncMock(return_value=ConversationPage(flow_id=flow.id, unavailable_reason="no_worker"))
+    github = Mock(spec=GitHubApp)
+    sync = ConsoleSynchronizer(github, conversations, database=store.database)
+    remote = sync.store.claim()
+    assert remote and remote.source == "github" and remote.issue_number is None
+    await sync.sync(remote)
+    worker = sync.store.claim()
+    assert worker and worker.source == "worker" and worker.issue_number is None
+    await sync.sync(worker)
+    conversations.read.assert_awaited_once_with(flow.id, None, 50)
+    assert sync.store.claim() is None
+    assert ActivityStore(store.database).history(flow.id, 1)
+    with store.connection() as connection:
+        names = {row["source"] for row in connection.execute("SELECT source FROM console_sync").fetchall()}
+    assert names == {"github", "worker"}
+
+    delivery = store.deliveries.get_or_create_delivery(flow.id, flow.initial_branch)
+    delivery.pr_number, delivery.state = 17, DeliveryState.OPEN
+    store.deliveries.update_delivery(delivery)
+    remote = sync.store.claim()
+    assert remote and remote.source == "github" and remote.pr_number == 17
+    await sync.sync(remote)
+    with store.connection() as connection:
+        names = {row["source"] for row in connection.execute("SELECT source FROM console_sync").fetchall()}
+    assert "pr.comments" in names and "pr.review_threads" in names
+    assert not any(name.startswith("issue.") for name in names)
+    github.installation.assert_not_called()
 
 
 @pytest.mark.parametrize("resume_during_read", [False, True])

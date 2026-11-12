@@ -21,6 +21,7 @@ from app.domain.models import (
     FlowState,
     JobKind,
     JobState,
+    TaskContent,
     WorkspaceInventory,
 )
 from app.persistence.activity import ActivityStore
@@ -42,7 +43,7 @@ def assignment(flow: int, workspace: str, generation: int = 1) -> AssignmentArgu
         workspace=workspace, generation=generation,
         task=InitialTask(flow_id=flow, attempt_id=flow, repo="owner/repo",
                          repo_identity="worker-a:owner/repo", issue_number=flow,
-                         issue_title="Issue", issue_body="Body", branch=f"flow/{flow}"),
+                         task_content=TaskContent(title="Issue", body="Body"), branch=f"flow/{flow}"),
     )
 
 

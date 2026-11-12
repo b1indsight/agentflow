@@ -17,7 +17,14 @@ from app.contracts.protocol import ExecutionStopped
 from app.contracts.result_models import ResultPending
 from app.controler.reconciliation.projects import ProjectSync
 from app.controler.workflow.service import ControlService
-from app.domain.models import ArchiveReason, DeliveryState, FlowState, JobKind, JobState
+from app.domain.models import (
+    ArchiveReason,
+    DeliveryState,
+    FlowState,
+    JobKind,
+    JobState,
+    TaskContent,
+)
 from app.domain.project_models import ProjectStatus
 from app.github import (
     GitHubApp,
@@ -214,6 +221,17 @@ def state(store):
     return store.projects.list_projections()[0]
 
 
+def test_direct_tasks_never_enter_issue_project_projections(store):
+    # Projects are Issue projections, not the repository selector used by direct task creation.
+    direct = store.flows.create_flow("owner/repo", None, 42, task_content=TaskContent(title="Direct"))
+    issue = store.flows.create_flow("owner/repo", 7, 42)
+    store.projects.seed("owner/repo", config(), 64)
+    projections = store.projects.list_projections()
+    assert [(row.flow_id, row.issue_number) for row in projections] == [(issue.id, 7)]
+    with store.connection() as connection:
+        assert connection.execute("SELECT 1 FROM issue_flow_owners WHERE flow_id=%s", (direct.id,)).fetchone() is None
+
+
 async def converge(sync, times=3):
     for _ in range(times):
         await sync.sweep()
@@ -340,7 +358,7 @@ async def test_resuming_older_flow_selects_owner_even_after_both_flows_are_archi
     service = ControlService(database=store.database)
     await converge(sync)
     service.cancel(flow)
-    newer = service.on_trigger(flow.repo, flow.issue_number, 42)
+    newer = service.create_flow(flow.repo, flow.issue_number, 42)
     assert newer is not None and newer.id > flow.id
     service.cancel(newer)
     clock.now += timedelta(seconds=31)

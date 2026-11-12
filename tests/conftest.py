@@ -122,7 +122,7 @@ async def server_runtime(store: Store, monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.fixture
-async def prepared_initial(store: Store, recording_resources: None):
+async def prepared_initial(store: Store, recording_resources: None, request):
     """Reuse the INITIAL workflow up to its prepared tool receipt, before terminal acceptance."""
     from app.contracts.protocol import (
         FlowToolArguments,
@@ -137,7 +137,10 @@ async def prepared_initial(store: Store, recording_resources: None):
     from tests.test_coordinator import coordinator
     from tests.workspace_fixtures import register_worker
 
-    flow = ControlService(database=store.database).on_trigger("owner/repo", 8, 42)
+    content = getattr(request, "param", None)
+    flow = ControlService(database=store.database).create_flow(
+        "owner/repo", None if content is not None else 8, 42, task_content=content,
+    )
     assert flow is not None
     register_worker(store, "worker-a", repo=flow.repo, epoch="epoch")
     job = store.workers.assign_job("worker-a", "token", "epoch")

@@ -19,7 +19,7 @@ from app.controler.events.webhooks import WebhookConsumer
 from app.controler.runtime import ServerRuntime
 from app.controler.workers.conversation import ConversationService
 from app.controler.workflow.service import ControlService
-from app.domain.models import Flow, FlowState, JobKind
+from app.domain.models import Flow, FlowState, JobKind, TaskContent
 from app.persistence.store import Store
 from app.plugins import get_plugin_manager
 from app.telemetry.metrics import Metrics
@@ -75,8 +75,11 @@ class RoutingService(ControlService):
     def __init__(self, store: Store) -> None:
         super().__init__(database=store.database)
 
-    def on_trigger(self, repo: str, issue_number: int, installation_id: int | None) -> Flow:
-        flow = self.flows.create_flow(repo, issue_number, installation_id)
+    def create_flow(
+        self, repo: str, issue_number: int | None, installation_id: int | None,
+        *, task_content: TaskContent | None = None,
+    ) -> Flow:
+        flow = self.flows.create_flow(repo, issue_number, installation_id, task_content=task_content)
         self.jobs.enqueue_job(flow.id, JobKind.INITIAL)
         return flow
 

@@ -2,14 +2,17 @@
 
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
 from githubkit_schemas.latest.models import DiffEntry
 
 from app.controler.review.context import build_review_context
+from app.controler.review.judge import ReviewJudge
 from app.domain.context_models import MAX_CONTEXT_BYTES
-from app.domain.models import Flow, FlowState, ReviewItemKind
+from app.domain.inference_models import InferenceOutput
+from app.domain.models import Flow, FlowState, ReviewItemKind, TaskContent, Verdict
 from app.domain.review_models import BatchState, ReviewBatch, ReviewFeedback
 from app.github import GitHubApp, GitHubError, GitHubErrorKind
 from tests.review_memory import review_context as context
@@ -122,7 +125,38 @@ async def test_context_preserves_evidence_as_untrusted_json(remote):
     assert events == ["pr", "issue", "files", "conversation", "review_body", "inline", "pr"]
 
 
-async def test_context_total_byte_limit_and_missing_patch_are_explicit(remote):
+@pytest.mark.parametrize("clipped", [False, True])
+async def test_direct_context_uses_persisted_task_without_issue_and_waits_only_if_clipped(remote, clipped):
+    # A direct task has no remote Issue; absence is normal, but truncated requirements are not.
+    repo, client, events = remote
+    flow, batch = review_data()
+    task = TaskContent(title="Direct requirements", body="大" * 5000 if clipped else "Persisted body")
+    flow = flow.model_copy(update={"issue_number": None, "task_content": task})
+    client.rest.issues.async_get = AsyncMock(side_effect=AssertionError("no Issue for direct task"))
+    result = await build_review_context(repo, flow, batch, 17)
+    assert result.issue_number is None and result.issue is None
+    assert result.task_content.title == task.title
+    assert result.task_content.body == task.body[:4000]
+    assert len(result.model_dump_json().encode()) <= MAX_CONTEXT_BYTES
+    assert result.limitations == (["task-body:truncated"] if clipped else [])
+    assert "issue" not in events
+
+    async def infer(request):
+        assert task.title in request.messages[-1].content
+        return InferenceOutput(
+            request_id=request.request_id, request_digest=request.digest,
+            text='{"verdict":"ignore","confidence":1,"reason":"Chatter"}',
+            adapter_version="test/v1",
+        )
+
+    inference = SimpleNamespace(infer=AsyncMock(side_effect=infer))
+    decision = await ReviewJudge(inference).triage(result)
+    assert decision.verdict.verdict is (Verdict.WAIT if clipped else Verdict.IGNORE)
+    assert inference.infer.await_count == (0 if clipped else 1)
+
+
+@pytest.mark.parametrize("direct", [False, True])
+async def test_context_total_byte_limit_and_missing_patch_are_explicit(remote, direct):
     repo, client, _ = remote
 
     async def files(*args, page, **kwargs):
@@ -131,8 +165,14 @@ async def test_context_total_byte_limit_and_missing_patch_are_explicit(remote):
 
     client.rest.pulls.async_list_files = files
     flow, batch = review_data()
+    if direct:
+        flow = flow.model_copy(update={
+            "issue_number": None, "task_content": TaskContent(title="Direct", body="大" * 4000),
+        })
     result = await build_review_context(repo, flow, batch, 17)
     assert len(result.model_dump_json().encode()) <= MAX_CONTEXT_BYTES
+    if direct:
+        assert result.task_content == flow.task_content and result.issue is None
     assert "files:truncated" in result.limitations
     assert any("patch" in reason for reason in result.limitations)
     assert "context:truncated" in result.limitations

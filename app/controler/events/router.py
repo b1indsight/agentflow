@@ -67,7 +67,7 @@ class EventRouter:
             if actor not in self.settings.allowlist:
                 logger.warning("trigger by non-allowlisted user {} ignored", actor)
                 return
-            self.service.on_trigger(repo, issue_number, installation_id)
+            self.service.create_flow(repo, issue_number, installation_id)
         elif action == "unlabeled" and trigger:
             flow = self.flows.get_active_flow(repo, issue_number)
             if flow:

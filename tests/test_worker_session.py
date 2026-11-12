@@ -26,7 +26,7 @@ from app.contracts.protocol import (
     terminal_digest,
 )
 from app.domain.delivery_models import DeliveryReceipt, PreparedDelivery
-from app.domain.models import JobState, VcsKind, VcsOutcome
+from app.domain.models import JobState, TaskContent, VcsKind, VcsOutcome
 from app.worker.execution.lifecycle import TaskExecutor, WorkerExecution, WorkerProtocolError
 from app.worker.state.execution import ExecutionState, ExecutionStateError
 
@@ -45,8 +45,7 @@ def _assignment(
             attempt_id=7,
             repo="owner/repo",
             issue_number=8,
-            issue_title="Issue",
-            issue_body="Body",
+            task_content=TaskContent(title="Issue", body="Body"),
             branch="flow/issue-8",
         ),
         secret=AssignmentSecret(

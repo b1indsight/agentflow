@@ -48,9 +48,10 @@ class SourcePage(BaseModel):
     child_sources: list[str] = Field(default_factory=list)
 
 
-def sources(pr_number: int | None) -> list[str]:
+def sources(issue_number: int | None, pr_number: int | None) -> list[str]:
     """Supported top-level sources; child sources cover all collected comment reactions."""
-    names = ["issue.description", "issue.comments", "issue.timeline", "issue.reactions"]
+    names = (["issue.description", "issue.comments", "issue.timeline", "issue.reactions"]
+             if issue_number is not None else [])
     if pr_number is not None:
         names += [
             "pr.description",
@@ -401,7 +402,7 @@ async def _check_workflows(repo: Repository, nodes: list[dict]) -> None:
 
 async def read_source(
     repo: Repository,
-    issue_number: int,
+    issue_number: int | None,
     pr_number: int | None,
     source: str,
     cursor: str | None = None,
@@ -414,7 +415,7 @@ async def read_source(
         r"(comment.reactions|inline.reactions):([1-9][0-9]*)|(commit.check_runs|commit.statuses):([0-9a-f]{40,64})|(pr.review_thread_replies|review.reactions):([A-Za-z0-9_=-]{1,256})",
         source,
     )
-    if source not in sources(pr_number) and not child:
+    if source not in sources(issue_number, pr_number) and not child:
         raise ValueError("unsupported source")
     scope = [repo.full_name.casefold(), issue_number, pr_number, source, limit]
     native = _position(cursor, scope)
@@ -444,9 +445,9 @@ async def read_source(
             page = int(native) if native else 1
             if page < 1:
                 raise ValueError("invalid page")
-            number = pr_number if source.startswith("pr.") else issue_number
+            number = pr_number if source.startswith("pr.") or issue_number is None else issue_number
             if number is None:
-                raise ValueError("missing PR")
+                raise ValueError("missing Issue or PR")
             kind, parent = "", None
             if source.endswith("description"):
                 response = await client.rest.issues.async_get(owner, name, number)

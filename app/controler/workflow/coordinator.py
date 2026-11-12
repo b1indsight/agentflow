@@ -38,12 +38,13 @@ from app.domain.models import (
     JobKind,
     JobState,
     ReviewItemKind,
+    TaskContent,
     TriageVerdict,
     Verdict,
 )
 from app.domain.ports import Judge
 from app.domain.review_models import BatchState, ReviewBatch
-from app.github import GitHubApp, GitHubError, GitHubErrorKind, PullRequest
+from app.github import GitHubApp, GitHubError, GitHubErrorKind, PullRequest, Repository
 from app.persistence.database import Database
 from app.persistence.deliveries import DeliveryStore
 from app.persistence.flows import FlowStore
@@ -269,6 +270,15 @@ class JobCoordinator:
                 GitHubErrorKind.TRANSIENT, "preparation read window expired",
             )) from error
 
+    async def _task_content(self, job: Job, flow: Flow, repository: Repository) -> TaskContent:
+        """Preserve direct input while Issue tasks continue to observe current Issue edits."""
+        if flow.task_content is not None:
+            return flow.task_content
+        number = flow.issue_number
+        assert number is not None
+        issue = await self._read(job, lambda: repository.fetch_issue(number))
+        return TaskContent(title=issue.title, body=issue.body)
+
     async def prepare(self, job: Job) -> ExecutionTask | JobState:
         """Build a task from a persisted job and its current workflow state.
 
@@ -316,7 +326,7 @@ class JobCoordinator:
                 flow = fresh
             try:
                 repo = self.github.installation(installation_id).repository(flow.repo)
-                issue = await self._read(job, lambda: repo.fetch_issue(flow.issue_number))
+                task_content = await self._task_content(job, flow, repo)
                 repository = await self._read(job, repo.refetch)
             except GitHubError as exc:
                 raise PreparationReadFailure(exc) from exc
@@ -339,8 +349,7 @@ class JobCoordinator:
                 attempt_id=attempt.id,
                 repo=flow.repo,
                 issue_number=flow.issue_number,
-                issue_title=issue.title,
-                issue_body=issue.body,
+                task_content=task_content,
                 branch=delivery.branch,
                 base_branch=repository.default_branch,
                 remote="origin",
@@ -390,7 +399,7 @@ class JobCoordinator:
                 ))
                 if not mismatch:
                     assert flow.installation_id is not None
-                    issue = await self._read(job, lambda: repository.fetch_issue(flow.issue_number))
+                    task_content = await self._task_content(job, flow, repository)
             except GitHubError as exc:
                 raise PreparationReadFailure(exc) from exc
             if mismatch:
@@ -410,8 +419,7 @@ class JobCoordinator:
                 expected_head_sha=delivery.head_sha,
                 session_id=attempt.codex_session_id,
                 session_generation=attempt.session_generation,
-                issue_title=issue.title,
-                issue_body=issue.body,
+                task_content=task_content,
                 previous_summary=attempt.last_revision_summary,
                 open_points=batch.open_points,
                 context=batch.context,

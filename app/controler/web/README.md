@@ -1,7 +1,7 @@
 # Web 控制台
 
 当前由 `flowtool serve` 在 `/console/` 提供，使用真实同源 `/api/`，**没有生产示例数据或 mock 回退**。
-提供 Flow「结束本轮」、已归档 Flow「恢复推进」及受阻 Flow 的安全重试。
+提供顶栏「新建 Flow」、Flow「结束本轮」、已归档 Flow「恢复推进」及受阻 Flow 的安全重试。
 页面、静态资源和 API 均要求 Cloudflare Access 的单 owner 身份；数据库、GitHub 与 Worker
 读取由 control 负责。真实 Access 登录/MFA、GitHub App 全来源回填和目标部署仍待验收。
 架构与持久化边界见[控制台功能记录](../../../docs/plan/web-console-kanban.md)。
@@ -60,6 +60,14 @@ npm run preview -- --port 8767
 
 Flow 编号必须来自当前数据库；没有固定可用的样例 ID。GitHub 链接指向真实记录。
 API 错误显式显示，已有内容不会被示例数据替换；Worker 离线仍可读已归档内容，未采集历史无法凭空恢复。
+
+「新建 Flow」选择 Project（代码仓库）并填写任务内容，不必关联 Issue。项目来自授权 installation 的分页仓库清单，
+不依赖历史 Flow；可继续读取空的中间页、重试或重新读取，并保留草稿。
+首个非空白行的前 256 个 Unicode 码点生成标题，全文原样保存，最多 32 KiB UTF-8；空白/NUL/超限输入拒绝。
+提交中禁用重复操作与关闭，成功后直接打开新 Flow 概览，不受看板筛选影响。
+明确拒绝保留可编辑草稿；网络、5xx 或不完整成功响应提示结果未知并锁定重发，提供清空筛选、刷新核对入口。
+草稿只保存在本页内存，刷新页面会丢失；不要在核对前重复创建。
+无 Issue Flow 的概览显示原始任务内容，卡片回退到 Flow/PR 编号，不生成 Issue 链接。
 
 顶栏只有一个查询框，支持普通关键词、双引号短语、`repo:`、`is:active|archived`、
 `status:queued|running|review|blocked|archived`、`issue:`、`pr:`；词和条件之间为 AND。

@@ -44,6 +44,119 @@ def console_runtime(store):
     )
 
 
+@pytest.mark.parametrize("task", [
+    {"title": "直接任务", "body": "\n完整内容 α\n第二行 β\n"},
+    {"title": "😀" * 256, "body": "中" * 10922 + "ab"},
+])
+def test_manual_creation_without_issue_is_atomic_visible_and_owner_only(console_runtime, store, monkeypatch, task):
+    from app.github import Repository
+    from tests.github import RecordingGitHub
+
+    console_runtime.github = RecordingGitHub()
+
+    async def refetch(repo):
+        return repo.model_copy(update={"default_branch": "main", "archived": False})
+
+    monkeypatch.setattr(Repository, "refetch", refetch)
+    payload = {
+        "repo": "owner/new-repo", "installation_id": 42,
+        "task_content": task,
+    }
+    with TestClient(create_app(console_runtime)) as client:
+        assert client.post("/api/flows", json=payload).status_code == 401
+        headers = console_runtime.issuer.headers()
+        assert client.post("/api/flows", json=payload, headers={**headers, "Origin": "https://other.test"}).status_code == 403
+        response = client.post("/api/flows", json=payload, headers=headers)
+        assert response.status_code == 201, response.text
+        detail = response.json()
+        assert response.headers["cache-control"] == "no-store"
+        assert detail["issue_number"] is None and detail["issue_url"] is None
+        assert detail["title"] == task["title"] and detail["task_content"] == task
+        assert detail["phase"] == "queued"
+        assert client.get(f"/api/flows/{detail['id']}", headers=headers).json()["task_content"] == payload["task_content"]
+        assert client.get("/api/flows", headers=headers).json()["items"][0]["id"] == detail["id"]
+    flow = store.flows.get_flow(detail["id"])
+    assert flow.repo == payload["repo"] and flow.installation_id == 42
+    assert [job.kind for job in store.jobs.list_jobs(flow.id)] == [JobKind.INITIAL]
+    assert console_runtime.gateway.wake_all.called
+
+
+@pytest.mark.parametrize("changes", [
+    {"task_content": None},
+    {"issue_number": 7},
+    {"task_content": {"title": "  ", "body": "内容"}},
+    {"task_content": {"title": "x" * 257}},
+    {"task_content": {"title": "t", "body": "中" * 10923}},
+    {"task_content": {"title": "t", "body": "a\0b"}},
+    {"installation_id": True},
+    {"repo": "owner/repo/extra"},
+])
+def test_manual_creation_invalid_input_never_writes(console_runtime, store, changes):
+    payload = {"repo": "owner/repo", "installation_id": 42, "task_content": {"title": "t", "body": "b"}, **changes}
+    with TestClient(create_app(console_runtime)) as client:
+        response = client.post("/api/flows", json=payload, headers=console_runtime.issuer.headers())
+        assert response.status_code == 422, response.text
+    assert store.flows.list_flows() == []
+
+
+@pytest.mark.parametrize("target_state,status", [("archived", 409), ("permission", 403), ("not_found", 404)])
+def test_manual_creation_rechecks_remote_access_before_writing(console_runtime, store, monkeypatch, target_state, status):
+    from app.github import GitHubError, GitHubErrorKind, Repository
+    from tests.github import RecordingGitHub
+
+    console_runtime.github = RecordingGitHub()
+
+    async def refetch(repo):
+        if target_state != "archived":
+            raise GitHubError(GitHubErrorKind(target_state), "get_repository")
+        return repo.model_copy(update={"default_branch": "main", "archived": True})
+
+    monkeypatch.setattr(Repository, "refetch", refetch)
+    with TestClient(create_app(console_runtime)) as client:
+        response = client.post("/api/flows", json={"repo": "owner/repo", "installation_id": 42,
+                                                  "task_content": {"title": "拒绝任务"}},
+                               headers=console_runtime.issuer.headers())
+        assert response.status_code == status
+    assert store.flows.list_flows() == []
+
+
+def test_creation_targets_include_new_repositories_and_continue_empty_inventory_pages(console_runtime, store, monkeypatch):
+    from app.github import Batch, GitHubApp, Repository
+    from app.github.apps import Installation
+    from tests.github import RecordingGitHub
+
+    console_runtime.github = RecordingGitHub()
+
+    async def installations(github, *, page=1):
+        return Batch(items=() if page == 1 else (github.installation(42), github.installation(43)),
+                     next_cursor="2" if page == 1 else None)
+
+    async def repositories(installation, *, page=1):
+        if installation.installation_id == 42 and page == 1:
+            return Batch(items=(), next_cursor="2")
+        return Batch(items=(Repository(installation, f"owner/new-{installation.installation_id}"),), next_cursor=None)
+
+    monkeypatch.setattr(GitHubApp, "fetch_installations", installations)
+    monkeypatch.setattr(Installation, "fetch_repositories", repositories)
+    with TestClient(create_app(console_runtime)) as client:
+        assert client.get("/api/flow-targets").status_code == 401
+        headers = console_runtime.issuer.headers()
+        cursor, items = None, []
+        for _ in range(4):
+            page = client.get("/api/flow-targets", params={"cursor": cursor} if cursor else {}, headers=headers)
+            assert page.status_code == 200, page.text
+            assert page.headers["cache-control"] == "no-store"
+            data = page.json()
+            items.extend(data["items"])
+            cursor = data["next_cursor"]
+            assert data["has_more"] is (cursor is not None)
+        assert cursor is None
+        assert items == [{"repo": "owner/new-42", "installation_id": 42}, {"repo": "owner/new-43", "installation_id": 43}]
+        assert client.get("/api/repos", headers=headers).json()["items"] == []
+        assert client.get("/api/flow-targets?cursor=bad", headers=headers).status_code == 409
+    assert store.flows.list_flows() == []
+
+
 def test_console_and_every_public_read_require_owner_before_io(console_runtime, store):
     flow = store.flows.create_flow("owner/repo", 7, 42)
     ActivityStore(store._db).append(

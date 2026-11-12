@@ -62,7 +62,7 @@ function numberFootnoteIdentifiers() {
 }
 
 /** Resolve archived destinations at their source; footnotes stay local to this body segment. */
-function ActivityMarkdown({
+export function ActivityMarkdown({
   text,
   url: sourceUrl,
 }: {

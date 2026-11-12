@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 from psycopg.rows import class_row
+from psycopg.types.json import Jsonb
 
 from app.domain.models import (
     ArchiveReason,
@@ -13,6 +14,7 @@ from app.domain.models import (
     Flow,
     FlowDelivery,
     FlowState,
+    TaskContent,
 )
 from app.github import PullRequestMerge
 from app.persistence.activity import ActivityStore
@@ -24,7 +26,12 @@ from app.persistence.results import UNCONFIRMED_EFFECT_SQL
 class FlowStore(Repository):
     """Flow and Attempt facts using the current database transaction."""
 
-    def create_flow(self, repo: str, issue_number: int, installation_id: int | None) -> Flow:
+    def create_flow(
+        self, repo: str, issue_number: int | None, installation_id: int | None,
+        *, task_content: TaskContent | None = None,
+    ) -> Flow:
+        if (issue_number is None) == (task_content is None):
+            raise ValueError("provide exactly one of issue_number and task_content")
         now = self._db.now()
         with (
             self._db.transaction() as tx,
@@ -33,9 +40,11 @@ class FlowStore(Repository):
         ):
             tx.serialize_issue(repo, issue_number)
             row = cursor.execute(
-                "INSERT INTO flows(repo, issue_number, installation_id, state, created_at,"
-                " updated_at) VALUES (%s,%s,%s,%s,%s,%s) RETURNING *",
-                (repo, issue_number, installation_id, FlowState.QUEUED, now, now),
+                "INSERT INTO flows(repo, issue_number, installation_id, task_content, state,"
+                " created_at, updated_at) VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING *",
+                (repo, issue_number, installation_id,
+                 Jsonb(task_content.model_dump()) if task_content is not None else None,
+                 FlowState.QUEUED, now, now),
             ).fetchone()
             FlowStore(tx).select_owner(required(row))
         return required(row)
@@ -47,7 +56,9 @@ class FlowStore(Repository):
         ):
             return cursor.execute("SELECT * FROM flows WHERE id=%s", (flow_id,)).fetchone()
 
-    def get_active_flow(self, repo: str, issue_number: int) -> Flow | None:
+    def get_active_flow(self, repo: str, issue_number: int | None) -> Flow | None:
+        if issue_number is None:
+            return None
         with (
             self._db.connection() as connection,
             connection.cursor(row_factory=class_row(Flow)) as cursor,
@@ -189,6 +200,8 @@ class FlowStore(Repository):
 
     def select_owner(self, flow: Flow) -> None:
         """Creation/resume alone select the Issue's display owner, including after archive."""
+        if flow.issue_number is None:
+            return
         with self._db.connection() as connection:
             connection.execute(
                 "INSERT INTO issue_flow_owners(repo,issue_number,flow_id) VALUES (%s,%s,%s)"
