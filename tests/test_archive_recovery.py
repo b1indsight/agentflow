@@ -13,9 +13,6 @@ from app.persistence.workers import WorkerStore
 from tests.github import RecordingGitHub
 from tests.test_coordinator import coordinator
 from tests.test_merge import merge_payload, route_merge
-from tests.test_result_recovery import (
-    completed_open_initial as completed_open_initial,  # noqa: PLC0414
-)
 from tests.test_workflow_transactions import accepted_coding
 from tests.worker_fakes import server_callbacks, server_runtime
 from tests.workspace_fixtures import register_worker

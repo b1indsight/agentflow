@@ -163,9 +163,6 @@ async def test_handshake_stop_allows_history_but_rejection_retains_started_evide
                 cleaning.set()
                 await release.wait()
 
-        async def reclaim_workspace(self):
-            pass
-
     work = _assignment()
     state = ExecutionState(tmp_path, 3)
     owner = WorkerExecution(worker_id="worker", executor=Executor(), state=state)

@@ -39,7 +39,7 @@ from app.contracts.protocol import (
 from app.domain.delivery_models import PreparedDelivery
 from app.domain.models import VcsExecutionContext, VcsKind, VcsOutcome
 from app.worker.execution.lifecycle import WorkerExecution
-from app.worker.state.execution import ExecutionState
+from app.worker.state.execution import ExecutionState, ExecutionStateError
 from app.worker.transport.mcp import FlowToolCaller, WorkerMCP
 from tests.test_conversation_history import SESSION
 from tests.test_remote_e2e import QueueConnection
@@ -106,9 +106,6 @@ class RecordingExecutor:
         assert isinstance(task, InitialTask)
         assert task.repo == "owner/repo"
         return InitialTaskResult(session_id="session-1", last_message="done", exit_code=0)
-
-    async def reclaim_workspace(self) -> None:
-        raise AssertionError("no stop was requested")
 
 
 class ScriptedConnection:
@@ -272,7 +269,7 @@ async def test_assignment_never_launches_before_started_is_sent_and_persisted(tm
 async def test_completion_between_register_and_resume_is_persisted_without_reexecution(
     tmp_path, journal_unavailable
 ):
-    # Register can report a live executor that finishes before control's resume decision.
+    # A live task can finish between Register and resume, even failing its first journal write.
     finish, collected = asyncio.Event(), asyncio.Event()
 
     class Journal(ExecutionState):
@@ -290,7 +287,10 @@ async def test_completion_between_register_and_resume_is_persisted_without_reexe
         async def execute(self, *args, **kwargs):
             self.invocations += 1
             await finish.wait()
-            return await super().execute(*args, **kwargs)
+            result = await super().execute(*args, **kwargs)
+            assert isinstance(result, InitialTaskResult)
+            result.last_message = "push-secret"
+            return result
 
     class Connection(ScriptedConnection):
         async def send(self, raw):
@@ -302,13 +302,34 @@ async def test_completion_between_register_and_resume_is_persisted_without_reexe
                 await collected.wait()
             for item in message.payload:
                 if isinstance(item, ExecuteResult):
-                    assert state.load().terminal.result == item.result
+                    terminal = item.terminal()
+                    assert isinstance(item.result, InitialTaskResult)
+                    assert item.result.last_message == "[REDACTED]"
+                    assert state.load().terminal == terminal == await owner.wait_terminal()
+                    assert owner.result_for_registration() == terminal
+                    assert state.assignment is assignment and owner.lease() is None
+                    assert not state.load().acknowledged
             await super().send(raw)
+
+        async def recv(self):
+            if self.messages:
+                before = state.path.read_bytes()
+                with pytest.raises(ExecutionStateError, match="does not match"):
+                    owner.resume(RecoveryDecision(
+                        action="resume", job_id=5, assignment_token="other",
+                    ))
+                assert state.path.read_bytes() == before
+            return await super().recv()
 
     state, executor = Journal(tmp_path, 3), Executor()
     owner = WorkerExecution(worker_id="worker-1", executor=executor, state=state)
-    owner.receive(_assignment())
+    assignment = _assignment()
+    owner.receive(assignment)
     owner.start()
+    assert owner.lease() is assignment
+    assert owner.result_for_registration() is None
+    recovery = owner.recovery()
+    assert recovery is not None and recovery.state == "started" and recovery.executor_active
 
     async def reconnect():
         connection = Connection()
@@ -343,6 +364,12 @@ async def test_completion_between_register_and_resume_is_persisted_without_reexe
             await reconnect()
         assert executor.invocations == 1
         assert state.load().acknowledged and state.load().terminal is not None
+        assert state.assignment is None and owner.lease() is None
+        assert owner.result_for_registration() is None
+        recovery = owner.recovery()
+        assert recovery is not None and recovery.state == "succeeded" and not recovery.executor_active
+        assert recovery.result_digest == state.load().result_digest
+        assert "push-secret" not in state.path.read_text()
     finally:
         finish.set()
         state.blocked = False
@@ -403,9 +430,6 @@ class ToolCallingExecutor:
         assert result == PreparedDelivery(head_sha="abc", delivery_version=1)
         return InitialTaskResult(session_id="session-1", last_message="done", exit_code=0)
 
-    async def reclaim_workspace(self) -> None:
-        raise AssertionError("no stop was requested")
-
 
 class ToolConnection(ScriptedConnection):
     def __init__(self) -> None:
@@ -458,9 +482,6 @@ class CancellableExecutor:
         finally:
             self.cancelled.set()
         raise AssertionError("unreachable")
-
-    async def reclaim_workspace(self) -> None:
-        raise AssertionError("no stop was requested")
 
 
 class BrokenHeartbeatConnection:

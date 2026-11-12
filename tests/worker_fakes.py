@@ -1,29 +1,17 @@
-"""Explicit worker dependencies for in-memory protocol tests."""
+"""Transport peers and external execution dependencies for focused protocol tests."""
 
 import asyncio
-from collections.abc import Awaitable, Callable
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 from pydantic import SecretStr
 
 from app.communication.gateway import Gateway
-from app.contracts.protocol import PROTOCOL_VERSION, ExecutionStopped, Register, message_header
+from app.contracts.protocol import Register, message_header
 from app.controler.config import ServerSettings
 from app.controler.runtime import ServerRuntime
 from app.controler.workers.callbacks import ServerCallbacks
-from app.controler.workflow.effects import ResultEffects
-from app.controler.workflow.results import ResultApplication
-from app.domain.models import (
-    FlowExecution,
-    JobState,
-    WorkerRecord,
-    WorkerStatus,
-    WorkspaceInventory,
-    utcnow,
-)
-from app.persistence.stops import StopIntent, StopStore
-from app.persistence.store import Store
+from app.domain.models import WorkspaceInventory
 from app.worker.config import WorkerSettings
 from app.worker.execution.executor import WorkerExecutor
 from app.worker.runtime import WebSocketTransport, WorkerRuntime
@@ -48,29 +36,6 @@ class SimulatedWorkspaces:
 
     async def provision(self, repository):
         assert repository == "owner/repo"
-
-
-class InventoryStore:
-    """Explicit controller repository methods for protocol-only Store simulations."""
-
-    inventory_items: dict[str, WorkspaceInventory]
-
-    def report_workspace(self, worker_id, epoch, item):
-        self.inventory_items[item.workspace] = item
-        return True
-
-    def list_workspaces(self, worker_id):
-        return [connected_worker(worker_id, PROTOCOL_VERSION, self.connection_epoch, workspace=item.workspace)
-                for item in self.inventory_items.values()]
-
-    def workspace_demand(self, worker_id, epoch):
-        return []
-
-    def get_worker_executions(self, worker_id) -> list[FlowExecution]:
-        return []
-
-    def worker_ready(self, worker_id, connection_epoch, inference):
-        assert inference is None
 
 
 def worker_runtime(*, worker_id, worker_token, serve_ws_url, execution, read_history):
@@ -135,45 +100,3 @@ def server_callbacks(runtime, worker_id, epoch):
         session=Mock(epoch=epoch), database=runtime.database, tools=runtime.tools,
         results=runtime.results, notify_jobs=runtime.gateway.wake_all,
     )
-
-
-class NoPendingStops(StopStore):
-    def __init__(self) -> None:
-        # This simulation supplies stop responses and never acquires database resources.
-        pass
-
-    def pending_for_worker(self, worker_id: str) -> list[StopIntent]:
-        return []
-
-    def receipt_request(self, worker_id: str, request_id: str) -> StopIntent | None:
-        return None
-
-    def authorize_dispatch(self, job_id: int, worker_id: str, token: str, epoch: str) -> bool:
-        return True
-
-    def confirm(self, worker_id: str, receipt: ExecutionStopped, connection_epoch: str) -> bool:
-        raise AssertionError("no stop was requested")
-
-
-def connected_worker(worker_id: str, protocol_version: int, connection_epoch: str,
-                     *, execute: bool = True, workspace: str = "b" * 32,
-                     repo_workspace_limit: int = 2) -> WorkerRecord:
-    now = utcnow()
-    return WorkerRecord(worker_id=worker_id, protocol_version=protocol_version,
-                        execute=execute, workspace=workspace, repo_workspace_limit=repo_workspace_limit,
-                        connection_epoch=connection_epoch, status=WorkerStatus.ONLINE,
-                        first_connected_at=now, last_connected_at=now, last_seen_at=now)
-
-
-
-def result_application(store: Store, commit_result: Callable[[int], Awaitable[JobState]]) -> ResultApplication:
-    """Exercise result locking and recovery around the supplied commit callback."""
-    results = ResultApplication(
-        Mock(),
-        Mock(),
-        Mock(),
-        database=store.database,
-        effects=Mock(spec=ResultEffects),
-    )
-    results._apply = commit_result  # type: ignore[method-assign, assignment]
-    return results

@@ -46,15 +46,24 @@ def triage_runtime(store, review_flow, recording_resources, monkeypatch):
     return runtime, batch
 
 
-async def test_only_revision_enters_job_queue(store, triage_runtime):
+async def test_only_revision_enters_job_queue(store, triage_runtime, review_flow):
     runtime, batch = triage_runtime
+    flow, clock = review_flow
     assert store.jobs.list_jobs(batch.flow_id) == []
     await runtime._run_triage()
     await runtime._run_triage()
     jobs = store.jobs.list_jobs(batch.flow_id)
     assert len(jobs) == 1 and jobs[0].kind is JobKind.REVISION
     assert store.reviews.get_batch(batch.id).job_id == jobs[0].id
+    assert store.reviews.for_job(jobs[0]).id == batch.id
+    assert runtime.coordinator.github.comments == []
     assert runtime.judge.triage.await_count == 1
+    ingest(store, flow, feedback(clock, 102), "next")
+    assert claim(store, clock) == []
+    await runtime._run_triage()
+    assert store.jobs.list_jobs(flow.id) == jobs
+    assert runtime.judge.triage.await_count == 1
+    assert runtime.coordinator.github.comments == []
 
 
 @pytest.mark.parametrize("action", ["cancel", "merge"])

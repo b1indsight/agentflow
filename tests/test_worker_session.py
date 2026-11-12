@@ -14,7 +14,6 @@ from app.contracts.protocol import (
     AssignmentSecret,
     ExecutionResult,
     ExecutionStopped,
-    ExecutionTask,
     FlowToolResponse,
     InitialTask,
     InitialTaskResult,
@@ -23,7 +22,6 @@ from app.contracts.protocol import (
     ResultAcceptance,
     StopFence,
     Succeeded,
-    TerminalPayload,
     parse_worker_message,
     terminal_digest,
 )
@@ -31,8 +29,6 @@ from app.domain.delivery_models import DeliveryReceipt, PreparedDelivery
 from app.domain.models import JobState, VcsKind, VcsOutcome
 from app.worker.execution.lifecycle import TaskExecutor, WorkerExecution, WorkerProtocolError
 from app.worker.state.execution import ExecutionState, ExecutionStateError
-from app.worker.state.record import ExecutionRecord
-from app.worker.transport.mcp import FlowToolCaller
 
 
 def _assignment(
@@ -432,72 +428,6 @@ def test_invalid_predecessor_journal_is_preserved(
         session.load()
 
     assert legacy.read_text() == original
-
-
-@pytest.mark.parametrize("journal_unavailable", [False, True])
-async def test_owner_collects_late_completion_without_restarting(
-    tmp_path: Path,
-    journal_unavailable: bool,
-) -> None:
-    # Register may describe a live task that finishes (even failing its first write) before resume.
-    finish, attempted = asyncio.Event(), asyncio.Event()
-
-    class Journal(ExecutionState):
-        blocked = journal_unavailable
-
-        def record_terminal(self, terminal: TerminalPayload) -> ExecutionRecord:
-            attempted.set()
-            if self.blocked:
-                raise OSError("journal unavailable")
-            return super().record_terminal(terminal)
-
-    class Executor:
-        invocations = 0
-
-        async def execute(
-            self,
-            task: ExecutionTask,
-            secret: AssignmentSecret | None = None,
-            *,
-            tool_caller: FlowToolCaller,
-        ) -> ExecutionResult:
-            self.invocations += 1
-            await finish.wait()
-            return InitialTaskResult(
-                session_id="session-1", last_message="push-secret", exit_code=0
-            )
-
-    state, executor = Journal(tmp_path, 3), Executor()
-    owner = WorkerExecution(worker_id="worker", executor=executor, state=state)
-    assignment = _assignment()
-    owner.receive(assignment)
-    owner.start()
-    assert owner.lease() is assignment
-    assert owner.result_for_registration() is None
-    recovery = owner.recovery()
-    assert recovery is not None and recovery.executor_active
-    finish.set()
-    await asyncio.wait_for(attempted.wait(), 1)
-    state.blocked = False
-    try:
-        with pytest.raises(ExecutionStateError, match="does not match"):
-            owner.resume(RecoveryDecision(action="resume", job_id=5, assignment_token="other"))
-        owner.resume(RecoveryDecision(action="resume", job_id=5, assignment_token="assignment-1"))
-        terminal = await owner.wait_terminal()
-        assert isinstance(terminal, Succeeded)
-        assert isinstance(terminal.result, InitialTaskResult)
-        assert terminal.result.last_message == "[REDACTED]"
-        assert owner.result_for_registration() == terminal
-        assert state.assignment is assignment and owner.lease() is None
-        assert executor.invocations == 1
-        assert "push-secret" not in state.path.read_text()
-        owner.on_result_accepted(
-            ResultAcceptance(job_id=5, assignment_token="assignment-1", state="done")
-        )
-        assert owner.result_for_registration() is None
-        assert owner.recovery() is not None
-    finally:
-        await owner.shutdown()
 
 
 async def test_owner_reuses_tool_future_and_matches_original_item(tmp_path: Path) -> None:

@@ -88,23 +88,25 @@ SESSION = "T-019eac3b-a60c-7a93-a442-3718f660fc8c"
 
 
 @pytest.mark.parametrize(
-    ("direction", "item"),
+    ("direction", "item", "valid"),
     [
-        ("server", call("worker.execute", {**IDENTITY, **LOCATION, "flow_id": 3, "task": TASK})),
-        ("server", call("worker.stop", FENCE)),
-        ("server", call("worker.history", {"session_id": SESSION, "cursor": "bad-cursor"})),
+        ("server", call("worker.execute", {**IDENTITY, **LOCATION, "flow_id": 3, "task": TASK}), True),
+        ("server", call("worker.stop", FENCE), True),
+        ("server", call("worker.history", {"session_id": SESSION, "cursor": "bad-cursor"}), True),
+        ("server", call("worker.history", {"session_id": "https://ampcode.com/T-x"}), False),
         (
             "server",
             call(
                 "worker.reject_recovery",
                 {"job_id": 5, "reason": "stale", "register_message_id": "c" * 32},
             ),
+            True,
         ),
-        ("worker", call("server.execution_started", IDENTITY)),
-        ("worker", call("server.accept_result", {**IDENTITY, "result_id": "c" * 32})),
-        ("worker", call("server.accept_stop", {**FENCE, "receipt_id": "c" * 32})),
-        ("worker", call("flow.open_pr", FLOW)),
-        ("worker", result("worker.execute", **IDENTITY, error="failed")),
+        ("worker", call("server.execution_started", IDENTITY), True),
+        ("worker", call("server.accept_result", {**IDENTITY, "result_id": "c" * 32}), True),
+        ("worker", call("server.accept_stop", {**FENCE, "receipt_id": "c" * 32}), True),
+        ("worker", call("flow.open_pr", FLOW), True),
+        ("worker", result("worker.execute", **IDENTITY, error="failed"), True),
         (
             "worker",
             result(
@@ -117,16 +119,18 @@ SESSION = "T-019eac3b-a60c-7a93-a442-3718f660fc8c"
                     "exit_code": 0,
                 },
             ),
+            True,
         ),
-        ("worker", result("worker.stop", result={**FENCE, "execution_nonce": "execution-1"})),
-        ("worker", result("worker.history", error="cursor_invalid")),
-        ("server", result("server.accept_result", result={**IDENTITY, "state": "failed"})),
-        ("server", result("server.accept_stop", result=FENCE)),
+        ("worker", result("worker.stop", result={**FENCE, "execution_nonce": "execution-1"}), True),
+        ("worker", result("worker.history", error="cursor_invalid"), True),
+        ("server", result("server.accept_result", result={**IDENTITY, "state": "failed"}), True),
+        ("server", result("server.accept_stop", result=FENCE), True),
         (
             "server",
             result(
                 "flow.open_pr", call_id="call-1", error="bad request", error_kind="invalid_request"
             ),
+            True,
         ),
         (
             "server",
@@ -135,6 +139,7 @@ SESSION = "T-019eac3b-a60c-7a93-a442-3718f660fc8c"
                 call_id="call-1",
                 result={"status": "prepared", "head_sha": "abc", "delivery_version": 1},
             ),
+            True,
         ),
         (
             "server",
@@ -146,17 +151,22 @@ SESSION = "T-019eac3b-a60c-7a93-a442-3718f660fc8c"
                 retryable=True,
                 retry_after="30",
             ),
+            True,
         ),
     ],
 )
 def test_method_contract_round_trip_and_direction(
-    direction: str, item: dict[str, JsonValue]
+    direction: str, item: dict[str, JsonValue], valid: bool,
 ) -> None:
     parse, other = (
         (parse_server_message, parse_worker_message)
         if direction == "server"
         else (parse_worker_message, parse_server_message)
     )
+    if not valid:
+        with pytest.raises(ValidationError):
+            parse(json.dumps(message([item])))
+        return
     parsed = parse(json.dumps(message([item])))
     assert parse(parsed.model_dump_json()) == parsed
     assert parsed.payload[0].method == item["method"]
@@ -260,18 +270,22 @@ def test_mixed_control_ack_and_business_have_independent_identities() -> None:
         "reply_to": E,
     }
     accept = {**call("server.accept_result", {**IDENTITY, "result_id": T}), "message_id": A}
+    history = result("worker.history", error="history_unreadable")
     data = message(
-        [terminal_item, accept], control="heartbeat", **IDENTITY, ack=True, ack_id="c" * 32
+        [terminal_item, accept, history], control="heartbeat", **IDENTITY, ack=True, ack_id="c" * 32
     )
     parsed = parse_worker_message(json.dumps(data))
     assert PROTOCOL_VERSION == 20
     assert isinstance(parsed.payload[0], ExecuteResult)
     assert parsed.payload[0].terminal() == terminal
     assert isinstance(parsed.payload[1], AcceptResultRequest)
+    assert parsed.payload[2].method == "worker.history"
     assert parsed.ack_id == "c" * 32
     data["assignment_token"] = "other"
     with pytest.raises(ValidationError):
         parse_worker_message(json.dumps(data))
+    data["payload"] = [history]
+    assert parse_worker_message(json.dumps(data)).payload == [parsed.payload[2]]
 
 
 def test_register_recovery_and_registered_decisions_are_control_fields() -> None:
@@ -298,17 +312,24 @@ def test_register_recovery_and_registered_decisions_are_control_fields() -> None
     parsed = parse_worker_message(json.dumps(data))
     assert isinstance(parsed, Register) and len(parsed.recoveries) == 1
     assert parsed.payload == [] and parsed.inventory_complete
+    empty = parse_worker_message(json.dumps({**data, "recoveries": []}))
+    assert isinstance(empty, Register) and empty.recoveries == empty.payload == []
     for payload in ([accept], [call("flow.open_pr", FLOW)]):
         with pytest.raises(ValidationError):
             parse_worker_message(json.dumps({**data, "payload": payload}))
-    for action in ("resume", "replay"):
+    for action, ack in (("resume", False), ("replay", False), (None, True)):
         registered = message(
             [], control="registered", heartbeat_interval=10,
-            recoveries=[{"action": action, **IDENTITY}], ready=True,
+            recoveries=[{"action": action, **IDENTITY}] if action is not None else [], ready=True,
+            ack=ack, ack_id="c" * 32 if ack else None,
         )
         decision = parse_server_message(json.dumps(registered))
-        assert isinstance(decision, Registered) and len(decision.recoveries) == 1
-        assert decision.recoveries[0].action == action and decision.ready
+        assert isinstance(decision, Registered) and decision.ready
+        assert decision.payload == [] and decision.ack is ack
+        assert decision.ack_id == ("c" * 32 if ack else None)
+        assert len(decision.recoveries) == (1 if action is not None else 0)
+        if action is not None:
+            assert decision.recoveries[0].action == action
         registered["payload"] = [call("worker.history", {"session_id": SESSION})]
         with pytest.raises(ValidationError):
             parse_server_message(json.dumps(registered))
@@ -343,31 +364,6 @@ def test_batch_static_validation_and_pure_ack_boundaries() -> None:
     error["payload"] = [call("worker.history", {"session_id": SESSION})]
     with pytest.raises(ValidationError):
         parse_server_message(json.dumps(error))
-
-
-def test_registration_rejects_business_but_heartbeat_can_carry_independent_queries() -> None:
-    query = call("worker.history", {"session_id": SESSION})
-    registered = message(
-        [query],
-        control="registered",
-        recoveries=[],
-        ready=True,
-        heartbeat_interval=10,
-        ack=True,
-        ack_id="c" * 32,
-    )
-    with pytest.raises(ValidationError):
-        parse_server_message(json.dumps(registered))
-    history = result("worker.history", error="history_unreadable")
-    heartbeat = message([history], control="heartbeat", **IDENTITY)
-    assert parse_worker_message(json.dumps(heartbeat)).payload[0].method == "worker.history"
-    register = message([], control="register", connection_epoch=None, worker_id="w", recoveries=[],
-                       inference=None, workspace="b" * 32, repo_workspace_limit=2,
-                       inventory=INVENTORY, inventory_complete=True)
-    assert parse_worker_message(json.dumps(register)).payload == []
-    query["arguments"] = {"session_id": "https://ampcode.com/T-x"}
-    with pytest.raises(ValidationError):
-        parse_server_message(json.dumps(message([query])))
 
 
 def test_inference_fences_and_cancel_control_are_required_and_directional() -> None:

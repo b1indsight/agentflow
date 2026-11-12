@@ -13,6 +13,7 @@ from app.contracts.protocol import (
     Heartbeat,
     InferenceRequest,
     InferenceResult,
+    InitialTaskResult,
     ProtocolError,
     Register,
     Registered,
@@ -37,10 +38,20 @@ from app.inference.bub import ADAPTER_VERSION
 from app.inference.local import serve_local_inference
 from app.worker.execution.lifecycle import WorkerExecution
 from app.worker.state.execution import ExecutionState
+from tests.github import RecordingGitHub
+from tests.test_coordinator import coordinator
 from tests.test_remote_asgi import AsgiRuntime
 from tests.test_remote_e2e import QueueConnection, QueueSocket
-from tests.test_worker_client import RecordingExecutor
 from tests.worker_fakes import inventory, run_worker, worker_runtime
+
+pytestmark = pytest.mark.usefixtures("recording_resources")
+
+
+class CodingFailure:
+    """An external coding failure can finish independently of inference cleanup."""
+
+    async def execute(self, task, secret=None, *, tool_caller=None):
+        return InitialTaskResult(session_id="session-1", last_message="coding failed", exit_code=1)
 
 
 def request():
@@ -74,7 +85,7 @@ async def test_inference_cleanup_keeps_its_slot_without_blocking_coding(store, t
     infer_entered, infer_release, infer_closed = asyncio.Event(), asyncio.Event(), asyncio.Event()
     infer_cleaning, cleanup_release = asyncio.Event(), asyncio.Event()
 
-    class Coding(RecordingExecutor):
+    class Coding(CodingFailure):
         async def execute(self, task, secret=None, *, tool_caller=None):
             coding_entered.set()
             await coding_release.wait()
@@ -100,7 +111,7 @@ async def test_inference_cleanup_keeps_its_slot_without_blocking_coding(store, t
     flow.current_attempt_id = attempt.id
     store.flows.update_flow(flow)
     coding = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
-    server = AsgiRuntime(store, attempt.id)
+    server = AsgiRuntime(store, coordinator(store, RecordingGitHub()))
     execution = WorkerExecution(worker_id="worker-1", executor=Coding(), state=ExecutionState(tmp_path, flow.id))
     worker = worker_runtime(worker_id="worker-1", worker_token="worker-secret",
                             serve_ws_url="ws://test", execution=execution, read_history=Mock())
@@ -117,7 +128,7 @@ async def test_inference_cleanup_keeps_its_slot_without_blocking_coding(store, t
             await asyncio.wait_for(infer_cleaning.wait(), 3)
             # Slow provider cleanup must not block coding results on the same session.
             coding_release.set()
-            await settled(store, coding, JobState.DONE)
+            await settled(store, coding, JobState.FAILED)
             assert store.jobs.get_job(inference.id).state is JobState.RUNNING
             assert store.workers.list_workers()[0].current_inference_job_id == inference.id
             assert not infer_closed.is_set()
@@ -149,8 +160,8 @@ async def test_local_mini_and_repo_free_worker_share_dispatch_and_results(store,
             return InferenceOutput(request_id=task.request_id, request_digest=task.digest,
                                    text="Remote answer", adapter_version="codex/v1")
 
-    server = AsgiRuntime(store, 1)
-    execution = WorkerExecution(worker_id="worker-1", executor=RecordingExecutor(), state=ExecutionState(tmp_path, 1))
+    server = AsgiRuntime(store, coordinator(store, RecordingGitHub()))
+    execution = WorkerExecution(worker_id="worker-1", executor=CodingFailure(), state=ExecutionState(tmp_path, 1))
     worker = worker_runtime(worker_id="worker-1", worker_token="worker-secret",
                             serve_ws_url="ws://test", execution=execution, read_history=Mock())
     worker.inference = Remote()
@@ -209,7 +220,7 @@ async def test_completed_inference_heartbeat_skips_renewal_but_dispatches_payloa
     attempt = store.flows.create_attempt(flow.id)
     flow.current_attempt_id = attempt.id
     store.flows.update_flow(flow)
-    server = AsgiRuntime(store, attempt.id)
+    server = AsgiRuntime(store, coordinator(store, RecordingGitHub()))
     serving = asyncio.create_task(serve_worker(QueueSocket(outgoing, incoming),
         worker_tokens={"worker-1": "worker-secret"}, serve=server.serve_worker_session))
 
@@ -289,7 +300,7 @@ async def test_slow_coding_preparation_keeps_inference_live(store, tmp_path, mon
     flow.current_attempt_id = attempt.id
     store.flows.update_flow(flow)
     coding = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
-    server = AsgiRuntime(store, attempt.id)
+    server = AsgiRuntime(store, coordinator(store, RecordingGitHub()))
     server.settings.worker_heartbeat_interval = .02
     prepare = server.coordinator.prepare_for_assignment
 
@@ -311,7 +322,7 @@ async def test_slow_coding_preparation_keeps_inference_live(store, tmp_path, mon
             return InferenceOutput(request_id=task.request_id, request_digest=task.digest,
                                    text="Answer during preparation", adapter_version="codex/v1")
 
-    execution = WorkerExecution(worker_id="worker-1", executor=RecordingExecutor(), state=ExecutionState(tmp_path, flow.id))
+    execution = WorkerExecution(worker_id="worker-1", executor=CodingFailure(), state=ExecutionState(tmp_path, flow.id))
     worker = worker_runtime(worker_id="worker-1", worker_token="worker-secret",
                             serve_ws_url="ws://test", execution=execution, read_history=Mock())
     worker.inference = Inference()
@@ -335,5 +346,5 @@ async def test_slow_coding_preparation_keeps_inference_live(store, tmp_path, mon
         assert not working.done() and not serving.done()
 
         prepare_release.set()
-        await settled(store, coding, JobState.DONE)
+        await settled(store, coding, JobState.FAILED)
         prepare_call.assert_awaited_once()

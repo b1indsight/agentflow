@@ -1,7 +1,5 @@
 import os
 from collections.abc import Iterator
-from functools import partial
-from unittest.mock import Mock
 from uuid import uuid4
 
 import psycopg
@@ -17,42 +15,6 @@ from tests.github import (
     RecordingRepository,
     RecordingReviewThread,
 )
-
-
-@pytest.fixture(autouse=True)
-def memory_repository_construction() -> Iterator[None]:
-    """Replace constructor calls only for databases wrapping an in-memory simulation.
-
-    PostgreSQL scenarios still construct real repositories. This keeps test doubles at
-    the repository creation boundary without adding injection parameters to services.
-    """
-    from app.controler.workers import callbacks, conversation
-    from app.controler.workflow import coordinator, effects, results, service, tools
-    from app.persistence.deliveries import DeliveryStore
-    from app.persistence.flows import FlowStore
-    from app.persistence.jobs import JobStore
-    from app.persistence.results import ResultStore
-    from app.persistence.reviews import ReviewStore
-    from app.persistence.stops import StopStore
-    from app.persistence.webhooks import WebhookStore
-    from app.persistence.workers import WorkerStore
-    from tests.persistence_fakes import RepositoryViews
-
-    def construct(repository: type, database):
-        if isinstance(database, Mock) and isinstance(database._mock_wraps, RepositoryViews):
-            return database._mock_wraps.repository(repository)
-        return repository(database)
-
-    repositories = (DeliveryStore, FlowStore, JobStore, ResultStore,
-                    ReviewStore, StopStore, WebhookStore, WorkerStore)
-    # Keep these constructor patches independent of each test's monkeypatch fixture;
-    # SQL observers must be restored before the PostgreSQL fixture drops its schema.
-    with pytest.MonkeyPatch.context() as patch:
-        for module in (coordinator, effects, results, service, tools, conversation, callbacks):
-            for repository in repositories:
-                if getattr(module, repository.__name__, None) is repository:
-                    patch.setattr(module, repository.__name__, partial(construct, repository))
-        yield
 
 
 @pytest.fixture
@@ -120,3 +82,67 @@ def store(postgresql_url: str) -> Iterator[Store]:
         yield instance
     finally:
         instance.close()
+
+
+@pytest.fixture
+async def prepared_initial(store: Store, recording_resources: None):
+    """Reuse the INITIAL workflow up to its prepared tool receipt, before terminal acceptance."""
+    from app.contracts.protocol import (
+        FlowToolArguments,
+        FlowToolRequest,
+        InitialTask,
+        InitialTaskResult,
+        call_header,
+    )
+    from app.controler.workflow.service import ControlService
+    from app.domain.models import VcsKind
+    from tests.github import RecordingGitHub
+    from tests.test_coordinator import coordinator
+    from tests.workspace_fixtures import register_worker
+
+    flow = ControlService(database=store.database).on_trigger("owner/repo", 8, 42)
+    assert flow is not None
+    register_worker(store, "worker-a", repo=flow.repo, epoch="epoch")
+    job = store.workers.assign_job("worker-a", "token", "epoch")
+    assert job is not None
+    github = RecordingGitHub()
+    subject = coordinator(store, github)
+    task = await subject.prepare(job)
+    assert isinstance(task, InitialTask)
+    assert store.workers.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
+    subject.mark_started(job, task, "worker-a")
+    request = FlowToolRequest(
+        **call_header(), method="flow.open_pr",
+        arguments=FlowToolArguments(
+            job_id=job.id, flow_id=flow.id, attempt_id=task.attempt_id, assignment_token="token",
+            call_id="initial-open", arguments={"title": "Title", "body": "Body"},
+            vcs_backend=VcsKind.GIT, branch=task.branch, commit_sha="abc123", remote_sha="abc123",
+        ),
+    )
+    tool = await subject.tools.execute(request, worker_id="worker-a", connection_epoch="epoch")
+    assert tool.result is not None
+    result = InitialTaskResult(
+        session_id="initial-session", last_message="done", exit_code=0,
+        vcs_backend=VcsKind.GIT, branch=task.branch, commit_sha="abc123", remote_sha="abc123",
+        pushed=True, open_pr_call_id="initial-open", delivery_receipt=tool.result,
+    )
+    current = store.flows.get_flow(flow.id)
+    assert current is not None
+    return current, subject, github, request, result
+
+
+@pytest.fixture
+async def completed_open_initial(store: Store, prepared_initial):
+    """Continue the same assignment through its persisted terminal and inventory report."""
+    from app.domain.models import JobState
+    from tests.test_coordinator import apply_result
+    from tests.workspace_fixtures import report_settled
+
+    flow, subject, github, request, result = prepared_initial
+    job = store.jobs.get_job(request.arguments.job_id)
+    assert job is not None
+    assert await apply_result(subject, job, result) is JobState.DONE
+    report_settled(store, job.id, epoch="epoch")
+    completed = store.flows.get_flow(flow.id)
+    assert completed is not None
+    return completed, subject, github, request, result

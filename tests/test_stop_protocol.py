@@ -2,7 +2,6 @@ import asyncio
 import os
 import sys
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -29,6 +28,7 @@ from app.contracts.protocol import (
     StopExecution,
     StopFence,
     StopResult,
+    Succeeded,
     accept_stop_id,
     call_header,
     message_header,
@@ -39,12 +39,13 @@ from app.contracts.protocol import (
     stop_receipt_id,
     terminal_digest,
 )
+from app.contracts.receipts import stop_receipt_digest
+from app.contracts.result_models import ResultPending
 from app.controler.workers.transport import serve_worker
-from app.controler.workflow.results import ResultApplication
 from app.controler.workflow.service import ControlService
-from app.controler.workflow.tools import FlowToolService
-from app.domain.models import FlowState, JobKind, JobState, VcsKind, utcnow
-from app.persistence.stops import StopIntent
+from app.domain.models import FlowState, JobKind, JobState, VcsKind
+from app.github import GitHubError, GitHubErrorKind, Repository
+from app.persistence.records import required
 from app.worker.execution.executor import WorkerExecutor
 from app.worker.execution.lifecycle import WorkerExecution, WorkerProtocolError
 from app.worker.execution.vcs import _run
@@ -56,17 +57,17 @@ from tests.test_remote_e2e import QueueConnection, QueueSocket
 from tests.test_vcs import _git
 from tests.test_worker_executor import RecordingAgent
 from tests.test_worker_handler import (
-    RecordingStore,
     ScriptedSocket,
     handler_for,
-    register_message,
+    recovery_registration,
     sent_items,
     terminal_items,
-    worker_message,
 )
+from tests.test_worker_handler import queued_initial as queued_initial  # noqa: PLC0414
 from tests.test_worker_workspaces import managed_seed
 from tests.test_workspace_inventory import merged_business
-from tests.worker_fakes import NoPendingStops, run_worker, server_runtime, worker_runtime
+from tests.wire import worker_message
+from tests.worker_fakes import run_worker, server_runtime, worker_runtime
 
 
 def assignment():
@@ -154,9 +155,6 @@ async def test_stop_kills_owned_process_and_child_then_replays_lost_ack(tmp_path
             await _run(sys.executable, "-c", script, str(ready))
             raise AssertionError("process should be cancelled")
 
-        async def reclaim_workspace(self):
-            pass
-
     owner = WorkerExecution(worker_id="w", executor=Executor(), state=journal)
     owner.receive(work)
     owner.start()
@@ -193,7 +191,7 @@ async def test_stop_kills_owned_process_and_child_then_replays_lost_ack(tmp_path
             execution=WorkerExecution(
                 worker_id="w",
                 state=restarted_state,
-                executor=SimpleNamespace(reclaim_workspace=AsyncMock()),
+                executor=SimpleNamespace(),
             ),
             read_history=restarted_state.read,
         )
@@ -223,9 +221,6 @@ async def test_replacing_client_during_stop_joins_executor_and_preserves_origina
                 await release.wait()
             # Returning during cancellation cleanup is not a successful job result.
             return InitialTaskResult(session_id="session", last_message="cancelled", exit_code=0)
-
-        async def reclaim_workspace(self):
-            raise AssertionError("stop must not clean or call the workspace pool")
 
     state, executor = ExecutionState(tmp_path, 1), Executor()
     owner = WorkerExecution(worker_id="w", executor=executor, state=state)
@@ -304,7 +299,7 @@ async def test_restarted_worker_does_not_infer_stopped_from_absent_task(tmp_path
 
 
 @pytest.mark.parametrize("overflow", [False, True])
-async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path, overflow):
+async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path, overflow, recording_resources):
     # Two cancellations used to keep both pool positions occupied, blocking the third Flow.
     root, _ = managed_seed(tmp_path)
     started = asyncio.Event()
@@ -340,40 +335,15 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path, o
             started.set()
             await asyncio.Event().wait()
 
-    class Coordinator:
-        async def prepare_for_assignment(self, job, worker, token, epoch):
-            task = InitialTask(
-                flow_id=flow.id,
-                attempt_id=attempt.id,
-                repo=flow.repo,
-                issue_number=1,
-                issue_title="test",
-                issue_body="",
-                branch="flow/1",
-            )
-            return AssignmentArguments(
-                job_id=job.id, flow_id=job.flow_id, assignment_token=token, task=task,
-                workspace=job.workspace, generation=job.generation,
-            )
-
-        def mark_started(self, job, task, worker_id):
-            pass
-
-        def worker_connected(self, *args):
-            pass
-
-        def worker_disconnected(self, *args):
-            pass
-
-    gateway_coordinator = Coordinator()
+    gateway_coordinator = coordinator(store, RecordingGitHub())
     handler = server_runtime(
         gateway_coordinator,
         database=store.database,
         peers=Gateway(),
         heartbeat_interval=0.01,
         poll_interval=0.01,
-        tools=Mock(spec=FlowToolService),
-        results=Mock(spec=ResultApplication),
+        tools=gateway_coordinator.tools,
+        results=gateway_coordinator.results,
     )
     pool = RepositoryWorkspaces(root, "worker-1", limit=2 if overflow else 1)
     default = pool.initialize()
@@ -468,25 +438,31 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path, o
 
 
 @pytest.mark.parametrize("delivery", ["combined", "split", "duplicate_B", "duplicate_RB", "B_only", "effects_pending"])
-async def test_stopping_consumes_a_and_requires_real_r_before_b(delivery):
+async def test_stopping_consumes_a_and_requires_real_r_before_b(
+    store, prepared_initial, monkeypatch, delivery,
+):
     # Registration cannot bypass a pending stop. In-flight T/A and Flow calls may arrive
     # before R/B, but only the real stopped receipt can release the stopping phase.
-    now = utcnow()
-    intent = StopIntent(
-        request_id="stop",
-        flow_id=3,
-        job_id=5,
-        worker_id="worker-1",
-        workspace="a" * 32,
-        generation=1,
-        assignment_token="token",
-        binding_at=now,
-        reason="cancel",
-        requested_at=now,
-        state="requested",
-        confirmed_at=None,
-        receipt_digest=None,
-    )
+    flow, subject, github, request, initial_result = prepared_initial
+    job = required(store.jobs.get_job(request.arguments.job_id))
+    terminal = Failed(job_id=job.id, assignment_token=job.assignment_token, error="cancelled")
+    if delivery == "effects_pending":
+        create = Repository.open_pull_request
+
+        async def lost_response(repo, head, base, title, body):
+            await create(repo, head, base, title, body)
+            raise GitHubError(GitHubErrorKind.TRANSIENT, "open_pull_request")
+
+        monkeypatch.setattr(Repository, "open_pull_request", lost_response)
+        terminal = Succeeded(job_id=job.id, assignment_token=job.assignment_token, result=initial_result)
+        assert store.workers.record_assignment_result(
+            job.id, "worker-a", job.assignment_token, "epoch", terminal,
+        ) == "pending"
+        with pytest.raises(ResultPending):
+            await subject.results.apply(job.id)
+        assert github.opened == [flow.initial_branch]
+    ControlService(database=store.database).cancel(flow)
+    intent, = store.stops.pending_for_worker("worker-a")
     receipt = ExecutionStopped(**intent.fence().model_dump(), execution_nonce="actual-executor")
     result = StopResult(
         **result_header(stop_call_id(intent.fence()), stop_receipt_id(receipt)),
@@ -498,34 +474,16 @@ async def test_stopping_consumes_a_and_requires_real_r_before_b(delivery):
         method="server.accept_stop",
         arguments=AcceptStopArguments(**intent.fence().model_dump(), receipt_id=result.message_id),
     )
-    terminal = Failed(job_id=5, assignment_token="token", error="cancelled")
     terminal_result, terminal_accept = terminal_items(terminal)
-    confirms = []
-
-    class Stops(NoPendingStops):
-        confirmed = False
-
-        def pending_for_worker(self, worker_id):
-            return [] if self.confirmed else [intent]
-
-        def receipt_request(self, worker_id, request_id):
-            assert (worker_id, request_id) == (intent.worker_id, intent.request_id)
-            return intent.model_copy(update={"state": "confirmed"}) if self.confirmed else intent
-
-        def confirm(self, worker_id, evidence, connection_epoch):
-            confirms.append((worker_id, evidence, connection_epoch))
-            assert evidence == receipt and store.job.result_applied_at is not None
-            self.confirmed = delivery != "effects_pending"
-            return self.confirmed
-
-    class StoppingStore(RecordingStore):
-        @property
-        def stops(self):
-            return stops
+    registration = recovery_registration(store, job, RecoveryDescriptor(
+        job_id=job.id, assignment_token=job.assignment_token,
+        state="succeeded" if delivery == "effects_pending" else "failed",
+        result_digest=terminal_digest(terminal),
+    ))
 
     class StoppingSocket(ScriptedSocket):
         def __init__(self):
-            super().__init__()
+            super().__init__(worker_id="worker-a", registration=registration)
             self.command = asyncio.Event()
 
         async def send_text(self, raw):
@@ -536,14 +494,7 @@ async def test_stopping_consumes_a_and_requires_real_r_before_b(delivery):
         async def receive_text(self):
             self._step += 1
             if self._step == 1:
-                return register_message(
-                    recovery=RecoveryDescriptor(
-                        job_id=5,
-                        assignment_token="token",
-                        state="failed",
-                        result_digest=terminal_digest(terminal),
-                    ),
-                ).model_dump_json()
+                return registration.model_dump_json()
             await self.command.wait()
             message = next(
                 message
@@ -554,50 +505,48 @@ async def test_stopping_consumes_a_and_requires_real_r_before_b(delivery):
             assert epoch is not None
             if self._step == 2:
                 if delivery == "B_only":
-                    return worker_message(epoch, accept).model_dump_json()
+                    return worker_message(accept, epoch=epoch).model_dump_json()
                 tool = FlowToolRequest(
                     **call_header(),
                     method="flow.open_pr",
                     arguments=FlowToolArguments(
-                        job_id=5,
-                        flow_id=3,
-                        attempt_id=11,
-                        assignment_token="token",
+                        job_id=job.id,
+                        flow_id=flow.id,
+                        attempt_id=request.arguments.attempt_id,
+                        assignment_token=job.assignment_token,
                         call_id="call",
                         arguments={"title": "no side effects"},
                         vcs_backend=VcsKind.GIT,
-                        branch="flow/1",
+                        branch=flow.initial_branch,
                         commit_sha="head",
                         remote_sha="head",
                     ),
                 )
                 items = [tool, terminal_result, terminal_accept, result]
+                if delivery == "effects_pending":
+                    # The inbox already exists, but its actual GitHub POST lost its
+                    # response. Stop evidence cannot acknowledge unresolved effects.
+                    items = [tool, result]
                 if delivery != "split":
                     items.append(accept)
                 return Heartbeat(
                     **message_header(epoch),
                     control="heartbeat",
-                    job_id=5,
-                    assignment_token="token",
+                    job_id=job.id,
+                    assignment_token=job.assignment_token,
                     payload=items,
                 ).model_dump_json()
             if self._step == 3 and delivery == "split":
-                return worker_message(epoch, accept).model_dump_json()
+                return worker_message(accept, epoch=epoch).model_dump_json()
             if self._step == 3 and delivery in {"duplicate_B", "duplicate_RB"}:
                 return worker_message(
-                    epoch, *([result, accept] if delivery == "duplicate_RB" else [accept]),
+                    *([result, accept] if delivery == "duplicate_RB" else [accept]), epoch=epoch,
                 ).model_dump_json()
             raise ConnectionError("script complete")
 
-    stops = Stops()
-    store, socket = StoppingStore(), StoppingSocket()
-    store.job.state, store.job.assigned_worker_id, store.job.assignment_token = (
-        JobState.RUNNING,
-        "worker-1",
-        "token",
-    )
+    socket = StoppingSocket()
     handler = handler_for(store)
-    await serve_worker(socket, serve=handler.serve_worker_session, worker_tokens={"worker-1": "worker-secret"})
+    await serve_worker(socket, serve=handler.serve_worker_session, worker_tokens={"worker-a": "worker-secret"})
     messages = list(map(parse_server_message, socket.sent))
     stop_index = next(
         i
@@ -606,59 +555,45 @@ async def test_stopping_consumes_a_and_requires_real_r_before_b(delivery):
     )
     assert not any(isinstance(message, Registered) for message in messages[:stop_index])
     assert not any(isinstance(item, AcceptResultResponse) for item in sent_items(socket.sent))
-    handler.tools.execute.assert_not_called()
+    assert store.deliveries.get_tool_call("call") is None
     accepted = [item for item in sent_items(socket.sent) if isinstance(item, StopAccepted)]
+    persisted = required(store.stops.receipt_request("worker-a", intent.request_id))
     if delivery in {"combined", "split", "duplicate_B", "duplicate_RB"}:
-        assert len(confirms) == (4 if delivery == "duplicate_RB" else 2)
+        assert persisted.state == "confirmed" and persisted.confirmed_at is not None
+        assert persisted.receipt_digest == stop_receipt_digest(receipt)
+        assert required(store.jobs.get_job(job.id)).result_applied_at is not None
         assert len(accepted) == (2 if delivery.startswith("duplicate") else 1)
         assert accepted[-1] == accepted[0]
         assert accepted[0].reply_to == accept.message_id and accepted[0].result == intent.fence()
-        assert all(epoch == store.connection_epoch for _, _, epoch in confirms)
     else:
         assert accepted == [] and socket.closed == 1008
-        assert len(confirms) == (1 if delivery == "effects_pending" else 0)
+        assert persisted.state == ("stopped" if delivery == "effects_pending" else "pending")
+        assert persisted.confirmed_at is None
+        assert required(store.jobs.get_job(job.id)).result_applied_at is None
+        if delivery == "effects_pending":
+            assert persisted.receipt_digest == stop_receipt_digest(receipt)
+            assert any(effect.dispatched_at is not None and effect.receipt is None
+                       for effect in store.results.list_effects(job.id))
 
 
 @pytest.mark.parametrize("merged", [False, True])
 async def test_stop_without_ack_reuses_workspace_and_reconnect_ack_preserves_new_writer(
-    store, tmp_path, monkeypatch, recording_resources, merged
+    store, tmp_path, recording_resources, merged
 ):
     # Lost stop ACKs retain only the old journal, never occupancy. Replaying that ACK
     # after reconnect must not clean or otherwise modify the new generation's writer.
     root, _ = managed_seed(tmp_path)
     pool = RepositoryWorkspaces(root, "worker-1", limit=1)
-    flows, attempts, jobs = [], {}, []
+    flows, jobs = [], []
     for issue in (1, 2):
         flow = store.flows.create_flow("owner/repo", issue, 1)
         attempt = store.flows.create_attempt(flow.id)
         flow.current_attempt_id = attempt.id
         store.flows.update_flow(flow)
         flows.append(flow)
-        attempts[flow.id] = attempt
         jobs.append(store.jobs.enqueue_job(flow.id, JobKind.INITIAL))
     started, successor_dispatched = asyncio.Event(), asyncio.Event()
     subject = coordinator(store, RecordingGitHub())
-
-    async def prepare(job, worker_id, token, epoch):
-        return AssignmentArguments(
-            job_id=job.id,
-            flow_id=job.flow_id,
-            assignment_token=token,
-            workspace=job.workspace,
-            generation=job.generation,
-            task=InitialTask(
-                flow_id=job.flow_id,
-                attempt_id=attempts[job.flow_id].id,
-                repo="owner/repo",
-                issue_number=job.flow_id,
-                issue_title="test",
-                issue_body="",
-                branch="flow/test",
-            ),
-        )
-
-    monkeypatch.setattr(subject, "prepare_for_assignment", prepare)
-
     executed = []
 
     class Executor(WorkerExecutor):
@@ -673,9 +608,6 @@ async def test_stop_without_ack_reuses_workspace_and_reconnect_ack_preserves_new
             executed.append(task.flow_id)
             started.set()
             await asyncio.Event().wait()
-
-        async def reclaim_workspace(self):
-            raise AssertionError("stop must not clean or call the workspace pool")
 
     handler = server_runtime(
         subject,
@@ -803,39 +735,12 @@ async def test_stop_without_ack_reuses_workspace_and_reconnect_ack_preserves_new
         await asyncio.gather(*(execution.shutdown() for execution in client.executions.values()))
 
 
-async def test_stop_wakes_assignment_waiting_for_missing_a(monkeypatch):
+async def test_stop_wakes_assignment_waiting_for_missing_a(store, queued_initial, monkeypatch, recording_resources):
+    flow, job = queued_initial
     waiting, command = asyncio.Event(), asyncio.Event()
-    requested = False
-
-    class Stops(NoPendingStops):
-        def pending_for_worker(self, worker_id):
-            if not requested:
-                return []
-            now = utcnow()
-            return [StopIntent(
-                request_id="stop",
-                flow_id=3,
-                job_id=5,
-                worker_id=worker_id,
-                workspace="a" * 32,
-                generation=1,
-                assignment_token=store.job.assignment_token,
-                binding_at=now,
-                reason="cancel",
-                requested_at=now,
-                state="requested",
-                confirmed_at=None,
-                receipt_digest=None,
-            )]
-
-    class StoppingStore(RecordingStore):
-        @property
-        def stops(self):
-            return Stops()
 
     class MissingAcceptSocket(ScriptedSocket):
         async def receive_text(self):
-            nonlocal requested
             if self._step < 2:
                 return await super().receive_text()
             self._step += 1
@@ -848,10 +753,9 @@ async def test_stop_wakes_assignment_waiting_for_missing_a(monkeypatch):
                         error="terminal without acceptance",
                     )
                 )
-                return worker_message(epoch, result).model_dump_json()
+                return worker_message(result, epoch=epoch).model_dump_json()
             await waiting.wait()
-            requested = True
-            handler.gateway.wake_all()
+            ControlService(database=store.database, jobs_available=handler.gateway.wake_all).cancel(flow)
             await asyncio.wait_for(command.wait(), 1)
             raise ConnectionError("stop delivered while A was absent")
 
@@ -860,16 +764,19 @@ async def test_stop_wakes_assignment_waiting_for_missing_a(monkeypatch):
             if any(isinstance(item, StopExecution) for item in parse_server_message(raw).payload):
                 command.set()
 
-    store, socket = StoppingStore(), MissingAcceptSocket()
+    socket = MissingAcceptSocket()
     handler = handler_for(store)
     receive = Session.next_event
 
     async def observed(connection, *, until=None):
-        if store.job.result_applied_at is not None:
+        if required(store.jobs.get_job(job.id)).result_applied_at is not None:
             waiting.set()
         return await receive(connection, until=until)
 
     monkeypatch.setattr(Session, "next_event", observed)
     await serve_worker(socket, serve=handler.serve_worker_session, worker_tokens={"worker-1": "worker-secret"})
     assert command.is_set()
+    intent, = store.stops.pending_for_worker("worker-1")
+    assert intent.job_id == job.id and intent.state == "pending"
+    assert required(store.jobs.get_job(job.id)).result_applied_at is not None
     assert not any(isinstance(item, AcceptResultResponse) for item in sent_items(socket.sent))
