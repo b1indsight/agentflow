@@ -663,24 +663,37 @@ svg {
   white-space: nowrap;
   flex-shrink: 0;
 }
-.tabs {
-  display: flex;
-  gap: 27px;
+.detail-head .tabs-list {
   margin-top: 20px;
 }
-.tabs button {
+.tabs-list {
+  display: flex;
+  gap: 27px;
+  max-width: calc(100% + 8px);
+  margin-inline: -4px;
+  padding-inline: 4px;
+  overflow-x: auto;
+}
+.tabs-trigger {
   position: relative;
+  flex-shrink: 0;
+  white-space: nowrap;
   background: none;
   border: 0;
   padding: 0 0 14px;
   font-size: var(--text-control);
   color: #8d9790;
 }
-.tabs button[aria-selected="true"] {
+.tabs-trigger:focus-visible,
+[data-slot="tabs-content"]:focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: -2px;
+}
+.tabs-trigger[data-state="active"] {
   color: var(--green);
   font-weight: 600;
 }
-.tabs button[aria-selected="true"]::after {
+.tabs-trigger[data-state="active"]::after {
   position: absolute;
   bottom: 0;
   left: 0;
@@ -1852,8 +1865,10 @@ pre code {
   .links {
     gap: 10px;
   }
-  .tabs {
+  .detail-head .tabs-list {
     margin-top: 18px;
+  }
+  .tabs-list {
     gap: 26px;
   }
   .content {
