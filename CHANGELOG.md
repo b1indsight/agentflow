@@ -8,6 +8,9 @@
 
 ## Unreleased
 
+- INITIAL 完成校验失败先反馈给原 Code Agent，在同一会话、工作区及原始 Git/jj 基线上最多追加两轮纠正。
+  保持 MCP 和 schema 有效，每轮独立复验；命令失败或保留 session 的执行超时可继续诊断。
+  会话、任务归属或能力失效及取消时停止，已确认交付不可重复调用或更换 head。
 - 已合并 PR 的 Flow 立即提交 ARCHIVED/SUCCEEDED 和唯一归档 activity，不等待原 Worker 在线、
   执行绑定释放、工作区清理或 GitHub 通知；原 Worker 通过既有停止协议确认执行退出。精确停止
   回执、远端结果和已发操作结清后，Control 释放绑定并推进 generation，立即允许位置复用，

@@ -22,17 +22,22 @@ from app.contracts.protocol import (
     RevisionTask,
     RevisionTaskResult,
 )
-from app.domain.delivery_models import DeliveryReceipt
 from app.domain.models import (
     CodingExecutionContext,
+    CodingExecutionResult,
     GitHubCapability,
     InitialCodingOutput,
     RevisionCodingOutput,
     SessionUnavailable,
+    VcsExecutionContext,
 )
 from app.domain.ports import CodingAgent
 from app.worker.execution.gh import require_gh
-from app.worker.execution.prompts import build_initial_prompt, build_revision_prompt
+from app.worker.execution.prompts import (
+    build_initial_correction_prompt,
+    build_initial_prompt,
+    build_revision_prompt,
+)
 from app.worker.execution.vcs import (
     VcsVerificationError,
     agent_guidance,
@@ -46,6 +51,7 @@ from app.worker.state.execution import ExecutionState
 from app.worker.transport.mcp import FlowToolCaller, WorkerMCP
 
 VCS_VERIFICATION_EXIT_CODE = 65
+INITIAL_CORRECTION_LIMIT = 2
 
 
 class WorkerExecutor:
@@ -126,28 +132,73 @@ class WorkerExecutor:
             agent_guidance(task.branch, remote=task.remote),
         )
         schema_path = _write_output_schema(InitialCodingOutput)
-        tool_call_id: str | None = None
-        tool_result: DeliveryReceipt | None = None
-        tool_vcs_outcome = None
+        run: CodingExecutionResult | None = None
         try:
             async with WorkerMCP(tool_caller, vcs_context) as mcp:
-                run = await self.code_agent.start(
-                    prompt,
-                    workspace,
-                    output_schema=schema_path,
-                    context=CodingExecutionContext(
-                        github=capability,
-                        mcp_url=mcp.url,
-                        mcp_token=mcp.token,
-                    ),
+                context = CodingExecutionContext(
+                    github=capability, mcp_url=mcp.url, mcp_token=mcp.token,
                 )
-                tool_call_id = mcp.last_call_id
-                tool_result = mcp.last_result
-                tool_vcs_outcome = mcp.last_vcs_outcome
+                run = await self.code_agent.start(
+                    prompt, workspace, output_schema=schema_path, context=context,
+                )
+                session_id = run.session_id
+                corrections = 0
+                while True:
+                    if run.session_id != session_id:
+                        return _vcs_failure(
+                            session_id, run.last_message, "session", "resume returned a different session",
+                        )
+                    result = await self._initial_result(run, vcs_context, mcp)
+                    # Verification awaits subprocesses; recheck ownership before another Agent call.
+                    if self.state.assignment != assignment:
+                        return _vcs_failure(
+                            session_id, run.last_message, "binding", "initial assignment changed",
+                        )
+                    if self.workspaces.lookup(task.repo, task.flow_id) != binding:
+                        return _vcs_failure(
+                            session_id, run.last_message, "binding", "workspace allocation changed",
+                        )
+                    if (result.exit_code == 0 or not session_id
+                            or corrections == INITIAL_CORRECTION_LIMIT):
+                        if result.exit_code != 0 and corrections:
+                            result.last_message += (
+                                f"\n\nCorrection attempts: {corrections}/{INITIAL_CORRECTION_LIMIT}"
+                            )
+                        return result
+                    try:
+                        require_gh(capability, task.repo)
+                    except VcsVerificationError as error:
+                        return _vcs_failure(session_id, run.last_message, error.stage, str(error))
+                    correction = build_initial_correction_prompt(
+                        vcs_context, result.failure_stage or "execution",
+                        result.failure_detail or "completion checks failed", mcp.last_result,
+                    )
+                    corrections += 1
+                    logger.info("feeding INITIAL failure back to CodingAgent: stage={} correction={}",
+                                result.failure_stage, corrections)
+                    try:
+                        run = await self.code_agent.resume(
+                            session_id, correction, cwd=workspace,
+                            output_schema=schema_path, context=context,
+                        )
+                    except SessionUnavailable:
+                        return _vcs_failure(
+                            session_id, run.last_message, "session", "original coding session is unavailable",
+                        )
         except VcsVerificationError as error:
-            return _vcs_failure(None, "", error.stage, str(error))
+            return _vcs_failure(
+                run.session_id if run else None, run.last_message if run else "", error.stage, str(error),
+            )
         finally:
             schema_path.unlink(missing_ok=True)
+
+    @staticmethod
+    async def _initial_result(
+        run: CodingExecutionResult, vcs_context: VcsExecutionContext, mcp: WorkerMCP,
+    ) -> InitialTaskResult:
+        """Check each turn against the original baseline and the confirmed delivery."""
+        tool_call_id, tool_result = mcp.last_call_id, mcp.last_result
+        tool_vcs_outcome = mcp.last_vcs_outcome
         if run.exit_code != 0:
             return InitialTaskResult(
                 session_id=run.session_id,
@@ -157,6 +208,8 @@ class WorkerExecutor:
                 failure_detail=(run.failure_detail
                                 or "CodingAgent exited unsuccessfully; execution may have occurred"),
             )
+        if not run.session_id:
+            return _vcs_failure(None, run.last_message, "session", "missing coding session")
         try:
             output = InitialCodingOutput.model_validate_json(run.last_message)
         except ValidationError:
@@ -173,7 +226,7 @@ class WorkerExecutor:
                 "delivery",
                 "CodingAgent did not complete flow.open_pr",
             )
-        if tool_vcs_outcome is not None and tool_vcs_outcome != outcome:
+        if tool_vcs_outcome != outcome or tool_result.head_sha != outcome.commit_sha:
             return _vcs_failure(
                 run.session_id,
                 run.last_message,

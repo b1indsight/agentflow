@@ -247,3 +247,88 @@ worker。
 - 真实 smoke 使用 `codex-cli 0.152.1`、一次性 Git repo 和本地 bare remote，Codex 自主生成 commit
   `2972371a533dc069754edf31e33886229b7a4e77` 并推送 `flow/codex-smoke`，本地与远端 SHA 一致；
 - Flow 生命周期 worker binding、GitHub credential/egress 和跨协议 VCS outcome 仍按计划留给 Feature 3。
+
+## 10. 2026-11-12：INITIAL 校验失败反馈给原 CodeAgent（待批准）
+
+**提议：** 首次编码完成后的可修正校验错误先反馈给原 CodeAgent，让它在同一任务内继续修正；完整校验通过后才交付。保留原始基线、独立验证和审查门禁，不让 worker 代替 Agent 修改仓库。本节仅为计划，尚未修改产品代码、测试或正在运行的 Flow。
+
+### 动机与范围
+
+用户要求：“这些问题你应该回报给code agent而不是直接显示失败”。触发案例是 Flow 3 的 INITIAL job 17：Agent 把运行前已有的未推送实现提交 amend 为同父提交，随后 Worker 的祖先校验直接返回 exit 65；Agent 还报告审查超时，未完成 push 和 `flow.open_pr`。[原执行记录](https://ampcode.com/threads/T-01a1ce3b-bfb0-7576-8137-3da6df2b8df8)与[本次反馈](https://ampcode.com/threads/T-01a1ce56-6fbd-7507-bf93-85c83f847b1a)是需求依据。
+
+当前 [`WorkerExecutor._initial`](../../app/worker/execution/executor.py) 在 Agent 返回后关闭 MCP，再解析输出、验证 VCS 和交付回执，失败即结束任务。两个 [`CodingAgent`](../../app/domain/ports.py) adapter 已提供带 cwd、schema 和当前能力的 `resume`，可以复用，不需要新执行后端。
+
+本批只修改上述 INITIAL 完成路径，覆盖结构化输出、分支/提交/工作区/推送状态及缺少交付回执。REVISION 的持久 fallback 证据、controller 远端结果校验、凭据续期、审查工具内部重试和通用任务重试不在本批范围内。不解析自然语言 summary 来判断审查是否通过，也不自动绕过超时的审查。
+
+### 拟采用行为与边界
+
+1. 初次 `start` 结束并成功返回后，仍在同一个 `WorkerMCP` 生命周期内执行全部完成检查。校验未通过时保持 job 为执行中，不先发终态、创建新 attempt 或要求用户重试。
+2. 将可修正的错误阶段、安全详情、固定目标分支和原始 Git/jj 基线反馈到这次成功运行的准确 session，调用 `CodingAgent.resume`。继续使用同一 assignment、workspace、schema、MCP 和当前 capability，最多追加两轮纠正；不新增配置项。
+3. 原始 `VcsExecutionContext` 只捕获一次。每轮都重新解析严格输出，独立验证 backend、祖先关系、工作区、原 remote 和远端 SHA，以及交付回执。不能把 amend 后的 HEAD 或基线的父提交改成新的验收基线。
+4. 反馈要求 Agent 保留运行前基线为祖先、继续完成仓库审查及 push/交付，并返回原 schema。worker 不 staging、commit、reset、push，不替 Agent 处理阅读状态功能或审查发现。
+5. 尚无成功回执时，Agent 修正后按原合同调用 `flow.open_pr`。已有成功回执时，保留已确认的 head 和回执，不重新执行交付调用；仅允许修正输出或把本地状态恢复到已验证的交付。远端已经偏离成功回执、需要改变已确认交付意图时停止，不盲目覆盖 controller 的 delivery。
+6. 初次运行或纠正运行非零退出、超时、取消、没有 session、resume 拒绝或返回不同 session、assignment 失效、凭据过期、不可修正的工具执行错误均停止纠正。没有“执行过之后再开新会话”的 fallback；取消继续传播到现有进程组清理。
+7. 纠正预算耗尽仍返回真实失败，保留最后阶段、详情及纠正次数。只有所有完成条件都通过才返回成功；不通过吞错或减少验证消除失败。
+
+### 修改位置与接口
+
+- `app/worker/execution/executor.py`：保持 `WorkerExecutor._initial(...) -> InitialTaskResult` 接口不变，将当前完成检查移入 MCP 上下文，加入固定两轮的同会话纠正循环。schema 文件在整个循环退出后才删除，不引入通用 retry 执行器、新表或新协议字段。
+- `app/worker/execution/prompts.py`：新增 `build_initial_correction_prompt(context: VcsExecutionContext, stage: str, detail: str, delivery: DeliveryReceipt | None) -> str`。提示包含此次校验的安全诊断、原始基线、目标分支和 remote 名称、严格结果合同及是否已有交付回执；不回显原始 ValidationError、凭据、环境或任意 CLI stderr。
+- `app/worker/execution/vcs.py`：为内部异常采用 `VcsVerificationError(stage: str, message: str, *, correctable: bool = False)`，仅对明确的完成合同不满足标记可纠正。进程超时、缺失可执行文件和命令失败保持不可纠正；Git 祖先查询的 exit 1 与命令错误区分，避免把所有 `commit` 阶段错误都当作可修正的历史问题。既有祖先和 remote 验证不放宽。
+- `app/worker/transport/mcp.py`：成功回执存在后拒绝再次执行交付调用，保留原回执与 VCS outcome。未成功的调用仍沿用现有 RPC 关联及错误返回，不新增自动重放机制。
+- `tests/test_worker_executor.py`、`tests/test_vcs.py` 与现有 MCP 测试：扩展公共执行结果和本地 remote 的回归，不按私有 helper 增加重复测试。
+
+### 取舍、成本与恢复
+
+只补 prompt 无法在错误发生后给 Agent 修正机会；放松祖先检查会接受错误历史；重新 `start` 会丢失原会话并可能重复副作用。同会话有界纠正保留原合同，代价是一次任务可能增加两轮模型调用及相应耗时。两轮是本方案的固定预算提议，不保证每个环境问题都能修复。
+
+纠正属于仍存活的同一 execution task；现有心跳、取消和租约机制继续管理它。进程丢失后不根据缺失的内存循环自动恢复编码；现有 journal 的不确定执行拒绝重跑规则不变。无需数据库或 wire 格式迁移；上线需另行发布 worker，本计划不热补丁生产、不手动续跑 Flow 3、不改其 journal 或已有提交。
+
+### 实施顺序与验证
+
+1. 先用现有本地 bare remote 和受控 Agent 在公共 `execute` 接口复现：运行前历史为 P→B，初次运行 amend B 为 B′。旧实现直接失败；新实现把阶段和 B 反馈回同一 session，Agent 在 B 后追加 C，完成审查合同、push 与工具调用后返回成功。验证 remote、本地最终内容和 B 的祖先关系。
+2. 冻结基线的负对照：纠正结果分别基于 B′ 和 P，仍必须失败；避免重新捕获 HEAD 或错误使用 B 的父提交。覆盖 Git 和已有 jj 祖先验证路径。
+3. 覆盖非法结构化结果、未推送、dirty tree、缺少回执经纠正后成功，以及持续失败恰好耗尽预算。正常一次完成不增加模型调用；成功回执不能重复执行控制面交付。
+4. 覆盖运行超时、无 session、session 变更或拒绝、过期能力、assignment 丢失和纠正中取消，不启动新会话、不报告假成功、不泄露测试凭据；结果重放不再启动 Agent。
+5. 实施后运行 worker executor、VCS、MCP、adapter、journal 和 revision 相关回归，再运行全仓 pytest、Ruff、Mypy 与 diff 检查。不涉及 UI 外观，无需新增截图。这里列出的是待执行验证，不是已通过结果。
+
+必要性对照在临时验证进程中分别移除纠正环、重新捕获基线、提前关闭 MCP、取消纠正上限或允许重复成功交付，同一组输入应分别拒绝应成功的修正或放过明确的错误结果。对照在实现后、代码审查前执行，不保留一次性脚本为产品测试。真实模型提示词对照需另行批准，不将受控 Agent 测试表述为真实模型成功率。
+
+**待确认：** 是否批准本节 INITIAL 范围、固定两轮纠正和成功交付回执不可重放的边界。当前仅补充计划，尚未实现、提交、推送或部署。
+
+## 11. 2026-11-12：同会话纠正的实现与边界修订
+
+### 需求修订与取舍
+
+用户质疑第 10 节通过错误类型判断停止的依据，随后要求“实现一下看看”。本次实施撤回 `correctable` 白名单，以及“命令失败、超时、非零退出本身足以停止”的提议。错误名称只能描述此次失败，不能证明 Agent 无法修复。保留 INITIAL 范围、原会话和原始验收基线，不扩展 REVISION 的持久恢复协议。
+
+继续执行需要仍持有原 assignment 和 workspace allocation、原会话 ID，以及未过期的仓库能力。执行调用必须已经返回；adapter 现有的进程清理和 runtime 的租约取消机制继续生效。会话缺失、被拒绝或变更，任务/工作区归属丢失，能力失效或取消时不再续跑，也不另开会话回放已发生的编码。不能根据缺失的 session 推测一个可用会话；例如 Codex 首轮超时未返回 session 时仍无法续跑。
+
+最多追加两轮是本版资源预算，耗尽只说明本次纠正额度用完，不说明问题不可修复。已有成功交付时，仍可以反馈诊断，但必须保持已确认 head；禁止再次交付或通过覆盖远端消除不一致。这替代第 10 节按远端错误分类直接结束的做法。
+
+### 实际实现
+
+- `WorkerExecutor._initial` 在同一个 MCP/schema 生命周期中完成 start、校验和有界 resume。原始 `VcsExecutionContext` 只捕获一次，纠正不创建新 job、attempt 或会话。校验返回后重新检查任务及工作区归属，续跑前重新检查 capability。
+- 完成检查仍覆盖严格输出、backend、分支、祖先、工作区、原 remote 和远端 SHA；新增要求最终 head 同时匹配已确认的工具 outcome 和回执。缺少交付、校验命令失败，以及保留 session 的执行失败均反馈给原 Agent。worker 本身不修改或推送编码仓库。
+- 纠正 prompt 传递阶段、安全诊断、Git/jj 原始锚点、目标和交付状态，要求满足原有测试和审查门禁。已有成功回执时禁止再次 push/交付；未知副作用需先核实再决定是否重试。未复制原始 schema 校验输入或 VCS stderr。
+- `WorkerMCP` 在锁内保存首个成功回执，之后拒绝重复交付；锁覆盖验证和控制面调用，避免两个并发请求同时通过“尚无回执”检查。不新增通用 RPC 自动重放。
+- Git 祖先查询区分 exit 1 的非祖先结果与其他命令失败，避免把缺失对象导致的 exit 128 错报成已证实的历史分叉。两类失败都可反馈，不据此分类是否可修复。
+
+### 回归与必要性验证
+
+先运行新增公共 `execute` 和 HTTP MCP 用例确认旧实现直接结束，随后使用受控 Agent、真实本地 Git/bare remote 和 MCP 检查修正结果。覆盖 amend 后恢复原基线的后继提交、严格输出、dirty tree、未推送、缺少交付、校验命令失败/超时和带 session 的执行超时。负例保留 amended sibling 或基线父提交，均不能通过祖先检查；成功回执后又提交/推送的结果也不能通过。补充会话缺失/变更/拒绝、能力过期、校验期间失去 assignment 和取消的边界验证。
+
+临时对照只在独立 Python 进程中替换运行时行为，未改写共享工作树。对照脚本的审阅副本及日志位于 `.amp/in/artifacts/initial-correction-ablation-*`，脚本源保留为 `initial-correction-ablation-source.py.txt`；复现时复制为临时 `.py`，使用 `.venv/bin/python <script> <case>` 执行：
+
+- `no-feedback`：预算设为 0，同一 amend 修复用例恢复为 exit 65，不能完成应成功的修正。
+- `weaken-base`：把校验锚点替换为原基线父提交，错误历史越过祖先检查、失败阶段从 commit 变为 delivery，负对照检测到合同被放宽；该实验没有绕过剩余交付检查。
+- `close-mcp`：提前关闭 MCP 后，修正会话交付出现连接错误，说明工具生命周期必须覆盖纠正。
+- `increase-budget`：预算暂改为 4，持续失败确实调用 4 轮，固定预算用例失败。这个结果只证明预算约束有效，不证明 2 轮最优。
+- `repeat-delivery`：移除成功回执保护后，重复 HTTP 调用再次到达控制面，回归用例失败。
+- `concurrency`：受控调度下，两次并发 dispatch 在有锁/无锁时分别执行一次/两次交付，保留交付锁。
+
+相关证据为 `initial-correction-before.log`、`initial-correction-ancestry-before.log`、`initial-correction-after.log` 和各 ablation 日志。全仓验证使用独立临时 PostgreSQL，命令为 `FLOWTOOL_TEST_DATABASE_URL=<isolated local PostgreSQL> .venv/bin/python -m pytest -q`，另运行 `.venv/bin/ruff check app tests`、`.venv/bin/mypy app tests` 与 `git diff --check`；最终结果见本线程[编码校验反馈](https://ampcode.com/artifacts/d89bcac2-580f-438e-b8f3-c0e84659bed0)。受控 Agent 验证不代表真实模型修复成功率，本次没有运行真实模型提示词对照。
+
+### 交付状态
+
+本次为本地实现及验证，尚未提交、推送或部署；没有热更新 worker、重跑 Flow 3 或修改其 journal。现有未归属本任务的工作树改动保持原样。发布 worker 与真实模型对照仍需单独执行，不作为本次已验证结果。
