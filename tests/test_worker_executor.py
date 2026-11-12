@@ -1,7 +1,9 @@
+import asyncio
 import shutil
+import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
@@ -18,6 +20,7 @@ from app.domain.delivery_models import PreparedDelivery
 from app.domain.models import (
     CodingExecutionResult,
     InitialCodingOutput,
+    SessionUnavailable,
     VcsKind,
     VcsOutcome,
 )
@@ -36,6 +39,9 @@ class RecordingAgent:
 
     async def start(self, task: str, cwd: Path, *, output_schema=None, context=None) -> CodingExecutionResult:
         self.started.append((task, cwd))
+        return await self.finish(context)
+
+    async def finish(self, context) -> CodingExecutionResult:
         if context is not None and context.mcp_url is not None:
             async with httpx.AsyncClient(trust_env=False) as client:
                 response = await client.post(context.mcp_url, headers={
@@ -191,6 +197,7 @@ async def test_initial_preserves_execution_failure_details(tmp_path, initial_wor
     # INITIAL previously discarded the adapter's safe diagnostic before terminal persistence.
     agent = RecordingAgent()
     agent.start = AsyncMock(return_value=CodingExecutionResult("session-1", "", 124, detail))
+    agent.resume = AsyncMock(return_value=CodingExecutionResult("session-1", "", 124, detail))
     journal, pool = initial_workspace
     task = journal.assignment.task
     result = await WorkerExecutor(
@@ -201,6 +208,167 @@ async def test_initial_preserves_execution_failure_details(tmp_path, initial_wor
     assert result.failure_detail == (
         detail or "CodingAgent exited unsuccessfully; execution may have occurred"
     )
+
+
+@pytest.mark.parametrize(("problem", "repair_base"), [
+    ("amend", "captured"), ("amend", "amended"), ("amend", "parent"),
+    ("schema-after-delivery", "captured"), ("missing-delivery", "captured"),
+    ("dirty", "captured"), ("unpushed", "captured"),
+    ("verification-timeout", "captured"), ("verification-command", "captured"),
+    ("execution-timeout", "captured"), ("changed-after-delivery", "captured"),
+])
+async def test_initial_corrects_completion_in_original_session(
+    tmp_path, initial_workspace, monkeypatch, problem, repair_base,
+):
+    # The incident amended the captured B into its sibling B′. Only a descendant of B is valid.
+    from app.worker.execution import executor as executor_module
+    from app.worker.execution.vcs import VcsVerificationError
+
+    output = InitialCodingOutput(summary="implemented", vcs_backend_used=VcsKind.GIT).model_dump_json()
+    journal, pool = initial_workspace
+
+    class Agent(RecordingAgent):
+        async def start(self, task, cwd, *, output_schema=None, context=None):
+            self.started.append((task, cwd))
+            self.context, self.schema = context, output_schema
+            self.base = (await asyncio.to_thread(
+                subprocess.check_output, ["git", "rev-parse", "HEAD"], cwd=cwd, text=True,
+            )).strip()
+            _git("checkout", "-b", "flow/issue-8", cwd=cwd)
+            (cwd / "README.md").write_text("implemented\n")
+            _git("add", "README.md", cwd=cwd)
+            _git("commit", *(["--amend"] if problem == "amend" else []), "-m", "implement", cwd=cwd)
+            if problem not in {"amend", "unpushed", "execution-timeout"}:
+                _git("push", "origin", "flow/issue-8", cwd=cwd)
+            if problem in {"schema-after-delivery", "changed-after-delivery"}:
+                await self.finish(context)
+                return CodingExecutionResult("session-1", "invalid output push-token", 0)
+            if problem == "dirty":
+                (cwd / "leftover").write_text("unfinished")
+            if problem == "execution-timeout":
+                return CodingExecutionResult("session-1", "", 124, "agent timed out", "timeout")
+            return CodingExecutionResult("session-1", output, 0)
+
+        async def resume(self, session_id, prompt, *, cwd, output_schema=None, context=None):
+            self.resumed.append((session_id, prompt))
+            assert session_id == "session-1" and cwd == self.started[0][1]
+            assert context is self.context and output_schema == self.schema and output_schema.is_file()
+            assert self.base in prompt and "flow/issue-8" in prompt and "push-token" not in prompt
+            if problem == "amend":
+                if repair_base != "amended" and len(self.resumed) == 1:
+                    base = self.base if repair_base == "captured" else f"{self.base}^"
+                    _git("reset", "--soft", base, cwd=cwd)
+                _git("commit", "--allow-empty", "-m", "repair", cwd=cwd)
+            if problem == "dirty":
+                (cwd / "leftover").unlink()
+            if problem == "changed-after-delivery":
+                # An incorrect Agent must not replace an already confirmed delivery with a new head.
+                _git("commit", "--allow-empty", "-m", "changed after receipt", cwd=cwd)
+            _git("push", "origin", "flow/issue-8", cwd=cwd)
+            if problem in {"schema-after-delivery", "changed-after-delivery"} or repair_base != "captured":
+                return CodingExecutionResult(session_id, output, 0)
+            return await self.finish(context)
+
+    deliveries = []
+
+    class Caller:
+        async def call_tool(self, name, arguments, *, call_id=None, vcs_outcome):
+            deliveries.append(vcs_outcome)
+            return PreparedDelivery(head_sha=vcs_outcome.commit_sha, delivery_version=1)
+
+    verify = executor_module.verify_vcs_outcome
+    checks = 0
+
+    async def initially_unavailable(context, backend):
+        nonlocal checks
+        checks += 1
+        if checks == 1:
+            detail = ("git command timed out after 30s" if problem == "verification-timeout"
+                      else "git command failed with exit 128")
+            raise VcsVerificationError("push", detail)
+        return await verify(context, backend)
+
+    if problem in {"verification-timeout", "verification-command"}:
+        monkeypatch.setattr(executor_module, "verify_vcs_outcome", initially_unavailable)
+    agent = Agent()
+    result = await WorkerExecutor(tmp_path, agent, worker_id="worker-1", state=journal,
+                                  workspaces=pool).execute(
+        journal.assignment.task, assignment_secret(), tool_caller=Caller(),
+    )
+    assert len(agent.started) == 1
+    assert not agent.schema.exists()
+    if repair_base == "captured" and problem != "changed-after-delivery":
+        assert result.exit_code == 0 and result.pushed and result.open_pr_call_id
+        assert len(agent.resumed) == 1 and len(deliveries) == 1
+        assert result.commit_sha == result.delivery_receipt.head_sha == deliveries[0].remote_sha
+        repo = agent.started[0][1]
+        assert (repo / "README.md").read_text() == "implemented\n"
+        _git("merge-base", "--is-ancestor", agent.base, result.commit_sha, cwd=repo)
+    else:
+        assert result.exit_code == 65
+        assert result.failure_stage == ("delivery" if problem == "changed-after-delivery" else "commit")
+        assert len(agent.resumed) == 2
+        assert len(deliveries) == (problem == "changed-after-delivery")
+        assert "2/2" in result.last_message
+
+
+@pytest.mark.parametrize("boundary", ["no-session", "session-changed", "session-rejected",
+                                      "assignment-lost", "lost-during-verification",
+                                      "capability-expired", "cancelled"])
+async def test_initial_correction_does_not_cross_execution_authority(
+    tmp_path, initial_workspace, monkeypatch, boundary,
+):
+    journal, pool = initial_workspace
+    secret = assignment_secret()
+    clock = Mock(wraps=datetime)
+    monkeypatch.setattr("app.worker.execution.gh.datetime", clock)
+    if boundary == "lost-during-verification":
+        async def lost_assignment(context, backend):
+            from app.worker.execution.vcs import VcsVerificationError
+            journal.assignment = None
+            raise VcsVerificationError("push", "verification failed after assignment loss")
+
+        monkeypatch.setattr("app.worker.execution.executor.verify_vcs_outcome", lost_assignment)
+
+    class Agent(BackendlessAgent):
+        async def start(self, task, cwd, **kwargs):
+            self.started.append((task, cwd))
+            result = await super().start(task, cwd, **kwargs)
+            if boundary == "no-session":
+                result.session_id = None
+            elif boundary == "lost-during-verification":
+                result.last_message = InitialCodingOutput(
+                    summary="implemented", vcs_backend_used=VcsKind.GIT,
+                ).model_dump_json()
+            elif boundary == "assignment-lost":
+                journal.assignment = None
+            elif boundary == "capability-expired":
+                # The adapter call may consume the remaining lifetime of the frozen capability.
+                clock.now.return_value = secret.push.expires_at + timedelta(seconds=1)
+            return result
+
+        async def resume(self, session_id, prompt, **kwargs):
+            self.resumed.append((session_id, prompt))
+            if boundary == "session-rejected":
+                raise SessionUnavailable("private adapter diagnostic")
+            if boundary == "cancelled":
+                raise asyncio.CancelledError
+            return CodingExecutionResult("another-session", "invalid output", 0)
+
+    agent = Agent()
+    execution = WorkerExecutor(tmp_path, agent, worker_id="worker-1", state=journal,
+                               workspaces=pool).execute(
+        journal.assignment.task, secret, tool_caller=RecordingToolCaller(),
+    )
+    if boundary == "cancelled":
+        with pytest.raises(asyncio.CancelledError):
+            await execution
+    else:
+        result = await execution
+        assert result.exit_code != 0
+        assert "push-token" not in result.model_dump_json()
+    assert len(agent.started) == 1
+    assert len(agent.resumed) == (boundary in {"session-changed", "session-rejected", "cancelled"})
 
 
 @pytest.mark.parametrize("problem", ["missing-gh", "expired", "mismatch", "clone-failure", "capacity"])

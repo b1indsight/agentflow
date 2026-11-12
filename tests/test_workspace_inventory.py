@@ -181,8 +181,8 @@ async def test_two_executors_share_pool_but_agents_overlap_on_assigned_paths(tmp
             await finish.wait()
             return CodingExecutionResult(session_id="s", last_message="controlled stop", exit_code=1)
 
-        async def resume(self, *args, **kwargs):
-            raise AssertionError("not a revision")
+        async def resume(self, session_id, *args, **kwargs):
+            return CodingExecutionResult(session_id=session_id, last_message="controlled stop", exit_code=1)
 
     tasks = []
     for flow, target in enumerate(targets, 1):

@@ -407,8 +407,10 @@ async def _require_git_descendant(repo_path: Path, base: str, commit: str) -> No
     code, _, _ = await _run(
         *_git_args("merge-base", "--is-ancestor", base, commit), cwd=repo_path, stage="commit"
     )
-    if code != 0:
+    if code == 1:
         raise VcsVerificationError("commit", "target commit does not descend from the captured base")
+    if code != 0:
+        raise VcsVerificationError("commit", f"git ancestry query failed with exit {code}")
 
 
 async def _require_jj_descendant(repo_path: Path, base: str, commit: str) -> None:

@@ -9,6 +9,8 @@ TODO(verify) V8：注入的 VCS 指引（尤其 jj）对 codex 的实际效果�
 from __future__ import annotations
 
 from app.contracts.protocol import ReviewFeedback, RevisionTask
+from app.domain.delivery_models import DeliveryReceipt
+from app.domain.models import VcsExecutionContext
 
 # 硬约束：codex 只碰本地 VCS，不碰 GitHub API（平面边界 §3）
 _HARD_CONSTRAINTS = (
@@ -46,6 +48,38 @@ def build_initial_prompt(
         _INITIAL_OUTPUT_INSTRUCTION,
     ]
     return "\n".join(parts)
+
+
+def build_initial_correction_prompt(
+    context: VcsExecutionContext, stage: str, detail: str, delivery: DeliveryReceipt | None,
+) -> str:
+    """Give the original session a completion failure without rebasing its acceptance criteria."""
+    delivery_instruction = (
+        f"flow.open_pr already confirmed delivery at {delivery.head_sha}. Keep that head and receipt. "
+        "Do not push or call flow.open_pr again. Correct the output or restore local state to that "
+        "delivery. If the remote has changed, report the blocker without overwriting it."
+        if delivery is not None else
+        "No successful flow.open_pr receipt was received. Inspect earlier tool results and verify "
+        "any uncertain side effects before retrying them. After fixing, testing and pushing, "
+        "complete flow.open_pr through the existing environment tool."
+    )
+    return "\n\n".join([
+        f"Completion verification failed [{stage}]: {detail}",
+        ("Continue this task in the same session and repository. Diagnose and fix this failure, "
+        "then satisfy the original task, repo tests and review gates before finishing."),
+        (f"Frozen target: branch {context.branch}; remote {context.remote}. "
+         f"Captured Git base: {context.git_base_sha or '(unavailable)'}. "
+         f"Captured jj working copy: {context.jj_base_sha or '(unavailable)'}. "
+         f"Captured jj ancestor: {context.jj_ancestor_sha or '(unavailable)'}. "
+         "The worker will recheck against these original anchors. Keep the captured Git base "
+         "(Git) or jj ancestor (jj) as an ancestor of the delivered commit. Do not substitute "
+         "its parent or an amended sibling for that anchor. "
+         "Preserve existing work and the original remote. Do not force-push or bypass a gate."),
+        delivery_instruction,
+        ("Do not use GitHub API/CLI to create or change a PR or post comments. "
+        "If blocked, describe the remaining blocker in summary; it will still be independently verified."),
+        _INITIAL_OUTPUT_INSTRUCTION,
+    ])
 
 
 def _format_item(item: ReviewFeedback) -> str:

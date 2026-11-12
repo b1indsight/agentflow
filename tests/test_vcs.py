@@ -6,6 +6,7 @@ import shutil
 import signal
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import cast
 
@@ -208,9 +209,14 @@ async def test_pushed_outcome_discovers_the_single_backend(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_git_outcome_rejects_unrelated_history(tmp_path: Path) -> None:
+@pytest.mark.parametrize(("missing_base", "detail"), [
+    (False, "does not descend"), (True, "ancestry query failed with exit 128"),
+])
+async def test_git_outcome_rejects_unrelated_history(tmp_path: Path, missing_base, detail) -> None:
     repo, _ = _git_fixture(tmp_path)
     context = await prepare_vcs_context(repo, "flow/one")
+    if missing_base:
+        context = replace(context, git_base_sha="f" * 40)
     _git("checkout", "--orphan", "flow/one", cwd=repo)
     _git("rm", "-rf", ".", cwd=repo)
     (repo / "README.md").write_text("unrelated\n")
@@ -218,7 +224,7 @@ async def test_git_outcome_rejects_unrelated_history(tmp_path: Path) -> None:
     _git("commit", "-m", "unrelated", cwd=repo)
     _git("push", "-u", "origin", "flow/one", cwd=repo)
 
-    with pytest.raises(VcsVerificationError, match="descend") as error:
+    with pytest.raises(VcsVerificationError, match=detail) as error:
         await verify_vcs_outcome(context, VcsKind.GIT)
 
     assert error.value.stage == "commit"
