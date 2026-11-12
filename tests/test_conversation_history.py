@@ -196,6 +196,12 @@ def test_amp_history_maps_public_blocks_and_invalidates_edited_prefix(monkeypatc
     second = native("user", "M-second", [
         {"type": "tool_result", "toolUseID": "TU-1", "run": {"result": {"output": "done"}}},
     ])
+    # Amp inserts CI/subscription events as user messages; only native metadata identifies them.
+    notice = native("user", "M-notice", [{"type": "text", "text": "GitHub update for this thread."}])
+    notice["meta"] = {"fromAutomation": True, "automationType": "event"}
+    human = native("user", "M-human", notice["content"])
+    human["meta"] = {"fromAutomation": False}
+    second["meta"] = {"fromAutomation": True}
     reader = AmpHistory()
     monkeypatch.setenv("AMP_API_KEY", "private-key-value")
     monkeypatch.setattr("app.worker.state.amp_history.CACHE_SECONDS", 0)
@@ -212,9 +218,14 @@ def test_amp_history_maps_public_blocks_and_invalidates_edited_prefix(monkeypatc
     ]
     assert "private-key-value" not in page.items[0].content.text
     # A native user tool_result is deliberately exposed as the existing tool role.
-    messages.append(second)
+    messages.extend([second, notice, human])
     next_page = reader.query(HistoryQuery(session_id=AMP_SESSION, cursor=page.next_cursor))
-    assert [(item.role, item.call_id) for item in next_page.items] == [("tool", "TU-1")]
+    assert [(item.role, item.kind, item.call_id) for item in next_page.items] == [
+        ("tool", "tool_result", "TU-1"),
+        ("system", "message", None),
+        ("user", "message", None),
+    ]
+    assert next_page.items[1].content.text == next_page.items[2].content.text == notice["content"][0]["text"]
 
     edited = native("assistant", "M-first", [{"type": "text", "text": "changed"}])
     messages[0] = edited
