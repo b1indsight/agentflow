@@ -1,12 +1,5 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
-from copy import deepcopy
-from datetime import datetime
-from typing import Any, cast
-from unittest.mock import Mock
-from uuid import uuid4
-
 import pytest
 from psycopg.types.json import Jsonb
 from pydantic import SecretStr
@@ -14,257 +7,50 @@ from pydantic import SecretStr
 from app.contracts.protocol import (
     ExecutionResult,
     Failed,
-    FlowToolArguments,
-    FlowToolRequest,
     InitialTask,
     InitialTaskResult,
     Succeeded,
     terminal_digest,
 )
-from app.contracts.receipts import ResultInbox
 from app.controler.config import ServerSettings
 from app.controler.workflow.coordinator import JobCoordinator
 from app.controler.workflow.effects import ResultEffects
 from app.controler.workflow.results import ResultApplication
 from app.controler.workflow.tools import FlowToolService
-from app.domain.delivery_models import DeliveryReceipt
-from app.domain.models import (
-    Attempt,
-    DeliveryState,
-    Flow,
-    FlowDelivery,
-    FlowExecution,
-    FlowState,
-    FlowToolCall,
-    Job,
-    JobKind,
-    JobState,
-    VcsKind,
-)
+from app.domain.models import DeliveryState, FlowState, Job, JobKind, JobState
 from app.github import GitHubApp
 from app.persistence.store import Store
 from app.plugins import get_plugin_manager
 from tests.github import RecordingGitHub
-from tests.persistence_fakes import RepositoryViews
-from tests.result_memory import MemoryResults, MemoryStops
-from tests.review_memory import MemoryReviews
 
 pytestmark = pytest.mark.usefixtures("recording_resources")
 
 
-class MemoryStore(RepositoryViews):
-    def __init__(self) -> None:
-        self.job_records: dict[int, Job] = {}
-        self.results = MemoryResults()
-        self.stops = MemoryStops()
-        self.reviews = MemoryReviews()
-        self.reviews.job_records = self.job_records
-        self.sources: dict[tuple[int, str], Job] = {}
-        self.flow = Flow(
-            id=1,
-            repo="owner/repo",
-            issue_number=8,
-            installation_id=42,
-            state=FlowState.RUNNING,
-        )
-        # Active flows do not archive. Finalizing scenarios script this boundary explicitly;
-        # settlement, release and archive activity are tested against PostgreSQL.
-        self.try_archive = Mock(name="try_archive", return_value=False)
-        self.attempt: Attempt | None = None
-        self.execution = FlowExecution(
-            flow_id=1,
-            worker_id="worker-1",
-            workspace="1" * 32,
-            generation=1,
-            repo_identity="worker-1:owner/repo",
-        )
-        self.delivery: FlowDelivery | None = None
-        self.tool_calls: dict[str, Any] = {}
-        self.enqueued: list[tuple[JobKind, dict | None]] = []
-
-    @contextmanager
-    def transaction(self):
-        # Scripted responses and observed calls are not transactional persistence state.
-        snapshot = deepcopy(self.__dict__, {id(self.try_archive): self.try_archive})
-        try:
-            yield self
-        except Exception:
-            # Services retain these injected objects; rollback must restore them in place.
-            for name in ("results", "reviews", "stops"):
-                current = getattr(self, name)
-                current.__dict__.clear()
-                current.__dict__.update(snapshot[name].__dict__)
-                snapshot[name] = current
-            self.__dict__.clear()
-            self.__dict__.update(snapshot)
-            raise
-
-    def now(self) -> datetime:
-        return self.results.clock
-
-    def serialize_issue(self, repo: str, issue_number: int) -> None:
-        pass
-
-    def has_pending_result(self, flow_id: int) -> bool:
-        return any(
-            job.flow_id == flow_id
-            and job.result_received_at is not None
-            and job.result_applied_at is None
-            for job in self.job_records.values()
-        )
-
-    def cancel_jobs(self, flow_id: int, *, reason: str = "Flow cancelled") -> None:
-        for job in self.job_records.values():
-            if job.flow_id == flow_id and job.state is JobState.QUEUED:
-                job.state = JobState.FAILED
-
-    def lock_workflow(self, flow_id: int) -> Flow | None:
-        return self.flow.model_copy(deep=True) if flow_id == self.flow.id else None
-
-    def lock_job(self, job_id: int) -> Job | None:
-        return self.get_job(job_id)
-
-
-    def get_job(self, job_id: int) -> Job | None:
-        job = self.job_records.get(job_id)
-        return job.model_copy(deep=True) if job else None
-
-    def accept(self, job: Job, result: ExecutionResult) -> None:
-        current = self.job_records.setdefault(job.id, job.model_copy(deep=True))
-        if current.assignment_token is None:
-            current.assignment_token = "test-token"
-        message = Succeeded(job_id=job.id, assignment_token=current.assignment_token, result=result)
-        digest = terminal_digest(message)
-        if current.result_digest is not None:
-            assert current.result_digest == digest
-            return
-        current.result_payload = ResultInbox(source="worker", terminal=message).model_dump(
-            mode="json"
-        )
-        current.result_digest = digest
-        current.result_received_at = self.now()
-
-    def complete_persisted_result(self, job_id: int, state: JobState) -> bool:
-        job = self.job_records[job_id]
-        if job.result_applied_at is not None:
-            return False
-        job.state, job.result_applied_at = state, self.now()
-        return True
-
-    def record_control_result(self, job_id: int, terminal: Failed, reason: str) -> None:
-        job = self.job_records[job_id]
-        assert terminal.job_id == job_id
-        assert terminal.assignment_token == (job.assignment_token or "control")
-        job.result_payload = ResultInbox(source="control", terminal=terminal).model_dump(
-            mode="json"
-        )
-        job.result_digest = terminal_digest(terminal)
-        job.result_received_at, job.last_error = self.now(), reason
-
-    def set_job_error(self, job_id: int, reason: str) -> None:
-        self.job_records[job_id].last_error = reason
-
-    def get_flow(self, flow_id: int) -> Flow | None:
-        return self.flow if flow_id == self.flow.id else None
-
-    def get_current_attempt(self, flow: Flow) -> Attempt | None:
-        return self.attempt if flow.current_attempt_id else None
-
-    def create_attempt(self, flow_id: int) -> Attempt:
-        self.attempt = Attempt(id=1, flow_id=flow_id)
-        return self.attempt
-
-    def get_attempt(self, attempt_id: int) -> Attempt | None:
-        return self.attempt if self.attempt and self.attempt.id == attempt_id else None
-
-    def update_attempt(self, attempt: Attempt) -> None:
-        self.attempt = attempt
-
-    def update_flow(self, flow: Flow) -> None:
-        assert flow.state is not FlowState.ARCHIVED, "only persistence finalization may archive"
-        self.flow = flow
-
-    def get_flow_execution(self, flow_id: int) -> FlowExecution | None:
-        return self.execution if flow_id == self.flow.id else None
-
-    def release_flow_execution(self, flow_id: int) -> bool:
-        if self.stops.has_pending(flow_id):
-            return False
-        self.execution.released_at = self.now()
-        return True
-
-    def get_or_create_delivery(self, flow_id: int, branch: str) -> FlowDelivery:
-        self.delivery = self.delivery or FlowDelivery(flow_id=flow_id, branch=branch)
-        return self.delivery
-
-    def get_delivery(self, flow_id: int) -> FlowDelivery | None:
-        return self.delivery if flow_id == self.flow.id else None
-
-    def update_delivery(self, delivery: FlowDelivery) -> None:
-        self.delivery = delivery
-
-    def assignment_active(self, *args: object) -> bool:
-        return True
-
-    def reserve_tool_call(self, **values: Any):
-        previous = self.tool_calls.get(values["call_id"])
-        if previous:
-            return previous, False
-        call = FlowToolCall(**values)
-        self.tool_calls[call.call_id] = call
-        return call, True
-
-    def complete_tool_call(self, call_id: str, response: DeliveryReceipt) -> None:
-        self.tool_calls[call_id].response = response
-
-    def get_tool_call(self, call_id: str):
-        return self.tool_calls.get(call_id)
-
-    def list_attempts(self, flow_id: int) -> list[Attempt]:
-        return [self.attempt] if self.attempt else []
-
-
-    def enqueue_job(
-        self,
-        flow_id: int,
-        kind: JobKind,
-        payload: dict | None = None,
-        *,
-        source_job_id: int | None = None,
-        source_key: str | None = None,
-    ) -> Job:
-        if source_job_id is not None and source_key is not None:
-            existing = self.sources.get((source_job_id, source_key))
-            if existing is not None:
-                return existing
-        self.enqueued.append((kind, payload))
-        job = Job(id=len(self.enqueued) + 10, flow_id=flow_id, kind=kind, state=JobState.QUEUED)
-        self.job_records[job.id] = job
-        if source_job_id is not None and source_key is not None:
-            self.sources[source_job_id, source_key] = job
-        return job
-
 class CoordinatorFixture(JobCoordinator):
-    memory: Store | MemoryStore
     tools: FlowToolService
 
 
-async def apply_result(subject: CoordinatorFixture, job: Job, result: ExecutionResult) -> JobState:
-    """Model the accepted-inbox boundary before invoking the production result application."""
-    store = cast(MemoryStore, subject.memory)
-    store.accept(job, result)
+def accept_result(subject: JobCoordinator, job: Job, result: ExecutionResult) -> str:
+    """Accept through the same fenced inbox used by the live worker connection."""
+    assert job.assigned_worker_id is not None and job.assignment_token is not None
+    worker = next(w for w in subject.workers.list_workers() if w.worker_id == job.assigned_worker_id)
+    assert worker.connection_epoch is not None
+    terminal = Succeeded(job_id=job.id, assignment_token=job.assignment_token, result=result)
+    accepted = subject.workers.record_assignment_result(
+        job.id, job.assigned_worker_id, job.assignment_token, worker.connection_epoch, terminal,
+    )
+    assert accepted in {"pending", "applied"}
+    return accepted
+
+
+async def apply_result(subject: JobCoordinator, job: Job, result: ExecutionResult) -> JobState:
+    accept_result(subject, job, result)
     return await subject.results.apply(job.id)
 
 
-async def prepare(subject: CoordinatorFixture, job: Job):
-    store = cast(MemoryStore, subject.memory)
-    store.job_records.setdefault(job.id, job.model_copy(deep=True))
-    return await subject.prepare(job)
-
-
-def coordinator(store: Store | MemoryStore, github: GitHubApp) -> CoordinatorFixture:
-    settings = ServerSettings.model_construct(
-        database_url="postgresql://localhost/test",
+def coordinator(store: Store, github: GitHubApp) -> CoordinatorFixture:
+    settings = ServerSettings(
+        database_url=store.database.database_url,
         worker_tokens={"worker-1": SecretStr("worker-secret")},
         allowlist=["alice"],
         reviewers=["carol"],
@@ -275,162 +61,45 @@ def coordinator(store: Store | MemoryStore, github: GitHubApp) -> CoordinatorFix
         prepare_max_failures=5,
         prepare_retry_window_seconds=900,
     )
-    repositories = cast(Store, store)
     plugins = get_plugin_manager()
-    effects = ResultEffects(
-        github,
-        database=repositories.database,
-        plugins=plugins,
-    )
-    results = ResultApplication(
-        github,
-        settings,
-        plugins,
-        effects=effects,
-        database=repositories.database,
-    )
-    subject = CoordinatorFixture(
-        github,
-        settings,
-        plugins,
-        database=cast(Store, store).database,
-        results=results,
-    )
-    subject.tools = FlowToolService(
-        github,
-        database=repositories.database,
-    )
-    subject.memory = store
+    effects = ResultEffects(github, database=store.database, plugins=plugins)
+    results = ResultApplication(github, settings, plugins, effects=effects, database=store.database)
+    subject = CoordinatorFixture(github, settings, plugins, database=store.database, results=results)
+    subject.tools = FlowToolService(github, database=store.database)
     return subject
 
 
-@pytest.mark.asyncio
-async def test_initial_job_crosses_worker_boundary_and_opens_pr() -> None:
-    store = MemoryStore()
-    store.try_archive.side_effect = [False]  # Delivery enters review, not finalization.
-    github = RecordingGitHub()
-    subject = coordinator(store, github)
-    job = Job(
-        id=5,
-        flow_id=1,
-        kind=JobKind.INITIAL,
-        state=JobState.RUNNING,
-        assigned_worker_id="worker-1",
-        assignment_token="token-1",
-    )
-
-    task = await prepare(subject, job)
+async def test_initial_job_crosses_worker_boundary_and_opens_pr(store, prepared_initial):
+    flow, subject, github, request, result = prepared_initial
+    job = store.jobs.get_job(request.arguments.job_id)
+    task = await subject.prepare(job)
     assert isinstance(task, InitialTask)
-    assert task.flow_id == store.flow.id
-    assert task.issue_title == "Real issue"
-    assert task.base_branch == "trunk"
-    assert task.branch == "flow/1"
-    subject.mark_started(job, task, "worker-1")
-    tool = await subject.tools.execute(
-        FlowToolRequest(
-            message_id=uuid4().hex,
-            type="tool_call",
-            reply_to=None,
-            method="flow.open_pr",
-            arguments=FlowToolArguments(
-                job_id=job.id,
-                flow_id=store.flow.id,
-                attempt_id=task.attempt_id,
-                assignment_token="token-1",
-                call_id="call-1",
-                arguments={"title": "Implement", "body": "done"},
-                vcs_backend=VcsKind.GIT,
-                branch="flow/1",
-                commit_sha="abc123",
-                remote_sha="abc123",
-            ),
-        ),
-        worker_id="worker-1",
-        connection_epoch="epoch-1",
-    )
-    assert tool.result is not None
+    assert task.flow_id == flow.id
+    assert task.issue_title == "Real issue" and task.issue_body == "Real body"
+    assert task.base_branch == "trunk" and task.branch == flow.initial_branch
+    # A tool receipt reserves delivery intent; only an accepted terminal may open a PR.
     assert github.opened == []
-    result = InitialTaskResult(
-        session_id="session-1",
-        last_message="done",
-        exit_code=0,
-        vcs_backend=VcsKind.GIT,
-        branch="flow/1",
-        commit_sha="abc123",
-        remote_sha="abc123",
-        pushed=True,
-        open_pr_call_id="call-1",
-        delivery_receipt=tool.result,
-    )
-    state = await apply_result(subject, job, result)
-    replayed_state = await apply_result(subject, job, result)
-
-    assert state is JobState.DONE
-    assert replayed_state is JobState.DONE
-    assert store.flow.state is FlowState.REVIEW
-    store.try_archive.assert_called_once_with(store.flow.id)
-    assert store.attempt is not None
-    assert store.attempt.codex_session_id == "session-1"
-    assert store.delivery is not None
-    assert store.delivery.state is DeliveryState.OPEN
-    assert store.delivery.pr_number == 17
-    assert github.opened == ["flow/1"]
+    assert await apply_result(subject, job, result) is JobState.DONE
+    assert await apply_result(subject, job, result) is JobState.DONE
+    assert store.flows.get_flow(flow.id).state is FlowState.REVIEW
+    assert store.flows.get_current_attempt(store.flows.get_flow(flow.id)).codex_session_id == result.session_id
+    delivery = store.deliveries.get_delivery(flow.id)
+    assert delivery.state is DeliveryState.OPEN and delivery.pr_number == 17
+    assert github.opened == [task.branch]
     assert github.review_requests == [["carol"]]
     assert github.labels == [["flow:in-review"]]
+    assert [j.kind for j in store.jobs.list_jobs(flow.id)] == [JobKind.INITIAL]
+    assert store.workers.get_flow_execution(flow.id).released_at is None
 
 
-@pytest.mark.asyncio
-async def test_initial_failure_after_open_pr_request_has_no_github_pr_side_effect() -> None:
-    # Codex may call the tool and then fail or time out; GitHub delivery must wait until the
-    # coordinator has accepted the terminal result and final VCS facts.
-    store = MemoryStore()
-    github = RecordingGitHub()
-    subject = coordinator(store, github)
-    job = Job(
-        id=5,
-        flow_id=1,
-        kind=JobKind.INITIAL,
-        state=JobState.RUNNING,
-        assigned_worker_id="worker-1",
-        assignment_token="token-1",
-    )
-    task = await prepare(subject, job)
-    assert isinstance(task, InitialTask)
-    subject.mark_started(job, task, "worker-1")
-    tool = await subject.tools.execute(
-        FlowToolRequest(
-            message_id=uuid4().hex,
-            type="tool_call",
-            reply_to=None,
-            method="flow.open_pr",
-            arguments=FlowToolArguments(
-                job_id=job.id,
-                flow_id=store.flow.id,
-                attempt_id=task.attempt_id,
-                assignment_token="token-1",
-                call_id="call-1",
-                arguments={"title": "Implement", "body": "done"},
-                vcs_backend=VcsKind.GIT,
-                branch="flow/1",
-                commit_sha="abc123",
-                remote_sha="abc123",
-            ),
-        ),
-        worker_id="worker-1",
-        connection_epoch="epoch-1",
-    )
-    assert tool.result is not None
-
-    state = await apply_result(
-        subject,
-        job,
-        InitialTaskResult(session_id="session-1", last_message="failed", exit_code=1),
-    )
-
-    assert state is JobState.FAILED
+async def test_initial_failure_after_open_pr_request_has_no_github_pr_side_effect(store, prepared_initial):
+    # An agent can call the tool and then fail; its prepared receipt must not open a PR.
+    flow, subject, github, request, _ = prepared_initial
+    job = store.jobs.get_job(request.arguments.job_id)
+    result = InitialTaskResult(session_id="session-1", last_message="failed", exit_code=1)
+    assert await apply_result(subject, job, result) is JobState.FAILED
     assert github.opened == []
-    assert store.delivery is not None
-    assert store.delivery.state is DeliveryState.OPENING
+    assert store.deliveries.get_delivery(flow.id).state is DeliveryState.OPENING
 
 
 @pytest.mark.parametrize("stage,detail,reason", [
@@ -443,36 +112,22 @@ async def test_initial_failure_after_open_pr_request_has_no_github_pr_side_effec
     (None, None, "（exit=65）"),
 ])
 @pytest.mark.parametrize("pr_number", [None, 17])
-async def test_initial_failure_keeps_diagnostics_local(stage, detail, reason, pr_number):
-    # Internal failures must stay local, whether the flow has only an Issue or an existing PR.
-    store = MemoryStore()
-    github = RecordingGitHub()
-    subject = coordinator(store, github)
-    job = Job(id=5, flow_id=1, kind=JobKind.INITIAL, state=JobState.RUNNING)
-    task = await prepare(subject, job)
-    assert isinstance(task, InitialTask)
-    subject.mark_started(job, task, "worker-1")
+async def test_initial_failure_keeps_diagnostics_local(store, prepared_initial, stage, detail, reason, pr_number):
+    flow, subject, github, request, _ = prepared_initial
+    job = store.jobs.get_job(request.arguments.job_id)
     if pr_number is not None:
-        store.delivery = FlowDelivery(flow_id=1, branch="flow/1", state=DeliveryState.OPEN,
-                                      pr_number=pr_number)
-
-    state = await apply_result(
-        subject,
-        job,
-        InitialTaskResult(
-            session_id=None if stage == "workspace" else "session-1",
-            last_message="ignored raw message",
-            exit_code=65,
-            failure_stage=stage,
-            failure_detail=detail,
-        ),
+        delivery = store.deliveries.get_delivery(flow.id)
+        delivery.pr_number, delivery.state = pr_number, DeliveryState.OPEN
+        store.deliveries.update_delivery(delivery)
+    result = InitialTaskResult(
+        session_id=None if stage == "workspace" else "session-1",
+        last_message="ignored raw message", exit_code=65, failure_stage=stage, failure_detail=detail,
     )
-
-    assert state is JobState.FAILED
+    assert await apply_result(subject, job, result) is JobState.FAILED
     assert github.comments == github.opened == []
     assert store.results.list_effects(job.id) == []
-    assert store.flow.state is FlowState.BLOCKED
-    assert store.get_job(job.id).last_error == f"编码失败{reason}。未开 PR。"
+    assert store.flows.get_flow(flow.id).state is FlowState.BLOCKED
+    assert store.jobs.get_job(job.id).last_error == f"编码失败{reason}。未开 PR。"
 
 
 @pytest.mark.parametrize("version", [1, 14, 15])
@@ -494,9 +149,7 @@ async def test_recovery_applies_unassigned_control_failure_without_rewriting_inb
                 **terminal.model_dump(mode="json"),
             }
             with tx.connection() as connection:
-                connection.execute(
-                    "UPDATE jobs SET result_payload=%s WHERE id=%s", (Jsonb(payload), job.id)
-                )
+                connection.execute("UPDATE jobs SET result_payload=%s WHERE id=%s", (Jsonb(payload), job.id))
     accepted = store.jobs.get_job(job.id)
     github = RecordingGitHub()
     subject = coordinator(store, github)

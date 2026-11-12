@@ -129,6 +129,14 @@ def test_attempt_and_job_lifecycle_round_trip(store: Store) -> None:
     assert finished is not None
     assert finished.state is JobState.DONE
 
+    current = store.flows.get_flow(flow.id)
+    assert current is not None and current.state is FlowState.RUNNING
+    store.init_db()
+    assert store.flows.get_flow(flow.id) == current
+    assert store.flows.get_current_attempt(flow) == attempt
+    assert store.jobs.get_job(claimed.id) == finished
+    assert store.deliveries.get_delivery(flow.id) == delivery
+
 
 def test_flow_binding_delivery_and_tool_ledger_round_trip(store: Store) -> None:
     register_worker(store, "worker-a", repo="owner/repo", epoch="epoch-a")

@@ -5,7 +5,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.communication.gateway import Gateway
 from app.contracts.protocol import ExecutionStopped, InitialTaskResult, Succeeded
 from app.contracts.result_models import ResultPending
 from app.controler.events.router import EventRouter
@@ -33,7 +32,7 @@ from tests.test_revision_recovery import (
     revision_resources as revision_resources,  # noqa: PLC0414 - fixture re-export
 )
 from tests.test_workflow_transactions import accepted_coding
-from tests.worker_fakes import server_callbacks, server_runtime
+from tests.worker_fixtures import server_callbacks
 from tests.workspace_fixtures import register_worker, report_settled
 
 
@@ -124,7 +123,7 @@ async def test_closed_binding_waits_for_started_executor_stop_before_archive(
     assert store.deliveries.get_delivery(flow.id).state is DeliveryState.CLOSED
 
 
-async def test_closed_missing_journal_preserves_late_result_and_reopen(store, pending_revision, monkeypatch):
+async def test_closed_missing_journal_preserves_late_result_and_reopen(store, pending_revision, monkeypatch, server_runtime):
     flow, job, task, github, subject = pending_revision
     assert store.workers.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
     with store.transaction() as tx:
@@ -132,12 +131,7 @@ async def test_closed_missing_journal_preserves_late_result_and_reopen(store, pe
         pause_delivery(tx.deliveries.get_delivery(flow.id), deliveries=tx.deliveries, jobs=tx.jobs)
     store.workers.worker_disconnected("worker-a", "disconnected during closed PR", "epoch")
     register_worker(store, "worker-a", repo=flow.repo, epoch="restart")
-    runtime = server_runtime(
-        subject, database=store.database,
-        peers=Gateway(),
-        tools=subject.tools,
-        results=subject.results,
-    )
+    runtime = server_runtime(github=github, clock=store.now)
     handler = server_callbacks(runtime, "worker-a", "restart")
     # Missing journal is not proof of execution failure: its original result may still arrive.
     await handler._reject_missing_journal(job.id)
@@ -374,8 +368,8 @@ async def test_close_webhook_ends_round_while_other_lifecycle_events_are_hints(
     )
 
 
-async def test_close_during_capability_preparation_never_dispatches(store, pending_revision, monkeypatch):
-    flow, job, _, _github, subject = pending_revision
+async def test_close_during_capability_preparation_never_dispatches(store, pending_revision, monkeypatch, server_runtime):
+    flow, job, _, github, _subject = pending_revision
     original = Repository.create_push_capability
 
     async def close_before_return(repo):
@@ -388,12 +382,7 @@ async def test_close_during_capability_preparation_never_dispatches(store, pendi
         return secret
 
     monkeypatch.setattr(Repository, "create_push_capability", close_before_return)
-    runtime = server_runtime(
-        subject, database=store.database,
-        peers=Gateway(),
-        tools=subject.tools,
-        results=subject.results,
-    )
+    runtime = server_runtime(github=github, clock=store.now)
     handler = server_callbacks(runtime, "worker-a", "epoch")
     prepared = await handler._prepare_assignment(job, "token")
     assert prepared is JobState.DONE

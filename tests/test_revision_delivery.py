@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from psycopg.types.json import Jsonb
 from pydantic import SecretStr, ValidationError
 
 from app.contracts.protocol import (
@@ -24,13 +25,9 @@ from app.contracts.result_models import ResolveEffect
 from app.controler.review.resolution import plan_resolution
 from app.domain.models import (
     AddressedComment,
-    Attempt,
     CodingExecutionContext,
     CodingExecutionResult,
     DeferredComment,
-    DeliveryState,
-    FlowDelivery,
-    Job,
     JobKind,
     JobState,
     ReviewItemKind,
@@ -38,6 +35,7 @@ from app.domain.models import (
     SessionUnavailable,
     VcsKind,
 )
+from app.domain.review_models import FeedbackUpdate
 from app.github import (
     Batch,
     PullRequest,
@@ -55,9 +53,8 @@ from app.worker.execution.vcs import (
 )
 from app.worker.execution.workspaces import RepositoryWorkspaces
 from app.worker.state.execution import ExecutionState
-from tests.github import NATIVE_PULL_REQUEST_REFETCH, RecordingGitHub
-from tests.review_memory import review_context
-from tests.test_coordinator import MemoryStore, apply_result, coordinator, prepare
+from tests.github import NATIVE_PULL_REQUEST_REFETCH
+from tests.test_coordinator import apply_result
 from tests.test_github_client import AsyncEndpoint, install_client
 from tests.test_review_context import pr_data
 from tests.test_review_resolution import feedback, human, snapshot
@@ -215,24 +212,44 @@ def test_revision_output_requires_every_field_and_rejects_extra_data():
 
 
 @pytest.fixture
-async def revision_control(recording_resources):
-    store, github = MemoryStore(), RecordingGitHub()
-    store.attempt = Attempt(id=1, flow_id=1, codex_session_id="session-1")
-    store.flow.current_attempt_id = 1
-    store.delivery = FlowDelivery(flow_id=1, branch="flow/1", base_branch="trunk",
-                                  state=DeliveryState.OPEN, pr_number=17, head_sha="abc123")
-    job = Job(id=21, flow_id=1, kind=JobKind.REVISION, state=JobState.RUNNING)
-    item = store.reviews.batch.feedback[0]
-    github.threads = [ReviewThread(thread_id="T1", repo="owner/repo", pr_number=17,
-        path="app.py", resolved=False, outdated=False, complete=True, comments=Batch[ReviewComment](items=(ReviewComment(
+def revision_feedback():
+    return [FeedbackUpdate(
+        kind=ReviewItemKind.INLINE, github_id=500, author="reviewer", body="Please fix it.",
+        updated_at=datetime.now(UTC), signal="request_changes", submitted=True,
+    )]
+
+
+@pytest.fixture
+async def revision_control(store, completed_open_initial, revision_feedback):
+    """Continue an actual delivered INITIAL through feedback ingestion and revision dispatch."""
+    flow, subject, github, _, _ = completed_open_initial
+    for index, update in enumerate(revision_feedback):
+        assert store.reviews.ingest(
+            flow.id, f"review-{index}", "pull_request_review_comment", {}, update,
+            settle_seconds=0, submit_grace_seconds=0,
+        )
+    batch, = store.reviews.claim_due()
+    assert batch.job_id is not None
+    job = store.workers.assign_job("worker-a", "revision-token", "epoch")
+    assert job is not None and job.id == batch.job_id and job.kind is JobKind.REVISION
+    item = next(f for f in batch.feedback if f.kind is ReviewItemKind.INLINE)
+    github.threads = [ReviewThread(
+        thread_id="T1", repo=flow.repo, pr_number=17, path="app.py", resolved=False,
+        outdated=False, complete=True, comments=Batch[ReviewComment](items=(ReviewComment(
             github_id=item.github_id, node_id="C500", author=item.author, is_bot=False,
-            body=item.body, updated_at=item.updated_at),)))]
-    subject = coordinator(store, github)
-    github.pull_request = review_context().pull_request.model_copy(update={
-        "head_branch": "flow/1", "head_sha": "abc123", "base_branch": "trunk",
-    })
-    task = await prepare(subject, job)
-    return store, github, job, subject, task
+            body=item.body, updated_at=item.updated_at,
+        ),)),
+    )]
+    task = await subject.prepare(job)
+    assert isinstance(task, RevisionTask)
+    assert store.workers.start_assignment(job.id, task.attempt_id, "worker-a", "revision-token", "epoch")
+    subject.mark_started(job, task, "worker-a")
+    github.comments.clear()
+    github.comment_bodies.clear()
+    github.review_requests.clear()
+    github.labels.clear()
+    github.resource_calls.clear()
+    return store, github, store.jobs.get_job(job.id), subject, task
 
 
 def verified_result(task, **updates):
@@ -251,7 +268,7 @@ def verified_result(task, **updates):
 
 
 async def test_resolve_payloads_only_carry_their_threads_current_and_historical_feedback(revision_control):
-    store, _, _, _, task = revision_control
+    store, _, job, _, task = revision_control
     threads, current, historical = [], [], []
     # Many long review threads must not duplicate the entire PR's history in every effect.
     for number in range(20):
@@ -260,12 +277,13 @@ async def test_resolve_payloads_only_carry_their_threads_current_and_historical_
         threads.append(snapshot(root, reply).model_copy(update={"thread_id": f"T{number}"}))
         historical.extend([feedback(root), feedback(root, kind=ReviewItemKind.REVIEW_BODY)])
         current.append(feedback(reply))
-    remote = ReviewThreads(repo=store.flow.repo, pr_number=17, fetched_at=datetime.now(UTC), threads=threads)
-    batch = store.reviews.batch.model_copy(update={"feedback": current, "threads": remote})
+    flow = store.flows.get_flow(job.flow_id)
+    remote = ReviewThreads(repo=flow.repo, pr_number=17, fetched_at=datetime.now(UTC), threads=threads)
+    batch = store.reviews.for_job(job).model_copy(update={"feedback": current, "threads": remote})
     result = verified_result(task.model_copy(update={"feedback": current}), output=revision_output(
         addressed=[AddressedComment(item_id=f.item_id, version=f.version, comment_id=f.github_id,
                                     note="Fixed") for f in current]))
-    plan = plan_resolution(store.flow, 17, batch, result, historical)
+    plan = plan_resolution(flow, 17, batch, result, historical)
     resolves = [effect for effect in plan.effects if isinstance(effect, ResolveEffect)]
     assert len(resolves) == len(threads) and all(effect.allow_resolve for effect in resolves)
     assert all({f.github_id for f in effect.covered} == {c.github_id for c in effect.snapshot.comments.items}
@@ -278,8 +296,10 @@ async def test_control_preserves_omitted_feedback_and_does_not_rereview_noop(rev
     result = verified_result(task)
     await apply_result(subject, job, result)
     await subject.results.apply(job.id)
-    assert store.reviews.consumed == []
-    assert store.reviews.batch.state.value == "waiting"
+    assert [(f.item_id, f.version) for f in store.reviews.pending(job.flow_id)] == [
+        (f.item_id, f.version) for f in task.feedback
+    ]
+    assert store.reviews.for_job(job).state.value == "waiting"
     assert github.review_requests == []
     assert len(github.comments) == 1
     assert "已按 review 更新" not in github.comments[0]
@@ -292,36 +312,44 @@ async def test_failed_revision_keeps_diagnostics_local(revision_control):
                              failure_detail="unregistered workspace unexpectedly exists",
                              invocations=[])
     assert await apply_result(subject, job, result) is JobState.FAILED
-    assert "unregistered workspace unexpectedly exists" in store.get_job(job.id).last_error
+    assert "unregistered workspace unexpectedly exists" in store.jobs.get_job(job.id).last_error
     assert store.results.list_effects(job.id) == []
     assert github.comments == github.review_requests == []
-    assert store.reviews.consumed == []
-    assert store.execution.released_at is None
+    assert [(f.item_id, f.version) for f in store.reviews.pending(job.flow_id)] == [
+        (f.item_id, f.version) for f in task.feedback
+    ]
+    assert store.workers.get_flow_execution(job.flow_id).released_at is None
 
 
 @pytest.mark.parametrize("problem", ["incomplete", "missing_root"])
 async def test_thread_mapping_errors_stay_local_without_consuming_feedback(revision_control, problem):
     # Internal snapshot errors leave feedback pending; they are not PR conversation content.
     store, github, job, subject, task = revision_control
-    threads = store.reviews.batch.threads
+    batch = store.reviews.for_job(job)
+    threads = batch.threads
     if problem == "incomplete":
-        store.reviews.batch.threads = threads.model_copy(update={"limitations": ("page missing",)})
+        threads = threads.model_copy(update={"limitations": ("page missing",)})
     else:
         thread = threads.threads[0]
         comments = thread.comments.model_copy(update={
             "items": tuple(c.model_copy(update={"reply_to_id": 999}) for c in thread.comments.items),
         })
-        store.reviews.batch.threads = threads.model_copy(update={
+        threads = threads.model_copy(update={
             "threads": (thread.model_copy(update={"comments": comments}),),
         })
+    with store.connection() as connection:
+        connection.execute("UPDATE review_batches SET threads=%s WHERE id=%s",
+                           (Jsonb(threads.model_dump(mode="json")), batch.id))
     item = task.feedback[0]
     result = verified_result(task, output=revision_output(addressed=[AddressedComment(
         item_id=item.item_id, version=item.version, comment_id=item.github_id, note="Fixed",
     )]))
     assert await apply_result(subject, job, result) is JobState.DONE
-    assert store.reviews.consumed == []
-    assert store.reviews.batch.open_points
-    assert store.reviews.batch.state.value == "waiting"
+    assert [(f.item_id, f.version) for f in store.reviews.pending(job.flow_id)] == [
+        (f.item_id, f.version) for f in task.feedback
+    ]
+    assert store.reviews.for_job(job).open_points
+    assert store.reviews.for_job(job).state.value == "waiting"
     assert github.comments == ["修订交付（无新提交）：Already satisfied"]
     assert github.thread_replies == github.review_requests == []
 
@@ -352,8 +380,11 @@ async def test_control_checks_actual_pr_and_lineage(revision_control, monkeypatc
         monkeypatch.setattr(PullRequest, "refetch", changed_pr)
     result = verified_result(task)
     assert (await apply_result(subject, job, result)).value == "failed"
-    assert store.delivery.head_sha == task.expected_head_sha
-    assert not store.reviews.consumed and not github.review_requests
+    assert store.deliveries.get_delivery(job.flow_id).head_sha == task.expected_head_sha
+    assert [(f.item_id, f.version) for f in store.reviews.pending(job.flow_id)] == [
+        (f.item_id, f.version) for f in task.feedback
+    ]
+    assert not github.review_requests
     assert github.comments == []
     if change == "renamed-repository":
         assert endpoint.calls == [(("owner", "repo", task.pr_number), {})]
@@ -386,9 +417,12 @@ async def test_verified_partial_delivery_waits_without_rereview(revision_control
     result = verified_result(task, commit_sha="new", remote_sha="new", output=output)
     await apply_result(subject, job, result)
     await subject.results.apply(job.id)
-    assert store.delivery.head_sha == "new"
+    assert store.deliveries.get_delivery(job.flow_id).head_sha == "new"
     assert bool(github.review_requests) is (pending == "none")
-    assert store.reviews.batch.state.value == ("completed" if pending == "none" else "waiting")
+    assert store.reviews.for_job(job).state.value == ("completed" if pending == "none" else "waiting")
+    assert [(f.item_id, f.version) for f in store.reviews.pending(job.flow_id)] == (
+        [(item.item_id, item.version)] if pending == "deferred" else []
+    )
     assert len(github.review_requests) <= 1
 
 
@@ -408,7 +442,10 @@ async def test_revision_rejects_fabricated_or_conflicting_feedback(revision_cont
                                   comment_id=item.github_id, reason="Later")] if kind == "conflict" else [],
     )
     assert (await apply_result(subject, job, verified_result(task, output=output))).value == "failed"
-    assert not store.reviews.consumed and not github.review_requests
+    assert [(f.item_id, f.version) for f in store.reviews.pending(job.flow_id)] == [
+        (f.item_id, f.version) for f in task.feedback
+    ]
+    assert not github.review_requests
     assert github.comments == []
 
 
@@ -455,22 +492,33 @@ async def test_dirty_repository_after_session_rejection_does_not_fallback(revisi
     assert (repo / "uncertain-work").read_text() == "preserve"
 
 
-@pytest.mark.parametrize("signal_kind", ["request_changes", "discussion"])
-async def test_empty_review_body_is_not_an_unresolved_obligation(revision_control, signal_kind):
+@pytest.mark.parametrize("revision_feedback", [
+    [FeedbackUpdate(
+        kind=ReviewItemKind.INLINE, github_id=500, author="reviewer", body="Please fix it.",
+        updated_at=datetime.now(UTC), signal="request_changes", submitted=True,
+    ), FeedbackUpdate(
+        kind=ReviewItemKind.REVIEW_BODY, github_id=501, author="reviewer", body="",
+        updated_at=datetime.now(UTC), signal=signal, submitted=True,
+    )] for signal in ("request_changes", "discussion")
+])
+async def test_empty_review_body_is_not_an_unresolved_obligation(revision_control, revision_feedback):
     store, _github, job, subject, task = revision_control
-    item = store.reviews.batch.feedback[0]
-    signal = item.model_copy(update={"item_id": 102, "github_id": 501, "body": "",
-                                     "signal": signal_kind, "kind": ReviewItemKind.REVIEW_BODY})
-    store.reviews.batch.feedback.append(signal)
-    task = task.model_copy(update={"feedback": [item, signal]})
-    store.job_records[job.id].payload["revision"] = task.model_dump(mode="json")
+    item = next(f for f in task.feedback if f.kind is ReviewItemKind.INLINE)
+    assert len(task.feedback) == len(revision_feedback) == 2
     result = verified_result(
-        task, feedback_refs=[item, signal],
+        task,
         output=RevisionCodingOutput(summary="Fixed", vcs_backend_used=VcsKind.GIT,
                           deferred=[], needs_clarification=[], addressed=[AddressedComment(
             item_id=item.item_id, version=item.version, comment_id=item.github_id, note="Fixed",
         )]),
     )
     await apply_result(subject, job, result)
-    assert store.reviews.batch.state.value == "completed"
-    assert {f.item_id for f in store.reviews.consumed} == {101, 102}
+    assert store.reviews.for_job(job).state.value == "completed"
+    assert store.reviews.pending(job.flow_id) == []
+    with store.connection() as connection:
+        consumed = connection.execute(
+            "SELECT item_id,version FROM review_versions WHERE consumed_at IS NOT NULL"
+        ).fetchall()
+    assert {(r["item_id"], r["version"]) for r in consumed} == {
+        (f.item_id, f.version) for f in task.feedback
+    }

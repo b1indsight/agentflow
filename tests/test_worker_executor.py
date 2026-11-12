@@ -120,52 +120,6 @@ async def initial_workspace(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_executor_runs_agent_without_store(
-    monkeypatch, tmp_path: Path, initial_workspace,
-) -> None:
-    async def fake_verify(context, backend):
-        assert context.push_token.get_secret_value() == "push-token"
-        assert backend is VcsKind.GIT
-        return VcsOutcome(
-            backend=VcsKind.GIT,
-            branch="flow/issue-8",
-            commit_sha="abc",
-            remote_sha="abc",
-        )
-
-    monkeypatch.setattr("app.worker.execution.executor.verify_vcs_outcome", fake_verify)
-    monkeypatch.setattr(
-        "app.worker.transport.mcp.verify_pushed_outcome",
-        lambda context: fake_verify(context, VcsKind.GIT),
-    )
-    agent = RecordingAgent()
-    journal, pool = initial_workspace
-    executor = WorkerExecutor(
-        tmp_path, agent, worker_id="worker-1", state=journal, workspaces=pool,
-    )
-
-    initial = await executor.execute(
-        InitialTask(
-            flow_id=3,
-            attempt_id=1,
-            repo="owner/repo", repo_identity="worker-1:owner/repo",
-            issue_number=8,
-            issue_title="Issue",
-            issue_body="Body",
-            branch="flow/issue-8",
-        ),
-        assignment_secret(), tool_caller=RecordingToolCaller(),
-    )
-    assert isinstance(initial, InitialTaskResult)
-    assert initial.commit_sha == "abc"
-    assert initial.open_pr_call_id
-    assert initial.delivery_receipt is not None
-    assert agent.started
-    workspace = executor.workspaces.path(executor.workspaces.lookup("owner/repo", 3))
-    assert agent.started[0][1] == workspace
-
-
-@pytest.mark.asyncio
 async def test_initial_exit_zero_without_a_declared_backend_is_a_failure(
     monkeypatch, tmp_path: Path, initial_workspace,
 ) -> None:
@@ -402,9 +356,13 @@ async def test_initial_bootstrap_push_mcp_and_final_verification_share_current_c
     tmp_path, monkeypatch,
 ):
     from app.worker.execution import vcs
-    _, remote = _git_fixture(tmp_path)
+    seed, remote = _git_fixture(tmp_path)
+    base_sha = (await asyncio.to_thread(
+        subprocess.check_output, ["git", "rev-parse", "HEAD"], cwd=seed, text=True,
+    )).strip()
     root = tmp_path / "new-worker"
     authenticated = []
+    deliveries: list[VcsOutcome] = []
     run = vcs._run
 
     async def offline(*args, **kwargs):
@@ -429,16 +387,27 @@ async def test_initial_bootstrap_push_mcp_and_final_verification_share_current_c
 
     class Caller:
         async def call_tool(self, name, arguments, *, call_id=None, vcs_outcome):
-            assert name == "flow.open_pr" and vcs_outcome.commit_sha == vcs_outcome.remote_sha
+            assert name == "flow.open_pr" and call_id
+            deliveries.append(vcs_outcome)
             return PreparedDelivery(head_sha=vcs_outcome.commit_sha, delivery_version=1)
 
     monkeypatch.setattr(vcs, "_run", offline)
     journal, pool = await assigned_workspace(root)
-    result = await WorkerExecutor(root, Agent(), worker_id="worker-1", state=journal,
-                                   workspaces=pool).execute(
+    agent = Agent()
+    result = await WorkerExecutor(root, agent, worker_id="worker-1", state=journal,
+                                  workspaces=pool).execute(
         journal.assignment.task, assignment_secret(), tool_caller=Caller(),
     )
+    assert isinstance(result, InitialTaskResult)
+    assert len(agent.started) == 1 and not agent.resumed
+    assert agent.started[0][1] == pool.path(pool.lookup("owner/repo", journal.flow_id))
     assert result.exit_code == 0 and result.pushed and result.open_pr_call_id
+    assert result.vcs_backend is VcsKind.GIT and result.branch == "flow/issue-8"
+    assert result.delivery_receipt is not None and len(deliveries) == 1
+    assert deliveries[0].backend is VcsKind.GIT and deliveries[0].branch == result.branch
+    assert (result.commit_sha == result.remote_sha == result.delivery_receipt.head_sha
+            == deliveries[0].commit_sha == deliveries[0].remote_sha)
+    assert result.commit_sha != base_sha
     assert result.delivery_receipt.status == "prepared"
     assert authenticated == ["clone", "verify", "verify"]
 
