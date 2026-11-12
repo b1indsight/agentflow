@@ -434,13 +434,17 @@ async def test_initial_failure_after_open_pr_request_has_no_github_pr_side_effec
 
 
 @pytest.mark.parametrize("stage,detail,reason", [
+    ("workspace", "unregistered workspace unexpectedly exists",
+     "（exit=65，阶段=workspace）：unregistered workspace unexpectedly exists"),
     ("push", "remote branch is missing", "（exit=65，阶段=push）：remote branch is missing"),
     ("execution", "Amp: no new stdout/stderr for 1200s; execution timed out",
      "（exit=65，阶段=execution）：Amp: no new stdout/stderr for 1200s; execution timed out"),
     (None, "safe diagnostic [REDACTED]", "（exit=65）：safe diagnostic [REDACTED]"),
     (None, None, "（exit=65）"),
 ])
-async def test_initial_failure_reports_stage_and_detail_without_guessing_backend(stage, detail, reason):
+@pytest.mark.parametrize("pr_number", [None, 17])
+async def test_initial_failure_keeps_diagnostics_local(stage, detail, reason, pr_number):
+    # Internal failures must stay local, whether the flow has only an Issue or an existing PR.
     store = MemoryStore()
     github = RecordingGitHub()
     subject = coordinator(store, github)
@@ -448,12 +452,15 @@ async def test_initial_failure_reports_stage_and_detail_without_guessing_backend
     task = await prepare(subject, job)
     assert isinstance(task, InitialTask)
     subject.mark_started(job, task, "worker-1")
+    if pr_number is not None:
+        store.delivery = FlowDelivery(flow_id=1, branch="flow/1", state=DeliveryState.OPEN,
+                                      pr_number=pr_number)
 
     state = await apply_result(
         subject,
         job,
         InitialTaskResult(
-            session_id="session-1",
+            session_id=None if stage == "workspace" else "session-1",
             last_message="ignored raw message",
             exit_code=65,
             failure_stage=stage,
@@ -462,14 +469,16 @@ async def test_initial_failure_reports_stage_and_detail_without_guessing_backend
     )
 
     assert state is JobState.FAILED
-    assert github.comments == [f"⚠️ 编码失败{reason}。未开 PR。"]
+    assert github.comments == github.opened == []
+    assert store.results.list_effects(job.id) == []
+    assert store.flow.state is FlowState.BLOCKED
     assert store.get_job(job.id).last_error == f"编码失败{reason}。未开 PR。"
 
 
 @pytest.mark.parametrize("version", [1, 14, 15])
 async def test_recovery_applies_unassigned_control_failure_without_rewriting_inbox(store, version):
     # Preparation can fail before assignment; only a control failure may use the sentinel token.
-    flow = store.flows.create_flow("owner/control", 1, None)
+    flow = store.flows.create_flow("owner/control", 1, 42)
     job = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
     terminal = Failed(job_id=job.id, assignment_token="control", error="preparation failed")
     with store.transaction() as tx:
@@ -489,11 +498,15 @@ async def test_recovery_applies_unassigned_control_failure_without_rewriting_inb
                     "UPDATE jobs SET result_payload=%s WHERE id=%s", (Jsonb(payload), job.id)
                 )
     accepted = store.jobs.get_job(job.id)
-    subject = coordinator(store, RecordingGitHub())
+    github = RecordingGitHub()
+    subject = coordinator(store, github)
     await subject.results.recover_pending_results()
     persisted = store.jobs.get_job(job.id)
     assert persisted.state is JobState.FAILED and persisted.result_applied_at is not None
     assert persisted.result_payload == accepted.result_payload
     assert persisted.result_digest == accepted.result_digest == terminal_digest(terminal)
+    assert persisted.last_error == "preparation failed"
+    assert github.comments == []
+    assert store.results.list_effects(job.id) == []
     assert store.flows.get_flow(flow.id).state is FlowState.BLOCKED
     assert store.jobs.lifecycle_job(flow.id) is None

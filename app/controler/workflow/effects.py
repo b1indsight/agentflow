@@ -146,6 +146,13 @@ class ResultEffects:
             if record is None:
                 raise ResultPending("result effects are awaiting retry or reconciliation")
             uncertain = record.dispatched_at is not None
+            if (isinstance(record.payload, CommentEffect)
+                    and record.payload.key == "failure" and not uncertain):
+                # Old frozen plans may contain warnings; suppress unsent ones, but retain
+                # uncertain writes for the existing read-only marker reconciliation.
+                self.result_store.finish(record, EffectState.SKIPPED,
+                                         error="internal failures are local-only")
+                continue
             try:
                 receipt = (await self._recover_retired(plan, record, records) if retired
                            else await self._execute(plan, record, records))
