@@ -15,7 +15,7 @@ from app.persistence.deliveries import DeliveryStore
 from app.persistence.flows import FlowStore
 from app.persistence.jobs import JobStore
 from app.persistence.repository import Repository
-from app.persistence.results import UNCONFIRMED_EFFECT_SQL
+from app.persistence.results import RESOURCE_JOB_SQL, UNCONFIRMED_EFFECT_SQL
 from app.persistence.workers import WorkerStore
 
 
@@ -171,7 +171,7 @@ class StopStore(Repository):
                              " WHERE id=%s AND result_received_at IS NULL", (tx.now(), intent.job_id))
                 if JobStore(tx).has_pending_result(receipt.flow_id) or conn.execute(
                         "SELECT 1 FROM result_effects e JOIN jobs j ON j.id=e.job_id"
-                        f" WHERE j.flow_id=%s AND {UNCONFIRMED_EFFECT_SQL} LIMIT 1",
+                        f" WHERE j.flow_id=%s AND {RESOURCE_JOB_SQL} AND {UNCONFIRMED_EFFECT_SQL} LIMIT 1",
                         (receipt.flow_id,),
                 ).fetchone() is not None:
                     return False

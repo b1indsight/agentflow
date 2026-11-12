@@ -43,7 +43,7 @@ from app.persistence.inference_notices import InferenceNoticeStore
 from app.persistence.jobs import JobStore
 from app.persistence.records import required
 from app.persistence.repository import Repository
-from app.persistence.results import UNCONFIRMED_EFFECT_SQL
+from app.persistence.results import RESOURCE_JOB_SQL, UNCONFIRMED_EFFECT_SQL
 
 # A frozen archive may have started deleting before its Started message reached serve.
 _MAY_HAVE_EXECUTED = (
@@ -59,6 +59,12 @@ _CURRENT_WORKSPACE = (
     " OR (jobs.kind<>'inference' AND slot.current_job_id=jobs.id)))"
 )
 
+_ASSIGNMENT_FLOW = (
+    " EXISTS (SELECT 1 FROM flows current_flow WHERE current_flow.id=jobs.flow_id"
+    " AND current_flow.current_round_no=jobs.round_no"
+    " AND current_flow.state<>'archived')"
+)
+
 # Shared by demand and claims: demand publishes repositories, never job ownership.
 _ELIGIBLE_JOB = (
     " AND j.kind<>'inference' AND j.round_no=f.current_round_no"
@@ -70,6 +76,7 @@ _ELIGIBLE_JOB = (
     " AND ((j.kind='archive') = EXISTS (SELECT 1 FROM flow_deliveries d"
     " WHERE d.flow_id=f.id AND d.state='merged'))"
     " AND NOT EXISTS (SELECT 1 FROM jobs prior WHERE prior.flow_id=f.id AND prior.id<>j.id"
+    f" AND {RESOURCE_JOB_SQL.replace('j.', 'prior.')}"
     " AND prior.kind<>'inference' AND (prior.state='running' OR (prior.result_received_at IS NOT NULL"
     " AND prior.result_applied_at IS NULL) OR EXISTS (SELECT 1 FROM workers held"
     " WHERE held.current_job_id=prior.id)))"
@@ -122,7 +129,8 @@ class WorkerStore(Repository):
                 " AND s.binding_at=flow_executions.bound_at AND s.state!='confirmed')"
                 " AND NOT EXISTS (SELECT 1 FROM jobs j JOIN flows f ON f.id=j.flow_id"
                 " WHERE j.flow_id=flow_executions.flow_id"
-                " AND j.round_no=f.current_round_no AND j.kind<>'inference' AND (j.state='running'"
+                f" AND j.round_no=f.current_round_no AND j.kind<>'inference' AND {RESOURCE_JOB_SQL}"
+                " AND (j.state='running'"
                 " OR (j.result_received_at IS NOT NULL AND j.result_applied_at IS NULL)"
                 " OR ((j.started_at IS NOT NULL OR j.dispatch_authorized_at IS NOT NULL"
                 " OR (j.kind='archive' AND j.payload->'archive' IS NOT NULL))"
@@ -130,7 +138,7 @@ class WorkerStore(Repository):
                 " WHERE s.job_id=j.id AND s.assignment_token=j.assignment_token AND s.state='confirmed'))))"
                 " AND NOT EXISTS (SELECT 1 FROM result_effects e JOIN jobs j ON j.id=e.job_id"
                 " JOIN flows f ON f.id=j.flow_id WHERE j.flow_id=flow_executions.flow_id"
-                f" AND j.round_no=f.current_round_no AND {UNCONFIRMED_EFFECT_SQL})",
+                f" AND j.round_no=f.current_round_no AND {RESOURCE_JOB_SQL} AND {UNCONFIRMED_EFFECT_SQL})",
                 (now, flow_id),
             )
             if result.rowcount == 1:
@@ -531,7 +539,7 @@ class WorkerStore(Repository):
                 " AND kind<>'inference' AND assigned_worker_id=%s AND assignment_token=%s"
                 " AND started_at IS NULL AND EXISTS (SELECT 1 FROM workers"
                 " WHERE repository IS NULL AND worker_id=%s AND connection_epoch=%s) AND "
-                + _CURRENT_WORKSPACE + " FOR UPDATE",
+                + _CURRENT_WORKSPACE + " AND " + _ASSIGNMENT_FLOW + " FOR UPDATE",
                 (job_id, JobState.RUNNING, worker_id, token, worker_id, connection_epoch),
             ).fetchone()
             if job is None:
@@ -618,14 +626,18 @@ class WorkerStore(Repository):
         """Resume started work, including a frozen archive whose Started message was lost."""
 
         now = self._db.now()
-        with self._db.connection() as connection, connection.transaction():
-            self._db._lock_worker(connection, worker_id)
+        candidate = JobStore(self._db).get_job(job_id)
+        if candidate is None or candidate.kind is JobKind.INFERENCE:
+            return False
+        with self._db.transaction() as tx, tx.connection() as connection:
+            tx.lock_workflow(candidate.required_flow_id)
             # Recover a lost Started only against the complete frozen ArchiveTask identity.
             resumed = connection.execute(
                 "UPDATE jobs SET recovery_deadline=NULL, heartbeat_at=%s,"
                 " lease_expires_at=%s, updated_at=%s, started_at=COALESCE(started_at,%s)"
                 " WHERE id=%s AND state=%s AND kind<>'inference'"
-                " AND (started_at IS NOT NULL OR (kind='archive' AND EXISTS"
+                " AND " + _ASSIGNMENT_FLOW
+                + " AND (started_at IS NOT NULL OR (kind='archive' AND EXISTS"
                 " (SELECT 1 FROM flows f JOIN flow_deliveries d ON d.flow_id=f.id"
                 " JOIN flow_executions e ON e.flow_id=f.id WHERE f.id=jobs.flow_id"
                 " AND f.state IN ('finalizing','blocked') AND d.state='merged' AND e.released_at IS NULL"
@@ -701,7 +713,7 @@ class WorkerStore(Repository):
         else:
             inbox = ResultInbox(source="worker", terminal=terminal)
             payload = inbox.model_dump(mode="json")
-            digest = terminal_digest(inbox.terminal)
+            digest = terminal_digest(terminal)
         now = self._db.now()
         with self._db.connection() as connection, connection.transaction():
             self._db._lock_worker(connection, worker_id)

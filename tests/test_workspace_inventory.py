@@ -6,9 +6,25 @@ import shutil
 from pathlib import Path
 
 import pytest
+from psycopg.types.json import Jsonb
 
-from app.contracts.protocol import ArchiveTask, AssignmentArguments, InitialTask
-from app.domain.models import CodingExecutionResult, JobState
+from app.contracts.protocol import (
+    ArchiveTask,
+    AssignmentArguments,
+    ExecutionStopped,
+    InitialTask,
+)
+from app.domain.models import (
+    ArchiveReason,
+    CodingExecutionResult,
+    DeliveryState,
+    FlowState,
+    JobKind,
+    JobState,
+    WorkspaceInventory,
+)
+from app.persistence.activity import ActivityStore
+from app.persistence.workers import WorkerStore
 from app.worker.execution.executor import WorkerExecutor
 from app.worker.execution.vcs import VcsVerificationError
 from app.worker.execution.workspaces import RepositoryWorkspaces, WorkspaceBinding
@@ -16,6 +32,8 @@ from app.worker.state.execution import ExecutionState, ExecutionStateError
 from tests.test_worker_executor import RecordingAgent, RecordingToolCaller, assignment_secret
 from tests.test_worker_session import _previous_journal
 from tests.test_worker_workspaces import managed_seed
+from tests.test_workspace_claims import claim as claim_job
+from tests.test_workspace_claims import connect, finish, provision, queued
 
 
 def assignment(flow: int, workspace: str, generation: int = 1) -> AssignmentArguments:
@@ -396,3 +414,155 @@ async def test_late_result_ack_never_mutates_newer_binding(tmp_path):
     assert pool.manifest_path.read_bytes() == before
     assert pool.lookup("owner/repo", 2) == newer
     assert state.load().workspace == binding
+
+
+def merged_business(store, flow_id):
+    """Model the business commit independently of the resource settlement under test."""
+    flow = store.flows.get_flow(flow_id)
+    delivery = store.deliveries.get_or_create_delivery(flow.id, flow.initial_branch)
+    delivery.state, delivery.pr_number = DeliveryState.MERGED, 17
+    delivery.merged_at, delivery.merge_commit_sha = store.now(), "a" * 40
+    store.deliveries.update_delivery(delivery)
+    flow.state = FlowState.ARCHIVED
+    flow.archive_reason = ArchiveReason.SUCCEEDED
+    flow.archived_at = store.now()
+    ActivityStore(store.database).append_flow(
+        flow.id, flow.current_round_no, "archive", occurred_at=flow.archived_at,
+        metadata={"archive_reason": "succeeded"},
+    )
+    store.flows.update_flow(flow)
+    return flow
+
+
+def uncertain_effect(store, job_id):
+    with store.connection() as conn:
+        conn.execute(
+            "INSERT INTO result_applications(job_id,digest,plan,created_at) VALUES (%s,'test','{}',%s)",
+            (job_id, store.now()),
+        )
+        conn.execute(
+            "INSERT INTO result_effects(job_id,effect_key,position,payload,state,dispatched_at,next_attempt_at)"
+            " VALUES (%s,'uncertain-comment',0,'{\"kind\":\"comment\"}','uncertain',%s,%s)",
+            (job_id, store.now(), store.now()),
+        )
+
+
+@pytest.mark.parametrize("blocker", [None, "remote-result", "remote-effect", "release-failure"])
+def test_archived_stop_settlement_reuses_only_exact_cleaned_generation(store, monkeypatch, blocker):
+    # Inventory cannot prove writer exit; only the original stop and settled
+    # remote work can publish a reusable controller-owned generation.
+    connect(store, "a")
+    for index in range(2):
+        provision(store, "a", index)
+        queued(store, index)
+    job, sibling = claim_job(store), claim_job(store, token="sibling")
+    assert store.stops.authorize_dispatch(job.id, "a", "token", "epoch")
+    finish(store, job)
+    with store.transaction() as tx:
+        tx.lock_workflow(job.flow_id)
+        tx.stops.request(job.flow_id)
+    flow = merged_business(store, job.flow_id)
+    intent = store.stops.pending_for_worker("a")[0]
+    receipt = ExecutionStopped(**intent.fence().model_dump(), execution_nonce="original-cleanup")
+    before = next(w for w in store.workers.list_workspaces("a") if w.workspace == sibling.workspace)
+    fresh = WorkspaceInventory(
+        workspace=job.workspace, repository=flow.repo, generation=job.generation + 1,
+        flow_id=None,
+    )
+    assert not store.workers.report_workspace("a", "epoch", fresh)
+    if blocker == "remote-result":
+        with store.connection() as conn:
+            conn.execute("UPDATE jobs SET result_applied_at=NULL WHERE id=%s", (job.id,))
+    elif blocker == "remote-effect":
+        uncertain_effect(store, job.id)
+    if blocker in {"remote-result", "remote-effect"}:
+        assert not store.stops.confirm("a", receipt, "epoch")
+        assert not store.workers.report_workspace("a", "epoch", fresh)
+        with store.connection() as conn:
+            conn.execute("UPDATE jobs SET result_applied_at=%s WHERE id=%s", (store.now(), job.id))
+            conn.execute("UPDATE result_effects SET receipt='{}' WHERE job_id=%s", (job.id,))
+    successor = queued(store, 3)
+    assert store.workers.assign_job("a", "too-soon", "epoch") is None
+    if blocker == "release-failure":
+        with monkeypatch.context() as patch:
+            patch.setattr(WorkerStore, "release_flow_execution", lambda *args: False)
+            assert store.stops.confirm("a", receipt, "epoch")
+        current = next(w for w in store.workers.list_workspaces("a") if w.workspace == job.workspace)
+        assert current.current_job_id is None and current.generation == job.generation
+        assert store.workers.get_flow_execution(flow.id).released_at is None
+        assert not store.workers.report_workspace("a", "epoch", fresh)
+        assert store.flows.try_archive(flow.id)
+    else:
+        assert store.stops.confirm("a", receipt, "epoch")
+    assert store.workers.get_flow_execution(flow.id).released_at is not None
+    assert store.workers.report_workspace("a", "epoch", fresh)
+    # No clock advance or sweeper: settlement immediately publishes the next generation.
+    next_job = claim_job(store, token="next")
+    assert next_job.id == successor.id and next_job.generation == fresh.generation
+    assert next_job.workspace == job.workspace
+    assert store.workers.report_workspace("a", "epoch", fresh.model_copy(update={"generation": job.generation}))
+    assert store.workers.report_workspace("a", "epoch", fresh)
+    current = next(w for w in store.workers.list_workspaces("a") if w.workspace == job.workspace)
+    assert current.current_job_id == next_job.id
+    assert next(w for w in store.workers.list_workspaces("a") if w.workspace == sibling.workspace) == before
+    assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
+
+
+@pytest.mark.parametrize("mismatch", [None, "version", "source", "assigned", "kind"])
+def test_only_local_merge_notice_is_independent_of_resource_settlement(store, mismatch):
+    # Notification delivery may remain uncertain while the original stop finishes;
+    # a lookalike remote result must keep its ordinary resource preconditions.
+    connect(store, "a")
+    item = provision(store, "a")
+    queued(store)
+    job = claim_job(store)
+    assert store.stops.authorize_dispatch(job.id, "a", "token", "epoch")
+    with store.transaction() as tx:
+        tx.lock_workflow(job.flow_id)
+        tx.stops.request(job.flow_id)
+    flow = merged_business(store, job.flow_id)
+    notice = store.jobs.enqueue_job(flow.id, JobKind.ARCHIVE)
+    payload = {"version": 2, "source": "control", "terminal": {
+        "type": "merge_archive", "job_id": notice.id, "flow_id": flow.id, "round_no": 1,
+        "repo": flow.repo, "pr_number": 17, "merged_at": store.now().isoformat(),
+        "merge_commit_sha": "a" * 40,
+    }}
+    if mismatch in {"version", "source"}:
+        payload[mismatch] = "2" if mismatch == "version" else "worker"
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE jobs SET state='running',result_payload=%s,result_digest='test',result_received_at=%s,"
+            " assigned_worker_id=%s,kind=%s WHERE id=%s",
+            (Jsonb(payload), store.now(), "a" if mismatch == "assigned" else None,
+             JobKind.REVISION if mismatch == "kind" else JobKind.ARCHIVE, notice.id),
+        )
+    uncertain_effect(store, notice.id)
+    intent = store.stops.pending_for_worker("a")[0]
+    receipt = ExecutionStopped(**intent.fence().model_dump(), execution_nonce="original-cleanup")
+    confirmed = store.stops.confirm("a", receipt, "epoch")
+    assert confirmed is (mismatch is None)
+    fresh = item.model_copy(update={"generation": 2})
+    assert store.workers.report_workspace("a", "epoch", fresh) is (mismatch is None)
+    assert (store.workers.get_flow_execution(flow.id).released_at is not None) is (mismatch is None)
+    assert store.jobs.get_job(notice.id).result_applied_at is None
+    assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
+
+
+@pytest.mark.parametrize("started", [False, True])
+def test_archived_coding_cannot_resume_or_supply_cleanup_evidence(store, started):
+    connect(store, "a")
+    item = provision(store, "a")
+    queued(store)
+    job = claim_job(store)
+    attempt = store.flows.get_flow(job.flow_id).current_attempt_id
+    assert store.stops.authorize_dispatch(job.id, "a", "token", "epoch")
+    if started:
+        assert store.workers.start_assignment(job.id, attempt, "a", "token", "epoch")
+    merged_business(store, job.flow_id)
+    assert not store.workers.start_assignment(job.id, attempt, "a", "token", "epoch")
+    assert not store.workers.resume_assignment(job.id, "a", "token", "epoch")
+    finish(store, job)  # A late coding result may settle, but it never proves cleanup.
+    assert not store.workers.report_workspace("a", "epoch", item.model_copy(update={"generation": 2}))
+    current = next(w for w in store.workers.list_workspaces("a") if w.workspace == job.workspace)
+    assert current.current_job_id is None and current.generation == job.generation
+    assert store.workers.get_flow_execution(job.flow_id).released_at is None

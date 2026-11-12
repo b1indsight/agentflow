@@ -21,6 +21,7 @@ from app.controler.workflow.lifecycle import prove_reopen
 from app.controler.workflow.service import ControlService
 from app.domain.models import (
     AddressedComment,
+    ArchiveReason,
     DeliveryState,
     FlowState,
     JobKind,
@@ -234,7 +235,7 @@ async def test_failed_revision_retry_retains_repo_and_consumes_a_new_cycle(store
     assert store.workers.get_flow_execution(flow.id).worker_id == binding.worker_id
 
 
-async def test_failed_revision_retry_after_merge_only_authorizes_archive(store, pending_revision):
+async def test_failed_revision_cannot_retry_coding_after_merge(store, pending_revision):
     flow, job, task, _, subject = pending_revision
     assert store.workers.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
     subject.mark_started(job, task, "worker-a")
@@ -248,12 +249,22 @@ async def test_failed_revision_retry_after_merge_only_authorizes_archive(store, 
     delivery = store.deliveries.get_delivery(flow.id)
     assert delivery.state is DeliveryState.MERGED
 
-    assert store.flows.get_flow(flow.id).state is FlowState.BLOCKED
-    assert ControlService(database=store.database).retry(flow)
-    assert store.flows.get_flow(flow.id).state is FlowState.FINALIZING
-    assert store.flows.get_active_flow(flow.repo, flow.issue_number).id == flow.id
+    archived = store.flows.get_flow(flow.id)
+    assert (archived.state, archived.archive_reason) == (FlowState.ARCHIVED, ArchiveReason.SUCCEEDED)
+    notice = jobs[-1]
+    assert notice.kind is JobKind.ARCHIVE and notice.state is JobState.RUNNING
+    assert notice.assigned_worker_id is None and notice.assignment_token is None
+    assert notice.result_payload["terminal"]["type"] == "merge_archive"
+    stop = store.stops.pending("worker-a")
+    assert stop.job_id == job.id and binding.released_at is None
+    with pytest.raises(ValueError, match="archived Flow"):
+        ControlService(database=store.database).retry(flow)
+    assert store.flows.get_flow(flow.id) == archived
+    assert store.flows.get_active_flow(flow.repo, flow.issue_number) is None
     assert store.jobs.list_jobs(flow.id) == jobs
     assert store.workers.get_flow_execution(flow.id) == binding
+    assert store.stops.pending("worker-a") == stop
+    assert store.workers.assign_job("worker-a", "after-merge", "epoch") is None
     assert store.deliveries.get_delivery(flow.id) == delivery
 
 
@@ -308,9 +319,18 @@ async def test_rejected_revision_notification_keeps_verified_result_recoverable(
         assert github.comments == comments and github.review_requests == []
         assert store.deliveries.get_delivery(flow.id).state is DeliveryState.MERGED
         assert store.deliveries.get_delivery(flow.id).head_sha == "baseline"
-        assert store.flows.get_flow(flow.id).state is FlowState.BLOCKED
-        assert service.retry(flow)
-        assert store.flows.get_flow(flow.id).state is FlowState.FINALIZING
+        archived = store.flows.get_flow(flow.id)
+        assert (archived.state, archived.archive_reason) == (
+            FlowState.ARCHIVED, ArchiveReason.SUCCEEDED,
+        )
+        jobs = store.jobs.list_jobs(flow.id)
+        with pytest.raises(ValueError, match="archived Flow"):
+            service.retry(flow)
+        assert store.flows.get_flow(flow.id) == archived
+        assert store.jobs.list_jobs(flow.id) == jobs
+        assert store.workers.get_flow_execution(flow.id).released_at is None
+        assert store.stops.pending("worker-a").job_id == job.id
+        assert github.comments == comments and github.review_requests == []
         assert store.flows.get_attempt(task.attempt_id).codex_session_id == "old-session"
         return
     if transition == "cancel":
@@ -342,6 +362,7 @@ async def test_merge_during_revision_application_preserves_delivery_and_session(
 ):
     # Remote verification and effect I/O can each overlap a human merging the current PR.
     flow, job, task, github, subject = pending_revision
+    assert store.workers.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
     result = verified_result(task, commit_sha="revision", remote_sha="revision")
     github.sha = "revision"
     assert accept(store, job, result) == "pending"
@@ -360,6 +381,8 @@ async def test_merge_during_revision_application_preserves_delivery_and_session(
     assert await subject.results.apply(job.id) is JobState.DONE
     assert store.deliveries.get_delivery(flow.id).state is DeliveryState.MERGED
     assert store.deliveries.get_delivery(flow.id).head_sha == "baseline"
+    archived = store.flows.get_flow(flow.id)
+    assert (archived.state, archived.archive_reason) == (FlowState.ARCHIVED, ArchiveReason.SUCCEEDED)
     assert store.flows.get_attempt(task.attempt_id).codex_session_id == "old-session"
     assert store.workers.get_flow_execution(flow.id).released_at is None
     assert len(store.reviews.pending(flow.id)) == 1

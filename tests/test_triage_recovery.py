@@ -5,15 +5,25 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.domain.models import JobKind, ReviewItemKind, TriageVerdict, Verdict
+from app.contracts.protocol import ExecutionStopped
+from app.domain.models import (
+    ArchiveReason,
+    FlowState,
+    JobKind,
+    ReviewItemKind,
+    TriageVerdict,
+    Verdict,
+)
 from app.domain.review_models import FeedbackUpdate
 from app.persistence.reviews import ReviewStore
 from tests.github import RecordingGitHub
 from tests.review_memory import judge_decision
 from tests.test_coordinator import coordinator
 from tests.test_merge import route_merge
+from tests.test_result_recovery import (
+    completed_open_initial as completed_open_initial,  # noqa: PLC0414
+)
 from tests.test_review_batches import claim, feedback, ingest, review_flow  # noqa: F401
-from tests.test_workflow_transactions import bound_review_flow
 
 
 async def test_revision_and_batch_transition_commit_together(
@@ -42,15 +52,14 @@ async def test_revision_and_batch_transition_commit_together(
     assert len(store.jobs.list_jobs(flow.id)) == 1
 
 
-async def test_judge_failure_then_ignore_keeps_archive_owner(store, recording_resources):
-    # A provider failure must not release the worker needed after a later PR merge.
-    flow = bound_review_flow(store)
+async def test_judge_failure_then_ignore_keeps_cleanup_owner(store, completed_open_initial):
+    # A provider failure must not release the checkout of a completed remote execution.
+    flow, subject, _github, initial, _result = completed_open_initial
     store.reviews.ingest(flow.id, "review", "pull_request_review_comment", {},
         FeedbackUpdate(kind=ReviewItemKind.INLINE, github_id=101, author="alice", body="Check",
                        updated_at=store.now()), settle_seconds=0, submit_grace_seconds=0)
     batch = store.reviews.claim_due()[0]
     before = store.workers.get_flow_execution(flow.id)
-    subject = coordinator(store, RecordingGitHub())
     judge = SimpleNamespace(triage=AsyncMock(side_effect=RuntimeError("provider stopped")))
     with pytest.raises(RuntimeError, match="provider stopped"):
         await subject.triage(batch, judge)
@@ -58,5 +67,18 @@ async def test_judge_failure_then_ignore_keeps_archive_owner(store, recording_re
     await subject.triage(store.reviews.get_batch(batch.id), judge)
     assert store.workers.get_flow_execution(flow.id) == before
     await route_merge(store, flow)
-    archive = store.workers.assign_job("worker-a", "archive", "epoch-a")
-    assert archive is not None and archive.kind is JobKind.ARCHIVE
+    archived = store.flows.get_flow(flow.id)
+    assert (archived.state, archived.archive_reason) == (FlowState.ARCHIVED, ArchiveReason.SUCCEEDED)
+    assert store.workers.get_flow_execution(flow.id) == before
+    notice = store.jobs.list_jobs(flow.id)[-1]
+    assert notice.kind is JobKind.ARCHIVE and notice.assigned_worker_id is None
+    assert notice.assignment_token is None
+    assert notice.result_payload["terminal"]["type"] == "merge_archive"
+    assert store.workers.assign_job("worker-a", "archive", "epoch") is None
+    stop = store.stops.pending("worker-a")
+    assert stop.job_id == initial.arguments.job_id
+    assert store.stops.confirm(
+        "worker-a", ExecutionStopped(**stop.fence().model_dump(), execution_nonce="owned"), "epoch"
+    )
+    assert store.workers.get_flow_execution(flow.id).released_at is not None
+    assert store.jobs.get_job(notice.id).result_applied_at is None

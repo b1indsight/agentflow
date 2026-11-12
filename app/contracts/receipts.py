@@ -7,16 +7,25 @@ application transactions and acknowledgements; a decoded receipt grants none of 
 from __future__ import annotations
 
 import hashlib
+import json
 from typing import Annotated, Literal, Self
 
-from pydantic import BeforeValidator, Field, JsonValue, StrictInt, TypeAdapter, model_validator
+from pydantic import (
+    AwareDatetime,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    JsonValue,
+    StrictInt,
+    TypeAdapter,
+    model_validator,
+)
 
 from app.contracts.protocol import (
     ExecutionStopped,
     Failed,
     ProtocolModel,
     Succeeded,
-    TerminalPayload,
     terminal_digest,
 )
 
@@ -64,15 +73,42 @@ class LegacyStopped(ExecutionStopped, _LegacyHeader):
         )
 
 
+class MergeArchiveNotice(ProtocolModel):
+    """Control's frozen business conclusion; never a Worker execution or cleanup receipt."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    type: Literal["merge_archive"] = "merge_archive"
+    job_id: int = Field(gt=0)
+    flow_id: int = Field(gt=0)
+    round_no: int = Field(gt=0)
+    repo: str = Field(min_length=1)
+    pr_number: int = Field(gt=0)
+    merged_at: AwareDatetime
+    merge_commit_sha: str = Field(min_length=1)
+
+
+def merge_notice_digest(notice: MergeArchiveNotice) -> str:
+    """Hash the complete immutable notice, independently of Worker terminal digests."""
+    return hashlib.sha256(json.dumps(
+        notice.model_dump(mode="json"), sort_keys=True, separators=(",", ":"),
+    ).encode()).hexdigest()
+
+
 class ResultInbox(ProtocolModel):
     """One stored business outcome and its origin, with no delivery metadata."""
 
-    version: Annotated[Literal[1], BeforeValidator(_INTEGER.validate_python)] = 1
+    version: Annotated[Literal[1, 2], BeforeValidator(_INTEGER.validate_python)] = 1
     source: Literal["worker", "control"]
-    terminal: TerminalPayload
+    terminal: Annotated[Succeeded | Failed | MergeArchiveNotice, Field(discriminator="type")]
 
     @model_validator(mode="after")
     def _control_outcome(self) -> Self:
+        if isinstance(self.terminal, MergeArchiveNotice):
+            if self.version != 2 or self.source != "control":
+                raise ValueError("merge notice requires the v2 Control inbox")
+            return self
+        if self.version != 1:
+            raise ValueError("execution outcomes require the v1 inbox")
         if self.source == "control" and not isinstance(self.terminal, Failed):
             raise ValueError("control may only persist a failure outcome")
         return self
@@ -85,7 +121,7 @@ def decode_result_inbox(
     assignment_token: str | None,
     result_digest: str,
 ) -> ResultInbox:
-    """Read v1 or a known v14/v15 inbox and validate it against the owning database row.
+    """Read v1/v2 or a known v14/v15 inbox against the owning database row.
 
     No input mutation, default-version inference or writeback occurs. An unassigned control
     failure alone can use the historical token='control' sentinel. Actual application and
@@ -100,6 +136,11 @@ def decode_result_inbox(
             terminal=previous.terminal(),
         )
     terminal = inbox.terminal
+    if isinstance(terminal, MergeArchiveNotice):
+        if (terminal.job_id != job_id or assignment_token is not None
+                or merge_notice_digest(terminal) != result_digest):
+            raise ValueError("merge notice does not match its local job or digest")
+        return inbox
     control_token = (
         inbox.source == "control"
         and assignment_token is None

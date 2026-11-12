@@ -61,7 +61,7 @@ class ServerRuntime:
         )
         plugins = get_plugin_manager()
         github = GitHubApp(self.settings)
-        effects = ResultEffects(github, database=database)
+        effects = ResultEffects(github, database=database, plugins=plugins)
         self.results = ResultApplication(
             github,
             self.settings,

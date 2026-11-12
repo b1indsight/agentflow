@@ -7,8 +7,10 @@ from app.contracts.protocol import ExecutionStopped, Failed
 from app.contracts.result_models import EffectState, PullRequestEffect, ResultPlan
 from app.controler.workflow.effects import ResultEffects
 from app.controler.workflow.service import ControlService
-from app.domain.models import DeliveryState, FlowState, JobKind, JobState
+from app.domain.models import ArchiveReason, DeliveryState, FlowState, JobKind, JobState
 from app.github import PullRequest
+from app.plugins import get_plugin_manager
+from app.plugins.hookspecs import hookimpl
 from tests.github import RecordingGitHub
 from tests.test_coordinator import coordinator
 from tests.test_merge import route_merge
@@ -111,7 +113,7 @@ def test_never_dispatched_cancel_needs_no_stop(store):
 
 
 @pytest.mark.parametrize("reconnect", [False, True])
-async def test_merge_during_cancel_retains_binding_for_original_archive(store, reconnect):
+async def test_merge_during_cancel_retains_binding_until_original_stop_settles(store, reconnect):
     flow, job = running(store)
     delivery = store.deliveries.get_or_create_delivery(flow.id, "flow/1")
     delivery.state, delivery.pr_number, delivery.head_sha = DeliveryState.OPEN, 17, "b" * 40
@@ -119,29 +121,34 @@ async def test_merge_during_cancel_retains_binding_for_original_archive(store, r
     ControlService(
         database=store.database,
     ).cancel(flow)
-    await route_merge(store, flow)
-    assert store.flows.get_flow(flow.id).state is FlowState.FINALIZING
     stop = store.stops.pending("w")
+    binding = store.workers.get_flow_execution(flow.id)
+    await route_merge(store, flow)
+    archived = store.flows.get_flow(flow.id)
+    assert (archived.state, archived.archive_reason) == (FlowState.ARCHIVED, ArchiveReason.SUCCEEDED)
+    assert store.stops.pending("w") == stop
+    assert store.workers.get_flow_execution(flow.id) == binding
+    notice = store.jobs.list_jobs(flow.id)[-1]
+    assert notice.kind is JobKind.ARCHIVE and notice.state is JobState.RUNNING
+    assert notice.assigned_worker_id is None and notice.assignment_token is None
+    assert notice.result_payload["terminal"]["type"] == "merge_archive"
+    successor = store.flows.create_flow(flow.repo, 2, 1)
+    queued = store.jobs.enqueue_job(successor.id, JobKind.INITIAL)
+    assert store.workers.assign_job("w", "before-stop", "epoch") is None
     assert store.stops.confirm(
         "w", ExecutionStopped(**stop.fence().model_dump(), execution_nonce="owned"), "epoch"
     )
-    assert store.workers.get_flow_execution(flow.id).released_at is None
+    assert store.workers.get_flow_execution(flow.id).released_at is not None
     epoch = "reconnected" if reconnect else "epoch"
     if reconnect:
         register_worker(store, "w", repo=flow.repo, epoch=epoch)
-    archive = store.workers.assign_job("w", "archive", epoch)
-    assert archive is not None and archive.kind is JobKind.ARCHIVE
+    replacement = store.workers.assign_job("w", "replacement", epoch)
+    assert replacement is not None and replacement.id == queued.id
     job = store.jobs.get_job(job.id)
-    assert archive.workspace == job.workspace and archive.generation == job.generation
-    assert store.workers.get_flow_execution(flow.id).bound_at == stop.binding_at
-    # A retained merged Flow can stop coding then archive in the same generation.
-    # Stop identity must follow the assignment, not the Flow generation.
-    assert store.stops.authorize_dispatch(archive.id, "w", "archive", epoch)
-    with store.transaction() as tx:
-        tx.lock_workflow(flow.id)
-        tx.stops.request(flow.id)
-    archive_stop = store.stops.pending("w")
-    assert archive_stop.job_id == archive.id and archive_stop.generation == archive.generation
+    assert replacement.workspace == job.workspace and replacement.generation == job.generation + 1
+    # Notification delivery never owns this slot or gates the next generation.
+    assert store.jobs.get_job(notice.id) == notice
+    assert store.flows.get_flow(flow.id) == archived
 
 
 @pytest.mark.parametrize("kind", ["comment", "label", None])
@@ -212,7 +219,7 @@ async def test_finalizing_flow_reserves_issue_until_late_merge_cleanup_settles(s
     store.workers.recover_abandoned_assignments()
     store._db._clock = lambda: flow.created_at + timedelta(days=2)
     store.workers.sweep_expired_assignments()
-    assert store.workers.get_flow_execution(flow.id).released_at is None
+    assert store.workers.get_flow_execution(flow.id).released_at is not None
 
 
 def test_lost_started_ack_cannot_requeue_then_cancel_as_unsent(store):
@@ -331,27 +338,44 @@ async def test_cancelled_creation_persists_pr_identity_and_merge_before_stop(
     )
     github = RecordingGitHub()
     github.pull_request = remote
+    observed: list[FlowState] = []
+
+    class ArchivedPlugin:
+        @hookimpl
+        def on_archived(self, flow):
+            observed.append(store.flows.get_flow(flow.id).state)
+
+    plugins = get_plugin_manager()
+    plugins.register(ArchivedPlugin())
     assert (
         await ResultEffects(
             github,
             database=store.database,
+            plugins=plugins,
         ).run(plan)
         is None
     )
+    assert observed == ([FlowState.ARCHIVED] if remote_state == "merged" else [])
     recovered = store.deliveries.get_delivery(flow.id)
     assert recovered.pr_number == 17 and recovered.state is DeliveryState(remote_state)
     assert recovered.merge_commit_sha == remote.merge_commit_sha
     assert store.flows.get_flow_by_pr(flow.repo, 17).id == flow.id
-    assert store.flows.get_flow(flow.id).state is FlowState.FINALIZING
+    current = store.flows.get_flow(flow.id)
+    assert current.state is (
+        FlowState.ARCHIVED if remote_state == "merged" else FlowState.FINALIZING
+    )
     stop = store.stops.pending("w")
     assert store.stops.confirm(
         "w", ExecutionStopped(**stop.fence().model_dump(), execution_nonce="owned"), "epoch"
     )
     if remote_state == "merged":
-        assert store.workers.get_flow_execution(flow.id).released_at is None
-        assert store.workers.assign_job("w", "archive", "epoch").kind is JobKind.ARCHIVE
-    else:
-        assert store.workers.get_flow_execution(flow.id).released_at is not None
+        assert current.archive_reason is ArchiveReason.SUCCEEDED
+        notice = store.jobs.list_jobs(flow.id)[-1]
+        assert notice.kind is JobKind.ARCHIVE and notice.assigned_worker_id is None
+        assert notice.assignment_token is None
+        assert notice.result_payload["terminal"]["type"] == "merge_archive"
+    assert store.workers.get_flow_execution(flow.id).released_at is not None
+    assert store.workers.assign_job("w", "archive", "epoch") is None
 
 
 async def test_preparation_result_releases_cancelled_binding_after_application(

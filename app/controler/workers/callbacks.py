@@ -22,6 +22,7 @@ from app.contracts.protocol import (
     ConversationResult,
     ExecuteResult,
     ExecutionTask,
+    Failed,
     FlowToolRequest,
     Heartbeat,
     InferenceRequest,
@@ -47,6 +48,7 @@ from app.contracts.protocol import (
     StopAccepted,
     StopExecution,
     StopResult,
+    Succeeded,
     TerminalPayload,
     ToolCall,
     ToolResult,
@@ -889,7 +891,9 @@ class ServerCallbacks:
             )
         except ValueError as error:
             raise ProtocolViolation("result acceptance conflicts with durable inbox") from error
-        if inbox.source != "worker" or self.workers.record_assignment_result(
+        if inbox.source != "worker" or not isinstance(inbox.terminal, (Succeeded, Failed)):
+            raise ProtocolViolation("result acceptance requires a remote execution result")
+        if self.workers.record_assignment_result(
             job.id,
             self.worker_id,
             token,

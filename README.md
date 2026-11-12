@@ -25,8 +25,9 @@ Flow 使用 `queued/running/review/blocked/finalizing/archived` 六态；看板�
   超出预算或永久 API 错误走现有失败/显式 retry 路径；凭据签发和 worker 执行不在此重试范围。
 
 - **关闭与重开**：当前未合并 PR 关闭进入废弃收尾；停止、结果和已发操作结清后归档，
-  放弃/调查保留工作区，合并交付仍须原 worker 的清理凭据。PR/Issue 重开不自动恢复。
-  失败与未知执行进入 blocked，仍占用该 Issue；`flow retry` 不绕过执行、结果和停止门槛。
+  放弃/调查保留工作区。已合并 PR 立即成功归档，原 worker 独立停止并回收工作区；
+  资源未结清时仍拒绝同一 Flow 的 resume。PR/Issue 重开不自动恢复。
+  未合并 Flow 的失败与未知执行进入 blocked，仍占用该 Issue；`flow retry` 不绕过执行、结果和停止门槛。
   只有 `flow resume` 开启新轮次、新分支与新交付，旧 PR 和旧反馈不能授权新工作。
   INITIAL 无 PR 失败也保留执行绑定，结束时须由原 worker 确认停止并清理后归还工作区；
   原 worker 离线时继续等待，不提前归档。恢复分支使用 `flow/<id>-round-N`，保留首轮 `flow/<id>`。
@@ -68,10 +69,15 @@ Flow 使用 `queued/running/review/blocked/finalizing/archived` 六态；看板�
 - **原子提交与操作恢复**：trigger/retry/merge/cancel 的状态和任务变更在共享事务内提交；
   终态结果先持久接收，再执行带回执的 GitHub 操作，最后原子提交本地结果并回复 `server.accept_result`。
   恢复时核对远端状态，避免重复派生 job 或重复发送评论；无法确认的远端结果保留待核对状态。
-- **合并与归档**：人工合并后由原 worker 核验并清理工作区，对关联 Issue/PR 发布工作区处置凭据。
-  沿用结果副作用为 Issue/PR 添加完成标签、移除待审标签；业务副作用结清后原子写入带轮次的归档
-  activity、释放 worker 并进入 archived。状态标签更新失败记入日志后跳过，不阻塞 PR 关联、交付或归档。
-  归档前合并优先于废弃，但不解除 blocked。迟到证据能证明归档前已合并时自动更正为成功，永不恢复执行。
+- **合并与归档**：Control 核验当前 PR 合并后，在同一事务保存合并事实、原 Worker 停止请求、
+  本地通知意图和带轮次的 archive activity，立即进入 archived/succeeded。原 worker 离线、
+  绑定缺失或已释放、清理或通知失败均不阻塞该结论。原 worker 确认执行已退出、远端结果及
+  已发操作结清后，Control 释放原绑定并推进 generation，正常路径不等待 recovery grace。
+  下一 INITIAL 由 worker 在独占目录后清理旧工作副本；库存不授权释放，ACK 不授权复用。
+  通知独立更新 Issue/PR 标签和评论，
+  不声称目录已清理；评论失败可用 `flow retry` 补发缺项，结果不确定时只查询恢复。
+  已保存完整合并事实的旧积压有界恢复，open 的执行失败 Flow 不变。
+  迟到证据能证明归档前已合并时自动更正为成功，永不恢复执行。
 - **GitHub 请求超时**：App 和 installation 客户端的连接、读写及连接池等待默认各为 30 秒，
   可通过 `FLOWTOOL_GITHUB_REQUEST_TIMEOUT_SECONDS` 调整；这不是整批结果恢复的总时限。
 - **持久反馈批次**：反馈版本与 settle deadline 入库，重启后恢复；同 Flow 串行处理冻结批次，
@@ -90,10 +96,10 @@ Flow 使用 `queued/running/review/blocked/finalizing/archived` 六态；看板�
   三次均失败或提前耗尽预算，在详情“执行记录 → 推理通知”保留安全摘要，不发送 GitHub 通知。
 - **运维入口**：CLI 可查看 Flow、交付分支/PR、worker、任务恢复状态和未完成的 GitHub 操作，
   并提供 cancel/retry 命令。已核验修订中被明确拒绝的通知可补发；结果不确定时拒绝直接 retry。
-- **取消与 drain**：cancel 持久化停止意图，worker 取消当前执行并回收其持有的 Codex/VCS
-  进程组，清理未提交修改和未跟踪文件后把原 workspace 归还空闲池，保留目录及 ignored 缓存。
-  完成回收才发送停止凭据；停止凭据、已发送 effects 及本地 ACK 库存未结清前不释放绑定。
-  停止只影响目标 job；与合并同时发生时，原位置的下一代仍留给原 Flow 完成归档。
+- **取消与 drain**：cancel 持久化停止意图，worker 取消当前执行并等待其 Codex/VCS
+  进程组退出后发送停止凭据，不在 stop 中执行 Git 清理；下一 INITIAL 独占后整理旧工作副本。
+  停止凭据、远端结果及已发送 effects 未结清前不释放绑定，ACK 只确认 journal。
+  停止只影响目标 job；合并后的原位置在精确停止回执结清后可立即分配给下一 Flow。
   drain 停止分配新 Flow，已有绑定继续收尾。未知旧执行保持阻塞，
   无强制释放入口，见[取消与停机](docs/operations/cancel-drain.md)。
 - **Server 镜像更新**：独立更新器监听仓库 Webhook，验签后持久写入主机 JSON 队列，后台核验发布、
@@ -373,17 +379,19 @@ Worker 连接按实际 protocol 和认证结果处理，不匹配直接拒绝。
 Worker 没有后台自动更新或切换握手；同版本重启仍保留冻结任务、结果摘要、effect ledger 与 journal 恢复能力。
 
 每个 Flow 的 journal 独立存于 `journals/flow-<flow_id>.json`，runtime 扫描全部文件，不再使用
-`current.json` 路由。任务 ACK 后保留上一任务的 Flow 和 root 归属，成功归档 ACK 已写入 pool 后才移除。不要更换
-`FLOWTOOL_WORKER_ROOT`、复制 journal 到其他 root 或复用 worker ID 接管工作区。清理只处理
-池中登记且归属匹配的 `workspaces/<owner>/<repo>/<slot_id>`：归档时完整副本归还空闲池并保留
-ignored 缓存，临时 worktree 注销并删除；取消时两种工作区均清理未提交修改后保留并归还池。
+`current.json` 路由。ACK 只确认 journal，不写 pool，也不阻止已退出执行的位置被新代接替。不要更换
+`FLOWTOOL_WORKER_ROOT`、复制 journal 到其他 root 或复用 worker ID 接管工作区。新 INITIAL
+取得独占后清理池中登记且归属匹配的 `workspaces/<owner>/<repo>/<slot_id>`，保留可复用目录及
+ignored 缓存；等待 review 的目录保留给原 Flow 的 revision，不能按空闲目录处理。
 拒绝 symlink、路径逃逸和未登记目录，不删除 seed 或其他 Flow 的工作区。
 
-合并后使用 `flow show <id>` 查看等待、清理失败、结果待核验/提交或完成及错误。
-清理失败进入 blocked 并保留原 worker binding；修复权限等原因后，原 worker 在线且执行已结束时
-使用 `flow retry <id>`，只重试 ARCHIVE，保留当前 attempt。已有清理凭据时仅按上述方式恢复 GitHub
-回写，不要重复删除。合并后的 cancel 不降低成功目标；旧 executor 状态未知、journal 丢失、原 worker 长期离线
-或绑定已释放时，不会自动接管、清理或释放，需人工核验。
+合并后使用 `flow show <id>` 分别查看业务归档、执行绑定与 GitHub 通知状态。原 Worker 确认执行
+退出后可释放绑定；下一 INITIAL 在独占目录后清理旧副本，清理失败不把原已归档 Flow 改回 blocked。
+已归档 Flow 的
+`flow retry <id>` 只重试明确失败的冻结通知，不能重启编码或重新派发清理；未决远端结果只查询恢复。
+合并统一使用原 Worker 的停止协议回收，不派发 Worker ARCHIVE，也不新增旧 ARCHIVE 任务恢复。
+旧 executor 状态未知、journal/root 丢失等情况仍隔离目录并要求人工核验，不跨 worker 接管。
+升级及回退边界见[部署与重启](docs/operations/upgrade.md#合并归档与资源回收分离)。
 
 线程快照、处理依据和远端回执均按当前契约持久化；本地 resolved 标记不替代 GitHub 确认。
 线程权限失败可完成已验证代码交付，但相关反馈/诊断仍待处理。

@@ -343,6 +343,7 @@ class RecordingCoordinator(JobCoordinator):
         if isinstance(terminal, Failed):
             job.state, job.result_applied_at = JobState.FAILED, job.updated_at
             return job.state
+        assert isinstance(terminal, Succeeded)
         result = terminal.result
         assert isinstance(result, InitialTaskResult)
         self.received_results.append(result)

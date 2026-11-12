@@ -43,7 +43,7 @@ from app.controler.workers.transport import serve_worker
 from app.controler.workflow.results import ResultApplication
 from app.controler.workflow.service import ControlService
 from app.controler.workflow.tools import FlowToolService
-from app.domain.models import JobKind, JobState, VcsKind, utcnow
+from app.domain.models import FlowState, JobKind, JobState, VcsKind, utcnow
 from app.persistence.stops import StopIntent
 from app.worker.execution.executor import WorkerExecutor
 from app.worker.execution.lifecycle import WorkerExecution, WorkerProtocolError
@@ -65,6 +65,7 @@ from tests.test_worker_handler import (
     worker_message,
 )
 from tests.test_worker_workspaces import managed_seed
+from tests.test_workspace_inventory import merged_business
 from tests.worker_fakes import NoPendingStops, run_worker, server_runtime, worker_runtime
 
 
@@ -618,8 +619,9 @@ async def test_stopping_consumes_a_and_requires_real_r_before_b(delivery):
         assert len(confirms) == (1 if delivery == "effects_pending" else 0)
 
 
+@pytest.mark.parametrize("merged", [False, True])
 async def test_stop_without_ack_reuses_workspace_and_reconnect_ack_preserves_new_writer(
-    store, tmp_path, monkeypatch, recording_resources
+    store, tmp_path, monkeypatch, recording_resources, merged
 ):
     # Lost stop ACKs retain only the old journal, never occupancy. Replaying that ACK
     # after reconnect must not clean or otherwise modify the new generation's writer.
@@ -748,9 +750,17 @@ async def test_stop_without_ack_reuses_workspace_and_reconnect_ack_preserves_new
     try:
         async with asyncio.timeout(5):
             await started.wait()
-            ControlService(database=store.database, jobs_available=handler.gateway.wake_all).cancel(
-                flows[0]
-            )
+            if merged:
+                # The merge business transaction commits before the worker has stopped.
+                with store.transaction() as tx:
+                    tx.lock_workflow(flows[0].id)
+                    tx.stops.request(flows[0].id)
+                merged_business(store, flows[0].id)
+                handler.gateway.wake_all()
+            else:
+                ControlService(database=store.database, jobs_available=handler.gateway.wake_all).cancel(
+                    flows[0]
+                )
             while len(executed) < 2:
                 if server.done():
                     server.result()
@@ -764,6 +774,7 @@ async def test_stop_without_ack_reuses_workspace_and_reconnect_ack_preserves_new
         manifest = pool.manifest_path.read_bytes()
         writer = pool.path(next_state.load().workspace) / "writer"
         assert writer.read_text() == str(flows[1].id)
+        assert store.flows.get_flow(flows[0].id).state is FlowState.ARCHIVED
     finally:
         server.cancel()
         worker.cancel()
@@ -784,6 +795,7 @@ async def test_stop_without_ack_reuses_workspace_and_reconnect_ack_preserves_new
         assert next_state.load().selected_generation > session.load().selected_generation
         assert pool.manifest_path.read_bytes() == manifest
         assert writer.read_text() == str(flows[1].id)
+        assert store.flows.get_flow(flows[0].id).state is FlowState.ARCHIVED
     finally:
         server.cancel()
         worker.cancel()

@@ -2,6 +2,8 @@
 
 from dataclasses import dataclass
 
+from pluggy import PluginManager
+
 from app.contracts.protocol import (
     InitialTaskResult,
     RevisionTaskResult,
@@ -22,7 +24,6 @@ from app.domain.models import (
     FlowDelivery,
     FlowState,
     Job,
-    JobKind,
 )
 from app.github import PullRequest, PullRequestMerge, Repository
 from app.persistence.database import Database
@@ -31,6 +32,7 @@ from app.persistence.flows import FlowStore
 from app.persistence.jobs import JobStore
 from app.persistence.stops import StopStore
 from app.persistence.workers import WorkerStore
+from app.plugins import emit_hook
 
 
 @dataclass(frozen=True)
@@ -75,6 +77,7 @@ def adopt_created_pull_request(
     jobs: JobStore,
     stops: StopStore,
     workers: WorkerStore,
+    plugins: PluginManager,
 ) -> None:
     """Bind a verified creation receipt and apply its lifecycle under the unchanged intent."""
     with database.transaction() as tx:
@@ -82,7 +85,6 @@ def adopt_created_pull_request(
         flows_tx = flows.using(tx)
         jobs_tx = jobs.using(tx)
         stops_tx = stops.using(tx)
-        workers_tx = workers.using(tx)
         flow = tx.lock_workflow(expected.flow_id)
         current = deliveries_tx.get_delivery(expected.flow_id)
         if (flow is None or current is None or flow.current_attempt_id != attempt_id
@@ -97,15 +99,17 @@ def adopt_created_pull_request(
             raise ResultPending("active PR creation has not closed")
         current.pr_number = remote.number
         current.url = f"https://github.com/{flow.repo}/pull/{remote.number}"
+        archived = False
         if remote.merged:
-            record_merge(
+            archived = record_merge(
                 flow,
                 current,
                 _merge_observation(remote),
                 deliveries=deliveries_tx,
                 flows=flows_tx,
                 jobs=jobs_tx,
-                workers=workers_tx,
+                stops=stops_tx,
+                workers=workers.using(tx),
                 origin="delivery_recovery",
             )
         elif cancelled:
@@ -121,6 +125,11 @@ def adopt_created_pull_request(
                 jobs=jobs_tx,
                 stops=stops_tx,
             )
+    if archived:
+        # Match ControlService.notify_merge: plugins observe the committed business
+        # conclusion, including PR creation recovered after a lost response.
+        emit_hook(plugins, "on_merged", flow=flow)
+        emit_hook(plugins, "on_archived", flow=flow)
 
 
 def _merge_observation(remote: PullRequest) -> PullRequestMerge:
@@ -257,6 +266,7 @@ def record_merge(
     deliveries: DeliveryStore,
     flows: FlowStore,
     jobs: JobStore,
+    stops: StopStore,
     workers: WorkerStore,
     origin: str,
 ) -> bool:
@@ -277,14 +287,14 @@ def record_merge(
         delivery.merge_commit_sha = merge.merge_commit_sha
         delivery.version += 1
         deliveries.update_delivery(delivery)
-    binding = workers.get_flow_execution(flow.id)
-    if first_merge:
-        flow.archive_reason = ArchiveReason.SUCCEEDED
-        if binding is None or binding.released_at is not None:
-            flow.state = FlowState.BLOCKED
-        elif flow.state is not FlowState.BLOCKED:
-            flow.state = FlowState.FINALIZING
-        flows.update_flow(flow)
-        jobs.cancel_jobs(flow.id, reason="PR merged; queued work retired")
-        jobs.enqueue_job(flow.id, JobKind.ARCHIVE)
-    return first_merge
+    flow.archive_reason = ArchiveReason.SUCCEEDED
+    flow.state = FlowState.FINALIZING
+    flows.update_flow(flow)
+    stops.request(flow.id)
+    jobs.cancel_jobs(flow.id, reason="PR merged; queued work retired")
+    jobs.record_merge_notice(flow, delivery)
+    flows.archive_round(flow, delivery)
+    # This can release a never-dispatched preparation immediately. Real execution
+    # remains pinned by the unchanged stop/result/ACK preconditions.
+    workers.release_flow_execution(flow.id)
+    return True

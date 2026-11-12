@@ -8,6 +8,17 @@
 
 ## Unreleased
 
+- 已合并 PR 的 Flow 立即提交 ARCHIVED/SUCCEEDED 和唯一归档 activity，不等待原 Worker 在线、
+  执行绑定释放、工作区清理或 GitHub 通知；原 Worker 通过既有停止协议确认执行退出。精确停止
+  回执、远端结果和已发操作结清后，Control 释放绑定并推进 generation，立即允许位置复用，
+  不增加固定等待；下一 INITIAL 由 Worker 独占后清理旧副本，不等待 journal ACK。
+  同 Flow 的 resume 仍等待旧绑定释放，库存不授权释放或推进 generation。
+  本地 Control 通知复用 jobs/result/effects，仅写 inbox v2，不新增表或 Worker wire 类型；
+  权限失败只重试冻结缺项，旧轮/新 Issue owner 的标签受保护，未知通知先查询原 marker。
+  修复旧轮本地通知未完成时阻塞 resume 后 INITIAL 调度的问题，保留真实执行和未结清结果的保护。
+  完整合并事实的旧积压有界恢复，open 的失败 Flow 不变；不新增旧 Worker ARCHIVE 任务兼容，
+  既有历史格式读取及 digest 保持不变。未合并的放弃/调查结束规则保持不变。
+  此项替代下文早期“合并后等待清理归档/下一代交回原 Flow”的规则；升级与 v2 回退边界见部署文档。
 - Worker 支持不同 workspace 上并行执行多个 job；Flow 与 workspace 双向独占，同 Flow 串行。
   扩充 workers 为 `(worker_id, workspace)` 复合主键，不新增 workspace 表或 Registry；
   默认无仓库 workspace 供推理，仓库库存按 worker 上报限额及排队需求自动补充，配置 3 可正常派发。
