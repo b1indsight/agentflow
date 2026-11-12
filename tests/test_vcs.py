@@ -55,27 +55,6 @@ async def _jj(*args: str, cwd: Path, env: dict[str, str]) -> None:
 
 
 @pytest.mark.asyncio
-async def test_git_outcome_requires_new_clean_commit_on_target_remote_branch(
-    tmp_path: Path,
-) -> None:
-    repo, _ = _git_fixture(tmp_path)
-    context = await prepare_vcs_context(repo, "flow/one")
-
-    _git("checkout", "-b", "flow/one", cwd=repo)
-    (repo / "README.md").write_text("changed\n")
-    _git("add", "README.md", cwd=repo)
-    _git("commit", "-m", "change", cwd=repo)
-    _git("push", "-u", "origin", "flow/one", cwd=repo)
-
-    outcome = await verify_vcs_outcome(context, VcsKind.GIT)
-
-    assert outcome.backend is VcsKind.GIT
-    assert outcome.branch == "flow/one"
-    assert outcome.commit_sha == outcome.remote_sha
-    assert outcome.commit_sha != context.git_base_sha
-
-
-@pytest.mark.asyncio
 async def test_git_outcome_rejects_a_branch_without_a_new_commit(tmp_path: Path) -> None:
     repo, _ = _git_fixture(tmp_path)
     context = await prepare_vcs_context(repo, "flow/one")

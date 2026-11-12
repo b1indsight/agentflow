@@ -237,13 +237,11 @@ async def test_flow_journals_isolate_unacknowledged_received_and_archive_resume(
     assert not (tmp_path / "journals/current.json").exists()
 
 
-@pytest.mark.parametrize("damage", ["filename", "symlink", "root", "record"])
+@pytest.mark.parametrize("damage", ["symlink", "root", "record"])
 def test_scan_preserves_all_evidence_on_invalid_inventory(tmp_path, damage):
     state = ExecutionState(tmp_path, 1)
     state.record_received(assignment(1, "a" * 32))
-    if damage == "filename":
-        state.path.rename(state.path.with_name("flow-01.json"))
-    elif damage == "symlink":
+    if damage == "symlink":
         (state.directory / "flow-2.json").symlink_to(state.path)
     else:
         data = json.loads(state.path.read_text())

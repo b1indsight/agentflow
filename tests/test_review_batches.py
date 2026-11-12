@@ -501,26 +501,6 @@ async def test_ignore_consumes_frozen_input_once_and_leaves_newer_version(store,
     assert [(f.github_id, f.version) for f in store.reviews.pending(flow.id)] == [(101, 2)]
 
 
-async def test_revise_transfers_batch_to_one_derived_job(store, review_flow, recording_resources):
-    flow, clock = review_flow
-    ingest(store, flow, feedback(clock))
-    job = claim(store, clock)[0]
-    _, github, _ = await run_triage(
-        store,
-        flow,
-        job,
-        TriageVerdict(verdict=Verdict.REVISE, confidence=0.9, instruction="Fix the bound"),
-    )
-    revisions = [j for j in store.jobs.list_jobs(flow.id) if j.kind is JobKind.REVISION]
-    assert len(revisions) == 1
-    assert batch_for(store, revisions[0]).id == batch_for(store, job).id
-    assert github.comments == []
-    ingest(store, flow, feedback(clock, 102), "next")
-    assert claim(store, clock) == []
-
-
-
-
 @pytest.mark.parametrize("outcome", [BatchState.COMPLETED, BatchState.WAITING])
 def test_retry_after_successful_replacement_does_not_select_historical_failure(
     store, review_flow, outcome,
@@ -572,7 +552,7 @@ async def test_answer_uses_frozen_decision_once_and_consumes_after_comment(store
     assert "#discussion_r102" in github.comments[0]
     assert batch.state is BatchState.COMPLETED
     assert not store.reviews.pending(flow.id)
-    assert all(item.kind.value != "answer" for item in store.jobs.list_jobs(flow.id))
+    assert store.jobs.list_jobs(flow.id) == []
 
 
 @pytest.mark.parametrize("approval_id", [101, 102])

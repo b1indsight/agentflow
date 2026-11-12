@@ -3,7 +3,7 @@
 import asyncio
 import json
 from contextlib import asynccontextmanager
-from unittest.mock import Mock
+from datetime import timedelta
 
 import pytest
 from pydantic import ValidationError
@@ -17,6 +17,7 @@ from app.contracts.protocol import (
     FlowToolRequest,
     Heartbeat,
     PayloadValidationError,
+    RepositoryDemand,
     ServerMessage,
     ServerMessageUnion,
     Started,
@@ -30,24 +31,29 @@ from app.contracts.protocol import (
 from app.contracts.validation import parse_worker_input
 from app.controler.workers.conversation import ConversationBroker
 from app.controler.workers.transport import control_ack
+from app.controler.workflow.service import ControlService
 from app.domain.models import VcsKind, VcsOutcome
+from app.persistence.records import required
+from app.worker.execution.executor import WorkerExecutor
 from app.worker.execution.lifecycle import FlowToolCallError, WorkerExecution, WorkerProtocolError
 from app.worker.state.execution import ExecutionState
 from tests.test_communication_session import Socket
 from tests.test_conversation_history import SESSION
 from tests.test_conversation_worker import Connection
 from tests.test_worker_client import RecordingExecutor, assignment_message, registered_message
-from tests.test_worker_handler import RecordingStore, handler_for, register_message, worker_message
+from tests.test_worker_handler import register_message
 from tests.test_worker_session import _assignment
-from tests.worker_fakes import run_worker, worker_runtime
+from tests.test_workspace_dispatch import wait_until
+from tests.wire import worker_message
+from tests.worker_fixtures import run_worker, worker_runtime
 
 ERROR = {"code": "validation_error", "message": "message payload failed validation"}
+pytestmark = pytest.mark.usefixtures("recording_resources")
 
 
 @asynccontextmanager
-async def server_connection():
-    store = RecordingStore()
-    runtime = handler_for(store)
+async def server_connection(store, runtime):
+    assert ControlService(database=store.database).on_trigger("owner/repo", 8, 42) is not None
     socket = Socket()
     session = Session[WorkerMessageUnion, ServerMessageUnion](
         socket,
@@ -70,19 +76,18 @@ async def receive(socket):
     async with asyncio.timeout(2):
         while True:
             message = parse_server_message(await socket.sent.get())
-            if message.payload:
+            if message.payload and not all(isinstance(item, RepositoryDemand) for item in message.payload):
                 return message
 
 
-async def test_bad_assignment_rejects_every_sibling_without_recording_then_continues(tmp_path):
+async def test_bad_assignment_rejects_every_sibling_without_recording_then_continues(tmp_path, monkeypatch):
     # A valid first sibling must not launch before a later sibling fails schema validation.
     connection = Connection()
+    monkeypatch.setattr(WorkerExecutor, "execute", RecordingExecutor.execute)
     state = ExecutionState(tmp_path, 3)
     execution = WorkerExecution(worker_id="worker", executor=RecordingExecutor(), state=state)
-    runtime = worker_runtime(
-        worker_id="worker",
+    runtime = await worker_runtime(
         worker_token="token",
-        serve_ws_url="unused",
         execution=execution,
         read_history=state.read,
     )
@@ -90,7 +95,7 @@ async def test_bad_assignment_rejects_every_sibling_without_recording_then_conti
     try:
         await connection.outgoing.get()
         await connection.incoming.put(registered_message().model_dump_json())
-        valid = assignment_message(_assignment())
+        valid = assignment_message(_assignment(workspace=runtime.workspaces.inventory()[1].workspace))
         invalid = assignment_message(_assignment()).model_dump(mode="json")
         invalid["payload"][0]["message_id"] = call_header()["message_id"]
         invalid["payload"][0]["arguments"] = {"private-token": "secret-input"}
@@ -143,18 +148,18 @@ async def test_tool_failure_retires_original_waiter_before_critical_recovery(tmp
     connection = Connection()
     state = ExecutionState(tmp_path, 3)
     execution = WorkerExecution(worker_id="worker", executor=Executor(), state=state)
-    runtime = worker_runtime(
-        worker_id="worker",
+    runtime = await worker_runtime(
         worker_token="token",
-        serve_ws_url="unused",
         execution=execution,
         read_history=state.read,
     )
+    work = _assignment(workspace=runtime.workspaces.inventory()[1].workspace)
+    execution.receive(work)
     running = asyncio.create_task(run_worker(runtime, connection))
     try:
         await connection.outgoing.get()
         await connection.incoming.put(registered_message().model_dump_json())
-        await connection.incoming.put(assignment_message(_assignment()).model_dump_json())
+        await connection.incoming.put(assignment_message(work).model_dump_json())
         started = (await connection.receive_message()).payload[0]
         tool = (await connection.receive_message()).payload[0]
         items = [
@@ -197,8 +202,8 @@ async def test_tool_failure_retires_original_waiter_before_critical_recovery(tmp
         await execution.shutdown()
 
 
-async def test_bad_heartbeat_tool_batch_has_no_ack_lease_or_tool_effect_then_continues():
-    async with server_connection() as (runtime, store, socket, serving):
+async def test_bad_heartbeat_tool_batch_has_no_ack_lease_or_tool_effect_then_continues(store, monkeypatch, server_runtime):
+    async with server_connection(store, server_runtime()) as (_runtime, _store, socket, serving):
         assignment = (await receive(socket)).payload[0]
         identity = ExecutionIdentity(
             job_id=assignment.arguments.job_id,
@@ -206,33 +211,37 @@ async def test_bad_heartbeat_tool_batch_has_no_ack_lease_or_tool_effect_then_con
         )
         await socket.incoming.put(
             worker_message(
-                "epoch",
                 Started(
                     **call_header(),
                     method="server.execution_started",
                     arguments=identity,
                 ),
+                epoch="epoch",
             ).model_dump_json()
         )
+        await wait_until(lambda: required(store.jobs.get_job(identity.job_id)).started_at is not None)
+        before = required(store.jobs.get_job(identity.job_id))
+        later = store.database.now() + timedelta(seconds=10)
+        monkeypatch.setattr(store.database, "_clock", lambda: later)
+        task = assignment.arguments.task
         tool = FlowToolRequest(
             **call_header(),
             method="flow.open_pr",
             arguments=FlowToolArguments(
                 **identity.model_dump(),
-                flow_id=3,
-                attempt_id=11,
+                flow_id=task.flow_id,
+                attempt_id=task.attempt_id,
                 call_id="open",
-                arguments={},
+                arguments={"title": "Implement", "body": "Done"},
                 vcs_backend="git",
-                branch="flow/issue-8",
-                commit_sha="abc",
-                remote_sha="abc",
+                branch=task.branch,
+                commit_sha="abc123",
+                remote_sha="abc123",
             ),
         )
         heartbeat = Heartbeat(
             **message_header("epoch"), control="heartbeat", payload=[tool], **identity.model_dump()
         )
-        store.heartbeat_assignment = Mock(wraps=store.heartbeat_assignment)
         bad = heartbeat.model_dump(mode="json")
         bad["payload"][0]["arguments"] = {"token": "private-token"}
         await socket.incoming.put(json.dumps(bad))
@@ -240,17 +249,19 @@ async def test_bad_heartbeat_tool_batch_has_no_ack_lease_or_tool_effect_then_con
         assert response.ack_id != heartbeat.message_id
         assert response.payload[0].error.model_dump() == ERROR
         assert response.payload[0].reply_to == tool.message_id
-        store.heartbeat_assignment.assert_not_called()
-        runtime.tools.execute.assert_not_awaited()
-        await socket.incoming.put(worker_message("epoch", tool).model_dump_json())
-        assert (await receive(socket)).payload[0].call_id == "open"
-        runtime.tools.execute.assert_awaited_once()
+        assert required(store.jobs.get_job(identity.job_id)).heartbeat_at == before.heartbeat_at
+        assert required(store.jobs.get_job(identity.job_id)).lease_expires_at == before.lease_expires_at
+        assert store.deliveries.get_tool_call("open") is None
+        await socket.incoming.put(worker_message(tool, epoch="epoch").model_dump_json())
+        reply = (await receive(socket)).payload[0]
+        assert reply.call_id == "open" and reply.error is None
+        assert required(store.deliveries.get_tool_call("open")).response == reply.result
         assert not serving.done()
 
 
 @pytest.mark.parametrize("kind", ["malformed", "repeated_reply", "rejection", "eof"])
-async def test_history_invalid_response_finishes_original_query_and_allows_next(kind):
-    async with server_connection() as (runtime, _store, socket, serving):
+async def test_history_invalid_response_finishes_original_query_and_allows_next(store, kind, server_runtime):
+    async with server_connection(store, server_runtime()) as (runtime, _store, socket, serving):
         await receive(socket)  # Read-only replies do not need the execution's Started.
         broker = ConversationBroker(runtime.gateway)
         query = asyncio.create_task(broker.query("worker-1", HistoryQuery(session_id=SESSION)))
@@ -260,7 +271,7 @@ async def test_history_invalid_response_finishes_original_query_and_allows_next(
             method="worker.history",
             error=PayloadValidationError(**ERROR),
         )
-        message = worker_message("epoch", reply).model_dump(mode="json")
+        message = worker_message(reply, epoch="epoch").model_dump(mode="json")
         if kind != "rejection":
             message["payload"][0].pop("error")
             message["payload"][0]["page"] = {"session_id": 123}
@@ -288,12 +299,12 @@ async def test_history_invalid_response_finishes_original_query_and_allows_next(
         request = (await receive(socket)).payload[0]
         await socket.incoming.put(
             worker_message(
-                "epoch",
                 ConversationResult(
                     **result_header(request.message_id),
                     method="worker.history",
                     error="history_unreadable",
                 ),
+                epoch="epoch",
             ).model_dump_json()
         )
         with pytest.raises(ConversationFailure, match="history_unreadable"):

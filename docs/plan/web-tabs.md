@@ -2,7 +2,7 @@
 
 已复用现有 Radix Tabs，提供标准组合式组件。新增标签只需登记标识与标题并提供对应内容，不再维护固定数量的键盘切换逻辑。初始方案保留在下方；实际实现和验证限制见时间线。
 
-**Stage:** 实现、完整本地复验和独立代码审查完成；远端 CI 待确认，保留基线滚动测试偶发失败的记录
+**Stage:** 实现和独立代码审查完成；已同步 main 并解决 Changelog 冲突，远端 CI 待确认；本地仍有基线滚动测试偶发失败
 **PR:** [#142](https://github.com/b1indsight/agentflow/pull/142)，分支 `feat/console-tabs`；未合并或部署
 
 ## 1. Initial plan
@@ -122,3 +122,9 @@
 - **Implemented changes:** 从最新 `main@origin` 建立独立 jj 工作区，仅带入 Tabs 实现、浏览器回归、feature record 和 Changelog；原工作区的其他后端、测试及文档修改未纳入本次 PR。补充控制台 Tabs 的变更说明，不新增示例标签或文件读取功能。
 - **Evidence / validation:** 在隔离工作区执行 `npm ci` 后，从前端目录运行 `npm run typecheck`、`npm test`、`npm run build`、`npm run format:check` 及 `npm run test:e2e -- --workers=4`，本轮全部通过。
 - **Outcome / pending:** 本轮完整回归通过不代表 [002] 中的基线偶发失败已修复；该问题未改动，仍作为已知验证限制保留。待完成独立代码审查并发布同一功能分支的 PR，未部署。
+
+### [004] — 2026-11-12 — 同步主线并保留双方变更说明
+
+- **Context / decision:** 主线合入测试整理后，双方在 `CHANGELOG.md` 的 `Unreleased` 顶部新增条目，导致 PR 冲突。合入 [main 的测试整理更新](https://github.com/b1indsight/agentflow/commit/7de2f5bba62959dc9585f8e07ac02f698bbf7168)，保留 Tabs 与测试整理两组说明；通过追加合并提交更新原 PR，不重写已发布历史，不合并 PR。
+- **Evidence / validation:** 无剩余冲突；前端目录与此前已审查、已发布的 PR head 完全一致。类型检查、单元测试、生产构建及格式检查通过。完整 `npm run test:e2e -- --workers=4` 中 Tabs 专项及其余场景通过；[002] 记录的 `large activity stays windowed, re-reads evicted pages, and refreshes explicitly` 再次以相同的 282.890625px 偏移失败，预期小于 2px。本轮仅解决文档冲突，未修改滚动逻辑。
+- **Outcome / pending:** 更新同一功能分支和 PR；等待远端 CI 结果。保留已知基线偶发失败，不将本轮完整浏览器回归描述为全部通过。未部署。

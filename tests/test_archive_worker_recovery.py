@@ -4,7 +4,6 @@ import asyncio
 import shutil
 from uuid import UUID, uuid4
 
-from app.communication.gateway import Gateway
 from app.contracts.protocol import (
     AssignmentArguments,
     InitialTask,
@@ -23,13 +22,12 @@ from app.worker.execution.workspaces import RepositoryWorkspaces
 from app.worker.runtime import WorkerRootLock
 from app.worker.state.execution import ExecutionState
 from tests.github import RecordingGitHub
-from tests.test_coordinator import coordinator
 from tests.test_merge import route_merge
 from tests.test_remote_e2e import QueueConnection, QueueSocket
 from tests.test_vcs import _git_fixture
 from tests.test_worker_executor import RecordingAgent
 from tests.test_workflow_transactions import accepted_coding
-from tests.worker_fakes import run_worker, server_runtime, worker_runtime
+from tests.worker_fixtures import run_worker, worker_runtime
 
 
 async def matching_pool(store, root, flow, monkeypatch):
@@ -64,7 +62,7 @@ class ArchiveSocket(QueueSocket):
 
 
 async def test_modern_merge_stops_original_worker_before_reusing_only_its_generation(
-    store, tmp_path, monkeypatch, recording_resources,
+    store, tmp_path, monkeypatch, recording_resources, server_runtime,
 ):
     # The server's exact stop receipt releases occupancy even if its reply is held.
     # Reuse cleans only that generation, never the sibling's checkout or journal.
@@ -131,8 +129,8 @@ async def test_modern_merge_stops_original_worker_before_reusing_only_its_genera
 
         executor = Executor(root, RecordingAgent(), worker_id="worker-a", state=journal, workspaces=pool)
         owner = WorkerExecution(worker_id="worker-a", executor=executor, state=journal)
-        client = worker_runtime(
-            worker_id="worker-a", worker_token="secret", serve_ws_url="unused",
+        client = await worker_runtime(
+            worker_token="secret",
             execution=owner, read_history=journal.read,
         )
         registered, ack_waiting, deliver_ack = asyncio.Event(), asyncio.Event(), asyncio.Event()
@@ -148,10 +146,8 @@ async def test_modern_merge_stops_original_worker_before_reusing_only_its_genera
                     await deliver_ack.wait()
                 return raw
 
-        subject = coordinator(store, RecordingGitHub())
         handler = server_runtime(
-            subject, database=store.database, peers=Gateway(), poll_interval=60,
-            tools=subject.tools, results=subject.results,
+            github=RecordingGitHub(), settings={"worker_poll_interval": 60},
         )
         outgoing, incoming = asyncio.Queue(), asyncio.Queue()
         owner.start()

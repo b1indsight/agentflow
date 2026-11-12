@@ -4,7 +4,6 @@ import asyncio
 import shutil
 from collections.abc import Callable
 from pathlib import Path
-from unittest.mock import Mock
 from uuid import uuid4
 
 import pytest
@@ -14,9 +13,6 @@ from app.communication.gateway import Gateway
 from app.communication.inprocess import in_process_transport_pair
 from app.communication.session import Session
 from app.contracts.protocol import (
-    AssignmentArguments,
-    ExecutionTask,
-    InitialTask,
     Inventory,
     ProvisionResult,
     Register,
@@ -27,17 +23,16 @@ from app.contracts.protocol import (
 from app.contracts.validation import parse_worker_input
 from app.controler.workers.callbacks import ServerCallbacks
 from app.controler.workers.transport import control_ack
-from app.controler.workflow.coordinator import JobCoordinator
-from app.controler.workflow.results import ResultApplication
-from app.domain.models import ArchiveReason, FlowState, Job, JobState
+from app.controler.workflow.service import ControlService
+from app.domain.models import ArchiveReason, FlowState, JobState
 from app.persistence.records import required
-from app.persistence.store import Store
 from app.worker.config import WorkerSettings
 from app.worker.execution.lifecycle import WorkerExecution
 from app.worker.runtime import WorkerRuntime
 from app.worker.state.execution import ExecutionState
+from tests.github import RecordingGitHub
+from tests.test_coordinator import coordinator
 from tests.test_worker_workspaces import managed_seed
-from tests.test_workspace_claims import queued
 
 
 class ControlledWorker(WorkerRuntime):
@@ -71,38 +66,8 @@ class ControlledWorker(WorkerRuntime):
                     worker.running.pop(assignment.job_id)
                 raise RuntimeError("controlled coding outcome")
 
-            async def reclaim_workspace(self):
-                raise AssertionError("stop must not clean or call the workspace pool")
-
         return WorkerExecution(worker_id="worker-a", executor=Executor(), state=state,
                                on_change=self.notify)
-
-
-class ControlledCoordinator(JobCoordinator):
-    def __init__(self, store: Store) -> None:
-        self.store = store
-
-    async def prepare_for_assignment(self, job, worker_id, token, epoch):
-        flow = required(self.store.flows.get_flow(job.required_flow_id))
-        assert flow.current_attempt_id is not None
-        return AssignmentArguments(
-            job_id=job.id, flow_id=flow.id, assignment_token=token,
-            workspace=job.workspace, generation=job.generation,
-            task=InitialTask(
-                flow_id=flow.id, attempt_id=flow.current_attempt_id,
-                repo=flow.repo, repo_identity=f"{worker_id}:{flow.repo}", issue_number=flow.issue_number,
-                issue_title="Controlled", issue_body="", branch=f"flow/{flow.id}",
-            ),
-        )
-
-    def mark_started(self, job: Job, task: ExecutionTask, worker_id: str) -> None:
-        pass
-
-
-class AppliedResults(ResultApplication):
-    async def _apply(self, job_id: int) -> JobState:
-        assert self.jobs.complete_persisted_result(job_id, JobState.FAILED)
-        return JobState.FAILED
 
 
 async def wait_until(condition: Callable[[], bool]) -> None:
@@ -112,11 +77,15 @@ async def wait_until(condition: Callable[[], bool]) -> None:
 
 
 @pytest.mark.parametrize("limit", [2, 3, 17])
-async def test_demand_concurrent_dispatch_stop_and_result_isolate_workspaces(store, tmp_path, limit):
+async def test_demand_concurrent_dispatch_stop_and_result_isolate_workspaces(
+    store, tmp_path, limit, recording_resources,
+):
     root, _ = managed_seed(tmp_path)
     shutil.copytree(root / "repos/owner/repo", root / "repos/owner/other")
-    jobs = [queued(store, issue, repo) for repo in ("owner/repo", "owner/other")
-            for issue in range(limit + 1)]
+    control = ControlService(database=store.database)
+    flows = [required(control.on_trigger(repo, issue, 42)) for repo in ("owner/repo", "owner/other")
+             for issue in range(1, limit + 2)]
+    jobs = [job for flow in flows for job in store.jobs.list_jobs(flow.id)]
     worker = ControlledWorker(root, limit)
     worker.root_lock.acquire()
     worker.initialize()
@@ -124,7 +93,7 @@ async def test_demand_concurrent_dispatch_stop_and_result_isolate_workspaces(sto
     assert worker.workspaces.inference_path.is_dir()
     peers = Gateway[WorkerMessageUnion, ServerMessageUnion]()
     host_transport, worker_transport = in_process_transport_pair()
-    results = AppliedResults(Mock(), Mock(), Mock(), database=store.database, effects=Mock())
+    subject = coordinator(store, RecordingGitHub())
     callbacks = None
 
     async def host():
@@ -135,8 +104,8 @@ async def test_demand_concurrent_dispatch_stop_and_result_isolate_workspaces(sto
         session.register_control(register)
         session.start()
         callbacks = ServerCallbacks(
-            ControlledCoordinator(store), worker_id="worker-a", register=register, session=session,
-            database=store.database, tools=Mock(), results=results, notify_jobs=peers.wake_all,
+            subject, worker_id="worker-a", register=register, session=session,
+            database=store.database, tools=subject.tools, results=subject.results, notify_jobs=peers.wake_all,
             heartbeat_interval=0.05, heartbeat_timeout=10, poll_interval=0.02,
         )
         try:
@@ -200,13 +169,18 @@ async def test_demand_concurrent_dispatch_stop_and_result_isolate_workspaces(sto
 
 
 @pytest.mark.parametrize("failure", ["invalid_repository", "workspace_conflict", "filesystem_error"])
-async def test_provision_failure_does_not_disconnect_other_workspaces(store, tmp_path, monkeypatch, failure):
+async def test_provision_failure_does_not_disconnect_other_workspaces(
+    store, tmp_path, monkeypatch, failure, recording_resources,
+):
     # Capacity requests share the job connection. One bad repository must not interrupt
     # healthy jobs, and a partially created pool must still publish its actual inventory.
     root, _ = managed_seed(tmp_path)
     bad_repo = "owner/bad--flow-name" if failure == "invalid_repository" else "owner/bad"
-    bad_job = queued(store, 1, bad_repo)
-    good_job = queued(store, 2, "owner/repo")
+    control = ControlService(database=store.database)
+    bad_flow = required(control.on_trigger(bad_repo, 1, 42))
+    good_flow = required(control.on_trigger("owner/repo", 2, 42))
+    bad_job, = store.jobs.list_jobs(bad_flow.id)
+    good_job, = store.jobs.list_jobs(good_flow.id)
     if failure == "filesystem_error":
         mkdir = Path.mkdir
         attempts = 0
@@ -241,7 +215,7 @@ async def test_provision_failure_does_not_disconnect_other_workspaces(store, tmp
         await send(raw)
 
     monkeypatch.setattr(worker_transport, "send_text", record_message)
-    results = AppliedResults(Mock(), Mock(), Mock(), database=store.database, effects=Mock())
+    subject = coordinator(store, RecordingGitHub())
     callbacks = None
 
     async def host():
@@ -252,8 +226,8 @@ async def test_provision_failure_does_not_disconnect_other_workspaces(store, tmp
         session.register_control(register)
         session.start()
         callbacks = ServerCallbacks(
-            ControlledCoordinator(store), worker_id="worker-a", register=register, session=session,
-            database=store.database, tools=Mock(), results=results, notify_jobs=peers.wake_all,
+            subject, worker_id="worker-a", register=register, session=session,
+            database=store.database, tools=subject.tools, results=subject.results, notify_jobs=peers.wake_all,
             heartbeat_interval=0.05, heartbeat_timeout=10, poll_interval=0.02,
         )
         if failure == "filesystem_error":

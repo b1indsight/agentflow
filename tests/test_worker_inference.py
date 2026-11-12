@@ -35,12 +35,13 @@ from app.domain.inference_models import (
 from app.domain.models import JobKind, JobState, utcnow
 from app.inference.bub import ADAPTER_VERSION
 from app.inference.local import serve_local_inference
-from app.worker.execution.lifecycle import WorkerExecution
-from app.worker.state.execution import ExecutionState
-from tests.test_remote_asgi import AsgiRuntime
+from app.worker.config import WorkerSettings
+from app.worker.runtime import WorkerRuntime
 from tests.test_remote_e2e import QueueConnection, QueueSocket
-from tests.test_worker_client import RecordingExecutor
-from tests.worker_fakes import inventory, run_worker, worker_runtime
+from tests.test_remote_e2e import remote_flow as remote_flow  # noqa: PLC0414
+from tests.worker_fixtures import inventory, run_worker
+
+pytestmark = pytest.mark.usefixtures("recording_resources")
 
 
 def request():
@@ -69,16 +70,21 @@ async def connected(server, worker):
         await asyncio.gather(*(execution.shutdown() for execution in worker.executions.values()))
 
 
-async def test_inference_cleanup_keeps_its_slot_without_blocking_coding(store, tmp_path):
+async def test_inference_cleanup_keeps_its_slot_without_blocking_coding(store, remote_flow, monkeypatch):
     coding_entered, coding_release = asyncio.Event(), asyncio.Event()
     infer_entered, infer_release, infer_closed = asyncio.Event(), asyncio.Event(), asyncio.Event()
     infer_cleaning, cleanup_release = asyncio.Event(), asyncio.Event()
 
-    class Coding(RecordingExecutor):
-        async def execute(self, task, secret=None, *, tool_caller=None):
-            coding_entered.set()
-            await coding_release.wait()
-            return await super().execute(task, secret, tool_caller=tool_caller)
+    flow, server, _github, worker, agent = remote_flow
+    coding, = store.jobs.list_jobs(flow.id)
+    start = agent.start
+
+    async def delayed_coding(*args, **kwargs):
+        coding_entered.set()
+        await coding_release.wait()
+        return await start(*args, **kwargs)
+
+    monkeypatch.setattr(agent, "start", delayed_coding)
 
     class Inference:
         def capability(self):
@@ -95,15 +101,6 @@ async def test_inference_cleanup_keeps_its_slot_without_blocking_coding(store, t
                 await cleanup_release.wait()
                 infer_closed.set()
 
-    flow = store.flows.create_flow("owner/repo", 8, 42)
-    attempt = store.flows.create_attempt(flow.id)
-    flow.current_attempt_id = attempt.id
-    store.flows.update_flow(flow)
-    coding = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
-    server = AsgiRuntime(store, attempt.id)
-    execution = WorkerExecution(worker_id="worker-1", executor=Coding(), state=ExecutionState(tmp_path, flow.id))
-    worker = worker_runtime(worker_id="worker-1", worker_token="worker-secret",
-                            serve_ws_url="ws://test", execution=execution, read_history=Mock())
     worker.inference = Inference()
     async with connected(server, worker) as (working, serving):
         try:
@@ -113,6 +110,7 @@ async def test_inference_cleanup_keeps_its_slot_without_blocking_coding(store, t
             await asyncio.wait_for(infer_entered.wait(), 3)
             clock = utcnow() + timedelta(seconds=20)
             store.database._clock = lambda: clock
+            monkeypatch.setattr(server.database, "_clock", lambda: clock)
             server.gateway.wake_all()
             await asyncio.wait_for(infer_cleaning.wait(), 3)
             # Slow provider cleanup must not block coding results on the same session.
@@ -131,7 +129,7 @@ async def test_inference_cleanup_keeps_its_slot_without_blocking_coding(store, t
             coding_release.set()
 
 
-async def test_local_mini_and_repo_free_worker_share_dispatch_and_results(store, tmp_path):
+async def test_local_mini_and_repo_free_worker_share_dispatch_and_results(store, tmp_path, server_runtime):
     entered, release = asyncio.Event(), asyncio.Event()
 
     class Local:
@@ -149,10 +147,11 @@ async def test_local_mini_and_repo_free_worker_share_dispatch_and_results(store,
             return InferenceOutput(request_id=task.request_id, request_digest=task.digest,
                                    text="Remote answer", adapter_version="codex/v1")
 
-    server = AsgiRuntime(store, 1)
-    execution = WorkerExecution(worker_id="worker-1", executor=RecordingExecutor(), state=ExecutionState(tmp_path, 1))
-    worker = worker_runtime(worker_id="worker-1", worker_token="worker-secret",
-                            serve_ws_url="ws://test", execution=execution, read_history=Mock())
+    server = server_runtime()
+    worker = WorkerRuntime(WorkerSettings(
+        worker_id="worker-1", worker_token="worker-secret", serve_ws_url="wss://unused",
+        worker_root=tmp_path / "worker",
+    ))
     worker.inference = Remote()
     workspace = tmp_path / "local-default"
     workspace.mkdir()
@@ -201,7 +200,7 @@ async def test_network_worker_cannot_claim_local_priority_even_with_a_configured
 
 @pytest.mark.parametrize("wrong_token", [False, True])
 async def test_completed_inference_heartbeat_skips_renewal_but_dispatches_payload(
-    store, wrong_token,
+    store, wrong_token, server_runtime,
 ):
     # A queued heartbeat can follow its result, even after another slot starts work.
     outgoing, incoming = asyncio.Queue(), asyncio.Queue()
@@ -209,7 +208,7 @@ async def test_completed_inference_heartbeat_skips_renewal_but_dispatches_payloa
     attempt = store.flows.create_attempt(flow.id)
     flow.current_attempt_id = attempt.id
     store.flows.update_flow(flow)
-    server = AsgiRuntime(store, attempt.id)
+    server = server_runtime()
     serving = asyncio.create_task(serve_worker(QueueSocket(outgoing, incoming),
         worker_tokens={"worker-1": "worker-secret"}, serve=server.serve_worker_session))
 
@@ -280,16 +279,12 @@ async def test_completed_inference_heartbeat_skips_renewal_but_dispatches_payloa
         await asyncio.gather(serving, return_exceptions=True)
 
 
-async def test_slow_coding_preparation_keeps_inference_live(store, tmp_path, monkeypatch):
+async def test_slow_coding_preparation_keeps_inference_live(store, remote_flow, monkeypatch):
     # GitHub preparation must not hold an idle inference slot or its incoming results.
     preparing, prepare_release = asyncio.Event(), asyncio.Event()
     inferring, infer_release = asyncio.Event(), asyncio.Event()
-    flow = store.flows.create_flow("owner/repo", 8, 42)
-    attempt = store.flows.create_attempt(flow.id)
-    flow.current_attempt_id = attempt.id
-    store.flows.update_flow(flow)
-    coding = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
-    server = AsgiRuntime(store, attempt.id)
+    flow, server, _github, worker, _agent = remote_flow
+    coding, = store.jobs.list_jobs(flow.id)
     server.settings.worker_heartbeat_interval = .02
     prepare = server.coordinator.prepare_for_assignment
 
@@ -311,9 +306,6 @@ async def test_slow_coding_preparation_keeps_inference_live(store, tmp_path, mon
             return InferenceOutput(request_id=task.request_id, request_digest=task.digest,
                                    text="Answer during preparation", adapter_version="codex/v1")
 
-    execution = WorkerExecution(worker_id="worker-1", executor=RecordingExecutor(), state=ExecutionState(tmp_path, flow.id))
-    worker = worker_runtime(worker_id="worker-1", worker_token="worker-secret",
-                            serve_ws_url="ws://test", execution=execution, read_history=Mock())
     worker.inference = Inference()
     async with connected(server, worker) as (working, serving):
         await asyncio.wait_for(preparing.wait(), 3)

@@ -66,26 +66,34 @@ def test_delayed_merge_automatically_corrects_without_resuming(store, archived, 
     activity = ActivityStore(store.database)
     original = activity.archived(archived.id, 1)
     before = authority(store, archived.id)
+    delivery = store.deliveries.get_delivery(archived.id)
     service = ControlService(database=store.database)
-    service.on_merged(archived, "delayed", merge_payload(archived))
+    router = EventRouter(service, SimpleNamespace(), database=store.database)
+    router.dispatch("pull_request", "delayed", merge_payload(archived))
+    assert store.webhooks.event_seen("delayed")
     current = store.flows.get_flow(archived.id)
     assert current == archived.model_copy(update={"archive_reason": ArchiveReason.SUCCEEDED})
     assert authority(store, archived.id) == before
+    assert store.deliveries.get_delivery(archived.id) == delivery
     assert activity.archived(archived.id, 1) == original
     assert original.metadata["archive_reason"] == "abandoned"
     assert original.occurred_at == archived.archived_at
     events = activity.history(archived.id, 1)
-    assert len([e for e in events if e.kind == "merge"]) == 1
+    merges = [e for e in events if e.kind == "merge"]
+    assert len(merges) == 1
+    assert merges[0].metadata["merge_commit_sha"] == MERGE.merge_commit_sha
     corrections = [e for e in events if e.kind == "archive_correction"]
     assert len(corrections) == 1
     assert corrections[0].metadata["before"] == "abandoned"
     assert corrections[0].metadata["after"] == "succeeded"
     # A later webhook or poll must reuse the fact, not compare origin/arrival time.
     monkeypatch.setattr(store.database, "_clock", lambda: NOW + timedelta(days=1))
-    service.on_merged(archived, "delayed", merge_payload(archived))
-    service.on_merged(archived, "duplicate-fact", merge_payload(archived))
+    router.dispatch("pull_request", "delayed", merge_payload(archived))
+    router.dispatch("pull_request", "duplicate-fact", merge_payload(archived))
     assert not store.flows.observe_archived_merge(archived.id, 1, MERGE, origin="reconciliation")
     assert activity.history(archived.id, 1) == events
+    assert authority(store, archived.id) == before
+    assert store.deliveries.get_delivery(archived.id) == delivery
 
 
 def test_delayed_old_round_merge_does_not_change_resumed_flow(store, archived):

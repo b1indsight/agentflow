@@ -22,26 +22,33 @@ from app.contracts.protocol import (
 )
 from app.controler.workers.callbacks import PROVISION_RETRY_SECONDS
 from app.controler.workers.errors import ProtocolViolation
-from app.domain.models import JobState
+from app.controler.workflow.service import ControlService
 from app.telemetry.logging import configure_logging
 from app.worker.execution.vcs import VcsVerificationError
 from app.worker.execution.workspaces import RepositoryProvisionError, RepositoryWorkspaces
-from tests.test_worker_handler import RecordingStore, handler_for, worker_message
-from tests.worker_fakes import server_callbacks
+from tests.test_workspace_claims import provision
+from tests.wire import worker_message
+from tests.worker_fixtures import server_callbacks
 
 
-async def controller(demand):
-    store = RecordingStore()
-    store.job.state = JobState.DONE
-    callbacks = server_callbacks(handler_for(store), "worker-1", "epoch")
-    callbacks.session.send = AsyncMock(return_value=True)
-    callbacks.workers.workspace_demand = Mock(return_value=demand)
-    routes = Dispatcher[WorkerMessageUnion]()
-    callbacks.bind(routes)
-    routes.freeze()
-    callbacks.on_published()
-    await callbacks.on_opened()
-    return callbacks, routes
+@pytest.fixture
+async def controller(server_runtime, recording_resources):
+    connections = []
+
+    async def connect():
+        callbacks = server_callbacks(server_runtime(), "worker-1", "epoch")
+        callbacks.session.send = AsyncMock(return_value=True)
+        routes = Dispatcher[WorkerMessageUnion]()
+        callbacks.bind(routes)
+        routes.freeze()
+        callbacks.on_published()
+        await callbacks.on_opened()
+        connections.append(callbacks)
+        return callbacks, routes
+
+    yield connect
+    for callbacks in connections:
+        await callbacks.aclose()
 
 
 def requests(callbacks):
@@ -60,15 +67,17 @@ async def deliver(callbacks, routes, call, error=None, *, repository=None, epoch
         repository=repository or call.repository,
         error=error,
     )
-    message = parse_worker_message(worker_message(epoch, reply).model_dump_json())
+    message = parse_worker_message(worker_message(reply, epoch=epoch).model_dump_json())
     await callbacks.on_message(message)
     await routes.dispatch(message.payload[0], message)
 
 
-async def test_bounded_demands_skip_blocked_repositories_and_reset_on_reconnect():
+async def test_bounded_demands_skip_blocked_repositories_and_reset_on_reconnect(store, controller):
     # A full page of bad repositories must not starve later demand or repeat each poll.
-    demand = [f"owner/repo-{i}" for i in range(MAX_PAYLOAD_ITEMS + 1)]
-    callbacks, routes = await controller(demand)
+    demand = [f"owner/repo-{i:03}" for i in range(MAX_PAYLOAD_ITEMS + 1)]
+    for repo in demand:
+        assert ControlService(database=store.database).on_trigger(repo, 1, 42) is not None
+    callbacks, routes = await controller()
     await callbacks.poll()
     await callbacks.poll()
     batch = requests(callbacks)
@@ -79,20 +88,26 @@ async def test_bounded_demands_skip_blocked_repositories_and_reset_on_reconnect(
     await callbacks.poll()
     assert [call.repository for call in requests(callbacks)] == demand
     last = requests(callbacks)[-1]
-    demand.pop()  # Corresponding inventory has satisfied demand before the result.
+    # Real inventory, not the capacity result, removes this repository's demand.
+    for index in range(2):
+        provision(store, "worker-1", index, last.repository)
+    assert last.repository not in store.workers.workspace_demand("worker-1", "epoch")
     await deliver(callbacks, routes, last)
     await callbacks.poll()
     assert len(requests(callbacks)) == MAX_PAYLOAD_ITEMS + 1
-    replacement, _ = await controller(demand)
+    replacement, _ = await controller()
     await replacement.poll()
     assert len(requests(replacement)) == MAX_PAYLOAD_ITEMS
 
 
 @pytest.mark.parametrize("failure", ["timeout", "filesystem_error"])
-async def test_capacity_retry_is_delayed_and_old_results_cannot_complete_it(monkeypatch, failure):
+async def test_capacity_retry_is_delayed_and_old_results_cannot_complete_it(
+    store, controller, monkeypatch, failure,
+):
+    assert ControlService(database=store.database).on_trigger("owner/missing", 1, 42) is not None
     now = 100.0
     monkeypatch.setattr(asyncio.get_running_loop(), "time", lambda: now)
-    callbacks, routes = await controller(["owner/repo"])
+    callbacks, routes = await controller()
     await callbacks.poll()
     first = requests(callbacks)[0]
     if failure == "timeout":
@@ -122,8 +137,9 @@ async def test_capacity_retry_is_delayed_and_old_results_cannot_complete_it(monk
     assert len(requests(callbacks)) == 2
 
 
-async def test_provision_send_failure_and_validation_rejection_retire_waiters():
-    callbacks, routes = await controller(["owner/repo"])
+async def test_provision_send_failure_and_validation_rejection_retire_waiters(store, controller):
+    assert ControlService(database=store.database).on_trigger("owner/missing", 1, 42) is not None
+    callbacks, routes = await controller()
     callbacks.session.send.side_effect = ConnectionError("write failed")
     with pytest.raises(ConnectionError):
         await callbacks.poll()
@@ -138,7 +154,7 @@ async def test_provision_send_failure_and_validation_rejection_retire_waiters():
             code="validation_error", message="message payload failed validation"
         ),
     )
-    await routes.dispatch(rejected, worker_message("epoch", rejected))
+    await routes.dispatch(rejected, worker_message(rejected, epoch="epoch"))
     await callbacks.poll()
     assert len(requests(callbacks)) == 2
     assert (
