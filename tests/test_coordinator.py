@@ -49,8 +49,8 @@ async def apply_result(subject: JobCoordinator, job: Job, result: ExecutionResul
 
 
 def coordinator(store: Store, github: GitHubApp) -> CoordinatorFixture:
-    settings = ServerSettings.model_construct(
-        database_url="postgresql://localhost/test",
+    settings = ServerSettings(
+        database_url=store.database.database_url,
         worker_tokens={"worker-1": SecretStr("worker-secret")},
         allowlist=["alice"],
         reviewers=["carol"],

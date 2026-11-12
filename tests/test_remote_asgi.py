@@ -1,9 +1,8 @@
 from threading import Event
+from unittest.mock import AsyncMock
 
-from pydantic import SecretStr
 from starlette.testclient import TestClient
 
-from app.communication.gateway import Gateway
 from app.contracts.protocol import (
     AcceptResultArguments,
     AcceptResultRequest,
@@ -31,59 +30,19 @@ from app.contracts.protocol import (
     terminal_id,
 )
 from app.controler.api import create_app
-from app.controler.config import ServerSettings
 from app.controler.runtime import ServerRuntime
-from app.controler.workers.conversation import ConversationBroker, ConversationService
 from app.domain.models import DeliveryState, FlowState, JobState, VcsKind
+from app.github import Batch
 from app.persistence.records import required
 from app.persistence.store import Store
-from app.telemetry.metrics import Metrics
 from tests.github import RecordingGitHub
-from tests.test_coordinator import CoordinatorFixture, coordinator
 from tests.test_worker_handler import queued_initial as queued_initial  # noqa: PLC0414
 from tests.wire import worker_message
-from tests.worker_fakes import inventory
-
-
-class AsgiRuntime(ServerRuntime):
-    def __init__(self, store: Store, subject: CoordinatorFixture) -> None:
-        self.settings = ServerSettings.model_construct(
-            database_url=store.database_url,
-            worker_tokens={"worker-1": SecretStr("worker-secret")},
-            github_webhook_secret="unused",
-            webhook_max_body_bytes=1024,
-            metrics_token=None,
-            host="test",
-            port=0,
-        )
-        self.metrics = Metrics()
-        self.gateway = Gateway()
-        self.worker_tokens = {"worker-1": "worker-secret"}
-        self.coordinator = subject
-        self.database = store.database
-        self.tools = subject.tools
-        self.results = subject.results
-        self.settings.worker_poll_interval = 0.01
-        self.conversations = ConversationService(
-            ConversationBroker(self.gateway),
-            database=store.database,
-        )
-
-    async def ready(self) -> bool:
-        return True
-
-    def startup(self) -> None:
-        pass
-
-    async def receive_webhook(self, event_type, delivery_id, payload, digest) -> None:
-        raise AssertionError("webhook receipt is not used in this test")
-
-    async def shutdown(self) -> None:
-        pass
+from tests.worker_fixtures import inventory
 
 
 def test_real_asgi_websocket_completes_a_postgresql_job(
-    store: Store, queued_initial, recording_resources, monkeypatch,
+    store: Store, queued_initial, recording_resources, monkeypatch, server_runtime,
 ) -> None:
     disconnected = Event()
     serve = ServerRuntime.serve_worker_session
@@ -95,7 +54,9 @@ def test_real_asgi_websocket_completes_a_postgresql_job(
     monkeypatch.setattr(ServerRuntime, "serve_worker_session", handle_until_disconnected)
     flow, job = queued_initial
     github = RecordingGitHub()
-    application = create_app(AsgiRuntime(store, coordinator(store, github)))
+    monkeypatch.setattr(RecordingGitHub, "fetch_installations", AsyncMock(return_value=Batch()))
+    runtime = server_runtime(github=github)
+    application = create_app(runtime)
 
     with (
         TestClient(application) as client,

@@ -1,15 +1,10 @@
 import asyncio
 import json
-from unittest.mock import Mock
 
 import httpx
 import pytest
 
-from app.communication.gateway import Gateway
-from app.contracts.protocol import ServerMessageUnion, WorkerMessageUnion
 from app.controler.api import create_app
-from app.controler.runtime import ServerRuntime
-from app.controler.workers.conversation import ConversationBroker, ConversationService
 from app.persistence.records import required
 from app.worker.execution.amp_process import AmpProcessResult
 from tests.access import AccessIssuer
@@ -28,7 +23,7 @@ OTHER_SESSION = "019eac3b-a60c-7a93-a442-3718f660fc8d"
 async def test_http_history_queues_behind_callbacks_but_not_execution(
     store, remote_flow, tmp_path, phase, monkeypatch, backend,
 ) -> None:
-    flow, subject, _github, worker, agent = remote_flow
+    flow, runtime, _github, worker, agent = remote_flow
     job, = store.jobs.list_jobs(flow.id)
     started, release = asyncio.Event(), asyncio.Event()
     blocked_phase = "worker" if phase == "slow_export" else phase
@@ -44,9 +39,9 @@ async def test_http_history_queues_behind_callbacks_but_not_execution(
 
         monkeypatch.setattr(target, method, invoke)
 
-    pause(subject, "prepare_for_assignment", "preparation")
-    pause(subject.tools, "execute", "tool")
-    pause(subject.results, "_apply", "result")
+    pause(runtime.coordinator, "prepare_for_assignment", "preparation")
+    pause(runtime.tools, "execute", "tool")
+    pause(runtime.results, "_apply", "result")
     pause(agent, "start", "worker")
     path = rollout(tmp_path / "codex", [message("user", "PR feedback"), message("assistant", "Fixed")])
     path.with_name(path.name.replace(SESSION, OTHER_SESSION)).write_text(
@@ -86,17 +81,16 @@ async def test_http_history_queues_behind_callbacks_but_not_execution(
             return AmpProcessResult(json.dumps({"id": args[2], "messages": messages}).encode(), b"", 0)
 
         monkeypatch.setattr("app.worker.state.amp_history.run_amp", export)
-    peers = Gateway[WorkerMessageUnion, ServerMessageUnion]()
-    broker = ConversationBroker(peers)
+    broker = runtime.conversations.broker
     broker.timeout = broker.timeout / 10 if phase == "slow_export" else 1
-    service = ConversationService(broker, database=store.database)
     issuer = AccessIssuer()
-    runtime = Mock(spec=ServerRuntime, settings=issuer.settings, access=issuer.auth, conversations=service)
+    await runtime.access.close()
+    monkeypatch.setattr(runtime, "access", issuer.auth)
     app = create_app(runtime)
     app.state.runtime = runtime
     endpoint = f"/api/flows/{flow.id}/conversation"
     try:
-        async with remote_connection(subject, worker, peers=peers), httpx.AsyncClient(
+        async with remote_connection(runtime, worker), httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://test", headers=issuer.headers(),
         ) as http:
             await asyncio.wait_for(started.wait(), 10)

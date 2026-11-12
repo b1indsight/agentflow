@@ -99,3 +99,11 @@
 - **上下文与决定：** 原工作区混有其他任务，发布时从整理前的 jj 快照提取本轮测试增量，再三方移植到最新 `main`。保留主线的产品代码、前端及其他任务测试，不复制旧文件覆盖后来实现。
 - **主线兼容：** 合并 PR 后立即归档的业务结果、未结执行绑定和 stop 回执仍各自验证；恢复场景使用真实 merge 入口并检查 ARCHIVED，取消场景保持 FINALIZING。保留主线新增的迟到结果、丢失 stop ACK 和新 writer 保护断言，以及 ResultEffects 的 plugin 装配。共享 fixture 的旧导入调用方同步移除冗余导入。
 - **验收：** 独立 UTF-8 PostgreSQL 上完整 Python 测试通过，无跳过或排除；Ruff、Mypy 与差异检查通过。此次移植没有修改产品、前端、schema 或 CI；[审查记录](https://ampcode.com/artifacts/91fae6c8-e2aa-4b62-b02a-c04dbd22dc8c)保存单独交付工作区的日志。
+
+### 2026-11-12：正常初始化运行时并删除模拟 workspace
+
+- **需求与决定：** 根据后续“精简这类问题”，继续移除 `worker_fakes` 中跳过构造、手填运行时成员和模拟 workspace 的装配。使用正常 `WorkerRuntime`、`ServerRuntime` 和配置校验，不为测试更改产品接口或增加另一套 runtime。
+- **共享装配：** `conftest.server_runtime` 在独立 PostgreSQL schema 上正常构造，独立拥有数据库池和资源关闭；仅替换外部 GitHub。`worker_fakes.py` 改为 `worker_fixtures.py`，删除 `SimulatedWorkspaces`、伪 inference、`__new__`、`model_construct`、`_initialized` 和 `_create_execution` 覆写。Worker helper 正常初始化、实际 provision，并接入故障测试暂停中的真实 execution；history 导出与协议对端仍可控。
+- **流程复用：** Controller 更换连接和 coding/inference 并发复用现有 `remote_flow` 的本地 Git、实际 executor、MCP、数据库和业务 ACK，编码成功必须经过真实交付校验。双端停止将暂停点移到外部 coding agent，保留 tracked/untracked/ignored 编辑、同一位置和 inode 复用、generation 推进，以及丢失 ACK 不影响新 writer 的断言。
+- **生命周期与故障：** ASGI/readiness 使用实际启动和关闭；关闭故障注入仍执行真实资源释放。重连继续使用活的 WorkerRuntime，进程重启则从持久 journal 重建；保留注册前停止、连接独占、离线完成、回执重放与恢复 fencing 等不同窗口。没有新增产品机制，本次不另做复杂度消融。
+- **验证状态：** 独立 PostgreSQL 上未排除文件的 Python 全量通过，无失败或跳过；最终辅助修改后再次通过 Worker 客户端和 history 检查，Ruff、Mypy 通过。结果与日志保存在[同一审查记录](https://ampcode.com/artifacts/91fae6c8-e2aa-4b62-b02a-c04dbd22dc8c)。本批继续使用原 PR，具体发布状态见审查记录。

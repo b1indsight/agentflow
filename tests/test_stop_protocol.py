@@ -5,7 +5,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.communication.gateway import Gateway
 from app.communication.session import Session
 from app.contracts.protocol import (
     PROTOCOL_VERSION,
@@ -46,19 +45,16 @@ from app.controler.workflow.service import ControlService
 from app.domain.models import FlowState, JobKind, JobState, VcsKind
 from app.github import GitHubError, GitHubErrorKind, Repository
 from app.persistence.records import required
-from app.worker.execution.executor import WorkerExecutor
+from app.worker.config import WorkerSettings
 from app.worker.execution.lifecycle import WorkerExecution, WorkerProtocolError
 from app.worker.execution.vcs import _run
-from app.worker.execution.workspaces import RepositoryWorkspaces
+from app.worker.runtime import WorkerRuntime
 from app.worker.state.execution import ExecutionState
-from tests.github import RecordingGitHub
-from tests.test_coordinator import coordinator
 from tests.test_remote_e2e import QueueConnection, QueueSocket
 from tests.test_vcs import _git
 from tests.test_worker_executor import RecordingAgent
 from tests.test_worker_handler import (
     ScriptedSocket,
-    handler_for,
     recovery_registration,
     sent_items,
     terminal_items,
@@ -67,7 +63,7 @@ from tests.test_worker_handler import queued_initial as queued_initial  # noqa: 
 from tests.test_worker_workspaces import managed_seed
 from tests.test_workspace_inventory import merged_business
 from tests.wire import worker_message
-from tests.worker_fakes import run_worker, server_runtime, worker_runtime
+from tests.worker_fixtures import run_worker, worker_runtime
 
 
 def assignment():
@@ -162,10 +158,8 @@ async def test_stop_kills_owned_process_and_child_then_replays_lost_ack(tmp_path
         async with asyncio.timeout(5):
             while not ready.exists():
                 await asyncio.sleep(0.01)
-        client = worker_runtime(
-            worker_id="w",
+        client = await worker_runtime(
             worker_token="secret",
-            serve_ws_url="unused",
             execution=owner,
             read_history=journal.read,
         )
@@ -184,10 +178,8 @@ async def test_stop_kills_owned_process_and_child_then_replays_lost_ack(tmp_path
                         break
                     await asyncio.sleep(0.01)
         restarted_state = ExecutionState(tmp_path, 1)
-        restarted = worker_runtime(
-            worker_id="w",
+        restarted = await worker_runtime(
             worker_token="secret",
-            serve_ws_url="unused",
             execution=WorkerExecution(
                 worker_id="w",
                 state=restarted_state,
@@ -204,8 +196,8 @@ async def test_stop_kills_owned_process_and_child_then_replays_lost_ack(tmp_path
         await owner.shutdown()
 
 
-async def test_replacing_client_during_stop_joins_executor_and_preserves_original_receipt(tmp_path):
-    # Disconnect while executor cancellation is suspended; the new client joins the same stop.
+async def test_reconnection_during_stop_joins_executor_and_preserves_original_receipt(tmp_path):
+    # Disconnect while executor cancellation is suspended; the new connection joins the same stop.
     started, cleaning, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
     class Executor:
@@ -228,14 +220,9 @@ async def test_replacing_client_during_stop_joins_executor_and_preserves_origina
     owner.start()
     request = StopFence(job_id=1, flow_id=1, assignment_token="token", request_id="stop")
 
+    client = await worker_runtime(execution=owner, read_history=state.read)
+
     def connect(request, epoch="epoch"):
-        client = worker_runtime(
-            worker_id="w",
-            worker_token="test",
-            serve_ws_url="unused",
-            execution=owner,
-            read_history=state.read,
-        )
         connection = AckConnection(request, epoch=epoch)
         return asyncio.create_task(run_worker(client, connection)), connection
 
@@ -285,10 +272,8 @@ async def test_restarted_worker_does_not_infer_stopped_from_absent_task(tmp_path
     journal = ExecutionState(tmp_path, 1)
     journal.record_received(work)
     journal.record_started()
-    client = worker_runtime(
-        worker_id="w",
+    client = await worker_runtime(
         worker_token="secret",
-        serve_ws_url="unused",
         execution=WorkerExecution(worker_id="w", executor=SimpleNamespace(), state=journal),
         read_history=journal.read,
     )
@@ -299,9 +284,13 @@ async def test_restarted_worker_does_not_infer_stopped_from_absent_task(tmp_path
 
 
 @pytest.mark.parametrize("overflow", [False, True])
-async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path, overflow, recording_resources):
+async def test_gateway_and_worker_cancel_over_duplex_protocol(
+    store, tmp_path, overflow, recording_resources, server_runtime, monkeypatch,
+):
     # Two cancellations used to keep both pool positions occupied, blocking the third Flow.
     root, _ = managed_seed(tmp_path)
+    _git("branch", "trunk", cwd=root / "repos/owner/repo")
+    _git("push", "origin", "trunk", cwd=root / "repos/owner/repo")
     started = asyncio.Event()
     to_worker, to_serve = asyncio.Queue(), asyncio.Queue()
 
@@ -309,21 +298,14 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path, o
         async def send(self, raw):
             if any(isinstance(item, StopResult) for item in parse_worker_message(raw).payload):
                 # Stop proves writer exit; dirty contents are cleaned only by the next INITIAL.
-                repo = executor.workspaces.path(session.load().workspace)
+                repo = pool.path(session.load().workspace)
                 assert (repo / "README.md").read_text() == "cancelled tracked edit"
                 assert (repo / "untracked").exists()
                 assert store.workers.get_flow_execution(flow.id).released_at is None
             await super().send(raw)
 
-    class Executor(WorkerExecutor):
-        async def execute(self, task, secret=None, *, tool_caller=None):
-            selected = self.state.assignment
-            binding = await self.workspaces.claim(
-                task.repo, task.flow_id, selected.workspace, selected.generation,
-                base_branch="main", remote="origin", push_token=None,
-            )
-            self.state.bind_workspace(binding)
-            path = self.workspaces.path(binding)
+    class Agent(RecordingAgent):
+        async def start(self, task, path, *, output_schema=None, context=None):
             assert (path / "README.md").read_text() == "base\n"
             assert not (path / "untracked").exists()
             (path / "README.md").write_text("cancelled staged edit")
@@ -335,17 +317,14 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path, o
             started.set()
             await asyncio.Event().wait()
 
-    gateway_coordinator = coordinator(store, RecordingGitHub())
-    handler = server_runtime(
-        gateway_coordinator,
-        database=store.database,
-        peers=Gateway(),
-        heartbeat_interval=0.01,
-        poll_interval=0.01,
-        tools=gateway_coordinator.tools,
-        results=gateway_coordinator.results,
-    )
-    pool = RepositoryWorkspaces(root, "worker-1", limit=2 if overflow else 1)
+    handler = server_runtime(settings={"worker_heartbeat_interval": 0.01})
+    monkeypatch.setattr("app.worker.runtime.CodexAgent", lambda **kwargs: Agent())
+    client = WorkerRuntime(WorkerSettings(
+        worker_id="worker-1", worker_token="worker-secret", serve_ws_url="wss://unused",
+        worker_root=root, worker_repo_workspace_limit=2 if overflow else 1,
+    ))
+    client.initialize()
+    pool = client.workspaces
     default = pool.initialize()
     await pool.provision("owner/repo")
     unrelated = None
@@ -361,16 +340,6 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path, o
         unrelated = await pool.claim("owner/repo", other.id, claimed.workspace, claimed.generation,
                                      base_branch="main", remote="origin", push_token=None)
         assert store.workers.finish_assignment(other_job.id, "worker-1", "unrelated", JobState.DONE, "setup")
-    session = ExecutionState(root, 1)
-    executor = Executor(root, RecordingAgent(), worker_id="worker-1", state=session, workspaces=pool)
-    client = worker_runtime(
-        worker_id="worker-1",
-        worker_token="worker-secret",
-        serve_ws_url="unused",
-        execution=WorkerExecution(worker_id="worker-1", executor=executor, state=session),
-        read_history=session.read,
-    )
-    client.settings.worker_repo_workspace_limit = pool.limit
     server = asyncio.create_task(
         serve_worker(
             QueueSocket(to_serve, to_worker),
@@ -388,11 +357,6 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path, o
                 flow.current_attempt_id = attempt.id
                 store.flows.update_flow(flow)
                 session = ExecutionState(root, flow.id)
-                executor = Executor(root, RecordingAgent(), worker_id="worker-1", state=session, workspaces=pool)
-                client.executions[flow.id] = WorkerExecution(
-                    worker_id="worker-1", executor=executor, state=session, on_change=client.notify,
-                )
-                client._create_execution = dict(client.executions).__getitem__
                 store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
                 started.clear()
                 handler.gateway.wake_all()
@@ -403,7 +367,7 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path, o
                         worker.result()
                     await asyncio.sleep(0.01)
                 binding = session.load().workspace
-                path = executor.workspaces.path(binding)
+                path = pool.path(binding)
                 allocations.append((binding, path.stat().st_ino))
                 ControlService(jobs_available=handler.gateway.wake_all, database=store.database).cancel(
                     flow
@@ -423,7 +387,7 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path, o
         assert replacement.slot_id == allocations[0][0].slot_id == allocations[1][0].slot_id
         assert replacement.generation > allocations[1][0].generation > allocations[0][0].generation
         assert (
-            executor.workspaces.path(replacement).stat().st_ino
+            pool.path(replacement).stat().st_ino
             == allocations[0][1]
             == allocations[1][1]
         )
@@ -439,7 +403,7 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(store, tmp_path, o
 
 @pytest.mark.parametrize("delivery", ["combined", "split", "duplicate_B", "duplicate_RB", "B_only", "effects_pending"])
 async def test_stopping_consumes_a_and_requires_real_r_before_b(
-    store, prepared_initial, monkeypatch, delivery,
+    store, prepared_initial, monkeypatch, delivery, server_runtime,
 ):
     # Registration cannot bypass a pending stop. In-flight T/A and Flow calls may arrive
     # before R/B, but only the real stopped receipt can release the stopping phase.
@@ -545,7 +509,7 @@ async def test_stopping_consumes_a_and_requires_real_r_before_b(
             raise ConnectionError("script complete")
 
     socket = StoppingSocket()
-    handler = handler_for(store)
+    handler = server_runtime(github=github)
     await serve_worker(socket, serve=handler.serve_worker_session, worker_tokens={"worker-a": "worker-secret"})
     messages = list(map(parse_server_message, socket.sent))
     stop_index = next(
@@ -578,12 +542,13 @@ async def test_stopping_consumes_a_and_requires_real_r_before_b(
 
 @pytest.mark.parametrize("merged", [False, True])
 async def test_stop_without_ack_reuses_workspace_and_reconnect_ack_preserves_new_writer(
-    store, tmp_path, recording_resources, merged
+    store, tmp_path, recording_resources, merged, server_runtime, monkeypatch,
 ):
     # Lost stop ACKs retain only the old journal, never occupancy. Replaying that ACK
     # after reconnect must not clean or otherwise modify the new generation's writer.
     root, _ = managed_seed(tmp_path)
-    pool = RepositoryWorkspaces(root, "worker-1", limit=1)
+    _git("branch", "trunk", cwd=root / "repos/owner/repo")
+    _git("push", "origin", "trunk", cwd=root / "repos/owner/repo")
     flows, jobs = [], []
     for issue in (1, 2):
         flow = store.flows.create_flow("owner/repo", issue, 1)
@@ -593,47 +558,28 @@ async def test_stop_without_ack_reuses_workspace_and_reconnect_ack_preserves_new
         flows.append(flow)
         jobs.append(store.jobs.enqueue_job(flow.id, JobKind.INITIAL))
     started, successor_dispatched = asyncio.Event(), asyncio.Event()
-    subject = coordinator(store, RecordingGitHub())
     executed = []
 
-    class Executor(WorkerExecutor):
-        async def execute(self, task, secret=None, *, tool_caller=None):
-            selected = self.state.assignment
-            binding = await self.workspaces.claim(
-                task.repo, task.flow_id, selected.workspace, selected.generation,
-                base_branch="main", remote="origin", push_token=None,
-            )
-            self.state.bind_workspace(binding)
-            (self.workspaces.path(binding) / "writer").write_text(str(task.flow_id))
-            executed.append(task.flow_id)
+    class Agent(RecordingAgent):
+        async def start(self, task, cwd, *, output_schema=None, context=None):
+            flow_id = next(item.flow_id for item in pool.inventory()
+                           if item.repository is not None and item.flow_id is not None
+                           and pool.path(pool.lookup("owner/repo", item.flow_id)) == cwd)
+            (cwd / "writer").write_text(str(flow_id))
+            executed.append(flow_id)
             started.set()
             await asyncio.Event().wait()
 
-    handler = server_runtime(
-        subject,
-        database=store.database,
-        peers=Gateway(),
-        heartbeat_interval=0.01,
-        poll_interval=0.01,
-        tools=subject.tools,
-        results=subject.results,
-    )
+    handler = server_runtime(settings={"worker_heartbeat_interval": 0.01})
+    monkeypatch.setattr("app.worker.runtime.CodexAgent", lambda **kwargs: Agent())
+    client = WorkerRuntime(WorkerSettings(
+        worker_id="worker-1", worker_token="worker-secret", serve_ws_url="wss://unused",
+        worker_root=root, worker_repo_workspace_limit=1,
+    ))
+    client.initialize()
+    pool = client.workspaces
     session = ExecutionState(root, flows[0].id)
-    executor = Executor(root, RecordingAgent(), worker_id="worker-1", state=session, workspaces=pool)
-    client = worker_runtime(
-        worker_id="worker-1",
-        worker_token="worker-secret",
-        serve_ws_url="unused",
-        execution=WorkerExecution(worker_id="worker-1", executor=executor, state=session),
-        read_history=session.read,
-    )
-    client.settings.worker_repo_workspace_limit = 1
     next_state = ExecutionState(root, flows[1].id)
-    client.executions[flows[1].id] = WorkerExecution(
-        worker_id="worker-1", state=next_state, on_change=client.notify,
-        executor=Executor(root, RecordingAgent(), worker_id="worker-1", state=next_state, workspaces=pool),
-    )
-    client._create_execution = dict(client.executions).__getitem__
 
     class Socket(QueueSocket):
         async def send_text(self, raw):
@@ -735,7 +681,9 @@ async def test_stop_without_ack_reuses_workspace_and_reconnect_ack_preserves_new
         await asyncio.gather(*(execution.shutdown() for execution in client.executions.values()))
 
 
-async def test_stop_wakes_assignment_waiting_for_missing_a(store, queued_initial, monkeypatch, recording_resources):
+async def test_stop_wakes_assignment_waiting_for_missing_a(
+    store, queued_initial, monkeypatch, recording_resources, server_runtime,
+):
     flow, job = queued_initial
     waiting, command = asyncio.Event(), asyncio.Event()
 
@@ -765,7 +713,7 @@ async def test_stop_wakes_assignment_waiting_for_missing_a(store, queued_initial
                 command.set()
 
     socket = MissingAcceptSocket()
-    handler = handler_for(store)
+    handler = server_runtime()
     receive = Session.next_event
 
     async def observed(connection, *, until=None):

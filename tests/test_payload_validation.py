@@ -34,26 +34,26 @@ from app.controler.workers.transport import control_ack
 from app.controler.workflow.service import ControlService
 from app.domain.models import VcsKind, VcsOutcome
 from app.persistence.records import required
+from app.worker.execution.executor import WorkerExecutor
 from app.worker.execution.lifecycle import FlowToolCallError, WorkerExecution, WorkerProtocolError
 from app.worker.state.execution import ExecutionState
 from tests.test_communication_session import Socket
 from tests.test_conversation_history import SESSION
 from tests.test_conversation_worker import Connection
 from tests.test_worker_client import RecordingExecutor, assignment_message, registered_message
-from tests.test_worker_handler import handler_for, register_message
+from tests.test_worker_handler import register_message
 from tests.test_worker_session import _assignment
 from tests.test_workspace_dispatch import wait_until
 from tests.wire import worker_message
-from tests.worker_fakes import run_worker, worker_runtime
+from tests.worker_fixtures import run_worker, worker_runtime
 
 ERROR = {"code": "validation_error", "message": "message payload failed validation"}
 pytestmark = pytest.mark.usefixtures("recording_resources")
 
 
 @asynccontextmanager
-async def server_connection(store):
+async def server_connection(store, runtime):
     assert ControlService(database=store.database).on_trigger("owner/repo", 8, 42) is not None
-    runtime = handler_for(store)
     socket = Socket()
     session = Session[WorkerMessageUnion, ServerMessageUnion](
         socket,
@@ -80,15 +80,14 @@ async def receive(socket):
                 return message
 
 
-async def test_bad_assignment_rejects_every_sibling_without_recording_then_continues(tmp_path):
+async def test_bad_assignment_rejects_every_sibling_without_recording_then_continues(tmp_path, monkeypatch):
     # A valid first sibling must not launch before a later sibling fails schema validation.
     connection = Connection()
+    monkeypatch.setattr(WorkerExecutor, "execute", RecordingExecutor.execute)
     state = ExecutionState(tmp_path, 3)
     execution = WorkerExecution(worker_id="worker", executor=RecordingExecutor(), state=state)
-    runtime = worker_runtime(
-        worker_id="worker",
+    runtime = await worker_runtime(
         worker_token="token",
-        serve_ws_url="unused",
         execution=execution,
         read_history=state.read,
     )
@@ -96,7 +95,7 @@ async def test_bad_assignment_rejects_every_sibling_without_recording_then_conti
     try:
         await connection.outgoing.get()
         await connection.incoming.put(registered_message().model_dump_json())
-        valid = assignment_message(_assignment())
+        valid = assignment_message(_assignment(workspace=runtime.workspaces.inventory()[1].workspace))
         invalid = assignment_message(_assignment()).model_dump(mode="json")
         invalid["payload"][0]["message_id"] = call_header()["message_id"]
         invalid["payload"][0]["arguments"] = {"private-token": "secret-input"}
@@ -149,18 +148,18 @@ async def test_tool_failure_retires_original_waiter_before_critical_recovery(tmp
     connection = Connection()
     state = ExecutionState(tmp_path, 3)
     execution = WorkerExecution(worker_id="worker", executor=Executor(), state=state)
-    runtime = worker_runtime(
-        worker_id="worker",
+    runtime = await worker_runtime(
         worker_token="token",
-        serve_ws_url="unused",
         execution=execution,
         read_history=state.read,
     )
+    work = _assignment(workspace=runtime.workspaces.inventory()[1].workspace)
+    execution.receive(work)
     running = asyncio.create_task(run_worker(runtime, connection))
     try:
         await connection.outgoing.get()
         await connection.incoming.put(registered_message().model_dump_json())
-        await connection.incoming.put(assignment_message(_assignment()).model_dump_json())
+        await connection.incoming.put(assignment_message(work).model_dump_json())
         started = (await connection.receive_message()).payload[0]
         tool = (await connection.receive_message()).payload[0]
         items = [
@@ -203,8 +202,8 @@ async def test_tool_failure_retires_original_waiter_before_critical_recovery(tmp
         await execution.shutdown()
 
 
-async def test_bad_heartbeat_tool_batch_has_no_ack_lease_or_tool_effect_then_continues(store, monkeypatch):
-    async with server_connection(store) as (_runtime, _store, socket, serving):
+async def test_bad_heartbeat_tool_batch_has_no_ack_lease_or_tool_effect_then_continues(store, monkeypatch, server_runtime):
+    async with server_connection(store, server_runtime()) as (_runtime, _store, socket, serving):
         assignment = (await receive(socket)).payload[0]
         identity = ExecutionIdentity(
             job_id=assignment.arguments.job_id,
@@ -261,8 +260,8 @@ async def test_bad_heartbeat_tool_batch_has_no_ack_lease_or_tool_effect_then_con
 
 
 @pytest.mark.parametrize("kind", ["malformed", "repeated_reply", "rejection", "eof"])
-async def test_history_invalid_response_finishes_original_query_and_allows_next(store, kind):
-    async with server_connection(store) as (runtime, _store, socket, serving):
+async def test_history_invalid_response_finishes_original_query_and_allows_next(store, kind, server_runtime):
+    async with server_connection(store, server_runtime()) as (runtime, _store, socket, serving):
         await receive(socket)  # Read-only replies do not need the execution's Started.
         broker = ConversationBroker(runtime.gateway)
         query = asyncio.create_task(broker.query("worker-1", HistoryQuery(session_id=SESSION)))

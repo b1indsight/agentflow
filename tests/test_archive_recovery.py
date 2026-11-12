@@ -4,17 +4,14 @@ from datetime import timedelta
 
 import pytest
 
-from app.communication.gateway import Gateway
 from app.contracts.protocol import ExecutionStopped, RecoveryDescriptor
 from app.controler.workflow.service import ControlService
 from app.domain.models import ArchiveReason, FlowState, JobKind, JobState
 from app.persistence.activity import ActivityStore
 from app.persistence.workers import WorkerStore
-from tests.github import RecordingGitHub
-from tests.test_coordinator import coordinator
 from tests.test_merge import merge_payload, route_merge
 from tests.test_workflow_transactions import accepted_coding
-from tests.worker_fakes import server_callbacks, server_runtime
+from tests.worker_fixtures import server_callbacks
 from tests.workspace_fixtures import register_worker
 
 
@@ -128,14 +125,11 @@ async def test_expired_merged_executor_is_pinned_until_original_worker_returns(s
 
 
 @pytest.mark.parametrize("journal", ["missing", "started-without-executor"])
-async def test_merged_coding_process_without_exit_proof_cannot_unlock_archive(store, journal):
+async def test_merged_coding_process_without_exit_proof_cannot_unlock_archive(store, journal, server_runtime):
     old, _ = accepted_coding(store, receive=False)
     flow = store.flows.get_flow(old.flow_id)
     await route_merge(store, flow)
-    subject = coordinator(store, RecordingGitHub())
-    runtime = server_runtime(
-        subject, database=store.database, peers=Gateway(), tools=subject.tools, results=subject.results,
-    )
+    runtime = server_runtime()
     handler = server_callbacks(runtime, "worker-a", "restart")
     register_worker(store, "worker-a", repo=flow.repo, epoch="restart")
     if journal == "missing":

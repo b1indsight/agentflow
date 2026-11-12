@@ -1,5 +1,7 @@
 import os
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from datetime import datetime
+from typing import Any
 from uuid import uuid4
 
 import psycopg
@@ -7,9 +9,12 @@ import pytest
 from psycopg import sql
 from psycopg.conninfo import make_conninfo
 
+from app.controler.config import ServerSettings
+from app.controler.runtime import ServerRuntime
 from app.github import Issue, PullRequest, Repository, ReviewThread
 from app.persistence.store import Store
 from tests.github import (
+    RecordingGitHub,
     RecordingIssue,
     RecordingPullRequest,
     RecordingRepository,
@@ -82,6 +87,38 @@ def store(postgresql_url: str) -> Iterator[Store]:
         yield instance
     finally:
         instance.close()
+
+
+@pytest.fixture
+async def server_runtime(store: Store, monkeypatch: pytest.MonkeyPatch):
+    """Construct owned control planes on the test schema, replacing only GitHub I/O."""
+    runtimes: list[ServerRuntime] = []
+
+    def create(
+        *,
+        github: RecordingGitHub | None = None,
+        settings: dict[str, Any] | None = None,
+        clock: Callable[[], datetime] | None = None,
+    ) -> ServerRuntime:
+        values = {
+            "_env_file": None,
+            "database_url": store.database.database_url,
+            "worker_tokens": {"worker-1": "worker-secret"},
+            "worker_poll_interval": 0.01,
+            **(settings or {}),
+        }
+        remote = github if github is not None else RecordingGitHub()
+        with monkeypatch.context() as patch:
+            patch.setattr("app.controler.runtime.GitHubApp", lambda _: remote)
+            runtime = ServerRuntime(ServerSettings(**values))
+        runtimes.append(runtime)
+        if clock is not None:
+            monkeypatch.setattr(runtime.database, "_clock", clock)
+        return runtime
+
+    yield create
+    for runtime in reversed(runtimes):
+        await runtime.shutdown()
 
 
 @pytest.fixture

@@ -8,7 +8,6 @@ from contextlib import asynccontextmanager
 import pytest
 from pydantic import SecretStr
 
-from app.communication.gateway import Gateway
 from app.contracts.receipts import decode_result_inbox
 from app.controler.workers.transport import serve_worker
 from app.controler.workflow.service import ControlService
@@ -18,11 +17,10 @@ from app.persistence.records import required
 from app.worker.config import WorkerSettings
 from app.worker.runtime import WorkerRuntime
 from tests.github import RecordingGitHub, RecordingRepository
-from tests.test_coordinator import coordinator
 from tests.test_worker_executor import RecordingAgent
 from tests.test_worker_workspaces import managed_seed
 from tests.test_workspace_dispatch import wait_until
-from tests.worker_fakes import run_worker, server_runtime
+from tests.worker_fixtures import run_worker
 
 
 class QueueSocket:
@@ -67,13 +65,13 @@ class QueueConnection:
 
 
 @pytest.fixture
-def remote_flow(store, tmp_path, monkeypatch, recording_resources):
+def remote_flow(store, tmp_path, monkeypatch, recording_resources, server_runtime):
     """Use the normal coordinator/executor; only GitHub and the coding agent are scripted."""
     from tests.test_vcs import _git
 
     flow = required(ControlService(database=store.database).on_trigger("owner/repo", 8, 42))
     github = RecordingGitHub()
-    subject = coordinator(store, github)
+    server = server_runtime(github=github)
     root, remote = managed_seed(tmp_path)
     seed = root / "repos/owner/repo"
     _git("branch", "-m", "trunk", cwd=seed)
@@ -115,23 +113,19 @@ def remote_flow(store, tmp_path, monkeypatch, recording_resources):
     worker.root_lock.acquire()
     worker.initialize()
     try:
-        yield flow, subject, github, worker, agent
+        yield flow, server, github, worker, agent
     finally:
         worker.root_lock.release()
 
 
 @asynccontextmanager
-async def remote_connection(subject, worker, *, peers=None):
+async def remote_connection(server, worker):
     """Keep the existing duplex wire while sharing runtime setup with HTTP history tests."""
-    handler = server_runtime(
-        subject, database=subject.database, peers=peers if peers is not None else Gateway(),
-        poll_interval=0.01, tools=subject.tools, results=subject.results,
-    )
     to_serve, to_worker = asyncio.Queue(), asyncio.Queue()
     tasks = [
         asyncio.create_task(serve_worker(
             QueueSocket(to_serve, to_worker), worker_tokens={"worker-1": "worker-secret"},
-            serve=handler.serve_worker_session,
+            serve=server.serve_worker_session,
         )),
         asyncio.create_task(run_worker(worker, QueueConnection(to_serve, to_worker))),
     ]

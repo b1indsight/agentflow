@@ -26,18 +26,17 @@ from app.controler.workflow.service import ControlService
 from app.telemetry.logging import configure_logging
 from app.worker.execution.vcs import VcsVerificationError
 from app.worker.execution.workspaces import RepositoryProvisionError, RepositoryWorkspaces
-from tests.test_worker_handler import handler_for
 from tests.test_workspace_claims import provision
 from tests.wire import worker_message
-from tests.worker_fakes import server_callbacks
+from tests.worker_fixtures import server_callbacks
 
 
 @pytest.fixture
-async def controller(store, recording_resources):
+async def controller(server_runtime, recording_resources):
     connections = []
 
     async def connect():
-        callbacks = server_callbacks(handler_for(store), "worker-1", "epoch")
+        callbacks = server_callbacks(server_runtime(), "worker-1", "epoch")
         callbacks.session.send = AsyncMock(return_value=True)
         routes = Dispatcher[WorkerMessageUnion]()
         callbacks.bind(routes)

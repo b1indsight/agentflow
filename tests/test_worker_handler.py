@@ -5,7 +5,6 @@ import pytest
 from fastapi import WebSocketDisconnect
 
 from app.communication.dispatch import Dispatcher
-from app.communication.gateway import Gateway
 from app.contracts.conversation import ConversationFailure, HistoryQuery
 from app.contracts.protocol import (
     MAX_PAYLOAD_ITEMS,
@@ -42,22 +41,18 @@ from app.contracts.protocol import (
     terminal_id,
 )
 from app.contracts.result_models import ResultPending
-from app.controler.runtime import ServerRuntime
 from app.controler.workers.callbacks import ServerCallbacks
 from app.controler.workers.conversation import ConversationBroker
 from app.controler.workers.transport import serve_worker
 from app.controler.workflow.service import ControlService
 from app.domain.models import JobState, WorkerStatus, WorkspaceInventory
 from app.persistence.records import required
-from app.persistence.store import Store
 from app.persistence.workers import WorkerStore
-from tests.github import RecordingGitHub
 from tests.test_communication_session import Socket
 from tests.test_conversation_history import SESSION
-from tests.test_coordinator import coordinator
 from tests.test_workflow_transactions import accepted_coding
 from tests.wire import worker_message
-from tests.worker_fakes import inventory, server_callbacks, server_runtime
+from tests.worker_fixtures import inventory, server_callbacks
 from tests.workspace_fixtures import report_settled
 
 pytestmark = pytest.mark.usefixtures("recording_resources")
@@ -115,14 +110,6 @@ def terminal_items(terminal: TerminalPayload) -> tuple[ExecuteResult, AcceptResu
 
 def sent_items(raws: list[str]) -> list[ServerPayload]:
     return [item for raw in raws for item in parse_server_message(raw).payload]
-
-
-def handler_for(store: Store) -> ServerRuntime:
-    subject = coordinator(store, RecordingGitHub())
-    return server_runtime(
-        subject, database=store.database, peers=Gateway(), tools=subject.tools,
-        results=subject.results, poll_interval=0.01,
-    )
 
 
 class ScriptedSocket:
@@ -188,8 +175,8 @@ class WaitingSocket(ScriptedSocket):
         raise AssertionError("unreachable")
 
 
-async def test_gateway_authorizes_dispatch_after_preparation(store, queued_initial, monkeypatch):
-    handler, socket = handler_for(store), ScriptedSocket()
+async def test_gateway_authorizes_dispatch_after_preparation(store, queued_initial, monkeypatch, server_runtime):
+    handler, socket = server_runtime(), ScriptedSocket()
     prepare = handler.coordinator.prepare_for_assignment
 
     async def reassigned(job, worker, token, epoch):
@@ -209,8 +196,8 @@ async def test_gateway_authorizes_dispatch_after_preparation(store, queued_initi
     assert persisted.assignment_token == "reassigned-token"
 
 
-async def test_gateway_never_acknowledges_an_uncommitted_result(store, queued_initial, monkeypatch):
-    handler, socket = handler_for(store), ScriptedSocket()
+async def test_gateway_never_acknowledges_an_uncommitted_result(store, queued_initial, monkeypatch, server_runtime):
+    handler, socket = server_runtime(), ScriptedSocket()
 
     async def unfinished(*args):
         raise ResultPending("GitHub outcome requires reconciliation")
@@ -236,7 +223,7 @@ async def test_gateway_rejects_bad_credentials_before_accepting(monkeypatch):
     serve.assert_not_awaited()
 
 
-async def test_disconnected_predecessor_does_not_reject_replacement(store):
+async def test_disconnected_predecessor_does_not_reject_replacement(store, server_runtime):
     # The peer may already be gone when replacement closes its still-registered Session.
     class ObservedSocket(WaitingSocket):
         def __init__(self):
@@ -253,7 +240,7 @@ async def test_disconnected_predecessor_does_not_reject_replacement(store):
             if self is first:
                 raise WebSocketDisconnect(1006)
 
-    handler = handler_for(store)
+    handler = server_runtime()
     peers = handler.gateway
     first, second = ObservedSocket(), ObservedSocket()
     first_session = asyncio.create_task(serve_worker(
@@ -281,7 +268,7 @@ async def test_disconnected_predecessor_does_not_reject_replacement(store):
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
-async def test_overlapping_replacements_do_not_republish_old_route(store):
+async def test_overlapping_replacements_do_not_republish_old_route(store, server_runtime):
     # B waits for A's close while C supersedes B. Finishing A must not publish B again.
     closing, release = asyncio.Event(), asyncio.Event()
 
@@ -301,7 +288,7 @@ async def test_overlapping_replacements_do_not_republish_old_route(store):
                 closing.set()
                 await release.wait()
 
-    handler = handler_for(store)
+    handler = server_runtime()
     gateway = handler.gateway
     broker = ConversationBroker(gateway)
     tokens = {"worker-1": "worker-secret"}
@@ -348,14 +335,14 @@ async def test_overlapping_replacements_do_not_republish_old_route(store):
 
 
 @pytest.mark.parametrize("disconnect_after_start", [False, True])
-async def test_gateway_disconnect_policy(store, queued_initial, disconnect_after_start):
+async def test_gateway_disconnect_policy(store, queued_initial, disconnect_after_start, server_runtime):
     class DisconnectingSocket(ScriptedSocket):
         async def receive_text(self):
             if self._step == (2 if disconnect_after_start else 1):
                 raise WebSocketDisconnect()
             return await super().receive_text()
 
-    await serve_worker(DisconnectingSocket(), serve=handler_for(store).serve_worker_session,
+    await serve_worker(DisconnectingSocket(), serve=server_runtime().serve_worker_session,
                        worker_tokens={"worker-1": "worker-secret"})
     job = required(store.jobs.get_job(queued_initial[1].id))
     assert job.state is JobState.RUNNING and job.result_received_at is None
@@ -366,7 +353,7 @@ async def test_gateway_disconnect_policy(store, queued_initial, disconnect_after
                 if w.workspace == job.workspace).current_job_id == job.id
 
 
-async def test_gateway_resumes_started_assignment_under_a_new_epoch(store):
+async def test_gateway_resumes_started_assignment_under_a_new_epoch(store, server_runtime):
     job, _ = accepted_coding(store, receive=False)
     registration = recovery_registration(store, job, RecoveryDescriptor(
         job_id=job.id, assignment_token=job.assignment_token, state="started", executor_active=True,
@@ -396,7 +383,7 @@ async def test_gateway_resumes_started_assignment_under_a_new_epoch(store):
             raise WebSocketDisconnect()
 
     socket = RecoveringSocket()
-    await serve_worker(socket, serve=handler_for(store).serve_worker_session,
+    await serve_worker(socket, serve=server_runtime().serve_worker_session,
                        worker_tokens={"worker-a": "worker-secret"})
     resumed = next(m for m in map(parse_server_message, socket.sent) if isinstance(m, Registered))
     assert len(resumed.recoveries) == 1 and resumed.recoveries[0].action == "resume"
@@ -430,7 +417,7 @@ async def test_transport_checks_actual_first_message_before_session_dispatch(fir
 
 @pytest.mark.parametrize("failure", ["disconnected", "runtime", "database", "cancel", "sealed"])
 async def test_handler_cleanup_joins_communication_before_presence_and_propagates_errors(
-    store, monkeypatch, failure,
+    store, monkeypatch, failure, server_runtime,
 ):
     closing, release, joined, registered, disconnect = (asyncio.Event() for _ in range(5))
 
@@ -465,7 +452,7 @@ async def test_handler_cleanup_joins_communication_before_presence_and_propagate
             raise ConnectionError("database disconnect failed")
 
     monkeypatch.setattr(WorkerStore, "worker_disconnected", record_disconnect)
-    handler, socket = handler_for(store), ClosingSocket()
+    handler, socket = server_runtime(), ClosingSocket()
     peers = handler.gateway
     if failure == "sealed":
         peers.seal()
@@ -504,7 +491,7 @@ async def test_handler_cleanup_joins_communication_before_presence_and_propagate
 
 
 @pytest.mark.parametrize("batch", ["started", "heartbeat", "wrong_epoch", "ack", "reversed"])
-async def test_control_and_payload_keep_order_and_trailing_acceptance(store, queued_initial, batch):
+async def test_control_and_payload_keep_order_and_trailing_acceptance(store, queued_initial, batch, server_runtime):
     # Started/T/A and heartbeat/history/T/A must not lose trailing lifecycle entries.
     class BatchedSocket(ScriptedSocket):
         async def receive_text(self):
@@ -541,7 +528,7 @@ async def test_control_and_payload_keep_order_and_trailing_acceptance(store, que
             return worker_message(*items, epoch=epoch).model_dump_json()
 
     socket = BatchedSocket()
-    await serve_worker(socket, serve=handler_for(store).serve_worker_session,
+    await serve_worker(socket, serve=server_runtime().serve_worker_session,
                        worker_tokens={"worker-1": "worker-secret"})
     responses = [item for item in sent_items(socket.sent) if isinstance(item, AcceptResultResponse)]
     job = required(store.jobs.get_job(queued_initial[1].id))
@@ -556,7 +543,7 @@ async def test_control_and_payload_keep_order_and_trailing_acceptance(store, que
 
 @pytest.mark.parametrize("acceptance", ["later", "heartbeat", "absent", "write_failed"])
 async def test_terminal_waits_for_actual_acceptance_write_before_retiring_assignment(
-    store, queued_initial, acceptance, monkeypatch,
+    store, queued_initial, acceptance, monkeypatch, server_runtime,
 ):
     applied = asyncio.Event()
     callbacks = []
@@ -602,7 +589,7 @@ async def test_terminal_waits_for_actual_acceptance_write_before_retiring_assign
                 raise ConnectionError("response lost")
             await super().send_text(raw)
 
-    handler, socket = handler_for(store), SplitSocket()
+    handler, socket = server_runtime(), SplitSocket()
     apply = handler.results._apply
 
     async def commit(job_id):
@@ -619,7 +606,7 @@ async def test_terminal_waits_for_actual_acceptance_write_before_retiring_assign
 
 
 @pytest.mark.parametrize("defect", ["execution_id", "terminal_id", "accept_id", "result_id", "missing"])
-async def test_result_identities_and_durable_inbox_are_required(store, queued_initial, defect):
+async def test_result_identities_and_durable_inbox_are_required(store, queued_initial, defect, server_runtime):
     class InvalidResultSocket(ScriptedSocket):
         async def receive_text(self):
             if self._step < 2:
@@ -643,7 +630,7 @@ async def test_result_identities_and_durable_inbox_are_required(store, queued_in
                                   epoch=epoch).model_dump_json()
 
     socket = InvalidResultSocket()
-    await serve_worker(socket, serve=handler_for(store).serve_worker_session,
+    await serve_worker(socket, serve=server_runtime().serve_worker_session,
                        worker_tokens={"worker-1": "worker-secret"})
     assert socket.closed == 1008
     assert not any(isinstance(item, AcceptResultResponse) for item in sent_items(socket.sent))
@@ -653,7 +640,7 @@ async def test_result_identities_and_durable_inbox_are_required(store, queued_in
 
 @pytest.mark.parametrize("committed,with_accept", [(True, True), (True, False), (False, True)])
 async def test_registration_only_answers_actual_committed_acceptance(
-    store, prepared_initial, monkeypatch, committed, with_accept,
+    store, prepared_initial, monkeypatch, committed, with_accept, server_runtime,
 ):
     _flow, subject, _, request, _ = prepared_initial
     job = required(store.jobs.get_job(request.arguments.job_id))
@@ -693,7 +680,7 @@ async def test_registration_only_answers_actual_committed_acceptance(
     async def pending(job_id):
         raise ResultPending("result application is not committed")
 
-    handler, socket = handler_for(store), RegistrationSocket()
+    handler, socket = server_runtime(), RegistrationSocket()
     monkeypatch.setattr(handler.results, "_apply", pending)
     await serve_worker(socket, serve=handler.serve_worker_session,
                        worker_tokens={"worker-a": "worker-secret"})
@@ -708,7 +695,7 @@ async def test_registration_only_answers_actual_committed_acceptance(
     assert socket.closed == (1013 if with_accept and not committed else 1000)
 
 
-async def test_duplicate_prior_job_result_does_not_retire_current_assignment(store, prepared_initial):
+async def test_duplicate_prior_job_result_does_not_retire_current_assignment(store, prepared_initial, server_runtime):
     flow, subject, _, request, _ = prepared_initial
     previous = required(store.jobs.get_job(request.arguments.job_id))
     old_terminal = Failed(job_id=previous.id, assignment_token=previous.assignment_token, error="old failure")
@@ -733,7 +720,7 @@ async def test_duplicate_prior_job_result_does_not_retire_current_assignment(sto
             return await super().receive_text()
 
     socket = DuplicateSocket(worker_id="worker-a", registration=registration)
-    await serve_worker(socket, serve=handler_for(store).serve_worker_session,
+    await serve_worker(socket, serve=server_runtime().serve_worker_session,
                        worker_tokens={"worker-a": "worker-secret"})
     responses = [item for item in sent_items(socket.sent) if isinstance(item, AcceptResultResponse)]
     assert [item.result.job_id for item in responses] == [previous.id, following.id]
@@ -741,10 +728,10 @@ async def test_duplicate_prior_job_result_does_not_retire_current_assignment(sto
     assert socket.closed == 1000
 
 
-async def test_split_result_acceptance_orders_same_flow_successor_after_ack(store, queued_initial):
+async def test_split_result_acceptance_orders_same_flow_successor_after_ack(store, queued_initial, server_runtime):
     # Completion releases the DB claim before A. A prepared successor must wait for
     # the ACK that makes this Flow's worker journal replaceable on the ordered writer.
-    callbacks = server_callbacks(handler_for(store), "worker-1", "epoch")
+    callbacks = server_callbacks(server_runtime(), "worker-1", "epoch")
     callbacks.session.send = AsyncMock(return_value=True)
     routes = Dispatcher[WorkerMessageUnion]()
     callbacks.bind(routes)
@@ -782,8 +769,8 @@ async def test_split_result_acceptance_orders_same_flow_successor_after_ack(stor
         await callbacks.aclose()
 
 
-async def test_result_response_cache_is_bounded_and_idempotent_without_inventory_ack(store):
-    callbacks = server_callbacks(handler_for(store), "worker-1", "epoch")
+async def test_result_response_cache_is_bounded_and_idempotent_without_inventory_ack(store, server_runtime):
+    callbacks = server_callbacks(server_runtime(), "worker-1", "epoch")
     callbacks.session.send = AsyncMock(return_value=True)
     for job_id in range(1, MAX_PAYLOAD_ITEMS * 3):
         reply = AcceptResultResponse(
@@ -797,7 +784,7 @@ async def test_result_response_cache_is_bounded_and_idempotent_without_inventory
     assert len(callbacks._sent) == MAX_PAYLOAD_ITEMS * 2
 
 
-async def test_recovery_rejection_is_correlated_to_register_before_registered(store, completed_open_initial):
+async def test_recovery_rejection_is_correlated_to_register_before_registered(store, completed_open_initial, server_runtime):
     _, _, _, request, _ = completed_open_initial
     job = required(store.jobs.get_job(request.arguments.job_id))
     initial = recovery_registration(store, job, RecoveryDescriptor(
@@ -811,7 +798,7 @@ async def test_recovery_rejection_is_correlated_to_register_before_registered(st
             raise WebSocketDisconnect()
 
     socket = RejectedSocket(worker_id="worker-a", registration=initial)
-    await serve_worker(socket, serve=handler_for(store).serve_worker_session,
+    await serve_worker(socket, serve=server_runtime().serve_worker_session,
                        worker_tokens={"worker-a": "worker-secret"})
     business = [message for message in map(parse_server_message, socket.sent)
                 if message.control or message.payload]

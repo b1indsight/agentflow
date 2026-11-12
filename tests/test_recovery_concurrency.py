@@ -1,21 +1,16 @@
 """A slow result must leave capacity for other Flows and local scheduling sweeps."""
 
 import asyncio
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
 
 import pytest
 from pydantic import ValidationError
 
-from app.communication.gateway import Gateway
 from app.contracts.protocol import AssignmentArguments, Failed
 from app.contracts.result_models import ResultPending
 from app.controler.config import ServerSettings
-from app.controler.runtime import ServerRuntime
 from app.controler.workflow.service import ControlService
 from app.domain.models import FlowState, JobState
 from app.persistence.records import required
-from app.telemetry.metrics import Metrics
 from tests.github import RecordingGitHub
 from tests.test_coordinator import coordinator
 from tests.workspace_fixtures import register_worker
@@ -187,8 +182,10 @@ async def test_recovery_continues_after_one_broken_result(store, monkeypatch):
     assert required(store.jobs.get_job(jobs[1].id)).result_applied_at is not None
 
 
-async def test_runtime_sweeps_continue_while_result_recovery_waits(store, monkeypatch):
-    processor, _ = await pending_results(store, 1)
+async def test_runtime_sweeps_continue_while_result_recovery_waits(store, monkeypatch, server_runtime):
+    await pending_results(store, 1)
+    runtime = server_runtime(settings={"worker_sweep_interval": 0.001})
+    processor = runtime.results
     entered, release, exited = asyncio.Event(), asyncio.Event(), asyncio.Event()
     lease, settled = asyncio.Event(), asyncio.Event()
     apply = processor._apply
@@ -202,13 +199,6 @@ async def test_runtime_sweeps_continue_while_result_recovery_waits(store, monkey
             exited.set()
 
     monkeypatch.setattr(processor, "_apply", commit)
-    runtime = ServerRuntime.__new__(ServerRuntime)
-    runtime._triage_task = None
-    runtime.coordinator = coordinator(store, RecordingGitHub())
-    runtime.settings = SimpleNamespace(
-        worker_sweep_interval=0, result_recovery_concurrency=4, result_recovery_batch_size=64,
-    )
-    runtime.reviews, runtime.workers = store.reviews, store.workers
     claim, sweep = runtime.reviews.claim_due, runtime.workers.sweep_expired_assignments
 
     def claim_due():
@@ -223,10 +213,6 @@ async def test_runtime_sweeps_continue_while_result_recovery_waits(store, monkey
 
     monkeypatch.setattr(runtime.reviews, "claim_due", claim_due)
     monkeypatch.setattr(runtime.workers, "sweep_expired_assignments", sweep_expired)
-    runtime.database, runtime.results, runtime.metrics = store.database, processor, Metrics()
-    runtime.access = SimpleNamespace(close=AsyncMock())
-    runtime.gateway = Gateway()
-    runtime.reconciler = SimpleNamespace(stop=Mock())
     loops = [runtime._sweep_results, runtime._sweep_assignments, runtime._sweep_reviews]
     runtime._tasks = [asyncio.create_task(loop()) for loop in loops]
     try:
@@ -237,38 +223,53 @@ async def test_runtime_sweeps_continue_while_result_recovery_waits(store, monkey
     finally:
         await runtime.shutdown()
     assert exited.is_set() and all(task.done() for task in runtime._tasks)
-    runtime.access.close.assert_awaited_once()
+    assert runtime.access.client.is_closed
 
 
 @pytest.mark.parametrize("failure", ["communication", "access"])
-async def test_shutdown_releases_resources_even_when_connection_cleanup_fails(failure):
+async def test_shutdown_releases_resources_even_when_connection_cleanup_fails(failure, server_runtime, monkeypatch):
     # These are resource-close fault injections, not alternate persistence behavior.
-    runtime = ServerRuntime.__new__(ServerRuntime)
-    runtime._tasks, runtime._triage_task = [], None
+    runtime = server_runtime()
     order = []
+    seal, stop = runtime.gateway.seal, runtime.reconciler.stop
+    close_gateway, close_access = runtime.gateway.close, runtime.access.close
+    close_database = runtime.database.close
+
+    def seal_gateway():
+        order.append("seal")
+        seal()
+
+    def stop_sweeps():
+        order.append("sweeps")
+        stop()
 
     async def close_communication(code):
         assert code == 1012
         order.append("communication")
+        await close_gateway(code)
         if failure == "communication":
             raise OSError("communication failed")
 
-    async def close_access():
+    async def close_owner_access():
         order.append("access")
+        await close_access()
         if failure == "access":
             raise OSError("access failed")
 
-    runtime.gateway = Mock(
-        spec=Gateway,
-        seal=Mock(side_effect=lambda: order.append("seal")),
-        close=AsyncMock(side_effect=close_communication),
-    )
-    runtime.reconciler = SimpleNamespace(stop=lambda: order.append("sweeps"))
-    runtime.access = SimpleNamespace(close=close_access)
-    runtime.database = SimpleNamespace(close=lambda: order.append("database"))
-    with pytest.raises(OSError, match=failure):
-        await runtime.shutdown()
-    assert order == ["seal", "sweeps", "communication", "access", "database"]
+    def close_pool():
+        order.append("database")
+        close_database()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(runtime.gateway, "seal", seal_gateway)
+        patch.setattr(runtime.reconciler, "stop", stop_sweeps)
+        patch.setattr(runtime.gateway, "close", close_communication)
+        patch.setattr(runtime.access, "close", close_owner_access)
+        patch.setattr(runtime.database, "close", close_pool)
+        with pytest.raises(OSError, match=failure):
+            await runtime.shutdown()
+    # Gateway.close seals again itself before joining its owned connections.
+    assert order == ["seal", "sweeps", "communication", "seal", "access", "database"]
 
 
 async def test_store_pages_only_unapplied_results_in_stable_job_order(store):

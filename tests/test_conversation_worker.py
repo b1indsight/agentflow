@@ -41,7 +41,7 @@ from tests.test_conversation_history import SESSION
 from tests.test_worker_client import registered_message
 from tests.test_worker_session import _assignment
 from tests.wire import registered, server_message
-from tests.worker_fakes import run_worker, worker_runtime
+from tests.worker_fixtures import run_worker, worker_runtime
 
 
 class Connection:
@@ -82,10 +82,8 @@ async def test_history_uses_fifo_with_separate_registration(tmp_path, registered
             return HistoryPage(session_id=query.session_id)
 
     state = State(tmp_path, 3)
-    client = worker_runtime(
-        worker_id="worker-1",
+    client = await worker_runtime(
         worker_token="token",
-        serve_ws_url="unused",
         execution=WorkerExecution(worker_id="worker-1", executor=SimpleNamespace(), state=state),
         read_history=state.read,
     )
@@ -121,10 +119,8 @@ async def test_history_uses_fifo_with_separate_registration(tmp_path, registered
 async def test_bad_cursor_returns_correlated_query_error(tmp_path):
     connection = Connection()
     state = ExecutionState(tmp_path, 3)
-    client = worker_runtime(
-        worker_id="worker",
+    client = await worker_runtime(
         worker_token="token",
-        serve_ws_url="unused",
         execution=WorkerExecution(worker_id="worker", executor=SimpleNamespace(), state=state),
         read_history=state.read,
     )
@@ -169,10 +165,8 @@ async def test_handshake_stop_allows_history_but_rejection_retains_started_evide
     owner.receive(work)
     owner.start()
     connection = Connection()
-    client = worker_runtime(
-        worker_id="worker",
+    client = await worker_runtime(
         worker_token="test",
-        serve_ws_url="unused",
         execution=owner,
         read_history=lambda query: HistoryPage(session_id=query.session_id),
     )
@@ -260,10 +254,8 @@ async def test_recovery_decision_precedes_terminal_replay_and_fences_ack_epoch(t
     state.record_started()
     state.complete(InitialTaskResult(session_id=SESSION, last_message="done", exit_code=0))
     owner = WorkerExecution(worker_id="worker", executor=SimpleNamespace(), state=state)
-    client = worker_runtime(
-        worker_id="worker",
+    client = await worker_runtime(
         worker_token="test",
-        serve_ws_url="unused",
         execution=owner,
         read_history=state.read,
     )

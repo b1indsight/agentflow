@@ -32,19 +32,18 @@ from app.contracts.protocol import (
     call_header,
     execution_call_id,
     message_header,
-    parse_server_message,
     parse_worker_message,
     result_header,
 )
 from app.domain.delivery_models import PreparedDelivery
-from app.domain.models import VcsExecutionContext, VcsKind, VcsOutcome
+from app.domain.models import JobState, VcsExecutionContext, VcsKind, VcsOutcome
 from app.worker.execution.lifecycle import WorkerExecution
 from app.worker.state.execution import ExecutionState, ExecutionStateError
 from app.worker.transport.mcp import FlowToolCaller, WorkerMCP
 from tests.test_conversation_history import SESSION
 from tests.test_remote_e2e import QueueConnection
 from tests.test_worker_session import _assignment
-from tests.worker_fakes import run_worker, worker_runtime
+from tests.worker_fixtures import run_worker, worker_runtime
 
 
 def assignment_message(work: AssignmentArguments, epoch: str = "epoch-1") -> ServerMessage:
@@ -109,7 +108,8 @@ class RecordingExecutor:
 
 
 class ScriptedConnection:
-    def __init__(self) -> None:
+    def __init__(self, work: AssignmentArguments | None = None) -> None:
+        self.work = work or _assignment()
         self.result_ready = asyncio.Event()
         self.tool_ready = asyncio.Event()
         self.sent: list[str] = []
@@ -118,7 +118,7 @@ class ScriptedConnection:
         self.epoch = "epoch-1"
         self.messages = [
             registered_message().model_dump_json(),
-            assignment_message(_assignment()).model_dump_json(),
+            assignment_message(self.work).model_dump_json(),
         ]
 
     async def send(self, data: str) -> None:
@@ -145,15 +145,19 @@ class ScriptedConnection:
         pass
 
 
-async def test_stop_during_dial_never_registers_or_borrows_execution(monkeypatch):
+async def test_stop_during_dial_never_registers_or_borrows_execution(tmp_path, monkeypatch):
     # stop() may run while connect.__aenter__ is still waiting for the server.
     dialing, release = asyncio.Event(), asyncio.Event()
     connection = ScriptedConnection()
-    owner = Mock(
-        spec=WorkerExecution,
-        recovery=Mock(return_value=None),
-        result_for_registration=Mock(return_value=None),
-    )
+    owner = WorkerExecution(worker_id="w", executor=RecordingExecutor(), state=ExecutionState(tmp_path, 3))
+    owner.state.record_received(_assignment())
+    owner.state.record_started()
+    owner.state.complete(InitialTaskResult(session_id="session", last_message="done", exit_code=0))
+    owner.state.acknowledge(5, JobState.DONE)
+    recovery = Mock(wraps=owner.recovery)
+    result = Mock(wraps=owner.result_for_registration)
+    monkeypatch.setattr(owner, "recovery", recovery)
+    monkeypatch.setattr(owner, "result_for_registration", result)
 
     @asynccontextmanager
     async def connect(*args, **kwargs):
@@ -162,12 +166,9 @@ async def test_stop_during_dial_never_registers_or_borrows_execution(monkeypatch
         yield connection
 
     monkeypatch.setattr("app.worker.runtime.connect", connect)
-    client = worker_runtime(
-        worker_id="w",
+    client = await worker_runtime(
         worker_token="test",
-        serve_ws_url="unused",
         execution=owner,
-        read_history=Mock(),
     )
     running = asyncio.create_task(client._run_connections())
     await dialing.wait()
@@ -175,12 +176,12 @@ async def test_stop_during_dial_never_registers_or_borrows_execution(monkeypatch
     release.set()
     await asyncio.wait_for(running, 1)
     assert connection.sent == []
-    owner.recovery.assert_not_called()
-    owner.result_for_registration.assert_not_called()
-    owner.shutdown.assert_not_called()
+    recovery.assert_not_called()
+    result.assert_not_called()
+    assert owner.state.load().acknowledged
 
 
-async def test_overlapping_connection_cannot_borrow_owner_or_change_online_state():
+async def test_overlapping_connection_cannot_borrow_owner_or_change_online_state(tmp_path, monkeypatch):
     # A rejected second socket must not reset the first connection's readiness.
     class IdleConnection(ScriptedConnection):
         async def recv(self):
@@ -190,18 +191,16 @@ async def test_overlapping_connection_cannot_borrow_owner_or_change_online_state
                 return first
             await asyncio.Event().wait()
 
-    owner = Mock(
-        spec=WorkerExecution,
-        recovery=Mock(side_effect=[None, AssertionError("second connection borrowed owner")]),
-        result_for_registration=Mock(return_value=None),
-        lease=Mock(return_value=None),
-    )
-    client = worker_runtime(
-        worker_id="w",
+    owner = WorkerExecution(worker_id="w", executor=RecordingExecutor(), state=ExecutionState(tmp_path, 3))
+    owner.state.record_received(_assignment())
+    owner.state.record_started()
+    owner.state.complete(InitialTaskResult(session_id="session", last_message="done", exit_code=0))
+    owner.state.acknowledge(5, JobState.DONE)
+    recovery = Mock(side_effect=[None, AssertionError("second connection borrowed owner")])
+    monkeypatch.setattr(owner, "recovery", recovery)
+    client = await worker_runtime(
         worker_token="test",
-        serve_ws_url="unused",
         execution=owner,
-        read_history=Mock(),
     )
     first = asyncio.create_task(run_worker(client, IdleConnection()))
     try:
@@ -213,12 +212,11 @@ async def test_overlapping_connection_cannot_borrow_owner_or_change_online_state
             await run_worker(client, second)
         assert second.sent == []
         assert client._connected
-        owner.recovery.assert_called_once_with()
-        owner.result_for_registration.assert_called_once_with()
+        recovery.assert_called_once_with()
     finally:
         first.cancel()
         await asyncio.gather(first, return_exceptions=True)
-    owner.shutdown.assert_not_called()
+    assert owner.state.load().acknowledged
 
 
 @pytest.mark.parametrize("failure", ["send", "cancel", "journal"])
@@ -248,15 +246,15 @@ async def test_assignment_never_launches_before_started_is_sent_and_persisted(tm
             self.invocations += 1
             return await super().execute(*args, **kwargs)
 
-    state, executor, connection = Journal(tmp_path, 3), Executor(), Connection()
+    state, executor = Journal(tmp_path, 3), Executor()
     owner = WorkerExecution(worker_id="worker-1", executor=executor, state=state)
-    client = worker_runtime(
-        worker_id="worker-1",
+    client = await worker_runtime(
         worker_token="test",
-        serve_ws_url="unused",
         execution=owner,
         read_history=state.read,
     )
+    connection = Connection(_assignment(workspace=client.workspaces.inventory()[1].workspace))
+    owner.receive(connection.work)
     error = asyncio.CancelledError if failure == "cancel" else OSError
     with pytest.raises(error):
         await run_worker(client, connection)
@@ -344,10 +342,8 @@ async def test_completion_between_register_and_resume_is_persisted_without_reexe
                 ),
             ).model_dump_json()
         ]
-        client = worker_runtime(
-            worker_id="worker-1",
+        client = await worker_runtime(
             worker_token="test",
-            serve_ws_url="unused",
             execution=owner,
             read_history=state.read,
         )
@@ -389,20 +385,15 @@ async def test_worker_redacts_echoed_push_capability_before_journal_and_wire(tmp
             assert "push-secret" not in terminal.model_dump_json()
             return super().record_terminal(terminal)
 
-    connection = ScriptedConnection()
-    message = parse_server_message(connection.messages[1])
-    assignment = message.payload[0]
-    assert isinstance(assignment, Assignment)
-    assignment.arguments.secret = _assignment().secret
-    connection.messages[1] = message.model_dump_json()
     state = InspectJournal(tmp_path, 3)
-    client = worker_runtime(
-        worker_id="worker-1",
+    owner = WorkerExecution(worker_id="worker-1", executor=EchoingExecutor(), state=state)
+    client = await worker_runtime(
         worker_token="worker-secret",
-        serve_ws_url="ws://serve/internal/workers/connect",
-        execution=WorkerExecution(worker_id="worker-1", executor=EchoingExecutor(), state=state),
+        execution=owner,
         read_history=state.read,
     )
+    connection = ScriptedConnection(_assignment(workspace=client.workspaces.inventory()[1].workspace))
+    owner.receive(connection.work)
     with pytest.raises(ConnectionError, match="script complete"):
         await run_worker(client, connection)
     terminals = [item for item in sent_items(connection.sent) if isinstance(item, ExecuteResult)]
@@ -432,8 +423,8 @@ class ToolCallingExecutor:
 
 
 class ToolConnection(ScriptedConnection):
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, work: AssignmentArguments | None = None) -> None:
+        super().__init__(work)
         self.step = 0
 
     async def recv(self) -> str:
@@ -441,7 +432,7 @@ class ToolConnection(ScriptedConnection):
         if self.step == 1:
             return registered_message(self.epoch).model_dump_json()
         if self.step == 2:
-            return assignment_message(_assignment(), self.epoch).model_dump_json()
+            return assignment_message(self.work, self.epoch).model_dump_json()
         if self.step == 3:
             await self.tool_ready.wait()
             requests = [item for item in sent_items(self.sent) if isinstance(item, FlowToolRequest)]
@@ -516,14 +507,13 @@ async def test_replacing_connection_preserves_running_executor_and_renews_lease(
     executor = CancellableExecutor()
     session = ExecutionState(tmp_path, 3)
     owner = WorkerExecution(worker_id="worker-1", executor=executor, state=session)
-    client = worker_runtime(
-        worker_id="worker-1",
+    client = await worker_runtime(
         worker_token="worker-secret",
-        serve_ws_url="ws://unused",
         execution=owner,
         read_history=session.read,
     )
-    assignment = _assignment()
+    assignment = _assignment(workspace=client.workspaces.inventory()[1].workspace)
+    owner.receive(assignment)
 
     disconnected = asyncio.Event()
 
@@ -539,16 +529,9 @@ async def test_replacing_connection_preserves_running_executor_and_renews_lease(
     await executor.started.wait()
     try:
         await asyncio.wait_for(disconnected.wait(), 1)
-        client.stop()
-        await execution
+        execution.cancel()
+        await asyncio.gather(execution, return_exceptions=True)
         assert executor.cancelled.is_set() is False
-        client = worker_runtime(
-            worker_id="worker-1",
-            worker_token="worker-secret",
-            serve_ws_url="ws://unused",
-            execution=owner,
-            read_history=session.read,
-        )
         heartbeat = asyncio.Event()
 
         class ResumedConnection:
@@ -596,16 +579,15 @@ async def test_replacing_connection_preserves_running_executor_and_renews_lease(
 @pytest.mark.asyncio
 async def test_heartbeat_failure_interrupts_waiting_for_tool_reply(tmp_path) -> None:
     # A stalled control-side tool reply must not prevent a failed heartbeat from reconnecting.
-    assignment = _assignment()
     state = ExecutionState(tmp_path, 3)
     owner = WorkerExecution(worker_id="worker-1", executor=ToolCallingExecutor(), state=state)
-    client = worker_runtime(
-        worker_id="worker-1",
+    client = await worker_runtime(
         worker_token="worker-secret",
-        serve_ws_url="ws://unused",
         execution=owner,
         read_history=state.read,
     )
+    assignment = _assignment(workspace=client.workspaces.inventory()[1].workspace)
+    owner.receive(assignment)
     connection = BrokenHeartbeatConnection(assignment)
     try:
         with pytest.raises(ConnectionError, match="connection lost"):
@@ -658,9 +640,6 @@ async def test_cancelled_disconnected_tool_does_not_leak_into_resumed_or_next_as
                 await self.tool_ready.wait()
                 raise ConnectionError("controller stopped")
             return await super().recv()
-
-    assignment = _assignment()
-    following = assignment.model_copy(update={"job_id": 6, "assignment_token": "next-token"})
 
     class Reconnect:
         def __init__(self):
@@ -732,16 +711,17 @@ async def test_cancelled_disconnected_tool_does_not_leak_into_resumed_or_next_as
 
     state = Journal(tmp_path, 3)
     owner = WorkerExecution(worker_id="worker-1", executor=Executor(), state=state)
-    client = worker_runtime(
-        worker_id="worker-1",
+    client = await worker_runtime(
         worker_token="test",
-        serve_ws_url="ws://unused",
         execution=owner,
         read_history=state.read,
     )
+    assignment = _assignment(workspace=client.workspaces.inventory()[1].workspace)
+    following = assignment.model_copy(update={"job_id": 6, "assignment_token": "next-token"})
+    owner.receive(assignment)
     try:
         with pytest.raises(ConnectionError, match="controller stopped"):
-            await asyncio.wait_for(run_worker(client, Disconnect()), 2)
+            await asyncio.wait_for(run_worker(client, Disconnect(assignment)), 2)
         cancel_tool.set()
         await asyncio.wait_for(cancelled.wait(), 2)
         if finish_before_reconnect:
@@ -762,18 +742,16 @@ async def test_cancelled_disconnected_tool_does_not_leak_into_resumed_or_next_as
 
 
 @pytest.mark.parametrize("sent_before_disconnect", [False, True])
-async def test_replacing_client_replays_original_tool_call(tmp_path, sent_before_disconnect):
-    # Both a ready-but-unsent call and a lost reply must retain the original caller across clients.
+async def test_reconnection_replays_original_tool_call(tmp_path, sent_before_disconnect):
+    # Both a ready-but-unsent call and a lost reply retain their caller across connections.
     assignment = _assignment()
     session = ExecutionState(tmp_path, 3)
     executor = ToolCallingExecutor()
     owner = WorkerExecution(worker_id="worker-1", executor=executor, state=session)
     owner.receive(assignment)
     owner.start()
-    client = worker_runtime(
-        worker_id="worker-1",
+    client = await worker_runtime(
         worker_token="test",
-        serve_ws_url="ws://unused",
         execution=owner,
         read_history=session.read,
     )
@@ -809,16 +787,9 @@ async def test_replacing_client_replays_original_tool_call(tmp_path, sent_before
         with pytest.raises(ConnectionError, match="controller stopped"):
             await asyncio.wait_for(run_worker(client, Disconnect("epoch-1")), 1)
         assert not pending.future.done()
-        replacement = worker_runtime(
-            worker_id="worker-1",
-            worker_token="test",
-            serve_ws_url="ws://unused",
-            execution=owner,
-            read_history=session.read,
-        )
         recovered = ReconnectedTool("epoch-2")
         with pytest.raises(ConnectionError, match="script complete"):
-            await asyncio.wait_for(run_worker(replacement, recovered), 1)
+            await asyncio.wait_for(run_worker(client, recovered), 1)
         requests = [
             item for item in sent_items(recovered.sent) if isinstance(item, FlowToolRequest)
         ]
@@ -902,14 +873,14 @@ async def test_tool_cancelled_after_borrow_is_not_sent_or_blocking_completion(
 
     state = ExecutionState(tmp_path, 3)
     owner = CancelAfterBorrow(worker_id="worker-1", executor=Executor(), state=state)
-    client = worker_runtime(
-        worker_id="worker-1",
+    client = await worker_runtime(
         worker_token="test",
-        serve_ws_url="unused",
         execution=owner,
         read_history=state.read,
     )
-    connection = ToolConnection() if subsequent_call else ScriptedConnection()
+    work = _assignment(workspace=client.workspaces.inventory()[1].workspace)
+    owner.receive(work)
+    connection = ToolConnection(work) if subsequent_call else ScriptedConnection(work)
     original_send = connection.send
 
     async def send(raw):
@@ -976,10 +947,8 @@ async def test_tool_cancelled_while_history_holds_driver_is_not_sent(tmp_path):
     work = _assignment()
     owner.receive(work)
     owner.start()
-    client = worker_runtime(
-        worker_id="worker",
+    client = await worker_runtime(
         worker_token="test",
-        serve_ws_url="unused",
         execution=owner,
         read_history=lambda query: HistoryPage(session_id=query.session_id),
     )
@@ -1053,8 +1022,6 @@ async def test_mcp_shutdown_consumes_late_tool_response_before_delivering_result
                 await closed.wait()
             return await super().recv()
 
-    connection = LateConnection()
-
     class Executor:
         async def execute(self, task, secret=None, *, tool_caller):
             context = VcsExecutionContext(
@@ -1087,13 +1054,14 @@ async def test_mcp_shutdown_consumes_late_tool_response_before_delivering_result
             )
 
     session = ExecutionState(tmp_path, 3)
-    client = worker_runtime(
-        worker_id="worker-1",
+    owner = WorkerExecution(worker_id="worker-1", executor=Executor(), state=session)
+    client = await worker_runtime(
         worker_token="token",
-        serve_ws_url="unused",
-        execution=WorkerExecution(worker_id="worker-1", executor=Executor(), state=session),
+        execution=owner,
         read_history=session.read,
     )
+    connection = LateConnection(_assignment(workspace=client.workspaces.inventory()[1].workspace))
+    owner.receive(connection.work)
     with pytest.raises(ConnectionError, match="script complete"):
         await asyncio.wait_for(run_worker(client, connection), 5)
     messages = sent_items(connection.sent)
