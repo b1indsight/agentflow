@@ -285,6 +285,47 @@ async def test_control_preserves_omitted_feedback_and_does_not_rereview_noop(rev
     assert "已按 review 更新" not in github.comments[0]
 
 
+async def test_failed_revision_keeps_diagnostics_local(revision_control):
+    # A failed execution must preserve feedback and binding without notifying PR participants.
+    store, github, job, subject, task = revision_control
+    result = verified_result(task, exit_code=65, output=None, failure_stage="workspace",
+                             failure_detail="unregistered workspace unexpectedly exists",
+                             invocations=[])
+    assert await apply_result(subject, job, result) is JobState.FAILED
+    assert "unregistered workspace unexpectedly exists" in store.get_job(job.id).last_error
+    assert store.results.list_effects(job.id) == []
+    assert github.comments == github.review_requests == []
+    assert store.reviews.consumed == []
+    assert store.execution.released_at is None
+
+
+@pytest.mark.parametrize("problem", ["incomplete", "missing_root"])
+async def test_thread_mapping_errors_stay_local_without_consuming_feedback(revision_control, problem):
+    # Internal snapshot errors leave feedback pending; they are not PR conversation content.
+    store, github, job, subject, task = revision_control
+    threads = store.reviews.batch.threads
+    if problem == "incomplete":
+        store.reviews.batch.threads = threads.model_copy(update={"limitations": ("page missing",)})
+    else:
+        thread = threads.threads[0]
+        comments = thread.comments.model_copy(update={
+            "items": tuple(c.model_copy(update={"reply_to_id": 999}) for c in thread.comments.items),
+        })
+        store.reviews.batch.threads = threads.model_copy(update={
+            "threads": (thread.model_copy(update={"comments": comments}),),
+        })
+    item = task.feedback[0]
+    result = verified_result(task, output=revision_output(addressed=[AddressedComment(
+        item_id=item.item_id, version=item.version, comment_id=item.github_id, note="Fixed",
+    )]))
+    assert await apply_result(subject, job, result) is JobState.DONE
+    assert store.reviews.consumed == []
+    assert store.reviews.batch.open_points
+    assert store.reviews.batch.state.value == "waiting"
+    assert github.comments == ["修订交付（无新提交）：Already satisfied"]
+    assert github.thread_replies == github.review_requests == []
+
+
 @pytest.mark.parametrize("change", ["closed", "base", "head", "renamed-repository"])
 async def test_control_checks_actual_pr_and_lineage(revision_control, monkeypatch, change):
     store, github, job, subject, task = revision_control
@@ -313,6 +354,7 @@ async def test_control_checks_actual_pr_and_lineage(revision_control, monkeypatc
     assert (await apply_result(subject, job, result)).value == "failed"
     assert store.delivery.head_sha == task.expected_head_sha
     assert not store.reviews.consumed and not github.review_requests
+    assert github.comments == []
     if change == "renamed-repository":
         assert endpoint.calls == [(("owner", "repo", task.pr_number), {})]
 
@@ -367,6 +409,7 @@ async def test_revision_rejects_fabricated_or_conflicting_feedback(revision_cont
     )
     assert (await apply_result(subject, job, verified_result(task, output=output))).value == "failed"
     assert not store.reviews.consumed and not github.review_requests
+    assert github.comments == []
 
 
 @pytest.mark.parametrize("behavior", ["noop", "push", "unpushed", "dirty", "wrong_branch"])

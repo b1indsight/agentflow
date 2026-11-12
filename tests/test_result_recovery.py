@@ -1,6 +1,7 @@
 """Failure injection at the remote-write and final-commit boundaries without network."""
 
 import asyncio
+import hashlib
 from datetime import timedelta
 from typing import cast
 from unittest.mock import call
@@ -12,14 +13,18 @@ from app.contracts.protocol import (
     FlowToolRequest,
     InitialTask,
     InitialTaskResult,
-    RevisionExecutionRecord,
-    RevisionTaskResult,
     Succeeded,
     call_header,
     terminal_digest,
 )
 from app.contracts.receipts import ResultInbox
-from app.contracts.result_models import EffectState, LabelEffect, ResultPending
+from app.contracts.result_models import (
+    CommentEffect,
+    EffectState,
+    LabelEffect,
+    ResultPending,
+    ResultPlan,
+)
 from app.controler.workflow.coordinator import JobCoordinator
 from app.controler.workflow.service import ControlService
 from app.domain.delivery_models import OpenedDelivery
@@ -32,6 +37,7 @@ from app.domain.models import (
     FlowToolCall,
     JobKind,
     JobState,
+    ReviewItemKind,
     VcsKind,
 )
 from app.github import GitHubError, GitHubErrorKind, Issue, PullRequest, Repository
@@ -40,28 +46,19 @@ from tests.github import RecordingGitHub
 from tests.test_coordinator import apply_result, coordinator
 from tests.test_merge import route_merge
 from tests.test_revision_delivery import revision_control as revision_control  # noqa: PLC0414
+from tests.test_revision_delivery import verified_result
 from tests.workspace_fixtures import register_worker, report_settled
 
 
 @pytest.fixture
 def scenario(revision_control):
     store, github, job, _subject, task = revision_control
-    result = RevisionTaskResult(
-        flow_id=task.flow_id,
-        attempt_id=task.attempt_id,
-        batch_id=task.batch_id,
-        feedback_refs=list(task.feedback),
-        previous_session_id=task.session_id,
-        session_id=task.session_id,
-        session_generation=task.session_generation,
-        mode="resume",
-        last_message="failed",
-        exit_code=1,
-        invocations=[
-            RevisionExecutionRecord(mode="resume", session_id=task.session_id, exit_code=1)
-        ],
-    )
-    return store, github, job, result
+    # Exercise normal delivery summaries, without unrelated inline-thread effects.
+    store.reviews.batch.feedback = [f.model_copy(update={"kind": ReviewItemKind.CONVERSATION})
+                                   for f in store.reviews.batch.feedback]
+    task = task.model_copy(update={"feedback": store.reviews.batch.feedback})
+    store.job_records[job.id].payload["revision"] = task.model_dump(mode="json")
+    return store, github, job, verified_result(task)
 
 
 @pytest.fixture
@@ -259,7 +256,7 @@ async def test_cancel_before_terminal_keeps_executor_slot_until_result_ack(scena
     ).cancel(store.flow)
     assert store.job_records[job.id].state is JobState.RUNNING
     store.try_archive.assert_called_once_with(store.flow.id)
-    assert await apply_result(coordinator(store, github), job, result) is JobState.FAILED
+    assert await apply_result(coordinator(store, github), job, result) is JobState.DONE
     assert store.flow.state is FlowState.FINALIZING
     assert store.job_records[job.id].result_applied_at is not None
     assert store.try_archive.call_args_list == [call(store.flow.id), call(store.flow.id)]
@@ -393,6 +390,41 @@ async def test_closed_pr_after_lost_creation_response_finishes_without_new_write
     assert github.labels == github.review_requests == []
 
 
+@pytest.mark.parametrize("prior", ["pending", "rejected", "accepted", "unknown"])
+async def test_legacy_failure_comment_is_never_sent_on_recovery(scenario, prior):
+    # A frozen pre-upgrade warning must not be sent; an uncertain old POST remains auditable.
+    store, github, job, result = scenario
+    result = result.model_copy(update={"exit_code": 65, "output": None})
+    store.accept(job, result)
+    accepted = store.get_job(job.id)
+    reason = "unregistered workspace unexpectedly exists"
+    plan = ResultPlan(job_id=job.id, flow_id=job.flow_id, digest=accepted.result_digest,
+                      attempt_id=store.flow.current_attempt_id, state=JobState.FAILED,
+                      flow_state=FlowState.BLOCKED, error=reason,
+                      effects=[CommentEffect(key="failure", installation_id=42, repo="owner/repo",
+                                             number=17, body=f"⚠️ {reason}")])
+    store.results.prepare(plan)
+    if prior != "pending":
+        record = store.results.claim(job.id, "old-process")
+        store.results.mark_dispatched(record)
+        if prior == "accepted":
+            digest = hashlib.sha256(f"{job.id}:{plan.digest}:failure".encode()).hexdigest()
+            github.comment_bodies.append(f"⚠️ {reason}\n\n<!-- flowtool:effect:{digest} -->")
+        store.results.finish(record, EffectState.RETRY if prior == "rejected" else EffectState.UNCERTAIN,
+                             definitely_unsent=prior == "rejected")
+    subject = coordinator(store, github)
+    if prior == "unknown":
+        with pytest.raises(ResultPending):
+            await subject.results.apply(job.id)
+        assert store.get_job(job.id).result_applied_at is None
+        assert store.results.list_effects(job.id)[0].dispatched_at is not None
+    else:
+        assert await subject.results.apply(job.id) is JobState.FAILED
+        assert store.get_job(job.id).last_error == reason
+        assert store.flow.state is FlowState.BLOCKED
+    assert github.comments == []
+
+
 async def test_remote_comment_is_recovered_after_response_loss(scenario, monkeypatch) -> None:
     # GitHub accepted the POST, but the control process never received its response.
     store, github, job, result = scenario
@@ -409,7 +441,7 @@ async def test_remote_comment_is_recovered_after_response_loss(scenario, monkeyp
     assert store.results.list_effects(job.id)[0].state is EffectState.UNCERTAIN
     store.results.clock += timedelta(seconds=10)
     state = await apply_result(coordinator(store, github), job, result)
-    assert state is JobState.FAILED
+    assert state is JobState.DONE
     assert len(github.comments) == 1 and store.enqueued == []
     assert store.job_records[job.id].result_applied_at is not None
     assert [
@@ -492,7 +524,7 @@ async def test_retired_result_reconciles_dispatched_comment_without_resending(
     store.try_archive.side_effect = [False]
     store.results.clock += timedelta(seconds=30)
     if remote_receipt:
-        assert await apply_result(subject, job, result) is JobState.FAILED
+        assert await apply_result(subject, job, result) is JobState.DONE
         assert store.results.list_effects(job.id)[0].state is EffectState.SUCCEEDED
         store.try_archive.assert_called_once_with(store.flow.id)
     else:
@@ -507,7 +539,7 @@ async def test_retired_result_reconciles_dispatched_comment_without_resending(
     )
 
 
-async def test_unknown_comment_is_not_resubmitted_and_blocks_retry(scenario, monkeypatch) -> None:
+async def test_unknown_comment_is_not_resubmitted_and_keeps_result_pending(scenario, monkeypatch) -> None:
     store, github, job, result = scenario
     sent = []
 
@@ -522,10 +554,7 @@ async def test_unknown_comment_is_not_resubmitted_and_blocks_retry(scenario, mon
         store.results.clock += timedelta(seconds=30)
     assert len(sent) == 1
     assert store.job_records[job.id].result_applied_at is None
-    with pytest.raises(ValueError, match="pending result"):
-        ControlService(
-            database=cast(Store, store).database,
-        ).retry(store.flow)
+    assert store.has_pending_result(store.flow.id)
 
 
 async def test_final_commit_failure_rolls_back_completion_but_keeps_effect_receipt(
@@ -545,7 +574,7 @@ async def test_final_commit_failure_rolls_back_completion_but_keeps_effect_recei
     assert store.enqueued == []
     assert store.job_records[job.id].result_applied_at is None
     assert store.results.list_effects(job.id)[0].state is EffectState.SUCCEEDED
-    store.try_archive.side_effect = [False]  # This failed revision is blocked, not finalizing.
+    store.try_archive.side_effect = [False]  # The delivered revision still awaits review.
     await apply_result(coordinator(store, github), job, result)
     assert store.try_archive.call_args_list == [call(store.flow.id), call(store.flow.id)]
     assert store.job_records[job.id].result_applied_at is not None

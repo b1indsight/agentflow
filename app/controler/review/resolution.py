@@ -68,7 +68,6 @@ def plan_resolution(
             reason = f"[{item.github_id}]({link})：线程映射缺失、不完整或评论版本已变，保留待处理。"
             notes.problems.append(reason)
             notes.blocked.append(FeedbackRef(item_id=item.item_id, version=item.version))
-            conversation.append(f"{reason}\n{text or ''}")
             continue
         thread = candidates[0]
         mapped[thread.thread_id] = thread
@@ -102,7 +101,6 @@ def plan_resolution(
             reason = f"{thread_id}：无法确认根评论，保留待处理。"
             notes.problems.append(reason)
             notes.blocked.extend(FeedbackRef(item_id=f.item_id, version=f.version) for f in items)
-            conversation.append(reason)
             reply_key = None
         coverage = [item for comment in thread.comments.items
                     for item in coverage_by_comment.get(comment.github_id, []) if matches(comment, item)]

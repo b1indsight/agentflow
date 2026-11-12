@@ -69,6 +69,9 @@ Flow 使用 `queued/running/review/blocked/finalizing/archived` 六态；看板�
 - **原子提交与操作恢复**：trigger/retry/merge/cancel 的状态和任务变更在共享事务内提交；
   终态结果先持久接收，再执行带回执的 GitHub 操作，最后原子提交本地结果并回复 `server.accept_result`。
   恢复时核对远端状态，避免重复派生 job 或重复发送评论；无法确认的远端结果保留待核对状态。
+- **内部错误**：准备、workspace、执行、交付校验、归档及线程映射等内部错误仅保留在任务/反馈诊断、
+  控制台和日志中，不发布 GitHub 评论。旧版尚未发出的失败评论也跳过；发送结果不明的记录只查询确认，
+  不补发或删除。正常交付摘要、业务反馈回复和成功归档通知继续发布，失败状态与显式 retry 规则不变。
 - **合并与归档**：Control 核验当前 PR 合并后，在同一事务保存合并事实、原 Worker 停止请求、
   本地通知意图和带轮次的 archive activity，立即进入 archived/succeeded。原 worker 离线、
   绑定缺失或已释放、清理或通知失败均不阻塞该结论。原 worker 确认执行已退出、远端结果及

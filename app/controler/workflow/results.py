@@ -363,13 +363,13 @@ class ResultApplication:
             return base.model_copy(update={"state": JobState.FAILED,
                 "error": "review batch or attempt is no longer current"})
         if isinstance(message, Failed):
-            return self._failure(tx, flow, base, message.error)
+            return self._failure(base, message.error)
         assert isinstance(message, Succeeded)
         result = message.result
         if result.kind != job.kind.value:
             raise ValueError("result kind does not match persisted job")
         if attempt is None:
-            return self._failure(tx, flow, base, "result has no current attempt")
+            return self._failure(base, "result has no current attempt")
         if isinstance(result, RevisionTaskResult):
             assert batch is not None
             expected = [(f.item_id, f.version) for f in batch.feedback]
@@ -397,14 +397,12 @@ class ResultApplication:
                 reason = f"编码失败（exit={result.exit_code}{stage}）"
                 if result.failure_detail:
                     reason += f"：{result.failure_detail}"
-                return self._failure(tx, flow, base, f"{reason}。未开 PR。")
+                return self._failure(base, f"{reason}。未开 PR。")
             delivery = deliveries_tx.get_delivery(flow.id)
             call = deliveries_tx.get_tool_call(result.open_pr_call_id) if result.open_pr_call_id else None
             mismatch = initial_delivery_mismatch(job, attempt, result, delivery, call)
             if mismatch is not None:
                 return self._failure(
-                    tx,
-                    flow,
                     base,
                     f"编码结果与已验证的 Flow delivery 不一致：{mismatch}。",
                 )
@@ -416,7 +414,7 @@ class ResultApplication:
                 or delivery.body is None
             ):
                 return self._failure(
-                    tx, flow, base, "Flow delivery has no complete prepared PR intent"
+                    base, "Flow delivery has no complete prepared PR intent"
                 )
             effects: list[Effect] = [
                 PullRequestEffect(
@@ -445,8 +443,6 @@ class ResultApplication:
             )
             if result.exit_code != 0:
                 return self._failure(
-                    tx,
-                    flow,
                     base,
                     f"修订失败（exit={result.exit_code}, stage={result.failure_stage}）："
                     f"{result.failure_detail or '执行结果不确定'}。反馈保留，需核对工作区和远端。",
@@ -456,7 +452,7 @@ class ResultApplication:
             execution = workers_tx.get_flow_execution(flow.id)
             mismatch = revision_error or revision_mismatch(task, result)
             if mismatch:
-                return self._failure(tx, flow, base, mismatch)
+                return self._failure(base, mismatch)
             if (delivery is None or delivery.head_sha != task.expected_head_sha
                     or delivery.state is not DeliveryState.OPEN
                     or delivery.pr_number != task.pr_number or delivery.branch != task.branch
@@ -465,7 +461,7 @@ class ResultApplication:
                     or attempt.session_generation != task.session_generation
                     or execution is None or execution.released_at is not None
                     or execution.repo_identity != task.repo_identity):
-                return self._failure(tx, flow, base, "revision assignment is no longer current")
+                return self._failure(base, "revision assignment is no longer current")
             assert result.output is not None
             number = self._pr_number(flow, deliveries=deliveries_tx)
             members = {(f.item_id, f.version): f for f in batch.feedback}
@@ -477,7 +473,7 @@ class ResultApplication:
                 key not in members or members[key].github_id != item.comment_id
                 for key, item in zip(keys, reported, strict=True)
             )):
-                return self._failure(tx, flow, base, "revision reported unknown or conflicting feedback")
+                return self._failure(base, "revision reported unknown or conflicting feedback")
             consumed = [FeedbackRef(item_id=f.item_id, version=f.version) for f in result.output.addressed]
             # Empty review summaries carry metadata, not an additional coding request.
             reported_keys = set(keys)
@@ -523,7 +519,7 @@ class ResultApplication:
                     flow, job, result, deliveries=deliveries_tx, jobs=jobs_tx, workers=workers_tx
                 )
             except ValueError as error:
-                return self._failure(tx, flow, base, str(error))
+                return self._failure(base, str(error))
             delivery = deliveries_tx.get_delivery(flow.id)
             assert delivery is not None
             return base.model_copy(
@@ -676,24 +672,13 @@ class ResultApplication:
         current.version += 1
         deliveries.update_delivery(current)
 
-    def _failure(self, tx: Database, flow: Flow, base: ResultPlan, reason: str) -> ResultPlan:
-        deliveries_tx = self.deliveries.using(tx)
-        delivery = deliveries_tx.get_delivery(flow.id)
-        if delivery is not None and delivery.state is DeliveryState.MERGED:
-            return base.model_copy(
-                update={"state": JobState.FAILED, "flow_state": FlowState.BLOCKED, "error": reason}
-            )
-        number = delivery.pr_number if delivery and delivery.pr_number else flow.issue_number
+    @staticmethod
+    def _failure(base: ResultPlan, reason: str) -> ResultPlan:
         return base.model_copy(
             update={
                 "state": JobState.FAILED,
                 "flow_state": FlowState.BLOCKED,
                 "error": reason,
-                "effects": (
-                    [self._comment(flow, number, "failure", f"⚠️ {reason}")]
-                    if flow.installation_id is not None
-                    else []
-                ),
             }
         )
 
