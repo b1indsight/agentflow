@@ -1,5 +1,5 @@
 import {
-  type KeyboardEvent,
+  type ReactNode,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -42,13 +42,13 @@ import { actionLabel, archiveReasonLabels, flowLabel, phases } from "./phases";
 import { SearchBox } from "./SearchBox";
 import { Button } from "./components/ui/button";
 import { Input } from "./components/ui/input";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "./components/ui/tabs";
 import type {
   ArchiveReason,
   FlowDetail,
   FlowSummary,
   JobSummary,
   Phase,
-  Tab,
 } from "./types";
 import { useConversation } from "./useConversation";
 import { SavedDetails, WindowList } from "./windowing";
@@ -75,14 +75,21 @@ const blank = (): Record<Phase, Column> => ({
   blocked: column(),
   archived: column(),
 });
+const flowTabs = [
+  { value: "overview", label: "概览" },
+  { value: "conversation", label: "会话" },
+  { value: "jobs", label: "执行记录" },
+] as const;
+type Tab = (typeof flowTabs)[number]["value"];
 const positions = new Map<string, number>();
 const route = () => {
-  const m = location.hash.match(
-    /^#flow\/(\d+)(?:\/(overview|conversation|jobs))?$/,
+  const m = location.hash.match(/^#flow\/(\d+)(?:\/([^/]+))?$/);
+  const tab = flowTabs.find(
+    ({ value }) => value === (m?.[2] ?? "conversation"),
   );
   return {
-    id: m ? Number(m[1]) : null,
-    tab: (m?.[2] ?? "conversation") as Tab,
+    id: m && tab ? Number(m[1]) : null,
+    tab: tab?.value ?? "conversation",
   };
 };
 const name = (f: FlowSummary) => f.title ?? `Issue #${f.issue_number}`;
@@ -481,14 +488,6 @@ function Detail({
       </main>
     );
   if (!flow) return <main className="empty-state">正在读取 Flow…</main>;
-  const switchTab = (t: Tab) => (location.hash = `flow/${id}/${t}`);
-  const tabs = (e: KeyboardEvent) => {
-    if (!["ArrowLeft", "ArrowRight"].includes(e.key)) return;
-    e.preventDefault();
-    const x: Tab[] = ["overview", "conversation", "jobs"],
-      n = (x.indexOf(tab) + (e.key === "ArrowRight" ? 1 : 2)) % 3;
-    switchTab(x[n]);
-  };
   return (
     <div
       className={`detail-shell${collapsed ? " rail-collapsed" : ""}${nav ? " nav-open" : ""}`}
@@ -565,331 +564,365 @@ function Detail({
         aria-label="关闭任务导航"
         onClick={() => setNav(false)}
       />
-      <main className="detail">
-        <header
-          ref={head}
-          className={`detail-head${compactHead ? " compact" : ""}`}
-        >
-          {compactHead && (
-            <div className="compact-detail-bar">
-              <button
-                type="button"
-                className="btn ghost"
-                aria-label="返回看板"
-                onClick={onBack}
-              >
-                <ArrowLeft />
-              </button>
-              <span className="compact-detail-ref">{ref(flow)}</span>
-              <span className="compact-detail-title">{name(flow)}</span>
-              <button
-                type="button"
-                className="btn ghost"
-                aria-label="展开详情标题"
-                onClick={() => {
-                  expandedAt.current = detail.current?.scrollTop ?? 0;
-                  headTransition.current = {
-                    height: head.current?.offsetHeight ?? 0,
-                    scroll: detail.current?.scrollTop ?? 0,
-                  };
-                  setCompactHead(false);
-                }}
-              >
-                <ChevronDown />
-              </button>
-            </div>
-          )}
-          <div className="detail-head-full" hidden={compactHead}>
-            <button
-              className="btn mobile-nav"
-              aria-expanded={nav}
-              onClick={() => setNav(true)}
-            >
-              <Menu />
-              切换任务
-            </button>
-            <div className="detail-title-row">
-              <h1 id="detail-heading">{name(flow)}</h1>
-              <span className={`badge phase-${flow.phase}`}>
-                <i className="dot" />
-                {flowLabel(flow)}
-              </span>
-            </div>
-            <div className="links">
-              <span>{flow.repo}</span>
-              <a href={flow.issue_url} target="_blank" rel="noreferrer">
-                Issue #{flow.issue_number} ↗
-              </a>
-              {flow.pr_url && (
-                <a href={flow.pr_url} target="_blank" rel="noreferrer">
-                  PR #{flow.pr_number} ↗
-                </a>
-              )}
-            </div>
-            <div className="tabs" role="tablist" onKeyDown={tabs}>
-              {(
-                [
-                  ["overview", "概览"],
-                  ["conversation", "会话"],
-                  ["jobs", "执行记录"],
-                ] as [Tab, string][]
-              ).map(([t, l]) => (
+      <Tabs
+        value={tab}
+        onValueChange={(value) => (location.hash = `flow/${id}/${value}`)}
+        asChild
+      >
+        <main className="detail">
+          <header
+            ref={head}
+            className={`detail-head${compactHead ? " compact" : ""}`}
+          >
+            {compactHead && (
+              <div className="compact-detail-bar">
                 <button
-                  role="tab"
-                  id={`tab-${t}`}
-                  aria-selected={tab === t}
-                  tabIndex={tab === t ? 0 : -1}
-                  onClick={() => switchTab(t)}
-                  key={t}
+                  type="button"
+                  className="btn ghost"
+                  aria-label="返回看板"
+                  onClick={onBack}
                 >
-                  {l}
+                  <ArrowLeft />
                 </button>
-              ))}
-            </div>
-          </div>
-        </header>
-        <div className="detail-body" data-scroll-root ref={detail}>
-          <section className="content" role="tabpanel">
-            {tab === "overview" ? (
-              <>
-                <section className={`execution-summary phase-${flow.phase}`}>
-                  <span className="eyebrow">当前动作</span>
-                  <h2>{actionLabel(flow)}</h2>
-                  <p>{flow.reason}</p>
-                  <div className="next-step">
-                    <span>下一步条件</span>
-                    <p>{flow.next_condition}</p>
-                  </div>
-                  <div className="round-actions">
-                    {flow.lifecycle === "blocked" && (
-                      <Button
-                        variant="outline"
-                        className="btn"
-                        disabled={pending !== null}
-                        onClick={() => void submit("retry")}
-                      >
-                        <RefreshCw />
-                        {pending === "retry" ? "正在提交重试…" : "重试"}
-                      </Button>
-                    )}
-                    {flow.lifecycle === "archived" ? (
-                      <>
-                        <p id="resume-hint">
-                          恢复推进将在同一 Flow 开启新轮次，从待处理开始并使用新
-                          PR，保留历史记录；不会重试旧轮次。
-                        </p>
-                        <Button
-                          variant="outline"
-                          className="btn"
-                          aria-describedby="resume-hint"
-                          disabled={pending !== null}
-                          onClick={() => void submit("resume")}
-                        >
-                          <RefreshCw />
-                          {pending === "resume" ? "正在恢复推进…" : "恢复推进"}
-                        </Button>
-                      </>
-                    ) : flow.lifecycle === "finalizing" ? (
-                      <p>
-                        正在结束本轮。停止确认、结果对账及收尾未完成前不会归档，请刷新查看进展。
-                      </p>
-                    ) : endingRound === null ? (
-                      <Button
-                        variant="outline"
-                        className="btn"
-                        disabled={pending !== null}
-                        onClick={() => {
-                          setEndingRound(flow.current_round_no);
-                          setWriteError("");
-                          setWriteNotice("");
-                        }}
-                      >
-                        <Archive />
-                        结束本轮
-                      </Button>
-                    ) : (
-                      <form
-                        className="round-form"
-                        aria-label="结束本轮"
-                        onSubmit={(event) => {
-                          event.preventDefault();
-                          void submit("archive");
-                        }}
-                      >
-                        <fieldset disabled={pending !== null}>
-                          <legend>结束第 {endingRound} 轮</legend>
-                          <p id="archive-hint">
-                            提交只发起结束本轮；停止确认、结果对账及收尾未完成前不会归档。
-                          </p>
-                          <div
-                            className="round-reasons"
-                            role="group"
-                            aria-label="本轮结果"
-                          >
-                            {(["succeeded", "abandoned"] as const).map(
-                              (reason) => (
-                                <label key={reason}>
-                                  <Input
-                                    type="radio"
-                                    className="round-choice"
-                                    name="archive-reason"
-                                    value={reason}
-                                    checked={archiveReason === reason}
-                                    onChange={() => setArchiveReason(reason)}
-                                  />
-                                  {archiveReasonLabels[reason]}
-                                </label>
-                              ),
-                            )}
-                          </div>
-                          <label htmlFor="archive-summary">
-                            本轮结论（必填）
-                          </label>
-                          <Input
-                            id="archive-summary"
-                            required
-                            value={archiveSummary}
-                            onChange={(event) =>
-                              setArchiveSummary(event.target.value)
-                            }
-                            aria-describedby="archive-hint"
-                            placeholder="说明本轮成果或废弃原因"
-                          />
-                          <div className="round-buttons">
-                            <Button
-                              type="submit"
-                              variant="outline"
-                              className="btn"
-                              disabled={
-                                !archiveSummary.trim() ||
-                                endingRound !== flow.current_round_no
-                              }
-                            >
-                              {pending === "archive"
-                                ? "正在提交结束请求…"
-                                : "确认结束本轮"}
-                            </Button>
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              onClick={() => setEndingRound(null)}
-                            >
-                              取消
-                            </Button>
-                          </div>
-                          {endingRound !== flow.current_round_no && (
-                            <p role="alert">
-                              轮次已变化，请关闭表单并核对当前轮次后再操作。
-                            </p>
-                          )}
-                        </fieldset>
-                      </form>
-                    )}
-                  </div>
-                  {writeError && <p role="alert">{writeError}</p>}
-                  {writeNotice && <p role="status">{writeNotice}</p>}
-                </section>
-                <h2 className="panel-title">任务信息</h2>
-                <dl className="task-facts">
-                  <dt>生命周期 / 阶段</dt>
-                  <dd>
-                    {flow.lifecycle} /{" "}
-                    {phases.find(([p]) => p === flow.phase)?.[1]}
-                  </dd>
-                  <dt>当前轮次</dt>
-                  <dd>第 {flow.current_round_no} 轮</dd>
-                  {flow.archive_reason && (
-                    <>
-                      <dt>
-                        {flow.lifecycle === "archived"
-                          ? "归档结果"
-                          : "本轮结束目标"}
-                      </dt>
-                      <dd>{archiveReasonLabels[flow.archive_reason]}</dd>
-                    </>
-                  )}
-                  {flow.archive_summary && (
-                    <>
-                      <dt>本轮结论</dt>
-                      <dd className="round-summary">{flow.archive_summary}</dd>
-                    </>
-                  )}
-                  <dt>Worker</dt>
-                  <dd>
-                    {flow.worker_id ?? "尚未绑定"}
-                    {flow.worker_historical ? "（历史归属）" : ""}
-                  </dd>
-                  <dt>分支</dt>
-                  <dd>{flow.branch ?? "尚未创建"}</dd>
-                  <dt>修订轮数</dt>
-                  <dd>{flow.revision_cycles}</dd>
-                  <dt>创建</dt>
-                  <dd>{new Date(flow.created_at).toLocaleString()}</dd>
-                  <dt>更新</dt>
-                  <dd>{new Date(flow.updated_at).toLocaleString()}</dd>
-                  {flow.archived_at && (
-                    <>
-                      <dt>归档时间</dt>
-                      <dd>{new Date(flow.archived_at).toLocaleString()}</dd>
-                    </>
-                  )}
-                  <dt>当前状态版本</dt>
-                  <dd>{flow.state_version}（与阅读快照独立）</dd>
-                </dl>
-                <h2 className="panel-title">数据来源</h2>
-                <SourceList sources={flow.sources} />
-              </>
-            ) : tab === "conversation" ? (
-              <Conversation key={id} id={id} root={detail} refresh={refresh} />
-            ) : (
-              <>
-                <InferenceNotices key={`${id}:${refresh}`} id={id} />
-                <h2 className="panel-title">任务执行</h2>
-                <div className="timeline">
-                  <WindowList
-                    count={jobs.length}
-                    label="执行记录"
-                    itemKey={(i) => jobs[i].id}
-                  >
-                    {(i) => (
-                      <article
-                        className="timeline-item"
-                        data-state={jobs[i].state}
-                      >
-                        <div className="job-top">
-                          <strong>
-                            {jobs[i].kind === "inference"
-                              ? `推理 · 派发次数 ${jobs[i].attempt}`
-                              : `${jobs[i].kind} #${jobs[i].attempt}`}
-                          </strong>
-                          <span className="badge">{jobs[i].state}</span>
-                        </div>
-                        <time dateTime={jobs[i].created_at}>
-                          创建于 {new Date(jobs[i].created_at).toLocaleString()}
-                        </time>
-                        <p>
-                          {jobs[i].worker_id ?? "无 Worker"}
-                          {jobs[i].error_code ? ` · ${jobs[i].error_code}` : ""}
-                        </p>
-                      </article>
-                    )}
-                  </WindowList>
-                </div>
-                {jobError && (
-                  <button className="btn" onClick={() => moreJobs()}>
-                    读取失败：{jobError}（重试）
-                  </button>
-                )}
-                {jobMore && (
-                  <button className="btn" onClick={() => moreJobs()}>
-                    读取更多执行记录
-                  </button>
-                )}
-              </>
+                <span className="compact-detail-ref">{ref(flow)}</span>
+                <span className="compact-detail-title">{name(flow)}</span>
+                <button
+                  type="button"
+                  className="btn ghost"
+                  aria-label="展开详情标题"
+                  onClick={() => {
+                    expandedAt.current = detail.current?.scrollTop ?? 0;
+                    headTransition.current = {
+                      height: head.current?.offsetHeight ?? 0,
+                      scroll: detail.current?.scrollTop ?? 0,
+                    };
+                    setCompactHead(false);
+                  }}
+                >
+                  <ChevronDown />
+                </button>
+              </div>
             )}
-          </section>
-        </div>
-      </main>
+            <div className="detail-head-full" hidden={compactHead}>
+              <button
+                className="btn mobile-nav"
+                aria-expanded={nav}
+                onClick={() => setNav(true)}
+              >
+                <Menu />
+                切换任务
+              </button>
+              <div className="detail-title-row">
+                <h1 id="detail-heading">{name(flow)}</h1>
+                <span className={`badge phase-${flow.phase}`}>
+                  <i className="dot" />
+                  {flowLabel(flow)}
+                </span>
+              </div>
+              <div className="links">
+                <span>{flow.repo}</span>
+                <a href={flow.issue_url} target="_blank" rel="noreferrer">
+                  Issue #{flow.issue_number} ↗
+                </a>
+                {flow.pr_url && (
+                  <a href={flow.pr_url} target="_blank" rel="noreferrer">
+                    PR #{flow.pr_number} ↗
+                  </a>
+                )}
+              </div>
+              <TabsList aria-label="Flow 详情">
+                {flowTabs.map(({ value, label }) => (
+                  <TabsTrigger value={value} key={value}>
+                    {label}
+                  </TabsTrigger>
+                ))}
+              </TabsList>
+            </div>
+          </header>
+          <div className="detail-body" data-scroll-root ref={detail}>
+            <TabsContent value={tab} asChild>
+              <section className="content">
+                {
+                  (
+                    {
+                      overview: (
+                        <>
+                          <section
+                            className={`execution-summary phase-${flow.phase}`}
+                          >
+                            <span className="eyebrow">当前动作</span>
+                            <h2>{actionLabel(flow)}</h2>
+                            <p>{flow.reason}</p>
+                            <div className="next-step">
+                              <span>下一步条件</span>
+                              <p>{flow.next_condition}</p>
+                            </div>
+                            <div className="round-actions">
+                              {flow.lifecycle === "blocked" && (
+                                <Button
+                                  variant="outline"
+                                  className="btn"
+                                  disabled={pending !== null}
+                                  onClick={() => void submit("retry")}
+                                >
+                                  <RefreshCw />
+                                  {pending === "retry"
+                                    ? "正在提交重试…"
+                                    : "重试"}
+                                </Button>
+                              )}
+                              {flow.lifecycle === "archived" ? (
+                                <>
+                                  <p id="resume-hint">
+                                    恢复推进将在同一 Flow
+                                    开启新轮次，从待处理开始并使用新
+                                    PR，保留历史记录；不会重试旧轮次。
+                                  </p>
+                                  <Button
+                                    variant="outline"
+                                    className="btn"
+                                    aria-describedby="resume-hint"
+                                    disabled={pending !== null}
+                                    onClick={() => void submit("resume")}
+                                  >
+                                    <RefreshCw />
+                                    {pending === "resume"
+                                      ? "正在恢复推进…"
+                                      : "恢复推进"}
+                                  </Button>
+                                </>
+                              ) : flow.lifecycle === "finalizing" ? (
+                                <p>
+                                  正在结束本轮。停止确认、结果对账及收尾未完成前不会归档，请刷新查看进展。
+                                </p>
+                              ) : endingRound === null ? (
+                                <Button
+                                  variant="outline"
+                                  className="btn"
+                                  disabled={pending !== null}
+                                  onClick={() => {
+                                    setEndingRound(flow.current_round_no);
+                                    setWriteError("");
+                                    setWriteNotice("");
+                                  }}
+                                >
+                                  <Archive />
+                                  结束本轮
+                                </Button>
+                              ) : (
+                                <form
+                                  className="round-form"
+                                  aria-label="结束本轮"
+                                  onSubmit={(event) => {
+                                    event.preventDefault();
+                                    void submit("archive");
+                                  }}
+                                >
+                                  <fieldset disabled={pending !== null}>
+                                    <legend>结束第 {endingRound} 轮</legend>
+                                    <p id="archive-hint">
+                                      提交只发起结束本轮；停止确认、结果对账及收尾未完成前不会归档。
+                                    </p>
+                                    <div
+                                      className="round-reasons"
+                                      role="group"
+                                      aria-label="本轮结果"
+                                    >
+                                      {(
+                                        ["succeeded", "abandoned"] as const
+                                      ).map((reason) => (
+                                        <label key={reason}>
+                                          <Input
+                                            type="radio"
+                                            className="round-choice"
+                                            name="archive-reason"
+                                            value={reason}
+                                            checked={archiveReason === reason}
+                                            onChange={() =>
+                                              setArchiveReason(reason)
+                                            }
+                                          />
+                                          {archiveReasonLabels[reason]}
+                                        </label>
+                                      ))}
+                                    </div>
+                                    <label htmlFor="archive-summary">
+                                      本轮结论（必填）
+                                    </label>
+                                    <Input
+                                      id="archive-summary"
+                                      required
+                                      value={archiveSummary}
+                                      onChange={(event) =>
+                                        setArchiveSummary(event.target.value)
+                                      }
+                                      aria-describedby="archive-hint"
+                                      placeholder="说明本轮成果或废弃原因"
+                                    />
+                                    <div className="round-buttons">
+                                      <Button
+                                        type="submit"
+                                        variant="outline"
+                                        className="btn"
+                                        disabled={
+                                          !archiveSummary.trim() ||
+                                          endingRound !== flow.current_round_no
+                                        }
+                                      >
+                                        {pending === "archive"
+                                          ? "正在提交结束请求…"
+                                          : "确认结束本轮"}
+                                      </Button>
+                                      <Button
+                                        type="button"
+                                        variant="ghost"
+                                        onClick={() => setEndingRound(null)}
+                                      >
+                                        取消
+                                      </Button>
+                                    </div>
+                                    {endingRound !== flow.current_round_no && (
+                                      <p role="alert">
+                                        轮次已变化，请关闭表单并核对当前轮次后再操作。
+                                      </p>
+                                    )}
+                                  </fieldset>
+                                </form>
+                              )}
+                            </div>
+                            {writeError && <p role="alert">{writeError}</p>}
+                            {writeNotice && <p role="status">{writeNotice}</p>}
+                          </section>
+                          <h2 className="panel-title">任务信息</h2>
+                          <dl className="task-facts">
+                            <dt>生命周期 / 阶段</dt>
+                            <dd>
+                              {flow.lifecycle} /{" "}
+                              {phases.find(([p]) => p === flow.phase)?.[1]}
+                            </dd>
+                            <dt>当前轮次</dt>
+                            <dd>第 {flow.current_round_no} 轮</dd>
+                            {flow.archive_reason && (
+                              <>
+                                <dt>
+                                  {flow.lifecycle === "archived"
+                                    ? "归档结果"
+                                    : "本轮结束目标"}
+                                </dt>
+                                <dd>
+                                  {archiveReasonLabels[flow.archive_reason]}
+                                </dd>
+                              </>
+                            )}
+                            {flow.archive_summary && (
+                              <>
+                                <dt>本轮结论</dt>
+                                <dd className="round-summary">
+                                  {flow.archive_summary}
+                                </dd>
+                              </>
+                            )}
+                            <dt>Worker</dt>
+                            <dd>
+                              {flow.worker_id ?? "尚未绑定"}
+                              {flow.worker_historical ? "（历史归属）" : ""}
+                            </dd>
+                            <dt>分支</dt>
+                            <dd>{flow.branch ?? "尚未创建"}</dd>
+                            <dt>修订轮数</dt>
+                            <dd>{flow.revision_cycles}</dd>
+                            <dt>创建</dt>
+                            <dd>
+                              {new Date(flow.created_at).toLocaleString()}
+                            </dd>
+                            <dt>更新</dt>
+                            <dd>
+                              {new Date(flow.updated_at).toLocaleString()}
+                            </dd>
+                            {flow.archived_at && (
+                              <>
+                                <dt>归档时间</dt>
+                                <dd>
+                                  {new Date(flow.archived_at).toLocaleString()}
+                                </dd>
+                              </>
+                            )}
+                            <dt>当前状态版本</dt>
+                            <dd>{flow.state_version}（与阅读快照独立）</dd>
+                          </dl>
+                          <h2 className="panel-title">数据来源</h2>
+                          <SourceList sources={flow.sources} />
+                        </>
+                      ),
+                      conversation: (
+                        <Conversation
+                          key={id}
+                          id={id}
+                          root={detail}
+                          refresh={refresh}
+                        />
+                      ),
+                      jobs: (
+                        <>
+                          <InferenceNotices key={`${id}:${refresh}`} id={id} />
+                          <h2 className="panel-title">任务执行</h2>
+                          <div className="timeline">
+                            <WindowList
+                              count={jobs.length}
+                              label="执行记录"
+                              itemKey={(i) => jobs[i].id}
+                            >
+                              {(i) => (
+                                <article
+                                  className="timeline-item"
+                                  data-state={jobs[i].state}
+                                >
+                                  <div className="job-top">
+                                    <strong>
+                                      {jobs[i].kind === "inference"
+                                        ? `推理 · 派发次数 ${jobs[i].attempt}`
+                                        : `${jobs[i].kind} #${jobs[i].attempt}`}
+                                    </strong>
+                                    <span className="badge">
+                                      {jobs[i].state}
+                                    </span>
+                                  </div>
+                                  <time dateTime={jobs[i].created_at}>
+                                    创建于{" "}
+                                    {new Date(
+                                      jobs[i].created_at,
+                                    ).toLocaleString()}
+                                  </time>
+                                  <p>
+                                    {jobs[i].worker_id ?? "无 Worker"}
+                                    {jobs[i].error_code
+                                      ? ` · ${jobs[i].error_code}`
+                                      : ""}
+                                  </p>
+                                </article>
+                              )}
+                            </WindowList>
+                          </div>
+                          {jobError && (
+                            <button className="btn" onClick={() => moreJobs()}>
+                              读取失败：{jobError}（重试）
+                            </button>
+                          )}
+                          {jobMore && (
+                            <button className="btn" onClick={() => moreJobs()}>
+                              读取更多执行记录
+                            </button>
+                          )}
+                        </>
+                      ),
+                    } satisfies Record<Tab, ReactNode>
+                  )[tab]
+                }
+              </section>
+            </TabsContent>
+          </div>
+        </main>
+      </Tabs>
     </div>
   );
 }

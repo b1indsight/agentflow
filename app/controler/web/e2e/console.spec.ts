@@ -245,6 +245,61 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
+for (const width of [1440, 390]) {
+  test(`standard tabs keep focus, panels and route history synchronized at ${width}px`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto("/#flow/42");
+    const conversation = page.getByRole("tab", { name: "会话", exact: true });
+    const overview = page.getByRole("tab", { name: "概览", exact: true });
+    const jobs = page.getByRole("tab", { name: "执行记录", exact: true });
+    const panel = page.getByRole("tabpanel");
+    await expect(conversation).toHaveAttribute("aria-selected", "true");
+    await expect(panel).toContainText("真实活动正文");
+
+    // The selected tab must name its panel, and keyboard navigation must move focus too.
+    await expect(panel).toHaveAccessibleName("会话");
+    await expect(conversation).toHaveAttribute(
+      "aria-controls",
+      (await panel.getAttribute("id"))!,
+    );
+    await conversation.focus();
+    await conversation.press("ArrowRight");
+    await expect(jobs).toBeFocused();
+    await expect(jobs).toHaveAttribute("aria-selected", "true");
+    await expect(page).toHaveURL(/#flow\/42\/jobs$/);
+    await expect(panel).toHaveAccessibleName("执行记录");
+    await expect(panel).toContainText("任务执行");
+    await jobs.press("ArrowRight");
+    await expect(overview).toBeFocused();
+    await expect(panel).toContainText("当前动作");
+    await overview.press("ArrowLeft");
+    await expect(jobs).toBeFocused();
+    await jobs.press("Home");
+    await expect(overview).toBeFocused();
+    await overview.press("End");
+    await expect(jobs).toBeFocused();
+    await jobs.press("Tab");
+    await expect(panel).toBeFocused();
+
+    await conversation.click();
+    await expect(panel).toContainText("真实活动正文");
+    await page.goBack();
+    await expect(jobs).toHaveAttribute("aria-selected", "true");
+    await expect(panel).toHaveAccessibleName("执行记录");
+    await page.goForward();
+    await expect(conversation).toHaveAttribute("aria-selected", "true");
+    await expect(panel).toContainText("真实活动正文");
+
+    await page.reload();
+    await expect(conversation).toHaveAttribute("aria-selected", "true");
+    await expect(panel).toHaveAccessibleName("会话");
+    await page.goto("/#flow/42/unknown");
+    await expect(page.getByRole("main", { name: "工作看板" })).toBeVisible();
+  });
+}
+
 test("execution timeline keeps timestamps and metadata when loading older jobs", async ({
   page,
 }) => {

@@ -1,7 +1,6 @@
 export type Phase = "queued" | "running" | "review" | "blocked" | "archived";
 export type FlowLifecycle = Phase | "finalizing";
 export type ArchiveReason = "succeeded" | "abandoned";
-export type Tab = "overview" | "conversation" | "jobs";
 export interface FlowSummary {
   id: number;
   repo: string;
