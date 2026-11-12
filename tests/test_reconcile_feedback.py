@@ -12,7 +12,6 @@ from app.domain.models import (
     FlowState,
     JobKind,
     ReviewItemKind,
-    TaskContent,
     TriageVerdict,
     Verdict,
 )
@@ -104,7 +103,7 @@ async def test_three_missing_sources_are_ingested_once_without_webhook_or_strong
 
 async def test_direct_feedback_skips_issue_seed_and_stale_issue_check_but_keeps_pr_sources(store, feedback_resources):
     # A stale or manually inserted Issue scan must also be inert, not just absent from new seeds.
-    flow = store.flows.create_flow("owner/repo", None, 42, task_content=TaskContent(title="Direct"))
+    flow = store.flows.create_flow("owner/repo", None, 42, task_content="Direct")
     attempt = store.flows.create_attempt(flow.id)
     flow.current_attempt_id, flow.state = attempt.id, FlowState.REVIEW
     store.flows.update_flow(flow)

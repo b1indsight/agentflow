@@ -23,7 +23,7 @@ from app.contracts.conversation import (
 from app.controler.console.sync import ConsoleSynchronizer
 from app.controler.workers.conversation import ConversationService
 from app.controler.workflow.service import ControlService
-from app.domain.models import DeliveryState, JobKind, TaskContent
+from app.domain.models import DeliveryState, JobKind
 from app.github import GitHubApp
 from app.persistence.activity import ActivityStore
 from app.persistence.console import ConsoleStore
@@ -39,7 +39,7 @@ def only_worker(database):
 
 async def test_direct_task_registers_only_real_remote_sources_and_still_reads_worker(store):
     # Before PR creation there is no GitHub target; local state and worker history are independent.
-    flow = store.flows.create_flow("owner/repo", None, 42, task_content=TaskContent(title="Direct"))
+    flow = store.flows.create_flow("owner/repo", None, 42, task_content="Direct")
     conversations = Mock(spec=ConversationService)
     conversations.read = AsyncMock(return_value=ConversationPage(flow_id=flow.id, unavailable_reason="no_worker"))
     github = Mock(spec=GitHubApp)

@@ -13,7 +13,7 @@ from app.contracts.protocol import (
 from app.controler.workflow.service import ControlService
 from app.controler.workflow.tools import FlowToolService
 from app.domain.delivery_models import PreparedDelivery
-from app.domain.models import ArchiveReason, DeliveryState, FlowState, JobKind, TaskContent, VcsKind
+from app.domain.models import ArchiveReason, DeliveryState, FlowState, JobKind, VcsKind
 from app.github import GitHubError, GitHubErrorKind, RemoteRef, Repository
 from app.persistence.deliveries import DeliveryStore
 from tests.github import RecordingGitHub
@@ -35,7 +35,7 @@ def fresh_tool_request(prepared_initial):
 async def test_direct_open_pr_preserves_body_without_closing_a_fake_issue(store, recording_resources):
     # Direct requirements have no Issue; preserve the worker's exact body across persisted replay.
     flow = ControlService(database=store.database).create_flow(
-        "owner/repo", None, 42, task_content=TaskContent(title="Direct"),
+        "owner/repo", None, 42, task_content="Direct",
     )
     attempt = store.flows.create_attempt(flow.id)
     flow.current_attempt_id = attempt.id

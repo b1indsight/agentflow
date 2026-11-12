@@ -23,7 +23,6 @@ from app.domain.models import (
     FlowState,
     JobKind,
     JobState,
-    TaskContent,
 )
 from app.domain.project_models import ProjectStatus
 from app.github import (
@@ -223,7 +222,7 @@ def state(store):
 
 def test_direct_tasks_never_enter_issue_project_projections(store):
     # Projects are Issue projections, not the repository selector used by direct task creation.
-    direct = store.flows.create_flow("owner/repo", None, 42, task_content=TaskContent(title="Direct"))
+    direct = store.flows.create_flow("owner/repo", None, 42, task_content="Direct")
     issue = store.flows.create_flow("owner/repo", 7, 42)
     store.projects.seed("owner/repo", config(), 64)
     projections = store.projects.list_projections()

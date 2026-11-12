@@ -69,7 +69,7 @@ TASK: dict[str, JsonValue] = {
     "attempt_id": 7,
     "repo": "owner/repo",
     "issue_number": 1,
-    "task_content": {"title": "test", "body": ""},
+    "task_content": "test",
     "branch": "flow/3",
 }
 FLOW: dict[str, JsonValue] = {
@@ -106,7 +106,7 @@ SESSION = "T-019eac3b-a60c-7a93-a442-3718f660fc8c"
                     "repo": "owner/repo", "repo_identity": "w:owner/repo", "branch": "flow/3",
                     "base_branch": "main", "pr_number": 17, "expected_head_sha": "abc",
                     "session_id": None, "session_generation": 0, "instruction": "Fix feedback",
-                    "task_content": {"title": "test", "body": "Original requirements"},
+                    "task_content": "test\n\nOriginal requirements",
                     "previous_summary": "", "open_points": [], "feedback": [],
                 },
             }),

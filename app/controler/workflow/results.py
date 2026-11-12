@@ -119,7 +119,7 @@ class ResultApplication:
             return await self._apply(job_id)
 
     def _apply_inference(self, job: Job) -> JobState:
-        """Validate saved answers before DONE; no Flow effects or live provider are needed."""
+        """Validate saved answers and atomically publish optional display metadata."""
         inference = job.inference
         if inference is None or inference.current_task is None or job.result_payload is None:
             raise ValueError("inference application requires a persisted assignment and result")
@@ -134,9 +134,18 @@ class ResultApplication:
             failure = error.failure
         except ValueError:
             failure = InferenceFailure(code="invalid_response")
-        self.workers.complete_inference_result(job.id, failure=failure)
-        current = self.jobs.get_job(job.id)
-        assert current is not None
+        with self.database.transaction() as tx, tx.connection() as connection:
+            self.workers.using(tx).complete_inference_result(job.id, failure=failure)
+            current = self.jobs.using(tx).get_job(job.id)
+            assert current is not None
+            if current.state is JobState.DONE and job.flow_id is not None and job.result_payload is not None:
+                output = InferenceResult.model_validate(job.result_payload).output
+                title = output.text.strip() if output is not None else ""
+                if title and len(title) <= 256 and all(character.isprintable() for character in title):
+                    connection.execute(
+                        "UPDATE flows SET title=%s WHERE id=%s AND title_job_id=%s AND title IS NULL",
+                        (title, job.flow_id, job.id),
+                    )
         return current.state
 
     async def recover_pending_results(self, *, concurrency: int = 4, batch_size: int = 64) -> None:

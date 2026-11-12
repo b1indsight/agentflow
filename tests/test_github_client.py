@@ -10,6 +10,7 @@ import pytest
 from githubkit import GitHub
 from githubkit.exception import RequestFailed
 from githubkit.response import Response
+from githubkit_schemas.latest.models import Issue as SDKIssue
 from pydantic import BaseModel, SecretStr, ValidationError
 
 from app.controler.config import ServerSettings
@@ -225,11 +226,12 @@ def test_both_github_auth_clients_use_finite_timeouts(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("issue_fields", [{}, {"pull_request": None}])
 async def test_fetches_issue_repository_and_remote_ref(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, issue_fields
 ) -> None:
     issue = AsyncEndpoint(
-        response(SimpleNamespace(number=7, title="Ship it", body=None, state="open"))
+        response(SDKIssue.model_construct(number=7, title="Ship it", body=None, state="open", **issue_fields))
     )
     repository = AsyncEndpoint(
         response(SimpleNamespace(full_name="octo/repo", default_branch="trunk", archived=False))

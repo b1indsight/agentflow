@@ -18,7 +18,7 @@ import uvicorn
 from pydantic import ValidationError
 
 from app import github
-from app.domain.models import ArchiveReason, DeliveryState, TaskContent
+from app.domain.models import ArchiveReason, DeliveryState
 from app.worker.cli import app as worker_app
 
 if TYPE_CHECKING:
@@ -147,8 +147,8 @@ def flow_create(
     repo: str,
     installation_id: int = typer.Option(..., min=1),
     issue_number: int | None = typer.Option(None, min=1),
-    title: str | None = typer.Option(None),
-    body_file: Annotated[Path | None, typer.Option(help="UTF-8 任务正文文件，- 表示 stdin")] = None,
+    content: str | None = typer.Option(None),
+    content_file: Annotated[Path | None, typer.Option(help="UTF-8 任务内容文件，- 表示 stdin")] = None,
 ) -> None:
     """从 Issue 或直接任务内容创建 Flow；不要求 webhook。"""
     from app.contracts.console import CreateFlowRequest
@@ -156,18 +156,17 @@ def flow_create(
     from app.controler.workflow.service import ControlService
 
     try:
-        body = ""
-        if body_file is not None:
-            if str(body_file) == "-":
-                body = sys.stdin.read(32769)
+        if content_file is not None:
+            if content is not None:
+                raise typer.BadParameter("provide only one of --content and --content-file")
+            if str(content_file) == "-":
+                content = sys.stdin.read(32769)
             else:
-                with body_file.open(encoding="utf-8", newline="") as stream:
-                    body = stream.read(32769)
-        if body_file is not None and title is None:
-            raise typer.BadParameter("--body-file requires --title")
+                with content_file.open(encoding="utf-8", newline="") as stream:
+                    content = stream.read(32769)
         request = CreateFlowRequest(
             repo=repo, installation_id=installation_id, issue_number=issue_number,
-            task_content=TaskContent(title=title, body=body) if title is not None else None,
+            task_content=content,
         )
     except (OSError, UnicodeError) as error:
         raise typer.BadParameter("cannot read UTF-8 task content") from error
@@ -264,7 +263,7 @@ def flow_show(flow_id: int) -> None:
             f" archived_at={f.archived_at or '-'}"
         )
         if f.task_content is not None:
-            typer.echo(f"  task: {f.task_content.title}\n{f.task_content.body}")
+            typer.echo(f"  task:\n{f.task_content}")
         execution = store.workers.get_flow_execution(f.id)
         delivery = store.deliveries.get_delivery(f.id)
         if execution is not None:

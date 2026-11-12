@@ -63,7 +63,7 @@ def _filters(q: str) -> tuple[str, list[object]]:
             if ":" not in token or literal:
                 token = token.strip('"')
                 clauses.append(
-                    "lower(concat_ws(' ',coalesce(facts->>'task_title',title),flow_id,facts->>'issue_number',"
+                    "lower(concat_ws(' ',coalesce(facts->>'task_title',title,facts->>'delivery_title'),flow_id,facts->>'issue_number',"
                     "facts->>'pr_number',facts->>'repo')) LIKE %s ESCAPE '\\'"
                 )
                 values.append(

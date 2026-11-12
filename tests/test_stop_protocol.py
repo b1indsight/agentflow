@@ -42,7 +42,7 @@ from app.contracts.receipts import stop_receipt_digest
 from app.contracts.result_models import ResultPending
 from app.controler.workers.transport import serve_worker
 from app.controler.workflow.service import ControlService
-from app.domain.models import FlowState, JobKind, JobState, TaskContent, VcsKind
+from app.domain.models import FlowState, JobKind, JobState, VcsKind
 from app.github import GitHubError, GitHubErrorKind, Repository
 from app.persistence.records import required
 from app.worker.config import WorkerSettings
@@ -78,7 +78,7 @@ def assignment():
             attempt_id=1,
             repo="owner/repo",
             issue_number=1,
-            task_content=TaskContent(title="test", body=""),
+            task_content="test",
             branch="flow/1",
         ),
     )

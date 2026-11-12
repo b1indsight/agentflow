@@ -5,7 +5,7 @@ from pydantic import SecretStr
 from app.controler.config import ServerSettings
 from app.controler.events.router import EventRouter
 from app.controler.workflow.service import ControlService
-from app.domain.models import ArchiveReason, DeliveryState, Flow, FlowState, JobKind, TaskContent
+from app.domain.models import ArchiveReason, DeliveryState, Flow, FlowState, JobKind
 from app.persistence.store import Store
 from tests.workspace_fixtures import register_worker
 
@@ -16,7 +16,7 @@ class RecordingService(ControlService):
 
     def create_flow(
         self, repo: str, issue_number: int | None, installation_id: int | None,
-        *, task_content: TaskContent | None = None,
+        *, task_content: str | None = None,
     ) -> Flow:
         flow = self.flows.create_flow(repo, issue_number, installation_id, task_content=task_content)
         self.jobs.enqueue_job(flow.id, JobKind.INITIAL)

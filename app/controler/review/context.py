@@ -97,10 +97,7 @@ async def build_review_context(
                                          "body": clip(issue.body, "issue-body")})
     task_content = flow.task_content
     if task_content is not None:
-        task_content = task_content.model_copy(update={
-            "title": clip(task_content.title, "task-title"),
-            "body": clip(task_content.body, "task-body"),
-        })
+        task_content = clip(task_content, "task-content")
 
     bounded_files = []
     if files:

@@ -27,8 +27,6 @@ from tests.workspace_fixtures import register_worker, report_settled
 
 def test_issue_input_schema_upgrade_preserves_history_and_is_repeatable(postgresql_url):
     # Existing installations need ALTERs: CREATE TABLE IF NOT EXISTS alone cannot enable direct input.
-    from app.domain.models import TaskContent
-
     with closing(Store(postgresql_url)) as store:
         with store.connection() as connection:
             connection.execute("""
@@ -46,10 +44,11 @@ def test_issue_input_schema_upgrade_preserves_history_and_is_repeatable(postgres
         store.init_db()
         prior = store.flows.list_flows()[0]
         assert prior.issue_number == 17 and prior.task_content is None
-        direct = store.flows.create_flow("owner/repo", None, 42, task_content=TaskContent(title="原始任务", body="完整正文"))
+        content = " \n原始任务\n\n完整正文\r\n "
+        direct = store.flows.create_flow("owner/repo", None, 42, task_content=content)
         store.init_db()
         assert store.flows.get_flow(prior.id) == prior
-        assert store.flows.get_flow(direct.id).task_content == TaskContent(title="原始任务", body="完整正文")
+        assert store.flows.get_flow(direct.id).task_content == content
 
 
 def test_persisted_timestamps_follow_the_injected_clock(postgresql_url):

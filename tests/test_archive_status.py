@@ -15,7 +15,7 @@ from app.contracts.receipts import MergeArchiveNotice, ResultInbox, merge_notice
 from app.contracts.result_models import CommentEffect, EffectState, LabelEffect, ResultPending
 from app.controler.workflow.archive import archive_effects, archive_progress
 from app.controler.workflow.service import ControlService
-from app.domain.models import Flow, FlowDelivery, FlowState, JobState, TaskContent
+from app.domain.models import Flow, FlowDelivery, FlowState, JobState
 from app.github import GitHubApp, GitHubError, GitHubErrorKind, Issue, PullRequest
 from app.persistence.results import ResultStore
 from app.persistence.store import Store
@@ -38,7 +38,7 @@ from tests.test_workflow_transactions import accepted_coding
 def test_direct_archive_notifies_only_real_pr_with_no_fake_issue_identity():
     # The same completion receipt must remain useful without an Issue target or fake Issue line.
     flow = Flow(id=1, repo="owner/repo", issue_number=None,
-                task_content=TaskContent(title="Direct"), installation_id=42,
+                task_content="Direct", installation_id=42,
                 state=FlowState.FINALIZING)
     delivery = FlowDelivery(flow_id=flow.id, branch="flow/1", pr_number=17,
                             merge_commit_sha="a" * 40, merged_at=datetime(2026, 9, 8, tzinfo=UTC))

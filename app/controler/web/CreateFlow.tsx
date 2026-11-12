@@ -1,8 +1,12 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { Plus } from "lucide-react";
 import { createFailure, createFlow, getFlowTargets } from "./api";
 import { Button } from "./components/ui/button";
-import { taskContentFromText } from "./flowInput";
+import {
+  replaceTaskText,
+  taskContentFromText,
+  updateTaskText,
+} from "./flowInput";
 import type { FlowTarget } from "./types";
 
 const targetKey = (target: FlowTarget) =>
@@ -19,6 +23,8 @@ export function CreateFlow({
   const id = useId();
   const dialog = useRef<HTMLDialogElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
+  const textarea = useRef<HTMLTextAreaElement>(null);
+  const pastedCursor = useRef<number | null>(null);
   const request = useRef<AbortController | null>(null);
   const submitting = useRef(false);
   const [targets, setTargets] = useState<FlowTarget[]>([]);
@@ -45,6 +51,15 @@ export function CreateFlow({
       : targets;
 
   useEffect(() => () => request.current?.abort(), []);
+  useLayoutEffect(() => {
+    if (pastedCursor.current !== null) {
+      textarea.current?.setSelectionRange(
+        pastedCursor.current,
+        pastedCursor.current,
+      );
+      pastedCursor.current = null;
+    }
+  }, [body]);
 
   const read = async (reset = false) => {
     if (request.current) return;
@@ -215,22 +230,47 @@ export function CreateFlow({
           </div>
           <label htmlFor={`${id}-body`}>任务内容</label>
           <textarea
+            ref={textarea}
             id={`${id}-body`}
             required
             rows={7}
-            value={body}
+            value={body.replace(/\r\n?/g, "\n")}
             disabled={pending || uncertain}
             aria-invalid={Boolean(body && !content.ok)}
             aria-describedby={`${id}-body-hint${body && !content.ok ? ` ${id}-validation` : ""}`}
-            placeholder="第一行描述任务，其余内容说明要求、背景和验收方式…"
+            placeholder="描述任务要求、背景和验收方式…"
             onChange={(event) => {
-              setBody(event.target.value);
+              setBody(
+                updateTaskText(
+                  body,
+                  event.target.value,
+                  event.target.selectionStart,
+                ),
+              );
+              setFailure(null);
+            }}
+            onPaste={(event) => {
+              // Native textarea paste normalizes CRLF before onChange can observe it.
+              event.preventDefault();
+              const input = event.currentTarget;
+              const pasted = event.clipboardData.getData("text/plain");
+              const nextBody = replaceTaskText(
+                body,
+                input.selectionStart,
+                input.selectionEnd,
+                pasted,
+              );
+              const cursor =
+                input.selectionStart + pasted.replace(/\r\n?/g, "\n").length;
+              if (nextBody === body) input.setSelectionRange(cursor, cursor);
+              else pastedCursor.current = cursor;
+              setBody(nextBody);
               setFailure(null);
             }}
           />
           <p id={`${id}-body-hint`} className="create-flow-hint">
-            全文原样保存，最多 32 KiB UTF-8；首个非空白行的前 256
-            个字符用作标题。
+            全文原样保存，最多 32 KiB
+            UTF-8。创建后由服务器生成标题；暂无标题时显示 Flow 编号。
           </p>
           {body && !content.ok && (
             <p
@@ -241,12 +281,6 @@ export function CreateFlow({
               {content.error}
             </p>
           )}
-          <div className="create-flow-preview">
-            <span>标题预览</span>
-            <p aria-label="标题预览">
-              {content.ok ? content.task.title : "填写任务内容后显示"}
-            </p>
-          </div>
           {failure && (
             <p className="create-flow-error" role="alert">
               {failure.message}

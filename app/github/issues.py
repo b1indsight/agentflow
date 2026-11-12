@@ -183,6 +183,8 @@ class Issue(BaseModel):
             )).parsed_data
             if data.number != self.number:
                 raise ValueError("Issue response does not match its bound number")
+            if data.pull_request:
+                raise GitHubError(GitHubErrorKind.VALIDATION, "get_issue")
             return Issue(
                 repo, data.number, title=data.title, body=data.body or "", state=data.state,
             )

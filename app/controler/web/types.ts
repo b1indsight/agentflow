@@ -35,11 +35,7 @@ export interface FlowDetail extends FlowSummary {
   reason: string;
   next_condition: string;
   sources: SourceStatus[];
-  task_content: TaskContent | null;
-}
-export interface TaskContent {
-  title: string;
-  body: string;
+  task_content: string | null;
 }
 export interface FlowTarget {
   repo: string;

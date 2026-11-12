@@ -35,7 +35,6 @@ from app.domain.inference_models import (
 from app.domain.models import (
     FeedbackRef,
     RevisionCodingOutput,
-    TaskContent,
     VcsKind,
     WorkspaceInventory,
 )
@@ -60,7 +59,7 @@ class InitialTask(ProtocolModel):
     attempt_id: int
     repo: str
     issue_number: int | None
-    task_content: TaskContent
+    task_content: str
     branch: str
     base_branch: str = "main"
     remote: str = "origin"
@@ -98,7 +97,7 @@ class RevisionTask(ProtocolModel):
     session_id: str | None
     session_generation: int = Field(ge=0)
     instruction: str
-    task_content: TaskContent
+    task_content: str
     previous_summary: str
     open_points: list[str]
     context: ReviewContext | None = None

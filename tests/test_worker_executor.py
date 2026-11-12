@@ -21,7 +21,6 @@ from app.domain.models import (
     CodingExecutionResult,
     InitialCodingOutput,
     SessionUnavailable,
-    TaskContent,
     VcsKind,
     VcsOutcome,
 )
@@ -134,7 +133,7 @@ async def test_initial_exit_zero_without_a_declared_backend_is_a_failure(
             attempt_id=1,
             repo="owner/repo", repo_identity="worker-1:owner/repo",
             issue_number=8,
-            task_content=TaskContent(title="Issue", body="Body"),
+            task_content="Issue\n\nBody",
             branch="flow/issue-8",
         ), assignment_secret(), tool_caller=RecordingToolCaller()
     )
@@ -352,9 +351,8 @@ async def test_initial_preparation_failure_does_not_start_agent_or_expose_token(
     assert "push-token" not in result.model_dump_json()
 
 
-@pytest.mark.parametrize("issue_number", [8, None])
 async def test_initial_bootstrap_push_mcp_and_final_verification_share_current_capability(
-    tmp_path, monkeypatch, issue_number,
+    tmp_path, monkeypatch,
 ):
     from app.worker.execution import vcs
     seed, remote = _git_fixture(tmp_path)
@@ -394,11 +392,10 @@ async def test_initial_bootstrap_push_mcp_and_final_verification_share_current_c
 
     monkeypatch.setattr(vcs, "_run", offline)
     journal, pool = await assigned_workspace(root)
+    task_content = " \nDirect requirements.\n\nPreserve all input.\t\n "
     journal.assignment.task = journal.assignment.task.model_copy(update={
-        "issue_number": issue_number,
-        "task_content": TaskContent(
-            title="Implement supplied task", body="Direct requirements.\nPreserve all input.",
-        ),
+        "issue_number": None,
+        "task_content": task_content,
     })
     agent = Agent()
     result = await WorkerExecutor(root, agent, worker_id="worker-1", state=journal,
@@ -408,10 +405,7 @@ async def test_initial_bootstrap_push_mcp_and_final_verification_share_current_c
     assert isinstance(result, InitialTaskResult)
     assert len(agent.started) == 1 and not agent.resumed
     assert agent.started[0][1] == pool.path(pool.lookup("owner/repo", journal.flow_id))
-    assert agent.started[0][0].startswith(
-        "# Task\n## Implement supplied task\n\nDirect requirements.\nPreserve all input.\n",
-    )
-    assert "from GitHub issue" not in agent.started[0][0]
+    assert task_content in agent.started[0][0]
     assert result.exit_code == 0 and result.pushed and result.open_pr_call_id
     assert result.vcs_backend is VcsKind.GIT and result.branch == "flow/issue-8"
     assert result.delivery_receipt is not None and len(deliveries) == 1

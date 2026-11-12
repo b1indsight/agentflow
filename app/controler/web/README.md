@@ -63,11 +63,15 @@ API 错误显式显示，已有内容不会被示例数据替换；Worker 离线
 
 「新建 Flow」选择 Project（代码仓库）并填写任务内容，不必关联 Issue。项目来自授权 installation 的分页仓库清单，
 不依赖历史 Flow；可继续读取空的中间页、重试或重新读取，并保留草稿。
-首个非空白行的前 256 个 Unicode 码点生成标题，全文原样保存，最多 32 KiB UTF-8；空白/NUL/超限输入拒绝。
+前端只提交 `task_content` 字符串，不推导或提交标题；全文保留前导空白和粘贴的 CRLF 等换行，
+最多 32 KiB UTF-8；空白/NUL/超限输入拒绝。创建后由服务器异步生成标题，刷新后显示；
+显示优先级为生成标题 → 缓存的 Issue 标题 → PR 标题 → `Flow #ID`。
+服务端返回的 `title` 已合并前三项；为 null 时前端直接回退 `Flow #ID`，不使用 Issue/PR 编号代替标题。
+身份徽标与链接仍独立保留 PR/Issue 编号，不受标题是否生成影响。
 提交中禁用重复操作与关闭，成功后直接打开新 Flow 概览，不受看板筛选影响。
 明确拒绝保留可编辑草稿；网络、5xx 或不完整成功响应提示结果未知并锁定重发，提供清空筛选、刷新核对入口。
 草稿只保存在本页内存，刷新页面会丢失；不要在核对前重复创建。
-无 Issue Flow 的概览显示原始任务内容，卡片回退到 Flow/PR 编号，不生成 Issue 链接。
+无 Issue Flow 的概览使用现有安全 Markdown 渲染完整任务字符串，不生成 Issue 链接。
 
 顶栏只有一个查询框，支持普通关键词、双引号短语、`repo:`、`is:active|archived`、
 `status:queued|running|review|blocked|archived`、`issue:`、`pr:`；词和条件之间为 AND。
@@ -219,6 +223,15 @@ npm run test:e2e
 ```
 
 Playwright 自动启动并关闭端口 5174 的隔离测试服务器，无需手工运行 Vite。
+若该端口已被其他 checkout 占用，指定空闲端口并设置 `CI=1`，避免复用错误的服务器：
+
+```sh
+CI=1 PLAYWRIGHT_PORT=5175 npm run test:e2e -- --workers=2 --grep 'direct Flow|creation'
+```
+
+任务输入回归覆盖原样字符串（包括 CRLF 粘贴及后续编辑）、空标题编号回退、刷新后服务端标题、
+取消/重复提交/结果未知保护；截图为 `.amp/in/artifacts/task-text-{form,detail-pending,detail-generated}-{1440,390}.png`。
+Issue/PR 关联但标题为 null 时的 `Flow #ID` 标题和独立身份徽标截图为 `task-text-fallback-{cards,pr,issue}-{1440,390}.png`。
 六态预览及本轮操作回归可单独复现（同时生成桌面/手机截图）：
 
 ```sh

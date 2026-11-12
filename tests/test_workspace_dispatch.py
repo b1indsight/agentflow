@@ -24,7 +24,7 @@ from app.contracts.validation import parse_worker_input
 from app.controler.workers.callbacks import ServerCallbacks
 from app.controler.workers.transport import control_ack
 from app.controler.workflow.service import ControlService
-from app.domain.models import ArchiveReason, FlowState, JobState
+from app.domain.models import ArchiveReason, JobState
 from app.persistence.records import required
 from app.worker.config import WorkerSettings
 from app.worker.execution.lifecycle import WorkerExecution
@@ -144,11 +144,12 @@ async def test_demand_concurrent_dispatch_stop_and_result_isolate_workspaces(
 
         # Stopping one Flow must not stop its siblings; writer exit permits higher-generation reuse.
         stopped_job = required(store.jobs.get_job(stopped))
-        with store.transaction() as tx:
-            flow = required(tx.lock_workflow(stopped_job.required_flow_id))
-            flow.state, flow.archive_reason = FlowState.FINALIZING, ArchiveReason.ABANDONED
-            tx.flows.update_flow(flow)
-            tx.stops.request(flow.id)
+        flow = required(store.flows.get_flow(stopped_job.required_flow_id))
+        # The public finish operation also retires queued inference when no inference worker exists.
+        control.finish(flow, reason=ArchiveReason.ABANDONED, summary="",
+                       expected_round_no=flow.current_round_no)
+        title_job = required(store.jobs.get_job(required(store.flows.get_flow(flow.id)).title_job_id))
+        assert title_job.state is JobState.FAILED
         peers.wake_all()
         await wait_until(lambda: bool(set(worker.running) - initial))
         assert set(siblings) <= set(worker.running)

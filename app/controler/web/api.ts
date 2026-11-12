@@ -9,7 +9,6 @@ import type {
   InferenceNoticePage,
   JobPage,
   RepositoryPage,
-  TaskContent,
 } from "./types";
 
 export class ApiError extends Error {
@@ -59,7 +58,7 @@ export const getRepos = (cursor: string | null, signal?: AbortSignal) =>
   api<RepositoryPage>("/api/repos", { cursor, limit: 100 }, signal);
 export const getFlowTargets = (cursor: string | null, signal: AbortSignal) =>
   api<FlowTargetPage>("/api/flow-targets", { cursor }, signal);
-export const createFlow = async (target: FlowTarget, task: TaskContent) => {
+export const createFlow = async (target: FlowTarget, task: string) => {
   const flow = await api<FlowDetail>("/api/flows", {}, undefined, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

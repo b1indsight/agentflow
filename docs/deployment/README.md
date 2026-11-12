@@ -64,6 +64,8 @@ Judge 配置只提供给 control，在 serve 的 `.env` 配置 `FLOWTOOL_JUDGE_M
 断线重试可能与旧计算重叠并重复计费，不保证模型调用恰好一次。
 
 serve 和 worker 需协调升级到 wire21，journal5 与执行结果 inbox1 不变；Control 本地归档通知保留 inbox2，无旧 wire fallback。
+任务输入使用纯文本；展示标题复用该推理队列，首轮准备后有界尝试一次逻辑调用（总预算 30 秒），不阻塞编码。
+生成前或失败时依次显示 Issue 缓存标题、PR 标题、Flow 编号；不会因 Issue 编辑自动开启会话或重新推理标题。
 workers 现为 `(worker_id, workspace)` 复合主键；旧 schema 须显式迁移，不能直接启动新版本。
 耗尽通知只写应用内执行记录；READY 后续扫描可创建新一轮 Job，WAITING 仍需新的有效反馈等原有触发。
 页面进入执行记录或显式刷新时读取通知，不轮询、不增加推理重试按钮。

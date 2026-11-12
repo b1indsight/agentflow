@@ -45,9 +45,9 @@ def console_runtime(store):
 
 
 @pytest.mark.parametrize("task", [
-    {"title": "直接任务", "body": "\n完整内容 α\n第二行 β\n"},
-    {"title": "😀" * 256, "body": "中" * 10922 + "ab"},
-])
+    "\n完整内容 α\r\n第二行 β\n",
+    "中" * 10922 + "ab",
+], ids=["exact-text", "32-kib"])
 def test_manual_creation_without_issue_is_atomic_visible_and_owner_only(console_runtime, store, monkeypatch, task):
     from app.github import Repository
     from tests.github import RecordingGitHub
@@ -71,7 +71,7 @@ def test_manual_creation_without_issue_is_atomic_visible_and_owner_only(console_
         detail = response.json()
         assert response.headers["cache-control"] == "no-store"
         assert detail["issue_number"] is None and detail["issue_url"] is None
-        assert detail["title"] == task["title"] and detail["task_content"] == task
+        assert detail["title"] is None and detail["task_content"] == task
         assert detail["phase"] == "queued"
         assert client.get(f"/api/flows/{detail['id']}", headers=headers).json()["task_content"] == payload["task_content"]
         assert client.get("/api/flows", headers=headers).json()["items"][0]["id"] == detail["id"]
@@ -84,38 +84,44 @@ def test_manual_creation_without_issue_is_atomic_visible_and_owner_only(console_
 @pytest.mark.parametrize("changes", [
     {"task_content": None},
     {"issue_number": 7},
-    {"task_content": {"title": "  ", "body": "内容"}},
-    {"task_content": {"title": "x" * 257}},
-    {"task_content": {"title": "t", "body": "中" * 10923}},
-    {"task_content": {"title": "t", "body": "a\0b"}},
+    {"task_content": " \r\n\t"},
+    {"task_content": {"title": "old object", "body": "内容"}},
+    {"task_content": "中" * 10923},
+    {"task_content": "a\0b"},
     {"installation_id": True},
     {"repo": "owner/repo/extra"},
 ])
 def test_manual_creation_invalid_input_never_writes(console_runtime, store, changes):
-    payload = {"repo": "owner/repo", "installation_id": 42, "task_content": {"title": "t", "body": "b"}, **changes}
+    payload = {"repo": "owner/repo", "installation_id": 42, "task_content": "完整任务", **changes}
     with TestClient(create_app(console_runtime)) as client:
         response = client.post("/api/flows", json=payload, headers=console_runtime.issuer.headers())
         assert response.status_code == 422, response.text
     assert store.flows.list_flows() == []
 
 
-@pytest.mark.parametrize("target_state,status", [("archived", 409), ("permission", 403), ("not_found", 404)])
+@pytest.mark.parametrize("target_state,status", [("archived", 409), ("permission", 403), ("not_found", 404), ("pull_request", 422)])
 def test_manual_creation_rechecks_remote_access_before_writing(console_runtime, store, monkeypatch, target_state, status):
-    from app.github import GitHubError, GitHubErrorKind, Repository
+    from app.github import GitHubError, GitHubErrorKind, Installation, Repository
     from tests.github import RecordingGitHub
 
     console_runtime.github = RecordingGitHub()
 
     async def refetch(repo):
-        if target_state != "archived":
+        if target_state in {"permission", "not_found"}:
             raise GitHubError(GitHubErrorKind(target_state), "get_repository")
-        return repo.model_copy(update={"default_branch": "main", "archived": True})
+        return repo.model_copy(update={"default_branch": "main", "archived": target_state == "archived"})
 
+    # GitHub's Issues endpoint also returns PRs; reject before creating any Flow or INITIAL.
+    sdk = Mock()
+    sdk.rest.issues.async_get = AsyncMock(return_value=SimpleNamespace(parsed_data=SimpleNamespace(
+        number=7, title="Source PR", body="", state="open", pull_request={"url": "https://example.test/pulls/7"},
+    )))
+    monkeypatch.setattr(Installation, "_client", lambda *args, **kwargs: sdk)
     monkeypatch.setattr(Repository, "refetch", refetch)
+    payload = {"repo": "owner/repo", "installation_id": 42,
+               **({"issue_number": 7} if target_state == "pull_request" else {"task_content": "拒绝任务"})}
     with TestClient(create_app(console_runtime)) as client:
-        response = client.post("/api/flows", json={"repo": "owner/repo", "installation_id": 42,
-                                                  "task_content": {"title": "拒绝任务"}},
-                               headers=console_runtime.issuer.headers())
+        response = client.post("/api/flows", json=payload, headers=console_runtime.issuer.headers())
         assert response.status_code == status
     assert store.flows.list_flows() == []
 

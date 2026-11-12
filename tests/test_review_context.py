@@ -1,5 +1,6 @@
 """Frozen review evidence keeps bounded pages, identities and diagnostics intact."""
 
+import json
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -12,7 +13,7 @@ from app.controler.review.context import build_review_context
 from app.controler.review.judge import ReviewJudge
 from app.domain.context_models import MAX_CONTEXT_BYTES
 from app.domain.inference_models import InferenceOutput
-from app.domain.models import Flow, FlowState, ReviewItemKind, TaskContent, Verdict
+from app.domain.models import Flow, FlowState, ReviewItemKind, Verdict
 from app.domain.review_models import BatchState, ReviewBatch, ReviewFeedback
 from app.github import GitHubApp, GitHubError, GitHubErrorKind
 from tests.review_memory import review_context as context
@@ -80,7 +81,7 @@ def remote(tmp_path, monkeypatch):
 
     async def issue(*args, **kwargs):
         events.append("issue")
-        return response(SimpleNamespace(number=8, title="Real issue", body="Real body", state="open"))
+        return response(SimpleNamespace(number=8, title="Real issue", body="Real body", state="open", pull_request=None))
 
     async def files(*args, **kwargs):
         events.append("files")
@@ -130,19 +131,18 @@ async def test_direct_context_uses_persisted_task_without_issue_and_waits_only_i
     # A direct task has no remote Issue; absence is normal, but truncated requirements are not.
     repo, client, events = remote
     flow, batch = review_data()
-    task = TaskContent(title="Direct requirements", body="大" * 5000 if clipped else "Persisted body")
+    task = "Direct requirements\n\n" + ("大" * 5000 if clipped else "Persisted body")
     flow = flow.model_copy(update={"issue_number": None, "task_content": task})
     client.rest.issues.async_get = AsyncMock(side_effect=AssertionError("no Issue for direct task"))
     result = await build_review_context(repo, flow, batch, 17)
     assert result.issue_number is None and result.issue is None
-    assert result.task_content.title == task.title
-    assert result.task_content.body == task.body[:4000]
+    assert result.task_content == task[:4000]
     assert len(result.model_dump_json().encode()) <= MAX_CONTEXT_BYTES
-    assert result.limitations == (["task-body:truncated"] if clipped else [])
+    assert result.limitations == (["task-content:truncated"] if clipped else [])
     assert "issue" not in events
 
     async def infer(request):
-        assert task.title in request.messages[-1].content
+        assert json.loads(request.messages[-1].content)["task_content"] == task
         return InferenceOutput(
             request_id=request.request_id, request_digest=request.digest,
             text='{"verdict":"ignore","confidence":1,"reason":"Chatter"}',
@@ -167,7 +167,7 @@ async def test_context_total_byte_limit_and_missing_patch_are_explicit(remote, d
     flow, batch = review_data()
     if direct:
         flow = flow.model_copy(update={
-            "issue_number": None, "task_content": TaskContent(title="Direct", body="大" * 4000),
+            "issue_number": None, "task_content": "大" * 4000,
         })
     result = await build_review_context(repo, flow, batch, 17)
     assert len(result.model_dump_json().encode()) <= MAX_CONTEXT_BYTES

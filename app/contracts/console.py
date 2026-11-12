@@ -8,7 +8,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
 from app.domain.inference_models import AdapterVersion, FailureCode, StopReason
-from app.domain.models import ArchiveReason, FlowState, TaskContent
+from app.domain.models import ArchiveReason, FlowState
 
 Phase = Literal["queued", "running", "review", "blocked", "archived"]
 
@@ -34,18 +34,18 @@ class CreateFlowRequest(FlowTarget):
     """Manual intake accepts exactly one live Issue or bounded direct task."""
 
     issue_number: int | None = Field(default=None, strict=True, gt=0)
-    task_content: TaskContent | None = None
+    task_content: str | None = None
 
     @model_validator(mode="after")
     def _input(self) -> CreateFlowRequest:
         if (self.issue_number is None) == (self.task_content is None):
             raise ValueError("provide exactly one of issue_number and task_content")
         if self.task_content is not None:
-            title, body = self.task_content.title, self.task_content.body
-            title.encode("utf-8")
-            if len(title) > 256 or len(body.encode("utf-8")) > 32768:
-                raise ValueError("task title exceeds 256 characters or body exceeds 32 KiB UTF-8")
-            if "\0" in title or "\0" in body:
+            if not self.task_content.strip():
+                raise ValueError("task content must not be blank")
+            if len(self.task_content.encode("utf-8")) > 32768:
+                raise ValueError("task content exceeds 32 KiB UTF-8")
+            if "\0" in self.task_content:
                 raise ValueError("task content must not contain NUL")
         return self
 
@@ -102,7 +102,7 @@ class FlowDetail(FlowSummary):
     reason: str
     next_condition: str
     sources: list[SourceStatus]
-    task_content: TaskContent | None = None
+    task_content: str | None = None
 
 
 class FlowPage(ConsoleModel):

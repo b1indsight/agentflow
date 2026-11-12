@@ -287,3 +287,38 @@ ConsoleSync 的 SyncClaim、来源枚举和读取作用域支持可空 Issue。�
 从本功能开始前的工作区快照提取任务输入改动，在独立 jj workspace 中应用到最新 main，原共享工作区及其他功能保持不变。合并冲突保留 main 已有的正常 Runtime 构造、真实 Worker 测试和“PR 合并即业务归档、原 Worker 异步清理”行为；只接入可空 Issue、TaskContent 和统一创建入口。新增的直接任务通知回归同时核对“本轮已归档”，不再断言清理已完成。
 
 版本说明按当前实现区分：wire21 / journal5，执行结果继续使用 ResultInbox v1，Control 本地归档通知保留 main 的 ResultInbox v2。本功能不调整两类 inbox 的格式或历史摘要，前文“inbox1 不变”指执行结果，不表示删除 main 新增的本地通知类型。部署与 README 的当前说明同步澄清这一边界。
+
+### 2026-11-12：取消 TaskContent，分离任务原文与展示标题
+
+**范围修订与决定：** 用户要求取消本 PR 新增的 `TaskContent` 类。任务输入统一为字符串；有关联 Issue 时，在 INITIAL/REVISION 准备阶段读取最新标题与正文，以空行拼接（正文为空只用标题）；直接输入则持久保存原文。展示标题异步推理，兜底顺序为 Issue 缓存标题、PR 标题、`Flow #ID`。这替代前文的标题/正文对象、前端首行标题和 JSONB 输入列，不增加 Issue 编辑触发会话、正文编辑或来源抽象。
+
+**实际实现：** 删除 Python/TypeScript TaskContent；Flow、API、CLI、wire21、Worker prompt 和直接任务审核统一消费字符串。`flows.task_content` 使用 TEXT，保持 Issue 与直接输入的 XOR，Issue 行的该列仍为 NULL。表单只提交完整文本，CLI 使用 `--content` 或 `--content-file`（`-` 为 stdin），校验非空白、NUL 和 32 KiB UTF-8，不截断原文。审核仍受原有总预算和单来源预算约束，截断明确进入 WAIT；旧 Issue 冻结上下文不增加 null 字段，保留原 JSON/digest 和结果证据。
+
+**标题生成的边界：** 新增 nullable `flows.title` 与 `title_job_id`；在 INITIAL 已创建 attempt、读到任务原文并提交 delivery 准备后，独立事务恰好入队一个已有 inference job，同时记录关联 ID。编码不等待模型调用；标题入队的可预期错误只保留兜底。推理沿用既有槽位、取消规则和最多三次派发，总预算 30 秒；永久失败不另排新逻辑调用。标题提示仅取任务前 12000 字符以满足推理预算，完整编码输入不变。排队且尚未准备的 Flow 使用兜底标题，不新增后台扫描器。
+
+**并发与恢复取舍：** 标题结果与推理结算在同一显式事务提交；条件 UPDATE 只接受该 Flow 引用的 title job，并拒绝空白、多行、控制字符和超过 256 字符的标题。通用 `update_flow` 不写标题列，旧 Flow 对象不能抹掉异步结果。title_job_id 和工作流锁防重复入队；attempt 更换/归档按原规则取消推理，不绕过既有 currentness。只替换原 PR 尚未部署的输入格式，不新增 TaskContent 数据转换或双格式兼容层；真正 pre-feature 的 Issue 历史行与审核快照仍保持可读。
+
+**咨询与核对：** 本机 Claude Code Oracle（实际初始化模型 `claude-opus-5-5`，工具/MCP 均为空，正常退出）建议隔离标题入队事务、条件更新避免陈旧对象覆盖，以及结果和标题原子提交。已核对 Database 的嵌套事务共用连接、推理的 worker→Flow→job 锁顺序、独立 inference 槽位与编码 claim 排除 inference 的条件；标题落库保持在业务结果应用所有者，不把展示逻辑移入通用 worker 仓储。
+
+**交付状态：** 本修订在原 feature 的隔离 jj workspace 实施，尚未推送更新到 PR #144、未合并或部署；原已推提交的 CI 全部必需检查成功、镜像发布跳过。验证与简化对照结果在本轮完成后续记。
+
+### 2026-11-12：纯文本任务的组合验证与简化对照
+
+**执行验证：** 使用本线程临时 PostgreSQL 55475、逐例隔离 schema，完整 `FLOWTOOL_TEST_DATABASE_URL=… pytest -q` 通过；`ruff check app tests scripts/migrate_flow_states.py scripts/smoke/recovery.py`、`mypy app tests`、前端格式/类型/单元/生产构建、`python scripts/build_console.py` 与 `uv build --no-sources` 通过。完整回归补齐了新增标题 inference 的旧固定任务列表断言，并让通用推理替身明确处理标题调用，未禁用真实标题路径。日志位于本线程 `.amp/in/task-text-{all-tests-final,static-final,package-build}.log`。
+
+**停止与资源释放：** 工作区并发测试曾直接将 Flow 改为 finalizing 并请求 stop，绕过业务入口的 `cancel_jobs`，使新增 queued inference 留存。改为调用已有 `ControlService.finish`，在没有推理 Worker 时仍能取消标题任务、确认原编码停止，并以更高 generation 将工作区交给下个 Flow。结果恢复、推理清理和并发派发的组合回归通过；没有因此放宽归档条件或改动生产停止实现。
+
+**前端限制：** 桌面/手机的直接创建、精确字符串提交、异步标题刷新及 Issue/PR 身份用例通过，截图已实际检查。完整 Playwright 的会话滚动用例出现约 282.89px 偏移；只读导出旧提交 `6cd3280a79a68fc89c7dc479f2f9e30fea0f6199`，除隔离端口外使用原代码，执行 `CI=1 npm run test:e2e -- --workers=1 --grep 'large activity stays windowed' --repeat-each=5` 也在同一断言复现相同偏移。当前代码该用例独立重复通过，但不能据此宣称完整浏览器回归全绿。保留为旧版也存在的未定位不稳定性，不改会话实现或降低断言门槛；日志为 `.amp/in/task-text-ui-{final-tests,baseline-repeat,repeat}.log`。
+
+**新增机制的简化对照：** 在独立 pytest 进程内替换方法，不编辑生产文件；每次只移除一个机制。
+
+| 简化方案与复现入口 | 观察结果 | 决定 |
+| --- | --- | --- |
+| `_enqueue_title` 不检查 `title_job_id`；运行 `tests/test_coordinator.py::test_issue_edits_change_prepared_text_without_resubmitting_title` | 重复准备产生第二个标题任务并替换关联 ID，回归拒绝 | 保留持久关联和防重复条件 |
+| `_apply_inference` 去掉包围结算与标题写入的显式事务；运行 `pytest -q tests/test_coordinator.py -k title_is_inferred_once` | 标题写入被注入中断后，结果却已标记应用完成，无法按原入口重放标题 | 保留共同事务 |
+
+未加载替换的完整回归通过；比较日志为 `.amp/in/task-text-ablation-{once,atomic}.log`。临时替换插件和旧版导出目录在验证后删除。保留原 TaskContent PR 的两个已知审查问题边界，不夹带旧 wire 快照迁移或 Issue/PR 类型校验修复。该修订仍仅在本地隔离 workspace，未推送更新或部署；真实推理服务、GitHub 和 Access 生产集成未在本轮连接。
+
+### 2026-11-12：拒绝手动 Issue 输入中的 PR 编号
+
+用户要求只修复第二项审查问题，并更新第二个提交。共享 `Issue.refetch` 在丢弃 GitHub 原始字段之前检查 `pull_request`，发现 PR 即返回已有 validation 错误，不为 API/CLI 增加重复校验或新抽象。复用现有入口回归，先证明两处均误创建 Flow，再验证 HTTP 422、CLI 失败且无 Flow/INITIAL 写入；真实 SDK 的缺省标记及显式 null 仍作为 Issue 接受。旧修订快照兼容和标题持久化归属不在本次修复范围。

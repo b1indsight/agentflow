@@ -17,7 +17,6 @@ from pydantic import (
     Field,
     JsonValue,
     SecretStr,
-    field_validator,
     model_validator,
 )
 
@@ -103,28 +102,15 @@ class VcsKind(StrEnum):
 # --------------------------------------------------------------------- 持久化模型
 
 
-class TaskContent(BaseModel):
-    """Coding requirements, independent of the resource that supplied them."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-    title: str
-    body: str = ""
-
-    @field_validator("title")
-    @classmethod
-    def _nonblank_title(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("task title must not be blank")
-        return value
-
-
 class Flow(BaseModel):
     """Stable task lifecycle with either live Issue input or persisted direct content."""
 
     id: int
     repo: str  # "owner/name"
     issue_number: int | None
-    task_content: TaskContent | None = None
+    task_content: str | None = None
+    title: str | None = None
+    title_job_id: int | None = None
     state: FlowState
     installation_id: int | None = None
     current_attempt_id: int | None = None

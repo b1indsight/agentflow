@@ -5,7 +5,6 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 from psycopg.rows import class_row
-from psycopg.types.json import Jsonb
 
 from app.domain.models import (
     ArchiveReason,
@@ -14,7 +13,6 @@ from app.domain.models import (
     Flow,
     FlowDelivery,
     FlowState,
-    TaskContent,
 )
 from app.github import PullRequestMerge
 from app.persistence.activity import ActivityStore
@@ -28,7 +26,7 @@ class FlowStore(Repository):
 
     def create_flow(
         self, repo: str, issue_number: int | None, installation_id: int | None,
-        *, task_content: TaskContent | None = None,
+        *, task_content: str | None = None,
     ) -> Flow:
         if (issue_number is None) == (task_content is None):
             raise ValueError("provide exactly one of issue_number and task_content")
@@ -42,9 +40,7 @@ class FlowStore(Repository):
             row = cursor.execute(
                 "INSERT INTO flows(repo, issue_number, installation_id, task_content, state,"
                 " created_at, updated_at) VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING *",
-                (repo, issue_number, installation_id,
-                 Jsonb(task_content.model_dump()) if task_content is not None else None,
-                 FlowState.QUEUED, now, now),
+                (repo, issue_number, installation_id, task_content, FlowState.QUEUED, now, now),
             ).fetchone()
             FlowStore(tx).select_owner(required(row))
         return required(row)

@@ -277,29 +277,9 @@ svg {
   height: auto;
   white-space: normal;
 }
-.create-flow-preview {
-  margin-top: 16px;
-  padding: 12px;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  background: var(--bg);
-}
-.create-flow-preview > span {
-  color: var(--muted);
-  font-size: var(--text-small);
-}
-.create-flow-preview p {
-  margin: 4px 0 0;
-  overflow-wrap: anywhere;
-}
 .task-content {
   margin: 24px 0;
   overflow-wrap: anywhere;
-}
-.task-content h3 {
-  font-size: var(--text-body);
-  font-weight: 550;
-  margin-bottom: 12px;
 }
 .sync-state {
   display: inline-flex;

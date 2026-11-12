@@ -19,7 +19,6 @@ from app.domain.models import (
     FlowState,
     JobKind,
     JobState,
-    TaskContent,
     WorkerView,
 )
 from app.github import PullRequestMerge
@@ -87,7 +86,7 @@ class ControlService:
 
     def create_flow(
         self, repo: str, issue_number: int | None, installation_id: int | None,
-        *, task_content: TaskContent | None = None,
+        *, task_content: str | None = None,
     ) -> Flow | None:
         """Atomically queue a task; only Issue identities deduplicate active Flows."""
         with self.database.transaction() as tx:

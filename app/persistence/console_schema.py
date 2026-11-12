@@ -33,7 +33,7 @@ SELECT f.id, f.repo, f.issue_number, f.state AS lifecycle, f.created_at,
  OR j.verify_last_error IS NOT NULL THEN 'execution_error' ELSE NULL END AS error_code,
  a.id AS attempt_id,a.codex_session_id,a.session_generation,a.last_revision_summary,
  f.current_round_no,f.archive_reason,
- f.archive_summary,f.archived_at,f.task_content->>'title' AS task_title
+ f.archive_summary,f.archived_at,f.title AS task_title
 FROM flows f LEFT JOIN flow_deliveries d ON d.flow_id=f.id
 LEFT JOIN flow_executions x ON x.flow_id=f.id
 LEFT JOIN attempts a ON a.id=f.current_attempt_id

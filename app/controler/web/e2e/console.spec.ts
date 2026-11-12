@@ -4329,13 +4329,14 @@ for (const width of [1440, 390]) {
   }) => {
     await page.setViewportSize({ width, height: 900 });
     const body =
-      "\n  为零历史仓库添加分页 😀  \n\n保留 **完整任务**。\n<script>alert('unsafe')</script>\n";
-    const title = "为零历史仓库添加分页 😀";
+      "\r\n  为零历史仓库添加分页 😀  \r\n\r\n保留 **完整任务**。\r\n<script>alert('unsafe')</script>\r\n";
+    const visibleBody = body.replace(/\r\n/g, "\n");
+    const title = "服务器生成：完善仓库分页";
     let posts = 0;
     let boardReads = 0;
     let release!: () => void;
     const gate = new Promise<void>((resolve) => (release = resolve));
-    const created: FlowDetail = {
+    let created: FlowDetail = {
       ...blockedFlow,
       id: 91,
       repo: "fresh/no-history",
@@ -4343,13 +4344,13 @@ for (const width of [1440, 390]) {
       issue_url: null,
       pr_number: null,
       pr_url: null,
-      title,
+      title: null,
       lifecycle: "queued",
       phase: "queued",
       action: "等待空闲 Worker",
       reason: "任务已排队",
       next_condition: "等待空闲 Worker",
-      task_content: { title, body },
+      task_content: body,
     };
     await page.route("**/api/flows?**", (route) => {
       boardReads++;
@@ -4379,7 +4380,7 @@ for (const width of [1440, 390]) {
       expect(route.request().postDataJSON()).toEqual({
         repo: created.repo,
         installation_id: 71,
-        task_content: { title, body },
+        task_content: body,
       });
       await gate;
       return route.fulfill({ status: 201, json: created });
@@ -4390,6 +4391,8 @@ for (const width of [1440, 390]) {
       exact: true,
     });
     await expect(trigger).toBeVisible();
+    await expect(trigger).toHaveText("");
+    await expect(trigger.locator("svg")).toHaveCount(1);
     await page.screenshot({
       path: `../../../.amp/in/artifacts/flow-create-board-${width}.png`,
       animations: "disabled",
@@ -4399,8 +4402,33 @@ for (const width of [1440, 390]) {
     const project = dialog.getByLabel("Project（代码仓库）");
     await expect(project).toBeFocused();
     await project.selectOption({ label: created.repo });
-    await dialog.getByLabel("任务内容", { exact: true }).fill(body);
-    await expect(dialog.getByLabel("标题预览")).toHaveText(title);
+    const content = dialog.getByLabel("任务内容", { exact: true });
+    // Browser paste normally normalizes CRLF; the submitted string must retain the clipboard bytes.
+    await content.evaluate((input, text) => {
+      const clipboardData = new DataTransfer();
+      clipboardData.setData("text/plain", text);
+      input.dispatchEvent(
+        new ClipboardEvent("paste", {
+          clipboardData,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    }, body);
+    await expect(content).toHaveValue(visibleBody);
+    // Editing in the middle must preserve untouched CRLF lines and the caret position.
+    await content.evaluate((input) => {
+      if (!(input instanceof HTMLTextAreaElement))
+        throw new Error("Expected textarea");
+      const start = input.value.indexOf("完整任务");
+      input.focus();
+      input.setSelectionRange(start, start);
+    });
+    await page.keyboard.type("新");
+    await page.keyboard.press("Backspace");
+    await expect(content).toHaveValue(visibleBody);
+    await expect(dialog).toContainText("创建后由服务器生成标题");
+    await expect(dialog.getByLabel("标题预览")).toHaveCount(0);
     await project.focus();
     await page.keyboard.press("Tab");
     await expect(
@@ -4418,10 +4446,13 @@ for (const width of [1440, 390]) {
     expect(posts).toBe(0);
     await trigger.click();
     await expect(dialog.getByLabel("任务内容", { exact: true })).toHaveValue(
-      body,
+      visibleBody,
     );
+    expect(
+      await dialog.evaluate((node) => node.scrollWidth <= node.clientWidth),
+    ).toBe(true);
     await page.screenshot({
-      path: `../../../.amp/in/artifacts/flow-create-form-${width}.png`,
+      path: `../../../.amp/in/artifacts/task-text-form-${width}.png`,
       animations: "disabled",
     });
     const readsBefore = boardReads;
@@ -4451,7 +4482,7 @@ for (const width of [1440, 390]) {
     await expect(page).toHaveURL(/#flow\/91\/overview$/);
     await expect(dialog).not.toBeVisible();
     await expect(
-      page.getByRole("heading", { name: title, exact: true }).first(),
+      page.getByRole("heading", { name: "Flow #91", exact: true }),
     ).toBeVisible();
     await expect(
       page.getByRole("region", { name: "原始任务内容" }),
@@ -4467,7 +4498,35 @@ for (const width of [1440, 390]) {
     );
     await expect.poll(() => boardReads).toBeGreaterThan(readsBefore);
     await page.screenshot({
-      path: `../../../.amp/in/artifacts/flow-create-detail-${width}.png`,
+      path: `../../../.amp/in/artifacts/task-text-detail-pending-${width}.png`,
+      animations: "disabled",
+    });
+    // A failed or still-pending inference leaves the same fallback; no client title is inferred.
+    const [pendingTitle] = await Promise.all([
+      page.waitForResponse(
+        (response) => new URL(response.url()).pathname === "/api/flows/91",
+      ),
+      page.getByRole("button", { name: "刷新当前视图" }).click(),
+    ]);
+    expect(await pendingTitle.json()).toMatchObject({ title: null });
+    await expect(
+      page.getByRole("heading", { name: "Flow #91", exact: true }),
+    ).toBeVisible();
+    created = { ...created, title, state_version: created.state_version + 1 };
+    await page.getByRole("button", { name: "刷新当前视图" }).click();
+    await expect(
+      page.getByRole("heading", { name: title, exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("region", { name: "原始任务内容" }),
+    ).toContainText("完整任务");
+    expect(
+      await page
+        .locator(".detail-body")
+        .evaluate((node) => node.scrollWidth <= node.clientWidth),
+    ).toBe(true);
+    await page.screenshot({
+      path: `../../../.amp/in/artifacts/task-text-detail-generated-${width}.png`,
       animations: "disabled",
     });
     await trigger.click();
@@ -4691,10 +4750,10 @@ for (const outcome of [
   });
 }
 
-test("direct Flow cards use Flow IDs without Issue links, preserve PR links and existing Issue behavior", async ({
+test("direct Flow cards use Flow IDs for null titles and preserve PR and Issue identities", async ({
   page,
 }) => {
-  const direct: FlowDetail = {
+  let direct: FlowDetail = {
     ...blockedFlow,
     id: 93,
     title: null,
@@ -4702,17 +4761,19 @@ test("direct Flow cards use Flow IDs without Issue links, preserve PR links and 
     issue_url: null,
     pr_number: null,
     pr_url: null,
-    task_content: { title: "直接任务", body: "原始任务正文" },
+    task_content: "原始任务正文",
   };
   const withPr: FlowDetail = {
     ...direct,
     id: 94,
-    title: "直接任务 PR",
+    title: null,
     pr_number: 97,
     pr_url: "https://example.test/pulls/97",
   };
-  await mockFlows(page, () => [direct, withPr, blockedFlow]);
+  const withIssue = { ...blockedFlow, title: null };
+  await mockFlows(page, () => [direct, withPr, withIssue]);
   for (const width of [1440, 390]) {
+    direct = { ...direct, title: null };
     await page.setViewportSize({ width, height: 900 });
     await page.goto("/console/");
     if (width === 390)
@@ -4723,12 +4784,33 @@ test("direct Flow cards use Flow IDs without Issue links, preserve PR links and 
     await expect(page.locator('[data-flow="93"]')).toContainText("Flow #93");
     await expect(page.locator('[data-flow="94"]')).toContainText("PR #97");
     await expect(page.locator('[data-flow="42"]')).toContainText("PR #87");
+    await expect(page.locator('[data-flow="93"] h2')).toHaveText("Flow #93");
+    await expect(page.locator('[data-flow="94"] h2')).toHaveText("Flow #94");
+    await expect(page.locator('[data-flow="42"] h2')).toHaveText("Flow #42");
     await expect(page.locator(".board-page")).not.toContainText("Issue #null");
     await page.screenshot({
-      path: `../../../.amp/in/artifacts/flow-input-cards-${width}.png`,
+      path: `../../../.amp/in/artifacts/task-text-fallback-cards-${width}.png`,
       animations: "disabled",
     });
+    // Inference can fill the title without a phase change; refreshing must update cached cards too.
+    const generatedTitle = "服务器生成的任务标题";
+    direct = {
+      ...direct,
+      title: generatedTitle,
+      state_version: direct.state_version + 1,
+    };
+    await page.getByRole("button", { name: "刷新当前视图" }).click();
+    await expect(page.locator('[data-flow="93"] h2')).toHaveText(
+      generatedTitle,
+    );
+    await page.locator('[data-flow="93"]').click();
+    await expect(
+      page.getByRole("heading", { name: generatedTitle, exact: true }),
+    ).toBeVisible();
     await page.goto("/console/#flow/94/overview");
+    await expect(
+      page.getByRole("heading", { name: "Flow #94", exact: true }),
+    ).toBeVisible();
     await expect(
       page.locator(".links").getByRole("link", { name: /PR #97/ }),
     ).toBeVisible();
@@ -4736,15 +4818,21 @@ test("direct Flow cards use Flow IDs without Issue links, preserve PR links and 
       page.locator(".links").getByRole("link", { name: /Issue/ }),
     ).toHaveCount(0);
     await page.screenshot({
-      path: `../../../.amp/in/artifacts/flow-input-direct-pr-${width}.png`,
+      path: `../../../.amp/in/artifacts/task-text-fallback-pr-${width}.png`,
       animations: "disabled",
     });
     await page.goto("/console/#flow/42/overview");
     await expect(
+      page.getByRole("heading", { name: "Flow #42", exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("region", { name: "原始任务内容" }),
+    ).toHaveCount(0);
+    await expect(
       page.locator(".links").getByRole("link", { name: /Issue #85/ }),
     ).toBeVisible();
     await page.screenshot({
-      path: `../../../.amp/in/artifacts/flow-input-issue-${width}.png`,
+      path: `../../../.amp/in/artifacts/task-text-fallback-issue-${width}.png`,
       animations: "disabled",
     });
   }

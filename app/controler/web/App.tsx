@@ -94,13 +94,7 @@ const route = () => {
     tab: tab?.value ?? "conversation",
   };
 };
-const name = (f: FlowSummary) =>
-  f.title ??
-  (f.issue_number !== null
-    ? `Issue #${f.issue_number}`
-    : f.pr_number
-      ? `PR #${f.pr_number}`
-      : `Flow #${f.id}`);
+const name = (f: FlowSummary) => f.title ?? `Flow #${f.id}`;
 const ref = (f: FlowSummary) =>
   f.pr_number
     ? `PR #${f.pr_number}`
@@ -816,9 +810,8 @@ function Detail({
                               aria-label="原始任务内容"
                             >
                               <h2 className="panel-title">原始任务内容</h2>
-                              <h3>{flow.task_content.title}</h3>
                               <ActivityMarkdown
-                                text={flow.task_content.body}
+                                text={flow.task_content}
                                 url={null}
                               />
                             </section>
