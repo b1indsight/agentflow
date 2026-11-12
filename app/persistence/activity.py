@@ -38,17 +38,25 @@ class ActivityCursor(BaseModel):
             raise ConsoleFailure("cursor_invalid") from error
 
 
-# GitHub effect receipts are transport metadata, not conversation text. This expression
-# stays in PostgreSQL so projections and paged reads never transfer an unbounded body.
-def _display_body(body: str, source: str) -> str:
+# Decode coding-result summaries and hide GitHub transport receipts at the same boundary.
+# Keeping this in PostgreSQL gives previews, paging and diffs one body without unbounded reads.
+def _display_body(alias: str) -> str:
+    prefix = f"{alias}." if alias else ""
+    body, source = f"{prefix}body", f"{prefix}source"
     return (
+        f"CASE WHEN {source}='worker' AND {prefix}kind='message'"
+        f" AND {prefix}author='assistant' AND pg_input_is_valid({body},'jsonb') THEN "
+        # A valid JSONB guard also rejects NUL/invalid surrogates before decoding native text.
+        f"CASE WHEN jsonb_typeof({body}::jsonb->'summary')='string'"
+        f" AND {body}::jsonb->>'vcs_backend_used' IN ('git','jj')"
+        f" THEN {body}::jsonb->>'summary' ELSE {body} END ELSE "
         f"CASE WHEN {source}='worker' THEN {body} ELSE "
-        f"regexp_replace({body}, E'\\n\\n<!-- flowtool:effect:[0-9a-f]{{64}} -->$', '') END"
+        f"regexp_replace({body}, E'\\n\\n<!-- flowtool:effect:[0-9a-f]{{64}} -->$', '') END END"
     )
 
 
-_CURRENT_DISPLAY_BODY = _display_body("current.body", "current.source")
-_PREVIOUS_DISPLAY_BODY = _display_body("p.body", "p.source")
+_CURRENT_DISPLAY_BODY = _display_body("current")
+_PREVIOUS_DISPLAY_BODY = _display_body("p")
 
 
 # Metadata-only observations do not make a comment look edited. The predecessor
@@ -352,12 +360,12 @@ class ActivityStore(Repository):
         with self._db.connection() as connection:
             rows = connection.execute(
                 "WITH old AS (SELECT DISTINCT ON(key) key,version,occurred_at,deleted,title,body,source,"
-                "metadata,author,url,parent_key"
+                "metadata,author,kind,url,parent_key"
                 " FROM console_activity"
                 " WHERE flow_id=%s AND version<=%s AND source!='flow'"
                 " ORDER BY key,deleted DESC,updated_at DESC,version DESC),"
                 " new AS (SELECT DISTINCT ON(key) key,version,occurred_at,deleted,title,body,source,"
-                "metadata,author,url,parent_key"
+                "metadata,author,kind,url,parent_key"
                 " FROM console_activity"
                 " WHERE flow_id=%s AND version<=%s AND source!='flow'"
                 " ORDER BY key,deleted DESC,updated_at DESC,version DESC)"
@@ -365,9 +373,9 @@ class ActivityStore(Repository):
                 " WHEN n.occurred_at<(SELECT max(occurred_at) FROM old) THEN 'backfilled' ELSE 'new' END AS kind,"
                 " count(*) AS n FROM new n LEFT JOIN old o USING(key)"
                 " WHERE n.version IS DISTINCT FROM o.version AND (o.key IS NULL OR (n.title,"
-                + _display_body("n.body", "n.source")
+                + _display_body("n")
                 + ",n.deleted,n.metadata,n.author,n.url,n.parent_key) IS DISTINCT FROM (o.title,"
-                + _display_body("o.body", "o.source")
+                + _display_body("o")
                 + ",o.deleted,o.metadata,o.author,o.url,o.parent_key)) GROUP BY 1",
                 (flow_id, before, flow_id, after),
             ).fetchall()
@@ -464,9 +472,9 @@ class ActivityStore(Repository):
         with self._db.connection() as connection:
             row = connection.execute(
                 "SELECT substring("
-                + _display_body("body", "source")
+                + _display_body("")
                 + " FROM %s FOR %s) AS text,length("
-                + _display_body("body", "source")
+                + _display_body("")
                 + ") AS n"
                 " FROM console_activity WHERE flow_id=%s AND key=%s AND version=%s",
                 (offset + 1, limit, flow_id, key, version),
@@ -502,7 +510,7 @@ class ActivityStore(Repository):
                 raise ConsoleFailure("previous_version_not_found", 404)
             old = connection.execute(
                 "SELECT left("
-                + _display_body("body", "source")
+                + _display_body("")
                 + ",65537) AS body,left(title,4097) AS title"
                 " FROM console_activity WHERE flow_id=%s AND key=%s AND version=%s",
                 (flow_id, key, previous),

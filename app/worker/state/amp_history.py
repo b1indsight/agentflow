@@ -148,6 +148,9 @@ class AmpHistory:
             return [], True
         if not isinstance(blocks, list):
             return [], True
+        # Amp delivers automated events as user messages, but they are not human input.
+        meta = message.get("meta")
+        automated = role == "user" and isinstance(meta, dict) and meta.get("fromAutomation") is True
         timestamp = message.get("createdAt") if isinstance(message.get("createdAt"), str) else None
         items: list[HistoryItem] = []
         unsupported = False
@@ -165,7 +168,8 @@ class AmpHistory:
             item_id = f"{session_id}:{message_id}:{block_index}"
             if kind == "text" and isinstance(block.get("text"), str):
                 text, truncated = self._text(redact_amp_text(block["text"], secrets))
-                items.append(HistoryItem(id=item_id, timestamp=timestamp, role=role, kind="message",
+                items.append(HistoryItem(id=item_id, timestamp=timestamp,
+                                         role="system" if automated else role, kind="message",
                                          content=ConversationContent(text=text), truncated=truncated))
             elif kind == "tool_use" and isinstance(block.get("name"), str):
                 arguments, truncated = self._text(redact_amp_json(block.get("input", {}), secrets))

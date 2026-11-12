@@ -1,5 +1,6 @@
-"""Effect receipt markers are hidden from conversation display reads."""
+"""Conversation display reads hide transport wrappers without changing archived evidence."""
 
+import json
 from datetime import timedelta
 
 import pytest
@@ -124,3 +125,119 @@ def test_display_preserves_worker_literals_and_unrelated_html(store):
         )
     displayed = {item.key: item.body for item in archive.page(flow.id, limit=20).items}
     assert displayed == {"worker:1": literal, "comment:1": unrelated}
+
+
+@pytest.mark.parametrize("revision", [False, True])
+def test_coding_summary_display_preserves_archives_paging_and_version_comparisons(store, revision):
+    # Existing archives contain the coding-result envelope, often longer than the preview.
+    flow = store.flows.create_flow("octo/repo", 7, 1)
+    archive = ActivityStore(store._db)
+    summary = "## 完成\n\n- **修复** JSON 展示\n\n" + "中文😀带引号\"和反斜线\\\n" * 210
+    payload: dict[str, object] = {"summary": summary, "vcs_backend_used": "jj" if revision else "git"}
+    if revision:
+        payload.update(addressed=[], deferred=[], needs_clarification=[])
+    raw = json.dumps(payload)
+    original = Observation(
+        key="worker:summary",
+        source="worker",
+        kind="message",
+        author="assistant",
+        body=raw,
+        occurred_at=flow.created_at,
+        updated_at=flow.created_at,
+    )
+    assert archive.append(flow.id, original)
+    page = archive.page(flow.id)
+    item = page.items[0]
+    assert item.body == summary[:2000]
+    assert item.body_length == len(summary)
+    text, offset = "", 0
+    while True:
+        part = archive.content(flow.id, item.key, item.version, offset, 997)
+        assert part.total == len(summary)
+        text += part.text
+        if part.next_offset is None:
+            break
+        offset = part.next_offset
+    assert text == summary
+    assert archive.versions(flow.id, item.key).items == page.items
+    with store._db.connection() as connection:
+        row = connection.execute(
+            "SELECT body FROM console_activity WHERE flow_id=%s AND key=%s AND version=%s",
+            (flow.id, item.key, item.version),
+        ).fetchone()
+    assert row["body"] == raw
+
+    # Envelope formatting/backend changes do not make an unchanged summary look edited.
+    payload["vcs_backend_used"] = "git" if revision else "jj"
+    assert archive.append(
+        flow.id,
+        original.model_copy(update={
+            "body": json.dumps(payload, ensure_ascii=False, indent=2),
+            "updated_at": flow.created_at + timedelta(seconds=1),
+        }),
+    )
+    unchanged = archive.page(flow.id, since=page.snapshot)
+    assert unchanged.changes == {}
+    assert unchanged.items[0].previous_version is None
+
+    payload["summary"] = summary.replace("JSON 展示", "摘要展示")
+    assert archive.append(
+        flow.id,
+        original.model_copy(update={
+            "body": json.dumps(payload, ensure_ascii=False),
+            "updated_at": flow.created_at + timedelta(seconds=2),
+        }),
+    )
+    changed = archive.page(flow.id, since=unchanged.snapshot)
+    assert changed.changes == {"edited": 1}
+    diff = archive.content(flow.id, item.key, changed.items[0].version, 0, compare=True)
+    assert diff.previous_version == unchanged.items[0].version
+    assert "-- **修复** JSON 展示" in diff.text and "+- **修复** 摘要展示" in diff.text
+    assert "vcs_backend_used" not in diff.text
+    assert archive.page(flow.id, snapshot=page.snapshot).items == page.items
+
+
+def test_summary_display_leaves_user_tool_and_non_result_json_unchanged(store):
+    flow = store.flows.create_flow("octo/repo", 7, 1)
+    archive = ActivityStore(store._db)
+    result = json.dumps({"summary": "完成", "vcs_backend_used": "git"})
+    cases = [
+        ("worker", "user", "message", result),
+        ("worker", "system", "message", result),
+        ("worker", "assistant", "tool_call", result),
+        ("worker", "tool", "tool_result", result),
+        ("issue.comments", "assistant", "message", result),
+    ]
+    # Invalid or incomplete native output must remain readable, never fail a whole page.
+    cases.extend(("worker", "assistant", "message", body) for body in (
+        result[:-1],
+        "## 普通 Markdown",
+        '{"summary":"普通数据"}',
+        '{"summary":42,"vcs_backend_used":"git"}',
+        '{"summary":null,"vcs_backend_used":"git"}',
+        '{"summary":"data","vcs_backend_used":"unknown"}',
+        r'{"summary":"\u0000","vcs_backend_used":"git"}',
+        r'{"summary":"\ud800","vcs_backend_used":"git"}',
+        '[]',
+        'null',
+    ))
+    expected = {}
+    for i, (source, author, kind, body) in enumerate(cases):
+        key = f"record:{i}"
+        expected[key] = body
+        assert archive.append(flow.id, Observation(
+            key=key,
+            source=source,
+            kind=kind,
+            author=author,
+            body=body,
+            occurred_at=flow.created_at,
+            updated_at=flow.created_at,
+        ))
+    page = archive.page(flow.id)
+    assert {item.key: item.body for item in page.items} == expected
+    for item in page.items:
+        content = archive.content(flow.id, item.key, item.version, 0)
+        assert content.text == expected[item.key]
+        assert item.body_length == content.total == len(content.text)
