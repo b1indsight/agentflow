@@ -149,8 +149,26 @@ jobs:
       - name: Install locked dependencies
         run: uv sync --locked --dev
 
-      - name: Run pytest
-        run: uv run pytest
+      - name: Cache pytest dependency data
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        with:
+          path: .testmondata*
+          # Do not reuse dependency data across changes to shared setup or external test inputs.
+          key: pytest-testmon-v1-${{ runner.os }}-py312-${{ hashFiles('uv.lock', 'pyproject.toml', '.github/workflows/ci.yml', '**/conftest.py', 'tests/fixtures/**', 'scripts/**', 'deploy/**', 'compose.yaml', 'Dockerfile') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            pytest-testmon-v1-${{ runner.os }}-py312-${{ hashFiles('uv.lock', 'pyproject.toml', '.github/workflows/ci.yml', '**/conftest.py', 'tests/fixtures/**', 'scripts/**', 'deploy/**', 'compose.yaml', 'Dockerfile') }}-
+
+      - name: Run affected pytest tests
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            uv run pytest --testmon --testmon-noselect --ignore=tests/test_boundaries.py --ignore=tests/test_worker_cli.py
+          else
+            uv run pytest --testmon --ignore=tests/test_boundaries.py --ignore=tests/test_worker_cli.py
+          fi
+
+      # Source inspection and isolated installed copies are invisible to runtime coverage.
+      - name: Check package boundaries and installed worker CLI
+        run: uv run pytest --no-testmon tests/test_boundaries.py tests/test_worker_cli.py
 
       - name: Smoke control plane and remote worker processes
         run: |

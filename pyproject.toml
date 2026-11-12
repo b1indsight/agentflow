@@ -29,6 +29,7 @@ flowtool = "app.cli:app"
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.23",
+    "pytest-testmon>=2.3,<3",
     "ruff>=0.6",
     "mypy>=1.11",
 ]

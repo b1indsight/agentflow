@@ -357,6 +357,10 @@ FLOWTOOL_TEST_DATABASE_URL=postgresql://flowtool:flowtool@127.0.0.1:5432/flowtoo
 [GitHub Actions CI](.github/workflows/ci.yml) 会在 pull request、推送到 `main` 和手动触发时，使用
 Python 3.12 分别运行 Ruff、Mypy、pytest 与 sdist/wheel 构建。pytest job 配置 PostgreSQL 17，
 并启动 serve 和两个 worker，重启 serve 后验证 worker 自动重新注册。
+自动触发的 pytest 使用 `pytest-testmon`，根据缓存的运行时依赖记录只执行受代码变更影响的测试；
+首次运行、缓存失效，以及依赖、共享 fixture、测试数据、脚本或部署配置变更时执行全量。
+手动触发 CI 也会执行全量并更新依赖记录。本地 `uv run pytest` 仍默认全量。
+包边界检查和安装后的 Worker CLI 测试涉及源码读取或隔离的代码副本，始终执行，避免运行时依赖追踪漏检。
 
 自动化覆盖配置与协议、Webhook、任务调度和恢复、Flow 工具与 PR 交付、GitHub 超时及错误映射、
 结果重放与远端操作核对。数据库用例还覆盖事务回滚、跨连接并发、任务去重、取消交错和恢复期限；
