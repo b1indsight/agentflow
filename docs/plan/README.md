@@ -5,6 +5,8 @@
 
 ## 当前计划
 
+- [`console-reading-state.md`](console-reading-state.md) — #88：owner + Flow 个人已读、正文分段和跨设备续读方案；语义修订、回执并集、重置代次、位置 CAS 与锚点回退均待批准，未增加产品代码、迁移或未读 UI，不阻塞 #85/#87。
+
 - [`worker-workspace-concurrency.md`](worker-workspace-concurrency.md) — 已在本地实现，全量 PostgreSQL 回归、静态检查与构建通过。
   workers 使用 worker/workspace 复合主键；worker 管理目录并按需求登记库存，调度直接选择位置，
   runtime 持有执行集合，默认无仓库 workspace 供推理。限额 2/3/17 的真实 Session 并发及五项简化对照通过；
