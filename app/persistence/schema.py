@@ -86,6 +86,13 @@ CREATE TABLE IF NOT EXISTS workers (
   last_disconnect_reason TEXT
 );
 
+CREATE TABLE IF NOT EXISTS worker_file_links (
+  link_id TEXT PRIMARY KEY,
+  worker_id TEXT NOT NULL REFERENCES workers(worker_id),
+  file_id TEXT NOT NULL,
+  UNIQUE(worker_id, file_id)
+);
+
 CREATE TABLE IF NOT EXISTS flow_executions (
   flow_id BIGINT PRIMARY KEY REFERENCES flows(id),
   worker_id TEXT NOT NULL REFERENCES workers(worker_id),

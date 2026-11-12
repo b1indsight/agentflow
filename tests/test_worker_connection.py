@@ -1,4 +1,5 @@
 import asyncio
+from unittest.mock import Mock
 
 import pytest
 from fastapi import WebSocketDisconnect
@@ -12,6 +13,8 @@ from app.contracts.protocol import (
 )
 from app.controler.workers.connection import ProtocolViolation, WorkerConnection
 from app.controler.workers.conversation import ConversationBroker
+from app.controler.workers.files import FileService
+from app.persistence.database import Database
 from tests.test_conversation_history import SESSION
 
 
@@ -46,7 +49,7 @@ class Socket:
 @pytest.mark.asyncio
 async def test_dispatch_bypasses_execution_buffer_and_survives_consumer_cancellation() -> None:
     broker, socket = ConversationBroker(), Socket()
-    connection = WorkerConnection(socket, broker, "worker", "epoch")
+    connection = WorkerConnection(socket, broker, FileService(Mock(spec=Database)), "worker", "epoch")
     try:
         # Idle polling cancels its own wait; it must not cancel the transport reader.
         waiting = asyncio.create_task(connection.receive_text())
@@ -76,7 +79,7 @@ async def test_dispatch_bypasses_execution_buffer_and_survives_consumer_cancella
 @pytest.mark.parametrize("failure", ["disconnect", "overflow"])
 async def test_receiver_failure_immediately_fails_query_while_control_is_busy(failure) -> None:
     broker, socket = ConversationBroker(), Socket()
-    connection = WorkerConnection(socket, broker, "worker", "epoch")
+    connection = WorkerConnection(socket, broker, FileService(Mock(spec=Database)), "worker", "epoch")
     query = asyncio.create_task(broker.query("worker", HistoryQuery(session_id=SESSION)))
     await socket.sent.get()
     raw = Heartbeat(job_id=1, assignment_token="token", connection_epoch="epoch").model_dump_json()

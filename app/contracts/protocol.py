@@ -19,12 +19,13 @@ from pydantic import (
 )
 
 from app.contracts.conversation import ConversationError, HistoryPage, SessionId
+from app.contracts.files import MAX_FILE_BASE64, FileError, FileId
 from app.domain.context_models import ReviewContext
 from app.domain.delivery_models import DeliveryReceipt
 from app.domain.models import FeedbackRef, JobState, RevisionCodingOutput, VcsKind
 from app.domain.review_models import ReviewFeedback
 
-PROTOCOL_VERSION: Literal[15] = 15
+PROTOCOL_VERSION: Literal[17] = 17
 
 
 class ProtocolModel(BaseModel):
@@ -34,7 +35,46 @@ class ProtocolModel(BaseModel):
 
 
 class Message(ProtocolModel):
-    protocol_version: Literal[15] = PROTOCOL_VERSION
+    protocol_version: Literal[17] = PROTOCOL_VERSION
+
+
+class FileEnvelope(Message):
+    request_id: FileId
+    connection_epoch: str = Field(min_length=1, max_length=64)
+
+
+class FileRegister(FileEnvelope):
+    type: Literal["file_register"] = "file_register"
+    file_id: FileId
+
+
+class FileRegistered(FileEnvelope):
+    type: Literal["file_registered"] = "file_registered"
+    link: str | None = Field(default=None, pattern=r"^/api/files/[0-9a-f]{32}$")
+    error: FileError | None = None
+
+    @model_validator(mode="after")
+    def _one_outcome(self) -> FileRegistered:
+        if (self.link is None) == (self.error is None):
+            raise ValueError("file registration requires exactly one of link or error")
+        return self
+
+
+class FileQuery(FileEnvelope):
+    type: Literal["file_query"] = "file_query"
+    file_id: FileId
+
+
+class FileResult(FileEnvelope):
+    type: Literal["file_result"] = "file_result"
+    content_base64: str | None = Field(default=None, max_length=MAX_FILE_BASE64)
+    error: FileError | None = None
+
+    @model_validator(mode="after")
+    def _one_outcome(self) -> FileResult:
+        if (self.content_base64 is None) == (self.error is None):
+            raise ValueError("file result requires exactly one of content or error")
+        return self
 
 
 class ConversationQuery(Message):
@@ -278,7 +318,8 @@ class StopAccepted(StopFence):
 
 
 WorkerMessage = Annotated[
-    Register | Started | Heartbeat | Succeeded | Failed | FlowToolRequest | ExecutionStopped | ConversationResult,
+    Register | Started | Heartbeat | Succeeded | Failed | FlowToolRequest | ExecutionStopped
+    | ConversationResult | FileRegister | FileResult,
     Field(discriminator="type"),
 ]
 
@@ -405,7 +446,9 @@ ServerMessage = Annotated[
     | FlowToolResponse
     | StopExecution
     | StopAccepted
-    | ConversationQuery,
+    | ConversationQuery
+    | FileQuery
+    | FileRegistered,
     Field(discriminator="type"),
 ]
 

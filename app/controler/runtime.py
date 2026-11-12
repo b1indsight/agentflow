@@ -93,6 +93,7 @@ class ServerRuntime:
             database=database,
         )
         self.conversations = ConversationService(conversations, database=database)
+        self.files = self.gateway.files
         self.console = ConsoleSynchronizer(github, self.conversations, database=database)
         self.webhooks = WebhookConsumer(
             self.settings,

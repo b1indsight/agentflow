@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import random
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 from uuid import uuid4
 
 from loguru import logger
 from websockets.asyncio.client import connect
+from websockets.exceptions import ConnectionClosed
 
 from app.contracts.conversation import ConversationFailure, HistoryQuery
+from app.contracts.files import FileFailure
 from app.contracts.protocol import (
     Assignment,
     AssignmentSecret,
@@ -21,6 +25,10 @@ from app.contracts.protocol import (
     ExecutionStopped,
     ExecutionTask,
     Failed,
+    FileQuery,
+    FileRegister,
+    FileRegistered,
+    FileResult,
     FlowToolErrorKind,
     FlowToolRequest,
     FlowToolResponse,
@@ -42,6 +50,7 @@ from app.contracts.protocol import (
 )
 from app.domain.delivery_models import DeliveryReceipt
 from app.domain.models import VcsOutcome
+from app.worker.state.file_links import LocalFileLinks
 from app.worker.state.session import WorkerSession
 from app.worker.transport.mcp import FlowToolCaller
 
@@ -114,8 +123,46 @@ class WorkerClient:
         self._connection_epoch: str | None = None
         self._connection_task: asyncio.Task[None] | None = None
         self._history_tasks: set[asyncio.Task[None]] = set()
+        self._file_tasks: set[asyncio.Task[None]] = set()
+        self._file_connection: Connection | None = None
+        self._file_registrations: dict[str, asyncio.Future[str]] = {}
+        self.files = LocalFileLinks(session.path.parent)
         self._execution: asyncio.Task[ExecutionResult] | None = None
         self._tool_requests: asyncio.Queue[_PendingTool] = asyncio.Queue()
+
+    async def register_file(self, path: Path) -> str:
+        """Return a server-relative file URL, usable while idle or executing a job.
+
+        Example: ``link = await client.register_file(Path("report.txt"))``.
+        The caller must keep ``run()`` active. Only the opaque handle crosses the
+        socket; re-registering the same file identity reuses its durable link.
+        """
+        connection, epoch = self._file_connection, self._connection_epoch
+        if connection is None or epoch is None:
+            raise FileFailure("worker_unavailable")
+        if len(self._file_registrations) >= 4:
+            raise FileFailure("query_busy")
+        request_id = uuid4().hex
+        future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+        self._file_registrations[request_id] = future
+        try:
+            async with asyncio.timeout(10):
+                file_id = await asyncio.to_thread(self.files.register, path)
+                if self._file_connection is not connection:
+                    raise FileFailure("worker_unavailable")
+                await connection.send(FileRegister(request_id=request_id, connection_epoch=epoch,
+                                                   file_id=file_id).model_dump_json())
+                return await future
+        except TimeoutError:
+            raise FileFailure("query_timeout") from None
+        except (OSError, ConnectionClosed):
+            raise FileFailure("worker_unavailable") from None
+        finally:
+            self._file_registrations.pop(request_id, None)
+            if not future.done():
+                future.cancel()
+            elif not future.cancelled():
+                future.exception()
 
     async def call_tool(
         self,
@@ -186,17 +233,46 @@ class WorkerClient:
         try:
             await self._run_connection(connection)
         finally:
-            tasks = list(self._history_tasks)
+            self.connected = False
+            self._file_connection = None
+            for future in self._file_registrations.values():
+                if not future.done():
+                    future.set_exception(FileFailure("worker_unavailable"))
+            tasks = list(self._history_tasks | self._file_tasks)
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             self._history_tasks.clear()
+            self._file_tasks.clear()
 
     async def _receive_message(self, connection: Connection) -> ServerMessage:
         """Keep one socket reader while history requests run alongside task messages."""
         while True:
             raw = await connection.recv()
             message = parse_server_message(raw.decode() if isinstance(raw, bytes) else raw)
+            if isinstance(message, FileRegistered):
+                future = self._file_registrations.get(message.request_id)
+                if (future is not None and not future.done()
+                        and message.connection_epoch == self._connection_epoch):
+                    if message.error is not None:
+                        future.set_exception(FileFailure(message.error))
+                    else:
+                        assert message.link is not None
+                        future.set_result(message.link)
+                continue
+            if isinstance(message, FileQuery):
+                if message.connection_epoch != self._connection_epoch:
+                    continue
+                if len(self._file_tasks) >= 4:
+                    await connection.send(FileResult(
+                        request_id=message.request_id, connection_epoch=message.connection_epoch,
+                        error="query_busy",
+                    ).model_dump_json())
+                    continue
+                task = asyncio.create_task(self._answer_file(connection, message))
+                self._file_tasks.add(task)
+                task.add_done_callback(self._file_finished)
+                continue
             if not isinstance(message, ConversationQuery):
                 return message
             if len(self._history_tasks) >= 4:
@@ -208,6 +284,21 @@ class WorkerClient:
             task = asyncio.create_task(self._answer_history(connection, message))
             self._history_tasks.add(task)
             task.add_done_callback(self._history_finished)
+
+    def _file_finished(self, task: asyncio.Task[None]) -> None:
+        self._file_tasks.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            logger.warning("file response could not be delivered")
+
+    async def _answer_file(self, connection: Connection, query: FileQuery) -> None:
+        try:
+            content = await asyncio.to_thread(self.files.read, query.file_id)
+            result = FileResult(request_id=query.request_id, connection_epoch=query.connection_epoch,
+                                content_base64=base64.b64encode(content).decode("ascii"))
+        except FileFailure as exc:
+            result = FileResult(request_id=query.request_id, connection_epoch=query.connection_epoch,
+                                error=exc.code)
+        await connection.send(result.model_dump_json())
 
     def _history_finished(self, task: asyncio.Task[None]) -> None:
         self._history_tasks.discard(task)
@@ -257,6 +348,7 @@ class WorkerClient:
             self.session.validate_recovery(first.job_id, first.assignment_token)
         self._connection_epoch = first.connection_epoch
         self.connected = True
+        self._file_connection = connection
         logger.bind(event="worker_connected", reason_code="ok", worker_id=self.worker_id).info("")
 
         async def heartbeat() -> None:

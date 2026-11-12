@@ -36,6 +36,7 @@ from app.contracts.protocol import (
 from app.contracts.result_models import ResultPending
 from app.controler.workers.connection import ProtocolViolation, WorkerConnection, WorkerSocket
 from app.controler.workers.conversation import ConversationBroker
+from app.controler.workers.files import FileService
 from app.controler.workflow.coordinator import JobCoordinator
 from app.controler.workflow.preparation import PreparationStale, PreparationState
 from app.controler.workflow.results import ResultApplication
@@ -86,6 +87,7 @@ class WorkerGateway:
         self._sessions: dict[str, tuple[asyncio.Event, WorkerConnection]] = {}
         self._registry_lock = asyncio.Lock()
         self.conversations = conversations
+        self.files = FileService(database)
 
     async def _prepare_assignment(
         self, job: Job, worker_id: str, token: str, epoch: str,
@@ -127,7 +129,7 @@ class WorkerGateway:
             register = parse_worker_message(await socket.receive_text())
             if not isinstance(register, Register) or register.worker_id != worker_id:
                 raise ProtocolViolation("worker registration does not match authenticated identity")
-            connection = WorkerConnection(socket, self.conversations, worker_id, connection_epoch)
+            connection = WorkerConnection(socket, self.conversations, self.files, worker_id, connection_epoch)
             wake = await self._register_session(worker_id, connection)
             registered_session = True
             worker = self.workers.worker_connected(

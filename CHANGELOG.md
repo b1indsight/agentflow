@@ -8,6 +8,9 @@
 
 ## Unreleased
 
+- 新增 `WorkerClient.register_file(path)` 和 `GET /api/files/{link_id}`：通过认证 WebSocket
+  登记/读取 worker 本地文件，两端持久化随机句柄映射，server 不接收路径；沿用 owner 鉴权，
+  支持二进制，限制 512 KiB，并处理文件替换、离线、超时和并发。协议升级为 v17。
 - Worker 发布核验复用运行列表返回的成功 attempt，删除重复的运行详情请求与 `ReleaseEvent`
   包装，直接返回已核验 SHA。保留固定 attempt 的发布步骤与当前 main SHA 核验，
   成功路径从 4 次 API 请求减为 3 次。

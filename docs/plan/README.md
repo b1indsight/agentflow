@@ -5,6 +5,8 @@
 
 ## 当前计划
 
+- [`worker-file-links.md`](worker-file-links.md) — worker 本地文件登记与 owner 文件 API：路径留在 worker，通过持久随机句柄和认证 WebSocket 按需读取；边界与验证见记录。
+
 - [`server-auto-update.md`](server-auto-update.md) — PR #104：独立验签 Webhook、本地文件队列和同镜像幂等部署已实现；Worker `--update` 在原 uv Git 安装中更新并核验后退出。保留删列与普通停启，不新建环境；951 项回归及五项简化对照通过，真实接入待验收，审查及交付状态见 PR。
 
 - [`worker-amp-cli.md`](worker-amp-cli.md) — 可选 Amp CLI 后端已实现：同 thread 修订、原生历史、

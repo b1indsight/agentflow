@@ -115,6 +115,7 @@ FlowTool 的目标是把带 `flow` 标签的 GitHub issue 编排成
 ## 文档
 
 - [Flow 会话查询 API](docs/architecture/conversation-api.md)：control 代理 worker 读取 Codex 历史，供 WebUI 分页展示；
+- [Worker 文件链接](docs/plan/worker-file-links.md)：登记本地文件并通过 owner API 按需读取，server 不接收 worker 路径；
 - [已取消 Flow 手动归档](docs/plan/cancelled-flow-archive.md)：归档入口、持久化与取消/恢复的安全边界；
 - [`docs/architecture/`](docs/architecture/README.md)：当前实现状态、目标架构、组件、流程、决策和接入说明；
 - [`docs/architecture/diagram.html`](docs/architecture/diagram.html)：手工维护的交互式架构可视化；
@@ -178,7 +179,7 @@ Git worktree。`FLOWTOOL_WORKER_REPO_WORKSPACE_LIMIT=2` 设置每仓库总上限
 每次 INITIAL、REVISION resume/fallback 都提供本轮 bot `gh` 包装、独立配置和 Git helper，
 不使用个人登录态；token 过期/权限不足即失败，不自动续期或扩权。worker 保持单仓库
 Contents write，PR 通过 MCP `open_pr` 请求 controler 校验后创建。包装不构成 OS 沙箱。
-当前 Codex/Amp 接入均使用 protocol v15 / journal v4，serve 与 worker 的协议版本必须匹配；旧 journal 不自动迁移。
+当前 Codex/Amp 接入均使用 protocol v17 / journal v4，serve 与 worker 的协议版本必须匹配；旧 journal 不自动迁移。
 Amp 的临时 settings 不覆盖 managed policy；发现 workspace `.amp/settings.json[c]` 时拒绝执行，
 避免覆盖本轮工具/MCP 设置。完整配置与取消边界见[部署说明](docs/deployment/README.md)。
 
@@ -301,7 +302,7 @@ M3 F3 及审查修复本地验证（2026-09-08）：真实 PostgreSQL 下 **502 
 响应丢失与重启恢复。Ruff、Mypy 与 sdist/wheel 构建通过；真实 GitHub App/worker 验收仍待执行，
 详见 [F3 审查修复记录](docs/plan/m3-archive-status.md#7-审查修复2026-09-08)。
 
-当前仅支持 wire protocol **v15**、worker journal **v4** 与当前完整 PostgreSQL schema。
+当前仅支持 wire protocol **v17**、worker journal **v4** 与当前完整 PostgreSQL schema。
 仓库尚未部署，不提供旧版本数据库、任务、结果或 journal 的迁移；首次运行使用新数据库/schema
 和新 worker root。Server 部署不以所有 Worker 更新为前提；Worker 连接仍按实际 protocol 和
 认证结果处理，不匹配直接拒绝。支持的 uv Git 虚拟环境安装可通过 `flowtool worker --update`

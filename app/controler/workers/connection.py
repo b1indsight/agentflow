@@ -8,9 +8,11 @@ from collections.abc import Mapping
 from typing import Protocol
 
 from fastapi import WebSocketDisconnect
+from loguru import logger
 
-from app.contracts.protocol import parse_worker_message
+from app.contracts.protocol import FileRegister, FileRegistered, parse_worker_message
 from app.controler.workers.conversation import ConversationBroker
+from app.controler.workers.files import FileService
 
 
 class WorkerSocket(Protocol):
@@ -39,14 +41,20 @@ class WorkerConnection:
     a replacement connection.
     """
 
-    def __init__(self, socket: WorkerSocket, conversations: ConversationBroker, worker_id: str, epoch: str) -> None:
+    def __init__(self, socket: WorkerSocket, conversations: ConversationBroker,
+                 files: FileService, worker_id: str, epoch: str) -> None:
         self.socket = socket
         self.conversations = conversations
+        self.files = files
+        self.worker_id = worker_id
+        self.epoch = epoch
+        self._registrations: set[asyncio.Task[None]] = set()
         self._messages: deque[tuple[str, int]] = deque()
         self._bytes = 0
         self._ready = asyncio.Event()
         self._error: Exception | None = None
         self.conversations.connect(worker_id, epoch, self)
+        self.files.connect(worker_id, epoch, self)
         self._reader = asyncio.create_task(self._receive())
 
     async def send_text(self, data: str) -> None:
@@ -62,7 +70,12 @@ class WorkerConnection:
         """Join the receiver when the gateway exits or a new connection takes over."""
         self._reader.cancel()
         await asyncio.gather(self._reader, return_exceptions=True)
+        tasks = list(self._registrations)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         self.conversations.disconnect(self)
+        self.files.disconnect(self)
         self._ready.set()
 
     async def receive_text(self) -> str:
@@ -77,12 +90,30 @@ class WorkerConnection:
         self._bytes -= size
         return raw
 
+    def _registration_finished(self, task: asyncio.Task[None]) -> None:
+        self._registrations.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            logger.warning("file registration response could not be delivered")
+
     async def _receive(self) -> None:
         try:
             while True:
                 raw = await self.socket.receive_text()
                 message = parse_worker_message(raw)
-                if self.conversations.accept(self, message):
+                if self.conversations.accept(self, message) or self.files.accept(self, message):
+                    continue
+                if isinstance(message, FileRegister):
+                    if message.connection_epoch != self.epoch:
+                        continue
+                    if len(self._registrations) >= 4:
+                        await self.send_text(FileRegistered(
+                            request_id=message.request_id, connection_epoch=self.epoch,
+                            error="query_busy",
+                        ).model_dump_json())
+                        continue
+                    task = asyncio.create_task(self.files.register(self.worker_id, self, message))
+                    self._registrations.add(task)
+                    task.add_done_callback(self._registration_finished)
                     continue
                 size = len(raw.encode())
                 if len(self._messages) >= 32 or self._bytes + size > 16 * 1024 * 1024:
@@ -94,4 +125,5 @@ class WorkerConnection:
             self._error = exc
         finally:
             self.conversations.disconnect(self)
+            self.files.disconnect(self)
             self._ready.set()

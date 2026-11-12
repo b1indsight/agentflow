@@ -181,10 +181,10 @@ Kubernetes Server 的自动部署入口是部署主机独立端口上的仓库 W
 停止 ACK 保留原位置证明，供取消期间已知合并后的 ARCHIVE 使用；详见[取消说明](../operations/cancel-drain.md)。
 当前 #109 仍有取消 REVISION 后显式重试无法重新占用 idle 位置的 medium，尚不建议合并部署。
 
-取消回收基线恢复为原 protocol v14，Amp 会话查询扩展在其上递增为 v15，沿用 journal v4 /
-workspace manifest v1，数据库 schema 不变。涉及协议或 journal 格式变更时，由操作者协调
+当前文件链接扩展使用 protocol v17，沿用 journal v4 / workspace manifest v1，
+完整数据库 schema 新增 `worker_file_links`。涉及协议或 journal 格式变更时，由操作者协调
 serve/worker 使用同一 commit 或对应镜像升级；更新器不检查或等待 Worker 升级。
-不混跑仅含取消回收的 v14、历史含 `release_workspace` 的 v15 或旧 Amp v16 快照。
+不混跑旧 v14/v15 或已废弃的 Amp v16 快照，文件接口见[Worker 文件链接](../plan/worker-file-links.md)。
 旧 journal 不自动迁移；在没有活跃/未知执行且归档与停止 ACK 完成后升级两端。
 保留旧数据作人工核查，不将旧 per-Flow 目录迁入池，详见[升级说明](../operations/upgrade.md)。
 
