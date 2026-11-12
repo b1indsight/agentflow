@@ -527,6 +527,35 @@ test("Markdown syntax and astral text count once, while collapsed tools stay unr
   expect(state.progress.unread_count).toBe(1);
 });
 
+test("late observations still acknowledge entries untouched by a newer mark", async ({
+  page,
+}) => {
+  const state = model([item("first"), item("second")]);
+  let release!: () => void;
+  state.delayObservation = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await serve(page, state);
+  await page.clock.runFor(900);
+  await expect.poll(() => state.progress.unread_count).toBe(0);
+  // Focus refresh learns the newer summary while the exact read acknowledgment
+  // is still in flight. Marking another entry must not discard that receipt.
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await expect(page.getByLabel("个人阅读进度")).toContainText("0 条未读");
+  await page
+    .locator('[data-entry="second"]')
+    .getByRole("button", { name: "未读 · 标为已读" })
+    .click();
+  await expect.poll(() => state.marks).toEqual(["entry_read"]);
+  const response = page.waitForResponse("**/reading/observations");
+  release();
+  await response;
+  await expect(
+    page.getByRole("button", { name: "已读 · 标为未读" }),
+  ).toHaveCount(2);
+  expect(state.claims).toBe(0);
+});
+
 test("late observation responses cannot undo a newer explicit unread", async ({
   page,
 }) => {

@@ -184,27 +184,28 @@ export function useReadingProgress(
         controller.signal,
       );
       if (controller.signal.aborted) return;
-      const current = accept(result);
-      if (current)
-        for (const [id, item] of pending) {
-          const entry = registry.current.get(id);
-          if (!entry) continue;
-          const prior = localRef.current.get(id) ?? entry.reading ?? fresh();
-          if (prior.generation !== item.generation) continue;
-          const ranges = mergeReadRanges([...prior.ranges, ...item.ranges]);
-          const header_read = prior.header_read || item.header;
-          const complete =
-            entry.body_length === 0 ||
-            (ranges.length === 1 &&
-              ranges[0][0] === 0 &&
-              ranges[0][1] === entry.body_length);
-          updateLocal(id, {
-            ...prior,
-            ranges,
-            header_read,
-            unread: !(prior.explicit_read || (header_read && complete)),
-          });
-        }
+      accept(result);
+      // A newer summary may belong to another entry. Merge acknowledged ranges
+      // by their own generation, which still fences a later explicit unread.
+      for (const [id, item] of pending) {
+        const entry = registry.current.get(id);
+        if (!entry) continue;
+        const prior = localRef.current.get(id) ?? entry.reading ?? fresh();
+        if (prior.generation !== item.generation) continue;
+        const ranges = mergeReadRanges([...prior.ranges, ...item.ranges]);
+        const header_read = prior.header_read || item.header;
+        const complete =
+          entry.body_length === 0 ||
+          (ranges.length === 1 &&
+            ranges[0][0] === 0 &&
+            ranges[0][1] === entry.body_length);
+        updateLocal(id, {
+          ...prior,
+          ranges,
+          header_read,
+          unread: !(prior.explicit_read || (header_read && complete)),
+        });
+      }
       setError("");
     } catch (failure) {
       if (controller.signal.aborted) return;
