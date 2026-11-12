@@ -90,8 +90,8 @@ async def revision_workspace(tmp_path):
         flow_id=1, attempt_id=1, batch_id=1, repo="owner/repo", repo_identity="w:owner/repo",
         branch="flow/1", base_branch="main", pr_number=17, expected_head_sha=sha,
         session_id="session-1", session_generation=0, instruction="Fix the feedback", feedback=[],
-        issue_title="Original task", issue_body="Original requirements", previous_summary="",
-        open_points=[],
+        task_content="Original task\n\nOriginal requirements",
+        previous_summary="", open_points=[],
     )
     secret = AssignmentSecret(push=PushSecret(
         repository="owner/repo", token=SecretStr("fresh-token"),
@@ -177,12 +177,15 @@ async def test_fallback_only_when_execution_is_known_not_to_have_started(
     revision_workspace, session, behavior, expected,
 ):
     root, repo, task, secret, pool = revision_workspace
-    task = task.model_copy(update={"session_id": session})
+    # A missing conversation must rebuild from the full direct text, not a generated display title.
+    task_content = " \nPreserve these original requirements.\n\nKeep every detail.\t\n "
+    task = task.model_copy(update={"session_id": session, "task_content": task_content})
     agent = RevisionAgent(repo, behavior)
     result = await WorkerExecutor(root, agent, state=ExecutionState(root, 1), worker_id="w",
                                    workspaces=pool).execute(task, secret, tool_caller=RecordingToolCaller())
     assert [call[0] for call in agent.calls] == expected
     assert all(call[1].mcp_url is None and call[1].mcp_token is None for call in agent.calls)
+    assert all(task_content in call[2] for call in agent.calls)
     if expected[-1] == "start":
         assert result.session_id == "new-session"
         assert result.session_generation == 1

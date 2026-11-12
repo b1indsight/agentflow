@@ -1,8 +1,8 @@
 # FlowTool（代号，未定名）
 
-FlowTool 的目标是把带 `flow` 标签的 GitHub issue 编排成
+FlowTool 支持从带 `flow` 标签的 GitHub Issue 或直接输入的任务内容开启
 `code agent 编码 → PR → 人工审核 → 自动回喂修订 → 人工合并 → 归档` 的 headless 闭环。
-工作流交互面是 GitHub issue 和 PR；另提供 [Web 控制台](app/controler/web/README.md)，通过同源 API
+工作流交互面包含 GitHub Issue、PR 和 [Web 控制台](app/controler/web/README.md)，通过同源 API
 展示真实 Flow、执行记录和持久时间线，由 Cloudflare Access 限制单 owner 访问。
 Flow 使用 `queued/running/review/blocked/finalizing/archived` 六态；看板将 finalizing 合入进行中。
 归档结果为 `succeeded/abandoned`，无 PR 的调查可凭非空结论成功结束；显式恢复开启同一 Flow 的新轮次。
@@ -18,6 +18,13 @@ Flow 使用 `queued/running/review/blocked/finalizing/archived` 六态；看板�
 > [持久层简化记录](docs/plan/persistence-simplification.md)。
 
 ## 当前能力
+
+- **直接创建 Flow**：看板顶栏点击“新建 Flow”，选择 Project（GitHub 代码仓库），输入任务内容即可开启，
+  不要求 Issue 或 webhook。项目来自 GitHub App 授权清单，零历史仓库也可选；提交时重新校验访问与归档状态。
+  任务内容以字符串原样保存，最多 32 KiB UTF-8，不要求填写标题。
+  首轮准备时异步推理标题，不等待生成结果；生成前或失败时依次使用 Issue 缓存标题、PR 标题、`Flow #ID`。
+  原始输入用于首轮、修订与审核；无 Issue 时不查询 Issue、不添加关闭指令，也不参与 Issue 型 Projects 同步。
+  提交结果未知时先刷新核对，页面不会自动重发；没有空闲 Worker 时正常排队。
 
 - **准备期读重试**：Assignment 发出前的临时 GitHub 读取故障按原 worker binding 自动退避；
   `FLOWTOOL_PREPARE_MAX_FAILURES` 默认 5 次，`FLOWTOOL_PREPARE_RETRY_WINDOW_SECONDS`
@@ -211,7 +218,8 @@ seed 和默认推理 workspace 不计入。每个 Flow 独占一个 workspace，
 每次 INITIAL、REVISION resume/fallback 都提供本轮 bot `gh` 包装、独立配置和 Git helper，
 不使用个人登录态；token 过期/权限不足即失败，不自动续期或扩权。worker 保持单仓库
 Contents write，PR 通过 MCP `open_pr` 请求 controler 校验后创建。包装不构成 OS 沙箱。
-当前 Codex/Amp 接入均使用 wire20 / journal5 / ResultInbox v1，serve 与 worker 的协议版本必须匹配。
+当前 Codex/Amp 接入均使用 wire21 / journal5；执行结果使用 ResultInbox v1，Control 本地归档通知使用 v2。
+serve 与 worker 的协议版本必须匹配。
 通信统一为顶层控制和 typed call/result 列表；控制 ACK 仅确认接收，不表示业务提交。
 支持只读加载受限 v4 journal（内嵌 v14/v15 回执），正常保存时才升级，见 [Worker 更新](docs/deployment/worker-update.md#journal-直接前代兼容)。
 两个后端继承 worker 专用账号及任务仓库中原生 CLI 可发现的 skills/MCP，以及其自定义环境变量；
@@ -264,6 +272,11 @@ uv run flowtool flow history <FLOW_ID> --round 1
 下一次尝试时间和错误原因；`flow retry` 重排最近失败的任务。已核验并 push 的修订若遇到 GitHub
 明确拒绝通知（例如 reviewer 请求 422），结果和回执保持待完成；修正 GitHub 端原因后使用同一命令
 只重试失败通知，成功后原子提交交付/session/反馈，不重新运行修订。状态不明的操作仍须先核对。
+
+直接输入也可用管理命令 `flowtool flow create OWNER/REPO --installation-id N --content-file PATH`；
+`--content-file -` 读取 stdin，也可用 `--content TEXT`。Issue 输入改用 `--issue-number N`，不得同时提供内容。
+这两种输入共用 `POST /api/flows` 的校验和原子创建用例；API 要求 owner 的同源 JSON，成功返回 201。
+`GET /api/flow-targets` 提供授权目标的分页清单，`/api/repos` 仍只用于历史看板筛选。
 
 serve 后台补齐三个配置标签：`FLOWTOOL_TRIGGER_LABEL`（默认 `flow`）、
 `FLOWTOOL_IN_REVIEW_LABEL`（默认 `flow:in-review`）、`FLOWTOOL_DONE_LABEL`（默认 `flow:done`）。
@@ -365,7 +378,11 @@ M3 F3 及审查修复本地验证（2026-09-08）：真实 PostgreSQL 下 **502 
 响应丢失与重启恢复。Ruff、Mypy 与 sdist/wheel 构建通过；真实 GitHub App/worker 验收仍待执行，
 详见 [F3 审查修复记录](docs/plan/m3-archive-status.md#7-审查修复2026-09-08)。
 
-当前在线协议仅支持 **v20**，正常写入 worker journal **v5**、ResultInbox **v1**、workspace manifest **v2**。
+当前在线协议仅支持 **v21**，正常写入 worker journal **v5**、执行结果 ResultInbox **v1**、workspace manifest **v2**；
+Control 本地归档通知使用 ResultInbox **v2**。
+INITIAL/REVISION 使用字符串 `task_content`，Issue 在准备时由最新标题与正文拼接；server/worker 必须成组升级，不能混跑 v20。
+现有六态库启动会幂等新增 `flows.task_content`（TEXT）和可空的 `title` / `title_job_id`、允许 NULL Issue，并校验两种输入恰好存在一种。
+首次创建直接任务后，旧程序无法读取这些记录，即使任务已归档也不能直接降级；应前向修复或按备份整体恢复。
 `workers` 使用 `(worker_id, workspace)` 复合主键；旧单行 worker schema 启动时明确拒绝，
 须在停写、备份后核对真实 worker-root 身份并显式迁移，不自动生成或猜造 workspace。
 合法 v4 journal 的 v14/v15 回执与已知旧 inbox 只读转换；下次原本需要的状态写入才写 v5。

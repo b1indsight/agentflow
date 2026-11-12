@@ -160,7 +160,7 @@ async def test_cancel_before_terminal_keeps_executor_slot_until_result_ack(scena
     assert store.workers.get_flow_execution(job.flow_id).released_at is None
     assert store.stops.has_pending(job.flow_id)
     assert not github.comments
-    assert [j.kind for j in store.jobs.list_jobs(job.flow_id)] == [JobKind.INITIAL, JobKind.REVISION]
+    assert [j.kind for j in store.jobs.list_jobs(job.flow_id)] == [JobKind.INITIAL, JobKind.INFERENCE, JobKind.REVISION]
 
 
 async def test_review_label_preserves_user_labels_on_delivery_and_replay(initial_scenario):
@@ -258,7 +258,7 @@ async def test_status_label_failure_does_not_block_initial_delivery(
     assert github.review_requests == [["carol"]]
     assert await apply_result(coordinator(store, github), job, result) is JobState.DONE
     assert len(github.opened) == 1 and calls == [operation]
-    assert [j.kind for j in store.jobs.list_jobs(job.flow_id)] == [JobKind.INITIAL]
+    assert [j.kind for j in store.jobs.list_jobs(job.flow_id)] == [JobKind.INITIAL, JobKind.INFERENCE]
 
 
 async def test_closed_pr_after_lost_creation_response_finishes_without_new_writes(
@@ -336,14 +336,14 @@ async def test_remote_comment_is_recovered_after_response_loss(scenario, result_
     monkeypatch.setattr(Issue, "comment", lose_response)
     with pytest.raises(ResultPending):
         await apply_result(coordinator(store, github), job, result)
-    assert [j.kind for j in store.jobs.list_jobs(job.flow_id)] == [JobKind.INITIAL, JobKind.REVISION]
+    assert [j.kind for j in store.jobs.list_jobs(job.flow_id)] == [JobKind.INITIAL, JobKind.INFERENCE, JobKind.REVISION]
     comment = next(r for r in store.results.list_effects(job.id) if isinstance(r.payload, CommentEffect))
     assert comment.state is EffectState.UNCERTAIN
     result_clock.now += timedelta(seconds=10)
     state = await apply_result(coordinator(store, github), job, result)
     assert state is JobState.DONE
     assert len(github.comments) == 1
-    assert [j.kind for j in store.jobs.list_jobs(job.flow_id)] == [JobKind.INITIAL, JobKind.REVISION]
+    assert [j.kind for j in store.jobs.list_jobs(job.flow_id)] == [JobKind.INITIAL, JobKind.INFERENCE, JobKind.REVISION]
     assert store.jobs.get_job(job.id).result_applied_at is not None
     assert [
         (call["operation"], call["installation_id"], call["repo"], call["number"])
@@ -378,7 +378,7 @@ async def test_merge_during_comment_lookup_prevents_dispatch(scenario, result_cl
     assert store.workers.get_flow_execution(job.flow_id).released_at is None
     assert github.comments == []
     assert [j.kind for j in store.jobs.list_jobs(job.flow_id)] == [
-        JobKind.INITIAL, JobKind.REVISION, JobKind.ARCHIVE,
+        JobKind.INITIAL, JobKind.INFERENCE, JobKind.REVISION, JobKind.ARCHIVE,
     ]
 
 
@@ -426,8 +426,8 @@ async def test_retired_result_reconciles_dispatched_comment_without_resending(
         assert store.jobs.get_job(job.id).result_applied_at is None
     assert len(calls) == 1
     assert [j.kind for j in store.jobs.list_jobs(job.flow_id)] == (
-        [JobKind.INITIAL, JobKind.REVISION, JobKind.ARCHIVE] if transition == "merge"
-        else [JobKind.INITIAL, JobKind.REVISION]
+        [JobKind.INITIAL, JobKind.INFERENCE, JobKind.REVISION, JobKind.ARCHIVE] if transition == "merge"
+        else [JobKind.INITIAL, JobKind.INFERENCE, JobKind.REVISION]
     )
     assert store.flows.get_flow(job.flow_id).state is (
         FlowState.ARCHIVED if transition == "merge" else FlowState.FINALIZING
@@ -471,7 +471,7 @@ async def test_final_commit_failure_rolls_back_completion_but_keeps_effect_recei
         patch.setattr(JobStore, "complete_persisted_result", interrupted_finalization)
         with pytest.raises(RuntimeError, match="commit interrupted"):
             await apply_result(coordinator(store, github), job, result)
-    assert [j.kind for j in store.jobs.list_jobs(job.flow_id)] == [JobKind.INITIAL, JobKind.REVISION]
+    assert [j.kind for j in store.jobs.list_jobs(job.flow_id)] == [JobKind.INITIAL, JobKind.INFERENCE, JobKind.REVISION]
     assert store.jobs.get_job(job.id).result_applied_at is None
     assert store.reviews.for_job(job) == before
     comment = next(r for r in store.results.list_effects(job.id) if isinstance(r.payload, CommentEffect))
@@ -479,7 +479,7 @@ async def test_final_commit_failure_rolls_back_completion_but_keeps_effect_recei
     await apply_result(coordinator(store, github), job, result)
     assert store.jobs.get_job(job.id).result_applied_at is not None
     assert len(github.comments) == 1
-    assert [j.kind for j in store.jobs.list_jobs(job.flow_id)] == [JobKind.INITIAL, JobKind.REVISION]
+    assert [j.kind for j in store.jobs.list_jobs(job.flow_id)] == [JobKind.INITIAL, JobKind.INFERENCE, JobKind.REVISION]
 
 
 async def test_cancel_during_remote_lookup_does_not_authorize_a_comment(
@@ -500,7 +500,7 @@ async def test_cancel_during_remote_lookup_does_not_authorize_a_comment(
     assert store.jobs.get_job(job.id).result_applied_at is not None
     assert store.stops.has_pending(job.flow_id)
     assert store.workers.get_flow_execution(job.flow_id).released_at is None
-    assert [j.kind for j in store.jobs.list_jobs(job.flow_id)] == [JobKind.INITIAL, JobKind.REVISION]
+    assert [j.kind for j in store.jobs.list_jobs(job.flow_id)] == [JobKind.INITIAL, JobKind.INFERENCE, JobKind.REVISION]
 
 
 async def test_concurrent_application_has_one_remote_sender(scenario, monkeypatch) -> None:
@@ -529,7 +529,7 @@ async def test_concurrent_application_has_one_remote_sender(scenario, monkeypatc
         if second is not None:
             await second
     assert len(github.comments) == 1
-    assert [j.kind for j in store.jobs.list_jobs(job.flow_id)] == [JobKind.INITIAL, JobKind.REVISION]
+    assert [j.kind for j in store.jobs.list_jobs(job.flow_id)] == [JobKind.INITIAL, JobKind.INFERENCE, JobKind.REVISION]
 
 
 async def test_process_interruption_recovers_a_running_effect(scenario, monkeypatch) -> None:
@@ -553,7 +553,7 @@ async def test_process_interruption_recovers_a_running_effect(scenario, monkeypa
     store.results.recover_claims()
     await apply_result(coordinator(store, github), job, result)
     assert len(github.comments) == 1
-    assert [j.kind for j in store.jobs.list_jobs(job.flow_id)] == [JobKind.INITIAL, JobKind.REVISION]
+    assert [j.kind for j in store.jobs.list_jobs(job.flow_id)] == [JobKind.INITIAL, JobKind.INFERENCE, JobKind.REVISION]
 
 
 async def test_rate_limit_waits_then_retries_a_definitely_rejected_request(

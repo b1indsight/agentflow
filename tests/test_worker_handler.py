@@ -60,7 +60,7 @@ pytestmark = pytest.mark.usefixtures("recording_resources")
 
 @pytest.fixture
 def queued_initial(store):
-    flow = required(ControlService(database=store.database).on_trigger("owner/repo", 8, 42))
+    flow = required(ControlService(database=store.database).create_flow("owner/repo", 8, 42))
     job, = store.jobs.list_jobs(flow.id)
     return flow, job
 

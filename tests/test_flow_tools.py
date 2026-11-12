@@ -4,12 +4,19 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from app.contracts.protocol import FlowToolErrorKind
+from app.contracts.protocol import (
+    FlowToolArguments,
+    FlowToolErrorKind,
+    FlowToolRequest,
+    call_header,
+)
 from app.controler.workflow.service import ControlService
+from app.controler.workflow.tools import FlowToolService
 from app.domain.delivery_models import PreparedDelivery
-from app.domain.models import ArchiveReason, DeliveryState, FlowState, JobKind
+from app.domain.models import ArchiveReason, DeliveryState, FlowState, JobKind, VcsKind
 from app.github import GitHubError, GitHubErrorKind, RemoteRef, Repository
 from app.persistence.deliveries import DeliveryStore
+from tests.github import RecordingGitHub
 from tests.test_merge import route_merge
 from tests.workspace_fixtures import register_worker
 
@@ -23,6 +30,34 @@ def fresh_tool_request(prepared_initial):
         "message_id": uuid4().hex,
         "arguments": request.arguments.model_copy(update={"call_id": uuid4().hex}),
     })
+
+
+async def test_direct_open_pr_preserves_body_without_closing_a_fake_issue(store, recording_resources):
+    # Direct requirements have no Issue; preserve the worker's exact body across persisted replay.
+    flow = ControlService(database=store.database).create_flow(
+        "owner/repo", None, 42, task_content="Direct",
+    )
+    attempt = store.flows.create_attempt(flow.id)
+    flow.current_attempt_id = attempt.id
+    store.flows.update_flow(flow)
+    register_worker(store, "worker-a", repo=flow.repo, epoch="epoch")
+    job = store.workers.assign_job("worker-a", "token", "epoch")
+    assert store.workers.start_assignment(job.id, attempt.id, "worker-a", "token", "epoch")
+    delivery = store.deliveries.get_or_create_delivery(flow.id, flow.initial_branch)
+    delivery.base_branch = "trunk"
+    store.deliveries.update_delivery(delivery)
+    body = "\n## Direct result\n\nPreserve trailing whitespace.  \n"
+    request = FlowToolRequest(**call_header(), method="flow.open_pr", arguments=FlowToolArguments(
+        job_id=job.id, flow_id=flow.id, attempt_id=attempt.id, assignment_token="token",
+        call_id="direct-open", arguments={"title": "Direct PR", "body": body},
+        vcs_backend=VcsKind.GIT, branch=delivery.branch, commit_sha="abc123", remote_sha="abc123",
+    ))
+    tools = FlowToolService(RecordingGitHub(), database=store.database)
+    first = await tools.execute(request, worker_id="worker-a", connection_epoch="epoch")
+    assert first.error is None
+    assert store.deliveries.get_delivery(flow.id).body == body
+    replay = await tools.execute(request, worker_id="worker-a", connection_epoch="epoch")
+    assert replay.result == first.result
 
 
 async def test_open_pr_prepares_and_replays_without_remote_delivery(

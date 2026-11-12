@@ -63,7 +63,7 @@ def _filters(q: str) -> tuple[str, list[object]]:
             if ":" not in token or literal:
                 token = token.strip('"')
                 clauses.append(
-                    "lower(concat_ws(' ',title,flow_id,facts->>'issue_number',"
+                    "lower(concat_ws(' ',coalesce(facts->>'task_title',title,facts->>'delivery_title'),flow_id,facts->>'issue_number',"
                     "facts->>'pr_number',facts->>'repo')) LIKE %s ESCAPE '\\'"
                 )
                 values.append(
@@ -114,7 +114,7 @@ def _summary(row: Row) -> FlowSummary:
         id=row["flow_id"],
         repo=repo,
         issue_number=issue,
-        issue_url=f"https://github.com/{repo}/issues/{issue}",
+        issue_url=f"https://github.com/{repo}/issues/{issue}" if issue is not None else None,
         title=row["title"],
         pr_number=pr,
         pr_url=f"https://github.com/{repo}/pull/{pr}" if pr else None,
@@ -233,7 +233,7 @@ class ConsoleStore(Repository):
             column = " AND facts->>'phase'=%s" if phase else ""
             rows = connection.execute(
                 "SELECT flow_id,facts-'delivery_body'-'delivery_title' AS facts,"
-                "coalesce(title,facts->>'delivery_title') AS title,state_version"
+                "coalesce(facts->>'task_title',title,facts->>'delivery_title') AS title,state_version"
                 " FROM console_flows WHERE "
                 + where
                 + column
@@ -262,8 +262,9 @@ class ConsoleStore(Repository):
         with self._db.connection() as connection:
             row = connection.execute(
                 "SELECT c.flow_id,c.facts-'delivery_body'-'delivery_title' AS facts,"
-                "coalesce(c.title,c.facts->>'delivery_title') AS title,c.state_version,diagnostic.*"
-                " FROM console_flows c LEFT JOIN LATERAL ("
+                "coalesce(c.facts->>'task_title',c.title,c.facts->>'delivery_title') AS title,"
+                "c.state_version,f.task_content,diagnostic.*"
+                " FROM console_flows c JOIN flows f ON f.id=c.flow_id LEFT JOIN LATERAL ("
                 " SELECT j.id AS diagnostic_job_id,j.kind AS diagnostic_kind,"
                 " j.state AS diagnostic_state,j.started_at IS NOT NULL AS execution_started,"
                 " j.recovery_deadline IS NOT NULL AS recovering,"
@@ -285,6 +286,7 @@ class ConsoleStore(Repository):
         reason, condition = _explanation(row)
         return FlowDetail(
             **flow.model_dump(),
+            task_content=row["task_content"],
             reason=reason,
             next_condition=condition,
             sources=self.sources(flow_id),

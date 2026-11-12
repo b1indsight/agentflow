@@ -1,9 +1,11 @@
 """Console display DTOs; internal execution payloads never cross this boundary."""
 
+from __future__ import annotations
+
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
 from app.domain.inference_models import AdapterVersion, FailureCode, StopReason
 from app.domain.models import ArchiveReason, FlowState
@@ -13,6 +15,39 @@ Phase = Literal["queued", "running", "review", "blocked", "archived"]
 
 class ConsoleModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+
+class FlowTarget(ConsoleModel):
+    """A repository and the installation granting access to it."""
+
+    repo: str = Field(pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", max_length=256)
+    installation_id: int = Field(strict=True, gt=0)
+
+
+class FlowTargetPage(ConsoleModel):
+    items: list[FlowTarget]
+    next_cursor: str | None
+    has_more: bool
+
+
+class CreateFlowRequest(FlowTarget):
+    """Manual intake accepts exactly one live Issue or bounded direct task."""
+
+    issue_number: int | None = Field(default=None, strict=True, gt=0)
+    task_content: str | None = None
+
+    @model_validator(mode="after")
+    def _input(self) -> CreateFlowRequest:
+        if (self.issue_number is None) == (self.task_content is None):
+            raise ValueError("provide exactly one of issue_number and task_content")
+        if self.task_content is not None:
+            if not self.task_content.strip():
+                raise ValueError("task content must not be blank")
+            if len(self.task_content.encode("utf-8")) > 32768:
+                raise ValueError("task content exceeds 32 KiB UTF-8")
+            if "\0" in self.task_content:
+                raise ValueError("task content must not contain NUL")
+        return self
 
 
 class ArchiveRequest(ConsoleModel):
@@ -34,8 +69,8 @@ class RetryRequest(ConsoleModel):
 class FlowSummary(ConsoleModel):
     id: int
     repo: str
-    issue_number: int
-    issue_url: str
+    issue_number: int | None
+    issue_url: str | None
     title: str | None
     pr_number: int | None
     pr_url: str | None
@@ -67,6 +102,7 @@ class FlowDetail(FlowSummary):
     reason: str
     next_condition: str
     sources: list[SourceStatus]
+    task_content: str | None = None
 
 
 class FlowPage(ConsoleModel):

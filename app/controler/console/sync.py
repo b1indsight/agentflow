@@ -95,7 +95,7 @@ class ConsoleSynchronizer:
                             [],
                             cursor=None,
                             more=False,
-                            children=sources(claim.pr_number),
+                            children=sources(claim.issue_number, claim.pr_number),
                             limitations=["remote_deleted_or_pre_ingestion_versions_unrecoverable"],
                         )
                     )

@@ -38,10 +38,11 @@ _INITIAL_OUTPUT_INSTRUCTION = (
 
 
 def build_initial_prompt(
-    issue_title: str, issue_body: str, repo_conventions: str, vcs_guidance: str
+    task_content: str, repo_conventions: str, vcs_guidance: str
 ) -> str:
+    """Render the supplied task without assuming a GitHub Issue source."""
     parts = [
-        f"# Task (from GitHub issue)\n## {issue_title}\n\n{issue_body}\n",
+        f"# Task\n{task_content}\n",
         f"# Repo conventions\n{repo_conventions or '(none provided)'}\n",
         f"# VCS guidance\n{vcs_guidance}\n",
         _HARD_CONSTRAINTS,
@@ -100,7 +101,7 @@ def build_revision_prompt(task: RevisionTask, repo_conventions: str) -> str:
     """Supply enough frozen context to resume or rebuild a session in the original repo."""
     feedback = "\n".join(_format_item(i) for i in task.feedback) or "(no inline items)"
     parts = [
-        f"# Original task\n{task.issue_title}\n{task.issue_body}\n",
+        f"# Original task\n{task.task_content}\n",
         f"# Repo conventions\n{repo_conventions}\n",
         (f"# Delivery\n{task.repo} PR #{task.pr_number}; branch {task.branch}; "
         f"base {task.base_branch}; expected head {task.expected_head_sha}\n"),

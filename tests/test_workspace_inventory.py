@@ -42,7 +42,7 @@ def assignment(flow: int, workspace: str, generation: int = 1) -> AssignmentArgu
         workspace=workspace, generation=generation,
         task=InitialTask(flow_id=flow, attempt_id=flow, repo="owner/repo",
                          repo_identity="worker-a:owner/repo", issue_number=flow,
-                         issue_title="Issue", issue_body="Body", branch=f"flow/{flow}"),
+                         task_content="Issue\n\nBody", branch=f"flow/{flow}"),
     )
 
 

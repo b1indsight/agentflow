@@ -10,8 +10,56 @@ from app.controler.workflow.service import ControlService
 from app.domain.models import ArchiveReason
 from app.github.console import Observation
 from app.persistence.activity import ActivityStore
+from app.persistence.console import ConsoleStore
 
 MARKER = "<!-- flowtool:effect:" + "a" * 64 + " -->"
+
+
+def test_direct_task_title_overrides_remote_cache_and_body_is_only_loaded_in_detail(store):
+    # Generated titles override remote caches; original requirements stay detail-only.
+    task = "Private original requirements 😀"
+    flow = store.flows.create_flow("octo/repo", None, 1, task_content=task)
+    console = ConsoleStore(store.database)
+    with store.connection() as connection:
+        connection.execute("UPDATE flows SET title='推理任务标题' WHERE id=%s", (flow.id,))
+        connection.execute("UPDATE console_flows SET title='Stale remote title' WHERE flow_id=%s", (flow.id,))
+        facts = connection.execute("SELECT facts FROM console_flows WHERE flow_id=%s", (flow.id,)).fetchone()["facts"]
+        history = connection.execute("SELECT body FROM console_activity WHERE flow_id=%s", (flow.id,)).fetchall()
+    assert facts["task_title"] == "推理任务标题"
+    assert "task_content" not in facts and task not in json.dumps(facts, ensure_ascii=False)
+    assert all(task not in row["body"] for row in history)
+    page = console.flows(q="推理任务标题")
+    assert [item.id for item in page.items] == [flow.id]
+    assert page.items[0].title == "推理任务标题"
+    assert page.items[0].issue_number is page.items[0].issue_url is None
+    assert not console.flows(q="Stale remote title").items
+    assert "task_content" not in page.model_dump_json()
+    detail = console.detail(flow.id)
+    assert detail.task_content == task and detail.issue_url is None
+    issue = store.flows.create_flow("octo/repo", 7, 1)
+    assert console.detail(issue.id).task_content is None
+    assert console.detail(issue.id).issue_url == "https://github.com/octo/repo/issues/7"
+
+
+@pytest.mark.parametrize("generated,cached,pr,expected", [
+    ("Generated", "Issue", "PR", "Generated"),
+    (None, "Issue", "PR", "Issue"),
+    (None, None, "PR", "PR"),
+    (None, None, None, None),
+])
+def test_display_title_and_search_share_fallback_precedence(store, generated, cached, pr, expected):
+    flow = store.flows.create_flow("octo/repo", 7, 1)
+    delivery = store.deliveries.get_or_create_delivery(flow.id, flow.initial_branch)
+    delivery.title = pr
+    store.deliveries.update_delivery(delivery)
+    with store.connection() as connection:
+        connection.execute("UPDATE flows SET title=%s WHERE id=%s", (generated, flow.id))
+        connection.execute("UPDATE console_flows SET title=%s WHERE flow_id=%s", (cached, flow.id))
+    console = ConsoleStore(store.database)
+    assert console.detail(flow.id).title == expected
+    assert console.flows().items[0].title == expected
+    if expected is not None:
+        assert console.flows(q=expected).items[0].id == flow.id
 
 
 def test_effect_markers_are_hidden_from_preview_content_and_diffs(store):

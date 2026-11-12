@@ -10,11 +10,12 @@ import type {
 } from "../types";
 
 const now = "2026-10-17T12:00:00Z";
-const flow: FlowSummary = {
+const flow: FlowSummary & Pick<FlowDetail, "task_content"> = {
   id: 42,
   repo: "owner/agentflow",
   issue_number: 85,
   issue_url: "https://example.test/issues/85",
+  task_content: null,
   title: "真实 DTO Flow",
   pr_number: 87,
   pr_url: "https://example.test/pulls/87",
@@ -4320,4 +4321,519 @@ test("mobile detail header contracts to one line without losing reading position
     e.scrollTop = 420;
   });
   await expect(head).not.toHaveClass(/compact/);
+});
+
+for (const width of [1440, 390]) {
+  test(`direct Flow creation preserves content, prevents duplicate writes and opens filtered-out detail at ${width}px`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 900 });
+    const body =
+      "\r\n  为零历史仓库添加分页 😀  \r\n\r\n保留 **完整任务**。\r\n<script>alert('unsafe')</script>\r\n";
+    const visibleBody = body.replace(/\r\n/g, "\n");
+    const title = "服务器生成：完善仓库分页";
+    let posts = 0;
+    let boardReads = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let created: FlowDetail = {
+      ...blockedFlow,
+      id: 91,
+      repo: "fresh/no-history",
+      issue_number: null,
+      issue_url: null,
+      pr_number: null,
+      pr_url: null,
+      title: null,
+      lifecycle: "queued",
+      phase: "queued",
+      action: "等待空闲 Worker",
+      reason: "任务已排队",
+      next_condition: "等待空闲 Worker",
+      task_content: body,
+    };
+    await page.route("**/api/flows?**", (route) => {
+      boardReads++;
+      return route.fulfill({
+        json: {
+          items: [],
+          counts: { queued: 0, running: 0, review: 0, blocked: 0, archived: 0 },
+          has_more: false,
+          next_cursor: null,
+        },
+      });
+    });
+    await page.route("**/api/flow-targets**", (route) =>
+      route.fulfill({
+        json: {
+          items: [{ repo: created.repo, installation_id: 71 }],
+          next_cursor: null,
+          has_more: false,
+        },
+      }),
+    );
+    await page.route("**/api/flows/91", (route) =>
+      route.fulfill({ json: created }),
+    );
+    await page.route(/\/api\/flows$/, async (route) => {
+      posts++;
+      expect(route.request().postDataJSON()).toEqual({
+        repo: created.repo,
+        installation_id: 71,
+        task_content: body,
+      });
+      await gate;
+      return route.fulfill({ status: 201, json: created });
+    });
+    await page.goto("/console/?q=repo:old/only");
+    const trigger = page.getByRole("button", {
+      name: "新建 Flow",
+      exact: true,
+    });
+    await expect(trigger).toBeVisible();
+    await expect(trigger).toHaveText("");
+    await expect(trigger.locator("svg")).toHaveCount(1);
+    await page.screenshot({
+      path: `../../../.amp/in/artifacts/flow-create-board-${width}.png`,
+      animations: "disabled",
+    });
+    await trigger.click();
+    const dialog = page.getByRole("dialog", { name: "新建 Flow", exact: true });
+    const project = dialog.getByLabel("Project（代码仓库）");
+    await expect(project).toBeFocused();
+    await project.selectOption({ label: created.repo });
+    const content = dialog.getByLabel("任务内容", { exact: true });
+    // Browser paste normally normalizes CRLF; the submitted string must retain the clipboard bytes.
+    await content.evaluate((input, text) => {
+      const clipboardData = new DataTransfer();
+      clipboardData.setData("text/plain", text);
+      input.dispatchEvent(
+        new ClipboardEvent("paste", {
+          clipboardData,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    }, body);
+    await expect(content).toHaveValue(visibleBody);
+    // Editing in the middle must preserve untouched CRLF lines and the caret position.
+    await content.evaluate((input) => {
+      if (!(input instanceof HTMLTextAreaElement))
+        throw new Error("Expected textarea");
+      const start = input.value.indexOf("完整任务");
+      input.focus();
+      input.setSelectionRange(start, start);
+    });
+    await page.keyboard.type("新");
+    await page.keyboard.press("Backspace");
+    await expect(content).toHaveValue(visibleBody);
+    await expect(dialog).toContainText("创建后由服务器生成标题");
+    await expect(dialog.getByLabel("标题预览")).toHaveCount(0);
+    await project.focus();
+    await page.keyboard.press("Tab");
+    await expect(
+      dialog.getByRole("button", { name: "重新读取项目", exact: true }),
+    ).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(dialog.getByLabel("任务内容", { exact: true })).toBeFocused();
+    await page.keyboard.press("Shift+Tab");
+    await expect(
+      dialog.getByRole("button", { name: "重新读取项目", exact: true }),
+    ).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(dialog).not.toBeVisible();
+    await expect(trigger).toBeFocused();
+    expect(posts).toBe(0);
+    await trigger.click();
+    await expect(dialog.getByLabel("任务内容", { exact: true })).toHaveValue(
+      visibleBody,
+    );
+    expect(
+      await dialog.evaluate((node) => node.scrollWidth <= node.clientWidth),
+    ).toBe(true);
+    await page.screenshot({
+      path: `../../../.amp/in/artifacts/task-text-form-${width}.png`,
+      animations: "disabled",
+    });
+    const readsBefore = boardReads;
+    await dialog
+      .getByRole("button", { name: "开启 Flow", exact: true })
+      .click();
+    await expect(
+      dialog.getByRole("button", { name: "正在开启 Flow…" }),
+    ).toBeDisabled();
+    await expect(
+      dialog.getByRole("button", { name: "取消", exact: true }),
+    ).toBeDisabled();
+    await dialog.locator("form").evaluate((form) => {
+      if (!(form instanceof HTMLFormElement))
+        throw new Error("Expected creation form");
+      form.requestSubmit();
+      form.requestSubmit();
+    });
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeVisible();
+    expect(posts).toBe(1);
+    await page.screenshot({
+      path: `../../../.amp/in/artifacts/flow-create-pending-${width}.png`,
+      animations: "disabled",
+    });
+    release();
+    await expect(page).toHaveURL(/#flow\/91\/overview$/);
+    await expect(dialog).not.toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: "Flow #91", exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("region", { name: "原始任务内容" }),
+    ).toContainText("完整任务");
+    await expect(
+      page.getByRole("region", { name: "原始任务内容" }).locator("script"),
+    ).toHaveCount(0);
+    await expect(
+      page.locator(".links").getByRole("link", { name: /Issue/ }),
+    ).toHaveCount(0);
+    await expect(page.getByRole("list", { name: "数据来源明细" })).toHaveCount(
+      0,
+    );
+    await expect.poll(() => boardReads).toBeGreaterThan(readsBefore);
+    await page.screenshot({
+      path: `../../../.amp/in/artifacts/task-text-detail-pending-${width}.png`,
+      animations: "disabled",
+    });
+    // A failed or still-pending inference leaves the same fallback; no client title is inferred.
+    const [pendingTitle] = await Promise.all([
+      page.waitForResponse(
+        (response) => new URL(response.url()).pathname === "/api/flows/91",
+      ),
+      page.getByRole("button", { name: "刷新当前视图" }).click(),
+    ]);
+    expect(await pendingTitle.json()).toMatchObject({ title: null });
+    await expect(
+      page.getByRole("heading", { name: "Flow #91", exact: true }),
+    ).toBeVisible();
+    created = { ...created, title, state_version: created.state_version + 1 };
+    await page.getByRole("button", { name: "刷新当前视图" }).click();
+    await expect(
+      page.getByRole("heading", { name: title, exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("region", { name: "原始任务内容" }),
+    ).toContainText("完整任务");
+    expect(
+      await page
+        .locator(".detail-body")
+        .evaluate((node) => node.scrollWidth <= node.clientWidth),
+    ).toBe(true);
+    await page.screenshot({
+      path: `../../../.amp/in/artifacts/task-text-detail-generated-${width}.png`,
+      animations: "disabled",
+    });
+    await trigger.click();
+    await expect(dialog.getByLabel("任务内容", { exact: true })).toHaveValue(
+      "",
+    );
+    await expect(project).toHaveValue("");
+    expect(posts).toBe(1);
+  });
+
+  test(`creation target pagination keeps drafts through empty pages, read failures and reload at ${width}px`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 900 });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const cursors: (string | null)[] = [];
+    let fail = true;
+    let exhausted = false;
+    let failReload = false;
+    await page.route("**/api/flow-targets**", async (route) => {
+      const cursor = new URL(route.request().url()).searchParams.get("cursor");
+      cursors.push(cursor);
+      if (cursors.length === 1) await gate;
+      if (cursor === "next" && fail) {
+        fail = false;
+        return route.fulfill({ status: 503, json: { detail: "读取暂不可用" } });
+      }
+      if (!cursor && failReload) {
+        failReload = false;
+        return route.fulfill({ status: 503, json: { detail: "重新读取失败" } });
+      }
+      return route.fulfill({
+        json: {
+          items:
+            exhausted || !cursor || cursor === "empty-middle"
+              ? []
+              : [
+                  {
+                    repo:
+                      cursor === "next" ? "fresh/repo" : "other/installation",
+                    installation_id: cursor === "next" ? 7 : 8,
+                  },
+                ],
+          next_cursor: exhausted
+            ? null
+            : !cursor
+              ? "next"
+              : cursor === "next"
+                ? "empty-middle"
+                : cursor === "empty-middle"
+                  ? "last"
+                  : null,
+          has_more: !exhausted && cursor !== "last",
+        },
+      });
+    });
+    await page.goto("/console/");
+    await page.getByRole("button", { name: "新建 Flow", exact: true }).click();
+    const dialog = page.getByRole("dialog");
+    await dialog.getByLabel("任务内容", { exact: true }).fill("保留草稿");
+    await expect(dialog).toContainText("正在读取项目");
+    await expect(
+      dialog.getByRole("button", { name: "读取更多项目" }),
+    ).toBeDisabled();
+    await page.screenshot({
+      path: `../../../.amp/in/artifacts/flow-create-loading-${width}.png`,
+      animations: "disabled",
+    });
+    release();
+    await expect(dialog).toContainText("尚未读取到可用项目");
+    await expect(dialog).not.toContainText("暂无可用项目");
+    await dialog.getByRole("button", { name: "读取更多项目" }).click();
+    await expect(dialog.getByRole("alert")).toContainText("读取暂不可用");
+    await page.screenshot({
+      path: `../../../.amp/in/artifacts/flow-create-read-error-${width}.png`,
+      animations: "disabled",
+    });
+    await dialog.getByRole("button", { name: "重试读取项目" }).click();
+    await dialog
+      .getByLabel("Project（代码仓库）")
+      .selectOption({ label: "fresh/repo" });
+    await expect(dialog).toContainText("已读取 1 个项目，仍有更多项目");
+    await page.screenshot({
+      path: `../../../.amp/in/artifacts/flow-create-partial-${width}.png`,
+      animations: "disabled",
+    });
+    await dialog.getByRole("button", { name: "读取更多项目" }).click();
+    expect(cursors).toEqual([null, "next", "next", "empty-middle"]);
+    await expect(dialog).toContainText("已读取 1 个项目，仍有更多项目");
+    // Reload can fail while a continuation cursor is still active; retry must restart at null.
+    failReload = true;
+    await dialog.getByRole("button", { name: "重新读取项目" }).click();
+    await expect(dialog.getByRole("alert")).toContainText("重新读取失败");
+    await dialog.getByRole("button", { name: "重试读取项目" }).click();
+    await expect(dialog).toContainText("尚未读取到可用项目");
+    expect(cursors.slice(-2)).toEqual([null, null]);
+    for (let index = 0; index < 3; index++) {
+      await dialog.getByRole("button", { name: "读取更多项目" }).click();
+      await expect(
+        dialog.getByRole("button", { name: "重新读取项目" }),
+      ).toBeEnabled();
+    }
+    await expect(
+      dialog.getByLabel("Project（代码仓库）").locator("option"),
+    ).toContainText(["请选择 owner/name", "fresh/repo", "other/installation"]);
+    exhausted = true;
+    await dialog.getByRole("button", { name: "重新读取项目" }).click();
+    await expect(dialog).toContainText("暂无可用项目");
+    await expect(dialog.getByLabel("任务内容", { exact: true })).toHaveValue(
+      "保留草稿",
+    );
+    await expect(
+      dialog.getByLabel("Project（代码仓库）").locator("option:checked"),
+    ).toHaveText("fresh/repo");
+    await page.screenshot({
+      path: `../../../.amp/in/artifacts/flow-create-empty-${width}.png`,
+      animations: "disabled",
+    });
+  });
+}
+
+for (const outcome of [
+  "refused",
+  "network",
+  "server",
+  "response-lost",
+] as const) {
+  test(`creation ${outcome} retains draft and never blindly resends an unknown write`, async ({
+    page,
+  }) => {
+    let posts = 0;
+    await page.route("**/api/flow-targets**", (route) =>
+      route.fulfill({
+        json: {
+          items: [{ repo: "fresh/repo", installation_id: 7 }],
+          next_cursor: null,
+          has_more: false,
+        },
+      }),
+    );
+    await page.route(/\/api\/flows$/, (route) => {
+      posts++;
+      return outcome === "network"
+        ? route.abort("failed")
+        : route.fulfill({
+            status:
+              outcome === "refused"
+                ? 403
+                : outcome === "response-lost"
+                  ? 201
+                  : 503,
+            json:
+              outcome === "response-lost"
+                ? {}
+                : { detail: "target_unavailable" },
+          });
+    });
+    await page.goto("/console/?q=repo:old/only");
+    const trigger = page.getByRole("button", {
+      name: "新建 Flow",
+      exact: true,
+    });
+    await trigger.click();
+    const dialog = page.getByRole("dialog");
+    await dialog
+      .getByLabel("Project（代码仓库）")
+      .selectOption({ label: "fresh/repo" });
+    const content = dialog.getByLabel("任务内容", { exact: true });
+    await content.fill(" \n\t");
+    await expect(
+      dialog.getByRole("button", { name: "开启 Flow", exact: true }),
+    ).toBeDisabled();
+    await content.fill("😀".repeat(8192) + "a");
+    await expect(dialog.getByRole("alert")).toContainText("32768");
+    await expect(
+      dialog.getByRole("button", { name: "开启 Flow", exact: true }),
+    ).toBeDisabled();
+    await content.fill("保留这份任务草稿");
+    await dialog
+      .getByRole("button", { name: "开启 Flow", exact: true })
+      .click();
+    await expect(dialog.getByRole("alert")).toContainText(
+      outcome === "refused" ? "未受理" : "无法确认",
+    );
+    await expect(content).toHaveValue("保留这份任务草稿");
+    expect(posts).toBe(1);
+    const screenshotState =
+      outcome === "refused" ? "refused" : `unknown-${outcome}`;
+    for (const width of [1440, 390]) {
+      await page.setViewportSize({ width, height: 900 });
+      await page.screenshot({
+        path: `../../../.amp/in/artifacts/flow-create-${screenshotState}-${width}.png`,
+        animations: "disabled",
+      });
+      expect(
+        await dialog.evaluate((node) => node.scrollWidth <= node.clientWidth),
+      ).toBe(true);
+    }
+    if (outcome === "refused") {
+      await expect(
+        dialog.getByRole("button", { name: "开启 Flow", exact: true }),
+      ).toBeEnabled();
+      await page.keyboard.press("Escape");
+    } else {
+      await expect(
+        dialog.getByRole("button", { name: "开启 Flow", exact: true }),
+      ).toBeDisabled();
+      await dialog
+        .getByRole("button", { name: "关闭并清空筛选、刷新看板核对" })
+        .click();
+      await expect(page).toHaveURL(/#board$/);
+      expect(new URL(page.url()).searchParams.has("q")).toBe(false);
+      await trigger.click();
+      await expect(content).toHaveValue("保留这份任务草稿");
+      await expect(
+        dialog.getByRole("button", { name: "开启 Flow", exact: true }),
+      ).toBeDisabled();
+      expect(posts).toBe(1);
+    }
+  });
+}
+
+test("direct Flow cards use Flow IDs for null titles and preserve PR and Issue identities", async ({
+  page,
+}) => {
+  let direct: FlowDetail = {
+    ...blockedFlow,
+    id: 93,
+    title: null,
+    issue_number: null,
+    issue_url: null,
+    pr_number: null,
+    pr_url: null,
+    task_content: "原始任务正文",
+  };
+  const withPr: FlowDetail = {
+    ...direct,
+    id: 94,
+    title: null,
+    pr_number: 97,
+    pr_url: "https://example.test/pulls/97",
+  };
+  const withIssue = { ...blockedFlow, title: null };
+  await mockFlows(page, () => [direct, withPr, withIssue]);
+  for (const width of [1440, 390]) {
+    direct = { ...direct, title: null };
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto("/console/");
+    if (width === 390)
+      await page
+        .locator(".mobile-stages")
+        .getByRole("button", { name: /受阻/ })
+        .click();
+    await expect(page.locator('[data-flow="93"]')).toContainText("Flow #93");
+    await expect(page.locator('[data-flow="94"]')).toContainText("PR #97");
+    await expect(page.locator('[data-flow="42"]')).toContainText("PR #87");
+    await expect(page.locator('[data-flow="93"] h2')).toHaveText("Flow #93");
+    await expect(page.locator('[data-flow="94"] h2')).toHaveText("Flow #94");
+    await expect(page.locator('[data-flow="42"] h2')).toHaveText("Flow #42");
+    await expect(page.locator(".board-page")).not.toContainText("Issue #null");
+    await page.screenshot({
+      path: `../../../.amp/in/artifacts/task-text-fallback-cards-${width}.png`,
+      animations: "disabled",
+    });
+    // Inference can fill the title without a phase change; refreshing must update cached cards too.
+    const generatedTitle = "服务器生成的任务标题";
+    direct = {
+      ...direct,
+      title: generatedTitle,
+      state_version: direct.state_version + 1,
+    };
+    await page.getByRole("button", { name: "刷新当前视图" }).click();
+    await expect(page.locator('[data-flow="93"] h2')).toHaveText(
+      generatedTitle,
+    );
+    await page.locator('[data-flow="93"]').click();
+    await expect(
+      page.getByRole("heading", { name: generatedTitle, exact: true }),
+    ).toBeVisible();
+    await page.goto("/console/#flow/94/overview");
+    await expect(
+      page.getByRole("heading", { name: "Flow #94", exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.locator(".links").getByRole("link", { name: /PR #97/ }),
+    ).toBeVisible();
+    await expect(
+      page.locator(".links").getByRole("link", { name: /Issue/ }),
+    ).toHaveCount(0);
+    await page.screenshot({
+      path: `../../../.amp/in/artifacts/task-text-fallback-pr-${width}.png`,
+      animations: "disabled",
+    });
+    await page.goto("/console/#flow/42/overview");
+    await expect(
+      page.getByRole("heading", { name: "Flow #42", exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("region", { name: "原始任务内容" }),
+    ).toHaveCount(0);
+    await expect(
+      page.locator(".links").getByRole("link", { name: /Issue #85/ }),
+    ).toBeVisible();
+    await page.screenshot({
+      path: `../../../.amp/in/artifacts/task-text-fallback-issue-${width}.png`,
+      animations: "disabled",
+    });
+  }
 });

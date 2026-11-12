@@ -32,10 +32,15 @@ from app.domain.inference_models import (
     InferenceOutput,
     InferenceTask,
 )
-from app.domain.models import FeedbackRef, RevisionCodingOutput, VcsKind, WorkspaceInventory
+from app.domain.models import (
+    FeedbackRef,
+    RevisionCodingOutput,
+    VcsKind,
+    WorkspaceInventory,
+)
 from app.domain.review_models import ReviewFeedback
 
-PROTOCOL_VERSION: Literal[20] = 20
+PROTOCOL_VERSION: Literal[21] = 21
 MAX_PAYLOAD_ITEMS = 32
 MessageId = Annotated[str, Field(strict=True, pattern=r"^[0-9a-f]{32}$")]
 ConnectionEpoch = Annotated[str, Field(strict=True, min_length=1, max_length=64)]
@@ -53,9 +58,8 @@ class InitialTask(ProtocolModel):
     flow_id: int = Field(gt=0)
     attempt_id: int
     repo: str
-    issue_number: int
-    issue_title: str
-    issue_body: str
+    issue_number: int | None
+    task_content: str
     branch: str
     base_branch: str = "main"
     remote: str = "origin"
@@ -93,8 +97,7 @@ class RevisionTask(ProtocolModel):
     session_id: str | None
     session_generation: int = Field(ge=0)
     instruction: str
-    issue_title: str
-    issue_body: str
+    task_content: str
     previous_summary: str
     open_points: list[str]
     context: ReviewContext | None = None
@@ -584,7 +587,7 @@ class Message[Payload: ToolCall | ToolResult](ProtocolModel):
     performs static checks only; receipt ACKs confer no business completion or authority.
     """
 
-    protocol_version: Literal[20]
+    protocol_version: Literal[21]
     message_id: MessageId
     connection_epoch: ConnectionEpoch | None
     ack: StrictBool
@@ -795,7 +798,7 @@ def accept_stop_id(receipt_id: MessageId) -> MessageId:
 
 
 class MessageHeader(TypedDict):
-    protocol_version: Literal[20]
+    protocol_version: Literal[21]
     message_id: MessageId
     connection_epoch: str | None
     ack: bool

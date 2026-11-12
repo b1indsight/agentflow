@@ -83,6 +83,7 @@ class Repository(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     full_name: str
     default_branch: Annotated[str, unobserved_field()]
+    archived: Annotated[bool, unobserved_field()]
     _installation: Installation | None = PrivateAttr(default=None)
 
     def __init__(
@@ -129,6 +130,7 @@ class Repository(BaseModel):
                 raise ValueError("repository response does not match its bound identity")
             return Repository(
                 self.installation, data.full_name, default_branch=data.default_branch,
+                archived=data.archived,
             )
 
     async def fetch_issue(self, number: int) -> Issue:

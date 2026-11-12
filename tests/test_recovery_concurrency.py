@@ -24,7 +24,7 @@ async def pending_results(store, count):
     jobs = []
     for _ in range(count):
         issue = len(store.flows.list_flows()) + 1
-        flow = required(ControlService(database=store.database).on_trigger("owner/repo", issue, 42))
+        flow = required(ControlService(database=store.database).create_flow("owner/repo", issue, 42))
         worker = f"worker-{flow.id}"
         register_worker(store, worker, repo=flow.repo, epoch="epoch")
         job = required(store.workers.assign_job(worker, f"token-{flow.id}", "epoch"))

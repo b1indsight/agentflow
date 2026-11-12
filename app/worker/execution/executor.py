@@ -126,8 +126,7 @@ class WorkerExecutor:
         except OSError:
             return _vcs_failure(None, "", "bootstrap", "repository filesystem preparation failed")
         prompt = build_initial_prompt(
-            task.issue_title,
-            task.issue_body,
+            task.task_content,
             self._repo_conventions(workspace),
             agent_guidance(task.branch, remote=task.remote),
         )

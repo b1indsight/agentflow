@@ -63,7 +63,9 @@ Judge 配置只提供给 control，在 serve 的 `.env` 配置 `FLOWTOOL_JUDGE_M
 进程内创建，跨连接重试保留，请求使用独立临时子目录；退出清除，不创建编码 workspace 或 journal。
 断线重试可能与旧计算重叠并重复计费，不保证模型调用恰好一次。
 
-serve 和 worker 需协调升级到 wire20，journal5 / inbox1 不变，无旧 wire fallback。
+serve 和 worker 需协调升级到 wire21，journal5 与执行结果 inbox1 不变；Control 本地归档通知保留 inbox2，无旧 wire fallback。
+任务输入使用纯文本；展示标题复用该推理队列，首轮准备后有界尝试一次逻辑调用（总预算 30 秒），不阻塞编码。
+生成前或失败时依次显示 Issue 缓存标题、PR 标题、Flow 编号；不会因 Issue 编辑自动开启会话或重新推理标题。
 workers 现为 `(worker_id, workspace)` 复合主键；旧 schema 须显式迁移，不能直接启动新版本。
 耗尽通知只写应用内执行记录；READY 后续扫描可创建新一轮 Job，WAITING 仍需新的有效反馈等原有触发。
 页面进入执行记录或显式刷新时读取通知，不轮询、不增加推理重试按钮。
@@ -245,7 +247,9 @@ INITIAL 使用当前 endpoint 和 token 引用；无当前 broker 的 REVISION/f
 取消期间确认合并时，数据库将原 Flow 的独占预留交接到同位置的新 generation；ARCHIVE 核对
 原 journal 和清理凭据后使用该目录。不能改用其他目录，也不能让新 Flow 抢占此交接。
 
-当前协议为 v20，使用 journal v5 / ResultInbox v1 / workspace manifest v2。
+当前协议为 v21，使用 journal v5 / 执行结果 ResultInbox v1 / workspace manifest v2；Control 本地归档通知使用 ResultInbox v2。
+本版允许从持久任务内容创建无 Issue Flow；六态库启动幂等增加输入列及二选一约束。
+出现 NULL Issue 记录后旧程序不可直接读取，即使已归档也不能直接降级；须前向修复或按备份整体恢复。
 升级前停写并备份数据库和 worker root，核对真实 workspace 身份；旧 workers 单列主键会被启动
 检查拒绝，不猜造位置、不自动迁移。Flow 四态迁移工具只处理 Flow 状态，不能替代 workspace 迁移。
 涉及协议或 journal 格式变更时，由操作者协调

@@ -5,6 +5,8 @@
 
 ## 当前计划
 
+- [`flow-task-input.md`](flow-task-input.md) — 本地实现与验证完成：Issue 可选；顶栏“新建 Flow”选择代码仓库并输入内容，原文用于首轮/修订/审核；API/CLI、PR 闭环、旧 context 摘要与安全恢复保留。隔离 PostgreSQL、真实跨进程调度、浏览器桌面/手机、静态检查、打包及简化对照通过；wire21 须成组升级，未提交、未推送、未部署。
+
 - [`worker-workspace-concurrency.md`](worker-workspace-concurrency.md) — 已在本地实现，全量 PostgreSQL 回归、静态检查与构建通过。
   workers 使用 worker/workspace 复合主键；worker 管理目录并按需求登记库存，调度直接选择位置，
   runtime 持有执行集合，默认无仓库 workspace 供推理。限额 2/3/17 的真实 Session 并发及五项简化对照通过；

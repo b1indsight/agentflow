@@ -10,6 +10,7 @@ import pytest
 from githubkit import GitHub
 from githubkit.exception import RequestFailed
 from githubkit.response import Response
+from githubkit_schemas.latest.models import Issue as SDKIssue
 from pydantic import BaseModel, SecretStr, ValidationError
 
 from app.controler.config import ServerSettings
@@ -225,14 +226,15 @@ def test_both_github_auth_clients_use_finite_timeouts(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("issue_fields", [{}, {"pull_request": None}])
 async def test_fetches_issue_repository_and_remote_ref(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, issue_fields
 ) -> None:
     issue = AsyncEndpoint(
-        response(SimpleNamespace(number=7, title="Ship it", body=None, state="open"))
+        response(SDKIssue.model_construct(number=7, title="Ship it", body=None, state="open", **issue_fields))
     )
     repository = AsyncEndpoint(
-        response(SimpleNamespace(full_name="octo/repo", default_branch="trunk"))
+        response(SimpleNamespace(full_name="octo/repo", default_branch="trunk", archived=False))
     )
     get_ref = AsyncEndpoint(
         response(SimpleNamespace(ref="refs/heads/topic", object_=SimpleNamespace(sha="abc123")))
@@ -260,6 +262,7 @@ async def test_fetches_issue_repository_and_remote_ref(
     assert observed_repository.model_dump() == {
         "full_name": "octo/repo",
         "default_branch": "trunk",
+        "archived": False,
     }
     assert remote_ref.model_dump() == {"branch": "topic", "sha": "abc123"}
     assert issue.calls == [(("octo", "repo", 7), {})]
@@ -270,7 +273,7 @@ async def test_fetches_issue_repository_and_remote_ref(
 @pytest.mark.parametrize("full_name", ["other/repo", "OCTO/REPO"])
 async def test_repository_refetch_keeps_identity_and_observed_casing(tmp_path, monkeypatch, full_name):
     # A redirected response must not retarget a resource; casing remains an observed fact.
-    endpoint = AsyncEndpoint(response(SimpleNamespace(full_name=full_name, default_branch="trunk")))
+    endpoint = AsyncEndpoint(response(SimpleNamespace(full_name=full_name, default_branch="trunk", archived=False)))
     sdk = SimpleNamespace(rest=SimpleNamespace(repos=SimpleNamespace(async_get=endpoint)))
     install_client(monkeypatch, lambda _, **kwargs: sdk)
     installation = GitHubApp(settings(tmp_path)).installation(42)

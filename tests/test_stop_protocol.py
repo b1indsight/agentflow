@@ -78,8 +78,7 @@ def assignment():
             attempt_id=1,
             repo="owner/repo",
             issue_number=1,
-            issue_title="test",
-            issue_body="",
+            task_content="test",
             branch="flow/1",
         ),
     )

@@ -24,7 +24,7 @@ from app.contracts.validation import parse_worker_input
 from app.controler.workers.callbacks import ServerCallbacks
 from app.controler.workers.transport import control_ack
 from app.controler.workflow.service import ControlService
-from app.domain.models import ArchiveReason, FlowState, JobState
+from app.domain.models import ArchiveReason, JobState
 from app.persistence.records import required
 from app.worker.config import WorkerSettings
 from app.worker.execution.lifecycle import WorkerExecution
@@ -83,7 +83,7 @@ async def test_demand_concurrent_dispatch_stop_and_result_isolate_workspaces(
     root, _ = managed_seed(tmp_path)
     shutil.copytree(root / "repos/owner/repo", root / "repos/owner/other")
     control = ControlService(database=store.database)
-    flows = [required(control.on_trigger(repo, issue, 42)) for repo in ("owner/repo", "owner/other")
+    flows = [required(control.create_flow(repo, issue, 42)) for repo in ("owner/repo", "owner/other")
              for issue in range(1, limit + 2)]
     jobs = [job for flow in flows for job in store.jobs.list_jobs(flow.id)]
     worker = ControlledWorker(root, limit)
@@ -144,11 +144,12 @@ async def test_demand_concurrent_dispatch_stop_and_result_isolate_workspaces(
 
         # Stopping one Flow must not stop its siblings; writer exit permits higher-generation reuse.
         stopped_job = required(store.jobs.get_job(stopped))
-        with store.transaction() as tx:
-            flow = required(tx.lock_workflow(stopped_job.required_flow_id))
-            flow.state, flow.archive_reason = FlowState.FINALIZING, ArchiveReason.ABANDONED
-            tx.flows.update_flow(flow)
-            tx.stops.request(flow.id)
+        flow = required(store.flows.get_flow(stopped_job.required_flow_id))
+        # The public finish operation also retires queued inference when no inference worker exists.
+        control.finish(flow, reason=ArchiveReason.ABANDONED, summary="",
+                       expected_round_no=flow.current_round_no)
+        title_job = required(store.jobs.get_job(required(store.flows.get_flow(flow.id)).title_job_id))
+        assert title_job.state is JobState.FAILED
         peers.wake_all()
         await wait_until(lambda: bool(set(worker.running) - initial))
         assert set(siblings) <= set(worker.running)
@@ -177,8 +178,8 @@ async def test_provision_failure_does_not_disconnect_other_workspaces(
     root, _ = managed_seed(tmp_path)
     bad_repo = "owner/bad--flow-name" if failure == "invalid_repository" else "owner/bad"
     control = ControlService(database=store.database)
-    bad_flow = required(control.on_trigger(bad_repo, 1, 42))
-    good_flow = required(control.on_trigger("owner/repo", 2, 42))
+    bad_flow = required(control.create_flow(bad_repo, 1, 42))
+    good_flow = required(control.create_flow("owner/repo", 2, 42))
     bad_job, = store.jobs.list_jobs(bad_flow.id)
     good_job, = store.jobs.list_jobs(good_flow.id)
     if failure == "filesystem_error":

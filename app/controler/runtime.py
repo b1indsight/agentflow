@@ -60,7 +60,7 @@ class ServerRuntime:
             recovery_grace=timedelta(seconds=self.settings.worker_recovery_grace),
         )
         plugins = get_plugin_manager()
-        github = GitHubApp(self.settings)
+        self.github = github = GitHubApp(self.settings)
         effects = ResultEffects(github, database=database, plugins=plugins)
         self.results = ResultApplication(
             github,

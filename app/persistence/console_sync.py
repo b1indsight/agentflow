@@ -25,7 +25,7 @@ class SyncClaim(BaseModel):
     claim_token: str
     failures: int
     repo: str
-    issue_number: int
+    issue_number: int | None
     pr_number: int | None
     installation_id: int | None
     created_at: datetime

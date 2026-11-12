@@ -94,7 +94,7 @@ async def test_modern_merge_stops_original_worker_before_reusing_only_its_genera
             workspace=other.slot_id, generation=other.generation,
             task=InitialTask(
                 flow_id=other.flow_id, attempt_id=1, repo=flow.repo, issue_number=9000,
-                issue_title="Sibling", issue_body="", branch="flow/sibling",
+                task_content="Sibling", branch="flow/sibling",
             ),
         ))
         sibling.record_started()

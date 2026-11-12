@@ -4,8 +4,8 @@ export type ArchiveReason = "succeeded" | "abandoned";
 export interface FlowSummary {
   id: number;
   repo: string;
-  issue_number: number;
-  issue_url: string;
+  issue_number: number | null;
+  issue_url: string | null;
   title: string | null;
   pr_number: number | null;
   pr_url: string | null;
@@ -35,6 +35,16 @@ export interface FlowDetail extends FlowSummary {
   reason: string;
   next_condition: string;
   sources: SourceStatus[];
+  task_content: string | null;
+}
+export interface FlowTarget {
+  repo: string;
+  installation_id: number;
+}
+export interface FlowTargetPage {
+  items: FlowTarget[];
+  next_cursor: string | null;
+  has_more: boolean;
 }
 export interface FlowPage {
   items: FlowSummary[];

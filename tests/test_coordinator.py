@@ -7,21 +7,26 @@ from pydantic import SecretStr
 from app.contracts.protocol import (
     ExecutionResult,
     Failed,
+    InferenceResult,
     InitialTask,
     InitialTaskResult,
     Succeeded,
+    result_header,
     terminal_digest,
 )
 from app.controler.config import ServerSettings
 from app.controler.workflow.coordinator import JobCoordinator
 from app.controler.workflow.effects import ResultEffects
 from app.controler.workflow.results import ResultApplication
+from app.controler.workflow.service import ControlService
 from app.controler.workflow.tools import FlowToolService
+from app.domain.inference_models import InferenceCapability, InferenceFailure, InferenceOutput
 from app.domain.models import DeliveryState, FlowState, Job, JobKind, JobState
 from app.github import GitHubApp
 from app.persistence.store import Store
 from app.plugins import get_plugin_manager
 from tests.github import RecordingGitHub
+from tests.workspace_fixtures import register_worker
 
 pytestmark = pytest.mark.usefixtures("recording_resources")
 
@@ -69,13 +74,18 @@ def coordinator(store: Store, github: GitHubApp) -> CoordinatorFixture:
     return subject
 
 
+@pytest.mark.parametrize("prepared_initial", [None, "\n直接任务 α\r\n完整需求 β\n"], indirect=True)
 async def test_initial_job_crosses_worker_boundary_and_opens_pr(store, prepared_initial):
     flow, subject, github, request, result = prepared_initial
     job = store.jobs.get_job(request.arguments.job_id)
     task = await subject.prepare(job)
     assert isinstance(task, InitialTask)
     assert task.flow_id == flow.id
-    assert task.issue_title == "Real issue" and task.issue_body == "Real body"
+    assert task.task_content == (flow.task_content or "Real issue\n\nReal body")
+    title_job = store.jobs.get_job(store.flows.get_flow(flow.id).title_job_id)
+    assert title_job.inference.task.messages[-1].content == task.task_content
+    if flow.issue_number is None:
+        assert not any(call["operation"] == "fetch_issue" for call in github.resource_calls)
     assert task.base_branch == "trunk" and task.branch == flow.initial_branch
     # A tool receipt reserves delivery intent; only an accepted terminal may open a PR.
     assert github.opened == []
@@ -85,11 +95,109 @@ async def test_initial_job_crosses_worker_boundary_and_opens_pr(store, prepared_
     assert store.flows.get_current_attempt(store.flows.get_flow(flow.id)).codex_session_id == result.session_id
     delivery = store.deliveries.get_delivery(flow.id)
     assert delivery.state is DeliveryState.OPEN and delivery.pr_number == 17
+    if flow.issue_number is None:
+        assert delivery.body == "Body"
     assert github.opened == [task.branch]
     assert github.review_requests == [["carol"]]
     assert github.labels == [["flow:in-review"]]
-    assert [j.kind for j in store.jobs.list_jobs(flow.id)] == [JobKind.INITIAL]
+    assert [j.kind for j in store.jobs.list_jobs(flow.id) if j.kind is not JobKind.INFERENCE] == [JobKind.INITIAL]
     assert store.workers.get_flow_execution(flow.id).released_at is None
+
+
+async def test_issue_edits_change_prepared_text_without_resubmitting_title(store, prepared_initial, monkeypatch):
+    # Edits are observed on preparation, not a new session trigger or persisted direct input.
+    from app.github import Issue, Repository
+
+    flow, subject, _, request, _ = prepared_initial
+    coding = store.jobs.get_job(request.arguments.job_id)
+    title_job = store.jobs.get_job(flow.title_job_id)
+    for body in ("\n更新正文 β\r\n", ""):
+        async def fetch_issue(repo, number, body=body):
+            return Issue(repo, number, title="改名 α", body=body, state="open")
+
+        monkeypatch.setattr(Repository, "fetch_issue", fetch_issue)
+        task = await subject.prepare(coding)
+        assert task.task_content == ("改名 α\n\n\n更新正文 β\r\n" if body else "改名 α")
+        assert store.flows.get_flow(flow.id).task_content is None
+        assert store.flows.get_flow(flow.id).title_job_id == title_job.id
+        assert store.jobs.get_job(title_job.id).inference.task == title_job.inference.task
+    assert [job.id for job in store.jobs.list_jobs(flow.id)] == [coding.id, title_job.id]
+
+
+@pytest.mark.parametrize("reply,cancelled,expected", [
+    ("  修复分页游标 😀\n", False, "修复分页游标 😀"),
+    ("第一行\n第二行", False, None),
+    ("x" * 257, False, None),
+    (InferenceFailure(code="configuration"), False, None),
+    ("不应使用的标题", True, None),
+])
+async def test_title_is_inferred_once_and_replayed_atomically(store, prepared_initial, monkeypatch, reply, cancelled, expected):
+    # Restart between receipt and application must retain the title without changing coding state.
+    flow, subject, github, request, _ = prepared_initial
+    coding = store.jobs.get_job(request.arguments.job_id)
+    title_job = store.jobs.get_job(flow.title_job_id)
+    assert title_job is not None and title_job.inference.source_attempt_id == flow.current_attempt_id
+    assert title_job.inference.task.messages[-1].content == "Real issue\n\nReal body"
+    task = await subject.prepare(coding)
+    assert isinstance(task, InitialTask)
+    assert store.flows.get_flow(flow.id).title_job_id == title_job.id
+    assert len([j for j in store.jobs.list_jobs(flow.id) if j.kind is JobKind.INFERENCE]) == 1
+    register_worker(store, "plain", epoch="epoch")
+    store.workers.worker_ready("plain", "epoch", InferenceCapability(adapter_version="codex/v1"))
+    assigned = store.workers.assign_job("plain", "title-token", "epoch", slot="infer")
+    assert assigned is not None and assigned.id == title_job.id
+    call = assigned.inference.current_task
+    response = InferenceResult(
+        **result_header(call.request_id), method="worker.infer", job_id=assigned.id,
+        assignment_token=assigned.assignment_token,
+        output=InferenceOutput(request_id=call.request_id, request_digest=call.digest,
+            text=reply, adapter_version="codex/v1") if isinstance(reply, str) else None,
+        failure=reply if isinstance(reply, InferenceFailure) else None,
+    )
+    assert store.workers.record_assignment_result(assigned.id, "plain", "title-token", "epoch", response) == "pending"
+    if cancelled:
+        flow.current_attempt_id = store.flows.create_attempt(flow.id).id
+        store.flows.update_flow(flow)
+    recovered = coordinator(store, github)
+    if expected is not None:
+        # Fail the title write after settlement: both facts must roll back together.
+        from psycopg import Connection
+        execute = Connection.execute
+
+        def interrupt(connection, query, *args, **kwargs):
+            if isinstance(query, str) and query.startswith("UPDATE flows SET title="):
+                raise RuntimeError("title write interrupted")
+            return execute(connection, query, *args, **kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(Connection, "execute", interrupt)
+            with pytest.raises(RuntimeError, match="title write interrupted"):
+                await recovered.results.apply(assigned.id)
+        assert store.jobs.get_job(assigned.id).result_applied_at is None
+    await recovered.results.apply(assigned.id)
+    await coordinator(store, github).results.apply(assigned.id)
+    assert store.flows.get_flow(flow.id).title == expected
+    store.flows.update_flow(flow)
+    assert store.flows.get_flow(flow.id).title == expected
+    assert store.jobs.get_job(coding.id).state is JobState.RUNNING
+    assert store.jobs.get_job(assigned.id).result_applied_at is not None
+
+
+async def test_title_enqueue_failure_does_not_block_coding(store, monkeypatch):
+    # Display metadata must not roll back a prepared coding assignment.
+    from app.persistence.jobs import JobStore
+
+    def unavailable(*args, **kwargs):
+        raise ValueError("title inference unavailable")
+
+    monkeypatch.setattr(JobStore, "enqueue_inference", unavailable)
+    flow = ControlService(database=store.database).create_flow("owner/repo", None, 42, task_content="\n原文 α\r\n")
+    register_worker(store, "worker-a", repo=flow.repo, epoch="epoch")
+    job = store.workers.assign_job("worker-a", "token", "epoch")
+    task = await coordinator(store, RecordingGitHub()).prepare(job)
+    assert isinstance(task, InitialTask) and task.task_content == "\n原文 α\r\n"
+    assert store.deliveries.get_delivery(flow.id).base_branch == "trunk"
+    assert store.flows.get_flow(flow.id).title_job_id is None
 
 
 async def test_initial_failure_after_open_pr_request_has_no_github_pr_side_effect(store, prepared_initial):

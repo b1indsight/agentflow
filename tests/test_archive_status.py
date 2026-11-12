@@ -13,9 +13,9 @@ from psycopg.types.json import Jsonb
 from app.contracts.protocol import ExecutionStopped
 from app.contracts.receipts import MergeArchiveNotice, ResultInbox, merge_notice_digest
 from app.contracts.result_models import CommentEffect, EffectState, LabelEffect, ResultPending
-from app.controler.workflow.archive import archive_progress
+from app.controler.workflow.archive import archive_effects, archive_progress
 from app.controler.workflow.service import ControlService
-from app.domain.models import FlowState, JobState
+from app.domain.models import Flow, FlowDelivery, FlowState, JobState
 from app.github import GitHubApp, GitHubError, GitHubErrorKind, Issue, PullRequest
 from app.persistence.results import ResultStore
 from app.persistence.store import Store
@@ -33,6 +33,24 @@ from tests.test_merge import (
 )
 from tests.test_merge import merge_payload, route_merge
 from tests.test_workflow_transactions import accepted_coding
+
+
+def test_direct_archive_notifies_only_real_pr_with_no_fake_issue_identity():
+    # The same completion receipt must remain useful without an Issue target or fake Issue line.
+    flow = Flow(id=1, repo="owner/repo", issue_number=None,
+                task_content="Direct", installation_id=42,
+                state=FlowState.FINALIZING)
+    delivery = FlowDelivery(flow_id=flow.id, branch="flow/1", pr_number=17,
+                            merge_commit_sha="a" * 40, merged_at=datetime(2026, 9, 8, tzinfo=UTC))
+    effects = archive_effects(flow, delivery, done_label="flow:done", in_review_label="flow:in-review")
+    assert [effect.number for effect in effects] == [17, 17, 17]
+    assert [effect.key for effect in effects] == [
+        "archive:17:17:done", "archive:17:17:in-review", "archive:17:17:comment",
+    ]
+    comment = next(effect for effect in effects if isinstance(effect, CommentEffect))
+    assert "关联 Issue" not in comment.body and "None" not in comment.body
+    assert "关联 PR：owner/repo#17" in comment.body and "a" * 40 in comment.body
+    assert "本轮已归档" in comment.body and "工作区处置已确认" not in comment.body
 
 
 class ArchiveGitHub(RecordingGitHub):
@@ -207,7 +225,7 @@ async def test_old_merge_notice_cannot_change_new_issue_owner_labels(
 ):
     await route_merge(store, merge_flow)
     job = store.jobs.list_jobs(merge_flow.id)[-1]
-    newer = ControlService(database=store.database).on_trigger(merge_flow.repo, merge_flow.issue_number, 42)
+    newer = ControlService(database=store.database).create_flow(merge_flow.repo, merge_flow.issue_number, 42)
     github = ArchiveGitHub()
     github.targets[merge_flow.issue_number] = {"Flow:In-Review", "user-label"}
     assert await coordinator(store, github).results.apply(job.id) is JobState.DONE

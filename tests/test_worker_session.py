@@ -45,8 +45,7 @@ def _assignment(
             attempt_id=7,
             repo="owner/repo",
             issue_number=8,
-            issue_title="Issue",
-            issue_body="Body",
+            task_content="Issue\n\nBody",
             branch="flow/issue-8",
         ),
         secret=AssignmentSecret(

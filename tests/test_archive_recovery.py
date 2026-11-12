@@ -38,7 +38,7 @@ async def test_archive_release_rolls_back_and_replays_atomically(store, monkeypa
     assert store.workers.get_flow_execution(flow.id).released_at is None
     current = next(w for w in store.workers.list_workspaces("worker-a") if w.workspace == job.workspace)
     assert (current.current_job_id, current.generation) == (job.id, job.generation)
-    other = ControlService(database=store.database).on_trigger("owner/repo", 999, 42)
+    other = ControlService(database=store.database).create_flow("owner/repo", 999, 42)
     assert store.workers.assign_job("worker-a", "next", "epoch-a") is None
 
     assert store.stops.confirm("worker-a", receipt, "epoch-a")

@@ -36,7 +36,7 @@ async def build_review_context(
 
     # API failures belong to the pre-Assignment retry boundary, not a frozen partial context.
     pr = await repo.fetch_pull_request(pr_number)
-    issue = await repo.fetch_issue(flow.issue_number)
+    issue = await repo.fetch_issue(flow.issue_number) if flow.issue_number is not None else None
     files: list[ContextFile] = []
     files_truncated = False
     async for remote_file in pr.list_files():
@@ -88,12 +88,16 @@ async def build_review_context(
         limitations.append("pull_request:changed-during-read")
     if pr.number != pr_number or pr.state != "open" or pr.merged:
         limitations.append("pull_request:not-current-open-pr")
-    if issue.number != flow.issue_number:
+    if issue is not None and issue.number != flow.issue_number:
         limitations.append("issue:identity-mismatch")
     pr = pr.model_copy(update={"title": clip(pr.title, "pr-title"),
                                "body": clip(pr.body, "pr-body")})
-    issue = issue.model_copy(update={"title": clip(issue.title, "issue-title"),
-                                     "body": clip(issue.body, "issue-body")})
+    if issue is not None:
+        issue = issue.model_copy(update={"title": clip(issue.title, "issue-title"),
+                                         "body": clip(issue.body, "issue-body")})
+    task_content = flow.task_content
+    if task_content is not None:
+        task_content = clip(task_content, "task-content")
 
     bounded_files = []
     if files:
@@ -155,7 +159,7 @@ async def build_review_context(
         limitations.append("open-points:truncated")
     snapshot = ReviewContext(
         batch_id=batch.id, repo=flow.repo, issue_number=flow.issue_number, pr_number=pr_number,
-        issue=issue, pull_request=pr, files=bounded_files,
+        issue=issue, task_content=task_content, pull_request=pr, files=bounded_files,
         discussions=discussions[:MAX_DISCUSSIONS], feedback=feedback,
         open_points=[clip(point, "open-points") for point in batch.open_points[:MAX_DISCUSSIONS]],
         limitations=sorted(set(limitations)),

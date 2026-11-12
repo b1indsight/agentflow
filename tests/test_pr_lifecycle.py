@@ -458,7 +458,7 @@ async def test_initial_close_before_final_commit_keeps_identity_without_authoriz
 ):
     flow = ControlService(
         database=store.database,
-    ).on_trigger("owner/repo", 8, 42)
+    ).create_flow("owner/repo", 8, 42)
     register_worker(store, "worker", repo=flow.repo, epoch="epoch")
     job = store.workers.assign_job("worker", "token", "epoch")
     attempt = store.flows.create_attempt(flow.id)

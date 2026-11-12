@@ -57,8 +57,92 @@ def test_trigger_rolls_back_flow_and_job_on_failure(store: Store, monkeypatch) -
     with pytest.raises(RuntimeError, match="enqueue interrupted"):
         ControlService(
             database=store.database,
-        ).on_trigger("owner/repo", 700, 42)
+        ).create_flow("owner/repo", 700, 42)
     assert store.flows.get_active_flow("owner/repo", 700) is None
+
+
+def test_direct_tasks_keep_independent_inputs_through_retry_and_resume(store: Store):
+    # A shared NULL Issue must neither deduplicate unrelated tasks nor lose their input on recovery.
+    service = ControlService(database=store.database)
+    content = " \n直接任务 α\n\n保留原始正文\r\n第二行 β\t\n "
+    first = service.create_flow("owner/repo", None, 42, task_content=content)
+    second = service.create_flow(
+        "owner/repo", None, 42, task_content="另一任务\n\n不同内容",
+    )
+    assert first is not None and second is not None and first.id != second.id
+    assert first.issue_number is None and first.task_content == content
+    first.state = FlowState.BLOCKED
+    store.flows.update_flow(first)
+    assert service.retry(first)
+    fresh = store.flows.get_flow(first.id)
+    assert fresh is not None
+    service.cancel(fresh)
+    archived = store.flows.get_flow(first.id)
+    assert archived is not None and archived.state is FlowState.ARCHIVED
+    resumed = service.resume(archived, expected_round_no=1)
+    assert resumed.current_round_no == 2 and resumed.task_content == content
+    first, second = store.flows.get_flow(first.id), store.flows.get_flow(second.id)
+    assert first is not None and first.task_content == content
+    assert second is not None and second.task_content is not None
+    assert second.task_content == "另一任务\n\n不同内容"
+    with store.connection() as connection:
+        owners = connection.execute("SELECT count(*) AS n FROM issue_flow_owners").fetchone()
+        assert owners is not None and owners["n"] == 0
+    assert store.jobs.list_jobs(first.id)[-1].kind is JobKind.INITIAL
+
+
+def test_direct_task_creation_rolls_back_input_and_initial_job(store: Store, monkeypatch):
+    def fail_enqueue(*args, **kwargs):
+        raise RuntimeError("enqueue interrupted")
+
+    monkeypatch.setattr(JobStore, "enqueue_job", fail_enqueue)
+    with pytest.raises(RuntimeError, match="enqueue interrupted"):
+        ControlService(database=store.database).create_flow(
+            "owner/repo", None, 42, task_content="原子任务\n\n不能留下孤立输入",
+        )
+    assert store.flows.list_flows() == []
+
+
+@pytest.mark.parametrize("source", ["content", "issue", "pull_request"])
+def test_admin_cli_creates_only_valid_task_inputs(store, monkeypatch, source):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+
+    from typer.testing import CliRunner
+
+    from app import cli
+    from app.github import Installation, Repository
+
+    monkeypatch.setenv("FLOWTOOL_DATABASE_URL", store.database.database_url)
+    monkeypatch.setenv("FLOWTOOL_WORKER_TOKENS", '{"worker":"test-token"}')
+    monkeypatch.setattr(cli.github, "GitHubApp", lambda settings: RecordingGitHub())
+
+    async def refetch(repo):
+        return repo.model_copy(update={"default_branch": "main", "archived": False})
+
+    # Exercise the shared Issue reader, including PR responses from the Issues endpoint.
+    sdk = Mock()
+    sdk.rest.issues.async_get = AsyncMock(return_value=SimpleNamespace(parsed_data=SimpleNamespace(
+        number=7, title="Source", body="", state="open", pull_request={"url": "pr"} if source == "pull_request" else None,
+    )))
+    monkeypatch.setattr(Installation, "_client", lambda *args, **kwargs: sdk)
+    monkeypatch.setattr(Repository, "refetch", refetch)
+    runner = CliRunner()
+    content = "正文 α\n完整保留 β\n"
+    options = ["--content-file", "-"] if source == "content" else ["--issue-number", "7"]
+    result = runner.invoke(cli.app, ["flow", "create", "owner/repo", "--installation-id", "42", *options], input=content)
+    assert result.exit_code == (1 if source == "pull_request" else 0), result.output
+    if source == "pull_request":
+        assert "kind=validation" in result.output and store.flows.list_flows() == []
+        return
+    flow, = store.flows.list_flows()
+    assert flow.issue_number == (None if source == "content" else 7)
+    assert flow.task_content == (content if source == "content" else None)
+    assert runner.invoke(cli.app, ["flows"]).exit_code == 0
+    shown = runner.invoke(cli.app, ["flow", "show", str(flow.id)])
+    assert shown.exit_code == 0 and "#None" not in shown.output
+    if source == "content":
+        assert "完整保留 β" in shown.output
 
 
 def test_assignment_skips_a_flow_locked_for_cancellation(store: Store):
@@ -66,7 +150,7 @@ def test_assignment_skips_a_flow_locked_for_cancellation(store: Store):
     register_worker(store, "worker-a", repo="owner/repo", epoch="epoch-a")
     flow = ControlService(
         database=store.database,
-    ).on_trigger("owner/repo", 705, 42)
+    ).create_flow("owner/repo", 705, 42)
     assert flow is not None
     with store.transaction() as tx:
         assert tx.lock_workflow(flow.id) is not None
@@ -131,7 +215,7 @@ def test_trigger_and_operator_resume_share_issue_reservation(store: Store, postg
     # Explicit resume uses its own Store and can race a new webhook-triggered Flow.
     flow = ControlService(
         database=store.database,
-    ).on_trigger("owner/repo", 706, 42)
+    ).create_flow("owner/repo", 706, 42)
     assert flow is not None
     ControlService(
         database=store.database,
@@ -143,7 +227,7 @@ def test_trigger_and_operator_resume_share_issue_reservation(store: Store, postg
             barrier.wait(timeout=5)
             return ControlService(
                 database=store.database,
-            ).on_trigger(flow.repo, flow.issue_number, 42)
+            ).create_flow(flow.repo, flow.issue_number, 42)
 
         def resume():
             barrier.wait(timeout=5)
@@ -208,8 +292,8 @@ def accepted_coding(store: Store, *, receive: bool = True, started: bool = True)
         batch_id=batch.id, attempt_id=flow.current_attempt_id, feedback=batch.feedback,
         flow_id=flow.id, repo=flow.repo, branch=f"flow/{flow.id}", repo_identity=binding.repo_identity,
         pr_number=17, base_branch="trunk", expected_head_sha="abc123", session_id="session",
-        session_generation=0, instruction=job.payload["instruction"], issue_title="Issue",
-        issue_body="", previous_summary="", open_points=batch.open_points,
+        session_generation=0, instruction=job.payload["instruction"], task_content="Issue",
+        previous_summary="", open_points=batch.open_points,
     )
     with store.transaction() as tx:
         assert tx.lock_workflow(flow.id) is not None

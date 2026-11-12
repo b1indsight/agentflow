@@ -237,7 +237,9 @@ class FlowToolService:
                               head_sha=delivery.head_sha, delivery_version=delivery.version)
 
     @staticmethod
-    def _closing_body(body: str, issue_number: int) -> str:
+    def _closing_body(body: str, issue_number: int | None) -> str:
+        if issue_number is None:
+            return body
         marker = f"Closes #{issue_number}"
         return body if marker.casefold() in body.casefold() else f"{marker}\n\n{body}".rstrip()
 

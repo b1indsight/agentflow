@@ -34,7 +34,7 @@ def store(postgresql_url):
 @pytest.fixture
 def archived(store):
     service = ControlService(database=store.database)
-    flow = service.on_trigger("owner/repo", 7, 42)
+    flow = service.create_flow("owner/repo", 7, 42)
     delivery = store.deliveries.get_or_create_delivery(flow.id, flow.initial_branch)
     delivery.pr_number, delivery.state = MERGE.number, DeliveryState.OPEN
     store.deliveries.update_delivery(delivery)
@@ -176,7 +176,7 @@ def test_correction_activity_failure_rolls_back_merge_and_outcome(store, archive
 
 
 def test_unsettled_archive_cannot_be_written_through_general_update(store):
-    flow = ControlService(database=store.database).on_trigger("owner/repo", 8, 42)
+    flow = ControlService(database=store.database).create_flow("owner/repo", 8, 42)
     flow.state, flow.archive_reason, flow.archived_at = (
         FlowState.ARCHIVED,
         ArchiveReason.ABANDONED,
@@ -190,7 +190,7 @@ def test_unsettled_archive_cannot_be_written_through_general_update(store):
 
 def test_archive_activity_failure_rolls_back_release_and_cancellation(store, monkeypatch):
     service = ControlService(database=store.database)
-    flow = service.on_trigger("owner/repo", 8, 42)
+    flow = service.create_flow("owner/repo", 8, 42)
     register_worker(store, "worker", repo=flow.repo)
     store.workers.assign_job("worker", "undispatched")
     before = authority(store, flow.id)

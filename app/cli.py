@@ -6,13 +6,16 @@ serve：起 webhook 常驻进程；flows/show/cancel/retry：运维 flow。
 from __future__ import annotations
 
 import asyncio
+import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import TYPE_CHECKING, Annotated
 
 import typer
 import uvicorn
+from pydantic import ValidationError
 
 from app import github
 from app.domain.models import ArchiveReason, DeliveryState
@@ -135,7 +138,65 @@ def flows(active: bool = typer.Option(False, help="只看未终结的")) -> None
             delivery = store.deliveries.get_delivery(f.id)
             pr = f"PR#{delivery.pr_number}" if delivery and delivery.pr_number else "-"
             cycles = att.revision_cycles if att else 0
-            typer.echo(f"[{f.id}] {f.repo}#{f.issue_number:<5} {f.state:<10} {pr} cycles={cycles}")
+            target = f"{f.repo}#{f.issue_number}" if f.issue_number is not None else f.repo
+            typer.echo(f"[{f.id}] {target} {f.state:<10} {pr} cycles={cycles}")
+
+
+@flow_app.command("create")
+def flow_create(
+    repo: str,
+    installation_id: int = typer.Option(..., min=1),
+    issue_number: int | None = typer.Option(None, min=1),
+    content: str | None = typer.Option(None),
+    content_file: Annotated[Path | None, typer.Option(help="UTF-8 任务内容文件，- 表示 stdin")] = None,
+) -> None:
+    """从 Issue 或直接任务内容创建 Flow；不要求 webhook。"""
+    from app.contracts.console import CreateFlowRequest
+    from app.controler.config import ServerSettings
+    from app.controler.workflow.service import ControlService
+
+    try:
+        if content_file is not None:
+            if content is not None:
+                raise typer.BadParameter("provide only one of --content and --content-file")
+            if str(content_file) == "-":
+                content = sys.stdin.read(32769)
+            else:
+                with content_file.open(encoding="utf-8", newline="") as stream:
+                    content = stream.read(32769)
+        request = CreateFlowRequest(
+            repo=repo, installation_id=installation_id, issue_number=issue_number,
+            task_content=content,
+        )
+    except (OSError, UnicodeError) as error:
+        raise typer.BadParameter("cannot read UTF-8 task content") from error
+    except ValidationError as error:
+        raise typer.BadParameter(error.errors(include_input=False)[0]["msg"]) from error
+    settings = ServerSettings()  # type: ignore[call-arg]
+
+    async def target() -> github.Repository:
+        # Same read-only target checks as console/api.py; never hold a DB transaction over I/O.
+        repository = await github.GitHubApp(settings).installation(request.installation_id).repository(request.repo).refetch()
+        if repository.archived:
+            raise github.GitHubError(github.GitHubErrorKind.VALIDATION, "repository_archived")
+        if request.issue_number is not None:
+            await repository.fetch_issue(request.issue_number)
+        return repository
+
+    try:
+        repository = asyncio.run(target())
+    except github.GitHubError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(1) from None
+    with _store() as store:
+        flow = ControlService(database=store.database).create_flow(
+            repository.full_name, request.issue_number, request.installation_id,
+            task_content=request.task_content,
+        )
+        if flow is None:
+            typer.echo("an active Flow already exists for this Issue", err=True)
+            raise typer.Exit(1)
+        typer.echo(f"flow {flow.id} created (queued) for {flow.repo}")
 
 
 @app.command("worker-drain")
@@ -197,10 +258,12 @@ def flow_show(flow_id: int) -> None:
         if not f:
             raise typer.Exit(1)
         typer.echo(
-            f"flow {f.id}\n  repo={f.repo} issue=#{f.issue_number} state={f.state}"
+            f"flow {f.id}\n  repo={f.repo} issue={f'#{f.issue_number}' if f.issue_number is not None else '-'} state={f.state}"
             f" round={f.current_round_no} outcome={f.archive_reason or '-'}"
             f" archived_at={f.archived_at or '-'}"
         )
+        if f.task_content is not None:
+            typer.echo(f"  task:\n{f.task_content}")
         execution = store.workers.get_flow_execution(f.id)
         delivery = store.deliveries.get_delivery(f.id)
         if execution is not None:

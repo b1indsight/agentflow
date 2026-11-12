@@ -53,7 +53,7 @@ pytestmark = pytest.mark.usefixtures("recording_resources")
 
 @asynccontextmanager
 async def server_connection(store, runtime):
-    assert ControlService(database=store.database).on_trigger("owner/repo", 8, 42) is not None
+    assert ControlService(database=store.database).create_flow("owner/repo", 8, 42) is not None
     socket = Socket()
     session = Session[WorkerMessageUnion, ServerMessageUnion](
         socket,

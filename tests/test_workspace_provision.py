@@ -76,7 +76,7 @@ async def test_bounded_demands_skip_blocked_repositories_and_reset_on_reconnect(
     # A full page of bad repositories must not starve later demand or repeat each poll.
     demand = [f"owner/repo-{i:03}" for i in range(MAX_PAYLOAD_ITEMS + 1)]
     for repo in demand:
-        assert ControlService(database=store.database).on_trigger(repo, 1, 42) is not None
+        assert ControlService(database=store.database).create_flow(repo, 1, 42) is not None
     callbacks, routes = await controller()
     await callbacks.poll()
     await callbacks.poll()
@@ -104,7 +104,7 @@ async def test_bounded_demands_skip_blocked_repositories_and_reset_on_reconnect(
 async def test_capacity_retry_is_delayed_and_old_results_cannot_complete_it(
     store, controller, monkeypatch, failure,
 ):
-    assert ControlService(database=store.database).on_trigger("owner/missing", 1, 42) is not None
+    assert ControlService(database=store.database).create_flow("owner/missing", 1, 42) is not None
     now = 100.0
     monkeypatch.setattr(asyncio.get_running_loop(), "time", lambda: now)
     callbacks, routes = await controller()
@@ -138,7 +138,7 @@ async def test_capacity_retry_is_delayed_and_old_results_cannot_complete_it(
 
 
 async def test_provision_send_failure_and_validation_rejection_retire_waiters(store, controller):
-    assert ControlService(database=store.database).on_trigger("owner/missing", 1, 42) is not None
+    assert ControlService(database=store.database).create_flow("owner/missing", 1, 42) is not None
     callbacks, routes = await controller()
     callbacks.session.send.side_effect = ConnectionError("write failed")
     with pytest.raises(ConnectionError):

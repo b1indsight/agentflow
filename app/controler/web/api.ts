@@ -4,6 +4,8 @@ import type {
   ContentPage,
   FlowDetail,
   FlowPage,
+  FlowTarget,
+  FlowTargetPage,
   InferenceNoticePage,
   JobPage,
   RepositoryPage,
@@ -39,7 +41,7 @@ export async function api<T>(
     let code = `请求失败 (${response.status})`;
     try {
       const body = (await response.json()) as { detail?: string };
-      if (body.detail) code = body.detail;
+      if (typeof body.detail === "string" && body.detail) code = body.detail;
     } catch {
       // A proxy may return an empty error body; status remains actionable.
     }
@@ -54,6 +56,39 @@ export const getFlows = (
 ) => api<FlowPage>("/api/flows", params, signal);
 export const getRepos = (cursor: string | null, signal?: AbortSignal) =>
   api<RepositoryPage>("/api/repos", { cursor, limit: 100 }, signal);
+export const getFlowTargets = (cursor: string | null, signal: AbortSignal) =>
+  api<FlowTargetPage>("/api/flow-targets", { cursor }, signal);
+export const createFlow = async (target: FlowTarget, task: string) => {
+  const flow = await api<FlowDetail>("/api/flows", {}, undefined, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...target, task_content: task }),
+  });
+  // An incomplete success response cannot identify the committed Flow for verification/navigation.
+  if (!Number.isSafeInteger(flow.id) || flow.id <= 0)
+    throw new Error("创建响应缺少有效的 Flow ID");
+  return flow;
+};
+
+/** Only explicit refusals prove no Flow was created; lost responses must never be resent. */
+export function createFailure(error: unknown): {
+  unknown: boolean;
+  message: string;
+} {
+  if (
+    error instanceof ApiError &&
+    [400, 401, 403, 404, 409, 410, 422].includes(error.status)
+  )
+    return {
+      unknown: false,
+      message: `未受理创建：${error.status === 401 ? "登录已失效，请重新登录。" : error.status === 403 ? "没有操作权限，或目标授权已失效。" : "请检查内容或重新读取项目。"}（${error.message}）`,
+    };
+  return {
+    unknown: true,
+    message:
+      "无法确认 Flow 是否已创建。请先清空筛选、刷新看板核对；再次创建可能重复。此处不会自动重发。",
+  };
+}
 export const getFlow = (id: number, signal?: AbortSignal) =>
   api<FlowDetail>(`/api/flows/${id}`, {}, signal);
 export const archiveFlow = (

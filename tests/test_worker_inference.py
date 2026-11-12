@@ -91,6 +91,9 @@ async def test_inference_cleanup_keeps_its_slot_without_blocking_coding(store, r
             return InferenceCapability(adapter_version="codex/v1")
 
         async def infer(self, task):
+            if task.messages != inference.inference.task.messages:
+                return InferenceOutput(request_id=task.request_id, request_digest=task.digest,
+                                       text="Task title", adapter_version="codex/v1")
             infer_entered.set()
             try:
                 await infer_release.wait()
@@ -101,11 +104,11 @@ async def test_inference_cleanup_keeps_its_slot_without_blocking_coding(store, r
                 await cleanup_release.wait()
                 infer_closed.set()
 
+    inference = store.jobs.enqueue_inference(request())
     worker.inference = Inference()
     async with connected(server, worker) as (working, serving):
         try:
             await asyncio.wait_for(coding_entered.wait(), 3)
-            inference = store.jobs.enqueue_inference(request())
             server.gateway.wake_all()
             await asyncio.wait_for(infer_entered.wait(), 3)
             clock = utcnow() + timedelta(seconds=20)
@@ -122,7 +125,7 @@ async def test_inference_cleanup_keeps_its_slot_without_blocking_coding(store, r
             cleanup_release.set()
             await settled(store, inference, JobState.FAILED)
             assert infer_closed.is_set()
-            assert store.workers.list_workers()[0].current_inference_job_id is None
+            assert store.workers.list_workers()[0].current_inference_job_id != inference.id
             assert not working.done() and not serving.done()
         finally:
             cleanup_release.set()
@@ -255,6 +258,11 @@ async def test_completed_inference_heartbeat_skips_renewal_but_dispatches_payloa
             while store.jobs.get_job(coding.id).started_at is None:
                 await asyncio.sleep(.01)
 
+        title_call = await next_call(InferenceRequest)
+        assert title_call.job_id == store.flows.get_flow(flow.id).title_job_id
+        await outgoing.put(WorkerMessage(**message_header(epoch), control=None,
+                                         payload=[answer(title_call)]).model_dump_json())
+        await settled(store, store.jobs.get_job(title_call.job_id), JobState.DONE)
         second = store.jobs.enqueue_inference(request())
         server.gateway.wake_all()
         second_call = await next_call(InferenceRequest)

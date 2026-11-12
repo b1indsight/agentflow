@@ -151,7 +151,7 @@ def test_delivery_facts_cannot_override_flow_phase_or_issue_ownership(
     assert [item.id for item in console.flows(q="is:active").items] == [flow.id]
     assert [item.id for item in console.flows(q=f"status:{phase}").items] == [flow.id]
     assert store.flows.get_active_flow(flow.repo, flow.issue_number).id == flow.id
-    assert ControlService(database=store.database).on_trigger(flow.repo, 7, 1) is None
+    assert ControlService(database=store.database).create_flow(flow.repo, 7, 1) is None
     # Upgrade a stale display-only archived card once, without requiring a GitHub event.
     with store.connection() as connection:
         connection.execute(
