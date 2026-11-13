@@ -360,6 +360,7 @@ async def test_close_webhook_ends_round_while_other_lifecycle_events_are_hints(
             database=store.database,
         ),
         SimpleNamespace(),
+        bot_login="flowtool[bot]",
         database=store.database,
     )
     payload = {

@@ -16,15 +16,19 @@ from psycopg import OperationalError
 from app.controler.events.webhooks import WebhookConsumer
 from app.controler.workflow.service import ControlService
 from app.domain.models import DeliveryState, FlowState
+from app.github import GitHubApp, GitHubError, GitHubErrorKind
 from app.persistence.store import Store
 from app.persistence.webhooks import WebhookStore
 from app.plugins import get_plugin_manager
 from app.plugins.hookspecs import hookimpl
+from tests.github import RecordingGitHub
+from tests.test_github_client import app_client, response
+from tests.test_github_client import settings as app_settings
 
 
 def settings():
     return SimpleNamespace(
-        allowlist=["alice"], bot_login="flowtool[bot]", trigger_label="flow",
+        allowlist=["alice"], trigger_label="flow",
         settle_seconds=75, submit_grace_seconds=15,
     )
 
@@ -43,6 +47,7 @@ def receive(inbox, delivery="one", body=None):
 def consumer(store):
     return WebhookConsumer(
         settings(),
+        RecordingGitHub(),
         database=store.database,
         plugins=get_plugin_manager(),
         jobs_available=lambda: None,
@@ -61,6 +66,43 @@ def test_received_delivery_survives_new_consumer_and_duplicate(store):
     assert consumer(store).sweep() == 0
     assert store.flows.get_active_flow("owner/repo", 7).id == flow.id
     assert inbox.list()[0].state == "done"
+
+
+async def test_bot_lookup_retries_without_claiming_receipts(store, tmp_path, monkeypatch):
+    # A GitHub outage before resolving the App must leave durable receipts untouched.
+    receive(store.webhooks)
+    worker = consumer(store)
+    worker.github = GitHubApp(app_settings(tmp_path))
+    applied = asyncio.Event()
+    worker.jobs_available = applied.set
+    attempts = 0
+
+    async def get_app():
+        nonlocal attempts
+        attempts += 1
+        receipt = store.webhooks.list()[0]
+        assert receipt.state == "pending" and receipt.attempts == 0
+        if attempts == 1:
+            worker.wakeup.set()
+            raise GitHubError(GitHubErrorKind.TRANSIENT, "get_app")
+        return response(SimpleNamespace(id=123, slug="flowtool-bot"))
+
+    app_client(monkeypatch, lambda **kwargs: SimpleNamespace(
+        rest=SimpleNamespace(apps=SimpleNamespace(async_get_authenticated=get_app)),
+    ))
+    with pytest.raises(RuntimeError):
+        worker.sweep()
+    assert store.webhooks.list()[0].attempts == 0
+    task = asyncio.create_task(worker.run())
+    try:
+        await asyncio.wait_for(applied.wait(), 5)
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert attempts == 2 and worker.github.bot_login == "flowtool-bot[bot]"
+    assert store.webhooks.list()[0].state == "done"
+    assert store.flows.get_active_flow("owner/repo", 7) is not None
 
 
 def test_failure_after_event_reservation_rolls_back_business_and_replays(store, monkeypatch):
@@ -158,6 +200,7 @@ def test_failed_completion_rolls_back_business_and_notifications(store, monkeypa
     monkeypatch.setattr(WebhookStore, "complete", unavailable)
     WebhookConsumer(
         settings(),
+        RecordingGitHub(),
         database=store.database,
         plugins=service.plugins,
         jobs_available=service.notify_jobs,
@@ -176,6 +219,7 @@ def test_webhook_transaction_does_not_rebind_the_root_service(store):
     )
     worker = WebhookConsumer(
         settings(),
+        RecordingGitHub(),
         database=store.database,
         plugins=service.plugins,
         jobs_available=service.notify_jobs,
@@ -285,6 +329,7 @@ def test_all_business_routes_rollback_with_receipt(store, monkeypatch, event, ac
     plugins.register(MergeObserver())
     worker = WebhookConsumer(
         settings(),
+        RecordingGitHub(),
         database=store.database,
         plugins=plugins,
         jobs_available=lambda: None,

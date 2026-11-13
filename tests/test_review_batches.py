@@ -295,7 +295,6 @@ async def test_bot_mentions_always_enter_triage(
     body = "@flowtool[bot] add a bound"
     settings = SimpleNamespace(
         allowlist=["alice"],
-        bot_login="flowtool[bot]",
         trigger_label="flow",
         settle_seconds=75,
         submit_grace_seconds=15,
@@ -305,6 +304,7 @@ async def test_bot_mentions_always_enter_triage(
             database=store.database,
         ),
         settings,
+        bot_login="flowtool[bot]",
         database=store.database,
     )
     # An allowlisted author's direct request still needs Judge.
@@ -353,7 +353,6 @@ async def test_review_actions_have_explicit_dispatch_semantics(
     _, clock = review_flow
     settings = SimpleNamespace(
         allowlist=["alice"],
-        bot_login="flowtool[bot]",
         trigger_label="flow",
         settle_seconds=75,
         submit_grace_seconds=15,
@@ -363,6 +362,7 @@ async def test_review_actions_have_explicit_dispatch_semantics(
             database=store.database,
         ),
         settings,
+        bot_login="flowtool[bot]",
         database=store.database,
     )
     router.dispatch(
@@ -627,11 +627,11 @@ async def test_approval_invalidates_body_without_waking_waiting_feedback(
         ),
         SimpleNamespace(
             allowlist=["alice"],
-            bot_login="flowtool[bot]",
             trigger_label="flow",
             settle_seconds=75,
             submit_grace_seconds=15,
         ),
+        bot_login="flowtool[bot]",
         database=store.database,
     )
     # Both a fresh approval and approval of an existing review must leave discussion asleep.

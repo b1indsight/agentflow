@@ -95,6 +95,7 @@ class ServerRuntime:
         self.console = ConsoleSynchronizer(github, self.conversations, database=database)
         self.webhooks = WebhookConsumer(
             self.settings,
+            github,
             database=database,
             plugins=plugins,
             jobs_available=self.gateway.wake_all,
@@ -110,7 +111,6 @@ class ServerRuntime:
         self.feedback_reconciler = FeedbackReconciler(
             github,
             settle_seconds=self.settings.settle_seconds,
-            bot_login=self.settings.bot_login,
             interval=self.settings.reconcile_interval_seconds,
             batch_size=self.settings.reconcile_batch_size,
             concurrency=self.settings.reconcile_concurrency,

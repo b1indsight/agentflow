@@ -42,7 +42,6 @@ class RecordingGitHub(GitHubApp):
 
     model_config = ConfigDict(frozen=False, extra="allow")
     app_id: int = 1
-    bot_login: str = "flowtool[bot]"
     comments: list[str] = Field(default_factory=list)
     comment_bodies: list[str] = Field(default_factory=list)
     pull_request: PullRequest | None = None
@@ -54,7 +53,8 @@ class RecordingGitHub(GitHubApp):
     resource_calls: list[dict[str, Any]] = Field(default_factory=list)
 
     def __init__(self) -> None:
-        BaseModel.__init__(self, app_id=1, bot_login="flowtool[bot]")
+        BaseModel.__init__(self, app_id=1)
+        self._bot_login = "flowtool[bot]"
         self._sdk = GitHub(AppAuthStrategy(1, "unused-test-key"))
 
 

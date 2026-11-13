@@ -33,6 +33,7 @@ async def _comment(target: Issue | PullRequest, body: str) -> int:
 async def _find_comment(target: Issue | PullRequest, marker: str) -> int | None:
     """Scan all pages for an exact recovery marker authored by this App's bot."""
     repo = target.repository
+    bot_login = (await repo.installation.app.resolve_bot_login()).casefold()
     client = repo.installation._client()
 
     with translate_errors("find_comment"):
@@ -44,7 +45,7 @@ async def _find_comment(target: Issue | PullRequest, marker: str) -> int | None:
             for comment in comments:
                 if (
                     comment.user is not None
-                    and comment.user.login == repo.installation.app.bot_login
+                    and comment.user.login.casefold() == bot_login
                     and comment.user.type == "Bot"
                     and marker in (comment.body or "").splitlines()
                 ):

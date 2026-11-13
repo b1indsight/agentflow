@@ -25,6 +25,7 @@ class EventRouter:
         service: ControlService,
         settings: ServerSettings,
         *,
+        bot_login: str,
         database: Database,
     ) -> None:
         self.database = database
@@ -34,6 +35,7 @@ class EventRouter:
         self.webhook_store = WebhookStore(database)
         self.service = service
         self.settings = settings
+        self.bot_login = bot_login.casefold()
 
     def dispatch(self, event_type: str, delivery_id: str, payload: dict) -> None:
         """Apply DB-only event transitions; callers may bind one outer transaction."""
@@ -42,7 +44,7 @@ class EventRouter:
             self._on_pull_request(delivery_id, payload)
             return
         sender = (payload.get("sender") or {}).get("login", "")
-        if sender == self.settings.bot_login or (payload.get("sender") or {}).get("type") == "Bot":
+        if sender.casefold() == self.bot_login or (payload.get("sender") or {}).get("type") == "Bot":
             return
         if event_type in {"issue_comment", "pull_request_review", "pull_request_review_comment"}:
             self._on_feedback(event_type, delivery_id, payload)
@@ -92,7 +94,7 @@ class EventRouter:
             flow is None
             or action not in allowed
             or author.get("type") == "Bot"
-            or author.get("login") == self.settings.bot_login
+            or (author.get("login") or "").casefold() == self.bot_login
         ):
             self.webhook_store.record_event(delivery_id, event_type, flow.id if flow else None, payload)
             return
