@@ -44,6 +44,7 @@ from app.worker.execution.vcs import (
     local_commit,
     prepare_revision_context,
     prepare_vcs_context,
+    revalidate_revision_context,
     verify_revision_outcome,
     verify_vcs_outcome,
 )
@@ -276,13 +277,17 @@ class WorkerExecutor:
             context = CodingExecutionContext(github=capability)
             answer_sha = await local_commit(workspace) if task.purpose == "answer" else None
             vcs_context = None if answer_sha is not None else await prepare_revision_context(
-                workspace, task.branch, task.expected_head_sha, capability.token,
+                workspace, task.branch, task.previous_head_sha or task.expected_head_sha,
+                capability.token,
             )
-            if task.purpose != "answer":
+            if vcs_context is not None:
+                result.baseline_sha = vcs_context.jj_ancestor_sha or vcs_context.git_base_sha
                 await self.workspaces.configure_git_identity(
                     binding, capability.bot_login, capability.bot_user_id,
                 )
-            prompt = build_revision_prompt(task, self._repo_conventions(workspace))
+            prompt = build_revision_prompt(
+                task, self._repo_conventions(workspace), baseline_sha=result.baseline_sha,
+            )
             schema_path = _write_output_schema(RevisionCodingOutput)
             run = None
             if task.session_id:
@@ -301,12 +306,8 @@ class WorkerExecutor:
                             raise VcsVerificationError("commit", "local commit changed after session rejection")
                     else:
                         assert vcs_context is not None
-                        fallback_context = await prepare_revision_context(
-                            workspace, task.branch, task.expected_head_sha, capability.token,
-                        )
-                        if ((fallback_context.git_remote_url, fallback_context.jj_remote_url)
-                                != (vcs_context.git_remote_url, vcs_context.jj_remote_url)):
-                            raise VcsVerificationError("push", "remote changed after session rejection")
+                        assert result.baseline_sha is not None
+                        await revalidate_revision_context(vcs_context, result.baseline_sha)
             if run is None:
                 result.mode = "fallback"
                 result.session_generation += 1

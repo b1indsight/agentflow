@@ -4,6 +4,7 @@ import asyncio
 import os
 import shutil
 import subprocess
+from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -48,9 +49,11 @@ from app.github import (
     ReviewThread,
     ReviewThreads,
 )
+from app.worker.execution import vcs
 from app.worker.execution.executor import WorkerExecutor
 from app.worker.execution.vcs import (
     VcsVerificationError,
+    local_commit,
     prepare_revision_context,
     verify_revision_outcome,
 )
@@ -86,13 +89,16 @@ async def revision_workspace(tmp_path):
                                base_branch="main", remote="origin", push_token=None)
     target = pool.path(binding)
     _git("checkout", "-b", "flow/1", cwd=target)
+    (target / "initial.txt").write_text("published by the first agent\n")
+    _git("add", "initial.txt", cwd=target)
+    _git("commit", "-m", "Initial delivery", cwd=target)
     _git("push", "origin", "flow/1", cwd=target)
     sha = (await asyncio.to_thread(
         subprocess.check_output, ["git", "rev-parse", "HEAD"], cwd=target, text=True,
     )).strip()
     task = RevisionTask(
         flow_id=1, attempt_id=1, batch_id=1, repo="owner/repo", repo_identity="w:owner/repo",
-        branch="flow/1", base_branch="main", pr_number=17, expected_head_sha=sha,
+        branch="flow/1", base_branch="main", pr_number=17, expected_head_sha=sha, previous_head_sha=sha,
         session_id="session-1", session_generation=0, instruction="Fix the feedback", feedback=[],
         task_content="Original task\n\nOriginal requirements",
         previous_summary="", open_points=[],
@@ -109,6 +115,41 @@ async def revision_workspace(tmp_path):
     )
     journal.record_started()
     return root, target, task, secret, pool
+
+
+@pytest.fixture
+def revision_collaborator(revision_workspace, tmp_path):
+    _, repo, task, _, _ = revision_workspace
+    remote = subprocess.check_output(
+        ["git", "remote", "get-url", "origin"], cwd=repo, text=True,
+    ).strip()
+    collaborator = tmp_path / "collaborator"
+    _git("clone", "--branch", task.branch, remote, str(collaborator), cwd=tmp_path)
+    _git("config", "user.name", "Collaborator", cwd=collaborator)
+    _git("config", "user.email", "collaborator@example.test", cwd=collaborator)
+    return collaborator
+
+
+def publish_external(collaborator, task, *, rewrite=False):
+    if rewrite:
+        _git("reset", "--hard", "origin/main", cwd=collaborator)
+    (collaborator / "external.txt").write_text("external contents\n")
+    _git("add", "external.txt", cwd=collaborator)
+    _git("commit", "-m", "External update", cwd=collaborator)
+    _git("push", "--force" if rewrite else "--no-force", "origin", task.branch, cwd=collaborator)
+    return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=collaborator, text=True).strip()
+
+
+@pytest.fixture(params=[VcsKind.GIT, VcsKind.JJ])
+async def revision_backend(revision_workspace, request):
+    _, repo, task, _, _ = revision_workspace
+    if request.param is VcsKind.JJ:
+        if shutil.which("jj") is None:
+            pytest.skip("jj is not installed")
+        env = os.environ | {"JJ_USER": "FlowTool Test", "JJ_EMAIL": "flowtool@example.test"}
+        await _jj("git", "init", "--colocate", cwd=repo, env=env)
+        await _jj("bookmark", "track", task.branch, "--remote=origin", cwd=repo, env=env)
+    return request.param
 
 
 class RevisionAgent:
@@ -137,6 +178,225 @@ class RevisionAgent:
         assert cwd == self.repo
         self.calls.append(("start", context, prompt))
         return CodingExecutionResult("new-session", revision_output().model_dump_json(), 0)
+
+
+@pytest.mark.parametrize("rewrite", [False, True])
+@pytest.mark.parametrize("noop", [False, True])
+async def test_revision_runs_on_fetched_external_contents(
+    revision_workspace, revision_collaborator, revision_backend, rewrite, noop,
+):
+    # The PR read and fetch can observe different heads, including a rewritten history.
+    root, repo, task, secret, pool = revision_workspace
+    backend = revision_backend
+    env = os.environ | {"JJ_USER": "FlowTool Test", "JJ_EMAIL": "flowtool@example.test"}
+    observed = publish_external(revision_collaborator, task, rewrite=rewrite)
+    task = task.model_copy(update={"expected_head_sha": observed})
+    (revision_collaborator / "external.txt").write_text("newer external contents\n")
+    _git("commit", "-am", "Update after PR observation", cwd=revision_collaborator)
+    _git("push", "origin", task.branch, cwd=revision_collaborator)
+    baseline = (await asyncio.to_thread(
+        subprocess.check_output, ["git", "rev-parse", "HEAD"], cwd=revision_collaborator, text=True,
+    )).strip()
+
+    class ExternalAgent(RevisionAgent):
+        async def resume(self, session_id, prompt, *, cwd, output_schema=None, context=None):
+            self.calls.append(("resume", context, prompt))
+            assert (cwd / "external.txt").read_text() == "newer external contents\n"
+            assert f"PR observed head: {observed}" in prompt
+            assert f"Fetched coding baseline: {baseline}" in prompt
+            if not noop:
+                (cwd / "agent.txt").write_text("agent change after external update\n")
+                if backend is VcsKind.JJ:
+                    await _jj("commit", "-m", "Agent revision", cwd=cwd, env=env)
+                    await _jj("bookmark", "set", task.branch, "-r", "@-", cwd=cwd, env=env)
+                    await _jj("git", "push", "-b", task.branch, cwd=cwd, env=env)
+                else:
+                    _git("add", "agent.txt", cwd=cwd)
+                    _git("commit", "-m", "Agent revision", cwd=cwd)
+                    _git("push", "origin", task.branch, cwd=cwd)
+            return CodingExecutionResult(
+                session_id, revision_output(vcs_backend_used=backend).model_dump_json(), 0,
+            )
+
+    agent = ExternalAgent(repo)
+    result = await WorkerExecutor(root, agent, state=ExecutionState(root, 1), worker_id="w",
+                                  workspaces=pool).execute(task, secret, tool_caller=RecordingToolCaller())
+    assert result.exit_code == 0, result.failure_detail
+    assert len(agent.calls) == 1
+    assert result.baseline_sha == baseline != task.expected_head_sha
+    assert result.commit_sha == result.remote_sha
+    assert (result.commit_sha == baseline) is noop
+    _git("merge-base", "--is-ancestor", baseline, result.commit_sha, cwd=repo)
+    if rewrite:
+        assert (await asyncio.to_thread(subprocess.run,
+            ["git", "merge-base", "--is-ancestor", task.previous_head_sha, result.commit_sha],
+            cwd=repo, capture_output=True, check=False,
+        )).returncode == 1
+
+
+async def test_fetch_snapshot_remains_the_baseline_when_remote_changes_before_agent(
+    revision_workspace, revision_collaborator, revision_backend, monkeypatch,
+):
+    # Advance the independent remote immediately after fetch, before any checkout/model call.
+    root, repo, task, secret, pool = revision_workspace
+    baseline = publish_external(revision_collaborator, task, rewrite=True)
+    task = task.model_copy(update={"expected_head_sha": baseline})
+    monkeypatch.setenv("FLOWTOOL_WORKER_TOKEN", "worker-secret")
+    monkeypatch.setenv("FLOWTOOL_PUSH_TOKEN", "stale-secret")
+    _git("config", "credential.helper", "!exit 97", cwd=repo)
+    run = vcs._run
+
+    async def advance_after_fetch(*args, **kwargs):
+        if "fetch" in args and f"refs/heads/{task.branch}" in args:
+            assert kwargs["cwd"] != repo
+            assert kwargs["environment"]["FLOWTOOL_PUSH_TOKEN"] == "fresh-token"
+            assert "FLOWTOOL_WORKER_TOKEN" not in kwargs["environment"]
+            assert all("fresh-token" not in arg and "stale-secret" not in arg for arg in args)
+            # Resolve credentials offline with the actual fetch flags: a later command-line
+            # helper reset used to erase the assignment helper despite its environment presence.
+            resolved = await asyncio.to_thread(
+                subprocess.run, (*args[:args.index("fetch")], "credential", "fill"),
+                input="protocol=https\nhost=github.com\n\n", cwd=kwargs["cwd"],
+                env=kwargs["environment"], capture_output=True, text=True, check=False,
+            )
+            assert resolved.returncode == 0, resolved.stderr
+            assert "username=x-access-token\n" in resolved.stdout
+            assert "password=fresh-token\n" in resolved.stdout
+            assert "stale-secret" not in resolved.stdout
+            config = (kwargs["cwd"] / "config").read_text()
+            assert "credential" not in config and "fresh-token" not in config
+        outcome = await run(*args, **kwargs)
+        if "fetch" in args and f"refs/heads/{task.branch}" in args:
+            assert outcome[0] == 0
+            (revision_collaborator / "external.txt").write_text("later remote contents\n")
+            _git("commit", "-am", "Race after fetch", cwd=revision_collaborator)
+            _git("push", "origin", task.branch, cwd=revision_collaborator)
+        return outcome
+
+    monkeypatch.setattr(vcs, "_run", advance_after_fetch)
+
+    class SnapshotAgent(RevisionAgent):
+        async def resume(self, session_id, prompt, *, cwd, output_schema=None, context=None):
+            self.calls.append(("resume", context, prompt))
+            assert (cwd / "external.txt").read_text() == "external contents\n"
+            return CodingExecutionResult(
+                session_id, revision_output(vcs_backend_used=revision_backend).model_dump_json(), 0,
+            )
+
+    agent = SnapshotAgent(repo)
+    result = await WorkerExecutor(root, agent, state=ExecutionState(root, 1), worker_id="w",
+                                  workspaces=pool).execute(task, secret, tool_caller=RecordingToolCaller())
+    assert len(agent.calls) == 1 and result.baseline_sha == baseline
+    assert result.exit_code != 0 and result.failure_stage == "push"
+    assert (repo / "external.txt").read_text() == "external contents\n"
+
+
+async def test_revision_accepts_local_work_published_only_in_new_history(
+    revision_workspace, revision_collaborator, revision_backend,
+):
+    # A local tip need not descend from the historical delivery if the new remote publishes it.
+    _, repo, task, _, _ = revision_workspace
+    remote = publish_external(revision_collaborator, task, rewrite=True)
+    if revision_backend is VcsKind.JJ:
+        env = os.environ | {"JJ_USER": "FlowTool Test", "JJ_EMAIL": "flowtool@example.test"}
+        await _jj("git", "fetch", "--remote", "origin", "-b", task.branch, cwd=repo, env=env)
+        await _jj("new", task.branch, cwd=repo, env=env)
+    else:
+        _git("fetch", "origin", task.branch, cwd=repo)
+        _git("checkout", "-B", task.branch, "FETCH_HEAD", cwd=repo)
+    context = await prepare_revision_context(repo, task.branch, task.previous_head_sha)
+    outcome = await verify_revision_outcome(context, revision_backend)
+    assert context.git_base_sha == outcome.commit_sha == remote
+
+
+@pytest.mark.skipif(shutil.which("jj") is None, reason="jj is not installed")
+@pytest.mark.parametrize("operation", ["revision", "align"])
+@pytest.mark.parametrize("target_kind,retained", [
+    ("directory", None), ("file", None), ("file", "ignored-file"), ("file", "ignored-symlink"),
+])
+async def test_jj_baseline_path_transitions_preserve_retained_leaves(
+    revision_workspace, revision_collaborator, operation, target_kind, retained,
+):
+    # A tracked file/directory may change shape, but an ignored leaf beside tracked content
+    # must still block directory replacement. Both revision sync and warm-copy reuse share this.
+    _, repo, task, _, _ = revision_workspace
+    path = repo / "shape"
+    if target_kind == "file":
+        (path / "nested").mkdir(parents=True)
+        (path / "nested/tracked").write_text("old tracked contents")
+    else:
+        path.write_text("old tracked contents")
+    _git("add", "shape", cwd=repo)
+    _git("commit", "-m", "Publish original path shape", cwd=repo)
+    _git("push", "origin", task.branch, cwd=repo)
+    previous = (await asyncio.to_thread(
+        subprocess.check_output, ["git", "rev-parse", "HEAD"], cwd=repo, text=True,
+    )).strip()
+    _git("pull", "--ff-only", cwd=revision_collaborator)
+    env = os.environ | {"JJ_USER": "FlowTool Test", "JJ_EMAIL": "flowtool@example.test"}
+    await _jj("git", "init", "--colocate", cwd=repo, env=env)
+    await _jj("bookmark", "track", task.branch, "--remote=origin", cwd=repo, env=env)
+    with (repo / ".git/info/exclude").open("a") as excluded:
+        excluded.write("\n/shape/nested/cache\n/unrelated-cache/\n")
+    (repo / "unrelated-cache").mkdir()
+    (repo / "unrelated-cache/keep").write_text("unrelated cache must survive")
+    preserved = path / "nested/cache"
+    if retained == "ignored-file":
+        preserved.write_text("nested cache must survive")
+    elif retained == "ignored-symlink":
+        preserved.symlink_to(repo / "README.md")
+    before_contents = preserved.read_bytes() if retained else None
+    before = await local_commit(repo)
+    _git("rm", "-r", "shape", cwd=revision_collaborator)
+    replacement = revision_collaborator / "shape"
+    if target_kind == "directory":
+        (replacement / "nested").mkdir(parents=True)
+        (replacement / "nested/tracked").write_text("new tracked contents")
+    else:
+        replacement.write_text("new tracked contents")
+    _git("add", "shape", cwd=revision_collaborator)
+    _git("commit", "-m", "Replace the tracked path shape", cwd=revision_collaborator)
+    _git("push", "origin", task.branch, cwd=revision_collaborator)
+    baseline = (await asyncio.to_thread(
+        subprocess.check_output, ["git", "rev-parse", "HEAD"], cwd=revision_collaborator, text=True,
+    )).strip()
+    if operation == "align":
+        await _jj("git", "init", "--colocate", cwd=revision_collaborator, env=env)
+    with (pytest.raises(VcsVerificationError, match="overwrite retained cache")
+          if retained else nullcontext()):
+        if operation == "revision":
+            await prepare_revision_context(repo, task.branch, previous)
+        else:
+            await vcs.align_repository(repo, revision_collaborator, task.branch)
+    if retained:
+        assert await local_commit(repo) == before
+        assert (path / "nested/tracked").read_text() == "old tracked contents"
+        assert preserved.read_bytes() == before_contents
+        assert preserved.is_symlink() is (retained == "ignored-symlink")
+    else:
+        current = await vcs.prepare_vcs_context(repo, task.branch)
+        assert current.git_base_sha == current.jj_ancestor_sha == baseline
+        updated = path / "nested/tracked" if target_kind == "directory" else path
+        assert updated.read_text() == "new tracked contents"
+    assert (repo / "unrelated-cache/keep").read_text() == "unrelated cache must survive"
+    await vcs.require_idle_repository(repo)
+
+
+async def test_answer_does_not_synchronize_external_updates(
+    revision_workspace, revision_collaborator, revision_backend,
+):
+    root, repo, task, secret, pool = revision_workspace
+    remote = publish_external(revision_collaborator, task, rewrite=True)
+    task = task.model_copy(update={"purpose": "answer", "expected_head_sha": remote})
+    before = await local_commit(repo)
+    agent = RevisionAgent(repo)
+    result = await WorkerExecutor(root, agent, state=ExecutionState(root, 1), worker_id="w",
+                                  workspaces=pool).execute(task, secret, tool_caller=RecordingToolCaller())
+    assert result.exit_code == 0
+    assert result.baseline_sha is None
+    assert result.commit_sha == before == await local_commit(repo)
+    assert (repo / "initial.txt").exists() and not (repo / "external.txt").exists()
+    assert "Fetched coding baseline" not in agent.calls[0][2]
 
 
 @pytest.mark.parametrize("behavior,success", [
@@ -207,6 +467,16 @@ async def test_answer_checks_only_local_commit(revision_workspace, behavior, suc
         assert (repo / "change.txt").read_text() == "revision\n"
 
 
+async def test_historical_revision_uses_expected_head_as_publication_proof(revision_workspace):
+    root, repo, task, secret, pool = revision_workspace
+    task = task.model_copy(update={"previous_head_sha": None})
+    result = await WorkerExecutor(root, RevisionAgent(repo), state=ExecutionState(root, 1),
+                                  worker_id="w", workspaces=pool).execute(
+        task, secret, tool_caller=RecordingToolCaller())
+    assert result.exit_code == 0
+    assert result.baseline_sha == result.commit_sha == task.expected_head_sha
+
+
 @pytest.mark.parametrize("purpose", ["answer", "revise"])
 @pytest.mark.parametrize("session,behavior,expected", [
     (None, "noop", ["start"]), ("session-1", "missing", ["resume", "start"]),
@@ -231,19 +501,79 @@ async def test_fallback_only_when_execution_is_known_not_to_have_started(
         assert result.mode == "fallback"
 
 
-@pytest.mark.parametrize("problem", ["baseline", "dirty"])
-async def test_revision_preflight_rejects_before_model_execution(revision_workspace, problem):
+@pytest.mark.parametrize("problem", [
+    "unpublished", "tracked", "untracked", "cache-file", "cache-directory", "cache-parent",
+    "cache-symlink", "jj-metadata", "branch",
+])
+async def test_revision_preflight_rejects_before_model_execution(
+    revision_workspace, revision_collaborator, revision_backend, problem,
+):
+    # External synchronization must not erase work, including ignored paths newly tracked upstream.
     root, repo, task, secret, pool = revision_workspace
-    if problem == "baseline":
-        _git("commit", "--allow-empty", "-m", "Concurrent change", cwd=repo)
-        _git("push", "origin", task.branch, cwd=repo)
+    env = os.environ | {"JJ_USER": "FlowTool Test", "JJ_EMAIL": "flowtool@example.test"}
+    remote = publish_external(revision_collaborator, task, rewrite=True)
+    preserved = repo / "README.md"
+    if problem == "unpublished":
+        preserved.write_text("unpublished work")
+        if revision_backend is VcsKind.JJ:
+            await _jj("commit", "-m", "Unpublished change", cwd=repo, env=env)
+            await _jj("bookmark", "set", task.branch, "-r", "@-", cwd=repo, env=env)
+        else:
+            _git("commit", "-am", "Unpublished change", cwd=repo)
+    elif problem == "tracked":
+        preserved.write_text("tracked edits")
+    elif problem == "untracked":
+        preserved = repo / "uncommitted"
+        preserved.write_text("unknown work")
+    elif problem.startswith("cache-"):
+        # Keep the ignore rule local so the collaborator can start tracking this path.
+        with (repo / ".git/info/exclude").open("a") as excluded:
+            excluded.write("\n/cache\n")
+        if problem in {"cache-file", "cache-directory"}:
+            (repo / "cache").mkdir()
+            preserved = repo / "cache/retained"
+        else:
+            preserved = repo / "cache"
+        if problem == "cache-symlink":
+            preserved.symlink_to("README.md")
+        else:
+            preserved.write_text("retained cache")
+        if problem == "cache-directory":
+            (revision_collaborator / "cache").write_text("upstream tracked contents")
+        else:
+            (revision_collaborator / "cache").mkdir()
+            (revision_collaborator / "cache/retained").write_text("upstream tracked contents")
+        _git("add", "cache", cwd=revision_collaborator)
+        _git("commit", "-m", "Track the retained cache path", cwd=revision_collaborator)
+        _git("push", "origin", task.branch, cwd=revision_collaborator)
+        remote = (await asyncio.to_thread(
+            subprocess.check_output, ["git", "rev-parse", "HEAD"], cwd=revision_collaborator, text=True,
+        )).strip()
+    elif problem == "jj-metadata":
+        if revision_backend is not VcsKind.JJ:
+            pytest.skip("requires jj metadata to retain")
+        preserved = repo / ".jj/retained"
+        preserved.write_text("jj metadata must survive")
+        (revision_collaborator / ".jj").write_text("upstream tracked contents")
+        _git("add", ".jj", cwd=revision_collaborator)
+        _git("commit", "-m", "Track a jj metadata path", cwd=revision_collaborator)
+        _git("push", "origin", task.branch, cwd=revision_collaborator)
+    elif revision_backend is VcsKind.JJ:
+        await _jj("new", "root()", cwd=repo, env=env)
     else:
-        (repo / "uncommitted").write_text("keep me")
+        _git("checkout", "-b", "wrong-branch", cwd=repo)
+    before_contents = preserved.read_bytes() if preserved.exists() else None
+    before_head = await local_commit(repo)
+    task = task.model_copy(update={"expected_head_sha": remote})
     agent = RevisionAgent(repo)
     result = await WorkerExecutor(root, agent, state=ExecutionState(root, 1), worker_id="w",
                                    workspaces=pool).execute(task, secret, tool_caller=RecordingToolCaller())
     assert result.exit_code != 0
     assert agent.calls == []
+    assert (preserved.read_bytes() if preserved.exists() else None) == before_contents
+    assert await local_commit(repo) == before_head
+    if problem == "cache-symlink":
+        assert preserved.is_symlink()
 
 
 def test_revision_output_requires_every_field_and_rejects_extra_data():
@@ -313,6 +643,7 @@ def verified_result(task, **updates):
         "last_message": "done", "exit_code": 0, "output": revision_output(),
         "vcs_backend": VcsKind.GIT, "branch": task.branch, "commit_sha": task.expected_head_sha,
         "remote_sha": task.expected_head_sha, "clean_worktree": True,
+        "baseline_sha": task.expected_head_sha if task.purpose == "revise" else None,
     }
     values.update(updates)
     return RevisionTaskResult(**values)
@@ -593,20 +924,106 @@ async def test_answer_checks_real_jj_working_commit(revision_workspace, changed_
         assert result.commit_sha != task.expected_head_sha
 
 
-async def test_dirty_repository_after_session_rejection_does_not_fallback(revision_workspace):
+@pytest.mark.parametrize("mutation", ["dirty", "head", "branch", "remote"])
+async def test_changed_repository_after_session_rejection_does_not_fallback(
+    revision_workspace, revision_backend, mutation,
+):
     root, repo, task, secret, pool = revision_workspace
+    env = os.environ | {"JJ_USER": "FlowTool Test", "JJ_EMAIL": "flowtool@example.test"}
 
-    class DirtyRejection(RevisionAgent):
+    class ChangedRejection(RevisionAgent):
         async def resume(self, *args, **kwargs):
-            (self.repo / "uncertain-work").write_text("preserve")
+            self.calls.append(("resume", kwargs["context"], args[1]))
+            if mutation == "dirty":
+                (repo / "uncertain-work").write_text("preserve")
+            elif mutation == "remote":
+                _git("remote", "set-url", "origin", str(repo / "other.git"), cwd=repo)
+            elif revision_backend is VcsKind.JJ:
+                if mutation == "head":
+                    await _jj("new", task.expected_head_sha, cwd=repo, env=env)
+                else:
+                    await _jj("bookmark", "set", task.branch, "-r", "@",
+                              cwd=repo, env=env)
+            elif mutation == "head":
+                # Even a published commit made during a rejected resume cannot be erased/retried.
+                _git("commit", "--allow-empty", "-m", "Uncertain execution", cwd=repo)
+                _git("push", "origin", task.branch, cwd=repo)
+            else:
+                _git("checkout", "-b", "uncertain-branch", cwd=repo)
+            self.after = await local_commit(repo)
             raise SessionUnavailable("rejected")
 
-    agent = DirtyRejection(repo)
+    agent = ChangedRejection(repo)
     result = await WorkerExecutor(root, agent, state=ExecutionState(root, 1), worker_id="w",
                                    workspaces=pool).execute(task, secret, tool_caller=RecordingToolCaller())
     assert result.exit_code != 0
-    assert agent.calls == []
-    assert (repo / "uncertain-work").read_text() == "preserve"
+    assert [call[0] for call in agent.calls] == ["resume"]
+    assert await local_commit(repo) == agent.after
+    assert result.baseline_sha == task.expected_head_sha
+    assert [invocation.failure for invocation in result.invocations] == ["session_unavailable"]
+    assert not ExecutionState(root, 1).load().fallback_consumed
+    if mutation == "dirty":
+        assert (repo / "uncertain-work").read_text() == "preserve"
+
+
+async def test_session_fallback_keeps_fetched_snapshot_when_remote_advances(
+    revision_workspace, revision_collaborator, revision_backend,
+):
+    # A rejected session does not grant another fetch or discard the synchronized run baseline.
+    root, repo, task, secret, pool = revision_workspace
+    baseline = publish_external(revision_collaborator, task, rewrite=True)
+    task = task.model_copy(update={"expected_head_sha": baseline})
+
+    class RemoteAdvance(RevisionAgent):
+        async def resume(self, session_id, prompt, *, cwd, output_schema=None, context=None):
+            self.calls.append(("resume", context, prompt))
+            (revision_collaborator / "external.txt").write_text("concurrent update\n")
+            _git("commit", "-am", "Update during rejected resume", cwd=revision_collaborator)
+            _git("push", "origin", task.branch, cwd=revision_collaborator)
+            raise SessionUnavailable("rejected")
+
+        async def start(self, prompt, cwd, *, output_schema=None, context=None):
+            self.calls.append(("start", context, prompt))
+            assert (cwd / "external.txt").read_text() == "external contents\n"
+            assert f"Fetched coding baseline: {baseline}" in prompt
+            return CodingExecutionResult(
+                "new-session", revision_output(vcs_backend_used=revision_backend).model_dump_json(), 0,
+            )
+
+    agent = RemoteAdvance(repo)
+    result = await WorkerExecutor(root, agent, state=ExecutionState(root, 1), worker_id="w",
+                                  workspaces=pool).execute(task, secret, tool_caller=RecordingToolCaller())
+    assert [call[0] for call in agent.calls] == ["resume", "start"]
+    assert [invocation.mode for invocation in result.invocations] == ["resume", "fallback"]
+    assert result.session_generation == 1 and result.baseline_sha == baseline
+    assert result.exit_code != 0 and result.failure_stage == "push"
+    assert (repo / "external.txt").read_text() == "external contents\n"
+
+
+async def test_jj_sync_preserves_other_unpublished_changes(revision_workspace, revision_collaborator):
+    if shutil.which("jj") is None:
+        pytest.skip("jj is not installed")
+    _, repo, task, _, _ = revision_workspace
+    env = os.environ | {"JJ_USER": "FlowTool Test", "JJ_EMAIL": "flowtool@example.test"}
+    await _jj("git", "init", "--colocate", cwd=repo, env=env)
+    await _jj("bookmark", "track", task.branch, "--remote=origin", cwd=repo, env=env)
+    (repo / "other-work").write_text("unpublished side change")
+    await _jj("describe", "-m", "Keep this other change", cwd=repo, env=env)
+    other = await local_commit(repo)
+    await _jj("new", task.branch, cwd=repo, env=env)
+    remote = publish_external(revision_collaborator, task, rewrite=True)
+    context = await prepare_revision_context(repo, task.branch, task.previous_head_sha)
+    assert (await verify_revision_outcome(context, VcsKind.JJ)).commit_sha == remote
+    visible = (await asyncio.to_thread(
+        subprocess.check_output,
+        ["jj", "--ignore-working-copy", "log", "-r", f"{other} & ancestors(visible_heads())",
+         "--no-graph", "-T", "commit_id"], cwd=repo, env=env, text=True,
+    )).strip()
+    assert visible == other
+    assert await asyncio.to_thread(
+        subprocess.check_output, ["jj", "file", "show", "-r", other, "other-work"],
+        cwd=repo, env=env, text=True,
+    ) == "unpublished side change"
 
 
 @pytest.mark.parametrize("revision_feedback", [

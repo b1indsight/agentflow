@@ -210,16 +210,14 @@ class Reconciler:
                             )
                         elif diagnostic is None:
                             diagnostic = "old executor or result changed during reopen verification"
-                    elif (current.head_sha and remote.head_sha != current.head_sha
-                          or remote.head_branch != current.branch
-                          or current.base_branch and remote.base_branch != current.base_branch):
+                    elif remote.head_branch != current.branch:
                         if coding is not None and coding.result_applied_at is None:
                             diagnostic = "in-flight coding delivery awaits its original result verification"
                         else:
                             pause_delivery(current, deliveries=deliveries_tx, jobs=jobs_tx)
                             fresh.state = FlowState.BLOCKED
                             flows_tx.update_flow(fresh)
-                            diagnostic = "PR head/base changed; verified delivery is unchanged"
+                            diagnostic = "PR source branch changed; verified delivery is unchanged"
                 delay = max(1800.0, self.interval) if fresh.state in TERMINAL_STATES else self.interval
                 reconcile_store_tx.succeeded(flow.id, delay, diagnostic, hint_version=check.hint_version)
             if merged:
