@@ -90,6 +90,7 @@ def assignment_secret() -> AssignmentSecret:
             token=SecretStr("push-token"),
             repository="owner/repo",
             expires_at=datetime.now(UTC) + timedelta(minutes=5),
+            bot_login="flowtool[bot]", bot_user_id=7654321,
         )
     )
 
@@ -190,7 +191,9 @@ async def test_initial_corrects_completion_in_original_session(
             _git("checkout", "-b", "flow/issue-8", cwd=cwd)
             (cwd / "README.md").write_text("implemented\n")
             _git("add", "README.md", cwd=cwd)
-            _git("commit", *(["--amend"] if problem == "amend" else []), "-m", "implement", cwd=cwd)
+            # Keep this an ancestry violation even when the attribution hook rejects human authors.
+            _git("commit", *(["--amend", "--reset-author"] if problem == "amend" else []),
+                 "-m", "implement", cwd=cwd)
             if problem not in {"amend", "unpushed", "execution-timeout"}:
                 _git("push", "origin", "flow/issue-8", cwd=cwd)
             if problem in {"schema-after-delivery", "changed-after-delivery"}:
@@ -375,8 +378,6 @@ async def test_initial_bootstrap_push_mcp_and_final_verification_share_current_c
     class Agent(RecordingAgent):
         async def start(self, task, cwd, *, output_schema=None, context=None):
             assert context.github.token.get_secret_value() == "push-token"
-            _git("config", "user.name", "Test Bot", cwd=cwd)
-            _git("config", "user.email", "bot@example.test", cwd=cwd)
             _git("checkout", "-b", "flow/issue-8", cwd=cwd)
             (cwd / "README.md").write_text("implemented\n")
             _git("add", ".", cwd=cwd)
@@ -415,6 +416,13 @@ async def test_initial_bootstrap_push_mcp_and_final_verification_share_current_c
     assert result.commit_sha != base_sha
     assert result.delivery_receipt.status == "prepared"
     assert authenticated == ["clone", "verify", "verify"]
+    repo = agent.started[0][1]
+    identities = await asyncio.to_thread(subprocess.check_output,
+        ["git", "log", "-1", "--format=%an <%ae>%n%cn <%ce>"], cwd=repo, text=True,
+    )
+    assert identities.splitlines() == [
+        "flowtool[bot] <7654321+flowtool[bot]@users.noreply.github.com>",
+    ] * 2
 
 
 async def test_stop_preserves_edits_until_next_initial_prepares_new_generation(

@@ -53,6 +53,7 @@ def _assignment(
                 token=SecretStr("push-secret"),
                 repository="owner/repo",
                 expires_at=datetime.now(UTC) + timedelta(minutes=5),
+                bot_login="flowtool[bot]", bot_user_id=7654321,
             )
         ),
     )

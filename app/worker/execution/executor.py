@@ -122,6 +122,9 @@ class WorkerExecutor:
                 await prepare_vcs_context(workspace, task.branch, remote=task.remote),
                 push_token=capability.token,
             )
+            await self.workspaces.configure_git_identity(
+                binding, capability.bot_login, capability.bot_user_id,
+            )
         except VcsVerificationError as error:
             return _vcs_failure(None, "", error.stage, str(error))
         except OSError:
@@ -275,6 +278,10 @@ class WorkerExecutor:
             vcs_context = None if answer_sha is not None else await prepare_revision_context(
                 workspace, task.branch, task.expected_head_sha, capability.token,
             )
+            if task.purpose != "answer":
+                await self.workspaces.configure_git_identity(
+                    binding, capability.bot_login, capability.bot_user_id,
+                )
             prompt = build_revision_prompt(task, self._repo_conventions(workspace))
             schema_path = _write_output_schema(RevisionCodingOutput)
             run = None
@@ -361,7 +368,10 @@ class WorkerExecutor:
 def _github_capability(secret: AssignmentSecret | None, repository: str) -> GitHubCapability:
     if secret is None:
         raise VcsVerificationError("capability", "push capability is missing")
-    capability = GitHubCapability(secret.push.token, secret.push.repository, secret.push.expires_at)
+    capability = GitHubCapability(
+        secret.push.token, secret.push.repository, secret.push.expires_at,
+        secret.push.bot_login, secret.push.bot_user_id,
+    )
     require_gh(capability, repository)
     return capability
 

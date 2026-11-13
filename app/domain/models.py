@@ -358,6 +358,8 @@ class GitHubCapability:
     token: SecretStr = field(repr=False)
     repository: str
     expires_at: datetime
+    bot_login: str
+    bot_user_id: int
 
 
 @dataclass(frozen=True)

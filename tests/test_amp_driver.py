@@ -39,7 +39,7 @@ async def test_amp_uses_current_capabilities_and_raw_caller_schema(monkeypatch, 
     schema.write_text('{"type":"object","required":["caller_owned"]}')
     context = CodingExecutionContext(
         github=GitHubCapability(SecretStr("bot-secret"), "owner/repo",
-                                datetime.now(UTC) + timedelta(minutes=5)),
+                                datetime.now(UTC) + timedelta(minutes=5), "flowtool[bot]", 7654321),
         mcp_url=None if resume else "http://127.0.0.1:12345/mcp",
         mcp_token=None if resume else SecretStr("broker-secret"),
     )
@@ -181,7 +181,7 @@ def test_environment_keeps_amp_login_but_excludes_ambient_credentials():
                                    "SSH_AUTH_SOCK": "/personal/ssh-agent",
                                    "AMP_CURRENT_THREAD_ID": "parent-thread"})
     assert environment["HOME"] == "/worker" and environment["AMP_API_KEY"] == "amp-secret"
-    assert environment["GIT_AUTHOR_NAME"] == "bot"
+    assert "GIT_AUTHOR_NAME" not in environment  # Workspace Git config owns commit identity.
     assert environment["OPENAI_API_KEY"] == "other" and environment["AMP_URL"] == "https://amp.example"
     assert not {"GH_TOKEN", "FLOWTOOL_WORKER_TOKEN", "GIT_CONFIG_PARAMETERS",
                 "SSH_AUTH_SOCK", "AMP_CURRENT_THREAD_ID"} & environment.keys()

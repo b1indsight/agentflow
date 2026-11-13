@@ -100,6 +100,7 @@ async def revision_workspace(tmp_path):
     secret = AssignmentSecret(push=PushSecret(
         repository="owner/repo", token=SecretStr("fresh-token"),
         expires_at=datetime.now(UTC) + timedelta(minutes=30),
+        bot_login="flowtool[bot]", bot_user_id=7654321,
     ))
     journal = ExecutionState(root, 1)
     journal.record_received(
@@ -171,6 +172,14 @@ async def test_revision_verifies_real_git_delivery(revision_workspace, monkeypat
     if success:
         assert result.clean_worktree and result.commit_sha == result.remote_sha
         assert (result.commit_sha == task.expected_head_sha) is (behavior == "noop")
+        if behavior == "push":
+            commit = await asyncio.to_thread(subprocess.check_output,
+                ["git", "log", "-1", "--format=%an <%ae>%n%cn <%ce>%n%B"], cwd=repo, text=True,
+            )
+            assert commit.splitlines()[:2] == [
+                "flowtool[bot] <7654321+flowtool[bot]@users.noreply.github.com>",
+            ] * 2
+            assert "Co-authored-by: FlowTool Test <flowtool@example.test>" in commit
 
 
 @pytest.mark.parametrize("behavior,success", [
@@ -180,12 +189,15 @@ async def test_answer_checks_only_local_commit(revision_workspace, behavior, suc
     # A clean, committed change must fail; an uncommitted edit is outside this check's scope.
     root, repo, task, secret, pool = revision_workspace
     task = task.model_copy(update={"purpose": "answer"})
+    before_config = (repo / ".git/config").read_bytes()
     agent = RevisionAgent(repo, behavior)
     result = await WorkerExecutor(root, agent, state=ExecutionState(root, 1), worker_id="w",
                                   workspaces=pool).execute(task, secret, tool_caller=RecordingToolCaller())
     assert (result.exit_code == 0) is success
     assert "Do not modify code" in agent.calls[0][2]
     assert "Modify, test, commit" not in agent.calls[0][2]
+    assert (repo / ".git/config").read_bytes() == before_config
+    assert not (repo / ".git/config.worktree").exists()
     if not success:
         assert result.failure_stage == "commit"
         head = await asyncio.to_thread(subprocess.check_output, ["git", "rev-parse", "HEAD"],

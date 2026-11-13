@@ -40,7 +40,7 @@ from app.domain.models import (
 )
 from app.domain.review_models import ReviewFeedback
 
-PROTOCOL_VERSION: Literal[22] = 22
+PROTOCOL_VERSION: Literal[23] = 23
 MAX_PAYLOAD_ITEMS = 32
 MessageId = Annotated[str, Field(strict=True, pattern=r"^[0-9a-f]{32}$")]
 ConnectionEpoch = Annotated[str, Field(strict=True, min_length=1, max_length=64)]
@@ -72,6 +72,8 @@ class PushSecret(ProtocolModel):
     token: SecretStr = Field(min_length=1)
     repository: str
     expires_at: datetime
+    bot_login: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9-]*\[bot\]$")
+    bot_user_id: int = Field(gt=0)
 
     @field_serializer("token", when_used="json")
     def _serialize_token(self, token: SecretStr) -> str:
@@ -588,7 +590,7 @@ class Message[Payload: ToolCall | ToolResult](ProtocolModel):
     performs static checks only; receipt ACKs confer no business completion or authority.
     """
 
-    protocol_version: Literal[22]
+    protocol_version: Literal[23]
     message_id: MessageId
     connection_epoch: ConnectionEpoch | None
     ack: StrictBool
@@ -799,7 +801,7 @@ def accept_stop_id(receipt_id: MessageId) -> MessageId:
 
 
 class MessageHeader(TypedDict):
-    protocol_version: Literal[22]
+    protocol_version: Literal[23]
     message_id: MessageId
     connection_epoch: str | None
     ack: bool

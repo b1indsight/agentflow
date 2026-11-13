@@ -20,7 +20,7 @@ from app.worker.execution.vcs import VcsVerificationError
 
 def capability() -> GitHubCapability:
     return GitHubCapability(SecretStr("current-bot-secret"), "owner/repo",
-                            datetime.now(UTC) + timedelta(minutes=5))
+                            datetime.now(UTC) + timedelta(minutes=5), "flowtool[bot]", 7654321)
 
 
 def test_git_uses_assignment_even_with_a_personal_helper(tmp_path):

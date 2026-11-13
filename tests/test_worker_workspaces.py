@@ -59,6 +59,112 @@ async def release(pool, binding):
                               token=f"release-{binding.flow_id}")
 
 
+@pytest.mark.parametrize("overflow", [False, True])
+async def test_workspace_git_commits_use_bot_and_preserve_original_coauthor(
+    tmp_path, monkeypatch, overflow,
+):
+    # --local leaks identity across linked worktrees; templates miss the agent's commit -m.
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    global_config = home / ".gitconfig"
+    global_config.write_text("[user]\n\tname = Global Person\n\temail = global@example.test\n")
+    root, _ = managed_seed(tmp_path)
+    seed = root / "repos/owner/repo"
+    _git("config", "user.name", "Original Person", cwd=seed)
+    _git("config", "user.email", "original@example.test", cwd=seed)
+    _git("config", "committer.name", "Different Committer", cwd=seed)
+    _git("config", "committer.email", "committer@example.test", cwd=seed)
+    pool = RepositoryWorkspaces(root, "worker-a", limit=3)
+    bindings = [await acquire(pool, flow) for flow in (1, 2, 3)]
+    binding = bindings[1 if overflow else 0]
+    repo = pool.path(binding)
+    hooks = tmp_path / "original hooks"
+    hooks.mkdir()
+    original_hook = hooks / "prepare-commit-msg"
+    original_hook.write_text('#!/bin/sh\ngit interpret-trailers --in-place '
+                             '--trailer "Original-hook: ran" "$1"\n')
+    original_hook.chmod(0o700)
+    pre_commit = hooks / "pre-commit"
+    pre_commit.write_text('#!/bin/sh\ntest ! -f reject-commit\n')
+    pre_commit.chmod(0o700)
+    _git("config", "core.hooksPath", str(hooks), cwd=repo)
+    before_global = global_config.read_bytes()
+    before_head = await asyncio.to_thread(subprocess.check_output,
+                                          ["git", "rev-parse", "HEAD"], cwd=repo)
+
+    for _ in range(2):
+        await pool.configure_git_identity(binding, "example-app[bot]", 7654321)
+    assert await asyncio.to_thread(subprocess.check_output,
+                                    ["git", "rev-parse", "HEAD"], cwd=repo) == before_head
+    _git("commit", "--allow-empty", "-m", "Bot change", "-m",
+         "Co-authored-by: Amp <amp@ampcode.com>\n"
+         "Co-authored-by: Original Person <original@example.test>", cwd=repo)
+    commit = await asyncio.to_thread(subprocess.check_output,
+        ["git", "log", "-1", "--format=%an <%ae>%n%cn <%ce>%n%B"], cwd=repo, text=True,
+    )
+    bot = "example-app[bot] <7654321+example-app[bot]@users.noreply.github.com>"
+    assert commit.splitlines()[:2] == [bot, bot]
+    assert commit.count("Co-authored-by: Original Person <original@example.test>") == 1
+    assert "Co-authored-by: Amp <amp@ampcode.com>" in commit and "Original-hook: ran" in commit
+    _git("commit", "--allow-empty", "-m", "No supplied trailer", cwd=repo)
+    message = await asyncio.to_thread(subprocess.check_output,
+                                      ["git", "log", "-1", "--format=%B"], cwd=repo, text=True)
+    assert message.count("Co-authored-by: Original Person <original@example.test>") == 1
+    editor = tmp_path / "editor"
+    editor.write_text('#!/bin/sh\nprintf "Editor change\\n" > "$1"\n')
+    editor.chmod(0o700)
+    monkeypatch.setenv("GIT_EDITOR", str(editor))
+    _git("commit", "--allow-empty", cwd=repo)
+    message = await asyncio.to_thread(subprocess.check_output,
+        ["git", "log", "-1", "--format=%B"], cwd=repo, text=True,
+    )
+    assert message.count("Co-authored-by: Original Person <original@example.test>") == 1
+    (repo / "reject-commit").touch()
+    rejected = await asyncio.to_thread(subprocess.run,
+        ["git", "commit", "--allow-empty", "-m", "Rejected"], cwd=repo,
+        capture_output=True, check=False,
+    )
+    assert rejected.returncode != 0
+    assert global_config.read_bytes() == before_global
+    for other in (seed, *(pool.path(b) for b in bindings if b != binding)):
+        assert (await asyncio.to_thread(subprocess.check_output,
+            ["git", "config", "user.name"], cwd=other, text=True,
+        )).strip() == "Original Person"
+
+    # Later preparation must not reset identity: the commit hook rejects drift instead.
+    (repo / "reject-commit").unlink()
+    before_commit = await asyncio.to_thread(subprocess.check_output,
+                                           ["git", "rev-parse", "HEAD"], cwd=repo)
+    for key, value in (("author.name", "Changed Author"),
+                       ("committer.email", "changed@example.test")):
+        previous = (await asyncio.to_thread(subprocess.check_output,
+                                            ["git", "config", key], cwd=repo, text=True)).strip()
+        _git("config", "--worktree", key, value, cwd=repo)
+        await pool.configure_git_identity(binding, "example-app[bot]", 7654321)
+        rejected = await asyncio.to_thread(subprocess.run,
+            ["git", "commit", "--allow-empty", "-m", "Wrong identity"],
+            cwd=repo, capture_output=True, text=True, check=False,
+        )
+        assert rejected.returncode != 0 and "identity" in rejected.stderr
+        assert (await asyncio.to_thread(subprocess.check_output,
+                                        ["git", "config", key], cwd=repo, text=True)).strip() == value
+        assert await asyncio.to_thread(subprocess.check_output,
+                                       ["git", "rev-parse", "HEAD"], cwd=repo) == before_commit
+        _git("config", "--worktree", key, previous, cwd=repo)
+    rejected = await asyncio.to_thread(subprocess.run,
+        ["git", "commit", "--allow-empty", "-m", "Explicit author",
+         "--author", "Someone Else <someone@example.test>"],
+        cwd=repo, capture_output=True, text=True, check=False,
+    )
+    assert rejected.returncode != 0 and "identity" in rejected.stderr
+    assert await asyncio.to_thread(subprocess.check_output,
+                                   ["git", "rev-parse", "HEAD"], cwd=repo) == before_commit
+    for login, user_id in (("different-app[bot]", 7654321), ("example-app[bot]", 8765432)):
+        with pytest.raises(VcsVerificationError, match="bot identity"):
+            await pool.configure_git_identity(binding, login, user_id)
+
+
 async def test_pool_reuses_warm_copy_bounds_overflow_and_fences_late_archive(tmp_path):
     # Local bindings remain allocation fences until the controller assigns a newer generation.
     root, _ = managed_seed(tmp_path)
