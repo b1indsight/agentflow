@@ -41,6 +41,7 @@ from app.worker.execution.prompts import (
 from app.worker.execution.vcs import (
     VcsVerificationError,
     agent_guidance,
+    local_commit,
     prepare_revision_context,
     prepare_vcs_context,
     verify_revision_outcome,
@@ -270,7 +271,8 @@ class WorkerExecutor:
             self.state.bind_workspace(binding)
             workspace = self.workspaces.path(binding)
             context = CodingExecutionContext(github=capability)
-            vcs_context = await prepare_revision_context(
+            answer_sha = await local_commit(workspace) if task.purpose == "answer" else None
+            vcs_context = None if answer_sha is not None else await prepare_revision_context(
                 workspace, task.branch, task.expected_head_sha, capability.token,
             )
             prompt = build_revision_prompt(task, self._repo_conventions(workspace))
@@ -287,12 +289,17 @@ class WorkerExecutor:
                                                     exit_code=1, failure="session_unavailable")
                     result.invocations = self.state.finish_invocation(invocation)
                     # A rejection is insufficient if anything changed while resume was attempted.
-                    fallback_context = await prepare_revision_context(
-                        workspace, task.branch, task.expected_head_sha, capability.token,
-                    )
-                    if ((fallback_context.git_remote_url, fallback_context.jj_remote_url)
-                            != (vcs_context.git_remote_url, vcs_context.jj_remote_url)):
-                        raise VcsVerificationError("push", "remote changed after session rejection")
+                    if answer_sha is not None:
+                        if await local_commit(workspace) != answer_sha:
+                            raise VcsVerificationError("commit", "local commit changed after session rejection")
+                    else:
+                        assert vcs_context is not None
+                        fallback_context = await prepare_revision_context(
+                            workspace, task.branch, task.expected_head_sha, capability.token,
+                        )
+                        if ((fallback_context.git_remote_url, fallback_context.jj_remote_url)
+                                != (vcs_context.git_remote_url, vcs_context.jj_remote_url)):
+                            raise VcsVerificationError("push", "remote changed after session rejection")
             if run is None:
                 result.mode = "fallback"
                 result.session_generation += 1
@@ -320,12 +327,19 @@ class WorkerExecutor:
             if result.mode == "resume" and run.session_id != task.session_id:
                 raise VcsVerificationError("session", "resume returned a different session")
             result.output = output
-            outcome = await verify_revision_outcome(vcs_context, output.vcs_backend_used)
-            result.vcs_backend = outcome.backend
-            result.branch = outcome.branch
-            result.commit_sha = outcome.commit_sha
-            result.remote_sha = outcome.remote_sha
-            result.clean_worktree = True
+            if answer_sha is not None:
+                if await local_commit(workspace) != answer_sha:
+                    raise VcsVerificationError("commit", "answer changed the local commit")
+                result.vcs_backend = output.vcs_backend_used
+                result.commit_sha = answer_sha
+            else:
+                assert vcs_context is not None
+                outcome = await verify_revision_outcome(vcs_context, output.vcs_backend_used)
+                result.vcs_backend = outcome.backend
+                result.branch = outcome.branch
+                result.commit_sha = outcome.commit_sha
+                result.remote_sha = outcome.remote_sha
+                result.clean_worktree = True
             result.exit_code = 0
         except VcsVerificationError as error:
             result.failure_stage = error.stage

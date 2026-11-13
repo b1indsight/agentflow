@@ -357,6 +357,16 @@ async def _verify_jj(context: VcsExecutionContext, *, require_new: bool = True) 
     return _outcome(VcsKind.JJ, context.branch, commit, remote)
 
 
+async def local_commit(repo_path: Path) -> str:
+    """Read only the native backend's current commit, without cleanliness or remote checks."""
+    if (repo_path / ".jj").exists():
+        return await _required_stdout(
+            "commit", "jj", "--ignore-working-copy", "log", "-r", "@", "--no-graph", "-T", "commit_id",
+            cwd=repo_path,
+        )
+    return await _required_stdout("commit", "git", "rev-parse", "HEAD", cwd=repo_path)
+
+
 async def prepare_revision_context(
     repo_path: Path, branch: str, expected_sha: str,
     push_token: SecretStr | None = None,

@@ -194,8 +194,8 @@ class RecordingPullRequest(PullRequest):
         )
 
     async def fetch_threads(self, *, cursor: str | None = None, limit: int = 100) -> Batch[ReviewThread]:
-        record_call(self.repository, "fetch_threads", number=self.number)
-        return Batch[ReviewThread]()
+        state = record_call(self.repository, "fetch_threads", number=self.number)
+        return Batch[ReviewThread](items=tuple(state.threads))
 
 
 class RecordingReviewThread(ReviewThread):

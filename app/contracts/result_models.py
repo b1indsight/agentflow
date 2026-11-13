@@ -106,6 +106,7 @@ class ResultPlan(FrozenModel):
     run: RunUpdate | None = None
     delivery: FlowDelivery | None = None
     revision: RevisionTaskResult | None = None
+    revision_purpose: Literal["answer", "revise"] = "revise"
     archive: ArchiveResult | None = None
     archive_notice: MergeArchiveNotice | None = None
     batch_id: int | None = None

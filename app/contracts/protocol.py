@@ -40,7 +40,7 @@ from app.domain.models import (
 )
 from app.domain.review_models import ReviewFeedback
 
-PROTOCOL_VERSION: Literal[21] = 21
+PROTOCOL_VERSION: Literal[22] = 22
 MAX_PAYLOAD_ITEMS = 32
 MessageId = Annotated[str, Field(strict=True, pattern=r"^[0-9a-f]{32}$")]
 ConnectionEpoch = Annotated[str, Field(strict=True, min_length=1, max_length=64)]
@@ -87,6 +87,7 @@ class RevisionTask(ProtocolModel):
     attempt_id: int
     feedback: list[ReviewFeedback]
     kind: Literal["revision"] = "revision"
+    purpose: Literal["answer", "revise"] = "revise"
     flow_id: int = Field(gt=0)
     repo: str
     branch: str
@@ -587,7 +588,7 @@ class Message[Payload: ToolCall | ToolResult](ProtocolModel):
     performs static checks only; receipt ACKs confer no business completion or authority.
     """
 
-    protocol_version: Literal[21]
+    protocol_version: Literal[22]
     message_id: MessageId
     connection_epoch: ConnectionEpoch | None
     ack: StrictBool
@@ -798,7 +799,7 @@ def accept_stop_id(receipt_id: MessageId) -> MessageId:
 
 
 class MessageHeader(TypedDict):
-    protocol_version: Literal[21]
+    protocol_version: Literal[22]
     message_id: MessageId
     connection_epoch: str | None
     ack: bool

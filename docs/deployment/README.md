@@ -63,7 +63,8 @@ Judge 配置只提供给 control，在 serve 的 `.env` 配置 `FLOWTOOL_JUDGE_M
 进程内创建，跨连接重试保留，请求使用独立临时子目录；退出清除，不创建编码 workspace 或 journal。
 断线重试可能与旧计算重叠并重复计费，不保证模型调用恰好一次。
 
-serve 和 worker 需协调升级到 wire21，journal5 与执行结果 inbox1 不变；Control 本地归档通知保留 inbox2，无旧 wire fallback。
+serve 和 worker 需协调升级到 wire22，journal5 与执行结果 inbox1 不变；Control 本地归档通知保留 inbox2，无旧 wire fallback。
+wire22 的 RevisionTask 冻结 answer/revise 用途；旧 worker 不能接收 answer 并按改码任务运行。升级前收敛在途任务和未确认的旧直接答复；旧 answer 继续按原 marker 核对，不转成 worker 任务重发。历史 context/decision/result digest 不重算，不自动重跑被旧上下文阻塞的批次。
 任务输入使用纯文本；展示标题复用该推理队列，首轮准备后有界尝试一次逻辑调用（总预算 30 秒），不阻塞编码。
 生成前或失败时依次显示 Issue 缓存标题、PR 标题、Flow 编号；不会因 Issue 编辑自动开启会话或重新推理标题。
 workers 现为 `(worker_id, workspace)` 复合主键；旧 schema 须显式迁移，不能直接启动新版本。

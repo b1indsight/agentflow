@@ -8,6 +8,7 @@
 
 ## Unreleased
 
+- Judge 的 answer/revise 统一创建 worker 任务，answer 显式要求只回答、不改码；worker 比较本地提交不变，controller 核对目标 open PR 的冻结 head。复用逐条线程答复和回执恢复，answer 不更新交付提交、不请求再次 review。Judge 上下文仅包含相关 PR、冻结反馈、所在讨论和引用片段，无关大 diff 不再造成 WAIT。wire22 须协调升级；journal5、历史结果和上下文 digest 保持不变。
 - Issue 成为可选输入：看板顶栏“新建 Flow”选择授权代码仓库并输入内容，无需 GitHub 事件；
   同时提供 owner-only 创建 API、分页目标清单与管理 CLI。原始任务持久保存并用于首轮、修订和审核，
   无 Issue 时跳过专属来源/关闭指令/归档目标，PR 闭环与停止恢复规则保持不变。

@@ -1,6 +1,7 @@
 """Plan per-thread explanations and conservative whole-thread completion from frozen feedback."""
 
 from dataclasses import dataclass, field
+from typing import Literal
 
 from app.contracts.protocol import RevisionTaskResult
 from app.contracts.result_models import CommentEffect, Effect, ResolveEffect, ThreadReplyEffect
@@ -41,7 +42,7 @@ class ResolutionNotes:
 
 def plan_resolution(
     flow: Flow, number: int, batch: ReviewBatch, result: RevisionTaskResult,
-    historical: list[ReviewFeedback],
+    historical: list[ReviewFeedback], *, purpose: Literal["answer", "revise"] = "revise",
 ) -> ResolutionNotes:
     """Freeze one reply and one resolution check per mapped thread; keep unmapped feedback pending."""
     assert flow.installation_id is not None and result.output is not None
@@ -81,7 +82,8 @@ def plan_resolution(
     for item in [*historical, *addressed]:
         if item.kind is ReviewItemKind.INLINE:
             coverage_by_comment.setdefault(item.github_id, []).append(item)
-    commit = f"已核验提交：[ `{result.commit_sha}` ](https://github.com/{flow.repo}/commit/{result.commit_sha})"
+    commit = ("问题答复（未交付代码变更）" if purpose == "answer" else
+              f"已核验提交：[ `{result.commit_sha}` ](https://github.com/{flow.repo}/commit/{result.commit_sha})")
     for thread_id, items in groups.items():
         thread = mapped[thread_id]
         roots = [c for c in thread.comments.items if c.reply_to_id is None]

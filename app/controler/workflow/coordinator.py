@@ -29,7 +29,7 @@ from app.controler.workflow.preparation import (
     PreparationState,
 )
 from app.controler.workflow.results import ResultApplication
-from app.controler.workflow.revisions import verify_revision_remote
+from app.controler.workflow.revisions import verify_answer_remote, verify_revision_remote
 from app.domain.context_models import ReviewContext
 from app.domain.inference_models import InferenceMessage, InferenceTask
 from app.domain.judge_models import JudgeDecision
@@ -89,7 +89,7 @@ class JobCoordinator:
         )
 
     async def triage(self, batch: ReviewBatch, judge: Judge) -> None:
-        """Resolve a feedback prerequisite, enqueueing a worker job only for revision."""
+        """Resolve feedback into an answer/revise worker task or a wait/ignore decision."""
         with self.database.transaction() as tx:
             reviews_tx = self.reviews.using(tx)
             flow = tx.lock_workflow(batch.flow_id)
@@ -117,13 +117,14 @@ class JobCoordinator:
         elif verdict.verdict is Verdict.REVISE and verdict.confidence < self.settings.confidence_threshold:
             verdict = TriageVerdict(verdict=Verdict.WAIT, confidence=verdict.confidence,
                 reason=f"low-confidence: {verdict.reason}"[:2000], open_points=verdict.open_points)
-        if verdict.verdict is Verdict.ANSWER:
+        if verdict.verdict is Verdict.ANSWER and batch.decision is not None and verdict.answer:
+            # Recover only already frozen pre-wire22 publications through their original marker.
             if await self._answer(flow, batch, context, decision.model_copy(update={"verdict": verdict})):
                 emit_hook(self.plugins, "on_review", flow=flow)
             return
         # Remote reads can outlive close/merge or a changed PR baseline.
         remote = (await repo.fetch_pull_request(context.pr_number)
-                  if verdict.verdict is Verdict.REVISE else None)
+                  if verdict.verdict in {Verdict.ANSWER, Verdict.REVISE} else None)
         with self.database.transaction() as tx:
             jobs_tx = self.jobs.using(tx)
             reviews_tx = self.reviews.using(tx)
@@ -136,9 +137,10 @@ class JobCoordinator:
                 reviews_tx.invalidate_context(batch, context)
                 return
             reviews_tx.record_decision(batch, decision.model_copy(update={"verdict": verdict}))
-            if verdict.verdict is Verdict.REVISE:
+            if verdict.verdict in {Verdict.ANSWER, Verdict.REVISE}:
                 job = jobs_tx.enqueue_job(flow.id, JobKind.REVISION,
-                    {"batch_id": batch.id, "instruction": verdict.instruction})
+                    {"batch_id": batch.id, "instruction": verdict.instruction,
+                     "purpose": verdict.verdict.value})
                 reviews_tx.advance(batch.id, job)
             else:
                 reviews_tx.complete(batch.id,
@@ -413,6 +415,7 @@ class JobCoordinator:
             assert flow.installation_id is not None
             repository = self.github.installation(flow.installation_id).repository(flow.repo)
             delivery = self._delivery(flow)
+            purpose = (job.payload or {}).get("purpose", "revise")
             if attempt.revision_cycles + 1 > self.settings.max_revision_cycles:
                 await self.fail(job, "已达最大修订轮数，暂停。")
                 return JobState.FAILED
@@ -421,7 +424,8 @@ class JobCoordinator:
                 await self.fail(job, "修订任务缺少有效 worker binding。")
                 return JobState.FAILED
             try:
-                mismatch = await self._read(job, lambda: verify_revision_remote(
+                verify = verify_answer_remote if purpose == "answer" else verify_revision_remote
+                mismatch = await self._read(job, lambda: verify(
                     repository,
                     flow, delivery, delivery.head_sha or "",
                 ))
@@ -437,6 +441,7 @@ class JobCoordinator:
             assert delivery.head_sha and delivery.base_branch and delivery.pr_number
             task = RevisionTask(
                 batch_id=batch.id,
+                purpose=purpose,
                 flow_id=flow.id,
                 attempt_id=attempt.id,
                 repo=flow.repo,

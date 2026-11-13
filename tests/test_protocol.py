@@ -259,6 +259,7 @@ def test_item_metadata_is_required_on_the_wire(key: str) -> None:
         {"protocol_version": 18},
         {"protocol_version": 19},
         {"protocol_version": 20},
+        {"protocol_version": 21},
         {"message_id": "A" * 32},
         {"ack": 1},
         {"ack": "true"},
@@ -297,7 +298,7 @@ def test_mixed_control_ack_and_business_have_independent_identities() -> None:
         [terminal_item, accept, history], control="heartbeat", **IDENTITY, ack=True, ack_id="c" * 32
     )
     parsed = parse_worker_message(json.dumps(data))
-    assert PROTOCOL_VERSION == 21
+    assert PROTOCOL_VERSION == 22
     assert isinstance(parsed.payload[0], ExecuteResult)
     assert parsed.payload[0].terminal() == terminal
     assert isinstance(parsed.payload[1], AcceptResultRequest)
