@@ -1,10 +1,10 @@
 # Worker bot 提交署名 — Feature record
 
-当前实现按用户的新方向收窄：首次编码准备时只在 workspace 的 Git 配置中设置当前 App 的 bot，后续提交检查署名，将覆盖前的账号保留为标准 `Co-authored-by`。用户已确认参考为 `gh-bot`；初始方案作为历史保留，下文 [001]–[005] 记录后续要求与实际实现。
+当前实现按用户的新方向收窄：首次编码准备时只在 workspace 的 Git 配置中设置当前 App 的 bot，后续提交检查署名，将覆盖前的账号保留为标准 `Co-authored-by`。用户已确认参考为 `gh-bot`；初始方案作为历史保留，下文 [001]–[006] 记录后续要求与实际实现。
 
-**Stage:** 原 worker 署名功能已合并；[005] 的 App Bot 身份来源修复已完成本地实现与验证，进入 PR 审查，尚未部署。
-**PR:** 原实现为已合并的 [#150](https://github.com/b1indsight/agentflow/pull/150)；[005] 后续修复使用 `fix/app-bot-identity` → `main`，不重新发布原实现。
-**基线:** 原实现基于 `9811f500dd11`；[005] 发布基于只读 fetch 后的 `main@origin`（`c4ee5ebee5a3`），原共享工作区及其并行改动保留。
+**Stage:** 原 worker 署名功能已合并；[005]–[006] 的身份来源及限流重试修复已完成本地实现与验证，纳入同一 PR 审查，尚未部署。
+**PR:** 原实现为已合并的 [#150](https://github.com/b1indsight/agentflow/pull/150)；[005] 后续修复为 [#153](https://github.com/b1indsight/agentflow/pull/153)，使用 `fix/app-bot-identity` → `main`。
+**基线:** 原实现基于 `9811f500dd11`；[005] 发布基于 `main@origin`（`c4ee5ebee5a3`），[006] 为其后续修复；原共享工作区及其并行改动保留。
 
 ## 1. Initial plan
 
@@ -131,3 +131,10 @@
 - **测试与验证：** 扩展既有 capability、评论/线程恢复、router 与反馈测试，新增身份失败后重试/并发共享、Webhook 无身份不领取与恢复的最小回归。先运行旧实现并观察带 `-bot` slug 的 capability 与评论恢复失败，再验证修改后的关联测试通过。归档凭据失效测试显式使用已解析的 App 身份，继续隔离 installation-token 的原失败边界；冷启动身份解析由独立恢复回归覆盖。使用本轮专属 loopback TCP PostgreSQL 17 执行 `.venv/bin/pytest -q`，首轮仅该旧归档夹具失败；适配后执行 `.venv/bin/pytest -q tests/test_archive_status.py tests/test_router.py tests/test_reconcile_feedback.py` 及 `.venv/bin/pytest -q --lf` 复测通过。其余全量用例通过或按既有条件跳过。Ruff、Mypy 与 diff 空白检查通过，未放宽产品身份或回执校验。证据分别见本线程 `.amp/in/artifacts/app-bot-identity-{red,integration,full,archive-recovery,final-rerun,checks}.log`；专属测试数据库已停止并清理，没有操作既有数据库或生产服务。
 - **较简方案对照：** 使用相同身份回归，在独立 Python 进程将锁替换为无操作上下文，失败一次后并发的三个调用产生三个成功请求，总请求由两个变成四个；仅移除缓存时，后续读取再请求一次，总数变成三个。两项都触发预期测试失败，源文件未改动。因此保留成功缓存与单次查询锁；不引入额外身份模型、匹配 helper 或全局启动网络 gate。可复现方法为 `pytest.main(['-q', 'tests/test_github_client.py', '-k', 'app_bot_identity'])` 配合上述单一替换，证据见本线程 `.amp/in/artifacts/app-bot-identity-ablation.log`。
 - **设计辅助与交付：** 本机 Claude Code 初始化及响应均确认 `claude-opus-5-5`，工具与 MCP 列表为空。采纳 App 自有异步解析、同步只读身份和 router 接收字符串的边界，未增加匹配 helper。当前仅本地修改，未提交、推送、部署或重试生产任务；Job 24 是否恢复须在另行升级并重试后验证。
+
+### [006] — 2026-11-13 — Webhook 的 App 身份查询遵守限流等待
+
+- **用户范围：** 用户在审查问题说明后要求“修复2”，仅修复 Webhook 冷启动身份查询忽略 `Retry-After` 的问题。第 1 项 Bot login 大小写兼容风险保持不动，不改变 worker、协议或 assignment capability 的失败分类。
+- **实际选择：** `WebhookConsumer.run` 单独处理查询产生的 `GitHubError`，复用 `retry_delay(1, datetime.now(UTC), error)` 后通过可取消的 `asyncio.sleep` 等待，再进入下一轮。秒数及 HTTP 日期均由现有 helper 解释，新事件的 wakeup 不会提前结束等待。数据库异常仍走原有普通轮询，取消时等待已运行 DB 线程的合同不变；身份失败仍不领取 receipt。
+- **边界与替代：** 不在共享 App 对象增加失败缓存、冷却状态或延长网络请求。反馈轮询与 marker 恢复已有各自重试路径；将 Webhook 的等待放进共享解析器会扩大到 capability 准备等消费者。无有效 `Retry-After` 时沿用 helper 的首轮退避，不新增计数器、配置或后台任务。本机 Claude Code 的初始化及响应均确认为 `claude-opus-5-5`，工具与 MCP 为空；采纳消费者本地等待的范围建议，代码和测试由主线程核对。
+- **回归与验证：** 扩展既有 receipt 恢复回归，以固定时钟和事件控制的等待验证秒数、HTTP 日期、缺失 header 的退避、反复 wakeup、等待后恢复及取消时不消费 receipt。旧实现未进入等待并提前处理事件，回归先失败；修改后，Webhook、GitHub client、ingress、反馈/PR 轮询、preparation retry 与 label 同步相关测试通过，Ruff、Mypy 与 diff 空白检查通过。证据见 `.amp/in/artifacts/app-bot-retry-{red,targeted,checks}.log`。GitHub 请求为测试替身，数据库使用本轮独立 PostgreSQL，没有部署或重试生产任务。

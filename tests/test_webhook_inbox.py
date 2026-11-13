@@ -4,7 +4,7 @@ import asyncio
 import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from queue import Queue
 from threading import Event
 from time import monotonic
@@ -68,14 +68,37 @@ def test_received_delivery_survives_new_consumer_and_duplicate(store):
     assert inbox.list()[0].state == "done"
 
 
-async def test_bot_lookup_retries_without_claiming_receipts(store, tmp_path, monkeypatch):
-    # A GitHub outage before resolving the App must leave durable receipts untouched.
+@pytest.mark.parametrize("kind,retry_after,delay,cancel", [
+    (GitHubErrorKind.TRANSIENT, None, 2, False),
+    (GitHubErrorKind.RATE_LIMITED, "600", 600, False),
+    (GitHubErrorKind.RATE_LIMITED, "Fri, 13 Nov 2026 12:10:00 GMT", 600, False),
+    (GitHubErrorKind.RATE_LIMITED, "600", 600, True),
+])
+async def test_bot_lookup_retries_without_claiming_receipts(
+    store, tmp_path, monkeypatch, kind, retry_after, delay, cancel,
+):
+    # Cold-start throttling must survive webhook wakeups without consuming durable receipts.
     receive(store.webhooks)
     worker = consumer(store)
     worker.github = GitHubApp(app_settings(tmp_path))
     applied = asyncio.Event()
     worker.jobs_available = applied.set
+    sleeping, release = asyncio.Event(), asyncio.Event()
     attempts = 0
+
+    async def sleep(seconds):
+        assert seconds == delay
+        sleeping.set()
+        await release.wait()
+
+    # Replace this consumer's asyncio binding, not the shared module used by the test loop.
+    monkeypatch.setattr("app.controler.events.webhooks.asyncio", SimpleNamespace(
+        **(vars(asyncio) | {"sleep": sleep}),
+    ))
+    now = datetime(2026, 11, 13, 12, tzinfo=UTC)
+    monkeypatch.setattr("app.controler.events.webhooks.datetime", SimpleNamespace(
+        now=lambda _: now,
+    ), raising=False)
 
     async def get_app():
         nonlocal attempts
@@ -84,7 +107,7 @@ async def test_bot_lookup_retries_without_claiming_receipts(store, tmp_path, mon
         assert receipt.state == "pending" and receipt.attempts == 0
         if attempts == 1:
             worker.wakeup.set()
-            raise GitHubError(GitHubErrorKind.TRANSIENT, "get_app")
+            raise GitHubError(kind, "get_app", retry_after=retry_after)
         return response(SimpleNamespace(id=123, slug="flowtool-bot"))
 
     app_client(monkeypatch, lambda **kwargs: SimpleNamespace(
@@ -95,14 +118,27 @@ async def test_bot_lookup_retries_without_claiming_receipts(store, tmp_path, mon
     assert store.webhooks.list()[0].attempts == 0
     task = asyncio.create_task(worker.run())
     try:
-        await asyncio.wait_for(applied.wait(), 5)
+        await asyncio.wait_for(sleeping.wait(), 1)
+        for _ in range(3):
+            worker.wakeup.set()
+            await asyncio.sleep(0)
+            receipt = store.webhooks.list()[0]
+            assert attempts == 1 and receipt.state == "pending" and receipt.attempts == 0
+        if not cancel:
+            release.set()
+            await asyncio.wait_for(applied.wait(), 5)
     finally:
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
-            await task
-    assert attempts == 2 and worker.github.bot_login == "flowtool-bot[bot]"
-    assert store.webhooks.list()[0].state == "done"
-    assert store.flows.get_active_flow("owner/repo", 7) is not None
+            await asyncio.wait_for(task, 1)
+    if cancel:
+        receipt = store.webhooks.list()[0]
+        assert attempts == 1 and receipt.state == "pending" and receipt.attempts == 0
+        assert store.flows.get_active_flow("owner/repo", 7) is None
+    else:
+        assert attempts == 2 and worker.github.bot_login == "flowtool-bot[bot]"
+        assert store.webhooks.list()[0].state == "done"
+        assert store.flows.get_active_flow("owner/repo", 7) is not None
 
 
 def test_failure_after_event_reservation_rolls_back_business_and_replays(store, monkeypatch):

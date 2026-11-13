@@ -142,7 +142,8 @@ secret 或个人 Git/gh 配置。每轮 Git/gh 继续使用 GitHub App 下发的
 不改变个人全局配置。control 用当前 App 的 JWT 查询 `GET /app`，核对 App ID 和非空 slug，
 自动使用 `slug[bot]`，再查询并核对真实 Bot 用户及正数用户 ID；身份查询失败时准备失败，
 不接受其他 App 的 bot。评论恢复、Webhook 及反馈轮询共用这个身份，忽略大小写匹配；
-身份解析失败时 Webhook 保持待处理，下轮重试，不在数据库事务中访问 GitHub。
+Webhook 的身份查询遇到 GitHub 错误时按现有退避等待，并遵守 `Retry-After` 秒数或 HTTP 日期；
+新事件不会提前触发查询，等待可随 controller 停止取消。receipt 保持待处理，不在数据库事务中访问 GitHub。
 首次编码准备时，在当前 workspace 的 Git
 `config.worktree` 中设置 bot 的 `user.*`、`author.*`、`committer.*`，保存原有效作者并安装
 hooks；完成后记录 bot 身份。后续准备只核对当前 App 身份，不重写配置或 hooks。

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from datetime import UTC, datetime
 from functools import partial
 
 from loguru import logger
@@ -13,7 +14,7 @@ from pydantic import ValidationError
 from app.controler.config import ServerSettings
 from app.controler.events.router import EventRouter
 from app.controler.workflow.service import ControlService
-from app.github import GitHubApp
+from app.github import GitHubApp, GitHubError, retry_delay
 from app.persistence.console_sync import ConsoleSyncStore
 from app.persistence.database import Database
 from app.persistence.webhooks import WebhookStore
@@ -110,6 +111,10 @@ class WebhookConsumer:
                     # Do not close the connection pool while a DB-only transaction is still running.
                     await work
                     raise
+            except GitHubError as error:
+                logger.warning("webhook App lookup deferred: reason={}", error.kind.value)
+                await asyncio.sleep(retry_delay(1, datetime.now(UTC), error))
+                continue
             except Exception as error:  # noqa: BLE001 -- DB outage leaves durable claims for the next sweep
                 logger.warning("webhook sweep unavailable: reason={}", type(error).__name__)
             try:
