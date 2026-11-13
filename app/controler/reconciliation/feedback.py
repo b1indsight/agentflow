@@ -60,7 +60,6 @@ class FeedbackReconciler:
         github: GitHubApp,
         *,
         settle_seconds: float,
-        bot_login: str = "flowtool[bot]",
         interval: float = 300,
         batch_size: int = 64,
         concurrency: int = 4,
@@ -71,7 +70,7 @@ class FeedbackReconciler:
         self.reconcile_store = ReconcileStore(database)
         self.reviews = ReviewStore(database)
         self.github = github
-        self.settle_seconds, self.bot_login = settle_seconds, bot_login.casefold()
+        self.settle_seconds = settle_seconds
         self.interval, self.batch_size, self.concurrency = interval, batch_size, concurrency
         self._sweep_lock = asyncio.Lock()
 
@@ -123,6 +122,7 @@ class FeedbackReconciler:
                 if flow.installation_id is None:
                     raise ValueError("missing installation")
                 boundary = reviews_tx.observation_boundary()
+            bot_login = (await self.github.resolve_bot_login()).casefold()
             number = flow.issue_number if check.source == "issue_comments" else delivery.pr_number
             assert number is not None
             repo = self.github.installation(flow.installation_id).repository(flow.repo)
@@ -134,7 +134,7 @@ class FeedbackReconciler:
                 threads = threads.model_copy(update={"threads": tuple(thread.model_copy(update={
                     "comments": thread.comments.model_copy(update={"items": tuple(
                         comment.model_copy(update={"is_bot": comment.is_bot
-                        or comment.author.casefold() == self.bot_login}) for comment in thread.comments.items),
+                        or comment.author.casefold() == bot_login}) for comment in thread.comments.items),
                     }),
                 }) for thread in threads.threads)})
                 diagnostic = "; ".join(threads.limitations) or (
@@ -238,7 +238,7 @@ class FeedbackReconciler:
     ) -> tuple[list[FeedbackUpdate], str | None]:
         updates, diagnostic = [], None
         for item in page.items:
-            if (item.author is None or item.is_bot or item.author.casefold() == self.bot_login
+            if (item.author is None or item.is_bot or item.author.casefold() == self.github.bot_login.casefold()
                     or item.state == "pending"):
                 continue
             inert = item.body.strip().startswith("/flow")

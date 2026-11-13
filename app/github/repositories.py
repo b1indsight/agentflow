@@ -240,14 +240,10 @@ class Repository(BaseModel):
             return PullRequest._from_response(self, data)
 
     async def create_push_capability(self) -> PushCapability:
+        bot_login = await self.installation.app.resolve_bot_login()
         client = self.installation.app._client()
 
         with translate_errors("create_push_capability"):
-            app = (await client.rest.apps.async_get_authenticated()).parsed_data
-            if (app is None or app.id != self.installation.app.app_id or not app.slug
-                    or f"{app.slug}[bot]".casefold() != self.installation.app.bot_login.casefold()):
-                raise GitHubError(GitHubErrorKind.UNEXPECTED_RESPONSE, "create_push_capability")
-            bot_login = f"{app.slug}[bot]"
             data = (await client.rest.apps.async_create_installation_access_token(
                 self.installation.installation_id, repositories=[self.name],
                 permissions={"contents": "write"},
@@ -267,5 +263,5 @@ class Repository(BaseModel):
             return PushCapability(
                 token=SecretStr(data.token), repository=self.full_name,
                 permissions=permissions, expires_at=datetime.fromisoformat(data.expires_at),
-                bot_login=bot.login, bot_user_id=bot.id,
+                bot_login=bot_login, bot_user_id=bot.id,
             )

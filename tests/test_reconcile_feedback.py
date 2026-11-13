@@ -26,6 +26,7 @@ from app.github import (
 from app.persistence.reconciliation import ReconcileStore
 from app.persistence.store import Store
 from tests.github import RecordingGitHub, record_call
+from tests.test_github_client import AsyncEndpoint, app_client, response
 from tests.test_review_batches import batch_for, claim, feedback, ingest, run_triage, settle
 from tests.test_review_batches import (
     review_flow as review_flow,  # noqa: PLC0414 - fixture re-export
@@ -213,13 +214,21 @@ async def test_review_edits_and_invalidation_preserve_versions(store, review_flo
 
 
 @pytest.mark.parametrize("field,value", [("is_bot", True), ("body", "/flow stop"),
-                                         ("state", "pending"), ("author", "flowtool[bot]")])
-async def test_old_commands_and_bots_never_wake_or_control(store, review_flow, field, value, feedback_resources):
+                                         ("state", "pending"), ("author", "Flowtool-bot[bot]")])
+async def test_old_commands_and_bots_never_wake_or_control(
+    store, review_flow, field, value, feedback_resources, monkeypatch,
+):
     flow, clock = review_flow
     github = GitHub(clock)
+    github._bot_login = None
+    get_app = AsyncEndpoint(response(SimpleNamespace(id=1, slug="flowtool-bot")))
+    app_client(monkeypatch, lambda **kwargs: SimpleNamespace(
+        rest=SimpleNamespace(apps=SimpleNamespace(async_get_authenticated=get_app)),
+    ))
     item = page(clock).items[0].model_copy(update={field: value})
     github.pages["reviews", None] = Batch(items=[item])
     await poller(store, github)._sweep()
+    assert store.reconcile.feedback_get(flow.id, "reviews").last_success_at is not None
     assert store.reviews.pending(flow.id) == []
     assert store.flows.get_flow(flow.id).state is FlowState.REVIEW
 
@@ -465,8 +474,8 @@ async def test_resumed_round_rejects_old_issue_comments_even_if_first_seen_or_ed
         assert store.reconcile.feedback_get(flow.id, "issue_comments").last_success_at is not None
     else:
         router = EventRouter(service, SimpleNamespace(
-            bot_login="flowtool[bot]", allowlist={"alice"}, settle_seconds=75, submit_grace_seconds=15,
-        ), database=store.database)
+            allowlist={"alice"}, settle_seconds=75, submit_grace_seconds=15,
+        ), bot_login="flowtool[bot]", database=store.database)
         for i, timestamp in enumerate(created):
             router.dispatch("issue_comment", f"round-comment-{i}", {
                 "repository": {"full_name": flow.repo}, "issue": {"number": flow.issue_number},

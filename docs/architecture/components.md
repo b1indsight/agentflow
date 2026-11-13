@@ -77,7 +77,7 @@ Worker 内容按 Attempt 归属，PR 内容按交付身份归属，Issue 共享/
 
 当前实现：
 
-- 触发/反馈忽略配置 bot login 及 GitHub `type=Bot` 的事件；合法关联 PR 的合并事实不受此过滤；
+- 触发/反馈忽略当前 App 自动解析的 bot login（不区分大小写）及 GitHub `type=Bot` 的事件；合法关联 PR 的合并事实不受此过滤；
 - 以 `X-GitHub-Delivery` 原子占有并持久化去重，只有成功插入的 handler 才继续处理，同时记录原始 payload；
 - 仅允许 allowlist 用户通过 `issues.labeled(flow)` 创建 queued Flow 与 initial job；
 - `issues.unlabeled(flow)` 或严格等于 `/flow stop` 的评论请求废弃收尾；

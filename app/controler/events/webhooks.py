@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from datetime import UTC, datetime
 from functools import partial
 
 from loguru import logger
@@ -13,6 +14,7 @@ from pydantic import ValidationError
 from app.controler.config import ServerSettings
 from app.controler.events.router import EventRouter
 from app.controler.workflow.service import ControlService
+from app.github import GitHubApp, GitHubError, retry_delay
 from app.persistence.console_sync import ConsoleSyncStore
 from app.persistence.database import Database
 from app.persistence.webhooks import WebhookStore
@@ -22,6 +24,7 @@ class WebhookConsumer:
     def __init__(
         self,
         settings: ServerSettings,
+        github: GitHubApp,
         *,
         database: Database,
         plugins: PluginManager,
@@ -30,12 +33,14 @@ class WebhookConsumer:
         self.database = database
         self.webhook_store = WebhookStore(database)
         self.settings = settings
+        self.github = github
         self.plugins = plugins
         self.jobs_available = jobs_available
         self.wakeup = asyncio.Event()
 
     def sweep(self, loop: asyncio.AbstractEventLoop | None = None) -> int:
         """Create services per receipt and publish notifications after its transaction commits."""
+        bot_login = self.github.bot_login
         inbox = self.webhook_store
         handled = 0
         for _ in range(50):
@@ -62,7 +67,7 @@ class WebhookConsumer:
                         after_commit=callbacks,
                         database=tx,
                     )
-                    router = EventRouter(service, self.settings, database=tx)
+                    router = EventRouter(service, self.settings, bot_login=bot_login, database=tx)
                     router.dispatch(
                         item.event_type,
                         item.delivery_id,
@@ -98,6 +103,7 @@ class WebhookConsumer:
         while True:
             self.wakeup.clear()
             try:
+                await self.github.resolve_bot_login()
                 work = asyncio.create_task(asyncio.to_thread(self._cycle, asyncio.get_running_loop()))
                 try:
                     await asyncio.shield(work)
@@ -105,6 +111,10 @@ class WebhookConsumer:
                     # Do not close the connection pool while a DB-only transaction is still running.
                     await work
                     raise
+            except GitHubError as error:
+                logger.warning("webhook App lookup deferred: reason={}", error.kind.value)
+                await asyncio.sleep(retry_delay(1, datetime.now(UTC), error))
+                continue
             except Exception as error:  # noqa: BLE001 -- DB outage leaves durable claims for the next sweep
                 logger.warning("webhook sweep unavailable: reason={}", type(error).__name__)
             try:

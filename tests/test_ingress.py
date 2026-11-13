@@ -23,6 +23,7 @@ from app.domain.models import Flow, FlowState, JobKind
 from app.persistence.store import Store
 from app.plugins import get_plugin_manager
 from app.telemetry.metrics import Metrics
+from tests.github import RecordingGitHub
 from tests.workspace_fixtures import register_worker
 
 
@@ -46,6 +47,7 @@ class WebhookRuntime(ServerRuntime):
         if store is not None:
             self.webhooks = WebhookConsumer(
                 self.settings,
+                RecordingGitHub(),
                 database=store.database,
                 plugins=get_plugin_manager(),
                 jobs_available=lambda: None,
@@ -120,7 +122,6 @@ async def test_valid_signature_dispatches_webhook(
         database_url="postgresql://localhost/test",
         worker_tokens={"worker-1": SecretStr("worker-secret")},
         allowlist=["alice"],
-        bot_login="flowtool[bot]",
         github_webhook_secret="webhook-secret",
         host="test",
         port=0,
@@ -132,6 +133,7 @@ async def test_valid_signature_dispatches_webhook(
         EventRouter(
             RoutingService(store),
             settings,
+            bot_login="flowtool[bot]",
             database=store.database,
         ),
         settings,

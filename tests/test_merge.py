@@ -38,13 +38,14 @@ def merge_payload(flow: Flow) -> dict:
 async def route_merge(store: Store, flow: Flow, event: str = "merge-1", payload=None):
     settings = ServerSettings.model_construct(database_url="postgresql://localhost/test",
                              worker_tokens={"worker-1": SecretStr("worker-secret")},
-                             allowlist=["alice"], bot_login="flowtool[bot]", trigger_label="flow",
+                             allowlist=["alice"], trigger_label="flow",
                                settle_seconds=75.0, submit_grace_seconds=15.0)
     EventRouter(
         ControlService(
             database=store.database,
         ),
         settings,
+        bot_login="flowtool[bot]",
         database=store.database,
     ).dispatch(
         "pull_request",

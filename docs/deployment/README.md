@@ -32,10 +32,12 @@ chmod 600 .env
 | `FLOWTOOL_GITHUB_APP_ID` | App ID |
 | `FLOWTOOL_GITHUB_PRIVATE_KEY_PATH` | control 账号可读的私钥路径 |
 | `FLOWTOOL_GITHUB_WEBHOOK_SECRET` | 与 GitHub App 设置相同的随机 secret |
-| `FLOWTOOL_BOT_LOGIN` | 实际 bot login |
 | `FLOWTOOL_ALLOWLIST` / `FLOWTOOL_REVIEWERS` | 可触发用户 / 请求 review 的用户 |
 | `FLOWTOOL_WORKER_TOKENS` | 例如 `{"worker-1":"替换为随机token"}`，与 worker 一致 |
 | `FLOWTOOL_HOST` / `FLOWTOOL_PORT` | 本文使用 `127.0.0.1` / `8000` |
+
+Bot login 自动取自当前 App 的 `slug[bot]`，无需手工配置；旧 `.env` 中的
+`FLOWTOOL_BOT_LOGIN` 已不再读取，可以删除。解析成功后在当前进程共享，重启后重新查询。
 
 无需提前创建 `flow`、`flow:in-review`、`flow:done`：serve 首轮后台扫描会在 App 已授权的
 非归档仓库补齐缺失定义。修改名称时同步修改对应配置；已有标签的名称、颜色和描述保留。
@@ -137,9 +139,12 @@ FLOWTOOL_CODEX_RUN_TIMEOUT_SECONDS=1200
 Amp 同样只在该专用 worker 身份下认证：使用其专用 HOME 执行 `amp login`，或提供可选
 `AMP_API_KEY`（Amp CLI 自行处理其优先级）。不要复制或挂载个人 HOME、Docker socket、control
 secret 或个人 Git/gh 配置。每轮 Git/gh 继续使用 GitHub App 下发的 assignment 凭据和临时配置，
-不改变个人全局配置。control 用当前 App 的 JWT 查询 `GET /app`，核对 App ID，并要求
-`FLOWTOOL_BOT_LOGIN` 与响应的 `slug[bot]` 一致（忽略大小写），再查询真实 Bot 用户 ID；
-身份不匹配时准备失败，不接受其他 App 的 bot。首次编码准备时，在当前 workspace 的 Git
+不改变个人全局配置。control 用当前 App 的 JWT 查询 `GET /app`，核对 App ID 和非空 slug，
+自动使用 `slug[bot]`，再查询并核对真实 Bot 用户及正数用户 ID；身份查询失败时准备失败，
+不接受其他 App 的 bot。评论恢复、Webhook 及反馈轮询共用这个身份，忽略大小写匹配；
+Webhook 的身份查询遇到 GitHub 错误时按现有退避等待，并遵守 `Retry-After` 秒数或 HTTP 日期；
+新事件不会提前触发查询，等待可随 controller 停止取消。receipt 保持待处理，不在数据库事务中访问 GitHub。
+首次编码准备时，在当前 workspace 的 Git
 `config.worktree` 中设置 bot 的 `user.*`、`author.*`、`committer.*`，保存原有效作者并安装
 hooks；完成后记录 bot 身份。后续准备只核对当前 App 身份，不重写配置或 hooks。
 本地 `commit-msg` hook 在追加原账号的 `Co-authored-by` 前核对实际 Author/Committer，

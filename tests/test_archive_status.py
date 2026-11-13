@@ -391,6 +391,8 @@ async def test_archive_auth_failure_preserves_whether_comment_was_sent(
 
     adapter, _ = archive_adapter(tmp_path, monkeypatch, transport,
                                  invalid_key=failure == "invalid_key")
+    # Isolate installation-token failure after this App's identity was already resolved.
+    adapter._bot_login = github.bot_login
 
     if already_dispatched:
         async def lost_response(*args):

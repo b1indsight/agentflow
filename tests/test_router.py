@@ -32,7 +32,6 @@ def router(store: Store, monkeypatch) -> EventRouter:
         database_url="postgresql://localhost/test",
         worker_tokens={"worker-1": SecretStr("worker-secret")},
         allowlist=["alice"],
-        bot_login="flowtool[bot]",
         trigger_label="flow",
         settle_seconds=75.0,
         submit_grace_seconds=15.0,
@@ -41,6 +40,7 @@ def router(store: Store, monkeypatch) -> EventRouter:
     return EventRouter(
         service,
         settings,
+        bot_login="flowtool-bot[bot]",
         database=store.database,
     )
 
@@ -79,7 +79,7 @@ async def test_allowed_label_creates_one_flow_and_job(
 async def test_bot_and_non_allowlisted_users_do_not_trigger(
     router: EventRouter, store: Store,
 ) -> None:
-    router.dispatch("issues", "bot-delivery", issue_event(action="labeled", sender="flowtool[bot]"))
+    router.dispatch("issues", "bot-delivery", issue_event(action="labeled", sender="Flowtool-bot[bot]"))
     router.dispatch("issues", "outsider-delivery", issue_event(action="labeled", sender="mallory"))
 
     assert store.flows.get_active_flow("owner/repo", 7) is None
@@ -116,9 +116,10 @@ async def test_unlabel_and_stop_comment_cancel_active_flow(
     assert stopped.archive_reason is ArchiveReason.ABANDONED
 
 
+@pytest.mark.parametrize("author", ["reviewer", "Flowtool-bot[bot]"])
 @pytest.mark.asyncio
 async def test_review_comment_is_stored_for_current_attempt(
-    router: EventRouter, store: Store, monkeypatch
+    router: EventRouter, store: Store, monkeypatch, author: str,
 ) -> None:
     flow = store.flows.create_flow("owner/repo", 7, installation_id=42)
     attempt = store.flows.create_attempt(flow.id)
@@ -136,7 +137,7 @@ async def test_review_comment_is_stored_for_current_attempt(
         "comment": {
             "id": 101,
             "body": "Please add a bound.",
-            "user": {"login": "reviewer"},
+            "user": {"login": author},
             "path": "app/worker/runtime.py",
             "line": 40,
             "original_commit_id": "abc123",
@@ -148,6 +149,10 @@ async def test_review_comment_is_stored_for_current_attempt(
     router.dispatch("pull_request_review_comment", "review-1", payload)
 
     items = store.reviews.pending(flow.id)
+    assert store.webhooks.event_seen("review-1")
+    if author != "reviewer":
+        assert items == []
+        return
     assert len(items) == 1
     assert items[0].github_id == 101
     assert items[0].path == "app/worker/runtime.py"
