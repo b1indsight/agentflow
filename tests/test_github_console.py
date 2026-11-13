@@ -208,7 +208,16 @@ async def test_cross_referenced_timeline_events_without_ids_have_stable_distinct
 
 
 @pytest.mark.parametrize("issue_number", [7, None])
-async def test_threads_use_separate_bounded_reply_connection(tmp_path, monkeypatch, issue_number):
+@pytest.mark.parametrize("side", ["LEFT", "RIGHT"])
+async def test_threads_use_separate_bounded_reply_connection(tmp_path, monkeypatch, issue_number, side):
+    # A comment near a large hunk's end must survive the display budget, even after lines move.
+    hunk = "@@ -101,41 +501,41 @@\n" + "\n".join([
+        *(f" context_before_{index} " + "x" * 80 for index in range(30)),
+        "-removed_target",
+        "+added_target",
+        *(f" context_after_{index}" for index in range(10)),
+    ])
+
     def handler(request):
         import json
 
@@ -224,8 +233,9 @@ async def test_threads_use_separate_bounded_reply_connection(tmp_path, monkeypat
             "author": None,
             "commit": {"oid": "a" * 40},
             "path": "a.py",
-            "line": 5,
-            "diffHunk": "+x",
+            "line": 731 if side == "RIGHT" else 331,
+            "originalLine": 531 if side == "RIGHT" else 131,
+            "diffHunk": hunk,
         }
         if "reviewThreads" in payload["query"]:
             thread = {
@@ -259,6 +269,7 @@ async def test_threads_use_separate_bounded_reply_connection(tmp_path, monkeypat
                 "data": {
                     "node": {
                         "pullRequest": pull,
+                        "diffSide": side,
                         "comments": {
                             "nodes": [node],
                             "pageInfo": {"hasNextPage": True, "endCursor": "after"},
@@ -275,6 +286,47 @@ async def test_threads_use_separate_bounded_reply_connection(tmp_path, monkeypat
     assert replies.items[0].parent_key == threads.items[0].key
     assert replies.items[0].body == "reply body" and replies.next_cursor
     assert replies.child_sources == ["inline.reactions:9"]
+    metadata = replies.items[0].metadata
+    excerpt = metadata["code_excerpt"]
+    assert isinstance(excerpt, str)
+    assert excerpt.startswith("@@ -127,10 +527,10 @@" if side == "RIGHT"
+                              else "@@ -126,10 +526,10 @@")
+    assert len(excerpt.splitlines()) == 12 and len(excerpt) <= 4000
+    assert "-removed_target\n+added_target" in excerpt
+    assert "context_before_0 " not in excerpt
+    assert metadata["code_summary_truncated"] is True
+    assert metadata["code_characters"] == len(hunk)
+    assert metadata["original_line"] == (531 if side == "RIGHT" else 131)
+    assert metadata["side"] == side
+
+
+@pytest.mark.parametrize(
+    "hunk,line,original_line,side,expected",
+    [
+        ("@@ -3 +8 @@\n-old\n+new", 8, None, "RIGHT", "@@ -3,1 +8,1 @@\n-old\n+new"),
+        ("@@ -0,0 +1,2 @@\n+first\n+second", 2, None, "RIGHT",
+         "@@ -0,0 +1,2 @@\n+first\n+second"),
+        ("@@ -8,2 +0,0 @@\n-first\n-second", None, 9, "LEFT",
+         "@@ -8,2 +0,0 @@\n-first\n-second"),
+        ("@@ -3 +8 @@\n-old\n+new", 3, None, "RIGHT", ""),
+        ("@@ -3 +8 @@\n-old\n+new", None, None, "LEFT", ""),
+        ("@@ -3 +8 @@\n-old\n+" + "x" * 8000, 8, None, "RIGHT",
+         "@@ -3,0 +8,1 @@\n+" + "x" * 3982 + "…"),
+    ],
+    ids=["replacement", "new-file", "deleted-file", "wrong-side", "missing-line", "long-line"],
+)
+def test_inline_webhook_code_context_is_bounded_and_keeps_patch_coordinates(
+    hunk, line, original_line, side, expected,
+):
+    payload = {
+        "repository": {"full_name": "owner/repo"},
+        "action": "created",
+        "comment": comment(diff_hunk=hunk, line=line, original_line=original_line, side=side),
+    }
+    metadata = webhook_observations("pull_request_review_comment", payload)[0].metadata
+    assert metadata["code_excerpt"] == expected
+    assert len(expected) <= 4000
+    assert metadata["code_summary_truncated"] is (not expected or len(hunk) > 4000)
 
 
 @pytest.mark.parametrize(

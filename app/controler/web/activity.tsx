@@ -432,26 +432,33 @@ function ThreadReplies({
         {page?.has_more ? `下一页${label}` : `查看${label}`}
       </button>
       {error && <p role="alert">{error}（点击上方按钮重试）</p>}
-      {page?.items.map((item) => (
-        <div key={`${item.key}-${item.version}`}>
-          {typeof item.metadata.code_excerpt === "string" &&
-            item.metadata.code_excerpt && (
+      {page?.items.map((item) => {
+        const line = item.metadata.original_line ?? item.metadata.line;
+        return (
+          <div key={`${item.key}-${item.version}`}>
+            {typeof item.metadata.code_excerpt === "string" && (
               <section className="review-thread" aria-label="评审代码上下文">
                 <header>
                   {typeof item.metadata.path === "string"
                     ? item.metadata.path
                     : "代码上下文"}
-                  {typeof item.metadata.line === "number" && (
-                    <span className="muted"> · Line {item.metadata.line}</span>
+                  {typeof line === "number" && (
+                    <span className="muted"> · Line {line}</span>
                   )}
                 </header>
-                <DiffWindow
-                  text={item.metadata.code_excerpt}
-                  stateKey={`${flowId}-${item.key}-${item.version}-code`}
-                />
+                {item.metadata.code_excerpt && (
+                  <DiffWindow
+                    text={item.metadata.code_excerpt}
+                    stateKey={`${flowId}-${item.key}-${item.version}-code`}
+                  />
+                )}
                 {item.metadata.code_summary_truncated === true && (
                   <p className="panel-note">
-                    <span>代码片段已截断。</span>{" "}
+                    <span>
+                      {item.metadata.code_excerpt
+                        ? "仅显示有限代码上下文。"
+                        : "无法定位评论行。"}
+                    </span>{" "}
                     {item.url && (
                       <a href={item.url} target="_blank" rel="noreferrer">
                         在 GitHub 查看完整上下文
@@ -461,34 +468,35 @@ function ThreadReplies({
                 )}
               </section>
             )}
-          <article
-            className="message thread-reply"
-            aria-label={`${item.author} 的线程回复`}
-          >
-            <div className="message-avatar" aria-hidden="true">
-              {item.author.slice(0, 1).toUpperCase()}
-            </div>
-            <div className="message-main">
-              <div className="message-label">
-                <span>{item.author}</span>
-                {item.deleted && (
-                  <span className="message-context">已删除</span>
-                )}
+            <article
+              className="message thread-reply"
+              aria-label={`${item.author} 的线程回复`}
+            >
+              <div className="message-avatar" aria-hidden="true">
+                {item.author.slice(0, 1).toUpperCase()}
               </div>
-              <ActivityBody
-                key={`${item.key}-${item.version}`}
-                entry={item}
-                flowId={flowId}
-              />
-              <EditedDiff
-                key={`diff-${item.key}-${item.version}`}
-                entry={item}
-                flowId={flowId}
-              />
-            </div>
-          </article>
-        </div>
-      ))}
+              <div className="message-main">
+                <div className="message-label">
+                  <span>{item.author}</span>
+                  {item.deleted && (
+                    <span className="message-context">已删除</span>
+                  )}
+                </div>
+                <ActivityBody
+                  key={`${item.key}-${item.version}`}
+                  entry={item}
+                  flowId={flowId}
+                />
+                <EditedDiff
+                  key={`diff-${item.key}-${item.version}`}
+                  entry={item}
+                  flowId={flowId}
+                />
+              </div>
+            </article>
+          </div>
+        );
+      })}
       {page && !page.has_more && (
         <small>
           已到{label}末尾 · {page.total} 条
