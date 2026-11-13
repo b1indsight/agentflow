@@ -1283,13 +1283,33 @@ svg {
   border-radius: 6px;
   overflow: hidden;
 }
+.review-thread > header,
 .review-thread summary {
   padding: 11px 12px;
   font-family: var(--mono);
   font-size: var(--text-small);
   background: #f4f7f5;
-  cursor: pointer;
   overflow-wrap: anywhere;
+}
+.review-thread summary {
+  cursor: pointer;
+}
+.review-thread .panel-note {
+  margin: 0;
+  padding: 8px 12px;
+  font-size: var(--text-meta);
+}
+.review-thread .diff-window {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+}
+.message.thread-reply {
+  --avatar-size: 22px;
+  margin: 12px 0;
+}
+.thread-reply > .message-avatar {
+  font-size: var(--text-small);
 }
 .thread-comment {
   padding: 12px;
