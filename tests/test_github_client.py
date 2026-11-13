@@ -438,18 +438,30 @@ async def test_creates_repository_scoped_contents_push_capability(
             )
         )
     )
-    get_bot = AsyncEndpoint(response(SimpleNamespace(login="Flowtool-bot[bot]", type="Bot", id=7654321)))
+    bot = {
+        "login": "Flowtool-bot[bot]", "type": "Bot", "id": 7654321, "node_id": "bot-node",
+        "avatar_url": "", "url": "", "html_url": "", "followers_url": "", "following_url": "",
+        "gists_url": "", "starred_url": "", "subscriptions_url": "", "organizations_url": "",
+        "repos_url": "", "events_url": "", "received_events_url": "", "site_admin": False,
+        "gravatar_id": None, "name": None, "company": None, "blog": None, "location": None,
+        "email": None, "hireable": None, "bio": None, "public_repos": 0, "public_gists": 0,
+        "followers": 0, "following": 0,
+        "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+    }
     get_app = AsyncEndpoint(response(SimpleNamespace(id=123, slug="flowtool-bot")))
     client = SimpleNamespace(
         rest=SimpleNamespace(
             apps=SimpleNamespace(async_create_installation_access_token=create_token,
                                  async_get_authenticated=get_app),
-            users=SimpleNamespace(async_get_by_username=get_bot),
         )
     )
     github = GitHubApp(settings(tmp_path))
     app_client(monkeypatch, lambda **kwargs: client)
-    install_client(monkeypatch, lambda *args, **kwargs: client)
+    # Job preparation uses fresh clones; SDK namespaces only weakly reference their client.
+    transport = httpx.MockTransport(lambda _: httpx.Response(200, json=bot))
+    install_client(monkeypatch, lambda _, **kwargs: GitHub(
+        "test-token", auto_retry=False, async_transport=transport,
+    ))
 
     if not accepted:
         with pytest.raises(GitHubError) as caught:
@@ -464,7 +476,6 @@ async def test_creates_repository_scoped_contents_push_capability(
     assert capability.expires_at == datetime(2026, 9, 5, 11, 30, tzinfo=UTC)
     assert capability.token.get_secret_value() == "ghs_scoped"
     assert (capability.bot_login, capability.bot_user_id) == ("flowtool-bot[bot]", 7654321)
-    assert get_bot.calls == [(("flowtool-bot[bot]",), {})]
     assert create_token.calls == [
         ((42,), {"repositories": ["repo"], "permissions": {"contents": "write"}})
     ]
@@ -472,7 +483,7 @@ async def test_creates_repository_scoped_contents_push_capability(
     for login, kind, user_id in (("other[bot]", "Bot", 7654321),
                                 ("flowtool-bot[bot]", "User", 7654321),
                                 ("flowtool-bot[bot]", "Bot", 0)):
-        get_bot.result = response(SimpleNamespace(login=login, type=kind, id=user_id))
+        bot.update(login=login, type=kind, id=user_id)
         with pytest.raises(GitHubError) as caught:
             await github.installation(42).repository("octo/repo").create_push_capability()
         assert caught.value.kind is GitHubErrorKind.UNEXPECTED_RESPONSE

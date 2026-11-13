@@ -255,7 +255,8 @@ class Repository(BaseModel):
                 {"contents": "write"}, {"contents": "write", "metadata": "read"},
             ) or repositories != [self.full_name]:
                 raise GitHubError(GitHubErrorKind.UNEXPECTED_RESPONSE, "create_push_capability")
-            bot = (await self.installation._client().rest.users.async_get_by_username(
+            installation_client = self.installation._client()
+            bot = (await installation_client.rest.users.async_get_by_username(
                 bot_login,
             )).parsed_data
             if (bot.login.lower() != bot_login.lower() or bot.type != "Bot" or bot.id <= 0):
