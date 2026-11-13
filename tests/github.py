@@ -82,6 +82,7 @@ class RecordingRepository(Repository):
             token=SecretStr("push-token"), repository=self.full_name,
             permissions={"contents": "write"},
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
+            bot_login=self.installation.app.bot_login, bot_user_id=7654321,
         )
 
     async def fetch_ref(self, branch: str, *, retry_transient: bool = False) -> RemoteRef:

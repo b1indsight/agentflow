@@ -201,7 +201,10 @@ FLOWTOOL_ALLOW_INSECURE_WORKER_WS=true uv run flowtool worker
 Amp 使用该 worker
 专用 HOME 的原生 `amp login`，或可选 `AMP_API_KEY`；不要复制个人 HOME、Docker socket 或
 control secret。Git/gh 每轮只使用 GitHub App 下发的 assignment 凭据和临时配置，不改个人全局
-Git/gh 设置，提交作者仍由 worker Git 配置决定。Amp 历史读取是完整原生 thread 快照，可能滞后；
+Git/gh 设置。编码 workspace 首次准备时将 Git 配置设为当前 App 的 bot，后续不重复写入。
+本地 hook 在提交时核对 bot 作者/提交者，再将原有效作者保留为 `Co-authored-by`（包括
+`git commit -m`）；身份不符则拒绝提交，只读 answer 不修改配置。此机制不配置 jj 身份或
+改写已有提交，原生 jj 提交也不运行 Git hooks。Amp 历史读取是完整原生 thread 快照，可能滞后；
 未知续跑不会自动重跑，Amp adapter 固定使用 `--mode low`。INITIAL 会在
 `<worker_root>/repos/<owner>/<repo>` 缺失或为空时，用当前任务的短期 installation token
 原子 clone；已有 seed 保持原状，不自动 fetch/reset 或安装依赖。seed 必须有任务基线分支，
@@ -218,7 +221,7 @@ seed 和默认推理 workspace 不计入。每个 Flow 独占一个 workspace，
 每次 INITIAL、REVISION resume/fallback 都提供本轮 bot `gh` 包装、独立配置和 Git helper，
 不使用个人登录态；token 过期/权限不足即失败，不自动续期或扩权。worker 保持单仓库
 Contents write，PR 通过 MCP `open_pr` 请求 controler 校验后创建。包装不构成 OS 沙箱。
-当前 Codex/Amp 接入均使用 wire22 / journal5；执行结果使用 ResultInbox v1，Control 本地归档通知使用 v2。
+当前 Codex/Amp 接入均使用 wire23 / journal5；执行结果使用 ResultInbox v1，Control 本地归档通知使用 v2。
 serve 与 worker 的协议版本必须匹配。
 Judge 的 answer/revise 都派发到原 worker；answer 只回答问题，worker 比较本地提交不变，controller 比较目标 PR head 不变。Judge 只接收反馈关联的 PR 信息、线程和引用片段，不读取全 PR diff；详见 [Review 循环](docs/architecture/review-loop.md)。
 通信统一为顶层控制和 typed call/result 列表；控制 ACK 仅确认接收，不表示业务提交。

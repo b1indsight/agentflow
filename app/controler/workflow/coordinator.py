@@ -517,6 +517,8 @@ class JobCoordinator:
                 token=capability.token,
                 repository=capability.repository,
                 expires_at=capability.expires_at,
+                bot_login=capability.bot_login,
+                bot_user_id=capability.bot_user_id,
             )
         )
 

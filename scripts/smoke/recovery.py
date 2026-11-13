@@ -178,7 +178,7 @@ def drill(work: Path, postgres_bin: Path, revision: str) -> dict:
             workspace=job.workspace, generation=job.generation,
             secret=AssignmentSecret(push=PushSecret(
                 token=SecretStr('fixture-not-a-credential'), repository=flow.repo,
-                expires_at=datetime.now(UTC))),
+                expires_at=datetime.now(UTC), bot_login='fixture[bot]', bot_user_id=1)),
             task=InitialTask(flow_id=flow.id, attempt_id=attempt.id, repo=flow.repo,
                              issue_number=1, task_content='fixture', branch='fixture'),
         ))

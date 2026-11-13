@@ -11,12 +11,11 @@ def inherited_agent_environment(source: Mapping[str, str]) -> dict[str, str]:
     Custom credentials deliberately remain available to skills and MCP servers. This
     filtering does not isolate a full-access agent from the worker account's files.
     """
-    identity = {"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"}
     parent_agent = {"AMP_CURRENT_THREAD_ID", "AMP_THREAD_ID", "CODEX_THREAD_ID", "CLAUDECODE"}
     return {
         key: value for key, value in source.items()
         if key not in parent_agent
-        and (key in identity or not key.startswith(("FLOWTOOL_", "GIT_", "GH_", "GITHUB_", "SSH_")))
+        and not key.startswith(("FLOWTOOL_", "GIT_", "GH_", "GITHUB_", "SSH_"))
     }
 
 

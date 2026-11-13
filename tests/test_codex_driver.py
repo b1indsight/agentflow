@@ -99,7 +99,7 @@ def test_codex_environment_removes_worker_and_github_credentials() -> None:
 def test_run_context_injects_only_scoped_push_and_mcp_capabilities() -> None:
     context = CodingExecutionContext(
         github=GitHubCapability(SecretStr("push-secret"), "owner/repo",
-                                datetime.now(UTC) + timedelta(minutes=5)),
+                                datetime.now(UTC) + timedelta(minutes=5), "flowtool[bot]", 7654321),
         mcp_url="http://127.0.0.1:12345/mcp",
         mcp_token=SecretStr("mcp-secret"),
     )

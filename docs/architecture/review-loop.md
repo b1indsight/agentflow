@@ -39,7 +39,7 @@ edited 不产生新的强信号，approve/dismissed 不触发修订。空 Reques
 
 ## B.2 冻结批次与任务协议
 
-协议 v22 向 worker 下发 INITIAL、REVISION、ARCHIVE。triage 直接使用 ReviewBatch，
+协议 v23 向 worker 下发 INITIAL、REVISION、ARCHIVE。triage 直接使用 ReviewBatch，
 上下文与 Judge 决策保存在批次内，没有 triage job 或本地终态协议。
 REVISION 冻结原 PR、repo identity、head/base、session generation、原始任务和前轮未决点。
 RevisionTask.purpose 为 answer 或 revise；历史任务缺省为 revise。两者的结果都携带同一 batch ID 与精确 item/version 清单，control 校验所有权、当前 attempt 与快照。

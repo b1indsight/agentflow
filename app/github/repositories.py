@@ -47,6 +47,8 @@ class PushCapability(BaseModel):
     repository: str
     permissions: dict[str, Literal["read", "write"]]
     expires_at: datetime
+    bot_login: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9-]*\[bot\]$")
+    bot_user_id: int = Field(gt=0)
 
 
 def split_repo(repo: str) -> tuple[str, str]:
@@ -241,6 +243,11 @@ class Repository(BaseModel):
         client = self.installation.app._client()
 
         with translate_errors("create_push_capability"):
+            app = (await client.rest.apps.async_get_authenticated()).parsed_data
+            if (app is None or app.id != self.installation.app.app_id or not app.slug
+                    or f"{app.slug}[bot]".casefold() != self.installation.app.bot_login.casefold()):
+                raise GitHubError(GitHubErrorKind.UNEXPECTED_RESPONSE, "create_push_capability")
+            bot_login = f"{app.slug}[bot]"
             data = (await client.rest.apps.async_create_installation_access_token(
                 self.installation.installation_id, repositories=[self.name],
                 permissions={"contents": "write"},
@@ -252,7 +259,13 @@ class Repository(BaseModel):
                 {"contents": "write"}, {"contents": "write", "metadata": "read"},
             ) or repositories != [self.full_name]:
                 raise GitHubError(GitHubErrorKind.UNEXPECTED_RESPONSE, "create_push_capability")
+            bot = (await self.installation._client().rest.users.async_get_by_username(
+                bot_login,
+            )).parsed_data
+            if (bot.login.lower() != bot_login.lower() or bot.type != "Bot" or bot.id <= 0):
+                raise GitHubError(GitHubErrorKind.UNEXPECTED_RESPONSE, "create_push_capability")
             return PushCapability(
                 token=SecretStr(data.token), repository=self.full_name,
                 permissions=permissions, expires_at=datetime.fromisoformat(data.expires_at),
+                bot_login=bot.login, bot_user_id=bot.id,
             )

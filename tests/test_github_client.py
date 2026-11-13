@@ -173,6 +173,7 @@ def test_push_capability_never_represents_or_serializes_secret() -> None:
         repository="octo/repo",
         permissions={"contents": "write"},
         expires_at=datetime(2026, 9, 5, 10, tzinfo=UTC),
+        bot_login="flowtool[bot]", bot_user_id=7654321,
     )
 
     assert capability.token.get_secret_value() == token
@@ -402,13 +403,18 @@ async def test_creates_repository_scoped_contents_push_capability(
             )
         )
     )
+    get_bot = AsyncEndpoint(response(SimpleNamespace(login="Flowtool[bot]", type="Bot", id=7654321)))
+    get_app = AsyncEndpoint(response(SimpleNamespace(id=123, slug="flowtool")))
     client = SimpleNamespace(
         rest=SimpleNamespace(
-            apps=SimpleNamespace(async_create_installation_access_token=create_token)
+            apps=SimpleNamespace(async_create_installation_access_token=create_token,
+                                 async_get_authenticated=get_app),
+            users=SimpleNamespace(async_get_by_username=get_bot),
         )
     )
     github = GitHubApp(settings(tmp_path))
     app_client(monkeypatch, lambda **kwargs: client)
+    install_client(monkeypatch, lambda *args, **kwargs: client)
 
     if not accepted:
         with pytest.raises(GitHubError) as caught:
@@ -422,9 +428,29 @@ async def test_creates_repository_scoped_contents_push_capability(
     assert capability.permissions == permissions
     assert capability.expires_at == datetime(2026, 9, 5, 11, 30, tzinfo=UTC)
     assert capability.token.get_secret_value() == "ghs_scoped"
+    assert (capability.bot_login, capability.bot_user_id) == ("Flowtool[bot]", 7654321)
+    assert get_bot.calls == [(("flowtool[bot]",), {})]
     assert create_token.calls == [
         ((42,), {"repositories": ["repo"], "permissions": {"contents": "write"}})
     ]
+    # A valid scoped token must never authorize guessing a missing or different bot identity.
+    for login, kind, user_id in (("other[bot]", "Bot", 7654321),
+                                ("flowtool[bot]", "User", 7654321),
+                                ("flowtool[bot]", "Bot", 0)):
+        get_bot.result = response(SimpleNamespace(login=login, type=kind, id=user_id))
+        with pytest.raises(GitHubError) as caught:
+            await github.installation(42).repository("octo/repo").create_push_capability()
+        assert caught.value.kind is GitHubErrorKind.UNEXPECTED_RESPONSE
+
+    # A real Bot account can still belong to a different App than the token issuer.
+    get_bot.result = response(SimpleNamespace(login="flowtool[bot]", type="Bot", id=7654321))
+    for identity in (None, SimpleNamespace(id=124, slug="flowtool"),
+                     SimpleNamespace(id=123, slug="another-app"),
+                     SimpleNamespace(id=123, slug=None)):
+        get_app.result = response(identity)
+        with pytest.raises(GitHubError) as caught:
+            await github.installation(42).repository("octo/repo").create_push_capability()
+        assert caught.value.kind is GitHubErrorKind.UNEXPECTED_RESPONSE
 
 
 @pytest.mark.asyncio

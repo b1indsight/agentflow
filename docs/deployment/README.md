@@ -63,7 +63,8 @@ Judge 配置只提供给 control，在 serve 的 `.env` 配置 `FLOWTOOL_JUDGE_M
 进程内创建，跨连接重试保留，请求使用独立临时子目录；退出清除，不创建编码 workspace 或 journal。
 断线重试可能与旧计算重叠并重复计费，不保证模型调用恰好一次。
 
-serve 和 worker 需协调升级到 wire22，journal5 与执行结果 inbox1 不变；Control 本地归档通知保留 inbox2，无旧 wire fallback。
+serve 和 worker 需协调升级到 wire23，journal5 与执行结果 inbox1 不变；Control 本地归档通知保留 inbox2，无旧 wire fallback。
+wire23 的 assignment 必须包含已核对的 App bot login 和用户 ID；control 在签发时读取 bot 用户，失败不回退个人账号。升级前 drain，待在途执行收敛后协调更新两端；恢复任务领取新凭据，journal 不保存身份或 token，无数据库迁移。
 wire22 的 RevisionTask 冻结 answer/revise 用途；旧 worker 不能接收 answer 并按改码任务运行。升级前收敛在途任务和未确认的旧直接答复；旧 answer 继续按原 marker 核对，不转成 worker 任务重发。历史 context/decision/result digest 不重算，不自动重跑被旧上下文阻塞的批次。
 任务输入使用纯文本；展示标题复用该推理队列，首轮准备后有界尝试一次逻辑调用（总预算 30 秒），不阻塞编码。
 生成前或失败时依次显示 Issue 缓存标题、PR 标题、Flow 编号；不会因 Issue 编辑自动开启会话或重新推理标题。
@@ -135,7 +136,21 @@ FLOWTOOL_CODEX_RUN_TIMEOUT_SECONDS=1200
 Amp 同样只在该专用 worker 身份下认证：使用其专用 HOME 执行 `amp login`，或提供可选
 `AMP_API_KEY`（Amp CLI 自行处理其优先级）。不要复制或挂载个人 HOME、Docker socket、control
 secret 或个人 Git/gh 配置。每轮 Git/gh 继续使用 GitHub App 下发的 assignment 凭据和临时配置，
-不改变个人全局配置；提交作者仍由 worker 的 Git 配置决定。切换为 `amp` 前先 drain 并等待该
+不改变个人全局配置。control 用当前 App 的 JWT 查询 `GET /app`，核对 App ID，并要求
+`FLOWTOOL_BOT_LOGIN` 与响应的 `slug[bot]` 一致（忽略大小写），再查询真实 Bot 用户 ID；
+身份不匹配时准备失败，不接受其他 App 的 bot。首次编码准备时，在当前 workspace 的 Git
+`config.worktree` 中设置 bot 的 `user.*`、`author.*`、`committer.*`，保存原有效作者并安装
+hooks；完成后记录 bot 身份。后续准备只核对当前 App 身份，不重写配置或 hooks。
+本地 `commit-msg` hook 在追加原账号的 `Co-authored-by` 前核对实际 Author/Committer，
+身份不符则拒绝提交，不自动修复配置。它覆盖 `git commit -m` 和交互编辑，保留已有 hooks
+和其他 coauthor，不重复署名。显式 `--no-verify` 跳过此 hook。
+linked worktree 只在共享配置启用 `extensions.worktreeConfig`（必要时迁移 main worktree 的
+`core.worktree/core.bare`）；seed 与兄弟 worktree 的身份、hooks 设置不被替换。需要 Git 2.31+。
+继承的 `GIT_AUTHOR_*`/`GIT_COMMITTER_*` 不传给 agent；不通过环境变量注入 bot 身份。
+只读 answer 不准备署名；没有原账号时不虚构 coauthor。此机制不配置 jj 或改写已有提交，
+原生 jj/`commit-tree` 等不运行 Git hooks。`--amend` 保留非 bot 作者时会被 hook 拒绝；
+显式 `--reset-author` 可使用当前 bot 作者，但不能绕过既有的提交祖先与交付基线校验。
+切换为 `amp` 前先 drain 并等待该
 worker 的 Flow 收尾；未知续跑不自动重跑。Amp 历史是原生完整 thread 快照，可能滞后于刚发生的
 外部续跑，且不承诺离线可用。adapter 固定使用 Amp `--mode low`，不从 worker 环境提供模式覆写。
 

@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, m
 
 from app.contracts.protocol import ProvisionError
 from app.domain.models import WorkspaceInventory
+from app.worker.execution.git_identity import configure_git_identity
 from app.worker.execution.vcs import (
     VcsVerificationError,
     _required_stdout,
@@ -350,6 +351,15 @@ class RepositoryWorkspaces:
 
     def _repository_lock(self, repository: str) -> asyncio.Lock:
         return self._repository_locks.setdefault(repository, asyncio.Lock())
+
+    async def configure_git_identity(
+        self, binding: WorkspaceBinding, bot_login: str, bot_user_id: int,
+    ) -> None:
+        """Configure attribution only for a verified, currently owned workspace."""
+        async with self._repository_lock(binding.repository):
+            path = self._verify_slot(self._owned(self._load(), binding))
+            require_repository(path)
+            await configure_git_identity(path, bot_login, bot_user_id)
 
     async def claim(
         self, repository: str, flow_id: int, workspace: str, generation: int,
