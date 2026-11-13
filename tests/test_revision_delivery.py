@@ -4,6 +4,7 @@ import asyncio
 import os
 import shutil
 import subprocess
+from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -242,16 +243,31 @@ async def test_fetch_snapshot_remains_the_baseline_when_remote_changes_before_ag
     task = task.model_copy(update={"expected_head_sha": baseline})
     monkeypatch.setenv("FLOWTOOL_WORKER_TOKEN", "worker-secret")
     monkeypatch.setenv("FLOWTOOL_PUSH_TOKEN", "stale-secret")
+    _git("config", "credential.helper", "!exit 97", cwd=repo)
     run = vcs._run
 
     async def advance_after_fetch(*args, **kwargs):
-        outcome = await run(*args, **kwargs)
         if "fetch" in args and f"refs/heads/{task.branch}" in args:
-            assert outcome[0] == 0
             assert kwargs["cwd"] != repo
             assert kwargs["environment"]["FLOWTOOL_PUSH_TOKEN"] == "fresh-token"
             assert "FLOWTOOL_WORKER_TOKEN" not in kwargs["environment"]
             assert all("fresh-token" not in arg and "stale-secret" not in arg for arg in args)
+            # Resolve credentials offline with the actual fetch flags: a later command-line
+            # helper reset used to erase the assignment helper despite its environment presence.
+            resolved = await asyncio.to_thread(
+                subprocess.run, (*args[:args.index("fetch")], "credential", "fill"),
+                input="protocol=https\nhost=github.com\n\n", cwd=kwargs["cwd"],
+                env=kwargs["environment"], capture_output=True, text=True, check=False,
+            )
+            assert resolved.returncode == 0, resolved.stderr
+            assert "username=x-access-token\n" in resolved.stdout
+            assert "password=fresh-token\n" in resolved.stdout
+            assert "stale-secret" not in resolved.stdout
+            config = (kwargs["cwd"] / "config").read_text()
+            assert "credential" not in config and "fresh-token" not in config
+        outcome = await run(*args, **kwargs)
+        if "fetch" in args and f"refs/heads/{task.branch}" in args:
+            assert outcome[0] == 0
             (revision_collaborator / "external.txt").write_text("later remote contents\n")
             _git("commit", "-am", "Race after fetch", cwd=revision_collaborator)
             _git("push", "origin", task.branch, cwd=revision_collaborator)
@@ -291,6 +307,79 @@ async def test_revision_accepts_local_work_published_only_in_new_history(
     context = await prepare_revision_context(repo, task.branch, task.previous_head_sha)
     outcome = await verify_revision_outcome(context, revision_backend)
     assert context.git_base_sha == outcome.commit_sha == remote
+
+
+@pytest.mark.skipif(shutil.which("jj") is None, reason="jj is not installed")
+@pytest.mark.parametrize("operation", ["revision", "align"])
+@pytest.mark.parametrize("target_kind,retained", [
+    ("directory", None), ("file", None), ("file", "ignored-file"), ("file", "ignored-symlink"),
+])
+async def test_jj_baseline_path_transitions_preserve_retained_leaves(
+    revision_workspace, revision_collaborator, operation, target_kind, retained,
+):
+    # A tracked file/directory may change shape, but an ignored leaf beside tracked content
+    # must still block directory replacement. Both revision sync and warm-copy reuse share this.
+    _, repo, task, _, _ = revision_workspace
+    path = repo / "shape"
+    if target_kind == "file":
+        (path / "nested").mkdir(parents=True)
+        (path / "nested/tracked").write_text("old tracked contents")
+    else:
+        path.write_text("old tracked contents")
+    _git("add", "shape", cwd=repo)
+    _git("commit", "-m", "Publish original path shape", cwd=repo)
+    _git("push", "origin", task.branch, cwd=repo)
+    previous = (await asyncio.to_thread(
+        subprocess.check_output, ["git", "rev-parse", "HEAD"], cwd=repo, text=True,
+    )).strip()
+    _git("pull", "--ff-only", cwd=revision_collaborator)
+    env = os.environ | {"JJ_USER": "FlowTool Test", "JJ_EMAIL": "flowtool@example.test"}
+    await _jj("git", "init", "--colocate", cwd=repo, env=env)
+    await _jj("bookmark", "track", task.branch, "--remote=origin", cwd=repo, env=env)
+    with (repo / ".git/info/exclude").open("a") as excluded:
+        excluded.write("\n/shape/nested/cache\n/unrelated-cache/\n")
+    (repo / "unrelated-cache").mkdir()
+    (repo / "unrelated-cache/keep").write_text("unrelated cache must survive")
+    preserved = path / "nested/cache"
+    if retained == "ignored-file":
+        preserved.write_text("nested cache must survive")
+    elif retained == "ignored-symlink":
+        preserved.symlink_to(repo / "README.md")
+    before_contents = preserved.read_bytes() if retained else None
+    before = await local_commit(repo)
+    _git("rm", "-r", "shape", cwd=revision_collaborator)
+    replacement = revision_collaborator / "shape"
+    if target_kind == "directory":
+        (replacement / "nested").mkdir(parents=True)
+        (replacement / "nested/tracked").write_text("new tracked contents")
+    else:
+        replacement.write_text("new tracked contents")
+    _git("add", "shape", cwd=revision_collaborator)
+    _git("commit", "-m", "Replace the tracked path shape", cwd=revision_collaborator)
+    _git("push", "origin", task.branch, cwd=revision_collaborator)
+    baseline = (await asyncio.to_thread(
+        subprocess.check_output, ["git", "rev-parse", "HEAD"], cwd=revision_collaborator, text=True,
+    )).strip()
+    if operation == "align":
+        await _jj("git", "init", "--colocate", cwd=revision_collaborator, env=env)
+    with (pytest.raises(VcsVerificationError, match="overwrite retained cache")
+          if retained else nullcontext()):
+        if operation == "revision":
+            await prepare_revision_context(repo, task.branch, previous)
+        else:
+            await vcs.align_repository(repo, revision_collaborator, task.branch)
+    if retained:
+        assert await local_commit(repo) == before
+        assert (path / "nested/tracked").read_text() == "old tracked contents"
+        assert preserved.read_bytes() == before_contents
+        assert preserved.is_symlink() is (retained == "ignored-symlink")
+    else:
+        current = await vcs.prepare_vcs_context(repo, task.branch)
+        assert current.git_base_sha == current.jj_ancestor_sha == baseline
+        updated = path / "nested/tracked" if target_kind == "directory" else path
+        assert updated.read_text() == "new tracked contents"
+    assert (repo / "unrelated-cache/keep").read_text() == "unrelated cache must survive"
+    await vcs.require_idle_repository(repo)
 
 
 async def test_answer_does_not_synchronize_external_updates(
@@ -414,7 +503,7 @@ async def test_fallback_only_when_execution_is_known_not_to_have_started(
 
 @pytest.mark.parametrize("problem", [
     "unpublished", "tracked", "untracked", "cache-file", "cache-directory", "cache-parent",
-    "cache-symlink", "branch",
+    "cache-symlink", "jj-metadata", "branch",
 ])
 async def test_revision_preflight_rejects_before_model_execution(
     revision_workspace, revision_collaborator, revision_backend, problem,
@@ -460,6 +549,15 @@ async def test_revision_preflight_rejects_before_model_execution(
         remote = (await asyncio.to_thread(
             subprocess.check_output, ["git", "rev-parse", "HEAD"], cwd=revision_collaborator, text=True,
         )).strip()
+    elif problem == "jj-metadata":
+        if revision_backend is not VcsKind.JJ:
+            pytest.skip("requires jj metadata to retain")
+        preserved = repo / ".jj/retained"
+        preserved.write_text("jj metadata must survive")
+        (revision_collaborator / ".jj").write_text("upstream tracked contents")
+        _git("add", ".jj", cwd=revision_collaborator)
+        _git("commit", "-m", "Track a jj metadata path", cwd=revision_collaborator)
+        _git("push", "origin", task.branch, cwd=revision_collaborator)
     elif revision_backend is VcsKind.JJ:
         await _jj("new", "root()", cwd=repo, env=env)
     else:

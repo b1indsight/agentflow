@@ -173,7 +173,8 @@ async def test_answer_uses_fresh_pr_without_adopting_external_delivery(store, pe
     assert any(body.startswith("问题答复：") for body in github.comments)
 
 
-async def test_changed_pr_rebuilds_judge_context_before_unstarted_revision(store, pending_revision):
+@pytest.mark.parametrize("dispatched", [False, True])
+async def test_changed_pr_rebuilds_judge_context_before_unstarted_revision(store, pending_revision, dispatched):
     # A PR push after triage must not silently attach a saved instruction to different evidence.
     flow, job, task, github, subject = pending_revision
     batch = store.reviews.for_job(job)
@@ -185,16 +186,33 @@ async def test_changed_pr_rebuilds_judge_context_before_unstarted_revision(store
         tx.reviews.freeze_context(batch, context)
         tx.reviews.record_decision(batch, judge_decision(verdict, context))
     github.sha = "external"
+    if dispatched:
+        # A missing Started message does not prove that a dispatched task has not executed.
+        with store.connection() as connection:
+            connection.execute("UPDATE jobs SET dispatch_authorized_at=created_at WHERE id=%s", (job.id,))
+        assert await subject.prepare_for_assignment(job, "worker-a", "token", "epoch") is JobState.QUEUED
+        # Persistence must also roll back the batch reset if retirement cannot prove no dispatch.
+        with pytest.raises(ValueError, match="cannot retire an executing preparation"):
+            store.reviews.invalidate_context(batch, context, job=job)
+        assert store.reviews.for_job(job).context.digest == context.digest
+        assert store.jobs.get_job(job.id).state is JobState.RUNNING
+        return
     assert await subject.prepare_for_assignment(job, "worker-a", "token", "epoch") is JobState.DONE
     fresh = store.reviews.get_batch(batch.id)
     assert fresh.context is fresh.decision is fresh.inference_job_id is fresh.job_id is None
     assert fresh.feedback == batch.feedback and store.reviews.pending(flow.id)
     assert store.flows.get_attempt(task.attempt_id).revision_cycles == 0
-    assert store.workers.finish_assignment(job.id, "worker-a", "token", JobState.DONE, "epoch")
-    report_settled(store, job.id, epoch="epoch")
+    # Restart before the driver's completion callback: the detached job must never be reclaimed.
+    with store.connection() as connection:
+        connection.execute("UPDATE jobs SET lease_expires_at=created_at WHERE id=%s", (job.id,))
+    store.workers.recover_abandoned_assignments()
+    store.workers.sweep_expired_assignments()
+    assert store.jobs.get_job(job.id).state is JobState.DONE
+    register_worker(store, "worker-a", repo=flow.repo, epoch="restarted")
     judge = SimpleNamespace(triage=AsyncMock(side_effect=lambda new: judge_decision(verdict, new)))
     await subject.triage(store.reviews.pending_triage()[0], judge)
-    replacement = store.workers.assign_job("worker-a", "replacement", "epoch")
+    replacement = store.workers.assign_job("worker-a", "replacement", "restarted")
+    assert replacement is not None and replacement.id != job.id
     prepared = await subject.prepare(replacement)
     assert isinstance(prepared, RevisionTask) and prepared.expected_head_sha == "external"
     assert prepared.context.digest != context.digest

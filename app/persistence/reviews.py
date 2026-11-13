@@ -618,19 +618,23 @@ class ReviewStore(Repository):
     def invalidate_context(
         self, batch: ReviewBatch, context: ReviewContext, *, job: Job | None = None,
     ) -> None:
-        """Discard this decision; an unstarted derived job can return its batch to triage."""
-        if job is not None:
-            self.for_job(job)
-            if job.started_at is not None or job.result_payload is not None:
-                raise ValueError("cannot invalidate an executing revision")
-        with self._db.connection() as connection:
-            connection.execute(
+        """Discard this decision and atomically retire any undispatched derived job."""
+        with self._db.transaction() as tx, tx.connection() as connection:
+            tx.lock_workflow(batch.flow_id)
+            if job is not None:
+                current = tx.lock_job(job.id)
+                if current is None:
+                    raise ValueError("review job no longer exists")
+                ReviewStore(tx).for_job(current)
+            cleared = connection.execute(
                 "UPDATE review_batches SET context=NULL,decision=NULL,inference_job_id=NULL,"
                 " job_id=CASE WHEN %s THEN NULL ELSE job_id END,"
                 " threads=CASE WHEN %s THEN NULL ELSE threads END WHERE id=%s"
                 " AND context=%s AND NOT answer_dispatched",
                 (job is not None, job is not None, batch.id, Jsonb(context.model_dump(mode="json"))),
             )
+            if job is not None and cleared.rowcount == 1:
+                JobStore(tx).retire_preparation(job)
 
     def authorize_answer(self, batch: ReviewBatch, context_digest: str) -> bool:
         """Fence the frozen context and authorize one POST under the workflow lock."""

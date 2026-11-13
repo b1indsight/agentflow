@@ -142,3 +142,18 @@
 - **最终检查：** 在最终源码上执行 `FLOWTOOL_TEST_DATABASE_URL=<隔离 UTF8 PostgreSQL> uv run pytest -q`，完整套件通过；`uv run ruff check app tests`、`uv run mypy app tests`、`uv build --no-sources` 与 `git diff origin/main --check` 均通过。简化对比的反例及同组正向回归已完成；详细日志和执行边界见[验收记录](https://ampcode.com/artifacts/838a2830-cbdb-437d-8822-aacbfd9316bc)。
 - **验证边界：** 没有进行真实 GitHub/HTTPS 或 CodingAgent provider smoke，没有操作生产 Kubernetes、部署、数据库或真实 PR 分支。此次无 UI 改动；既有 Starlette/httpx 弃用警告不影响检查结果。
 - **交付边界：** 实现、相关文档与 changelog 使用原 draft PR 提交评审；代码推送须先通过 review gate，不合并或部署。wire24 两端协调升级、先收敛在途任务和回执，以及不自动恢复旧 BLOCKED Flow 的边界保持不变。
+
+### 2026-11-13：原子退休过期准备任务
+
+- **触发与复现：** 发布前审查指出，旧实现先解除反馈批次与 job 的关联，随后依赖 driver callback 结束旧 job。新增故障窗口回归省略 callback 并执行启动/租约恢复，原实现把已脱离批次的旧 job 重新排队，无法可靠继续修订。
+- **决定与实现：** `ReviewStore.invalidate_context` 在同一事务中按 worker → Flow → Job 顺序取得锁，清除旧上下文与关联，并由 `JobStore.retire_preparation` 结束尚未派发的 job、释放其准确 workspace 占用。无需制造 worker 结果、增加 JobState 或退款协议；正常 callback 迟到也不会重新激活旧任务。
+- **执行保护：** 准备阶段拒绝撤销已授权派发的任务，即使还没有收到 Started。持久层同样要求未派发、未启动、无结果；无法退休时整个批次重置回滚，不把未知执行交回 triage。
+- **验证与对比：** 原实现的恢复场景和已派发负向场景均失败；修复后，任务不会在重启后重新入队，新任务能在同一批次上生成新的 Judge context。事务拒绝场景验证旧 context digest、job 归属与运行状态均保留。Controller 的修订恢复、反馈批次、coordinator 与 PR 生命周期针对性检查通过；日志见[验收记录](https://ampcode.com/artifacts/838a2830-cbdb-437d-8822-aacbfd9316bc)。
+
+### 2026-11-13：保留同步凭据并允许 tracked 路径形状变化
+
+- **触发与复现：** 审查指出，新 fetch 经 `_git_args()` 再次清空 helper，抵消 assignment 凭据；只检查环境变量存在不能证明认证生效。既有 retained-path guard 还把安全的 tracked 文件/目录互换当成缓存覆盖。扩展原回归后，旧代码的真实离线 `git credential fill` 解析失败，Git/jj 凭据场景及 jj 两种路径转换均复现失败。
+- **凭据决定：** 隔离的临时 bare repo 不包含 Agent 配置，fetch 沿用 `ensure_seed` 的直接 Git 参数，保留 assignment helper，同时禁用 hooks、fsmonitor 和外部协议。其余 `_git_args()` 调用仍禁止仓库自定义 helper；不全局放宽策略，也不把 token 写入参数、仓库配置或日志。
+- **路径决定：** idle check 已证明的 tracked 文件或 symlink 可以被新树替换；目录变文件时只扫描实际被替换的子树，任一 retained 文件或 symlink 都必须保留。继续拒绝未知 blocking ancestor 及 `.jj` 元数据覆盖，不扫描无关缓存目录。修订同步和 warm-copy `align_repository` 复用同一检查。
+- **验证与对比：** 同组红绿用例验证有效 fetch 参数下的真实凭据解析、两向路径互换以及嵌套 ignored 文件/symlink 和无关缓存的保留；旧实现失败、修复后通过。Worker 的 VCS、workspace、executor、凭据、session 和 adapter 针对性检查通过，数据库场景由整体验证覆盖；未进行真实私有 GitHub HTTPS smoke。
+- **整体验收：** 三项修复的最终源码在隔离 UTF8 PostgreSQL 上通过完整 `uv run pytest -q`；Git 后端不适用的 jj 元数据场景跳过，其余数据库场景均执行。`uv run ruff check app tests`、`uv run mypy app tests`、`uv build` 和相对已发布实现的 diff 空白检查通过；仍有既有 Starlette/httpx 弃用警告。详细红绿与完整日志见[验收记录](https://ampcode.com/artifacts/838a2830-cbdb-437d-8822-aacbfd9316bc)，无生产操作。

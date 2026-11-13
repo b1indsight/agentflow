@@ -285,6 +285,25 @@ class JobStore(Repository):
         ):
             return cursor.execute("SELECT * FROM jobs WHERE id=%s", (job_id,)).fetchone()
 
+    def retire_preparation(self, job: Job) -> None:
+        """Retire undispatched work under the caller's workflow/job locks, without an inbox."""
+        now = self._db.now()
+        with self._db.connection() as connection:
+            retired = connection.execute(
+                "UPDATE jobs SET state='done',result_applied_at=%s,updated_at=%s"
+                " WHERE id=%s AND kind<>'inference' AND state='running'"
+                " AND started_at IS NULL AND dispatch_authorized_at IS NULL"
+                " AND result_received_at IS NULL AND result_payload IS NULL",
+                (now, now, job.id),
+            )
+            if retired.rowcount != 1:
+                raise ValueError("cannot retire an executing preparation")
+            connection.execute(
+                "UPDATE workers w SET current_job_id=NULL FROM jobs j WHERE j.id=%s"
+                " AND w.worker_id=j.assigned_worker_id AND w.workspace=j.workspace"
+                " AND w.generation=j.generation AND w.current_job_id=j.id", (job.id,),
+            )
+
     def list_jobs(self, flow_id: int) -> list[Job]:
         with (
             self._db.connection() as connection,

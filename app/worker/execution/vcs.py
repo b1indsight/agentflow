@@ -441,9 +441,12 @@ async def _fetch_revision(context: VcsExecutionContext, push_token: SecretStr | 
             "baseline", "git", "clone", "--bare", "--shared", "--", str(context.repo_path), ".",
             cwd=temporary,
         )
+        # Like ensure_seed, keep the assignment helper: this fresh repository has no
+        # agent-controlled config, so _git_args() would only erase our own credentials.
         code, _, _ = await _run(
-            *_git_args("fetch", "--no-tags", "--no-recurse-submodules", "--",
-                       context.git_remote_url, f"refs/heads/{context.branch}"),
+            "git", "-c", f"core.hooksPath={os.devnull}", "-c", "core.fsmonitor=false",
+            "-c", "protocol.ext.allow=never", "fetch", "--no-tags", "--no-recurse-submodules",
+            "--", context.git_remote_url, f"refs/heads/{context.branch}",
             cwd=temporary, stage="baseline", environment=environment,
         )
         if code:
@@ -497,16 +500,31 @@ def _require_jj_working_at(working: str, parents: str | None, bookmark: str) -> 
 def _require_retained_paths(repo: Path, current: set[str], target: list[str]) -> None:
     """Reject newly tracked paths that would overwrite retained files, symlinks or jj metadata."""
     for name in target:
-        if not name or name in current:
+        if not name:
+            continue
+        if name == ".jj" or name.startswith(".jj/"):
+            raise VcsVerificationError("workspace", "baseline would overwrite retained cache paths")
+        if name in current:
             continue
         path = repo / name
-        blocked_parent = any(
-            parent.is_symlink() or (parent.exists() and not parent.is_dir())
-            for parent in path.parents if parent != repo and repo in parent.parents
-        )
-        if (path.exists() or path.is_symlink() or blocked_parent
-                or name == ".jj" or name.startswith(".jj/")):
+        parents = [parent for parent in path.parents if parent != repo and repo in parent.parents]
+        # The idle check proves a tracked ancestor can be replaced, without following it
+        # if it is a symlink. Only unknown/ignored blocking ancestors must survive.
+        if any(parent.relative_to(repo).as_posix() in current for parent in parents):
+            continue
+        if any(parent.is_symlink() or (parent.exists() and not parent.is_dir())
+               for parent in parents):
             raise VcsVerificationError("workspace", "baseline would overwrite retained cache paths")
+        # Inspect only the subtree being replaced, not unrelated retained cache trees.
+        pending = [path] if path.exists() or path.is_symlink() else []
+        while pending:
+            entry = pending.pop()
+            if entry.is_dir() and not entry.is_symlink():
+                pending.extend(entry.iterdir())
+            elif entry.relative_to(repo).as_posix() not in current:
+                raise VcsVerificationError(
+                    "workspace", "baseline would overwrite retained cache paths",
+                )
 
 
 async def verify_revision_outcome(

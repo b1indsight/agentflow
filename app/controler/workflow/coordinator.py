@@ -480,7 +480,8 @@ class JobCoordinator:
                         or current.assignment_token != job.assignment_token
                         or current.assigned_worker_id != job.assigned_worker_id
                         or current.state is not JobState.RUNNING
-                        or current.started_at is not None or current.result_payload is not None
+                        or current.started_at is not None or current.dispatch_authorized_at is not None
+                        or current.result_payload is not None
                         or (job.assignment_token is not None and (
                             current.lease_expires_at is None
                             or current.lease_expires_at <= tx.now()))):
