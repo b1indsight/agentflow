@@ -18,10 +18,10 @@ from app.domain.review_models import BatchState
 from app.github import GitHubError, GitHubErrorKind, PullRequest
 from app.persistence.inference_notices import InferenceNoticeStore
 from tests.github import RecordingGitHub
-from tests.review_memory import judge_decision
+from tests.review_memory import feedback_threads, judge_decision
 from tests.test_console_api import console_runtime as console_runtime  # noqa: PLC0414
 from tests.test_merge import route_merge
-from tests.test_review_batches import claim, feedback, ingest
+from tests.test_review_batches import claim, feedback, freeze_legacy_answer, ingest
 from tests.test_review_batches import review_flow as review_flow  # noqa: PLC0414
 from tests.workspace_fixtures import register_worker
 
@@ -32,20 +32,29 @@ def triage_runtime(store, review_flow, recording_resources, monkeypatch, server_
     ingest(store, flow, feedback(clock))
     batch = claim(store, clock)[0]
     runtime = server_runtime(clock=lambda: clock.now)
+    runtime.coordinator.github.threads = feedback_threads(batch.feedback)
     judge = SimpleNamespace(triage=AsyncMock(side_effect=lambda context: judge_decision(
         TriageVerdict(verdict=Verdict.REVISE, confidence=1, instruction="Fix the bound"), context)))
     monkeypatch.setattr("app.controler.runtime.ReviewJudge", lambda *args, **kwargs: judge)
     return runtime, batch, judge
 
 
-async def test_only_revision_enters_job_queue(store, triage_runtime, review_flow):
+@pytest.mark.parametrize("purpose", ["answer", "revise"])
+async def test_feedback_tasks_enter_job_queue_once(store, triage_runtime, review_flow, purpose):
     runtime, batch, judge = triage_runtime
     flow, clock = review_flow
+    judge.triage.side_effect = lambda context: judge_decision(
+        TriageVerdict(verdict=Verdict(purpose), confidence=1,
+                      instruction="Explain the bound" if purpose == "answer" else "Fix the bound"),
+        context,
+    )
     assert store.jobs.list_jobs(batch.flow_id) == []
     await runtime._run_triage()
     await runtime._run_triage()
     jobs = store.jobs.list_jobs(batch.flow_id)
     assert len(jobs) == 1 and jobs[0].kind is JobKind.REVISION
+    assert jobs[0].payload["purpose"] == purpose
+    assert store.reviews.pending(flow.id)
     assert store.reviews.get_batch(batch.id).job_id == jobs[0].id
     assert store.reviews.for_job(jobs[0]).id == batch.id
     assert runtime.coordinator.github.comments == []
@@ -93,8 +102,8 @@ async def test_answer_definite_rejection_can_retry_saved_decision(store, triage_
     # An explicit rejection proves the POST was not accepted; it must not leave
     # the batch permanently uncertain like a lost response does.
     runtime, batch, judge = triage_runtime
-    judge.triage.side_effect = lambda context: judge_decision(
-        TriageVerdict(verdict=Verdict.ANSWER, answer="Ten."), context)
+    batch = await freeze_legacy_answer(store, runtime.coordinator, batch,
+                                      TriageVerdict(verdict=Verdict.ANSWER, answer="Ten."))
     github = runtime.coordinator.github
     comment = PullRequest.comment
 
@@ -109,7 +118,7 @@ async def test_answer_definite_rejection_can_retry_saved_decision(store, triage_
     monkeypatch.setattr(PullRequest, "comment", comment)
     await runtime.coordinator.triage(store.reviews.get_batch(batch.id), judge)
     assert len(github.comments) == 1
-    assert judge.triage.await_count == 1
+    assert judge.triage.await_count == 0
 
 
 async def test_slow_judge_keeps_settle_available_without_a_second_execution(triage_runtime):
@@ -154,11 +163,12 @@ async def finish_inference(store, subject, reply: str | InferenceFailure):
 async def test_review_recomputes_after_pr_push_without_replaying_old_answer(
     store, review_flow, recording_resources, server_runtime,
 ):
-    # A push between inference completion and comment delivery makes the saved answer stale.
+    # A push between inference completion and task creation invalidates the saved context.
     flow, clock = review_flow
     ingest(store, flow, feedback(clock))
     batch = claim(store, clock)[0]
     github = RecordingGitHub()
+    github.threads = feedback_threads(batch.feedback)
     runtime = server_runtime(github=github, clock=lambda: clock.now)
     subject = runtime.coordinator
     judge = ReviewJudge(JobInference(
@@ -170,7 +180,7 @@ async def test_review_recomputes_after_pr_push_without_replaying_old_answer(
     with pytest.raises(InferencePending) as first:
         await subject.triage(batch, judge)
     old_context = store.reviews.get_batch(batch.id).context
-    await finish_inference(store, subject, '{"verdict":"answer","answer":"Old snapshot result"}')
+    await finish_inference(store, subject, '{"verdict":"answer","instruction":"Explain old snapshot"}')
     github.pull_request = old_context.pull_request.model_copy(update={"head_sha": "changed"})
     await subject.triage(store.reviews.get_batch(batch.id), judge)
     assert store.reviews.get_batch(batch.id).context is None
@@ -185,10 +195,12 @@ async def test_review_recomputes_after_pr_push_without_replaying_old_answer(
     assert job.attempt == 0
     assert github.comments == []
 
-    await finish_inference(store, subject, '{"verdict":"answer","answer":"New snapshot result"}')
+    await finish_inference(store, subject, '{"verdict":"answer","instruction":"Explain new snapshot"}')
     await subject.triage(store.reviews.get_batch(batch.id), judge)
-    assert len(github.comments) == 1 and github.comments[0].startswith("New snapshot result\n")
-    assert all(job.kind is JobKind.INFERENCE for job in store.jobs.list_jobs(flow.id))
+    assert github.comments == []
+    coding, = [job for job in store.jobs.list_jobs(flow.id) if job.kind is JobKind.REVISION]
+    assert coding.payload["purpose"] == "answer"
+    assert coding.payload["instruction"] == "Explain new snapshot"
     assert store.jobs.get_job(first.value.job_id).state is JobState.DONE
 
 
@@ -199,6 +211,7 @@ async def test_exhausted_inference_recovers_notice_without_a_fourth_attempt(
     ingest(store, flow, feedback(clock))
     batch = claim(store, clock)[0]
     runtime = server_runtime(settings={"judge_timeout_seconds": 5}, clock=lambda: clock.now)
+    runtime.coordinator.github.threads = feedback_threads(batch.feedback)
     register_worker(store, "plain", epoch="epoch")
     store.workers.worker_ready("plain", "epoch", InferenceCapability(adapter_version="codex/v1"))
     await runtime._run_triage()

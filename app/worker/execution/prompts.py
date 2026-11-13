@@ -107,9 +107,17 @@ def build_revision_prompt(task: RevisionTask, repo_conventions: str) -> str:
         f"base {task.base_branch}; expected head {task.expected_head_sha}\n"),
         f"# Previous summary\n{task.previous_summary}\n",
         f"# Unresolved questions\n{chr(10).join(task.open_points)}\n",
-        f"# Revision instruction (synthesized from review)\n{task.instruction}\n",
+        f"# {task.purpose.title()} instruction (synthesized from review)\n{task.instruction}\n",
         f"# Review feedback\n{feedback}\n",
-        ("Rules: Use the existing repo, branch and PR. Modify, test, commit and ordinary push "
+        ("Rules: This task is answer-only, overriding earlier coding or delivery instructions. "
+        "Do not modify code, commit or push. Read the existing repository to answer every question, "
+        "with code references in each addressed.note. If a request requires a code change, report "
+        "it as deferred; do not upgrade this task to revise. Do not use GitHub API/CLI, post "
+        "comments, request review or open a PR. Report exact item/version/comment identities. "
+        "Preserve deferred work and ask concrete clarification questions. "
+        "Prior conversation may be unavailable."
+        if task.purpose == "answer" else
+        "Rules: Use the existing repo, branch and PR. Modify, test, commit and ordinary push "
         "to origin. Use the repo's Git or jj backend and leave a clean tree; for jj leave an "
         "empty working copy at or directly after the pushed bookmark. Do not force push, "
         "reset, open another PR, use GitHub API/CLI, post comments or request review. "

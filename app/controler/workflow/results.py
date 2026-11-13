@@ -37,6 +37,7 @@ from app.controler.workflow.initial import initial_delivery_mismatch
 from app.controler.workflow.revisions import (
     frozen_revision,
     revision_mismatch,
+    verify_answer_remote,
     verify_revision_remote,
 )
 from app.domain.inference_models import InferenceError, InferenceFailure
@@ -129,7 +130,7 @@ class ResultApplication:
             if result.output is not None:
                 result.output.validate_for(inference.current_task)
                 if inference.validation == "review":
-                    TriageVerdict.model_validate(strict_json(result.output.text))
+                    TriageVerdict.model_validate(strict_json(result.output.text), context={"judge_response": True})
         except InferenceError as error:
             failure = error.failure
         except ValueError:
@@ -316,6 +317,8 @@ class ResultApplication:
             return "revision has no open verified delivery"
         try:
             repo = self.github.installation(flow.installation_id).repository(flow.repo)
+            if task.purpose == "answer":
+                return await verify_answer_remote(repo, flow, delivery, task.expected_head_sha)
             return await verify_revision_remote(repo, flow, delivery, result.commit_sha)
         except GitHubError as error:
             if error.retryable:
@@ -495,18 +498,18 @@ class ResultApplication:
             unresolved = (len(consumed) != len(batch.feedback)
                           or bool(result.output.needs_clarification))
             notes = plan_resolution(flow, number, batch, result,
-                                    reviews_tx.addressed(flow.id, attempt.id))
+                                    reviews_tx.addressed(flow.id, attempt.id), purpose=task.purpose)
             blocked = {(f.item_id, f.version) for f in notes.blocked}
             consumed = [f for f in consumed if (f.item_id, f.version) not in blocked]
             unresolved |= bool(notes.problems)
             effects = notes.effects
-            new_commit = result.commit_sha != task.expected_head_sha
+            new_commit = task.purpose == "revise" and result.commit_sha != task.expected_head_sha
             if result.output.summary:
                 effects.append(
                     self._comment(
                         flow, number, "summary",
-                        f"修订交付"
-                        f"（{'已核验新提交' if new_commit else '无新提交'}）：{result.output.summary}"
+                        f"问题答复：{result.output.summary}" if task.purpose == "answer" else
+                        f"修订交付（{'已核验新提交' if new_commit else '无新提交'}）：{result.output.summary}"
                     )
                 )
             if not unresolved and new_commit:
@@ -516,6 +519,7 @@ class ResultApplication:
                     "effects": effects,
                     "delivery": delivery,
                     "revision": result,
+                    "revision_purpose": task.purpose,
                     "batch_state": BatchState.WAITING if unresolved else BatchState.COMPLETED,
                     "consumed": consumed,
                     "open_points": [*notes.problems, *result.output.needs_clarification,
@@ -638,9 +642,10 @@ class ResultApplication:
             if current is None or current.version != plan.delivery.version:
                 raise ResultPending("delivery version changed before result commit")
             if plan.revision is not None:
-                current.head_sha = plan.revision.commit_sha
-                current.version += 1
-                deliveries_tx.update_delivery(current)
+                if plan.revision_purpose == "revise":
+                    current.head_sha = plan.revision.commit_sha
+                    current.version += 1
+                    deliveries_tx.update_delivery(current)
             else:
                 self._commit_initial_delivery(
                     job, current, flow, deliveries=deliveries_tx, result_store=result_store_tx
@@ -657,12 +662,18 @@ class ResultApplication:
                            and r.receipt is not None and r.receipt.pending_reason
                            for f in r.payload.feedback_refs}
                 consumed = [f for f in consumed if (f.item_id, f.version) not in blocked]
+                if plan.revision_purpose == "answer" and any(
+                    r.receipt is not None and r.receipt.pending_reason for r in records
+                ):
+                    consumed = []
                 open_points.extend(r.receipt.pending_reason for r in records
                                    if r.receipt is not None and r.receipt.pending_reason)
                 if open_points:
                     batch_state = BatchState.WAITING
                 assert plan.revision.commit_sha is not None
-                reviews_tx.record_addressed(plan.batch_id, consumed, plan.revision.commit_sha, job.id)
+                assert plan.delivery is not None and plan.delivery.head_sha is not None
+                head = plan.delivery.head_sha if plan.revision_purpose == "answer" else plan.revision.commit_sha
+                reviews_tx.record_addressed(plan.batch_id, consumed, head, job.id)
             reviews_tx.complete(plan.batch_id, batch_state, consumed, list(dict.fromkeys(open_points)))
 
     @staticmethod

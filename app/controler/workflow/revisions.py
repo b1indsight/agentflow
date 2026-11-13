@@ -21,10 +21,11 @@ def revision_mismatch(task: RevisionTask, result: RevisionTaskResult) -> str | N
     ]:
         return "revision feedback does not match the frozen assignment"
     if (result.exit_code != 0 or result.output is None or not result.output.summary.strip()
-            or result.failure_stage is not None or not result.clean_worktree
-            or result.branch != task.branch or not result.commit_sha
-            or result.commit_sha != result.remote_sha
+            or result.failure_stage is not None or not result.commit_sha
             or result.vcs_backend != result.output.vcs_backend_used):
+        return "revision lacks successful worker execution evidence"
+    if task.purpose == "revise" and (not result.clean_worktree or result.branch != task.branch
+            or result.commit_sha != result.remote_sha):
         return "revision lacks verified clean repository and remote delivery evidence"
     if result.previous_session_id != task.session_id or not result.session_id:
         return "revision session does not match the frozen assignment"
@@ -47,6 +48,20 @@ def revision_mismatch(task: RevisionTask, result: RevisionTaskResult) -> str | N
     if (last.mode != result.mode or last.session_id != result.session_id
             or last.exit_code != 0 or last.failure is not None):
         return "revision invocation does not match accepted session"
+    return None
+
+
+async def verify_answer_remote(
+    repo: Repository, flow: Flow, delivery: FlowDelivery, head_sha: str,
+) -> str | None:
+    """Answer checks only the original open PR's code head, not refs or ancestry."""
+    if (flow.installation_id is None or delivery.state is not DeliveryState.OPEN
+            or delivery.pr_number is None):
+        return "answer has no open verified delivery"
+    pr = await repo.fetch_pull_request(delivery.pr_number)
+    if (pr.number != delivery.pr_number or pr.state != "open" or pr.merged
+            or pr.head_sha != head_sha):
+        return "original PR closed or head changed; answer paused"
     return None
 
 

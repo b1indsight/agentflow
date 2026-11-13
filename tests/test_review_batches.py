@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.controler.events.router import EventRouter
+from app.controler.review.context import build_review_context
 from app.controler.workflow.service import ControlService
 from app.domain.context_models import ReviewContext
 from app.domain.judge_models import JudgeDecision
@@ -26,7 +27,7 @@ from app.persistence.jobs import JobStore
 from app.persistence.reviews import ReviewStore
 from app.persistence.store import Store
 from tests.github import RecordingGitHub
-from tests.review_memory import judge_decision, review_context
+from tests.review_memory import feedback_threads, judge_decision, review_context
 from tests.test_coordinator import coordinator
 
 
@@ -406,9 +407,27 @@ def test_blocked_batch_retry_preserves_frozen_feedback_without_dispatching(store
     assert batch_for(store, replacement).feedback[0].github_id == 101
 
 
+async def freeze_legacy_answer(store, subject, batch, verdict):
+    """Seed an already saved pre-wire22 decision to exercise publication recovery only."""
+    flow = store.flows.get_flow(batch.flow_id)
+    subject.github.threads = feedback_threads(batch.feedback)
+    repo = subject.github.installation(flow.installation_id).repository(flow.repo)
+    context = await build_review_context(repo, flow, batch, 17)
+    with store.transaction() as tx:
+        tx.lock_workflow(flow.id)
+        tx.reviews.freeze_context(batch, context)
+        tx.reviews.record_decision(batch, judge_decision(verdict, context))
+    return store.reviews.get_batch(batch.id)
+
+
 async def run_triage(store, flow, batch, verdict, *, before_apply=None, github=None):
     github = github or RecordingGitHub()
+    github.threads = feedback_threads(batch.feedback)
     subject = coordinator(store, github)
+    if verdict.answer:
+        batch = await freeze_legacy_answer(store, subject, batch, verdict)
+        if before_apply:
+            before_apply()
     async def decide(context):
         if before_apply:
             before_apply()

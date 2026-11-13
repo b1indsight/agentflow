@@ -27,7 +27,7 @@
 
 | 范围 | 状态 | 当前事实 |
 |---|---|---|
-| 配置与领域契约 | 已验证（自动化） | serve/worker 独立配置、wire21 task/result/tool/recovery/stop/conversation 消息和分页 inventory、纯文本任务与可空 Issue、按 Flow 分文件的 journal v5、修订基线与 session generation、批次/item-version/context digest 身份有覆盖 |
+| 配置与领域契约 | 已验证（自动化） | serve/worker 独立配置、wire22 task/result/tool/recovery/stop/conversation 消息和分页 inventory、answer/revise 任务用途、纯文本任务与可空 Issue、按 Flow 分文件的 journal v5、修订基线与 session generation、批次/item-version/context digest 身份有覆盖 |
 | PostgreSQL 持久层 | 已验证（自动化） | Runtime 管理共享 Database，服务自行创建具体仓储；显式事务与共用锁保护 flow/attempt/job、binding、结果回执与反馈批次；聚合 Store 用于 CLI、live smoke 和测试 |
 | Webhook Ingress | 已验证（自动化） | HMAC 验签后、202 前持久化 inbox；后台消费者在每条 receipt 事务内创建服务/路由，提交后通知；失败退避、重放和请求体限制有覆盖 |
 | Event Router | 已验证（M2 F1 自动化） | 反馈 delivery/版本/deadline 原子写入，持久 settle、强信号授权、显式 action、同 Flow 冻结批次串行和重启恢复已覆盖 |
@@ -37,7 +37,7 @@
 | Control Service / Job Coordinator | 部分 | Issue 或持久任务输入/default branch prepare、原子创建、tool fencing、INITIAL 成功后创建 PR、原线程回复/保守 resolve 与持久恢复已接线；冲突自动处理与真实副作用 E2E 未完成 |
 | Codex / Context / Sandbox / VCS | 部分 | Flow repo、临时凭据、首轮 MCP、修订 resume/一次性 fallback、Git/jj clean/remote/lineage 双端核验有自动化；GitHub-only egress 与真实多轮 run 未验证 |
 | GitHub Client | 部分 | githubkit 0.16 App/installation 认证、Issue/repository/ref/PR、单仓库 Contents capability 与错误映射有隔离测试；M2 线程分页、回复、resolve 及竞态恢复有自动化；真实 App smoke 待验证 |
-| Judge / 通用推理 | 已验证（adapter / Job 自动化） | wire21 推理 Job 复用统一领取/结果/恢复；优先合条件的 controller 托管 bub mini worker，否则使用普通 worker 默认无仓库 workspace 的独立 Codex/Amp 会话；单推理槽与多编码 workspace 并存、持久预算/重试及执行记录通知；业务决定和 GitHub 操作仍归 control，真实 provider smoke 待执行 |
+| Judge / 通用推理 | 已验证（adapter / Job 自动化） | wire22 推理 Job 复用统一领取/结果/恢复；Judge 仅按相关 PR/反馈线程/引用片段派发 answer/revise 或保留 wait/ignore，不生成最终答复；answer 由 worker 回答并比较本地提交不变，control 比较冻结 PR head。推理优先 controller 托管 bub mini worker，否则使用普通 worker 默认无仓库 workspace 的独立 Codex/Amp 会话；持久预算/重试及执行记录通知不变，真实 provider smoke 待执行 |
 | PR / 反馈对账 | 已实现、有自动化覆盖 | 独立有界循环读取已追踪 PR 的 merge/close/reopen 及 Issue/PR/review/线程反馈；cursor、退避和诊断持久化，不补建漏失的新 Flow trigger |
 | Projects v2 | 已实现、有自动化覆盖 | 可选组织看板配置、资源 API、独立投影同步及 check/status/retry；远端失败不改写 Flow，真实看板待验收 |
 | 取消 / drain / 停机 | 已实现、有自动化覆盖 | 持久 stop intent、执行 nonce、进程组取消与停止凭据握手；未知执行/未决 effects 保留占用；drain 不派新 Flow，已有绑定继续收尾 |

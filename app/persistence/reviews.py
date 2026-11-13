@@ -419,7 +419,7 @@ class ReviewStore(Repository):
             assert row is not None
             if decision.instruction is not None:
                 job = JobStore(self._db).enqueue_job(flow_id, JobKind.REVISION,
-                    {"batch_id": row["id"], "instruction": decision.instruction})
+                    {"batch_id": row["id"], "instruction": decision.instruction, "purpose": "revise"})
                 self.advance(row["id"], job)
             return self.get_batch(row["id"])
 

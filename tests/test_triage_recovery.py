@@ -17,7 +17,7 @@ from app.domain.models import (
 from app.domain.review_models import FeedbackUpdate
 from app.persistence.reviews import ReviewStore
 from tests.github import RecordingGitHub
-from tests.review_memory import judge_decision
+from tests.review_memory import feedback_threads, judge_decision
 from tests.test_coordinator import coordinator
 from tests.test_merge import route_merge
 from tests.test_review_batches import claim, feedback, ingest, review_flow  # noqa: F401
@@ -32,6 +32,7 @@ async def test_revision_and_batch_transition_commit_together(
     judge = SimpleNamespace(triage=AsyncMock(side_effect=lambda context: judge_decision(
         TriageVerdict(verdict=Verdict.REVISE, confidence=1, instruction="Fix it"), context)))
     subject = coordinator(store, RecordingGitHub())
+    subject.github.threads = feedback_threads(batch.feedback)
     advance = ReviewStore.advance
 
     def interrupt(self, *args):
@@ -56,6 +57,7 @@ async def test_judge_failure_then_ignore_keeps_cleanup_owner(store, completed_op
         FeedbackUpdate(kind=ReviewItemKind.INLINE, github_id=101, author="alice", body="Check",
                        updated_at=store.now()), settle_seconds=0, submit_grace_seconds=0)
     batch = store.reviews.claim_due()[0]
+    _github.threads = feedback_threads(batch.feedback)
     before = store.workers.get_flow_execution(flow.id)
     judge = SimpleNamespace(triage=AsyncMock(side_effect=RuntimeError("provider stopped")))
     with pytest.raises(RuntimeError, match="provider stopped"):

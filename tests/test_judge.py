@@ -83,13 +83,14 @@ async def test_real_bub_contract_is_stateless_and_has_no_tools(monkeypatch):
     monkeypatch.setenv("BUB_FALLBACK_MODELS", '["malicious:fallback"]')
     monkeypatch.setenv("GITHUB_TOKEN", "must-not-leak")
     output = json.dumps({"verdict": "answer", "confidence": 0.9,
-                         "answer": "The configured retry limit is 10."})
+                         "instruction": "Explain the configured retry limit."})
     async with model_endpoint(output=output) as (url, calls):
         judge = judge_for(model="openai:test", api_key=SecretStr("fake-key"), api_base=url)
         first = await judge.triage(context())
         second = await judge.triage(context(2))
     assert first.failure is None
-    assert first.verdict.answer == "The configured retry limit is 10."
+    assert first.verdict.instruction == "Explain the configured retry limit."
+    assert first.verdict.answer == ""
     assert first.context_digest == context().digest
     assert first.session_id != second.session_id
     assert len(calls) == 2
@@ -103,6 +104,8 @@ async def test_real_bub_contract_is_stateless_and_has_no_tools(monkeypatch):
 @pytest.mark.parametrize("output", ["not JSON",
     '{"verdict":"revise","confidence":NaN,"instruction":"Edit"}',
     '{"verdict":"ignore","verdict":"answer","answer":"bad"}',
+    '{"verdict":"answer","answer":"A final answer is no longer Judge output"}',
+    '{"verdict":"answer","instruction":" "}',
 ])
 async def test_bad_model_output_waits_without_retries(output):
     async with model_endpoint(output=output) as (url, calls):

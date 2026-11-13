@@ -17,6 +17,7 @@ from pydantic import (
     Field,
     JsonValue,
     SecretStr,
+    ValidationInfo,
     model_validator,
 )
 
@@ -386,13 +387,16 @@ class TriageVerdict(BaseModel):
     )
 
     @model_validator(mode="after")
-    def _action_fields(self) -> TriageVerdict:
+    def _action_fields(self, info: ValidationInfo) -> TriageVerdict:
+        if info.context and info.context.get("judge_response") and self.answer:
+            raise ValueError("Judge responses describe tasks, not final answers")
         if self.verdict is Verdict.REVISE:
             if not self.instruction.strip() or self.answer:
                 raise ValueError("revise requires an instruction and forbids an answer")
         elif self.verdict is Verdict.ANSWER:
-            if not self.answer.strip() or self.instruction or self.open_points:
-                raise ValueError("answer requires a complete answer with no unresolved work")
+            # Saved pre-wire22 decisions contain the final answer, not a worker instruction.
+            if (bool(self.answer.strip()) == bool(self.instruction.strip()) or self.open_points):
+                raise ValueError("answer requires an instruction (or historical answer) with no unresolved work")
         elif self.instruction or self.answer:
             raise ValueError("wait/ignore cannot contain an instruction or answer")
         if self.verdict is Verdict.IGNORE and self.open_points:

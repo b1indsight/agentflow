@@ -7,6 +7,7 @@ import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -33,7 +34,9 @@ from app.domain.models import (
     ReviewItemKind,
     RevisionCodingOutput,
     SessionUnavailable,
+    TriageVerdict,
     VcsKind,
+    Verdict,
 )
 from app.domain.review_models import FeedbackUpdate
 from app.github import (
@@ -54,6 +57,7 @@ from app.worker.execution.vcs import (
 from app.worker.execution.workspaces import RepositoryWorkspaces
 from app.worker.state.execution import ExecutionState
 from tests.github import NATIVE_PULL_REQUEST_REFETCH
+from tests.review_memory import judge_decision
 from tests.test_coordinator import apply_result
 from tests.test_github_client import AsyncEndpoint, install_client
 from tests.test_review_context import pr_data
@@ -169,17 +173,40 @@ async def test_revision_verifies_real_git_delivery(revision_workspace, monkeypat
         assert (result.commit_sha == task.expected_head_sha) is (behavior == "noop")
 
 
+@pytest.mark.parametrize("behavior,success", [
+    ("noop", True), ("dirty", True), ("unpushed", False), ("push", False),
+])
+async def test_answer_checks_only_local_commit(revision_workspace, behavior, success):
+    # A clean, committed change must fail; an uncommitted edit is outside this check's scope.
+    root, repo, task, secret, pool = revision_workspace
+    task = task.model_copy(update={"purpose": "answer"})
+    agent = RevisionAgent(repo, behavior)
+    result = await WorkerExecutor(root, agent, state=ExecutionState(root, 1), worker_id="w",
+                                  workspaces=pool).execute(task, secret, tool_caller=RecordingToolCaller())
+    assert (result.exit_code == 0) is success
+    assert "Do not modify code" in agent.calls[0][2]
+    assert "Modify, test, commit" not in agent.calls[0][2]
+    if not success:
+        assert result.failure_stage == "commit"
+        head = await asyncio.to_thread(subprocess.check_output, ["git", "rev-parse", "HEAD"],
+                                       cwd=repo, text=True)
+        assert head.strip() != task.expected_head_sha
+    if behavior == "dirty":
+        assert (repo / "change.txt").read_text() == "revision\n"
+
+
+@pytest.mark.parametrize("purpose", ["answer", "revise"])
 @pytest.mark.parametrize("session,behavior,expected", [
     (None, "noop", ["start"]), ("session-1", "missing", ["resume", "start"]),
     ("session-1", "timeout", ["resume"]),
 ])
 async def test_fallback_only_when_execution_is_known_not_to_have_started(
-    revision_workspace, session, behavior, expected,
+    revision_workspace, session, behavior, expected, purpose,
 ):
     root, repo, task, secret, pool = revision_workspace
     # A missing conversation must rebuild from the full direct text, not a generated display title.
     task_content = " \nPreserve these original requirements.\n\nKeep every detail.\t\n "
-    task = task.model_copy(update={"session_id": session, "task_content": task_content})
+    task = task.model_copy(update={"session_id": session, "task_content": task_content, "purpose": purpose})
     agent = RevisionAgent(repo, behavior)
     result = await WorkerExecutor(root, agent, state=ExecutionState(root, 1), worker_id="w",
                                    workspaces=pool).execute(task, secret, tool_caller=RecordingToolCaller())
@@ -223,18 +250,18 @@ def revision_feedback():
 
 
 @pytest.fixture
-async def revision_control(store, completed_open_initial, revision_feedback):
+async def revision_control(store, completed_open_initial, revision_feedback, request):
     """Continue an actual delivered INITIAL through feedback ingestion and revision dispatch."""
     flow, subject, github, _, _ = completed_open_initial
+    purpose = getattr(request, "param", "revise")
     for index, update in enumerate(revision_feedback):
+        if purpose == "answer":
+            update = update.model_copy(update={"signal": "discussion"})
         assert store.reviews.ingest(
             flow.id, f"review-{index}", "pull_request_review_comment", {}, update,
             settle_seconds=0, submit_grace_seconds=0,
         )
     batch, = store.reviews.claim_due()
-    assert batch.job_id is not None
-    job = store.workers.assign_job("worker-a", "revision-token", "epoch")
-    assert job is not None and job.id == batch.job_id and job.kind is JobKind.REVISION
     item = next(f for f in batch.feedback if f.kind is ReviewItemKind.INLINE)
     github.threads = [ReviewThread(
         thread_id="T1", repo=flow.repo, pr_number=17, path="app.py", resolved=False,
@@ -243,8 +270,17 @@ async def revision_control(store, completed_open_initial, revision_feedback):
             body=item.body, updated_at=item.updated_at,
         ),)),
     )]
+    if purpose == "answer":
+        judge = SimpleNamespace(triage=AsyncMock(side_effect=lambda context: judge_decision(
+            TriageVerdict(verdict=Verdict.ANSWER, instruction="Explain the existing bound"), context)))
+        await subject.triage(batch, judge)
+        batch = store.reviews.get_batch(batch.id)
+    assert batch.job_id is not None
+    job = store.workers.assign_job("worker-a", "revision-token", "epoch")
+    assert job is not None and job.id == batch.job_id and job.kind is JobKind.REVISION
     task = await subject.prepare(job)
     assert isinstance(task, RevisionTask)
+    assert task.purpose == purpose
     assert store.workers.start_assignment(job.id, task.attempt_id, "worker-a", "revision-token", "epoch")
     subject.mark_started(job, task, "worker-a")
     github.comments.clear()
@@ -268,6 +304,48 @@ def verified_result(task, **updates):
     }
     values.update(updates)
     return RevisionTaskResult(**values)
+
+
+@pytest.mark.parametrize("revision_control", ["answer"], indirect=True)
+@pytest.mark.parametrize("change", ["metadata", "head", "closed", "late-head"])
+async def test_answer_publication_checks_pr_head_not_worker_delivery(revision_control, monkeypatch, change):
+    store, github, job, subject, task = revision_control
+    before = store.deliveries.get_delivery(job.flow_id)
+    original = PullRequest.refetch
+    reads = 0
+
+    async def changed_pr(pr):
+        nonlocal reads
+        reads += 1
+        return (await original(pr)).model_copy(update={
+            "title": "Edited PR title", "body": "Updated description",
+            "head_sha": "new" if change == "head" or (change == "late-head" and reads > 1) else task.expected_head_sha,
+            "state": "closed" if change == "closed" else "open",
+        })
+
+    monkeypatch.setattr(PullRequest, "refetch", changed_pr)
+    # No ref fetch, clean-tree claim or worker SHA/remote SHA equality is required for answer.
+    monkeypatch.setattr(Repository, "fetch_ref", AsyncMock(side_effect=AssertionError("answer read a ref")))
+    item = task.feedback[0]
+    result = verified_result(task, commit_sha="local-jj-working-commit", remote_sha=None,
+                             branch=None, clean_worktree=False, output=revision_output(addressed=[
+        AddressedComment(item_id=item.item_id, version=item.version, comment_id=item.github_id,
+                         note="The bound is read in app.py:12."),
+    ]))
+    state = await apply_result(subject, job, result)
+    await subject.results.apply(job.id)
+    assert store.deliveries.get_delivery(job.flow_id) == before
+    assert github.review_requests == []
+    if change == "metadata":
+        assert state is JobState.DONE
+        assert store.reviews.pending(job.flow_id) == []
+        assert len(github.thread_replies) == 1
+        assert "app.py:12" in github.thread_replies[0]
+        assert github.comments == ["问题答复：Already satisfied"]
+    else:
+        assert state is (JobState.DONE if change == "late-head" else JobState.FAILED)
+        assert store.reviews.pending(job.flow_id)
+        assert github.comments == github.thread_replies == []
 
 
 async def test_resolve_payloads_only_carry_their_threads_current_and_historical_feedback(revision_control):
@@ -477,6 +555,30 @@ async def test_revision_checks_real_jj_repository(revision_workspace, behavior):
     else:
         with pytest.raises(VcsVerificationError):
             await verify_revision_outcome(context, VcsKind.JJ)
+
+
+@pytest.mark.parametrize("changed_commit", [False, True])
+async def test_answer_checks_real_jj_working_commit(revision_workspace, changed_commit):
+    if shutil.which("jj") is None:
+        pytest.skip("jj is not installed")
+    root, repo, task, secret, pool = revision_workspace
+    env = os.environ | {"JJ_USER": "FlowTool Test", "JJ_EMAIL": "flowtool@example.test"}
+    await _jj("git", "init", "--colocate", cwd=repo, env=env)
+    # jj's working commit differs from the PR head even before a read-only task runs.
+    task = task.model_copy(update={"purpose": "answer"})
+
+    class AnswerAgent(RevisionAgent):
+        async def resume(self, session_id, prompt, *, cwd, output_schema=None, context=None):
+            if changed_commit:
+                await _jj("new", "-m", "Unexpected new commit", cwd=repo, env=env)
+            return CodingExecutionResult(session_id, revision_output(vcs_backend_used=VcsKind.JJ).model_dump_json(), 0)
+
+    result = await WorkerExecutor(root, AnswerAgent(repo), state=ExecutionState(root, 1),
+                                  worker_id="w", workspaces=pool).execute(
+        task, secret, tool_caller=RecordingToolCaller())
+    assert (result.exit_code == 0) is not changed_commit
+    if not changed_commit:
+        assert result.commit_sha != task.expected_head_sha
 
 
 async def test_dirty_repository_after_session_rejection_does_not_fallback(revision_workspace):
