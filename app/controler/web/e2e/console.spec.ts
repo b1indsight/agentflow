@@ -2541,6 +2541,155 @@ test("height changes above, within and below the reading row preserve its top th
   expect(errors).toEqual([]);
 });
 
+test("thread comments show archived code context automatically with optional line numbers and truncation", async ({
+  page,
+}) => {
+  // GitHub attaches diff hunks to comments, not to the empty thread container.
+  const hunk =
+    "@@ -94,2 +95,2 @@\n         self.gateway = gateway\n-        self.files = files\n+        self.files = self.gateway.files";
+  const replies = [
+    {
+      ...activity,
+      key: "inline-context",
+      kind: "inline_comment",
+      title: "",
+      body: "runtime.files 在哪里被使用",
+      body_length: 20,
+      previous_version: null,
+      metadata: {
+        path: "app/controler/runtime.py",
+        line: 96,
+        code_excerpt: hunk,
+        code_summary_truncated: false,
+      },
+    },
+    {
+      ...activity,
+      key: "inline-truncated",
+      author: "reviewer",
+      body: "历史代码片段",
+      body_length: 6,
+      previous_version: null,
+      url: "https://github.com/owner/agentflow/pull/87#discussion_r2",
+      metadata: {
+        path: "app/controler/workers/archived/long-file-name.py",
+        line: null,
+        code_excerpt:
+          "@@ -8,4 +9,4 @@\n context\n-old_value = 1\n+archived_value = 1",
+        code_summary_truncated: true,
+      },
+    },
+    {
+      ...activity,
+      key: "inline-without-code",
+      author: "long-github-reviewer-name-for-wrapping",
+      deleted: true,
+      previous_version: null,
+    },
+  ];
+  await page.route("**/api/flows/42/activity?**", (route) => {
+    const parent = new URL(route.request().url()).searchParams.get("parent");
+    return route.fulfill({
+      json: activityPage(
+        parent
+          ? replies
+          : [
+              {
+                ...activity,
+                kind: "thread",
+                title: "",
+                body: "",
+                body_length: 0,
+              },
+            ],
+        0,
+        parent ? replies.length : 1,
+      ),
+    });
+  });
+  await page.goto("/#flow/42/conversation");
+  const contexts = page.getByRole("region", { name: "评审代码上下文" });
+  await expect(contexts).toHaveCount(2);
+  await expect(contexts.first()).toContainText("app/controler/runtime.py");
+  await expect(contexts.first()).toContainText("Line 96");
+  const diff = contexts.first().getByLabel("版本差异");
+  await expect(diff.locator(".diff-code-delete")).toHaveText(
+    "self.files = files",
+  );
+  await expect(diff.locator(".diff-code-insert")).toHaveText(
+    "self.files = self.gateway.files",
+  );
+  await expect(diff.locator(".diff-gutter-delete").first()).toHaveText("95");
+  await expect(diff.locator(".diff-gutter-insert").last()).toHaveText("96");
+  await expect(diff.locator(".diff-code-delete")).toHaveCSS(
+    "background-color",
+    "rgb(255, 235, 233)",
+  );
+  await expect(diff.locator(".diff-code-insert")).toHaveCSS(
+    "background-color",
+    "rgb(218, 251, 225)",
+  );
+  await expect(diff.locator(".diff-code-edit")).toHaveText("self.gateway.");
+  await expect(contexts.last().locator(".diff-code-insert")).toHaveText(
+    "archived_value = 1",
+  );
+  await expect(
+    contexts.last().locator(".diff-gutter-insert").last(),
+  ).toHaveText("10");
+  await expect(contexts.last()).not.toContainText("Line");
+  await expect(
+    page.getByText("代码片段已截断。", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: "在 GitHub 查看完整上下文" }),
+  ).toHaveAttribute("href", replies[1].url!);
+  await expect(
+    page.getByText("runtime.files 在哪里被使用", { exact: true }),
+  ).toBeVisible();
+  await expect(page.getByText("真实活动正文", { exact: true })).toBeVisible();
+  const replyArticles = page
+    .getByRole("region", { name: "线程回复", exact: true })
+    .getByRole("article");
+  await expect(replyArticles).toHaveCount(3);
+  await expect(replyArticles.locator(".message-avatar")).toHaveText([
+    "O",
+    "R",
+    "L",
+  ]);
+  await expect(
+    replyArticles.last().getByText("已删除", { exact: true }),
+  ).toBeVisible();
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: 1200 });
+    for (const [index, reply] of replies.entries()) {
+      const row = replyArticles.nth(index);
+      const avatar = await row.locator(".message-avatar").boundingBox();
+      const author = await row
+        .getByText(reply.author, { exact: true })
+        .boundingBox();
+      const body = await row
+        .getByText(reply.body, { exact: true })
+        .boundingBox();
+      const parentAvatar = await page
+        .locator("[data-entry='comment-1'] > .message-avatar")
+        .boundingBox();
+      expect(avatar!.width).toBeLessThan(parentAvatar!.width);
+      expect(avatar!.x).toBeLessThan(author!.x);
+      expect(Math.abs(author!.x - body!.x)).toBeLessThan(1);
+      expect(body!.y).toBeGreaterThanOrEqual(author!.y + author!.height);
+    }
+    expect(
+      await page.evaluate(() => document.documentElement.scrollWidth),
+    ).toBeLessThanOrEqual(width);
+    expect(
+      await diff.evaluate((node) => node.scrollWidth - node.clientWidth),
+    ).toBeLessThanOrEqual(1);
+    await page.locator("[data-entry='comment-1']").screenshot({
+      path: `../../../.amp/in/artifacts/thread-replies-first-page-${width}.png`,
+    });
+  }
+});
+
 test("thread replies and body continuation use the pinned snapshot and Unicode offsets", async ({
   page,
 }) => {
@@ -2584,7 +2733,6 @@ test("thread replies and body continuation use the pinned snapshot and Unicode o
   await page.getByRole("tab", { name: "概览" }).click();
   await page.getByRole("tab", { name: "会话" }).click();
   await expect(page.getByText("后文", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "查看线程回复" }).click();
   await expect(page.getByText("线程回复正文", { exact: true })).toBeVisible();
   await page.setViewportSize({ width: 390, height: 844 });
   await page.getByRole("button", { name: "切换任务" }).click();
@@ -2620,14 +2768,14 @@ test("refresh resets reply cursors even when the thread version is unchanged", a
           items: [
             {
               ...activity,
-              key: `reply-${pinned}`,
-              body: `快照 ${pinned} 回复`,
+              key: `${cursor ? "next" : "reply"}-${pinned}`,
+              body: `快照 ${pinned}${cursor ? " 下一页" : ""} 回复`,
             },
           ],
           snapshot,
           total: 2,
-          has_more: true,
-          next_cursor: `reply-${pinned}`,
+          has_more: !cursor,
+          next_cursor: cursor ? null : `reply-${pinned}`,
           sources: [],
           changes: {},
         },
@@ -2646,17 +2794,26 @@ test("refresh resets reply cursors even when the thread version is unchanged", a
     });
   });
   await page.goto("/#flow/42/conversation");
-  await page.getByRole("button", { name: "查看线程回复" }).click();
   await expect(page.getByText("快照 2 回复", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "刷新当前视图" }).click();
+  await page.getByRole("button", { name: "下一页线程回复" }).click();
   await expect(
-    page.getByRole("button", { name: "查看线程回复" }),
+    page.getByText("快照 2 下一页 回复", { exact: true }),
   ).toBeVisible();
   await expect(page.getByText("快照 2 回复", { exact: true })).toHaveCount(0);
-  await page.getByRole("button", { name: "查看线程回复" }).click();
+  await page.getByRole("button", { name: "刷新当前视图" }).click();
   await expect(page.getByText("快照 3 回复", { exact: true })).toBeVisible();
+  await expect(
+    page.getByText("快照 2 下一页 回复", { exact: true }),
+  ).toHaveCount(0);
   await page.getByRole("button", { name: "下一页线程回复" }).click();
-  await expect.poll(() => reads).toEqual(["null:2", "null:3", "reply-3:3"]);
+  await expect(
+    page.getByText("快照 3 下一页 回复", { exact: true }),
+  ).toBeVisible();
+  await expect(page.getByText("快照 3 回复", { exact: true })).toHaveCount(0);
+  // StrictMode replays mount reads and aborts the first; only the cursor/snapshot pairs matter.
+  await expect
+    .poll(() => new Set(reads))
+    .toEqual(new Set(["null:2", "reply-2:2", "null:3", "reply-3:3"]));
   await expect(page.getByRole("alert")).toHaveCount(0);
 });
 

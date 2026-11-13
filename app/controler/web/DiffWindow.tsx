@@ -9,7 +9,7 @@ import {
 } from "react-diff-view";
 import { CODE_LINES, useReadingState } from "./windowing";
 
-/** Parse a complete patch once; window parsed rows without breaking patch syntax or line numbers. */
+/** Parse a patch or standalone GitHub hunk; window rows without losing their original line numbers. */
 export function DiffWindow({
   text,
   stateKey,
@@ -17,7 +17,14 @@ export function DiffWindow({
   text: string;
   stateKey: string;
 }) {
-  const file = useMemo(() => parseDiff(text)[0], [text]);
+  const file = useMemo(
+    // GitHub's diffHunk omits the file headers required by the patch parser.
+    () =>
+      parseDiff(
+        text.startsWith("@@ ") ? `--- a/code\n+++ b/code\n${text}` : text,
+      )[0],
+    [text],
+  );
   const tokens = useMemo(
     () => file && tokenize(file.hunks, { enhancers: [markEdits(file.hunks)] }),
     [file],
