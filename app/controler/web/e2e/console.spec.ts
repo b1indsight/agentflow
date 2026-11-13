@@ -2558,7 +2558,8 @@ test("thread comments show archived code context automatically with optional lin
       previous_version: null,
       metadata: {
         path: "app/controler/runtime.py",
-        line: 96,
+        line: 196,
+        original_line: 96,
         code_excerpt: hunk,
         code_summary_truncated: false,
       },
@@ -2576,6 +2577,20 @@ test("thread comments show archived code context automatically with optional lin
         line: null,
         code_excerpt:
           "@@ -8,4 +9,4 @@\n context\n-old_value = 1\n+archived_value = 1",
+        code_summary_truncated: true,
+      },
+    },
+    {
+      ...activity,
+      key: "inline-unlocated",
+      author: "unknown-line-reviewer",
+      body: "评论行不可用",
+      body_length: 6,
+      previous_version: null,
+      url: "https://github.com/owner/agentflow/pull/87#discussion_r3",
+      metadata: {
+        path: "removed.py",
+        code_excerpt: "",
         code_summary_truncated: true,
       },
     },
@@ -2609,9 +2624,10 @@ test("thread comments show archived code context automatically with optional lin
   });
   await page.goto("/#flow/42/conversation");
   const contexts = page.getByRole("region", { name: "评审代码上下文" });
-  await expect(contexts).toHaveCount(2);
+  await expect(contexts).toHaveCount(3);
   await expect(contexts.first()).toContainText("app/controler/runtime.py");
   await expect(contexts.first()).toContainText("Line 96");
+  await expect(contexts.first()).not.toContainText("Line 196");
   const diff = contexts.first().getByLabel("版本差异");
   await expect(diff.locator(".diff-code-delete")).toHaveText(
     "self.files = files",
@@ -2630,19 +2646,24 @@ test("thread comments show archived code context automatically with optional lin
     "rgb(218, 251, 225)",
   );
   await expect(diff.locator(".diff-code-edit")).toHaveText("self.gateway.");
-  await expect(contexts.last().locator(".diff-code-insert")).toHaveText(
+  await expect(contexts.nth(1).locator(".diff-code-insert")).toHaveText(
     "archived_value = 1",
   );
   await expect(
-    contexts.last().locator(".diff-gutter-insert").last(),
+    contexts.nth(1).locator(".diff-gutter-insert").last(),
   ).toHaveText("10");
-  await expect(contexts.last()).not.toContainText("Line");
+  await expect(contexts.nth(1)).not.toContainText("Line");
   await expect(
-    page.getByText("代码片段已截断。", { exact: true }),
+    page.getByText("仅显示有限代码上下文。", { exact: true }),
   ).toBeVisible();
   await expect(
-    page.getByRole("link", { name: "在 GitHub 查看完整上下文" }),
+    contexts.nth(1).getByRole("link", { name: "在 GitHub 查看完整上下文" }),
   ).toHaveAttribute("href", replies[1].url!);
+  await expect(contexts.last()).toContainText("无法定位评论行。");
+  await expect(contexts.last().getByLabel("版本差异")).toHaveCount(0);
+  await expect(
+    contexts.last().getByRole("link", { name: "在 GitHub 查看完整上下文" }),
+  ).toHaveAttribute("href", replies[2].url!);
   await expect(
     page.getByText("runtime.files 在哪里被使用", { exact: true }),
   ).toBeVisible();
@@ -2650,10 +2671,11 @@ test("thread comments show archived code context automatically with optional lin
   const replyArticles = page
     .getByRole("region", { name: "线程回复", exact: true })
     .getByRole("article");
-  await expect(replyArticles).toHaveCount(3);
+  await expect(replyArticles).toHaveCount(4);
   await expect(replyArticles.locator(".message-avatar")).toHaveText([
     "O",
     "R",
+    "U",
     "L",
   ]);
   await expect(
@@ -2685,7 +2707,10 @@ test("thread comments show archived code context automatically with optional lin
       await diff.evaluate((node) => node.scrollWidth - node.clientWidth),
     ).toBeLessThanOrEqual(1);
     await page.locator("[data-entry='comment-1']").screenshot({
-      path: `../../../.amp/in/artifacts/thread-replies-first-page-${width}.png`,
+      path: `../../../.amp/in/artifacts/thread-context-bounded-${width}.png`,
+    });
+    await contexts.last().screenshot({
+      path: `../../../.amp/in/artifacts/thread-context-unlocated-${width}.png`,
     });
   }
 });

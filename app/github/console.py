@@ -11,7 +11,9 @@ import asyncio
 import base64
 import json
 import re
+from collections import deque
 from datetime import UTC, datetime
+from io import StringIO
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -103,6 +105,74 @@ def _key(repo: str, kind: str, node: dict) -> str:
     return f"github:{repo.casefold()}:{kind}:{identity}"
 
 
+def _code_excerpt(hunk: str, line: int | None, side: str | None) -> tuple[str, bool]:
+    """Keep the comment and five diff rows either side, within 4000 characters.
+
+    Coordinates belong to the comment's original diff, not the latest PR revision.
+    Rebuild the hunk header so cropped additions/deletions retain correct line numbers.
+    """
+    if line is None or side not in {"LEFT", "RIGHT"}:
+        return "", True
+    before: deque[tuple[int, int, str]] = deque(maxlen=5)
+    rows: list[tuple[int, int, str]] = []
+    anchor: int | None = None
+    old: int | None = None
+    new = 0
+    truncated = False
+    for raw in StringIO(hunk):
+        text = raw.rstrip("\r\n")
+        header = re.match(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", text)
+        if header:
+            if anchor is not None:
+                truncated = True
+                break
+            truncated |= old is not None
+            old = int(header[1]) + (header[2] == "0")
+            new = int(header[3]) + (header[4] == "0")
+            before.clear()
+            continue
+        if old is None or not text or text[0] not in " +-":
+            continue
+        row = (old, new, text)
+        matches = (side == "LEFT" and text[0] != "+" and old == line) or (
+            side == "RIGHT" and text[0] != "-" and new == line
+        )
+        if anchor is None:
+            if matches:
+                rows = [*before, row]
+                anchor = len(before)
+            else:
+                truncated |= len(before) == before.maxlen
+                before.append(row)
+        elif len(rows) - anchor <= 5:
+            rows.append(row)
+        else:
+            truncated = True
+            break
+        old += text[0] != "+"
+        new += text[0] != "-"
+    if anchor is None:
+        return "", True
+    while True:
+        old_count = sum(row[2][0] != "+" for row in rows)
+        new_count = sum(row[2][0] != "-" for row in rows)
+        old_start = rows[0][0] - (old_count == 0)
+        new_start = rows[0][1] - (new_count == 0)
+        excerpt = f"@@ -{old_start},{old_count} +{new_start},{new_count} @@\n"
+        excerpt += "\n".join(row[2] for row in rows)
+        if len(excerpt) <= 4000:
+            return excerpt, truncated
+        truncated = True
+        if len(rows) == 1:
+            return excerpt[:3999] + "…", True
+        # Remove distant context before shortening the actual commented line.
+        if anchor >= len(rows) - anchor - 1:
+            rows.pop(0)
+            anchor -= 1
+        else:
+            rows.pop()
+
+
 def _object(
     repo: str, source: str, kind: str, node: dict, *, parent: str | None = None
 ) -> Observation:
@@ -143,10 +213,13 @@ def _object(
             )
     hunk = node.get("diff_hunk")
     if isinstance(hunk, str):
+        excerpt, truncated = _code_excerpt(
+            hunk, node.get("original_line") or node.get("line"), node.get("side")
+        )
         metadata.update(
-            code_excerpt=hunk[:2000],
+            code_excerpt=excerpt,
             code_characters=len(hunk),
-            code_summary_truncated=len(hunk) > 2000,
+            code_summary_truncated=truncated,
         )
     author = user.get("login")
     body = node.get("body") or node.get("description")
@@ -205,9 +278,9 @@ _THREADS = (
  } pageInfo { hasNextPage endCursor } } } } }"""
 )
 _REPLIES = """query($id:ID!,$limit:Int!,$cursor:String) { node(id:$id) {
- ... on PullRequestReviewThread { pullRequest { number repository { nameWithOwner } }
+ ... on PullRequestReviewThread { diffSide pullRequest { number repository { nameWithOwner } }
  comments(first:$limit,after:$cursor) { nodes { id fullDatabaseId body createdAt updatedAt url
- author { login } replyTo { id } diffHunk commit { oid } path line }
+ author { login } replyTo { id } diffHunk commit { oid } path line originalLine }
  pageInfo { hasNextPage endCursor } } } } }"""
 
 
@@ -254,6 +327,8 @@ async def _threads(
                 "user": node.get("author"),
                 "path": node.get("path"),
                 "line": node.get("line"),
+                "original_line": node.get("originalLine"),
+                "side": target["diffSide"],
                 "diff_hunk": node.get("diffHunk"),
                 "commit_id": node.get("commit", {}).get("oid"),
             }
