@@ -9,7 +9,7 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
-import { defaultRangeExtractor, useVirtualizer } from "@tanstack/react-virtual";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { focusableControls } from "./focus";
 
 export const MAX_ROWS = 60;
@@ -20,6 +20,10 @@ function readingMemory() {
   return {
     values: new Map<string, number>(),
     listeners: new Map<string, Set<() => void>>(),
+    bookmarks: new Map<
+      string,
+      { key: RowKey | null; offset: number; scrollTop: number }
+    >(),
   };
 }
 const Memory = createContext(readingMemory());
@@ -160,34 +164,109 @@ export function TextWindow({
   );
 }
 
+type RowKey = string | number;
+type RowGeometry = { top: number; height: number };
+interface ReadingAnchor {
+  key: RowKey;
+  offset: number;
+  scrollTop: number;
+  rootTop: number;
+  inputVersion: number;
+}
+
 interface WindowProps {
   count: number;
-  itemKey: (index: number) => string | number;
-  children: (index: number, mounted: ReadonlySet<number>) => ReactNode;
+  itemKey: (index: number) => RowKey;
+  children: (index: number) => ReactNode;
   estimate?: number;
   onRange?: (indexes: number[]) => void;
+  onVisibleRange?: (keys: readonly RowKey[], anchorKey: RowKey | null) => void;
+  /** Preserve a logical row across layout/remounts; resolve is called only for missing row keys. */
+  reading?: { key: string; resolve: (key: RowKey) => RowKey | null };
   label: string;
 }
 
-/** Small collections stay in normal flow; growing collections share the page's scroll root. */
+/** Mounted rows share normal flow; only omitted intervals use estimated heights. */
 export function WindowList({
   count,
   itemKey,
   children,
   estimate = 180,
   onRange,
+  onVisibleRange,
+  reading,
   label,
 }: WindowProps) {
+  const memory = useContext(Memory);
+  const preserveReadingAnchor = Boolean(reading);
   const large = count > MAX_ROWS;
   const host = useRef<HTMLDivElement>(null);
-  const measured = useRef(new Map<string | number, number>());
+  const measured = useRef(new Map<RowKey, number>());
   const [root, setRoot] = useState<HTMLElement | null>(null);
   const [margin, setMargin] = useState(0);
-  const [focused, setFocused] = useState<number | null>(null);
+  const [focused, setFocused] = useState<RowKey | null>(null);
   const [pending, setPending] = useState<{
-    index: number;
+    key: RowKey;
     reverse: boolean;
   } | null>(null);
+  const [recovery, setRecovery] = useState<RowKey | null>(null);
+  // restore applies the mount bookmark before live anchoring; input cancels it, header navigation doesn't.
+  // anchor keeps the first fully visible (or first intersecting) row; recovery pins a target lacking DOM geometry.
+  // Input/navigation/external scroll reselect active anchors against the previous geometry.
+  // Commits, measurements, scroll, resize and navigation settle together after ancestor layout effects.
+  // Wait for a snapshot before mounting: an empty settle would consume and overwrite the bookmark.
+  const layout = useRef({
+    anchor: null as ReadingAnchor | null,
+    restore: reading ? memory.bookmarks.get(reading.key) : undefined,
+    geometry: new Map<RowKey, RowGeometry>(),
+    keys: [] as RowKey[],
+    inputVersion: 0,
+    visible: [] as RowKey[],
+    visibleAnchor: null as RowKey | null,
+    reported: false,
+  });
+  const keys = Array.from({ length: count }, (_, index) => itemKey(index));
+  const keyIndexes = new Map(keys.map((key, index) => [key, index]));
+  const resolveKey = (key: RowKey | null) => {
+    if (key === null || keyIndexes.has(key)) return key;
+    const replacement = reading?.resolve(key);
+    if (
+      replacement !== undefined &&
+      replacement !== null &&
+      keyIndexes.has(replacement)
+    )
+      return replacement;
+    // Focus, pending Tab and reading anchors share the last settled display-row order.
+    const before = layout.current.keys;
+    const index = before.indexOf(key);
+    if (index < 0) return null;
+    for (let i = index - 1; i >= 0; i--)
+      if (keyIndexes.has(before[i])) return before[i];
+    for (let i = index + 1; i < before.length; i++)
+      if (keyIndexes.has(before[i])) return before[i];
+    return null;
+  };
+  const focusedKey = resolveKey(focused);
+  const pendingKey = resolveKey(pending?.key ?? null);
+  const anchorKey = preserveReadingAnchor
+    ? resolveKey(
+        recovery ??
+          layout.current.restore?.key ??
+          layout.current.anchor?.key ??
+          null,
+      )
+    : null;
+  const queued = useRef(false);
+  const settle = useRef<() => void>(() => {});
+  // Ancestor layout effects (header/tab positioning) finish before this batch reads geometry.
+  const settleLayout = () => {
+    if (queued.current) return;
+    queued.current = true;
+    queueMicrotask(() => {
+      queued.current = false;
+      settle.current();
+    });
+  };
   const virtual = useVirtualizer<HTMLElement, HTMLDivElement>({
     count,
     enabled: large,
@@ -195,28 +274,206 @@ export function WindowList({
     useFlushSync: false,
     getScrollElement: () => (large ? root : null),
     initialOffset: () => root?.scrollTop ?? 0,
+    // Switching a populated list into virtual mode must not unmount its focused row for one commit.
+    initialRect: {
+      width: root?.clientWidth ?? 0,
+      height: root?.clientHeight ?? 0,
+    },
     estimateSize: (index) => measured.current.get(itemKey(index)) ?? estimate,
     getItemKey: itemKey,
     overscan: 3,
     scrollMargin: margin,
+    onChange: settleLayout,
     rangeExtractor: (range) => {
-      const pins = [
-        ...new Set(
-          [focused, pending?.index].filter(
-            (n): n is number => n !== null && n !== undefined && n < count,
-          ),
-        ),
-      ];
-      const visible = defaultRangeExtractor(range).slice(
-        0,
-        MAX_ROWS - pins.length,
-      );
-      return [...new Set([...visible, ...pins])].sort((a, b) => a - b);
+      const selected = new Set<number>();
+      for (const key of [focusedKey, pendingKey, anchorKey]) {
+        const index = key === null ? undefined : keyIndexes.get(key);
+        if (index !== undefined) selected.add(index);
+      }
+      // Visible rows take priority over overscan; pins share this same hard budget.
+      for (
+        let index = range.startIndex;
+        index <= range.endIndex && selected.size < MAX_ROWS;
+        index++
+      )
+        selected.add(index);
+      for (let distance = 1; distance <= range.overscan; distance++) {
+        for (const index of [
+          range.startIndex - distance,
+          range.endIndex + distance,
+        ])
+          if (index >= 0 && index < count && selected.size < MAX_ROWS)
+            selected.add(index);
+      }
+      return [...selected].sort((a, b) => a - b);
     },
   });
+  // The library and the conversation must not both compensate one measurement.
+  virtual.shouldAdjustScrollPositionOnItemSizeChange = preserveReadingAnchor
+    ? () => false
+    : undefined;
+
+  settle.current = () => {
+    const node = host.current;
+    if (!node || !root) return;
+    const before = layout.current;
+    if (!preserveReadingAnchor && !onVisibleRange) {
+      before.keys = keys;
+      return;
+    }
+    const rootTop = root.getBoundingClientRect().top + root.clientTop;
+    const visibleTop = Math.max(0, -rootTop);
+    const visibleBottom = Math.min(root.clientHeight, innerHeight - rootTop);
+    if (visibleBottom <= visibleTop) return;
+    const geometry = new Map<RowKey, RowGeometry>();
+    for (const row of node.querySelectorAll<HTMLElement>(
+      ":scope > [data-window-row]",
+    )) {
+      const key = keys[Number(row.dataset.windowRow)];
+      const rect = row.getBoundingClientRect();
+      if (key === undefined) continue;
+      geometry.set(key, {
+        top: rect.top - rootTop + root.scrollTop,
+        height: rect.height,
+      });
+    }
+    const visibleRows = (positions: ReadonlyMap<RowKey, RowGeometry>) =>
+      [...positions].filter(([, row]) => {
+        const offset = row.top - root.scrollTop;
+        return (
+          row.height > 0 &&
+          offset < visibleBottom &&
+          offset + row.height > visibleTop
+        );
+      });
+    const pickAnchor = (positions: ReadonlyMap<RowKey, RowGeometry>) => {
+      const visible = visibleRows(positions);
+      const first =
+        visible.find(([, row]) => {
+          const offset = row.top - root.scrollTop;
+          return (
+            offset >= visibleTop - 0.5 &&
+            offset + row.height <= visibleBottom + 0.5
+          );
+        }) ?? visible[0];
+      return first
+        ? {
+            key: first[0],
+            offset: first[1].top - root.scrollTop,
+            scrollTop: root.scrollTop,
+            rootTop,
+            inputVersion: before.inputVersion,
+          }
+        : null;
+    };
+    let anchor = before.anchor;
+    if (before.restore) {
+      const saved = before.restore;
+      if (saved.key === null) root.scrollTop = saved.scrollTop;
+      else
+        anchor = {
+          key: saved.key,
+          offset: saved.offset,
+          scrollTop: root.scrollTop,
+          rootTop,
+          inputVersion: before.inputVersion,
+        };
+    }
+    if (preserveReadingAnchor && anchor) {
+      const scrollMoved = Math.abs(root.scrollTop - anchor.scrollTop) > 0.5;
+      const max = Math.max(0, root.scrollHeight - root.clientHeight);
+      const clamped = anchor.scrollTop > max && root.scrollTop >= max - 0.5;
+      const externalPosition =
+        scrollMoved && (!clamped || Math.abs(rootTop - anchor.rootTop) > 0.5);
+      if (anchor.inputVersion !== before.inputVersion || externalPosition) {
+        // Read the latest input against the previous layout, not a request-start scroll position.
+        anchor = pickAnchor(before.geometry);
+      }
+      const key = resolveKey(anchor?.key ?? null);
+      if (anchor && key !== null) {
+        anchor = {
+          ...anchor,
+          key,
+          // A short folded summary must not inherit an invisible tall member's negative offset.
+          offset:
+            key === anchor.key
+              ? anchor.offset
+              : Math.max(visibleTop, anchor.offset),
+        };
+        const row = geometry.get(key);
+        if (!row) {
+          before.anchor = anchor;
+          if (recovery !== key) setRecovery(key);
+          return;
+        }
+        // Using actual geometry also accounts for browser clamping after a group shrinks.
+        const delta = row.top - root.scrollTop - anchor.offset;
+        if (Math.abs(delta) > 0.5) root.scrollTop += delta;
+      }
+    }
+    before.restore = undefined;
+    if (recovery !== null) setRecovery(null);
+    before.anchor = pickAnchor(geometry);
+    before.geometry = geometry;
+    before.keys = keys;
+    const visible = visibleRows(geometry).map(([key]) => key);
+    const nextAnchor = before.anchor?.key ?? null;
+    const bounds = node.getBoundingClientRect();
+    const reliable =
+      !count ||
+      visible.length > 0 ||
+      bounds.bottom <= rootTop + visibleTop ||
+      bounds.top >= rootTop + visibleBottom;
+    if (reading && reliable)
+      memory.bookmarks.set(reading.key, {
+        key: before.anchor?.key ?? null,
+        offset: before.anchor?.offset ?? 0,
+        scrollTop: root.scrollTop,
+      });
+    if (
+      onVisibleRange &&
+      reliable &&
+      (!before.reported ||
+        before.visibleAnchor !== nextAnchor ||
+        before.visible.length !== visible.length ||
+        visible.some((key, index) => key !== before.visible[index]))
+    ) {
+      before.reported = true;
+      before.visible = visible;
+      before.visibleAnchor = nextAnchor;
+      onVisibleRange(visible, nextAnchor);
+    }
+  };
   useLayoutEffect(() => {
     setRoot(host.current?.closest<HTMLElement>("[data-scroll-root]") ?? null);
   }, []);
+  useLayoutEffect(settleLayout);
+  useLayoutEffect(() => {
+    if (!root || (!preserveReadingAnchor && !onVisibleRange)) return;
+    const input = () => {
+      layout.current.inputVersion++;
+      layout.current.restore = undefined;
+    };
+    const navigation = () => {
+      // Header positioning can finish before the initial bookmark restoration.
+      layout.current.inputVersion++;
+      settleLayout();
+    };
+    root.addEventListener("wheel", input, { passive: true });
+    root.addEventListener("pointerdown", input, { passive: true });
+    root.addEventListener("keydown", input);
+    root.addEventListener("window-list-navigation", navigation);
+    root.addEventListener("scroll", settleLayout, { passive: true });
+    window.addEventListener("resize", settleLayout);
+    return () => {
+      root.removeEventListener("wheel", input);
+      root.removeEventListener("pointerdown", input);
+      root.removeEventListener("keydown", input);
+      root.removeEventListener("window-list-navigation", navigation);
+      root.removeEventListener("scroll", settleLayout);
+      window.removeEventListener("resize", settleLayout);
+    };
+  }, [root, preserveReadingAnchor, Boolean(onVisibleRange)]);
   useLayoutEffect(() => {
     if (!large || !root || !host.current) return;
     const update = () => {
@@ -248,7 +505,10 @@ export function WindowList({
     if (count > MAX_ROWS || !host.current) return;
     const observer = new ResizeObserver((entries) => {
       for (const { target } of entries) {
-        if (target instanceof HTMLElement) {
+        if (
+          target instanceof HTMLElement &&
+          target.hasAttribute("data-window-row")
+        ) {
           const index = Number(target.dataset.windowRow);
           measured.current.set(
             itemKey(index),
@@ -256,8 +516,12 @@ export function WindowList({
           );
         }
       }
+      settleLayout();
     });
-    for (const row of host.current.children) observer.observe(row);
+    for (const row of host.current.querySelectorAll(
+      ":scope > [data-window-row]",
+    ))
+      observer.observe(row);
     return () => observer.disconnect();
   }, [count, itemKey]);
   const rows = large
@@ -266,21 +530,34 @@ export function WindowList({
         index,
         key: itemKey(index),
         start: 0,
+        end: 0,
       }));
-  const mounted = new Set(rows.map(({ index }) => index));
   const indexes = rows.map(({ index }) => index).join(",");
   useEffect(() => {
     if (indexes) onRange?.(indexes.split(",").map(Number));
   }, [indexes, onRange]);
   useLayoutEffect(() => {
+    if (focused !== focusedKey) {
+      setFocused(focusedKey);
+      const index =
+        focusedKey === null ? undefined : keyIndexes.get(focusedKey);
+      host.current
+        ?.querySelector<HTMLElement>(`:scope > [data-window-row="${index}"]`)
+        ?.focus({ preventScroll: true });
+    }
     if (!pending) return;
+    const index = pendingKey === null ? undefined : keyIndexes.get(pendingKey);
+    if (index === undefined) {
+      setPending(null);
+      return;
+    }
     const row = host.current?.querySelector<HTMLElement>(
-      `:scope > [data-window-row="${pending.index}"]`,
+      `:scope > [data-window-row="${index}"]`,
     );
     if (row && row.getBoundingClientRect().height === 0) {
-      const next = pending.index + (pending.reverse ? -1 : 1);
+      const next = index + (pending.reverse ? -1 : 1);
       if (next >= 0 && next < count) {
-        setPending({ index: next, reverse: pending.reverse });
+        setPending({ key: keys[next], reverse: pending.reverse });
         virtual.scrollToIndex(next, { align: "auto" });
       } else setPending(null);
       return;
@@ -293,28 +570,63 @@ export function WindowList({
       target.focus({ preventScroll: true });
       setPending(null);
     }
-  }, [indexes, pending]);
+  });
   const ownRow = (target: EventTarget | null) => {
     if (!(target instanceof HTMLElement)) return null;
     let node = target;
     while (node.parentElement && node.parentElement !== host.current)
       node = node.parentElement;
-    return node.parentElement === host.current
+    return node.parentElement === host.current &&
+      node.hasAttribute("data-window-row")
       ? Number(node.dataset.windowRow)
       : null;
   };
+  const content: ReactNode[] = [];
+  let previousEnd = margin;
+  for (const row of rows) {
+    if (large && row.start > previousEnd)
+      content.push(
+        <div
+          key={`gap:${row.key}`}
+          aria-hidden="true"
+          style={{ height: row.start - previousEnd }}
+        />,
+      );
+    content.push(
+      <div
+        key={`row:${row.key}`}
+        data-index={row.index}
+        data-window-row={row.index}
+        tabIndex={-1}
+        ref={(node) => {
+          if (node)
+            measured.current.set(
+              keys[row.index],
+              node.getBoundingClientRect().height,
+            );
+          if (large) virtual.measureElement(node);
+        }}
+      >
+        {children(row.index)}
+      </div>,
+    );
+    previousEnd = row.end;
+  }
+  const suffix = virtual.getTotalSize() + margin - previousEnd;
+  if (large && suffix > 0)
+    content.push(
+      <div key="suffix" aria-hidden="true" style={{ height: suffix }} />,
+    );
   return (
     <div
       className={`window-list${large ? " virtual-list" : ""}`}
       data-window-list={label}
       data-window-count={count}
       ref={host}
-      style={
-        large
-          ? { height: virtual.getTotalSize(), position: "relative" }
-          : undefined
-      }
-      onFocusCapture={(event) => setFocused(ownRow(event.target))}
+      onFocusCapture={(event) => {
+        const index = ownRow(event.target);
+        setFocused(index === null ? null : keys[index]);
+      }}
       onBlurCapture={(event) => {
         if (!event.currentTarget.contains(event.relatedTarget))
           setFocused(null);
@@ -349,39 +661,12 @@ export function WindowList({
         // Native Tab would skip every unmounted record between two DOM windows.
         event.preventDefault();
         event.stopPropagation();
-        setPending({ index: next, reverse: event.shiftKey });
+        layout.current.inputVersion++;
+        setPending({ key: keys[next], reverse: event.shiftKey });
         virtual.scrollToIndex(next, { align: "auto" });
       }}
     >
-      {rows.map((row) => (
-        <div
-          key={row.key}
-          data-index={row.index}
-          data-window-row={row.index}
-          tabIndex={-1}
-          ref={(node) => {
-            if (large) virtual.measureElement(node);
-            else if (node)
-              measured.current.set(
-                itemKey(row.index),
-                node.getBoundingClientRect().height,
-              );
-          }}
-          style={
-            large
-              ? {
-                  position: "absolute",
-                  top: 0,
-                  left: 0,
-                  width: "100%",
-                  transform: `translateY(${row.start - margin}px)`,
-                }
-              : undefined
-          }
-        >
-          {children(row.index, mounted)}
-        </div>
-      ))}
+      {content}
     </div>
   );
 }

@@ -42,7 +42,6 @@ class RecordingGitHub(GitHubApp):
 
     model_config = ConfigDict(frozen=False, extra="allow")
     app_id: int = 1
-    bot_login: str = "flowtool[bot]"
     comments: list[str] = Field(default_factory=list)
     comment_bodies: list[str] = Field(default_factory=list)
     pull_request: PullRequest | None = None
@@ -54,7 +53,8 @@ class RecordingGitHub(GitHubApp):
     resource_calls: list[dict[str, Any]] = Field(default_factory=list)
 
     def __init__(self) -> None:
-        BaseModel.__init__(self, app_id=1, bot_login="flowtool[bot]")
+        BaseModel.__init__(self, app_id=1)
+        self._bot_login = "flowtool[bot]"
         self._sdk = GitHub(AppAuthStrategy(1, "unused-test-key"))
 
 
@@ -82,6 +82,7 @@ class RecordingRepository(Repository):
             token=SecretStr("push-token"), repository=self.full_name,
             permissions={"contents": "write"},
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
+            bot_login=self.installation.app.bot_login, bot_user_id=7654321,
         )
 
     async def fetch_ref(self, branch: str, *, retry_transient: bool = False) -> RemoteRef:
@@ -194,8 +195,8 @@ class RecordingPullRequest(PullRequest):
         )
 
     async def fetch_threads(self, *, cursor: str | None = None, limit: int = 100) -> Batch[ReviewThread]:
-        record_call(self.repository, "fetch_threads", number=self.number)
-        return Batch[ReviewThread]()
+        state = record_call(self.repository, "fetch_threads", number=self.number)
+        return Batch[ReviewThread](items=tuple(state.threads))
 
 
 class RecordingReviewThread(ReviewThread):

@@ -34,6 +34,7 @@ from app.contracts.files import FileFailure
 from app.controler.config import ServerSettings
 from app.controler.console.api import router as console_router
 from app.controler.runtime import ServerRuntime
+from app.controler.workers.transport import serve_worker
 from app.persistence.webhooks import DeliveryConflict
 
 
@@ -240,7 +241,9 @@ def create_app(runtime: ServerRuntime | None = None) -> FastAPI:
     @application.websocket("/internal/workers/connect")
     async def worker_connect(socket: WebSocket) -> None:
         runtime: ServerRuntime = socket.app.state.runtime
-        await runtime.gateway.handle(socket)
+        await serve_worker(
+            socket, worker_tokens=runtime.worker_tokens, serve=runtime.serve_worker_session,
+        )
 
     return application
 

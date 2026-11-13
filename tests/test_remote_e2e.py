@@ -1,31 +1,26 @@
+"""Duplex worker/server runtime coverage with PostgreSQL and a scripted external agent."""
+
 import asyncio
+import subprocess
 from collections.abc import Mapping
-from unittest.mock import AsyncMock, Mock
+from contextlib import asynccontextmanager
 
 import pytest
+from pydantic import SecretStr
 
-from app.contracts.protocol import (
-    Assignment,
-    ExecutionResult,
-    ExecutionTask,
-    FlowToolResponse,
-    InitialTask,
-    InitialTaskResult,
-    Succeeded,
-)
-from app.controler.workers.conversation import ConversationBroker
-from app.controler.workers.gateway import WorkerGateway
-from app.controler.workflow.coordinator import JobCoordinator
-from app.controler.workflow.tools import FlowToolService
-from app.domain.delivery_models import OpenedDelivery
-from app.domain.models import FlowDelivery, Job, JobKind, JobState, VcsKind, VcsOutcome
-from app.persistence.stops import StopStore
-from app.persistence.store import Store
-from app.worker.state.session import WorkerSession
-from app.worker.transport.client import WorkerClient
-from app.worker.transport.mcp import FlowToolCaller
-from tests.persistence_fakes import RepositoryViews
-from tests.worker_fakes import NoPendingStops, connected_worker, result_application
+from app.contracts.receipts import decode_result_inbox
+from app.controler.workers.transport import serve_worker
+from app.controler.workflow.service import ControlService
+from app.domain.models import DeliveryState, FlowState, JobState
+from app.github import RemoteRef, Repository
+from app.persistence.records import required
+from app.worker.config import WorkerSettings
+from app.worker.runtime import WorkerRuntime
+from tests.github import RecordingGitHub, RecordingRepository
+from tests.test_worker_executor import RecordingAgent
+from tests.test_worker_workspaces import managed_seed
+from tests.test_workspace_dispatch import wait_until
+from tests.worker_fixtures import run_worker
 
 
 class QueueSocket:
@@ -65,228 +60,111 @@ class QueueConnection:
     async def recv(self) -> str:
         return await self._incoming.get()
 
-
-class RemoteStore(RepositoryViews, Store):
-    @property
-    def stops(self) -> StopStore:
-        return NoPendingStops()
-
-    def __init__(self) -> None:
-        self.job = Job(id=5, flow_id=3, kind=JobKind.INITIAL, state=JobState.QUEUED)
-        self.done = asyncio.Event()
-
-    def get_job(self, job_id: int) -> Job | None:
-        return self.job if self.job.id == job_id else None
-
-    def get_delivery(self, flow_id: int) -> FlowDelivery | None:
-        return None
-
-    def get_worker_execution(self, worker_id: str):
-        return None
-
-    def worker_connected(self, worker_id: str, protocol_version: int, connection_epoch: str = ""):
-        return connected_worker(worker_id, protocol_version, connection_epoch)
-
-    def worker_disconnected(
-        self,
-        worker_id: str,
-        reason: str | None = None,
-        connection_epoch: str = "",
-    ) -> None:
-        pass
-
-    def assign_job(self, worker_id: str, token: str, connection_epoch: str = "") -> Job | None:
-        if self.job.state is not JobState.QUEUED:
-            return None
-        self.job.state = JobState.RUNNING
-        self.job.assigned_worker_id = worker_id
-        self.job.assignment_token = token
-        return self.job
-
-    def start_assignment(
-        self,
-        job_id: int,
-        attempt_id: int,
-        worker_id: str,
-        token: str,
-        connection_epoch: str = "",
-    ) -> bool:
-        return self.assignment_active(job_id, worker_id, token)
-
-    def heartbeat_assignment(
-        self, job_id: int, worker_id: str, token: str, connection_epoch: str = ""
-    ) -> bool:
-        return self.assignment_active(job_id, worker_id, token)
-
-    def resume_assignment(
-        self, job_id: int, worker_id: str, token: str, connection_epoch: str
-    ) -> bool:
-        return self.assignment_active(job_id, worker_id, token)
-
-    def record_assignment_result(
-        self,
-        job_id: int,
-        worker_id: str,
-        token: str,
-        connection_epoch: str,
-        payload: Mapping[str, object],
-        digest: str,
-    ) -> str:
-        if not self.assignment_active(job_id, worker_id, token):
-            return "rejected"
-        self.job.result_payload = dict(payload)
-        self.job.result_digest = digest
-        return "pending"
-
-    def unapplied_result_ceiling(self) -> int:
-        return 0
-
-    def list_unapplied_results(
-        self, *, after_id: int = 0, through_id: int | None = None, limit: int = 64,
-    ) -> list[Job]:
-        return []
-
-    def complete_persisted_result(self, job_id: int, state: JobState) -> bool:
-        self.job.state = state
-        self.job.result_applied_at = self.job.updated_at
-        self.done.set()
-        return True
-
-    def assignment_active(self, job_id: int, worker_id: str, token: str, connection_epoch: str = "") -> bool:
-        return (
-            self.job.state is JobState.RUNNING
-            and self.job.id == job_id
-            and self.job.assigned_worker_id == worker_id
-            and self.job.assignment_token == token
-        )
-
-    def finish_assignment(
-        self,
-        job_id: int,
-        worker_id: str,
-        token: str,
-        state: JobState,
-        connection_epoch: str = "",
-    ) -> bool:
-        if not self.assignment_active(job_id, worker_id, token):
-            return False
-        self.job.state = state
-        self.done.set()
-        return True
-
-    def requeue_assignment(
-        self, job_id: int, worker_id: str, token: str, connection_epoch: str = ""
-    ) -> bool:
-        self.job.state = JobState.QUEUED
-        return True
-
-
-class RemoteCoordinator(JobCoordinator):
-    async def prepare_for_assignment(self, job, worker, token, epoch):
-        task = await self.prepare(job)
-        if isinstance(task, JobState):
-            return task
-        return Assignment(job_id=job.id, flow_id=job.flow_id, assignment_token=token,
-                          connection_epoch=epoch, task=task)
-
-    def __init__(self, store: RemoteStore) -> None:
-        self.jobs = store.jobs
-        self.tools = Mock(spec=FlowToolService, execute=AsyncMock(side_effect=self._tool_response))
-        self.results = result_application(store, self._commit_result)
-        self.result: InitialTaskResult | None = None
-        self.tool_calls = 0
-
-    async def prepare(self, job: Job) -> ExecutionTask | JobState:
-        return InitialTask(
-            flow_id=job.flow_id,
-            attempt_id=7,
-            repo="owner/repo",
-            issue_number=8,
-            issue_title="Issue",
-            issue_body="Body",
-            branch="flow/issue-8",
-        )
-
-    async def _tool_response(self, request, *, worker_id: str):
-        self.tool_calls += 1
-        return FlowToolResponse(
-            call_id=request.call_id,
-            result=OpenedDelivery(pr_number=17, head_sha="abc123", url="https://github.com/owner/repo/pull/17", delivery_version=1),
-        )
-
-    def mark_started(self, job: Job, task: ExecutionTask, worker_id: str) -> None:
-        pass
-
-    async def _commit_result(self, job_id: int) -> JobState:
-        job = self.jobs.get_job(job_id)
-        assert job is not None and job.result_payload is not None
-        result = Succeeded.model_validate(job.result_payload).result
-        assert isinstance(result, InitialTaskResult)
-        self.result = result
-        self.jobs.complete_persisted_result(job.id, JobState.DONE)
-        return JobState.DONE
-
-    async def fail(self, job: Job, reason: str) -> None:
+    async def close(self, code: int = 1000) -> None:
         pass
 
 
-class FakeExecutor:
-    async def execute(
-        self, task: ExecutionTask, secret=None, *, tool_caller: FlowToolCaller
-    ) -> ExecutionResult:
-        assert isinstance(task, InitialTask)
-        tool = await tool_caller.call_tool(
-            "flow.open_pr",
-            {"title": "Implement", "body": "Done"},
-            vcs_outcome=VcsOutcome(
-                backend=VcsKind.GIT,
-                branch=task.branch,
-                commit_sha="abc",
-                remote_sha="abc",
-            ),
-        )
-        assert isinstance(tool, OpenedDelivery) and tool.pr_number == 17
-        return InitialTaskResult(session_id="session-1", last_message="done", exit_code=0)
+@pytest.fixture
+def remote_flow(store, tmp_path, monkeypatch, recording_resources, server_runtime):
+    """Use the normal coordinator/executor; only GitHub and the coding agent are scripted."""
+    from tests.test_vcs import _git
 
-    async def reclaim_workspace(self) -> None:
-        raise AssertionError("no stop was requested")
+    flow = required(ControlService(database=store.database).create_flow("owner/repo", 8, 42))
+    github = RecordingGitHub()
+    server = server_runtime(github=github)
+    root, remote = managed_seed(tmp_path)
+    seed = root / "repos/owner/repo"
+    _git("branch", "-m", "trunk", cwd=seed)
+    _git("push", "-u", "origin", "trunk", cwd=seed)
+
+    def remote_sha(branch):
+        return subprocess.check_output(
+            ["git", "--git-dir", str(remote), "rev-parse", f"refs/heads/{branch}"], text=True,
+        ).strip()
+
+    async def fetch_ref(repo, branch, *, retry_transient=False):
+        return RemoteRef(branch=branch, sha=await asyncio.to_thread(remote_sha, branch))
+
+    async def open_pull_request(repo, head, base, title, body):
+        pull = await RecordingRepository.open_pull_request(repo, head, base, title, body)
+        github.pull_request = pull.model_copy(update={"head_sha": remote_sha(head)})
+        return github.pull_request
+
+    monkeypatch.setattr(Repository, "fetch_ref", fetch_ref)
+    monkeypatch.setattr(Repository, "open_pull_request", open_pull_request)
+
+    class Agent(RecordingAgent):
+        async def start(self, task, cwd, *, output_schema=None, context=None):
+            self.started.append((task, cwd))
+            _git("checkout", "-b", flow.initial_branch, cwd=cwd)
+            (cwd / "README.md").write_text("implemented\n")
+            _git("add", "README.md", cwd=cwd)
+            _git("commit", "-m", "implement", cwd=cwd)
+            _git("push", "origin", flow.initial_branch, cwd=cwd)
+            return await self.finish(context)
+
+    agent = Agent()
+    monkeypatch.setattr("app.worker.runtime.CodexAgent", lambda **kwargs: agent)
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex"))
+    worker = WorkerRuntime(WorkerSettings(
+        worker_id="worker-1", worker_token=SecretStr("worker-secret"),
+        serve_ws_url="wss://unused", worker_root=root,
+    ))
+    worker.root_lock.acquire()
+    worker.initialize()
+    try:
+        yield flow, server, github, worker, agent
+    finally:
+        worker.root_lock.release()
 
 
-@pytest.mark.asyncio
-async def test_control_gateway_and_worker_client_complete_one_remote_job(tmp_path) -> None:
-    worker_to_serve: asyncio.Queue[str] = asyncio.Queue()
-    serve_to_worker: asyncio.Queue[str] = asyncio.Queue()
-    store = RemoteStore()
-    coordinator = RemoteCoordinator(store)
-    gateway = WorkerGateway(
-        coordinator, database=store.database,
-        worker_tokens={"worker-1": "worker-secret"},
-        poll_interval=0.01,
-        tools=coordinator.tools,
-        results=coordinator.results,
-        conversations=ConversationBroker(),
-    )
-    executor = FakeExecutor()
-    client = WorkerClient(session=WorkerSession(tmp_path),
-        worker_id="worker-1",
-        worker_token="worker-secret",
-        serve_ws_url="ws://unused",
-        executor=executor,
-    )
-
+@asynccontextmanager
+async def remote_connection(server, worker):
+    """Keep the existing duplex wire while sharing runtime setup with HTTP history tests."""
+    to_serve, to_worker = asyncio.Queue(), asyncio.Queue()
     tasks = [
-        asyncio.create_task(gateway.handle(QueueSocket(worker_to_serve, serve_to_worker))),
-        asyncio.create_task(
-            client.run_connection(QueueConnection(worker_to_serve, serve_to_worker))
-        ),
+        asyncio.create_task(serve_worker(
+            QueueSocket(to_serve, to_worker), worker_tokens={"worker-1": "worker-secret"},
+            serve=server.serve_worker_session,
+        )),
+        asyncio.create_task(run_worker(worker, QueueConnection(to_serve, to_worker))),
     ]
-    await asyncio.wait_for(store.done.wait(), timeout=1)
-    await asyncio.sleep(0)
-    for task in tasks:
-        task.cancel()
-    await asyncio.gather(*tasks, return_exceptions=True)
+    try:
+        yield
+    finally:
+        for task in tasks:
+            task.cancel()
+        outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.gather(*(execution.shutdown() for execution in worker.executions.values()))
+        for outcome in outcomes:
+            if isinstance(outcome, Exception):
+                raise outcome
 
-    assert store.job.state is JobState.DONE
-    assert coordinator.result is not None
-    assert coordinator.result.session_id == "session-1"
-    assert coordinator.tool_calls == 1
+
+async def test_control_gateway_and_worker_client_complete_one_remote_job(store, remote_flow):
+    flow, subject, github, worker, agent = remote_flow
+    job, = store.jobs.list_jobs(flow.id)
+    async with remote_connection(subject, worker):
+        await wait_until(lambda: required(store.jobs.get_job(job.id)).result_applied_at is not None)
+        # A server commit alone is not completion: the correlated business ACK must
+        # reach the worker and retire its durable journal, independently of inventory.
+        await wait_until(lambda: worker.executions[flow.id].state.load().acknowledged)
+        state = worker.executions[flow.id].state
+        assert state.assignment is None and state.path.is_file()
+        journal = state.load()
+        assert journal.terminal.result.delivery_receipt.status == "prepared"
+
+    persisted = required(store.jobs.get_job(job.id))
+    assert persisted.state is JobState.DONE and persisted.started_at is not None
+    terminal = decode_result_inbox(
+        persisted.result_payload, job_id=job.id, assignment_token=persisted.assignment_token,
+        result_digest=persisted.result_digest,
+    ).terminal
+    assert terminal == journal.terminal and terminal.result.session_id == "session-1"
+    assert required(store.flows.get_flow(flow.id)).state is FlowState.REVIEW
+    delivery = required(store.deliveries.get_delivery(flow.id))
+    assert delivery.state is DeliveryState.OPEN and delivery.pr_number == 17
+    assert delivery.head_sha == terminal.result.commit_sha
+    call = required(store.deliveries.get_tool_call(terminal.result.open_pr_call_id))
+    assert call.response == terminal.result.delivery_receipt
+    assert github.opened == [flow.initial_branch] and len(agent.started) == 1

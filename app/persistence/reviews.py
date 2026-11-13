@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from psycopg.rows import class_row
 from psycopg.types.json import Jsonb
@@ -13,6 +13,7 @@ from app.domain.judge_models import JudgeDecision
 from app.domain.models import (
     TERMINAL_STATES,
     DeliveryState,
+    Flow,
     FlowState,
     Job,
     JobKind,
@@ -57,11 +58,28 @@ class ReviewStore(Repository):
             if (
                 flow is None
                 or flow.state in TERMINAL_STATES
+                or flow.archive_reason is not None
                 or flow.current_attempt_id is None
                 or delivery is None
                 or delivery.state not in {DeliveryState.OPEN, DeliveryState.CLOSED}
             ):
                 return False
+            number = (payload.get("issue" if event_type == "issue_comment" else "pull_request") or {}).get("number")
+            # Routing happened before this lock; resume may have replaced that PR meanwhile.
+            if number is not None and number not in {flow.issue_number, delivery.pr_number}:
+                return False
+            if event_type == "issue_comment" and number == flow.issue_number:
+                cutoff = ReviewStore(tx).issue_comment_cutoff(flow)
+                if cutoff is not None:
+                    timestamp = (payload.get("comment") or {}).get("created_at")
+                    if not isinstance(timestamp, str):
+                        return False
+                    try:
+                        created_at = datetime.fromisoformat(timestamp)
+                    except ValueError:
+                        return False
+                    if created_at.tzinfo is None or created_at < cutoff:
+                        return False
             previous_body = ((payload.get("changes") or {}).get("body") or {}).get("from")
             if not ReviewStore(tx)._append_version(
                 flow_id,
@@ -79,6 +97,25 @@ class ReviewStore(Repository):
             delay = submit_grace_seconds if strong or update.submitted else settle_seconds
             ReviewStore(tx)._touch(flow_id, delay)
             return True
+
+    def issue_comment_cutoff(self, flow: Flow) -> datetime | None:
+        """Read under the workflow lock; original Issue history stays out of resumed rounds.
+
+        The first INITIAL is inserted atomically with resume and survives retries. GitHub
+        has second precision, so the entire ambiguous start second is excluded. Clocks
+        must be synchronized; this boundary does not compensate for remote clock skew.
+        """
+        if flow.current_round_no == 1:
+            return None
+        with self._db.connection() as connection:
+            row = connection.execute(
+                "SELECT MIN(created_at) AS started_at FROM jobs"
+                " WHERE flow_id=%s AND round_no=%s AND kind='initial'",
+                (flow.id, flow.current_round_no),
+            ).fetchone()
+        if row is None or row["started_at"] is None:
+            raise ValueError("current round has no durable start boundary")
+        return row["started_at"].replace(microsecond=0) + timedelta(seconds=1)
 
     def _append_version(
         self,
@@ -266,6 +303,8 @@ class ReviewStore(Repository):
                 connection.execute(
                     "SELECT 1 FROM review_items i JOIN review_versions v"
                     " ON v.item_id=i.id AND v.version=i.version WHERE i.flow_id=%s"
+                    " AND v.attempt_id IN (SELECT a.id FROM attempts a JOIN flows f ON f.id=a.flow_id"
+                    " WHERE f.id=i.flow_id AND a.round_no=f.current_round_no)"
                     " AND v.consumed_at IS NULL AND v.relayed_at IS NULL"
                     " AND NOT v.signal_retired"
                     " AND NOT (v.content->>'deleted')::boolean"
@@ -291,6 +330,8 @@ class ReviewStore(Repository):
             rows = connection.execute(
                 "WITH pending AS (SELECT i.id,i.version,v.content,v.relayed_at FROM review_items i JOIN review_versions v"
                 " ON v.item_id=i.id AND v.version=i.version WHERE i.flow_id=%s"
+                " AND v.attempt_id IN (SELECT a.id FROM attempts a JOIN flows f ON f.id=a.flow_id"
+                " WHERE f.id=i.flow_id AND a.round_no=f.current_round_no)"
                 " AND v.consumed_at IS NULL AND NOT (v.content->>'deleted')::boolean"
                 " AND NOT COALESCE((v.content->>'inert')::boolean,FALSE)), first_text AS ("
                 " SELECT id FROM pending WHERE content->>'body' !~ '^[[:space:]]*$'"
@@ -308,7 +349,7 @@ class ReviewStore(Repository):
             candidates = connection.execute(
                 "SELECT flow_id FROM review_buffers WHERE due_at<=%s"
                 " UNION SELECT b.flow_id FROM review_batches b JOIN flows f ON f.id=b.flow_id"
-                " WHERE b.state IN ('ready','processing','waiting') AND f.state<>'active'"
+                " WHERE b.state IN ('ready','processing','waiting') AND f.state IN ('finalizing','archived')"
                 " ORDER BY flow_id",
                 (self._db.now(),),
             ).fetchall()
@@ -318,8 +359,11 @@ class ReviewStore(Repository):
                 flow = tx.lock_workflow(candidate["flow_id"])
                 if flow is None:
                     continue
-                if flow.state in TERMINAL_STATES:
-                    JobStore(tx).cancel_jobs(flow.id)
+                if not flow.accepts(JobKind.REVISION):
+                    # A blocked result may still need its frozen review batch to repair
+                    # effects. Finalizing retires reviews, never its archive job.
+                    if flow.state in {FlowState.FINALIZING, FlowState.ARCHIVED}:
+                        ReviewStore(tx).cancel(flow.id)
                     continue
                 job = ReviewStore(tx)._claim(flow.id, flow.current_attempt_id)
                 if job is not None:
@@ -375,29 +419,39 @@ class ReviewStore(Repository):
             assert row is not None
             if decision.instruction is not None:
                 job = JobStore(self._db).enqueue_job(flow_id, JobKind.REVISION,
-                    {"batch_id": row["id"], "instruction": decision.instruction})
+                    {"batch_id": row["id"], "instruction": decision.instruction, "purpose": "revise"})
                 self.advance(row["id"], job)
             return self.get_batch(row["id"])
 
     def pending_triage(self) -> list[ReviewBatch]:
         """Read unfinished prerequisites; they have no job or execution ownership."""
         with self._db.connection() as connection:
-            return connection.cursor(row_factory=class_row(ReviewBatch)).execute(
-                "SELECT b.* FROM review_batches b JOIN flows f ON f.id=b.flow_id"
-                " JOIN flow_deliveries d ON d.flow_id=f.id"
-                " WHERE b.state='ready' AND b.job_id IS NULL AND f.state='active'"
-                " AND b.attempt_id=f.current_attempt_id AND d.state='open' ORDER BY b.id"
-            ).fetchall()
+            return (
+                connection.cursor(row_factory=class_row(ReviewBatch))
+                .execute(
+                    "SELECT b.* FROM review_batches b JOIN flows f ON f.id=b.flow_id"
+                    " JOIN flow_deliveries d ON d.flow_id=f.id"
+                    " WHERE b.state='ready' AND b.job_id IS NULL AND f.state IN ('queued','running','review')"
+                    " AND f.archive_reason IS NULL"
+                    " AND b.attempt_id=f.current_attempt_id AND d.state='open' ORDER BY b.id"
+                )
+                .fetchall()
+            )
 
     def current(self, batch: ReviewBatch) -> bool:
         """Check under the workflow lock before accepting a batch prerequisite."""
         flow = FlowStore(self._db).get_flow(batch.flow_id)
         delivery = DeliveryStore(self._db).get_delivery(batch.flow_id)
         fresh = self.get_batch(batch.id)
-        return (flow is not None and flow.state is FlowState.ACTIVE
-                and flow.current_attempt_id == batch.attempt_id
-                and delivery is not None and delivery.state is DeliveryState.OPEN
-                and fresh.state is BatchState.READY and fresh.job_id is None)
+        return (
+            flow is not None
+            and flow.accepts(JobKind.REVISION)
+            and flow.current_attempt_id == batch.attempt_id
+            and delivery is not None
+            and delivery.state is DeliveryState.OPEN
+            and fresh.state is BatchState.READY
+            and fresh.job_id is None
+        )
 
     def get_batch(self, batch_id: int) -> ReviewBatch:
         """Load persisted input content, never the live item projection."""
@@ -561,14 +615,26 @@ class ReviewStore(Repository):
                                (Jsonb(context.model_dump(mode="json")), batch.id))
         return context
 
-    def invalidate_context(self, batch: ReviewBatch, context: ReviewContext) -> None:
-        """Discard only this snapshot, retaining uncertain answer evidence under the workflow lock."""
-        with self._db.connection() as connection:
-            connection.execute(
-                "UPDATE review_batches SET context=NULL,decision=NULL WHERE id=%s"
+    def invalidate_context(
+        self, batch: ReviewBatch, context: ReviewContext, *, job: Job | None = None,
+    ) -> None:
+        """Discard this decision and atomically retire any undispatched derived job."""
+        with self._db.transaction() as tx, tx.connection() as connection:
+            tx.lock_workflow(batch.flow_id)
+            if job is not None:
+                current = tx.lock_job(job.id)
+                if current is None:
+                    raise ValueError("review job no longer exists")
+                ReviewStore(tx).for_job(current)
+            cleared = connection.execute(
+                "UPDATE review_batches SET context=NULL,decision=NULL,inference_job_id=NULL,"
+                " job_id=CASE WHEN %s THEN NULL ELSE job_id END,"
+                " threads=CASE WHEN %s THEN NULL ELSE threads END WHERE id=%s"
                 " AND context=%s AND NOT answer_dispatched",
-                (batch.id, Jsonb(context.model_dump(mode="json"))),
+                (job is not None, job is not None, batch.id, Jsonb(context.model_dump(mode="json"))),
             )
+            if job is not None and cleared.rowcount == 1:
+                JobStore(tx).retire_preparation(job)
 
     def authorize_answer(self, batch: ReviewBatch, context_digest: str) -> bool:
         """Fence the frozen context and authorize one POST under the workflow lock."""
@@ -660,21 +726,6 @@ class ReviewStore(Repository):
             ).fetchone()
             if unseen:
                 self._touch(batch.flow_id, 0)
-
-    def reopened(self, flow_id: int, settle_seconds: float) -> None:
-        """Refreeze retained feedback through Judge without claiming it was previously relayed."""
-        self._touch(flow_id, settle_seconds)
-        with self._db.connection() as connection:
-            # The first bounded batch cannot retire authorization for the entire backlog.
-            # Retire each existing version under the caller's Flow lock; new versions still
-            # follow normal authorization rules, and duplicates cannot revive old signals.
-            connection.execute(
-                "UPDATE review_versions v SET signal_retired=TRUE FROM review_items i"
-                " WHERE v.item_id=i.id AND i.flow_id=%s AND NOT v.signal_retired"
-                " AND v.content->>'signal'='request_changes'",
-                (flow_id,),
-            )
-            connection.execute("UPDATE review_buffers SET force_triage=TRUE WHERE flow_id=%s", (flow_id,))
 
     def cancel(self, flow_id: int) -> None:
         """Retire pending discussion atomically with the Flow's terminal transition."""

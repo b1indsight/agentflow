@@ -9,11 +9,20 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    SecretStr,
+    ValidationInfo,
+    model_validator,
+)
 
 from app.domain.delivery_models import DeliveryReceipt
+from app.domain.inference_models import InferenceCapability, InferenceJob
 
 
 def utcnow() -> datetime:
@@ -24,16 +33,23 @@ def utcnow() -> datetime:
 
 
 class FlowState(StrEnum):
-    """Flow lifecycle only; UI phases are derived from jobs and delivery."""
+    """Authoritative business stage; finalizing shares running's board group."""
 
-    ACTIVE = "active"
+    QUEUED = "queued"
+    RUNNING = "running"
+    REVIEW = "review"
+    BLOCKED = "blocked"
+    FINALIZING = "finalizing"
+    ARCHIVED = "archived"
+
+
+TERMINAL_STATES = frozenset({FlowState.ARCHIVED})
+WORKING_STATES = frozenset({FlowState.QUEUED, FlowState.RUNNING, FlowState.REVIEW})
+
+
+class ArchiveReason(StrEnum):
     SUCCEEDED = "succeeded"
-    CANCELLED = "cancelled"
-    FAILED = "failed"
-
-
-# 处于这些状态的 flow 算「已终结」，(repo, issue) 唯一约束只作用于非终结态。
-TERMINAL_STATES = frozenset({FlowState.SUCCEEDED, FlowState.CANCELLED, FlowState.FAILED})
+    ABANDONED = "abandoned"
 
 
 class DeliveryState(StrEnum):
@@ -48,6 +64,7 @@ class JobKind(StrEnum):
     INITIAL = "initial"  # 首轮编码
     REVISION = "revision"  # 修订
     ARCHIVE = "archive"  # 收尾归档
+    INFERENCE = "inference"
 
 
 class JobState(StrEnum):
@@ -87,16 +104,41 @@ class VcsKind(StrEnum):
 
 
 class Flow(BaseModel):
-    """Stable issue-level lifecycle and delivery identity."""
+    """Stable task lifecycle with either live Issue input or persisted direct content."""
 
     id: int
     repo: str  # "owner/name"
-    issue_number: int
+    issue_number: int | None
+    task_content: str | None = None
+    title: str | None = None
+    title_job_id: int | None = None
     state: FlowState
     installation_id: int | None = None
     current_attempt_id: int | None = None
+    current_round_no: int = 1
+    archive_reason: ArchiveReason | None = None
+    archive_summary: str | None = None
+    archived_at: datetime | None = None
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
+
+    @model_validator(mode="after")
+    def _one_input(self) -> Flow:
+        if (self.issue_number is None) == (self.task_content is None):
+            raise ValueError("provide exactly one of issue_number and task_content")
+        return self
+
+    @property
+    def initial_branch(self) -> str:
+        """Sibling refs preserve first-round branches without Git file/directory conflicts."""
+        suffix = f"-round-{self.current_round_no}" if self.current_round_no > 1 else ""
+        return f"flow/{self.id}{suffix}"
+
+    def accepts(self, kind: JobKind) -> bool:
+        """Finalization never authorizes more coding, even if its PR is reopened."""
+        if kind is JobKind.ARCHIVE:
+            return self.state is FlowState.FINALIZING
+        return self.state in WORKING_STATES and self.archive_reason is None
 
 
 class Attempt(BaseModel):
@@ -104,6 +146,7 @@ class Attempt(BaseModel):
 
     id: int
     flow_id: int
+    round_no: int = 1
     codex_session_id: str | None = None
     session_generation: int = 0
     last_revision_summary: str = ""
@@ -117,6 +160,8 @@ class FlowExecution(BaseModel):
 
     flow_id: int
     worker_id: str
+    workspace: str
+    generation: int = Field(gt=0)
     repo_identity: str
     bound_at: datetime = Field(default_factory=utcnow)
     recovery_deadline: datetime | None = None
@@ -162,17 +207,22 @@ class FlowToolCall(BaseModel):
 
 class Job(BaseModel):
     id: int
-    flow_id: int
+    flow_id: int | None
+    round_no: int = 1
     kind: JobKind
     state: JobState
+    inference: InferenceJob | None = None
     attempt: int = 0
     heartbeat_at: datetime | None = None
     assigned_worker_id: str | None = None
+    workspace: str | None = None
+    generation: int | None = None
     assignment_token: str | None = None
     started_at: datetime | None = None
+    dispatch_authorized_at: datetime | None = None
     lease_expires_at: datetime | None = None
     recovery_deadline: datetime | None = None
-    result_payload: dict | None = None
+    result_payload: dict[str, JsonValue] | None = None
     result_digest: str | None = None
     result_received_at: datetime | None = None
     result_applied_at: datetime | None = None
@@ -190,12 +240,48 @@ class Job(BaseModel):
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
 
+    @model_validator(mode="after")
+    def _kind_fields(self) -> Job:
+        if self.kind is JobKind.INFERENCE:
+            if self.inference is None:
+                raise ValueError("inference jobs require a frozen inference call")
+        elif self.flow_id is None or self.inference is not None:
+            raise ValueError("coding jobs require a Flow and cannot contain inference")
+        return self
+
+    @property
+    def required_flow_id(self) -> int:
+        """Narrow the coding-only boundary; inference provenance grants no Flow authority."""
+        if self.kind is JobKind.INFERENCE or self.flow_id is None:
+            raise ValueError("inference jobs have no coding Flow authority")
+        return self.flow_id
+
+
+class WorkspaceInventory(BaseModel):
+    """Concrete identity and freshness, never authority to release a controller claim."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    workspace: str = Field(pattern=r"^[0-9a-f]{32}$")
+    repository: str | None
+    generation: int = Field(gt=0, strict=True)
+    flow_id: int | None
+
 
 class WorkerRecord(BaseModel):
     draining: bool = False
     worker_id: str
+    workspace: str
+    repository: str | None = None
+    generation: int = 1
+    inventory_epoch: str | None = None
+    repo_workspace_limit: int = 2
     protocol_version: int
     status: WorkerStatus
+    execute: bool = True
+    inference: InferenceCapability | None = None
+    current_inference_job_id: int | None = None
+    last_inference_assigned_at: datetime | None = None
     connection_epoch: str | None = None
     current_job_id: int | None = None
     first_connected_at: datetime
@@ -210,6 +296,8 @@ class WorkerView(BaseModel):
     draining: bool = False
     worker_id: str
     status: WorkerStatus
+    workspaces: list[WorkerRecord] = Field(default_factory=list)
+    executions: list[FlowExecution] = Field(default_factory=list)
     current_job_id: int | None = None
     current_flow_id: int | None = None
     last_seen_at: datetime
@@ -256,6 +344,7 @@ class CodingExecutionResult:
     last_message: str
     exit_code: int
     failure_detail: str | None = None
+    failure_kind: Literal["timeout", "output_limit"] | None = None
 
 
 class SessionUnavailable(RuntimeError):
@@ -269,6 +358,8 @@ class GitHubCapability:
     token: SecretStr = field(repr=False)
     repository: str
     expires_at: datetime
+    bot_login: str
+    bot_user_id: int
 
 
 @dataclass(frozen=True)
@@ -298,13 +389,16 @@ class TriageVerdict(BaseModel):
     )
 
     @model_validator(mode="after")
-    def _action_fields(self) -> TriageVerdict:
+    def _action_fields(self, info: ValidationInfo) -> TriageVerdict:
+        if info.context and info.context.get("judge_response") and self.answer:
+            raise ValueError("Judge responses describe tasks, not final answers")
         if self.verdict is Verdict.REVISE:
             if not self.instruction.strip() or self.answer:
                 raise ValueError("revise requires an instruction and forbids an answer")
         elif self.verdict is Verdict.ANSWER:
-            if not self.answer.strip() or self.instruction or self.open_points:
-                raise ValueError("answer requires a complete answer with no unresolved work")
+            # Saved pre-wire22 decisions contain the final answer, not a worker instruction.
+            if (bool(self.answer.strip()) == bool(self.instruction.strip()) or self.open_points):
+                raise ValueError("answer requires an instruction (or historical answer) with no unresolved work")
         elif self.instruction or self.answer:
             raise ValueError("wait/ignore cannot contain an instruction or answer")
         if self.verdict is Verdict.IGNORE and self.open_points:

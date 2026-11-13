@@ -9,11 +9,17 @@
 
 ## 停止确认
 
-同一鉴权 WebSocket 使用 v17 的 StopExecution / ExecutionStopped / StopAccepted 消息。
-请求绑定 flow、worker、job、assignment token、binding 创建时间、当前 epoch 和独立 request ID。
+同一鉴权 WebSocket 使用 wire25 的 `worker.stop` 调用及 `[停止结果 R, server.accept_stop 调用 B]`。
+请求绑定 flow、worker、job、assignment token、binding 创建时间、当前 epoch 和独立 request ID；
+控制端还核对 job 与 stop 保存的 workspace/generation 快照。停止只作用于目标 workspace 的执行。
 worker 必须持有匹配 journal，当前执行只能由持有该 task / 子进程对象的进程取消。
 每次 assignment 在启动前持久化执行 nonce；停止凭据包含 nonce，原 journal 继续保存直到 ACK。
-ACK 丢失后重连重发同一凭据，控制面按 digest 幂等确认；不根据旧 PID 杀进程。
+这里的 ACK 指业务接纳回复；顶层控制接收 ACK 不确认停止。业务回复丢失后重连重发同一真实
+凭据与 B，控制面核验原 digest 和完整提交条件才回复 B，不能仅凭 DB hash 接纳；不根据旧 PID 杀进程。
+
+`WorkerExecution` 持有执行与停止清理任务。关闭或替换 Session 只关闭通信，
+已授权的停止继续清理；新连接按同一完整停止身份等待原操作，再发送新 epoch 的回执。
+执行离线自然完成时主动写 journal，重连只重放结果，不重新启动编码。
 
 重放旧 stop 时仍须对账控制面已派发的下一任务。若原 worker 返回的 journal 未记录该任务，
 只有未 dispatch 的准备任务可重排；普通已 dispatch 任务记录明确失败，不自动重新运行。
@@ -23,14 +29,17 @@ CLOSED/MERGED 的缺失 journal 仍保留原绑定，等待人工核验交付事
 ignored 缓存并归还空闲池；copy 和 worktree 都在原路径复用。清理成功后才发送停止凭据，
 不增加消息字段、数据库阶段或目录删除。失败保留原 journal 和控制面绑定，重连可重试；
 未知归属、锁文件和无法清理的 VCS 操作仍阻塞供人工核验，不强行接管或删除元数据。
-停止 ACK 保留 journal 的原位置证明，取消期间已知合并时仍可使用它完成 ARCHIVE。
-再次分配时递增位置代次，旧停止凭据不得清理新任务。已知合并前后的绑定决定仍由原控制面
-停止确认处理；取消不撤销远端 commit/PR。入口与权限优化由 [#108](https://github.com/b1indsight/agentflow/issues/108) 跟踪。
+停止 ACK 保留 journal 的原位置证明，先持久发布 pool 结清凭据，再上报库存。清理和 ACK
+结清后推进 generation，控制端收到精确库存凭据后才允许复用，旧停止凭据不得清理新任务。
+若合并与停止清理同时发生，原 Flow 的预留原子交接到同一位置的下一代以完成 ARCHIVE，
+期间不把目录交给其他 Flow。取消不撤销远端 commit/PR。入口与权限优化由
+[#108](https://github.com/b1indsight/agentflow/issues/108) 跟踪。
 
 worker 等待当前 coroutine 退出；Codex 和 VCS 的现有取消路径会 SIGKILL 已拥有的进程组并
 等待直接子进程退出，不增加 10 秒 TERM 等待窗口。Amp 先 SIGTERM CLI、有界等待后升级
 清理事前捕获的独立子进程组；无法保证任意脱离进程树的进程被回收。停止处理
-最多等待执行 task 15 秒，服务端停止握手总预算 20 秒；超时留下请求/journal，不确认停止。
+最多等待执行 task 15 秒；控制端按连接心跳检测断线，不给整机的多个停止任务共用单个 20 秒截止。
+超时留下请求/journal，不确认停止。
 只适用于可信执行代码的普通子进程；主动脱离进程组的恶意代码不在当前隔离保证内。
 
 已有执行在 worker 进程崩溃后只有 started journal、没有存活执行对象和停止凭据时，恢复保持
@@ -65,10 +74,17 @@ serve 用 Uvicorn 的 20 秒 graceful shutdown 窗口停止接收并收敛请求
 STOP 请求和有效凭据握手能完成取消。未写出凭据的进程崩溃依然按未知执行处理。
 容器 stop grace / Kubernetes terminationGracePeriod 至少 45 秒，超时 SIGKILL 只靠持久事实恢复。
 
-当前仅支持协议 v17 / journal v4 / workspace manifest v1，serve/worker 必须使用同一版本；版本定义见
-[协议](../../app/contracts/protocol.py)与 [WorkerSession](../../app/worker/state/session.py)。仓库未部署，未保留跨版本
-数据库或 journal 迁移。当前版本停机重启仍应先 drain，再保存数据和 worker root/HOME；
-按原身份启动并核对恢复状态后 undrain。不要通过编辑 journal 版本号绕过验证。
+Runtime 先停止并 join 通信，再等待全部 execution owner 的停止/执行清理，最后释放根锁。
+重复取消外层运行任务不会提前释放根锁；普通 shutdown 不回收 workspace、不合成结果或停止 ACK。
+
+当前在线协议 wire25 / journal v5 / 执行结果 ResultInbox v1 / workspace manifest v3，serve/worker 必须使用匹配版本；
+Control 本地归档通知继续使用 ResultInbox v2。
+定义见[协议](../../app/contracts/protocol.py)与 [ExecutionRecord](../../app/worker/state/record.py)。
+受限历史 v4/v14–v15 journal 与旧 inbox 只读转换，正常写入才升级；未知数据保留并拒绝。
+协议切换须先收敛活跃执行和 effects，再协调升级。旧 workers 单列主键不能直接启动新版本，
+必须先核对并显式迁移物理 workspace 身份，见[本次升级限制](../plan/worker-workspace-concurrency.md#8-升级与交付限制)。
+其他旧格式降级限制见[升级边界](upgrade.md)。同版本重启先 drain、保存数据和 root/HOME，按原身份核对恢复后再 undrain。
+不要通过编辑 journal 版本号绕过验证。
 
 ## 验证范围
 

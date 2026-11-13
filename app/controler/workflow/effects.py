@@ -5,6 +5,9 @@ from __future__ import annotations
 import hashlib
 from uuid import uuid4
 
+from loguru import logger
+from pluggy import PluginManager
+
 from app.contracts.result_models import (
     CommentEffect,
     EffectReceipt,
@@ -19,7 +22,7 @@ from app.contracts.result_models import (
     ThreadReplyEffect,
     unique_pull_request_receipt,
 )
-from app.controler.workflow.archive import verify_archive
+from app.controler.workflow.archive import verify_archive, verify_merge_notice
 from app.controler.workflow.lifecycle import (
     DeliveryConflict,
     adopt_created_pull_request,
@@ -31,7 +34,7 @@ from app.controler.workflow.thread_effects import (
     resolve_thread,
     revision_current,
 )
-from app.domain.models import TERMINAL_STATES, DeliveryState, FlowState
+from app.domain.models import TERMINAL_STATES, DeliveryState
 from app.domain.review_models import BatchState
 from app.github import (
     GitHubApp,
@@ -42,6 +45,7 @@ from app.github import (
     ReviewThread,
     retry_delay,
 )
+from app.persistence.activity import ActivityStore
 from app.persistence.database import Database
 from app.persistence.deliveries import DeliveryStore
 from app.persistence.flows import FlowStore
@@ -69,8 +73,10 @@ class ResultEffects:
         github: GitHubApp,
         *,
         database: Database,
+        plugins: PluginManager,
     ) -> None:
         self.database = database
+        self.plugins = plugins
         self.deliveries = DeliveryStore(database)
         self.flows = FlowStore(database)
         self.jobs = JobStore(database)
@@ -89,17 +95,26 @@ class ResultEffects:
                 result_store_tx = self.result_store.using(tx)
                 workers_tx = self.workers.using(tx)
                 flow = tx.lock_workflow(plan.flow_id)
-                cancelled = flow is not None and flow.state is FlowState.CANCELLED
-                if flow is None or (flow.state in TERMINAL_STATES and not cancelled):
-                    result_store_tx.skip_remaining(plan.job_id, "Flow is terminal")
+                cancelled = (
+                    flow is not None and flow.archive_reason is not None
+                    and plan.archive is None and plan.archive_notice is None
+                )
+                if flow is None:
+                    result_store_tx.skip_remaining(plan.job_id, "Flow disappeared")
                     return None
-                if flow.current_attempt_id != plan.attempt_id:
-                    result_store_tx.skip_remaining(plan.job_id, "result attempt is no longer current")
-                    return "result attempt is no longer current"
                 job = jobs_tx.get_job(plan.job_id)
                 if job is None:
                     raise ValueError("result job disappeared")
-                if plan.archive is not None:
+                delivery = deliveries_tx.get_delivery(plan.flow_id)
+                retired = (
+                    cancelled or job.round_no != flow.current_round_no
+                    or flow.current_attempt_id != plan.attempt_id
+                    or (flow.state in TERMINAL_STATES and plan.archive_notice is None)
+                    or (delivery is not None and delivery.supersedes(job.kind))
+                )
+                if plan.archive_notice is not None:
+                    verify_merge_notice(flow, job, plan.archive_notice, activity=ActivityStore(tx))
+                if plan.archive is not None and not retired:
                     try:
                         verify_archive(
                             flow,
@@ -111,8 +126,6 @@ class ResultEffects:
                         )
                     except ValueError as error:
                         raise ResultPending(str(error)) from error
-                delivery = deliveries_tx.get_delivery(plan.flow_id)
-                retired = cancelled or (delivery is not None and delivery.supersedes(job.kind))
                 if retired:
                     result_store_tx.retire_for_merge(plan.job_id)
             records = self.result_store.list_effects(plan.job_id)
@@ -133,6 +146,13 @@ class ResultEffects:
             if record is None:
                 raise ResultPending("result effects are awaiting retry or reconciliation")
             uncertain = record.dispatched_at is not None
+            if (isinstance(record.payload, CommentEffect)
+                    and record.payload.key == "failure" and not uncertain):
+                # Old frozen plans may contain warnings; suppress unsent ones, but retain
+                # uncertain writes for the existing read-only marker reconciliation.
+                self.result_store.finish(record, EffectState.SKIPPED,
+                                         error="internal failures are local-only")
+                continue
             try:
                 receipt = (await self._recover_retired(plan, record, records) if retired
                            else await self._execute(plan, record, records))
@@ -155,8 +175,26 @@ class ResultEffects:
                     uncertain or (record.dispatched_at is not None and not definite_rejection)
                 )
                 retryable = isinstance(exc, GitHubError) and exc.retryable
-                if (isinstance(record.payload, (ThreadReplyEffect, ResolveEffect))
-                        and not ambiguous and not retryable):
+                if isinstance(exc, GitHubError) and isinstance(record.payload, LabelEffect):
+                    # Display failures do not invalidate delivery or require a remote receipt.
+                    self.result_store.finish(
+                        record,
+                        EffectState.SKIPPED,
+                        error=str(exc),
+                        definitely_unsent=definite_rejection and not uncertain,
+                    )
+                    logger.warning(
+                        "status label skipped: job={} effect={} {}",
+                        plan.job_id,
+                        record.effect_key,
+                        exc,
+                    )
+                    continue
+                if (
+                    isinstance(record.payload, (ThreadReplyEffect, ResolveEffect))
+                    and not ambiguous
+                    and not retryable
+                ):
                     # A definite permission/deletion failure leaves a diagnostic and pending input;
                     # already delivered code must not trigger another Codex run to repair GitHub.
                     self.result_store.finish(record, EffectState.SUCCEEDED, receipt=EffectReceipt(
@@ -195,14 +233,23 @@ class ResultEffects:
             job = tx.lock_job(plan.job_id)
             if (
                 flow is None
-                or flow.state in TERMINAL_STATES
+                or (flow.state in TERMINAL_STATES and plan.archive_notice is None)
                 or job is None
                 or job.result_applied_at is not None
                 or job.result_digest != plan.digest
                 or flow.current_attempt_id != plan.attempt_id
+                or job.round_no != flow.current_round_no
+                or (flow.archive_reason is not None
+                    and plan.archive is None and plan.archive_notice is None)
             ):
                 raise ResultPending("Flow changed before GitHub dispatch")
             delivery = deliveries_tx.get_delivery(flow.id)
+            if plan.archive_notice is not None:
+                verify_merge_notice(flow, job, plan.archive_notice, activity=ActivityStore(tx))
+                if (isinstance(record.payload, LabelEffect)
+                        and record.payload.number == flow.issue_number
+                        and not self.flows.using(tx).is_issue_owner(flow)):
+                    raise _PendingReviewFeedback("Issue display belongs to a newer Flow")
             if plan.archive is not None:
                 try:
                     verify_archive(
@@ -259,9 +306,13 @@ class ResultEffects:
             found = await repository.find_pull_request_by_head(effect.branch)
             delivery = self.deliveries.get_delivery(plan.flow_id)
             flow = self.flows.get_flow(plan.flow_id)
-            cancelled_opening = (flow is not None and flow.state is FlowState.CANCELLED
-                                 and delivery is not None and delivery.state is DeliveryState.OPENING
-                                 and delivery.pr_number is None)
+            cancelled_opening = (
+                flow is not None
+                and flow.archive_reason is not None
+                and delivery is not None
+                and delivery.state is DeliveryState.OPENING
+                and delivery.pr_number is None
+            )
             if (found is None or delivery is None or (not cancelled_opening and found.number != delivery.pr_number)
                     or found.head_branch != effect.branch or found.base_branch != effect.base_branch):
                 raise ResultPending("retired PR creation awaits its remote identity")
@@ -283,6 +334,7 @@ class ResultEffects:
                     jobs=self.jobs,
                     stops=self.stops,
                     workers=self.workers,
+                    plugins=self.plugins,
                 )
                 found = remote
             return EffectReceipt(pull_request=found)
@@ -326,9 +378,12 @@ class ResultEffects:
                 # Batch answers follow this same marker-before-retry rule in JobCoordinator._answer.
                 if record.dispatched_at is not None:
                     raise ResultPending("comment outcome is unknown; waiting for its remote marker")
-                if isinstance(effect, ThreadReplyEffect) and not await revision_current(repository, plan, effect.number):
-                    return EffectReceipt(thread_id=effect.thread_id,
-                                         pending_reason="PR 已关闭或 head 已变化，未发送线程说明")
+                if (plan.revision is not None and not await revision_current(
+                    repository, plan, effect.number, jobs=self.jobs,
+                )):
+                    return EffectReceipt(
+                        thread_id=effect.thread_id if isinstance(effect, ThreadReplyEffect) else None,
+                        pending_reason="PR 已关闭或 head 已变化，未发送反馈说明")
                 self._dispatch(plan, record)
                 body = f"{effect.body}\n\n{marker}"
                 if isinstance(effect, ThreadReplyEffect):
@@ -369,6 +424,7 @@ class ResultEffects:
                         jobs=self.jobs,
                         stops=self.stops,
                         workers=self.workers,
+                        plugins=self.plugins,
                     )
                     return EffectReceipt(pull_request=remote)
                 pull_request = remote
@@ -386,12 +442,17 @@ class ResultEffects:
                 if (
                     any(r.receipt and r.receipt.pending_reason for r in records)
                     or _pending_feedback(plan, reviews=self.reviews)
-                    or not await revision_current(repository, plan, number)
+                    or not await revision_current(repository, plan, number, jobs=self.jobs)
                 ):
                     return EffectReceipt(pending_reason="仍有未决反馈或 PR 已变化，暂停 re-review")
             if number == "created_pr":
                 number = unique_pull_request_receipt(records).number
             if isinstance(effect, LabelEffect):
+                if plan.archive_notice is not None:
+                    flow = self.flows.get_flow(plan.flow_id)
+                    if (flow is not None and effect.number == flow.issue_number
+                            and not self.flows.is_issue_owner(flow)):
+                        return EffectReceipt(pending_reason="Issue display belongs to a newer Flow")
                 issue = Issue(repository, number)
                 labels = {label.casefold() for label in await issue.fetch_labels()}
                 if (effect.label.casefold() in labels) != effect.present:

@@ -6,16 +6,19 @@ serve：起 webhook 常驻进程；flows/show/cancel/retry：运维 flow。
 from __future__ import annotations
 
 import asyncio
+import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import TYPE_CHECKING, Annotated
 
 import typer
 import uvicorn
+from pydantic import ValidationError
 
 from app import github
-from app.domain.models import DeliveryState
+from app.domain.models import ArchiveReason, DeliveryState
 from app.worker.cli import app as worker_app
 
 if TYPE_CHECKING:
@@ -135,7 +138,65 @@ def flows(active: bool = typer.Option(False, help="只看未终结的")) -> None
             delivery = store.deliveries.get_delivery(f.id)
             pr = f"PR#{delivery.pr_number}" if delivery and delivery.pr_number else "-"
             cycles = att.revision_cycles if att else 0
-            typer.echo(f"[{f.id}] {f.repo}#{f.issue_number:<5} {f.state:<10} {pr} cycles={cycles}")
+            target = f"{f.repo}#{f.issue_number}" if f.issue_number is not None else f.repo
+            typer.echo(f"[{f.id}] {target} {f.state:<10} {pr} cycles={cycles}")
+
+
+@flow_app.command("create")
+def flow_create(
+    repo: str,
+    installation_id: int = typer.Option(..., min=1),
+    issue_number: int | None = typer.Option(None, min=1),
+    content: str | None = typer.Option(None),
+    content_file: Annotated[Path | None, typer.Option(help="UTF-8 任务内容文件，- 表示 stdin")] = None,
+) -> None:
+    """从 Issue 或直接任务内容创建 Flow；不要求 webhook。"""
+    from app.contracts.console import CreateFlowRequest
+    from app.controler.config import ServerSettings
+    from app.controler.workflow.service import ControlService
+
+    try:
+        if content_file is not None:
+            if content is not None:
+                raise typer.BadParameter("provide only one of --content and --content-file")
+            if str(content_file) == "-":
+                content = sys.stdin.read(32769)
+            else:
+                with content_file.open(encoding="utf-8", newline="") as stream:
+                    content = stream.read(32769)
+        request = CreateFlowRequest(
+            repo=repo, installation_id=installation_id, issue_number=issue_number,
+            task_content=content,
+        )
+    except (OSError, UnicodeError) as error:
+        raise typer.BadParameter("cannot read UTF-8 task content") from error
+    except ValidationError as error:
+        raise typer.BadParameter(error.errors(include_input=False)[0]["msg"]) from error
+    settings = ServerSettings()  # type: ignore[call-arg]
+
+    async def target() -> github.Repository:
+        # Same read-only target checks as console/api.py; never hold a DB transaction over I/O.
+        repository = await github.GitHubApp(settings).installation(request.installation_id).repository(request.repo).refetch()
+        if repository.archived:
+            raise github.GitHubError(github.GitHubErrorKind.VALIDATION, "repository_archived")
+        if request.issue_number is not None:
+            await repository.fetch_issue(request.issue_number)
+        return repository
+
+    try:
+        repository = asyncio.run(target())
+    except github.GitHubError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(1) from None
+    with _store() as store:
+        flow = ControlService(database=store.database).create_flow(
+            repository.full_name, request.issue_number, request.installation_id,
+            task_content=request.task_content,
+        )
+        if flow is None:
+            typer.echo("an active Flow already exists for this Issue", err=True)
+            raise typer.Exit(1)
+        typer.echo(f"flow {flow.id} created (queued) for {flow.repo}")
 
 
 @app.command("worker-drain")
@@ -152,19 +213,25 @@ def workers() -> None:
     from app.controler.workflow.service import ControlService
 
     with _store() as store:
-        typer.echo("WORKER\tSTATUS\tDRAINING\tJOB\tFLOW\tEPOCH\tLEASE\tRECOVERY\tLAST_SEEN\tREASON")
+        typer.echo("WORKER\tSTATUS\tDRAINING\tEPOCH\tLAST_SEEN\tREASON")
         for worker in ControlService(
             database=store.database,
         ).list_workers():
             typer.echo(
                 f"{worker.worker_id}\t{worker.status.value}\t{worker.draining}\t"
-                f"{worker.current_job_id or '-'}\t{worker.current_flow_id or '-'}\t"
                 f"{(worker.connection_epoch or '-')[:8]}\t"
-                f"{_remaining(worker.lease_expires_at)}\t"
-                f"{_remaining(worker.recovery_deadline)}\t"
                 f"{_age(worker.last_seen_at)}\t"
                 f"{worker.last_disconnect_reason or '-'}"
             )
+            bindings = {item.workspace: item for item in worker.executions}
+            for workspace in worker.workspaces:
+                binding = bindings.get(workspace.workspace)
+                typer.echo(
+                    f"  {workspace.workspace}\tgeneration={workspace.generation}"
+                    f"\trepo={workspace.repository or '-'}"
+                    f"\tjob={workspace.current_job_id or workspace.current_inference_job_id or '-'}"
+                    f"\tflow={binding.flow_id if binding else '-'}"
+                )
 
 
 def _age(value: datetime) -> str:
@@ -190,12 +257,19 @@ def flow_show(flow_id: int) -> None:
         f = store.flows.get_flow(flow_id)
         if not f:
             raise typer.Exit(1)
-        typer.echo(f"flow {f.id}\n  repo={f.repo} issue=#{f.issue_number} state={f.state}")
+        typer.echo(
+            f"flow {f.id}\n  repo={f.repo} issue={f'#{f.issue_number}' if f.issue_number is not None else '-'} state={f.state}"
+            f" round={f.current_round_no} outcome={f.archive_reason or '-'}"
+            f" archived_at={f.archived_at or '-'}"
+        )
+        if f.task_content is not None:
+            typer.echo(f"  task:\n{f.task_content}")
         execution = store.workers.get_flow_execution(f.id)
         delivery = store.deliveries.get_delivery(f.id)
         if execution is not None:
             typer.echo(
                 f"  execution: worker={execution.worker_id} repo={execution.repo_identity}"
+                f" workspace={execution.workspace} generation={execution.generation}"
                 f" active={execution.released_at is None}"
             )
         if delivery is not None:
@@ -204,8 +278,10 @@ def flow_show(flow_id: int) -> None:
                 f" pr={delivery.pr_number or '-'} head={delivery.head_sha or '-'}"
             )
             if delivery.state is DeliveryState.CLOSED:
-                typer.echo("  paused: original worker/repo retained; reopen requires settled execution"
-                           " and verified head/base; flow retry cannot bypass this hold")
+                typer.echo(
+                    "  closed: finalization or baseline reconciliation required;"
+                    " reopening does not authorize work"
+                )
         check = store.reconcile.get(f.id)
         if check is not None:
             typer.echo(f"  reconcile: last={check.last_success_at or '-'} next={check.next_at}"
@@ -279,6 +355,62 @@ def flow_retry(flow_id: int) -> None:
             database=store.database,
         ).retry(f)
     typer.echo(f"retry requested for flow {flow_id}")
+
+
+@flow_app.command("finish")
+def flow_finish(
+    flow_id: int,
+    reason: ArchiveReason,
+    summary: str = typer.Option(""),
+    expected_round: int = typer.Option(..., min=1),
+) -> None:
+    """结束指定轮次；无 PR 的成功调查必须提供结论。"""
+    from app.controler.workflow.service import ControlService
+
+    with _store() as store:
+        flow = store.flows.get_flow(flow_id)
+        if flow is None:
+            raise typer.Exit(1)
+        try:
+            ControlService(database=store.database).finish(
+                flow, reason=reason, summary=summary, expected_round_no=expected_round
+            )
+        except ValueError as error:
+            typer.echo(str(error), err=True)
+            raise typer.Exit(1) from None
+    typer.echo(f"finalization requested for flow {flow_id} round {expected_round}")
+
+
+@flow_app.command("resume")
+def flow_resume(flow_id: int, expected_round: int = typer.Option(..., min=1)) -> None:
+    """显式恢复已归档 Flow，开启新轮次和新交付。"""
+    from app.controler.workflow.service import ControlService
+
+    with _store() as store:
+        flow = store.flows.get_flow(flow_id)
+        if flow is None:
+            raise typer.Exit(1)
+        try:
+            resumed = ControlService(database=store.database).resume(
+                flow, expected_round_no=expected_round
+            )
+        except ValueError as error:
+            typer.echo(str(error), err=True)
+            raise typer.Exit(1) from None
+    typer.echo(f"flow {flow_id} round {resumed.current_round_no}: queued")
+
+
+@flow_app.command("history")
+def flow_history(flow_id: int, round_no: int = typer.Option(..., "--round", min=1)) -> None:
+    """按轮次显示状态、归档、合并证据与自动更正的原始活动记录。"""
+    from app.persistence.activity import ActivityStore
+
+    with _store() as store:
+        flow = store.flows.get_flow(flow_id)
+        if flow is None or round_no > flow.current_round_no:
+            raise typer.Exit(1)
+        for item in ActivityStore(store.database).history(flow_id, round_no):
+            typer.echo(item.model_dump_json())
 
 
 if __name__ == "__main__":

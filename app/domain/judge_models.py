@@ -1,11 +1,11 @@
-"""Versioned Judge subprocess request and auditable decision, containing no credentials."""
+"""Frozen review input and auditable decisions, containing no credentials."""
 
-import json
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.domain.context_models import ReviewContext
+from app.domain.inference_models import AdapterVersion, FailureCode
 from app.domain.models import TriageVerdict, Verdict
 
 ADAPTER_VERSION: Literal["bub-0.4.1/v1"] = "bub-0.4.1/v1"
@@ -13,7 +13,7 @@ Failure = Literal[
     "missing-configuration", "adapter-unavailable", "start-failed", "timeout",
     "output-limit", "nonzero-exit", "empty-output", "invalid-envelope", "invalid-verdict",
     "model-error", "incomplete-context",
-]
+] | FailureCode
 
 
 class JudgeRequest(BaseModel):
@@ -26,33 +26,19 @@ class JudgeRequest(BaseModel):
 class JudgeDecision(BaseModel):
     model_config = ConfigDict(extra="forbid")
     version: Literal[1] = 1
-    adapter_version: Literal["bub-0.4.1/v1"] = ADAPTER_VERSION
+    adapter_version: AdapterVersion = ADAPTER_VERSION
     context_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     session_id: str
-    model: str
+    model: str | None
     verdict: TriageVerdict
     failure: Failure | None = None
 
 
-def waiting(request: JudgeRequest, model: str, failure: Failure) -> JudgeDecision:
+def waiting(request: JudgeRequest, model: str | None, failure: Failure, *,
+            adapter_version: str = "review/v1") -> JudgeDecision:
     """Return a sanitized operational failure without serializing provider errors or output."""
     return JudgeDecision(
         context_digest=request.context.digest, session_id=request.session_id, model=model,
+        adapter_version=adapter_version,
         verdict=TriageVerdict(verdict=Verdict.WAIT, reason=failure), failure=failure,
     )
-
-
-def strict_json(raw: str | bytes) -> object:
-    """Reject duplicate keys and non-JSON numeric constants as well as trailing output."""
-    def pairs(items):
-        result = {}
-        for key, value in items:
-            if key in result:
-                raise ValueError("duplicate JSON key")
-            result[key] = value
-        return result
-
-    def constant(value):
-        raise ValueError("non-finite JSON constant")
-
-    return json.loads(raw, object_pairs_hook=pairs, parse_constant=constant)

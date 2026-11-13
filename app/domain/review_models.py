@@ -54,6 +54,7 @@ class ReviewBatch(BaseModel):
     state: BatchState
     trigger: Literal["discussion", "strong"]
     job_id: int | None
+    inference_job_id: int | None = None
     feedback: list[ReviewFeedback]
     open_points: list[str]
     created_at: datetime

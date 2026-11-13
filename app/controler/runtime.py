@@ -4,9 +4,14 @@ from __future__ import annotations
 
 import asyncio
 from datetime import timedelta
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from loguru import logger
 
+from app.communication.gateway import Gateway
+from app.communication.session import Session
+from app.contracts.protocol import Register, ServerMessageUnion, WorkerMessageUnion
 from app.controler.access import OwnerAccess
 from app.controler.config import ServerSettings
 from app.controler.console.sync import ConsoleSynchronizer
@@ -15,15 +20,20 @@ from app.controler.reconciliation.feedback import FeedbackReconciler
 from app.controler.reconciliation.labels import LabelSynchronizer
 from app.controler.reconciliation.projects import ProjectSync
 from app.controler.reconciliation.pull_requests import Reconciler
-from app.controler.review.judge import BubJudge
+from app.controler.review.judge import ReviewJudge
+from app.controler.workers.callbacks import ServerCallbacks
 from app.controler.workers.conversation import ConversationBroker, ConversationService
-from app.controler.workers.gateway import WorkerGateway
+from app.controler.workers.files import FileService, ServerFileCallbacks
 from app.controler.workflow.coordinator import JobCoordinator
 from app.controler.workflow.effects import ResultEffects
+from app.controler.workflow.inference import InferencePending, JobInference
 from app.controler.workflow.results import ResultApplication
 from app.controler.workflow.service import ControlService
 from app.controler.workflow.tools import FlowToolService
+from app.domain.inference_models import InferenceError
 from app.github import GitHubApp
+from app.inference.bub import BubInference
+from app.inference.local import serve_local_inference
 from app.persistence.database import Database
 from app.persistence.readiness import database_ready
 from app.persistence.results import ResultStore
@@ -51,8 +61,8 @@ class ServerRuntime:
             recovery_grace=timedelta(seconds=self.settings.worker_recovery_grace),
         )
         plugins = get_plugin_manager()
-        github = GitHubApp(self.settings)
-        effects = ResultEffects(github, database=database)
+        self.github = github = GitHubApp(self.settings)
+        effects = ResultEffects(github, database=database, plugins=plugins)
         self.results = ResultApplication(
             github,
             self.settings,
@@ -60,8 +70,13 @@ class ServerRuntime:
             effects=effects,
             database=database,
         )
-        tools = FlowToolService(github, database=database)
-        conversations = ConversationBroker()
+        self.tools = FlowToolService(github, database=database)
+        self.gateway = Gateway[WorkerMessageUnion, ServerMessageUnion]()
+        conversations = ConversationBroker(self.gateway)
+        self.worker_tokens = {
+            worker_id: token.get_secret_value()
+            for worker_id, token in self.settings.worker_tokens.items()
+        }
         self.coordinator = JobCoordinator(
             github,
             self.settings,
@@ -69,42 +84,27 @@ class ServerRuntime:
             database=database,
             results=self.results,
         )
-        self.gateway = WorkerGateway(
-            self.coordinator,
-            database=database,
-            tools=tools,
-            results=self.results,
-            conversations=conversations,
-            worker_tokens={
-                worker_id: token.get_secret_value()
-                for worker_id, token in self.settings.worker_tokens.items()
-            },
-            heartbeat_interval=self.settings.worker_heartbeat_interval,
-            heartbeat_timeout=self.settings.worker_heartbeat_timeout,
-            poll_interval=self.settings.worker_poll_interval,
-            metrics=self.metrics,
-        )
-        self.judge = BubJudge(model=settings.judge_model, api_key=settings.judge_api_key,
-                         api_base=settings.judge_api_base, timeout=settings.judge_timeout_seconds)
+        self.local_bub = BubInference(model=settings.judge_model, api_key=settings.judge_api_key,
+                                      api_base=settings.judge_api_base)
         self._triage_task: asyncio.Task[None] | None = None
         self.service = ControlService(
             plugins,
-            self.gateway.notify_jobs,
+            self.gateway.wake_all,
             database=database,
         )
         self.conversations = ConversationService(conversations, database=database)
-        self.files = self.gateway.files
+        self.files = FileService(self.gateway, database=database)
         self.console = ConsoleSynchronizer(github, self.conversations, database=database)
         self.webhooks = WebhookConsumer(
             self.settings,
+            github,
             database=database,
             plugins=plugins,
-            jobs_available=self.gateway.notify_jobs,
+            jobs_available=self.gateway.wake_all,
         )
         self.reconciler = Reconciler(
             github,
             self.service,
-            settle_seconds=self.settings.settle_seconds,
             interval=self.settings.reconcile_interval_seconds,
             batch_size=self.settings.reconcile_batch_size,
             concurrency=self.settings.reconcile_concurrency,
@@ -113,7 +113,6 @@ class ServerRuntime:
         self.feedback_reconciler = FeedbackReconciler(
             github,
             settle_seconds=self.settings.settle_seconds,
-            bot_login=self.settings.bot_login,
             interval=self.settings.reconcile_interval_seconds,
             batch_size=self.settings.reconcile_batch_size,
             concurrency=self.settings.reconcile_concurrency,
@@ -135,6 +134,40 @@ class ServerRuntime:
         self.webhook_store = WebhookStore(database)
         self._tasks: list[asyncio.Task[None]] = []
 
+    async def serve_worker_session(
+        self,
+        worker_id: str,
+        register: Register,
+        session: Session[WorkerMessageUnion, ServerMessageUnion],
+    ) -> None:
+        """Mount server business callbacks, transferring connection cleanup to Gateway."""
+        try:
+            callbacks = ServerCallbacks(
+                self.coordinator,
+                worker_id=worker_id,
+                register=register,
+                session=session,
+                database=self.database,
+                tools=self.tools,
+                results=self.results,
+                notify_jobs=self.gateway.wake_all,
+                heartbeat_interval=self.settings.worker_heartbeat_interval,
+                heartbeat_timeout=self.settings.worker_heartbeat_timeout,
+                poll_interval=self.settings.worker_poll_interval,
+                metrics=self.metrics,
+            )
+            files = ServerFileCallbacks(worker_id=worker_id, session=session, store=self.files.store)
+        except BaseException:
+            await session.close()
+            raise
+        try:
+            await self.gateway.serve(worker_id, session, callbacks, files, replace=True)
+        finally:
+            try:
+                await callbacks.aclose()
+            finally:
+                await files.aclose()
+
     def startup(self) -> None:
         self.database.init_db()
         self.result_store.recover_claims()
@@ -150,12 +183,33 @@ class ServerRuntime:
             asyncio.create_task(self._sweep_results()),
             asyncio.create_task(self._sweep_reviews()),
         ]
+        if self.local_bub.configured:
+            if self.local_bub.configuration_failure() is None:
+                self._tasks.append(asyncio.create_task(self._serve_bub()))
+            else:
+                logger.warning("local bub worker unavailable: configuration preflight failed")
         if self.settings.metrics_token and self.settings.metrics_token.get_secret_value():
             self._tasks.append(asyncio.create_task(self.metrics.run(
                 self.settings.database_url, self.settings.metrics_interval_seconds,
             )))
         self._settle_reviews()
         self._ready = True
+
+    async def _serve_bub(self) -> None:
+        """Supervise the infer-only peer using the same Session and job driver as remote workers."""
+        # The default directory survives connection retries. Each request gets its own
+        # child; shutdown joins providers before removing this repository-free root.
+        with TemporaryDirectory(prefix="flowtool-local-bub-") as directory:
+            self.local_bub.root = Path(directory)
+            try:
+                while True:
+                    try:
+                        await serve_local_inference(self.serve_worker_session, self.local_bub, self.local_bub.root)
+                    except Exception:  # noqa: BLE001 -- restart the local connection, not a model attempt
+                        logger.exception("local bub worker disconnected; reconnecting")
+                    await asyncio.sleep(self.settings.worker_poll_interval)
+            finally:
+                self.local_bub.root = None
 
     async def ready(self) -> bool:
         if not self._ready or self._readiness_lock.locked():
@@ -177,7 +231,7 @@ class ServerRuntime:
                         requeued,
                         failed,
                     )
-                    self.gateway.notify_jobs()
+                    self.gateway.wake_all()
             except Exception:  # noqa: BLE001 -- keep periodic recovery alive after operational errors
                 logger.exception("assignment recovery sweep failed; retrying next sweep")
 
@@ -189,14 +243,14 @@ class ServerRuntime:
                     concurrency=self.settings.result_recovery_concurrency,
                     batch_size=self.settings.result_recovery_batch_size,
                 )
-                self.gateway.notify_jobs()
+                self.gateway.wake_all()
             except Exception:  # noqa: BLE001 -- a failed inbox query is retried next sweep
                 logger.exception("result recovery sweep failed; retrying next sweep")
             await asyncio.sleep(self.settings.worker_sweep_interval)
 
     def _settle_reviews(self) -> None:
         if self.reviews.claim_due():
-            self.gateway.notify_jobs()
+            self.gateway.wake_all()
 
         if self._triage_task is None or self._triage_task.done():
             self._triage_task = asyncio.create_task(self._run_triage())
@@ -208,11 +262,19 @@ class ServerRuntime:
             logger.exception("could not read pending review batches")
             return
         for batch in batches:
+            judge = ReviewJudge(JobInference(
+                self.database, self.gateway.wake_all, flow_id=batch.flow_id, batch_id=batch.id,
+            ), timeout=self.settings.judge_timeout_seconds)
             try:
-                await self.coordinator.triage(batch, self.judge)
+                await self.coordinator.triage(batch, judge)
+            except InferencePending:
+                continue  # Other batches can enqueue while this job waits for a worker or result.
+            except InferenceError as error:
+                logger.warning("review inference interrupted for batch {}: {}",
+                               batch.id, error.failure.code)
             except Exception:  # noqa: BLE001 -- isolate unavailable providers/feedback batches
                 logger.exception("review prerequisite interrupted; unfinished batch will be retried")
-        self.gateway.notify_jobs()
+        self.gateway.wake_all()
 
     async def _sweep_reviews(self) -> None:
         """Keep settle independent of both lease errors and slow remote receipt checks."""
@@ -229,13 +291,21 @@ class ServerRuntime:
 
     async def shutdown(self) -> None:
         self._ready = False
-        self.reconciler.stop()
-        tasks = list(self._tasks)
-        if self._triage_task is not None:
-            tasks.append(self._triage_task)
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-        await self.access.close()
-        self.database.close()
+        self.gateway.seal()
+        try:
+            self.reconciler.stop()
+            tasks = list(self._tasks)
+            if self._triage_task is not None:
+                tasks.append(self._triage_task)
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            try:
+                await self.gateway.close(1012)
+            finally:
+                try:
+                    await self.access.close()
+                finally:
+                    self.database.close()

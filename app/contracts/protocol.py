@@ -6,15 +6,20 @@ import hashlib
 import json
 from datetime import datetime
 from enum import StrEnum
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Self, TypedDict
+from uuid import UUID, uuid4, uuid5
 
 from pydantic import (
     BaseModel,
     ConfigDict,
+    Discriminator,
     Field,
     SecretStr,
+    StrictBool,
+    Tag,
     TypeAdapter,
     field_serializer,
+    field_validator,
     model_validator,
 )
 
@@ -22,10 +27,25 @@ from app.contracts.conversation import ConversationError, HistoryPage, SessionId
 from app.contracts.files import MAX_FILE_BASE64, FileError, FileId
 from app.domain.context_models import ReviewContext
 from app.domain.delivery_models import DeliveryReceipt
-from app.domain.models import FeedbackRef, JobState, RevisionCodingOutput, VcsKind
+from app.domain.inference_models import (
+    InferenceCapability,
+    InferenceFailure,
+    InferenceOutput,
+    InferenceTask,
+)
+from app.domain.models import (
+    FeedbackRef,
+    RevisionCodingOutput,
+    VcsKind,
+    WorkspaceInventory,
+)
 from app.domain.review_models import ReviewFeedback
 
-PROTOCOL_VERSION: Literal[17] = 17
+PROTOCOL_VERSION: Literal[25] = 25
+MAX_PAYLOAD_ITEMS = 32
+MessageId = Annotated[str, Field(strict=True, pattern=r"^[0-9a-f]{32}$")]
+ConnectionEpoch = Annotated[str, Field(strict=True, min_length=1, max_length=64)]
+_ID_NAMESPACE = UUID("46ebd500-2f34-463f-b746-f5c03b53b0ac")
 
 
 class ProtocolModel(BaseModel):
@@ -34,84 +54,13 @@ class ProtocolModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class Message(ProtocolModel):
-    protocol_version: Literal[17] = PROTOCOL_VERSION
-
-
-class FileEnvelope(Message):
-    request_id: FileId
-    connection_epoch: str = Field(min_length=1, max_length=64)
-
-
-class FileRegister(FileEnvelope):
-    type: Literal["file_register"] = "file_register"
-    file_id: FileId
-
-
-class FileRegistered(FileEnvelope):
-    type: Literal["file_registered"] = "file_registered"
-    link: str | None = Field(default=None, pattern=r"^/api/files/[0-9a-f]{32}$")
-    error: FileError | None = None
-
-    @model_validator(mode="after")
-    def _one_outcome(self) -> FileRegistered:
-        if (self.link is None) == (self.error is None):
-            raise ValueError("file registration requires exactly one of link or error")
-        return self
-
-
-class FileQuery(FileEnvelope):
-    type: Literal["file_query"] = "file_query"
-    file_id: FileId
-
-
-class FileResult(FileEnvelope):
-    type: Literal["file_result"] = "file_result"
-    content_base64: str | None = Field(default=None, max_length=MAX_FILE_BASE64)
-    error: FileError | None = None
-
-    @model_validator(mode="after")
-    def _one_outcome(self) -> FileResult:
-        if (self.content_base64 is None) == (self.error is None):
-            raise ValueError("file result requires exactly one of content or error")
-        return self
-
-
-class ConversationQuery(Message):
-    """Read-only request, independent of the worker's current assignment."""
-
-    # HistoryQuery checks cursor semantics inside the task, so a bad cursor returns
-    # a query error rather than aborting WebSocket message parsing and reconnecting.
-    type: Literal["conversation_query"] = "conversation_query"
-    session_id: SessionId
-    cursor: str | None = Field(default=None, min_length=1, max_length=1024)
-    limit: int = Field(default=100, ge=1, le=500)
-    request_id: str = Field(min_length=1, max_length=64)
-    connection_epoch: str = Field(min_length=1, max_length=64)
-
-
-class ConversationResult(Message):
-    type: Literal["conversation_result"] = "conversation_result"
-    request_id: str = Field(min_length=1, max_length=64)
-    connection_epoch: str = Field(min_length=1, max_length=64)
-    page: HistoryPage | None = None
-    error: ConversationError | None = None
-
-    @model_validator(mode="after")
-    def _one_outcome(self) -> ConversationResult:
-        if (self.page is None) == (self.error is None):
-            raise ValueError("conversation result requires exactly one of page or error")
-        return self
-
-
 class InitialTask(ProtocolModel):
     kind: Literal["initial"] = "initial"
     flow_id: int = Field(gt=0)
     attempt_id: int
     repo: str
-    issue_number: int
-    issue_title: str
-    issue_body: str
+    issue_number: int | None
+    task_content: str
     branch: str
     base_branch: str = "main"
     remote: str = "origin"
@@ -124,6 +73,8 @@ class PushSecret(ProtocolModel):
     token: SecretStr = Field(min_length=1)
     repository: str
     expires_at: datetime
+    bot_login: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9-]*\[bot\]$")
+    bot_user_id: int = Field(gt=0)
 
     @field_serializer("token", when_used="json")
     def _serialize_token(self, token: SecretStr) -> str:
@@ -139,6 +90,7 @@ class RevisionTask(ProtocolModel):
     attempt_id: int
     feedback: list[ReviewFeedback]
     kind: Literal["revision"] = "revision"
+    purpose: Literal["answer", "revise"] = "revise"
     flow_id: int = Field(gt=0)
     repo: str
     branch: str
@@ -146,11 +98,14 @@ class RevisionTask(ProtocolModel):
     pr_number: int = Field(gt=0)
     base_branch: str
     expected_head_sha: str = Field(min_length=1)
+    # Absent only in historical assignments whose expected head was also the delivery head.
+    previous_head_sha: str | None = Field(
+        default=None, min_length=1, exclude_if=lambda value: value is None,
+    )
     session_id: str | None
     session_generation: int = Field(ge=0)
     instruction: str
-    issue_title: str
-    issue_body: str
+    task_content: str
     previous_summary: str
     open_points: list[str]
     context: ReviewContext | None = None
@@ -221,6 +176,10 @@ class RevisionTaskResult(ProtocolModel):
     commit_sha: str | None = None
     remote_sha: str | None = None
     clean_worktree: bool = False
+    # Keep historical result JSON/digests unchanged; new revise tasks require this evidence.
+    baseline_sha: str | None = Field(
+        default=None, min_length=1, exclude_if=lambda value: value is None,
+    )
 
 
 class ArchiveResult(ArchiveIdentity):
@@ -244,89 +203,46 @@ class RecoveryDescriptor(ProtocolModel):
     archive_resume: bool = False
 
 
-class Register(Message):
-    type: Literal["register"] = "register"
-    worker_id: str
-    recovery: RecoveryDescriptor | None = None
+class ExecutionIdentity(ProtocolModel):
+    """Assignment authority, independent of a connection or message identity."""
 
-
-class Started(Message):
-    type: Literal["started"] = "started"
     job_id: int
     assignment_token: str
-    connection_epoch: str
 
 
-class Heartbeat(Message):
-    type: Literal["heartbeat"] = "heartbeat"
-    job_id: int
-    assignment_token: str
-    connection_epoch: str
+class RecoveryDecision(ExecutionIdentity):
+    action: Literal["resume", "replay"]
 
 
-class Succeeded(Message):
+class Succeeded(ExecutionIdentity):
+    """Durable terminal data; never a standalone wire message."""
+
     type: Literal["succeeded"] = "succeeded"
-    job_id: int
-    assignment_token: str
-    connection_epoch: str
     result: ExecutionResult
 
 
-class Failed(Message):
+class Failed(ExecutionIdentity):
     type: Literal["failed"] = "failed"
-    job_id: int
-    assignment_token: str
-    connection_epoch: str
     error: str
 
 
-class FlowToolRequest(Message):
-    type: Literal["flow_tool_request"] = "flow_tool_request"
-    job_id: int
-    flow_id: int
-    attempt_id: int
-    assignment_token: str
-    connection_epoch: str
-    call_id: str
-    name: str
-    arguments: dict[str, object]
-    vcs_backend: VcsKind
-    branch: str
-    commit_sha: str
-    remote_sha: str
-
-
-class StopFence(Message):
+class StopFence(ProtocolModel):
     request_id: str
     flow_id: int
     job_id: int
     assignment_token: str
-    connection_epoch: str
-
-
-class StopExecution(StopFence):
-    type: Literal["stop_execution"] = "stop_execution"
 
 
 class ExecutionStopped(StopFence):
-    type: Literal["execution_stopped"] = "execution_stopped"
+    """Durable evidence of stopped execution, without delivery metadata."""
+
     execution_nonce: str = Field(min_length=1, max_length=128)
 
 
-class StopAccepted(StopFence):
-    type: Literal["stop_accepted"] = "stop_accepted"
+TerminalPayload = Annotated[Succeeded | Failed, Field(discriminator="type")]
 
 
-WorkerMessage = Annotated[
-    Register | Started | Heartbeat | Succeeded | Failed | FlowToolRequest | ExecutionStopped
-    | ConversationResult | FileRegister | FileResult,
-    Field(discriminator="type"),
-]
-
-TerminalMessage = Succeeded | Failed
-
-
-def terminal_digest(message: TerminalMessage) -> str:
+def terminal_digest(message: TerminalPayload) -> str:
     """Hash only terminal content so a replay may use a freshly fenced epoch."""
 
     if isinstance(message, Succeeded):
@@ -340,62 +256,264 @@ def terminal_digest(message: TerminalMessage) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
-class Registered(Message):
-    type: Literal["registered"] = "registered"
-    heartbeat_interval: float
-    connection_epoch: str
-
-
-class Assignment(Message):
-    type: Literal["assignment"] = "assignment"
-    job_id: int
+class AssignmentArguments(ExecutionIdentity):
     flow_id: int
-    assignment_token: str
-    connection_epoch: str
+    workspace: str = Field(pattern=r"^[0-9a-f]{32}$")
+    generation: int = Field(strict=True, gt=0)
     task: ExecutionTask
     secret: AssignmentSecret | None = None
 
     @model_validator(mode="after")
-    def _flow_identity(self) -> Assignment:
+    def _flow_identity(self) -> Self:
         if self.task.flow_id != self.flow_id:
             raise ValueError("assignment and task belong to different Flows")
         return self
 
 
-class ResumeAssignment(Message):
-    type: Literal["resume_assignment"] = "resume_assignment"
-    job_id: int
-    assignment_token: str
-    connection_epoch: str
-    heartbeat_interval: float
+class HistoryArguments(ProtocolModel):
+    # Cursor semantics stay in HistoryQuery, yielding a query error, not a disconnect.
+    session_id: SessionId
+    cursor: str | None = Field(default=None, min_length=1, max_length=1024)
+    limit: int = Field(default=100, ge=1, le=500)
 
 
-class ReplayResult(Message):
-    type: Literal["replay_result"] = "replay_result"
-    job_id: int
-    assignment_token: str
-    connection_epoch: str
-    heartbeat_interval: float
-
-
-class RecoveryRejected(Message):
-    type: Literal["recovery_rejected"] = "recovery_rejected"
+class RecoveryRejectedArguments(ProtocolModel):
     job_id: int
     reason: str
+    register_message_id: MessageId
 
 
-class ResultAccepted(Message):
-    type: Literal["result_accepted"] = "result_accepted"
+class AcceptResultArguments(ExecutionIdentity):
+    result_id: MessageId
+
+
+class AcceptStopArguments(StopFence):
+    receipt_id: MessageId
+
+
+class ResultAcceptance(ExecutionIdentity):
+    state: Literal["done", "failed"]
+
+
+class FlowToolArguments(ExecutionIdentity):
+    flow_id: int
+    attempt_id: int
+    call_id: str
+    arguments: dict[str, object]
+    vcs_backend: VcsKind
+    branch: str
+    commit_sha: str
+    remote_sha: str
+
+
+class ToolCall(ProtocolModel):
+    """One typed invocation; its identity survives transport repackaging when replayed."""
+
+    type: Literal["tool_call"]
+    message_id: MessageId
+    reply_to: None
+    method: str
+
+
+class ToolResult(ProtocolModel):
+    """A method-specific result correlated to one invocation, not its containing message."""
+
+    type: Literal["tool_result"]
+    message_id: MessageId
+    reply_to: MessageId
+    method: str
+
+    @model_validator(mode="after")
+    def _reply_identity(self) -> Self:
+        if self.reply_to == self.message_id:
+            raise ValueError("a result cannot reply to itself")
+        return self
+
+
+class PayloadValidationError(ProtocolModel):
+    """Fixed public failure; never carry input, field names or validator diagnostics."""
+
+    code: Literal["validation_error"]
+    message: Literal["message payload failed validation"]
+
+
+class ValidationErrorResult(ToolResult):
+    """Reject one item by its original ID, without claiming any business acceptance."""
+
+    error: PayloadValidationError
+
+
+class Assignment(ToolCall):
+    method: Literal["worker.execute"]
+    arguments: AssignmentArguments
+
+
+class StopExecution(ToolCall):
+    method: Literal["worker.stop"]
+    arguments: StopFence
+
+
+class ConversationQuery(ToolCall):
+    method: Literal["worker.history"]
+    arguments: HistoryArguments
+
+
+class FileRegister(ToolCall):
+    method: Literal["server.file_register"]
+    file_id: FileId
+
+
+class FileQuery(ToolCall):
+    method: Literal["worker.file_read"]
+    file_id: FileId
+
+
+class FileRegistered(ToolResult):
+    method: Literal["server.file_register"]
+    link: str | None = Field(default=None, pattern=r"^/api/files/[0-9a-f]{32}$")
+    error: FileError | None = None
+
+    @model_validator(mode="after")
+    def _one_outcome(self) -> Self:
+        if (self.link is None) == (self.error is None):
+            raise ValueError("file registration requires exactly one outcome")
+        return self
+
+
+class FileResult(ToolResult):
+    method: Literal["worker.file_read"]
+    content_base64: str | None = Field(default=None, max_length=MAX_FILE_BASE64)
+    error: FileError | None = None
+
+    @model_validator(mode="after")
+    def _one_outcome(self) -> Self:
+        if (self.content_base64 is None) == (self.error is None):
+            raise ValueError("file result requires exactly one outcome")
+        return self
+
+
+class InferenceRequest(ToolCall):
+    method: Literal["worker.infer"]
+    job_id: int = Field(strict=True, gt=0)
+    assignment_token: str = Field(strict=True, min_length=1)
+    arguments: InferenceTask
+
+    @model_validator(mode="after")
+    def _request_identity(self) -> Self:
+        if self.message_id != self.arguments.request_id:
+            raise ValueError("inference request identity mismatch")
+        return self
+
+
+class RecoveryRejected(ToolCall):
+    method: Literal["worker.reject_recovery"]
+    arguments: RecoveryRejectedArguments
+
+
+class RepositoryDemand(ToolCall):
+    """Level-triggered capacity request; it grants no job or Flow ownership."""
+
+    method: Literal["worker.provision"]
+    repository: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$")
+
+
+class ProvisionError(StrEnum):
+    """Public repository-local failures; only filesystem errors retry automatically."""
+
+    INVALID_REPOSITORY = "invalid_repository"
+    WORKSPACE_CONFLICT = "workspace_conflict"
+    FILESYSTEM_ERROR = "filesystem_error"
+
+
+class ProvisionResult(ToolResult):
+    """Finish one capacity request; only separately reported inventory grants capacity."""
+
+    method: Literal["worker.provision"]
+    repository: str
+    error: ProvisionError | None
+
+
+class Started(ToolCall):
+    method: Literal["server.execution_started"]
+    arguments: ExecutionIdentity
+
+
+class AcceptResultRequest(ToolCall):
+    method: Literal["server.accept_result"]
+    arguments: AcceptResultArguments
+
+
+class AcceptStop(ToolCall):
+    method: Literal["server.accept_stop"]
+    arguments: AcceptStopArguments
+
+
+class FlowToolRequest(ToolCall):
+    arguments: FlowToolArguments
+
+
+class ExecuteResult(ToolResult):
+    method: Literal["worker.execute"]
     job_id: int
-    state: JobState
     assignment_token: str
-    connection_epoch: str
+    result: ExecutionResult | None = None
+    error: str | None = None
+
+    @model_validator(mode="after")
+    def _one_outcome(self) -> Self:
+        if (self.result is None) == (self.error is None):
+            raise ValueError("execution result requires exactly one of result or error")
+        return self
+
+    def terminal(self) -> TerminalPayload:
+        """Project only durable fields; message and invocation metadata never enter the journal."""
+        if self.result is not None:
+            return Succeeded(
+                job_id=self.job_id, assignment_token=self.assignment_token, result=self.result
+            )
+        assert self.error is not None
+        return Failed(job_id=self.job_id, assignment_token=self.assignment_token, error=self.error)
 
 
-class ProtocolError(Message):
-    type: Literal["error"] = "error"
-    code: str
-    detail: str
+class StopResult(ToolResult):
+    method: Literal["worker.stop"]
+    result: ExecutionStopped
+
+
+class ConversationResult(ToolResult):
+    method: Literal["worker.history"]
+    page: HistoryPage | None = None
+    error: ConversationError | None = None
+
+    @model_validator(mode="after")
+    def _one_outcome(self) -> Self:
+        if (self.page is None) == (self.error is None):
+            raise ValueError("conversation result requires exactly one of page or error")
+        return self
+
+
+class InferenceResult(ToolResult):
+    method: Literal["worker.infer"]
+    job_id: int = Field(strict=True, gt=0)
+    assignment_token: str = Field(strict=True, min_length=1)
+    output: InferenceOutput | None = None
+    failure: InferenceFailure | None = None
+
+    @model_validator(mode="after")
+    def _one_outcome(self) -> Self:
+        if (self.output is None) == (self.failure is None):
+            raise ValueError("inference result requires exactly one outcome")
+        return self
+
+
+class AcceptResultResponse(ToolResult):
+    method: Literal["server.accept_result"]
+    result: ResultAcceptance
+
+
+class StopAccepted(ToolResult):
+    method: Literal["server.accept_stop"]
+    result: StopFence
 
 
 class FlowToolErrorKind(StrEnum):
@@ -411,8 +529,7 @@ class FlowToolErrorKind(StrEnum):
     UPSTREAM = "upstream"
 
 
-class FlowToolResponse(Message):
-    type: Literal["flow_tool_response"] = "flow_tool_response"
+class FlowToolResponse(ToolResult):
     call_id: str
     result: DeliveryReceipt | None = None
     error: str | None = None
@@ -435,34 +552,343 @@ class FlowToolResponse(Message):
         return self
 
 
-ServerMessage = Annotated[
-    Registered
-    | Assignment
-    | ResumeAssignment
-    | ReplayResult
-    | RecoveryRejected
-    | ResultAccepted
-    | ProtocolError
-    | FlowToolResponse
-    | StopExecution
-    | StopAccepted
-    | ConversationQuery
-    | FileQuery
-    | FileRegistered,
-    Field(discriminator="type"),
+_FIXED_METHODS = frozenset(
+    {
+        "worker.execute",
+        "worker.stop",
+        "worker.history",
+        "worker.file_read",
+        "server.file_register",
+        "worker.infer",
+        "worker.provision",
+        "worker.reject_recovery",
+        "server.execution_started",
+        "server.accept_result",
+        "server.accept_stop",
+    }
+)
+
+
+def _method_tag(value: object) -> str | None:
+    """Unknown names retain the existing typed Flow INVALID_REQUEST path.
+
+    Known methods never fall back after malformed arguments. This discriminator selects
+    a schema only; it neither registers handlers nor invokes code named by remote input.
+    """
+    if isinstance(value, (ToolCall, ToolResult)):
+        method: object = value.method
+    elif isinstance(value, dict):
+        method = value.get("method")
+    else:
+        return None
+    if not isinstance(method, str):
+        return None
+    return method if method in _FIXED_METHODS else "flow_tool"
+
+
+WorkerCall = Annotated[
+    Annotated[Started, Tag("server.execution_started")]
+    | Annotated[AcceptResultRequest, Tag("server.accept_result")]
+    | Annotated[AcceptStop, Tag("server.accept_stop")]
+    | Annotated[FileRegister, Tag("server.file_register")]
+    | Annotated[FlowToolRequest, Tag("flow_tool")],
+    Discriminator(_method_tag),
 ]
 
-_WORKER_MESSAGES: TypeAdapter[WorkerMessage] = TypeAdapter(WorkerMessage)
-_SERVER_MESSAGES: TypeAdapter[ServerMessage] = TypeAdapter(ServerMessage)
+
+def _result_tag(value: object) -> str | None:
+    if isinstance(value, ValidationErrorResult):
+        return "validation_error"
+    if isinstance(value, dict) and isinstance(value.get("error"), dict):
+        # An error object is never retried as a success/domain-error schema.
+        return "validation_error"
+    return _method_tag(value)
 
 
-def parse_worker_message(raw: str) -> WorkerMessage:
-    """Validate a worker-to-serve JSON message."""
+WorkerResult = Annotated[
+    Annotated[ExecuteResult, Tag("worker.execute")]
+    | Annotated[StopResult, Tag("worker.stop")]
+    | Annotated[ConversationResult, Tag("worker.history")]
+    | Annotated[FileResult, Tag("worker.file_read")]
+    | Annotated[InferenceResult, Tag("worker.infer")]
+    | Annotated[ProvisionResult, Tag("worker.provision")]
+    | Annotated[ValidationErrorResult, Tag("validation_error")],
+    Discriminator(_result_tag),
+]
+WorkerPayload = Annotated[WorkerCall | WorkerResult, Field(discriminator="type")]
+ServerCall = Annotated[
+    Assignment | StopExecution | ConversationQuery | FileQuery | InferenceRequest | RecoveryRejected | RepositoryDemand,
+    Field(discriminator="method"),
+]
+ServerResult = Annotated[
+    Annotated[AcceptResultResponse, Tag("server.accept_result")]
+    | Annotated[StopAccepted, Tag("server.accept_stop")]
+    | Annotated[FileRegistered, Tag("server.file_register")]
+    | Annotated[FlowToolResponse, Tag("flow_tool")]
+    | Annotated[ValidationErrorResult, Tag("validation_error")],
+    Discriminator(_result_tag),
+]
+ServerPayload = Annotated[ServerCall | ServerResult, Field(discriminator="type")]
+
+
+class Message[Payload: ToolCall | ToolResult](ProtocolModel):
+    """Common message fields. Every field is required, including explicit nulls and [].
+
+    Use a concrete control or directional message and its directional parser. This model
+    performs static checks only; receipt ACKs confer no business completion or authority.
+    """
+
+    protocol_version: Literal[25]
+    message_id: MessageId
+    connection_epoch: ConnectionEpoch | None
+    ack: StrictBool
+    ack_id: MessageId | None
+    control: Literal["register", "registered", "inventory", "heartbeat", "cancel_job", "error"] | None
+    payload: list[Payload] = Field(max_length=MAX_PAYLOAD_ITEMS)
+
+    @field_validator("protocol_version", mode="before")
+    @classmethod
+    def _version_type(cls, value: object) -> object:
+        if type(value) is not int:
+            raise ValueError("protocol_version must be an integer")
+        return value
+
+    @model_validator(mode="after")
+    def _message_contract(self) -> Self:
+        if self.ack != (self.ack_id is not None):
+            raise ValueError("ack and ack_id must occur together")
+        ids = [item.message_id for item in self.payload]
+        if len(ids) != len(set(ids)):
+            raise ValueError("duplicate payload message_id")
+        if self.control is None and not self.payload:
+            if not self.ack or self.connection_epoch is not None:
+                raise ValueError("empty payload without control requires a null-epoch ACK")
+        elif self.control == "register":
+            if self.connection_epoch is not None or self.ack:
+                raise ValueError("Register has no epoch or prior control to acknowledge")
+        elif self.control != "error" and self.connection_epoch is None:
+            raise ValueError("established-connection messages require an epoch")
+        return self
+
+
+class WorkerMessage(Message[WorkerPayload]):
+    """Worker message with control=None; empty payload is allowed only for a receipt ACK."""
+
+    control: Literal[None]  # noqa: PYI061 - Pydantic's discriminator requires Literal for null.
+
+
+class ServerMessage(Message[ServerPayload]):
+    """Server message with control=None; empty payload is allowed only for a receipt ACK."""
+
+    control: Literal[None]  # noqa: PYI061 - Pydantic's discriminator requires Literal for null.
+
+
+class InventoryPage(ProtocolModel):
+    """A bounded snapshot page. The receiver explicitly requests each subsequent page."""
+
+    inventory: list[WorkspaceInventory] = Field(max_length=MAX_PAYLOAD_ITEMS)
+    recoveries: list[RecoveryDescriptor] = Field(max_length=MAX_PAYLOAD_ITEMS)
+    inventory_complete: StrictBool
+
+
+class Register(Message[WorkerPayload], InventoryPage):
+    control: Literal["register"]
+    worker_id: str
+    workspace: str = Field(pattern=r"^[0-9a-f]{32}$")
+    repo_workspace_limit: int = Field(strict=True, gt=0)
+    execute: StrictBool = True
+    inference: InferenceCapability | None
+
+    @model_validator(mode="after")
+    def _recovery_payload(self) -> Self:
+        if not self.execute and self.recoveries:
+            raise ValueError("infer-only workers cannot recover coding execution")
+        if self.payload:
+            raise ValueError("registration acceptances follow recovery decisions")
+        return self
+
+
+class Inventory(Message[WorkerPayload], InventoryPage):
+    control: Literal["inventory"]
+
+    @model_validator(mode="after")
+    def _no_payload(self) -> Self:
+        if self.payload:
+            raise ValueError("inventory cannot carry business payload")
+        return self
+
+
+class Registered(Message[ServerPayload]):
+    control: Literal["registered"]
+    heartbeat_interval: float
+    recoveries: list[RecoveryDecision] = Field(max_length=MAX_PAYLOAD_ITEMS)
+    ready: StrictBool
+
+    @model_validator(mode="after")
+    def _recovery_payload(self) -> Self:
+        if self.payload:
+            raise ValueError("registration decisions cannot carry business payload")
+        return self
+
+
+class Heartbeat(Message[WorkerPayload]):
+    control: Literal["heartbeat"]
+    job_id: int
+    assignment_token: str
+
+    @model_validator(mode="after")
+    def _execution_payload(self) -> Self:
+        for item in self.payload:
+            if isinstance(item, (ConversationResult, FileRegister, FileResult, InferenceResult,
+                                 ProvisionResult, ValidationErrorResult)):
+                continue
+            if isinstance(item, (Started, AcceptResultRequest, AcceptStop, FlowToolRequest)):
+                identity = (item.arguments.job_id, item.arguments.assignment_token)
+            elif isinstance(item, ExecuteResult):
+                identity = (item.job_id, item.assignment_token)
+            else:
+                identity = (item.result.job_id, item.result.assignment_token)
+            if identity != (self.job_id, self.assignment_token):
+                raise ValueError("heartbeat and payload belong to different executions")
+        return self
+
+
+class CancelJob(Message[ServerPayload]):
+    """Cancel only the inference assignment identified by this connection and token."""
+
+    control: Literal["cancel_job"]
+    job_id: int = Field(strict=True, gt=0)
+    assignment_token: str = Field(strict=True, min_length=1)
+
+    @model_validator(mode="after")
+    def _no_payload(self) -> Self:
+        if self.payload:
+            raise ValueError("CancelJob cannot carry business payload")
+        return self
+
+
+class ProtocolError(Message[ServerPayload]):
+    control: Literal["error"]
+    code: str
+    detail: str
+
+    @model_validator(mode="after")
+    def _no_payload(self) -> Self:
+        if self.payload:
+            raise ValueError("ProtocolError cannot carry business payload")
+        return self
+
+
+WorkerMessageUnion = Annotated[Register | Inventory | Heartbeat | WorkerMessage, Field(discriminator="control")]
+ServerMessageUnion = Annotated[
+    Registered | CancelJob | ProtocolError | ServerMessage, Field(discriminator="control")
+]
+
+_WORKER_MESSAGES: TypeAdapter[WorkerMessageUnion] = TypeAdapter(WorkerMessageUnion)
+_SERVER_MESSAGES: TypeAdapter[ServerMessageUnion] = TypeAdapter(ServerMessageUnion)
+
+
+def parse_worker_message(raw: str) -> WorkerMessageUnion:
+    """Validate the complete worker message before any control or payload has effects."""
 
     return _WORKER_MESSAGES.validate_json(raw)
 
 
-def parse_server_message(raw: str) -> ServerMessage:
-    """Validate a serve-to-worker JSON message."""
+def parse_server_message(raw: str) -> ServerMessageUnion:
+    """Validate the complete server message; historical records use durable decoders instead."""
 
     return _SERVER_MESSAGES.validate_json(raw)
+
+
+def _stable_id(parts: list[str | int]) -> MessageId:
+    return uuid5(_ID_NAMESPACE, json.dumps(parts, ensure_ascii=False, separators=(",", ":"))).hex
+
+
+def execution_call_id(job_id: int, assignment_token: str) -> MessageId:
+    """E: stable assignment invocation, without a connection epoch."""
+    return _stable_id(["worker.execute", job_id, assignment_token])
+
+
+def _terminal_id(job_id: int, assignment_token: str, digest: str) -> MessageId:
+    return _stable_id(["terminal", job_id, assignment_token, digest])
+
+
+def terminal_id(terminal: TerminalPayload) -> MessageId:
+    """T: identity of the already-redacted durable execution outcome."""
+    return _terminal_id(terminal.job_id, terminal.assignment_token, terminal_digest(terminal))
+
+
+def accept_result_id(result_id: MessageId) -> MessageId:
+    """A: request to acknowledge business application of one terminal result."""
+    return _stable_id(["server.accept_result", result_id])
+
+
+def stop_call_id(fence: StopFence) -> MessageId:
+    """C: the same stop invocation across reconnects."""
+    return _stable_id(
+        ["stop_execution", fence.request_id, fence.flow_id, fence.job_id, fence.assignment_token]
+    )
+
+
+def stop_receipt_id(receipt: ExecutionStopped) -> MessageId:
+    """R: evidence from one actual execution, including its nonce."""
+    return _stable_id(
+        [
+            "execution_stopped",
+            receipt.request_id,
+            receipt.flow_id,
+            receipt.job_id,
+            receipt.assignment_token,
+            receipt.execution_nonce,
+        ]
+    )
+
+
+def accept_stop_id(receipt_id: MessageId) -> MessageId:
+    """B: request to acknowledge one fenced stop receipt."""
+    return _stable_id(["server.accept_stop", receipt_id])
+
+
+class MessageHeader(TypedDict):
+    protocol_version: Literal[25]
+    message_id: MessageId
+    connection_epoch: str | None
+    ack: bool
+    ack_id: MessageId | None
+
+
+def message_header(connection_epoch: str | None) -> MessageHeader:
+    """Construct fresh delivery metadata without supplying defaults to the wire parser."""
+    return {
+        "protocol_version": PROTOCOL_VERSION,
+        "message_id": uuid4().hex,
+        "connection_epoch": connection_epoch,
+        "ack": False,
+        "ack_id": None,
+    }
+
+
+class CallHeader(TypedDict):
+    type: Literal["tool_call"]
+    message_id: MessageId
+    reply_to: None
+
+
+def call_header(message_id: MessageId | None = None) -> CallHeader:
+    """Construct an invocation header, retaining a stable identity when replaying."""
+    return {"type": "tool_call", "message_id": message_id or uuid4().hex, "reply_to": None}
+
+
+class ResultHeader(TypedDict):
+    type: Literal["tool_result"]
+    message_id: MessageId
+    reply_to: MessageId
+
+
+def result_header(reply_to: MessageId, message_id: MessageId | None = None) -> ResultHeader:
+    """Correlate a result to its invocation rather than the containing message."""
+    return {
+        "type": "tool_result",
+        "message_id": message_id or uuid4().hex,
+        "reply_to": reply_to,
+    }

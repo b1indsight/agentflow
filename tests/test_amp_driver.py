@@ -5,7 +5,6 @@ import json
 import os
 import sys
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 
 import pytest
 from pydantic import SecretStr
@@ -17,21 +16,30 @@ from app.worker.execution.amp_process import AmpProcessResult, amp_environment, 
 THREAD = "T-01a15d70-eb3d-722c-9f6d-563dd65eb0a8"
 
 
-def stream(*, result=None, session=THREAD, **overrides):
+def stream(*, result=None, session=THREAD, tools=None, **overrides):
     final = {"type": "result", "subtype": "success", "is_error": False,
              "session_id": session, "result": result or '{"caller_owned":true}'} | overrides
     return "\n".join(json.dumps(event, ensure_ascii=False) for event in [
-        {"type": "system", "subtype": "init", "session_id": THREAD, "tools": ["shell_command"]}, final,
+        {"type": "system", "subtype": "init", "session_id": THREAD,
+         "tools": ["shell_command"] if tools is None else tools}, final,
     ]).encode()
 
 
 @pytest.mark.parametrize("resume", [False, True])
 async def test_amp_uses_current_capabilities_and_raw_caller_schema(monkeypatch, tmp_path, resume):
+    # Native workspace/user config and custom MCP credentials must survive every round.
+    settings = tmp_path / ".amp" / "settings.jsonc"
+    settings.parent.mkdir()
+    native_settings = '{// repository policy\n"amp.mcpPermissions":[]}'
+    settings.write_text(native_settings)
+    monkeypatch.setenv("AMP_SETTINGS_FILE", str(tmp_path / "user.jsonc"))
+    monkeypatch.setenv("EXAMPLE_MCP_TOKEN", "custom-mcp-token")
+    monkeypatch.setenv("FLOWTOOL_MCP_TOKEN", "stale-broker-token")
     schema = tmp_path / "schema.json"
     schema.write_text('{"type":"object","required":["caller_owned"]}')
     context = CodingExecutionContext(
         github=GitHubCapability(SecretStr("bot-secret"), "owner/repo",
-                                datetime.now(UTC) + timedelta(minutes=5)),
+                                datetime.now(UTC) + timedelta(minutes=5), "flowtool[bot]", 7654321),
         mcp_url=None if resume else "http://127.0.0.1:12345/mcp",
         mcp_token=None if resume else SecretStr("broker-secret"),
     )
@@ -47,18 +55,23 @@ async def test_amp_uses_current_capabilities_and_raw_caller_schema(monkeypatch, 
         assert "bot-secret" not in " ".join(args) and "broker-secret" not in input_text
         assert "caller_owned" in input_text and "task" in input_text
         assert env["GH_TOKEN"] == env["FLOWTOOL_PUSH_TOKEN"] == "bot-secret"
-        settings = json.loads(Path(args[args.index("--settings-file") + 1]).read_text())
-        assert "async_shell_command" in settings["amp.tools.enable"]
-        broker = settings["amp.mcpServers"]["flow"]
+        assert env["EXAMPLE_MCP_TOKEN"] == "custom-mcp-token"
+        assert env["AMP_SETTINGS_FILE"] == str(tmp_path / "user.jsonc")
+        assert "--settings-file" not in args
+        servers = json.loads(args[args.index("--mcp-config") + 1])
+        assert set(servers) == {"flow"}
+        broker = servers["flow"]
         if resume:
             assert args[:3] == ["threads", "continue", THREAD]
-            assert broker["disabled"] is True
+            assert broker == {"url": "http://127.0.0.1:0/mcp"}
             assert "FLOWTOOL_MCP_TOKEN" not in env
         else:
             assert broker["url"] == context.mcp_url
             assert broker["headers"]["Authorization"] == "Bearer ${FLOWTOOL_MCP_TOKEN}"
             assert env["FLOWTOOL_MCP_TOKEN"] == "broker-secret"
-        return AmpProcessResult(stream(result='{"caller_owned":"bot-secret"}'), b"", 0)
+        return AmpProcessResult(stream(result='{"caller_owned":"bot-secret"}', tools=[
+            "shell_command", "skill", "tool_search", "code_exec", "mcp__example__lookup",
+        ]), b"", 0)
 
     monkeypatch.setattr("app.worker.execution.amp_agent.github_environment", github)
     monkeypatch.setattr("app.worker.execution.amp_agent.run_amp", execute)
@@ -67,6 +80,7 @@ async def test_amp_uses_current_capabilities_and_raw_caller_schema(monkeypatch, 
               if resume else await agent.start("task", tmp_path, output_schema=schema, context=context))
     assert result.session_id == THREAD and result.exit_code == 0
     assert result.last_message == '{"caller_owned":"[REDACTED]"}'
+    assert settings.read_text() == native_settings
     assert all(not directory.exists() for directory in directories)
 
 
@@ -121,6 +135,7 @@ async def test_final_answer_keeps_text_that_exceeds_json_decoder_limits(monkeypa
     (stream() + b'\n{"type":"result"}', 0),
     (b'{"type":"assistant"}\n', 0),
     (b'not json\n' + stream(), 0),
+    (stream(tools=["skill", "mcp__example__lookup"]), 0),
     (stream(), 1),
 ])
 async def test_incomplete_or_failed_execution_never_succeeds(monkeypatch, tmp_path, stdout, exit_code):
@@ -156,45 +171,36 @@ async def test_unproven_missing_thread_does_not_trigger_replay(monkeypatch, tmp_
         await AmpCodingAgent().start("task", tmp_path)
 
 
-async def test_workspace_settings_cannot_override_invocation_policy(tmp_path, monkeypatch):
-    # Amp loads workspace settings after --settings-file, including MCP policy.
-    settings = tmp_path / ".amp" / "settings.jsonc"
-    settings.parent.mkdir()
-    settings.write_text('{"amp.mcpPermissions":[]}')
-
-    async def execute(*args, **kwargs):
-        pytest.fail("conflicting settings must be rejected before starting Amp")
-
-    monkeypatch.setattr("app.worker.execution.amp_agent.run_amp", execute)
-    with pytest.raises(ValueError, match="workspace Amp settings"):
-        await AmpCodingAgent(trusted_host=True).start("task", tmp_path)
-    assert settings.read_text() == '{"amp.mcpPermissions":[]}'
-
-
 def test_environment_keeps_amp_login_but_excludes_ambient_credentials():
     environment = amp_environment({"HOME": "/worker", "AMP_API_KEY": "amp-secret",
                                    "PATH": "/usr/bin", "GIT_AUTHOR_NAME": "bot",
                                    "FLOWTOOL_WORKER_TOKEN": "worker-secret",
                                    "GH_TOKEN": "personal", "OPENAI_API_KEY": "other",
-                                   "AMP_URL": "https://untrusted.example"})
+                                   "AMP_URL": "https://amp.example",
+                                   "GIT_CONFIG_PARAMETERS": "personal-credentials",
+                                   "SSH_AUTH_SOCK": "/personal/ssh-agent",
+                                   "AMP_CURRENT_THREAD_ID": "parent-thread"})
     assert environment["HOME"] == "/worker" and environment["AMP_API_KEY"] == "amp-secret"
-    assert environment["GIT_AUTHOR_NAME"] == "bot"
-    assert not {"GH_TOKEN", "OPENAI_API_KEY", "AMP_URL", "FLOWTOOL_WORKER_TOKEN"} & environment.keys()
+    assert "GIT_AUTHOR_NAME" not in environment  # Workspace Git config owns commit identity.
+    assert environment["OPENAI_API_KEY"] == "other" and environment["AMP_URL"] == "https://amp.example"
+    assert not {"GH_TOKEN", "FLOWTOOL_WORKER_TOKEN", "GIT_CONFIG_PARAMETERS",
+                "SSH_AUTH_SOCK", "AMP_CURRENT_THREAD_ID"} & environment.keys()
 
 
 async def test_process_supervisor_drains_both_pipes_and_bounds_output(monkeypatch, tmp_path):
     monkeypatch.setattr("app.worker.execution.amp_process.AMP_BIN", sys.executable)
     result = await run_amp(["-c", "import os; os.write(1,b'o'*131072); os.write(2,b'e'*131072)"],
-                           cwd=tmp_path, max_stdout=262144)
+                           cwd=tmp_path, max_stdout=262144, timeout_kind="idle")
     assert result.exit_code == 0 and len(result.stdout) == len(result.stderr) == 131072
     result = await run_amp(["-c", "import os,time; os.write(2,b'e'*262144); time.sleep(20)"],
-                           cwd=tmp_path, max_stdout=1024)
-    assert result.overflow and len(result.stderr) <= 1024
+                           cwd=tmp_path, max_stdout=1024, timeout_kind="idle")
+    assert result.overflow and not result.timed_out and len(result.stderr) <= 1024
 
 
 @pytest.mark.parametrize("cancel", [False, True])
 async def test_supervisor_cleans_separate_child_group_before_returning(monkeypatch, tmp_path, cancel):
     # Native Amp shells use their own PGID; killing just the CLI group leaks them.
+    existing = asyncio.all_tasks()
     monkeypatch.setattr("app.worker.execution.amp_process.AMP_BIN", sys.executable)
     monkeypatch.setattr("app.worker.execution.amp_process.TERMINATION_GRACE", 0.1)
     pidfile = tmp_path / "child.pid"
@@ -205,7 +211,7 @@ child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],
 pathlib.Path({str(pidfile)!r}).write_text(str(child.pid))
 time.sleep(60)
 """
-    task = asyncio.create_task(run_amp(["-c", code], cwd=tmp_path, timeout=0.8))
+    task = asyncio.create_task(run_amp(["-c", code], cwd=tmp_path, timeout=0.8, timeout_kind="idle"))
     for _ in range(100):
         if pidfile.exists():
             break
@@ -228,6 +234,7 @@ time.sleep(60)
             await asyncio.sleep(0.01)
         else:
             pytest.fail("separate child group survived supervisor")
+        assert not asyncio.all_tasks() - existing
     finally:
         try:
             os.killpg(child, 9)

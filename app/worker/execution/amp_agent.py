@@ -12,12 +12,10 @@ from pydantic import BaseModel, ConfigDict, StrictBool, StrictStr, TypeAdapter, 
 from app.contracts.conversation import SessionId
 from app.domain.models import CodingExecutionContext, CodingExecutionResult
 from app.worker.execution.amp_process import (
-    AMP_TOOLS,
     AmpProcessResult,
     amp_environment,
     redact_amp_text,
     run_amp,
-    write_amp_settings,
 )
 from app.worker.execution.gh import github_environment
 
@@ -39,23 +37,10 @@ class _Result(BaseModel):
     error: StrictStr = ""
 
 
-def _workspace_settings(cwd: Path) -> None:
-    """Refuse repository settings that take precedence over our invocation policy.
-
-    Managed Amp policy still belongs to the operator. CLI settings/tool lists do
-    not isolate a full-access agent from its account, filesystem or network.
-    """
-    for directory in (cwd, *cwd.parents):
-        if any((directory / ".amp" / name).exists() or (directory / ".amp" / name).is_symlink()
-               for name in ("settings.json", "settings.jsonc")):
-            raise ValueError("workspace Amp settings override worker policy; use an isolated worker workspace")
-        if (directory / ".git").exists():
-            break
-
-
-def _outcome(process: AmpProcessResult, expected: str | None) -> CodingExecutionResult:
+def _outcome(process: AmpProcessResult, expected: str | None, timeout: float) -> CodingExecutionResult:
     """Only an intact matching init/final pair can carry a successful final answer."""
     session_id = expected
+    timeout_detail = f"Amp: no new stdout/stderr for {timeout:g}s; execution timed out"
     try:
         init: _Init | None = None
         final: _Result | None = None
@@ -75,8 +60,6 @@ def _outcome(process: AmpProcessResult, expected: str | None) -> CodingExecution
                 if not init.session_id.startswith("T-") or (expected and init.session_id != expected):
                     raise ValueError("Amp returned a different thread")
                 session_id = init.session_id
-                if not set(init.tools) <= AMP_TOOLS | {"mcp__flow__open_pr"}:
-                    raise ValueError("Amp effective tool set exceeds worker policy")
                 if "shell_command" not in init.tools:
                     raise ValueError("Amp thread has no native shell; cannot execute coding tasks")
             elif kind == "result":
@@ -86,7 +69,7 @@ def _outcome(process: AmpProcessResult, expected: str | None) -> CodingExecution
         if init is None or final is None or final.session_id != session_id:
             raise ValueError("incomplete or mismatched Amp result")
         if process.timed_out:
-            raise ValueError("Amp execution timed out")
+            raise ValueError(timeout_detail)
         if process.overflow:
             raise ValueError("Amp execution output exceeded byte limit")
         if process.exit_code or final.is_error or final.subtype != "success":
@@ -99,23 +82,26 @@ def _outcome(process: AmpProcessResult, expected: str | None) -> CodingExecution
         return CodingExecutionResult(session_id=session_id, last_message=final.result, exit_code=0)
     except (ValueError, ValidationError, UnicodeDecodeError) as error:
         # Do not expose validation inputs or raw JSON: they may contain thinking or credentials.
-        detail = ("Amp execution timed out" if process.timed_out else
+        detail = (timeout_detail if process.timed_out else
                   "Amp execution output exceeded byte limit" if process.overflow else
                   str(error) if type(error) is ValueError else "invalid Amp event stream")
-        if init is None and process.stderr.strip():
+        if init is None and not process.timed_out and process.stderr.strip():
             detail += ": " + process.stderr.decode(errors="replace").strip()
         return CodingExecutionResult(
             session_id=session_id, last_message="", exit_code=124 if process.timed_out else process.exit_code or 1,
             failure_detail=detail,
+            failure_kind="timeout" if process.timed_out else "output_limit" if process.overflow else None,
         )
 
 
 class AmpCodingAgent:
     """Adapt coding requests to Amp threads; executor retains schema and VCS authority."""
 
-    def __init__(self, *, trusted_host: bool = False, timeout: float = 1200.0):
+    def __init__(self, *, trusted_host: bool = False, timeout: float = 1200.0,
+                 max_output_bytes: int = 8 * 1024 * 1024):
         self.trusted_host = trusted_host
         self.timeout = timeout
+        self.max_output_bytes = max_output_bytes
 
     async def start(
         self, task: str, cwd: Path, *, output_schema: Path | None = None,
@@ -142,27 +128,33 @@ class AmpCodingAgent:
     ) -> CodingExecutionResult:
         if not self.trusted_host:
             raise RuntimeError("Amp trusted-host execution requires FLOWTOOL_TRUSTED_HOST_EXECUTION=true")
-        _workspace_settings(cwd)
         url = context.mcp_url if context else None
         token = context.mcp_token if context else None
         if (url is None) != (token is None):
             raise ValueError("worker MCP requires an endpoint and scoped token together")
+        # The pinned CLI has no per-server disabled flag. Port zero replaces any
+        # saved/user flow endpoint without exposing an old broker or its token.
+        mcp = {"flow": ({"url": url, "headers": {"Authorization": "Bearer ${FLOWTOOL_MCP_TOKEN}"}}
+                        if url is not None else {"url": "http://127.0.0.1:0/mcp"})}
         if output_schema is not None:
             prompt += ("\n\nReturn exactly one JSON value matching this JSON Schema as your final answer. "
                        "Do not wrap it in Markdown or add explanatory text.\n" + output_schema.read_text())
         with tempfile.TemporaryDirectory(prefix="flowtool-amp-") as directory:
             run_directory = Path(directory)
-            settings = write_amp_settings(run_directory, mcp_url=url)
             environment = amp_environment(context=context)
             if context and context.github:
                 environment.update(github_environment(context.github, run_directory, environment))
             args = (["threads", "continue", session_id] if session_id else []) + [
-                "--settings-file", str(settings), "--executor", "local", "--mode", "low",
+                "--mcp-config", json.dumps(mcp), "--executor", "local", "--mode", "low",
                 "--visibility", "private", "--no-ide", "--no-notifications",
                 "--execute", "--stream-json", "--no-archive-after-execute", "--log-file", os.devnull,
             ]
-            process = await run_amp(args, cwd=cwd, env=environment, input_text=prompt, timeout=self.timeout)
-            result = _outcome(process, session_id)
+            process = await run_amp(args, cwd=cwd, env=environment, input_text=prompt,
+                                    timeout=self.timeout, timeout_kind="idle")
+            result = _outcome(process, session_id, self.timeout)
+            if len(result.last_message.encode()) > self.max_output_bytes:
+                return CodingExecutionResult(session_id=result.session_id, last_message="", exit_code=1,
+                    failure_detail="Amp final answer exceeded byte limit", failure_kind="output_limit")
             # No SessionUnavailable fallback: the observed CLI stderr alone has not
             # proven that every missing-thread rejection precedes all execution.
             secrets = [value for key, value in environment.items()

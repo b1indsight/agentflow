@@ -5,7 +5,16 @@
 
 ## 当前计划
 
-- [`worker-file-links.md`](worker-file-links.md) — worker 本地文件登记与 owner 文件 API：路径留在 worker，通过持久随机句柄和认证 WebSocket 按需读取；边界与验证见记录。
+- [`worker-file-links.md`](worker-file-links.md) — worker 本地文件登记与 owner 文件 API：路径留在 worker，通过持久随机句柄和认证 Session 按需读取；PR #146 合并适配与验证见记录。
+
+- [`judge-feedback-tasks.md`](judge-feedback-tasks.md) — answer/revise 共用 worker 任务，answer 仅约束调用指令、本地提交和 PR head；上下文按反馈相关性选择。实现、真实 PostgreSQL 全量回归、静态检查、打包和两项简化对照完成；正在审查并准备 PR，wire22 须协调升级，未部署。
+
+- [`flow-task-input.md`](flow-task-input.md) — 本地实现与验证完成：Issue 可选；顶栏“新建 Flow”选择代码仓库并输入内容，原文用于首轮/修订/审核；API/CLI、PR 闭环、旧 context 摘要与安全恢复保留。隔离 PostgreSQL、真实跨进程调度、浏览器桌面/手机、静态检查、打包及简化对照通过；wire21 须成组升级，未提交、未推送、未部署。
+
+- [`worker-workspace-concurrency.md`](worker-workspace-concurrency.md) — 已在本地实现，全量 PostgreSQL 回归、静态检查与构建通过。
+  workers 使用 worker/workspace 复合主键；worker 管理目录并按需求登记库存，调度直接选择位置，
+  runtime 持有执行集合，默认无仓库 workspace 供推理。限额 2/3/17 的真实 Session 并发及五项简化对照通过；
+  旧数据库物理身份迁移仍是部署前置条件。按要求通过审查门禁后交付独立 PR，未部署。
 
 - [`server-auto-update.md`](server-auto-update.md) — PR #104：独立验签 Webhook、本地文件队列和同镜像幂等部署已实现；Worker `--update` 在原 uv Git 安装中更新并核验后退出。保留删列与普通停启，不新建环境；951 项回归及五项简化对照通过，真实接入待验收，审查及交付状态见 PR。
 

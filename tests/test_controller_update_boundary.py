@@ -1,36 +1,28 @@
 """Ordinary Controller replacement preserves the Worker executor and journal."""
 
 import asyncio
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from app.contracts.protocol import (
-    Assignment,
-    FlowToolResponse,
-    InitialTask,
-    InitialTaskResult,
-)
-from app.controler.workers.conversation import ConversationBroker
-from app.controler.workers.gateway import WorkerGateway
-from app.controler.workflow.coordinator import JobCoordinator
-from app.controler.workflow.results import ResultApplication
-from app.controler.workflow.tools import FlowToolService
-from app.domain.delivery_models import PreparedDelivery
-from app.domain.models import JobState, VcsKind, VcsOutcome
-from app.worker.state.session import WorkerSession
-from app.worker.transport.client import WorkerClient
-from tests.test_worker_connection import Socket
+from app.controler.workers.transport import serve_worker
+from app.domain.models import JobState
+from tests.test_communication_session import Socket
+from tests.test_remote_e2e import remote_flow as remote_flow  # noqa: PLC0414
+from tests.test_workspace_dispatch import wait_until
+from tests.worker_fixtures import run_worker
 
 
 class DuplexSocket(Socket):
     def __init__(self):
         super().__init__()
-        self.headers = {"x-flowtool-worker-id": "w", "authorization": "Bearer test"}
+        self.headers = {"x-flowtool-worker-id": "worker-1", "authorization": "Bearer worker-secret"}
+
+    async def accept(self):
+        pass
 
     async def close(self, code=1000):
         await super().close(code)
+        await self.incoming.put(ConnectionError(f"worker closed: {code}"))
         await self.sent.put(ConnectionError(f"controller closed: {code}"))
 
     async def send(self, raw):
@@ -40,132 +32,71 @@ class DuplexSocket(Socket):
         message = await self.sent.get()
         if isinstance(message, Exception):
             raise message
-        return message.model_dump_json()
+        return message
 
 
-def scenario(store):
-    flow = store.flows.create_flow("owner/repo", 1, 1)
-    attempt = store.flows.create_attempt(flow.id)
-    job = store.jobs.enqueue_job(flow.id, "initial")
-    started = asyncio.Event()
-
-    async def prepare(job, worker, token, epoch):
-        return Assignment(
-            job_id=job.id,
-            flow_id=flow.id,
-            assignment_token=token,
-            connection_epoch=epoch,
-            task=InitialTask(
-                flow_id=flow.id,
-                attempt_id=attempt.id,
-                repo="owner/repo",
-                issue_number=1,
-                issue_title="Test",
-                issue_body="",
-                branch="flow/1",
-            ),
-        )
-
-    async def apply(job_id):
-        assert store.jobs.complete_persisted_result(job_id, JobState.DONE)
-        return JobState.DONE
-
-    async def tool(message, *, worker_id):
-        return FlowToolResponse(
-            call_id=message.call_id, result=PreparedDelivery(head_sha="abc", delivery_version=1)
-        )
-
-    coordinator = Mock(
-        spec=JobCoordinator,
-        prepare_for_assignment=AsyncMock(side_effect=prepare),
-        mark_started=Mock(side_effect=lambda *args: started.set()),
-    )
-    tools = Mock(spec=FlowToolService, execute=AsyncMock(side_effect=tool))
-    results = Mock(spec=ResultApplication, apply=AsyncMock(side_effect=apply))
-
-    def gateway():
-        return WorkerGateway(
-            coordinator,
-            database=store.database,
-            worker_tokens={"w": "test"},
-            heartbeat_interval=60,
-            poll_interval=0.01,
-            tools=tools,
-            results=results,
-            conversations=ConversationBroker(),
-        )
-
-    return SimpleNamespace(job=job, started=started, gateway=gateway, tools=tools, results=results)
-
-
-async def test_running_worker_reconnects_to_new_controller_and_finishes_once(store, tmp_path):
+async def test_running_worker_reconnects_to_new_controller_and_finishes_once(
+    store, remote_flow, server_runtime, monkeypatch,
+):
     # Normal disconnect must not cancel the executor. Tools and terminal journal
     # replay on the new connection without a deployment pause or second execution.
-    case = scenario(store)
-    proceed = asyncio.Event()
+    flow, original, github, client, agent = remote_flow
+    job, = store.jobs.list_jobs(flow.id)
+    started, proceed = asyncio.Event(), asyncio.Event()
     invocations = []
+    start = agent.start
 
-    class Executor:
-        async def execute(self, task, secret=None, *, tool_caller):
-            invocations.append(task)
-            await proceed.wait()
-            await tool_caller.call_tool(
-                "flow.open_pr",
-                {},
-                call_id="same-call",
-                vcs_outcome=VcsOutcome(
-                    backend=VcsKind.GIT, branch="flow/1", commit_sha="abc", remote_sha="abc"
-                ),
-            )
-            return InitialTaskResult(session_id="same-session", last_message="done", exit_code=0)
+    async def paused(*args, **kwargs):
+        invocations.append(args[0])
+        started.set()
+        await proceed.wait()
+        return await start(*args, **kwargs)
 
-    session = WorkerSession(tmp_path)
-    client = WorkerClient(
-        worker_id="w",
-        worker_token="test",
-        serve_ws_url="ws://unused",
-        executor=Executor(),
-        session=session,
-    )
+    monkeypatch.setattr(agent, "start", paused)
     tasks = []
     try:
         old = DuplexSocket()
-        server = asyncio.create_task(case.gateway().handle(old))
-        worker = asyncio.create_task(client.run_connection(old))
+        server = asyncio.create_task(
+            serve_worker(old, worker_tokens=original.worker_tokens, serve=original.serve_worker_session)
+        )
+        worker = asyncio.create_task(run_worker(client, old))
         tasks.extend([server, worker])
-        await asyncio.wait_for(case.started.wait(), 2)
-        async with asyncio.timeout(2):
-            while not invocations:
-                await asyncio.sleep(0)
-        execution = client._execution
+        await asyncio.wait_for(started.wait(), 5)
+        owner = client.executions[flow.id]
+        session = owner.state
         await old.close(code=1001)
         with pytest.raises(ConnectionError, match="1001"):
             await asyncio.wait_for(worker, 2)
         await asyncio.wait_for(server, 2)
-        assert execution is not None and not execution.done()
-        assert case.tools.execute.await_count == case.results.apply.await_count == 0
-        assert store.jobs.get_job(case.job.id).state == "running"
+        assert owner.lease() is not None
+        assert github.opened == []
+        assert store.jobs.get_job(job.id).state is JobState.RUNNING
+        assert store.jobs.get_job(job.id).result_received_at is None
 
-        proceed.set()
-        store.workers.recover_abandoned_assignments()
+        replacement = server_runtime(github=github)
+        replacement.workers.recover_abandoned_assignments()
         new = DuplexSocket()
         tasks.extend(
             [
-                asyncio.create_task(case.gateway().handle(new)),
-                asyncio.create_task(client.run_connection(new)),
+                asyncio.create_task(
+                    serve_worker(new, worker_tokens=replacement.worker_tokens, serve=replacement.serve_worker_session)
+                ),
+                asyncio.create_task(run_worker(client, new)),
             ]
         )
-        async with asyncio.timeout(2):
-            while not session.load().acknowledged:
-                await asyncio.sleep(0)
+        proceed.set()
+        await wait_until(lambda: session.load().acknowledged)
         assert len(invocations) == 1
-        assert execution.done() and not execution.cancelled()
-        assert store.jobs.get_job(case.job.id).state == "done"
-        assert case.results.apply.await_count == 1
-        assert case.tools.execute.await_count == 1
-        assert store.workers.get_flow_execution(case.job.flow_id).released_at is None
+        assert owner.lease() is None
+        assert store.jobs.get_job(job.id).state is JobState.DONE
+        assert github.opened == [flow.initial_branch]
+        receipt = session.load().terminal.result.delivery_receipt
+        assert receipt.status == "prepared"
+        assert receipt.head_sha == store.deliveries.get_delivery(flow.id).head_sha
+        assert store.workers.get_flow_execution(flow.id).released_at is None
     finally:
+        proceed.set()
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        await client._cancel_execution()
+        await asyncio.gather(*(execution.shutdown() for execution in client.executions.values()))

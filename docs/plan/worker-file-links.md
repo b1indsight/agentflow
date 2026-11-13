@@ -10,16 +10,16 @@
 
 ## 使用
 
-在运行中的 `WorkerRuntime` 所在事件循环调用：
+在已完成连接注册的 `WorkerRuntime` 所在事件循环调用；不要在 Session 的串行回调内等待此方法：
 
 ```python
 from pathlib import Path
 
-link = await runtime.client.register_file(Path("/path/to/report.txt"))
+link = await runtime.register_file(Path("/path/to/report.txt"))
 # /api/files/0123456789abcdef0123456789abcdef
 ```
 
-- `WorkerClient.register_file(path: Path) -> str` 返回 **server-relative URL**；用 server 的 HTTP(S) origin 解析。连接未就绪或已断开时抛出 `FileFailure("worker_unavailable")`。
+- `WorkerRuntime.register_file(path: Path) -> str` 返回 **server-relative URL**；用 server 的 HTTP(S) origin 解析。连接未就绪或已断开时抛出 `FileFailure("worker_unavailable")`。
 - 相对本地路径按 worker 进程当前目录解析；登记时解析符号链接，固定解析后的路径和设备/inode。同一身份重复登记或响应丢失后重试返回同一链接。
 - `GET /api/files/{link_id}` 在 owner 鉴权成功后读取原 worker；成功返回原始字节，包含空文件及二进制文件。后续 UI 可使用 `fetch` 消费内容。
 - 响应固定为 `application/octet-stream`、`Content-Disposition: attachment`，并带 `no-store`、`nosniff`、`no-referrer` 和 sandbox CSP。HTML/SVG 等内容不在服务端 origin 执行。
@@ -29,9 +29,9 @@ link = await runtime.client.register_file(Path("/path/to/report.txt"))
 
 - `app/worker/state/file_links.py`：`LocalFileLinks.register(path) -> str` 与 `read(handle) -> bytes`。`file-links.json` 位于 worker root，以 0600 原子写入，沿用 worker root 独占锁。每个随机句柄对应 `LocalFile(path: Path, device: int, inode: int)`。线程锁串行化注册表更新。
 - `app/persistence/file_links.py`：`FileLinkStore.register(worker_id, file_id) -> FileLink` 以 `(worker_id, file_id)` 唯一键幂等登记；`get(link_id) -> FileLink | None` 查询路由。`FileLink` 只有 `link_id`、`worker_id`、`file_id` 三个字符串字段。数据库不保存路径、文件名、正文。
-- `app/contracts/protocol.py`：`FileRegister` 携带文件句柄，`FileRegistered` 返回链接或错误；`FileQuery` 请求句柄，`FileResult` 返回 base64 字节或错误。四种消息都以 `request_id` 和 `connection_epoch` 关联。
-- `app/controler/workers/files.py`：`FileService` 保存在线连接和临时查询；登记身份来自已认证连接，读取响应必须匹配具体连接、epoch 和请求 ID。未知、旧连接和其他 worker 的回复不能完成查询。
-- `WorkerConnection` 在独立有界任务里登记，立即分派读取结果；`WorkerClient` 独立处理登记回执和读取任务。慢登记或文件读取不占用任务执行消息队列。
+- `app/contracts/protocol.py`：`FileRegister`/`FileRegistered` 使用 `server.file_register`，`FileQuery`/`FileResult` 使用 `worker.file_read`，携带随机句柄、链接、base64 字节或固定错误。它们是统一协议的 typed call/result，以 `message_id`/`reply_to` 关联，epoch 位于顶层信封。
+- `app/controler/workers/files.py`：`FileService` 从共享 Gateway 选择原 worker 的 Session，使用 `request_reply` 等待回复，不再自管连接或关联表。连接回调核验 epoch，Dispatcher 关联请求；未知、旧连接和其他 worker 的回复不能完成查询。
+- `ServerFileCallbacks` 和 `WorkerFileCallbacks` 各自持有有界 IO 任务，完成后唤醒串行 driver 发送结果，不占用执行/推理的 watch 槽。慢登记或文件读取不阻塞执行消息；其他串行业务回调仍可能延迟文件回复。超时/取消后的迟到回复被忽略，不断开健康连接。
 
 ## 边界与错误
 
@@ -47,11 +47,13 @@ link = await runtime.client.register_file(Path("/path/to/report.txt"))
 
 ## 协议与部署
 
-本次使用 **wire v17**，避免与仓库文档中已废弃的 Amp v16 快照复用版本号。两端必须同时使用当前协议；v15/v16 均拒绝。journal 仍为 v4，workspace manifest 仍为 v1；完整 schema 新增 `worker_file_links` 表，遵守现有开发期无历史迁移策略。
+合并当前 main 后使用 **wire v25**，两端必须同时升级，旧 wire v17/v24 不在线互通。保留 main 的 journal v5、执行 ResultInbox v1 / Control 通知 inbox v2 和 workspace manifest v3；新增 `worker_file_links` 表。main 的 worker/workspace 复合主键不允许文件表继续引用单独的 worker_id，因此文件路由保存已认证的逻辑 worker ID，不绑定可回收的 workspace 行。既有数据库与 journal 的升级限制仍见[升级说明](../operations/upgrade.md)。
 
 ## 实施与验证记录
 
 ### 001 — 文件链接登记和按需读取
+
+最初实现使用 `WorkerClient.register_file` 和 wire v17（journal v4、manifest v1）；下述 003 记录合并 main 后的接口与通信变更。
 
 已实现上述接口、持久映射、身份校验、读取限额及 owner HTTP 路由。选择服务端返回相对链接以避免增加 public-origin 配置；选择两端保存映射以避免把路径交给 server。与直接让 HTTP 传入路径相比，worker 仅能返回已登记身份；与保存文件副本相比，查询得到 worker 当前内容，但需要 worker 在线。
 
@@ -65,3 +67,18 @@ link = await runtime.client.register_file(Path("/path/to/report.txt"))
 - 在临时 Python 进程中替换 `file_links._read`，仅移除 `expected` 身份比较后运行 `test_links_reject_file_substitution_and_growth`，测试因替换文件被接受而失败；正常实现通过，因此保留身份检查。
 - 临时替换 `FileService.accept`，将回复强制视为 pending 请求的连接/epoch 后运行 `test_file_routing_isolates_worker_identity_and_connection_epoch`。首次对照发现测试中伪造与合法回复均为空，不能识别误接收；改用不同内容后，对照返回 `b"forged"` 而失败，正常实现通过，因此保留连接与 epoch 检查。
 - 所有对照仅修改该进程内对象，未改动产品源文件；最终针对性测试、Ruff、Mypy 再次通过。
+
+### 003 — PR #146 合并 main 与调用位置核查
+
+针对反馈 item 1/version 1/comment 5888832200，以保留原提交为第一父节点的 merge 方式整合 main。保留 main 的统一 Session/Gateway、并发执行、推理和 workspace 模型；删除 main 已淘汰的 WorkerClient、WorkerConnection、WorkerGateway，将文件登记入口移到 WorkerRuntime。只复用通信层的请求生命周期，不再保留旧协议连接表和回复分派。两端有界 IO 任务避免慢数据库/文件读取阻塞串行消息处理，迟到文件回复不会被当成执行协议错误。
+
+针对 item 2/version 1/comment 4561730074，`ServerRuntime.files` 有实际生产调用：`app/controler/api.py` 的 `file_content` 路由执行 `runtime.files.read(link_id)`，即 `GET /api/files/{link_id}`。合并后的 runtime 直接构造 `FileService(self.gateway, database=database)`；`serve_worker_session` 还将其 `.store` 交给连接级登记回调。保留该属性，未将提问解释为删除要求。
+
+文件集成测试已改用正常构造的 ServerRuntime/WorkerRuntime、真实 PostgreSQL 和共享 Session。覆盖 idle/busy 登记读取、对象重建、owner HTTP 路由、陈旧 epoch 注册拒绝，以及慢 IO 期间执行仍能完成、取消/超时后的迟到回复不破坏连接。
+
+合并后的验证结果：
+
+- 全量 PostgreSQL pytest 通过；Git 参数组合下不适用的 jj 元数据保留用例按现有条件跳过。最终文件/通信/协议/HTTP 专项测试、Ruff、Mypy、CLI help、前端格式/单测/构建和 sdist/wheel 构建通过，wheel 包含 console 与新增文件传输模块。
+- 前端与 main 逐字节一致。Playwright 首次四 worker 并行运行时，`large activity stays windowed` 的滚动位置断言失败；降低到单 worker 后该用例及完整套件均通过。未改断言或 UI，具体时序原因未确认。
+- 使用合并后代码重新执行本机 Uvicorn、真实 WebSocket、HTTP 与 PostgreSQL 验证，512 KiB 二进制逐字节一致，无 owner assertion 返回 401，链接和响应头无文件名。未执行公网部署验收。
+- 临时进程将 server 登记改为直接等待 IO，慢登记期间执行确认超时；恢复当前实现后相同测试通过。另一个临时进程恢复“拒绝迟到 FileRegistered”的行为，取消后的登记回复触发 WorkerProtocolError；当前实现通过。这两个对照支持保留后台 IO 与迟到回复处理，未改产品文件，临时测试脚本已删除。
