@@ -10,9 +10,11 @@ from app.contracts.result_models import (
     ResultPlan,
 )
 from app.controler.review.resolution import covered_thread
+from app.controler.workflow.revisions import frozen_revision
 from app.domain.models import TERMINAL_STATES, ReviewItemKind
 from app.github import GitHubError, PullRequest, Repository, ReviewThread, ReviewThreads
 from app.persistence.database import Database
+from app.persistence.jobs import JobStore
 from app.persistence.reviews import ReviewStore
 
 
@@ -30,20 +32,22 @@ def observe(
         reviews_tx.observe_threads(flow.id, snapshot, reviews_tx.get_batch(plan.batch_id).feedback)
 
 
-async def revision_current(repo: Repository, plan: ResultPlan, number: int) -> bool:
+async def revision_current(repo: Repository, plan: ResultPlan, number: int, *, jobs: JobStore) -> bool:
     if plan.revision is None or plan.delivery is None:
         return False
+    job = jobs.get_job(plan.job_id)
+    if job is None:
+        return False
+    task = frozen_revision(job)
     effect = plan.effects[0]
     # Revision authorization retains the first frozen effect's identity, even on recovery.
     target = repo.installation.app.installation(effect.installation_id).repository(effect.repo)
     current = await target.fetch_pull_request(number)
-    if plan.revision_purpose == "answer":
-        return (current.number == number and current.state == "open" and not current.merged
-                and current.head_sha == plan.delivery.head_sha)
-    return (current.number == number and current.state == "open" and not current.merged
-            and current.head_sha == plan.revision.commit_sha
-            and current.head_branch == plan.delivery.branch
-            and current.base_branch == plan.delivery.base_branch
+    head = task.expected_head_sha if plan.revision_purpose == "answer" else plan.revision.commit_sha
+    return (current.repo == effect.repo and current.number == task.pr_number == number
+            and current.state == "open" and not current.merged and current.head_sha == head
+            and current.head_branch == task.branch
+            and current.base_branch == task.base_branch
             and current.head_repository == effect.repo)
 
 
@@ -94,7 +98,7 @@ async def resolve_thread(
     elif not any(r.effect_key == effect.reply_key and r.receipt is not None
                  and r.receipt.comment_id is not None and not r.receipt.pending_reason for r in records):
         reason = "线程处理说明尚未确认发送"
-    elif not await revision_current(repo, plan, effect.number):
+    elif not await revision_current(repo, plan, effect.number, jobs=JobStore(database)):
         reason = "PR 已关闭或 head 已变化"
     if reason:
         return receipt.model_copy(update={"pending_reason": f"{effect.thread_id}：{reason}"})

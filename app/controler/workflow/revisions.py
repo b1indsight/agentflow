@@ -1,7 +1,7 @@
-"""Read-only revision delivery checks shared by assignment and result application."""
+"""Validate frozen revision ownership and current remote delivery evidence."""
 
 from app.contracts.protocol import RevisionTask, RevisionTaskResult
-from app.domain.models import DeliveryState, Flow, FlowDelivery, Job
+from app.domain.models import Flow, Job
 from app.github import Repository
 
 
@@ -27,6 +27,8 @@ def revision_mismatch(task: RevisionTask, result: RevisionTaskResult) -> str | N
     if task.purpose == "revise" and (not result.clean_worktree or result.branch != task.branch
             or result.commit_sha != result.remote_sha):
         return "revision lacks verified clean repository and remote delivery evidence"
+    if task.purpose == "revise" and task.previous_head_sha is not None and not result.baseline_sha:
+        return "revision lacks its synchronized coding baseline"
     if result.previous_session_id != task.session_id or not result.session_id:
         return "revision session does not match the frozen assignment"
     if result.mode == "resume":
@@ -52,33 +54,37 @@ def revision_mismatch(task: RevisionTask, result: RevisionTaskResult) -> str | N
 
 
 async def verify_answer_remote(
-    repo: Repository, flow: Flow, delivery: FlowDelivery, head_sha: str,
+    repo: Repository, flow: Flow, task: RevisionTask,
 ) -> str | None:
     """Answer checks only the original open PR's code head, not refs or ancestry."""
-    if (flow.installation_id is None or delivery.state is not DeliveryState.OPEN
-            or delivery.pr_number is None):
+    if flow.installation_id is None:
         return "answer has no open verified delivery"
-    pr = await repo.fetch_pull_request(delivery.pr_number)
-    if (pr.number != delivery.pr_number or pr.state != "open" or pr.merged
-            or pr.head_sha != head_sha):
+    pr = await repo.fetch_pull_request(task.pr_number)
+    if (pr.repo != task.repo or pr.number != task.pr_number or pr.state != "open" or pr.merged
+            or pr.head_repository != task.repo or pr.head_branch != task.branch
+            or pr.base_branch != task.base_branch or pr.head_sha != task.expected_head_sha):
         return "original PR closed or head changed; answer paused"
     return None
 
 
 async def verify_revision_remote(
-    repo: Repository, flow: Flow, delivery: FlowDelivery, head_sha: str,
+    repo: Repository, flow: Flow, task: RevisionTask, result: RevisionTaskResult,
 ) -> str | None:
-    """Require the original open PR and exact branch/ref SHA; API errors remain retryable."""
-    if (flow.installation_id is None or delivery.state is not DeliveryState.OPEN
-            or delivery.pr_number is None or not delivery.base_branch or not delivery.head_sha):
+    """Verify publication against the actual fetched baseline, never historical delivery ancestry."""
+    if flow.installation_id is None:
         return "revision has no open verified delivery"
-    pr = await repo.fetch_pull_request(delivery.pr_number)
-    ref = await repo.fetch_ref(delivery.branch)
-    if (pr.number != delivery.pr_number or pr.state != "open" or pr.merged
-            or pr.head_repository != flow.repo
-            or pr.head_branch != delivery.branch or pr.base_branch != delivery.base_branch
-            or ref.branch != delivery.branch or pr.head_sha != head_sha or ref.sha != head_sha):
+    baseline = result.baseline_sha
+    if baseline is None and task.previous_head_sha is None:
+        baseline = task.expected_head_sha  # Historical tasks predate the separate fetched baseline.
+    if not baseline or not result.commit_sha:
+        return "revision lacks its synchronized coding baseline"
+    pr = await repo.fetch_pull_request(task.pr_number)
+    ref = await repo.fetch_ref(task.branch)
+    if (pr.repo != task.repo or pr.number != task.pr_number or pr.state != "open" or pr.merged
+            or pr.head_repository != flow.repo or pr.head_branch != task.branch
+            or pr.base_branch != task.base_branch or ref.branch != task.branch
+            or pr.head_sha != result.commit_sha or ref.sha != result.commit_sha):
         return "original PR or remote branch changed; revision paused"
-    if head_sha != delivery.head_sha and not await repo.compare_commits(delivery.head_sha, head_sha):
-        return "revision commit does not advance the frozen delivery head"
+    if result.commit_sha != baseline and not await repo.compare_commits(baseline, result.commit_sha):
+        return "revision commit does not advance the synchronized coding baseline"
     return None

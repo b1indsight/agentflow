@@ -1,7 +1,7 @@
 # 同分支外部更新 — Feature record
 
-**Stage:** Planning，待用户批准；尚未修改产品代码或测试。
-**PR:** 尚未创建；本次仅推送计划，draft PR 待另行授权。
+**Stage:** 实现评审；本地实现、完整验证与简化对比已完成，保留 draft，尚未部署。
+**PR:** [Draft PR #152](https://github.com/b1indsight/agentflow/pull/152)，计划与实现复用同一 PR。
 **Bookmark:** `feat/external-pr-updates`。
 **规划基线:** `main@origin`，`34a33153ded0aaa7afe553b90445c0dd044c3522`。
 
@@ -111,3 +111,34 @@
 实现时确认 Git/jj 的具体同步命令和历史 JSON 兼容落点，用真实本地集成测试决定细节。外部更新期间自动 rebase/cherry-pick 在途成果、跨 worker 迁移和旧 BLOCKED Flow 批量恢复均不在本项范围。
 
 ## 2. PR change timeline
+
+### 2026-11-13：分离历史交付与本轮编码基线
+
+- **触发与状态：** 用户要求同来源分支接受外部更新并在编码前同步。已在本地实现 Controller、Worker 和协议接线，尚未发布。
+- **Controller：** reconcile 不再因历史 head/base 不同关闭 delivery；prepare 读取当前原 PR/ref，冻结 `previous_head_sha=A`、PR 观察值 B 与当前 base，不提前把外部提交记为已交付。结果使用 Worker 实际 `baseline_sha=R` 核验 C，是否有新提交比较 C/R，成功后才更新 delivery head/base。effect 发布与 answer 的 addressed SHA 使用本轮冻结事实，不从旧 delivery 取值。
+- **过期决策与恢复：** 已冻结 Judge context 的 head/base 变化时，只退休尚未 Started、没有结果的派生 job，把同一反馈批次退回 triage，清除 context/decision/inference 关联后重建；Started 或未知执行不能走该路径。reopen 接受原来源分支外部更新，但仍核验原任务/结果、旧执行已收敛及实际结果相对本轮基线的关系，不自动重激活终态。
+- **Worker：** 同步前保护 dirty/untracked、未发布提交及原分支/remote；同步后把实际 R 写入结果与 prompt。session unavailable 只读复核同一已同步上下文，不能重新同步掩盖本地变化。
+- **兼容与独立修复：** wire24 需两端协调升级；历史任务/结果缺字段时保持 JSON/digest，只有历史任务允许用旧 expected head 解释起点。新版 revise 成功结果缺少基线或不继承该基线均拒绝。未合并 PR 的 `merge_commit_sha` 可以缺省，`merged=True` 仍要求完整合并证据。
+- **验证证据：** 先扩展 GitHub 读取测试，缺字段在原实现上失败，修复后 GitHub/protocol 用例通过。PostgreSQL 的 `test_external_updates_keep_original_delivery_open` 在旧 reconcile 上失败；`test_external_updates_use_fetched_baseline_without_claiming_external_work` 在旧 prepare 上返回 FAILED，接线后覆盖外部历史改写、观察 B 后又更新到 R、新提交/no-op 与重复结果恢复。修订、反馈批次、生命周期和准备重试的针对性检查通过；完整套件、简化对比及最终检查尚未完成。
+- **发布边界：** 没有新增数据库列；升级/回滚前先收敛在途执行和回执。未调用生产 Kubernetes、未解封旧 BLOCKED Flow、未部署；同一 draft PR 保持不变。
+
+### 2026-11-13：简化对比保留必要的三段检查
+
+- **设置：** 使用同一组真实 Git/jj、本地 bare remote 和隔离 PostgreSQL 用例，临时 pytest 插件仅在单个测试进程替换一个机制，不修改产品文件。模式分别为 `historical-admission`、`no-sync`、`no-unpublished-check`；插件在实验结束后删除，不提交辅助框架。
+- **只放宽 reconcile：** 用规划基线的 `JobCoordinator.prepare` 及准备校验替换当前 prepare，保留其他新实现，执行 `pytest tests/test_revision_recovery.py -k external_updates`。外部历史改写后仍在准备阶段返回 FAILED，无法产生 RevisionTask；因此仅删除 reconcile 限制不能满足需求。
+- **去掉 Worker 同步：** 用只读取旧工作区的 `prepare_vcs_context` 替代同步，执行 `pytest tests/test_revision_delivery.py -k runs_on_fetched_external_contents`。Git/jj、普通更新/历史改写以及新提交/no-op 场景均在 Agent 读取 `external.txt` 时失败，证明不执行同步会读旧代码。
+- **去掉未发布历史检查：** 仅把同步前的 `git rev-list local --not previous fetched` 检查替换为空输出，执行 `pytest tests/test_revision_delivery.py -k 'preflight and unpublished'`。Git 错误返回成功，jj 也进入 Agent，均违背保留未发布工作的前置拒绝要求。
+- **决定与后果：** 保留 prepare 刷新、Worker 同步及本地已发布历史证明。无需增加同步 RPC、新 Job 状态、退款/重排队协议或独立发布证明 ref。实验已得到明确反例；最终实现的同组正向检查及完整套件结果另记。
+
+### 2026-11-13：隔离 fetch 配置并保留 jj 旁支
+
+- **背景与选择：** 直接在 Agent 工作区带凭据 fetch 会受仓库 Git 配置影响；jj fetch/import 还可能自动处理被外部改写的旧历史。采用临时 bare/shared clone 借用本地对象和 refs，再在隔离配置/凭据环境中 fetch 原 URL，仅将对象导入工作区；不在参数、配置、日志或 journal 中保存 token。
+- **jj 落点：** 同步前先证明当前书签没有未发布提交、工作提交为空且位于该书签。随后更新本地 remote ref，使用 `git.abandon-unreachable-commits=false` 执行原生 `jj git import`，移动原 bookmark 并创建 R 后的空工作提交，不触发外部历史改写的自动 rebase/abandon。此处细化初始计划的“原生 fetch/bookmark/工作提交操作”，保持同一职责和返回类型。
+- **代价与验证：** 多一次本地对象导入，换取凭据配置隔离及未发布旁支保留。`test_jj_sync_preserves_other_unpublished_changes` 核验外部 force-push 后旁支提交仍可见、文件内容不变；preflight 用例覆盖本地 ignored 文件/父路径/symlink 将被上游新增路径覆盖时的拒绝。fetch 是唯一同步观察点，拒绝 session 后只读复核原分支目标，不能再次 fetch 或移动书签。
+
+### 2026-11-13：完成本地验收
+
+- **实际覆盖：** 真实 Git/colocated jj、bare remote 与独立协作者 clone 验证外部快进及历史改写后，Agent 确实读取新文件；覆盖实际基线的新提交/no-op、fetch 竞争、脏文件与未发布提交拒绝、ignored 路径保留、凭据环境隔离、jj 旁支和 session fallback 的精确本地复核。PostgreSQL 验证任务准备、Judge context 重建、结果重放、answer、reopen 与历史 JSON/digest 兼容。
+- **最终检查：** 在最终源码上执行 `FLOWTOOL_TEST_DATABASE_URL=<隔离 UTF8 PostgreSQL> uv run pytest -q`，完整套件通过；`uv run ruff check app tests`、`uv run mypy app tests`、`uv build --no-sources` 与 `git diff origin/main --check` 均通过。简化对比的反例及同组正向回归已完成；详细日志和执行边界见[验收记录](https://ampcode.com/artifacts/838a2830-cbdb-437d-8822-aacbfd9316bc)。
+- **验证边界：** 没有进行真实 GitHub/HTTPS 或 CodingAgent provider smoke，没有操作生产 Kubernetes、部署、数据库或真实 PR 分支。此次无 UI 改动；既有 Starlette/httpx 弃用警告不影响检查结果。
+- **交付边界：** 实现、相关文档与 changelog 使用原 draft PR 提交评审；代码推送须先通过 review gate，不合并或部署。wire24 两端协调升级、先收敛在途任务和回执，以及不自动恢复旧 BLOCKED Flow 的边界保持不变。

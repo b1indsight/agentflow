@@ -306,15 +306,27 @@ async def test_reopen_waits_for_old_executor_and_pending_result(store, lifecycle
 
 
 @pytest.mark.parametrize("changed", [{"head_sha": "c" * 40}, {"base_branch": "other"}])
-async def test_human_drift_pauses_without_adopting_a_new_baseline(store, lifecycle_flow, changed, lifecycle_resources):
+async def test_external_updates_keep_original_delivery_open(store, lifecycle_flow, changed, lifecycle_resources):
+    # A collaborator can advance/rewrite the source branch without retiring the Flow's work.
     flow, _ = lifecycle_flow
+    previous = store.deliveries.get_delivery(flow.id)
     await check(store, flow, GitHub(flow, "open", **changed))
     delivery = store.deliveries.get_delivery(flow.id)
-    assert delivery.state is DeliveryState.CLOSED and delivery.head_sha == "b" * 40
-    assert delivery.base_branch == "main"
+    assert delivery == previous
+    assert delivery.state is DeliveryState.OPEN and delivery.head_sha == "b" * 40
+    assert store.flows.get_flow(flow.id).state is FlowState.REVIEW
     await check(store, flow, GitHub(flow, "open", **changed))
-    assert store.deliveries.get_delivery(flow.id).state is DeliveryState.CLOSED
-    assert "head/base" in store.reconcile.get(flow.id).last_error
+    assert store.deliveries.get_delivery(flow.id) == previous
+    assert store.reconcile.get(flow.id).failures == 0
+
+
+async def test_external_update_cannot_replace_source_branch(store, lifecycle_flow, lifecycle_resources):
+    flow, _ = lifecycle_flow
+    await check(store, flow, GitHub(flow, "open", head_branch="another-branch"))
+    delivery = store.deliveries.get_delivery(flow.id)
+    assert delivery.state is DeliveryState.CLOSED
+    assert delivery.branch == f"flow/{flow.id}" and delivery.head_sha == "b" * 40
+    assert store.flows.get_flow(flow.id).state is FlowState.BLOCKED
 
 
 @pytest.mark.parametrize("state", [FlowState.BLOCKED, FlowState.ARCHIVED])

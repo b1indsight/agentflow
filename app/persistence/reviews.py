@@ -615,13 +615,21 @@ class ReviewStore(Repository):
                                (Jsonb(context.model_dump(mode="json")), batch.id))
         return context
 
-    def invalidate_context(self, batch: ReviewBatch, context: ReviewContext) -> None:
-        """Discard only this snapshot, retaining uncertain answer evidence under the workflow lock."""
+    def invalidate_context(
+        self, batch: ReviewBatch, context: ReviewContext, *, job: Job | None = None,
+    ) -> None:
+        """Discard this decision; an unstarted derived job can return its batch to triage."""
+        if job is not None:
+            self.for_job(job)
+            if job.started_at is not None or job.result_payload is not None:
+                raise ValueError("cannot invalidate an executing revision")
         with self._db.connection() as connection:
             connection.execute(
-                "UPDATE review_batches SET context=NULL,decision=NULL,inference_job_id=NULL WHERE id=%s"
+                "UPDATE review_batches SET context=NULL,decision=NULL,inference_job_id=NULL,"
+                " job_id=CASE WHEN %s THEN NULL ELSE job_id END,"
+                " threads=CASE WHEN %s THEN NULL ELSE threads END WHERE id=%s"
                 " AND context=%s AND NOT answer_dispatched",
-                (batch.id, Jsonb(context.model_dump(mode="json"))),
+                (job is not None, job is not None, batch.id, Jsonb(context.model_dump(mode="json"))),
             )
 
     def authorize_answer(self, batch: ReviewBatch, context_digest: str) -> bool:

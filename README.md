@@ -221,8 +221,9 @@ seed 和默认推理 workspace 不计入。每个 Flow 独占一个 workspace，
 每次 INITIAL、REVISION resume/fallback 都提供本轮 bot `gh` 包装、独立配置和 Git helper，
 不使用个人登录态；token 过期/权限不足即失败，不自动续期或扩权。worker 保持单仓库
 Contents write，PR 通过 MCP `open_pr` 请求 controler 校验后创建。包装不构成 OS 沙箱。
-当前 Codex/Amp 接入均使用 wire23 / journal5；执行结果使用 ResultInbox v1，Control 本地归档通知使用 v2。
+当前 Codex/Amp 接入均使用 wire24 / journal5；执行结果使用 ResultInbox v1，Control 本地归档通知使用 v2。
 serve 与 worker 的协议版本必须匹配。
+同一 PR 来源分支允许外部更新；revise 编码前安全同步 Git/jj，以实际 fetch 的提交作为本轮基线，保留脏文件和未发布提交。旧 BLOCKED Flow 不自动恢复。
 Judge 的 answer/revise 都派发到原 worker；answer 只回答问题，worker 比较本地提交不变，controller 比较目标 PR head 不变。Judge 只接收反馈关联的 PR 信息、线程和引用片段，不读取全 PR diff；详见 [Review 循环](docs/architecture/review-loop.md)。
 通信统一为顶层控制和 typed call/result 列表；控制 ACK 仅确认接收，不表示业务提交。
 支持只读加载受限 v4 journal（内嵌 v14/v15 回执），正常保存时才升级，见 [Worker 更新](docs/deployment/worker-update.md#journal-直接前代兼容)。

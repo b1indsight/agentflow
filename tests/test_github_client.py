@@ -316,11 +316,14 @@ async def test_full_pr_read_preserves_merge_sha_even_when_sdk_schema_omits_it(tm
     assert observed.merge_commit_sha == "c" * 40
     assert observed.head_repository == "octo/repo" and observed.body == ""
     assert len(calls) == 1
-    # Missing merge evidence must fail closed, never manufacture a merge or null observation.
+    # GitHub may omit a test-merge SHA for an unmerged PR (for example with conflicts).
     del payload["merge_commit_sha"]
-    with pytest.raises(GitHubError) as error:
-        await repo.fetch_pull_request(17)
-    assert error.value.kind is GitHubErrorKind.UNEXPECTED_RESPONSE
+    if merged:
+        with pytest.raises(GitHubError) as error:
+            await repo.fetch_pull_request(17)
+        assert error.value.kind is GitHubErrorKind.UNEXPECTED_RESPONSE
+    else:
+        assert (await repo.fetch_pull_request(17)).merge_commit_sha is None
 
 
 def test_partial_pull_request_distinguishes_unobserved_nullable_facts_from_null():

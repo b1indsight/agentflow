@@ -40,7 +40,7 @@ from app.domain.models import (
 )
 from app.domain.review_models import ReviewFeedback
 
-PROTOCOL_VERSION: Literal[23] = 23
+PROTOCOL_VERSION: Literal[24] = 24
 MAX_PAYLOAD_ITEMS = 32
 MessageId = Annotated[str, Field(strict=True, pattern=r"^[0-9a-f]{32}$")]
 ConnectionEpoch = Annotated[str, Field(strict=True, min_length=1, max_length=64)]
@@ -97,6 +97,10 @@ class RevisionTask(ProtocolModel):
     pr_number: int = Field(gt=0)
     base_branch: str
     expected_head_sha: str = Field(min_length=1)
+    # Absent only in historical assignments whose expected head was also the delivery head.
+    previous_head_sha: str | None = Field(
+        default=None, min_length=1, exclude_if=lambda value: value is None,
+    )
     session_id: str | None
     session_generation: int = Field(ge=0)
     instruction: str
@@ -171,6 +175,10 @@ class RevisionTaskResult(ProtocolModel):
     commit_sha: str | None = None
     remote_sha: str | None = None
     clean_worktree: bool = False
+    # Keep historical result JSON/digests unchanged; new revise tasks require this evidence.
+    baseline_sha: str | None = Field(
+        default=None, min_length=1, exclude_if=lambda value: value is None,
+    )
 
 
 class ArchiveResult(ArchiveIdentity):
@@ -590,7 +598,7 @@ class Message[Payload: ToolCall | ToolResult](ProtocolModel):
     performs static checks only; receipt ACKs confer no business completion or authority.
     """
 
-    protocol_version: Literal[23]
+    protocol_version: Literal[24]
     message_id: MessageId
     connection_epoch: ConnectionEpoch | None
     ack: StrictBool
@@ -801,7 +809,7 @@ def accept_stop_id(receipt_id: MessageId) -> MessageId:
 
 
 class MessageHeader(TypedDict):
-    protocol_version: Literal[23]
+    protocol_version: Literal[24]
     message_id: MessageId
     connection_epoch: str | None
     ack: bool

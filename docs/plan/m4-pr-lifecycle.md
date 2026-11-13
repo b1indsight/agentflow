@@ -90,3 +90,7 @@ INITIAL 最终提交前关闭和事务回滚；真实 GitHub close/reopen/归档
 CLOSED 和 MERGED 的 Started 执行缺少 worker journal 时，仅拒绝恢复握手并保留原执行事实，不合成失败回执。原 journal/结果恢复后仍可接受原 token 的结果、完成收尾并重新核验打开 PR。新增真实 PostgreSQL 回归覆盖整条恢复链，针对性 48 passed。
 
 本轮验证：完整 PostgreSQL 629 passed；Ruff、Mypy、build 通过。
+
+## 同来源分支外部更新取代早期漂移暂停规则
+
+[同分支外部更新](external-pr-updates.md) 取代本记录中“人工 push/head/base 变化即暂停、reopen 必须等于历史 head”的规则。同仓库、同 PR、同来源分支的外部更新在编码前安全同步，以本轮 fetch 基线验证交付；历史已交付 head 只用于归属和本地已发布历史证明。close/merge/归档、未知执行与结果收敛保护保持不变，不自动恢复已 BLOCKED Flow。

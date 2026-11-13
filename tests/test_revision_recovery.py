@@ -5,6 +5,8 @@ from tests.test_review_batches import settle
 """PostgreSQL crash and replay boundaries for verified revisions."""
 
 from datetime import UTC, datetime
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from psycopg.types.json import Jsonb
@@ -17,6 +19,7 @@ from app.contracts.protocol import (
 )
 from app.contracts.receipts import decode_result_inbox
 from app.contracts.result_models import EffectState, ResultPending
+from app.controler.review.context import build_review_context
 from app.controler.workflow.lifecycle import prove_reopen
 from app.controler.workflow.service import ControlService
 from app.domain.models import (
@@ -27,10 +30,13 @@ from app.domain.models import (
     JobKind,
     JobState,
     ReviewItemKind,
+    TriageVerdict,
+    Verdict,
 )
 from app.domain.review_models import FeedbackUpdate
 from app.github import GitHubError, GitHubErrorKind, Issue, PullRequest, RemoteRef, Repository
 from tests.github import RecordingGitHub, record_call
+from tests.review_memory import judge_decision
 from tests.test_coordinator import coordinator
 from tests.test_merge import route_merge
 from tests.test_revision_delivery import revision_output, verified_result
@@ -41,6 +47,7 @@ class RevisionGitHub(RecordingGitHub):
     def __init__(self):
         super().__init__()
         self.sha = "baseline"
+        self.base_branch = "main"
         self.reads = 0
 
 @pytest.fixture
@@ -50,7 +57,7 @@ def revision_resources(recording_resources, monkeypatch):
         state.reads += 1
         return PullRequest(pr.repository, pr.number, merged=False, state="open",
                            head_branch="flow/1", head_sha=state.sha,
-                           head_repository=pr.repository.full_name, base_branch="main",
+                           head_repository=pr.repository.full_name, base_branch=state.base_branch,
                            base_sha="base", title="Task", body="Requirements")
 
     async def fetch_ref(repo, branch, *, retry_transient=False):
@@ -67,7 +74,7 @@ def revision_resources(recording_resources, monkeypatch):
 
 
 @pytest.fixture
-async def pending_revision(store, revision_resources):
+async def pending_revision(store, revision_resources, request):
     flow = store.flows.create_flow("owner/repo", 8, 42)
     attempt = store.flows.create_attempt(flow.id)
     attempt.codex_session_id = "old-session"
@@ -92,6 +99,13 @@ async def pending_revision(store, revision_resources):
     assert queued.kind is JobKind.REVISION
     job = store.workers.assign_job("worker-a", "token", "epoch")
     github = RevisionGitHub()
+    updates = getattr(request, "param", {})
+    github.sha = updates.get("head", github.sha)
+    github.base_branch = updates.get("base", github.base_branch)
+    if "purpose" in updates:
+        job.payload = {**job.payload, "purpose": updates["purpose"]}
+        with store.connection() as connection:
+            connection.execute("UPDATE jobs SET payload=%s WHERE id=%s", (Jsonb(job.payload), job.id))
     subject = coordinator(store, github)
     task = await subject.prepare(job)
     assert isinstance(task, RevisionTask)
@@ -101,6 +115,104 @@ async def pending_revision(store, revision_resources):
 def accept(store, job, result):
     terminal = Succeeded(job_id=job.id, assignment_token="token", result=result)
     return store.workers.record_assignment_result(job.id, "worker-a", "token", "epoch", terminal)
+
+
+@pytest.mark.parametrize("pending_revision", [{"head": "external", "base": "release"}], indirect=True)
+@pytest.mark.parametrize("new_commit", [False, True])
+async def test_external_updates_use_fetched_baseline_without_claiming_external_work(
+    store, pending_revision, monkeypatch, new_commit,
+):
+    # The collaborator rewrites history before preparation, then pushes again before fetch.
+    flow, job, task, github, subject = pending_revision
+    assert task.previous_head_sha == "baseline"
+    assert task.expected_head_sha == "external" and task.base_branch == "release"
+    assert store.deliveries.get_delivery(flow.id).head_sha == "baseline"
+    assert store.workers.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
+    subject.mark_started(job, task, "worker-a")
+
+    async def compare(repo, base, head):
+        return (base, head) == ("fetched", "revision")
+
+    monkeypatch.setattr(Repository, "compare_commits", compare)
+    github.sha = "revision" if new_commit else "fetched"
+    item, = task.feedback
+    result = verified_result(task, baseline_sha="fetched", commit_sha=github.sha,
+        remote_sha=github.sha, output=revision_output(addressed=[AddressedComment(
+            item_id=item.item_id, version=item.version, comment_id=item.github_id,
+            note="Fixed" if new_commit else "Already fixed externally",
+        )]))
+    assert accept(store, job, result) == "pending"
+    assert await subject.results.apply(job.id) is JobState.DONE
+    assert await subject.results.apply(job.id) is JobState.DONE
+    delivery = store.deliveries.get_delivery(flow.id)
+    assert delivery.head_sha == github.sha and delivery.base_branch == "release"
+    assert not store.reviews.pending(flow.id)
+    assert bool(github.review_requests) is new_commit
+    assert any(("已核验新提交" if new_commit else "无新提交") in body for body in github.comments)
+
+
+@pytest.mark.parametrize("pending_revision", [
+    {"head": "external", "base": "release", "purpose": "answer"},
+], indirect=True)
+async def test_answer_uses_fresh_pr_without_adopting_external_delivery(store, pending_revision):
+    flow, job, task, github, subject = pending_revision
+    before = store.deliveries.get_delivery(flow.id)
+    assert task.purpose == "answer" and task.expected_head_sha == "external"
+    assert store.workers.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
+    subject.mark_started(job, task, "worker-a")
+    item, = task.feedback
+    result = verified_result(task, commit_sha="local-working-copy", remote_sha=None, branch=None,
+        clean_worktree=False, output=revision_output(addressed=[AddressedComment(
+            item_id=item.item_id, version=item.version, comment_id=item.github_id,
+            note="The implementation already has the requested bound.",
+        )]))
+    assert accept(store, job, result) == "pending"
+    assert await subject.results.apply(job.id) is JobState.DONE
+    assert store.deliveries.get_delivery(flow.id) == before
+    assert not store.reviews.pending(flow.id) and not github.review_requests
+    assert any(body.startswith("问题答复：") for body in github.comments)
+
+
+async def test_changed_pr_rebuilds_judge_context_before_unstarted_revision(store, pending_revision):
+    # A PR push after triage must not silently attach a saved instruction to different evidence.
+    flow, job, task, github, subject = pending_revision
+    batch = store.reviews.for_job(job)
+    repo = github.installation(flow.installation_id).repository(flow.repo)
+    context = await build_review_context(repo, flow, batch, task.pr_number)
+    verdict = TriageVerdict(verdict=Verdict.REVISE, confidence=1, instruction="Fix it")
+    with store.transaction() as tx:
+        tx.lock_workflow(flow.id)
+        tx.reviews.freeze_context(batch, context)
+        tx.reviews.record_decision(batch, judge_decision(verdict, context))
+    github.sha = "external"
+    assert await subject.prepare_for_assignment(job, "worker-a", "token", "epoch") is JobState.DONE
+    fresh = store.reviews.get_batch(batch.id)
+    assert fresh.context is fresh.decision is fresh.inference_job_id is fresh.job_id is None
+    assert fresh.feedback == batch.feedback and store.reviews.pending(flow.id)
+    assert store.flows.get_attempt(task.attempt_id).revision_cycles == 0
+    assert store.workers.finish_assignment(job.id, "worker-a", "token", JobState.DONE, "epoch")
+    report_settled(store, job.id, epoch="epoch")
+    judge = SimpleNamespace(triage=AsyncMock(side_effect=lambda new: judge_decision(verdict, new)))
+    await subject.triage(store.reviews.pending_triage()[0], judge)
+    replacement = store.workers.assign_job("worker-a", "replacement", "epoch")
+    prepared = await subject.prepare(replacement)
+    assert isinstance(prepared, RevisionTask) and prepared.expected_head_sha == "external"
+    assert prepared.context.digest != context.digest
+    assert store.reviews.get_batch(batch.id).decision.context_digest == prepared.context.digest
+
+
+@pytest.mark.parametrize("baseline", [None, "unrelated"])
+async def test_current_revision_requires_actual_baseline_evidence(store, pending_revision, baseline):
+    flow, job, task, github, subject = pending_revision
+    assert store.workers.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
+    subject.mark_started(job, task, "worker-a")
+    github.sha = "revision"
+    result = verified_result(task, baseline_sha=baseline, commit_sha=github.sha, remote_sha=github.sha)
+    assert accept(store, job, result) == "pending"
+    assert await subject.results.apply(job.id) is JobState.FAILED
+    assert store.deliveries.get_delivery(flow.id).head_sha == "baseline"
+    assert store.reviews.pending(flow.id)
+    assert not github.comments and not github.review_requests
 
 
 def test_started_and_revision_budget_commit_atomically(store, pending_revision):
@@ -441,15 +553,25 @@ async def test_uncertain_revision_notification_cannot_be_explicitly_resent(
 
 @pytest.mark.parametrize("version", [1, 14, 15])
 @pytest.mark.parametrize("retired", [False, True])
+@pytest.mark.parametrize("external_update", [False, True])
 async def test_durable_revision_recovery_and_reopen_keep_original_inbox(
-    store, pending_revision, version, retired
+    store, pending_revision, version, retired, external_update,
 ):
     # Both ordinary recovery and a closed PR's late result must read old stored wire receipts,
     # while retaining the exact payload/digest that existing plans and effects reference.
     flow, job, task, github, subject = pending_revision
     assert store.workers.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
     subject.mark_started(job, task, "worker-a")
-    terminal = Succeeded(job_id=job.id, assignment_token="token", result=verified_result(task))
+    # A real historical assignment/result has neither new field; its original digest must survive.
+    task = task.model_copy(update={"previous_head_sha": None})
+    payload = {**job.payload, "revision": task.model_dump(mode="json")}
+    with store.connection() as connection:
+        connection.execute("UPDATE jobs SET payload=%s WHERE id=%s", (Jsonb(payload), job.id))
+    assert "previous_head_sha" not in payload["revision"]
+    github.sha = "revision" if retired else "baseline"
+    result = verified_result(task, baseline_sha=None, commit_sha=github.sha, remote_sha=github.sha)
+    assert "baseline_sha" not in result.model_dump(mode="json")
+    terminal = Succeeded(job_id=job.id, assignment_token="token", result=result)
     assert (
         store.workers.record_assignment_result(job.id, "worker-a", "token", "epoch", terminal)
         == "pending"
@@ -472,6 +594,8 @@ async def test_durable_revision_recovery_and_reopen_keep_original_inbox(
     await subject.results.recover_pending_results()
     persisted = store.jobs.get_job(job.id)
     assert persisted.state is JobState.DONE and persisted.result_applied_at is not None
+    if external_update:
+        github.sha, github.base_branch = "external-rewrite", "release"
     repo = github.installation(flow.installation_id).repository(flow.repo)
     remote = await repo.fetch_pull_request(task.pr_number)
     proof, error = await prove_reopen(
@@ -483,7 +607,7 @@ async def test_durable_revision_recovery_and_reopen_keep_original_inbox(
         deliveries=store.deliveries,
         flows=store.flows,
     )
-    assert error is None and proof is not None and proof.head_sha == task.expected_head_sha
+    assert error is None and proof is not None and proof.head_sha == result.commit_sha
     assert persisted.result_payload == accepted.result_payload
     assert persisted.result_digest == accepted.result_digest == terminal_digest(terminal)
     assert store.results.get_plan(job.id).digest == accepted.result_digest

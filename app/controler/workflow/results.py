@@ -308,7 +308,7 @@ class ResultApplication:
         if mismatch:
             return mismatch
         delivery = self.deliveries.get_delivery(flow.id)
-        if delivery is None or delivery.head_sha != task.expected_head_sha:
+        if delivery is None or delivery.head_sha != (task.previous_head_sha or task.expected_head_sha):
             return "revision baseline no longer matches delivery"
         if job.verify_next_at is not None and job.verify_next_at > self.database.now():
             raise ResultPending(job.verify_last_error or "revision verification backoff")
@@ -318,8 +318,8 @@ class ResultApplication:
         try:
             repo = self.github.installation(flow.installation_id).repository(flow.repo)
             if task.purpose == "answer":
-                return await verify_answer_remote(repo, flow, delivery, task.expected_head_sha)
-            return await verify_revision_remote(repo, flow, delivery, result.commit_sha)
+                return await verify_answer_remote(repo, flow, task)
+            return await verify_revision_remote(repo, flow, task, result)
         except GitHubError as error:
             if error.retryable:
                 self.result_store.defer_verification(job, error)
@@ -465,10 +465,9 @@ class ResultApplication:
             mismatch = revision_error or revision_mismatch(task, result)
             if mismatch:
                 return self._failure(base, mismatch)
-            if (delivery is None or delivery.head_sha != task.expected_head_sha
+            if (delivery is None or delivery.head_sha != (task.previous_head_sha or task.expected_head_sha)
                     or delivery.state is not DeliveryState.OPEN
                     or delivery.pr_number != task.pr_number or delivery.branch != task.branch
-                    or delivery.base_branch != task.base_branch
                     or attempt.codex_session_id != task.session_id
                     or attempt.session_generation != task.session_generation
                     or execution is None or execution.released_at is not None
@@ -503,7 +502,9 @@ class ResultApplication:
             consumed = [f for f in consumed if (f.item_id, f.version) not in blocked]
             unresolved |= bool(notes.problems)
             effects = notes.effects
-            new_commit = task.purpose == "revise" and result.commit_sha != task.expected_head_sha
+            new_commit = task.purpose == "revise" and result.commit_sha != (
+                result.baseline_sha or task.expected_head_sha
+            )
             if result.output.summary:
                 effects.append(
                     self._comment(
@@ -644,6 +645,7 @@ class ResultApplication:
             if plan.revision is not None:
                 if plan.revision_purpose == "revise":
                     current.head_sha = plan.revision.commit_sha
+                    current.base_branch = frozen_revision(job).base_branch
                     current.version += 1
                     deliveries_tx.update_delivery(current)
             else:
@@ -672,7 +674,8 @@ class ResultApplication:
                     batch_state = BatchState.WAITING
                 assert plan.revision.commit_sha is not None
                 assert plan.delivery is not None and plan.delivery.head_sha is not None
-                head = plan.delivery.head_sha if plan.revision_purpose == "answer" else plan.revision.commit_sha
+                head = (frozen_revision(job).expected_head_sha if plan.revision_purpose == "answer"
+                        else plan.revision.commit_sha)
                 reviews_tx.record_addressed(plan.batch_id, consumed, head, job.id)
             reviews_tx.complete(plan.batch_id, batch_state, consumed, list(dict.fromkeys(open_points)))
 

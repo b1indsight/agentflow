@@ -97,14 +97,18 @@ def _format_item(item: ReviewFeedback) -> str:
             f"{item.author} says: {item.body}")
 
 
-def build_revision_prompt(task: RevisionTask, repo_conventions: str) -> str:
+def build_revision_prompt(
+    task: RevisionTask, repo_conventions: str, *, baseline_sha: str | None,
+) -> str:
     """Supply enough frozen context to resume or rebuild a session in the original repo."""
+    if task.purpose == "revise" and baseline_sha is None:
+        raise ValueError("revise prompt requires the fetched coding baseline")
     feedback = "\n".join(_format_item(i) for i in task.feedback) or "(no inline items)"
     parts = [
         f"# Original task\n{task.task_content}\n",
         f"# Repo conventions\n{repo_conventions}\n",
         (f"# Delivery\n{task.repo} PR #{task.pr_number}; branch {task.branch}; "
-        f"base {task.base_branch}; expected head {task.expected_head_sha}\n"),
+        f"base {task.base_branch}; PR observed head: {task.expected_head_sha}\n"),
         f"# Previous summary\n{task.previous_summary}\n",
         f"# Unresolved questions\n{chr(10).join(task.open_points)}\n",
         f"# {task.purpose.title()} instruction (synthesized from review)\n{task.instruction}\n",
@@ -121,11 +125,17 @@ def build_revision_prompt(task: RevisionTask, repo_conventions: str) -> str:
         "to origin. Use the repo's Git or jj backend and leave a clean tree; for jj leave an "
         "empty working copy at or directly after the pushed bookmark. Do not force push, "
         "reset, open another PR, use GitHub API/CLI, post comments or request review. "
-        "If the existing code already satisfies the feedback, explain why and leave the SHA "
-        "unchanged. Report exact item/version/comment identities. Preserve deferred work "
+        "Keep the fetched coding baseline as an ancestor of the delivered commit; do not rebase "
+        "or amend it. If the existing code already satisfies the feedback, explain why and leave "
+        "that baseline unchanged. Report exact item/version/comment identities. Preserve deferred work "
         "and ask concrete clarification questions. Prior conversation may be unavailable."),
         _OUTPUT_INSTRUCTION,
     ]
+    if baseline_sha is not None:
+        parts.insert(3, f"# Coding start\nFetched coding baseline: {baseline_sha}\n"
+                     "The worker synchronized this checkout before this invocation. Start from "
+                     "its current contents, including collaborator changes. The PR observed head "
+                     "above is an earlier metadata snapshot, not the coding baseline.\n")
     if task.context is not None:
         parts.append(f"# Frozen PR context\n{task.context.model_dump_json()}")
     return "\n".join(parts)

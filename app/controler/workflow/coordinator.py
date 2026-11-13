@@ -29,7 +29,6 @@ from app.controler.workflow.preparation import (
     PreparationState,
 )
 from app.controler.workflow.results import ResultApplication
-from app.controler.workflow.revisions import verify_answer_remote, verify_revision_remote
 from app.domain.context_models import ReviewContext
 from app.domain.inference_models import InferenceMessage, InferenceTask
 from app.domain.judge_models import JudgeDecision
@@ -424,18 +423,20 @@ class JobCoordinator:
                 await self.fail(job, "修订任务缺少有效 worker binding。")
                 return JobState.FAILED
             try:
-                verify = verify_answer_remote if purpose == "answer" else verify_revision_remote
-                mismatch = await self._read(job, lambda: verify(
-                    repository,
-                    flow, delivery, delivery.head_sha or "",
-                ))
+                remote = await self._read(job, lambda: repository.fetch_pull_request(self._pr_number(flow)))
+                mismatch = (delivery.state is not DeliveryState.OPEN or not delivery.head_sha
+                    or remote.repo != flow.repo or remote.number != delivery.pr_number
+                    or remote.state != "open" or remote.merged
+                    or remote.head_repository != flow.repo or remote.head_branch != delivery.branch)
+                if not mismatch and purpose == "revise":
+                    ref = await self._read(job, lambda: repository.fetch_ref(delivery.branch))
+                    mismatch = ref.branch != delivery.branch
                 if not mismatch:
-                    assert flow.installation_id is not None
                     task_content = await self._task_content(job, flow, repository)
             except GitHubError as exc:
                 raise PreparationReadFailure(exc) from exc
             if mismatch:
-                await self.fail(job, mismatch)
+                await self.fail(job, "original PR or source branch changed; revision paused")
                 return JobState.FAILED
             assert flow.installation_id is not None
             assert delivery.head_sha and delivery.base_branch and delivery.pr_number
@@ -448,8 +449,9 @@ class JobCoordinator:
                 branch=delivery.branch,
                 repo_identity=execution.repo_identity,
                 pr_number=delivery.pr_number,
-                base_branch=delivery.base_branch,
-                expected_head_sha=delivery.head_sha,
+                base_branch=remote.base_branch,
+                expected_head_sha=remote.head_sha,
+                previous_head_sha=delivery.head_sha,
                 session_id=attempt.codex_session_id,
                 session_generation=attempt.session_generation,
                 task_content=task_content,
@@ -478,10 +480,20 @@ class JobCoordinator:
                         or current.assignment_token != job.assignment_token
                         or current.assigned_worker_id != job.assigned_worker_id
                         or current.state is not JobState.RUNNING
+                        or current.started_at is not None or current.result_payload is not None
                         or (job.assignment_token is not None and (
                             current.lease_expires_at is None
                             or current.lease_expires_at <= tx.now()))):
                     return JobState.QUEUED
+                if batch.context is not None and (
+                    batch.context.pull_request is None
+                    or (batch.context.pull_request.head_sha, batch.context.pull_request.base_sha,
+                        batch.context.pull_request.base_branch)
+                    != (remote.head_sha, remote.base_sha, remote.base_branch)
+                ):
+                    # A Judge instruction belongs to its exact context; let triage rebuild both.
+                    reviews_tx.invalidate_context(batch, batch.context, job=current)
+                    return JobState.DONE
                 if threads is not None:
                     reviews_tx.freeze_threads(current, threads)
                 return reviews_tx.freeze_revision(current, task)

@@ -378,8 +378,9 @@ class ResultEffects:
                 # Batch answers follow this same marker-before-retry rule in JobCoordinator._answer.
                 if record.dispatched_at is not None:
                     raise ResultPending("comment outcome is unknown; waiting for its remote marker")
-                if ((isinstance(effect, ThreadReplyEffect) or plan.revision_purpose == "answer")
-                        and not await revision_current(repository, plan, effect.number)):
+                if (plan.revision is not None and not await revision_current(
+                    repository, plan, effect.number, jobs=self.jobs,
+                )):
                     return EffectReceipt(
                         thread_id=effect.thread_id if isinstance(effect, ThreadReplyEffect) else None,
                         pending_reason="PR 已关闭或 head 已变化，未发送反馈说明")
@@ -441,7 +442,7 @@ class ResultEffects:
                 if (
                     any(r.receipt and r.receipt.pending_reason for r in records)
                     or _pending_feedback(plan, reviews=self.reviews)
-                    or not await revision_current(repository, plan, number)
+                    or not await revision_current(repository, plan, number, jobs=self.jobs)
                 ):
                     return EffectReceipt(pending_reason="仍有未决反馈或 PR 已变化，暂停 re-review")
             if number == "created_pr":

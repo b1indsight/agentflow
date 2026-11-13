@@ -196,17 +196,7 @@ async def align_repository(repo: Path, seed: Path, base_branch: str) -> None:
             "workspace", "jj", "file", "list", "-r", revision,
             "-T", r'"\x00" ++ path ++ "\x00"', cwd=repo,
         )).split("\0")
-        # Check ancestors too: an ignored file or symlink can block a newly tracked directory.
-        for name in target:
-            if not name or name in current:
-                continue
-            path = repo / name
-            blocked_parent = any(
-                parent.is_symlink() or (parent.exists() and not parent.is_dir())
-                for parent in path.parents if parent != repo and repo in parent.parents
-            )
-            if path.exists() or path.is_symlink() or blocked_parent:
-                raise VcsVerificationError("workspace", "baseline would overwrite retained cache paths")
+        _require_retained_paths(repo, current, target)
         await _required_stdout("workspace", "jj", "new", revision, cwd=repo)
     else:
         revision = await _required_stdout(
@@ -368,23 +358,155 @@ async def local_commit(repo_path: Path) -> str:
 
 
 async def prepare_revision_context(
-    repo_path: Path, branch: str, expected_sha: str,
+    repo_path: Path, branch: str, previous_head_sha: str,
     push_token: SecretStr | None = None,
 ) -> VcsExecutionContext:
-    """Require the existing clean Flow repo to match the frozen remote head; never reset it."""
+    """Synchronize a clean, published checkout to the source branch's fetched snapshot.
+
+    The previous delivery proves local work was published; it does not constrain the new remote
+    history. Fetch objects without importing jj refs first, so an unsafe checkout cannot cause
+    jj to move bookmarks or automatically rebase unpublished changes during a fetch/import.
+    """
     if not repo_path.is_dir():
         raise VcsVerificationError("binding", "existing Flow repository is missing")
+    await require_idle_repository(repo_path)
     context = await prepare_vcs_context(repo_path, branch)
-    # A colocated jj working-copy commit may differ from its pushed bookmark. The expected
-    # delivery commit, not that mutable working-copy commit, is the revision ancestry anchor.
-    context = replace(context, git_base_sha=expected_sha if context.git_base_sha else None,
-                      jj_ancestor_sha=expected_sha if context.jj_base_sha else None,
-                      push_token=push_token)
-    backend = VcsKind.JJ if context.jj_base_sha else VcsKind.GIT
-    outcome = await verify_revision_outcome(context, backend)
-    if outcome.commit_sha != expected_sha:
-        raise VcsVerificationError("baseline", "local/remote head differs from frozen delivery")
-    return context
+    if context.git_base_sha is None or context.git_remote_url is None:
+        raise VcsVerificationError("binding", "revision requires Git or colocated jj metadata")
+    await _required_stdout("branch", "git", "check-ref-format", f"refs/heads/{branch}", cwd=repo_path)
+    if context.jj_base_sha is not None:
+        _require_unchanged_remote(context.jj_remote_url or "", context.git_remote_url)
+        local = await _required_stdout(
+            "branch", "jj", "log", "-r", branch, "--no-graph", "-T", "commit_id", cwd=repo_path,
+        )
+        _require_jj_working_at(context.jj_base_sha, context.jj_ancestor_sha, local)
+    else:
+        local = context.git_base_sha
+        await _require_git_branch(context)
+    fetched = await _fetch_revision(context, push_token)
+    unpublished = await _required_stdout(
+        "baseline", "git", "rev-list", local, "--not", previous_head_sha, fetched, "--",
+        cwd=repo_path,
+    )
+    if unpublished:
+        raise VcsVerificationError("baseline", "local branch has unpublished commits")
+    # Fetch is the snapshot linearization point. Check local facts again, not remote equality.
+    await revalidate_revision_context(context, local)
+    if context.jj_base_sha is not None:
+        current = set((await _required_stdout(
+            "workspace", "git", "ls-tree", "-r", "-z", "--format=%x00%(path)", local, cwd=repo_path,
+        )).split("\0"))
+        target = (await _required_stdout(
+            "workspace", "git", "ls-tree", "-r", "-z", "--format=%x00%(path)", fetched, cwd=repo_path,
+        )).split("\0")
+        _require_retained_paths(repo_path, current, target)
+        await _required_stdout(
+            "baseline", "git", "update-ref", f"refs/remotes/{context.remote}/{branch}", fetched,
+            cwd=repo_path,
+        )
+        # Do not abandon rewritten history or rebase other jj changes on import.
+        await _required_stdout(
+            "baseline", "jj", "--ignore-working-copy", "--config",
+            "git.abandon-unreachable-commits=false", "git", "import", cwd=repo_path,
+        )
+        await _required_stdout(
+            "baseline", "jj", "bookmark", "set", "--allow-backwards", branch, "-r", fetched,
+            cwd=repo_path,
+        )
+        await _required_stdout("baseline", "jj", "new", fetched, cwd=repo_path)
+    else:
+        # -B moves the branch only if checkout succeeds; unlike reset --hard, it preserves
+        # unknown files, and --no-overwrite-ignore also protects retained ignored caches.
+        await _required_stdout(
+            "baseline", "git", "checkout", "--no-overwrite-ignore", "-B", branch, fetched,
+            cwd=repo_path,
+        )
+    synchronized = await prepare_vcs_context(repo_path, branch)
+    if (synchronized.git_base_sha != fetched or (
+        synchronized.jj_base_sha is not None and synchronized.jj_ancestor_sha != fetched
+    )):
+        raise VcsVerificationError("baseline", "checkout does not match the fetched coding baseline")
+    return replace(synchronized, push_token=push_token)
+
+
+async def _fetch_revision(context: VcsExecutionContext, push_token: SecretStr | None) -> str:
+    """Fetch the fixed URL outside repo-controlled config, then import only the fetched objects."""
+    assert context.git_remote_url is not None
+    environment = _vcs_environment()
+    environment.update(git_credential_environment(push_token))
+    with tempfile.TemporaryDirectory(prefix="flowtool-revision-fetch-") as directory:
+        temporary = Path(directory)
+        # Borrow local objects and refs for negotiation without inheriting local Git config.
+        await _required_stdout(
+            "baseline", "git", "clone", "--bare", "--shared", "--", str(context.repo_path), ".",
+            cwd=temporary,
+        )
+        code, _, _ = await _run(
+            *_git_args("fetch", "--no-tags", "--no-recurse-submodules", "--",
+                       context.git_remote_url, f"refs/heads/{context.branch}"),
+            cwd=temporary, stage="baseline", environment=environment,
+        )
+        if code:
+            raise VcsVerificationError("baseline", f"source branch fetch failed with exit {code}")
+        fetched = await _required_stdout(
+            "baseline", "git", "rev-parse", "--verify", "FETCH_HEAD^{commit}", cwd=temporary,
+        )
+        await _required_stdout(
+            "baseline", "git", "fetch", "--no-tags", "--no-recurse-submodules", "--refmap=",
+            "--", str(temporary), fetched, cwd=context.repo_path,
+        )
+    return fetched
+
+
+async def revalidate_revision_context(context: VcsExecutionContext, branch_sha: str) -> None:
+    """Check the captured local state and branch target without fetching or moving either."""
+    await require_idle_repository(context.repo_path)
+    current = await prepare_vcs_context(context.repo_path, context.branch, remote=context.remote)
+    if (current.git_remote_url, current.jj_remote_url) != (
+        context.git_remote_url, context.jj_remote_url,
+    ):
+        raise VcsVerificationError("push", "remote changed after revision preparation")
+    if (current.git_base_sha, current.jj_base_sha, current.jj_ancestor_sha) != (
+        context.git_base_sha, context.jj_base_sha, context.jj_ancestor_sha,
+    ):
+        raise VcsVerificationError("baseline", "local VCS state changed after revision preparation")
+    if context.jj_base_sha is not None:
+        bookmark = await _required_stdout(
+            "branch", "jj", "log", "-r", context.branch, "--no-graph", "-T", "commit_id",
+            cwd=context.repo_path,
+        )
+        if bookmark != branch_sha:
+            raise VcsVerificationError("branch", "jj bookmark changed after revision preparation")
+    else:
+        await _require_git_branch(context)
+
+
+async def _require_git_branch(context: VcsExecutionContext) -> None:
+    branch = await _required_stdout(
+        "branch", "git", "branch", "--show-current", cwd=context.repo_path,
+    )
+    if branch != context.branch:
+        raise VcsVerificationError("branch", "Git working copy is not on the revision branch")
+
+
+def _require_jj_working_at(working: str, parents: str | None, bookmark: str) -> None:
+    if working != bookmark and parents != bookmark:
+        raise VcsVerificationError("branch", "jj working copy is not at the delivered bookmark")
+
+
+def _require_retained_paths(repo: Path, current: set[str], target: list[str]) -> None:
+    """Reject newly tracked paths that would overwrite retained files, symlinks or jj metadata."""
+    for name in target:
+        if not name or name in current:
+            continue
+        path = repo / name
+        blocked_parent = any(
+            parent.is_symlink() or (parent.exists() and not parent.is_dir())
+            for parent in path.parents if parent != repo and repo in parent.parents
+        )
+        if (path.exists() or path.is_symlink() or blocked_parent
+                or name == ".jj" or name.startswith(".jj/")):
+            raise VcsVerificationError("workspace", "baseline would overwrite retained cache paths")
 
 
 async def verify_revision_outcome(
@@ -402,8 +524,7 @@ async def verify_revision_outcome(
         "branch", "jj", "log", "-r", "parents(@)", "--no-graph", "-T", 'commit_id ++ "\\n"',
         cwd=context.repo_path,
     )
-    if working != outcome.commit_sha and parents != outcome.commit_sha:
-        raise VcsVerificationError("branch", "jj working copy is not at the delivered bookmark")
+    _require_jj_working_at(working, parents, outcome.commit_sha)
     return outcome
 
 

@@ -15,7 +15,6 @@ from app.controler.workflow.initial import initial_delivery_mismatch
 from app.controler.workflow.revisions import (
     frozen_revision,
     revision_mismatch,
-    verify_revision_remote,
 )
 from app.domain.models import (
     ArchiveReason,
@@ -181,12 +180,13 @@ async def prove_reopen(
     deliveries: DeliveryStore,
     flows: FlowStore,
 ) -> tuple[ReopenProof | None, str | None]:
-    """Only an exact old head or a verified frozen worker delivery may resume this PR."""
+    """Retain settled delivery evidence while accepting external updates to the same source branch."""
     if (not delivery.head_sha or not delivery.base_branch or flow.installation_id is None
-            or remote.head_branch != delivery.branch or remote.base_branch != delivery.base_branch):
-        return None, "PR head/base requires manual reconciliation"
+            or remote.repo != flow.repo or remote.number != delivery.pr_number
+            or remote.head_repository != flow.repo or remote.head_branch != delivery.branch
+            or remote.state != "open" or remote.merged):
+        return None, "PR source identity requires manual reconciliation"
     proof = ReopenProof(delivery.head_sha)
-    revision = None
     if job is not None:
         if job.result_payload is None or job.result_applied_at is None:
             return None, "old executor or result is not settled"
@@ -213,26 +213,23 @@ async def prove_reopen(
             task = frozen_revision(job)
             if (revision_mismatch(task, result) or task.attempt_id != flow.current_attempt_id
                     or task.repo != flow.repo or task.pr_number != delivery.pr_number
-                    or task.branch != delivery.branch or task.base_branch != delivery.base_branch
-                    or delivery.head_sha not in {task.expected_head_sha, result.commit_sha}):
+                    or task.branch != delivery.branch
+                    or delivery.head_sha not in {
+                        task.previous_head_sha or task.expected_head_sha, result.commit_sha,
+                    }):
                 return None, "old revision does not prove the frozen delivery"
             assert result.commit_sha is not None  # canonical mismatch validation requires this evidence
-            proof = ReopenProof(result.commit_sha, result.session_id, result.session_generation)
-            revision = result
+            baseline = result.baseline_sha or task.expected_head_sha
+            if (task.purpose == "revise" and result.commit_sha != baseline
+                    and not await repo.compare_commits(baseline, result.commit_sha)):
+                return None, "old revision does not advance its coding baseline"
+            head = result.commit_sha if task.purpose == "revise" else delivery.head_sha
+            proof = ReopenProof(head, result.session_id, result.session_generation)
         else:
             return None, "unexpected coding result; manual reconciliation required"
-    if remote.head_sha != proof.head_sha:
-        return None, "PR head/base changed; verified delivery is unchanged"
-    if revision is not None:
-        mismatch = await verify_revision_remote(
-            repo, flow, delivery.model_copy(update={"state": DeliveryState.OPEN}), proof.head_sha,
-        )
-        if mismatch:
-            return None, mismatch
-    else:
-        ref = await repo.fetch_ref(delivery.branch)
-        if ref.branch != delivery.branch or ref.sha != proof.head_sha:
-            return None, "PR head/base and remote branch disagree"
+    ref = await repo.fetch_ref(delivery.branch)
+    if ref.branch != delivery.branch or ref.sha != remote.head_sha:
+        return None, "PR and remote branch disagree"
     return proof, None
 
 

@@ -39,10 +39,12 @@ edited 不产生新的强信号，approve/dismissed 不触发修订。空 Reques
 
 ## B.2 冻结批次与任务协议
 
-协议 v23 向 worker 下发 INITIAL、REVISION、ARCHIVE。triage 直接使用 ReviewBatch，
+协议 v24 向 worker 下发 INITIAL、REVISION、ARCHIVE。triage 直接使用 ReviewBatch，
 上下文与 Judge 决策保存在批次内，没有 triage job 或本地终态协议。
 REVISION 冻结原 PR、repo identity、head/base、session generation、原始任务和前轮未决点。
 RevisionTask.purpose 为 answer 或 revise；历史任务缺省为 revise。两者的结果都携带同一 batch ID 与精确 item/version 清单，control 校验所有权、当前 attempt 与快照。
+
+同仓库、同 PR、同来源分支的外部 push、rebase/force-push 和目标分支调整不暂停 Flow。reconcile 不提前改写 delivery head/version；每次准备重新读取 PR，`previous_head_sha` 保留历史已交付提交，`expected_head_sha` 保存本次 PR 观察值，base 使用新读取的目标分支。若已有 Judge context 的 head/base 过期，退休尚未执行的派生 job，清除 context、decision 和 inference 关联后重新判断；不把旧决定绑定到新快照。直接 Request changes 路径也读取当前 PR。
 
 
 control 读取当前 PR 标题正文、head/base SHA、冻结反馈和未决点，只补齐 inline 反馈所在的线程上下文，保留反馈已有的 path、original_commit_id 和 diff_hunk。不读取全 PR 文件 diff、原 Issue/任务正文或无关讨论前缀；非 inline 反馈只保留冻结内容，不猜测线程关系。
@@ -88,14 +90,15 @@ answer 显式要求仅回答、不修改代码、不 commit/push，覆盖旧编�
 未提交文件变化、先改后恢复和其他外部副作用不在这两项检查范围内；这不是只读沙箱。失败保留现场及反馈，不自动回滚或升级为 revise。
 
 revise 的退出码之外，worker 要求完整 schema、Git/jj backend、正确 branch、干净工作区和一致的本地/远端 SHA；
-执行前基线必须等于 control 冻结的 head。control 查询原 open PR 与 ref，核验 head repository、base/branch
-和提交从基线正常前进，随后将交付事实及 addressed 声明冻结入 ResultPlan。结果重放复用已核验事实与副作用回执。
-允许 SHA 不变的明确 no-op；没有新提交或有 deferred/clarification/遗漏项时不请求 review。
+worker 先 fetch 原分支，确认本地没有脏文件或无法证明已发布的提交，再安全同步到 fetch 得到的 R。R 可以晚于 PR 观察值，也不必继承历史 delivery head。Git 与 colocated jj 均保留未发布工作；不会自动 stash、强推或在途 rebase。
+成功结果必须提供实际 `baseline_sha=R`。control 查询原 open PR 与 ref，核验来源仓库、base/branch、最终本地/远端提交一致，且最终提交等于 R 或继承 R，随后将交付事实及 addressed 声明冻结入 ResultPlan。只有成功结果更新 delivery head/base；评论、resolve 和 re-review 使用冻结任务/结果的 PR 事实。结果重放复用已核验事实与副作用回执。
+允许 SHA 不变的明确 no-op；是否有新提交比较最终提交与 R，外部提交不算 Agent 的新修订。没有新提交或有 deferred/clarification/遗漏项时不请求 review。编码后的并发更新由普通 push 和结果/effect 校验拒绝，保留现场与反馈，不自动重新编码。
 
 没有 session，或 Codex 0.153.4 明确返回执行前的 `no rollout found for thread id` 且无执行事件时，
-按任务用途重新核验（answer 比较本地提交，revise 核验 repo/ref）后最多 start 一次；其他错误和不确定结果保留反馈并暂停。journal 在进程启动前记录
+按任务用途重新核验（answer 比较本地提交，revise 只读复核已同步的本地基线、分支和 remote，不再次 fetch/移动工作区）后最多 start 一次；其他错误和不确定结果保留反馈并暂停。journal 在进程启动前记录
 resume/fallback 阶段、一次性兜底消耗和 invocation 结果。重启时没有 terminal 的 started job 不自动重跑。
 `Started` 与 revision_cycles 同事务提交，fallback/重放不增额度；新的显式 retry job 消耗新额度，保留原 worker binding。
+wire24 须协调升级，journal5/inbox1 保持不变。历史任务缺少 `previous_head_sha` 时按旧 expected head 解释；历史结果缺少 `baseline_sha` 时保持原 JSON/digest，新版 revise 成功结果不能省略该证据。升级前先收敛旧执行和未决回执，回滚前同样收敛新版任务；不自动重跑未知执行或恢复既有 BLOCKED Flow。旧执行/结果已收敛的 reopen 也允许同来源分支外部更新，正常关闭/合并/归档仍保持现有终态规则。
 成功接受新 session 后才更新 generation。每次 Amp/Codex 调用按 stdout/stderr 非空新读入
 刷新空闲期限（包括半行、工具调用/结果和进度）；连续无输出达到配置值才超时，没有修订外层总时限。
 心跳、历史查询和 EOF 不续期；静默工具仍可能超时，持续诊断也算活动。历史导出仍有 20 秒
