@@ -1,5 +1,7 @@
 """Real runtime setup and scripted remote peers for focused protocol tests."""
 
+import asyncio
+
 from pydantic import SecretStr
 
 from app.communication.session import Session
@@ -47,7 +49,10 @@ async def worker_runtime(*, execution: WorkerExecution, worker_token="test", rea
     execution._on_change = runtime.notify
     runtime.executions[execution.state.flow_id] = execution
     if read_history is not None:
-        runtime.read_history = read_history  # type: ignore[method-assign]
+        async def history(query):
+            return await asyncio.to_thread(read_history, query)
+
+        runtime.read_history = history  # type: ignore[method-assign]
     return runtime
 
 

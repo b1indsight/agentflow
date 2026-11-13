@@ -381,12 +381,22 @@ class ConsoleStore(Repository):
         )
 
     def request_sync(self, flow_id: int, *, active_only: bool = True) -> None:
+        """Queue background reads; explicit refresh also retries earlier file registrations."""
         with self._db.connection() as connection:
             connection.execute(
                 "SELECT console_enqueue(flow_id) FROM console_flows WHERE flow_id=%s"
                 + (" AND facts->>'lifecycle'<>'archived'" if active_only else ""),
                 (flow_id,),
             )
+            if not active_only:
+                # console_enqueue holds the publication lock before this source lock.
+                # Retire any old claim so a late EOF cannot overwrite the restart.
+                connection.execute(
+                    "UPDATE console_sync SET cursor=NULL,claim_token=NULL,claim_until=NULL,"
+                    "dirty=FALSE,failures=0,next_at=now(),status='pending'"
+                    " WHERE flow_id=%s AND source='worker'",
+                    (flow_id,),
+                )
 
     def rebuild(self, flow_id: int) -> None:
         """Recompute from canonical facts; never replay or fabricate missing historical events."""

@@ -69,9 +69,9 @@ class Connection:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("registered_first", [False, True])
-async def test_history_uses_fifo_with_separate_registration(tmp_path, registered_first) -> None:
-    # A standalone read holds the driver; control in its own message waits behind it.
-    # Protocol 20 keeps registration and history in separate messages.
+async def test_history_does_not_block_separate_registration(tmp_path, registered_first) -> None:
+    # History can register files over this same connection, so the driver must
+    # continue dispatching control/replies even while history IO is suspended.
     connection = Connection()
     started, release = threading.Event(), threading.Event()
 
@@ -100,7 +100,10 @@ async def test_history_uses_fifo_with_separate_registration(tmp_path, registered
     try:
         await connection.outgoing.get()  # Registration request.
         assert await asyncio.to_thread(started.wait, 5)
-        assert client._connected is registered_first
+        async with asyncio.timeout(1):
+            while not client._connected:
+                await asyncio.sleep(0)
+        assert not release.is_set()
         release.set()
         message = await connection.receive_message()
         assert len(message.payload) == 1 and message.connection_epoch == "e1"
@@ -111,6 +114,68 @@ async def test_history_uses_fifo_with_separate_registration(tmp_path, registered
         assert result.page.session_id == SESSION
     finally:
         release.set()
+        running.cancel()
+        await asyncio.gather(running, return_exceptions=True)
+
+
+async def test_history_is_bounded_and_disconnect_joins_pending_reads(tmp_path, monkeypatch):
+    # A disconnected page must relinquish its registration waits, never reply on
+    # a later connection or prevent that connection from reading history.
+    connection = Connection()
+    started, released = asyncio.Event(), []
+
+    async def read(query):
+        released.append(False)
+        index = len(released) - 1
+        if len(released) == 2:
+            started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            released[index] = True
+
+    state = ExecutionState(tmp_path, 3)
+    client = await worker_runtime(
+        execution=WorkerExecution(worker_id="worker", executor=SimpleNamespace(), state=state),
+    )
+    monkeypatch.setattr(client, "read_history", read)
+    requests = [ConversationQuery(
+        **call_header(), method="worker.history", arguments=HistoryArguments(session_id=SESSION),
+    ) for _ in range(3)]
+    running = asyncio.create_task(run_worker(client, connection))
+    try:
+        await connection.receive_message()  # Register.
+        await connection.incoming.put(registered(epoch="old").model_dump_json())
+        for query in requests:
+            await connection.incoming.put(server_message(query, epoch="old").model_dump_json())
+        await asyncio.wait_for(started.wait(), 2)
+        result = (await connection.receive_message()).payload[0]
+        assert isinstance(result, ConversationResult)
+        assert result.reply_to == requests[-1].message_id and result.error == "query_busy"
+    finally:
+        running.cancel()
+        await asyncio.wait_for(asyncio.gather(running, return_exceptions=True), 2)
+    assert released == [True, True]
+
+    async def available(query):
+        return HistoryPage(session_id=query.session_id)
+
+    monkeypatch.setattr(client, "read_history", available)
+    connection = Connection()
+    running = asyncio.create_task(run_worker(client, connection))
+    try:
+        await connection.receive_message()
+        await connection.incoming.put(registered(epoch="new").model_dump_json())
+        query = ConversationQuery(
+            **call_header(), method="worker.history", arguments=HistoryArguments(session_id=SESSION),
+        )
+        await connection.incoming.put(server_message(query, epoch="new").model_dump_json())
+        response = await connection.receive_message()
+        assert response.connection_epoch == "new"
+        result = response.payload[0]
+        assert isinstance(result, ConversationResult) and result.reply_to == query.message_id
+        assert result.page == HistoryPage(session_id=SESSION)
+    finally:
         running.cancel()
         await asyncio.gather(running, return_exceptions=True)
 

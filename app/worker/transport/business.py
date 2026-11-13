@@ -39,6 +39,7 @@ class WorkerBusinessCallbacks:
         self.session, self.runtime = session, runtime
         self.ready = ready
         self.pending: dict[int, PendingToolCall] = {}
+        self._history: dict[asyncio.Task[ConversationResult], str | None] = {}
 
     def bind(self, routes: Dispatcher[ServerMessageUnion]) -> None:
         self.routes = routes
@@ -46,22 +47,45 @@ class WorkerBusinessCallbacks:
         routes.before_wait(self.prepare)
 
     async def on_history(self, call: ConversationQuery, message: ServerMessageUnion) -> None:
-        """Read inline with the driver; only the blocking filesystem/process IO leaves the loop."""
+        """Keep the driver free to receive registration replies while history is prepared."""
+        if len(self._history) >= 2:
+            await self._send_history(ConversationResult(
+                **result_header(call.message_id), method=call.method, error="query_busy",
+            ), message.connection_epoch)
+            return
+        task = asyncio.create_task(self._read_history(call))
+        self._history[task] = message.connection_epoch
+        task.add_done_callback(self._history_completed)
+
+    def _history_completed(self, task: asyncio.Task[ConversationResult]) -> None:
+        if not task.cancelled():
+            task.exception()
+        self.session.wake()
+
+    async def _read_history(self, call: ConversationQuery) -> ConversationResult:
         try:
             query = HistoryQuery(**call.arguments.model_dump())
-            page = await asyncio.to_thread(self.runtime.read_history, query)
-            result = ConversationResult(
+            page = await self.runtime.read_history(query)
+            return ConversationResult(
                 **result_header(call.message_id), method="worker.history", page=page
             )
         except ConversationFailure as error:
-            result = ConversationResult(
+            return ConversationResult(
                 **result_header(call.message_id), method="worker.history", error=error.code
             )
+
+    async def _send_history(self, result: ConversationResult, epoch: str | None) -> None:
         await self.session.send(
             WorkerMessage(
-                **message_header(message.connection_epoch), control=None, payload=[result]
+                **message_header(epoch), control=None, payload=[result]
             )
         )
+
+    async def aclose(self) -> None:
+        for task in self._history:
+            task.cancel()
+        await asyncio.gather(*self._history, return_exceptions=True)
+        self._history.clear()
 
     async def prepare(self) -> None:
         """Reconcile borrowed work between events, without another callback's lifecycle calls.
@@ -69,7 +93,13 @@ class WorkerBusinessCallbacks:
         Normal completion retains the sent call until its late reply or assignment retirement.
         A fenced stop withdraws it. Neither path takes ownership of the execution's Future.
         """
-        if self.session.closed or not self.ready():
+        if self.session.closed:
+            return
+        for task in tuple(self._history):
+            if task.done():
+                epoch = self._history.pop(task)
+                await self._send_history(task.result(), epoch)
+        if not self.ready():
             return
         active_jobs = set()
         for execution in self.runtime.executions.values():

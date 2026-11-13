@@ -17,7 +17,7 @@ from websockets.asyncio.client import connect
 from app.communication.gateway import Gateway
 from app.communication.requests import ReplyRejected, request_reply
 from app.communication.session import Session, SessionClosed, Transport
-from app.contracts.conversation import HistoryPage, HistoryQuery
+from app.contracts.conversation import ConversationFailure, HistoryPage, HistoryQuery
 from app.contracts.files import FileFailure
 from app.contracts.protocol import (
     AssignmentArguments,
@@ -46,9 +46,12 @@ from app.worker.state.amp_history import AmpHistory
 from app.worker.state.execution import ExecutionState
 from app.worker.state.file_links import LocalFileLinks
 from app.worker.state.history import CodexHistory
+from app.worker.state.history_links import link_history
 from app.worker.transport.business import WorkerBusinessCallbacks
 from app.worker.transport.files import WorkerFileCallbacks
 from app.worker.transport.state import WorkerStateCallbacks, control_ack
+
+HISTORY_TIMEOUT = 25.0  # Leave time for the reply within the controller's 30-second budget.
 
 _CONTROL_ENVIRONMENT_KEYS = frozenset(
     {
@@ -246,9 +249,16 @@ class WorkerRuntime:
         self.executions[assignment.flow_id] = execution
         return execution
 
-    def read_history(self, query: HistoryQuery) -> HistoryPage:
-        """History belongs to a session, not to whichever Flow currently occupies a slot."""
-        return (self._amp_history if query.session_id.startswith("T-") else self._history).query(query)
+    async def read_history(self, query: HistoryQuery) -> HistoryPage:
+        """Page native history first, then register destinations only in its outbound copy."""
+        deadline = asyncio.get_running_loop().time() + HISTORY_TIMEOUT
+        source = self._amp_history if query.session_id.startswith("T-") else self._history
+        try:
+            async with asyncio.timeout_at(deadline):
+                page = await asyncio.to_thread(source.query, query)
+        except TimeoutError:
+            raise ConversationFailure("query_timeout") from None
+        return await link_history(page, self.register_file, deadline=deadline)
 
     async def register_file(self, path: Path) -> str:
         """Return an owner-only server-relative URL for a local file (at most 512 KiB).
@@ -372,7 +382,10 @@ class WorkerRuntime:
                 try:
                     await inference_callbacks.aclose()
                 finally:
-                    await file_callbacks.aclose()
+                    try:
+                        await file_callbacks.aclose()
+                    finally:
+                        await business_callbacks.aclose()
 
     def _set_connected(self, connected: bool) -> None:
         self._connected = connected
