@@ -7,11 +7,25 @@ from app.contracts.protocol import Register, message_header
 from app.contracts.validation import parse_worker_input
 from app.controler.workers.callbacks import ServerCallbacks
 from app.controler.workers.transport import control_ack
+from app.domain.inference_models import InferenceCapability, InferenceOutput
 from app.domain.models import WorkspaceInventory
 from app.worker.config import WorkerSettings
 from app.worker.execution.lifecycle import WorkerExecution
 from app.worker.runtime import WebSocketTransport, WorkerRuntime
 from tests.test_communication_session import Socket
+
+
+class NamingInference:
+    """Script only the model answer, keeping inference dispatch and result handling real."""
+
+    def capability(self):
+        return InferenceCapability(adapter_version="codex/v1")
+
+    async def infer(self, task):
+        return InferenceOutput(
+            request_id=task.request_id, request_digest=task.digest, adapter_version="codex/v1",
+            text='{"title":"Implement task","branch_slug":"implement-task"}',
+        )
 
 
 def inventory() -> list[WorkspaceInventory]:

@@ -134,7 +134,7 @@ async def prepared_initial(store: Store, recording_resources: None, request):
     from app.controler.workflow.service import ControlService
     from app.domain.models import VcsKind
     from tests.github import RecordingGitHub
-    from tests.test_coordinator import coordinator
+    from tests.test_coordinator import coordinator, prepare_initial
     from tests.workspace_fixtures import register_worker
 
     content = getattr(request, "param", None)
@@ -146,9 +146,11 @@ async def prepared_initial(store: Store, recording_resources: None, request):
     job = store.workers.assign_job("worker-a", "token", "epoch")
     assert job is not None
     github = RecordingGitHub()
+    github.refs = {}
     subject = coordinator(store, github)
-    task = await subject.prepare(job)
+    task = await prepare_initial(subject, job)
     assert isinstance(task, InitialTask)
+    github.refs[task.branch] = "abc123"
     assert store.workers.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
     subject.mark_started(job, task, "worker-a")
     request = FlowToolRequest(

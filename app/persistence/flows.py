@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
+from psycopg.errors import UniqueViolation
 from psycopg.rows import class_row
 
 from app.domain.models import (
@@ -64,6 +65,33 @@ class FlowStore(Repository):
                 " ORDER BY id DESC LIMIT 1",
                 (repo, issue_number),
             ).fetchone()
+
+    def assign_branch_name(self, flow_id: int, repo: str, slug: str) -> str:
+        """Reserve a stable semantic stem; the caller owns the workflow transaction.
+
+        A savepoint lets a concurrent name reservation win without losing the saved
+        inference result. Round suffixes are excluded by the naming output contract.
+        """
+        stem = f"flow/{slug}"
+        suffix = 1
+        while True:
+            candidate = stem if suffix == 1 else f"{stem}-{suffix}"
+            try:
+                with self._db.transaction() as tx, tx.connection() as connection:
+                    row = connection.execute(
+                        "UPDATE flows SET branch_name=%s WHERE id=%s AND repo=%s"
+                        " AND branch_name IS NULL RETURNING branch_name",
+                        (candidate, flow_id, repo),
+                    ).fetchone()
+                    if row is None:
+                        flow = required(FlowStore(tx).get_flow(flow_id))
+                        assert flow.branch_name is not None
+                        return flow.branch_name
+                    return row["branch_name"]
+            except UniqueViolation as error:
+                if error.diag.constraint_name != "ux_flows_branch_name":
+                    raise
+                suffix += 1
 
     def get_flow_by_pr(self, repo: str, pr_number: int) -> Flow | None:
         with (

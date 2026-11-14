@@ -182,7 +182,8 @@ class ControlService:
             ConsoleSyncStore(tx).reset_round(fresh.id)
             ReconcileStore(tx).reset_round(fresh.id)
             resumed = flows.start_round(fresh)
-            self.deliveries.using(tx).reset_round(resumed.id, resumed.initial_branch)
+            if self.deliveries.using(tx).get_delivery(resumed.id) is not None:
+                self.deliveries.using(tx).reset_round(resumed.id, resumed.initial_branch)
             flows.select_owner(resumed)
             self.jobs.using(tx).enqueue_job(
                 resumed.id, JobKind.INITIAL,

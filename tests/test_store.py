@@ -51,6 +51,48 @@ def test_issue_input_schema_upgrade_preserves_history_and_is_repeatable(postgres
         assert store.flows.get_flow(direct.id).task_content == content
 
 
+def test_branch_schema_backfills_actual_deliveries_without_renaming(store):
+    # Upgrade from before branch_name existed: custom and ID branches both survive resume.
+    deliveries = [("flow/older-custom-round-3", 3, "flow/older-custom"),
+                  ("flow/77", 1, "flow/77"),
+                  ("flow/not-this-round-3", 2, "flow/not-this-round-3")]
+    for number, (branch, round_no, _) in enumerate(deliveries, 1):
+        flow = store.flows.create_flow("owner/repo", number, 42)
+        store.deliveries.get_or_create_delivery(flow.id, branch)
+        with store.connection() as connection:
+            connection.execute("UPDATE flows SET current_round_no=%s WHERE id=%s", (round_no, flow.id))
+    untouched = store.flows.create_flow("owner/repo", 4, 42)
+    with store.connection() as connection:
+        connection.execute("ALTER TABLE flows DROP COLUMN branch_name")
+    store.init_db()
+    store.init_db()
+    for flow, (branch, round_no, stem) in zip(sorted(store.flows.list_flows(), key=lambda f: f.id)[:3], deliveries, strict=True):
+        assert flow.branch_name == stem and flow.current_round_no == round_no
+        assert store.deliveries.get_delivery(flow.id).branch == branch
+    assert store.flows.get_flow(untouched.id).branch_name is None
+
+
+def test_concurrent_branch_names_are_unique_per_repo_and_survive_archive(store):
+    # Identical model answers must not put independent tasks onto the same branch.
+    flows = [store.flows.create_flow("owner/repo", number, 42) for number in (1, 2)]
+    ready = Barrier(2)
+
+    def reserve(flow):
+        ready.wait(timeout=5)
+        return store.flows.assign_branch_name(flow.id, flow.repo, "fix-pagination")
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        names = list(executor.map(reserve, flows))
+    assert set(names) == {"flow/fix-pagination", "flow/fix-pagination-2"}
+    for flow, name in zip(flows, names, strict=True):
+        assert store.flows.assign_branch_name(flow.id, flow.repo, "different-answer") == name
+        ControlService(database=store.database).cancel(store.flows.get_flow(flow.id))
+    third = store.flows.create_flow("owner/repo", 3, 42)
+    assert store.flows.assign_branch_name(third.id, third.repo, "fix-pagination") == "flow/fix-pagination-3"
+    other = store.flows.create_flow("owner/other", 1, 42)
+    assert store.flows.assign_branch_name(other.id, other.repo, "fix-pagination") == "flow/fix-pagination"
+
+
 def test_persisted_timestamps_follow_the_injected_clock(postgresql_url):
     # Recovery simulations inject a clock; newly created work must share their timeline.
     now = datetime(2026, 9, 1, tzinfo=UTC)
@@ -158,7 +200,7 @@ def test_attempt_and_job_lifecycle_round_trip(store: Store) -> None:
     current = store.flows.get_flow(flow.id)
     assert current is not None and current.state is FlowState.RUNNING
     store.init_db()
-    assert store.flows.get_flow(flow.id) == current
+    assert store.flows.get_flow(flow.id) == current.model_copy(update={"branch_name": delivery.branch})
     assert store.flows.get_current_attempt(flow) == attempt
     assert store.jobs.get_job(claimed.id) == finished
     assert store.deliveries.get_delivery(flow.id) == delivery

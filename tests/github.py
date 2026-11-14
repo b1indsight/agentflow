@@ -12,6 +12,8 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr
 from app.github import (
     Batch,
     GitHubApp,
+    GitHubError,
+    GitHubErrorKind,
     Issue,
     PullRequest,
     PushCapability,
@@ -48,6 +50,7 @@ class RecordingGitHub(GitHubApp):
     opened: list[str] = Field(default_factory=list)
     review_requests: list[list[str]] = Field(default_factory=list)
     labels: list[list[str]] = Field(default_factory=list)
+    refs: dict[str, str] | None = None
     threads: list[ReviewThread] = Field(default_factory=list)
     thread_replies: list[str] = Field(default_factory=list)
     resource_calls: list[dict[str, Any]] = Field(default_factory=list)
@@ -86,7 +89,11 @@ class RecordingRepository(Repository):
         )
 
     async def fetch_ref(self, branch: str, *, retry_transient: bool = False) -> RemoteRef:
-        record_call(self, "fetch_ref")
+        state = record_call(self, "fetch_ref")
+        if state.refs is not None:
+            if branch not in state.refs:
+                raise GitHubError(GitHubErrorKind.NOT_FOUND, "get_ref", status_code=404)
+            return RemoteRef(branch=branch, sha=state.refs[branch])
         return RemoteRef(branch=branch, sha="abc123")
 
     async def compare_commits(self, base: str, head: str) -> bool:

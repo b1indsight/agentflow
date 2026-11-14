@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+import json
+from datetime import timedelta
+
 import pytest
 from psycopg.types.json import Jsonb
 from pydantic import SecretStr
@@ -74,6 +78,81 @@ def coordinator(store: Store, github: GitHubApp) -> CoordinatorFixture:
     return subject
 
 
+async def prepare_initial(subject, coding):
+    """Complete the real title/branch inference before a scripted coding assignment."""
+    preparing = asyncio.create_task(subject.prepare(coding))
+    try:
+        async with asyncio.timeout(3):
+            while not preparing.done():
+                flow = subject.flows.get_flow(coding.flow_id)
+                naming = subject.jobs.get_job(flow.title_job_id) if flow.title_job_id is not None else None
+                if naming is not None and naming.state in {JobState.QUEUED, JobState.RUNNING}:
+                    break
+                await asyncio.sleep(.01)
+            if preparing.done():
+                return preparing.result()
+            worker_id = coding.assigned_worker_id
+            worker = next(w for w in subject.workers.list_workers() if w.worker_id == worker_id)
+            epoch = worker.connection_epoch
+            subject.workers.worker_ready(worker_id, epoch, InferenceCapability(adapter_version="codex/v1"))
+            naming = subject.workers.assign_job(worker_id, "naming", epoch, slot="infer")
+            assert naming is not None and naming.id == flow.title_job_id
+            call = naming.inference.current_task
+            response = InferenceResult(
+                **result_header(call.request_id), method="worker.infer", job_id=naming.id,
+                assignment_token="naming", output=InferenceOutput(
+                    request_id=call.request_id, request_digest=call.digest, adapter_version="codex/v1",
+                    text=json.dumps({"title": "Task title", "branch_slug": "implement-task"}),
+                ),
+            )
+            assert subject.workers.record_assignment_result(naming.id, worker_id, "naming", epoch, response) == "pending"
+            await subject.results.apply(naming.id)
+            return await preparing
+    finally:
+        preparing.cancel()
+        await asyncio.gather(preparing, return_exceptions=True)
+
+
+async def test_initial_waits_for_title_and_branch_from_one_inference(store):
+    # An async title used to arrive after coding had already started on an ID branch.
+    flow = ControlService(database=store.database).create_flow(
+        "owner/repo", None, 42, task_content="修复分页游标末页重复数据",
+    )
+    register_worker(store, "worker-a", repo=flow.repo, epoch="epoch")
+    github = RecordingGitHub()
+    github.refs = {}
+    subject = coordinator(store, github)
+    coding = store.workers.assign_job("worker-a", "token", "epoch")
+    preparing = asyncio.create_task(subject.prepare(coding))
+    try:
+        async with asyncio.timeout(2):
+            while store.flows.get_flow(flow.id).title_job_id is None:
+                await asyncio.sleep(.01)
+        assert not preparing.done()
+        assert store.deliveries.get_delivery(flow.id) is None
+        store.workers.worker_ready("worker-a", "epoch", InferenceCapability(adapter_version="codex/v1"))
+        naming = store.workers.assign_job("worker-a", "naming", "epoch", slot="infer")
+        assert naming.id == store.flows.get_flow(flow.id).title_job_id
+        call = naming.inference.current_task
+        result = InferenceResult(
+            **result_header(call.request_id), method="worker.infer", job_id=naming.id,
+            assignment_token="naming", output=InferenceOutput(
+                request_id=call.request_id, request_digest=call.digest, adapter_version="codex/v1",
+                text=json.dumps({"title": "修复分页游标", "branch_slug": "fix-pagination-cursor"}),
+            ),
+        )
+        assert store.workers.record_assignment_result(naming.id, "worker-a", "naming", "epoch", result) == "pending"
+        await subject.results.apply(naming.id)
+        task = await asyncio.wait_for(preparing, 2)
+        assert isinstance(task, InitialTask) and task.branch == "flow/fix-pagination-cursor"
+        assert store.flows.get_flow(flow.id).title == "修复分页游标"
+        assert (await subject.prepare(coding)).branch == task.branch
+        assert [job.kind for job in store.jobs.list_jobs(flow.id)] == [JobKind.INITIAL, JobKind.INFERENCE]
+    finally:
+        preparing.cancel()
+        await asyncio.gather(preparing, return_exceptions=True)
+
+
 @pytest.mark.parametrize("prepared_initial", [None, "\n直接任务 α\r\n完整需求 β\n"], indirect=True)
 async def test_initial_job_crosses_worker_boundary_and_opens_pr(store, prepared_initial):
     flow, subject, github, request, result = prepared_initial
@@ -124,41 +203,63 @@ async def test_issue_edits_change_prepared_text_without_resubmitting_title(store
     assert [job.id for job in store.jobs.list_jobs(flow.id)] == [coding.id, title_job.id]
 
 
+@pytest.fixture
+async def pending_naming(store):
+    flow = ControlService(database=store.database).create_flow("owner/repo", 8, 42)
+    register_worker(store, "worker-a", repo=flow.repo, epoch="epoch")
+    github = RecordingGitHub()
+    github.refs = {}
+    subject = coordinator(store, github)
+    coding = store.workers.assign_job("worker-a", "token", "epoch")
+    preparing = asyncio.create_task(subject.prepare(coding))
+    try:
+        async with asyncio.timeout(2):
+            while (flow := store.flows.get_flow(flow.id)).title_job_id is None:
+                await asyncio.sleep(.01)
+        yield flow, subject, coding, preparing, store.jobs.get_job(flow.title_job_id)
+    finally:
+        preparing.cancel()
+        await asyncio.gather(preparing, return_exceptions=True)
+
+
 @pytest.mark.parametrize("reply,cancelled,expected", [
-    ("  修复分页游标 😀\n", False, "修复分页游标 😀"),
-    ("第一行\n第二行", False, None),
-    ("x" * 257, False, None),
+    ({"title": "修复分页游标 😀", "branch_slug": "fix-cursor"}, False, "修复分页游标 😀"),
+    ({"title": "第一行\n第二行", "branch_slug": "fix-cursor"}, False, None),
+    ({"title": "x" * 257, "branch_slug": "fix-cursor"}, False, None),
+    ({"title": "Title", "branch_slug": "../unsafe"}, False, None),
+    ({"title": "Title", "branch_slug": "123"}, False, None),
+    ({"title": "Title", "branch_slug": "fix-round-2"}, False, None),
+    ('{"title":"One","title":"Two","branch_slug":"fix-cursor"}', False, None),
     (InferenceFailure(code="configuration"), False, None),
-    ("不应使用的标题", True, None),
+    ({"title": "不应使用的标题", "branch_slug": "fix-cursor"}, True, None),
+    ({"title": "不应使用的标题", "branch_slug": "fix-cursor"}, "stop", None),
 ])
-async def test_title_is_inferred_once_and_replayed_atomically(store, prepared_initial, monkeypatch, reply, cancelled, expected):
-    # Restart between receipt and application must retain the title without changing coding state.
-    flow, subject, github, request, _ = prepared_initial
-    coding = store.jobs.get_job(request.arguments.job_id)
-    title_job = store.jobs.get_job(flow.title_job_id)
+async def test_title_is_inferred_once_and_replayed_atomically(store, pending_naming, monkeypatch, reply, cancelled, expected):
+    # Restart between receipt and application must publish both names or neither.
+    flow, subject, _coding, preparing, title_job = pending_naming
     assert title_job is not None and title_job.inference.source_attempt_id == flow.current_attempt_id
     assert title_job.inference.task.messages[-1].content == "Real issue\n\nReal body"
-    task = await subject.prepare(coding)
-    assert isinstance(task, InitialTask)
     assert store.flows.get_flow(flow.id).title_job_id == title_job.id
     assert len([j for j in store.jobs.list_jobs(flow.id) if j.kind is JobKind.INFERENCE]) == 1
-    register_worker(store, "plain", epoch="epoch")
-    store.workers.worker_ready("plain", "epoch", InferenceCapability(adapter_version="codex/v1"))
-    assigned = store.workers.assign_job("plain", "title-token", "epoch", slot="infer")
+    store.workers.worker_ready("worker-a", "epoch", InferenceCapability(adapter_version="codex/v1"))
+    assigned = store.workers.assign_job("worker-a", "title-token", "epoch", slot="infer")
     assert assigned is not None and assigned.id == title_job.id
     call = assigned.inference.current_task
     response = InferenceResult(
         **result_header(call.request_id), method="worker.infer", job_id=assigned.id,
         assignment_token=assigned.assignment_token,
         output=InferenceOutput(request_id=call.request_id, request_digest=call.digest,
-            text=reply, adapter_version="codex/v1") if isinstance(reply, str) else None,
+            text=json.dumps(reply) if isinstance(reply, dict) else reply,
+            adapter_version="codex/v1") if not isinstance(reply, InferenceFailure) else None,
         failure=reply if isinstance(reply, InferenceFailure) else None,
     )
-    assert store.workers.record_assignment_result(assigned.id, "plain", "title-token", "epoch", response) == "pending"
-    if cancelled:
+    assert store.workers.record_assignment_result(assigned.id, "worker-a", "title-token", "epoch", response) == "pending"
+    if cancelled == "stop":
+        ControlService(database=store.database).cancel(flow)
+    elif cancelled:
         flow.current_attempt_id = store.flows.create_attempt(flow.id).id
         store.flows.update_flow(flow)
-    recovered = coordinator(store, github)
+    recovered = coordinator(store, subject.github)
     if expected is not None:
         # Fail the title write after settlement: both facts must roll back together.
         from psycopg import Connection
@@ -174,17 +275,27 @@ async def test_title_is_inferred_once_and_replayed_atomically(store, prepared_in
             with pytest.raises(RuntimeError, match="title write interrupted"):
                 await recovered.results.apply(assigned.id)
         assert store.jobs.get_job(assigned.id).result_applied_at is None
+        assert store.flows.get_flow(flow.id).branch_name is None
+        assert store.flows.get_flow(flow.id).title is None
     await recovered.results.apply(assigned.id)
-    await coordinator(store, github).results.apply(assigned.id)
+    await coordinator(store, subject.github).results.apply(assigned.id)
     assert store.flows.get_flow(flow.id).title == expected
-    store.flows.update_flow(flow)
+    if cancelled != "stop":
+        store.flows.update_flow(flow)
     assert store.flows.get_flow(flow.id).title == expected
-    assert store.jobs.get_job(coding.id).state is JobState.RUNNING
+    task = await asyncio.wait_for(preparing, 2)
+    if expected is not None:
+        assert isinstance(task, InitialTask) and task.branch == "flow/fix-cursor"
+        assert store.flows.get_flow(flow.id).branch_name == "flow/fix-cursor"
+    else:
+        assert task is (JobState.DONE if cancelled else JobState.FAILED)
+        assert store.deliveries.get_delivery(flow.id) is None
+        assert store.flows.get_flow(flow.id).branch_name is None
     assert store.jobs.get_job(assigned.id).result_applied_at is not None
 
 
-async def test_title_enqueue_failure_does_not_block_coding(store, monkeypatch):
-    # Display metadata must not roll back a prepared coding assignment.
+async def test_title_enqueue_failure_blocks_coding_without_an_id_fallback(store, monkeypatch):
+    # A descriptive branch is required before any coding assignment can be sent.
     from app.persistence.jobs import JobStore
 
     def unavailable(*args, **kwargs):
@@ -195,9 +306,32 @@ async def test_title_enqueue_failure_does_not_block_coding(store, monkeypatch):
     register_worker(store, "worker-a", repo=flow.repo, epoch="epoch")
     job = store.workers.assign_job("worker-a", "token", "epoch")
     task = await coordinator(store, RecordingGitHub()).prepare(job)
-    assert isinstance(task, InitialTask) and task.task_content == "\n原文 α\r\n"
-    assert store.deliveries.get_delivery(flow.id).base_branch == "trunk"
+    assert task is JobState.FAILED
+    assert store.deliveries.get_delivery(flow.id) is None
     assert store.flows.get_flow(flow.id).title_job_id is None
+
+
+async def test_naming_deadline_without_an_inference_worker_blocks_initial(store, pending_naming, monkeypatch):
+    # A coding-only worker cannot leave preparation waiting forever for inference.
+    flow, subject, coding, preparing, naming = pending_naming
+    deadline = naming.inference.deadline_at + timedelta(seconds=1)
+    monkeypatch.setattr(store.database, "_clock", lambda: deadline)
+    assert await asyncio.wait_for(preparing, 2) is JobState.FAILED
+    assert store.flows.get_flow(flow.id).state is FlowState.BLOCKED
+    assert store.deliveries.get_delivery(flow.id) is None
+    assert store.jobs.get_job(coding.id).started_at is None
+    assert "execution_timeout" in store.jobs.get_job(coding.id).last_error
+
+    # Explicit retry retains the attempt but starts one new logical naming call.
+    from tests.workspace_fixtures import report_settled
+
+    report_settled(store, coding.id, epoch="epoch")
+    assert ControlService(database=store.database).retry(store.flows.get_flow(flow.id))
+    retry = store.workers.assign_job("worker-a", "retry", "epoch")
+    task = await prepare_initial(subject, retry)
+    assert isinstance(task, InitialTask) and task.branch == "flow/implement-task"
+    named = store.flows.get_flow(flow.id)
+    assert named.current_attempt_id == flow.current_attempt_id and named.title_job_id != naming.id
 
 
 async def test_initial_failure_after_open_pr_request_has_no_github_pr_side_effect(store, prepared_initial):

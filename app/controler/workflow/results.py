@@ -50,6 +50,7 @@ from app.domain.models import (
     FeedbackRef,
     Flow,
     FlowDelivery,
+    FlowNaming,
     FlowState,
     Job,
     JobKind,
@@ -120,17 +121,20 @@ class ResultApplication:
             return await self._apply(job_id)
 
     def _apply_inference(self, job: Job) -> JobState:
-        """Validate saved answers and atomically publish optional display metadata."""
+        """Validate saved answers and atomically publish their Flow naming facts."""
         inference = job.inference
         if inference is None or inference.current_task is None or job.result_payload is None:
             raise ValueError("inference application requires a persisted assignment and result")
         failure = None
+        naming = None
         try:
             result = InferenceResult.model_validate(job.result_payload)
             if result.output is not None:
                 result.output.validate_for(inference.current_task)
                 if inference.validation == "review":
                     TriageVerdict.model_validate(strict_json(result.output.text), context={"judge_response": True})
+                elif inference.validation == "flow_naming":
+                    naming = FlowNaming.model_validate(strict_json(result.output.text))
         except InferenceError as error:
             failure = error.failure
         except ValueError:
@@ -140,6 +144,17 @@ class ResultApplication:
             current = self.jobs.using(tx).get_job(job.id)
             assert current is not None
             if current.state is JobState.DONE and job.flow_id is not None and job.result_payload is not None:
+                if naming is not None:
+                    flow = self.flows.using(tx).get_flow(job.flow_id)
+                    if (flow is not None and flow.title_job_id == job.id
+                            and flow.current_round_no == job.round_no
+                            and flow.current_attempt_id == inference.source_attempt_id):
+                        self.flows.using(tx).assign_branch_name(flow.id, flow.repo, naming.branch_slug)
+                        connection.execute(
+                            "UPDATE flows SET title=%s WHERE id=%s AND title_job_id=%s",
+                            (naming.title.strip(), flow.id, job.id),
+                        )
+                    return current.state
                 output = InferenceResult.model_validate(job.result_payload).output
                 title = output.text.strip() if output is not None else ""
                 if title and len(title) <= 256 and all(character.isprintable() for character in title):

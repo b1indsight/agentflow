@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -103,6 +104,25 @@ class VcsKind(StrEnum):
 # --------------------------------------------------------------------- 持久化模型
 
 
+class FlowNaming(BaseModel):
+    """One worker answer supplies both the display title and semantic branch slug."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    title: str = Field(strict=True, min_length=1, max_length=256)
+    branch_slug: str = Field(
+        strict=True, min_length=3, max_length=48, pattern=r"^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
+    )
+
+    @model_validator(mode="after")
+    def _names(self) -> FlowNaming:
+        if not self.title.strip() or not self.title.isprintable():
+            raise ValueError("title must be a nonblank printable line")
+        if re.search(r"-round(?:-\d+)?$", self.branch_slug):
+            raise ValueError("branch slug uses the reserved round suffix")
+        return self
+
+
 class Flow(BaseModel):
     """Stable task lifecycle with either live Issue input or persisted direct content."""
 
@@ -112,6 +132,7 @@ class Flow(BaseModel):
     task_content: str | None = None
     title: str | None = None
     title_job_id: int | None = None
+    branch_name: str | None = None
     state: FlowState
     installation_id: int | None = None
     current_attempt_id: int | None = None
@@ -130,9 +151,10 @@ class Flow(BaseModel):
 
     @property
     def initial_branch(self) -> str:
-        """Sibling refs preserve first-round branches without Git file/directory conflicts."""
+        """Keep legacy bindings readable; new INITIALs require persisted worker naming."""
         suffix = f"-round-{self.current_round_no}" if self.current_round_no > 1 else ""
-        return f"flow/{self.id}{suffix}"
+        stem = self.branch_name or f"flow/{self.id}"
+        return f"{stem}{suffix}"
 
     def accepts(self, kind: JobKind) -> bool:
         """Finalization never authorizes more coding, even if its PR is reopened."""

@@ -49,6 +49,26 @@ def test_resume_does_not_replay_prior_round_feedback_or_cursors(store):
         assert connection.execute("SELECT count(*) AS n FROM review_versions").fetchone()["n"] == 1
 
 
+async def test_resume_before_first_delivery_still_requires_worker_naming(store, recording_resources):
+    # A task abandoned before preparation has no branch for resume to reset.
+    from app.contracts.protocol import InitialTask
+    from tests.github import RecordingGitHub
+    from tests.test_coordinator import coordinator, prepare_initial
+    from tests.workspace_fixtures import register_worker
+
+    service = ControlService(database=store.database)
+    flow = service.create_flow("owner/repo", 8, 42)
+    service.cancel(flow)
+    resumed = service.resume(flow, expected_round_no=1)
+    assert resumed.branch_name is None and store.deliveries.get_delivery(flow.id) is None
+    register_worker(store, "worker-a", repo=flow.repo, epoch="epoch")
+    coding = store.workers.assign_job("worker-a", "token", "epoch")
+    github = RecordingGitHub()
+    github.refs = {}
+    task = await prepare_initial(coordinator(store, github), coding)
+    assert isinstance(task, InitialTask) and task.branch == "flow/implement-task-round-2"
+
+
 async def test_failed_initial_round_stops_workspace_before_resume(
     store,
     tmp_path,
@@ -69,7 +89,7 @@ async def test_failed_initial_round_stops_workspace_before_resume(
     from app.worker.execution.workspaces import RepositoryWorkspaces
     from app.worker.state.execution import ExecutionState
     from tests.github import RecordingGitHub
-    from tests.test_coordinator import coordinator
+    from tests.test_coordinator import coordinator, prepare_initial
     from tests.test_vcs import _git
     from tests.test_worker_executor import RecordingAgent, assignment_secret
     from tests.test_worker_workspaces import managed_seed
@@ -87,8 +107,10 @@ async def test_failed_initial_round_stops_workspace_before_resume(
     for item in await pool.provision(flow.repo):
         assert store.workers.report_workspace("worker-a", "epoch", item)
     job = store.workers.assign_job("worker-a", "first", "epoch")
-    subject = coordinator(store, RecordingGitHub())
-    task = await subject.prepare(job)
+    github = RecordingGitHub()
+    github.refs = {}
+    subject = coordinator(store, github)
+    task = await prepare_initial(subject, job)
     assert isinstance(task, InitialTask)
     assert store.workers.start_assignment(job.id, task.attempt_id, "worker-a", "first", "epoch")
     state = ExecutionState(root, flow.id)
@@ -164,6 +186,8 @@ async def test_failed_initial_round_stops_workspace_before_resume(
     next_job = store.workers.assign_job("worker-a", "second", "epoch")
     next_task = await subject.prepare(next_job)
     assert isinstance(next_task, InitialTask)
+    assert next_task.branch == f"{task.branch}-round-2"
+    assert store.flows.get_flow(flow.id).title_job_id == store.jobs.list_jobs(flow.id)[1].id
     assert store.deliveries.get_delivery(flow.id).branch == next_task.branch
     state.record_received(
         AssignmentArguments(

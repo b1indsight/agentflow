@@ -149,7 +149,7 @@ class InferenceJob(InferenceModel):
     task: InferenceTask
     current_task: InferenceTask | None = None
     deadline_at: datetime
-    validation: Literal["text", "review"] = "text"
+    validation: Literal["text", "review", "flow_naming"] = "text"
     batch_id: int | None = None
     summary: InferenceSummary | None = None
     consumed: bool = False

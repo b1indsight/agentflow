@@ -12,7 +12,7 @@ from app.controler.workflow.service import ControlService
 from app.domain.models import FlowState, JobState
 from app.persistence.records import required
 from tests.github import RecordingGitHub
-from tests.test_coordinator import coordinator
+from tests.test_coordinator import coordinator, prepare_initial
 from tests.workspace_fixtures import register_worker
 
 pytestmark = pytest.mark.usefixtures("recording_resources")
@@ -20,7 +20,9 @@ pytestmark = pytest.mark.usefixtures("recording_resources")
 
 async def pending_results(store, count):
     """Persist real assigned/started worker failures, leaving application to the caller."""
-    subject = coordinator(store, RecordingGitHub())
+    github = RecordingGitHub()
+    github.refs = {}
+    subject = coordinator(store, github)
     jobs = []
     for _ in range(count):
         issue = len(store.flows.list_flows()) + 1
@@ -28,6 +30,7 @@ async def pending_results(store, count):
         worker = f"worker-{flow.id}"
         register_worker(store, worker, repo=flow.repo, epoch="epoch")
         job = required(store.workers.assign_job(worker, f"token-{flow.id}", "epoch"))
+        await prepare_initial(subject, job)
         task = await subject.prepare_for_assignment(job, worker, job.assignment_token, "epoch")
         assert isinstance(task, AssignmentArguments)
         assert store.workers.start_assignment(job.id, task.task.attempt_id, worker,

@@ -39,7 +39,7 @@ from app.worker.config import WorkerSettings
 from app.worker.runtime import WorkerRuntime
 from tests.test_remote_e2e import QueueConnection, QueueSocket
 from tests.test_remote_e2e import remote_flow as remote_flow  # noqa: PLC0414
-from tests.worker_fixtures import inventory, run_worker
+from tests.worker_fixtures import NamingInference, inventory, run_worker
 
 pytestmark = pytest.mark.usefixtures("recording_resources")
 
@@ -91,9 +91,8 @@ async def test_inference_cleanup_keeps_its_slot_without_blocking_coding(store, r
             return InferenceCapability(adapter_version="codex/v1")
 
         async def infer(self, task):
-            if task.messages != inference.inference.task.messages:
-                return InferenceOutput(request_id=task.request_id, request_digest=task.digest,
-                                       text="Task title", adapter_version="codex/v1")
+            if task.output_schema is not None:
+                return await NamingInference().infer(task)
             infer_entered.set()
             try:
                 await infer_release.wait()
@@ -104,11 +103,11 @@ async def test_inference_cleanup_keeps_its_slot_without_blocking_coding(store, r
                 await cleanup_release.wait()
                 infer_closed.set()
 
-    inference = store.jobs.enqueue_inference(request())
     worker.inference = Inference()
     async with connected(server, worker) as (working, serving):
         try:
             await asyncio.wait_for(coding_entered.wait(), 3)
+            inference = store.jobs.enqueue_inference(request())
             server.gateway.wake_all()
             await asyncio.wait_for(infer_entered.wait(), 3)
             clock = utcnow() + timedelta(seconds=20)
@@ -211,7 +210,11 @@ async def test_completed_inference_heartbeat_skips_renewal_but_dispatches_payloa
     attempt = store.flows.create_attempt(flow.id)
     flow.current_attempt_id = attempt.id
     store.flows.update_flow(flow)
-    server = server_runtime()
+    from tests.github import RecordingGitHub
+
+    github = RecordingGitHub()
+    github.refs = {}
+    server = server_runtime(github=github)
     serving = asyncio.create_task(serve_worker(QueueSocket(outgoing, incoming),
         worker_tokens={"worker-1": "worker-secret"}, serve=server.serve_worker_session))
 
@@ -228,7 +231,10 @@ async def test_completed_inference_heartbeat_skips_renewal_but_dispatches_payloa
         return InferenceResult(**result_header(call.message_id), method="worker.infer",
             job_id=call.job_id, assignment_token=call.assignment_token,
             output=InferenceOutput(request_id=call.arguments.request_id,
-                request_digest=call.arguments.digest, text="Answer", adapter_version="codex/v1"))
+                request_digest=call.arguments.digest,
+                text='{"title":"Implement task","branch_slug":"implement-task"}'
+                    if call.arguments.output_schema is not None else "Answer",
+                adapter_version="codex/v1"))
 
     await outgoing.put(Register(**message_header(None), control="register", payload=[],
         worker_id="worker-1", recoveries=[], workspace="b" * 32, repo_workspace_limit=2,
@@ -248,6 +254,11 @@ async def test_completed_inference_heartbeat_skips_renewal_but_dispatches_payloa
 
         coding = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
         server.gateway.wake_all()
+        title_call = await next_call(InferenceRequest)
+        assert title_call.job_id == store.flows.get_flow(flow.id).title_job_id
+        await outgoing.put(WorkerMessage(**message_header(epoch), control=None,
+                                         payload=[answer(title_call)]).model_dump_json())
+        await settled(store, store.jobs.get_job(title_call.job_id), JobState.DONE)
         call = await next_call(Assignment)
         await outgoing.put(WorkerMessage(**message_header(epoch), control=None, payload=[
             Started(**call_header(), method="server.execution_started",
@@ -258,11 +269,6 @@ async def test_completed_inference_heartbeat_skips_renewal_but_dispatches_payloa
             while store.jobs.get_job(coding.id).started_at is None:
                 await asyncio.sleep(.01)
 
-        title_call = await next_call(InferenceRequest)
-        assert title_call.job_id == store.flows.get_flow(flow.id).title_job_id
-        await outgoing.put(WorkerMessage(**message_header(epoch), control=None,
-                                         payload=[answer(title_call)]).model_dump_json())
-        await settled(store, store.jobs.get_job(title_call.job_id), JobState.DONE)
         second = store.jobs.enqueue_inference(request())
         server.gateway.wake_all()
         second_call = await next_call(InferenceRequest)
@@ -309,6 +315,8 @@ async def test_slow_coding_preparation_keeps_inference_live(store, remote_flow, 
             return InferenceCapability(adapter_version="codex/v1")
 
         async def infer(self, task):
+            if task.output_schema is not None:
+                return await NamingInference().infer(task)
             inferring.set()
             await infer_release.wait()
             return InferenceOutput(request_id=task.request_id, request_digest=task.digest,
