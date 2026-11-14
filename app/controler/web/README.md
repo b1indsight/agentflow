@@ -7,7 +7,7 @@
 架构与持久化边界见[控制台功能记录](../../../docs/plan/web-console-kanban.md)。
 技术栈为 **React + TypeScript + Vite + Tailwind CSS + shadcn/ui**。
 shadcn 的 Button / Input 源码放在 `components/ui/`，按需引入；不使用 CDN、全局状态库或请求缓存库。
-前端样式规则统一维护在 [STYLE_GUIDE.md](STYLE_GUIDE.md)，AI 开发入口见 [AGENTS.md](AGENTS.md)。
+前端样式规则统一维护在 [STYLE_GUIDE.md](../../../docs/STYLE_GUIDE.md)，AI 开发入口见 [AGENTS.md](AGENTS.md)。
 
 ## 运行与构建
 
@@ -141,7 +141,7 @@ GitHub 末尾 effect 标记在展示读取时移除，原始归档不变；预�
 消息与线程回复在当前有界正文段内渲染 Markdown/GFM，支持标题、列表、链接、引用、代码与
 表格；跨段语法按各段独立解析，不额外读取整篇正文。工具输出和 diff 保持原文。原始 HTML
 仅显示转义文本，危险 URL 被过滤；图片显示为链接，不自动请求外部资源。
-代码块与宽表格的排版规则见 [样式指南](STYLE_GUIDE.md#布局窄屏与长内容)。
+代码块与宽表格的排版规则见 [样式指南](../../../docs/STYLE_GUIDE.md#布局窄屏与长内容)。
 普通相对链接（含片段）与图片地址按消息原始来源 URL 解析；来源缺失或无效时保留文字，
 不将相对目标跳到控制台域名。GFM 脚注使用每条正文独立的引用、标题及回链 ID；点击或键盘
 激活时仅在当前正文段内定位并转移焦点，不覆盖会话 hash 路由，也不打开新窗口。
