@@ -24,7 +24,7 @@ class NamingInference:
     async def infer(self, task):
         return InferenceOutput(
             request_id=task.request_id, request_digest=task.digest, adapter_version="codex/v1",
-            text='{"title":"Implement task","branch_slug":"implement-task"}',
+            text='{"title":"Implement task","branch_slug":"feat/implement-task"}',
         )
 
 

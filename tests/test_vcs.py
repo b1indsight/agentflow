@@ -18,6 +18,7 @@ from app.worker.execution.vcs import (
     VcsVerificationError,
     _remote_sha,
     _run,
+    prepare_revision_context,
     prepare_vcs_context,
     verify_pushed_outcome,
     verify_vcs_outcome,
@@ -80,20 +81,24 @@ async def test_declared_backend_must_match_repository_metadata(tmp_path: Path) -
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(shutil.which("jj") is None, reason="jj is not installed")
-async def test_jj_outcome_is_verified_from_a_colocated_repository(tmp_path: Path) -> None:
+@pytest.mark.parametrize("branch", ["flow/jj", "feat/remove-login", "feat/remove-login-round-2"])
+async def test_jj_outcome_is_verified_from_a_colocated_repository(tmp_path: Path, branch: str) -> None:
     repo, _ = _git_fixture(tmp_path)
     env = os.environ | {"JJ_USER": "FlowTool Test", "JJ_EMAIL": "flowtool@example.test"}
     await _jj("git", "init", "--colocate", cwd=repo, env=env)
-    context = await prepare_vcs_context(repo, "flow/jj")
+    context = await prepare_vcs_context(repo, branch)
     (repo / "README.md").write_text("changed by jj\n")
     await _jj("commit", "-m", "change", cwd=repo, env=env)
-    await _jj("bookmark", "set", "flow/jj", "-r", "@-", cwd=repo, env=env)
-    await _jj("git", "push", "-b", "flow/jj", cwd=repo, env=env)
+    await _jj("bookmark", "set", branch, "-r", "@-", cwd=repo, env=env)
+    await _jj("git", "push", "-b", branch, cwd=repo, env=env)
 
     outcome = await verify_vcs_outcome(context, VcsKind.JJ)
 
     assert outcome.backend is VcsKind.JJ
     assert outcome.commit_sha == outcome.remote_sha
+    # Naming must work in the jj revsets used for both delivery and the next revision.
+    revision = await prepare_revision_context(repo, branch, outcome.commit_sha)
+    assert revision.branch == branch and revision.jj_base_sha is not None
 
 
 async def test_remote_verification_uses_only_current_push_token(monkeypatch, tmp_path):

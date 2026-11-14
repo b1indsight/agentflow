@@ -104,7 +104,7 @@ async def prepare_initial(subject, coding):
                 **result_header(call.request_id), method="worker.infer", job_id=naming.id,
                 assignment_token="naming", output=InferenceOutput(
                     request_id=call.request_id, request_digest=call.digest, adapter_version="codex/v1",
-                    text=json.dumps({"title": "Task title", "branch_slug": "implement-task"}),
+                    text=json.dumps({"title": "Task title", "branch_slug": "feat/implement-task"}),
                 ),
             )
             assert subject.workers.record_assignment_result(naming.id, worker_id, "naming", epoch, response) == "pending"
@@ -115,13 +115,16 @@ async def prepare_initial(subject, coding):
         await asyncio.gather(preparing, return_exceptions=True)
 
 
-@pytest.mark.parametrize("branch_slug", [
-    "feat-remove-login", "feat(auth)-remove-login", "feat!-remove-login", "feat(auth)!-remove-login",
+@pytest.mark.parametrize("task_content,branch_slug", [
+    ("feat: remove login", "feat/remove-login"),
+    ("feat(auth): remove login", "feat/remove-login"),
+    ("feat!: remove login", "feat/remove-login"),
+    ("feat(auth)!: remove login", "feat/remove-login"),
 ])
-async def test_initial_waits_for_title_and_branch_from_one_inference(store, branch_slug):
+async def test_initial_waits_for_title_and_branch_from_one_inference(store, task_content, branch_slug):
     # An async title used to arrive after coding had already started on an ID branch.
     flow = ControlService(database=store.database).create_flow(
-        "owner/repo", None, 42, task_content="移除登录功能",
+        "owner/repo", None, 42, task_content=task_content,
     )
     register_worker(store, "worker-a", repo=flow.repo, epoch="epoch")
     github = RecordingGitHub()
@@ -143,9 +146,10 @@ async def test_initial_waits_for_title_and_branch_from_one_inference(store, bran
         naming_prompt = call.messages[0].content
         assert "Conventional Commits" in naming_prompt
         assert "<type>[optional scope][!]: <description>" in naming_prompt
-        assert "<type>[(<scope>)][!]-<description>" in naming_prompt
-        assert "feat(auth)!: remove login -> feat(auth)!-remove-login" in naming_prompt
-        assert "fix-pagination-cursor" in naming_prompt
+        assert "<type>/<description>" in naming_prompt
+        assert "feat(auth)!: remove login -> feat/remove-login" in naming_prompt
+        assert "fix/pagination-cursor" in naming_prompt
+        assert call.messages[1].content == task_content
         assert re.search(call.output_schema["properties"]["branch_slug"]["pattern"], branch_slug)
         result = InferenceResult(
             **result_header(call.request_id), method="worker.infer", job_id=naming.id,
@@ -157,7 +161,7 @@ async def test_initial_waits_for_title_and_branch_from_one_inference(store, bran
         assert store.workers.record_assignment_result(naming.id, "worker-a", "naming", "epoch", result) == "pending"
         await subject.results.apply(naming.id)
         task = await asyncio.wait_for(preparing, 2)
-        assert isinstance(task, InitialTask) and task.branch == f"flow/{branch_slug}"
+        assert isinstance(task, InitialTask) and task.branch == branch_slug
         await asyncio.to_thread(subprocess.run, ["git", "check-ref-format", "--branch", task.branch],
                                 check=True, capture_output=True)
         assert store.flows.get_flow(flow.id).title == "移除登录功能"
@@ -238,41 +242,41 @@ async def pending_naming(store):
 
 
 @pytest.mark.parametrize("reply,cancelled,expected", [
-    ({"title": "修复分页游标 😀", "branch_slug": "fix-cursor"}, False, "修复分页游标 😀"),
-    ({"title": "Title", "branch_slug": "custom(api-v2)!-" + "x" * 32}, False, "Title"),
-    ({"title": "   ", "branch_slug": "fix-cursor"}, False, None),
-    ({"title": 123, "branch_slug": "fix-cursor"}, False, None),
-    ({"title": "第一行\n第二行", "branch_slug": "fix-cursor"}, False, None),
-    ({"title": "x" * 257, "branch_slug": "fix-cursor"}, False, None),
+    ({"title": "修复分页游标 😀", "branch_slug": "fix/cursor"}, False, "修复分页游标 😀"),
+    ({"title": "Title", "branch_slug": "custom/" + "x" * 41}, False, "Title"),
+    ({"title": "   ", "branch_slug": "fix/cursor"}, False, None),
+    ({"title": 123, "branch_slug": "fix/cursor"}, False, None),
+    ({"title": "第一行\n第二行", "branch_slug": "fix/cursor"}, False, None),
+    ({"title": "x" * 257, "branch_slug": "fix/cursor"}, False, None),
     ({"title": "Title", "branch_slug": 123}, False, None),
     ({"title": "Title", "branch_slug": "ab"}, False, None),
-    ({"title": "Title", "branch_slug": "custom(api-v2)!-" + "x" * 33}, False, None),
+    ({"title": "Title", "branch_slug": "custom/" + "x" * 42}, False, None),
     ({"title": "Title", "branch_slug": "../unsafe"}, False, None),
     ({"title": "Title", "branch_slug": "123"}, False, None),
     ({"title": "Title", "branch_slug": "feat"}, False, None),
-    ({"title": "Title", "branch_slug": "feat(auth)!"}, False, None),
-    ({"title": "Title", "branch_slug": "feat(auth)!-"}, False, None),
-    ({"title": "Title", "branch_slug": "feat()-remove-login"}, False, None),
-    ({"title": "Title", "branch_slug": "feat(auth-remove-login"}, False, None),
-    ({"title": "Title", "branch_slug": "feat!auth-remove-login"}, False, None),
-    ({"title": "Title", "branch_slug": "feat!(auth)-remove-login"}, False, None),
-    ({"title": "Title", "branch_slug": "feat(auth)!!-remove-login"}, False, None),
+    ({"title": "Title", "branch_slug": "feat/"}, False, None),
+    ({"title": "Title", "branch_slug": "/remove-login"}, False, None),
+    ({"title": "Title", "branch_slug": "flow/remove-login"}, False, None),
+    ({"title": "Title", "branch_slug": "flow/feat/remove-login"}, False, None),
+    ({"title": "Title", "branch_slug": "feat/auth/remove-login"}, False, None),
+    ({"title": "Title", "branch_slug": "feat-remove-login"}, False, None),
+    ({"title": "Title", "branch_slug": "feat(auth)/remove-login"}, False, None),
+    ({"title": "Title", "branch_slug": "feat!/remove-login"}, False, None),
+    ({"title": "Title", "branch_slug": "feat(auth)!-remove-login"}, False, None),
     ({"title": "Title", "branch_slug": "feat(auth)!: remove login"}, False, None),
-    ({"title": "Title", "branch_slug": "feat(auth/core)-remove-login"}, False, None),
-    ({"title": "Title", "branch_slug": "feat(Auth)-remove-login"}, False, None),
-    ({"title": "Title", "branch_slug": "feat(auth)-remove_login"}, False, None),
-    ({"title": "Title", "branch_slug": "feat(auth)-remove--login"}, False, None),
-    ({"title": "Title", "branch_slug": "feat(auth)-remove-login\n"}, False, None),
-    ({"title": "Title", "branch_slug": "feat(auth)!-remove-login-round"}, False, None),
-    ({"title": "Title", "branch_slug": "feat(auth)!-remove-login-round-2"}, False, None),
-    ({"title": "Title", "branch_slug": "fix-round-2"}, False, None),
+    ({"title": "Title", "branch_slug": "feat/remove_login"}, False, None),
+    ({"title": "Title", "branch_slug": "feat/Remove-login"}, False, None),
+    ({"title": "Title", "branch_slug": "feat/remove--login"}, False, None),
+    ({"title": "Title", "branch_slug": "feat/remove-login\n"}, False, None),
+    ({"title": "Title", "branch_slug": "feat/remove-login-round"}, False, None),
+    ({"title": "Title", "branch_slug": "feat/remove-login-round-2"}, False, None),
     ({"title": "Title"}, False, None),
-    ({"title": "Title", "branch_slug": "fix-cursor", "extra": True}, False, None),
+    ({"title": "Title", "branch_slug": "fix/cursor", "extra": True}, False, None),
     ("[]", False, None),
-    ('{"title":"One","title":"Two","branch_slug":"fix-cursor"}', False, None),
+    ('{"title":"One","title":"Two","branch_slug":"fix/cursor"}', False, None),
     (InferenceFailure(code="configuration"), False, None),
-    ({"title": "不应使用的标题", "branch_slug": "fix-cursor"}, True, None),
-    ({"title": "不应使用的标题", "branch_slug": "fix-cursor"}, "stop", None),
+    ({"title": "不应使用的标题", "branch_slug": "fix/cursor"}, True, None),
+    ({"title": "不应使用的标题", "branch_slug": "fix/cursor"}, "stop", None),
 ])
 async def test_title_is_inferred_once_and_replayed_atomically(store, pending_naming, monkeypatch, reply, cancelled, expected):
     # Recover the branch from the same inference after title application, before delivery exists.
@@ -336,7 +340,7 @@ async def test_title_is_inferred_once_and_replayed_atomically(store, pending_nam
         await asyncio.gather(preparing, return_exceptions=True)
         assert store.deliveries.get_delivery(flow.id) is None
         task = await asyncio.wait_for(coordinator(store, subject.github).prepare(_coding), 2)
-        assert isinstance(task, InitialTask) and task.branch == f"flow/{reply['branch_slug']}"
+        assert isinstance(task, InitialTask) and task.branch == reply["branch_slug"]
         assert store.deliveries.get_delivery(flow.id).branch == task.branch
         assert len([j for j in store.jobs.list_jobs(flow.id) if j.kind is JobKind.INFERENCE]) == 1
     else:
@@ -381,7 +385,7 @@ async def test_naming_deadline_without_an_inference_worker_blocks_initial(store,
     assert ControlService(database=store.database).retry(store.flows.get_flow(flow.id))
     retry = store.workers.assign_job("worker-a", "retry", "epoch")
     task = await prepare_initial(subject, retry)
-    assert isinstance(task, InitialTask) and task.branch == "flow/implement-task"
+    assert isinstance(task, InitialTask) and task.branch == "feat/implement-task"
     named = store.flows.get_flow(flow.id)
     assert named.current_attempt_id == flow.current_attempt_id and named.title_job_id != naming.id
 
