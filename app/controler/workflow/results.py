@@ -70,6 +70,14 @@ from app.persistence.reviews import ReviewStore
 from app.persistence.workers import WorkerStore
 from app.plugins import emit_hook
 
+# Shared with the naming schema. The final lookahead anchors the absolute end in
+# both Python and JSON Schema regexes, unlike $ which also permits a final newline.
+BRANCH_SLUG_PATTERN = (
+    r"^(?!.*-round(?:-[0-9]+)?$)"
+    r"[a-z][a-z0-9]*(?:\([a-z0-9]+(?:-[a-z0-9]+)*\))?!?-"
+    r"[a-z0-9]+(?:-[a-z0-9]+)*(?![\s\S])"
+)
+
 
 class ResultApplication:
     """One entry point for both a live worker's accepted result and control recovery."""
@@ -142,8 +150,7 @@ class ResultApplication:
                     if (not isinstance(title, str) or not title.strip() or len(title) > 256
                             or not title.isprintable() or not isinstance(branch_slug, str)
                             or not 3 <= len(branch_slug) <= 48
-                            or re.fullmatch(r"[a-z][a-z0-9]*(-[a-z0-9]+)*", branch_slug) is None
-                            or re.search(r"-round(?:-\d+)?$", branch_slug)):
+                            or re.fullmatch(BRANCH_SLUG_PATTERN, branch_slug) is None):
                         raise ValueError("invalid title or branch_slug")
         except InferenceError as error:
             failure = error.failure
