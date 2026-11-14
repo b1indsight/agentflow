@@ -10,6 +10,8 @@ from app.domain.review_models import FeedbackUpdate
 
 
 @pytest.mark.parametrize("branch,round_no,expected_branch", [
+    ("feat/remove-login", 1, "feat/remove-login-round-2"),
+    ("feat/remove-login-round-3", 3, "feat/remove-login-round-4"),
     ("flow/77", 1, "flow/77-round-2"),
     ("flow/custom-task", 1, "flow/custom-task-round-2"),
     ("flow/custom-task-round-3", 3, "flow/custom-task-round-4"),
@@ -76,7 +78,7 @@ async def test_resume_before_first_delivery_still_requires_worker_naming(store, 
     github = RecordingGitHub()
     github.refs = {}
     task = await prepare_initial(coordinator(store, github), coding)
-    assert isinstance(task, InitialTask) and task.branch == "flow/implement-task-round-2"
+    assert isinstance(task, InitialTask) and task.branch == "feat/implement-task-round-2"
 
 
 async def test_failed_initial_round_stops_workspace_before_resume(

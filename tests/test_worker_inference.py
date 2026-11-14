@@ -236,7 +236,7 @@ async def test_completed_inference_heartbeat_skips_renewal_but_dispatches_payloa
             job_id=call.job_id, assignment_token=call.assignment_token,
             output=InferenceOutput(request_id=call.arguments.request_id,
                 request_digest=call.arguments.digest,
-                text='{"title":"Implement task","branch_slug":"implement-task"}'
+                text='{"title":"Implement task","branch_slug":"feat/implement-task"}'
                     if call.arguments.output_schema is not None else "Answer",
                 adapter_version="codex/v1"))
 

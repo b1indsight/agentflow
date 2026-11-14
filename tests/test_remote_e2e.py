@@ -172,9 +172,9 @@ async def test_control_gateway_and_worker_client_complete_one_remote_job(store, 
     assert delivery.head_sha == terminal.result.commit_sha
     call = required(store.deliveries.get_tool_call(terminal.result.open_pr_call_id))
     assert call.response == terminal.result.delivery_receipt
-    assert github.opened == ["flow/implement-task"] and len(agent.started) == 1
+    assert github.opened == ["feat/implement-task"] and len(agent.started) == 1
     named = store.flows.get_flow(flow.id)
-    assert named.title == "Implement task" and delivery.branch == "flow/implement-task"
+    assert named.title == "Implement task" and delivery.branch == "feat/implement-task"
     assert len([j for j in store.jobs.list_jobs(flow.id) if j.kind.value == "inference"]) == 1
 
 
@@ -184,7 +184,7 @@ async def test_existing_remote_branch_is_not_taken_over(store, remote_flow):
 
     flow, server, github, worker, agent = remote_flow
     seed = worker.settings.worker_root / "repos/owner/repo"
-    branch = "flow/implement-task"
+    branch = "feat/implement-task"
     _git("branch", branch, cwd=seed)
     _git("push", "origin", branch, cwd=seed)
     before = _git("ls-remote", "origin", f"refs/heads/{branch}", cwd=seed)
