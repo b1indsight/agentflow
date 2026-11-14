@@ -6,6 +6,9 @@ serve / worker 设置 `FLOWTOOL_LOG_FORMAT=json` 启用 JSON stdout，默认 tex
 未标注结构化事件的日志显示 `application_log / unspecified`，通过 source 定位；不要依赖 message
 全文告警。第三方 standard logging 和 Uvicorn 日志使用同一出口。CLI 自身命令结果仍是命令输出。
 
+异常附带 `exception_trace`，仅保留最靠近抛出位置的 16 帧 `模块:函数:行号`，按调用顺序用 `|` 连接。
+模块和函数名经过字符白名单过滤；不包含文件路径、源代码、异常正文或局部变量。
+
 `delivery_id` 关联接收与应用；`flow_id/job_id/worker_id/epoch` 关联执行和结果处理。
 executor 的 async task 在创建时继承独立上下文；assignment_token 不允许出现在日志字段中。
 标识符也应限制日志访问权限，保留期由部署的日志系统配置。

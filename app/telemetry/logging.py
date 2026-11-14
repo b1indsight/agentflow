@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import sys
+from collections import deque
 from typing import TYPE_CHECKING, TextIO
 
 from loguru import logger
@@ -50,6 +51,20 @@ def configure_logging(role: str, output_format: str, output: TextIO | None = Non
         exception = record['exception']
         if exception and exception.type:
             row['exception_type'] = exception.type.__name__
+            frames: deque[str] = deque(maxlen=16)
+            traceback = exception.traceback
+            while traceback is not None:
+                # Code identities only: formatted tracebacks also expose source and exception text.
+                module = traceback.tb_frame.f_globals.get('__name__')
+                function = traceback.tb_frame.f_code.co_name
+                if not isinstance(module, str) or not re.fullmatch(r'[A-Za-z0-9_.]{1,200}', module):
+                    module = 'unknown'
+                if not re.fullmatch(r'[A-Za-z0-9_.<>]{1,200}', function):
+                    function = 'unknown'
+                frames.append(f'{module}:{function}:{traceback.tb_lineno}')
+                traceback = traceback.tb_next
+            if frames:
+                row['exception_trace'] = '|'.join(frames)
         if output_format == 'json':
             rendered = json.dumps(row, ensure_ascii=True)
         else:
