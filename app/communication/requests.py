@@ -24,7 +24,7 @@ async def request_reply[Incoming: Message, Outgoing: Message, Reply: ToolResult]
         if not future.done():
             future.set_result((reply, incoming))
 
-    def rejected(reason: str) -> None:
+    async def rejected(reason: str) -> None:
         if not future.done():
             future.set_exception(ReplyRejected("request reply rejected"))
 

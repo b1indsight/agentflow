@@ -8,6 +8,11 @@
 
 ## Unreleased
 
+- 固定协议收敛为 `worker.*` / `server.*` 两个特殊 ToolCall 包：方向联合与固定方法集合由模型的 `method` 派生，
+  执行归属由模型 `execution()` 提供，删除心跳、活性、迟到响应和 `on_rejected` 中按类型或方法名维护的名单。
+  畸形响应统一交给原调用方的 `on_rejected`（改为 async），持久项恢复由发送方负责；infer 失败随请求绑定处理。
+  新增固定命令只需定义模型、`routes.register` 和调用方。`routes.register` 与 wire25、journal/inbox 不变。
+  接收方不再因畸形持久项或迟到畸形响应主动断开，provision 结果不再刷新 coding 接收期限。
 - INITIAL 复用同一次 worker 推理生成标题与描述性分支名，完成后才开始编码，不再为新任务生成 `flow/<id>`。直接处理 `title` / `branch_slug`，实际分支复用已有 delivery 保存，重试与 resume 沿用该分支；无效输出、超时和远端预存分支阻止编码。无需新增分支列、占名索引、回填、wire 消息或协议版本，已有 PR 不重命名。
 - 新增 `WorkerRuntime.register_file(path)` 和 owner-only `GET /api/files/{link_id}`：通过现有
   Session/Gateway 登记并读取 worker 本地文件，持久化随机句柄，server 不接收路径。

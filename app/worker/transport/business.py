@@ -129,7 +129,9 @@ class WorkerBusinessCallbacks:
         if reply.call_id != call.request.arguments.call_id:
             raise WorkerProtocolError("Flow tool response does not match its request")
 
-    def on_rejected(self, execution: WorkerExecution, call: PendingToolCall, reason: str) -> None:
+    async def on_rejected(
+        self, execution: WorkerExecution, call: PendingToolCall, reason: str
+    ) -> None:
         """Fail the matched call only after the connection owner has authorized rejection."""
         execution.reject_tool_call(call, reason)
         self._release(call)

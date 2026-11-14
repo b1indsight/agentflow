@@ -23,7 +23,7 @@ from app.contracts.protocol import (
     ExecuteResult,
     ExecutionIdentity,
     ExecutionStopped,
-    FileRegistered,
+    FlowToolResponse,
     Heartbeat,
     Inventory,
     InventoryPage,
@@ -140,8 +140,8 @@ class WorkerStateCallbacks:
         )
 
     async def on_unmatched_reply(self, reply: ToolResult, message: ServerMessageUnion) -> None:
-        if isinstance(reply, FileRegistered):
-            return  # A cancelled or timed-out registration may still have committed.
+        if reply.execution() is None and not isinstance(reply, FlowToolResponse):
+            return  # A timed-out independent query, such as file registration, may still finish.
         previous = self._accepted.get(reply.reply_to)
         if isinstance(reply, (AcceptResultResponse, StopAccepted)) and (
             type(reply) is type(previous) and previous is not None and reply.result == previous.result
@@ -523,7 +523,7 @@ class WorkerStateCallbacks:
                     # Finish ordinary failed calls in this same error batch before recovery.
                     self._recovery_required = True
                     return
-            if self.routes.reject_reply(error, "message payload failed validation"):
+            if await self.routes.reject_reply(error, "message payload failed validation"):
                 return
         if not self._unmatched_error_logged:
             logger.warning("ignored unmatched validation error on worker connection")
@@ -537,24 +537,15 @@ class WorkerStateCallbacks:
             or message.control is not None
         ):
             raise WorkerProtocolError("invalid payload has no established connection authority")
-        critical = False
-        replies: list[ToolResult] = []
-        for item in message.payload:
-            if isinstance(item, ToolResult):
-                model = self.routes.reply_model(item)
-                if model is None:
-                    raise WorkerProtocolError("invalid reply has no pending invocation")
-                if model in (AcceptResultResponse, StopAccepted):
-                    critical = True
-                else:
-                    replies.append(item)
-            elif item.method in {"worker.stop", "worker.reject_recovery"}:
-                critical = True
-        # All headers must be authorized before any independent caller is rejected.
-        for item in replies:
-            self.routes.reject_reply(item, "invalid tool response; remote effect outcome unknown")
 
         async def respond() -> None:
+            # A malformed reply fails its caller. Durable items need no decision here: the
+            # server sees the validation error and requires recovery for what it sent.
+            for item in message.payload:
+                if isinstance(item, ToolResult):
+                    await self.routes.reject_reply(
+                        item, "invalid tool response; remote effect outcome unknown"
+                    )
             await self.session.send(
                 WorkerMessage(
                     **message_header(self.session.epoch),
@@ -571,7 +562,5 @@ class WorkerStateCallbacks:
                     ],
                 )
             )
-            if critical:
-                raise WorkerProtocolError("critical protocol payload rejected; recovery required")
 
         return respond

@@ -3,6 +3,7 @@
 import asyncio
 import hmac
 from collections.abc import Callable
+from functools import partial
 from uuid import uuid4
 
 from fastapi import WebSocketDisconnect
@@ -19,13 +20,9 @@ from app.contracts.protocol import (
     Assignment,
     AssignmentArguments,
     CancelJob,
-    ConversationResult,
     ExecuteResult,
     ExecutionTask,
     Failed,
-    FileRegister,
-    FileResult,
-    FlowToolRequest,
     Heartbeat,
     InferenceRequest,
     InferenceResult,
@@ -172,10 +169,8 @@ class ServerCallbacks:
 
     async def on_unmatched_reply(self, reply: ToolResult, message: WorkerMessageUnion) -> None:
         """Authorize durable replay when the original connection's receiver is gone."""
-        if isinstance(reply, ProvisionResult):
-            return  # Late/duplicate capacity results cannot complete a newer request.
-        if isinstance(reply, (ConversationResult, FileResult, InferenceResult)):
-            return  # A timed-out query is never replayed or evidence of execution progress.
+        if reply.execution() is None:
+            return  # A timed-out query or capacity result is never replayed or execution progress.
         if isinstance(reply, StopResult):
             await self.on_stopped(reply, message)
             return
@@ -272,9 +267,9 @@ class ServerCallbacks:
                 self.workers.requeue_assignment(job.id, self.worker_id, token, self.epoch)
                 self.notify_jobs()
         fence = intent.fence()
-        await self._send(
-            StopExecution(**call_header(stop_call_id(fence)), method="worker.stop", arguments=fence)
-        )
+        stop = StopExecution(**call_header(stop_call_id(fence)), method="worker.stop", arguments=fence)
+        self.routes.expect_reply(stop, StopResult, self.on_stopped)
+        await self._send(stop)
         self.receive_deadline = asyncio.get_running_loop().time() + self.heartbeat_timeout
 
     async def poll(self) -> float | None:
@@ -326,6 +321,10 @@ class ServerCallbacks:
                 continue
             call = RepositoryDemand(**call_header(), method="worker.provision", repository=repository)
             self.provisioning[repository] = call, now + self.heartbeat_timeout
+            self.routes.expect_reply(
+                call, ProvisionResult, self.on_provisioned,
+                on_rejected=partial(self._provision_rejected, call),
+            )
             try:
                 await self._send(call)
             except BaseException:
@@ -344,6 +343,9 @@ class ServerCallbacks:
             logger.bind(event="workspace_provision_failed", worker_id=self.worker_id,
                         repository=call.repository, reason_code=error).warning("")
         self.session.wake()
+
+    async def _provision_rejected(self, call: RepositoryDemand, reason: str) -> None:
+        self._finish_provision(call, "invalid_response", retryable=False)
 
     async def on_provisioned(self, reply: ProvisionResult, message: WorkerMessageUnion) -> None:
         call = next((call for call, _ in self.provisioning.values()
@@ -388,10 +390,15 @@ class ServerCallbacks:
                 assert job.inference is not None and job.inference.current_task is not None
                 task = job.inference.current_task
                 self.inference_current = job
-                await self._send(InferenceRequest(
+                request = InferenceRequest(
                     **call_header(task.request_id), method="worker.infer", arguments=task,
                     job_id=job.id, assignment_token=token,
-                ))
+                )
+                self.routes.expect_reply(
+                    request, InferenceResult, self.on_inference_result,
+                    on_rejected=partial(self._inference_rejected, request),
+                )
+                await self._send(request)
                 if not self.current and not self.stopping:
                     self.receive_deadline = asyncio.get_running_loop().time() + self.heartbeat_timeout
 
@@ -428,15 +435,11 @@ class ServerCallbacks:
         return False
 
     async def on_message(self, message: WorkerMessageUnion) -> None:
-        # Independent inference/history and validation errors do not prove coding progress.
+        # Independent queries, capacity results and validation errors do not prove coding progress.
         liveness = not self._inference_heartbeat(message) or (not self.current and not self.stopping)
         self._refresh_receive = liveness and message.connection_epoch == self.epoch and (
             message.control is not None
-            or any(
-                not isinstance(item, (ValidationErrorResult, ConversationResult, FileRegister,
-                                      FileResult, InferenceResult))
-                for item in message.payload
-            )
+            or any(item.execution() is not None for item in message.payload)
         )
         if (
             message.control is None
@@ -477,24 +480,14 @@ class ServerCallbacks:
             return  # The error hook enforces correlation and the pre-start fence.
         if self._recovery_required:
             raise ProtocolViolation("critical protocol payload rejected; recovery required")
-        if isinstance(item, (ConversationResult, FileRegister, FileResult, InferenceResult)):
+        execution = item.execution()
+        if execution is None:
             return  # Independent queries need no Started and cannot initiate execution effects.
-        job_id = self._item_job(item)
-        if job_id in self.starting and not isinstance(item, Started):
+        if execution[0] in self.starting and not isinstance(item, Started):
             raise ProtocolViolation("assignment must be acknowledged with Started")
         for stop in self.stops.pending_for_worker(self.worker_id):
             if stop.job_id not in self.starting:
                 await self._begin_stop(stop)
-
-    @staticmethod
-    def _item_job(item: ToolCall | ToolResult) -> int | None:
-        if isinstance(item, (Started, AcceptResultRequest, AcceptStop, FlowToolRequest)):
-            return item.arguments.job_id
-        if isinstance(item, ExecuteResult):
-            return item.job_id
-        if isinstance(item, StopResult):
-            return item.result.job_id
-        return None
 
     def on_message_done(self) -> None:
         if self._recovery_required:
@@ -543,8 +536,9 @@ class ServerCallbacks:
             raise ProtocolViolation("result conflicts with persisted assignment facts")
         await self.results.apply(job.id)
 
-    async def on_inference_result(self, item: InferenceResult,
-                                  message: WorkerMessageUnion | RejectedMessage) -> None:
+    async def on_inference_result(
+        self, item: InferenceResult, message: WorkerMessageUnion | None = None
+    ) -> None:
         current = self.inference_current
         if (current is None or current.id != item.job_id
                 or current.assignment_token != item.assignment_token
@@ -560,6 +554,14 @@ class ServerCallbacks:
         self.routes.forget_reply(item.reply_to)
         self.inference_current, self.inference_cancelling = None, False
         self.notify_jobs()
+
+    async def _inference_rejected(self, request: InferenceRequest, reason: str) -> None:
+        """A rejected request or malformed reply ends the slot as an invalid provider response."""
+        await self.on_inference_result(InferenceResult(
+            **result_header(request.message_id), method="worker.infer",
+            job_id=request.job_id, assignment_token=request.assignment_token,
+            failure=InferenceFailure(code="invalid_response"),
+        ))
 
     async def on_accept_result(self, item: AcceptResultRequest, message: WorkerMessageUnion) -> None:
         if item.arguments.job_id in self.stopping:
@@ -635,18 +637,6 @@ class ServerCallbacks:
     async def on_error(self, error: ValidationErrorResult,
                        message: WorkerMessageUnion | RejectedMessage) -> None:
         if message.connection_epoch == self.epoch:
-            inference = self.inference_current
-            if (inference is not None and inference.inference is not None
-                    and inference.inference.current_task is not None
-                    and error.method == "worker.infer"
-                    and error.reply_to == inference.inference.current_task.request_id):
-                assert inference.assignment_token is not None
-                await self.on_inference_result(InferenceResult(
-                    **result_header(error.reply_to), method="worker.infer",
-                    job_id=inference.id, assignment_token=inference.assignment_token,
-                    failure=InferenceFailure(code="invalid_response"),
-                ), message)
-                return
             for job, token, _ in list(self.current.values()):
                 if (
                     error.reply_to == execution_call_id(job.id, token)
@@ -694,7 +684,7 @@ class ServerCallbacks:
             ):
                 self._recovery_required = True
                 return
-            if self.routes.reject_reply(error, "message payload failed validation"):
+            if await self.routes.reject_reply(error, "message payload failed validation"):
                 return
         if not self._unmatched_error_logged:
             logger.warning("ignored unmatched validation error on server connection")
@@ -704,37 +694,13 @@ class ServerCallbacks:
         if not self.registered:
             raise ProtocolViolation("invalid payload before registration")
         self._validate_control(message)
-        critical = False
-        replies: list[ToolResult] = []
-        for item in message.payload:
-            if isinstance(item, ToolResult) and item.method in {"worker.history", "worker.infer", "worker.provision"}:
-                replies.append(item)
-                continue
-            if item.method in {
-                "server.execution_started",
-                "server.accept_result",
-                "server.accept_stop",
-                "worker.execute",
-                "worker.stop",
-            }:
-                critical = True
-            elif isinstance(item, ToolResult):
-                raise ProtocolViolation("invalid reply has no pending invocation")
-        # Do not notify any caller until every header in the batch is authorized.
-        for item in replies:
-            self.routes.reject_reply(item, "message payload failed validation")
 
         async def respond() -> None:
-            # Job replies have no temporary Future to reject. Persist the authorized
-            # failure now so malformed answers cannot turn into retryable timeouts.
-            for item in replies:
-                if item.method == "worker.infer":
-                    await self.on_error(ValidationErrorResult(
-                        **result_header(item.reply_to), method=item.method,
-                        error=PayloadValidationError(
-                            code="validation_error", message="message payload failed validation",
-                        ),
-                    ), message)
+            # A malformed reply fails its caller like a rejected call. Durable items need no
+            # decision here: their sender sees the validation error and requires recovery.
+            for item in message.payload:
+                if isinstance(item, ToolResult):
+                    await self.routes.reject_reply(item, "message payload failed validation")
             await self.session.send(
                 ServerMessage(
                     **message_header(self.epoch),
@@ -751,8 +717,6 @@ class ServerCallbacks:
                     ],
                 )
             )
-            if critical:
-                raise ProtocolViolation("critical protocol payload rejected; recovery required")
 
         return respond
 
@@ -802,24 +766,13 @@ class ServerCallbacks:
                 self._sent[identity] = item
                 if len(self._sent) > MAX_PAYLOAD_ITEMS * 2:
                     self._sent.pop(next(iter(self._sent)))
-        if isinstance(item, Assignment):
-            self.routes.expect_reply(item, ExecuteResult, self.on_result)
-        elif isinstance(item, StopExecution):
-            self.routes.expect_reply(item, StopResult, self.on_stopped)
-        elif isinstance(item, InferenceRequest):
-            self.routes.expect_reply(item, InferenceResult, self.on_inference_result)
-        elif isinstance(item, RepositoryDemand):
-            self.routes.expect_reply(
-                item, ProvisionResult, self.on_provisioned,
-                on_rejected=lambda _: self._finish_provision(item, "invalid_response", retryable=False),
-            )
         try:
             return await self.session.send(
                 ServerMessage(**message_header(self.epoch), control=None, payload=[item])
             )
         except BaseException:
-            if isinstance(item, (Assignment, StopExecution, InferenceRequest, RepositoryDemand)):
-                self.routes.forget_reply(item.message_id)
+            if isinstance(item, ToolCall):
+                self.routes.forget_reply(item.message_id)  # Callers bind replies before sending.
             if tracked:
                 if previous is None:
                     self._sent.pop(identity, None)
@@ -843,13 +796,13 @@ class ServerCallbacks:
             raise ProtocolViolation("preparation changed the claimed workspace")
         self.current[job.id] = job, token, prepared.task
         self.starting.add(job.id)
-        await self._send(
-            Assignment(
-                **call_header(execution_call_id(job.id, token)),
-                method="worker.execute",
-                arguments=prepared,
-            )
+        assignment = Assignment(
+            **call_header(execution_call_id(job.id, token)),
+            method="worker.execute",
+            arguments=prepared,
         )
+        self.routes.expect_reply(assignment, ExecuteResult, self.on_result)
+        await self._send(assignment)
         self.receive_deadline = asyncio.get_running_loop().time() + self.heartbeat_timeout
 
     async def _prepare_assignment(
