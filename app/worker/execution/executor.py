@@ -111,6 +111,8 @@ class WorkerExecutor:
             assignment = self.state.assignment
             if assignment is None or assignment.task != task:
                 raise VcsVerificationError("binding", "initial assignment target is missing")
+            model = assignment.model
+            effort = assignment.effort
             capability = _github_capability(secret, task.repo)
             binding = await self.workspaces.claim(
                 task.repo, task.flow_id, assignment.workspace, assignment.generation,
@@ -143,7 +145,7 @@ class WorkerExecutor:
                     github=capability, mcp_url=mcp.url, mcp_token=mcp.token,
                 )
                 run = await self.code_agent.start(
-                    prompt, workspace, output_schema=schema_path, context=context,
+                    prompt, workspace, output_schema=schema_path, context=context, model=model, effort=effort,
                 )
                 session_id = run.session_id
                 corrections = 0
@@ -267,6 +269,9 @@ class WorkerExecutor:
             mode="resume" if task.session_id else "fallback", last_message="", exit_code=65,
         )
         schema_path: Path | None = None
+        assignment = self.state.assignment
+        model = assignment.model if assignment is not None else None
+        effort = assignment.effort if assignment is not None else None
         try:
             if task.repo_identity != f"{self.worker_id}:{task.repo}":
                 raise VcsVerificationError("binding", "repo identity does not match worker")
@@ -313,7 +318,7 @@ class WorkerExecutor:
                 result.session_generation += 1
                 self.state.begin_revision("fallback")
                 run = await self.code_agent.start(
-                    prompt, workspace, output_schema=schema_path, context=context,
+                    prompt, workspace, output_schema=schema_path, context=context, model=model, effort=effort,
                 )
             invocation = RevisionExecutionRecord(mode=result.mode, session_id=run.session_id,
                                             exit_code=run.exit_code)

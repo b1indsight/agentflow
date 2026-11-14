@@ -117,8 +117,14 @@ class CodexAgent:
         *,
         output_schema: Path | None = None,
         context: CodingExecutionContext | None = None,
+        model: str | None = None,
+        effort: str | None = None,
     ) -> CodingExecutionResult:
         args = _start_args(task, cwd, trusted_host=self.trusted_host, context=context)
+        if model is not None:
+            args.extend(["--model", model])
+        if effort is not None:
+            args.extend(["-c", f"model_reasoning_effort={json.dumps(effort)}"])
         return await self._run(args, output_schema, cwd=cwd, parse_thread=True, context=context)
 
     async def resume(

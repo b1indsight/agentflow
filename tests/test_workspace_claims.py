@@ -28,6 +28,7 @@ def identity(name: str) -> str:
 def connect(store: Store, worker: str, limit: int = 2, epoch: str = "epoch") -> None:
     store.workers.worker_connected(
         worker, PROTOCOL_VERSION, epoch, workspace=identity(worker + ":default"), repo_workspace_limit=limit,
+        coding_agent=None if worker == LOCAL_BUB_WORKER_ID else "codex",
     )
     assert store.workers.report_workspace(worker, epoch, WorkspaceInventory(
         workspace=identity(worker + ":default"), repository=None, generation=1, flow_id=None,

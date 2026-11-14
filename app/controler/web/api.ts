@@ -2,6 +2,7 @@ import { jsonCacheBytes, SessionCache } from "./sessionCache";
 import type {
   ActivityPage,
   ArchiveReason,
+  CodingModelSettings,
   ContentPage,
   FlowDetail,
   FlowPage,
@@ -50,6 +51,46 @@ export async function api<T>(
   }
   return response.json() as Promise<T>;
 }
+
+function checkedSettings(value: CodingModelSettings): CodingModelSettings {
+  if (
+    !value ||
+    !Number.isSafeInteger(value.revision) ||
+    value.revision < 0 ||
+    !(value.codex_model === null || typeof value.codex_model === "string") ||
+    !(value.amp_model === null || typeof value.amp_model === "string") ||
+    !(value.codex_effort === null || typeof value.codex_effort === "string") ||
+    !(value.amp_effort === null || typeof value.amp_effort === "string")
+  )
+    throw new Error("设置响应不完整，请重新读取核对。");
+  return value;
+}
+
+// Mutable settings deliberately bypass the immutable conversation/session caches below.
+export const getSettings = async (signal: AbortSignal) =>
+  checkedSettings(await api<CodingModelSettings>("/api/settings", {}, signal));
+export const updateSettings = async (
+  request: Omit<CodingModelSettings, "revision"> & {
+    expected_revision: number;
+  },
+) => {
+  const saved = checkedSettings(
+    await api<CodingModelSettings>("/api/settings", {}, undefined, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+    }),
+  );
+  if (
+    saved.revision !== request.expected_revision + 1 ||
+    saved.codex_model !== request.codex_model ||
+    saved.amp_model !== request.amp_model ||
+    saved.codex_effort !== request.codex_effort ||
+    saved.amp_effort !== request.amp_effort
+  )
+    throw new Error("保存响应与提交不一致，请重新读取核对。");
+  return saved;
+};
 
 const contentCache = new SessionCache<string, ContentPage>(
   64,

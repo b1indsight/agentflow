@@ -44,6 +44,80 @@ def console_runtime(store):
     )
 
 
+@pytest.mark.parametrize("amp_model", [" anthropic/claude-opus-5-5 ", "openai/custom"])
+def test_settings_are_owner_only_durable_and_reject_stale_tabs(console_runtime, store, amp_model):
+    from app.persistence.database import Database
+    from app.persistence.settings import SettingsStore
+
+    payload = {
+        "codex_model": " gpt-custom ", "amp_model": amp_model,
+        "codex_effort": "ultra", "amp_effort": "xhigh", "expected_revision": 0,
+    }
+    with TestClient(create_app(console_runtime)) as client:
+        assert client.get("/api/settings").status_code == 401
+        assert client.put("/api/settings", json=payload).status_code == 401
+        headers = console_runtime.issuer.headers()
+        initial = client.get("/api/settings", headers=headers)
+        assert initial.status_code == 200
+        assert initial.json() == {
+            "codex_model": None, "amp_model": None,
+            "codex_effort": None, "amp_effort": None, "revision": 0,
+        }
+        assert initial.headers["cache-control"] == "no-store"
+        assert client.put("/api/settings", json=payload, headers={
+            **headers, "Origin": "https://other.test",
+        }).status_code == 403
+        # Two stale tabs must not both succeed, even when their writes arrive together.
+        with ThreadPoolExecutor(2) as executor:
+            responses = list(executor.map(lambda _: client.put("/api/settings", json=payload, headers=headers), range(2)))
+        assert sorted(response.status_code for response in responses) == [200, 409]
+        conflict = next(response for response in responses if response.status_code == 409)
+        assert conflict.json() == {"detail": "settings_conflict"}
+        saved = {
+            "codex_model": "gpt-custom", "amp_model": amp_model.strip(),
+            "codex_effort": "ultra", "amp_effort": "xhigh", "revision": 1,
+        }
+        assert client.get("/api/settings", headers=headers).json() == saved
+        # Schema initialization / a second server must retain the saved values.
+        other = Database(store.database_url)
+        try:
+            other.init_db()
+            assert SettingsStore(other).get().model_dump() == saved
+        finally:
+            other.close()
+        cleared = client.put("/api/settings", json={
+            "codex_model": "  ", "amp_model": None,
+            "codex_effort": None, "amp_effort": None, "expected_revision": 1,
+        }, headers=headers)
+        assert cleared.json() == {
+            "codex_model": None, "amp_model": None,
+            "codex_effort": None, "amp_effort": None, "revision": 2,
+        }
+
+
+@pytest.mark.parametrize("changes", [
+    {"codex_model": "model\nargument"}, {"codex_model": "x" * 257},
+    {"codex_model": "--flag"}, {"codex_model": 17}, {"codex_model": "has space"},
+    {"amp_model": "high"}, {"amp_model": "openai/"}, {"amp_model": "openai/has space"},
+    {"amp_model": "--flag/model"}, {"amp_model": "openai/model\n"},
+    {"amp_model": "openai/" + "x" * 250}, {"amp_model": 17},
+    {"codex_effort": "extreme"}, {"codex_effort": 17}, {"codex_effort": "high\n"},
+    {"amp_model": "openai/gpt-6.1-sol", "amp_effort": "ultra"},
+    {"amp_model": "openai/gpt-6.1-sol", "amp_effort": "--flag"},
+    {"amp_effort": "high"},
+    {"expected_revision": True}, {"expected_revision": -1}, {"extra": "value"},
+])
+def test_invalid_settings_never_write(console_runtime, changes):
+    with TestClient(create_app(console_runtime)) as client:
+        headers = console_runtime.issuer.headers()
+        response = client.put("/api/settings", json={
+            "codex_model": None, "amp_model": None,
+            "codex_effort": None, "amp_effort": None, "expected_revision": 0, **changes,
+        }, headers=headers)
+        assert response.status_code == 422, response.text
+        assert client.get("/api/settings", headers=headers).json()["revision"] == 0
+
+
 @pytest.mark.parametrize("task", [
     "\n完整内容 α\r\n第二行 β\n",
     "中" * 10922 + "ab",

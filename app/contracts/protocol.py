@@ -41,7 +41,7 @@ from app.domain.models import (
 )
 from app.domain.review_models import ReviewFeedback
 
-PROTOCOL_VERSION: Literal[25] = 25
+PROTOCOL_VERSION: Literal[26] = 26
 MAX_PAYLOAD_ITEMS = 32
 MessageId = Annotated[str, Field(strict=True, pattern=r"^[0-9a-f]{32}$")]
 ConnectionEpoch = Annotated[str, Field(strict=True, min_length=1, max_length=64)]
@@ -262,6 +262,8 @@ class AssignmentArguments(ExecutionIdentity):
     generation: int = Field(strict=True, gt=0)
     task: ExecutionTask
     secret: AssignmentSecret | None = None
+    model: str | None = None
+    effort: str | None = None
 
     @model_validator(mode="after")
     def _flow_identity(self) -> Self:
@@ -661,7 +663,7 @@ class Message[Payload: ToolCall | ToolResult](ProtocolModel):
     performs static checks only; receipt ACKs confer no business completion or authority.
     """
 
-    protocol_version: Literal[25]
+    protocol_version: Literal[26]
     message_id: MessageId
     connection_epoch: ConnectionEpoch | None
     ack: StrictBool
@@ -720,10 +722,13 @@ class Register(Message[WorkerPayload], InventoryPage):
     workspace: str = Field(pattern=r"^[0-9a-f]{32}$")
     repo_workspace_limit: int = Field(strict=True, gt=0)
     execute: StrictBool = True
+    coding_agent: Literal["codex", "amp"] | None
     inference: InferenceCapability | None
 
     @model_validator(mode="after")
     def _recovery_payload(self) -> Self:
+        if self.execute and self.coding_agent is None:
+            raise ValueError("coding workers must declare their agent type")
         if not self.execute and self.recoveries:
             raise ValueError("infer-only workers cannot recover coding execution")
         if self.payload:
@@ -865,7 +870,7 @@ def accept_stop_id(receipt_id: MessageId) -> MessageId:
 
 
 class MessageHeader(TypedDict):
-    protocol_version: Literal[25]
+    protocol_version: Literal[26]
     message_id: MessageId
     connection_epoch: str | None
     ack: bool

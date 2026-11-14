@@ -24,14 +24,17 @@ from app.contracts.console import (
     RepositoryPage,
     ResumeRequest,
     RetryRequest,
+    UpdateSettingsRequest,
 )
 from app.controler.runtime import ServerRuntime
 from app.controler.workflow.service import ControlService, RetryRejected
+from app.domain.models import CodingModelSettings
 from app.github import GitHubError, GitHubErrorKind
 from app.persistence.activity import ActivityStore
 from app.persistence.console import ConsoleStore
 from app.persistence.flows import FlowStore
 from app.persistence.inference_notices import InferenceNoticeStore
+from app.persistence.settings import SettingsConflict, SettingsStore
 
 router = APIRouter(prefix="/api")
 FlowId = Annotated[int, Path(gt=0)]
@@ -132,7 +135,7 @@ async def detail(request: Request, flow_id: FlowId) -> FlowDetail:
 
 
 def _require_same_origin_json(request: Request) -> None:
-    """Protect both console commands, including behind TLS and Host-rewriting proxies."""
+    """Protect console writes, including behind TLS and Host-rewriting proxies."""
     origin = request.headers.get("origin")
     fetch_site = request.headers.get("sec-fetch-site")
     # Browser-controlled Fetch Metadata survives proxy TLS termination and Host rewriting.
@@ -148,6 +151,26 @@ def _require_same_origin_json(request: Request) -> None:
         != "application/json"
     ):
         raise ConsoleFailure("json_required", 415)
+
+
+@router.get("/settings", response_model=CodingModelSettings)
+async def settings(request: Request) -> CodingModelSettings:
+    runtime: ServerRuntime = request.app.state.runtime
+    return await runtime.console.db(SettingsStore(runtime.database).get)
+
+
+@router.put("/settings", response_model=CodingModelSettings)
+async def update_settings(request: Request, body: UpdateSettingsRequest) -> CodingModelSettings:
+    _require_same_origin_json(request)
+    runtime: ServerRuntime = request.app.state.runtime
+    try:
+        return await runtime.console.db(partial(
+            SettingsStore(runtime.database).update, body.codex_model, body.amp_model,
+            codex_effort=body.codex_effort, amp_effort=body.amp_effort,
+            expected_revision=body.expected_revision,
+        ))
+    except SettingsConflict as error:
+        raise ConsoleFailure("settings_conflict") from error
 
 
 @router.post("/flows", response_model=FlowDetail, status_code=201)

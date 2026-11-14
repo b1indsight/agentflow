@@ -8,6 +8,13 @@
 
 ## Unreleased
 
+- 新增 `/console/#settings`，按 Codex / Amp 类型从预置下拉列表选择全局编码默认模型与推理强度；Amp worker
+  CLI 升至固定版本 `0.0.1794672034-g01d6fa`，支持 `--model provider/name`。配置持久化到 PostgreSQL，
+  owner 同源 API 使用版本检查防止旧表单覆盖，前端保留失败及未知保存结果的草稿并支持回读核对。
+  新会话 start 使用 assignment 选择，已有会话 resume 不加模型/模式/强度覆盖；独立 inference/Judge 不变。
+  页面仅保留每组模型标题与图标设置入口；支持中等强度的模型默认预选 mid（medium），显式保存后生效，
+  已保存的显式强度保持不变；Amp 须先选具体模型才能指定强度。
+  worker 独立注册 coding_agent，wire26 须协调升级；新增设置表和 worker 类型列，journal/inbox 不变。
 - 固定协议收敛为 `worker.*` / `server.*` 两个特殊 ToolCall 包：每个包由静态类型别名声明一次，方向联合与固定方法集合由此派生，
   执行归属由模型 `execution()` 提供，删除心跳、活性、迟到响应和 `on_rejected` 中按类型或方法名维护的名单。
   畸形响应统一交给原调用方的 `on_rejected`（改为 async），持久项恢复由发送方负责；infer 失败随请求绑定处理。

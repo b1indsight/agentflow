@@ -75,7 +75,7 @@ class _LocalConnection:
     async def on_opened(self) -> None:
         await self.session.send(Register(
             **message_header(None), control="register", payload=[],
-            worker_id=LOCAL_BUB_WORKER_ID, execute=False,
+            worker_id=LOCAL_BUB_WORKER_ID, execute=False, coding_agent=None,
             workspace="0" * 32, repo_workspace_limit=1,
             inventory=[WorkspaceInventory(workspace="0" * 32, repository=None,
                                           generation=1, flow_id=None)],

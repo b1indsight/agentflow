@@ -1,6 +1,14 @@
 export type Phase = "queued" | "running" | "review" | "blocked" | "archived";
 export type FlowLifecycle = Phase | "finalizing";
 export type ArchiveReason = "succeeded" | "abandoned";
+/** Server-global defaults for newly created coding sessions, guarded by a revision. */
+export interface CodingModelSettings {
+  codex_model: string | null;
+  amp_model: string | null;
+  codex_effort: string | null;
+  amp_effort: string | null;
+  revision: number;
+}
 export interface FlowSummary {
   id: number;
   repo: string;

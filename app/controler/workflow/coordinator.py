@@ -51,6 +51,7 @@ from app.persistence.deliveries import DeliveryStore
 from app.persistence.flows import FlowStore
 from app.persistence.jobs import JobStore
 from app.persistence.reviews import ReviewStore
+from app.persistence.settings import SettingsStore
 from app.persistence.workers import WorkerStore
 from app.plugins import emit_hook, get_plugin_manager
 
@@ -207,6 +208,16 @@ class JobCoordinator:
         prepared = await self._prepare_task(job, worker, token, epoch)
         if isinstance(prepared, JobState):
             return prepared
+        model = None
+        effort = None
+        if job.kind is not JobKind.ARCHIVE:
+            owner = next((item for item in self.workers.list_workspaces(worker)
+                          if item.repository is None and item.connection_epoch == epoch), None)
+            if owner is None or owner.coding_agent is None:
+                raise PreparationStale("coding worker identity changed during preparation")
+            defaults = SettingsStore(self.database).get()
+            model = defaults.codex_model if owner.coding_agent == "codex" else defaults.amp_model
+            effort = defaults.codex_effort if owner.coding_agent == "codex" else defaults.amp_effort
         try:
             secret = await self._assignment_secret(job, prepared)
         except Exception as exc:  # noqa: BLE001 - signing errors become durable control failures
@@ -228,6 +239,7 @@ class JobCoordinator:
         return AssignmentArguments(
             job_id=job.id, flow_id=job.required_flow_id, assignment_token=token,
             workspace=job.workspace, generation=job.generation, task=prepared, secret=secret,
+            model=model, effort=effort,
         )
 
     async def _prepare_task(

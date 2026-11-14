@@ -302,7 +302,7 @@ def test_mixed_control_ack_and_business_have_independent_identities() -> None:
         [terminal_item, accept, history], control="heartbeat", **IDENTITY, ack=True, ack_id="c" * 32
     )
     parsed = parse_worker_message(json.dumps(data))
-    assert PROTOCOL_VERSION == 25
+    assert PROTOCOL_VERSION == 26
     assert isinstance(parsed.payload[0], ExecuteResult)
     assert parsed.payload[0].terminal() == terminal
     assert isinstance(parsed.payload[1], AcceptResultRequest)
@@ -329,6 +329,7 @@ def test_register_recovery_and_registered_decisions_are_control_fields() -> None
         control="register",
         connection_epoch=None,
         worker_id="w",
+        coding_agent="codex",
         workspace="b" * 32,
         repo_workspace_limit=2,
         inventory=INVENTORY,
@@ -419,12 +420,16 @@ def test_inference_fences_and_cancel_control_are_required_and_directional() -> N
 def test_infer_only_registration_cannot_claim_coding_recovery() -> None:
     data = message([], control="register", connection_epoch=None, worker_id="mini",
                    recoveries=[], inference={"adapter_version": "bub/0.4.1"},
+                   coding_agent="amp",
                    workspace="b" * 32, repo_workspace_limit=2,
                    inventory=INVENTORY, inventory_complete=True)
     ordinary = parse_worker_message(json.dumps(data))
-    assert isinstance(ordinary, Register) and ordinary.execute
-    mini = parse_worker_message(json.dumps({**data, "execute": False}))
-    assert isinstance(mini, Register) and not mini.execute
+    assert isinstance(ordinary, Register) and ordinary.execute and ordinary.coding_agent == "amp"
+    mini = parse_worker_message(json.dumps({**data, "execute": False, "coding_agent": None}))
+    assert isinstance(mini, Register) and not mini.execute and mini.coding_agent is None
+    for value in (None, "claude-code", 1):
+        with pytest.raises(ValidationError):
+            parse_worker_message(json.dumps({**data, "coding_agent": value}))
     for fields in ({"recoveries": [{**IDENTITY, "state": "started"}]}, {"execute": "false"},
                    {"payload": [call("server.execution_started", IDENTITY)]}):
         with pytest.raises(ValidationError):

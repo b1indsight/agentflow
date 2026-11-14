@@ -241,7 +241,7 @@ async def test_completed_inference_heartbeat_skips_renewal_but_dispatches_payloa
                 adapter_version="codex/v1"))
 
     await outgoing.put(Register(**message_header(None), control="register", payload=[],
-        worker_id="worker-1", recoveries=[], workspace="b" * 32, repo_workspace_limit=2,
+        worker_id="worker-1", coding_agent="codex", recoveries=[], workspace="b" * 32, repo_workspace_limit=2,
         inventory=inventory(), inventory_complete=True,
         inference=InferenceCapability(adapter_version="codex/v1")).model_dump_json())
     try:
@@ -308,7 +308,7 @@ async def test_invalid_inference_exchange_fails_its_slot_and_keeps_the_connectio
     serving = asyncio.create_task(serve_worker(QueueSocket(outgoing, incoming),
         worker_tokens={"worker-1": "worker-secret"}, serve=server.serve_worker_session))
     await outgoing.put(Register(**message_header(None), control="register", payload=[],
-        worker_id="worker-1", recoveries=[], workspace="b" * 32, repo_workspace_limit=2,
+        worker_id="worker-1", coding_agent="codex", recoveries=[], workspace="b" * 32, repo_workspace_limit=2,
         inventory=inventory(), inventory_complete=True,
         inference=InferenceCapability(adapter_version="codex/v1")).model_dump_json())
     try:

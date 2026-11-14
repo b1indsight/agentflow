@@ -305,7 +305,7 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(
             await super().send(raw)
 
     class Agent(RecordingAgent):
-        async def start(self, task, path, *, output_schema=None, context=None):
+        async def start(self, task, path, *, output_schema=None, context=None, model=None, effort=None):
             assert (path / "README.md").read_text() == "base\n"
             assert not (path / "untracked").exists()
             (path / "README.md").write_text("cancelled staged edit")
@@ -333,7 +333,7 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(
     unrelated = None
     if overflow:
         store.workers.worker_connected("worker-1", PROTOCOL_VERSION, "setup",
-                                       workspace=default.workspace, repo_workspace_limit=2)
+                                       workspace=default.workspace, repo_workspace_limit=2, coding_agent="codex")
         for item in pool.inventory():
             assert store.workers.report_workspace("worker-1", "setup", item)
         other = store.flows.create_flow("owner/repo", 999, 1)
@@ -564,7 +564,7 @@ async def test_stop_without_ack_reuses_workspace_and_reconnect_ack_preserves_new
     executed = []
 
     class Agent(RecordingAgent):
-        async def start(self, task, cwd, *, output_schema=None, context=None):
+        async def start(self, task, cwd, *, output_schema=None, context=None, model=None, effort=None):
             flow_id = next(item.flow_id for item in pool.inventory()
                            if item.repository is not None and item.flow_id is not None
                            and pool.path(pool.lookup("owner/repo", item.flow_id)) == cwd)

@@ -57,10 +57,40 @@ npm run preview -- --port 8767
 - `/console/#board`：五列看板、组合查询、服务端分页和各阶段全集计数，PR 优先编号。
 - `/console/#flow/<id>/conversation`：GitHub + Agent 时间线、工具摘要、Review 线程、下滑加载和末尾刷新。
 - `/console/#flow/<id>/overview`、`/jobs`：概览、来源同步状态、当前动作/下一条件与执行记录。
+- `/console/#settings`：Codex / Amp 默认模型与推理强度，顶栏可进入；刷新只读取设置。
 - `/console/?q=repo%3Aagentflow+is%3Aactive+pr%3A95#board`：可分享、刷新后恢复的组合查询。
 
 Flow 编号必须来自当前数据库；没有固定可用的样例 ID。GitHub 链接指向真实记录。
 API 错误显式显示，已有内容不会被示例数据替换；Worker 离线仍可读已归档内容，未采集历史无法凭空恢复。
+
+「设置」按 Codex / Amp 后端分别保存本服务器全局默认值，仅用于新建编码会话。
+正在运行或恢复的已有会话不被强制换模型，独立 inference / Judge 不受影响。
+模型与推理强度使用预设下拉框，不提供手动输入或实时发现。
+模型「不指定」保存为 `null`：Codex 沿用原生模型，Amp 新会话保持 `--mode low` 默认。
+Amp CLI `0.0.1794672034-g01d6fa` 支持显式 `--model provider/name`；页面不再提供原生模式选项，
+已有会话恢复行为不变。
+
+[`modelPresets.ts`](modelPresets.ts) 保存 2026-11-14 的 CLI 元数据预设快照：
+Codex 为本地 CLI 缓存中可见的八个模型；Amp 为已脱敏 `current-models.json` 中
+`capabilities.tools=true` 的 53 个模型，保留原始 `id`、`displayName` 及 `capabilities.efforts`。
+Codex 强度来自同一缓存的 `supported_reasoning_levels`，并非旧 CLI 的封闭枚举。
+这些元数据不代表账号授权或模型执行已验证，没有实时权限或可用性探测。
+已保存但不在预设中的模型或强度以「当前值（不在预设中）」保留，读取不会静默清空。
+每组只显示模型标题，强度下拉保留可访问名称；顶栏设置入口仅显示图标，不显示静态说明或已读取提示。
+未指定强度时，支持 `medium` 的模型在草稿中预选 `mid`，显式保存时提交 `medium`，不再提供「模型默认」选项。
+已有显式强度保持不变；预选不会自动写入数据库或修改已有会话。
+已知模型只提供自身的强度，Codex 未指定或未知模型可选后端支持的并集。
+Amp 未指定模型、未知模型或没有可选强度时，禁用空强度框；已保存的非预设强度仍可保留。
+切换模型保留兼容强度，否则预选 `mid`；若支持其他强度但没有 `medium`，需选择可用档位后才能保存。
+非空 Amp 强度要求明确模型。服务端负责最终格式和组合校验，不自动保存。
+
+设置通过同源 `GET /api/settings` 读取 `{codex_model, amp_model, codex_effort, amp_effort, revision}`，不使用会话响应缓存。
+显式保存以 `PUT /api/settings` 同时提交四项（包括 `null`）和 `expected_revision`；成功响应须回显四项，版本恰好加一。
+读取、校验和权限失败保留草稿；409 冲突须先重新读取，再对照服务器当前设置显式保存或选择「使用服务器设置」。
+网络、5xx 或不完整的成功响应视为保存结果未知，锁定重发；「回读核对」仅发 GET，并保留草稿供比较，
+失败时不解除锁定，也不会自动重发 PUT。离开设置时取消读取；迟到响应不能覆盖新页面或读取期间编辑的草稿。
+草稿与未知结果保护在当前页面内存中保留，切换设置、看板和详情不会丢失；整页刷新或关闭前应先回读核对。
+返回看板保留查询、未提交的搜索输入、阶段、滚动与分页状态；原有 Flow 深链接和会话缓存保持独立。
 
 「新建 Flow」选择 Project（代码仓库）并填写任务内容，不必关联 Issue。项目来自授权 installation 的分页仓库清单，
 不依赖历史 Flow；可继续读取空的中间页、重试或重新读取，并保留草稿。
@@ -154,7 +184,8 @@ Tab / Shift+Tab 顺序。
 收起后隐藏的导航不再接收焦点；桌面保持展开。
 
 - 手机未显示的看板阶段列仍保留测量，避免虚拟列表复显错位。
-  打开详情再返回会恢复各列滚动位置和卡片焦点，手机切换阶段保留阅读位置。
+  从设置或详情返回时，各列复用窗口层按可见卡片及偏移恢复阅读位置，避免重挂载后估计高度变化导致移位；
+  详情返回仍恢复卡片焦点，手机切换阶段保留阅读位置。
 - 看板各列使用独立滚动根，侧栏分组、执行记录、关键进展、会话、正文块、Review 回复使用各自页面的共享滚动根。
   会话显示行由数据定义，组摘要与展开后的各条正文独立虚拟化；调用和结果各占稳定的一行，
   每行最多一条正文。每个列表最多挂载 60 个行容器，摘要、正文、上下各 3 行预渲染及
@@ -194,6 +225,8 @@ Tab / Shift+Tab 顺序。
 | ------------------------------------ | -------------------------------------------------- |
 | `main.tsx` / `App.tsx`               | React 入口、URL、服务端筛选/分页、看板、侧栏与详情 |
 | `api.ts` / `types.ts`                | 同源可取消请求、错误与控制台 DTO；不回退到 fixture |
+| `SettingsPage.tsx`                   | 编码默认值草稿、版本冲突与未知保存结果的回读核对   |
+| `modelPresets.ts`                    | Codex / Amp 具体模型预设元数据快照                 |
 | `activity.tsx`                       | 作者分组、结构化活动、安全 Markdown 与原文工具输出 |
 | `DiffWindow.tsx`                     | 编辑 patch 的有界窗口、行号与行内高亮              |
 | `useConversation.ts`                 | 快照分页缓存、请求取消/隔离、回读、显式刷新与重试  |
@@ -233,6 +266,17 @@ Playwright 自动启动并关闭端口 5174 的隔离测试服务器，无需手
 ```sh
 CI=1 PLAYWRIGHT_PORT=5175 npm run test:e2e -- --workers=2 --grep 'direct Flow|creation'
 ```
+
+设置回归单独执行（截图默认写入仓库根目录 `.amp/in/artifacts/`，也可指定 `PLAYWRIGHT_ARTIFACT_DIR`）：
+
+```sh
+CI=1 PLAYWRIGHT_PORT=5175 npm run test:e2e -- e2e/settings.spec.ts --workers=2
+```
+
+覆盖模型清空、四项保存/重载、`mid` 预选及原值保留、按模型过滤与切换兼容性、非预设当前值保留、冲突、读取/校验/权限错误、未知写入回读且不重发、
+迟到读取隔离、hash 与浏览器导航、看板搜索/手机阶段和原有会话缓存。
+1440px / 390px 默认、选择后、保存成功、读取失败、未知写入和冲突截图名为
+`code-agent-settings-compact-{default,selected,saved,read-error,unknown,conflict}-{width}.png`。
 
 任务输入回归覆盖原样字符串（包括 CRLF 粘贴及后续编辑）、空标题编号回退、刷新后服务端标题、
 取消/重复提交/结果未知保护；截图为 `.amp/in/artifacts/task-text-{form,detail-pending,detail-generated}-{1440,390}.png`。

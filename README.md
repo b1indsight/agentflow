@@ -207,7 +207,8 @@ Git/gh 设置。编码 workspace 首次准备时将 Git 配置设为当前 App �
 本地 hook 在提交时核对 bot 作者/提交者，再将原有效作者保留为 `Co-authored-by`（包括
 `git commit -m`）；身份不符则拒绝提交，只读 answer 不修改配置。此机制不配置 jj 身份或
 改写已有提交，原生 jj 提交也不运行 Git hooks。Amp 历史读取是完整原生 thread 快照，可能滞后；
-未知续跑不会自动重跑，Amp adapter 固定使用 `--mode low`。INITIAL 会在
+未知续跑不会自动重跑。Amp 新会话默认 `--mode low`，可在设置页选择具体模型与推理强度；
+恢复已有会话时不传模型、模式或强度覆盖。INITIAL 会在
 `<worker_root>/repos/<owner>/<repo>` 缺失或为空时，用当前任务的短期 installation token
 原子 clone；已有 seed 保持原状，不自动 fetch/reset 或安装依赖。seed 必须有任务基线分支，
 不自动处理空远端、submodule 或 LFS。
@@ -223,7 +224,7 @@ seed 和默认推理 workspace 不计入。每个 Flow 独占一个 workspace，
 每次 INITIAL、REVISION resume/fallback 都提供本轮 bot `gh` 包装、独立配置和 Git helper，
 不使用个人登录态；token 过期/权限不足即失败，不自动续期或扩权。worker 保持单仓库
 Contents write，PR 通过 MCP `open_pr` 请求 controler 校验后创建。包装不构成 OS 沙箱。
-当前 Codex/Amp 接入均使用 wire25 / journal5；执行结果使用 ResultInbox v1，Control 本地归档通知使用 v2。
+当前 Codex/Amp 接入均使用 wire26 / journal5；执行结果使用 ResultInbox v1，Control 本地归档通知使用 v2。
 serve 与 worker 的协议版本必须匹配。
 同一 PR 来源分支允许外部更新；revise 编码前安全同步 Git/jj，以实际 fetch 的提交作为本轮基线，保留脏文件和未发布提交。旧 BLOCKED Flow 不自动恢复。
 Judge 的 answer/revise 都派发到原 worker；answer 只回答问题，worker 比较本地提交不变，controller 比较目标 PR head 不变。Judge 只接收反馈关联的 PR 信息、线程和引用片段，不读取全 PR diff；详见 [Review 循环](docs/architecture/review-loop.md)。
@@ -324,6 +325,16 @@ v14/v15 和 ResultInbox v1 不改；未应用或损坏的结果仍拒绝，不�
 Tunnel/Access 必须将 `/console*` 与 `/api/*` 交给同一服务并应用相同 owner 策略，
 不要为静态资源增加公开旁路。Webhook 与 Worker 端点继续使用各自原有鉴权。
 
+顶栏“设置”打开 `/console/#settings`，按 code agent 类型保存 server 全局编码默认值：
+Codex 和 Amp 均从预置下拉列表选择模型；Amp 使用 `provider/name` ID，选择也会影响提示词和工具。
+选择“不指定”时 Codex 沿用原生默认，Amp 新会话使用 `low`。Amp worker 镜像固定 CLI 为
+`0.0.1794672034-g01d6fa`，新会话通过 `--model` 传入具体模型；没有实时模型目录或账号权限探测。
+已有设置不在预置列表中时仍显示并保留，列表不会清空服务器配置。设置在 PostgreSQL 持久化，保存后后续新编码会话生效，无需重启；
+不改变运行中的进程、已有会话恢复、独立 inference 或本地 Bub Judge。
+只校验格式，不探测账号权限；模型不可用时保留原生失败，不静默替换。保存冲突需重新读取；
+网络中断导致结果未知时先回读核对，草稿保留，不自动重复提交。API 为 owner-only 的
+`GET /api/settings` 与同源 JSON `PUT /api/settings`，使用 `expected_revision` 防止旧页面覆盖。
+
 时间线永久保存已观察版本和删除标记；本次阅读绑定本地快照，末尾分界线显式刷新。
 活动轮次按实际 Job/Attempt 或 PR 身份确定，迟到内容不借用当前轮；Issue 共享内容及无法确认归属的旧内容为 NULL。
 活跃 Flow 打开详情或刷新会排队后台同步，未完成的来源明确显示 pending/partial/unavailable，
@@ -389,8 +400,11 @@ M3 F3 及审查修复本地验证（2026-09-08）：真实 PostgreSQL 下 **502 
 响应丢失与重启恢复。Ruff、Mypy 与 sdist/wheel 构建通过；真实 GitHub App/worker 验收仍待执行，
 详见 [F3 审查修复记录](docs/plan/m3-archive-status.md#7-审查修复2026-09-08)。
 
-当前在线协议仅支持 **v25**，正常写入 worker journal **v5**、执行结果 ResultInbox **v1**、workspace manifest **v3**；
+当前在线协议仅支持 **v26**，正常写入 worker journal **v5**、执行结果 ResultInbox **v1**、workspace manifest **v3**；
 Control 本地归档通知使用 ResultInbox **v2**。
+注册独立上报 `coding_agent`，不从 inference 能力推断；编码 worker 必须声明 Codex 或 Amp。
+初始化幂等新增 `runtime_settings` 单行表和 nullable `workers.coding_agent` 列，旧 worker 类型待重新注册。
+模型选择随 assignment 下发，仅供新会话 start 使用；升级前须 drain，server/worker 成组升级。
 INITIAL/REVISION 使用字符串 `task_content`，Issue 在准备时由最新标题与正文拼接；server/worker 必须成组升级，不能混跑旧协议。
 现有六态库启动会幂等新增 `flows.task_content`（TEXT）和可空的 `title` / `title_job_id`、允许 NULL Issue，并校验两种输入恰好存在一种。
 新任务从同一次联合推理读取 `title` 和 `branch_slug`，实际分支沿用 `flow_deliveries.branch` 保存，不新增分支列、回填或占名索引。已有 delivery 保留实际分支，resume 从该分支派生轮次名。首次派发前发现远端同名分支会失败，不自动接管或添加数字后缀；检查到 push 之间仍可能发生并发重名。升级前须让在途准备和推理结果收敛。

@@ -158,6 +158,7 @@ class WorkerStore(Repository):
         protocol_version: int,
         connection_epoch: str = "",
         *, workspace: str, repo_workspace_limit: int, execute: bool = True,
+        coding_agent: Literal["codex", "amp"] | None,
     ) -> WorkerRecord:
         WorkspaceInventory(workspace=workspace, repository=None, generation=1, flow_id=None)
         if repo_workspace_limit <= 0:
@@ -184,11 +185,12 @@ class WorkerStore(Repository):
             row = cursor.execute(
                 "INSERT INTO workers(worker_id,workspace,repo_workspace_limit, protocol_version, status, connection_epoch,"
                 " current_job_id, first_connected_at, last_connected_at, last_seen_at,"
-                " last_error, last_disconnect_reason,execute)"
-                " VALUES (%s,%s,%s,%s,%s,%s,NULL,%s,%s,%s,NULL,NULL,%s)"
+                " last_error, last_disconnect_reason,execute,coding_agent)"
+                " VALUES (%s,%s,%s,%s,%s,%s,NULL,%s,%s,%s,NULL,NULL,%s,%s)"
                 " ON CONFLICT(worker_id,workspace) DO UPDATE SET protocol_version=excluded.protocol_version,"
                 " status='online',repo_workspace_limit=excluded.repo_workspace_limit,"
                 " connection_epoch=excluded.connection_epoch,execute=excluded.execute,inference=NULL,"
+                " coding_agent=excluded.coding_agent,"
                 " last_connected_at=excluded.last_connected_at,"
                 " last_seen_at=excluded.last_seen_at, last_error=NULL RETURNING *",
                 (
@@ -202,6 +204,7 @@ class WorkerStore(Repository):
                     now,
                     now,
                     execute,
+                    coding_agent,
                 ),
             ).fetchone()
             connection.execute(
@@ -343,7 +346,7 @@ class WorkerStore(Repository):
         with self._db.connection() as conn:
             return conn.cursor(row_factory=class_row(WorkerRecord)).execute(
                 "SELECT slot.*,owner.protocol_version,owner.status,owner.connection_epoch,owner.draining,"
-                " owner.execute,owner.inference,owner.repo_workspace_limit,owner.last_seen_at,"
+                " owner.execute,owner.coding_agent,owner.inference,owner.repo_workspace_limit,owner.last_seen_at,"
                 " owner.first_connected_at,owner.last_connected_at,owner.last_disconnect_reason"
                 " FROM workers slot JOIN workers owner ON owner.worker_id=slot.worker_id AND owner.repository IS NULL"
                 " WHERE slot.worker_id=%s ORDER BY slot.workspace", (worker_id,),
