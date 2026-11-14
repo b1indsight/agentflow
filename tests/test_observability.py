@@ -161,15 +161,21 @@ def test_standard_logging_preserves_level_and_origin_without_payload():
         logger.remove()
 
 
-def test_serve_preserves_sanitized_uvicorn_logging(monkeypatch, capsys):
+@pytest.mark.parametrize('output_format', ['json', 'text'])
+def test_serve_preserves_sanitized_uvicorn_logging(monkeypatch, capsys, output_format):
     output = io.StringIO()
     settings = ServerSettings.model_construct(database_url="postgresql://localhost/test",
-        worker_tokens={"worker-1": SecretStr("worker-secret")}, log_format="json")
+        worker_tokens={"worker-1": SecretStr("worker-secret")}, log_format=output_format)
     monkeypatch.setattr(server_config, "ServerSettings", lambda: settings)
     monkeypatch.setattr(server_runtime, "Database", Mock())
     monkeypatch.setattr(server_runtime, "GitHubApp", Mock())
     monkeypatch.setattr(server_runtime, "configure_logging",
                         lambda role, output_format: configure_logging(role, output_format, output))
+
+    def fail_request(depth):
+        if depth:
+            fail_request(depth - 1)
+        raise RuntimeError("private secret-error")
 
     def initialize_server(application, **kwargs):
         # CLI constructs the runtime first; Uvicorn configures its handlers afterwards.
@@ -177,7 +183,8 @@ def test_serve_preserves_sanitized_uvicorn_logging(monkeypatch, capsys):
         logging.getLogger("uvicorn.access").info('%s - "%s %s HTTP/%s" %d',
             "127.0.0.1:1", "GET", "/probe?token=secret-query", "1.1", 200)
         try:
-            raise RuntimeError("private secret-error")
+            # ASGI failures need their innermost code locations, not just Uvicorn's log site.
+            fail_request(24)
         except RuntimeError:
             logging.getLogger("uvicorn.error").exception("raw exception payload")
 
@@ -186,10 +193,19 @@ def test_serve_preserves_sanitized_uvicorn_logging(monkeypatch, capsys):
         cli.serve()
         captured = capsys.readouterr()
         rendered = output.getvalue() + captured.out + captured.err
-        assert not any(secret in rendered for secret in ("secret-query", "secret-error", "raw exception payload"))
-        rows = [json.loads(line) for line in output.getvalue().splitlines()]
+        assert not any(secret in rendered for secret in (
+            "secret-query", "secret-error", "raw exception payload", __file__,
+        ))
+        rows = [json.loads(line) if output_format == 'json' else
+                dict(field.split('=', 1) for field in line.split())
+                for line in output.getvalue().splitlines()]
         assert {row["level"] for row in rows} == {"INFO", "ERROR"}
         assert rows[-1]["exception_type"] == "RuntimeError"
+        frames = rows[-1]['exception_trace'].split('|')
+        assert len(frames) == 16
+        assert all(frame.startswith(f'{__name__}:fail_request:') for frame in frames)
+        assert all(frame.rsplit(':', 1)[-1].isdigit() for frame in frames)
+        assert 'exception_trace' not in rows[0]
     finally:
         logger.remove()
 
