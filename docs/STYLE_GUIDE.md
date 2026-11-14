@@ -7,9 +7,9 @@
 ## 样式来源与修改边界
 
 - 修改前阅读目标组件及其在 [styles.css](../app/controler/web/styles.css) 中的规则；复用相邻同类组件的外观，不直接套用组件库默认皮肤。
-- [theme.css](../app/controler/web/theme.css) 定义 Tailwind 主题，[styles.css](../app/controler/web/styles.css) 定义业务样式与布局，[components/ui/](../app/controler/web/components/ui/) 维护本地通用组件。通用外观由组件维护，页面专属间距和布局留在页面样式中。
+- 共享基础色值统一定义在 [styles.css](../app/controler/web/styles.css) 的 `:root`；[theme.css](../app/controler/web/theme.css) 通过 `@theme inline` 引用这些变量，提供 Tailwind 颜色名称。业务样式与布局留在 `styles.css`，[components/ui/](../app/controler/web/components/ui/) 维护本地通用组件。
 - 复用现有 `Button`、`Input`、`Tabs` 和业务样式；不为局部界面引入另一套 UI 组件库，也不借样式任务统一重写已有组件。
-- 下文规定用途和视觉约定，具体色值、尺寸以对应源码为准。修改基础色时核对两份 CSS 中的对应定义，避免 Tailwind 组件与业务样式不一致。
+- 下文规定用途和视觉约定，具体色值、尺寸以对应源码为准。修改共享基础色时只改 `:root` 中的定义，不在 Tailwind 映射或使用处重写色值；映射按用途区分，例如 Tailwind `muted` 背景引用 `--bg`，`muted-foreground` 文字引用 `--muted`。
 - 运行方式、滚动行为和渲染预算见 [README](../app/controler/web/README.md)。历史设计记录只用于追溯决定，不用旧方案覆盖当前实现与约定。
 
 ## 颜色与视觉层次
@@ -17,7 +17,7 @@
 - 页面使用 `--bg` 浅灰底，内容面使用 `--paper` 白色；正文、辅助信息和分割线分别使用 `--ink`、`--muted`、`--line`。
 - 链接、主要操作和选中项使用 `--green` 强调，浅绿背景使用 `--wash`；同一用途复用现有变量，不另造近似色。
 - 状态沿用共享色表：待处理灰、进行中蓝、待审核黄、受阻红、已归档绿。复用 `phase-*` 与 `--status-*`，配合状态文字，不只靠颜色传意。
-- 品牌绿与状态绿分开使用；已归档绿只表示阶段，成功或废弃由文字区分。错误文字和破坏性操作沿用 destructive 色，不直接使用亮红状态圆点色作为正文色。
+- 品牌绿与状态绿分开使用；已归档绿只表示阶段，成功或废弃由文字区分。错误文字和破坏性操作使用 `--destructive`，不直接使用亮红状态圆点色作为正文色。
 - 用留白、浅底色和细分割线组织层次；默认不加入渐变、大面积高饱和底色、玻璃模糊或厚重投影。
 - 保持现有浅色主题；本地组件中的 `dark:` 类不代表已有完整暗色主题，不在无关任务中补做主题切换。
 
