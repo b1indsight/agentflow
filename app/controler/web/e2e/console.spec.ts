@@ -757,6 +757,16 @@ test("shared virtual lists preserve distant focus, omitted gaps and keyboard ord
       },
     });
   });
+  const scrollToEnd = async (root: Locator, last: Locator) => {
+    // Measured rows can shrink estimated gaps after a jump; re-read the end before checking navigation.
+    await expect(async () => {
+      await root.evaluate(async (node) => {
+        node.scrollTop = node.scrollHeight;
+        for (let i = 0; i < 4; i++) await new Promise(requestAnimationFrame);
+      });
+      await expect(last).toBeInViewport({ timeout: 250 });
+    }).toPass({ timeout: 5000 });
+  };
   const checkPinnedNavigation = async (
     root: Locator,
     first: Locator,
@@ -767,11 +777,7 @@ test("shared virtual lists preserve distant focus, omitted gaps and keyboard ord
       node.scrollTop = 0;
     });
     await first.focus();
-    await root.evaluate(async (node) => {
-      node.scrollTop = node.scrollHeight;
-      for (let i = 0; i < 4; i++) await new Promise(requestAnimationFrame);
-    });
-    await expect(last).toBeInViewport();
+    await scrollToEnd(root, last);
     await expect(first).toBeFocused();
     await expect(first).not.toBeInViewport();
     expect(await root.evaluate((node) => node.scrollTop)).toBeGreaterThan(2000);
@@ -825,10 +831,7 @@ test("shared virtual lists preserve distant focus, omitted gaps and keyboard ord
   const jobs = page.locator('[data-window-list="执行记录"]');
   await expect(jobs).toHaveAttribute("data-window-count", "90");
   const detail = page.locator(".detail-body");
-  await detail.evaluate((node) => {
-    node.scrollTop = node.scrollHeight;
-  });
-  await expect(page.getByText("initial #90", { exact: true })).toBeInViewport();
+  await scrollToEnd(detail, page.getByText("initial #90", { exact: true }));
   await detail.evaluate((node) => {
     node.scrollTop = 0;
   });
@@ -898,15 +901,24 @@ for (const width of [1440, 390]) {
       "受阻1",
       "已归档2",
     ]);
-    await expect(
-      page.locator('.column.phase-running [data-flow="46"] .current-action'),
-    ).toHaveText("进行中");
-    await expect(
-      page.locator('.column.phase-blocked [data-flow="45"] .current-action'),
-    ).toHaveText("受阻");
-    await expect(
-      page.locator(".column.phase-archived .current-action"),
-    ).toHaveText(["已归档 · 成功", "已归档 · 废弃"]);
+    for (const [id, phase, status] of [
+      [42, "running", "进行中"],
+      [43, "queued", "待处理"],
+      [44, "review", "待审核"],
+      [45, "blocked", "受阻"],
+      [46, "running", "进行中"],
+      [47, "archived", "已归档 · 成功"],
+      [48, "archived", "已归档 · 废弃"],
+    ] as const) {
+      // Color-only cards must still expose their phase and archive outcome.
+      if (width === 390)
+        await page.locator(`.mobile-stages .phase-${phase}`).click();
+      const marker = page.locator(`.card[data-flow="${id}"]`).getByRole("img");
+      await expect(marker).toHaveCount(1);
+      await expect(marker).toHaveAccessibleName(status);
+    }
+    if (width === 390)
+      await page.locator(".mobile-stages .phase-running").click();
     await expect(page.locator(".column.phase-finalizing")).toHaveCount(0);
     await page.screenshot({
       path: `../../../.amp/in/artifacts/flow-default-${width}.png`,
@@ -1305,8 +1317,10 @@ for (const [width, reason, label] of [
         .getByRole("button", { name: /待处理/ })
         .click();
     await expect(
-      page.locator('.column.phase-queued [data-flow="42"]'),
-    ).toContainText("待处理");
+      page
+        .locator('.column.phase-queued [data-flow="42"]')
+        .getByRole("img", { name: "待处理", exact: true }),
+    ).toBeVisible();
     await expect(page.locator(".column.phase-archived .card")).toHaveCount(0);
     expect(requests).toBe(1);
     expect(resumeRequests).toBe(1);

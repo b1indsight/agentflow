@@ -189,16 +189,20 @@ function Board({
                           go(f.id);
                         }}
                       >
-                        <div className="card-top">
-                          <span>{ref(f)}</span>
+                        <div className="card-title">
+                          <span
+                            className="dot card-status"
+                            role="img"
+                            aria-label={flowLabel(f)}
+                            title={flowLabel(f)}
+                          />
+                          <h2>{name(f)}</h2>
                         </div>
-                        <h2>{name(f)}</h2>
-                        <div className="repo-label">{f.repo}</div>
-                        <div className="card-foot">
-                          <span className="current-action">
-                            <i className="dot" />
-                            {flowLabel(f)}
+                        <div className="card-meta">
+                          <span className="repo-label" title={f.repo}>
+                            {f.repo}
                           </span>
+                          <span className="card-ref">{ref(f)}</span>
                         </div>
                       </button>
                     );
