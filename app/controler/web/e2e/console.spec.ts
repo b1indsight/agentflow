@@ -2035,6 +2035,11 @@ test("reads a complete patch once and windows parsed rows without losing line nu
   await edited.click();
   await edited.click();
   await expect(firstNumber).toHaveText("151");
+  // Virtual rows and tab navigation unmount the diff, but its version is immutable.
+  await page.getByRole("tab", { name: "概览" }).click();
+  await page.getByRole("tab", { name: "会话" }).click();
+  await edited.click();
+  await expect(firstNumber).toHaveText("151");
   expect(requests).toBe(1);
 });
 
@@ -2777,10 +2782,15 @@ test("thread replies and body continuation use the pinned snapshot and Unicode o
   page,
 }) => {
   const thread = { ...activity, kind: "thread", body: "😀", body_length: 3 };
+  let bodyReads = 0;
+  let replyReads = 0;
   await page.route("**/api/flows/42/activity?**", async (route) => {
     const url = new URL(route.request().url());
     const parent = url.searchParams.get("parent");
-    if (parent) expect(url.searchParams.get("snapshot")).toBe("2");
+    if (parent) {
+      replyReads++;
+      expect(url.searchParams.get("snapshot")).toBe("2");
+    }
     return route.fulfill({
       json: {
         items: parent
@@ -2796,6 +2806,7 @@ test("thread replies and body continuation use the pinned snapshot and Unicode o
     });
   });
   await page.route("**/api/flows/42/activity/content?**", (route) => {
+    bodyReads++;
     const url = new URL(route.request().url());
     expect(url.searchParams.get("offset")).toBe("1");
     expect(url.searchParams.get("version")).toBe("2");
@@ -2812,11 +2823,16 @@ test("thread replies and body continuation use the pinned snapshot and Unicode o
   await page.goto("/#flow/42/conversation");
   await page.getByRole("button", { name: "下一段", exact: true }).click();
   await expect(page.getByText("后文", { exact: true })).toBeVisible();
+  await expect(page.getByText("线程回复正文", { exact: true })).toBeVisible();
+  // Replies now load on mount; StrictMode may abort an initial read before the successful one.
+  const initialReplyReads = replyReads;
   // Tab changes unmount the activity row, just as virtual-window eviction does.
   await page.getByRole("tab", { name: "概览" }).click();
   await page.getByRole("tab", { name: "会话" }).click();
   await expect(page.getByText("后文", { exact: true })).toBeVisible();
   await expect(page.getByText("线程回复正文", { exact: true })).toBeVisible();
+  expect(bodyReads).toBe(1);
+  expect(replyReads).toBe(initialReplyReads);
   await page.setViewportSize({ width: 390, height: 844 });
   await page.getByRole("button", { name: "切换任务" }).click();
   await expect(page.getByRole("dialog", { name: "Flow 导航" })).toBeVisible();
@@ -2826,6 +2842,132 @@ test("thread replies and body continuation use the pinned snapshot and Unicode o
     path: "../../../.amp/in/artifacts/console-mobile.png",
     fullPage: true,
   });
+});
+
+test("empty conversations stay cached until explicit refresh or page reload", async ({
+  page,
+}) => {
+  let reads = 0;
+  let snapshot = 0;
+  await page.route("**/api/flows/42/activity?**", (route) => {
+    reads++;
+    const url = new URL(route.request().url());
+    if (url.searchParams.get("refresh") === "true") snapshot = 2;
+    return route.fulfill({
+      json: {
+        items: snapshot ? [activity] : [],
+        snapshot,
+        total: snapshot ? 1 : 0,
+        next_cursor: null,
+        has_more: false,
+        sources: [],
+        changes: {},
+      },
+    });
+  });
+  await page.goto("/#flow/42/conversation");
+  const boundary = page.locator(".refresh-boundary");
+  await expect(boundary).toBeEnabled();
+  const initialReads = reads;
+  // A successful empty snapshot is cached data, not an uninitialized conversation.
+  await page.getByRole("tab", { name: "概览" }).click();
+  await page.getByRole("tab", { name: "会话" }).click();
+  await expect(boundary).toBeEnabled();
+  expect(reads).toBe(initialReads);
+  await boundary.click();
+  await expect(page.getByText(activity.body, { exact: true })).toBeVisible();
+  expect(reads).toBe(initialReads + 1);
+  await page.reload();
+  await expect(page.getByText(activity.body, { exact: true })).toBeVisible();
+  expect(reads).toBeGreaterThan(initialReads + 1);
+});
+
+test("returning to a cached flow keeps it resident when another flow is opened", async ({
+  page,
+}) => {
+  const reads = new Map<number, number>();
+  await page.route(/\/api\/flows\/\d+$/, (route) => {
+    const id = Number(new URL(route.request().url()).pathname.split("/")[3]);
+    return route.fulfill({ json: { ...blockedFlow, id } });
+  });
+  await page.route(/\/api\/flows\/\d+\/activity\?/, (route) => {
+    const id = Number(new URL(route.request().url()).pathname.split("/")[3]);
+    const body = `会话 ${id}`;
+    reads.set(id, (reads.get(id) ?? 0) + 1);
+    return route.fulfill({
+      json: {
+        items: [{ ...activity, body, body_length: body.length }],
+        snapshot: 2,
+        total: 1,
+        next_cursor: null,
+        has_more: false,
+        sources: [],
+        changes: {},
+      },
+    });
+  });
+  const visit = async (id: number) => {
+    await page.evaluate((id) => {
+      location.hash = `flow/${id}/conversation`;
+    }, id);
+    await expect(page.getByText(`会话 ${id}`, { exact: true })).toBeVisible();
+    await expect(page.locator(".refresh-boundary")).toBeEnabled();
+  };
+  await page.goto("/#board");
+  for (const id of [42, 43, 44, 45]) await visit(id);
+  const initialReads = new Map(reads);
+  // Revisiting a Flow without fetching must still promote it ahead of less recently read Flows.
+  await visit(42);
+  expect(reads).toEqual(initialReads);
+  await visit(46);
+  await visit(42);
+  expect(reads.get(42)).toBe(initialReads.get(42));
+  await visit(43);
+  expect(reads.get(43)).toBeGreaterThan(initialReads.get(43)!);
+});
+
+test("an oversized refreshed conversation stays readable without retaining its old snapshot", async ({
+  page,
+}) => {
+  let reads = 0;
+  let snapshot = 2;
+  // Large metadata lives in the items Map, so counting only JSON.stringify(state) would miss it.
+  const largeMetadata = "x".repeat(8 * 1024 * 1024);
+  await page.route("**/api/flows/42/activity?**", (route) => {
+    reads++;
+    if (new URL(route.request().url()).searchParams.get("refresh") === "true")
+      snapshot = 3;
+    return route.fulfill({
+      json: {
+        items: [
+          {
+            ...activity,
+            version: snapshot,
+            body: `快照 ${snapshot}`,
+            body_length: 4,
+            metadata: snapshot === 3 ? { payload: largeMetadata } : {},
+          },
+        ],
+        snapshot,
+        total: 1,
+        next_cursor: null,
+        has_more: false,
+        sources: [],
+        changes: {},
+      },
+    });
+  });
+  await page.goto("/#flow/42/conversation");
+  await expect(page.getByText("快照 2", { exact: true })).toBeVisible();
+  await page.locator(".refresh-boundary").click();
+  await expect(page.getByText("快照 3", { exact: true })).toBeVisible();
+  const beforeReturn = reads;
+  await page.getByRole("tab", { name: "概览" }).click();
+  await page.getByRole("tab", { name: "会话" }).click();
+  await expect(page.getByText("快照 3", { exact: true })).toBeVisible();
+  await expect(page.locator(".refresh-boundary")).toBeEnabled();
+  expect(reads).toBeGreaterThan(beforeReturn);
+  await expect(page.getByRole("alert")).toHaveCount(0);
 });
 
 test("refresh resets reply cursors even when the thread version is unchanged", async ({

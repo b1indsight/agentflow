@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getActivity } from "./api";
+import { jsonCacheBytes, SessionCache } from "./sessionCache";
 import type {
   ActivityIdentity,
   ActivityItem,
@@ -42,13 +43,11 @@ const empty = (): ConversationState => ({
   busy: false,
   error: null,
 });
-const cache = new Map<number, ConversationState>();
-function remember(id: number, s: ConversationState) {
-  cache.delete(id);
-  cache.set(id, { ...s, busy: false });
-  while (cache.size > CONVERSATION_CACHE_FLOWS)
-    cache.delete(cache.keys().next().value!);
-}
+const cache = new SessionCache<number, ConversationState>(
+  CONVERSATION_CACHE_FLOWS,
+  16 * 1024 * 1024,
+  (id, state) => jsonCacheBytes(id, { ...state, items: [...state.items] }),
+);
 
 /** Project only the fields needed for grouping, provenance boundaries and logical navigation. */
 export function activityIdentity(entry: ActivityItem): ActivityIdentity {
@@ -310,7 +309,8 @@ export function useConversation(flowId: number) {
     anchor = useRef<string | null>(null);
   const put = (s: ConversationState) => {
     current.current = s;
-    remember(flowId, s);
+    // Keep the completed snapshot during a pending read, without weighing its unchanged payload again.
+    if (!s.busy) cache.set(flowId, s);
     setState(s);
   };
   const read = useCallback(
@@ -407,7 +407,7 @@ export function useConversation(flowId: number) {
   }, [state.busy, state.error, state.items, onRange]);
   useEffect(() => {
     // StrictMode deliberately aborts the first mount; do not retain its in-flight flag.
-    if (!current.current.records.length) void read(null);
+    if (current.current.snapshot === null) void read(null);
     return () => controller.current?.abort();
   }, [flowId, read]);
   return {
