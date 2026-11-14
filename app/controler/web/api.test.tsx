@@ -78,6 +78,29 @@ test("failed and aborted reads do not poison the session cache", async (t) => {
   assert.equal(fetch.mock.callCount(), 3);
 });
 
+test("an aborted overlapping read cannot replace another caller's cached response", async (t) => {
+  // A row can remount before its old fetch settles; its cancelled result must not win the cache race.
+  const pending: Array<(response: Response) => void> = [];
+  const fetch = t.mock.method(
+    globalThis,
+    "fetch",
+    () => new Promise<Response>((resolve) => pending.push(resolve)),
+  );
+  const controller = new AbortController();
+  const read = (signal?: AbortSignal) =>
+    getContent(30, "entry", 2, 0, 20, signal);
+  const oldRead = read(controller.signal);
+  const newRead = read();
+  const aborted = assert.rejects(oldRead, { name: "AbortError" });
+  controller.abort();
+  pending[1](Response.json(content));
+  assert.deepEqual(await newRead, content);
+  pending[0](Response.json({ ...content, text: "已取消的响应" }));
+  await aborted;
+  assert.deepEqual(await read(), content);
+  assert.equal(fetch.mock.callCount(), 2);
+});
+
 test("session response caches evict least-recently-used data and can reread it", async (t) => {
   const fetch = t.mock.method(globalThis, "fetch", async (url: URL) =>
     Response.json(url.pathname.endsWith("/content") ? content : replies),

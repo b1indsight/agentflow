@@ -1241,6 +1241,50 @@ test("empty conversations stay cached until explicit refresh or page reload", as
   expect(reads).toBeGreaterThan(initialReads + 1);
 });
 
+test("returning to a cached flow keeps it resident when another flow is opened", async ({
+  page,
+}) => {
+  const reads = new Map<number, number>();
+  await page.route(/\/api\/flows\/\d+$/, (route) => {
+    const id = Number(new URL(route.request().url()).pathname.split("/")[3]);
+    return route.fulfill({ json: { ...blockedFlow, id } });
+  });
+  await page.route(/\/api\/flows\/\d+\/activity\?/, (route) => {
+    const id = Number(new URL(route.request().url()).pathname.split("/")[3]);
+    const body = `会话 ${id}`;
+    reads.set(id, (reads.get(id) ?? 0) + 1);
+    return route.fulfill({
+      json: {
+        items: [{ ...activity, body, body_length: body.length }],
+        snapshot: 2,
+        total: 1,
+        next_cursor: null,
+        has_more: false,
+        sources: [],
+        changes: {},
+      },
+    });
+  });
+  const visit = async (id: number) => {
+    await page.evaluate((id) => {
+      location.hash = `flow/${id}/conversation`;
+    }, id);
+    await expect(page.getByText(`会话 ${id}`, { exact: true })).toBeVisible();
+    await expect(page.locator(".refresh-boundary")).toBeEnabled();
+  };
+  await page.goto("/#board");
+  for (const id of [42, 43, 44, 45]) await visit(id);
+  const initialReads = new Map(reads);
+  // Revisiting a Flow without fetching must still promote it ahead of less recently read Flows.
+  await visit(42);
+  expect(reads).toEqual(initialReads);
+  await visit(46);
+  await visit(42);
+  expect(reads.get(42)).toBe(initialReads.get(42));
+  await visit(43);
+  expect(reads.get(43)).toBeGreaterThan(initialReads.get(43)!);
+});
+
 test("refresh resets reply cursors even when the thread version is unchanged", async ({
   page,
 }) => {
