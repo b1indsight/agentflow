@@ -89,7 +89,7 @@ async def test_running_worker_reconnects_to_new_controller_and_finishes_once(
         assert len(invocations) == 1
         assert owner.lease() is None
         assert store.jobs.get_job(job.id).state is JobState.DONE
-        assert github.opened == [store.flows.get_flow(flow.id).initial_branch]
+        assert github.opened == ["flow/implement-task"]
         receipt = session.load().terminal.result.delivery_receipt
         assert receipt.status == "prepared"
         assert receipt.head_sha == store.deliveries.get_delivery(flow.id).head_sha

@@ -177,4 +177,4 @@ def test_real_asgi_websocket_completes_a_postgresql_job(
     assert completed.state is JobState.DONE
     assert required(store.flows.get_flow(flow.id)).state is FlowState.REVIEW
     assert required(store.deliveries.get_delivery(flow.id)).state is DeliveryState.OPEN
-    assert github.opened == [flow.initial_branch]
+    assert github.opened == ["flow/implement-task"]

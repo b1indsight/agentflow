@@ -165,7 +165,7 @@ async def test_initial_job_crosses_worker_boundary_and_opens_pr(store, prepared_
     assert title_job.inference.task.messages[-1].content == task.task_content
     if flow.issue_number is None:
         assert not any(call["operation"] == "fetch_issue" for call in github.resource_calls)
-    assert task.base_branch == "trunk" and task.branch == flow.initial_branch
+    assert task.base_branch == "trunk" and task.branch == request.arguments.branch
     # A tool receipt reserves delivery intent; only an accepted terminal may open a PR.
     assert github.opened == []
     assert await apply_result(subject, job, result) is JobState.DONE
@@ -224,18 +224,26 @@ async def pending_naming(store):
 
 @pytest.mark.parametrize("reply,cancelled,expected", [
     ({"title": "修复分页游标 😀", "branch_slug": "fix-cursor"}, False, "修复分页游标 😀"),
+    ({"title": "   ", "branch_slug": "fix-cursor"}, False, None),
+    ({"title": 123, "branch_slug": "fix-cursor"}, False, None),
     ({"title": "第一行\n第二行", "branch_slug": "fix-cursor"}, False, None),
     ({"title": "x" * 257, "branch_slug": "fix-cursor"}, False, None),
+    ({"title": "Title", "branch_slug": 123}, False, None),
+    ({"title": "Title", "branch_slug": "ab"}, False, None),
+    ({"title": "Title", "branch_slug": "x" * 49}, False, None),
     ({"title": "Title", "branch_slug": "../unsafe"}, False, None),
     ({"title": "Title", "branch_slug": "123"}, False, None),
     ({"title": "Title", "branch_slug": "fix-round-2"}, False, None),
+    ({"title": "Title"}, False, None),
+    ({"title": "Title", "branch_slug": "fix-cursor", "extra": True}, False, None),
+    ("[]", False, None),
     ('{"title":"One","title":"Two","branch_slug":"fix-cursor"}', False, None),
     (InferenceFailure(code="configuration"), False, None),
     ({"title": "不应使用的标题", "branch_slug": "fix-cursor"}, True, None),
     ({"title": "不应使用的标题", "branch_slug": "fix-cursor"}, "stop", None),
 ])
 async def test_title_is_inferred_once_and_replayed_atomically(store, pending_naming, monkeypatch, reply, cancelled, expected):
-    # Restart between receipt and application must publish both names or neither.
+    # Recover the branch from the same inference after title application, before delivery exists.
     flow, subject, _coding, preparing, title_job = pending_naming
     assert title_job is not None and title_job.inference.source_attempt_id == flow.current_attempt_id
     assert title_job.inference.task.messages[-1].content == "Real issue\n\nReal body"
@@ -275,7 +283,7 @@ async def test_title_is_inferred_once_and_replayed_atomically(store, pending_nam
             with pytest.raises(RuntimeError, match="title write interrupted"):
                 await recovered.results.apply(assigned.id)
         assert store.jobs.get_job(assigned.id).result_applied_at is None
-        assert store.flows.get_flow(flow.id).branch_name is None
+        assert store.deliveries.get_delivery(flow.id) is None
         assert store.flows.get_flow(flow.id).title is None
     await recovered.results.apply(assigned.id)
     await coordinator(store, subject.github).results.apply(assigned.id)
@@ -283,14 +291,18 @@ async def test_title_is_inferred_once_and_replayed_atomically(store, pending_nam
     if cancelled != "stop":
         store.flows.update_flow(flow)
     assert store.flows.get_flow(flow.id).title == expected
-    task = await asyncio.wait_for(preparing, 2)
     if expected is not None:
+        preparing.cancel()
+        await asyncio.gather(preparing, return_exceptions=True)
+        assert store.deliveries.get_delivery(flow.id) is None
+        task = await asyncio.wait_for(coordinator(store, subject.github).prepare(_coding), 2)
         assert isinstance(task, InitialTask) and task.branch == "flow/fix-cursor"
-        assert store.flows.get_flow(flow.id).branch_name == "flow/fix-cursor"
+        assert store.deliveries.get_delivery(flow.id).branch == task.branch
+        assert len([j for j in store.jobs.list_jobs(flow.id) if j.kind is JobKind.INFERENCE]) == 1
     else:
+        task = await asyncio.wait_for(preparing, 2)
         assert task is (JobState.DONE if cancelled else JobState.FAILED)
         assert store.deliveries.get_delivery(flow.id) is None
-        assert store.flows.get_flow(flow.id).branch_name is None
     assert store.jobs.get_job(assigned.id).result_applied_at is not None
 
 

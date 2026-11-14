@@ -10,7 +10,6 @@ CREATE TABLE IF NOT EXISTS flows (
   task_content TEXT,
   title TEXT,
   title_job_id BIGINT,
-  branch_name TEXT,
   installation_id BIGINT,
   state TEXT NOT NULL CHECK (state IN ('queued','running','review','blocked','finalizing','archived')),
   current_attempt_id BIGINT,
@@ -27,7 +26,6 @@ CREATE TABLE IF NOT EXISTS flows (
 ALTER TABLE flows ADD COLUMN IF NOT EXISTS task_content TEXT;
 ALTER TABLE flows ADD COLUMN IF NOT EXISTS title TEXT;
 ALTER TABLE flows ADD COLUMN IF NOT EXISTS title_job_id BIGINT;
-ALTER TABLE flows ADD COLUMN IF NOT EXISTS branch_name TEXT;
 ALTER TABLE flows ALTER COLUMN issue_number DROP NOT NULL;
 DO $$ BEGIN
   ALTER TABLE flows ADD CONSTRAINT flows_one_input
@@ -162,15 +160,6 @@ CREATE TABLE IF NOT EXISTS flow_deliveries (
 );
 CREATE INDEX IF NOT EXISTS ix_flow_deliveries_pr
   ON flow_deliveries(pr_number) WHERE pr_number IS NOT NULL;
-
-UPDATE flows f SET branch_name=CASE
- WHEN f.current_round_no>1
- AND right(d.branch,length('-round-' || f.current_round_no::text))='-round-' || f.current_round_no::text
- THEN left(d.branch,length(d.branch)-length('-round-' || f.current_round_no::text))
- ELSE d.branch END
- FROM flow_deliveries d WHERE d.flow_id=f.id AND f.branch_name IS NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS ux_flows_branch_name ON flows(repo,branch_name)
- WHERE branch_name IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS flow_tool_calls (
   call_id TEXT PRIMARY KEY,

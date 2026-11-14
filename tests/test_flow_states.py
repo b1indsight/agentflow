@@ -9,13 +9,22 @@ from app.domain.models import DeliveryState, FlowState, ReviewItemKind
 from app.domain.review_models import FeedbackUpdate
 
 
-def test_resume_does_not_replay_prior_round_feedback_or_cursors(store):
+@pytest.mark.parametrize("branch,round_no,expected_branch", [
+    ("flow/77", 1, "flow/77-round-2"),
+    ("flow/custom-task", 1, "flow/custom-task-round-2"),
+    ("flow/custom-task-round-3", 3, "flow/custom-task-round-4"),
+    ("flow/not-this-round-3", 2, "flow/not-this-round-3-round-3"),
+])
+def test_resume_does_not_replay_prior_round_feedback_or_cursors(store, branch, round_no, expected_branch):
     service = ControlService(database=store.database)
     flow = service.create_flow("owner/repo", 7, 42)
+    for previous_round in range(1, round_no):
+        service.cancel(flow)
+        flow = service.resume(flow, expected_round_no=previous_round)
     attempt = store.flows.create_attempt(flow.id)
     flow.current_attempt_id = attempt.id
     store.flows.update_flow(flow)
-    delivery = store.deliveries.get_or_create_delivery(flow.id, f"flow/{flow.id}")
+    delivery = store.deliveries.get_or_create_delivery(flow.id, branch)
     delivery.state, delivery.pr_number = DeliveryState.OPEN, 17
     store.deliveries.update_delivery(delivery)
     store.reviews.ingest(
@@ -39,7 +48,8 @@ def test_resume_does_not_replay_prior_round_feedback_or_cursors(store):
     assert store.reviews.pending(flow.id)
     assert store.reconcile.feedback_get(flow.id, "reviews") is not None
     service.cancel(flow)
-    resumed = service.resume(flow, expected_round_no=1)
+    resumed = service.resume(flow, expected_round_no=round_no)
+    assert store.deliveries.get_delivery(flow.id).branch == expected_branch
     resumed.current_attempt_id = store.flows.create_attempt(flow.id).id
     store.flows.update_flow(resumed)
     assert store.reviews.pending(flow.id) == []
@@ -60,7 +70,7 @@ async def test_resume_before_first_delivery_still_requires_worker_naming(store, 
     flow = service.create_flow("owner/repo", 8, 42)
     service.cancel(flow)
     resumed = service.resume(flow, expected_round_no=1)
-    assert resumed.branch_name is None and store.deliveries.get_delivery(flow.id) is None
+    assert resumed.current_round_no == 2 and store.deliveries.get_delivery(flow.id) is None
     register_worker(store, "worker-a", repo=flow.repo, epoch="epoch")
     coding = store.workers.assign_job("worker-a", "token", "epoch")
     github = RecordingGitHub()

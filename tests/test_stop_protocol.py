@@ -427,7 +427,7 @@ async def test_stopping_consumes_a_and_requires_real_r_before_b(
         ) == "pending"
         with pytest.raises(ResultPending):
             await subject.results.apply(job.id)
-        assert github.opened == [flow.initial_branch]
+        assert github.opened == [request.arguments.branch]
     ControlService(database=store.database).cancel(flow)
     intent, = store.stops.pending_for_worker("worker-a")
     receipt = ExecutionStopped(**intent.fence().model_dump(), execution_nonce="actual-executor")
@@ -484,7 +484,7 @@ async def test_stopping_consumes_a_and_requires_real_r_before_b(
                         call_id="call",
                         arguments={"title": "no side effects"},
                         vcs_backend=VcsKind.GIT,
-                        branch=flow.initial_branch,
+                        branch=request.arguments.branch,
                         commit_sha="head",
                         remote_sha="head",
                     ),

@@ -174,7 +174,7 @@ async def test_control_gateway_and_worker_client_complete_one_remote_job(store, 
     assert call.response == terminal.result.delivery_receipt
     assert github.opened == ["flow/implement-task"] and len(agent.started) == 1
     named = store.flows.get_flow(flow.id)
-    assert named.title == "Implement task" and named.initial_branch == delivery.branch
+    assert named.title == "Implement task" and delivery.branch == "flow/implement-task"
     assert len([j for j in store.jobs.list_jobs(flow.id) if j.kind.value == "inference"]) == 1
 
 

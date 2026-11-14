@@ -298,8 +298,8 @@ M2 已加入类型化 GraphQL 线程/comment 分页、共享预算、原线程�
 | execution policy | 否 | worker config / `CodexAgent` | full access 需专用 account/container/VM；目录只表达所有权 |
 | VCS | 否 | `agent_guidance/verify_pushed_outcome` | Agent 自探测；worker 在 tool 前用固定 remote 和净化、限时命令验证 ancestry/clean/remote SHA |
 
-INITIAL 复用原 title inference job，一次返回 `title` 与英文 kebab-case `branch_slug`；control 校验并原子保存标题和 `flow/<slug>` 分支 stem，命名成功后才创建 delivery、派发编码。等待使用独立异步 preparation，不持有事务或阻塞 inference 槽；逻辑调用仍限 30 秒。命名失败不会生成 ID 分支。
-同仓库的 stem 由唯一索引防止重复，重名加数字后缀，后续 round 沿用 stem 加 `-round-N`。已有 delivery/PR 保留实际分支；首次派发前只读检查远端同名 ref，拒绝接管。该检查不构成远端原子占名。
+INITIAL 复用原 title inference job，一次返回 `title` 与英文 kebab-case `branch_slug`；control 直接校验两个字段，沿用原有标题写入和 inference 结果保存，从该结果读取 slug 后才创建 delivery、派发编码。不新增命名对象、分支列或分支占名写入，实际分支仍由 `flow_deliveries.branch` 保存。等待使用独立异步 preparation，不持有事务或阻塞 inference 槽；逻辑调用仍限 30 秒。命名失败不会生成 ID 分支。
+重试沿用已有 delivery 分支或原 inference 结果，后续 round 从 delivery 的实际分支去掉当前轮次后缀，再加 `-round-N`。已有 delivery/PR 不重命名；首次派发前只读检查远端同名 ref，拒绝接管，不自动添加数字后缀。该检查不构成远端原子占名，也不在数据库中预留名称。
 worker 内的 Code Agent 在 Flow repo 完成 branch/bookmark、commit 和
 push；worker 在转发 `flow.open_pr` 前核验，control 再读取 GitHub ref 核对 SHA 后才创建/复用 PR，最后以
 terminal result 三方核对。当前缺口包括：

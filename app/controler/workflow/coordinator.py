@@ -13,6 +13,7 @@ from app.contracts.protocol import (
     AssignmentSecret,
     ExecutionTask,
     Failed,
+    InferenceResult,
     InitialTask,
     PushSecret,
     RevisionTask,
@@ -29,12 +30,12 @@ from app.controler.workflow.preparation import (
 from app.controler.workflow.results import ResultApplication
 from app.domain.context_models import ReviewContext
 from app.domain.inference_models import InferenceMessage, InferenceTask
+from app.domain.json import strict_json
 from app.domain.judge_models import JudgeDecision
 from app.domain.models import (
     DeliveryState,
     Flow,
     FlowDelivery,
-    FlowNaming,
     Job,
     JobKind,
     JobState,
@@ -307,29 +308,44 @@ class JobCoordinator:
                     )),
                     InferenceMessage(role="user", content=task_content[:12000]),
                 ],
-                output_schema=FlowNaming.model_json_schema(),
+                output_schema={
+                    "type": "object", "additionalProperties": False,
+                    "required": ["title", "branch_slug"],
+                    "properties": {
+                        "title": {"type": "string", "minLength": 1, "maxLength": 256},
+                        "branch_slug": {
+                            "type": "string", "minLength": 3, "maxLength": 48,
+                            "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
+                        },
+                    },
+                },
                 max_output_bytes=4096, timeout_seconds=30,
             ), flow_id=flow.id, validation="flow_naming")
             connection.execute("UPDATE flows SET title_job_id=%s WHERE id=%s", (naming.id, flow.id))
             return naming.id
 
-    async def _await_naming(self, job: Job, flow: Flow, naming_job_id: int) -> Flow | JobState:
+    async def _await_naming(self, job: Job, flow: Flow, naming_job_id: int) -> str | JobState:
         """Wait without holding workflow locks or the connection's inference lane."""
         while True:
             fresh = self.flows.get_flow(flow.id)
             if (fresh is None or self._retired(fresh, job, deliveries=self.deliveries)
                     or fresh.current_attempt_id != flow.current_attempt_id):
                 return JobState.DONE
-            if fresh.branch_name is not None:
-                return fresh
             naming = self.jobs.get_job(naming_job_id)
             assert naming is not None and naming.inference is not None
             if naming.result_received_at is not None and naming.result_applied_at is None:
                 await self.results.apply(naming.id)
                 continue
+            if naming.state is JobState.DONE:
+                result = InferenceResult.model_validate(naming.result_payload)
+                assert result.output is not None
+                output = strict_json(result.output.text)
+                assert isinstance(output, dict) and isinstance(output["branch_slug"], str)
+                suffix = f"-round-{fresh.current_round_no}" if fresh.current_round_no > 1 else ""
+                return f"flow/{output['branch_slug']}{suffix}"
             expired = (naming.inference.deadline_at <= self.database.now()
                        and self.workers.inference_needs_cancel(naming.id))
-            if naming.state in {JobState.DONE, JobState.FAILED} or expired:
+            if naming.state is JobState.FAILED or expired:
                 reason = "execution_timeout" if expired else naming.last_error or "invalid_response"
                 await self.fail(job, f"Flow title/branch naming failed: {reason}")
                 return JobState.FAILED
@@ -389,7 +405,7 @@ class JobCoordinator:
             if repository.full_name != flow.repo:
                 await self.fail(job, "GitHub repository identity 不匹配。")
                 return JobState.FAILED
-            if delivery is None and flow.branch_name is None:
+            if delivery is None:
                 try:
                     naming_job_id = self._ensure_naming(flow, job, task_content)
                 except ValueError:
@@ -398,10 +414,12 @@ class JobCoordinator:
                 named = await self._await_naming(job, flow, naming_job_id)
                 if isinstance(named, JobState):
                     return named
-                flow = named
-            if flow.branch_name is not None and (delivery is None or delivery.base_branch is None):
+                branch = named
+            else:
+                branch = delivery.branch
+            if delivery is None or delivery.base_branch is None:
                 try:
-                    await self._read(job, lambda: repo.fetch_ref(flow.initial_branch))
+                    await self._read(job, lambda: repo.fetch_ref(branch))
                 except GitHubError as error:
                     if error.kind is not GitHubErrorKind.NOT_FOUND:
                         raise PreparationReadFailure(error) from error
@@ -416,9 +434,7 @@ class JobCoordinator:
                     return JobState.DONE
                 current_delivery = deliveries_tx.get_delivery(flow.id)
                 if current_delivery is None:
-                    if fresh.branch_name is None:
-                        raise ValueError("new INITIAL requires worker-generated naming")
-                    current_delivery = deliveries_tx.get_or_create_delivery(fresh.id, fresh.initial_branch)
+                    current_delivery = deliveries_tx.get_or_create_delivery(fresh.id, branch)
                 current_delivery.base_branch = repository.default_branch
                 deliveries_tx.update_delivery(current_delivery)
                 delivery = current_delivery

@@ -377,3 +377,13 @@ ConsoleSync 的 SyncClaim、来源枚举和读取作用域支持可空 Issue。�
 使用真实 PostgreSQL、原有双端 Session 和 `--testmon`，临时插件只给 `NamingInference.infer` 增加每次 0.35 秒延迟：原测试在 10 秒总时限失败，按每个新增运行任务等待进展的版本通过，最大容量场景执行超过 14 秒。保留每步 10 秒停滞上限和全部容量、隔离、重连、停止及复用断言，不减少 17 的容量参数、不预先跳过命名，也不改产品 30 秒命名预算。该变更仅替换测试首个等待条件，不新增产品状态或抽象；此旧等待/新等待对照即为本次简化比较。
 
 复验沿用 CI 第一分片的模块选择与 testmon 收集，另跑受延迟影响的容量参数及 Ruff/Mypy；证据为 `.amp/in/artifacts/branch-naming-ci-{failure,latency-red,latency-green,shard,ruff,mypy}.log`。临时延迟插件不保留在仓库，修复仍在同一个 bookmark 和 PR 交付。
+
+### 2026-11-14：直接处理联合输出，移除新增分支持久化
+
+**要求与决定：** 用户要求“简化直接处理，去掉持久化逻辑”。本次据此替代前文关于 `FlowNaming`、`flows.branch_name`、回填与唯一占名索引的决定；保留功能原本已有的 title、inference 结果和 `flow_deliveries.branch` 存储，不把“去掉新增持久化”扩大成删除交付记录或推理恢复机制。
+
+**实现与取舍：** 移除 `FlowNaming`、分支字段、`assign_branch_name`、schema 新增列/回填/索引及其专属测试。仍在同一次 inference 中返回 `title` / `branch_slug`，直接校验这两个字段；结果应用只沿用原标题写入。INITIAL 从现有推理结果读取 slug，完成远端读取后通过原有 delivery 创建入口保存实际分支，不为命名新增写入。命名完成后、delivery 创建前的重启复用同一结果与 deadline。后续 round 从 delivery 的实际分支去掉与当前 round 精确匹配的后缀，再派生下一轮分支，历史 ID/custom 分支也按实际保存值处理。
+
+本次同时取消数据库名称预留及自动 `-2` / `-3` 编号；远端已存在的分支仍直接失败，不接管或覆盖。检查到 push 之间依旧存在并发窗口，相同推理结果也不再由本地唯一索引隔离。这是本次简化后的明确边界，不将原唯一索引测试的结论继续描述为当前保证。现有分支 SHA、assignment、round 和 attempt 校验不变，不运行数据库迁移或删除在线数据。
+
+**验证与简化比较：** 本轮删除额外模型和存储机制，未引入新的状态、调用或抽象，因此不为已删除机制再加消融层。保留原有等待/超时/无效输出/迟到结果/远端预存分支回归，并扩展现有重放场景，在 title 结果应用之后、创建 delivery 之前替换 coordinator，验证不增加第二次 inference 也能得到原分支；恢复用例覆盖 ID、自定义名、精确当前轮次后缀与不匹配后缀。独立 PostgreSQL 新库检查确认没有 `branch_name` 列和 `ux_flows_branch_name` 索引。Ruff、Mypy、sdist/wheel 构建通过；全量 PostgreSQL 回归及发布前双代理审查结果分别保存在 `.amp/in/artifacts/branch-naming-simple-suite.log`、`branch-naming-simple-review.log`，schema 检查为 `branch-naming-simple-schema.log`。外部模型和 GitHub 仍使用可控模拟，没有 UI 外观变更。

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Literal
 
 from loguru import logger
@@ -50,7 +51,6 @@ from app.domain.models import (
     FeedbackRef,
     Flow,
     FlowDelivery,
-    FlowNaming,
     FlowState,
     Job,
     JobKind,
@@ -121,12 +121,12 @@ class ResultApplication:
             return await self._apply(job_id)
 
     def _apply_inference(self, job: Job) -> JobState:
-        """Validate saved answers and atomically publish their Flow naming facts."""
+        """Validate saved answers and atomically publish their Flow title."""
         inference = job.inference
         if inference is None or inference.current_task is None or job.result_payload is None:
             raise ValueError("inference application requires a persisted assignment and result")
         failure = None
-        naming = None
+        title = None
         try:
             result = InferenceResult.model_validate(job.result_payload)
             if result.output is not None:
@@ -134,7 +134,17 @@ class ResultApplication:
                 if inference.validation == "review":
                     TriageVerdict.model_validate(strict_json(result.output.text), context={"judge_response": True})
                 elif inference.validation == "flow_naming":
-                    naming = FlowNaming.model_validate(strict_json(result.output.text))
+                    output = strict_json(result.output.text)
+                    if not isinstance(output, dict) or set(output) != {"title", "branch_slug"}:
+                        raise ValueError("expected title and branch_slug")
+                    title, branch_slug = output["title"], output["branch_slug"]
+                    # Keep these bounds aligned with the schema in _ensure_naming.
+                    if (not isinstance(title, str) or not title.strip() or len(title) > 256
+                            or not title.isprintable() or not isinstance(branch_slug, str)
+                            or not 3 <= len(branch_slug) <= 48
+                            or re.fullmatch(r"[a-z][a-z0-9]*(-[a-z0-9]+)*", branch_slug) is None
+                            or re.search(r"-round(?:-\d+)?$", branch_slug)):
+                        raise ValueError("invalid title or branch_slug")
         except InferenceError as error:
             failure = error.failure
         except ValueError:
@@ -144,15 +154,15 @@ class ResultApplication:
             current = self.jobs.using(tx).get_job(job.id)
             assert current is not None
             if current.state is JobState.DONE and job.flow_id is not None and job.result_payload is not None:
-                if naming is not None:
+                if inference.validation == "flow_naming":
                     flow = self.flows.using(tx).get_flow(job.flow_id)
                     if (flow is not None and flow.title_job_id == job.id
                             and flow.current_round_no == job.round_no
                             and flow.current_attempt_id == inference.source_attempt_id):
-                        self.flows.using(tx).assign_branch_name(flow.id, flow.repo, naming.branch_slug)
+                        assert isinstance(title, str)
                         connection.execute(
                             "UPDATE flows SET title=%s WHERE id=%s AND title_job_id=%s",
-                            (naming.title.strip(), flow.id, job.id),
+                            (title.strip(), flow.id, job.id),
                         )
                     return current.state
                 output = InferenceResult.model_validate(job.result_payload).output
