@@ -260,3 +260,17 @@ schema 加载只依赖 contracts/domain；连接的 `bind()` 不参与 schema �
   - 临时加入 `worker.echo` 模型，未改任何名单即通过两个方向的解析、Heartbeat 和错误方向拒绝，演练后已删除。
 - **Outcome / pending:** 待用户审阅行为变化与实现；提交、推送和 PR 未执行。
 
+### [003] — 2026-11-14 — 包改由静态类型别名声明
+
+- **Context / requirement update:** 用户要求用类型系统表达两个包，不在运行时扫描，并且方法集合不能在运行时增减。
+- **Options considered:** 保留 002 的 `__subclasses__()` 扫描，新增命令无需改别名，但 mypy 只能看到 `ToolCall | ToolResult`，且模型须定义在派生语句之前。改用 `type` 别名后，新增命令要在本包别名中加一项，换来精确的静态类型，并去掉 `TYPE_CHECKING` 分支和定义顺序约定。
+- **Decision / status:** 已实现，用户已选择类型别名。
+- **Implemented changes:**
+  - `protocol.py` 以 `WorkerCalls`、`WorkerResults`、`ServerCalls`、`ServerResults` 四个 `type` 别名声明两个包。
+  - `_FIXED_METHODS` 是从别名派生的 frozenset；方向 payload 也直接写成静态类型别名，包内按 `method` Literal 判别，外层只区分固定包、Flow 和 validation error。
+  - 删除 `_package`、`TYPE_CHECKING` 分支和 `reduce`。`execution()`、拒绝处理和 002 的其他改动保持不变。
+- **Evidence / validation:**
+  - ruff、mypy 通过，payload 恢复为精确联合类型。
+  - 以 24 条代表性消息比较本实现与 `main` 原解析器，结果完全一致，覆盖合法与畸形参数、错误方向、未知方法、Flow 和 validation error。
+  - 全量 pytest 结果见 PR。
+

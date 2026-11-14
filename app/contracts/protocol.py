@@ -6,9 +6,7 @@ import hashlib
 import json
 from datetime import datetime
 from enum import StrEnum
-from functools import reduce
-from operator import or_
-from typing import TYPE_CHECKING, Annotated, Literal, Self, TypedDict, get_args
+from typing import Annotated, Literal, Self, TypedDict, get_args
 from uuid import UUID, uuid4, uuid5
 
 from pydantic import (
@@ -586,35 +584,30 @@ class FlowToolResponse(ToolResult):
         return self
 
 
-def _fixed_method(model: type[ToolCall | ToolResult]) -> str | None:
-    methods = get_args(model.model_fields["method"].annotation)
-    return methods[0] if len(methods) == 1 else None
+# The two fixed packages, named by their method prefix and fixed in source. Each alias is
+# the only list of its members; directional parsing and _FIXED_METHODS derive from them.
+type WorkerCalls = (
+    Assignment | StopExecution | ConversationQuery | FileQuery | InferenceRequest
+    | RecoveryRejected | RepositoryDemand
+)
+type WorkerResults = (
+    ExecuteResult | StopResult | ConversationResult | FileResult | InferenceResult | ProvisionResult
+)
+type ServerCalls = Started | AcceptResultRequest | AcceptStop | FileRegister
+type ServerResults = AcceptResultResponse | StopAccepted | FileRegistered
 
-
-def _package(base: type[ToolCall | ToolResult], package: str) -> list[object]:
-    """The worker and server packages: every model whose fixed method is ``package.*``.
-
-    Defining such a model above this point is its registration; nothing lists it again.
-    Flow tools and validation errors keep an open ``method: str`` and stay outside.
-    """
-    return [
-        Annotated[model, Tag(method)]
-        for model in base.__subclasses__()
-        if (method := _fixed_method(model)) is not None and method.startswith(f"{package}.")
-    ]
-
-
-# Every fixed result answers a fixed call, so the calls name every fixed method.
 _FIXED_METHODS = frozenset(
-    method for model in ToolCall.__subclasses__() if (method := _fixed_method(model)) is not None
+    get_args(model.model_fields["method"].annotation)[0]
+    for package in (WorkerCalls, ServerCalls)
+    for model in get_args(package.__value__)
 )
 
 
-def _method_tag(value: object) -> str | None:
+def _call_tag(value: object) -> str | None:
     """Unknown names retain the existing typed Flow INVALID_REQUEST path.
 
-    Known methods never fall back after malformed arguments. This discriminator selects
-    a schema only; it neither registers handlers nor invokes code named by remote input.
+    Known methods never fall back after malformed arguments, including a known method sent
+    in the wrong direction. This selects a schema only; it never invokes code named by input.
     """
     if isinstance(value, (ToolCall, ToolResult)):
         method: object = value.method
@@ -624,7 +617,7 @@ def _method_tag(value: object) -> str | None:
         return None
     if not isinstance(method, str):
         return None
-    return method if method in _FIXED_METHODS else "flow_tool"
+    return "fixed" if method in _FIXED_METHODS else "flow_tool"
 
 
 def _result_tag(value: object) -> str | None:
@@ -633,31 +626,32 @@ def _result_tag(value: object) -> str | None:
     if isinstance(value, dict) and isinstance(value.get("error"), dict):
         # An error object is never retried as a success/domain-error schema.
         return "validation_error"
-    return _method_tag(value)
+    return _call_tag(value)
 
 
-def _payload(calls: list[object], results: list[object]) -> object:
-    error = Annotated[ValidationErrorResult, Tag("validation_error")]
-    return Annotated[
-        Annotated[reduce(or_, calls), Discriminator(_method_tag)]
-        | Annotated[reduce(or_, [*results, error]), Discriminator(_result_tag)],
-        Field(discriminator="type"),
+type WorkerPayload = Annotated[
+    Annotated[
+        Annotated[ServerCalls, Field(discriminator="method"), Tag("fixed")]
+        | Annotated[FlowToolRequest, Tag("flow_tool")],
+        Discriminator(_call_tag),
     ]
-
-
-if TYPE_CHECKING:
-    # The concrete unions are derived at import time; callers narrow with isinstance.
-    type WorkerPayload = ToolCall | ToolResult
-    type ServerPayload = ToolCall | ToolResult
-else:
-    WorkerPayload = _payload(
-        [*_package(ToolCall, "server"), Annotated[FlowToolRequest, Tag("flow_tool")]],
-        _package(ToolResult, "worker"),
-    )
-    ServerPayload = _payload(
-        _package(ToolCall, "worker"),
-        [*_package(ToolResult, "server"), Annotated[FlowToolResponse, Tag("flow_tool")]],
-    )
+    | Annotated[
+        Annotated[WorkerResults, Field(discriminator="method"), Tag("fixed")]
+        | Annotated[ValidationErrorResult, Tag("validation_error")],
+        Discriminator(_result_tag),
+    ],
+    Field(discriminator="type"),
+]
+type ServerPayload = Annotated[
+    Annotated[WorkerCalls, Field(discriminator="method")]
+    | Annotated[
+        Annotated[ServerResults, Field(discriminator="method"), Tag("fixed")]
+        | Annotated[FlowToolResponse, Tag("flow_tool")]
+        | Annotated[ValidationErrorResult, Tag("validation_error")],
+        Discriminator(_result_tag),
+    ],
+    Field(discriminator="type"),
+]
 
 
 class Message[Payload: ToolCall | ToolResult](ProtocolModel):
