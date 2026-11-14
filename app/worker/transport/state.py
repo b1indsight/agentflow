@@ -23,6 +23,7 @@ from app.contracts.protocol import (
     ExecuteResult,
     ExecutionIdentity,
     ExecutionStopped,
+    FileRegistered,
     Heartbeat,
     Inventory,
     InventoryPage,
@@ -139,6 +140,8 @@ class WorkerStateCallbacks:
         )
 
     async def on_unmatched_reply(self, reply: ToolResult, message: ServerMessageUnion) -> None:
+        if isinstance(reply, FileRegistered):
+            return  # A cancelled or timed-out registration may still have committed.
         previous = self._accepted.get(reply.reply_to)
         if isinstance(reply, (AcceptResultResponse, StopAccepted)) and (
             type(reply) is type(previous) and previous is not None and reply.result == previous.result

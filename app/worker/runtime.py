@@ -15,13 +15,20 @@ from loguru import logger
 from websockets.asyncio.client import connect
 
 from app.communication.gateway import Gateway
-from app.communication.session import Session, Transport
+from app.communication.requests import ReplyRejected, request_reply
+from app.communication.session import Session, SessionClosed, Transport
 from app.contracts.conversation import HistoryPage, HistoryQuery
+from app.contracts.files import FileFailure
 from app.contracts.protocol import (
     AssignmentArguments,
+    FileRegister,
+    FileRegistered,
     InitialTask,
     ServerMessageUnion,
+    WorkerMessage,
     WorkerMessageUnion,
+    call_header,
+    message_header,
 )
 from app.contracts.validation import parse_server_input
 from app.domain.inference_models import MAX_OUTPUT_BYTES
@@ -37,8 +44,10 @@ from app.worker.execution.workspaces import RepositoryWorkspaces
 from app.worker.health import HealthFile
 from app.worker.state.amp_history import AmpHistory
 from app.worker.state.execution import ExecutionState
+from app.worker.state.file_links import LocalFileLinks
 from app.worker.state.history import CodexHistory
 from app.worker.transport.business import WorkerBusinessCallbacks
+from app.worker.transport.files import WorkerFileCallbacks
 from app.worker.transport.state import WorkerStateCallbacks, control_ack
 
 _CONTROL_ENVIRONMENT_KEYS = frozenset(
@@ -163,6 +172,8 @@ class WorkerRuntime:
         )
         self.gateway = Gateway[ServerMessageUnion, WorkerMessageUnion]()
         self._connected = False
+        self.files = LocalFileLinks(self.settings.worker_root)
+        self._file_registrations = 0
 
     def initialize(self) -> None:
         """Load every Flow only while the process owns its root; reconnects keep live owners."""
@@ -239,6 +250,41 @@ class WorkerRuntime:
         """History belongs to a session, not to whichever Flow currently occupies a slot."""
         return (self._amp_history if query.session_id.startswith("T-") else self._history).query(query)
 
+    async def register_file(self, path: Path) -> str:
+        """Return an owner-only server-relative URL for a local file (at most 512 KiB).
+
+        Call on this runtime's loop, outside Session callbacks, after registration.
+        A timed-out call may be retried: both local and server mappings are idempotent.
+        """
+        registration = self.gateway.get("server")
+        if not self._connected or registration is None:
+            raise FileFailure("worker_unavailable")
+        if self._file_registrations >= 4:
+            raise FileFailure("query_busy")
+        self._file_registrations += 1
+        try:
+            registration.session.check_request()
+            async with asyncio.timeout(10):
+                file_id = await asyncio.to_thread(self.files.register, path)
+                call = FileRegister(**call_header(), method="server.file_register", file_id=file_id)
+                response, _ = await request_reply(
+                    registration, call, FileRegistered,
+                    WorkerMessage(**message_header(registration.session.epoch), control=None, payload=[call]),
+                    timeout=10.0,
+                )
+            if response.error is not None:
+                raise FileFailure(response.error)
+            assert response.link is not None
+            return response.link
+        except TimeoutError:
+            raise FileFailure("query_timeout") from None
+        except SessionClosed:
+            raise FileFailure("worker_unavailable") from None
+        except ReplyRejected:
+            raise FileFailure("invalid_response") from None
+        finally:
+            self._file_registrations -= 1
+
     def notify(self) -> None:
         self._changed.set()
 
@@ -308,12 +354,14 @@ class WorkerRuntime:
             business_callbacks = WorkerBusinessCallbacks(
                 session=session, runtime=self, ready=lambda: state_callbacks.ready,
             )
+            file_callbacks = WorkerFileCallbacks(session=session, files=self.files)
         except BaseException:
             await session.close()
             raise
         try:
             await self.gateway.serve(
-                "server", session, state_callbacks, business_callbacks, inference_callbacks, replace=False,
+                "server", session, state_callbacks, business_callbacks, inference_callbacks,
+                file_callbacks, replace=False,
             )
         except InferenceProtocolError as error:
             raise WorkerProtocolError(str(error)) from error
@@ -321,7 +369,10 @@ class WorkerRuntime:
             try:
                 await state_callbacks.aclose()
             finally:
-                await inference_callbacks.aclose()
+                try:
+                    await inference_callbacks.aclose()
+                finally:
+                    await file_callbacks.aclose()
 
     def _set_connected(self, connected: bool) -> None:
         self._connected = connected

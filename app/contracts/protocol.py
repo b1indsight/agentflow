@@ -24,6 +24,7 @@ from pydantic import (
 )
 
 from app.contracts.conversation import ConversationError, HistoryPage, SessionId
+from app.contracts.files import MAX_FILE_BASE64, FileError, FileId
 from app.domain.context_models import ReviewContext
 from app.domain.delivery_models import DeliveryReceipt
 from app.domain.inference_models import (
@@ -40,7 +41,7 @@ from app.domain.models import (
 )
 from app.domain.review_models import ReviewFeedback
 
-PROTOCOL_VERSION: Literal[24] = 24
+PROTOCOL_VERSION: Literal[25] = 25
 MAX_PAYLOAD_ITEMS = 32
 MessageId = Annotated[str, Field(strict=True, pattern=r"^[0-9a-f]{32}$")]
 ConnectionEpoch = Annotated[str, Field(strict=True, min_length=1, max_length=64)]
@@ -357,6 +358,40 @@ class ConversationQuery(ToolCall):
     arguments: HistoryArguments
 
 
+class FileRegister(ToolCall):
+    method: Literal["server.file_register"]
+    file_id: FileId
+
+
+class FileQuery(ToolCall):
+    method: Literal["worker.file_read"]
+    file_id: FileId
+
+
+class FileRegistered(ToolResult):
+    method: Literal["server.file_register"]
+    link: str | None = Field(default=None, pattern=r"^/api/files/[0-9a-f]{32}$")
+    error: FileError | None = None
+
+    @model_validator(mode="after")
+    def _one_outcome(self) -> Self:
+        if (self.link is None) == (self.error is None):
+            raise ValueError("file registration requires exactly one outcome")
+        return self
+
+
+class FileResult(ToolResult):
+    method: Literal["worker.file_read"]
+    content_base64: str | None = Field(default=None, max_length=MAX_FILE_BASE64)
+    error: FileError | None = None
+
+    @model_validator(mode="after")
+    def _one_outcome(self) -> Self:
+        if (self.content_base64 is None) == (self.error is None):
+            raise ValueError("file result requires exactly one outcome")
+        return self
+
+
 class InferenceRequest(ToolCall):
     method: Literal["worker.infer"]
     job_id: int = Field(strict=True, gt=0)
@@ -522,6 +557,8 @@ _FIXED_METHODS = frozenset(
         "worker.execute",
         "worker.stop",
         "worker.history",
+        "worker.file_read",
+        "server.file_register",
         "worker.infer",
         "worker.provision",
         "worker.reject_recovery",
@@ -553,6 +590,7 @@ WorkerCall = Annotated[
     Annotated[Started, Tag("server.execution_started")]
     | Annotated[AcceptResultRequest, Tag("server.accept_result")]
     | Annotated[AcceptStop, Tag("server.accept_stop")]
+    | Annotated[FileRegister, Tag("server.file_register")]
     | Annotated[FlowToolRequest, Tag("flow_tool")],
     Discriminator(_method_tag),
 ]
@@ -571,6 +609,7 @@ WorkerResult = Annotated[
     Annotated[ExecuteResult, Tag("worker.execute")]
     | Annotated[StopResult, Tag("worker.stop")]
     | Annotated[ConversationResult, Tag("worker.history")]
+    | Annotated[FileResult, Tag("worker.file_read")]
     | Annotated[InferenceResult, Tag("worker.infer")]
     | Annotated[ProvisionResult, Tag("worker.provision")]
     | Annotated[ValidationErrorResult, Tag("validation_error")],
@@ -578,12 +617,13 @@ WorkerResult = Annotated[
 ]
 WorkerPayload = Annotated[WorkerCall | WorkerResult, Field(discriminator="type")]
 ServerCall = Annotated[
-    Assignment | StopExecution | ConversationQuery | InferenceRequest | RecoveryRejected | RepositoryDemand,
+    Assignment | StopExecution | ConversationQuery | FileQuery | InferenceRequest | RecoveryRejected | RepositoryDemand,
     Field(discriminator="method"),
 ]
 ServerResult = Annotated[
     Annotated[AcceptResultResponse, Tag("server.accept_result")]
     | Annotated[StopAccepted, Tag("server.accept_stop")]
+    | Annotated[FileRegistered, Tag("server.file_register")]
     | Annotated[FlowToolResponse, Tag("flow_tool")]
     | Annotated[ValidationErrorResult, Tag("validation_error")],
     Discriminator(_result_tag),
@@ -598,7 +638,7 @@ class Message[Payload: ToolCall | ToolResult](ProtocolModel):
     performs static checks only; receipt ACKs confer no business completion or authority.
     """
 
-    protocol_version: Literal[24]
+    protocol_version: Literal[25]
     message_id: MessageId
     connection_epoch: ConnectionEpoch | None
     ack: StrictBool
@@ -699,7 +739,8 @@ class Heartbeat(Message[WorkerPayload]):
     @model_validator(mode="after")
     def _execution_payload(self) -> Self:
         for item in self.payload:
-            if isinstance(item, (ConversationResult, InferenceResult, ProvisionResult, ValidationErrorResult)):
+            if isinstance(item, (ConversationResult, FileRegister, FileResult, InferenceResult,
+                                 ProvisionResult, ValidationErrorResult)):
                 continue
             if isinstance(item, (Started, AcceptResultRequest, AcceptStop, FlowToolRequest)):
                 identity = (item.arguments.job_id, item.arguments.assignment_token)
@@ -809,7 +850,7 @@ def accept_stop_id(receipt_id: MessageId) -> MessageId:
 
 
 class MessageHeader(TypedDict):
-    protocol_version: Literal[24]
+    protocol_version: Literal[25]
     message_id: MessageId
     connection_epoch: str | None
     ack: bool

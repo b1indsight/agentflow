@@ -1,6 +1,7 @@
 # 当前版本部署与重启
 
-当前格式为 wire protocol v20、worker journal v5、执行 ResultInbox v1、Control 合并通知 inbox v2、workspace manifest v3。
+当前格式为 wire protocol v25、worker journal v5、执行 ResultInbox v1、Control 合并通知 inbox v2、workspace manifest v3。
+文件链接扩展只新增 `worker_file_links` 表，不改变现有 journal/inbox；两端必须协调升级到 v25。
 首次部署选择新数据库/schema 与新 worker root，serve/worker 固定到同一 commit/镜像 digest；
 schema 初始化只创建当前结构。合并归档调整不增加 DDL；前置的[多工作区并发版本](../plan/worker-workspace-concurrency.md)仍须独立核验 workers 结构及物理位置迁移。
 

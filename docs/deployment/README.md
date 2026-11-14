@@ -269,7 +269,8 @@ INITIAL 使用当前 endpoint 和 token 引用；无当前 broker 的 REVISION/f
 取消期间确认合并时，数据库将原 Flow 的独占预留交接到同位置的新 generation；ARCHIVE 核对
 原 journal 和清理凭据后使用该目录。不能改用其他目录，也不能让新 Flow 抢占此交接。
 
-当前协议为 v21，使用 journal v5 / 执行结果 ResultInbox v1 / workspace manifest v2；Control 本地归档通知使用 ResultInbox v2。
+当前协议为 v25，使用 journal v5 / 执行结果 ResultInbox v1 / workspace manifest v3；Control 本地归档通知使用 ResultInbox v2。
+文件链接扩展新增 `worker_file_links` 表；本地路径只保存在 worker root 的私有注册表中，接口见[Worker 文件链接](../plan/worker-file-links.md)。
 本版允许从持久任务内容创建无 Issue Flow；六态库启动幂等增加输入列及二选一约束。
 出现 NULL Issue 记录后旧程序不可直接读取，即使已归档也不能直接降级；须前向修复或按备份整体恢复。
 升级前停写并备份数据库和 worker root，核对真实 workspace 身份；旧 workers 单列主键会被启动

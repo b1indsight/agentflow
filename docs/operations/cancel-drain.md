@@ -9,7 +9,7 @@
 
 ## 停止确认
 
-同一鉴权 WebSocket 使用 wire21 的 `worker.stop` 调用及 `[停止结果 R, server.accept_stop 调用 B]`。
+同一鉴权 WebSocket 使用 wire25 的 `worker.stop` 调用及 `[停止结果 R, server.accept_stop 调用 B]`。
 请求绑定 flow、worker、job、assignment token、binding 创建时间、当前 epoch 和独立 request ID；
 控制端还核对 job 与 stop 保存的 workspace/generation 快照。停止只作用于目标 workspace 的执行。
 worker 必须持有匹配 journal，当前执行只能由持有该 task / 子进程对象的进程取消。
@@ -77,7 +77,7 @@ STOP 请求和有效凭据握手能完成取消。未写出凭据的进程崩溃
 Runtime 先停止并 join 通信，再等待全部 execution owner 的停止/执行清理，最后释放根锁。
 重复取消外层运行任务不会提前释放根锁；普通 shutdown 不回收 workspace、不合成结果或停止 ACK。
 
-当前在线协议 wire21 / journal v5 / 执行结果 ResultInbox v1 / workspace manifest v2，serve/worker 必须使用匹配版本；
+当前在线协议 wire25 / journal v5 / 执行结果 ResultInbox v1 / workspace manifest v3，serve/worker 必须使用匹配版本；
 Control 本地归档通知继续使用 ResultInbox v2。
 定义见[协议](../../app/contracts/protocol.py)与 [ExecutionRecord](../../app/worker/state/record.py)。
 受限历史 v4/v14–v15 journal 与旧 inbox 只读转换，正常写入才升级；未知数据保留并拒绝。

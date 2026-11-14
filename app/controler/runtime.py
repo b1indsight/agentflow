@@ -23,6 +23,7 @@ from app.controler.reconciliation.pull_requests import Reconciler
 from app.controler.review.judge import ReviewJudge
 from app.controler.workers.callbacks import ServerCallbacks
 from app.controler.workers.conversation import ConversationBroker, ConversationService
+from app.controler.workers.files import FileService, ServerFileCallbacks
 from app.controler.workflow.coordinator import JobCoordinator
 from app.controler.workflow.effects import ResultEffects
 from app.controler.workflow.inference import InferencePending, JobInference
@@ -92,6 +93,7 @@ class ServerRuntime:
             database=database,
         )
         self.conversations = ConversationService(conversations, database=database)
+        self.files = FileService(self.gateway, database=database)
         self.console = ConsoleSynchronizer(github, self.conversations, database=database)
         self.webhooks = WebhookConsumer(
             self.settings,
@@ -154,13 +156,17 @@ class ServerRuntime:
                 poll_interval=self.settings.worker_poll_interval,
                 metrics=self.metrics,
             )
+            files = ServerFileCallbacks(worker_id=worker_id, session=session, store=self.files.store)
         except BaseException:
             await session.close()
             raise
         try:
-            await self.gateway.serve(worker_id, session, callbacks, replace=True)
+            await self.gateway.serve(worker_id, session, callbacks, files, replace=True)
         finally:
-            await callbacks.aclose()
+            try:
+                await callbacks.aclose()
+            finally:
+                await files.aclose()
 
     def startup(self) -> None:
         self.database.init_db()

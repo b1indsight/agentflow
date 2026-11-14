@@ -148,6 +148,7 @@ Flow 使用 `queued/running/review/blocked/finalizing/archived` 六态；看板�
 ## 文档
 
 - [Flow 会话查询 API](docs/architecture/conversation-api.md)：control 代理 worker 读取 Codex 历史，供 WebUI 分页展示；
+- [Worker 文件链接](docs/plan/worker-file-links.md)：登记本地文件并通过 owner API 按需读取，server 不接收 worker 路径；
 - [已取消 Flow 手动归档](docs/plan/cancelled-flow-archive.md)：归档入口、持久化与取消/恢复的安全边界；
 - [`docs/architecture/`](docs/architecture/README.md)：当前实现状态、目标架构、组件、流程、决策和接入说明；
 - [`docs/architecture/diagram.html`](docs/architecture/diagram.html)：手工维护的交互式架构可视化；
@@ -221,7 +222,7 @@ seed 和默认推理 workspace 不计入。每个 Flow 独占一个 workspace，
 每次 INITIAL、REVISION resume/fallback 都提供本轮 bot `gh` 包装、独立配置和 Git helper，
 不使用个人登录态；token 过期/权限不足即失败，不自动续期或扩权。worker 保持单仓库
 Contents write，PR 通过 MCP `open_pr` 请求 controler 校验后创建。包装不构成 OS 沙箱。
-当前 Codex/Amp 接入均使用 wire24 / journal5；执行结果使用 ResultInbox v1，Control 本地归档通知使用 v2。
+当前 Codex/Amp 接入均使用 wire25 / journal5；执行结果使用 ResultInbox v1，Control 本地归档通知使用 v2。
 serve 与 worker 的协议版本必须匹配。
 同一 PR 来源分支允许外部更新；revise 编码前安全同步 Git/jj，以实际 fetch 的提交作为本轮基线，保留脏文件和未发布提交。旧 BLOCKED Flow 不自动恢复。
 Judge 的 answer/revise 都派发到原 worker；answer 只回答问题，worker 比较本地提交不变，controller 比较目标 PR head 不变。Judge 只接收反馈关联的 PR 信息、线程和引用片段，不读取全 PR diff；详见 [Review 循环](docs/architecture/review-loop.md)。
@@ -387,9 +388,9 @@ M3 F3 及审查修复本地验证（2026-09-08）：真实 PostgreSQL 下 **502 
 响应丢失与重启恢复。Ruff、Mypy 与 sdist/wheel 构建通过；真实 GitHub App/worker 验收仍待执行，
 详见 [F3 审查修复记录](docs/plan/m3-archive-status.md#7-审查修复2026-09-08)。
 
-当前在线协议仅支持 **v21**，正常写入 worker journal **v5**、执行结果 ResultInbox **v1**、workspace manifest **v2**；
+当前在线协议仅支持 **v25**，正常写入 worker journal **v5**、执行结果 ResultInbox **v1**、workspace manifest **v3**；
 Control 本地归档通知使用 ResultInbox **v2**。
-INITIAL/REVISION 使用字符串 `task_content`，Issue 在准备时由最新标题与正文拼接；server/worker 必须成组升级，不能混跑 v20。
+INITIAL/REVISION 使用字符串 `task_content`，Issue 在准备时由最新标题与正文拼接；server/worker 必须成组升级，不能混跑旧协议。
 现有六态库启动会幂等新增 `flows.task_content`（TEXT）和可空的 `title` / `title_job_id`、允许 NULL Issue，并校验两种输入恰好存在一种。
 首次创建直接任务后，旧程序无法读取这些记录，即使任务已归档也不能直接降级；应前向修复或按备份整体恢复。
 `workers` 使用 `(worker_id, workspace)` 复合主键；旧单行 worker schema 启动时明确拒绝，

@@ -8,6 +8,9 @@
 
 ## Unreleased
 
+- 新增 `WorkerRuntime.register_file(path)` 和 owner-only `GET /api/files/{link_id}`：通过现有
+  Session/Gateway 登记并读取 worker 本地文件，持久化随机句柄，server 不接收路径。
+  保留 512 KiB、文件身份、连接隔离、超时与并发限制；wire25 须协调升级，journal/inbox 不变。
 - GitHub 推送凭据准备时保留 Bot 查询客户端，避免 SDK 弱引用导致客户端提前回收、编码任务在下发前以 `RuntimeError` 失败；身份与权限校验保持不变。
 - Webhook 冷启动查询 App 身份遇到 GitHub 错误时遵守 `Retry-After` 并退避，新事件不会提前触发重试；等待可取消，未处理 receipt 及数据库线程关闭语义保持不变。
 - 同一 PR 的来源分支允许外部 push/rebase/force-push 和目标分支调整，不因历史 SHA 漂移暂停 Flow。revise 编码前安全同步 Git/jj，以实际 fetch 基线校验结果和识别 no-op，保留脏文件、未发布提交、反馈版本及回执恢复保护；过期 Judge context 连同决定重建。wire24 须协调升级，journal/inbox 不变，不自动解封已有 BLOCKED Flow。修复未合并 PR 缺少 `merge_commit_sha` 时读取失败，合并证据仍严格验证。

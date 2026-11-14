@@ -5,6 +5,8 @@
 
 ## 当前计划
 
+- [`worker-file-links.md`](worker-file-links.md) — worker 本地文件登记与 owner 文件 API：路径留在 worker，通过持久随机句柄和认证 Session 按需读取；PR #146 合并适配与验证见记录。
+
 - [`judge-feedback-tasks.md`](judge-feedback-tasks.md) — answer/revise 共用 worker 任务，answer 仅约束调用指令、本地提交和 PR head；上下文按反馈相关性选择。实现、真实 PostgreSQL 全量回归、静态检查、打包和两项简化对照完成；正在审查并准备 PR，wire22 须协调升级，未部署。
 
 - [`flow-task-input.md`](flow-task-input.md) — 本地实现与验证完成：Issue 可选；顶栏“新建 Flow”选择代码仓库并输入内容，原文用于首轮/修订/审核；API/CLI、PR 闭环、旧 context 摘要与安全恢复保留。隔离 PostgreSQL、真实跨进程调度、浏览器桌面/手机、静态检查、打包及简化对照通过；wire21 须成组升级，未提交、未推送、未部署。

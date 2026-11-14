@@ -23,6 +23,8 @@ from app.contracts.protocol import (
     ExecuteResult,
     ExecutionTask,
     Failed,
+    FileRegister,
+    FileResult,
     FlowToolRequest,
     Heartbeat,
     InferenceRequest,
@@ -172,7 +174,7 @@ class ServerCallbacks:
         """Authorize durable replay when the original connection's receiver is gone."""
         if isinstance(reply, ProvisionResult):
             return  # Late/duplicate capacity results cannot complete a newer request.
-        if isinstance(reply, (ConversationResult, InferenceResult)):
+        if isinstance(reply, (ConversationResult, FileResult, InferenceResult)):
             return  # A timed-out query is never replayed or evidence of execution progress.
         if isinstance(reply, StopResult):
             await self.on_stopped(reply, message)
@@ -431,7 +433,8 @@ class ServerCallbacks:
         self._refresh_receive = liveness and message.connection_epoch == self.epoch and (
             message.control is not None
             or any(
-                not isinstance(item, (ValidationErrorResult, ConversationResult, InferenceResult))
+                not isinstance(item, (ValidationErrorResult, ConversationResult, FileRegister,
+                                      FileResult, InferenceResult))
                 for item in message.payload
             )
         )
@@ -474,8 +477,8 @@ class ServerCallbacks:
             return  # The error hook enforces correlation and the pre-start fence.
         if self._recovery_required:
             raise ProtocolViolation("critical protocol payload rejected; recovery required")
-        if isinstance(item, (ConversationResult, InferenceResult)):
-            return  # Read-only replies need no Started and cannot initiate execution effects.
+        if isinstance(item, (ConversationResult, FileRegister, FileResult, InferenceResult)):
+            return  # Independent queries need no Started and cannot initiate execution effects.
         job_id = self._item_job(item)
         if job_id in self.starting and not isinstance(item, Started):
             raise ProtocolViolation("assignment must be acknowledged with Started")
