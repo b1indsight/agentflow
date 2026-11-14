@@ -6,6 +6,7 @@
   --line: #e6eae8;
   --green: #147657;
   --wash: #edf6f1;
+  --destructive: #b42318;
   --status-gray: #8e8e93;
   --status-blue: #0a84ff;
   --status-yellow: #febc2e;
@@ -244,7 +245,7 @@ svg {
   outline-offset: 2px;
 }
 .create-flow-dialog textarea[aria-invalid="true"] {
-  border-color: #b42318;
+  border-color: var(--destructive);
 }
 .create-flow-hint {
   margin: 8px 0;
@@ -253,7 +254,7 @@ svg {
 }
 .create-flow-error {
   margin: 10px 0;
-  color: #b42318;
+  color: var(--destructive);
   overflow-wrap: anywhere;
 }
 .create-flow-read-actions,
@@ -337,8 +338,8 @@ svg {
   box-shadow: 0 0 0 2px #eaf5ee;
 }
 .query-field .query-input[aria-invalid="true"] {
-  border-color: #b42318;
-  box-shadow: 0 0 0 2px #b4231814;
+  border-color: var(--destructive);
+  box-shadow: 0 0 0 2px rgb(from var(--destructive) r g b / calc(20 / 255));
 }
 .query-input::-webkit-search-cancel-button {
   appearance: none;
@@ -411,7 +412,7 @@ svg {
 }
 .query-error {
   padding: 12px;
-  color: #b42318;
+  color: var(--destructive);
   font-size: var(--text-control);
 }
 .kanban {
@@ -921,7 +922,7 @@ svg {
   background: var(--status-yellow);
 }
 .source-state.unavailable {
-  color: #b42318;
+  color: var(--destructive);
 }
 .source-state.unavailable .dot {
   background: var(--status-red);
@@ -1548,7 +1549,7 @@ pre code {
   overflow-wrap: anywhere;
 }
 .execution-summary [role="alert"] {
-  color: #b42318;
+  color: var(--destructive);
 }
 .next-step {
   border-top: 1px solid var(--line);
