@@ -8,6 +8,164 @@
 
 ## Unreleased
 
+- 固定协议收敛为 `worker.*` / `server.*` 两个特殊 ToolCall 包：每个包由静态类型别名声明一次，方向联合与固定方法集合由此派生，
+  执行归属由模型 `execution()` 提供，删除心跳、活性、迟到响应和 `on_rejected` 中按类型或方法名维护的名单。
+  畸形响应统一交给原调用方的 `on_rejected`（改为 async），持久项恢复由发送方负责；infer 失败随请求绑定处理。
+  新增固定命令只需定义模型并加入本包别名、`routes.register` 和调用方。`routes.register` 与 wire25、journal/inbox 不变。
+  接收方不再因畸形持久项或迟到畸形响应主动断开，provision 结果不再刷新 coding 接收期限。
+- INITIAL 复用同一次 worker 推理生成标题与描述性分支名，完成后才开始编码，不再为新任务生成 `flow/<id>`。直接处理 `title` / `branch_slug`，实际分支复用已有 delivery 保存，重试与 resume 沿用该分支；无效输出、超时和远端预存分支阻止编码。无需新增分支列、占名索引、回填、wire 消息或协议版本，已有 PR 不重命名。
+- 新增 `WorkerRuntime.register_file(path)` 和 owner-only `GET /api/files/{link_id}`：通过现有
+  Session/Gateway 登记并读取 worker 本地文件，持久化随机句柄，server 不接收路径。
+  保留 512 KiB、文件身份、连接隔离、超时与并发限制；wire25 须协调升级，journal/inbox 不变。
+- GitHub 推送凭据准备时保留 Bot 查询客户端，避免 SDK 弱引用导致客户端提前回收、编码任务在下发前以 `RuntimeError` 失败；身份与权限校验保持不变。
+- Webhook 冷启动查询 App 身份遇到 GitHub 错误时遵守 `Retry-After` 并退避，新事件不会提前触发重试；等待可取消，未处理 receipt 及数据库线程关闭语义保持不变。
+- 同一 PR 的来源分支允许外部 push/rebase/force-push 和目标分支调整，不因历史 SHA 漂移暂停 Flow。revise 编码前安全同步 Git/jj，以实际 fetch 基线校验结果和识别 no-op，保留脏文件、未发布提交、反馈版本及回执恢复保护；过期 Judge context 连同决定重建。wire24 须协调升级，journal/inbox 不变，不自动解封已有 BLOCKED Flow。修复未合并 PR 缺少 `merge_commit_sha` 时读取失败，合并证据仍严格验证。
+- Worker 编码 workspace 首次准备时配置当前 App bot 的 Git 作者/提交者，后续提交检查身份并将原有效作者保留为 `Co-authored-by`，包括显式 `git commit -m`。App JWT 核对当前 App ID，从 slug 自动解析并共享 bot login，移除手工 `FLOWTOOL_BOT_LOGIN` 配置；凭据生成、评论恢复及反馈过滤使用同一身份，仍拒绝其他 App 的 bot。后续准备不重写配置。配置按 worktree 隔离，不修改个人全局身份、jj 身份或历史提交；只读 answer 不修改配置。assignment 增加 bot login/用户 ID，wire23 需协调升级，journal/inbox 版本不变。
+- Judge 的 answer/revise 统一创建 worker 任务，answer 显式要求只回答、不改码；worker 比较本地提交不变，controller 核对目标 open PR 的冻结 head。复用逐条线程答复和回执恢复，answer 不更新交付提交、不请求再次 review。Judge 上下文仅包含相关 PR、冻结反馈、所在讨论和引用片段，无关大 diff 不再造成 WAIT。wire22 须协调升级；journal5、历史结果和上下文 digest 保持不变。
+- Issue 成为可选输入：看板顶栏“新建 Flow”选择授权代码仓库并输入内容，无需 GitHub 事件；
+  同时提供 owner-only 创建 API、分页目标清单与管理 CLI。原始任务持久保存并用于首轮、修订和审核，
+  无 Issue 时跳过专属来源/关闭指令/归档目标，PR 闭环与停止恢复规则保持不变。
+  wire21 使用纯文本 task_content，Issue 输入在准备时拼接最新标题和正文；展示标题异步推理，
+  未生成时依次回退到 Issue 缓存标题、PR 标题、Flow 编号。server/worker 须成组升级；journal/inbox 版本不变。
+  六态库幂等增加输入列和 XOR 约束；首次创建 NULL Issue 任务后不能直接降级旧程序。
+- 控制台详情页使用标准 Tabs 组件，统一标签声明、路由校验与内容类型检查；保留现有外观和按需加载，
+  支持键盘导航、面板无障碍关联及多标签横向滚动。
+- 测试复用真实 PostgreSQL、Worker 执行、Git/MCP 和双端通信流程，合并重复场景并保留独有断言。
+  删除内部仓储/事务状态机替身、全局构造补丁、过期概念清单和无调用方辅助；GitHub 等外部
+  服务及明确故障边界继续可控模拟，不改变产品行为。
+  Worker/Server 测试改用正常构造和配置校验，删除模拟 workspace 与手工初始化运行时；
+  Controller 重连、停止和 inference 并发复用真实交付流程，保留不同故障窗口和资源关闭检查。
+- INITIAL 完成校验失败先反馈给原 Code Agent，在同一会话、工作区及原始 Git/jj 基线上最多追加两轮纠正。
+  保持 MCP 和 schema 有效，每轮独立复验；命令失败或保留 session 的执行超时可继续诊断。
+  会话、任务归属或能力失效及取消时停止，已确认交付不可重复调用或更换 head。
+- 已合并 PR 的 Flow 立即提交 ARCHIVED/SUCCEEDED 和唯一归档 activity，不等待原 Worker 在线、
+  执行绑定释放、工作区清理或 GitHub 通知；原 Worker 通过既有停止协议确认执行退出。精确停止
+  回执、远端结果和已发操作结清后，Control 释放绑定并推进 generation，立即允许位置复用，
+  不增加固定等待；下一 INITIAL 由 Worker 独占后清理旧副本，不等待 journal ACK。
+  同 Flow 的 resume 仍等待旧绑定释放，库存不授权释放或推进 generation。
+  本地 Control 通知复用 jobs/result/effects，仅写 inbox v2，不新增表或 Worker wire 类型；
+  权限失败只重试冻结缺项，旧轮/新 Issue owner 的标签受保护，未知通知先查询原 marker。
+  修复旧轮本地通知未完成时阻塞 resume 后 INITIAL 调度的问题，保留真实执行和未结清结果的保护。
+  完整合并事实的旧积压有界恢复，open 的失败 Flow 不变；不新增旧 Worker ARCHIVE 任务兼容，
+  既有历史格式读取及 digest 保持不变。未合并的放弃/调查结束规则保持不变。
+  此项替代下文早期“合并后等待清理归档/下一代交回原 Flow”的规则；升级与 v2 回退边界见部署文档。
+- Worker 支持不同 workspace 上并行执行多个 job；Flow 与 workspace 双向独占，同 Flow 串行。
+  扩充 workers 为 `(worker_id, workspace)` 复合主键，不新增 workspace 表或 Registry；
+  默认无仓库 workspace 供推理，仓库库存按 worker 上报限额及排队需求自动补充，配置 3 可正常派发。
+  wire20 按具体位置和 generation 派发，分页登记库存与恢复，逐 job 心跳和停止；有界 Session
+  队列对有效突发施加背压。journal 按 `journals/flow-<flow_id>.json` 独立保存，不使用 current 指针。
+  workspace 不另设状态；占用由 Flow 绑定与 job 决定，停止等待原执行退出，不依赖目录清理或 ACK。
+  controller 释放绑定时推进 generation；worker 在接替前核对旧执行，ACK 只结清 journal。
+  旧 workers schema 须核对物理身份后显式迁移；旧 Flow 状态迁移只更新其目标结构，不改执行表。
+- workspace 补充请求返回关联的成功/失败结果，单仓库目录故障不再关闭共享 worker 连接。
+  controller 限制在途请求、按错误分类阻止或延迟重试；真实库存先于结果上报，目录故障修复后重新核验，
+  不持久化隔离状态。未知目录仍不收编；临时创建失败重用原位置，不反复消耗额度。
+- Flow 采用 queued/running/review/blocked/finalizing/archived 六态，保留现有处理器、事务、ResultPlan
+  和 activity 触发器。看板隐藏 finalizing 独立列，Projects 从 Flow 投影。
+  Issue/PR 标签沿用原有初始化和 LabelEffect，仅在交付、合并清理节点更新，不新增六态标签同步或重试表。
+  状态标签失败保存错误后跳过，不阻塞 PR 关联、交付或归档，也不单独重试；触发标签职责不变。
+  未合并关闭进入废弃收尾；归档结果仅 succeeded/abandoned，无 PR 调查可凭结论成功结束。
+  收尾等待停止、结果、必要副作用和工作区处置后才释放绑定并归档；失败与未知执行进入 blocked。
+  显式恢复开启同一 Flow 新轮次，隔离旧交付/任务/反馈；核验归档前合并的迟到证据后自动更正成功，
+  不自动恢复。轮次与归档历史统一写入 activity，删除独立 Round 表及人工更正入口。
+  旧 PR、Worker 活动按真实身份标记轮次，未知/共享内容留空；旧四态库需离线预检迁移，启动不猜测旧状态。
+  精简迁移中的重复 schema 执行与报告包装，复用测试步骤；保留数据转换、预检、备份和事务回滚。
+  跨轮同步、Issue 占用和恢复回滚复用原有测试；字段异常直接验证请求模型，迁移正反例共享准备数据。
+- 修复恢复轮次的 Git ref 前缀冲突与 INITIAL 失败提前释放绑定；复用停止清理完成工作区隔离。
+  原 Issue 旧评论即使首次补拉或编辑也不进入新轮反馈；同秒/缺失创建时间保守拒绝。
+  resume 的持久化重置归回各仓储并保持同一事务；旧库允许迁移尚未创建 Attempt 的新排队任务。
+  移除协调器测试替身中复制的归档策略。
+- CI 的 Prometheus 与 worker 镜像工具下载增加有限重试和超时，容忍临时 HTTP 504；保留固定
+  版本和 SHA256 校验，永久 HTTP 错误及校验失败仍阻止构建。
+- 新增通用 `worker.infer` 文本/JSON 推理 Job（wire19），复用现有 Job 分配、结果受理及恢复流程，
+  删除独立 Router/Pool。controller 托管仅 infer 的 bub mini worker，合条件时优先；未配置、
+  半配、忙或能力不符时选普通 worker。普通 worker 同时提供 execute/infer，无 repo 绑定也可推理，
+  复用 Codex/Amp 在初始为空的非 Git 临时目录启动新答案会话；编码与推理各有独立持久槽。
+  control 保留 review 校验、决定持久化与 GitHub 操作；推理不改变 Flow 仓库绑定。
+  总截止及最多 3 次授权派发跨重启保存，可恢复失败按剩余预算重试，永久错误保守 WAIT。
+  耗尽通知与结果终结原子保存，补写失败不重跑模型；可恢复失败的 READY 批次后续扫描可开启新 Job。
+  执行记录显示推理 Job 与派发次数，通知继续使用活动账本幂等和快照分页，无新轮询或 GitHub 通知。
+  按 Job/token 取消推理并等待回收，不中断同 worker 编码；目录分离不构成原生工具沙箱。
+- 修复 review 上下文失效后复用旧推理结果：PR head/base 变化时解除旧推理 Job 关联，
+  恢复时核对冻结上下文；相同上下文仍复用已保存答案，不重置活动任务预算。
+- 接收端核实旧心跳对应的任务已结束且分配身份匹配后，跳过续租，不再误断共享连接；
+  不刷新其他任务的存活期限，随包业务内容仍独立校验和处理，错误身份仍拒绝。
+- 编码准备接入现有 Session.watch，慢 GitHub 读取和 capability 签发不再阻塞同连接的推理派发、
+  结果、心跳和历史读取；准备完成后仍串行校验并授权下发。停止撤销未下发准备，连接关闭或替换
+  等待准备清理；已撤销的观察仍由 Session 保持清理所有权，避免取消与关闭交叉时提前接手。
+- 精简推理调用层：移除未使用的 Runtime 实例、重复异常包装与过时测试字段，保留失败归因、
+  持久通知和三次尝试预算；纠正 worker 双槽与统一 Job 调度的过时说明。
+- Amp/Codex 编码改为连续无新 stdout/stderr 输出才超时，默认仍为 1200 秒；半行、工具
+  调用/结果和进度续期，移除 REVISION 外层总时限，保留历史导出和单条 VCS 命令的总时限。
+  两后端空闲秒数均要求正有限值。INITIAL 保留安全失败详情和 execution 阶段，controler
+  不再误标 Codex/VCS；超时说明具体后端、静默时长与原因，不自动重放未知执行。
+- Amp/Codex worker 继承专用运行环境的原生 skills/MCP 和自定义变量，先过滤 ambient
+  Flow、Git/GitHub/SSH 认证与父会话身份，再注入当前 assignment 能力。Amp 删除临时全量
+  settings、workspace 设置拒绝和固定工具集合上限，仅用原生 `--mcp-config` 覆盖 `flow`；
+  修订时以不可连接的 loopback 端口零替换旧 broker（固定 CLI 不支持 `disabled`，会有连接警告）。
+  用户权限和 workspace 审批不自动放行，Schema/VCS、Git/gh 凭据与进程监督不变；
+  历史导出沿用原生配置。部署文档说明继承范围、自定义秘密脱敏限制及旧 thread 验收边界。
+- Worker/server 两端 Runtime 统一持有 Gateway，以同一个 Session 事件入口驱动每连接的
+  worker 状态/业务回调与 ServerCallbacks；移除旧 Client/Handler 消费循环，按 `package.method`
+  精确注册请求模型与回调；回复按 `reply_to` 关联原调用，worker 不再注册工具名来接收结果。
+  通信关闭不取消执行，控制收件与提交/停止证据保持独立；history 与其他 payload 统一 FIFO。
+  删除 WorkerClient，主动拨号、认证、退避重连与连接任务关闭等待直接归 WorkerRuntime；
+  Connection 接口与 WebSocketTransport 一并归入 worker/runtime.py，删除 transport/client.py；
+  WebSocket IO 适配行为不变，进程停机仍等待执行清理后释放 root lock。
+  通信层统一使用 message 命名：非控制变体为 WorkerMessage / ServerMessage，共用 message_header；
+  完整消息钩子为 on_message / on_message_done，不再引入 frame 术语或保留旧名别名，wire 字段不变。
+  结果接纳类型明确分为 AcceptResultRequest、AcceptResultResponse 与 ResultAcceptance，
+  分别表示请求、回复及回复数据；不保留旧类型名，server.accept_result 路由与 wire 格式不变。
+  Dispatcher 统一把验证错误交给连接业务对象的 `on_error`，请求回调只接收注册模型；
+  删除逐方法重复错误转发，保留处理顺序与业务关联校验。
+  普通回复由 Dispatcher 按原调用 ID、method 和结果模型关联，匹配后先执行可选 on_reply，
+  再交付给该调用的接收函数；删除 worker 状态类的工具回复中转，连接退出只清关联、不取消执行。
+  WorkerRuntime 平级挂载 WorkerStateCallbacks 与 WorkerBusinessCallbacks，两者互不持有或调用；
+  状态类处理连接与执行状态协议，业务类处理 Flow 工具发送/回复和 worker.history，server 保留 ServerFlowCallbacks。
+  删除 Session 查询表、Responder、history handler/busy 队列及混合消息 shortcut；history 与慢回调互相等待。
+  Broker 通过配对 Session/Dispatcher 登记临时回复，管理查询 Future、4/64 限额及发送加等待总预算；
+  实际关闭及时失败查询，EOF 先排空已收到的回复/拒收；history 不刷新执行存活期限。
+  Flow 通过共同 driver 的 before_wait 自行管理观察与退休，授权后的拒收由 Dispatcher 路由回原调用。
+  正常终态仍可消费已发工具的迟到回复，stop 撤销关联，旧执行缺少恢复决定时禁止工具重放。
+  server 保留 Flow 请求路由，历史任务结果仍可通过持久 assignment 身份核对后接纳。
+  工具 Future 仍归执行 owner，Flow 权限和停止检查保持原顺序，未注册工具不会触发业务执行。
+  wire 升级为 v17：可关联的 payload 校验失败整批拒收，返回固定两字段 `tool_result.error`，
+  无诊断详情；普通 Future 失败后连接继续，关键协议失败保留证据并恢复关闭。
+  Assignment 拒绝经 SQL 预启动围栏写入 control 结果并提交后收尾；journal5/inbox1 不变。
+  双端需协调升级，无 v16 wire fallback；本次不包含部署、事务 outbox 或 HA。
+- 统一 worker/server 协议第二步：Session 接入逐项分派、有界控制 ACK 与原连接 history 关联，
+  worker 使用单一业务消费循环；终态 `[T,A]` 在应用提交后接纳，停止 `[R,B]` 仍需真实凭据与 effects 收敛。
+  接入 journal5 / inbox1 持久读写、已知旧格式只读转换和来源 SQL，移除旧 wire 调用与内联 journal 模型；
+  保留原执行 Task/Future、binding、摘要和 tool ledger。v15/v16 需协调升级，新格式写入后不可直接降级；
+  Runtime 对称装配、可靠领域事件/outbox 与部署不在本次范围。
+- 统一 worker/server 协议第一步：wire16 结构采用顶层控制与 typed call/result 列表，
+  区分帧 ACK、reply_to 与稳定业务身份；定义 journal5、ResultInbox v1 及严格旧格式只读 decoder，
+  保持 terminal/stop 摘要和既有持久证据。运行时、存储 IO 和调用方迁移留在第二步；
+  当前为不可独立运行、合并或部署的 draft 中间态，不以结构测试代替全链路验收。
+- Worker 与 server 共用进程级 `Gateway`，统一 peer/session 登记、替换、路由与通信关闭；
+  server 多 worker，worker 至多一个 server。删除 WorkerGateway 和 Broker 的独立连接表，
+  接入函数负责认证/首帧，WorkerHandler 保留业务；无 Endpoint/Run 中间对象。
+  重叠替换只发布最新连接，进程退出等待所有已持有的 Session，停止期间的迟到拨号不能借用执行。
+  server 关闭已断开的 socket 视为正常完成，不再因此拒绝后继连接；其他关闭错误继续传播。
+  保留 WorkerExecution、journal 与 Flow binding 的所有权、wire v15/journal v4 和结果/停止提交语义。
+- Worker 与 server 共用连接级 `Session`，统一单 reader、有界执行 FIFO、串行发送与临时查询关联，
+  删除原 WorkerConnection、Broker pending 表及 Client 查询分流任务；慢工具、结果应用和停止清理
+  期间仍能查询历史。保留全局/单连接配额、超时和 epoch 隔离，发送前检查工具是否已取消；
+  关闭只回收通信，不取消执行或释放 binding。wire v15、journal v4、数据库和结果/停止 ACK 不变；
+  公共 Gateway、envelope 和 outbox 留待后续阶段。
+- Worker 执行生命周期移入进程级 `WorkerExecution`，持久状态明确为 `ExecutionState`；
+  替换整个 Client 不取消或重复执行，工具调用保留原 call_id 与等待者，离线完成先落盘再重放。
+  显式停止清理不受断线取消，Runtime 等已拥有的子进程清理结束后再释放根锁；
+  保留 wire v15、journal v4、digest、ACK 和未知旧执行的恢复限制，未引入公共 Session/Gateway。
+- Worker 发送工具请求前再次检查等待状态，跳过借出后已取消的请求，避免废弃调用阻塞后续工具或终态；
+  已发送调用仍先消费匹配回复，Future 的创建与完成继续由执行所有者负责。
+- 修复详情会话从底部向上滚动时的内容反复闪烁；分组与工具配对不再依赖挂载范围，
+  已挂载行按普通流衔接并统一保留阅读锚点。工具／操作组点击展开、整组离屏收起；
+  大跨度跳入未挂载区域仍可能短暂留白。
+- 修复长折叠组持续自动读取历史、刷新回填时丢失可见组展开状态，以及重进会话页签后的
+  阅读位置偏移；折叠组不再增加显示行时可手动继续读取，页签返回仍默认折叠。
+- Worker 可直接读取 journal v4 中上一代协议 v14 的结果和停止回执，保留身份、摘要和工作区归属；
+  读取只在内存转换，正常 ACK/状态保存时写为 v15，无需手工清理。不放宽网络协议，也不兼容 v3/v13。
 - Worker 发布核验复用运行列表返回的成功 attempt，删除重复的运行详情请求与 `ReleaseEvent`
   包装，直接返回已核验 SHA。保留固定 attempt 的发布步骤与当前 main SHA 核验，
   成功路径从 4 次 API 请求减为 3 次。

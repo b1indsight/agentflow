@@ -18,7 +18,7 @@ from app.github import (
 )
 from app.github import threads as github_threads
 from app.github.errors import translate_errors
-from tests.test_github_client import install_client, settings
+from tests.test_github_client import AsyncEndpoint, app_client, install_client, response, settings
 
 
 def test_identity_only_thread_never_proves_coverage():
@@ -115,10 +115,15 @@ async def test_reply_uses_root_rest_endpoint_and_exact_app_marker(tmp_path, monk
 
     async def graphql(query, variables):
         return {"node": thread(comments=[comment(1), comment(2, body="MARK", reply_to=1),
-            comment(3, author="flowtool[bot]", bot=True, body="prefix MARK", reply_to=1),
-            comment(4, author="flowtool[bot]", bot=True, body="note\nMARK", reply_to=1)])}
+            comment(3, author="flowtool-bot[bot]", bot=True, body="prefix MARK", reply_to=1),
+            comment(5, author="flowtool[bot]", bot=True, body="MARK", reply_to=1),
+            comment(4, author="Flowtool-bot[bot]", bot=True, body="note\nMARK", reply_to=1)])}
 
     app = GitHubApp(settings(tmp_path))
+    get_app = AsyncEndpoint(response(SimpleNamespace(id=123, slug="flowtool-bot")))
+    app_client(monkeypatch, lambda **kwargs: SimpleNamespace(
+        rest=SimpleNamespace(apps=SimpleNamespace(async_get_authenticated=get_app)),
+    ))
     client = SimpleNamespace(async_graphql=graphql, rest=SimpleNamespace(pulls=SimpleNamespace(
         async_create_reply_for_review_comment=reply)))
     install_client(monkeypatch, lambda _, **kwargs: client)

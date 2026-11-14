@@ -10,8 +10,9 @@ from pathlib import Path
 
 import pytest
 
+from app.domain.models import WorkspaceInventory
 from app.worker.execution.vcs import VcsVerificationError
-from app.worker.execution.workspaces import RepositoryWorkspaces
+from app.worker.execution.workspaces import RepositoryWorkspaces, WorkspaceBinding
 from tests.test_vcs import _git, _git_fixture, _jj
 from tests.test_worker_executor import assignment_secret
 
@@ -28,13 +29,144 @@ def managed_seed(tmp_path: Path) -> tuple[Path, Path]:
     return root, remote
 
 
-async def acquire(pool: RepositoryWorkspaces, flow_id: int):
-    return await pool.acquire("owner/repo", flow_id, base_branch="main", remote="origin",
-                              push_token=assignment_secret().push.token)
+async def acquire(
+    pool: RepositoryWorkspaces, flow_id: int, *, previous: WorkspaceBinding | None = None,
+) -> WorkspaceBinding:
+    """Simulate controller selection, explicitly advancing a released allocation when supplied."""
+    inventory = await pool.provision("owner/repo")
+    target: WorkspaceInventory | None
+    generation: int | None
+    if previous is not None:
+        target = next(item for item in inventory if item.workspace == previous.slot_id)
+        assert target.generation == previous.generation
+        generation = previous.generation + 1
+    else:
+        target = next((item for item in inventory if item.flow_id == flow_id), None)
+        generation = target.generation if target is not None else None
+    if target is None:
+        target = next((item for item in inventory if item.repository == "owner/repo"
+                       and item.flow_id is None), None)
+    if target is None:
+        raise VcsVerificationError("workspace", "repository workspace capacity exhausted")
+    return await pool.claim("owner/repo", flow_id, target.workspace,
+                            generation if generation is not None else target.generation,
+                            base_branch="main", remote="origin",
+                            push_token=assignment_secret().push.token)
+
+
+async def release(pool, binding):
+    return await pool.release(binding, job_id=100 + binding.flow_id,
+                              token=f"release-{binding.flow_id}")
+
+
+@pytest.mark.parametrize("overflow", [False, True])
+async def test_workspace_git_commits_use_bot_and_preserve_original_coauthor(
+    tmp_path, monkeypatch, overflow,
+):
+    # --local leaks identity across linked worktrees; templates miss the agent's commit -m.
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    global_config = home / ".gitconfig"
+    global_config.write_text("[user]\n\tname = Global Person\n\temail = global@example.test\n")
+    root, _ = managed_seed(tmp_path)
+    seed = root / "repos/owner/repo"
+    _git("config", "user.name", "Original Person", cwd=seed)
+    _git("config", "user.email", "original@example.test", cwd=seed)
+    _git("config", "committer.name", "Different Committer", cwd=seed)
+    _git("config", "committer.email", "committer@example.test", cwd=seed)
+    pool = RepositoryWorkspaces(root, "worker-a", limit=3)
+    bindings = [await acquire(pool, flow) for flow in (1, 2, 3)]
+    binding = bindings[1 if overflow else 0]
+    repo = pool.path(binding)
+    hooks = tmp_path / "original hooks"
+    hooks.mkdir()
+    original_hook = hooks / "prepare-commit-msg"
+    original_hook.write_text('#!/bin/sh\ngit interpret-trailers --in-place '
+                             '--trailer "Original-hook: ran" "$1"\n')
+    original_hook.chmod(0o700)
+    pre_commit = hooks / "pre-commit"
+    pre_commit.write_text('#!/bin/sh\ntest ! -f reject-commit\n')
+    pre_commit.chmod(0o700)
+    _git("config", "core.hooksPath", str(hooks), cwd=repo)
+    before_global = global_config.read_bytes()
+    before_head = await asyncio.to_thread(subprocess.check_output,
+                                          ["git", "rev-parse", "HEAD"], cwd=repo)
+
+    for _ in range(2):
+        await pool.configure_git_identity(binding, "example-app[bot]", 7654321)
+    assert await asyncio.to_thread(subprocess.check_output,
+                                    ["git", "rev-parse", "HEAD"], cwd=repo) == before_head
+    _git("commit", "--allow-empty", "-m", "Bot change", "-m",
+         "Co-authored-by: Amp <amp@ampcode.com>\n"
+         "Co-authored-by: Original Person <original@example.test>", cwd=repo)
+    commit = await asyncio.to_thread(subprocess.check_output,
+        ["git", "log", "-1", "--format=%an <%ae>%n%cn <%ce>%n%B"], cwd=repo, text=True,
+    )
+    bot = "example-app[bot] <7654321+example-app[bot]@users.noreply.github.com>"
+    assert commit.splitlines()[:2] == [bot, bot]
+    assert commit.count("Co-authored-by: Original Person <original@example.test>") == 1
+    assert "Co-authored-by: Amp <amp@ampcode.com>" in commit and "Original-hook: ran" in commit
+    _git("commit", "--allow-empty", "-m", "No supplied trailer", cwd=repo)
+    message = await asyncio.to_thread(subprocess.check_output,
+                                      ["git", "log", "-1", "--format=%B"], cwd=repo, text=True)
+    assert message.count("Co-authored-by: Original Person <original@example.test>") == 1
+    editor = tmp_path / "editor"
+    editor.write_text('#!/bin/sh\nprintf "Editor change\\n" > "$1"\n')
+    editor.chmod(0o700)
+    monkeypatch.setenv("GIT_EDITOR", str(editor))
+    _git("commit", "--allow-empty", cwd=repo)
+    message = await asyncio.to_thread(subprocess.check_output,
+        ["git", "log", "-1", "--format=%B"], cwd=repo, text=True,
+    )
+    assert message.count("Co-authored-by: Original Person <original@example.test>") == 1
+    (repo / "reject-commit").touch()
+    rejected = await asyncio.to_thread(subprocess.run,
+        ["git", "commit", "--allow-empty", "-m", "Rejected"], cwd=repo,
+        capture_output=True, check=False,
+    )
+    assert rejected.returncode != 0
+    assert global_config.read_bytes() == before_global
+    for other in (seed, *(pool.path(b) for b in bindings if b != binding)):
+        assert (await asyncio.to_thread(subprocess.check_output,
+            ["git", "config", "user.name"], cwd=other, text=True,
+        )).strip() == "Original Person"
+
+    # Later preparation must not reset identity: the commit hook rejects drift instead.
+    (repo / "reject-commit").unlink()
+    before_commit = await asyncio.to_thread(subprocess.check_output,
+                                           ["git", "rev-parse", "HEAD"], cwd=repo)
+    for key, value in (("author.name", "Changed Author"),
+                       ("committer.email", "changed@example.test")):
+        previous = (await asyncio.to_thread(subprocess.check_output,
+                                            ["git", "config", key], cwd=repo, text=True)).strip()
+        _git("config", "--worktree", key, value, cwd=repo)
+        await pool.configure_git_identity(binding, "example-app[bot]", 7654321)
+        rejected = await asyncio.to_thread(subprocess.run,
+            ["git", "commit", "--allow-empty", "-m", "Wrong identity"],
+            cwd=repo, capture_output=True, text=True, check=False,
+        )
+        assert rejected.returncode != 0 and "identity" in rejected.stderr
+        assert (await asyncio.to_thread(subprocess.check_output,
+                                        ["git", "config", key], cwd=repo, text=True)).strip() == value
+        assert await asyncio.to_thread(subprocess.check_output,
+                                       ["git", "rev-parse", "HEAD"], cwd=repo) == before_commit
+        _git("config", "--worktree", key, previous, cwd=repo)
+    rejected = await asyncio.to_thread(subprocess.run,
+        ["git", "commit", "--allow-empty", "-m", "Explicit author",
+         "--author", "Someone Else <someone@example.test>"],
+        cwd=repo, capture_output=True, text=True, check=False,
+    )
+    assert rejected.returncode != 0 and "identity" in rejected.stderr
+    assert await asyncio.to_thread(subprocess.check_output,
+                                   ["git", "rev-parse", "HEAD"], cwd=repo) == before_commit
+    for login, user_id in (("different-app[bot]", 7654321), ("example-app[bot]", 8765432)):
+        with pytest.raises(VcsVerificationError, match="bot identity"):
+            await pool.configure_git_identity(binding, login, user_id)
 
 
 async def test_pool_reuses_warm_copy_bounds_overflow_and_fences_late_archive(tmp_path):
-    # Review/recovery retains occupancy; only a successful archive returns a copy to the pool.
+    # Local bindings remain allocation fences until the controller assigns a newer generation.
     root, _ = managed_seed(tmp_path)
     pool = RepositoryWorkspaces(root, "worker-a", limit=2)
     first = await acquire(pool, 1)
@@ -51,32 +183,85 @@ async def test_pool_reuses_warm_copy_bounds_overflow_and_fences_late_archive(tmp
     # Lowering the startup limit must not evict a previously occupied location.
     smaller = RepositoryWorkspaces(root, "worker-a", limit=1)
     assert await acquire(smaller, 2) == overflow
-    assert await pool.release(first) == "released"
-    reused = await acquire(pool, 3)
+    assert await release(pool, first) == "released"
+    reused = await acquire(pool, 3, previous=first)
     assert pool.path(reused) == repo and reused.generation > first.generation
     assert (repo / ".venv/keep").read_text() == "warm"
     with pytest.raises(VcsVerificationError, match="ownership"):
-        await pool.release(first)
+        await release(pool, first)
     assert pool.lookup("owner/repo", 3) == reused
-    assert await pool.release(overflow) == "removed"
+    assert await release(pool, overflow) == "removed"
     assert not worktree.exists()
     registry = await asyncio.to_thread(subprocess.check_output,
         ["git", "worktree", "list", "--porcelain"], cwd=root / "repos/owner/repo", text=True,
     )
     assert str(worktree) not in registry
-    replacement = await acquire(pool, 2)
+    replacement = await acquire(pool, 2, previous=overflow)
     assert replacement.slot_id == overflow.slot_id and replacement.generation > overflow.generation
     with pytest.raises(VcsVerificationError, match="ownership"):
-        await pool.release(overflow)
+        await release(pool, overflow)
     assert pool.lookup("owner/repo", 2) == replacement and worktree.exists()
 
 
+@pytest.mark.parametrize("overflow", [False, True])
+async def test_duplicate_claim_preserves_ongoing_flow_content_after_restart(tmp_path, overflow):
+    # Repeated binding verification must not reset an active Flow back to the seed baseline.
+    root, _ = managed_seed(tmp_path)
+    pool = RepositoryWorkspaces(root, "worker-a", limit=2)
+    if overflow:
+        await acquire(pool, 999)
+    binding = await acquire(pool, 1)
+    repo = pool.path(binding)
+    _git("checkout", "-b", "flow/1", cwd=repo)
+    (repo / "README.md").write_text("ongoing tracked edit")
+    (repo / "new-file").write_text("ongoing untracked edit")
+    before = pool.manifest_path.read_bytes()
+    restarted = RepositoryWorkspaces(root, "worker-a", limit=2)
+    assert await acquire(restarted, 1) == binding
+    assert restarted.manifest_path.read_bytes() == before
+    assert (repo / "README.md").read_text() == "ongoing tracked edit"
+    assert (repo / "new-file").read_text() == "ongoing untracked edit"
+    assert (await asyncio.to_thread(subprocess.check_output,
+        ["git", "branch", "--show-current"], cwd=repo, text=True,
+    )).strip() == "flow/1"
+
+
+@pytest.mark.parametrize("failure", ["seed", "copy"])
+async def test_initial_preparation_retries_in_place_after_filesystem_repair(tmp_path, monkeypatch, failure):
+    # A failed INITIAL retains its allocation; retry must not need a new generation or slot.
+    root, _ = managed_seed(tmp_path)
+    pool = RepositoryWorkspaces(root, "worker-a", limit=1)
+    target = (await pool.provision("owner/repo"))[1]
+
+    async def failed_seed(*args, **kwargs):
+        raise OSError("temporary seed IO failure")
+
+    def failed_copy(source, destination, **kwargs):
+        (destination / "partial").write_text("unfinished copy")
+        raise OSError("temporary copy IO failure")
+
+    with monkeypatch.context() as patch:
+        if failure == "seed":
+            patch.setattr("app.worker.execution.workspaces.ensure_seed", failed_seed)
+        else:
+            patch.setattr("app.worker.execution.workspaces.shutil.copytree", failed_copy)
+        with pytest.raises(OSError, match="temporary"):
+            await acquire(pool, 1)
+    restarted = RepositoryWorkspaces(root, "worker-a", limit=1)
+    binding = await acquire(restarted, 1)
+    assert (binding.slot_id, binding.generation) == (target.workspace, target.generation)
+    assert (restarted.path(binding) / "README.md").read_text() == "base\n"
+    assert not (restarted.path(binding) / "partial").exists()
+    assert len(restarted.inventory()) == 2
+
+
 @pytest.mark.parametrize("problem", ["tracked", "unknown", "operation", "symlink"])
-async def test_pool_quarantines_unsafe_release_without_discarding_contents(tmp_path, problem):
+async def test_unsafe_release_preserves_contents_and_can_retry_after_repair(tmp_path, problem):
     root, _ = managed_seed(tmp_path)
     pool = RepositoryWorkspaces(root, "worker-a", limit=1)
     binding = await acquire(pool, 1)
     repo = pool.path(binding)
+    before = pool.manifest_path.read_bytes()
     if problem == "tracked":
         (repo / "README.md").write_text("preserve changes")
     elif problem == "unknown":
@@ -88,10 +273,23 @@ async def test_pool_quarantines_unsafe_release_without_discarding_contents(tmp_p
         repo.rename(saved)
         repo.symlink_to(saved, target_is_directory=True)
     with pytest.raises(VcsVerificationError):
-        await pool.release(binding)
-    with pytest.raises(VcsVerificationError, match="capacity"):
-        await acquire(pool, 2)
+        await release(pool, binding)
+    assert pool.manifest_path.read_bytes() == before
     assert repo.exists()
+    if problem == "tracked":
+        assert (repo / "README.md").read_text() == "preserve changes"
+        (repo / "README.md").write_text("base\n")
+    elif problem == "unknown":
+        assert (repo / "unknown").read_text() == "preserve unknown"
+        (repo / "unknown").unlink()
+    elif problem == "operation":
+        assert (repo / ".git/MERGE_HEAD").read_text() == "unsettled"
+        (repo / ".git/MERGE_HEAD").unlink()
+    else:
+        repo.unlink()
+        saved.rename(repo)
+    assert await release(pool, binding) == "released"
+    assert pool.lookup("owner/repo", 1) == binding
 
 
 async def test_pool_rejects_corrupt_manifest_and_unproven_missing_workspace(tmp_path):
@@ -100,7 +298,7 @@ async def test_pool_rejects_corrupt_manifest_and_unproven_missing_workspace(tmp_
     binding = await acquire(pool, 1)
     shutil.rmtree(pool.path(binding))
     with pytest.raises(VcsVerificationError, match="missing"):
-        await pool.release(binding)
+        await release(pool, binding)
     manifest = root / "workspace-pool.json"
     manifest.write_text("corrupt")
     with pytest.raises(VcsVerificationError, match="manifest"):
@@ -115,10 +313,10 @@ async def test_pool_does_not_adopt_a_replacement_at_a_previously_removed_locatio
     await acquire(pool, 1)
     removed = await acquire(pool, 2)
     path = pool.path(removed)
-    assert await pool.release(removed) == "removed"
+    assert await release(pool, removed) == "removed"
     shutil.copytree(root / "repos/owner/repo", path)
     with pytest.raises(VcsVerificationError, match="unexpectedly exists"):
-        await acquire(pool, 3)
+        await acquire(pool, 3, previous=removed)
     assert (path / "README.md").read_text() == "base\n"
 
 
@@ -149,8 +347,10 @@ async def test_bootstrap_clones_atomically_with_current_token_and_task_baseline(
 
     monkeypatch.setattr(vcs, "_run", local_remote)
     pool = RepositoryWorkspaces(root, "worker-a", limit=2)
-    binding = await pool.acquire("owner/repo", 1, base_branch="trunk", remote="upstream",
-                                 push_token=assignment_secret().push.token)
+    location = (await pool.provision("owner/repo"))[1]
+    binding = await pool.claim("owner/repo", 1, location.workspace, location.generation,
+                               base_branch="trunk", remote="upstream",
+                               push_token=assignment_secret().push.token)
     assert len(clones) == 1 and (target / ".git").is_dir()
     repo = pool.path(binding)
     assert (await asyncio.to_thread(subprocess.check_output, ["git", "remote"], cwd=repo,
@@ -185,20 +385,23 @@ async def test_failed_clone_never_publishes_seed_or_leaves_owned_temporary_data(
 async def test_repository_identity_cannot_escape_managed_paths(tmp_path, repository):
     pool = RepositoryWorkspaces(tmp_path, "worker-a", limit=2)
     with pytest.raises(VcsVerificationError):
-        await pool.acquire(repository, 1, base_branch="main", remote="origin", push_token=None)
+        await pool.provision(repository)
     assert not (tmp_path / "workspace-pool.json").exists()
 
 
-async def test_preparing_state_after_process_loss_is_not_adopted(tmp_path):
+async def test_unreleased_v2_manifest_is_rejected_without_adopting_contents(tmp_path):
     root, _ = managed_seed(tmp_path)
     pool = RepositoryWorkspaces(root, "worker-a", limit=1)
     binding = await acquire(pool, 1)
     manifest = root / "workspace-pool.json"
     payload = json.loads(manifest.read_text())
+    payload["version"] = 2
     payload["slots"][0]["state"] = "preparing"
     manifest.write_text(json.dumps(payload))
-    with pytest.raises(VcsVerificationError, match="preparing"):
+    before = manifest.read_bytes()
+    with pytest.raises(VcsVerificationError, match="manifest"):
         await acquire(RepositoryWorkspaces(root, "worker-a", limit=1), 1)
+    assert manifest.read_bytes() == before
     assert pool.path(binding).exists()
 
 
@@ -209,14 +412,14 @@ async def test_reuse_refuses_baseline_that_would_overwrite_ignored_cache(tmp_pat
     repo = pool.path(binding)
     (repo / ".venv").mkdir()
     (repo / ".venv/keep").write_text("cache must survive")
-    await pool.release(binding)
+    await release(pool, binding)
     seed = root / "repos/owner/repo"
     (seed / ".venv").mkdir()
     (seed / ".venv/keep").write_text("new tracked source")
     _git("add", "-f", ".venv/keep", cwd=seed)
     _git("commit", "-m", "new baseline conflicts with old cache", cwd=seed)
     with pytest.raises(VcsVerificationError):
-        await acquire(pool, 2)
+        await acquire(pool, 2, previous=binding)
     assert (repo / ".venv/keep").read_text() == "cache must survive"
 
 
@@ -247,13 +450,13 @@ async def test_jj_reuse_preserves_cache_with_unusual_paths_or_blocking_ancestors
         (repo / ".venv").mkdir()
         preserved = repo / ".venv" / name
         preserved.write_text("cache must survive")
-    await pool.release(binding)
+    await release(pool, binding)
     (seed / ".venv").mkdir()
     (seed / ".venv" / name).write_text("new tracked source")
     _git("add", "-f", f".venv/{name}", cwd=seed)
     _git("commit", "-m", "new baseline conflicts with cache", cwd=seed)
     with pytest.raises(VcsVerificationError, match="overwrite retained cache"):
-        await acquire(pool, 2)
+        await acquire(pool, 2, previous=binding)
     assert preserved.read_text() == "cache must survive"
     if cache == "symlink-parent":
         assert not (outside / name).exists()
@@ -274,19 +477,19 @@ async def test_jj_copy_can_return_to_pool_and_reuse_committed_baseline(tmp_path,
     pool = RepositoryWorkspaces(root, "worker-a", limit=2)
     binding = await acquire(pool, 1)
     assert (pool.path(binding) / ".jj").is_dir()
-    assert await pool.release(binding) == "released"
+    assert await release(pool, binding) == "released"
     (seed / "README.md").write_text("updated committed baseline\n")
     await _jj("describe", "-m", "advance the seed baseline", cwd=seed, env=environment)
     await _jj("bookmark", "set", "main", "-r", "@", cwd=seed, env=environment)
     await _jj("new", cwd=seed, env=environment)
-    reused = await acquire(pool, 2)
+    reused = await acquire(pool, 2, previous=binding)
     assert pool.path(reused) == pool.path(binding)
     assert (pool.path(reused) / "README.md").read_text() == "updated committed baseline\n"
 
 
 @pytest.mark.skipif(shutil.which("jj") is None, reason="jj is not installed")
 @pytest.mark.parametrize("colocated", [True, False])
-async def test_cancel_cleans_jj_edits_before_reusing_directory(tmp_path, colocated):
+async def test_next_initial_cleans_stopped_jj_edits_when_reusing_directory(tmp_path, colocated):
     # Non-colocated jj has no .git checkout; Git reset alone cannot clean its working copy.
     root, remote = managed_seed(tmp_path)
     seed = root / "repos/owner/repo"
@@ -304,12 +507,11 @@ async def test_cancel_cleans_jj_edits_before_reusing_directory(tmp_path, colocat
     await _jj("commit", "-m", "agent commit", cwd=repo, env=environment)
     (repo / "README.md").write_text("cancelled edit")
     (repo / "untracked").write_text("cancelled file")
-    assert await pool.release(binding, recycle=True) == "released"
-    assert (repo / "README.md").read_text() == "committed agent work\n"
-    assert not (repo / "untracked").exists()
-    reused = await acquire(pool, 1)
+    # Stop leaves edits in place; only the next explicit allocation prepares a new baseline.
+    reused = await acquire(pool, 1, previous=binding)
     assert reused.slot_id == binding.slot_id and reused.generation > binding.generation
     assert (repo / "README.md").read_text() == "base\n"
+    assert not (repo / "untracked").exists()
 
 
 @pytest.mark.parametrize("cancellations", [1, 2])
@@ -342,6 +544,8 @@ async def test_cancelled_copy_waits_for_thread_and_cleans_only_owned_partial(
             await task
     manifest = json.loads((root / "workspace-pool.json").read_text())
     slot = manifest["slots"][0]
-    assert slot["state"] == "absent"
+    assert "state" not in slot and slot["directory_identity"] is None
+    assert slot["binding"]["flow_id"] == 1
+    assert slot["generation"] == 1
     assert not (root / slot["relative_path"]).exists()
     assert (root / "repos/owner/repo/README.md").exists()

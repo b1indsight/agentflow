@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
-from app.github.errors import translate_errors
+from app.github.errors import GitHubError, GitHubErrorKind, translate_errors
 from app.github.pagination import Batch
 from app.github.projects import Project, ProjectConfig
 from app.github.repositories import Repository
@@ -23,8 +24,9 @@ class GitHubApp(BaseModel):
 
     model_config = ConfigDict(frozen=True)
     app_id: int = Field(gt=0)
-    bot_login: str
     _sdk: GitHub[AppAuthStrategy] = PrivateAttr()
+    _bot_login: str | None = PrivateAttr(default=None)
+    _bot_login_lock: asyncio.Lock = PrivateAttr(default_factory=asyncio.Lock)
 
     def __init__(self, settings: ServerSettings) -> None:
         from githubkit import AppAuthStrategy, GitHub
@@ -34,11 +36,31 @@ class GitHubApp(BaseModel):
         key = settings.github_private_key_path.read_text()
         if not key.strip():
             raise ValueError("FLOWTOOL_GITHUB_PRIVATE_KEY_PATH points to an empty file")
-        super().__init__(app_id=settings.github_app_id, bot_login=settings.bot_login)
+        super().__init__(app_id=settings.github_app_id)
         self._sdk = GitHub(
             AppAuthStrategy(self.app_id, key),
             timeout=settings.github_request_timeout_seconds,
         )
+
+    @property
+    def bot_login(self) -> str:
+        """Read the resolved identity without network I/O, including in DB-only consumers."""
+        if self._bot_login is None:
+            raise RuntimeError("App bot identity has not been resolved")
+        return self._bot_login
+
+    async def resolve_bot_login(self) -> str:
+        """Derive the bot from this App's JWT; share successful reads, but retry failures."""
+        if self._bot_login is None:
+            async with self._bot_login_lock:
+                if self._bot_login is None:
+                    client = self._client(auto_retry=False)
+                    with translate_errors("get_app"):
+                        app = (await client.rest.apps.async_get_authenticated()).parsed_data
+                        if app is None or app.id != self.app_id or not app.slug:
+                            raise GitHubError(GitHubErrorKind.UNEXPECTED_RESPONSE, "get_app")
+                        self._bot_login = f"{app.slug}[bot]"
+        return self.bot_login
 
     def _client(self, *, auto_retry: bool = True) -> GitHub[AppAuthStrategy]:
         # Copy native configuration so an effect cannot change another call's retry policy.

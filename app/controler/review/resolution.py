@@ -1,6 +1,7 @@
 """Plan per-thread explanations and conservative whole-thread completion from frozen feedback."""
 
 from dataclasses import dataclass, field
+from typing import Literal
 
 from app.contracts.protocol import RevisionTaskResult
 from app.contracts.result_models import CommentEffect, Effect, ResolveEffect, ThreadReplyEffect
@@ -41,7 +42,7 @@ class ResolutionNotes:
 
 def plan_resolution(
     flow: Flow, number: int, batch: ReviewBatch, result: RevisionTaskResult,
-    historical: list[ReviewFeedback],
+    historical: list[ReviewFeedback], *, purpose: Literal["answer", "revise"] = "revise",
 ) -> ResolutionNotes:
     """Freeze one reply and one resolution check per mapped thread; keep unmapped feedback pending."""
     assert flow.installation_id is not None and result.output is not None
@@ -68,7 +69,6 @@ def plan_resolution(
             reason = f"[{item.github_id}]({link})：线程映射缺失、不完整或评论版本已变，保留待处理。"
             notes.problems.append(reason)
             notes.blocked.append(FeedbackRef(item_id=item.item_id, version=item.version))
-            conversation.append(f"{reason}\n{text or ''}")
             continue
         thread = candidates[0]
         mapped[thread.thread_id] = thread
@@ -82,7 +82,8 @@ def plan_resolution(
     for item in [*historical, *addressed]:
         if item.kind is ReviewItemKind.INLINE:
             coverage_by_comment.setdefault(item.github_id, []).append(item)
-    commit = f"已核验提交：[ `{result.commit_sha}` ](https://github.com/{flow.repo}/commit/{result.commit_sha})"
+    commit = ("问题答复（未交付代码变更）" if purpose == "answer" else
+              f"已核验提交：[ `{result.commit_sha}` ](https://github.com/{flow.repo}/commit/{result.commit_sha})")
     for thread_id, items in groups.items():
         thread = mapped[thread_id]
         roots = [c for c in thread.comments.items if c.reply_to_id is None]
@@ -102,7 +103,6 @@ def plan_resolution(
             reason = f"{thread_id}：无法确认根评论，保留待处理。"
             notes.problems.append(reason)
             notes.blocked.extend(FeedbackRef(item_id=f.item_id, version=f.version) for f in items)
-            conversation.append(reason)
             reply_key = None
         coverage = [item for comment in thread.comments.items
                     for item in coverage_by_comment.get(comment.github_id, []) if matches(comment, item)]

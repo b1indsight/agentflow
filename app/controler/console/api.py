@@ -1,32 +1,102 @@
 """Owner-only console HTTP; all blocking database units run outside the event loop."""
 
 import asyncio
+import base64
 from functools import partial
 from typing import Annotated
 
 from fastapi import APIRouter, Path, Query, Request
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.contracts.console import (
     ActivityPage,
     ArchiveRequest,
     ConsoleFailure,
     ContentPage,
+    CreateFlowRequest,
     FlowDetail,
     FlowPage,
+    FlowTarget,
+    FlowTargetPage,
+    InferenceNoticePage,
     JobPage,
     Phase,
     RepositoryPage,
+    ResumeRequest,
     RetryRequest,
 )
 from app.controler.runtime import ServerRuntime
 from app.controler.workflow.service import ControlService, RetryRejected
+from app.github import GitHubError, GitHubErrorKind
 from app.persistence.activity import ActivityStore
 from app.persistence.console import ConsoleStore
 from app.persistence.flows import FlowStore
+from app.persistence.inference_notices import InferenceNoticeStore
 
 router = APIRouter(prefix="/api")
 FlowId = Annotated[int, Path(gt=0)]
 Cursor = Annotated[str | None, Query(min_length=1, max_length=4096)]
+
+
+class _TargetCursor(BaseModel):
+    """Resume one bounded inventory page, anchored by installation identity."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    installation_page: int = Field(default=1, gt=0)
+    installation_id: int | None = Field(default=None, gt=0)
+    repository_page: int = Field(default=1, gt=0)
+
+    def encode(self) -> str:
+        return base64.urlsafe_b64encode(self.model_dump_json().encode()).decode()
+
+
+def _github_failure(error: GitHubError) -> ConsoleFailure:
+    statuses = {
+        GitHubErrorKind.AUTHENTICATION: 403, GitHubErrorKind.PERMISSION: 403,
+        GitHubErrorKind.NOT_FOUND: 404, GitHubErrorKind.VALIDATION: 422,
+        GitHubErrorKind.CONFLICT: 409, GitHubErrorKind.RATE_LIMITED: 429,
+    }
+    return ConsoleFailure(f"github_{error.kind.value}", statuses.get(error.kind, 503))
+
+
+@router.get("/flow-targets", response_model=FlowTargetPage)
+async def flow_targets(request: Request, cursor: Cursor = None) -> FlowTargetPage:
+    """Read at most one installation page and one repository page; no GitHub writes."""
+    runtime: ServerRuntime = request.app.state.runtime
+    try:
+        position = _TargetCursor.model_validate_json(
+            base64.b64decode(cursor, altchars=b"-_", validate=True)
+        ) if cursor else _TargetCursor()
+    except ValueError as error:
+        raise ConsoleFailure("cursor_invalid") from error
+    following: _TargetCursor | None = None
+    items: list[FlowTarget] = []
+    try:
+        installations = await runtime.github.fetch_installations(page=position.installation_page)
+        identities = [item.installation_id for item in installations.items]
+        if position.installation_id is not None and position.installation_id not in identities:
+            raise ConsoleFailure("cursor_invalid")
+        if installations.items:
+            index = identities.index(position.installation_id) if position.installation_id else 0
+            installation = installations.items[index]
+            repositories = await installation.fetch_repositories(page=position.repository_page)
+            items = [FlowTarget(repo=repo.full_name, installation_id=installation.installation_id)
+                     for repo in repositories.items]
+            if repositories.next_cursor is not None:
+                following = _TargetCursor(
+                    installation_page=position.installation_page,
+                    installation_id=installation.installation_id,
+                    repository_page=int(repositories.next_cursor),
+                )
+            elif index + 1 < len(identities):
+                following = _TargetCursor(installation_page=position.installation_page,
+                                          installation_id=identities[index + 1])
+        if following is None and installations.next_cursor is not None:
+            following = _TargetCursor(installation_page=int(installations.next_cursor))
+    except GitHubError as error:
+        raise _github_failure(error) from error
+    return FlowTargetPage(items=items, next_cursor=following.encode() if following else None,
+                          has_more=following is not None)
 
 
 @router.get("/flows", response_model=FlowPage)
@@ -80,12 +150,89 @@ def _require_same_origin_json(request: Request) -> None:
         raise ConsoleFailure("json_required", 415)
 
 
-@router.post("/flows/{flow_id}/archive", response_model=FlowDetail)
-async def archive(request: Request, flow_id: FlowId, body: ArchiveRequest) -> FlowDetail:
-    """Archive only local display state; JSON and origin checks prevent form-based CSRF."""
+@router.post("/flows", response_model=FlowDetail, status_code=201)
+async def create_flow(request: Request, body: CreateFlowRequest) -> FlowDetail:
+    """Validate current GitHub access before atomically persisting input and INITIAL."""
     _require_same_origin_json(request)
     runtime: ServerRuntime = request.app.state.runtime
-    return await runtime.console.db(partial(ConsoleStore(runtime.database).archive, flow_id))
+    try:
+        # Keep these read-only checks aligned with the admin CLI's flow create command.
+        repository = await runtime.github.installation(body.installation_id).repository(body.repo).refetch()
+        if repository.archived:
+            raise ConsoleFailure("repository_archived")
+        if body.issue_number is not None:
+            await repository.fetch_issue(body.issue_number)
+    except GitHubError as error:
+        raise _github_failure(error) from error
+    loop = asyncio.get_running_loop()
+
+    def notify_jobs() -> None:
+        loop.call_soon_threadsafe(runtime.gateway.wake_all)
+
+    def command() -> FlowDetail:
+        flow = ControlService(
+            database=runtime.database,
+            jobs_available=notify_jobs,
+        ).create_flow(repository.full_name, body.issue_number, body.installation_id,
+                      task_content=body.task_content)
+        if flow is None:
+            raise ConsoleFailure("flow_conflict")
+        return ConsoleStore(runtime.database).detail(flow.id)
+
+    return await runtime.console.db(command)
+
+
+@router.post("/flows/{flow_id}/archive", response_model=FlowDetail)
+async def archive(request: Request, flow_id: FlowId, body: ArchiveRequest) -> FlowDetail:
+    """Request business finalization; a card cannot bypass stop or cleanup guards."""
+    _require_same_origin_json(request)
+    runtime: ServerRuntime = request.app.state.runtime
+    loop = asyncio.get_running_loop()
+
+    def notify_jobs() -> None:
+        loop.call_soon_threadsafe(runtime.gateway.wake_all)
+
+    def command() -> FlowDetail:
+        flow = FlowStore(runtime.database).get_flow(flow_id)
+        if flow is None:
+            raise ConsoleFailure("flow_not_found", 404)
+        try:
+            ControlService(database=runtime.database, jobs_available=notify_jobs).finish(
+                flow,
+                reason=body.reason,
+                summary=body.summary,
+                expected_round_no=body.expected_round_no,
+            )
+        except ValueError as error:
+            raise ConsoleFailure("archive_rejected") from error
+        return ConsoleStore(runtime.database).detail(flow_id)
+
+    return await runtime.console.db(command)
+
+
+@router.post("/flows/{flow_id}/resume", response_model=FlowDetail)
+async def resume(request: Request, flow_id: FlowId, body: ResumeRequest) -> FlowDetail:
+    """Explicit restoration is separate from retry and historical correction."""
+    _require_same_origin_json(request)
+    runtime: ServerRuntime = request.app.state.runtime
+    loop = asyncio.get_running_loop()
+
+    def notify_jobs() -> None:
+        loop.call_soon_threadsafe(runtime.gateway.wake_all)
+
+    def command() -> FlowDetail:
+        flow = FlowStore(runtime.database).get_flow(flow_id)
+        if flow is None:
+            raise ConsoleFailure("flow_not_found", 404)
+        try:
+            ControlService(database=runtime.database, jobs_available=notify_jobs).resume(
+                flow, expected_round_no=body.expected_round_no
+            )
+        except ValueError as error:
+            raise ConsoleFailure("resume_rejected") from error
+        return ConsoleStore(runtime.database).detail(flow_id)
+
+    return await runtime.console.db(command)
 
 
 @router.post("/flows/{flow_id}/retry", response_model=FlowDetail)
@@ -97,7 +244,7 @@ async def retry(request: Request, flow_id: FlowId, body: RetryRequest) -> FlowDe
 
     def notify_jobs() -> None:
         # Schedule on the ASGI loop after commit, including after client disconnect.
-        loop.call_soon_threadsafe(runtime.gateway.notify_jobs)
+        loop.call_soon_threadsafe(runtime.gateway.wake_all)
 
     def command() -> FlowDetail:
         flow = FlowStore(runtime.database).get_flow(flow_id)
@@ -131,6 +278,21 @@ async def jobs(
     return await runtime.console.db(
         partial(ConsoleStore(runtime.database).jobs, flow_id, cursor=cursor, limit=limit)
     )
+
+
+@router.get("/flows/{flow_id}/inference-notices", response_model=InferenceNoticePage)
+async def inference_notices(
+    request: Request,
+    flow_id: FlowId,
+    cursor: Cursor = None,
+    snapshot: int | None = Query(default=None, ge=0),
+    limit: int = Query(default=20, ge=1, le=100),
+) -> InferenceNoticePage:
+    runtime: ServerRuntime = request.app.state.runtime
+    return await runtime.console.db(partial(
+        InferenceNoticeStore(runtime.database).page, flow_id,
+        cursor=cursor, snapshot=snapshot, limit=limit,
+    ))
 
 
 @router.get("/flows/{flow_id}/activity", response_model=ActivityPage)

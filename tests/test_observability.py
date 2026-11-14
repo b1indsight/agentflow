@@ -4,26 +4,31 @@ import json
 import logging
 import threading
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import psycopg
 import pytest
+from fastapi import WebSocket
 from fastapi.testclient import TestClient
 from loguru import logger
+from psycopg_pool import PoolTimeout
 from pydantic import SecretStr
 
 import app.controler.config as server_config
 import app.controler.runtime as server_runtime
 import app.telemetry.metrics as metrics_module
 from app import cli
-from app.contracts.protocol import PROTOCOL_VERSION, InitialTaskResult, Succeeded
+from app.contracts.protocol import InitialTaskResult, Succeeded
 from app.controler.api import create_app
 from app.controler.config import ServerSettings
-from app.domain.models import DeliveryState, FlowState, JobKind, JobState, utcnow
+from app.controler.workflow.service import ControlService
+from app.domain.models import ArchiveReason, DeliveryState, FlowState, JobKind
 from app.persistence import metrics as database_metrics
+from app.persistence.activity import ActivityStore
 from app.persistence.metrics import read_snapshot
 from app.telemetry.logging import configure_logging
 from app.telemetry.metrics import Metrics
+from tests.workspace_fixtures import register_worker
 
 
 async def test_logs_isolate_concurrent_context_and_never_render_exception_payload():
@@ -46,6 +51,49 @@ async def test_logs_isolate_concurrent_context_and_never_render_exception_payloa
         assert all(row['event'] == 'job_failed' for row in rows)
         for secret in ('secret-token', 'password', 'raw prompt', 'postgres://', 'payload'):
             assert secret not in output.getvalue()
+    finally:
+        logger.remove()
+
+
+@pytest.mark.parametrize('error_type', [psycopg.errors.CheckViolation, PoolTimeout])
+@pytest.mark.parametrize('already_closed', [False, True])
+def test_database_failures_preserve_websocket_close_and_http_response(error_type, already_closed):
+    output = io.StringIO()
+    configure_logging('serve', 'json', output)
+    runtime = SimpleNamespace(settings=SimpleNamespace(host='test', port=0), metrics=Metrics(),
+                              startup=Mock(), shutdown=AsyncMock())
+    application = create_app(runtime)
+
+    @application.websocket('/database-failure')
+    async def fail_websocket(socket: WebSocket):
+        await socket.accept()
+        if already_closed:
+            # Gateway may already have closed the connection while unwinding a DB failure.
+            await socket.close(code=1012)
+        raise error_type('postgresql://private:password@db/secret-payload')
+
+    @application.get('/database-failure')
+    async def fail_http():
+        raise error_type('postgresql://private:password@db/secret-payload')
+
+    try:
+        with TestClient(application) as client:
+            with client.websocket_connect('/database-failure') as socket:
+                close = socket.receive()
+                assert close['type'] == 'websocket.close'
+                assert close['code'] == (1012 if already_closed else 1011)
+            response = client.get('/database-failure')
+            assert response.status_code == 503
+            assert response.json() == {'detail': 'database_unavailable'}
+            assert response.headers['cache-control'] == 'no-store'
+        rows = [json.loads(line) for line in output.getvalue().splitlines()]
+        failures = [row for row in rows if row.get('exception_type') == error_type.__name__]
+        assert len(failures) == 1
+        assert failures[0]['reason_code'] == 'database_unavailable'
+        assert f'{__name__}:fail_websocket:' in failures[0]['exception_trace']
+        assert not any(secret in output.getvalue() for secret in (
+            'postgresql://', 'password', 'secret-payload', 'RuntimeError',
+        ))
     finally:
         logger.remove()
 
@@ -113,12 +161,12 @@ async def test_snapshot_runs_off_event_loop_and_scrape_never_reads_database(monk
 def test_repeated_snapshots_do_not_count_execution_receipt_twice(store, postgresql_url):
     flow = store.flows.create_flow('private/repository', 1, 1)
     job = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
-    store.workers.worker_connected('w', PROTOCOL_VERSION, 'epoch')
+    register_worker(store, 'w', repo=flow.repo, epoch='epoch')
     assert store.workers.assign_job('w', 'token', 'epoch')
-    result = Succeeded(job_id=job.id, assignment_token='token', connection_epoch='epoch',
+    result = Succeeded(job_id=job.id, assignment_token='token',
                        result=InitialTaskResult(session_id='session', last_message='', exit_code=1))
     assert store.workers.record_assignment_result(job.id, 'w', 'token', 'epoch',
-                                          result.model_dump(mode='json'), 'digest') == 'pending'
+                                          result) == 'pending'
     with store.connection() as connection:
         connection.execute("UPDATE jobs SET started_at=result_received_at-interval '3 seconds' WHERE id=%s", (job.id,))
     metrics = Metrics()
@@ -158,15 +206,21 @@ def test_standard_logging_preserves_level_and_origin_without_payload():
         logger.remove()
 
 
-def test_serve_preserves_sanitized_uvicorn_logging(monkeypatch, capsys):
+@pytest.mark.parametrize('output_format', ['json', 'text'])
+def test_serve_preserves_sanitized_uvicorn_logging(monkeypatch, capsys, output_format):
     output = io.StringIO()
     settings = ServerSettings.model_construct(database_url="postgresql://localhost/test",
-        worker_tokens={"worker-1": SecretStr("worker-secret")}, log_format="json")
+        worker_tokens={"worker-1": SecretStr("worker-secret")}, log_format=output_format)
     monkeypatch.setattr(server_config, "ServerSettings", lambda: settings)
     monkeypatch.setattr(server_runtime, "Database", Mock())
     monkeypatch.setattr(server_runtime, "GitHubApp", Mock())
     monkeypatch.setattr(server_runtime, "configure_logging",
                         lambda role, output_format: configure_logging(role, output_format, output))
+
+    def fail_request(depth):
+        if depth:
+            fail_request(depth - 1)
+        raise RuntimeError("private secret-error")
 
     def initialize_server(application, **kwargs):
         # CLI constructs the runtime first; Uvicorn configures its handlers afterwards.
@@ -174,7 +228,8 @@ def test_serve_preserves_sanitized_uvicorn_logging(monkeypatch, capsys):
         logging.getLogger("uvicorn.access").info('%s - "%s %s HTTP/%s" %d',
             "127.0.0.1:1", "GET", "/probe?token=secret-query", "1.1", 200)
         try:
-            raise RuntimeError("private secret-error")
+            # ASGI failures need their innermost code locations, not just Uvicorn's log site.
+            fail_request(24)
         except RuntimeError:
             logging.getLogger("uvicorn.error").exception("raw exception payload")
 
@@ -183,65 +238,49 @@ def test_serve_preserves_sanitized_uvicorn_logging(monkeypatch, capsys):
         cli.serve()
         captured = capsys.readouterr()
         rendered = output.getvalue() + captured.out + captured.err
-        assert not any(secret in rendered for secret in ("secret-query", "secret-error", "raw exception payload"))
-        rows = [json.loads(line) for line in output.getvalue().splitlines()]
+        assert not any(secret in rendered for secret in (
+            "secret-query", "secret-error", "raw exception payload", __file__,
+        ))
+        rows = [json.loads(line) if output_format == 'json' else
+                dict(field.split('=', 1) for field in line.split())
+                for line in output.getvalue().splitlines()]
         assert {row["level"] for row in rows} == {"INFO", "ERROR"}
         assert rows[-1]["exception_type"] == "RuntimeError"
+        frames = rows[-1]['exception_trace'].split('|')
+        assert len(frames) == 16
+        assert all(frame.startswith(f'{__name__}:fail_request:') for frame in frames)
+        assert all(frame.rsplit(':', 1)[-1].isdigit() for frame in frames)
+        assert 'exception_trace' not in rows[0]
     finally:
         logger.remove()
 
 
 def test_reconcile_metrics_match_scheduler_eligibility(store, postgresql_url):
     for number, state, delivery_state, pr in [
-        (1, FlowState.ACTIVE, DeliveryState.OPEN, 11),
-        (2, FlowState.CANCELLED, DeliveryState.OPEN, 12),
-        (4, FlowState.ACTIVE, DeliveryState.MERGED, 14),
-        (5, FlowState.ACTIVE, DeliveryState.NONE, None),
+        (1, FlowState.REVIEW, DeliveryState.OPEN, 11),
+        (2, FlowState.ARCHIVED, DeliveryState.OPEN, 12),
+        (4, FlowState.FINALIZING, DeliveryState.MERGED, 14),
+        (5, FlowState.QUEUED, DeliveryState.NONE, None),
     ]:
         flow = store.flows.create_flow('fixture/repo', number, 1)
-        flow.state = state
-        store.flows.update_flow(flow)
         delivery = store.deliveries.get_or_create_delivery(flow.id, f'flow/{number}')
         delivery.state, delivery.pr_number = delivery_state, pr
         store.deliveries.update_delivery(delivery)
+        if state is FlowState.ARCHIVED:
+            ControlService(database=store.database).cancel(flow)
+            assert ActivityStore(store.database).archived(flow.id, 1) is not None
+        else:
+            flow.state = state
+            if state is FlowState.FINALIZING:
+                flow.archive_reason = ArchiveReason.SUCCEEDED
+            store.flows.update_flow(flow)
         store.reconcile.hint(flow.id)
         with store.connection() as conn:
             conn.execute("UPDATE flow_reconcile SET next_at=now()-(%s * interval '1 second') WHERE flow_id=%s",
                          (60 if number <= 2 else 3600, flow.id))
     due = store.reconcile.due(100)
-    assert len(due) == 2  # Cancelled PRs still need reconciliation; merged/no-PR do not.
+    assert len(due) == 2  # Archived PRs still need evidence; merged/no-PR do not.
     metrics = read_snapshot(postgresql_url)
     assert next(s.value for s in metrics.samples if s.family == 'reconcile_due') == len(due)
     age = next(s.value for s in metrics.samples if s.family == 'oldest_age_seconds' and s.labels == ['reconcile'])
     assert 60 <= age < 120
-
-
-def test_archive_alert_age_uses_latest_job_of_active_bound_flow(store, postgresql_url):
-    flow = store.flows.create_flow('fixture/recovery', 1, 1)
-    store.workers.worker_connected('w', PROTOCOL_VERSION, 'epoch')
-    initial = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
-    assert store.workers.assign_job('w', 'token', 'epoch')
-    assert store.workers.finish_assignment(initial.id, 'w', 'token', JobState.DONE, 'epoch')
-    delivery = store.deliveries.get_or_create_delivery(flow.id, 'flow/1')
-    delivery.state, delivery.pr_number = DeliveryState.MERGED, 17
-    delivery.head_sha, delivery.merge_commit_sha, delivery.merged_at = 'head', 'merge', utcnow()
-    store.deliveries.update_delivery(delivery)
-    job = store.jobs.enqueue_job(flow.id, JobKind.ARCHIVE)
-    with store.connection() as conn:
-        conn.execute("UPDATE jobs SET created_at=now()-interval '20 minutes' WHERE id=%s", (job.id,))
-    def age():
-        return next(s.value for s in read_snapshot(postgresql_url).samples
-                    if s.family == 'archive_pending_age_seconds')
-    assert age() >= 1200
-    assert store.workers.assign_job('w', 'archive-token', 'epoch')
-    assert store.workers.finish_assignment(job.id, 'w', 'archive-token', JobState.FAILED, 'epoch')
-    # A newer queued retry replaces the age of the failed attempt.
-    retry = store.jobs.enqueue_job(flow.id, JobKind.ARCHIVE)
-    assert age() < 10
-    # Successful archive application also terminates the Flow and releases its binding.
-    assert store.workers.assign_job('w', 'retry-token', 'epoch')
-    assert store.workers.finish_assignment(retry.id, 'w', 'retry-token', JobState.DONE, 'epoch')
-    flow.state = FlowState.SUCCEEDED
-    store.flows.update_flow(flow)
-    assert store.workers.release_flow_execution(flow.id)
-    assert age() == 0

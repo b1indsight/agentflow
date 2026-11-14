@@ -12,6 +12,8 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr
 from app.github import (
     Batch,
     GitHubApp,
+    GitHubError,
+    GitHubErrorKind,
     Issue,
     PullRequest,
     PushCapability,
@@ -42,19 +44,20 @@ class RecordingGitHub(GitHubApp):
 
     model_config = ConfigDict(frozen=False, extra="allow")
     app_id: int = 1
-    bot_login: str = "flowtool[bot]"
     comments: list[str] = Field(default_factory=list)
     comment_bodies: list[str] = Field(default_factory=list)
     pull_request: PullRequest | None = None
     opened: list[str] = Field(default_factory=list)
     review_requests: list[list[str]] = Field(default_factory=list)
     labels: list[list[str]] = Field(default_factory=list)
+    refs: dict[str, str] | None = None
     threads: list[ReviewThread] = Field(default_factory=list)
     thread_replies: list[str] = Field(default_factory=list)
     resource_calls: list[dict[str, Any]] = Field(default_factory=list)
 
     def __init__(self) -> None:
-        BaseModel.__init__(self, app_id=1, bot_login="flowtool[bot]")
+        BaseModel.__init__(self, app_id=1)
+        self._bot_login = "flowtool[bot]"
         self._sdk = GitHub(AppAuthStrategy(1, "unused-test-key"))
 
 
@@ -82,10 +85,15 @@ class RecordingRepository(Repository):
             token=SecretStr("push-token"), repository=self.full_name,
             permissions={"contents": "write"},
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
+            bot_login=self.installation.app.bot_login, bot_user_id=7654321,
         )
 
     async def fetch_ref(self, branch: str, *, retry_transient: bool = False) -> RemoteRef:
-        record_call(self, "fetch_ref")
+        state = record_call(self, "fetch_ref")
+        if state.refs is not None:
+            if branch not in state.refs:
+                raise GitHubError(GitHubErrorKind.NOT_FOUND, "get_ref", status_code=404)
+            return RemoteRef(branch=branch, sha=state.refs[branch])
         return RemoteRef(branch=branch, sha="abc123")
 
     async def compare_commits(self, base: str, head: str) -> bool:
@@ -194,8 +202,8 @@ class RecordingPullRequest(PullRequest):
         )
 
     async def fetch_threads(self, *, cursor: str | None = None, limit: int = 100) -> Batch[ReviewThread]:
-        record_call(self.repository, "fetch_threads", number=self.number)
-        return Batch[ReviewThread]()
+        state = record_call(self.repository, "fetch_threads", number=self.number)
+        return Batch[ReviewThread](items=tuple(state.threads))
 
 
 class RecordingReviewThread(ReviewThread):

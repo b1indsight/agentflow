@@ -26,7 +26,8 @@ jobs:
         run: |
           cache_dir=".cache/$(date +%F)/operations"
           mkdir -p "$cache_dir"
-          curl -fsSL https://github.com/prometheus/prometheus/releases/download/v3.5.1/prometheus-3.5.1.linux-amd64.tar.gz -o "$cache_dir/prometheus.tar.gz"
+          curl -fsSL --retry 3 --retry-max-time 120 --connect-timeout 15 --max-time 120 \
+            https://github.com/prometheus/prometheus/releases/download/v3.5.1/prometheus-3.5.1.linux-amd64.tar.gz -o "$cache_dir/prometheus.tar.gz"
           echo "cd6aea0ab214b05838470668dfcee7d01a7d91913509a227b00401ca872423f0  $cache_dir/prometheus.tar.gz" | sha256sum --check
           tar -xzf "$cache_dir/prometheus.tar.gz" -C "$cache_dir" prometheus-3.5.1.linux-amd64/promtool
           "$cache_dir/prometheus-3.5.1.linux-amd64/promtool" check rules deploy/monitoring/alerts.yml

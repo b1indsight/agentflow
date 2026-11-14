@@ -43,7 +43,7 @@ class ReviewContext(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     batch_id: int = Field(gt=0)
     repo: str
-    issue_number: int
+    issue_number: int | None
     pr_number: int
     issue: Issue | None = None
     pull_request: PullRequest | None = None
@@ -53,6 +53,8 @@ class ReviewContext(BaseModel):
     open_points: list[str] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
     ci: str = "not-fetched"
+    # Legacy frozen contexts must retain their exact JSON/digest for saved decisions.
+    task_content: str | None = Field(default=None, exclude_if=lambda value: value is None)
 
     @model_validator(mode="after")
     def _require_observed_resources(self) -> "ReviewContext":

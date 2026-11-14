@@ -4,7 +4,7 @@ import { phases } from "./phases";
 export interface SearchQuery {
   terms: string[];
   repo?: string;
-  lifecycle?: "active" | "done";
+  lifecycle?: "active" | "archived";
   status?: Phase;
   issue?: number;
   pr?: number;
@@ -39,10 +39,10 @@ export function parseSearch(
         break;
       }
       case "is":
-        if (value !== "active" && value !== "done")
+        if (value !== "active" && value !== "archived")
           return {
             ok: false,
-            error: "is: 支持 active（活跃）或 done（已归档）。",
+            error: "is: 支持 active（活跃）或 archived（已归档）。",
           };
         query.lifecycle = value;
         break;
@@ -51,7 +51,7 @@ export function parseSearch(
         if (!phase)
           return {
             ok: false,
-            error: "请选择排队、执行、审核、受阻或归档状态。",
+            error: "请选择待处理、进行中、待审核、受阻或已归档阶段。",
           };
         query.status = phase;
         break;

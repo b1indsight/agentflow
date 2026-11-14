@@ -13,11 +13,17 @@ from pydantic import BaseModel, ConfigDict, PrivateAttr
 from typer.testing import CliRunner
 
 from app import cli
-from app.contracts.protocol import PROTOCOL_VERSION, ArchiveResult, Failed, terminal_digest
+from app.contracts.protocol import ExecutionStopped
 from app.contracts.result_models import ResultPending
 from app.controler.reconciliation.projects import ProjectSync
 from app.controler.workflow.service import ControlService
-from app.domain.models import DeliveryState, FlowState, JobKind, JobState
+from app.domain.models import (
+    ArchiveReason,
+    DeliveryState,
+    FlowState,
+    JobKind,
+    JobState,
+)
 from app.domain.project_models import ProjectStatus
 from app.github import (
     GitHubApp,
@@ -31,11 +37,16 @@ from app.github import (
     ProjectTarget,
     Repository,
 )
+from app.persistence.activity import ActivityStore
 from app.persistence.store import Store
-from tests.test_archive_recovery import ready_archive, receive
+from tests.github import RecordingGitHub
+from tests.test_coordinator import coordinator
 from tests.test_github_client import settings
 from tests.test_github_projects import config, item, page
+from tests.test_merge import route_merge
 from tests.test_review_batches import review_flow as review_flow  # noqa: PLC0414
+from tests.test_workflow_transactions import accepted_coding
+from tests.workspace_fixtures import register_worker
 
 
 class RemoteProject(Project):
@@ -189,6 +200,9 @@ def remote_app(monkeypatch):
 @pytest.fixture
 def projection(store, review_flow, remote_app):
     flow, clock = review_flow
+    # The shared fixture creates delivery facts; this suite explicitly owns its Flow phase.
+    flow.state = FlowState.REVIEW
+    store.flows.update_flow(flow)
     configs = {flow.repo: config()}
     remote = RemoteProject()
     sync = ProjectSync(
@@ -206,42 +220,91 @@ def state(store):
     return store.projects.list_projections()[0]
 
 
+def test_direct_tasks_never_enter_issue_project_projections(store):
+    # Projects are Issue projections, not the repository selector used by direct task creation.
+    direct = store.flows.create_flow("owner/repo", None, 42, task_content="Direct")
+    issue = store.flows.create_flow("owner/repo", 7, 42)
+    store.projects.seed("owner/repo", config(), 64)
+    projections = store.projects.list_projections()
+    assert [(row.flow_id, row.issue_number) for row in projections] == [(issue.id, 7)]
+    with store.connection() as connection:
+        assert connection.execute("SELECT 1 FROM issue_flow_owners WHERE flow_id=%s", (direct.id,)).fetchone() is None
+
+
 async def converge(sync, times=3):
     for _ in range(times):
         await sync.sweep()
 
 
-@pytest.mark.parametrize("flow_state,delivery,expected", [
-    (FlowState.SUCCEEDED, DeliveryState.MERGED, ProjectStatus.DONE),
-    (FlowState.FAILED, DeliveryState.OPEN, ProjectStatus.BLOCKED),
-    (FlowState.CANCELLED, DeliveryState.OPEN, ProjectStatus.BLOCKED),
-    (FlowState.ACTIVE, DeliveryState.CLOSED, ProjectStatus.BLOCKED),
-    (FlowState.ACTIVE, DeliveryState.MERGED, ProjectStatus.IN_PROGRESS),
-    (FlowState.ACTIVE, DeliveryState.OPEN, ProjectStatus.IN_REVIEW),
-])
-async def test_priority_mapping_including_terminals(store, projection, flow_state, delivery, expected):
+@pytest.mark.parametrize(
+    "flow_state,delivery,reason,expected",
+    [
+        (FlowState.QUEUED, DeliveryState.CLOSED, None, ProjectStatus.TODO),
+        (FlowState.RUNNING, DeliveryState.MERGED, None, ProjectStatus.IN_PROGRESS),
+        (FlowState.REVIEW, DeliveryState.OPEN, None, ProjectStatus.IN_REVIEW),
+        (FlowState.REVIEW, DeliveryState.CLOSED, None, ProjectStatus.IN_REVIEW),
+        (FlowState.REVIEW, DeliveryState.MERGED, None, ProjectStatus.IN_REVIEW),
+        (FlowState.BLOCKED, DeliveryState.OPEN, None, ProjectStatus.BLOCKED),
+        (FlowState.BLOCKED, DeliveryState.MERGED, ArchiveReason.SUCCEEDED, ProjectStatus.BLOCKED),
+        (
+            FlowState.FINALIZING,
+            DeliveryState.MERGED,
+            ArchiveReason.SUCCEEDED,
+            ProjectStatus.IN_PROGRESS,
+        ),
+        (
+            FlowState.FINALIZING,
+            DeliveryState.CLOSED,
+            ArchiveReason.ABANDONED,
+            ProjectStatus.IN_PROGRESS,
+        ),
+        (FlowState.ARCHIVED, DeliveryState.NONE, ArchiveReason.SUCCEEDED, ProjectStatus.DONE),
+        (FlowState.ARCHIVED, DeliveryState.CLOSED, ArchiveReason.ABANDONED, ProjectStatus.DONE),
+    ],
+)
+async def test_projects_maps_flow_phase_without_inference_from_delivery(
+    store,
+    projection,
+    flow_state,
+    delivery,
+    reason,
+    expected,
+):
     flow, clock, _, remote, sync = projection
     await sync.sweep()
-    flow.state = flow_state
-    store.flows.update_flow(flow)
     current = store.deliveries.get_delivery(flow.id)
     current.state = delivery
+    if delivery is DeliveryState.NONE:
+        current.pr_number = None
     store.deliveries.update_delivery(current)
+    if flow_state is FlowState.ARCHIVED:
+        ControlService(database=store.database).finish(
+            flow,
+            reason=reason,
+            summary="本轮已完成",
+            expected_round_no=1,
+        )
+    else:
+        flow.state, flow.archive_reason = flow_state, reason
+        store.flows.update_flow(flow)
     clock.now += timedelta(seconds=31)
     await converge(sync)
+    assert store.flows.get_flow(flow.id).state is flow_state
     assert state(store).desired_status is expected
     assert remote.item.option_id == config().options[expected]
 
 
 async def test_unbound_initial_is_todo_then_bound_work_is_in_progress(store, projection):
     flow, clock, _, _, sync = projection
+    flow.state = FlowState.QUEUED
+    store.flows.update_flow(flow)
     delivery = store.deliveries.get_delivery(flow.id)
     delivery.state, delivery.pr_number = DeliveryState.NONE, None
     store.deliveries.update_delivery(delivery)
     store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
     await converge(sync)
     assert state(store).desired_status is ProjectStatus.TODO
-    store.workers.worker_connected("project-worker", PROTOCOL_VERSION, "epoch")
+    register_worker(store, "project-worker", repo=flow.repo, epoch="epoch")
     assert store.workers.assign_job("project-worker", "token", "epoch") is not None
     clock.now += timedelta(seconds=31)
     await sync.sweep()
@@ -277,14 +340,41 @@ async def test_lost_response_restart_reads_before_another_write(store, projectio
 async def test_same_issue_new_flow_takes_over_existing_card(store, projection):
     flow, clock, _, remote, sync = projection
     await converge(sync)
-    flow.state = FlowState.FAILED
-    store.flows.update_flow(flow)
+    ControlService(database=store.database).cancel(flow)
     fresh = store.flows.create_flow(flow.repo, flow.issue_number, 42)
     clock.now += timedelta(seconds=31)
     await converge(sync)
     assert len(store.projects.list_projections()) == 1
     assert state(store).flow_id == fresh.id and state(store).desired_status is ProjectStatus.TODO
     assert remote.calls.count("add") == 1
+
+
+async def test_resuming_older_flow_selects_owner_even_after_both_flows_are_archived(
+    store, projection
+):
+    # Max Flow ID loses ownership when an operator explicitly resumes an older Flow.
+    flow, clock, _, remote, sync = projection
+    service = ControlService(database=store.database)
+    await converge(sync)
+    service.cancel(flow)
+    newer = service.create_flow(flow.repo, flow.issue_number, 42)
+    assert newer is not None and newer.id > flow.id
+    service.cancel(newer)
+    clock.now += timedelta(seconds=31)
+    await converge(sync)
+    assert state(store).flow_id == newer.id
+    activity = ActivityStore(store.database)
+    first_archive = activity.archived(flow.id, 1)
+    assert first_archive is not None
+    resumed = service.resume(store.flows.get_flow(flow.id), expected_round_no=1)
+    await converge(sync)
+    assert state(store).flow_id == flow.id and state(store).desired_status is ProjectStatus.TODO
+    service.cancel(resumed)
+    await converge(sync)
+    assert state(store).flow_id == flow.id and state(store).desired_status is ProjectStatus.DONE
+    assert activity.archived(flow.id, 1) == first_archive
+    assert activity.archived(flow.id, 2) is not None
+    assert remote.calls.count("add") == 1 and remote.item.option_id == "done"
 
 
 async def test_new_desired_version_during_set_is_not_acknowledged_by_old_response(store, projection):
@@ -299,11 +389,11 @@ async def test_new_desired_version_during_set_is_not_acknowledged_by_old_respons
     remote.after_set = change
     await sync.sweep()
     current = state(store)
-    assert current.desired_status is ProjectStatus.BLOCKED
+    assert current.desired_status is ProjectStatus.DONE
     assert current.synced_version < current.desired_version
     remote.after_set = None
     await converge(sync)
-    assert remote.item.option_id == "blocked"
+    assert remote.item.option_id == "done"
 
 
 async def test_change_during_read_prevents_obsolete_write(store, projection):
@@ -320,7 +410,7 @@ async def test_change_during_read_prevents_obsolete_write(store, projection):
     assert ("set", ProjectStatus.IN_REVIEW) not in remote.calls
     remote.after_read = None
     await converge(sync)
-    assert remote.item.option_id == "blocked"
+    assert remote.item.option_id == "done"
 
 
 @pytest.mark.parametrize("removed", ["deleted", "archived"])
@@ -415,9 +505,11 @@ async def test_rate_limit_deadline_survives_and_does_not_change_flow(store, proj
         database=store.database,
     ).cancel(flow)
     await sync.sweep()
-    assert state(store).desired_status is ProjectStatus.BLOCKED
+    assert state(store).desired_status is ProjectStatus.DONE
     assert state(store).next_at == before.next_at
-    assert remote.calls == ["validate"] and store.flows.get_flow(flow.id).state is FlowState.CANCELLED
+    assert (
+        remote.calls == ["validate"] and store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
+    )
 
 
 @pytest.mark.parametrize("status", [429, 422])
@@ -492,52 +584,43 @@ async def test_project_error_does_not_block_control_cancellation_or_worker_relea
     ControlService(
         database=store.database,
     ).cancel(flow)
-    assert store.flows.get_flow(flow.id).state is FlowState.CANCELLED
+    assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
     assert state(store).failures == 1
-
-
-async def test_explicit_job_failure_blocks_but_pending_retry_does_not(store, remote_app, recording_resources):
-    flow, job, _, subject = await ready_archive(store)
-    sync = ProjectSync(
-        {flow.repo: config()},
-        remote_app(RemoteProject()),
-        database=store.database,
-    )
-    await converge(sync)
-    assert state(store).desired_status is ProjectStatus.IN_PROGRESS
-    # Cleanup can fail while the merged Flow remains active and keeps its worker ownership.
-    message = Failed(job_id=job.id, assignment_token="archive-token", connection_epoch="epoch-a",
-                     error="Cleanup failed")
-    assert store.workers.record_assignment_result(job.id, "worker-a", "archive-token", "epoch-a",
-        message.model_dump(mode="json"), terminal_digest(message)) == "pending"
-    assert await subject.results.apply(job.id) is JobState.FAILED
-    assert store.flows.get_flow(flow.id).state is FlowState.ACTIVE
-    assert store.deliveries.get_delivery(flow.id).state is DeliveryState.MERGED
-    await sync.sweep()
-    assert state(store).desired_status is ProjectStatus.BLOCKED
-    ControlService(
-        database=store.database,
-    ).retry(flow)
-    assert store.jobs.list_jobs(flow.id)[-1].state is JobState.QUEUED
-    await sync.sweep()
-    assert state(store).desired_status is ProjectStatus.IN_PROGRESS
 
 
 async def test_archive_ack_and_worker_release_succeed_while_projects_are_offline(
-    store, remote_app, recording_resources,
+    store,
+    remote_app,
+    recording_resources,
 ):
-    flow, job, task, subject = await ready_archive(store)
+    execution, _ = accepted_coding(store, receive=False)
+    flow = store.flows.get_flow(execution.flow_id)
+    store.projects.seed(flow.repo, config(), 100)
+    await route_merge(store, flow)
+    job = store.jobs.list_jobs(flow.id)[-1]
+    subject = coordinator(store, RecordingGitHub())
     remote = RemoteProject()
     remote.failure = "offline"
     sync = ProjectSync(
-        {flow.repo: config()}, remote_app(remote), database=store.database,
+        {flow.repo: config()},
+        remote_app(remote),
+        database=store.database,
     )
     await sync.sweep()
     assert state(store).failures == 1
-    assert receive(store, job, ArchiveResult(**task.model_dump(), cleanup="removed")) == "pending"
+    stop = store.stops.pending("worker-a")
+    assert store.stops.confirm(
+        "worker-a", ExecutionStopped(**stop.fence().model_dump(), execution_nonce="owned"), "epoch-a",
+    )
     assert await subject.results.apply(job.id) is JobState.DONE
     assert store.workers.get_flow_execution(flow.id).released_at is not None
     assert store.jobs.get_job(job.id).result_applied_at is not None
+    archived = store.flows.get_flow(flow.id)
+    assert (
+        archived.state is FlowState.ARCHIVED and archived.archive_reason is ArchiveReason.SUCCEEDED
+    )
+    archive = ActivityStore(store.database).archived(flow.id, 1)
+    assert archive is not None and archive.occurred_at == archived.archived_at is not None
     await sync.sweep()
     assert state(store).desired_status is ProjectStatus.DONE and remote.calls == ["validate"]
 
@@ -607,14 +690,22 @@ async def test_slow_item_does_not_block_another_issue(store, projection, remote_
     try:
         await asyncio.wait_for(entered.wait(), 2)
         await asyncio.wait_for(progressed.wait(), 2)
-        assert store.flows.get_flow(other.id).state is FlowState.ACTIVE
+        assert store.flows.get_flow(other.id).state is FlowState.QUEUED
     finally:
         release.set()
         await task
 
 
-async def test_unknown_archive_executor_is_an_explicit_block(store, remote_app, recording_resources):
-    flow, _, _, _ = await ready_archive(store)
+async def test_merged_executor_recovery_preserves_done_projection(
+    store,
+    monkeypatch,
+    remote_app,
+    recording_resources,
+):
+    job, _ = accepted_coding(store, receive=False)
+    flow = store.flows.get_flow(job.flow_id)
+    store.projects.seed(flow.repo, config(), 100)
+    await route_merge(store, flow)
     store.workers.worker_disconnected("worker-a", connection_epoch="epoch-a")
     sync = ProjectSync(
         {flow.repo: config()},
@@ -622,17 +713,29 @@ async def test_unknown_archive_executor_is_an_explicit_block(store, remote_app, 
         database=store.database,
     )
     await sync.sweep()
-    assert state(store).desired_status is ProjectStatus.BLOCKED
+    assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
+    assert state(store).desired_status is ProjectStatus.DONE
+    # Executor recovery cannot replace the committed business conclusion.
+    later = store.now() + timedelta(hours=1)
+    monkeypatch.setattr(store._db, "_clock", lambda: later)
+    store.workers.sweep_expired_assignments()
+    assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
+    await sync.sweep()
+    assert state(store).desired_status is ProjectStatus.DONE
 
 
-async def test_received_archive_result_is_in_progress_despite_old_recovery_deadline(
+async def test_pending_archive_notice_is_done_despite_old_recovery_deadline(
     store, monkeypatch, remote_app, recording_resources,
 ):
-    flow, job, task, subject = await ready_archive(store)
-    # The retained deadline describes a past disconnect; a persisted receipt now proves the outcome.
+    execution, _ = accepted_coding(store, receive=False)
+    flow = store.flows.get_flow(execution.flow_id)
+    store.projects.seed(flow.repo, config(), 100)
+    await route_merge(store, flow)
+    job = store.jobs.list_jobs(flow.id)[-1]
+    subject = coordinator(store, RecordingGitHub())
+    # The retained deadline cannot change archival while its local notice is pending.
     with store.connection() as connection:
         connection.execute("UPDATE jobs SET recovery_deadline=%s WHERE id=%s", (store.now(), job.id))
-    assert receive(store, job, ArchiveResult(**task.model_dump(), cleanup="removed")) == "pending"
 
     async def delayed(plan):
         raise ResultPending("notification backoff")
@@ -645,7 +748,7 @@ async def test_received_archive_result_is_in_progress_despite_old_recovery_deadl
         {flow.repo: config()}, remote_app(remote), database=store.database,
     )
     await sync.sweep()
-    assert state(store).desired_status is ProjectStatus.IN_PROGRESS
+    assert state(store).desired_status is ProjectStatus.DONE
     assert store.jobs.get_job(job.id).result_applied_at is None
 
 
