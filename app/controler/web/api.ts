@@ -1,3 +1,4 @@
+import { SessionCache } from "./sessionCache";
 import type {
   ActivityPage,
   ContentPage,
@@ -44,6 +45,26 @@ export async function api<T>(
     throw new ApiError(code, response.status);
   }
   return response.json() as Promise<T>;
+}
+
+const contentCache = new SessionCache<string, ContentPage>(64);
+const threadCache = new SessionCache<string, ActivityPage>(12);
+
+/** Cache only completed immutable reads; each caller keeps its own cancellation lifetime. */
+async function sessionRead<T>(
+  cache: SessionCache<string, T>,
+  identity: (string | number | null)[],
+  read: () => Promise<T>,
+  signal?: AbortSignal,
+): Promise<T> {
+  signal?.throwIfAborted();
+  const key = JSON.stringify(identity);
+  const saved = cache.get(key);
+  if (saved !== undefined) return saved;
+  const value = await read();
+  signal?.throwIfAborted();
+  cache.set(key, value);
+  return value;
 }
 
 export const getFlows = (
@@ -128,9 +149,15 @@ export const getContent = (
   limit: number,
   signal?: AbortSignal,
 ) =>
-  api<ContentPage>(
-    `/api/flows/${id}/activity/content`,
-    { key, version, offset, limit },
+  sessionRead(
+    contentCache,
+    [id, key, version, offset, limit],
+    () =>
+      api<ContentPage>(
+        `/api/flows/${id}/activity/content`,
+        { key, version, offset, limit },
+        signal,
+      ),
     signal,
   );
 export const getDiff = (
@@ -139,9 +166,15 @@ export const getDiff = (
   version: number,
   signal?: AbortSignal,
 ) =>
-  api<ContentPage>(
-    `/api/flows/${id}/activity/content`,
-    { key, version, compare: true },
+  sessionRead(
+    contentCache,
+    [id, key, version, "diff"],
+    () =>
+      api<ContentPage>(
+        `/api/flows/${id}/activity/content`,
+        { key, version, compare: true },
+        signal,
+      ),
     signal,
   );
 export const getThread = (
@@ -150,4 +183,10 @@ export const getThread = (
   cursor: string | null,
   snapshot: number,
   signal?: AbortSignal,
-) => getActivity(id, { parent, cursor, snapshot }, signal);
+) =>
+  sessionRead(
+    threadCache,
+    [id, parent, cursor, snapshot],
+    () => getActivity(id, { parent, cursor, snapshot }, signal),
+    signal,
+  );

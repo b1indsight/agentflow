@@ -1042,6 +1042,11 @@ test("reads a complete patch once and windows parsed rows without losing line nu
   await edited.click();
   await edited.click();
   await expect(firstNumber).toHaveText("151");
+  // Virtual rows and tab navigation unmount the diff, but its version is immutable.
+  await page.getByRole("tab", { name: "概览" }).click();
+  await page.getByRole("tab", { name: "会话" }).click();
+  await edited.click();
+  await expect(firstNumber).toHaveText("151");
   expect(requests).toBe(1);
 });
 
@@ -1136,10 +1141,15 @@ test("thread replies and body continuation use the pinned snapshot and Unicode o
   page,
 }) => {
   const thread = { ...activity, kind: "thread", body: "😀", body_length: 3 };
+  let bodyReads = 0;
+  let replyReads = 0;
   await page.route("**/api/flows/42/activity?**", async (route) => {
     const url = new URL(route.request().url());
     const parent = url.searchParams.get("parent");
-    if (parent) expect(url.searchParams.get("snapshot")).toBe("2");
+    if (parent) {
+      replyReads++;
+      expect(url.searchParams.get("snapshot")).toBe("2");
+    }
     return route.fulfill({
       json: {
         items: parent
@@ -1155,6 +1165,7 @@ test("thread replies and body continuation use the pinned snapshot and Unicode o
     });
   });
   await page.route("**/api/flows/42/activity/content?**", (route) => {
+    bodyReads++;
     const url = new URL(route.request().url());
     expect(url.searchParams.get("offset")).toBe("1");
     expect(url.searchParams.get("version")).toBe("2");
@@ -1171,12 +1182,16 @@ test("thread replies and body continuation use the pinned snapshot and Unicode o
   await page.goto("/#flow/42/conversation");
   await page.getByRole("button", { name: "下一段", exact: true }).click();
   await expect(page.getByText("后文", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "查看线程回复" }).click();
+  await expect(page.getByText("线程回复正文", { exact: true })).toBeVisible();
   // Tab changes unmount the activity row, just as virtual-window eviction does.
   await page.getByRole("tab", { name: "概览" }).click();
   await page.getByRole("tab", { name: "会话" }).click();
   await expect(page.getByText("后文", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "查看线程回复" }).click();
   await expect(page.getByText("线程回复正文", { exact: true })).toBeVisible();
+  expect(bodyReads).toBe(1);
+  expect(replyReads).toBe(1);
   await page.setViewportSize({ width: 390, height: 844 });
   await page.getByRole("button", { name: "切换任务" }).click();
   await expect(page.getByRole("dialog", { name: "Flow 导航" })).toBeVisible();
@@ -1186,6 +1201,44 @@ test("thread replies and body continuation use the pinned snapshot and Unicode o
     path: "../../../.amp/in/artifacts/console-mobile.png",
     fullPage: true,
   });
+});
+
+test("empty conversations stay cached until explicit refresh or page reload", async ({
+  page,
+}) => {
+  let reads = 0;
+  let snapshot = 0;
+  await page.route("**/api/flows/42/activity?**", (route) => {
+    reads++;
+    const url = new URL(route.request().url());
+    if (url.searchParams.get("refresh") === "true") snapshot = 2;
+    return route.fulfill({
+      json: {
+        items: snapshot ? [activity] : [],
+        snapshot,
+        total: snapshot ? 1 : 0,
+        next_cursor: null,
+        has_more: false,
+        sources: [],
+        changes: {},
+      },
+    });
+  });
+  await page.goto("/#flow/42/conversation");
+  const boundary = page.locator(".refresh-boundary");
+  await expect(boundary).toBeEnabled();
+  const initialReads = reads;
+  // A successful empty snapshot is cached data, not an uninitialized conversation.
+  await page.getByRole("tab", { name: "概览" }).click();
+  await page.getByRole("tab", { name: "会话" }).click();
+  await expect(boundary).toBeEnabled();
+  expect(reads).toBe(initialReads);
+  await boundary.click();
+  await expect(page.getByText(activity.body, { exact: true })).toBeVisible();
+  expect(reads).toBe(initialReads + 1);
+  await page.reload();
+  await expect(page.getByText(activity.body, { exact: true })).toBeVisible();
+  expect(reads).toBeGreaterThan(initialReads + 1);
 });
 
 test("refresh resets reply cursors even when the thread version is unchanged", async ({

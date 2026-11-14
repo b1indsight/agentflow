@@ -6,6 +6,7 @@ import {
   useState,
 } from "react";
 import { getActivity } from "./api";
+import { SessionCache } from "./sessionCache";
 import type { ActivityItem, SourceStatus } from "./types";
 
 export const ACTIVITY_CACHE_ROWS = 240;
@@ -37,13 +38,7 @@ const empty = (): State => ({
   busy: false,
   error: null,
 });
-const cache = new Map<number, State>();
-function remember(id: number, s: State) {
-  cache.delete(id);
-  cache.set(id, { ...s, busy: false });
-  while (cache.size > CONVERSATION_CACHE_FLOWS)
-    cache.delete(cache.keys().next().value!);
-}
+const cache = new SessionCache<number, State>(CONVERSATION_CACHE_FLOWS);
 /** Keeps opaque page cursors after body eviction so virtual windows can be re-read in one pinned snapshot. */
 export function useConversation(
   flowId: number,
@@ -55,7 +50,7 @@ export function useConversation(
     wanted = useRef<number[]>([]);
   const put = (s: State) => {
     current.current = s;
-    remember(flowId, s);
+    cache.set(flowId, { ...s, busy: false });
     setState(s);
   };
   const read = useCallback(
@@ -234,7 +229,7 @@ export function useConversation(
   }, [state.busy, state.error, state.items, onRange]);
   useEffect(() => {
     // StrictMode deliberately aborts the first mount; do not retain its in-flight flag.
-    if (!current.current.keys.length) void read(null);
+    if (current.current.snapshot === null) void read(null);
     return () => controller.current?.abort();
   }, [flowId, read]);
   useEffect(() => {
