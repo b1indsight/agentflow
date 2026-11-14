@@ -898,15 +898,24 @@ for (const width of [1440, 390]) {
       "受阻1",
       "已归档2",
     ]);
-    await expect(
-      page.locator('.column.phase-running [data-flow="46"] .current-action'),
-    ).toHaveText("进行中");
-    await expect(
-      page.locator('.column.phase-blocked [data-flow="45"] .current-action'),
-    ).toHaveText("受阻");
-    await expect(
-      page.locator(".column.phase-archived .current-action"),
-    ).toHaveText(["已归档 · 成功", "已归档 · 废弃"]);
+    for (const [id, phase, status] of [
+      [42, "running", "进行中"],
+      [43, "queued", "待处理"],
+      [44, "review", "待审核"],
+      [45, "blocked", "受阻"],
+      [46, "running", "进行中"],
+      [47, "archived", "已归档 · 成功"],
+      [48, "archived", "已归档 · 废弃"],
+    ] as const) {
+      // Color-only cards must still expose their phase and archive outcome.
+      if (width === 390)
+        await page.locator(`.mobile-stages .phase-${phase}`).click();
+      const marker = page.locator(`.card[data-flow="${id}"]`).getByRole("img");
+      await expect(marker).toHaveCount(1);
+      await expect(marker).toHaveAccessibleName(status);
+    }
+    if (width === 390)
+      await page.locator(".mobile-stages .phase-running").click();
     await expect(page.locator(".column.phase-finalizing")).toHaveCount(0);
     await page.screenshot({
       path: `../../../.amp/in/artifacts/flow-default-${width}.png`,
@@ -1305,8 +1314,10 @@ for (const [width, reason, label] of [
         .getByRole("button", { name: /待处理/ })
         .click();
     await expect(
-      page.locator('.column.phase-queued [data-flow="42"]'),
-    ).toContainText("待处理");
+      page
+        .locator('.column.phase-queued [data-flow="42"]')
+        .getByRole("img", { name: "待处理", exact: true }),
+    ).toBeVisible();
     await expect(page.locator(".column.phase-archived .card")).toHaveCount(0);
     expect(requests).toBe(1);
     expect(resumeRequests).toBe(1);

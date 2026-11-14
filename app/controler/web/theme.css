@@ -15,5 +15,5 @@
   --color-border: var(--line);
   --color-input: var(--line);
   --color-ring: var(--green);
-  --radius-md: 0.375rem;
+  --radius-md: 0;
 }

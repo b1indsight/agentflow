@@ -131,7 +131,7 @@ svg {
   padding: 8px 12px;
   background: white;
   border: 1px solid var(--line);
-  border-radius: 7px;
+  border-radius: 0;
   font-size: var(--text-control);
 }
 .btn:hover {
@@ -194,7 +194,7 @@ svg {
   overflow: auto;
   padding: 24px;
   border: 1px solid var(--line);
-  border-radius: 12px;
+  border-radius: 0;
   background: var(--paper);
   color: var(--ink);
   white-space: normal;
@@ -228,7 +228,7 @@ svg {
   min-width: 0;
   padding: 10px 12px;
   border: 1px solid var(--line);
-  border-radius: 7px;
+  border-radius: 0;
   background: var(--paper);
   color: var(--ink);
   font: inherit;
@@ -300,7 +300,6 @@ svg {
   flex: 1;
   min-height: 0;
   overflow: hidden;
-  padding: 24px 24px 20px;
   width: 100%;
   max-width: 1800px;
   margin: auto;
@@ -327,7 +326,7 @@ svg {
   width: 100%;
   height: 42px;
   border: 1px solid var(--line);
-  border-radius: 7px;
+  border-radius: 0;
   padding: 0 42px 0 40px;
   background: white;
   font-size: var(--text-control);
@@ -359,7 +358,7 @@ svg {
   left: 0;
   width: 100%;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: 0;
   background: var(--paper);
   box-shadow: 0 8px 24px #2029271a;
   padding: 6px;
@@ -372,7 +371,7 @@ svg {
   justify-content: space-between;
   gap: 16px;
   padding: 11px 12px;
-  border-radius: 5px;
+  border-radius: 0;
   cursor: pointer;
   font-size: var(--text-control);
   overflow-wrap: anywhere;
@@ -407,7 +406,7 @@ svg {
   background: white;
   border: 1px solid var(--line);
   padding: 4px 8px;
-  border-radius: 5px;
+  border-radius: 0;
   font-size: var(--text-small);
 }
 .query-error {
@@ -420,7 +419,6 @@ svg {
   grid-template-columns: repeat(5, minmax(0, 1fr));
   grid-template-rows: minmax(0, 1fr);
   flex: 1;
-  gap: 16px;
   min-height: 0;
 }
 .column {
@@ -429,23 +427,25 @@ svg {
   min-height: 0;
   min-width: 0;
   overflow: hidden;
-  border-radius: 10px;
-  background: #eff2f1;
-  padding: 12px 9px;
+  border-right: 1px solid var(--line);
+  background: var(--bg);
+}
+.column:last-child {
+  border-right: 0;
 }
 .column-scroll {
   flex: 1;
   min-height: 0;
   overflow: auto;
   overscroll-behavior: contain;
-  padding: 3px;
 }
 .col-header {
   display: flex;
   flex-shrink: 0;
   align-items: center;
   gap: 8px;
-  padding: 2px 5px 15px;
+  padding: 14px 14px 15px;
+  border-bottom: 1px solid var(--line);
   font-size: var(--text-control);
   font-weight: 600;
 }
@@ -454,7 +454,7 @@ svg {
   color: #8b9590;
   background: #e5eae7;
   font-size: var(--text-small);
-  border-radius: 4px;
+  border-radius: 0;
   padding: 2px 5px;
   font-weight: 400;
 }
@@ -472,71 +472,71 @@ svg {
   display: block;
   width: 100%;
   text-align: left;
-  background: white;
-  border: 1px solid #e2e7e4;
-  border-radius: 8px;
-  padding: 15px 13px;
-  margin-bottom: 10px;
-  box-shadow: 0 2px 3px #1d3d2b03;
-  transition:
-    transform 0.15s,
-    border-color 0.15s,
-    box-shadow 0.15s;
+  background: var(--paper);
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  padding: 16px 14px;
+  transition: background-color 0.15s;
 }
 .card:hover {
-  border-color: #9cbda9;
-  box-shadow: 0 4px 12px #214b3210;
-  transform: translateY(-2px);
+  background: var(--wash);
 }
-.card-top {
+.card:focus-visible {
+  outline-offset: -2px;
+}
+.card-title {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  color: #8b9490;
-  font-family: var(--mono);
-  font-size: var(--text-small);
+  align-items: flex-start;
+  gap: 8px;
+}
+.card-status {
+  width: 8px;
+  height: 8px;
+  margin-top: 8px;
 }
 .card h2 {
+  min-width: 0;
   font-size: var(--text-body);
-  line-height: 1.7;
+  line-height: 1.5;
   font-weight: 550;
-  margin: 11px 0 7px;
+  margin: 0;
   letter-spacing: 0.1px;
+  overflow-wrap: anywhere;
 }
-.repo-label {
-  font-size: var(--text-small);
-  color: #8b9490;
-}
-.card-foot {
+.card-meta {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  padding-top: 13px;
-  margin-top: 13px;
-  border-top: 1px solid #f0f2f1;
+  gap: 12px;
+  margin-top: 8px;
   font-size: var(--text-small);
-  color: #89938e;
+  line-height: 1.5;
+  color: var(--muted);
 }
-.current-action {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: var(--text-meta);
-  color: #52665a;
+.repo-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.card-ref {
+  flex-shrink: 0;
+  font-family: var(--mono);
+  white-space: nowrap;
 }
 .worker-pill {
   color: #4b6d5a;
   background: #f0f6f2;
   padding: 3px 6px;
-  border-radius: 4px;
+  border-radius: 0;
 }
 .card-note {
   font-size: var(--text-meta);
   color: #ad7263;
   background: #fbf4f1;
   padding: 7px 8px;
-  border-radius: 4px;
+  border-radius: 0;
   margin-top: 11px;
 }
 .empty-col {
@@ -608,7 +608,7 @@ svg {
 .rail-scroll {
   overflow: auto;
   min-height: 0;
-  padding: 13px 10px;
+  padding: 13px 0;
   flex: 1;
 }
 .rail-group {
@@ -622,7 +622,7 @@ svg {
   font-weight: 550;
   color: #718077;
   cursor: pointer;
-  padding: 8px 10px;
+  padding: 8px 20px;
   list-style: none;
 }
 .rail-group summary::after {
@@ -642,16 +642,15 @@ svg {
   font-size: var(--text-meta);
 }
 .flow-tab {
-  border: 1px solid transparent;
+  border: 0;
   display: flex;
   width: 100%;
   gap: 10px;
   align-items: center;
   background: transparent;
-  padding: 10px;
-  border-radius: 7px;
+  padding: 11px 20px;
+  border-radius: 0;
   text-align: left;
-  margin: 2px 0;
   color: #66736b;
 }
 .flow-tab:hover {
@@ -659,7 +658,6 @@ svg {
 }
 .flow-tab.active {
   background: #e5f0e8;
-  border-color: #ccdfd1;
   color: #205c40;
 }
 .flow-tab .dot {
@@ -698,9 +696,21 @@ svg {
   overflow-anchor: none;
 }
 .detail-head {
+  position: relative;
   flex-shrink: 0;
   padding: 24px 42px 0;
-  border-bottom: 1px solid var(--line);
+  background: var(--bg);
+}
+/* The active tab covers the shared seam to join its content surface. */
+.detail-head::after {
+  content: "";
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: var(--line);
+  pointer-events: none;
 }
 .detail-head-full[hidden] {
   display: none;
@@ -765,7 +775,6 @@ svg {
 }
 .tabs-list {
   display: flex;
-  gap: 27px;
   max-width: calc(100% + 8px);
   margin-inline: -4px;
   padding-inline: 4px;
@@ -773,13 +782,18 @@ svg {
 }
 .tabs-trigger {
   position: relative;
+  z-index: 1;
   flex-shrink: 0;
   white-space: nowrap;
-  background: none;
+  background: transparent;
   border: 0;
-  padding: 0 0 14px;
+  padding: 7px 14px;
   font-size: var(--text-control);
   color: #8d9790;
+}
+.tabs-trigger:hover {
+  background: var(--wash);
+  color: var(--ink);
 }
 .tabs-trigger:focus-visible,
 [data-slot="tabs-content"]:focus-visible {
@@ -787,17 +801,9 @@ svg {
   outline-offset: -2px;
 }
 .tabs-trigger[data-state="active"] {
+  background: var(--paper);
   color: var(--green);
   font-weight: 600;
-}
-.tabs-trigger[data-state="active"]::after {
-  position: absolute;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  height: 2px;
-  content: "";
-  background: var(--green);
 }
 .content {
   max-width: 890px;
@@ -825,7 +831,7 @@ svg {
 .conversation-source-warning button {
   color: inherit;
   border: 1px solid #e4d2ac;
-  border-radius: 5px;
+  border-radius: 0;
   background: none;
   padding: 5px 10px;
 }
@@ -991,7 +997,7 @@ svg {
 .message-context {
   color: var(--muted);
   background: var(--bg);
-  border-radius: 4px;
+  border-radius: 0;
   padding: 1px 6px;
   font-size: var(--text-small);
   font-weight: 400;
@@ -1077,7 +1083,7 @@ svg {
   font-size: var(--text-control);
   background: var(--bg);
   padding: 2px 5px;
-  border-radius: 4px;
+  border-radius: 0;
 }
 .markdown-body pre {
   max-width: 100%;
@@ -1087,7 +1093,7 @@ svg {
   padding: 12px 14px;
   background: var(--bg);
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: 0;
   line-height: 1.6;
 }
 .markdown-body pre code {
@@ -1177,7 +1183,7 @@ svg {
   margin: 0;
   padding: 10px 12px;
   background: var(--bg);
-  border-radius: 5px;
+  border-radius: 0;
   font-size: var(--text-small);
   color: var(--ink);
 }
@@ -1214,7 +1220,7 @@ svg {
   max-width: 100%;
   padding: 4px 0;
   border: 0;
-  border-radius: 3px;
+  border-radius: 0;
   background: transparent;
   color: var(--muted);
   font: inherit;
@@ -1260,7 +1266,7 @@ svg {
   padding: 12px 16px;
   background: #fcfdfc;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: 0;
 }
 .github-bubble h3 {
   font-size: var(--text-body);
@@ -1281,7 +1287,7 @@ svg {
 .review-thread {
   margin-top: 14px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: 0;
   overflow: hidden;
 }
 .review-thread > header,
@@ -1394,7 +1400,7 @@ svg {
 .tool {
   margin: 12px 0;
   border: 1px solid #e7ece8;
-  border-radius: 7px;
+  border-radius: 0;
   overflow: hidden;
 }
 .tool summary {
@@ -1454,7 +1460,7 @@ pre code {
   border: 1px solid #eadcc5;
   background: #fcf9f2;
   color: #9b8057;
-  border-radius: 6px;
+  border-radius: 0;
   font-size: var(--text-body);
   line-height: 1.8;
   margin-bottom: 24px;
@@ -1472,7 +1478,7 @@ pre code {
   padding: 22px;
   border: 1px solid var(--line);
   border-left: 3px solid var(--phase);
-  border-radius: 8px;
+  border-radius: 0;
   background: #fafcfb;
   margin-bottom: 28px;
 }
@@ -1515,7 +1521,7 @@ pre code {
   min-width: 0;
   padding: 16px;
   border: 1px solid var(--line);
-  border-radius: 7px;
+  border-radius: 0;
 }
 .round-form legend {
   padding: 0 6px;
@@ -1570,7 +1576,7 @@ pre code {
 }
 .execution-info {
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: 0;
   margin-bottom: 30px;
   padding: 2px 18px;
 }
@@ -1615,7 +1621,7 @@ pre code {
 .inference-notice {
   border: 1px solid var(--line);
   border-left: 3px solid var(--status-yellow);
-  border-radius: 8px;
+  border-radius: 0;
   padding: 18px;
   margin-bottom: 16px;
   background: #fffdf8;
@@ -1749,7 +1755,7 @@ pre code {
   color: white;
   font-size: var(--text-control);
   padding: 11px 20px;
-  border-radius: 8px;
+  border-radius: 0;
   box-shadow: 0 5px 25px #24472e25;
   z-index: 50;
 }
@@ -1785,7 +1791,7 @@ pre code {
   border: 1px solid transparent;
   color: var(--muted);
   padding: 5px 8px;
-  border-radius: 5px;
+  border-radius: 0;
   font: inherit;
 }
 .text-window-controls button:hover:not(:disabled) {
@@ -1811,10 +1817,6 @@ pre code {
   min-width: 0;
   flex: 1;
 }
-.card-foot {
-  flex-wrap: wrap;
-}
-.repo-label,
 .card-note,
 .flow-tab {
   overflow-wrap: anywhere;
@@ -1826,14 +1828,8 @@ pre code {
   }
 }
 @media (max-width: 1100px) {
-  .board-page {
-    padding: 26px 20px;
-  }
-  .kanban {
-    gap: 10px;
-  }
   .card {
-    padding: 12px 10px;
+    padding: 16px 10px;
   }
   .rail {
     width: 225px;
@@ -1877,25 +1873,20 @@ pre code {
   .bar-status .btn {
     padding: 6px 8px;
   }
-  .board-page {
-    padding: 16px;
-  }
   .mobile-stages {
     display: flex;
     flex-shrink: 0;
-    gap: 6px;
     overflow: auto;
-    margin-bottom: 15px;
-    padding: 2px 1px 7px;
   }
   .mobile-stages button {
     flex: 1;
     justify-content: center;
     white-space: nowrap;
     font-size: var(--text-meta);
-    border: 1px solid var(--line);
-    border-radius: 6px;
-    background: white;
+    border: 0;
+    border-bottom: 1px solid var(--line);
+    border-radius: 0;
+    background: var(--bg);
     padding: 8px 4px;
     display: flex;
     flex-direction: column;
@@ -1907,8 +1898,8 @@ pre code {
   }
   .mobile-stages button.active {
     color: var(--green);
-    border-color: #b0ccba;
-    background: var(--wash);
+    border-bottom-color: transparent;
+    background: var(--paper);
   }
   .kanban {
     display: flex;
@@ -1920,14 +1911,14 @@ pre code {
     inset: 0;
     visibility: hidden;
     flex: 1;
-    padding: 12px;
+    border-right: 0;
   }
   .column.mobile-selected {
     position: relative;
     visibility: visible;
   }
   .card {
-    padding: 16px;
+    padding: 18px 16px;
   }
   .footnote {
     line-height: 1.8;
@@ -1984,9 +1975,6 @@ pre code {
   }
   .detail-head .tabs-list {
     margin-top: 18px;
-  }
-  .tabs-list {
-    gap: 26px;
   }
   .content {
     padding: 20px 18px 35px;
@@ -2087,7 +2075,7 @@ pre code {
   margin: 8px 0;
   max-height: 480px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: 0;
   overflow: auto;
   font-size: var(--text-control);
 }
