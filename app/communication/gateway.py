@@ -83,6 +83,7 @@ class Gateway[Incoming: Message, Outgoing: Message]:
                         if routes.message_done is not None:
                             routes.message_done()
         except Exception as error:
+            code = 1011
             if failed is None:
                 raise
             code = await failed(error)
