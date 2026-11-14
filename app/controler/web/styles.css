@@ -438,6 +438,10 @@ svg {
   min-height: 0;
   overflow: auto;
   overscroll-behavior: contain;
+  scrollbar-width: none;
+}
+.column-scroll::-webkit-scrollbar {
+  display: none;
 }
 .col-header {
   display: flex;
