@@ -338,13 +338,13 @@
         </article>
         <article class="node" data-status="done">
           <div class="node__top"><span class="node__name">Protocol</span><span class="pill">已验证</span></div>
-          <p class="node__role">v13 strict Pydantic · task/result/tool/stop/history · journal v3 · 批次/context digest · 修订基线/session generation</p>
+          <p class="node__role">wire19 · typed call/result 列表 · 整批校验失败返回固定 error，无详情 · 控制 ACK 与业务接纳分离 · journal5 / inbox1</p>
           <code class="node__file">app/contracts/protocol.py</code>
         </article>
         <article class="node" data-status="done">
-          <div class="node__top"><span class="node__name">Worker Gateway</span><span class="pill">已验证</span></div>
-          <p class="node__role">多 identity WebSocket · bearer 鉴权 · epoch fencing · busy reconnect / takeover</p>
-          <code class="node__file">app/controler/workers/gateway.py</code>
+          <div class="node__top"><span class="node__name">共享 Gateway + Session</span><span class="pill">通信层</span></div>
+          <p class="node__role">两端 Runtime 持有 · Gateway 统一事件驱动与 package.method 路由 · Session 交付 message / Ready / wake，管理单 reader / FIFO / 写入 / 查询 / 时限</p>
+          <code class="node__file">app/communication/gateway.py · session.py</code>
         </article>
         <article class="node" data-status="partial">
           <div class="node__top"><span class="node__name">GitHub Client</span><span class="pill">部分</span></div>
@@ -356,9 +356,9 @@
       <div class="row-label">常驻后台任务</div>
       <div class="grid">
         <article class="node" data-status="done">
-          <div class="node__top"><span class="node__name">Remote Worker Session</span><span class="pill">Features 1–3 已验</span></div>
-          <p class="node__role">多出站长连接 · lease/recovery grace · journal/result replay · 持久停止握手/进程组取消 · drain · 未知执行保留绑定</p>
-          <code class="node__file">app/controler/workers/gateway.py</code>
+          <div class="node__top"><span class="node__name">ServerCallbacks</span><span class="pill">每连接业务</span></div>
+          <p class="node__role">接入函数认证与首条 message 校验 · Runtime 挂载回调 · 调度 / 恢复 / 工具 / 结果与停止提交 · 无独立接收循环</p>
+          <code class="node__file">app/controler/workers/callbacks.py · transport.py</code>
         </article>
         <article class="node" data-status="done">
           <div class="node__top"><span class="node__name">Reconciliation</span><span class="pill">自动化</span></div>
@@ -382,7 +382,7 @@
 
     <!-- worker plane -->
     <div class="plane plane--local">
-      <span class="plane-label">Remote Worker <small>= Client + Session + Executor + Codex · 无数据库/GitHub App/Judge 凭据</small></span>
+      <span class="plane-label">Remote Worker <small>Runtime 持有共享 Gateway / Session · 无数据库/GitHub App/Judge 凭据</small></span>
       <div class="grid">
         <article class="node" data-status="partial">
           <div class="node__top"><span class="node__name">Codex Driver</span><span class="pill">部分</span></div>
@@ -400,9 +400,9 @@
           <code class="node__file">app/worker/execution/vcs.py · V8</code>
         </article>
         <article class="node" data-status="artifact">
-          <div class="node__top"><span class="node__name">Worker Client + Executor</span></div>
-          <p class="node__role">主动连接/重连 · Flow binding · tool multiplex · journal · 执行停止/凭据重放 · Codex 历史查询</p>
-          <code class="node__file">app/worker/transport/client.py · state/session.py · execution/executor.py · runtime.py</code>
+          <div class="node__top"><span class="node__name">WorkerStateCallbacks + WorkerBusinessCallbacks</span></div>
+          <p class="node__role">Runtime 平级挂载状态协议与业务回调 · worker.history 与 Flow 工具走统一 FIFO，无查询旁路 · WorkerExecution 长期持有 Task / 工具 Future / shielded stop · ExecutionState 持久 journal · 断线不取消执行</p>
+          <code class="node__file">app/worker/runtime.py · transport/state.py · transport/business.py · execution/lifecycle.py · state/execution.py</code>
         </article>
       </div>
     </div>

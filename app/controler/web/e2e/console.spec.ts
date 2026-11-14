@@ -1,16 +1,25 @@
-import { expect, test } from "@playwright/test";
-import type { FlowDetail, SourceStatus } from "../types";
+import { expect, test, type Locator, type Page } from "@playwright/test";
+import type {
+  ActivityItem,
+  ActivityPage,
+  FlowDetail,
+  FlowSummary,
+  InferenceNotice,
+  JobSummary,
+  SourceStatus,
+} from "../types";
 
 const now = "2026-10-17T12:00:00Z";
-const flow = {
+const flow: FlowSummary & Pick<FlowDetail, "task_content"> = {
   id: 42,
   repo: "owner/agentflow",
   issue_number: 85,
   issue_url: "https://example.test/issues/85",
+  task_content: null,
   title: "真实 DTO Flow",
   pr_number: 87,
   pr_url: "https://example.test/pulls/87",
-  lifecycle: "active",
+  lifecycle: "running",
   phase: "running",
   action: "正在验证",
   worker_id: "worker-1",
@@ -19,21 +28,71 @@ const flow = {
   branch: "flow/85",
   created_at: now,
   updated_at: now,
+  current_round_no: 1,
+  archive_reason: null,
+  archive_summary: null,
   archived_at: null,
   state_version: 2,
 };
 const blockedFlow: FlowDetail = {
   ...flow,
-  lifecycle: "cancelled",
+  lifecycle: "blocked",
   phase: "blocked",
-  action: "cancelled",
-  reason: "Flow 已取消",
+  action: "execution_failed",
+  reason: "执行受阻",
   next_condition: "修复受阻原因后重试",
   sources: [],
 };
+const archivedFlow: FlowDetail = {
+  ...blockedFlow,
+  lifecycle: "archived",
+  phase: "archived",
+  action: "archived",
+  archive_reason: "succeeded",
+  archive_summary: "本轮实现与验证已完成。",
+  archived_at: now,
+  reason: "本轮已完成归档",
+  next_condition: "如需继续，请显式恢复推进",
+};
+
+/** Preview real components against mutable DTOs, including post-write board refreshes. */
+async function mockFlows(page: Page, current: () => FlowDetail[]) {
+  await page.route("**/api/flows?**", (route) => {
+    const items = current();
+    return route.fulfill({
+      json: {
+        items: items.filter(
+          (item) =>
+            item.phase ===
+            new URL(route.request().url()).searchParams.get("phase"),
+        ),
+        counts: Object.fromEntries(
+          ["queued", "running", "review", "blocked", "archived"].map(
+            (phase) => [
+              phase,
+              items.filter((item) => item.phase === phase).length,
+            ],
+          ),
+        ),
+        next_cursor: null,
+        has_more: false,
+      },
+    });
+  });
+  await page.route(/\/api\/flows\/\d+$/, (route) => {
+    const id = Number(
+      new URL(route.request().url()).pathname.split("/").at(-1),
+    );
+    const item = current().find((item) => item.id === id);
+    return item
+      ? route.fulfill({ json: item })
+      : route.fulfill({ status: 404, json: { detail: "flow_not_found" } });
+  });
+}
 const activity = {
   key: "comment-1",
   version: 2,
+  round_no: null,
   source: "github",
   kind: "comment",
   occurred_at: now,
@@ -51,6 +110,84 @@ const activity = {
   metadata: {},
 };
 
+/** Scenarios own the records and request gates; only the 20-record page bookkeeping is shared. */
+function activityPage(
+  items: ActivityItem[],
+  start: number,
+  total: number,
+  snapshot = 2,
+): ActivityPage {
+  const next = start + 20;
+  return {
+    items,
+    snapshot,
+    total,
+    next_cursor: next < total ? String(next) : null,
+    has_more: next < total,
+    sources: [],
+    changes: {},
+  };
+}
+
+async function scrollToSnapshotEnd(page: Page) {
+  const root = page.locator(".detail-body");
+  await expect
+    .poll(
+      async () => {
+        await root.evaluate((node) => {
+          node.scrollTop = node.scrollHeight;
+        });
+        return page
+          .getByRole("button", {
+            name: "已到当前本地快照末尾 · 点击刷新",
+            exact: true,
+          })
+          .isVisible();
+      },
+      { timeout: 15000 },
+    )
+    .toBe(true);
+}
+
+/** Sample painted geometry without waiting for a missing target to become mounted. */
+function sampleReadingFrames(root: Locator, selector: string) {
+  return root.evaluate(async (node, selector) => {
+    const positions: number[] = [],
+      offsets: number[] = [];
+    let overlap = 0,
+      mounted = 0;
+    for (let frame = 0; frame < 18; frame++) {
+      // rAF precedes ResizeObserver delivery; sample after that paint, without skipping a frame.
+      await new Promise<void>((resolve) =>
+        requestAnimationFrame(() => setTimeout(resolve, 0)),
+      );
+      const viewport = node.getBoundingClientRect();
+      const top =
+        node.querySelector(selector)?.getBoundingClientRect().top ?? Infinity;
+      positions.push(top);
+      offsets.push(top - viewport.top - node.clientTop);
+      const rows = [
+        ...node.querySelectorAll(".conversation-stream [data-window-row]"),
+      ].map((row) => row.getBoundingClientRect());
+      for (let index = 1; index < rows.length; index++)
+        if (
+          rows[index].top < viewport.bottom &&
+          rows[index - 1].bottom > viewport.top
+        )
+          overlap = Math.max(overlap, rows[index - 1].bottom - rows[index].top);
+      mounted = Math.max(mounted, rows.length);
+    }
+    return {
+      positions,
+      offsets,
+      overlap,
+      mounted,
+      scrollTop: node.scrollTop,
+      maxScroll: node.scrollHeight - node.clientHeight,
+    };
+  }, selector);
+}
+
 test.beforeEach(async ({ page }) => {
   await page.route("**/api/**", async (route) => {
     const url = new URL(route.request().url());
@@ -65,7 +202,7 @@ test.beforeEach(async ({ page }) => {
       return route.fulfill({
         json: {
           ...pageOf(url.searchParams.get("phase") === "running" ? [flow] : []),
-          counts: { queued: 0, running: 1, review: 0, blocked: 0, done: 0 },
+          counts: { queued: 0, running: 1, review: 0, blocked: 0, archived: 0 },
         },
       });
     if (url.pathname === "/api/flows/42")
@@ -79,6 +216,8 @@ test.beforeEach(async ({ page }) => {
       });
     if (url.pathname.endsWith("/jobs"))
       return route.fulfill({ json: pageOf([]) });
+    if (url.pathname.endsWith("/inference-notices"))
+      return route.fulfill({ json: { ...pageOf([]), snapshot: 2 } });
     if (url.pathname.endsWith("/activity"))
       return route.fulfill({
         json: {
@@ -107,116 +246,867 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
-test("archived column distinguishes closed unmerged PRs from completed archives", async ({
+for (const width of [1440, 390]) {
+  test(`standard tabs keep focus, panels and route history synchronized at ${width}px`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto("/#flow/42");
+    const conversation = page.getByRole("tab", { name: "会话", exact: true });
+    const overview = page.getByRole("tab", { name: "概览", exact: true });
+    const jobs = page.getByRole("tab", { name: "执行记录", exact: true });
+    const panel = page.getByRole("tabpanel");
+    await expect(conversation).toHaveAttribute("aria-selected", "true");
+    await expect(panel).toContainText("真实活动正文");
+    // Selection frames only three edges, without moving the tab or the content seam.
+    const tabsBefore = await page
+      .getByRole("tab")
+      .evaluateAll((tabs) =>
+        tabs.map((tab) => tab.getBoundingClientRect().toJSON()),
+      );
+    for (const side of ["top", "right", "left"]) {
+      await expect(conversation).toHaveCSS(`border-${side}-width`, "1px");
+      await expect(conversation).not.toHaveCSS(
+        `border-${side}-color`,
+        "rgba(0, 0, 0, 0)",
+      );
+      await expect(jobs).toHaveCSS(`border-${side}-color`, "rgba(0, 0, 0, 0)");
+    }
+    await expect(conversation).toHaveCSS("border-bottom-width", "0px");
+
+    // The selected tab must name its panel, and keyboard navigation must move focus too.
+    await expect(panel).toHaveAccessibleName("会话");
+    await expect(conversation).toHaveAttribute(
+      "aria-controls",
+      (await panel.getAttribute("id"))!,
+    );
+    await conversation.focus();
+    await conversation.press("ArrowRight");
+    await expect(jobs).toBeFocused();
+    await expect(jobs).toHaveAttribute("aria-selected", "true");
+    await expect(page).toHaveURL(/#flow\/42\/jobs$/);
+    await expect(panel).toHaveAccessibleName("执行记录");
+    await expect(panel).toContainText("任务执行");
+    expect(
+      await page
+        .getByRole("tab")
+        .evaluateAll((tabs) =>
+          tabs.map((tab) => tab.getBoundingClientRect().toJSON()),
+        ),
+    ).toEqual(tabsBefore);
+    await expect(jobs).toHaveCSS("border-top-width", "1px");
+    await expect(jobs).not.toHaveCSS("border-top-color", "rgba(0, 0, 0, 0)");
+    await expect(jobs).toHaveCSS("border-bottom-width", "0px");
+    await jobs.press("ArrowRight");
+    await expect(overview).toBeFocused();
+    await expect(panel).toContainText("当前动作");
+    await overview.press("ArrowLeft");
+    await expect(jobs).toBeFocused();
+    await jobs.press("Home");
+    await expect(overview).toBeFocused();
+    await overview.press("End");
+    await expect(jobs).toBeFocused();
+    await jobs.press("Tab");
+    await expect(panel).toBeFocused();
+
+    await conversation.click();
+    await expect(panel).toContainText("真实活动正文");
+    await page.goBack();
+    await expect(jobs).toHaveAttribute("aria-selected", "true");
+    await expect(panel).toHaveAccessibleName("执行记录");
+    await page.goForward();
+    await expect(conversation).toHaveAttribute("aria-selected", "true");
+    await expect(panel).toContainText("真实活动正文");
+
+    await page.reload();
+    await expect(conversation).toHaveAttribute("aria-selected", "true");
+    await expect(panel).toHaveAccessibleName("会话");
+    await page.goto("/#flow/42/unknown");
+    await expect(page.getByRole("main", { name: "工作看板" })).toBeVisible();
+  });
+}
+
+test("execution timeline keeps timestamps and metadata when loading older jobs", async ({
   page,
 }) => {
-  const closed = {
-    ...flow,
-    title: "已关闭的 PR",
-    phase: "done",
-    action: "delivery_closed",
-  };
-  const archived = {
-    ...closed,
-    id: 43,
-    title: "正常归档的 PR",
-    lifecycle: "succeeded",
-    action: "archived",
-  };
-  await page.route("**/api/flows?**", (route) =>
+  // Retried executions can share kind/attempt; their creation times distinguish them.
+  const jobs: JobSummary[] = ["running", "failed", "done", "queued"].map(
+    (state, i) => ({
+      id: 4 - i,
+      flow_id: flow.id,
+      attempt: 1,
+      kind: "initial",
+      state,
+      worker_id: state === "queued" ? null : "worker-1",
+      created_at: new Date(Date.parse(now) - i * 3_600_000).toISOString(),
+      started_at: state === "queued" ? null : now,
+      updated_at: now,
+      finished_at: state === "failed" || state === "done" ? now : null,
+      error_code: state === "failed" ? "execution_error" : null,
+    }),
+  );
+  await page.route("**/api/flows/42/jobs?**", (route) => {
+    const older = new URL(route.request().url()).searchParams.get("cursor");
+    return route.fulfill({
+      json: {
+        items: older ? jobs.slice(2) : jobs.slice(0, 2),
+        next_cursor: older ? null : "older-jobs",
+        has_more: !older,
+      },
+    });
+  });
+  await page.goto("/#flow/42/jobs");
+  const records = page.getByRole("article");
+  await expect(records).toHaveCount(2);
+  await expect(records.nth(0)).toContainText("running");
+  await expect(records.nth(1)).toContainText("worker-1 · execution_error");
+  await page.getByRole("button", { name: "读取更多执行记录" }).click();
+  await expect(records).toHaveCount(4);
+  await expect(records.locator(".badge")).toHaveText([
+    "running",
+    "failed",
+    "done",
+    "queued",
+  ]);
+  for (const [i, job] of jobs.entries()) {
+    await expect(records.nth(i).locator("time")).toHaveAttribute(
+      "datetime",
+      job.created_at,
+    );
+    await expect(records.nth(i).locator("time")).toHaveText(
+      await page.evaluate(
+        (date) => `创建于 ${new Date(date).toLocaleString()}`,
+        job.created_at,
+      ),
+    );
+  }
+  await expect(records.nth(3)).toContainText("无 Worker");
+  await expect(
+    page.getByRole("button", { name: "读取更多执行记录" }),
+  ).toHaveCount(0);
+  await page.screenshot({
+    path: "../../../.amp/in/artifacts/jobs-timeline-desktop.png",
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(records.nth(3)).toBeVisible();
+  expect(
+    await page
+      .locator(".detail-body")
+      .evaluate((e) => e.scrollWidth <= e.clientWidth),
+  ).toBe(true);
+  await page.screenshot({
+    path: "../../../.amp/in/artifacts/jobs-timeline-mobile.png",
+  });
+});
+
+const inferenceNotice: InferenceNotice = {
+  key: "inference-exhausted:10",
+  batch_id: 10,
+  occurred_at: now,
+  updated_at: now,
+  attempts: 3,
+  max_attempts: 3,
+  last_failure_code: "rpc_timeout",
+  last_worker_id: "worker-inference-1",
+  backend: "codex",
+  stop_reason: "max_attempts",
+  elapsed_ms: 1200,
+  historical: false,
+  next_condition: "本批次仍待处理，后续扫描可继续尝试。",
+};
+
+test("unified inference jobs show dispatched attempts and queued zero", async ({
+  page,
+}) => {
+  await page.route("**/api/flows/42/jobs?**", (route) =>
     route.fulfill({
       json: {
-        items:
-          new URL(route.request().url()).searchParams.get("phase") === "done"
-            ? [closed, archived]
-            : [],
-        counts: { queued: 0, running: 0, review: 0, blocked: 0, done: 2 },
+        items: ["queued", "running", "failed", "done"].map((state, i) => ({
+          id: 10 - i,
+          flow_id: 42,
+          attempt: state === "queued" ? 0 : state === "failed" ? 3 : 1,
+          kind: "inference",
+          state,
+          worker_id: state === "queued" ? null : "__local_bub__",
+          started_at: null,
+          updated_at: now,
+          created_at: now,
+          finished_at: null,
+          error_code: state === "failed" ? "execution_error" : null,
+        })),
         next_cursor: null,
         has_more: false,
       },
     }),
   );
-  await page.route("**/api/flows/42", (route) =>
+  await page.goto("/#flow/42/jobs");
+  const jobs = page.locator(".timeline-item");
+  await expect(jobs).toHaveCount(4);
+  await expect(jobs.locator("strong")).toHaveText([
+    "推理 · 派发次数 0",
+    "推理 · 派发次数 1",
+    "推理 · 派发次数 3",
+    "推理 · 派发次数 1",
+  ]);
+  await expect(jobs.locator(".badge")).toHaveText([
+    "queued",
+    "running",
+    "failed",
+    "done",
+  ]);
+  await expect(
+    page.getByText("尝试次数包含已授权派发但结果未知的任务。", {
+      exact: false,
+    }),
+  ).toBeVisible();
+  expect(
+    await page
+      .locator(".detail-body")
+      .evaluate((node) => node.scrollWidth <= node.clientWidth),
+  ).toBe(true);
+});
+
+test("inference notices keep authorized attempts, history and snapshot paging on mobile", async ({
+  page,
+}) => {
+  // Budget exhaustion and a final authentication failure must not imply three retries or Flow failure.
+  await page.setViewportSize({ width: 390, height: 900 });
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  const requests: URL[] = [];
+  await page.route("**/api/flows/42/inference-notices?**", (route) => {
+    const url = new URL(route.request().url());
+    requests.push(url);
+    const older = url.searchParams.has("cursor");
+    return route.fulfill({
+      json: {
+        items: [
+          older
+            ? {
+                ...inferenceNotice,
+                key: "inference-exhausted:9",
+                batch_id: 9,
+                historical: true,
+                last_failure_code: "authentication",
+                stop_reason: "non_retryable",
+                next_condition: "该批次已完成，此通知仅作历史记录。",
+              }
+            : {
+                ...inferenceNotice,
+                attempts: 2,
+                stop_reason: "deadline",
+              },
+        ],
+        snapshot: 17,
+        next_cursor: older ? null : "older-notices",
+        has_more: !older,
+      },
+    });
+  });
+  await page.goto("/#flow/42/jobs");
+  const notices = page.getByRole("region", { name: "推理通知", exact: true });
+  await expect(notices.getByRole("article")).toHaveCount(1);
+  await expect(notices).toContainText("尝试 2 / 3 次");
+  await expect(notices).toContainText("总预算耗尽");
+  await expect(notices).toContainText("推理请求超时");
+  await expect(notices).toContainText("worker-inference-1");
+  await expect(notices).toContainText("codex");
+  await expect(notices).toContainText(inferenceNotice.next_condition);
+  await expect(notices.locator("time").first()).toHaveAttribute(
+    "datetime",
+    now,
+  );
+  await expect(
+    notices.getByRole("button", { name: "重试", exact: true }),
+  ).toHaveCount(0);
+  await notices.getByRole("button", { name: "读取更多推理通知" }).click();
+  const historical = notices.getByRole("article").last();
+  await expect(historical).toContainText("历史通知");
+  await expect(historical).toContainText("尝试 3 / 3 次");
+  await expect(historical).toContainText("身份验证失败");
+  await expect(historical).toContainText("不可直接重试");
+  await expect(historical).toContainText("该批次已完成，此通知仅作历史记录。");
+  // StrictMode can abort and repeat the first read; every initial read must still start a fresh snapshot.
+  for (const url of requests.filter((url) => !url.searchParams.has("cursor")))
+    expect(Object.fromEntries(url.searchParams)).toEqual({ limit: "20" });
+  expect(
+    requests
+      .filter((url) => url.searchParams.has("cursor"))
+      .map((url) => Object.fromEntries(url.searchParams)),
+  ).toEqual([{ cursor: "older-notices", snapshot: "17", limit: "20" }]);
+  expect(
+    await page
+      .locator(".detail-body")
+      .evaluate((node) => node.scrollWidth <= node.clientWidth),
+  ).toBe(true);
+  expect(errors).toEqual([]);
+});
+
+test("inference notice read failures preserve jobs and loaded notices, with safe empty and error states", async ({
+  page,
+}) => {
+  // A separate read can fail at either boundary; never erase the other list or leak a proxy error body.
+  let failNotices = true;
+  let failJobs = false;
+  let empty = false;
+  let mixedSnapshot = false;
+  const queries: URL[] = [];
+  await page.route("**/api/flows/42/jobs?**", (route) =>
+    route.fulfill(
+      failJobs
+        ? { status: 503, json: { detail: "jobs unavailable" } }
+        : {
+            json: {
+              items: [
+                {
+                  id: 1,
+                  flow_id: 42,
+                  kind: "initial",
+                  attempt: 1,
+                  state: "done",
+                  created_at: now,
+                  worker_id: "coding-worker",
+                },
+              ],
+              next_cursor: null,
+              has_more: false,
+            },
+          },
+    ),
+  );
+  await page.route("**/api/flows/42/inference-notices?**", (route) => {
+    const url = new URL(route.request().url());
+    queries.push(url);
+    return route.fulfill(
+      failNotices
+        ? {
+            status: 503,
+            json: { detail: "private stderr /secret/workspace TOKEN=secret" },
+          }
+        : {
+            json: {
+              items:
+                empty || url.searchParams.has("cursor")
+                  ? []
+                  : [inferenceNotice],
+              snapshot: mixedSnapshot ? 18 : 17,
+              next_cursor:
+                empty || url.searchParams.has("cursor") ? null : "next-notice",
+              has_more: !empty && !url.searchParams.has("cursor"),
+            },
+          },
+    );
+  });
+  await page.goto("/#flow/42/jobs");
+  const notices = page.getByRole("region", { name: "推理通知", exact: true });
+  await expect(notices.getByRole("alert")).toContainText("推理通知读取失败");
+  await expect(page.locator(".timeline")).toContainText("coding-worker");
+  await expect(page.getByRole("tabpanel")).not.toContainText("TOKEN=secret");
+  failNotices = false;
+  await notices.getByRole("button", { name: "重新读取推理通知" }).click();
+  await expect(notices.getByRole("article")).toHaveCount(1);
+  failNotices = true;
+  await notices.getByRole("button", { name: "读取更多推理通知" }).click();
+  await expect(notices.getByRole("alert")).toBeVisible();
+  await expect(notices.getByRole("article")).toHaveCount(1);
+  await expect(page.locator(".timeline")).toContainText("coding-worker");
+  failNotices = false;
+  mixedSnapshot = true;
+  await notices.getByRole("button", { name: "重新读取推理通知" }).click();
+  await expect(notices.getByRole("alert")).toContainText("快照已变化");
+  await expect(notices.getByRole("article")).toHaveCount(1);
+  mixedSnapshot = false;
+  await notices.getByRole("button", { name: "重新读取推理通知" }).click();
+  await expect(notices.getByRole("alert")).toHaveCount(0);
+  expect(
+    queries.slice(-2).map((url) => Object.fromEntries(url.searchParams)),
+  ).toEqual([
+    { limit: "20", cursor: "next-notice", snapshot: "17" },
+    { limit: "20", cursor: "next-notice", snapshot: "17" },
+  ]);
+  failJobs = true;
+  await page.getByRole("button", { name: "刷新当前视图" }).click();
+  await expect(
+    page.getByRole("button", { name: /读取失败：jobs unavailable/ }),
+  ).toBeVisible();
+  await expect(notices.getByRole("article")).toHaveCount(1);
+  expect(queries.at(-1)?.searchParams.has("snapshot")).toBe(false);
+  failJobs = false;
+  empty = true;
+  await page.getByRole("button", { name: "刷新当前视图" }).click();
+  await expect(notices).toContainText("暂无推理通知");
+  await expect(notices.getByRole("article")).toHaveCount(0);
+});
+
+test("late inference notices cannot overwrite another Flow", async ({
+  page,
+}) => {
+  // A late response must not appear in the new Flow even if the transport ignores abort.
+  await page.addInitScript(() => {
+    const fetchOriginal = window.fetch;
+    window.fetch = async (input, options) => {
+      if (!String(input).includes("/inference-notices"))
+        return fetchOriginal(input, options);
+      const response = await fetchOriginal(input, {
+        ...options,
+        signal: undefined,
+      });
+      const body = await response.clone().json();
+      sessionStorage.setItem("notice-completed", body.items[0].next_condition);
+      return response;
+    };
+  });
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let requested = false;
+  await page.route("**/api/flows/*/inference-notices?**", async (route) => {
+    const old = new URL(route.request().url()).pathname.includes("/42/");
+    if (old) {
+      requested = true;
+      await gate;
+    }
+    return route.fulfill({
+      json: {
+        items: [
+          {
+            ...inferenceNotice,
+            next_condition: old ? "旧 Flow 请求" : "新 Flow 请求",
+          },
+        ],
+        snapshot: 17,
+        next_cursor: null,
+        has_more: false,
+      },
+    });
+  });
+  await page.route("**/api/flows/43", (route) =>
     route.fulfill({
       json: {
-        ...closed,
-        reason: "PR 已关闭（未合并），编码与修订已暂停",
-        next_condition: "重新打开 PR 并完成执行状态及 head/base 对账后才能继续",
+        ...flow,
+        id: 43,
+        title: "另一个 Flow",
+        reason: "原因",
+        next_condition: "条件",
         sources: [],
       },
     }),
   );
-  await page.goto("/#board");
-  const column = page.locator(".column.phase-done");
-  await expect(column.locator(".col-header")).toHaveText("已归档2");
-  await expect(
-    column.getByText("已关闭 · 未合并", { exact: true }),
-  ).toBeVisible();
-  await expect(column.getByText("归档完成", { exact: true })).toBeVisible();
-  await expect(page.getByText("已完成", { exact: true })).toHaveCount(0);
-  await page.screenshot({
-    path: "../../../.amp/in/artifacts/archived-board-desktop.png",
+  await page.goto("/#flow/42/jobs");
+  await expect.poll(() => requested).toBe(true);
+  await page.evaluate(() => {
+    location.hash = "flow/43/jobs";
   });
-  const search = page.getByRole("combobox", { name: "搜索任务与筛选条件" });
-  await search.fill("is:d");
-  await expect(page.getByRole("option", { name: /已归档/ })).toBeVisible();
-  await search.fill("");
-  await search.press("Escape");
-  await page.setViewportSize({ width: 390, height: 844 });
-  await page
-    .locator(".mobile-stages")
-    .getByRole("button", { name: /已归档/ })
-    .click();
   await expect(
-    column.getByText("已关闭 · 未合并", { exact: true }),
+    page.getByRole("heading", { name: "另一个 Flow" }),
   ).toBeVisible();
-  await page.screenshot({
-    path: "../../../.amp/in/artifacts/archived-board-mobile.png",
-  });
-  await column.locator('.card[data-flow="42"]').click();
-  await expect(page.locator(".detail-head .badge")).toHaveText(
-    "已关闭 · 未合并",
+  const notices = page.getByRole("region", { name: "推理通知", exact: true });
+  await expect(notices).toContainText("新 Flow 请求");
+  release();
+  await expect
+    .poll(() => page.evaluate(() => sessionStorage.getItem("notice-completed")))
+    .toBe("旧 Flow 请求");
+  // Wait for the late fetch to reach React, not just for the network route to release.
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      ),
   );
-  await page.getByRole("tab", { name: "概览" }).click();
+  await expect(notices).toContainText("新 Flow 请求");
+  await expect(notices).not.toContainText("旧 Flow 请求");
+});
+
+test("shared virtual lists preserve distant focus, omitted gaps and keyboard order", async ({
+  page,
+}) => {
+  // A focused first row must stay at its old location while the viewport displays a distant range.
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.route("**/api/flows?**", (route) => {
+    const url = new URL(route.request().url());
+    const phase = url.searchParams.get("phase");
+    const start = Number(url.searchParams.get("cursor") ?? 0);
+    const total = phase === "queued" || phase === "running" ? 70 : 0;
+    return route.fulfill({
+      json: {
+        items: Array.from({ length: Math.min(50, total - start) }, (_, i) => ({
+          ...flow,
+          id: (phase === "running" ? 42 : 200) + start + i,
+          lifecycle: phase,
+          phase,
+          title: `${phase} Flow ${start + i}`,
+        })),
+        next_cursor: start + 50 < total ? String(start + 50) : null,
+        has_more: start + 50 < total,
+        counts: { queued: 70, running: 70, review: 0, blocked: 0, archived: 0 },
+      },
+    });
+  });
+  await page.route("**/api/flows/111", (route) =>
+    route.fulfill({
+      json: {
+        ...flow,
+        id: 111,
+        title: "running Flow 69",
+        reason: "正在验证",
+        next_condition: "等待验证完成",
+        sources: [],
+      },
+    }),
+  );
+  await page.route("**/api/flows/111/jobs?**", (route) => {
+    const start = Number(
+      new URL(route.request().url()).searchParams.get("cursor") ?? 0,
+    );
+    return route.fulfill({
+      json: {
+        items: Array.from({ length: Math.min(50, 90 - start) }, (_, i) => ({
+          id: 90 - start - i,
+          flow_id: 111,
+          attempt: start + i + 1,
+          kind: "initial",
+          state: "done",
+          worker_id: "worker-1",
+          created_at: new Date(
+            Date.parse(now) - (start + i) * 1000,
+          ).toISOString(),
+          started_at: now,
+          updated_at: now,
+          finished_at: now,
+          error_code: null,
+        })),
+        next_cursor: start + 50 < 90 ? String(start + 50) : null,
+        has_more: start + 50 < 90,
+      },
+    });
+  });
+  const scrollToEnd = async (root: Locator, last: Locator) => {
+    // Measured rows can shrink estimated gaps after a jump; re-read the end before checking navigation.
+    await expect(async () => {
+      await root.evaluate(async (node) => {
+        node.scrollTop = node.scrollHeight;
+        for (let i = 0; i < 4; i++) await new Promise(requestAnimationFrame);
+      });
+      await expect(last).toBeInViewport({ timeout: 250 });
+    }).toPass({ timeout: 5000 });
+  };
+  const checkPinnedNavigation = async (
+    root: Locator,
+    first: Locator,
+    next: Locator,
+    last: Locator,
+  ) => {
+    await root.evaluate((node) => {
+      node.scrollTop = 0;
+    });
+    await first.focus();
+    await scrollToEnd(root, last);
+    await expect(first).toBeFocused();
+    await expect(first).not.toBeInViewport();
+    expect(await root.evaluate((node) => node.scrollTop)).toBeGreaterThan(2000);
+    await page.keyboard.press("Tab");
+    await expect(next).toBeFocused();
+    await expect(next).toBeInViewport();
+    await page.keyboard.press("Shift+Tab");
+    await expect(first).toBeFocused();
+    await expect(first).toBeInViewport();
+  };
+  await page.goto("/#board");
+  for (const phase of ["queued", "running"]) {
+    const root = page.locator(`[data-phase="${phase}"]`);
+    await expect
+      .poll(async () => {
+        await root.evaluate((node) => {
+          node.scrollTop = node.scrollHeight;
+        });
+        return root
+          .locator("[data-window-list]")
+          .getAttribute("data-window-count");
+      })
+      .toBe("70");
+  }
+  const board = page.locator('[data-phase="running"]');
+  await checkPinnedNavigation(
+    board,
+    board.getByRole("button", { name: /running Flow 0 / }),
+    board.getByRole("button", { name: /running Flow 1 / }),
+    board.getByRole("button", { name: /running Flow 69 / }),
+  );
+  await board.evaluate((node) => {
+    node.scrollTop = node.scrollHeight;
+  });
+  await board.getByRole("button", { name: /running Flow 69 / }).click();
+  const rail = page.locator(".rail-scroll");
   await expect(
-    page.getByText("active / 已归档", { exact: true }),
-  ).toBeVisible();
-  await page.screenshot({
-    path: "../../../.amp/in/artifacts/archived-detail-mobile.png",
+    rail.locator('[data-window-list="侧栏-queued"]'),
+  ).toHaveAttribute("data-window-count", "70");
+  await expect(
+    rail.locator('[data-window-list="侧栏-running"]'),
+  ).toHaveAttribute("data-window-count", "70");
+  await checkPinnedNavigation(
+    rail,
+    rail.getByRole("button", { name: "queued Flow 0", exact: true }),
+    rail.getByRole("button", { name: "queued Flow 1", exact: true }),
+    rail.getByRole("button", { name: "running Flow 69", exact: true }),
+  );
+  await page.getByRole("tab", { name: "执行记录", exact: true }).click();
+  await page.getByRole("button", { name: "读取更多执行记录" }).click();
+  const jobs = page.locator('[data-window-list="执行记录"]');
+  await expect(jobs).toHaveAttribute("data-window-count", "90");
+  const detail = page.locator(".detail-body");
+  await scrollToEnd(detail, page.getByText("initial #90", { exact: true }));
+  await detail.evaluate((node) => {
+    node.scrollTop = 0;
   });
-  await page.setViewportSize({ width: 1440, height: 900 });
-  await page.screenshot({
-    path: "../../../.amp/in/artifacts/archived-detail-desktop.png",
+  await expect(page.getByText("initial #1", { exact: true })).toBeInViewport();
+  for (const list of await page.locator("[data-window-list]").all())
+    expect(
+      await list.locator(":scope > [data-window-row]").count(),
+    ).toBeLessThanOrEqual(60);
+  expect(errors).toEqual([]);
+});
+
+for (const width of [1440, 390]) {
+  test(`six-state preview keeps finalizing in running and only business archives in archived at ${width}px`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 900 });
+    const errors: string[] = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+    const items: FlowDetail[] = [
+      { ...blockedFlow, ...flow, title: "实现与验证进行中" },
+      {
+        ...blockedFlow,
+        id: 43,
+        lifecycle: "queued",
+        phase: "queued",
+        title: "等待开始的新任务",
+      },
+      {
+        ...blockedFlow,
+        id: 44,
+        lifecycle: "review",
+        phase: "review",
+        title: "等待审核的变更",
+      },
+      {
+        ...blockedFlow,
+        id: 45,
+        title: "PR 关闭，等待处理",
+      },
+      {
+        ...blockedFlow,
+        id: 46,
+        lifecycle: "finalizing",
+        phase: "running",
+        action: "finalizing",
+        archive_reason: "succeeded",
+        archive_summary: "PR 已合并，等待收尾。",
+        title: "PR 合并，正在安全收尾",
+        reason: "PR 已合并，清理尚未完成",
+        next_condition: "等待原 Worker 收尾完成",
+      },
+      { ...archivedFlow, id: 47, title: "本轮已成功归档" },
+      {
+        ...archivedFlow,
+        id: 48,
+        archive_reason: "abandoned",
+        title: "本轮已废弃归档",
+        archive_summary: "需求调整，结束本轮。",
+      },
+    ];
+    await mockFlows(page, () => items);
+    await page.goto("/#board");
+    await expect(page.locator(".col-header")).toHaveText([
+      "待处理1",
+      "进行中2",
+      "待审核1",
+      "受阻1",
+      "已归档2",
+    ]);
+    for (const [id, phase, status] of [
+      [42, "running", "进行中"],
+      [43, "queued", "待处理"],
+      [44, "review", "待审核"],
+      [45, "blocked", "受阻"],
+      [46, "running", "进行中"],
+      [47, "archived", "已归档 · 成功"],
+      [48, "archived", "已归档 · 废弃"],
+    ] as const) {
+      // Color-only cards must still expose their phase and archive outcome.
+      if (width === 390)
+        await page.locator(`.mobile-stages .phase-${phase}`).click();
+      const marker = page.locator(`.card[data-flow="${id}"]`).getByRole("img");
+      await expect(marker).toHaveCount(1);
+      await expect(marker).toHaveAccessibleName(status);
+    }
+    if (width === 390)
+      await page.locator(".mobile-stages .phase-running").click();
+    await expect(page.locator(".column.phase-finalizing")).toHaveCount(0);
+    await page.screenshot({
+      path: `../../../.amp/in/artifacts/flow-default-${width}.png`,
+    });
+    const search = page.getByRole("combobox", { name: "搜索任务与筛选条件" });
+    await search.fill("status:arch");
+    await expect(page.getByRole("option", { name: /已归档/ })).toContainText(
+      "status:archived",
+    );
+    await search.fill("is:arch");
+    const archivedOption = page.getByRole("option", { name: /已归档/ });
+    await expect(archivedOption).toContainText("is:archived");
+    await archivedOption.click();
+    await expect(search).toHaveValue("is:archived ");
+    const query = page.waitForRequest((request) => {
+      const url = new URL(request.url());
+      return (
+        url.pathname === "/api/flows" &&
+        url.searchParams.get("q") === "is:archived"
+      );
+    });
+    await search.press("Enter");
+    await query;
+    await search.fill("is:done");
+    await search.press("Enter");
+    await expect(page.getByRole("alert")).toContainText(
+      "is: 支持 active（活跃）或 archived（已归档）。",
+    );
+    expect(new URL(page.url()).searchParams.get("q")).toBe("is:archived");
+    await search.fill("");
+    await search.press("Enter");
+    await search.press("Escape");
+    await page.locator('.card[data-flow="46"]').click();
+    await page.getByRole("tab", { name: "概览" }).click();
+    await expect(page.locator(".detail-head .badge")).toHaveText("进行中");
+    await expect(page.locator(".task-facts")).toContainText(
+      "finalizing / 进行中",
+    );
+    await expect(
+      page.getByRole("heading", { name: "正在收尾（finalizing）" }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: /^(重试|恢复推进|结束本轮)$/ }),
+    ).toHaveCount(0);
+    await page.screenshot({
+      path: `../../../.amp/in/artifacts/flow-finalizing-${width}.png`,
+    });
+    await page.evaluate(() => {
+      location.hash = "flow/47/overview";
+    });
+    await expect(page.locator(".detail-head .badge")).toHaveText(
+      "已归档 · 成功",
+    );
+    await expect(
+      page.getByRole("button", { name: "恢复推进", exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "重试", exact: true }),
+    ).toHaveCount(0);
+    await expect(page.locator(".task-facts")).toContainText("归档时间");
+    await page.screenshot({
+      path: `../../../.amp/in/artifacts/flow-archived-${width}.png`,
+    });
+    const archivedAt = page.getByText("归档时间", { exact: true });
+    await archivedAt.scrollIntoViewIfNeeded();
+    await expect(archivedAt).toBeVisible();
+    await page.screenshot({
+      path: `../../../.amp/in/artifacts/flow-archived-facts-${width}.png`,
+    });
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBe(true);
+    expect(errors).toEqual([]);
   });
+}
+
+test("detail reads synchronize sidebar and board without reloading the page", async ({
+  page,
+}) => {
+  // A worker can fail a Flow after the board loaded, before its detail is opened.
+  let current: FlowDetail = {
+    ...flow,
+    phase: "running",
+    reason: "正在执行",
+    next_condition: "等待执行结果",
+    sources: [],
+  };
+  const other = { ...current, id: 43, title: "仍在执行的 Flow" };
+  await mockFlows(page, () => [current, other]);
+  await page.goto("/#board");
+  await expect(page.locator(".column.phase-running .card")).toHaveCount(2);
+  current = {
+    ...current,
+    lifecycle: "blocked",
+    phase: "blocked",
+    action: "failed",
+    state_version: 3,
+    reason: "Flow 已失败",
+  };
+  await page.locator('.card[data-flow="42"]').click();
+  await expect(page.locator(".detail-head .badge")).toHaveText("受阻");
+  await expect(page.locator(".rail-group.phase-running .count")).toHaveText(
+    "1",
+  );
+  await expect(page.locator(".rail-group.phase-blocked .flow-tab")).toHaveText(
+    flow.title!,
+  );
+  await expect(page.locator(".rail-group.phase-blocked .count")).toHaveText(
+    "1",
+  );
+  await page.getByRole("tab", { name: "概览", exact: true }).click();
+  await expect(page.locator(".task-facts")).toContainText("blocked / 受阻");
+  await page.screenshot({
+    path: "../../../.amp/in/artifacts/detail-board-sync-failed.png",
+  });
+
+  current = {
+    ...current,
+    lifecycle: "review",
+    phase: "review",
+    action: "awaiting_review",
+    state_version: 4,
+    reason: "PR 已打开，当前没有待执行任务",
+    next_condition: "等待审核或人工合并",
+  };
+  await page.getByRole("button", { name: "刷新当前视图" }).click();
+  await expect(page.locator(".detail-head .badge")).toHaveText("待审核");
+  await expect(page.locator(".rail-group.phase-blocked .flow-tab")).toHaveCount(
+    0,
+  );
+  await expect(page.locator(".rail-group.phase-blocked .count")).toHaveText(
+    "0",
+  );
+  await expect(page.locator(".rail-group.phase-review .count")).toHaveText("1");
+
+  // Same-phase updates must also replace cached card titles.
+  const updatedTitle = "更新后的任务标题";
+  current = { ...current, title: updatedTitle, state_version: 5 };
+  await page.getByRole("button", { name: "刷新当前视图" }).click();
+  await expect(page.locator(".detail-head h1")).toHaveText(updatedTitle);
+  await expect(page.locator(".rail-group.phase-review .flow-tab")).toHaveText(
+    updatedTitle,
+  );
+  await page.screenshot({
+    path: "../../../.amp/in/artifacts/detail-board-sync-review.png",
+  });
+  await page.getByRole("button", { name: "返回看板", exact: true }).click();
+  await expect(page.locator(".column.phase-review .card")).toContainText(
+    updatedTitle,
+  );
+  await expect(page.locator(".column.phase-running .card")).toHaveText(
+    /仍在执行的 Flow/,
+  );
+  await expect(page.locator(".column.phase-blocked .card")).toHaveCount(0);
 });
 
 test("retry disables both commands until commit, then refreshes detail and board", async ({
   page,
 }) => {
   let current = blockedFlow;
-  await page.route("**/api/flows?**", (route) =>
-    route.fulfill({
-      json: {
-        items:
-          new URL(route.request().url()).searchParams.get("phase") ===
-          current.phase
-            ? [current]
-            : [],
-        counts: {
-          queued: current.phase === "queued" ? 1 : 0,
-          running: 0,
-          review: 0,
-          blocked: current.phase === "blocked" ? 1 : 0,
-          done: 0,
-        },
-        next_cursor: null,
-        has_more: false,
-      },
-    }),
-  );
-  await page.route("**/api/flows/42", (route) =>
-    route.fulfill({ json: current }),
-  );
+  await mockFlows(page, () => [current]);
   let finish = () => {};
   const committed = new Promise<void>((resolve) => {
     finish = resolve;
@@ -228,7 +1118,7 @@ test("retry disables both commands until commit, then refreshes detail and board
     await committed;
     current = {
       ...current,
-      lifecycle: "active",
+      lifecycle: "queued",
       phase: "queued",
       action: "initial:queued",
       state_version: 3,
@@ -243,16 +1133,14 @@ test("retry disables both commands until commit, then refreshes detail and board
     page.getByRole("button", { name: "正在提交重试…" }),
   ).toBeDisabled();
   await expect(
-    page.getByRole("button", { name: "归档", exact: true }),
+    page.getByRole("button", { name: "结束本轮", exact: true }),
   ).toBeDisabled();
   await expect(page.locator(".rail-group.phase-blocked .count")).toHaveText(
     "1",
   );
   finish();
   await expect(page.getByRole("status")).toContainText("重试请求已受理");
-  await expect(page.locator(".detail-head .badge")).toHaveText(
-    "initial:queued",
-  );
+  await expect(page.locator(".detail-head .badge")).toHaveText("待处理");
   await expect(page.locator(".rail-group.phase-blocked .count")).toHaveText(
     "0",
   );
@@ -262,7 +1150,7 @@ test("retry disables both commands until commit, then refreshes detail and board
     location.hash = "board";
   });
   await expect(page.locator(".column.phase-queued .card")).toContainText(
-    flow.title,
+    flow.title!,
   );
   await expect(page.locator(".column.phase-blocked .card")).toHaveCount(0);
 });
@@ -295,148 +1183,233 @@ for (const [code, message] of [
   });
 }
 
-for (const width of [1440, 390]) {
-  test(`cancelled flow manual archive persists and refreshes groups at ${width}px`, async ({
+for (const [width, reason, label] of [
+  [1440, "succeeded", "成功"],
+  [390, "abandoned", "废弃"],
+] as const) {
+  test(`round archive ${reason} waits for finalization then resumes a new round at ${width}px`, async ({
     page,
   }) => {
     await page.setViewportSize({ width, height: 900 });
     let current: FlowDetail = {
-      ...flow,
-      lifecycle: "cancelled",
-      phase: "blocked",
-      action: "cancelled",
-      title: "已取消的 Flow",
-      worker_historical: true,
-      reason: "Flow 已取消",
-      next_condition: "确认在途任务的停止确认与结果对账完成后，再评估是否重试",
-      sources: [],
+      ...blockedFlow,
+      pr_number: null,
+      pr_url: null,
+      title: "结束本轮并保留全部历史",
     };
-    const detail = () => ({ ...current });
-    await page.route("**/api/flows?**", (route) =>
-      route.fulfill({
-        json: {
-          items:
-            new URL(route.request().url()).searchParams.get("phase") ===
-            current.phase
-              ? [current]
-              : [],
-          counts: {
-            queued: 0,
-            running: 0,
-            review: 0,
-            blocked: current.archived_at ? 0 : 1,
-            done: current.archived_at ? 1 : 0,
-          },
-          next_cursor: null,
-          has_more: false,
-        },
-      }),
-    );
-    await page.route("**/api/flows/42", (route) =>
-      route.fulfill({ json: detail() }),
-    );
-    let attempts = 0;
+    await mockFlows(page, () => [current]);
+    let requests = 0;
     let finish: () => void = () => {};
     const committed = new Promise<void>((resolve) => {
       finish = resolve;
     });
     await page.route("**/api/flows/42/archive", async (route) => {
+      requests++;
       expect(route.request().method()).toBe("POST");
       expect(route.request().headers()["content-type"]).toBe(
         "application/json",
       );
-      expect(route.request().postDataJSON()).toEqual({});
-      if (++attempts === 1)
-        return route.fulfill({
-          status: 503,
-          json: { detail: "database_unavailable" },
-        });
+      expect(route.request().postDataJSON()).toEqual({
+        reason,
+        summary: "本轮结论",
+        expected_round_no: 1,
+      });
       await committed;
       current = {
         ...current,
-        phase: "done",
-        archived_at: now,
+        lifecycle: "finalizing",
+        phase: "running",
+        archive_reason: reason,
+        archive_summary: "本轮结论",
         state_version: 3,
-        reason: "Flow 已取消并归档；归档仅改变展示分组",
+        reason: "已受理结束请求，正在停止和收尾",
+        next_condition: "等待停止确认、结果对账及收尾完成",
       };
-      return route.fulfill({ json: detail() });
+      return route.fulfill({ json: current });
     });
     await page.goto("/?q=repo%3Aowner%2Fagentflow#flow/42/overview");
-    const archive = page.getByRole("button", { name: "归档", exact: true });
-    await expect(archive).toBeVisible();
-    await expect(
-      page.getByRole("button", { name: "重试", exact: true }),
-    ).toBeVisible();
-    await page.screenshot({
-      path: `../../../.amp/in/artifacts/cancelled-archive-before-${width}.png`,
+    await page.getByRole("button", { name: "结束本轮", exact: true }).click();
+    const archive = page.getByRole("button", {
+      name: "确认结束本轮",
+      exact: true,
     });
-    await archive.click();
-    await expect(page.getByRole("alert")).toContainText("归档失败");
+    await expect(archive).toBeDisabled();
+    await page.getByLabel("本轮结论（必填）").fill("   ");
+    await expect(archive).toBeDisabled();
+    expect(requests).toBe(0);
+    await page.getByRole("radio", { name: label, exact: true }).check();
+    await page.getByLabel("本轮结论（必填）").fill("  本轮结论  ");
     await expect(archive).toBeEnabled();
-    await expect(page.locator(".detail-head .badge")).toHaveText("已取消");
-    if (width === 1440)
-      await page.screenshot({
-        path: "../../../.amp/in/artifacts/cancelled-archive-error.png",
-      });
+    await page.screenshot({
+      path: `../../../.amp/in/artifacts/flow-end-round-${width}.png`,
+      animations: "disabled",
+    });
     await archive.click();
     await expect(
-      page.getByRole("button", { name: "正在归档…" }),
+      page.getByRole("button", { name: "正在提交结束请求…" }),
     ).toBeDisabled();
     await expect(
       page.getByRole("button", { name: "重试", exact: true }),
     ).toBeDisabled();
+    await expect(page.getByLabel("本轮结论（必填）")).toBeDisabled();
+    await expect(page.locator(".detail-head .badge")).toHaveText("受阻");
     finish();
-    await expect(page.locator(".detail-head .badge")).toHaveText(
-      "已取消 · 已归档",
+    await expect(page.getByRole("status")).toContainText("结束本轮请求已受理");
+    await expect(page.locator(".detail-head .badge")).toHaveText("进行中");
+    await expect(page.locator(".task-facts")).toContainText(
+      "finalizing / 进行中",
     );
-    await expect(page.getByRole("alert")).toHaveCount(0);
-    await expect(archive).toHaveCount(0);
+    await expect(page.getByText("归档时间", { exact: true })).toHaveCount(0);
     await expect(
-      page.getByText("已取消 / 已归档", { exact: true }),
-    ).toBeVisible();
-    await expect(page.getByText("手动归档", { exact: true })).toBeVisible();
-    if (width === 1440) {
-      await expect(page.locator(".rail-group.phase-blocked .count")).toHaveText(
-        "0",
-      );
-      await expect(page.locator(".rail-group.phase-done .count")).toHaveText(
-        "1",
-      );
-      await expect(page.locator(".rail-group.phase-done .flow-tab")).toHaveText(
-        current.title!,
-      );
-    }
-    await page.screenshot({
-      path: `../../../.amp/in/artifacts/cancelled-archive-after-${width}.png`,
-    });
+      page.getByRole("button", { name: "恢复推进", exact: true }),
+    ).toHaveCount(0);
+    await expect(page.locator(".rail-group.phase-archived .count")).toHaveText(
+      "0",
+    );
+    current = {
+      ...current,
+      lifecycle: "archived",
+      phase: "archived",
+      archived_at: now,
+      state_version: 4,
+      reason: "本轮已归档",
+      next_condition: "可显式恢复推进",
+    };
+    await page.getByRole("button", { name: "刷新当前视图" }).click();
+    await expect(page.locator(".detail-head .badge")).toHaveText(
+      `已归档 · ${label}`,
+    );
+    await expect(page.locator(".task-facts")).toContainText("归档时间");
+    await expect(page.locator(".task-facts")).toContainText("本轮结论");
     await page.reload();
     await expect(page.locator(".detail-head .badge")).toHaveText(
-      "已取消 · 已归档",
-    );
-    await expect(page).toHaveURL(
-      /q=repo%3Aowner%2Fagentflow#flow\/42\/overview/,
+      `已归档 · ${label}`,
     );
     await page.getByRole("tab", { name: "会话" }).click();
     await expect(page.getByText("真实活动正文", { exact: true })).toBeVisible();
+    await page.getByRole("tab", { name: "概览" }).click();
+    await expect(
+      page.getByRole("button", { name: "重试", exact: true }),
+    ).toHaveCount(0);
+    await expect(page.getByText(/同一 Flow 开启新轮次/)).toContainText("新 PR");
+    let resumeRequests = 0;
+    let resume = () => {};
+    const resumed = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    await page.route("**/api/flows/42/resume", async (route) => {
+      resumeRequests++;
+      expect(route.request().method()).toBe("POST");
+      expect(route.request().headers()["content-type"]).toBe(
+        "application/json",
+      );
+      expect(route.request().postDataJSON()).toEqual({ expected_round_no: 1 });
+      await resumed;
+      current = {
+        ...current,
+        lifecycle: "queued",
+        phase: "queued",
+        current_round_no: 2,
+        archived_at: null,
+        archive_reason: null,
+        archive_summary: null,
+        state_version: 5,
+        reason: "新轮次待处理",
+      };
+      return route.fulfill({ json: current });
+    });
+    await page.getByRole("button", { name: "恢复推进", exact: true }).click();
+    await expect(
+      page.getByRole("button", { name: "正在恢复推进…" }),
+    ).toBeDisabled();
+    await expect(page.locator(".detail-head .badge")).toHaveText(
+      `已归档 · ${label}`,
+    );
+    resume();
+    await expect(page.getByRole("status")).toContainText("恢复推进请求已受理");
+    await expect(page.locator(".detail-head .badge")).toHaveText("待处理");
+    await expect(page.locator(".task-facts")).toContainText("第 2 轮");
+    await expect(page).toHaveURL(
+      /q=repo%3Aowner%2Fagentflow#flow\/42\/overview/,
+    );
+    await expect(page.getByText("归档时间", { exact: true })).toHaveCount(0);
     await page.evaluate(() => {
       location.hash = "board";
     });
     if (width === 390)
       await page
         .locator(".mobile-stages")
-        .getByRole("button", { name: /已归档/ })
+        .getByRole("button", { name: /待处理/ })
         .click();
-    await expect(page.locator(".column.phase-done .card")).toContainText(
-      "已取消 · 已归档",
-    );
-    await expect(page.locator(".column.phase-blocked .card")).toHaveCount(0);
-    expect(
-      await page.evaluate(
-        () => document.documentElement.scrollWidth <= innerWidth,
-      ),
-    ).toBe(true);
+    await expect(
+      page
+        .locator('.column.phase-queued [data-flow="42"]')
+        .getByRole("img", { name: "待处理", exact: true }),
+    ).toBeVisible();
+    await expect(page.locator(".column.phase-archived .card")).toHaveCount(0);
+    expect(requests).toBe(1);
+    expect(resumeRequests).toBe(1);
   });
 }
+
+for (const action of ["archive", "resume"] as const) {
+  for (const failure of ["conflict", "network"] as const) {
+    test(`round commands ${action} ${failure} preserve state without success or automatic resubmission`, async ({
+      page,
+    }) => {
+      // A stale tab can target an old round; a lost response can follow a committed write.
+      const current = action === "archive" ? blockedFlow : archivedFlow;
+      await mockFlows(page, () => [current]);
+      let requests = 0;
+      await page.route(`**/api/flows/42/${action}`, (route) => {
+        requests++;
+        return failure === "network"
+          ? route.abort("failed")
+          : route.fulfill({ status: 409, json: { detail: "round_conflict" } });
+      });
+      await page.goto("/#flow/42/overview");
+      if (action === "archive") {
+        await page
+          .getByRole("button", { name: "结束本轮", exact: true })
+          .click();
+        await page.getByLabel("本轮结论（必填）").fill("保留这份结论");
+        await page.getByRole("button", { name: "确认结束本轮" }).click();
+      } else
+        await page
+          .getByRole("button", { name: "恢复推进", exact: true })
+          .click();
+      await expect(page.getByRole("alert")).toContainText(
+        failure === "conflict" ? "未受理" : "无法确认",
+      );
+      await expect(page.getByRole("alert")).toContainText("刷新核对");
+      await expect(page.getByRole("status")).toHaveCount(0);
+      await expect(page.locator(".detail-head .badge")).toHaveText(
+        action === "archive" ? "受阻" : "已归档 · 成功",
+      );
+      if (action === "archive")
+        await expect(page.getByLabel("本轮结论（必填）")).toHaveValue(
+          "保留这份结论",
+        );
+      expect(requests).toBe(1);
+    });
+  }
+}
+
+test("round form cannot silently retarget a newer round after refresh", async ({
+  page,
+}) => {
+  let current = blockedFlow;
+  await mockFlows(page, () => [current]);
+  await page.goto("/#flow/42/overview");
+  await page.getByRole("button", { name: "结束本轮", exact: true }).click();
+  await page.getByLabel("本轮结论（必填）").fill("旧轮次结论");
+  current = { ...current, current_round_no: 2, state_version: 3 };
+  await page.getByRole("button", { name: "刷新当前视图" }).click();
+  await expect(page.getByRole("alert")).toContainText("轮次已变化");
+  await expect(
+    page.getByRole("button", { name: "确认结束本轮" }),
+  ).toBeDisabled();
+});
 
 test("a retry finishing after navigation cannot overwrite another flow", async ({
   page,
@@ -465,6 +1438,7 @@ test("a retry finishing after navigation cannot overwrite another flow", async (
     return route.fulfill({
       json: {
         ...flow,
+        lifecycle: "queued",
         phase: "queued",
         state_version: 3,
         reason: "已重排",
@@ -818,28 +1792,47 @@ test("activity content hierarchy keeps provenance secondary and expandable", asy
     ).toBeLessThan(1);
     expect(Math.abs(link.y - icon.y)).toBeLessThan(1);
     expect(icon.x - link.x - link.width).toBeCloseTo(4);
-    // Equal SVG boxes can still contain differently sized drawings and padding.
-    const [githubInk, infoInk] = await message
-      .locator(".message-actions")
-      .evaluate((actions) =>
-        [...actions.querySelectorAll("svg")].map((svg) => {
-          const shape = svg.querySelector("circle, path");
-          if (!shape) throw new Error("Icon drawing is missing");
-          const bounds = shape.getBoundingClientRect();
-          const style = getComputedStyle(shape);
-          const stroke =
-            style.stroke === "none"
-              ? 0
-              : (parseFloat(style.strokeWidth) *
-                  svg.getBoundingClientRect().width) /
-                svg.viewBox.baseVal.width;
+    // Plus and refresh have different path extents even with equal SVG boxes.
+    // Only measure toolbar triggers, not buttons inside the closed create dialog.
+    const ink = await page
+      .locator(".bar-status > button svg, .message-actions svg")
+      .evaluateAll((icons) =>
+        icons.map((svg) => {
+          const bounds = [...svg.children].map((shape) => {
+            const rect = shape.getBoundingClientRect();
+            const style = getComputedStyle(shape);
+            const stroke =
+              style.stroke === "none"
+                ? 0
+                : parseFloat(style.strokeWidth) *
+                  (style.vectorEffect === "non-scaling-stroke"
+                    ? 1
+                    : Math.hypot(
+                        (shape as SVGGraphicsElement).getScreenCTM()!.a,
+                        (shape as SVGGraphicsElement).getScreenCTM()!.b,
+                      ));
+            return {
+              left: rect.left - stroke / 2,
+              right: rect.right + stroke / 2,
+              top: rect.top - stroke / 2,
+              bottom: rect.bottom + stroke / 2,
+            };
+          });
+          const left = Math.min(...bounds.map((b) => b.left)),
+            right = Math.max(...bounds.map((b) => b.right)),
+            top = Math.min(...bounds.map((b) => b.top)),
+            bottom = Math.max(...bounds.map((b) => b.bottom));
           return {
-            width: bounds.width + stroke,
-            height: bounds.height + stroke,
-            centerY: bounds.y + bounds.height / 2,
+            width: right - left,
+            height: bottom - top,
+            centerY: (top + bottom) / 2,
           };
         }),
       );
+    for (const icon of ink) {
+      expect(Math.max(icon.width, icon.height)).toBeCloseTo(14, 1);
+    }
+    const [githubInk, infoInk] = ink.slice(-2);
     expect(Math.abs(githubInk.width - infoInk.width)).toBeLessThan(0.5);
     expect(Math.abs(githubInk.height - infoInk.height)).toBeLessThan(0.5);
     expect(Math.abs(githubInk.centerY - infoInk.centerY)).toBeLessThan(0.5);
@@ -1063,34 +2056,210 @@ test("surfaces API failures without replacing existing UI", async ({
   });
 });
 
+for (const width of [1440, 390]) {
+  test(`conversation prefetches before the page boundary without moving the reading position at ${width}px`, async ({
+    page,
+  }) => {
+    // A delayed next page must start while more than a viewport of unread messages remains.
+    await page.setViewportSize({ width, height: 900 });
+    const cursors: string[] = [];
+    let releasePage!: () => void;
+    const pageGate = new Promise<void>((resolve) => {
+      releasePage = resolve;
+    });
+    await page.route("**/api/flows/42/activity?**", async (route) => {
+      const url = new URL(route.request().url());
+      expect(url.searchParams.has("refresh")).toBe(false);
+      const cursor = url.searchParams.get("cursor");
+      if (cursor) {
+        cursors.push(`${cursor}:${url.searchParams.get("snapshot")}`);
+        await pageGate;
+      }
+      const start = cursor ? 20 : 0;
+      return route.fulfill({
+        json: {
+          items: Array.from({ length: 20 }, (_, i) => {
+            const n = start + i;
+            const body = [
+              `会话正文 ${n}`,
+              ...Array.from(
+                { length: 3 + (n % 3) },
+                () => "下滑阅读时，后续消息会提前读取，当前内容保持稳定。",
+              ),
+            ].join("\n\n");
+            return {
+              ...activity,
+              key: `prefetch-${n}`,
+              author: n % 2 ? "assistant" : "owner",
+              body,
+              body_length: body.length,
+              previous_version: null,
+            };
+          }),
+          snapshot: 2,
+          total: 40,
+          next_cursor: cursor ? null : "page-2",
+          has_more: !cursor,
+          sources: [],
+          changes: {},
+        },
+      });
+    });
+    await page.goto("/#flow/42/conversation");
+    const root = page.locator(".detail-body");
+    const list = page.locator('[data-window-list="会话活动"]');
+    await expect(list).toHaveAttribute("data-window-count", "20");
+    expect(cursors).toEqual([]);
+    const reading = await root.evaluate(async (node) => {
+      // The mobile header changes the viewport height after the first scroll.
+      for (let step = 0; step < 2; step++) {
+        node.scrollTop = node.scrollHeight - node.clientHeight * 2.5;
+        for (let i = 0; i < 6; i++) await new Promise(requestAnimationFrame);
+      }
+      const bounds = node.getBoundingClientRect();
+      const entry = [
+        ...node.querySelectorAll<HTMLElement>("[data-entry]"),
+      ].find((item) => {
+        const rect = item.getBoundingClientRect();
+        return rect.top >= bounds.top && rect.bottom <= bounds.bottom;
+      })!;
+      return {
+        key: entry.dataset.entry!,
+        top: entry.getBoundingClientRect().top,
+        remaining:
+          node.querySelector(".load-sentinel")!.getBoundingClientRect().top -
+          bounds.bottom,
+        viewport: node.clientHeight,
+      };
+    });
+    expect(reading.remaining).toBeGreaterThan(reading.viewport);
+    await expect.poll(() => cursors).toEqual(["page-2:2"]);
+    await expect(list).toHaveAttribute("data-window-count", "20");
+    const positions = root.evaluate(async (node, key) => {
+      const values: number[] = [];
+      for (let i = 0; i < 18; i++) {
+        await new Promise<void>((resolve) =>
+          requestAnimationFrame(() => setTimeout(resolve, 0)),
+        );
+        values.push(
+          node.querySelector(`[data-entry="${key}"]`)!.getBoundingClientRect()
+            .top,
+        );
+      }
+      return values;
+    }, reading.key);
+    releasePage();
+    await expect(list).toHaveAttribute("data-window-count", "40");
+    expect(
+      Math.max(...(await positions).map((top) => Math.abs(top - reading.top))),
+    ).toBeLessThan(2);
+    expect(cursors).toEqual(["page-2:2"]);
+    await page.screenshot({
+      path: `../../../.amp/in/artifacts/conversation-prefetch-${width}.png`,
+    });
+  });
+}
+
+test("conversation keeps loading when fast pages extend the same collapsed tool group", async ({
+  page,
+}) => {
+  // Fast responses can batch busy=true/false into one render. Folded tools leave the sentinel in place.
+  const items: ActivityItem[] = Array.from({ length: 61 }, (_, index) => {
+    const body = index === 60 ? "工具活动之后的正文" : `工具记录 ${index}`;
+    return {
+      ...activity,
+      key: `fast-tool-${index}`,
+      source: "worker",
+      kind: index === 60 ? "message" : index % 2 ? "tool_result" : "tool_call",
+      author: index % 2 ? "tool" : "assistant",
+      title: "exec",
+      body,
+      body_length: body.length,
+      previous_version: null,
+      metadata: {
+        attempt_id: 1,
+        session_id: "fast-tools",
+        session_generation: 0,
+        call_id: `call-${Math.floor(index / 2)}`,
+      },
+    };
+  });
+  const pages = Array.from({ length: 4 }, (_, index) =>
+    activityPage(
+      items.slice(index * 20, (index + 1) * 20),
+      index * 20,
+      items.length,
+    ),
+  );
+  await page.addInitScript((pages) => {
+    const fetch = window.fetch;
+    window.fetch = async (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : input);
+      if (url.pathname !== "/api/flows/42/activity") return fetch(input, init);
+      const start = Number(url.searchParams.get("cursor") ?? 0);
+      const result = pages[start / 20];
+      const response = Response.json(result);
+      response.json = async () => result;
+      return response;
+    };
+  }, pages);
+  await page.goto("/#flow/42/conversation");
+  // Do not scroll, expand the group or click a load control to make pagination advance.
+  await expect(
+    page.getByText("工具活动之后的正文", { exact: true }),
+  ).toBeVisible();
+  const group = page.getByRole("button", { name: /^工具活动/ });
+  await expect(group).toHaveAccessibleName("工具活动 · 30 次调用 · 30 条结果");
+  await expect(group).toHaveAttribute("aria-expanded", "false");
+  await expect(
+    page.getByRole("button", { name: "已到当前本地快照末尾 · 点击刷新" }),
+  ).toBeVisible();
+});
+
 test("large activity stays windowed, re-reads evicted pages, and refreshes explicitly", async ({
   page,
 }) => {
-  let refreshed = false;
+  let refreshed = false,
+    rebuilding = false;
+  let releaseRefresh!: () => void, releasePage!: () => void;
+  const refreshGate = new Promise<void>((resolve) => {
+    releaseRefresh = resolve;
+  });
+  const pageGate = new Promise<void>((resolve) => {
+    releasePage = resolve;
+  });
   const rereads: string[] = [],
     errors: string[] = [];
   page.on("pageerror", (e) => errors.push(e.message));
   await page.route("**/api/flows/42/activity?**", async (route) => {
     const url = new URL(route.request().url());
-    if (url.searchParams.get("refresh") === "true") refreshed = true;
+    const snapshot =
+      url.searchParams.get("refresh") === "true"
+        ? 3
+        : Number(url.searchParams.get("snapshot") ?? 2);
     const start = Number(url.searchParams.get("cursor") ?? 0);
+    if (url.searchParams.get("refresh") === "true") {
+      refreshed = true;
+      await refreshGate;
+    }
+    if (snapshot === 3 && start === 100) {
+      rebuilding = true;
+      await pageGate;
+    }
     rereads.push(`${start}:${url.searchParams.get("snapshot")}`);
     const items = Array.from({ length: Math.min(20, 320 - start) }, (_, i) => ({
       ...activity,
       key: `large-${start + i}`,
-      version: refreshed ? 3 : 2,
+      // Refresh uses the archive's ascending (occurred_at, key) order to detect removed targets.
+      occurred_at: new Date(Date.parse(now) + (start + i) * 1000).toISOString(),
+      version: snapshot,
       body: `归档正文 ${start + i}`,
-      body_length: 20,
+      body_length: `归档正文 ${start + i}`.length,
     }));
     return route.fulfill({
       json: {
-        items,
-        snapshot: refreshed ? 3 : 2,
-        total: 320,
-        next_cursor: start + 20 < 320 ? String(start + 20) : null,
-        has_more: start + 20 < 320,
-        sources: [],
-        changes: refreshed ? { edited: 1 } : {},
+        ...activityPage(items, start, 320, snapshot),
+        changes: snapshot === 3 ? { edited: 1 } : {},
       },
     });
   });
@@ -1125,11 +2294,483 @@ test("large activity stays windowed, re-reads evicted pages, and refreshes expli
   ).toBeLessThanOrEqual(60);
   expect((await page.locator(".detail-head").boundingBox())?.y).toBe(head?.y);
   await page.getByRole("button", { name: "刷新当前视图" }).click();
+  await expect.poll(() => refreshed).toBe(true);
+  // Move after both the first response and a later pinned page begin waiting. Neither may restore old pixels.
+  await root.evaluate(async (node) => {
+    node.scrollTop = node.scrollHeight;
+    for (let i = 0; i < 6; i++) await new Promise(requestAnimationFrame);
+  });
+  releaseRefresh();
+  await expect.poll(() => rebuilding).toBe(true);
+  const bounds = (await root.boundingBox())!;
+  await page.mouse.move(
+    bounds.x + bounds.width / 2,
+    bounds.y + bounds.height / 2,
+  );
+  await page.mouse.wheel(0, -3500);
+  const latest = await root.evaluate(async (node) => {
+    for (let i = 0; i < 6; i++) await new Promise(requestAnimationFrame);
+    const top = node.getBoundingClientRect().top + node.clientTop;
+    const entry = [
+      ...node.querySelectorAll<HTMLElement>("article[data-entry]"),
+    ].find((item) => {
+      const rect = item.parentElement!.getBoundingClientRect();
+      return rect.top >= top && rect.bottom <= top + node.clientHeight;
+    })!;
+    return {
+      key: entry.dataset.entry!,
+      offset: entry.getBoundingClientRect().top - top,
+    };
+  });
+  expect(Number(latest.key.slice("large-".length))).toBeGreaterThan(100);
+  expect(Number(latest.key.slice("large-".length))).toBeLessThan(300);
+  releasePage();
   await expect(
     page.getByRole("status").filter({ hasText: "快照更新" }),
   ).toBeVisible();
-  expect(refreshed).toBe(true);
+  const frames = await sampleReadingFrames(
+    root,
+    `[data-entry="${latest.key}"]`,
+  );
+  expect(
+    Math.max(
+      ...frames.offsets.map((offset) => Math.abs(offset - latest.offset)),
+    ),
+  ).toBeLessThan(2);
   expect(errors).toEqual([]);
+});
+
+for (const scenario of [
+  "messages",
+  "collapsed tool groups",
+  "expanded tool groups",
+]) {
+  test(`scrolling up from the conversation boundary keeps ${scenario} steady`, async ({
+    page,
+  }) => {
+    test.setTimeout(45000);
+    // Moving the mounted boundary must not change author headers or move results between calls and rows.
+    const tools = scenario !== "messages";
+    const expanded = scenario === "expanded tool groups";
+    const total = tools ? 180 : 320;
+    const errors: string[] = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+    page.on("console", (message) => {
+      if (message.type() === "error") errors.push(message.text());
+    });
+    await page.addInitScript(() => {
+      window.addEventListener("error", (event) => console.error(event.message));
+    });
+    await page.route("**/api/flows/42/activity?**", (route) => {
+      const start = Number(
+        new URL(route.request().url()).searchParams.get("cursor") ?? 0,
+      );
+      return route.fulfill({
+        json: activityPage(
+          Array.from({ length: 20 }, (_, i) => {
+            const n = start + i;
+            const message = expanded ? n === 179 : n % 20 === 19;
+            const body =
+              n % 5 === 0
+                ? `第 ${n} 条消息\n\n\`\`\`text\n${"检查变高会话的阅读位置\n".repeat(3 + (n % 11))}\`\`\``
+                : `第 ${n} 条消息。${"向上滚动时保留正文阅读位置。".repeat(1 + (n % 4))}`;
+            return {
+              ...activity,
+              key: `steady-${n}`,
+              source: tools ? "worker" : activity.source,
+              kind: tools
+                ? message
+                  ? "message"
+                  : n % 2
+                    ? "tool_result"
+                    : "tool_call"
+                : activity.kind,
+              title: tools ? "exec" : activity.title,
+              author: tools && !message && n % 2 ? "tool" : "assistant",
+              body,
+              body_length: body.length,
+              previous_version: null,
+              metadata: tools
+                ? {
+                    attempt_id: 1,
+                    session_id: "steady-tools",
+                    session_generation: 0,
+                    call_id: `call-${Math.floor(n / 2)}`,
+                  }
+                : {},
+            };
+          }),
+          start,
+          total,
+        ),
+      });
+    });
+    await page.goto("/#flow/42/conversation");
+    const root = page.locator(".detail-body");
+    await scrollToSnapshotEnd(page);
+    if (expanded)
+      await page
+        .getByRole("button", { name: /^工具活动/ })
+        .first()
+        .click();
+    await expect
+      .poll(
+        () =>
+          root.evaluate(async (element, total) => {
+            element.scrollTop = element.scrollHeight;
+            for (let i = 0; i < 4; i++)
+              await new Promise(requestAnimationFrame);
+            const bounds = element
+              .querySelector(`[data-entry="steady-${total - 1}"]`)
+              ?.getBoundingClientRect();
+            const viewport = element.getBoundingClientRect();
+            return Boolean(
+              bounds &&
+              bounds.top < viewport.bottom &&
+              bounds.bottom > viewport.top,
+            );
+          }, total),
+        { timeout: 15000, intervals: [100] },
+      )
+      .toBe(true);
+    const bounds = (await root.boundingBox())!;
+    await page.mouse.move(
+      bounds.x + bounds.width / 2,
+      bounds.y + bounds.height / 2,
+    );
+    for (let step = 0; step < 18; step++) {
+      // Sample during input too: a new body can outgrow its old position before the range settles.
+      const [frames] = await Promise.all([
+        root.evaluate(async (element) => {
+          let overlap = 0,
+            rows = 0,
+            bodies = 0,
+            emptyFrames = 0;
+          for (let frame = 0; frame < 18; frame++) {
+            await new Promise(requestAnimationFrame);
+            const viewport = element.getBoundingClientRect();
+            const mounted = [
+              ...element.querySelectorAll(
+                ".conversation-stream [data-window-row]",
+              ),
+            ];
+            const rectangles = mounted
+              .map((row) => row.getBoundingClientRect())
+              .filter((rectangle) => rectangle.height > 0);
+            // An empty window must not pass merely because there are no overlapping rows.
+            if (
+              !rectangles.some(
+                (row) => row.top < viewport.bottom && row.bottom > viewport.top,
+              )
+            )
+              emptyFrames++;
+            for (let i = 1; i < rectangles.length; i++) {
+              const previous = rectangles[i - 1],
+                current = rectangles[i];
+              if (
+                current.top < viewport.bottom &&
+                previous.bottom > viewport.top
+              )
+                overlap = Math.max(overlap, previous.bottom - current.top);
+            }
+            rows = Math.max(rows, mounted.length);
+            bodies = Math.max(
+              bodies,
+              element.querySelectorAll(
+                '.message-body, pre[aria-label="工具摘要"]',
+              ).length,
+            );
+          }
+          return { overlap, rows, bodies, emptyFrames };
+        }),
+        page.mouse.wheel(0, -240),
+      ]);
+      expect(
+        frames.overlap,
+        `Rows overlapped during wheel step ${step}`,
+      ).toBeLessThan(1);
+      expect(frames.rows).toBeLessThanOrEqual(60);
+      expect(frames.bodies).toBeLessThanOrEqual(60);
+      expect(frames.emptyFrames, `Empty window during wheel step ${step}`).toBe(
+        0,
+      );
+      const movement = await root.evaluate(async (element) => {
+        // Check several painted frames after input, not just the eventual final position.
+        for (let i = 0; i < 6; i++) await new Promise(requestAnimationFrame);
+        const top = element.getBoundingClientRect().top;
+        const anchor = [...element.querySelectorAll("[data-entry]")].find(
+          (row) => row.getBoundingClientRect().bottom > top + 100,
+        )!;
+        const positions: number[] = [];
+        for (let i = 0; i < 12; i++) {
+          await new Promise(requestAnimationFrame);
+          positions.push(anchor.getBoundingClientRect().top);
+        }
+        return Math.max(...positions) - Math.min(...positions);
+      });
+      expect(
+        movement,
+        `Reading anchor oscillated after wheel step ${step}`,
+      ).toBeLessThan(2);
+    }
+    expect(
+      await page.locator(".conversation-stream [data-window-row]").count(),
+    ).toBeLessThanOrEqual(60);
+    expect(errors).toEqual([]);
+  });
+}
+
+test("height changes above, within and below the reading row preserve its top through every frame", async ({
+  page,
+}) => {
+  // Unlike wheel-only checks, asymmetric expansion distinguishes anchoring from shifting by every height delta.
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.route("**/api/flows/42/activity?**", (route) => {
+    const start = Number(
+      new URL(route.request().url()).searchParams.get("cursor") ?? 0,
+    );
+    return route.fulfill({
+      json: activityPage(
+        Array.from({ length: Math.min(20, 100 - start) }, (_, i) => {
+          const n = start + i;
+          const body = `高度校准正文 ${n}。${"保留稳定阅读位置。".repeat(3)}`;
+          return {
+            ...activity,
+            key: `resize-${n}`,
+            author: n % 2 ? "reviewer" : "owner",
+            body,
+            body_length: body.length,
+            previous_version: null,
+            metadata: {
+              diagnostics: Array.from(
+                { length: 12 },
+                (_, i) => `${n}-${i} ${"完整来源信息。".repeat(4)}`,
+              ),
+            },
+          };
+        }),
+        start,
+        100,
+      ),
+    });
+  });
+  await page.goto("/#flow/42/conversation");
+  const root = page.locator(".detail-body");
+  await scrollToSnapshotEnd(page);
+  const key = await root.evaluate(async (node) => {
+    node.scrollTop = node.scrollHeight - 1800;
+    for (let i = 0; i < 6; i++) await new Promise(requestAnimationFrame);
+    const top = node.getBoundingClientRect().top + node.clientTop;
+    const bottom = top + node.clientHeight;
+    return [...node.querySelectorAll<HTMLElement>("article[data-entry]")].find(
+      (entry) => {
+        const rect = entry.parentElement!.getBoundingClientRect();
+        return rect.top >= top && rect.bottom <= bottom;
+      },
+    )!.dataset.entry!;
+  });
+  const index = Number(key.slice("resize-".length));
+  const anchor = page.locator(`article[data-entry="${key}"]`);
+  const before = await anchor.evaluate(
+    (entry) => entry.getBoundingClientRect().top,
+  );
+  for (const relative of [-2, 0, 2]) {
+    const toggle = page
+      .locator(`article[data-entry="resize-${index + relative}"]`)
+      .getByRole("button", { name: "来源信息与查询定位", exact: true });
+    await toggle.evaluate((button) => button.focus({ preventScroll: true }));
+    for (const expanded of ["true", "false"]) {
+      const [frames] = await Promise.all([
+        sampleReadingFrames(root, `article[data-entry="${key}"]`),
+        page.keyboard.press("Enter"),
+      ]);
+      await expect(toggle).toHaveAttribute("aria-expanded", expanded);
+      expect(
+        frames.overlap,
+        `Rows overlapped when row ${relative} changed height`,
+      ).toBeLessThan(1);
+      expect(
+        Math.max(...frames.positions.map((top) => Math.abs(top - before))),
+        `Offset changed when row ${relative} ${expanded === "true" ? "grew" : "shrank"}: ${JSON.stringify(frames.positions)}`,
+      ).toBeLessThan(2);
+    }
+  }
+  expect(errors).toEqual([]);
+});
+
+test("thread comments show archived code context automatically with optional line numbers and truncation", async ({
+  page,
+}) => {
+  // GitHub attaches diff hunks to comments, not to the empty thread container.
+  const hunk =
+    "@@ -94,2 +95,2 @@\n         self.gateway = gateway\n-        self.files = files\n+        self.files = self.gateway.files";
+  const replies = [
+    {
+      ...activity,
+      key: "inline-context",
+      kind: "inline_comment",
+      title: "",
+      body: "runtime.files 在哪里被使用",
+      body_length: 20,
+      previous_version: null,
+      metadata: {
+        path: "app/controler/runtime.py",
+        line: 196,
+        original_line: 96,
+        code_excerpt: hunk,
+        code_summary_truncated: false,
+      },
+    },
+    {
+      ...activity,
+      key: "inline-truncated",
+      author: "reviewer",
+      body: "历史代码片段",
+      body_length: 6,
+      previous_version: null,
+      url: "https://github.com/owner/agentflow/pull/87#discussion_r2",
+      metadata: {
+        path: "app/controler/workers/archived/long-file-name.py",
+        line: null,
+        code_excerpt:
+          "@@ -8,4 +9,4 @@\n context\n-old_value = 1\n+archived_value = 1",
+        code_summary_truncated: true,
+      },
+    },
+    {
+      ...activity,
+      key: "inline-unlocated",
+      author: "unknown-line-reviewer",
+      body: "评论行不可用",
+      body_length: 6,
+      previous_version: null,
+      url: "https://github.com/owner/agentflow/pull/87#discussion_r3",
+      metadata: {
+        path: "removed.py",
+        code_excerpt: "",
+        code_summary_truncated: true,
+      },
+    },
+    {
+      ...activity,
+      key: "inline-without-code",
+      author: "long-github-reviewer-name-for-wrapping",
+      deleted: true,
+      previous_version: null,
+    },
+  ];
+  await page.route("**/api/flows/42/activity?**", (route) => {
+    const parent = new URL(route.request().url()).searchParams.get("parent");
+    return route.fulfill({
+      json: activityPage(
+        parent
+          ? replies
+          : [
+              {
+                ...activity,
+                kind: "thread",
+                title: "",
+                body: "",
+                body_length: 0,
+              },
+            ],
+        0,
+        parent ? replies.length : 1,
+      ),
+    });
+  });
+  await page.goto("/#flow/42/conversation");
+  const contexts = page.getByRole("region", { name: "评审代码上下文" });
+  await expect(contexts).toHaveCount(3);
+  await expect(contexts.first()).toContainText("app/controler/runtime.py");
+  await expect(contexts.first()).toContainText("Line 96");
+  await expect(contexts.first()).not.toContainText("Line 196");
+  const diff = contexts.first().getByLabel("版本差异");
+  await expect(diff.locator(".diff-code-delete")).toHaveText(
+    "self.files = files",
+  );
+  await expect(diff.locator(".diff-code-insert")).toHaveText(
+    "self.files = self.gateway.files",
+  );
+  await expect(diff.locator(".diff-gutter-delete").first()).toHaveText("95");
+  await expect(diff.locator(".diff-gutter-insert").last()).toHaveText("96");
+  await expect(diff.locator(".diff-code-delete")).toHaveCSS(
+    "background-color",
+    "rgb(255, 235, 233)",
+  );
+  await expect(diff.locator(".diff-code-insert")).toHaveCSS(
+    "background-color",
+    "rgb(218, 251, 225)",
+  );
+  await expect(diff.locator(".diff-code-edit")).toHaveText("self.gateway.");
+  await expect(contexts.nth(1).locator(".diff-code-insert")).toHaveText(
+    "archived_value = 1",
+  );
+  await expect(
+    contexts.nth(1).locator(".diff-gutter-insert").last(),
+  ).toHaveText("10");
+  await expect(contexts.nth(1)).not.toContainText("Line");
+  await expect(
+    page.getByText("仅显示有限代码上下文。", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    contexts.nth(1).getByRole("link", { name: "在 GitHub 查看完整上下文" }),
+  ).toHaveAttribute("href", replies[1].url!);
+  await expect(contexts.last()).toContainText("无法定位评论行。");
+  await expect(contexts.last().getByLabel("版本差异")).toHaveCount(0);
+  await expect(
+    contexts.last().getByRole("link", { name: "在 GitHub 查看完整上下文" }),
+  ).toHaveAttribute("href", replies[2].url!);
+  await expect(
+    page.getByText("runtime.files 在哪里被使用", { exact: true }),
+  ).toBeVisible();
+  await expect(page.getByText("真实活动正文", { exact: true })).toBeVisible();
+  const replyArticles = page
+    .getByRole("region", { name: "线程回复", exact: true })
+    .getByRole("article");
+  await expect(replyArticles).toHaveCount(4);
+  await expect(replyArticles.locator(".message-avatar")).toHaveText([
+    "O",
+    "R",
+    "U",
+    "L",
+  ]);
+  await expect(
+    replyArticles.last().getByText("已删除", { exact: true }),
+  ).toBeVisible();
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: 1200 });
+    for (const [index, reply] of replies.entries()) {
+      const row = replyArticles.nth(index);
+      const avatar = await row.locator(".message-avatar").boundingBox();
+      const author = await row
+        .getByText(reply.author, { exact: true })
+        .boundingBox();
+      const body = await row
+        .getByText(reply.body, { exact: true })
+        .boundingBox();
+      const parentAvatar = await page
+        .locator("[data-entry='comment-1'] > .message-avatar")
+        .boundingBox();
+      expect(avatar!.width).toBeLessThan(parentAvatar!.width);
+      expect(avatar!.x).toBeLessThan(author!.x);
+      expect(Math.abs(author!.x - body!.x)).toBeLessThan(1);
+      expect(body!.y).toBeGreaterThanOrEqual(author!.y + author!.height);
+    }
+    expect(
+      await page.evaluate(() => document.documentElement.scrollWidth),
+    ).toBeLessThanOrEqual(width);
+    expect(
+      await diff.evaluate((node) => node.scrollWidth - node.clientWidth),
+    ).toBeLessThanOrEqual(1);
+    await page.locator("[data-entry='comment-1']").screenshot({
+      path: `../../../.amp/in/artifacts/thread-context-bounded-${width}.png`,
+    });
+    await contexts.last().screenshot({
+      path: `../../../.amp/in/artifacts/thread-context-unlocated-${width}.png`,
+    });
+  }
 });
 
 test("thread replies and body continuation use the pinned snapshot and Unicode offsets", async ({
@@ -1175,7 +2816,6 @@ test("thread replies and body continuation use the pinned snapshot and Unicode o
   await page.getByRole("tab", { name: "概览" }).click();
   await page.getByRole("tab", { name: "会话" }).click();
   await expect(page.getByText("后文", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "查看线程回复" }).click();
   await expect(page.getByText("线程回复正文", { exact: true })).toBeVisible();
   await page.setViewportSize({ width: 390, height: 844 });
   await page.getByRole("button", { name: "切换任务" }).click();
@@ -1211,14 +2851,14 @@ test("refresh resets reply cursors even when the thread version is unchanged", a
           items: [
             {
               ...activity,
-              key: `reply-${pinned}`,
-              body: `快照 ${pinned} 回复`,
+              key: `${cursor ? "next" : "reply"}-${pinned}`,
+              body: `快照 ${pinned}${cursor ? " 下一页" : ""} 回复`,
             },
           ],
           snapshot,
           total: 2,
-          has_more: true,
-          next_cursor: `reply-${pinned}`,
+          has_more: !cursor,
+          next_cursor: cursor ? null : `reply-${pinned}`,
           sources: [],
           changes: {},
         },
@@ -1237,17 +2877,26 @@ test("refresh resets reply cursors even when the thread version is unchanged", a
     });
   });
   await page.goto("/#flow/42/conversation");
-  await page.getByRole("button", { name: "查看线程回复" }).click();
   await expect(page.getByText("快照 2 回复", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "刷新当前视图" }).click();
+  await page.getByRole("button", { name: "下一页线程回复" }).click();
   await expect(
-    page.getByRole("button", { name: "查看线程回复" }),
+    page.getByText("快照 2 下一页 回复", { exact: true }),
   ).toBeVisible();
   await expect(page.getByText("快照 2 回复", { exact: true })).toHaveCount(0);
-  await page.getByRole("button", { name: "查看线程回复" }).click();
+  await page.getByRole("button", { name: "刷新当前视图" }).click();
   await expect(page.getByText("快照 3 回复", { exact: true })).toBeVisible();
+  await expect(
+    page.getByText("快照 2 下一页 回复", { exact: true }),
+  ).toHaveCount(0);
   await page.getByRole("button", { name: "下一页线程回复" }).click();
-  await expect.poll(() => reads).toEqual(["null:2", "null:3", "reply-3:3"]);
+  await expect(
+    page.getByText("快照 3 下一页 回复", { exact: true }),
+  ).toBeVisible();
+  await expect(page.getByText("快照 3 回复", { exact: true })).toHaveCount(0);
+  // StrictMode replays mount reads and aborts the first; only the cursor/snapshot pairs matter.
+  await expect
+    .poll(() => new Set(reads))
+    .toEqual(new Set(["null:2", "reply-2:2", "null:3", "reply-3:3"]));
   await expect(page.getByRole("alert")).toHaveCount(0);
 });
 
@@ -1663,6 +3312,205 @@ test("footnote labels cannot collide with repeated-reference suffixes", async ({
   }
 });
 
+test("consecutive actor operations collapse across pages and sources without hiding messages", async ({
+  page,
+}) => {
+  // A bot's Issue cross-reference and PR label can straddle pages; source changes must not split them.
+  const check = {
+    ...activity,
+    source: "commit.check_runs:head",
+    kind: "check",
+    author: "GitHub Actions",
+    body: "",
+    body_length: 0,
+    previous_version: null,
+  };
+  const checks = [
+    ["Images", "publish", "skipped"],
+    ["Operations validation", "recovery", "success"],
+    ["Images", "build", "success"],
+    ["Kubernetes templates", "render", "success"],
+    ["CI", "pytest", "failure"],
+    ["CI", "Ruff", "success"],
+    ["CI", "Frontend", "success"],
+    ["CI", "Mypy", "success"],
+    ["CI", "Build", "success"],
+  ].map(([workflow, title, conclusion], index) => {
+    const body = conclusion === "failure" ? "测试失败，请检查日志。" : "";
+    return {
+      ...check,
+      key: `check-${index}`,
+      title,
+      body,
+      body_length: Array.from(body).length,
+      occurred_at: new Date(Date.parse(now) + index * 1000).toISOString(),
+      url: `https://example.test/checks/${index}`,
+      metadata: { workflow_name: workflow, status: "completed", conclusion },
+    };
+  });
+  const event = {
+    ...activity,
+    source: "pr.timeline",
+    kind: "event",
+    author: "b1indsight-bot[bot]",
+    body: "",
+    body_length: 0,
+    previous_version: null,
+  };
+  const items = [
+    ...checks,
+    {
+      ...event,
+      key: "cross-reference",
+      source: "issue.timeline",
+      title: "cross-referenced",
+      occurred_at: "2026-10-24T21:02:30Z",
+      url: "https://github.com/b1indsight/agentflow/issues/88",
+      metadata: { event: "cross-referenced" },
+    },
+    {
+      ...event,
+      key: "label",
+      title: "labeled",
+      occurred_at: "2026-10-24T21:02:32Z",
+      url: "https://github.com/b1indsight/agentflow/pull/113",
+      metadata: { event: "labeled", label: "flow:in-review" },
+    },
+    {
+      ...activity,
+      key: "message",
+      source: check.source,
+      author: check.author,
+      occurred_at: "2026-10-24T21:02:33Z",
+      previous_version: null,
+    },
+    {
+      ...checks[0],
+      key: "after-message",
+      occurred_at: "2026-10-24T21:02:34Z",
+    },
+    {
+      ...checks[1],
+      key: "other-commit",
+      source: "commit.check_runs:other",
+      occurred_at: "2026-10-24T21:02:35Z",
+    },
+  ];
+  await page.route("**/api/flows/42/activity?**", (route) => {
+    const later = new URL(route.request().url()).searchParams.has("cursor");
+    return route.fulfill({
+      json: {
+        items: later ? items.slice(10) : items.slice(0, 10),
+        snapshot: 2,
+        total: items.length,
+        has_more: !later,
+        next_cursor: later ? null : "operations",
+        sources: [],
+        changes: {},
+      },
+    });
+  });
+  await page.goto("/#flow/42/conversation");
+  const group = page.getByRole("button", {
+    name: "操作记录 · 9 条",
+    exact: true,
+  });
+  const events = page
+    .locator("article[data-activity-summary='cross-reference']")
+    .getByRole("button", { name: "操作记录 · 2 条", exact: true });
+  await expect(group).toHaveAttribute("aria-expanded", "false");
+  await expect(events).toHaveAttribute("aria-expanded", "false");
+  await expect(
+    page.getByText("CI: pytest: failure", { exact: true }),
+  ).not.toBeVisible();
+  await expect(
+    page.getByText(checks[4].body, { exact: true }),
+  ).not.toBeVisible();
+  await expect(page.getByText(activity.body, { exact: true })).toBeVisible();
+  await expect(
+    page
+      .locator("article[data-activity-summary='after-message']")
+      .getByRole("button", { name: "操作记录 · 2 条", exact: true }),
+  ).toHaveAttribute("aria-expanded", "false");
+  for (const key of ["after-message", "other-commit"]) {
+    const row = page.locator(`article[data-entry='${key}']`);
+    await expect(row.locator(".event-action")).not.toBeVisible();
+  }
+  const capture = async (state: string) => {
+    const viewport = page.viewportSize()!;
+    // Element screenshots cannot capture content clipped by the shared scroll root.
+    await page.setViewportSize({ ...viewport, height: 2000 });
+    await page.locator(".conversation-stream").screenshot({
+      path: `../../../.amp/in/artifacts/activity-operations-cross-source-${state}.png`,
+    });
+    await page.setViewportSize(viewport);
+  };
+  await capture("desktop-collapsed");
+  await group.focus();
+  await page.keyboard.press("Enter");
+  await expect(group).toHaveAttribute("aria-expanded", "true");
+  await expect(page.getByText(checks[4].body, { exact: true })).toBeVisible();
+  for (const [index, check] of checks.entries()) {
+    const row = page.locator(`article[data-entry='${check.key}']`);
+    await expect(row.locator(".event-action")).toHaveText(
+      `${check.metadata.workflow_name}: ${check.title}: ${check.metadata.conclusion}`,
+    );
+    await expect(row.locator("time:visible")).toHaveText(
+      await page.evaluate(
+        (date) => new Date(date).toLocaleString(),
+        check.occurred_at,
+      ),
+    );
+    await expect(
+      row.getByRole("link", { name: "在 GitHub 中查看" }),
+    ).toHaveAttribute("href", `https://example.test/checks/${index}`);
+  }
+  await expect(
+    page.getByText("cross-referenced", { exact: true }),
+  ).not.toBeVisible();
+  await events.click();
+  await expect(
+    page.getByText("cross-referenced", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("添加标签：flow:in-review", { exact: true }),
+  ).toBeVisible();
+  for (const [key, url] of [
+    ["cross-reference", "https://github.com/b1indsight/agentflow/issues/88"],
+    ["label", "https://github.com/b1indsight/agentflow/pull/113"],
+  ]) {
+    await expect(
+      page
+        .locator(`article[data-entry='${key}']`)
+        .getByRole("link", { name: "在 GitHub 中查看" }),
+    ).toHaveAttribute("href", url);
+  }
+  await capture("desktop-expanded");
+  await events.click();
+  await page.getByRole("tab", { name: "概览" }).click();
+  await page.getByRole("tab", { name: "会话" }).click();
+  await expect(group).toHaveAttribute("aria-expanded", "false");
+  await expect(
+    page.getByText("CI: pytest: failure", { exact: true }),
+  ).not.toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await capture("mobile-collapsed");
+  await group.click();
+  await expect(
+    page.getByText("CI: pytest: failure", { exact: true }),
+  ).toBeVisible();
+  await events.click();
+  await expect(
+    page.getByText("cross-referenced", { exact: true }),
+  ).toBeVisible();
+  await capture("mobile-expanded");
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+  ).toBe(true);
+});
+
 test("assistant tools share one compact activity bar across pages without crossing turns", async ({
   page,
 }) => {
@@ -1814,17 +3662,14 @@ test("assistant tools share one compact activity bar across pages without crossi
     });
   });
   await page.goto("/#flow/42/conversation");
-  await expect(page.locator("[data-entry='orphan']")).toBeAttached();
+  await expect(page.locator("[data-activity-summary='orphan']")).toBeAttached();
   await expect(page.getByText("添加标签：flow", { exact: true })).toBeVisible();
   await expect(
     page.getByRole("heading", { name: /^(message|tool_result|exec|labeled)$/ }),
   ).toHaveCount(0);
-  await expect(page.locator("[data-entry='call-a']")).toHaveClass(
-    /continuation/,
-  );
-  await expect(page.locator("[data-entry='orphan']")).not.toHaveClass(
-    /continuation/,
-  );
+  await expect(
+    page.locator("[data-activity-summary='orphan']"),
+  ).not.toHaveClass(/continuation/);
   await expect(
     page.getByText("工作目录干净", { exact: true }),
   ).not.toBeVisible();
@@ -1867,18 +3712,21 @@ test("assistant tools share one compact activity bar across pages without crossi
   await expect(
     page.getByText("下一轮的目录", { exact: true }),
   ).not.toBeVisible();
-  await expect(page.locator(".tool-activity-body pre")).toHaveCount(4);
-  const callA = page.locator("article[data-entry='call-a']");
-  const callB = page.locator("article[data-entry='call-b']");
-  await expect(callA.getByText("工作目录干净", { exact: true })).toBeVisible();
-  await expect(callB.getByText("测试通过", { exact: true })).toBeVisible();
-  await expect(callA.locator("pre")).toHaveText([
+  await expect(page.locator(".tool-activity-body pre")).toHaveText([
     "exec git status --short",
     "工作目录干净",
+    "test pytest",
+    "测试通过",
   ]);
-  await expect(callB.locator("pre")).toHaveText(["test pytest", "测试通过"]);
-  await expect(callA.locator("blockquote")).toHaveText("工作目录干净");
-  await expect(callB.locator("blockquote")).toHaveText("测试通过");
+  const callA = page.locator("article[data-entry='call-a']");
+  const callB = page.locator("article[data-entry='call-b']");
+  await expect(callA).toHaveClass(/continuation/);
+  await expect(
+    page.locator("article[data-entry='result-a'] blockquote"),
+  ).toHaveText("工作目录干净");
+  await expect(
+    page.locator("article[data-entry='result-b'] blockquote"),
+  ).toHaveText("测试通过");
   await expect(page.locator(".tool-activity-body small")).toHaveCount(0);
   await expect(callA.locator(".tool-activity-body")).not.toContainText(
     "call-a",
@@ -1886,12 +3734,6 @@ test("assistant tools share one compact activity bar across pages without crossi
   await expect(callB.locator(".tool-activity-body")).not.toContainText(
     "call-b",
   );
-  await expect(
-    page.locator("article[data-entry='result-a']"),
-  ).not.toBeVisible();
-  await expect(
-    page.locator("article[data-entry='result-b']"),
-  ).not.toBeVisible();
   await page.setViewportSize({ width: 1440, height: 1100 });
   await captureOutput("desktop-expanded");
   await page.setViewportSize({ width: 390, height: 844 });
@@ -1910,9 +3752,7 @@ test("assistant tools share one compact activity bar across pages without crossi
   await page.setViewportSize({ width: 1440, height: 1100 });
   await page.getByRole("tab", { name: "概览" }).click();
   await page.getByRole("tab", { name: "会话" }).click();
-  await expect(page.getByText("工作目录干净", { exact: true })).toBeVisible();
-  await expect(page.getByText("测试通过", { exact: true })).toBeVisible();
-  await tools.click();
+  await expect(tools).toHaveAttribute("aria-expanded", "false");
   await expect(
     page.getByText("工作目录干净", { exact: true }),
   ).not.toBeVisible();
@@ -1926,11 +3766,11 @@ test("assistant tools share one compact activity bar across pages without crossi
   await expect(page.getByText("下一轮的目录", { exact: true })).toBeVisible();
   await expect(
     page
-      .locator("article[data-entry='next-call']")
+      .locator("article[data-entry='next-result']")
       .getByText("下一轮的目录", { exact: true }),
   ).toBeVisible();
   await page
-    .locator("[data-entry='orphan']")
+    .locator("[data-activity-summary='orphan']")
     .getByRole("button", { name: /^工具活动/ })
     .click();
   await expect(
@@ -1949,28 +3789,493 @@ test("assistant tools share one compact activity bar across pages without crossi
   expect(errors).toEqual([]);
 });
 
+for (const kind of ["tool", "operation"] as const) {
+  test(`folded ${kind} history automatically continues through unchanged display rows`, async ({
+    page,
+  }) => {
+    // A long worker turn or bot-event burst adds no visible rows when another page only extends its summary.
+    const errors: string[] = [],
+      continuations: string[] = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+    await page.route("**/api/flows/42/activity?**", async (route) => {
+      const url = new URL(route.request().url());
+      const start = Number(url.searchParams.get("cursor") ?? 0);
+      if (start)
+        continuations.push(`${start}:${url.searchParams.get("snapshot")}`);
+      return route.fulfill({
+        json: activityPage(
+          Array.from({ length: Math.min(20, 121 - start) }, (_, i) => {
+            const n = start + i;
+            if (n === 120) {
+              const body = "折叠记录之后的正文";
+              return {
+                ...activity,
+                key: "after-folded",
+                body,
+                body_length: body.length,
+                previous_version: null,
+              };
+            }
+            const body = kind === "tool" ? `折叠工具记录 ${n}` : "";
+            return {
+              ...activity,
+              key: `folded-${n}`,
+              source:
+                kind === "tool"
+                  ? "worker"
+                  : n % 2
+                    ? "pr.timeline"
+                    : "issue.timeline",
+              kind:
+                kind === "tool"
+                  ? n % 2
+                    ? "tool_result"
+                    : "tool_call"
+                  : "event",
+              author:
+                kind === "tool" ? (n % 2 ? "tool" : "assistant") : "bot[bot]",
+              title:
+                kind === "tool" ? (n % 2 ? "tool_result" : "exec") : "labeled",
+              occurred_at: new Date(Date.parse(now) + n * 1000).toISOString(),
+              body,
+              body_length: body.length,
+              previous_version: null,
+              metadata:
+                kind === "tool"
+                  ? {
+                      attempt_id: 1,
+                      session_id: "folded-history",
+                      session_generation: 0,
+                      call_id: `call-${Math.floor(n / 2)}`,
+                    }
+                  : { event: "labeled", label: `archive-${n}` },
+            };
+          }),
+          start,
+          121,
+        ),
+      });
+    });
+    await page.goto("/#flow/42/conversation");
+    // No scroll, expansion or manual load is needed to reach the message after the folded run.
+    await expect(
+      page.getByText("折叠记录之后的正文", { exact: true }),
+    ).toBeVisible();
+    const summary = page.getByRole("button", {
+      name: kind === "tool" ? /^工具活动/ : /^操作记录/,
+    });
+    await expect(summary).toHaveAccessibleName(
+      kind === "tool"
+        ? "工具活动 · 60 次调用 · 60 条结果"
+        : "操作记录 · 120 条",
+    );
+    await expect(summary).toHaveAttribute("aria-expanded", "false");
+    await expect(summary).toBeInViewport();
+    expect(continuations).toEqual(
+      Array.from({ length: 6 }, (_, i) => `${(i + 1) * 20}:2`),
+    );
+    await expect(page.locator('article[data-entry^="folded-"]')).toHaveCount(0);
+    await expect(
+      page.getByRole("button", { name: "已到当前本地快照末尾 · 点击刷新" }),
+    ).toBeVisible();
+    expect(errors).toEqual([]);
+  });
+}
+
+for (const change of [
+  "prepending a member",
+  "replacing the old first member",
+] as const) {
+  test(`snapshot refresh preserves visible expanded tool bodies and offsets after ${change}`, async ({
+    page,
+  }) => {
+    // Archive backfills can precede the output being read, and a stale first record can disappear.
+    const errors: string[] = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+    const records = Array.from({ length: 52 }, (_, n) => {
+      const unrelated = n >= 12 && n < 20;
+      const main = n >= 20 && n < 36;
+      const tool = unrelated || main;
+      const member = unrelated ? n - 12 : n - 20;
+      const session = unrelated ? "refresh-unrelated" : "refresh-main";
+      const body = tool
+        ? `${unrelated ? "无关工具正文" : "刷新工具正文"} ${member}\n${"刷新时保留正在阅读的工具输出。\n".repeat(5)}`
+        : `刷新普通正文 ${n}。${"保留本行阅读位置。".repeat(4)}`;
+      return {
+        ...activity,
+        key: tool ? `${session}-${member}` : `refresh-message-${n}`,
+        source: tool ? "worker" : activity.source,
+        kind: tool ? (member % 2 ? "tool_result" : "tool_call") : "comment",
+        author: tool
+          ? member % 2
+            ? "tool"
+            : "assistant"
+          : n % 2
+            ? "reviewer"
+            : "owner",
+        title: tool ? (member % 2 ? "tool_result" : "exec") : "评论",
+        // Numeric key suffixes are not archive ordering; every record has its real ascending time.
+        occurred_at: new Date(Date.parse(now) + n * 1000).toISOString(),
+        body,
+        body_length: body.length,
+        previous_version: null,
+        metadata: tool
+          ? {
+              attempt_id: 1,
+              session_id: session,
+              session_generation: 0,
+              call_id: `${session}-call-${Math.floor(member / 2)}`,
+            }
+          : {},
+      };
+    });
+    const original = records.filter((_, n) => n < 16 || n >= 20);
+    const body = "补采的更早工具调用\n保留后面的可见工具正文。";
+    const earlier = {
+      ...records[20],
+      key: "refresh-earlier",
+      occurred_at: new Date(Date.parse(now) + 19500).toISOString(),
+      body,
+      body_length: body.length,
+      metadata: { ...records[20].metadata, call_id: "backfilled-call" },
+    };
+    const removeFirst = change === "replacing the old first member";
+    // Extra unrelated records occupy the main group's former raw indexes; they must not inherit its expansion.
+    const refreshed = [
+      ...records.slice(0, 20),
+      earlier,
+      ...records.slice(removeFirst ? 21 : 20),
+    ];
+    await page.route("**/api/flows/42/activity?**", (route) => {
+      const url = new URL(route.request().url());
+      const snapshot =
+        url.searchParams.get("refresh") === "true"
+          ? 3
+          : Number(url.searchParams.get("snapshot") ?? 2);
+      const start = Number(url.searchParams.get("cursor") ?? 0);
+      const items = snapshot === 3 ? refreshed : original;
+      return route.fulfill({
+        json: {
+          ...activityPage(
+            items
+              .slice(start, start + 20)
+              .map((entry) => ({ ...entry, version: snapshot })),
+            start,
+            items.length,
+            snapshot,
+          ),
+          changes:
+            snapshot === 3 ? { added: 5, removed: removeFirst ? 1 : 0 } : {},
+        },
+      });
+    });
+    await page.goto("/#flow/42/conversation");
+    const root = page.locator(".detail-body");
+    await scrollToSnapshotEnd(page);
+    const main = page.getByRole("button", {
+      name: "工具活动 · 8 次调用 · 8 条结果",
+      exact: true,
+    });
+    await expect(
+      page.getByRole("button", {
+        name: "工具活动 · 2 次调用 · 2 条结果",
+        exact: true,
+      }),
+    ).toHaveAttribute("aria-expanded", "false");
+    await main.click();
+    const target = page.locator('article[data-entry="refresh-main-8"]');
+    await expect(target.locator("pre")).toContainText("刷新工具正文 8");
+    const before = await target.evaluate(async (entry) => {
+      const node = entry.closest<HTMLElement>("[data-scroll-root]")!;
+      const row = entry.closest("[data-window-row]")!;
+      const previous = node
+        .querySelector('[data-entry="refresh-main-7"]')!
+        .closest("[data-window-row]")!;
+      node.scrollTop +=
+        row.getBoundingClientRect().top -
+        node.getBoundingClientRect().top -
+        node.clientTop -
+        previous.getBoundingClientRect().height / 2;
+      for (let frame = 0; frame < 6; frame++)
+        await new Promise(requestAnimationFrame);
+      const top = node.getBoundingClientRect().top + node.clientTop;
+      const first = [
+        ...node.querySelectorAll(".conversation-stream [data-window-row]"),
+      ].find((item) => {
+        const bounds = item.getBoundingClientRect();
+        return bounds.top >= top && bounds.bottom <= top + node.clientHeight;
+      });
+      return {
+        offset: row.getBoundingClientRect().top - top,
+        first: first?.querySelector<HTMLElement>("article")?.dataset.entry,
+      };
+    });
+    expect(before.first).toBe("refresh-main-8");
+    await expect(
+      page.locator('article[data-entry="refresh-main-0"]'),
+    ).not.toBeInViewport();
+    await page.getByRole("button", { name: "刷新当前视图" }).click();
+    await expect(
+      page.getByRole("status").filter({ hasText: "快照更新" }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", {
+        name: `工具活动 · ${removeFirst ? 8 : 9} 次调用 · 8 条结果`,
+        exact: true,
+      }),
+    ).toHaveAttribute("aria-expanded", "true");
+    await expect(target.locator("pre")).toContainText("刷新工具正文 8");
+    await expect(target).toBeInViewport();
+    await expect
+      .poll(() =>
+        target.evaluate((entry, offset) => {
+          const node = entry.closest<HTMLElement>("[data-scroll-root]")!;
+          return Math.abs(
+            entry.closest("[data-window-row]")!.getBoundingClientRect().top -
+              node.getBoundingClientRect().top -
+              node.clientTop -
+              offset,
+          );
+        }, before.offset),
+      )
+      .toBeLessThan(2);
+    await expect(
+      page.getByRole("button", {
+        name: "工具活动 · 4 次调用 · 4 条结果",
+        exact: true,
+      }),
+    ).toHaveAttribute("aria-expanded", "false");
+    await expect(
+      page.locator('article[data-entry^="refresh-unrelated-"]'),
+    ).toHaveCount(0);
+    if (removeFirst)
+      await expect(
+        page.locator('article[data-entry="refresh-main-0"]'),
+      ).toHaveCount(0);
+    expect(errors).toEqual([]);
+  });
+}
+
+for (const reading of [
+  "tool body",
+  "tall tool body",
+  "following message",
+] as const) {
+  test(`conversation tab re-entry folds groups and restores the ${reading} logical offset in a virtual list`, async ({
+    page,
+  }) => {
+    test.setTimeout(45000);
+    // Leaving a long conversation folds its tools; restoring old pixels would land on unrelated later messages.
+    const errors: string[] = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+    const tall = reading === "tall tool body";
+    const records = Array.from({ length: 200 }, (_, n) => {
+      const tool = n >= 90 && n < 110;
+      const body = tool
+        ? `重返工具正文 ${n}\n${"切换标签页后继续阅读同一位置。\n".repeat(tall && n === 96 ? 100 : 5)}`
+        : `重返普通正文 ${n}。${"前后消息让折叠后的目标偏移仍然可达。".repeat(3)}`;
+      return {
+        ...activity,
+        key: `reentry-${n}`,
+        source: tool ? "worker" : activity.source,
+        kind: tool ? (n % 2 ? "tool_result" : "tool_call") : "comment",
+        author: tool
+          ? n % 2
+            ? "tool"
+            : "assistant"
+          : n % 2
+            ? "reviewer"
+            : "owner",
+        title: tool ? (n % 2 ? "tool_result" : "exec") : "评论",
+        occurred_at: new Date(Date.parse(now) + n * 1000).toISOString(),
+        body,
+        body_length: body.length,
+        previous_version: null,
+        metadata: tool
+          ? {
+              attempt_id: 1,
+              session_id: "tab-reentry",
+              session_generation: 0,
+              call_id: `call-${Math.floor(n / 2)}`,
+            }
+          : {},
+      };
+    });
+    await page.route("**/api/flows/42/activity?**", (route) => {
+      const start = Number(
+        new URL(route.request().url()).searchParams.get("cursor") ?? 0,
+      );
+      return route.fulfill({
+        json: activityPage(
+          records.slice(start, start + 20),
+          start,
+          records.length,
+        ),
+      });
+    });
+    await page.goto("/#flow/42/conversation");
+    const root = page.locator(".detail-body");
+    const list = page.locator('[data-window-list="会话活动"]');
+    await scrollToSnapshotEnd(page);
+    await expect(list).toHaveAttribute("data-window-count", "181");
+    await expect(list).toHaveClass(/virtual-list/);
+    await root.evaluate((node) => {
+      node.scrollTop = 0;
+    });
+    const bar = page.getByRole("button", {
+      name: "工具活动 · 10 次调用 · 10 条结果",
+      exact: true,
+    });
+    // Both targets are known but unmounted, not merely absent because their API pages are unread.
+    await expect(bar).toHaveCount(0);
+    await expect(page.locator('article[data-entry="reentry-110"]')).toHaveCount(
+      0,
+    );
+    expect(
+      await list.locator(":scope > [data-window-row]").count(),
+    ).toBeLessThanOrEqual(60);
+    await expect
+      .poll(
+        async () => {
+          if (!(await bar.count()))
+            await root.evaluate((node) => {
+              node.scrollTop += node.clientHeight;
+            });
+          return bar.count();
+        },
+        { timeout: 15000, intervals: [100] },
+      )
+      .toBe(1);
+    await bar.click();
+    await expect(bar).toHaveAttribute("aria-expanded", "true");
+    await expect(list).toHaveAttribute("data-window-count", "201");
+    const targetIndex = reading === "following message" ? 110 : 96;
+    const target = page.locator(`article[data-entry="reentry-${targetIndex}"]`);
+    await expect
+      .poll(
+        async () => {
+          if (!(await target.count()))
+            await root.evaluate((node) => {
+              node.scrollTop += node.clientHeight / 2;
+            });
+          return target.count();
+        },
+        { timeout: 15000, intervals: [100] },
+      )
+      .toBe(1);
+    const before = await target.evaluate(
+      async (entry, { index, tall }) => {
+        const node = entry.closest<HTMLElement>("[data-scroll-root]")!;
+        const row = entry.closest("[data-window-row]")!;
+        const previous = node
+          .querySelector(`[data-entry="reentry-${index - 1}"]`)!
+          .closest("[data-window-row]")!;
+        // A tall body leaves no complete row; otherwise half the preceding tool remains visible.
+        const offset = tall
+          ? -node.clientHeight / 2
+          : previous.getBoundingClientRect().height / 2;
+        node.scrollTop +=
+          row.getBoundingClientRect().top -
+          node.getBoundingClientRect().top -
+          node.clientTop -
+          offset;
+        for (let frame = 0; frame < 6; frame++)
+          await new Promise(requestAnimationFrame);
+        const top = node.getBoundingClientRect().top + node.clientTop;
+        const rows = [
+          ...node.querySelectorAll(".conversation-stream [data-window-row]"),
+        ];
+        const first =
+          rows.find((item) => {
+            const bounds = item.getBoundingClientRect();
+            return (
+              bounds.top >= top && bounds.bottom <= top + node.clientHeight
+            );
+          }) ??
+          rows.find((item) => {
+            const bounds = item.getBoundingClientRect();
+            return bounds.bottom > top && bounds.top < top + node.clientHeight;
+          });
+        return {
+          offset: row.getBoundingClientRect().top - top,
+          first: first?.querySelector<HTMLElement>("article")?.dataset.entry,
+          previousTop: previous.getBoundingClientRect().top - top,
+          previousBottom: previous.getBoundingClientRect().bottom - top,
+        };
+      },
+      { index: targetIndex, tall },
+    );
+    expect(before.first).toBe(`reentry-${targetIndex}`);
+    expect(before.previousTop).toBeLessThan(0);
+    if (tall) expect(before.previousBottom).toBeLessThanOrEqual(0);
+    else expect(before.previousBottom).toBeGreaterThan(0);
+    await expect(target).toBeInViewport();
+    await expect(bar).toHaveAttribute("aria-expanded", "true");
+    await page.getByRole("tab", { name: "概览" }).click();
+    await expect(page.getByRole("heading", { name: "任务信息" })).toBeVisible();
+    await page.getByRole("tab", { name: "会话" }).click();
+    await expect(list).toHaveAttribute("data-window-count", "181");
+    await expect(bar).toHaveAttribute("aria-expanded", "false");
+    await expect(list.locator(".tool-activity-body")).toHaveCount(0);
+    const restored = reading === "following message" ? target : bar;
+    // A short summary must be visible even when the former body began above the viewport.
+    const expectedOffset = tall ? 0 : before.offset;
+    await expect(restored).toBeInViewport();
+    await expect
+      .poll(() =>
+        restored.evaluate((entry, offset) => {
+          const node = entry.closest<HTMLElement>("[data-scroll-root]")!;
+          return Math.abs(
+            entry.closest("[data-window-row]")!.getBoundingClientRect().top -
+              node.getBoundingClientRect().top -
+              node.clientTop -
+              offset,
+          );
+        }, expectedOffset),
+      )
+      .toBeLessThan(2);
+    const frames = await sampleReadingFrames(
+      root,
+      reading === "following message"
+        ? `[data-window-row]:has([data-entry="reentry-${targetIndex}"])`
+        : '[data-window-row]:has([data-activity-summary="reentry-90"])',
+    );
+    expect(
+      Math.max(
+        ...frames.offsets.map((offset) => Math.abs(offset - expectedOffset)),
+      ),
+    ).toBeLessThan(2);
+    expect(frames.mounted).toBeLessThanOrEqual(60);
+    // Prefix and suffix messages keep the expected offset away from unavoidable boundary clamping.
+    expect(frames.scrollTop).toBeGreaterThan(0);
+    expect(frames.scrollTop).toBeLessThan(frames.maxScroll);
+    expect(errors).toEqual([]);
+  });
+}
+
 test("long tool activity remains bounded and readable across virtual windows", async ({
   page,
 }) => {
-  // A long uninterrupted tool run must not bypass the raw-row mounting budget when opened.
-  const errors: string[] = [];
+  // The group outlives the 240-body cache without changing statistics or fetching bodies while folded.
+  const errors: string[] = [],
+    rereads: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
   await page.route("**/api/flows/42/activity?**", (route) => {
-    const start = Number(
-      new URL(route.request().url()).searchParams.get("cursor") ?? 0,
-    );
+    const url = new URL(route.request().url());
+    const start = Number(url.searchParams.get("cursor") ?? 0);
+    rereads.push(`${start}:${url.searchParams.get("snapshot")}`);
     return route.fulfill({
-      json: {
-        items: Array.from({ length: Math.min(20, 141 - start) }, (_, index) => {
+      json: activityPage(
+        Array.from({ length: Math.min(20, 321 - start) }, (_, index) => {
           const n = start + index;
-          const body = n === 140 ? "本轮全部完成" : `工具记录 ${n}`;
+          const body = n === 320 ? "本轮全部完成" : `工具记录 ${n}`;
           return {
             ...activity,
             key: `tool-run-${n}`,
             source: "worker",
             author: n % 2 ? "tool" : "assistant",
-            kind: n === 140 ? "message" : n % 2 ? "tool_result" : "tool_call",
-            title: n === 140 ? "message" : n % 2 ? "tool_result" : "exec",
+            kind: n === 320 ? "message" : n % 2 ? "tool_result" : "tool_call",
+            title: n === 320 ? "message" : n % 2 ? "tool_result" : "exec",
             body,
             body_length: body.length,
             previous_version: null,
@@ -1979,39 +4284,50 @@ test("long tool activity remains bounded and readable across virtual windows", a
               session_id: "long-tools",
               session_generation: 0,
               call_id: `call-${Math.floor(n / 2)}`,
+              archive_locator: `tool-source-${n}`,
             },
           };
         }),
-        snapshot: 2,
-        total: 141,
-        next_cursor: start + 20 < 141 ? String(start + 20) : null,
-        has_more: start + 20 < 141,
-        sources: [],
-        changes: {},
-      },
+        start,
+        321,
+      ),
     });
   });
   await page.goto("/#flow/42/conversation");
   const root = page.locator(".detail-body");
   const list = page.locator('[data-window-list="会话活动"]');
-  await expect
-    .poll(
-      async () => {
-        await root.evaluate((e) => {
-          e.scrollTop = e.scrollHeight;
-        });
-        return list.getAttribute("data-window-count");
-      },
-      { timeout: 15000 },
-    )
-    .toBe("141");
+  await scrollToSnapshotEnd(page);
+  await expect(list).toHaveAttribute("data-window-count", "2");
   await root.evaluate((e) => {
     e.scrollTop = 0;
   });
   const bar = page.getByRole("button", { name: /^工具活动/ }).first();
+  await expect(bar).toHaveAccessibleName("工具活动 · 160 次调用 · 160 条结果");
   await expect(bar).toHaveAttribute("aria-expanded", "false");
+  expect(rereads.filter((read) => read === "0:2")).toHaveLength(0);
   await bar.click();
   await expect(page.getByText("工具记录 0", { exact: true })).toBeVisible();
+  expect(rereads.filter((read) => read === "0:2").length).toBeGreaterThan(0);
+  const source = page
+    .locator('article[data-entry="tool-run-0"]')
+    .getByRole("button", {
+      name: "来源信息与查询定位 · 321 条记录",
+      exact: true,
+    });
+  await source.click();
+  await expect(page.getByRole("group", { name: "来源记录分页" })).toContainText(
+    "记录 1–20 / 321",
+  );
+  await page
+    .getByRole("button", { name: "下一页来源记录", exact: true })
+    .click();
+  await expect(page.getByRole("group", { name: "来源记录分页" })).toContainText(
+    "记录 21–40 / 321",
+  );
+  await expect(
+    page.locator('article[data-entry="tool-run-0"] .message-provenance'),
+  ).toContainText('"archive_locator": "tool-source-20"');
+  await source.click();
   await expect
     .poll(async () => {
       await root.evaluate(async (e) => {
@@ -2023,7 +4339,7 @@ test("long tool activity remains bounded and readable across virtual windows", a
       });
       // Measured tool rows can grow after scrolling; reach the final message as well.
       return (
-        (await page.getByText("工具记录 139", { exact: true }).isVisible()) &&
+        (await page.getByText("工具记录 319", { exact: true }).isVisible()) &&
         (await page.getByText("本轮全部完成", { exact: true }).isVisible())
       );
     })
@@ -2034,6 +4350,138 @@ test("long tool activity remains bounded and readable across virtual windows", a
   ).toBeLessThanOrEqual(60);
   expect(errors).toEqual([]);
 });
+
+for (const [expandedRows, width] of [
+  [59, 1440],
+  [60, 1440],
+  [61, 1440],
+  [61, 390],
+]) {
+  test(`whole-group visibility and collapse preserve reading at ${expandedRows} rows, ${width}px`, async ({
+    page,
+  }) => {
+    // A prefix makes the replacement summary's inherited offset reachable after removing the anchor.
+    await page.setViewportSize({ width, height: 900 });
+    const records = Array.from({ length: expandedRows - 1 }, (_, n) => {
+      const tool = n >= 12 && n < 32;
+      const body = tool
+        ? `工具正文 ${n}\n${"保持工具输出可读。\n".repeat(5)}`
+        : `普通正文 ${n}。${"保留本行阅读位置。".repeat(5)}`;
+      return {
+        ...activity,
+        key: `visibility-${n}`,
+        source: tool ? "worker" : activity.source,
+        kind: tool ? (n % 2 ? "tool_result" : "tool_call") : "comment",
+        author: tool ? (n % 2 ? "tool" : "assistant") : "owner",
+        title: tool ? "exec" : "评论",
+        body,
+        body_length: body.length,
+        previous_version: null,
+        metadata: tool
+          ? {
+              attempt_id: 1,
+              session_id: "visibility",
+              session_generation: 0,
+              call_id: `visibility-call-${Math.floor(n / 2)}`,
+            }
+          : {},
+      };
+    });
+    await page.route("**/api/flows/42/activity?**", (route) => {
+      const start = Number(
+        new URL(route.request().url()).searchParams.get("cursor") ?? 0,
+      );
+      return route.fulfill({
+        json: activityPage(
+          records.slice(start, start + 20),
+          start,
+          records.length,
+        ),
+      });
+    });
+    await page.goto("/#flow/42/conversation");
+    const root = page.locator(".detail-body");
+    const list = page.locator('[data-window-list="会话活动"]');
+    await scrollToSnapshotEnd(page);
+    const bar = page.getByRole("button", {
+      name: "工具活动 · 10 次调用 · 10 条结果",
+      exact: true,
+    });
+    await expect(bar).toHaveAttribute("aria-expanded", "false");
+    await bar.click();
+    await expect(list).toHaveAttribute(
+      "data-window-count",
+      String(expandedRows),
+    );
+    await expect(bar).toBeFocused();
+    await expect(page.getByText(/^工具正文 12/)).toBeVisible();
+    await bar.evaluate((button) => {
+      const root = button.closest<HTMLElement>("[data-scroll-root]")!;
+      const row = button.closest("[data-window-row]")!;
+      root.scrollTop +=
+        row.getBoundingClientRect().bottom -
+        root.getBoundingClientRect().top +
+        30;
+    });
+    await expect(bar).not.toBeInViewport();
+    await expect(bar).toHaveAttribute("aria-expanded", "true");
+    const offset = await root.evaluate((node) => {
+      const top = node.getBoundingClientRect().top + node.clientTop;
+      const bottom = Math.min(top + node.clientHeight, innerHeight);
+      const first = [...node.querySelectorAll("[data-window-row]")].find(
+        (row) => {
+          const rect = row.getBoundingClientRect();
+          return rect.height > 0 && rect.top >= top && rect.bottom <= bottom;
+        },
+      )!;
+      return first.getBoundingClientRect().top - top;
+    });
+    // Enter on the still-focused, offscreen summary must not scroll it into view before collapsing.
+    await page.keyboard.press("Enter");
+    await expect(bar).toHaveAttribute("aria-expanded", "false");
+    await expect
+      .poll(() =>
+        bar.evaluate((button, offset) => {
+          const root = button.closest<HTMLElement>("[data-scroll-root]")!;
+          return Math.abs(
+            button.closest("[data-window-row]")!.getBoundingClientRect().top -
+              root.getBoundingClientRect().top -
+              root.clientTop -
+              offset,
+          );
+        }, offset),
+      )
+      .toBeLessThan(2);
+    await bar.click();
+    await expect(bar).toHaveAttribute("aria-expanded", "true");
+    await root.evaluate((node) => {
+      node.scrollTop = node.scrollHeight;
+    });
+    // Focus pins and overscan are not visibility: all member bodies are now above the viewport.
+    await expect(bar).toHaveAttribute("aria-expanded", "false");
+    await expect(
+      page.getByText(new RegExp(`^普通正文 ${records.length - 1}。`)),
+    ).toBeVisible();
+    await bar.scrollIntoViewIfNeeded();
+    await expect(bar).toHaveAttribute("aria-expanded", "false");
+    await bar.click();
+    await expect(bar).toHaveAttribute("aria-expanded", "true");
+    await root.evaluate((node) => {
+      node.scrollTop = 0;
+    });
+    // The same reset applies when the entire group is below the viewport, not only above it.
+    await expect(bar).toHaveAttribute("aria-expanded", "false");
+    await expect(page.getByText(/^普通正文 0。/)).toBeInViewport();
+    await bar.scrollIntoViewIfNeeded();
+    await expect(bar).toHaveAttribute("aria-expanded", "false");
+    expect(
+      await list.locator(":scope > [data-window-row]").count(),
+    ).toBeLessThanOrEqual(60);
+    expect(
+      await list.locator('.message-body, pre[aria-label="工具摘要"]').count(),
+    ).toBeLessThanOrEqual(60);
+  });
+}
 
 test("mobile detail header contracts to one line without losing reading position", async ({
   page,
@@ -2113,4 +4561,529 @@ test("mobile detail header contracts to one line without losing reading position
     e.scrollTop = 420;
   });
   await expect(head).not.toHaveClass(/compact/);
+});
+
+for (const width of [1440, 390]) {
+  test(`direct Flow creation preserves content, prevents duplicate writes and opens filtered-out detail at ${width}px`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 900 });
+    const body =
+      "\r\n  为零历史仓库添加分页 😀  \r\n\r\n保留 **完整任务**。\r\n<script>alert('unsafe')</script>\r\n";
+    const visibleBody = body.replace(/\r\n/g, "\n");
+    const title = "服务器生成：完善仓库分页";
+    let posts = 0;
+    let boardReads = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let created: FlowDetail = {
+      ...blockedFlow,
+      id: 91,
+      repo: "fresh/no-history",
+      issue_number: null,
+      issue_url: null,
+      pr_number: null,
+      pr_url: null,
+      title: null,
+      lifecycle: "queued",
+      phase: "queued",
+      action: "等待空闲 Worker",
+      reason: "任务已排队",
+      next_condition: "等待空闲 Worker",
+      task_content: body,
+    };
+    await page.route("**/api/flows?**", (route) => {
+      boardReads++;
+      return route.fulfill({
+        json: {
+          items: [],
+          counts: { queued: 0, running: 0, review: 0, blocked: 0, archived: 0 },
+          has_more: false,
+          next_cursor: null,
+        },
+      });
+    });
+    await page.route("**/api/flow-targets**", (route) =>
+      route.fulfill({
+        json: {
+          items: [{ repo: created.repo, installation_id: 71 }],
+          next_cursor: null,
+          has_more: false,
+        },
+      }),
+    );
+    await page.route("**/api/flows/91", (route) =>
+      route.fulfill({ json: created }),
+    );
+    await page.route(/\/api\/flows$/, async (route) => {
+      posts++;
+      expect(route.request().postDataJSON()).toEqual({
+        repo: created.repo,
+        installation_id: 71,
+        task_content: body,
+      });
+      await gate;
+      return route.fulfill({ status: 201, json: created });
+    });
+    await page.goto("/console/?q=repo:old/only");
+    const trigger = page.getByRole("button", {
+      name: "新建 Flow",
+      exact: true,
+    });
+    await expect(trigger).toBeVisible();
+    await expect(trigger).toHaveText("");
+    await expect(trigger.locator("svg")).toHaveCount(1);
+    await page.screenshot({
+      path: `../../../.amp/in/artifacts/flow-create-board-${width}.png`,
+      animations: "disabled",
+    });
+    await trigger.click();
+    const dialog = page.getByRole("dialog", { name: "新建 Flow", exact: true });
+    const project = dialog.getByLabel("Project（代码仓库）");
+    await expect(project).toBeFocused();
+    const cancel = dialog.getByRole("button", { name: "取消", exact: true });
+    await expect(cancel).toHaveText("");
+    await expect(cancel).toHaveAttribute("title", "取消");
+    for (const button of [
+      cancel,
+      dialog.getByRole("button", { name: "开启 Flow", exact: true }),
+    ]) {
+      await expect(button).toHaveCSS("border-top-width", "0px");
+      await expect(button.locator("svg")).toHaveCount(1);
+    }
+    await project.selectOption({ label: created.repo });
+    const content = dialog.getByLabel("任务内容", { exact: true });
+    // Browser paste normally normalizes CRLF; the submitted string must retain the clipboard bytes.
+    await content.evaluate((input, text) => {
+      const clipboardData = new DataTransfer();
+      clipboardData.setData("text/plain", text);
+      input.dispatchEvent(
+        new ClipboardEvent("paste", {
+          clipboardData,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    }, body);
+    await expect(content).toHaveValue(visibleBody);
+    // Editing in the middle must preserve untouched CRLF lines and the caret position.
+    await content.evaluate((input) => {
+      if (!(input instanceof HTMLTextAreaElement))
+        throw new Error("Expected textarea");
+      const start = input.value.indexOf("完整任务");
+      input.focus();
+      input.setSelectionRange(start, start);
+    });
+    await page.keyboard.type("新");
+    await page.keyboard.press("Backspace");
+    await expect(content).toHaveValue(visibleBody);
+    await expect(dialog).toContainText("创建后由服务器生成标题");
+    await expect(dialog.getByLabel("标题预览")).toHaveCount(0);
+    await project.focus();
+    await page.keyboard.press("Tab");
+    await expect(
+      dialog.getByRole("button", { name: "重新读取项目", exact: true }),
+    ).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(dialog.getByLabel("任务内容", { exact: true })).toBeFocused();
+    await page.keyboard.press("Shift+Tab");
+    await expect(
+      dialog.getByRole("button", { name: "重新读取项目", exact: true }),
+    ).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(dialog).not.toBeVisible();
+    await expect(trigger).toBeFocused();
+    expect(posts).toBe(0);
+    await trigger.click();
+    await expect(dialog.getByLabel("任务内容", { exact: true })).toHaveValue(
+      visibleBody,
+    );
+    expect(
+      await dialog.evaluate((node) => node.scrollWidth <= node.clientWidth),
+    ).toBe(true);
+    await page.screenshot({
+      path: `../../../.amp/in/artifacts/task-text-form-${width}.png`,
+      animations: "disabled",
+    });
+    const readsBefore = boardReads;
+    await dialog
+      .getByRole("button", { name: "开启 Flow", exact: true })
+      .click();
+    await expect(
+      dialog.getByRole("button", { name: "正在开启 Flow…" }),
+    ).toBeDisabled();
+    await expect(
+      dialog.getByRole("button", { name: "取消", exact: true }),
+    ).toBeDisabled();
+    await dialog.locator("form").evaluate((form) => {
+      if (!(form instanceof HTMLFormElement))
+        throw new Error("Expected creation form");
+      form.requestSubmit();
+      form.requestSubmit();
+    });
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeVisible();
+    expect(posts).toBe(1);
+    await page.screenshot({
+      path: `../../../.amp/in/artifacts/flow-create-pending-${width}.png`,
+      animations: "disabled",
+    });
+    release();
+    await expect(page).toHaveURL(/#flow\/91\/overview$/);
+    await expect(dialog).not.toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: "Flow #91", exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("region", { name: "原始任务内容" }),
+    ).toContainText("完整任务");
+    await expect(
+      page.getByRole("region", { name: "原始任务内容" }).locator("script"),
+    ).toHaveCount(0);
+    await expect(
+      page.locator(".links").getByRole("link", { name: /Issue/ }),
+    ).toHaveCount(0);
+    await expect(page.getByRole("list", { name: "数据来源明细" })).toHaveCount(
+      0,
+    );
+    await expect.poll(() => boardReads).toBeGreaterThan(readsBefore);
+    await page.screenshot({
+      path: `../../../.amp/in/artifacts/task-text-detail-pending-${width}.png`,
+      animations: "disabled",
+    });
+    // A failed or still-pending inference leaves the same fallback; no client title is inferred.
+    const [pendingTitle] = await Promise.all([
+      page.waitForResponse(
+        (response) => new URL(response.url()).pathname === "/api/flows/91",
+      ),
+      page.getByRole("button", { name: "刷新当前视图" }).click(),
+    ]);
+    expect(await pendingTitle.json()).toMatchObject({ title: null });
+    await expect(
+      page.getByRole("heading", { name: "Flow #91", exact: true }),
+    ).toBeVisible();
+    created = { ...created, title, state_version: created.state_version + 1 };
+    await page.getByRole("button", { name: "刷新当前视图" }).click();
+    await expect(
+      page.getByRole("heading", { name: title, exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("region", { name: "原始任务内容" }),
+    ).toContainText("完整任务");
+    expect(
+      await page
+        .locator(".detail-body")
+        .evaluate((node) => node.scrollWidth <= node.clientWidth),
+    ).toBe(true);
+    await page.screenshot({
+      path: `../../../.amp/in/artifacts/task-text-detail-generated-${width}.png`,
+      animations: "disabled",
+    });
+    await trigger.click();
+    await expect(dialog.getByLabel("任务内容", { exact: true })).toHaveValue(
+      "",
+    );
+    await expect(project).toHaveValue("");
+    expect(posts).toBe(1);
+  });
+
+  test(`creation target pagination keeps drafts through empty pages, read failures and reload at ${width}px`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 900 });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const cursors: (string | null)[] = [];
+    let fail = true;
+    let exhausted = false;
+    let failReload = false;
+    await page.route("**/api/flow-targets**", async (route) => {
+      const cursor = new URL(route.request().url()).searchParams.get("cursor");
+      cursors.push(cursor);
+      if (cursors.length === 1) await gate;
+      if (cursor === "next" && fail) {
+        fail = false;
+        return route.fulfill({ status: 503, json: { detail: "读取暂不可用" } });
+      }
+      if (!cursor && failReload) {
+        failReload = false;
+        return route.fulfill({ status: 503, json: { detail: "重新读取失败" } });
+      }
+      return route.fulfill({
+        json: {
+          items:
+            exhausted || !cursor || cursor === "empty-middle"
+              ? []
+              : [
+                  {
+                    repo:
+                      cursor === "next" ? "fresh/repo" : "other/installation",
+                    installation_id: cursor === "next" ? 7 : 8,
+                  },
+                ],
+          next_cursor: exhausted
+            ? null
+            : !cursor
+              ? "next"
+              : cursor === "next"
+                ? "empty-middle"
+                : cursor === "empty-middle"
+                  ? "last"
+                  : null,
+          has_more: !exhausted && cursor !== "last",
+        },
+      });
+    });
+    await page.goto("/console/");
+    await page.getByRole("button", { name: "新建 Flow", exact: true }).click();
+    const dialog = page.getByRole("dialog");
+    await dialog.getByLabel("任务内容", { exact: true }).fill("保留草稿");
+    await expect(dialog).toContainText("正在读取项目");
+    await expect(
+      dialog.getByRole("button", { name: "读取更多项目" }),
+    ).toBeDisabled();
+    await page.screenshot({
+      path: `../../../.amp/in/artifacts/flow-create-loading-${width}.png`,
+      animations: "disabled",
+    });
+    release();
+    await expect(dialog).toContainText("尚未读取到可用项目");
+    await expect(dialog).not.toContainText("暂无可用项目");
+    await dialog.getByRole("button", { name: "读取更多项目" }).click();
+    await expect(dialog.getByRole("alert")).toContainText("读取暂不可用");
+    await page.screenshot({
+      path: `../../../.amp/in/artifacts/flow-create-read-error-${width}.png`,
+      animations: "disabled",
+    });
+    await dialog.getByRole("button", { name: "重试读取项目" }).click();
+    await dialog
+      .getByLabel("Project（代码仓库）")
+      .selectOption({ label: "fresh/repo" });
+    await expect(dialog).toContainText("已读取 1 个项目，仍有更多项目");
+    await page.screenshot({
+      path: `../../../.amp/in/artifacts/flow-create-partial-${width}.png`,
+      animations: "disabled",
+    });
+    await dialog.getByRole("button", { name: "读取更多项目" }).click();
+    expect(cursors).toEqual([null, "next", "next", "empty-middle"]);
+    await expect(dialog).toContainText("已读取 1 个项目，仍有更多项目");
+    // Reload can fail while a continuation cursor is still active; retry must restart at null.
+    failReload = true;
+    await dialog.getByRole("button", { name: "重新读取项目" }).click();
+    await expect(dialog.getByRole("alert")).toContainText("重新读取失败");
+    await dialog.getByRole("button", { name: "重试读取项目" }).click();
+    await expect(dialog).toContainText("尚未读取到可用项目");
+    expect(cursors.slice(-2)).toEqual([null, null]);
+    for (let index = 0; index < 3; index++) {
+      await dialog.getByRole("button", { name: "读取更多项目" }).click();
+      await expect(
+        dialog.getByRole("button", { name: "重新读取项目" }),
+      ).toBeEnabled();
+    }
+    await expect(
+      dialog.getByLabel("Project（代码仓库）").locator("option"),
+    ).toContainText(["请选择 owner/name", "fresh/repo", "other/installation"]);
+    exhausted = true;
+    await dialog.getByRole("button", { name: "重新读取项目" }).click();
+    await expect(dialog).toContainText("暂无可用项目");
+    await expect(dialog.getByLabel("任务内容", { exact: true })).toHaveValue(
+      "保留草稿",
+    );
+    await expect(
+      dialog.getByLabel("Project（代码仓库）").locator("option:checked"),
+    ).toHaveText("fresh/repo");
+    await page.screenshot({
+      path: `../../../.amp/in/artifacts/flow-create-empty-${width}.png`,
+      animations: "disabled",
+    });
+  });
+}
+
+for (const outcome of [
+  "refused",
+  "network",
+  "server",
+  "response-lost",
+] as const) {
+  test(`creation ${outcome} retains draft and never blindly resends an unknown write`, async ({
+    page,
+  }) => {
+    let posts = 0;
+    await page.route("**/api/flow-targets**", (route) =>
+      route.fulfill({
+        json: {
+          items: [{ repo: "fresh/repo", installation_id: 7 }],
+          next_cursor: null,
+          has_more: false,
+        },
+      }),
+    );
+    await page.route(/\/api\/flows$/, (route) => {
+      posts++;
+      return outcome === "network"
+        ? route.abort("failed")
+        : route.fulfill({
+            status:
+              outcome === "refused"
+                ? 403
+                : outcome === "response-lost"
+                  ? 201
+                  : 503,
+            json:
+              outcome === "response-lost"
+                ? {}
+                : { detail: "target_unavailable" },
+          });
+    });
+    await page.goto("/console/?q=repo:old/only");
+    const trigger = page.getByRole("button", {
+      name: "新建 Flow",
+      exact: true,
+    });
+    await trigger.click();
+    const dialog = page.getByRole("dialog");
+    await dialog
+      .getByLabel("Project（代码仓库）")
+      .selectOption({ label: "fresh/repo" });
+    const content = dialog.getByLabel("任务内容", { exact: true });
+    await content.fill(" \n\t");
+    await expect(
+      dialog.getByRole("button", { name: "开启 Flow", exact: true }),
+    ).toBeDisabled();
+    await content.fill("😀".repeat(8192) + "a");
+    await expect(dialog.getByRole("alert")).toContainText("32768");
+    await expect(
+      dialog.getByRole("button", { name: "开启 Flow", exact: true }),
+    ).toBeDisabled();
+    await content.fill("保留这份任务草稿");
+    await dialog
+      .getByRole("button", { name: "开启 Flow", exact: true })
+      .click();
+    await expect(dialog.getByRole("alert")).toContainText(
+      outcome === "refused" ? "未受理" : "无法确认",
+    );
+    await expect(content).toHaveValue("保留这份任务草稿");
+    expect(posts).toBe(1);
+    const screenshotState =
+      outcome === "refused" ? "refused" : `unknown-${outcome}`;
+    for (const width of [1440, 390]) {
+      await page.setViewportSize({ width, height: 900 });
+      await page.screenshot({
+        path: `../../../.amp/in/artifacts/flow-create-${screenshotState}-${width}.png`,
+        animations: "disabled",
+      });
+      expect(
+        await dialog.evaluate((node) => node.scrollWidth <= node.clientWidth),
+      ).toBe(true);
+    }
+    if (outcome === "refused") {
+      await expect(
+        dialog.getByRole("button", { name: "开启 Flow", exact: true }),
+      ).toBeEnabled();
+      await page.keyboard.press("Escape");
+    } else {
+      await expect(
+        dialog.getByRole("button", { name: "开启 Flow", exact: true }),
+      ).toBeDisabled();
+      await dialog
+        .getByRole("button", { name: "关闭并清空筛选、刷新看板核对" })
+        .click();
+      await expect(page).toHaveURL(/#board$/);
+      expect(new URL(page.url()).searchParams.has("q")).toBe(false);
+      await trigger.click();
+      await expect(content).toHaveValue("保留这份任务草稿");
+      await expect(
+        dialog.getByRole("button", { name: "开启 Flow", exact: true }),
+      ).toBeDisabled();
+      expect(posts).toBe(1);
+    }
+  });
+}
+
+test("direct Flow cards use Flow IDs for null titles and preserve PR and Issue identities", async ({
+  page,
+}) => {
+  let direct: FlowDetail = {
+    ...blockedFlow,
+    id: 93,
+    title: null,
+    issue_number: null,
+    issue_url: null,
+    pr_number: null,
+    pr_url: null,
+    task_content: "原始任务正文",
+  };
+  const withPr: FlowDetail = {
+    ...direct,
+    id: 94,
+    title: null,
+    pr_number: 97,
+    pr_url: "https://example.test/pulls/97",
+  };
+  const withIssue = { ...blockedFlow, title: null };
+  await mockFlows(page, () => [direct, withPr, withIssue]);
+  for (const width of [1440, 390]) {
+    direct = { ...direct, title: null };
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto("/console/");
+    if (width === 390)
+      await page
+        .locator(".mobile-stages")
+        .getByRole("button", { name: /受阻/ })
+        .click();
+    await expect(page.locator('[data-flow="93"]')).toContainText("Flow #93");
+    await expect(page.locator('[data-flow="94"]')).toContainText("PR #97");
+    await expect(page.locator('[data-flow="42"]')).toContainText("PR #87");
+    await expect(page.locator('[data-flow="93"] h2')).toHaveText("Flow #93");
+    await expect(page.locator('[data-flow="94"] h2')).toHaveText("Flow #94");
+    await expect(page.locator('[data-flow="42"] h2')).toHaveText("Flow #42");
+    await expect(page.locator(".board-page")).not.toContainText("Issue #null");
+    await page.screenshot({
+      path: `../../../.amp/in/artifacts/task-text-fallback-cards-${width}.png`,
+      animations: "disabled",
+    });
+    // Inference can fill the title without a phase change; refreshing must update cached cards too.
+    const generatedTitle = "服务器生成的任务标题";
+    direct = {
+      ...direct,
+      title: generatedTitle,
+      state_version: direct.state_version + 1,
+    };
+    await page.getByRole("button", { name: "刷新当前视图" }).click();
+    await expect(page.locator('[data-flow="93"] h2')).toHaveText(
+      generatedTitle,
+    );
+    await page.locator('[data-flow="93"]').click();
+    await expect(
+      page.getByRole("heading", { name: generatedTitle, exact: true }),
+    ).toBeVisible();
+    await page.goto("/console/#flow/94/overview");
+    await expect(
+      page.getByRole("heading", { name: "Flow #94", exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.locator(".links").getByRole("link", { name: /PR #97/ }),
+    ).toBeVisible();
+    await expect(
+      page.locator(".links").getByRole("link", { name: /Issue/ }),
+    ).toHaveCount(0);
+    await page.screenshot({
+      path: `../../../.amp/in/artifacts/task-text-fallback-pr-${width}.png`,
+      animations: "disabled",
+    });
+    await page.goto("/console/#flow/42/overview");
+    await expect(
+      page.getByRole("heading", { name: "Flow #42", exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("region", { name: "原始任务内容" }),
+    ).toHaveCount(0);
+    await expect(
+      page.locator(".links").getByRole("link", { name: /Issue #85/ }),
+    ).toBeVisible();
+    await page.screenshot({
+      path: `../../../.amp/in/artifacts/task-text-fallback-issue-${width}.png`,
+      animations: "disabled",
+    });
+  }
 });

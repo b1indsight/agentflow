@@ -7,18 +7,24 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from pydantic import ValidationError
 from starlette.testclient import TestClient
 
-from app.contracts.protocol import PROTOCOL_VERSION
+from app.contracts.console import ArchiveRequest, ResumeRequest
 from app.controler.api import create_app
 from app.controler.console.sync import ConsoleSynchronizer
-from app.domain.models import DeliveryState, FlowState, JobKind
+from app.controler.workflow.service import ControlService
+from app.domain.models import ArchiveReason, DeliveryState, FlowState, JobKind
 from app.github.console import Observation
 from app.persistence.activity import ActivityStore
 from app.persistence.console import ConsoleStore
 from app.persistence.console_sync import ConsoleSyncStore
 from app.telemetry.metrics import Metrics
 from tests.access import AccessIssuer
+from tests.test_cancel_drain import running
+from tests.test_merge import route_merge
+from tests.test_workflow_transactions import accepted_coding
+from tests.workspace_fixtures import register_worker
 
 
 @pytest.fixture
@@ -34,8 +40,127 @@ def console_runtime(store):
         shutdown=issuer.auth.close,
         console=ConsoleSynchronizer(SimpleNamespace(), SimpleNamespace(), database=store._db),
         conversations=SimpleNamespace(read=AsyncMock()),
-        gateway=SimpleNamespace(notify_jobs=Mock()),
+        gateway=SimpleNamespace(wake_all=Mock()),
     )
+
+
+@pytest.mark.parametrize("task", [
+    "\n完整内容 α\r\n第二行 β\n",
+    "中" * 10922 + "ab",
+], ids=["exact-text", "32-kib"])
+def test_manual_creation_without_issue_is_atomic_visible_and_owner_only(console_runtime, store, monkeypatch, task):
+    from app.github import Repository
+    from tests.github import RecordingGitHub
+
+    console_runtime.github = RecordingGitHub()
+
+    async def refetch(repo):
+        return repo.model_copy(update={"default_branch": "main", "archived": False})
+
+    monkeypatch.setattr(Repository, "refetch", refetch)
+    payload = {
+        "repo": "owner/new-repo", "installation_id": 42,
+        "task_content": task,
+    }
+    with TestClient(create_app(console_runtime)) as client:
+        assert client.post("/api/flows", json=payload).status_code == 401
+        headers = console_runtime.issuer.headers()
+        assert client.post("/api/flows", json=payload, headers={**headers, "Origin": "https://other.test"}).status_code == 403
+        response = client.post("/api/flows", json=payload, headers=headers)
+        assert response.status_code == 201, response.text
+        detail = response.json()
+        assert response.headers["cache-control"] == "no-store"
+        assert detail["issue_number"] is None and detail["issue_url"] is None
+        assert detail["title"] is None and detail["task_content"] == task
+        assert detail["phase"] == "queued"
+        assert client.get(f"/api/flows/{detail['id']}", headers=headers).json()["task_content"] == payload["task_content"]
+        assert client.get("/api/flows", headers=headers).json()["items"][0]["id"] == detail["id"]
+    flow = store.flows.get_flow(detail["id"])
+    assert flow.repo == payload["repo"] and flow.installation_id == 42
+    assert [job.kind for job in store.jobs.list_jobs(flow.id)] == [JobKind.INITIAL]
+    assert console_runtime.gateway.wake_all.called
+
+
+@pytest.mark.parametrize("changes", [
+    {"task_content": None},
+    {"issue_number": 7},
+    {"task_content": " \r\n\t"},
+    {"task_content": {"title": "old object", "body": "内容"}},
+    {"task_content": "中" * 10923},
+    {"task_content": "a\0b"},
+    {"installation_id": True},
+    {"repo": "owner/repo/extra"},
+])
+def test_manual_creation_invalid_input_never_writes(console_runtime, store, changes):
+    payload = {"repo": "owner/repo", "installation_id": 42, "task_content": "完整任务", **changes}
+    with TestClient(create_app(console_runtime)) as client:
+        response = client.post("/api/flows", json=payload, headers=console_runtime.issuer.headers())
+        assert response.status_code == 422, response.text
+    assert store.flows.list_flows() == []
+
+
+@pytest.mark.parametrize("target_state,status", [("archived", 409), ("permission", 403), ("not_found", 404), ("pull_request", 422)])
+def test_manual_creation_rechecks_remote_access_before_writing(console_runtime, store, monkeypatch, target_state, status):
+    from app.github import GitHubError, GitHubErrorKind, Installation, Repository
+    from tests.github import RecordingGitHub
+
+    console_runtime.github = RecordingGitHub()
+
+    async def refetch(repo):
+        if target_state in {"permission", "not_found"}:
+            raise GitHubError(GitHubErrorKind(target_state), "get_repository")
+        return repo.model_copy(update={"default_branch": "main", "archived": target_state == "archived"})
+
+    # GitHub's Issues endpoint also returns PRs; reject before creating any Flow or INITIAL.
+    sdk = Mock()
+    sdk.rest.issues.async_get = AsyncMock(return_value=SimpleNamespace(parsed_data=SimpleNamespace(
+        number=7, title="Source PR", body="", state="open", pull_request={"url": "https://example.test/pulls/7"},
+    )))
+    monkeypatch.setattr(Installation, "_client", lambda *args, **kwargs: sdk)
+    monkeypatch.setattr(Repository, "refetch", refetch)
+    payload = {"repo": "owner/repo", "installation_id": 42,
+               **({"issue_number": 7} if target_state == "pull_request" else {"task_content": "拒绝任务"})}
+    with TestClient(create_app(console_runtime)) as client:
+        response = client.post("/api/flows", json=payload, headers=console_runtime.issuer.headers())
+        assert response.status_code == status
+    assert store.flows.list_flows() == []
+
+
+def test_creation_targets_include_new_repositories_and_continue_empty_inventory_pages(console_runtime, store, monkeypatch):
+    from app.github import Batch, GitHubApp, Repository
+    from app.github.apps import Installation
+    from tests.github import RecordingGitHub
+
+    console_runtime.github = RecordingGitHub()
+
+    async def installations(github, *, page=1):
+        return Batch(items=() if page == 1 else (github.installation(42), github.installation(43)),
+                     next_cursor="2" if page == 1 else None)
+
+    async def repositories(installation, *, page=1):
+        if installation.installation_id == 42 and page == 1:
+            return Batch(items=(), next_cursor="2")
+        return Batch(items=(Repository(installation, f"owner/new-{installation.installation_id}"),), next_cursor=None)
+
+    monkeypatch.setattr(GitHubApp, "fetch_installations", installations)
+    monkeypatch.setattr(Installation, "fetch_repositories", repositories)
+    with TestClient(create_app(console_runtime)) as client:
+        assert client.get("/api/flow-targets").status_code == 401
+        headers = console_runtime.issuer.headers()
+        cursor, items = None, []
+        for _ in range(4):
+            page = client.get("/api/flow-targets", params={"cursor": cursor} if cursor else {}, headers=headers)
+            assert page.status_code == 200, page.text
+            assert page.headers["cache-control"] == "no-store"
+            data = page.json()
+            items.extend(data["items"])
+            cursor = data["next_cursor"]
+            assert data["has_more"] is (cursor is not None)
+        assert cursor is None
+        assert items == [{"repo": "owner/new-42", "installation_id": 42}, {"repo": "owner/new-43", "installation_id": 43}]
+        assert client.get("/api/repos", headers=headers).json()["items"] == []
+        assert client.get("/api/flow-targets?cursor=bad", headers=headers).status_code == 409
+    assert store.flows.list_flows() == []
 
 
 def test_console_and_every_public_read_require_owner_before_io(console_runtime, store):
@@ -72,11 +197,26 @@ def test_console_and_every_public_read_require_owner_before_io(console_runtime, 
         assert response.status_code == 200
         assert response.headers["cache-control"] == "no-store"
         assert response.json()["counts"]["queued"] == 1
+        summary = response.json()["items"][0]
+        assert summary["lifecycle"] == summary["phase"] == "queued"
+        assert summary["current_round_no"] == 1
+        assert (
+            summary["archive_reason"]
+            is summary["archive_summary"]
+            is summary["archived_at"]
+            is None
+        )
         assert "installation_id" not in response.text and "payload" not in response.text
         assert client.get("/api/flows/99999", headers=headers).status_code == 404
         assert client.get("/api/flows?limit=101", headers=headers).status_code == 422
         assert client.get("/api/flows?cursor=garbage", headers=headers).status_code == 409
         assert client.get("/api/flows?q=secret:bad", headers=headers).status_code == 422
+        for query in ("is:done", "status:done"):
+            rejected = client.get("/api/flows", params={"q": query}, headers=headers)
+            assert rejected.status_code == 422 and rejected.json() == {"detail": "search_invalid"}
+        assert (
+            client.get("/api/flows", params={"phase": "done"}, headers=headers).status_code == 422
+        )
         body = client.get(f"/api/flows/{flow.id}/activity", headers=headers).json()
         item = body["items"][0]
         assert (
@@ -91,7 +231,7 @@ def test_console_and_every_public_read_require_owner_before_io(console_runtime, 
         assert client.get("/console/", headers=headers).status_code == 503
 
 
-@pytest.mark.parametrize("command", ["archive", "retry"])
+@pytest.mark.parametrize("command", ["archive", "resume", "retry"])
 @pytest.mark.parametrize(
     "base_url,origin_headers",
     [
@@ -114,16 +254,26 @@ def test_console_commands_require_owner_json_and_same_origin(
     # TLS termination (and sometimes Host rewriting) changes the backend URL,
     # while the browser still sends the public HTTPS Origin for a same-origin POST.
     flow = store.flows.create_flow("owner/repo", 7, 42)
-    flow.state = FlowState.CANCELLED
-    store.flows.update_flow(flow)
+    if command == "resume":
+        ControlService(database=store.database).cancel(flow)
+    elif command == "retry":
+        flow.state = FlowState.BLOCKED
+        store.flows.update_flow(flow)
+    payload = {
+        "archive": {"reason": "succeeded", "summary": "调查完成", "expected_round_no": 1},
+        "resume": {"expected_round_no": 1},
+        "retry": {},
+    }[command]
     path = f"/api/flows/{flow.id}/{command}"
     console = ConsoleStore(store.database)
     before = console.detail(flow.id)
     with TestClient(create_app(console_runtime), base_url=base_url) as client:
-        assert client.post(path, json={}).status_code == 401
+        assert client.post(path, json=payload).status_code == 401
         assert (
             client.post(
-                path, json={}, headers=console_runtime.issuer.headers(email="other@example.com")
+                path,
+                json=payload,
+                headers=console_runtime.issuer.headers(email="other@example.com"),
             ).status_code
             == 403
         )
@@ -140,7 +290,7 @@ def test_console_commands_require_owner_json_and_same_origin(
                 "X-Forwarded-Host": "evil.test",
             },
         ):
-            response = client.post(path, json={}, headers=headers | extra)
+            response = client.post(path, json=payload, headers=headers | extra)
             assert response.status_code == 403
             assert response.json()["detail"] == "cross_origin_request"
         # FastAPI rejects the non-JSON body before calling the endpoint.
@@ -150,41 +300,165 @@ def test_console_commands_require_owner_json_and_same_origin(
             ).status_code
             == 422
         )
-        assert client.post(path, json={"force": True}, headers=headers).status_code == 422
+        assert client.post(path, json=payload | {"force": True}, headers=headers).status_code == 422
         assert console.detail(flow.id) == before
-        response = client.post(path, json={}, headers=headers | origin_headers)
+        assert store.jobs.list_jobs(flow.id) == []
+        console_runtime.gateway.wake_all.assert_not_called()
+        response = client.post(path, json=payload, headers=headers | origin_headers)
         assert response.status_code == 200
         assert response.headers["cache-control"] == "no-store"
-        assert client.post(f"/api/flows/99999/{command}", json={}, headers=headers).status_code == 404
+        assert (
+            client.post(f"/api/flows/99999/{command}", json=payload, headers=headers).status_code
+            == 404
+        )
 
 
-def test_manual_archive_is_idempotent_and_only_accepts_cancelled_flows(console_runtime, store):
-    flow = store.flows.create_flow("owner/repo", 7, 42)
-    flow.state = FlowState.CANCELLED
-    store.flows.update_flow(flow)
-    path = f"/api/flows/{flow.id}/archive"
+async def test_merged_console_is_archived_while_original_cleanup_is_pending(console_runtime, store):
+    job, _ = accepted_coding(store, receive=False)
+    flow = store.flows.get_flow(job.flow_id)
+    await route_merge(store, flow)
     with TestClient(create_app(console_runtime)) as client:
         headers = console_runtime.issuer.headers()
-        response = client.post(path, json={}, headers=headers)
+        response = client.get(f"/api/flows/{flow.id}", headers=headers)
         assert response.status_code == 200
-        assert response.json()["phase"] == "done"
-        assert response.json()["lifecycle"] == "cancelled"
-        assert response.json()["archived_at"] is not None
-        assert client.post(path, json={}, headers=headers).json() == response.json()
-        for state in (FlowState.ACTIVE, FlowState.FAILED, FlowState.SUCCEEDED):
-            flow.state = state
-            store.flows.update_flow(flow)
-            assert client.post(path, json={}, headers=headers).status_code == 409
-            assert ConsoleStore(store.database).detail(flow.id).archived_at is None
+        archived = response.json()
+        assert archived["phase"] == archived["lifecycle"] == "archived"
+        assert archived["archive_reason"] == "succeeded" and archived["archived_at"] is not None
+        active = client.get("/api/flows", params={"q": "is:active"}, headers=headers).json()
+        assert not active["items"]
+        refused = client.post(f"/api/flows/{flow.id}/resume",
+                              json={"expected_round_no": 1}, headers=headers)
+        assert refused.status_code == 409 and refused.json() == {"detail": "resume_rejected"}
+    assert store.workers.get_flow_execution(flow.id).released_at is None
+    assert store.stops.has_pending(flow.id)
+
+
+@pytest.mark.parametrize("reason", ["succeeded", "abandoned"])
+def test_archive_is_idempotent_and_resume_opens_a_new_round(console_runtime, store, reason):
+    flow = store.flows.create_flow("owner/repo", 7, 42)
+    path = f"/api/flows/{flow.id}/archive"
+    payload = {"reason": reason, "summary": "本轮结论", "expected_round_no": 1}
+    with TestClient(create_app(console_runtime)) as client:
+        headers = console_runtime.issuer.headers()
+        response = client.post(path, json=payload, headers=headers)
+        assert response.status_code == 200
+        archived = response.json()
+        assert archived["phase"] == archived["lifecycle"] == "archived"
+        assert archived["current_round_no"] == 1 and archived["archive_reason"] == reason
+        assert archived["archive_summary"] == "本轮结论"
+        assert (
+            archived["archived_at"]
+            == store.flows.get_flow(flow.id).model_dump(mode="json")["archived_at"]
+        )
+        assert archived["archived_at"] is not None
+        assert client.post(path, json=payload, headers=headers).json() == archived
+        activity = ActivityStore(store.database)
+        first_archive = activity.archived(flow.id, 1)
+        assert first_archive is not None and first_archive.metadata["archive_reason"] == reason
+        assert first_archive.metadata["archive_summary"] == payload["summary"]
+        assert first_archive.occurred_at == store.flows.get_flow(flow.id).archived_at
+        assert store.deliveries.get_delivery(flow.id) is None
+        refused = client.post(f"/api/flows/{flow.id}/retry", json={}, headers=headers)
+        assert refused.status_code == 409 and refused.json() == {"detail": "retry_archived"}
+        assert ConsoleStore(store.database).detail(flow.id).current_round_no == 1
+        resumed = client.post(
+            f"/api/flows/{flow.id}/resume",
+            json={"expected_round_no": 1},
+            headers=headers,
+        )
+        assert resumed.status_code == 200
+        body = resumed.json()
+        assert body["id"] == flow.id and body["current_round_no"] == 2
+        assert body["lifecycle"] == body["phase"] == "queued"
+        assert body["archive_reason"] is body["archive_summary"] is body["archived_at"] is None
+        for command, stale, code in (
+            ("archive", payload, "archive_rejected"),
+            ("resume", {"expected_round_no": 1}, "resume_rejected"),
+            ("resume", {"expected_round_no": 2}, "resume_rejected"),
+        ):
+            rejected = client.post(f"/api/flows/{flow.id}/{command}", json=stale, headers=headers)
+            assert rejected.status_code == 409 and rejected.json() == {"detail": code}
+        assert activity.archived(flow.id, 1) == first_archive
+        assert activity.archived(flow.id, 2) is None
+        jobs = store.jobs.list_jobs(flow.id)
+        assert len(jobs) == 1 and jobs[0].round_no == 2
+
+
+@pytest.mark.parametrize(
+    "model,payload,field,error",
+    [
+        (ArchiveRequest, {}, "reason", "missing"),
+        (
+            ArchiveRequest,
+            {"reason": "cancelled", "summary": "结论", "expected_round_no": 1},
+            "reason",
+            "enum",
+        ),
+        (ArchiveRequest, {"reason": "succeeded", "expected_round_no": 1}, "summary", "missing"),
+        (
+            ArchiveRequest,
+            {"reason": "succeeded", "summary": "结论", "expected_round_no": True},
+            "expected_round_no",
+            "int_type",
+        ),
+        (ResumeRequest, {}, "expected_round_no", "missing"),
+        (ResumeRequest, {"expected_round_no": 0}, "expected_round_no", "greater_than"),
+        (ResumeRequest, {"expected_round_no": "1"}, "expected_round_no", "int_type"),
+    ],
+)
+def test_round_command_schema_rejects_invalid_fields(model, payload, field, error):
+    # Field validation needs only the request DTO; HTTP rejection is covered above.
+    with pytest.raises(ValidationError) as failure:
+        model.model_validate(payload)
+    assert ((field,), error) in [(e["loc"], e["type"]) for e in failure.value.errors()]
+
+
+def test_archive_refuses_empty_success_or_unmerged_pr_without_changes(console_runtime, store):
+    flow = store.flows.create_flow("owner/repo", 7, 42)
+    console = ConsoleStore(store.database)
+    with TestClient(create_app(console_runtime)) as client:
+        for summary in ("", "   ", "PR has not merged"):
+            if summary.strip():
+                delivery = store.deliveries.get_or_create_delivery(flow.id, "flow/7")
+                delivery.state, delivery.pr_number = DeliveryState.OPEN, 17
+                store.deliveries.update_delivery(delivery)
+            before = console.detail(flow.id)
+            response = client.post(
+                f"/api/flows/{flow.id}/archive",
+                headers=console_runtime.issuer.headers(),
+                json={"reason": "succeeded", "summary": summary, "expected_round_no": 1},
+            )
+            assert response.status_code == 409 and response.json() == {"detail": "archive_rejected"}
+            assert console.detail(flow.id) == before
+    console_runtime.gateway.wake_all.assert_not_called()
+
+
+def test_archive_request_reports_finalizing_until_stop_is_confirmed(console_runtime, store):
+    flow, job = running(store)
+    with TestClient(create_app(console_runtime)) as client:
+        response = client.post(
+            f"/api/flows/{flow.id}/archive",
+            headers=console_runtime.issuer.headers(),
+            json={"reason": "abandoned", "summary": "停止本轮", "expected_round_no": 1},
+        )
+        client.portal.call(lambda: None)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["lifecycle"] == "finalizing" and body["phase"] == "running"
+    assert body["archive_reason"] == "abandoned" and body["archive_summary"] == "停止本轮"
+    assert body["archived_at"] is None and body["current_round_no"] == 1
+    assert store.stops.pending("w").job_id == job.id
+    assert store.workers.get_flow_execution(flow.id).released_at is None
+    console_runtime.gateway.wake_all.assert_called_once_with()
 
 
 def test_retry_commits_before_waking_workers_on_the_event_loop(console_runtime, store):
-    # A browser retry must resume the failed job, not just report an ACTIVE no-op.
+    # A blocked retry requeues work within this round and notifies only after commit.
     flow = store.flows.create_flow("owner/repo", 7, 42)
     original = store.jobs.enqueue_job(flow.id, JobKind.INITIAL, payload={"issue_number": 7})
     with store.connection() as connection:
         connection.execute("UPDATE jobs SET state='failed' WHERE id=%s", (original.id,))
-    flow.state = FlowState.FAILED
+    flow.state = FlowState.BLOCKED
     store.flows.update_flow(flow)
     notifications = []
 
@@ -194,7 +468,7 @@ def test_retry_commits_before_waking_workers_on_the_event_loop(console_runtime, 
             (get_ident(), store.flows.get_flow(flow.id).state, len(store.jobs.list_jobs(flow.id)))
         )
 
-    console_runtime.gateway.notify_jobs = notified
+    console_runtime.gateway.wake_all = notified
     with TestClient(create_app(console_runtime)) as client:
         loop_thread = client.portal.call(get_ident)
         response = client.post(
@@ -207,37 +481,50 @@ def test_retry_commits_before_waking_workers_on_the_event_loop(console_runtime, 
         assert repeated.json() == {"detail": "retry_no_change"}
         client.portal.call(lambda: None)
     assert response.status_code == 200
-    assert response.json()["lifecycle"] == "active"
+    assert response.json()["lifecycle"] == "queued"
     assert response.json()["phase"] == "queued"
+    assert response.json()["current_round_no"] == 1
     jobs = store.jobs.list_jobs(flow.id)
     assert len(jobs) == 2
     assert jobs[-1].kind == original.kind and jobs[-1].payload == original.payload
-    assert notifications == [(loop_thread, FlowState.ACTIVE, 2)]
+    assert notifications == [(loop_thread, FlowState.QUEUED, 2)]
 
 
-def test_concurrent_browser_retries_enqueue_only_once(console_runtime, store):
+@pytest.mark.parametrize("command", ["retry", "resume"])
+def test_concurrent_browser_commands_enqueue_only_once(console_runtime, store, command):
     # Two tabs can submit despite local button disabling; the business lock is authoritative.
     flow = store.flows.create_flow("owner/repo", 7, 42)
-    flow.state = FlowState.FAILED
-    store.flows.update_flow(flow)
+    if command == "resume":
+        ControlService(database=store.database).cancel(flow)
+    else:
+        flow.state = FlowState.BLOCKED
+        store.flows.update_flow(flow)
+    payload = {"expected_round_no": 1} if command == "resume" else {}
     barrier = Barrier(2)
     headers = console_runtime.issuer.headers()
     with TestClient(create_app(console_runtime)) as client, ThreadPoolExecutor(2) as pool:
 
         def submit():
             barrier.wait(timeout=5)
-            return client.post(f"/api/flows/{flow.id}/retry", json={}, headers=headers)
+            return client.post(f"/api/flows/{flow.id}/{command}", json=payload, headers=headers)
 
         responses = list(pool.map(lambda _: submit(), range(2)))
         client.portal.call(lambda: None)
     assert sorted(response.status_code for response in responses) == [200, 409]
+    rejected = next(response for response in responses if response.status_code == 409)
+    assert rejected.json() == {
+        "detail": "resume_rejected" if command == "resume" else "retry_no_change"
+    }
     assert len(store.jobs.list_jobs(flow.id)) == 1
-    console_runtime.gateway.notify_jobs.assert_called_once_with()
+    assert store.flows.get_flow(flow.id).current_round_no == (2 if command == "resume" else 1)
+    console_runtime.gateway.wake_all.assert_called_once_with()
 
 
 def test_browser_retry_reports_business_refusal_without_changes(console_runtime, store):
     # The API translates canonical refusals; individual safety rules have service-level coverage.
     flow = store.flows.create_flow("owner/repo", 7, 42)
+    flow.state = FlowState.BLOCKED
+    store.flows.update_flow(flow)
     delivery = store.deliveries.get_or_create_delivery(flow.id, "flow/7")
     delivery.state = DeliveryState.CLOSED
     store.deliveries.update_delivery(delivery)
@@ -251,36 +538,35 @@ def test_browser_retry_reports_business_refusal_without_changes(console_runtime,
     assert response.json() == {"detail": "retry_delivery_closed"}
     assert console.detail(flow.id) == before
     assert store.jobs.list_jobs(flow.id) == []
-    console_runtime.gateway.notify_jobs.assert_not_called()
+    console_runtime.gateway.wake_all.assert_not_called()
 
 
 @pytest.mark.parametrize(
-    "scenario,reason,condition",
+    "scenario,state,reason,condition",
     [
-        ("queued", "等待分配 Worker", "可用 Worker"),
-        ("preparing", "准备失败", "自动重试"),
-        ("dispatching", "等待 Worker 确认开始", "确认执行"),
-        ("running", "首轮编码正在执行", "执行结果"),
-        ("revision", "修订正在执行", "执行结果"),
-        ("execution_failed", "首轮编码失败", "执行记录"),
-        ("recovering", "执行状态待确认", "原 Worker"),
-        ("verifying", "结果校验暂时失败", "自动重试"),
-        ("applying", "结果已收到", "校验与应用"),
-        ("effect_failed", "GitHub 写入失败", "核对远端写入结果"),
-        ("older_result", "GitHub 写入失败", "核对远端写入结果"),
-        ("closed", "PR 已关闭", "重新打开 PR"),
-        ("archive_recovery", "归档执行状态待确认", "不能强制释放"),
-        ("archive_failed", "归档失败", "原 Worker"),
-        ("archive_running", "归档正在执行", "执行结果"),
-        ("archive_queued", "等待原 Worker 接收", "原 Worker"),
-        ("review", "PR 已打开", "审核或人工合并"),
-        ("failed", "Flow 已失败", "执行记录"),
-        ("cancelled", "Flow 已取消", "停止确认"),
-        ("done", "Flow 已归档完成", "无需后续动作"),
+        ("queued", FlowState.QUEUED, "等待分配 Worker", "可用 Worker"),
+        ("preparing", FlowState.RUNNING, "准备失败", "自动重试"),
+        ("dispatching", FlowState.RUNNING, "等待 Worker 确认开始", "确认执行"),
+        ("running", FlowState.RUNNING, "首轮编码正在执行", "执行结果"),
+        ("revision", FlowState.RUNNING, "修订正在执行", "执行结果"),
+        ("execution_failed", FlowState.BLOCKED, "首轮编码失败", "执行记录"),
+        ("recovering", FlowState.RUNNING, "执行状态待确认", "原 Worker"),
+        ("verifying", FlowState.RUNNING, "结果校验暂时失败", "自动重试"),
+        ("applying", FlowState.RUNNING, "结果已收到", "校验与应用"),
+        ("effect_failed", FlowState.BLOCKED, "GitHub 写入失败", "核对远端写入结果"),
+        ("older_result", FlowState.BLOCKED, "GitHub 写入失败", "核对远端写入结果"),
+        ("closed", FlowState.BLOCKED, "GitHub 写入失败", "核对远端写入结果"),
+        ("archive_recovery", FlowState.BLOCKED, "归档执行状态待确认", "不能强制释放"),
+        ("archive_failed", FlowState.BLOCKED, "归档失败", "原 Worker"),
+        ("archive_effect_failed", FlowState.BLOCKED, "GitHub 写入失败", "核对远端写入结果"),
+        ("archive_running", FlowState.FINALIZING, "正在结束本轮，尚未归档", "停止确认"),
+        ("archive_queued", FlowState.FINALIZING, "正在结束本轮，尚未归档", "工作区处置"),
+        ("review", FlowState.REVIEW, "PR 已打开", "审核或人工合并"),
+        ("finalizing", FlowState.FINALIZING, "正在结束本轮，尚未归档", "不会继续编码"),
     ],
 )
 def test_detail_explains_execution_facts_without_exposing_internal_errors(
-    console_runtime, store, scenario, reason, condition
+    console_runtime, store, scenario, state, reason, condition
 ):
     # Multiple blocked states need different recovery instructions; a phase alone is insufficient.
     flow = store.flows.create_flow("owner/repo", 7, 42)
@@ -289,9 +575,7 @@ def test_detail_explains_execution_facts_without_exposing_internal_errors(
         kind = JobKind.REVISION
     job = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
     if scenario != "queued":
-        store.workers.worker_connected(
-            "worker-safe", protocol_version=PROTOCOL_VERSION, connection_epoch="epoch-safe"
-        )
+        register_worker(store, "worker-safe", repo=flow.repo, epoch="epoch-safe")
         assert store.workers.assign_job("worker-safe", "private-assignment", "epoch-safe")
     delivery = store.deliveries.get_or_create_delivery(flow.id, "flow/7")
     delivery.pr_number = 17
@@ -304,6 +588,7 @@ def test_detail_explains_execution_facts_without_exposing_internal_errors(
         "verifying",
         "applying",
         "effect_failed",
+        "archive_effect_failed",
         "older_result",
         "closed",
     }
@@ -332,7 +617,7 @@ def test_detail_explains_execution_facts_without_exposing_internal_errors(
                 job.id,
             ),
         )
-        if scenario in {"effect_failed", "older_result", "closed"}:
+        if scenario in {"effect_failed", "archive_effect_failed", "older_result", "closed"}:
             connection.execute(
                 "INSERT INTO result_applications(job_id,digest,plan,created_at) VALUES (%s,'d','{}',%s)",
                 (job.id, now),
@@ -344,13 +629,14 @@ def test_detail_explains_execution_facts_without_exposing_internal_errors(
             )
     if scenario == "older_result":
         store.jobs.enqueue_job(flow.id, JobKind.REVISION)
-    if scenario in {"failed", "cancelled", "done"}:
-        flow.state = {
-            "failed": FlowState.FAILED,
-            "cancelled": FlowState.CANCELLED,
-            "done": FlowState.SUCCEEDED,
-        }[scenario]
-        store.flows.update_flow(flow)
+    flow = store.flows.get_flow(flow.id)
+    flow.state = state
+    if kind is JobKind.ARCHIVE or state is FlowState.FINALIZING:
+        flow.archive_reason = (
+            ArchiveReason.SUCCEEDED if kind is JobKind.ARCHIVE else ArchiveReason.ABANDONED
+        )
+        flow.archive_summary = "Requested round completion"
+    store.flows.update_flow(flow)
     with TestClient(create_app(console_runtime)) as client:
         response = client.get(f"/api/flows/{flow.id}", headers=console_runtime.issuer.headers())
     assert response.status_code == 200
@@ -358,9 +644,14 @@ def test_detail_explains_execution_facts_without_exposing_internal_errors(
     assert reason in body["reason"]
     assert condition in body["next_condition"]
     assert "private-" not in response.text and "/private/repo" not in response.text
-    if scenario == "closed":
-        assert body["phase"] == "done" and body["action"] == "delivery_closed"
-        assert body["lifecycle"] == "active"
+    assert body["lifecycle"] == state
+    assert body["phase"] == ("running" if state is FlowState.FINALIZING else state.value)
+    assert body["current_round_no"] == 1 and body["archived_at"] is None
+    if scenario.startswith("archive_"):
+        assert body["archive_reason"] == "succeeded"
+        assert (body["action"] == "archive_blocked") is (
+            scenario in {"archive_failed", "archive_recovery", "archive_effect_failed"}
+        )
     if scenario in {"effect_failed", "older_result", "running", "preparing"}:
         assert f"#{job.id}" in body["reason"]
 
@@ -370,8 +661,13 @@ def test_explicit_refresh_retries_stopped_sources_in_every_lifecycle(console_run
     # After repairing App permissions, the owner must also be able to retry a
     # failed source on a completed Flow without reopening its execution.
     flow = store.flows.create_flow("owner/repo", 7, 42)
-    flow.state = state
-    store.flows.update_flow(flow)
+    if state is FlowState.ARCHIVED:
+        ControlService(database=store.database).cancel(flow)
+    else:
+        flow.state = state
+        if state is FlowState.FINALIZING:
+            flow.archive_reason = ArchiveReason.ABANDONED
+        store.flows.update_flow(flow)
     sync = ConsoleSyncStore(store._db)
 
     def stopped_sources():
@@ -388,7 +684,7 @@ def test_explicit_refresh_retries_stopped_sources_in_every_lifecycle(console_run
         pending = connection.execute(
             "SELECT pending FROM console_sync WHERE flow_id=%s", (flow.id,)
         ).fetchall()
-    assert all(row["pending"] == (state == FlowState.ACTIVE) for row in pending)
+    assert all(row["pending"] == (state is not FlowState.ARCHIVED) for row in pending)
     stopped_sources()
     with TestClient(create_app(console_runtime)) as client:
         path = f"/api/flows/{flow.id}/activity"
@@ -438,7 +734,7 @@ def test_conversation_excludes_flow_audit_from_items_pagination_and_changes(cons
         ).json()
         assert first["total"] == 2 and first["has_more"]
         assert first["changes"] == {"new": 2}
-        flow.state = FlowState.FAILED
+        flow.state = FlowState.BLOCKED
         store.flows.update_flow(flow)
         second = client.get(
             path, headers=headers, params={"limit": 1, "cursor": first["next_cursor"]}

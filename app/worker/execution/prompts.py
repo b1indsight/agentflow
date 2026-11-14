@@ -9,17 +9,8 @@ TODO(verify) V8：注入的 VCS 指引（尤其 jj）对 codex 的实际效果�
 from __future__ import annotations
 
 from app.contracts.protocol import ReviewFeedback, RevisionTask
-
-_COMMIT_CONVENTIONS = (
-    "# Commit messages\n"
-    "Use Conventional Commits for every new Git commit or jj change description on the assigned "
-    "branch/bookmark: `<type>[optional scope][!]: <description>`. Use `feat` for features, "
-    "`fix` for bug fixes, or another appropriate type such as `docs`, `refactor`, `test`, or "
-    "`chore`. An optional scope goes in parentheses. Write a concise description of the change. "
-    "Mark breaking changes with `!` before `:` or a `BREAKING CHANGE:` footer. "
-    "Examples: `feat(auth): add sign-in`, `fix: handle expired sessions`. "
-    "These rules apply to commit messages; keep the assigned branch/bookmark name unchanged.\n"
-)
+from app.domain.delivery_models import DeliveryReceipt
+from app.domain.models import VcsExecutionContext
 
 # 硬约束：codex 只碰本地 VCS，不碰 GitHub API（平面边界 §3）
 _HARD_CONSTRAINTS = (
@@ -47,17 +38,49 @@ _INITIAL_OUTPUT_INSTRUCTION = (
 
 
 def build_initial_prompt(
-    issue_title: str, issue_body: str, repo_conventions: str, vcs_guidance: str
+    task_content: str, repo_conventions: str, vcs_guidance: str
 ) -> str:
+    """Render the supplied task without assuming a GitHub Issue source."""
     parts = [
-        f"# Task (from GitHub issue)\n## {issue_title}\n\n{issue_body}\n",
+        f"# Task\n{task_content}\n",
         f"# Repo conventions\n{repo_conventions or '(none provided)'}\n",
         f"# VCS guidance\n{vcs_guidance}\n",
         _HARD_CONSTRAINTS,
-        _COMMIT_CONVENTIONS,
         _INITIAL_OUTPUT_INSTRUCTION,
     ]
     return "\n".join(parts)
+
+
+def build_initial_correction_prompt(
+    context: VcsExecutionContext, stage: str, detail: str, delivery: DeliveryReceipt | None,
+) -> str:
+    """Give the original session a completion failure without rebasing its acceptance criteria."""
+    delivery_instruction = (
+        f"flow.open_pr already confirmed delivery at {delivery.head_sha}. Keep that head and receipt. "
+        "Do not push or call flow.open_pr again. Correct the output or restore local state to that "
+        "delivery. If the remote has changed, report the blocker without overwriting it."
+        if delivery is not None else
+        "No successful flow.open_pr receipt was received. Inspect earlier tool results and verify "
+        "any uncertain side effects before retrying them. After fixing, testing and pushing, "
+        "complete flow.open_pr through the existing environment tool."
+    )
+    return "\n\n".join([
+        f"Completion verification failed [{stage}]: {detail}",
+        ("Continue this task in the same session and repository. Diagnose and fix this failure, "
+        "then satisfy the original task, repo tests and review gates before finishing."),
+        (f"Frozen target: branch {context.branch}; remote {context.remote}. "
+         f"Captured Git base: {context.git_base_sha or '(unavailable)'}. "
+         f"Captured jj working copy: {context.jj_base_sha or '(unavailable)'}. "
+         f"Captured jj ancestor: {context.jj_ancestor_sha or '(unavailable)'}. "
+         "The worker will recheck against these original anchors. Keep the captured Git base "
+         "(Git) or jj ancestor (jj) as an ancestor of the delivered commit. Do not substitute "
+         "its parent or an amended sibling for that anchor. "
+         "Preserve existing work and the original remote. Do not force-push or bypass a gate."),
+        delivery_instruction,
+        ("Do not use GitHub API/CLI to create or change a PR or post comments. "
+        "If blocked, describe the remaining blocker in summary; it will still be independently verified."),
+        _INITIAL_OUTPUT_INSTRUCTION,
+    ])
 
 
 def _format_item(item: ReviewFeedback) -> str:
@@ -74,28 +97,45 @@ def _format_item(item: ReviewFeedback) -> str:
             f"{item.author} says: {item.body}")
 
 
-def build_revision_prompt(task: RevisionTask, repo_conventions: str) -> str:
+def build_revision_prompt(
+    task: RevisionTask, repo_conventions: str, *, baseline_sha: str | None,
+) -> str:
     """Supply enough frozen context to resume or rebuild a session in the original repo."""
+    if task.purpose == "revise" and baseline_sha is None:
+        raise ValueError("revise prompt requires the fetched coding baseline")
     feedback = "\n".join(_format_item(i) for i in task.feedback) or "(no inline items)"
     parts = [
-        f"# Original task\n{task.issue_title}\n{task.issue_body}\n",
+        f"# Original task\n{task.task_content}\n",
         f"# Repo conventions\n{repo_conventions}\n",
         (f"# Delivery\n{task.repo} PR #{task.pr_number}; branch {task.branch}; "
-        f"base {task.base_branch}; expected head {task.expected_head_sha}\n"),
+        f"base {task.base_branch}; PR observed head: {task.expected_head_sha}\n"),
         f"# Previous summary\n{task.previous_summary}\n",
         f"# Unresolved questions\n{chr(10).join(task.open_points)}\n",
-        f"# Revision instruction (synthesized from review)\n{task.instruction}\n",
+        f"# {task.purpose.title()} instruction (synthesized from review)\n{task.instruction}\n",
         f"# Review feedback\n{feedback}\n",
-        ("Rules: Use the existing repo, branch and PR. Modify, test, commit and ordinary push "
+        ("Rules: This task is answer-only, overriding earlier coding or delivery instructions. "
+        "Do not modify code, commit or push. Read the existing repository to answer every question, "
+        "with code references in each addressed.note. If a request requires a code change, report "
+        "it as deferred; do not upgrade this task to revise. Do not use GitHub API/CLI, post "
+        "comments, request review or open a PR. Report exact item/version/comment identities. "
+        "Preserve deferred work and ask concrete clarification questions. "
+        "Prior conversation may be unavailable."
+        if task.purpose == "answer" else
+        "Rules: Use the existing repo, branch and PR. Modify, test, commit and ordinary push "
         "to origin. Use the repo's Git or jj backend and leave a clean tree; for jj leave an "
         "empty working copy at or directly after the pushed bookmark. Do not force push, "
         "reset, open another PR, use GitHub API/CLI, post comments or request review. "
-        "If the existing code already satisfies the feedback, explain why and leave the SHA "
-        "unchanged. Report exact item/version/comment identities. Preserve deferred work "
+        "Keep the fetched coding baseline as an ancestor of the delivered commit; do not rebase "
+        "or amend it. If the existing code already satisfies the feedback, explain why and leave "
+        "that baseline unchanged. Report exact item/version/comment identities. Preserve deferred work "
         "and ask concrete clarification questions. Prior conversation may be unavailable."),
-        _COMMIT_CONVENTIONS,
         _OUTPUT_INSTRUCTION,
     ]
+    if baseline_sha is not None:
+        parts.insert(3, f"# Coding start\nFetched coding baseline: {baseline_sha}\n"
+                     "The worker synchronized this checkout before this invocation. Start from "
+                     "its current contents, including collaborator changes. The PR observed head "
+                     "above is an earlier metadata snapshot, not the coding baseline.\n")
     if task.context is not None:
         parts.append(f"# Frozen PR context\n{task.context.model_dump_json()}")
     return "\n".join(parts)

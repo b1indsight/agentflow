@@ -26,14 +26,15 @@ PR、反馈与 Projects。事件、Worker 管理和对账调用工作流，工�
 各子包直接引用已有领域类型、协议、具体仓储/GitHub 及配置，不反向依赖 API 或运行时。
 Runtime 统一初始化工具、effects、结果应用和 conversation broker；各服务仅接收实际
 使用的数据库与服务，自行创建需要的具体仓储。Runtime 管理共享 Database 的初始化和关闭，
-向服务提供同一 Database。Gateway 直接使用工具和结果应用，结果应用的锁由 Runtime、coordinator
-与 Gateway 共享。Webhook 消费器接收配置、插件、通知回调和 Database，在每次 receipt
+向服务提供同一 Database。ServerCallbacks 直接使用结果应用，ServerFlowCallbacks 调用 Flow 工具服务；
+结果应用的锁由 Runtime、coordinator
+与回调对象共享；Gateway 只驱动通信事件。Webhook 消费器接收配置、插件、通知回调和 Database，在每次 receipt
 事务内直接创建 ControlService 与 EventRouter，构造函数以事务上下文创建仓储；通知和 hook
 排到外层提交后执行。API 和对账使用独立的常驻控制服务。
 各包入口只说明职责，调用者直接导入具体模块。
 
 目录列表见[当前目录](roadmap.md#8-当前目录与里程碑)。ASGI Python 入口为
-`app.controler.api`，Judge 内部子进程入口为 `app.controler.review.runner`；
+`app.controler.api`，本地 bub 推理子进程入口为 `app.inference.runner`；
 CLI 命令为 `flowtool serve` / `flowtool worker`，真实验收入口为 `app.live_smoke`。
 
 ## 4.1 Webhook Ingress（FastAPI + uvicorn）
@@ -55,24 +56,31 @@ Codex 等长任务占用 GitHub 的 Webhook 请求。
 边界：202 表示事件已持久化到 webhook inbox；后台消费者在事务内调用 Event Router，失败后可重试。
 202 不表示业务处理已经完成。
 
-### 4.1.1 Web 控制台展示归档
+### 4.1.1 Flow 六态、归档与恢复
 
-控制台的 `POST /api/flows/{id}/archive` 接受空 JSON 对象，复用单 owner Access 验签，
-拒绝明确跨站请求；工作流业务命令仍由 GitHub 与 CLI 发起。
-它在 workflow/publication 锁内重新校验 cancelled，持久保存 `console_flows.archived_at`，
-将卡片移到 done 并保留取消状态、停止确认与结果对账要求；重复请求幂等，任务和会话历史仍可阅读。
-投影刷新和重建保留该标记；重试或合并对账恢复生命周期后清除。
-此入口不创建 ARCHIVE job，不修改 Worker、交付或 GitHub，不将取消当作成功。
-见[功能记录](../plan/cancelled-flow-archive.md)与[控制台说明](../../app/controler/web/README.md)。
+Flow 持久化 `queued/running/review/blocked/finalizing/archived`，所有看板与 Projects 只映射
+这个字段；finalizing 合并到进行中。失败为 blocked，继续占用 Issue；归档结果只有 succeeded/abandoned。
+`POST /api/flows/{id}/archive` 接受 `{reason,summary,expected_round_no}`，复用单 owner Access
+验签及同源检查，通过现有 ControlService 请求收尾。无 PR 的成功调查必须提供非空结论。
+停止、结果、已派发副作用与工作区处置均确认后，事务内释放绑定、追加归档 activity 并写 archived。
+弃置/调查保留工作区；合并交付继续要求原 worker 的 ArchiveResult。
+`POST /api/flows/{id}/resume` 接受 `{expected_round_no}`，检查 Issue 冲突并开启同一 Flow 的新轮次。
+旧 PR、Job、Attempt 与反馈不授权新轮工作；旧分页游标重新开始，activity 历史保留。
+轮次由 Flow/Job/Attempt/activity 的字段表达，无独立 Round 实体。归档 activity 保留原始结果、时间和 PR 身份。
+已核验 webhook 与补偿查询自动更正归档前已合并的 abandoned 结果；严格要求 merged_at 加一秒早于 archived_at。
+合并证据、更正 activity 与当前归档结果同事务提交，重复消息幂等，不改变原归档时间、当前轮次、owner 或执行。
+状态 activity 继续由数据库触发器产生；归档、合并证据和更正由内部事务写入，不能覆盖或作为缓存清理。
+Worker 内容按 Attempt 归属，PR 内容按交付身份归属，Issue 共享/未知归属内容的 round_no 为 NULL。
+详见[控制台说明](../../app/controler/web/README.md)；原展示归档记录保留在历史规划中。
 
 ## 4.2 Event Router
 
 当前实现：
 
-- 触发/反馈忽略配置 bot login 及 GitHub `type=Bot` 的事件；合法关联 PR 的合并事实不受此过滤；
+- 触发/反馈忽略当前 App 自动解析的 bot login（不区分大小写）及 GitHub `type=Bot` 的事件；合法关联 PR 的合并事实不受此过滤；
 - 以 `X-GitHub-Delivery` 原子占有并持久化去重，只有成功插入的 handler 才继续处理，同时记录原始 payload；
-- 仅允许 allowlist 用户通过 `issues.labeled(flow)` 创建 active flow 与 initial job；
-- `issues.unlabeled(flow)` 或严格等于 `/flow stop` 的评论取消 active flow；
+- 仅允许 allowlist 用户通过 `issues.labeled(flow)` 创建 queued Flow 与 initial job；
+- `issues.unlabeled(flow)` 或严格等于 `/flow stop` 的评论请求废弃收尾；
 - review body、inline comment 和 conversation 按 Flow/kind/GitHub ID 保存不可变版本，保留来源 attempt；
 - 反馈 delivery、版本和 deadline 共用事务，持久 settle 后冻结批次；仅 allowlist 作者提交的 Request Changes 经 grace 直达 REVISION；
 - `pull_request.closed (merged=true)` 原子保存事件去重、合并时间/SHA、delivery version，停止
@@ -82,22 +90,21 @@ Codex 等长任务占用 GitHub 的 Webhook 请求。
 
 M2 F1 自动化覆盖反馈工作流锁、同 Flow 批次串行、重启恢复和精确版本消费。
 WebhookConsumer 已持久化失败退避和重放；PR 对账处理已追踪 PR 的 merge/close/reopen，
-反馈对账补充 Issue/PR/review/线程漏投。未合并 close 暂挂而不取消 Flow，保留原绑定，
-重开后核验基线再恢复；漏失的新 Flow trigger 不由对账补建。真实 GitHub payload 兼容性
+反馈对账补充 Issue/PR/review/线程漏投。未合并 close 请求废弃收尾，reopen 不恢复执行，
+恢复只通过显式新轮次操作；漏失的新 Flow trigger 不由对账补建。真实 GitHub payload 兼容性
 仍需服务验收。依据：[消费者](../../app/controler/events/webhooks.py)、
 [PR 对账](../../app/controler/reconciliation/pull_requests.py)、
 [反馈对账](../../app/controler/reconciliation/feedback.py)。
 
 ## 4.3 Control Service / Job Coordinator（状态机核心）
 
-当前持久状态分轴保存；编码、审核和修订阶段由 job、反馈批次与 delivery 推导：
+业务阶段由 Flow 持久化；Job、反馈批次与 delivery 保留各自技术事实：
 
-```text
-Flow:     ACTIVE → SUCCEEDED / CANCELLED / FAILED
-Delivery: NONE → OPENING → OPEN → CLOSED / MERGED
-Review:   settle → READY → PROCESSING → COMPLETED / WAITING
-          新反馈进入后续批次；终态取消活动批次
-```
+| 记录 | 状态 | 约束 |
+| --- | --- | --- |
+| Flow | queued、running、review、blocked、finalizing、archived | 非 archived 继续占用 Issue；新轮次仅显式恢复 |
+| Delivery | none、opening、open、closed、merged | 原生 PR 事实不替代 Flow；关闭/合并经业务处理器更新 Flow |
+| Review | ready、processing、completed、waiting、cancelled | blocked 暂停；finalizing/archived 退休活动批次 |
 
 `ControlService` 在显式事务中负责触发、取消和 retry，并由 `lifecycle` 提交合并事实；
 `lifecycle` 也拥有创建 PR 的身份核验、绑定及 close/reopen。`JobCoordinator` 把 INITIAL、REVISION、ARCHIVE
@@ -108,14 +115,17 @@ Runtime 创建并共享的 `ResultApplication` 按 job ID 读取并校验已持�
 PR 依赖操作与 INITIAL 提交复用 `contracts.result_models.unique_pull_request_receipt`，
 只消费已读取的唯一创建回执；退休恢复缺少唯一回执时继续等待，不提交本地完成状态。
 `ResultApplication` 同时拥有逐 job 锁、有界分页和固定并发恢复；Runtime 调度其恢复方法，
-Gateway 持久接收后直接调用 `self.results.apply`，核验提交完成后才发送 ACK；
-工具请求直接调用 `gateway.tools.execute`。内部配置、数据库、仓储与服务依赖使用具体类型。
+ServerCallbacks 持久接收终态 T 后直接调用 `self.results.apply`，核验提交完成后才回复接纳调用 A；
+工具请求直接调用 `self.tools.execute`。内部配置、数据库、仓储与服务依赖使用具体类型。
 网络请求不占用数据库事务；plugin hook 在提交后调用，不具备持久化投递保证。worker 不能直接更新这些状态。
 `JobCoordinator.prepare_for_assignment` 完成任务构造、push capability 签发和 I/O 后业务复查，
-直接返回 wire `Assignment` 或 QUEUED/DONE/FAILED。读取故障使用持久重试预算，签发故障直接失败。
-`WorkerGateway` 在准备期间维持租约心跳，连接结束时取消并等待准备协程；发送前仍独立调用
-`self.stops.authorize_dispatch`，再发送 coordinator 构造的消息。
-非零 Codex exit 会转 FAILED。revision 成功后仅消费明确 addressed 的 item/version，deferred/遗漏项/
+直接返回 typed `AssignmentArguments` 或 QUEUED/DONE/FAILED。读取故障使用持久重试预算，签发故障直接失败。
+`ServerCallbacks` 通过现有 `Session.watch` 观察编码准备，期间维持准备租约，同连接继续派发推理和
+处理消息。完成通知回到串行 driver，发送前仍独立调用 `self.stops.authorize_dispatch`，再以稳定执行 ID
+和当前连接头构造 `worker.execute` 调用；准备状态不授权 worker 提前报 Started 或结果。
+停止时撤销未下发准备，连接结束或替换时等待其取消清理。`Session.unwatch` 立即撤销完成通知，
+清理中的观察仍计入容量并由 Session 持有；关闭时一并等待，不重复取消已在清理的观察。
+非零 Codex exit 将 Job 置为 failed、Flow 置为 blocked。revision 成功后仅消费明确 addressed 的 item/version，deferred/遗漏项/
 clarification 保持 waiting；不把 addressed 当作远端 resolved。有未决问题时不重新请求审核。
 
 M2 已接入有界 Issue/PR/patch/讨论快照、线程/comment 映射与原线程回复/保守 resolve。
@@ -125,30 +135,82 @@ M2 已接入有界 Issue/PR/patch/讨论快照、线程/comment 映射与原线�
 - 同秒已出现的编辑转换保留待核对，不重复回放；新鲜观察可推进，见 [M4 F1](../plan/m4-feedback-replay.md)；
 - 冻结上下文尚不包含 CI 状态；
 - cancel 持久化停止意图，worker 取消执行并回收持有的进程组；未知旧执行和未决 effects
-  保留绑定，无强制释放。cancel 不撤销已发生的 push/PR/评论，也不执行归档清理；
-- 未合并 close 暂挂，reopen 核验 head/base 和旧执行后恢复；修订拒绝远端 head 漂移，
+  保留绑定，无强制释放。cancel 不撤销已发生的 push/PR/评论；确认停止后保留工作区并归档；
+- 未合并 close 结束本轮，reopen 只记事实；显式 resume 创建新轮次。修订拒绝远端 head 漂移，
   人工 push 的自动接纳、rebase/冲突处理尚未实现。
 
 因此状态转换代码存在不等于目标闭环可用。
 
-### 4.3.1 远程 Worker Gateway / Client / Executor
+### 4.3.1 公共 Gateway / Session 与角色驱动
 
-serve 的 `WorkerGateway` 校验每个 identity 的 bearer token，维护多会话 registry，并用随机 connection epoch 与
-assignment token 对 Started、Heartbeat 和结果做四元组 fencing。每个 worker 是单槽，PostgreSQL 按 FIFO、
-worker `last_assigned_at` 和 Flow execution binding 事务化领取任务。worker 的 `WorkerClient` 主动连接并指数退避；
+两端 Runtime 直接创建同类 `Gateway`，统一登记、查找、替换、通信关闭和串行事件驱动。
+ServerRuntime 为每条连接创建 `ServerCallbacks`；WorkerRuntime 分别创建 `WorkerStateCallbacks` 和
+`WorkerBusinessCallbacks`，以 `Gateway.serve(..., state_callbacks, business_callbacks, replace=False)` 平级挂载，
+以固定 `server` key 拒绝重叠连接。worker 两类分别位于 `transport/state.py` 与 `transport/business.py`。
+server 仍由 ServerCallbacks 组合 ServerFlowCallbacks；本轮不扩展 server 的装配重构。
+ServerFlowCallbacks 通过 `bind(routes)` 注册 `flow.open_pr` 请求，并拒绝未注册工具请求。
+WorkerBusinessCallbacks.bind 注册 `worker.history` 和 `before_wait(self.prepare)`，在同一 driver
+中读取历史、管理工具观察。它与 WorkerStateCallbacks 互不引用或调用；状态类是唯一 configure owner，
+负责连接与执行状态协议、terminal 观察和授权。握手缺少恢复决定时，不授权仍在运行的旧执行发送工具。
+Flow 只在 epoch 已绑定且执行 lease 有效时观察队首，发送时再次检查 lease 与 Future；正常完成
+保留原调用关联以消费迟到回复，停止或 assignment 退休/更换后撤销。只读的 WorkerExecution.stopping
+区分正常完成与 fenced stop，不增加共享业务状态容器。
+WorkerBusinessCallbacks 不注册 Flow 工具名；发送前用 `expect_reply(call, model, deliver, on_reply=..., on_rejected=...)`
+登记原调用的接收函数。Dispatcher 匹配 reply_to、method 和模型后，直接调用它的 `on_reply`，
+成功返回才调用 deliver，将回复交给 WorkerExecution 完成原 Future，不经 WorkerStateCallbacks 转发。
+ServerFlowCallbacks 校验 Flow/job 归属，通过连接 owner 的实时检查获得 assignment 与 stopping 状态；
+WorkerBusinessCallbacks 只保存当前连接借出的工具调用，原 Future 继续由 WorkerExecution 持有。
+握手、逐项授权、整批验证错误和关键证据恢复仍由连接回调统一处理。
+Gateway 在准入前调用 `bind(routes)`，冻结 `register("包名.方法名", model, callback)` 的精确请求路由；
+该接口只接受 ToolCall 模型。普通 ToolResult 由 Dispatcher 的连接局部关联表按原 payload ID 分派；
+执行/停止调用及其接纳调用也在发送前登记。`on_reply` 是每次调用可选的交付前钩子，抛错阻止交付；
+call_id、job/token、持久结果和停止证据继续由业务 owner 校验。调用完成、弃用或发送失败时撤销关联，
+Gateway 退出时清空；表不接管执行 Future 的生命周期。server 的 T/R 接收函数保留至 A/B 接纳，允许重复凭据。
+无法匹配的回复交给 `configure(unmatched_reply=...)`：worker 拒绝；server 对跨重连或旧任务终态，
+用持久 job 的原 assignment 身份核对调用 ID，再执行原结果处理，不依赖旧连接的关联表。
+ValidationErrorResult 先进入原 `validation_error` 钩子，未匹配错误不会触发新业务效果。
+worker 验证 epoch 与整批关联头后，通过 Dispatcher.reject_reply 通知原调用登记的 on_rejected；
+核心协议回调不再判断 FlowToolResponse 或直接调用 Flow 对象，关键协议错误仍由自身证据策略处理。
+不使用通配、反射或 pluggy hook 分发。Session 交付既有 message、类型化 Ready 回调或无数据 wake，
+不增加 Delivery；观察任务只借用执行结果，业务处理始终在共同驱动中串行进行。
+
+`configure(message=self.on_message, message_done=self.on_message_done, ...)` 处理完整 message：先校验控制与 epoch，
+再逐项处理 payload，全部成功后执行 message_done。`Message` 是共同消息模型，
+`WorkerMessageUnion` / `ServerMessageUnion` 是含控制变体的方向联合；`WorkerMessage` /
+`ServerMessage` 是 `control=None` 的具体变体，也包含空 payload 的纯收件 ACK。
+它们使用相同的 `message_header`，不增加另一层消息包装。
+
+serve 的 `workers/transport.py:serve_worker` 校验 bearer token、accept 与实际首条 message Register，
+再创建带随机 epoch 的 Session，交给 Runtime 装配回调并调用 `Gateway.serve`。
+回调保存调度、恢复、持久化和 assignment fencing 的连接局部状态，无 Endpoint/Run/Context 对象。
+普通 worker 按仓库维护多个编码 workspace，另有一个无仓库默认 workspace 和独立推理槽；
+本地 bub 仅有推理槽。worker 按排队需求补充并登记具体目录，编码任务按 FIFO、worker
+`last_assigned_at` 和 Flow execution binding 在 PostgreSQL 中事务化领取具体 `(worker_id, workspace)`。
+每仓库限额使用该 worker 上报的配置；不同 workspace 的 job 并行，同 Flow 串行，推理选择规则见下文。
+`WorkerRuntime` 直接负责主动拨号、认证、指数退避和连接任务的关闭等待，
+并直接持有按 Flow 分开的执行集合，不增加 Registry。`Connection` 接口与 `WebSocketTransport` 均位于 `worker/runtime.py`；
+后者只适配底层 WebSocket IO，不负责连接生命周期，不保留独立 client 模块。
 `WorkerExecutor` 只依赖 CodingAgent 和 Flow repo/VCS helpers，不导入 Store、FastAPI 或 GitHub。
+
+Gateway 仅发布当前登记，另保留尚未退休的 Session 以便进程关闭全部通信。A→B→C 重叠替换时，
+C 可越过慢 A；B 等待结束后必须复核身份，不能重新发布或覆盖在线 DB。旧 finally 只退休自己。
+Gateway 退出先撤回路由并 join Session，再调用角色 closed 钩子以原 epoch 写 DB 断连；关闭错误也不跳过 DB 清理。
+进程关闭先 seal，拒绝新登记和查找，再 join 全部通信；不接管 ASGI 或执行任务。正常 ASGI drain
+仍负责业务退出，强制超时退出没有新增业务 join 保证。FastAPI transport.close 仅吸收正常断连的
+WebSocketDisconnect，其他错误与取消继续传播，见[第三阶段记录](../plan/shared-communication-gateway.md)。
 
 不同 identity 可并发在线；同 identity 新连接取得新 epoch 并关闭旧 socket，数据库条件保证旧连接最终失效。
 未授权派发的任务断线后可在 lease 到期 requeue；已授权派发但缺少 Started 的未知执行不当作
 未发送重排。Started job 进入 RECOVERING，只允许原 identity 在 grace 内恢复，
-到期才把 job/活跃 flow 置 FAILED，不覆盖 CANCELLED。取消通过持久 StopExecution /
-ExecutionStopped / StopAccepted 握手收敛；停止凭据与已发送 effects 未确认前不释放绑定，
+到期才把 job/活跃 flow 置 FAILED，不覆盖 CANCELLED。取消通过 `worker.stop` 与 `[R,B]`
+握手收敛；真实停止凭据与已发送 effects 未确认前不回复 B、不释放绑定，
 离线和 lease 到期不能替代停止证明。drain 只阻止分配新 Flow，已有绑定继续 revision/archive。
 详见[取消、drain 与停机](../operations/cancel-drain.md)。
 已持久接收的终态结果由 control 接管，不因 worker 的 recovery deadline 到期重新执行或失败；
-后台循环持续恢复未应用结果。必要的 GitHub 操作未完成时不发 ResultAccepted，worker 保留 journal 重连。
-Flow 非终态时，即使暂时没有 running job，binding 也继续独占该 worker/repo。
-worker socket 与 executor 解耦，root 内原子 journal 在 ack 前保存进度和终态结果；
+后台循环持续恢复未应用结果。必要的 GitHub 操作未完成时不回复 `server.accept_result`，worker 保留 journal 重连。
+Flow 未释放时，即使暂时没有 running job，binding 也继续独占该具体 workspace。
+worker socket 与 executor 解耦，root 内 `journals/flow-<id>.json` 分别保存进度和终态结果；
+结果或停止提交后仍等待精确 ACK 库存凭据，不凭漏报或旧代际消息释放执行。
 进程重启可重放终态，但不会猜测恢复已经消失的 executor。同一 attempt 的后续任务仍只回到首次 Started 的 worker，
 不支持跨 worker session 迁移。同机默认 root 按 identity 派生，并用持久 identity 标记与独占锁拒绝并发或顺序复用。
 
@@ -158,22 +220,30 @@ worker socket 与 executor 解耦，root 内原子 journal 在 ack 前保存进�
 单轮超时，并将所选超时用于 revision deadline。INITIAL/REVISION 的业务 Schema、VCS 核验、
 交付回执和 ARCHIVE 的 workspace 释放由共用 executor 负责。
 
+两个后端通过 `credentials.inherited_agent_environment` 继承原生 CLI/skills/MCP 环境，
+先清除 ambient Flow、Git/GitHub/SSH 认证与父会话状态，再注入当前 assignment 能力。
+HOME、原生配置入口及自定义 MCP 变量保留；不增加配置解析、skills 复制或通用密钥识别。
+独立 VCS 核验仍使用自己的最小环境；自定义秘密及磁盘文件依赖专用 worker 身份隔离。
+
 ### Amp
 
 - `amp_agent.AmpCodingAgent` 适配 worker 的编码请求，使用私有 local execute thread；
   prompt 经 stdin，恢复显式指定同一 `T-UUID`，
   固定 `--mode low`，不运行 orb、runner 或 SDK。原生登录或 `AMP_API_KEY` 归专用 worker 账户。
-- 临时 settings、Git helper 和 `gh` 环境在每轮重建，复用本轮 GitHub capability；INITIAL 配置
-  当前 WorkerMCP，REVISION 禁用旧 `flow` broker。进程环境不继承 control/worker 或个人 GH token。
+- 使用原生 user/workspace settings；每轮仅通过 `--mcp-config` 覆盖保留名称 `flow`。
+  INITIAL 配置当前 WorkerMCP，REVISION 用不可连接的 loopback 端口零替换旧 broker，不带旧 token；
+  固定 CLI 不支持 `disabled`，该项会报告连接错误，其他 MCP 保留。Git helper 和 `gh` 临时环境
+  继续按本轮 GitHub capability 重建。
 - 成功必须具有完整、同 session 的 init/result、进程退出 0、`is_error=false` 和 `subtype=success`。
   最终文本原样交给 executor，Schema 只作提示，不修复 JSON 或自动重跑未知执行。
 - `amp_process.run_amp` 供编码与历史导出共用，并行有界读取两条管道；取消/超时先 SIGTERM，升级时包含事前捕获的独立
   shell 进程组。该快照无法保证回收任意脱离进程树的进程；仍依赖外部隔离。
-- `WorkerSession` 按 ID 格式选择历史来源。Amp 原生 export 经公开块映射与脱敏后短时缓存，
+- `ExecutionState` 按 ID 格式选择历史来源。Amp 原生 export 经公开块映射与脱敏后短时缓存，
   支持外部追加、块内分页、前缀编辑失效；不保存第二套捕获历史，不显示 thinking。
-  记录 ID 保留 session 前缀，满足 control 的来源校验；两端使用 protocol v15。
-- workspace Amp 设置可能覆盖临时设置，因此执行前发现设置即拒绝。managed policy/账户插件仍由
-  运维核查；有效工具列表检查只影响结果接收，不能替代权限或 OS 隔离。
+  记录 ID 保留 session 前缀，满足 control 的来源校验；两端使用 protocol v25。
+- 不再拒绝 workspace Amp 设置或因额外工具拒收结果；保留必要的原生 shell 与完整终态检查。
+  用户禁用与 workspace MCP 审批由原生 CLI 执行，不自动批准；managed policy/账户插件仍由
+  运维核查，CLI 工具列表不能替代权限或 OS 隔离。
 
 配置、历史预算和取消限制见[部署说明](../deployment/README.md)；实现与实测记录见
 [Amp feature record](../plan/worker-amp-cli.md)。
@@ -195,7 +265,7 @@ worker socket 与 executor 解耦，root 内原子 journal 在 ack 前保存进�
   worker binding 仍由 executor 校验；
 - `-o` 读取原始最终消息，`--output-schema` 约束 CLI 输出；`WorkerExecutor` 按 INITIAL/revision
   严格解析各自结果模型，adapter 不解释业务 schema；
-- 子进程只继承 Codex 认证、代理/CA 和基础运行环境；INITIAL 额外获得单次短时 push credential helper 与
+- 子进程保留原生配置、skills/MCP 和自定义环境变量；INITIAL 额外获得单次短时 push credential helper 与
   指向 worker 进程内 loopback HTTP 服务的 `flow.open_pr` MCP 配置及单次 Bearer 凭据，不获得 control/worker credential；
 - 单次运行使用配置的 timeout，超时 kill 子进程并返回 exit 124。
 
@@ -228,7 +298,9 @@ M2 已加入类型化 GraphQL 线程/comment 分页、共享预算、原线程�
 | execution policy | 否 | worker config / `CodexAgent` | full access 需专用 account/container/VM；目录只表达所有权 |
 | VCS | 否 | `agent_guidance/verify_pushed_outcome` | Agent 自探测；worker 在 tool 前用固定 remote 和净化、限时命令验证 ancestry/clean/remote SHA |
 
-分支名由 control 定为 `flow/<flow-id>`。worker 内的 Code Agent 在 Flow repo 完成 branch/bookmark、commit 和
+INITIAL 复用原 title inference job，一次返回 `title` 与英文 kebab-case `branch_slug`；control 直接校验两个字段，沿用原有标题写入和 inference 结果保存，从该结果读取 slug 后才创建 delivery、派发编码。不新增命名对象、分支列或分支占名写入，实际分支仍由 `flow_deliveries.branch` 保存。等待使用独立异步 preparation，不持有事务或阻塞 inference 槽；逻辑调用仍限 30 秒。命名失败不会生成 ID 分支。
+重试沿用已有 delivery 分支或原 inference 结果，后续 round 从 delivery 的实际分支去掉当前轮次后缀，再加 `-round-N`。已有 delivery/PR 不重命名；首次派发前只读检查远端同名 ref，拒绝接管，不自动添加数字后缀。该检查不构成远端原子占名，也不在数据库中预留名称。
+worker 内的 Code Agent 在 Flow repo 完成 branch/bookmark、commit 和
 push；worker 在转发 `flow.open_pr` 前核验，control 再读取 GitHub ref 核对 SHA 后才创建/复用 PR，最后以
 terminal result 三方核对。当前缺口包括：
 
@@ -279,17 +351,17 @@ cursor 上使用 Psycopg `class_row(Model)`，由模型统一校验枚举、时�
 事务边界与共用锁由 Database 提供，没有引入 ORM。
 
 - `flows`：issue 级状态，`(repo, issue)` 仅允许一个非终态 flow；
-- `flow_executions`：Flow 到单槽 worker/repo identity 的生命周期 binding 与 recovery deadline；
+- `flow_executions`：Flow 到具体 worker/workspace/generation 的生命周期 binding 与 recovery deadline，活跃位置唯一；
 - `flow_deliveries`：每 Flow 唯一 branch/base/PR、交付状态和版本；
 - `flow_tool_calls`：fenced command 的参数与成功交付回执 response，支持同 call id 重放；
 - `attempts`：一次运行/恢复尝试的 session 与 revision cycles，不拥有 worker、branch 或 PR；
-- `jobs`：queued/running/done/failed、worker/token/start、lease/recovery deadline、result inbox/digest 与尝试次数；
+- `jobs`：queued/running/done/failed、worker/workspace/generation/token/start、lease/recovery deadline、result inbox/digest 与尝试次数；
 - `result_applications`：按源 job 唯一保存冻结的结果计划；
 - `result_effects`：有序 GitHub 操作、claim/fencing、远端回执、退避时间和最后错误；
-- `workers`：identity、协议版本、epoch、online/busy/recovering/offline/failed、当前 job、连接/心跳与断线原因；
+- `workers`：以 `(worker_id, workspace)` 为复合主键，一位置一行；默认无仓库行保存连接/epoch/限额/推理槽，各仓库行保存代际、库存状态和当前编码 job；
 - `events`：delivery 去重和 payload 审计；
 - `webhook_inbox`：202 前持久接收的原始事件、消费 claim、重试与保留状态；
-- `execution_stops`：绑定到具体执行的停止意图、凭据 digest 与确认状态；
+- `execution_stops`：绑定到具体执行与 workspace/generation 的停止意图、凭据 digest 与确认状态；
 - `review_items` / `review_versions`：Flow 内稳定反馈身份、不可变版本、独立 relay/consume 时间和已核验 addressed 依据；
 - `review_pending_edits`：同秒乱序编辑的前序正文与原始来源；只有未在历史表示且后继无歧义时原子回放，其余保留待核对；
 - `review_buffers` / `review_batches`：持久 deadline/generation、冻结反馈/上下文/线程快照、批次所有者 job 和未决问题；
@@ -302,11 +374,13 @@ cursor 上使用 Psycopg `class_row(Model)`，由模型统一校验枚举、时�
 
 自动化覆盖 active 唯一约束、flow/attempt/job 往返、review upsert、assignment start/heartbeat/fencing、
 lease 到期 requeue、started grace/deadline、epoch fencing、result inbox 去重、跨 Store 可见性、delivery 去重和并发 assign。
-`WorkerStore.assign_job()` 使用事务内的 `FOR UPDATE SKIP LOCKED`，gateway 接受多个独立配置 worker。
+`WorkerStore.assign_job()` 是编码与推理的共同领取入口，gateway 接受多个独立配置 worker。
 
-仓储继续使用同步接口。assignment claim 无锁读取公平候选，只有请求方就是候选时才锁定自身 worker，
+仓储继续使用同步接口。编码 claim 无锁读取公平候选，只有请求方就是候选时才锁定自身 worker，
 重新检查 epoch、在线状态、空闲槽位及 drain/binding；随后锁定最早 eligible Flow job，并原子创建
-或复用 lifecycle binding。`with database.transaction() as tx` 提供绑定连接的数据库上下文；
+或复用 lifecycle binding。推理 claim 按 worker ID 顺序锁定候选状态，再比较本地优先、能力和空闲
+推理槽；它不创建 lifecycle binding。该选择串行化领取事务，代价随 worker 数量增长，不承诺大规模吞吐。
+`with database.transaction() as tx` 提供绑定连接的数据库上下文；
 服务用 `self.flows.using(tx)`、`self.jobs.using(tx)` 绑定自己持有的仓储。
 所有步骤共用该连接，异常一起回滚，事务退出后这些视图拒绝继续使用。
 结果的最终事务同时写入 flow/delivery/attempt、带源 job 唯一键的派生 job、`result_applied_at` 和 worker slot；
@@ -316,8 +390,10 @@ lease 到期 requeue、started grace/deadline、epoch fencing、result inbox 去
 评论使用稳定隐藏 marker 并分页核对本 bot 作者，PR 使用固定 head 查询，labels/reviewers 则核对目标状态。
 不能确认是否成功的非幂等请求保持 uncertain，不盲目重复 POST；`flow show` 显示待处理操作，retry 不能绕过它们。
 因此不宣称跨 PostgreSQL/GitHub 的通用 exactly-once。跨 worker session 迁移和多 serve HA 仍未实现。
-当前只初始化完整 schema，不执行历史迁移、数据回填或跨版本结果转换。serve/worker 使用同一
-版本，wire protocol v13 / journal v3；持久结果的重放保障适用于当前版本的重启恢复。
+启动初始化 schema，并幂等升级推理 Job、双槽和批次关联字段；已有编码记录保留。serve/worker 在线使用 wire19，
+正常写 journal5 / ResultInbox v1；journal/inbox 只存业务事实，不存 message、条目身份、ACK 或 epoch。
+受限 v4 journal（内嵌 v14/v15 回执）与已知旧 inbox 只读转换；保持摘要，正常状态保存才写 v5。
+未知、混合或损坏记录保留并拒绝；切换和降级边界见[升级说明](../operations/upgrade.md)。
 
 ## 4.8 GitHub 交互面
 
@@ -352,17 +428,40 @@ F4 的完整线程映射由 control 持有，遵循当前 worker v13 契约。is
 语义见 [Review 修订循环](review-loop.md)。`review/context.py` 在 control 读取 Issue、PR 与分页文件/
 讨论，冻结有界 JSON 快照；先后读取 PR 防止 head/base 在取数期间变化，未完成批次复用入库快照。
 
-triage 是 worker 请求之前的批次判断，由 control 的 review sweep 顺序处理 ready 且无 job 的批次。
+triage 由 control 的 review sweep 处理 ready 且无修订 job 的批次；需要模型时提交推理 Job，
+立即让出扫描，后续批次可继续入队。`review_batches.inference_job_id` 与修订 `job_id` 分开保存。
 REVISE 在工作流事务中创建 revision job 并关联批次；ANSWER/IGNORE/WAIT 直接处理批次。
-没有独立 job、assignment token 或本地任务恢复；中断后重新读取未完成批次。有效性检查与原子
-关联避免迟到决定或重复下发，过程不更改 worker 状态或 Flow binding。答案已发送但回执不明时，
+推理使用真实 Job/token/epoch、总截止和持久结果；重新扫描不能重置活动 Job 的请求和尝试预算。
+当前性检查与原子关联避免迟到决定或重复下发，推理不更改 Flow binding。答案已发送但回执不明时，
 只查询批次 marker，不重复 POST。`ReviewStore` 拥有上下文失效、答案发送授权和确定拒绝后的复位；
 coordinator 不直接更新业务表。批次答案与结果评论保留各自的事务授权和 marker 恢复，
 共享 `GitHubError.definitely_rejected` 的拒绝判定；线程回复与普通结果评论共用一个执行分支。
 
-control 的 `BubJudge` 启动独立 `app.controler.review.runner` 子进程，显式配置 bub 0.4.1 `ModelRunner.completion_response`，
-不创建 framework、加载插件、读写 tape 或执行工具。每批次独立请求与会话 ID；凭据仅通过允许的
-子进程环境传入。单次调用无 fallback/SDK retry，父进程限制时长和 stdout/stderr，取消时回收子进程。
+control 的 `ReviewJudge` 负责 prompt 和业务判定，`JobInference` 提交/读取通用 messages、可选 schema、
+字节限制及总预算。`WorkerStore.assign_job` 统一选择固定 execute/infer 槽，结果经共同受理和
+`ResultApplication` 保存、校验和应用；review 的 `TriageVerdict` 校验必须在推理 Job 成功前完成。
+无 Flow 的通用推理也能执行。旧 `InferenceRouter`、`InferencePool` 已删除，不保留另一套调度循环。
+controller 只在 bub 配置和依赖预检通过时托管 mini worker；会话就绪、空闲且能力合条件时优先。
+未配置、半配、忙或不符合条件则选普通 worker；永久调用错误不能通过更换 provider 绕过。
+`app.inference.runner` 子进程显式配置 bub 0.4.1 `ModelRunner.completion_response`，不创建 framework、
+加载插件、读写 tape 或执行工具，SDK retries 为零。父进程限制时长和管道，取消时回收子进程。
+
+普通 worker 在鉴权和 Registered 完成后登记推理能力，拥有 execute 和 infer 两个独立持久槽。
+编码忙不排除推理，draining/recovering/failed 排除；无需 Flow/repo 绑定即可接推理。
+bub mini worker 仅挂 infer 回调，通过有界进程内 Transport 和相同 Session/Dispatcher 注册及领取，
+不实例化编码 Runtime、不创建仓库或编码 journal。宿主负责连接重建、取消和 join，网络连接不能冒用本地身份。
+共享 `app.inference.transport` 负责异步执行与按 Job/token 取消，`app.inference.local` 管理 mini 生命周期；
+controller 不依赖 `app.worker`。临时 RPC helper 继续服务 history，推理通过持久 Job 回复关联恢复。
+worker 通过 Session.watch 观察异步答案任务，模型等待不占用串行消息 driver；断线取消并 join 推理。
+原生 Codex/Amp 每次调用 start，在 `worker_root/inference/answer-*` 下使用新会话，不授予 Flow capability。
+两类 worker 每次推理使用初始为空、不复用的非 Git 目录；原生工具/用户配置仍受外部专用账号、container 或 VM 约束。
+
+只有 Job 状态机重试可恢复错误，最多 3 次授权派发，排队、通信和退避计入同一总预算并跨重启保存；
+每次换 request_id，未知结果排除原 worker。不可恢复错误保守 WAIT，可恢复耗尽保留 READY，
+后续扫描允许新一轮 Job；已保存结果/决定的应用不需要 worker 在线，也不再次调用模型。
+三次未成功或提前耗尽预算的安全摘要与 Job 终结在同一事务写入活动账本；写入失败保留 inbox，仅重试应用。
+`InferenceNoticeStore` 按快照、keyset 分页读取每个批次的最新通知，并从当前批次/Flow 状态生成后续说明。
+控制台执行记录展示推理 Job、状态和派发次数；独立读取通知，不改变 jobs 分页，不轮询，也不向 GitHub 发送失败通知。
 
 严格校验四类 verdict、有限 confidence、动作字段和 envelope 身份。结果持久保存模型/adapter 版本、
 context digest、reason/open_points；answer 使用同一个答案，由反馈批次持久化发送授权并通过
@@ -370,23 +469,64 @@ context digest、reason/open_points；answer 使用同一个答案，由反馈�
 adapter/控制流已通过自动化，真实 provider 的语义准确性仍待 smoke 验收。
 
 
-### WorkerSession
+### Worker 执行生命周期
 
-`app/worker/state/session.py` 统一 worker 本地会话状态：当前 assignment、持久化执行阶段、
-修订调用记录、终态脱敏/归档、恢复描述、停止/清理凭据及历史查询入口。
-Runtime 创建一个实例供 Client/Executor 共用；Client 保留连接和执行 Task，Executor 保留任务编排。
-会话状态继续写入 `assignment-journal.json`（version=3），历史正文继续从 Codex JSONL 读取。
-历史解析与限流由 `state/history.py` 处理，查询允许读取 control 明确指定的既往会话，不局限于当前 assignment。
+`WorkerRuntime` 装配一个进程级 `WorkerExecution`，拥有根锁、信号、健康任务与关闭顺序。
+`execution/lifecycle.py` 中的 owner 持有唯一执行 Task、工具请求和原 Future、停止清理 Task。
+`WorkerExecutor` 继续编排 initial/revision/archive、agent、MCP、VCS 和 workspace，不管理连接。
+连接回调只借用 owner；重新连接前必须关闭并 join 旧 Session，同一 owner 不支持并行通信消费者。
 
+`state/execution.py` 的 `ExecutionState` 保存当前 assignment、持久化阶段、修订调用记录、
+终态脱敏/归档、恢复描述及停止/清理凭据。唯一 `state/record.py:ExecutionRecord` 保存 v5
+业务记录与原 digest；ExecutionState 负责 IO。执行自然结束时 owner 主动落盘，无需等待重连；落盘失败保留
+完成 Task 的结果，恢复时重试，不能重新执行。Register 后完成的任务可接收 `Registered.recovery=resume`，
+然后重放终态；普通 started 任务在进程重启后没有 Task 时仍不能推断已停止或重新运行。
 
-WorkerClient 在 `_receive_message()` 统一解析 WebSocket 消息，历史查询并发执行并在原连接回复；
-其他任务消息继续进入执行/恢复流程。每条连接最多 4 个历史查询，连接结束时取消并回收查询任务。
-`state/history.py` 继续提供历史解析、分页和读取限制，由 WorkerSession 提供查询入口；无额外连接包装层。
+首次派发保持 `record_received → 发送 Started → record_started → 创建 Task` 的顺序。
+工具调用由 MCP 交给 owner，WorkerBusinessCallbacks 借用队头、以当前 epoch 的新 message 发送原条目，收到响应后交回 owner
+完成原 Future。断线不出队、不换 call_id 或调用条目 ID；原 socket 仍消费已取消调用的匹配迟到回复。
+`on_result_accepted` / `on_stop_accepted` 只处理收到的确认，不发送 ACK。
+
+双端 Runtime 使用公共 Gateway 管理 `app/communication/session.py` 中的 Session 实例。
+一个 Session 对应单个对端的一次连接 epoch，唯一 reader 严格解析完整 message；所有 payload 和拒收进入
+32 条 message / 32 个业务条目 / 16 MiB FIFO。history 请求、回复和错误都经过相同 driver，
+先由控制 owner 授权，再逐项分派。`Dispatcher` 只按 `package.method` 注册请求模型与绑定回调；
+普通回复按 `reply_to` 由 Dispatcher 关联，经过可选 `on_reply` 后交给原调用接收函数；
+无反射或广播，Session 不再持有查询表或 responder；临时 history 同样使用 Dispatcher 的关联表。
+Session 对 terminal/tool 做有界一次性观察；Gateway 公平交替网络输入与就绪回调，禁止嵌套消费。
+Session 的 stop 硬截止覆盖回调内部 await；通信心跳独立运行，慢业务不阻塞心跳发送。
+所有消息经 Session 串行写入，`send` 等实际写完成；工具 guard 在拿到锁后的实际写入前检查。
+不确定的写失败/取消封闭连接，无自动重试。FastAPI socket 直接满足 Transport；websockets client
+只用本地适配器转换 send/recv/bytes。message 携带共同连接头及 typed call/result 列表，
+控制 ACK 用独立的 32 项 FIFO 和 sender，实际写成功才出队，可顺带附加到业务写；不确认业务成功或续 lease。
+
+Broker 持有临时查询 Future，按 Session 限额 4 个、全局 64 个，保留 30 秒发送加等待总预算和历史页校验。
+Gateway.get 一次选定 Registration 中配对的 Session/Dispatcher，不保存第二张 peer 表、不重投后继连接。
+worker.history 由业务类串行处理；慢 history 与其他慢回调互相等待。无独立 handler、busy 队列或查询 sender。
+临时请求使用 expect_reply 的 on_closed 通知；持久接收者不登记它，关闭连接不取消真实执行。
+epoch 由合法握手/恢复响应确认一次；`worker.stop` 与已提交 Register+A 的接纳回复可早于 Registered。
+终态发 `[T,A]`，停止发 `[R,B]`；每项各自关联。T 后不丢 A，R 后不丢 B；停止阶段不回复 A、不创建新 Flow effects。
+
+关闭先失败临时查询、清连接缓存，再完整取消并 join 通信任务；不取消执行 Task、原工具 Future、
+shielded stop，也不释放 Flow binding。读失败先按序排空已读 FIFO，交付已收到的回复/拒收，再失败剩余查询；
+显式关闭则丢弃旧 FIFO。旧连接/epoch 回复不能完成新请求，不跨连接重放查询。
+WorkerBusinessCallbacks.on_history 内 await to_thread 调用 `ExecutionState.read()`，再选择 Codex/Amp 读取器，
+允许查询 control 指定的既往会话；无额外历史 facade。取消 to_thread 的等待不保证同步读取立即停止；
+其结果只属于旧 Session。Registered 前的合法 history 不绑定 epoch 或 ready；server 的 history 回复
+不要求 Started，也不替代 Started 或刷新执行存活期限。可靠领域事件/outbox 与 HA 不在当前通信架构范围。
+
+wire v18 的可关联 payload 校验失败整批拒收；合法兄弟项也不执行。每项收到同 method、
+`reply_to=原条目ID` 的 `tool_result`，error 严格只有固定 `code=validation_error` 与
+`message=message payload failed validation`，不暴露详情。坏头、握手、epoch、容量或畸形 error
+仍关闭连接，不对 error 回 error；混合控制拒收不续租、不登记 ACK。
+普通工具/history 失败原 Future，保持连接；Started、T/A、R/B 或 stop 失败保留证据并恢复关闭。
+Assignment 拒绝只在 SQL 预启动围栏成立后写 control-source Failed，应用提交后才退出派发等待；
+与 stop 竞争时保留 binding/intent，缺 journal 不能伪造停止证据。双端协调升级，journal5/inbox1 不变。
 
 WorkerMCP 随首次编码启动与关闭，复用现有 HTTP 依赖，仅暴露 open_pr；无 STDIO 桥接进程。
 修订恢复覆盖为禁用的 flow MCP 配置，避免重新连接旧任务端口。MCP 服务不接管 worker 信号。
 
 
-Worker 目录分为 `execution/`（executor、Codex、prompts、VCS、credentials）、
-`transport/`（control client、MCP）和 `state/`（session、history）。
+Worker 目录分为 `execution/`（lifecycle、executor、Codex/Amp、prompts、VCS、credentials）、
+`transport/`（IO 适配器、状态/业务回调、MCP）和 `state/`（execution、history）。
 根目录保留 runtime/config/health，分别负责组装、配置和探针入口；各子包不提供转发导出。

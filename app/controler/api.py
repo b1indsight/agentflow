@@ -27,12 +27,15 @@ from psycopg import Error as DatabaseError
 from psycopg_pool import PoolTimeout
 from starlette.middleware.base import RequestResponseEndpoint
 from starlette.responses import FileResponse, JSONResponse, RedirectResponse
+from starlette.websockets import WebSocketState
 
 from app.contracts.console import ConsoleFailure
 from app.contracts.conversation import ConversationFailure, ConversationPage
+from app.contracts.files import FileFailure
 from app.controler.config import ServerSettings
 from app.controler.console.api import router as console_router
 from app.controler.runtime import ServerRuntime
+from app.controler.workers.transport import serve_worker
 from app.persistence.webhooks import DeliveryConflict
 
 
@@ -85,7 +88,14 @@ def create_app(runtime: ServerRuntime | None = None) -> FastAPI:
 
     @application.exception_handler(DatabaseError)
     @application.exception_handler(PoolTimeout)
-    async def database_failure(request: Request, error: Exception) -> Response:
+    async def database_failure(request: Request | WebSocket, error: Exception) -> Response | None:
+        if isinstance(request, WebSocket):
+            logger.bind(event="worker_disconnected", reason_code="database_unavailable").opt(
+                exception=error,
+            ).error("")
+            if request.application_state is not WebSocketState.DISCONNECTED:
+                await request.close(code=1011)
+            return None
         return JSONResponse({"detail": "database_unavailable"}, status_code=503,
                             headers={"Cache-Control": "no-store"})
 
@@ -153,6 +163,31 @@ def create_app(runtime: ServerRuntime | None = None) -> FastAPI:
             disconnect_scope.cancel()
             await asyncio.gather(query, disconnected, return_exceptions=True)
 
+    @application.get("/api/files/{link_id}", dependencies=[Depends(_require_owner)])
+    async def file_content(request: Request, link_id: str) -> Response:
+        runtime: ServerRuntime = request.app.state.runtime
+        query = asyncio.create_task(runtime.files.read(link_id))
+        # As with conversation reads, release the pending slot if the HTTP caller leaves.
+        disconnect_scope = anyio.CancelScope()
+        disconnected = asyncio.create_task(_wait_for_disconnect(request, disconnect_scope))
+        try:
+            await asyncio.wait({query, disconnected}, return_when=asyncio.FIRST_COMPLETED)
+            if not query.done():
+                return Response(status_code=499)
+            return Response(query.result(), media_type="application/octet-stream", headers={
+                "Content-Disposition": "attachment",
+                "Content-Security-Policy": "sandbox; default-src 'none'",
+            })
+        except FileFailure as exc:
+            status = {"file_not_found": 404, "file_changed": 409, "file_too_large": 413,
+                      "worker_unavailable": 503, "query_busy": 503,
+                      "query_timeout": 504}.get(exc.code, 502)
+            raise HTTPException(status, exc.code) from None
+        finally:
+            query.cancel()
+            disconnect_scope.cancel()
+            await asyncio.gather(query, disconnected, return_exceptions=True)
+
     @application.get("/metrics")
     async def metrics(request: Request) -> Response:
         runtime: ServerRuntime = request.app.state.runtime
@@ -214,7 +249,9 @@ def create_app(runtime: ServerRuntime | None = None) -> FastAPI:
     @application.websocket("/internal/workers/connect")
     async def worker_connect(socket: WebSocket) -> None:
         runtime: ServerRuntime = socket.app.state.runtime
-        await runtime.gateway.handle(socket)
+        await serve_worker(
+            socket, worker_tokens=runtime.worker_tokens, serve=runtime.serve_worker_session,
+        )
 
     return application
 

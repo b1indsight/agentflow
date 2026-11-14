@@ -20,7 +20,10 @@ test("search qualifiers remain exact and malformed queries never broaden server 
     "repo:",
     "repo:short",
     "is:open",
+    "is:done",
     "status:unknown",
+    "status:done",
+    "status:finalizing",
     "pr:0",
     "pr:1.5",
     "pr:2147483648",
@@ -29,5 +32,16 @@ test("search qualifiers remain exact and malformed queries never broaden server 
     '"unfinished',
   ]) {
     assert.equal(parseSearch(q, []).ok, false, q);
+  }
+  // The archived column is a business lifecycle, not the old display-only done bucket.
+  assert.deepEqual(parseSearch("status:archived", []), {
+    ok: true,
+    query: { terms: [], status: "archived" },
+  });
+  for (const lifecycle of ["active", "archived"]) {
+    assert.deepEqual(parseSearch(`is:${lifecycle}`, []), {
+      ok: true,
+      query: { terms: [], lifecycle },
+    });
   }
 });

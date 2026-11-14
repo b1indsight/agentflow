@@ -17,54 +17,24 @@ from app.domain.models import (
     CodingExecutionResult,
     SessionUnavailable,
 )
-from app.worker.execution.credentials import git_credential_environment
+from app.worker.execution.credentials import git_credential_environment, inherited_agent_environment
 from app.worker.execution.gh import github_environment
+from app.worker.execution.idle import wait_for_inactivity
 
 CODEX_BIN = "codex"
 
 
-_CODEX_ENVIRONMENT_KEYS = frozenset(
-    {
-        "PATH",
-        "HOME",
-        "USER",
-        "LOGNAME",
-        "SHELL",
-        "LANG",
-        "LC_ALL",
-        "LC_CTYPE",
-        "TERM",
-        "TMPDIR",
-        "CODEX_HOME",
-        "OPENAI_API_KEY",
-        "CODEX_API_KEY",
-        "CODEX_ACCESS_TOKEN",
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "ALL_PROXY",
-        "NO_PROXY",
-        "http_proxy",
-        "https_proxy",
-        "all_proxy",
-        "no_proxy",
-        "SSL_CERT_FILE",
-        "SSL_CERT_DIR",
-        "REQUESTS_CA_BUNDLE",
-        "CURL_CA_BUNDLE",
-    }
-)
+class _OutputLimit(Exception):
+    pass
 
 
 def _codex_environment(
     source: Mapping[str, str] | None = None,
     context: CodingExecutionContext | None = None,
 ) -> dict[str, str]:
-    """Build a minimal environment with only the optional scoped push credential."""
+    """Inherit native CLI/MCP configuration, then inject only current task capabilities."""
 
-    values = os.environ if source is None else source
-    environment = {
-        key: value for key, value in values.items() if key in _CODEX_ENVIRONMENT_KEYS
-    }
+    environment = inherited_agent_environment(os.environ if source is None else source)
     if context is not None:
         environment.update(git_credential_environment(context.github.token if context.github else None))
         if context.mcp_token is not None:
@@ -134,9 +104,11 @@ def _parse_thread_id(jsonl_text: str) -> str | None:
 class CodexAgent:
     """实现 ports.CodingAgent。"""
 
-    def __init__(self, *, trusted_host: bool = False, timeout: float = 1200.0):
+    def __init__(self, *, trusted_host: bool = False, timeout: float = 1200.0,
+                 max_output_bytes: int = 8 * 1024 * 1024):
         self.trusted_host = trusted_host
         self.timeout = timeout
+        self.max_output_bytes = max_output_bytes
 
     async def start(
         self,
@@ -201,23 +173,85 @@ class CodexAgent:
                 cwd=cwd,
                 start_new_session=True,
             )
-            try:
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self.timeout)
-            except TimeoutError:
-                logger.error("codex run timed out after {}s", self.timeout)
-                return CodingExecutionResult(session_id=session_id, last_message="", exit_code=124)
-            finally:
-                # Reap the group before removing its wrapper/config, including surviving children
-                # after a successful CLI exit. Cancellation must propagate only after this step.
+            stdout, stderr = bytearray(), bytearray()
+            loop = asyncio.get_running_loop()
+            last_activity = loop.time()
+
+            async def read(stream: asyncio.StreamReader | None, buffer: bytearray) -> None:
+                nonlocal last_activity
+                assert stream is not None
+                while chunk := await stream.read(65536):
+                    last_activity = loop.time()
+                    available = 8 * 1024 * 1024 - len(buffer)
+                    buffer.extend(chunk[:available])
+                    if len(chunk) > available:
+                        raise _OutputLimit
+
+            tasks = [asyncio.create_task(read(proc.stdout, stdout)),
+                     asyncio.create_task(read(proc.stderr, stderr)),
+                     asyncio.create_task(proc.wait())]
+            io = asyncio.gather(*tasks)
+
+            async def cleanup() -> None:
+                # Reap the group before removing its wrapper/config, including surviving children.
                 try:
                     os.killpg(proc.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
-                await proc.wait()
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                await asyncio.gather(io, return_exceptions=True)
+
+                async def discard(stream: asyncio.StreamReader | None) -> None:
+                    assert stream is not None
+                    while await stream.read(8192):
+                        pass
+
+                # Like amp_process.cleanup, replace bounded readers with discard readers.
+                # Overflow can pause a pipe, so waiting for exit alone can never finish.
+                draining = asyncio.gather(proc.wait(), discard(proc.stdout), discard(proc.stderr))
+                try:
+                    await asyncio.wait_for(draining, timeout=5)
+                except TimeoutError:
+                    logger.warning("Codex cleanup exceeded its limit after termination; a descendant may hold a pipe")
+                finally:
+                    draining.cancel()
+                    await asyncio.gather(draining, return_exceptions=True)
+
+            try:
+                await wait_for_inactivity(io, timeout=self.timeout, last_activity=lambda: last_activity)
+            except TimeoutError:
+                timeout_detail = f"Codex: no new stdout/stderr for {self.timeout:g}s; execution timed out"
+                logger.error(timeout_detail)
+                return CodingExecutionResult(session_id=session_id, last_message="", exit_code=124,
+                                             failure_detail=timeout_detail, failure_kind="timeout")
+            except _OutputLimit:
+                return CodingExecutionResult(session_id=session_id, last_message="", exit_code=1,
+                    failure_detail="Codex execution output exceeded byte limit", failure_kind="output_limit")
+            finally:
+                stopping = asyncio.create_task(cleanup())
+                cancelled = False
+                while not stopping.done():
+                    try:
+                        await asyncio.shield(stopping)
+                    except asyncio.CancelledError:
+                        cancelled = True
+                stopping.result()
+                if cancelled:
+                    raise asyncio.CancelledError
 
             jsonl = stdout.decode(errors="replace")
             sid = _parse_thread_id(jsonl)
-            last_message = last_file.read_text() if last_file.exists() else ""
+            raw = b""
+            if last_file.exists():
+                with last_file.open("rb") as stream:
+                    raw = stream.read(self.max_output_bytes + 1)
+            if len(raw) > self.max_output_bytes:
+                return CodingExecutionResult(session_id=sid, last_message="", exit_code=1,
+                    failure_detail="Codex final answer exceeded byte limit", failure_kind="output_limit")
+            last_message = raw.decode()
             detail = stderr.decode(errors="replace") if proc.returncode else None
             if context is not None:
                 tokens = [context.mcp_token, context.github.token if context.github else None]

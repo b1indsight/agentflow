@@ -1,14 +1,15 @@
-export type Phase = "queued" | "running" | "review" | "blocked" | "done";
-export type Tab = "overview" | "conversation" | "jobs";
+export type Phase = "queued" | "running" | "review" | "blocked" | "archived";
+export type FlowLifecycle = Phase | "finalizing";
+export type ArchiveReason = "succeeded" | "abandoned";
 export interface FlowSummary {
   id: number;
   repo: string;
-  issue_number: number;
-  issue_url: string;
+  issue_number: number | null;
+  issue_url: string | null;
   title: string | null;
   pr_number: number | null;
   pr_url: string | null;
-  lifecycle: string;
+  lifecycle: FlowLifecycle;
   phase: Phase;
   action: string;
   worker_id: string | null;
@@ -17,6 +18,9 @@ export interface FlowSummary {
   branch: string | null;
   created_at: string;
   updated_at: string;
+  current_round_no: number;
+  archive_reason: ArchiveReason | null;
+  archive_summary: string | null;
   archived_at: string | null;
   state_version: number;
 }
@@ -31,6 +35,16 @@ export interface FlowDetail extends FlowSummary {
   reason: string;
   next_condition: string;
   sources: SourceStatus[];
+  task_content: string | null;
+}
+export interface FlowTarget {
+  repo: string;
+  installation_id: number;
+}
+export interface FlowTargetPage {
+  items: FlowTarget[];
+  next_cursor: string | null;
+  has_more: boolean;
 }
 export interface FlowPage {
   items: FlowSummary[];
@@ -61,11 +75,47 @@ export interface JobPage {
   next_cursor: string | null;
   has_more: boolean;
 }
+/** A failed inference round, separate from coding jobs and the Flow lifecycle. */
+export interface InferenceNotice {
+  key: string;
+  batch_id: number;
+  occurred_at: string;
+  updated_at: string;
+  attempts: number;
+  max_attempts: number;
+  last_failure_code:
+    | "unavailable"
+    | "busy"
+    | "connection_closed"
+    | "rpc_timeout"
+    | "execution_timeout"
+    | "rate_limited"
+    | "backend_unavailable"
+    | "authentication"
+    | "configuration"
+    | "invalid_response"
+    | "output_limit"
+    | "backend_error"
+    | "cancelled";
+  last_worker_id: string | null;
+  backend: string | null;
+  stop_reason: "max_attempts" | "deadline" | "non_retryable" | "unavailable";
+  elapsed_ms: number;
+  historical: boolean;
+  next_condition: string;
+}
+export interface InferenceNoticePage {
+  items: InferenceNotice[];
+  snapshot: number;
+  next_cursor: string | null;
+  has_more: boolean;
+}
 export interface ActivityItem {
   key: string;
   version: number;
   source: string;
   kind: string;
+  round_no: number | null;
   occurred_at: string;
   updated_at: string;
   observed_at: string;
@@ -80,6 +130,86 @@ export interface ActivityItem {
   previous_version: number | null;
   metadata: Record<string, unknown>;
 }
+
+/** Snapshot identity survives body eviction; ownership fields retain the API's values and missingness. */
+export interface ActivityIdentity extends Pick<
+  ActivityItem,
+  | "key"
+  | "version"
+  | "source"
+  | "kind"
+  | "round_no"
+  | "author"
+  | "occurred_at"
+  | "body_length"
+  | "parent_key"
+  | "prior"
+  | "deleted"
+> {
+  metadata: Partial<
+    Pick<
+      ActivityItem["metadata"],
+      "attempt_id" | "session_id" | "session_generation" | "call_id"
+    >
+  >;
+}
+
+/** One continuous data-defined group, with inclusive raw-record bounds. */
+export interface ConversationGroup {
+  key: string;
+  kind: "tool" | "operation";
+  first: number;
+  last: number;
+  calls: number;
+  results: number;
+}
+
+/** Display keys are distinct from raw record keys, which still own body reading state. */
+export type ConversationRow =
+  | {
+      kind: "summary";
+      key: string;
+      group: ConversationGroup;
+      expanded: boolean;
+    }
+  | {
+      kind: "body";
+      key: string;
+      rawIndex: number;
+      groupKey: string | null;
+      pairedCallKey: string | null;
+    };
+
+/** Inclusive identity-defined source span; fetching it never changes the body cache. */
+export interface ActivityProvenanceRange {
+  first: number;
+  last: number;
+}
+
+/** Full source metadata is retained only for the selected, bounded provenance page. */
+export type ActivityProvenanceItem = Pick<
+  ActivityItem,
+  "key" | "version" | "source" | "author" | "occurred_at" | "url" | "metadata"
+>;
+
+export interface ActivityProvenancePage {
+  items: ActivityProvenanceItem[];
+  offset: number;
+  total: number;
+  next_offset: number | null;
+}
+
+/** Offset is relative to the source span, not the raw activity list. */
+export type ReadActivityProvenance = (
+  range: ActivityProvenanceRange,
+  offset: number,
+  signal: AbortSignal,
+) => Promise<ActivityProvenancePage>;
+
+export interface ActivityProvenanceSource extends ActivityProvenanceRange {
+  read: ReadActivityProvenance;
+}
+
 export interface ActivityPage {
   items: ActivityItem[];
   snapshot: number;

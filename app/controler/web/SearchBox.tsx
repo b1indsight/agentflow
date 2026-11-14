@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from "react";
-import { Search, X } from "lucide-react";
+import { ArrowLeft, ArrowRight, Search, X } from "lucide-react";
 import { phases } from "./phases";
 import { parseSearch } from "./search";
 import { Input } from "./components/ui/input";
@@ -12,7 +12,7 @@ interface Suggestion {
 }
 const fields: Suggestion[] = [
   { value: "repo:", label: "仓库", description: "repo:owner/name" },
-  { value: "is:", label: "归档状态", description: "is:active · is:done" },
+  { value: "is:", label: "归档状态", description: "is:active · is:archived" },
   { value: "status:", label: "执行状态", description: "status:running" },
   { value: "issue:", label: "Issue 编号", description: "issue:82" },
   { value: "pr:", label: "PR 编号", description: "pr:95" },
@@ -68,7 +68,7 @@ export function SearchBox({
         : key === "is"
           ? [
               ["active", "活跃任务"],
-              ["done", "已归档"],
+              ["archived", "已归档"],
             ]
               .filter(([value]) => value.startsWith(prefix))
               .map(([value, label]) => ({
@@ -225,6 +225,7 @@ export function SearchBox({
             className="query-clear"
             variant="ghost"
             aria-label="清空搜索条件"
+            title="清空搜索条件"
             onClick={() => {
               setDraft("");
               setCaret(0);
@@ -265,25 +266,29 @@ export function SearchBox({
             {pages > 1 && (
               <span className="query-pages">
                 <button
+                  aria-label="上一组"
+                  title="上一组"
                   disabled={!safePage}
                   onClick={() => {
                     setPage(safePage - 1);
                     setActive(-1);
                   }}
                 >
-                  上一组
+                  <ArrowLeft aria-hidden="true" />
                 </button>
                 <span>
                   {safePage + 1} / {pages}
                 </span>
                 <button
+                  aria-label="下一组"
+                  title="下一组"
                   disabled={safePage === pages - 1}
                   onClick={() => {
                     setPage(safePage + 1);
                     setActive(-1);
                   }}
                 >
-                  下一组
+                  <ArrowRight aria-hidden="true" />
                 </button>
               </span>
             )}
