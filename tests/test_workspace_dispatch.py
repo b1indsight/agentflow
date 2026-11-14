@@ -120,7 +120,9 @@ async def test_demand_concurrent_dispatch_stop_and_result_isolate_workspaces(
     host_task = asyncio.create_task(host())
     worker_task = asyncio.create_task(worker._serve_connection(worker_transport))
     try:
-        await wait_until(lambda: len(worker.running) == 2 * limit)
+        # Naming shares one inference lane; require progress, not a fixed total startup time.
+        for expected in range(1, 2 * limit + 1):
+            await wait_until(lambda expected=expected: len(worker.running) >= expected)
         assert not host_task.done() and not worker_task.done()
         assert len(set(worker.running.values())) == 2 * limit
         assert len(worker.workspaces.inventory()) == 1 + 2 * limit

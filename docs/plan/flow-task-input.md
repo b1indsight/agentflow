@@ -369,3 +369,11 @@ ConsoleSync 的 SyncClaim、来源枚举和读取作用域支持可空 Issue。�
 用户要求推送 PR。共享工作区同时保留多个任务的改动，因此从本次命名涉及的差异提取独立 jj workspace，重放到最新 `origin/main`，未改写共享工作区或夹带其他功能。保留主线已合入的 Bot 查询客户端生命周期修复和私有文件链接功能；README 的升级段落沿用主线 v25 / manifest v3，只补充联合命名要求，changelog 保留其他功能条目。
 
 发布验证使用本线程的一次性 PostgreSQL，执行全量 `pytest -q`、`ruff check app tests scripts`、`mypy app tests`、差异空白检查和 `uv build --no-sources`。本轮日志集中在 `.amp/in/artifacts/branch-naming-pr-{suite,ruff,mypy,build}.log`；代码发布前按仓库约定运行独立双代理 review gate。此次交付仅创建 feature 分支与 PR，不合并、部署或迁移运行中服务。
+
+### 2026-11-14：修复并发工作区测试的总启动时限
+
+[PR #155 首次 CI](https://github.com/b1indsight/agentflow/actions/runs/43555123342/job/132326132725) 中，`test_demand_concurrent_dispatch_stop_and_result_isolate_workspaces[17]` 在等待全部工作区启动的固定 10 秒处超时；日志显示截止前仍持续有任务启动。联合命名让这些任务先共享一条 inference lane，本地普通回归未覆盖较慢环境下所有命名调用的累计耗时。
+
+使用真实 PostgreSQL、原有双端 Session 和 `--testmon`，临时插件只给 `NamingInference.infer` 增加每次 0.35 秒延迟：原测试在 10 秒总时限失败，按每个新增运行任务等待进展的版本通过，最大容量场景执行超过 14 秒。保留每步 10 秒停滞上限和全部容量、隔离、重连、停止及复用断言，不减少 17 的容量参数、不预先跳过命名，也不改产品 30 秒命名预算。该变更仅替换测试首个等待条件，不新增产品状态或抽象；此旧等待/新等待对照即为本次简化比较。
+
+复验沿用 CI 第一分片的模块选择与 testmon 收集，另跑受延迟影响的容量参数及 Ruff/Mypy；证据为 `.amp/in/artifacts/branch-naming-ci-{failure,latency-red,latency-green,shard,ruff,mypy}.log`。临时延迟插件不保留在仓库，修复仍在同一个 bookmark 和 PR 交付。
