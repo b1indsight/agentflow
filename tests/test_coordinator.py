@@ -149,6 +149,7 @@ async def test_initial_waits_for_title_and_branch_from_one_inference(store, task
         assert "<type>/<description>" in naming_prompt
         assert "feat(auth)!: remove login -> feat/remove-login" in naming_prompt
         assert "fix/pagination-cursor" in naming_prompt
+        assert "flow/ and heads/ prefixes are reserved" in naming_prompt
         assert call.messages[1].content == task_content
         assert re.search(call.output_schema["properties"]["branch_slug"]["pattern"], branch_slug)
         result = InferenceResult(
@@ -244,6 +245,8 @@ async def pending_naming(store):
 @pytest.mark.parametrize("reply,cancelled,expected", [
     ({"title": "修复分页游标 😀", "branch_slug": "fix/cursor"}, False, "修复分页游标 😀"),
     ({"title": "Title", "branch_slug": "custom/" + "x" * 41}, False, "Title"),
+    ({"title": "Title", "branch_slug": "heads2/remove-login"}, False, "Title"),
+    ({"title": "Title", "branch_slug": "feat/heads-remove-login"}, False, "Title"),
     ({"title": "   ", "branch_slug": "fix/cursor"}, False, None),
     ({"title": 123, "branch_slug": "fix/cursor"}, False, None),
     ({"title": "第一行\n第二行", "branch_slug": "fix/cursor"}, False, None),
@@ -257,6 +260,7 @@ async def pending_naming(store):
     ({"title": "Title", "branch_slug": "feat/"}, False, None),
     ({"title": "Title", "branch_slug": "/remove-login"}, False, None),
     ({"title": "Title", "branch_slug": "flow/remove-login"}, False, None),
+    ({"title": "Title", "branch_slug": "heads/remove-login"}, False, None),
     ({"title": "Title", "branch_slug": "flow/feat/remove-login"}, False, None),
     ({"title": "Title", "branch_slug": "feat/auth/remove-login"}, False, None),
     ({"title": "Title", "branch_slug": "feat-remove-login"}, False, None),

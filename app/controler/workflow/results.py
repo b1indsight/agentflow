@@ -73,7 +73,7 @@ from app.plugins import emit_hook
 # Shared with the naming schema. The final lookahead anchors the absolute end in
 # both Python and JSON Schema regexes, unlike $ which also permits a final newline.
 BRANCH_SLUG_PATTERN = (
-    r"^(?!flow/)(?!.*-round(?:-[0-9]+)?$)"
+    r"^(?!(?:flow|heads)/)(?!.*-round(?:-[0-9]+)?$)"
     r"[a-z][a-z0-9]*/"
     r"[a-z0-9]+(?:-[a-z0-9]+)*(?![\s\S])"
 )
