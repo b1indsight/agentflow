@@ -77,7 +77,7 @@ async def history_connection():
                     socket.delivered.put_nowait(item)
 
             async def error(self, item, message):
-                self.routes.reject_reply(item, "invalid response")
+                await self.routes.reject_reply(item, "invalid response")
 
         serving.append(asyncio.create_task(peers.serve(worker, session, Callbacks(), replace=True)))
         await asyncio.wait_for(opened.wait(), 1)

@@ -31,7 +31,7 @@ class Dispatcher[Incoming: Message]:
                 str,
                 type[ToolResult],
                 Callable[[ToolResult, Incoming], Awaitable[None]],
-                Callable[[str], None] | None,
+                Callable[[str], Awaitable[None]] | None,
                 Callable[[], None] | None,
             ],
         ] = {}
@@ -80,7 +80,7 @@ class Dispatcher[Incoming: Message]:
         deliver: Callable[[Reply, Incoming], Awaitable[None]],
         *,
         on_reply: Callable[[Reply, Incoming], Awaitable[None]] | None = None,
-        on_rejected: Callable[[str], None] | None = None,
+        on_rejected: Callable[[str], Awaitable[None]] | None = None,
         on_closed: Callable[[], None] | None = None,
     ) -> None:
         """Bind this invocation before writing it, independently of frozen request routes.
@@ -108,12 +108,7 @@ class Dispatcher[Incoming: Message]:
 
         self._replies[call.message_id] = call.method, model, invoke, on_rejected, on_closed
 
-    def reply_model(self, reply: ToolResult) -> type[ToolResult] | None:
-        """Non-consuming header lookup for owner-authorized validation rejection."""
-        entry = self._replies.get(reply.reply_to)
-        return entry[1] if entry is not None and entry[0] == reply.method else None
-
-    def reject_reply(self, reply: ToolResult, reason: str) -> bool:
+    async def reject_reply(self, reply: ToolResult, reason: str) -> bool:
         """Notify the original caller after the owner validates the whole message.
 
         Only headers are trusted here: a malformed reply cannot match its result model.
@@ -124,7 +119,7 @@ class Dispatcher[Incoming: Message]:
         entry = self._replies.get(reply.reply_to)
         if entry is None or entry[0] != reply.method or entry[3] is None:
             return False
-        entry[3](reason)
+        await entry[3](reason)
         return True
 
     def forget_reply(self, message_id: str) -> None:

@@ -1,6 +1,7 @@
 """Unified job delivery keeps inference cancellation independent from coding."""
 
 import asyncio
+import json
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from unittest.mock import AsyncMock, Mock
@@ -13,10 +14,12 @@ from app.contracts.protocol import (
     Heartbeat,
     InferenceRequest,
     InferenceResult,
+    PayloadValidationError,
     ProtocolError,
     Register,
     Registered,
     Started,
+    ValidationErrorResult,
     WorkerMessage,
     call_header,
     message_header,
@@ -35,6 +38,7 @@ from app.domain.inference_models import (
 from app.domain.models import JobKind, JobState, utcnow
 from app.inference.bub import ADAPTER_VERSION
 from app.inference.local import serve_local_inference
+from app.persistence.records import required
 from app.worker.config import WorkerSettings
 from app.worker.runtime import WorkerRuntime
 from tests.test_remote_e2e import QueueConnection, QueueSocket
@@ -288,6 +292,56 @@ async def test_completed_inference_heartbeat_skips_renewal_but_dispatches_payloa
             assert not serving.done()
             assert store.jobs.get_job(first.id) == saved_first
             assert store.jobs.get_job(coding.id) == saved_coding
+    finally:
+        serving.cancel()
+        await asyncio.gather(serving, return_exceptions=True)
+
+
+@pytest.mark.parametrize("defect", ["malformed_reply", "rejected_request"])
+async def test_invalid_inference_exchange_fails_its_slot_and_keeps_the_connection(
+    store, defect, server_runtime,
+):
+    # The InferenceRequest's own reply receiver records the failure; without it a malformed
+    # answer or a worker rejection would wait for the provider deadline instead.
+    outgoing, incoming = asyncio.Queue(), asyncio.Queue()
+    server = server_runtime()
+    serving = asyncio.create_task(serve_worker(QueueSocket(outgoing, incoming),
+        worker_tokens={"worker-1": "worker-secret"}, serve=server.serve_worker_session))
+    await outgoing.put(Register(**message_header(None), control="register", payload=[],
+        worker_id="worker-1", recoveries=[], workspace="b" * 32, repo_workspace_limit=2,
+        inventory=inventory(), inventory_complete=True,
+        inference=InferenceCapability(adapter_version="codex/v1")).model_dump_json())
+    try:
+        async with asyncio.timeout(3):
+            while not isinstance(registered := parse_server_message(await incoming.get()), Registered):
+                pass
+            job = store.jobs.enqueue_inference(request())
+            server.gateway.wake_all()
+            while not isinstance(
+                call := next(iter(parse_server_message(await incoming.get()).payload), None),
+                InferenceRequest,
+            ):
+                pass
+        item = InferenceResult(**result_header(call.message_id), method="worker.infer",
+            job_id=call.job_id, assignment_token=call.assignment_token,
+            output=InferenceOutput(request_id=call.arguments.request_id,
+                request_digest=call.arguments.digest, text="Answer", adapter_version="codex/v1"),
+        ).model_dump(mode="json")
+        if defect == "malformed_reply":
+            item["output"] = {"text": "missing identity"}
+        else:
+            item = ValidationErrorResult(**result_header(call.message_id), method=call.method,
+                error=PayloadValidationError(code="validation_error",
+                                             message="message payload failed validation"),
+            ).model_dump(mode="json")
+        await outgoing.put(json.dumps(
+            {**message_header(registered.connection_epoch), "control": None, "payload": [item]}
+        ))
+        async with asyncio.timeout(3):
+            while not (failures := required(store.jobs.get_job(job.id)).inference.failures):
+                await asyncio.sleep(.01)
+        assert [failure.code for failure in failures] == ["invalid_response"]
+        assert not serving.done()
     finally:
         serving.cancel()
         await asyncio.gather(serving, return_exceptions=True)

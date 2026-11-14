@@ -157,17 +157,10 @@ async def test_provision_send_failure_and_validation_rejection_retire_waiters(st
     await routes.dispatch(rejected, worker_message(rejected, epoch="epoch"))
     await callbacks.poll()
     assert len(requests(callbacks)) == 2
-    assert (
-        routes.reply_model(
-            ProvisionResult(
-                **result_header(call.message_id),
-                method=call.method,
-                repository=call.repository,
-                error=None,
-            )
-        )
-        is None
+    late = ProvisionResult(
+        **result_header(call.message_id), method=call.method, repository=call.repository, error=None,
     )
+    assert not await routes.reject_reply(late, "late")
 
 
 @pytest.mark.parametrize("created", [False, True])

@@ -6,7 +6,7 @@ import hashlib
 import json
 from datetime import datetime
 from enum import StrEnum
-from typing import Annotated, Literal, Self, TypedDict
+from typing import Annotated, Literal, Self, TypedDict, get_args
 from uuid import UUID, uuid4, uuid5
 
 from pydantic import (
@@ -314,6 +314,10 @@ class ToolCall(ProtocolModel):
     reply_to: None
     method: str
 
+    def execution(self) -> tuple[int, str] | None:
+        """The coding assignment this item reports on; None for independent queries."""
+        return None
+
 
 class ToolResult(ProtocolModel):
     """A method-specific result correlated to one invocation, not its containing message."""
@@ -328,6 +332,10 @@ class ToolResult(ProtocolModel):
         if self.reply_to == self.message_id:
             raise ValueError("a result cannot reply to itself")
         return self
+
+    def execution(self) -> tuple[int, str] | None:
+        """The coding assignment this item reports on; None for independent queries."""
+        return None
 
 
 class PayloadValidationError(ProtocolModel):
@@ -437,19 +445,31 @@ class Started(ToolCall):
     method: Literal["server.execution_started"]
     arguments: ExecutionIdentity
 
+    def execution(self) -> tuple[int, str]:
+        return self.arguments.job_id, self.arguments.assignment_token
+
 
 class AcceptResultRequest(ToolCall):
     method: Literal["server.accept_result"]
     arguments: AcceptResultArguments
+
+    def execution(self) -> tuple[int, str]:
+        return self.arguments.job_id, self.arguments.assignment_token
 
 
 class AcceptStop(ToolCall):
     method: Literal["server.accept_stop"]
     arguments: AcceptStopArguments
 
+    def execution(self) -> tuple[int, str]:
+        return self.arguments.job_id, self.arguments.assignment_token
+
 
 class FlowToolRequest(ToolCall):
     arguments: FlowToolArguments
+
+    def execution(self) -> tuple[int, str]:
+        return self.arguments.job_id, self.arguments.assignment_token
 
 
 class ExecuteResult(ToolResult):
@@ -465,6 +485,9 @@ class ExecuteResult(ToolResult):
             raise ValueError("execution result requires exactly one of result or error")
         return self
 
+    def execution(self) -> tuple[int, str]:
+        return self.job_id, self.assignment_token
+
     def terminal(self) -> TerminalPayload:
         """Project only durable fields; message and invocation metadata never enter the journal."""
         if self.result is not None:
@@ -478,6 +501,9 @@ class ExecuteResult(ToolResult):
 class StopResult(ToolResult):
     method: Literal["worker.stop"]
     result: ExecutionStopped
+
+    def execution(self) -> tuple[int, str]:
+        return self.result.job_id, self.result.assignment_token
 
 
 class ConversationResult(ToolResult):
@@ -510,10 +536,16 @@ class AcceptResultResponse(ToolResult):
     method: Literal["server.accept_result"]
     result: ResultAcceptance
 
+    def execution(self) -> tuple[int, str]:
+        return self.result.job_id, self.result.assignment_token
+
 
 class StopAccepted(ToolResult):
     method: Literal["server.accept_stop"]
     result: StopFence
+
+    def execution(self) -> tuple[int, str]:
+        return self.result.job_id, self.result.assignment_token
 
 
 class FlowToolErrorKind(StrEnum):
@@ -552,28 +584,30 @@ class FlowToolResponse(ToolResult):
         return self
 
 
+# The two fixed packages, named by their method prefix and fixed in source. Each alias is
+# the only list of its members; directional parsing and _FIXED_METHODS derive from them.
+type WorkerCalls = (
+    Assignment | StopExecution | ConversationQuery | FileQuery | InferenceRequest
+    | RecoveryRejected | RepositoryDemand
+)
+type WorkerResults = (
+    ExecuteResult | StopResult | ConversationResult | FileResult | InferenceResult | ProvisionResult
+)
+type ServerCalls = Started | AcceptResultRequest | AcceptStop | FileRegister
+type ServerResults = AcceptResultResponse | StopAccepted | FileRegistered
+
 _FIXED_METHODS = frozenset(
-    {
-        "worker.execute",
-        "worker.stop",
-        "worker.history",
-        "worker.file_read",
-        "server.file_register",
-        "worker.infer",
-        "worker.provision",
-        "worker.reject_recovery",
-        "server.execution_started",
-        "server.accept_result",
-        "server.accept_stop",
-    }
+    get_args(model.model_fields["method"].annotation)[0]
+    for package in (WorkerCalls, ServerCalls)
+    for model in get_args(package.__value__)
 )
 
 
-def _method_tag(value: object) -> str | None:
+def _call_tag(value: object) -> str | None:
     """Unknown names retain the existing typed Flow INVALID_REQUEST path.
 
-    Known methods never fall back after malformed arguments. This discriminator selects
-    a schema only; it neither registers handlers nor invokes code named by remote input.
+    Known methods never fall back after malformed arguments, including a known method sent
+    in the wrong direction. This selects a schema only; it never invokes code named by input.
     """
     if isinstance(value, (ToolCall, ToolResult)):
         method: object = value.method
@@ -583,17 +617,7 @@ def _method_tag(value: object) -> str | None:
         return None
     if not isinstance(method, str):
         return None
-    return method if method in _FIXED_METHODS else "flow_tool"
-
-
-WorkerCall = Annotated[
-    Annotated[Started, Tag("server.execution_started")]
-    | Annotated[AcceptResultRequest, Tag("server.accept_result")]
-    | Annotated[AcceptStop, Tag("server.accept_stop")]
-    | Annotated[FileRegister, Tag("server.file_register")]
-    | Annotated[FlowToolRequest, Tag("flow_tool")],
-    Discriminator(_method_tag),
-]
+    return "fixed" if method in _FIXED_METHODS else "flow_tool"
 
 
 def _result_tag(value: object) -> str | None:
@@ -602,33 +626,32 @@ def _result_tag(value: object) -> str | None:
     if isinstance(value, dict) and isinstance(value.get("error"), dict):
         # An error object is never retried as a success/domain-error schema.
         return "validation_error"
-    return _method_tag(value)
+    return _call_tag(value)
 
 
-WorkerResult = Annotated[
-    Annotated[ExecuteResult, Tag("worker.execute")]
-    | Annotated[StopResult, Tag("worker.stop")]
-    | Annotated[ConversationResult, Tag("worker.history")]
-    | Annotated[FileResult, Tag("worker.file_read")]
-    | Annotated[InferenceResult, Tag("worker.infer")]
-    | Annotated[ProvisionResult, Tag("worker.provision")]
-    | Annotated[ValidationErrorResult, Tag("validation_error")],
-    Discriminator(_result_tag),
+type WorkerPayload = Annotated[
+    Annotated[
+        Annotated[ServerCalls, Field(discriminator="method"), Tag("fixed")]
+        | Annotated[FlowToolRequest, Tag("flow_tool")],
+        Discriminator(_call_tag),
+    ]
+    | Annotated[
+        Annotated[WorkerResults, Field(discriminator="method"), Tag("fixed")]
+        | Annotated[ValidationErrorResult, Tag("validation_error")],
+        Discriminator(_result_tag),
+    ],
+    Field(discriminator="type"),
 ]
-WorkerPayload = Annotated[WorkerCall | WorkerResult, Field(discriminator="type")]
-ServerCall = Annotated[
-    Assignment | StopExecution | ConversationQuery | FileQuery | InferenceRequest | RecoveryRejected | RepositoryDemand,
-    Field(discriminator="method"),
+type ServerPayload = Annotated[
+    Annotated[WorkerCalls, Field(discriminator="method")]
+    | Annotated[
+        Annotated[ServerResults, Field(discriminator="method"), Tag("fixed")]
+        | Annotated[FlowToolResponse, Tag("flow_tool")]
+        | Annotated[ValidationErrorResult, Tag("validation_error")],
+        Discriminator(_result_tag),
+    ],
+    Field(discriminator="type"),
 ]
-ServerResult = Annotated[
-    Annotated[AcceptResultResponse, Tag("server.accept_result")]
-    | Annotated[StopAccepted, Tag("server.accept_stop")]
-    | Annotated[FileRegistered, Tag("server.file_register")]
-    | Annotated[FlowToolResponse, Tag("flow_tool")]
-    | Annotated[ValidationErrorResult, Tag("validation_error")],
-    Discriminator(_result_tag),
-]
-ServerPayload = Annotated[ServerCall | ServerResult, Field(discriminator="type")]
 
 
 class Message[Payload: ToolCall | ToolResult](ProtocolModel):
@@ -739,16 +762,8 @@ class Heartbeat(Message[WorkerPayload]):
     @model_validator(mode="after")
     def _execution_payload(self) -> Self:
         for item in self.payload:
-            if isinstance(item, (ConversationResult, FileRegister, FileResult, InferenceResult,
-                                 ProvisionResult, ValidationErrorResult)):
-                continue
-            if isinstance(item, (Started, AcceptResultRequest, AcceptStop, FlowToolRequest)):
-                identity = (item.arguments.job_id, item.arguments.assignment_token)
-            elif isinstance(item, ExecuteResult):
-                identity = (item.job_id, item.assignment_token)
-            else:
-                identity = (item.result.job_id, item.result.assignment_token)
-            if identity != (self.job_id, self.assignment_token):
+            identity = item.execution()
+            if identity is not None and identity != (self.job_id, self.assignment_token):
                 raise ValueError("heartbeat and payload belong to different executions")
         return self
 
