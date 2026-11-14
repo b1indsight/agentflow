@@ -10,6 +10,7 @@ import {
   useSyncExternalStore,
 } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
+import { ArrowLeft, ArrowRight } from "lucide-react";
 import { focusableControls } from "./focus";
 
 export const MAX_ROWS = 60;
@@ -134,18 +135,26 @@ export function TextWindow({
       role="group"
       aria-label={`${label}分段浏览`}
     >
-      <button type="button" disabled={!start} onClick={previous}>
-        上一段
+      <button
+        type="button"
+        aria-label="上一段"
+        title="上一段"
+        disabled={!start}
+        onClick={previous}
+      >
+        <ArrowLeft aria-hidden="true" />
       </button>
       <span>
         字符 {start + 1}–{end} / {text.length}
       </span>
       <button
         type="button"
+        aria-label="下一段"
+        title="下一段"
         disabled={end === text.length}
         onClick={() => setStart(end)}
       >
-        下一段
+        <ArrowRight aria-hidden="true" />
       </button>
     </span>
   );

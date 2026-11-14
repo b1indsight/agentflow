@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from "react";
-import { Search, X } from "lucide-react";
+import { ArrowLeft, ArrowRight, Search, X } from "lucide-react";
 import { phases } from "./phases";
 import { parseSearch } from "./search";
 import { Input } from "./components/ui/input";
@@ -225,6 +225,7 @@ export function SearchBox({
             className="query-clear"
             variant="ghost"
             aria-label="清空搜索条件"
+            title="清空搜索条件"
             onClick={() => {
               setDraft("");
               setCaret(0);
@@ -265,25 +266,29 @@ export function SearchBox({
             {pages > 1 && (
               <span className="query-pages">
                 <button
+                  aria-label="上一组"
+                  title="上一组"
                   disabled={!safePage}
                   onClick={() => {
                     setPage(safePage - 1);
                     setActive(-1);
                   }}
                 >
-                  上一组
+                  <ArrowLeft aria-hidden="true" />
                 </button>
                 <span>
                   {safePage + 1} / {pages}
                 </span>
                 <button
+                  aria-label="下一组"
+                  title="下一组"
                   disabled={safePage === pages - 1}
                   onClick={() => {
                     setPage(safePage + 1);
                     setActive(-1);
                   }}
                 >
-                  下一组
+                  <ArrowRight aria-hidden="true" />
                 </button>
               </span>
             )}

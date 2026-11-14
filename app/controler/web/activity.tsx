@@ -1,5 +1,13 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
-import { Info } from "lucide-react";
+import {
+  ArrowLeft,
+  ArrowRight,
+  ChevronRight,
+  FileDiff,
+  Info,
+  RefreshCw,
+  Terminal,
+} from "lucide-react";
 import type { Nodes, Root } from "mdast";
 import Markdown, { defaultUrlTransform, type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -244,22 +252,26 @@ function ActivityBody({
         >
           <button
             type="button"
+            aria-label="上一段"
+            title="上一段"
             disabled={busy || segment.start === 0}
             onClick={() =>
               void read(Math.max(0, segment.start - budget), segment.start)
             }
           >
-            上一段
+            <ArrowLeft aria-hidden="true" />
           </button>
           <span>
             字符 {segment.start + 1}–{end} / {entry.body_length}
           </span>
           <button
             type="button"
+            aria-label="下一段"
+            title="下一段"
             disabled={busy || end >= entry.body_length}
             onClick={() => void read(end)}
           >
-            下一段
+            <ArrowRight aria-hidden="true" />
           </button>
         </div>
       )}
@@ -269,12 +281,14 @@ function ActivityBody({
           <button
             type="button"
             className="btn ghost"
+            aria-label="重试正文读取"
+            title="重试正文读取"
             disabled={busy}
             onClick={() =>
               void read(failedRead.current.offset, failedRead.current.before)
             }
           >
-            重试正文读取
+            <RefreshCw aria-hidden="true" />
           </button>
         </p>
       )}
@@ -286,7 +300,8 @@ function ActivityBody({
       stateKey={`${entry.key}-${entry.version}-tool`}
     >
       <summary>
-        ⌘{" "}
+        <ChevronRight className="tool-chevron" aria-hidden="true" />
+        <Terminal aria-hidden="true" />
         {entry.title === "tool_result" ? "工具结果" : entry.title || "工具调用"}
       </summary>
       {content}
@@ -339,6 +354,8 @@ function EditedDiff({
       <button
         type="button"
         className="edited-link"
+        aria-label="已编辑"
+        title="已编辑：查看与上一版的差异"
         aria-expanded={open}
         aria-controls={id}
         onClick={() => {
@@ -349,7 +366,7 @@ function EditedDiff({
           setOpen(!open);
         }}
       >
-        已编辑
+        <FileDiff aria-hidden="true" />
       </button>
       {open && (
         <section
@@ -363,8 +380,14 @@ function EditedDiff({
           {error && (
             <p role="alert">
               {error}{" "}
-              <button type="button" onClick={() => void read()}>
-                重试
+              <button
+                type="button"
+                className="btn"
+                aria-label="重试"
+                title="重试"
+                onClick={() => void read()}
+              >
+                <RefreshCw aria-hidden="true" />
               </button>
             </p>
           )}
@@ -425,11 +448,13 @@ function ThreadReplies({
   return (
     <section className="activity-pages" aria-label={label}>
       <button
-        className="activity-toggle"
+        className="btn"
+        aria-label={page?.has_more ? `下一页${label}` : `查看${label}`}
+        title={page?.has_more ? `下一页${label}` : `查看${label}`}
         disabled={busy}
         onClick={() => void read()}
       >
-        {page?.has_more ? `下一页${label}` : `查看${label}`}
+        <ArrowRight aria-hidden="true" />
       </button>
       {error && <p role="alert">{error}（点击上方按钮重试）</p>}
       {page?.items.map((item) => {
@@ -768,7 +793,7 @@ export function ActivitySummary({
           aria-expanded={expanded}
           onClick={onToggle}
         >
-          <span aria-hidden="true">{expanded ? "▾" : "▸"}</span>{" "}
+          <ChevronRight aria-hidden="true" />
           {group.kind === "tool"
             ? `工具活动 · ${group.calls} 次调用 · ${group.results} 条结果`
             : `操作记录 · ${group.last - group.first + 1} 条`}
@@ -839,12 +864,14 @@ function ProvenancePage({
             >
               <button
                 type="button"
+                aria-label="上一页来源记录"
+                title="上一页来源记录"
                 disabled={busy || page.offset === 0}
                 onClick={() =>
                   void read(Math.max(0, page.offset - ACTIVITY_PROVENANCE_ROWS))
                 }
               >
-                上一页来源记录
+                <ArrowLeft aria-hidden="true" />
               </button>
               <span>
                 记录 {page.offset + 1}–{page.offset + page.items.length} /{" "}
@@ -852,12 +879,14 @@ function ProvenancePage({
               </span>
               <button
                 type="button"
+                aria-label="下一页来源记录"
+                title="下一页来源记录"
                 disabled={busy || page.next_offset === null}
                 onClick={() =>
                   page.next_offset !== null && void read(page.next_offset)
                 }
               >
-                下一页来源记录
+                <ArrowRight aria-hidden="true" />
               </button>
             </div>
           )}
@@ -868,10 +897,13 @@ function ProvenancePage({
           来源信息读取失败：{error}{" "}
           <button
             type="button"
+            className="btn"
+            aria-label="重试来源信息"
+            title="重试来源信息"
             disabled={busy}
             onClick={() => void read(failedOffset.current)}
           >
-            重试来源信息
+            <RefreshCw aria-hidden="true" />
           </button>
         </p>
       )}
@@ -1029,10 +1061,10 @@ export function ActivityView({
                     aria-label="在 GitHub 中查看"
                     title="在 GitHub 中查看"
                   >
-                    {/* Primer Octicons mark-github-16, padded to match the Info glyph. */}
+                    {/* Primer Octicons mark-github-16, padded to a 14px visible width. */}
                     <svg
                       className="github-mark"
-                      viewBox="-0.75 -1 17.5 17.5"
+                      viewBox="-2.285714 -2.535714 20.571428 20.571428"
                       aria-hidden="true"
                     >
                       <path d="M6.766 11.328c-2.063-.25-3.516-1.734-3.516-3.656 0-.781.281-1.625.75-2.188-.203-.515-.172-1.609.063-2.062.625-.078 1.468.25 1.968.703.594-.187 1.219-.281 1.985-.281.765 0 1.39.094 1.953.265.484-.437 1.344-.765 1.969-.687.218.422.25 1.515.046 2.047.5.593.766 1.39.766 2.203 0 1.922-1.453 3.375-3.547 3.64.531.344.89 1.094.89 1.954v1.625c0 .468.391.734.86.547C13.781 14.359 16 11.53 16 8.03 16 3.61 12.406 0 7.984 0 3.563 0 0 3.61 0 8.031a7.88 7.88 0 0 0 5.172 7.422c.422.156.828-.125.828-.547v-1.25c-.219.094-.5.156-.75.156-1.031 0-1.64-.562-2.078-1.609-.172-.422-.36-.672-.719-.719-.187-.015-.25-.093-.25-.187 0-.188.313-.328.625-.328.453 0 .844.281 1.25.86.313.452.64.655 1.031.655s.641-.14 1-.5c.266-.265.47-.5.657-.656" />

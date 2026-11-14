@@ -1,4 +1,5 @@
 import { useMemo } from "react";
+import { ArrowLeft, ArrowRight } from "lucide-react";
 import {
   Decoration,
   Diff,
@@ -75,20 +76,24 @@ export function DiffWindow({
         >
           <button
             type="button"
+            aria-label="上一段差异"
+            title="上一段差异"
             disabled={!start}
             onClick={() => setStart(Math.max(0, start - CODE_LINES))}
           >
-            上一段差异
+            <ArrowLeft aria-hidden="true" />
           </button>
           <span>
             差异行 {start + 1}–{end} / {total}
           </span>
           <button
             type="button"
+            aria-label="下一段差异"
+            title="下一段差异"
             disabled={end === total}
             onClick={() => setStart(end)}
           >
-            下一段差异
+            <ArrowRight aria-hidden="true" />
           </button>
         </div>
       )}

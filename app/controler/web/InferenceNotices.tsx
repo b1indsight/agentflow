@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { ArrowDown, RefreshCw } from "lucide-react";
 import { ApiError, getInferenceNotices } from "./api";
 import type { InferenceNotice, InferenceNoticePage } from "./types";
 import { WindowList } from "./windowing";
@@ -148,13 +149,25 @@ export function InferenceNotices({ id }: { id: number }) {
       )}
       {error && <p role="alert">{error}</p>}
       {error ? (
-        <button className="btn" disabled={busy} onClick={read}>
-          重新读取推理通知
+        <button
+          className="btn"
+          aria-label="重新读取推理通知"
+          title="重新读取推理通知"
+          disabled={busy}
+          onClick={read}
+        >
+          <RefreshCw aria-hidden="true" />
         </button>
       ) : (
         page?.has_more && (
-          <button className="btn" disabled={busy} onClick={read}>
-            读取更多推理通知
+          <button
+            className="btn"
+            aria-label="读取更多推理通知"
+            title="读取更多推理通知"
+            disabled={busy}
+            onClick={read}
+          >
+            <ArrowDown aria-hidden="true" />
           </button>
         )
       )}

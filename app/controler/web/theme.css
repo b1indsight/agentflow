@@ -3,7 +3,7 @@
 @theme inline {
   --color-background: var(--paper);
   --color-foreground: var(--ink);
-  --color-primary: var(--green);
+  --color-primary: var(--accent);
   --color-primary-foreground: var(--paper);
   --color-secondary: var(--wash);
   --color-secondary-foreground: var(--ink);
@@ -14,6 +14,6 @@
   --color-destructive: var(--destructive);
   --color-border: var(--line);
   --color-input: var(--line);
-  --color-ring: var(--green);
+  --color-ring: var(--accent);
   --radius-md: 0;
 }
