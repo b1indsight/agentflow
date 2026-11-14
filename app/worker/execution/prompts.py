@@ -10,6 +10,17 @@ from __future__ import annotations
 
 from app.contracts.protocol import ReviewFeedback, RevisionTask
 
+_COMMIT_CONVENTIONS = (
+    "# Commit messages\n"
+    "Use Conventional Commits for every new Git commit or jj change description on the assigned "
+    "branch/bookmark: `<type>[optional scope][!]: <description>`. Use `feat` for features, "
+    "`fix` for bug fixes, or another appropriate type such as `docs`, `refactor`, `test`, or "
+    "`chore`. An optional scope goes in parentheses. Write a concise description of the change. "
+    "Mark breaking changes with `!` before `:` or a `BREAKING CHANGE:` footer. "
+    "Examples: `feat(auth): add sign-in`, `fix: handle expired sessions`. "
+    "These rules apply to commit messages; keep the assigned branch/bookmark name unchanged.\n"
+)
+
 # 硬约束：codex 只碰本地 VCS，不碰 GitHub API（平面边界 §3）
 _HARD_CONSTRAINTS = (
     "Rules:\n"
@@ -43,6 +54,7 @@ def build_initial_prompt(
         f"# Repo conventions\n{repo_conventions or '(none provided)'}\n",
         f"# VCS guidance\n{vcs_guidance}\n",
         _HARD_CONSTRAINTS,
+        _COMMIT_CONVENTIONS,
         _INITIAL_OUTPUT_INSTRUCTION,
     ]
     return "\n".join(parts)
@@ -81,6 +93,7 @@ def build_revision_prompt(task: RevisionTask, repo_conventions: str) -> str:
         "If the existing code already satisfies the feedback, explain why and leave the SHA "
         "unchanged. Report exact item/version/comment identities. Preserve deferred work "
         "and ask concrete clarification questions. Prior conversation may be unavailable."),
+        _COMMIT_CONVENTIONS,
         _OUTPUT_INSTRUCTION,
     ]
     if task.context is not None:

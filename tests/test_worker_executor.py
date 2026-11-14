@@ -140,6 +140,11 @@ async def test_executor_runs_agent_without_store(
     assert initial.open_pr_call_id
     assert initial.delivery_receipt is not None
     assert agent.started
+    prompt = agent.started[0][0]
+    assert "Conventional Commits" in prompt
+    assert "<type>[optional scope][!]: <description>" in prompt
+    assert "BREAKING CHANGE:" in prompt
+    assert "exact branch or bookmark `flow/issue-8`" in prompt
     workspace = executor.workspaces.path(executor.workspaces.lookup("owner/repo", 3))
     assert agent.started[0][1] == workspace
 

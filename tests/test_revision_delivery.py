@@ -162,6 +162,12 @@ async def test_fallback_only_when_execution_is_known_not_to_have_started(
     result = await WorkerExecutor(root, agent, session=WorkerSession(root), worker_id="w").execute(task, secret, tool_caller=RecordingToolCaller())
     assert [call[0] for call in agent.calls] == expected
     assert all(call[1].mcp_url is None and call[1].mcp_token is None for call in agent.calls)
+    # A rebuilt session must receive the same commit rules without prior conversation.
+    for _, _, prompt in agent.calls:
+        assert "Conventional Commits" in prompt
+        assert "<type>[optional scope][!]: <description>" in prompt
+        assert "BREAKING CHANGE:" in prompt
+        assert "Use the existing repo, branch and PR." in prompt
     if expected[-1] == "start":
         assert result.session_id == "new-session"
         assert result.session_generation == 1
