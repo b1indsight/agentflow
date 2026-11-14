@@ -1,5 +1,5 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
-import { Plus } from "lucide-react";
+import { ArrowDown, Plus, RefreshCw, X } from "lucide-react";
 import { createFailure, createFlow, getFlowTargets } from "./api";
 import { Button } from "./components/ui/button";
 import {
@@ -123,6 +123,7 @@ export function CreateFlow({
         type="button"
         className="btn ghost"
         aria-label="新建 Flow"
+        title="新建 Flow"
         onClick={() => {
           dialog.current?.showModal();
           if (!loaded && !request.current) void read();
@@ -210,22 +211,29 @@ export function CreateFlow({
             {(more || readError) && (
               <Button
                 type="button"
-                variant="outline"
                 className="btn"
+                aria-label={readError ? "重试读取项目" : "读取更多项目"}
+                title={readError ? "重试读取项目" : "读取更多项目"}
                 disabled={loading || pending}
                 onClick={() => void read(readError?.reset ?? false)}
               >
-                {readError ? "重试读取项目" : "读取更多项目"}
+                {readError ? (
+                  <RefreshCw aria-hidden="true" />
+                ) : (
+                  <ArrowDown aria-hidden="true" />
+                )}
+                {readError && "重试读取项目"}
               </Button>
             )}
             <Button
               type="button"
-              variant="outline"
               className="btn"
+              aria-label="重新读取项目"
+              title="重新读取项目"
               disabled={loading || pending}
               onClick={() => void read(true)}
             >
-              重新读取项目
+              <RefreshCw aria-hidden="true" />
             </Button>
           </div>
           <label htmlFor={`${id}-body`}>任务内容</label>
@@ -294,23 +302,24 @@ export function CreateFlow({
           <div className="create-flow-actions">
             <Button
               type="button"
-              variant="outline"
               className="btn"
+              aria-label={uncertain ? "安全关闭" : "取消"}
+              title={uncertain ? "安全关闭" : "取消"}
               disabled={pending}
               onClick={close}
             >
-              {uncertain ? "安全关闭" : "取消"}
+              <X aria-hidden="true" />
             </Button>
             {uncertain && (
               <Button
                 type="button"
-                variant="outline"
                 className="btn create-flow-verify"
                 onClick={() => {
                   close();
                   onVerify();
                 }}
               >
+                <RefreshCw aria-hidden="true" />
                 关闭并清空筛选、刷新看板核对
               </Button>
             )}
@@ -319,6 +328,7 @@ export function CreateFlow({
               className="btn create-flow-submit"
               disabled={pending || uncertain || !selected || !content.ok}
             >
+              <Plus aria-hidden="true" />
               {pending ? "正在开启 Flow…" : "开启 Flow"}
             </Button>
           </div>

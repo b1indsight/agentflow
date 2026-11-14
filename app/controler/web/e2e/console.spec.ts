@@ -258,6 +258,21 @@ for (const width of [1440, 390]) {
     const panel = page.getByRole("tabpanel");
     await expect(conversation).toHaveAttribute("aria-selected", "true");
     await expect(panel).toContainText("真实活动正文");
+    // Selection frames only three edges, without moving the tab or the content seam.
+    const tabsBefore = await page
+      .getByRole("tab")
+      .evaluateAll((tabs) =>
+        tabs.map((tab) => tab.getBoundingClientRect().toJSON()),
+      );
+    for (const side of ["top", "right", "left"]) {
+      await expect(conversation).toHaveCSS(`border-${side}-width`, "1px");
+      await expect(conversation).not.toHaveCSS(
+        `border-${side}-color`,
+        "rgba(0, 0, 0, 0)",
+      );
+      await expect(jobs).toHaveCSS(`border-${side}-color`, "rgba(0, 0, 0, 0)");
+    }
+    await expect(conversation).toHaveCSS("border-bottom-width", "0px");
 
     // The selected tab must name its panel, and keyboard navigation must move focus too.
     await expect(panel).toHaveAccessibleName("会话");
@@ -272,6 +287,16 @@ for (const width of [1440, 390]) {
     await expect(page).toHaveURL(/#flow\/42\/jobs$/);
     await expect(panel).toHaveAccessibleName("执行记录");
     await expect(panel).toContainText("任务执行");
+    expect(
+      await page
+        .getByRole("tab")
+        .evaluateAll((tabs) =>
+          tabs.map((tab) => tab.getBoundingClientRect().toJSON()),
+        ),
+    ).toEqual(tabsBefore);
+    await expect(jobs).toHaveCSS("border-top-width", "1px");
+    await expect(jobs).not.toHaveCSS("border-top-color", "rgba(0, 0, 0, 0)");
+    await expect(jobs).toHaveCSS("border-bottom-width", "0px");
     await jobs.press("ArrowRight");
     await expect(overview).toBeFocused();
     await expect(panel).toContainText("当前动作");
@@ -1767,28 +1792,47 @@ test("activity content hierarchy keeps provenance secondary and expandable", asy
     ).toBeLessThan(1);
     expect(Math.abs(link.y - icon.y)).toBeLessThan(1);
     expect(icon.x - link.x - link.width).toBeCloseTo(4);
-    // Equal SVG boxes can still contain differently sized drawings and padding.
-    const [githubInk, infoInk] = await message
-      .locator(".message-actions")
-      .evaluate((actions) =>
-        [...actions.querySelectorAll("svg")].map((svg) => {
-          const shape = svg.querySelector("circle, path");
-          if (!shape) throw new Error("Icon drawing is missing");
-          const bounds = shape.getBoundingClientRect();
-          const style = getComputedStyle(shape);
-          const stroke =
-            style.stroke === "none"
-              ? 0
-              : (parseFloat(style.strokeWidth) *
-                  svg.getBoundingClientRect().width) /
-                svg.viewBox.baseVal.width;
+    // Plus and refresh have different path extents even with equal SVG boxes.
+    // Only measure toolbar triggers, not buttons inside the closed create dialog.
+    const ink = await page
+      .locator(".bar-status > button svg, .message-actions svg")
+      .evaluateAll((icons) =>
+        icons.map((svg) => {
+          const bounds = [...svg.children].map((shape) => {
+            const rect = shape.getBoundingClientRect();
+            const style = getComputedStyle(shape);
+            const stroke =
+              style.stroke === "none"
+                ? 0
+                : parseFloat(style.strokeWidth) *
+                  (style.vectorEffect === "non-scaling-stroke"
+                    ? 1
+                    : Math.hypot(
+                        (shape as SVGGraphicsElement).getScreenCTM()!.a,
+                        (shape as SVGGraphicsElement).getScreenCTM()!.b,
+                      ));
+            return {
+              left: rect.left - stroke / 2,
+              right: rect.right + stroke / 2,
+              top: rect.top - stroke / 2,
+              bottom: rect.bottom + stroke / 2,
+            };
+          });
+          const left = Math.min(...bounds.map((b) => b.left)),
+            right = Math.max(...bounds.map((b) => b.right)),
+            top = Math.min(...bounds.map((b) => b.top)),
+            bottom = Math.max(...bounds.map((b) => b.bottom));
           return {
-            width: bounds.width + stroke,
-            height: bounds.height + stroke,
-            centerY: bounds.y + bounds.height / 2,
+            width: right - left,
+            height: bottom - top,
+            centerY: (top + bottom) / 2,
           };
         }),
       );
+    for (const icon of ink) {
+      expect(Math.max(icon.width, icon.height)).toBeCloseTo(14, 1);
+    }
+    const [githubInk, infoInk] = ink.slice(-2);
     expect(Math.abs(githubInk.width - infoInk.width)).toBeLessThan(0.5);
     expect(Math.abs(githubInk.height - infoInk.height)).toBeLessThan(0.5);
     expect(Math.abs(githubInk.centerY - infoInk.centerY)).toBeLessThan(0.5);
@@ -4597,6 +4641,16 @@ for (const width of [1440, 390]) {
     const dialog = page.getByRole("dialog", { name: "新建 Flow", exact: true });
     const project = dialog.getByLabel("Project（代码仓库）");
     await expect(project).toBeFocused();
+    const cancel = dialog.getByRole("button", { name: "取消", exact: true });
+    await expect(cancel).toHaveText("");
+    await expect(cancel).toHaveAttribute("title", "取消");
+    for (const button of [
+      cancel,
+      dialog.getByRole("button", { name: "开启 Flow", exact: true }),
+    ]) {
+      await expect(button).toHaveCSS("border-top-width", "0px");
+      await expect(button.locator("svg")).toHaveCount(1);
+    }
     await project.selectOption({ label: created.repo });
     const content = dialog.getByLabel("任务内容", { exact: true });
     // Browser paste normally normalizes CRLF; the submitted string must retain the clipboard bytes.

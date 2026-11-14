@@ -9,12 +9,15 @@ import {
 } from "react";
 import {
   Archive,
+  ArrowDown,
   ArrowLeft,
+  Check,
   ChevronDown,
   Menu,
   PanelLeftClose,
   PanelLeftOpen,
   RefreshCw,
+  X,
 } from "lucide-react";
 import {
   archiveFlow,
@@ -210,7 +213,8 @@ function Board({
                 </WindowList>
                 {c.error && (
                   <button className="btn" onClick={() => load(phase)}>
-                    读取失败：{c.error}（重试）
+                    <RefreshCw aria-hidden="true" />
+                    <span>读取失败：{c.error}（重试）</span>
                   </button>
                 )}
                 {c.busy && <p>正在加载…</p>}
@@ -492,8 +496,13 @@ function Detail({
       <main className="empty-state">
         <strong>无法读取 Flow</strong>
         <span>{error}</span>
-        <button className="btn" onClick={onBack}>
-          返回看板
+        <button
+          className="btn"
+          aria-label="返回看板"
+          title="返回看板"
+          onClick={onBack}
+        >
+          <ArrowLeft aria-hidden="true" />
         </button>
       </main>
     );
@@ -510,12 +519,18 @@ function Detail({
         aria-modal={nav || undefined}
       >
         <div className="rail-head">
-          <button className="btn ghost back" onClick={onBack}>
-            返回看板
+          <button
+            className="btn ghost back"
+            aria-label="返回看板"
+            title="返回看板"
+            onClick={onBack}
+          >
+            <ArrowLeft aria-hidden="true" />
           </button>
           <button
             className="btn rail-toggle"
             aria-label={collapsed ? "展开任务侧栏" : "折叠任务侧栏"}
+            title={collapsed ? "展开任务侧栏" : "折叠任务侧栏"}
             onClick={() =>
               setCollapsed((x) => {
                 positions.set("collapsed", x ? 0 : 1);
@@ -560,8 +575,13 @@ function Detail({
                   )}
                 </WindowList>
                 {group.length < counts[p] && (
-                  <button className="btn" onClick={() => load(p)}>
-                    更多{l}任务
+                  <button
+                    className="btn"
+                    aria-label={`更多${l}任务`}
+                    title={`更多${l}任务`}
+                    onClick={() => load(p)}
+                  >
+                    <ArrowDown aria-hidden="true" />
                   </button>
                 )}
               </SavedDetails>
@@ -590,6 +610,7 @@ function Detail({
                   type="button"
                   className="btn ghost"
                   aria-label="返回看板"
+                  title="返回看板"
                   onClick={onBack}
                 >
                   <ArrowLeft />
@@ -600,6 +621,7 @@ function Detail({
                   type="button"
                   className="btn ghost"
                   aria-label="展开详情标题"
+                  title="展开详情标题"
                   onClick={() => {
                     expandedAt.current = detail.current?.scrollTop ?? 0;
                     headTransition.current = {
@@ -616,11 +638,12 @@ function Detail({
             <div className="detail-head-full" hidden={compactHead}>
               <button
                 className="btn mobile-nav"
+                aria-label="切换任务"
+                title="切换任务"
                 aria-expanded={nav}
                 onClick={() => setNav(true)}
               >
                 <Menu />
-                切换任务
               </button>
               <div className="detail-title-row">
                 <h1 id="detail-heading">{name(flow)}</h1>
@@ -675,15 +698,22 @@ function Detail({
                             <div className="round-actions">
                               {flow.lifecycle === "blocked" && (
                                 <Button
-                                  variant="outline"
                                   className="btn"
+                                  aria-label={
+                                    pending === "retry"
+                                      ? "正在提交重试…"
+                                      : "重试"
+                                  }
+                                  title={
+                                    pending === "retry"
+                                      ? "正在提交重试…"
+                                      : "重试"
+                                  }
                                   disabled={pending !== null}
                                   onClick={() => void submit("retry")}
                                 >
                                   <RefreshCw />
-                                  {pending === "retry"
-                                    ? "正在提交重试…"
-                                    : "重试"}
+                                  {pending === "retry" && "正在提交重试…"}
                                 </Button>
                               )}
                               {flow.lifecycle === "archived" ? (
@@ -694,7 +724,6 @@ function Detail({
                                     PR，保留历史记录；不会重试旧轮次。
                                   </p>
                                   <Button
-                                    variant="outline"
                                     className="btn"
                                     aria-describedby="resume-hint"
                                     disabled={pending !== null}
@@ -712,7 +741,6 @@ function Detail({
                                 </p>
                               ) : endingRound === null ? (
                                 <Button
-                                  variant="outline"
                                   className="btn"
                                   disabled={pending !== null}
                                   onClick={() => {
@@ -777,13 +805,13 @@ function Detail({
                                     <div className="round-buttons">
                                       <Button
                                         type="submit"
-                                        variant="outline"
                                         className="btn"
                                         disabled={
                                           !archiveSummary.trim() ||
                                           endingRound !== flow.current_round_no
                                         }
                                       >
+                                        <Check aria-hidden="true" />
                                         {pending === "archive"
                                           ? "正在提交结束请求…"
                                           : "确认结束本轮"}
@@ -791,9 +819,11 @@ function Detail({
                                       <Button
                                         type="button"
                                         variant="ghost"
+                                        aria-label="取消"
+                                        title="取消"
                                         onClick={() => setEndingRound(null)}
                                       >
-                                        取消
+                                        <X aria-hidden="true" />
                                       </Button>
                                     </div>
                                     {endingRound !== flow.current_round_no && (
@@ -932,12 +962,18 @@ function Detail({
                           </div>
                           {jobError && (
                             <button className="btn" onClick={() => moreJobs()}>
-                              读取失败：{jobError}（重试）
+                              <RefreshCw aria-hidden="true" />
+                              <span>读取失败：{jobError}（重试）</span>
                             </button>
                           )}
                           {jobMore && (
-                            <button className="btn" onClick={() => moreJobs()}>
-                              读取更多执行记录
+                            <button
+                              className="btn"
+                              aria-label="读取更多执行记录"
+                              title="读取更多执行记录"
+                              onClick={() => moreJobs()}
+                            >
+                              <ArrowDown aria-hidden="true" />
                             </button>
                           )}
                         </>
@@ -1186,16 +1222,20 @@ function Conversation({
       </div>
       {state.error ? (
         <button className="btn" onClick={retry}>
-          读取失败：{state.error.message}（重试）
+          <RefreshCw aria-hidden="true" />
+          <span>读取失败：{state.error.message}（重试）</span>
         </button>
       ) : state.has_more ? (
         <div className="load-sentinel" role="status" ref={sentinel}>
           <button
             className="btn"
+            aria-label={state.busy ? "正在加载更多交互…" : "读取更多交互"}
+            title={state.busy ? "正在加载更多交互…" : "读取更多交互"}
             aria-disabled={state.busy}
             onClick={() => load()}
           >
-            {state.busy ? "正在加载更多交互…" : "读取更多交互"}
+            <ArrowDown aria-hidden="true" />
+            {state.busy && "正在加载更多交互…"}
           </button>
         </div>
       ) : (
@@ -1204,6 +1244,7 @@ function Conversation({
           disabled={state.busy}
           onClick={() => void load(true)}
         >
+          <RefreshCw aria-hidden="true" />
           {state.busy ? "正在检查更新…" : "已到当前本地快照末尾 · 点击刷新"}
         </button>
       )}
@@ -1324,7 +1365,14 @@ export default function App() {
                   .catch((e) => setRepoError(e.message));
               }}
             >
-              {repoError ? `仓库读取失败：${repoError}（重试）` : "更多仓库"}
+              {repoError ? (
+                <RefreshCw aria-hidden="true" />
+              ) : (
+                <ArrowDown aria-hidden="true" />
+              )}
+              <span>
+                {repoError ? `仓库读取失败：${repoError}（重试）` : "更多仓库"}
+              </span>
             </button>
           )}
         </div>
@@ -1343,6 +1391,7 @@ export default function App() {
           <button
             className="btn ghost"
             aria-label="刷新当前视图"
+            title="刷新当前视图"
             onClick={() => {
               if (current.id) setRefresh((x) => x + 1);
               else phases.forEach(([p]) => load(p, true));
