@@ -120,3 +120,47 @@ test("session response caches evict least-recently-used data and can reread it",
     assert.equal(fetch.mock.callCount(), before + 2);
   }
 });
+
+test("response byte budgets include Unicode payloads and metadata without rejecting oversized reads", async (t) => {
+  const largeContent = { ...content, text: "中".repeat(1024 * 1024) };
+  const oversized = { ...content, text: "中".repeat(2 * 1024 * 1024) };
+  const largeReplies: ActivityPage = {
+    ...replies,
+    sources: [
+      {
+        source: "worker",
+        status: "partial",
+        reason: "😀".repeat(256 * 1024),
+        last_success_at: null,
+        limitations: [],
+      },
+    ],
+  };
+  const fetch = t.mock.method(globalThis, "fetch", async (url: URL) =>
+    Response.json(
+      url.searchParams.get("key") === "oversized"
+        ? oversized
+        : url.pathname.endsWith("/content")
+          ? largeContent
+          : largeReplies,
+    ),
+  );
+  // Two entries fit the count caps, but exceed each cache's byte budget once metadata is counted.
+  for (const read of [
+    (i: number) => getContent(40, `entry-${i}`, 2, 0, 20),
+    (i: number) => getThread(40, `thread-${i}`, null, 2),
+  ]) {
+    const before = fetch.mock.callCount();
+    await read(0);
+    await read(1);
+    await read(1);
+    assert.equal(fetch.mock.callCount(), before + 2);
+    await read(0);
+    assert.equal(fetch.mock.callCount(), before + 3);
+  }
+  const before = fetch.mock.callCount();
+  for (let i = 0; i < 2; i++)
+    assert.deepEqual(await getDiff(40, "oversized", 2), oversized);
+  await getContent(40, "entry-0", 2, 0, 20);
+  assert.equal(fetch.mock.callCount(), before + 2);
+});

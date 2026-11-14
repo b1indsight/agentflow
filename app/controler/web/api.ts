@@ -1,4 +1,4 @@
-import { SessionCache } from "./sessionCache";
+import { jsonCacheBytes, SessionCache } from "./sessionCache";
 import type {
   ActivityPage,
   ArchiveReason,
@@ -51,8 +51,16 @@ export async function api<T>(
   return response.json() as Promise<T>;
 }
 
-const contentCache = new SessionCache<string, ContentPage>(64);
-const threadCache = new SessionCache<string, ActivityPage>(12);
+const contentCache = new SessionCache<string, ContentPage>(
+  64,
+  4 * 1024 * 1024,
+  jsonCacheBytes,
+);
+const threadCache = new SessionCache<string, ActivityPage>(
+  12,
+  2 * 1024 * 1024,
+  jsonCacheBytes,
+);
 
 /** Cache only completed immutable reads; each caller keeps its own cancellation lifetime. */
 async function sessionRead<T>(

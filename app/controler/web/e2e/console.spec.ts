@@ -2926,6 +2926,50 @@ test("returning to a cached flow keeps it resident when another flow is opened",
   expect(reads.get(43)).toBeGreaterThan(initialReads.get(43)!);
 });
 
+test("an oversized refreshed conversation stays readable without retaining its old snapshot", async ({
+  page,
+}) => {
+  let reads = 0;
+  let snapshot = 2;
+  // Large metadata lives in the items Map, so counting only JSON.stringify(state) would miss it.
+  const largeMetadata = "x".repeat(8 * 1024 * 1024);
+  await page.route("**/api/flows/42/activity?**", (route) => {
+    reads++;
+    if (new URL(route.request().url()).searchParams.get("refresh") === "true")
+      snapshot = 3;
+    return route.fulfill({
+      json: {
+        items: [
+          {
+            ...activity,
+            version: snapshot,
+            body: `快照 ${snapshot}`,
+            body_length: 4,
+            metadata: snapshot === 3 ? { payload: largeMetadata } : {},
+          },
+        ],
+        snapshot,
+        total: 1,
+        next_cursor: null,
+        has_more: false,
+        sources: [],
+        changes: {},
+      },
+    });
+  });
+  await page.goto("/#flow/42/conversation");
+  await expect(page.getByText("快照 2", { exact: true })).toBeVisible();
+  await page.locator(".refresh-boundary").click();
+  await expect(page.getByText("快照 3", { exact: true })).toBeVisible();
+  const beforeReturn = reads;
+  await page.getByRole("tab", { name: "概览" }).click();
+  await page.getByRole("tab", { name: "会话" }).click();
+  await expect(page.getByText("快照 3", { exact: true })).toBeVisible();
+  await expect(page.locator(".refresh-boundary")).toBeEnabled();
+  expect(reads).toBeGreaterThan(beforeReturn);
+  await expect(page.getByRole("alert")).toHaveCount(0);
+});
+
 test("refresh resets reply cursors even when the thread version is unchanged", async ({
   page,
 }) => {

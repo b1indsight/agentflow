@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getActivity } from "./api";
-import { SessionCache } from "./sessionCache";
+import { jsonCacheBytes, SessionCache } from "./sessionCache";
 import type {
   ActivityIdentity,
   ActivityItem,
@@ -45,6 +45,8 @@ const empty = (): ConversationState => ({
 });
 const cache = new SessionCache<number, ConversationState>(
   CONVERSATION_CACHE_FLOWS,
+  16 * 1024 * 1024,
+  (id, state) => jsonCacheBytes(id, { ...state, items: [...state.items] }),
 );
 
 /** Project only the fields needed for grouping, provenance boundaries and logical navigation. */
@@ -307,7 +309,8 @@ export function useConversation(flowId: number) {
     anchor = useRef<string | null>(null);
   const put = (s: ConversationState) => {
     current.current = s;
-    cache.set(flowId, { ...s, busy: false });
+    // Keep the completed snapshot during a pending read, without weighing its unchanged payload again.
+    if (!s.busy) cache.set(flowId, s);
     setState(s);
   };
   const read = useCallback(
