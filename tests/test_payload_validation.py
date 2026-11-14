@@ -31,7 +31,6 @@ from app.contracts.protocol import (
 from app.contracts.validation import parse_worker_input
 from app.controler.workers.conversation import ConversationBroker
 from app.controler.workers.transport import control_ack
-from app.controler.workflow.service import ControlService
 from app.domain.models import VcsKind, VcsOutcome
 from app.persistence.records import required
 from app.worker.execution.executor import WorkerExecutor
@@ -41,6 +40,7 @@ from tests.test_communication_session import Socket
 from tests.test_conversation_history import SESSION
 from tests.test_conversation_worker import Connection
 from tests.test_worker_client import RecordingExecutor, assignment_message, registered_message
+from tests.test_worker_handler import queued_initial as queued_initial  # noqa: PLC0414
 from tests.test_worker_handler import register_message
 from tests.test_worker_session import _assignment
 from tests.test_workspace_dispatch import wait_until
@@ -53,7 +53,6 @@ pytestmark = pytest.mark.usefixtures("recording_resources")
 
 @asynccontextmanager
 async def server_connection(store, runtime):
-    assert ControlService(database=store.database).create_flow("owner/repo", 8, 42) is not None
     socket = Socket()
     session = Session[WorkerMessageUnion, ServerMessageUnion](
         socket,
@@ -202,7 +201,7 @@ async def test_tool_failure_retires_original_waiter_before_critical_recovery(tmp
         await execution.shutdown()
 
 
-async def test_bad_heartbeat_tool_batch_has_no_ack_lease_or_tool_effect_then_continues(store, monkeypatch, server_runtime):
+async def test_bad_heartbeat_tool_batch_has_no_ack_lease_or_tool_effect_then_continues(store, queued_initial, monkeypatch, server_runtime):
     async with server_connection(store, server_runtime()) as (_runtime, _store, socket, serving):
         assignment = (await receive(socket)).payload[0]
         identity = ExecutionIdentity(
@@ -260,7 +259,7 @@ async def test_bad_heartbeat_tool_batch_has_no_ack_lease_or_tool_effect_then_con
 
 
 @pytest.mark.parametrize("kind", ["malformed", "repeated_reply", "rejection", "eof"])
-async def test_history_invalid_response_finishes_original_query_and_allows_next(store, kind, server_runtime):
+async def test_history_invalid_response_finishes_original_query_and_allows_next(store, queued_initial, kind, server_runtime):
     async with server_connection(store, server_runtime()) as (runtime, _store, socket, serving):
         await receive(socket)  # Read-only replies do not need the execution's Started.
         broker = ConversationBroker(runtime.gateway)

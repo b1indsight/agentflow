@@ -417,7 +417,9 @@ async def test_late_result_ack_never_mutates_newer_binding(tmp_path):
 def merged_business(store, flow_id):
     """Model the business commit independently of the resource settlement under test."""
     flow = store.flows.get_flow(flow_id)
-    delivery = store.deliveries.get_or_create_delivery(flow.id, flow.initial_branch)
+    delivery = store.deliveries.get_delivery(flow.id)
+    if delivery is None:
+        delivery = store.deliveries.get_or_create_delivery(flow.id, flow.initial_branch)
     delivery.state, delivery.pr_number = DeliveryState.MERGED, 17
     delivery.merged_at, delivery.merge_commit_sha = store.now(), "a" * 40
     store.deliveries.update_delivery(delivery)

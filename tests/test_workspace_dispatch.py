@@ -33,6 +33,7 @@ from app.worker.state.execution import ExecutionState
 from tests.github import RecordingGitHub
 from tests.test_coordinator import coordinator
 from tests.test_worker_workspaces import managed_seed
+from tests.worker_fixtures import NamingInference
 
 
 class ControlledWorker(WorkerRuntime):
@@ -43,6 +44,7 @@ class ControlledWorker(WorkerRuntime):
         ))
         self.running: dict[int, Path] = {}
         self.finish: dict[int, asyncio.Event] = {}
+        self.inference = NamingInference()  # type: ignore[assignment]
 
     def _create_execution(self, flow_id: int) -> WorkerExecution:
         state = ExecutionState(self.settings.worker_root, flow_id)
@@ -93,7 +95,9 @@ async def test_demand_concurrent_dispatch_stop_and_result_isolate_workspaces(
     assert worker.workspaces.inference_path.is_dir()
     peers = Gateway[WorkerMessageUnion, ServerMessageUnion]()
     host_transport, worker_transport = in_process_transport_pair()
-    subject = coordinator(store, RecordingGitHub())
+    github = RecordingGitHub()
+    github.refs = {}
+    subject = coordinator(store, github)
     callbacks = None
 
     async def host():
@@ -116,7 +120,9 @@ async def test_demand_concurrent_dispatch_stop_and_result_isolate_workspaces(
     host_task = asyncio.create_task(host())
     worker_task = asyncio.create_task(worker._serve_connection(worker_transport))
     try:
-        await wait_until(lambda: len(worker.running) == 2 * limit)
+        # Naming shares one inference lane; require progress, not a fixed total startup time.
+        for expected in range(1, 2 * limit + 1):
+            await wait_until(lambda expected=expected: len(worker.running) >= expected)
         assert not host_task.done() and not worker_task.done()
         assert len(set(worker.running.values())) == 2 * limit
         assert len(worker.workspaces.inventory()) == 1 + 2 * limit
@@ -145,11 +151,11 @@ async def test_demand_concurrent_dispatch_stop_and_result_isolate_workspaces(
         # Stopping one Flow must not stop its siblings; writer exit permits higher-generation reuse.
         stopped_job = required(store.jobs.get_job(stopped))
         flow = required(store.flows.get_flow(stopped_job.required_flow_id))
-        # The public finish operation also retires queued inference when no inference worker exists.
+        # Completed naming is retained when a running coding task is stopped.
         control.finish(flow, reason=ArchiveReason.ABANDONED, summary="",
                        expected_round_no=flow.current_round_no)
         title_job = required(store.jobs.get_job(required(store.flows.get_flow(flow.id)).title_job_id))
-        assert title_job.state is JobState.FAILED
+        assert title_job.state is JobState.DONE
         peers.wake_all()
         await wait_until(lambda: bool(set(worker.running) - initial))
         assert set(siblings) <= set(worker.running)
@@ -216,7 +222,9 @@ async def test_provision_failure_does_not_disconnect_other_workspaces(
         await send(raw)
 
     monkeypatch.setattr(worker_transport, "send_text", record_message)
-    subject = coordinator(store, RecordingGitHub())
+    github = RecordingGitHub()
+    github.refs = {}
+    subject = coordinator(store, github)
     callbacks = None
 
     async def host():

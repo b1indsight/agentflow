@@ -8,6 +8,7 @@
 
 ## Unreleased
 
+- INITIAL 复用同一次 worker 推理生成标题与描述性分支名，完成后才开始编码，不再为新任务生成 `flow/<id>`。直接处理 `title` / `branch_slug`，实际分支复用已有 delivery 保存，重试与 resume 沿用该分支；无效输出、超时和远端预存分支阻止编码。无需新增分支列、占名索引、回填、wire 消息或协议版本，已有 PR 不重命名。
 - 新增 `WorkerRuntime.register_file(path)` 和 owner-only `GET /api/files/{link_id}`：通过现有
   Session/Gateway 登记并读取 worker 本地文件，持久化随机句柄，server 不接收路径。
   保留 512 KiB、文件身份、连接隔离、超时与并发限制；wire25 须协调升级，journal/inbox 不变。

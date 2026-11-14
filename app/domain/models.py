@@ -130,7 +130,7 @@ class Flow(BaseModel):
 
     @property
     def initial_branch(self) -> str:
-        """Sibling refs preserve first-round branches without Git file/directory conflicts."""
+        """Legacy default; prepared deliveries own their actual worker-generated branch."""
         suffix = f"-round-{self.current_round_no}" if self.current_round_no > 1 else ""
         return f"flow/{self.id}{suffix}"
 

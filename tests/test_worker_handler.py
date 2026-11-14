@@ -61,6 +61,10 @@ pytestmark = pytest.mark.usefixtures("recording_resources")
 @pytest.fixture
 def queued_initial(store):
     flow = required(ControlService(database=store.database).create_flow("owner/repo", 8, 42))
+    # These wire tests start after naming; the full inference wire is covered in remote_e2e.
+    delivery = store.deliveries.get_or_create_delivery(flow.id, "flow/implement-task")
+    delivery.base_branch = "trunk"
+    store.deliveries.update_delivery(delivery)
     job, = store.jobs.list_jobs(flow.id)
     return flow, job
 

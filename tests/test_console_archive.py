@@ -237,7 +237,7 @@ def test_resume_starts_new_round_without_overwriting_archive_or_conversation(sto
     assert resumed.id == flow.id and detail.current_round_no == 2
     assert detail.phase == "queued" and detail.lifecycle is FlowState.QUEUED
     assert detail.archived_at is detail.archive_reason is detail.archive_summary is None
-    assert detail.pr_number is None and detail.branch == f"flow/{flow.id}-round-2"
+    assert detail.pr_number is None and detail.branch == "flow/7-round-2"
     assert history.archived(flow.id, 1) == first_archive
     jobs = store.jobs.list_jobs(flow.id)
     assert [(job.round_no, job.state) for job in jobs] == [

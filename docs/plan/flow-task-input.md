@@ -322,3 +322,68 @@ ConsoleSync 的 SyncClaim、来源枚举和读取作用域支持可空 Issue。�
 ### 2026-11-12：拒绝手动 Issue 输入中的 PR 编号
 
 用户要求只修复第二项审查问题，并更新第二个提交。共享 `Issue.refetch` 在丢弃 GitHub 原始字段之前检查 `pull_request`，发现 PR 即返回已有 validation 错误，不为 API/CLI 增加重复校验或新抽象。复用现有入口回归，先证明两处均误创建 Flow，再验证 HTTP 422、CLI 失败且无 Flow/INITIAL 写入；真实 SDK 的缺省标记及显式 null 仍作为 Issue 接受。旧修订快照兼容和标题持久化归属不在本次修复范围。
+
+### 2026-11-14：标题与描述性分支联合推理（待批准，未实施）
+
+**要求与当前状态：** 用户要求“branch 名需要随title一起给worker推理生成，不要用现在id的形式”。本节提出用同一个持久 inference job 生成展示标题和语义化英文分支名，替代前文“编码不等待模型调用”的决定。当前 [`Flow.initial_branch`](../../app/domain/models.py#L131-L135) 仍返回 `flow/{id}`；[`prepare`](../../app/controler/workflow/coordinator.py#L285-L386) 在标题任务完成之前创建 delivery 并派发编码。已核对最新 fetch 的 `origin/main` 也保留这条路径。此次只追加方案；产品代码、测试、当前其他功能的改动均未修改，未提交、推送、创建 PR 或部署。
+
+**目标与例子：** 任务“修复分页游标在末页重复返回数据”由 worker 一次返回 `{"title":"修复分页游标末页重复数据","branch_slug":"fix-pagination-cursor-duplicates"}`，首轮使用 `flow/fix-pagination-cursor-duplicates`。模型按任务语言生成 title，按英文小写 kebab-case 生成 slug；任务原文继续按数据处理，不执行其中的命名提示。保留现有完整编码输入、12000 字符命名输入预算、30 秒逻辑调用预算和最多三次派发，不增加第二次推理、配置项或调度器。
+
+**开始编码前确定分支：** INITIAL 先创建 attempt、读取任务原文并确保命名任务已持久化，在现有异步 preparation task 中等待其结束，不创建临时 ID 分支或先编码后改名。等待不持有数据库事务；定时重读保存状态并使用现有推理过期/取消入口，避免没有推理 worker 时无限等待。[现有 preparation](../../app/controler/workers/callbacks.py#L850-L875) 已独立运行并续租，[同一连接的 inference](../../app/controler/workers/callbacks.py#L278-L306) 继续使用独立槽位，stop 仍取消准备任务。命名完成后复核 round、attempt、token/epoch、delivery 和归档状态，再创建 delivery、签发 capability 和派发编码。代价是命名期间暂占一个已领取 workspace；本次接受这项有界等待，不为此引入前置任务图或新的领取条件。
+
+**最小数据与接口：**
+
+- `FlowNaming` 放在现有业务模型模块，作为结构化推理输出契约；只有 `title: str` 和 `branch_slug: str` 两个必填字段，拒绝额外字段。title 沿用非空、单行、可打印、至多 256 字符；slug 使用 3–48 字符的 `^[a-z][a-z0-9]*(-[a-z0-9]+)*$`。保留 `-round` / `-round-N` 结尾作为系统轮次命名空间，不接受这种模型输出，避免重名后缀和轮次分支混淆。
+- 新增 `flows.branch_name TEXT NULL` / `Flow.branch_name: str | None = None`，保存已经选定的首轮完整分支名，包括 `flow/` 前缀及必要的重名后缀；后续 round 不改这个 stem。为非空 `(repo, branch_name)` 建唯一索引，包含归档 Flow，防止复用历史名称。`initial_branch` 从该 stem 加现有 `-round-N` 后缀；尚未命名时明确报错，不生成 ID 兜底。
+- 沿用 `title_job_id` 关联同一次联合命名，不为字段更名做无关迁移。`InferenceJob.validation` 和 `JobStore.enqueue_inference(..., validation=...)` 的现有枚举增加 `flow_naming`；使用现有 `output_schema` 传递 `FlowNaming` schema，无需新增 wire 消息、字段或协议版本。
+- 在 coordinator 中以 `_ensure_naming(self, flow: Flow, job: Job, task_content: str) -> int` 替代 best-effort `_enqueue_title`，返回持久命名 job ID；增加 `_await_naming(self, job: Job, flow: Flow, naming_job_id: int) -> Flow | JobState`，等待已保存的结果并按现有工作流检查决定继续、退役或失败。`prepare` / `prepare_for_assignment` 的外部签名不变。
+- `ResultApplication._apply_inference` 对 `flow_naming` 严格 JSON 解码及业务校验；只在关联 job、round、attempt 仍有效时，在同一事务中结算推理并保存 title 与分支 stem。两者不部分生效，旧 Flow 对象的 `update_flow` 不能抹掉命名结果。既有纯文本标题任务和 review 推理仍按原契约读取，不能将其他推理结果当作命名。
+- 分支候选的本地占用查询和最终写入归 `FlowStore`，不放入通用 WorkerStore；需要的签名为 `assign_branch_name(self, flow_id: int, repo: str, slug: str) -> str`，在调用方事务中执行并返回稳定 stem。唯一索引处理并发竞争，失败事务可由既有结果恢复重放；不声称在无限并发下保证有限次成功。
+
+**重名与远端边界：** 同仓库的第二个同名任务使用描述名加 `-2`、`-3` 等后缀，不拼 Flow ID；不同仓库允许同名。名称选择同时避开已保留的 stem 与轮次命名空间。首次下发前通过既有只读 ref API 检查目标远端分支，已存在且不属于当前 delivery 时明确失败，保留诊断、不接管、不覆盖，也不在已有 delivery 上偷偷换名。本次不增加远端预留写操作；检查到 agent push 之间仍有远端并发窗口，继续遵守普通非强制 push 和原结果核验，不承诺原子远端占名。
+
+**失败、重试与恢复：** 无可用推理能力、超过总预算、配置错误、无效 JSON/title/slug 或命名入队失败，均不能启动编码或退回 `flow/{id}`。可恢复 provider 故障沿用原重试预算；`invalid_response` 按[现有非重试错误分类](../../app/domain/inference_models.py#L20-L30) 结束，不能将它描述为自动重试。最终命名失败通过现有控制结果标记 INITIAL 失败并进入可诊断状态。数据库暂时错误沿用既有恢复机制，不伪装为模型成功。重启或同 attempt 的重复 prepare 复用原 job、request、deadline 和已经保存的名字；显式 retry 更换 attempt 时，若尚未选定名字，可为新 attempt 建立一次新命名调用，不能一直复用已被旧 attempt 取消的 job。归档、停止或 attempt 变化后的旧结果不得写入新轮次。
+
+**兼容与 resume：** 不重命名已有 delivery 或 PR。schema 初始化时从实际持久 delivery 回填其分支 stem，仅去除与该 Flow 当前 round 精确对应的末尾轮次后缀，不重新按 ID 猜测名称；异常历史记录须先诊断，不能静默改写。旧纯文本标题任务继续完成标题填充，不改已有分支。既有 ID 分支及其后续 resume 保持原命名，以免历史交付断开；新 Flow 使用语义 stem，resume 为 `flow/fix-pagination-cursor-duplicates-round-2`。尚未命名、从未创建 delivery 的 Flow 归档后 resume 不提前生成分支，待新 INITIAL 准备时命名。新语义发布或回滚前须让相关在途准备和结果收敛；不在本次操作运行中的数据库或服务。
+
+**替代方案与取舍：** 从 title 本地转 slug 不满足交给 worker 推理的要求；分两次推理增加一次调用；先用 ID 分支再改名会破坏已冻结交付身份。等待期间直接返回 QUEUED 会反复领取未就绪任务，避免空转还须改领取 SQL 与唤醒条件；现有独立 preparation task 更小。新增可空 stem 和唯一索引用于保存模型决定、保证重试/resume 稳定及处理描述名自然重名，不能仅修改 prompt 而省略。
+
+**实施顺序与拟验收：** 批准后先扩展现有 `test_coordinator.py` / worker inference 用例证明旧实现仍下发 ID 分支，再增加模型/schema、联合输出校验和原子保存，最后接入准备等待与 resume，并更新当前 README/架构说明。重点验证同一次 inference 产出两项、完成前无编码下发、无效/超时/无推理 worker 不使用 ID、同仓库并发同名/不同仓库对照、事务中断与重放、同 attempt 重试/新 attempt 重试、停止/断线/归档及新旧 resume。使用隔离 PostgreSQL 与本地 Git/bare remote，验证预存远端同名分支不会被接管；不写真实 GitHub。移除等待、原子事务或唯一索引时，对应反例应失败；消融在实施后、代码 review 前运行，不保留一次性测试脚本。随后执行相关和完整 pytest、Ruff、Mypy 及构建检查。没有改动 UI 外观的计划；本轮没有运行产品测试或真实模型命名评测。
+
+**设计辅助与审批：** 本机 Claude Code 的初始化及响应均确认为 `claude-opus-5-5`，工具和 MCP 列表为空，正常退出。采纳现有异步 preparation 等待和持久 stem 的建议；主线程核对后修正其关于 `invalid_response` 自动重试、按 ID 回填历史分支以及把远端读取放进数据库事务的提议。这里只记录待批准方案，不把模型建议当作执行验证。除批准此方案外，没有必须由用户选择的技术问题；未获提交、推送、PR 或部署授权。
+
+### 2026-11-14：复用原命名任务落地与故障验证
+
+**触发与实现：** 用户补充“你复用同一个推理任务实现”。已把原 title 调用扩展为 `FlowNaming` 的 `title` / `branch_slug` JSON，仍由 `title_job_id`、原 inference 调度、schema 和结果 inbox 承载，没有新增第二个模型调用或 wire 消息。`JobCoordinator` 在现有异步准备任务中等待命名，成功后才创建 delivery 和签发编码能力；无可用推理 worker 时受原 30 秒 deadline 限制。`ResultApplication` 同事务结算推理并保存两项名字；`FlowStore` 在 savepoint 内利用 `(repo, branch_name)` 唯一索引处理同名，后续 round 沿用持久 stem。涉及 `coordinator.py`、`results.py`、`models.py`、`inference_models.py`、`flows.py`、`jobs.py`、`schema.py` 和 `service.py`，README、架构说明与 changelog 已同步。
+
+**与提案的细节差异：** 新 INITIAL 创建 delivery 前强制要求非空 `branch_name`，不以 ID 兜底。`Flow.initial_branch` 的旧 ID 计算仍保留给尚无新字段的旧对象/旧绑定读取，避免把历史对象的读取也改成异常；初始化从实际 delivery 回填后优先使用其保存值，因此不会按 Flow ID 猜改已有分支。命名失败后的显式 `ControlService.retry` 实际保留 attempt、创建更晚的 coding job；据此只对该后续 job 新建命名调用，同一 coding job 的重复准备仍复用原 request 和 deadline，修正提案关于 retry 一定更换 attempt 的假设。未命名且没有 delivery 的归档任务 resume 不提前创建分支。
+
+**回归与验证边界：** 修改前的新回归在“命名尚未完成，准备不得结束”的断言失败，证据为 `.amp/in/artifacts/branch-naming-red.log`。当前针对性测试使用隔离 PostgreSQL，覆盖一次推理产出两项、重复准备、严格 JSON 与危险 slug、超时及显式 retry、停止/attempt 变化后的迟到结果、原子回滚/恢复、同仓库并发重名及跨仓库对照、实际历史分支回填、命名前归档后 resume 和既有语义分支的轮次恢复。远端通路运行真实 Worker/Controller 双端通信、inference 消息、Git 和本地 bare remote；已有同名 ref 时断言未启动 agent、未签发 push capability、ref 未变化。外部模型回答和 GitHub 服务可控模拟，未进行付费模型命名质量评测，也未写真实 GitHub。原协议测试从命名完成后的状态开始，不再假设无 inference 能力也能直接启动新任务。
+
+**消融与取舍：** 在独立测试进程中临时替换运行时机制，不改产品源码；各变体都复用相同测试输入。去除 `_await_naming` 的等待、立即返回 DONE 时，`test_initial_waits_for_title_and_branch_from_one_inference` 检出准备过早结束；移除 `_apply_inference` 外层事务、让仓储分别提交时，原子重放测试在标题写入故障后检出已错误提交的推理完成标记；只在一次性测试 schema 删除 `ux_flows_branch_name` 时，并发同名测试检出两个相同分支。三个变体均按预期失败，恢复正常机制后对应测试通过，因此保留有界等待、外层事务和唯一索引。命令入口为 `BRANCH_NAMING_ABLATION=<waiting|atomicity|uniqueness> pytest -p branch_naming_ablation <对应测试>`；临时插件通过 pytest hook 分别替换上述方法或删除测试索引，运行后移除。证据保存在 `.amp/in/artifacts/branch-naming-ablation-{waiting,atomicity,uniqueness}.log`；正常对照为 `FLOWTOOL_TEST_DATABASE_URL=<隔离库> .venv/bin/pytest -q tests/test_coordinator.py tests/test_remote_e2e.py tests/test_flow_states.py tests/test_store.py`。
+
+**交付状态与验证结论：** 当前为本地未提交改动；未推送、开 PR、部署或迁移运行中服务。全量 PostgreSQL pytest 复验通过，仅现有 jj 元数据保留场景因环境条件跳过，并保留既有 Starlette 弃用告警；全量运行后补充的停止命名、首次交付前 resume 和真实 bare remote 冲突场景已针对性补跑通过。Ruff（`app tests scripts`）、Mypy（`app tests`）、`git diff --check` 与 `uv build --no-sources` 的 sdist/wheel 构建均通过。完整证据为 `.amp/in/artifacts/branch-naming-suite-final.log`、`branch-naming-final-targeted.log`、`branch-naming-{ruff,mypy,build}.log`。临时消融插件和构建产物已移除；隔离 PostgreSQL 完成验证后关闭并清理。没有 UI 外观代码变更。
+
+### 2026-11-14：隔离本次改动并对齐最新主线
+
+用户要求推送 PR。共享工作区同时保留多个任务的改动，因此从本次命名涉及的差异提取独立 jj workspace，重放到最新 `origin/main`，未改写共享工作区或夹带其他功能。保留主线已合入的 Bot 查询客户端生命周期修复和私有文件链接功能；README 的升级段落沿用主线 v25 / manifest v3，只补充联合命名要求，changelog 保留其他功能条目。
+
+发布验证使用本线程的一次性 PostgreSQL，执行全量 `pytest -q`、`ruff check app tests scripts`、`mypy app tests`、差异空白检查和 `uv build --no-sources`。本轮日志集中在 `.amp/in/artifacts/branch-naming-pr-{suite,ruff,mypy,build}.log`；代码发布前按仓库约定运行独立双代理 review gate。此次交付仅创建 feature 分支与 PR，不合并、部署或迁移运行中服务。
+
+### 2026-11-14：修复并发工作区测试的总启动时限
+
+[PR #155 首次 CI](https://github.com/b1indsight/agentflow/actions/runs/43555123342/job/132326132725) 中，`test_demand_concurrent_dispatch_stop_and_result_isolate_workspaces[17]` 在等待全部工作区启动的固定 10 秒处超时；日志显示截止前仍持续有任务启动。联合命名让这些任务先共享一条 inference lane，本地普通回归未覆盖较慢环境下所有命名调用的累计耗时。
+
+使用真实 PostgreSQL、原有双端 Session 和 `--testmon`，临时插件只给 `NamingInference.infer` 增加每次 0.35 秒延迟：原测试在 10 秒总时限失败，按每个新增运行任务等待进展的版本通过，最大容量场景执行超过 14 秒。保留每步 10 秒停滞上限和全部容量、隔离、重连、停止及复用断言，不减少 17 的容量参数、不预先跳过命名，也不改产品 30 秒命名预算。该变更仅替换测试首个等待条件，不新增产品状态或抽象；此旧等待/新等待对照即为本次简化比较。
+
+复验沿用 CI 第一分片的模块选择与 testmon 收集，另跑受延迟影响的容量参数及 Ruff/Mypy；证据为 `.amp/in/artifacts/branch-naming-ci-{failure,latency-red,latency-green,shard,ruff,mypy}.log`。临时延迟插件不保留在仓库，修复仍在同一个 bookmark 和 PR 交付。
+
+### 2026-11-14：直接处理联合输出，移除新增分支持久化
+
+**要求与决定：** 用户要求“简化直接处理，去掉持久化逻辑”。本次据此替代前文关于 `FlowNaming`、`flows.branch_name`、回填与唯一占名索引的决定；保留功能原本已有的 title、inference 结果和 `flow_deliveries.branch` 存储，不把“去掉新增持久化”扩大成删除交付记录或推理恢复机制。
+
+**实现与取舍：** 移除 `FlowNaming`、分支字段、`assign_branch_name`、schema 新增列/回填/索引及其专属测试。仍在同一次 inference 中返回 `title` / `branch_slug`，直接校验这两个字段；结果应用只沿用原标题写入。INITIAL 从现有推理结果读取 slug，完成远端读取后通过原有 delivery 创建入口保存实际分支，不为命名新增写入。命名完成后、delivery 创建前的重启复用同一结果与 deadline。后续 round 从 delivery 的实际分支去掉与当前 round 精确匹配的后缀，再派生下一轮分支，历史 ID/custom 分支也按实际保存值处理。
+
+本次同时取消数据库名称预留及自动 `-2` / `-3` 编号；远端已存在的分支仍直接失败，不接管或覆盖。检查到 push 之间依旧存在并发窗口，相同推理结果也不再由本地唯一索引隔离。这是本次简化后的明确边界，不将原唯一索引测试的结论继续描述为当前保证。现有分支 SHA、assignment、round 和 attempt 校验不变，不运行数据库迁移或删除在线数据。
+
+**验证与简化比较：** 本轮删除额外模型和存储机制，未引入新的状态、调用或抽象，因此不为已删除机制再加消融层。保留原有等待/超时/无效输出/迟到结果/远端预存分支回归，并扩展现有重放场景，在 title 结果应用之后、创建 delivery 之前替换 coordinator，验证不增加第二次 inference 也能得到原分支；恢复用例覆盖 ID、自定义名、精确当前轮次后缀与不匹配后缀。独立 PostgreSQL 新库检查确认没有 `branch_name` 列和 `ux_flows_branch_name` 索引。Ruff、Mypy、sdist/wheel 构建通过；全量 PostgreSQL 回归及发布前双代理审查结果分别保存在 `.amp/in/artifacts/branch-naming-simple-suite.log`、`branch-naming-simple-review.log`，schema 检查为 `branch-naming-simple-schema.log`。外部模型和 GitHub 仍使用可控模拟，没有 UI 外观变更。

@@ -12,7 +12,7 @@ from app.contracts.receipts import decode_result_inbox
 from app.controler.workers.transport import serve_worker
 from app.controler.workflow.service import ControlService
 from app.domain.models import DeliveryState, FlowState, JobState
-from app.github import RemoteRef, Repository
+from app.github import GitHubError, GitHubErrorKind, RemoteRef, Repository
 from app.persistence.records import required
 from app.worker.config import WorkerSettings
 from app.worker.runtime import WorkerRuntime
@@ -20,7 +20,7 @@ from tests.github import RecordingGitHub, RecordingRepository
 from tests.test_worker_executor import RecordingAgent
 from tests.test_worker_workspaces import managed_seed
 from tests.test_workspace_dispatch import wait_until
-from tests.worker_fixtures import run_worker
+from tests.worker_fixtures import NamingInference, run_worker
 
 
 class QueueSocket:
@@ -83,7 +83,10 @@ def remote_flow(store, tmp_path, monkeypatch, recording_resources, server_runtim
         ).strip()
 
     async def fetch_ref(repo, branch, *, retry_transient=False):
-        return RemoteRef(branch=branch, sha=await asyncio.to_thread(remote_sha, branch))
+        try:
+            return RemoteRef(branch=branch, sha=await asyncio.to_thread(remote_sha, branch))
+        except subprocess.CalledProcessError as error:
+            raise GitHubError(GitHubErrorKind.NOT_FOUND, "get_ref", status_code=404) from error
 
     async def open_pull_request(repo, head, base, title, body):
         pull = await RecordingRepository.open_pull_request(repo, head, base, title, body)
@@ -96,11 +99,12 @@ def remote_flow(store, tmp_path, monkeypatch, recording_resources, server_runtim
     class Agent(RecordingAgent):
         async def start(self, task, cwd, *, output_schema=None, context=None):
             self.started.append((task, cwd))
-            _git("checkout", "-b", flow.initial_branch, cwd=cwd)
+            branch = store.deliveries.get_delivery(flow.id).branch
+            _git("checkout", "-b", branch, cwd=cwd)
             (cwd / "README.md").write_text("implemented\n")
             _git("add", "README.md", cwd=cwd)
             _git("commit", "-m", "implement", cwd=cwd)
-            _git("push", "origin", flow.initial_branch, cwd=cwd)
+            _git("push", "origin", branch, cwd=cwd)
             return await self.finish(context)
 
     agent = Agent()
@@ -110,6 +114,7 @@ def remote_flow(store, tmp_path, monkeypatch, recording_resources, server_runtim
         worker_id="worker-1", worker_token=SecretStr("worker-secret"),
         serve_ws_url="wss://unused", worker_root=root,
     ))
+    worker.inference = NamingInference()
     worker.root_lock.acquire()
     worker.initialize()
     try:
@@ -167,4 +172,29 @@ async def test_control_gateway_and_worker_client_complete_one_remote_job(store, 
     assert delivery.head_sha == terminal.result.commit_sha
     call = required(store.deliveries.get_tool_call(terminal.result.open_pr_call_id))
     assert call.response == terminal.result.delivery_receipt
-    assert github.opened == [flow.initial_branch] and len(agent.started) == 1
+    assert github.opened == ["flow/implement-task"] and len(agent.started) == 1
+    named = store.flows.get_flow(flow.id)
+    assert named.title == "Implement task" and delivery.branch == "flow/implement-task"
+    assert len([j for j in store.jobs.list_jobs(flow.id) if j.kind.value == "inference"]) == 1
+
+
+async def test_existing_remote_branch_is_not_taken_over(store, remote_flow):
+    # Even a valid model answer cannot authorize coding on an unrelated existing ref.
+    from tests.test_vcs import _git
+
+    flow, server, github, worker, agent = remote_flow
+    seed = worker.settings.worker_root / "repos/owner/repo"
+    branch = "flow/implement-task"
+    _git("branch", branch, cwd=seed)
+    _git("push", "origin", branch, cwd=seed)
+    before = _git("ls-remote", "origin", f"refs/heads/{branch}", cwd=seed)
+    coding, = store.jobs.list_jobs(flow.id)
+    async with remote_connection(server, worker):
+        await wait_until(lambda: store.jobs.get_job(coding.id).result_applied_at is not None)
+    failed = store.jobs.get_job(coding.id)
+    assert failed.state is JobState.FAILED and failed.started_at is None
+    assert "already exists" in failed.last_error
+    assert store.deliveries.get_delivery(flow.id) is None
+    assert github.opened == agent.started == []
+    assert not any(call["operation"] == "create_push_capability" for call in github.resource_calls)
+    assert _git("ls-remote", "origin", f"refs/heads/{branch}", cwd=seed) == before

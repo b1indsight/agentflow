@@ -50,6 +50,7 @@ from app.worker.execution.lifecycle import WorkerExecution, WorkerProtocolError
 from app.worker.execution.vcs import _run
 from app.worker.runtime import WorkerRuntime
 from app.worker.state.execution import ExecutionState
+from tests.github import RecordingGitHub
 from tests.test_remote_e2e import QueueConnection, QueueSocket
 from tests.test_vcs import _git
 from tests.test_worker_executor import RecordingAgent
@@ -63,7 +64,7 @@ from tests.test_worker_handler import queued_initial as queued_initial  # noqa: 
 from tests.test_worker_workspaces import managed_seed
 from tests.test_workspace_inventory import merged_business
 from tests.wire import worker_message
-from tests.worker_fixtures import run_worker, worker_runtime
+from tests.worker_fixtures import NamingInference, run_worker, worker_runtime
 
 
 def assignment():
@@ -316,12 +317,15 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(
             started.set()
             await asyncio.Event().wait()
 
-    handler = server_runtime(settings={"worker_heartbeat_interval": 0.01})
+    github = RecordingGitHub()
+    github.refs = {}
+    handler = server_runtime(github=github, settings={"worker_heartbeat_interval": 0.01})
     monkeypatch.setattr("app.worker.runtime.CodexAgent", lambda **kwargs: Agent())
     client = WorkerRuntime(WorkerSettings(
         worker_id="worker-1", worker_token="worker-secret", serve_ws_url="wss://unused",
         worker_root=root, worker_repo_workspace_limit=2 if overflow else 1,
     ))
+    client.inference = NamingInference()
     client.initialize()
     pool = client.workspaces
     default = pool.initialize()
@@ -423,7 +427,7 @@ async def test_stopping_consumes_a_and_requires_real_r_before_b(
         ) == "pending"
         with pytest.raises(ResultPending):
             await subject.results.apply(job.id)
-        assert github.opened == [flow.initial_branch]
+        assert github.opened == [request.arguments.branch]
     ControlService(database=store.database).cancel(flow)
     intent, = store.stops.pending_for_worker("worker-a")
     receipt = ExecutionStopped(**intent.fence().model_dump(), execution_nonce="actual-executor")
@@ -480,7 +484,7 @@ async def test_stopping_consumes_a_and_requires_real_r_before_b(
                         call_id="call",
                         arguments={"title": "no side effects"},
                         vcs_backend=VcsKind.GIT,
-                        branch=flow.initial_branch,
+                        branch=request.arguments.branch,
                         commit_sha="head",
                         remote_sha="head",
                     ),
@@ -569,12 +573,15 @@ async def test_stop_without_ack_reuses_workspace_and_reconnect_ack_preserves_new
             started.set()
             await asyncio.Event().wait()
 
-    handler = server_runtime(settings={"worker_heartbeat_interval": 0.01})
+    github = RecordingGitHub()
+    github.refs = {}
+    handler = server_runtime(github=github, settings={"worker_heartbeat_interval": 0.01})
     monkeypatch.setattr("app.worker.runtime.CodexAgent", lambda **kwargs: Agent())
     client = WorkerRuntime(WorkerSettings(
         worker_id="worker-1", worker_token="worker-secret", serve_ws_url="wss://unused",
         worker_root=root, worker_repo_workspace_limit=1,
     ))
+    client.inference = NamingInference()
     client.initialize()
     pool = client.workspaces
     session = ExecutionState(root, flows[0].id)

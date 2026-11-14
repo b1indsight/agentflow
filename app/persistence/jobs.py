@@ -184,7 +184,7 @@ class JobStore(Repository):
 
     def enqueue_inference(
         self, task: InferenceTask, *, flow_id: int | None = None,
-        batch_id: int | None = None, validation: Literal["text", "review"] = "text",
+        batch_id: int | None = None, validation: Literal["text", "review", "flow_naming"] = "text",
     ) -> Job:
         """Freeze a logical call once; a batch's consumed recoverable failure starts a new round.
 

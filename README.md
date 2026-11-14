@@ -22,7 +22,8 @@ Flow 使用 `queued/running/review/blocked/finalizing/archived` 六态；看板�
 - **直接创建 Flow**：看板顶栏点击“新建 Flow”，选择 Project（GitHub 代码仓库），输入任务内容即可开启，
   不要求 Issue 或 webhook。项目来自 GitHub App 授权清单，零历史仓库也可选；提交时重新校验访问与归档状态。
   任务内容以字符串原样保存，最多 32 KiB UTF-8，不要求填写标题。
-  首轮准备时异步推理标题，不等待生成结果；生成前或失败时依次使用 Issue 缓存标题、PR 标题、`Flow #ID`。
+  首轮准备复用同一次推理生成标题与描述性分支名，例如 `flow/fix-pagination-cursor`，完成后才派发编码。
+  命名失败或超时会阻止编码，不回退到 ID 分支；等待期间页面标题仍可使用 Issue 缓存标题、PR 标题、`Flow #ID`。
   原始输入用于首轮、修订与审核；无 Issue 时不查询 Issue、不添加关闭指令，也不参与 Issue 型 Projects 同步。
   提交结果未知时先刷新核对，页面不会自动重发；没有空闲 Worker 时正常排队。
 
@@ -37,7 +38,7 @@ Flow 使用 `queued/running/review/blocked/finalizing/archived` 六态；看板�
   未合并 Flow 的失败与未知执行进入 blocked，仍占用该 Issue；`flow retry` 不绕过执行、结果和停止门槛。
   只有 `flow resume` 开启新轮次、新分支与新交付，旧 PR 和旧反馈不能授权新工作。
   INITIAL 无 PR 失败也保留执行绑定，结束时须由原 worker 确认停止并清理后归还工作区；
-  原 worker 离线时继续等待，不提前归档。恢复分支使用 `flow/<id>-round-N`，保留首轮 `flow/<id>`。
+  原 worker 离线时继续等待，不提前归档。恢复分支沿用已保存名字加 `-round-N`；已有 ID 分支不重命名。
 
 - **反馈对账**：原 Issue、PR 普通评论和 Review 正文分别保存分页进度，默认每 300 秒复扫；
   每个来源每次至多读取 50 条完整正文，未完成的页 5 秒后继续。重启保留 cursor/退避，
@@ -392,6 +393,7 @@ M3 F3 及审查修复本地验证（2026-09-08）：真实 PostgreSQL 下 **502 
 Control 本地归档通知使用 ResultInbox **v2**。
 INITIAL/REVISION 使用字符串 `task_content`，Issue 在准备时由最新标题与正文拼接；server/worker 必须成组升级，不能混跑旧协议。
 现有六态库启动会幂等新增 `flows.task_content`（TEXT）和可空的 `title` / `title_job_id`、允许 NULL Issue，并校验两种输入恰好存在一种。
+新任务从同一次联合推理读取 `title` 和 `branch_slug`，实际分支沿用 `flow_deliveries.branch` 保存，不新增分支列、回填或占名索引。已有 delivery 保留实际分支，resume 从该分支派生轮次名。首次派发前发现远端同名分支会失败，不自动接管或添加数字后缀；检查到 push 之间仍可能发生并发重名。升级前须让在途准备和推理结果收敛。
 首次创建直接任务后，旧程序无法读取这些记录，即使任务已归档也不能直接降级；应前向修复或按备份整体恢复。
 `workers` 使用 `(worker_id, workspace)` 复合主键；旧单行 worker schema 启动时明确拒绝，
 须在停写、备份后核对真实 worker-root 身份并显式迁移，不自动生成或猜造 workspace。
