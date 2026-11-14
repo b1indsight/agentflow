@@ -757,6 +757,16 @@ test("shared virtual lists preserve distant focus, omitted gaps and keyboard ord
       },
     });
   });
+  const scrollToEnd = async (root: Locator, last: Locator) => {
+    // Measured rows can shrink estimated gaps after a jump; re-read the end before checking navigation.
+    await expect(async () => {
+      await root.evaluate(async (node) => {
+        node.scrollTop = node.scrollHeight;
+        for (let i = 0; i < 4; i++) await new Promise(requestAnimationFrame);
+      });
+      await expect(last).toBeInViewport({ timeout: 250 });
+    }).toPass({ timeout: 5000 });
+  };
   const checkPinnedNavigation = async (
     root: Locator,
     first: Locator,
@@ -767,11 +777,7 @@ test("shared virtual lists preserve distant focus, omitted gaps and keyboard ord
       node.scrollTop = 0;
     });
     await first.focus();
-    await root.evaluate(async (node) => {
-      node.scrollTop = node.scrollHeight;
-      for (let i = 0; i < 4; i++) await new Promise(requestAnimationFrame);
-    });
-    await expect(last).toBeInViewport();
+    await scrollToEnd(root, last);
     await expect(first).toBeFocused();
     await expect(first).not.toBeInViewport();
     expect(await root.evaluate((node) => node.scrollTop)).toBeGreaterThan(2000);
@@ -825,10 +831,7 @@ test("shared virtual lists preserve distant focus, omitted gaps and keyboard ord
   const jobs = page.locator('[data-window-list="执行记录"]');
   await expect(jobs).toHaveAttribute("data-window-count", "90");
   const detail = page.locator(".detail-body");
-  await detail.evaluate((node) => {
-    node.scrollTop = node.scrollHeight;
-  });
-  await expect(page.getByText("initial #90", { exact: true })).toBeInViewport();
+  await scrollToEnd(detail, page.getByText("initial #90", { exact: true }));
   await detail.evaluate((node) => {
     node.scrollTop = 0;
   });
