@@ -1,4 +1,5 @@
 import asyncio
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -152,3 +153,40 @@ async def test_failed_registration_closes_candidate_without_restoring_old_route(
     finally:
         old_socket.release_close.set()
         await asyncio.gather(registering, gateway.close(), return_exceptions=True)
+
+
+@pytest.mark.parametrize('handling', ['missing', 'raises', 'mapped'])
+async def test_unhandled_driver_failure_closes_as_internal_error(handling):
+    class Callbacks:
+        def bind(self, routes):
+            routes.configure(
+                opened=self.opened,
+                message=AsyncMock(),
+                unmatched_reply=AsyncMock(),
+                validation_error=AsyncMock(),
+                failed=None if handling == 'missing' else self.failed,
+            )
+
+        async def opened(self):
+            raise RuntimeError('business failure')
+
+        async def failed(self, error):
+            if handling == 'mapped':
+                return 1008
+            raise error
+
+    gateway = Gateway[Packet, Packet]()
+    socket = ClosingSocket()
+    session = make_session(socket)
+    try:
+        if handling == 'mapped':
+            await gateway.serve('peer', session, Callbacks(), replace=True)
+        else:
+            # A propagating server failure must not look like a successful WebSocket close.
+            with pytest.raises(RuntimeError, match='business failure'):
+                await gateway.serve('peer', session, Callbacks(), replace=True)
+        assert socket.codes == [1008 if handling == 'mapped' else 1011]
+        assert session.closed
+        assert gateway.get('peer') is None
+    finally:
+        await gateway.close()

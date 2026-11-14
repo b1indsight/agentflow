@@ -27,6 +27,7 @@ from psycopg import Error as DatabaseError
 from psycopg_pool import PoolTimeout
 from starlette.middleware.base import RequestResponseEndpoint
 from starlette.responses import FileResponse, JSONResponse, RedirectResponse
+from starlette.websockets import WebSocketState
 
 from app.contracts.console import ConsoleFailure
 from app.contracts.conversation import ConversationFailure, ConversationPage
@@ -87,7 +88,14 @@ def create_app(runtime: ServerRuntime | None = None) -> FastAPI:
 
     @application.exception_handler(DatabaseError)
     @application.exception_handler(PoolTimeout)
-    async def database_failure(request: Request, error: Exception) -> Response:
+    async def database_failure(request: Request | WebSocket, error: Exception) -> Response | None:
+        if isinstance(request, WebSocket):
+            logger.bind(event="worker_disconnected", reason_code="database_unavailable").opt(
+                exception=error,
+            ).error("")
+            if request.application_state is not WebSocketState.DISCONNECTED:
+                await request.close(code=1011)
+            return None
         return JSONResponse({"detail": "database_unavailable"}, status_code=503,
                             headers={"Cache-Control": "no-store"})
 

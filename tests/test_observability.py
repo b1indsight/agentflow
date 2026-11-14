@@ -4,12 +4,14 @@ import json
 import logging
 import threading
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import psycopg
 import pytest
+from fastapi import WebSocket
 from fastapi.testclient import TestClient
 from loguru import logger
+from psycopg_pool import PoolTimeout
 from pydantic import SecretStr
 
 import app.controler.config as server_config
@@ -49,6 +51,49 @@ async def test_logs_isolate_concurrent_context_and_never_render_exception_payloa
         assert all(row['event'] == 'job_failed' for row in rows)
         for secret in ('secret-token', 'password', 'raw prompt', 'postgres://', 'payload'):
             assert secret not in output.getvalue()
+    finally:
+        logger.remove()
+
+
+@pytest.mark.parametrize('error_type', [psycopg.errors.CheckViolation, PoolTimeout])
+@pytest.mark.parametrize('already_closed', [False, True])
+def test_database_failures_preserve_websocket_close_and_http_response(error_type, already_closed):
+    output = io.StringIO()
+    configure_logging('serve', 'json', output)
+    runtime = SimpleNamespace(settings=SimpleNamespace(host='test', port=0), metrics=Metrics(),
+                              startup=Mock(), shutdown=AsyncMock())
+    application = create_app(runtime)
+
+    @application.websocket('/database-failure')
+    async def fail_websocket(socket: WebSocket):
+        await socket.accept()
+        if already_closed:
+            # Gateway may already have closed the connection while unwinding a DB failure.
+            await socket.close(code=1012)
+        raise error_type('postgresql://private:password@db/secret-payload')
+
+    @application.get('/database-failure')
+    async def fail_http():
+        raise error_type('postgresql://private:password@db/secret-payload')
+
+    try:
+        with TestClient(application) as client:
+            with client.websocket_connect('/database-failure') as socket:
+                close = socket.receive()
+                assert close['type'] == 'websocket.close'
+                assert close['code'] == (1012 if already_closed else 1011)
+            response = client.get('/database-failure')
+            assert response.status_code == 503
+            assert response.json() == {'detail': 'database_unavailable'}
+            assert response.headers['cache-control'] == 'no-store'
+        rows = [json.loads(line) for line in output.getvalue().splitlines()]
+        failures = [row for row in rows if row.get('exception_type') == error_type.__name__]
+        assert len(failures) == 1
+        assert failures[0]['reason_code'] == 'database_unavailable'
+        assert f'{__name__}:fail_websocket:' in failures[0]['exception_trace']
+        assert not any(secret in output.getvalue() for secret in (
+            'postgresql://', 'password', 'secret-payload', 'RuntimeError',
+        ))
     finally:
         logger.remove()
 
