@@ -11,6 +11,7 @@
 | PR 所有权 | Orchestrator 创建 PR | Code Agent 改码/提交/push 后调用 `flow.open_pr`；control 独占 GitHub API，真实 E2E 待验收 |
 | 持久化 | PostgreSQL + 持久化 jobs/result inbox | Runtime 管理 Database，服务自建具体仓储；Store 用于 CLI/live smoke/测试；epoch + assignment token 对远程消息 fencing，仓储接口仍同步 |
 | 执行拓扑 | 单 serve + 多个出站单槽 worker | 多 worker、affinity、单机多实例和同 identity lease 恢复已实现；多 serve HA 未实现 |
+| Flow 状态的可信来源 | `console_activity` 的 Flow 事实为账本，`flows` 为同事务状态表，其他表不由账本重建 | 2026-11-15 提出，待审批；仅归档、合并证据和归档更正三种事实已实现，其余状态变化仍直接写 `flows`，见 [Flow 事实账本与状态表](flow-ledger.md) |
 | 本地版本控制 | VCS 指引交给 Code Agent | VCS 不是端口；Git/jj 由 Agent 自选，worker 在开 PR 前验证 commit/clean/remote SHA |
 
 “决策已定”只表示目标方向固定，不表示对应 adapter 或端到端行为已经完成。
@@ -25,7 +26,9 @@
 4. **并发与幂等**：一 Flow 一 binding/branch/PR 与 open PR 重放已约束；修订检测并拒绝远端 head 漂移，
    人工 push 合并和 base 冲突处理仍待实现；
 5. **worker 健康**：短断线可在 recovery grace 内恢复，但 worker 进程丢失 executor、grace 到期或 journal 损坏仍会 fail closed；
-6. **上下文与成本**：多轮 resume 的 token 增长、re-seed/压缩和预算限制尚未实现。
+6. **上下文与成本**：多轮 resume 的 token 增长、re-seed/压缩和预算限制尚未实现；
+7. **状态与历史可能不一致**：Flow 状态由多处直接写入，变化记录由触发器事后生成且不含起因；
+   目前无法校验 `flows` 当前行与历史是否一致，也无法发现绕过业务规则的直接写入。
 
 ## 10. 待强化 / 已知短板
 
@@ -39,6 +42,7 @@
 | 6 | 状态机边界 | 部分 | close/reopen、持久 stop/进程组取消及原 worker 归档清理已实现；未知执行保守阻塞；人工 push 接纳、base 前进/冲突与真实取消恢复演练仍待完成 |
 | 7 | 成本与失控闸 | 部分 | run timeout、最大修订轮数已有；仍需预算、heartbeat 失败上限、kill switch、re-seed |
 | 8 | 可运维性 | 部分 | epoch/lease/recovery/reason、drain、受保护指标、结构化日志、安全重试及部署/告警配置已提供；真实镜像发布、集群和备份恢复演练待验收 |
+| 9 | Flow 事实账本 | 部分 | 归档相关三种事实已先于状态写入并不可变；仍需单一写入口、覆盖全部状态变化的事实种类、重放校验命令和存量快照，见 [计划](../plan/flow-activity-ledger.md) |
 
 优先顺序：先在授权的一次性仓库校准 GitHub/Codex/bub 与安全边界，再开放真实业务仓库；
 对账、幂等、取消与部署恢复虽已有实现，仍需在无人值守运行前完成真实环境验收。

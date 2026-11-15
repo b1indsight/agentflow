@@ -17,6 +17,8 @@
 
 - [`code-agent-model-settings.md`](code-agent-model-settings.md) — 新增全局设置页，按 Codex / Amp 类型下拉选择新编码会话默认模型与推理强度；实施、验证与固定 CLI 的支持边界见记录。
 
+- [`flow-activity-ledger.md`](flow-activity-ledger.md) — 待审批：以 `console_activity` 的 Flow 事实为 Flow 状态的唯一可信账本，`flows` 为同事务状态表；单一写入口、带起因的事实种类、重放校验与存量快照。只覆盖 `flows` 表，不新建表、不改协议；目标架构见 [Flow 事实账本与状态表](../architecture/flow-ledger.md)，尚未实现。
+
 - [`worker-file-links.md`](worker-file-links.md) — worker 本地文件登记与 owner 文件 API：路径留在 worker，通过持久随机句柄和认证 Session 按需读取；PR #146 合并适配与验证见记录。
 
 - [`judge-feedback-tasks.md`](judge-feedback-tasks.md) — answer/revise 共用 worker 任务，answer 仅约束调用指令、本地提交和 PR head；上下文按反馈相关性选择。实现、真实 PostgreSQL 全量回归、静态检查、打包和两项简化对照完成；正在审查并准备 PR，wire22 须协调升级，未部署。

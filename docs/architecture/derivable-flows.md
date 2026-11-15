@@ -63,6 +63,20 @@ tool authorization 和 delivery ownership 都以稳定 Flow ID 为键。
 这些事实不能继续编码成互斥的 `PR_OPEN_WAITING_CHILDREN` 一类组合状态；面向用户的单一 status 应由上述
 事实派生。
 
+### 3.1 与 Flow 事实账本的关系
+
+[Flow 事实账本](flow-ledger.md)是另一项目标设计：Flow 生命周期的每次变化先追加一条不可变事实，
+`flows` 是它的同事务状态表。它的首期范围只有上表的“Flow 生命周期”一行，其余四个维度继续以各自的表为权威。
+
+本页的派生、等待与验收落地时，按同一规则扩展账本，不另建一套历史记录：
+
+- 派生关系的建立、`FlowResult` 新版本的发布、父级的 accept / reject 是带版本的业务事实，
+  适合作为新的事实种类，由父 Flow 或子 Flow 的账本记录并引用对方的 Flow ID；
+- `FlowWait` 的求值进度、continuation Job 的租约属于协调数据，不进入账本；
+- ContextBundle、SkillManifest 和 artifact 的正文留在各自的存储，事实只保存引用与 digest。
+
+这些种类不属于账本首期的承诺范围，需要在派生功能自己的计划中定义。
+
 ## 4. Agent 环境工具
 
 CodingAgent 看到的是 Flow 语义工具，不是 control 数据库、worker 管理接口或 GitHub credential：
