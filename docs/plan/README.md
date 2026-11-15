@@ -5,6 +5,8 @@
 
 ## 当前计划
 
+- [`worker-store-split.md`](worker-store-split.md) — 规划中，待审批：推理结算、取消、候选选择和准备重试预算改为领域纯函数；`WorkerStore` 按会话与库存、领取与租约、推理调用拆开，Flow 执行绑定归 `FlowStore`，`Database` 提供公开的 worker 锁方法。数据库结构、wire 协议和 worker → Flow → job 锁顺序不变；推理独立表只作为单独提案，不在本项实施。
+
 - [`flow-state-transitions.md`](flow-state-transitions.md) — 已实现领域事件决策、FlowStore 单写入口及公共锁定上下文；保留结果恢复、业务归档和批量领取/回收边界。验证、简化对照及发布基线见功能记录，PR 与 CI 的最新状态见其链接线程。
 
 - [`job-retirement-simplification.md`](job-retirement-simplification.md) — 共用 job 作废与 effects 计划归属规则，保留派发、恢复、提交及归档通知的阶段差异；本地实现与验证记录、发布基线、独立 PR 及 CI 状态见功能记录，未部署。
