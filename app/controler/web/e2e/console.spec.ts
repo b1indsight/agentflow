@@ -2114,3 +2114,170 @@ test("mobile detail header contracts to one line without losing reading position
   });
   await expect(head).not.toHaveClass(/compact/);
 });
+
+test("detail Inbox combines manual work with pagination, navigation, filtering and refresh", async ({
+  page,
+}) => {
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  let items: FlowDetail[] = [
+    {
+      ...blockedFlow,
+      id: 41,
+      title: "等待人工审核",
+      phase: "review",
+      lifecycle: "active",
+      action: "awaiting_review",
+    },
+    { ...blockedFlow, title: "等待修复与重试" },
+    { ...blockedFlow, id: 43, title: "等待归档处理" },
+    { ...blockedFlow, id: 44, title: "执行中的任务", phase: "running" },
+    { ...blockedFlow, id: 45, title: "已归档任务", phase: "done" },
+    { ...blockedFlow, id: 46, title: "排队中的任务", phase: "queued" },
+  ];
+  await page.route("**/api/flows?**", (route) => {
+    const params = new URL(route.request().url()).searchParams;
+    const visible = items.filter(
+      (item) =>
+        params.get("q") !== "status:running" || item.phase === "running",
+    );
+    const counts = { queued: 0, running: 0, review: 0, blocked: 0, done: 0 };
+    for (const item of visible) counts[item.phase]++;
+    const group = visible.filter((item) => item.phase === params.get("phase"));
+    const offset = params.has("cursor") ? 1 : 0;
+    return route.fulfill({
+      json: {
+        items: group.slice(offset, offset + 1),
+        counts,
+        next_cursor: group.length > offset + 1 ? "next" : null,
+        has_more: group.length > offset + 1,
+      },
+    });
+  });
+  await page.route(/\/api\/flows\/\d+$/, (route) =>
+    route.fulfill({
+      json: items.find(
+        (item) =>
+          item.id ===
+          Number(new URL(route.request().url()).pathname.split("/").at(-1)),
+      ),
+    }),
+  );
+  await page.goto("/#flow/42/overview");
+  const inbox = page.locator(".rail-inbox");
+  await expect(inbox.locator("summary")).toHaveText("Inbox3");
+  await expect(inbox.locator(".flow-tab")).toHaveCount(2);
+  await expect(
+    inbox.getByText("待审核 / 合并", { exact: false }),
+  ).toBeVisible();
+  await expect(inbox.getByText("受阻待处理", { exact: false })).toBeVisible();
+  await expect(
+    inbox.getByText(/执行中的任务|已归档任务|排队中的任务/),
+  ).toHaveCount(0);
+  await inbox.getByRole("button", { name: "更多受阻任务" }).click();
+  await expect(inbox.locator(".flow-tab")).toHaveCount(3);
+  await expect(inbox.getByRole("button", { name: "更多受阻任务" })).toHaveCount(
+    0,
+  );
+  await page.screenshot({
+    path: "../../../.amp/in/artifacts/inbox-desktop.png",
+  });
+  await inbox.getByRole("button", { name: /等待人工审核/ }).click();
+  await expect(page).toHaveURL(/#flow\/41\/overview$/);
+  await expect(
+    inbox.getByRole("button", { name: /等待人工审核/ }),
+  ).toHaveAttribute("aria-current", "page");
+  await inbox.locator("summary").click();
+  await page.getByRole("tab", { name: "会话" }).click();
+  await expect(inbox).not.toHaveAttribute("open");
+  await inbox.locator("summary").click();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByRole("button", { name: "切换任务" }).click();
+  await expect(page.getByRole("dialog", { name: "Flow 导航" })).toBeVisible();
+  await page.screenshot({
+    path: "../../../.amp/in/artifacts/inbox-mobile.png",
+  });
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+  ).toBe(true);
+  await inbox.getByRole("button", { name: /等待归档处理/ }).click();
+  await expect(page).toHaveURL(/#flow\/43\/conversation$/);
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await page.getByRole("button", { name: "切换任务" }).click();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const search = page.getByRole("combobox", { name: "搜索任务与筛选条件" });
+  await search.fill("status:running");
+  await search.press("Enter");
+  await expect(inbox.locator("summary")).toHaveText("Inbox0");
+  await expect(inbox.getByText("当前筛选下暂无待人工处理的任务")).toBeVisible();
+  await page.screenshot({ path: "../../../.amp/in/artifacts/inbox-empty.png" });
+  await page.getByRole("button", { name: "清空搜索条件" }).click();
+  await expect(inbox.locator("summary")).toHaveText("Inbox3");
+  // Manual work completed elsewhere must leave the Inbox when the owner refreshes detail.
+  items = items.map((item) => ({ ...item, phase: "done" }));
+  await page.getByRole("button", { name: "刷新当前视图" }).click();
+  await expect(inbox.locator("summary")).toHaveText("Inbox0");
+  await expect(inbox.locator(".flow-tab")).toHaveCount(0);
+  await expect(inbox.getByText("当前筛选下暂无待人工处理的任务")).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test("detail Inbox preserves partial results and distinguishes failed reads from empty work", async ({
+  page,
+}) => {
+  let fail = true;
+  let release = () => {};
+  const loaded = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route("**/api/flows?**", async (route) => {
+    const phase = new URL(route.request().url()).searchParams.get("phase");
+    if (phase === "blocked") {
+      if (fail)
+        return route.fulfill({ status: 503, json: { detail: "暂时不可用" } });
+      await loaded;
+    }
+    return route.fulfill({
+      json: {
+        items:
+          phase === "blocked"
+            ? [blockedFlow]
+            : phase === "review"
+              ? [{ ...flow, id: 41, phase: "review", title: "等待人工审核" }]
+              : [],
+        counts: { queued: 0, running: 0, review: 1, blocked: 1, done: 0 },
+        next_cursor: null,
+        has_more: false,
+      },
+    });
+  });
+  await page.goto("/#flow/42/overview");
+  const inbox = page.locator(".rail-inbox");
+  await expect(inbox.getByRole("alert")).toContainText(
+    "受阻读取失败：暂时不可用",
+  );
+  await expect(
+    inbox.getByRole("button", { name: /等待人工审核/ }),
+  ).toBeVisible();
+  await expect(inbox.getByText("当前筛选下暂无待人工处理的任务")).toHaveCount(
+    0,
+  );
+  await page.screenshot({ path: "../../../.amp/in/artifacts/inbox-error.png" });
+  fail = false;
+  await inbox.getByRole("button", { name: "重试读取受阻任务" }).click();
+  await expect(inbox.getByRole("status")).toHaveText("正在加载受阻任务…");
+  await expect(
+    inbox.getByRole("button", { name: "更多受阻任务" }),
+  ).toBeDisabled();
+  await expect(inbox.getByText("当前筛选下暂无待人工处理的任务")).toHaveCount(
+    0,
+  );
+  release();
+  await expect(inbox.getByRole("status")).toHaveCount(0);
+  await expect(inbox.getByRole("alert")).toHaveCount(0);
+  await expect(inbox.locator(".flow-tab")).toHaveCount(2);
+});

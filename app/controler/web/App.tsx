@@ -9,6 +9,7 @@ import {
   Archive,
   ArrowLeft,
   ChevronDown,
+  Inbox,
   Menu,
   PanelLeftClose,
   PanelLeftOpen,
@@ -65,6 +66,22 @@ const blank = (): Record<Phase, Column> => ({
   blocked: column(),
   done: column(),
 });
+const sidebarGroups: {
+  key: string;
+  label: string;
+  members: (readonly [Phase, string])[];
+}[] = [
+  {
+    key: "inbox",
+    label: "Inbox",
+    members: phases.filter(([p]) => p === "blocked" || p === "review"),
+  },
+  ...phases.map((phase) => ({
+    key: phase[0],
+    label: phase[1],
+    members: [phase],
+  })),
+];
 const positions = new Map<string, number>();
 const route = () => {
   const m = location.hash.match(
@@ -203,7 +220,7 @@ function Board({
 function Detail({
   id,
   tab,
-  all,
+  columns,
   counts,
   load,
   refresh,
@@ -212,7 +229,7 @@ function Detail({
 }: {
   id: number;
   tab: Tab;
-  all: FlowSummary[];
+  columns: Record<Phase, Column>;
   counts: Record<Phase, number>;
   load: (p: Phase) => void;
   refresh: number;
@@ -470,43 +487,94 @@ function Detail({
           </button>
         </div>
         <nav className="rail-scroll" data-scroll-root>
-          {phases.map(([p, l]) => {
-            const group = all.filter((f) => f.phase === p);
+          {sidebarGroups.map(({ key, label, members }) => {
+            const group = members.flatMap(([p]) => columns[p].items);
+            const inbox = key === "inbox";
             return (
               <SavedDetails
                 open
-                key={p}
-                stateKey={`rail-group-${p}`}
-                className={`rail-group phase-${p}`}
+                key={key}
+                stateKey={`rail-group-${key}`}
+                className={`rail-group${inbox ? " rail-inbox" : ` phase-${key}`}`}
               >
                 <summary>
-                  {l}
-                  <span className="count">{counts[p]}</span>
+                  {inbox && <Inbox size={16} aria-hidden="true" />}
+                  {label}
+                  <span className="count">
+                    {members.reduce((total, [p]) => total + counts[p], 0)}
+                  </span>
                 </summary>
+                {inbox && (
+                  <p className="inbox-note">需要人工处理 · 受阻、审核或合并</p>
+                )}
                 <WindowList
                   count={group.length}
-                  label={`侧栏-${p}`}
+                  label={`侧栏-${key}`}
                   itemKey={(i) => group[i].id}
                   estimate={78}
                 >
                   {(i) => (
                     <button
-                      className={`flow-tab${group[i].id === id ? " active" : ""}`}
+                      className={`flow-tab phase-${group[i].phase}${group[i].id === id ? " active" : ""}`}
+                      aria-current={group[i].id === id ? "page" : undefined}
                       onClick={() => {
                         setNav(false);
                         location.hash = `flow/${group[i].id}/${tab}`;
                       }}
                     >
                       <i className="dot" />
-                      <span className="name">{name(group[i])}</span>
+                      <span className="name">
+                        {name(group[i])}
+                        {inbox && (
+                          <span className="meta">
+                            {group[i].repo} · {ref(group[i])} ·{" "}
+                            <span className="inbox-action">
+                              {group[i].phase === "blocked"
+                                ? "受阻待处理"
+                                : "待审核 / 合并"}
+                            </span>
+                          </span>
+                        )}
+                      </span>
                     </button>
                   )}
                 </WindowList>
-                {group.length < counts[p] && (
-                  <button className="btn" onClick={() => load(p)}>
-                    更多{l}任务
-                  </button>
-                )}
+                {inbox &&
+                  !group.length &&
+                  members.every(
+                    ([p]) =>
+                      !columns[p].busy && !columns[p].error && !columns[p].more,
+                  ) && (
+                    <p className="inbox-note">当前筛选下暂无待人工处理的任务</p>
+                  )}
+                {members.map(([p, phaseLabel]) => {
+                  const c = columns[p];
+                  return (
+                    <div key={p}>
+                      {c.busy && (
+                        <p className="inbox-note" role="status">
+                          正在加载{phaseLabel}任务…
+                        </p>
+                      )}
+                      {c.error && (
+                        <p className="inbox-note" role="alert">
+                          {phaseLabel}读取失败：{c.error}
+                        </p>
+                      )}
+                      {(c.more || c.error) && (
+                        <button
+                          className="btn"
+                          disabled={c.busy}
+                          onClick={() => load(p)}
+                        >
+                          {c.error
+                            ? `重试读取${phaseLabel}任务`
+                            : `更多${phaseLabel}任务`}
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
               </SavedDetails>
             );
           })}
@@ -954,7 +1022,6 @@ export default function App() {
     history.replaceState(null, "", url);
     return () => boardRequests.current.forEach((c) => c.abort());
   }, [query, boardRevision]);
-  const all = phases.flatMap(([p]) => columns[p].items);
   return (
     <>
       <header className="workspace-bar">
@@ -989,7 +1056,7 @@ export default function App() {
             aria-label="刷新当前视图"
             onClick={() => {
               if (current.id) setRefresh((x) => x + 1);
-              else phases.forEach(([p]) => load(p, true));
+              phases.forEach(([p]) => load(p, true));
             }}
           >
             <RefreshCw />
@@ -1001,7 +1068,7 @@ export default function App() {
           key={current.id}
           id={current.id}
           tab={current.tab}
-          all={all}
+          columns={columns}
           counts={counts}
           load={load}
           refresh={refresh}
