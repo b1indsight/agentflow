@@ -15,13 +15,12 @@ from app.controler.workflow.service import ControlService
 from app.domain.inference_models import InferenceCapability, InferenceFailure, InferenceOutput
 from app.domain.models import JobKind, JobState, TriageVerdict, Verdict
 from app.domain.review_models import BatchState
-from app.github import GitHubError, GitHubErrorKind, PullRequest
 from app.persistence.inference_notices import InferenceNoticeStore
 from tests.github import RecordingGitHub
 from tests.review_memory import feedback_threads, judge_decision
 from tests.test_console_api import console_runtime as console_runtime  # noqa: PLC0414
 from tests.test_merge import route_merge
-from tests.test_review_batches import claim, feedback, freeze_legacy_answer, ingest
+from tests.test_review_batches import claim, feedback, ingest
 from tests.test_review_batches import review_flow as review_flow  # noqa: PLC0414
 from tests.workspace_fixtures import register_worker
 
@@ -96,29 +95,6 @@ async def test_interrupted_judge_retries_unfinished_batch(store, triage_runtime)
     judge.triage.side_effect = decide
     await runtime._run_triage()
     assert len(store.jobs.list_jobs(batch.flow_id)) == 1
-
-
-async def test_answer_definite_rejection_can_retry_saved_decision(store, triage_runtime, monkeypatch):
-    # An explicit rejection proves the POST was not accepted; it must not leave
-    # the batch permanently uncertain like a lost response does.
-    runtime, batch, judge = triage_runtime
-    batch = await freeze_legacy_answer(store, runtime.coordinator, batch,
-                                      TriageVerdict(verdict=Verdict.ANSWER, answer="Ten."))
-    github = runtime.coordinator.github
-    comment = PullRequest.comment
-
-    async def rejected_comment(pr, body):
-        raise GitHubError(GitHubErrorKind.RATE_LIMITED, "comment", status_code=429,
-                          request_rejected=True)
-
-    monkeypatch.setattr(PullRequest, "comment", rejected_comment)
-    with pytest.raises(GitHubError):
-        await runtime.coordinator.triage(batch, judge)
-    assert not store.reviews.get_batch(batch.id).answer_dispatched
-    monkeypatch.setattr(PullRequest, "comment", comment)
-    await runtime.coordinator.triage(store.reviews.get_batch(batch.id), judge)
-    assert len(github.comments) == 1
-    assert judge.triage.await_count == 0
 
 
 async def test_slow_judge_keeps_settle_available_without_a_second_execution(triage_runtime):

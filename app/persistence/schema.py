@@ -318,7 +318,6 @@ CREATE TABLE IF NOT EXISTS review_batches (
   created_at TIMESTAMPTZ NOT NULL,
   context JSONB,
   decision JSONB,
-  answer_dispatched BOOLEAN NOT NULL DEFAULT FALSE,
   threads JSONB,
   UNIQUE(flow_id,generation)
 );

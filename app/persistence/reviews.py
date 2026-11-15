@@ -630,32 +630,11 @@ class ReviewStore(Repository):
                 "UPDATE review_batches SET context=NULL,decision=NULL,inference_job_id=NULL,"
                 " job_id=CASE WHEN %s THEN NULL ELSE job_id END,"
                 " threads=CASE WHEN %s THEN NULL ELSE threads END WHERE id=%s"
-                " AND context=%s AND NOT answer_dispatched",
+                " AND context=%s",
                 (job is not None, job is not None, batch.id, Jsonb(context.model_dump(mode="json"))),
             )
             if job is not None and cleared.rowcount == 1:
                 JobStore(tx).retire_preparation(job)
-
-    def authorize_answer(self, batch: ReviewBatch, context_digest: str) -> bool:
-        """Fence the frozen context and authorize one POST under the workflow lock."""
-        fresh = self.get_batch(batch.id)
-        if (not self.current(batch) or fresh.answer_dispatched or fresh.context is None
-                or fresh.context.digest != context_digest):
-            return False
-        with self._db.connection() as connection:
-            connection.execute("UPDATE review_batches SET answer_dispatched=TRUE WHERE id=%s", (batch.id,))
-        return True
-
-    def reject_answer(self, batch: ReviewBatch, context_digest: str) -> None:
-        """An old rejected POST must not clear a replacement context's send marker."""
-        with self._db.transaction() as tx:
-            tx.lock_workflow(batch.flow_id)
-            fresh = ReviewStore(tx).get_batch(batch.id)
-            if (fresh.state is not BatchState.READY or fresh.job_id is not None
-                    or fresh.context is None or fresh.context.digest != context_digest):
-                return
-            with tx.connection() as connection:
-                connection.execute("UPDATE review_batches SET answer_dispatched=FALSE WHERE id=%s", (batch.id,))
 
     def record_decision(self, batch: ReviewBatch, decision: JudgeDecision) -> None:
         """Persist the interpretation alongside its immutable batch input."""

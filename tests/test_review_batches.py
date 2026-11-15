@@ -8,7 +8,6 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.controler.events.router import EventRouter
-from app.controler.review.context import build_review_context
 from app.controler.workflow.service import ControlService
 from app.domain.context_models import ReviewContext
 from app.domain.judge_models import JudgeDecision
@@ -22,7 +21,7 @@ from app.domain.models import (
     Verdict,
 )
 from app.domain.review_models import BatchState, FeedbackUpdate, ReviewBatch
-from app.github import GitHubError, GitHubErrorKind, PullRequest
+from app.github import PullRequest
 from app.persistence.jobs import JobStore
 from app.persistence.reviews import ReviewStore
 from app.persistence.store import Store
@@ -81,8 +80,14 @@ def claim(store, clock):
     return settle(store)
 
 
-def test_legacy_frozen_context_keeps_digest_decision_and_answer_authorization(store, review_flow):
+@pytest.mark.parametrize("legacy_column", [False, True])
+def test_legacy_frozen_context_keeps_digest_and_completed_decision(store, review_flow, legacy_column):
     # Old snapshots lack task_content. Adding a serialized null would invalidate saved decisions.
+    if legacy_column:
+        with store.connection() as connection:
+            connection.execute(
+                "ALTER TABLE review_batches ADD COLUMN answer_dispatched BOOLEAN NOT NULL DEFAULT FALSE"
+            )
     flow, clock = review_flow
     ingest(store, flow, feedback(clock))
     batch = batch_for(store, claim(store, clock)[0])
@@ -99,6 +104,7 @@ def test_legacy_frozen_context_keeps_digest_decision_and_answer_authorization(st
         tx.lock_workflow(flow.id)
         assert tx.reviews.freeze_context(batch, snapshot) == snapshot
         tx.reviews.record_decision(batch, decision)
+        tx.reviews.complete(batch.id, BatchState.COMPLETED, list(batch.feedback), [])
     with store.connection() as connection:
         stored = connection.execute(
             "SELECT context FROM review_batches WHERE id=%s", (batch.id,),
@@ -108,10 +114,7 @@ def test_legacy_frozen_context_keeps_digest_decision_and_answer_authorization(st
     try:
         fresh = restarted.reviews.get_batch(batch.id)
         assert fresh.context.digest == digest and fresh.decision == decision
-        with restarted.transaction() as tx:
-            tx.lock_workflow(flow.id)
-            assert tx.reviews.authorize_answer(fresh, digest)
-            assert not tx.reviews.authorize_answer(fresh, digest)
+        assert fresh.state is BatchState.COMPLETED
     finally:
         restarted.close()
 
@@ -407,27 +410,10 @@ def test_blocked_batch_retry_preserves_frozen_feedback_without_dispatching(store
     assert batch_for(store, replacement).feedback[0].github_id == 101
 
 
-async def freeze_legacy_answer(store, subject, batch, verdict):
-    """Seed an already saved pre-wire22 decision to exercise publication recovery only."""
-    flow = store.flows.get_flow(batch.flow_id)
-    subject.github.threads = feedback_threads(batch.feedback)
-    repo = subject.github.installation(flow.installation_id).repository(flow.repo)
-    context = await build_review_context(repo, flow, batch, 17)
-    with store.transaction() as tx:
-        tx.lock_workflow(flow.id)
-        tx.reviews.freeze_context(batch, context)
-        tx.reviews.record_decision(batch, judge_decision(verdict, context))
-    return store.reviews.get_batch(batch.id)
-
-
 async def run_triage(store, flow, batch, verdict, *, before_apply=None, github=None):
     github = github or RecordingGitHub()
     github.threads = feedback_threads(batch.feedback)
     subject = coordinator(store, github)
-    if verdict.answer:
-        batch = await freeze_legacy_answer(store, subject, batch, verdict)
-        if before_apply:
-            before_apply()
     async def decide(context):
         if before_apply:
             before_apply()
@@ -465,49 +451,8 @@ async def test_revise_confidence_boundary_and_unresolved_points_persist(
         assert not claim(store, clock)
 
 
-@pytest.mark.parametrize("receipt", [True, False])
-async def test_answer_recovery_waits_for_receipt_and_preserves_a_new_version(
-    store, review_flow, receipt, recording_resources, monkeypatch,
-):
-    comment = PullRequest.comment
-
-    async def lost_response(pr, body):
-        if receipt:
-            await comment(pr, body)
-        raise GitHubError(GitHubErrorKind.TRANSIENT, "comment")
-
-    monkeypatch.setattr(PullRequest, "comment", lost_response)
-
-    flow, clock = review_flow
-    ingest(store, flow, feedback(clock))
-    job = claim(store, clock)[0]
-    github = RecordingGitHub()
-    with pytest.raises(GitHubError):
-        await run_triage(store, flow, job, TriageVerdict(
-            verdict=Verdict.ANSWER, answer="The bound is ten.", confidence=0.8,
-        ), github=github)
-    batch = batch_for(store, job)
-    assert batch.state is BatchState.READY
-    assert len(store.reviews.pending(flow.id)) == 1
-    assert batch.decision.verdict.answer == "The bound is ten."
-    clock.now += timedelta(seconds=20)
-    ingest(store, flow, feedback(clock, body="A new request"), "edit")
-    restarted = Store(store.database_url, clock=lambda: clock.now)
-    try:
-        await coordinator(restarted, github).triage(restarted.reviews.get_batch(job.id),
-            SimpleNamespace(triage=AsyncMock(side_effect=AssertionError("saved decision must be reused"))))
-        await coordinator(restarted, github).triage(restarted.reviews.get_batch(job.id),
-            SimpleNamespace(triage=AsyncMock(side_effect=AssertionError("saved decision must be reused"))))
-        assert len(github.comments) == int(receipt)
-        assert [(f.github_id, f.version) for f in restarted.reviews.pending(flow.id)] == [(101, 2)]
-        assert batch_for(restarted, job).state is (BatchState.COMPLETED if receipt else BatchState.READY)
-        assert restarted.jobs.list_jobs(flow.id) == []
-    finally:
-        restarted.close()
-
-
 @pytest.mark.parametrize("change", ["cancel", "closed", "head"])
-async def test_answer_rechecks_lifecycle_and_remote_head_before_sending(
+async def test_answer_rechecks_lifecycle_and_remote_head_before_queueing(
     store, review_flow, change, recording_resources, monkeypatch,
 ):
     read = PullRequest.refetch
@@ -537,9 +482,10 @@ async def test_answer_rechecks_lifecycle_and_remote_head_before_sending(
                 database=store.database,
             ).cancel(flow)
 
-    await run_triage(store, flow, job, TriageVerdict(verdict=Verdict.ANSWER, answer="Reply"),
+    await run_triage(store, flow, job, TriageVerdict(verdict=Verdict.ANSWER, instruction="Explain the bound"),
                      github=github, before_apply=change_state)
     assert github.comments == []
+    assert store.jobs.list_jobs(flow.id) == []
     assert len(store.reviews.pending(flow.id)) == 1
 
 
@@ -589,7 +535,7 @@ def test_retry_after_successful_replacement_does_not_select_historical_failure(
     assert resumed.current_round_no == flow.current_round_no + 1
 
 
-async def test_answer_uses_frozen_decision_once_and_consumes_after_comment(store, review_flow, recording_resources):
+async def test_answer_carries_waiting_questions_into_worker_task(store, review_flow, recording_resources):
     flow, clock = review_flow
     ingest(store, flow, feedback(clock))
     job = claim(store, clock)[0]
@@ -599,17 +545,17 @@ async def test_answer_uses_frozen_decision_once_and_consumes_after_comment(store
     ingest(store, flow, feedback(clock, 102, body="Please explain it."), "reply")
     job = claim(store, clock)[0]
     _, github, _ = await run_triage(store, flow, job, TriageVerdict(
-        verdict=Verdict.ANSWER, answer="Ten is the configured retry limit.", confidence=0.9,
+        verdict=Verdict.ANSWER, instruction="Explain the configured retry limit.", confidence=0.9,
     ))
     batch = batch_for(store, job)
     assert "Why is the limit 10?" in batch.context.open_points
-    assert batch.decision.verdict.answer == "Ten is the configured retry limit."
-    assert len(github.comments) == 1
-    assert github.comments[0].startswith("Ten is the configured retry limit.")
-    assert "#discussion_r102" in github.comments[0]
-    assert batch.state is BatchState.COMPLETED
-    assert not store.reviews.pending(flow.id)
-    assert store.jobs.list_jobs(flow.id) == []
+    assert batch.decision.verdict.instruction == "Explain the configured retry limit."
+    task, = store.jobs.list_jobs(flow.id)
+    assert task.kind is JobKind.REVISION and task.payload["purpose"] == "answer"
+    assert task.payload["instruction"] == "Explain the configured retry limit."
+    assert batch.job_id == task.id and batch.state is BatchState.READY
+    assert store.reviews.pending(flow.id)
+    assert github.comments == []
 
 
 @pytest.mark.parametrize("approval_id", [101, 102])
