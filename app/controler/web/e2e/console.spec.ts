@@ -1142,7 +1142,9 @@ test("retry disables both commands until commit, then refreshes detail and board
     "1",
   );
   finish();
-  await expect(page.getByRole("status")).toContainText("重试请求已受理");
+  await expect(
+    page.locator(".execution-summary").getByRole("status"),
+  ).toContainText("重试请求已受理");
   await expect(page.locator(".detail-head .badge")).toHaveText("待处理");
   await expect(page.locator(".rail-group.phase-blocked .count")).toHaveText(
     "0",
@@ -1179,8 +1181,12 @@ for (const [code, message] of [
     await page.goto("/#flow/42/overview");
     const retry = page.getByRole("button", { name: "重试", exact: true });
     await retry.click();
-    await expect(page.getByRole("alert")).toContainText(message);
-    await expect(page.getByRole("status")).toHaveCount(0);
+    await expect(
+      page.locator(".execution-summary").getByRole("alert"),
+    ).toContainText(message);
+    await expect(
+      page.locator(".execution-summary").getByRole("status"),
+    ).toHaveCount(0);
     await expect(retry).toBeEnabled();
     expect(requests).toBe(1);
   });
@@ -1256,8 +1262,24 @@ for (const [width, reason, label] of [
     ).toBeDisabled();
     await expect(page.getByLabel("本轮结论（必填）")).toBeDisabled();
     await expect(page.locator(".detail-head .badge")).toHaveText("受阻");
+    // Keep sidebar reloads pending so the command notice coexists with other live statuses.
+    let finishRefresh = () => {};
+    const refreshed = new Promise<void>((resolve) => {
+      finishRefresh = resolve;
+    });
+    await page.route("**/api/flows?**", async (route) => {
+      await refreshed;
+      return route.fallback();
+    });
     finish();
-    await expect(page.getByRole("status")).toContainText("结束本轮请求已受理");
+    if (width === 1440)
+      await expect(page.locator(".rail-inbox").getByRole("status")).toHaveCount(
+        2,
+      );
+    await expect(
+      page.locator(".execution-summary").getByRole("status"),
+    ).toContainText("结束本轮请求已受理");
+    finishRefresh();
     await expect(page.locator(".detail-head .badge")).toHaveText("进行中");
     await expect(page.locator(".task-facts")).toContainText(
       "finalizing / 进行中",
@@ -1329,7 +1351,9 @@ for (const [width, reason, label] of [
       `已归档 · ${label}`,
     );
     resume();
-    await expect(page.getByRole("status")).toContainText("恢复推进请求已受理");
+    await expect(
+      page.locator(".execution-summary").getByRole("status"),
+    ).toContainText("恢复推进请求已受理");
     await expect(page.locator(".detail-head .badge")).toHaveText("待处理");
     await expect(page.locator(".task-facts")).toContainText("第 2 轮");
     await expect(page).toHaveURL(
@@ -1381,11 +1405,15 @@ for (const action of ["archive", "resume"] as const) {
         await page
           .getByRole("button", { name: "恢复推进", exact: true })
           .click();
-      await expect(page.getByRole("alert")).toContainText(
-        failure === "conflict" ? "未受理" : "无法确认",
-      );
-      await expect(page.getByRole("alert")).toContainText("刷新核对");
-      await expect(page.getByRole("status")).toHaveCount(0);
+      await expect(
+        page.locator(".execution-summary").getByRole("alert"),
+      ).toContainText(failure === "conflict" ? "未受理" : "无法确认");
+      await expect(
+        page.locator(".execution-summary").getByRole("alert"),
+      ).toContainText("刷新核对");
+      await expect(
+        page.locator(".execution-summary").getByRole("status"),
+      ).toHaveCount(0);
       await expect(page.locator(".detail-head .badge")).toHaveText(
         action === "archive" ? "受阻" : "已归档 · 成功",
       );
@@ -1408,7 +1436,9 @@ test("round form cannot silently retarget a newer round after refresh", async ({
   await page.getByLabel("本轮结论（必填）").fill("旧轮次结论");
   current = { ...current, current_round_no: 2, state_version: 3 };
   await page.getByRole("button", { name: "刷新当前视图" }).click();
-  await expect(page.getByRole("alert")).toContainText("轮次已变化");
+  await expect(
+    page.locator(".execution-summary").getByRole("alert"),
+  ).toContainText("轮次已变化");
   await expect(
     page.getByRole("button", { name: "确认结束本轮" }),
   ).toBeDisabled();
@@ -1470,7 +1500,9 @@ test("a retry finishing after navigation cannot overwrite another flow", async (
   await expect(
     page.getByRole("button", { name: "重试", exact: true }),
   ).toHaveCount(0);
-  await expect(page.getByRole("status")).toHaveCount(0);
+  await expect(
+    page.locator(".execution-summary").getByRole("status"),
+  ).toHaveCount(0);
 });
 
 test("overview sources explain sync progress separately from historical gaps", async ({
