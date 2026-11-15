@@ -16,6 +16,7 @@ from app.domain.review_models import BatchState
 from app.persistence.activity import ActivityStore
 from app.persistence.jobs import JobStore
 from app.persistence.store import Store
+from tests.flow_fixtures import enqueue_job
 from tests.github import RecordingGitHub
 from tests.test_coordinator import coordinator
 from tests.test_workflow_transactions import accepted_coding
@@ -59,7 +60,7 @@ def merge_flow(store: Store) -> Flow:
     flow = store.flows.create_flow("owner/repo", 7, 42)
     attempt = store.flows.create_attempt(flow.id)
     flow.current_attempt_id = attempt.id
-    store.flows.update_flow(flow)
+    store.flows.update_flow_metadata(flow)
     delivery = store.deliveries.get_or_create_delivery(flow.id, f"flow/{flow.id}")
     delivery.state, delivery.pr_number = DeliveryState.OPEN, 17
     delivery.head_sha = "b" * 40  # A squash/rebase merge need not equal the PR head.
@@ -72,7 +73,7 @@ async def test_merge_transaction_failure_can_replay_same_delivery(store, monkeyp
     # Neither a persisted stop/notice nor its archive activity may survive a failed commit.
     running, _ = accepted_coding(store, receive=False)
     flow = store.flows.get_flow(running.flow_id)
-    queued = store.jobs.enqueue_job(flow.id, JobKind.REVISION)
+    queued = enqueue_job(store, flow.id, JobKind.REVISION)
     owner, method = ((JobStore, "record_merge_notice") if boundary == "notice"
                      else (ActivityStore, "append_flow"))
     original = getattr(owner, method)

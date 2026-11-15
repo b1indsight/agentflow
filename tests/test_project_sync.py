@@ -17,6 +17,7 @@ from app.contracts.protocol import ExecutionStopped
 from app.contracts.result_models import ResultPending
 from app.controler.reconciliation.projects import ProjectSync
 from app.controler.workflow.service import ControlService
+from app.domain.flow_policy import FlowEvent
 from app.domain.models import (
     ArchiveReason,
     DeliveryState,
@@ -39,6 +40,7 @@ from app.github import (
 )
 from app.persistence.activity import ActivityStore
 from app.persistence.store import Store
+from tests.flow_fixtures import enqueue_job
 from tests.github import RecordingGitHub
 from tests.test_coordinator import coordinator
 from tests.test_github_client import settings
@@ -200,9 +202,6 @@ def remote_app(monkeypatch):
 @pytest.fixture
 def projection(store, review_flow, remote_app):
     flow, clock = review_flow
-    # The shared fixture creates delivery facts; this suite explicitly owns its Flow phase.
-    flow.state = FlowState.REVIEW
-    store.flows.update_flow(flow)
     configs = {flow.repo: config()}
     remote = RemoteProject()
     sync = ProjectSync(
@@ -285,8 +284,16 @@ async def test_projects_maps_flow_phase_without_inference_from_delivery(
             expected_round_no=1,
         )
     else:
-        flow.state, flow.archive_reason = flow_state, reason
-        store.flows.update_flow(flow)
+        with store.flows.locked(flow.id) as context:
+            flow = context.flow
+            flow.archive_reason = reason
+            store.flows.using(context.database).transition(flow, {
+                FlowState.QUEUED: FlowEvent.JOB_ENQUEUED,
+                FlowState.RUNNING: FlowEvent.JOB_CLAIMED,
+                FlowState.REVIEW: FlowEvent.DELIVERY_APPLIED,
+                FlowState.BLOCKED: FlowEvent.RESULT_FAILED,
+                FlowState.FINALIZING: FlowEvent.FINALIZATION_REQUESTED,
+            }[flow_state])
     clock.now += timedelta(seconds=31)
     await converge(sync)
     assert store.flows.get_flow(flow.id).state is flow_state
@@ -296,12 +303,13 @@ async def test_projects_maps_flow_phase_without_inference_from_delivery(
 
 async def test_unbound_initial_is_todo_then_bound_work_is_in_progress(store, projection):
     flow, clock, _, _, sync = projection
-    flow.state = FlowState.QUEUED
-    store.flows.update_flow(flow)
+    from tests.flow_fixtures import apply_flow_event
+
+    flow = apply_flow_event(store, flow, FlowEvent.JOB_ENQUEUED)
     delivery = store.deliveries.get_delivery(flow.id)
     delivery.state, delivery.pr_number = DeliveryState.NONE, None
     store.deliveries.update_delivery(delivery)
-    store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
+    enqueue_job(store, flow.id, JobKind.INITIAL)
     await converge(sync)
     assert state(store).desired_status is ProjectStatus.TODO
     register_worker(store, "project-worker", repo=flow.repo, epoch="epoch")
@@ -646,7 +654,7 @@ async def test_config_change_revalidates_and_reuses_same_item(store, projection)
 async def test_installation_mismatch_blocks_before_any_remote_request(store, projection):
     flow, _, _, remote, sync = projection
     flow.installation_id = 999
-    store.flows.update_flow(flow)
+    store.flows.update_flow_metadata(flow)
     await sync.sweep()
     assert state(store).blocked and remote.calls == []
 

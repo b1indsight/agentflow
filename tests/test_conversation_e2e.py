@@ -56,7 +56,7 @@ async def test_http_history_queues_behind_callbacks_but_not_execution(
     attempt.codex_session_id = session
     store.flows.update_attempt(attempt)
     flow.current_attempt_id = attempt.id
-    store.flows.update_flow(flow)
+    store.flows.update_flow_metadata(flow)
     continuation = store.flows.create_attempt(flow.id)
     continuation.codex_session_id, continuation.session_generation = other_session, 1
     store.flows.update_attempt(continuation)

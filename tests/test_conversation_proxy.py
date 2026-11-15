@@ -31,6 +31,7 @@ from app.controler.workers.conversation import (
 from app.controler.workers.transport import control_ack
 from app.controler.workflow.service import ControlService
 from app.domain.models import JobKind
+from tests.flow_fixtures import enqueue_job
 from tests.test_communication_session import Socket
 from tests.test_conversation_history import SESSION
 from tests.workspace_fixtures import register_worker
@@ -335,9 +336,9 @@ async def test_service_resolves_existing_database_metadata_and_released_binding(
     assert (await service.read(flow.id, None, 100)).unavailable_reason == "no_worker"
     attempt = store.flows.create_attempt(flow.id)
     flow.current_attempt_id = attempt.id
-    store.flows.update_flow(flow)
+    store.flows.update_flow_metadata(flow)
     register_worker(store, "worker-1", repo=flow.repo, epoch="epoch")
-    store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
+    enqueue_job(store, flow.id, JobKind.INITIAL)
     assert store.workers.assign_job("worker-1", "assignment", "epoch") is not None
     assert (await service.read(flow.id, None, 100)).unavailable_reason == "no_session"
     attempt.codex_session_id = SESSION

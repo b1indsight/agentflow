@@ -16,6 +16,7 @@ from app.controler.workflow.service import ControlService
 from app.domain.models import ArchiveReason, DeliveryState, FlowState, JobKind, JobState, utcnow
 from app.live_smoke import GitHubProbe, Pull, SmokeError, SmokeSession
 from app.persistence.activity import ActivityStore
+from tests.flow_fixtures import enqueue_job
 from tests.github import RecordingGitHub
 from tests.test_coordinator import coordinator
 from tests.workspace_fixtures import register_worker, report_settled
@@ -108,7 +109,7 @@ def test_observe_reads_without_creating_work_and_does_not_claim_partial_success(
     flow = store.flows.create_flow("owner/smoke", 7, 42)
     attempt = store.flows.create_attempt(flow.id)
     flow.current_attempt_id = attempt.id
-    store.flows.update_flow(flow)
+    store.flows.update_flow_metadata(flow)
     delivery = store.deliveries.get_or_create_delivery(flow.id, "flow/7")
     delivery.state, delivery.pr_number, delivery.head_sha = DeliveryState.OPEN, 8, "a"*40
     store.deliveries.update_delivery(delivery)
@@ -169,12 +170,12 @@ async def test_core_pass_requires_three_verified_heads_and_matching_merge(
     flow = store.flows.create_flow("owner/smoke", 7, 42)
     attempt = store.flows.create_attempt(flow.id)
     flow.current_attempt_id = attempt.id
-    store.flows.update_flow(flow)
+    store.flows.update_flow_metadata(flow)
     delivery = store.deliveries.get_or_create_delivery(flow.id, "flow/7")
     delivery.state, delivery.pr_number = DeliveryState.OPEN, 8
     store.deliveries.update_delivery(delivery)
     register_worker(store, "worker-1", repo=flow.repo)
-    initial = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
+    initial = enqueue_job(store, flow.id, JobKind.INITIAL)
     assert store.workers.assign_job("worker-1", "initial").id == initial.id
     assert store.workers.start_assignment(initial.id, attempt.id, "worker-1", "initial")
     assert store.workers.finish_assignment(initial.id, "worker-1", "initial", JobState.DONE)

@@ -3,12 +3,13 @@
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from datetime import timedelta
-from threading import Barrier
+from threading import Barrier, Event
 
 import pytest
 
 from app.contracts.protocol import RevisionTask, Succeeded
 from app.controler.workflow.service import ControlService
+from app.domain.flow_policy import FlowEvent
 from app.domain.models import (
     ArchiveReason,
     DeliveryState,
@@ -19,8 +20,10 @@ from app.domain.models import (
     ReviewItemKind,
 )
 from app.domain.review_models import FeedbackUpdate
+from app.persistence.database import Database
 from app.persistence.jobs import JobStore
 from app.persistence.store import Store
+from tests.flow_fixtures import apply_flow_event, enqueue_job
 from tests.github import RecordingGitHub
 from tests.review_memory import review_context
 from tests.test_coordinator import coordinator
@@ -48,6 +51,36 @@ def test_owned_repository_keeps_its_connection_scope_on_rollback(store):
     assert flows.get_flow(committed.id) is not None
 
 
+def test_locked_flow_reads_state_and_attempt_committed_while_waiting(store, monkeypatch):
+    # A recovery operation can wait behind a result/attempt update. Its eligibility
+    # checks must use the committed facts, never a snapshot read before that wait.
+    flow = store.flows.create_flow("owner/repo", 710, 42)
+    waiting = Event()
+    lock_workflow = Database.lock_workflow
+
+    def observed(database, flow_id):
+        waiting.set()
+        return lock_workflow(database, flow_id)
+
+    def read_current():
+        with store.flows.locked(flow.id) as context:
+            return context.flow, context.matches(round_no=1, attempt_id=None)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with store.flows.locked(flow.id) as context:
+            monkeypatch.setattr(Database, "lock_workflow", observed)
+            reader = pool.submit(read_current)
+            assert waiting.wait(5) and not reader.done()
+            fresh, tx = context.flow, context.database
+            fresh.current_attempt_id = store.flows.using(tx).create_attempt(flow.id).id
+            store.flows.using(tx).update_flow_metadata(fresh)
+            store.flows.using(tx).transition(fresh, FlowEvent.RESULT_FAILED)
+        current, matches = reader.result(timeout=5)
+    assert current.state is FlowState.BLOCKED
+    assert current.current_attempt_id == fresh.current_attempt_id
+    assert not matches
+
+
 def test_trigger_rolls_back_flow_and_job_on_failure(store: Store, monkeypatch) -> None:
     # Reservation without its first job would permanently suppress delivery retries.
     def fail_enqueue(*args: object, **kwargs: object) -> Job:
@@ -71,8 +104,7 @@ def test_direct_tasks_keep_independent_inputs_through_retry_and_resume(store: St
     )
     assert first is not None and second is not None and first.id != second.id
     assert first.issue_number is None and first.task_content == content
-    first.state = FlowState.BLOCKED
-    store.flows.update_flow(first)
+    first = apply_flow_event(store, first, FlowEvent.RESULT_FAILED)
     assert service.retry(first)
     fresh = store.flows.get_flow(first.id)
     assert fresh is not None
@@ -164,11 +196,10 @@ def test_assignment_skips_a_flow_locked_for_cancellation(store: Store):
 @pytest.mark.parametrize("command", ["retry", "resume"])
 def test_retry_rolls_back_with_real_database(store: Store, monkeypatch, command) -> None:
     flow = store.flows.create_flow("owner/repo", 702, 42)
-    flow.state = FlowState.BLOCKED
-    store.flows.update_flow(flow)
+    flow = apply_flow_event(store, flow, FlowEvent.RESULT_FAILED)
     service = ControlService(database=store.database)
     if command == "resume":
-        store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
+        enqueue_job(store, flow.id, JobKind.INITIAL)
         delivery = store.deliveries.get_or_create_delivery(flow.id, flow.initial_branch)
         delivery.state, delivery.pr_number = DeliveryState.OPEN, 17
         store.deliveries.update_delivery(delivery)
@@ -258,12 +289,12 @@ def bound_review_flow(store: Store):
     attempt.codex_session_id = "session"
     store.flows.update_attempt(attempt)
     flow.current_attempt_id = attempt.id
-    store.flows.update_flow(flow)
+    store.flows.update_flow_metadata(flow)
     delivery = store.deliveries.get_or_create_delivery(flow.id, f"flow/{flow.id}")
     delivery.state, delivery.base_branch, delivery.pr_number = DeliveryState.OPEN, "trunk", 17
     delivery.head_sha = "abc123"
     store.deliveries.update_delivery(delivery)
-    initial = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
+    initial = enqueue_job(store, flow.id, JobKind.INITIAL)
     assert store.workers.assign_job("worker-a", "initial-token", "epoch-a") is not None
     # The fixture supplies the delivery directly; no INITIAL process was dispatched.
     # Starting this job would require a real terminal receipt before any later archive.
@@ -271,8 +302,7 @@ def bound_review_flow(store: Store):
         initial.id, "worker-a", "initial-token", JobState.DONE, "epoch-a"
     )
     report_settled(store, initial.id, epoch="epoch-a")
-    flow.state = FlowState.REVIEW
-    store.flows.update_flow(flow)
+    flow = apply_flow_event(store, flow, FlowEvent.DELIVERY_APPLIED)
     return flow
 
 

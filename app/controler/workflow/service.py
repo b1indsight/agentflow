@@ -11,6 +11,7 @@ from pluggy import PluginManager
 
 from app.controler.workflow.archive import verify_archive, verify_merge_notice
 from app.controler.workflow.lifecycle import close_delivery, record_merge
+from app.domain.flow_policy import FlowEvent
 from app.domain.models import (
     WORKING_STATES,
     ArchiveReason,
@@ -98,7 +99,7 @@ class ControlService:
                 return None
             flow = flows_tx.create_flow(repo, issue_number, installation_id, task_content=task_content)
             jobs_tx.enqueue_job(
-                flow.id, JobKind.INITIAL,
+                flow, JobKind.INITIAL,
                 payload={"issue_number": issue_number} if issue_number is not None else {},
             )
         self._jobs_available()
@@ -118,12 +119,13 @@ class ControlService:
         self, flow: Flow, *, reason: ArchiveReason, summary: str, expected_round_no: int
     ) -> None:
         """End the selected round; a conclusion without a PR can succeed independently."""
-        with self.database.transaction() as tx:
+        with self.flows.locked(flow.id) as context:
+            tx = context.database
             deliveries_tx = self.deliveries.using(tx)
             flows_tx = self.flows.using(tx)
             jobs_tx = self.jobs.using(tx)
             stops_tx = self.stops.using(tx)
-            fresh = tx.lock_workflow(flow.id)
+            fresh = context.flow
             if fresh is None or fresh.current_round_no != expected_round_no:
                 raise ValueError("Flow round is no longer current")
             if fresh.state is FlowState.ARCHIVED:
@@ -149,8 +151,7 @@ class ControlService:
                     return
                 fresh.archive_reason = reason
                 fresh.archive_summary = summary.strip() or None
-                fresh.state = FlowState.FINALIZING
-                flows_tx.update_flow(fresh)
+                flows_tx.transition(fresh, FlowEvent.FINALIZATION_REQUESTED)
                 stops_tx.request(fresh.id)
                 jobs_tx.cancel_jobs(fresh.id)
                 flows_tx.try_archive(fresh.id)
@@ -192,7 +193,7 @@ class ControlService:
                 )
             flows.select_owner(resumed)
             self.jobs.using(tx).enqueue_job(
-                resumed.id, JobKind.INITIAL,
+                resumed, JobKind.INITIAL,
                 payload={"issue_number": resumed.issue_number}
                 if resumed.issue_number is not None else {},
             )
@@ -201,8 +202,8 @@ class ControlService:
 
     def on_closed(self, flow: Flow, delivery_id: str, payload: dict) -> None:
         """An authenticated unmerged close retires current work in the event transaction."""
-        with self.database.transaction() as tx:
-            fresh = tx.lock_workflow(flow.id)
+        with self.flows.locked(flow.id) as context:
+            tx, fresh = context.database, context.flow
             deliveries = self.deliveries.using(tx)
             delivery = deliveries.get_delivery(flow.id)
             remote = payload.get("pull_request") or {}
@@ -235,12 +236,13 @@ class ControlService:
     def on_merged(self, flow: Flow, delivery_id: str, payload: dict) -> None:
         """Commit the webhook reservation, merge fact and retirement of old work together."""
         merge = PullRequestMerge.model_validate(payload["pull_request"])
-        with self.database.transaction() as tx:
+        with self.flows.locked(flow.id) as context:
+            tx = context.database
             deliveries_tx = self.deliveries.using(tx)
             flows_tx = self.flows.using(tx)
             jobs_tx = self.jobs.using(tx)
             webhook_store_tx = self.webhook_store.using(tx)
-            fresh = tx.lock_workflow(flow.id)
+            fresh = context.flow
             delivery = deliveries_tx.get_delivery(flow.id)
             if (
                 fresh is None
@@ -364,8 +366,7 @@ class ControlService:
                         "retry_execution_unsettled", "original executor is not settled"
                     )
                 if fresh.archive_reason is not None:
-                    fresh.state = FlowState.FINALIZING
-                    flows_tx.update_flow(fresh)
+                    flows_tx.transition(fresh, FlowEvent.RETRY_REQUESTED)
                     flows_tx.try_archive(fresh.id)
                     return True
                 # Recovery may have failed the Flow before its queued work was swept.
@@ -377,10 +378,9 @@ class ControlService:
                     raise RetryRejected(
                         "retry_delivery_merged", "a merged PR cannot retry coding or review jobs"
                     )
-                fresh.state = FlowState.QUEUED
-                flows_tx.update_flow(fresh)
+                flows_tx.transition(fresh, FlowEvent.RETRY_REQUESTED)
                 replacement = jobs_tx.enqueue_job(
-                    fresh.id,
+                    fresh,
                     kind,
                     payload=failed_job.payload
                     if failed_job

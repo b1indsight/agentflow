@@ -32,6 +32,7 @@ from app.contracts.protocol import (
     PushSecret,
 )
 from app.domain.models import FlowState, JobKind
+from app.persistence.records import required
 from app.persistence.store import Store
 from app.worker.execution.workspaces import RepositoryWorkspaces
 from app.worker.runtime import WorkerRootLock
@@ -147,7 +148,7 @@ def drill(work: Path, postgres_bin: Path, revision: str) -> dict:
         flow = store.flows.create_flow('fixture/no-network', 1, 1)
         attempt = store.flows.create_attempt(flow.id)
         flow.current_attempt_id = attempt.id
-        store.flows.update_flow(flow)
+        store.flows.update_flow_metadata(flow)
         pool = RepositoryWorkspaces(root, 'fixture-worker')
         default = pool.initialize()
         store.workers.worker_connected(
@@ -158,7 +159,8 @@ def drill(work: Path, postgres_bin: Path, revision: str) -> dict:
         for item in asyncio.run(pool.provision(flow.repo)):
             if not store.workers.report_workspace('fixture-worker', 'fixture-epoch', item):
                 raise RuntimeError('fixture inventory rejected')
-        store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
+        with store.flows.locked(flow.id) as context:
+            store.jobs.using(context.database).enqueue_job(required(context.flow), JobKind.INITIAL)
         job = store.workers.assign_job('fixture-worker', 'fixture-token', 'fixture-epoch')
         if job is None or job.workspace is None or job.generation is None:
             raise RuntimeError('fixture assignment failed')

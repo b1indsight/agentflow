@@ -8,6 +8,7 @@ from psycopg.errors import CheckViolation, LockNotAvailable
 
 from app.controler.events.router import EventRouter
 from app.controler.workflow.service import ControlService
+from app.domain.flow_policy import FlowEvent
 from app.domain.models import ArchiveReason, DeliveryState, FlowState, JobKind
 from app.github import PullRequestMerge
 from app.github.console import Observation
@@ -175,15 +176,14 @@ def test_correction_activity_failure_rolls_back_merge_and_outcome(store, archive
     assert store.flows.get_flow(archived.id).archive_reason is ArchiveReason.SUCCEEDED
 
 
-def test_unsettled_archive_cannot_be_written_through_general_update(store):
+def test_archive_requires_activity_in_the_same_transaction(store):
     flow = ControlService(database=store.database).create_flow("owner/repo", 8, 42)
-    flow.state, flow.archive_reason, flow.archived_at = (
-        FlowState.ARCHIVED,
-        ArchiveReason.ABANDONED,
-        NOW,
-    )
-    with pytest.raises(ValueError, match="archive"):
-        store.flows.update_flow(flow)
+    with pytest.raises(ValueError, match="archive"), store.flows.locked(flow.id) as context:
+        fresh = context.flow
+        fresh.archive_reason = ArchiveReason.ABANDONED
+        flows = store.flows.using(context.database)
+        flows.transition(fresh, FlowEvent.FINALIZATION_REQUESTED)
+        flows.transition(fresh, FlowEvent.ROUND_ARCHIVED)
     assert store.flows.get_flow(flow.id).state is FlowState.QUEUED
     assert ActivityStore(store.database).archived(flow.id, 1) is None
 

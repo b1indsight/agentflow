@@ -355,8 +355,8 @@ class ReviewStore(Repository):
             ).fetchall()
         jobs = []
         for candidate in candidates:
-            with self._db.transaction() as tx:
-                flow = tx.lock_workflow(candidate["flow_id"])
+            with FlowStore(self._db).locked(candidate["flow_id"]) as context:
+                tx, flow = context.database, context.flow
                 if flow is None:
                     continue
                 if not flow.accepts(JobKind.REVISION):
@@ -365,12 +365,13 @@ class ReviewStore(Repository):
                     if flow.state in {FlowState.FINALIZING, FlowState.ARCHIVED}:
                         ReviewStore(tx).cancel(flow.id)
                     continue
-                job = ReviewStore(tx)._claim(flow.id, flow.current_attempt_id)
+                job = ReviewStore(tx)._claim(flow)
                 if job is not None:
                     jobs.append(job)
         return jobs
 
-    def _claim(self, flow_id: int, attempt_id: int | None) -> ReviewBatch | None:
+    def _claim(self, flow: Flow) -> ReviewBatch | None:
+        flow_id, attempt_id = flow.id, flow.current_attempt_id
         delivery = DeliveryStore(self._db).get_delivery(flow_id)
         if attempt_id is None or delivery is None or delivery.state is not DeliveryState.OPEN:
             return None
@@ -418,7 +419,7 @@ class ReviewStore(Repository):
             ).fetchone()
             assert row is not None
             if decision.instruction is not None:
-                job = JobStore(self._db).enqueue_job(flow_id, JobKind.REVISION,
+                job = JobStore(self._db).enqueue_job(flow, JobKind.REVISION,
                     {"batch_id": row["id"], "instruction": decision.instruction, "purpose": "revise"})
                 self.advance(row["id"], job)
             return self.get_batch(row["id"])

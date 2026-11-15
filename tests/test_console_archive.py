@@ -7,10 +7,12 @@ import pytest
 from app.contracts.console import ConsoleFailure
 from app.contracts.protocol import ExecutionStopped
 from app.controler.workflow.service import ControlService
+from app.domain.flow_policy import FlowEvent
 from app.domain.models import ArchiveReason, DeliveryState, FlowState, JobKind, JobState
 from app.github.console import Observation
 from app.persistence.activity import ActivityStore
 from app.persistence.console import ConsoleStore
+from tests.flow_fixtures import apply_flow_event, enqueue_job
 from tests.test_cancel_drain import running
 
 
@@ -82,14 +84,11 @@ def test_current_projection_and_history_rollback_with_facts(store):
     before = console.detail(flow.id)
     history_before = activity.history(flow.id, 1)
     with pytest.raises(RuntimeError), store.transaction() as tx:
-        row = tx.flows.get_flow(flow.id)
-        row.state = FlowState.BLOCKED
-        tx.flows.update_flow(row)
+        apply_flow_event(tx, flow, FlowEvent.RESULT_FAILED)
         raise RuntimeError("rollback")
     assert console.detail(flow.id) == before
     assert activity.history(flow.id, 1) == history_before
-    flow.state = FlowState.BLOCKED
-    store.flows.update_flow(flow)
+    flow = apply_flow_event(store, flow, FlowEvent.RESULT_FAILED)
     assert console.detail(flow.id).phase == "blocked"
     with store._db.connection() as connection:
         connection.execute("UPDATE console_flows SET facts='{}' WHERE flow_id=%s", (flow.id,))
@@ -134,11 +133,18 @@ def test_delivery_facts_cannot_override_flow_phase_or_issue_ownership(
 ):
     # Remote observations are facts, not permission to bypass lifecycle/cleanup transitions.
     flow = store.flows.create_flow("octo/repo", 7, 1)
-    flow.state = state
-    if state is FlowState.FINALIZING:
-        flow.archive_reason = ArchiveReason.SUCCEEDED
-        flow.archive_summary = "Awaiting cleanup"
-    store.flows.update_flow(flow)
+    if state is not FlowState.QUEUED:
+        with store.flows.locked(flow.id) as context:
+            flow = context.flow
+            if state is FlowState.FINALIZING:
+                flow.archive_reason = ArchiveReason.SUCCEEDED
+                flow.archive_summary = "Awaiting cleanup"
+            store.flows.using(context.database).transition(flow, {
+                FlowState.RUNNING: FlowEvent.JOB_CLAIMED,
+                FlowState.REVIEW: FlowEvent.DELIVERY_APPLIED,
+                FlowState.BLOCKED: FlowEvent.RESULT_FAILED,
+                FlowState.FINALIZING: FlowEvent.FINALIZATION_REQUESTED,
+            }[state])
     console = ConsoleStore(store._db)
     before = console.detail(flow.id)
     delivery = store.deliveries.get_or_create_delivery(flow.id, "flow/7")
@@ -203,7 +209,7 @@ def test_real_archive_filters_and_rebuild_preserve_business_outcome(store, reaso
 
 def test_resume_starts_new_round_without_overwriting_archive_or_conversation(store):
     flow = store.flows.create_flow("octo/repo", 7, 1)
-    original_job = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
+    original_job = enqueue_job(store, flow.id, JobKind.INITIAL)
     delivery = store.deliveries.get_or_create_delivery(flow.id, "flow/7")
     delivery.pr_number, delivery.state = 17, DeliveryState.CLOSED
     store.deliveries.update_delivery(delivery)

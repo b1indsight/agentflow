@@ -12,6 +12,7 @@ from psycopg.types.json import Jsonb
 
 from app.contracts.protocol import Failed, InferenceResult, TerminalPayload, terminal_digest
 from app.contracts.receipts import ResultInbox
+from app.domain.flow_policy import FlowEvent
 from app.domain.inference_models import (
     LOCAL_BUB_WORKER_ID,
     InferenceCapability,
@@ -22,6 +23,7 @@ from app.domain.inference_models import (
 )
 from app.domain.models import (
     DeliveryState,
+    Flow,
     FlowExecution,
     Job,
     JobKind,
@@ -430,10 +432,11 @@ class WorkerStore(Repository):
             ).fetchall()
             for candidate in coding_candidates:
                 # Lock Flow explicitly before job, and re-evaluate after any competing claim.
-                if connection.execute(
-                    "SELECT id FROM flows WHERE id=%s FOR NO KEY UPDATE SKIP LOCKED",
+                flow = connection.cursor(row_factory=class_row(Flow)).execute(
+                    "SELECT * FROM flows WHERE id=%s FOR NO KEY UPDATE SKIP LOCKED",
                     (candidate["flow_id"],),
-                ).fetchone() is None:
+                ).fetchone()
+                if flow is None:
                     continue
                 row = connection.execute(
                     selection + " AND j.id=%s AND slot.workspace=%s",
@@ -455,16 +458,17 @@ class WorkerStore(Repository):
                     ).fetchone()
                     if bound is None:
                         continue
-                return workers._claim_job(row["id"], worker_id, token, connection_epoch, None)
+                return workers._claim_job(row["id"], worker_id, token, connection_epoch, None,
+                                          flow=flow)
             return None
 
     def _claim_job(self, job_id: int, worker_id: str, token: str, epoch: str,
-                   current_task: InferenceTask | None) -> Job | None:
+                   current_task: InferenceTask | None, *, flow: Flow | None = None) -> Job | None:
         """Commit ownership and the authorized-attempt count under the allocator's locks."""
         now = self._db.now()
         candidate = required(JobStore(self._db).get_job(job_id))
-        if candidate.flow_id is not None:
-            self._db.lock_workflow(candidate.flow_id)
+        if candidate.flow_id is not None and flow is None:
+            flow = self._db.lock_workflow(candidate.flow_id)
         job = required(self._db.lock_job(job_id))
         inference = job.inference
         with self._db.connection() as connection:
@@ -514,11 +518,7 @@ class WorkerStore(Repository):
                     "UPDATE workers SET last_assigned_at=%s WHERE worker_id=%s AND repository IS NULL",
                     (now, worker_id),
                 )
-                connection.execute(
-                    "UPDATE flows SET state='running',updated_at=%s WHERE id=%s"
-                    " AND state IN ('queued','review') AND archive_reason IS NULL",
-                    (now, job.flow_id),
-                )
+                FlowStore(self._db).transition(required(flow), FlowEvent.JOB_CLAIMED, now=now)
             if claimed.rowcount != 1:
                 raise ValueError("assignment lost its locked workspace generation")
             return required(assigned)
@@ -1111,8 +1111,11 @@ class WorkerStore(Repository):
         candidate = JobStore(self._db).get_job(job_id)
         if candidate is None:
             return False
-        with self._db.transaction() as tx, tx.connection() as connection:
-            tx.lock_workflow(candidate.required_flow_id)
+        with (
+            FlowStore(self._db).locked(candidate.required_flow_id) as context,
+            context.database.connection() as connection,
+        ):
+            tx, flow = context.database, context.flow
             result = connection.execute(
                 "UPDATE jobs SET state=%s, assigned_worker_id=NULL, assignment_token=NULL,"
                 " workspace=NULL,generation=NULL,"
@@ -1125,7 +1128,7 @@ class WorkerStore(Repository):
                 (
                     JobState.QUEUED,
                     self._db.now(),
-                    job_id,
+                    candidate.id,
                     JobState.RUNNING,
                     worker_id,
                     token,
@@ -1134,15 +1137,12 @@ class WorkerStore(Repository):
                 ),
             )
             if result.rowcount == 1:
-                connection.execute(
-                    "UPDATE flows SET state='queued',updated_at=%s WHERE id=%s AND state='running'"
-                    " AND archive_reason IS NULL AND current_round_no=%s",
-                    (tx.now(), candidate.flow_id, candidate.round_no),
-                )
+                if flow is not None and flow.current_round_no == candidate.round_no:
+                    FlowStore(tx).transition(flow, FlowEvent.ASSIGNMENT_REQUEUED)
                 connection.execute(
                     "UPDATE workers SET current_job_id=NULL WHERE worker_id=%s AND workspace=%s"
                     " AND generation=%s AND current_job_id=%s",
-                    (worker_id, candidate.workspace, candidate.generation, job_id),
+                    (worker_id, candidate.workspace, candidate.generation, candidate.id),
                 )
         return result.rowcount == 1
 
@@ -1177,10 +1177,11 @@ class WorkerStore(Repository):
             tx._lock_workers(connection)
             # Worker -> Flow -> Job, also for recovery. Never wait for a Flow
             # after locking its job while a result writer holds the opposite order.
-            connection.execute(
-                "SELECT id FROM flows WHERE id IN (SELECT flow_id FROM jobs WHERE state IN ('queued','running')"
+            locked_flows = connection.cursor(row_factory=class_row(Flow)).execute(
+                "SELECT * FROM flows WHERE id IN (SELECT flow_id FROM jobs WHERE state IN ('queued','running')"
                 " UNION SELECT flow_id FROM flow_executions WHERE released_at IS NULL) ORDER BY id FOR NO KEY UPDATE"
             ).fetchall()
+            flows = {flow.id: flow for flow in locked_flows}
             workers = WorkerStore(tx)
             pending = connection.execute(
                 "SELECT id FROM jobs WHERE kind='inference' AND state IN ('queued','running') ORDER BY id",
@@ -1218,8 +1219,11 @@ class WorkerStore(Repository):
                 (now, now),
             ).fetchall()
             actions: dict[RecoveryAction, list[int]] = {action: [] for action in RecoveryAction}
+            flow_actions: dict[RecoveryAction, set[int]] = {action: set() for action in RecoveryAction}
             for candidate in candidates:
-                actions[decide_job_recovery(candidate, now)].append(candidate.id)
+                action = decide_job_recovery(candidate, now)
+                actions[action].append(candidate.id)
+                flow_actions[action].add(candidate.flow_id)
             requeued_rows = connection.execute(
                 "UPDATE jobs SET state=%s, assigned_worker_id=NULL, assignment_token=NULL,"
                 " workspace=NULL,generation=NULL,"
@@ -1229,21 +1233,15 @@ class WorkerStore(Repository):
                 " RETURNING id",
                 (JobState.QUEUED, now, actions[RecoveryAction.REQUEUE], JobState.RUNNING),
             ).fetchall()
-            connection.execute(
-                "UPDATE flows SET state='queued',updated_at=%s WHERE state='running'"
-                " AND archive_reason IS NULL AND id IN (SELECT flow_id FROM jobs WHERE id=ANY(%s))",
-                (now, actions[RecoveryAction.REQUEUE]),
-            )
+            for flow_id in sorted(flow_actions[RecoveryAction.REQUEUE]):
+                FlowStore(tx).transition(flows[flow_id], FlowEvent.ASSIGNMENT_REQUEUED, now=now)
             connection.execute(
                 "UPDATE jobs SET last_error=%s WHERE id=ANY(%s) AND state='running'"
                 " AND result_received_at IS NULL",
                 (RECOVERY_BLOCKED, actions[RecoveryAction.BLOCKED]),
             )
-            connection.execute(
-                "UPDATE flows SET state='blocked',updated_at=%s WHERE id IN"
-                " (SELECT flow_id FROM jobs WHERE id=ANY(%s)) AND state<>'archived'",
-                (now, actions[RecoveryAction.BLOCKED]),
-            )
+            for flow_id in sorted(flow_actions[RecoveryAction.BLOCKED]):
+                FlowStore(tx).transition(flows[flow_id], FlowEvent.EXECUTION_UNCERTAIN, now=now)
             requeued_ids = [row["id"] for row in requeued_rows]
             if requeued_ids:
                 connection.execute(

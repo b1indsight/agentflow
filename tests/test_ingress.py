@@ -82,7 +82,9 @@ class RoutingService(ControlService):
         *, task_content: str | None = None,
     ) -> Flow:
         flow = self.flows.create_flow(repo, issue_number, installation_id, task_content=task_content)
-        self.jobs.enqueue_job(flow.id, JobKind.INITIAL)
+        with self.flows.locked(flow.id) as context:
+            assert context.flow is not None
+            self.jobs.using(context.database).enqueue_job(context.flow, JobKind.INITIAL)
         return flow
 
     def notify_jobs(self) -> None:

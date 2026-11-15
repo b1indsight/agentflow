@@ -34,7 +34,7 @@ from app.controler.workflow.thread_effects import (
     resolve_thread,
     revision_current,
 )
-from app.domain.models import TERMINAL_STATES, DeliveryState, Flow, Job
+from app.domain.models import TERMINAL_STATES, DeliveryState, Job
 from app.domain.review_models import BatchState
 from app.github import (
     GitHubApp,
@@ -48,7 +48,7 @@ from app.github import (
 from app.persistence.activity import ActivityStore
 from app.persistence.database import Database
 from app.persistence.deliveries import DeliveryStore
-from app.persistence.flows import FlowStore
+from app.persistence.flows import FlowStore, LockedFlow
 from app.persistence.jobs import JobStore
 from app.persistence.results import ResultStore
 from app.persistence.reviews import ReviewStore
@@ -65,12 +65,13 @@ def _pending_feedback(plan: ResultPlan, *, reviews: ReviewStore) -> bool:
     return any((f.item_id, f.version) not in frozen for f in reviews.pending(plan.flow_id))
 
 
-def _plan_stale(flow: Flow, job: Job, plan: ResultPlan) -> bool:
+def _plan_stale(context: LockedFlow, job: Job, plan: ResultPlan) -> bool:
     """A notice survives terminal state, but never a round or attempt change."""
+    flow = context.flow
+    assert flow is not None
     return (
         (flow.state in TERMINAL_STATES and plan.archive_notice is None)
-        or flow.current_attempt_id != plan.attempt_id
-        or job.round_no != flow.current_round_no
+        or not context.matches(round_no=job.round_no, attempt_id=plan.attempt_id)
         or (flow.archive_reason is not None
             and plan.archive is None and plan.archive_notice is None)
     )
@@ -100,12 +101,13 @@ class ResultEffects:
     async def run(self, plan: ResultPlan) -> str | None:
         """Return a permanent failure, or finish all effects; pending work raises ResultPending."""
         while True:
-            with self.database.transaction() as tx:
+            with self.flows.locked(plan.flow_id) as context:
+                tx = context.database
                 deliveries_tx = self.deliveries.using(tx)
                 jobs_tx = self.jobs.using(tx)
                 result_store_tx = self.result_store.using(tx)
                 workers_tx = self.workers.using(tx)
-                flow = tx.lock_workflow(plan.flow_id)
+                flow = context.flow
                 if flow is None:
                     result_store_tx.skip_remaining(plan.job_id, "Flow disappeared")
                     return None
@@ -114,7 +116,7 @@ class ResultEffects:
                     raise ValueError("result job disappeared")
                 delivery = deliveries_tx.get_delivery(plan.flow_id)
                 retired = (
-                    _plan_stale(flow, job, plan)
+                    _plan_stale(context, job, plan)
                     or (delivery is not None and delivery.supersedes(job.kind))
                 )
                 if plan.archive_notice is not None:
@@ -221,20 +223,21 @@ class ResultEffects:
 
     def _dispatch(self, plan: ResultPlan, record: EffectRecord) -> None:
         # Check cancellation again after remote reads, immediately before authorizing the write.
-        with self.database.transaction() as tx:
+        with self.flows.locked(plan.flow_id) as context:
+            tx = context.database
             deliveries_tx = self.deliveries.using(tx)
             jobs_tx = self.jobs.using(tx)
             result_store_tx = self.result_store.using(tx)
             reviews_tx = self.reviews.using(tx)
             workers_tx = self.workers.using(tx)
-            flow = tx.lock_workflow(plan.flow_id)
+            flow = context.flow
             job = tx.lock_job(plan.job_id)
             if (
                 flow is None
                 or job is None
                 or job.result_applied_at is not None
                 or job.result_digest != plan.digest
-                or _plan_stale(flow, job, plan)
+                or _plan_stale(context, job, plan)
             ):
                 raise ResultPending("Flow changed before GitHub dispatch")
             delivery = deliveries_tx.get_delivery(flow.id)

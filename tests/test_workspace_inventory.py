@@ -14,6 +14,7 @@ from app.contracts.protocol import (
     ExecutionStopped,
     InitialTask,
 )
+from app.domain.flow_policy import FlowEvent
 from app.domain.models import (
     ArchiveReason,
     CodingExecutionResult,
@@ -23,12 +24,12 @@ from app.domain.models import (
     JobState,
     WorkspaceInventory,
 )
-from app.persistence.activity import ActivityStore
 from app.persistence.workers import WorkerStore
 from app.worker.execution.executor import WorkerExecutor
 from app.worker.execution.vcs import VcsVerificationError
 from app.worker.execution.workspaces import RepositoryWorkspaces, WorkspaceBinding
 from app.worker.state.execution import ExecutionState, ExecutionStateError
+from tests.flow_fixtures import enqueue_job
 from tests.test_worker_executor import RecordingAgent, RecordingToolCaller, assignment_secret
 from tests.test_worker_session import _previous_journal
 from tests.test_worker_workspaces import managed_seed
@@ -423,14 +424,12 @@ def merged_business(store, flow_id):
     delivery.state, delivery.pr_number = DeliveryState.MERGED, 17
     delivery.merged_at, delivery.merge_commit_sha = store.now(), "a" * 40
     store.deliveries.update_delivery(delivery)
-    flow.state = FlowState.ARCHIVED
-    flow.archive_reason = ArchiveReason.SUCCEEDED
-    flow.archived_at = store.now()
-    ActivityStore(store.database).append_flow(
-        flow.id, flow.current_round_no, "archive", occurred_at=flow.archived_at,
-        metadata={"archive_reason": "succeeded"},
-    )
-    store.flows.update_flow(flow)
+    with store.flows.locked(flow.id) as context:
+        flow = context.flow
+        flow.archive_reason = ArchiveReason.SUCCEEDED
+        flows = store.flows.using(context.database)
+        flows.transition(flow, FlowEvent.FINALIZATION_REQUESTED)
+        flows.archive_round(flow, delivery)
     return flow
 
 
@@ -521,7 +520,7 @@ def test_only_local_merge_notice_is_independent_of_resource_settlement(store, mi
         tx.lock_workflow(job.flow_id)
         tx.stops.request(job.flow_id)
     flow = merged_business(store, job.flow_id)
-    notice = store.jobs.enqueue_job(flow.id, JobKind.ARCHIVE)
+    notice = enqueue_job(store, flow.id, JobKind.ARCHIVE)
     payload = {"version": 2, "source": "control", "terminal": {
         "type": "merge_archive", "job_id": notice.id, "flow_id": flow.id, "round_no": 1,
         "repo": flow.repo, "pr_number": 17, "merged_at": store.now().isoformat(),

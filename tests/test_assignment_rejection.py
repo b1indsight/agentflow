@@ -8,6 +8,7 @@ from app.contracts.protocol import ExecutionStopped, Failed
 from app.contracts.receipts import decode_result_inbox
 from app.controler.workflow.service import ControlService
 from app.domain.models import FlowState, JobKind, JobState
+from tests.flow_fixtures import enqueue_job
 from tests.workspace_fixtures import register_worker, report_settled
 
 
@@ -16,9 +17,9 @@ def test_assignment_rejection_preserves_competing_evidence(store, race):
     flow = store.flows.create_flow("owner/repo", 1, 1)
     attempt = store.flows.create_attempt(flow.id)
     flow.current_attempt_id = attempt.id
-    store.flows.update_flow(flow)
+    store.flows.update_flow_metadata(flow)
     register_worker(store, "worker", repo=flow.repo, epoch="epoch")
-    job = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
+    job = enqueue_job(store, flow.id, JobKind.INITIAL)
     assert store.workers.assign_job("worker", "token", "epoch")
     assert store.stops.authorize_dispatch(job.id, "worker", "token", "epoch")
     if race == "started":

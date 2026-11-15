@@ -22,12 +22,14 @@ from app.contracts.protocol import InitialTaskResult, Succeeded
 from app.controler.api import create_app
 from app.controler.config import ServerSettings
 from app.controler.workflow.service import ControlService
+from app.domain.flow_policy import FlowEvent
 from app.domain.models import ArchiveReason, DeliveryState, FlowState, JobKind
 from app.persistence import metrics as database_metrics
 from app.persistence.activity import ActivityStore
 from app.persistence.metrics import read_snapshot
 from app.telemetry.logging import configure_logging
 from app.telemetry.metrics import Metrics
+from tests.flow_fixtures import enqueue_job
 from tests.workspace_fixtures import register_worker
 
 
@@ -160,7 +162,7 @@ async def test_snapshot_runs_off_event_loop_and_scrape_never_reads_database(monk
 
 def test_repeated_snapshots_do_not_count_execution_receipt_twice(store, postgresql_url):
     flow = store.flows.create_flow('private/repository', 1, 1)
-    job = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
+    job = enqueue_job(store, flow.id, JobKind.INITIAL)
     register_worker(store, 'w', repo=flow.repo, epoch='epoch')
     assert store.workers.assign_job('w', 'token', 'epoch')
     result = Succeeded(job_id=job.id, assignment_token='token',
@@ -269,11 +271,15 @@ def test_reconcile_metrics_match_scheduler_eligibility(store, postgresql_url):
         if state is FlowState.ARCHIVED:
             ControlService(database=store.database).cancel(flow)
             assert ActivityStore(store.database).archived(flow.id, 1) is not None
-        else:
-            flow.state = state
-            if state is FlowState.FINALIZING:
-                flow.archive_reason = ArchiveReason.SUCCEEDED
-            store.flows.update_flow(flow)
+        elif state is not FlowState.QUEUED:
+            with store.flows.locked(flow.id) as context:
+                flow = context.flow
+                if state is FlowState.FINALIZING:
+                    flow.archive_reason = ArchiveReason.SUCCEEDED
+                store.flows.using(context.database).transition(
+                    flow, FlowEvent.FINALIZATION_REQUESTED if state is FlowState.FINALIZING
+                    else FlowEvent.DELIVERY_APPLIED,
+                )
         store.reconcile.hint(flow.id)
         with store.connection() as conn:
             conn.execute("UPDATE flow_reconcile SET next_at=now()-(%s * interval '1 second') WHERE flow_id=%s",

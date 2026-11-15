@@ -83,9 +83,10 @@ class JobCoordinator:
 
     async def triage(self, batch: ReviewBatch, judge: Judge) -> None:
         """Resolve feedback into an answer/revise worker task or a wait/ignore decision."""
-        with self.database.transaction() as tx:
+        with self.flows.locked(batch.flow_id) as locked:
+            tx = locked.database
             reviews_tx = self.reviews.using(tx)
-            flow = tx.lock_workflow(batch.flow_id)
+            flow = locked.flow
             if not reviews_tx.current(batch):
                 return
         assert flow is not None and flow.installation_id is not None
@@ -93,9 +94,9 @@ class JobCoordinator:
         context = batch.context or await build_review_context(
             repo, flow, batch, self._pr_number(flow),
         )
-        with self.database.transaction() as tx:
+        with self.flows.locked(flow.id) as locked:
+            tx = locked.database
             reviews_tx = self.reviews.using(tx)
-            tx.lock_workflow(flow.id)
             if not reviews_tx.current(batch):
                 return
             context = reviews_tx.freeze_context(batch, context)
@@ -113,12 +114,13 @@ class JobCoordinator:
         # Remote reads can outlive close/merge or a changed PR baseline.
         remote = (await repo.fetch_pull_request(context.pr_number)
                   if verdict.verdict in {Verdict.ANSWER, Verdict.REVISE} else None)
-        with self.database.transaction() as tx:
+        with self.flows.locked(flow.id) as locked:
+            tx = locked.database
             jobs_tx = self.jobs.using(tx)
             reviews_tx = self.reviews.using(tx)
-            tx.lock_workflow(flow.id)
             if not reviews_tx.current(batch):
                 return
+            assert locked.flow is not None
             if remote is not None and (context.pull_request is None or remote.state != "open" or remote.merged
                     or remote.head_sha != context.pull_request.head_sha
                     or remote.base_sha != context.pull_request.base_sha):
@@ -126,7 +128,7 @@ class JobCoordinator:
                 return
             reviews_tx.record_decision(batch, decision.model_copy(update={"verdict": verdict}))
             if verdict.verdict in {Verdict.ANSWER, Verdict.REVISE}:
-                job = jobs_tx.enqueue_job(flow.id, JobKind.REVISION,
+                job = jobs_tx.enqueue_job(locked.flow, JobKind.REVISION,
                     {"batch_id": batch.id, "instruction": verdict.instruction,
                      "purpose": verdict.verdict.value})
                 reviews_tx.advance(batch.id, job)
@@ -237,8 +239,8 @@ class JobCoordinator:
 
     def _ensure_naming(self, flow: Flow, job: Job, task_content: str) -> int:
         """Extend the existing title call to name its branch in the same inference."""
-        with self.database.transaction() as tx, tx.connection() as connection:
-            fresh = tx.lock_workflow(flow.id)
+        with self.flows.locked(flow.id) as locked, locked.database.connection() as connection:
+            tx, fresh = locked.database, locked.flow
             if (fresh is None or self._retired(fresh, job, deliveries=self.deliveries.using(tx))
                     or fresh.current_attempt_id != flow.current_attempt_id):
                 raise PreparationStale("Flow changed before naming")
@@ -347,17 +349,18 @@ class JobCoordinator:
             if job.assigned_worker_id and execution.worker_id != job.assigned_worker_id:
                 await self.fail(job, "Flow execution binding 与 assignment 不匹配。")
                 return JobState.FAILED
-            with self.database.transaction() as tx:
+            with self.flows.locked(flow.id) as locked:
+                tx = locked.database
                 deliveries_tx = self.deliveries.using(tx)
                 flows_tx = self.flows.using(tx)
-                fresh = tx.lock_workflow(flow.id)
+                fresh = locked.flow
                 if fresh is None or self._retired(fresh, job, deliveries=deliveries_tx):
                     return JobState.DONE
                 attempt = flows_tx.get_current_attempt(fresh)
                 if attempt is None:
                     attempt = flows_tx.create_attempt(fresh.id)
                     fresh.current_attempt_id = attempt.id
-                    flows_tx.update_flow(fresh)
+                    flows_tx.update_flow_metadata(fresh)
                 delivery = deliveries_tx.get_delivery(fresh.id)
                 flow = fresh
             try:
@@ -390,9 +393,10 @@ class JobCoordinator:
                 else:
                     await self.fail(job, "Flow branch already exists on the remote; refusing to take it over")
                     return JobState.FAILED
-            with self.database.transaction() as tx:
+            with self.flows.locked(flow.id) as locked:
+                tx = locked.database
                 deliveries_tx = self.deliveries.using(tx)
-                fresh = tx.lock_workflow(flow.id)
+                fresh = locked.flow
                 if (fresh is None or self._retired(fresh, job, deliveries=deliveries_tx)
                         or fresh.current_attempt_id != attempt.id):
                     return JobState.DONE
@@ -490,11 +494,12 @@ class JobCoordinator:
                 instruction=(job.payload or {}).get("instruction", "Address the review feedback."),
                 feedback=batch.feedback,
             )
-            with self.database.transaction() as tx:
+            with self.flows.locked(flow.id) as locked:
+                tx = locked.database
                 deliveries_tx = self.deliveries.using(tx)
                 reviews_tx = self.reviews.using(tx)
                 workers_tx = self.workers.using(tx)
-                fresh = tx.lock_workflow(flow.id)
+                fresh = locked.flow
                 current = tx.lock_job(job.id)
                 binding = workers_tx.get_flow_execution(flow.id)
                 latest = deliveries_tx.get_delivery(flow.id)
@@ -529,11 +534,12 @@ class JobCoordinator:
                 return reviews_tx.freeze_revision(current, task)
         if job.kind is JobKind.ARCHIVE:
             try:
-                with self.database.transaction() as tx:
+                with self.flows.locked(flow.id) as locked:
+                    tx = locked.database
                     deliveries_tx = self.deliveries.using(tx)
                     jobs_tx = self.jobs.using(tx)
                     workers_tx = self.workers.using(tx)
-                    fresh = tx.lock_workflow(flow.id)
+                    fresh = locked.flow
                     current = tx.lock_job(job.id)
                     if fresh is None or current is None:
                         raise ValueError("archive workflow disappeared")
@@ -577,10 +583,11 @@ class JobCoordinator:
         if execution is None or execution.worker_id != worker_id:
             raise ValueError(f"flow {flow.id} is not bound to worker {worker_id}")
         if job.kind is JobKind.REVISION:
-            with self.database.transaction() as tx:
+            with self.flows.locked(flow.id) as locked:
+                tx = locked.database
                 deliveries_tx = self.deliveries.using(tx)
                 reviews_tx = self.reviews.using(tx)
-                fresh = tx.lock_workflow(flow.id)
+                fresh = locked.flow
                 current = tx.lock_job(job.id)
                 if (
                     fresh is None
@@ -594,9 +601,9 @@ class JobCoordinator:
 
     async def fail(self, job: Job, reason: str) -> None:
         """Persist control failures too, so recovery and live failures use the same atomic finish."""
-        with self.database.transaction() as tx:
+        with self.flows.locked(job.required_flow_id) as locked:
+            tx = locked.database
             jobs_tx = self.jobs.using(tx)
-            tx.lock_workflow(job.required_flow_id)
             current = tx.lock_job(job.id)
             if current is None or current.state is not JobState.RUNNING:
                 return
