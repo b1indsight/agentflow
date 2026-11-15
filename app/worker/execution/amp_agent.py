@@ -105,9 +105,10 @@ class AmpCodingAgent:
 
     async def start(
         self, task: str, cwd: Path, *, output_schema: Path | None = None,
-        context: CodingExecutionContext | None = None,
+        context: CodingExecutionContext | None = None, model: str | None = None,
+        effort: str | None = None,
     ) -> CodingExecutionResult:
-        return await self._run(task, cwd, output_schema=output_schema, context=context)
+        return await self._run(task, cwd, output_schema=output_schema, context=context, model=model, effort=effort)
 
     async def resume(
         self, session_id: str, prompt: str, *, cwd: Path, output_schema: Path | None = None,
@@ -125,6 +126,7 @@ class AmpCodingAgent:
     async def _run(
         self, prompt: str, cwd: Path, *, session_id: str | None = None,
         output_schema: Path | None = None, context: CodingExecutionContext | None = None,
+        model: str | None = None, effort: str | None = None,
     ) -> CodingExecutionResult:
         if not self.trusted_host:
             raise RuntimeError("Amp trusted-host execution requires FLOWTOOL_TRUSTED_HOST_EXECUTION=true")
@@ -132,8 +134,8 @@ class AmpCodingAgent:
         token = context.mcp_token if context else None
         if (url is None) != (token is None):
             raise ValueError("worker MCP requires an endpoint and scoped token together")
-        # The pinned CLI has no per-server disabled flag. Port zero replaces any
-        # saved/user flow endpoint without exposing an old broker or its token.
+        # Port zero replaces any saved/user flow endpoint without exposing an old
+        # broker or its token; it preserves the existing no-broker behavior.
         mcp = {"flow": ({"url": url, "headers": {"Authorization": "Bearer ${FLOWTOOL_MCP_TOKEN}"}}
                         if url is not None else {"url": "http://127.0.0.1:0/mcp"})}
         if output_schema is not None:
@@ -145,10 +147,15 @@ class AmpCodingAgent:
             if context and context.github:
                 environment.update(github_environment(context.github, run_directory, environment))
             args = (["threads", "continue", session_id] if session_id else []) + [
-                "--mcp-config", json.dumps(mcp), "--executor", "local", "--mode", "low",
+                "--mcp-config", json.dumps(mcp), "--executor", "local",
                 "--visibility", "private", "--no-ide", "--no-notifications",
                 "--execute", "--stream-json", "--no-archive-after-execute", "--log-file", os.devnull,
             ]
+            # Native continuation owns its model; only new threads use current settings.
+            if session_id is None:
+                args.extend(["--model", model] if model is not None else ["--mode", "low"])
+                if effort is not None:
+                    args.extend(["--effort", effort])
             process = await run_amp(args, cwd=cwd, env=environment, input_text=prompt,
                                     timeout=self.timeout, timeout_kind="idle")
             result = _outcome(process, session_id, self.timeout)

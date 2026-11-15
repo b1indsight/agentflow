@@ -1,5 +1,6 @@
 """Explicit simulated worker inventory for persistence tests, never a product fallback."""
 
+from typing import Literal
 from uuid import NAMESPACE_URL, uuid5
 
 from app.contracts.protocol import PROTOCOL_VERSION
@@ -10,11 +11,12 @@ from app.persistence.store import Store
 
 def register_worker(
     store: Store, worker_id: str, *, repo: str | None = None, epoch: str = "",
+    coding_agent: Literal["codex", "amp"] = "codex",
 ) -> WorkerRecord:
     """Register a stable default directory and, when requested, one concrete repo slot."""
     worker = store.workers.worker_connected(
         worker_id, PROTOCOL_VERSION, epoch,
-        workspace=uuid5(NAMESPACE_URL, worker_id + ":default").hex, repo_workspace_limit=2,
+        workspace=uuid5(NAMESPACE_URL, worker_id + ":default").hex, repo_workspace_limit=2, coding_agent=coding_agent,
     )
     assert store.workers.report_workspace(worker_id, epoch, WorkspaceInventory(
         workspace=worker.workspace, repository=None, generation=1, flow_id=None,

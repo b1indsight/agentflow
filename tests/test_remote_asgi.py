@@ -74,6 +74,7 @@ def test_real_asgi_websocket_completes_a_postgresql_job(
                 control="register",
                 payload=[],
                 worker_id="worker-1",
+                coding_agent="codex",
                 workspace="b" * 32,
                 repo_workspace_limit=2,
                 inventory=inventory(),

@@ -60,7 +60,7 @@ def server_callbacks(runtime, worker_id, epoch):
     return ServerCallbacks(
         runtime.coordinator, worker_id=worker_id,
         register=Register(**message_header(None), control="register", payload=[],
-                          worker_id=worker_id, workspace="b" * 32, repo_workspace_limit=2,
+                          worker_id=worker_id, coding_agent="codex", workspace="b" * 32, repo_workspace_limit=2,
                           inventory=inventory(), recoveries=[], inventory_complete=True,
                           inference=None),
         session=Session(Socket(), parse=parse_worker_input, make_ack=control_ack, epoch=epoch),

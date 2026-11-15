@@ -65,7 +65,15 @@ Judge 配置只提供给 control，在 serve 的 `.env` 配置 `FLOWTOOL_JUDGE_M
 进程内创建，跨连接重试保留，请求使用独立临时子目录；退出清除，不创建编码 workspace 或 journal。
 断线重试可能与旧计算重叠并重复计费，不保证模型调用恰好一次。
 
-serve 和 worker 需协调升级到 wire24，journal5 与执行结果 inbox1 不变；Control 本地归档通知保留 inbox2，无旧 wire fallback。
+serve 和 worker 需协调升级到 wire26，journal5 与执行结果 inbox1 不变；Control 本地归档通知保留 inbox2，无旧 wire fallback。
+wire26 独立登记 worker 的 Codex / Amp 类型，并随 assignment 下发全局编码模型和推理强度默认值；
+升级前 drain 并收敛在途执行和未决回执，再成组更新两端。启动时幂等新增 `runtime_settings`
+配置表和 nullable `workers.coding_agent` 列；旧 worker 类型待重新注册后补齐，不从 inference 猜测。
+通过 `/console/#settings` 下拉框保存 Codex / Amp 模型与推理强度，仅影响后续新建编码会话；
+数据库初始化幂等增加 nullable `codex_effort` / `amp_effort`，已有模型值和 revision 保留。
+强度为空沿用原生默认；Amp 指定强度前须选择具体模型。Amp 使用
+`provider/name`，worker 镜像中的 CLI 已固定到 `0.0.1794672034-g01d6fa`。直接运行 worker 的
+专用账号也须安装该版本，模型权限和原生恢复仍需实际验收；预置列表不验证账号可用性，不更改独立 inference / Judge。
 wire24 分开记录历史交付 head、当前 PR 观察 head 和 Worker 实际 fetch 基线，允许同来源分支外部 push/rebase/force-push。升级前 drain 并收敛旧执行和未决回执，再更新两端；回滚前先收敛新版任务。历史任务/结果的 JSON 与 digest 保持不变，无数据库列迁移；不自动重跑未知执行或恢复旧 BLOCKED Flow。详见[实施记录](../plan/external-pr-updates.md)。
 wire23 的 assignment 必须包含已核对的 App bot login 和用户 ID；control 在签发时读取 bot 用户，失败不回退个人账号。升级前 drain，待在途执行收敛后协调更新两端；恢复任务领取新凭据，journal 不保存身份或 token，无数据库迁移。
 wire22 的 RevisionTask 冻结 answer/revise 用途；旧 worker 不能接收 answer 并按改码任务运行。升级前收敛在途任务和未确认的旧直接答复；旧 answer 继续按原 marker 核对，不转成 worker 任务重发。历史 context/decision/result digest 不重算，不自动重跑被旧上下文阻塞的批次。
@@ -158,7 +166,9 @@ linked worktree 只在共享配置启用 `extensions.worktreeConfig`（必要时
 显式 `--reset-author` 可使用当前 bot 作者，但不能绕过既有的提交祖先与交付基线校验。
 切换为 `amp` 前先 drain 并等待该
 worker 的 Flow 收尾；未知续跑不自动重跑。Amp 历史是原生完整 thread 快照，可能滞后于刚发生的
-外部续跑，且不承诺离线可用。adapter 固定使用 Amp `--mode low`，不从 worker 环境提供模式覆写。
+外部续跑，且不承诺离线可用。adapter 新会话默认使用 `--mode low`；显式设置具体模型时改用
+`--model provider/name`，不与模式参数混用；显式强度通过 `--effort` 传入。
+模型和强度设置不从 worker 环境提供，resume 不加覆盖。
 
 Amp 的最终业务 JSON 通过 Schema 提示与现有 Pydantic/VCS 核验接收，没有 Codex 的
 `--output-schema` 生成约束；无效 JSON、错误终态或不完整输出均失败，不自动整理或重跑。
@@ -217,8 +227,8 @@ worker 身份可访问的位置。Amp 不再提供替代用户配置的 `--setti
 
 `flow` 是 worker 保留的 MCP 名称。Amp 通过 `--mcp-config` 整项覆盖它，其他 server 不变：
 INITIAL 使用当前 endpoint 和 token 引用；无当前 broker 的 REVISION/fallback 使用
-`http://127.0.0.1:0/mcp` 替换旧 endpoint，并移除旧 token。固定 Amp 版本不支持 MCP 的
-`disabled` 字段，因此这不是原生“禁用”状态：CLI 会重试并显示 `flow` 连接错误，其他 MCP
+`http://127.0.0.1:0/mcp` 替换旧 endpoint，并移除旧 token。此路径沿用不可连接的端口，
+没有设置原生 `disabled` 字段：CLI 会重试并显示 `flow` 连接错误，其他 MCP
 仍可连接。Codex 沿用 `enabled=false`。不要把已有自定义 server 命名为 `flow`。
 
 用户的工具禁用、MCP 权限与 workspace 审批继续交给原生 CLI；worker 不自动批准或覆写

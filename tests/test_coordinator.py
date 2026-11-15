@@ -115,6 +115,34 @@ async def prepare_initial(subject, coding):
         await asyncio.gather(preparing, return_exceptions=True)
 
 
+@pytest.mark.parametrize("agent_type,expected,effort", [
+    ("codex", "codex-selected", "ultra"), ("amp", "openai/gpt-6.1-sol", "low"),
+])
+async def test_assignment_selects_coding_default_without_inference_capability(store, agent_type, expected, effort):
+    from app.contracts.protocol import AssignmentArguments
+    from app.persistence.settings import SettingsStore
+
+    flow = ControlService(database=store.database).create_flow("owner/repo", 8, 42)
+    register_worker(store, "worker-a", repo=flow.repo, epoch="epoch", coding_agent=agent_type)
+    job = store.workers.assign_job("worker-a", "token", "epoch")
+    github = RecordingGitHub()
+    github.refs = {}
+    subject = coordinator(store, github)
+    await prepare_initial(subject, job)
+    store.workers.worker_ready("worker-a", "epoch", None)
+    assert store.workers.list_workers()[0].inference is None
+    SettingsStore(store.database).update(
+        "codex-selected", "openai/gpt-6.1-sol", codex_effort="ultra", amp_effort="low", expected_revision=0,
+    )
+    assignment = await subject.prepare_for_assignment(job, "worker-a", "token", "epoch")
+    assert isinstance(assignment, AssignmentArguments) and assignment.model == expected
+    SettingsStore(store.database).update(
+        "new-codex", "anthropic/claude-opus-5-5", codex_effort="high", amp_effort="max", expected_revision=1,
+    )
+    assert assignment.model == expected and assignment.effort == effort
+    assert all(item.coding_agent == agent_type for item in store.workers.list_workspaces("worker-a"))
+
+
 @pytest.mark.parametrize("task_content,branch_slug", [
     ("feat: remove login", "feat/remove-login"),
     ("feat(auth): remove login", "feat/remove-login"),

@@ -225,14 +225,26 @@ worker socket 与 executor 解耦，root 内 `journals/flow-<id>.json` 分别保
 HOME、原生配置入口及自定义 MCP 变量保留；不增加配置解析、skills 复制或通用密钥识别。
 独立 VCS 核验仍使用自己的最小环境；自定义秘密及磁盘文件依赖专用 worker 身份隔离。
 
+`SettingsStore` 在 PostgreSQL 的单行 `runtime_settings` 保存按 Codex / Amp 类型共享的编码默认值；
+owner 设置 API 按版本原子保存，冲突返回 409。注册的 `coding_agent` 独立于可选 inference 能力，
+coordinator 在签发 capability 前按已认证 worker 类型读取设置，经 `AssignmentArguments.model/effort` 下发。
+executor 按 assignment 捕获值，仅用于 INITIAL 或原有 revision fallback 的 `CodingAgent.start`；
+resume 不带全局模型或强度覆盖，不修改共享 agent 或凭据 context。ARCHIVE 不读取模型设置。
+Codex 选择通过原生 `--model` 与 `-c model_reasoning_effort="..."` 传入，空值不覆盖原生配置；
+独立 inference / Bub Judge 不使用此设置。强度下拉选项按模型元数据快照提供，不探测账号可用性。
+
 ### Amp
 
 - `amp_agent.AmpCodingAgent` 适配 worker 的编码请求，使用私有 local execute thread；
   prompt 经 stdin，恢复显式指定同一 `T-UUID`，
-  固定 `--mode low`，不运行 orb、runner 或 SDK。原生登录或 `AMP_API_KEY` 归专用 worker 账户。
+  新会话按设置传 `--model provider/name`，空值保留 `--mode low`，两者不同时使用；
+  显式模型可额外指定 `--effort`，默认不传；continue 不传模型、模式或强度覆盖。
+  不运行 orb、runner 或 SDK。worker 镜像固定 CLI 为
+  `0.0.1794672034-g01d6fa`，页面提供具体模型下拉列表，不开放插件模式或实时权限探测。
+  原生登录或 `AMP_API_KEY` 归专用 worker 账户。
 - 使用原生 user/workspace settings；每轮仅通过 `--mcp-config` 覆盖保留名称 `flow`。
   INITIAL 配置当前 WorkerMCP，REVISION 用不可连接的 loopback 端口零替换旧 broker，不带旧 token；
-  固定 CLI 不支持 `disabled`，该项会报告连接错误，其他 MCP 保留。Git helper 和 `gh` 临时环境
+  该路径不设置原生 `disabled`，会报告连接错误，其他 MCP 保留。Git helper 和 `gh` 临时环境
   继续按本轮 GitHub capability 重建。
 - 成功必须具有完整、同 session 的 init/result、进程退出 0、`is_error=false` 和 `subtype=success`。
   最终文本原样交给 executor，Schema 只作提示，不修复 JSON 或自动重跑未知执行。
@@ -240,7 +252,7 @@ HOME、原生配置入口及自定义 MCP 变量保留；不增加配置解析�
   shell 进程组。该快照无法保证回收任意脱离进程树的进程；仍依赖外部隔离。
 - `ExecutionState` 按 ID 格式选择历史来源。Amp 原生 export 经公开块映射与脱敏后短时缓存，
   支持外部追加、块内分页、前缀编辑失效；不保存第二套捕获历史，不显示 thinking。
-  记录 ID 保留 session 前缀，满足 control 的来源校验；两端使用 protocol v25。
+  记录 ID 保留 session 前缀，满足 control 的来源校验；两端使用 protocol v26。
 - 不再拒绝 workspace Amp 设置或因额外工具拒收结果；保留必要的原生 shell 与完整终态检查。
   用户禁用与 workspace MCP 审批由原生 CLI 执行，不自动批准；managed policy/账户插件仍由
   运维核查，CLI 工具列表不能替代权限或 OS 隔离。

@@ -103,6 +103,16 @@ class VcsKind(StrEnum):
 # --------------------------------------------------------------------- 持久化模型
 
 
+class CodingModelSettings(BaseModel):
+    """Global defaults applied only when starting a new coding session."""
+
+    codex_model: str | None
+    amp_model: str | None
+    codex_effort: str | None
+    amp_effort: str | None
+    revision: int
+
+
 class Flow(BaseModel):
     """Stable task lifecycle with either live Issue input or persisted direct content."""
 
@@ -279,6 +289,7 @@ class WorkerRecord(BaseModel):
     protocol_version: int
     status: WorkerStatus
     execute: bool = True
+    coding_agent: Literal["codex", "amp"] | None = None
     inference: InferenceCapability | None = None
     current_inference_job_id: int | None = None
     last_inference_assigned_at: datetime | None = None

@@ -76,6 +76,7 @@ def register_message(
     items = inventory() if inventory_items is None else inventory_items
     return Register(
         **message_header(None), control="register", worker_id=worker_id,
+        coding_agent="codex",
         workspace=next(item.workspace for item in items if item.repository is None),
         repo_workspace_limit=2, inventory=items,
         recoveries=[recovery] if recovery is not None else [],

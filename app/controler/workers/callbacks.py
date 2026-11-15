@@ -192,6 +192,7 @@ class ServerCallbacks:
         self.worker = self.workers.worker_connected(
             self.worker_id, self.register.protocol_version, self.epoch, execute=self.register.execute,
             workspace=self.register.workspace, repo_workspace_limit=self.register.repo_workspace_limit,
+            coding_agent=self.register.coding_agent,
         )
 
     async def on_opened(self) -> None:

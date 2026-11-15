@@ -26,6 +26,8 @@ class CodingAgent(Protocol):
         *,
         output_schema: Path | None = None,
         context: CodingExecutionContext | None = None,
+        model: str | None = None,
+        effort: str | None = None,
     ) -> CodingExecutionResult: ...
 
     async def resume(

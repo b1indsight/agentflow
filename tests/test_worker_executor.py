@@ -37,7 +37,9 @@ class RecordingAgent:
         self.started: list[tuple[str, Path]] = []
         self.resumed: list[tuple[str, str]] = []
 
-    async def start(self, task: str, cwd: Path, *, output_schema=None, context=None) -> CodingExecutionResult:
+    async def start(
+        self, task: str, cwd: Path, *, output_schema=None, context=None, model=None, effort=None,
+    ) -> CodingExecutionResult:
         self.started.append((task, cwd))
         return await self.finish(context)
 
@@ -68,7 +70,9 @@ class RecordingAgent:
 
 
 class BackendlessAgent(RecordingAgent):
-    async def start(self, task: str, cwd: Path, *, output_schema=None, context=None) -> CodingExecutionResult:
+    async def start(
+        self, task: str, cwd: Path, *, output_schema=None, context=None, model=None, effort=None,
+    ) -> CodingExecutionResult:
         return CodingExecutionResult(
             session_id="session-1",
             last_message="claimed success",
@@ -182,7 +186,7 @@ async def test_initial_corrects_completion_in_original_session(
     journal, pool = initial_workspace
 
     class Agent(RecordingAgent):
-        async def start(self, task, cwd, *, output_schema=None, context=None):
+        async def start(self, task, cwd, *, output_schema=None, context=None, model=None, effort=None):
             self.started.append((task, cwd))
             self.context, self.schema = context, output_schema
             self.base = (await asyncio.to_thread(
@@ -376,7 +380,7 @@ async def test_initial_bootstrap_push_mcp_and_final_verification_share_current_c
         return await run(*args, **kwargs)
 
     class Agent(RecordingAgent):
-        async def start(self, task, cwd, *, output_schema=None, context=None):
+        async def start(self, task, cwd, *, output_schema=None, context=None, model=None, effort=None):
             assert context.github.token.get_secret_value() == "push-token"
             _git("checkout", "-b", "flow/issue-8", cwd=cwd)
             (cwd / "README.md").write_text("implemented\n")

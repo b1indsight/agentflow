@@ -156,6 +156,8 @@ class RevisionAgent:
     def __init__(self, repo: Path, behavior="noop"):
         self.repo, self.behavior = repo, behavior
         self.calls: list[tuple[str, CodingExecutionContext | None, str]] = []
+        self.models: list[str | None] = []
+        self.efforts: list[str | None] = []
 
     async def resume(self, session_id, prompt, *, cwd, output_schema=None, context=None):
         assert cwd == self.repo
@@ -174,8 +176,10 @@ class RevisionAgent:
         return CodingExecutionResult(session_id,
                         "" if self.behavior == "empty" else revision_output().model_dump_json(), 0)
 
-    async def start(self, prompt, cwd, *, output_schema=None, context=None):
+    async def start(self, prompt, cwd, *, output_schema=None, context=None, model=None, effort=None):
         assert cwd == self.repo
+        self.models.append(model)
+        self.efforts.append(effort)
         self.calls.append(("start", context, prompt))
         return CodingExecutionResult("new-session", revision_output().model_dump_json(), 0)
 
@@ -490,9 +494,17 @@ async def test_fallback_only_when_execution_is_known_not_to_have_started(
     task_content = " \nPreserve these original requirements.\n\nKeep every detail.\t\n "
     task = task.model_copy(update={"session_id": session, "task_content": task_content, "purpose": purpose})
     agent = RevisionAgent(repo, behavior)
-    result = await WorkerExecutor(root, agent, state=ExecutionState(root, 1), worker_id="w",
+    state = ExecutionState(root, 1)
+    binding = pool.lookup(task.repo, task.flow_id)
+    state.assignment = AssignmentArguments(
+        job_id=1, flow_id=1, assignment_token="token", task=task,
+        workspace=binding.slot_id, generation=binding.generation, model="revision-selected", effort="xhigh",
+    )
+    result = await WorkerExecutor(root, agent, state=state, worker_id="w",
                                    workspaces=pool).execute(task, secret, tool_caller=RecordingToolCaller())
     assert [call[0] for call in agent.calls] == expected
+    assert agent.models == (["revision-selected"] if "start" in expected else [])
+    assert agent.efforts == (["xhigh"] if "start" in expected else [])
     assert all(call[1].mcp_url is None and call[1].mcp_token is None for call in agent.calls)
     assert all(task_content in call[2] for call in agent.calls)
     if expected[-1] == "start":
@@ -982,7 +994,7 @@ async def test_session_fallback_keeps_fetched_snapshot_when_remote_advances(
             _git("push", "origin", task.branch, cwd=revision_collaborator)
             raise SessionUnavailable("rejected")
 
-        async def start(self, prompt, cwd, *, output_schema=None, context=None):
+        async def start(self, prompt, cwd, *, output_schema=None, context=None, model=None, effort=None):
             self.calls.append(("start", context, prompt))
             assert (cwd / "external.txt").read_text() == "external contents\n"
             assert f"Fetched coding baseline: {baseline}" in prompt

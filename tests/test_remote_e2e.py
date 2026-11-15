@@ -65,7 +65,7 @@ class QueueConnection:
 
 
 @pytest.fixture
-def remote_flow(store, tmp_path, monkeypatch, recording_resources, server_runtime):
+def remote_flow(store, tmp_path, monkeypatch, recording_resources, server_runtime, request):
     """Use the normal coordinator/executor; only GitHub and the coding agent are scripted."""
     from tests.test_vcs import _git
 
@@ -97,7 +97,14 @@ def remote_flow(store, tmp_path, monkeypatch, recording_resources, server_runtim
     monkeypatch.setattr(Repository, "open_pull_request", open_pull_request)
 
     class Agent(RecordingAgent):
-        async def start(self, task, cwd, *, output_schema=None, context=None):
+        def __init__(self):
+            super().__init__()
+            self.models: list[str | None] = []
+            self.efforts: list[str | None] = []
+
+        async def start(self, task, cwd, *, output_schema=None, context=None, model=None, effort=None):
+            self.models.append(model)
+            self.efforts.append(effort)
             self.started.append((task, cwd))
             branch = store.deliveries.get_delivery(flow.id).branch
             _git("checkout", "-b", branch, cwd=cwd)
@@ -109,10 +116,12 @@ def remote_flow(store, tmp_path, monkeypatch, recording_resources, server_runtim
 
     agent = Agent()
     monkeypatch.setattr("app.worker.runtime.CodexAgent", lambda **kwargs: agent)
+    monkeypatch.setattr("app.worker.runtime.AmpCodingAgent", lambda **kwargs: agent)
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex"))
     worker = WorkerRuntime(WorkerSettings(
         worker_id="worker-1", worker_token=SecretStr("worker-secret"),
         serve_ws_url="wss://unused", worker_root=root,
+        coding_agent=getattr(request, "param", "codex"),
     ))
     worker.inference = NamingInference()
     worker.root_lock.acquire()
@@ -146,7 +155,13 @@ async def remote_connection(server, worker):
                 raise outcome
 
 
+@pytest.mark.parametrize("remote_flow", ["codex", "amp"], indirect=True)
 async def test_control_gateway_and_worker_client_complete_one_remote_job(store, remote_flow):
+    from app.persistence.settings import SettingsStore
+
+    SettingsStore(store.database).update(
+        "codex-wire-model", "anthropic/claude-opus-5-5", codex_effort="ultra", amp_effort="low", expected_revision=0,
+    )
     flow, subject, github, worker, agent = remote_flow
     job, = store.jobs.list_jobs(flow.id)
     async with remote_connection(subject, worker):
@@ -173,6 +188,9 @@ async def test_control_gateway_and_worker_client_complete_one_remote_job(store, 
     call = required(store.deliveries.get_tool_call(terminal.result.open_pr_call_id))
     assert call.response == terminal.result.delivery_receipt
     assert github.opened == ["feat/implement-task"] and len(agent.started) == 1
+    assert agent.models == ["codex-wire-model" if worker.settings.coding_agent == "codex"
+                            else "anthropic/claude-opus-5-5"]
+    assert agent.efforts == ["ultra" if worker.settings.coding_agent == "codex" else "low"]
     named = store.flows.get_flow(flow.id)
     assert named.title == "Implement task" and delivery.branch == "feat/implement-task"
     assert len([j for j in store.jobs.list_jobs(flow.id) if j.kind.value == "inference"]) == 1

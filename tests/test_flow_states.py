@@ -115,7 +115,7 @@ async def test_failed_initial_round_stops_workspace_before_resume(
     pool = RepositoryWorkspaces(root, "worker-a", limit=1)
     default = pool.initialize()
     store.workers.worker_connected("worker-a", PROTOCOL_VERSION, "epoch",
-                                   workspace=default.workspace, repo_workspace_limit=1)
+                                   workspace=default.workspace, repo_workspace_limit=1, coding_agent="codex")
     for item in await pool.provision(flow.repo):
         assert store.workers.report_workspace("worker-a", "epoch", item)
     job = store.workers.assign_job("worker-a", "first", "epoch")
@@ -172,7 +172,7 @@ async def test_failed_initial_round_stops_workspace_before_resume(
     store.workers.sweep_expired_assignments()
     assert store.workers.get_flow_execution(flow.id).released_at is None
     store.workers.worker_connected("worker-a", PROTOCOL_VERSION, "epoch",
-                                   workspace=default.workspace, repo_workspace_limit=1)
+                                   workspace=default.workspace, repo_workspace_limit=1, coding_agent="codex")
     for item in pool.inventory():
         assert store.workers.report_workspace("worker-a", "epoch", item)
     service.cancel(store.flows.get_flow(flow.id))

@@ -26,7 +26,10 @@ def stream(*, result=None, session=THREAD, tools=None, **overrides):
 
 
 @pytest.mark.parametrize("resume", [False, True])
-async def test_amp_uses_current_capabilities_and_raw_caller_schema(monkeypatch, tmp_path, resume):
+@pytest.mark.parametrize("model,effort", [
+    (None, None), ("anthropic/claude-opus-5-5", None), ("anthropic/claude-opus-5-5", "xhigh"),
+])
+async def test_amp_uses_current_capabilities_and_raw_caller_schema(monkeypatch, tmp_path, resume, model, effort):
     # Native workspace/user config and custom MCP credentials must survive every round.
     settings = tmp_path / ".amp" / "settings.jsonc"
     settings.parent.mkdir()
@@ -63,9 +66,21 @@ async def test_amp_uses_current_capabilities_and_raw_caller_schema(monkeypatch, 
         broker = servers["flow"]
         if resume:
             assert args[:3] == ["threads", "continue", THREAD]
+            assert "--mode" not in args and "--model" not in args and "--effort" not in args
             assert broker == {"url": "http://127.0.0.1:0/mcp"}
             assert "FLOWTOOL_MCP_TOKEN" not in env
         else:
+            if model is None:
+                assert args[args.index("--mode") + 1] == "low"
+                assert "--model" not in args
+            else:
+                # A concrete model must not compete with the old default --mode low.
+                assert args[args.index("--model") + 1] == model
+                assert "--mode" not in args
+            if effort is None:
+                assert "--effort" not in args
+            else:
+                assert args[args.index("--effort") + 1] == effort
             assert broker["url"] == context.mcp_url
             assert broker["headers"]["Authorization"] == "Bearer ${FLOWTOOL_MCP_TOKEN}"
             assert env["FLOWTOOL_MCP_TOKEN"] == "broker-secret"
@@ -77,7 +92,8 @@ async def test_amp_uses_current_capabilities_and_raw_caller_schema(monkeypatch, 
     monkeypatch.setattr("app.worker.execution.amp_agent.run_amp", execute)
     agent = AmpCodingAgent(trusted_host=True)
     result = (await agent.resume(THREAD, "task", cwd=tmp_path, output_schema=schema, context=context)
-              if resume else await agent.start("task", tmp_path, output_schema=schema, context=context))
+              if resume else await agent.start("task", tmp_path, output_schema=schema, context=context,
+                                              model=model, effort=effort))
     assert result.session_id == THREAD and result.exit_code == 0
     assert result.last_message == '{"caller_owned":"[REDACTED]"}'
     assert settings.read_text() == native_settings

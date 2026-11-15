@@ -17,6 +17,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   RefreshCw,
+  Settings,
   X,
 } from "lucide-react";
 import {
@@ -45,6 +46,7 @@ import { CreateFlow } from "./CreateFlow";
 import { InferenceNotices } from "./InferenceNotices";
 import { actionLabel, archiveReasonLabels, flowLabel, phases } from "./phases";
 import { SearchBox } from "./SearchBox";
+import { SettingsPage } from "./SettingsPage";
 import { Button } from "./components/ui/button";
 import { Input } from "./components/ui/input";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "./components/ui/tabs";
@@ -93,6 +95,7 @@ const route = () => {
     ({ value }) => value === (m?.[2] ?? "conversation"),
   );
   return {
+    settings: location.hash === "#settings",
     id: m && tab ? Number(m[1]) : null,
     tab: tab?.value ?? "conversation",
   };
@@ -110,21 +113,18 @@ function Board({
   counts,
   load,
   go,
+  mobile,
+  onMobile,
 }: {
   columns: ReturnType<typeof blank>;
   counts: Record<Phase, number>;
   load: (p: Phase) => void;
   go: (id: number) => void;
+  mobile: Phase;
+  onMobile: (phase: Phase) => void;
 }) {
-  const [mobile, setMobile] = useState<Phase>("running");
   const host = useRef<HTMLElement>(null);
   useLayoutEffect(() => {
-    const roots = [
-      ...(host.current?.querySelectorAll<HTMLElement>("[data-phase]") ?? []),
-    ];
-    roots.forEach((x) => {
-      x.scrollTop = positions.get(x.dataset.phase!) ?? 0;
-    });
     const frame = requestAnimationFrame(() => {
       host.current
         ?.querySelector<HTMLElement>(
@@ -132,10 +132,7 @@ function Board({
         )
         ?.focus({ preventScroll: true });
     });
-    return () => {
-      cancelAnimationFrame(frame);
-      roots.forEach((x) => positions.set(x.dataset.phase!, x.scrollTop));
-    };
+    return () => cancelAnimationFrame(frame);
   }, []);
   return (
     <main ref={host} className="board-page" aria-label="工作看板">
@@ -144,7 +141,7 @@ function Board({
           <button
             key={p}
             className={`phase-${p}${mobile === p ? " active" : ""}`}
-            onClick={() => setMobile(p)}
+            onClick={() => onMobile(p)}
           >
             <i className="dot" />
             {l}
@@ -180,6 +177,7 @@ function Board({
                   label={`看板-${phase}`}
                   itemKey={(i) => c.items[i].id}
                   estimate={250}
+                  reading={{ key: `board:${phase}`, resolve: () => null }}
                 >
                   {(i) => {
                     const f = c.items[i];
@@ -1261,6 +1259,9 @@ export default function App() {
     [repoNext, setRepoNext] = useState<string | null>(null),
     [repoError, setRepoError] = useState(""),
     [refresh, setRefresh] = useState(0),
+    [settingsRefresh, setSettingsRefresh] = useState(0),
+    [boardStarted, setBoardStarted] = useState(!current.settings),
+    [mobilePhase, setMobilePhase] = useState<Phase>("running"),
     [boardRevision, setBoardRevision] = useState(0),
     [columns, setColumns] = useState(blank),
     [counts, setCounts] = useState(
@@ -1268,11 +1269,22 @@ export default function App() {
     );
   const boardRequests = useRef(new Map<Phase, AbortController>());
   useEffect(() => {
-    const sync = () => setCurrent(route());
+    const sync = () => {
+      setCurrent(route());
+      setQuery(new URL(location.href).searchParams.get("q") ?? "");
+    };
     addEventListener("hashchange", sync);
-    return () => removeEventListener("hashchange", sync);
+    addEventListener("popstate", sync);
+    return () => {
+      removeEventListener("hashchange", sync);
+      removeEventListener("popstate", sync);
+    };
   }, []);
   useEffect(() => {
+    if (!current.settings) setBoardStarted(true);
+  }, [current.settings]);
+  useEffect(() => {
+    if (!boardStarted) return;
     const c = new AbortController();
     void getRepos(null, c.signal)
       .then((page) => {
@@ -1283,7 +1295,7 @@ export default function App() {
       })
       .catch((e) => !c.signal.aborted && setRepoError(e.message));
     return () => c.abort();
-  }, []);
+  }, [boardStarted]);
   const load = (phase: Phase, reset = false) => {
     const prior = columns[phase];
     if ((prior.busy || !prior.more) && !reset) return;
@@ -1334,13 +1346,18 @@ export default function App() {
       );
   };
   useEffect(() => {
+    if (!boardStarted) return;
     phases.forEach(([p]) => load(p, true));
+    return () => boardRequests.current.forEach((c) => c.abort());
+  }, [query, boardRevision, boardStarted]);
+  const changeQuery = (value: string) => {
+    // Hash navigation in the same action must already see the new query in the URL.
     const url = new URL(location.href);
-    if (query) url.searchParams.set("q", query);
+    if (value) url.searchParams.set("q", value);
     else url.searchParams.delete("q");
     history.replaceState(null, "", url);
-    return () => boardRequests.current.forEach((c) => c.abort());
-  }, [query, boardRevision]);
+    setQuery(value);
+  };
   const all = phases.flatMap(([p]) => columns[p].items);
   return (
     <>
@@ -1348,10 +1365,12 @@ export default function App() {
         <nav className="bar-path">
           <span>工作空间</span>
           <span>/</span>
-          <strong>{current.id ? `任务详情` : "看板"}</strong>
+          <strong>
+            {current.settings ? "设置" : current.id ? "任务详情" : "看板"}
+          </strong>
         </nav>
-        <div className="bar-filters">
-          <SearchBox query={query} repos={repos} onQuery={setQuery} />
+        <div className="bar-filters" hidden={current.settings}>
+          <SearchBox query={query} repos={repos} onQuery={changeQuery} />
           {(repoNext || repoError) && (
             <button
               className="btn"
@@ -1377,13 +1396,23 @@ export default function App() {
           )}
         </div>
         <div className="bar-status">
+          <Button asChild className="btn ghost">
+            <a
+              href="#settings"
+              aria-current={current.settings ? "page" : undefined}
+              aria-label="设置"
+              title="设置"
+            >
+              <Settings aria-hidden="true" />
+            </a>
+          </Button>
           <CreateFlow
             onCreated={(id) => {
               setBoardRevision((x) => x + 1);
               location.hash = `flow/${id}/overview`;
             }}
             onVerify={() => {
-              setQuery("");
+              changeQuery("");
               setBoardRevision((x) => x + 1);
               location.hash = "board";
             }}
@@ -1393,7 +1422,8 @@ export default function App() {
             aria-label="刷新当前视图"
             title="刷新当前视图"
             onClick={() => {
-              if (current.id) setRefresh((x) => x + 1);
+              if (current.settings) setSettingsRefresh((x) => x + 1);
+              else if (current.id) setRefresh((x) => x + 1);
               else phases.forEach(([p]) => load(p, true));
             }}
           >
@@ -1401,7 +1431,12 @@ export default function App() {
           </button>
         </div>
       </header>
-      {current.id ? (
+      <SettingsPage
+        active={current.settings}
+        refresh={settingsRefresh}
+        onBack={() => (location.hash = "board")}
+      />
+      {current.settings ? null : current.id ? (
         <Detail
           key={current.id}
           id={current.id}
@@ -1419,6 +1454,8 @@ export default function App() {
           counts={counts}
           load={load}
           go={(id) => (location.hash = `flow/${id}/conversation`)}
+          mobile={mobilePhase}
+          onMobile={setMobilePhase}
         />
       )}
     </>

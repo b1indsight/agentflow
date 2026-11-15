@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
 
 from app.domain.inference_models import AdapterVersion, FailureCode, StopReason
 from app.domain.models import ArchiveReason, FlowState
@@ -15,6 +16,40 @@ Phase = Literal["queued", "running", "review", "blocked", "archived"]
 
 class ConsoleModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+
+class UpdateSettingsRequest(ConsoleModel):
+    """Explicit replacement; a stale form cannot overwrite newer coding defaults."""
+
+    codex_model: str | None = Field(max_length=256)
+    amp_model: str | None = Field(
+        max_length=256, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$",
+    )
+    codex_effort: Literal["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] | None
+    amp_effort: Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"] | None
+    expected_revision: int = Field(strict=True, ge=0)
+
+    @field_validator("codex_model", "amp_model", mode="before")
+    @classmethod
+    def _normalize_model(cls, value: object) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str) or any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in value):
+            raise ValueError("model must be text without control characters")
+        return value.strip() or None
+
+    @field_validator("codex_model")
+    @classmethod
+    def _codex_model(cls, value: str | None) -> str | None:
+        if value is not None and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]*", value) is None:
+            raise ValueError("invalid model identifier")
+        return value
+
+    @model_validator(mode="after")
+    def _amp_effort_requires_model(self) -> UpdateSettingsRequest:
+        if self.amp_effort is not None and self.amp_model is None:
+            raise ValueError("Amp reasoning effort requires an explicit model")
+        return self
 
 
 class FlowTarget(ConsoleModel):

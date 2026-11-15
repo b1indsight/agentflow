@@ -196,6 +196,7 @@ class WorkerStateCallbacks:
             workspace=default.workspace,
             repo_workspace_limit=self.runtime.settings.worker_repo_workspace_limit,
             execute=True,
+            coding_agent=self.runtime.settings.coding_agent,
             inference=self.inference,
             payload=[],
             **self._pages.popleft().model_dump(),

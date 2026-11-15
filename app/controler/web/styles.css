@@ -93,6 +93,7 @@ svg {
 .lucide-refresh-cw,
 .lucide-panel-left-close,
 .lucide-panel-left-open,
+.lucide-save,
 .lucide-search {
   --icon-span: 18;
 }
@@ -215,13 +216,24 @@ svg {
   max-width: 890px;
   margin: auto;
 }
+.bar-filters[hidden] {
+  display: none;
+}
 .bar-status {
   display: flex;
   align-items: center;
   gap: 12px;
+  margin-left: auto;
   color: var(--muted);
   font-size: var(--text-small);
   white-space: nowrap;
+}
+.bar-status a:hover {
+  text-decoration: none;
+}
+.bar-status a[aria-current="page"] {
+  color: var(--accent);
+  background: var(--selected);
 }
 .create-flow-dialog {
   position: fixed;
@@ -314,6 +326,114 @@ svg {
 .create-flow-verify {
   height: auto;
   white-space: normal;
+}
+.settings-page {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  background: var(--paper);
+}
+.settings-content {
+  width: min(100%, 840px);
+  margin: 0 auto;
+  padding: 32px 40px 48px;
+  line-height: 1.75;
+  overflow-wrap: anywhere;
+}
+.settings-heading {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 28px;
+}
+.settings-heading h1 {
+  margin: 0;
+  font-size: var(--text-title);
+  font-weight: 600;
+  outline: none;
+}
+.settings-content h2 {
+  margin: 0 0 12px;
+  font-size: 1.25rem;
+  font-weight: 600;
+}
+.settings-content form {
+  margin-top: 24px;
+  padding-top: 24px;
+  border-top: 1px solid var(--line);
+}
+.settings-agent {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(180px, 0.55fr);
+  gap: 8px 16px;
+  align-items: end;
+  margin-bottom: 24px;
+}
+.settings-field label {
+  display: block;
+  margin-bottom: 8px;
+  font-weight: 550;
+}
+.settings-field select {
+  width: 100%;
+  min-width: 0;
+  height: 40px;
+  border: 1px solid var(--line);
+  border-radius: 0;
+  background: var(--paper);
+  color: var(--ink);
+  padding: 8px 12px;
+  font-family: var(--mono);
+  font-size: var(--text-control);
+}
+.settings-field select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.settings-field select:disabled {
+  background: var(--surface-soft);
+  color: var(--muted);
+}
+.settings-feedback p {
+  margin: 8px 0;
+}
+.settings-error {
+  color: var(--destructive);
+}
+.settings-server {
+  margin-top: 16px;
+  padding: 16px;
+  background: var(--surface-soft);
+  border: 1px solid var(--line);
+}
+.settings-server h3 {
+  margin: 0;
+  font-size: var(--text-control);
+  font-weight: 550;
+}
+.settings-server dl {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px 16px;
+  font-size: var(--text-control);
+}
+.settings-server dd {
+  margin: 0;
+  font-family: var(--mono);
+}
+.settings-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 20px 0 12px;
+}
+.settings-save {
+  background: var(--accent);
+  color: var(--paper);
+}
+.settings-save:hover {
+  background: var(--accent-hover);
 }
 .task-content {
   margin: 24px 0;
@@ -1899,6 +2019,18 @@ pre code {
   }
 }
 @media (max-width: 760px) {
+  .settings-content {
+    padding: 24px 18px 32px;
+  }
+  .settings-heading h1 {
+    font-size: 1.5rem;
+  }
+  .settings-agent {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .settings-field select {
+    font-size: var(--text-body);
+  }
   .workspace-bar {
     height: auto;
     display: grid;
